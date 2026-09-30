@@ -616,7 +616,39 @@ def fallibleIOPrim (sym : String) : String :=
   else if sym.startsWith "lean_io_prim_handle_" then "l2r_fs_" ++ (sym.drop 20).toString
   else if sym == "lean_io_realpath" then "l2r_fs_real_path"
   else if sym == "lean_io_symlink_metadata" then "l2r_fs_metadata"
+  else if sym == "lean_chmod" then "l2r_fs_set_access_rights"
   else "l2r_fs_" ++ (sym.drop 8).toString
+
+/-- `l2r_io_finish(v, ok, err)`: the outcome of a fallible runtime primitive
+(result `v : primRet`) as the IO result `resTy`: `EST.Out.ok (okOf x)`, or
+`EST.Out.error e` with `e` built by Lean's own `IO.Error` builder for the
+error kind the runtime reports (as Lean's `decode_io_error`). -/
+def ioFinish (v : RR.Expr) (primRet resTy : RR.Ty) (okOf : RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
+  let .named rn := resTy | throwError "lean2rr: IO result of type {resTy.render}"
+  let some info := (← get).typeInfos[rn]? | throwError "lean2rr: IO result of type {rn}"
+  let some errL := info.ctors.find? ``EST.Out.error | throwError "lean2rr: IO result {rn} cannot fail"
+  let x ← fresh "fx"
+  let okFn := RR.Expr.lam x primRet (.ofExpr (← wrapIOResult resTy (← okOf (.var x))))
+  let (k, errno, fname, details) := ("ek", "ee", "ef", "ed")
+  let errTy ← match errL.fields[0]? with
+    | some (some (_, t)) => pure t
+    | _ => throwError "lean2rr: IO result {rn} has no error field"
+  let mut mk : RR.Expr := .call "l2r_unreachable" #[errTy] #[]
+  for i in [:(← read).ioErrorBuilders.size] do
+    let j := (← read).ioErrorBuilders.size - 1 - i
+    let some inst := (← read).ioErrorBuilders[j]! | continue
+    let callee ← calleeOf inst
+    let .code fn ps _ := callee | continue
+    let call := if ps.size == 3 then RR.Expr.call fn #[] #[.var fname, .var errno, .var details]
+      else if ps.size == 2 then RR.Expr.call fn #[] #[.var errno, .var details]
+      else RR.Expr.call fn #[] #[.var details]
+    let kj ← fresh "kj"
+    mk := .block ⟨#[(kj, some (.named "u32"), .atom (toString j))],
+      .ite (.atom s!"{k} == {kj}") (.ofExpr call) (.ofExpr mk)⟩
+  let errVal := RR.Expr.ctor rn (some errL.variant) #[mk]
+  let errFn := RR.Expr.lam k (.named "u32") <| .ofExpr <| .lam errno (.named "u32") <| .ofExpr <|
+    .lam fname (.named "LStr") <| .ofExpr <| .lam details (.named "LStr") (.ofExpr errVal)
+  return .call "l2r_io_finish" #[primRet, resTy] #[v, okFn, errFn]
 
 /-- Glue for a fallible IO extern: call the runtime primitive, then
 `l2r_io_finish` turns its outcome into `EST.Out.ok payload` or into
@@ -625,9 +657,6 @@ the error kind the runtime reports (as Lean's `decode_io_error`). -/
 def fallibleIOGlue (prim : String) (primRet : RR.Ty) (argTys : Array RR.Ty) (args : Array RR.Expr)
     (ret : Expr) (follow : Bool := true) : LowerM RR.Expr := do
   let resTy ← lowerType ret
-  let .named rn := resTy | throwError "lean2rr: IO result of type {resTy.render}"
-  let some info := (← get).typeInfos[rn]? | throwError "lean2rr: IO result of type {rn}"
-  let some errL := info.ctors.find? ``EST.Out.error | throwError "lean2rr: IO result {rn} cannot fail"
   let payload ← ioPayloadTy resTy
   -- Arguments: enumerations (`IO.FS.Mode`) are passed as their index.
   let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[]
@@ -649,33 +678,17 @@ def fallibleIOGlue (prim : String) (primRet : RR.Ty) (argTys : Array RR.Ty) (arg
   -- `metadata` and `symlinkMetadata` differ in following symbolic links.
   if prim == "l2r_fs_metadata" then vals := vals.push (.atom (toString follow))
   lets := lets.push (v, some primRet, .call prim #[] vals)
-  -- Success: the payload.
-  let x ← fresh "fx"
-  let okVal ← if payload == RR.Ty.unit then pure RR.Expr.unitVal
-    else if prim == "l2r_fs_metadata" then metadataOf payload (.var x)
-    else if prim == "l2r_fs_read_dir" then dirEntriesOf payload vals[0]! (.var x)
-    else coerce (.var x) primRet payload
-  let okFn := RR.Expr.lam x primRet (.ofExpr (← wrapIOResult resTy okVal))
-  -- Failure: the builder of the reported kind.
-  let (k, errno, fname, details) := ("ek", "ee", "ef", "ed")
-  let errTy ← match errL.fields[0]? with
-    | some (some (_, t)) => pure t
-    | _ => throwError "lean2rr: IO result {rn} has no error field"
-  let mut mk : RR.Expr := .call "l2r_unreachable" #[errTy] #[]
-  for i in [:(← read).ioErrorBuilders.size] do
-    let j := (← read).ioErrorBuilders.size - 1 - i
-    let some inst := (← read).ioErrorBuilders[j]! | continue
-    let callee ← calleeOf inst
-    let .code fn ps _ := callee | continue
-    let call := if ps.size == 3 then RR.Expr.call fn #[] #[.var fname, .var errno, .var details]
-      else RR.Expr.call fn #[] #[.var errno, .var details]
-    let kj ← fresh "kj"
-    mk := .block ⟨#[(kj, some (.named "u32"), .atom (toString j))],
-      .ite (.atom s!"{k} == {kj}") (.ofExpr call) (.ofExpr mk)⟩
-  let errVal := RR.Expr.ctor rn (some errL.variant) #[mk]
-  let errFn := RR.Expr.lam k (.named "u32") <| .ofExpr <| .lam errno (.named "u32") <| .ofExpr <|
-    .lam fname (.named "LStr") <| .ofExpr <| .lam details (.named "LStr") (.ofExpr errVal)
-  return .block ⟨lets, .call "l2r_io_finish" #[primRet, resTy] #[.var v, okFn, errFn]⟩
+  let finish ← ioFinish (.var v) primRet resTy fun x => do
+    if payload == RR.Ty.unit then pure RR.Expr.unitVal
+    else if prim == "l2r_fs_metadata" then metadataOf payload x
+    else if prim == "l2r_fs_read_dir" then dirEntriesOf payload vals[0]! x
+    else if prim == "l2r_fs_create_tempfile" then
+      -- `(handle, path)`: the path of the file just created.
+      let tys ← ctorFieldTys payload ``Prod.mk
+      ctorValue payload ``Prod.mk #[← coerce x primRet (tys[0]?.getD primRet),
+        ← coerce (.call "l2r_fs_temp_file_path" #[] #[]) (.named "LStr") (tys[1]?.getD (.named "LStr"))]
+    else coerce x primRet payload
+  return .block ⟨lets, finish⟩
 
 /-- A standard stream (`IO.getStdout` & co.) as a Lean `IO.FS.Stream` value:
 each field is a curried closure calling the runtime primitive
@@ -700,13 +713,21 @@ def streamValue (fd : Nat) (streamTy : RR.Ty) : LowerM RR.Expr := do
     let names ← ps.mapM fun _ => fresh "s"
     let passed := (names.zip ps).filterMap fun (n, pt) => if pt == .unit then none else some (RR.Expr.var n)
     let call := RR.Expr.call prim #[] (#[.atom (toString fd)] ++ passed)
-    -- Primitives with no result return `u64` (Reussir's `unit` is not a value).
     let payload ← ioPayloadTy t
-    let v ← if payload == RR.Ty.unit then do
-        let r ← fresh "r"
-        pure (RR.Expr.block ⟨#[(r, some (.named "u64"), call)], .unitVal⟩)
-      else pure call
-    let mut body ← wrapIOResult t v
+    let mut body ← match (← read).preludeRets[prim]? with
+      -- Fallible operations report errors (broken pipe, closed stream, wrong
+      -- direction) through the runtime's last-error protocol.
+      | some primRet =>
+        if fieldNames[i] == `isTty then wrapIOResult t call
+        else ioFinish call primRet t fun x =>
+          if payload == RR.Ty.unit then pure .unitVal else coerce x primRet payload
+      | none =>
+        -- Primitives with no result return `u64` (Reussir's `unit` is not a value).
+        let v ← if payload == RR.Ty.unit then do
+            let r ← fresh "r"
+            pure (RR.Expr.block ⟨#[(r, some (.named "u64"), call)], .unitVal⟩)
+          else pure call
+        wrapIOResult t v
     for (n, pt) in (names.zip ps).reverse do
       body := .lam n pt (.ofExpr body)
     vals := vals.push body
@@ -778,6 +799,13 @@ def ctorCallbackExtern (sym : String) (ret : Expr) (args : Array RR.Expr) : Lowe
   let rt ← lowerType ret
   let lam (x : String) (t : RR.Ty) (body : RR.Expr) : RR.Expr := .lam x t (.ofExpr body)
   match sym with
+  -- `timeit msg act`, `allocprof msg act`: the runtime runs the action.
+  | "lean_io_timeit" | "lean_io_allocprof" =>
+    let helper := if sym == "lean_io_timeit" then "l2r_io_timeit_with" else "l2r_io_allocprof_with"
+    let some msg := args[0]? | return none
+    let some act := args[1]? | return none
+    return some (.call helper #[rt] #[msg, act])
+  -- `String.mk : List Char → String`: push the characters.
   | "lean_string_compare" =>
     let v (c : Name) := ctorValue rt c #[]
     return some (.call "l2r_string_compare_with" #[rt] (args ++ #[← v ``Ordering.lt, ← v ``Ordering.eq, ← v ``Ordering.gt]))
@@ -864,6 +892,12 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
       (.named "LStr") (.named "u32") fun acc x => .call "lean_string_push" #[] #[acc, x]
     return some (.call fn #[] #[args[0]!, ← strLit ""])
   -- `Array.mk : List α → Array α`
+  -- `String.mk : List Char → String`: push the characters onto "".
+  if (← externSymbol orig) == "lean_string_mk" then
+    let lt ← lowerType params[0]!
+    let fn ← listFold s!"l2r_string_of_list_{lt.render.map fun c => if c.isAlphanum then c else '_'}" lt
+      (.named "LStr") (.named "u32") fun acc x => .call "lean_string_push" #[] #[acc, x]
+    return some (.call fn #[] #[args[0]!, ← strLit ""])
   if orig == ``Array.mk then
     let lt ← lowerType params[0]!
     let arrTy ← lowerType ret
@@ -952,7 +986,12 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
       if let .named rn := resTy then
         if let some k := (← get).typeKeys[rn]? then
           if k.isAppOf ``EST.Out || k.isAppOf ``ST.Out then
-            return ← wrapIOResult resTy (.call prim #[] passedArgs)
+            -- Arguments at the primitive's parameter types (a handle is
+            -- `lcAny` in mono code, so it arrives boxed).
+            let argTys ← (mask.zip params).filterMapM fun (m, p) => if m then some <$> lowerType p else pure none
+            let want := (← read).preludeParams[prim]?.getD argTys
+            let passed ← (passedArgs.zip (argTys.zip want)).mapM fun (a, (t, w)) => coerce a t w
+            return ← wrapIOResult resTy (.call prim #[] passed)
   -- Array externs at `Array Nat`/`Array Int` use the one-word arrays.
   if let some α := typeArgs[0]? then
     let fam? := match ← lowerType (← toMonoTypeKeep α) with

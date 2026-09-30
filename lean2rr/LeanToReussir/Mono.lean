@@ -345,15 +345,21 @@ def ioErrorBuilderSyms : Array String := #[
   "lean_mk_io_error_unsatisfied_constraints", "lean_mk_io_error_illegal_operation",
   "lean_mk_io_error_resource_vanished", "lean_mk_io_error_protocol_error",
   "lean_mk_io_error_time_expired", "lean_mk_io_error_resource_busy",
-  "lean_mk_io_error_unsupported_operation"]
+  "lean_mk_io_error_unsupported_operation", "lean_mk_io_user_error"]
 
 /-- Is `sym` a fallible IO primitive whose errors the runtime reports
 through its last-error protocol? -/
 def isFallibleIOSym (sym : String) : Bool :=
-  sym.startsWith "lean_io_prim_handle_" ||
+  (sym.startsWith "lean_io_prim_handle_" &&
+    sym ∉ ["lean_io_prim_handle_is_tty", "lean_io_prim_handle_is_eof"]) ||
   sym ∈ ["lean_io_remove_file", "lean_io_create_dir", "lean_io_remove_dir", "lean_io_rename",
          "lean_io_hard_link", "lean_io_realpath", "lean_io_read_dir", "lean_io_metadata",
-         "lean_io_symlink_metadata"]
+         "lean_io_symlink_metadata", "lean_chmod", "lean_io_create_tempfile",
+         "lean_io_create_tempdir", "lean_io_current_dir", "lean_io_app_path",
+         "lean_io_process_get_current_dir", "lean_io_process_set_current_dir"] ||
+  -- The standard streams' operations (their glue is generated with the
+  -- `IO.FS.Stream` values) report errors the same way.
+  sym ∈ ["lean_get_stdout", "lean_get_stderr", "lean_get_stdin"]
 
 /-- A fallible IO extern needs the `IO.Error` builders: instantiate them. -/
 def ensureIOErrorBuilders (f : Name) : MonoM Unit := do

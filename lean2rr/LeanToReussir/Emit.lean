@@ -201,13 +201,27 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
       | some t => acc.insert name t
       | none => acc
     | _ => acc
+  -- Parameter types of the non-generic prelude functions (`fn f(a : T, …)`).
+  let preludeParams := prelude.splitOn "\n" |>.foldl (init := ({} : Std.HashMap String (Array RR.Ty))) fun acc line =>
+    let line := line.trimLeft
+    let line := if line.startsWith "pub fn " then (line.drop 4).toString else line
+    if !line.startsWith "fn " then acc else
+    let rest := (line.drop 3).toString
+    let name := (rest.takeWhile fun c => c.isAlphanum || c == '_').toString
+    let rest := (rest.drop name.length).toString
+    if !rest.startsWith "(" then acc else
+    let inner := ((rest.drop 1).takeWhile (· != ')')).toString
+    let parts := if inner.trim.isEmpty then [] else inner.splitOn ","
+    match parts.mapM (fun p => match p.splitOn ":" with | [_, t] => RR.parseTy t | _ => none) with
+    | some tys => acc.insert name tys.toArray
+    | none => acc
   -- The `IO.Error` builders' instances (monomorphic, so keyed by declaration).
   let byDecl : NameMap Name := keys.foldl (init := {}) fun m inst k =>
     if k.typeArgs.isEmpty && k.dicts.isEmpty then m.insert k.decl inst else m
   let exports ← (exportMap.run' {config := {}} : CoreM _)
   let ioErrorBuilders := ioErrorBuilderSyms.map fun sym => (exports.get? sym).bind byDecl.find?
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
-                          preludeRets, ioErrorBuilders }
+                          preludeRets, preludeParams, ioErrorBuilders }
   let act : LowerM Unit := do
     -- Once-cells of `initialize` constants (read by `calleeOf`).
     for st in startup do

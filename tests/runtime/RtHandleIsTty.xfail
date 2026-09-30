@@ -1,1 +1,0 @@
-lean2rr lowers lean_io_prim_handle_is_tty (BaseIO Bool) through the fallible l2r_io_finish path and fails with 'IO result ... cannot fail' (runtime/README.md, request 15)

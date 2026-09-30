@@ -73,6 +73,8 @@ structure LowerCtx where
   preludeFns : Std.HashSet String := {}
   /-- Result types of the prelude's functions (from their signatures). -/
   preludeRets : Std.HashMap String RR.Ty := {}
+  /-- Parameter types of the prelude's non-generic functions. -/
+  preludeParams : Std.HashMap String (Array RR.Ty) := {}
   /-- Instances of the `IO.Error` builders, by runtime error kind. -/
   ioErrorBuilders : Array (Option Name) := #[]
   /-- The mono declarations of the program (code and extern instances). -/

@@ -1,1 +1,0 @@
-lean2rr's stream glue ignores write errors: it must call l2r_io_finish after l2r_stream_putStr (runtime/README.md, request 14)
