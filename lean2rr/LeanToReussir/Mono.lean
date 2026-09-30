@@ -1,6 +1,7 @@
 import Lean
 import LeanToReussir.Collect
 import LeanToReussir.Relevance
+import LeanToReussir.Passes
 
 /-!
 # Stage 1: monomorphization
@@ -33,6 +34,9 @@ type-former parameters, in parameter order. -/
 structure InstKey where
   decl : Name
   typeArgs : Array Expr
+  /-- For each class-typed parameter (in order): the statically known
+  dictionary passed for it, if any (see `DictExpr`). Empty when none is. -/
+  dicts : Array (Option Expr) := #[]
   deriving BEq, Hashable, Inhabited
 
 def InstKey.describe (k : InstKey) : String :=
@@ -66,6 +70,14 @@ structure MonoState where
   keys : NameMap InstKey := {}
   /-- Number of type arguments replaced by `lcAny`. -/
   uniformArgs : Nat := 0
+  /-- `unsafe` implementation ↦ the safe declaration it implements
+  (`@[implemented_by]`), built on first use. -/
+  unsafeImpls : Option (NameMap Name) := none
+  /-- Base declarations compiled by lean2rr itself (safe reference
+  definitions of unsafe implementations, and their auxiliary declarations). -/
+  extraBase : NameMap (Decl .pure) := {}
+  /-- Safe definitions that could not be compiled (the unsafe version stays). -/
+  uncompilable : NameSet := {}
 
 abbrev MonoM := StateRefT MonoState CoreM
 
@@ -111,6 +123,168 @@ def instanceName (key : InstKey) : MonoM Name := do
     keys := s.keys.insert n key }
   return n
 
+/-- `unsafe` implementations of `@[implemented_by]` declarations, mapped to
+the safe declaration they implement. -/
+def unsafeImplMap : MonoM (NameMap Name) := do
+  if let some m := (← get).unsafeImpls then return m
+  let env ← getEnv
+  let mut m : NameMap Name := {}
+  for (n, _) in env.constants.map₁.toList do
+    if let some impl := Compiler.getImplementedBy? env n then
+      if let some ci := env.find? impl then
+        if ci.isUnsafe && !(env.find? n |>.map (·.isUnsafe) |>.getD true) then
+          m := m.insert impl n
+  modify fun s => { s with unsafeImpls := some m }
+  return m
+
+/-- Whether a constant's definition casts through `unsafeCast`/`NonScalar`. -/
+def usesCast (c : Name) : CoreM Bool := do
+  let some ci := (← getEnv).find? c | return false
+  let some v := ci.value? (allowOpaque := true) | return false
+  return v.foldConsts false fun k b => b || k == ``unsafeCast || k == ``NonScalar || k == ``PNonScalar
+
+/-- The declaration a name belongs to, for auxiliary names: the user-facing
+name without the private prefix. -/
+def userName (n : Name) : Name := (privateToUserName? n).getD n
+
+/-- Type-unsafe implementations: `unsafe` `@[implemented_by]` targets whose
+code (or auxiliary code) casts through `unsafeCast`/`NonScalar`, so that
+their LCNF types are not the types of the values. `Array.mapMUnsafe`
+stores a `String` into what its types call an `Array Nat`. Other unsafe
+implementations, like `partial`'s `_unsafe_rec`, are type-correct. -/
+def isTypeUnsafeImpl (c : Name) : MonoM Bool := do
+  unless (← unsafeImplMap).contains c do return false
+  if ← usesCast c then return true
+  let some ci := (← getEnv).find? c | return false
+  let some v := ci.value? (allowOpaque := true) | return false
+  let aux := v.foldConsts #[] fun k acc => if (userName c).isPrefixOf (userName k) && k != c then acc.push k else acc
+  aux.anyM fun k => usesCast k
+
+/-- Is `c` a type-unsafe implementation or one of its auxiliary declarations? -/
+def isTypeUnsafeCode (c : Name) : MonoM Bool := do
+  if ← isTypeUnsafeImpl c then return true
+  let u := userName c
+  for (impl, _) in (← unsafeImplMap).toList do
+    if (userName impl).isPrefixOf u && u != userName impl then
+      if ← isTypeUnsafeImpl impl then return true
+  return false
+
+/-- The origin of a specialization name `X._at_.Y.spec_N`: `X`. -/
+def specOrigin? (n : Name) : Option Name :=
+  let comps := n.components
+  match comps.idxOf? `_at_ with
+  | some i => some ((comps.take i).foldl (· ++ ·) .anonymous)
+  | none => none
+
+/-- A persisted base declaration is *tainted* when its body reaches
+type-unsafe code, directly or through specializations Lean derived from it. -/
+partial def isTainted (d : Decl .pure) (visiting : NameSet := {}) : MonoM Bool := do
+  let .code c := d.value | return false
+  for k in codeConsts c #[] do
+    if ← isTypeUnsafeCode k then return true
+    if let some o := specOrigin? k then
+      if ← isTypeUnsafeCode o then return true
+      if !visiting.contains k then
+        if let some kd ← getBaseDecl? k then
+          if ← isTainted kd (visiting.insert k) then return true
+  return false
+
+/-- Rename the targets of constant applications. -/
+partial def renameConsts (rename : Name → Name) : Code .pure → Code .pure
+  | .let d k =>
+    let d := match d.value with
+      | .const f us args _ => { d with value := .const (rename f) us args }
+      | _ => d
+    .let d (renameConsts rename k)
+  | .fun d k _ => .fun (FunDecl.mk d.fvarId d.binderName d.params d.type (renameConsts rename d.value)) (renameConsts rename k)
+  | .jp d k => .jp (FunDecl.mk d.fvarId d.binderName d.params d.type (renameConsts rename d.value)) (renameConsts rename k)
+  | .cases cs => .cases ⟨cs.typeName, cs.resultType, cs.discr, cs.alts.map fun
+      | .alt c ps k _ => .alt c ps (renameConsts rename k)
+      | .default k => .default (renameConsts rename k)
+      | a => a⟩
+  | c => c
+
+/-- The base-pass pipeline lean2rr uses to compile a declaration from
+source: Lean's base passes before `saveBase`, except that
+* `implemented_by` replacement is done by lean2rr's own pass, which skips
+  type-unsafe implementations and maps them back to their safe declaration;
+* nothing pulls in persisted callee bodies (no inlining of definitions, no
+  `specialize`), since those may already contain type-unsafe code. -/
+def recompilePasses : MonoM (Array Pass) := do
+  let implOf ← unsafeImplMap
+  let mut unsafeTargets : NameSet := {}
+  for (impl, _) in implOf.toList do
+    if ← isTypeUnsafeImpl impl then unsafeTargets := unsafeTargets.insert impl
+  let env ← getEnv
+  let rename (n : Name) : Name :=
+    if unsafeTargets.contains n then (implOf.find? n).getD n
+    else match Compiler.getImplementedBy? env n with
+      | some impl => if unsafeTargets.contains impl then n else impl
+      | none => n
+  let implPass : Pass := {
+    name := `l2rImplementedBy, phase := .base
+    run := fun decls => return decls.map fun d => { d with value := d.value.mapCode (renameConsts rename) } }
+  let m ← getPassManager
+  let some i := m.basePasses.findIdx? (·.name == `saveBase) | throwError "lean2rr: no saveBase pass"
+  let mut out := #[]
+  -- `simp` must not inline persisted bodies here: Lean's persisted callers
+  -- already call type-unsafe implementations, and inlining them would bring
+  -- their untypable code back. Callees are instantiated (and recompiled if
+  -- tainted) on their own; Stage 2 inlines lean2rr's safe instances.
+  for p in m.basePasses[:i] do
+    if p.name == `simp && p.occurrence == 1 then
+      out := out.push implPass
+      out := out.push (LCNF.simp { etaPoly := true, inlinePartial := true, implementedBy := false, inlineDefs := false } (occurrence := 1))
+    else if p.name == `simp then
+      out := out.push (LCNF.simp { inlineDefs := false } (occurrence := p.occurrence))
+    else if p.name == `specialize then
+      -- Lean's specializer instantiates persisted callee bodies, which may be
+      -- tainted; lean2rr instantiates (and recompiles) callees itself.
+      out := out.push implPass
+    else out := out.push p
+  return out
+
+/-- Compile a declaration from its source definition with `recompilePasses`.
+New auxiliary declarations (lambda lifting, specializations) are recorded
+too. Returns `false` if Lean cannot compile it. -/
+def recompile (n : Name) : MonoM Bool := do
+  if (← get).extraBase.contains n then return true
+  if (← get).uncompilable.contains n then return false
+  let passes ← recompilePasses
+  try
+    let decls ← (do
+        let d ← toDecl n
+        runPasses passes (markRecDecls #[d]) false : CompilerM _).run (phase := .base)
+    modify fun s => { s with extraBase := decls.foldl (fun m d => m.insert d.name d) s.extraBase }
+    return true
+  catch e =>
+    if (← IO.getEnv "L2R_DEBUG").isSome then IO.eprintln s!"lean2rr: cannot recompile {n}: {← e.toMessageData.toString}"
+    modify fun s => { s with uncompilable := s.uncompilable.insert n }
+    return false
+
+/-- The base declaration to instantiate for `n`: one compiled by lean2rr,
+or Lean's persisted one — unless that one is tainted by type-unsafe code, in
+which case `n` is recompiled from source. -/
+def baseDeclFor? (n : Name) : MonoM (Option (Decl .pure)) := do
+  if let some d := (← get).extraBase.find? n then return some d
+  let some d ← getBaseDecl? n | do
+    -- A safe declaration with an `implemented_by` has no persisted body.
+    if (← unsafeImplMap).toList.any (·.2 == n) then
+      if ← recompile n then return (← get).extraBase.find? n
+    return none
+  if (specOrigin? n).isNone then
+    if ← isTainted d then
+      if ← recompile n then return (← get).extraBase.find? n
+  return some d
+
+/-- Redirect a call target: a type-unsafe implementation becomes the safe
+declaration it implements. -/
+def redirectTarget (f : Name) : MonoM Name := do
+  if ← isTypeUnsafeImpl f then
+    if let some safe := (← unsafeImplMap).find? f then
+      if ← recompile safe then return safe
+  return f
+
 /-- Positions of type-former parameters. -/
 def typeParamPositions (decl : Decl .pure) : Array Nat := Id.run do
   let mut out := #[]
@@ -118,11 +292,77 @@ def typeParamPositions (decl : Decl .pure) : Array Nat := Id.run do
     if isTypeFormerType decl.params[i].type then out := out.push i
   return out
 
+/-! ## Static dictionaries
+
+A type-class dictionary is *static* when it is built from instance constants
+and types only. Like Lean's specializer, lean2rr specializes a callee on the
+static dictionaries passed to it: the callee's instance binds the parameter
+to the dictionary itself, so Lean's `simp` folds its projections into direct
+calls (`inlineProjInst?` folds let-bound dictionaries only). A static
+dictionary is encoded as an `Expr`: `c a₁ … aₙ` for an instance application,
+where a type argument `t` is `L2R.tyArg t` and an erased one is `◾`, or
+`.proj S i d` for a projection. -/
+
+def tyArgMarker : Expr := .const `L2R.tyArg []
+
+/-- The static dictionary a `let` value denotes, given the static
+dictionaries of variables in scope. -/
+def staticDict? (statics : Std.HashMap FVarId Expr) (v : LetValue .pure) (ty : Expr) : MonoM (Option Expr) := do
+  unless (← isClass? ty).isSome do return none
+  match v with
+  | .const c _ args _ =>
+    let mut out := #[]
+    for a in args do
+      match a with
+      | .type t _ =>
+        let t ← normTypeArg t
+        if t == anyExpr then return none
+        out := out.push (mkApp tyArgMarker t)
+      | .erased => out := out.push erasedExpr
+      | .fvar x =>
+        match statics[x]? with
+        | some e => out := out.push e
+        | none => return none
+    return some (mkAppN (.const c []) out)
+  | .proj sn i x _ =>
+    match statics[x]? with
+    | some e => return some (.proj sn i e)
+    | none => return none
+  | _ => return none
+
+/-- Rebuild a static dictionary as a chain of `let`s (registered in the local
+context); returns the variable holding it. -/
+partial def dictLets (e : Expr) : StateT (Array (LetDecl .pure)) CompilerM FVarId := do
+  let value ← match e with
+    | .proj sn i b => pure (LetValue.proj sn i (← dictLets b))
+    | _ =>
+      let .const c _ := e.getAppFn | throwError "lean2rr: malformed static dictionary"
+      let args ← e.getAppArgs.mapM fun a => do
+        if a.isAppOf `L2R.tyArg then return Arg.type a.appArg!
+        else if a.isErased then return Arg.erased
+        else return Arg.fvar (← dictLets a)
+      pure (LetValue.const c [] args)
+  let ty ← value.inferType
+  let fvarId ← mkFreshFVarId
+  let d : LetDecl .pure := { fvarId, binderName := `_dict, type := ty, value }
+  modifyLCtx (·.addLetDecl d)
+  modify (·.push d)
+  return fvarId
+
+/-- Positions of class-typed (instance) parameters. -/
+def classParamPositions (decl : Decl .pure) : MonoM (Array Nat) := do
+  let mut out := #[]
+  for h : i in [:decl.params.size] do
+    if (← isClass? decl.params[i].type).isSome then out := out.push i
+  return out
+
 /-- Redirect a constant application to the instance of its callee. Returns
 `none` when the constant is not a declaration we instantiate (constructors,
 monomorphic externs). -/
-def renameApp (f : Name) (args : Array (Arg .pure)) : MonoM (Option (Name × Array (Arg .pure))) := do
-  let some callee ← getBaseDecl? f | return none
+def renameApp (statics : Std.HashMap FVarId Expr) (f : Name) (args : Array (Arg .pure)) :
+    MonoM (Option (Name × Array (Arg .pure))) := do
+  let f ← redirectTarget f
+  let some callee ← baseDeclFor? f | return none
   let positions := typeParamPositions callee
   if let .extern _ := callee.value then
     if positions.isEmpty then
@@ -136,31 +376,40 @@ def renameApp (f : Name) (args : Array (Arg .pure)) : MonoM (Option (Name × Arr
     -- A partial application that stops before a type parameter: that
     -- parameter is kept (see `instantiate`), so it has no argument here.
     | none => typeArgs := typeArgs.push anyExpr
-  let n ← instanceName { decl := f, typeArgs }
+  let mut found : Array (Option Expr) := #[]
+  for i in ← classParamPositions callee do
+    found := found.push <| match args[i]? with
+      | some (.fvar x) => statics[x]?
+      | _ => none
+  let dicts := if found.any Option.isSome then found else #[]
+  let n ← instanceName { decl := f, typeArgs, dicts }
   -- Type arguments stay (as erased arguments): instances keep Lean's arity.
   let args := args.zipIdx.map fun (a, i) => if positions.contains i then .erased else a
   return some (n, args)
 
-partial def renameCode : Code .pure → MonoM (Code .pure)
+partial def renameCode (statics : Std.HashMap FVarId Expr) : Code .pure → MonoM (Code .pure)
   | .let d k => do
+    let statics := match ← staticDict? statics d.value d.type with
+      | some e => statics.insert d.fvarId e
+      | none => statics
     let d ← match d.value with
       | .const f _ args _ =>
-        match ← renameApp f args with
+        match ← renameApp statics f args with
         | some (n, args') => pure { d with value := .const n [] args' }
         | none => pure d
       | _ => pure d
-    return .let d (← renameCode k)
+    return .let d (← renameCode statics k)
   | .fun d k _ => do
-    let value ← renameCode d.value
-    return .fun (FunDecl.mk d.fvarId d.binderName d.params d.type value) (← renameCode k)
+    let value ← renameCode statics d.value
+    return .fun (FunDecl.mk d.fvarId d.binderName d.params d.type value) (← renameCode statics k)
   | .jp d k => do
-    let value ← renameCode d.value
-    return .jp (FunDecl.mk d.fvarId d.binderName d.params d.type value) (← renameCode k)
+    let value ← renameCode statics d.value
+    return .jp (FunDecl.mk d.fvarId d.binderName d.params d.type value) (← renameCode statics k)
   | .cases c => do
     let alts ← c.alts.mapM fun alt => do
       match alt with
-      | .alt ctor ps code _ => return .alt ctor ps (← renameCode code)
-      | .default code => return .default (← renameCode code)
+      | .alt ctor ps code _ => return .alt ctor ps (← renameCode statics code)
+      | .default code => return .default (← renameCode statics code)
       | other => return other
     return .cases ⟨c.typeName, c.resultType, c.discr, alts⟩
   | code => return code
@@ -168,10 +417,20 @@ partial def renameCode : Code .pure → MonoM (Code .pure)
 /-- Build the instance of `decl` at `typeArgs` like Lean's `mkSpecDecl`:
 instantiate universe levels (at `0`) and type parameters, and internalize.
 Type parameters are kept as erased parameters, so arities are Lean's. -/
-def instantiate (decl : Decl .pure) (name : Name) (typeArgs : Array Expr) (keepMissing : Bool) :
+def instantiate (decl : Decl .pure) (name : Name) (typeArgs : Array Expr) (keepMissing : Bool)
+    (classPositions : Array Nat := #[]) (dicts : Array (Option Expr) := #[]) :
     CompilerM (Decl .pure) := do
-  let us := decl.levelParams.map fun _ => levelZero
+  let us := decl.levelParams.map fun _ => Level.zero
   let positions := typeParamPositions decl
+  -- Static dictionaries are rebuilt as `let`s; their parameters stay (unused).
+  let mut dictSubst : FVarSubst .pure := {}
+  let mut dictDecls : Array (LetDecl .pure) := #[]
+  for h : j in [:dicts.size] do
+    if let some e := dicts[j] then
+      if let some i := classPositions[j]? then
+        let (fv, ds) ← (dictLets e).run dictDecls
+        dictDecls := ds
+        dictSubst := dictSubst.insert decl.params[i]!.fvarId (.fvar fv)
   -- Returns the kept (internalized) parameters and, per original parameter,
   -- the expression it is instantiated with (for the result type).
   let go : Internalize.InternalizeM .pure (Array (Param .pure) × Array Expr) := do
@@ -195,6 +454,10 @@ def instantiate (decl : Decl .pure) (name : Name) (typeArgs : Array Expr) (keepM
         let p' ← Internalize.internalizeParam p
         kept := kept.push p'
         instArgs := instArgs.push (.fvar p'.fvarId)
+        -- A parameter fixed to a static dictionary: the body uses the
+        -- dictionary's `let` instead (the parameter remains, unused).
+        if let some d := dictSubst[p.fvarId]? then
+          modify fun s => s.insert p.fvarId d
     return (kept, instArgs)
   let code := match decl.value with
     | .code c => c.instantiateValueLevelParams decl.levelParams us
@@ -202,7 +465,9 @@ def instantiate (decl : Decl .pure) (name : Name) (typeArgs : Array Expr) (keepM
   let ((params, args), value) ← (do
       let r ← go
       let v ← match decl.value with
-        | .code _ => pure (DeclValue.code (← Internalize.internalizeCode code))
+        | .code _ =>
+          let c ← Internalize.internalizeCode code
+          pure (DeclValue.code (dictDecls.foldr (fun d c => .let d c) c))
         | .extern e => pure (DeclValue.extern e)
       return (r, v) : Internalize.InternalizeM .pure _).run' {}
   let declType := eraseLevels (decl.type.instantiateLevelParamsNoCache decl.levelParams us)
@@ -217,7 +482,7 @@ instantiated, the others become fresh parameters (borrow annotations are
 dropped: Reussir's ownership analysis decides borrowing). -/
 def instantiateExtern (decl : Decl .pure) (name : Name) (typeArgs : Array Expr) :
     CompilerM (Decl .pure) := do
-  let us := decl.levelParams.map fun _ => levelZero
+  let us := decl.levelParams.map fun _ => Level.zero
   let positions := typeParamPositions decl
   let mut ty := eraseLevels (decl.type.instantiateLevelParamsNoCache decl.levelParams us)
   let mut params : Array (Param .pure) := #[]
@@ -242,7 +507,7 @@ def instantiateExtern (decl : Decl .pure) (name : Name) (typeArgs : Array Expr) 
 
 /-- Process one instance: instantiate, simplify, rename, record. -/
 def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
-  let some decl ← getBaseDecl? key.decl
+  let some decl ← baseDeclFor? key.decl
     | throwError "lean2rr: no base declaration for {key.decl} (internal error)"
   let keepMissing := true
   match decl.value with
@@ -251,11 +516,16 @@ def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
     modify fun s => { s with externs := s.externs.push inst }
   | .code _ =>
     let doSimp := (← get).config.simp
+    let classPositions ← classParamPositions decl
     let inst ← (do
-        let inst ← instantiate decl name key.typeArgs keepMissing
-        if doSimp then inst.simp {} else pure inst : CompilerM _).run (phase := .base)
+        let inst ← instantiate decl name key.typeArgs keepMissing classPositions key.dicts
+        -- No inlining of definitions here: persisted bodies may contain
+        -- type-unsafe code. Dictionary projections are still folded
+        -- (`inlineProjInst?` is not gated by `inlineDefs`); general
+        -- inlining happens in Stage 2 over lean2rr's own instances.
+        if doSimp then inst.simp { inlineDefs := false } else pure inst : CompilerM _).run (phase := .base)
     let .code code := inst.value | unreachable!
-    let code ← renameCode code
+    let code ← renameCode {} code
     modify fun s => { s with decls := s.decls.push { inst with value := .code code } }
 
 /-- Run Stage 1 from monomorphic `roots`; returns their instance names. -/

@@ -1,6 +1,7 @@
 import Lean
 import LeanToReussir.Collect
 import LeanToReussir.Mono
+import LeanToReussir.Passes
 
 /-!
 # Stage 2: Lean's own mono pipeline, driven by lean2rr
@@ -43,20 +44,6 @@ def stage2Passes : CoreM Stage2Passes := do
     mono := m.monoPasses.filter (!skip ·)
     monoNoLambda := m.monoPassesNoLambda.filter (!skip ·)
   }
-
-/-- Run `passes` over `decls` exactly as `PassManager.runPassManagerPart`
-does, but restricted to pure phases (base and mono). -/
-def runPasses (passes : Array Pass) (decls : Array (Decl .pure)) (check : Bool) :
-    CompilerM (Array (Decl .pure)) := do
-  let mut state : (pu : Purity) × Array (Decl pu) := ⟨.pure, decls⟩
-  for pass in passes do
-    let decls ← withPhase pass.phase do
-      state.fst.withAssertPurity pass.phase.toPurity fun h => pass.run (h ▸ state.snd)
-    state := ⟨_, decls⟩
-    if check || pass.shouldAlwaysRunCheck then
-      withPhase pass.phaseOut do
-        for decl in state.snd do decl.check
-  return state.fst.withAssertPurity .pure fun h => h ▸ state.snd
 
 /-- Names of instance declarations called from `decl`. -/
 def calledDecls (names : NameSet) (decl : Decl .pure) : List Name :=

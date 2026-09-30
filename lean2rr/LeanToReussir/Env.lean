@@ -15,10 +15,15 @@ open Lean
 
 /-- Import `modules` and their transitive closure at `private` level. Only
 this level exposes every module's complete base-LCNF bodies; the default
-`exported` level replaces non-public bodies with opaque stubs. -/
+`exported` level replaces non-public bodies with opaque stubs.
+
+Environment extensions are loaded (`loadExts`): without them every
+extension keeps its initial state, and queries such as `isClass` — which
+Lean's own compiler passes rely on — silently answer `false`. -/
 def loadEnvironment (modules : Array Name) : IO Environment := do
   initSearchPath (← findSysroot)
-  importModules (modules.map ({ module := · })) {} (level := .private)
+  unsafe enableInitializersExecution
+  importModules (modules.map ({ module := · })) {} (level := .private) (loadExts := true)
 
 /-- Run a `CoreM` action against `env` without a heartbeat limit. -/
 def runCoreM (env : Environment) (x : CoreM α) : IO α := do
