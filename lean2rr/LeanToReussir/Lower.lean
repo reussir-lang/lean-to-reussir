@@ -359,6 +359,27 @@ def lambdaChain (tys : Array RR.Ty) (mk : Array RR.Expr → LowerM RR.Expr) : Lo
     body := .lam n t (.ofExpr body)
   return body
 
+/-- The domains of the first `k` arrows of `t` and the rest. -/
+def peelFn (t : RR.Ty) (k : Nat) : Array RR.Ty × RR.Ty := Id.run do
+  let mut ds := #[]
+  let mut t := t
+  for _ in [:k] do
+    match t with
+    | .fn d c => ds := ds.push d; t := c
+    | _ => break
+  return (ds, t)
+
+/-- A partial application: a curried chain of lambdas over the missing
+parameters, at the types the partial application has (the let's type),
+converting to and from the callee's own parameter and result types. -/
+def partialApp (missing : Array RR.Ty) (ret want : RR.Ty) (mk : Array RR.Expr → RR.Expr) :
+    LowerM RR.Expr := do
+  let (ds, c) := peelFn want missing.size
+  if ds.size != missing.size then return ← lambdaChain missing fun rest => return mk rest
+  lambdaChain ds fun rest => do
+    let rest' ← (rest.zip (ds.zip missing)).mapM fun (v, (d, p)) => coerce v d p
+    coerce (mk rest') ret c
+
 /-- Apply a closure to further arguments, one at a time. A function value of
 statically unknown type (`Box`) is stored in canonical form `Box -> Box`
 (see `tryCoerce`): it is unboxed to that, applied to a boxed argument, and
@@ -689,8 +710,13 @@ def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : E
   | ``ST.Prim.mkRef =>
     let r ← coerce (.call "l2r_ref_new" #[st] #[wrap args[0]!]) refTy payload
     return some (← wrapIOResult resTy r)
-  | ``ST.Prim.Ref.get | ``ST.Prim.Ref.take =>
+  | ``ST.Prim.Ref.get =>
     let v ← coerce (unwrap (.call "l2r_ref_get" #[st] #[← asRef 0])) (← lowerType α) payload
+    return some (← wrapIOResult resTy v)
+  -- `take` moves the value out (Lean's `modify` is take-then-set, so the
+  -- value stays unshared and is updated in place).
+  | ``ST.Prim.Ref.take =>
+    let v ← coerce (unwrap (.call "l2r_ref_take" #[st] #[← asRef 0])) (← lowerType α) payload
     return some (← wrapIOResult resTy v)
   | ``ST.Prim.Ref.set =>
     let r ← fresh "rs"
@@ -955,7 +981,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       coerce (.call fn #[] as) ret (← lowerType resTy)
     else if args.size < n then
       let supplied ← (args.zip params).mapM fun (a, t) => lowerArg ctx a t
-      lambdaChain params[args.size:].toArray fun rest => return .call fn #[] (supplied ++ rest)
+      partialApp params[args.size:].toArray ret (← lowerType resTy) fun rest => .call fn #[] (supplied ++ rest)
     else
       let as ← (args[:n].toArray.zip params).mapM fun (a, t) => lowerArg ctx a t
       let (e, t) ← applyChain (.call fn #[] as) ret ctx args[n:].toArray
@@ -969,7 +995,15 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       lowerExternCall orig typeArgs params ret as
     else if args.size < n then
       let supplied ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
-      lambdaChain ptys[args.size:].toArray fun rest => lowerExternCall orig typeArgs params ret (supplied ++ rest)
+      let k := n - args.size
+      let want ← lowerType resTy
+      let (ds, c) := peelFn want k
+      if ds.size == k then
+        lambdaChain ds fun rest => do
+          let rest' ← (rest.zip (ds.zip ptys[args.size:].toArray)).mapM fun (v, (d, p)) => coerce v d p
+          coerce (← lowerExternCall orig typeArgs params ret (supplied ++ rest')) retTy c
+      else
+        lambdaChain ptys[args.size:].toArray fun rest => lowerExternCall orig typeArgs params ret (supplied ++ rest)
     else
       let as ← (args[:n].toArray.zip ptys).mapM fun (a, t) => lowerArg ctx a t
       let call ← lowerExternCall orig typeArgs params ret as
@@ -1156,6 +1190,25 @@ where
     | .cases cs => cs.alts.foldl (fun acc alt => go alt.getCode acc) acc
     | _ => acc
 
+/-- Size of a code block (bindings, alternatives and exits), counted up to
+`cap`. -/
+partial def codeSize (c : Code .pure) (cap : Nat) : Nat :=
+  go c 0
+where
+  go (c : Code .pure) (acc : Nat) : Nat :=
+    if acc ≥ cap then acc else
+    match c with
+    | .let _ k => go k (acc + 1)
+    | .fun d k _ | .jp d k => go k (go d.value (acc + 1))
+    | .cases cs => cs.alts.foldl (fun acc alt => go alt.getCode (acc + 1)) (acc + 1)
+    | _ => acc + 1
+
+/-- Small join points are duplicated at their jumps (like J1) rather than
+outlined: outlining one on a loop's path makes the loop a state machine
+(J4) or mutually recursive (J3), and keeps the reuse of cells matched
+before the jump from reaching constructions after it. -/
+def isSmallJp (d : FunDecl .pure) : Bool := codeSize d.value 13 ≤ 12
+
 /-- Choose a strategy for every join point of a declaration body: the set
 of outlined (J3) join points; others are J1 (single jump) or J2. -/
 partial def chooseOutlined (body : Code .pure) : FVarIdSet := Id.run do
@@ -1180,7 +1233,8 @@ partial def chooseOutlined (body : Code .pure) : FVarIdSet := Id.run do
       -- A J2 join point cannot be the target of a jump from inside an outlined body.
       let jumpedFromOutlined := jps.any fun (d', _) =>
         outlined.contains d'.fvarId && (jumpsIn d'.value {}).contains d.fvarId
-      let ok := single || (endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined && !jumpedFromOutlined)
+      let ok := single || isSmallJp d ||
+        (endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined && !jumpedFromOutlined)
       if !ok then
         outlined := outlined.insert d.fvarId
         changed := true
@@ -1287,7 +1341,9 @@ mutual
         let fn ← fresh "jp_"
         modify fun s => { s with fns := s.fns.push (.fn fn fparams retTy body) }
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.call fn captured) } outlined retTy k
-      else if (countJumps k {}).getD d.fvarId 0 ≤ 1 then
+      else if (countJumps k {}).getD d.fvarId 0 ≤ 1 ||
+          (isSmallJp d && !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined) then
+        -- J1, or a small join point that is not J2: its body at each jump.
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.inline d.params d.value) } outlined retTy k
       else
         -- J2: the scope computes the join point's arguments.

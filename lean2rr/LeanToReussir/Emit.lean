@@ -28,9 +28,8 @@ def isToolchainModule (m : Name) : Bool :=
 initializers: for each module in import order, for each declaration in
 order, run an `initialize` action, or run the init function of an
 `initialize c : T ← act` constant and store its result, or evaluate a
-constant (native Lean evaluates every constant of a module, used or not;
-type-class instances are skipped: building a dictionary has no observable
-effect). -/
+constant (native Lean evaluates every constant of a module, used or not,
+instances included: their fields may compute or trace). -/
 inductive StartupItem where
   | caf (decl : Name)
   | ioUnit (fn : Name)
@@ -42,13 +41,21 @@ def StartupItem.root : StartupItem → Name
   | .ioUnit f => f
   | .init _ f => f
 
-/-- Position of a declaration for ordering: module index, then line. -/
+/-- Position of a declaration for ordering: module index, then source
+position (line and column, so declarations on one line keep their order). -/
 def declOrder (n : Name) : CoreM (Nat × Nat) := do
   let idx := ((← getEnv).getModuleIdxFor? n).map (·.toNat) |>.getD 0
-  let pos := match ← findDeclarationRanges? n with
-    | some r => r.range.pos.line
-    | none => 0
-  return (idx, pos)
+  -- An auxiliary declaration (`main.unsafe_1`, `f.match_1`, …) has no
+  -- range of its own; Lean adds it while elaborating its parent, just
+  -- before the parent.
+  let rec find (m : Name) (aux : Bool) (fuel : Nat) : CoreM Nat := do
+    match fuel with
+    | 0 => return 0
+    | fuel + 1 =>
+      match ← findDeclarationRanges? m with
+      | some r => return 2 * (r.range.pos.line * 100000 + r.range.pos.column) + (if aux then 0 else 1)
+      | none => if m.isAnonymous then return 0 else find m.getPrefix true fuel
+  return (idx, ← find n false 16)
 
 /-- The startup items of the program's own (non-toolchain) modules, in
 order. -/
@@ -65,7 +72,7 @@ def startupItems : CoreM (Array StartupItem) := do
       else
         match ← getBaseDecl? n with
         | some d =>
-          if d.value matches .code _ && d.params.isEmpty && (← isClass? d.type).isNone then
+          if d.value matches .code _ && d.params.isEmpty then
             pure (some (.caf n))
           else pure none
         | none => pure none

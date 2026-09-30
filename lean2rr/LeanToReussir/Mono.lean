@@ -49,7 +49,7 @@ structure MonoConfig where
   maxTypeArgSize : Nat := 64
   /-- A declaration with more instances than this gets further instances at
   `lcAny` only. -/
-  maxInstancesPerDecl : Nat := 128
+  maxInstancesPerDecl : Nat := 1024
   /-- Run Lean's base `simp` on each instance (dictionary folding). -/
   simp : Bool := true
   /-- Replace type-unsafe library implementations by their safe sources
@@ -99,13 +99,28 @@ def eraseLevels (e : Expr) : Expr :=
     | .sort (.param _) | .sort (.max ..) | .sort (.imax ..) => some (.sort levelOne)
     | _ => none
 
+/-- The number of nodes of `e` as a tree, counting up to `cap` (a type
+built by polymorphic recursion such as `α × α` doubles at each step, so
+its tree size, which later stages traverse, is exponential in its depth). -/
+partial def treeSizeUpTo (e : Expr) (cap : Nat) : Nat :=
+  go e 0
+where
+  go (e : Expr) (acc : Nat) : Nat :=
+    if acc ≥ cap then acc else
+    match e with
+    | .app f a => go a (go f (acc + 1))
+    | .forallE _ d b _ | .lam _ d b _ => go b (go d (acc + 1))
+    | .mdata _ b => go b (acc + 1)
+    | _ => acc + 1
+
 /-- Normalize a type argument: beta, erase levels, and replace anything that
-is not statically known by `lcAny`. -/
+is not statically known, or too large, by `lcAny`. -/
 def normTypeArg (e : Expr) : MonoM Expr := do
   let e ← Core.betaReduce e
   let e := eraseLevels e
   let known := !e.hasFVar && !e.hasLooseBVars && !e.hasMVar
-  if !known || e.approxDepth.toNat > (← get).config.maxTypeArgSize then
+  let cap := (← get).config.maxTypeArgSize
+  if !known || e.approxDepth.toNat > cap || treeSizeUpTo e (4 * cap) ≥ 4 * cap then
     modify fun s => { s with uniformArgs := s.uniformArgs + 1 }
     return anyExpr
   return e
@@ -450,7 +465,10 @@ def renameApp (statics : Std.HashMap FVarId Expr) (f : Name) (args : Array (Arg 
   for i in positions do
     match args[i]? with
     | some (.type e _) => typeArgs := typeArgs.push (← normTypeArg e)
-    | some _ => typeArgs := typeArgs.push erasedExpr
+    -- A type that is a variable here (taken out of an existential package,
+    -- or a type parameter Lean's specializer turned into a value) is not
+    -- statically known: the uniform instance.
+    | some _ => typeArgs := typeArgs.push anyExpr
     -- A partial application that stops before a type parameter: that
     -- parameter is kept (see `instantiate`), so it has no argument here.
     | none => typeArgs := typeArgs.push anyExpr

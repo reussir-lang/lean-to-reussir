@@ -107,6 +107,15 @@ def fresh (pre : String) : LowerM String := do
   modify fun s => { s with counter := n + 1 }
   return s!"{pre}{n}"
 
+/-- An injective, identifier-safe encoding of a string: ASCII letters and
+digits are kept, `_` becomes `__`, and any other character `c` becomes
+`_<hex code point>_`. -/
+def identEscape (s : String) : String :=
+  s.foldl (init := "") fun acc c =>
+    if c.isAlphanum && c.toNat < 128 then acc.push c
+    else if c == '_' then acc ++ "__"
+    else acc ++ "_" ++ (Nat.toDigits 16 c.toNat).asString ++ "_"
+
 /-- An identifier-safe rendering of a Lean name, for readable hints in
 generated names (uniqueness always comes from a numeric component). -/
 def nameHint (n : Name) : String :=
@@ -317,7 +326,7 @@ mutual
       -- constructors of a computed-field implementation `T._impl`).
       let base := match ival.name with | .str p "_impl" => p | n => n
       let rel := (ctorName.replacePrefix base .anonymous).toString (escape := false)
-      let variant := "c_" ++ (rel.map fun c => if c.isAlphanum then c else '_')
+      let variant := "c_" ++ identEscape rel
       ctors := ctors.insert ctorName { variant, numParams := ival.numParams, fields }
       variants := variants.push (variant, rrFields)
     let shape :=
