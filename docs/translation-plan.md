@@ -1275,6 +1275,22 @@ Each item says what differs and when.
   order among them depends on how its specializer recursed, which the
   `.olean` does not record, and can differ. Visible only when such
   constants trace or panic.
+- *Compiler options of the program's modules* (`set_option
+  compiler.extract_closed false`, `compiler.small`, `maxRecInline`, …) are
+  not recorded in the `.olean`, so lean2rr runs Lean's passes with the
+  defaults: a declaration compiled without closed-term extraction natively
+  can have its closed terms extracted (and evaluated once) under lean2rr.
+- *Merging after erasure*: natively, two uses of a type-polymorphic
+  constant at different type arguments (`(emptyList : List Nat)`,
+  `(emptyList : List String)`) are the same call after erasure, and Lean's
+  CSE merges them; lean2rr's instances are different calls. Visible only
+  when such a value traces or panics.
+- *Build time*: rrc compiles about 80 small functions per second; a program
+  with thousands of constants (each an initializer and an accessor, plus its
+  closed terms) takes minutes to build where native takes seconds.
+- *Open descriptors*: native Lean starts with libuv's descriptors open (8
+  more), so `/proc/self/fd` listings and the point where opening files
+  fails with `EMFILE` differ.
 - *Order of panics in pure code*: when several pure computations panic
   (`get!` on a short array, an `assert!`), their messages can come out in
   another order than natively, because Lean's closed-term extraction may
