@@ -1234,11 +1234,12 @@ where
     | .cases cs => cs.alts.foldl (fun acc alt => go alt.getCode (acc + 1)) (acc + 1)
     | _ => acc + 1
 
-/-- Small join points are duplicated at their jumps (like J1) rather than
+/-- Small join points (nested join points included, since sinking nests
+them) are duplicated at their jumps (like J1) rather than
 outlined: outlining one on a loop's path makes the loop a state machine
 (J4) or mutually recursive (J3), and keeps the reuse of cells matched
 before the jump from reaching constructions after it. -/
-def isSmallJp (d : FunDecl .pure) : Bool := codeSize d.value 13 ≤ 12
+def isSmallJp (d : FunDecl .pure) : Bool := codeSize d.value 41 ≤ 40
 
 /-- Choose a strategy for every join point of a declaration body: the set
 of outlined (J3) join points; others are J1 (single jump) or J2. -/

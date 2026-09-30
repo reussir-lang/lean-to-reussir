@@ -521,7 +521,7 @@ each path that reaches it:
 `body` there, with `y` bound to the argument.
 
 **J1', small join point: duplicate.** A join point whose body is small (at
-most a dozen bindings, alternatives and exits) and that is not J2 is
+most 40 bindings, alternatives and exits, nested join points included) and that is not J2 is
 inlined at each of its jumps, like J1. Outlining it would put a function
 boundary on the path: a loop through it would become a state machine or
 mutually recursive, and Reussir could not reuse a cell matched before the
