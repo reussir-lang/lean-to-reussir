@@ -624,6 +624,16 @@ Rules:
   native types, or pass the generated constructors to a generic runtime
   helper as arguments. That keeps the runtime independent of generated type
   names. `Array.mk` and `Array.toList` are generated loops.
+- **Externs implemented in Lean.** Many externs' C symbols are provided
+  by an `@[export sym]` Lean definition (`String.Internal.*`, the `IO.Error`
+  constructors, `lean_string_intercalate`, …): Lean's runtime calls back
+  into compiled Lean code. lean2rr calls that definition directly and
+  compiles it like any other, so its semantics are exactly Lean's.
+- **Proofs.** A `Prop`-valued inductive has the unit representation, and a
+  parameter of such a type (a proof) is not passed to the runtime.
+- **`BaseIO` externs that cannot fail** call the runtime's payload
+  primitive `l2r_<symbol without lean_>` when the prelude defines it; its
+  result is wrapped as the IO result (`EST.Out.ok` / `ST.Out`).
 - **Constructors with an implementation.** Constructors of builtin types
   that Lean implements in its runtime (`Int.ofNat` is `lean_nat_to_int`,
   `Int.negSucc`, `ByteArray.mk`, …) are calls, as in Lean's IR.
