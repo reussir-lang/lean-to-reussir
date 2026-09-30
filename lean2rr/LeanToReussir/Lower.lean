@@ -1284,8 +1284,9 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
     catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
   if let some sm := sm? then
     let arms := (← get).smArms
-    -- A shared enum: a `[value]` one with `Nat` fields is miscompiled by
-    -- Reussir (reported); Reussir reuses the cell of the matched value.
+    -- A shared enum: Reussir miscompiles `[value]` enums whose arms have
+    -- different layouts (translation plan §9); Reussir reuses the cell of
+    -- the matched value.
     let mode := RR.Item.enum sm.mode false
       (#[(sm.entry, ptys)] ++ arms.map fun (v, fps, _) => (v, fps.map (·.2)))
     let mkArm (v : String) (names : Array String) (b : RR.Block) : RR.Arm :=

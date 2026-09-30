@@ -552,8 +552,8 @@ matches on the entry point; a jump to an outlined join point and a self
 tail call both become a self tail call with the corresponding variant, and
 LLVM turns them into a loop. The declaration itself is a wrapper that
 enters at its own variant. The enum is a shared (heap) type for now:
-Reussir miscompiles a `[value]` enum whose variants hold `Nat` fields
-(reported); Reussir's reuse makes the shared cell cheap.
+Reussir miscompiles `[value]` enums with fields of mixed layout (§9);
+Reussir's reuse makes the shared cell cheap.
 
 **Choice and nesting.** J1 applies first, then J2, then J3 (J4 when an
 outlined body calls the declaration back).
@@ -822,9 +822,15 @@ Probe results (Reussir at the pinned commit):
   at every optimization level.
 - **Stacks.** The main thread has 8 MiB; the program body runs on a 1 GiB
   thread (§5.11).
-- **Known Reussir bug.** A `[value]` enum whose variants hold `[value]`
-  enums with shared payloads (`Nat`) together with other fields is
-  miscompiled (segfault or wrong fields); reported, and avoided (§5.6).
+- **Known Reussir bug.** A `[value]` enum is lowered to LLVM as its tag
+  plus one representative arm's struct, and moved as that aggregate, so
+  bytes of another arm that fall on the representative's padding or on a
+  `bool` field are lost (`enum [value] M { A(u8), B(bool) }` reads `A(42)`
+  back as 0). lean2rr only emits `[value]` enums that are unaffected:
+  enumerations without fields, and `Nat`/`Int`, whose arms each hold one
+  64-bit word. Everything else with several arms is a shared enum (J4
+  entry points, §5.6); multi-field value records are `[value]` structs,
+  whose padding is explicit.
 - **Candidate Reussir requests.** Guaranteed tail calls; `[value]` types
   across the FFI (for `Nat` array elements without a wrapper); borrowed
   FFI parameters (an array `get` currently takes ownership and releases).
