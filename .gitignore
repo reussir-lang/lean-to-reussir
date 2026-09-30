@@ -3,3 +3,5 @@
 /.deps/
 # Lake build outputs
 .lake/
+# leanrt build outputs
+/runtime/leanrt/target/
