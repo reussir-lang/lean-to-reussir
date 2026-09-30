@@ -822,7 +822,14 @@ Native Lean behaves as follows (observed; `EmitC.emitInitFn`):
   unused*. This includes declarations the compiler generates, such as a
   specialization `gen._at_.main.spec_0` with every parameter fixed;
 - `extractClosed` constants are evaluated **lazily, once**, on first use;
-- all of these values live for the whole run.
+- all of these values live for the whole run;
+- simple ground values (literals, constructors of literals) are static
+  data and cost nothing.
+
+A constant whose code only builds unboxed values from small literals and
+constructors (`Int.ofNat 0`, an enumeration value) is recomputed at every
+use instead of cached. It cannot panic, trace or allocate, so this is
+unobservable, and it is cheaper than a once-cell read.
 
 The initializer follows Lean's compilation order, which is not persisted in
 the `.olean`. Compilation follows the source, and a declaration generated

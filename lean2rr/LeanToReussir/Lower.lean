@@ -1599,6 +1599,34 @@ partial def finishUnboxFns : LowerM Unit := do
       -- growth of the variant set makes it pending again.
       done := done.insert t (nvars + 1)
 
+/-- Types whose values need no heap cell. -/
+def isUnboxedTy (t : RR.Ty) : LowerM Bool := do
+  match t with
+  | .named n =>
+    if n ∈ ["Nat", "Int", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64",
+            "bool", "L2RUnit"] then return true
+    return ((← get).typeInfos[n]?.map (·.shape == .enumLike)).getD false
+  | _ => return false
+
+/-- A constant whose code only builds unboxed values from small literals
+and constructors (`Int.ofNat 0`, an enumeration value). It cannot panic,
+trace or allocate, so it is recomputed at every use: cheaper than reading a
+once-cell (native Lean emits such constants as static data). -/
+partial def isCheapConst (c : Code .pure) : LowerM Bool := do
+  match c with
+  | .let d k =>
+    unless ← isUnboxedTy (← lowerType d.type) do return false
+    let ok ← match d.value with
+      | .lit (.str _) => pure false
+      | .lit (.nat n) => pure (n < 2 ^ 63)
+      | .lit _ => pure true
+      | .erased => pure true
+      | .const f _ _ => pure ((← getEnv).isConstructor f)
+      | _ => pure false
+    if ok then isCheapConst k else return false
+  | .return _ => return true
+  | _ => return false
+
 /-- Lower a declaration with code to a Reussir function. -/
 def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let .code body := d.value | return
@@ -1641,7 +1669,7 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
             (.ofExpr (.call sm.fn #[] ((pnames.map .var).push (.ctor sm.mode (some sm.entry) #[])))))
       smArms := #[] }
     return
-  if d.params.isEmpty then
+  if d.params.isEmpty && !(← isCheapConst body) then
     let acc ← cafAccessor (fnName d.name) ret
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name ++ "_init") #[] ret block) |>.push acc }
   else
