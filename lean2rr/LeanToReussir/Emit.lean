@@ -93,7 +93,15 @@ def startupItems : CoreM (Array StartupItem) := do
       if isIOUnitInitFn env n || (getInitFnNameFor? env n).isSome then continue
       let (m, pos) ← declOrder n
       out := out.push (.caf n, m, pos)
-  let sorted := out.qsort fun (_, m1, p1) (_, m2, p2) => m1 < m2 || (m1 == m2 && p1 < p2)
+  -- Ties (specializations generated with the same declaration): by their
+  -- number, which is Lean's order in simple cases; Lean's real order depends
+  -- on how its specializer recursed, which is not persisted.
+  let specNo (it : StartupItem) : Nat :=
+    match it.root.components.getLast? with
+    | some (.str _ s) => if s.startsWith "spec_" then ((s.drop 5).toString.toNat?).getD 0 else 0
+    | _ => 0
+  let sorted := out.qsort fun (i1, m1, p1) (i2, m2, p2) =>
+    m1 < m2 || (m1 == m2 && (p1 < p2 || (p1 == p2 && specNo i1 < specNo i2)))
   return sorted.map (·.1)
 
 /-- A startup step with instance names (see `StartupItem`). -/

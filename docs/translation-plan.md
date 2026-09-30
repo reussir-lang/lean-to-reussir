@@ -1265,7 +1265,16 @@ Each item says what differs and when.
   (§5.14): a task or `main` polling shared state that another task sets
   never sees it change, output ordered by sleeps across tasks comes in the
   order tasks are needed, and `IO.waitAny` does not pick the fastest task.
-  Promises are not translated yet.
+  A pure task created while no other task is pending is computed at once,
+  so one that never finishes hangs the program, where native Lean runs it
+  on a worker thread and can exit without it. Promises are not translated
+  yet.
+- *Startup order of generated constants*: specializations with every
+  parameter fixed that Lean generated while compiling the same declaration
+  run in the order of their numbers (`spec_0`, `spec_2`, …). Lean's own
+  order among them depends on how its specializer recursed, which the
+  `.olean` does not record, and can differ. Visible only when such
+  constants trace or panic.
 - *Stack depth* in general: frame sizes differ from native, and lean2rr
   adds recursion of its own (structural conversions, the `Array.mk` and
   `String.mk` list folds). The depth at which `Stack overflow detected.
