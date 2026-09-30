@@ -137,7 +137,8 @@ def renameApp (f : Name) (args : Array (Arg .pure)) : MonoM (Option (Name × Arr
     -- parameter is kept (see `instantiate`), so it has no argument here.
     | none => typeArgs := typeArgs.push anyExpr
   let n ← instanceName { decl := f, typeArgs }
-  let args := args.zipIdx.filterMap fun (a, i) => if positions.contains i then none else some a
+  -- Type arguments stay (as erased arguments): instances keep Lean's arity.
+  let args := args.zipIdx.map fun (a, i) => if positions.contains i then .erased else a
   return some (n, args)
 
 partial def renameCode : Code .pure → MonoM (Code .pure)
@@ -164,12 +165,9 @@ partial def renameCode : Code .pure → MonoM (Code .pure)
     return .cases ⟨c.typeName, c.resultType, c.discr, alts⟩
   | code => return code
 
-/-- Build the instance of `decl` at `typeArgs` as Lean's `mkSpecDecl` does:
-instantiate universe levels (at `0`) and type parameters, drop the
-instantiated parameters, and internalize the rest. A type parameter whose
-argument is `lcAny` because it was never supplied (partial application) is
-kept as an erased parameter, so that the instance's arity matches what
-callers pass. -/
+/-- Build the instance of `decl` at `typeArgs` like Lean's `mkSpecDecl`:
+instantiate universe levels (at `0`) and type parameters, and internalize.
+Type parameters are kept as erased parameters, so arities are Lean's. -/
 def instantiate (decl : Decl .pure) (name : Name) (typeArgs : Array Expr) (keepMissing : Bool) :
     CompilerM (Decl .pure) := do
   let us := decl.levelParams.map fun _ => levelZero
@@ -184,14 +182,15 @@ def instantiate (decl : Decl .pure) (name : Name) (typeArgs : Array Expr) (keepM
       let p := { p with type := eraseLevels (p.type.instantiateLevelParamsNoCache decl.levelParams us) }
       match positions.idxOf? i with
       | some j =>
+        -- The parameter is substituted in the body but kept, with an
+        -- erased type, so that the instance has exactly Lean's arity (a
+        -- polymorphic function must not become a constant, which Lean
+        -- would evaluate at startup; cf. ReduceArity).
         let t := typeArgs[j]!
-        if keepMissing && t == anyExpr then
-          let p' ← Internalize.internalizeParam { p with type := erasedExpr }
-          kept := kept.push p'
-          instArgs := instArgs.push anyExpr
-        else
-          modify fun s => s.insert p.fvarId (if t.isErased then .erased else .type t)
-          instArgs := instArgs.push t
+        let p' ← Internalize.internalizeParam { p with type := erasedExpr }
+        kept := kept.push p'
+        modify fun s => s.insert p.fvarId (if t.isErased then .erased else .type t)
+        instArgs := instArgs.push t
       | none =>
         let p' ← Internalize.internalizeParam p
         kept := kept.push p'
@@ -228,14 +227,11 @@ def instantiateExtern (decl : Decl .pure) (name : Name) (typeArgs : Array Expr) 
     let d := d.consumeMData
     match positions.idxOf? i with
     | some j =>
+      -- kept as an erased parameter (Lean's arity); not passed to C
       let t := typeArgs[j]!
-      if t == anyExpr then
-        -- never supplied (partial application): keep as an erased parameter
-        let p ← mkParam n erasedExpr false
-        params := params.push p
-        ty := b.instantiate1 anyExpr
-      else
-        ty := b.instantiate1 t
+      let p ← mkParam n erasedExpr false
+      params := params.push p
+      ty := b.instantiate1 t
     | none =>
       let p ← mkParam n (← Core.betaReduce d) false
       params := params.push p

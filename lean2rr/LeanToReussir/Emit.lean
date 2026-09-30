@@ -116,6 +116,7 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (eager : Array Name
     for d in decls do lowerDecl d
     let entry ← lowerEntry mainInst errStr eager
     modify fun s => { s with fns := s.fns.push entry }
+    finishUnboxFns
   let ((), st) ← (act.run ctx).run {}
   let mut out := prelude ++ "\n// ---- generated types ----\n\n"
   for it in st.typeItems do out := out ++ it.render ++ "\n"

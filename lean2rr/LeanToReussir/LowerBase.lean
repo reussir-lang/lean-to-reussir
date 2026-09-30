@@ -71,6 +71,9 @@ structure LowerState where
   tupleTypes : Std.HashMap (Array RR.Ty) String := {}
   /-- Generated functions (declarations and outlined join points). -/
   fns : Array RR.Item := #[]
+  /-- Nominal types that some `Box` value is unboxed to (converter bodies
+  are generated at the end, once all `Box` variants are known). -/
+  unboxTargets : Array String := #[]
   /-- Next once-cell slot for constants. -/
   cafSlots : Nat := 0
   /-- Structural conversions being generated (for recursive types). -/
@@ -110,7 +113,7 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
     match (← get).typeInfos[n]? with
     | some info => return info.shape != .enumLike
     | none => return false
-  | .app n _ => return n == "RVec"
+  | .app n _ => return n == "RVec" || n == "LRef"
   | .fn .. => return false
 
 /-- The element type stored in a runtime array: values that cannot cross the
@@ -228,6 +231,19 @@ def boxVariant (t : RR.Ty) : LowerM String := do
   let v := s!"b{(← get).boxVariants.size}"
   modify fun s => { s with boxVariants := s.boxVariants.push (t, v) }
   return v
+
+/-- The uniform instance of an inductive: every relevant type argument is
+`lcAny` (so data of those types is stored as `Box`). -/
+def uniformType (ind : Name) : LowerM RR.Ty := do
+  let some (.inductInfo ival) := (← getEnv).find? ind | return RR.Ty.box
+  lowerTypeApp ind ((List.range ival.numParams).toArray.map fun _ => anyExpr)
+
+/-- Name of the generated function converting a `Box` to nominal type `t`
+(its body is generated at the end). -/
+def unboxFn (t : String) : LowerM String := do
+  unless (← get).unboxTargets.contains t do
+    modify fun s => { s with unboxTargets := s.unboxTargets.push t }
+  return s!"l2r_unbox_{t}"
 
 /-- A `[value]` struct type carrying several join-point arguments. -/
 def tupleType (tys : Array RR.Ty) : LowerM String := do

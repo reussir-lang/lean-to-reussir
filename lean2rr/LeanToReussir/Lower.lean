@@ -66,20 +66,55 @@ mutual
 
   partial def tryCoerce (e : RR.Expr) (src dst : RR.Ty) : LowerM (Option RR.Expr) := do
     if src == dst then return some e
+    -- Closures are boxed in canonical form `Box -> Box`, so that any
+    -- consumer can apply them whatever their precise type was.
+    let canon := RR.Ty.fn RR.Ty.box RR.Ty.box
     if dst == RR.Ty.box then
-      return some (.ctor boxName (some (← boxVariant src)) #[e])
+      match src with
+      | .fn .. =>
+        if src == canon then return some (.ctor boxName (some (← boxVariant canon)) #[e])
+        let some c ← tryCoerce e src canon | return none
+        return some (.ctor boxName (some (← boxVariant canon)) #[c])
+      | _ => return some (.ctor boxName (some (← boxVariant src)) #[e])
     if src == RR.Ty.box then
-      let v ← boxVariant dst
-      let x ← fresh "ub"
-      return some (.mtch e #[
-        { ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) },
-        { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[dst] #[]) }])
+      match dst with
+      | .fn .. =>
+        let v ← boxVariant canon
+        let x ← fresh "ub"
+        let unboxed := RR.Expr.mtch e #[
+          { ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) },
+          { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[canon] #[]) }]
+        if dst == canon then return some unboxed
+        return ← tryCoerce unboxed canon dst
+      | .named tn =>
+        if (← get).typeInfos.contains tn then
+          -- Any instantiation of the same inductive may have been boxed.
+          return some (.call (← unboxFn tn) #[] #[e])
+        let v ← boxVariant dst
+        let x ← fresh "ub"
+        return some (.mtch e #[
+          { ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) },
+          { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[dst] #[]) }])
+      | _ =>
+        let v ← boxVariant dst
+        let x ← fresh "ub"
+        return some (.mtch e #[
+          { ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) },
+          { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[dst] #[]) }])
     match src, dst with
     | .fn a1 b1, .fn a2 b2 =>
+      -- Wrapper `|x| conv(e(conv(x)))`; `e` is bound first unless it is a
+      -- variable, because Reussir only calls variables and call results.
+      let (pre, callee) ← match e with
+        | .var _ => pure (#[], e)
+        | _ => do
+          let v ← fresh "cf"
+          pure (#[(v, some src, e)], RR.Expr.var v)
       let x ← fresh "cv"
       let some arg ← tryCoerce (.var x) a2 a1 | return none
-      let some res ← tryCoerce (.apply e arg) b1 b2 | return none
-      return some (.lam x a2 (.ofExpr res))
+      let some res ← tryCoerce (.apply callee arg) b1 b2 | return none
+      let lam := RR.Expr.lam x a2 (.ofExpr res)
+      return some (if pre.isEmpty then lam else .block ⟨pre, lam⟩)
     | .named sn, .named dn =>
       let some sh ← nominalHead sn | return none
       let some dh ← nominalHead dn | return none
@@ -191,19 +226,31 @@ def lambdaChain (tys : Array RR.Ty) (mk : Array RR.Expr → LowerM RR.Expr) : Lo
     body := .lam n t (.ofExpr body)
   return body
 
-/-- Apply a closure to further arguments, one at a time. -/
+/-- Apply a closure to further arguments, one at a time. A function value of
+statically unknown type (`Box`) is stored in canonical form `Box -> Box`
+(see `tryCoerce`): it is unboxed to that, applied to a boxed argument, and
+yields a `Box`. -/
 def applyChain (f : RR.Expr) (fty : RR.Ty) (ctx : CodeCtx) (args : Array (Arg .pure)) :
     LowerM (RR.Expr × RR.Ty) := do
   let mut e := f
   let mut t := fty
   for a in args do
+    if t == RR.Ty.box then
+      let canon := RR.Ty.fn RR.Ty.box RR.Ty.box
+      e := ← coerce e RR.Ty.box canon
+      t := canon
     match t with
     | .fn d c =>
-      e := .apply e (← lowerArg ctx a d)
+      let arg ← lowerArg ctx a d
+      -- Reussir only calls variables and call results: bind other
+      -- function expressions (e.g. a `match` producing a closure) first.
+      match e with
+      | .var _ | .call .. | .apply .. => e := .apply e arg
+      | _ =>
+        let v ← fresh "fn"
+        e := .block ⟨#[(v, some t, e)], .apply (.var v) arg⟩
       t := c
-    | _ =>
-      -- Applying a boxed value: unbox to the closure type implied by the argument.
-      throwError "lean2rr: application of a non-function value of type {t.render}"
+    | _ => throwError "lean2rr: application of a non-function value of type {t.render}"
   return (e, t)
 
 /-! ## Externs -/
@@ -297,6 +344,41 @@ def listFold (name : String) (listTy accTy elemTy : RR.Ty) (step : RR.Expr → R
   modify fun s => { s with fns := s.fns.push (.fn name #[("l", listTy), ("acc", accTy)] accTy body) }
   return name
 
+/-- Glue for `ST.Ref` operations on the runtime cell `LRef<S>` (S is the
+storage type of the element type `α`, taken from the extern instance key).
+A reference itself has mono type `lcAny` (Lean unwraps `ST.Ref` to an opaque
+pointer), so it is passed around boxed. -/
+def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
+    (args : Array RR.Expr) : LowerM (Option RR.Expr) := do
+  let some α := typeArgs[1]? | return none
+  let (st, boxed) ← arrayElemTy (← lowerType α)
+  let refTy := RR.Ty.app "LRef" #[st]
+  let wrap (e : RR.Expr) : RR.Expr := match st with
+    | .named bn => if boxed then .ctor bn none #[e] else e
+    | _ => e
+  let unwrap (e : RR.Expr) : RR.Expr := if boxed then .field e 0 else e
+  let resTy ← lowerType ret
+  let payload ← ioPayloadTy resTy
+  let asRef (i : Nat) : LowerM RR.Expr := do
+    coerce args[i]! (← lowerType params[i]!) refTy
+  match orig with
+  | ``ST.Prim.mkRef =>
+    let r ← coerce (.call "l2r_ref_new" #[st] #[wrap args[0]!]) refTy payload
+    return some (← wrapIOResult resTy r)
+  | ``ST.Prim.Ref.get | ``ST.Prim.Ref.take =>
+    let v ← coerce (unwrap (.call "l2r_ref_get" #[st] #[← asRef 0])) (← lowerType α) payload
+    return some (← wrapIOResult resTy v)
+  | ``ST.Prim.Ref.set =>
+    let r ← fresh "rs"
+    return some (.block ⟨#[(r, some (.named "u64"), .call "l2r_ref_set" #[st] #[← asRef 0, wrap args[1]!])],
+      ← wrapIOResult resTy .unitVal⟩)
+  | ``ST.Prim.Ref.swap =>
+    let v ← coerce (unwrap (.call "l2r_ref_swap" #[st] #[← asRef 0, wrap args[1]!])) (← lowerType α) payload
+    return some (← wrapIOResult resTy v)
+  | ``ST.Prim.Ref.ptrEq =>
+    return some (← wrapIOResult resTy (.call "l2r_ref_ptr_eq" #[st] #[← asRef 0, ← asRef 1]))
+  | _ => return none
+
 /-- Externs whose results mention Lean-defined types get generated glue
 (translation plan §5.8); returns `none` for ordinary externs. -/
 def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array RR.Expr) :
@@ -317,6 +399,8 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     let x ← fresh "tu"
     return some (.ctor (← structOf ret) none #[.lam x RR.Ty.unit (.ofExpr args[0]!)])
   | ``Thunk.get => return some (.apply (.field args[0]! 0) .unitVal)
+  -- Constructors that carry an extern attribute.
+  | ``Thunk.mk | ``Task.pure => return some (.ctor (← structOf ret) none #[args[0]!])
   -- BaseIO task combinators, run eagerly: `asTask act := Task.pure <$> act`,
   -- `mapTask f t := Task.pure <$> f t.get`, `bindTask t f := f t.get`,
   -- `wait t := pure t.get`. Results are `ST.Out` structs.
@@ -395,7 +479,14 @@ struct, so arguments of that type are wrapped and a result of that type is
 unwrapped here. -/
 def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
     (args : Array RR.Expr) : LowerM RR.Expr := do
-  if let some e ← customExtern orig params ret args then return e
+  -- Glue sees only relevant parameters: erased ones (type arguments,
+  -- proofs) are dropped; the world is kept (IO glue applies actions to it).
+  let relevant := (params.zip args).filter fun (p, _) =>
+    let p := p.consumeMData
+    !(p.isErased || p.isSort)
+  if let some e ← customExtern orig (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
+  if orig.getPrefix == `ST.Prim || orig.getPrefix == `ST.Prim.Ref then
+    if let some e ← refGlue orig typeArgs (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
   let sym ← externSymbol orig
   -- Storage for each type argument: (Lean type, storage type, boxed?).
   let mut storage := #[]
@@ -614,7 +705,8 @@ mutual
     match c with
     | .let d k =>
       let t ← lowerType d.type
-      let e ← lowerLetValue ctx d.value d.type t
+      let e ← try lowerLetValue ctx d.value d.type t
+        catch ex => throwError "{ex.toMessageData}\n  in let {d.binderName} : {d.type}"
       let x ← fresh "x"
       let b ← lowerCode { ctx with vars := ctx.vars.insert d.fvarId (x, t) } outlined retTy k
       return { b with lets := #[(x, some t, e)] ++ b.lets }
@@ -704,7 +796,16 @@ mutual
 
   partial def lowerCases (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (cs : Cases .pure) :
       LowerM RR.Expr := do
-    let some (scrut, sty) := ctx.vars[cs.discr]? | throwError "lean2rr: cases on unbound variable"
+    let some (scrut0, sty0) := ctx.vars[cs.discr]? | throwError "lean2rr: cases on unbound variable"
+    -- A `cases` on a value of statically unknown type: convert it to the
+    -- inductive's uniform instance first.
+    if sty0 == RR.Ty.box then
+      let uty ← uniformType cs.typeName
+      let u ← fresh "uv"
+      let conv ← coerce (.var scrut0) RR.Ty.box uty
+      let ctx' := { ctx with vars := ctx.vars.insert cs.discr (u, uty) }
+      return .block ⟨#[(u, some uty, conv)], ← lowerCases ctx' outlined retTy cs⟩
+    let (scrut, sty) := (scrut0, sty0)
     let altFor (ctor : Name) : Option (Alt .pure) := cs.alts.find? fun
       | .alt c _ _ _ => c == ctor
       | _ => false
@@ -788,6 +889,35 @@ def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
     (.ofExpr (unwrap (.call "l2r_once_get" #[st] #[k])))
     (.ofExpr (unwrap (.call "l2r_once_set" #[st] #[k, wrap (.call (name ++ "_init") #[] #[])]))))
   return .fn name #[] ret body
+
+/-- Generate the bodies of all `Box → nominal` converters: each matches every
+`Box` variant holding an instantiation of the target's inductive and
+converts it structurally. Generating a conversion may add `Box` variants
+(for fields), so this iterates until the variant set is stable. -/
+partial def finishUnboxFns : LowerM Unit := do
+  let mut done : Std.HashMap String Nat := {}
+  repeat
+    let targets := (← get).unboxTargets
+    let nvars := (← get).boxVariants.size
+    let pending := targets.filter fun t => done.getD t 0 != nvars + 1
+    if pending.isEmpty then break
+    for t in pending do
+      let some th ← nominalHead t | continue
+      let mut arms := #[]
+      for (vt, vname) in (← get).boxVariants do
+        let .named vn := vt | continue
+        let some vh ← nominalHead vn | continue
+        if vh != th then continue
+        let x ← fresh "bx"
+        let body ← if vn == t then pure (RR.Expr.var x) else coerce (.var x) vt (.named t)
+        arms := arms.push { ty := boxName, ctor := some vname, binders := #[some x], body := .ofExpr body : RR.Arm }
+      arms := arms.push { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[.named t] #[]) }
+      let fname := s!"l2r_unbox_{t}"
+      let item := RR.Item.fn fname #[("b", RR.Ty.box)] (.named t) (.ofExpr (.mtch (.var "b") arms))
+      modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != fname | _ => true).push item }
+      -- Record the variant count this body was generated against; a later
+      -- growth of the variant set makes it pending again.
+      done := done.insert t (nvars + 1)
 
 /-- Lower a declaration with code to a Reussir function. -/
 def lowerDecl (d : Decl .pure) : LowerM Unit := do
