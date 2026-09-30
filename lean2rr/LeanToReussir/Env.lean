@@ -13,17 +13,27 @@ translated with `lake env lean2rr <Module>`.
 namespace LeanToReussir
 open Lean
 
+/-- Load the imported state of every persistent environment extension, like
+`importModules (loadExts := true)`, but without running the imported
+modules' `[init]` declarations: with `loadExts`, importing runs the
+program's own `initialize` actions (through the interpreter) inside
+lean2rr. Without any extension state, queries such as `isClass`, which
+Lean's own compiler passes rely on, would silently answer `false`. -/
+unsafe def loadExtensionStates (env : Environment) : IO Environment := do
+  let mut env := env
+  for extDescr in ← persistentEnvExtensionsRef.get do
+    let s := extDescr.toEnvExtension.getState (asyncMode := .sync) env
+    let newState ← extDescr.addImportedFn s.importedEntries { env := env, opts := {} }
+    env := extDescr.toEnvExtension.setState (asyncMode := .sync) env { s with state := newState }
+  return env
+
 /-- Import `modules` and their transitive closure at `private` level. Only
 this level exposes every module's complete base-LCNF bodies; the default
-`exported` level replaces non-public bodies with opaque stubs.
-
-Environment extensions are loaded (`loadExts`): without them every
-extension keeps its initial state, and queries such as `isClass` — which
-Lean's own compiler passes rely on — silently answer `false`. -/
+`exported` level replaces non-public bodies with opaque stubs. -/
 def loadEnvironment (modules : Array Name) : IO Environment := do
   initSearchPath (← findSysroot)
-  unsafe enableInitializersExecution
-  importModules (modules.map ({ module := · })) {} (level := .private) (loadExts := true)
+  let env ← importModules (modules.map ({ module := · })) {} (level := .private)
+  unsafe loadExtensionStates env
 
 /-- Run a `CoreM` action against `env` without a heartbeat limit. -/
 def runCoreM (env : Environment) (x : CoreM α) : IO α := do

@@ -95,9 +95,9 @@ def main():
     ap.add_argument("-O", "--opt", default="default", choices=["none", "default", "aggressive", "size"])
     ap.add_argument("--keep-rr", default=None, help="also write the generated .rr here")
     ap.add_argument("--root", default="main")
-    # Off by default: Reussir's reuse across calls currently miscompiles some
-    # programs (a field of a reused cell read after the reuse).
-    ap.add_argument("--reuse-across-call", action="store_true")
+    # Reuse a matched cell for a constructor after intervening calls (like
+    # Lean's reset/reuse); `--no-reuse-across-call` turns it off.
+    ap.add_argument("--no-reuse-across-call", action="store_true")
     args = ap.parse_args()
 
     env = dict(os.environ)
@@ -117,7 +117,11 @@ def main():
              "--polyffi-libdir", str(rt), "--polyffi-libdir", str(deps),
              "--polyffi-libdir", target_libdir, "--polyffi-libdir", str(LEANRT_OUT),
              "--link-lib", str(rlib), "--link-lib", str(gmp_archive())]
-            + (["--reuse-across-call"] if args.reuse_across_call else []))
+            # Reussir's in-place variant reuse skips stores of fields that
+            # the packed record layout moves (RcCreateFusion copy avoidance):
+            # keep declaration-order layouts until that is fixed.
+            + ["--no-pack-record-members"]
+            + ([] if args.no_reuse_across_call else ["--reuse-across-call"]))
 
 
 if __name__ == "__main__":

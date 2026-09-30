@@ -79,6 +79,8 @@ structure LowerState where
   unboxTargets : Array String := #[]
   /-- Next once-cell slot for constants. -/
   cafSlots : Nat := 0
+  /-- Once-cell slots of constants defined by `initialize`. -/
+  initSlots : NameMap Nat := {}
   /-- Structural conversions being generated (for recursive types). -/
   convsInProgress : Std.HashSet String := {}
   /-- Generated placeholder (`box(0)`) functions, per type. -/

@@ -312,8 +312,12 @@ inductive Callee where
   | extern (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
   /-- A constructor. -/
   | ctor (info : ConstructorVal)
+  /-- A constant defined by `initialize`: read from its once-cell. -/
+  | initConst (slot : Nat) (type : Expr)
 
 def calleeOf (f : Name) : LowerM Callee := do
+  if let some slot := (← get).initSlots.find? f then
+    return .initConst slot (← toMonoTypeKeep (← getOtherDeclBaseType f []))
   if let some (.ctorInfo c) := (← getEnv).find? f then
     -- Constructors of builtin types implemented by the runtime
     -- (`Int.ofNat` is `lean_nat_to_int`, …) are calls, as in Lean's IR.
@@ -801,6 +805,13 @@ where
 def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy : Expr) :
     LowerM RR.Expr := do
   match ← calleeOf f with
+  | .initConst slot ty =>
+    let t ← lowerType ty
+    let (st, boxed) ← arrayElemTy t
+    let v := RR.Expr.call "l2r_once_get" #[st] #[.atom (toString slot)]
+    let v := if boxed then .field v 0 else v
+    let (e, t) ← applyChain v t ctx args
+    coerce e t (← lowerType resTy)
   | .code fn params ret =>
     let n := params.size
     if args.size == n then

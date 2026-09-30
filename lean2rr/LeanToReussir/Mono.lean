@@ -80,6 +80,9 @@ structure MonoState where
   unsafeImpls : Option (NameMap Name) := none
   /-- Export symbol ↦ declaration (lazily computed). -/
   exports : Option (Std.HashMap String Name) := none
+  /-- Constants defined by `initialize`/`builtin_initialize` that the
+  program references, with their init functions (in discovery order). -/
+  initConsts : Array (Name × Name) := #[]
   /-- Base declarations compiled by lean2rr itself (safe reference
   definitions of unsafe implementations, and their auxiliary declarations). -/
   extraBase : NameMap (Decl .pure) := {}
@@ -394,6 +397,14 @@ def classParamPositions (decl : Decl .pure) : MonoM (Array Nat) := do
 monomorphic externs). -/
 def renameApp (statics : Std.HashMap FVarId Expr) (f : Name) (args : Array (Arg .pure)) :
     MonoM (Option (Name × Array (Arg .pure))) := do
+  -- A constant defined by `initialize c : T ← act` has no code: its value
+  -- is the result of `act`, run at startup (Stage 4 reads it from a
+  -- once-cell). `act` becomes a root.
+  if let some initFn := getInitFnNameFor? (← getEnv) f then
+    unless (← get).initConsts.any (·.1 == f) do
+      discard <| instanceName { decl := initFn, typeArgs := #[] }
+      modify fun s => { s with initConsts := s.initConsts.push (f, initFn) }
+    return none
   let f ← redirectTarget f
   let some callee ← baseDeclFor? f | return none
   let positions := typeParamPositions callee

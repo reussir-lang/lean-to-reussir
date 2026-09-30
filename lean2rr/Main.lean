@@ -44,8 +44,8 @@ def run (opts : CliOptions) (module : Name) : IO UInt32 := do
     let mut text := ""
     if opts.emit == some "base" then text := text ++ (← emitBase prog)
     if opts.emit == some "inst" || opts.emit == some "mono" || opts.emit == some "rr" || opts.emit == some "externs" then
-      let userCafs ← userConstants
-      let (rootInsts, st) ← monomorphize (#[opts.root] ++ entryRoots ++ userCafs)
+      let items ← startupItems
+      let (rootInsts, st) ← monomorphize (#[opts.root] ++ entryRoots ++ items.map (·.root))
       let header := s!"-- root instances: {rootInsts}; instances: {st.decls.size}, extern instances: {st.externs.size}, lcAny type arguments: {st.uniformArgs}\n"
       if opts.emit == some "inst" then
         text := text ++ header
@@ -61,8 +61,25 @@ def run (opts : CliOptions) (module : Name) : IO UInt32 := do
           let prelude ← match opts.prelude with
             | some p => IO.FS.readFile p
             | none => pure ""
-          let eager := rootInsts[(1 + entryRoots.size):].toArray
-          text := text ++ (← lowerProgram prelude rootInsts[0]! rootInsts[1]! eager decls st.keys)
+          -- Startup: `initialize` constants of the toolchain that the
+          -- program uses (their modules come first), then the program's own
+          -- startup items in order.
+          let userInits := items.filterMap fun | .init d _ => some d | _ => none
+          let mut tool := #[]
+          for (d, f) in st.initConsts do
+            unless userInits.contains d do
+              let some inst := st.names[({ decl := f, typeArgs := #[] } : InstKey)]? | continue
+              tool := tool.push (d, inst, ← declOrder d)
+          let toolSorted := tool.qsort fun (_, _, (m1, p1)) (_, _, (m2, p2)) => m1 < m2 || (m1 == m2 && p1 < p2)
+          let base := 1 + entryRoots.size
+          let user := items.zipIdx.map fun (it, i) =>
+            let inst := rootInsts[base + i]!
+            match it with
+            | .caf _ => StartupStep.caf inst
+            | .ioUnit _ => .ioUnit inst
+            | .init d _ => .init d inst
+          let startup := toolSorted.map (fun (d, inst, _) => StartupStep.init d inst) ++ user
+          text := text ++ (← lowerProgram prelude rootInsts[0]! rootInsts[1]! startup decls st.keys)
     if opts.stats then text := text ++ (← statsReport prog)
     return text
   match opts.output with

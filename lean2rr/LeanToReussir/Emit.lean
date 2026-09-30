@@ -24,41 +24,84 @@ evaluated lazily; see translation plan §5.12). -/
 def isToolchainModule (m : Name) : Bool :=
   m.getRoot ∈ [`Init, `Std, `Lean, `Lake]
 
-/-- Constants (zero-parameter declarations with code) of user modules, in
-source order. Native Lean evaluates all of them at startup, even unused ones,
-so they are roots and are forced before `main`. Type-class instances are
-skipped: building a dictionary has no observable effect. -/
-def userConstants : CoreM (Array Name) := do
+/-- What a program does at startup, before `main`, like Lean's module
+initializers: for each module in import order, for each declaration in
+order, run an `initialize` action, or run the init function of an
+`initialize c : T ← act` constant and store its result, or evaluate a
+constant (native Lean evaluates every constant of a module, used or not;
+type-class instances are skipped: building a dictionary has no observable
+effect). -/
+inductive StartupItem where
+  | caf (decl : Name)
+  | ioUnit (fn : Name)
+  | init (decl fn : Name)
+  deriving Inhabited
+
+def StartupItem.root : StartupItem → Name
+  | .caf d => d
+  | .ioUnit f => f
+  | .init _ f => f
+
+/-- Position of a declaration for ordering: module index, then line. -/
+def declOrder (n : Name) : CoreM (Nat × Nat) := do
+  let idx := ((← getEnv).getModuleIdxFor? n).map (·.toNat) |>.getD 0
+  let pos := match ← findDeclarationRanges? n with
+    | some r => r.range.pos.line
+    | none => 0
+  return (idx, pos)
+
+/-- The startup items of the program's own (non-toolchain) modules, in
+order. -/
+def startupItems : CoreM (Array StartupItem) := do
   let env ← getEnv
-  let mut out : Array (Name × Nat × Nat) := #[]
+  let mut out : Array (StartupItem × Nat × Nat) := #[]
   for (n, _) in env.constants.map₁.toList do
     let some idx := env.getModuleIdxFor? n | continue
     let some modName := env.header.moduleNames[idx.toNat]? | continue
     if isToolchainModule modName then continue
-    let some d ← getBaseDecl? n | continue
-    let .code _ := d.value | continue
-    unless d.params.isEmpty do continue
-    if (← isClass? d.type).isSome then continue
-    let pos := match ← findDeclarationRanges? n with
-      | some r => r.range.pos.line
-      | none => 0
-    out := out.push (n, idx.toNat, pos)
+    let item? ← do
+      if isIOUnitInitFn env n then pure (some (StartupItem.ioUnit n))
+      else if let some f := getInitFnNameFor? env n then pure (some (.init n f))
+      else
+        match ← getBaseDecl? n with
+        | some d =>
+          if d.value matches .code _ && d.params.isEmpty && (← isClass? d.type).isNone then
+            pure (some (.caf n))
+          else pure none
+        | none => pure none
+    let some item := item? | continue
+    let (m, pos) ← declOrder n
+    out := out.push (item, m, pos)
   let sorted := out.qsort fun (_, m1, p1) (_, m2, p2) => m1 < m2 || (m1 == m2 && p1 < p2)
   return sorted.map (·.1)
 
-/-- The entry point. `mainInst`/`errStr` are instance names; `eager` are the
-instances of user constants, forced before `main` like native Lean does. -/
-def lowerEntry (mainInst errStr : Name) (eager : Array Name) : LowerM RR.Item := do
-  let some mainDecl := (← read).decls.find? mainInst | throwError "lean2rr: no main"
-  let (ps, r) := splitFnType mainDecl.type mainDecl.params.size
-  let resTy ← lowerType r
-  let .named outTy := resTy | throwError "lean2rr: unexpected main result type {resTy.render}"
-  let some info := (← get).typeInfos[outTy]? | throwError "lean2rr: main result is not EST.Out"
+/-- A startup step with instance names (see `StartupItem`). -/
+inductive StartupStep where
+  | caf (inst : Name)
+  | ioUnit (inst : Name)
+  | init (decl inst : Name)
+  deriving Inhabited
+
+/-- The IO result type of an instance and its `ok`/`error` variants. -/
+def ioResultOf (inst : Name) : LowerM (String × String × String × Option RR.Ty) := do
+  let some d := (← read).decls.find? inst | throwError "lean2rr: no declaration {inst}"
+  let (_, r) := splitFnType d.type d.params.size
+  let .named outTy ← lowerType r | throwError "lean2rr: {inst} does not return an IO result"
+  let some info := (← get).typeInfos[outTy]? | throwError "lean2rr: {inst} does not return EST.Out"
   let okV := (info.ctors.find? ``EST.Out.ok).map (·.variant) |>.getD "c_ok"
   let errV := (info.ctors.find? ``EST.Out.error).map (·.variant) |>.getD "c_error"
-  let okField := (info.ctors.find? ``EST.Out.ok).bind (·.fields[0]?) |>.join
+  let okField := (info.ctors.find? ``EST.Out.ok).bind (·.fields[0]?) |>.join |>.map (·.2)
+  return (outTy, okV, errV, okField)
+
+/-- The entry point. `mainInst`/`errStr` are instance names; `startup` is
+run first, in order (see `StartupItem`); an error in an initializer is
+reported like an uncaught exception of `main`. -/
+def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM RR.Item := do
+  let some mainDecl := (← read).decls.find? mainInst | throwError "lean2rr: no main"
+  let (ps, _) := splitFnType mainDecl.type mainDecl.params.size
+  let (outTy, okV, errV, okField) ← ioResultOf mainInst
   let exitCode := match okField with
-    | some (_, .named "u32") => "l2r_exit(v)"
+    | some (.named "u32") => "l2r_exit(v)"
     | _ => "l2r_exit(0)"
   let takesArgs := ps.size == 2
   let mut pre := ""
@@ -71,10 +114,24 @@ def lowerEntry (mainInst errStr : Name) (eager : Array Name) : LowerM RR.Item :=
     let consV := (linfo.ctors.find? ``List.cons).map (·.variant) |>.getD "c_cons"
     pre := s!"fn l2r_mk_args(i : u64, acc : {lt}) -> {lt} \{\n    if i == 0 \{ acc } else \{ l2r_mk_args(i - 1, {lt}::{consV}\{l2r_argv(i - 1), acc}) }\n}\n\n"
     argExpr := s!"l2r_mk_args(l2r_argc(), {lt}::{nilV}\{}), "
-  let mut forced := ""
-  for h : i in [:eager.size] do
-    forced := forced ++ s!"    let caf{i} = {fnName eager[i]}();\n"
-  let body := s!"fn l2r_main_body() \{\n{forced}    let r = {fnName mainInst}({argExpr}L2RUnit::u\{});\n    match r \{\n        {outTy}::{okV}(v) => \{ {exitCode} },\n        {outTy}::{errV}(e) => \{ l2r_uncaught_exception({fnName errStr}(e)) }\n    }\n}\n"
+  let uncaught (e : String) := s!"l2r_uncaught_exception({fnName errStr}({e}))"
+  let mut code := s!"let r = {fnName mainInst}({argExpr}L2RUnit::u\{});\nmatch r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
+  -- Build the startup chain from the last step outwards.
+  for h : i in [:startup.size] do
+    let j := startup.size - 1 - i
+    match startup[j]! with
+    | .caf inst => code := s!"let caf{j} = {fnName inst}();\n" ++ code
+    | .ioUnit inst =>
+      let (t, ok, err, _) ← ioResultOf inst
+      code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\n{code}\n},\n{t}::{err}(e{j}) => \{ {uncaught s!"e{j}"} }\n}"
+    | .init decl inst =>
+      let (t, ok, err, field) ← ioResultOf inst
+      let some slot := (← get).initSlots.find? decl | throwError "lean2rr: no slot for {decl}"
+      let vt := field.getD RR.Ty.unit
+      let (st, boxed) ← arrayElemTy vt
+      let stored := if boxed then match st with | .named bn => s!"{bn}\{v{j}}" | _ => s!"v{j}" else s!"v{j}"
+      code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\nlet s{j} : {st.render} = l2r_once_set<{st.render}>({slot}, {stored});\n{code}\n},\n{t}::{err}(e{j}) => \{ {uncaught s!"e{j}"} }\n}"
+  let body := s!"fn l2r_main_body() \{\n{code}\n}\n"
   -- Like Lean's runtime, run the program on a thread with a big stack
   -- (1 GiB, `LEAN_STACK_SIZE_KB`, `LEAN_MAIN_USE_THREAD`) and report a stack
   -- overflow as Lean does; `leanrt::rt::run_main` implements both.
@@ -115,7 +172,7 @@ def externReport (decls : Array (Decl .pure)) (keys : NameMap InstKey) : CoreM S
   return "\n".intercalate (lines.qsort (· < ·)).toList ++ "\n"
 
 /-- Lower a whole program. -/
-def lowerProgram (prelude : String) (mainInst errStr : Name) (eager : Array Name) (decls : Array (Decl .pure))
+def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array StartupStep) (decls : Array (Decl .pure))
     (keys : NameMap InstKey) : CoreM String := do
   let table ← programRelevance decls
   let decls ← retypeMono table decls
@@ -125,8 +182,12 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (eager : Array Name
     if name.isEmpty then acc else acc.insert name.toString
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns }
   let act : LowerM Unit := do
+    -- Once-cells of `initialize` constants (read by `calleeOf`).
+    for st in startup do
+      if let .init decl _ := st then
+        modify fun s => { s with initSlots := s.initSlots.insert decl s.cafSlots, cafSlots := s.cafSlots + 1 }
     for d in decls do lowerDecl d
-    let entry ← lowerEntry mainInst errStr eager
+    let entry ← lowerEntry mainInst errStr startup
     modify fun s => { s with fns := s.fns.push entry }
     finishUnboxFns
   let ((), st) ← (act.run ctx).run {}
