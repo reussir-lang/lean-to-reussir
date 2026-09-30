@@ -1,1 +1,0 @@
-lean2rr's stream glue ignores stream errors: it must call l2r_io_finish after the l2r_stream_* primitives (runtime/README.md, request 14)

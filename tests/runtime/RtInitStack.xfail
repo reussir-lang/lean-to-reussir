@@ -1,0 +1,1 @@
+lean2rr's entry must run the module initializers on the main thread: leanrt::rt::run_main2(init, body) (runtime/README.md, request 24)

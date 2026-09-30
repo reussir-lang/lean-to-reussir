@@ -170,21 +170,59 @@ fn strtoull10(s: &[u8]) -> u64 {
 extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     fn epoll_create1(flags: i32) -> i32;
+    fn dup2(old: i32, new: i32) -> i32;
+    fn close(fd: i32) -> i32;
+}
+
+/// Whether `fd` is the `/dev/null` Rust's runtime opens (read-write) in
+/// place of a standard descriptor that was closed at startup
+/// (`sanitize_standard_fds`, run before any Rust `main`).
+fn is_rust_dev_null(fd: i32) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    use std::os::unix::io::FromRawFd;
+    const F_GETFL: i32 = 3;
+    const O_ACCMODE: i32 = 3;
+    const O_RDWR: i32 = 2;
+    const DEV_NULL: u64 = (1 << 8) | 3; // makedev(1, 3)
+    let f = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    let Ok(m) = f.metadata() else { return false };
+    m.file_type().is_char_device() && m.rdev() == DEV_NULL && unsafe { fcntl(fd, F_GETFL) } & O_ACCMODE == O_RDWR
 }
 
 /// Native Lean's runtime opens several descriptors at startup (libuv's
 /// epoll/eventfd/pipes); when stdin, stdout or stderr is closed, the lowest
 /// of them takes its place, and reading or writing that stream then fails
-/// with `EINVAL` (not `EBADF`). Occupy closed standard descriptors with
-/// epoll descriptors so the same errors arise here.
+/// with `EINVAL` (not `EBADF`). Put epoll descriptors in the place of
+/// closed standard descriptors (still closed, or already replaced by Rust's
+/// runtime with `/dev/null`) so the same errors arise here. (A standard
+/// descriptor redirected by the user to `/dev/null` read-write, `<>`, is
+/// taken for a closed one.)
 pub fn occupy_closed_std_fds() {
     const F_GETFD: i32 = 1;
     const EPOLL_CLOEXEC: i32 = 0o2000000;
     for fd in 0..3 {
-        if unsafe { fcntl(fd, F_GETFD) } < 0 {
-            unsafe { epoll_create1(EPOLL_CLOEXEC) };
+        if unsafe { fcntl(fd, F_GETFD) } < 0 || is_rust_dev_null(fd) {
+            let e = unsafe { epoll_create1(EPOLL_CLOEXEC) };
+            if e >= 0 && e != fd {
+                unsafe {
+                    dup2(e, fd);
+                    close(e);
+                }
+            }
         }
     }
+}
+
+/// `IO.initializing` (`lean_io_initializing`): true while module
+/// initializers run. lean2rr's entry sets it around them.
+static INITIALIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_initializing(b: bool) {
+    INITIALIZING.store(b, std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn initializing() -> bool {
+    INITIALIZING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Run the program's main body as Lean does (`lean_run_main`): on a thread
@@ -192,6 +230,24 @@ pub fn occupy_closed_std_fds() {
 /// Lean's stack-overflow report, and wait for it.
 pub fn run_main<F: FnOnce() + Send + 'static>(body: F) {
     occupy_closed_std_fds();
+    run_body(body)
+}
+
+/// Run a program as Lean's generated C `main` does: `init` (the module
+/// initializers) on the calling thread (the process's main thread, with its
+/// usual stack, so deep initializers overflow as natively), then `body` as
+/// `run_main` does (`lean_run_main`: Lean's big main stack). Both have
+/// Lean's stack-overflow report. `init` decides itself whether to continue
+/// (an initializer's uncaught error exits); `IO.initializing` is the
+/// caller's business (`set_initializing`).
+pub fn run_main2<I: FnOnce(), F: FnOnce() + Send + 'static>(init: I, body: F) {
+    occupy_closed_std_fds();
+    install_stack_overflow_handler();
+    init();
+    run_body(body)
+}
+
+fn run_body<F: FnOnce() + Send + 'static>(body: F) {
     if std::env::var("LEAN_MAIN_USE_THREAD").map(|v| v == "0").unwrap_or(false) {
         install_stack_overflow_handler();
         body();

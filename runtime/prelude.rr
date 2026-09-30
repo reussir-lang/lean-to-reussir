@@ -2616,7 +2616,12 @@ fn l2r_runtime_mark_persistent<T>(a : T) -> T { a }
 fn l2r_runtime_mark_multi_threaded<T>(a : T) -> T { a }
 fn l2r_runtime_forget<T>(a : T) -> L2RUnit { L2RUnit::u{} }
 fn l2r_runtime_hold<T>(a : T) -> L2RUnit { L2RUnit::u{} }
-fn l2r_io_initializing() -> bool { false }
+// `IO.initializing`: true while the module initializers run; lean2rr's entry
+// calls `l2r_set_initializing(true)` before them and `(false)` after.
+#[ffi(import)]
+fn l2r_io_initializing() -> bool [{ leanrt::rt::initializing() }];
+#[ffi(import)]
+fn l2r_set_initializing(b : bool) -> u64 [{ { leanrt::rt::set_initializing(b); 0 } }];
 fn l2r_io_set_heartbeats(n : Nat) -> L2RUnit { L2RUnit::u{} }
 fn l2r_io_process_get_current_dir() -> LStr { l2r_io_current_dir() }
 

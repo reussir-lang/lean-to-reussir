@@ -199,6 +199,12 @@ closed at startup); `l2r_stream_isTty(fd)` cannot fail.
 thread with a 1 GiB stack and Lean's stack-overflow report (a fault in the
 stack guard page prints `\nStack overflow detected. Aborting.` and aborts,
 exit 134, without flushing stdout — as native).
+`leanrt::rt::run_main2(|| init(), || body())` first runs `init` (the
+module initializers) on the calling thread, as native `main` does. Both
+put epoll descriptors in place of standard descriptors closed at startup
+(native Lean's libuv descriptors take their place, so using them fails
+with `EINVAL`), including the `/dev/null` Rust's runtime substitutes.
+`l2r_set_initializing(b)` sets what `IO.initializing` answers.
 
 ## Requests for lean2rr
 
@@ -236,14 +242,14 @@ lean2rr's dev branch (the tests pass with it).
 12. `Nat.repr`/`Int.repr` of big numbers are Lean code dividing by 10 digit
     by digit (quadratic); `l2r_nat_repr`/`l2r_int_repr` are exact
     replacements using GMP.
-13. The generated entry should run `l2r_main_body` through
+13. *done* — The generated entry should run `l2r_main_body` through
     `leanrt::rt::run_main(|| unsafe { l2r_main_body() })` instead of its
     own `std::thread` (Lean's stack size incl. `LEAN_STACK_SIZE_KB` and
     `LEAN_MAIN_USE_THREAD`, and Lean's stack-overflow message; test
     `RtStack`).
-14. The standard-stream glue should check each `l2r_stream_*` call with
+14. *done* — The standard-stream glue should check each `l2r_stream_*` call with
     `l2r_io_finish`, as for files (tests `RtBrokenPipe`, `RtClosedStreams`).
-15. `lean_io_prim_handle_is_tty` and `lean_io_prim_handle_is_eof` are
+15. *done* — `lean_io_prim_handle_is_tty` and `lean_io_prim_handle_is_eof` are
     `BaseIO`: the `lean_io_prim_handle_` prefix rule sends them to the
     fallible glue, which rejects them ("IO result ... cannot fail"). Use the
     BaseIO payloads `l2r_io_prim_handle_is_tty`/`_is_eof` (test
@@ -252,26 +258,46 @@ lean2rr's dev branch (the tests pass with it).
     the cell and the taken copy is shared: every `modify`/`modifyGet`
     copies the array or string it updates (quadratic loops). Map it to
     `l2r_ref_take`.
-17. `allocprof` (`lean_io_allocprof`) has no glue: use
+17. *done* — `allocprof` (`lean_io_allocprof`) has no glue: use
     `l2r_io_allocprof_with(msg, act)` (test `RtAllocProf`); likewise
     `timeit` → `l2r_io_timeit_with`.
-18. `lean_chmod` (`IO.setAccessRights`) is not a fallible IO symbol yet; its
+18. *done* — `lean_chmod` (`IO.setAccessRights`) is not a fallible IO symbol yet; its
     primitive is `l2r_fs_set_access_rights(p, mode)`.
-19. Glue for `IO.FS.createTempFile` (`l2r_fs_create_tempfile` then
+19. *done* — Glue for `IO.FS.createTempFile` (`l2r_fs_create_tempfile` then
     `l2r_fs_temp_file_path` for the pair) and `IO.FS.createTempDir`
     (`l2r_fs_create_tempdir`).
-20. `IO.currentDir`, `IO.appPath` can fail with a user error (kind 23), and
+20. *done* — `IO.currentDir`, `IO.appPath` can fail with a user error (kind 23), and
     `IO.Process.getCurrentDir`/`setCurrentDir` with errno errors: use
     `l2r_fs_current_dir`, `l2r_fs_app_path`,
     `l2r_fs_process_get_current_dir`, `l2r_fs_process_set_current_dir`
     with `l2r_io_finish`; kind 23 needs `IO.userError`.
 21. Once `setStderr` is supported: native `panic!` (outside
-    `LEAN_ABORT_ON_PANIC`), `dbgTrace`, `timeit` and `allocprof` print to
+    `LEAN_ABORT_ON_PANIC`, including the runtime's own panics such as
+    `index out of bounds`), `dbgTrace`, `timeit` and `allocprof` print to
     the *current* stderr stream (`io_eprintln`); the runtime prints them to
     descriptor 2. Internal panics, uncaught exceptions and abort-mode panics
-    do go to descriptor 2 natively.
-22. `String.mk`/`List.asString` (`lean_string_mk`) take a `List Char`: glue
+    do go to descriptor 2 natively. Needed from lean2rr: define in every
+    program `fn l2r_stderr_put(s : LStr) -> u64`, writing `s` with the
+    current stderr stream's `putStr` and ignoring its result (when the
+    stderr cell is unset: `l2r_stream_putStr(2, s)`). The prelude may call
+    functions defined after it, so the runtime then sends each diagnostic
+    line (with its `\n`) through it.
+22. *done* — `String.mk`/`List.asString` (`lean_string_mk`) take a `List Char`: glue
     folding the list with `lean_string_push` onto `lean_mk_string("")`.
+23. `IO.initializing` is true while module initializers run (native
+    `g_initializing` until `lean_io_mark_end_initialization`): the entry
+    should call `l2r_set_initializing(true)` before the initializers and
+    `l2r_set_initializing(false)` after (test `RtInitializing`).
+24. Native `main` runs the module initializers on the process's main thread
+    (8 MiB stack) and only `main` on Lean's big thread: the entry should be
+    `leanrt::rt::run_main2(|| init(), || body())`, which runs `init` on the
+    calling thread (with the stack-overflow report) and then `body` as
+    `run_main` (test `RtInitStack`: a deep initializer overflows natively).
+    An initializer's uncaught error prints `uncaught exception: ...` and
+    exits 1 without running `main`, as natively.
+25. `IO.getEnv` (`lean_io_getenv`) is emitted as a direct call to
+    `lean_io_getenv`, which the prelude cannot define (its result is
+    `Option String`); use `l2r_io_getenv_with(name, none, some)`.
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store `Nat`/`Int`/enum-like values directly; and `mi_free` takes mimalloc's
