@@ -187,7 +187,11 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
   -- thread with a big stack (1 GiB, `LEAN_STACK_SIZE_KB`,
   -- `LEAN_MAIN_USE_THREAD`). A stack overflow is reported as Lean does.
   -- `leanrt::rt::run_main2` implements all of this.
-  let entry := "extern \"C\" trampoline \"l2r_init_body\" = l2r_init_body;\n" ++
+  -- The runtime writes its own diagnostics (index out of bounds, …) with
+  -- `l2r_stderr_put` through this trampoline, called from Rust, so that
+  -- Reussir sees no call cycle through the stream code.
+  let entry := "extern \"C\" trampoline \"l2r_stderr_put_c\" = l2r_stderr_put;\n" ++
+    "extern \"C\" trampoline \"l2r_init_body\" = l2r_init_body;\n" ++
     "extern \"C\" trampoline \"l2r_main_body\" = l2r_main_body;\n\n" ++
     "#[ffi(import)]\nfn l2r_init_done() -> unit [{ leanrt::rt::set_initializing(false) }];\n\n" ++
     "#[ffi(import)]\nfn l2r_run_main() [{ {\n" ++

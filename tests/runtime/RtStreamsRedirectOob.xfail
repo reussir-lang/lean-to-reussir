@@ -1,1 +1,0 @@
-the runtime's own panics reach l2r_stderr_put through the trampoline l2r_stderr_put_c, which lean2rr must emit (runtime/README.md, request 21)
