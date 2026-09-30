@@ -55,8 +55,11 @@ fn cstr(s: &[u8]) -> Vec<u8> {
 }
 
 /// What the child process writes to stderr on a failure before `exec`
-/// (`std::cerr << ... << std::endl`), then `_exit(-1)`.
+/// (`std::cerr << ... << std::endl`), then `_exit(-1)`. `std::cerr` is tied
+/// to `std::cout`: the stdout buffer the child copied from the parent is
+/// flushed first (to the child's stdout, after the `dup2`s).
 fn child_fail(parts: &[&[u8]]) -> ! {
+    crate::io::flush_stdout();
     for p in parts {
         unsafe { write(2, p.as_ptr() as *const std::ffi::c_void, p.len()) };
     }

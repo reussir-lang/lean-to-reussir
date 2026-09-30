@@ -382,10 +382,12 @@ lean2rr's dev branch (the tests pass with it).
 30. `Lean.Name.beq` (`lean_name_eq`): the prelude cannot define it (`Name`
     is a Lean type); its reference body (structural equality) is what the
     native code computes.
-31. `ptrAddrUnsafe` of a value lean2rr wraps at the call (`ElemBox{x}`)
-    measures the fresh wrapper, whose memory the next wrapper can reuse:
-    the runtime answers fresh addresses for `ElemBox…`/`L2RBox` wrappers
-    (test `RtPtrAddr`); lean2rr could instead call `lean_ptr_addr` on the
+31. *done* in the runtime — `ptrAddrUnsafe` of a value lean2rr wraps at
+    the call (`ElemBox{x}`, function-value wrappers, rebuilt structures)
+    measured the fresh wrapper, whose memory the next wrapper can reuse:
+    the runtime now answers a fresh number for any object whose count is 1
+    at the call (it dies with the call, so it equals no other live value)
+    (test `RtPtrAddr`). lean2rr could keep more shortcuts by passing the
     value's own handle when it has one.
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
@@ -402,8 +404,10 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`,
   `ptrAddrUnsafe` is the handle pointer (or the value's bits for scalars;
-  a fresh, never repeated number for values lean2rr wraps at the call, so
-  pointer-equality shortcuts are not taken for them), and
+  a fresh, never repeated number for objects referenced only by the call,
+  such as the wrappers lean2rr builds for `Nat`s and structures, so
+  pointer-equality shortcuts are not taken for them; a `PtrSet`/`PtrMap`
+  of such values does not find them again), and
   `dbgTraceIfShared` of such wrapped values (`Nat`, structures held by
   value) never reports sharing.
 - Everything runs on one thread: tasks run when they are first needed or

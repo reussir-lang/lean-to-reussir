@@ -2832,27 +2832,32 @@ fn lean_dbg_sleep<T>(ms : u32, f : L2RUnit -> T) -> T {
     f(L2RUnit::u{})
 }
 
-// `ptrAddrUnsafe`: the handle's pointer for boxed values (runtime handles
-// and Reussir records), the bits for scalars. Lean uses equal addresses as a
+// `ptrAddrUnsafe`: the bits for scalars, the pointer for heap objects
+// (runtime handles and Reussir records). Lean uses equal addresses as a
 // shortcut for equal values, so an address must never be shared by unequal
-// values. lean2rr's one-field wrappers (`ElemBox…`, `L2RBox`) are built at
-// the call for values that cannot cross the FFI boundary (`Nat`, ...): a
-// wrapper freed after the first call can be reallocated for the second at
-// the same address. So those, and any other type, get a fresh odd number
-// each time (never equal, which only makes such code take its general
-// path).
+// values. An object whose count is 1 here dies with this call (the texture
+// holds the only reference): it cannot be the same object as any other live
+// value, and a later object may reuse its memory (lean2rr builds wrappers
+// such as `ElemBox{x}` at the call for values that cannot cross the FFI
+// boundary). It, and any other type, gets a fresh odd number (never equal,
+// which only makes such code take its general path). Nullary constructors
+// (Reussir immediates: nonzero top byte, or an immortal count) keep their
+// pointer.
 #[ffi(import)]
 fn lean_ptr_addr<T>(a : T) -> u64 [{
     {
         let name = ::std::any::type_name::<[:T:]>();
         let size = ::std::mem::size_of::<[:T:]>();
         let scalar = matches!(name, "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "usize" | "isize" | "bool" | "char" | "f32" | "f64");
-        let wrapper = name.contains("ElemBox") || name.contains("L2RBox");
-        let handle = size == ::std::mem::size_of::<usize>() && name.starts_with("reussir_rt::") && !wrapper;
-        if scalar || handle {
+        let handle = size == ::std::mem::size_of::<usize>() && name.starts_with("reussir_rt::");
+        if scalar {
             let mut w: u64 = 0;
             unsafe { ::std::ptr::copy_nonoverlapping(&a as *const [:T:] as *const u8, &mut w as *mut u64 as *mut u8, size) };
             w
+        } else if handle {
+            let p = unsafe { *(&a as *const [:T:] as *const usize) };
+            let dying = (p >> 56) == 0 && unsafe { *(p as *const u32) } == 1;
+            if dying { leanrt::fresh_addr() } else { p as u64 }
         } else {
             leanrt::fresh_addr()
         }

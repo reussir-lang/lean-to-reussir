@@ -522,7 +522,8 @@ pub fn real_path(p: &[u8]) -> LStr {
     if c_path(p).is_none() {
         return from_bytes(p);
     }
-    match with_errno(|| std::fs::canonicalize(os_path(p))) {
+    // One `realpath(3)` call (whose errno glibc may change even on success).
+    match std::fs::canonicalize(os_path(p)) {
         Ok(r) => {
             set_ok();
             from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(r.as_os_str()))

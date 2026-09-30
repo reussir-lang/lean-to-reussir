@@ -170,7 +170,7 @@ fn strtoull10(s: &[u8]) -> u64 {
 extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     fn epoll_create1(flags: i32) -> i32;
-    fn dup2(old: i32, new: i32) -> i32;
+    fn dup3(old: i32, new: i32, flags: i32) -> i32;
     fn close(fd: i32) -> i32;
 }
 
@@ -205,7 +205,7 @@ pub fn occupy_closed_std_fds() {
             let e = unsafe { epoll_create1(EPOLL_CLOEXEC) };
             if e >= 0 && e != fd {
                 unsafe {
-                    dup2(e, fd);
+                    dup3(e, fd, EPOLL_CLOEXEC); // close-on-exec, as libuv's descriptors
                     close(e);
                 }
             }
