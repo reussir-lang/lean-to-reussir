@@ -114,6 +114,7 @@ single call:
 | `lean_float_frexp`, `lean_float32_frexp` (→ `Float × Int`) | `l2r_float_frexp_with<P>(x, \|m\| \|e\| mk(m, e))`; or `l2r_float_frexp_mant`/`_exp` |
 | `lean_io_getenv` (→ `Option String`) | `l2r_io_getenv_with<O>(name, none, \|s\| some(s))` |
 | `lean_slice_hash`, `lean_slice_dec_lt` (take `String.Slice`) | `l2r_slice_hash(s, b, e)`, `l2r_slice_dec_lt(s1, b1, e1, s2, b2, e2)` |
+| `lean_byteslice_beq` (takes `ByteSlice`s) | `l2r_byteslice_beq(a, startA, stopA, b, startB, stopB)` (fields `byteArray`, `start`, `stop`) |
 
 **IO externs that cannot fail** (BaseIO) have a payload primitive named
 `l2r_` + the symbol without `lean_`, taking the same passed arguments;
@@ -344,6 +345,10 @@ lean2rr's dev branch (the tests pass with it).
 27. `Nat.repr`/`Int.repr` (request 12): besides the quadratic big case,
     `Nat.reprFast` clones the `Nat.reprArray` once-cell and drops it out of
     line for every number ≥ 128 (13% of the Sieve benchmark).
+28. `ByteSlice.beq` needs glue (`l2r_byteslice_beq` above);
+    `ShareCommon.State.shareCommon` (`lean_state_sharecommon`, hash-consing
+    natively) can use its reference body `(a, s)`, which is observably the
+    same (sharing is not observable here).
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store `Nat`/`Int`/enum-like values directly; and `mi_free` takes mimalloc's

@@ -1737,6 +1737,20 @@ fn l2r_slice_hash(s : LStr, b : u64, e : u64) -> u64 [{
 fn l2r_slice_dec_lt(s1 : LStr, b1 : u64, e1 : u64, s2 : LStr, b2 : u64, e2 : u64) -> bool [{
     s1.get(b1 as usize..e1 as usize).unwrap_or(&[]) < s2.get(b2 as usize..e2 as usize).unwrap_or(&[])
 }];
+// `ByteSlice.beq` (`lean_byteslice_beq`) on the fields `byteArray`,
+// `start`, `stop` of both slices (`start ≤ stop ≤ size` by the structure's
+// proofs).
+#[ffi(import)]
+fn l2r_byteslice_beq(a : RVec<u8>, sa : u64, ea : u64, b : RVec<u8>, sb : u64, eb : u64) -> bool [{
+    {
+        let x = leanrt::array::as_slice(&a).get(sa as usize..ea as usize).unwrap_or(&[]);
+        let y = leanrt::array::as_slice(&b).get(sb as usize..eb as usize).unwrap_or(&[]);
+        let r = x == y;
+        leanrt::array::release(a);
+        leanrt::array::release(b);
+        r
+    }
+}];
 
 // ---- Glue helpers for externs over Lean-defined types ----
 //
