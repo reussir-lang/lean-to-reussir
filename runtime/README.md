@@ -134,20 +134,25 @@ lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α) }`
 `l2r_lcell_get<S>(c)`, `l2r_lcell_set<S>(c, v)`, `l2r_lcell_swap<S>(c, v)`
 (returns the old state). lean2rr generates the forcing functions (run the
 closure once, store `done`); `l2r_lazy_cycle<T>()` waits forever, for a
-thunk or task needed by its own computation, as native Lean does. IO tasks
+thunk or task needed by its own computation, as native Lean does. Tasks
 are deferred until needed (translation plan §5.14); `leanrt::task` keeps
-the queue of pending IO tasks (holding one reference each), the stack of
-running tasks and their cancellation flags:
-`l2r_task_register<S>(c, tag)` queues a pending task (`tag` identifies `S`
-at exit), `l2r_task_begin<S>(c)` / `l2r_task_end<S>(c)` bracket its run
-(`begin` takes it off the queue), `l2r_task_cancel<S>(c)`,
-`l2r_task_observe<S>(c)` (false the first time `IO.getTaskState` asks about
-a pending task), `l2r_task_check_canceled()`, `l2r_task_deferring()` (false
-during initialization, when Lean runs IO tasks at once),
-`l2r_task_manager_start()` (before `main`),
-`l2r_task_shutdown()` (after `main`: `IO.checkCanceled` becomes true in
-tasks), and `l2r_task_next_tag()` / `l2r_task_take<S>()`, with which the
-generated entry runs the tasks still queued when `main` returns.
+the queue of pending tasks (holding one reference each), the stack of
+running tasks, cancellation flags and their propagation, and converted
+tasks standing for another: `l2r_task_register<S>(c, tag)` queues a
+pending task (`tag` identifies `S` at exit), `l2r_task_register_alias<S,
+O>(c, tag, orig)` one standing for `orig`, `l2r_task_depend<S, D>(src,
+dep)` records that `dep` depends on `src`, `l2r_task_begin<S>(c)` /
+`l2r_task_end<S>(c)` bracket a run (`begin` takes the task off the queue),
+`l2r_task_status<S>(c)` (0 waiting, 1 running, 2 finished),
+`l2r_task_query<S>(c)` (for `IO.getTaskState`; 3: run it first),
+`l2r_task_cancel<S>(c)`, `l2r_task_check_canceled()`,
+`l2r_task_deferring()` (false during initialization, when Lean runs IO
+tasks at once), `l2r_task_eager_pure()` (a pure task may be computed at
+once), `l2r_task_manager_start()` (before `main`), `l2r_task_shutdown()`
+(after `main`), and
+`l2r_task_next_tag()` / `l2r_task_take<S>()`, with which the generated
+entry runs the tasks still queued when `main` returns. `l2r_sleep_ms` goes
+through `leanrt::task` (sleeps count as time passing for its heuristics).
 
 **Fallible IO** (files, standard streams): primitives record their outcome
 in a global last-error slot; the glue is
@@ -338,13 +343,14 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`,
   `ptrAddrUnsafe` is the handle pointer (or the value's bits for scalars).
-- Everything runs on one thread: pure tasks are computed when they are
-  created, IO tasks when they are first needed or when `main` returns (a
-  schedule native Lean can produce; translation plan §5.14). `main` polling
-  shared state that a task sets never sees it change, and `IO.waitAny`
-  does not pick the fastest of several unfinished tasks. lean2rr does not
-  translate promises yet (the `l2r_promise_*` helpers assume a promise is
-  resolved before it is read, which deferred IO tasks no longer ensure).
+- Everything runs on one thread: tasks run when they are first needed or
+  when `main` returns, pure tasks at once while no task is pending (a
+  schedule native Lean can produce; translation plan §5.14). A task or
+  `main` polling shared state that another task sets never sees it change,
+  and `IO.waitAny` does not pick the fastest of several unfinished tasks.
+  lean2rr does not translate promises yet (the `l2r_promise_*` helpers
+  assume a promise is resolved before it is read, which deferred tasks no
+  longer ensure).
   `IO.Process.spawn`, sockets, `Std.Sync` and timers are not implemented.
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.

@@ -76,7 +76,8 @@ def main (args : List String) : IO Unit := do
   let p := Task.spawn fun _ => hn 21
   let q := p.map (· * 2)
   let b := p.bind fun x => Task.spawn fun _ => x + 1
-  IO.println s!"pure {p.get} {q.get} {b.get} {← IO.wait q} {← IO.getTaskState b}"
+  IO.println s!"pure {p.get} {q.get} {b.get} {← IO.wait q}"
+  IO.println s!"pure task after get: {← IO.getTaskState b}"
   let t13 ← IO.asTask (do IO.sleep 10; return (Task.spawn fun _ => hn 13).get)
   IO.println s!"t13 = {val (← IO.wait t13)}"
   -- BaseIO-level tasks (no Except).

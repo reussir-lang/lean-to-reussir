@@ -2556,9 +2556,10 @@ fn l2r_cell_swap<T>(slot : u64, v : T) -> T [{
 // generates per value type: `enum S { pending(L2RUnit -> α), busy, done(α) }`
 // (a shared enum). lean2rr also generates the functions that force the
 // state (`l2r_thunk_get_S`, `l2r_task_get_S`, ...): a thunk runs its closure
-// on first `get` and keeps the value; a pure task is computed when it is
-// spawned; an IO task stays pending until it is needed or `main` returns
-// (`leanrt::task`).
+// on first `get` and keeps the value; a task stays pending until it is
+// needed or `main` returns, except a pure task created while no task is
+// pending or running, which is computed at once. `leanrt::task` keeps the
+// queue of pending tasks and answers questions about their state.
 
 #[ffi(import)]
 fn l2r_lcell_new<T>(v : T) -> LCell<T> [{ Rc::new(v) }];
@@ -2596,8 +2597,8 @@ fn l2r_task_register<S>(c : LCell<S>, tag : u64) -> u64 [{
     }
 }];
 
-// A task starts / stops running (for `IO.checkCanceled`); `begin` removes it
-// from the queue and drops the queue's reference.
+// A task starts / stops running (for `IO.checkCanceled` and the task's
+// state); `begin` removes it from the queue and drops the queue's reference.
 #[ffi(import)]
 fn l2r_task_begin<S>(c : LCell<S>) -> u64 [{
     {
@@ -2630,11 +2631,50 @@ fn l2r_task_cancel<S>(c : LCell<S>) -> u64 [{
     }
 }];
 
+// Queue a pending task standing for the unfinished task `orig` (a task
+// converted to another representation; its closure holds `orig`).
 #[ffi(import)]
-fn l2r_task_observe<S>(c : LCell<S>) -> bool [{
+fn l2r_task_register_alias<S, O>(c : LCell<S>, tag : u64, orig : LCell<O>) -> u64 [{
+    {
+        let c = ::std::mem::ManuallyDrop::new(c);
+        let p: usize = unsafe { ::std::mem::transmute_copy(&*c) };
+        let o: usize = unsafe { ::std::mem::transmute_copy(&orig) };
+        leanrt::task::register_alias(p, tag, o);
+        drop(orig);
+        0
+    }
+}];
+
+// Task `dep` was created depending on task `src` (for cancellation).
+#[ffi(import)]
+fn l2r_task_depend<S, D>(src : LCell<S>, dep : LCell<D>) -> u64 [{
+    {
+        let s: usize = unsafe { ::std::mem::transmute_copy(&src) };
+        let d: usize = unsafe { ::std::mem::transmute_copy(&dep) };
+        leanrt::task::depend(s, d);
+        drop(src);
+        drop(dep);
+        0
+    }
+}];
+
+// 0 waiting, 1 running, 2 finished.
+#[ffi(import)]
+fn l2r_task_status<S>(c : LCell<S>) -> u8 [{
     {
         let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
-        let r = leanrt::task::observe(p);
+        let r = leanrt::task::status(p);
+        drop(c);
+        r
+    }
+}];
+
+// `IO.getTaskState`: as `l2r_task_status`, or 3: run the task first.
+#[ffi(import)]
+fn l2r_task_query<S>(c : LCell<S>) -> u8 [{
+    {
+        let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
+        let r = leanrt::task::query(p);
         drop(c);
         r
     }
@@ -2642,6 +2682,9 @@ fn l2r_task_observe<S>(c : LCell<S>) -> bool [{
 
 #[ffi(import)]
 fn l2r_task_deferring() -> bool [{ leanrt::task::deferring() }];
+
+#[ffi(import)]
+fn l2r_task_eager_pure() -> bool [{ leanrt::task::eager_pure() }];
 
 #[ffi(import)]
 fn l2r_task_manager_start() -> u64 [{ { leanrt::task::start(); 0 } }];
@@ -2712,7 +2755,7 @@ fn lean_void_mk<T>(x : T) -> L2RUnit { L2RUnit::u{} }
 fn lean_dbg_stack_trace<T>(f : L2RUnit -> T) -> T { f(L2RUnit::u{}) }
 
 #[ffi(import)]
-fn l2r_sleep_ms(ms : u32) -> u64 [{ { std::thread::sleep(std::time::Duration::from_millis(ms as u64)); 0 } }];
+fn l2r_sleep_ms(ms : u32) -> u64 [{ { leanrt::task::sleep_ms(ms); 0 } }];
 
 fn lean_dbg_sleep<T>(ms : u32, f : L2RUnit -> T) -> T {
     let ignored = l2r_sleep_ms(ms);

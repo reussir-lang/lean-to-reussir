@@ -140,7 +140,7 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
   -- initialization, Lean has no task manager and runs them at once). After
   -- `main` returns, whatever its result, the tasks still pending run, as
   -- `lean_finalize_task_manager` waits for them before the exception is
-  -- reported or the process exits; `IO.checkCanceled` is then true in them.
+  -- reported or the process exits; they see Lean's shutdown flag (§5.14).
   let tags := (← get).taskTags
   let mut drain := ""
   if !tags.isEmpty then
