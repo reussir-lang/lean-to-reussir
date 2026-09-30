@@ -836,6 +836,43 @@ Rules:
   Lean's own exported `lean_mk_io_error_*` builder for the reported kind,
   as Lean's `decode_io_error` does (the builders are instantiated when a
   program uses such an extern). `IO.FS.Handle` is the runtime's `LHandle`.
+- **Child processes** (`IO.Process`, over the runtime's `l2r_proc_*`
+  primitives, which follow Lean's `process.cpp`). Natively a `Child` object
+  carries, after its three stream fields, the pid (`uint32`) and whether
+  the child was spawned with `setsid` (`uint8`). The generated record for
+  `IO.Process.Child` has the same two hidden fields after its Lean ones:
+  `struct Child(Box, Box, Box, u32, bool)` (the streams are `lcAny` in
+  mono code: a boxed `LHandle` for a piped stream, a boxed unit otherwise,
+  as natively `box(0)`). Lean code never builds a `Child` (its constructor
+  is private), so only the glue sets the hidden fields:
+  - `spawn args` reads the `SpawnArgs` record and flattens it as the
+    primitive takes it: the three `Stdio` indices packed into `modes`, the
+    command and arguments, `cwd` as a string and a flag, `env` as three
+    parallel arrays (names, values, whether the value is `some`; generated
+    loops), `inheritEnv`, `setsid`. On success the `Child` gets
+    `l2r_proc_end(k)` for each piped stream, the pid and the flag.
+  - `wait`, `tryWait` (`1 << 32 | code`, or 0 while running) and `kill`
+    read the hidden fields. They borrow the child natively (`@&`), so the
+    glue holds it until the result is built, and its pipes stay open while
+    the call runs (a child still writing to a pipe the parent has not read
+    does not get `EPIPE`). `pid` is the hidden field; `takeStdin` returns the stdin
+    field and a new `Child` with a boxed unit instead, keeping the other
+    fields.
+  - `IO.Process.output` is Lean code that reads stdout in a dedicated task
+    while it reads stderr. lean2rr's tasks are deferred (§5.14), so a child
+    writing more than a pipe holds (64 KiB) to stdout before closing stderr
+    would block forever. Its
+    declaration is lowered to generated glue instead of its body, in
+    native order (only the stderr check waits for stdout's end of file
+    too, §10): spawn with stdout and stderr piped and stdin null, or
+    piped when `input?` is `some s` (then `putStr s`, `flush`, and the
+    handle's release closes it, like `takeStdin` and the handle's last use
+    natively); `l2r_proc_drain` reads both pipes to end of file together;
+    `readToEnd`'s UTF-8 check of stderr (`IO.userError "Tried to read from
+    handle containing non UTF-8 data."`); `wait`; the same check of stdout.
+    `IO.Process.run` is Lean code over `output` and needs nothing more.
+    Each fallible step's error becomes the `IO.Error` Lean's
+    `decode_io_error(errno, nullptr)` builds, as for files.
 - **Proofs.** A `Prop`-valued inductive has the unit representation, and a
   parameter of such a type (a proof) is not passed to the runtime.
 - **`BaseIO` externs that cannot fail** call the runtime's payload
@@ -863,7 +900,13 @@ Rules:
   `dbgTrace`, `dbgTraceIfShared`, `dbgSleep`, `dbgStackTrace`, `panic`
   and `sorry`; lean2rr finds these functions by reading the prelude.
 - **Borrowing.** Lean's borrow annotations (`@&`) are dropped. Reussir's
-  owned convention plus its Perceus analysis gives the same results.
+  owned convention plus its Perceus analysis gives the same results, except
+  for when a value is freed: natively a parameter that Lean's IR infers as
+  borrowed is released by the caller after the call returns, while here the
+  callee releases it at its last use, possibly earlier. Only resources can
+  tell: a file handle is closed (and so flushed) earlier, a child sees end
+  of file on a pipe earlier (§10). The process glue keeps a `Child` alive
+  across `wait`, `tryWait` and `kill`, which borrow it by annotation.
 
 ### 5.9 Panics and unreachable code
 
@@ -1291,6 +1334,13 @@ Each item says what differs and when.
 - *Open descriptors*: native Lean starts with libuv's descriptors open (8
   more), so `/proc/self/fd` listings and the point where opening files
   fails with `EMFILE` differ.
+- *Release time of borrowed parameters* (§5.8): a resource passed to a
+  function that Lean infers to borrow it is released by Lean's caller
+  after the call; here it is released at its last use inside the callee.
+  A handle written and then dropped by a helper that goes on to read the
+  same file, or a pipe to a child that the helper then waits for, is
+  closed earlier than natively (the file is already flushed; the child
+  sees end of file, where natively it may wait forever).
 - *Order of panics in pure code*: when several pure computations panic
   (`get!` on a short array, an `assert!`), their messages can come out in
   another order than natively, because Lean's closed-term extraction may
@@ -1331,6 +1381,20 @@ Each item says what differs and when.
   backtrace line is `(stack trace unavailable)`.
 - Huge capacity reservations are capped.
 - `errno` after a sticky handle error can differ.
+- Child processes (§5.8): code that reads one of a child's pipes in a task
+  while it reads the other (as `IO.Process.output` does natively, stdout
+  in the task; its glue here reads both together) deadlocks if the child
+  writes more than a pipe holds to the task's pipe before closing the
+  other one, since the task runs only when its value is needed. Natively `Child.pid` leaks the child, so its pipes stay open
+  forever (a child waiting for end of file on stdin then hangs); here they
+  are closed as usual. Natively the `Child` from `takeStdin` loses the
+  `setsid` flag (`kill` reads uninitialized memory); here it keeps it.
+  `output` reports a non-UTF-8 stderr once both pipes are at end of file
+  (natively as soon as stderr is: different timing when a grandchild holds
+  stdout open), and a read error on either pipe at once (natively a stdout
+  read error after `wait`). Native Lean has
+  about 8 more descriptors open (libuv's), so descriptor numbers inherited
+  by children and `EMFILE` thresholds differ.
 
 **Diagnostics**
 - lean2rr's own impossibilities (a `Box` unwrap of another variant, a cast
@@ -1338,7 +1402,7 @@ Each item says what differs and when.
   been reached` and exit 1, like a real unreachable.
 
 **Not supported** (translation succeeds; `rrc` reports an unknown function)
-- `IO.Process.spawn` and other processes, sockets, `Std.Sync`, timers.
+- Sockets, `Std.Sync`, timers.
 - Every constant of the program is translated (§2.2), so an unused constant
   that reaches an unsupported extern makes the whole program fail to link.
   A program is therefore translated by lean2rr, but links only if the

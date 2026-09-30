@@ -232,14 +232,18 @@ parent's end of a piped stream, a closed handle otherwise);
 `l2r_proc_wait(pid) -> u32` (128 + signal when killed),
 `l2r_proc_try_wait(pid) -> u64` (`1 << 32 | code` once exited, 0 while
 running), `l2r_proc_kill(pid, setsid)` — all fallible. A child that cannot
-change directory or execute prints Lean's message and exits with 255.
+change directory or execute prints Lean's message and exits with 255; as
+natively (`std::cerr` is tied to `std::cout`), it first flushes the stdout
+bytes the parent had pending, into its own descriptor 1.
 `IO.Process.output` reads stdout in a dedicated task while it reads
 stderr; without threads, `l2r_proc_drain(out, err) -> RVec<u8>` reads both
 pipes to end of file together (`poll`), returning stdout's bytes, then
 `l2r_proc_drained_err() -> RVec<u8>` gives stderr's (fallible: the first
 read error). The glue applies `readToEnd`'s UTF-8 check (`Tried to read
 from handle containing non UTF-8 data.`) to stderr before `wait` and to
-stdout after, as natively.
+stdout after, as natively (but stderr's check comes once both pipes are at
+end of file; natively as soon as stderr is). A read error stops the drain
+and is reported at once.
 
 **Other glue primitives.**
 
@@ -258,9 +262,12 @@ stack guard page prints `\nStack overflow detected. Aborting.` and aborts,
 exit 134, without flushing stdout — as native).
 `leanrt::rt::run_main2(|| init(), || body())` first runs `init` (the
 module initializers) on the calling thread, as native `main` does. Both
-put epoll descriptors in place of standard descriptors closed at startup
-(native Lean's libuv descriptors take their place, so using them fails
-with `EINVAL`), including the `/dev/null` Rust's runtime substitutes.
+put close-on-exec epoll descriptors in place of standard descriptors
+closed at startup (native Lean's libuv descriptors take their place, so
+using them fails with `EINVAL`, and children see them closed), including
+the `/dev/null` Rust's runtime substitutes; an ELF constructor records
+which were closed before Rust's runtime runs, so a `/dev/null` the program
+was given (Python's `subprocess.DEVNULL`) stays.
 `l2r_set_initializing(b)` sets what `IO.initializing` answers.
 
 ## Requests for lean2rr
@@ -372,7 +379,7 @@ lean2rr's dev branch (the tests pass with it).
     `ShareCommon.State.shareCommon` (`lean_state_sharecommon`, hash-consing
     natively) can use its reference body `(a, s)`, which is observably the
     same (sharing is not observable here).
-29. *in progress* — Child processes: `IO.Process.spawn` and `Child.wait`/`tryWait`/`kill`/
+29. *done* — Child processes: `IO.Process.spawn` and `Child.wait`/`tryWait`/`kill`/
     `pid`/`takeStdin` need glue over the `l2r_proc_*` primitives (above).
     Natively a `Child` object also carries the pid (`uint32`) and whether it
     was spawned with `setsid` (`uint8`) after its three Lean fields, so
@@ -418,11 +425,27 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   lean2rr does not translate promises yet (the `l2r_promise_*` helpers
   assume a promise is resolved before it is read, which deferred tasks no
   longer ensure).
-  Sockets, `Std.Sync` and timers are not implemented; child processes wait
-  for lean2rr glue (request 29). Code that reads a child's two pipes one
-  after the other itself (not through `IO.Process.output`, whose glue
-  drains both together) deadlocks without threads if the child fills the
-  other pipe (64 KiB) first; natively a dedicated task avoids it.
+  Sockets, `Std.Sync` and timers are not implemented. Code that reads one
+  of a child's pipes in a task while it reads the other itself (as
+  `IO.Process.output` does natively, stdout in the task; its glue drains
+  both together) deadlocks if the child writes more than a pipe holds
+  (64 KiB) to the task's pipe before closing the other one: the task runs
+  only when its value is needed.
+- Child processes: natively `Child.pid` leaks its argument (Lean passes
+  the child owned, the C function treats it as borrowed), so the child's
+  pipes are never closed after a `pid` call, and a child waiting for end of
+  file on its stdin after `takeStdin` waits forever; lean2rr releases it
+  as usual. Natively the `Child` that `takeStdin` returns does not copy the
+  `setsid` flag (its byte is uninitialized memory, read by `kill`); here it
+  is kept. `IO.Process.output` reports a non-UTF-8 stderr once both pipes
+  are at end of file (natively as soon as stderr is; a grandchild can hold
+  stdout open), and a read error on either pipe at once (natively a stdout
+  read error after `wait`); the bytes and messages are the same, only when
+  it happens differs.
+- Native Lean has libuv's descriptors open (about 8 more than here), so
+  descriptor numbers (those a child inherits, such as the `/dev/null` that
+  `Stdio.null` leaves open, as natively) and the point where a low
+  `ulimit -n` makes `open` or `spawn` fail with `EMFILE` differ.
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
 - Huge `Array.mkEmpty`/`ByteArray.emptyWithCapacity` capacities are checked

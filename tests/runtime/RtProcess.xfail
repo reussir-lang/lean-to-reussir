@@ -1,1 +1,0 @@
-lean2rr has no glue for IO.Process.spawn and the Child operations: see the runtime's l2r_proc_* primitives (runtime/README.md, request 29)
