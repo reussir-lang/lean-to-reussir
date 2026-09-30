@@ -77,6 +77,10 @@ fn l2r_exit(code : u32) -> unit [{ leanrt::io::exit(code as i32) }];
 #[ffi(import)]
 fn l2r_process_exit(code : u8) -> u64 [{ leanrt::io::exit(code as i32) }];
 
+// `IO.Process.forceExit` (`std::_Exit`): no flushing, no exit handlers.
+#[ffi(import)]
+fn l2r_process_force_exit(code : u8) -> u64 [{ { extern "C" { fn _exit(code: i32) -> !; } unsafe { _exit(code as i32) } } }];
+
 #[ffi(import)]
 fn l2r_argc() -> u64 [{ (std::env::args_os().count() as u64).saturating_sub(1) }];
 

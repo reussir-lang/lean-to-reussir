@@ -324,20 +324,26 @@ lean2rr's dev branch (the tests pass with it).
     line (with its `\n`) through it.
 22. *done* — `String.mk`/`List.asString` (`lean_string_mk`) take a `List Char`: glue
     folding the list with `lean_string_push` onto `lean_mk_string("")`.
-23. `IO.initializing` is true while module initializers run (native
+23. *done* — `IO.initializing` is true while module initializers run (native
     `g_initializing` until `lean_io_mark_end_initialization`): the entry
     should call `l2r_set_initializing(true)` before the initializers and
     `l2r_set_initializing(false)` after (test `RtInitializing`).
-24. Native `main` runs the module initializers on the process's main thread
+24. *done* — Native `main` runs the module initializers on the process's main thread
     (8 MiB stack) and only `main` on Lean's big thread: the entry should be
     `leanrt::rt::run_main2(|| init(), || body())`, which runs `init` on the
     calling thread (with the stack-overflow report) and then `body` as
     `run_main` (test `RtInitStack`: a deep initializer overflows natively).
     An initializer's uncaught error prints `uncaught exception: ...` and
     exits 1 without running `main`, as natively.
-25. `IO.getEnv` (`lean_io_getenv`) is emitted as a direct call to
+25. *done* — `IO.getEnv` (`lean_io_getenv`) is emitted as a direct call to
     `lean_io_getenv`, which the prelude cannot define (its result is
     `Option String`); use `l2r_io_getenv_with(name, none, some)`.
+26. `IO.Process.forceExit` (`lean_io_force_exit`, `std::_Exit`: nothing is
+    flushed) has no glue: as `IO.Process.exit`, with
+    `l2r_process_force_exit(code)` (test `RtForceExit`).
+27. `Nat.repr`/`Int.repr` (request 12): besides the quadratic big case,
+    `Nat.reprFast` clones the `Nat.reprArray` once-cell and drops it out of
+    line for every number ≥ 128 (13% of the Sieve benchmark).
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store `Nat`/`Int`/enum-like values directly; and `mi_free` takes mimalloc's
