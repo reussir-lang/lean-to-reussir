@@ -243,7 +243,9 @@ def valueGenericPreludeFns (prelude : String) : Std.HashMap String Nat := Id.run
 def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array StartupStep) (decls : Array (Decl .pure))
     (keys : NameMap InstKey) : CoreM String := do
   let table ← programRelevance decls
-  let decls ← retypeMono table decls
+  let roots := #[mainInst, errStr] ++ startup.map fun
+    | .caf i | .ioUnit i | .init _ i => i
+  let (decls, keys) ← retypeMono table decls keys roots
   -- Function names the prelude defines (`fn NAME`).
   let preludeFns := (prelude.splitOn "fn ").foldl (init := ({} : Std.HashSet String)) fun acc chunk =>
     let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'

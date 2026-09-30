@@ -227,7 +227,11 @@ giving it the representation it assumes:
 - `NonScalar` and `PNonScalar` (types that stand for "any object") become
   `lcAny`, so values of those types are `Box`es. The casts become the
   ordinary representation conversions of §5.1; between arrays of different
-  element types the conversion is element by element.
+  element types the conversion is element by element. Stage 3 (§4) recovers
+  the precise types around this code. When source and target elements have
+  the same representation, the `map` loop runs on the precise array. When
+  they differ, the array is converted once on entry and once on exit, never
+  inside a loop.
 - A `box(0)` placeholder is a value that is never inspected. It arrives as
   a unit-like value used at another type, or as `◾` at a relevant type.
   Stage 4 materializes it as the *zero* of the expected type: `0`, `false`,
@@ -334,21 +338,82 @@ def loop (a.1 : List (Prod Nat P)) (a.2 : List Float) : List Float :=
 
 ## 4. Stage 3 — check and recover lost types
 
-Mono can still lose type information in a few places. Types inferred
-*during* the passes go through erased signatures; for example, a
-constructor's mono signature is `List.cons : lcAny → List lcAny → …`. Where
-a binder ends up with `lcAny` in a position that holds data, its exact type
-is recovered from its context, and only when that context determines it:
-- a `cases` field: the constructor's field type, instantiated at the
-  discriminant's type;
-- a constructor application: from its argument types;
-- a call: from the callee's exact signature, which all our instances have;
-- a join-point parameter: from its jump arguments, when they agree.
+Mono can still lose type information in two ways:
+- Types inferred *during* the passes go through erased signatures. A
+  constructor's mono signature is `List.cons : lcAny → List lcAny → …`, so
+  `structProjCases` can type the fields of an exactly typed pair `lcAny`, and
+  lambda lifting can give a lifted lambda the result type `lcAny`.
+- The library code of §2.7 casts with `unsafeCast`, which LCNF erases. The
+  result of `xs.map f` is bound at `Array NonScalar`, i.e. `Array lcAny`, and
+  so is every loop parameter it is passed to.
 
-Where the context does not determine the type, the binder keeps `lcAny` and
-uses the uniform `Box` representation (§5.1), with conversions where it meets
-a precise type. Recovery is therefore an optimization that avoids boxing, but
-it must be exact: a recovered type is always the binder's real type.
+A binder typed `lcAny` uses the uniform `Box` representation (§5.1), and each
+use at a precise type converts it. For an array that is an element-by-element
+copy: a loop reading `ys[i]!` from a loop-invariant `Array lcAny` would copy
+the whole array at every step, which is quadratic. So Stage 3 recovers the
+exact type wherever the program determines it. It iterates over the whole
+program until nothing changes:
+- **From definitions.** A `cases` field gets the constructor's field type,
+  instantiated at the discriminant's type. A constructor application gets
+  the type its argument types determine. A call, full or partial, gets the
+  type the callee's signature gives. A join-point parameter gets the type of
+  its jump arguments when they agree (for an array parameter, every argument
+  must be known).
+- **From uses, for arrays.** A binder of an array type with `lcAny` inside
+  gets `T` when all of its uses at precise types expect `T`: call and
+  constructor arguments, jump arguments, closure arguments. This includes
+  `let`s, join-point and `cases`-field binders, and a declaration's
+  parameters, whose callers then convert once, before the loop:
+  ```
+  def loop (xs : Array lcAny) (i : Nat) (s : Nat) := … Array.get!Internal@Nat 0 xs i …
+    ⇒ xs : Array Nat
+  ```
+  Returned values do not count as uses: a result type recovered from the
+  callers (below) holds for the value returned, not necessarily for the
+  binders it comes from. The loop of `Array.map` returns its array once every
+  element has been replaced, but the same binder holds source elements on the
+  other paths. Values of type `lcAny` itself are not retyped from uses:
+  moving a conversion from the uses to the definition is only right if the
+  value has that type on every path, and a dynamically typed value (the
+  payload of a `Dynamic`) is cast only after a runtime check of its type.
+- **Result types.** A declaration whose result type is unknown gets `T` when
+  all its returned values have type `T`. The results of its own self calls,
+  and constructors without fields such as `none`, do not count. It also gets
+  `T` when every call of it binds the result at `T`. The callers would
+  convert right away anyway; the conversion moves to the callee's `return`,
+  which for a constant happens once instead of at every read.
+- **Parameters from callers, for arrays.** A parameter of an array type
+  that every call site passes at the same precise type `T` is assumed to
+  have type `T`. The body is retyped under that assumption, not counting the
+  arguments of self calls at that position as uses. The assumption is kept
+  if the self calls then pass `T` too. By induction on the calls, every
+  value reaching the parameter has type `T`. Only call sites in declarations
+  reachable from `main` and the startup work count. A partial application
+  that leaves the parameter open blocks the rule.
+- **Externs at unknown types.** A call of a polymorphic extern instantiated
+  at `lcAny`, e.g. `Array.uget` and `Array.uset` at `NonScalar`, is
+  redirected to the extern's instance at the type arguments the arguments
+  determine. Every argument must then have exactly the expected type, or be a
+  `◾` placeholder, and a binder that already has a precise type must be
+  given exactly that type. An extern does not depend on its type arguments;
+  only the representation changes.
+
+Together, the last two rules make the loop of `xs.map f` precise when `f`
+maps a type to itself (`xs.map (· * 2)`, `names.map (·.trim)`). The loop is
+assumed to receive `Array Nat`. Its reads become `Array.uget@Nat`, its
+placeholder is a `Nat` zero, and its writes of `Nat` values become
+`Array.uset@Nat`, so it passes `Array Nat` back. The whole map then runs in
+place without boxing, like native Lean. When `f` changes the representation
+(`Nat → String`), the writes do not fit the assumption. The loop then keeps
+the `Box` array: its input is converted once on entry, and its result once
+where it is bound.
+
+Each rule is exact: in a well-typed source program a value has one type, and
+`lcAny` is only an erasure of it. The one value that really holds two types,
+the in-progress array of `Array.map`, is only used at `lcAny`, and the rules
+above never push a precise type onto it. Where the program does not
+determine the type, the binder keeps `lcAny` and uses `Box`, with conversions
+where it meets a precise type.
 
 Stage 3 also checks the structural facts Stage 4 relies on:
 - join points are not recursive, and jumps are in tail position;
@@ -469,6 +534,13 @@ its value is stored as `Box`.
   out of polymorphically recursive code) meets code expecting the precise
   type (`List Nat`), the conversion is structural, element by element.
   Programs observe values, not object identity, so this is transparent.
+  An array whose elements cannot be converted (`Array Nat` to `Array Int`)
+  must be empty when that happens: an empty array that `cse` shared between
+  two element types, or the result of mapping nothing. Its element step is
+  therefore `unreachable`.
+- A `cases` field whose binder Stage 3 gave a precise array type, while the
+  constructor stores it at another representation (the `Option (Array
+  lcAny)` of `Array.mapM` in `Option`), is converted once where it is bound.
 - Between two different inductives with the same constructor shapes, or
   between `Nat` and an enumeration (only reachable through `unsafeCast`,
   where Lean's representations coincide), values convert constructor by

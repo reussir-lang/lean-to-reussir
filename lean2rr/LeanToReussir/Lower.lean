@@ -1,6 +1,7 @@
 import Lean
 import LeanToReussir.MonoTypesKeep
 import LeanToReussir.LowerBase
+import LeanToReussir.MonoRetype
 
 /-!
 # Stage 4: lowering mono LCNF to Reussir
@@ -378,35 +379,41 @@ mutual
         let some si := (← get).typeInfos[sn]? | return none
         unless si.shape == .enumLike do return none
         return some (.ctor "Nat" (some "Small") #[.call (← enumIndexFn sn) #[] #[e]])
-      let some sh ← nominalHead sn | return none
-      let some dh ← nominalHead dn | return none
-      if sh != dh && !(← isomorphic sn dn) then return none
-      return some (.call (← structConv sn dn) #[] #[e])
+      if let some sh ← nominalHead sn then
+        let some dh ← nominalHead dn | return none
+        if sh != dh && !(← isomorphic sn dn) then return none
+        return some (.call (← structConv sn dn) #[] #[e])
+      vecCoerce e src dst
     | .app "LCell" #[.named sz], .app "LCell" #[.named dz] =>
       match ← lazyConv sz dz with
       | some f => return some (.call f #[] #[e])
       | none => return none
-    | _, _ =>
-      -- Arrays whose element types differ (an array reinterpreted by
-      -- Lean's uniform-representation code, e.g. `Array α` as
-      -- `Array NonScalar`): rebuilt element by element.
-      let some sr ← arrayRepr? src | return none
-      let some dr ← arrayRepr? dst | return none
-      match ← vecConv src dst sr dr with
-      | some f => return some (.call f #[] #[e])
-      | none => return none
+    | _, _ => vecCoerce e src dst
+
+  /-- Arrays whose element types differ (an array reinterpreted by Lean's
+  uniform-representation code, e.g. `Array α` as `Array NonScalar`): rebuilt
+  element by element. -/
+  partial def vecCoerce (e : RR.Expr) (src dst : RR.Ty) : LowerM (Option RR.Expr) := do
+    let some sr ← arrayRepr? src | return none
+    let some dr ← arrayRepr? dst | return none
+    match ← vecConv src dst sr dr with
+    | some f => return some (.call f #[] #[e])
+    | none => return none
 
   /-- The generated function converting an array with element storage `se`
-  to one with element storage `de` (cached); `none` if the elements are not
-  convertible. -/
+  to one with element storage `de` (cached). -/
   partial def vecConv (src dst : RR.Ty) (sr dr : ArrayRepr) : LowerM (Option String) := do
     if let some f := (← get).vecConvs[(src, dst)]? then return some f
     let f ← fresh "l2r_vconv_"
     modify fun s => { s with vecConvs := s.vecConvs.insert (src, dst) f }
     let x := sr.load (sr.call "get" #[.var "src", .var "i"])
-    let some y ← tryCoerce x sr.value dr.value
-      | modify fun s => { s with vecConvs := s.vecConvs.erase (src, dst) }
-        return none
+    -- Elements that cannot be converted (`Array Nat` to `Array Int`) mean
+    -- that the array is empty whenever this runs: an empty array that `cse`
+    -- shared between two element types, or the array `Array.map` returns
+    -- when it had nothing to map (Stage 3).
+    let y ← match ← tryCoerce x sr.value dr.value with
+      | some y => pure y
+      | none => pure (.call "l2r_unreachable" #[dr.value] #[])
     let go := f ++ "_go"
     let u64 := RR.Ty.named "u64"
     let loop : RR.Block := .ofExpr <| .ite (.atom "i < n")
@@ -1487,7 +1494,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     let retTy ← lowerType ret
     if args.size == n then
       let as ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
-      lowerExternCall orig typeArgs params ret as
+      coerce (← lowerExternCall orig typeArgs params ret as) retTy (← lowerType resTy)
     else if args.size < n then
       let supplied ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
       partialApp ptys[args.size:].toArray retTy (← lowerType resTy) fun rest =>
@@ -1752,6 +1759,19 @@ where
     let (bound, acc) := b.lets.foldl (fun (bound, acc) (x, _, e) => (bound.insert x, rrFreeVars e bound acc)) (bound, acc)
     rrFreeVars b.result bound acc
 
+/-- The binder of a `cases` field `p`, extracted as `x` at the layout's field
+type `ft`. Usually the field is used at `ft`. When Stage 3 gave the binder
+a precise array type and the layout stores the field at another
+representation (an `Option (Array lcAny)` returned by `Array.mapM`), the
+field is converted once here instead of at every use. -/
+def fieldBinder (p : Param .pure) (x : String) (ft : RR.Ty) :
+    LowerM (String × RR.Ty × Array (String × Option RR.Ty × RR.Expr)) := do
+  if !isArrayTy p.type || hasRelevantAny (← read).table p.type then return (x, ft, #[])
+  let bt ← lowerType p.type
+  if bt == ft then return (x, ft, #[])
+  let y ← fresh "fc"
+  return (y, bt, #[(y, some bt, ← coerce (.var x) ft bt)])
+
 mutual
   /-- Lower a code block whose value has Reussir type `retTy`. -/
   partial def lowerCode (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (c : Code .pure) :
@@ -1915,7 +1935,9 @@ mutual
             | some (some (j, ft)) =>
               let x ← fresh "f"
               lets := lets.push (x, some ft, RR.Expr.field (.var scrut) j)
-              ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
+              let (y, t, conv) ← fieldBinder p x ft
+              lets := lets ++ conv
+              ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (y, t) }
             | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
           let b ← lowerCode ctx' outlined retTy k
           return .block { b with lets := lets ++ b.lets }
@@ -1929,15 +1951,19 @@ mutual
           | some (.alt _ ps k _) =>
             let mut ctx' := ctx
             let mut binders := Array.replicate (layout.fields.filter (·.isSome)).size (none : Option String)
+            let mut lets := #[]
             for h : i in [:ps.size] do
               let p := ps[i]
               match layout.fields[i]? with
               | some (some (j, ft)) =>
                 let x ← fresh "f"
                 binders := binders.set! j (some x)
-                ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
+                let (y, t, conv) ← fieldBinder p x ft
+                lets := lets ++ conv
+                ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (y, t) }
               | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
-            arms := arms.push { ty := tn, ctor := some layout.variant, binders, body := ← lowerCode ctx' outlined retTy k }
+            let b ← lowerCode ctx' outlined retTy k
+            arms := arms.push { ty := tn, ctor := some layout.variant, binders, body := { b with lets := lets ++ b.lets } }
           | _ => pure ()
         if arms.size < info.ctorOrder.size then
           let body ← match dflt with
@@ -1948,12 +1974,30 @@ mutual
     | t => throwError "lean2rr: cases on value of type {t.render} ({cs.typeName})"
 end
 
+/-- Can Reussir types `a` and `b` represent the same Lean type? `Box` stands
+for any type; arrays compare their elements, instantiations of an inductive
+their head. -/
+partial def reprCompatible (a b : RR.Ty) : LowerM Bool := do
+  if a == b || a == RR.Ty.box || b == RR.Ty.box then return true
+  match a, b with
+  | .fn a1 b1, .fn a2 b2 => return (← reprCompatible a1 a2) && (← reprCompatible b1 b2)
+  | _, _ =>
+    if let (some ra, some rb) := (← arrayRepr? a, ← arrayRepr? b) then
+      return ← reprCompatible ra.value rb.value
+    match a, b with
+    | .named an, .named bn =>
+      match ← nominalHead an, ← nominalHead bn with
+      | some ha, some hb => return ha == hb
+      | _, _ => return false
+    | _, _ => return false
+
 /-- Generate the bodies of all `Box → nominal` and `Box → array` converters.
 A converter matches every `Box` variant that can hold a value of the
 target's Lean type and converts it: for a nominal type, any instantiation of
 its inductive (structurally); for an array type, any array representation
-(element by element; e.g. an `Array Nat` built by uniform-representation
-code is boxed as `RVec<Box>`, but its consumer wants `LNatArr`). A boxed unit
+with compatible elements (element by element; e.g. an `Array Nat` built by
+uniform-representation code is boxed as `RVec<Box>`, but its consumer wants
+`LNatArr`). Other variants are unreachable. A boxed unit
 is Lean's `box(0)` placeholder and becomes the target's zero. Generating a
 conversion may add `Box` variants (for fields), so this iterates until the
 variant set is stable. -/
@@ -1975,12 +2019,19 @@ partial def finishUnboxFns : LowerM Unit := do
         let accept ← match th?, vt with
           | some th, .named vn => pure ((← nominalHead vn) == some th)
           | some _, _ => pure false
-          | none, _ => pure (tArr && (← arrayRepr? vt).isSome)
+          | none, _ => pure (tArr && (← arrayRepr? vt).isSome && (← reprCompatible vt t))
         if !accept then continue
         let x ← fresh "bx"
-        -- An impossible conversion (another element type) is left to the
-        -- unreachable arm.
-        if let some body ← tryCoerce (.var x) vt t then
+        -- Arrays of another representation go through `RVec<Box>` (boxing,
+        -- then unboxing each element), so that the conversions generated
+        -- stay linear in the number of array types, not quadratic (nested
+        -- arrays under polymorphic recursion have many representations).
+        let boxArr := RR.Ty.app "RVec" #[RR.Ty.box]
+        let body ← if th?.isSome || vt == t || vt == boxArr || t == boxArr then tryCoerce (.var x) vt t
+          else match ← tryCoerce (.var x) vt boxArr with
+            | some b => tryCoerce b boxArr t
+            | none => pure none
+        if let some body := body then
           arms := arms.push { ty := boxName, ctor := some vname, binders := #[some x], body := .ofExpr body }
       let u ← boxVariant .unit
       unless arms.any (·.ctor == some u) do
