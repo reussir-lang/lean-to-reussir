@@ -2030,6 +2030,22 @@ partial def chooseOutlined (body : Code .pure) : FVarIdSet := Id.run do
         changed := true
   return outlined
 
+/-- Whether `x` occurs in `c`. -/
+partial def hasFVar (x : FVarId) (c : Code .pure) : Bool :=
+  let inArg : Arg .pure → Bool := fun | .fvar y => y == x | _ => false
+  let inValue : LetValue .pure → Bool := fun
+    | .fvar f args => f == x || args.any inArg
+    | .const _ _ args _ => args.any inArg
+    | .proj _ _ y _ => y == x
+    | _ => false
+  match c with
+  | .let d k => inValue d.value || hasFVar x k
+  | .fun d k _ | .jp d k => hasFVar x d.value || hasFVar x k
+  | .jmp _ args => args.any inArg
+  | .cases cs => cs.discr == x || cs.alts.any (hasFVar x ·.getCode)
+  | .return y => y == x
+  | .unreach _ => false
+
 /-- Whether `x` occurs in `c` only as a returned value (`return x`). -/
 partial def onlyReturned (x : FVarId) (c : Code .pure) : Bool :=
   let inArg : Arg .pure → Bool := fun | .fvar y => y == x | _ => false
@@ -2265,7 +2281,16 @@ mutual
             if !binders.isEmpty && binders.all Option.isSome && onlyReturned cs.discr k then
               let e := RR.Expr.ctor tn (some layout.variant) (binders.map fun b => .var b.get!)
               ctx' := { ctx' with rebuild := ctx'.rebuild.insert cs.discr (e, sty) }
-            arms := arms.push { ty := tn, ctor := some layout.variant, binders, body := ← lowerCode ctx' outlined retTy k }
+            -- In the arm of a constructor without fields, the matched value
+            -- is that constructor, which costs nothing to build (`leaf` used
+            -- as the children of a new node).
+            let mut pre := #[]
+            if binders.isEmpty && hasFVar cs.discr k then
+              let x ← fresh "nc"
+              pre := #[(x, some sty, RR.Expr.ctor tn (some layout.variant) #[])]
+              ctx' := { ctx' with vars := ctx'.vars.insert cs.discr (x, sty) }
+            let body ← lowerCode ctx' outlined retTy k
+            arms := arms.push { ty := tn, ctor := some layout.variant, binders, body := { body with lets := pre ++ body.lets } }
           | _ => pure ()
         if arms.size < info.ctorOrder.size then
           let body ← match dflt with
