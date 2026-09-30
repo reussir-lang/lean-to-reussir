@@ -2891,6 +2891,27 @@ fn l2r_ptr_addr_obj<T>(a : T) -> u64 [{
     }
 }];
 
+// The same for a shared Reussir record (a generated struct or enum). The
+// reference the call received is given back inline when others remain (a
+// record's count is the `u32` at its address; static cells and immediates,
+// tagged in the top byte, and a last reference go through the record's
+// release), so that the call costs no out-of-line release: `ptrEq` in a
+// traversal (`Expr.replace`) spent 40% of its time there.
+#[ffi(import)]
+fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
+    {
+        let p = unsafe { *(&a as *const [:T:] as *const usize) };
+        if (p >> 56) == 0 {
+            let c = unsafe { *(p as *const u32) };
+            if c > 1 {
+                unsafe { *(p as *mut u32) = c - 1 };
+                ::std::mem::forget(a);
+            }
+        }
+        p as u64
+    }
+}];
+
 // Sharing is not observable here: answering "shared" / "not a scalar" only
 // makes such code take its general path.
 fn lean_is_exclusive_obj<T>(a : T) -> bool { false }
