@@ -1368,9 +1368,14 @@ Answered (Lean):
   then applies the rest: one-argument-at-a-time semantics (§5.3).
 - Pointer equality in `Init`: `Array.mapMono`, `List.mapMono`,
   `withPtrEq` and `ShareCommon` use it only as a shortcut, so "not equal"
-  is safe (lean2rr's `ElemBox`-wrapped values always compare unequal, and
-  the shortcut is just lost). `ST.Ref.ptrEq` is real identity, implemented
-  by `l2r_ref_ptr_eq`.
+  is safe there. Other code stops when `ptrEq` says a step returned its
+  argument itself (`Expr.replace`, fixpoint loops), so a heap value must
+  keep its identity: `ptrAddrUnsafe` of a heap value passed as it is
+  answers its handle pointer (`l2r_ptr_addr_obj`), and a `[value]` struct,
+  represented natively by its field, answers its field's address. Values
+  lean2rr wraps at the call (`Nat`s, enumerations: `ElemBox`) get a fresh
+  number, so they always compare unequal and the shortcut is just lost.
+  `ST.Ref.ptrEq` is real identity, implemented by `l2r_ref_ptr_eq`.
 
 ---
 

@@ -2840,7 +2840,9 @@ fn lean_dbg_sleep<T>(ms : u32, f : L2RUnit -> T) -> T {
     f(L2RUnit::u{})
 }
 
-// `ptrAddrUnsafe`: the bits for scalars, the pointer for heap objects
+// `ptrAddrUnsafe` of a value lean2rr may have wrapped or converted for the
+// call (a heap value passed as it is goes to `l2r_ptr_addr_obj` below):
+// the bits for scalars, the pointer for heap objects
 // (runtime handles and Reussir records). Lean uses equal addresses as a
 // shortcut for equal values, so an address must never be shared by unequal
 // values. An object whose count is 1 here dies with this call (the texture
@@ -2866,6 +2868,23 @@ fn lean_ptr_addr<T>(a : T) -> u64 [{
             let p = unsafe { *(&a as *const [:T:] as *const usize) };
             let dying = (p >> 56) == 0 && unsafe { *(p as *const u32) } == 1;
             if dying { leanrt::fresh_addr() } else { p as u64 }
+        } else {
+            leanrt::fresh_addr()
+        }
+    }
+}];
+
+// `ptrAddrUnsafe` of a heap value that lean2rr passes as it is (not a
+// wrapper built for the call): its handle pointer, whatever its count. The
+// value is the Lean object itself, so its address is its identity even when
+// this call holds its last reference (`ptrEq a b` where `a`'s own call
+// released the other reference to the same object).
+#[ffi(import)]
+fn l2r_ptr_addr_obj<T>(a : T) -> u64 [{
+    {
+        let size = ::std::mem::size_of::<[:T:]>();
+        if size == ::std::mem::size_of::<usize>() {
+            unsafe { *(&a as *const [:T:] as *const usize) as u64 }
         } else {
             leanrt::fresh_addr()
         }

@@ -2018,6 +2018,40 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     return some (.block ⟨#[(e, some (.named "u64"), .call prim #[] #[args[0]!])],
       .call "l2r_unreachable" #[rt] #[]⟩)
   | _ => pure ()
+  -- `ptrAddrUnsafe`: the address of the Lean object, as natively. A heap
+  -- value passed as it is (a variable, not a wrapper or a conversion built
+  -- for the call) answers its handle pointer (`l2r_ptr_addr_obj`), whatever
+  -- its count: when the call holds the last reference, the value may still
+  -- be the same object as another one whose address was taken before (the
+  -- other side of `ptrEq a b`, when `a` was released by its own call). A
+  -- `[value]` struct is represented natively by its field (Lean unboxes
+  -- structures with one relevant field), so its address is the field's,
+  -- recursively. Everything else (scalars, and values wrapped at the call,
+  -- such as `Nat`s, which cannot cross the FFI boundary) goes through the
+  -- generic path: `lean_ptr_addr` answers the bits of a scalar, and a fresh
+  -- number for a wrapper that dies with the call (§9).
+  if (← externSymbol orig) == "lean_ptr_addr" then
+    let some p := params[0]? | return none
+    let mut t ← lowerType p
+    let mut e := args[0]!
+    repeat
+      let .named tn := t | break
+      let some info := (← get).typeInfos[tn]? | break
+      if !info.value then break
+      let some layout := info.ctors.find? info.ctorOrder[0]! | break
+      let some ft := layout.posTys[0]? | break
+      e := .field e 0
+      t := ft
+    let rec place : RR.Expr → Bool
+      | .var n => !n.startsWith "L2RUnit"
+      | .field x _ => place x
+      | _ => false
+    let scalar := match t with
+      | .named n => n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool"]
+      | _ => false
+    if place e && !scalar && (← isBoundaryTy t) then
+      return some (.call "l2r_ptr_addr_obj" #[t] #[e])
+    return none
   -- `Lean.Name.beq`: structural equality (see `structEqFn`).
   if (← externSymbol orig) == "lean_name_eq" then
     let .named tn ← lowerType params[0]! | return none
