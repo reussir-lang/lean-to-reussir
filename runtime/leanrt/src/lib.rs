@@ -13,13 +13,16 @@
 
 extern crate reussir_rt;
 
+pub mod alloc;
 pub mod array;
 pub mod big;
 pub mod float;
+pub mod fs;
 pub mod gmp;
 pub mod hash;
 pub mod io;
 pub mod once;
+pub mod rt;
 pub mod string;
 pub mod tagvec;
 

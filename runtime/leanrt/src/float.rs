@@ -2,16 +2,28 @@
 
 use crate::string::{from_bytes, LStr};
 
-/// `lean_float_to_string`: `std::to_string(double)`, i.e. `printf("%f")`,
-/// with every NaN printed as `NaN`. Rust's `{:.6}` formatting is exact and
-/// rounds ties to even like glibc (checked on ~800k values including exact
-/// ties, infinities and `-0.0`).
+extern "C" {
+    fn snprintf(buf: *mut u8, n: usize, fmt: *const u8, ...) -> i32;
+}
+
+/// `lean_float_to_string`: `std::to_string(double)`, i.e. C's
+/// `snprintf("%f")` — called directly, so the output is Lean's by
+/// construction — with every NaN printed as `NaN`.
 #[inline(never)]
 pub fn to_string(x: f64) -> LStr {
     if x.is_nan() {
         return from_bytes(b"NaN");
     }
-    from_bytes(format!("{:.6}", x).as_bytes())
+    let mut buf = [0u8; 64];
+    let n = unsafe { snprintf(buf.as_mut_ptr(), buf.len(), b"%f\0".as_ptr(), x) };
+    if n >= 0 && (n as usize) < buf.len() {
+        return from_bytes(&buf[..n as usize]);
+    }
+    // Up to 309 integer digits for large magnitudes.
+    let mut big = vec![0u8; n.max(0) as usize + 1];
+    let m = unsafe { snprintf(big.as_mut_ptr(), big.len(), b"%f\0".as_ptr(), x) };
+    big.truncate(m.max(0) as usize);
+    from_bytes(&big)
 }
 
 /// `lean_float32_to_string`: the float is printed through `double`.

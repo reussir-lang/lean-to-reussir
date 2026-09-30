@@ -11,6 +11,7 @@
 //! differs from the out-of-range case) before calling in.
 
 use reussir_rt::rc::Rc;
+use crate::alloc::{rc_new, reserve, vec_from_slice, vec_with_capacity};
 
 pub type LStr = Rc<Vec<u8>>;
 
@@ -19,12 +20,12 @@ pub const DEFAULT_CHAR: u32 = 65;
 
 #[inline]
 pub fn from_bytes(b: &[u8]) -> LStr {
-    Rc::new(b.to_vec())
+    rc_new(vec_from_slice(b, 0))
 }
 
 #[inline]
 pub fn from_vec(v: Vec<u8>) -> LStr {
-    Rc::new(v)
+    rc_new(v)
 }
 
 /// `utf8.cpp:push_unicode_scalar` (also used for invalid code points,
@@ -53,11 +54,11 @@ pub fn push_scalar(v: &mut Vec<u8>, code: u32) {
 #[inline]
 fn make_mut(s: &mut LStr, extra: usize) -> &mut Vec<u8> {
     if !s.is_unique() {
-        let mut v = Vec::with_capacity((s.len() + extra).max(s.len() * 2));
-        v.extend_from_slice(s);
-        *s = Rc::new(v);
+        *s = rc_new(vec_from_slice(s, extra.max(s.len())));
     }
-    unsafe { s.data_mut() }
+    let v = unsafe { s.data_mut() };
+    reserve(v, extra);
+    v
 }
 
 /// `String.push`: an inline fast path for an ASCII character appended to
@@ -245,10 +246,10 @@ pub fn is_valid_pos(s: &[u8], i: u64) -> bool {
 pub fn extract(s: LStr, b: u64, e: u64) -> LStr {
     let sz = s.len() as u64;
     if b >= e || b >= sz {
-        return Rc::new(Vec::new());
+        return rc_new(Vec::new());
     }
     if !is_utf8_first_byte(s[b as usize]) {
-        return Rc::new(Vec::new());
+        return rc_new(Vec::new());
     }
     let mut e = e.min(sz);
     if e < sz && !is_utf8_first_byte(s[e as usize]) {
@@ -341,7 +342,7 @@ pub fn of_u64(n: u64) -> LStr {
 /// Decimal representation of a signed word.
 #[inline(never)]
 pub fn of_i64(n: i64) -> LStr {
-    let mut v = Vec::with_capacity(20);
+    let mut v = vec_with_capacity(20);
     if n < 0 {
         v.push(b'-');
     }

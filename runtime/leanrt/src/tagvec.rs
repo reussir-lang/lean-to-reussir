@@ -15,6 +15,7 @@
 //! `TagVec`, whose `Clone`/`Drop` maintain the big elements' counts. Like
 //! every array it is copy-on-write: updated in place when unique.
 
+use crate::alloc::{box_new, rc_new, reserve, vec_from_slice, vec_with_capacity};
 use crate::big::LBig;
 use reussir_rt::rc::Rc;
 use std::any::Any;
@@ -70,7 +71,7 @@ fn tv_mut(a: &mut LTagVec) -> &mut TagVec {
 }
 
 fn mk(w: Vec<u64>) -> LTagVec {
-    Rc::new(Box::new(TagVec { w }) as Box<dyn Any>)
+    rc_new(box_new(TagVec { w }) as Box<dyn Any>)
 }
 
 /// Unique access, copying a shared vector first.
@@ -86,7 +87,7 @@ fn make_mut(a: &mut LTagVec) -> &mut TagVec {
 #[inline(never)]
 fn copy_shared(a: &mut LTagVec) {
     let c = tv(a).clone();
-    *a = Rc::new(Box::new(c) as Box<dyn Any>);
+    *a = rc_new(box_new(c) as Box<dyn Any>);
 }
 
 #[cold]
@@ -110,19 +111,23 @@ pub fn empty() -> LTagVec {
 
 #[inline(never)]
 pub fn with_capacity(n: u64) -> LTagVec {
-    mk(Vec::with_capacity(n.min(1 << 24) as usize))
+    mk(vec_with_capacity(n.min(1 << 24) as usize))
 }
 
 /// `n` copies of a small (odd) word.
 #[inline(never)]
 pub fn replicate_word(n: u64, w: u64) -> LTagVec {
-    mk(vec![w; n as usize])
+    {
+        let mut v = vec_with_capacity(n as usize);
+        v.resize(n as usize, w);
+        mk(v)
+    }
 }
 
 /// `n` references to one big value.
 #[inline(never)]
 pub fn replicate_big(n: u64, b: LBig) -> LTagVec {
-    let mut v = Vec::with_capacity(n as usize);
+    let mut v = vec_with_capacity(n as usize);
     for _ in 0..n {
         v.push(big_to_word(b.clone()));
     }
@@ -192,7 +197,7 @@ fn push_raw(mut a: LTagVec, w: u64) -> LTagVec {
 fn push_slow(mut a: LTagVec, w: u64) -> LTagVec {
     let v = make_mut(&mut a);
     let n = v.w.len();
-    v.w.reserve(n.max(4));
+    reserve(&mut v.w, n.max(4));
     v.w.push(w);
     a
 }
@@ -236,7 +241,7 @@ fn copy_words(ws: &[u64]) -> Vec<u64> {
             std::mem::forget(word_as_big(w).clone());
         }
     }
-    ws.to_vec()
+    vec_from_slice(ws, 0)
 }
 
 #[inline(never)]

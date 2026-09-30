@@ -7,3 +7,4 @@
 /runtime/leanrt/target/
 # runtime test builds
 /tests/runtime/build/
+__pycache__/
