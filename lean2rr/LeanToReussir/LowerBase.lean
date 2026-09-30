@@ -67,6 +67,8 @@ structure TypeInfo where
   ctors : NameMap CtorLayout
   /-- Constructor names in declaration order. -/
   ctorOrder : Array Name
+  /-- A `[value]` struct (one field; see `nominalType`). -/
+  value : Bool := false
 
 structure LowerCtx where
   table : RelevanceTable
@@ -231,7 +233,7 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
     if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
             "LStr", "LBig", "LNatArr", "LIntArr", "LHandle", boxName] then return true
     match (← get).typeInfos[n]? with
-    | some info => return info.shape != .enumLike
+    | some info => return info.shape != .enumLike && !info.value
     | none => return false
   | .app n _ => return n == "RVec" || n == "LRef" || n == "LCell"
   -- A function value is a shared enum.
@@ -498,12 +500,25 @@ mutual
       if variants.all (·.2.isEmpty) then Shape.enumLike
       else if variants.size == 1 then Shape.struct
       else Shape.enum
+    -- A structure with a single field (after dropping irrelevant ones, e.g.
+    -- `ST.Out`, the result of every `BaseIO` call, once the world is gone)
+    -- is a `[value]` struct: passed by value, no heap cell per value. Its
+    -- field must be of a finished type (or a primitive), so that no type
+    -- contains itself by value.
+    let value ← do
+      if shape != .struct then pure false else
+      match variants[0]!.2 with
+      | #[.named fn] =>
+        if (← get).typeInfos.contains fn then pure true
+        else pure !((← get).typeKeys.contains fn)
+      | #[.app _ _] | #[.fn ..] => pure true
+      | _ => pure false
     let item := match shape with
       | .enumLike => RR.Item.enum name true (if variants.isEmpty then #[("c_impossible", #[])] else variants)
-      | .struct => RR.Item.struct name false variants[0]!.2
+      | .struct => RR.Item.struct name value variants[0]!.2
       | .enum => RR.Item.enum name false variants
     modify fun s => { s with
-      typeInfos := s.typeInfos.insert name { name, shape, ctors, ctorOrder := ival.ctors.toArray }
+      typeInfos := s.typeInfos.insert name { name, shape, ctors, ctorOrder := ival.ctors.toArray, value }
       typeItems := s.typeItems.push item }
     return .named name
 end

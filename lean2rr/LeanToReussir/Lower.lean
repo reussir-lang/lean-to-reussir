@@ -348,7 +348,7 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
     | .named n =>
       if n ∈ ["LStr", "LNatArr", "LIntArr", boxName] then pure true
       else match (← get).typeInfos[n]? with
-        | some info => pure (info.shape != .enumLike)
+        | some info => pure (info.shape != .enumLike && !info.value)
         | none => pure ((← storageElem t).2)
     | .app "RVec" _ | .fn .. => pure true
     | _ => pure false
