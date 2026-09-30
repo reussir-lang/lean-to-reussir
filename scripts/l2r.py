@@ -95,6 +95,9 @@ def main():
     ap.add_argument("-O", "--opt", default="default", choices=["none", "default", "aggressive", "size"])
     ap.add_argument("--keep-rr", default=None, help="also write the generated .rr here")
     ap.add_argument("--root", default="main")
+    # Off by default: Reussir's reuse across calls currently miscompiles some
+    # programs (a field of a reused cell read after the reuse).
+    ap.add_argument("--reuse-across-call", action="store_true")
     args = ap.parse_args()
 
     env = dict(os.environ)
@@ -109,11 +112,12 @@ def main():
         rt, deps = rt_dirs()
         target_libdir = run([str(RUSTC), "--print", "target-libdir"]).stdout.strip()
         run([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", args.output,
-             "--emit", "executable", "-O", args.opt, "--reuse-across-call",
+             "--emit", "executable", "-O", args.opt,
              "--polyffi-rust-path", str(rustc_wrapper()),
              "--polyffi-libdir", str(rt), "--polyffi-libdir", str(deps),
              "--polyffi-libdir", target_libdir, "--polyffi-libdir", str(LEANRT_OUT),
-             "--link-lib", str(rlib), "--link-lib", str(gmp_archive())])
+             "--link-lib", str(rlib), "--link-lib", str(gmp_archive())]
+            + (["--reuse-across-call"] if args.reuse_across_call else []))
 
 
 if __name__ == "__main__":
