@@ -668,11 +668,14 @@ Erased fields get no binders. Reussir syntax notes: match arms have no
 trailing comma after the last arm, and there is no `else if` (use
 `else { if … }`).
 
-Three shapes help Reussir's token reuse, which gives a cell freed by a
-match to a later construction:
-- An arm that returns the matched value (`simp` turns `node l k r` back
-  into `t`) returns `node(l, k, r)` rebuilt from the fields, so every arm
-  consumes the cell.
+An arm that returns the matched value (`simp` turns `node l k r` back
+into `t`) returns that value itself, as natively: the same object, with its
+sharing. Code that stops when `ptrEq` says a step changed nothing (Lean's
+`Expr.replace`, fixpoint loops) depends on it, and a lookup returning an
+existing node must not copy it.
+
+Two shapes help Reussir's token reuse, which gives a cell freed by a match
+to a later construction:
 - In the arm of a constructor without fields, the matched value is that
   constructor (`leaf{}`), which costs nothing to build.
 - In an arm where the matched value stays live because it is stored whole
@@ -1441,6 +1444,15 @@ Each item says what differs and when.
   so a DAG costs exponential time and memory, and a conversion on every call
   costs O(size) per call. Past the instance caps of §2.6 this can happen
   inside loops. Running out of memory changes the exit status.
+- *A match with an arm that returns the matched value* (a BST insert of a
+  key already present, whose `simp`ed code returns `t` itself) keeps the
+  value live across the match, and Reussir's token reuse then offers the
+  projected fields' releases as reuse donors in the other arms, where they
+  never free anything, instead of the cell the match frees (Reussir bug 7,
+  being fixed in Reussir): the other arms allocate a new node per level. A
+  user BST insert (1e6 keys) takes 3.6-5.6x native time; lean2rr used to
+  rebuild the node from its fields in such arms (0.5-0.8x native), which
+  broke identity and sharing (§5.5).
 - *`Array.map` that changes the representation* (for example
   `(Array.range n).map some`) converts the input to an array of `Box` on
   entry and back on exit (§2.7), so the input, the boxed copy with one box

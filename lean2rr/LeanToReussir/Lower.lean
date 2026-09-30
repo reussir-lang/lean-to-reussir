@@ -76,9 +76,6 @@ structure CodeCtx where
   /-- Types of join-point parameters, for lowering jump arguments. -/
   jpParams : Std.HashMap FVarId (Array RR.Ty) := {}
   sm : Option StateMachine := none
-  /-- Matched values that an arm returns: returned as the constructor
-  rebuilt from the arm's fields (see `lowerCases`). -/
-  rebuild : Std.HashMap FVarId (RR.Expr × RR.Ty) := {}
   /-- Matched values whose fields are bound lazily (outermost first). -/
   lazy : Array LazyMatch := #[]
   /-- Bodies of the join points in scope. -/
@@ -2546,21 +2543,6 @@ partial def hasFVar (x : FVarId) (c : Code .pure) : Bool :=
   | .return y => y == x
   | .unreach _ => false
 
-/-- Whether `x` occurs in `c` only as a returned value (`return x`). -/
-partial def onlyReturned (x : FVarId) (c : Code .pure) : Bool :=
-  let inArg : Arg .pure → Bool := fun | .fvar y => y == x | _ => false
-  let inValue : LetValue .pure → Bool := fun
-    | .fvar f args => f == x || args.any inArg
-    | .const _ _ args _ => args.any inArg
-    | .proj _ _ y _ => y == x
-    | _ => false
-  match c with
-  | .let d k => !inValue d.value && onlyReturned x k
-  | .fun d k _ | .jp d k => onlyReturned x d.value && onlyReturned x k
-  | .jmp _ args => !args.any inArg
-  | .cases cs => cs.discr != x && cs.alts.all (onlyReturned x ·.getCode)
-  | .return _ | .unreach _ => true
-
 /-- Variables used in a let value. -/
 def valueUses (v : LetValue .pure) (acc : Std.HashSet FVarId) : Std.HashSet FVarId :=
   let args (as : Array (Arg .pure)) (acc : Std.HashSet FVarId) :=
@@ -2725,7 +2707,6 @@ mutual
       let b ← lowerCode { ctx with vars := ctx.vars.insert d.fvarId (x, t) } outlined retTy k
       return { b with lets := #[(x, some t, e)] ++ b.lets }
     | .return x =>
-      if let some (e, t) := ctx.rebuild[x]? then return .ofExpr (← coerce e t retTy)
       match ctx.vars[x]? with
       | some (n, t) => return .ofExpr (← coerce (.var n) t retTy)
       | none => throwError "lean2rr: return of unbound variable (internal error)"
@@ -2892,14 +2873,6 @@ mutual
                 binders := binders.set! j (some x)
                 ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
               | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
-            -- An arm that returns the matched value itself (Lean's `simp`
-            -- replaces `C a b` by the scrutinee) returns the constructor
-            -- rebuilt from the fields instead: then every arm consumes the
-            -- matched cell, and Reussir can reuse it for the constructions of
-            -- the other arms (and for this one, giving the same cell back).
-            if !binders.isEmpty && binders.all Option.isSome && onlyReturned cs.discr k then
-              let e := RR.Expr.ctor tn (some layout.variant) (binders.map fun b => .var b.get!)
-              ctx' := { ctx' with rebuild := ctx'.rebuild.insert cs.discr (e, sty) }
             -- An arm in which the matched value stays live because it is
             -- stored whole in a new constructor binds only the fields needed
             -- while it is live; a field used only in inner alternatives that
@@ -2913,7 +2886,7 @@ mutual
             -- values only passed to calls: there reusing the cell (merge's
             -- `go l₁ ys (y :: acc)`) measured slower for mergesort, whose
             -- lists then keep the scattered order of the input cells.
-            else if !binders.isEmpty && info.shape == .enum &&
+            if !binders.isEmpty && info.shape == .enum &&
                 usedAsField (← getEnv) ctx.jpBodies cs.discr k then
               let early := usesWhileLive ctx.jpBodies cs.discr k {}
               let used := codeUses k {}
