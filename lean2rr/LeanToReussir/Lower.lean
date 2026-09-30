@@ -76,9 +76,6 @@ structure CodeCtx where
   /-- Types of join-point parameters, for lowering jump arguments. -/
   jpParams : Std.HashMap FVarId (Array RR.Ty) := {}
   sm : Option StateMachine := none
-  /-- Matched values that an arm returns: returned as the constructor
-  rebuilt from the arm's fields (see `lowerCases`). -/
-  rebuild : Std.HashMap FVarId (RR.Expr × RR.Ty) := {}
   /-- Matched values whose fields are bound lazily (outermost first). -/
   lazy : Array LazyMatch := #[]
   /-- Bodies of the join points in scope. -/
@@ -159,10 +156,11 @@ def partValue (tg : FnTarget) (captured : Array RR.Expr) : LowerM (RR.Expr × RR
   return (.ctor (RR.fnTypeName t) (some (fnVariantName v)) captured, t)
 
 /-- `l2r_fconv_S_T(f)`: function value `f : S` at representation `T`. A
-value that is itself `T`'s value wrapped (`w<T>`) is unwrapped, so that a
-value converted back and forth (a structure field crossing uniform code in
-a loop) is not wrapped again each time; otherwise it is wrapped (`w<S>`).
-The body is generated at the end (`finishFnValues`). -/
+value that is itself a wrapped value of another representation `R`
+(`w<R>(g)`) is converted from `R` directly (`g` itself when `R` is `T`), so
+that a value converted back and forth (a structure field crossing uniform
+code in a loop) is not wrapped again each time; otherwise it is wrapped
+(`w<S>`). The body is generated at the end (`genFnConv`). -/
 def fnConvFn (src dst : RR.Ty) : LowerM String := do
   unless (← get).fnConvs.contains (src, dst) do
     modify fun s => { s with fnConvs := s.fnConvs.push (src, dst) }
@@ -438,6 +436,40 @@ def unboxMatch (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
   return .mtch e (arms.push
     { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) })
 
+/-- An enumeration: `bool`, or a generated `[value]` enum without fields. -/
+def isEnumName (n : String) : LowerM Bool := do
+  if n == "bool" then return true
+  return ((← get).typeInfos[n]?.map (·.shape == .enumLike)).getD false
+
+/-- The index of value `e` of Reussir type `n`, as `u64`: a `Nat`, a
+fixed-width unsigned integer, `bool` (`false` is 0) or an enumeration
+(constructor position). `none` for other types. -/
+def indexOf (e : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
+  let u64 := RR.Ty.named "u64"
+  if n == "Nat" then return some (.call "lean_usize_of_nat" #[] #[e])
+  if n == "u64" then return some e
+  if n ∈ ["u8", "u16", "u32"] then return some (.cast e u64)
+  if n == "bool" then
+    let o ← fresh "ix"
+    return some (.ite e ⟨#[(o, some u64, .atom "1")], .var o⟩ ⟨#[(o, some u64, .atom "0")], .var o⟩)
+  if ← isEnumName n then return some (.call (← enumIndexFn n) #[] #[e])
+  return none
+
+/-- The value of Reussir type `n` with index `i : u64` (see `indexOf`); an
+index past the last constructor of an enumeration gives the last one, a
+nonzero one `true`. -/
+def ofIndex (i : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
+  let u64 := RR.Ty.named "u64"
+  if n == "Nat" then return some (.ctor "Nat" (some "Small") #[i])
+  if n == "u64" then return some i
+  if n ∈ ["u8", "u16", "u32"] then return some (.cast i (.named n))
+  if n == "bool" then
+    let x ← fresh "ix"
+    let z ← fresh "iz"
+    return some (.block ⟨#[(x, some u64, i), (z, some u64, .atom "0")], .atom s!"{x} != {z}"⟩)
+  if ← isEnumName n then return some (.call (← enumOfIndexFn n) #[] #[i])
+  return none
+
 mutual
   /-- Convert `e` from representation `src` to `dst`. Besides `Box`
   conversions and closure wrappers, two instantiations of the same inductive
@@ -520,17 +552,19 @@ mutual
       let some res ← tryCoerce (.apply callee arg) b1 b2 | return none
       let f := rawFnValue dst x (.ofExpr res)
       return some (if pre.isEmpty then f else .block ⟨pre, f⟩)
-    -- `Nat` and enumerations by index (Lean represents both as scalars;
-    -- only reachable through `unsafeCast`).
     | .named sn, .named dn =>
-      if sn == "Nat" then
-        let some di := (← get).typeInfos[dn]? | return none
-        unless di.shape == .enumLike do return none
-        return some (.call (← enumOfIndexFn dn) #[] #[.call "lean_usize_of_nat" #[] #[e]])
-      if dn == "Nat" then
-        let some si := (← get).typeInfos[sn]? | return none
-        unless si.shape == .enumLike do return none
-        return some (.ctor "Nat" (some "Small") #[.call (← enumIndexFn sn) #[] #[e]])
+      -- Enumerations (and `Bool`) and `Nat` or fixed-width integers, by
+      -- index: natively an enumeration is a `uint8`/`16`/`32` (`Bool` a
+      -- `uint8`), a `Nat` its boxed scalar. Only reachable through
+      -- `unsafeCast`.
+      if (← isEnumName sn) || (← isEnumName dn) then
+        let infos := (← get).typeInfos
+        let related ← if infos.contains sn && infos.contains dn then
+            pure ((← nominalHead sn) == (← nominalHead dn) || (← isomorphic sn dn))
+          else pure false
+        if !related then
+          if let some i ← indexOf e sn then
+            if let some r ← ofIndex i dn then return some r
       if let some sh ← nominalHead sn then
         let some dh ← nominalHead dn | return none
         if sh != dh && !(← isomorphic sn dn) then return none
@@ -2068,6 +2102,47 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     return some (.block ⟨#[(e, some (.named "u64"), .call prim #[] #[args[0]!])],
       .call "l2r_unreachable" #[rt] #[]⟩)
   | _ => pure ()
+  -- `ptrAddrUnsafe`: the address of the Lean object, as natively. A heap
+  -- value passed as it is (a variable, not a wrapper or a conversion built
+  -- for the call) answers its handle pointer (`l2r_ptr_addr_obj`), whatever
+  -- its count: when the call holds the last reference, the value may still
+  -- be the same object as another one whose address was taken before (the
+  -- other side of `ptrEq a b`, when `a` was released by its own call). A
+  -- `[value]` struct is represented natively by its field (Lean unboxes
+  -- structures with one relevant field), so its address is the field's,
+  -- recursively. Everything else (scalars, and values wrapped at the call,
+  -- such as `Nat`s, which cannot cross the FFI boundary) goes through the
+  -- generic path: `lean_ptr_addr` answers the bits of a scalar, and a fresh
+  -- number for a wrapper that dies with the call (§9).
+  if (← externSymbol orig) == "lean_ptr_addr" then
+    let some p := params[0]? | return none
+    let mut t ← lowerType p
+    let mut e := args[0]!
+    repeat
+      let .named tn := t | break
+      let some info := (← get).typeInfos[tn]? | break
+      if !info.value then break
+      let some layout := info.ctors.find? info.ctorOrder[0]! | break
+      let some ft := layout.posTys[0]? | break
+      e := .field e 0
+      t := ft
+    let rec place : RR.Expr → Bool
+      | .var n => !n.startsWith "L2RUnit"
+      | .field x _ => place x
+      | _ => false
+    let scalar := match t with
+      | .named n => n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool"]
+      | _ => false
+    if place e && !scalar && (← isBoundaryTy t) then
+      -- Records generated by lean2rr (shared structs and enums, `Box`,
+      -- function values) and runtime handles.
+      let infos := (← get).typeInfos
+      let record := match t with
+        | .named n => n == boxName || infos.contains n
+        | .fn .. => true
+        | _ => false
+      return some (.call (if record then "l2r_ptr_addr_rec" else "l2r_ptr_addr_obj") #[t] #[e])
+    return none
   -- `Lean.Name.beq`: structural equality (see `structEqFn`).
   if (← externSymbol orig) == "lean_name_eq" then
     let .named tn ← lowerType params[0]! | return none
@@ -2386,6 +2461,68 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     else partialApp { id := "k" ++ fullRt.enc ++ "_" ++ fnName c.name, params := argTys, ret := fullRt,
                       call := .ctor c.name fullRt } vals (← lowerType resTy)
 
+/-- How a `cases` (or projection) of inductive `typeName` treats a
+discriminant of Reussir type `sty`. Mono erases `unsafeCast`, so the
+discriminant can be a value of another type that Lean represents alike
+(translation plan §5.5): an inductive with the same constructor shapes, a
+`Nat` or `UInt8` used as an enumeration. -/
+inductive CastCases where
+  /-- A value of `typeName` (the usual case). -/
+  | same
+  /-- A value of isomorphic inductive `sn` (§5.1), matched as `dn`, an
+  instance of `typeName`: constructors correspond by position, relevant
+  fields by position (`viewLayout`), and are bound at their own types. -/
+  | view (sn dn : String)
+  /-- Converted to `typeName`'s instance `dst` first (enumerations by index;
+  where no conversion exists, `coerce` warns and the cast panics). -/
+  | convert (dst : RR.Ty)
+  /-- `typeName` has no representation (its values carry nothing). -/
+  | unit
+
+def castCases (sty : RR.Ty) (typeName : Name) : LowerM CastCases := do
+  let sameHead (h : Name) := h == typeName || h == typeName ++ `_impl || typeName == h ++ `_impl
+  let tn := match sty with | .named n => n | _ => ""
+  let infos := (← get).typeInfos
+  let nominal := infos.contains tn
+  if nominal then
+    let some h ← nominalHead tn | return .same
+    if sameHead h then return .same
+  else if tn == "bool" && typeName == ``Bool then return .same
+  -- The instance of `typeName` to match against: at the discriminant's
+  -- type arguments when the parameter counts agree (`Option Nat` cast to
+  -- `MyOpt Nat`), otherwise the uniform one.
+  let uniform ← uniformType typeName
+  if uniform == .unit then return .unit
+  if uniform == sty || uniform == RR.Ty.box then return .same
+  if nominal then
+    let mut cands : Array RR.Ty := #[]
+    if let some k := (← get).typeKeys[tn]? then
+      if let some (.inductInfo ival) := (← getEnv).find? typeName then
+        if ival.numParams == k.getAppNumArgs && ival.numParams > 0 then
+          cands := cands.push (← lowerTypeApp typeName k.getAppArgs)
+    cands := cands.push uniform
+    for dt in cands do
+      if let .named dn := dt then
+        if (← get).typeInfos.contains dn && (← isomorphic tn dn) then return .view tn dn
+  return .convert uniform
+
+/-- The layout of constructor `dl` (of the instance a cast value is matched
+as) over the record of the corresponding constructor `sl` of the value's
+own type: the `k`-th relevant field of `dl` is the `k`-th relevant field of
+`sl`, at its record position and type (as `structConv` converts isomorphic
+inductives). -/
+def viewLayout (sl dl : CtorLayout) : CtorLayout := Id.run do
+  let srcRel := sl.fields.filterMap id
+  let mut fields := #[]
+  let mut k := 0
+  for f in dl.fields do
+    match f with
+    | some _ =>
+      fields := fields.push srcRel[k]?
+      k := k + 1
+    | none => fields := fields.push none
+  return { variant := sl.variant, numParams := dl.numParams, fields }
+
 def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty) : LowerM RR.Expr := do
   match v with
   | .lit (.nat n) => coerce (← natLiteral n) (.named "Nat") rty
@@ -2394,16 +2531,33 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
   | .lit (.uint32 n) => return .atom (toString n)
   | .lit (.uint64 n) | .lit (.usize n) => return .atom (toString n)
   | .erased => zeroValue rty
-  | .proj _ i x _ =>
+  | .proj sn i x _ =>
     match ctx.vars[x]? with
-    | some (n, .named tn) =>
-      match (← get).typeInfos[tn]? with
-      | some info =>
-        let some layout := info.ctors.find? info.ctorOrder[0]! | throwError "lean2rr: bad projection"
-        match layout.fields[i]? with
-        | some (some (j, ft)) => coerce (.field (.var n) j) ft rty
-        | _ => zeroValue rty
-      | none => throwError "lean2rr: projection from non-structure {tn}"
+    | some (n, st) =>
+      -- A projection of a cast value: as a `cases` (see `castCases`).
+      let (e, tn, layout?) ← match ← castCases st sn with
+        | .view src dst =>
+          let si := (← get).typeInfos[src]?
+          let di := (← get).typeInfos[dst]?
+          let sl := si.bind fun i => i.ctorOrder[0]?.bind i.ctors.find?
+          let dl := di.bind fun i => i.ctorOrder[0]?.bind i.ctors.find?
+          pure (RR.Expr.var n, src, (do viewLayout (← sl) (← dl)))
+        | .convert dty =>
+          let .named dn := dty | return ← zeroValue rty
+          let di := (← get).typeInfos[dn]?
+          pure (← coerce (.var n) st dty, dn, di.bind fun i => i.ctorOrder[0]?.bind i.ctors.find?)
+        | .unit => return ← zeroValue rty
+        | .same =>
+          let .named tn := st | throwError "lean2rr: projection from {st.render}"
+          let some info := (← get).typeInfos[tn]? | throwError "lean2rr: projection from non-structure {tn}"
+          pure (RR.Expr.var n, tn, info.ctorOrder[0]?.bind info.ctors.find?)
+      let some layout := layout? | throwError "lean2rr: bad projection"
+      match layout.fields[i]? with
+      | some (some (j, ft)) =>
+        match e with
+        | .var _ => coerce (.field e j) ft rty
+        | _ => withVar "pv" (.named tn) e fun v => coerce (.field v j) ft rty
+      | _ => zeroValue rty
     | _ => throwError "lean2rr: projection from unknown variable"
   | .const f _ args _ => lowerConstApp ctx f args ty
   | .fvar g args =>
@@ -2593,21 +2747,6 @@ partial def hasFVar (x : FVarId) (c : Code .pure) : Bool :=
   | .return y => y == x
   | .unreach _ => false
 
-/-- Whether `x` occurs in `c` only as a returned value (`return x`). -/
-partial def onlyReturned (x : FVarId) (c : Code .pure) : Bool :=
-  let inArg : Arg .pure → Bool := fun | .fvar y => y == x | _ => false
-  let inValue : LetValue .pure → Bool := fun
-    | .fvar f args => f == x || args.any inArg
-    | .const _ _ args _ => args.any inArg
-    | .proj _ _ y _ => y == x
-    | _ => false
-  match c with
-  | .let d k => !inValue d.value && onlyReturned x k
-  | .fun d k _ | .jp d k => onlyReturned x d.value && onlyReturned x k
-  | .jmp _ args => !args.any inArg
-  | .cases cs => cs.discr != x && cs.alts.all (onlyReturned x ·.getCode)
-  | .return _ | .unreach _ => true
-
 /-- Variables used in a let value. -/
 def valueUses (v : LetValue .pure) (acc : Std.HashSet FVarId) : Std.HashSet FVarId :=
   let args (as : Array (Arg .pure)) (acc : Std.HashSet FVarId) :=
@@ -2772,7 +2911,6 @@ mutual
       let b ← lowerCode { ctx with vars := ctx.vars.insert d.fvarId (x, t) } outlined retTy k
       return { b with lets := #[(x, some t, e)] ++ b.lets }
     | .return x =>
-      if let some (e, t) := ctx.rebuild[x]? then return .ofExpr (← coerce e t retTy)
       match ctx.vars[x]? with
       | some (n, t) => return .ofExpr (← coerce (.var n) t retTy)
       | none => throwError "lean2rr: return of unbound variable (internal error)"
@@ -2883,6 +3021,22 @@ mutual
       let conv ← coerce (.var scrut0) RR.Ty.box uty
       let ctx' := { ctx with vars := ctx.vars.insert cs.discr (u, uty) }
       return .block ⟨#[(u, some uty, conv)], ← lowerCases ctx' outlined retTy cs⟩
+    -- A cast value (see `castCases`): converted first, or matched through
+    -- the corresponding constructors of its own type.
+    let mut view : Option String := none
+    match ← castCases sty0 cs.typeName with
+    | .same => pure ()
+    | .view _ dn => view := some dn
+    | .convert dty =>
+      let u ← fresh "cv"
+      let conv ← coerce (.var scrut0) sty0 dty
+      let ctx' := { ctx with vars := ctx.vars.insert cs.discr (u, dty) }
+      return .block ⟨#[(u, some dty, conv)], ← lowerCases ctx' outlined retTy cs⟩
+    | .unit =>
+      -- No data: the only alternative, its fields carry nothing.
+      let some alt := cs.alts[0]? | return .call "l2r_unreachable" #[retTy] #[]
+      let ctx' := alt.getParams.foldl (fun c p => { c with vars := c.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }) ctx
+      return .block (← lowerCode ctx' outlined retTy alt.getCode)
     let (scrut, sty) := (scrut0, sty0)
     let altFor (ctor : Name) : Option (Alt .pure) := cs.alts.find? fun
       | .alt c _ _ _ => c == ctor
@@ -2903,12 +3057,23 @@ mutual
     | .named tn =>
       let some info := (← get).typeInfos[tn]?
         | throwError "lean2rr: cases on non-nominal type {tn} ({cs.typeName})"
+      -- The alternatives' constructors, at each constructor position of
+      -- the matched type, and their layouts over its records.
+      let (actors, layoutOf) ← match view with
+        | none => pure (info.ctorOrder, fun c => info.ctors.find? c)
+        | some dn =>
+          let some di := (← get).typeInfos[dn]? | throwError "lean2rr: no type {dn}"
+          let mut m : NameMap CtorLayout := {}
+          for (sc, dc) in info.ctorOrder.zip di.ctorOrder do
+            if let (some sl, some dl) := (info.ctors.find? sc, di.ctors.find? dc) then
+              m := m.insert dc (viewLayout sl dl)
+          pure (di.ctorOrder, fun c => m.find? c)
       match info.shape with
       | .struct =>
         let some alt := cs.alts[0]? | throwError "lean2rr: empty cases"
         match alt with
         | .alt ctor ps k _ =>
-          let some layout := info.ctors.find? ctor | throwError "lean2rr: bad constructor"
+          let some layout := layoutOf ctor | throwError "lean2rr: bad constructor"
           let mut ctx' := ctx
           let mut lets := #[]
           for h : i in [:ps.size] do
@@ -2925,8 +3090,8 @@ mutual
         | _ => throwError "lean2rr: impure alternative"
       | _ =>
         let mut arms := #[]
-        for ctor in info.ctorOrder do
-          let some layout := info.ctors.find? ctor | continue
+        for ctor in actors do
+          let some layout := layoutOf ctor | continue
           match altFor ctor with
           | some (.alt _ ps k _) =>
             let mut ctx' := ctx
@@ -2939,14 +3104,6 @@ mutual
                 binders := binders.set! j (some x)
                 ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
               | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
-            -- An arm that returns the matched value itself (Lean's `simp`
-            -- replaces `C a b` by the scrutinee) returns the constructor
-            -- rebuilt from the fields instead: then every arm consumes the
-            -- matched cell, and Reussir can reuse it for the constructions of
-            -- the other arms (and for this one, giving the same cell back).
-            if !binders.isEmpty && binders.all Option.isSome && onlyReturned cs.discr k then
-              let e := RR.Expr.ctor tn (some layout.variant) (binders.map fun b => .var b.get!)
-              ctx' := { ctx' with rebuild := ctx'.rebuild.insert cs.discr (e, sty) }
             -- An arm in which the matched value stays live because it is
             -- stored whole in a new constructor binds only the fields needed
             -- while it is live; a field used only in inner alternatives that
@@ -2960,7 +3117,7 @@ mutual
             -- values only passed to calls: there reusing the cell (merge's
             -- `go l₁ ys (y :: acc)`) measured slower for mergesort, whose
             -- lists then keep the scattered order of the input cells.
-            else if !binders.isEmpty && info.shape == .enum &&
+            if !binders.isEmpty && info.shape == .enum &&
                 usedAsField (← getEnv) ctx.jpBodies cs.discr k then
               let early := usesWhileLive ctx.jpBodies cs.discr k {}
               let used := codeUses k {}
@@ -3180,17 +3337,24 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
   let item := RR.Item.fn name params resJ (.ofExpr (.mtch (.var "l2rf") arms))
   modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
 
-/-- Generate `l2r_fconv_S_T` (see `fnConvFn`). -/
+/-- Generate `l2r_fconv_S_T` (see `fnConvFn`). A value that is a wrapped
+value `g` of a representation `R` (`w<R>(g)`) is converted from `R`
+directly: `g` itself when `R` is `T`, otherwise `l2r_fconv_R_T(g)` (generated
+on demand). So a function value that travels through several
+representations (a reference read at `Nat → Nat`, `Nat → Box` and
+`Box → Box` in a loop) stays one wrapper deep, and coming back to its own
+representation gives the value itself (like `lazyConv`'s chains). Other
+values are wrapped (`w<S>`). -/
 def genFnConv (src dst : RR.Ty) : LowerM Unit := do
   let name := s!"l2r_fconv_{src.enc}_{dst.enc}"
   let wrapped := RR.Expr.ctor (RR.fnTypeName dst) (some (fnVariantName (.wrap src))) #[.var "l2rf"]
-  let back := FnVariant.wrap dst
-  let body : RR.Expr :=
-    if ((← get).fnVariants.getD src #[]).contains back then
-      .mtch (.var "l2rf") #[
-        { ty := RR.fnTypeName src, ctor := some (fnVariantName back), binders := #[some "l2rg"], body := .ofExpr (.var "l2rg") },
-        { ty := RR.fnTypeName src, ctor := none, binders := #[], body := .ofExpr wrapped }]
-    else wrapped
+  let mut arms : Array RR.Arm := #[]
+  for v in (← get).fnVariants.getD src #[] do
+    let .wrap r := v | continue
+    let some e ← tryCoerce (.var "l2rg") r dst | continue
+    arms := arms.push { ty := RR.fnTypeName src, ctor := some (fnVariantName v), binders := #[some "l2rg"], body := .ofExpr e }
+  let body : RR.Expr := if arms.isEmpty then wrapped
+    else .mtch (.var "l2rf") (arms.push { ty := RR.fnTypeName src, ctor := none, binders := #[], body := .ofExpr wrapped })
   let item := RR.Item.fn name #[("l2rf", src)] dst (.ofExpr body)
   modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
 

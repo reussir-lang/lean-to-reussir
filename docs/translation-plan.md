@@ -486,7 +486,11 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   count) means a `[value]` enum (no allocation). One constructor means a
   `struct`. Anything else is an `enum`.
 - **Allocation.** Non-enum types are heap-allocated and reference-counted
-  (`[shared]`), like Lean's.
+  (`[shared]`), like Lean's. A structure with a single relevant field
+  (`ST.Out`, the result of every `BaseIO` call, once the world is gone) is
+  a `[value]` struct instead, as natively Lean represents it by its field,
+  unless that field's type is being translated at the same time (no type
+  contains itself by value).
 - **Field order.** lean2rr orders each constructor's fields by decreasing
   alignment (ties in declaration order), so records have no padding; the
   layout maps each Lean field to its record position, and constructions,
@@ -495,7 +499,12 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   that packing moves.)
 - **Recursion.** Recursive, mutual and nested inductives refer to each
   other's instances; `inductive Rose | node : List Rose → Rose` gives
-  `Rose` and `List_Rose`, defined together.
+  `Rose` and `List_Rose`, defined together. Whether a type is a shared
+  record (so that arrays store it as it is, not in an `ElemBox`) is decided
+  from its constructor shapes before its fields are translated, so
+  `inductive Tree | node (v : Nat) (cs : Array Tree)` holds `RVec<Tree>`,
+  the representation `Array Tree` has everywhere else (also through mutual
+  types, whichever is translated first).
 
 **Function types** become generated shared enums, one per (lowered,
 curried) function type, whose variants say what a value is a partial
@@ -530,8 +539,12 @@ its value is stored as `Box`.
   representation of the same Lean type (for example to `Box → Box`, for
   uniform code that applies it) wraps it once in a `w` variant (§5.3),
   which converts the arguments and the result at each application and
-  calls the function exactly once. So a function value that goes through
-  uniform code and comes back is not wrapped at all.
+  calls the function exactly once. Converting a wrapped value converts the
+  value inside from its own representation instead of wrapping again. So a
+  function value that goes through uniform code and comes back is not
+  wrapped at all (it is the same object), and one read at three
+  representations in a loop (`Nat → Nat`, `Nat → Box`, `Box → Box`)
+  stays one wrapper deep.
 - A partial application has the type of its target with the supplied
   arguments removed. Lambda lifting can give a lifted lambda the result type
   `lcAny` while its closure is used at `Nat × Int → Int`, or the reverse; the
@@ -546,9 +559,10 @@ its value is stored as `Box`.
   two element types, or the result of mapping nothing. Its element step is
   therefore `unreachable`.
 - Between two different inductives with the same constructor shapes, or
-  between `Nat` and an enumeration (only reachable through `unsafeCast`,
-  where Lean's representations coincide), values convert constructor by
-  constructor, or by index. Where no conversion exists at all, lean2rr
+  between an enumeration and `Nat`, a fixed-width integer, `Bool` or
+  another enumeration (only reachable through `unsafeCast`, where Lean's
+  representations coincide), values convert constructor by constructor, or
+  by index. Where no conversion exists at all, lean2rr
   warns and emits a run-time panic for that cast: the program is still
   translated.
 - `Box` costs one allocation per boxing, and appears only on the rare paths
@@ -668,11 +682,32 @@ Erased fields get no binders. Reussir syntax notes: match arms have no
 trailing comma after the last arm, and there is no `else if` (use
 `else { if … }`).
 
-Three shapes help Reussir's token reuse, which gives a cell freed by a
-match to a later construction:
-- An arm that returns the matched value (`simp` turns `node l k r` back
-  into `t`) returns `node(l, k, r)` rebuilt from the fields, so every arm
-  consumes the cell.
+**Cast values.** Mono erases `unsafeCast`, so a `cases` (or a projection)
+can meet a value of another type that Lean represents alike. A value of an
+inductive with the same constructor shapes (§5.1) is matched through its
+own constructors, position by position, and the relevant fields are bound
+by position at their own types (converted only where they are used), so
+the value is not converted as a whole:
+
+```
+match (unsafeCast x : L2) with | .cons h _ => h | .nil => 0     -- x : L1
+    ↦  match x { T_L1::cons(h, _) => h, T_L1::nil => 0 }
+```
+
+A `Nat`, a fixed-width integer or `Bool` matched as an enumeration (and an
+enumeration matched as another one with a different number of
+constructors, or as `Bool`) is converted by index first. A value in `Box`
+is converted to the inductive's uniform instance first. Where no
+conversion exists, lean2rr warns and the match panics when it runs.
+
+An arm that returns the matched value (`simp` turns `node l k r` back
+into `t`) returns that value itself, as natively: the same object, with its
+sharing. Code that stops when `ptrEq` says a step changed nothing (Lean's
+`Expr.replace`, fixpoint loops) depends on it, and a lookup returning an
+existing node must not copy it.
+
+Two shapes help Reussir's token reuse, which gives a cell freed by a match
+to a later construction:
 - In the arm of a constructor without fields, the matched value is that
   constructor (`leaf{}`), which costs nothing to build.
 - In an arm where the matched value stays live because it is stored whole
@@ -1379,9 +1414,14 @@ Answered (Lean):
   then applies the rest: one-argument-at-a-time semantics (§5.3).
 - Pointer equality in `Init`: `Array.mapMono`, `List.mapMono`,
   `withPtrEq` and `ShareCommon` use it only as a shortcut, so "not equal"
-  is safe (lean2rr's `ElemBox`-wrapped values always compare unequal, and
-  the shortcut is just lost). `ST.Ref.ptrEq` is real identity, implemented
-  by `l2r_ref_ptr_eq`.
+  is safe there. Other code stops when `ptrEq` says a step returned its
+  argument itself (`Expr.replace`, fixpoint loops), so a heap value must
+  keep its identity: `ptrAddrUnsafe` of a heap value passed as it is
+  answers its handle pointer (`l2r_ptr_addr_obj`), and a `[value]` struct,
+  represented natively by its field, answers its field's address. Values
+  lean2rr wraps at the call (`Nat`s, enumerations: `ElemBox`) get a fresh
+  number, so they always compare unequal and the shortcut is just lost.
+  `ST.Ref.ptrEq` is real identity, implemented by `l2r_ref_ptr_eq`.
 
 ---
 
@@ -1457,6 +1497,15 @@ Each item says what differs and when.
   so a DAG costs exponential time and memory, and a conversion on every call
   costs O(size) per call. Past the instance caps of §2.6 this can happen
   inside loops. Running out of memory changes the exit status.
+- *A match with an arm that returns the matched value* (a BST insert of a
+  key already present, whose `simp`ed code returns `t` itself) keeps the
+  value live across the match, and Reussir's token reuse then offers the
+  projected fields' releases as reuse donors in the other arms, where they
+  never free anything, instead of the cell the match frees (Reussir bug 7,
+  being fixed in Reussir): the other arms allocate a new node per level. A
+  user BST insert (1e6 keys) takes 3.6-5.6x native time; lean2rr used to
+  rebuild the node from its fields in such arms (0.5-0.8x native), which
+  broke identity and sharing (§5.5).
 - *`Array.map` that changes the representation* (for example
   `(Array.range n).map some`) converts the input to an array of `Box` on
   entry and back on exit (§2.7), so the input, the boxed copy with one box

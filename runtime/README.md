@@ -406,8 +406,11 @@ lean2rr's dev branch (the tests pass with it).
     measured the fresh wrapper, whose memory the next wrapper can reuse:
     the runtime now answers a fresh number for any object whose count is 1
     at the call (it dies with the call, so it equals no other live value)
-    (test `RtPtrAddr`). lean2rr could keep more shortcuts by passing the
-    value's own handle when it has one.
+    (test `RtPtrAddr`). lean2rr passes a heap value's own handle when it has
+    one, to `l2r_ptr_addr_obj`, which answers the pointer whatever the count
+    (the value is the Lean object; `ptrEq a b` may release `a`'s last other
+    reference before `b`'s address is taken), and the field of a `[value]`
+    struct (test `RtPtrEqFix`).
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store `Nat`/`Int`/enum-like values directly; and `mi_free` takes mimalloc's
@@ -422,11 +425,12 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
 - Panics print `backtrace:` and `(stack trace unavailable)` instead of a
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`,
-  `ptrAddrUnsafe` is the handle pointer (or the value's bits for scalars;
-  a fresh, never repeated number for objects referenced only by the call,
-  such as the wrappers lean2rr builds for `Nat`s and structures, so
-  pointer-equality shortcuts are not taken for them; a `PtrSet`/`PtrMap`
-  of such values does not find them again), and
+  `ptrAddrUnsafe` is the handle pointer (the field's for a `[value]`
+  struct; the value's bits for scalars; a fresh, never repeated number for
+  the wrappers lean2rr builds at the call for values that cannot cross the
+  FFI boundary, such as `Nat`s and enumerations, so pointer-equality
+  shortcuts are not taken for them; a `PtrSet`/`PtrMap` of such values
+  does not find them again), and
   `dbgTraceIfShared` of such wrapped values (`Nat`, structures held by
   value) never reports sharing.
 - Everything runs on one thread: tasks run when they are first needed or
