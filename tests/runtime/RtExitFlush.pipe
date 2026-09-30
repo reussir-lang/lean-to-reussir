@@ -1,0 +1,1 @@
+$BIN; echo "exit $?"; cat rtexitflush-global.txt rtexitflush-local.txt

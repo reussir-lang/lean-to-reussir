@@ -1,0 +1,1 @@
+lean2rr has no glue for lean_io_allocprof: it should call the prelude's l2r_io_allocprof_with(msg, act) (runtime/README.md, request 17)
