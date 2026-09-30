@@ -12,7 +12,7 @@ Environment overrides: L2R_REUSSIR (Reussir checkout with build/), L2R_RUSTC
 (the rustc that built Reussir's runtime rlibs), L2R_GMP (path of libgmp.a;
 default: the one shipped with the Lean toolchain).
 """
-import argparse, hashlib, os, subprocess, sys, tempfile
+import argparse, fcntl, hashlib, os, subprocess, sys, tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -70,14 +70,18 @@ def build_leanrt():
     stamp = LEANRT_OUT / "libleanrt.stamp"
     rlib = LEANRT_OUT / "libleanrt.rlib"
     digest = h.hexdigest()
-    if rlib.exists() and stamp.exists() and stamp.read_text() == digest:
-        return rlib
     LEANRT_OUT.mkdir(parents=True, exist_ok=True)
-    run([str(RUSTC), "--edition", "2021", "--crate-type", "rlib", "--crate-name", "leanrt",
-         "-C", "opt-level=3", *NATIVE_FLAGS, "-L", str(rt), "-L", str(deps),
-         str(LEANRT_SRC / "lib.rs"), "-o", str(rlib)])
-    stamp.write_text(digest)
-    return rlib
+    # Concurrent drivers share the output directory: one builds, the others
+    # wait for it and then find the stamp up to date.
+    with open(LEANRT_OUT / "libleanrt.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if rlib.exists() and stamp.exists() and stamp.read_text() == digest:
+            return rlib
+        run([str(RUSTC), "--edition", "2021", "--crate-type", "rlib", "--crate-name", "leanrt",
+             "-C", "opt-level=3", *NATIVE_FLAGS, "-L", str(rt), "-L", str(deps),
+             str(LEANRT_SRC / "lib.rs"), "-o", str(rlib)])
+        stamp.write_text(digest)
+        return rlib
 
 
 def gmp_archive():
