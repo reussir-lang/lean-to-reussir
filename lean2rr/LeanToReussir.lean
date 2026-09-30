@@ -7,3 +7,7 @@ import LeanToReussir.Stats
 import LeanToReussir.Mono
 import LeanToReussir.Pipeline
 import LeanToReussir.Dump
+import LeanToReussir.RR
+import LeanToReussir.LowerBase
+import LeanToReussir.Lower
+import LeanToReussir.Emit

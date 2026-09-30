@@ -262,10 +262,10 @@ def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
     let code ← renameCode code
     modify fun s => { s with decls := s.decls.push { inst with value := .code code } }
 
-/-- Run Stage 1 from `root`. The root instance is `(root, [])`. -/
-def monomorphize (root : Name) (config : MonoConfig := {}) : CoreM (Name × MonoState) := do
-  let act : MonoM Name := do
-    let rootName ← instanceName { decl := root, typeArgs := #[] }
+/-- Run Stage 1 from monomorphic `roots`; returns their instance names. -/
+def monomorphize (roots : Array Name) (config : MonoConfig := {}) : CoreM (Array Name × MonoState) := do
+  let act : MonoM (Array Name) := do
+    let rootNames ← roots.mapM fun r => instanceName { decl := r, typeArgs := #[] }
     repeat
       let s ← get
       if h : s.work.size > 0 then
@@ -273,7 +273,7 @@ def monomorphize (root : Name) (config : MonoConfig := {}) : CoreM (Name × Mono
         modify fun s => { s with work := s.work.pop }
         monoInstance key name
       else break
-    return rootName
+    return rootNames
   act.run { config }
 
 end LeanToReussir

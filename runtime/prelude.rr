@@ -1,0 +1,543 @@
+// lean2rr runtime prelude (minimal bootstrap version).
+//
+// Functions named `lean_*` implement the Lean extern with the same C symbol
+// (see lean.h), on lean2rr's representation types. `l2r_*` functions are
+// primitives used by lean2rr-generated glue.
+
+extern "rust" [{
+    use reussir_rt::rc::Rc;
+    use reussir_rt::collections::vec::Vec as RVecImpl;
+    use std::io::Write;
+    use std::cmp::Ordering;
+
+    // ---- bignum helpers: little-endian base-2^32 limbs, no trailing zeros ----
+    fn big_norm(mut v: Vec<u32>) -> Vec<u32> { while v.last() == Some(&0) { v.pop(); } v }
+    fn big_from_u64(x: u64) -> Vec<u32> { big_norm(vec![x as u32, (x >> 32) as u32]) }
+    fn big_cmp(a: &[u32], b: &[u32]) -> Ordering {
+        if a.len() != b.len() { return a.len().cmp(&b.len()); }
+        for i in (0..a.len()).rev() { if a[i] != b[i] { return a[i].cmp(&b[i]); } }
+        Ordering::Equal
+    }
+    fn big_add(a: &[u32], b: &[u32]) -> Vec<u32> {
+        let n = a.len().max(b.len());
+        let mut r = Vec::with_capacity(n + 1);
+        let mut carry = 0u64;
+        for i in 0..n {
+            let s = *a.get(i).unwrap_or(&0) as u64 + *b.get(i).unwrap_or(&0) as u64 + carry;
+            r.push(s as u32); carry = s >> 32;
+        }
+        if carry != 0 { r.push(carry as u32); }
+        big_norm(r)
+    }
+    // a - b, requires a >= b
+    fn big_sub(a: &[u32], b: &[u32]) -> Vec<u32> {
+        let mut r = Vec::with_capacity(a.len());
+        let mut borrow = 0i64;
+        for i in 0..a.len() {
+            let mut d = a[i] as i64 - *b.get(i).unwrap_or(&0) as i64 - borrow;
+            if d < 0 { d += 1i64 << 32; borrow = 1; } else { borrow = 0; }
+            r.push(d as u32);
+        }
+        big_norm(r)
+    }
+    fn big_mul(a: &[u32], b: &[u32]) -> Vec<u32> {
+        if a.is_empty() || b.is_empty() { return Vec::new(); }
+        let mut r = vec![0u32; a.len() + b.len()];
+        for i in 0..a.len() {
+            let mut carry = 0u64;
+            for j in 0..b.len() {
+                let t = a[i] as u64 * b[j] as u64 + r[i + j] as u64 + carry;
+                r[i + j] = t as u32; carry = t >> 32;
+            }
+            let mut k = i + b.len();
+            while carry != 0 { let t = r[k] as u64 + carry; r[k] = t as u32; carry = t >> 32; k += 1; }
+        }
+        big_norm(r)
+    }
+    fn big_divmod_small(a: &[u32], d: u32) -> (Vec<u32>, u32) {
+        let mut q = vec![0u32; a.len()];
+        let mut rem = 0u64;
+        for i in (0..a.len()).rev() {
+            let cur = (rem << 32) | a[i] as u64;
+            q[i] = (cur / d as u64) as u32; rem = cur % d as u64;
+        }
+        (big_norm(q), rem as u32)
+    }
+    fn big_shl1(a: &mut Vec<u32>, bit: u32) {
+        let mut carry = bit;
+        for x in a.iter_mut() { let nc = *x >> 31; *x = (*x << 1) | carry; carry = nc; }
+        if carry != 0 { a.push(carry); }
+    }
+    // (a / b, a % b), b != 0
+    fn big_divmod(a: &[u32], b: &[u32]) -> (Vec<u32>, Vec<u32>) {
+        if big_cmp(a, b) == Ordering::Less { return (Vec::new(), a.to_vec()); }
+        if b.len() == 1 { let (q, r) = big_divmod_small(a, b[0]); return (q, big_norm(vec![r])); }
+        let mut q = vec![0u32; a.len()];
+        let mut r: Vec<u32> = Vec::new();
+        for i in (0..a.len() * 32).rev() {
+            big_shl1(&mut r, (a[i / 32] >> (i % 32)) & 1);
+            r = big_norm(r);
+            if big_cmp(&r, b) != Ordering::Less { r = big_sub(&r, b); q[i / 32] |= 1 << (i % 32); }
+        }
+        (big_norm(q), r)
+    }
+    fn big_to_string(a: &[u32]) -> String {
+        if a.is_empty() { return "0".to_string(); }
+        let mut parts = Vec::new();
+        let mut cur = a.to_vec();
+        while !cur.is_empty() { let (q, r) = big_divmod_small(&cur, 1_000_000_000); parts.push(r); cur = q; }
+        let mut s = parts.last().unwrap().to_string();
+        for p in parts.iter().rev().skip(1) { s.push_str(&format!("{:09}", p)); }
+        s
+    }
+    fn big_of_str(s: &str) -> Vec<u32> {
+        let mut r: Vec<u32> = Vec::new();
+        for c in s.bytes() { r = big_add(&big_mul(&r, &[10]), &big_from_u64((c - b'0') as u64)); }
+        r
+    }
+}];
+
+// ---- runtime types -------------------------------------------------------
+
+// Unit-like values (erased values, `PUnit`, the IO world). Reussir's own
+// `unit` is result-only and cannot be stored or passed.
+enum [value] L2RUnit {
+    u
+}
+
+// A Lean `String`: UTF-8 bytes.
+#[ffi(rust = "::reussir_rt::rc::Rc<::std::vec::Vec<u8>>")]
+pub struct LStr;
+
+// A big natural number (>= 2^64): little-endian 32-bit limbs.
+#[ffi(rust = "::reussir_rt::rc::Rc<::std::vec::Vec<u32>>")]
+pub struct LBig;
+
+// A Lean `Array`: a copy-on-write vector (updated in place when unique).
+#[ffi(rust = "::reussir_rt::collections::vec::Vec")]
+pub struct RVec<T>;
+
+// A Lean `Nat`. Invariant: `Big` only holds values >= 2^64.
+enum [value] Nat {
+    Small(u64),
+    Big(LBig)
+}
+
+// ---- process -------------------------------------------------------------
+
+#[ffi(import)]
+fn l2r_exit(code : u32) -> unit [{
+    let _ = std::io::stdout().flush();
+    std::process::exit(code as i32)
+}];
+
+#[ffi(import)]
+fn l2r_argc() -> u64 [{ (std::env::args().count() as u64).saturating_sub(1) }];
+
+#[ffi(import)]
+fn l2r_argv(i : u64) -> LStr [{
+    Rc::new(std::env::args().nth(i as usize + 1).unwrap_or_default().into_bytes())
+}];
+
+#[ffi(import)]
+fn l2r_uncaught_exception(msg : LStr) -> unit [{
+    let _ = std::io::stdout().flush();
+    eprintln!("uncaught exception: {}", String::from_utf8_lossy(&msg));
+    std::process::exit(1)
+}];
+
+#[ffi(import)]
+fn l2r_unreachable_msg() -> u64 [{
+    eprintln!("INTERNAL PANIC: unreachable code has been reached");
+    std::process::exit(1)
+}];
+
+fn l2r_unreachable<T>() -> T {
+    let ignored = l2r_unreachable_msg();
+    core::intrinsic::panic::panic<T>()
+}
+
+// ---- Nat -----------------------------------------------------------------
+//
+// Fast paths (both operands small, result fits in u64) are plain Reussir
+// code; everything else goes through the bignum helpers.
+
+#[ffi(import)]
+fn l2r_big_of_u64(x : u64) -> LBig [{ Rc::new(big_from_u64(x)) }];
+#[ffi(import)]
+fn l2r_big_add(a : LBig, b : LBig) -> LBig [{ Rc::new(big_add(&a, &b)) }];
+#[ffi(import)]
+fn l2r_big_sub(a : LBig, b : LBig) -> LBig [{
+    if big_cmp(&a, &b) == Ordering::Less { Rc::new(Vec::new()) } else { Rc::new(big_sub(&a, &b)) }
+}];
+#[ffi(import)]
+fn l2r_big_mul(a : LBig, b : LBig) -> LBig [{ Rc::new(big_mul(&a, &b)) }];
+#[ffi(import)]
+fn l2r_big_div(a : LBig, b : LBig) -> LBig [{
+    if b.is_empty() { Rc::new(Vec::new()) } else { Rc::new(big_divmod(&a, &b).0) }
+}];
+#[ffi(import)]
+fn l2r_big_mod(a : LBig, b : LBig) -> LBig [{
+    if b.is_empty() { a } else { Rc::new(big_divmod(&a, &b).1) }
+}];
+#[ffi(import)]
+fn l2r_big_cmp(a : LBig, b : LBig) -> i64 [{
+    match big_cmp(&a, &b) { Ordering::Less => -1, Ordering::Equal => 0, Ordering::Greater => 1 }
+}];
+#[ffi(import)]
+fn l2r_big_fits_u64(a : LBig) -> bool [{ a.len() <= 2 }];
+#[ffi(import)]
+fn l2r_big_low_u64(a : LBig) -> u64 [{
+    (*a.get(0).unwrap_or(&0) as u64) | ((*a.get(1).unwrap_or(&0) as u64) << 32)
+}];
+#[ffi(import)]
+fn l2r_big_to_lstr(a : LBig) -> LStr [{ Rc::new(big_to_string(&a).into_bytes()) }];
+#[ffi(import)]
+fn l2r_big_of_str(s : str) -> LBig [{ Rc::new(big_of_str(&*s)) }];
+
+fn l2r_nat_of_big(b : LBig) -> Nat {
+    if l2r_big_fits_u64(b) { Nat::Small{l2r_big_low_u64(b)} } else { Nat::Big{b} }
+}
+
+fn l2r_nat_to_big(n : Nat) -> LBig {
+    match n {
+        Nat::Small(x) => l2r_big_of_u64(x),
+        Nat::Big(b) => b
+    }
+}
+
+fn lean_cstr_to_nat(s : str) -> Nat { l2r_nat_of_big(l2r_big_of_str(s)) }
+
+fn lean_nat_add(a : Nat, b : Nat) -> Nat {
+    match a {
+        Nat::Small(x) => {
+            match b {
+                Nat::Small(y) => {
+                    let s = x + y;
+                    if s < x { l2r_nat_of_big(l2r_big_add(l2r_big_of_u64(x), l2r_big_of_u64(y))) } else { Nat::Small{s} }
+                },
+                Nat::Big(bb) => l2r_nat_of_big(l2r_big_add(l2r_big_of_u64(x), bb))
+            }
+        },
+        Nat::Big(ba) => l2r_nat_of_big(l2r_big_add(ba, l2r_nat_to_big(b)))
+    }
+}
+
+fn lean_nat_sub(a : Nat, b : Nat) -> Nat {
+    match a {
+        Nat::Small(x) => {
+            match b {
+                Nat::Small(y) => if x < y { Nat::Small{0} } else { Nat::Small{x - y} },
+                Nat::Big(_) => Nat::Small{0}
+            }
+        },
+        Nat::Big(ba) => l2r_nat_of_big(l2r_big_sub(ba, l2r_nat_to_big(b)))
+    }
+}
+
+fn lean_nat_mul(a : Nat, b : Nat) -> Nat {
+    match a {
+        Nat::Small(x) => {
+            match b {
+                Nat::Small(y) => {
+                    if x < 4294967296 {
+                        if y < 4294967296 { Nat::Small{x * y} } else { l2r_nat_mul_slow(a, b) }
+                    } else { l2r_nat_mul_slow(a, b) }
+                },
+                Nat::Big(_) => l2r_nat_mul_slow(a, b)
+            }
+        },
+        Nat::Big(_) => l2r_nat_mul_slow(a, b)
+    }
+}
+
+fn l2r_nat_mul_slow(a : Nat, b : Nat) -> Nat {
+    l2r_nat_of_big(l2r_big_mul(l2r_nat_to_big(a), l2r_nat_to_big(b)))
+}
+
+fn lean_nat_div(a : Nat, b : Nat) -> Nat {
+    match a {
+        Nat::Small(x) => {
+            match b {
+                Nat::Small(y) => if y == 0 { Nat::Small{0} } else { Nat::Small{x / y} },
+                Nat::Big(_) => Nat::Small{0}
+            }
+        },
+        Nat::Big(ba) => l2r_nat_of_big(l2r_big_div(ba, l2r_nat_to_big(b)))
+    }
+}
+
+fn lean_nat_mod(a : Nat, b : Nat) -> Nat {
+    match a {
+        Nat::Small(x) => {
+            match b {
+                Nat::Small(y) => if y == 0 { Nat::Small{x} } else { Nat::Small{x % y} },
+                Nat::Big(_) => Nat::Small{x}
+            }
+        },
+        Nat::Big(ba) => l2r_nat_of_big(l2r_big_mod(ba, l2r_nat_to_big(b)))
+    }
+}
+
+fn lean_nat_pow(a : Nat, b : Nat) -> Nat {
+    match b {
+        Nat::Small(n) => l2r_nat_pow_loop(Nat::Small{1}, a, n),
+        Nat::Big(_) => l2r_unreachable<Nat>()
+    }
+}
+
+// Square-and-multiply: acc * base^n.
+fn l2r_nat_pow_loop(acc : Nat, base : Nat, n : u64) -> Nat {
+    if n == 0 { acc } else {
+        if n % 2 == 1 { l2r_nat_pow_loop(lean_nat_mul(acc, base), lean_nat_mul(base, base), n / 2) }
+        else { l2r_nat_pow_loop(acc, lean_nat_mul(base, base), n / 2) }
+    }
+}
+
+fn l2r_nat_cmp(a : Nat, b : Nat) -> i64 {
+    match a {
+        Nat::Small(x) => {
+            match b {
+                Nat::Small(y) => if x < y { 0 - 1 } else { if x == y { 0 } else { 1 } },
+                Nat::Big(_) => 0 - 1
+            }
+        },
+        Nat::Big(ba) => {
+            match b {
+                Nat::Small(_) => 1,
+                Nat::Big(bb) => l2r_big_cmp(ba, bb)
+            }
+        }
+    }
+}
+
+fn lean_nat_dec_eq(a : Nat, b : Nat) -> bool {
+    match a {
+        Nat::Small(x) => {
+            match b {
+                Nat::Small(y) => x == y,
+                Nat::Big(_) => false
+            }
+        },
+        Nat::Big(_) => l2r_nat_cmp(a, b) == 0
+    }
+}
+
+fn lean_nat_dec_lt(a : Nat, b : Nat) -> bool {
+    match a {
+        Nat::Small(x) => {
+            match b {
+                Nat::Small(y) => x < y,
+                Nat::Big(_) => true
+            }
+        },
+        Nat::Big(_) => l2r_nat_cmp(a, b) < 0
+    }
+}
+
+fn lean_nat_dec_le(a : Nat, b : Nat) -> bool {
+    match a {
+        Nat::Small(x) => {
+            match b {
+                Nat::Small(y) => x <= y,
+                Nat::Big(_) => true
+            }
+        },
+        Nat::Big(_) => l2r_nat_cmp(a, b) <= 0
+    }
+}
+
+fn lean_system_platform_nbits(u : L2RUnit) -> Nat { Nat::Small{64} }
+
+// ---- fixed-width integers ------------------------------------------------
+
+fn lean_uint32_of_nat(a : Nat) -> u32 {
+    match a {
+        Nat::Small(x) => x as u32,
+        Nat::Big(b) => l2r_big_low_u64(b) as u32
+    }
+}
+
+fn lean_uint32_to_nat(x : u32) -> Nat { Nat::Small{x as u64} }
+fn lean_uint32_add(a : u32, b : u32) -> u32 { a + b }
+fn lean_uint32_dec_le(a : u32, b : u32) -> bool { a <= b }
+fn lean_uint32_dec_eq(a : u32, b : u32) -> bool { a == b }
+
+fn lean_usize_of_nat(a : Nat) -> u64 {
+    match a {
+        Nat::Small(x) => x,
+        Nat::Big(b) => l2r_big_low_u64(b)
+    }
+}
+
+// ---- strings -------------------------------------------------------------
+
+#[ffi(import)]
+fn lean_mk_string(s : str) -> LStr [{ Rc::new((*s).as_bytes().to_vec()) }];
+
+#[ffi(import)]
+fn lean_string_of_usize(n : u64) -> LStr [{ Rc::new(n.to_string().into_bytes()) }];
+
+#[ffi(import)]
+fn lean_string_append(a : LStr, b : LStr) -> LStr [{
+    let mut a = a;
+    Rc::make_mut(&mut a).extend_from_slice(&b);
+    a
+}];
+
+#[ffi(import)]
+fn lean_string_push(s : LStr, c : u32) -> LStr [{
+    let mut s = s;
+    let ch = char::from_u32(c).unwrap_or('A');
+    let mut buf = [0u8; 4];
+    Rc::make_mut(&mut s).extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+    s
+}];
+
+#[ffi(import)]
+fn lean_string_utf8_byte_size_u64(s : LStr) -> u64 [{ s.len() as u64 }];
+
+fn lean_string_utf8_byte_size(s : LStr) -> Nat { Nat::Small{lean_string_utf8_byte_size_u64(s)} }
+
+// `String.Pos.Raw.get`: the character starting at byte `p`, or the default
+// character 'A' when `p` is not the start of a character (Lean's model,
+// `utf8GetAux`).
+#[ffi(import)]
+fn l2r_string_utf8_get(s : LStr, p : u64) -> u32 [{
+    let b: &[u8] = &s;
+    let p = p as usize;
+    if p >= b.len() || (b[p] & 0xC0) == 0x80 { return 65; }
+    match std::str::from_utf8(&b[p..]).ok().and_then(|t| t.chars().next()) {
+        Some(c) => c as u32,
+        None => 65,
+    }
+}];
+
+fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 {
+    match p {
+        Nat::Small(i) => l2r_string_utf8_get(s, i),
+        Nat::Big(_) => 65
+    }
+}
+
+// `String.Pos.Raw.set`: replace the character starting at byte `p`; the
+// string is unchanged when `p` is not the start of a character.
+#[ffi(import)]
+fn l2r_string_utf8_set(s : LStr, p : u64, c : u32) -> LStr [{
+    let p = p as usize;
+    let valid = { let b: &[u8] = &s; p < b.len() && (b[p] & 0xC0) != 0x80 };
+    if !valid { return s; }
+    let (old_len, ch) = {
+        let b: &[u8] = &s;
+        let t = std::str::from_utf8(&b[p..]).unwrap_or("");
+        (t.chars().next().map(|c| c.len_utf8()).unwrap_or(1), char::from_u32(c).unwrap_or('A'))
+    };
+    let mut s = s;
+    let mut buf = [0u8; 4];
+    let enc = ch.encode_utf8(&mut buf).as_bytes().to_vec();
+    Rc::make_mut(&mut s).splice(p..p + old_len, enc);
+    s
+}];
+
+fn lean_string_utf8_set(s : LStr, p : Nat, c : u32) -> LStr {
+    match p {
+        Nat::Small(i) => l2r_string_utf8_set(s, i, c),
+        Nat::Big(_) => s
+    }
+}
+
+// `String.decodeChar` / `String.Pos.next` on a position known to be valid.
+#[ffi(import)]
+fn l2r_string_utf8_get_fast(s : LStr, p : u64) -> u32 [{
+    let b: &[u8] = &s;
+    let p = p as usize;
+    std::str::from_utf8(&b[p..]).ok().and_then(|t| t.chars().next()).map(|c| c as u32).unwrap_or(65)
+}];
+
+#[ffi(import)]
+fn l2r_string_utf8_next_fast(s : LStr, p : u64) -> u64 [{
+    let b: &[u8] = &s;
+    let c = b[p as usize];
+    let n = if c < 0x80 { 1 } else if c < 0xE0 { 2 } else if c < 0xF0 { 3 } else { 4 };
+    p + n
+}];
+
+fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 {
+    match p {
+        Nat::Small(i) => l2r_string_utf8_get_fast(s, i),
+        Nat::Big(_) => 65
+    }
+}
+
+fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat {
+    match p {
+        Nat::Small(i) => Nat::Small{l2r_string_utf8_next_fast(s, i)},
+        Nat::Big(_) => p
+    }
+}
+
+// ---- arrays --------------------------------------------------------------
+
+#[ffi(import)]
+fn l2r_array_empty<T>() -> RVec<T> [{ RVecImpl::new() }];
+
+#[ffi(import)]
+fn l2r_array_push<T>(v : RVec<T>, x : T) -> RVec<T> [{ v.push(x) }];
+
+#[ffi(import)]
+fn l2r_array_size<T>(v : RVec<T>) -> u64 [{ v.len() as u64 }];
+
+#[ffi(import)]
+fn l2r_array_get<T>(v : RVec<T>, i : u64) -> T [{ v.get(i as usize).unwrap() }];
+
+fn lean_array_get_size<T>(v : RVec<T>) -> Nat { Nat::Small{l2r_array_size(v)} }
+
+fn lean_array_fget<T>(v : RVec<T>, i : Nat) -> T {
+    match i {
+        Nat::Small(k) => l2r_array_get(v, k),
+        Nat::Big(_) => l2r_unreachable<T>()
+    }
+}
+
+// ---- streams -------------------------------------------------------------
+
+#[ffi(import)]
+fn l2r_stream_putStr(fd : u64, s : LStr) -> u64 [{
+    if fd == 2 { let _ = std::io::stderr().write_all(&s); } else { let _ = std::io::stdout().write_all(&s); }
+    0
+}];
+
+#[ffi(import)]
+fn l2r_stream_write(fd : u64, b : RVec<u8>) -> u64 [{
+    let mut out: std::vec::Vec<u8> = std::vec::Vec::new();
+    let mut i = 0usize;
+    while let Some(x) = b.get(i) { out.push(x); i += 1; }
+    if fd == 2 { let _ = std::io::stderr().write_all(&out); } else { let _ = std::io::stdout().write_all(&out); }
+    0
+}];
+
+#[ffi(import)]
+fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{
+    use std::io::Read;
+    let mut buf = vec![0u8; n as usize];
+    let k = if fd == 0 { std::io::stdin().read(&mut buf).unwrap_or(0) } else { 0 };
+    let mut v = RVecImpl::new();
+    for x in &buf[..k] { v = v.push(*x); }
+    v
+}];
+
+#[ffi(import)]
+fn l2r_stream_getLine(fd : u64) -> LStr [{
+    let mut line = String::new();
+    if fd == 0 { let _ = std::io::stdin().read_line(&mut line); }
+    Rc::new(line.into_bytes())
+}];
+
+#[ffi(import)]
+fn l2r_stream_isTty(fd : u64) -> bool [{ false }];
+
+#[ffi(import)]
+fn l2r_stream_flush(fd : u64) -> u64 [{
+    if fd == 2 { let _ = std::io::stderr().flush(); } else { let _ = std::io::stdout().flush(); }
+    0
+}];
