@@ -1061,6 +1061,48 @@ def stderrPutFn : LowerM RR.Item := do
   return .fn "l2r_stderr_put" #[("s", sTy)] u64
     ⟨#[("cur", some st, .call getFn #[] #[]), ("r", some t, r)], .atom "0"⟩
 
+/-- `l2r_eq_<T>(a, b)`: structural equality on generated type `tn` whose
+fields are `tn` itself, strings, `Nat`s or scalars (`Lean.Name.beq`,
+`lean_name_eq`: the same constructor and equal fields; a name's cached hash
+is compared first). `none` for other field types. -/
+partial def structEqFn (tn : String) : LowerM (Option String) := do
+  let name := s!"l2r_eq_{tn}"
+  if (← get).fns.any (fun | .fn n .. => n == name | _ => false) then return some name
+  let some info := (← get).typeInfos[tn]? | return none
+  let fieldEq (t : RR.Ty) (x y : String) : Option RR.Expr :=
+    match t with
+    | .named n =>
+      if n == tn then some (.call name #[] #[.var x, .var y])
+      else if n == "LStr" then some (.call "lean_string_dec_eq" #[] #[.var x, .var y])
+      else if n == "Nat" then some (.call "lean_nat_dec_eq" #[] #[.var x, .var y])
+      else if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "bool"] then some (.atom s!"{x} == {y}")
+      else none
+    | _ => none
+  let mut arms := #[]
+  for c in info.ctorOrder do
+    let some l := info.ctors.find? c | continue
+    let tys := l.posTys
+    let xs := (List.range tys.size).toArray.map fun i => s!"ea{i}"
+    let ys := (List.range tys.size).toArray.map fun i => s!"eb{i}"
+    -- Scalars first, the recursive field last.
+    let order := (List.range tys.size).toArray.qsort fun i j =>
+      let rank (k : Nat) := if tys[k]! == .named tn then 2 else if tys[k]! matches .named "LStr" | .named "Nat" then 1 else 0
+      rank i < rank j
+    let mut body : RR.Expr := .atom "true"
+    for i in order.reverse do
+      let some e := fieldEq tys[i]! xs[i]! ys[i]! | return none
+      body := if body matches .atom "true" then e else .ite e (.ofExpr body) (.ofExpr (.atom "false"))
+    let tyName := match info.shape with | .struct => tn | _ => tn
+    let inner := RR.Expr.mtch (.var "b") #[
+      { ty := tyName, ctor := if info.shape == .struct then none else some l.variant,
+        binders := ys.map some, body := .ofExpr body },
+      { ty := tyName, ctor := none, binders := #[], body := .ofExpr (.atom "false") }]
+    arms := arms.push { ty := tyName, ctor := some l.variant, binders := xs.map some, body := .ofExpr inner : RR.Arm }
+  if info.shape == .struct then return none
+  let item := RR.Item.fn name #[("a", .named tn), ("b", .named tn)] .bool (.ofExpr (.mtch (.var "a") arms))
+  modify fun s => { s with fns := s.fns.push item }
+  return some name
+
 /-- A generated function folding a Lean `List` into an accumulator:
 `go(l, acc)` = `acc` extended with every element via `step(acc, x)`. Cached
 by name. -/
@@ -1451,6 +1493,11 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     return some (.block ⟨#[(e, some (.named "u64"), .call prim #[] #[args[0]!])],
       .call "l2r_unreachable" #[rt] #[]⟩)
   | _ => pure ()
+  -- `Lean.Name.beq`: structural equality (see `structEqFn`).
+  if (← externSymbol orig) == "lean_name_eq" then
+    let .named tn ← lowerType params[0]! | return none
+    let some f ← structEqFn tn | return none
+    return some (.call f #[] #[args[0]!, args[1]!])
   -- `ByteSlice.beq`: the runtime compares the fields `byteArray`, `start`,
   -- `stop` of both slices.
   if (← externSymbol orig) == "lean_byteslice_beq" then

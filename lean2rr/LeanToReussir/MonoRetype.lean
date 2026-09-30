@@ -69,8 +69,8 @@ def sameHead (a b : Expr) : Bool :=
 /-- First-order matching of `pat` against `target`, where the placeholder
 free variables `holes` stand for unknown inductive parameters; records
 their assignments. -/
-partial def matchTy (holes : Array FVarId) (pat target : Expr) (assign : Array (Option Expr)) :
-    Array (Option Expr) :=
+partial def matchTy (holes : Array FVarId) (pat target : Expr) (assign : Array (Option Expr))
+    (strict : Bool := false) : Array (Option Expr) :=
   let pat := pat.consumeMData
   let target := target.consumeMData
   match pat with
@@ -78,16 +78,28 @@ partial def matchTy (holes : Array FVarId) (pat target : Expr) (assign : Array (
     match holes.idxOf? id with
     | some i =>
       match assign[i]! with
-      | none => if target.isErased || target == anyExpr then assign else assign.set! i (some target)
-      | some _ => assign
+      -- `strict`: an argument whose type leaves the parameter unknown
+      -- (`lcAny`) may hold values of any representation (uniform code,
+      -- `unsafeCast`), so the parameter is not determined either.
+      | none =>
+        if target.isErased then assign
+        else if target == anyExpr then (if strict then assign.set! i (some anyExpr) else assign)
+        else assign.set! i (some target)
+      -- Two arguments disagree about the parameter (`List.cons` of an
+      -- `α × Nat` onto a list of `α × String`, as `unsafeCast` can make
+      -- them): it is not determined (`lcAny` marks the conflict).
+      | some a =>
+        if target.isErased || a == target then assign
+        else if target == anyExpr && !strict then assign
+        else assign.set! i (some anyExpr)
     | none => assign
   | .app .. =>
     if target.isApp && sameHead pat.getAppFn target.getAppFn && pat.getAppNumArgs == target.getAppNumArgs then
-      (pat.getAppArgs.zip target.getAppArgs).foldl (fun a (p, t) => matchTy holes p t a) assign
+      (pat.getAppArgs.zip target.getAppArgs).foldl (fun a (p, t) => matchTy holes p t a strict) assign
     else assign
   | .forallE _ d b _ =>
     match target with
-    | .forallE _ d' b' _ => matchTy holes b b' (matchTy holes d d' assign)
+    | .forallE _ d' b' _ => matchTy holes b b' (matchTy holes d d' assign strict) strict
     | _ => assign
   | _ => assign
 
@@ -149,7 +161,7 @@ def ctorAppType (ctor : Name) (argTys : Array Expr) (known : Option Expr := none
     match ty.headBeta with
     | .forallE _ d b _ =>
       if let some argTy := argTys[i]? then
-        assign := matchTy holes d argTy assign
+        assign := matchTy holes d argTy assign (strict := true)
       ty := b.instantiate1 anyExpr
       i := i + 1
     | _ => break
@@ -157,7 +169,7 @@ def ctorAppType (ctor : Name) (argTys : Array Expr) (known : Option Expr := none
     let k := k.consumeMData.headBeta
     if sameHead k.getAppFn (.const c.induct []) && k.getAppNumArgs == c.numParams then
       assign := assign.zipIdx.map fun (a, i) => a <|> some k.getAppArgs[i]!
-  if assign.any Option.isNone then return none
+  if assign.any (fun a => a.isNone || a == some anyExpr) then return none
   let indTy := mkAppN (.const c.induct []) (assign.map Option.get!)
   return some (← toMonoTypeKeep indTy)
 
