@@ -8,6 +8,8 @@
 # Per-test inputs, all optional, next to NAME.lean:
 #   NAME.args   command-line arguments (one line, split by the shell)
 #   NAME.stdin  standard input
+#   NAME.pipe   a bash command line to run instead ($BIN = executable,
+#               $ARGS = arguments; pipefail), e.g. `$BIN | head -1`
 #   NAME.xfail  the test is known to fail through lean2rr; the file says why
 #               (a "Requests for lean2rr" item in runtime/README.md)
 #
@@ -27,6 +29,30 @@ else
   for f in "$HERE"/Rt*.lean; do TESTS+=("$(basename "$f" .lean)"); done
 fi
 
+# Run executable $1 of test $t in $d with its args/stdin (or its NAME.pipe
+# command line, where $BIN is the executable and $ARGS the arguments; run by
+# bash with pipefail), killing it after 120 s; results in $2.{out,err,code}.
+run_one() {
+  local bin=$1 p=$2
+  (
+    cd "$d" || exit
+    export LEAN_BACKTRACE=0
+    if [ -f "$HERE/$t.pipe" ]; then
+      BIN=$bin ARGS="$args" bash -o pipefail -c "$(cat "$HERE/$t.pipe")" < "$stdin" > "$p.out" 2> "$p.err" &
+    else
+      # shellcheck disable=SC2086
+      $bin $args < "$stdin" > "$p.out" 2> "$p.err" &
+    fi
+    local pid=$!
+    ( sleep 120; kill -9 "$pid" 2> /dev/null ) &
+    local watch=$!
+    wait "$pid" 2> /dev/null
+    echo $? > "$p.code"
+    kill "$watch" 2> /dev/null
+    wait "$watch" 2> /dev/null
+  )
+}
+
 pass=0; fail=0; xfail=0; xpass=0; failed=()
 for t in "${TESTS[@]}"; do
   t=${t%.lean}
@@ -44,10 +70,8 @@ for t in "${TESTS[@]}"; do
         > "$d/build-l2r.log" 2>&1; then
     status=fail; why="lean2rr build failed (see $d/build-l2r.log)"
   else
-    # shellcheck disable=SC2086
-    (cd "$d" && LEAN_BACKTRACE=0 ./native $args < "$stdin" > native.out 2> native.err; echo $? > native.code)
-    # shellcheck disable=SC2086
-    (cd "$d" && LEAN_BACKTRACE=0 timeout 120 ./l2r $args < "$stdin" > l2r.out 2> l2r.err; echo $? > l2r.code)
+    run_one ./native native
+    run_one ./l2r l2r
     for k in out err code; do
       if ! cmp -s "$d/native.$k" "$d/l2r.$k"; then
         status=fail; why="$why $k differs (diff $d/native.$k $d/l2r.$k);"

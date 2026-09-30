@@ -1,1 +1,0 @@
-lean2rr: the generated entry should run l2r_main_body through leanrt::rt::run_main (Lean's stack size and "Stack overflow detected. Aborting." report) instead of its own std::thread (request 13 in runtime/README.md)

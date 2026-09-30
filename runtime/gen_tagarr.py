@@ -123,7 +123,7 @@ fn lean_mk_empty_{k}arr() -> {T} {{ l2r_{k}arr_empty() }}
 
 fn lean_mk_empty_{k}arr_with_capacity(n : Nat) -> {T} {{
     match n {{
-        Nat::Small(c) => l2r_{k}arr_with_capacity(c),
+        Nat::Small(c) => if (c >> 63) == 0 {{ l2r_{k}arr_with_capacity(c) }} else {{ l2r_internal_panic_at<{T}>(4) }},
         Nat::Big(_) => l2r_internal_panic_at<{T}>(4)
     }}
 }}

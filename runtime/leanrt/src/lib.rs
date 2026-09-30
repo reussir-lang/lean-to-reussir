@@ -55,40 +55,68 @@ fn rc_drop_last<T>(r: reussir_rt::rc::Rc<T>) {
 /// `backtrace:` and a stack trace unless `LEAN_BACKTRACE=0`; we print the
 /// header and no frames (tests compare stderr with backtraces removed).
 /// `LEAN_ABORT_ON_PANIC` aborts, as natively.
+///
+/// Output order as `lean_panic_impl`: normally the lines go through Lean's
+/// (unbuffered) stderr stream; with `LEAN_ABORT_ON_PANIC` they go to
+/// `std::cerr`, which is tied to `std::cout` and so flushes stdout first,
+/// and the process then aborts.
 #[inline(never)]
 pub fn panic_msg(msg: &[u8]) {
     let abort = std::env::var_os("LEAN_ABORT_ON_PANIC").is_some();
-    let mut line = msg.to_vec();
-    line.push(b'\n');
-    io::write_stderr(&line);
-    let bt = std::env::var("LEAN_BACKTRACE").map(|v| v != "0").unwrap_or(true);
-    if bt {
-        io::write_stderr(b"backtrace:\n(stack trace unavailable)\n");
-    }
     if abort {
         io::flush_stdout();
+    }
+    let mut line = msg.to_vec();
+    line.push(b'\n');
+    io::eprint(&line);
+    let bt = std::env::var("LEAN_BACKTRACE").map(|v| v != "0").unwrap_or(true);
+    if bt {
+        io::eprint(b"backtrace:\n(stack trace unavailable)\n");
+    }
+    if abort {
         std::process::abort();
     }
 }
 
-/// `lean_internal_panic`: `INTERNAL PANIC: msg`, then exit 1.
+/// `lean_internal_panic`: `INTERNAL PANIC: msg` straight to stderr, then
+/// `exit(1)` (which flushes stdout afterwards), or `abort()` without flushing
+/// under `LEAN_ABORT_ON_PANIC`.
 #[inline(never)]
 pub fn internal_panic(msg: &str) -> ! {
-    io::flush_stdout();
-    io::write_stderr(format!("INTERNAL PANIC: {}\n", msg).as_bytes());
+    io::eprint(format!("INTERNAL PANIC: {}\n", msg).as_bytes());
     if std::env::var_os("LEAN_ABORT_ON_PANIC").is_some() {
         std::process::abort();
     }
-    std::process::exit(1)
+    io::exit(1)
 }
 
-/// An uncaught `IO` exception at the top level.
+/// An uncaught `IO` exception at the top level: printed with `std::cerr`
+/// (which flushes stdout first), exit status 1.
 #[inline(never)]
 pub fn uncaught_exception(msg: &[u8]) -> ! {
     io::flush_stdout();
     let mut line = b"uncaught exception: ".to_vec();
     line.extend_from_slice(msg);
     line.push(b'\n');
-    io::write_stderr(&line);
-    std::process::exit(1)
+    io::eprint(&line);
+    io::exit(1)
+}
+
+/// `Option.getOrBlock!` on `none` (`Promise.result!` of a dropped promise):
+/// a forced panic message (to `std::cerr`, so stdout is flushed first), then
+/// block forever, as natively.
+#[inline(never)]
+pub fn promise_dropped() -> ! {
+    io::flush_stdout();
+    io::eprint(b"PANIC: Promise.result!: promise has been dropped without ever being resolved\n");
+    let bt = std::env::var("LEAN_BACKTRACE").map(|v| v != "0").unwrap_or(true);
+    if bt {
+        io::eprint(b"backtrace:\n(stack trace unavailable)\n");
+    }
+    if std::env::var_os("LEAN_ABORT_ON_PANIC").is_some() {
+        std::process::abort();
+    }
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
 }

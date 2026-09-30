@@ -96,6 +96,7 @@ fn l2r_internal_panic(code : u64) -> u64 [{
         3 => "Nat.shiftr exponent is too big",
         4 => "out of memory",
         5 => "executed 'sorry'",
+        6 => "integer overflow in runtime computation",
         _ => "internal error",
     })
 }];
@@ -1871,7 +1872,7 @@ fn l2r_string_next_while(s : LStr, p : u32 -> bool, i : u64, n : u64) -> u64 {
 #[ffi(import)]
 fn l2r_array_empty<T>() -> RVec<T> [{ leanrt::array::empty() }];
 #[ffi(import)]
-fn l2r_array_with_capacity<T>(n : u64) -> RVec<T> [{ leanrt::array::with_capacity(n.min(1 << 24) as usize) }];
+fn l2r_array_with_capacity<T>(n : u64, elem : u64) -> RVec<T> [{ leanrt::array::with_capacity_checked(n, elem) }];
 #[ffi(import)]
 fn l2r_array_size<T>(v : RVec<T>) -> u64 [{ { let r = leanrt::array::size(&v); leanrt::array::release(v); r } }];
 // Element `i`, which must be in bounds.
@@ -1898,12 +1899,16 @@ fn l2r_array_reverse<T>(v : RVec<T>) -> RVec<T> [{ leanrt::array::reverse(v) }];
 
 fn lean_mk_empty_array<T>() -> RVec<T> { l2r_array_empty<T>() }
 
-fn lean_mk_empty_array_with_capacity<T>(n : Nat) -> RVec<T> {
+// A capacity that is not a Lean scalar (>= 2^63) is an out-of-memory panic;
+// `elem` is the native element size (for Lean's allocation-size checks).
+fn l2r_mk_empty_with_capacity<T>(n : Nat, elem : u64) -> RVec<T> {
     match n {
-        Nat::Small(k) => l2r_array_with_capacity<T>(k),
+        Nat::Small(k) => if (k >> 63) == 0 { l2r_array_with_capacity<T>(k, elem) } else { l2r_internal_panic_at<RVec<T>>(4) },
         Nat::Big(_) => l2r_internal_panic_at<RVec<T>>(4)
     }
 }
+
+fn lean_mk_empty_array_with_capacity<T>(n : Nat) -> RVec<T> { l2r_mk_empty_with_capacity<T>(n, 8) }
 
 fn lean_array_get_size<T>(v : RVec<T>) -> Nat { Nat::Small{l2r_array_size(v)} }
 fn lean_array_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
@@ -2052,7 +2057,7 @@ fn lean_mk_empty_natarr() -> LNatArr { l2r_natarr_empty() }
 
 fn lean_mk_empty_natarr_with_capacity(n : Nat) -> LNatArr {
     match n {
-        Nat::Small(c) => l2r_natarr_with_capacity(c),
+        Nat::Small(c) => if (c >> 63) == 0 { l2r_natarr_with_capacity(c) } else { l2r_internal_panic_at<LNatArr>(4) },
         Nat::Big(_) => l2r_internal_panic_at<LNatArr>(4)
     }
 }
@@ -2187,7 +2192,7 @@ fn lean_mk_empty_intarr() -> LIntArr { l2r_intarr_empty() }
 
 fn lean_mk_empty_intarr_with_capacity(n : Nat) -> LIntArr {
     match n {
-        Nat::Small(c) => l2r_intarr_with_capacity(c),
+        Nat::Small(c) => if (c >> 63) == 0 { l2r_intarr_with_capacity(c) } else { l2r_internal_panic_at<LIntArr>(4) },
         Nat::Big(_) => l2r_internal_panic_at<LIntArr>(4)
     }
 }
@@ -2252,7 +2257,7 @@ fn l2r_intarr_to_list_go<L>(a : LIntArr, i : u64, acc : L, cons : Int -> (L -> L
 
 // ---- ByteArray (RVec<u8>) ----
 
-fn lean_mk_empty_byte_array(n : Nat) -> RVec<u8> { lean_mk_empty_array_with_capacity<u8>(n) }
+fn lean_mk_empty_byte_array(n : Nat) -> RVec<u8> { l2r_mk_empty_with_capacity<u8>(n, 1) }
 fn lean_byte_array_size(v : RVec<u8>) -> Nat { Nat::Small{l2r_array_size(v)} }
 fn lean_sarray_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
 fn lean_byte_array_uget(v : RVec<u8>, i : u64) -> u8 { l2r_array_get(v, i) }
@@ -2276,8 +2281,24 @@ fn lean_sarray_dec_eq(a : RVec<u8>, b : RVec<u8>) -> bool [{ { let r = leanrt::a
 fn l2r_byte_array_copy_slice(src : RVec<u8>, so : u64, dest : RVec<u8>, d : u64, len : u64, exact : bool) -> RVec<u8> [{
     leanrt::array::copy_slice(src, so, dest, d, len, exact)
 }];
+// `lean_nat_to_size_t`: values that are not a `size_t` (>= 2^64) are an
+// internal "out of memory" panic.
+fn l2r_nat_to_size_t(n : Nat) -> u64 {
+    match n {
+        Nat::Small(x) => x,
+        Nat::Big(_) => l2r_internal_panic_at<u64>(4)
+    }
+}
+
+// `ByteArray.copySlice`, converting the offsets in C's order (a source
+// offset past the end returns `dest` before the others are looked at).
 fn lean_byte_array_copy_slice(src : RVec<u8>, so : Nat, dest : RVec<u8>, d : Nat, len : Nat, exact : bool) -> RVec<u8> {
-    l2r_byte_array_copy_slice(src, l2r_nat_sat_u64(so), dest, l2r_nat_sat_u64(d), l2r_nat_sat_u64(len), exact)
+    let s = l2r_nat_to_size_t(so);
+    if s > l2r_array_size(src) { dest } else {
+        let n = l2r_nat_to_size_t(len);
+        let o = l2r_nat_to_size_t(d);
+        l2r_byte_array_copy_slice(src, s, dest, o, n, exact)
+    }
 }
 // `ByteArray.mk`/`ByteArray.data` convert from/to `Array UInt8` (`RVec<u8>`
 // too: `UInt8` crosses the boundary unboxed), so they are the identity.
@@ -2286,7 +2307,7 @@ fn lean_byte_array_data(a : RVec<u8>) -> RVec<u8> { a }
 
 // ---- FloatArray (RVec<f64>) ----
 
-fn lean_mk_empty_float_array(n : Nat) -> RVec<f64> { lean_mk_empty_array_with_capacity<f64>(n) }
+fn lean_mk_empty_float_array(n : Nat) -> RVec<f64> { l2r_mk_empty_with_capacity<f64>(n, 8) }
 fn lean_float_array_size(v : RVec<f64>) -> Nat { Nat::Small{l2r_array_size(v)} }
 fn lean_float_array_uget(v : RVec<f64>, i : u64) -> f64 { l2r_array_get(v, i) }
 fn lean_float_array_fget(v : RVec<f64>, i : Nat) -> f64 { l2r_array_get(v, lean_usize_of_nat(i)) }
@@ -2308,13 +2329,16 @@ fn lean_float_array_data(a : RVec<f64>) -> RVec<f64> { a }
 //
 // lean2rr builds each `IO.FS.Stream` field as a closure over these
 // primitives (fd 0 = stdin, 1 = stdout, 2 = stderr). stdout is buffered
-// like C stdio and flushed at exit.
+// like glibc's stdio and flushed at exit. putStr/write/flush/read/getLine
+// record their outcome in the last-error slot (use `l2r_io_finish`, as for
+// files): EPIPE, EBADF, EINVAL on closed streams, EBADF for the wrong
+// direction; isTty cannot fail.
 
 #[ffi(import)]
-fn l2r_stream_putStr(fd : u64, s : LStr) -> u64 [{ { leanrt::io::write_std(fd, &s); leanrt::rc_release(s); 0 } }];
+fn l2r_stream_putStr(fd : u64, s : LStr) -> u64 [{ { if fd == 0 { leanrt::io::wrong_direction(fd) } else { leanrt::io::write_std(fd, &s) }; leanrt::rc_release(s); 0 } }];
 
 #[ffi(import)]
-fn l2r_stream_write(fd : u64, b : RVec<u8>) -> u64 [{ { leanrt::io::write_std(fd, leanrt::array::as_slice(&b)); leanrt::array::release(b); 0 } }];
+fn l2r_stream_write(fd : u64, b : RVec<u8>) -> u64 [{ { if fd == 0 { leanrt::io::wrong_direction(fd) } else { leanrt::io::write_std(fd, leanrt::array::as_slice(&b)) }; leanrt::array::release(b); 0 } }];
 
 #[ffi(import)]
 fn l2r_stream_flush(fd : u64) -> u64 [{ { leanrt::io::flush_std(fd); 0 } }];
@@ -2322,7 +2346,7 @@ fn l2r_stream_flush(fd : u64) -> u64 [{ { leanrt::io::flush_std(fd); 0 } }];
 #[ffi(import)]
 fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{
     {
-        let bytes = if fd == 0 { leanrt::io::read_stdin(n as usize) } else { std::vec::Vec::new() };
+        let bytes = if fd == 0 { leanrt::io::read_stdin(n as usize) } else { leanrt::io::wrong_direction(fd); std::vec::Vec::new() };
         leanrt::array::bytes_of_string(Rc::new(bytes))
     }
 }];
@@ -2330,7 +2354,7 @@ fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{
 #[ffi(import)]
 fn l2r_stream_getLine(fd : u64) -> LStr [{
     {
-        let bytes = if fd == 0 { leanrt::io::read_line_stdin() } else { std::vec::Vec::new() };
+        let bytes = if fd == 0 { leanrt::io::read_line_stdin() } else { leanrt::io::wrong_direction(fd); std::vec::Vec::new() };
         leanrt::string::from_bytes_lossy(&bytes)
     }
 }];
@@ -2338,8 +2362,21 @@ fn l2r_stream_getLine(fd : u64) -> LStr [{
 #[ffi(import)]
 fn l2r_stream_isTty(fd : u64) -> bool [{ leanrt::io::is_tty(fd) }];
 
-// `IO.eprint`/`IO.eprintln` helpers (also used for `dbgTrace`).
+// `IO.eprintln` helper.
 fn l2r_eprintln(s : LStr) -> u64 { l2r_stream_putStr(2, lean_string_push(s, 10)) }
+
+// A runtime diagnostic line (`dbgTrace`, `timeit`, `allocprof`) on stderr:
+// write errors are ignored and the last-error slot is left alone.
+#[ffi(import)]
+fn l2r_diag_println(s : LStr) -> u64 [{
+    {
+        let mut line = s.to_vec();
+        line.push(10);
+        leanrt::io::eprint(&line);
+        leanrt::rc_release(s);
+        0
+    }
+}];
 
 // ===========================================================================
 // ST.Ref / IO.Ref
@@ -2393,6 +2430,44 @@ fn l2r_ref_take<T>(r : LRef<T>) -> T [{
     }
 }];
 
+// An empty cell, and whether a cell is empty.
+#[ffi(import)]
+fn l2r_ref_empty<T>() -> LRef<T> [{ leanrt::array::from_rc(leanrt::alloc::rc_new(leanrt::alloc::vec_with_capacity(1))) }];
+
+#[ffi(import)]
+fn l2r_ref_is_empty<T>(r : LRef<T>) -> bool [{
+    { let c = leanrt::array::into_rc(r); let e = c.is_empty(); leanrt::rc_release(c); e }
+}];
+
+// ---- IO.Promise (`IO.Promise α` as `LRef<E>`, empty until resolved) ----
+//
+// Tasks run eagerly (translation plan §6), so reading a promise's result
+// happens after every resolution that can precede it; an unresolved promise
+// reads as dropped (`none`).
+
+fn l2r_promise_new<T>() -> LRef<T> { l2r_ref_empty<T>() }
+
+// `Promise.resolve v p`: only the first resolution counts.
+fn l2r_promise_resolve<T>(v : T, p : LRef<T>) -> L2RUnit {
+    let r = if l2r_ref_is_empty(p) { l2r_ref_set(p, v) } else { 0 };
+    L2RUnit::u{}
+}
+
+// `Promise.result?` (the task's value; lean2rr wraps it in its `Task`).
+fn l2r_promise_result_with<T, O>(p : LRef<T>, none : O, some : T -> O) -> O {
+    if l2r_ref_is_empty(p) { none } else { some(l2r_ref_get(p)) }
+}
+
+// `Option.getOrBlock!` on `none`: Lean's forced panic message, then block
+// forever (as natively).
+#[ffi(import)]
+fn l2r_promise_dropped() -> u64 [{ leanrt::promise_dropped() }];
+
+fn l2r_option_get_or_block_none<T>() -> T {
+    let ignored = l2r_promise_dropped();
+    l2r_unreachable<T>()
+}
+
 #[ffi(import)]
 fn l2r_ref_ptr_eq<T>(a : LRef<T>, b : LRef<T>) -> bool [{
     {
@@ -2413,6 +2488,7 @@ fn l2r_once_has(slot : u64) -> bool [{ leanrt::once::has(slot) }];
 #[ffi(import)]
 fn l2r_once_get<T>(slot : u64) -> T [{
     {
+        assert!(::std::mem::size_of::<[:T:]>() <= ::std::mem::size_of::<usize>());
         let raw = leanrt::once::get_raw(slot);
         let p: ::std::mem::ManuallyDrop<[:T:]> = unsafe { ::std::mem::transmute_copy(&raw) };
         (*p).clone()
@@ -2433,18 +2509,64 @@ fn l2r_once_set<T>(slot : u64, v : T) -> T [{
     }
 }];
 
+// Mutable global cells (e.g. the current standard streams for
+// `IO.setStdout`/`setStderr`/`setStdin`), in the same slot numbering as the
+// once-cells: `l2r_once_has`/`l2r_once_get` read them, `l2r_once_set`
+// initializes them, and `l2r_cell_swap` replaces the value and returns the
+// previous one.
+#[ffi(import)]
+fn l2r_cell_swap<T>(slot : u64, v : T) -> T [{
+    {
+        assert!(::std::mem::size_of::<[:T:]>() <= ::std::mem::size_of::<usize>());
+        let keep = ::std::mem::ManuallyDrop::new(v);
+        let mut raw: usize = 0;
+        unsafe {
+            ::std::ptr::copy_nonoverlapping(&*keep as *const [:T:] as *const u8, &mut raw as *mut usize as *mut u8, ::std::mem::size_of::<[:T:]>())
+        };
+        let old = leanrt::once::swap_raw(slot, raw);
+        let p: [:T:] = unsafe { ::std::mem::transmute_copy(&old) };
+        p
+    }
+}];
+
 // ===========================================================================
 // Thunks, tasks, debugging, platform
 
 // `dbgTrace msg f`: print `msg` to stderr, then `f ()`.
 fn lean_dbg_trace<T>(msg : LStr, f : L2RUnit -> T) -> T {
-    let ignored = l2r_eprintln(msg);
+    let ignored = l2r_diag_println(msg);
     f(L2RUnit::u{})
 }
 
-// `dbgTraceIfShared`: this runtime does not track sharing observably; the
-// value is returned unchanged.
-fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T { a }
+// `dbgTraceIfShared msg a`: prints `shared RC <msg>` when `a` is a heap
+// object whose reference count is not 1 (scalars never are). Reference-counted
+// storage types (runtime handles and Reussir records) have their u32 count at
+// offset 0 of the object they point to. Nullary constructors are Reussir
+// immediates, scalars in Lean: a pointer with a nonzero top byte (the `tbi`
+// encoding) or to a dummy box with an immortal count (>= 2^31).
+#[ffi(import)]
+fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
+    {
+        let name = ::std::any::type_name::<[:T:]>();
+        let boxed = name.starts_with("reussir_rt::") && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
+        let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
+        let shared = boxed && (p >> 56) == 0 && {
+            let c = unsafe { *(p as *const u32) };
+            c != 1 && c < 0x8000_0000
+        };
+        if shared {
+            let mut line = b"shared RC ".to_vec();
+            line.extend_from_slice(&msg);
+            line.push(b'\n');
+            leanrt::io::eprint(&line);
+        }
+        leanrt::rc_release(msg);
+        a
+    }
+}];
+
+// `Void.mk` (`runST`'s initial world): the world has no representation.
+fn lean_void_mk<T>(x : T) -> L2RUnit { L2RUnit::u{} }
 
 fn lean_dbg_stack_trace<T>(f : L2RUnit -> T) -> T { f(L2RUnit::u{}) }
 
@@ -2634,12 +2756,107 @@ fn l2r_fs_real_path(p : LStr) -> LStr [{ { let r = leanrt::fs::real_path(&p); le
 fn l2r_fs_read_dir(p : LStr) -> RVec<LStr> [{
     { let v = leanrt::fs::read_dir(&p); leanrt::rc_release(p); leanrt::array::from_rc(Rc::new(v)) }
 }];
-// `System.FilePath.metadata` (`follow`) / `symlinkMetadata`: [accessed sec,
-// accessed nsec, modified sec, modified nsec, byteSize, type] with type the
-// `IO.FS.FileType` constructor index (dir, file, symlink, other).
+// `System.FilePath.metadata` (`follow`) / `symlinkMetadata`: [accessed sec
+// (i64 bits), accessed nsec, modified sec (i64 bits), modified nsec,
+// byteSize, type, numLinks] with type the `IO.FS.FileType` constructor index
+// (dir, file, symlink, other).
 #[ffi(import)]
 fn l2r_fs_metadata(p : LStr, follow : bool) -> RVec<u64> [{
     { let v = leanrt::fs::metadata(&p, follow); leanrt::rc_release(p); leanrt::array::from_rc(Rc::new(v.to_vec())) }
+}];
+// `Handle.isEof` / `Handle.isTty` are `BaseIO` (they cannot fail): payload
+// primitives named after the extern symbols.
+#[ffi(import)]
+fn l2r_io_prim_handle_is_eof(h : LHandle) -> bool [{ { let r = leanrt::fs::is_eof(&h); leanrt::rc_release(h); r } }];
+#[ffi(import)]
+fn l2r_io_prim_handle_is_tty(h : LHandle) -> bool [{ { let r = leanrt::fs::is_tty(&h); leanrt::rc_release(h); r } }];
+// `IO.currentDir` / `IO.appPath` (user errors) and
+// `IO.Process.getCurrentDir` / `setCurrentDir` (errno errors).
+#[ffi(import)]
+fn l2r_fs_current_dir() -> LStr [{ leanrt::fs::current_dir() }];
+#[ffi(import)]
+fn l2r_fs_app_path() -> LStr [{ leanrt::fs::app_path() }];
+#[ffi(import)]
+fn l2r_fs_process_get_current_dir() -> LStr [{ leanrt::fs::process_current_dir() }];
+#[ffi(import)]
+fn l2r_fs_process_set_current_dir(p : LStr) -> u64 [{ { leanrt::fs::set_current_dir(&p); leanrt::rc_release(p); 0 } }];
+// `IO.FS.createTempFile : IO (Handle × FilePath)`: the handle, then (on
+// success) `l2r_fs_temp_file_path()` is the new file's path.
+// `IO.FS.createTempDir : IO FilePath`.
+#[ffi(import)]
+fn l2r_fs_create_tempfile() -> LHandle [{ leanrt::fs::create_temp_file() }];
+#[ffi(import)]
+fn l2r_fs_temp_file_path() -> LStr [{ leanrt::fs::temp_file_path() }];
+#[ffi(import)]
+fn l2r_fs_create_tempdir() -> LStr [{ leanrt::fs::create_temp_dir() }];
+
+// `timeit msg act` (`lean_io_timeit`): run the IO action (`f` applied to
+// the world), then print `msg <t>ms` (or `<t>s` from one second on, 3
+// significant digits as C++'s `setprecision(3)`) to stderr.
+#[ffi(import)]
+fn l2r_timeit_start() -> u64 [{
+    {
+        let mut ts = [0i64; 2];
+        extern "C" { fn clock_gettime(clk: i32, ts: *mut i64) -> i32; }
+        unsafe { clock_gettime(1, ts.as_mut_ptr()) };
+        (ts[0] as u64) * 1000000000 + (ts[1] as u64)
+    }
+}];
+
+#[ffi(import)]
+fn l2r_timeit_report(msg : LStr, start : u64) -> u64 [{
+    {
+        let mut ts = [0i64; 2];
+        extern "C" { fn clock_gettime(clk: i32, ts: *mut i64) -> i32; fn snprintf(b: *mut u8, n: usize, f: *const u8, ...) -> i32; }
+        unsafe { clock_gettime(1, ts.as_mut_ptr()) };
+        let now = (ts[0] as u64) * 1000000000 + (ts[1] as u64);
+        let secs = (now.saturating_sub(start)) as f64 / 1e9;
+        let (v, unit) = if secs < 1.0 { (secs * 1000.0, "ms") } else { (secs, "s") };
+        let mut buf = [0u8; 64];
+        let n = unsafe { snprintf(buf.as_mut_ptr(), 64, b"%.3g\0".as_ptr(), v) };
+        // Native prints `string_cstr(msg)`: up to the first NUL.
+        let cut = msg.iter().position(|&b| b == 0).unwrap_or(msg.len());
+        let mut line = msg[..cut].to_vec();
+        line.push(b' ');
+        line.extend_from_slice(&buf[..(n.max(0) as usize).min(63)]);
+        line.extend_from_slice(unit.as_bytes());
+        line.push(b'\n');
+        leanrt::rc_release(msg);
+        leanrt::io::eprint(&line);
+        0
+    }
+}];
+
+fn l2r_io_timeit_with<R>(msg : LStr, act : L2RUnit -> R) -> R {
+    let t = l2r_timeit_start();
+    let r = act(L2RUnit::u{});
+    let ignored = l2r_timeit_report(msg, t);
+    r
+}
+
+// Tasks run eagerly, so every task has finished: `IO.getTaskState t`
+// (`TaskState` constructors passed in) and `IO.cancel t`.
+fn l2r_io_get_task_state_with<T, S>(t : T, waiting : S, running : S, finished : S) -> S { finished }
+fn l2r_io_cancel<T>(t : T) -> L2RUnit { L2RUnit::u{} }
+
+// `allocprof msg act`: runs the action, then prints what a Lean runtime
+// built without `RUNTIME_STATS` prints.
+fn l2r_io_allocprof_with<R>(msg : LStr, act : L2RUnit -> R) -> R {
+    let r = act(L2RUnit::u{});
+    let ignored = l2r_allocprof_report(msg);
+    r
+}
+
+#[ffi(import)]
+fn l2r_allocprof_report(msg : LStr) -> u64 [{
+    {
+        let cut = msg.iter().position(|&b| b == 0).unwrap_or(msg.len());
+        let mut out = msg[..cut].to_vec();
+        out.extend_from_slice(b"\nAllocation profiling data is not available, compile lean using `-D RUNTIME_STATS=ON`\n\n");
+        leanrt::rc_release(msg);
+        leanrt::io::eprint(&out);
+        0
+    }
 }];
 
 // `IO.getEnv name : BaseIO (Option String)`.

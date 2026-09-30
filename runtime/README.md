@@ -120,13 +120,15 @@ lean2rr wraps its result with `wrapIOResult`: `l2r_io_mono_ms_now()`,
 `l2r_io_mono_nanos_now()`, `l2r_io_get_random_bytes(n)`,
 `l2r_io_process_get_pid()`, `l2r_io_get_num_heartbeats()`,
 `l2r_io_check_canceled()`, `l2r_io_get_tid()`, `l2r_io_initializing()`,
-`l2r_io_set_heartbeats(n)`, `l2r_io_app_path()`, `l2r_io_current_dir()`,
-`l2r_io_process_get_current_dir()`, `l2r_runtime_mark_persistent<T>(a)`,
+`l2r_io_set_heartbeats(n)`, `l2r_runtime_mark_persistent<T>(a)`,
 `l2r_runtime_mark_multi_threaded<T>(a)`, `l2r_runtime_forget<T>(a)`,
-`l2r_runtime_hold<T>(a)`. References: `l2r_ref_new/get/set/swap/take/ptr_eq`.
+`l2r_runtime_hold<T>(a)`, `l2r_io_prim_handle_is_eof(h)`,
+`l2r_io_prim_handle_is_tty(h)`. (`l2r_io_app_path()`, `l2r_io_current_dir()`
+and `l2r_io_process_get_current_dir()` are infallible stand-ins for the
+fallible primitives below.) References: `l2r_ref_new/get/set/swap/take/ptr_eq`.
 
-**Fallible IO** (files): primitives `l2r_fs_*` record their outcome in a
-global last-error slot; the glue is
+**Fallible IO** (files, standard streams): primitives record their outcome
+in a global last-error slot; the glue is
 
     let v = l2r_fs_open(path, modeIndex);
     l2r_io_finish(v, |v| EST.Out.ok(v), |kind| |errno| |fname| |details| mkError)
@@ -148,17 +150,50 @@ constructor (exported Lean functions) numbered `kind`, as Lean's
 | 8 | `resource_exhausted_file(fname, errno, details)` | 20 | `time_expired(errno, details)` |
 | 9 | `inappropriate_type(errno, details)` | 21 | `resource_busy(errno, details)` |
 | 10 | `inappropriate_type_file(fname, errno, details)` | 22 | `unsupported_operation(errno, details)` |
-| 11 | `no_such_thing(errno, details)` | | |
+| 11 | `no_such_thing(errno, details)` | 23 | `IO.userError(details)` |
+
+The operations Lean implements with libuv (`removeFile`, `hardLink`,
+`metadata`, `symlinkMetadata`, `createTempFile`, `createTempDir`) report
+errors as `decode_uv_error`: the errno is libuv's negated errno as a
+`UInt32` (`4294967294` for `ENOENT`), the details are `uv_strerror`'s, and
+errnos libuv does not map are kind 0. Kind 23 is Lean's
+`io_result_mk_error(msg)` (`IO.currentDir`, `IO.appPath`).
 
 File primitives: `l2r_fs_open(path, mode)` (mode = `IO.FS.Mode` constructor
 index), `l2r_fs_put_str`, `l2r_fs_write`, `l2r_fs_flush`, `l2r_fs_read(h, n)`,
-`l2r_fs_get_line`, `l2r_fs_is_tty`, `l2r_fs_rewind`, `l2r_fs_truncate`,
+`l2r_fs_get_line`, `l2r_fs_rewind`, `l2r_fs_truncate`,
 `l2r_fs_lock(h, exclusive)`, `l2r_fs_try_lock`, `l2r_fs_unlock`,
 `l2r_fs_remove_file`, `l2r_fs_create_dir`, `l2r_fs_remove_dir`,
-`l2r_fs_rename`, `l2r_fs_hard_link`, `l2r_fs_set_access_rights`,
-`l2r_fs_real_path`, `l2r_fs_read_dir(p) -> RVec<LStr>` (names in `readdir`
-order), `l2r_fs_metadata(p, follow) -> RVec<u64>` ([atime s, ns, mtime s,
-ns, size, `FileType` index]).
+`l2r_fs_rename`, `l2r_fs_hard_link`, `l2r_fs_set_access_rights` (for
+`lean_chmod`), `l2r_fs_real_path`, `l2r_fs_read_dir(p) -> RVec<LStr>` (names
+in `readdir` order), `l2r_fs_metadata(p, follow) -> RVec<u64>` ([atime s,
+ns, mtime s, ns, size, `FileType` index, numLinks]; the seconds are `i64`
+bit patterns), `l2r_fs_current_dir()`, `l2r_fs_app_path()`,
+`l2r_fs_process_get_current_dir()`, `l2r_fs_process_set_current_dir(p)`,
+`l2r_fs_create_tempfile() -> LHandle` (then `l2r_fs_temp_file_path()` is
+its path, for the `Handle × FilePath` pair), `l2r_fs_create_tempdir()`.
+Handles behave as glibc `FILE`s: `st_blksize` write buffers filled and
+flushed as `fwrite` does, `EBADF` at once for the wrong direction, sticky
+end-of-file and error indicators (after any failed operation on a handle,
+`getLine` fails, as natively), and every open handle is flushed at exit.
+
+Standard-stream primitives (`fd` = 0 stdin, 1 stdout, 2 stderr; the fields
+of `IO.FS.Stream`): `l2r_stream_putStr(fd, s)`, `l2r_stream_write(fd, b)`,
+`l2r_stream_flush(fd)`, `l2r_stream_read(fd, n)` and
+`l2r_stream_getLine(fd)` record their outcome like the file primitives
+(`EPIPE`, `EBADF` for the wrong direction, `EINVAL` on streams that were
+closed at startup); `l2r_stream_isTty(fd)` cannot fail.
+
+**Other glue primitives.**
+
+| Lean | primitives |
+|---|---|
+| `initialize`, closed terms | once-cells `l2r_once_has(slot)`, `l2r_once_get<T>(slot)`, `l2r_once_set<T>(slot, v)` |
+| `IO.setStdout`/`setStderr`/`setStdin` | a cell per stream: `l2r_once_*` plus `l2r_cell_swap<T>(slot, v) -> T` (returns the previous value) |
+| `IO.Promise α` (as `LRef<E>`) | `l2r_promise_new<T>()`, `l2r_promise_resolve<T>(v, p)` (first wins), `l2r_promise_result_with<T, O>(p, none, some)`, `l2r_option_get_or_block_none<T>()` (`Promise.result!` of a dropped promise: Lean's message, then blocks) |
+| `IO.getTaskState`, `IO.cancel` | `l2r_io_get_task_state_with<T, S>(t, waiting, running, finished)`, `l2r_io_cancel<T>(t)` |
+| `timeit`, `allocprof` | `l2r_io_timeit_with<R>(msg, act)`, `l2r_io_allocprof_with<R>(msg, act)` |
+| `Void.mk` | `lean_void_mk<T>(x)` |
 
 **Main thread.** `leanrt::rt::run_main(|| body())` runs the program on a
 thread with a 1 GiB stack and Lean's stack-overflow report (a fault in the
@@ -206,6 +241,37 @@ lean2rr's dev branch (the tests pass with it).
     own `std::thread` (Lean's stack size incl. `LEAN_STACK_SIZE_KB` and
     `LEAN_MAIN_USE_THREAD`, and Lean's stack-overflow message; test
     `RtStack`).
+14. The standard-stream glue should check each `l2r_stream_*` call with
+    `l2r_io_finish`, as for files (tests `RtBrokenPipe`, `RtClosedStreams`).
+15. `lean_io_prim_handle_is_tty` and `lean_io_prim_handle_is_eof` are
+    `BaseIO`: the `lean_io_prim_handle_` prefix rule sends them to the
+    fallible glue, which rejects them ("IO result ... cannot fail"). Use the
+    BaseIO payloads `l2r_io_prim_handle_is_tty`/`_is_eof` (test
+    `RtHandleIsTty`).
+16. `ST.Prim.Ref.take` is lowered to `l2r_ref_get`, so the value stays in
+    the cell and the taken copy is shared: every `modify`/`modifyGet`
+    copies the array or string it updates (quadratic loops). Map it to
+    `l2r_ref_take`.
+17. `allocprof` (`lean_io_allocprof`) has no glue: use
+    `l2r_io_allocprof_with(msg, act)` (test `RtAllocProf`); likewise
+    `timeit` → `l2r_io_timeit_with`.
+18. `lean_chmod` (`IO.setAccessRights`) is not a fallible IO symbol yet; its
+    primitive is `l2r_fs_set_access_rights(p, mode)`.
+19. Glue for `IO.FS.createTempFile` (`l2r_fs_create_tempfile` then
+    `l2r_fs_temp_file_path` for the pair) and `IO.FS.createTempDir`
+    (`l2r_fs_create_tempdir`).
+20. `IO.currentDir`, `IO.appPath` can fail with a user error (kind 23), and
+    `IO.Process.getCurrentDir`/`setCurrentDir` with errno errors: use
+    `l2r_fs_current_dir`, `l2r_fs_app_path`,
+    `l2r_fs_process_get_current_dir`, `l2r_fs_process_set_current_dir`
+    with `l2r_io_finish`; kind 23 needs `IO.userError`.
+21. Once `setStderr` is supported: native `panic!` (outside
+    `LEAN_ABORT_ON_PANIC`), `dbgTrace`, `timeit` and `allocprof` print to
+    the *current* stderr stream (`io_eprintln`); the runtime prints them to
+    descriptor 2. Internal panics, uncaught exceptions and abort-mode panics
+    do go to descriptor 2 natively.
+22. `String.mk`/`List.asString` (`lean_string_mk`) take a `List Char`: glue
+    folding the list with `lean_string_push` onto `lean_mk_string("")`.
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store `Nat`/`Int`/enum-like values directly; and `mi_free` takes mimalloc's
@@ -221,16 +287,24 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`,
   `ptrAddrUnsafe` is the handle pointer (or the value's bits for scalars).
-- Tasks run eagerly; `IO.Process.spawn`, sockets, `Std.Sync`, timers and
-  promises are not implemented.
+- Tasks run eagerly (promises are resolved before they are read);
+  `IO.Process.spawn`, sockets, `Std.Sync` and timers are not implemented.
+- `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
+  `dbgStackTrace` prints nothing.
+- Huge `Array.mkEmpty`/`ByteArray.emptyWithCapacity` capacities are checked
+  as natively (overflow panic; `out of memory` when `malloc` of the full
+  size fails) but only `2^24` elements are reserved.
+- The C `errno` reported by a handle's sticky error indicator (see file
+  primitives) is the runtime's current `errno`, which may differ from
+  native after unrelated failing calls.
 
 ## Testing
 
 `tests/runtime/run.sh [NAME...]` builds every `tests/runtime/Rt*.lean`
 natively (`lean` + `leanc -O3 -DNDEBUG`, like Lake's release build) and
 through lean2rr, runs both (`LEAN_BACKTRACE=0`, optional `NAME.args` and
-`NAME.stdin`), and compares stdout, stderr and the exit code byte for byte.
-`NAME.xfail` marks tests blocked by a lean2rr request. The Rust unit tests
-of `leanrt` (bignums, tagged arrays, hashes) run with
-`rustc --test runtime/leanrt/src/lib.rs` linked against GMP (see
-`tests/runtime/run.sh` header).
+`NAME.stdin`; `NAME.pipe` is a shell command line run instead, with `$BIN`
+the program, for redirections and pipes), and compares stdout, stderr and
+the exit code byte for byte. `NAME.xfail` marks tests blocked by a lean2rr
+request. The Rust unit tests of `leanrt` (bignums, tagged arrays, hashes)
+run with `tests/runtime/leanrt-unit.sh`.

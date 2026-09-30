@@ -40,6 +40,11 @@ const SA_SIGINFO: i32 = 4;
 const SA_ONSTACK: i32 = 0x0800_0000;
 const SC_PAGESIZE: i32 = 30;
 const ALTSTACK_SIZE: usize = 1 << 16;
+const PROT_NONE: i32 = 0;
+const PROT_READ: i32 = 1;
+const PROT_WRITE: i32 = 2;
+const MAP_PRIVATE: i32 = 0x02;
+const MAP_ANONYMOUS: i32 = 0x20;
 
 extern "C" {
     fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
@@ -49,15 +54,24 @@ extern "C" {
     fn pthread_attr_getstack(attr: *const [u64; 16], addr: *mut *mut c_void, size: *mut usize) -> i32;
     fn pthread_attr_destroy(attr: *mut [u64; 16]) -> i32;
     fn sysconf(name: i32) -> i64;
+    fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
+    fn mprotect(addr: *mut c_void, len: usize, prot: i32) -> i32;
     fn abort() -> !;
     fn write(fd: i32, buf: *const c_void, n: usize) -> isize;
 }
 
-/// `is_within_stack_guard`: the page just below the current thread's stack.
-unsafe fn is_within_stack_guard(addr: usize) -> bool {
+/// The guard page just below the Lean thread's stack, `[lo, hi)`, computed
+/// when the handler is installed (`pthread_getattr_np` is not
+/// async-signal-safe; there is one Lean thread).
+struct Guard(std::cell::UnsafeCell<(usize, usize)>);
+unsafe impl Sync for Guard {}
+static GUARD: Guard = Guard(std::cell::UnsafeCell::new((0, 0)));
+
+/// `is_within_stack_guard` of `stack_overflow.cpp`, for the current thread.
+unsafe fn current_stack_guard() -> (usize, usize) {
     let mut attr = [0u64; 16];
     if unsafe { pthread_getattr_np(pthread_self(), &mut attr) } != 0 {
-        return false;
+        return (0, 0);
     }
     let mut stackaddr: *mut c_void = std::ptr::null_mut();
     let mut size = 0usize;
@@ -65,14 +79,16 @@ unsafe fn is_within_stack_guard(addr: usize) -> bool {
         pthread_attr_getstack(&attr, &mut stackaddr, &mut size);
         pthread_attr_destroy(&mut attr);
     }
-    let guard = unsafe { sysconf(SC_PAGESIZE) } as usize;
+    let page = unsafe { sysconf(SC_PAGESIZE) } as usize;
     let lo = stackaddr as usize;
-    lo.wrapping_sub(guard) <= addr && addr < lo
+    (lo.wrapping_sub(page), lo)
 }
 
 extern "C" fn segv_handler(signum: i32, info: *mut SigInfo, _ctx: *mut c_void) {
     unsafe {
-        if is_within_stack_guard((*info).si_addr as usize) {
+        let (lo, hi) = *GUARD.0.get();
+        let addr = (*info).si_addr as usize;
+        if lo <= addr && addr < hi {
             let msg = b"\nStack overflow detected. Aborting.\n";
             write(2, msg.as_ptr() as *const c_void, msg.len());
             abort();
@@ -88,9 +104,14 @@ extern "C" fn segv_handler(signum: i32, info: *mut SigInfo, _ctx: *mut c_void) {
 /// stack-overflow handler (process-wide, replacing Rust's own report).
 pub fn install_stack_overflow_handler() {
     unsafe {
-        let sp = std::alloc::alloc(std::alloc::Layout::from_size_align(ALTSTACK_SIZE, 16).unwrap());
-        if !sp.is_null() {
-            let ss = StackT { ss_sp: sp as *mut c_void, ss_flags: 0, ss_size: ALTSTACK_SIZE };
+        *GUARD.0.get() = current_stack_guard();
+        // The alternate stack gets its own guard page (as Rust's std does),
+        // so overflowing it faults instead of corrupting memory.
+        let page = sysconf(SC_PAGESIZE) as usize;
+        let base = mmap(std::ptr::null_mut(), page + ALTSTACK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if base as isize != -1 {
+            mprotect(base, page, PROT_NONE);
+            let ss = StackT { ss_sp: (base as usize + page) as *mut c_void, ss_flags: 0, ss_size: ALTSTACK_SIZE };
             sigaltstack(&ss, std::ptr::null_mut());
         }
         for sig in [SIGSEGV, SIGBUS] {
@@ -109,19 +130,68 @@ pub fn install_stack_overflow_handler() {
 /// targets, or `LEAN_STACK_SIZE_KB` (rounded down to 4 KiB) plus a
 /// 128 KiB buffer.
 fn main_stack_size() -> usize {
-    if let Some(kb) = std::env::var("LEAN_STACK_SIZE_KB").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
-        let sz = (kb / 4 * 4 * 1024) as usize;
+    if let Some(v) = std::env::var_os("LEAN_STACK_SIZE_KB") {
+        let kb = strtoull10(std::os::unix::ffi::OsStrExt::as_bytes(v.as_os_str()));
+        let sz = (kb / 4 * 4).wrapping_mul(1024) as usize;
         if sz > 0 {
-            return sz + 128 * 1024;
+            return sz.saturating_add(128 * 1024);
         }
     }
     1 << 30
+}
+
+/// C's `strtoull(s, nullptr, 10)`: leading white space, an optional sign
+/// (`-` negates modulo 2^64), then decimal digits up to the first other
+/// character; saturates at 2^64 - 1.
+fn strtoull10(s: &[u8]) -> u64 {
+    let mut i = 0;
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
+        i += 1;
+    }
+    let neg = i < s.len() && s[i] == b'-';
+    if i < s.len() && (s[i] == b'-' || s[i] == b'+') {
+        i += 1;
+    }
+    let mut v: u64 = 0;
+    let mut overflow = false;
+    while i < s.len() && s[i].is_ascii_digit() {
+        match v.checked_mul(10).and_then(|x| x.checked_add((s[i] - b'0') as u64)) {
+            Some(x) => v = x,
+            None => overflow = true,
+        }
+        i += 1;
+    }
+    if overflow {
+        return u64::MAX;
+    }
+    if neg { v.wrapping_neg() } else { v }
+}
+
+extern "C" {
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn epoll_create1(flags: i32) -> i32;
+}
+
+/// Native Lean's runtime opens several descriptors at startup (libuv's
+/// epoll/eventfd/pipes); when stdin, stdout or stderr is closed, the lowest
+/// of them takes its place, and reading or writing that stream then fails
+/// with `EINVAL` (not `EBADF`). Occupy closed standard descriptors with
+/// epoll descriptors so the same errors arise here.
+pub fn occupy_closed_std_fds() {
+    const F_GETFD: i32 = 1;
+    const EPOLL_CLOEXEC: i32 = 0o2000000;
+    for fd in 0..3 {
+        if unsafe { fcntl(fd, F_GETFD) } < 0 {
+            unsafe { epoll_create1(EPOLL_CLOEXEC) };
+        }
+    }
 }
 
 /// Run the program's main body as Lean does (`lean_run_main`): on a thread
 /// with Lean's main stack size (unless `LEAN_MAIN_USE_THREAD=0`), with
 /// Lean's stack-overflow report, and wait for it.
 pub fn run_main<F: FnOnce() + Send + 'static>(body: F) {
+    occupy_closed_std_fds();
     if std::env::var("LEAN_MAIN_USE_THREAD").map(|v| v == "0").unwrap_or(false) {
         install_stack_overflow_handler();
         body();

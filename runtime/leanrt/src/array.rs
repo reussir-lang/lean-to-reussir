@@ -84,6 +84,50 @@ pub fn with_capacity<T: Clone>(n: usize) -> RVec<T> {
     from_rc(rc_new(vec_with_capacity(n)))
 }
 
+/// Capacities up to this many elements are reserved as asked; larger ones
+/// are checked (`check_alloc`) but reserved only this far.
+pub const CAPACITY_CAP: u64 = 1 << 24;
+
+/// Lean's allocation of an array object of `n` elements of `elem` bytes
+/// (`lean_alloc_array`, `lean_alloc_sarray`): `24 + elem * n` bytes, where
+/// an overflow is the internal panic `integer overflow in runtime
+/// computation` and a failed `malloc` is `out of memory`.
+#[inline(always)]
+pub fn check_alloc(n: u64, elem: u64) {
+    if n > CAPACITY_CAP {
+        check_alloc_slow(n, elem)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn check_alloc_slow(n: u64, elem: u64) {
+    extern "C" {
+        fn malloc(n: usize) -> *mut std::ffi::c_void;
+        fn free(p: *mut std::ffi::c_void);
+    }
+    let Some(bytes) = n.checked_mul(elem).and_then(|b| b.checked_add(24)) else {
+        crate::internal_panic("integer overflow in runtime computation")
+    };
+    // Would the native allocation succeed? (It is only reserved, not
+    // touched, so this costs no memory. `black_box` keeps the compiler from
+    // eliding the malloc/free pair.)
+    let p = std::hint::black_box(unsafe { malloc(std::hint::black_box(bytes as usize)) });
+    if p.is_null() {
+        crate::internal_panic("out of memory")
+    }
+    unsafe { free(p) };
+}
+
+/// `Array.mkEmpty n` (and the scalar-array variants, `elem` bytes per
+/// element): Lean's allocation checks, then a capacity of at most
+/// `CAPACITY_CAP` elements.
+#[inline(never)]
+pub fn with_capacity_checked<T: Clone>(n: u64, elem: u64) -> RVec<T> {
+    check_alloc(n, elem);
+    with_capacity(n.min(CAPACITY_CAP) as usize)
+}
+
 #[inline]
 pub fn empty<T: Clone>() -> RVec<T> {
     from_rc(rc_new(Vec::new()))
@@ -200,6 +244,7 @@ fn swap_slow<T: Clone>(mut r: Rc<Vec<T>>, i: u64, j: u64) -> RVec<T> {
 #[inline(never)]
 pub fn replicate<T: Clone>(n: u64, x: T) -> RVec<T> {
     {
+    check_alloc(n, 8);
     let mut v = vec_with_capacity(n as usize);
     v.resize(n as usize, x);
     from_rc(rc_new(v))

@@ -111,13 +111,15 @@ pub fn empty() -> LTagVec {
 
 #[inline(never)]
 pub fn with_capacity(n: u64) -> LTagVec {
-    mk(vec_with_capacity(n.min(1 << 24) as usize))
+    crate::array::check_alloc(n, 8);
+    mk(vec_with_capacity(n.min(crate::array::CAPACITY_CAP) as usize))
 }
 
 /// `n` copies of a small (odd) word.
 #[inline(never)]
 pub fn replicate_word(n: u64, w: u64) -> LTagVec {
     {
+        crate::array::check_alloc(n, 8);
         let mut v = vec_with_capacity(n as usize);
         v.resize(n as usize, w);
         mk(v)
@@ -127,6 +129,7 @@ pub fn replicate_word(n: u64, w: u64) -> LTagVec {
 /// `n` references to one big value.
 #[inline(never)]
 pub fn replicate_big(n: u64, b: LBig) -> LTagVec {
+    crate::array::check_alloc(n, 8);
     let mut v = vec_with_capacity(n as usize);
     for _ in 0..n {
         v.push(big_to_word(b.clone()));

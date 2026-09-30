@@ -83,8 +83,22 @@ fn push_slow(s: LStr, c: u32) -> LStr {
     s
 }
 
-#[inline(never)]
+#[inline(always)]
 pub fn append(a: LStr, b: LStr) -> LStr {
+    let mut a = a;
+    if a.is_unique() {
+        let v = unsafe { a.data_mut() };
+        if v.len() + b.len() <= v.capacity() {
+            v.extend_from_slice(&b);
+            crate::rc_release(b);
+            return a;
+        }
+    }
+    append_slow(a, b)
+}
+
+#[inline(never)]
+fn append_slow(a: LStr, b: LStr) -> LStr {
     if b.is_empty() {
         return a;
     }
