@@ -170,6 +170,9 @@ structure LowerState where
   stdStreamTy : Option RR.Ty := none
   /-- Once-cell slots of constants defined by `initialize`. -/
   initSlots : NameMap Nat := {}
+  /-- Types whose fields are being lowered, and whether they will be
+  boundary types (see `nominalType`). -/
+  pendingBoundary : Std.HashMap String Bool := {}
   /-- Structural conversions being generated (for recursive types). -/
   convsInProgress : Std.HashSet String := {}
   /-- Generated placeholder (`box(0)`) functions, per type. -/
@@ -234,7 +237,10 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
             "LStr", "LBig", "LNatArr", "LIntArr", "LHandle", boxName] then return true
     match (← get).typeInfos[n]? with
     | some info => return info.shape != .enumLike && !info.value
-    | none => return false
+    -- A type whose fields are being lowered: decided from its shape
+    -- beforehand (`nominalType`), so that `Array T` in its own fields has
+    -- the representation it has everywhere else.
+    | none => return ((← get).pendingBoundary[n]?).getD false
   | .app n _ => return n == "RVec" || n == "LRef" || n == "LCell"
   -- A function value is a shared enum.
   | .fn .. => return true
@@ -380,6 +386,36 @@ def fieldAlign (t : RR.Ty) : LowerM Nat := do
     | none => return 8
   | _ => return 8
 
+/-- The type constants `lowerTypeApp` translates itself (not through
+`nominalType`). -/
+def builtinTypeNames : List Name :=
+  [``UInt8, ``UInt16, ``UInt32, ``UInt64, ``USize, ``Float, ``Float32, ``Bool, ``IO.FS.Handle,
+   ``Unit, ``PUnit, ``lcVoid, ``lcErased, ``lcAny, ``Nat, ``Int, ``String, ``Thunk, ``Task,
+   ``ByteArray, ``FloatArray, ``Array]
+
+/-- The key of the generated type for inductive `ival` applied to `args`
+(only relevant arguments distinguish instances). -/
+def nominalKey (ival : InductiveVal) (args : Array Expr) : LowerM Expr := do
+  let rel ← relevanceOf ival.name ival.numParams
+  -- Phantom (irrelevant) arguments do not create distinct types.
+  let keyArgs := (List.range ival.numParams).toArray.map fun i =>
+    if rel.getD i true then (args[i]?.getD anyExpr).consumeMData else erasedExpr
+  return mkAppN (.const ival.name []) keyArgs
+
+/-- Whether mono type `e` translates to a generated nominal type whose
+fields are being lowered (see `nominalType`). -/
+def inProgressType (e : Expr) : LowerM Bool := do
+  let e := e.consumeMData.headBeta
+  let .const n _ := e.getAppFn | return false
+  if builtinTypeNames.contains n then return false
+  let ival? := match (← getEnv).find? (n ++ `_impl), (← getEnv).find? n with
+    | some (.inductInfo iv), _ => some iv
+    | _, some (.inductInfo iv) => if iv.type.getForallBody.isProp then none else some iv
+    | _, _ => none
+  let some ival := ival? | return false
+  let some name := (← get).typeNames[← nominalKey ival e.getAppArgs]? | return false
+  return !(← get).typeInfos.contains name
+
 mutual
   /-- Translate a mono type. -/
   partial def lowerType (e : Expr) : LowerM RR.Ty := do
@@ -440,35 +476,55 @@ mutual
 
   /-- The generated nominal type for an instantiated inductive. -/
   partial def nominalType (ival : InductiveVal) (args : Array Expr) : LowerM RR.Ty := do
-    let rel ← relevanceOf ival.name ival.numParams
-    -- Phantom (irrelevant) arguments do not create distinct types.
-    let keyArgs := (List.range ival.numParams).toArray.map fun i =>
-      if rel.getD i true then (args[i]?.getD anyExpr).consumeMData else erasedExpr
-    let key := mkAppN (.const ival.name []) keyArgs
+    let key ← nominalKey ival args
     if let some n := (← get).typeNames[key]? then return .named n
     let name ← fresh s!"T_{nameHint ival.name}_"
     modify fun s => { s with typeNames := s.typeNames.insert key name, typeKeys := s.typeKeys.insert name key }
-    -- Constructor layouts, fields translated through Lean's own `toMonoTypeKeep`
-    -- so representation decisions (trivial structures, `Decidable`, …) match.
-    let mut ctors : NameMap CtorLayout := {}
-    let mut variants : Array (String × Array RR.Ty) := #[]
+    -- The fields' mono types, through Lean's own `toMonoTypeKeep` so
+    -- representation decisions (trivial structures, `Decidable`, …) match;
+    -- `none` for an erased field.
+    let mut monos : Array (Array (Option Expr)) := #[]
     for ctorName in ival.ctors do
       let ctorTy ← getOtherDeclBaseType ctorName []
       let mut ty ← instantiateForall ctorTy (args[:ival.numParams].toArray.map (·.consumeMData))
-      let mut fields := #[]
-      let mut rrFields := #[]
+      let mut ms := #[]
       repeat
         match ty.headBeta with
         | .forallE _ d b _ =>
           let mono ← toMonoTypeKeep d
-          if mono.isErased || mono == mkConst ``lcVoid then
-            fields := fields.push none
-          else
-            let t ← lowerType mono
-            fields := fields.push (some (rrFields.size, t))
-            rrFields := rrFields.push t
+          ms := ms.push (if mono.isErased || mono == mkConst ``lcVoid then none else some mono)
           ty := b.instantiate1 anyExpr
         | _ => break
+      monos := monos.push ms
+    -- Whether the type will be a boundary type (a shared record), decided
+    -- from its shape before its fields are lowered: a field `Array T` (a
+    -- rose tree's children) must get the storage `Array T` gets everywhere
+    -- else, `RVec<T>` rather than `RVec<ElemBox(T)>`. A one-field structure
+    -- is a `[value]` struct (below) unless its field is of a type whose
+    -- fields are being lowered too.
+    let relCounts := monos.map fun ms => (ms.filter Option.isSome).size +
+      (if ival.name == ``IO.Process.Child then 2 else 0)
+    let predictValue ← do
+      if relCounts.size != 1 || relCounts[0]! != 1 then pure false else
+      match (monos[0]!.filterMap id)[0]? with
+      | some m => pure !(← inProgressType m)
+      | none => pure false
+    let boundary := relCounts.any (· > 0) && !predictValue
+    modify fun s => { s with pendingBoundary := s.pendingBoundary.insert name boundary }
+    -- Constructor layouts.
+    let mut ctors : NameMap CtorLayout := {}
+    let mut variants : Array (String × Array RR.Ty) := #[]
+    for h : ci in [:ival.ctors.length] do
+      let ctorName := ival.ctors[ci]!
+      let mut fields := #[]
+      let mut rrFields := #[]
+      for m in monos[ci]! do
+        match m with
+        | none => fields := fields.push none
+        | some mono =>
+          let t ← lowerType mono
+          fields := fields.push (some (rrFields.size, t))
+          rrFields := rrFields.push t
       -- `IO.Process.Child`: native Lean's object also carries the pid
       -- (`uint32`) and whether the child was spawned with `setsid`
       -- (`uint8`) after its three fields (`src/runtime/process.cpp`). They
@@ -506,7 +562,7 @@ mutual
     -- field must be of a finished type (or a primitive), so that no type
     -- contains itself by value.
     let value ← do
-      if shape != .struct then pure false else
+      if shape != .struct || !predictValue then pure false else
       match variants[0]!.2 with
       | #[.named fn] =>
         if (← get).typeInfos.contains fn then pure true
@@ -519,7 +575,8 @@ mutual
       | .enum => RR.Item.enum name false variants
     modify fun s => { s with
       typeInfos := s.typeInfos.insert name { name, shape, ctors, ctorOrder := ival.ctors.toArray, value }
-      typeItems := s.typeItems.push item }
+      typeItems := s.typeItems.push item
+      pendingBoundary := s.pendingBoundary.erase name }
     return .named name
 end
 

@@ -486,7 +486,11 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   count) means a `[value]` enum (no allocation). One constructor means a
   `struct`. Anything else is an `enum`.
 - **Allocation.** Non-enum types are heap-allocated and reference-counted
-  (`[shared]`), like Lean's.
+  (`[shared]`), like Lean's. A structure with a single relevant field
+  (`ST.Out`, the result of every `BaseIO` call, once the world is gone) is
+  a `[value]` struct instead, as natively Lean represents it by its field,
+  unless that field's type is being translated at the same time (no type
+  contains itself by value).
 - **Field order.** lean2rr orders each constructor's fields by decreasing
   alignment (ties in declaration order), so records have no padding; the
   layout maps each Lean field to its record position, and constructions,
@@ -495,7 +499,12 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   that packing moves.)
 - **Recursion.** Recursive, mutual and nested inductives refer to each
   other's instances; `inductive Rose | node : List Rose → Rose` gives
-  `Rose` and `List_Rose`, defined together.
+  `Rose` and `List_Rose`, defined together. Whether a type is a shared
+  record (so that arrays store it as it is, not in an `ElemBox`) is decided
+  from its constructor shapes before its fields are translated, so
+  `inductive Tree | node (v : Nat) (cs : Array Tree)` holds `RVec<Tree>`,
+  the representation `Array Tree` has everywhere else (also through mutual
+  types, whichever is translated first).
 
 **Function types** become generated shared enums, one per (lowered,
 curried) function type, whose variants say what a value is a partial
