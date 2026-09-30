@@ -1275,6 +1275,11 @@ Each item says what differs and when.
   order among them depends on how its specializer recursed, which the
   `.olean` does not record, and can differ. Visible only when such
   constants trace or panic.
+- *Order of panics in pure code*: when several pure computations panic
+  (`get!` on a short array, an `assert!`), their messages can come out in
+  another order than natively, because Lean's closed-term extraction may
+  group them differently in lean2rr's instances. stdout and results are the
+  same.
 - *Stack depth* in general: frame sizes differ from native, and lean2rr
   adds recursion of its own (structural conversions, the `Array.mk` and
   `String.mk` list folds). The depth at which `Stack overflow detected.
