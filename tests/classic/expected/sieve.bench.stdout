@@ -1,0 +1,4 @@
+primes below 50000000: count=3001134 sum=72619548630277 last=49999991 twins=239101 maxgap=220
+pi(10)=4 pi(100)=25 pi(1000)=168 pi(10000)=1229 pi(100000)=9592 pi(1000000)=78498 pi(10000000)=664579
+trial division mismatches: 0
+spf below 12500000: agree=true omegaSum=47503740 spfSum=4937273667155

@@ -1,0 +1,6 @@
+insert: size=4000000 (n=4000000) sum=21333329333333 ok overwritten=1333334
+lookup: hits=4000000 misses=4000000 ok contains=true false getD=77 get!=6
+erase: size=3200001 ok v1=(some 1000004) v2=(some 70) v5=(some 555) v7=none vnew=(some 42) v10=none
+iterate: keySum=6400004000001 bad=0 ok orderHash=7879266950382891751
+words: distinct=12 total=1000000 agree=ok counts=[(, 82947), (brown, 84015), (dog, 83253), (fox, 83757), (jumps, 83079), (lazy, 82910), (over, 83067), (quick, 83467), (the, 83327), (ünïcode, 83463), (λ, 83401), (日本, 83314)]
+struct keys: size=1002001 ok probe=(some 500500) set=500002 qr=500002 ok gridOrder=5554945504953582802

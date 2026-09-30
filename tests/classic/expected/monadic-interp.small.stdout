@@ -1,0 +1,40 @@
+check collatz: ok (45 statements)
+check primes: ok (48 statements)
+check calls: ok (32 statements)
+check exceptions: ok (48 statements)
+check failing: ok (28 statements)
+check uncaught: ok (28 statements)
+check bad-break: rejected after 26 statements: break outside loop
+transformer order demo: (10, 20)
+collatz:
+  collatz total steps = 59542
+  collatz longest (start*1000+steps) = 871178
+  => ok; steps=244209 calls=0 printed=2 vars=6
+primes:
+  prime count = 168
+  last prime = 997
+  => ok; steps=11055 calls=0 printed=2 vars=5
+calls:
+  fib(18) = 2584
+  sum of gcds = 5530
+  find(1369) = 37
+  find(1370) = -1
+  deep(50) = 50
+  => ok; steps=19134 calls=8613 printed=5 vars=2
+exceptions:
+  exception accumulator = 2886
+  deep(500) caught = -27
+  rethrown = 42
+  unknown function caught = -23
+  => ok; steps=167 calls=100 printed=4 vars=5
+failing:
+  before = 5
+  => runtime error: division by zero; steps=2 calls=0 printed=1 vars=1
+uncaught:
+  => uncaught throw 1004; steps=10 calls=0 printed=0 vars=1
+bad-break:
+  => break outside loop; steps=1 calls=0 printed=0 vars=1
+io: [ok 0, ok 1, caught 'io error 2', ok 3, ok 4, caught 'io error 5']
+in body
+finally ran
+caught after finally: from body

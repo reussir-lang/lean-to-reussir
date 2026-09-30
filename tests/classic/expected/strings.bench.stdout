@@ -1,0 +1,16 @@
+built: length=35341276 bytes=36941276 hash=2793800112865361605
+parsed: lines=1000000 natSum=499999500000 intSum=-3499996500000 words=1000000 floats=1000000 bad=0 chars=34341276 bytes=35941276
+chars: digits=23841277 alpha=3300000 space=1100000 upper=0 nonAscii=1100000 codeSum=22540341248 utf8Sum=36941276
+maps: upperHash=5990148710454666161 rotHash=17266417295590901230 rot13 twice ok lowerEq ok ascii=6888890 rot=14259544914304966757 upper=11445781248529102288 lower=1535372624392478260 rot13 twice ok
+join/split: parts=100000 sum=4999950000 length=588889
+utf8: length=16 bytes=25 sizes=[1, 2, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 3, 3, 1, 4] offsets=[0, 1, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 17, 20, 21] codes=[104, 233, 108, 108, 111, 32, 119, 246, 114, 108, 100, 32, 20013, 25991, 32, 128512]
+slices: take3=hél drop6=wörld 中文 😀 takeEnd1=😀 dropEnd2=héllo wörld 中文 front=h back=😀 starts=true ends=true replace=héllo woerld 中文 😀 contains=true
+case: HéLLO WöRLD 中文 😀 Àb-cd Hello é Z q false true true pad me|
+bytes: [104, 195, 169, 108, 108, 111, 32, 119, 195, 182, 114, 108, 100, 32, 228, 184, 173, 230, 150, 135, 32, 240, 159, 152, 128] roundtrip=some héllo wörld 中文 😀 invalid=none encode=[240, 159, 152, 128]
+chars: A 0 0 128512 98 x!!! "a\"b\n\tc" '\n'
+toNat?: none some 7 some 1000 none some 18446744073709551616 none none toInt?: some 0 none some -12 none some -99999999999999999999
+splitOn: ["a", "b", "", "c"] ["a", "b"] ["abc"] [""] ["", "a"] ["x", "é", "y"] ["", "a", "b"] ["no-sep"] ["ab"]
+nat/int: 0 18446744073709551616 -9223372036854775808 -7 12345678901234567890123 -1000000000000000000000000000000
+float: [0.300000, 10000000000000000159028911097599180468360808563945281389781327557747838772170381060813469985856815104.000000, inf, -inf, NaN, -0.000000, 0.000000, 2.500000, 123456789.125000, 1000000000000000000000.000000, 1.414214, 123.450000, 1180591620717411303424.000000, -0.001500]
+float ops: [2.000000, 3.000000, 3.000000, -3.000000, 2.718282, 2.302585, 0.841471, 1.414214] 3 0 18446744073709551615 true false
+compare: true true false true Ordering.gt interp {braces} 12x
