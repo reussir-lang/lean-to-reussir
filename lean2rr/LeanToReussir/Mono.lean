@@ -52,6 +52,11 @@ structure MonoConfig where
   maxInstancesPerDecl : Nat := 128
   /-- Run Lean's base `simp` on each instance (dictionary folding). -/
   simp : Bool := true
+  /-- Replace type-unsafe library implementations by their safe sources
+  (recompiling tainted callers). Not needed for correctness: lean2rr
+  represents Lean's uniform-representation code with `Box` (see
+  `uniformCode`) and placeholders. -/
+  safeSources : Bool := false
 
 structure MonoState where
   config : MonoConfig
@@ -272,7 +277,7 @@ def baseDeclFor? (n : Name) : MonoM (Option (Decl .pure)) := do
     if (← unsafeImplMap).toList.any (·.2 == n) then
       if ← recompile n then return (← get).extraBase.find? n
     return none
-  if (specOrigin? n).isNone then
+  if (← get).config.safeSources && (specOrigin? n).isNone then
     if ← isTainted d then
       if ← recompile n then return (← get).extraBase.find? n
   return some d
@@ -280,6 +285,7 @@ def baseDeclFor? (n : Name) : MonoM (Option (Decl .pure)) := do
 /-- Redirect a call target: a type-unsafe implementation becomes the safe
 declaration it implements. -/
 def redirectTarget (f : Name) : MonoM Name := do
+  if !(← get).config.safeSources then return f
   if ← isTypeUnsafeImpl f then
     if let some safe := (← unsafeImplMap).find? f then
       if ← recompile safe then return safe
@@ -505,6 +511,58 @@ def instantiateExtern (decl : Decl .pure) (name : Name) (typeArgs : Array Expr) 
   let type ← mkForallParams params retType
   return { decl with name, levelParams := [], params, type }
 
+/-! ## Uniform-representation code
+
+A few library functions rely on Lean's uniform object representation:
+`Array.mapMUnsafe` reinterprets an `Array α` as an `Array NonScalar`,
+replaces its elements one by one with values of another type, and casts the
+result to `Array β`. Such code is inlined and specialized into user code, so
+it is part of the persisted LCNF. lean2rr gives it the uniform
+representation it assumes: `NonScalar` and `PNonScalar` (types that stand
+for "any object") become `lcAny`, i.e. `Box`; the casts become the
+representation conversions of Stage 4 (element-wise for arrays), and
+`NonScalar.mk`/`PNonScalar.mk` (only used to build the `box(0)`
+placeholder) become `◾`. -/
+
+def isUniformConst (n : Name) : Bool := n == ``NonScalar || n == ``PNonScalar
+
+def uniformTy (e : Expr) : Expr :=
+  if e.find? (fun e => e.isConst && isUniformConst e.constName!) |>.isNone then e
+  else e.replace fun e => if e.isConst && isUniformConst e.constName! then some anyExpr else none
+
+def uniformParamTy (p : Param .pure) : Param .pure := { p with type := uniformTy p.type }
+
+partial def uniformCode : Code .pure → Code .pure
+  | .let d k =>
+    let value : LetValue .pure := match d.value with
+      | .const c _ _ _ =>
+        if c == ``NonScalar.mk || c == ``PNonScalar.mk then .erased else d.value
+      | v => v
+    let value : LetValue .pure := match value with
+      | .const c us args h => .const c us (args.map fun (a : Arg .pure) => match a with
+          | .type t _ => .type (uniformTy t)
+          | a => a) h
+      | v => v
+    .let { d with type := uniformTy d.type, value } (uniformCode k)
+  | .fun d k _ => .fun (uniformFun d) (uniformCode k)
+  | .jp d k => .jp (uniformFun d) (uniformCode k)
+  | .cases c =>
+    let alts := c.alts.map fun
+      | .alt ctor ps code _ => .alt ctor (ps.map uniformParamTy) (uniformCode code)
+      | .default code => .default (uniformCode code)
+      | other => other
+    .cases ⟨c.typeName, uniformTy c.resultType, c.discr, alts⟩
+  | code => code
+where
+  uniformFun (d : FunDecl .pure) : FunDecl .pure :=
+    FunDecl.mk d.fvarId d.binderName (d.params.map uniformParamTy) (uniformTy d.type) (uniformCode d.value)
+
+def uniformDecl (d : Decl .pure) : Decl .pure :=
+  let value := match d.value with
+    | .code c => .code (uniformCode c)
+    | v => v
+  { d with type := uniformTy d.type, params := d.params.map uniformParamTy, value }
+
 /-- Process one instance: instantiate, simplify, rename, record. -/
 def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
   let some decl ← baseDeclFor? key.decl
@@ -513,7 +571,7 @@ def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
   match decl.value with
   | .extern _ =>
     let inst ← (instantiateExtern decl name key.typeArgs).run (phase := .base)
-    modify fun s => { s with externs := s.externs.push inst }
+    modify fun s => { s with externs := s.externs.push (uniformDecl inst) }
   | .code _ =>
     let doSimp := (← get).config.simp
     let classPositions ← classParamPositions decl
@@ -524,6 +582,7 @@ def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
         -- (`inlineProjInst?` is not gated by `inlineDefs`); general
         -- inlining happens in Stage 2 over lean2rr's own instances.
         if doSimp then inst.simp { inlineDefs := false } else pure inst : CompilerM _).run (phase := .base)
+    let inst := uniformDecl inst
     let .code code := inst.value | unreachable!
     let code ← renameCode {} code
     modify fun s => { s with decls := s.decls.push { inst with value := .code code } }

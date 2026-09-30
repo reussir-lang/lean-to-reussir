@@ -46,6 +46,69 @@ def nominalHead (n : String) : LowerM (Option Name) := do
   | some k => return k.getAppFn.constName?
   | none => return none
 
+/-- A placeholder of Reussir type `t`. Lean passes `box(0)` for values that
+are never inspected: erased arguments (`◾`) at relevant types, and the
+`unsafeCast ()` its library stores into array slots so that the element
+being updated stays unshared (`Array.modifyMUnsafe`, `Array.mapMUnsafe`).
+lean2rr materializes `box(0)` at the expected type as that type's zero:
+`0`, `false`, the first constructor whose fields have zeros, a closure
+returning a zero, an empty array (for `Nat`, `Bool` and enumerations this is
+exactly what `box(0)` denotes in Lean). Only a type without a finite value
+gets `l2r_unreachable`. Each placeholder is a generated function
+`l2r_zero_N`. -/
+partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
+  if t == .unit then return .unitVal
+  if let some f := (← get).zeroFns[t]? then return .call f #[] #[]
+  let f ← fresh "l2r_zero_"
+  modify fun s => { s with zeroFns := s.zeroFns.insert t f, zeroBusy := s.zeroBusy.insert t }
+  let lit (text : String) : RR.Block := ⟨#[("z", some t, .atom text)], .var "z"⟩
+  let unreachable : RR.Block := .ofExpr (.call "l2r_unreachable" #[t] #[])
+  let body : RR.Block ← match t with
+    | .named n =>
+      if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"] then pure (lit "0")
+      else if n ∈ ["f32", "f64"] then pure (lit "0.0")
+      else if n == "bool" then pure (.ofExpr (.atom "false"))
+      else if n == "Nat" then
+        pure ⟨#[("z", some (.named "u64"), .atom "0")], .ctor "Nat" (some "Small") #[.var "z"]⟩
+      else if n == "Int" then
+        pure ⟨#[("z", some (.named "i64"), .atom "0")], .ctor "Int" (some "Small") #[.var "z"]⟩
+      else if n == "LStr" then pure (.ofExpr (.call "lean_mk_string" #[] #[.atom "\"\""]))
+      else if n == boxName then
+        pure (.ofExpr (.ctor boxName (some (← boxVariant .unit)) #[.unitVal]))
+      else if let some info := (← get).typeInfos[n]? then
+        -- The first constructor none of whose fields is a type whose
+        -- placeholder is being built (so the value is finite).
+        let busy := (← get).zeroBusy
+        let ok (tys : Array RR.Ty) := tys.all fun ft => !busy.contains ft
+        let fieldsOf (layout : CtorLayout) := layout.fields.filterMap (·.map (·.2))
+        let cands := info.ctorOrder.filterMap info.ctors.find?
+        match cands.find? (fieldsOf · |>.isEmpty) <|> cands.find? (ok ∘ fieldsOf) with
+        | some layout =>
+          let vals ← (fieldsOf layout).mapM zeroValue
+          pure <| .ofExpr <| match info.shape with
+            | .struct => .ctor n none vals
+            | _ => .ctor n (some layout.variant) vals
+        | none => pure unreachable
+      else
+        -- Generated positional structs (`Tuple…`, `ElemBox…`).
+        match (← get).tupleTypes.toList.find? (·.2 == n) with
+        | some (k, _) =>
+          let fields := if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k
+          if fields.any (← get).zeroBusy.contains then pure unreachable
+          else pure (.ofExpr (.ctor n none (← fields.mapM zeroValue)))
+        | none => pure unreachable
+    | .app "RVec" #[e] => pure (.ofExpr (.call "l2r_array_empty" #[e] #[]))
+    | .fn a b =>
+      -- A closure is a value whatever its result; its result is built only
+      -- if it is ever applied.
+      let x ← fresh "zx"
+      pure (.ofExpr (.lam x a (.ofExpr (← zeroValue b))))
+    | _ => pure unreachable
+  modify fun s => { s with
+    zeroBusy := s.zeroBusy.erase t
+    fns := s.fns.push (.fn f #[] t body) }
+  return .call f #[] #[]
+
 mutual
   /-- Convert `e` from representation `src` to `dst`. Besides `Box`
   conversions and closure wrappers, two instantiations of the same inductive
@@ -102,6 +165,9 @@ mutual
           { ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) },
           { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[dst] #[]) }])
     match src, dst with
+    -- A unit-like value used at another type is an `unsafeCast ()`
+    -- placeholder (see `zeroValue`).
+    | .named "L2RUnit", _ => return some (← zeroValue dst)
     | .fn a1 b1, .fn a2 b2 =>
       -- Wrapper `|x| conv(e(conv(x)))`; `e` is bound first unless it is a
       -- variable, because Reussir only calls variables and call results.
@@ -121,10 +187,42 @@ mutual
       if sh != dh then return none
       return some (.call (← structConv sn dn) #[] #[e])
     | .app "RVec" #[se], .app "RVec" #[de] =>
-      -- Arrays merged across types: rebuild element by element.
-      let _ := (se, de)
-      return none
+      -- Arrays whose element types differ (an array reinterpreted by
+      -- Lean's uniform-representation code, e.g. `Array α` as
+      -- `Array NonScalar`): rebuilt element by element.
+      match ← vecConv se de with
+      | some f => return some (.call f #[] #[e])
+      | none => return none
     | _, _ => return none
+
+  /-- The generated function converting an array with element storage `se`
+  to one with element storage `de` (cached); `none` if the elements are not
+  convertible. -/
+  partial def vecConv (se de : RR.Ty) : LowerM (Option String) := do
+    if let some f := (← get).vecConvs[(se, de)]? then return some f
+    let (st, sboxed) ← storageElem se
+    let (dt, dboxed) ← storageElem de
+    let f ← fresh "l2r_vconv_"
+    modify fun s => { s with vecConvs := s.vecConvs.insert (se, de) f }
+    let x := RR.Expr.call "l2r_array_get" #[se] #[.var "src", .var "i"]
+    let x := if sboxed then RR.Expr.field x 0 else x
+    let some y ← tryCoerce x st dt | return none
+    let y := if dboxed then RR.Expr.ctor (match de with | .named n => n | _ => "") none #[y] else y
+    let go := f ++ "_go"
+    let vec (t : RR.Ty) := RR.Ty.app "RVec" #[t]
+    let u64 := RR.Ty.named "u64"
+    let loop : RR.Block := .ofExpr <| .ite (.atom "i < n")
+      ⟨#[("one", some u64, .atom "1"), ("y", some de, y)],
+        .call go #[] #[.var "src", .atom "i + one", .var "n",
+          .call "l2r_array_push" #[de] #[.var "acc", .var "y"]]⟩
+      (.ofExpr (.var "acc"))
+    let entry : RR.Block :=
+      ⟨#[("n", some u64, .call "l2r_array_size" #[se] #[.var "src"]), ("zero", some u64, .atom "0")],
+        .call go #[] #[.var "src", .var "zero", .var "n", .call "l2r_array_empty" #[de] #[]]⟩
+    modify fun s => { s with fns := s.fns ++ #[
+      .fn go #[("src", vec se), ("i", u64), ("n", u64), ("acc", vec de)] (vec de) loop,
+      .fn f #[("src", vec se)] (vec de) entry] }
+    return some f
 
   /-- The generated function converting instantiation `sn` to `dn` of the
   same inductive (cached). -/
@@ -193,7 +291,10 @@ inductive Callee where
   | ctor (info : ConstructorVal)
 
 def calleeOf (f : Name) : LowerM Callee := do
-  if let some (.ctorInfo c) := (← getEnv).find? f then return .ctor c
+  if let some (.ctorInfo c) := (← getEnv).find? f then
+    -- Constructors of builtin types implemented by the runtime
+    -- (`Int.ofNat` is `lean_nat_to_int`, …) are calls, as in Lean's IR.
+    unless isExtern (← getEnv) f do return .ctor c
   if let some d := (← read).decls.find? f then
     let (ps, r) := splitFnType d.type d.params.size
     match d.value with
@@ -205,6 +306,10 @@ def calleeOf (f : Name) : LowerM Callee := do
   if let some d ← getMonoDecl? f then
     let (ps, r) := splitFnType d.type d.params.size
     return .extern f #[] ps r
+  if let some (.ctorInfo c) := (← getEnv).find? f then
+    let ty ← toMonoType (← getOtherDeclBaseType f [])
+    let (ps, r) := splitFnType ty (c.numParams + c.numFields)
+    return .extern f #[] ps r
   throwError "lean2rr: unknown callee {f} (internal error)"
 
 /-- Argument lowering with conversion to the expected type. -/
@@ -214,7 +319,8 @@ def lowerArg (ctx : CodeCtx) (a : Arg .pure) (expected : RR.Ty) : LowerM RR.Expr
     match ctx.vars[x]? with
     | some (n, t) => coerce (.var n) t expected
     | none => throwError "lean2rr: unbound variable {x.name} (internal error)"
-  | _ => coerce .unitVal .unit expected
+  -- `◾` (type arguments, proofs, or `box(0)` at a relevant type)
+  | _ => zeroValue expected
 
 /-- A curried chain of lambdas over `tys` whose innermost body is
 `mk vars`. Used for partial applications: the body runs only when the last
@@ -254,6 +360,29 @@ def applyChain (f : RR.Expr) (fty : RR.Ty) (ctx : CodeCtx) (args : Array (Arg .p
   return (e, t)
 
 /-! ## Externs -/
+
+/-- For each parameter of `c`'s declared type, the type parameter (index
+among the type-former parameters) that is exactly its type, if any; and
+the same for the result type. -/
+def typeVarUses (c : Name) : CoreM (Array (Option Nat) × Option Nat) := do
+  let some ci := (← getEnv).find? c | return (#[], none)
+  let mut ty := ci.type
+  let mut tyParams : Array Nat := #[]
+  let mut uses := #[]
+  let mut i := 0
+  let use (tyParams : Array Nat) (i : Nat) (d : Expr) : Option Nat :=
+    match d.cleanupAnnotations with
+    | .bvar k => if k < i then tyParams.idxOf? (i - 1 - k) else none
+    | _ => none
+  repeat
+    match ty with
+    | .forallE _ d b _ =>
+      uses := uses.push (use tyParams i d)
+      if isTypeFormerType d then tyParams := tyParams.push i
+      ty := b
+      i := i + 1
+    | _ => break
+  return (uses, use tyParams i ty)
 
 /-- The C symbol Lean uses for an extern (the prelude implements functions
 under the same names). -/
@@ -453,6 +582,34 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     let fn ← listFold s!"l2r_list_to_array_{lt.render.map fun c => if c.isAlphanum then c else '_'}" lt arrTy
       elemTy fun acc x => .call "l2r_array_push" #[] #[acc, wrap x]
     return some (.call fn #[] #[args[0]!, .call "l2r_array_empty" #[elemTy] #[]])
+  -- `Array.toList : Array α → List α`: cons the elements from the last.
+  if orig == ``Array.toList then
+    let arrTy ← lowerType params[0]!
+    let lt ← lowerType ret
+    let .app _ #[elemTy] := arrTy | throwError "lean2rr: bad array type {arrTy.render}"
+    let .named ltn := lt | throwError "lean2rr: bad list type"
+    let some info := (← get).typeInfos[ltn]? | throwError "lean2rr: bad list type"
+    let some nil := info.ctors.find? ``List.nil | throwError "lean2rr: bad list type"
+    let some cons := info.ctors.find? ``List.cons | throwError "lean2rr: bad list type"
+    let some (some (_, valTy)) := cons.fields[0]? | throwError "lean2rr: bad list type"
+    let (_, boxed) ← storageElem elemTy
+    let name := s!"l2r_array_to_list_{ltn}"
+    unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+      let x := RR.Expr.call "l2r_array_get" #[elemTy] #[.var "v", .var "j"]
+      let x ← coerce (if boxed then .field x 0 else x) (← storageElem elemTy).1 valTy
+      let u64 := RR.Ty.named "u64"
+      let body : RR.Block := ⟨#[("zero", some u64, .atom "0")], .ite (.atom "zero < i")
+        ⟨#[("one", some u64, .atom "1"), ("j", some u64, .atom "i - one"), ("x", some valTy, x),
+           ("c", some lt, .ctor ltn (some cons.variant) #[.var "x", .var "acc"])],
+          .call (name ++ "_go") #[] #[.var "v", .var "j", .var "c"]⟩
+        (.ofExpr (.var "acc"))⟩
+      let entry : RR.Block :=
+        .ofExpr (.call (name ++ "_go") #[] #[.var "v", .call "l2r_array_size" #[elemTy] #[.var "v"],
+          .ctor ltn (some nil.variant) #[]])
+      modify fun s => { s with fns := s.fns ++ #[
+        .fn (name ++ "_go") #[("v", arrTy), ("i", u64), ("acc", lt)] lt body,
+        .fn name #[("v", arrTy)] lt entry] }
+    return some (.call name #[] #[args[0]!])
   let fd? : Option Nat := match orig with
     | ``IO.getStdin => some 0
     | ``IO.getStdout => some 1
@@ -488,22 +645,28 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
   if orig.getPrefix == `ST.Prim || orig.getPrefix == `ST.Prim.Ref then
     if let some e ← refGlue orig typeArgs (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
   let sym ← externSymbol orig
-  -- Storage for each type argument: (Lean type, storage type, boxed?).
+  -- Storage for each type argument: (storage type, boxed?).
   let mut storage := #[]
   for t in typeArgs do
     let rt ← lowerType t
-    let (st, boxed) ← arrayElemTy rt
-    storage := storage.push (t.consumeMData, st, boxed)
-  let boxOf (t : Expr) : Option RR.Ty :=
-    storage.findSome? fun (lt, st, boxed) => if boxed && lt == t.consumeMData then some st else none
+    storage := storage.push (← arrayElemTy rt)
+  -- Values whose declared type is a type parameter `α` are passed and
+  -- returned in `α`'s storage (e.g. `Array.push`'s element): wrapped if the
+  -- storage is a wrapper.
+  let (uses, retUse) ← typeVarUses orig
+  let boxOf (use : Option Nat) : Option String := do
+    let (st, boxed) ← storage[← use]?
+    if boxed then if let .named bn := st then return bn
+    none
   let mut passed := #[]
-  for (p, a) in params.zip args do
-    if externParamPassed p then
-      match boxOf p with
-      | some (.named bn) => passed := passed.push (.ctor bn none #[a])
-      | _ => passed := passed.push a
-  let call := RR.Expr.call sym (storage.map (·.2.1)) passed
-  match boxOf ret with
+  for h : i in [:params.size] do
+    if externParamPassed params[i] then
+      let a := args[i]!
+      match boxOf (uses[i]?.join) with
+      | some bn => passed := passed.push (.ctor bn none #[a])
+      | none => passed := passed.push a
+  let call := RR.Expr.call sym (storage.map (·.1)) passed
+  match boxOf retUse with
   | some _ => return .field call 0
   | none => return call
 
@@ -527,7 +690,8 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       lambdaChain params[args.size:].toArray fun rest => return .call fn #[] (supplied ++ rest)
     else
       let as ← (args[:n].toArray.zip params).mapM fun (a, t) => lowerArg ctx a t
-      return (← applyChain (.call fn #[] as) ret ctx args[n:].toArray).1
+      let (e, t) ← applyChain (.call fn #[] as) ret ctx args[n:].toArray
+      coerce e t (← lowerType resTy)
   | .extern orig typeArgs params ret =>
     let n := params.size
     let ptys ← params.mapM lowerType
@@ -541,7 +705,8 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     else
       let as ← (args[:n].toArray.zip ptys).mapM fun (a, t) => lowerArg ctx a t
       let call ← lowerExternCall orig typeArgs params ret as
-      return (← applyChain call retTy ctx args[n:].toArray).1
+      let (e, t) ← applyChain call retTy ctx args[n:].toArray
+      coerce e t (← lowerType resTy)
   | .ctor c =>
     let arity := c.numParams + c.numFields
     let rt ← lowerType (← if args.size ≥ arity then pure resTy else pure resTy)
@@ -590,7 +755,7 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
   | .lit (.uint8 n) | .lit (.uint16 n) => return .atom (toString n)
   | .lit (.uint32 n) => return .atom (toString n)
   | .lit (.uint64 n) | .lit (.usize n) => return .atom (toString n)
-  | .erased => coerce .unitVal .unit rty
+  | .erased => zeroValue rty
   | .proj _ i x _ =>
     match ctx.vars[x]? with
     | some (n, .named tn) =>
@@ -599,7 +764,7 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
         let some layout := info.ctors.find? info.ctorOrder[0]! | throwError "lean2rr: bad projection"
         match layout.fields[i]? with
         | some (some (j, ft)) => coerce (.field (.var n) j) ft rty
-        | _ => coerce .unitVal .unit rty
+        | _ => zeroValue rty
       | none => throwError "lean2rr: projection from non-structure {tn}"
     | _ => throwError "lean2rr: projection from unknown variable"
   | .const f _ args _ => lowerConstApp ctx f args ty

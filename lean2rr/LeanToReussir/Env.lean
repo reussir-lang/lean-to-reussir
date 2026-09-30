@@ -27,7 +27,11 @@ def loadEnvironment (modules : Array Name) : IO Environment := do
 
 /-- Run a `CoreM` action against `env` without a heartbeat limit. -/
 def runCoreM (env : Environment) (x : CoreM α) : IO α := do
-  let ctx : Core.Context := { fileName := "<lean2rr>", fileMap := default, maxHeartbeats := 0 }
+  -- Instances can be deeper than anything Lean compiled (the recursion
+  -- limit is also reset from the options by `withOptions`).
+  let depth := 100000
+  let ctx : Core.Context := { fileName := "<lean2rr>", fileMap := default, maxHeartbeats := 0,
+                              maxRecDepth := depth, options := maxRecDepth.set {} depth }
   let (a, _) ← x.toIO ctx { env }
   return a
 

@@ -78,6 +78,12 @@ structure LowerState where
   cafSlots : Nat := 0
   /-- Structural conversions being generated (for recursive types). -/
   convsInProgress : Std.HashSet String := {}
+  /-- Generated placeholder (`box(0)`) functions, per type. -/
+  zeroFns : Std.HashMap RR.Ty String := {}
+  /-- Placeholder functions whose body is being generated. -/
+  zeroBusy : Std.HashSet RR.Ty := {}
+  /-- Generated element-wise array conversions, per (source, target) storage. -/
+  vecConvs : Std.HashMap (RR.Ty × RR.Ty) String := {}
   counter : Nat := 0
 
 abbrev LowerM := ReaderT LowerCtx (StateRefT LowerState CoreM)
@@ -128,6 +134,14 @@ def arrayElemTy (t : RR.Ty) : LowerM (RR.Ty × Bool) := do
     tupleTypes := s.tupleTypes.insert key n
     typeItems := s.typeItems.push (.struct n false #[t]) }
   return (.named n, true)
+
+/-- The element type an array storage type holds, and whether the storage
+is a one-field wrapper (see `arrayElemTy`). -/
+def storageElem (st : RR.Ty) : LowerM (RR.Ty × Bool) := do
+  let .named n := st | return (st, false)
+  for (k, v) in (← get).tupleTypes.toList do
+    if v == n && k.size == 2 && k[1]! == .named "__elem_box" then return (k[0]!, true)
+  return (st, false)
 
 /-- Relevance of the parameters of inductive `ind` (see `Relevance.lean`). -/
 def relevanceOf (ind : Name) (numParams : Nat) : LowerM (Array Bool) := do
