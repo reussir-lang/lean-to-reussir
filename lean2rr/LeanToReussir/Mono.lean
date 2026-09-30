@@ -83,6 +83,8 @@ structure MonoState where
   /-- Constants defined by `initialize`/`builtin_initialize` that the
   program references, with their init functions (in discovery order). -/
   initConsts : Array (Name × Name) := #[]
+  /-- The instance being built (for detecting polymorphic recursion). -/
+  current : Option InstKey := none
   /-- Base declarations compiled by lean2rr itself (safe reference
   definitions of unsafe implementations, and their auxiliary declarations). -/
   extraBase : NameMap (Decl .pure) := {}
@@ -133,6 +135,18 @@ def freshInstName (decl : Name) (k : Nat) : Name :=
 
 /-- Look up (or create and enqueue) the instance for `key`. -/
 def instanceName (key : InstKey) : MonoM Name := do
+  if let some n := (← get).names[key]? then return n
+  -- Polymorphic recursion: an instance of `d` asking for `d` at type
+  -- arguments that strictly contain its own (`Nest α` → `Nest (List α)`)
+  -- would create a new instance per level; use the uniform one at once.
+  let key ← match (← get).current with
+    | some cur =>
+      if cur.decl == key.decl && cur.typeArgs.size == key.typeArgs.size &&
+         (cur.typeArgs.zip key.typeArgs).any (fun (a, b) => a != b && a != anyExpr && (b.find? (· == a)).isSome) then
+        modify fun s => { s with uniformArgs := s.uniformArgs + key.typeArgs.size }
+        pure { key with typeArgs := key.typeArgs.map fun _ => anyExpr, dicts := #[] }
+      else pure key
+    | none => pure key
   if let some n := (← get).names[key]? then return n
   let count := (← get).perDecl.getD key.decl 0
   let key ← if count ≥ (← get).config.maxInstancesPerDecl &&
@@ -655,6 +669,7 @@ def uniformDecl (d : Decl .pure) : Decl .pure :=
 
 /-- Process one instance: instantiate, simplify, rename, record. -/
 def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
+  modify fun s => { s with current := some key }
   let some decl ← baseDeclFor? key.decl
     | throwError "lean2rr: no base declaration for {key.decl} (internal error)"
   let keepMissing := true
