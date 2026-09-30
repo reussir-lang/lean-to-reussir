@@ -1039,16 +1039,35 @@ use instead of cached. It cannot panic, trace or allocate, so this is
 unobservable, and it is cheaper than a once-cell read.
 
 The initializer follows Lean's compilation order, which is not persisted in
-the `.olean`. Compilation follows the source, and a declaration generated
-while compiling `g` is compiled with `g`, before it.
+the `.olean`. Compilation follows the source, command by command. A `def`
+or `instance` command is compiled after it is elaborated, together with its
+`where`/`let rec` helpers: the elaborator lists the helpers (those of later
+`mutual` members first, outer ones before nested ones, otherwise in source
+order), then the command's own declarations, and compiles the strongly
+connected components of their reference graph one at a time, callees first
+(Tarjan's order over that list). A declaration generated while compiling a
+component, such as a specialization `f._at_.g.spec_N` made while compiling
+`g`, comes right before the component's members; an auxiliary declaration
+made during elaboration (`c.unsafe_1`, `instInhabitedP.default`) comes
+before the whole command. For example
+
+    def p : Nat := t "p" (h1 + h2)
+    where
+      h1 : Nat := t "p.h1" 1
+      h2 : Nat := t "p.h2" (h3 + 1)
+      h3 : Nat := t "p.h3" 3
+
+initializes `p.h1`, `p.h3`, `p.h2`, then the specializations made in `p`,
+then `p`. lean2rr rebuilds this order from declaration ranges (a helper's
+range lies inside its parent's; the kernel's `all` lists a recursive mutual
+block) and from the references in the declarations' kernel values (for a
+`partial` definition, its `_unsafe_rec`). The function of an `initialize`
+declaration belongs to its constant: a specialization made inside the
+action comes right before the action.
 
 Our translation runs, before `main`, the startup work of Lean's module
 initializers:
-- for each program module, for each declaration in source order (line,
-  then column). An auxiliary declaration such as `main.unsafe_1`, which has
-  no position of its own, goes right before its parent. A specialization
-  `f._at_.g.spec_N` goes right before `g`, the declaration after the last
-  `_at_`:
+- for each program module, for each declaration in that order:
   - an `initialize` action (`initialize do …`) is run;
   - for `initialize c : T ← act`, `act` is run and its result stored as
     `c`, which the program reads from a once-cell;
@@ -1413,6 +1432,14 @@ Each item says what differs and when.
   order among them depends on how its specializer recursed, which the
   `.olean` does not record, and can differ. Visible only when such
   constants trace or panic.
+- *Startup order in `mutual` blocks and several `let rec` groups* (§5.12):
+  the members of a `mutual` block that do not call each other are ordered
+  as separate commands, because the block is not recorded in the `.olean`
+  (natively the helpers of all its members run first, those of later
+  members first). Within one declaration, a `let rec` in the body and a
+  `where` clause are ordered by source position (natively the `where`
+  helpers come first). Visible only when such helper constants trace or
+  panic.
 - *Compiler options of the program's modules* (`set_option
   compiler.extract_closed false`, `compiler.small`, `maxRecInline`, …) are
   not recorded in the `.olean`, so lean2rr runs Lean's passes with the
