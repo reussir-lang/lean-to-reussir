@@ -121,31 +121,64 @@ fn l2r_internal_panic_at<T>(code : u64) -> T {
     core::intrinsic::panic::panic<T>()
 }
 
-// `lean_panic_fn`: print the message and continue with the default value.
-#[ffi(import)]
-fn l2r_panic_msg(msg : LStr) -> u64 [{ { leanrt::panic_msg(&msg); 0 } }];
+// Runtime diagnostics go where native Lean's `io_eprintln` sends them: to
+// the *current* stderr stream (`IO.setStderr`), through
+// `l2r_stderr_put(s)`, which lean2rr defines in every program (it writes
+// with the stream's `putStr`, ignoring errors). Messages printed right
+// before the process dies (abort-mode panics, internal panics, uncaught
+// exceptions, stack overflow) go to descriptor 2, as natively.
 
-// Messages the C runtime itself panics with, by code.
+// `lean_panic_impl`'s lines: the message, then (unless `LEAN_BACKTRACE=0`)
+// `backtrace:` and the frames (none here). Natively one `io_eprintln` per
+// line; written here with one `putStr` (the same bytes). Under
+// `LEAN_ABORT_ON_PANIC` this does not return: `leanrt::panic_msg` flushes
+// stdout, writes the message to descriptor 2 (`std::cerr`) and aborts.
 #[ffi(import)]
-fn l2r_panic_code(code : u64) -> u64 [{
+fn l2r_panic_text(msg : LStr) -> LStr [{
     {
-        leanrt::panic_msg(match code {
-            0 => "Error: index out of bounds".as_bytes(),
-            1 => "Error: invalid `String.Pos` at `String.get!`".as_bytes(),
-            _ => "Error".as_bytes(),
-        });
-        0
+        if std::env::var_os("LEAN_ABORT_ON_PANIC").is_some() {
+            leanrt::panic_msg(&msg);
+        }
+        let mut t = msg.to_vec();
+        t.push(b'\n');
+        if std::env::var("LEAN_BACKTRACE").map(|v| v != "0").unwrap_or(true) {
+            t.extend_from_slice(b"backtrace:\n(stack trace unavailable)\n");
+        }
+        leanrt::rc_release(msg);
+        leanrt::string::from_bytes(&t)
     }
 }];
 
+fn l2r_panic_str(msg : LStr) -> u64 { l2r_stderr_put(l2r_panic_text(msg)) }
+
+// Messages the C runtime itself panics with, by code.
+#[ffi(import)]
+fn l2r_panic_code_text(code : u64) -> LStr [{
+    leanrt::string::from_bytes(match code {
+        0 => "Error: index out of bounds".as_bytes(),
+        1 => "Error: invalid `String.Pos` at `String.get!`".as_bytes(),
+        _ => "Error".as_bytes(),
+    })
+}];
+
+// These panics come from inside the prelude's array and string helpers,
+// which the stream code behind `l2r_stderr_put` itself uses: routing them
+// through `l2r_stderr_put` crashes rrc's TokenReusePass under
+// `--reuse-across-call` (a Reussir bug), so they go to descriptor 2 (the
+// same place unless stderr is redirected).
+fn l2r_panic_code(code : u64) -> u64 { l2r_eprint_raw(l2r_panic_text(l2r_panic_code_text(code))) }
+
+#[ffi(import)]
+fn l2r_eprint_raw(s : LStr) -> u64 [{ { leanrt::io::eprint(&s); leanrt::rc_release(s); 0 } }];
+
 // `panicCore {α} [Inhabited α] (msg : String) : α`.
 fn lean_panic_fn_borrowed<T>(dflt : T, msg : LStr) -> T {
-    let ignored = l2r_panic_msg(msg);
+    let ignored = l2r_panic_str(msg);
     dflt
 }
 
 fn lean_panic_fn<T>(dflt : T, msg : LStr) -> T {
-    let ignored = l2r_panic_msg(msg);
+    let ignored = l2r_panic_str(msg);
     dflt
 }
 
@@ -2395,18 +2428,9 @@ fn l2r_stream_isTty(fd : u64) -> bool [{ leanrt::io::is_tty(fd) }];
 // `IO.eprintln` helper.
 fn l2r_eprintln(s : LStr) -> u64 { l2r_stream_putStr(2, lean_string_push(s, 10)) }
 
-// A runtime diagnostic line (`dbgTrace`, `timeit`, `allocprof`) on stderr:
-// write errors are ignored and the last-error slot is left alone.
-#[ffi(import)]
-fn l2r_diag_println(s : LStr) -> u64 [{
-    {
-        let mut line = s.to_vec();
-        line.push(10);
-        leanrt::io::eprint(&line);
-        leanrt::rc_release(s);
-        0
-    }
-}];
+// A runtime diagnostic line (`dbgTrace`, `timeit`, `allocprof`):
+// `io_eprintln`, to the current stderr stream.
+fn l2r_diag_println(s : LStr) -> u64 { l2r_stderr_put(lean_string_push(s, 10)) }
 
 // ===========================================================================
 // ST.Ref / IO.Ref
@@ -2738,6 +2762,14 @@ fn lean_dbg_trace<T>(msg : LStr, f : L2RUnit -> T) -> T {
 // offset 0 of the object they point to. Nullary constructors are Reussir
 // immediates, scalars in Lean: a pointer with a nonzero top byte (the `tbi`
 // encoding) or to a dummy box with an immortal count (>= 2^31).
+// This must be an FFI import (lean2rr then passes values that cannot cross
+// the boundary in fresh wrappers, which are never shared: native Lean's
+// small `Nat`s are scalars), so it cannot reach `l2r_stderr_put`: the
+// message goes to descriptor 2. For the current stderr stream, lean2rr's
+// glue can use the pieces below instead: `l2r_shared_check<S>(a)` records
+// whether `a` is shared (read with `l2r_last_shared()`) and returns it;
+// the message is `l2r_shared_rc_text(msg)` (`shared RC <msg up to its
+// first NUL>\n`).
 #[ffi(import)]
 fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
     {
@@ -2756,6 +2788,35 @@ fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
         }
         leanrt::rc_release(msg);
         a
+    }
+}];
+
+#[ffi(import)]
+fn l2r_shared_check<T>(a : T) -> T [{
+    {
+        let name = ::std::any::type_name::<[:T:]>();
+        let boxed = name.starts_with("reussir_rt::") && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
+        let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
+        let shared = boxed && (p >> 56) == 0 && {
+            let c = unsafe { *(p as *const u32) };
+            c != 1 && c < 0x8000_0000
+        };
+        leanrt::set_last_shared(shared);
+        a
+    }
+}];
+
+#[ffi(import)]
+fn l2r_last_shared() -> bool [{ leanrt::last_shared() }];
+
+#[ffi(import)]
+fn l2r_shared_rc_text(msg : LStr) -> LStr [{
+    {
+        let mut line = b"shared RC ".to_vec();
+        line.extend_from_slice(&msg[..msg.iter().position(|&b| b == 0).unwrap_or(msg.len())]);
+        line.push(b'\n');
+        leanrt::rc_release(msg);
+        leanrt::string::from_bytes(&line)
     }
 }];
 
@@ -3063,7 +3124,7 @@ fn l2r_timeit_start() -> u64 [{
 }];
 
 #[ffi(import)]
-fn l2r_timeit_report(msg : LStr, start : u64) -> u64 [{
+fn l2r_timeit_text(msg : LStr, start : u64) -> LStr [{
     {
         let mut ts = [0i64; 2];
         extern "C" { fn clock_gettime(clk: i32, ts: *mut i64) -> i32; fn snprintf(b: *mut u8, n: usize, f: *const u8, ...) -> i32; }
@@ -3081,15 +3142,14 @@ fn l2r_timeit_report(msg : LStr, start : u64) -> u64 [{
         line.extend_from_slice(unit.as_bytes());
         line.push(b'\n');
         leanrt::rc_release(msg);
-        leanrt::io::eprint(&line);
-        0
+        leanrt::string::from_bytes(&line)
     }
 }];
 
 fn l2r_io_timeit_with<R>(msg : LStr, act : L2RUnit -> R) -> R {
     let t = l2r_timeit_start();
     let r = act(L2RUnit::u{});
-    let ignored = l2r_timeit_report(msg, t);
+    let ignored = l2r_stderr_put(l2r_timeit_text(msg, t));
     r
 }
 
@@ -3102,19 +3162,18 @@ fn l2r_io_cancel<T>(t : T) -> L2RUnit { L2RUnit::u{} }
 // built without `RUNTIME_STATS` prints.
 fn l2r_io_allocprof_with<R>(msg : LStr, act : L2RUnit -> R) -> R {
     let r = act(L2RUnit::u{});
-    let ignored = l2r_allocprof_report(msg);
+    let ignored = l2r_stderr_put(l2r_allocprof_text(msg));
     r
 }
 
 #[ffi(import)]
-fn l2r_allocprof_report(msg : LStr) -> u64 [{
+fn l2r_allocprof_text(msg : LStr) -> LStr [{
     {
         let cut = msg.iter().position(|&b| b == 0).unwrap_or(msg.len());
         let mut out = msg[..cut].to_vec();
         out.extend_from_slice(b"\nAllocation profiling data is not available, compile lean using `-D RUNTIME_STATS=ON`\n\n");
         leanrt::rc_release(msg);
-        leanrt::io::eprint(&out);
-        0
+        leanrt::string::from_bytes(&out)
     }
 }];
 

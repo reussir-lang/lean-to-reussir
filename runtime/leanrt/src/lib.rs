@@ -37,6 +37,17 @@ pub mod task;
 pub use big::LBig;
 pub use string::LStr;
 
+static LAST_SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `dbgTraceIfShared`'s check, recorded for the prelude to read back.
+pub fn set_last_shared(b: bool) {
+    LAST_SHARED.store(b, std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn last_shared() -> bool {
+    LAST_SHARED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A fresh "address" for `ptrAddrUnsafe` of a value without one: odd (so
 /// never a real pointer) and never repeated.
 pub fn fresh_addr() -> u64 {

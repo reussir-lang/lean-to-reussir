@@ -324,17 +324,22 @@ lean2rr's dev branch (the tests pass with it).
     `l2r_fs_current_dir`, `l2r_fs_app_path`,
     `l2r_fs_process_get_current_dir`, `l2r_fs_process_set_current_dir`
     with `l2r_io_finish`; kind 23 needs `IO.userError`.
-21. Once `setStderr` is supported: native `panic!` (outside
-    `LEAN_ABORT_ON_PANIC`, including the runtime's own panics such as
-    `index out of bounds`), `dbgTrace`, `timeit` and `allocprof` print to
-    the *current* stderr stream (`io_eprintln`); the runtime prints them to
-    descriptor 2. Internal panics, uncaught exceptions and abort-mode panics
-    do go to descriptor 2 natively. Needed from lean2rr: define in every
-    program `fn l2r_stderr_put(s : LStr) -> u64`, writing `s` with the
-    current stderr stream's `putStr` and ignoring its result (when the
-    stderr cell is unset: `l2r_stream_putStr(2, s)`). The prelude may call
-    functions defined after it, so the runtime then sends each diagnostic
-    line (with its `\n`) through it.
+21. *done* (except the runtime's own panics and `dbgTraceIfShared`) —
+    native `panic!` (outside `LEAN_ABORT_ON_PANIC`), `dbgTrace`, `timeit`
+    and `allocprof` print to the *current* stderr stream (`io_eprintln`):
+    every program defines `fn l2r_stderr_put(s : LStr) -> u64` (lean2rr),
+    which the prelude calls. Internal panics, uncaught exceptions and
+    abort-mode panics go to descriptor 2, as natively. The runtime's own
+    panics (`index out of bounds` from `get!`/`set!`, `String.get!`) still
+    go to descriptor 2: they are raised inside the prelude's array helpers,
+    which the stream code behind `l2r_stderr_put` uses too, and routing
+    them through it makes rrc crash in `TokenReusePass` under
+    `--reuse-across-call` (a Reussir bug; without the flag it compiles)
+    (test `RtStreamsRedirectOob`). `lean_dbg_trace_if_shared<T>` must stay
+    an FFI import (so value types arrive in fresh, unshared wrappers), so
+    it writes to descriptor 2; glue for the current stream:
+    `let r = l2r_shared_check<S>(a); if l2r_last_shared() {
+    l2r_stderr_put(l2r_shared_rc_text(msg)) }; r`.
 22. *done* — `String.mk`/`List.asString` (`lean_string_mk`) take a `List Char`: glue
     folding the list with `lean_string_push` onto `lean_mk_string("")`.
 23. *done* — `IO.initializing` is true while module initializers run (native
@@ -421,6 +426,10 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
 - `IO.FS.createTempFile`/`createTempDir` with `TMPDIR` naming a missing
   directory report `no such file or directory` with an empty file name;
   natively `decode_uv_error` dereferences a null file name and crashes.
+  The same crash happens natively whenever an error without a file name
+  has errno `ENOENT` or `EINTR` (e.g. `getLine` on a handle whose error
+  indicator is set, after a failed `metadata` left `errno = ENOENT`); the
+  runtime reports `no such file or directory` with an empty file name.
 - A direct `read` of a huge count (`Handle.read`, ≥ one buffer) is issued in
   `read(2)` calls of at most 16 MiB (the same data; natively one call).
 

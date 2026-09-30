@@ -1,0 +1,1 @@
+the runtime's own panics go to descriptor 2: routing l2r_panic_code through l2r_stderr_put crashes rrc's TokenReusePass under --reuse-across-call (runtime/README.md, request 21)

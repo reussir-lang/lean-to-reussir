@@ -110,7 +110,7 @@ pub fn stream_flush(fd: u64) {
 /// `read n` on a standard stream (`fread`).
 #[inline(never)]
 pub fn stream_read(fd: u64, n: u64) -> Vec<u8> {
-    match crate::fs::lean_read(std_file(fd), n) {
+    match crate::fs::lean_read(|| std_file(fd), n) {
         Ok(v) => {
             set_ok();
             v
