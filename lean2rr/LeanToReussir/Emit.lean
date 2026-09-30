@@ -1,6 +1,7 @@
 import Lean
 import LeanToReussir.Lower
 import LeanToReussir.MonoRetype
+import LeanToReussir.FloatLits
 
 /-!
 # Program assembly
@@ -444,6 +445,8 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
   let roots := #[mainInst, errStr] ++ startup.map fun
     | .caf i | .ioUnit i | .init _ i => i
   let (decls, keys) ← retypeMono table decls keys roots
+  -- Float literals become bit patterns (translation plan §5.12).
+  let decls := foldFloatLitsDecls keys decls
   -- Function names the prelude defines (`fn NAME`).
   let preludeFns := (prelude.splitOn "fn ").foldl (init := ({} : Std.HashSet String)) fun acc chunk =>
     let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'

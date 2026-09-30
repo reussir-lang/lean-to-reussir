@@ -1038,6 +1038,17 @@ constructors (`Int.ofNat 0`, an enumeration value) is recomputed at every
 use instead of cached. It cannot panic, trace or allocate, so this is
 unobservable, and it is cheaper than a once-cell read.
 
+A float literal arrives as a call of a Lean function on literal arguments,
+`Float.ofScientific 15 true 301` for `1.5e-300` (or `Float.ofNat n`,
+`Float32.…`), which is not cheap: the slow path (a mantissa of `2^53` or
+more, an exponent above 22) goes through `Float.Model` with bignum
+arithmetic. lean2rr evaluates such calls itself, with the same Lean
+functions (lean2rr is compiled from the same `Init` code, so the bits are
+Lean's, subnormals and rounding included), and replaces them by
+`Float.ofBits` of the bit pattern, a cheap constant as above. Calls with
+an exponent above 2000 or a mantissa of more than 4096 bits are left to run
+(cached as usual when they are a constant).
+
 The initializer follows Lean's compilation order, which is not persisted in
 the `.olean`. Compilation follows the source, command by command. A `def`
 or `instance` command is compiled after it is elaborated, together with its
@@ -1455,7 +1466,7 @@ Each item says what differs and when.
   The recursion limit (`maxRecDepth`, which large literals need raised)
   is effectively unlimited in lean2rr, bounded by its stack (4 GiB, set by
   `scripts/l2r.py` through `LEAN_STACK_SIZE_KB`): a 60000-element list
-  literal needs about 100 MiB.
+  literal needs more than 64 MiB.
 - *Merging after erasure*: natively, two uses of a type-polymorphic
   constant at different type arguments (`(emptyList : List Nat)`,
   `(emptyList : List String)`) are the same call after erasure, and Lean's
