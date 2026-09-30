@@ -27,8 +27,8 @@ Generated sections of the prelude (edit the generator, then run it):
 1. builds `leanrt` with the pinned rustc (`L2R_RUSTC`) into
    `runtime/leanrt/target/libleanrt.rlib`, cached by a hash of its sources;
 2. runs lean2rr (`L2R_LEAN2RR`) with `--prelude runtime/prelude.rr`;
-3. runs rrc (`L2R_REUSSIR`; `--reuse-across-call` only on request: Reussir currently
-   miscompiles some programs with it) with
+3. runs rrc (`L2R_REUSSIR`; with `--reuse-across-call` unless `l2r.py` gets
+   `--no-reuse-across-call`) with
    - `--polyffi-rust-path runtime/leanrt/target/rustc-native`: a wrapper that
      adds `-C target-cpu=native -C target-feature=-outline-atomics`. With the
      plain rustc, textures are not inlined into Reussir code, and calls through
