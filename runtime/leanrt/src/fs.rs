@@ -750,3 +750,39 @@ pub fn decode_kind(e: i32, has_fname: bool) -> u32 {
 pub fn is_open(h: &LHandle) -> bool {
     fh(h).fd >= 0
 }
+
+/// Handle operations taking their arguments by value, out of line. The
+/// prelude's textures call these: an inlined texture that borrowed its
+/// parameter (`&h`) left a stack slot whose address escapes in the calling
+/// Lean function, and LLVM then kept that function's self tail calls as real
+/// calls (an IO loop over `getLine` or `flush` ran out of stack).
+pub mod owned {
+    use super::*;
+    use crate::{array, rc_release};
+    use reussir_rt::collections::vec::Vec as RVec;
+
+    #[inline(never)]
+    pub fn put_str(h: LHandle, s: LStr) { super::put_str(&h, &s); rc_release(s); rc_release(h); }
+    #[inline(never)]
+    pub fn write(h: LHandle, b: RVec<u8>) { super::put_str(&h, array::as_slice(&b)); array::release(b); rc_release(h); }
+    #[inline(never)]
+    pub fn flush(h: LHandle) { super::flush(&h); rc_release(h); }
+    #[inline(never)]
+    pub fn read(h: LHandle, n: u64) -> RVec<u8> { let v = read_bytes(&h, n); rc_release(h); array::bytes_of_string(Rc::new(v)) }
+    #[inline(never)]
+    pub fn get_line(h: LHandle) -> LStr { let s = super::get_line(&h); rc_release(h); s }
+    #[inline(never)]
+    pub fn is_tty(h: LHandle) -> bool { let r = super::is_tty(&h); rc_release(h); r }
+    #[inline(never)]
+    pub fn is_eof(h: LHandle) -> bool { let r = super::is_eof(&h); rc_release(h); r }
+    #[inline(never)]
+    pub fn rewind(h: LHandle) { super::rewind(&h); rc_release(h); }
+    #[inline(never)]
+    pub fn truncate(h: LHandle) { super::truncate(&h); rc_release(h); }
+    #[inline(never)]
+    pub fn lock(h: LHandle, exclusive: bool) { super::lock(&h, exclusive); rc_release(h); }
+    #[inline(never)]
+    pub fn try_lock(h: LHandle, exclusive: bool) -> bool { let r = super::try_lock(&h, exclusive); rc_release(h); r }
+    #[inline(never)]
+    pub fn unlock(h: LHandle) { super::unlock(&h); rc_release(h); }
+}

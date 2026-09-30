@@ -2925,24 +2925,10 @@ fn l2r_io_get_tid() -> u64 { l2r_io_get_tid_u64() }
 fn l2r_io_get_tid_u64() -> u64 [{ { extern "C" { fn gettid() -> i32; } unsafe { gettid() as u64 } } }];
 
 #[ffi(import)]
-fn l2r_io_mono_ms_now_u64() -> u64 [{
-    {
-        let mut ts = [0i64; 2];
-        extern "C" { fn clock_gettime(clk: i32, ts: *mut i64) -> i32; }
-        unsafe { clock_gettime(1, ts.as_mut_ptr()) };
-        (ts[0] as u64) * 1000 + (ts[1] as u64) / 1000000
-    }
-}];
+fn l2r_io_mono_ms_now_u64() -> u64 [{ leanrt::io::mono_nanos() / 1000000 }];
 
 #[ffi(import)]
-fn l2r_io_mono_nanos_now_u64() -> u64 [{
-    {
-        let mut ts = [0i64; 2];
-        extern "C" { fn clock_gettime(clk: i32, ts: *mut i64) -> i32; }
-        unsafe { clock_gettime(1, ts.as_mut_ptr()) };
-        (ts[0] as u64) * 1000000000 + (ts[1] as u64)
-    }
-}];
+fn l2r_io_mono_nanos_now_u64() -> u64 [{ leanrt::io::mono_nanos() }];
 
 
 #[ffi(import)]
@@ -2997,27 +2983,27 @@ fn l2r_io_finish<T, R>(v : T, ok : T -> R, err : u32 -> (u32 -> (LStr -> (LStr -
 #[ffi(import)]
 fn l2r_fs_open(path : LStr, mode : u8) -> LHandle [{ { let h = leanrt::fs::open_file(&path, mode); leanrt::rc_release(path); h } }];
 #[ffi(import)]
-fn l2r_fs_put_str(h : LHandle, s : LStr) -> u64 [{ { leanrt::fs::put_str(&h, &s); leanrt::rc_release(s); leanrt::rc_release(h); 0 } }];
+fn l2r_fs_put_str(h : LHandle, s : LStr) -> u64 [{ { leanrt::fs::owned::put_str(h, s); 0 } }];
 #[ffi(import)]
-fn l2r_fs_write(h : LHandle, b : RVec<u8>) -> u64 [{ { leanrt::fs::put_str(&h, leanrt::array::as_slice(&b)); leanrt::array::release(b); leanrt::rc_release(h); 0 } }];
+fn l2r_fs_write(h : LHandle, b : RVec<u8>) -> u64 [{ { leanrt::fs::owned::write(h, b); 0 } }];
 #[ffi(import)]
-fn l2r_fs_flush(h : LHandle) -> u64 [{ { leanrt::fs::flush(&h); leanrt::rc_release(h); 0 } }];
+fn l2r_fs_flush(h : LHandle) -> u64 [{ { leanrt::fs::owned::flush(h); 0 } }];
 #[ffi(import)]
-fn l2r_fs_read(h : LHandle, n : u64) -> RVec<u8> [{ { let v = leanrt::fs::read_bytes(&h, n); leanrt::rc_release(h); leanrt::array::bytes_of_string(Rc::new(v)) } }];
+fn l2r_fs_read(h : LHandle, n : u64) -> RVec<u8> [{ leanrt::fs::owned::read(h, n) }];
 #[ffi(import)]
-fn l2r_fs_get_line(h : LHandle) -> LStr [{ { let s = leanrt::fs::get_line(&h); leanrt::rc_release(h); s } }];
+fn l2r_fs_get_line(h : LHandle) -> LStr [{ leanrt::fs::owned::get_line(h) }];
 #[ffi(import)]
-fn l2r_fs_is_tty(h : LHandle) -> bool [{ { let r = leanrt::fs::is_tty(&h); leanrt::rc_release(h); r } }];
+fn l2r_fs_is_tty(h : LHandle) -> bool [{ leanrt::fs::owned::is_tty(h) }];
 #[ffi(import)]
-fn l2r_fs_rewind(h : LHandle) -> u64 [{ { leanrt::fs::rewind(&h); leanrt::rc_release(h); 0 } }];
+fn l2r_fs_rewind(h : LHandle) -> u64 [{ { leanrt::fs::owned::rewind(h); 0 } }];
 #[ffi(import)]
-fn l2r_fs_truncate(h : LHandle) -> u64 [{ { leanrt::fs::truncate(&h); leanrt::rc_release(h); 0 } }];
+fn l2r_fs_truncate(h : LHandle) -> u64 [{ { leanrt::fs::owned::truncate(h); 0 } }];
 #[ffi(import)]
-fn l2r_fs_lock(h : LHandle, exclusive : bool) -> u64 [{ { leanrt::fs::lock(&h, exclusive); leanrt::rc_release(h); 0 } }];
+fn l2r_fs_lock(h : LHandle, exclusive : bool) -> u64 [{ { leanrt::fs::owned::lock(h, exclusive); 0 } }];
 #[ffi(import)]
-fn l2r_fs_try_lock(h : LHandle, exclusive : bool) -> bool [{ { let r = leanrt::fs::try_lock(&h, exclusive); leanrt::rc_release(h); r } }];
+fn l2r_fs_try_lock(h : LHandle, exclusive : bool) -> bool [{ leanrt::fs::owned::try_lock(h, exclusive) }];
 #[ffi(import)]
-fn l2r_fs_unlock(h : LHandle) -> u64 [{ { leanrt::fs::unlock(&h); leanrt::rc_release(h); 0 } }];
+fn l2r_fs_unlock(h : LHandle) -> u64 [{ { leanrt::fs::owned::unlock(h); 0 } }];
 #[ffi(import)]
 fn l2r_fs_remove_file(p : LStr) -> u64 [{ { leanrt::fs::remove_file(&p); leanrt::rc_release(p); 0 } }];
 #[ffi(import)]
@@ -3049,9 +3035,9 @@ fn l2r_fs_metadata(p : LStr, follow : bool) -> RVec<u64> [{
 // `Handle.isEof` / `Handle.isTty` are `BaseIO` (they cannot fail): payload
 // primitives named after the extern symbols.
 #[ffi(import)]
-fn l2r_io_prim_handle_is_eof(h : LHandle) -> bool [{ { let r = leanrt::fs::is_eof(&h); leanrt::rc_release(h); r } }];
+fn l2r_io_prim_handle_is_eof(h : LHandle) -> bool [{ leanrt::fs::owned::is_eof(h) }];
 #[ffi(import)]
-fn l2r_io_prim_handle_is_tty(h : LHandle) -> bool [{ { let r = leanrt::fs::is_tty(&h); leanrt::rc_release(h); r } }];
+fn l2r_io_prim_handle_is_tty(h : LHandle) -> bool [{ leanrt::fs::owned::is_tty(h) }];
 // `IO.currentDir` / `IO.appPath` (user errors) and
 // `IO.Process.getCurrentDir` / `setCurrentDir` (errno errors).
 #[ffi(import)]

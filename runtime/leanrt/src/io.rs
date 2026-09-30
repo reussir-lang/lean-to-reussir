@@ -184,3 +184,14 @@ pub fn exit(code: i32) -> ! {
     flush_at_exit_registered();
     std::process::exit(code)
 }
+
+/// `CLOCK_MONOTONIC` in nanoseconds (`IO.monoNanosNow`, `IO.monoMsNow`).
+/// Out of line: inlined, its `timespec` buffer is a stack slot whose address
+/// escapes, and LLVM then keeps the calling loop's self tail calls as calls.
+#[inline(never)]
+pub fn mono_nanos() -> u64 {
+    let mut ts = [0i64; 2];
+    extern "C" { fn clock_gettime(clk: i32, ts: *mut i64) -> i32; }
+    unsafe { clock_gettime(1, ts.as_mut_ptr()) };
+    (ts[0] as u64) * 1000000000 + (ts[1] as u64)
+}
