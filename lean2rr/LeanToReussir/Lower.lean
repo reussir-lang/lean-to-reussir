@@ -40,24 +40,100 @@ structure CodeCtx where
 
 /-! ## Conversions -/
 
-partial def coerce (e : RR.Expr) (src dst : RR.Ty) : LowerM RR.Expr := do
-  if src == dst then return e
-  if dst == RR.Ty.box then
-    return .ctor boxName (some (← boxVariant src)) #[e]
-  if src == RR.Ty.box then
-    let v ← boxVariant dst
-    let x ← fresh "ub"
-    return .mtch e #[
-      { ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) },
-      { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[dst] #[]) }]
-  match src, dst with
-  | .fn a1 b1, .fn a2 b2 =>
-    let x ← fresh "cv"
-    let arg ← coerce (.var x) a2 a1
-    let res ← coerce (.apply e arg) b1 b2
-    return .lam x a2 (.ofExpr res)
-  | _, _ =>
-    throwError "lean2rr: no representation conversion from {src.render} to {dst.render} (not implemented)"
+/-- Head constant of the Lean type a generated nominal type represents. -/
+def nominalHead (n : String) : LowerM (Option Name) := do
+  match (← get).typeKeys[n]? with
+  | some k => return k.getAppFn.constName?
+  | none => return none
+
+mutual
+  /-- Convert `e` from representation `src` to `dst`. Besides `Box`
+  conversions and closure wrappers, two instantiations of the same inductive
+  are converted structurally: Lean's mono `cse` compares erased types, so it
+  may merge e.g. `[] : List Shape` with `[] : List Nat`; such a merged value
+  carries no data at the differing type parameter, so rebuilding it at the
+  target type is always possible (an arm that would need an impossible
+  element conversion is unreachable). -/
+  partial def coerce (e : RR.Expr) (src dst : RR.Ty) : LowerM RR.Expr := do
+    match ← tryCoerce e src dst with
+    | some r => return r
+    | none =>
+      let keyOf (t : RR.Ty) : LowerM String := do
+        match t with
+        | .named n => return match (← get).typeKeys[n]? with | some k => s!"{n} = {k}" | none => n
+        | _ => return t.render
+      throwError "lean2rr: no representation conversion from {← keyOf src} to {← keyOf dst}"
+
+  partial def tryCoerce (e : RR.Expr) (src dst : RR.Ty) : LowerM (Option RR.Expr) := do
+    if src == dst then return some e
+    if dst == RR.Ty.box then
+      return some (.ctor boxName (some (← boxVariant src)) #[e])
+    if src == RR.Ty.box then
+      let v ← boxVariant dst
+      let x ← fresh "ub"
+      return some (.mtch e #[
+        { ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) },
+        { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[dst] #[]) }])
+    match src, dst with
+    | .fn a1 b1, .fn a2 b2 =>
+      let x ← fresh "cv"
+      let some arg ← tryCoerce (.var x) a2 a1 | return none
+      let some res ← tryCoerce (.apply e arg) b1 b2 | return none
+      return some (.lam x a2 (.ofExpr res))
+    | .named sn, .named dn =>
+      let some sh ← nominalHead sn | return none
+      let some dh ← nominalHead dn | return none
+      if sh != dh then return none
+      return some (.call (← structConv sn dn) #[] #[e])
+    | .app "RVec" #[se], .app "RVec" #[de] =>
+      -- Arrays merged across types: rebuild element by element.
+      let _ := (se, de)
+      return none
+    | _, _ => return none
+
+  /-- The generated function converting instantiation `sn` to `dn` of the
+  same inductive (cached). -/
+  partial def structConv (sn dn : String) : LowerM String := do
+    let fname := s!"l2r_conv_{sn}_{dn}"
+    if (← get).fns.any (fun | .fn n .. => n == fname | _ => false) ||
+       (← get).convsInProgress.contains fname then return fname
+    modify fun s => { s with convsInProgress := s.convsInProgress.insert fname }
+    let some si := (← get).typeInfos[sn]? | throwError "lean2rr: no type {sn}"
+    let some di := (← get).typeInfos[dn]? | throwError "lean2rr: no type {dn}"
+    let mut arms := #[]
+    let mut structBody : Option RR.Block := none
+    for ctor in si.ctorOrder do
+      let some sl := si.ctors.find? ctor | continue
+      let some dl := di.ctors.find? ctor | continue
+      let srcFields := sl.fields.filterMap id
+      let dstFields := dl.fields.filterMap id
+      let names ← srcFields.mapM fun _ => fresh "cf"
+      let mut vals := #[]
+      let mut possible := true
+      for h : i in [:dstFields.size] do
+        let (_, dt) := dstFields[i]
+        match srcFields[i]? with
+        | some (_, st) =>
+          match ← tryCoerce (.var names[i]!) st dt with
+          | some v => vals := vals.push v
+          | none => possible := false
+        | none => possible := false
+      let body : RR.Block := if possible then
+          .ofExpr (match di.shape with
+            | .struct => .ctor dn none vals
+            | _ => .ctor dn (some dl.variant) vals)
+        else .ofExpr (.call "l2r_unreachable" #[.named dn] #[])
+      match si.shape with
+      | .struct =>
+        structBody := some ⟨(names.zip srcFields).mapIdx (fun i (n, (_, t)) => (n, some t, RR.Expr.field (.var "x") i)), body.result⟩
+      | _ =>
+        arms := arms.push { ty := sn, ctor := some sl.variant, binders := names.map some, body }
+    let body := match structBody with
+      | some b => b
+      | none => .ofExpr (.mtch (.var "x") arms)
+    modify fun s => { s with fns := s.fns.push (.fn fname #[("x", .named sn)] (.named dn) body) }
+    return fname
+end
 
 /-! ## Declarations and signatures -/
 
@@ -225,6 +301,51 @@ def listFold (name : String) (listTy accTy elemTy : RR.Ty) (step : RR.Expr → R
 (translation plan §5.8); returns `none` for ordinary externs. -/
 def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array RR.Expr) :
     LowerM (Option RR.Expr) := do
+  -- Tasks run eagerly and thunks are called on demand: the glue follows the
+  -- reference bodies of these externs in Lean's source (translation plan §6).
+  -- `Task α` and `Thunk α` are Lean's one-field structures.
+  let structOf (t : Expr) : LowerM String := do
+    match ← lowerType t with
+    | .named n => return n
+    | rt => throwError "lean2rr: expected a structure type, got {rt.render}"
+  match orig with
+  | ``Task.get => return some (.field args[0]! 0)
+  | ``Task.spawn => return some (.ctor (← structOf ret) none #[.apply args[0]! .unitVal])
+  | ``Task.map => return some (.ctor (← structOf ret) none #[.apply args[0]! (.field args[1]! 0)])
+  | ``Task.bind => return some (.apply args[1]! (.field args[0]! 0))
+  | ``Thunk.pure =>
+    let x ← fresh "tu"
+    return some (.ctor (← structOf ret) none #[.lam x RR.Ty.unit (.ofExpr args[0]!)])
+  | ``Thunk.get => return some (.apply (.field args[0]! 0) .unitVal)
+  -- BaseIO task combinators, run eagerly: `asTask act := Task.pure <$> act`,
+  -- `mapTask f t := Task.pure <$> f t.get`, `bindTask t f := f t.get`,
+  -- `wait t := pure t.get`. Results are `ST.Out` structs.
+  | ``IO.asTask =>
+    let resTy ← lowerType ret
+    let taskTy ← ioPayloadTy resTy
+    let .named taskN := taskTy | return none
+    let r ← fresh "at"
+    let rTy ← match ← lowerType params[0]! with | .fn _ c => pure c | t => pure t
+    return some (.block ⟨#[(r, some rTy, .apply args[0]! args[2]!)],
+      ← wrapIOResult resTy (.ctor taskN none #[.field (.var r) 0])⟩)
+  | ``IO.mapTask =>
+    let resTy ← lowerType ret
+    let taskTy ← ioPayloadTy resTy
+    let .named taskN := taskTy | return none
+    let r ← fresh "mt"
+    let fTy ← lowerType params[0]!
+    let rTy := match fTy with | .fn _ (.fn _ c) => c | t => t
+    return some (.block ⟨#[(r, some rTy, .apply (.apply args[0]! (.field args[1]! 0)) args[4]!)],
+      ← wrapIOResult resTy (.ctor taskN none #[.field (.var r) 0])⟩)
+  | ``IO.bindTask => return some (.apply (.apply args[1]! (.field args[0]! 0)) args[4]!)
+  | ``IO.wait => return some (← wrapIOResult (← lowerType ret) (.field args[0]! 0))
+  -- `IO.Process.exit : UInt8 → IO α` never returns.
+  | ``IO.Process.exit =>
+    let rt ← lowerType ret
+    let e ← fresh "ex"
+    return some (.block ⟨#[(e, some (.named "u64"), .call "l2r_process_exit" #[] #[args[0]!])],
+      .call "l2r_unreachable" #[rt] #[]⟩)
+  | _ => pure ()
   -- `String.ofList : List Char → String`
   if orig == ``String.ofList then
     let lt ← lowerType params[0]!
@@ -264,16 +385,36 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   return none
 
 /-- Emit a saturated extern call. Default: call the prelude function named
-after the C symbol with the passed arguments. -/
+after the C symbol with the passed arguments.
+
+For extern instances (polymorphic externs such as `Array.push {α}`), the
+prelude function is generic; it receives the storage types of the type
+arguments explicitly. A type argument whose values cannot cross Reussir's
+FFI boundary (a value type, a closure) is stored boxed in a one-field shared
+struct, so arguments of that type are wrapped and a result of that type is
+unwrapped here. -/
 def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
     (args : Array RR.Expr) : LowerM RR.Expr := do
   if let some e ← customExtern orig params ret args then return e
   let sym ← externSymbol orig
+  -- Storage for each type argument: (Lean type, storage type, boxed?).
+  let mut storage := #[]
+  for t in typeArgs do
+    let rt ← lowerType t
+    let (st, boxed) ← arrayElemTy rt
+    storage := storage.push (t.consumeMData, st, boxed)
+  let boxOf (t : Expr) : Option RR.Ty :=
+    storage.findSome? fun (lt, st, boxed) => if boxed && lt == t.consumeMData then some st else none
   let mut passed := #[]
   for (p, a) in params.zip args do
-    if externParamPassed p then passed := passed.push a
-  let _ := (typeArgs, ret)
-  return .call sym #[] passed
+    if externParamPassed p then
+      match boxOf p with
+      | some (.named bn) => passed := passed.push (.ctor bn none #[a])
+      | _ => passed := passed.push a
+  let call := RR.Expr.call sym (storage.map (·.2.1)) passed
+  match boxOf ret with
+  | some _ => return .field call 0
+  | none => return call
 
 /-! ## Values -/
 
@@ -639,7 +780,8 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let ret ← lowerType r
   let pnames ← d.params.mapM fun _ => fresh "a"
   let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {} }
-  let block ← lowerCode ctx (chooseOutlined body) ret body
+  let block ← try lowerCode ctx (chooseOutlined body) ret body
+    catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
   modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
 
 end LeanToReussir

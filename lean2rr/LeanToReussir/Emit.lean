@@ -1,5 +1,6 @@
 import Lean
 import LeanToReussir.Lower
+import LeanToReussir.MonoRetype
 
 /-!
 # Program assembly
@@ -78,6 +79,7 @@ def externReport (decls : Array (Decl .pure)) (keys : NameMap InstKey) : CoreM S
 def lowerProgram (prelude : String) (mainInst errStr : Name) (decls : Array (Decl .pure))
     (keys : NameMap InstKey) : CoreM String := do
   let table ← programRelevance decls
+  let decls ← retypeMono table decls
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys }
   let act : LowerM Unit := do
     for d in decls do lowerDecl d

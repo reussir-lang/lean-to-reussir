@@ -132,6 +132,12 @@ fn l2r_exit(code : u32) -> unit [{
 }];
 
 #[ffi(import)]
+fn l2r_process_exit(code : u8) -> u64 [{
+    let _ = std::io::stdout().flush();
+    std::process::exit(code as i32)
+}];
+
+#[ffi(import)]
 fn l2r_argc() -> u64 [{ (std::env::args().count() as u64).saturating_sub(1) }];
 
 #[ffi(import)]

@@ -61,6 +61,8 @@ structure LowerState where
   /-- Mono type (keyed by relevant arguments) ↦ generated type name. -/
   typeNames : Std.HashMap Expr String := {}
   typeInfos : Std.HashMap String TypeInfo := {}
+  /-- Generated type name ↦ the (keyed) Lean type it represents, for diagnostics. -/
+  typeKeys : Std.HashMap String Expr := {}
   /-- Generated type items, in creation order. -/
   typeItems : Array RR.Item := #[]
   /-- Variants of the uniform `Box` type: boxed Reussir type ↦ variant name. -/
@@ -69,6 +71,8 @@ structure LowerState where
   tupleTypes : Std.HashMap (Array RR.Ty) String := {}
   /-- Generated functions (declarations and outlined join points). -/
   fns : Array RR.Item := #[]
+  /-- Structural conversions being generated (for recursive types). -/
+  convsInProgress : Std.HashSet String := {}
   counter : Nat := 0
 
 abbrev LowerM := ReaderT LowerCtx (StateRefT LowerState CoreM)
@@ -175,7 +179,7 @@ mutual
     let key := mkAppN (.const ival.name []) keyArgs
     if let some n := (← get).typeNames[key]? then return .named n
     let name ← fresh s!"T_{nameHint ival.name}_"
-    modify fun s => { s with typeNames := s.typeNames.insert key name }
+    modify fun s => { s with typeNames := s.typeNames.insert key name, typeKeys := s.typeKeys.insert name key }
     -- Constructor layouts, fields translated through Lean's own `toMonoType`
     -- so representation decisions (trivial structures, `Decidable`, …) match.
     let mut ctors : NameMap CtorLayout := {}
