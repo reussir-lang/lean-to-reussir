@@ -1,0 +1,20 @@
+[
+  {"name": "rbtree", "exe": "rbtree", "module": "Rbtree", "origin": "Perceus: Koka test/bench/lean/rbtree.lean", "sizes": {"small": 100000, "medium": 1000000, "bench": 8000000}},
+  {"name": "rbtree-ck", "exe": "rbtree-ck", "module": "RbtreeCk", "origin": "Perceus: Koka test/bench/lean/rbtree-ck.lean", "sizes": {"small": 100000, "medium": 1000000, "bench": 4200000}},
+  {"name": "deriv", "exe": "deriv", "module": "Deriv", "origin": "Perceus: Koka test/bench/lean/deriv.lean (current-syntax copy: lean4 tests/compile_bench/deriv.lean)", "sizes": {"small": 8, "medium": 10, "bench": 11}},
+  {"name": "nqueens", "exe": "nqueens", "module": "Nqueens", "origin": "Perceus: port of Koka test/bench/koka/nqueens.kk (no Lean original)", "sizes": {"small": 10, "medium": 13, "bench": 14}},
+  {"name": "cfold", "exe": "cfold", "module": "Cfold", "origin": "Perceus: lean4 tests/compile_bench/const_fold.lean (source of Koka cfold.kk)", "sizes": {"small": 15, "medium": 20, "bench": 23}},
+  {"name": "binarytrees", "exe": "binarytrees", "module": "Binarytrees", "origin": "Lean 4: tests/compile_bench/binarytrees.lean", "sizes": {"small": 14, "medium": 18, "bench": 21}},
+  {"name": "qsort", "exe": "qsort", "module": "Qsort", "origin": "Lean 4: tests/compile_bench/qsort.lean (+ checksum output)", "sizes": {"small": 80, "medium": 250, "bench": 400}},
+  {"name": "unionfind", "exe": "unionfind", "module": "Unionfind", "origin": "Lean 4: tests/compile_bench/unionfind.lean", "sizes": {"small": 70000, "medium": 1000000, "bench": 3000000}},
+  {"name": "rbmap", "exe": "rbmap", "module": "Rbmap", "origin": "Lean 4: tests/compile_bench/rbmap.lean", "sizes": {"small": 100000, "medium": 1000000, "bench": 8000000}},
+  {"name": "liasolver", "exe": "liasolver", "module": "Liasolver", "origin": "Lean 4: tests/compile_bench/liasolver.lean (input embedded)", "sizes": {"small": 16, "medium": 30, "bench": 50}},
+  {"name": "bignum", "exe": "bignum", "module": "Bignum", "origin": "new", "sizes": {"small": 1000, "medium": 3000, "bench": 6000}},
+  {"name": "sieve", "exe": "sieve", "module": "Sieve", "origin": "new", "sizes": {"small": 1000000, "medium": 10000000, "bench": 50000000}},
+  {"name": "mergesort", "exe": "mergesort", "module": "Mergesort", "origin": "new", "sizes": {"small": 10000, "medium": 100000, "bench": 300000}},
+  {"name": "higher-order", "exe": "higher-order", "module": "HigherOrder", "origin": "new", "sizes": {"small": 100000, "medium": 3000000, "bench": 20000000}},
+  {"name": "monadic-interp", "exe": "monadic-interp", "module": "MonadicInterp", "origin": "new", "sizes": {"small": 1000, "medium": 10000, "bench": 30000}},
+  {"name": "typeclass-generic", "exe": "typeclass-generic", "module": "TypeclassGeneric", "origin": "new", "sizes": {"small": 100000, "medium": 1000000, "bench": 10000000}},
+  {"name": "strings", "exe": "strings", "module": "Strings", "origin": "new", "sizes": {"small": 20000, "medium": 200000, "bench": 1000000}},
+  {"name": "hashmap", "exe": "hashmap", "module": "Hashmap", "origin": "new", "sizes": {"small": 10000, "medium": 1000000, "bench": 4000000}}
+]

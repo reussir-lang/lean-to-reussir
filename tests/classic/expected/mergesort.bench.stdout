@@ -1,0 +1,7 @@
+Nat: n=300000 sorted=true perm=true first=5 last=999999 hash=14803185426433076359
+Int: n=300000 sorted=true perm=true first=-999981 last=999999 hash=15536182096326175102
+String: n=300000 sorted=true perm=true first=kakaka last=ßßß hash=11522692029983491403
+UInt64: n=300000 sorted=true perm=true first=6069 last=2147476767 hash=16662055492367360865
+Person: n=300000 sorted=true perm=true first=kakaka/0/19 last=ßßß/89/242 hash=8622307840095899376
+Keyed: n=300000 sorted=true stable=true tagHash=17894495175452584579
+small: agree=true empty=0 one=[7] rev=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] dups=[1, 1, 2, 3, 3] strs=[, B, a, ab, b, é]

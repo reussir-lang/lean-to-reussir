@@ -1,0 +1,7 @@
+sum: Nat=14999850000 Int=-50000 UInt64=923015048159958128 Float=6243750.000000 V2=(4999950000, -9999900000)
+mconcat: Nat=2432902008176640000 Int=-10 UInt64=12244409579944489793 Float=-0.750000 String=abçde List=[1, 2, 3, 4]
+mconcat derived: pair=(42, xyz) option=some 10 optionNone=none optionString=some "pq"
+mpow: loop=3842887652168630776 nat=136318165 int=-7000 float=2.718146 string=ababababab fibInt=222232244629420445529739893461909967206666939096499764990979600 fibU64=17658870469870104080
+shapes: circles=299700.000000 describe=[circle area=3.000000, rect 2.000000x3.500000, 6-gon area=6.000000, circle area=0.750000, rect 1.000000x1.000000] manyArea=35500.000000
+container: bag=12497500 array=-10
+functor: tree=37492500 list=[3, 6, 9] option=(some 42) none=none array=#[15, 18]
