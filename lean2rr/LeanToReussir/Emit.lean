@@ -304,25 +304,55 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
   -- (`l2r_run_pending_tasks` is generated at the end, `taskDispatchFns`.)
   let drain := "let sd : u64 = l2r_task_shutdown();\nlet pt : u64 = l2r_run_pending_tasks();\n"
   let mainCode := s!"let tm : u64 = l2r_task_manager_start();\nlet se : u64 = l2r_std_enter();\nlet r = {fnName mainInst}({argExpr}L2RUnit::u\{});\nlet sl : u64 = l2r_std_leave();\n{drain}match r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
-  -- The startup chain ends by clearing `IO.initializing`; an error stops
-  -- the program before main (`l2r_uncaught_exception` exits).
-  let mut code := "l2r_init_done()"
-  -- Build the startup chain from the last step outwards.
-  for h : i in [:startup.size] do
-    let j := startup.size - 1 - i
-    match startup[j]! with
-    | .caf inst => code := s!"let caf{j} = {fnName inst}();\n" ++ code
-    | .ioUnit inst =>
-      let (t, ok, err, _) ← ioResultOf inst
-      code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\n{code}\n},\n{t}::{err}(e{j}) => \{ {uncaught s!"e{j}"} }\n}"
-    | .init decl inst =>
-      let (t, ok, err, field) ← ioResultOf inst
-      let some slot := (← get).initSlots.find? decl | throwError "lean2rr: no slot for {decl}"
-      let vt := field.getD RR.Ty.unit
-      let (st, boxed) ← arrayElemTy vt
-      let stored := if boxed then match st with | .named bn => s!"{bn}\{v{j}}" | _ => s!"v{j}" else s!"v{j}"
-      code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\nlet s{j} : {st.render} = l2r_once_set<{st.render}>({slot}, {stored});\n{code}\n},\n{t}::{err}(e{j}) => \{ {uncaught s!"e{j}"} }\n}"
-  let body := s!"fn l2r_init_body() \{\nlet si : u64 = l2r_set_initializing(true);\n{code}\n}\n\n" ++
+  -- The startup chain, cut into functions of at most `chunk` steps: one
+  -- chain of nested matches per program would be as deep as the program
+  -- has initializers, and rrc's recursive lowering overflows its stack on
+  -- a few thousand. Each function returns 0 once its steps succeeded; an
+  -- error in an initializer is reported and exits (`l2r_init_failed`), so
+  -- later initializers do not run. The chain ends by clearing
+  -- `IO.initializing`.
+  let chunk := 128
+  let failed (e : String) := s!"l2r_init_failed({fnName errStr}({e}))"
+  let mut initFns := ""
+  let mut calls : Array String := #[]
+  let mut start := 0
+  while start < startup.size do
+    let stop := min startup.size (start + chunk)
+    -- Build the chunk's chain from its last step outwards.
+    let mut code := "0"
+    for i in [:stop - start] do
+      let j := stop - 1 - i
+      match startup[j]! with
+      | .caf inst => code := s!"let caf{j} = {fnName inst}();\n" ++ code
+      | .ioUnit inst =>
+        let (t, ok, err, _) ← ioResultOf inst
+        code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\n{code}\n},\n{t}::{err}(e{j}) => \{ {failed s!"e{j}"} }\n}"
+      | .init decl inst =>
+        let (t, ok, err, field) ← ioResultOf inst
+        let some slot := (← get).initSlots.find? decl | throwError "lean2rr: no slot for {decl}"
+        let vt := field.getD RR.Ty.unit
+        let (st, boxed) ← arrayElemTy vt
+        let stored := if boxed then match st with | .named bn => s!"{bn}\{v{j}}" | _ => s!"v{j}" else s!"v{j}"
+        code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\nlet s{j} : {st.render} = l2r_once_set<{st.render}>({slot}, {stored});\n{code}\n},\n{t}::{err}(e{j}) => \{ {failed s!"e{j}"} }\n}"
+    let name := s!"l2r_init_chunk_{calls.size}"
+    initFns := initFns ++ s!"fn {name}() -> u64 \{\n{code}\n}\n\n"
+    calls := calls.push s!"let ic{calls.size} : u64 = {name}();"
+    start := stop
+  -- Many chunks: group their calls the same way.
+  let mut level := 0
+  while calls.size > chunk do
+    let mut next : Array String := #[]
+    let mut g := 0
+    while g * chunk < calls.size do
+      let part := calls.extract (g * chunk) ((g + 1) * chunk)
+      let name := s!"l2r_init_group_{level}_{g}"
+      initFns := initFns ++ s!"fn {name}() -> u64 \{\n{"\n".intercalate part.toList}\n0\n}\n\n"
+      next := next.push s!"let ig{g} : u64 = {name}();"
+      g := g + 1
+    calls := next
+    level := level + 1
+  let body := initFns ++
+    s!"fn l2r_init_body() \{\nlet si : u64 = l2r_set_initializing(true);\n{"\n".intercalate calls.toList}\nl2r_init_done()\n}\n\n" ++
     s!"fn l2r_main_body() \{\n{mainCode}\n}\n"
   -- Like Lean's runtime: the module initializers run on the process's main
   -- thread (8 MiB stack) with `IO.initializing` true; then `main` runs on a
@@ -336,6 +366,7 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
     "extern \"C\" trampoline \"l2r_init_body\" = l2r_init_body;\n" ++
     "extern \"C\" trampoline \"l2r_main_body\" = l2r_main_body;\n\n" ++
     "#[ffi(import)]\nfn l2r_init_done() -> unit [{ leanrt::rt::set_initializing(false) }];\n\n" ++
+    "#[ffi(import)]\nfn l2r_init_failed(msg : LStr) -> u64 [{ leanrt::uncaught_exception(&msg) }];\n\n" ++
     "#[ffi(import)]\nfn l2r_run_main() [{ {\n" ++
     "    extern \"C\" { fn l2r_init_body(); fn l2r_main_body(); }\n" ++
     "    leanrt::rt::run_main2(|| unsafe { l2r_init_body() }, || unsafe { l2r_main_body() })\n} }];\n\n" ++

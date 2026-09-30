@@ -1085,6 +1085,13 @@ lean2rr itself never runs the program's initializers: it loads the imported
 extension states without Lean's init step, which would execute the
 program's `initialize` actions inside the compiler.
 
+The startup steps are emitted as functions of at most 128 steps each,
+called in order (with a further level of grouping when there are more than
+128 of those): one chain of nested matches, one per initializer, would be
+as deep as the program has initializers, and rrc's recursive lowering
+overflows its stack on a few thousand. An error in a step exits from inside
+it, so later steps do not run.
+
 The storage is a runtime once-cell per constant (the prelude's
 `l2r_once_has`/`get`/`set` over `leanrt::once`), holding a value that is
 never freed. A value that is not a pointer-sized boundary type is wrapped in
