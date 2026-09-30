@@ -19,17 +19,15 @@
 //! (so `4294967294` for `ENOENT` as a `UInt32`), the message is
 //! `uv_strerror`'s, and errnos libuv does not map are `otherError`s.
 //!
-//! Buffering follows glibc's `FILE`: a write buffer of `st_blksize` bytes
-//! (at most `BUFSIZ`), line buffered on a terminal, filled and flushed as
-//! `_IO_new_file_xsputn` does, so other readers of the file see the same
-//! bytes at the same points as natively. Open handles are flushed when the
-//! process exits (as C's `exit` flushes every `FILE`).
+//! A handle is a model of the glibc `FILE` native Lean uses (`cfile`), so
+//! buffering, file positions and the end-of-file/error indicators behave as
+//! natively. Open handles are finished at exit as C's `exit` does.
 
+use crate::cfile::{CFile, IS_APPENDING, NO_READS, NO_WRITES};
 use crate::string::{from_bytes, from_bytes_lossy, LStr};
 use reussir_rt::rc::Rc;
 use std::any::Any;
 use std::cell::UnsafeCell;
-use std::ffi::c_void;
 
 pub type LHandle = Rc<Box<dyn Any>>;
 
@@ -89,10 +87,6 @@ fn set_user_error(msg: &[u8]) {
 
 extern "C" {
     fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
-    fn close(fd: i32) -> i32;
-    fn read(fd: i32, buf: *mut c_void, n: usize) -> isize;
-    fn lseek(fd: i32, off: i64, whence: i32) -> i64;
-    fn ftruncate(fd: i32, len: i64) -> i32;
     fn flock(fd: i32, op: i32) -> i32;
     fn isatty(fd: i32) -> i32;
     fn unlink(path: *const std::ffi::c_char) -> i32;
@@ -105,12 +99,9 @@ extern "C" {
     fn mkostemp(template: *mut std::ffi::c_char, flags: i32) -> i32;
     fn mkdtemp(template: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
     fn strerror(e: i32) -> *const std::ffi::c_char;
-    fn __errno_location() -> *mut i32;
 }
 
-fn errno_now() -> i32 {
-    unsafe { *__errno_location() }
-}
+use crate::cfile::errno_now;
 
 const O_RDONLY: i32 = 0;
 const O_WRONLY: i32 = 1;
@@ -121,6 +112,7 @@ const O_TRUNC: i32 = 0o1000;
 const O_APPEND: i32 = 0o2000;
 const O_CLOEXEC: i32 = 0o2000000;
 const EINVAL: i32 = 22;
+const ENOMEM: i32 = 12;
 const LOCK_SH: i32 = 1;
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
@@ -139,151 +131,46 @@ fn c_path(p: &[u8]) -> Option<Vec<u8>> {
     Some(v)
 }
 
+/// A handle: a glibc `FILE` model over the descriptor (see `cfile`).
 pub struct FileHandle {
-    fd: i32,
-    /// Opened for reading / for writing (glibc's `_IO_NO_READS` and
-    /// `_IO_NO_WRITES`: the other direction fails at once with `EBADF`).
-    readable: bool,
-    writable: bool,
-    rbuf: Vec<u8>,
-    rpos: usize,
-    w: crate::io::WBuf,
-    /// C's sticky end-of-file indicator (`feof`), cleared by `clearerr`
-    /// (Lean's read and getLine clear it when they return at end of file)
-    /// and by seeking.
-    eof: bool,
-    /// C's sticky error indicator (`ferror`), set by any failed read or
-    /// write. Lean's `getLine` checks it after reading: once set, every
-    /// `getLine` fails (with the current `errno`); `read` clears it only
-    /// when it returns at end of file.
-    err: bool,
+    f: CFile,
 }
 
-const EBADF: i32 = 9;
-
-fn set_c_errno(e: i32) {
-    unsafe { *__errno_location() = e }
-}
-
-const BUF: usize = 1 << 16;
-
-/// The open handles, oldest first, flushed at exit.
+/// The open handles, oldest first (glibc's `_IO_list_all`, reversed).
 static OPEN: Global<Vec<usize>> = Global(UnsafeCell::new(Vec::new()));
 
-/// Flush every open handle, most recently opened first (as glibc's
-/// `_IO_flush_all` at `exit`), ignoring errors.
-pub(crate) fn flush_all() {
+/// Apply `op` to every open handle, most recently opened first (the order
+/// of glibc's `_IO_flush_all`/`_IO_unbuffer_all` at exit).
+pub(crate) fn for_each_open(mut op: impl FnMut(&mut CFile)) {
     let open = unsafe { &*OPEN.0.get() };
     for &p in open.iter().rev() {
-        let _ = unsafe { &mut *(p as *mut FileHandle) }.flush();
-    }
-}
-
-impl FileHandle {
-    /// A failed operation: sets the error indicator.
-    fn failed<T>(&mut self, e: i32) -> Result<T, i32> {
-        self.err = true;
-        Err(e)
-    }
-
-    fn flush(&mut self) -> Result<(), i32> {
-        if self.w.buf.is_empty() {
-            return Ok(());
-        }
-        // The buffer is dropped even when the write fails (glibc).
-        let r = crate::io::write_fd(self.fd, &self.w.buf);
-        self.w.buf.clear();
-        match r {
-            Ok(()) => Ok(()),
-            Err(e) => self.failed(e),
-        }
-    }
-
-    fn write_bytes(&mut self, b: &[u8]) -> Result<(), i32> {
-        if !self.writable {
-            if b.is_empty() {
-                return Ok(());
-            }
-            set_c_errno(EBADF);
-            return self.failed(EBADF);
-        }
-        if !self.rbuf.is_empty() {
-            // C stdio needs a seek between reading and writing; drop the
-            // read-ahead and position the file where the reader was.
-            let back = (self.rbuf.len() - self.rpos) as i64;
-            unsafe { lseek(self.fd, -back, 1) };
-            self.rbuf.clear();
-            self.rpos = 0;
-        }
-        match crate::io::xsputn(self.fd, &mut self.w, b) {
-            Ok(()) => Ok(()),
-            Err(e) => self.failed(e),
-        }
-    }
-
-    /// Fill the read buffer; `Ok(false)` at end of file.
-    fn fill(&mut self) -> Result<bool, i32> {
-        if !self.readable {
-            set_c_errno(EBADF);
-            return self.failed(EBADF);
-        }
-        if !self.w.buf.is_empty() {
-            self.flush()?;
-        }
-        // Switching to reading: the next write finds no room (glibc).
-        self.w.putting = false;
-        self.rbuf.clear();
-        self.rpos = 0;
-        self.rbuf.resize(BUF, 0);
-        loop {
-            let n = unsafe { read(self.fd, self.rbuf.as_mut_ptr() as *mut c_void, BUF) };
-            if n < 0 {
-                let e = errno_now();
-                if e == 4 {
-                    continue;
-                }
-                self.rbuf.clear();
-                return self.failed(e);
-            }
-            self.rbuf.truncate(n as usize);
-            return Ok(n > 0);
-        }
+        op(&mut unsafe { &mut *(p as *mut FileHandle) }.f);
     }
 }
 
 impl Drop for FileHandle {
     fn drop(&mut self) {
-        if self.fd >= 0 {
+        if self.f.fd >= 0 {
             let open = unsafe { &mut *OPEN.0.get() };
             let me = self as *mut FileHandle as usize;
             if let Some(i) = open.iter().rposition(|&p| p == me) {
                 open.remove(i);
             }
-            let _ = self.flush();
-            unsafe { close(self.fd) };
+            self.f.close();
         }
     }
 }
 
 #[inline(always)]
-fn fh(h: &LHandle) -> &mut FileHandle {
+fn fh(h: &LHandle) -> &mut CFile {
     // Handles are shared and mutable (like `FILE*`); only this module
     // creates them, always holding a `FileHandle`.
     let b: &Box<dyn Any> = h;
-    unsafe { &mut *(*(&**b as *const dyn Any as *const UnsafeCell<FileHandle>)).get() }
+    unsafe { &mut (*(*(&**b as *const dyn Any as *const UnsafeCell<FileHandle>)).get()).f }
 }
 
-fn mk(fd: i32, readable: bool, writable: bool) -> LHandle {
-    let b = Box::new(UnsafeCell::new(FileHandle {
-        fd,
-        readable,
-        writable,
-        rbuf: Vec::new(),
-        rpos: 0,
-        w: crate::io::WBuf::new(),
-        eof: false,
-        err: false,
-    }));
+fn mk(fd: i32, flags: u32) -> LHandle {
+    let b = Box::new(UnsafeCell::new(FileHandle { f: CFile::new(fd, flags) }));
     if fd >= 0 {
         crate::io::flush_at_exit_registered();
         unsafe { &mut *OPEN.0.get() }.push(b.get() as usize);
@@ -292,24 +179,24 @@ fn mk(fd: i32, readable: bool, writable: bool) -> LHandle {
 }
 
 /// `IO.FS.Handle.mk path mode` (`read`, `write`, `writeNew`, `readWrite`,
-/// `append` = 0..4). On failure the result is a closed handle.
+/// `append` = 0..4): `open` and `fdopen` with `r`, `w`, `w`, `r+`, `a`. On
+/// failure the result is a closed handle.
 pub fn open_file(path: &[u8], mode: u8) -> LHandle {
-    let Some(c) = c_path(path) else { return mk(-1, false, false) };
-    let flags = O_CLOEXEC
-        | match mode {
-            0 => O_RDONLY,
-            1 => O_WRONLY | O_CREAT | O_TRUNC,
-            2 => O_WRONLY | O_CREAT | O_TRUNC | O_EXCL,
-            3 => O_RDWR,
-            _ => O_WRONLY | O_CREAT | O_APPEND,
-        };
-    let fd = unsafe { open(c.as_ptr() as *const std::ffi::c_char, flags, 0o666 as std::ffi::c_uint) };
+    let Some(c) = c_path(path) else { return mk(-1, 0) };
+    let (flags, fflags) = match mode {
+        0 => (O_RDONLY, NO_WRITES),
+        1 => (O_WRONLY | O_CREAT | O_TRUNC, NO_READS),
+        2 => (O_WRONLY | O_CREAT | O_TRUNC | O_EXCL, NO_READS),
+        3 => (O_RDWR, 0),
+        _ => (O_WRONLY | O_CREAT | O_APPEND, NO_READS | IS_APPENDING),
+    };
+    let fd = unsafe { open(c.as_ptr() as *const std::ffi::c_char, flags | O_CLOEXEC, 0o666 as std::ffi::c_uint) };
     if fd < 0 {
         set_err(errno_now(), Some(path));
     } else {
         set_ok();
     }
-    mk(fd, mode == 0 || mode == 3, mode != 0)
+    mk(fd, fflags)
 }
 
 fn outcome(r: Result<(), i32>) {
@@ -319,94 +206,58 @@ fn outcome(r: Result<(), i32>) {
     }
 }
 
+/// `Handle.putStr` / `Handle.write` (`fwrite`).
 pub fn put_str(h: &LHandle, s: &[u8]) {
-    outcome(fh(h).write_bytes(s))
+    outcome(fh(h).put(s))
 }
 
+/// `Handle.flush` (`fflush`).
 pub fn flush(h: &LHandle) {
     outcome(fh(h).flush())
 }
 
-/// Make buffered input available: `false` at end of file (sticky: nothing
-/// is read once it was seen) or after a read error (which sets the error
-/// indicator), as `getc`/`fread` stop.
-fn more_input(f: &mut FileHandle) -> bool {
-    if f.rpos < f.rbuf.len() {
-        return true;
+/// `lean_io_prim_handle_read`: a count whose byte array would overflow is
+/// `ENOMEM`; the array allocation itself has Lean's checks; then `fread`.
+pub(crate) fn lean_read(f: &mut CFile, n: u64) -> Result<Vec<u8>, i32> {
+    if n > u64::MAX - 24 {
+        return Err(ENOMEM);
     }
-    if f.eof {
-        return false;
-    }
-    match f.fill() {
-        Ok(true) => true,
-        Ok(false) => {
-            f.eof = true;
-            false
-        }
-        Err(_) => false,
-    }
+    crate::array::check_alloc(n, 1);
+    f.read(n as usize)
 }
 
-/// `Handle.read n` (`lean_io_prim_handle_read`): `fread` up to `n` bytes;
-/// any bytes read are a success. With nothing read, end of file clears
-/// both indicators (`clearerr`) and is a success, otherwise the error is
-/// reported with the current `errno`.
+/// `Handle.read n`.
 pub fn read_bytes(h: &LHandle, n: u64) -> Vec<u8> {
-    let f = fh(h);
-    let n = n as usize;
-    let mut out = Vec::with_capacity(n.min(BUF));
-    if n == 0 {
-        set_ok();
-        return out;
-    }
-    while out.len() < n && more_input(f) {
-        let k = (f.rbuf.len() - f.rpos).min(n - out.len());
-        out.extend_from_slice(&f.rbuf[f.rpos..f.rpos + k]);
-        f.rpos += k;
-    }
-    if out.is_empty() {
-        if !f.eof {
-            set_err(errno_now(), None);
-            return out;
+    match lean_read(fh(h), n) {
+        Ok(v) => {
+            set_ok();
+            v
         }
-        f.eof = false;
-        f.err = false;
+        Err(e) => {
+            set_err(e, None);
+            Vec::new()
+        }
     }
-    set_ok();
-    out
 }
 
 /// `Handle.isEof` (`feof`; cannot fail).
 pub fn is_eof(h: &LHandle) -> bool {
     set_ok();
-    fh(h).eof
+    fh(h).is_eof()
 }
 
-/// `Handle.getLine` (`lean_io_prim_handle_get_line`): characters up to and
-/// including `\n`, or to end of file or a read error. Then, if the error
-/// indicator is set (now or by any earlier failure) the line is lost and
-/// the error reported with the current `errno`; otherwise end of file is
-/// cleared.
+/// `Handle.getLine`.
 pub fn get_line(h: &LHandle) -> LStr {
-    let f = fh(h);
-    let mut line = Vec::new();
-    while more_input(f) {
-        let avail = &f.rbuf[f.rpos..];
-        if let Some(k) = avail.iter().position(|&b| b == b'\n') {
-            line.extend_from_slice(&avail[..=k]);
-            f.rpos += k + 1;
-            break;
+    match fh(h).get_line() {
+        Ok(l) => {
+            set_ok();
+            from_bytes_lossy(&l)
         }
-        line.extend_from_slice(avail);
-        f.rpos = f.rbuf.len();
+        Err(e) => {
+            set_err(e, None);
+            from_bytes(b"")
+        }
     }
-    if f.err {
-        set_err(errno_now(), None);
-        return from_bytes(b"");
-    }
-    f.eof = false;
-    set_ok();
-    from_bytes_lossy(&line)
 }
 
 /// `Handle.isTty` (cannot fail; records success so a fallible-glue caller
@@ -416,27 +267,14 @@ pub fn is_tty(h: &LHandle) -> bool {
     unsafe { isatty(fh(h).fd) == 1 }
 }
 
+/// `Handle.rewind` (`fseek(fp, 0, SEEK_SET)`).
 pub fn rewind(h: &LHandle) {
-    let f = fh(h);
-    if let Err(e) = f.flush() {
-        return set_err(e, None);
-    }
-    f.rbuf.clear();
-    f.rpos = 0;
-    f.eof = false;
-    f.w.putting = false;
-    if unsafe { lseek(f.fd, 0, 0) } < 0 { set_err(errno_now(), None) } else { set_ok() }
+    outcome(fh(h).rewind())
 }
 
-/// `Handle.truncate`: truncate at the current position.
+/// `Handle.truncate` (`ftruncate(fileno(fp), ftello(fp))`).
 pub fn truncate(h: &LHandle) {
-    let f = fh(h);
-    if let Err(e) = f.flush() {
-        return set_err(e, None);
-    }
-    let back = (f.rbuf.len() - f.rpos) as i64;
-    let pos = unsafe { lseek(f.fd, 0, 1) } - back;
-    if unsafe { ftruncate(f.fd, pos) } != 0 { set_err(errno_now(), None) } else { set_ok() }
+    outcome(fh(h).truncate())
 }
 
 pub fn lock(h: &LHandle, exclusive: bool) {
@@ -539,28 +377,36 @@ pub fn set_current_dir(p: &[u8]) {
     }
 }
 
-/// libuv's `uv_os_tmpdir`: `TMPDIR`, `TMP`, `TEMP` or `TEMPDIR` (the first
-/// set and non-empty), else `/tmp`, without a trailing slash; Lean then
-/// appends `/tmp.XXXXXXXX`.
-fn temp_template() -> Vec<u8> {
+/// libuv's `uv_os_tmpdir`: the first of `TMPDIR`, `TMP`, `TEMP`, `TEMPDIR`
+/// that is set (even if empty), else `/tmp`, without a trailing slash; Lean
+/// then appends `/tmp.XXXXXXXX`. An empty directory is libuv's `ENOENT`
+/// with file `""` (Lean's `base_len == 0` case), one of `PATH_MAX` bytes or
+/// more `ENOBUFS`.
+fn temp_template() -> Option<Vec<u8>> {
     use std::os::unix::ffi::OsStrExt;
-    let mut dir = b"/tmp".to_vec();
-    for v in ["TMPDIR", "TMP", "TEMP", "TEMPDIR"] {
-        if let Some(d) = std::env::var_os(v) {
-            if !d.is_empty() {
-                dir = d.as_bytes().to_vec();
-                break;
-            }
-        }
+    const PATH_MAX: usize = 4096;
+    const ENOBUFS: i32 = 105;
+    let mut dir = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+        .iter()
+        .find_map(|v| std::env::var_os(v))
+        .map(|d| d.as_bytes().to_vec())
+        .unwrap_or_else(|| b"/tmp".to_vec());
+    if dir.len() >= PATH_MAX {
+        set_err_uv(ENOBUFS, None);
+        return None;
     }
     if dir.len() > 1 && dir.last() == Some(&b'/') {
         dir.pop();
+    }
+    if dir.is_empty() {
+        set_err_uv(2, Some(b""));
+        return None;
     }
     if dir.last() != Some(&b'/') {
         dir.push(b'/');
     }
     dir.extend_from_slice(b"tmp.XXXXXXXX\0");
-    dir
+    Some(dir)
 }
 
 /// The path of the file the last `create_temp_file` created.
@@ -570,17 +416,20 @@ static TEMP_PATH: Global<Vec<u8>> = Global(UnsafeCell::new(Vec::new()));
 /// reading and writing; its path is `temp_file_path()`. Errors are libuv's,
 /// without a file name.
 pub fn create_temp_file() -> LHandle {
-    let mut t = temp_template();
+    let Some(mut t) = temp_template() else {
+        unsafe { *TEMP_PATH.0.get() = Vec::new() };
+        return mk(-1, 0);
+    };
     let fd = unsafe { mkostemp(t.as_mut_ptr() as *mut std::ffi::c_char, O_CLOEXEC) };
     t.pop();
     if fd < 0 {
         set_err_uv(errno_now(), None);
         unsafe { *TEMP_PATH.0.get() = Vec::new() };
-        return mk(-1, false, false);
+        return mk(-1, 0);
     }
     set_ok();
     unsafe { *TEMP_PATH.0.get() = t };
-    mk(fd, true, true)
+    mk(fd, 0)
 }
 
 pub fn temp_file_path() -> LStr {
@@ -589,7 +438,7 @@ pub fn temp_file_path() -> LStr {
 
 /// `IO.FS.createTempDir` (`mkdtemp`, as libuv).
 pub fn create_temp_dir() -> LStr {
-    let mut t = temp_template();
+    let Some(mut t) = temp_template() else { return from_bytes(b"") };
     let r = unsafe { mkdtemp(t.as_mut_ptr() as *mut std::ffi::c_char) };
     t.pop();
     if r.is_null() {

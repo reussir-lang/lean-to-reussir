@@ -21,6 +21,7 @@ extern crate reussir_rt;
 pub mod alloc;
 pub mod array;
 pub mod big;
+pub mod cfile;
 pub mod float;
 pub mod fs;
 pub mod gmp;
@@ -102,7 +103,8 @@ pub fn internal_panic(msg: &str) -> ! {
 pub fn uncaught_exception(msg: &[u8]) -> ! {
     io::flush_stdout();
     let mut line = b"uncaught exception: ".to_vec();
-    line.extend_from_slice(msg);
+    // `string_cstr`: up to the first NUL.
+    line.extend_from_slice(&msg[..msg.iter().position(|&b| b == 0).unwrap_or(msg.len())]);
     line.push(b'\n');
     io::eprint(&line);
     io::exit(1)

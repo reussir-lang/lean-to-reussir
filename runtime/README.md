@@ -114,6 +114,7 @@ single call:
 | `lean_float_frexp`, `lean_float32_frexp` (→ `Float × Int`) | `l2r_float_frexp_with<P>(x, \|m\| \|e\| mk(m, e))`; or `l2r_float_frexp_mant`/`_exp` |
 | `lean_io_getenv` (→ `Option String`) | `l2r_io_getenv_with<O>(name, none, \|s\| some(s))` |
 | `lean_slice_hash`, `lean_slice_dec_lt` (take `String.Slice`) | `l2r_slice_hash(s, b, e)`, `l2r_slice_dec_lt(s1, b1, e1, s2, b2, e2)` |
+| `lean_byteslice_beq` (takes `ByteSlice`s) | `l2r_byteslice_beq(a, startA, stopA, b, startB, stopB)` (fields `byteArray`, `start`, `stop`) |
 
 **IO externs that cannot fail** (BaseIO) have a payload primitive named
 `l2r_` + the symbol without `lean_`, taking the same passed arguments;
@@ -199,10 +200,20 @@ bit patterns), `l2r_fs_current_dir()`, `l2r_fs_app_path()`,
 `l2r_fs_process_get_current_dir()`, `l2r_fs_process_set_current_dir(p)`,
 `l2r_fs_create_tempfile() -> LHandle` (then `l2r_fs_temp_file_path()` is
 its path, for the `Handle × FilePath` pair), `l2r_fs_create_tempdir()`.
-Handles behave as glibc `FILE`s: `st_blksize` write buffers filled and
-flushed as `fwrite` does, `EBADF` at once for the wrong direction, sticky
-end-of-file and error indicators (after any failed operation on a handle,
-`getLine` fails, as natively), and every open handle is flushed at exit.
+**stdio model.** Handles and the standard streams are models of glibc's
+`FILE` (`leanrt/src/cfile.rs`, following libio's `fileops.c`/`genops.c`
+function by function): one `st_blksize` buffer shared by reading and
+writing with libio's get/put areas and cached offset; `fwrite`
+(`_IO_new_file_xsputn`, line-buffered tails flushed at each newline),
+`fread` (`_IO_file_xsgetn`, including direct reads of whole blocks),
+`getc`, `fflush`, `fseek` (in-buffer seeks), `ftello`; `EBADF` for the
+wrong direction after the same mode switch; sticky end-of-file and error
+indicators (after any failed operation on a handle, `getLine` fails, as
+natively); reading a terminal first flushes a line-buffered stdout. The
+same system calls happen in the same order, so the `errno`s are native's.
+At exit, stdout is flushed first (libc++'s `ios_base::Init`), then every
+`FILE`'s pending output, newest first, then used streams are synced (a
+seekable stdin is left at the position the program read up to).
 
 Standard-stream primitives (`fd` = 0 stdin, 1 stdout, 2 stderr; the fields
 of `IO.FS.Stream`): `l2r_stream_putStr(fd, s)`, `l2r_stream_write(fd, b)`,
@@ -314,20 +325,30 @@ lean2rr's dev branch (the tests pass with it).
     line (with its `\n`) through it.
 22. *done* — `String.mk`/`List.asString` (`lean_string_mk`) take a `List Char`: glue
     folding the list with `lean_string_push` onto `lean_mk_string("")`.
-23. `IO.initializing` is true while module initializers run (native
+23. *done* — `IO.initializing` is true while module initializers run (native
     `g_initializing` until `lean_io_mark_end_initialization`): the entry
     should call `l2r_set_initializing(true)` before the initializers and
     `l2r_set_initializing(false)` after (test `RtInitializing`).
-24. Native `main` runs the module initializers on the process's main thread
+24. *done* — Native `main` runs the module initializers on the process's main thread
     (8 MiB stack) and only `main` on Lean's big thread: the entry should be
     `leanrt::rt::run_main2(|| init(), || body())`, which runs `init` on the
     calling thread (with the stack-overflow report) and then `body` as
     `run_main` (test `RtInitStack`: a deep initializer overflows natively).
     An initializer's uncaught error prints `uncaught exception: ...` and
     exits 1 without running `main`, as natively.
-25. `IO.getEnv` (`lean_io_getenv`) is emitted as a direct call to
+25. *done* — `IO.getEnv` (`lean_io_getenv`) is emitted as a direct call to
     `lean_io_getenv`, which the prelude cannot define (its result is
     `Option String`); use `l2r_io_getenv_with(name, none, some)`.
+26. `IO.Process.forceExit` (`lean_io_force_exit`, `std::_Exit`: nothing is
+    flushed) has no glue: as `IO.Process.exit`, with
+    `l2r_process_force_exit(code)` (test `RtForceExit`).
+27. `Nat.repr`/`Int.repr` (request 12): besides the quadratic big case,
+    `Nat.reprFast` clones the `Nat.reprArray` once-cell and drops it out of
+    line for every number ≥ 128 (13% of the Sieve benchmark).
+28. `ByteSlice.beq` needs glue (`l2r_byteslice_beq` above);
+    `ShareCommon.State.shareCommon` (`lean_state_sharecommon`, hash-consing
+    natively) can use its reference body `(a, s)`, which is observably the
+    same (sharing is not observable here).
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store `Nat`/`Int`/enum-like values directly; and `mi_free` takes mimalloc's
@@ -358,8 +379,13 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   as natively (overflow panic; `out of memory` when `malloc` of the full
   size fails) but only `2^24` elements are reserved.
 - The C `errno` reported by a handle's sticky error indicator (see file
-  primitives) is the runtime's current `errno`, which may differ from
-  native after unrelated failing calls.
+  primitives) is the current `errno`, which may differ from native after
+  unrelated failing calls (the runtime's own calls are not libc++'s).
+- `IO.FS.createTempFile`/`createTempDir` with `TMPDIR` naming a missing
+  directory report `no such file or directory` with an empty file name;
+  natively `decode_uv_error` dereferences a null file name and crashes.
+- A direct `read` of a huge count (`Handle.read`, ≥ one buffer) is issued in
+  `read(2)` calls of at most 16 MiB (the same data; natively one call).
 
 ## Testing
 
@@ -369,5 +395,6 @@ through lean2rr, runs both (`LEAN_BACKTRACE=0`, optional `NAME.args` and
 `NAME.stdin`; `NAME.pipe` is a shell command line run instead, with `$BIN`
 the program, for redirections and pipes), and compares stdout, stderr and
 the exit code byte for byte. `NAME.xfail` marks tests blocked by a lean2rr
-request. The Rust unit tests of `leanrt` (bignums, tagged arrays, hashes)
-run with `tests/runtime/leanrt-unit.sh`.
+request. The Rust unit tests of `leanrt` (bignums, tagged arrays, hashes,
+and a differential test of the `FILE` model against glibc's own `FILE`
+over random operation sequences) run with `tests/runtime/leanrt-unit.sh`.
