@@ -13,6 +13,7 @@
 
 use reussir_rt::collections::vec::Vec as RVec;
 use reussir_rt::rc::Rc;
+use crate::alloc::{rc_new, reserve, vec_from_slice, vec_with_capacity};
 
 #[inline(always)]
 pub fn into_rc<T: Clone>(v: RVec<T>) -> Rc<Vec<T>> {
@@ -58,16 +59,16 @@ pub fn make_mut<T: Clone>(v: &mut Rc<Vec<T>>, extra: usize) -> &mut Vec<T> {
     if !v.is_unique() {
         copy_shared(v, extra);
     }
-    unsafe { v.data_mut() }
+    let vec = unsafe { v.data_mut() };
+    reserve(vec, extra);
+    vec
 }
 
 /// Replace a shared array by a private copy (with room for `extra` more).
 #[cold]
 #[inline(never)]
 fn copy_shared<T: Clone>(v: &mut Rc<Vec<T>>, extra: usize) {
-    let mut n = Vec::with_capacity(v.len() + extra);
-    n.extend_from_slice(v);
-    *v = Rc::new(n);
+    *v = rc_new(vec_from_slice(v, extra));
 }
 
 /// An index that the Lean-level proof (or the prelude's bounds check)
@@ -80,12 +81,12 @@ fn index_bug(i: u64, n: usize) -> ! {
 
 #[inline]
 pub fn with_capacity<T: Clone>(n: usize) -> RVec<T> {
-    from_rc(Rc::new(Vec::with_capacity(n)))
+    from_rc(rc_new(vec_with_capacity(n)))
 }
 
 #[inline]
 pub fn empty<T: Clone>() -> RVec<T> {
-    from_rc(Rc::new(Vec::new()))
+    from_rc(rc_new(Vec::new()))
 }
 
 #[inline(always)]
@@ -198,7 +199,11 @@ fn swap_slow<T: Clone>(mut r: Rc<Vec<T>>, i: u64, j: u64) -> RVec<T> {
 /// `Array.replicate n x`.
 #[inline(never)]
 pub fn replicate<T: Clone>(n: u64, x: T) -> RVec<T> {
-    from_rc(Rc::new(vec![x; n as usize]))
+    {
+    let mut v = vec_with_capacity(n as usize);
+    v.resize(n as usize, x);
+    from_rc(rc_new(v))
+}
 }
 
 /// Drop elements from index `n` on.
@@ -233,7 +238,7 @@ pub fn extract<T: Clone>(v: RVec<T>, start: u64, stop: u64) -> RVec<T> {
     if start == 0 && stop == s.len() {
         return v;
     }
-    from_rc(Rc::new(s[start..stop].to_vec()))
+    from_rc(rc_new(vec_from_slice(&s[start..stop], 0)))
 }
 
 /// Reverse in place.

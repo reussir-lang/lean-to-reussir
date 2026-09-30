@@ -18,6 +18,7 @@
 
 use crate::gmp::*;
 use reussir_rt::rc::Rc;
+use crate::alloc::{rc_new, reserve, vec_from_slice, vec_zeroed_u64};
 
 pub type LBig = Rc<(bool, Vec<u64>)>;
 
@@ -32,13 +33,13 @@ fn norm(v: &mut Vec<u64>) {
 fn mk(neg: bool, mut v: Vec<u64>) -> LBig {
     norm(&mut v);
     let neg = neg && !v.is_empty();
-    Rc::new((neg, v))
+    rc_new((neg, v))
 }
 
 /// A vector of `n` uninitialized-then-zeroed limbs (GMP writes all of them).
 #[inline]
 fn zeroed(n: usize) -> Vec<u64> {
-    vec![0u64; n]
+    vec_zeroed_u64(n)
 }
 
 // ---------------------------------------------------------------------------
@@ -46,19 +47,19 @@ fn zeroed(n: usize) -> Vec<u64> {
 
 #[inline(never)]
 pub fn of_u64(x: u64) -> LBig {
-    Rc::new((false, if x == 0 { Vec::new() } else { vec![x] }))
+    rc_new((false, if x == 0 { Vec::new() } else { vec_from_slice(&[x], 1) }))
 }
 
 /// `hi * 2^64 + lo`.
 #[inline(never)]
 pub fn of_limbs2(lo: u64, hi: u64) -> LBig {
-    mk(false, vec![lo, hi])
+    mk(false, vec_from_slice(&[lo, hi], 1))
 }
 
 #[inline(never)]
 pub fn of_i64(x: i64) -> LBig {
     let m = x.unsigned_abs();
-    Rc::new((x < 0, if m == 0 { Vec::new() } else { vec![m] }))
+    rc_new((x < 0, if m == 0 { Vec::new() } else { vec_from_slice(&[m], 1) }))
 }
 
 /// Whether a non-negative value fits in a `u64`.
@@ -121,7 +122,7 @@ fn mag_to_decimal(m: &[u64], out: &mut Vec<u8>) {
         out.push(b'0');
         return;
     }
-    let mut tmp = m.to_vec(); // mpn_get_str clobbers its input
+    let mut tmp = vec_from_slice(m, 0); // mpn_get_str clobbers its input
     // Allocate one extra limb as mpn_get_str requires s1p to have n+1 limbs available.
     tmp.push(0);
     let cap = unsafe { __gmpn_sizeinbase(m.as_ptr(), m.len() as i64, 10) } + 1;
@@ -164,7 +165,7 @@ fn mag_cmp(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
 fn mag_add(a: &[u64], b: &[u64]) -> Vec<u64> {
     let (x, y) = if a.len() >= b.len() { (a, b) } else { (b, a) };
     if y.is_empty() {
-        return x.to_vec();
+        return vec_from_slice(x, 0);
     }
     let mut r = zeroed(x.len() + 1);
     let c = unsafe { __gmpn_add(r.as_mut_ptr(), x.as_ptr(), x.len() as i64, y.as_ptr(), y.len() as i64) };
@@ -176,7 +177,7 @@ fn mag_add(a: &[u64], b: &[u64]) -> Vec<u64> {
 /// `a - b`, requires `a >= b`.
 fn mag_sub(a: &[u64], b: &[u64]) -> Vec<u64> {
     if b.is_empty() {
-        return a.to_vec();
+        return vec_from_slice(a, 0);
     }
     let mut r = zeroed(a.len());
     unsafe { __gmpn_sub(r.as_mut_ptr(), a.as_ptr(), a.len() as i64, b.as_ptr(), b.len() as i64) };
@@ -205,13 +206,13 @@ fn mag_mul(a: &[u64], b: &[u64]) -> Vec<u64> {
 fn mag_divmod(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
     debug_assert!(!b.is_empty());
     if mag_cmp(a, b) == std::cmp::Ordering::Less {
-        return (Vec::new(), a.to_vec());
+        return (Vec::new(), vec_from_slice(a, 0));
     }
     if b.len() == 1 {
         let mut q = zeroed(a.len());
         let r = unsafe { __gmpn_divrem_1(q.as_mut_ptr(), 0, a.as_ptr(), a.len() as i64, b[0]) };
         norm(&mut q);
-        return (q, if r == 0 { Vec::new() } else { vec![r] });
+        return (q, if r == 0 { Vec::new() } else { vec_from_slice(&[r], 0) });
     }
     let mut q = zeroed(a.len() - b.len() + 1);
     let mut r = zeroed(b.len());
@@ -234,6 +235,7 @@ pub fn nat_add(a: LBig, b: LBig) -> LBig {
     if x.is_unique() {
         let v = unsafe { &mut x.data_mut().1 };
         let n = v.len();
+        reserve(v, 1);
         v.push(0);
         let c = unsafe { __gmpn_add(v.as_mut_ptr(), v.as_ptr(), n as i64, y.1.as_ptr(), y.1.len() as i64) };
         if c == 0 {
@@ -243,7 +245,7 @@ pub fn nat_add(a: LBig, b: LBig) -> LBig {
         }
         x
     } else {
-        Rc::new((false, mag_add(&x.1, &y.1)))
+        rc_new((false, mag_add(&x.1, &y.1)))
     }
 }
 
@@ -254,6 +256,7 @@ pub fn nat_add_u64(a: LBig, y: u64) -> LBig {
     if a.is_unique() {
         let v = unsafe { &mut a.data_mut().1 };
         let n = v.len();
+        reserve(v, 1);
         v.push(0);
         let c = unsafe { __gmpn_add_1(v.as_mut_ptr(), v.as_ptr(), n as i64, y) };
         if c == 0 {
@@ -263,7 +266,7 @@ pub fn nat_add_u64(a: LBig, y: u64) -> LBig {
         }
         a
     } else {
-        Rc::new((false, mag_add(&a.1, &[y])))
+        rc_new((false, mag_add(&a.1, &[y])))
     }
 }
 
@@ -286,7 +289,7 @@ pub fn nat_sub(a: LBig, b: LBig) -> LBig {
         norm(v);
         a
     } else {
-        Rc::new((false, mag_sub(&a.1, &b.1)))
+        rc_new((false, mag_sub(&a.1, &b.1)))
     }
 }
 
@@ -300,13 +303,13 @@ pub fn nat_sub_u64(a: LBig, y: u64) -> LBig {
         norm(v);
         a
     } else {
-        Rc::new((false, mag_sub(&a.1, &[y])))
+        rc_new((false, mag_sub(&a.1, &[y])))
     }
 }
 
 #[inline(never)]
 pub fn nat_mul(a: LBig, b: LBig) -> LBig {
-    Rc::new((false, mag_mul(&a.1, &b.1)))
+    rc_new((false, mag_mul(&a.1, &b.1)))
 }
 
 /// `a * y` for `y != 0`; reuses `a`'s buffer when it is unique.
@@ -319,6 +322,7 @@ pub fn nat_mul_u64(a: LBig, y: u64) -> LBig {
     if a.is_unique() {
         let v = unsafe { &mut a.data_mut().1 };
         let n = v.len();
+        reserve(v, 1);
         v.push(0);
         let c = unsafe { __gmpn_mul_1(v.as_mut_ptr(), v.as_ptr(), n as i64, y) };
         if c == 0 {
@@ -352,7 +356,7 @@ pub fn u64_mul_hi(x: u64, y: u64) -> u64 {
 /// `a / b` for a nonzero big `b` (any `a`, as a handle).
 #[inline(never)]
 pub fn nat_div(a: LBig, b: LBig) -> LBig {
-    Rc::new((false, mag_divmod(&a.1, &b.1).0))
+    rc_new((false, mag_divmod(&a.1, &b.1).0))
 }
 
 /// `a / y` for `y != 0`.
@@ -373,7 +377,7 @@ pub fn nat_div_u64(a: LBig, y: u64) -> LBig {
 
 #[inline(never)]
 pub fn nat_mod(a: LBig, b: LBig) -> LBig {
-    Rc::new((false, mag_divmod(&a.1, &b.1).1))
+    rc_new((false, mag_divmod(&a.1, &b.1).1))
 }
 
 /// `a % y` for `y != 0`.
@@ -402,7 +406,7 @@ fn mag_bitop(a: &[u64], b: &[u64], op: u8) -> Vec<u64> {
     let n = y.len();
     let mut r: Vec<u64> = match op {
         0 => zeroed(n), // and
-        _ => x.to_vec(), // or, xor: high limbs of the longer operand
+        _ => vec_from_slice(x, 0), // or, xor: high limbs of the longer operand
     };
     if n > 0 {
         unsafe {
@@ -419,7 +423,7 @@ fn mag_bitop(a: &[u64], b: &[u64], op: u8) -> Vec<u64> {
 
 #[inline(never)]
 pub fn nat_land(a: LBig, b: LBig) -> LBig {
-    Rc::new((false, mag_bitop(&a.1, &b.1, 0)))
+    rc_new((false, mag_bitop(&a.1, &b.1, 0)))
 }
 
 #[inline(never)]
@@ -429,26 +433,26 @@ pub fn nat_land_u64(a: LBig, y: u64) -> u64 {
 
 #[inline(never)]
 pub fn nat_lor(a: LBig, b: LBig) -> LBig {
-    Rc::new((false, mag_bitop(&a.1, &b.1, 1)))
+    rc_new((false, mag_bitop(&a.1, &b.1, 1)))
 }
 
 #[inline(never)]
 pub fn nat_lor_u64(a: LBig, y: u64) -> LBig {
     let mut v = a.1.clone();
     v[0] |= y;
-    Rc::new((false, v))
+    rc_new((false, v))
 }
 
 #[inline(never)]
 pub fn nat_xor(a: LBig, b: LBig) -> LBig {
-    Rc::new((false, mag_bitop(&a.1, &b.1, 2)))
+    rc_new((false, mag_bitop(&a.1, &b.1, 2)))
 }
 
 #[inline(never)]
 pub fn nat_xor_u64(a: LBig, y: u64) -> LBig {
     let mut v = a.1.clone();
     v[0] ^= y;
-    Rc::new((false, v))
+    rc_new((false, v))
 }
 
 fn mag_shl(a: &[u64], s: u64) -> Vec<u64> {
@@ -489,13 +493,13 @@ fn mag_shr(a: &[u64], s: u64) -> Vec<u64> {
 /// `a <<< s` for any `a` (as a handle); `s <= 2^32 - 1` (checked by the caller).
 #[inline(never)]
 pub fn nat_shl(a: LBig, s: u64) -> LBig {
-    Rc::new((false, mag_shl(&a.1, s)))
+    rc_new((false, mag_shl(&a.1, s)))
 }
 
 /// `a >>> s`.
 #[inline(never)]
 pub fn nat_shr(a: LBig, s: u64) -> LBig {
-    Rc::new((false, mag_shr(&a.1, s)))
+    rc_new((false, mag_shr(&a.1, s)))
 }
 
 /// Bit length minus one (`Nat.log2`) of a nonzero magnitude.
@@ -514,7 +518,7 @@ pub fn nat_pow(a: LBig, e: u64) -> LBig {
     let v = View::new(false, &a.1);
     unsafe { __gmpz_pow_ui(r.ptr(), v.ptr(), e) };
     let (_, limbs) = r.to_parts();
-    Rc::new((false, limbs))
+    rc_new((false, limbs))
 }
 
 #[inline(never)]
@@ -523,7 +527,7 @@ pub fn nat_gcd(a: LBig, b: LBig) -> LBig {
     let (va, vb) = (View::new(false, &a.1), View::new(false, &b.1));
     unsafe { __gmpz_gcd(r.ptr(), va.ptr(), vb.ptr()) };
     let (_, limbs) = r.to_parts();
-    Rc::new((false, limbs))
+    rc_new((false, limbs))
 }
 
 /// The magnitude as a Nat handle (for `Int.natAbs`/`Int.toNat`).
@@ -537,7 +541,7 @@ pub fn int_abs(a: LBig) -> LBig {
         unsafe { a.data_mut().0 = false };
         a
     } else {
-        Rc::new((false, a.1.clone()))
+        rc_new((false, a.1.clone()))
     }
 }
 
@@ -586,7 +590,7 @@ pub fn int_neg(a: LBig) -> LBig {
         d.0 = !d.0;
         a
     } else {
-        Rc::new((!a.0, a.1.clone()))
+        rc_new((!a.0, a.1.clone()))
     }
 }
 
@@ -629,9 +633,9 @@ pub fn int_emod(a: LBig, b: LBig) -> LBig {
     let (_, r) = mag_divmod(&a.1, &b.1);
     if a.0 && !r.is_empty() {
         // r < 0: r + |b|
-        Rc::new((false, mag_sub(&b.1, &r)))
+        rc_new((false, mag_sub(&b.1, &r)))
     } else {
-        Rc::new((false, r))
+        rc_new((false, r))
     }
 }
 

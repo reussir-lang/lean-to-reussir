@@ -2456,6 +2456,37 @@ fn lean_dbg_sleep<T>(ms : u32, f : L2RUnit -> T) -> T {
     f(L2RUnit::u{})
 }
 
+// `ptrAddrUnsafe`: the handle's pointer for boxed values, the bits for
+// scalars. Lean only uses pointer equality as a shortcut for equal values.
+#[ffi(import)]
+fn lean_ptr_addr<T>(a : T) -> u64 [{
+    {
+        let mut w: u64 = 0;
+        let n = ::std::mem::size_of::<[:T:]>().min(8);
+        unsafe { ::std::ptr::copy_nonoverlapping(&a as *const [:T:] as *const u8, &mut w as *mut u64 as *mut u8, n) };
+        w
+    }
+}];
+
+// Sharing is not observable here: answering "shared" / "not a scalar" only
+// makes such code take its general path.
+fn lean_is_exclusive_obj<T>(a : T) -> bool { false }
+fn lean_is_scalar<T>(a : T) -> bool { false }
+fn lean_sharecommon_quick<T>(a : T) -> T { a }
+
+// Payload primitives of the `Runtime.*` BaseIO externs (memory-management
+// hints without observable effect here).
+fn l2r_runtime_mark_persistent<T>(a : T) -> T { a }
+fn l2r_runtime_mark_multi_threaded<T>(a : T) -> T { a }
+fn l2r_runtime_forget<T>(a : T) -> L2RUnit { L2RUnit::u{} }
+fn l2r_runtime_hold<T>(a : T) -> L2RUnit { L2RUnit::u{} }
+fn l2r_io_initializing() -> bool { false }
+fn l2r_io_set_heartbeats(n : Nat) -> L2RUnit { L2RUnit::u{} }
+fn l2r_io_process_get_current_dir() -> LStr { l2r_io_current_dir() }
+
+// `Lean.githash` of the Lean 4.33.0 toolchain.
+fn lean_get_githash(u : L2RUnit) -> LStr { lean_mk_string("d8b18978322de05a8f3dba51ef03cf5461676c17") }
+
 fn lean_system_platform_windows(u : L2RUnit) -> bool { false }
 fn lean_system_platform_osx(u : L2RUnit) -> bool { false }
 fn lean_system_platform_emscripten(u : L2RUnit) -> bool { false }
@@ -2522,6 +2553,94 @@ fn l2r_io_get_random_bytes(n : u64) -> RVec<u8> [{
 
 #[ffi(import)]
 fn l2r_io_process_get_pid() -> u32 [{ std::process::id() }];
+
+// ===========================================================================
+// Files and the file system (IO.FS)
+//
+// A handle (`IO.FS.Handle`, `lcAny` in mono code) is `LHandle`: a shared,
+// buffered file, closed when the last reference goes away. Fallible
+// primitives record their outcome in a global last-error slot; lean2rr's
+// glue for an `IO` extern calls the primitive, then
+//   l2r_io_finish(v, |v| EST.Out.ok(v), mkError)
+// where `mkError kind errno fname details` builds the `IO.Error` with the
+// `lean_mk_io_error_*` constructor numbered `kind` (runtime/README.md).
+
+#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+pub struct LHandle;
+
+#[ffi(import)]
+fn l2r_io_ok() -> bool [{ leanrt::fs::ok() }];
+#[ffi(import)]
+fn l2r_io_errno() -> u32 [{ leanrt::fs::errno() }];
+#[ffi(import)]
+fn l2r_io_error_kind() -> u32 [{ leanrt::fs::error_kind() }];
+#[ffi(import)]
+fn l2r_io_error_fname() -> LStr [{ leanrt::fs::error_fname() }];
+#[ffi(import)]
+fn l2r_io_error_details() -> LStr [{ leanrt::fs::error_details() }];
+
+fn l2r_io_error_with<E>(mk : u32 -> (u32 -> (LStr -> (LStr -> E)))) -> E {
+    mk(l2r_io_error_kind())(l2r_io_errno())(l2r_io_error_fname())(l2r_io_error_details())
+}
+
+// The result of the primitive just called: `ok v`, or the error it recorded.
+fn l2r_io_finish<T, R>(v : T, ok : T -> R, err : u32 -> (u32 -> (LStr -> (LStr -> R)))) -> R {
+    if l2r_io_ok() { ok(v) } else { l2r_io_error_with(err) }
+}
+
+// `IO.FS.Handle.mk path mode` (mode = constructor index of `IO.FS.Mode`:
+// read, write, writeNew, readWrite, append).
+#[ffi(import)]
+fn l2r_fs_open(path : LStr, mode : u8) -> LHandle [{ { let h = leanrt::fs::open_file(&path, mode); leanrt::rc_release(path); h } }];
+#[ffi(import)]
+fn l2r_fs_put_str(h : LHandle, s : LStr) -> u64 [{ { leanrt::fs::put_str(&h, &s); leanrt::rc_release(s); leanrt::rc_release(h); 0 } }];
+#[ffi(import)]
+fn l2r_fs_write(h : LHandle, b : RVec<u8>) -> u64 [{ { leanrt::fs::put_str(&h, leanrt::array::as_slice(&b)); leanrt::array::release(b); leanrt::rc_release(h); 0 } }];
+#[ffi(import)]
+fn l2r_fs_flush(h : LHandle) -> u64 [{ { leanrt::fs::flush(&h); leanrt::rc_release(h); 0 } }];
+#[ffi(import)]
+fn l2r_fs_read(h : LHandle, n : u64) -> RVec<u8> [{ { let v = leanrt::fs::read_bytes(&h, n); leanrt::rc_release(h); leanrt::array::bytes_of_string(Rc::new(v)) } }];
+#[ffi(import)]
+fn l2r_fs_get_line(h : LHandle) -> LStr [{ { let s = leanrt::fs::get_line(&h); leanrt::rc_release(h); s } }];
+#[ffi(import)]
+fn l2r_fs_is_tty(h : LHandle) -> bool [{ { let r = leanrt::fs::is_tty(&h); leanrt::rc_release(h); r } }];
+#[ffi(import)]
+fn l2r_fs_rewind(h : LHandle) -> u64 [{ { leanrt::fs::rewind(&h); leanrt::rc_release(h); 0 } }];
+#[ffi(import)]
+fn l2r_fs_truncate(h : LHandle) -> u64 [{ { leanrt::fs::truncate(&h); leanrt::rc_release(h); 0 } }];
+#[ffi(import)]
+fn l2r_fs_lock(h : LHandle, exclusive : bool) -> u64 [{ { leanrt::fs::lock(&h, exclusive); leanrt::rc_release(h); 0 } }];
+#[ffi(import)]
+fn l2r_fs_try_lock(h : LHandle, exclusive : bool) -> bool [{ { let r = leanrt::fs::try_lock(&h, exclusive); leanrt::rc_release(h); r } }];
+#[ffi(import)]
+fn l2r_fs_unlock(h : LHandle) -> u64 [{ { leanrt::fs::unlock(&h); leanrt::rc_release(h); 0 } }];
+#[ffi(import)]
+fn l2r_fs_remove_file(p : LStr) -> u64 [{ { leanrt::fs::remove_file(&p); leanrt::rc_release(p); 0 } }];
+#[ffi(import)]
+fn l2r_fs_create_dir(p : LStr) -> u64 [{ { leanrt::fs::create_dir(&p); leanrt::rc_release(p); 0 } }];
+#[ffi(import)]
+fn l2r_fs_remove_dir(p : LStr) -> u64 [{ { leanrt::fs::remove_dir(&p); leanrt::rc_release(p); 0 } }];
+#[ffi(import)]
+fn l2r_fs_rename(a : LStr, b : LStr) -> u64 [{ { leanrt::fs::rename_file(&a, &b); leanrt::rc_release(a); leanrt::rc_release(b); 0 } }];
+#[ffi(import)]
+fn l2r_fs_hard_link(a : LStr, b : LStr) -> u64 [{ { leanrt::fs::hard_link(&a, &b); leanrt::rc_release(a); leanrt::rc_release(b); 0 } }];
+#[ffi(import)]
+fn l2r_fs_set_access_rights(p : LStr, mode : u32) -> u64 [{ { leanrt::fs::set_access_rights(&p, mode); leanrt::rc_release(p); 0 } }];
+#[ffi(import)]
+fn l2r_fs_real_path(p : LStr) -> LStr [{ { let r = leanrt::fs::real_path(&p); leanrt::rc_release(p); r } }];
+// Entry names in `readdir` order, without `.` and `..` (lean2rr builds the
+// `IO.FS.DirEntry`s with `root := p`).
+#[ffi(import)]
+fn l2r_fs_read_dir(p : LStr) -> RVec<LStr> [{
+    { let v = leanrt::fs::read_dir(&p); leanrt::rc_release(p); leanrt::array::from_rc(Rc::new(v)) }
+}];
+// `System.FilePath.metadata` (`follow`) / `symlinkMetadata`: [accessed sec,
+// accessed nsec, modified sec, modified nsec, byteSize, type] with type the
+// `IO.FS.FileType` constructor index (dir, file, symlink, other).
+#[ffi(import)]
+fn l2r_fs_metadata(p : LStr, follow : bool) -> RVec<u64> [{
+    { let v = leanrt::fs::metadata(&p, follow); leanrt::rc_release(p); leanrt::array::from_rc(Rc::new(v.to_vec())) }
+}];
 
 // `IO.getEnv name : BaseIO (Option String)`.
 #[ffi(import)]
