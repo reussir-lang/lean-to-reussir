@@ -35,6 +35,22 @@ structure CtorLayout where
   erased and has no representation. -/
   fields : Array (Option (Nat × RR.Ty))
 
+/-- The relevant fields' values, given in Lean order, placed at their
+positions in the Reussir record. -/
+def CtorLayout.place (l : CtorLayout) (vals : Array RR.Expr) : Array RR.Expr := Id.run do
+  let rel := l.fields.filterMap id
+  let mut out := Array.replicate rel.size RR.Expr.unitVal
+  for h : k in [:rel.size] do
+    out := out.set! rel[k].1 (vals[k]?.getD .unitVal)
+  return out
+
+/-- The relevant fields' types in record position order. -/
+def CtorLayout.posTys (l : CtorLayout) : Array RR.Ty := Id.run do
+  let rel := l.fields.filterMap id
+  let mut out := Array.replicate rel.size RR.Ty.unit
+  for (p, t) in rel do out := out.set! p t
+  return out
+
 inductive Shape where
   /-- All constructors without relevant fields: `enum [value]`. -/
   | enumLike
@@ -238,6 +254,19 @@ def relevanceOf (ind : Name) (numParams : Nat) : LowerM (Array Bool) := do
   | some r => return r
   | none => return Array.replicate numParams true
 
+/-- Alignment class of a field type: 1, 2, 4 or 8 bytes (pointers,
+64-bit scalars, `Nat`/`Int` and records are 8). -/
+def fieldAlign (t : RR.Ty) : LowerM Nat := do
+  match t with
+  | .named n =>
+    if n ∈ ["u8", "i8", "bool", "L2RUnit"] then return 1
+    if n ∈ ["u16", "i16"] then return 2
+    if n ∈ ["u32", "i32", "f32"] then return 4
+    match (← get).typeInfos[n]? with
+    | some info => if info.shape == .enumLike then return (if info.ctorOrder.size ≤ 256 then 1 else 2) else return 8
+    | none => return 8
+  | _ => return 8
+
 mutual
   /-- Translate a mono type. -/
   partial def lowerType (e : Expr) : LowerM RR.Ty := do
@@ -327,8 +356,18 @@ mutual
       let base := match ival.name with | .str p "_impl" => p | n => n
       let rel := (ctorName.replacePrefix base .anonymous).toString (escape := false)
       let variant := "c_" ++ identEscape rel
-      ctors := ctors.insert ctorName { variant, numParams := ival.numParams, fields }
-      variants := variants.push (variant, rrFields)
+      -- Fields in decreasing alignment (ties in declaration order), so the
+      -- record has no padding: Reussir keeps the given order (the driver
+      -- turns its own member packing off, see scripts/l2r.py).
+      let aligns ← rrFields.mapM fieldAlign
+      let perm := ((List.range rrFields.size).toArray.qsort fun i j =>
+        aligns[i]! > aligns[j]! || (aligns[i]! == aligns[j]! && i < j))
+      let mut posOf := Array.replicate rrFields.size 0
+      for h : r in [:perm.size] do posOf := posOf.set! perm[r] r
+      let placed := fields.map (·.map fun (i, t) => (posOf[i]!, t))
+      let packed := perm.map (rrFields[·]!)
+      ctors := ctors.insert ctorName { variant, numParams := ival.numParams, fields := placed }
+      variants := variants.push (variant, packed)
     let shape :=
       if variants.all (·.2.isEmpty) then Shape.enumLike
       else if variants.size == 1 then Shape.struct

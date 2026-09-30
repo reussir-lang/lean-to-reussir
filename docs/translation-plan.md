@@ -372,8 +372,12 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   One constructor means a `struct`. Anything else is an `enum`.
 - **Allocation.** Non-enum types are heap-allocated and reference-counted
   (`[shared]`), like Lean's.
-- **Field order.** Reussir reorders fields by alignment internally, which
-  is invisible to the program.
+- **Field order.** lean2rr orders each constructor's fields by decreasing
+  alignment (ties in declaration order), so records have no padding; the
+  layout maps each Lean field to its record position, and constructions,
+  patterns and projections go through it. (Reussir's own member packing is
+  off: its in-place reuse of a cell for another variant mishandles fields
+  that packing moves.)
 - **Recursion.** Recursive, mutual and nested inductives refer to each
   other's instances; `inductive Rose | node : List Rose → Rose` gives
   `Rose` and `List_Rose`, defined together.

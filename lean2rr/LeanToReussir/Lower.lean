@@ -108,7 +108,7 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
         -- placeholder is being built (so the value is finite).
         let busy := (← get).zeroBusy
         let ok (tys : Array RR.Ty) := tys.all fun ft => !busy.contains ft
-        let fieldsOf (layout : CtorLayout) := layout.fields.filterMap (·.map (·.2))
+        let fieldsOf (layout : CtorLayout) := layout.posTys
         let cands := info.ctorOrder.filterMap info.ctors.find?
         match cands.find? (fieldsOf · |>.isEmpty) <|> cands.find? (ok ∘ fieldsOf) with
         | some layout =>
@@ -333,16 +333,20 @@ mutual
           | some v => vals := vals.push v
           | none => possible := false
         | none => possible := false
+      -- Fields are bound from and placed at their record positions.
+      let placedVals := dl.place vals
       let body : RR.Block := if possible then
           .ofExpr (match di.shape with
-            | .struct => .ctor dn none vals
-            | _ => .ctor dn (some dl.variant) vals)
+            | .struct => .ctor dn none placedVals
+            | _ => .ctor dn (some dl.variant) placedVals)
         else .ofExpr (.call "l2r_unreachable" #[.named dn] #[])
       match si.shape with
       | .struct =>
-        structBody := some ⟨(names.zip srcFields).mapIdx (fun i (n, (_, t)) => (n, some t, RR.Expr.field (.var "x") i)), body.result⟩
+        structBody := some ⟨(names.zip srcFields).map (fun (n, (p, t)) => (n, some t, RR.Expr.field (.var "x") p)), body.result⟩
       | _ =>
-        arms := arms.push { ty := sn, ctor := some sl.variant, binders := names.map some, body }
+        let mut binders : Array (Option String) := Array.replicate srcFields.size none
+        for (n, (p, _)) in names.zip srcFields do binders := binders.set! p (some n)
+        arms := arms.push { ty := sn, ctor := some sl.variant, binders, body }
     let body := match structBody with
       | some b => b
       | none => .ofExpr (.mtch (.var "x") arms)
@@ -553,6 +557,7 @@ def ctorValue (ty : RR.Ty) (ctor : Name) (fields : Array RR.Expr) : LowerM RR.Ex
   if tn == "bool" then return .atom (if ctor == ``Bool.true then "true" else "false")
   let some info := (← get).typeInfos[tn]? | throwError "lean2rr: constructor {ctor} of non-nominal type {tn}"
   let some layout := info.ctors.find? ctor | throwError "lean2rr: constructor {ctor} not in type {tn}"
+  let fields := layout.place fields
   return match info.shape with
     | .struct => .ctor tn none fields
     | _ => .ctor tn (some layout.variant) fields
@@ -713,7 +718,8 @@ def listFold (name : String) (listTy accTy elemTy : RR.Ty) (step : RR.Expr → R
   let some cons := info.ctors.find? ``List.cons | throwError "lean2rr: bad list type"
   let body : RR.Block := .ofExpr (.mtch (.var "l") #[
     { ty := lt, ctor := some nil.variant, binders := #[], body := .ofExpr (.var "acc") },
-    { ty := lt, ctor := some cons.variant, binders := #[some "x", some "t"],
+    { ty := lt, ctor := some cons.variant,
+      binders := (cons.place #[.var "x", .var "t"]).map fun | .var v => some v | _ => none,
       body := .ofExpr (.call name #[] #[.var "t", step (.var "acc") (.var "x")]) }])
   let _ := elemTy
   modify fun s => { s with fns := s.fns.push (.fn name #[("l", listTy), ("acc", accTy)] accTy body) }
@@ -876,7 +882,7 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
       let u64 := RR.Ty.named "u64"
       let body : RR.Block := ⟨#[("zero", some u64, .atom "0")], .ite (.atom "zero < i")
         ⟨#[("one", some u64, .atom "1"), ("j", some u64, .atom "i - one"), ("x", some valTy, x),
-           ("c", some lt, .ctor ltn (some cons.variant) #[.var "x", .var "acc"])],
+           ("c", some lt, .ctor ltn (some cons.variant) (cons.place #[.var "x", .var "acc"]))],
           .call (name ++ "_go") #[] #[.var "v", .var "j", .var "c"]⟩
         (.ofExpr (.var "acc"))⟩
       let entry : RR.Block :=
@@ -1060,9 +1066,10 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
           for h : i in [:layout.fields.size] do
             if let some _ := layout.fields[i] then
               fieldVals := fieldVals.push vals[layout.numParams + i]!
+          let placedVals := layout.place fieldVals
           match info.shape with
-          | .struct => return .ctor tn none fieldVals
-          | _ => return .ctor tn (some layout.variant) fieldVals
+          | .struct => return .ctor tn none placedVals
+          | _ => return .ctor tn (some layout.variant) placedVals
         | none => throwError "lean2rr: constructor {c.name} of non-nominal type {tn}"
       | t => throwError "lean2rr: constructor {c.name} at type {t.render}"
     -- Expected Reussir types of the constructor's arguments.
