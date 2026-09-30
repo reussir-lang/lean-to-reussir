@@ -384,5 +384,6 @@ through lean2rr, runs both (`LEAN_BACKTRACE=0`, optional `NAME.args` and
 `NAME.stdin`; `NAME.pipe` is a shell command line run instead, with `$BIN`
 the program, for redirections and pipes), and compares stdout, stderr and
 the exit code byte for byte. `NAME.xfail` marks tests blocked by a lean2rr
-request. The Rust unit tests of `leanrt` (bignums, tagged arrays, hashes)
-run with `tests/runtime/leanrt-unit.sh`.
+request. The Rust unit tests of `leanrt` (bignums, tagged arrays, hashes,
+and a differential test of the `FILE` model against glibc's own `FILE`
+over random operation sequences) run with `tests/runtime/leanrt-unit.sh`.
