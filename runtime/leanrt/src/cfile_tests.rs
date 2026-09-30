@@ -196,6 +196,64 @@ fn run_case(seed: u64, mode: u8, steps: usize) {
     let _ = std::fs::remove_file(&pb);
 }
 
+extern "C" {
+    fn pipe(fds: *mut c_int) -> c_int;
+}
+
+/// A read-only `FILE` on a pipe holding `data` (at most 64 KiB, so the
+/// writes cannot block), write end closed: stdin from a pipe.
+fn pipe_with(data: &[u8]) -> c_int {
+    let mut fds = [0 as c_int; 2];
+    assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+    let mut done = 0;
+    while done < data.len() {
+        let n = unsafe { write(fds[1], data[done..].as_ptr() as *const c_void, data.len() - done) };
+        assert!(n > 0);
+        done += n as usize;
+    }
+    unsafe { close(fds[1]) };
+    fds[0]
+}
+
+fn run_pipe_case(seed: u64, steps: usize) {
+    let mut rng = Rng(seed * 40503 + 977);
+    let len = rng.below(60000) as usize;
+    let data: Vec<u8> = (0..len).map(|k| if rng.below(30) == 0 { b'\n' } else { b'a' + (k % 26) as u8 }).collect();
+    let cm = CString::new("r").unwrap();
+    let mut g = Glibc(unsafe { fdopen(pipe_with(&data), cm.as_ptr()) });
+    let mut m = CFile::new(pipe_with(&data), NO_WRITES);
+    for step in 0..steps {
+        let op = rng.below(7);
+        let (ra, rb): (Result<Vec<u8>, i32>, Result<Vec<u8>, i32>) = match op {
+            0 => (g.put(b"x").map(|_| Vec::new()), m.put(b"x").map(|_| Vec::new())),
+            1 => {
+                let n = match rng.below(3) {
+                    0 => rng.below(20),
+                    1 => rng.below(5000),
+                    _ => rng.below(20000),
+                } as usize;
+                (g.read(n), m.read(n))
+            }
+            2 | 3 => (g.get_line(), m.get_line()),
+            4 => (g.flush().map(|_| Vec::new()), m.flush().map(|_| Vec::new())),
+            5 => (g.rewind().map(|_| Vec::new()), m.rewind().map(|_| Vec::new())),
+            _ => (g.truncate().map(|_| Vec::new()), m.truncate().map(|_| Vec::new())),
+        };
+        let ctx = format!("pipe seed {} step {} op {}", seed, step, op);
+        assert_eq!(ra, rb, "result differs: {}", ctx);
+        assert_eq!(g.is_eof(), m.is_eof(), "feof differs: {}", ctx);
+    }
+    unsafe { fclose(g.0) };
+    m.close();
+}
+
+#[test]
+fn differential_against_glibc_pipes() {
+    for seed in 1..=300u64 {
+        run_pipe_case(seed, 60);
+    }
+}
+
 #[test]
 fn differential_against_glibc() {
     for seed in 1..=300u64 {
