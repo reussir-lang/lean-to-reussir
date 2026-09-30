@@ -550,9 +550,10 @@ its value is stored as `Box`.
   two element types, or the result of mapping nothing. Its element step is
   therefore `unreachable`.
 - Between two different inductives with the same constructor shapes, or
-  between `Nat` and an enumeration (only reachable through `unsafeCast`,
-  where Lean's representations coincide), values convert constructor by
-  constructor, or by index. Where no conversion exists at all, lean2rr
+  between an enumeration and `Nat`, a fixed-width integer, `Bool` or
+  another enumeration (only reachable through `unsafeCast`, where Lean's
+  representations coincide), values convert constructor by constructor, or
+  by index. Where no conversion exists at all, lean2rr
   warns and emits a run-time panic for that cast: the program is still
   translated.
 - `Box` costs one allocation per boxing, and appears only on the rare paths
@@ -671,6 +672,24 @@ application appears.
 Erased fields get no binders. Reussir syntax notes: match arms have no
 trailing comma after the last arm, and there is no `else if` (use
 `else { if … }`).
+
+**Cast values.** Mono erases `unsafeCast`, so a `cases` (or a projection)
+can meet a value of another type that Lean represents alike. A value of an
+inductive with the same constructor shapes (§5.1) is matched through its
+own constructors, position by position, and the relevant fields are bound
+by position at their own types (converted only where they are used), so
+the value is not converted as a whole:
+
+```
+match (unsafeCast x : L2) with | .cons h _ => h | .nil => 0     -- x : L1
+    ↦  match x { T_L1::cons(h, _) => h, T_L1::nil => 0 }
+```
+
+A `Nat`, a fixed-width integer or `Bool` matched as an enumeration (and an
+enumeration matched as another one with a different number of
+constructors, or as `Bool`) is converted by index first. A value in `Box`
+is converted to the inductive's uniform instance first. Where no
+conversion exists, lean2rr warns and the match panics when it runs.
 
 An arm that returns the matched value (`simp` turns `node l k r` back
 into `t`) returns that value itself, as natively: the same object, with its
