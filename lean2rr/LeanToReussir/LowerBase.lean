@@ -514,11 +514,10 @@ mutual
     -- Constructor layouts.
     let mut ctors : NameMap CtorLayout := {}
     let mut variants : Array (String × Array RR.Ty) := #[]
-    for h : ci in [:ival.ctors.length] do
-      let ctorName := ival.ctors[ci]!
+    for (ctorName, ms) in ival.ctors.toArray.zip monos do
       let mut fields := #[]
       let mut rrFields := #[]
-      for m in monos[ci]! do
+      for m in ms do
         match m with
         | none => fields := fields.push none
         | some mono =>
