@@ -45,6 +45,53 @@ pub fn swap_raw(slot: u64, raw: usize) -> usize {
     std::mem::replace(&mut vals[slot as usize], raw)
 }
 
+/// Empty a set slot, returning its bit pattern (whose reference passes to
+/// the caller).
+#[inline(never)]
+pub fn take_raw(slot: u64) -> usize {
+    if !has(slot) {
+        unset(slot)
+    }
+    let set = unsafe { &mut *SLOTS.1.get() };
+    set[slot as usize] = false;
+    let vals = unsafe { &*SLOTS.0.get() };
+    vals[slot as usize]
+}
+
+/// Saved contents of cells `base..base + n` (`None`: empty; `n <= 3`),
+/// innermost last.
+struct Saved(UnsafeCell<Vec<[Option<usize>; 3]>>);
+unsafe impl Sync for Saved {}
+static SAVED: Saved = Saved(UnsafeCell::new(Vec::new()));
+
+/// Set the cells `base..base + n` aside, leaving them empty: a new context
+/// (a task starting, which natively runs on its own thread with its own
+/// current standard streams). The references move to the saved context.
+#[inline(never)]
+pub fn push_context(base: u64, n: u64) {
+    assert!(n <= 3, "leanrt: context of {} cells", n);
+    let mut ctx = [None; 3];
+    for i in 0..n {
+        let slot = base + i;
+        ctx[i as usize] = if has(slot) { Some(take_raw(slot)) } else { None };
+    }
+    unsafe { &mut *SAVED.0.get() }.push(ctx);
+}
+
+/// Restore the cells set aside by the matching `push_context`; the caller
+/// has emptied them.
+#[inline(never)]
+pub fn pop_context(base: u64, n: u64) {
+    let ctx = unsafe { &mut *SAVED.0.get() }.pop().expect("leanrt: no saved context");
+    for i in 0..n {
+        let slot = base + i;
+        assert!(!has(slot), "leanrt: context cell {} still set", slot);
+        if let Some(raw) = ctx[i as usize] {
+            set_raw(slot, raw);
+        }
+    }
+}
+
 #[inline(never)]
 pub fn set_raw(slot: u64, raw: usize) {
     let vals = unsafe { &mut *SLOTS.0.get() };

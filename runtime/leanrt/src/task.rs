@@ -14,11 +14,12 @@
 //! This module holds what the generated code cannot: the queue of pending
 //! tasks (in creation order; it owns one reference to each cell), the stack
 //! of running tasks, cancellation flags and their propagation to dependent
-//! tasks, the tasks that stand for another one (a task converted to another
-//! representation), and the phase of the program. A cell is identified by
-//! its address, which is stable while the queue or a running computation
+//! tasks, and the phase of the program. A task is identified by the address
+//! of its cell, which is stable while the queue or a running computation
 //! holds it: every pending task cell is queued, and entries about a task are
-//! dropped when it finishes.
+//! dropped when it finishes. (A task converted to another representation is
+//! a new cell that records the address of the task it stands for, and keeps
+//! that task alive; questions about it are asked about that address.)
 
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,14 +28,21 @@ struct Global<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Global<T> {}
 
 struct Entry {
-    /// Position in the creation-order queue.
-    seq: u64,
+    /// Position in the queue (creation order, or the order in which the
+    /// task it waits for finished; negative: at the head).
+    seq: i64,
     /// Which generated state type the cell has (lean2rr's tag).
     tag: u64,
     /// `IO.getTaskState` reported this task as waiting: the sleep count at
     /// the first such answer, and the number of answers.
     observed: Option<u64>,
     queries: u32,
+    /// Created depending on a task that was unfinished then (`mapTask`,
+    /// `bindTask`): off the queue until that task finishes.
+    waiting: bool,
+    /// Created with `sync := true`: when the task it waits for finishes,
+    /// Lean runs it at once (`LEAN_SYNC_PRIO` in `enqueue_core`).
+    sync: bool,
 }
 
 struct Running {
@@ -52,12 +60,17 @@ struct Tasks {
     /// `main` has returned; the remaining tasks run as during Lean's
     /// task-manager shutdown.
     shutting_down: bool,
-    next_seq: u64,
+    next_seq: i64,
+    /// For tasks that go to the head of the queue (decreasing).
+    head_seq: i64,
     /// Sleeps so far (`IO.sleep`, `dbgSleep`): time passing, for the
     /// heuristics below.
     epoch: u64,
-    /// Pending tasks: seq -> cell address.
-    queue: BTreeMap<u64, usize>,
+    /// Pending tasks that do not wait for another task, in the order Lean's
+    /// task manager enqueues them: seq -> cell address. A task that waits
+    /// for another is enqueued when that one finishes, and several such
+    /// tasks newest first, as Lean's `handle_finished` walks its dependents.
+    queue: BTreeMap<i64, usize>,
     /// Pending tasks by cell address.
     pending: BTreeMap<usize, Entry>,
     /// Unfinished tasks for which `IO.cancel` was called.
@@ -66,8 +79,6 @@ struct Tasks {
     /// depend on it (`mapTask`, `bindTask`): they are canceled when it
     /// finishes canceled, as Lean's `handle_finished` does.
     deps: BTreeMap<usize, Vec<usize>>,
-    /// Unfinished converted task -> the task it stands for.
-    aliases: BTreeMap<usize, usize>,
     /// Running tasks, innermost last.
     running: Vec<Running>,
 }
@@ -76,12 +87,12 @@ static TASKS: Global<Tasks> = Global(UnsafeCell::new(Tasks {
     started: false,
     shutting_down: false,
     next_seq: 0,
+    head_seq: -1,
     epoch: 0,
     queue: BTreeMap::new(),
     pending: BTreeMap::new(),
     canceled: BTreeSet::new(),
     deps: BTreeMap::new(),
-    aliases: BTreeMap::new(),
     running: Vec::new(),
 }));
 
@@ -130,36 +141,26 @@ pub fn register(cell: usize, tag: u64) {
     let seq = t.next_seq;
     t.next_seq += 1;
     t.queue.insert(seq, cell);
-    t.pending.insert(cell, Entry { seq, tag, observed: None, queries: 0 });
+    t.pending.insert(cell, Entry { seq, tag, observed: None, queries: 0, waiting: false, sync: false });
 }
 
-/// Queue a pending task that stands for the unfinished task `orig` (the
-/// same Lean task at another representation): questions about it are
-/// answered for `orig`, and it is canceled with `orig`.
+/// `dep` was created depending on `src` (`sync`: with `sync := true`): if
+/// `src` is unfinished, `dep` waits for it (in the final run of queued
+/// tasks), and will be canceled if `src` finishes canceled, as Lean's
+/// `add_dep` and `handle_finished` do.
 #[inline(never)]
-pub fn register_alias(cell: usize, tag: u64, orig: usize) {
-    register(cell, tag);
-    let t = tasks();
-    t.aliases.insert(cell, orig);
-    t.deps.entry(orig).or_default().push(cell);
-}
-
-/// `dep` was created depending on `src`: if `src` is unfinished, `dep`
-/// will be canceled if `src` finishes canceled.
-#[inline(never)]
-pub fn depend(src: usize, dep: usize) {
+pub fn depend(src: usize, dep: usize, sync: bool) {
     if status(src) != 2 {
-        tasks().deps.entry(src).or_default().push(dep);
+        let t = tasks();
+        t.deps.entry(src).or_default().push(dep);
+        if let Some(e) = t.pending.get_mut(&dep) {
+            e.sync = sync;
+            if !e.waiting {
+                e.waiting = true;
+                t.queue.remove(&e.seq);
+            }
+        }
     }
-}
-
-/// The task a (possibly converted) task stands for.
-fn origin(mut cell: usize) -> usize {
-    let t = tasks();
-    while let Some(&o) = t.aliases.get(&cell) {
-        cell = o;
-    }
-    cell
 }
 
 fn is_running(cell: usize) -> bool {
@@ -174,50 +175,74 @@ pub fn begin(cell: usize) -> bool {
     t.running.push(Running { cell, checked: false, epoch: t.epoch });
     match t.pending.remove(&cell) {
         Some(e) => {
-            t.queue.remove(&e.seq);
+            if !e.waiting {
+                t.queue.remove(&e.seq);
+            }
             true
         }
         None => false,
     }
 }
 
-/// The running task `cell` has finished; if it was canceled, so are the
-/// unfinished tasks that depend on it.
+/// The running task `cell` stops without finishing: it will run again (a
+/// `bind` task waiting for the task it continues as). Its flag and its
+/// dependents stay.
+#[inline(never)]
+pub fn suspend(cell: usize) {
+    let top = tasks().running.pop();
+    debug_assert_eq!(top.map(|r| r.cell), Some(cell));
+}
+
+/// The running task `cell` has finished: the tasks that depend on it are
+/// ready (Lean enqueues them newest first), and canceled too if it was.
 #[inline(never)]
 pub fn end(cell: usize) {
     let t = tasks();
     let top = t.running.pop();
     debug_assert_eq!(top.map(|r| r.cell), Some(cell));
-    t.aliases.remove(&cell);
     let canceled = t.canceled.remove(&cell);
     if let Some(ds) = t.deps.remove(&cell) {
-        if canceled {
-            for d in ds {
-                if t.pending.contains_key(&d) || is_running(d) {
-                    t.canceled.insert(d);
+        // Lean walks the dependents from the newest: `sync` ones run at once
+        // (so, here, at the head of the queue, in walk order), the others are
+        // enqueued.
+        let mut syncs = Vec::new();
+        for &d in ds.iter().rev() {
+            let running = is_running(d);
+            let t = tasks();
+            if let Some(e) = t.pending.get_mut(&d) {
+                if e.waiting {
+                    e.waiting = false;
+                    if e.sync {
+                        syncs.push(d);
+                    } else {
+                        e.seq = t.next_seq;
+                        t.next_seq += 1;
+                        t.queue.insert(e.seq, d);
+                    }
                 }
+            }
+            if canceled && (running || t.pending.contains_key(&d)) {
+                t.canceled.insert(d);
+            }
+        }
+        let t = tasks();
+        for &d in syncs.iter().rev() {
+            if let Some(e) = t.pending.get_mut(&d) {
+                e.seq = t.head_seq;
+                t.head_seq -= 1;
+                t.queue.insert(e.seq, d);
             }
         }
     }
 }
 
-/// The state of a task: 0 waiting (pending), 1 running, 2 finished. A
-/// converted task that has not run is in the state of the task it stands
-/// for (finished then means its value is one conversion away).
+/// The state of a task: 0 waiting (pending), 1 running, 2 finished.
 #[inline(never)]
 pub fn status(cell: usize) -> u8 {
     if is_running(cell) {
         return 1;
     }
-    if !tasks().pending.contains_key(&cell) {
-        return 2;
-    }
-    let o = origin(cell);
-    if o == cell {
-        0
-    } else {
-        status(o)
-    }
+    if tasks().pending.contains_key(&cell) { 0 } else { 2 }
 }
 
 /// `IO.getTaskState`: 0 waiting, 1 running, 2 finished, or 3: the caller
@@ -231,10 +256,9 @@ pub fn query(cell: usize) -> u8 {
     if s != 0 {
         return s;
     }
-    let o = origin(cell);
     let t = tasks();
     let epoch = t.epoch;
-    let Some(e) = t.pending.get_mut(&o) else { return 3 };
+    let Some(e) = t.pending.get_mut(&cell) else { return 3 };
     match e.observed {
         None => {
             e.observed = Some(epoch);
@@ -252,10 +276,8 @@ pub fn query(cell: usize) -> u8 {
 /// `IO.cancel` of a task.
 #[inline(never)]
 pub fn cancel(cell: usize) {
-    let o = origin(cell);
-    let t = tasks();
-    if t.pending.contains_key(&o) || is_running(o) {
-        t.canceled.insert(o);
+    if tasks().pending.contains_key(&cell) || is_running(cell) {
+        tasks().canceled.insert(cell);
     }
 }
 
@@ -280,23 +302,33 @@ pub fn check_canceled() -> bool {
     late || t.canceled.contains(&cell)
 }
 
-/// The tag of the oldest pending task, `u64::MAX` if there is none.
+/// The next task of the final run of queued tasks: the first of the queue
+/// (see `Tasks::queue`). When only tasks waiting for others remain (a
+/// cycle), there is none: Lean's workers stop when the queue is empty and
+/// leave such tasks behind.
+fn next() -> Option<usize> {
+    tasks().queue.values().next().copied()
+}
+
+/// The tag of the next task (see `next`), `u64::MAX` if there is none.
 #[inline(never)]
 pub fn next_tag() -> u64 {
-    let t = tasks();
-    match t.queue.first_key_value() {
-        Some((_, cell)) => t.pending[cell].tag,
+    match next() {
+        Some(cell) => tasks().pending[&cell].tag,
         None => u64::MAX,
     }
 }
 
-/// Remove the oldest pending task from the queue and hand its reference to
-/// the caller.
+/// Remove the next task (see `next`) from the queue and hand its reference
+/// to the caller.
 #[inline(never)]
 pub fn take() -> usize {
+    let cell = next().expect("leanrt: no pending task");
     let t = tasks();
-    let (_, cell) = t.queue.pop_first().expect("leanrt: no pending task");
-    t.pending.remove(&cell);
+    let e = t.pending.remove(&cell).expect("leanrt: no pending task");
+    if !e.waiting {
+        t.queue.remove(&e.seq);
+    }
     cell
 }
 

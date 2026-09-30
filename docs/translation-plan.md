@@ -451,7 +451,7 @@ Stage 4 sees only mono types:
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
 | `ST.Ref σ α` | `LRef<Box>`, a shared mutable cell | mono types a reference as `lcAny`, so it travels boxed. Its contents are boxed too, whatever `α` is: uniform code (`α = lcAny`) and typed code can share one cell, and a cell cannot be converted without losing aliasing. Each `set` allocates the box. |
-| `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧) }` | memoized thunks, deferred IO tasks (§5.14) |
+| `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧), … }` | memoized thunks, deferred tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
 
 A type with computed fields (`Lean.Name`) is represented by its
@@ -926,7 +926,9 @@ A generated Reussir `#[main]` does what Lean's generated `main` does
 2. it clears `IO.initializing` and starts the task manager: IO tasks are
    deferred from now on (§5.14). It then starts a thread with a 1 GiB
    stack, as Lean's runtime does for `main` (deep non-tail recursion is
-   common in Lean programs);
+   common in Lean programs); `main` starts there with the process's
+   standard streams, as a new thread does natively, whatever the
+   initializers redirected;
 3. on that thread it calls the translated `main`, passing the argument list
    (without the program name) if `main` takes one, and the world;
 4. it runs the IO tasks still pending, whatever `main` returned, as
@@ -1011,11 +1013,15 @@ value, updated in place and seen through every alias. The value is a
 generated state, one type per value type `α` (and per kind, thunk or task):
 
 ```
-enum L2RThunk_N { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧) }
+enum L2RThunk_N { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧),
+                  conv(L2RUnit -> ⟦α⟧, Box, u64), busyconv(u64) }
+enum L2RTask_N  { …the same…, bind(L2RUnit -> LCell<L2RTask_N>) }
 ```
 
 The state is a shared Reussir enum, so every `α` fits, closures and value
 types included; a closure cannot be stored in a runtime cell directly.
+`conv` is a converted thunk or task (`busyconv` while it is forced) and
+`bind` a bind task that has not started (both below).
 toMono leaves only a few externs to translate: `cases` on a thunk or task
 becomes `Thunk.get`/`Task.get`, and `Thunk.fn` a closure calling
 `Thunk.get`.
@@ -1043,9 +1049,13 @@ task runs when it is needed, on the stack of whoever needs it.
 
 - *IO tasks* (`BaseIO.asTask`, `mapTask`, `bindTask`) are deferred. The new
   cell is `pending(|w| act(w).val)` (for `mapTask f t`, the action is `f
-  t.get`; for `bindTask t f`, the value of the task `f t.get` returns). The
-  runtime (`leanrt::task`) queues it and holds a reference until it runs,
-  since Lean runs an IO task even if the program drops it.
+  t.get`); for `bindTask t f` it is `bind(|w| (f t.get w).val)`, whose
+  computation yields the task the new one continues as. The runtime
+  (`leanrt::task`) queues it and holds a reference until it runs, since
+  Lean runs an IO task even if the program drops it. A task that depends
+  on a task unfinished at its creation (`mapTask`, `bindTask`, and the pure
+  `Task.map`, `Task.bind`) is recorded as its dependent, as Lean's
+  `add_dep` does.
 - *Pure tasks* (`Task.spawn`, `Task.map`, `Task.bind`) are computed when
   they are created if no task is pending or running: `Task.spawn f` is then
   `l2r_lcell_new(S::done{f(())})`, and nothing, not even `dbgTrace`,
@@ -1062,10 +1072,18 @@ task runs when it is needed, on the stack of whoever needs it.
     pending task `waiting`, until the program asks again after time has
     passed (an `IO.sleep`/`dbgSleep` since the first answer) or keeps asking
     (1000 times); the task then runs and is reported `finished`;
-  - `main` returning (§5.11): the queued tasks run in creation order.
-    `IO.Process.exit` exits at once, as natively.
-- `mapTask`/`bindTask` with `sync := true` of a finished task run `f` at
-  once, as `lean_task_map_core`/`lean_task_bind_core` do.
+  - `main` returning (§5.11): the queued tasks run in the order Lean's task
+    manager starts them (with one worker, native Lean's order exactly).
+    A dependent is enqueued when the task it waits for finishes: Lean walks
+    the dependents from the newest, runs those created with `sync := true`
+    at once and enqueues the others. A bind task that has run `f` finishes
+    at once if the task `f` returned has finished, and otherwise waits,
+    enqueued again, and finishes as that one (`task_bind_fn1`). Dependents
+    of a cycle are left behind, as Lean's workers stop when the queue is
+    empty. `IO.Process.exit` exits at once, as natively.
+- `mapTask`/`bindTask`/`Task.map`/`Task.bind` with `sync := true` of a
+  finished task apply `f` at once in the calling thread (its streams too),
+  as `lean_task_map_core`/`lean_task_bind_core` do.
 - `IO.cancel` sets the flag of a pending or running task; when a canceled
   task finishes, the tasks created while it was unfinished that depend on
   it (`mapTask`, `bindTask`) are canceled too, as Lean's `handle_finished`
@@ -1074,10 +1092,29 @@ task runs when it is needed, on the stack of whoever needs it.
   shutdown flag, which makes `IO.checkCanceled` true; natively those tasks
   have usually started long before, so a task sees the flag only once time
   has passed in it (a sleep) or from its second check on.
-- A task stored at another representation (in `Box`, §5.1) is converted to
-  a new cell whose closure forces the original. While unfinished, it is
-  queued as standing for the original: its state, `IO.cancel` and
-  cancellation are the original's.
+- A thunk or task stored at another representation (in `Box`, §5.1) is
+  converted to a new cell in state `conv(g, o, a)`: `g` forces the original
+  and converts its value (so it still runs at most once); `o` is the
+  original cell, boxed, so that converting back gives that very cell (a
+  thunk crossing between typed and uniform code in a loop stays one cell
+  instead of growing a chain); `a` is, for a task, the original's identity
+  for the runtime, so the copy's state, `IO.cancel` and cancellation are the
+  original's, also while the copy is being forced (`busyconv`). A copy of a
+  copy records the first original, and converting it to a third
+  representation converts the original directly, so chains stay one level
+  deep.
+- *Standard streams.* Natively each thread has its own current standard
+  streams (`IO.setStdout` & co. replace the current thread's, which start as
+  the process's), and a task runs on a worker thread. So a task starts with
+  the process's streams, and when it ends the streams of whoever ran it are
+  back (`l2r_std_enter`/`l2r_std_leave` set the stream cells aside and
+  restore them); a pure task computed at once does the same. During module
+  initialization, where Lean runs tasks on the calling thread, they share
+  the caller's streams. `main`, on its own thread, starts with the
+  process's streams whatever the initializers installed (§5.11). Natively
+  a worker keeps its streams from one task to the next, so a task that
+  leaves a redirection behind can affect the next task on the same worker;
+  the translation behaves as if every task ran on a fresh worker.
 - During module initialization Lean has no task manager, and
   `lean_task_spawn_core` runs the action at once; so does the translation.
 
@@ -1100,7 +1137,11 @@ What a single thread cannot do:
   returns, and a long chain of dependent tasks runs recursively when its
   last task is needed;
 - Lean's panic for `Task.get` inside a `sync := true` task is not
-  reproduced.
+  reproduced;
+- a deferred task is reported `waiting` at the first question even after a
+  sleep, where natively a worker would long have run it (a pure task
+  deferred behind a pending IO task, for example): running it then could
+  hang, if it needs a task that waits for `main`.
 
 Tasks that wait for each other in a cycle wait forever, as natively.
 Promises are not translated yet.
@@ -1267,8 +1308,11 @@ Each item says what differs and when.
   order tasks are needed, and `IO.waitAny` does not pick the fastest task.
   A pure task created while no other task is pending is computed at once,
   so one that never finishes hangs the program, where native Lean runs it
-  on a worker thread and can exit without it. Promises are not translated
-  yet.
+  on a worker thread and can exit without it. A deferred task is reported
+  `waiting` at the first `IO.hasFinished`, even after a sleep. Tasks run as
+  if each had a fresh worker thread, so a redirection a task leaves behind
+  never reaches another task (natively it can, on the same worker).
+  Promises are not translated yet.
 - *Startup order of generated constants*: specializations with every
   parameter fixed that Lean generated while compiling the same declaration
   run in the order of their numbers (`spec_0`, `spec_2`, …). Lean's own
@@ -1287,10 +1331,9 @@ Each item says what differs and when.
 - *Stream redirection* (`IO.setStdout`, `setStderr`, `setStdin`,
   `IO.FS.withIsolatedStreams`) is translated: the current streams live in
   cell slots, and panics, `dbgTrace` and `timeit` write through the current
-  stderr stream (`l2r_stderr_put`), as natively. Natively each thread has
-  its own streams: a task, and `main` after the initializers, start with the
-  process's streams. Until tasks save and restore the slots, a redirection
-  made in a task or an initializer is seen by the rest of the program.
+  stderr stream (`l2r_stderr_put`), as natively, and per thread as
+  natively: a task, and `main` after the initializers, start with the
+  process's streams (§5.14).
 
 **Cost** (time and memory, not results)
 - *Structural conversions* (§5.1) rebuild a value as a tree: sharing is lost,
