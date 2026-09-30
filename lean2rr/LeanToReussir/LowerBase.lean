@@ -71,6 +71,8 @@ structure LowerState where
   tupleTypes : Std.HashMap (Array RR.Ty) String := {}
   /-- Generated functions (declarations and outlined join points). -/
   fns : Array RR.Item := #[]
+  /-- Next once-cell slot for constants. -/
+  cafSlots : Nat := 0
   /-- Structural conversions being generated (for recursive types). -/
   convsInProgress : Std.HashSet String := {}
   counter : Nat := 0

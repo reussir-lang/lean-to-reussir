@@ -19,8 +19,36 @@ open Lean Compiler LCNF
 /-- Roots besides `main` that the entry point needs. -/
 def entryRoots : Array Name := #[``IO.Error.toString]
 
-/-- The entry point. `mainInst`/`errStr` are instance names. -/
-def lowerEntry (mainInst errStr : Name) : LowerM RR.Item := do
+/-- Whether a module belongs to the Lean toolchain (its constants are
+evaluated lazily; see translation plan §5.12). -/
+def isToolchainModule (m : Name) : Bool :=
+  m.getRoot ∈ [`Init, `Std, `Lean, `Lake]
+
+/-- Constants (zero-parameter declarations with code) of user modules, in
+source order. Native Lean evaluates all of them at startup, even unused ones,
+so they are roots and are forced before `main`. Type-class instances are
+skipped: building a dictionary has no observable effect. -/
+def userConstants : CoreM (Array Name) := do
+  let env ← getEnv
+  let mut out : Array (Name × Nat × Nat) := #[]
+  for (n, _) in env.constants.map₁.toList do
+    let some idx := env.getModuleIdxFor? n | continue
+    let some modName := env.header.moduleNames[idx.toNat]? | continue
+    if isToolchainModule modName then continue
+    let some d ← getBaseDecl? n | continue
+    let .code _ := d.value | continue
+    unless d.params.isEmpty do continue
+    if (← isClass? d.type).isSome then continue
+    let pos := match ← findDeclarationRanges? n with
+      | some r => r.range.pos.line
+      | none => 0
+    out := out.push (n, idx.toNat, pos)
+  let sorted := out.qsort fun (_, m1, p1) (_, m2, p2) => m1 < m2 || (m1 == m2 && p1 < p2)
+  return sorted.map (·.1)
+
+/-- The entry point. `mainInst`/`errStr` are instance names; `eager` are the
+instances of user constants, forced before `main` like native Lean does. -/
+def lowerEntry (mainInst errStr : Name) (eager : Array Name) : LowerM RR.Item := do
   let some mainDecl := (← read).decls.find? mainInst | throwError "lean2rr: no main"
   let (ps, r) := splitFnType mainDecl.type mainDecl.params.size
   let resTy ← lowerType r
@@ -43,7 +71,10 @@ def lowerEntry (mainInst errStr : Name) : LowerM RR.Item := do
     let consV := (linfo.ctors.find? ``List.cons).map (·.variant) |>.getD "c_cons"
     pre := s!"fn l2r_mk_args(i : u64, acc : {lt}) -> {lt} \{\n    if i == 0 \{ acc } else \{ l2r_mk_args(i - 1, {lt}::{consV}\{l2r_argv(i - 1), acc}) }\n}\n\n"
     argExpr := s!"l2r_mk_args(l2r_argc(), {lt}::{nilV}\{}), "
-  let body := s!"#[main]\npub fn lean_main_entry() \{\n    let r = {fnName mainInst}({argExpr}L2RUnit::u\{});\n    match r \{\n        {outTy}::{okV}(v) => \{ {exitCode} },\n        {outTy}::{errV}(e) => \{ l2r_uncaught_exception({fnName errStr}(e)) }\n    }\n}\n"
+  let mut forced := ""
+  for h : i in [:eager.size] do
+    forced := forced ++ s!"    let caf{i} = {fnName eager[i]}();\n"
+  let body := s!"#[main]\npub fn lean_main_entry() \{\n{forced}    let r = {fnName mainInst}({argExpr}L2RUnit::u\{});\n    match r \{\n        {outTy}::{okV}(v) => \{ {exitCode} },\n        {outTy}::{errV}(e) => \{ l2r_uncaught_exception({fnName errStr}(e)) }\n    }\n}\n"
   return .raw (pre ++ body)
 
 /-- The externs a program calls: Lean name, C symbol, mono signature, and
@@ -76,14 +107,14 @@ def externReport (decls : Array (Decl .pure)) (keys : NameMap InstKey) : CoreM S
   return "\n".intercalate (lines.qsort (· < ·)).toList ++ "\n"
 
 /-- Lower a whole program. -/
-def lowerProgram (prelude : String) (mainInst errStr : Name) (decls : Array (Decl .pure))
+def lowerProgram (prelude : String) (mainInst errStr : Name) (eager : Array Name) (decls : Array (Decl .pure))
     (keys : NameMap InstKey) : CoreM String := do
   let table ← programRelevance decls
   let decls ← retypeMono table decls
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys }
   let act : LowerM Unit := do
     for d in decls do lowerDecl d
-    let entry ← lowerEntry mainInst errStr
+    let entry ← lowerEntry mainInst errStr eager
     modify fun s => { s with fns := s.fns.push entry }
   let ((), st) ← (act.run ctx).run {}
   let mut out := prelude ++ "\n// ---- generated types ----\n\n"

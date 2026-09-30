@@ -97,6 +97,47 @@ extern "rust" [{
     }
 }];
 
+// ---- once-cells (constants) ------------------------------------------------
+// Temporary implementation: a weak_odr/no_mangle static is merged into a
+// single global across all texture crates at link time. (To be replaced by
+// the leanrt crate.)
+
+extern "rust" [{
+    #[linkage = "weak_odr"]
+    #[unsafe(no_mangle)]
+    pub static mut L2R_ONCE_VAL: [usize; 16384] = [0; 16384];
+    #[linkage = "weak_odr"]
+    #[unsafe(no_mangle)]
+    pub static mut L2R_ONCE_SET: [u8; 16384] = [0; 16384];
+}];
+
+#[ffi(import)]
+fn l2r_once_has(slot : u64) -> bool [{ unsafe { L2R_ONCE_SET[slot as usize] != 0 } }];
+
+#[ffi(import)]
+fn l2r_once_set<T>(slot : u64, v : T) -> T [{
+    {
+        let keep = v.clone();
+        let mut raw: usize = 0;
+        unsafe {
+            ::std::ptr::copy_nonoverlapping(&keep as *const [:T:] as *const u8, &mut raw as *mut usize as *mut u8, ::std::mem::size_of::<[:T:]>());
+            L2R_ONCE_VAL[slot as usize] = raw;
+            L2R_ONCE_SET[slot as usize] = 1;
+        }
+        ::std::mem::forget(keep);
+        v
+    }
+}];
+
+#[ffi(import)]
+fn l2r_once_get<T>(slot : u64) -> T [{
+    {
+        let raw = unsafe { L2R_ONCE_VAL[slot as usize] };
+        let p: ::std::mem::ManuallyDrop<[:T:]> = unsafe { ::std::mem::transmute_copy(&raw) };
+        (*p).clone()
+    }
+}];
+
 // ---- runtime types -------------------------------------------------------
 
 // Unit-like values (erased values, `PUnit`, the IO world). Reussir's own

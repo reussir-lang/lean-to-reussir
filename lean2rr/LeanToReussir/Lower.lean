@@ -771,6 +771,24 @@ mutual
     | t => throwError "lean2rr: cases on value of type {t.render} ({cs.typeName})"
 end
 
+/-- The accessor of a constant (a declaration without parameters): its value
+is computed once, by `<name>_init`, and kept in a runtime once-cell for the
+rest of the run, like native Lean's CAFs and closed terms (translation plan
+§5.12). The cell stores a boundary type; other values are boxed. -/
+def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
+  let slot := (← get).cafSlots
+  modify fun s => { s with cafSlots := slot + 1 }
+  let (st, boxed) ← arrayElemTy ret
+  let wrap (e : RR.Expr) : RR.Expr := match st with
+    | .named bn => if boxed then .ctor bn none #[e] else e
+    | _ => e
+  let unwrap (e : RR.Expr) : RR.Expr := if boxed then .field e 0 else e
+  let k := RR.Expr.atom (toString slot)
+  let body : RR.Block := .ofExpr (.ite (.call "l2r_once_has" #[] #[k])
+    (.ofExpr (unwrap (.call "l2r_once_get" #[st] #[k])))
+    (.ofExpr (unwrap (.call "l2r_once_set" #[st] #[k, wrap (.call (name ++ "_init") #[] #[])]))))
+  return .fn name #[] ret body
+
 /-- Lower a declaration with code to a Reussir function. -/
 def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let .code body := d.value | return
@@ -782,6 +800,10 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {} }
   let block ← try lowerCode ctx (chooseOutlined body) ret body
     catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
-  modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
+  if d.params.isEmpty then
+    let acc ← cafAccessor (fnName d.name) ret
+    modify fun s => { s with fns := s.fns.push (.fn (fnName d.name ++ "_init") #[] ret block) |>.push acc }
+  else
+    modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
 
 end LeanToReussir

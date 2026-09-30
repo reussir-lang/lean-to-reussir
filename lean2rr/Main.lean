@@ -44,7 +44,8 @@ def run (opts : CliOptions) (module : Name) : IO UInt32 := do
     let mut text := ""
     if opts.emit == some "base" then text := text ++ (← emitBase prog)
     if opts.emit == some "inst" || opts.emit == some "mono" || opts.emit == some "rr" || opts.emit == some "externs" then
-      let (rootInsts, st) ← monomorphize (#[opts.root] ++ entryRoots)
+      let userCafs ← userConstants
+      let (rootInsts, st) ← monomorphize (#[opts.root] ++ entryRoots ++ userCafs)
       let header := s!"-- root instances: {rootInsts}; instances: {st.decls.size}, extern instances: {st.externs.size}, lcAny type arguments: {st.uniformArgs}\n"
       if opts.emit == some "inst" then
         text := text ++ header
@@ -60,7 +61,8 @@ def run (opts : CliOptions) (module : Name) : IO UInt32 := do
           let prelude ← match opts.prelude with
             | some p => IO.FS.readFile p
             | none => pure ""
-          text := text ++ (← lowerProgram prelude rootInsts[0]! rootInsts[1]! decls st.keys)
+          let eager := rootInsts[(1 + entryRoots.size):].toArray
+          text := text ++ (← lowerProgram prelude rootInsts[0]! rootInsts[1]! eager decls st.keys)
     if opts.stats then text := text ++ (← statsReport prog)
     return text
   match opts.output with
