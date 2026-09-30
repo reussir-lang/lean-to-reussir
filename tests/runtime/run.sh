@@ -38,7 +38,7 @@ for t in "${TESTS[@]}"; do
   stdin=/dev/null; [ -f "$HERE/$t.stdin" ] && stdin="$HERE/$t.stdin"
   status=ok; why=""
   if ! (cd "$d" && lean -o "$t.olean" -c "$t.c" "$t.lean" > build-native.log 2>&1 \
-        && leanc "$t.c" -o native >> build-native.log 2>&1); then
+        && leanc -O3 -DNDEBUG "$t.c" -o native >> build-native.log 2>&1); then
     status=fail; why="native build failed (see $d/build-native.log)"
   elif ! python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" --keep-rr "$d/$t.rr" \
         > "$d/build-l2r.log" 2>&1; then
