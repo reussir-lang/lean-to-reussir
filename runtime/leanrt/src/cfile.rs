@@ -782,3 +782,7 @@ impl CFile {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cfile_tests.rs"]
+mod tests;
