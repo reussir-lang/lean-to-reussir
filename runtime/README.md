@@ -262,9 +262,12 @@ stack guard page prints `\nStack overflow detected. Aborting.` and aborts,
 exit 134, without flushing stdout — as native).
 `leanrt::rt::run_main2(|| init(), || body())` first runs `init` (the
 module initializers) on the calling thread, as native `main` does. Both
-put epoll descriptors in place of standard descriptors closed at startup
-(native Lean's libuv descriptors take their place, so using them fails
-with `EINVAL`), including the `/dev/null` Rust's runtime substitutes.
+put close-on-exec epoll descriptors in place of standard descriptors
+closed at startup (native Lean's libuv descriptors take their place, so
+using them fails with `EINVAL`, and children see them closed), including
+the `/dev/null` Rust's runtime substitutes; an ELF constructor records
+which were closed before Rust's runtime runs, so a `/dev/null` the program
+was given (Python's `subprocess.DEVNULL`) stays.
 `l2r_set_initializing(b)` sets what `IO.initializing` answers.
 
 ## Requests for lean2rr

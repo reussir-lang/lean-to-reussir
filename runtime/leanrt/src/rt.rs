@@ -189,22 +189,58 @@ fn is_rust_dev_null(fd: i32) -> bool {
     m.file_type().is_char_device() && m.rdev() == DEV_NULL && unsafe { fcntl(fd, F_GETFL) } & O_ACCMODE == O_RDWR
 }
 
+/// Which standard descriptors (bit `fd`) were closed when the process
+/// started, as `record_closed_std_fds` saw them; `NOT_RECORDED` if it did
+/// not run.
+static CLOSED_AT_START: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(NOT_RECORDED);
+const NOT_RECORDED: u8 = 0x80;
+
+/// An ELF constructor: it runs before `main`, and so before Rust's runtime
+/// puts `/dev/null` in the place of closed standard descriptors
+/// (`sanitize_standard_fds`), which could not be told apart afterwards from
+/// a `/dev/null` the program was given (Python's `subprocess.DEVNULL`,
+/// `<>/dev/null`).
+extern "C" fn record_closed_std_fds() {
+    const F_GETFD: i32 = 1;
+    let mut closed = 0u8;
+    for fd in 0..3 {
+        if unsafe { fcntl(fd, F_GETFD) } < 0 {
+            closed |= 1 << fd;
+        }
+    }
+    CLOSED_AT_START.store(closed, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[used]
+#[link_section = ".init_array"]
+static RECORD_CLOSED_STD_FDS: extern "C" fn() = record_closed_std_fds;
+
 /// Native Lean's runtime opens several descriptors at startup (libuv's
 /// epoll/eventfd/pipes); when stdin, stdout or stderr is closed, the lowest
 /// of them takes its place, and reading or writing that stream then fails
-/// with `EINVAL` (not `EBADF`). Put epoll descriptors in the place of
-/// closed standard descriptors (still closed, or already replaced by Rust's
-/// runtime with `/dev/null`) so the same errors arise here. Like libuv's,
-/// they are close-on-exec, so a child process sees the standard descriptor
-/// closed. (A standard descriptor redirected by the user to `/dev/null`
-/// read-write, `<>`, is taken for a closed one.)
+/// with `EINVAL` (not `EBADF`). Put epoll descriptors in the place of the
+/// standard descriptors that were closed at startup (still closed, or
+/// already replaced by Rust's runtime with `/dev/null`) so the same errors
+/// arise here. Like libuv's, they are close-on-exec, so a child process
+/// sees the standard descriptor closed. (Without the constructor's record, a
+/// standard descriptor that is `/dev/null` opened read-write is taken for a
+/// closed one.)
 pub fn occupy_closed_std_fds() {
     const F_GETFD: i32 = 1;
     const F_SETFD: i32 = 2;
     const FD_CLOEXEC: i32 = 1;
     const EPOLL_CLOEXEC: i32 = 0o2000000;
+    // Refer to the constructor, so that the linker keeps the object that
+    // holds it.
+    let _ = unsafe { std::ptr::read_volatile(&RECORD_CLOSED_STD_FDS) };
+    let recorded = CLOSED_AT_START.load(std::sync::atomic::Ordering::Relaxed);
     for fd in 0..3 {
-        if unsafe { fcntl(fd, F_GETFD) } < 0 || is_rust_dev_null(fd) {
+        let closed = if recorded & NOT_RECORDED == 0 {
+            recorded & (1 << fd) != 0
+        } else {
+            (unsafe { fcntl(fd, F_GETFD) }) < 0 || is_rust_dev_null(fd)
+        };
+        if closed {
             let e = unsafe { epoll_create1(EPOLL_CLOEXEC) };
             if e >= 0 && e != fd {
                 unsafe {
