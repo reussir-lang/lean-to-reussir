@@ -55,10 +55,22 @@ def declOrder (n : Name) : CoreM (Nat × Nat) := do
       match ← findDeclarationRanges? m with
       | some r => return 2 * (r.range.pos.line * 100000 + r.range.pos.column) + (if aux then 0 else 1)
       | none => if m.isAnonymous then return 0 else find m.getPrefix true fuel
-  return (idx, ← find n false 16)
+  -- A specialization `f._at_.g.spec_N` is compiled with `g`, before it.
+  let n' := (atParent? n).getD n
+  return (idx, ← find n' (n' != n) 16)
+where
+  /-- The declaration after the last `_at_` component, if any. -/
+  atParent? (n : Name) : Option Name := Id.run do
+    let cs := n.components
+    let some i := (List.range cs.length).reverse.find? (cs[·]! == `_at_) | return none
+    let rest := cs.drop (i + 1)
+    if rest.isEmpty then return none
+    return some (rest.foldl (fun acc c => acc ++ c) .anonymous)
 
 /-- The startup items of the program's own (non-toolchain) modules, in
-order. -/
+order. Constants are the module's compiled zero-parameter declarations
+(as native Lean's module initializer), so compiler-generated ones such as
+specializations with every parameter fixed are included. -/
 def startupItems : CoreM (Array StartupItem) := do
   let env ← getEnv
   let mut out : Array (StartupItem × Nat × Nat) := #[]
@@ -66,19 +78,21 @@ def startupItems : CoreM (Array StartupItem) := do
     let some idx := env.getModuleIdxFor? n | continue
     let some modName := env.header.moduleNames[idx.toNat]? | continue
     if isToolchainModule modName then continue
-    let item? ← do
-      if isIOUnitInitFn env n then pure (some (StartupItem.ioUnit n))
-      else if let some f := getInitFnNameFor? env n then pure (some (.init n f))
-      else
-        match ← getBaseDecl? n with
-        | some d =>
-          if d.value matches .code _ && d.params.isEmpty then
-            pure (some (.caf n))
-          else pure none
-        | none => pure none
+    let item? :=
+      if isIOUnitInitFn env n then some (StartupItem.ioUnit n)
+      else if let some f := getInitFnNameFor? env n then some (.init n f)
+      else none
     let some item := item? | continue
     let (m, pos) ← declOrder n
     out := out.push (item, m, pos)
+  for h : idx in [:env.header.moduleNames.size] do
+    if isToolchainModule env.header.moduleNames[idx] then continue
+    for d in baseExt.getModuleEntries env idx (level := .private) do
+      let n := d.name
+      unless d.value matches .code _ && d.params.isEmpty do continue
+      if isIOUnitInitFn env n || (getInitFnNameFor? env n).isSome then continue
+      let (m, pos) ← declOrder n
+      out := out.push (.caf n, m, pos)
   let sorted := out.qsort fun (_, m1, p1) (_, m2, p2) => m1 < m2 || (m1 == m2 && p1 < p2)
   return sorted.map (·.1)
 

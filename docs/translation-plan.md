@@ -336,7 +336,7 @@ Stage 4 sees only mono types:
 | `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records), otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
-| `ST.Ref σ α` | `LRef<S>`, a shared mutable cell | mono types a reference as `lcAny`, so it travels boxed |
+| `ST.Ref σ α` | `LRef<Box>`, a shared mutable cell | mono types a reference as `lcAny`, so it travels boxed. Its contents are boxed too, whatever `α` is: uniform code (`α = lcAny`) and typed code can share one cell, and a cell cannot be converted without losing aliasing. Each `set` allocates the box. |
 | `Thunk α`, `Task α` | generated one-field structs | a thunk is forced when built; a pure task is computed when spawned (§6) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
 
@@ -722,21 +722,31 @@ executables.
 
 ### 5.12 Constants (CAFs) and closed terms
 
-Native Lean behaves as follows (observed):
-- every zero-parameter declaration of a module is **evaluated at program
-  start**, in the module initializer, *even if unused*;
+Native Lean behaves as follows (observed; `EmitC.emitInitFn`):
+- every zero-parameter declaration of a module's compiled code is
+  **evaluated at program start**, in the module initializer, *even if
+  unused*. This includes declarations the compiler generates, such as a
+  specialization `gen._at_.main.spec_0` with every parameter fixed;
 - `extractClosed` constants are evaluated **lazily, once**, on first use;
 - all of these values live for the whole run.
+
+The initializer follows Lean's compilation order, which is not persisted in
+the `.olean`. Compilation follows the source, and a declaration generated
+while compiling `g` is compiled with `g`, before it.
 
 Our translation runs, before `main`, the startup work of Lean's module
 initializers:
 - for each program module, for each declaration in source order (line,
-  then column; an auxiliary declaration such as `main.unsafe_1`, which has
-  no position of its own, right before its parent):
+  then column). An auxiliary declaration such as `main.unsafe_1`, which has
+  no position of its own, goes right before its parent. A specialization
+  `f._at_.g.spec_N` goes right before `g`, the declaration after the last
+  `_at_`:
   - an `initialize` action (`initialize do …`) is run;
   - for `initialize c : T ← act`, `act` is run and its result stored as
     `c`, which the program reads from a once-cell;
-  - any other constant, instances included, is evaluated;
+  - any other zero-parameter declaration of the module's base-phase code
+    (the persisted base LCNF, so generated declarations are included),
+    instances included, is evaluated;
 - before those, the `initialize` constants of toolchain modules that the
   program uses (`IO.stdGenRef`), in module order.
 An error from an initializer is reported like an uncaught exception of

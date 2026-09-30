@@ -752,42 +752,43 @@ def listFold (name : String) (listTy accTy elemTy : RR.Ty) (step : RR.Expr → R
   modify fun s => { s with fns := s.fns.push (.fn name #[("l", listTy), ("acc", accTy)] accTy body) }
   return name
 
-/-- Glue for `ST.Ref` operations on the runtime cell `LRef<S>` (S is the
-storage type of the element type `α`, taken from the extern instance key).
+/-- Glue for `ST.Ref` operations on the runtime cell `LRef<L2RBox>`.
 A reference itself has mono type `lcAny` (Lean unwraps `ST.Ref` to an opaque
-pointer), so it is passed around boxed. -/
+pointer), so it is passed around boxed. Its contents are boxed too, whatever
+the element type `α` of the operation: a reference created by uniform code
+(at `α = lcAny`) is read and written by typed code as well, and a cell
+cannot be converted without losing aliasing. -/
 def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
     (args : Array RR.Expr) : LowerM (Option RR.Expr) := do
   let some α := typeArgs[1]? | return none
   let α ← toMonoTypeKeep α
-  let (st, boxed) ← arrayElemTy (← lowerType α)
+  let elemTy ← lowerType α
+  let st := RR.Ty.box
   let refTy := RR.Ty.app "LRef" #[st]
-  let wrap (e : RR.Expr) : RR.Expr := match st with
-    | .named bn => if boxed then .ctor bn none #[e] else e
-    | _ => e
-  let unwrap (e : RR.Expr) : RR.Expr := if boxed then .field e 0 else e
+  let wrap (e : RR.Expr) : LowerM RR.Expr := coerce e elemTy st
+  let unwrap (e : RR.Expr) : LowerM RR.Expr := coerce e st elemTy
   let resTy ← lowerType ret
   let payload ← ioPayloadTy resTy
   let asRef (i : Nat) : LowerM RR.Expr := do
     coerce args[i]! (← lowerType params[i]!) refTy
   match orig with
   | ``ST.Prim.mkRef =>
-    let r ← coerce (.call "l2r_ref_new" #[st] #[wrap args[0]!]) refTy payload
+    let r ← coerce (.call "l2r_ref_new" #[st] #[← wrap args[0]!]) refTy payload
     return some (← wrapIOResult resTy r)
   | ``ST.Prim.Ref.get =>
-    let v ← coerce (unwrap (.call "l2r_ref_get" #[st] #[← asRef 0])) (← lowerType α) payload
+    let v ← coerce (← unwrap (.call "l2r_ref_get" #[st] #[← asRef 0])) elemTy payload
     return some (← wrapIOResult resTy v)
   -- `take` moves the value out (Lean's `modify` is take-then-set, so the
   -- value stays unshared and is updated in place).
   | ``ST.Prim.Ref.take =>
-    let v ← coerce (unwrap (.call "l2r_ref_take" #[st] #[← asRef 0])) (← lowerType α) payload
+    let v ← coerce (← unwrap (.call "l2r_ref_take" #[st] #[← asRef 0])) elemTy payload
     return some (← wrapIOResult resTy v)
   | ``ST.Prim.Ref.set =>
     let r ← fresh "rs"
-    return some (.block ⟨#[(r, some (.named "u64"), .call "l2r_ref_set" #[st] #[← asRef 0, wrap args[1]!])],
+    return some (.block ⟨#[(r, some (.named "u64"), .call "l2r_ref_set" #[st] #[← asRef 0, ← wrap args[1]!])],
       ← wrapIOResult resTy .unitVal⟩)
   | ``ST.Prim.Ref.swap =>
-    let v ← coerce (unwrap (.call "l2r_ref_swap" #[st] #[← asRef 0, wrap args[1]!])) (← lowerType α) payload
+    let v ← coerce (← unwrap (.call "l2r_ref_swap" #[st] #[← asRef 0, ← wrap args[1]!])) elemTy payload
     return some (← wrapIOResult resTy v)
   | ``ST.Prim.Ref.ptrEq =>
     return some (← wrapIOResult resTy (.call "l2r_ref_ptr_eq" #[st] #[← asRef 0, ← asRef 1]))
