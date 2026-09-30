@@ -1,4 +1,5 @@
 import Lean
+import LeanToReussir.MonoTypesKeep
 import LeanToReussir.Relevance
 
 /-!
@@ -12,7 +13,7 @@ List lcAny`, so `structProjCases` or `simp` may produce `cases p : Prod …
 context, but only when the context determines them:
 
 * a `cases` field gets its constructor's field type, instantiated at the
-  discriminant's (exact) type arguments and passed through `toMonoType`;
+  discriminant's (exact) type arguments and passed through `toMonoTypeKeep`;
 * a `let` of a constructor application gets the inductive applied to the
   type arguments determined by first-order matching of the field types
   against the argument types;
@@ -63,7 +64,7 @@ def ctorFieldTypes (ctor : Name) (args : Array Expr) : CoreM (Array Expr) := do
   repeat
     match ty.headBeta with
     | .forallE _ d b _ =>
-      out := out.push (← toMonoType d)
+      out := out.push (← toMonoTypeKeep d)
       ty := b.instantiate1 anyExpr
     | _ => break
   return out
@@ -86,7 +87,7 @@ def ctorAppType (ctor : Name) (argTys : Array Expr) : CoreM (Option Expr) := do
     | _ => break
   if assign.any Option.isNone then return none
   let indTy := mkAppN (.const c.induct []) (assign.map Option.get!)
-  return some (← toMonoType indTy)
+  return some (← toMonoTypeKeep indTy)
 
 structure RetypeCtx where
   table : RelevanceTable

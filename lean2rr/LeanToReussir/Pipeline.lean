@@ -1,4 +1,6 @@
 import Lean
+import LeanToReussir.TypedToMono
+import LeanToReussir.TypedStructProjCases
 import LeanToReussir.Collect
 import LeanToReussir.Mono
 import LeanToReussir.Passes
@@ -40,9 +42,13 @@ def stage2Passes : CoreM Stage2Passes := do
   let some i := m.basePasses.findIdx? (·.name == `saveBase)
     | throwError "lean2rr: Lean's pass manager has no saveBase pass"
   return {
-    toMono := m.basePasses[i:].toArray.filter (!skip ·)
-    mono := m.monoPasses.filter (!skip ·)
-    monoNoLambda := m.monoPassesNoLambda.filter (!skip ·)
+    -- Lean's `toMono`, with types that keep constant type families.
+    toMono := m.basePasses[i:].toArray.filter (!skip ·) |>.map fun p =>
+      if p.name == `toMono then Lean.Compiler.LCNF.toMonoK else p
+    mono := m.monoPasses.filter (!skip ·) |>.map fun p =>
+      if p.name == `structProjCases then Lean.Compiler.LCNF.structProjCasesK else p
+    monoNoLambda := m.monoPassesNoLambda.filter (!skip ·) |>.map fun p =>
+      if p.name == `structProjCases then Lean.Compiler.LCNF.structProjCasesK else p
   }
 
 /-- Names of instance declarations called from `decl`. -/

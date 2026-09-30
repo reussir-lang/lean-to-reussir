@@ -1,4 +1,5 @@
 import Lean
+import LeanToReussir.MonoTypesKeep
 import LeanToReussir.RR
 import LeanToReussir.Relevance
 import LeanToReussir.Collect
@@ -284,7 +285,7 @@ mutual
     if let some n := (← get).typeNames[key]? then return .named n
     let name ← fresh s!"T_{nameHint ival.name}_"
     modify fun s => { s with typeNames := s.typeNames.insert key name, typeKeys := s.typeKeys.insert name key }
-    -- Constructor layouts, fields translated through Lean's own `toMonoType`
+    -- Constructor layouts, fields translated through Lean's own `toMonoTypeKeep`
     -- so representation decisions (trivial structures, `Decidable`, …) match.
     let mut ctors : NameMap CtorLayout := {}
     let mut variants : Array (String × Array RR.Ty) := #[]
@@ -296,7 +297,7 @@ mutual
       repeat
         match ty.headBeta with
         | .forallE _ d b _ =>
-          let mono ← toMonoType d
+          let mono ← toMonoTypeKeep d
           if mono.isErased || mono == mkConst ``lcVoid then
             fields := fields.push none
           else

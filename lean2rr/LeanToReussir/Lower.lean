@@ -1,4 +1,5 @@
 import Lean
+import LeanToReussir.MonoTypesKeep
 import LeanToReussir.LowerBase
 
 /-!
@@ -329,7 +330,7 @@ def calleeOf (f : Name) : LowerM Callee := do
     let (ps, r) := splitFnType d.type d.params.size
     return .extern f #[] ps r
   if let some (.ctorInfo c) := (← getEnv).find? f then
-    let ty ← toMonoType (← getOtherDeclBaseType f [])
+    let ty ← toMonoTypeKeep (← getOtherDeclBaseType f [])
     let (ps, r) := splitFnType ty (c.numParams + c.numFields)
     return .extern f #[] ps r
   throwError "lean2rr: unknown callee {f} (internal error)"
@@ -521,7 +522,7 @@ pointer), so it is passed around boxed. -/
 def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
     (args : Array RR.Expr) : LowerM (Option RR.Expr) := do
   let some α := typeArgs[1]? | return none
-  let α ← toMonoType α
+  let α ← toMonoTypeKeep α
   let (st, boxed) ← arrayElemTy (← lowerType α)
   let refTy := RR.Ty.app "LRef" #[st]
   let wrap (e : RR.Expr) : RR.Expr := match st with
@@ -745,7 +746,7 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
             return ← wrapIOResult resTy (.call prim #[] passedArgs)
   -- Array externs at `Array Nat`/`Array Int` use the one-word arrays.
   if let some α := typeArgs[0]? then
-    let fam? := match ← lowerType (← toMonoType α) with
+    let fam? := match ← lowerType (← toMonoTypeKeep α) with
       | .named "Nat" => some "natarr"
       | .named "Int" => some "intarr"
       | _ => none
@@ -756,7 +757,7 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
   let mut storage := #[]
   for t in typeArgs do
     -- Instance keys hold base-phase types.
-    let rt ← lowerType (← toMonoType t)
+    let rt ← lowerType (← toMonoTypeKeep t)
     storage := storage.push (← arrayElemTy rt)
   -- Values whose declared type is a type parameter `α` are passed and
   -- returned in `α`'s storage (e.g. `Array.push`'s element): wrapped if the
@@ -804,7 +805,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     let n := params.size
     if args.size == n then
       let as ← (args.zip params).mapM fun (a, t) => lowerArg ctx a t
-      return .call fn #[] as
+      coerce (.call fn #[] as) ret (← lowerType resTy)
     else if args.size < n then
       let supplied ← (args.zip params).mapM fun (a, t) => lowerArg ctx a t
       lambdaChain params[args.size:].toArray fun rest => return .call fn #[] (supplied ++ rest)

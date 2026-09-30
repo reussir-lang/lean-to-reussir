@@ -13,3 +13,6 @@ import LeanToReussir.Lower
 import LeanToReussir.Emit
 import LeanToReussir.MonoRetype
 import LeanToReussir.Passes
+import LeanToReussir.MonoTypesKeep
+import LeanToReussir.TypedToMono
+import LeanToReussir.TypedStructProjCases
