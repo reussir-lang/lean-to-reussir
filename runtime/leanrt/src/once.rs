@@ -18,10 +18,31 @@ pub fn has(slot: u64) -> bool {
     set.get(slot as usize).copied().unwrap_or(false)
 }
 
+/// The value of a set slot (reading an unset slot is a runtime bug:
+/// reported, not undefined behaviour).
 #[inline]
 pub fn get_raw(slot: u64) -> usize {
+    if !has(slot) {
+        unset(slot)
+    }
     let vals = unsafe { &*SLOTS.0.get() };
     vals[slot as usize]
+}
+
+#[cold]
+#[inline(never)]
+fn unset(slot: u64) -> ! {
+    crate::internal_panic(&format!("leanrt: read of the unset once slot {}", slot))
+}
+
+/// Replace the value of a set slot, returning the previous bit pattern
+/// (whose reference passes to the caller). Used for mutable global cells
+/// (the current standard streams).
+#[inline(never)]
+pub fn swap_raw(slot: u64, raw: usize) -> usize {
+    let vals = unsafe { &mut *SLOTS.0.get() };
+    assert!(has(slot), "leanrt: swap of an unset cell {}", slot);
+    std::mem::replace(&mut vals[slot as usize], raw)
 }
 
 #[inline(never)]

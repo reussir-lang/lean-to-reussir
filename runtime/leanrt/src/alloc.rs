@@ -6,11 +6,16 @@
 //! takes mimalloc's aligned path (`mi_malloc_aligned`, `mi_realloc_aligned`),
 //! and pages holding aligned blocks send later frees down mimalloc's generic
 //! path too. Strings, arrays and big numbers are allocated here instead with
-//! `mi_malloc`/`mi_realloc` (mimalloc's blocks of 16 bytes or more are
-//! 16-aligned anyway; runtime objects need 8). They are freed normally: the
-//! global allocator frees any mimalloc block with `mi_free`.
+//! `mi_malloc`/`mi_realloc`, whose blocks are 8-aligned (Reussir builds
+//! mimalloc with `MI_MAX_ALIGN_SIZE=8`), which is all runtime objects need.
+//! They are freed normally: the global allocator frees any mimalloc block
+//! with `mi_free`.
 //!
 //! Types aligned above 8 fall back to the standard allocation.
+//!
+//! This requires reussir_rt's (default) mimalloc allocator backend: with a
+//! libc-backed global allocator (sanitizer builds), these blocks would be
+//! freed with `free`.
 
 use reussir_rt::rc::Rc;
 use std::ffi::c_void;
