@@ -289,7 +289,7 @@ lean2rr's dev branch (the tests pass with it).
    type-check). lean2rr now instantiates generic prelude functions that are
    plain Reussir code at the value type (`lean_dbg_trace<Nat>`), and thunks
    and tasks are cells of a generated state type.
-9. BaseIO payload primitives above (`IO.monoMsNow`, `IO.getRandomBytes`,
+9. *done* — BaseIO payload primitives above (`IO.monoMsNow`, `IO.getRandomBytes`,
    ...) and the file protocol need `wrapIOResult` glue; `IO.FS.Handle`
    (`lcAny` in mono code) must be represented as `LHandle`.
 10. Externs implemented by `@[export sym]` Lean code (all
@@ -298,8 +298,8 @@ lean2rr's dev branch (the tests pass with it).
     `IO.Error` constructors, `Lean.Name.beq` has a reference body) should
     compile and call that code; the prelude has hand-written versions of the
     `String.Internal.*` ones.
-11. `Array Nat`/`Array Int` as `LNatArr`/`LIntArr` (names above).
-12. `Nat.repr`/`Int.repr` of big numbers are Lean code dividing by 10 digit
+11. *done* — `Array Nat`/`Array Int` as `LNatArr`/`LIntArr` (names above).
+12. *done* — `Nat.repr`/`Int.repr` of big numbers are Lean code dividing by 10 digit
     by digit (quadratic); `l2r_nat_repr`/`l2r_int_repr` are exact
     replacements using GMP.
 13. *done* — The generated entry should run `l2r_main_body` through
@@ -314,7 +314,7 @@ lean2rr's dev branch (the tests pass with it).
     fallible glue, which rejects them ("IO result ... cannot fail"). Use the
     BaseIO payloads `l2r_io_prim_handle_is_tty`/`_is_eof` (test
     `RtHandleIsTty`).
-16. `ST.Prim.Ref.take` is lowered to `l2r_ref_get`, so the value stays in
+16. *done* — `ST.Prim.Ref.take` is lowered to `l2r_ref_get`, so the value stays in
     the cell and the taken copy is shared: every `modify`/`modifyGet`
     copies the array or string it updates (quadratic loops). Map it to
     `l2r_ref_take`.
@@ -362,30 +362,32 @@ lean2rr's dev branch (the tests pass with it).
 25. *done* — `IO.getEnv` (`lean_io_getenv`) is emitted as a direct call to
     `lean_io_getenv`, which the prelude cannot define (its result is
     `Option String`); use `l2r_io_getenv_with(name, none, some)`.
-26. `IO.Process.forceExit` (`lean_io_force_exit`, `std::_Exit`: nothing is
+26. *done* — `IO.Process.forceExit` (`lean_io_force_exit`, `std::_Exit`: nothing is
     flushed) has no glue: as `IO.Process.exit`, with
     `l2r_process_force_exit(code)` (test `RtForceExit`).
-27. `Nat.repr`/`Int.repr` (request 12): besides the quadratic big case,
+27. *done* — `Nat.repr`/`Int.repr` (request 12): besides the quadratic big case,
     `Nat.reprFast` clones the `Nat.reprArray` once-cell and drops it out of
     line for every number ≥ 128 (13% of the Sieve benchmark).
-28. `ByteSlice.beq` needs glue (`l2r_byteslice_beq` above);
+28. *done* — `ByteSlice.beq` needs glue (`l2r_byteslice_beq` above);
     `ShareCommon.State.shareCommon` (`lean_state_sharecommon`, hash-consing
     natively) can use its reference body `(a, s)`, which is observably the
     same (sharing is not observable here).
-29. Child processes: `IO.Process.spawn` and `Child.wait`/`tryWait`/`kill`/
+29. *in progress* — Child processes: `IO.Process.spawn` and `Child.wait`/`tryWait`/`kill`/
     `pid`/`takeStdin` need glue over the `l2r_proc_*` primitives (above).
     Natively a `Child` object also carries the pid (`uint32`) and whether it
     was spawned with `setsid` (`uint8`) after its three Lean fields, so
     lean2rr's `Child` record needs those two extra fields, set by the spawn
     glue and kept by `takeStdin` (test `RtProcess`). `IO.Process.output`
     should use `l2r_proc_drain` (above) instead of its task-based reads.
-30. `Lean.Name.beq` (`lean_name_eq`): the prelude cannot define it (`Name`
+30. *done* — `Lean.Name.beq` (`lean_name_eq`): the prelude cannot define it (`Name`
     is a Lean type); its reference body (structural equality) is what the
     native code computes.
-31. `ptrAddrUnsafe` of a value lean2rr wraps at the call (`ElemBox{x}`)
-    measures the fresh wrapper, whose memory the next wrapper can reuse:
-    the runtime answers fresh addresses for `ElemBox…`/`L2RBox` wrappers
-    (test `RtPtrAddr`); lean2rr could instead call `lean_ptr_addr` on the
+31. *done* in the runtime — `ptrAddrUnsafe` of a value lean2rr wraps at
+    the call (`ElemBox{x}`, function-value wrappers, rebuilt structures)
+    measured the fresh wrapper, whose memory the next wrapper can reuse:
+    the runtime now answers a fresh number for any object whose count is 1
+    at the call (it dies with the call, so it equals no other live value)
+    (test `RtPtrAddr`). lean2rr could keep more shortcuts by passing the
     value's own handle when it has one.
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
@@ -402,8 +404,10 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`,
   `ptrAddrUnsafe` is the handle pointer (or the value's bits for scalars;
-  a fresh, never repeated number for values lean2rr wraps at the call, so
-  pointer-equality shortcuts are not taken for them), and
+  a fresh, never repeated number for objects referenced only by the call,
+  such as the wrappers lean2rr builds for `Nat`s and structures, so
+  pointer-equality shortcuts are not taken for them; a `PtrSet`/`PtrMap`
+  of such values does not find them again), and
   `dbgTraceIfShared` of such wrapped values (`Nat`, structures held by
   value) never reports sharing.
 - Everything runs on one thread: tasks run when they are first needed or
