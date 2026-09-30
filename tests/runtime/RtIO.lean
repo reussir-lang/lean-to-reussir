@@ -52,7 +52,7 @@ def main (args : List String) : IO UInt32 := do
   let eof ← stdin.getLine
   IO.println s!"eof {repr eof}"
   -- trace and a lot of output
-  let t := dbgTrace "tracing" fun _ => (41 : Nat) + 1
+  let t := dbgTrace "tracing" fun _ => "forty" ++ "-two"
   IO.println s!"traced {t}"
   for i in [0:3000] do
     IO.println s!"line {i} {"x".pushn '.' (i % 50)}"
