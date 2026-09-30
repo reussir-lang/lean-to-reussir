@@ -854,15 +854,17 @@ Rules:
   - `wait`, `tryWait` (`1 << 32 | code`, or 0 while running) and `kill`
     read the hidden fields. They borrow the child natively (`@&`), so the
     glue holds it until the result is built, and its pipes stay open while
-    the call runs (a child still writing to an unread pipe is not killed by
-    `SIGPIPE`). `pid` is the hidden field; `takeStdin` returns the stdin
+    the call runs (a child still writing to a pipe the parent has not read
+    does not get `EPIPE`). `pid` is the hidden field; `takeStdin` returns the stdin
     field and a new `Child` with a boxed unit instead, keeping the other
     fields.
   - `IO.Process.output` is Lean code that reads stdout in a dedicated task
     while it reads stderr. lean2rr's tasks are deferred (§5.14), so a child
-    filling its stderr pipe before closing stdout would block forever. Its
+    writing more than a pipe holds (64 KiB) to stdout before closing stderr
+    would block forever. Its
     declaration is lowered to generated glue instead of its body, in
-    native order: spawn with stdout and stderr piped and stdin null, or
+    native order (only the stderr check waits for stdout's end of file
+    too, §10): spawn with stdout and stderr piped and stdin null, or
     piped when `input?` is `some s` (then `putStr s`, `flush`, and the
     handle's release closes it, like `takeStdin` and the handle's last use
     natively); `l2r_proc_drain` reads both pipes to end of file together;
@@ -898,7 +900,13 @@ Rules:
   `dbgTrace`, `dbgTraceIfShared`, `dbgSleep`, `dbgStackTrace`, `panic`
   and `sorry`; lean2rr finds these functions by reading the prelude.
 - **Borrowing.** Lean's borrow annotations (`@&`) are dropped. Reussir's
-  owned convention plus its Perceus analysis gives the same results.
+  owned convention plus its Perceus analysis gives the same results, except
+  for when a value is freed: natively a parameter that Lean's IR infers as
+  borrowed is released by the caller after the call returns, while here the
+  callee releases it at its last use, possibly earlier. Only resources can
+  tell: a file handle is closed (and so flushed) earlier, a child sees end
+  of file on a pipe earlier (§10). The process glue keeps a `Child` alive
+  across `wait`, `tryWait` and `kill`, which borrow it by annotation.
 
 ### 5.9 Panics and unreachable code
 
@@ -1310,6 +1318,13 @@ Each item says what differs and when.
   order among them depends on how its specializer recursed, which the
   `.olean` does not record, and can differ. Visible only when such
   constants trace or panic.
+- *Release time of borrowed parameters* (§5.8): a resource passed to a
+  function that Lean infers to borrow it is released by Lean's caller
+  after the call; here it is released at its last use inside the callee.
+  A handle written and then dropped by a helper that goes on to read the
+  same file, or a pipe to a child that the helper then waits for, is
+  closed earlier than natively (the file is already flushed; the child
+  sees end of file, where natively it may wait forever).
 - *Order of panics in pure code*: when several pure computations panic
   (`get!` on a short array, an `assert!`), their messages can come out in
   another order than natively, because Lean's closed-term extraction may
@@ -1342,15 +1357,20 @@ Each item says what differs and when.
   backtrace line is `(stack trace unavailable)`.
 - Huge capacity reservations are capped.
 - `errno` after a sticky handle error can differ.
-- Child processes (§5.8): code that reads a child's stdout and stderr
-  pipes one after the other itself deadlocks if the child fills the other
-  pipe first (natively `IO.Process.output` avoids it with a thread; its
-  glue here reads both together). Natively `Child.pid` leaks the child, so
-  its pipes stay open forever (a child waiting for end of file on stdin
-  then hangs); here they are closed as usual. Natively the `Child` from
-  `takeStdin` loses the `setsid` flag (`kill` reads uninitialized memory);
-  here it keeps it. A read error on `output`'s stdout pipe is reported
-  before the child is waited for (natively after).
+- Child processes (§5.8): code that reads one of a child's pipes in a task
+  while it reads the other (as `IO.Process.output` does natively, stdout
+  in the task; its glue here reads both together) deadlocks if the child
+  writes more than a pipe holds to the task's pipe before closing the
+  other one, since the task runs only when its value is needed. Natively `Child.pid` leaks the child, so its pipes stay open
+  forever (a child waiting for end of file on stdin then hangs); here they
+  are closed as usual. Natively the `Child` from `takeStdin` loses the
+  `setsid` flag (`kill` reads uninitialized memory); here it keeps it.
+  `output` reports a non-UTF-8 stderr once both pipes are at end of file
+  (natively as soon as stderr is: different timing when a grandchild holds
+  stdout open), and a read error on either pipe at once (natively a stdout
+  read error after `wait`). Native Lean has
+  about 8 more descriptors open (libuv's), so descriptor numbers inherited
+  by children and `EMFILE` thresholds differ.
 
 **Diagnostics**
 - lean2rr's own impossibilities (a `Box` unwrap of another variant, a cast

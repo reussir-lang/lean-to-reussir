@@ -194,18 +194,23 @@ fn is_rust_dev_null(fd: i32) -> bool {
 /// of them takes its place, and reading or writing that stream then fails
 /// with `EINVAL` (not `EBADF`). Put epoll descriptors in the place of
 /// closed standard descriptors (still closed, or already replaced by Rust's
-/// runtime with `/dev/null`) so the same errors arise here. (A standard
-/// descriptor redirected by the user to `/dev/null` read-write, `<>`, is
-/// taken for a closed one.)
+/// runtime with `/dev/null`) so the same errors arise here. Like libuv's,
+/// they are close-on-exec, so a child process sees the standard descriptor
+/// closed. (A standard descriptor redirected by the user to `/dev/null`
+/// read-write, `<>`, is taken for a closed one.)
 pub fn occupy_closed_std_fds() {
     const F_GETFD: i32 = 1;
+    const F_SETFD: i32 = 2;
+    const FD_CLOEXEC: i32 = 1;
     const EPOLL_CLOEXEC: i32 = 0o2000000;
     for fd in 0..3 {
         if unsafe { fcntl(fd, F_GETFD) } < 0 || is_rust_dev_null(fd) {
             let e = unsafe { epoll_create1(EPOLL_CLOEXEC) };
             if e >= 0 && e != fd {
                 unsafe {
+                    // `dup2` clears close-on-exec on the copy.
                     dup2(e, fd);
+                    fcntl(fd, F_SETFD, FD_CLOEXEC);
                     close(e);
                 }
             }
@@ -253,14 +258,29 @@ fn run_body<F: FnOnce() + Send + 'static>(body: F) {
         body();
         return;
     }
-    let t = std::thread::Builder::new()
+    let t = match std::thread::Builder::new()
         .name("main".into())
         .stack_size(main_stack_size())
         .spawn(move || {
             install_stack_overflow_handler();
             body()
-        })
-        .expect("leanrt: cannot spawn the main thread");
+        }) {
+        Ok(t) => t,
+        Err(_) => {
+            // Native `lean_run_main` throws `lean::exception("failed to
+            // create thread")`, which nothing catches: libc++ reports it
+            // and aborts (nothing is flushed).
+            extern "C" {
+                fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+                fn abort() -> !;
+            }
+            let msg = b"libc++abi: terminating due to uncaught exception of type lean::exception: failed to create thread\n";
+            unsafe {
+                write(2, msg.as_ptr(), msg.len());
+                abort()
+            }
+        }
+    };
     if t.join().is_err() {
         crate::io::flush_stdout();
         std::process::exit(101);

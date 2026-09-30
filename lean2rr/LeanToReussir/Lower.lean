@@ -1763,14 +1763,17 @@ def processExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array
 /-- The body of `IO.Process.output args input?`'s declaration (parameters
 `ps`, result `ret`), in place of Lean's: that one reads stdout in a
 dedicated task while it reads stderr, and lean2rr's tasks are deferred, so
-a child filling its stderr pipe before closing stdout would block forever.
+a child writing more than a pipe holds to stdout before closing stderr would
+block forever.
 The glue follows native order: spawn with stdout and stderr piped, stdin
 null, or piped when `input?` is `some s` (then `s` is written and flushed,
 and the handle released and so closed, as `takeStdin`, `putStr` and
 `flush` do natively); read both pipes to end of file together
 (`l2r_proc_drain`); `readToEnd`'s UTF-8 check of stderr; `wait`; the same
-check of stdout. Errors are native's in the same order, except that a
-read error on stdout (natively reported after `wait`) comes before it. -/
+check of stdout. Errors are native's, in the same order, but a non-UTF-8
+stderr is reported once both pipes are at end of file (natively as soon as
+stderr is), and a read error on either pipe at once (natively a stdout read
+error after `wait`). -/
 def processOutputBody (ps : Array (String × RR.Ty)) (ret : RR.Ty) : LowerM RR.Block := do
   let some (sa, saTy) := ps[0]? | throwError "lean2rr: bad IO.Process.output signature"
   let some (inp, inTy) := ps[1]? | throwError "lean2rr: bad IO.Process.output signature"

@@ -241,7 +241,9 @@ pipes to end of file together (`poll`), returning stdout's bytes, then
 `l2r_proc_drained_err() -> RVec<u8>` gives stderr's (fallible: the first
 read error). The glue applies `readToEnd`'s UTF-8 check (`Tried to read
 from handle containing non UTF-8 data.`) to stderr before `wait` and to
-stdout after, as natively.
+stdout after, as natively (but stderr's check comes once both pipes are at
+end of file; natively as soon as stderr is). A read error stops the drain
+and is reported at once.
 
 **Other glue primitives.**
 
@@ -416,19 +418,27 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   lean2rr does not translate promises yet (the `l2r_promise_*` helpers
   assume a promise is resolved before it is read, which deferred tasks no
   longer ensure).
-  Sockets, `Std.Sync` and timers are not implemented. Code that reads a
-  child's two pipes one after the other itself (not through
-  `IO.Process.output`, whose glue drains both together) deadlocks without
-  threads if the child fills the other pipe (64 KiB) first; natively a
-  dedicated task avoids it.
+  Sockets, `Std.Sync` and timers are not implemented. Code that reads one
+  of a child's pipes in a task while it reads the other itself (as
+  `IO.Process.output` does natively, stdout in the task; its glue drains
+  both together) deadlocks if the child writes more than a pipe holds
+  (64 KiB) to the task's pipe before closing the other one: the task runs
+  only when its value is needed.
 - Child processes: natively `Child.pid` leaks its argument (Lean passes
   the child owned, the C function treats it as borrowed), so the child's
   pipes are never closed after a `pid` call, and a child waiting for end of
   file on its stdin after `takeStdin` waits forever; lean2rr releases it
   as usual. Natively the `Child` that `takeStdin` returns does not copy the
   `setsid` flag (its byte is uninitialized memory, read by `kill`); here it
-  is kept. A read error on `IO.Process.output`'s stdout pipe is reported
-  before the child is waited for (natively after).
+  is kept. `IO.Process.output` reports a non-UTF-8 stderr once both pipes
+  are at end of file (natively as soon as stderr is; a grandchild can hold
+  stdout open), and a read error on either pipe at once (natively a stdout
+  read error after `wait`); the bytes and messages are the same, only when
+  it happens differs.
+- Native Lean has libuv's descriptors open (about 8 more than here), so
+  descriptor numbers (those a child inherits, such as the `/dev/null` that
+  `Stdio.null` leaves open, as natively) and the point where a low
+  `ulimit -n` makes `open` or `spawn` fail with `EMFILE` differ.
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
 - Huge `Array.mkEmpty`/`ByteArray.emptyWithCapacity` capacities are checked
