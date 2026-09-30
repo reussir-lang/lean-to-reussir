@@ -3439,7 +3439,7 @@ partial def isCheapConst (c : Code .pure) (fuel : Nat := 8) : LowerM Bool := do
       | .const f _ args =>
         if (← getEnv).isConstructor f then pure true
         -- Total conversions of scalars (`UInt32.ofNat 0`, the default of
-        -- `Inhabited UInt32`).
+        -- `Inhabited UInt32`, a float literal's bits: `foldFloatLits`).
         else if isScalarConversion (((← read).keys.find? f).map (·.decl) |>.getD f) then pure true
         -- Another such constant.
         else if args.isEmpty && fuel > 0 then
@@ -3457,7 +3457,7 @@ where
          ``UInt8.ofNatLT, ``UInt16.ofNatLT, ``UInt32.ofNatLT, ``UInt64.ofNatLT, ``USize.ofNatLT,
          ``Int8.ofNat, ``Int16.ofNat, ``Int32.ofNat, ``Int64.ofNat, ``ISize.ofNat,
          ``Int8.ofInt, ``Int16.ofInt, ``Int32.ofInt, ``Int64.ofInt, ``ISize.ofInt,
-         ``Float.ofNat, ``Float.ofScientific, ``Float32.ofNat, ``Float32.ofScientific,
+         ``Float.ofBits, ``Float32.ofBits,
          ``Char.ofNat, ``Nat.toUInt8, ``Nat.toUInt16, ``Nat.toUInt32, ``Nat.toUInt64,
          ``Nat.toUSize]
 

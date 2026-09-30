@@ -119,6 +119,11 @@ def main():
     args = ap.parse_args()
 
     env = dict(os.environ)
+    # lean2rr runs Lean's compiler passes, which recurse once per nested
+    # `let` (a 60000-element list literal needs more than 64 MiB of stack):
+    # a bigger stack than Lean's default 1 GiB for its main thread, so that
+    # whatever Lean compiled translates.
+    env.setdefault("LEAN_STACK_SIZE_KB", str(4 * 1024 * 1024))
     if args.lean_path:
         env["LEAN_PATH"] = args.lean_path + (":" + env["LEAN_PATH"] if env.get("LEAN_PATH") else "")
 
@@ -140,7 +145,16 @@ def main():
                # Reussir's in-place variant reuse skips stores of fields that
                # the packed record layout moves (RcCreateFusion copy
                # avoidance): keep declaration-order layouts until that is fixed.
-               + ["--no-pack-record-members"])
+               + ["--no-pack-record-members"]
+               # -O aggressive enables closure devirtualization, which prints
+               # each closure's result type, every named type expanded, at
+               # every vtable and indirect call site: build time and memory
+               # grow with the nesting of lean2rr's function representations
+               # (3x on an interpreter, out of memory at 16 GB on polymorphic
+               # recursion through monad transformers), while it changes no
+               # classic benchmark by more than 1% (lean2rr dispatches
+               # function values itself).
+               + ["--no-closure-wpd"])
         if args.no_reuse_across_call:
             run(rrc, cwd=tmp)
         else:

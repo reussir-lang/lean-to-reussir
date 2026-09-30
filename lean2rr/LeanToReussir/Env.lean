@@ -35,11 +35,16 @@ def loadEnvironment (modules : Array Name) : IO Environment := do
   let env ← importModules (modules.map ({ module := · })) {} (level := .private)
   unsafe loadExtensionStates env
 
-/-- Run a `CoreM` action against `env` without a heartbeat limit. -/
+/-- Run a `CoreM` action against `env` without a heartbeat limit and,
+in effect, without a recursion limit. -/
 def runCoreM (env : Environment) (x : CoreM α) : IO α := do
-  -- Instances can be deeper than anything Lean compiled (the recursion
-  -- limit is also reset from the options by `withOptions`).
-  let depth := 100000
+  -- The program's own `maxRecDepth` is not in the `.olean`, and Lean's
+  -- passes recurse once per nested `let` (a large literal), so any fixed
+  -- limit rejects some program that Lean compiled; instances can also be
+  -- deeper than anything Lean compiled. Only the stack bounds the depth
+  -- (the driver gives lean2rr a 4 GiB stack). The limit is also reset from
+  -- the options by `withOptions`.
+  let depth := 100000000
   let ctx : Core.Context := { fileName := "<lean2rr>", fileMap := default, maxHeartbeats := 0,
                               maxRecDepth := depth, options := maxRecDepth.set {} depth }
   let (a, _) ← x.toIO ctx { env }

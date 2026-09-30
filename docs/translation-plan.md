@@ -195,13 +195,20 @@ unavailable, the uniform `Box` representation (§5.1) takes its place:
   `lcAny` (§2.3).
 - **Polymorphic recursion.** Nested datatypes, or a function calling itself
   at a growing type such as `α`, `List α`, `List (List α)`, … would need
-  infinitely many instances. This is detected at the first self-call whose
-  type arguments strictly contain the caller's: that call goes to the fully
-  uniform instance (every type argument `lcAny`, static dictionaries
-  dropped). Other growth, such as mutual polymorphic recursion, is cut by
-  bounds: a type argument deeper than 64 or larger than 256 nodes becomes
-  `lcAny`, and past 1024 instances of one declaration every further
-  instance is the uniform one. So the set of instances stays finite. This is
+  infinitely many instances. This is detected when an instance of `d` is
+  requested at type arguments that strictly contain those of an instance of
+  `d` on the path of instances that led to the request (a type function
+  such as `StateT Nat m` counts as growth when it is larger): that request
+  goes to the fully uniform instance (every type argument `lcAny`, static
+  dictionaries dropped). The path covers growth through other declarations
+  of the cycle, a `where` helper (`nestI` → `nestI.helper` → `nestI` at
+  `StateT Nat m`) or a mutual partner. It stops at the nearest uniform
+  instance of `d`, so the uniform instance's own recursive request gets one
+  typed instance at `F lcAny`, whose request at `F (F lcAny)` then goes back
+  to the uniform one. Growth that no path shows is cut by bounds: a type
+  argument deeper than 64 or larger than 256 nodes becomes `lcAny`, and
+  past 1024 instances of one declaration every further instance is the
+  uniform one. So the set of instances stays finite. This is
   necessary: Reussir's own monomorphizer cannot handle polymorphic
   recursion. Callers of a uniform instance convert their arguments
   structurally on every call (§5.1), which costs time proportional to the
@@ -1073,17 +1080,47 @@ constructors (`Int.ofNat 0`, an enumeration value) is recomputed at every
 use instead of cached. It cannot panic, trace or allocate, so this is
 unobservable, and it is cheaper than a once-cell read.
 
+A float literal arrives as a call of a Lean function on literal arguments,
+`Float.ofScientific 15 true 301` for `1.5e-300` (or `Float.ofNat n`,
+`Float32.…`), which is not cheap: the slow path (a mantissa of `2^53` or
+more, an exponent above 22) goes through `Float.Model` with bignum
+arithmetic. lean2rr evaluates such calls itself, with the same Lean
+functions (lean2rr is compiled from the same `Init` code, so the bits are
+Lean's, subnormals and rounding included), and replaces them by
+`Float.ofBits` of the bit pattern, a cheap constant as above. Calls with
+an exponent above 2000 or a mantissa of more than 4096 bits are left to run
+(cached as usual when they are a constant).
+
 The initializer follows Lean's compilation order, which is not persisted in
-the `.olean`. Compilation follows the source, and a declaration generated
-while compiling `g` is compiled with `g`, before it.
+the `.olean`. Compilation follows the source, command by command. A `def`
+or `instance` command is compiled after it is elaborated, together with its
+`where`/`let rec` helpers: the elaborator lists the helpers (those of later
+`mutual` members first, outer ones before nested ones, otherwise in source
+order), then the command's own declarations, and compiles the strongly
+connected components of their reference graph one at a time, callees first
+(Tarjan's order over that list). A declaration generated while compiling a
+component, such as a specialization `f._at_.g.spec_N` made while compiling
+`g`, comes right before the component's members; an auxiliary declaration
+made during elaboration (`c.unsafe_1`, `instInhabitedP.default`) comes
+before the whole command. For example
+
+    def p : Nat := t "p" (h1 + h2)
+    where
+      h1 : Nat := t "p.h1" 1
+      h2 : Nat := t "p.h2" (h3 + 1)
+      h3 : Nat := t "p.h3" 3
+
+initializes `p.h1`, `p.h3`, `p.h2`, then the specializations made in `p`,
+then `p`. lean2rr rebuilds this order from declaration ranges (a helper's
+range lies inside its parent's; the kernel's `all` lists a recursive mutual
+block) and from the references in the declarations' kernel values (for a
+`partial` definition, its `_unsafe_rec`). The function of an `initialize`
+declaration belongs to its constant: a specialization made inside the
+action comes right before the action.
 
 Our translation runs, before `main`, the startup work of Lean's module
 initializers:
-- for each program module, for each declaration in source order (line,
-  then column). An auxiliary declaration such as `main.unsafe_1`, which has
-  no position of its own, goes right before its parent. A specialization
-  `f._at_.g.spec_N` goes right before `g`, the declaration after the last
-  `_at_`:
+- for each program module, for each declaration in that order:
   - an `initialize` action (`initialize do …`) is run;
   - for `initialize c : T ← act`, `act` is run and its result stored as
     `c`, which the program reads from a once-cell;
@@ -1100,6 +1137,13 @@ of them at startup without any visible effect. Closed terms are lazy, once.
 lean2rr itself never runs the program's initializers: it loads the imported
 extension states without Lean's init step, which would execute the
 program's `initialize` actions inside the compiler.
+
+The startup steps are emitted as functions of at most 128 steps each,
+called in order (with a further level of grouping when there are more than
+128 of those): one chain of nested matches, one per initializer, would be
+as deep as the program has initializers, and rrc's recursive lowering
+overflows its stack on a few thousand. An error in a step exits from inside
+it, so later steps do not run.
 
 The storage is a runtime once-cell per constant (the prelude's
 `l2r_once_has`/`get`/`set` over `leanrt::once`), holding a value that is
@@ -1453,11 +1497,23 @@ Each item says what differs and when.
   order among them depends on how its specializer recursed, which the
   `.olean` does not record, and can differ. Visible only when such
   constants trace or panic.
+- *Startup order in `mutual` blocks and several `let rec` groups* (§5.12):
+  the members of a `mutual` block that do not call each other are ordered
+  as separate commands, because the block is not recorded in the `.olean`
+  (natively the helpers of all its members run first, those of later
+  members first). Within one declaration, a `let rec` in the body and a
+  `where` clause are ordered by source position (natively the `where`
+  helpers come first). Visible only when such helper constants trace or
+  panic.
 - *Compiler options of the program's modules* (`set_option
   compiler.extract_closed false`, `compiler.small`, `maxRecInline`, …) are
   not recorded in the `.olean`, so lean2rr runs Lean's passes with the
   defaults: a declaration compiled without closed-term extraction natively
   can have its closed terms extracted (and evaluated once) under lean2rr.
+  The recursion limit (`maxRecDepth`, which large literals need raised)
+  is effectively unlimited in lean2rr, bounded by its stack (4 GiB, set by
+  `scripts/l2r.py` through `LEAN_STACK_SIZE_KB`): a 60000-element list
+  literal needs more than 64 MiB.
 - *Merging after erasure*: natively, two uses of a type-polymorphic
   constant at different type arguments (`(emptyList : List Nat)`,
   `(emptyList : List String)`) are the same call after erasure, and Lean's
@@ -1466,6 +1522,17 @@ Each item says what differs and when.
 - *Build time*: rrc compiles about 80 small functions per second; a program
   with thousands of constants (each an initializer and an accessor, plus its
   closed terms) takes minutes to build where native takes seconds.
+  Polymorphic recursion through type functions (monad transformer towers)
+  makes deeply nested function representations (`L2RFn_*` enums, `Box`),
+  and two rrc costs grow superlinearly on them: closure devirtualization
+  (part of `-O aggressive`) prints each closure's result type, every named
+  type expanded, at every vtable and indirect call site, and the
+  module-level SCCP pass iterates over the large call graph of the uniform
+  code. The driver turns closure devirtualization off (`--no-closure-wpd`:
+  no classic benchmark changes by more than 1%, since lean2rr dispatches
+  function values itself). Such programs still take a minute or more to
+  build, and the largest towers (four transformers) up to a quarter of an
+  hour and several GB.
 - *Open descriptors*: native Lean starts with libuv's descriptors open (8
   more), so `/proc/self/fd` listings and the point where opening files
   fails with `EMFILE` differ.

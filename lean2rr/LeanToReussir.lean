@@ -11,6 +11,7 @@ import LeanToReussir.RR
 import LeanToReussir.LowerBase
 import LeanToReussir.Lower
 import LeanToReussir.Emit
+import LeanToReussir.FloatLits
 import LeanToReussir.MonoRetype
 import LeanToReussir.Passes
 import LeanToReussir.MonoTypesKeep

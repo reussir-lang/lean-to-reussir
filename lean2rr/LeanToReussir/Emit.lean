@@ -1,6 +1,7 @@
 import Lean
 import LeanToReussir.Lower
 import LeanToReussir.MonoRetype
+import LeanToReussir.FloatLits
 
 /-!
 # Program assembly
@@ -41,69 +42,177 @@ def StartupItem.root : StartupItem → Name
   | .ioUnit f => f
   | .init _ f => f
 
-/-- Position of a declaration for ordering: module index, then source
-position (line and column, so declarations on one line keep their order). -/
+/-- A declaration's source position as one number (line, then column, so
+declarations on one line keep their order). -/
+def rangeKey (r : DeclarationRanges) : Nat := r.range.pos.line * 100000 + r.range.pos.column
+
+/-- Position of a declaration for ordering: module index, then the source
+position of the declaration or of its nearest prefix that has one. -/
 def declOrder (n : Name) : CoreM (Nat × Nat) := do
   let idx := ((← getEnv).getModuleIdxFor? n).map (·.toNat) |>.getD 0
-  -- An auxiliary declaration (`main.unsafe_1`, `f.match_1`, …) has no
-  -- range of its own; Lean adds it while elaborating its parent, just
-  -- before the parent.
-  let rec find (m : Name) (aux : Bool) (fuel : Nat) : CoreM Nat := do
-    match fuel with
-    | 0 => return 0
-    | fuel + 1 =>
-      match ← findDeclarationRanges? m with
-      | some r => return 2 * (r.range.pos.line * 100000 + r.range.pos.column) + (if aux then 0 else 1)
-      | none => if m.isAnonymous then return 0 else find m.getPrefix true fuel
-  -- A specialization `f._at_.g.spec_N` is compiled with `g`'s compilation
-  -- block, before it: the block of a `where`/`let rec` helper is its
-  -- parent's, and a mutual block starts at its first member.
-  match atParent? n with
-  | some g => return (idx, ← find (← blockRoot g) true 16)
-  | none => return (idx, ← find n false 16)
-where
-  /-- The first declaration of `g`'s compilation block. -/
-  blockRoot (g : Name) : CoreM Name := do
-    let key (r : DeclarationRanges) : Nat := r.range.pos.line * 100000 + r.range.pos.column
-    -- The name after `_at_` ends with the specialization's own components
-    -- (`c.helper.spec_0`): the nearest prefix with a position.
-    let mut g := g
-    while !g.isAnonymous && (← findDeclarationRanges? g).isNone do g := g.getPrefix
-    let some gr ← findDeclarationRanges? g | return g
-    -- The outermost declaration whose range encloses `g`'s (a helper's
-    -- parent).
-    let mut root := g
-    let mut p := g.getPrefix
+  let mut m := n
+  while !m.isAnonymous do
+    if let some r ← findDeclarationRanges? m then return (idx, rangeKey r)
+    m := m.getPrefix
+  return (idx, 0)
+
+/-- A name rebuilt from its components (`Name.append` would reinterpret the
+macro scopes of a hygienic component, such as an `initialize` function's
+`_private.M.0.initFn._@.M._hyg.2`). -/
+def nameOfComponents (cs : List Name) : Name :=
+  cs.foldl (init := .anonymous) fun acc c => match c with
+    | .str _ s => .str acc s
+    | .num _ k => .num acc k
+    | .anonymous => acc
+
+/-- For a specialization `f._at_.g.spec_N`, the name after the last `_at_`
+(`g.spec_N`): Lean made it while compiling `g`. -/
+def specTarget? (n : Name) : Option Name := Id.run do
+  let cs := n.components
+  let some i := (List.range cs.length).reverse.find? (cs[·]! == `_at_) | return none
+  let rest := cs.drop (i + 1)
+  if rest.isEmpty then return none
+  return some (nameOfComponents rest)
+
+/-- Lean's initializer order for the startup declarations `items` of one
+module (translation plan §5.12). Native Lean initializes a module's
+declarations in compilation order. A `def`/`instance` command is compiled
+after it is elaborated, together with its `where`/`let rec` helpers: the
+elaborator lists the helpers (those of later mutual members first, outer
+before nested ones) and then the command's declarations, and compiles the
+strongly connected components of their reference graph one by one, callees
+first (Tarjan over that list, `addPreDefinitions`). The specializations
+made while compiling a component come before its members, and an auxiliary
+declaration made during elaboration (`c.unsafe_1`, `instInhabitedP.default`)
+before the whole command. lean2rr sees the command through declaration
+ranges: a helper's range lies inside its parent's, and the kernel's `all`
+lists a recursive mutual block. Non-recursive members of a `mutual` block
+are not recorded, so they are ordered as separate commands. Returns a sort
+key per item. -/
+partial def moduleStartupKeys (idx : Nat) (items : Array Name) : CoreM (Std.HashMap Name (Array Nat)) := do
+  let env ← getEnv
+  let some md := env.header.moduleData[idx]? | return {}
+  -- Ranges of the module's declarations, and each `initialize` function's
+  -- constant (the function belongs to its constant's position).
+  let mut ranges : Std.HashMap Name DeclarationRanges := {}
+  let mut initOf : Std.HashMap Name Name := {}
+  for c in md.constNames do
+    if let some r ← findDeclarationRanges? c then ranges := ranges.insert c r
+    if let some f := getInitFnNameFor? env c <|> getBuiltinInitFnNameFor? env c then
+      initOf := initOf.insert f c
+  let ranged? (n : Name) : Option Name := Id.run do
+    let mut m := n
+    while !m.isAnonymous do
+      if ranges.contains m then return some m
+      m := m.getPrefix
+    return none
+  let vertexOf? (n : Name) : Option Name := (ranged? n).map fun v => initOf.getD v v
+  let encloses (outer inner : Name) : Bool := Id.run do
+    let some o := ranges[outer]? | return false
+    let some i := ranges[inner]? | return false
+    let k (q : Position) : Nat := q.line * 100000 + q.column
+    return k o.range.pos ≤ k i.range.pos && k i.range.endPos ≤ k o.range.endPos
+  -- The enclosing declaration of a helper (outermost prefix whose range
+  -- contains its range), and its nesting depth.
+  let memberOf (v : Name) : Name × Nat := Id.run do
+    let mut top := v
+    let mut depth := 0
+    let mut p := v.getPrefix
     while !p.isAnonymous do
-      if let some pr ← findDeclarationRanges? p then
-        let pos := pr.range.pos
-        let e := pr.range.endPos
-        let gp := gr.range.pos
-        let ge := gr.range.endPos
-        let k (q : Position) : Nat := q.line * 100000 + q.column
-        if k pos ≤ k gp && k ge ≤ k e then
-          root := p
+      if ranges.contains p && encloses p v then
+        top := p
+        depth := depth + 1
       p := p.getPrefix
-    -- The earliest member of its mutual block.
-    let members := match (← getEnv).find? root with
+    return (initOf.getD top top, depth)
+  -- The first member of a recursive mutual block.
+  let blockOf (main : Name) : Name := Id.run do
+    let members := match env.find? main with
       | some (.defnInfo d) => d.all
       | some (.opaqueInfo o) => o.all
-      | _ => [root]
-    let mut best := root
-    let mut bestKey := key (← findDeclarationRanges? root).get!
+      | _ => [main]
+    let mut best := main
+    let mut bestKey := (ranges[main]?.map rangeKey).getD 0
     for m in members do
-      if let some r ← findDeclarationRanges? m then
-        if key r < bestKey then
+      if let some r := ranges[m]? then
+        if rangeKey r < bestKey then
           best := m
-          bestKey := key r
+          bestKey := rangeKey r
     return best
-  /-- The declaration after the last `_at_` component, if any. -/
-  atParent? (n : Name) : Option Name := Id.run do
-    let cs := n.components
-    let some i := (List.range cs.length).reverse.find? (cs[·]! == `_at_) | return none
-    let rest := cs.drop (i + 1)
-    if rest.isEmpty then return none
-    return some (rest.foldl (fun acc c => acc ++ c) .anonymous)
+  let rootOf (v : Name) : Name := blockOf (memberOf v).1
+  let rootKey (root : Name) : Nat := (ranges[root]?.map rangeKey).getD 0
+  -- The vertices of the commands that have startup items.
+  let mut wanted : Std.HashSet Name := {}
+  for n in items do
+    if let some v := vertexOf? ((specTarget? n).getD n) then wanted := wanted.insert (rootOf v)
+  let mut blocks : Std.HashMap Name (Array Name) := {}
+  for (c, _) in ranges do
+    if initOf.contains c then continue
+    let r := rootOf c
+    if wanted.contains r then blocks := blocks.insert r ((blocks.getD r #[]).push c)
+  -- Rank of each vertex: the index of its component in compilation order.
+  let mut rank : Std.HashMap Name Nat := {}
+  for (_, vs) in blocks do
+    if vs.size == 1 then
+      rank := rank.insert vs[0]! 0
+      continue
+    let vset : Std.HashSet Name := vs.foldl (·.insert ·) {}
+    let mains := (vs.filter fun v => (memberOf v).1 == v).qsort fun a b =>
+      (ranges[a]?.map rangeKey).getD 0 < (ranges[b]?.map rangeKey).getD 0
+    let memberIdx (v : Name) : Nat := (mains.findIdx? (· == (memberOf v).1)).getD 0
+    let key (v : Name) : Nat × Nat × Nat :=
+      (mains.size - memberIdx v, (memberOf v).2, (ranges[v]?.map rangeKey).getD 0)
+    let lex (a b : Nat × Nat × Nat) : Bool := a.1 < b.1 || (a.1 == b.1 && (a.2.1 < b.2.1 || (a.2.1 == b.2.1 && a.2.2 < b.2.2)))
+    let helpers := (vs.filter fun v => (memberOf v).1 != v).qsort fun a b => lex (key a) (key b)
+    -- References of a vertex's value to other vertices of the command,
+    -- through its own auxiliary declarations (`._unary`, `.match_1`); a
+    -- `partial` definition's code is its `._unsafe_rec`. Lean lists them in
+    -- reverse order of first occurrence.
+    let succs (v : Name) : List Name := Id.run do
+      let mut out : Array Name := #[]
+      let mut seen : Std.HashSet Name := {}
+      let mut todo : Array Name := #[if env.contains (v ++ `_unsafe_rec) then v ++ `_unsafe_rec else v]
+      let mut visited : Std.HashSet Name := {}
+      while h : todo.size > 0 do
+        let c := todo.back
+        todo := todo.pop
+        if visited.contains c then continue
+        visited := visited.insert c
+        let some info := env.find? c | continue
+        let some val := info.value? (allowOpaque := true) | continue
+        for d in val.getUsedConstants do
+          match vertexOf? d with
+          | some u =>
+            if u != v && vset.contains u then
+              unless seen.contains u do
+                seen := seen.insert u
+                out := out.push u
+            else if u == v && !ranges.contains d then
+              todo := todo.push d
+          | none => pure ()
+      return out.toList.reverse
+    let comps := Lean.SCC.scc (helpers ++ mains).toList succs
+    for h : i in [:comps.length] do
+      for v in comps[i] do rank := rank.insert v i
+  -- Keys: command position, then component, then: auxiliary declarations
+  -- first (component 0), specializations before their component's members,
+  -- specializations by number.
+  let specNo (n : Name) : Nat :=
+    match n.components.getLast? with
+    | some (.str _ s) => if s.startsWith "spec_" then ((s.drop 5).toString.toNat?).getD 0 else 0
+    | _ => 0
+  let mut out : Std.HashMap Name (Array Nat) := {}
+  for n in items do
+    let key := match specTarget? n with
+      | some g => match vertexOf? g with
+        | some v => #[rootKey (rootOf v), 1 + rank.getD v 0, 0, specNo n]
+        | none => #[0, 0, 0, specNo n]
+      | none => match vertexOf? n with
+        | some v =>
+          if ranges.contains n then #[rootKey (rootOf v), 1 + rank.getD v 0, 1, 0]
+          else #[rootKey (rootOf v), 0, (ranges[ranged? n |>.getD v]?.map rangeKey).getD 0, 0]
+        | none => #[0, 0, 0, 0]
+    out := out.insert n key
+  return out
 
 /-- The startup items of the program's own (non-toolchain) modules, in
 order. Constants are the module's compiled zero-parameter declarations
@@ -111,7 +220,7 @@ order. Constants are the module's compiled zero-parameter declarations
 specializations with every parameter fixed are included. -/
 def startupItems : CoreM (Array StartupItem) := do
   let env ← getEnv
-  let mut out : Array (StartupItem × Nat × Nat) := #[]
+  let mut byModule : Std.HashMap Nat (Array (StartupItem × Name)) := {}
   for (n, _) in env.constants.map₁.toList do
     let some idx := env.getModuleIdxFor? n | continue
     let some modName := env.header.moduleNames[idx.toNat]? | continue
@@ -121,26 +230,32 @@ def startupItems : CoreM (Array StartupItem) := do
       else if let some f := getInitFnNameFor? env n then some (.init n f)
       else none
     let some item := item? | continue
-    let (m, pos) ← declOrder n
-    out := out.push (item, m, pos)
+    byModule := byModule.insert idx.toNat ((byModule.getD idx.toNat #[]).push (item, n))
   for h : idx in [:env.header.moduleNames.size] do
     if isToolchainModule env.header.moduleNames[idx] then continue
     for d in baseExt.getModuleEntries env idx (level := .private) do
       let n := d.name
       unless d.value matches .code _ && d.params.isEmpty do continue
       if isIOUnitInitFn env n || (getInitFnNameFor? env n).isSome then continue
-      let (m, pos) ← declOrder n
-      out := out.push (.caf n, m, pos)
-  -- Ties (specializations generated with the same declaration): by their
+      byModule := byModule.insert idx ((byModule.getD idx #[]).push (.caf n, n))
+  -- Ties (specializations generated with the same component): by their
   -- number, which is Lean's order in simple cases; Lean's real order depends
   -- on how its specializer recursed, which is not persisted.
-  let specNo (it : StartupItem) : Nat :=
-    match it.root.components.getLast? with
-    | some (.str _ s) => if s.startsWith "spec_" then ((s.drop 5).toString.toNat?).getD 0 else 0
-    | _ => 0
-  let sorted := out.qsort fun (i1, m1, p1) (i2, m2, p2) =>
-    m1 < m2 || (m1 == m2 && (p1 < p2 || (p1 == p2 && specNo i1 < specNo i2)))
-  return sorted.map (·.1)
+  let lexLt (a b : Array Nat) : Bool := Id.run do
+    for i in [:min a.size b.size] do
+      if a[i]! < b[i]! then return true
+      if a[i]! > b[i]! then return false
+    return a.size < b.size
+  let mut out := #[]
+  for idx in (byModule.toArray.map (·.1)).qsort (· < ·) do
+    let its := byModule.getD idx #[]
+    let keys ← moduleStartupKeys idx (its.map (·.2))
+    let sorted := its.qsort fun (_, n1) (_, n2) =>
+      let k1 := keys.getD n1 #[]
+      let k2 := keys.getD n2 #[]
+      lexLt k1 k2 || (k1 == k2 && Name.lt n1 n2)
+    out := out ++ sorted.map (·.1)
+  return out
 
 /-- A startup step with instance names (see `StartupItem`). -/
 inductive StartupStep where
@@ -190,25 +305,55 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
   -- (`l2r_run_pending_tasks` is generated at the end, `taskDispatchFns`.)
   let drain := "let sd : u64 = l2r_task_shutdown();\nlet pt : u64 = l2r_run_pending_tasks();\n"
   let mainCode := s!"let tm : u64 = l2r_task_manager_start();\nlet se : u64 = l2r_std_enter();\nlet r = {fnName mainInst}({argExpr}L2RUnit::u\{});\nlet sl : u64 = l2r_std_leave();\n{drain}match r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
-  -- The startup chain ends by clearing `IO.initializing`; an error stops
-  -- the program before main (`l2r_uncaught_exception` exits).
-  let mut code := "l2r_init_done()"
-  -- Build the startup chain from the last step outwards.
-  for h : i in [:startup.size] do
-    let j := startup.size - 1 - i
-    match startup[j]! with
-    | .caf inst => code := s!"let caf{j} = {fnName inst}();\n" ++ code
-    | .ioUnit inst =>
-      let (t, ok, err, _) ← ioResultOf inst
-      code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\n{code}\n},\n{t}::{err}(e{j}) => \{ {uncaught s!"e{j}"} }\n}"
-    | .init decl inst =>
-      let (t, ok, err, field) ← ioResultOf inst
-      let some slot := (← get).initSlots.find? decl | throwError "lean2rr: no slot for {decl}"
-      let vt := field.getD RR.Ty.unit
-      let (st, boxed) ← arrayElemTy vt
-      let stored := if boxed then match st with | .named bn => s!"{bn}\{v{j}}" | _ => s!"v{j}" else s!"v{j}"
-      code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\nlet s{j} : {st.render} = l2r_once_set<{st.render}>({slot}, {stored});\n{code}\n},\n{t}::{err}(e{j}) => \{ {uncaught s!"e{j}"} }\n}"
-  let body := s!"fn l2r_init_body() \{\nlet si : u64 = l2r_set_initializing(true);\n{code}\n}\n\n" ++
+  -- The startup chain, cut into functions of at most `chunk` steps: one
+  -- chain of nested matches per program would be as deep as the program
+  -- has initializers, and rrc's recursive lowering overflows its stack on
+  -- a few thousand. Each function returns 0 once its steps succeeded; an
+  -- error in an initializer is reported and exits (`l2r_init_failed`), so
+  -- later initializers do not run. The chain ends by clearing
+  -- `IO.initializing`.
+  let chunk := 128
+  let failed (e : String) := s!"l2r_init_failed({fnName errStr}({e}))"
+  let mut initFns := ""
+  let mut calls : Array String := #[]
+  let mut start := 0
+  while start < startup.size do
+    let stop := min startup.size (start + chunk)
+    -- Build the chunk's chain from its last step outwards.
+    let mut code := "0"
+    for i in [:stop - start] do
+      let j := stop - 1 - i
+      match startup[j]! with
+      | .caf inst => code := s!"let caf{j} = {fnName inst}();\n" ++ code
+      | .ioUnit inst =>
+        let (t, ok, err, _) ← ioResultOf inst
+        code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\n{code}\n},\n{t}::{err}(e{j}) => \{ {failed s!"e{j}"} }\n}"
+      | .init decl inst =>
+        let (t, ok, err, field) ← ioResultOf inst
+        let some slot := (← get).initSlots.find? decl | throwError "lean2rr: no slot for {decl}"
+        let vt := field.getD RR.Ty.unit
+        let (st, boxed) ← arrayElemTy vt
+        let stored := if boxed then match st with | .named bn => s!"{bn}\{v{j}}" | _ => s!"v{j}" else s!"v{j}"
+        code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\nlet s{j} : {st.render} = l2r_once_set<{st.render}>({slot}, {stored});\n{code}\n},\n{t}::{err}(e{j}) => \{ {failed s!"e{j}"} }\n}"
+    let name := s!"l2r_init_chunk_{calls.size}"
+    initFns := initFns ++ s!"fn {name}() -> u64 \{\n{code}\n}\n\n"
+    calls := calls.push s!"let ic{calls.size} : u64 = {name}();"
+    start := stop
+  -- Many chunks: group their calls the same way.
+  let mut level := 0
+  while calls.size > chunk do
+    let mut next : Array String := #[]
+    let mut g := 0
+    while g * chunk < calls.size do
+      let part := calls.extract (g * chunk) ((g + 1) * chunk)
+      let name := s!"l2r_init_group_{level}_{g}"
+      initFns := initFns ++ s!"fn {name}() -> u64 \{\n{"\n".intercalate part.toList}\n0\n}\n\n"
+      next := next.push s!"let ig{g} : u64 = {name}();"
+      g := g + 1
+    calls := next
+    level := level + 1
+  let body := initFns ++
+    s!"fn l2r_init_body() \{\nlet si : u64 = l2r_set_initializing(true);\n{"\n".intercalate calls.toList}\nl2r_init_done()\n}\n\n" ++
     s!"fn l2r_main_body() \{\n{mainCode}\n}\n"
   -- Like Lean's runtime: the module initializers run on the process's main
   -- thread (8 MiB stack) with `IO.initializing` true; then `main` runs on a
@@ -222,6 +367,7 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
     "extern \"C\" trampoline \"l2r_init_body\" = l2r_init_body;\n" ++
     "extern \"C\" trampoline \"l2r_main_body\" = l2r_main_body;\n\n" ++
     "#[ffi(import)]\nfn l2r_init_done() -> unit [{ leanrt::rt::set_initializing(false) }];\n\n" ++
+    "#[ffi(import)]\nfn l2r_init_failed(msg : LStr) -> u64 [{ leanrt::uncaught_exception(&msg) }];\n\n" ++
     "#[ffi(import)]\nfn l2r_run_main() [{ {\n" ++
     "    extern \"C\" { fn l2r_init_body(); fn l2r_main_body(); }\n" ++
     "    leanrt::rt::run_main2(|| unsafe { l2r_init_body() }, || unsafe { l2r_main_body() })\n} }];\n\n" ++
@@ -299,6 +445,8 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
   let roots := #[mainInst, errStr] ++ startup.map fun
     | .caf i | .ioUnit i | .init _ i => i
   let (decls, keys) ← retypeMono table decls keys roots
+  -- Float literals become bit patterns (translation plan §5.12).
+  let decls := foldFloatLitsDecls keys decls
   -- Function names the prelude defines (`fn NAME`).
   let preludeFns := (prelude.splitOn "fn ").foldl (init := ({} : Std.HashSet String)) fun acc chunk =>
     let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
