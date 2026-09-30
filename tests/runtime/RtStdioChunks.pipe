@@ -1,0 +1,1 @@
+$BIN 2>&1 | md5sum; cat rvchunks.txt | md5sum

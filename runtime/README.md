@@ -199,10 +199,20 @@ bit patterns), `l2r_fs_current_dir()`, `l2r_fs_app_path()`,
 `l2r_fs_process_get_current_dir()`, `l2r_fs_process_set_current_dir(p)`,
 `l2r_fs_create_tempfile() -> LHandle` (then `l2r_fs_temp_file_path()` is
 its path, for the `Handle × FilePath` pair), `l2r_fs_create_tempdir()`.
-Handles behave as glibc `FILE`s: `st_blksize` write buffers filled and
-flushed as `fwrite` does, `EBADF` at once for the wrong direction, sticky
-end-of-file and error indicators (after any failed operation on a handle,
-`getLine` fails, as natively), and every open handle is flushed at exit.
+**stdio model.** Handles and the standard streams are models of glibc's
+`FILE` (`leanrt/src/cfile.rs`, following libio's `fileops.c`/`genops.c`
+function by function): one `st_blksize` buffer shared by reading and
+writing with libio's get/put areas and cached offset; `fwrite`
+(`_IO_new_file_xsputn`, line-buffered tails flushed at each newline),
+`fread` (`_IO_file_xsgetn`, including direct reads of whole blocks),
+`getc`, `fflush`, `fseek` (in-buffer seeks), `ftello`; `EBADF` for the
+wrong direction after the same mode switch; sticky end-of-file and error
+indicators (after any failed operation on a handle, `getLine` fails, as
+natively); reading a terminal first flushes a line-buffered stdout. The
+same system calls happen in the same order, so the `errno`s are native's.
+At exit, stdout is flushed first (libc++'s `ios_base::Init`), then every
+`FILE`'s pending output, newest first, then used streams are synced (a
+seekable stdin is left at the position the program read up to).
 
 Standard-stream primitives (`fd` = 0 stdin, 1 stdout, 2 stderr; the fields
 of `IO.FS.Stream`): `l2r_stream_putStr(fd, s)`, `l2r_stream_write(fd, b)`,
@@ -358,8 +368,13 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   as natively (overflow panic; `out of memory` when `malloc` of the full
   size fails) but only `2^24` elements are reserved.
 - The C `errno` reported by a handle's sticky error indicator (see file
-  primitives) is the runtime's current `errno`, which may differ from
-  native after unrelated failing calls.
+  primitives) is the current `errno`, which may differ from native after
+  unrelated failing calls (the runtime's own calls are not libc++'s).
+- `IO.FS.createTempFile`/`createTempDir` with `TMPDIR` naming a missing
+  directory report `no such file or directory` with an empty file name;
+  natively `decode_uv_error` dereferences a null file name and crashes.
+- A direct `read` of a huge count (`Handle.read`, ≥ one buffer) is issued in
+  `read(2)` calls of at most 16 MiB (the same data; natively one call).
 
 ## Testing
 
