@@ -2410,7 +2410,7 @@ def isUnboxedTy (t : RR.Ty) : LowerM Bool := do
 and constructors (`Int.ofNat 0`, an enumeration value). It cannot panic,
 trace or allocate, so it is recomputed at every use: cheaper than reading a
 once-cell (native Lean emits such constants as static data). -/
-partial def isCheapConst (c : Code .pure) : LowerM Bool := do
+partial def isCheapConst (c : Code .pure) (fuel : Nat := 8) : LowerM Bool := do
   match c with
   | .let d k =>
     unless ← isUnboxedTy (← lowerType d.type) do return false
@@ -2419,11 +2419,30 @@ partial def isCheapConst (c : Code .pure) : LowerM Bool := do
       | .lit (.nat n) => pure (n < 2 ^ 63)
       | .lit _ => pure true
       | .erased => pure true
-      | .const f _ _ => pure ((← getEnv).isConstructor f)
+      | .const f _ args =>
+        if (← getEnv).isConstructor f then pure true
+        -- Total conversions of scalars (`UInt32.ofNat 0`, the default of
+        -- `Inhabited UInt32`).
+        else if isScalarConversion (((← read).keys.find? f).map (·.decl) |>.getD f) then pure true
+        -- Another such constant.
+        else if args.isEmpty && fuel > 0 then
+          match (← read).decls.find? f with
+          | some { params := #[], value := .code b, .. } => isCheapConst b (fuel - 1)
+          | _ => pure false
+        else pure false
       | _ => pure false
-    if ok then isCheapConst k else return false
+    if ok then isCheapConst k fuel else return false
   | .return _ => return true
   | _ => return false
+where
+  isScalarConversion (f : Name) : Bool :=
+    f ∈ [``UInt8.ofNat, ``UInt16.ofNat, ``UInt32.ofNat, ``UInt64.ofNat, ``USize.ofNat,
+         ``UInt8.ofNatLT, ``UInt16.ofNatLT, ``UInt32.ofNatLT, ``UInt64.ofNatLT, ``USize.ofNatLT,
+         ``Int8.ofNat, ``Int16.ofNat, ``Int32.ofNat, ``Int64.ofNat, ``ISize.ofNat,
+         ``Int8.ofInt, ``Int16.ofInt, ``Int32.ofInt, ``Int64.ofInt, ``ISize.ofInt,
+         ``Float.ofNat, ``Float.ofScientific, ``Float32.ofNat, ``Float32.ofScientific,
+         ``Char.ofNat, ``Nat.toUInt8, ``Nat.toUInt16, ``Nat.toUInt32, ``Nat.toUInt64,
+         ``Nat.toUSize]
 
 /-- Lower a declaration with code to a Reussir function. -/
 def lowerDecl (d : Decl .pure) : LowerM Unit := do
