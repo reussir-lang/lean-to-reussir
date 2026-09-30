@@ -58,6 +58,10 @@ where
     | .const ``lcErased _ => return erasedExpr
     | .const ``lcAny _ => return anyExpr
     | .const ``Decidable _ => return mkConst ``Bool
+    -- "Any object" (a one-field structure over `Nat`, which mono would
+    -- unwrap): values of every type are cast to it, so its representation
+    -- is the uniform one, in data structures as in library code.
+    | .const ``NonScalar _ | .const ``PNonScalar _ => return anyExpr
     | .const declName us =>
       if let some info ← hasTrivialStructure? declName then
         let ctorType ← getOtherDeclBaseType info.ctorName []

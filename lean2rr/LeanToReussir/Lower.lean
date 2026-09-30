@@ -425,6 +425,11 @@ mutual
     -- A unit-like value used at another type is an `unsafeCast ()`
     -- placeholder (see `zeroValue`).
     | .named "L2RUnit", _ => return some (← zeroValue dst)
+    -- Any value at a unit-like type (an irrelevant position: a proof, a
+    -- phantom) carries nothing; it is still evaluated.
+    | _, .named "L2RUnit" =>
+      let d ← fresh "du"
+      return some (.block ⟨#[(d, some src, e)], .unitVal⟩)
     | .fn a1 b1, .fn a2 b2 =>
       -- Another representation of the same function type: wrapped, and
       -- converted at each application.
@@ -588,14 +593,29 @@ mutual
       let names ← srcFields.mapM fun _ => fresh "cf"
       let mut vals := #[]
       let mut possible := true
-      for h : i in [:dstFields.size] do
-        let (_, dt) := dstFields[i]
-        match srcFields[i]? with
-        | some (_, st) =>
-          match ← tryCoerce (.var names[i]!) st dt with
-          | some v => vals := vals.push v
+      if sameHead then
+        -- Fields by Lean index. A field relevant in the target but not in
+        -- the source (a proof-like type such as `PLift p` in one of the
+        -- instantiations) was never inspected: its placeholder.
+        let srcIdx := (List.range sl.fields.size).toArray.filter fun j => (sl.fields[j]?.join).isSome
+        for h : j in [:dl.fields.size] do
+          let some (_, dt) := dl.fields[j] | continue
+          match sl.fields[j]?.join, srcIdx.idxOf? j with
+          | some (_, st), some k =>
+            match ← tryCoerce (.var names[k]!) st dt with
+            | some v => vals := vals.push v
+            | none => possible := false
+          | _, _ => vals := vals.push (← zeroValue dt)
+      else
+        -- Isomorphic inductives: relevant fields by position.
+        for h : i in [:dstFields.size] do
+          let (_, dt) := dstFields[i]
+          match srcFields[i]? with
+          | some (_, st) =>
+            match ← tryCoerce (.var names[i]!) st dt with
+            | some v => vals := vals.push v
+            | none => possible := false
           | none => possible := false
-        | none => possible := false
       -- Fields are bound from and placed at their record positions.
       let placedVals := dl.place vals
       let body : RR.Block := if possible then
@@ -1547,7 +1567,12 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
   let sym ← externSymbol orig
   -- Which parameters the runtime receives: not erased ones, not the world,
   -- not proofs.
-  let mask ← params.mapM fun p => return externParamPassed p && !(← isPropTy p)
+  -- A parameter declared at a type variable is passed even when that is
+  -- instantiated with a proof-like type (`Array.push` at `PLift True`).
+  let (uses0, _) ← typeVarUses orig
+  let mask ← params.zipIdx.mapM fun (p, i) => do
+    if (uses0[i]?.join).isSome then return true
+    return externParamPassed p && !(← isPropTy p)
   let passedArgs := (mask.zip args).filterMap fun (m, a) => if m then some a else none
   -- A fallible IO extern (files): the runtime's last-error protocol.
   if isFallibleIOSym sym then
