@@ -85,6 +85,11 @@ structure MonoState where
   initConsts : Array (Name × Name) := #[]
   /-- The instance being built (for detecting polymorphic recursion). -/
   current : Option InstKey := none
+  /-- Its name. -/
+  currentInst : Option Name := none
+  /-- Instance ↦ the instance whose code first asked for it: the
+  instantiation path, along which polymorphic recursion is detected. -/
+  parentOf : NameMap Name := {}
   /-- Base declarations compiled by lean2rr itself (safe reference
   definitions of unsafe implementations, and their auxiliary declarations). -/
   extraBase : NameMap (Decl .pure) := {}
@@ -146,14 +151,30 @@ def instanceName (key : InstKey) : MonoM Name := do
     a != b && a != anyExpr &&
       ((b.find? (· == a)).isSome ||
        ((a.isLambda || b.isLambda) && treeSizeUpTo b 1000 > treeSizeUpTo a 1000))
-  let key ← match (← get).current with
-    | some cur =>
-      if cur.decl == key.decl && cur.typeArgs.size == key.typeArgs.size &&
-         (cur.typeArgs.zip key.typeArgs).any (fun (a, b) => grows a b) then
-        modify fun s => { s with uniformArgs := s.uniformArgs + key.typeArgs.size }
-        pure { key with typeArgs := key.typeArgs.map fun _ => anyExpr, dicts := #[] }
-      else pure key
-    | none => pure key
+  -- The request can come from another declaration of the cycle (a `where`
+  -- helper, a mutual partner: `nestI` → `nestI.helper` → `nestI` at
+  -- `StateT Nat m`), so it is compared with the instances of the same
+  -- declaration on the path that led to the requesting instance, up to the
+  -- nearest uniform one: from there on, as for a direct self-call, one
+  -- typed instance at `F lcAny` is made, whose own request `F (F lcAny)`
+  -- grows.
+  let s ← get
+  let onPath : Bool := Id.run do
+    let mut inst := s.currentInst
+    let mut fuel := 100000
+    while fuel > 0 do
+      let some n := inst | return false
+      if let some k := s.keys.find? n then
+        if k.decl == key.decl && k.typeArgs.size == key.typeArgs.size then
+          if k.typeArgs.all (· == anyExpr) then return false
+          if (k.typeArgs.zip key.typeArgs).any (fun (a, b) => grows a b) then return true
+      inst := s.parentOf.find? n
+      fuel := fuel - 1
+    return false
+  let key ← if !key.typeArgs.isEmpty && onPath then
+      modify fun s => { s with uniformArgs := s.uniformArgs + key.typeArgs.size }
+      pure { key with typeArgs := key.typeArgs.map fun _ => anyExpr, dicts := #[] }
+    else pure key
   if let some n := (← get).names[key]? then return n
   let count := (← get).perDecl.getD key.decl 0
   let key ← if count ≥ (← get).config.maxInstancesPerDecl &&
@@ -169,7 +190,10 @@ def instanceName (key : InstKey) : MonoM Name := do
     names := s.names.insert key n
     perDecl := s.perDecl.insert key.decl (count + 1)
     work := s.work.push (key, n)
-    keys := s.keys.insert n key }
+    keys := s.keys.insert n key
+    parentOf := match s.currentInst with
+      | some p => s.parentOf.insert n p
+      | none => s.parentOf }
   return n
 
 /-- `unsafe` implementations of `@[implemented_by]` declarations, mapped to
@@ -693,7 +717,7 @@ def uniformDecl (d : Decl .pure) : Decl .pure :=
 
 /-- Process one instance: instantiate, simplify, rename, record. -/
 def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
-  modify fun s => { s with current := some key }
+  modify fun s => { s with current := some key, currentInst := some name }
   let some decl ← baseDeclFor? key.decl
     | throwError "lean2rr: no base declaration for {key.decl} (internal error)"
   let keepMissing := true

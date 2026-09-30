@@ -195,13 +195,20 @@ unavailable, the uniform `Box` representation (§5.1) takes its place:
   `lcAny` (§2.3).
 - **Polymorphic recursion.** Nested datatypes, or a function calling itself
   at a growing type such as `α`, `List α`, `List (List α)`, … would need
-  infinitely many instances. This is detected at the first self-call whose
-  type arguments strictly contain the caller's: that call goes to the fully
-  uniform instance (every type argument `lcAny`, static dictionaries
-  dropped). Other growth, such as mutual polymorphic recursion, is cut by
-  bounds: a type argument deeper than 64 or larger than 256 nodes becomes
-  `lcAny`, and past 1024 instances of one declaration every further
-  instance is the uniform one. So the set of instances stays finite. This is
+  infinitely many instances. This is detected when an instance of `d` is
+  requested at type arguments that strictly contain those of an instance of
+  `d` on the path of instances that led to the request (a type function
+  such as `StateT Nat m` counts as growth when it is larger): that request
+  goes to the fully uniform instance (every type argument `lcAny`, static
+  dictionaries dropped). The path covers growth through other declarations
+  of the cycle, a `where` helper (`nestI` → `nestI.helper` → `nestI` at
+  `StateT Nat m`) or a mutual partner. It stops at the nearest uniform
+  instance of `d`, so the uniform instance's own recursive request gets one
+  typed instance at `F lcAny`, whose request at `F (F lcAny)` then goes back
+  to the uniform one. Growth that no path shows is cut by bounds: a type
+  argument deeper than 64 or larger than 256 nodes becomes `lcAny`, and
+  past 1024 instances of one declaration every further instance is the
+  uniform one. So the set of instances stays finite. This is
   necessary: Reussir's own monomorphizer cannot handle polymorphic
   recursion. Callers of a uniform instance convert their arguments
   structurally on every call (§5.1), which costs time proportional to the
