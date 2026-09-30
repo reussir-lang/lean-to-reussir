@@ -203,6 +203,9 @@ fn l2r_big_is_u64(a : LBig) -> bool [{ { let r = leanrt::big::is_u64(&a); leanrt
 fn l2r_big_low(a : LBig) -> u64 [{ { let r = leanrt::big::low_limb(&a); leanrt::rc_release(a); r } }];
 #[ffi(import)]
 fn l2r_big_of_decimal(s : str) -> LBig [{ leanrt::big::of_decimal(&*s) }];
+// A big `Nat` literal: its decimal digits (from the string literal table).
+#[ffi(import)]
+fn l2r_big_of_decimal_lstr(s : LStr) -> LBig [{ { let r = leanrt::big::of_decimal(unsafe { ::std::str::from_utf8_unchecked(&s[..]) }); leanrt::rc_release(s); r } }];
 #[ffi(import)]
 fn l2r_big_to_lstr(a : LBig) -> LStr [{ leanrt::string::from_vec(leanrt::big::to_decimal(&a)) }];
 #[ffi(import)]

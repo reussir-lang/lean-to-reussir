@@ -473,6 +473,11 @@ def renameApp (statics : Std.HashMap FVarId Expr) (f : Name) (args : Array (Arg 
       discard <| instanceName { decl := initFn, typeArgs := #[] }
       modify fun s => { s with initConsts := s.initConsts.push (f, initFn) }
     return none
+  -- Declarations that Lean's mono passes recognise by name keep it:
+  -- `toMono` replaces `Decidable.decide` by its argument, which folds the
+  -- `if` on it and so the closed terms (an instance under a new name
+  -- survives as a call).
+  if f == ``Decidable.decide then return none
   let f ← redirectTarget f
   if isExtern (← getEnv) f then ensureIOErrorBuilders f
   let some callee ← baseDeclFor? f | return none

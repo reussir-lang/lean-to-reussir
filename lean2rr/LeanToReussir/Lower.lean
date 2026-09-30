@@ -1725,21 +1725,13 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
 
 /-! ## Values -/
 
-/-- A `Nat` literal: `Small` below 2^64, otherwise built from base-2^32
-digits with runtime arithmetic (no string argument, see `strLit`). -/
-def natLiteral (n : Nat) : RR.Expr :=
-  if n < 2 ^ 64 then small n
-  else
-    let rec limbs (n : Nat) (acc : List Nat) (fuel : Nat) : List Nat :=
-      match fuel with
-      | 0 => acc
-      | fuel + 1 => if n == 0 then acc else limbs (n / 2 ^ 32) ((n % 2 ^ 32) :: acc) fuel
-    match limbs n [] (n.log2 / 32 + 2) with
-    | [] => small 0
-    | l :: ls => ls.foldl (init := small l) fun acc d =>
-        .call "lean_nat_add" #[] #[.call "lean_nat_mul" #[] #[acc, small (2 ^ 32)], small d]
-where
-  small (k : Nat) : RR.Expr := .ctor "Nat" (some "Small") #[.atom (toString k)]
+/-- A `Nat` literal: `Small` below 2^64, otherwise parsed by the runtime
+from its decimal digits in the string literal table (a flat call: a nested
+arithmetic expression per limb overflowed rrc's stack for literals of
+thousands of digits, and cost quadratic time). -/
+def natLiteral (n : Nat) : LowerM RR.Expr := do
+  if n < 2 ^ 64 then return .ctor "Nat" (some "Small") #[.atom (toString n)]
+  return .call "l2r_nat_norm" #[] #[.call "l2r_big_of_decimal_lstr" #[] #[← strLit (toString n)]]
 
 /-- Constructor `c` applied to all its arguments `vals` (parameters, then
 fields), building a value of `fullRt`. -/
@@ -1841,7 +1833,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
 
 def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty) : LowerM RR.Expr := do
   match v with
-  | .lit (.nat n) => coerce (natLiteral n) (.named "Nat") rty
+  | .lit (.nat n) => coerce (← natLiteral n) (.named "Nat") rty
   | .lit (.str s) => coerce (← strLit s) (.named "LStr") rty
   | .lit (.uint8 n) | .lit (.uint16 n) => return .atom (toString n)
   | .lit (.uint32 n) => return .atom (toString n)
@@ -2598,7 +2590,10 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
             (.ofExpr (.call sm.fn #[] ((pnames.map .var).push (.ctor sm.mode (some sm.entry) #[])))))
       smArms := #[] }
     return
-  if d.params.isEmpty && !(← isCheapConst body) then
+  -- A constant is cached in a once-cell, unless it is cheap to recompute
+  -- or a closed term used only once, by another constant (which runs once;
+  -- caching every step of an array literal kept every intermediate array).
+  if d.params.isEmpty && !(← isCheapConst body) && !(← read).chainConsts.contains d.name then
     let acc ← cafAccessor (fnName d.name) ret
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name ++ "_init") #[] ret block) |>.push acc }
   else

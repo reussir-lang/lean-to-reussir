@@ -82,6 +82,9 @@ structure LowerCtx where
   valueGenericFns : Std.HashMap String Nat := {}
   /-- Which parameters of those functions are Reussir closures. -/
   valueGenericCls : Std.HashMap String (Array Bool) := {}
+  /-- Closed terms used exactly once, by another constant: evaluated where
+  used, not cached (see `lowerDecl`). -/
+  chainConsts : NameSet := {}
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/
