@@ -143,7 +143,16 @@ def main():
                # Reussir's in-place variant reuse skips stores of fields that
                # the packed record layout moves (RcCreateFusion copy
                # avoidance): keep declaration-order layouts until that is fixed.
-               + ["--no-pack-record-members"])
+               + ["--no-pack-record-members"]
+               # -O aggressive enables closure devirtualization, which prints
+               # each closure's result type, every named type expanded, at
+               # every vtable and indirect call site: build time and memory
+               # grow with the nesting of lean2rr's function representations
+               # (3x on an interpreter, out of memory at 16 GB on polymorphic
+               # recursion through monad transformers), while it changes no
+               # classic benchmark by more than 1% (lean2rr dispatches
+               # function values itself).
+               + ["--no-closure-wpd"])
         if args.no_reuse_across_call:
             run(rrc)
         else:

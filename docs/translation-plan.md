@@ -1482,6 +1482,17 @@ Each item says what differs and when.
 - *Build time*: rrc compiles about 80 small functions per second; a program
   with thousands of constants (each an initializer and an accessor, plus its
   closed terms) takes minutes to build where native takes seconds.
+  Polymorphic recursion through type functions (monad transformer towers)
+  makes deeply nested function representations (`L2RFn_*` enums, `Box`),
+  and two rrc costs grow superlinearly on them: closure devirtualization
+  (part of `-O aggressive`) prints each closure's result type, every named
+  type expanded, at every vtable and indirect call site, and the
+  module-level SCCP pass iterates over the large call graph of the uniform
+  code. The driver turns closure devirtualization off (`--no-closure-wpd`:
+  no classic benchmark changes by more than 1%, since lean2rr dispatches
+  function values itself). Such programs still take a minute or more to
+  build, and the largest towers (four transformers) up to a quarter of an
+  hour and several GB.
 - *Open descriptors*: native Lean starts with libuv's descriptors open (8
   more), so `/proc/self/fd` listings and the point where opening files
   fails with `EMFILE` differ.
