@@ -668,6 +668,41 @@ Erased fields get no binders. Reussir syntax notes: match arms have no
 trailing comma after the last arm, and there is no `else if` (use
 `else { if … }`).
 
+Three shapes help Reussir's token reuse, which gives a cell freed by a
+match to a later construction:
+- An arm that returns the matched value (`simp` turns `node l k r` back
+  into `t`) returns `node(l, k, r)` rebuilt from the fields, so every arm
+  consumes the cell.
+- In the arm of a constructor without fields, the matched value is that
+  constructor (`leaf{}`), which costs nothing to build.
+- In an arm where the matched value stays live because it is stored whole
+  in a new constructor, the match binds only the fields used while the
+  value is live; an inner alternative that no longer uses the value matches
+  it again and binds the fields it uses there. `balance` keeps the
+  recursive result `x` when no rotation is needed and takes it apart
+  otherwise:
+
+  ```
+  match x {
+      T::node(xs, _, _, _, _) => {        // x stays live: only its size
+          if 3 * ss < xs {
+              match x {                   // x dies here, this match frees it
+                  T::node(_, xk, xv, xl, xr) => ⟦rotations⟧,
+                  _ => l2r_unreachable()
+              }
+          } else { T::node{1 + xs + ss, k, v, x, r} }
+      }, …
+  ```
+
+  Reussir projects every bound field at the match. A field of a value that
+  stays live then gets an extra reference, released where the field dies,
+  and token reuse takes that release for a freed cell, which it never is,
+  instead of the cell actually freed: `TreeMap.insert` rebuilt every node
+  of the path. The rule is limited to values stored in constructors. For a
+  value only passed to calls (merge's `go l₁ ys (y :: acc)`), reusing its
+  cell measured slower on the classic `mergesort`: the result keeps the
+  scattered memory order of the input cells.
+
 ### 5.6 Join points
 
 A join point is a local continuation: `jp j y := body; k`, where the code

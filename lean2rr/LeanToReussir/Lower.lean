@@ -57,6 +57,19 @@ structure StateMachine where
   params : Array String
   entry : String := "e"
 
+/-- A matched value that stays live in its arm, whose fields are bound where
+they are used (see `lowerCases`). `fields` are the arm's field parameters
+that the arm uses, with their binder index and type; `pending` those not
+bound yet. -/
+structure LazyMatch where
+  discr : FVarId
+  scrut : String
+  ty : String
+  variant : String
+  nbinders : Nat
+  fields : Array (FVarId × Nat × RR.Ty)
+  pending : Array (FVarId × Nat × RR.Ty)
+
 structure CodeCtx where
   vars : Std.HashMap FVarId (String × RR.Ty) := {}
   jumps : Std.HashMap FVarId JumpAction := {}
@@ -66,6 +79,10 @@ structure CodeCtx where
   /-- Matched values that an arm returns: returned as the constructor
   rebuilt from the arm's fields (see `lowerCases`). -/
   rebuild : Std.HashMap FVarId (RR.Expr × RR.Ty) := {}
+  /-- Matched values whose fields are bound lazily (outermost first). -/
+  lazy : Array LazyMatch := #[]
+  /-- Bodies of the join points in scope. -/
+  jpBodies : Std.HashMap FVarId (Code .pure) := {}
 
 /-! ## Function values
 
@@ -2544,6 +2561,124 @@ partial def onlyReturned (x : FVarId) (c : Code .pure) : Bool :=
   | .cases cs => cs.discr != x && cs.alts.all (onlyReturned x ·.getCode)
   | .return _ | .unreach _ => true
 
+/-- Variables used in a let value. -/
+def valueUses (v : LetValue .pure) (acc : Std.HashSet FVarId) : Std.HashSet FVarId :=
+  let args (as : Array (Arg .pure)) (acc : Std.HashSet FVarId) :=
+    as.foldl (fun acc a => match a with | .fvar y => acc.insert y | _ => acc) acc
+  match v with
+  | .fvar f as => args as (acc.insert f)
+  | .const _ _ as _ => args as acc
+  | .proj _ _ y _ => acc.insert y
+  | _ => acc
+
+/-- Variables used in `c`. -/
+partial def codeUses (c : Code .pure) (acc : Std.HashSet FVarId) : Std.HashSet FVarId :=
+  match c with
+  | .let d k => codeUses k (valueUses d.value acc)
+  | .fun d k _ | .jp d k => codeUses k (codeUses d.value acc)
+  | .jmp _ as => as.foldl (fun acc a => match a with | .fvar y => acc.insert y | _ => acc) acc
+  | .cases cs => cs.alts.foldl (fun acc alt => codeUses alt.getCode acc) (acc.insert cs.discr)
+  | .return y => acc.insert y
+  | .unreach _ => acc
+
+/-- Whether `x` is used in `c` or by a join point that `c` jumps to (`jps`:
+the bodies of the join points declared outside `c`). -/
+partial def usesVar (jps : Std.HashMap FVarId (Code .pure)) (x : FVarId) (c : Code .pure) : Bool :=
+  go {} c
+where
+  go (seen : FVarIdSet) (c : Code .pure) : Bool :=
+    if hasFVar x c then true else jumpsUsing seen c
+  jumpsUsing (seen : FVarIdSet) (c : Code .pure) : Bool :=
+    match c with
+    | .let _ k => jumpsUsing seen k
+    | .fun d k _ | .jp d k => jumpsUsing seen d.value || jumpsUsing seen k
+    | .jmp j _ =>
+      match jps[j]? with
+      | some b => !seen.contains j && go (seen.insert j) b
+      | none => false
+    | .cases cs => cs.alts.any (jumpsUsing seen ·.getCode)
+    | .return _ | .unreach _ => false
+
+/-- Whether `x` is a field of a constructor application in `c` (or in a join
+point that `c` jumps to). -/
+partial def usedAsField (env : Environment) (jps : Std.HashMap FVarId (Code .pure)) (x : FVarId)
+    (c : Code .pure) : Bool :=
+  go {} c
+where
+  go (seen : FVarIdSet) (c : Code .pure) : Bool :=
+    match c with
+    | .let d k =>
+      (match d.value with
+       | .const f _ args _ =>
+         env.isConstructor f && args.any fun a => match a with | .fvar y => y == x | _ => false
+       | _ => false) || go seen k
+    | .fun d k _ | .jp d k => go seen d.value || go seen k
+    | .jmp j _ =>
+      match jps[j]? with
+      | some b => !seen.contains j && go (seen.insert j) b
+      | none => false
+    | .cases cs => cs.alts.any (go seen ·.getCode)
+    | .return _ | .unreach _ => false
+
+/-- One pass over `c` for a matched value `x`: whether `c` uses `x` (as
+`usesVar`, with `jps` the bodies of the join points declared outside `c`),
+and the variables used in `c` outside the alternatives (of `cases` in `c`)
+that do not use `x`. The latter are the fields of `x` that must be bound
+before `c` when `x` stays live in `c`. Uses in local functions and join
+points count (conservatively). A `cases` with one alternative (a structure)
+is no branch: its code counts as the rest of `c`, since it is lowered
+without `lowerAlt`. The state caches whether a join point's body uses `x`. -/
+partial def liveScan (jps : Std.HashMap FVarId (Code .pure)) (x : FVarId) (c : Code .pure) :
+    StateM (Std.HashMap FVarId Bool) (Bool × Std.HashSet FVarId) := do
+  let inArg : Arg .pure → Bool := fun | .fvar y => y == x | _ => false
+  let argUses (as : Array (Arg .pure)) : Std.HashSet FVarId :=
+    as.foldl (fun acc a => match a with | .fvar y => acc.insert y | _ => acc) {}
+  match c with
+  | .let d k =>
+    let (m, e) ← liveScan jps x k
+    let here := match d.value with
+      | .fvar f args => f == x || args.any inArg
+      | .const _ _ args _ => args.any inArg
+      | .proj _ _ y _ => y == x
+      | _ => false
+    return (m || here, valueUses d.value e)
+  | .fun d k _ =>
+    let (m, e) ← liveScan jps x k
+    return (m || hasFVar x d.value, codeUses d.value e)
+  | .jp d k =>
+    let (mj, _) ← liveScan jps x d.value
+    modify (·.insert d.fvarId mj)
+    let (m, e) ← liveScan jps x k
+    return (m || mj, codeUses d.value e)
+  | .jmp j as =>
+    let f ← match (← get)[j]? with
+      | some b => pure b
+      | none =>
+        let b := match jps[j]? with
+          | some body => usesVar jps x body
+          | none => false
+        modify (·.insert j b)
+        pure b
+    return (as.any inArg || f, argUses as)
+  | .cases cs =>
+    let mut m := cs.discr == x
+    let mut e : Std.HashSet FVarId := ({} : Std.HashSet FVarId).insert cs.discr
+    for alt in cs.alts do
+      let (ma, ea) ← liveScan jps x alt.getCode
+      m := m || ma
+      -- Merge the smaller set into the larger (deep chains stay linear).
+      if cs.alts.size == 1 || ma then
+        e := if ea.size ≥ e.size then e.fold (·.insert ·) ea else ea.fold (·.insert ·) e
+    return (m, e)
+  | .return y => return (y == x, ({} : Std.HashSet FVarId).insert y)
+  | .unreach _ => return (false, {})
+
+/-- The fields to bind before `c` when `x` stays live in `c` (see
+`liveScan`), added to `acc`. -/
+def usesWhileLive (jps : Std.HashMap FVarId (Code .pure)) (x : FVarId) (c : Code .pure)
+    (acc : Std.HashSet FVarId) : Std.HashSet FVarId :=
+  ((liveScan jps x c).run' {}).2.fold (·.insert ·) acc
+
 /-! ## Code -/
 
 /-- Free variable names of an RR expression/block (for outlined join points). -/
@@ -2627,7 +2762,8 @@ mutual
       | none => throwError "lean2rr: jump to unknown join point (internal error)"
     | .jp d k =>
       let ptys ← d.params.mapM (lowerType ·.type)
-      let ctx := { ctx with jpParams := ctx.jpParams.insert d.fvarId ptys }
+      let ctx := { ctx with jpParams := ctx.jpParams.insert d.fvarId ptys,
+                            jpBodies := ctx.jpBodies.insert d.fvarId d.value }
       if outlined.contains d.fvarId then
         -- J3: outline the body into a function over its free variables.
         let pnames ← d.params.mapM fun _ => fresh "p"
@@ -2711,10 +2847,10 @@ mutual
     | .named "bool" =>
       let branch (ctor : Name) : LowerM RR.Block := do
         match altFor ctor with
-        | some alt => lowerCode ctx outlined retTy alt.getCode
+        | some alt => lowerAlt ctx outlined retTy alt.getCode
         | none =>
           match dflt with
-          | some k => lowerCode ctx outlined retTy k
+          | some k => lowerAlt ctx outlined retTy k
           | none => return .ofExpr (.call "l2r_unreachable" #[retTy] #[])
       return .ite (.var scrut) (← branch ``Bool.true) (← branch ``Bool.false)
     | .named tn =>
@@ -2764,6 +2900,38 @@ mutual
             if !binders.isEmpty && binders.all Option.isSome && onlyReturned cs.discr k then
               let e := RR.Expr.ctor tn (some layout.variant) (binders.map fun b => .var b.get!)
               ctx' := { ctx' with rebuild := ctx'.rebuild.insert cs.discr (e, sty) }
+            -- An arm in which the matched value stays live because it is
+            -- stored whole in a new constructor binds only the fields needed
+            -- while it is live; a field used only in inner alternatives that
+            -- do not use the value is bound there, by matching the value
+            -- again (`lowerAlt`). Reussir projects a match's fields at the
+            -- match: a field of a value that stays live is then an extra
+            -- reference (inc and dec), and its release looks like a
+            -- reusable cell to Reussir's token reuse, which prefers it to
+            -- the cell actually freed and then never reuses anything
+            -- (TreeMap's `balance` rebuilt every node of the path). Not for
+            -- values only passed to calls: there reusing the cell (merge's
+            -- `go l₁ ys (y :: acc)`) measured slower for mergesort, whose
+            -- lists then keep the scattered order of the input cells.
+            else if !binders.isEmpty && info.shape == .enum &&
+                usedAsField (← getEnv) ctx.jpBodies cs.discr k then
+              let early := usesWhileLive ctx.jpBodies cs.discr k {}
+              let used := codeUses k {}
+              let mut fields := #[]
+              let mut pending := #[]
+              for h : i in [:ps.size] do
+                let p := ps[i]
+                if let some (some (j, ft)) := layout.fields[i]? then
+                  if used.contains p.fvarId then fields := fields.push (p.fvarId, j, ft)
+                  if !early.contains p.fvarId then
+                    binders := binders.set! j none
+                    ctx' := { ctx' with vars := ctx'.vars.erase p.fvarId }
+                    if used.contains p.fvarId then pending := pending.push (p.fvarId, j, ft)
+              if !fields.isEmpty then
+                let l : LazyMatch :=
+                  { discr := cs.discr, scrut, ty := tn, variant := layout.variant,
+                    nbinders := binders.size, fields, pending }
+                ctx' := { ctx' with lazy := ctx'.lazy.push l }
             -- In the arm of a constructor without fields, the matched value
             -- is that constructor, which costs nothing to build (`leaf` used
             -- as the children of a new node).
@@ -2771,17 +2939,60 @@ mutual
             if binders.isEmpty && hasFVar cs.discr k then
               let x ← fresh "nc"
               pre := #[(x, some sty, RR.Expr.ctor tn (some layout.variant) #[])]
-              ctx' := { ctx' with vars := ctx'.vars.insert cs.discr (x, sty) }
-            let body ← lowerCode ctx' outlined retTy k
+              ctx' := { ctx' with vars := ctx'.vars.insert cs.discr (x, sty),
+                                  lazy := ctx'.lazy.map fun l =>
+                                    { l with fields := l.fields.filter (·.1 != cs.discr),
+                                             pending := l.pending.filter (·.1 != cs.discr) } }
+            let body ← lowerAlt ctx' outlined retTy k
             arms := arms.push { ty := tn, ctor := some layout.variant, binders, body := { body with lets := pre ++ body.lets } }
           | _ => pure ()
         if arms.size < info.ctorOrder.size then
           let body ← match dflt with
-            | some k => lowerCode ctx outlined retTy k
+            | some k => lowerAlt ctx outlined retTy k
             | none => pure (.ofExpr (.call "l2r_unreachable" #[retTy] #[]))
           arms := arms.push { ty := tn, ctor := none, binders := #[], body }
         return .mtch (.var scrut) arms
     | t => throwError "lean2rr: cases on value of type {t.render} ({cs.typeName})"
+
+  /-- Lower the code of an alternative. A lazily matched value (see
+  `lowerCases`) whose fields the alternative uses is matched again first.
+  When the alternative does not use the value itself, the value dies here:
+  this match consumes it and binds every field the alternative uses (also
+  those bound before, which are then only borrowed). Otherwise it binds the
+  pending fields needed while the value is live. -/
+  partial def lowerAlt (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (k : Code .pure) :
+      LowerM RR.Block := do
+    if ctx.lazy.isEmpty then return ← lowerCode ctx outlined retTy k
+    let used := codeUses k {}
+    for h : i in [:ctx.lazy.size] do
+      let l := ctx.lazy[i]
+      let live := usesVar ctx.jpBodies l.discr k
+      let now := if live then
+          let need := l.pending.filter (used.contains ·.1)
+          if need.isEmpty then need else
+            let early := usesWhileLive ctx.jpBodies l.discr k {}
+            need.filter (early.contains ·.1)
+        else l.fields.filter (used.contains ·.1)
+      if now.isEmpty then continue
+      -- The value's current name: the match of an enclosing lazy value may
+      -- have bound it again (it is a field of that value).
+      let scrut := match ctx.vars[l.discr]? with
+        | some (n, _) => n
+        | none => l.scrut
+      let mut binders := Array.replicate l.nbinders (none : Option String)
+      let mut ctx' := ctx
+      for (p, j, ft) in now do
+        let x ← fresh "f"
+        binders := binders.set! j (some x)
+        ctx' := { ctx' with vars := ctx'.vars.insert p (x, ft) }
+      let rest := l.pending.filter fun q => !now.any (·.1 == q.1)
+      ctx' := { ctx' with lazy :=
+        if live then ctx'.lazy.set! i { l with pending := rest } else ctx'.lazy.eraseIdx! i }
+      let body ← lowerAlt ctx' outlined retTy k
+      return .ofExpr (.mtch (.var scrut) #[
+        { ty := l.ty, ctor := some l.variant, binders, body },
+        { ty := l.ty, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[retTy] #[]) }])
+    lowerCode ctx outlined retTy k
 end
 
 /-- Can Reussir types `a` and `b` represent the same Lean type? `Box` stands
