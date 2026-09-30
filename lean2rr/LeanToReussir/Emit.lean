@@ -285,6 +285,9 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
                           preludeRets, preludeParams, ioErrorBuilders, valueGenericFns }
   let act : LowerM Unit := do
+    -- `Box` always exists (with at least the unit variant, `box(0)`): types
+    -- may mention it even when nothing is ever boxed.
+    let _ ← boxVariant .unit
     -- Once-cells of `initialize` constants (read by `calleeOf`).
     for st in startup do
       if let .init decl _ := st then
@@ -296,8 +299,7 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
   let ((), st) ← (act.run ctx).run {}
   let mut out := prelude ++ "\n// ---- generated types ----\n\n"
   for it in st.typeItems do out := out ++ it.render ++ "\n"
-  unless st.boxVariants.isEmpty do
-    out := out ++ (RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))).render ++ "\n"
+  out := out ++ (RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))).render ++ "\n"
   out := out ++ "// ---- generated functions ----\n\n"
   for f in st.fns do out := out ++ f.render ++ "\n"
   unless st.strLits.isEmpty do out := out ++ strLitTable st.strLits

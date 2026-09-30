@@ -144,6 +144,24 @@ def nominalHead (n : String) : LowerM (Option Name) := do
   | some k => return k.getAppFn.constName?
   | none => return none
 
+/-- The accessor of a constant (a declaration without parameters): its value
+is computed once, by `<name>_init`, and kept in a runtime once-cell for the
+rest of the run, like native Lean's CAFs and closed terms (translation plan
+§5.12). The cell stores a boundary type; other values are boxed. -/
+def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
+  let slot := (← get).cafSlots
+  modify fun s => { s with cafSlots := slot + 1 }
+  let (st, boxed) ← arrayElemTy ret
+  let wrap (e : RR.Expr) : RR.Expr := match st with
+    | .named bn => if boxed then .ctor bn none #[e] else e
+    | _ => e
+  let unwrap (e : RR.Expr) : RR.Expr := if boxed then .field e 0 else e
+  let k := RR.Expr.atom (toString slot)
+  let body : RR.Block := .ofExpr (.ite (.call "l2r_once_has" #[] #[k])
+    (.ofExpr (unwrap (.call "l2r_once_get" #[st] #[k])))
+    (.ofExpr (unwrap (.call "l2r_once_set" #[st] #[k, wrap (.call (name ++ "_init") #[] #[])]))))
+  return .fn name #[] ret body
+
 /-- A placeholder of Reussir type `t`. Lean passes `box(0)` for values that
 are never inspected: erased arguments (`◾`) at relevant types, and the
 `unsafeCast ()` its library stores into array slots so that the element
@@ -153,7 +171,10 @@ lean2rr materializes `box(0)` at the expected type as that type's zero:
 returning a zero, an empty array (for `Nat`, `Bool` and enumerations this is
 exactly what `box(0)` denotes in Lean). Only a type without a finite value
 gets `l2r_unreachable`. Each placeholder is a generated function
-`l2r_zero_N`. -/
+`l2r_zero_N`. A placeholder that would allocate (a string, an array, a
+record, a closure, a boxed unit) is built once and kept in a once-cell like
+a constant (`cafAccessor`): `Array.modify` stores one per update, and it is
+never inspected, so a shared value does as well as a fresh one. -/
 partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
   if t == .unit then return .unitVal
   if let some f := (← get).zeroFns[t]? then return .call f #[] #[]
@@ -210,9 +231,25 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
       let x ← fresh "zx"
       pure (.ofExpr (.lam x a (.ofExpr (← zeroValue b))))
     | _ => pure unreachable
-  modify fun s => { s with
-    zeroBusy := s.zeroBusy.erase t
-    fns := s.fns.push (.fn f #[] t body) }
+  modify fun s => { s with zeroBusy := s.zeroBusy.erase t }
+  -- Heap values are shared (a nullary constructor of a shared enum does not
+  -- allocate).
+  let heap ← match t with
+    | .named n =>
+      if n ∈ ["LStr", "LNatArr", "LIntArr", boxName] then pure true
+      else match (← get).typeInfos[n]? with
+        | some info => pure (info.shape != .enumLike)
+        | none => pure ((← storageElem t).2)
+    | .app "RVec" _ | .fn .. => pure true
+    | _ => pure false
+  let nullary := match body with
+    | ⟨#[], .ctor _ _ #[]⟩ => true
+    | _ => false
+  if heap && !nullary then
+    let acc ← cafAccessor f t
+    modify fun s => { s with fns := s.fns.push (.fn (f ++ "_init") #[] t body) |>.push acc }
+  else
+    modify fun s => { s with fns := s.fns.push (.fn f #[] t body) }
   return .call f #[] #[]
 
 /-- The index of a value of an enumeration type (a generated `[value]`
@@ -248,6 +285,21 @@ def enumOfIndexFn (tn : String) : LowerM String := do
         .ite (.atom "x == k") (.ofExpr (.ctor tn (some l.variant) #[])) (.ofExpr e)⟩
     modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named "u64")] (.named tn) (.ofExpr e)) }
   return name
+
+/-- Unwrap a `Box` whose variant for Reussir type `t` is fixed by the Lean
+types: the variant's payload, or, for a boxed unit, the placeholder of `t`
+(a boxed unit used at another type is Lean's `box(0)`, see `zeroValue`); any
+other variant is unreachable. -/
+def unboxMatch (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
+  let v ← boxVariant t
+  let u ← boxVariant .unit
+  let x ← fresh "ub"
+  let mut arms : Array RR.Arm :=
+    #[{ ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) }]
+  if u != v then
+    arms := arms.push { ty := boxName, ctor := some u, binders := #[none], body := .ofExpr (← zeroValue t) }
+  return .mtch e (arms.push
+    { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) })
 
 mutual
   /-- Convert `e` from representation `src` to `dst`. Besides `Box`
@@ -286,28 +338,18 @@ mutual
     if src == RR.Ty.box then
       match dst with
       | .fn .. =>
-        let v ← boxVariant canon
-        let x ← fresh "ub"
-        let unboxed := RR.Expr.mtch e #[
-          { ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) },
-          { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[canon] #[]) }]
+        let unboxed ← unboxMatch e canon
         if dst == canon then return some unboxed
         return ← tryCoerce unboxed canon dst
-      | .named tn =>
-        if (← get).typeInfos.contains tn then
-          -- Any instantiation of the same inductive may have been boxed.
-          return some (.call (← unboxFn tn) #[] #[e])
-        let v ← boxVariant dst
-        let x ← fresh "ub"
-        return some (.mtch e #[
-          { ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) },
-          { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[dst] #[]) }])
       | _ =>
-        let v ← boxVariant dst
-        let x ← fresh "ub"
-        return some (.mtch e #[
-          { ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) },
-          { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[dst] #[]) }])
+        if let .named tn := dst then
+          if (← get).typeInfos.contains tn then
+            -- Any instantiation of the same inductive may have been boxed.
+            return some (.call (← unboxFn tn) #[] #[e])
+        if (← arrayRepr? dst).isSome then
+          -- Any representation of the same array type may have been boxed.
+          return some (.call (← unboxArrFn dst) #[] #[e])
+        return some (← unboxMatch e dst)
     match src, dst with
     -- A unit-like value used at another type is an `unsafeCast ()`
     -- placeholder (see `zeroValue`).
@@ -362,7 +404,9 @@ mutual
     let f ← fresh "l2r_vconv_"
     modify fun s => { s with vecConvs := s.vecConvs.insert (src, dst) f }
     let x := sr.load (sr.call "get" #[.var "src", .var "i"])
-    let some y ← tryCoerce x sr.value dr.value | return none
+    let some y ← tryCoerce x sr.value dr.value
+      | modify fun s => { s with vecConvs := s.vecConvs.erase (src, dst) }
+        return none
     let go := f ++ "_go"
     let u64 := RR.Ty.named "u64"
     let loop : RR.Block := .ofExpr <| .ite (.atom "i < n")
@@ -545,26 +589,33 @@ def lambdaChain (tys : Array RR.Ty) (mk : Array RR.Expr → LowerM RR.Expr) : Lo
     body := .lam n t (.ofExpr body)
   return body
 
-/-- The domains of the first `k` arrows of `t` and the rest. -/
-def peelFn (t : RR.Ty) (k : Nat) : Array RR.Ty × RR.Ty := Id.run do
-  let mut ds := #[]
-  let mut t := t
-  for _ in [:k] do
-    match t with
-    | .fn d c => ds := ds.push d; t := c
+/-- A partial application as a value of type `expected` (the type of the
+`let` that binds it): a curried chain over the remaining parameters `rest`
+whose innermost body `mk vars` has type `ret`. The binder's type may differ
+from the callee's own types (a lifted lambda whose result Lean typed
+`lcAny`, a closure stored at a uniform type), so the conversions go inside
+the chain: each lambda takes the expected parameter type and converts it to
+the callee's, and the innermost result is converted to the expected result.
+The callee still runs only when the last argument arrives. -/
+def partialApp (rest : Array RR.Ty) (ret : RR.Ty) (expected : RR.Ty)
+    (mk : Array RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
+  let mut exp := expected
+  let mut doms := #[]
+  for _ in rest do
+    match exp with
+    | .fn d c => doms := doms.push d; exp := c
     | _ => break
-  return (ds, t)
-
-/-- A partial application: a curried chain of lambdas over the missing
-parameters, at the types the partial application has (the let's type),
-converting to and from the callee's own parameter and result types. -/
-def partialApp (missing : Array RR.Ty) (ret want : RR.Ty) (mk : Array RR.Expr → RR.Expr) :
-    LowerM RR.Expr := do
-  let (ds, c) := peelFn want missing.size
-  if ds.size != missing.size then return ← lambdaChain missing fun rest => return mk rest
-  lambdaChain ds fun rest => do
-    let rest' ← (rest.zip (ds.zip missing)).mapM fun (v, (d, p)) => coerce v d p
-    coerce (mk rest') ret c
+  if doms.size < rest.size then
+    -- The expected type is not a function type of that depth (e.g. `Box`):
+    -- build the chain at the callee's types and convert it as a whole.
+    let own := rest.foldr (fun a b => RR.Ty.fn a b) ret
+    return ← coerce (← lambdaChain rest mk) own expected
+  let names ← rest.mapM fun _ => fresh "pa"
+  let args ← (names.zip (doms.zip rest)).mapM fun (n, d, t) => coerce (.var n) d t
+  let mut body ← coerce (← mk args) ret exp
+  for (n, d) in (names.zip doms).reverse do
+    body := .lam n d (.ofExpr body)
+  return body
 
 /-- Apply a closure to further arguments, one at a time. A function value of
 statically unknown type (`Box`) is stored in canonical form `Box -> Box`
@@ -1425,7 +1476,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       coerce (.call fn #[] as) ret (← lowerType resTy)
     else if args.size < n then
       let supplied ← (args.zip params).mapM fun (a, t) => lowerArg ctx a t
-      partialApp params[args.size:].toArray ret (← lowerType resTy) fun rest => .call fn #[] (supplied ++ rest)
+      partialApp params[args.size:].toArray ret (← lowerType resTy) fun rest => return .call fn #[] (supplied ++ rest)
     else
       let as ← (args[:n].toArray.zip params).mapM fun (a, t) => lowerArg ctx a t
       let (e, t) ← applyChain (.call fn #[] as) ret ctx args[n:].toArray
@@ -1439,15 +1490,8 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       lowerExternCall orig typeArgs params ret as
     else if args.size < n then
       let supplied ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
-      let k := n - args.size
-      let want ← lowerType resTy
-      let (ds, c) := peelFn want k
-      if ds.size == k then
-        lambdaChain ds fun rest => do
-          let rest' ← (rest.zip (ds.zip ptys[args.size:].toArray)).mapM fun (v, (d, p)) => coerce v d p
-          coerce (← lowerExternCall orig typeArgs params ret (supplied ++ rest')) retTy c
-      else
-        lambdaChain ptys[args.size:].toArray fun rest => lowerExternCall orig typeArgs params ret (supplied ++ rest)
+      partialApp ptys[args.size:].toArray retTy (← lowerType resTy) fun rest =>
+        lowerExternCall orig typeArgs params ret (supplied ++ rest)
     else
       let as ← (args[:n].toArray.zip ptys).mapM fun (a, t) => lowerArg ctx a t
       let call ← lowerExternCall orig typeArgs params ret as
@@ -1493,7 +1537,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       | _ => pure (Array.replicate arity RR.Ty.unit)
     let vals ← (args.zip argTys).mapM fun (a, t) => lowerArg ctx a t
     if args.size ≥ arity then build vals
-    else lambdaChain argTys[args.size:].toArray fun rest => build (vals ++ rest)
+    else partialApp argTys[args.size:].toArray fullRt (← lowerType resTy) fun rest => build (vals ++ rest)
 
 def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty) : LowerM RR.Expr := do
   match v with
@@ -1904,52 +1948,49 @@ mutual
     | t => throwError "lean2rr: cases on value of type {t.render} ({cs.typeName})"
 end
 
-/-- The accessor of a constant (a declaration without parameters): its value
-is computed once, by `<name>_init`, and kept in a runtime once-cell for the
-rest of the run, like native Lean's CAFs and closed terms (translation plan
-§5.12). The cell stores a boundary type; other values are boxed. -/
-def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
-  let slot := (← get).cafSlots
-  modify fun s => { s with cafSlots := slot + 1 }
-  let (st, boxed) ← arrayElemTy ret
-  let wrap (e : RR.Expr) : RR.Expr := match st with
-    | .named bn => if boxed then .ctor bn none #[e] else e
-    | _ => e
-  let unwrap (e : RR.Expr) : RR.Expr := if boxed then .field e 0 else e
-  let k := RR.Expr.atom (toString slot)
-  let body : RR.Block := .ofExpr (.ite (.call "l2r_once_has" #[] #[k])
-    (.ofExpr (unwrap (.call "l2r_once_get" #[st] #[k])))
-    (.ofExpr (unwrap (.call "l2r_once_set" #[st] #[k, wrap (.call (name ++ "_init") #[] #[])]))))
-  return .fn name #[] ret body
-
-/-- Generate the bodies of all `Box → nominal` converters: each matches every
-`Box` variant holding an instantiation of the target's inductive and
-converts it structurally. Generating a conversion may add `Box` variants
-(for fields), so this iterates until the variant set is stable. -/
+/-- Generate the bodies of all `Box → nominal` and `Box → array` converters.
+A converter matches every `Box` variant that can hold a value of the
+target's Lean type and converts it: for a nominal type, any instantiation of
+its inductive (structurally); for an array type, any array representation
+(element by element; e.g. an `Array Nat` built by uniform-representation
+code is boxed as `RVec<Box>`, but its consumer wants `LNatArr`). A boxed unit
+is Lean's `box(0)` placeholder and becomes the target's zero. Generating a
+conversion may add `Box` variants (for fields), so this iterates until the
+variant set is stable. -/
 partial def finishUnboxFns : LowerM Unit := do
   let mut done : Std.HashMap String Nat := {}
   repeat
-    let targets := (← get).unboxTargets
     let nvars := (← get).boxVariants.size
-    let pending := targets.filter fun t => done.getD t 0 != nvars + 1
+    let nominal := (← get).unboxTargets.map fun t => (s!"l2r_unbox_{t}", RR.Ty.named t)
+    let arrays := (← get).unboxArrTargets.map fun (t, f) => (f, t)
+    let pending := (nominal ++ arrays).filter fun (f, _) => done.getD f 0 != nvars + 1
     if pending.isEmpty then break
-    for t in pending do
-      let some th ← nominalHead t | continue
-      let mut arms := #[]
+    for (fname, t) in pending do
+      let th? ← match t with
+        | .named tn => nominalHead tn
+        | _ => pure none
+      let tArr := (← arrayRepr? t).isSome
+      let mut arms : Array RR.Arm := #[]
       for (vt, vname) in (← get).boxVariants do
-        let .named vn := vt | continue
-        let some vh ← nominalHead vn | continue
-        if vh != th then continue
+        let accept ← match th?, vt with
+          | some th, .named vn => pure ((← nominalHead vn) == some th)
+          | some _, _ => pure false
+          | none, _ => pure (tArr && (← arrayRepr? vt).isSome)
+        if !accept then continue
         let x ← fresh "bx"
-        let body ← if vn == t then pure (RR.Expr.var x) else coerce (.var x) vt (.named t)
-        arms := arms.push { ty := boxName, ctor := some vname, binders := #[some x], body := .ofExpr body : RR.Arm }
-      arms := arms.push { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[.named t] #[]) }
-      let fname := s!"l2r_unbox_{t}"
-      let item := RR.Item.fn fname #[("b", RR.Ty.box)] (.named t) (.ofExpr (.mtch (.var "b") arms))
+        -- An impossible conversion (another element type) is left to the
+        -- unreachable arm.
+        if let some body ← tryCoerce (.var x) vt t then
+          arms := arms.push { ty := boxName, ctor := some vname, binders := #[some x], body := .ofExpr body }
+      let u ← boxVariant .unit
+      unless arms.any (·.ctor == some u) do
+        arms := arms.push { ty := boxName, ctor := some u, binders := #[none], body := .ofExpr (← zeroValue t) }
+      arms := arms.push { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) }
+      let item := RR.Item.fn fname #[("b", RR.Ty.box)] t (.ofExpr (.mtch (.var "b") arms))
       modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != fname | _ => true).push item }
       -- Record the variant count this body was generated against; a later
       -- growth of the variant set makes it pending again.
-      done := done.insert t (nvars + 1)
+      done := done.insert fname (nvars + 1)
 
 /-- Types whose values need no heap cell. -/
 def isUnboxedTy (t : RR.Ty) : LowerM Bool := do

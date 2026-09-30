@@ -234,7 +234,10 @@ giving it the representation it assumes:
   the first constructor whose fields have zeros, a closure returning a zero,
   an empty array. For `Nat`, `Bool` and enumerations this is exactly what
   `box(0)` denotes in Lean. Only a type without a finite value gets
-  `unreachable`.
+  `unreachable`. A zero that would allocate (a string, an array, a record,
+  a closure) is built once and kept in a once-cell, like a constant
+  (§5.12): `modify` stores one per update, and since a placeholder is never
+  inspected, a shared value serves as well as a fresh one.
 
 This keeps Lean's in-place update tricks, including `modify`'s unshared
 element. An alternative, redirecting to the safe reference implementations
@@ -432,13 +435,20 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
 **The uniform type `Box`.** When a data position has type `lcAny` (§2.6, §4),
 its value is stored as `Box`.
 - `Box` is a generated enum with one variant per concrete Reussir type that
-  the program ever boxes. Variants are created as Stage 4 needs them, and
-  the unboxing functions are regenerated until the set stops growing, so
-  the set is known at the end of Stage 4.
-- Converting between a precise type `T` and `Box` means wrapping into or
-  unwrapping out of `T`'s variant. The variant is fixed by the Lean types
-  at both ends, so the unwrap always succeeds; its "other variant" arm is
-  unreachable.
+  the program ever boxes, plus a unit variant. Variants are created as
+  Stage 4 needs them, and the unboxing functions are regenerated until the
+  set stops growing, so the set is known at the end of Stage 4. `Box` is
+  always emitted, since types can mention it even when nothing is boxed.
+- Converting a precise type `T` to `Box` wraps the value into `T`'s variant.
+  Unwrapping must accept every variant that can hold a value of the same
+  Lean type, because one Lean type can have several Reussir
+  representations: the instantiations of an inductive (`List Nat` and a
+  uniform `List Box`), or the representations of an array (`LNatArr`, and
+  `RVec<Box>` for an `Array Nat` built by the code of §2.7). Unboxing to a
+  nominal or array type is therefore a generated function that matches all
+  such variants and converts structurally, element by element for arrays. A
+  boxed unit unwraps to the zero of `T`: a unit used at another type is
+  Lean's `box(0)` placeholder (§2.7). Any other variant is unreachable.
 - Conversions are inserted wherever a value's Reussir type differs from
   the type expected where it is used: call arguments, return values,
   constructor fields, join-point arguments, closure arguments and results.
@@ -449,6 +459,12 @@ its value is stored as `Box`.
 - A closure passed where `Box -> Box` is expected is wrapped as
   `|b| box(f(unbox(b)))`. The wrapper calls `f` exactly once per
   application, so evaluation timing does not change.
+- A partial application is built directly at the type of the binder that
+  receives it. Lambda lifting can give a lifted lambda the result type
+  `lcAny` while its closure is used at `Nat × Int → Int`, or the reverse. The
+  chain's lambdas take the binder's parameter types, and the conversions go
+  inside the innermost lambda, so the callee still runs only when the last
+  argument arrives.
 - When a structure built at a uniform type (for example a `List Box` coming
   out of polymorphically recursive code) meets code expecting the precise
   type (`List Nat`), the conversion is structural, element by element.
