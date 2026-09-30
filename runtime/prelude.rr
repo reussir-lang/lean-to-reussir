@@ -1727,6 +1727,59 @@ fn l2r_slice_dec_lt(s1 : LStr, b1 : u64, e1 : u64, s2 : LStr, b2 : u64, e2 : u64
     s1.get(b1 as usize..e1 as usize).unwrap_or(&[]) < s2.get(b2 as usize..e2 as usize).unwrap_or(&[])
 }];
 
+// ---- Glue helpers for externs over Lean-defined types ----
+//
+// The prelude cannot name generated types (`List Char`, `Ordering`,
+// `Option Char`, ...), so these helpers are generic in the result type and
+// take its constructors as arguments: lean2rr's glue for such an extern is a
+// call passing the constructor values (nullary constructors as values,
+// others as curried closures).
+
+// `String.compare a b` (`lean_string_compare`).
+fn l2r_string_compare_with<O>(a : LStr, b : LStr, lt : O, eq : O, gt : O) -> O {
+    let r = l2r_string_compare(a, b);
+    if r == 0 { lt } else { if r == 1 { eq } else { gt } }
+}
+
+// `String.toList`/`String.data` (`lean_string_data`): the characters of a
+// valid UTF-8 string, built from the end.
+fn l2r_string_to_list<L>(s : LStr, nil : L, cons : u32 -> (L -> L)) -> L {
+    l2r_string_to_list_go(s, l2r_string_size(s), nil, cons)
+}
+
+fn l2r_string_to_list_go<L>(s : LStr, i : u64, acc : L, cons : u32 -> (L -> L)) -> L {
+    if i == 0 { acc } else {
+        let j = l2r_string_prev(s, i);
+        l2r_string_to_list_go(s, j, cons(l2r_string_get_fast(s, j))(acc), cons)
+    }
+}
+
+// `String.Pos.Raw.get?` (`lean_string_utf8_get_opt`).
+fn l2r_string_utf8_get_opt_with<O>(s : LStr, p : Nat, none : O, some : u32 -> O) -> O {
+    let c = l2r_string_utf8_get_opt(s, p);
+    if c == 1114112 { none } else { some(c) }
+}
+
+// `Array.toList` (`lean_array_to_list`), built from the end. `E` is the
+// array's storage type; `cons` takes the stored element (lean2rr unboxes
+// inside the closure when the array stores boxes).
+fn l2r_array_to_list<E, L>(a : RVec<E>, nil : L, cons : E -> (L -> L)) -> L {
+    l2r_array_to_list_go(a, l2r_array_size(a), nil, cons)
+}
+
+fn l2r_array_to_list_go<E, L>(a : RVec<E>, i : u64, acc : L, cons : E -> (L -> L)) -> L {
+    if i == 0 { acc } else { l2r_array_to_list_go(a, i - 1, cons(l2r_array_get(a, i - 1))(acc), cons) }
+}
+
+// `Float.frExp` (`lean_float_frexp`): `mk` builds the `Float × Int`.
+fn l2r_float_frexp_with<P>(x : f64, mk : f64 -> (Int -> P)) -> P {
+    mk(l2r_float_frexp_mant(x))(l2r_float_frexp_exp(x))
+}
+
+fn l2r_float32_frexp_with<P>(x : f32, mk : f32 -> (Int -> P)) -> P {
+    mk(l2r_float32_frexp_mant(x))(l2r_float32_frexp_exp(x))
+}
+
 fn lean_string_pos_sub(a : Nat, b : Nat) -> Nat { lean_nat_sub(a, b) }
 fn lean_string_pos_min(a : Nat, b : Nat) -> Nat { if lean_nat_dec_le(a, b) { a } else { b } }
 
