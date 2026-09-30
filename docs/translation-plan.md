@@ -100,8 +100,11 @@ fresh names guarantee Lean's passes only ever see our monomorphic copies,
 never Lean's saved polymorphic versions.
 
 How an instance is built: substitute each type parameter by its type argument
-everywhere, drop those parameters, and re-simplify the types. This is exactly
-what Lean's own specializer does (`Specialize.mkSpecDecl`). Lean represents a
+everywhere and re-simplify the types. This is what Lean's own specializer
+does (`Specialize.mkSpecDecl`), with one difference: the type parameters are
+*kept*, as erased parameters, so that the instance has exactly Lean's arity
+(§5.2). Dropping them would, for example, turn a polymorphic function with
+only type parameters into a constant, which Lean evaluates at startup. Lean represents a
 higher-kinded argument as a type-level function, e.g.
 `StateT Nat Id ↦ fun α => Nat → α × Nat`. Substitution plus beta reduction
 therefore turns `m (β × σ)` into an ordinary type such as
@@ -125,6 +128,16 @@ After substitution, a dictionary falls into one of two cases:
   statically known instances and folds `inst # i` projections into direct
   calls, which is exactly the optimization Lean itself applies. The
   resulting direct calls create new instances (§2.3).
+
+`simp` folds only dictionaries that are `let`-bound in the same function. A
+dictionary that arrives as a *parameter* (`Array.mapM` receives `Monad Id`
+from `Array.map`) would stay a runtime value. So, like Lean's specializer,
+lean2rr also specializes callees on **static dictionaries**: a dictionary
+built only from instance constants and types (and projections of such). The
+instance key then includes the dictionary. The callee's instance binds that
+parameter to the dictionary itself, rebuilt as `let`s at its start, and
+`simp` folds its projections into direct calls. The parameter stays, unused,
+so the arity is unchanged.
 
 A dictionary with polymorphic methods is sometimes *not* statically known:
 it is stored in a data structure, or passed through code that neither Lean
@@ -157,6 +170,37 @@ unavailable, the uniform `Box` representation (§5.1) takes its place:
   payload boxed, and functions over the payload take `Box`.
 - **Dynamic polymorphic dictionaries** (§2.4).
 
+### 2.7 Library code that relies on the uniform representation
+
+A few library functions are `implemented_by` unsafe code that is only
+correct because every Lean value is an object pointer:
+- `Array.mapMUnsafe` (behind `Array.map`/`mapM`) and `mapFinIdxMUnsafe`
+  reinterpret an `Array α` as an `Array NonScalar`, replace its elements one
+  by one with values of type `β`, and cast the result to `Array β`;
+- `Array.modifyMUnsafe` (behind `Array.modify`) stores `unsafeCast ()`, that
+  is `box(0)`, into the slot being updated, so that the element stays
+  unshared while the update function runs.
+
+These functions are `@[inline]`/`@[specialize]`, so their code is already
+inlined into the persisted LCNF of user code. lean2rr translates it as is,
+giving it the representation it assumes:
+- `NonScalar` and `PNonScalar` (types that stand for "any object") become
+  `lcAny`, so values of those types are `Box`es. The casts become the
+  ordinary representation conversions of §5.1; between arrays of different
+  element types the conversion is element by element.
+- A `box(0)` placeholder is a value that is never inspected. It arrives as
+  a unit-like value used at another type, or as `◾` at a relevant type.
+  Stage 4 materializes it as the *zero* of the expected type: `0`, `false`,
+  the first constructor whose fields have zeros, a closure returning a zero,
+  an empty array. For `Nat`, `Bool` and enumerations this is exactly what
+  `box(0)` denotes in Lean. Only a type without a finite value gets
+  `unreachable`.
+
+This keeps Lean's in-place update tricks, including `modify`'s unshared
+element. An alternative, redirecting to the safe reference implementations
+and recompiling tainted callers from source, exists behind an option; it is
+off, because it loses Lean's inlining and specialization in those callers.
+
 ---
 
 ## 3. Stage 2 — Lean's mono pipeline (Lean's passes, driven by us)
@@ -167,6 +211,10 @@ declaration is saved to the local extension so later passes can inline it,
 and Lean's checker runs after every pass. This stage involves no new
 translation logic; its job is to leave the code in the shape Stage 4
 expects.
+
+The environment is imported with its extensions loaded (`loadExts`). Without
+them every extension keeps its initial state, and queries the passes depend
+on, such as "is this a class" for dictionary folding, silently answer no.
 
 **`toMono`: semantic lowering done by Lean.**
 - `Decidable` → `Bool`.
@@ -270,18 +318,26 @@ Stage 4 sees only mono types:
 | `UInt8/16/32/64`, `USize` | `u8/u16/u32/u64`, `u64` | `Char` arrives as `UInt32`, `Int8`… as `UInt8`… (unwrapped by Lean); signed operations are externs on the bit pattern, as in `lean.h`. 64-bit targets only. |
 | `Float`, `Float32` | `f64`, `f32` | |
 | `Bool` | `bool` | |
-| `Unit`/`PUnit`, `lcVoid` | `unit` | the IO world is a `unit` value (probe) |
-| `Nat`, `Int` | runtime type `Nat` / `Int`: a small machine word, or a bignum | Reussir has no bignum (§6) (probe) |
-| `String` | runtime string type: an opaque, copy-on-write handle over Rust's `String` | std's `String` cannot be read from outside the std package (private field, probe); literals are built from `str` |
-| `Array α` | `std::collections::cow::vec::Vec<⟦α⟧>` | copy-on-write, in place when unique (probe) |
-| `ByteArray`, `FloatArray` | `Vec<u8>`, `Vec<f64>` | |
-| `Thunk α`, `Task α`, `ST.Ref σ α` | runtime types over `⟦α⟧` | `σ` is a phantom |
-| `Option α` | `std::option::Option<⟦α⟧>` | same constructors |
-| `Except ε α`, `EST.Out ε σ α` | generated enums (next paragraph) | std has no `Result` at the pinned commit (probe) |
+| `Unit`/`PUnit`, `lcVoid`, `◾` | `L2RUnit` | Reussir's `unit` is result-only, so unit-like values are a one-variant `[value]` enum from the prelude. The IO world is an `L2RUnit` value. |
+| `Nat` | `enum [value] Nat { Small(u64), Big(LBig) }` | `Big` only for values ≥ 2^64; `LBig` is an opaque runtime bignum (GMP) |
+| `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
+| `String` | `LStr`, an opaque copy-on-write handle over UTF-8 bytes (`Rc<Vec<u8>>`) | literals: §5.4 |
+| `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records), otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
+| `ST.Ref σ α` | `LRef<S>`, a shared mutable cell | mono types a reference as `lcAny`, so it travels boxed |
+| `Thunk α`, `Task α` | generated one-field structs | a thunk is forced when built; a pure task is computed when spawned (§6) |
+| `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
 
-**`◾` (erased)** has no representation. Erased parameters, fields and `let`s
-disappear, consistently at definitions and uses. One exception, for
-closures, is in §5.3.
+A type with computed fields (`Lean.Name`) is represented by its
+implementation inductive `T._impl`, whose constructors also store the
+computed fields. Lean's runtime does the same, and mono code uses both names
+for the same values.
+
+**`◾` (erased)** values have the unit representation. Erased parameters are
+kept, so arities are exactly Lean's (§5.2), and they receive `L2RUnit::u{}`.
+Erased constructor fields have no representation. Where `◾` or a unit-like
+value is used at a *relevant* type, it is Lean's `box(0)` placeholder
+(§2.7) and becomes the zero of that type.
 
 **Other inductives** become one Reussir type per instantiation, mirroring
 the Lean declaration: same constructors, same field order, fields typed by
@@ -402,11 +458,16 @@ changing when work runs.
   Lean's passes have already removed dead `let`s. Lowering never adds or
   removes any, because a `let` can run a function that panics.
 - Literals:
-  - `Nat` literals become `Nat` values; big ones are built from their
-    decimal string.
+  - `Nat` literals below 2^64 become `Nat::Small`; bigger ones are built
+    from base-2^32 digits with runtime multiplication and addition.
   - `UIntN` literals become typed Reussir literals.
-  - String literals become a `String` built from a `str` literal with the
-    same UTF-8 bytes. Escaping must round-trip every character.
+  - String literals become `l2r_str_lit(id)`: a runtime function generated
+    with the program, which builds the string from a table of Rust byte
+    strings holding the literals' UTF-8 bytes. The bytes are written as
+    escapes, so every string round-trips exactly.
+  - Neither kind passes a Reussir `str` to the runtime: a `str` argument
+    goes through a stack slot whose address escapes, and a function with
+    such a slot never has its tail calls turned into loops by LLVM.
 
 ### 5.5 `cases`
 
@@ -473,6 +534,13 @@ cases x                         ↦    match x { A => z,
 | C => jmp j v
 ```
 
+**Sinking first.** Before choosing, every join point is moved down to the
+smallest part of its scope that contains all its jumps: past `let`s, into
+the single `cases` branch that jumps to it, into the continuation or body of
+another join point. Free variables stay in scope (binders are unique), and
+no code is duplicated. A join point declared before a `cases` of which only
+one branch uses it often satisfies J2 once sunk into that branch.
+
 **Choice and nesting.** J1 applies first, then J2, then J3.
 - J2 requires every jump to `j` to stay inside the same Reussir function.
   If `j` is also jumped to from inside a join point that was outlined, `j`
@@ -483,12 +551,13 @@ cases x                         ↦    match x { A => z,
 - *Stack use.* Loops are recursive functions, and Lean runs self tail calls
   as loops. Under J1 and J2, a self tail call stays inside its own
   function, where LLVM reliably turns it into a loop. Under J3, the tail
-  call goes through the outlined function. Reussir has no guaranteed tail
-  calls. A probe showed that at `-O default` and above, mutual tail calls
-  between separate functions compile to sibling calls, which run in
-  constant stack; at `-O none` they do not. J3 is therefore the last
-  resort, each use of it is reported, and lean2rr always compiles with
-  optimization. Guaranteed tail calls remain a candidate Reussir request.
+  call goes through the outlined function, and the loop becomes mutually
+  recursive. Reussir has no guaranteed tail calls, and LLVM makes a
+  mutual tail call a sibling call only when all arguments fit in
+  registers. A `for` loop in Lean's `forIn'` form overflowed a 1 GiB stack
+  that way at 10⁷ iterations until sinking made its join points J2. J3 is
+  therefore the last resort. Guaranteed tail calls remain a candidate
+  Reussir request.
 - *Memory reuse.* J1 and J2 keep "destructure the old value" and "build the
   new one" in one function. That is what Reussir's token reuse needs to
   update in place.
@@ -531,9 +600,22 @@ Rules:
   so nothing else stops Reussir or LLVM from merging, dropping or reordering
   two identical `println` calls (probe).
 - **Lean-defined types in signatures.** Externs that take or return
-  Lean-defined types (`IO.FS.Stream`, `IO.Error`, `Option`, `List`) get a
-  small generated wrapper around runtime primitives on native types. That
-  keeps the runtime independent of generated type names.
+  Lean-defined types (`IO.FS.Stream`, `IO.Error`, `Option`, `List`,
+  `Ordering`) get a small generated wrapper around runtime primitives on
+  native types, or pass the generated constructors to a generic runtime
+  helper as arguments. That keeps the runtime independent of generated type
+  names. `Array.mk` and `Array.toList` are generated loops.
+- **Constructors with an implementation.** Constructors of builtin types
+  that Lean implements in its runtime (`Int.ofNat` is `lean_nat_to_int`,
+  `Int.negSucc`, `ByteArray.mk`, …) are calls, as in Lean's IR.
+- **Element storage.** A polymorphic extern instance knows its type
+  arguments. A value whose *declared* type is a type parameter `α` (the
+  element of `Array.push`, or a trivial structure over `α` such as
+  `[Inhabited α]`, which mono represents by its field) is passed and
+  returned in `α`'s array storage type, wrapped or unwrapped if that is an
+  `ElemBox`. Other parameters, like an index, are passed as they are.
+  Instance keys hold base-phase types, so type arguments go through
+  `toMonoType` first.
 - **Borrowing.** Lean's borrow annotations (`@&`) are dropped. Reussir's
   owned convention plus its Perceus analysis gives the same results.
 
@@ -560,7 +642,10 @@ def main (w : lcVoid) : EST.Out IO.Error lcAny PUnit :=     fn main_(w : unit) -
 
 ### 5.11 Program entry
 
-A generated Reussir `#[main]`:
+A generated Reussir `#[main]` starts a thread with a 1 GiB stack, as Lean's
+runtime does for `main` (deep non-tail recursion is common in Lean
+programs), and runs the program body on it through an exported function.
+The body:
 1. runs the startup work of §5.12;
 2. calls the translated `main`, passing the argument list (without the
    program name) if `main` takes one, and the world `()`;

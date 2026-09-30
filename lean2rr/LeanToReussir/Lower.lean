@@ -31,12 +31,32 @@ inductive JumpAction where
   /-- J3: jumps call the outlined function with the captured variables
   followed by the arguments. -/
   | call (fn : String) (captured : Array String)
+  /-- J4: jumps re-enter the declaration's state machine at the join point's
+  variant (see `StateMachine`). -/
+  | enter (variant : String) (captured : Array String)
+
+/-- A self-recursive declaration with outlined join points is lowered as one
+function over a `[value]` enum of entry points (J4, translation plan §5.6):
+the declaration's own entry and one variant per outlined join point. Jumps to
+those join points and self tail calls become self tail calls of that
+function, which LLVM turns into a loop; separate functions would make the
+loop mutually recursive. -/
+structure StateMachine where
+  /-- The dispatching function. -/
+  fn : String
+  /-- The entry-point enum. -/
+  mode : String
+  /-- The declaration, whose tail calls re-enter at `entry`. -/
+  self : Name
+  arity : Nat
+  entry : String := "e"
 
 structure CodeCtx where
   vars : Std.HashMap FVarId (String × RR.Ty) := {}
   jumps : Std.HashMap FVarId JumpAction := {}
   /-- Types of join-point parameters, for lowering jump arguments. -/
   jpParams : Std.HashMap FVarId (Array RR.Ty) := {}
+  sm : Option StateMachine := none
 
 /-! ## Conversions -/
 
@@ -520,10 +540,58 @@ def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : E
     return some (← wrapIOResult resTy (.call "l2r_ref_ptr_eq" #[st] #[← asRef 0, ← asRef 1]))
   | _ => return none
 
+/-- A value of generated type `ty` built with constructor `ctor` from its
+relevant fields. -/
+def ctorValue (ty : RR.Ty) (ctor : Name) (fields : Array RR.Expr) : LowerM RR.Expr := do
+  let .named tn := ty | throwError "lean2rr: constructor {ctor} at type {ty.render}"
+  if tn == "bool" then return .atom (if ctor == ``Bool.true then "true" else "false")
+  let some info := (← get).typeInfos[tn]? | throwError "lean2rr: constructor {ctor} of non-nominal type {tn}"
+  let some layout := info.ctors.find? ctor | throwError "lean2rr: constructor {ctor} not in type {tn}"
+  return match info.shape with
+    | .struct => .ctor tn none fields
+    | _ => .ctor tn (some layout.variant) fields
+
+/-- The types of the relevant fields of constructor `ctor` of generated type `ty`. -/
+def ctorFieldTys (ty : RR.Ty) (ctor : Name) : LowerM (Array RR.Ty) := do
+  let .named tn := ty | return #[]
+  let some info := (← get).typeInfos[tn]? | return #[]
+  let some layout := info.ctors.find? ctor | return #[]
+  return layout.fields.filterMap (·.map (·.2))
+
+/-- Externs over Lean-defined types: the runtime's generic helpers receive
+the generated constructors as arguments. -/
+def ctorCallbackExtern (sym : String) (ret : Expr) (args : Array RR.Expr) : LowerM (Option RR.Expr) := do
+  let rt ← lowerType ret
+  let lam (x : String) (t : RR.Ty) (body : RR.Expr) : RR.Expr := .lam x t (.ofExpr body)
+  match sym with
+  | "lean_string_compare" =>
+    let v (c : Name) := ctorValue rt c #[]
+    return some (.call "l2r_string_compare_with" #[rt] (args ++ #[← v ``Ordering.lt, ← v ``Ordering.eq, ← v ``Ordering.gt]))
+  | "lean_string_data" =>
+    let some hd := (← ctorFieldTys rt ``List.cons)[0]? | return none
+    let cons ← ctorValue rt ``List.cons #[← coerce (.var "c") (.named "u32") hd, .var "t"]
+    return some (.call "l2r_string_to_list" #[rt]
+      (args ++ #[← ctorValue rt ``List.nil #[], lam "c" (.named "u32") (lam "t" rt cons)]))
+  | "lean_string_utf8_get_opt" =>
+    let some v := (← ctorFieldTys rt ``Option.some)[0]? | return none
+    let some' ← ctorValue rt ``Option.some #[← coerce (.var "c") (.named "u32") v]
+    return some (.call "l2r_string_utf8_get_opt_with" #[rt]
+      (args ++ #[← ctorValue rt ``Option.none #[], lam "c" (.named "u32") some']))
+  | "lean_float_frexp" | "lean_float32_frexp" =>
+    let fty := RR.Ty.named (if sym == "lean_float_frexp" then "f64" else "f32")
+    let tys ← ctorFieldTys rt ``Prod.mk
+    let some mt := tys[0]? | return none
+    let some et := tys[1]? | return none
+    let pair ← ctorValue rt ``Prod.mk #[← coerce (.var "m") fty mt, ← coerce (.var "e") (.named "Int") et]
+    let helper := if sym == "lean_float_frexp" then "l2r_float_frexp_with" else "l2r_float32_frexp_with"
+    return some (.call helper #[rt] (args ++ #[lam "m" fty (lam "e" (.named "Int") pair)]))
+  | _ => return none
+
 /-- Externs whose results mention Lean-defined types get generated glue
 (translation plan §5.8); returns `none` for ordinary externs. -/
 def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array RR.Expr) :
     LowerM (Option RR.Expr) := do
+  if let some e ← ctorCallbackExtern (← externSymbol orig) ret args then return some e
   -- Tasks run eagerly and thunks are called on demand: the glue follows the
   -- reference bodies of these externs in Lean's source (translation plan §6).
   -- `Task α` and `Thunk α` are Lean's one-field structures.
@@ -888,6 +956,18 @@ partial def sinkJoinPoints : Code .pure → Code .pure
       | other => other⟩
   | c => c
 
+/-- The bodies of the outlined join points of `c`. -/
+partial def outlinedBodies (c : Code .pure) (outlined : FVarIdSet) : Array (Code .pure) :=
+  go c #[]
+where
+  go (c : Code .pure) (acc : Array (Code .pure)) : Array (Code .pure) :=
+    match c with
+    | .let _ k => go k acc
+    | .fun d k _ => go k (go d.value acc)
+    | .jp d k => go k (go d.value (if outlined.contains d.fvarId then acc.push d.value else acc))
+    | .cases cs => cs.alts.foldl (fun acc alt => go alt.getCode acc) acc
+    | _ => acc
+
 /-- Choose a strategy for every join point of a declaration body: the set
 of outlined (J3) join points; others are J1 (single jump) or J2. -/
 partial def chooseOutlined (body : Code .pure) : FVarIdSet := Id.run do
@@ -947,6 +1027,16 @@ mutual
     match c with
     | .let d k =>
       let t ← lowerType d.type
+      -- J4: a self tail call re-enters the state machine.
+      if let some sm := ctx.sm then
+        if let .const f _ args _ := d.value then
+          if f == sm.self && args.size == sm.arity && t == retTy then
+            if let .return x := k then
+              if x == d.fvarId then
+                let some selfDecl := (← read).decls.find? f | throwError "lean2rr: no declaration {f}"
+                let (ps, _) := splitFnType selfDecl.type sm.arity
+                let vals ← (args.zip ps).mapM fun (a, p) => do lowerArg ctx a (← lowerType p)
+                return .ofExpr (.call sm.fn #[] #[.ctor sm.mode (some sm.entry) vals])
       let e ← try lowerLetValue ctx d.value d.type t
         catch ex => throwError "{ex.toMessageData}\n  in let {d.binderName} : {d.type}"
       let x ← fresh "x"
@@ -981,6 +1071,11 @@ mutual
         let tys := ctx.jpParams.getD j #[]
         let vals ← (args.zip tys).mapM fun (a, t) => lowerArg ctx a t
         return .ofExpr (.call fn #[] (captured.map .var ++ vals))
+      | some (.enter variant captured) =>
+        let some sm := ctx.sm | throwError "lean2rr: state-machine jump outside a state machine"
+        let tys := ctx.jpParams.getD j #[]
+        let vals ← (args.zip tys).mapM fun (a, t) => lowerArg ctx a t
+        return .ofExpr (.call sm.fn #[] #[.ctor sm.mode (some variant) (captured.map .var ++ vals)])
       | none => throwError "lean2rr: jump to unknown join point (internal error)"
     | .jp d k =>
       let ptys ← d.params.mapM (lowerType ·.type)
@@ -995,8 +1090,13 @@ mutual
         let free := (rrFreeVars.blockFreeVars body bound {}).toArray.qsort (· < ·)
         let varTys : Std.HashMap String RR.Ty := ctx.vars.fold (fun m _ (n, t) => m.insert n t) {}
         let captured := free.filter varTys.contains
-        let fn ← fresh "jp_"
         let fparams := captured.map (fun n => (n, varTys.getD n .unit)) ++ pnames.zip ptys
+        if let some sm := ctx.sm then
+          -- J4: a variant of the state machine.
+          let variant ← fresh "j"
+          modify fun s => { s with smArms := s.smArms.push (variant, fparams, body) }
+          return ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.enter variant captured) } outlined retTy k
+        let fn ← fresh "jp_"
         modify fun s => { s with fns := s.fns.push (.fn fn fparams retTy body) }
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.call fn captured) } outlined retTy k
       else if (countJumps k {}).getD d.fvarId 0 ≤ 1 then
@@ -1170,9 +1270,36 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let ptys ← d.params.mapM (lowerType ·.type)
   let ret ← lowerType r
   let pnames ← d.params.mapM fun _ => fresh "a"
-  let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {} }
-  let block ← try lowerCode ctx (chooseOutlined body) ret body
+  let outlined := chooseOutlined body
+  -- J4 when an outlined join point calls the declaration back.
+  let callsBack := outlinedBodies body outlined |>.any fun c => (codeConsts c #[]).contains d.name
+  let sm? : Option StateMachine ← do
+    if !callsBack || d.params.isEmpty then pure none
+    else
+      let base := fnName d.name
+      pure (some { fn := base ++ "_sm", mode := base ++ "_mode", self := d.name, arity := d.params.size })
+  modify fun s => { s with smArms := #[] }
+  let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm? }
+  let block ← try lowerCode ctx outlined ret body
     catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
+  if let some sm := sm? then
+    let arms := (← get).smArms
+    -- A shared enum: a `[value]` one with `Nat` fields is miscompiled by
+    -- Reussir (reported); Reussir reuses the cell of the matched value.
+    let mode := RR.Item.enum sm.mode false
+      (#[(sm.entry, ptys)] ++ arms.map fun (v, fps, _) => (v, fps.map (·.2)))
+    let mkArm (v : String) (names : Array String) (b : RR.Block) : RR.Arm :=
+      { ty := sm.mode, ctor := some v, binders := names.map some, body := b }
+    let matchArms := #[mkArm sm.entry pnames block] ++ arms.map fun (v, fps, b) => mkArm v (fps.map (·.1)) b
+    let m ← fresh "m"
+    modify fun s => { s with
+      typeItems := s.typeItems.push mode
+      fns := s.fns
+        |>.push (.fn sm.fn #[(m, .named sm.mode)] ret (.ofExpr (.mtch (.var m) matchArms)))
+        |>.push (.fn (fnName d.name) (pnames.zip ptys) ret
+            (.ofExpr (.call sm.fn #[] #[.ctor sm.mode (some sm.entry) (pnames.map .var)])))
+      smArms := #[] }
+    return
   if d.params.isEmpty then
     let acc ← cafAccessor (fnName d.name) ret
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name ++ "_init") #[] ret block) |>.push acc }

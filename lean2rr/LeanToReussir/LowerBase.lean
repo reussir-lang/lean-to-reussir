@@ -82,6 +82,8 @@ structure LowerState where
   zeroFns : Std.HashMap RR.Ty String := {}
   /-- Placeholder functions whose body is being generated. -/
   zeroBusy : Std.HashSet RR.Ty := {}
+  /-- Variants of the state machine being built (J4): name, fields, body. -/
+  smArms : Array (String × Array (String × RR.Ty) × RR.Block) := #[]
   /-- String literals of the program, by id (see `strLit`). -/
   strLits : Array String := #[]
   strLitIds : Std.HashMap String Nat := {}
