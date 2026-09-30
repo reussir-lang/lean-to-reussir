@@ -115,17 +115,29 @@ def main():
              "--prelude", str(PRELUDE), "-o", str(rr)], env=env)
         rt, deps = rt_dirs()
         target_libdir = run([str(RUSTC), "--print", "target-libdir"]).stdout.strip()
-        run([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", args.output,
-             "--emit", "executable", "-O", args.opt,
-             "--polyffi-rust-path", str(rustc_wrapper()),
-             "--polyffi-libdir", str(rt), "--polyffi-libdir", str(deps),
-             "--polyffi-libdir", target_libdir, "--polyffi-libdir", str(LEANRT_OUT),
-             "--link-lib", str(rlib), "--link-lib", str(gmp_archive())]
-            # Reussir's in-place variant reuse skips stores of fields that
-            # the packed record layout moves (RcCreateFusion copy avoidance):
-            # keep declaration-order layouts until that is fixed.
-            + ["--no-pack-record-members"]
-            + ([] if args.no_reuse_across_call else ["--reuse-across-call"]))
+        rrc = ([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", args.output,
+                "--emit", "executable", "-O", args.opt,
+                "--polyffi-rust-path", str(rustc_wrapper()),
+                "--polyffi-libdir", str(rt), "--polyffi-libdir", str(deps),
+                "--polyffi-libdir", target_libdir, "--polyffi-libdir", str(LEANRT_OUT),
+                "--link-lib", str(rlib), "--link-lib", str(gmp_archive())]
+               # Reussir's in-place variant reuse skips stores of fields that
+               # the packed record layout moves (RcCreateFusion copy
+               # avoidance): keep declaration-order layouts until that is fixed.
+               + ["--no-pack-record-members"])
+        if args.no_reuse_across_call:
+            run(rrc)
+        else:
+            res = subprocess.run(rrc + ["--reuse-across-call"], env=env, capture_output=True, text=True)
+            if res.returncode < 0:
+                # rrc crashed (RcCreateFusion's structural type comparison
+                # recurses forever on two structurally equal recursive types,
+                # e.g. a user list and `List`): retry without reuse across calls.
+                sys.stderr.write(f"l2r: rrc crashed (signal {-res.returncode}); retrying without --reuse-across-call\n")
+                run(rrc)
+            elif res.returncode != 0:
+                sys.stderr.write(res.stdout + res.stderr)
+                sys.exit(res.returncode)
 
 
 if __name__ == "__main__":
