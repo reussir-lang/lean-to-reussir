@@ -995,6 +995,52 @@ def streamValue (fd : Nat) (streamTy : RR.Ty) : LowerM RR.Expr := do
     vals := vals.push v
   return .ctor sn none vals
 
+/-- `l2r_get_std_<fd>()` and `l2r_set_std_<fd>(s)`: the current standard
+stream `fd` is kept in a cell slot (built on first use, like Lean's
+thread-local streams), which `IO.setStdout` & co. replace, returning the
+previous stream. -/
+def stdStreamFns (fd : Nat) (streamTy : RR.Ty) : LowerM (String × String) := do
+  let getFn := s!"l2r_get_std_{fd}"
+  let setFn := s!"l2r_set_std_{fd}"
+  if (← get).fns.any (fun | .fn n .. => n == getFn | _ => false) then return (getFn, setFn)
+  let base ← match (← get).stdSlots with
+    | some b => pure b
+    | none => do
+      let b := (← get).cafSlots
+      modify fun s => { s with cafSlots := b + 3, stdSlots := some b, stdStreamTy := some streamTy }
+      pure b
+  let slot := RR.Expr.atom (toString (base + fd))
+  let getBody : RR.Block := .ofExpr (.ite (.call "l2r_once_has" #[] #[slot])
+    (.ofExpr (.call "l2r_once_get" #[streamTy] #[slot]))
+    (.ofExpr (.call "l2r_once_set" #[streamTy] #[slot, ← streamValue fd streamTy])))
+  let setBody : RR.Block :=
+    ⟨#[("cur", some streamTy, .call getFn #[] #[])], .call "l2r_cell_swap" #[streamTy] #[slot, .var "s"]⟩
+  let items := #[RR.Item.fn getFn #[] streamTy getBody, .fn setFn #[("s", streamTy)] streamTy setBody]
+  modify fun s => { s with fns := s.fns ++ items }
+  return (getFn, setFn)
+
+/-- `l2r_stderr_put(s)`, defined in every program for the runtime's
+diagnostics (panics, `dbgTrace`, `timeit`): native Lean writes them with the
+*current* stderr stream's `putStr` (`io_eprintln`), ignoring its result.
+Without any use of the standard streams, the current stderr is descriptor 2. -/
+def stderrPutFn : LowerM RR.Item := do
+  let sTy := RR.Ty.named "LStr"
+  let u64 := RR.Ty.named "u64"
+  let simple := RR.Item.fn "l2r_stderr_put" #[("s", sTy)] u64
+    (.ofExpr (.call "l2r_stream_putStr" #[] #[.atom "2", .var "s"]))
+  let some st := (← get).stdStreamTy | return simple
+  let .named sn := st | return simple
+  let some info := (← get).typeInfos[sn]? | return simple
+  let some layout := info.ctors.find? info.ctorOrder[0]! | return simple
+  let some i := (getStructureFields (← getEnv) ``IO.FS.Stream).idxOf? `putStr | return simple
+  let some (some (pos, fty)) := layout.fields[i]? | return simple
+  let (getFn, _) ← stdStreamFns 2 st
+  let (ps, t) := fnChain fty
+  unless ps.size == 2 do return simple
+  let r ← applyCall (.field (.var "cur") pos) fty #[.var "s", .unitVal]
+  return .fn "l2r_stderr_put" #[("s", sTy)] u64
+    ⟨#[("cur", some st, .call getFn #[] #[]), ("r", some t, r)], .atom "0"⟩
+
 /-- A generated function folding a Lean `List` into an accumulator:
 `go(l, acc)` = `acc` extended with every element via `step(acc, x)`. Cached
 by name. -/
@@ -1385,6 +1431,31 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     return some (.block ⟨#[(e, some (.named "u64"), .call prim #[] #[args[0]!])],
       .call "l2r_unreachable" #[rt] #[]⟩)
   | _ => pure ()
+  -- `ByteSlice.beq`: the runtime compares the fields `byteArray`, `start`,
+  -- `stop` of both slices.
+  if (← externSymbol orig) == "lean_byteslice_beq" then
+    let st ← lowerType params[0]!
+    let .named sn := st | return none
+    let some info := (← get).typeInfos[sn]? | return none
+    let some layout := info.ctors.find? info.ctorOrder[0]! | return none
+    let some (some (pa, _)) := layout.fields[0]? | return none
+    let some (some (ps, _)) := layout.fields[1]? | return none
+    let some (some (pe, _)) := layout.fields[2]? | return none
+    let parts (x : RR.Expr) : Array RR.Expr :=
+      #[.field x pa, .call "lean_usize_of_nat" #[] #[.field x ps], .call "lean_usize_of_nat" #[] #[.field x pe]]
+    return some (← withVar "bs" st args[0]! fun a => withVar "bs" st args[1]! fun b =>
+      pure (.call "l2r_byteslice_beq" #[] (parts a ++ parts b)))
+  -- `ShareCommon.State.shareCommon s a`: hash-consing natively; its
+  -- reference body `(a, s)` is observably the same (sharing is not).
+  if orig == ``ShareCommon.State.shareCommon then
+    let rt ← lowerType ret
+    let tys ← ctorFieldTys rt ``Prod.mk
+    let some at' := tys[0]? | return none
+    let some stt := tys[1]? | return none
+    let n := params.size
+    let a ← coerce args[n - 1]! (← lowerType params[n - 1]!) at'
+    let st ← coerce args[n - 2]! (← lowerType params[n - 2]!) stt
+    return some (← ctorValue rt ``Prod.mk #[a, st])
   -- `String.ofList : List Char → String`
   if orig == ``String.ofList then
     let lt ← lowerType params[0]!
@@ -1432,19 +1503,26 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
         .fn (name ++ "_go") #[("v", arrTy), ("i", u64), ("acc", lt)] lt body,
         .fn name #[("v", arrTy)] lt entry] }
     return some (.call name #[] #[args[0]!])
-  let fd? : Option Nat := match orig with
-    | ``IO.getStdin => some 0
-    | ``IO.getStdout => some 1
-    | ``IO.getStderr => some 2
+  let std? : Option (Nat × Bool) := match orig with
+    | ``IO.getStdin => some (0, false)
+    | ``IO.getStdout => some (1, false)
+    | ``IO.getStderr => some (2, false)
+    | ``IO.setStdin => some (0, true)
+    | ``IO.setStdout => some (1, true)
+    | ``IO.setStderr => some (2, true)
     | _ => none
-  if let some fd := fd? then
-    -- BaseIO FS.Stream: the result is `ST.Out σ FS.Stream`.
+  if let some (fd, set) := std? then
+    -- `BaseIO FS.Stream`: the result is `ST.Out σ FS.Stream`.
     let resTy ← lowerType ret
     let .named rn := resTy | return none
     let some info := (← get).typeInfos[rn]? | return none
     let some layout := info.ctors.find? info.ctorOrder[0]! | return none
     let some (some (_, streamTy)) := layout.fields[0]? | return none
-    return some (← wrapIOResult resTy (← streamValue fd streamTy))
+    let (getFn, setFn) ← stdStreamFns fd streamTy
+    if set then
+      let s ← coerce args[0]! (← lowerType params[0]!) streamTy
+      return some (← wrapIOResult resTy (.call setFn #[] #[s]))
+    return some (← wrapIOResult resTy (.call getFn #[] #[]))
   return none
 
 /-- Emit a saturated extern call. Default: call the prelude function named
@@ -1582,9 +1660,22 @@ def ctorBuild (c : Name) (fullRt : RR.Ty) (vals : Array RR.Expr) : LowerM RR.Exp
     | none => throwError "lean2rr: constructor {c} of non-nominal type {tn}"
   | t => throwError "lean2rr: constructor {c} at type {t.render}"
 
+/-- Lean definitions replaced by prelude functions with the same results
+(runtime requests 12, 27): `Nat.repr` divides by 10 digit by digit, and
+`Nat.reprFast` reads a table of strings through a once-cell. -/
+def preludeReplacement? (f : Name) : LowerM (Option (String × RR.Ty)) := do
+  let orig := ((← read).keys.find? f).map (·.decl) |>.getD f
+  match orig with
+  | ``Nat.repr | ``Nat.reprFast => return some ("l2r_nat_repr", .named "Nat")
+  | ``Int.repr => return some ("l2r_int_repr", .named "Int")
+  | _ => return none
+
 /-- Lower a constant application with Lean's arity rules. -/
 def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy : Expr) :
     LowerM RR.Expr := do
+  if args.size == 1 then
+    if let some (prim, argTy) ← preludeReplacement? f then
+      return ← coerce (.call prim #[] #[← lowerArg ctx args[0]! argTy]) (.named "LStr") (← lowerType resTy)
   match ← calleeOf f with
   | .initConst slot ty =>
     let t ← lowerType ty
@@ -2114,7 +2205,8 @@ partial def finishUnboxFns : LowerM Unit := do
         -- stay linear in the number of array types, not quadratic (nested
         -- arrays under polymorphic recursion have many representations).
         let boxArr := RR.Ty.app "RVec" #[RR.Ty.box]
-        let body ← if th?.isSome || vt == t || vt == boxArr || t == boxArr then tryCoerce (.var x) vt t
+        let body ← if th?.isSome || vt == t || vt == boxArr || t == boxArr || t matches .fn .. then
+            tryCoerce (.var x) vt t
           else match ← tryCoerce (.var x) vt boxArr with
             | some b => tryCoerce b boxArr t
             | none => pure none

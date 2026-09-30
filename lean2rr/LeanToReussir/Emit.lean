@@ -311,6 +311,8 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
     for d in decls do lowerDecl d
     let entry ← lowerEntry mainInst errStr startup
     modify fun s => { s with fns := s.fns.push entry }
+    let put ← stderrPutFn
+    modify fun s => { s with fns := s.fns.push put }
     -- Converters and application functions can need each other.
     repeat
       finishUnboxFns

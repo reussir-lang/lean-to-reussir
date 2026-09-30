@@ -154,6 +154,10 @@ structure LowerState where
   unboxArrTargets : Array (RR.Ty × String) := #[]
   /-- Next once-cell slot for constants. -/
   cafSlots : Nat := 0
+  /-- First of the three cell slots holding the current standard streams
+  (stdin, stdout, stderr), and the stream record type, once used. -/
+  stdSlots : Option Nat := none
+  stdStreamTy : Option RR.Ty := none
   /-- Once-cell slots of constants defined by `initialize`. -/
   initSlots : NameMap Nat := {}
   /-- Structural conversions being generated (for recursive types). -/
