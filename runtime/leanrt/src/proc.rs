@@ -55,8 +55,13 @@ fn cstr(s: &[u8]) -> Vec<u8> {
 }
 
 /// What the child process writes to stderr on a failure before `exec`
-/// (`std::cerr << ... << std::endl`), then `_exit(-1)`.
+/// (`std::cerr << ... << std::endl`), then `_exit(-1)`. `std::cerr` is tied
+/// to `std::cout`, so the first `<<` flushes C `stdout` first: the parent's
+/// pending stdout bytes, inherited by `fork`, go to the child's descriptor 1
+/// (a pipe that `IO.Process.output` captures, or the parent's own stdout,
+/// where the parent writes them again later).
 fn child_fail(parts: &[&[u8]]) -> ! {
+    crate::io::flush_stdout();
     for p in parts {
         unsafe { write(2, p.as_ptr() as *const std::ffi::c_void, p.len()) };
     }

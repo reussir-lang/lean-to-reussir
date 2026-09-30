@@ -32,7 +32,8 @@ structure CtorLayout where
   numParams : Nat
   /-- One entry per Lean field: `some (i, ty)` when the field is relevant
   (its position among the Reussir fields and its type), `none` when it is
-  erased and has no representation. -/
+  erased and has no representation. `IO.Process.Child` has two more
+  entries, its hidden fields (see `nominalType`). -/
   fields : Array (Option (Nat × RR.Ty))
 
 /-- The relevant fields' values, given in Lean order, placed at their
@@ -446,6 +447,16 @@ mutual
             rrFields := rrFields.push t
           ty := b.instantiate1 anyExpr
         | _ => break
+      -- `IO.Process.Child`: native Lean's object also carries the pid
+      -- (`uint32`) and whether the child was spawned with `setsid`
+      -- (`uint8`) after its three fields (`src/runtime/process.cpp`). They
+      -- are two hidden fields after the Lean ones, set and read only by the
+      -- process glue (Lean code cannot build a `Child`: its constructor is
+      -- private to `Init.System.IO`).
+      if ival.name == ``IO.Process.Child then
+        for t in #[RR.Ty.named "u32", RR.Ty.bool] do
+          fields := fields.push (some (rrFields.size, t))
+          rrFields := rrFields.push t
       -- The constructor's name relative to its type (`T.c._impl` for the
       -- constructors of a computed-field implementation `T._impl`).
       let base := match ival.name with | .str p "_impl" => p | n => n

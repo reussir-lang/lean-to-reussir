@@ -1,1 +1,0 @@
-lean2rr has no glue for IO.Process.spawn / output: use l2r_proc_spawn and l2r_proc_drain (runtime/README.md, request 29)

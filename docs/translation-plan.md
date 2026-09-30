@@ -836,6 +836,41 @@ Rules:
   Lean's own exported `lean_mk_io_error_*` builder for the reported kind,
   as Lean's `decode_io_error` does (the builders are instantiated when a
   program uses such an extern). `IO.FS.Handle` is the runtime's `LHandle`.
+- **Child processes** (`IO.Process`, over the runtime's `l2r_proc_*`
+  primitives, which follow Lean's `process.cpp`). Natively a `Child` object
+  carries, after its three stream fields, the pid (`uint32`) and whether
+  the child was spawned with `setsid` (`uint8`). The generated record for
+  `IO.Process.Child` has the same two hidden fields after its Lean ones:
+  `struct Child(Box, Box, Box, u32, bool)` (the streams are `lcAny` in
+  mono code: a boxed `LHandle` for a piped stream, a boxed unit otherwise,
+  as natively `box(0)`). Lean code never builds a `Child` (its constructor
+  is private), so only the glue sets the hidden fields:
+  - `spawn args` reads the `SpawnArgs` record and flattens it as the
+    primitive takes it: the three `Stdio` indices packed into `modes`, the
+    command and arguments, `cwd` as a string and a flag, `env` as three
+    parallel arrays (names, values, whether the value is `some`; generated
+    loops), `inheritEnv`, `setsid`. On success the `Child` gets
+    `l2r_proc_end(k)` for each piped stream, the pid and the flag.
+  - `wait`, `tryWait` (`1 << 32 | code`, or 0 while running) and `kill`
+    read the hidden fields. They borrow the child natively (`@&`), so the
+    glue holds it until the result is built, and its pipes stay open while
+    the call runs (a child still writing to an unread pipe is not killed by
+    `SIGPIPE`). `pid` is the hidden field; `takeStdin` returns the stdin
+    field and a new `Child` with a boxed unit instead, keeping the other
+    fields.
+  - `IO.Process.output` is Lean code that reads stdout in a dedicated task
+    while it reads stderr. lean2rr's tasks are deferred (§5.14), so a child
+    filling its stderr pipe before closing stdout would block forever. Its
+    declaration is lowered to generated glue instead of its body, in
+    native order: spawn with stdout and stderr piped and stdin null, or
+    piped when `input?` is `some s` (then `putStr s`, `flush`, and the
+    handle's release closes it, like `takeStdin` and the handle's last use
+    natively); `l2r_proc_drain` reads both pipes to end of file together;
+    `readToEnd`'s UTF-8 check of stderr (`IO.userError "Tried to read from
+    handle containing non UTF-8 data."`); `wait`; the same check of stdout.
+    `IO.Process.run` is Lean code over `output` and needs nothing more.
+    Each fallible step's error becomes the `IO.Error` Lean's
+    `decode_io_error(errno, nullptr)` builds, as for files.
 - **Proofs.** A `Prop`-valued inductive has the unit representation, and a
   parameter of such a type (a proof) is not passed to the runtime.
 - **`BaseIO` externs that cannot fail** call the runtime's payload
@@ -1307,6 +1342,15 @@ Each item says what differs and when.
   backtrace line is `(stack trace unavailable)`.
 - Huge capacity reservations are capped.
 - `errno` after a sticky handle error can differ.
+- Child processes (§5.8): code that reads a child's stdout and stderr
+  pipes one after the other itself deadlocks if the child fills the other
+  pipe first (natively `IO.Process.output` avoids it with a thread; its
+  glue here reads both together). Natively `Child.pid` leaks the child, so
+  its pipes stay open forever (a child waiting for end of file on stdin
+  then hangs); here they are closed as usual. Natively the `Child` from
+  `takeStdin` loses the `setsid` flag (`kill` reads uninitialized memory);
+  here it keeps it. A read error on `output`'s stdout pipe is reported
+  before the child is waited for (natively after).
 
 **Diagnostics**
 - lean2rr's own impossibilities (a `Box` unwrap of another variant, a cast
@@ -1314,7 +1358,7 @@ Each item says what differs and when.
   been reached` and exit 1, like a real unreachable.
 
 **Not supported** (translation succeeds; `rrc` reports an unknown function)
-- `IO.Process.spawn` and other processes, sockets, `Std.Sync`, timers.
+- Sockets, `Std.Sync`, timers.
 - Every constant of the program is translated (§2.2), so an unused constant
   that reaches an unsupported extern makes the whole program fail to link.
   A program is therefore translated by lean2rr, but links only if the

@@ -232,7 +232,9 @@ parent's end of a piped stream, a closed handle otherwise);
 `l2r_proc_wait(pid) -> u32` (128 + signal when killed),
 `l2r_proc_try_wait(pid) -> u64` (`1 << 32 | code` once exited, 0 while
 running), `l2r_proc_kill(pid, setsid)` — all fallible. A child that cannot
-change directory or execute prints Lean's message and exits with 255.
+change directory or execute prints Lean's message and exits with 255; as
+natively (`std::cerr` is tied to `std::cout`), it first flushes the stdout
+bytes the parent had pending, into its own descriptor 1.
 `IO.Process.output` reads stdout in a dedicated task while it reads
 stderr; without threads, `l2r_proc_drain(out, err) -> RVec<u8>` reads both
 pipes to end of file together (`poll`), returning stdout's bytes, then
@@ -372,7 +374,7 @@ lean2rr's dev branch (the tests pass with it).
     `ShareCommon.State.shareCommon` (`lean_state_sharecommon`, hash-consing
     natively) can use its reference body `(a, s)`, which is observably the
     same (sharing is not observable here).
-29. Child processes: `IO.Process.spawn` and `Child.wait`/`tryWait`/`kill`/
+29. *done* — Child processes: `IO.Process.spawn` and `Child.wait`/`tryWait`/`kill`/
     `pid`/`takeStdin` need glue over the `l2r_proc_*` primitives (above).
     Natively a `Child` object also carries the pid (`uint32`) and whether it
     was spawned with `setsid` (`uint8`) after its three Lean fields, so
@@ -414,11 +416,19 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   lean2rr does not translate promises yet (the `l2r_promise_*` helpers
   assume a promise is resolved before it is read, which deferred tasks no
   longer ensure).
-  Sockets, `Std.Sync` and timers are not implemented; child processes wait
-  for lean2rr glue (request 29). Code that reads a child's two pipes one
-  after the other itself (not through `IO.Process.output`, whose glue
-  drains both together) deadlocks without threads if the child fills the
-  other pipe (64 KiB) first; natively a dedicated task avoids it.
+  Sockets, `Std.Sync` and timers are not implemented. Code that reads a
+  child's two pipes one after the other itself (not through
+  `IO.Process.output`, whose glue drains both together) deadlocks without
+  threads if the child fills the other pipe (64 KiB) first; natively a
+  dedicated task avoids it.
+- Child processes: natively `Child.pid` leaks its argument (Lean passes
+  the child owned, the C function treats it as borrowed), so the child's
+  pipes are never closed after a `pid` call, and a child waiting for end of
+  file on its stdin after `takeStdin` waits forever; lean2rr releases it
+  as usual. Natively the `Child` that `takeStdin` returns does not copy the
+  `setsid` flag (its byte is uninitialized memory, read by `kill`); here it
+  is kept. A read error on `IO.Process.output`'s stdout pipe is reported
+  before the child is waited for (natively after).
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
 - Huge `Array.mkEmpty`/`ByteArray.emptyWithCapacity` capacities are checked

@@ -361,10 +361,16 @@ def isFallibleIOSym (sym : String) : Bool :=
   -- `IO.FS.Stream` values) report errors the same way.
   sym ∈ ["lean_get_stdout", "lean_get_stderr", "lean_get_stdin"]
 
+/-- The child-process externs that can fail. Their glue (Lower's "Child
+processes") reports errors through the runtime's last-error protocol too. -/
+def processIOSyms : Array String :=
+  #["lean_io_process_spawn", "lean_io_process_child_wait", "lean_io_process_child_try_wait",
+    "lean_io_process_child_kill"]
+
 /-- A fallible IO extern needs the `IO.Error` builders: instantiate them. -/
 def ensureIOErrorBuilders (f : Name) : MonoM Unit := do
   let some sym := getExternNameFor (← getEnv) `c f | return
-  unless isFallibleIOSym sym do return
+  unless isFallibleIOSym sym || processIOSyms.contains sym do return
   for b in ioErrorBuilderSyms do
     if let some d := (← exportMap).get? b then
       discard <| instanceName { decl := d, typeArgs := #[] }
