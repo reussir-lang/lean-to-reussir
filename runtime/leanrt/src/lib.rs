@@ -1,0 +1,91 @@
+//! `leanrt`: the Rust half of lean2rr's runtime.
+//!
+//! The Reussir prelude (`runtime/prelude.rr`) implements each Lean extern:
+//! fast paths in Reussir, everything else through small `#[ffi(import)]`
+//! textures that call into this crate. Keeping the code here (rather than in
+//! the prelude's `extern "rust"` block, which is copied into every texture)
+//! keeps texture compilation cheap and gives the runtime one copy of its
+//! global state: the stdout buffer, once-cells, and panic settings.
+//!
+//! Small hot functions are `#[inline]` so they are instantiated into the
+//! textures (and can be inlined into Reussir code); slow paths are
+//! `#[inline(never)]`.
+
+extern crate reussir_rt;
+
+pub mod array;
+pub mod big;
+pub mod float;
+pub mod gmp;
+pub mod hash;
+pub mod io;
+pub mod once;
+pub mod string;
+pub mod tagvec;
+
+pub use big::LBig;
+pub use string::LStr;
+
+/// Give up a handle a texture received by value but only borrowed (every
+/// FFI call consumes its arguments). A shared handle is just decremented;
+/// freeing the last reference is out of line, which keeps textures small
+/// enough for LLVM to inline them into Reussir code.
+#[inline(always)]
+pub fn rc_release<T>(r: reussir_rt::rc::Rc<T>) {
+    let c = r.count_ref().get();
+    if c == 1 {
+        rc_drop_last(r)
+    } else {
+        r.count_ref().set(c - 1);
+        std::mem::forget(r);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn rc_drop_last<T>(r: reussir_rt::rc::Rc<T>) {
+    drop(r)
+}
+
+/// `lean_panic_fn`: print the message (Lean has already formatted it as
+/// `PANIC at ...`) to stderr and continue. Native executables also print
+/// `backtrace:` and a stack trace unless `LEAN_BACKTRACE=0`; we print the
+/// header and no frames (tests compare stderr with backtraces removed).
+/// `LEAN_ABORT_ON_PANIC` aborts, as natively.
+#[inline(never)]
+pub fn panic_msg(msg: &[u8]) {
+    let abort = std::env::var_os("LEAN_ABORT_ON_PANIC").is_some();
+    let mut line = msg.to_vec();
+    line.push(b'\n');
+    io::write_stderr(&line);
+    let bt = std::env::var("LEAN_BACKTRACE").map(|v| v != "0").unwrap_or(true);
+    if bt {
+        io::write_stderr(b"backtrace:\n(stack trace unavailable)\n");
+    }
+    if abort {
+        io::flush_stdout();
+        std::process::abort();
+    }
+}
+
+/// `lean_internal_panic`: `INTERNAL PANIC: msg`, then exit 1.
+#[inline(never)]
+pub fn internal_panic(msg: &str) -> ! {
+    io::flush_stdout();
+    io::write_stderr(format!("INTERNAL PANIC: {}\n", msg).as_bytes());
+    if std::env::var_os("LEAN_ABORT_ON_PANIC").is_some() {
+        std::process::abort();
+    }
+    std::process::exit(1)
+}
+
+/// An uncaught `IO` exception at the top level.
+#[inline(never)]
+pub fn uncaught_exception(msg: &[u8]) -> ! {
+    io::flush_stdout();
+    let mut line = b"uncaught exception: ".to_vec();
+    line.extend_from_slice(msg);
+    line.push(b'\n');
+    io::write_stderr(&line);
+    std::process::exit(1)
+}
