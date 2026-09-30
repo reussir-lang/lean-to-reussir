@@ -20,3 +20,4 @@ Status: early development.
 
 - `lean2rr/` — the translator (a Lake package)
 - `docs/` — design documents
+- `tests/` — the classic test corpus and its native-Lean oracle (see [`tests/README.md`](tests/README.md))
