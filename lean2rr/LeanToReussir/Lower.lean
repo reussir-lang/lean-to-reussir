@@ -1,7 +1,6 @@
 import Lean
 import LeanToReussir.MonoTypesKeep
 import LeanToReussir.LowerBase
-import LeanToReussir.MonoRetype
 
 /-!
 # Stage 4: lowering mono LCNF to Reussir
@@ -1759,19 +1758,6 @@ where
     let (bound, acc) := b.lets.foldl (fun (bound, acc) (x, _, e) => (bound.insert x, rrFreeVars e bound acc)) (bound, acc)
     rrFreeVars b.result bound acc
 
-/-- The binder of a `cases` field `p`, extracted as `x` at the layout's field
-type `ft`. Usually the field is used at `ft`. When Stage 3 gave the binder
-a precise array type and the layout stores the field at another
-representation (an `Option (Array lcAny)` returned by `Array.mapM`), the
-field is converted once here instead of at every use. -/
-def fieldBinder (p : Param .pure) (x : String) (ft : RR.Ty) :
-    LowerM (String × RR.Ty × Array (String × Option RR.Ty × RR.Expr)) := do
-  if !isArrayTy p.type || hasRelevantAny (← read).table p.type then return (x, ft, #[])
-  let bt ← lowerType p.type
-  if bt == ft then return (x, ft, #[])
-  let y ← fresh "fc"
-  return (y, bt, #[(y, some bt, ← coerce (.var x) ft bt)])
-
 mutual
   /-- Lower a code block whose value has Reussir type `retTy`. -/
   partial def lowerCode (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (c : Code .pure) :
@@ -1935,9 +1921,7 @@ mutual
             | some (some (j, ft)) =>
               let x ← fresh "f"
               lets := lets.push (x, some ft, RR.Expr.field (.var scrut) j)
-              let (y, t, conv) ← fieldBinder p x ft
-              lets := lets ++ conv
-              ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (y, t) }
+              ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
             | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
           let b ← lowerCode ctx' outlined retTy k
           return .block { b with lets := lets ++ b.lets }
@@ -1951,19 +1935,15 @@ mutual
           | some (.alt _ ps k _) =>
             let mut ctx' := ctx
             let mut binders := Array.replicate (layout.fields.filter (·.isSome)).size (none : Option String)
-            let mut lets := #[]
             for h : i in [:ps.size] do
               let p := ps[i]
               match layout.fields[i]? with
               | some (some (j, ft)) =>
                 let x ← fresh "f"
                 binders := binders.set! j (some x)
-                let (y, t, conv) ← fieldBinder p x ft
-                lets := lets ++ conv
-                ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (y, t) }
+                ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
               | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
-            let b ← lowerCode ctx' outlined retTy k
-            arms := arms.push { ty := tn, ctor := some layout.variant, binders, body := { b with lets := lets ++ b.lets } }
+            arms := arms.push { ty := tn, ctor := some layout.variant, binders, body := ← lowerCode ctx' outlined retTy k }
           | _ => pure ()
         if arms.size < info.ctorOrder.size then
           let body ← match dflt with

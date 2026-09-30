@@ -24,35 +24,33 @@ A binder typed `lcAny` is represented by `Box`, and every use at a precise
 type converts it; an array converts element by element, so a loop reading a
 loop-invariant `Array lcAny` would convert the whole array per access. This
 pass recomputes binder types where the program determines them, iterating
-over the whole program to a fixpoint (translation plan §4):
+over the whole program to a fixpoint (translation plan §4). A type is taken
+from what flows into a binder, never from how it is used: with a type that
+depends on a value (`data : Array t.denote`), a use as `Array Nat` speaks
+only for the branch where `t = .nat`.
 
 * **from definitions**: a `cases` field gets its constructor's field type at
   the discriminant's type arguments; a constructor application, a projection,
   a call (full or partial) gets the type its callee's signature gives; a
-  join-point parameter gets the type of its jump arguments, if they agree;
-* **from uses, for arrays**: a binder of array type all of whose uses at
-  precise types (call, constructor, jump and closure arguments; not returned
-  values) expect the same type `T` gets `T`; a declaration parameter
-  likewise, from the uses in its body (callers then convert once, before the
-  loop);
+  join-point parameter gets the type of its jump arguments, if all are known
+  and agree;
 * **result types**: a declaration whose result is `lcAny` gets the type all
-  its `return`s have, or the type all its callers bind the result at;
-* **parameters from callers, for arrays**: a parameter that every caller
-  passes at the same precise type `T` gets `T` when the body, retyped under
-  that assumption, passes `T` back in its self calls (this makes the
-  `Array.mapMUnsafe` loop precise when the source and target element types
+  its `return`s have, or the type all its callers bind the result at (if it
+  is used nowhere else); a `map` loop of `Array.mapMUnsafe` or
+  `Array.mapFinIdxMUnsafe` returns `Array β` when every value it stores has
+  type `β`;
+* **parameters from callers**: a parameter holding an erased array that
+  every caller passes at the same precise type `T` gets `T` when the body,
+  retyped under that assumption, passes `T` back in its self calls (this
+  makes the `map` loop precise when the source and target element types
   agree, e.g. `xs.map (· * 2)`);
 * **externs**: a call of a polymorphic extern instantiated at `lcAny`
   (`Array.uget`/`Array.uset` at `NonScalar`) whose arguments determine the
-  type arguments is redirected to the extern's instance at those types.
+  type arguments is redirected to the extern's instance at those types;
+* **placeholders**: `let z := ◾` gets the type its uses expect.
 
-Each rule is exact: the value of a source-typed program has one type, `lcAny`
-is only an erasure of it, and a precise use or definition reveals it. The
-in-progress array of `Array.map`, which holds elements of two types, is only
-used at `lcAny`; returned values are not counted as uses because a result
-type recovered from the callers holds for the value returned, not for the
-binders it comes from on other paths. Whatever stays unknown keeps `lcAny`
-and is represented by the uniform `Box` in Stage 4.
+Whatever stays unknown keeps `lcAny` and is represented by the uniform `Box`
+in Stage 4.
 -/
 
 namespace LeanToReussir
@@ -137,8 +135,11 @@ def ctorFieldTypes (ctor : Name) (args : Array Expr) : CoreM (Array Expr) := do
   return out
 
 /-- The mono type of a constructor application with argument types `argTys`
-(parameters first, then fields), when matching determines it. -/
-def ctorAppType (ctor : Name) (argTys : Array Expr) : CoreM (Option Expr) := do
+(parameters first, then fields), when matching determines it. A parameter
+that no field determines (the error type of `EST.Out.ok`) is taken from
+`known`, the type the binder already has, if it is an application of the
+same inductive. -/
+def ctorAppType (ctor : Name) (argTys : Array Expr) (known : Option Expr := none) : CoreM (Option Expr) := do
   let some (.ctorInfo c) := (← getEnv).find? ctor | return none
   let holes ← (List.range c.numParams).toArray.mapM fun _ => mkFreshFVarId
   let mut ty ← instantiateForall (← getOtherDeclBaseType ctor []) (holes.map .fvar)
@@ -152,6 +153,10 @@ def ctorAppType (ctor : Name) (argTys : Array Expr) : CoreM (Option Expr) := do
       ty := b.instantiate1 anyExpr
       i := i + 1
     | _ => break
+  if let some k := known then
+    let k := k.consumeMData.headBeta
+    if sameHead k.getAppFn (.const c.induct []) && k.getAppNumArgs == c.numParams then
+      assign := assign.zipIdx.map fun (a, i) => a <|> some k.getAppArgs[i]!
   if assign.any Option.isNone then return none
   let indTy := mkAppN (.const c.induct []) (assign.map Option.get!)
   return some (← toMonoTypeKeep indTy)
@@ -303,11 +308,7 @@ def applyType? (t : Expr) : Nat → Option Expr
     | .forallE _ _ b _ => applyType? (b.instantiate1 anyExpr) n
     | _ => none
 
-/-- Is `t` an array type? Retyping from uses moves a conversion from the uses
-to the definition, which is only right if the value has its type on every
-path: an `Array lcAny` is always an erased `Array T` (§2.7), whereas a value
-typed `lcAny` may be dynamically typed, e.g. the payload of a `Dynamic`,
-cast only after a runtime check of its type name. -/
+/-- Is `t` an array type? -/
 def isArrayTy (t : Expr) : Bool := t.consumeMData.headBeta.isAppOf ``Array
 
 partial def fwdCode (sc : Scope) : Code .pure → StateT Bool MRetypeM (Code .pure × Scope)
@@ -320,7 +321,7 @@ partial def fwdCode (sc : Scope) : Code .pure → StateT Bool MRetypeM (Code .pu
     if ← unknown d.type then
       let candidate ← match d.value with
         | .const f _ args _ =>
-          if (← getEnv).isConstructor f then ctorAppType f (args.map sc.argTy)
+          if (← getEnv).isConstructor f then ctorAppType f (args.map sc.argTy) d.type
           else pure (((← getThe MRetypeState).sigs[f]?).bind (appType? · args.size))
         | .proj s i x _ =>
           match sc.types[x]? with
@@ -349,11 +350,11 @@ partial def fwdCode (sc : Scope) : Code .pure → StateT Bool MRetypeM (Code .pu
         let mut known := #[]
         for t in cands do
           unless ← unknown t do known := known.push (← norm t, t)
-        -- An array argument typed `lcAny` may be the in-progress array of
-        -- `Array.map` (see `isArrayTy`): arrays need every argument known.
-        let complete := !isArrayTy p.type || known.size == cands.size
+        -- Every argument must be known: with a type that depends on a value
+        -- (`Array t.denote`), jumps from different branches pass different
+        -- types, and an argument typed `lcAny` may have any of them.
         if let some (n, t) := known[0]? then
-          if complete && known.all (·.1 == n) then
+          if known.size == cands.size && known.all (·.1 == n) then
             if let some t ← refineTo? p.type (some t) then
               params := params.set! i { p with type := t }
               set true
@@ -409,7 +410,14 @@ where
     | .cases cs => cs.alts.foldl (fun acc alt => jumpArgTypes j alt.getCode i types acc) acc
     | _ => acc
 
-/-! ## Retyping from uses -/
+/-! ## Placeholders from uses
+
+A binder of a value is only retyped from its definition: a use at a precise
+type in one branch says nothing about the other paths. With a type that
+depends on a value (`data : Array t.denote`, used as `Array Nat` only in the
+branch where `t = .nat`), a conversion moved from the use to the definition
+would run, and fail, on the other paths. The exception is a placeholder
+`let z := ◾`, which has no value to convert and fits any type. -/
 
 abbrev Uses := Std.HashMap FVarId (Array Expr)
 
@@ -418,14 +426,7 @@ calls (from the callee's signature) and of constructors (from the field
 types), jump arguments (the join point's parameter types), and closure
 arguments. Arguments of self calls (of `self`) at positions `skip` are not
 counted: those parameter types are assumptions being checked
-(`paramsFromCallers`).
-
-Returned values are not counted either. A result type may have been
-recovered from the callers (`paramsFromCallers`), and the value returned is
-then of that type, but the binders it comes from need not be: the loop of
-`Array.map` returns its array once every element has been replaced, while
-the same binder holds elements of the source type on the other paths (the
-cast that marked this is erased). Stage 4 converts at the `return`. -/
+(`paramsFromCallers`). -/
 partial def collectUses (types : Types) (jps : Std.HashMap FVarId (Array Expr))
     (c : Code .pure) (acc : Uses) (self : Name := .anonymous) (skip : Array Nat := #[]) :
     MRetypeM Uses := do
@@ -469,10 +470,8 @@ partial def collectUses (types : Types) (jps : Std.HashMap FVarId (Array Expr))
     return acc
   | _ => return acc
 
-/-- The type all precise uses of `x` agree on, if it refines `old` (an array
-type, see `isArrayTy`, unless `anyTy`). -/
-def fromUses (uses : Uses) (x : FVarId) (old : Expr) (anyTy := false) : MRetypeM (Option Expr) := do
-  unless anyTy || isArrayTy old do return none
+/-- The type all precise uses of `x` agree on, if it refines `old`. -/
+def fromUses (uses : Uses) (x : FVarId) (old : Expr) : MRetypeM (Option Expr) := do
   let cands := uses.getD x #[]
   let some t := cands[0]? | return none
   let n ← norm t
@@ -483,33 +482,20 @@ def fromUses (uses : Uses) (x : FVarId) (old : Expr) (anyTy := false) : MRetypeM
 partial def bwdCode (uses : Uses) : Code .pure → StateT Bool MRetypeM (Code .pure)
   | .let d k => do
     let mut d := d
-    -- A placeholder `◾` fits any type.
-    if let some t ← fromUses uses d.fvarId d.type (anyTy := d.value matches .erased) then
-      d := { d with type := t }
-      set true
+    if d.value matches .erased then
+      if let some t ← fromUses uses d.fvarId d.type then
+        d := { d with type := t }
+        set true
     return .let d (← bwdCode uses k)
   | .jp d k => do
-    let mut params := d.params
-    for i in [:params.size] do
-      let p := params[i]!
-      if let some t ← fromUses uses p.fvarId p.type then
-        params := params.set! i { p with type := t }
-        set true
     let value ← bwdCode uses d.value
-    return .jp (FunDecl.mk d.fvarId d.binderName params d.type value) (← bwdCode uses k)
+    return .jp (FunDecl.mk d.fvarId d.binderName d.params d.type value) (← bwdCode uses k)
   | .fun d k _ => do
     let value ← bwdCode uses d.value
     return .fun (FunDecl.mk d.fvarId d.binderName d.params d.type value) (← bwdCode uses k)
   | .cases cs => do
     let alts ← cs.alts.mapM fun
-      | .alt ctor ps code _ => do
-        let mut ps := ps
-        for i in [:ps.size] do
-          let p := ps[i]!
-          if let some t ← fromUses uses p.fvarId p.type then
-            ps := ps.set! i { p with type := t }
-            set true
-        return .alt ctor ps (← bwdCode uses code)
+      | .alt ctor ps code _ => return .alt ctor ps (← bwdCode uses code)
       | .default code => return .default (← bwdCode uses code)
       | other => return other
     return .cases ⟨cs.typeName, cs.resultType, cs.discr, alts⟩
@@ -538,59 +524,6 @@ def localRetype (d : Decl .pure) (skip : Array Nat := #[]) : MRetypeM (Decl .pur
     any := true
   return ({ d with value := .code c }, any, types)
 
-/-- The types of the values a declaration returns, except the results of its
-own saturated self calls (by induction on the recursion they have the
-declaration's result type, whatever it is) and constructors without fields
-(`none`, `[]`: they exist at every instantiation of their type). -/
-partial def returnTypes (env : Environment) (self : Name) (arity : Nat) (types : Types) :
-    Code .pure → FVarIdSet → Array Expr → Array Expr
-  | .let d k, selfRes, acc =>
-    let selfRes := match d.value with
-      | .const f _ args _ =>
-        let fieldless := match env.find? f with
-          | some (.ctorInfo c) => c.numFields == 0
-          | _ => false
-        if (f == self && args.size == arity) || fieldless then selfRes.insert d.fvarId else selfRes
-      | _ => selfRes
-    returnTypes env self arity types k selfRes acc
-  | .jp d k, selfRes, acc | .fun d k _, selfRes, acc =>
-    returnTypes env self arity types k selfRes (returnTypes env self arity types d.value selfRes acc)
-  | .cases cs, selfRes, acc => cs.alts.foldl (fun acc alt => returnTypes env self arity types alt.getCode selfRes acc) acc
-  | .return x, selfRes, acc => if selfRes.contains x then acc else acc.push (types.getD x anyExpr)
-  | _, _, acc => acc
-
-/-- Refine a declaration's signature: parameters from their uses in the
-body, the result type from the returned values. -/
-def refineSignature (d : Decl .pure) (types : Types) : MRetypeM (Decl .pure × Bool) := do
-  let .code c := d.value | return (d, false)
-  let sig := ((← get).sigs[d.name]?).getD (declSig d)
-  let uses ← collectUses types {} c {}
-  let mut params := d.params
-  let mut changed := false
-  for i in [:params.size] do
-    let p := params[i]!
-    if let some t ← fromUses uses p.fvarId p.type then
-      params := params.set! i { p with type := t }
-      changed := true
-  let mut ret := sig.ret
-  if ← unknown ret then
-    let rets := returnTypes (← getEnv) d.name d.params.size types c {} #[]
-    if let some t := rets[0]? then
-      let n ← norm t
-      let mut agree := true
-      for r in rets do
-        if (← norm r) != n then agree := false
-      if agree then
-        if let some t ← refineTo? ret (some t) then
-          ret := t
-          changed := true
-  if !changed then return (d, false)
-  let d := withSig d params ret
-  modify fun s => { s with sigs := s.sigs.insert d.name (declSig d) }
-  return (d, true)
-
-/-! ## Parameters from call sites -/
-
 /-- The applications of constants in `c`, with the type of the binder. -/
 partial def constApps (c : Code .pure) (acc : Array (Name × Array (Arg .pure) × Expr)) :
     Array (Name × Array (Arg .pure) × Expr) :=
@@ -612,15 +545,186 @@ partial def erasedVars (c : Code .pure) (acc : FVarIdSet) : FVarIdSet :=
   | .cases cs => cs.alts.foldl (fun acc alt => erasedVars alt.getCode acc) acc
   | _ => acc
 
-/-- What the call sites of the program's declarations tell (self calls not
-included): the argument types per (callee, parameter), `none` for a
+/-- What a declaration returns: the types of the returned values, except the
+results of its own saturated self calls (by induction on the recursion they
+have the declaration's result type, whatever it is) and constructors without
+fields (`none`, `[]`), whose inductives are listed separately: such a value
+exists at every instantiation of its inductive. -/
+partial def returnTypes (env : Environment) (self : Name) (arity : Nat) (types : Types) :
+    Code .pure → Std.HashMap FVarId (Option Name) → Array Expr × Array Name → Array Expr × Array Name
+  | .let d k, special, acc =>
+    let special := match d.value with
+      | .const f _ args _ =>
+        match env.find? f with
+        | some (.ctorInfo c) => if c.numFields == 0 then special.insert d.fvarId (some c.induct) else special
+        | _ => if f == self && args.size == arity then special.insert d.fvarId none else special
+      | _ => special
+    returnTypes env self arity types k special acc
+  | .jp d k, special, acc | .fun d k _, special, acc =>
+    returnTypes env self arity types k special (returnTypes env self arity types d.value special acc)
+  | .cases cs, special, acc => cs.alts.foldl (fun acc alt => returnTypes env self arity types alt.getCode special acc) acc
+  | .return x, special, (tys, inds) =>
+    match special[x]? with
+    | some none => (tys, inds)
+    | some (some ind) => (tys, inds.push ind)
+    | none => (tys.push (types.getD x anyExpr), inds)
+  | _, _, acc => acc
+
+/-- Is `n` the `map` loop of `Array.mapMUnsafe` or `Array.mapFinIdxMUnsafe`
+(an instance of one of Lean's specializations of it, or its `_redArg`
+part)? These are the loops of §2.7 that reinterpret an array. -/
+def isMapLoop (keys : NameMap InstKey) (n : Name) : Bool :=
+  let n := match n with
+    | .str p "_redArg" => p
+    | n => n
+  match keys.find? n with
+  | some k =>
+    let u := userName ((specOrigin? k.decl).getD k.decl)
+    u == `Array.mapMUnsafe.map || u == `Array.mapFinIdxMUnsafe.map
+  | none => false
+
+def isArrayAny (e : Expr) : Bool := e.isAppOfArity ``Array 1 && e.appArg!.consumeMData == anyExpr
+
+/-- Occurrences of `Array lcAny` in `e`. -/
+partial def countArrayAny (e : Expr) : Nat :=
+  if isArrayAny e then 1
+  else match e with
+    | .app f a => countArrayAny f + countArrayAny a
+    | .forallE _ d b _ => countArrayAny d + countArrayAny b
+    | .mdata _ b => countArrayAny b
+    | _ => 0
+
+/-- The element type of the array that a `map` loop returns (see
+`isMapLoop`). The loop replaces the elements of its array parameter one by
+one with `Array.uset` and returns the array when every element has been
+replaced; if every value it stores (other than the `box(0)` placeholder) has
+the same precise type `β`, it returns an `Array β`. The array parameter and
+the arrays derived from it must only be read, written, passed back to the
+loop, returned (possibly inside a constructor, e.g. `some bs`) or jumped
+with; any other use (the array escaping into a closure, say) gives up. -/
+partial def mapLoopElem? (d : Decl .pure) (types : Types) : MRetypeM (Option Expr) := do
+  let .code c := d.value | return none
+  let arrs ← d.params.filterM fun p => return isArrayTy p.type && (← unknown p.type)
+  let some bs := arrs[0]? | return none
+  unless arrs.size == 1 do return none
+  let keys := (← get).keys
+  let env ← getEnv
+  let erased := erasedVars c {}
+  -- The arrays derived from `bs`, to a fixpoint (join-point parameters
+  -- receive them through jumps).
+  let mut chain : FVarIdSet := ({} : FVarIdSet).insert bs.fvarId
+  let mut result : Bool × Array (Option Expr) := (true, #[])
+  for _ in [:4] do
+    let before := chain.size
+    let (chain', ok, stored) := visit env keys erased types d.name c (chain, true, #[])
+    chain := chain'
+    result := (ok, stored)
+    if chain.size == before then break
+  let (ok, stored) := result
+  unless ok do return none
+  let tys := stored.filterMap id
+  let some t := tys[0]? | return none
+  if tys.size != stored.size then return none
+  let n ← norm t
+  for t' in tys do
+    if (← unknown t') || (← norm t') != n then return none
+  return some t
+where
+  /-- One pass over the loop body: extends the chain of derived arrays,
+  checks their uses, and collects the types of the stored values (`none` for
+  a value of unknown type; placeholders are skipped). -/
+  visit (env : Environment) (keys : NameMap InstKey) (erased : FVarIdSet) (types : Types) (self : Name)
+      (c : Code .pure) : FVarIdSet × Bool × Array (Option Expr) → FVarIdSet × Bool × Array (Option Expr)
+    | (chain, ok, stored) =>
+    let inChain (a : Arg .pure) : Bool := match a with
+      | .fvar x => chain.contains x
+      | _ => false
+    match c with
+    | .let d k =>
+      let st := match d.value with
+        | .const f _ args _ =>
+          match (keys.find? f).map (·.decl) with
+          | some ``Array.uset =>
+            -- `Array.uset α a i v h`: only the array argument may be derived.
+            if args.size != 5 || args.zipIdx.any (fun (a, i) => i != 1 && inChain a) then (chain, false, stored)
+            else if inChain args[1]! then
+              let stored := match args[3]! with
+                | .fvar x => if erased.contains x then stored else stored.push (types[x]?.filter (!·.isErased))
+                | _ => stored
+              (chain.insert d.fvarId, ok, stored)
+            else (chain, ok, stored)
+          | some ``Array.uget | some ``Array.usize | some ``Array.size => (chain, ok, stored)
+          | _ =>
+            if f == self || env.isConstructor f || !args.any inChain then (chain, ok, stored)
+            else (chain, false, stored)
+        | .fvar _ args => (chain, ok && !args.any inChain, stored)
+        | .proj _ _ x => (chain, ok && !chain.contains x, stored)
+        | _ => (chain, ok, stored)
+      visit env keys erased types self k st
+    | .jp d k =>
+      -- Parameters that receive a derived array join the chain.
+      let chain := d.params.zipIdx.foldl (fun ch (p, i) =>
+        if jumpsWith d.fvarId i k chain then ch.insert p.fvarId else ch) chain
+      visit env keys erased types self k (visit env keys erased types self d.value (chain, ok, stored))
+    | .fun d k _ =>
+      visit env keys erased types self k (visit env keys erased types self d.value (chain, ok, stored))
+    | .cases cs =>
+      cs.alts.foldl (fun st alt => visit env keys erased types self alt.getCode st)
+        (chain, ok && !chain.contains cs.discr, stored)
+    | _ => (chain, ok, stored)
+  jumpsWith (j : FVarId) (i : Nat) (c : Code .pure) (chain : FVarIdSet) : Bool :=
+    match c with
+    | .jmp j' args => j' == j && (match args[i]? with | some (.fvar x) => chain.contains x | _ => false)
+    | .let _ k => jumpsWith j i k chain
+    | .fun d k _ | .jp d k => jumpsWith j i d.value chain || jumpsWith j i k chain
+    | .cases cs => cs.alts.any fun alt => jumpsWith j i alt.getCode chain
+    | _ => false
+
+/-- Refine a declaration's result type, if unknown: for a `map` loop, from
+the values it stores (`mapLoopElem?`); otherwise from the values it returns,
+when they agree (constructors without fields must belong to the inductive of
+that type). -/
+def refineSignature (d : Decl .pure) (types : Types) : MRetypeM (Decl .pure × Bool) := do
+  let .code c := d.value | return (d, false)
+  let sig := ((← get).sigs[d.name]?).getD (declSig d)
+  unless ← unknown sig.ret do return (d, false)
+  let mut cand : Option Expr := none
+  if isMapLoop (← get).keys d.name then
+    if let some β ← mapLoopElem? d types then
+      -- The loop's result type holds its array once, e.g. `Option (Array lcAny)`.
+      let occ := countArrayAny sig.ret
+      if occ == 1 then
+        cand := some (sig.ret.replace fun e => if isArrayAny e then some (mkApp (mkConst ``Array) β) else none)
+  if cand.isNone then
+    let (rets, inds) := returnTypes (← getEnv) d.name d.params.size types c {} (#[], #[])
+    if let some t := rets[0]? then
+      let n ← norm t
+      let mut agree := true
+      for r in rets do
+        if (← norm r) != n then agree := false
+      for ind in inds do
+        unless sameHead t.consumeMData.getAppFn (.const ind []) do agree := false
+      if agree then cand := some t
+  let some t ← refineTo? sig.ret cand | return (d, false)
+  let d := withSig d d.params t
+  modify fun s => { s with sigs := s.sigs.insert d.name (declSig d) }
+  return (d, true)
+
+/-! ## Parameters from call sites -/
+
+/-- What the call sites in the program's live declarations tell (self calls
+not included): the argument types per (callee, parameter), `none` for a
 placeholder argument; the parameters that some partial application leaves
-open (`blocked`: they receive whatever the closure is applied to); and the
-types of the binders of saturated calls, per callee. -/
+open (`blocked`: they receive whatever the closure is applied to); the types
+of the binders of saturated calls, per callee; and which callees are
+referenced otherwise. -/
 structure CallSites where
   args : Std.HashMap (Name × Nat) (Array (Option Expr)) := {}
   blocked : Std.HashSet (Name × Nat) := {}
   results : Std.HashMap Name (Array Expr) := {}
+  /-- Declarations also referenced otherwise than by a saturated call (a
+  closure, an over-application), including by themselves. -/
+  escapes : NameSet := {}
 
 def callSites (decls : Array (Decl .pure)) (types : Array Types) : MRetypeM CallSites := do
   let mut cs : CallSites := {}
@@ -631,8 +735,10 @@ def callSites (decls : Array (Decl .pure)) (types : Array Types) : MRetypeM Call
     unless st.live.contains d.name do continue
     let sc : Scope := { types := types[i]!, erased := erasedVars c {} }
     for (f, args, resTy) in constApps c #[] do
-      if f == d.name || !st.codeDecls.contains f then continue
+      if !st.codeDecls.contains f then continue
       let some sig := st.sigs[f]? | continue
+      if args.size != sig.params.size then cs := { cs with escapes := cs.escapes.insert f }
+      if f == d.name then continue
       for j in [:sig.params.size] do
         match args[j]? with
         | some a =>
@@ -671,11 +777,11 @@ def paramsFromCallers (decls : Array (Decl .pure)) (types : Array Types) :
     let mut hyp : Array (Nat × Expr) := #[]
     for h : j in [:d.params.size] do
       let p := d.params[j]
-      -- Only arrays (see `isArrayTy`): code over a dynamically typed value
-      -- (`Dynamic.get?`) casts it to other types in branches that a runtime
-      -- check rules out, and at a precise parameter type those casts could
-      -- no longer be translated.
-      unless isArrayTy p.type && (← unknown p.type) do continue
+      -- Only types holding an erased array (`Array lcAny`, `Option (Array
+      -- lcAny)`, …): code over a dynamically typed value (`Dynamic.get?`)
+      -- casts it to other types in branches that a runtime check rules out,
+      -- and at a precise parameter type those casts could not be translated.
+      unless countArrayAny p.type > 0 && (← unknown p.type) do continue
       if sites.blocked.contains (d.name, j) then continue
       let ts := ((sites.args.getD (d.name, j) #[]).filterMap id)
       let some t := ts[0]? | continue
@@ -708,6 +814,8 @@ def paramsFromCallers (decls : Array (Decl .pure)) (types : Array Types) :
     unless d.value matches .code _ do continue
     let some sig := (← get).sigs[d.name]? | continue
     unless ← unknown sig.ret do continue
+    -- A closure of it may be applied where the result has another type.
+    if sites.escapes.contains d.name then continue
     let rs := sites.results.getD d.name #[]
     let some t := rs[0]? | continue
     let n ← norm t
