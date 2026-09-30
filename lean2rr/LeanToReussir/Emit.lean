@@ -74,8 +74,16 @@ def lowerEntry (mainInst errStr : Name) (eager : Array Name) : LowerM RR.Item :=
   let mut forced := ""
   for h : i in [:eager.size] do
     forced := forced ++ s!"    let caf{i} = {fnName eager[i]}();\n"
-  let body := s!"#[main]\npub fn lean_main_entry() \{\n{forced}    let r = {fnName mainInst}({argExpr}L2RUnit::u\{});\n    match r \{\n        {outTy}::{okV}(v) => \{ {exitCode} },\n        {outTy}::{errV}(e) => \{ l2r_uncaught_exception({fnName errStr}(e)) }\n    }\n}\n"
-  return .raw (pre ++ body)
+  let body := s!"fn l2r_main_body() \{\n{forced}    let r = {fnName mainInst}({argExpr}L2RUnit::u\{});\n    match r \{\n        {outTy}::{okV}(v) => \{ {exitCode} },\n        {outTy}::{errV}(e) => \{ l2r_uncaught_exception({fnName errStr}(e)) }\n    }\n}\n"
+  -- Like Lean's runtime, run the program on a thread with a 1 GiB stack
+  -- (deep non-tail recursion is common in Lean programs).
+  let entry := "extern \"C\" trampoline \"l2r_main_body\" = l2r_main_body;\n\n" ++
+    "#[ffi(import)]\nfn l2r_run_main() [{ {\n" ++
+    "    extern \"C\" { fn l2r_main_body(); }\n" ++
+    "    ::std::thread::Builder::new().name(\"main\".into()).stack_size(1 << 30)\n" ++
+    "        .spawn(|| unsafe { l2r_main_body() }).unwrap().join().unwrap()\n} }];\n\n" ++
+    "#[main]\npub fn lean_main_entry() { l2r_run_main() }\n"
+  return .raw (pre ++ body ++ "\n" ++ entry)
 
 /-- The externs a program calls: Lean name, C symbol, mono signature, and
 type arguments for extern instances (development aid for the runtime). -/
@@ -124,6 +132,7 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (eager : Array Name
     out := out ++ (RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))).render ++ "\n"
   out := out ++ "// ---- generated functions ----\n\n"
   for f in st.fns do out := out ++ f.render ++ "\n"
+  unless st.strLits.isEmpty do out := out ++ strLitTable st.strLits
   return out
 
 end LeanToReussir

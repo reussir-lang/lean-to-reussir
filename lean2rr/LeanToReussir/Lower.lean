@@ -72,7 +72,7 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
         pure ⟨#[("z", some (.named "u64"), .atom "0")], .ctor "Nat" (some "Small") #[.var "z"]⟩
       else if n == "Int" then
         pure ⟨#[("z", some (.named "i64"), .atom "0")], .ctor "Int" (some "Small") #[.var "z"]⟩
-      else if n == "LStr" then pure (.ofExpr (.call "lean_mk_string" #[] #[.atom "\"\""]))
+      else if n == "LStr" then pure (.ofExpr (← strLit ""))
       else if n == boxName then
         pure (.ofExpr (.ctor boxName (some (← boxVariant .unit)) #[.unitVal]))
       else if let some info := (← get).typeInfos[n]? then
@@ -362,27 +362,38 @@ def applyChain (f : RR.Expr) (fty : RR.Ty) (ctx : CodeCtx) (args : Array (Arg .p
 /-! ## Externs -/
 
 /-- For each parameter of `c`'s declared type, the type parameter (index
-among the type-former parameters) that is exactly its type, if any; and
-the same for the result type. -/
+among the type-former parameters) that its value has in the mono phase, if
+any; and the same for the result type. A parameter declared at `α` has
+type `α`, and so has one declared at a trivial structure over `α` (such as
+`[Inhabited α]`, which mono represents by its `default` field). -/
 def typeVarUses (c : Name) : CoreM (Array (Option Nat) × Option Nat) := do
   let some ci := (← getEnv).find? c | return (#[], none)
   let mut ty := ci.type
-  let mut tyParams : Array Nat := #[]
+  let mut tyParams : Array FVarId := #[]
   let mut uses := #[]
-  let mut i := 0
-  let use (tyParams : Array Nat) (i : Nat) (d : Expr) : Option Nat :=
-    match d.cleanupAnnotations with
-    | .bvar k => if k < i then tyParams.idxOf? (i - 1 - k) else none
-    | _ => none
   repeat
     match ty with
     | .forallE _ d b _ =>
-      uses := uses.push (use tyParams i d)
-      if isTypeFormerType d then tyParams := tyParams.push i
-      ty := b
-      i := i + 1
+      uses := uses.push (← varOf tyParams d 8)
+      let x ← mkFreshFVarId
+      if isTypeFormerType d then tyParams := tyParams.push x
+      ty := b.instantiate1 (.fvar x)
     | _ => break
-  return (uses, use tyParams i ty)
+  return (uses, ← varOf tyParams ty 8)
+where
+  varOf (tyParams : Array FVarId) (d : Expr) (fuel : Nat) : CoreM (Option Nat) := do
+    let d := d.cleanupAnnotations
+    if let .fvar x := d then return tyParams.idxOf? x
+    let .const s _ := d.getAppFn | return none
+    let some info ← hasTrivialStructure? s | return none
+    let fuel' + 1 := fuel | return none
+    let some (.ctorInfo ctor) := (← getEnv).find? info.ctorName | return none
+    let mut fty ← instantiateForall ctor.type d.getAppArgs[:ctor.numParams]
+    for _ in [:info.fieldIdx] do
+      let .forallE _ _ b _ := fty | return none
+      fty := b.instantiate1 (.fvar (← mkFreshFVarId))
+    let .forallE _ fd _ _ := fty | return none
+    varOf tyParams fd fuel'
 
 /-- The C symbol Lean uses for an extern (the prelude implements functions
 under the same names). -/
@@ -480,6 +491,7 @@ pointer), so it is passed around boxed. -/
 def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
     (args : Array RR.Expr) : LowerM (Option RR.Expr) := do
   let some α := typeArgs[1]? | return none
+  let α ← toMonoType α
   let (st, boxed) ← arrayElemTy (← lowerType α)
   let refTy := RR.Ty.app "LRef" #[st]
   let wrap (e : RR.Expr) : RR.Expr := match st with
@@ -564,7 +576,7 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     let lt ← lowerType params[0]!
     let fn ← listFold s!"l2r_list_to_string_{lt.render.map fun c => if c.isAlphanum then c else '_'}" lt
       (.named "LStr") (.named "u32") fun acc x => .call "lean_string_push" #[] #[acc, x]
-    return some (.call fn #[] #[args[0]!, .call "lean_mk_string" #[] #[.atom "\"\""]])
+    return some (.call fn #[] #[args[0]!, ← strLit ""])
   -- `Array.mk : List α → Array α`
   if orig == ``Array.mk then
     let lt ← lowerType params[0]!
@@ -648,7 +660,8 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
   -- Storage for each type argument: (storage type, boxed?).
   let mut storage := #[]
   for t in typeArgs do
-    let rt ← lowerType t
+    -- Instance keys hold base-phase types.
+    let rt ← lowerType (← toMonoType t)
     storage := storage.push (← arrayElemTy rt)
   -- Values whose declared type is a type parameter `α` are passed and
   -- returned in `α`'s storage (e.g. `Array.push`'s element): wrapped if the
@@ -672,9 +685,21 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
 
 /-! ## Values -/
 
+/-- A `Nat` literal: `Small` below 2^64, otherwise built from base-2^32
+digits with runtime arithmetic (no string argument, see `strLit`). -/
 def natLiteral (n : Nat) : RR.Expr :=
-  if n < 2 ^ 63 then .ctor "Nat" (some "Small") #[.atom (toString n)]
-  else .call "lean_cstr_to_nat" #[] #[.atom (n.repr.quote)]
+  if n < 2 ^ 64 then small n
+  else
+    let rec limbs (n : Nat) (acc : List Nat) (fuel : Nat) : List Nat :=
+      match fuel with
+      | 0 => acc
+      | fuel + 1 => if n == 0 then acc else limbs (n / 2 ^ 32) ((n % 2 ^ 32) :: acc) fuel
+    match limbs n [] (n.log2 / 32 + 2) with
+    | [] => small 0
+    | l :: ls => ls.foldl (init := small l) fun acc d =>
+        .call "lean_nat_add" #[] #[.call "lean_nat_mul" #[] #[acc, small (2 ^ 32)], small d]
+where
+  small (k : Nat) : RR.Expr := .ctor "Nat" (some "Small") #[.atom (toString k)]
 
 /-- Lower a constant application with Lean's arity rules. -/
 def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy : Expr) :
@@ -751,7 +776,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
 def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty) : LowerM RR.Expr := do
   match v with
   | .lit (.nat n) => coerce (natLiteral n) (.named "Nat") rty
-  | .lit (.str s) => coerce (.call "lean_mk_string" #[] #[.atom s.quote]) (.named "LStr") rty
+  | .lit (.str s) => coerce (← strLit s) (.named "LStr") rty
   | .lit (.uint8 n) | .lit (.uint16 n) => return .atom (toString n)
   | .lit (.uint32 n) => return .atom (toString n)
   | .lit (.uint64 n) | .lit (.usize n) => return .atom (toString n)
@@ -810,6 +835,58 @@ partial def jumpsIn : Code .pure → FVarIdSet → FVarIdSet
   | .fun d k _, s | .jp d k, s => jumpsIn k (jumpsIn d.value s)
   | .cases c, s => c.alts.foldl (fun s alt => jumpsIn alt.getCode s) s
   | _, s => s
+
+/-- Does `c` jump to `j`? -/
+partial def hasJumpTo (j : FVarId) : Code .pure → Bool
+  | .jmp j' _ => j == j'
+  | .let _ k => hasJumpTo j k
+  | .fun d k _ | .jp d k => hasJumpTo j d.value || hasJumpTo j k
+  | .cases c => c.alts.any (hasJumpTo j ·.getCode)
+  | _ => false
+
+/-- Place join point `d` (whose scope is `k`) as deep as possible: into the
+single branch, join-point body or continuation containing all its jumps.
+Free variables of `d` stay in scope (binders are unique), and code does not
+grow. Sunk into the subtree its jumps come from, a join point is more often
+structured (J2) instead of outlined: an outlined join point that calls the
+enclosing function back makes a loop mutually recursive, which LLVM does not
+turn into a loop. -/
+partial def sinkInto (d : FunDecl .pure) (k : Code .pure) : Code .pure :=
+  let j := d.fvarId
+  match k with
+  | .let x k' => .let x (sinkInto d k')
+  | .fun f k' _ => if hasJumpTo j f.value then .jp d k else .fun f (sinkInto d k')
+  | .jp d2 k2 =>
+    match hasJumpTo j d2.value, hasJumpTo j k2 with
+    | true, true => .jp d k
+    | true, false => .jp (FunDecl.mk d2.fvarId d2.binderName d2.params d2.type (sinkInto d d2.value)) k2
+    | false, true => .jp d2 (sinkInto d k2)
+    | false, false => k
+  | .cases c =>
+    if (c.alts.filter (hasJumpTo j ·.getCode)).size == 1 then
+      .cases ⟨c.typeName, c.resultType, c.discr, c.alts.map fun alt =>
+        if hasJumpTo j alt.getCode then
+          match alt with
+          | .alt ctor ps code _ => .alt ctor ps (sinkInto d code)
+          | .default code => .default (sinkInto d code)
+          | other => other
+        else alt⟩
+    else .jp d k
+  | _ => .jp d k
+
+/-- Sink every join point of `c` (innermost first). -/
+partial def sinkJoinPoints : Code .pure → Code .pure
+  | .let x k => .let x (sinkJoinPoints k)
+  | .fun d k _ =>
+    .fun (FunDecl.mk d.fvarId d.binderName d.params d.type (sinkJoinPoints d.value)) (sinkJoinPoints k)
+  | .jp d k =>
+    sinkInto (FunDecl.mk d.fvarId d.binderName d.params d.type (sinkJoinPoints d.value)) (sinkJoinPoints k)
+  | .cases c =>
+    .cases ⟨c.typeName, c.resultType, c.discr, c.alts.map fun
+      | .alt ctor ps code _ => .alt ctor ps (sinkJoinPoints code)
+      | .default code => .default (sinkJoinPoints code)
+      | other => other⟩
+  | c => c
 
 /-- Choose a strategy for every join point of a declaration body: the set
 of outlined (J3) join points; others are J1 (single jump) or J2. -/
@@ -1087,6 +1164,7 @@ partial def finishUnboxFns : LowerM Unit := do
 /-- Lower a declaration with code to a Reussir function. -/
 def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let .code body := d.value | return
+  let body := sinkJoinPoints body
   let (ps, r) := splitFnType d.type d.params.size
   let _ := ps
   let ptys ← d.params.mapM (lowerType ·.type)

@@ -82,6 +82,9 @@ structure LowerState where
   zeroFns : Std.HashMap RR.Ty String := {}
   /-- Placeholder functions whose body is being generated. -/
   zeroBusy : Std.HashSet RR.Ty := {}
+  /-- String literals of the program, by id (see `strLit`). -/
+  strLits : Array String := #[]
+  strLitIds : Std.HashMap String Nat := {}
   /-- Generated element-wise array conversions, per (source, target) storage. -/
   vecConvs : Std.HashMap (RR.Ty × RR.Ty) String := {}
   counter : Nat := 0
@@ -143,6 +146,31 @@ def storageElem (st : RR.Ty) : LowerM (RR.Ty × Bool) := do
     if v == n && k.size == 2 && k[1]! == .named "__elem_box" then return (k[0]!, true)
   return (st, false)
 
+/-- A string literal: `l2r_str_lit(id)`, which builds the string from a
+table of byte strings generated with the program (`strLitTable`). Passing
+a Reussir `str` to the runtime would go through a stack slot whose address
+escapes, which keeps LLVM from turning tail calls of the enclosing function
+into loops. -/
+def strLit (s : String) : LowerM RR.Expr := do
+  let id ← match (← get).strLitIds[s]? with
+    | some id => pure id
+    | none =>
+      let id := (← get).strLits.size
+      modify fun st => { st with strLits := st.strLits.push s, strLitIds := st.strLitIds.insert s id }
+      pure id
+  return .call "l2r_str_lit" #[] #[.atom (toString id)]
+
+/-- The runtime function behind `strLit`: the literals as Rust byte strings. -/
+def strLitTable (lits : Array String) : String :=
+  let hex := "0123456789abcdef".toList.toArray
+  let esc (s : String) : String := s.toUTF8.foldl (init := "") fun acc b =>
+    if b ≥ 0x20 && b < 0x7f && b != 0x22 && b != 0x5c then acc.push (Char.ofNat b.toNat)
+    else acc ++ "\\x" |>.push hex[(b / 16).toNat]! |>.push hex[(b % 16).toNat]!
+  let items := lits.toList.map fun s => s!"b\"{esc s}\""
+  "#[ffi(import)]\nfn l2r_str_lit(id : u64) -> LStr [{ {\n" ++
+  s!"    const LITS: &[&[u8]] = &[{", ".intercalate items}];\n" ++
+  "    leanrt::string::from_bytes(LITS[id as usize])\n} }];\n"
+
 /-- Relevance of the parameters of inductive `ind` (see `Relevance.lean`). -/
 def relevanceOf (ind : Name) (numParams : Nat) : LowerM (Array Bool) := do
   match (← read).table.find? ind with
@@ -185,6 +213,11 @@ mutual
       let (elem, _) ← arrayElemTy elem
       return .app "RVec" #[elem]
     | _ =>
+      -- An inductive with computed fields is represented by its
+      -- implementation inductive `T._impl` (whose constructors also store
+      -- the computed fields); mono code uses both names for the same values.
+      if let some (.inductInfo ival) := (← getEnv).find? (n ++ `_impl) then
+        return ← nominalType ival args
       match (← getEnv).find? n with
       | some (.inductInfo ival) => nominalType ival args
       | _ => return RR.Ty.box
@@ -220,9 +253,11 @@ mutual
             rrFields := rrFields.push t
           ty := b.instantiate1 anyExpr
         | _ => break
-      let variant := match ctorName with
-        | .str _ s => "c_" ++ (s.map fun c => if c.isAlphanum then c else '_')
-        | _ => "c_ctor"
+      -- The constructor's name relative to its type (`T.c._impl` for the
+      -- constructors of a computed-field implementation `T._impl`).
+      let base := match ival.name with | .str p "_impl" => p | n => n
+      let rel := (ctorName.replacePrefix base .anonymous).toString (escape := false)
+      let variant := "c_" ++ (rel.map fun c => if c.isAlphanum then c else '_')
       ctors := ctors.insert ctorName { variant, numParams := ival.numParams, fields }
       variants := variants.push (variant, rrFields)
     let shape :=
