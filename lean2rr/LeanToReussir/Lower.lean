@@ -156,10 +156,11 @@ def partValue (tg : FnTarget) (captured : Array RR.Expr) : LowerM (RR.Expr × RR
   return (.ctor (RR.fnTypeName t) (some (fnVariantName v)) captured, t)
 
 /-- `l2r_fconv_S_T(f)`: function value `f : S` at representation `T`. A
-value that is itself `T`'s value wrapped (`w<T>`) is unwrapped, so that a
-value converted back and forth (a structure field crossing uniform code in
-a loop) is not wrapped again each time; otherwise it is wrapped (`w<S>`).
-The body is generated at the end (`finishFnValues`). -/
+value that is itself a wrapped value of another representation `R`
+(`w<R>(g)`) is converted from `R` directly (`g` itself when `R` is `T`), so
+that a value converted back and forth (a structure field crossing uniform
+code in a loop) is not wrapped again each time; otherwise it is wrapped
+(`w<S>`). The body is generated at the end (`genFnConv`). -/
 def fnConvFn (src dst : RR.Ty) : LowerM String := do
   unless (← get).fnConvs.contains (src, dst) do
     modify fun s => { s with fnConvs := s.fnConvs.push (src, dst) }
@@ -3140,17 +3141,24 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
   let item := RR.Item.fn name params resJ (.ofExpr (.mtch (.var "l2rf") arms))
   modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
 
-/-- Generate `l2r_fconv_S_T` (see `fnConvFn`). -/
+/-- Generate `l2r_fconv_S_T` (see `fnConvFn`). A value that is a wrapped
+value `g` of a representation `R` (`w<R>(g)`) is converted from `R`
+directly: `g` itself when `R` is `T`, otherwise `l2r_fconv_R_T(g)` (generated
+on demand). So a function value that travels through several
+representations (a reference read at `Nat → Nat`, `Nat → Box` and
+`Box → Box` in a loop) stays one wrapper deep, and coming back to its own
+representation gives the value itself (like `lazyConv`'s chains). Other
+values are wrapped (`w<S>`). -/
 def genFnConv (src dst : RR.Ty) : LowerM Unit := do
   let name := s!"l2r_fconv_{src.enc}_{dst.enc}"
   let wrapped := RR.Expr.ctor (RR.fnTypeName dst) (some (fnVariantName (.wrap src))) #[.var "l2rf"]
-  let back := FnVariant.wrap dst
-  let body : RR.Expr :=
-    if ((← get).fnVariants.getD src #[]).contains back then
-      .mtch (.var "l2rf") #[
-        { ty := RR.fnTypeName src, ctor := some (fnVariantName back), binders := #[some "l2rg"], body := .ofExpr (.var "l2rg") },
-        { ty := RR.fnTypeName src, ctor := none, binders := #[], body := .ofExpr wrapped }]
-    else wrapped
+  let mut arms : Array RR.Arm := #[]
+  for v in (← get).fnVariants.getD src #[] do
+    let .wrap r := v | continue
+    let some e ← tryCoerce (.var "l2rg") r dst | continue
+    arms := arms.push { ty := RR.fnTypeName src, ctor := some (fnVariantName v), binders := #[some "l2rg"], body := .ofExpr e }
+  let body : RR.Expr := if arms.isEmpty then wrapped
+    else .mtch (.var "l2rf") (arms.push { ty := RR.fnTypeName src, ctor := none, binders := #[], body := .ofExpr wrapped })
   let item := RR.Item.fn name #[("l2rf", src)] dst (.ofExpr body)
   modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
 

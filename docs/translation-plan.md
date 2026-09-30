@@ -530,8 +530,12 @@ its value is stored as `Box`.
   representation of the same Lean type (for example to `Box → Box`, for
   uniform code that applies it) wraps it once in a `w` variant (§5.3),
   which converts the arguments and the result at each application and
-  calls the function exactly once. So a function value that goes through
-  uniform code and comes back is not wrapped at all.
+  calls the function exactly once. Converting a wrapped value converts the
+  value inside from its own representation instead of wrapping again. So a
+  function value that goes through uniform code and comes back is not
+  wrapped at all (it is the same object), and one read at three
+  representations in a loop (`Nat → Nat`, `Nat → Box`, `Box → Box`)
+  stays one wrapper deep.
 - A partial application has the type of its target with the supplied
   arguments removed. Lambda lifting can give a lifted lambda the result type
   `lcAny` while its closure is used at `Nat × Int → Int`, or the reverse; the
