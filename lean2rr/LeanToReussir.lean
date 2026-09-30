@@ -4,3 +4,6 @@ import LeanToReussir.Relevance
 import LeanToReussir.Retype
 import LeanToReussir.Specialize
 import LeanToReussir.Stats
+import LeanToReussir.Mono
+import LeanToReussir.Pipeline
+import LeanToReussir.Dump

@@ -7,18 +7,20 @@ structure CliOptions where
   root : Name := `main
   emit : Option String := none
   stats : Bool := false
+  check : Bool := true
   output : Option System.FilePath := none
 
 def usage : String :=
-  "usage: lean2rr <Module> [--root NAME] [--stats] [--emit base] [-o FILE]\n" ++
+  "usage: lean2rr <Module> [--root NAME] [--stats] [--emit base|inst|mono] [--no-check] [-o FILE]\n" ++
   "  Modules are found via LEAN_PATH; run inside `lake env` for Lake projects."
 
 partial def parseArgs : List String → CliOptions → Except String CliOptions
   | [], o => .ok o
   | "--root" :: r :: rest, o => parseArgs rest { o with root := r.toName }
   | "--emit" :: e :: rest, o =>
-    if e == "base" then parseArgs rest { o with emit := some e }
-    else .error s!"unknown --emit stage '{e}' (supported: base)"
+    if e ∈ ["base", "inst", "mono"] then parseArgs rest { o with emit := some e }
+    else .error s!"unknown --emit stage '{e}' (supported: base, inst, mono)"
+  | "--no-check" :: rest, o => parseArgs rest { o with check := false }
   | "--stats" :: rest, o => parseArgs rest { o with stats := true }
   | "-o" :: f :: rest, o => parseArgs rest { o with output := some f }
   | a :: rest, o =>
@@ -39,6 +41,14 @@ def run (opts : CliOptions) (module : Name) : IO UInt32 := do
     let prog ← collect opts.root
     let mut text := ""
     if opts.emit == some "base" then text := text ++ (← emitBase prog)
+    if opts.emit == some "inst" || opts.emit == some "mono" then
+      let (rootInst, st) ← monomorphize opts.root
+      text := text ++ s!"-- root instance: {rootInst}; instances: {st.decls.size}, extern instances: {st.externs.size}, lcAny type arguments: {st.uniformArgs}\n"
+      if opts.emit == some "inst" then
+        for d in st.externs ++ st.decls do text := text ++ fmtDecl d ++ "\n"
+      else
+        let decls ← runStage2 st.decls st.externs opts.check
+        for d in decls do text := text ++ fmtDecl d ++ "\n"
     if opts.stats then text := text ++ (← statsReport prog)
     return text
   match opts.output with
