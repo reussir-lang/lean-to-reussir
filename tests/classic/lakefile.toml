@@ -1,0 +1,55 @@
+# lean2rr classic corpus: one executable per case (see cases.json and ../README.md).
+name = "classic"
+version = "0.1.0"
+defaultTargets = [
+  "rbtree",
+  "rbtree-ck",
+  "deriv",
+  "nqueens",
+  "cfold",
+  "binarytrees",
+  "qsort",
+  "unionfind",
+  "rbmap",
+  "liasolver",
+]
+
+[[lean_exe]]
+name = "rbtree"
+root = "Rbtree"
+
+[[lean_exe]]
+name = "rbtree-ck"
+root = "RbtreeCk"
+
+[[lean_exe]]
+name = "deriv"
+root = "Deriv"
+
+[[lean_exe]]
+name = "nqueens"
+root = "Nqueens"
+
+[[lean_exe]]
+name = "cfold"
+root = "Cfold"
+
+[[lean_exe]]
+name = "binarytrees"
+root = "Binarytrees"
+
+[[lean_exe]]
+name = "qsort"
+root = "Qsort"
+
+[[lean_exe]]
+name = "unionfind"
+root = "Unionfind"
+
+[[lean_exe]]
+name = "rbmap"
+root = "Rbmap"
+
+[[lean_exe]]
+name = "liasolver"
+root = "Liasolver"
