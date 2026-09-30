@@ -106,3 +106,50 @@ pub fn ln(x: f64) -> f64 {
 pub fn ln32(x: f32) -> f32 {
     unsafe { logf(x) }
 }
+
+/// C libm functions without a lowering for Reussir's math intrinsics. These
+/// call glibc directly: Rust's own `f64::asinh` & co. are not libm and
+/// differ in the last bits.
+pub mod libm {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    extern "C" {
+        pub fn acosh(x: f64) -> f64;
+        pub fn asinh(x: f64) -> f64;
+        pub fn atanh(x: f64) -> f64;
+        pub fn acoshf(x: f32) -> f32;
+        pub fn asinhf(x: f32) -> f32;
+        pub fn atanhf(x: f32) -> f32;
+        fn dlsym(handle: *mut std::ffi::c_void, name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+    }
+
+    /// Rust's `compiler_builtins` defines its own (musl-derived) `cbrt` and
+    /// `cbrtf`, which the static link binds to; they differ from glibc's by
+    /// an ulp. Resolve glibc's through the dynamic symbol table instead.
+    fn resolve(cache: &AtomicUsize, name: &[u8]) -> usize {
+        let p = cache.load(Ordering::Relaxed);
+        if p != 0 {
+            return p;
+        }
+        let p = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr() as *const std::ffi::c_char) } as usize;
+        cache.store(p, Ordering::Relaxed);
+        p
+    }
+
+    static CBRT: AtomicUsize = AtomicUsize::new(0);
+    static CBRTF: AtomicUsize = AtomicUsize::new(0);
+
+    pub unsafe fn cbrt(x: f64) -> f64 {
+        match resolve(&CBRT, b"cbrt\0") {
+            0 => x.cbrt(),
+            p => unsafe { std::mem::transmute::<usize, extern "C" fn(f64) -> f64>(p)(x) },
+        }
+    }
+
+    pub unsafe fn cbrtf(x: f32) -> f32 {
+        match resolve(&CBRTF, b"cbrtf\0") {
+            0 => x.cbrt(),
+            p => unsafe { std::mem::transmute::<usize, extern "C" fn(f32) -> f32>(p)(x) },
+        }
+    }
+}
