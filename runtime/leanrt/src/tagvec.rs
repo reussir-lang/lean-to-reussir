@@ -78,27 +78,31 @@ fn mk(w: Vec<u64>) -> LTagVec {
 #[inline(always)]
 fn make_mut(a: &mut LTagVec) -> &mut TagVec {
     if !a.is_unique() {
-        copy_shared(a);
+        // By value: the address of `a` (often a local of the Reussir caller
+        // once this is inlined) must not escape, or tail calls are lost.
+        unsafe { std::ptr::write(a, copy_shared(std::ptr::read(a))) };
     }
     tv_mut(a)
 }
 
+/// A private copy of a shared vector (releasing the shared one).
 #[cold]
 #[inline(never)]
-fn copy_shared(a: &mut LTagVec) {
-    let c = tv(a).clone();
-    *a = rc_new(box_new(c) as Box<dyn Any>);
+extern "C" fn copy_shared(a: LTagVec) -> LTagVec {
+    let c = rc_new(box_new(tv(&a).clone()) as Box<dyn Any>);
+    drop(a);
+    c
 }
 
 #[cold]
 #[inline(never)]
-fn index_bug(i: u64, n: usize) -> ! {
+extern "C" fn index_bug(i: u64, n: usize) -> ! {
     crate::internal_panic(&format!("array index {} out of bounds {} (runtime invariant)", i, n))
 }
 
 #[cold]
 #[inline(never)]
-fn drop_word(w: u64) {
+extern "C" fn drop_word(w: u64) {
     if !is_small(w) {
         drop(unsafe { std::mem::transmute::<usize, LBig>(w as usize) });
     }
@@ -157,6 +161,32 @@ pub fn big(a: &LTagVec, i: u64) -> LBig {
     word_as_big(&tv(a).w[i as usize]).clone()
 }
 
+/// The word at `i`; when it is a big value, the returned word owns one
+/// reference to it (so it outlives the array) and must be turned back into
+/// the handle with `big_of_owned_word`. Lets a reader consume the array
+/// once for both cases.
+#[inline(always)]
+pub fn word_owned(a: &LTagVec, i: u64) -> u64 {
+    let w = word(a, i);
+    if !is_small(w) {
+        own_big_word(w);
+    }
+    w
+}
+
+#[cold]
+#[inline(never)]
+extern "C" fn own_big_word(w: u64) {
+    std::mem::forget(word_as_big(&w).clone());
+}
+
+/// The big handle owned by a word from `word_owned`.
+#[inline(always)]
+pub fn big_of_owned_word(w: u64) -> LBig {
+    debug_assert!(!is_small(w));
+    unsafe { std::mem::transmute::<usize, LBig>(w as usize) }
+}
+
 #[inline(always)]
 fn set_raw(mut a: LTagVec, i: u64, w: u64) -> LTagVec {
     let v = make_mut(&mut a);
@@ -197,7 +227,7 @@ fn push_raw(mut a: LTagVec, w: u64) -> LTagVec {
 
 #[cold]
 #[inline(never)]
-fn push_slow(mut a: LTagVec, w: u64) -> LTagVec {
+extern "C" fn push_slow(mut a: LTagVec, w: u64) -> LTagVec {
     let v = make_mut(&mut a);
     let n = v.w.len();
     reserve(&mut v.w, n.max(4));

@@ -22,9 +22,12 @@ CODECS = {
     "nat": ("LNatArr", "Nat", """
 // Small values below 2^63 are stored as `(v << 1) | 1`; all others as big
 // numbers (normalized back to `Nat::Small` when read, for values below 2^64).
+// The array is consumed once (a second use in one branch would make Reussir
+// release it out of line in the other): a big word comes back owning a
+// reference.
 fn l2r_natarr_get(a : LNatArr, i : u64) -> Nat {
-    let w = l2r_natarr_word(a, i);
-    if (w & 1) == 1 { Nat::Small{w >> 1} } else { l2r_nat_norm(l2r_natarr_big(a, i)) }
+    let w = l2r_natarr_word_owned(a, i);
+    if (w & 1) == 1 { Nat::Small{w >> 1} } else { l2r_nat_norm(l2r_big_of_owned_word(w)) }
 }
 
 fn l2r_natarr_set(a : LNatArr, i : u64, x : Nat) -> LNatArr {
@@ -54,8 +57,8 @@ fn l2r_natarr_replicate(n : u64, x : Nat) -> LNatArr {
 fn l2r_int_is_tag_small(v : i64) -> bool { ((v + 4611686018427387904) as u64) < 9223372036854775808 }
 
 fn l2r_intarr_get(a : LIntArr, i : u64) -> Int {
-    let w = l2r_intarr_word(a, i);
-    if (w & 1) == 1 { Int::Small{(w as i64) >> 1} } else { l2r_int_norm(l2r_intarr_big(a, i)) }
+    let w = l2r_intarr_word_owned(a, i);
+    if (w & 1) == 1 { Int::Small{(w as i64) >> 1} } else { l2r_int_norm(l2r_big_of_owned_word(w)) }
 }
 
 fn l2r_intarr_set(a : LIntArr, i : u64, x : Int) -> LIntArr {
@@ -96,6 +99,9 @@ fn l2r_{k}arr_size(a : {T}) -> u64 [{{ {{ let r = leanrt::tagvec::size(&a); lean
 fn l2r_{k}arr_word(a : {T}, i : u64) -> u64 [{{ {{ let r = leanrt::tagvec::word(&a, i); leanrt::rc_release(a); r }} }}];
 #[ffi(import)]
 fn l2r_{k}arr_big(a : {T}, i : u64) -> LBig [{{ {{ let r = leanrt::tagvec::big(&a, i); leanrt::rc_release(a); r }} }}];
+// The word at `i`; a big word owns a reference (see `l2r_big_of_owned_word`).
+#[ffi(import)]
+fn l2r_{k}arr_word_owned(a : {T}, i : u64) -> u64 [{{ {{ let r = leanrt::tagvec::word_owned(&a, i); leanrt::rc_release(a); r }} }}];
 #[ffi(import)]
 fn l2r_{k}arr_set_word(a : {T}, i : u64, w : u64) -> {T} [{{ leanrt::tagvec::set_word(a, i, w) }}];
 #[ffi(import)]

@@ -9,7 +9,12 @@
 //!
 //! Small hot functions are `#[inline]` so they are instantiated into the
 //! textures (and can be inlined into Reussir code); slow paths are
-//! `#[inline(never)]`.
+//! `#[inline(never)]`. The cold paths of hot textures are `extern "C"`
+//! (they cannot unwind: runtime failures exit or abort), so calls to them
+//! need no landing pads, which keeps the textures under LLVM's inlining
+//! threshold.
+
+#![allow(improper_ctypes_definitions)]
 
 extern crate reussir_rt;
 
@@ -46,7 +51,7 @@ pub fn rc_release<T>(r: reussir_rt::rc::Rc<T>) {
 
 #[cold]
 #[inline(never)]
-fn rc_drop_last<T>(r: reussir_rt::rc::Rc<T>) {
+extern "C" fn rc_drop_last<T>(r: reussir_rt::rc::Rc<T>) {
     drop(r)
 }
 

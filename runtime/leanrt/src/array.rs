@@ -43,7 +43,7 @@ pub fn release<T: Clone>(v: RVec<T>) {
 
 #[cold]
 #[inline(never)]
-fn drop_last<T>(r: Rc<Vec<T>>) {
+extern "C" fn drop_last<T>(r: Rc<Vec<T>>) {
     drop(r)
 }
 
@@ -57,25 +57,30 @@ pub fn as_slice<T: Clone>(v: &RVec<T>) -> &[T] {
 #[inline(always)]
 pub fn make_mut<T: Clone>(v: &mut Rc<Vec<T>>, extra: usize) -> &mut Vec<T> {
     if !v.is_unique() {
-        copy_shared(v, extra);
+        // By value: the address of `v` (often a local of the Reussir caller
+        // once this is inlined) must not escape, or tail calls are lost.
+        unsafe { std::ptr::write(v, copy_shared(std::ptr::read(v), extra)) };
     }
     let vec = unsafe { v.data_mut() };
     reserve(vec, extra);
     vec
 }
 
-/// Replace a shared array by a private copy (with room for `extra` more).
+/// A private copy of a shared array (with room for `extra` more), releasing
+/// the shared one.
 #[cold]
 #[inline(never)]
-fn copy_shared<T: Clone>(v: &mut Rc<Vec<T>>, extra: usize) {
-    *v = rc_new(vec_from_slice(v, extra));
+extern "C" fn copy_shared<T: Clone>(v: Rc<Vec<T>>, extra: usize) -> Rc<Vec<T>> {
+    let c = rc_new(vec_from_slice(&v, extra));
+    drop(v);
+    c
 }
 
 /// An index that the Lean-level proof (or the prelude's bounds check)
 /// guarantees to be in range was not: a lean2rr/runtime bug.
 #[cold]
 #[inline(never)]
-fn index_bug(i: u64, n: usize) -> ! {
+extern "C" fn index_bug(i: u64, n: usize) -> ! {
     crate::internal_panic(&format!("array index {} out of bounds {} (runtime invariant)", i, n))
 }
 
@@ -101,7 +106,7 @@ pub fn check_alloc(n: u64, elem: u64) {
 
 #[cold]
 #[inline(never)]
-fn check_alloc_slow(n: u64, elem: u64) {
+extern "C" fn check_alloc_slow(n: u64, elem: u64) {
     extern "C" {
         fn malloc(n: usize) -> *mut std::ffi::c_void;
         fn free(p: *mut std::ffi::c_void);
@@ -165,7 +170,7 @@ pub fn push<T: Clone>(v: RVec<T>, x: T) -> RVec<T> {
 
 #[cold]
 #[inline(never)]
-fn push_slow<T: Clone>(mut r: Rc<Vec<T>>, x: T) -> RVec<T> {
+extern "C" fn push_slow<T: Clone>(mut r: Rc<Vec<T>>, x: T) -> RVec<T> {
     let n = r.len();
     make_mut(&mut r, n.max(4)).push(x);
     from_rc(r)
@@ -188,7 +193,7 @@ pub fn set<T: Clone>(v: RVec<T>, i: u64, x: T) -> RVec<T> {
 
 #[cold]
 #[inline(never)]
-fn set_slow<T: Clone>(mut r: Rc<Vec<T>>, i: u64, x: T) -> RVec<T> {
+extern "C" fn set_slow<T: Clone>(mut r: Rc<Vec<T>>, i: u64, x: T) -> RVec<T> {
     let vec = make_mut(&mut r, 0);
     match vec.get_mut(i as usize) {
         Some(slot) => *slot = x,
@@ -213,7 +218,7 @@ pub fn pop<T: Clone>(v: RVec<T>) -> RVec<T> {
 
 #[cold]
 #[inline(never)]
-fn pop_slow<T: Clone>(mut r: Rc<Vec<T>>) -> RVec<T> {
+extern "C" fn pop_slow<T: Clone>(mut r: Rc<Vec<T>>) -> RVec<T> {
     make_mut(&mut r, 0).pop();
     from_rc(r)
 }
@@ -235,7 +240,7 @@ pub fn swap<T: Clone>(v: RVec<T>, i: u64, j: u64) -> RVec<T> {
 
 #[cold]
 #[inline(never)]
-fn swap_slow<T: Clone>(mut r: Rc<Vec<T>>, i: u64, j: u64) -> RVec<T> {
+extern "C" fn swap_slow<T: Clone>(mut r: Rc<Vec<T>>, i: u64, j: u64) -> RVec<T> {
     make_mut(&mut r, 0).swap(i as usize, j as usize);
     from_rc(r)
 }
