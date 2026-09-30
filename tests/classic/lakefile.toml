@@ -12,6 +12,14 @@ defaultTargets = [
   "unionfind",
   "rbmap",
   "liasolver",
+  "bignum",
+  "sieve",
+  "mergesort",
+  "higher-order",
+  "monadic-interp",
+  "typeclass-generic",
+  "strings",
+  "hashmap",
 ]
 
 [[lean_exe]]
@@ -53,3 +61,35 @@ root = "Rbmap"
 [[lean_exe]]
 name = "liasolver"
 root = "Liasolver"
+
+[[lean_exe]]
+name = "bignum"
+root = "Bignum"
+
+[[lean_exe]]
+name = "sieve"
+root = "Sieve"
+
+[[lean_exe]]
+name = "mergesort"
+root = "Mergesort"
+
+[[lean_exe]]
+name = "higher-order"
+root = "HigherOrder"
+
+[[lean_exe]]
+name = "monadic-interp"
+root = "MonadicInterp"
+
+[[lean_exe]]
+name = "typeclass-generic"
+root = "TypeclassGeneric"
+
+[[lean_exe]]
+name = "strings"
+root = "Strings"
+
+[[lean_exe]]
+name = "hashmap"
+root = "Hashmap"
