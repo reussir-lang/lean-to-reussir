@@ -301,6 +301,39 @@ def baseDeclFor? (n : Name) : MonoM (Option (Decl .pure)) := do
       if ← recompile n then return (← get).extraBase.find? n
   return some d
 
+/-- The `IO.Error` builders of Lean's C runtime (exported Lean definitions),
+numbered by the error kind the runtime's fallible primitives report (the
+order of `decode_io_error`; see runtime/README.md). -/
+def ioErrorBuilderSyms : Array String := #[
+  "lean_mk_io_error_other_error", "lean_mk_io_error_interrupted",
+  "lean_mk_io_error_invalid_argument", "lean_mk_io_error_invalid_argument_file",
+  "lean_mk_io_error_no_file_or_directory", "lean_mk_io_error_permission_denied",
+  "lean_mk_io_error_permission_denied_file", "lean_mk_io_error_resource_exhausted",
+  "lean_mk_io_error_resource_exhausted_file", "lean_mk_io_error_inappropriate_type",
+  "lean_mk_io_error_inappropriate_type_file", "lean_mk_io_error_no_such_thing",
+  "lean_mk_io_error_no_such_thing_file", "lean_mk_io_error_already_exists",
+  "lean_mk_io_error_already_exists_file", "lean_mk_io_error_hardware_fault",
+  "lean_mk_io_error_unsatisfied_constraints", "lean_mk_io_error_illegal_operation",
+  "lean_mk_io_error_resource_vanished", "lean_mk_io_error_protocol_error",
+  "lean_mk_io_error_time_expired", "lean_mk_io_error_resource_busy",
+  "lean_mk_io_error_unsupported_operation"]
+
+/-- Is `sym` a fallible IO primitive whose errors the runtime reports
+through its last-error protocol? -/
+def isFallibleIOSym (sym : String) : Bool :=
+  sym.startsWith "lean_io_prim_handle_" ||
+  sym ∈ ["lean_io_remove_file", "lean_io_create_dir", "lean_io_remove_dir", "lean_io_rename",
+         "lean_io_hard_link", "lean_io_realpath", "lean_io_read_dir", "lean_io_metadata",
+         "lean_io_symlink_metadata"]
+
+/-- A fallible IO extern needs the `IO.Error` builders: instantiate them. -/
+def ensureIOErrorBuilders (f : Name) : MonoM Unit := do
+  let some sym := getExternNameFor (← getEnv) `c f | return
+  unless isFallibleIOSym sym do return
+  for b in ioErrorBuilderSyms do
+    if let some d := (← exportMap).get? b then
+      discard <| instanceName { decl := d, typeArgs := #[] }
+
 /-- Redirect a call target: an extern implemented by an exported Lean
 definition becomes that definition; with `safeSources`, a type-unsafe
 implementation becomes the safe declaration it implements. -/
@@ -406,6 +439,7 @@ def renameApp (statics : Std.HashMap FVarId Expr) (f : Name) (args : Array (Arg 
       modify fun s => { s with initConsts := s.initConsts.push (f, initFn) }
     return none
   let f ← redirectTarget f
+  if isExtern (← getEnv) f then ensureIOErrorBuilders f
   let some callee ← baseDeclFor? f | return none
   let positions := typeParamPositions callee
   if let .extern _ := callee.value then

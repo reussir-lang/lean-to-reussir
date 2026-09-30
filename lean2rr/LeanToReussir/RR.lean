@@ -68,6 +68,25 @@ mutual
     result : Expr
 end
 
+/-- Parse a type as written in the prelude: `name` or `name<T, …>`. -/
+partial def parseTy (s : String) : Option Ty :=
+  let s := s.trim
+  if s.isEmpty then none else
+  match s.splitOn "<" with
+  | [n] => if n.all (fun c => c.isAlphanum || c == '_') then some (.named n) else none
+  | n :: _ =>
+    if !s.endsWith ">" then none else
+    let inner := ((s.drop (n.length + 1)).dropRight 1).toString
+    -- Split at top-level commas.
+    let (parts, cur, _) := inner.foldl (init := (#[], "", 0)) fun (ps, cur, depth) c =>
+      if c == ',' && depth == 0 then (ps.push cur, "", depth)
+      else (ps, cur.push c, if c == '<' then depth + 1 else if c == '>' then depth - 1 else depth)
+    let parts := parts.push cur
+    match parts.mapM parseTy with
+    | some args => some (.app n.trim args)
+    | none => none
+  | [] => none
+
 /-- The unit value. -/
 def Expr.unitVal : Expr := .ctor "L2RUnit" (some "u") #[]
 

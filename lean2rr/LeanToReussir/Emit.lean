@@ -180,7 +180,27 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
   let preludeFns := (prelude.splitOn "fn ").foldl (init := ({} : Std.HashSet String)) fun acc chunk =>
     let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
     if name.isEmpty then acc else acc.insert name.toString
-  let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns }
+  -- Result types from the prelude's one-line signatures (`fn f(…) -> T …`).
+  let preludeRets := prelude.splitOn "\n" |>.foldl (init := ({} : Std.HashMap String RR.Ty)) fun acc line =>
+    let line := line.trimLeft
+    let line := if line.startsWith "pub fn " then (line.drop 4).toString else line
+    if !line.startsWith "fn " then acc else
+    let name := ((line.drop 3).takeWhile fun c => c.isAlphanum || c == '_').toString
+    match line.splitOn ") -> " with
+    | _ :: rest@(_ :: _) =>
+      let r := rest.getLast!
+      let r := ((r.splitOn " [{").head!.splitOn " {").head!.trim
+      match RR.parseTy r with
+      | some t => acc.insert name t
+      | none => acc
+    | _ => acc
+  -- The `IO.Error` builders' instances (monomorphic, so keyed by declaration).
+  let byDecl : NameMap Name := keys.foldl (init := {}) fun m inst k =>
+    if k.typeArgs.isEmpty && k.dicts.isEmpty then m.insert k.decl inst else m
+  let exports ← (exportMap.run' {config := {}} : CoreM _)
+  let ioErrorBuilders := ioErrorBuilderSyms.map fun sym => (exports.get? sym).bind byDecl.find?
+  let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
+                          preludeRets, ioErrorBuilders }
   let act : LowerM Unit := do
     -- Once-cells of `initialize` constants (read by `calleeOf`).
     for st in startup do

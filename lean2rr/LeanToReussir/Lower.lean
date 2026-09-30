@@ -466,6 +466,154 @@ def ioPayloadTy (resTy : RR.Ty) : LowerM RR.Ty := do
   | some (some (_, t)) => return t
   | _ => return RR.Ty.unit
 
+/-- A value of generated type `ty` built with constructor `ctor` from its
+relevant fields. -/
+def ctorValue (ty : RR.Ty) (ctor : Name) (fields : Array RR.Expr) : LowerM RR.Expr := do
+  let .named tn := ty | throwError "lean2rr: constructor {ctor} at type {ty.render}"
+  if tn == "bool" then return .atom (if ctor == ``Bool.true then "true" else "false")
+  let some info := (← get).typeInfos[tn]? | throwError "lean2rr: constructor {ctor} of non-nominal type {tn}"
+  let some layout := info.ctors.find? ctor | throwError "lean2rr: constructor {ctor} not in type {tn}"
+  return match info.shape with
+    | .struct => .ctor tn none fields
+    | _ => .ctor tn (some layout.variant) fields
+
+/-- The types of the relevant fields of constructor `ctor` of generated type `ty`. -/
+def ctorFieldTys (ty : RR.Ty) (ctor : Name) : LowerM (Array RR.Ty) := do
+  let .named tn := ty | return #[]
+  let some info := (← get).typeInfos[tn]? | return #[]
+  let some layout := info.ctors.find? ctor | return #[]
+  return layout.fields.filterMap (·.map (·.2))
+
+/-- The index of a value of an enumeration type (a generated `[value]`
+enum without fields), as `u8`: a generated `match`. -/
+def enumIndexFn (tn : String) : LowerM String := do
+  let name := s!"l2r_enum_index_{tn}"
+  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+    let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no enumeration {tn}"
+    let arms := info.ctorOrder.zipIdx.filterMap fun (c, i) => (info.ctors.find? c).map fun l =>
+      { ty := tn, ctor := some l.variant, binders := #[], body := ⟨#[("i", some (.named "u8"), .atom (toString i))], .var "i"⟩ : RR.Arm }
+    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named tn)] (.named "u8") (.ofExpr (.mtch (.var "x") arms))) }
+  return name
+
+/-- The value of enumeration type `tn` with index `i : u64` (a generated
+chain of comparisons). -/
+def enumOfIndexFn (tn : String) : LowerM String := do
+  let name := s!"l2r_enum_of_index_{tn}"
+  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+    let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no enumeration {tn}"
+    let ls := info.ctorOrder.filterMap info.ctors.find?
+    let some last := ls.back? | throwError "lean2rr: empty enumeration {tn}"
+    let mut e : RR.Expr := .ctor tn (some last.variant) #[]
+    for j in [:ls.size - 1] do
+      let i := ls.size - 2 - j
+      let some l := ls[i]? | continue
+      e := .block ⟨#[("k", some (.named "u64"), .atom (toString i))],
+        .ite (.atom "x == k") (.ofExpr (.ctor tn (some l.variant) #[])) (.ofExpr e)⟩
+    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named "u64")] (.named tn) (.ofExpr e)) }
+  return name
+
+/-- `IO.FS.Metadata` from the runtime's `[atime s, ns, mtime s, ns, size,
+file type, links]`. -/
+def metadataOf (mt : RR.Ty) (v : RR.Expr) : LowerM RR.Expr := do
+  let fs ← ctorFieldTys mt ``IO.FS.Metadata.mk
+  let some stTy := fs[0]? | throwError "lean2rr: bad IO.FS.Metadata type"
+  let some (RR.Ty.named ftn) := fs[3]? | throwError "lean2rr: bad IO.FS.Metadata type"
+  let get (i : Nat) : RR.Expr := .call "l2r_array_get" #[.named "u64"] #[.var "m", .atom (toString i)]
+  let time (i : Nat) : LowerM RR.Expr := ctorValue stTy ``IO.FS.SystemTime.mk
+    #[.call "lean_int64_to_int_sint" #[] #[get i], .atom s!"({(get (i + 1)).render 0} as u32)"]
+  let md ← ctorValue mt ``IO.FS.Metadata.mk
+    #[← time 0, ← time 2, get 4, .call (← enumOfIndexFn ftn) #[] #[get 5], get 6]
+  return .block ⟨#[("m", some (.app "RVec" #[.named "u64"]), v)], md⟩
+
+/-- `Array IO.FS.DirEntry` from a directory and the runtime's entry names. -/
+def dirEntriesOf (arrTy : RR.Ty) (root names : RR.Expr) : LowerM RR.Expr := do
+  let some repr ← arrayRepr? arrTy | throwError "lean2rr: bad directory entry array {arrTy.render}"
+  let .named en := repr.value | throwError "lean2rr: bad directory entry type"
+  let name := s!"l2r_dir_entries_{en}"
+  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+    let u64 := RR.Ty.named "u64"
+    let entry ← ctorValue repr.value ``IO.FS.DirEntry.mk
+      #[.var "root", .call "l2r_array_get" #[.named "LStr"] #[.var "names", .var "i"]]
+    let body : RR.Block := .ofExpr <| .ite (.atom "i < n")
+      ⟨#[("one", some u64, .atom "1"), ("e", some repr.storage, repr.store entry)],
+        .call (name ++ "_go") #[] #[.var "root", .var "names", .atom "i + one", .var "n",
+          repr.call "push" #[.var "acc", .var "e"]]⟩
+      (.ofExpr (.var "acc"))
+    let strs := RR.Ty.app "RVec" #[.named "LStr"]
+    let entry' : RR.Block := ⟨#[("n", some u64, .call "l2r_array_size" #[.named "LStr"] #[.var "names"]),
+        ("zero", some u64, .atom "0")],
+      .call (name ++ "_go") #[] #[.var "root", .var "names", .var "zero", .var "n", repr.call "empty" #[]]⟩
+    modify fun s => { s with fns := s.fns ++ #[
+      .fn (name ++ "_go") #[("root", .named "LStr"), ("names", strs), ("i", u64), ("n", u64), ("acc", arrTy)] arrTy body,
+      .fn name #[("root", .named "LStr"), ("names", strs)] arrTy entry'] }
+  return .call name #[] #[root, names]
+
+/-- The runtime primitive implementing fallible IO extern `sym`. -/
+def fallibleIOPrim (sym : String) : String :=
+  if sym == "lean_io_prim_handle_mk" then "l2r_fs_open"
+  else if sym.startsWith "lean_io_prim_handle_" then "l2r_fs_" ++ (sym.drop 20).toString
+  else if sym == "lean_io_realpath" then "l2r_fs_real_path"
+  else if sym == "lean_io_symlink_metadata" then "l2r_fs_metadata"
+  else "l2r_fs_" ++ (sym.drop 8).toString
+
+/-- Glue for a fallible IO extern: call the runtime primitive, then
+`l2r_io_finish` turns its outcome into `EST.Out.ok payload` or into
+`EST.Out.error e`, where `e` is built by Lean's own `IO.Error` builder for
+the error kind the runtime reports (as Lean's `decode_io_error`). -/
+def fallibleIOGlue (prim : String) (primRet : RR.Ty) (argTys : Array RR.Ty) (args : Array RR.Expr)
+    (ret : Expr) (follow : Bool := true) : LowerM RR.Expr := do
+  let resTy ← lowerType ret
+  let .named rn := resTy | throwError "lean2rr: IO result of type {resTy.render}"
+  let some info := (← get).typeInfos[rn]? | throwError "lean2rr: IO result of type {rn}"
+  let some errL := info.ctors.find? ``EST.Out.error | throwError "lean2rr: IO result {rn} cannot fail"
+  let payload ← ioPayloadTy resTy
+  -- Arguments: enumerations (`IO.FS.Mode`) are passed as their index.
+  let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[]
+  let mut vals := #[]
+  for (a, t) in args.zip argTys do
+    let x ← fresh "fa"
+    let e ← match t with
+      | .named tn =>
+        -- A handle is `lcAny` in mono code, so it arrives boxed.
+        if tn == boxName then coerce a t (.named "LHandle") else
+        match (← get).typeInfos[tn]? with
+        | some ti => if ti.shape == .enumLike then pure (RR.Expr.call (← enumIndexFn tn) #[] #[a]) else pure a
+        | none => pure a
+      | _ => pure a
+    lets := lets.push (x, none, e)
+    vals := vals.push (RR.Expr.var x)
+  let v ← fresh "fv"
+  -- `metadata` and `symlinkMetadata` differ in following symbolic links.
+  if prim == "l2r_fs_metadata" then vals := vals.push (.atom (toString follow))
+  lets := lets.push (v, some primRet, .call prim #[] vals)
+  -- Success: the payload.
+  let x ← fresh "fx"
+  let okVal ← if payload == RR.Ty.unit then pure RR.Expr.unitVal
+    else if prim == "l2r_fs_metadata" then metadataOf payload (.var x)
+    else if prim == "l2r_fs_read_dir" then dirEntriesOf payload vals[0]! (.var x)
+    else coerce (.var x) primRet payload
+  let okFn := RR.Expr.lam x primRet (.ofExpr (← wrapIOResult resTy okVal))
+  -- Failure: the builder of the reported kind.
+  let (k, errno, fname, details) := ("ek", "ee", "ef", "ed")
+  let errTy ← match errL.fields[0]? with
+    | some (some (_, t)) => pure t
+    | _ => throwError "lean2rr: IO result {rn} has no error field"
+  let mut mk : RR.Expr := .call "l2r_unreachable" #[errTy] #[]
+  for i in [:(← read).ioErrorBuilders.size] do
+    let j := (← read).ioErrorBuilders.size - 1 - i
+    let some inst := (← read).ioErrorBuilders[j]! | continue
+    let callee ← calleeOf inst
+    let .code fn ps _ := callee | continue
+    let call := if ps.size == 3 then RR.Expr.call fn #[] #[.var fname, .var errno, .var details]
+      else RR.Expr.call fn #[] #[.var errno, .var details]
+    let kj ← fresh "kj"
+    mk := .block ⟨#[(kj, some (.named "u32"), .atom (toString j))],
+      .ite (.atom s!"{k} == {kj}") (.ofExpr call) (.ofExpr mk)⟩
+  let errVal := RR.Expr.ctor rn (some errL.variant) #[mk]
+  let errFn := RR.Expr.lam k (.named "u32") <| .ofExpr <| .lam errno (.named "u32") <| .ofExpr <|
+    .lam fname (.named "LStr") <| .ofExpr <| .lam details (.named "LStr") (.ofExpr errVal)
+  return .block ⟨lets, .call "l2r_io_finish" #[primRet, resTy] #[.var v, okFn, errFn]⟩
+
 /-- A standard stream (`IO.getStdout` & co.) as a Lean `IO.FS.Stream` value:
 each field is a curried closure calling the runtime primitive
 `l2r_stream_<field>` on file descriptor `fd`. Erased and world parameters
@@ -554,24 +702,6 @@ def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : E
   | ``ST.Prim.Ref.ptrEq =>
     return some (← wrapIOResult resTy (.call "l2r_ref_ptr_eq" #[st] #[← asRef 0, ← asRef 1]))
   | _ => return none
-
-/-- A value of generated type `ty` built with constructor `ctor` from its
-relevant fields. -/
-def ctorValue (ty : RR.Ty) (ctor : Name) (fields : Array RR.Expr) : LowerM RR.Expr := do
-  let .named tn := ty | throwError "lean2rr: constructor {ctor} at type {ty.render}"
-  if tn == "bool" then return .atom (if ctor == ``Bool.true then "true" else "false")
-  let some info := (← get).typeInfos[tn]? | throwError "lean2rr: constructor {ctor} of non-nominal type {tn}"
-  let some layout := info.ctors.find? ctor | throwError "lean2rr: constructor {ctor} not in type {tn}"
-  return match info.shape with
-    | .struct => .ctor tn none fields
-    | _ => .ctor tn (some layout.variant) fields
-
-/-- The types of the relevant fields of constructor `ctor` of generated type `ty`. -/
-def ctorFieldTys (ty : RR.Ty) (ctor : Name) : LowerM (Array RR.Ty) := do
-  let .named tn := ty | return #[]
-  let some info := (← get).typeInfos[tn]? | return #[]
-  let some layout := info.ctors.find? ctor | return #[]
-  return layout.fields.filterMap (·.map (·.2))
 
 /-- Externs over Lean-defined types: the runtime's generic helpers receive
 the generated constructors as arguments. -/
@@ -738,6 +868,12 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
   -- not proofs.
   let mask ← params.mapM fun p => return externParamPassed p && !(← isPropTy p)
   let passedArgs := (mask.zip args).filterMap fun (m, a) => if m then some a else none
+  -- A fallible IO extern (files): the runtime's last-error protocol.
+  if isFallibleIOSym sym then
+    let prim := fallibleIOPrim sym
+    if let some primRet := (← read).preludeRets[prim]? then
+      let argTys ← (mask.zip params).filterMapM fun (m, p) => if m then some <$> lowerType p else pure none
+      return ← fallibleIOGlue prim primRet argTys passedArgs ret (follow := sym != "lean_io_symlink_metadata")
   -- A `BaseIO` extern that cannot fail: the runtime provides its payload
   -- as `l2r_<sym without lean_>`; the result is wrapped as an IO result.
   if sym.startsWith "lean_" then

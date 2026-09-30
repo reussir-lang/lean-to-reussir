@@ -55,6 +55,10 @@ structure LowerCtx where
   table : RelevanceTable
   /-- Functions the runtime prelude defines. -/
   preludeFns : Std.HashSet String := {}
+  /-- Result types of the prelude's functions (from their signatures). -/
+  preludeRets : Std.HashMap String RR.Ty := {}
+  /-- Instances of the `IO.Error` builders, by runtime error kind. -/
+  ioErrorBuilders : Array (Option Name) := #[]
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/
@@ -125,7 +129,7 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
   match t with
   | .named n =>
     if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
-            "LStr", "LBig", "LNatArr", "LIntArr", boxName] then return true
+            "LStr", "LBig", "LNatArr", "LIntArr", "LHandle", boxName] then return true
     match (← get).typeInfos[n]? with
     | some info => return info.shape != .enumLike
     | none => return false
@@ -247,6 +251,7 @@ mutual
     | ``Float => return .named "f64"
     | ``Float32 => return .named "f32"
     | ``Bool => return .bool
+    | ``IO.FS.Handle => return .named "LHandle"
     | ``Unit | ``PUnit | ``lcVoid | ``lcErased => return .unit
     | ``lcAny => return RR.Ty.box
     | ``Nat => return .named "Nat"
