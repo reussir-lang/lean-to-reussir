@@ -541,7 +541,22 @@ another join point. Free variables stay in scope (binders are unique), and
 no code is duplicated. A join point declared before a `cases` of which only
 one branch uses it often satisfies J2 once sunk into that branch.
 
-**Choice and nesting.** J1 applies first, then J2, then J3.
+**J4, outlined join points that call back: one state machine.** When a
+self-recursive declaration has outlined join points whose bodies call the
+declaration (a loop whose body is a DAG of join points, e.g. a chain of
+`if`s with shared continuations), J3 would make the loop mutually
+recursive. Instead the declaration becomes one function over an enum of
+entry points: one variant for the declaration's own parameters and one per
+outlined join point (its captured variables and parameters). The function
+matches on the entry point; a jump to an outlined join point and a self
+tail call both become a self tail call with the corresponding variant, and
+LLVM turns them into a loop. The declaration itself is a wrapper that
+enters at its own variant. The enum is a shared (heap) type for now:
+Reussir miscompiles a `[value]` enum whose variants hold `Nat` fields
+(reported); Reussir's reuse makes the shared cell cheap.
+
+**Choice and nesting.** J1 applies first, then J2, then J3 (J4 when an
+outlined body calls the declaration back).
 - J2 requires every jump to `j` to stay inside the same Reussir function.
   If `j` is also jumped to from inside a join point that was outlined, `j`
   is outlined too.
@@ -786,41 +801,36 @@ Tests run each program natively and through lean2rr, and compare:
 
 ## 9. Open items
 
-Probe results so far (preliminary; to be re-checked when the probes are
-completed):
-- **Output.** Printing and argv go through Reussir's polymorphic FFI: Rust
-  function bodies (`println!`, `std::env::args`) compiled into the program.
-- **Standard library.** Using it requires linking the prebuilt std
-  interfaces and archives. It has no `Result` type. `std::string::String`
-  cannot be read from outside the std package, so the runtime defines its
-  own string handle.
-- **Runtime types in Rust.** An opaque runtime type must be nameable with
-  only `std` and `reussir_rt` in scope, and the Rust glue is compiled at
-  edition 2015. External Rust crates (e.g. `num-bigint`) are usable when
-  built by the same `rustc`. A C-ABI shared library and statically linked
-  GMP also work.
-- **Recursion limits.** Polymorphic recursion makes Reussir's monomorphizer
-  loop without a diagnostic, and non-regular datatypes crash it at nesting
-  depth 128. lean2rr must never emit either; the §2.6 depth cap and `Box`
-  guarantee that.
-- **Arithmetic.** It lowers directly to LLVM: division, remainder, shifts
-  and float→int are undefined at the edge cases (hence the wrappers of
-  §5.8), and `+ - *` wrap.
-- **Tail calls.** Mutual tail calls compile to sibling calls at
-  `-O default` and above (§5.6).
-
-Still to probe (Reussir):
-- whether a `[value]` enum can hold a runtime handle (for `Nat`);
-- `unit` parameters, and closures returning closures;
-- whether effectful runtime calls are kept and ordered;
-- syntax limits for generated names and matches;
-- globals or once-cells;
-- compile time on large generated files.
+Probe results (Reussir at the pinned commit):
+- **FFI types.** Integers, floats, `bool`, `char`, `str`, opaque runtime
+  types and shared records cross the FFI boundary; `unit` only as a result.
+  `[value]` records, closures and `unit` parameters do not, hence
+  `L2RUnit`, the `ElemBox` element wrapper and the runtime's generic
+  helpers taking constructors as arguments.
+- **Runtime crate.** The runtime is an external Rust crate (`leanrt`) linked
+  into every program; its statics are shared by all FFI textures (each
+  texture is otherwise its own crate).
+- **Inlining.** Textures are inlined into Reussir code only when compiled
+  for the same target CPU and features as Reussir's own code, and only
+  under LLVM's size threshold, so hot runtime functions keep a small fast
+  path and an out-of-line slow path.
+- **Tail calls.** Self tail calls become loops, unless the function has a
+  stack slot whose address escapes (a `str` argument, a float or 4+
+  argument FFI call through the packed-argument path). Mutual tail calls
+  become sibling calls only when all arguments fit in registers.
+- **Effects.** Effectful FFI calls are never merged, dropped or reordered,
+  at every optimization level.
+- **Stacks.** The main thread has 8 MiB; the program body runs on a 1 GiB
+  thread (§5.11).
+- **Known Reussir bug.** A `[value]` enum whose variants hold `[value]`
+  enums with shared payloads (`Nat`) together with other fields is
+  miscompiled (segfault or wrong fields); reported, and avoided (§5.6).
+- **Candidate Reussir requests.** Guaranteed tail calls; `[value]` types
+  across the FFI (for `Nat` array elements without a wrapper); borrowed
+  FFI parameters (an array `get` currently takes ownership and releases).
 
 To verify (Lean):
-- the message printed on reaching unreachable code;
 - the evaluation order of startup constants and initializers;
-- that no local functions survive `lambdaLifting`;
 - the exact `lean_apply_n` behaviour;
 - that every Lean use of pointer equality is a shortcut, so answering
   "not equal" is safe.
