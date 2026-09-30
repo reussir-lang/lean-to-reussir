@@ -63,6 +63,9 @@ structure CodeCtx where
   /-- Types of join-point parameters, for lowering jump arguments. -/
   jpParams : Std.HashMap FVarId (Array RR.Ty) := {}
   sm : Option StateMachine := none
+  /-- Matched values that an arm returns: returned as the constructor
+  rebuilt from the arm's fields (see `lowerCases`). -/
+  rebuild : Std.HashMap FVarId (RR.Expr × RR.Ty) := {}
 
 /-! ## Function values
 
@@ -1491,6 +1494,13 @@ def lazyExtern (orig : Name) (params : Array Expr) (ret : Expr) (args0 : Array R
   let some e ← lazyExternGlue orig params ret args | return none
   return some (if pre.isEmpty then e else .block ⟨pre, e⟩)
 
+/-- The runtime primitive of a slice extern (see `customExtern`). -/
+def sliceGlue? : String → Option String
+  | "lean_byteslice_beq" => some "l2r_byteslice_beq"
+  | "lean_slice_hash" => some "l2r_slice_hash"
+  | "lean_slice_dec_lt" => some "l2r_slice_dec_lt"
+  | _ => none
+
 /-- Externs whose results mention Lean-defined types get generated glue
 (translation plan §5.8); returns `none` for ordinary externs. -/
 def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array RR.Expr) :
@@ -1512,9 +1522,10 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     let .named tn ← lowerType params[0]! | return none
     let some f ← structEqFn tn | return none
     return some (.call f #[] #[args[0]!, args[1]!])
-  -- `ByteSlice.beq`: the runtime compares the fields `byteArray`, `start`,
-  -- `stop` of both slices.
-  if (← externSymbol orig) == "lean_byteslice_beq" then
+  -- Slices (`ByteSlice.beq`, `String.Slice` hash and `<`): the runtime
+  -- takes the fields — the bytes or string, start, end — of each slice.
+  let sliceSym := (← externSymbol orig)
+  if let some prim := sliceGlue? sliceSym then
     let st ← lowerType params[0]!
     let .named sn := st | return none
     let some info := (← get).typeInfos[sn]? | return none
@@ -1524,8 +1535,10 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     let some (some (pe, _)) := layout.fields[2]? | return none
     let parts (x : RR.Expr) : Array RR.Expr :=
       #[.field x pa, .call "lean_usize_of_nat" #[] #[.field x ps], .call "lean_usize_of_nat" #[] #[.field x pe]]
+    if args.size == 1 then
+      return some (← withVar "bs" st args[0]! fun a => pure (.call prim #[] (parts a)))
     return some (← withVar "bs" st args[0]! fun a => withVar "bs" st args[1]! fun b =>
-      pure (.call "l2r_byteslice_beq" #[] (parts a ++ parts b)))
+      pure (.call prim #[] (parts a ++ parts b)))
   -- `ShareCommon.State.shareCommon s a`: hash-consing natively; its
   -- reference body `(a, s)` is observably the same (sharing is not).
   if orig == ``ShareCommon.State.shareCommon then
@@ -2017,6 +2030,21 @@ partial def chooseOutlined (body : Code .pure) : FVarIdSet := Id.run do
         changed := true
   return outlined
 
+/-- Whether `x` occurs in `c` only as a returned value (`return x`). -/
+partial def onlyReturned (x : FVarId) (c : Code .pure) : Bool :=
+  let inArg : Arg .pure → Bool := fun | .fvar y => y == x | _ => false
+  let inValue : LetValue .pure → Bool := fun
+    | .fvar f args => f == x || args.any inArg
+    | .const _ _ args _ => args.any inArg
+    | .proj _ _ y _ => y == x
+    | _ => false
+  match c with
+  | .let d k => !inValue d.value && onlyReturned x k
+  | .fun d k _ | .jp d k => onlyReturned x d.value && onlyReturned x k
+  | .jmp _ args => !args.any inArg
+  | .cases cs => cs.discr != x && cs.alts.all (onlyReturned x ·.getCode)
+  | .return _ | .unreach _ => true
+
 /-! ## Code -/
 
 /-- Free variable names of an RR expression/block (for outlined join points). -/
@@ -2063,6 +2091,7 @@ mutual
       let b ← lowerCode { ctx with vars := ctx.vars.insert d.fvarId (x, t) } outlined retTy k
       return { b with lets := #[(x, some t, e)] ++ b.lets }
     | .return x =>
+      if let some (e, t) := ctx.rebuild[x]? then return .ofExpr (← coerce e t retTy)
       match ctx.vars[x]? with
       | some (n, t) => return .ofExpr (← coerce (.var n) t retTy)
       | none => throwError "lean2rr: return of unbound variable (internal error)"
@@ -2228,6 +2257,14 @@ mutual
                 binders := binders.set! j (some x)
                 ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
               | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
+            -- An arm that returns the matched value itself (Lean's `simp`
+            -- replaces `C a b` by the scrutinee) returns the constructor
+            -- rebuilt from the fields instead: then every arm consumes the
+            -- matched cell, and Reussir can reuse it for the constructions of
+            -- the other arms (and for this one, giving the same cell back).
+            if !binders.isEmpty && binders.all Option.isSome && onlyReturned cs.discr k then
+              let e := RR.Expr.ctor tn (some layout.variant) (binders.map fun b => .var b.get!)
+              ctx' := { ctx' with rebuild := ctx'.rebuild.insert cs.discr (e, sty) }
             arms := arms.push { ty := tn, ctor := some layout.variant, binders, body := ← lowerCode ctx' outlined retTy k }
           | _ => pure ()
         if arms.size < info.ctorOrder.size then

@@ -1297,6 +1297,11 @@ Each item says what differs and when.
   so a DAG costs exponential time and memory, and a conversion on every call
   costs O(size) per call. Past the instance caps of §2.6 this can happen
   inside loops. Running out of memory changes the exit status.
+- *`Array.map` that changes the representation* (for example
+  `(Array.range n).map some`) converts the input to an array of `Box` on
+  entry and back on exit (§2.7), so the input, the boxed copy with one box
+  per element, and the result are live together: peak memory 1.5–2.7x
+  native in tests. Maps that keep the representation run in place.
 - *Element storage*: array elements, `ST.Ref` contents, once-cell values and
   polymorphic extern arguments whose type cannot cross the FFI boundary
   (enumerations, `L2RUnit`, `[value]` tuples) are wrapped in an
