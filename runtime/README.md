@@ -222,6 +222,18 @@ of `IO.FS.Stream`): `l2r_stream_putStr(fd, s)`, `l2r_stream_write(fd, b)`,
 (`EPIPE`, `EBADF` for the wrong direction, `EINVAL` on streams that were
 closed at startup); `l2r_stream_isTty(fd)` cannot fail.
 
+**Child processes** (`src/runtime/process.cpp`: `fork` + `execvp`, pipes
+with `O_CLOEXEC`, stdout flushed first when the child inherits stdin):
+`l2r_proc_spawn(cmd, args, cwd, has_cwd, env_names, env_values, env_set,
+modes, inherit_env, setsid) -> u32` (the pid; fallible; `modes` = stdin |
+stdout << 8 | stderr << 16 as `IO.Process.Stdio` indices; `env` as parallel
+arrays, `env_set[i]` for `some`), then `l2r_proc_end(0/1/2) -> LHandle` (the
+parent's end of a piped stream, a closed handle otherwise);
+`l2r_proc_wait(pid) -> u32` (128 + signal when killed),
+`l2r_proc_try_wait(pid) -> u64` (`1 << 32 | code` once exited, 0 while
+running), `l2r_proc_kill(pid, setsid)` — all fallible. A child that cannot
+change directory or execute prints Lean's message and exits with 255.
+
 **Other glue primitives.**
 
 | Lean | primitives |
@@ -349,6 +361,23 @@ lean2rr's dev branch (the tests pass with it).
     `ShareCommon.State.shareCommon` (`lean_state_sharecommon`, hash-consing
     natively) can use its reference body `(a, s)`, which is observably the
     same (sharing is not observable here).
+29. Child processes: `IO.Process.spawn` and `Child.wait`/`tryWait`/`kill`/
+    `pid`/`takeStdin` need glue over the `l2r_proc_*` primitives (above).
+    Natively a `Child` object also carries the pid (`uint32`) and whether it
+    was spawned with `setsid` (`uint8`) after its three Lean fields, so
+    lean2rr's `Child` record needs those two extra fields, set by the spawn
+    glue and kept by `takeStdin` (test `RtProcess`). `IO.Process.output`
+    reads stdout in a dedicated task while reading stderr; if deferred
+    tasks cannot interleave these, a runtime primitive draining both pipes
+    with `poll` can be added (ask).
+30. `Lean.Name.beq` (`lean_name_eq`): the prelude cannot define it (`Name`
+    is a Lean type); its reference body (structural equality) is what the
+    native code computes.
+31. `ptrAddrUnsafe` of a value lean2rr wraps at the call (`ElemBox{x}`)
+    measures the fresh wrapper, whose memory the next wrapper can reuse:
+    the runtime answers fresh addresses for `ElemBox…`/`L2RBox` wrappers
+    (test `RtPtrAddr`); lean2rr could instead call `lean_ptr_addr` on the
+    value's own handle when it has one.
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store `Nat`/`Int`/enum-like values directly; and `mi_free` takes mimalloc's
@@ -363,7 +392,11 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
 - Panics print `backtrace:` and `(stack trace unavailable)` instead of a
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`,
-  `ptrAddrUnsafe` is the handle pointer (or the value's bits for scalars).
+  `ptrAddrUnsafe` is the handle pointer (or the value's bits for scalars;
+  a fresh, never repeated number for values lean2rr wraps at the call, so
+  pointer-equality shortcuts are not taken for them), and
+  `dbgTraceIfShared` of such wrapped values (`Nat`, structures held by
+  value) never reports sharing.
 - Everything runs on one thread: tasks run when they are first needed or
   when `main` returns, pure tasks at once while no task is pending (a
   schedule native Lean can produce; translation plan §5.14). A task or
@@ -372,7 +405,11 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   lean2rr does not translate promises yet (the `l2r_promise_*` helpers
   assume a promise is resolved before it is read, which deferred tasks no
   longer ensure).
-  `IO.Process.spawn`, sockets, `Std.Sync` and timers are not implemented.
+  Sockets, `Std.Sync` and timers are not implemented; child processes wait
+  for lean2rr glue (request 29). `IO.Process.output` reads the child's
+  stdout in a dedicated task natively while it reads stderr; without
+  threads, a child that fills one pipe (64 KiB) while the program waits on
+  the other deadlocks.
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
 - Huge `Array.mkEmpty`/`ByteArray.emptyWithCapacity` capacities are checked

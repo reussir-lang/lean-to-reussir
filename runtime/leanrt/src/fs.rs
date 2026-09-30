@@ -169,6 +169,12 @@ fn fh(h: &LHandle) -> &mut CFile {
     unsafe { &mut (*(*(&**b as *const dyn Any as *const UnsafeCell<FileHandle>)).get()).f }
 }
 
+/// A handle over an open descriptor (`fdopen`; `flags` as `CFile::new`),
+/// or a closed one for `fd = -1`.
+pub(crate) fn handle_from_fd(fd: i32, flags: u32) -> LHandle {
+    mk(fd, flags)
+}
+
 fn mk(fd: i32, flags: u32) -> LHandle {
     let b = Box::new(UnsafeCell::new(FileHandle { f: CFile::new(fd, flags) }));
     if fd >= 0 {
