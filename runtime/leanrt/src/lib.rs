@@ -28,6 +28,7 @@ pub mod gmp;
 pub mod hash;
 pub mod io;
 pub mod once;
+pub mod proc;
 pub mod rt;
 pub mod string;
 pub mod tagvec;
@@ -35,6 +36,24 @@ pub mod task;
 
 pub use big::LBig;
 pub use string::LStr;
+
+static LAST_SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `dbgTraceIfShared`'s check, recorded for the prelude to read back.
+pub fn set_last_shared(b: bool) {
+    LAST_SHARED.store(b, std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn last_shared() -> bool {
+    LAST_SHARED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A fresh "address" for `ptrAddrUnsafe` of a value without one: odd (so
+/// never a real pointer) and never repeated.
+pub fn fresh_addr() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(2, std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Give up a handle a texture received by value but only borrowed (every
 /// FFI call consumes its arguments). A shared handle is just decremented;

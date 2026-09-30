@@ -150,8 +150,21 @@ fn run_case(seed: u64, mode: u8, steps: usize) {
     };
     let mut m = CFile::new(fb, flags);
     for step in 0..steps {
-        let op = rng.below(7);
+        let op = rng.below(8);
         let (ra, rb): (Result<Vec<u8>, i32>, Result<Vec<u8>, i32>) = match op {
+            7 => {
+                // Another writer changes both files the same way: stale
+                // buffered data must be reused (or not) as by glibc.
+                let at = rng.below(file_bytes(&pa).len() as u64 + 1) as usize;
+                let len = rng.below(300) as usize + 1;
+                let d: Vec<u8> = (0..len).map(|k| b'0' + ((k + step) % 10) as u8).collect();
+                for p in [&pa, &pb] {
+                    let mut f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+                    std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(at as u64)).unwrap();
+                    std::io::Write::write_all(&mut f, &d).unwrap();
+                }
+                (Ok(Vec::new()), Ok(Vec::new()))
+            }
             0 => {
                 let len = match rng.below(4) {
                     0 => rng.below(10),

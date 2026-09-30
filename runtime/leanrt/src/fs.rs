@@ -35,6 +35,9 @@ struct Global<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Global<T> {}
 
 struct LastError {
+    /// The last primitive failed (its errno may be 0: Lean reports whatever
+    /// `errno` holds, e.g. a sticky `ferror` after a libuv call reset it).
+    failed: bool,
     errno: i32,
     /// Reported by a libuv-based operation (`decode_uv_error`).
     uv: bool,
@@ -43,7 +46,7 @@ struct LastError {
 }
 
 static LAST: Global<LastError> =
-    Global(UnsafeCell::new(LastError { errno: 0, uv: false, fname: None, details: None }));
+    Global(UnsafeCell::new(LastError { failed: false, errno: 0, uv: false, fname: None, details: None }));
 
 fn last() -> &'static mut LastError {
     unsafe { &mut *LAST.0.get() }
@@ -51,6 +54,7 @@ fn last() -> &'static mut LastError {
 
 pub(crate) fn set_ok() {
     let l = last();
+    l.failed = false;
     l.errno = 0;
     l.uv = false;
     l.fname = None;
@@ -59,6 +63,7 @@ pub(crate) fn set_ok() {
 
 pub(crate) fn set_err(errno: i32, fname: Option<&[u8]>) {
     let l = last();
+    l.failed = true;
     l.errno = errno;
     l.uv = false;
     l.fname = fname.map(|f| f.to_vec());
@@ -101,7 +106,7 @@ extern "C" {
     fn strerror(e: i32) -> *const std::ffi::c_char;
 }
 
-use crate::cfile::errno_now;
+use crate::cfile::{errno_now, set_errno};
 
 const O_RDONLY: i32 = 0;
 const O_WRONLY: i32 = 1;
@@ -169,6 +174,12 @@ fn fh(h: &LHandle) -> &mut CFile {
     unsafe { &mut (*(*(&**b as *const dyn Any as *const UnsafeCell<FileHandle>)).get()).f }
 }
 
+/// A handle over an open descriptor (`fdopen`; `flags` as `CFile::new`),
+/// or a closed one for `fd = -1`.
+pub(crate) fn handle_from_fd(fd: i32, flags: u32) -> LHandle {
+    mk(fd, flags)
+}
+
 fn mk(fd: i32, flags: u32) -> LHandle {
     let b = Box::new(UnsafeCell::new(FileHandle { f: CFile::new(fd, flags) }));
     if fd >= 0 {
@@ -218,17 +229,19 @@ pub fn flush(h: &LHandle) {
 
 /// `lean_io_prim_handle_read`: a count whose byte array would overflow is
 /// `ENOMEM`; the array allocation itself has Lean's checks; then `fread`.
-pub(crate) fn lean_read(f: &mut CFile, n: u64) -> Result<Vec<u8>, i32> {
+/// (The checks run before `f` is borrowed: an out-of-memory panic exits,
+/// and the exit processing takes every `FILE`.)
+pub(crate) fn lean_read<'a>(f: impl FnOnce() -> &'a mut CFile, n: u64) -> Result<Vec<u8>, i32> {
     if n > u64::MAX - 24 {
         return Err(ENOMEM);
     }
     crate::array::check_alloc(n, 1);
-    f.read(n as usize)
+    f().read(n as usize)
 }
 
 /// `Handle.read n`.
 pub fn read_bytes(h: &LHandle, n: u64) -> Vec<u8> {
-    match lean_read(fh(h), n) {
+    match lean_read(|| fh(h), n) {
         Ok(v) => {
             set_ok();
             v
@@ -307,6 +320,7 @@ fn path_op(p: &[u8], f: impl FnOnce(*const std::ffi::c_char) -> i32) {
 /// `IO.FS.removeFile` (libuv's `uv_fs_unlink` natively).
 pub fn remove_file(p: &[u8]) {
     let Some(c) = c_path(p) else { return };
+    set_errno(0); // libuv (`uv__fs_work`) clears errno first
     if unsafe { unlink(c.as_ptr() as *const std::ffi::c_char) } != 0 {
         set_err_uv(errno_now(), Some(p))
     } else {
@@ -322,9 +336,23 @@ pub fn remove_dir(p: &[u8]) {
     path_op(p, |c| unsafe { rmdir(c) })
 }
 
+/// Run a Rust std call and leave C's `errno` as the single libc call native
+/// Lean makes would: unchanged on success (Rust may retry or probe, and
+/// `ReadDir` clears `errno`), the error's code on failure. (`errno` is
+/// observable through a handle's sticky error indicator.)
+fn with_errno<T>(f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+    let saved = errno_now();
+    let r = f();
+    match &r {
+        Ok(_) => set_errno(saved),
+        Err(e) => set_errno(e.raw_os_error().unwrap_or(EINVAL)),
+    }
+    r
+}
+
 /// `IO.currentDir`: `getcwd`; a failure is Lean's user error.
 pub fn current_dir() -> LStr {
-    match std::env::current_dir() {
+    match with_errno(std::env::current_dir) {
         Ok(p) => {
             set_ok();
             from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))
@@ -338,7 +366,7 @@ pub fn current_dir() -> LStr {
 
 /// `IO.appPath`: `/proc/self/exe`; a failure is Lean's user error.
 pub fn app_path() -> LStr {
-    match std::fs::read_link("/proc/self/exe") {
+    match with_errno(|| std::fs::read_link("/proc/self/exe")) {
         Ok(p) => {
             set_ok();
             from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))
@@ -352,7 +380,7 @@ pub fn app_path() -> LStr {
 
 /// `IO.Process.getCurrentDir`: `getcwd`; errors are decoded without a file.
 pub fn process_current_dir() -> LStr {
-    match std::env::current_dir() {
+    match with_errno(std::env::current_dir) {
         Ok(p) => {
             set_ok();
             from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))
@@ -420,6 +448,7 @@ pub fn create_temp_file() -> LHandle {
         unsafe { *TEMP_PATH.0.get() = Vec::new() };
         return mk(-1, 0);
     };
+    set_errno(0);
     let fd = unsafe { mkostemp(t.as_mut_ptr() as *mut std::ffi::c_char, O_CLOEXEC) };
     t.pop();
     if fd < 0 {
@@ -439,6 +468,7 @@ pub fn temp_file_path() -> LStr {
 /// `IO.FS.createTempDir` (`mkdtemp`, as libuv).
 pub fn create_temp_dir() -> LStr {
     let Some(mut t) = temp_template() else { return from_bytes(b"") };
+    set_errno(0);
     let r = unsafe { mkdtemp(t.as_mut_ptr() as *mut std::ffi::c_char) };
     t.pop();
     if r.is_null() {
@@ -472,6 +502,7 @@ pub fn rename_file(from: &[u8], to: &[u8]) {
 pub fn hard_link(from: &[u8], to: &[u8]) {
     let Some(a) = c_path(from) else { return };
     let Some(b) = c_path(to) else { return };
+    set_errno(0);
     if unsafe { link(a.as_ptr() as *const std::ffi::c_char, b.as_ptr() as *const std::ffi::c_char) } != 0 {
         set_err_uv(errno_now(), Some(from))
     } else {
@@ -491,7 +522,7 @@ pub fn real_path(p: &[u8]) -> LStr {
     if c_path(p).is_none() {
         return from_bytes(p);
     }
-    match std::fs::canonicalize(os_path(p)) {
+    match with_errno(|| std::fs::canonicalize(os_path(p))) {
         Ok(r) => {
             set_ok();
             from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(r.as_os_str()))
@@ -508,12 +539,17 @@ pub fn read_dir(p: &[u8]) -> Vec<LStr> {
     if c_path(p).is_none() {
         return Vec::new();
     }
-    match std::fs::read_dir(os_path(p)) {
-        Ok(it) => {
-            set_ok();
+    let r = with_errno(|| {
+        std::fs::read_dir(os_path(p)).map(|it| {
             it.filter_map(|e| e.ok())
                 .map(|e| from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(e.file_name().as_os_str())))
-                .collect()
+                .collect::<Vec<LStr>>()
+        })
+    });
+    match r {
+        Ok(v) => {
+            set_ok();
+            v
         }
         Err(e) => {
             set_err(e.raw_os_error().unwrap_or(EINVAL), Some(p));
@@ -533,6 +569,11 @@ pub fn metadata(p: &[u8], follow: bool) -> [u64; 7] {
     }
     let s = os_path(p);
     let m = if follow { std::fs::metadata(s) } else { std::fs::symlink_metadata(s) };
+    // libuv (`uv__fs_work`) clears errno before the call.
+    set_errno(match &m {
+        Ok(_) => 0,
+        Err(e) => e.raw_os_error().unwrap_or(EINVAL),
+    });
     match m {
         Ok(m) => {
             set_ok();
@@ -550,7 +591,7 @@ pub fn metadata(p: &[u8], follow: bool) -> [u64; 7] {
 // ---- error decoding (`decode_io_error`/`decode_uv_error` in io.cpp) ----
 
 pub fn ok() -> bool {
-    last().errno == 0
+    !last().failed
 }
 
 /// The error code of the last error: the errno, or libuv's negated errno
