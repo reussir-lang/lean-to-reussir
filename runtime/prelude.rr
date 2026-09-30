@@ -2587,12 +2587,36 @@ fn l2r_cell_swap<T>(slot : u64, v : T) -> T [{
     }
 }];
 
+// Empty a set cell, moving its value (and reference) to the caller.
+#[ffi(import)]
+fn l2r_once_take<T>(slot : u64) -> T [{
+    {
+        assert!(::std::mem::size_of::<[:T:]>() <= ::std::mem::size_of::<usize>());
+        let raw = leanrt::once::take_raw(slot);
+        let p: [:T:] = unsafe { ::std::mem::transmute_copy(&raw) };
+        p
+    }
+}];
+
+// Stream contexts: natively each thread has its own current standard
+// streams. `l2r_std_push(base)` sets the cells `base..base+2` aside (empty,
+// so they are rebuilt as the process's streams on first use) when a task
+// starts; `l2r_std_pop(base)` puts them back when it ends (lean2rr's
+// `l2r_std_leave` first empties them, releasing the task's streams).
+#[ffi(import)]
+fn l2r_std_push(base : u64) -> u64 [{ { leanrt::once::push_context(base, 3); 0 } }];
+
+#[ffi(import)]
+fn l2r_std_pop(base : u64) -> u64 [{ { leanrt::once::pop_context(base, 3); 0 } }];
+
 // ===========================================================================
 // Thunks and tasks
 //
 // A `Thunk α` or `Task α` is an `LCell<S>` whose state type `S` lean2rr
-// generates per value type: `enum S { pending(L2RUnit -> α), busy, done(α) }`
-// (a shared enum). lean2rr also generates the functions that force the
+// generates per value type: `enum S { pending(L2RUnit -> α), busy, done(α),
+// conv(L2RUnit -> α, L2RBox, u64) }` (a shared enum; `conv` is a thunk or
+// task converted from another representation: its computation, the original
+// cell, and for a task the original's identity). lean2rr also generates the functions that force the
 // state (`l2r_thunk_get_S`, `l2r_task_get_S`, ...): a thunk runs its closure
 // on first `get` and keeps the value; a task stays pending until it is
 // needed or `main` returns, except a pure task created while no task is
@@ -2649,6 +2673,18 @@ fn l2r_task_begin<S>(c : LCell<S>) -> u64 [{
     }
 }];
 
+// A running task stops without finishing (a `bind` task that now waits for
+// the task it continues as).
+#[ffi(import)]
+fn l2r_task_suspend<S>(c : LCell<S>) -> u64 [{
+    {
+        let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
+        leanrt::task::suspend(p);
+        drop(c);
+        0
+    }
+}];
+
 #[ffi(import)]
 fn l2r_task_end<S>(c : LCell<S>) -> u64 [{
     {
@@ -2659,64 +2695,33 @@ fn l2r_task_end<S>(c : LCell<S>) -> u64 [{
     }
 }];
 
+// A task's identity for the runtime (`leanrt::task`): the address of its
+// cell, or, for a task converted to another representation, the address it
+// records (see lean2rr's `l2r_task_addr_S`).
 #[ffi(import)]
-fn l2r_task_cancel<S>(c : LCell<S>) -> u64 [{
+fn l2r_lcell_addr<S>(c : LCell<S>) -> u64 [{
     {
         let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
-        leanrt::task::cancel(p);
         drop(c);
-        0
+        p as u64
     }
 }];
 
-// Queue a pending task standing for the unfinished task `orig` (a task
-// converted to another representation; its closure holds `orig`).
 #[ffi(import)]
-fn l2r_task_register_alias<S, O>(c : LCell<S>, tag : u64, orig : LCell<O>) -> u64 [{
-    {
-        let c = ::std::mem::ManuallyDrop::new(c);
-        let p: usize = unsafe { ::std::mem::transmute_copy(&*c) };
-        let o: usize = unsafe { ::std::mem::transmute_copy(&orig) };
-        leanrt::task::register_alias(p, tag, o);
-        drop(orig);
-        0
-    }
-}];
+fn l2r_task_cancel_at(a : u64) -> u64 [{ { leanrt::task::cancel(a as usize); 0 } }];
 
-// Task `dep` was created depending on task `src` (for cancellation).
+// Task `dep` was created depending on task `src`, with `sync := true` or
+// not (for its start and its cancellation).
 #[ffi(import)]
-fn l2r_task_depend<S, D>(src : LCell<S>, dep : LCell<D>) -> u64 [{
-    {
-        let s: usize = unsafe { ::std::mem::transmute_copy(&src) };
-        let d: usize = unsafe { ::std::mem::transmute_copy(&dep) };
-        leanrt::task::depend(s, d);
-        drop(src);
-        drop(dep);
-        0
-    }
-}];
+fn l2r_task_depend_at(src : u64, dep : u64, sync : bool) -> u64 [{ { leanrt::task::depend(src as usize, dep as usize, sync); 0 } }];
 
 // 0 waiting, 1 running, 2 finished.
 #[ffi(import)]
-fn l2r_task_status<S>(c : LCell<S>) -> u8 [{
-    {
-        let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
-        let r = leanrt::task::status(p);
-        drop(c);
-        r
-    }
-}];
+fn l2r_task_status_at(a : u64) -> u8 [{ leanrt::task::status(a as usize) }];
 
-// `IO.getTaskState`: as `l2r_task_status`, or 3: run the task first.
+// `IO.getTaskState`: as `l2r_task_status_at`, or 3: run the task first.
 #[ffi(import)]
-fn l2r_task_query<S>(c : LCell<S>) -> u8 [{
-    {
-        let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
-        let r = leanrt::task::query(p);
-        drop(c);
-        r
-    }
-}];
+fn l2r_task_query_at(a : u64) -> u8 [{ leanrt::task::query(a as usize) }];
 
 #[ffi(import)]
 fn l2r_task_deferring() -> bool [{ leanrt::task::deferring() }];
@@ -2730,8 +2735,8 @@ fn l2r_task_manager_start() -> u64 [{ { leanrt::task::start(); 0 } }];
 #[ffi(import)]
 fn l2r_task_shutdown() -> u64 [{ { leanrt::task::shutdown(); 0 } }];
 
-// The oldest pending IO task at exit: its tag (`u64::MAX` if none), then the
-// cell itself (with the queue's reference).
+// The next queued task when `main` has returned: its tag (`u64::MAX` if
+// none), then the cell itself (with the queue's reference).
 #[ffi(import)]
 fn l2r_task_next_tag() -> u64 [{ leanrt::task::next_tag() }];
 

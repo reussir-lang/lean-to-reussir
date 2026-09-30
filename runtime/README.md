@@ -130,30 +130,37 @@ and `l2r_io_process_get_current_dir()` are infallible stand-ins for the
 fallible primitives below.) References: `l2r_ref_new/get/set/swap/take/ptr_eq`.
 
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
-lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α) }`
-(a shared enum, so any `α` fits). Cell primitives: `l2r_lcell_new<S>(v)`,
+lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),
+conv(L2RUnit -> α, L2RBox, u64), busyconv(u64) }` (tasks also
+`bind(L2RUnit -> LCell<S>)`;
+a shared enum, so any `α` fits). Cell primitives: `l2r_lcell_new<S>(v)`,
 `l2r_lcell_get<S>(c)`, `l2r_lcell_set<S>(c, v)`, `l2r_lcell_swap<S>(c, v)`
-(returns the old state). lean2rr generates the forcing functions (run the
-closure once, store `done`); `l2r_lazy_cycle<T>()` waits forever, for a
-thunk or task needed by its own computation, as native Lean does. Tasks
-are deferred until needed (translation plan §5.14); `leanrt::task` keeps
-the queue of pending tasks (holding one reference each), the stack of
-running tasks, cancellation flags and their propagation, and converted
-tasks standing for another: `l2r_task_register<S>(c, tag)` queues a
-pending task (`tag` identifies `S` at exit), `l2r_task_register_alias<S,
-O>(c, tag, orig)` one standing for `orig`, `l2r_task_depend<S, D>(src,
-dep)` records that `dep` depends on `src`, `l2r_task_begin<S>(c)` /
-`l2r_task_end<S>(c)` bracket a run (`begin` takes the task off the queue),
-`l2r_task_status<S>(c)` (0 waiting, 1 running, 2 finished),
-`l2r_task_query<S>(c)` (for `IO.getTaskState`; 3: run it first),
-`l2r_task_cancel<S>(c)`, `l2r_task_check_canceled()`,
+(returns the old state), `l2r_lcell_addr<S>(c)` (the cell's address).
+lean2rr generates the forcing functions (run the closure once, store
+`done`); `l2r_lazy_cycle<T>()` waits forever, for a thunk or task needed by
+its own computation, as native Lean does. Tasks are deferred until needed
+(translation plan §5.14); `leanrt::task` keeps the queue of pending tasks
+(holding one reference each, in the order Lean's task manager would start
+them), the stack of running tasks, cancellation flags and their
+propagation. A task is identified by an address: its cell's, or the one a
+converted task records. `l2r_task_register<S>(c, tag)` queues a pending
+task (`tag` identifies `S` at exit), `l2r_task_depend_at(src, dep, sync)`
+records that `dep` depends on `src`, `l2r_task_begin<S>(c)` / `l2r_task_end<S>(c)`
+bracket a run (`begin` takes the task off the queue; `l2r_task_suspend<S>(c)`
+stops a `bind` task that now waits for its continuation),
+`l2r_task_status_at(a)` (0 waiting, 1 running, 2 finished),
+`l2r_task_query_at(a)` (for `IO.getTaskState`; 3: run it first),
+`l2r_task_cancel_at(a)`, `l2r_task_check_canceled()`,
 `l2r_task_deferring()` (false during initialization, when Lean runs IO
 tasks at once), `l2r_task_eager_pure()` (a pure task may be computed at
 once), `l2r_task_manager_start()` (before `main`), `l2r_task_shutdown()`
-(after `main`), and
-`l2r_task_next_tag()` / `l2r_task_take<S>()`, with which the generated
-entry runs the tasks still queued when `main` returns. `l2r_sleep_ms` goes
-through `leanrt::task` (sleeps count as time passing for its heuristics).
+(after `main`), and `l2r_task_next_tag()` / `l2r_task_take<S>()`, with which
+the generated entry runs the tasks still queued when `main` returns.
+`l2r_sleep_ms` goes through `leanrt::task` (sleeps count as time passing for
+its heuristics). Standard streams are per task, as they are per thread
+natively: `l2r_std_push(base)` / `l2r_std_pop(base)` set the stream cells
+aside and put them back (`leanrt::once::push_context`), and
+`l2r_once_take<T>(slot)` empties a cell.
 
 **Fallible IO** (files, standard streams): primitives record their outcome
 in a global last-error slot; the glue is
