@@ -229,6 +229,9 @@ lean2rr's dev branch (the tests pass with it).
 8. `dbgTrace` (and `dbgSleep`, `dbgStackTrace`, `Thunk.mk`) at a boxed `α`:
    the `PUnit → α` closure argument must be wrapped to return the box
    (`lean_dbg_trace<ElemBox>(msg, f : L2RUnit -> Nat)` does not type-check).
+   *done* for the `dbg*` externs: lean2rr instantiates generic prelude
+   functions that are plain Reussir code at the value type
+   (`lean_dbg_trace<Nat>`).
 9. BaseIO payload primitives above (`IO.monoMsNow`, `IO.getRandomBytes`,
    ...) and the file protocol need `wrapIOResult` glue; `IO.FS.Handle`
    (`lcAny` in mono code) must be represented as `LHandle`.

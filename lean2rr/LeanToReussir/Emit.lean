@@ -200,6 +200,28 @@ def externReport (decls : Array (Decl .pure)) (keys : NameMap InstKey) : CoreM S
         lines := lines.push s!"{o}{targsStr}  [{sym}]  : {sig}"
   return "\n".intercalate (lines.qsort (· < ·)).toList ++ "\n"
 
+/-- The generic functions of the prelude that are plain Reussir code over
+values: not FFI imports, and no type application in their signature (a
+parameter `RVec<T>` makes `T` an array storage type, as for
+`lean_array_push<T>`). lean2rr instantiates them at the value types of the
+extern's type arguments (see `lowerExternCall`). Name ↦ number of type
+parameters. -/
+def valueGenericPreludeFns (prelude : String) : Std.HashMap String Nat := Id.run do
+  let mut out : Std.HashMap String Nat := {}
+  let mut prev := ""
+  for line in prelude.splitOn "\n" do
+    if line.startsWith "fn " && prev != "#[ffi(import)]" then
+      let rest := (line.drop 3).toString
+      let name := (rest.takeWhile fun c => c.isAlphanum || c == '_').toString
+      let after := (rest.drop name.length).toString
+      if after.startsWith "<" then
+        let gens := ((after.drop 1).takeWhile (· != '>')).toString
+        let sig := ((after.drop (gens.length + 2)).takeWhile (· != '{')).toString
+        unless sig.contains '<' || sig.contains '[' do
+          out := out.insert name (gens.splitOn ",").length
+    unless line.all Char.isWhitespace do prev := line
+  return out
+
 /-- Lower a whole program. -/
 def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array StartupStep) (decls : Array (Decl .pure))
     (keys : NameMap InstKey) : CoreM String := do
@@ -242,8 +264,9 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
     if k.typeArgs.isEmpty && k.dicts.isEmpty then m.insert k.decl inst else m
   let exports ← (exportMap.run' {config := {}} : CoreM _)
   let ioErrorBuilders := ioErrorBuilderSyms.map fun sym => (exports.get? sym).bind byDecl.find?
+  let valueGenericFns := valueGenericPreludeFns prelude
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
-                          preludeRets, preludeParams, ioErrorBuilders }
+                          preludeRets, preludeParams, ioErrorBuilders, valueGenericFns }
   let act : LowerM Unit := do
     -- Once-cells of `initialize` constants (read by `calleeOf`).
     for st in startup do

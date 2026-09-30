@@ -77,6 +77,9 @@ structure LowerCtx where
   preludeParams : Std.HashMap String (Array RR.Ty) := {}
   /-- Instances of the `IO.Error` builders, by runtime error kind. -/
   ioErrorBuilders : Array (Option Name) := #[]
+  /-- Generic prelude functions over plain values (see
+  `valueGenericPreludeFns`), with their number of type parameters. -/
+  valueGenericFns : Std.HashMap String Nat := {}
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/

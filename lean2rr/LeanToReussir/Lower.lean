@@ -852,10 +852,6 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     | .named n => return n
     | rt => throwError "lean2rr: expected a structure type, got {rt.render}"
   match orig with
-  -- Generic Reussir functions in the prelude (not FFI): instantiated at
-  -- the value type itself, not at its array storage type.
-  | ``dbgTrace => return some (.call "lean_dbg_trace" #[← lowerType ret] args)
-  | ``dbgTraceIfShared => return some (.call "lean_dbg_trace_if_shared" #[← lowerType ret] args)
   | ``Task.get => return some (.field args[0]! 0)
   | ``Task.spawn => return some (.ctor (← structOf ret) none #[.apply args[0]! .unitVal])
   | ``Task.map => return some (.ctor (← structOf ret) none #[.apply args[0]! (.field args[1]! 0)])
@@ -1002,6 +998,15 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
             let want := (← read).preludeParams[prim]?.getD argTys
             let passed ← (passedArgs.zip (argTys.zip want)).mapM fun (a, (t, w)) => coerce a t w
             return ← wrapIOResult resTy (.call prim #[] passed)
+  -- A generic prelude function in plain Reussir that does not store its
+  -- values in runtime containers (`dbgTrace`, `dbgSleep`, `panic`, …) is
+  -- instantiated at the value types themselves: its arguments and result
+  -- are passed as they are, closures included. Only FFI functions and
+  -- containers need array storage types.
+  if let some n := (← read).valueGenericFns[sym]? then
+    let tys ← if n == typeArgs.size then typeArgs.mapM fun t => do lowerType (← toMonoTypeKeep t)
+      else pure #[]
+    return .call sym tys passedArgs
   -- Array externs at `Array Nat`/`Array Int` use the one-word arrays.
   if let some α := typeArgs[0]? then
     let fam? := match ← lowerType (← toMonoTypeKeep α) with

@@ -739,6 +739,16 @@ Rules:
   `ElemBox`. Other parameters, like an index, are passed as they are.
   Instance keys hold base-phase types, so type arguments go through
   `toMonoType` first.
+- **Generic prelude functions over values.** Storage types exist only
+  because values cross into Rust. A prelude function that is plain Reussir
+  code (not an FFI import) and whose signature applies no generic type
+  (no `RVec<T>`, `LRef<T>`) never does that, so it is instantiated at the
+  value types themselves and receives its arguments as they are:
+  `dbgSleep 1 fun _ => n + 1` at `Nat` is
+  `lean_dbg_sleep<Nat>(ms, f : L2RUnit -> Nat)`, not
+  `lean_dbg_sleep<ElemBox>` with a closure returning a `Nat`. This covers
+  `dbgTrace`, `dbgTraceIfShared`, `dbgSleep`, `dbgStackTrace`, `panic`
+  and `sorry`; lean2rr finds these functions by reading the prelude.
 - **Borrowing.** Lean's borrow annotations (`@&`) are dropped. Reussir's
   owned convention plus its Perceus analysis gives the same results.
 
