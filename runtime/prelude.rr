@@ -2189,10 +2189,24 @@ fn l2r_hardware_concurrency() -> u32 [{ std::thread::available_parallelism().map
 fn lean_internal_get_hardware_concurrency(u : L2RUnit) -> u32 { l2r_hardware_concurrency() }
 
 // ===========================================================================
-// IO primitives (lean2rr wraps the results in `EST.Out`)
+// IO primitives
+//
+// Convention: an IO/BaseIO extern `lean_io_xxx` whose result cannot fail
+// has a payload primitive `l2r_io_xxx` taking the same passed arguments and
+// returning the payload; lean2rr wraps it in `EST.Out.ok`/`ST.Out`
+// (`wrapIOResult`).
+
+fn l2r_io_mono_ms_now() -> Nat { Nat::Small{l2r_io_mono_ms_now_u64()} }
+fn l2r_io_mono_nanos_now() -> Nat { Nat::Small{l2r_io_mono_nanos_now_u64()} }
+fn l2r_io_get_num_heartbeats() -> Nat { Nat::Small{0} }
+fn l2r_io_check_canceled() -> bool { false }
+fn l2r_io_get_tid() -> u64 { l2r_io_get_tid_u64() }
 
 #[ffi(import)]
-fn l2r_io_mono_ms_now() -> u64 [{
+fn l2r_io_get_tid_u64() -> u64 [{ { extern "C" { fn gettid() -> i32; } unsafe { gettid() as u64 } } }];
+
+#[ffi(import)]
+fn l2r_io_mono_ms_now_u64() -> u64 [{
     {
         let mut ts = [0i64; 2];
         extern "C" { fn clock_gettime(clk: i32, ts: *mut i64) -> i32; }
@@ -2202,7 +2216,7 @@ fn l2r_io_mono_ms_now() -> u64 [{
 }];
 
 #[ffi(import)]
-fn l2r_io_mono_nanos_now() -> u64 [{
+fn l2r_io_mono_nanos_now_u64() -> u64 [{
     {
         let mut ts = [0i64; 2];
         extern "C" { fn clock_gettime(clk: i32, ts: *mut i64) -> i32; }
@@ -2211,8 +2225,6 @@ fn l2r_io_mono_nanos_now() -> u64 [{
     }
 }];
 
-fn l2r_io_mono_ms_now_nat() -> Nat { Nat::Small{l2r_io_mono_ms_now()} }
-fn l2r_io_mono_nanos_now_nat() -> Nat { Nat::Small{l2r_io_mono_nanos_now()} }
 
 #[ffi(import)]
 fn l2r_io_get_random_bytes(n : u64) -> RVec<u8> [{
@@ -2226,3 +2238,35 @@ fn l2r_io_get_random_bytes(n : u64) -> RVec<u8> [{
 
 #[ffi(import)]
 fn l2r_io_process_get_pid() -> u32 [{ std::process::id() }];
+
+// `IO.getEnv name : BaseIO (Option String)`.
+#[ffi(import)]
+fn l2r_getenv_has(name : LStr) -> bool [{
+    std::env::var_os(std::ffi::OsStr::new(std::str::from_utf8(&name).unwrap_or("\0"))).is_some()
+}];
+#[ffi(import)]
+fn l2r_getenv_value(name : LStr) -> LStr [{
+    {
+        let v = std::env::var_os(std::ffi::OsStr::new(std::str::from_utf8(&name).unwrap_or("\0"))).unwrap_or_default();
+        leanrt::string::from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(v.as_os_str()))
+    }
+}];
+fn l2r_io_getenv_with<O>(name : LStr, none : O, some : LStr -> O) -> O {
+    if l2r_getenv_has(name) { some(l2r_getenv_value(name)) } else { none }
+}
+
+// `IO.appPath`, `IO.currentDir` (these cannot fail in practice here).
+#[ffi(import)]
+fn l2r_io_app_path() -> LStr [{
+    {
+        let p = std::env::current_exe().unwrap_or_default();
+        leanrt::string::from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))
+    }
+}];
+#[ffi(import)]
+fn l2r_io_current_dir() -> LStr [{
+    {
+        let p = std::env::current_dir().unwrap_or_default();
+        leanrt::string::from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))
+    }
+}];
