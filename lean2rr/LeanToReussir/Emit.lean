@@ -55,10 +55,48 @@ def declOrder (n : Name) : CoreM (Nat × Nat) := do
       match ← findDeclarationRanges? m with
       | some r => return 2 * (r.range.pos.line * 100000 + r.range.pos.column) + (if aux then 0 else 1)
       | none => if m.isAnonymous then return 0 else find m.getPrefix true fuel
-  -- A specialization `f._at_.g.spec_N` is compiled with `g`, before it.
-  let n' := (atParent? n).getD n
-  return (idx, ← find n' (n' != n) 16)
+  -- A specialization `f._at_.g.spec_N` is compiled with `g`'s compilation
+  -- block, before it: the block of a `where`/`let rec` helper is its
+  -- parent's, and a mutual block starts at its first member.
+  match atParent? n with
+  | some g => return (idx, ← find (← blockRoot g) true 16)
+  | none => return (idx, ← find n false 16)
 where
+  /-- The first declaration of `g`'s compilation block. -/
+  blockRoot (g : Name) : CoreM Name := do
+    let key (r : DeclarationRanges) : Nat := r.range.pos.line * 100000 + r.range.pos.column
+    -- The name after `_at_` ends with the specialization's own components
+    -- (`c.helper.spec_0`): the nearest prefix with a position.
+    let mut g := g
+    while !g.isAnonymous && (← findDeclarationRanges? g).isNone do g := g.getPrefix
+    let some gr ← findDeclarationRanges? g | return g
+    -- The outermost declaration whose range encloses `g`'s (a helper's
+    -- parent).
+    let mut root := g
+    let mut p := g.getPrefix
+    while !p.isAnonymous do
+      if let some pr ← findDeclarationRanges? p then
+        let pos := pr.range.pos
+        let e := pr.range.endPos
+        let gp := gr.range.pos
+        let ge := gr.range.endPos
+        let k (q : Position) : Nat := q.line * 100000 + q.column
+        if k pos ≤ k gp && k ge ≤ k e then
+          root := p
+      p := p.getPrefix
+    -- The earliest member of its mutual block.
+    let members := match (← getEnv).find? root with
+      | some (.defnInfo d) => d.all
+      | some (.opaqueInfo o) => o.all
+      | _ => [root]
+    let mut best := root
+    let mut bestKey := key (← findDeclarationRanges? root).get!
+    for m in members do
+      if let some r ← findDeclarationRanges? m then
+        if key r < bestKey then
+          best := m
+          bestKey := key r
+    return best
   /-- The declaration after the last `_at_` component, if any. -/
   atParent? (n : Name) : Option Name := Id.run do
     let cs := n.components
