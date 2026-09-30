@@ -138,11 +138,18 @@ def instanceName (key : InstKey) : MonoM Name := do
   if let some n := (← get).names[key]? then return n
   -- Polymorphic recursion: an instance of `d` asking for `d` at type
   -- arguments that strictly contain its own (`Nest α` → `Nest (List α)`)
-  -- would create a new instance per level; use the uniform one at once.
+  -- would create a new instance per level; use the uniform one at once. A
+  -- type function (a monad `m` → `StateT Nat m`) no longer contains the
+  -- caller's argument once beta-reduced, so there a strictly larger
+  -- argument counts as growth.
+  let grows (a b : Expr) : Bool :=
+    a != b && a != anyExpr &&
+      ((b.find? (· == a)).isSome ||
+       ((a.isLambda || b.isLambda) && treeSizeUpTo b 1000 > treeSizeUpTo a 1000))
   let key ← match (← get).current with
     | some cur =>
       if cur.decl == key.decl && cur.typeArgs.size == key.typeArgs.size &&
-         (cur.typeArgs.zip key.typeArgs).any (fun (a, b) => a != b && a != anyExpr && (b.find? (· == a)).isSome) then
+         (cur.typeArgs.zip key.typeArgs).any (fun (a, b) => grows a b) then
         modify fun s => { s with uniformArgs := s.uniformArgs + key.typeArgs.size }
         pure { key with typeArgs := key.typeArgs.map fun _ => anyExpr, dicts := #[] }
       else pure key
