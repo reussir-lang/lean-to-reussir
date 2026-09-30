@@ -137,6 +137,34 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
     fns := s.fns.push (.fn f #[] t body) }
   return .call f #[] #[]
 
+/-- The index of a value of an enumeration type (a generated `[value]`
+enum without fields), as `u8`: a generated `match`. -/
+def enumIndexFn (tn : String) : LowerM String := do
+  let name := s!"l2r_enum_index_{tn}"
+  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+    let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no enumeration {tn}"
+    let arms := info.ctorOrder.zipIdx.filterMap fun (c, i) => (info.ctors.find? c).map fun l =>
+      { ty := tn, ctor := some l.variant, binders := #[], body := ⟨#[("i", some (.named "u8"), .atom (toString i))], .var "i"⟩ : RR.Arm }
+    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named tn)] (.named "u8") (.ofExpr (.mtch (.var "x") arms))) }
+  return name
+
+/-- The value of enumeration type `tn` with index `i : u64` (a generated
+chain of comparisons). -/
+def enumOfIndexFn (tn : String) : LowerM String := do
+  let name := s!"l2r_enum_of_index_{tn}"
+  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+    let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no enumeration {tn}"
+    let ls := info.ctorOrder.filterMap info.ctors.find?
+    let some last := ls.back? | throwError "lean2rr: empty enumeration {tn}"
+    let mut e : RR.Expr := .ctor tn (some last.variant) #[]
+    for j in [:ls.size - 1] do
+      let i := ls.size - 2 - j
+      let some l := ls[i]? | continue
+      e := .block ⟨#[("k", some (.named "u64"), .atom (toString i))],
+        .ite (.atom "x == k") (.ofExpr (.ctor tn (some l.variant) #[])) (.ofExpr e)⟩
+    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named "u64")] (.named tn) (.ofExpr e)) }
+  return name
+
 mutual
   /-- Convert `e` from representation `src` to `dst`. Besides `Box`
   conversions and closure wrappers, two instantiations of the same inductive
@@ -153,7 +181,11 @@ mutual
         match t with
         | .named n => return match (← get).typeKeys[n]? with | some k => s!"{n} = {k}" | none => n
         | _ => return t.render
-      throwError "lean2rr: no representation conversion from {← keyOf src} to {← keyOf dst}"
+      -- No conversion: only reachable through an `unsafeCast` between
+      -- types whose values Lean represents alike but lean2rr does not.
+      -- The program is still translated; the cast panics if executed.
+      IO.eprintln s!"lean2rr: warning: no representation conversion from {← keyOf src} to {← keyOf dst}; the conversion panics at run time"
+      return .call "l2r_internal_panic_at" #[dst] #[.atom "0"]
 
   partial def tryCoerce (e : RR.Expr) (src dst : RR.Ty) : LowerM (Option RR.Expr) := do
     if src == dst then return some e
@@ -209,10 +241,21 @@ mutual
       let some res ← tryCoerce (.apply callee arg) b1 b2 | return none
       let lam := RR.Expr.lam x a2 (.ofExpr res)
       return some (if pre.isEmpty then lam else .block ⟨pre, lam⟩)
+    -- `Nat` and enumerations by index (Lean represents both as scalars;
+    -- only reachable through `unsafeCast`).
     | .named sn, .named dn =>
+      if sn == "Nat" then
+        let some di := (← get).typeInfos[dn]? | return none
+        unless di.shape == .enumLike do return none
+        return some (.call (← enumOfIndexFn dn) #[] #[.call "lean_usize_of_nat" #[] #[e]])
+      if dn == "Nat" then
+        let some si := (← get).typeInfos[sn]? | return none
+        unless si.shape == .enumLike do return none
+        let idx := RR.Expr.call (← enumIndexFn sn) #[] #[e]
+        return some (.ctor "Nat" (some "Small") #[.atom s!"({idx.render 0} as u64)"])
       let some sh ← nominalHead sn | return none
       let some dh ← nominalHead dn | return none
-      if sh != dh then return none
+      if sh != dh && !(← isomorphic sn dn) then return none
       return some (.call (← structConv sn dn) #[] #[e])
     | _, _ =>
       -- Arrays whose element types differ (an array reinterpreted by
@@ -247,6 +290,17 @@ mutual
       .fn f #[("src", src)] dst entry] }
     return some f
 
+  /-- Two generated types with the same number of constructors and, at each
+  position, the same number of relevant fields. -/
+  partial def isomorphic (sn dn : String) : LowerM Bool := do
+    let some si := (← get).typeInfos[sn]? | return false
+    let some di := (← get).typeInfos[dn]? | return false
+    if si.ctorOrder.size != di.ctorOrder.size then return false
+    return (si.ctorOrder.zip di.ctorOrder).all fun (a, b) =>
+      match si.ctors.find? a, di.ctors.find? b with
+      | some la, some lb => (la.fields.filterMap id).size == (lb.fields.filterMap id).size
+      | _, _ => false
+
   /-- The generated function converting instantiation `sn` to `dn` of the
   same inductive (cached). -/
   partial def structConv (sn dn : String) : LowerM String := do
@@ -258,9 +312,14 @@ mutual
     let some di := (← get).typeInfos[dn]? | throwError "lean2rr: no type {dn}"
     let mut arms := #[]
     let mut structBody : Option RR.Block := none
-    for ctor in si.ctorOrder do
+    -- Constructors correspond by name (instantiations of one inductive) or
+    -- by position (isomorphic inductives, through `unsafeCast`).
+    let sameHead := (← nominalHead sn) == (← nominalHead dn)
+    for h : ci in [:si.ctorOrder.size] do
+      let ctor := si.ctorOrder[ci]
       let some sl := si.ctors.find? ctor | continue
-      let some dl := di.ctors.find? ctor | continue
+      let dctor := if sameHead then ctor else di.ctorOrder[ci]?.getD ctor
+      let some dl := di.ctors.find? dctor | continue
       let srcFields := sl.fields.filterMap id
       let dstFields := dl.fields.filterMap id
       let names ← srcFields.mapM fun _ => fresh "cf"
@@ -504,34 +563,6 @@ def ctorFieldTys (ty : RR.Ty) (ctor : Name) : LowerM (Array RR.Ty) := do
   let some info := (← get).typeInfos[tn]? | return #[]
   let some layout := info.ctors.find? ctor | return #[]
   return layout.fields.filterMap (·.map (·.2))
-
-/-- The index of a value of an enumeration type (a generated `[value]`
-enum without fields), as `u8`: a generated `match`. -/
-def enumIndexFn (tn : String) : LowerM String := do
-  let name := s!"l2r_enum_index_{tn}"
-  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
-    let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no enumeration {tn}"
-    let arms := info.ctorOrder.zipIdx.filterMap fun (c, i) => (info.ctors.find? c).map fun l =>
-      { ty := tn, ctor := some l.variant, binders := #[], body := ⟨#[("i", some (.named "u8"), .atom (toString i))], .var "i"⟩ : RR.Arm }
-    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named tn)] (.named "u8") (.ofExpr (.mtch (.var "x") arms))) }
-  return name
-
-/-- The value of enumeration type `tn` with index `i : u64` (a generated
-chain of comparisons). -/
-def enumOfIndexFn (tn : String) : LowerM String := do
-  let name := s!"l2r_enum_of_index_{tn}"
-  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
-    let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no enumeration {tn}"
-    let ls := info.ctorOrder.filterMap info.ctors.find?
-    let some last := ls.back? | throwError "lean2rr: empty enumeration {tn}"
-    let mut e : RR.Expr := .ctor tn (some last.variant) #[]
-    for j in [:ls.size - 1] do
-      let i := ls.size - 2 - j
-      let some l := ls[i]? | continue
-      e := .block ⟨#[("k", some (.named "u64"), .atom (toString i))],
-        .ite (.atom "x == k") (.ofExpr (.ctor tn (some l.variant) #[])) (.ofExpr e)⟩
-    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named "u64")] (.named tn) (.ofExpr e)) }
-  return name
 
 /-- `IO.FS.Metadata` from the runtime's `[atime s, ns, mtime s, ns, size,
 file type, links]`. -/
