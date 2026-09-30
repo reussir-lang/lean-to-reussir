@@ -138,14 +138,16 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
   return .call f #[] #[]
 
 /-- The index of a value of an enumeration type (a generated `[value]`
-enum without fields), as `u8`: a generated `match`. -/
+enum without fields), as `u64`: a generated `match`. -/
 def enumIndexFn (tn : String) : LowerM String := do
   let name := s!"l2r_enum_index_{tn}"
   unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
     let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no enumeration {tn}"
     let arms := info.ctorOrder.zipIdx.filterMap fun (c, i) => (info.ctors.find? c).map fun l =>
-      { ty := tn, ctor := some l.variant, binders := #[], body := ⟨#[("i", some (.named "u8"), .atom (toString i))], .var "i"⟩ : RR.Arm }
-    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named tn)] (.named "u8") (.ofExpr (.mtch (.var "x") arms))) }
+      { ty := tn, ctor := some l.variant, binders := #[], body := ⟨#[("i", some (.named "u64"), .atom (toString i))], .var "i"⟩ : RR.Arm }
+    let body : RR.Block := if arms.isEmpty then .ofExpr (.call "l2r_unreachable" #[.named "u64"] #[])
+      else .ofExpr (.mtch (.var "x") arms)
+    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named tn)] (.named "u64") body) }
   return name
 
 /-- The value of enumeration type `tn` with index `i : u64` (a generated
@@ -155,7 +157,11 @@ def enumOfIndexFn (tn : String) : LowerM String := do
   unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
     let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no enumeration {tn}"
     let ls := info.ctorOrder.filterMap info.ctors.find?
-    let some last := ls.back? | throwError "lean2rr: empty enumeration {tn}"
+    let some last := ls.back? | do
+      -- No values: the conversion is unreachable.
+      modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named "u64")] (.named tn)
+        (.ofExpr (.call "l2r_unreachable" #[.named tn] #[]))) }
+      return name
     let mut e : RR.Expr := .ctor tn (some last.variant) #[]
     for j in [:ls.size - 1] do
       let i := ls.size - 2 - j
@@ -251,8 +257,7 @@ mutual
       if dn == "Nat" then
         let some si := (← get).typeInfos[sn]? | return none
         unless si.shape == .enumLike do return none
-        let idx := RR.Expr.call (← enumIndexFn sn) #[] #[e]
-        return some (.ctor "Nat" (some "Small") #[.atom s!"({idx.render 0} as u64)"])
+        return some (.ctor "Nat" (some "Small") #[.call (← enumIndexFn sn) #[] #[e]])
       let some sh ← nominalHead sn | return none
       let some dh ← nominalHead dn | return none
       if sh != dh && !(← isomorphic sn dn) then return none
@@ -634,7 +639,8 @@ def fallibleIOGlue (prim : String) (primRet : RR.Ty) (argTys : Array RR.Ty) (arg
         -- A handle is `lcAny` in mono code, so it arrives boxed.
         if tn == boxName then coerce a t (.named "LHandle") else
         match (← get).typeInfos[tn]? with
-        | some ti => if ti.shape == .enumLike then pure (RR.Expr.call (← enumIndexFn tn) #[] #[a]) else pure a
+        | some ti => if ti.shape == .enumLike then
+            pure (.atom s!"({(RR.Expr.call (← enumIndexFn tn) #[] #[a]).render 0} as u8)") else pure a
         | none => pure a
       | _ => pure a
     lets := lets.push (x, none, e)
