@@ -806,6 +806,15 @@ def ctorCallbackExtern (sym : String) (ret : Expr) (args : Array RR.Expr) : Lowe
     let some msg := args[0]? | return none
     let some act := args[1]? | return none
     return some (.call helper #[rt] #[msg, act])
+  -- `IO.getEnv name : BaseIO (Option String)`.
+  | "lean_io_getenv" =>
+    let some name := args[0]? | return none
+    let pay ← ioPayloadTy rt
+    let some v := (← ctorFieldTys pay ``Option.some)[0]? | return none
+    let some' ← ctorValue pay ``Option.some #[← coerce (.var "s") (.named "LStr") v]
+    let r := RR.Expr.call "l2r_io_getenv_with" #[pay]
+      #[name, ← ctorValue pay ``Option.none #[], lam "s" (.named "LStr") some']
+    return some (← wrapIOResult rt r)
   -- `String.mk : List Char → String`: push the characters.
   | "lean_string_compare" =>
     let v (c : Name) := ctorValue rt c #[]

@@ -1,1 +1,0 @@
-lean2rr's entry must call l2r_set_initializing(true) before the module initializers and (false) after (runtime/README.md, request 23)

@@ -793,16 +793,23 @@ fn l_main___l2r_0_(a505 : L2RUnit) -> T_EST_Out_348 {
 
 ### 5.11 Program entry
 
-A generated Reussir `#[main]` starts a thread with a 1 GiB stack, as Lean's
-runtime does for `main` (deep non-tail recursion is common in Lean
-programs), and runs the program body on it through an exported function.
-The body:
-1. runs the startup work of §5.12;
-2. calls the translated `main`, passing the argument list (without the
-   program name) if `main` takes one, and the world `()`;
-3. on `error e`, prints `uncaught exception: <message>` to stderr and exits
-   with status 1;
-4. otherwise exits with the returned `UInt32` (0 for `IO Unit`).
+A generated Reussir `#[main]` does what Lean's generated `main` does
+(`EmitC`: `initialize_Main`, then `lean_io_mark_end_initialization`, then
+`lean_run_main`):
+1. it runs the startup work of §5.12 on the process's main thread (8 MiB
+   stack), with `IO.initializing` answering `true`. An error there prints
+   `uncaught exception: <message>` and exits with status 1 before `main`;
+2. it clears `IO.initializing`, then starts a thread with a 1 GiB stack, as
+   Lean's runtime does for `main` (deep non-tail recursion is common in Lean
+   programs);
+3. on that thread it calls the translated `main`, passing the argument list
+   (without the program name) if `main` takes one, and the world;
+4. on `error e`, it prints `uncaught exception: <message>` to stderr and
+   exits with status 1;
+5. otherwise it exits with the returned `UInt32` (0 for `IO Unit`).
+
+`leanrt::rt::run_main2` implements the two threads and Lean's stack
+overflow report.
 
 The runtime flushes stdout at exit. These behaviours were observed on native
 executables.
@@ -1025,11 +1032,6 @@ Each item says what differs and when.
   creator; a task that waits for its creator never terminates or takes
   another branch. Promises are read after every resolution that can come
   before the read.
-- *`IO.initializing`* answers `false` during startup, where native answers
-  `true` (runtime support pending).
-- *Startup stack*: startup work runs on the 1 GiB thread, where native runs
-  it on the 8 MiB main thread, so deep recursion in a constant succeeds
-  where native overflows (runtime support pending).
 - *Stack depth* in general: frame sizes differ from native, and lean2rr
   adds recursion of its own (structural conversions, the `Array.mk` and
   `String.mk` list folds). The depth at which `Stack overflow detected.

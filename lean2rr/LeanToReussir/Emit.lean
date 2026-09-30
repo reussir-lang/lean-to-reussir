@@ -136,7 +136,10 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
     pre := s!"fn l2r_mk_args(i : u64, acc : {lt}) -> {lt} \{\n    if i == 0 \{ acc } else \{ l2r_mk_args(i - 1, {lt}::{consV}\{l2r_argv(i - 1), acc}) }\n}\n\n"
     argExpr := s!"l2r_mk_args(l2r_argc(), {lt}::{nilV}\{}), "
   let uncaught (e : String) := s!"l2r_uncaught_exception({fnName errStr}({e}))"
-  let mut code := s!"let r = {fnName mainInst}({argExpr}L2RUnit::u\{});\nmatch r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
+  let mainCode := s!"let r = {fnName mainInst}({argExpr}L2RUnit::u\{});\nmatch r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
+  -- The startup chain ends by clearing `IO.initializing`; an error stops
+  -- the program before main (`l2r_uncaught_exception` exits).
+  let mut code := "l2r_init_done()"
   -- Build the startup chain from the last step outwards.
   for h : i in [:startup.size] do
     let j := startup.size - 1 - i
@@ -152,14 +155,19 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
       let (st, boxed) ← arrayElemTy vt
       let stored := if boxed then match st with | .named bn => s!"{bn}\{v{j}}" | _ => s!"v{j}" else s!"v{j}"
       code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\nlet s{j} : {st.render} = l2r_once_set<{st.render}>({slot}, {stored});\n{code}\n},\n{t}::{err}(e{j}) => \{ {uncaught s!"e{j}"} }\n}"
-  let body := s!"fn l2r_main_body() \{\n{code}\n}\n"
-  -- Like Lean's runtime, run the program on a thread with a big stack
-  -- (1 GiB, `LEAN_STACK_SIZE_KB`, `LEAN_MAIN_USE_THREAD`) and report a stack
-  -- overflow as Lean does; `leanrt::rt::run_main` implements both.
-  let entry := "extern \"C\" trampoline \"l2r_main_body\" = l2r_main_body;\n\n" ++
+  let body := s!"fn l2r_init_body() \{\nlet si : u64 = l2r_set_initializing(true);\n{code}\n}\n\n" ++
+    s!"fn l2r_main_body() \{\n{mainCode}\n}\n"
+  -- Like Lean's runtime: the module initializers run on the process's main
+  -- thread (8 MiB stack) with `IO.initializing` true; then `main` runs on a
+  -- thread with a big stack (1 GiB, `LEAN_STACK_SIZE_KB`,
+  -- `LEAN_MAIN_USE_THREAD`). A stack overflow is reported as Lean does.
+  -- `leanrt::rt::run_main2` implements all of this.
+  let entry := "extern \"C\" trampoline \"l2r_init_body\" = l2r_init_body;\n" ++
+    "extern \"C\" trampoline \"l2r_main_body\" = l2r_main_body;\n\n" ++
+    "#[ffi(import)]\nfn l2r_init_done() -> unit [{ leanrt::rt::set_initializing(false) }];\n\n" ++
     "#[ffi(import)]\nfn l2r_run_main() [{ {\n" ++
-    "    extern \"C\" { fn l2r_main_body(); }\n" ++
-    "    leanrt::rt::run_main(|| unsafe { l2r_main_body() })\n} }];\n\n" ++
+    "    extern \"C\" { fn l2r_init_body(); fn l2r_main_body(); }\n" ++
+    "    leanrt::rt::run_main2(|| unsafe { l2r_init_body() }, || unsafe { l2r_main_body() })\n} }];\n\n" ++
     "#[main]\npub fn lean_main_entry() { l2r_run_main() }\n"
   return .raw (pre ++ body ++ "\n" ++ entry)
 
