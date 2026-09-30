@@ -1151,14 +1151,26 @@ task runs when it is needed, on the stack of whoever needs it.
     passed (an `IO.sleep`/`dbgSleep` since the first answer) or keeps asking
     (1000 times); the task then runs and is reported `finished`;
   - `main` returning (§5.11): the queued tasks run in the order Lean's task
-    manager starts them (with one worker, native Lean's order exactly).
-    A dependent is enqueued when the task it waits for finishes: Lean walks
-    the dependents from the newest, runs those created with `sync := true`
-    at once and enqueues the others. A bind task that has run `f` finishes
-    at once if the task `f` returned has finished, and otherwise waits,
-    enqueued again, and finishes as that one (`task_bind_fn1`). Dependents
-    of a cycle are left behind, as Lean's workers stop when the queue is
-    empty. `IO.Process.exit` exits at once, as natively.
+    manager with one worker (`LEAN_NUM_THREADS=1`) starts them. The task
+    manager keeps a queue per priority (0 to 8; a dedicated task, above 8,
+    has a thread of its own, so it comes first here) and takes the first
+    task of the highest non-empty one. An idle worker starts the first
+    task queued at once, and when a task finishes it starts the next one
+    right away: that started task runs first, whatever is queued after it.
+    `IO.Process.exit` exits at once, as natively.
+- *Dependents.* A task that waits for a task unfinished at its creation
+  (`mapTask`, `bindTask`, `Task.map`, `Task.bind`) is off the queue until
+  that task finishes. Then, whoever finished it (during `main` too), Lean
+  walks its dependents from the newest (`handle_finished`): one created
+  with `sync := true` runs there and then, on the finishing thread, before
+  anything waiting for the finished task resumes; the others are enqueued
+  at their priority. A bind task that has run `f` finishes at once if the
+  task `f` returned has finished, and otherwise waits for it, keeping its
+  priority and `sync` flag, and finishes as that one (`task_bind_fn1`).
+  Dependents of a cycle are left behind, as Lean's workers stop when the
+  queue is empty. A task needed while the tasks it waits for are pending
+  first runs that chain from its deepest end, one task after the other,
+  so a long chain does not recurse.
 - `mapTask`/`bindTask`/`Task.map`/`Task.bind` with `sync := true` of a
   finished task apply `f` at once in the calling thread (its streams too),
   as `lean_task_map_core`/`lean_task_bind_core` do.
@@ -1212,8 +1224,10 @@ What a single thread cannot do:
   needed, not by time, and `IO.waitAny` does not pick the fastest of
   several unfinished tasks;
 - tasks nobody waits for stay queued, with what they hold, until `main`
-  returns, and a long chain of dependent tasks runs recursively when its
-  last task is needed;
+  returns (a chain of 4·10⁶ `mapTask`s built by `main` takes 1.6 GB, where
+  native workers run it as it is built);
+- a task needed by `main` runs at once, where a single native worker would
+  first finish the tasks queued before it;
 - Lean's panic for `Task.get` inside a `sync := true` task is not
   reproduced;
 - a deferred task is reported `waiting` at the first question even after a
@@ -1389,8 +1403,10 @@ Each item says what differs and when.
   on a worker thread and can exit without it. A deferred task is reported
   `waiting` at the first `IO.hasFinished`, even after a sleep. Tasks run as
   if each had a fresh worker thread, so a redirection a task leaves behind
-  never reaches another task (natively it can, on the same worker).
-  Promises are not translated yet.
+  never reaches another task (natively it can, on the same worker);
+  `IO.getTID` inside a task is main's thread id plus the depth of running
+  tasks, as distinct from main's as a worker's. Promises are not
+  translated yet.
 - *Startup order of generated constants*: specializations with every
   parameter fixed that Lean generated while compiling the same declaration
   run in the order of their numbers (`spec_0`, `spec_2`, …). Lean's own

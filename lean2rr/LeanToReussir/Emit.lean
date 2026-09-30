@@ -187,17 +187,8 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
   -- `main` returns, whatever its result, the tasks still pending run, as
   -- `lean_finalize_task_manager` waits for them before the exception is
   -- reported or the process exits; they see Lean's shutdown flag (§5.14).
-  let tags := (← get).taskTags
-  let mut drain := ""
-  if !tags.isEmpty then
-    let mut chain := "let none : u64 = 0;\n    none"
-    for h : i in [:tags.size] do
-      let j := tags.size - 1 - i
-      let z := tags[j]!
-      let step ← taskStepFn z
-      chain := s!"if tag == {j} \{\n    let c : LCell<{z}> = l2r_task_take<{z}>();\n    let v : u64 = {step}(c);\n    l2r_run_pending_tasks()\n    } else \{\n    {chain}\n    }"
-    pre := pre ++ s!"fn l2r_run_pending_tasks() -> u64 \{\n    let tag : u64 = l2r_task_next_tag();\n    {chain}\n}\n\n"
-    drain := "let sd : u64 = l2r_task_shutdown();\nlet pt : u64 = l2r_run_pending_tasks();\n"
+  -- (`l2r_run_pending_tasks` is generated at the end, `taskDispatchFns`.)
+  let drain := "let sd : u64 = l2r_task_shutdown();\nlet pt : u64 = l2r_run_pending_tasks();\n"
   let mainCode := s!"let tm : u64 = l2r_task_manager_start();\nlet se : u64 = l2r_std_enter();\nlet r = {fnName mainInst}({argExpr}L2RUnit::u\{});\nlet sl : u64 = l2r_std_leave();\n{drain}match r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
   -- The startup chain ends by clearing `IO.initializing`; an error stops
   -- the program before main (`l2r_uncaught_exception` exits).
@@ -387,6 +378,12 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
     modify fun s => { s with fns := s.fns.push put }
     let ctxFns ← stdContextFns
     modify fun s => { s with fns := s.fns ++ ctxFns }
+    repeat
+      finishUnboxFns
+      unless ← finishFnValues do break
+    -- Every task type is known now: the functions running queued tasks.
+    let disp ← taskDispatchFns
+    modify fun s => { s with fns := s.fns ++ disp }
     repeat
       finishUnboxFns
       unless ← finishFnValues do break
