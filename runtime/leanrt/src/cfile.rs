@@ -696,6 +696,25 @@ impl CFile {
         }
     }
 
+    /// What one `read(1024)`-sized step of `readToEnd` gets without blocking
+    /// twice: the buffered bytes, or one refill (one `read(2)`). `Ok` empty
+    /// at end of file (clearing the indicators, as `read` at end of file
+    /// does); `Err(errno)` on a read error. For `IO.Process.output`'s
+    /// polling of two pipes.
+    pub(crate) fn read_some(&mut self) -> Result<Vec<u8>, i32> {
+        self.used = true;
+        if self.rp >= self.re && self.underflow_generic() == EOF {
+            if self.flags & ERR_SEEN != 0 {
+                return Err(errno_now());
+            }
+            self.clearerr();
+            return Ok(Vec::new());
+        }
+        let v = self.buf[self.rp..self.re].to_vec();
+        self.rp = self.re;
+        Ok(v)
+    }
+
     /// `Handle.getLine`: `getc` up to and including `\n` (or to end of file
     /// or error); then an error indicator (set now or by any earlier
     /// failure) is an error and the line is lost; otherwise end of file is

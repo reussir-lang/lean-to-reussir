@@ -233,6 +233,13 @@ parent's end of a piped stream, a closed handle otherwise);
 `l2r_proc_try_wait(pid) -> u64` (`1 << 32 | code` once exited, 0 while
 running), `l2r_proc_kill(pid, setsid)` — all fallible. A child that cannot
 change directory or execute prints Lean's message and exits with 255.
+`IO.Process.output` reads stdout in a dedicated task while it reads
+stderr; without threads, `l2r_proc_drain(out, err) -> RVec<u8>` reads both
+pipes to end of file together (`poll`), returning stdout's bytes, then
+`l2r_proc_drained_err() -> RVec<u8>` gives stderr's (fallible: the first
+read error). The glue applies `readToEnd`'s UTF-8 check (`Tried to read
+from handle containing non UTF-8 data.`) to stderr before `wait` and to
+stdout after, as natively.
 
 **Other glue primitives.**
 
@@ -324,22 +331,21 @@ lean2rr's dev branch (the tests pass with it).
     `l2r_fs_current_dir`, `l2r_fs_app_path`,
     `l2r_fs_process_get_current_dir`, `l2r_fs_process_set_current_dir`
     with `l2r_io_finish`; kind 23 needs `IO.userError`.
-21. *done* (except the runtime's own panics and `dbgTraceIfShared`) —
-    native `panic!` (outside `LEAN_ABORT_ON_PANIC`), `dbgTrace`, `timeit`
-    and `allocprof` print to the *current* stderr stream (`io_eprintln`):
+21. *done* on the runtime side — native `panic!` (outside
+    `LEAN_ABORT_ON_PANIC`), the runtime's own panics (`index out of
+    bounds`, `String.get!`), `dbgTrace`, `dbgTraceIfShared`, `timeit` and
+    `allocprof` print to the *current* stderr stream (`io_eprintln`):
     every program defines `fn l2r_stderr_put(s : LStr) -> u64` (lean2rr),
     which the prelude calls. Internal panics, uncaught exceptions and
     abort-mode panics go to descriptor 2, as natively. The runtime's own
-    panics (`index out of bounds` from `get!`/`set!`, `String.get!`) still
-    go to descriptor 2: they are raised inside the prelude's array helpers,
-    which the stream code behind `l2r_stderr_put` uses too, and routing
-    them through it makes rrc crash in `TokenReusePass` under
-    `--reuse-across-call` (a Reussir bug; without the flag it compiles)
-    (test `RtStreamsRedirectOob`). `lean_dbg_trace_if_shared<T>` must stay
-    an FFI import (so value types arrive in fresh, unshared wrappers), so
-    it writes to descriptor 2; glue for the current stream:
-    `let r = l2r_shared_check<S>(a); if l2r_last_shared() {
-    l2r_stderr_put(l2r_shared_rc_text(msg)) }; r`.
+    panics are raised inside the prelude's array helpers, which the stream
+    code behind `l2r_stderr_put` uses too; a Reussir-level call there
+    makes rrc crash in `TokenReusePass` under `--reuse-across-call` (a
+    Reussir bug), so they (and `dbgTraceIfShared`, an FFI import) reach it
+    from Rust (`leanrt::io::diag_put`) through the trampoline
+    `extern "C" trampoline "l2r_stderr_put_c" = l2r_stderr_put;`, which
+    lean2rr must emit in every program (a weak symbol: without it they go
+    to descriptor 2; test `RtStreamsRedirectOob`).
 22. *done* — `String.mk`/`List.asString` (`lean_string_mk`) take a `List Char`: glue
     folding the list with `lean_string_push` onto `lean_mk_string("")`.
 23. *done* — `IO.initializing` is true while module initializers run (native
@@ -372,9 +378,7 @@ lean2rr's dev branch (the tests pass with it).
     was spawned with `setsid` (`uint8`) after its three Lean fields, so
     lean2rr's `Child` record needs those two extra fields, set by the spawn
     glue and kept by `takeStdin` (test `RtProcess`). `IO.Process.output`
-    reads stdout in a dedicated task while reading stderr; if deferred
-    tasks cannot interleave these, a runtime primitive draining both pipes
-    with `poll` can be added (ask).
+    should use `l2r_proc_drain` (above) instead of its task-based reads.
 30. `Lean.Name.beq` (`lean_name_eq`): the prelude cannot define it (`Name`
     is a Lean type); its reference body (structural equality) is what the
     native code computes.
@@ -411,10 +415,10 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   assume a promise is resolved before it is read, which deferred tasks no
   longer ensure).
   Sockets, `Std.Sync` and timers are not implemented; child processes wait
-  for lean2rr glue (request 29). `IO.Process.output` reads the child's
-  stdout in a dedicated task natively while it reads stderr; without
-  threads, a child that fills one pipe (64 KiB) while the program waits on
-  the other deadlocks.
+  for lean2rr glue (request 29). Code that reads a child's two pipes one
+  after the other itself (not through `IO.Process.output`, whose glue
+  drains both together) deadlocks without threads if the child fills the
+  other pipe (64 KiB) first; natively a dedicated task avoids it.
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
 - Huge `Array.mkEmpty`/`ByteArray.emptyWithCapacity` capacities are checked

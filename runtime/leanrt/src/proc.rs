@@ -168,6 +168,86 @@ pub fn take_end(i: u64) -> LHandle {
     ends.get_mut(i as usize).and_then(|e| e.take()).unwrap_or_else(|| handle_from_fd(-1, 0))
 }
 
+/// stderr's bytes from the last `drain`.
+static DRAINED_ERR: Global<Vec<u8>> = Global(UnsafeCell::new(Vec::new()));
+
+#[repr(C)]
+struct PollFd {
+    fd: c_int,
+    events: i16,
+    revents: i16,
+}
+
+extern "C" {
+    fn poll(fds: *mut PollFd, n: u64, timeout: c_int) -> c_int;
+}
+
+const POLLIN: i16 = 1;
+const EINTR: i32 = 4;
+
+/// `IO.Process.output`'s reads of a child's piped stdout and stderr to end
+/// of file. Natively stdout is read by a dedicated task while the main
+/// thread reads stderr, so a child writing much to either never blocks;
+/// here both are read in turn as data arrives (`poll`). Returns stdout's
+/// bytes; stderr's are then `take_drained_err()`. A read error is recorded
+/// (the first one; natively stderr's is raised before the child is waited
+/// for, stdout's after), and reading stops.
+pub fn drain(out: &LHandle, err: &LHandle) -> Vec<u8> {
+    let (mut o, mut e) = (Vec::new(), Vec::new());
+    let mut done = [false, false];
+    let mut failure: Option<i32> = None;
+    let files = [crate::fs::fh(out) as *mut crate::cfile::CFile, crate::fs::fh(err) as *mut crate::cfile::CFile];
+    // Closed handles (streams that were not piped) have nothing to read.
+    for i in 0..2 {
+        if unsafe { (*files[i]).fd } < 0 {
+            done[i] = true;
+        }
+    }
+    while failure.is_none() && !(done[0] && done[1]) {
+        let mut fds: Vec<PollFd> = Vec::new();
+        let mut which = Vec::new();
+        for i in 0..2 {
+            if !done[i] {
+                fds.push(PollFd { fd: unsafe { (*files[i]).fd }, events: POLLIN, revents: 0 });
+                which.push(i);
+            }
+        }
+        let r = unsafe { poll(fds.as_mut_ptr(), fds.len() as u64, -1) };
+        if r < 0 {
+            if errno_now() == EINTR {
+                continue;
+            }
+            failure = Some(errno_now());
+            break;
+        }
+        for (k, pfd) in fds.iter().enumerate() {
+            if pfd.revents == 0 {
+                continue;
+            }
+            let i = which[k];
+            match unsafe { (*files[i]).read_some() } {
+                Ok(bytes) if bytes.is_empty() => done[i] = true,
+                Ok(bytes) => (if i == 0 { &mut o } else { &mut e }).extend_from_slice(&bytes),
+                Err(errno) => {
+                    failure = Some(errno);
+                    break;
+                }
+            }
+        }
+    }
+    unsafe { *DRAINED_ERR.0.get() = e };
+    match failure {
+        Some(errno) => set_err(errno, None),
+        None => set_ok(),
+    }
+    o
+}
+
+/// stderr's bytes from the last `drain`.
+pub fn take_drained_err() -> Vec<u8> {
+    std::mem::take(unsafe { &mut *DRAINED_ERR.0.get() })
+}
+
 fn decode_status(status: c_int) -> u32 {
     if status & 0x7f == 0 {
         ((status >> 8) & 0xff) as u32

@@ -162,14 +162,15 @@ fn l2r_panic_code_text(code : u64) -> LStr [{
 }];
 
 // These panics come from inside the prelude's array and string helpers,
-// which the stream code behind `l2r_stderr_put` itself uses: routing them
-// through `l2r_stderr_put` crashes rrc's TokenReusePass under
-// `--reuse-across-call` (a Reussir bug), so they go to descriptor 2 (the
-// same place unless stderr is redirected).
-fn l2r_panic_code(code : u64) -> u64 { l2r_eprint_raw(l2r_panic_text(l2r_panic_code_text(code))) }
+// which the stream code behind `l2r_stderr_put` itself uses. A Reussir-level
+// call cycle there crashes rrc's TokenReusePass under `--reuse-across-call`
+// (a Reussir bug), so the message reaches `l2r_stderr_put` from Rust,
+// through the program's `l2r_stderr_put_c` trampoline
+// (`leanrt::io::diag_put`; descriptor 2 without one).
+fn l2r_panic_code(code : u64) -> u64 { l2r_diag_put(l2r_panic_text(l2r_panic_code_text(code))) }
 
 #[ffi(import)]
-fn l2r_eprint_raw(s : LStr) -> u64 [{ { leanrt::io::eprint(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_diag_put(s : LStr) -> u64 [{ { leanrt::io::diag_put(s); 0 } }];
 
 // `panicCore {α} [Inhabited α] (msg : String) : α`.
 fn lean_panic_fn_borrowed<T>(dflt : T, msg : LStr) -> T {
@@ -2764,12 +2765,10 @@ fn lean_dbg_trace<T>(msg : LStr, f : L2RUnit -> T) -> T {
 // encoding) or to a dummy box with an immortal count (>= 2^31).
 // This must be an FFI import (lean2rr then passes values that cannot cross
 // the boundary in fresh wrappers, which are never shared: native Lean's
-// small `Nat`s are scalars), so it cannot reach `l2r_stderr_put`: the
-// message goes to descriptor 2. For the current stderr stream, lean2rr's
-// glue can use the pieces below instead: `l2r_shared_check<S>(a)` records
-// whether `a` is shared (read with `l2r_last_shared()`) and returns it;
-// the message is `l2r_shared_rc_text(msg)` (`shared RC <msg up to its
-// first NUL>\n`).
+// small `Nat`s are scalars), so the message reaches the current stderr
+// stream from Rust (`leanrt::io::diag_put`). The pieces below
+// (`l2r_shared_check<S>(a)`, `l2r_last_shared()`, `l2r_shared_rc_text`)
+// allow the same from Reussir code.
 #[ffi(import)]
 fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
     {
@@ -2784,7 +2783,7 @@ fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
             let mut line = b"shared RC ".to_vec();
             line.extend_from_slice(&msg[..msg.iter().position(|&b| b == 0).unwrap_or(msg.len())]);
             line.push(b'\n');
-            leanrt::io::eprint(&line);
+            leanrt::io::diag_put(leanrt::string::from_bytes(&line));
         }
         leanrt::rc_release(msg);
         a
@@ -3106,6 +3105,23 @@ fn l2r_proc_wait(pid : u32) -> u32 [{ leanrt::proc::wait(pid) }];
 // `Child.tryWait`: `(1 << 32) | code` once exited, 0 while running; fallible.
 #[ffi(import)]
 fn l2r_proc_try_wait(pid : u32) -> u64 [{ leanrt::proc::try_wait(pid) }];
+// `IO.Process.output`: the child's piped stdout and stderr handles read to
+// end of file together (natively a dedicated task reads stdout while stderr
+// is read; without threads, `poll`). Returns stdout's bytes; stderr's are
+// then `l2r_proc_drained_err()`. Fallible (the first read error). The glue
+// then applies `readToEnd`'s UTF-8 check (`Tried to read from handle
+// containing non UTF-8 data.`): stderr's before `wait`, stdout's after.
+#[ffi(import)]
+fn l2r_proc_drain(out : LHandle, err : LHandle) -> RVec<u8> [{
+    {
+        let v = leanrt::proc::drain(&out, &err);
+        leanrt::rc_release(out);
+        leanrt::rc_release(err);
+        leanrt::array::bytes_of_string(Rc::new(v))
+    }
+}];
+#[ffi(import)]
+fn l2r_proc_drained_err() -> RVec<u8> [{ leanrt::array::bytes_of_string(Rc::new(leanrt::proc::take_drained_err())) }];
 // `Child.kill`: SIGKILL (to the process group after `setsid`); fallible.
 #[ffi(import)]
 fn l2r_proc_kill(pid : u32, setsid : bool) -> u64 [{ { leanrt::proc::kill_child(pid, setsid); 0 } }];

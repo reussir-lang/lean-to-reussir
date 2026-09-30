@@ -151,6 +151,34 @@ pub fn eprint(data: &[u8]) {
     let _ = std_file(2).put(data);
 }
 
+extern "C" {
+    /// lean2rr's `l2r_stderr_put(s : LStr) -> u64` (the current stderr
+    /// stream's `putStr`), exported by every program as
+    /// `extern "C" trampoline "l2r_stderr_put_c" = l2r_stderr_put;` (one
+    /// pointer argument, consumed; a trivial trampoline). Weak: null when
+    /// the program does not define it.
+    #[linkage = "extern_weak"]
+    static l2r_stderr_put_c: *const std::ffi::c_void;
+}
+
+/// A runtime diagnostic (the runtime's own panics, `dbgTraceIfShared`)
+/// through the program's current stderr stream (native `io_eprintln`),
+/// called from Rust so that Reussir sees no call from the prelude's helpers
+/// into the stream code; descriptor 2 when the program has no
+/// `l2r_stderr_put_c`.
+#[inline(never)]
+pub fn diag_put(s: crate::string::LStr) {
+    let f = unsafe { l2r_stderr_put_c };
+    if f.is_null() {
+        eprint(&s);
+        crate::rc_release(s);
+    } else {
+        let put: unsafe extern "C" fn(*mut std::ffi::c_void) -> u64 = unsafe { std::mem::transmute(f) };
+        let raw: *mut std::ffi::c_void = unsafe { std::mem::transmute(s) };
+        unsafe { put(raw) };
+    }
+}
+
 /// Flush as at exit and terminate the process.
 pub fn exit(code: i32) -> ! {
     flush_at_exit_registered();

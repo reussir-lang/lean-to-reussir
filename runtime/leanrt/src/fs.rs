@@ -167,7 +167,7 @@ impl Drop for FileHandle {
 }
 
 #[inline(always)]
-fn fh(h: &LHandle) -> &mut CFile {
+pub(crate) fn fh(h: &LHandle) -> &mut CFile {
     // Handles are shared and mutable (like `FILE*`); only this module
     // creates them, always holding a `FileHandle`.
     let b: &Box<dyn Any> = h;
