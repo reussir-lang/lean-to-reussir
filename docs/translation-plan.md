@@ -212,9 +212,20 @@ and Lean's checker runs after every pass. This stage involves no new
 translation logic; its job is to leave the code in the shape Stage 4
 expects.
 
-The environment is imported with its extensions loaded (`loadExts`). Without
-them every extension keeps its initial state, and queries the passes depend
-on, such as "is this a class" for dictionary folding, silently answer no.
+The environment is imported with the extensions' imported state loaded.
+Without it every extension keeps its initial state, and queries the passes
+depend on, such as "is this a class" for dictionary folding, silently answer
+no.
+
+**Two passes are lean2rr's copies.** Lean's `toMono` erases every
+type-former argument of an inductive to `lcAny`: `Std.HashMap Nat Nat` is
+`DHashMap Nat (fun _ => Nat)`, and mono makes its buckets
+`AssocList Nat lcAny`, boxing every value. lean2rr runs copies of `toMono`
+and `structProjCases` (the other pass that converts types) whose type
+conversion keeps a closed, non-dependent type-former argument: a constant
+family `fun _ => T` or a type constructor. A dependent family (`fun n =>
+Fin n`) stays `lcAny`, as its values have no single representation. Every
+mono type lean2rr computes itself uses the same conversion.
 
 **`toMono`: semantic lowering done by Lean.**
 - `Decidable` → `Bool`.
@@ -392,6 +403,12 @@ its value is stored as `Box`.
   out of polymorphically recursive code) meets code expecting the precise
   type (`List Nat`), the conversion is structural, element by element.
   Programs observe values, not object identity, so this is transparent.
+- Between two different inductives with the same constructor shapes, or
+  between `Nat` and an enumeration (only reachable through `unsafeCast`,
+  where Lean's representations coincide), values convert constructor by
+  constructor, or by index. Where no conversion exists at all, lean2rr
+  warns and emits a run-time panic for that cast: the program is still
+  translated.
 - `Box` costs one allocation per boxing, and appears only on the rare paths
   of §2.6. Typed code never pays for it.
 
@@ -503,6 +520,13 @@ each path that reaches it:
 **J1, single jump: inline.** When `j` is jumped to from one place, put
 `body` there, with `y` bound to the argument.
 
+**J1', small join point: duplicate.** A join point whose body is small (at
+most a dozen bindings, alternatives and exits) and that is not J2 is
+inlined at each of its jumps, like J1. Outlining it would put a function
+boundary on the path: a loop through it would become a state machine or
+mutually recursive, and Reussir could not reuse a cell matched before the
+jump for a construction after it.
+
 **J2, all paths join: structured `let`.** When every path through `k` ends
 in `jmp j …` (or in unreachable), `k` becomes an expression that produces
 `j`'s arguments, followed by `body`. This is the common "diamond" shape. The
@@ -559,8 +583,8 @@ self tail call; other calls back into the declaration are ordinary calls. The en
 Reussir miscompiles `[value]` enums with fields of mixed layout (§9);
 Reussir's reuse makes the shared cell cheap.
 
-**Choice and nesting.** J1 applies first, then J2, then J3 (J4 when an
-outlined body calls the declaration back).
+**Choice and nesting.** J1 applies first, then J2, then J1' (small), then
+J3 (J4 when an outlined body tail-calls the declaration).
 - J2 requires every jump to `j` to stay inside the same Reussir function.
   If `j` is also jumped to from inside a join point that was outlined, `j`
   is outlined too.
@@ -629,6 +653,13 @@ Rules:
   constructors, `lean_string_intercalate`, …): Lean's runtime calls back
   into compiled Lean code. lean2rr calls that definition directly and
   compiles it like any other, so its semantics are exactly Lean's.
+- **Fallible IO** (files and the file system): the runtime primitive
+  records its outcome in a last-error slot; `l2r_io_finish` turns it into
+  `EST.Out.ok` with the payload (converted: unit, handle, `Metadata`, an
+  array of `DirEntry`) or into `EST.Out.error e`, where `e` is built by
+  Lean's own exported `lean_mk_io_error_*` builder for the reported kind,
+  as Lean's `decode_io_error` does (the builders are instantiated when a
+  program uses such an extern). `IO.FS.Handle` is the runtime's `LHandle`.
 - **Proofs.** A `Prop`-valued inductive has the unit representation, and a
   parameter of such a type (a proof) is not passed to the runtime.
 - **`BaseIO` externs that cannot fail** call the runtime's payload
@@ -693,19 +724,25 @@ Native Lean behaves as follows (observed):
 - `extractClosed` constants are evaluated **lazily, once**, on first use;
 - all of these values live for the whole run.
 
-Our translation:
-- **User-module constants whose value involves a function call** are
-  evaluated at startup, before `main`, including unused ones. They can
-  panic, trace, or loop, just as natively.
-- **Constants that are plain data** (literals, constructors, partial
-  applications) may be built lazily; that is indistinguishable.
-- **Toolchain constants** (Init/Std) are evaluated lazily, once. Every
-  native Lean program evaluates all of them at startup without any visible
-  effect, so laziness changes nothing but speed.
-- **Closed terms** are lazy, once.
-- **`initialize`/`builtin_initialize` declarations** of user modules are IO
-  actions that native runs in the module initializer. They run at startup in
-  the same module order, and their results are stored like constants.
+Our translation runs, before `main`, the startup work of Lean's module
+initializers:
+- for each program module, for each declaration in source order (line,
+  then column; an auxiliary declaration such as `main.unsafe_1`, which has
+  no position of its own, right before its parent):
+  - an `initialize` action (`initialize do …`) is run;
+  - for `initialize c : T ← act`, `act` is run and its result stored as
+    `c`, which the program reads from a once-cell;
+  - any other constant, instances included, is evaluated;
+- before those, the `initialize` constants of toolchain modules that the
+  program uses (`IO.stdGenRef`), in module order.
+An error from an initializer is reported like an uncaught exception of
+`main` (the message, exit code 1), and later initializers do not run.
+Toolchain constants are evaluated lazily, once: native Lean evaluates all
+of them at startup without any visible effect. Closed terms are lazy, once.
+
+lean2rr itself never runs the program's initializers: it loads the imported
+extension states without Lean's init step, which would execute the
+program's `initialize` actions inside the compiler.
 
 The storage is a once-cell per constant, holding a value that is never
 freed. It is either a runtime facility or a Reussir global, and is a
