@@ -1284,10 +1284,13 @@ Each item says what differs and when.
   adds recursion of its own (structural conversions, the `Array.mk` and
   `String.mk` list folds). The depth at which `Stack overflow detected.
   Aborting.` (exit 134) happens is not native's, in either direction.
-- *Stream redirection*: `IO.setStdout`, `setStderr` and `setStdin` (and so
-  `IO.FS.withIsolatedStreams`) are not translated yet. Panic messages and
-  `dbgTrace` go to descriptor 2, where native uses the current stderr
-  stream.
+- *Stream redirection* (`IO.setStdout`, `setStderr`, `setStdin`,
+  `IO.FS.withIsolatedStreams`) is translated: the current streams live in
+  cell slots, and panics, `dbgTrace` and `timeit` write through the current
+  stderr stream (`l2r_stderr_put`), as natively. Natively each thread has
+  its own streams: a task, and `main` after the initializers, start with the
+  process's streams. Until tasks save and restore the slots, a redirection
+  made in a task or an initializer is seen by the rest of the program.
 
 **Cost** (time and memory, not results)
 - *Structural conversions* (§5.1) rebuild a value as a tree: sharing is lost,

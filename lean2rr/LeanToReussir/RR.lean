@@ -71,6 +71,8 @@ mutual
     | ctor (ty : String) (variant : Option String) (args : Array Expr)
     /-- Positional field access `e.i`. -/
     | field (e : Expr) (idx : Nat)
+    /-- Numeric conversion `(e as T)`. -/
+    | cast (e : Expr) (ty : Ty)
     /-- Single-parameter lambda `|x : T| body`. -/
     | lam (param : String) (ty : Ty) (body : Block)
     | ite (cond : Expr) (thenB : Block) (elseB : Block)
@@ -141,6 +143,7 @@ mutual
     | .apply f a, acc => a.tys (f.tys acc)
     | .ctor _ _ args, acc => args.foldl (fun a e => e.tys a) acc
     | .field e _, acc => e.tys acc
+    | .cast e t, acc => (e.tys acc).push t
     | .lam _ t b, acc => Block.tys b (acc.push t)
     | .ite c t e, acc => Block.tys e (Block.tys t (c.tys acc))
     | .mtch s arms, acc => arms.foldl (fun a arm => Block.tys arm.body a) (s.tys acc)
@@ -172,6 +175,7 @@ mutual
       let head := match v with | some v => s!"{ty}::{v}" | none => ty
       if args.isEmpty then head ++ "{}" else s!"{head}\{{", ".intercalate (args.toList.map (Expr.render d))}}"
     | .field e i => s!"{e.render d}.{i}"
+    | .cast e t => s!"({e.render d} as {t.render})"
     | .lam x ty body => s!"|{x} : {ty.render}| {Block.render d body}"
     | .ite c t e =>
       -- No `else if` in Reussir: an `if` in the else branch stays inside braces.

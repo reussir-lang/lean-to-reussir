@@ -868,7 +868,7 @@ def metadataOf (mt : RR.Ty) (v : RR.Expr) : LowerM RR.Expr := do
   let some (RR.Ty.named ftn) := fs[3]? | throwError "lean2rr: bad IO.FS.Metadata type"
   let get (i : Nat) : RR.Expr := .call "l2r_array_get" #[.named "u64"] #[.var "m", .atom (toString i)]
   let time (i : Nat) : LowerM RR.Expr := ctorValue stTy ``IO.FS.SystemTime.mk
-    #[.call "lean_int64_to_int_sint" #[] #[get i], .atom s!"({(get (i + 1)).render 0} as u32)"]
+    #[.call "lean_int64_to_int_sint" #[] #[get i], .cast (get (i + 1)) (.named "u32")]
   let md ← ctorValue mt ``IO.FS.Metadata.mk
     #[← time 0, ← time 2, get 4, .call (← enumOfIndexFn ftn) #[] #[get 5], get 6]
   return .block ⟨#[("m", some (.app "RVec" #[.named "u64"]), v)], md⟩
@@ -955,7 +955,7 @@ def fallibleIOGlue (prim : String) (primRet : RR.Ty) (argTys : Array RR.Ty) (arg
         if tn == boxName then coerce a t (.named "LHandle") else
         match (← get).typeInfos[tn]? with
         | some ti => if ti.shape == .enumLike then
-            pure (.atom s!"({(RR.Expr.call (← enumIndexFn tn) #[] #[a]).render 0} as u8)") else pure a
+            pure (.cast (RR.Expr.call (← enumIndexFn tn) #[] #[a]) (.named "u8")) else pure a
         | none => pure a
       | _ => pure a
     lets := lets.push (x, none, e)
@@ -2028,6 +2028,7 @@ partial def rrFreeVars (e : RR.Expr) (bound : Std.HashSet String) (acc : Std.Has
   | .apply f a => rrFreeVars a bound (rrFreeVars f bound acc)
   | .ctor _ _ args => args.foldl (fun acc a => rrFreeVars a bound acc) acc
   | .field e _ => rrFreeVars e bound acc
+  | .cast e _ => rrFreeVars e bound acc
   | .lam x _ b => blockFreeVars b (bound.insert x) acc
   | .ite c t f => blockFreeVars f bound (blockFreeVars t bound (rrFreeVars c bound acc))
   | .mtch s arms => arms.foldl (fun acc arm =>
