@@ -1452,6 +1452,10 @@ Each item says what differs and when.
   not recorded in the `.olean`, so lean2rr runs Lean's passes with the
   defaults: a declaration compiled without closed-term extraction natively
   can have its closed terms extracted (and evaluated once) under lean2rr.
+  The recursion limit (`maxRecDepth`, which large literals need raised)
+  is effectively unlimited in lean2rr, bounded by its stack (4 GiB, set by
+  `scripts/l2r.py` through `LEAN_STACK_SIZE_KB`): a 60000-element list
+  literal needs about 100 MiB.
 - *Merging after erasure*: natively, two uses of a type-polymorphic
   constant at different type arguments (`(emptyList : List Nat)`,
   `(emptyList : List String)`) are the same call after erasure, and Lean's

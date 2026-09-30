@@ -119,6 +119,11 @@ def main():
     args = ap.parse_args()
 
     env = dict(os.environ)
+    # lean2rr runs Lean's compiler passes, which recurse once per nested
+    # `let` (a 60000-element list literal needs more than 64 MiB of stack):
+    # a bigger stack than Lean's default 1 GiB for its main thread, so that
+    # whatever Lean compiled translates.
+    env.setdefault("LEAN_STACK_SIZE_KB", str(4 * 1024 * 1024))
     if args.lean_path:
         env["LEAN_PATH"] = args.lean_path + (":" + env["LEAN_PATH"] if env.get("LEAN_PATH") else "")
 
