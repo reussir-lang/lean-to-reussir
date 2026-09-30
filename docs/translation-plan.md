@@ -380,7 +380,7 @@ Stage 4 sees only mono types:
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
 | `ST.Ref σ α` | `LRef<Box>`, a shared mutable cell | mono types a reference as `lcAny`, so it travels boxed. Its contents are boxed too, whatever `α` is: uniform code (`α = lcAny`) and typed code can share one cell, and a cell cannot be converted without losing aliasing. Each `set` allocates the box. |
-| `Thunk α`, `Task α` | generated one-field structs | a thunk is forced when built; a pure task is computed when spawned (§6) |
+| `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧) }` | memoized thunks, deferred IO tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
 
 A type with computed fields (`Lean.Name`) is represented by its
@@ -804,19 +804,23 @@ fn l_main___l2r_0_(a505 : L2RUnit) -> T_EST_Out_348 {
 ### 5.11 Program entry
 
 A generated Reussir `#[main]` does what Lean's generated `main` does
-(`EmitC`: `initialize_Main`, then `lean_io_mark_end_initialization`, then
-`lean_run_main`):
+(`EmitC`: `initialize_Main`, then `lean_io_mark_end_initialization` and
+`lean_init_task_manager`, then `lean_run_main`, then
+`lean_finalize_task_manager`):
 1. it runs the startup work of §5.12 on the process's main thread (8 MiB
    stack), with `IO.initializing` answering `true`. An error there prints
    `uncaught exception: <message>` and exits with status 1 before `main`;
-2. it clears `IO.initializing`, then starts a thread with a 1 GiB stack, as
-   Lean's runtime does for `main` (deep non-tail recursion is common in Lean
-   programs);
+2. it clears `IO.initializing` and starts the task manager: IO tasks are
+   deferred from now on (§5.14). It then starts a thread with a 1 GiB
+   stack, as Lean's runtime does for `main` (deep non-tail recursion is
+   common in Lean programs);
 3. on that thread it calls the translated `main`, passing the argument list
    (without the program name) if `main` takes one, and the world;
-4. on `error e`, it prints `uncaught exception: <message>` to stderr and
+4. it runs the IO tasks still pending, whatever `main` returned, as
+   `lean_finalize_task_manager` does before the result is looked at;
+5. on `error e`, it prints `uncaught exception: <message>` to stderr and
    exits with status 1;
-5. otherwise it exits with the returned `UInt32` (0 for `IO Unit`).
+6. otherwise it exits with the returned `UInt32` (0 for `IO Unit`).
 
 `leanrt::rt::run_main2` implements the two threads and Lean's stack
 overflow report.
@@ -887,6 +891,83 @@ or std names:
 Uniqueness comes from the counters, not from an encoding of the type
 arguments.
 
+### 5.14 Thunks and tasks
+
+Both are a runtime cell `LCell<S>`: one allocation holding a count and one
+value, updated in place and seen through every alias. The value is a
+generated state, one type per value type `α` (and per kind, thunk or task):
+
+```
+enum L2RThunk_N { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧) }
+```
+
+The state is a shared Reussir enum, so every `α` fits, closures and value
+types included; a closure cannot be stored in a runtime cell directly.
+toMono leaves only a few externs to translate: `cases` on a thunk or task
+becomes `Thunk.get`/`Task.get`, and `Thunk.fn` a closure calling
+`Thunk.get`.
+
+**Thunks** follow `lean_mk_thunk` and `lean_thunk_get_core`:
+
+| Lean | Reussir |
+|---|---|
+| `Thunk.mk f` | `l2r_lcell_new(S::pending{f})` |
+| `Thunk.pure a` | `l2r_lcell_new(S::done{a})` |
+| `Thunk.get t` | `l2r_thunk_get_S(t)`: `done(v)` gives `v`; `pending(f)`: swap in `busy`, `v = f(())`, store `done(v)`, give `v` |
+
+- The closure runs at most once, on the first `get`, and is released after
+  it has run, as Lean's thunk drops its closure before calling it.
+- `busy` means the thunk is needed by its own computation. Lean then spins
+  forever waiting for the value; the translation waits forever too.
+- Cost: `Thunk.mk` allocates one object more than Lean (the `pending` state
+  around the closure). The first `get` replaces it by the `done` state,
+  which Reussir can build in the cell it frees.
+
+**Tasks.** Native Lean runs tasks on a thread pool. A worker may start a task
+at any time after it is created and must have finished it when its value is
+needed. The translation is single-threaded and picks one such schedule:
+
+- *Pure tasks* (`Task.spawn`, `Task.map`, `Task.bind`, `Task.pure`) are
+  computed when they are created: `Task.spawn f` is
+  `l2r_lcell_new(S::done{f(())})`. Pure code cannot observe when that
+  happened (only `dbgTrace` could).
+- *IO tasks* (`BaseIO.asTask`, `mapTask`, `bindTask`) are deferred. The new
+  cell is `pending(|w| act(w).val)` (for `mapTask f t`, the action is `f
+  t.get`; for `bindTask t f`, the value of the task `f t.get` returns). The
+  runtime (`leanrt::task`) queues it and holds a reference until it runs,
+  since Lean runs an IO task even if the program drops it. A pending task
+  runs, on the stack of whoever needs it, at the first of:
+  - `IO.wait`/`Task.get` of it, a pure task built from it, or a task
+    depending on it (`mapTask`, `bindTask`) running;
+  - `IO.waitAny` on a list none of whose tasks has finished: the first
+    pending task of the list runs (it is the one that finished first);
+  - a second `IO.getTaskState`/`IO.hasFinished` of the same task: the first
+    reports `waiting`, a repeated one means the program is polling, so the
+    task runs and is reported `finished`;
+  - `main` returning (§5.11): the queued tasks run in creation order. Lean
+    sets its shutdown flag before waiting for them, so `IO.checkCanceled` is
+    true in them. `IO.Process.exit` exits at once, as natively.
+- `mapTask`/`bindTask` with `sync := true` of a finished task run `f` at
+  once, as `lean_task_map_core`/`lean_task_bind_core` do.
+- `IO.cancel` sets the flag of a pending or running task. `IO.checkCanceled`
+  answers for the innermost running task, and is false in `main`.
+- During module initialization Lean has no task manager, and
+  `lean_task_spawn_core` runs the action at once; so does the translation.
+
+Why IO tasks are deferred rather than run at creation: a task may wait for
+`main`. `IO.asTask (do while !(← flag.get) do IO.sleep 1; …)` followed by
+`flag.set true; IO.wait t` finishes natively; run at creation, the task
+would spin forever. Running at creation also prints the task's output
+before `main`'s next line, which natively comes first when the task starts
+with a sleep. A task that runs only when needed never waits for something
+that is still to happen.
+
+What a single thread cannot do: `main` waiting for a task by other means
+than the task operations above (polling an `IO.Ref` the task sets) does not
+terminate, and `IO.waitAny` does not pick the fastest of several unfinished
+tasks. Tasks that wait for each other in a cycle wait forever, as natively.
+Promises are not implemented.
+
 ---
 
 ## 6. Runtime (`leanrt`)
@@ -898,17 +979,17 @@ The runtime provides what Reussir lacks:
 - `Float` math through libm;
 - IO: stdout/stderr/stdin streams, `IO.Error`, argv, exit;
 - `ST.Ref` cells;
-- memoized `Thunk`;
-- eager `Task`, since pure tasks give the same values when run immediately;
+- the mutable cells of thunks and tasks, and the queue of deferred IO
+  tasks (§5.14);
 - panic, trace;
 - once-cells for constants.
 
-Concurrency primitives (`IO.asTask`, promises, channels) run on a
-single-threaded cooperative scheduler. A task runs until it finishes or
-blocks on another task or promise, and then the scheduler switches. Every
-interleaving this produces is one that native Lean could also produce. Real
-threads, using Reussir's atomic reference counting, come later. Each runtime function consumes the arguments it owns, and never
-mutates in place unless it has checked for uniqueness.
+Everything runs on one thread: IO tasks are deferred until needed
+(§5.14), which gives one of the schedules native Lean can produce. Real
+threads, using Reussir's atomic reference counting, come later. Each
+runtime function consumes the arguments it owns, and never mutates in
+place unless it has checked for uniqueness (the cells of refs, thunks and
+tasks are mutable by design).
 
 ---
 
@@ -1044,11 +1125,11 @@ Each item says what differs and when.
 - *Dictionary rebuilding* (§2.4): an instance function applied to static
   arguments may run more often than natively. Visible only through traces
   or panics inside instance code, or as extra time.
-- *Tasks* run eagerly and synchronously when created. This matches native
-  only for tasks that finish without waiting for later actions of their
-  creator; a task that waits for its creator never terminates or takes
-  another branch. Promises are read after every resolution that can come
-  before the read.
+- *Tasks* run on one thread, when they are needed or when `main` returns
+  (§5.14): a task or `main` polling shared state that another task sets
+  never sees it change, output ordered by sleeps across tasks comes in the
+  order tasks are needed, and `IO.waitAny` does not pick the fastest task.
+  Promises are not translated yet.
 - *Stack depth* in general: frame sizes differ from native, and lean2rr
   adds recursion of its own (structural conversions, the `Array.mk` and
   `String.mk` list folds). The depth at which `Stack overflow detected.

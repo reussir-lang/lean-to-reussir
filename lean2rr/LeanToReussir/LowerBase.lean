@@ -119,6 +119,14 @@ structure LowerState where
   strLitIds : Std.HashMap String Nat := {}
   /-- Generated element-wise array conversions, per (source, target) storage. -/
   vecConvs : Std.HashMap (RR.Ty × RR.Ty) String := {}
+  /-- State types of thunks and tasks (see `lazyState`): (is a task, value
+  type) ↦ generated enum name, and back. -/
+  lazyStates : Std.HashMap (Bool × RR.Ty) String := {}
+  lazyInfos : Std.HashMap String (Bool × RR.Ty) := {}
+  /-- Task state types that IO tasks use, indexed by their runtime tag. -/
+  taskTags : Array String := #[]
+  /-- Names of generated thunk/task helper functions (see `lazyFn`). -/
+  lazyFnNames : Std.HashSet String := {}
   counter : Nat := 0
 
 abbrev LowerM := ReaderT LowerCtx (StateRefT LowerState CoreM)
@@ -163,8 +171,29 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
     match (← get).typeInfos[n]? with
     | some info => return info.shape != .enumLike
     | none => return false
-  | .app n _ => return n == "RVec" || n == "LRef"
+  | .app n _ => return n == "RVec" || n == "LRef" || n == "LCell"
   | .fn .. => return false
+
+/-- The state type of a thunk (`task = false`) or task over values of type
+`t`: a generated shared enum `{ pending(L2RUnit -> t), busy, done(t) }`
+held in a runtime cell `LCell<S>` (translation plan §5.14). A thunk
+starts `pending` (or `done`, for `Thunk.pure`) and is `busy` while its
+closure runs; a task is `done` from the start unless it is a deferred IO
+task. -/
+def lazyState (task : Bool) (t : RR.Ty) : LowerM String := do
+  if let some n := (← get).lazyStates[(task, t)]? then return n
+  let n ← fresh (if task then "L2RTask" else "L2RThunk")
+  modify fun s => { s with
+    lazyStates := s.lazyStates.insert (task, t) n
+    lazyInfos := s.lazyInfos.insert n (task, t)
+    typeItems := s.typeItems.push (.enum n false #[("pending", #[.fn .unit t]), ("busy", #[]), ("done", #[t])]) }
+  return n
+
+/-- The state type and value type of a thunk or task representation
+`LCell<S>`, if `t` is one. -/
+def lazyOf? (t : RR.Ty) : LowerM (Option (String × Bool × RR.Ty)) := do
+  let .app "LCell" #[.named s] := t | return none
+  return (← get).lazyInfos[s]?.map (s, ·)
 
 /-- The element type stored in a runtime array: values that cannot cross the
 FFI boundary are wrapped in a one-field shared struct (Lean boxes array
@@ -300,6 +329,11 @@ mutual
     | ``Nat => return .named "Nat"
     | ``Int => return .named "Int"
     | ``String => return .named "LStr"
+    | ``Thunk | ``Task =>
+      let elem ← match args[0]? with
+        | some a => lowerType a
+        | none => pure RR.Ty.box
+      return .app "LCell" #[.named (← lazyState (n == ``Task) elem)]
     | ``ByteArray => return .app "RVec" #[.named "u8"]
     | ``FloatArray => return .app "RVec" #[.named "f64"]
     | ``Array =>

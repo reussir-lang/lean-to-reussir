@@ -30,6 +30,7 @@ pub mod once;
 pub mod rt;
 pub mod string;
 pub mod tagvec;
+pub mod task;
 
 pub use big::LBig;
 pub use string::LStr;

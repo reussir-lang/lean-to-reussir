@@ -64,6 +64,68 @@ structure CodeCtx where
   jpParams : Std.HashMap FVarId (Array RR.Ty) := {}
   sm : Option StateMachine := none
 
+/-! ## Thunks and tasks: forcing
+
+A `Thunk α` or `Task α` is a runtime cell `LCell<S>` holding a generated
+state `S { pending(L2RUnit -> α), busy, done(α) }` (`lazyState`,
+translation plan §5.14). The functions below are generated once per state
+type. -/
+
+/-- Generate the functions `mk` builds under the name `name`, once. -/
+def lazyFn (name : String) (mk : LowerM (Array RR.Item)) : LowerM String := do
+  if (← get).lazyFnNames.contains name then return name
+  modify fun s => { s with lazyFnNames := s.lazyFnNames.insert name }
+  let items ← mk
+  modify fun s => { s with fns := s.fns ++ items }
+  return name
+
+/-- Whether state type `z` is a task's, and its value type. -/
+def lazyInfo (z : String) : LowerM (Bool × RR.Ty) := do
+  match (← get).lazyInfos[z]? with
+  | some i => return i
+  | none => throwError "lean2rr: {z} is not a thunk or task state (internal error)"
+
+/-- A match arm on state type `z`. -/
+def lazyArm (z v : String) (binders : Array (Option String)) (body : RR.Block) : RR.Arm :=
+  { ty := z, ctor := some v, binders, body }
+
+/-- `l2r_thunk_get_S(c)` / `l2r_task_get_S(c)`: the value of a thunk or
+task, computed on first use and kept. The slow path swaps in `busy` (so the
+pending state, now uniquely held, can be reused for `done`), runs the
+closure and stores its value, like `lean_thunk_get_core`, which takes the
+closure out before calling it. Forcing a `busy` state means the value is
+needed by its own computation: native Lean then waits forever, and so do
+we. A task is also registered as running for the duration
+(`IO.checkCanceled`, and it leaves the queue of pending IO tasks). -/
+def lazyGetFn (z : String) : LowerM String := do
+  let (task, t) ← lazyInfo z
+  let kind := if task then "task" else "thunk"
+  let get := s!"l2r_{kind}_get_{z}"
+  let run := s!"l2r_{kind}_run_{z}"
+  lazyFn get do
+    let zt := RR.Ty.named z
+    let cellTy := RR.Ty.app "LCell" #[zt]
+    let u64 := RR.Ty.named "u64"
+    let getBody : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
+      lazyArm z "done" #[some "v"] (.ofExpr (.var "v")),
+      lazyArm z "pending" #[none] (.ofExpr (.call run #[] #[.var "c"])),
+      lazyArm z "busy" #[] (.ofExpr (.call "l2r_lazy_cycle" #[t] #[]))])
+    let onCell (f : String) : RR.Expr := .call f #[zt] #[.var "c"]
+    let lets : Array (String × Option RR.Ty × RR.Expr) :=
+      (if task then #[("b", some u64, onCell "l2r_task_begin")] else #[]) ++
+      #[("v", some t, .apply (.var "f") .unitVal),
+        ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]])] ++
+      (if task then #[("e", some u64, onCell "l2r_task_end")] else #[])
+    let runBody : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_swap" #[zt] #[.var "c", .ctor z (some "busy") #[]]) #[
+      lazyArm z "pending" #[some "f"] ⟨lets, .var "v"⟩,
+      { ty := z, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) }])
+    return #[.fn run #[("c", cellTy)] t runBody, .fn get #[("c", cellTy)] t getBody]
+
+/-- A new cell in state `done(v)` (`Thunk.pure`, `Task.pure`, and every
+pure task). -/
+def lazyDone (z : String) (v : RR.Expr) : RR.Expr :=
+  .call "l2r_lcell_new" #[.named z] #[.ctor z (some "done") #[v]]
+
 /-! ## Conversions -/
 
 /-- Head constant of the Lean type a generated nominal type represents. -/
@@ -126,6 +188,12 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
           else pure (.ofExpr (.ctor n none (← fields.mapM zeroValue)))
         | none => pure unreachable
     | .app "RVec" #[e] => pure (.ofExpr (.call "l2r_array_empty" #[e] #[]))
+    | .app "LCell" _ =>
+      match ← lazyOf? t with
+      | some (z, _, vt) =>
+        if (← get).zeroBusy.contains vt then pure unreachable
+        else pure (.ofExpr (lazyDone z (← zeroValue vt)))
+      | none => pure unreachable
     | .fn a b =>
       -- A closure is a value whatever its result; its result is built only
       -- if it is ever applied.
@@ -262,6 +330,10 @@ mutual
       let some dh ← nominalHead dn | return none
       if sh != dh && !(← isomorphic sn dn) then return none
       return some (.call (← structConv sn dn) #[] #[e])
+    | .app "LCell" #[.named sz], .app "LCell" #[.named dz] =>
+      match ← lazyConv sz dz with
+      | some f => return some (.call f #[] #[e])
+      | none => return none
     | _, _ =>
       -- Arrays whose element types differ (an array reinterpreted by
       -- Lean's uniform-representation code, e.g. `Array α` as
@@ -305,6 +377,34 @@ mutual
       match si.ctors.find? a, di.ctors.find? b with
       | some la, some lb => (la.fields.filterMap id).size == (lb.fields.filterMap id).size
       | _, _ => false
+
+  /-- The generated function converting a thunk or task with state type `sz`
+  to one with state type `dz` (same kind, value types differing only in
+  representation, as for `structConv`): a computed value is converted now;
+  otherwise the result is a new pending cell that forces the original (so
+  the original's computation still runs at most once). `none` if the values
+  are not convertible. -/
+  partial def lazyConv (sz dz : String) : LowerM (Option String) := do
+    let some (sk, st) := (← get).lazyInfos[sz]? | return none
+    let some (dk, dt) := (← get).lazyInfos[dz]? | return none
+    if sk != dk then return none
+    let name := s!"l2r_lazyconv_{sz}_{dz}"
+    if (← get).lazyFnNames.contains name then return some name
+    modify fun s => { s with lazyFnNames := s.lazyFnNames.insert name }
+    let fail : LowerM (Option String) := do
+      modify fun s => { s with lazyFnNames := s.lazyFnNames.erase name }
+      return none
+    let some now ← tryCoerce (.var "v") st dt | fail
+    let get ← lazyGetFn sz
+    let some later ← tryCoerce (.call get #[] #[.var "c"]) st dt | fail
+    let u ← fresh "u"
+    let pending := RR.Expr.call "l2r_lcell_new" #[.named dz]
+      #[.ctor dz (some "pending") #[.lam u .unit (.ofExpr later)]]
+    let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[.named sz] #[.var "c"]) #[
+      lazyArm sz "done" #[some "v"] (.ofExpr (lazyDone dz now)),
+      { ty := sz, ctor := none, binders := #[], body := .ofExpr pending }])
+    modify fun s => { s with fns := s.fns.push (.fn name #[("c", .app "LCell" #[.named sz])] (.app "LCell" #[.named dz]) body) }
+    return some name
 
   /-- The generated function converting instantiation `sn` to `dn` of the
   same inductive (cached). -/
@@ -839,51 +939,292 @@ def ctorCallbackExtern (sym : String) (ret : Expr) (args : Array RR.Expr) : Lowe
     return some (.call helper #[rt] (args ++ #[lam "m" fty (lam "e" (.named "Int") pair)]))
   | _ => return none
 
+/-! ## Thunks and tasks: extern glue
+
+Translation plan §5.14. Thunks are memoized cells. Pure tasks
+(`Task.spawn`, `Task.map`, `Task.bind`) are computed when they are created,
+which a thread pool may always do. IO tasks (`BaseIO.asTask`, `mapTask`,
+`bindTask`) are deferred: they run when the program first needs them, or
+when `main` returns, as Lean's task manager finishes all queued tasks before
+the process exits (`leanrt::task`). -/
+
+/-- Bind `e : ty` to a fresh variable for `k` (Reussir applies only
+variables and call results). -/
+def withVar (pre : String) (ty : RR.Ty) (e : RR.Expr) (k : RR.Expr → LowerM RR.Expr) :
+    LowerM RR.Expr := do
+  match e with
+  | .var _ => k e
+  | _ =>
+    let x ← fresh pre
+    return .block ⟨#[(x, some ty, e)], ← k (.var x)⟩
+
+/-- Run the `BaseIO` action `act : actTy` (`L2RUnit -> R` with `R` an
+`ST.Out` structure) on the world `w`; its value, converted to `dst`. -/
+def runIO (act : RR.Expr) (actTy : RR.Ty) (w : RR.Expr) (dst : RR.Ty) : LowerM RR.Expr := do
+  let .fn _ resTy := actTy | throwError "lean2rr: IO action of type {actTy.render}"
+  let .named rn := resTy | throwError "lean2rr: IO result of type {resTy.render}"
+  let some info := (← get).typeInfos[rn]? | throwError "lean2rr: IO result of type {rn}"
+  let some layout := info.ctors.find? info.ctorOrder[0]! | throwError "lean2rr: IO result of type {rn}"
+  unless info.shape == .struct do throwError "lean2rr: BaseIO result type {rn} is not a structure"
+  let some (some (j, pt)) := layout.fields[0]? | throwError "lean2rr: IO result of type {rn}"
+  withVar "act" actTy act fun a => do
+    let r ← fresh "io"
+    return .block ⟨#[(r, some resTy, .apply a w)], ← coerce (.field (.var r) j) pt dst⟩
+
+/-- The state type and value type of a thunk or task of Reussir type `t`. -/
+def lazyOf (t : RR.Ty) : LowerM (String × RR.Ty) := do
+  match ← lazyOf? t with
+  | some (z, _, vt) => return (z, vt)
+  | none => throwError "lean2rr: expected a thunk or task, got {t.render}"
+
+/-- `l2r_task_defer_S(g)`: a new IO task computing `g(())`. After
+initialization it is pending and queued (runtime tag = index in
+`taskTags`); during module initialization Lean has no task manager and runs
+it at once (`lean_task_spawn_core`). -/
+def taskDeferFn (z : String) : LowerM String := do
+  let (_, t) ← lazyInfo z
+  let tag ← match (← get).taskTags.idxOf? z with
+    | some i => pure i
+    | none =>
+      let i := (← get).taskTags.size
+      modify fun s => { s with taskTags := s.taskTags.push z }
+      pure i
+  let name := s!"l2r_task_defer_{z}"
+  lazyFn name do
+    let zt := RR.Ty.named z
+    let cellTy := RR.Ty.app "LCell" #[zt]
+    let u64 := RR.Ty.named "u64"
+    let deferred : RR.Block := ⟨#[
+        ("c", some cellTy, .call "l2r_lcell_new" #[zt] #[.ctor z (some "pending") #[.var "g"]]),
+        ("r", some u64, .call "l2r_task_register" #[zt] #[.var "c", .atom (toString tag)])], .var "c"⟩
+    let eager : RR.Block := ⟨#[("v", some t, .apply (.var "g") .unitVal)], lazyDone z (.var "v")⟩
+    return #[.fn name #[("g", .fn .unit t)] cellTy
+      (.ofExpr (.ite (.call "l2r_task_deferring" #[] #[]) deferred eager))]
+
+/-- `l2r_task_done_S(c)`: whether a task has its value. -/
+def taskDoneFn (z : String) : LowerM String := do
+  let name := s!"l2r_task_done_{z}"
+  lazyFn name do
+    let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[.named z] #[.var "c"]) #[
+      lazyArm z "done" #[none] (.ofExpr (.atom "true")),
+      { ty := z, ctor := none, binders := #[], body := .ofExpr (.atom "false") }])
+    return #[.fn name #[("c", .app "LCell" #[.named z])] .bool body]
+
+/-- A pure task: the value `v` of type `vt`, stored in a task of Reussir
+type `taskTy`. -/
+def pureTask (taskTy : RR.Ty) (v : RR.Expr) (vt : RR.Ty) : LowerM RR.Expr := do
+  let (z, t) ← lazyOf taskTy
+  withVar "tv" t (← coerce v vt t) fun x => return lazyDone z x
+
+/-- The value of task or thunk `c : ty`, converted to `dst`. -/
+def lazyGet (c : RR.Expr) (ty : RR.Ty) (dst : RR.Ty) : LowerM RR.Expr := do
+  let (z, t) ← lazyOf ty
+  let get ← lazyGetFn z
+  withVar "tk" ty c fun c => coerce (.call get #[] #[c]) t dst
+
+/-- A deferred IO task of Reussir type `taskTy` whose value is `body u`
+(`u` is the world). -/
+def deferTask (taskTy : RR.Ty) (body : RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
+  let (z, _) ← lazyOf taskTy
+  let u ← fresh "w"
+  return .call (← taskDeferFn z) #[] #[.lam u .unit (.ofExpr (← body (.var u)))]
+
+/-- `IO.getTaskState` glue: `done` is finished, `busy` running (the task is
+computing); a pending task is reported waiting the first time it is asked
+about, and a repeated question (a program polling for it) runs it first
+and reports it finished. -/
+def taskStateFn (z : String) (stateTy : RR.Ty) : LowerM String := do
+  let name := s!"l2r_task_state_{z}"
+  let (_, t) ← lazyInfo z
+  let get ← lazyGetFn z
+  let v (c : Name) := ctorValue stateTy c #[]
+  let waiting ← v ``IO.TaskState.waiting
+  let running ← v ``IO.TaskState.running
+  let finished ← v ``IO.TaskState.finished
+  lazyFn name do
+    let zt := RR.Ty.named z
+    let pending : RR.Block := .ofExpr (.ite (.call "l2r_task_observe" #[zt] #[.var "c"])
+      ⟨#[("v", some t, .call get #[] #[.var "c"])], finished⟩ (.ofExpr waiting))
+    let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
+      lazyArm z "done" #[none] (.ofExpr finished),
+      lazyArm z "busy" #[] (.ofExpr running),
+      lazyArm z "pending" #[none] pending])
+    return #[.fn name #[("c", .app "LCell" #[zt])] stateTy body]
+
+/-- `IO.cancel` glue: an unfinished task gets its cancellation flag. -/
+def taskCancelFn (z : String) : LowerM String := do
+  let name := s!"l2r_task_cancel_{z}"
+  lazyFn name do
+    let zt := RR.Ty.named z
+    let u64 := RR.Ty.named "u64"
+    let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
+      lazyArm z "done" #[none] ⟨#[("z", some u64, .atom "0")], .var "z"⟩,
+      { ty := z, ctor := none, binders := #[], body := .ofExpr (.call "l2r_task_cancel" #[zt] #[.var "c"]) }])
+    return #[.fn name #[("c", .app "LCell" #[zt])] u64 body]
+
+/-- `IO.waitAny` glue over a list of tasks of type `listTy`: the value of the
+first task of the list that has finished; if none has, the first pending
+one is run (it finished first). If every task is running, they all wait
+for the caller: native Lean deadlocks. -/
+def taskWaitAnyFn (listTy : RR.Ty) (taskTy : RR.Ty) : LowerM String := do
+  let (z, t) ← lazyOf taskTy
+  let .named ln := listTy | throwError "lean2rr: bad list type {listTy.render}"
+  let some info := (← get).typeInfos[ln]? | throwError "lean2rr: bad list type {ln}"
+  let some nil := info.ctors.find? ``List.nil | throwError "lean2rr: bad list type {ln}"
+  let some cons := info.ctors.find? ``List.cons | throwError "lean2rr: bad list type {ln}"
+  let some (some (_, et)) := cons.fields[0]? | throwError "lean2rr: bad list type {ln}"
+  let get ← lazyGetFn z
+  let name := s!"l2r_task_wait_any_{z}_{ln}"
+  let run := name ++ "_run"
+  let task ← coerce (.var "c") et taskTy
+  lazyFn name do
+    let zt := RR.Ty.named z
+    let listArm (v : String) (bs : Array (Option String)) (b : RR.Block) : RR.Arm :=
+      { ty := ln, ctor := some v, binders := bs, body := b }
+    let state : RR.Expr := .call "l2r_lcell_get" #[zt] #[.var "tc"]
+    -- `cons` binders at the fields' record positions.
+    let consBinders := (cons.place #[.var "c", .var "rest"]).map fun | .var v => some v | _ => none
+    let firstDone : RR.Block := .ofExpr (.mtch (.var "l") #[
+      listArm nil.variant #[] (.ofExpr (.call run #[] #[.var "all"])),
+      listArm cons.variant consBinders ⟨#[("tc", some taskTy, task)], .mtch state #[
+        lazyArm z "done" #[some "v"] (.ofExpr (.var "v")),
+        { ty := z, ctor := none, binders := #[], body := .ofExpr (.call name #[] #[.var "rest", .var "all"]) }]⟩])
+    let firstPending : RR.Block := .ofExpr (.mtch (.var "l") #[
+      listArm nil.variant #[] (.ofExpr (.call "l2r_lazy_cycle" #[t] #[])),
+      listArm cons.variant consBinders ⟨#[("tc", some taskTy, task)], .mtch state #[
+        lazyArm z "pending" #[none] (.ofExpr (.call get #[] #[.var "tc"])),
+        { ty := z, ctor := none, binders := #[], body := .ofExpr (.call run #[] #[.var "rest"]) }]⟩])
+    return #[.fn run #[("l", listTy)] t firstPending,
+      .fn name #[("l", listTy), ("all", listTy)] t firstDone]
+
+/-- The glue of `lazyExtern`, on arguments that are variables. -/
+def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Array RR.Expr) :
+    LowerM (Option RR.Expr) := do
+  let pty (i : Nat) : LowerM RR.Ty := lowerType params[i]!
+  -- `f : PUnit → α` applied to `()`, or `f : α → β` to a task's value.
+  let applyTo (f : RR.Expr) (fTy : RR.Ty) (arg : RR.Expr) (argTy : RR.Ty) (dst : RR.Ty) : LowerM RR.Expr := do
+    let .fn d c := fTy | throwError "lean2rr: application of {fTy.render}"
+    let a ← coerce arg argTy d
+    withVar "tf" fTy f fun g => coerce (.apply g a) c dst
+  match orig with
+  | ``Thunk.mk =>
+    let (z, t) ← lazyOf (← lowerType ret)
+    let f ← coerce args[0]! (← pty 0) (.fn .unit t)
+    return some (.call "l2r_lcell_new" #[.named z] #[.ctor z (some "pending") #[f]])
+  | ``Thunk.pure | ``Task.pure => return some (← pureTask (← lowerType ret) args[0]! (← pty 0))
+  | ``Thunk.get | ``Task.get => return some (← lazyGet args[0]! (← pty 0) (← lowerType ret))
+  -- Pure tasks: computed now.
+  | ``Task.spawn =>
+    let rt ← lowerType ret
+    let (_, t) ← lazyOf rt
+    return some (← pureTask rt (← applyTo args[0]! (← pty 0) .unitVal .unit t) t)
+  | ``Task.map =>
+    let rt ← lowerType ret
+    let (_, t) ← lazyOf rt
+    let (_, xt) ← lazyOf (← pty 1)
+    let x ← lazyGet args[1]! (← pty 1) xt
+    return some (← pureTask rt (← applyTo args[0]! (← pty 0) x xt t) t)
+  | ``Task.bind =>
+    let (_, xt) ← lazyOf (← pty 0)
+    let x ← lazyGet args[0]! (← pty 0) xt
+    return some (← applyTo args[1]! (← pty 1) x xt (← lowerType ret))
+  -- IO tasks: `asTask act prio`, `mapTask f t prio sync`, `bindTask t f prio
+  -- sync`; results are `ST.Out` structures.
+  | ``BaseIO.asTask =>
+    let resTy ← lowerType ret
+    let taskTy ← ioPayloadTy resTy
+    let (_, t) ← lazyOf taskTy
+    let actTy ← pty 0
+    let c ← deferTask taskTy fun w => runIO args[0]! actTy w t
+    return some (← wrapIOResult resTy c)
+  | ``BaseIO.mapTask | ``BaseIO.bindTask =>
+    let isMap := orig == ``BaseIO.mapTask
+    let (fi, ti) := if isMap then (0, 1) else (1, 0)
+    let resTy ← lowerType ret
+    let taskTy ← ioPayloadTy resTy
+    let (_, t) ← lazyOf taskTy
+    let srcTy ← pty ti
+    let (sz, st) ← lazyOf srcTy
+    let fTy ← pty fi
+    let .fn fd actTy := fTy | throwError "lean2rr: {orig} of a function of type {fTy.render}"
+    -- The new task's value, running `f` on the world `w`.
+    let value (w : RR.Expr) : LowerM RR.Expr := do
+      let x ← lazyGet args[ti]! srcTy fd
+      withVar "tf" fTy args[fi]! fun f => do
+        if isMap then runIO (.apply f x) actTy w t
+        else
+          -- `bindTask` continues as the task `f` returns.
+          let inner ← ioPayloadTy (match actTy with | .fn _ r => r | r => r)
+          let t2 ← runIO (.apply f x) actTy w inner
+          lazyGet t2 inner t
+    -- With `sync := true` and `t` finished, Lean runs `f` at once
+    -- (`lean_task_map_core`/`lean_task_bind_core`); otherwise the task is
+    -- deferred.
+    let now ← if isMap then do
+        let v ← value args[4]!
+        pureTask taskTy v t
+      else do
+        let x ← lazyGet args[ti]! srcTy fd
+        withVar "tf" fTy args[fi]! fun f => do
+          runIO (.apply f x) actTy args[4]! taskTy
+    let later ← deferTask taskTy value
+    let d ← fresh "sync"
+    let cond : RR.Expr := .ite args[3]! (.ofExpr (.call (← taskDoneFn sz) #[] #[args[ti]!])) (.ofExpr (.atom "false"))
+    let _ := st
+    let c ← fresh "tn"
+    return some (.block ⟨#[(d, some .bool, cond), (c, some taskTy, .ite (.var d) (.ofExpr now) (.ofExpr later))],
+      ← wrapIOResult resTy (.var c)⟩)
+  | ``IO.wait =>
+    let resTy ← lowerType ret
+    return some (← wrapIOResult resTy (← lazyGet args[0]! (← pty 0) (← ioPayloadTy resTy)))
+  | ``IO.waitAny =>
+    let resTy ← lowerType ret
+    let lt ← pty 0
+    let some et := (← ctorFieldTys lt ``List.cons)[0]? | return none
+    let (_, t) ← lazyOf et
+    let f ← taskWaitAnyFn lt et
+    let v ← coerce (.call f #[] #[args[0]!, args[0]!]) t (← ioPayloadTy resTy)
+    return some (← wrapIOResult resTy v)
+  | ``IO.getTaskState =>
+    let resTy ← lowerType ret
+    let (z, _) ← lazyOf (← pty 0)
+    return some (← wrapIOResult resTy (.call (← taskStateFn z (← ioPayloadTy resTy)) #[] #[args[0]!]))
+  | ``IO.cancel =>
+    let resTy ← lowerType ret
+    let (z, _) ← lazyOf (← pty 0)
+    let r ← fresh "cn"
+    return some (.block ⟨#[(r, some (.named "u64"), .call (← taskCancelFn z) #[] #[args[0]!])],
+      ← wrapIOResult resTy .unitVal⟩)
+  | _ => return none
+
+/-- Glue for the thunk and task externs; `none` for other externs. `args`
+are the relevant arguments, already at the Reussir types of `params`. -/
+def lazyExtern (orig : Name) (params : Array Expr) (ret : Expr) (args0 : Array RR.Expr) :
+    LowerM (Option RR.Expr) := do
+  unless orig ∈ [``Thunk.mk, ``Thunk.pure, ``Task.pure, ``Thunk.get, ``Task.get, ``Task.spawn,
+      ``Task.map, ``Task.bind, ``BaseIO.asTask, ``BaseIO.mapTask, ``BaseIO.bindTask, ``IO.wait,
+      ``IO.waitAny, ``IO.getTaskState, ``IO.cancel] do return none
+  let pty (i : Nat) : LowerM RR.Ty := lowerType params[i]!
+  -- Arguments may be used several times below: bind them to variables.
+  let mut pre := #[]
+  let mut args := #[]
+  for h : i in [:args0.size] do
+    match args0[i] with
+    | .var n => args := args.push (RR.Expr.var n)
+    | a =>
+      let x ← fresh "ta"
+      pre := pre.push (x, some (← pty i), a)
+      args := args.push (.var x)
+  let some e ← lazyExternGlue orig params ret args | return none
+  return some (if pre.isEmpty then e else .block ⟨pre, e⟩)
+
 /-- Externs whose results mention Lean-defined types get generated glue
 (translation plan §5.8); returns `none` for ordinary externs. -/
 def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array RR.Expr) :
     LowerM (Option RR.Expr) := do
   if let some e ← ctorCallbackExtern (← externSymbol orig) ret args then return some e
-  -- Tasks run eagerly and thunks are called on demand: the glue follows the
-  -- reference bodies of these externs in Lean's source (translation plan §6).
-  -- `Task α` and `Thunk α` are Lean's one-field structures.
-  let structOf (t : Expr) : LowerM String := do
-    match ← lowerType t with
-    | .named n => return n
-    | rt => throwError "lean2rr: expected a structure type, got {rt.render}"
+  if let some e ← lazyExtern orig params ret args then return some e
   match orig with
-  | ``Task.get => return some (.field args[0]! 0)
-  | ``Task.spawn => return some (.ctor (← structOf ret) none #[.apply args[0]! .unitVal])
-  | ``Task.map => return some (.ctor (← structOf ret) none #[.apply args[0]! (.field args[1]! 0)])
-  | ``Task.bind => return some (.apply args[1]! (.field args[0]! 0))
-  | ``Thunk.pure =>
-    let x ← fresh "tu"
-    return some (.ctor (← structOf ret) none #[.lam x RR.Ty.unit (.ofExpr args[0]!)])
-  | ``Thunk.get => return some (.apply (.field args[0]! 0) .unitVal)
-  -- Constructors that carry an extern attribute.
-  | ``Thunk.mk | ``Task.pure => return some (.ctor (← structOf ret) none #[args[0]!])
-  -- BaseIO task combinators, run eagerly: `asTask act := Task.pure <$> act`,
-  -- `mapTask f t := Task.pure <$> f t.get`, `bindTask t f := f t.get`,
-  -- `wait t := pure t.get`. Results are `ST.Out` structs.
-  | ``BaseIO.asTask =>
-    let resTy ← lowerType ret
-    let taskTy ← ioPayloadTy resTy
-    let .named taskN := taskTy | return none
-    let r ← fresh "at"
-    let rTy ← match ← lowerType params[0]! with | .fn _ c => pure c | t => pure t
-    return some (.block ⟨#[(r, some rTy, .apply args[0]! args[2]!)],
-      ← wrapIOResult resTy (.ctor taskN none #[.field (.var r) 0])⟩)
-  | ``BaseIO.mapTask =>
-    let resTy ← lowerType ret
-    let taskTy ← ioPayloadTy resTy
-    let .named taskN := taskTy | return none
-    let r ← fresh "mt"
-    let fTy ← lowerType params[0]!
-    let rTy := match fTy with | .fn _ (.fn _ c) => c | t => t
-    return some (.block ⟨#[(r, some rTy, .apply (.apply args[0]! (.field args[1]! 0)) args[4]!)],
-      ← wrapIOResult resTy (.ctor taskN none #[.field (.var r) 0])⟩)
-  | ``BaseIO.bindTask => return some (.apply (.apply args[1]! (.field args[0]! 0)) args[4]!)
-  | ``IO.wait => return some (← wrapIOResult (← lowerType ret) (.field args[0]! 0))
   -- `IO.Process.exit : UInt8 → IO α` never returns.
   | ``IO.Process.exit =>
     let rt ← lowerType ret

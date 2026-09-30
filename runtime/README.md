@@ -51,6 +51,7 @@ Generated sections of the prelude (edit the generator, then run it):
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one tagged word per element (below) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `RVec<u8>` and `LStr` share a layout: `String.toUTF8` is free |
 | `ST.Ref σ α` / `IO.Ref α` | `LRef<E>` (a shared 0/1-element vector) | mutated through every alias; empty after `take` |
+| `Thunk α`, `Task α` | `LCell<S>` = `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
 | `IO.FS.Handle` | `LHandle` | shared buffered file, closed with its last reference |
 | `UInt8..64`, `USize` | `u8..u64`, `u64` | |
 | `Int8..64`, `ISize` | `u8..u64`, `u64` (bit patterns) | signed semantics as `lean_int8_*` etc. |
@@ -126,6 +127,27 @@ lean2rr wraps its result with `wrapIOResult`: `l2r_io_mono_ms_now()`,
 `l2r_io_prim_handle_is_tty(h)`. (`l2r_io_app_path()`, `l2r_io_current_dir()`
 and `l2r_io_process_get_current_dir()` are infallible stand-ins for the
 fallible primitives below.) References: `l2r_ref_new/get/set/swap/take/ptr_eq`.
+
+**Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
+lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α) }`
+(a shared enum, so any `α` fits). Cell primitives: `l2r_lcell_new<S>(v)`,
+`l2r_lcell_get<S>(c)`, `l2r_lcell_set<S>(c, v)`, `l2r_lcell_swap<S>(c, v)`
+(returns the old state). lean2rr generates the forcing functions (run the
+closure once, store `done`); `l2r_lazy_cycle<T>()` waits forever, for a
+thunk or task needed by its own computation, as native Lean does. IO tasks
+are deferred until needed (translation plan §5.14); `leanrt::task` keeps
+the queue of pending IO tasks (holding one reference each), the stack of
+running tasks and their cancellation flags:
+`l2r_task_register<S>(c, tag)` queues a pending task (`tag` identifies `S`
+at exit), `l2r_task_begin<S>(c)` / `l2r_task_end<S>(c)` bracket its run
+(`begin` takes it off the queue), `l2r_task_cancel<S>(c)`,
+`l2r_task_observe<S>(c)` (false the first time `IO.getTaskState` asks about
+a pending task), `l2r_task_check_canceled()`, `l2r_task_deferring()` (false
+during initialization, when Lean runs IO tasks at once),
+`l2r_task_manager_start()` (before `main`),
+`l2r_task_shutdown()` (after `main`: `IO.checkCanceled` becomes true in
+tasks), and `l2r_task_next_tag()` / `l2r_task_take<S>()`, with which the
+generated entry runs the tasks still queued when `main` returns.
 
 **Fallible IO** (files, standard streams): primitives record their outcome
 in a global last-error slot; the glue is
@@ -224,14 +246,14 @@ lean2rr's dev branch (the tests pass with it).
 6. *done* — Element-wise `RVec` conversion between instantiations
    (`RtHashMap`), and the `unsafeCast`-based `Array.mapMUnsafe`/
    `Array.modifyM` implementations (`RtArrayUnsafe`).
-7. `BaseIO.asTask` (symbol `lean_io_as_task`): the task glue is keyed on
-   `IO.asTask`, which is not the 4.33 extern.
-8. `dbgTrace` (and `dbgSleep`, `dbgStackTrace`, `Thunk.mk`) at a boxed `α`:
-   the `PUnit → α` closure argument must be wrapped to return the box
-   (`lean_dbg_trace<ElemBox>(msg, f : L2RUnit -> Nat)` does not type-check).
-   *done* for the `dbg*` externs: lean2rr instantiates generic prelude
-   functions that are plain Reussir code at the value type
-   (`lean_dbg_trace<Nat>`).
+7. *done* — `BaseIO.asTask` (symbol `lean_io_as_task`): the task glue is
+   keyed on `IO.asTask`, which is not the 4.33 extern.
+8. *done* — `dbgTrace` (and `dbgSleep`, `dbgStackTrace`, `Thunk.mk`) at a
+   boxed `α`: the `PUnit → α` closure argument must be wrapped to return the
+   box (`lean_dbg_trace<ElemBox>(msg, f : L2RUnit -> Nat)` does not
+   type-check). lean2rr now instantiates generic prelude functions that are
+   plain Reussir code at the value type (`lean_dbg_trace<Nat>`), and thunks
+   and tasks are cells of a generated state type.
 9. BaseIO payload primitives above (`IO.monoMsNow`, `IO.getRandomBytes`,
    ...) and the file protocol need `wrapIOResult` glue; `IO.FS.Handle`
    (`lcAny` in mono code) must be represented as `LHandle`.
@@ -316,7 +338,13 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`,
   `ptrAddrUnsafe` is the handle pointer (or the value's bits for scalars).
-- Tasks run eagerly (promises are resolved before they are read);
+- Everything runs on one thread: pure tasks are computed when they are
+  created, IO tasks when they are first needed or when `main` returns (a
+  schedule native Lean can produce; translation plan §5.14). `main` polling
+  shared state that a task sets never sees it change, and `IO.waitAny`
+  does not pick the fastest of several unfinished tasks. lean2rr does not
+  translate promises yet (the `l2r_promise_*` helpers assume a promise is
+  resolved before it is read, which deferred IO tasks no longer ensure).
   `IO.Process.spawn`, sockets, `Std.Sync` and timers are not implemented.
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.

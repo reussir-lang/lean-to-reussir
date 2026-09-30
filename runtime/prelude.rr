@@ -49,6 +49,12 @@ pub struct RVec<T>;
 #[ffi(rust = "::reussir_rt::collections::vec::Vec")]
 pub struct LRef<T>;
 
+// A mutable cell holding one value, mutated in place through every alias:
+// the state of a `Thunk` or `Task` (lean2rr generates the state type).
+// One allocation: the count and the value.
+#[ffi(rust = "::reussir_rt::rc::Rc")]
+pub struct LCell<T>;
+
 // A Lean `Nat`. Invariant: `Big` only holds values >= 2^64.
 enum [value] Nat {
     Small(u64),
@@ -2544,7 +2550,128 @@ fn l2r_cell_swap<T>(slot : u64, v : T) -> T [{
 }];
 
 // ===========================================================================
-// Thunks, tasks, debugging, platform
+// Thunks and tasks
+//
+// A `Thunk α` or `Task α` is an `LCell<S>` whose state type `S` lean2rr
+// generates per value type: `enum S { pending(L2RUnit -> α), busy, done(α) }`
+// (a shared enum). lean2rr also generates the functions that force the
+// state (`l2r_thunk_get_S`, `l2r_task_get_S`, ...): a thunk runs its closure
+// on first `get` and keeps the value; a pure task is computed when it is
+// spawned; an IO task stays pending until it is needed or `main` returns
+// (`leanrt::task`).
+
+#[ffi(import)]
+fn l2r_lcell_new<T>(v : T) -> LCell<T> [{ Rc::new(v) }];
+
+#[ffi(import)]
+fn l2r_lcell_get<T>(c : LCell<T>) -> T [{ c.data_ref().clone() }];
+
+#[ffi(import)]
+fn l2r_lcell_set<T>(c : LCell<T>, v : T) -> u64 [{
+    {
+        let mut c = c;
+        unsafe { *c.data_mut() = v };
+        0
+    }
+}];
+
+// Store `v`, returning the previous value (its reference moves out, so a
+// uniquely held state can be reused by the caller).
+#[ffi(import)]
+fn l2r_lcell_swap<T>(c : LCell<T>, v : T) -> T [{
+    {
+        let mut c = c;
+        unsafe { ::std::mem::replace(c.data_mut(), v) }
+    }
+}];
+
+// Queue a pending IO task (the queue keeps a reference until it runs).
+#[ffi(import)]
+fn l2r_task_register<S>(c : LCell<S>, tag : u64) -> u64 [{
+    {
+        let c = ::std::mem::ManuallyDrop::new(c);
+        let p: usize = unsafe { ::std::mem::transmute_copy(&*c) };
+        leanrt::task::register(p, tag);
+        0
+    }
+}];
+
+// A task starts / stops running (for `IO.checkCanceled`); `begin` removes it
+// from the queue and drops the queue's reference.
+#[ffi(import)]
+fn l2r_task_begin<S>(c : LCell<S>) -> u64 [{
+    {
+        let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
+        if leanrt::task::begin(p) {
+            drop(unsafe { ::std::ptr::read(&c) });
+        }
+        drop(c);
+        0
+    }
+}];
+
+#[ffi(import)]
+fn l2r_task_end<S>(c : LCell<S>) -> u64 [{
+    {
+        let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
+        leanrt::task::end(p);
+        drop(c);
+        0
+    }
+}];
+
+#[ffi(import)]
+fn l2r_task_cancel<S>(c : LCell<S>) -> u64 [{
+    {
+        let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
+        leanrt::task::cancel(p);
+        drop(c);
+        0
+    }
+}];
+
+#[ffi(import)]
+fn l2r_task_observe<S>(c : LCell<S>) -> bool [{
+    {
+        let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
+        let r = leanrt::task::observe(p);
+        drop(c);
+        r
+    }
+}];
+
+#[ffi(import)]
+fn l2r_task_deferring() -> bool [{ leanrt::task::deferring() }];
+
+#[ffi(import)]
+fn l2r_task_manager_start() -> u64 [{ { leanrt::task::start(); 0 } }];
+
+#[ffi(import)]
+fn l2r_task_shutdown() -> u64 [{ { leanrt::task::shutdown(); 0 } }];
+
+// The oldest pending IO task at exit: its tag (`u64::MAX` if none), then the
+// cell itself (with the queue's reference).
+#[ffi(import)]
+fn l2r_task_next_tag() -> u64 [{ leanrt::task::next_tag() }];
+
+#[ffi(import)]
+fn l2r_task_take<S>() -> LCell<S> [{ unsafe { ::std::mem::transmute_copy(&leanrt::task::take()) } }];
+
+#[ffi(import)]
+fn l2r_task_check_canceled() -> bool [{ leanrt::task::check_canceled() }];
+
+#[ffi(import)]
+fn l2r_hang() -> u64 [{ leanrt::task::hang() }];
+
+// A thunk forced by its own computation, or a cycle of tasks waiting for
+// each other: native Lean waits forever.
+fn l2r_lazy_cycle<T>() -> T {
+    let ignored = l2r_hang();
+    l2r_unreachable<T>()
+}
+
+// ===========================================================================
+// Debugging, platform
 
 // `dbgTrace msg f`: print `msg` to stderr, then `f ()`.
 fn lean_dbg_trace<T>(msg : LStr, f : L2RUnit -> T) -> T {
@@ -2655,7 +2782,7 @@ fn lean_internal_get_hardware_concurrency(u : L2RUnit) -> u32 { l2r_hardware_con
 fn l2r_io_mono_ms_now() -> Nat { Nat::Small{l2r_io_mono_ms_now_u64()} }
 fn l2r_io_mono_nanos_now() -> Nat { Nat::Small{l2r_io_mono_nanos_now_u64()} }
 fn l2r_io_get_num_heartbeats() -> Nat { Nat::Small{0} }
-fn l2r_io_check_canceled() -> bool { false }
+fn l2r_io_check_canceled() -> bool { l2r_task_check_canceled() }
 fn l2r_io_get_tid() -> u64 { l2r_io_get_tid_u64() }
 
 #[ffi(import)]

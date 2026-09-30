@@ -136,7 +136,24 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
     pre := s!"fn l2r_mk_args(i : u64, acc : {lt}) -> {lt} \{\n    if i == 0 \{ acc } else \{ l2r_mk_args(i - 1, {lt}::{consV}\{l2r_argv(i - 1), acc}) }\n}\n\n"
     argExpr := s!"l2r_mk_args(l2r_argc(), {lt}::{nilV}\{}), "
   let uncaught (e : String) := s!"l2r_uncaught_exception({fnName errStr}({e}))"
-  let mainCode := s!"let r = {fnName mainInst}({argExpr}L2RUnit::u\{});\nmatch r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
+  -- IO tasks are deferred once `main` starts (before, during
+  -- initialization, Lean has no task manager and runs them at once). After
+  -- `main` returns, whatever its result, the tasks still pending run, as
+  -- `lean_finalize_task_manager` waits for them before the exception is
+  -- reported or the process exits; `IO.checkCanceled` is then true in them.
+  let tags := (← get).taskTags
+  let mut drain := ""
+  if !tags.isEmpty then
+    let mut chain := "let none : u64 = 0;\n    none"
+    for h : i in [:tags.size] do
+      let j := tags.size - 1 - i
+      let z := tags[j]!
+      let get ← lazyGetFn z
+      let (_, t) ← lazyInfo z
+      chain := s!"if tag == {j} \{\n    let c : LCell<{z}> = l2r_task_take<{z}>();\n    let v : {t.render} = {get}(c);\n    l2r_run_pending_tasks()\n    } else \{\n    {chain}\n    }"
+    pre := pre ++ s!"fn l2r_run_pending_tasks() -> u64 \{\n    let tag : u64 = l2r_task_next_tag();\n    {chain}\n}\n\n"
+    drain := "let sd : u64 = l2r_task_shutdown();\nlet pt : u64 = l2r_run_pending_tasks();\n"
+  let mainCode := s!"let tm : u64 = l2r_task_manager_start();\nlet r = {fnName mainInst}({argExpr}L2RUnit::u\{});\n{drain}match r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
   -- The startup chain ends by clearing `IO.initializing`; an error stops
   -- the program before main (`l2r_uncaught_exception` exits).
   let mut code := "l2r_init_done()"
