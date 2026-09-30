@@ -239,6 +239,19 @@ def valueGenericPreludeFns (prelude : String) : Std.HashMap String Nat := Id.run
     unless line.all Char.isWhitespace do prev := line
   return out
 
+/-- For the prelude functions of `valueGenericPreludeFns`: which parameters
+are Reussir closures (a function value passed there is converted). -/
+def valueGenericClosureParams (prelude : String) : Std.HashMap String (Array Bool) := Id.run do
+  let mut out : Std.HashMap String (Array Bool) := {}
+  for line in prelude.splitOn "\n" do
+    if line.startsWith "fn " then
+      let rest := (line.drop 3).toString
+      let name := (rest.takeWhile fun c => c.isAlphanum || c == '_').toString
+      let params := ((rest.dropWhile (· != '(')).drop 1 |>.takeWhile (· != ')')).toString
+      let ps := if params.trim.isEmpty then [] else params.splitOn ","
+      out := out.insert name (ps.map (·.contains '-')).toArray
+  return out
+
 /-- Lower a whole program. -/
 def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array StartupStep) (decls : Array (Decl .pure))
     (keys : NameMap InstKey) : CoreM String := do
@@ -284,9 +297,10 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
   let exports ← (exportMap.run' {config := {}} : CoreM _)
   let ioErrorBuilders := ioErrorBuilderSyms.map fun sym => (exports.get? sym).bind byDecl.find?
   let valueGenericFns := valueGenericPreludeFns prelude
+  let valueGenericCls := valueGenericClosureParams prelude
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
-                          preludeRets, preludeParams, ioErrorBuilders, valueGenericFns }
-  let act : LowerM Unit := do
+                          preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls }
+  let act : LowerM (Array RR.Item) := do
     -- `Box` always exists (with at least the unit variant, `box(0)`): types
     -- may mention it even when nothing is ever boxed.
     let _ ← boxVariant .unit
@@ -297,10 +311,15 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
     for d in decls do lowerDecl d
     let entry ← lowerEntry mainInst errStr startup
     modify fun s => { s with fns := s.fns.push entry }
-    finishUnboxFns
-  let ((), st) ← (act.run ctx).run {}
+    -- Converters and application functions can need each other.
+    repeat
+      finishUnboxFns
+      unless ← finishFnValues do break
+    return ← fnTypeItems
+  let (fnItems, st) ← (act.run ctx).run {}
   let mut out := prelude ++ "\n// ---- generated types ----\n\n"
   for it in st.typeItems do out := out ++ it.render ++ "\n"
+  for it in fnItems do out := out ++ it.render ++ "\n"
   out := out ++ (RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))).render ++ "\n"
   out := out ++ "// ---- generated functions ----\n\n"
   for f in st.fns do out := out ++ f.render ++ "\n"

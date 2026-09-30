@@ -16,15 +16,39 @@ inductive Ty where
   | named (name : String)
   /-- A generic type applied to arguments, e.g. `RVec<u32>`. -/
   | app (name : String) (args : Array Ty)
-  /-- A (curried, single-argument) closure type `A -> B`. -/
+  /-- A Lean function value `A → B` (curried). It is a generated shared enum
+  (`fnTypeName`), not a Reussir closure; see Lower's "Function values". -/
   | fn (dom : Ty) (cod : Ty)
+  /-- A Reussir closure type `A -> B`: callbacks passed to prelude helpers,
+  and the `raw` variant of a function value. -/
+  | cls (dom : Ty) (cod : Ty)
   deriving BEq, Hashable, Inhabited, Repr
+
+/-- An injective encoding of a type as identifier characters (a prefix
+code: lengths before names, argument counts before arguments). -/
+partial def Ty.enc : Ty → String
+  | .named n => s!"{n.length}n{n}"
+  | .app n args => s!"{n.length}a{n}{args.size}_" ++ String.join (args.toList.map Ty.enc)
+  | .fn d c => "F" ++ d.enc ++ c.enc
+  | .cls d c => "C" ++ d.enc ++ c.enc
+
+/-- The generated enum representing Lean function values of type `t`. -/
+def fnTypeName (t : Ty) : String := "L2RFn_" ++ t.enc
 
 partial def Ty.render : Ty → String
   | .named n => n
   | .app n args => s!"{n}<{", ".intercalate (args.toList.map Ty.render)}>"
+  | t@(.fn ..) => fnTypeName t
   -- The arrow is right-associative; parenthesize a function domain.
-  | .fn d c => (match d with | .fn .. => s!"({d.render})" | _ => d.render) ++ " -> " ++ c.render
+  | .cls d c => (match d with | .cls .. => s!"({d.render})" | _ => d.render) ++ " -> " ++ c.render
+
+/-- Every type occurring in `t` (itself included), innermost first. -/
+partial def Ty.subterms (t : Ty) (acc : Array Ty := #[]) : Array Ty :=
+  let acc := match t with
+    | .named _ => acc
+    | .app _ args => args.foldl (fun a (x : Ty) => x.subterms a) acc
+    | .fn d c | .cls d c => c.subterms (d.subterms acc)
+  acc.push t
 
 /-- Reussir's `unit` has no value representation (it is result-only), so
 lean2rr represents unit-like values (erased values, `PUnit`, the IO world)
@@ -107,6 +131,30 @@ inductive Item where
   | raw (text : String)
 
 private def indent (n : Nat) : String := "".pushn ' ' (4 * n)
+
+mutual
+  /-- The types written in an expression (annotations, lambda parameters,
+  explicit type arguments). -/
+  partial def Expr.tys : Expr → Array Ty → Array Ty
+    | .var _, acc | .atom _, acc => acc
+    | .call _ tys args, acc => args.foldl (fun a e => e.tys a) (acc ++ tys)
+    | .apply f a, acc => a.tys (f.tys acc)
+    | .ctor _ _ args, acc => args.foldl (fun a e => e.tys a) acc
+    | .field e _, acc => e.tys acc
+    | .lam _ t b, acc => Block.tys b (acc.push t)
+    | .ite c t e, acc => Block.tys e (Block.tys t (c.tys acc))
+    | .mtch s arms, acc => arms.foldl (fun a arm => Block.tys arm.body a) (s.tys acc)
+    | .block b, acc => Block.tys b acc
+  partial def Block.tys (b : Block) (acc : Array Ty) : Array Ty :=
+    b.result.tys (b.lets.foldl (fun a (_, t, e) => e.tys (match t with | some t => a.push t | none => a)) acc)
+end
+
+/-- The types an item mentions. -/
+def Item.tys : Item → Array Ty
+  | .enum _ _ vs => vs.foldl (fun a (_, fs) => a ++ fs) #[]
+  | .struct _ _ fs => fs
+  | .fn _ ps ret body => Block.tys body (ps.map (·.2) |>.push ret)
+  | .raw _ => #[]
 
 mutual
   partial def Expr.render (d : Nat) : Expr → String

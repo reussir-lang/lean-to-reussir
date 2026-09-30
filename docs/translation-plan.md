@@ -497,8 +497,9 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   other's instances; `inductive Rose | node : List Rose → Rose` gives
   `Rose` and `List_Rose`, defined together.
 
-**Function types** become curried Reussir closures: `A → B → C` is
-`A -> (B -> C)`. §5.3 explains why they are curried.
+**Function types** become generated shared enums, one per (lowered,
+curried) function type, whose variants say what a value is a partial
+application of (§5.3). They are not Reussir closures.
 
 **The uniform type `Box`.** When a data position has type `lcAny` (§2.6, §4),
 its value is stored as `Box`.
@@ -524,15 +525,18 @@ its value is stored as `Box`.
   converts between `obj` and unboxed scalars.
 - An inductive applied to `lcAny` is instantiated with `Box`:
   `Free lcAny Nat` ↦ `Free_Box_Nat`.
-- A closure passed where `Box -> Box` is expected is wrapped as
-  `|b| box(f(unbox(b)))`. The wrapper calls `f` exactly once per
-  application, so evaluation timing does not change.
-- A partial application is built directly at the type of the binder that
-  receives it. Lambda lifting can give a lifted lambda the result type
-  `lcAny` while its closure is used at `Nat × Int → Int`, or the reverse. The
-  chain's lambdas take the binder's parameter types, and the conversions go
-  inside the innermost lambda, so the callee still runs only when the last
-  argument arrives.
+- A function value is boxed under the variant of its own type. Unboxing it
+  to the same type gives the value back; unboxing it to another
+  representation of the same Lean type (for example to `Box → Box`, for
+  uniform code that applies it) wraps it once in a `w` variant (§5.3),
+  which converts the arguments and the result at each application and
+  calls the function exactly once. So a function value that goes through
+  uniform code and comes back is not wrapped at all.
+- A partial application has the type of its target with the supplied
+  arguments removed. Lambda lifting can give a lifted lambda the result type
+  `lcAny` while its closure is used at `Nat × Int → Int`, or the reverse; the
+  value is then converted to the binder's type as above, and the callee
+  still runs only when the last argument arrives.
 - When a structure built at a uniform type (for example a `List Box` coming
   out of polymorphically recursive code) meets code expecting the precise
   type (`List Nat`), the conversion is structural, element by element.
@@ -574,41 +578,62 @@ work runs is observable.
 | Mono LCNF | Reussir |
 |---|---|
 | `let y := f a b` with `f` of arity 2 | `let y = f(a, b);` |
-| `let h := f a` with `f` of arity 2 | `let h = \|x : B\| f(a, x);` (closure, §5.3) |
+| `let h := f a` with `f` of arity 2 | `let h = F_B_C::p1_f{a};` (function value, §5.3) |
 | `let y := f a b c` with `f` of arity 2 | `let t = f(a, b); let y = t(c);` |
-| `let y := g a b` with `g` a closure variable | `let y = g(a)(b);` |
+| `let y := g a b` with `g` a function value | `let y = l2r_ap2_…(g, a, b);` (§5.3) |
 
-### 5.3 Closures
+### 5.3 Closures (function values)
 
 After Stage 2, every closure is a partial application of a top-level
 declaration; lambda lifting turned local functions into declarations over
 their captured variables.
 
-- **Creating a closure.** A partial application of a declaration of arity
-  `n`, given `m` arguments, becomes a chain of `n − m` nested
-  single-parameter lambdas. Only the innermost one calls the declaration:
-  `f a` with arity 3 becomes `|y| |z| f(a, y, z)`.
-- **Applying a closure.** A closure is applied one argument at a time:
-  `g a b` becomes `g(a)(b)`.
-- **Why this is right.** The declaration runs exactly when its last
-  argument arrives, which is precisely Lean's runtime rule (`lean_apply_n`
-  behaves like applying one argument at a time). Curried closure types are
-  the only choice that works for *every* value of a function type:
-  different values of the same Lean type can have different arities
-  (`mkAdder` versus a function that returns a closure after doing work).
+- **Representation.** A Lean function value of lowered, curried type
+  `T = A₁ → … → Aₙ → R` is a value of a generated shared enum `L2RFn_…`
+  with these variants:
+  - `p<m>_<target>(c₁, …, cₘ)`: a *target* (a declaration, an extern, a
+    constructor, a standard-stream primitive) with its first `m` arguments
+    captured. With `m = 0` the variant is nullary and costs no allocation;
+  - `raw(A₁ -> …)`: a Reussir closure, for values built by glue code;
+  - `w<S>(g)`: a value `g` of another representation `S` of the same Lean
+    type (§5.1);
+  - `z`: the `box(0)` placeholder (§2.7), a function that is never applied.
+- **Creating a function value.** A partial application of a target of
+  arity `k` to `m < k` arguments builds `p<m>_<target>(args)`: one
+  allocation, like native `lean_alloc_closure`.
+- **Applying a function value.** `g a₁ … aⱼ` calls a generated
+  `l2r_ap<j>_T(g, a₁, …, aⱼ)` (at most the chain length at a time), which
+  matches the variant. A target whose remaining arity is exactly `j` is
+  called directly, and nothing is allocated. With fewer arguments than it
+  needs, a new `p` value capturing them is built. With more, the target is
+  called with as many as it takes, and its result is applied to the rest.
+  This is exactly `lean_apply_n` (`apply.cpp`).
+- **Why this is right.** A target runs exactly when its last argument
+  arrives, which is Lean's runtime rule. The variant records the target's
+  own arity, so different values of the same Lean type can have different
+  arities (`mkAdder` versus a function that returns a closure after doing
+  work).
+- **Why not Reussir closures.** A Reussir closure is applied by writing the
+  argument into its captured payload, so applying a *shared* closure copies
+  it first: one allocation per call of any closure held in a data structure
+  or used twice. Curried application also allocates an intermediate closure
+  per argument. Both are gone here; the dispatch is a `match`, which LLVM
+  can inline, and a known target is a direct call. In a prototype, 10⁸ calls
+  of shared function values took 0.09 s this way and 0.55 s with Reussir
+  closures.
 - **Erased parameters.** Lean still passes erased parameters (a proof, the
   IO world, a type) to closures, and they count toward the arity. They
   remain parameters of type `L2RUnit`, in declarations and closures alike,
   and receive `L2RUnit::u{}`. Only extern calls drop them.
-- **Constructors.** A partially applied constructor becomes a lambda that
-  builds it. Constructors do no work, so timing does not matter.
+- **Constructors and externs** are targets like declarations. Constructors
+  do no work, so their timing does not matter.
+- **Prelude callbacks.** Runtime helpers that take a Reussir closure
+  (`dbgTrace`, `timeit`, …) receive `|x| l2r_ap1_…(g, x)`. Glue that
+  builds a function value from Reussir code uses the `raw` variant.
 
-Cost: a `k`-argument application of an unknown closure allocates `k − 1`
-intermediate closures, for example on each step of a fold over an unknown
-two-argument function. Native `lean_apply_n` calls the code directly when
-the closure misses exactly the arguments supplied, and allocates only when
-it misses more. A faster representation is possible later (§7) without
-changing when work runs.
+The enums and the application functions are generated at the end of
+Stage 4, together with the `Box` unboxing functions, until no new variant or
+application appears.
 
 ### 5.4 `let`, `return`, literals
 
@@ -1136,7 +1161,6 @@ tasks are mutable by design).
 
 **Room kept open.** Each of these can change later without changing when
 work runs or what the program computes:
-- a faster closure representation that implements `lean_apply_n` directly;
 - `[value]` for small non-recursive structs;
 - a cheaper `Nat`;
 - borrowed parameters, if Reussir adds them;
@@ -1256,17 +1280,12 @@ Each item says what differs and when.
   so a DAG costs exponential time and memory, and a conversion on every call
   costs O(size) per call. Past the instance caps of §2.6 this can happen
   inside loops. Running out of memory changes the exit status.
-- *Closure wrappers* pile up: every crossing into or out of `Box` wraps a
-  closure again, so a function value that passes through uniform code `n`
-  times costs O(n) per application.
 - *Element storage*: array elements, `ST.Ref` contents, once-cell values and
   polymorphic extern arguments whose type cannot cross the FFI boundary
-  (enumerations, `L2RUnit`, `[value]` tuples, closures) are wrapped in an
+  (enumerations, `L2RUnit`, `[value]` tuples) are wrapped in an
   `ElemBox` cell, one allocation each, where native stores tagged scalars.
   `ST.Ref` contents are always boxed (§5.1). `UInt64` and `Float` arrays, on
   the other hand, are unboxed, unlike native.
-- *Unknown closures*: `k − 1` intermediate closures per `k`-argument
-  application (§5.3).
 
 **Runtime** (details in `runtime/README.md`, "Known divergences")
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`.

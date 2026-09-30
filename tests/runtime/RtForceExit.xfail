@@ -1,1 +1,0 @@
-lean2rr has no glue for IO.Process.forceExit: like IO.Process.exit, with l2r_process_force_exit (runtime/README.md, request 26)

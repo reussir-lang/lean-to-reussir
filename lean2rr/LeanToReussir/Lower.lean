@@ -64,6 +64,87 @@ structure CodeCtx where
   jpParams : Std.HashMap FVarId (Array RR.Ty) := {}
   sm : Option StateMachine := none
 
+/-! ## Function values
+
+A Lean function value of (lowered, curried) type `T = A₁ → … → Aₙ → R` is
+a value of a generated shared enum `L2RFn_…` (translation plan §5.3), not
+a Reussir closure: applying a shared Reussir closure copies it, and
+curried application allocates a closure per argument. The variants:
+- `z`: the `box(0)` placeholder, a function that is never applied (an
+  application returns the zero of its result type);
+- `raw(A₁ -> …)`: a Reussir closure (built by glue code);
+- `p<m>_<id>(c₁, …, cₘ)`: target `id` (a declaration, extern, constructor
+  or stream primitive) with its first `m` arguments captured;
+- `w<S>(g)`: a function value `g` of another representation `S` of the same
+  Lean type, converted at each application.
+Applying `j` arguments calls a generated `l2r_ap<j>_…` that matches the
+variant. A target whose remaining arity is `j` is called directly and
+nothing is allocated, as with `lean_apply_n` at exact arity; with fewer
+arguments a new `p` value is built (a partial application); with more, the
+result is applied to the rest. The application functions and the enums are
+generated at the end (`finishFnValues`), when all variants are known. -/
+
+/-- Parameter types of a function type's curried chain, and its result. -/
+partial def fnChain (t : RR.Ty) : Array RR.Ty × RR.Ty :=
+  go t #[]
+where
+  go : RR.Ty → Array RR.Ty → Array RR.Ty × RR.Ty
+    | .fn d c, acc => go c (acc.push d)
+    | t, acc => (acc, t)
+
+/-- The type of a value of function type `t` applied to `j` arguments. -/
+def fnResult : RR.Ty → Nat → RR.Ty
+  | t, 0 => t
+  | .fn _ c, j + 1 => fnResult c j
+  | t, _ => t
+
+def fnVariantName : FnVariant → String
+  | .part id m => s!"p{m}_{id}"
+  | .wrap src => s!"w{src.enc}"
+
+def applyFnName (t : RR.Ty) (j : Nat) : String := s!"l2r_ap{j}_{t.enc}"
+
+def addFnVariant (t : RR.Ty) (v : FnVariant) : LowerM Unit := do
+  let vs := (← get).fnVariants.getD t #[]
+  unless vs.contains v do
+    modify fun s => { s with fnVariants := s.fnVariants.insert t (vs.push v) }
+
+/-- `f`, of function type `t`, applied to `args` (at `t`'s parameter types;
+at most the chain length). -/
+def applyCall (f : RR.Expr) (t : RR.Ty) (args : Array RR.Expr) : LowerM RR.Expr := do
+  let j := args.size
+  unless (← get).fnApplies.contains (t, j) do
+    modify fun s => { s with fnApplies := s.fnApplies.push (t, j) }
+  return .call (applyFnName t j) #[] (#[f] ++ args)
+
+/-- A function value of type `t = A → B` from a Reussir lambda
+`|x : A| body`, where `body : B`. -/
+def rawFnValue (t : RR.Ty) (x : String) (body : RR.Block) : RR.Expr :=
+  match t with
+  | .fn d _ => .ctor (RR.fnTypeName t) (some "raw") #[.lam x d body]
+  | _ => .lam x t body
+
+/-- The type of target `tg` with its first `m` arguments captured. -/
+def partTy (tg : FnTarget) (m : Nat) : RR.Ty :=
+  tg.params[m:].toArray.foldr (fun a b => RR.Ty.fn a b) tg.ret
+
+/-- Target `tg` with its first arguments `captured` (at `tg`'s parameter
+types; fewer than all of them), and the value's type. -/
+def partValue (tg : FnTarget) (captured : Array RR.Expr) : LowerM (RR.Expr × RR.Ty) := do
+  unless (← get).fnTargets.contains tg.id do
+    modify fun s => { s with fnTargets := s.fnTargets.insert tg.id tg }
+  let t := partTy tg captured.size
+  let v := FnVariant.part tg.id captured.size
+  addFnVariant t v
+  return (.ctor (RR.fnTypeName t) (some (fnVariantName v)) captured, t)
+
+/-- The generated function unboxing a `Box` to function type `t` (its body
+is generated at the end, with the other unboxing functions). -/
+def unboxFnFn (t : RR.Ty) : LowerM String := do
+  unless (← get).fnUnboxTargets.contains t do
+    modify fun s => { s with fnUnboxTargets := s.fnUnboxTargets.push t }
+  return s!"l2r_unbox_fn_{t.enc}"
+
 /-! ## Thunks and tasks: forcing
 
 A `Thunk α` or `Task α` is a runtime cell `LCell<S>` holding a generated
@@ -111,9 +192,10 @@ def lazyGetFn (z : String) : LowerM String := do
       lazyArm z "pending" #[none] (.ofExpr (.call run #[] #[.var "c"])),
       lazyArm z "busy" #[] (.ofExpr (.call "l2r_lazy_cycle" #[t] #[]))])
     let onCell (f : String) : RR.Expr := .call f #[zt] #[.var "c"]
+    let force ← applyCall (.var "f") (.fn .unit t) #[.unitVal]
     let lets : Array (String × Option RR.Ty × RR.Expr) :=
       (if task then #[("b", some u64, onCell "l2r_task_begin")] else #[]) ++
-      #[("v", some t, .apply (.var "f") .unitVal),
+      #[("v", some t, force),
         ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]])] ++
       (if task then #[("e", some u64, onCell "l2r_task_end")] else #[])
     let runBody : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_swap" #[zt] #[.var "c", .ctor z (some "busy") #[]]) #[
@@ -225,11 +307,8 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
         if (← get).zeroBusy.contains vt then pure unreachable
         else pure (.ofExpr (lazyDone z (← zeroValue vt)))
       | none => pure unreachable
-    | .fn a b =>
-      -- A closure is a value whatever its result; its result is built only
-      -- if it is ever applied.
-      let x ← fresh "zx"
-      pure (.ofExpr (.lam x a (.ofExpr (← zeroValue b))))
+    -- A function value that is never applied (applying it gives a zero).
+    | .fn .. => pure (.ofExpr (.ctor (RR.fnTypeName t) (some "z") #[]))
     | _ => pure unreachable
   modify fun s => { s with zeroBusy := s.zeroBusy.erase t }
   -- Heap values are shared (a nullary constructor of a shared enum does not
@@ -325,22 +404,14 @@ mutual
 
   partial def tryCoerce (e : RR.Expr) (src dst : RR.Ty) : LowerM (Option RR.Expr) := do
     if src == dst then return some e
-    -- Closures are boxed in canonical form `Box -> Box`, so that any
-    -- consumer can apply them whatever their precise type was.
-    let canon := RR.Ty.fn RR.Ty.box RR.Ty.box
+    -- A function value is boxed as it is; unboxing it to another
+    -- representation wraps it (`l2r_unbox_fn_…`), so a function value that
+    -- goes through uniform code and back is not wrapped at all.
     if dst == RR.Ty.box then
-      match src with
-      | .fn .. =>
-        if src == canon then return some (.ctor boxName (some (← boxVariant canon)) #[e])
-        let some c ← tryCoerce e src canon | return none
-        return some (.ctor boxName (some (← boxVariant canon)) #[c])
-      | _ => return some (.ctor boxName (some (← boxVariant src)) #[e])
+      return some (.ctor boxName (some (← boxVariant src)) #[e])
     if src == RR.Ty.box then
       match dst with
-      | .fn .. =>
-        let unboxed ← unboxMatch e canon
-        if dst == canon then return some unboxed
-        return ← tryCoerce unboxed canon dst
+      | .fn .. => return some (.call (← unboxFnFn dst) #[] #[e])
       | _ =>
         if let .named tn := dst then
           if (← get).typeInfos.contains tn then
@@ -355,8 +426,27 @@ mutual
     -- placeholder (see `zeroValue`).
     | .named "L2RUnit", _ => return some (← zeroValue dst)
     | .fn a1 b1, .fn a2 b2 =>
-      -- Wrapper `|x| conv(e(conv(x)))`; `e` is bound first unless it is a
-      -- variable, because Reussir only calls variables and call results.
+      -- Another representation of the same function type: wrapped, and
+      -- converted at each application.
+      let some _ ← tryCoerce (.var "l2rcv") a2 a1 | return none
+      let some _ ← tryCoerce (.var "l2rcv") b1 b2 | return none
+      let v := FnVariant.wrap src
+      addFnVariant dst v
+      return some (.ctor (RR.fnTypeName dst) (some (fnVariantName v)) #[e])
+    -- Between a function value and a Reussir closure (prelude callbacks):
+    -- a lambda. `e` is bound first, so that it is evaluated once.
+    | .fn a1 b1, .cls a2 b2 =>
+      let (pre, callee) ← match e with
+        | .var _ => pure (#[], e)
+        | _ => do
+          let v ← fresh "cf"
+          pure (#[(v, some src, e)], RR.Expr.var v)
+      let x ← fresh "cv"
+      let some arg ← tryCoerce (.var x) a2 a1 | return none
+      let some res ← tryCoerce (← applyCall callee src #[arg]) b1 b2 | return none
+      let lam := RR.Expr.lam x a2 (.ofExpr res)
+      return some (if pre.isEmpty then lam else .block ⟨pre, lam⟩)
+    | .cls a1 b1, .fn a2 b2 =>
       let (pre, callee) ← match e with
         | .var _ => pure (#[], e)
         | _ => do
@@ -365,8 +455,8 @@ mutual
       let x ← fresh "cv"
       let some arg ← tryCoerce (.var x) a2 a1 | return none
       let some res ← tryCoerce (.apply callee arg) b1 b2 | return none
-      let lam := RR.Expr.lam x a2 (.ofExpr res)
-      return some (if pre.isEmpty then lam else .block ⟨pre, lam⟩)
+      let f := rawFnValue dst x (.ofExpr res)
+      return some (if pre.isEmpty then f else .block ⟨pre, f⟩)
     -- `Nat` and enumerations by index (Lean represents both as scalars;
     -- only reachable through `unsafeCast`).
     | .named sn, .named dn =>
@@ -459,7 +549,7 @@ mutual
     let some later ← tryCoerce (.call get #[] #[.var "c"]) st dt | fail
     let u ← fresh "u"
     let pending := RR.Expr.call "l2r_lcell_new" #[.named dz]
-      #[.ctor dz (some "pending") #[.lam u .unit (.ofExpr later)]]
+      #[.ctor dz (some "pending") #[rawFnValue (.fn .unit dt) u (.ofExpr later)]]
     -- A converted task is the same Lean task: it is queued as standing for
     -- the original (its state, cancellation), see `leanrt::task`.
     let pending ← if dk then do
@@ -585,69 +675,60 @@ def lowerArg (ctx : CodeCtx) (a : Arg .pure) (expected : RR.Ty) : LowerM RR.Expr
   -- `◾` (type arguments, proofs, or `box(0)` at a relevant type)
   | _ => zeroValue expected
 
-/-- A curried chain of lambdas over `tys` whose innermost body is
-`mk vars`. Used for partial applications: the body runs only when the last
-argument arrives. -/
-def lambdaChain (tys : Array RR.Ty) (mk : Array RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
-  let names ← tys.mapM fun _ => fresh "pa"
-  let mut body ← mk (names.map .var)
-  for (n, t) in (names.zip tys).reverse do
-    body := .lam n t (.ofExpr body)
-  return body
+/-- A partial application of target `tg` to `supplied` (at its parameter
+types) as a value of type `expected`, the type of the binder. That may be
+another representation (a lifted lambda whose result Lean typed `lcAny`,
+a closure stored at a uniform type, `Box`): the value is then converted
+(`tryCoerce`). The target runs only when its last argument arrives. -/
+def partialApp (tg : FnTarget) (supplied : Array RR.Expr) (expected : RR.Ty) : LowerM RR.Expr := do
+  let (v, t) ← partValue tg supplied
+  coerce v t expected
 
-/-- A partial application as a value of type `expected` (the type of the
-`let` that binds it): a curried chain over the remaining parameters `rest`
-whose innermost body `mk vars` has type `ret`. The binder's type may differ
-from the callee's own types (a lifted lambda whose result Lean typed
-`lcAny`, a closure stored at a uniform type), so the conversions go inside
-the chain: each lambda takes the expected parameter type and converts it to
-the callee's, and the innermost result is converted to the expected result.
-The callee still runs only when the last argument arrives. -/
-def partialApp (rest : Array RR.Ty) (ret : RR.Ty) (expected : RR.Ty)
-    (mk : Array RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
-  let mut exp := expected
-  let mut doms := #[]
-  for _ in rest do
-    match exp with
-    | .fn d c => doms := doms.push d; exp := c
-    | _ => break
-  if doms.size < rest.size then
-    -- The expected type is not a function type of that depth (e.g. `Box`):
-    -- build the chain at the callee's types and convert it as a whole.
-    let own := rest.foldr (fun a b => RR.Ty.fn a b) ret
-    return ← coerce (← lambdaChain rest mk) own expected
-  let names ← rest.mapM fun _ => fresh "pa"
-  let args ← (names.zip (doms.zip rest)).mapM fun (n, d, t) => coerce (.var n) d t
-  let mut body ← coerce (← mk args) ret exp
-  for (n, d) in (names.zip doms).reverse do
-    body := .lam n d (.ofExpr body)
-  return body
+/-- Apply `f : t` to `args` (each with its type): up to a chain's length at
+a time (`applyCall`); a function value of statically unknown type (`Box`)
+is unboxed to `Box → Box`. The result and its type. -/
+def applyExprs (f : RR.Expr) (t : RR.Ty) (args : Array (RR.Expr × RR.Ty)) :
+    LowerM (RR.Expr × RR.Ty) := do
+  let mut e := f
+  let mut t := t
+  let mut i := 0
+  while i < args.size do
+    if t == RR.Ty.box then
+      let canon := RR.Ty.fn RR.Ty.box RR.Ty.box
+      e ← coerce e RR.Ty.box canon
+      t := canon
+    let (doms, _) := fnChain t
+    if doms.isEmpty then throwError "lean2rr: application of a non-function value of type {t.render}"
+    let j := min doms.size (args.size - i)
+    let mut as := #[]
+    for k in [:j] do
+      let (a, aty) := args[i + k]!
+      as := as.push (← coerce a aty doms[k]!)
+    e ← applyCall e t as
+    t := fnResult t j
+    i := i + j
+  return (e, t)
 
-/-- Apply a closure to further arguments, one at a time. A function value of
-statically unknown type (`Box`) is stored in canonical form `Box -> Box`
-(see `tryCoerce`): it is unboxed to that, applied to a boxed argument, and
-yields a `Box`. -/
+/-- Apply a function value `f : fty` to further (Lean) arguments. -/
 def applyChain (f : RR.Expr) (fty : RR.Ty) (ctx : CodeCtx) (args : Array (Arg .pure)) :
     LowerM (RR.Expr × RR.Ty) := do
   let mut e := f
   let mut t := fty
-  for a in args do
+  let mut i := 0
+  while i < args.size do
     if t == RR.Ty.box then
       let canon := RR.Ty.fn RR.Ty.box RR.Ty.box
-      e := ← coerce e RR.Ty.box canon
+      e ← coerce e RR.Ty.box canon
       t := canon
-    match t with
-    | .fn d c =>
-      let arg ← lowerArg ctx a d
-      -- Reussir only calls variables and call results: bind other
-      -- function expressions (e.g. a `match` producing a closure) first.
-      match e with
-      | .var _ | .call .. | .apply .. => e := .apply e arg
-      | _ =>
-        let v ← fresh "fn"
-        e := .block ⟨#[(v, some t, e)], .apply (.var v) arg⟩
-      t := c
-    | _ => throwError "lean2rr: application of a non-function value of type {t.render}"
+    let (doms, _) := fnChain t
+    if doms.isEmpty then throwError "lean2rr: application of a non-function value of type {t.render}"
+    let j := min doms.size (args.size - i)
+    let mut as := #[]
+    for k in [:j] do
+      as := as.push (← lowerArg ctx args[i + k]! doms[k]!)
+    e ← applyCall e t as
+    t := fnResult t j
+    i := i + j
   return (e, t)
 
 /-! ## Externs -/
@@ -865,47 +946,53 @@ def fallibleIOGlue (prim : String) (primRet : RR.Ty) (argTys : Array RR.Ty) (arg
     else coerce x primRet payload
   return .block ⟨lets, finish⟩
 
+/-- Field `i` of the standard stream record type `streamTy`: its name, the
+parameters of its curried function type and its IO result type. -/
+def streamField (streamTy : RR.Ty) (i : Nat) : LowerM (Option (Name × Array RR.Ty × RR.Ty)) := do
+  let .named sn := streamTy | return none
+  let some info := (← get).typeInfos[sn]? | return none
+  let some layout := info.ctors.find? info.ctorOrder[0]! | return none
+  let fieldNames := getStructureFields (← getEnv) ``IO.FS.Stream
+  let some fname := fieldNames[i]? | return none
+  let some (some (_, fty)) := layout.fields[i]? | return none
+  let (ps, t) := fnChain fty
+  return some (fname, ps, t)
+
+/-- Stream field `i` on file descriptor `fd` applied to `args`: the runtime
+primitive `l2r_stream_<field>`. Erased and world parameters are not passed
+to the primitive. -/
+def streamFieldCall (fd : Nat) (i : Nat) (streamTy : RR.Ty) (args : Array RR.Expr) : LowerM RR.Expr := do
+  let some (fname, ps, t) ← streamField streamTy i | throwError "lean2rr: bad stream field"
+  let passed := (args.zip ps).filterMap fun (a, pt) => if pt == .unit then none else some a
+  let prim := s!"l2r_stream_{fname}"
+  let call := RR.Expr.call prim #[] (#[.atom (toString fd)] ++ passed)
+  let payload ← ioPayloadTy t
+  match (← read).preludeRets[prim]? with
+  -- Fallible operations report errors (broken pipe, closed stream, wrong
+  -- direction) through the runtime's last-error protocol.
+  | some primRet =>
+    if fname == `isTty then wrapIOResult t call
+    else ioFinish call primRet t fun x =>
+      if payload == RR.Ty.unit then pure .unitVal else coerce x primRet payload
+  | none =>
+    -- Primitives with no result return `u64` (Reussir's `unit` is not a value).
+    let v ← if payload == RR.Ty.unit then do
+        let r ← fresh "r"
+        pure (RR.Expr.block ⟨#[(r, some (.named "u64"), call)], .unitVal⟩)
+      else pure call
+    wrapIOResult t v
+
 /-- A standard stream (`IO.getStdout` & co.) as a Lean `IO.FS.Stream` value:
-each field is a curried closure calling the runtime primitive
-`l2r_stream_<field>` on file descriptor `fd`. Erased and world parameters
-are not passed to the primitive. -/
+each field is a function value whose target is `streamFieldCall` (a
+nullary variant, so the record is the only allocation). -/
 def streamValue (fd : Nat) (streamTy : RR.Ty) : LowerM RR.Expr := do
   let .named sn := streamTy | throwError "lean2rr: bad stream type"
-  let some info := (← get).typeInfos[sn]? | throwError "lean2rr: bad stream type"
-  let some layout := info.ctors.find? info.ctorOrder[0]! | throwError "lean2rr: bad stream type"
   let fieldNames := getStructureFields (← getEnv) ``IO.FS.Stream
   let mut vals := #[]
-  for h : i in [:fieldNames.size] do
-    let some (some (_, fty)) := layout.fields[i]? | continue
-    -- Split the curried closure type into parameters and the IO result.
-    let mut ps := #[]
-    let mut t := fty
-    repeat
-      match t with
-      | .fn d c => ps := ps.push d; t := c
-      | _ => break
-    let prim := s!"l2r_stream_{fieldNames[i]}"
-    let names ← ps.mapM fun _ => fresh "s"
-    let passed := (names.zip ps).filterMap fun (n, pt) => if pt == .unit then none else some (RR.Expr.var n)
-    let call := RR.Expr.call prim #[] (#[.atom (toString fd)] ++ passed)
-    let payload ← ioPayloadTy t
-    let mut body ← match (← read).preludeRets[prim]? with
-      -- Fallible operations report errors (broken pipe, closed stream, wrong
-      -- direction) through the runtime's last-error protocol.
-      | some primRet =>
-        if fieldNames[i] == `isTty then wrapIOResult t call
-        else ioFinish call primRet t fun x =>
-          if payload == RR.Ty.unit then pure .unitVal else coerce x primRet payload
-      | none =>
-        -- Primitives with no result return `u64` (Reussir's `unit` is not a value).
-        let v ← if payload == RR.Ty.unit then do
-            let r ← fresh "r"
-            pure (RR.Expr.block ⟨#[(r, some (.named "u64"), call)], .unitVal⟩)
-          else pure call
-        wrapIOResult t v
-    for (n, pt) in (names.zip ps).reverse do
-      body := .lam n pt (.ofExpr body)
-    vals := vals.push body
+  for i in [:fieldNames.size] do
+    let some (_, ps, t) ← streamField streamTy i | continue
+    let (v, _) ← partValue { id := s!"s{fd}f{i}{sn}", params := ps, ret := t, call := .stream fd i streamTy } #[]
+    vals := vals.push v
   return .ctor sn none vals
 
 /-- A generated function folding a Lean `List` into an accumulator:
@@ -980,6 +1067,7 @@ def ctorCallbackExtern (sym : String) (ret : Expr) (args : Array RR.Expr) : Lowe
     let helper := if sym == "lean_io_timeit" then "l2r_io_timeit_with" else "l2r_io_allocprof_with"
     let some msg := args[0]? | return none
     let some act := args[1]? | return none
+    let act ← coerce act (.fn .unit rt) (.cls .unit rt)
     return some (.call helper #[rt] #[msg, act])
   -- `IO.getEnv name : BaseIO (Option String)`.
   | "lean_io_getenv" =>
@@ -1043,7 +1131,7 @@ def runIO (act : RR.Expr) (actTy : RR.Ty) (w : RR.Expr) (dst : RR.Ty) : LowerM R
   let some (some (j, pt)) := layout.fields[0]? | throwError "lean2rr: IO result of type {rn}"
   withVar "act" actTy act fun a => do
     let r ← fresh "io"
-    return .block ⟨#[(r, some resTy, .apply a w)], ← coerce (.field (.var r) j) pt dst⟩
+    return .block ⟨#[(r, some resTy, ← applyCall a actTy #[w])], ← coerce (.field (.var r) j) pt dst⟩
 
 /-- The state type and value type of a thunk or task of Reussir type `t`. -/
 def lazyOf (t : RR.Ty) : LowerM (String × RR.Ty) := do
@@ -1069,7 +1157,7 @@ def taskNewFn (z : String) (pure : Bool) : LowerM String := do
     let deferred : RR.Block := ⟨#[
         ("c", some cellTy, .call "l2r_lcell_new" #[zt] #[.ctor z (some "pending") #[.var "g"]]),
         ("r", some u64, .call "l2r_task_register" #[zt] #[.var "c", .atom (toString tag)])], .var "c"⟩
-    let eager : RR.Block := ⟨#[("v", some t, .apply (.var "g") .unitVal)], lazyDone z (.var "v")⟩
+    let eager : RR.Block := ⟨#[("v", some t, ← applyCall (.var "g") (.fn .unit t) #[.unitVal])], lazyDone z (.var "v")⟩
     let body := if pure then RR.Expr.ite (.call "l2r_task_eager_pure" #[] #[]) eager deferred
       else .ite (.call "l2r_task_deferring" #[] #[]) deferred eager
     return #[.fn name #[("g", .fn .unit t)] cellTy (.ofExpr body)]
@@ -1088,9 +1176,9 @@ def lazyGet (c : RR.Expr) (ty : RR.Ty) (dst : RR.Ty) : LowerM RR.Expr := do
 /-- A new task of Reussir type `taskTy` whose value is `body u` (`u` is the
 world, for IO tasks). -/
 def newTask (taskTy : RR.Ty) (pure : Bool) (body : RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
-  let (z, _) ← lazyOf taskTy
+  let (z, t) ← lazyOf taskTy
   let u ← fresh "w"
-  return .call (← taskNewFn z pure) #[] #[.lam u .unit (.ofExpr (← body (.var u)))]
+  return .call (← taskNewFn z pure) #[] #[rawFnValue (.fn .unit t) u (.ofExpr (← body (.var u)))]
 
 /-- `IO.getTaskState` glue (`leanrt::task::query`): the runtime's answer,
 where 3 means the program is polling for a pending task, which then runs
@@ -1156,7 +1244,7 @@ def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Arra
   let applyTo (f : RR.Expr) (fTy : RR.Ty) (arg : RR.Expr) (argTy : RR.Ty) (dst : RR.Ty) : LowerM RR.Expr := do
     let .fn d c := fTy | throwError "lean2rr: application of {fTy.render}"
     let a ← coerce arg argTy d
-    withVar "tf" fTy f fun g => coerce (.apply g a) c dst
+    withVar "tf" fTy f fun g => do coerce (← applyCall g fTy #[a]) c dst
   match orig with
   | ``Thunk.mk =>
     let (z, t) ← lazyOf (← lowerType ret)
@@ -1211,11 +1299,11 @@ def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Arra
     let value (w : RR.Expr) : LowerM RR.Expr := do
       let x ← lazyGet args[ti]! srcTy fd
       withVar "tf" fTy args[fi]! fun f => do
-        if isMap then runIO (.apply f x) actTy w t
+        if isMap then runIO (← applyCall f fTy #[x]) actTy w t
         else
           -- `bindTask` continues as the task `f` returns.
           let inner ← ioPayloadTy (match actTy with | .fn _ r => r | r => r)
-          let t2 ← runIO (.apply f x) actTy w inner
+          let t2 ← runIO (← applyCall f fTy #[x]) actTy w inner
           lazyGet t2 inner t
     -- With `sync := true` and `t` finished, Lean runs `f` at once
     -- (`lean_task_map_core`/`lean_task_bind_core`); otherwise the task is
@@ -1226,7 +1314,7 @@ def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Arra
       else do
         let x ← lazyGet args[ti]! srcTy fd
         withVar "tf" fTy args[fi]! fun f => do
-          runIO (.apply f x) actTy args[4]! taskTy
+          runIO (← applyCall f fTy #[x]) actTy args[4]! taskTy
     let later ← newTask taskTy false value
     let d ← fresh "sync"
     let cond : RR.Expr := .ite args[3]! (.ofExpr (taskDone sz args[ti]!)) (.ofExpr (.atom "false"))
@@ -1288,11 +1376,13 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   if let some e ← ctorCallbackExtern (← externSymbol orig) ret args then return some e
   if let some e ← lazyExtern orig params ret args then return some e
   match orig with
-  -- `IO.Process.exit : UInt8 → IO α` never returns.
-  | ``IO.Process.exit =>
+  -- `IO.Process.exit : UInt8 → IO α` never returns; nor does `forceExit`,
+  -- which skips flushing and exit handlers.
+  | ``IO.Process.exit | ``IO.Process.forceExit =>
     let rt ← lowerType ret
     let e ← fresh "ex"
-    return some (.block ⟨#[(e, some (.named "u64"), .call "l2r_process_exit" #[] #[args[0]!])],
+    let prim := if orig == ``IO.Process.exit then "l2r_process_exit" else "l2r_process_force_exit"
+    return some (.block ⟨#[(e, some (.named "u64"), .call prim #[] #[args[0]!])],
       .call "l2r_unreachable" #[rt] #[]⟩)
   | _ => pure ()
   -- `String.ofList : List Char → String`
@@ -1410,7 +1500,13 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
   if let some n := (← read).valueGenericFns[sym]? then
     let tys ← if n == typeArgs.size then typeArgs.mapM fun t => do lowerType (← toMonoTypeKeep t)
       else pure #[]
-    return .call sym tys passedArgs
+    -- A function value becomes a Reussir closure for the prelude.
+    let argTys ← (mask.zip params).filterMapM fun (m, p) => if m then some <$> lowerType p else pure none
+    let cls := (← read).valueGenericCls.getD sym #[]
+    let passed ← (passedArgs.zip argTys).zipIdx.mapM fun ((a, t), i) => match t with
+      | .fn d c => if cls[i]?.getD false then coerce a t (.cls d c) else pure a
+      | _ => pure a
+    return .call sym tys passed
   -- Array externs at `Array Nat`/`Array Int` use the one-word arrays.
   if let some α := typeArgs[0]? then
     let fam? := match ← lowerType (← toMonoTypeKeep α) with
@@ -1464,6 +1560,28 @@ def natLiteral (n : Nat) : RR.Expr :=
 where
   small (k : Nat) : RR.Expr := .ctor "Nat" (some "Small") #[.atom (toString k)]
 
+/-- Constructor `c` applied to all its arguments `vals` (parameters, then
+fields), building a value of `fullRt`. -/
+def ctorBuild (c : Name) (fullRt : RR.Ty) (vals : Array RR.Expr) : LowerM RR.Expr := do
+  match fullRt with
+  | .named "bool" => return .atom (if c == ``Bool.true then "true" else "false")
+  | .named "L2RUnit" => return .unitVal
+  | .named tn =>
+    match (← get).typeInfos[tn]? with
+    | some info =>
+      let some layout := info.ctors.find? c
+        | throwError "lean2rr: constructor {c} not in type {tn}"
+      let mut fieldVals := #[]
+      for h : i in [:layout.fields.size] do
+        if let some _ := layout.fields[i] then
+          fieldVals := fieldVals.push vals[layout.numParams + i]!
+      let placedVals := layout.place fieldVals
+      match info.shape with
+      | .struct => return .ctor tn none placedVals
+      | _ => return .ctor tn (some layout.variant) placedVals
+    | none => throwError "lean2rr: constructor {c} of non-nominal type {tn}"
+  | t => throwError "lean2rr: constructor {c} at type {t.render}"
+
 /-- Lower a constant application with Lean's arity rules. -/
 def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy : Expr) :
     LowerM RR.Expr := do
@@ -1482,7 +1600,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       coerce (.call fn #[] as) ret (← lowerType resTy)
     else if args.size < n then
       let supplied ← (args.zip params).mapM fun (a, t) => lowerArg ctx a t
-      partialApp params[args.size:].toArray ret (← lowerType resTy) fun rest => return .call fn #[] (supplied ++ rest)
+      partialApp { id := "d" ++ fn, params, ret, call := .code fn } supplied (← lowerType resTy)
     else
       let as ← (args[:n].toArray.zip params).mapM fun (a, t) => lowerArg ctx a t
       let (e, t) ← applyChain (.call fn #[] as) ret ctx args[n:].toArray
@@ -1496,8 +1614,8 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       coerce (← lowerExternCall orig typeArgs params ret as) retTy (← lowerType resTy)
     else if args.size < n then
       let supplied ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
-      partialApp ptys[args.size:].toArray retTy (← lowerType resTy) fun rest =>
-        lowerExternCall orig typeArgs params ret (supplied ++ rest)
+      partialApp { id := "e" ++ fnName f, params := ptys, ret := retTy, call := .extern orig typeArgs params ret }
+        supplied (← lowerType resTy)
     else
       let as ← (args[:n].toArray.zip ptys).mapM fun (a, t) => lowerArg ctx a t
       let call ← lowerExternCall orig typeArgs params ret as
@@ -1510,25 +1628,6 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     -- application; for a partial application, by the codomain.
     let (_, fullTy) := splitFnType resTy (arity - min arity args.size)
     let fullRt ← if args.size ≥ arity then pure rt else lowerType fullTy
-    let build (vals : Array RR.Expr) : LowerM RR.Expr := do
-      match fullRt with
-      | .named "bool" => return .atom (if c.name == ``Bool.true then "true" else "false")
-      | .named "L2RUnit" => return .unitVal
-      | .named tn =>
-        match (← get).typeInfos[tn]? with
-        | some info =>
-          let some layout := info.ctors.find? c.name
-            | throwError "lean2rr: constructor {c.name} not in type {tn}"
-          let mut fieldVals := #[]
-          for h : i in [:layout.fields.size] do
-            if let some _ := layout.fields[i] then
-              fieldVals := fieldVals.push vals[layout.numParams + i]!
-          let placedVals := layout.place fieldVals
-          match info.shape with
-          | .struct => return .ctor tn none placedVals
-          | _ => return .ctor tn (some layout.variant) placedVals
-        | none => throwError "lean2rr: constructor {c.name} of non-nominal type {tn}"
-      | t => throwError "lean2rr: constructor {c.name} at type {t.render}"
     -- Expected Reussir types of the constructor's arguments.
     let argTys ← do
       match fullRt with
@@ -1542,8 +1641,9 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
         | none => pure (Array.replicate arity RR.Ty.unit)
       | _ => pure (Array.replicate arity RR.Ty.unit)
     let vals ← (args.zip argTys).mapM fun (a, t) => lowerArg ctx a t
-    if args.size ≥ arity then build vals
-    else partialApp argTys[args.size:].toArray fullRt (← lowerType resTy) fun rest => build (vals ++ rest)
+    if args.size ≥ arity then ctorBuild c.name fullRt vals
+    else partialApp { id := "k" ++ fullRt.enc ++ "_" ++ fnName c.name, params := argTys, ret := fullRt,
+                      call := .ctor c.name fullRt } vals (← lowerType resTy)
 
 def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty) : LowerM RR.Expr := do
   match v with
@@ -1869,8 +1969,11 @@ mutual
       let bodyCtx := { ctx with vars }
       let body ← lowerCode bodyCtx outlined rt d.value
       let mut lam := RR.Expr.block body
-      for (n, t) in (pnames.zip ptys).reverse do lam := .lam n t (.ofExpr lam)
-      let fty := (ptys.foldr (fun a b => RR.Ty.fn a b) rt)
+      let mut lt := rt
+      for (n, t) in (pnames.zip ptys).reverse do
+        lt := .fn t lt
+        lam := rawFnValue lt n (.ofExpr lam)
+      let fty := lt
       let x ← fresh "f"
       let b ← lowerCode { ctx with vars := ctx.vars.insert d.fvarId (x, fty) } outlined retTy k
       return { b with lets := #[(x, some fty, lam)] ++ b.lets }
@@ -1987,7 +2090,8 @@ partial def finishUnboxFns : LowerM Unit := do
     let nvars := (← get).boxVariants.size
     let nominal := (← get).unboxTargets.map fun t => (s!"l2r_unbox_{t}", RR.Ty.named t)
     let arrays := (← get).unboxArrTargets.map fun (t, f) => (f, t)
-    let pending := (nominal ++ arrays).filter fun (f, _) => done.getD f 0 != nvars + 1
+    let fns := (← get).fnUnboxTargets.map fun t => (s!"l2r_unbox_fn_{t.enc}", t)
+    let pending := (nominal ++ arrays ++ fns).filter fun (f, _) => done.getD f 0 != nvars + 1
     if pending.isEmpty then break
     for (fname, t) in pending do
       let th? ← match t with
@@ -1999,6 +2103,9 @@ partial def finishUnboxFns : LowerM Unit := do
         let accept ← match th?, vt with
           | some th, .named vn => pure ((← nominalHead vn) == some th)
           | some _, _ => pure false
+          | none, .fn .. =>
+            -- A function value of any compatible representation (wrapped).
+            pure (t matches .fn .. && (← reprCompatible vt t))
           | none, _ => pure (tArr && (← arrayRepr? vt).isSome && (← reprCompatible vt t))
         if !accept then continue
         let x ← fresh "bx"
@@ -2022,6 +2129,109 @@ partial def finishUnboxFns : LowerM Unit := do
       -- Record the variant count this body was generated against; a later
       -- growth of the variant set makes it pending again.
       done := done.insert fname (nvars + 1)
+
+/-- Target `tg` called with all its arguments. -/
+def targetCall (tg : FnTarget) (args : Array RR.Expr) : LowerM RR.Expr := do
+  match tg.call with
+  | .code fn => return .call fn #[] args
+  | .extern orig typeArgs params ret => lowerExternCall orig typeArgs params ret args
+  | .ctor c fullRt => ctorBuild c fullRt args
+  | .stream fd i streamTy => streamFieldCall fd i streamTy args
+
+/-- Generate `l2r_ap<j>_T`, applying a function value of type `t` to `j`
+arguments (see "Function values"): a match on the variant. -/
+def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
+  let (doms, _) := fnChain t
+  let resJ := fnResult t j
+  let tn := RR.fnTypeName t
+  let as := (List.range j).toArray.map fun i => s!"l2ra{i}"
+  let argsFrom (k : Nat) : Array (RR.Expr × RR.Ty) :=
+    (List.range (j - k)).toArray.map fun i => (RR.Expr.var as[k + i]!, doms[k + i]!)
+  -- The value `e` of the first `k` arguments (at `fnResult t k`), applied to
+  -- the others.
+  let rest (e : RR.Expr) (k : Nat) : LowerM RR.Expr := do
+    let (r, rt) ← applyExprs e (fnResult t k) (argsFrom k)
+    coerce r rt resJ
+  let mut arms : Array RR.Arm :=
+    #[{ ty := tn, ctor := some "z", binders := #[], body := .ofExpr (← zeroValue resJ) }]
+  let rawBody ← rest (.apply (.var "l2rc") (.var as[0]!)) 1
+  arms := arms.push { ty := tn, ctor := some "raw", binders := #[some "l2rc"], body := .ofExpr rawBody }
+  for v in (← get).fnVariants.getD t #[] do
+    let (binders, body) ← match v with
+      | .wrap src =>
+        let k := min (fnChain src).1.size j
+        let (e, et) ← applyExprs (.var "l2rg") src ((argsFrom 0).extract 0 k)
+        pure (#[some "l2rg"], ← rest (← coerce e et (fnResult t k)) k)
+      | .part id m =>
+        let some tg := (← get).fnTargets[id]? | throwError "lean2rr: unknown function target {id}"
+        let captured := (List.range m).toArray.map fun i => RR.Expr.var s!"l2rx{i}"
+        let r := tg.params.size - m
+        let k := min r j
+        let mut cargs := #[]
+        for i in [:k] do cargs := cargs.push (← coerce (.var as[i]!) doms[i]! tg.params[m + i]!)
+        let body ← if k < r then do
+            -- Fewer arguments than the target needs: a partial application.
+            let (pv, pt) ← partValue tg (captured ++ cargs)
+            coerce pv pt resJ
+          else do
+            let call ← targetCall tg (captured ++ cargs)
+            rest (← coerce call tg.ret (fnResult t k)) k
+        pure ((List.range m).toArray.map fun i => some s!"l2rx{i}", body)
+    arms := arms.push { ty := tn, ctor := some (fnVariantName v), binders, body := .ofExpr body }
+  let name := applyFnName t j
+  let params := #[("l2rf", t)] ++ as.zip (doms.extract 0 j)
+  let item := RR.Item.fn name params resJ (.ofExpr (.mtch (.var "l2rf") arms))
+  modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
+
+/-- Generate the application functions requested so far, again for those
+whose type gained variants. Whether anything was generated. -/
+partial def finishFnValues : LowerM Bool := do
+  let mut any := false
+  repeat
+    let mut progress := false
+    for (t, j) in (← get).fnApplies do
+      let nv := ((← get).fnVariants.getD t #[]).size
+      if (← get).fnApplyDone[(t, j)]? == some nv then continue
+      genApply t j
+      modify fun s => { s with fnApplyDone := s.fnApplyDone.insert (t, j) nv }
+      progress := true
+    if !progress then break
+    any := true
+  return any
+
+/-- The fields of the variants of function type `t`, besides `z`/`raw`. -/
+def fnVariantFields (v : FnVariant) : LowerM (Array RR.Ty) := do
+  match v with
+  | .wrap src => return #[src]
+  | .part id m =>
+    let some tg := (← get).fnTargets[id]? | throwError "lean2rr: unknown function target {id}"
+    return tg.params.extract 0 m
+
+/-- The enums of all function types the generated program mentions. -/
+def fnTypeItems : LowerM (Array RR.Item) := do
+  let st ← get
+  let mut work : Array RR.Ty := #[]
+  for it in st.fns ++ st.typeItems do
+    for t in it.tys do work := t.subterms work
+  for (t, _) in st.boxVariants do work := t.subterms work
+  for (k, _) in st.tupleTypes.toList do
+    for t in k do work := t.subterms work
+  let mut seen : Std.HashSet RR.Ty := {}
+  let mut items := #[]
+  while !work.isEmpty do
+    let t := work.back!
+    work := work.pop
+    let .fn d c := t | continue
+    if seen.contains t then continue
+    seen := seen.insert t
+    let mut variants : Array (String × Array RR.Ty) := #[("z", #[]), ("raw", #[.cls d c])]
+    work := (RR.Ty.cls d c).subterms work
+    for v in (← get).fnVariants.getD t #[] do
+      let fs ← fnVariantFields v
+      for f in fs do work := f.subterms work
+      variants := variants.push (fnVariantName v, fs)
+    items := items.push (RR.Item.enum (RR.fnTypeName t) false variants)
+  return items
 
 /-- Types whose values need no heap cell. -/
 def isUnboxedTy (t : RR.Ty) : LowerM Bool := do

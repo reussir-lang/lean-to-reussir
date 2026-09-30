@@ -80,12 +80,59 @@ structure LowerCtx where
   /-- Generic prelude functions over plain values (see
   `valueGenericPreludeFns`), with their number of type parameters. -/
   valueGenericFns : Std.HashMap String Nat := {}
+  /-- Which parameters of those functions are Reussir closures. -/
+  valueGenericCls : Std.HashMap String (Array Bool) := {}
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/
   keys : NameMap InstKey
 
+/-- How the target of a function value is called with all its arguments
+(data, so that the lowering state can hold it; see Lower's
+`targetCall`). -/
+inductive FnCall where
+  /-- A declaration of the program. -/
+  | code (fn : String)
+  /-- An extern, as `lowerExternCall` takes it. -/
+  | extern (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
+  /-- A constructor, building a value of `fullRt`. -/
+  | ctor (c : Name) (fullRt : RR.Ty)
+  /-- Field `field` of the standard stream record `streamTy` on descriptor
+  `fd` (see `streamValue`). -/
+  | stream (fd : Nat) (field : Nat) (streamTy : RR.Ty)
+  deriving Inhabited
+
+/-- Something a function value can be a partial application of: Reussir
+parameter types, result type, and how it is called. `id` is an identifier
+naming it in variant names. -/
+structure FnTarget where
+  id : String
+  params : Array RR.Ty
+  ret : RR.Ty
+  call : FnCall
+  deriving Inhabited
+
+/-- A variant of a function-value enum besides `z` (the `box(0)`
+placeholder) and `raw` (a Reussir closure): `part id m` is target `id`
+with its first `m` arguments captured; `wrap src` is a function value of
+another representation `src` of the same Lean type. -/
+inductive FnVariant where
+  | part (id : String) (m : Nat)
+  | wrap (src : RR.Ty)
+  deriving BEq, Hashable, Inhabited
+
 structure LowerState where
+  /-- Targets of function values, by id. -/
+  fnTargets : Std.HashMap String FnTarget := {}
+  /-- Variants of each function-value type (an `RR.Ty.fn`), besides `z` and `raw`. -/
+  fnVariants : Std.HashMap RR.Ty (Array FnVariant) := {}
+  /-- Requested application functions: function type and number of arguments. -/
+  fnApplies : Array (RR.Ty × Nat) := #[]
+  /-- Function types that some `Box` value is unboxed to. -/
+  fnUnboxTargets : Array RR.Ty := #[]
+  /-- Generated application functions, with the number of variants of their
+  type they were generated for. -/
+  fnApplyDone : Std.HashMap (RR.Ty × Nat) Nat := {}
   /-- Mono type (keyed by relevant arguments) ↦ generated type name. -/
   typeNames : Std.HashMap Expr String := {}
   typeInfos : Std.HashMap String TypeInfo := {}
@@ -175,7 +222,9 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
     | some info => return info.shape != .enumLike
     | none => return false
   | .app n _ => return n == "RVec" || n == "LRef" || n == "LCell"
-  | .fn .. => return false
+  -- A function value is a shared enum.
+  | .fn .. => return true
+  | .cls .. => return false
 
 /-- The state type of a thunk (`task = false`) or task over values of type
 `t`: a generated shared enum `{ pending(L2RUnit -> t), busy, done(t) }`
