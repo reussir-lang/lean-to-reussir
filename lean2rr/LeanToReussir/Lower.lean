@@ -2246,6 +2246,11 @@ partial def reprCompatible (a b : RR.Ty) : LowerM Bool := do
   if a == b || a == RR.Ty.box || b == RR.Ty.box then return true
   match a, b with
   | .fn a1 b1, .fn a2 b2 => return (← reprCompatible a1 a2) && (← reprCompatible b1 b2)
+  | .app "LCell" _, .app "LCell" _ =>
+    -- Thunks (or tasks) with compatible values.
+    match ← lazyOf? a, ← lazyOf? b with
+    | some (_, k1, va), some (_, k2, vb) => return k1 == k2 && (← reprCompatible va vb)
+    | _, _ => return false
   | _, _ =>
     if let (some ra, some rb) := (← arrayRepr? a, ← arrayRepr? b) then
       return ← reprCompatible ra.value rb.value

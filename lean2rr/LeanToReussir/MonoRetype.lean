@@ -268,18 +268,21 @@ def reinstantiate? (sc : Scope) (f : Name) (args : Array (Arg .pure)) (resTy : E
   unless key.dicts.isEmpty && key.typeArgs.any (· == anyExpr) do return none
   let some base ← getBaseDecl? key.decl | return none
   let positions := typeParamPositions base
-  unless positions.size == key.typeArgs.size && base.params.size == args.size do return none
+  -- Saturated, or over-applied (the element read of an `Array.map` over
+  -- functions is applied to the function's argument).
+  let n := base.params.size
+  unless positions.size == key.typeArgs.size && n ≤ args.size do return none
   let holes ← positions.mapM fun _ => mkFreshFVarId
   let mut assign : Array (Option Expr) := Array.replicate holes.size none
   let mut ty := eraseLevels base.type
-  for h : i in [:args.size] do
+  for h : i in [:n] do
     match ty.headBeta with
     | .forallE _ d b _ =>
       match positions.idxOf? i with
       | some j => ty := b.instantiate1 (.fvar holes[j]!)
       | none =>
-        unless sc.isPlaceholder args[i] do
-          assign := matchTy holes d (sc.argTy args[i]) assign
+        unless sc.isPlaceholder args[i]! do
+          assign := matchTy holes d (sc.argTy args[i]!) assign
         ty := b.instantiate1 anyExpr
     | _ => return none
   let some typeArgs := assign.mapM id | return none
@@ -288,14 +291,20 @@ def reinstantiate? (sc : Scope) (f : Name) (args : Array (Arg .pure)) (resTy : E
   let inst ← externInstance key.decl base (typeArgs.map eraseLevels)
   if inst == f then return none
   let some sig := (← get).sigs[inst]? | return none
-  for h : i in [:args.size] do
+  for h : i in [:n] do
     let p := sig.params[i]!.consumeMData
     if p.isErased || p.isSort || p == mkConst ``lcVoid then continue
-    if sc.isPlaceholder args[i] then continue
-    if (← norm (sc.argTy args[i])) != (← norm p) then return none
+    if sc.isPlaceholder args[i]! then continue
+    if (← norm (sc.argTy args[i]!)) != (← norm p) then return none
+  -- The result after the extra arguments, if any.
+  let mut ret := sig.ret
+  for _ in [n:args.size] do
+    match ret.consumeMData with
+    | .forallE _ _ b _ => ret := b.instantiate1 anyExpr
+    | _ => return none
   -- A binder that already has a precise type keeps it; the instance must
   -- produce exactly that.
-  unless (← unknown resTy) || (← norm resTy) == (← norm sig.ret) do return none
+  unless (← unknown resTy) || (← norm resTy) == (← norm ret) do return none
   return some inst
 
 /-! ## Retyping from definitions -/
