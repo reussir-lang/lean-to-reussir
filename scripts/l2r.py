@@ -58,22 +58,36 @@ def rustc_wrapper():
     return w
 
 
+def leanrt_out():
+    """Where leanrt is built: it links against the Reussir checkout's runtime
+    crates, so another checkout (L2R_REUSSIR, e.g. a patched Reussir) gets
+    its own directory."""
+    if REUSSIR.resolve() == (ROOT / "reussir").resolve():
+        return LEANRT_OUT
+    return LEANRT_OUT / ("rt-" + hashlib.sha256(str(REUSSIR.resolve()).encode()).hexdigest()[:12])
+
+
 def build_leanrt():
-    """Build runtime/leanrt as an rlib (cached by a hash of its sources)."""
+    """Build runtime/leanrt as an rlib (cached by a hash of its sources and
+    of the Reussir runtime it links against)."""
     rt, deps = rt_dirs()
+    out = leanrt_out()
     h = hashlib.sha256()
     for f in sorted(LEANRT_SRC.rglob("*.rs")):
         h.update(f.name.encode())
         h.update(f.read_bytes())
     h.update(str(RUSTC).encode())
     h.update(" ".join(NATIVE_FLAGS).encode())
-    stamp = LEANRT_OUT / "libleanrt.stamp"
-    rlib = LEANRT_OUT / "libleanrt.rlib"
+    for f in sorted(deps.glob("libreussir_rt*.rlib")):
+        h.update(f.name.encode())
+        h.update(str(f.stat().st_mtime_ns).encode())
+    stamp = out / "libleanrt.stamp"
+    rlib = out / "libleanrt.rlib"
     digest = h.hexdigest()
-    LEANRT_OUT.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
     # Concurrent drivers share the output directory: one builds, the others
     # wait for it and then find the stamp up to date.
-    with open(LEANRT_OUT / "libleanrt.lock", "w") as lock:
+    with open(out / "libleanrt.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if rlib.exists() and stamp.exists() and stamp.read_text() == digest:
             return rlib
@@ -96,7 +110,7 @@ def main():
     ap.add_argument("module")
     ap.add_argument("-o", "--output", required=True)
     ap.add_argument("--lean-path", default=None, help="extra LEAN_PATH entries")
-    ap.add_argument("-O", "--opt", default="default", choices=["none", "default", "aggressive", "size"])
+    ap.add_argument("-O", "--opt", default="aggressive", choices=["none", "default", "aggressive", "size"])
     ap.add_argument("--keep-rr", default=None, help="also write the generated .rr here")
     ap.add_argument("--root", default="main")
     # Reuse a matched cell for a constructor after intervening calls (like
@@ -119,7 +133,7 @@ def main():
                 "--emit", "executable", "-O", args.opt,
                 "--polyffi-rust-path", str(rustc_wrapper()),
                 "--polyffi-libdir", str(rt), "--polyffi-libdir", str(deps),
-                "--polyffi-libdir", target_libdir, "--polyffi-libdir", str(LEANRT_OUT),
+                "--polyffi-libdir", target_libdir, "--polyffi-libdir", str(rlib.parent),
                 "--link-lib", str(rlib), "--link-lib", str(gmp_archive())]
                # Reussir's in-place variant reuse skips stores of fields that
                # the packed record layout moves (RcCreateFusion copy
