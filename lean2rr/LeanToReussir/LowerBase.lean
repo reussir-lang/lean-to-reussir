@@ -133,6 +133,10 @@ structure LowerState where
   /-- Generated application functions, with the number of variants of their
   type they were generated for. -/
   fnApplyDone : Std.HashMap (RR.Ty × Nat) Nat := {}
+  /-- Conversions between two representations of a function type (source,
+  target), and the source variant count their body was generated for. -/
+  fnConvs : Array (RR.Ty × RR.Ty) := #[]
+  fnConvDone : Std.HashMap (RR.Ty × RR.Ty) Nat := {}
   /-- Mono type (keyed by relevant arguments) ↦ generated type name. -/
   typeNames : Std.HashMap Expr String := {}
   typeInfos : Std.HashMap String TypeInfo := {}

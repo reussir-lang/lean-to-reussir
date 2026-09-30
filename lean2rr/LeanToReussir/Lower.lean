@@ -138,6 +138,16 @@ def partValue (tg : FnTarget) (captured : Array RR.Expr) : LowerM (RR.Expr × RR
   addFnVariant t v
   return (.ctor (RR.fnTypeName t) (some (fnVariantName v)) captured, t)
 
+/-- `l2r_fconv_S_T(f)`: function value `f : S` at representation `T`. A
+value that is itself `T`'s value wrapped (`w<T>`) is unwrapped, so that a
+value converted back and forth (a structure field crossing uniform code in
+a loop) is not wrapped again each time; otherwise it is wrapped (`w<S>`).
+The body is generated at the end (`finishFnValues`). -/
+def fnConvFn (src dst : RR.Ty) : LowerM String := do
+  unless (← get).fnConvs.contains (src, dst) do
+    modify fun s => { s with fnConvs := s.fnConvs.push (src, dst) }
+  return s!"l2r_fconv_{src.enc}_{dst.enc}"
+
 /-- The generated function unboxing a `Box` to function type `t` (its body
 is generated at the end, with the other unboxing functions). -/
 def unboxFnFn (t : RR.Ty) : LowerM String := do
@@ -417,8 +427,9 @@ mutual
           if (← get).typeInfos.contains tn then
             -- Any instantiation of the same inductive may have been boxed.
             return some (.call (← unboxFn tn) #[] #[e])
-        if (← arrayRepr? dst).isSome then
-          -- Any representation of the same array type may have been boxed.
+        if (← arrayRepr? dst).isSome || dst matches .app "LCell" _ then
+          -- Any representation of the same array (or thunk, task) type may
+          -- have been boxed.
           return some (.call (← unboxArrFn dst) #[] #[e])
         return some (← unboxMatch e dst)
     match src, dst with
@@ -435,9 +446,8 @@ mutual
       -- converted at each application.
       let some _ ← tryCoerce (.var "l2rcv") a2 a1 | return none
       let some _ ← tryCoerce (.var "l2rcv") b1 b2 | return none
-      let v := FnVariant.wrap src
-      addFnVariant dst v
-      return some (.ctor (RR.fnTypeName dst) (some (fnVariantName v)) #[e])
+      addFnVariant dst (.wrap src)
+      return some (.call (← fnConvFn src dst) #[] #[e])
     -- Between a function value and a Reussir closure (prelude callbacks):
     -- a lambda. `e` is bound first, so that it is evaluated once.
     | .fn a1 b1, .cls a2 b2 =>
@@ -1113,12 +1123,16 @@ def listFold (name : String) (listTy accTy elemTy : RR.Ty) (step : RR.Expr → R
   let some info := (← get).typeInfos[lt]? | throwError "lean2rr: bad list type"
   let some nil := info.ctors.find? ``List.nil | throwError "lean2rr: bad list type"
   let some cons := info.ctors.find? ``List.cons | throwError "lean2rr: bad list type"
+  -- An irrelevant element (a list of types or proofs) has no field; the
+  -- step gets its placeholder.
+  let headRel := (cons.fields[0]?.join).isSome
+  let x ← if headRel then pure (RR.Expr.var "x") else zeroValue elemTy
   let body : RR.Block := .ofExpr (.mtch (.var "l") #[
     { ty := lt, ctor := some nil.variant, binders := #[], body := .ofExpr (.var "acc") },
     { ty := lt, ctor := some cons.variant,
-      binders := (cons.place #[.var "x", .var "t"]).map fun | .var v => some v | _ => none,
-      body := .ofExpr (.call name #[] #[.var "t", step (.var "acc") (.var "x")]) }])
-  let _ := elemTy
+      binders := (cons.place (if headRel then #[.var "x", .var "t"] else #[.var "t"])).map fun
+        | .var v => some v | _ => none,
+      body := .ofExpr (.call name #[] #[.var "t", step (.var "acc") x]) }])
   modify fun s => { s with fns := s.fns.push (.fn name #[("l", listTy), ("acc", accTy)] accTy body) }
   return name
 
@@ -1541,7 +1555,7 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     let arrTy ← lowerType ret
     let some repr ← arrayRepr? arrTy | throwError "lean2rr: bad array type {arrTy.render}"
     let fn ← listFold s!"l2r_list_to_array_{lt.render.map fun c => if c.isAlphanum then c else '_'}" lt arrTy
-      repr.storage fun acc x => repr.call "push" #[acc, repr.store x]
+      repr.value fun acc x => repr.call "push" #[acc, repr.store x]
     return some (.call fn #[] #[args[0]!, repr.call "empty" #[]])
   -- `Array.toList : Array α → List α`: cons the elements from the last.
   if orig == ``Array.toList then
@@ -1552,15 +1566,19 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     let some info := (← get).typeInfos[ltn]? | throwError "lean2rr: bad list type"
     let some nil := info.ctors.find? ``List.nil | throwError "lean2rr: bad list type"
     let some cons := info.ctors.find? ``List.cons | throwError "lean2rr: bad list type"
-    let some (some (_, valTy)) := cons.fields[0]? | throwError "lean2rr: bad list type"
+    let valTy? := (cons.fields[0]?.join).map (·.2)
     let name := s!"l2r_array_to_list_{ltn}_{repr.family}"
     unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
-      let x := repr.load (repr.call "get" #[.var "v", .var "j"])
-      let x ← coerce x repr.value valTy
       let u64 := RR.Ty.named "u64"
+      -- Elements without a representation (types, proofs) are not stored.
+      let (xLet, fieldVals) ← match valTy? with
+        | some valTy => do
+          let x := repr.load (repr.call "get" #[.var "v", .var "j"])
+          pure (#[("x", some valTy, ← coerce x repr.value valTy)], #[RR.Expr.var "x", .var "acc"])
+        | none => pure (#[], #[RR.Expr.var "acc"])
       let body : RR.Block := ⟨#[("zero", some u64, .atom "0")], .ite (.atom "zero < i")
-        ⟨#[("one", some u64, .atom "1"), ("j", some u64, .atom "i - one"), ("x", some valTy, x),
-           ("c", some lt, .ctor ltn (some cons.variant) (cons.place #[.var "x", .var "acc"]))],
+        ⟨#[("one", some u64, .atom "1"), ("j", some u64, .atom "i - one")] ++ xLet ++
+         #[("c", some lt, .ctor ltn (some cons.variant) (cons.place fieldVals))],
           .call (name ++ "_go") #[] #[.var "v", .var "j", .var "c"]⟩
         (.ofExpr (.var "acc"))⟩
       let entry : RR.Block :=
@@ -2269,6 +2287,11 @@ partial def finishUnboxFns : LowerM Unit := do
           | none, .fn .. =>
             -- A function value of any compatible representation (wrapped).
             pure (t matches .fn .. && (← reprCompatible vt t))
+          | none, .app "LCell" _ =>
+            -- A thunk or task of the same kind with compatible values.
+            match ← lazyOf? t, ← lazyOf? vt with
+            | some (_, k1, a), some (_, k2, b) => pure (k1 == k2 && (← reprCompatible a b))
+            | _, _ => pure false
           | none, _ => pure (tArr && (← arrayRepr? vt).isSome && (← reprCompatible vt t))
         if !accept then continue
         let x ← fresh "bx"
@@ -2277,7 +2300,8 @@ partial def finishUnboxFns : LowerM Unit := do
         -- stay linear in the number of array types, not quadratic (nested
         -- arrays under polymorphic recursion have many representations).
         let boxArr := RR.Ty.app "RVec" #[RR.Ty.box]
-        let body ← if th?.isSome || vt == t || vt == boxArr || t == boxArr || t matches .fn .. then
+        let body ← if th?.isSome || vt == t || vt == boxArr || t == boxArr || t matches .fn ..
+            || t matches .app "LCell" _ then
             tryCoerce (.var x) vt t
           else match ← tryCoerce (.var x) vt boxArr with
             | some b => tryCoerce b boxArr t
@@ -2347,12 +2371,32 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
   let item := RR.Item.fn name params resJ (.ofExpr (.mtch (.var "l2rf") arms))
   modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
 
+/-- Generate `l2r_fconv_S_T` (see `fnConvFn`). -/
+def genFnConv (src dst : RR.Ty) : LowerM Unit := do
+  let name := s!"l2r_fconv_{src.enc}_{dst.enc}"
+  let wrapped := RR.Expr.ctor (RR.fnTypeName dst) (some (fnVariantName (.wrap src))) #[.var "l2rf"]
+  let back := FnVariant.wrap dst
+  let body : RR.Expr :=
+    if ((← get).fnVariants.getD src #[]).contains back then
+      .mtch (.var "l2rf") #[
+        { ty := RR.fnTypeName src, ctor := some (fnVariantName back), binders := #[some "l2rg"], body := .ofExpr (.var "l2rg") },
+        { ty := RR.fnTypeName src, ctor := none, binders := #[], body := .ofExpr wrapped }]
+    else wrapped
+  let item := RR.Item.fn name #[("l2rf", src)] dst (.ofExpr body)
+  modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
+
 /-- Generate the application functions requested so far, again for those
 whose type gained variants. Whether anything was generated. -/
 partial def finishFnValues : LowerM Bool := do
   let mut any := false
   repeat
     let mut progress := false
+    for (src, dst) in (← get).fnConvs do
+      let nv := ((← get).fnVariants.getD src #[]).size
+      if (← get).fnConvDone[(src, dst)]? == some nv then continue
+      genFnConv src dst
+      modify fun s => { s with fnConvDone := s.fnConvDone.insert (src, dst) nv }
+      progress := true
     for (t, j) in (← get).fnApplies do
       let nv := ((← get).fnVariants.getD t #[]).size
       if (← get).fnApplyDone[(t, j)]? == some nv then continue
