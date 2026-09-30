@@ -21,9 +21,31 @@ pub mod hash;
 pub mod io;
 pub mod once;
 pub mod string;
+pub mod tagvec;
 
 pub use big::LBig;
 pub use string::LStr;
+
+/// Give up a handle a texture received by value but only borrowed (every
+/// FFI call consumes its arguments). A shared handle is just decremented;
+/// freeing the last reference is out of line, which keeps textures small
+/// enough for LLVM to inline them into Reussir code.
+#[inline(always)]
+pub fn rc_release<T>(r: reussir_rt::rc::Rc<T>) {
+    let c = r.count_ref().get();
+    if c == 1 {
+        rc_drop_last(r)
+    } else {
+        r.count_ref().set(c - 1);
+        std::mem::forget(r);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn rc_drop_last<T>(r: reussir_rt::rc::Rc<T>) {
+    drop(r)
+}
 
 /// `lean_panic_fn`: print the message (Lean has already formatted it as
 /// `PANIC at ...`) to stderr and continue. Native executables also print

@@ -109,7 +109,7 @@ def main():
         rt, deps = rt_dirs()
         target_libdir = run([str(RUSTC), "--print", "target-libdir"]).stdout.strip()
         run([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", args.output,
-             "--emit", "executable", "-O", args.opt,
+             "--emit", "executable", "-O", args.opt, "--reuse-across-call",
              "--polyffi-rust-path", str(rustc_wrapper()),
              "--polyffi-libdir", str(rt), "--polyffi-libdir", str(deps),
              "--polyffi-libdir", target_libdir, "--polyffi-libdir", str(LEANRT_OUT),

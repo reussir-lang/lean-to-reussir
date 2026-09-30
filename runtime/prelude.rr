@@ -153,9 +153,9 @@ fn l2r_big_of_u64(x : u64) -> LBig [{ leanrt::big::of_u64(x) }];
 #[ffi(import)]
 fn l2r_big_of_limbs2(lo : u64, hi : u64) -> LBig [{ leanrt::big::of_limbs2(lo, hi) }];
 #[ffi(import)]
-fn l2r_big_is_u64(a : LBig) -> bool [{ leanrt::big::is_u64(&a) }];
+fn l2r_big_is_u64(a : LBig) -> bool [{ { let r = leanrt::big::is_u64(&a); leanrt::rc_release(a); r } }];
 #[ffi(import)]
-fn l2r_big_low(a : LBig) -> u64 [{ leanrt::big::low_limb(&a) }];
+fn l2r_big_low(a : LBig) -> u64 [{ { let r = leanrt::big::low_limb(&a); leanrt::rc_release(a); r } }];
 #[ffi(import)]
 fn l2r_big_of_decimal(s : str) -> LBig [{ leanrt::big::of_decimal(&*s) }];
 #[ffi(import)]
@@ -580,13 +580,13 @@ fn lean_system_platform_nbits(u : L2RUnit) -> Nat { Nat::Small{64} }
 #[ffi(import)]
 fn l2r_big_of_i64(x : i64) -> LBig [{ leanrt::big::of_i64(x) }];
 #[ffi(import)]
-fn l2r_big_fits_i64(a : LBig) -> bool [{ leanrt::big::fits_i64(&a) }];
+fn l2r_big_fits_i64(a : LBig) -> bool [{ { let r = leanrt::big::fits_i64(&a); leanrt::rc_release(a); r } }];
 #[ffi(import)]
-fn l2r_big_to_i64(a : LBig) -> i64 [{ leanrt::big::to_i64(&a) }];
+fn l2r_big_to_i64(a : LBig) -> i64 [{ { let r = leanrt::big::to_i64(&a); leanrt::rc_release(a); r } }];
 #[ffi(import)]
-fn l2r_big_low_twos(a : LBig) -> u64 [{ leanrt::big::low_u64_twos(&a) }];
+fn l2r_big_low_twos(a : LBig) -> u64 [{ { let r = leanrt::big::low_u64_twos(&a); leanrt::rc_release(a); r } }];
 #[ffi(import)]
-fn l2r_big_is_neg(a : LBig) -> bool [{ leanrt::big::is_neg(&a) }];
+fn l2r_big_is_neg(a : LBig) -> bool [{ { let r = leanrt::big::is_neg(&a); leanrt::rc_release(a); r } }];
 #[ffi(import)]
 fn l2r_bigint_add(a : LBig, b : LBig) -> LBig [{ leanrt::big::int_add(a, b) }];
 #[ffi(import)]
@@ -1558,10 +1558,10 @@ fn lean_string_append(a : LStr, b : LStr) -> LStr [{ leanrt::string::append(a, b
 fn lean_string_push(s : LStr, c : u32) -> LStr [{ leanrt::string::push(s, c) }];
 
 #[ffi(import)]
-fn l2r_string_size(s : LStr) -> u64 [{ s.len() as u64 }];
+fn l2r_string_size(s : LStr) -> u64 [{ { let r = s.len() as u64; leanrt::rc_release(s); r } }];
 
 #[ffi(import)]
-fn l2r_string_length(s : LStr) -> u64 [{ leanrt::string::length(&s) }];
+fn l2r_string_length(s : LStr) -> u64 [{ { let r = leanrt::string::length(&s); leanrt::rc_release(s); r } }];
 
 fn lean_string_utf8_byte_size(s : LStr) -> Nat { Nat::Small{l2r_string_size(s)} }
 fn lean_string_length(s : LStr) -> Nat { Nat::Small{l2r_string_length(s)} }
@@ -1569,25 +1569,25 @@ fn lean_string_size(s : LStr) -> Nat { Nat::Small{l2r_string_size(s) + 1} }
 fn lean_string_len(s : LStr) -> Nat { Nat::Small{l2r_string_length(s)} }
 
 #[ffi(import)]
-fn l2r_string_get(s : LStr, i : u64) -> u32 [{ leanrt::string::get(&s, i) }];
+fn l2r_string_get(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get(&s, i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_get_opt(s : LStr, i : u64) -> u32 [{ leanrt::string::get_opt(&s, i) }];
+fn l2r_string_get_opt(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get_opt(&s, i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_get_fast(s : LStr, i : u64) -> u32 [{ leanrt::string::get_fast(&s, i) }];
+fn l2r_string_get_fast(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get_fast(&s, i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_next(s : LStr, i : u64) -> u64 [{ leanrt::string::next(&s, i) }];
+fn l2r_string_next(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::next(&s, i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_next_fast(s : LStr, i : u64) -> u64 [{ leanrt::string::next_fast(&s, i) }];
+fn l2r_string_next_fast(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::next_fast(&s, i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_prev(s : LStr, i : u64) -> u64 [{ leanrt::string::prev(&s, i) }];
+fn l2r_string_prev(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::prev(&s, i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_is_valid_pos(s : LStr, i : u64) -> bool [{ leanrt::string::is_valid_pos(&s, i) }];
+fn l2r_string_is_valid_pos(s : LStr, i : u64) -> bool [{ { let r = leanrt::string::is_valid_pos(&s, i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
 fn l2r_string_extract(s : LStr, b : u64, e : u64) -> LStr [{ leanrt::string::extract(s, b, e) }];
 #[ffi(import)]
 fn l2r_string_set(s : LStr, i : u64, c : u32) -> LStr [{ leanrt::string::set(s, i, c) }];
 #[ffi(import)]
-fn l2r_string_get_byte(s : LStr, i : u64) -> u8 [{ s.get(i as usize).copied().unwrap_or(0) }];
+fn l2r_string_get_byte(s : LStr, i : u64) -> u8 [{ { let r = s.get(i as usize).copied().unwrap_or(0); leanrt::rc_release(s); r } }];
 
 // `String.Pos.Raw.get`: the character at byte `p`, or `'A'`.
 fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 {
@@ -1684,18 +1684,18 @@ fn lean_string_get_byte_fast(s : LStr, i : Nat) -> u8 { l2r_string_get_byte(s, l
 fn lean_string_uget_byte_fast(s : LStr, i : u64) -> u8 { l2r_string_get_byte(s, i) }
 
 #[ffi(import)]
-fn lean_string_dec_eq(a : LStr, b : LStr) -> bool [{ *a == *b }];
+fn lean_string_dec_eq(a : LStr, b : LStr) -> bool [{ { let r = *a == *b; leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 #[ffi(import)]
-fn lean_string_dec_lt(a : LStr, b : LStr) -> bool [{ leanrt::string::dec_lt(&a, &b) }];
+fn lean_string_dec_lt(a : LStr, b : LStr) -> bool [{ { let r = leanrt::string::dec_lt(&a, &b); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 #[ffi(import)]
-fn lean_string_lt(a : LStr, b : LStr) -> bool [{ leanrt::string::dec_lt(&a, &b) }];
+fn lean_string_lt(a : LStr, b : LStr) -> bool [{ { let r = leanrt::string::dec_lt(&a, &b); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 fn lean_string_eq(a : LStr, b : LStr) -> bool { lean_string_dec_eq(a, b) }
 fn lean_string_ne(a : LStr, b : LStr) -> bool { !lean_string_dec_eq(a, b) }
 // `String.compare`: 0 = lt, 1 = eq, 2 = gt (lean2rr maps it to `Ordering`).
 #[ffi(import)]
-fn l2r_string_compare(a : LStr, b : LStr) -> u8 [{ leanrt::string::compare(&a, &b) }];
+fn l2r_string_compare(a : LStr, b : LStr) -> u8 [{ { let r = leanrt::string::compare(&a, &b); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 #[ffi(import)]
-fn lean_string_hash(s : LStr) -> u64 [{ leanrt::string::hash(&s) }];
+fn lean_string_hash(s : LStr) -> u64 [{ { let r = leanrt::string::hash(&s); leanrt::rc_release(s); r } }];
 
 // `String.toUTF8` / `String.ofByteArray` / `String.fromUTF8`: a string and
 // a byte array share their representation, so these do not copy.
@@ -1704,13 +1704,13 @@ fn lean_string_to_utf8(s : LStr) -> RVec<u8> [{ leanrt::array::bytes_of_string(s
 #[ffi(import)]
 fn lean_string_from_utf8_unchecked(b : RVec<u8>) -> LStr [{ leanrt::array::string_of_bytes(b) }];
 #[ffi(import)]
-fn lean_string_validate_utf8(b : RVec<u8>) -> bool [{ leanrt::string::validate(leanrt::array::as_slice(&b)) }];
+fn lean_string_validate_utf8(b : RVec<u8>) -> bool [{ { let r = leanrt::string::validate(leanrt::array::as_slice(&b)); leanrt::array::release(b); r } }];
 // `String.fromUTF8!`-style lossy decoding (`lean_decode_lossy_utf8`).
 #[ffi(import)]
 fn lean_decode_lossy_utf8(b : RVec<u8>) -> LStr [{ leanrt::string::from_bytes_lossy(leanrt::array::as_slice(&b)) }];
 
 #[ffi(import)]
-fn l2r_string_memcmp(a : LStr, b : LStr, ls : u64, rs : u64, len : u64) -> bool [{ leanrt::string::memcmp(&a, &b, ls, rs, len) }];
+fn l2r_string_memcmp(a : LStr, b : LStr, ls : u64, rs : u64, len : u64) -> bool [{ { let r = leanrt::string::memcmp(&a, &b, ls, rs, len); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 
 fn lean_string_memcmp(a : LStr, b : LStr, ls : Nat, rs : Nat, len : Nat) -> bool {
     l2r_string_memcmp(a, b, lean_usize_of_nat(ls), lean_usize_of_nat(rs), lean_usize_of_nat(len))
@@ -1790,11 +1790,11 @@ fn l2r_string_drop(s : LStr, n : u64) -> LStr [{ leanrt::string::drop(s, n) }];
 #[ffi(import)]
 fn l2r_string_drop_right(s : LStr, n : u64) -> LStr [{ leanrt::string::drop_right(s, n) }];
 #[ffi(import)]
-fn lean_string_isprefixof(p : LStr, s : LStr) -> bool [{ leanrt::string::is_prefix_of(&p, &s) }];
+fn lean_string_isprefixof(p : LStr, s : LStr) -> bool [{ { let r = leanrt::string::is_prefix_of(&p, &s); leanrt::rc_release(p); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_pos_of(s : LStr, c : u32) -> u64 [{ leanrt::string::pos_of(&s, c) }];
+fn l2r_string_pos_of(s : LStr, c : u32) -> u64 [{ { let r = leanrt::string::pos_of(&s, c); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn lean_string_contains(s : LStr, c : u32) -> bool [{ leanrt::string::contains(&s, c) }];
+fn lean_string_contains(s : LStr, c : u32) -> bool [{ { let r = leanrt::string::contains(&s, c); leanrt::rc_release(s); r } }];
 #[ffi(import)]
 fn l2r_string_pushn(s : LStr, c : u32, n : u64) -> LStr [{ leanrt::string::pushn(s, c, n) }];
 #[ffi(import)]
@@ -1802,7 +1802,7 @@ fn lean_string_trim(s : LStr) -> LStr [{ leanrt::string::trim(s) }];
 #[ffi(import)]
 fn lean_string_capitalize(s : LStr) -> LStr [{ leanrt::string::capitalize(s) }];
 #[ffi(import)]
-fn l2r_string_offset_of_pos(s : LStr, p : u64) -> u64 [{ leanrt::string::offset_of_pos(&s, p) }];
+fn l2r_string_offset_of_pos(s : LStr, p : u64) -> u64 [{ { let r = leanrt::string::offset_of_pos(&s, p); leanrt::rc_release(s); r } }];
 
 fn lean_string_drop(s : LStr, n : Nat) -> LStr { l2r_string_drop(s, l2r_nat_sat_u64(n)) }
 fn lean_string_dropright(s : LStr, n : Nat) -> LStr { l2r_string_drop_right(s, l2r_nat_sat_u64(n)) }
@@ -1873,10 +1873,10 @@ fn l2r_array_empty<T>() -> RVec<T> [{ leanrt::array::empty() }];
 #[ffi(import)]
 fn l2r_array_with_capacity<T>(n : u64) -> RVec<T> [{ leanrt::array::with_capacity(n.min(1 << 24) as usize) }];
 #[ffi(import)]
-fn l2r_array_size<T>(v : RVec<T>) -> u64 [{ leanrt::array::size(&v) }];
+fn l2r_array_size<T>(v : RVec<T>) -> u64 [{ { let r = leanrt::array::size(&v); leanrt::array::release(v); r } }];
 // Element `i`, which must be in bounds.
 #[ffi(import)]
-fn l2r_array_get<T>(v : RVec<T>, i : u64) -> T [{ leanrt::array::get(&v, i) }];
+fn l2r_array_get<T>(v : RVec<T>, i : u64) -> T [{ { let r = leanrt::array::get(&v, i); leanrt::array::release(v); r } }];
 #[ffi(import)]
 fn l2r_array_push<T>(v : RVec<T>, x : T) -> RVec<T> [{ leanrt::array::push(v, x) }];
 #[ffi(import)]
@@ -1966,6 +1966,290 @@ fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> {
     }
 }
 
+// ---- Array Nat / Array Int ----
+//
+// One tagged word per element (leanrt::tagvec) instead of a heap box per
+// element. lean2rr represents `Array Nat` as `LNatArr` and `Array Int` as
+// `LIntArr`, and calls `lean_natarr_xxx` / `l2r_natarr_xxx` (`intarr`) in
+// place of `lean_array_xxx<E>` / `l2r_array_xxx<E>`.
+
+#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+pub struct LNatArr;
+
+#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+pub struct LIntArr;
+
+// BEGIN GENERATED: tagarr (runtime/gen_tagarr.py)
+
+// ---- Array Nat (LNatArr) ----
+
+#[ffi(import)]
+fn l2r_natarr_empty() -> LNatArr [{ leanrt::tagvec::empty() }];
+#[ffi(import)]
+fn l2r_natarr_with_capacity(n : u64) -> LNatArr [{ leanrt::tagvec::with_capacity(n) }];
+#[ffi(import)]
+fn l2r_natarr_replicate_word(n : u64, w : u64) -> LNatArr [{ leanrt::tagvec::replicate_word(n, w) }];
+#[ffi(import)]
+fn l2r_natarr_replicate_big(n : u64, b : LBig) -> LNatArr [{ leanrt::tagvec::replicate_big(n, b) }];
+#[ffi(import)]
+fn l2r_natarr_size(a : LNatArr) -> u64 [{ { let r = leanrt::tagvec::size(&a); leanrt::rc_release(a); r } }];
+#[ffi(import)]
+fn l2r_natarr_word(a : LNatArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word(&a, i); leanrt::rc_release(a); r } }];
+#[ffi(import)]
+fn l2r_natarr_big(a : LNatArr, i : u64) -> LBig [{ { let r = leanrt::tagvec::big(&a, i); leanrt::rc_release(a); r } }];
+#[ffi(import)]
+fn l2r_natarr_set_word(a : LNatArr, i : u64, w : u64) -> LNatArr [{ leanrt::tagvec::set_word(a, i, w) }];
+#[ffi(import)]
+fn l2r_natarr_set_big(a : LNatArr, i : u64, b : LBig) -> LNatArr [{ leanrt::tagvec::set_big(a, i, b) }];
+#[ffi(import)]
+fn l2r_natarr_push_word(a : LNatArr, w : u64) -> LNatArr [{ leanrt::tagvec::push_word(a, w) }];
+#[ffi(import)]
+fn l2r_natarr_push_big(a : LNatArr, b : LBig) -> LNatArr [{ leanrt::tagvec::push_big(a, b) }];
+#[ffi(import)]
+fn l2r_natarr_pop(a : LNatArr) -> LNatArr [{ leanrt::tagvec::pop(a) }];
+#[ffi(import)]
+fn l2r_natarr_swap(a : LNatArr, i : u64, j : u64) -> LNatArr [{ leanrt::tagvec::swap(a, i, j) }];
+#[ffi(import)]
+fn l2r_natarr_append(a : LNatArr, b : LNatArr) -> LNatArr [{ leanrt::tagvec::append(a, b) }];
+#[ffi(import)]
+fn l2r_natarr_extract(a : LNatArr, s : u64, e : u64) -> LNatArr [{ leanrt::tagvec::extract(a, s, e) }];
+#[ffi(import)]
+fn l2r_natarr_truncate(a : LNatArr, n : u64) -> LNatArr [{ leanrt::tagvec::truncate(a, n) }];
+#[ffi(import)]
+fn l2r_natarr_reverse(a : LNatArr) -> LNatArr [{ leanrt::tagvec::reverse(a) }];
+
+
+// Small values below 2^63 are stored as `(v << 1) | 1`; all others as big
+// numbers (normalized back to `Nat::Small` when read, for values below 2^64).
+fn l2r_natarr_get(a : LNatArr, i : u64) -> Nat {
+    let w = l2r_natarr_word(a, i);
+    if (w & 1) == 1 { Nat::Small{w >> 1} } else { l2r_nat_norm(l2r_natarr_big(a, i)) }
+}
+
+fn l2r_natarr_set(a : LNatArr, i : u64, x : Nat) -> LNatArr {
+    match x {
+        Nat::Small(v) => if (v >> 63) == 0 { l2r_natarr_set_word(a, i, (v << 1) | 1) } else { l2r_natarr_set_big(a, i, l2r_big_of_u64(v)) },
+        Nat::Big(b) => l2r_natarr_set_big(a, i, b)
+    }
+}
+
+fn l2r_natarr_push(a : LNatArr, x : Nat) -> LNatArr {
+    match x {
+        Nat::Small(v) => if (v >> 63) == 0 { l2r_natarr_push_word(a, (v << 1) | 1) } else { l2r_natarr_push_big(a, l2r_big_of_u64(v)) },
+        Nat::Big(b) => l2r_natarr_push_big(a, b)
+    }
+}
+
+fn l2r_natarr_replicate(n : u64, x : Nat) -> LNatArr {
+    match x {
+        Nat::Small(v) => if (v >> 63) == 0 { l2r_natarr_replicate_word(n, (v << 1) | 1) } else { l2r_natarr_replicate_big(n, l2r_big_of_u64(v)) },
+        Nat::Big(b) => l2r_natarr_replicate_big(n, b)
+    }
+}
+
+
+fn lean_mk_empty_natarr() -> LNatArr { l2r_natarr_empty() }
+
+fn lean_mk_empty_natarr_with_capacity(n : Nat) -> LNatArr {
+    match n {
+        Nat::Small(c) => l2r_natarr_with_capacity(c),
+        Nat::Big(_) => l2r_internal_panic_at<LNatArr>(4)
+    }
+}
+
+fn lean_natarr_get_size(v : LNatArr) -> Nat { Nat::Small{l2r_natarr_size(v)} }
+fn lean_natarr_size(v : LNatArr) -> u64 { l2r_natarr_size(v) }
+fn lean_natarr_fget(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get(v, lean_usize_of_nat(i)) }
+fn lean_natarr_fget_borrowed(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get(v, lean_usize_of_nat(i)) }
+fn lean_natarr_uget(v : LNatArr, i : u64) -> Nat { l2r_natarr_get(v, i) }
+fn lean_natarr_uget_borrowed(v : LNatArr, i : u64) -> Nat { l2r_natarr_get(v, i) }
+
+// `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
+// return the default.
+fn lean_natarr_get(dflt : Nat, v : LNatArr, i : Nat) -> Nat {
+    if l2r_index_ok(i, l2r_natarr_size(v)) { l2r_natarr_get(v, lean_usize_of_nat(i)) } else {
+        let ignored = l2r_panic_code(0);
+        dflt
+    }
+}
+
+fn lean_natarr_get_borrowed(dflt : Nat, v : LNatArr, i : Nat) -> Nat { lean_natarr_get(dflt, v, i) }
+fn lean_natarr_fset(v : LNatArr, i : Nat, x : Nat) -> LNatArr { l2r_natarr_set(v, lean_usize_of_nat(i), x) }
+fn lean_natarr_uset(v : LNatArr, i : u64, x : Nat) -> LNatArr { l2r_natarr_set(v, i, x) }
+
+// `Array.set!`: out of bounds, panic and return the array unchanged.
+fn lean_natarr_set(v : LNatArr, i : Nat, x : Nat) -> LNatArr {
+    if l2r_index_ok(i, l2r_natarr_size(v)) { l2r_natarr_set(v, lean_usize_of_nat(i), x) } else {
+        let ignored = l2r_panic_code(0);
+        v
+    }
+}
+
+fn lean_natarr_push(v : LNatArr, x : Nat) -> LNatArr { l2r_natarr_push(v, x) }
+fn lean_natarr_pop(v : LNatArr) -> LNatArr { l2r_natarr_pop(v) }
+fn lean_natarr_fswap(v : LNatArr, i : Nat, j : Nat) -> LNatArr { l2r_natarr_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j)) }
+fn lean_natarr_uswap(v : LNatArr, i : u64, j : u64) -> LNatArr { l2r_natarr_swap(v, i, j) }
+
+// `Array.swapIfInBounds`.
+fn lean_natarr_swap(v : LNatArr, i : Nat, j : Nat) -> LNatArr {
+    let n = l2r_natarr_size(v);
+    if l2r_index_ok(i, n) && l2r_index_ok(j, n) { l2r_natarr_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j)) } else { v }
+}
+
+// `Array.replicate n x`.
+fn lean_mk_natarr(n : Nat, x : Nat) -> LNatArr {
+    match n {
+        Nat::Small(c) => l2r_natarr_replicate(c, x),
+        Nat::Big(_) => l2r_internal_panic_at<LNatArr>(4)
+    }
+}
+
+// `Array.toList` glue (see `l2r_array_to_list`).
+fn l2r_natarr_to_list<L>(a : LNatArr, nil : L, cons : Nat -> (L -> L)) -> L {
+    l2r_natarr_to_list_go(a, l2r_natarr_size(a), nil, cons)
+}
+
+fn l2r_natarr_to_list_go<L>(a : LNatArr, i : u64, acc : L, cons : Nat -> (L -> L)) -> L {
+    if i == 0 { acc } else { l2r_natarr_to_list_go(a, i - 1, cons(l2r_natarr_get(a, i - 1))(acc), cons) }
+}
+
+
+// ---- Array Int (LIntArr) ----
+
+#[ffi(import)]
+fn l2r_intarr_empty() -> LIntArr [{ leanrt::tagvec::empty() }];
+#[ffi(import)]
+fn l2r_intarr_with_capacity(n : u64) -> LIntArr [{ leanrt::tagvec::with_capacity(n) }];
+#[ffi(import)]
+fn l2r_intarr_replicate_word(n : u64, w : u64) -> LIntArr [{ leanrt::tagvec::replicate_word(n, w) }];
+#[ffi(import)]
+fn l2r_intarr_replicate_big(n : u64, b : LBig) -> LIntArr [{ leanrt::tagvec::replicate_big(n, b) }];
+#[ffi(import)]
+fn l2r_intarr_size(a : LIntArr) -> u64 [{ { let r = leanrt::tagvec::size(&a); leanrt::rc_release(a); r } }];
+#[ffi(import)]
+fn l2r_intarr_word(a : LIntArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word(&a, i); leanrt::rc_release(a); r } }];
+#[ffi(import)]
+fn l2r_intarr_big(a : LIntArr, i : u64) -> LBig [{ { let r = leanrt::tagvec::big(&a, i); leanrt::rc_release(a); r } }];
+#[ffi(import)]
+fn l2r_intarr_set_word(a : LIntArr, i : u64, w : u64) -> LIntArr [{ leanrt::tagvec::set_word(a, i, w) }];
+#[ffi(import)]
+fn l2r_intarr_set_big(a : LIntArr, i : u64, b : LBig) -> LIntArr [{ leanrt::tagvec::set_big(a, i, b) }];
+#[ffi(import)]
+fn l2r_intarr_push_word(a : LIntArr, w : u64) -> LIntArr [{ leanrt::tagvec::push_word(a, w) }];
+#[ffi(import)]
+fn l2r_intarr_push_big(a : LIntArr, b : LBig) -> LIntArr [{ leanrt::tagvec::push_big(a, b) }];
+#[ffi(import)]
+fn l2r_intarr_pop(a : LIntArr) -> LIntArr [{ leanrt::tagvec::pop(a) }];
+#[ffi(import)]
+fn l2r_intarr_swap(a : LIntArr, i : u64, j : u64) -> LIntArr [{ leanrt::tagvec::swap(a, i, j) }];
+#[ffi(import)]
+fn l2r_intarr_append(a : LIntArr, b : LIntArr) -> LIntArr [{ leanrt::tagvec::append(a, b) }];
+#[ffi(import)]
+fn l2r_intarr_extract(a : LIntArr, s : u64, e : u64) -> LIntArr [{ leanrt::tagvec::extract(a, s, e) }];
+#[ffi(import)]
+fn l2r_intarr_truncate(a : LIntArr, n : u64) -> LIntArr [{ leanrt::tagvec::truncate(a, n) }];
+#[ffi(import)]
+fn l2r_intarr_reverse(a : LIntArr) -> LIntArr [{ leanrt::tagvec::reverse(a) }];
+
+
+// Small values in [-2^62, 2^62) are stored as `(v << 1) | 1`; all others as
+// big numbers (normalized back to `Int::Small` when read).
+fn l2r_int_is_tag_small(v : i64) -> bool { ((v + 4611686018427387904) as u64) < 9223372036854775808 }
+
+fn l2r_intarr_get(a : LIntArr, i : u64) -> Int {
+    let w = l2r_intarr_word(a, i);
+    if (w & 1) == 1 { Int::Small{(w as i64) >> 1} } else { l2r_int_norm(l2r_intarr_big(a, i)) }
+}
+
+fn l2r_intarr_set(a : LIntArr, i : u64, x : Int) -> LIntArr {
+    match x {
+        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_intarr_set_word(a, i, ((v << 1) | 1) as u64) } else { l2r_intarr_set_big(a, i, l2r_big_of_i64(v)) },
+        Int::Big(b) => l2r_intarr_set_big(a, i, b)
+    }
+}
+
+fn l2r_intarr_push(a : LIntArr, x : Int) -> LIntArr {
+    match x {
+        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_intarr_push_word(a, ((v << 1) | 1) as u64) } else { l2r_intarr_push_big(a, l2r_big_of_i64(v)) },
+        Int::Big(b) => l2r_intarr_push_big(a, b)
+    }
+}
+
+fn l2r_intarr_replicate(n : u64, x : Int) -> LIntArr {
+    match x {
+        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_intarr_replicate_word(n, ((v << 1) | 1) as u64) } else { l2r_intarr_replicate_big(n, l2r_big_of_i64(v)) },
+        Int::Big(b) => l2r_intarr_replicate_big(n, b)
+    }
+}
+
+
+fn lean_mk_empty_intarr() -> LIntArr { l2r_intarr_empty() }
+
+fn lean_mk_empty_intarr_with_capacity(n : Nat) -> LIntArr {
+    match n {
+        Nat::Small(c) => l2r_intarr_with_capacity(c),
+        Nat::Big(_) => l2r_internal_panic_at<LIntArr>(4)
+    }
+}
+
+fn lean_intarr_get_size(v : LIntArr) -> Nat { Nat::Small{l2r_intarr_size(v)} }
+fn lean_intarr_size(v : LIntArr) -> u64 { l2r_intarr_size(v) }
+fn lean_intarr_fget(v : LIntArr, i : Nat) -> Int { l2r_intarr_get(v, lean_usize_of_nat(i)) }
+fn lean_intarr_fget_borrowed(v : LIntArr, i : Nat) -> Int { l2r_intarr_get(v, lean_usize_of_nat(i)) }
+fn lean_intarr_uget(v : LIntArr, i : u64) -> Int { l2r_intarr_get(v, i) }
+fn lean_intarr_uget_borrowed(v : LIntArr, i : u64) -> Int { l2r_intarr_get(v, i) }
+
+// `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
+// return the default.
+fn lean_intarr_get(dflt : Int, v : LIntArr, i : Nat) -> Int {
+    if l2r_index_ok(i, l2r_intarr_size(v)) { l2r_intarr_get(v, lean_usize_of_nat(i)) } else {
+        let ignored = l2r_panic_code(0);
+        dflt
+    }
+}
+
+fn lean_intarr_get_borrowed(dflt : Int, v : LIntArr, i : Nat) -> Int { lean_intarr_get(dflt, v, i) }
+fn lean_intarr_fset(v : LIntArr, i : Nat, x : Int) -> LIntArr { l2r_intarr_set(v, lean_usize_of_nat(i), x) }
+fn lean_intarr_uset(v : LIntArr, i : u64, x : Int) -> LIntArr { l2r_intarr_set(v, i, x) }
+
+// `Array.set!`: out of bounds, panic and return the array unchanged.
+fn lean_intarr_set(v : LIntArr, i : Nat, x : Int) -> LIntArr {
+    if l2r_index_ok(i, l2r_intarr_size(v)) { l2r_intarr_set(v, lean_usize_of_nat(i), x) } else {
+        let ignored = l2r_panic_code(0);
+        v
+    }
+}
+
+fn lean_intarr_push(v : LIntArr, x : Int) -> LIntArr { l2r_intarr_push(v, x) }
+fn lean_intarr_pop(v : LIntArr) -> LIntArr { l2r_intarr_pop(v) }
+fn lean_intarr_fswap(v : LIntArr, i : Nat, j : Nat) -> LIntArr { l2r_intarr_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j)) }
+fn lean_intarr_uswap(v : LIntArr, i : u64, j : u64) -> LIntArr { l2r_intarr_swap(v, i, j) }
+
+// `Array.swapIfInBounds`.
+fn lean_intarr_swap(v : LIntArr, i : Nat, j : Nat) -> LIntArr {
+    let n = l2r_intarr_size(v);
+    if l2r_index_ok(i, n) && l2r_index_ok(j, n) { l2r_intarr_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j)) } else { v }
+}
+
+// `Array.replicate n x`.
+fn lean_mk_intarr(n : Nat, x : Int) -> LIntArr {
+    match n {
+        Nat::Small(c) => l2r_intarr_replicate(c, x),
+        Nat::Big(_) => l2r_internal_panic_at<LIntArr>(4)
+    }
+}
+
+// `Array.toList` glue (see `l2r_array_to_list`).
+fn l2r_intarr_to_list<L>(a : LIntArr, nil : L, cons : Int -> (L -> L)) -> L {
+    l2r_intarr_to_list_go(a, l2r_intarr_size(a), nil, cons)
+}
+
+fn l2r_intarr_to_list_go<L>(a : LIntArr, i : u64, acc : L, cons : Int -> (L -> L)) -> L {
+    if i == 0 { acc } else { l2r_intarr_to_list_go(a, i - 1, cons(l2r_intarr_get(a, i - 1))(acc), cons) }
+}
+
+// END GENERATED: tagarr
+
 // ---- ByteArray (RVec<u8>) ----
 
 fn lean_mk_empty_byte_array(n : Nat) -> RVec<u8> { lean_mk_empty_array_with_capacity<u8>(n) }
@@ -1985,9 +2269,9 @@ fn lean_byte_array_set(v : RVec<u8>, i : Nat, x : u8) -> RVec<u8> {
     if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_set(v, lean_usize_of_nat(i), x) } else { v }
 }
 #[ffi(import)]
-fn lean_byte_array_hash(v : RVec<u8>) -> u64 [{ leanrt::hash::murmur64a(leanrt::array::as_slice(&v), 11) }];
+fn lean_byte_array_hash(v : RVec<u8>) -> u64 [{ { let r = leanrt::hash::murmur64a(leanrt::array::as_slice(&v), 11); leanrt::array::release(v); r } }];
 #[ffi(import)]
-fn lean_sarray_dec_eq(a : RVec<u8>, b : RVec<u8>) -> bool [{ leanrt::array::as_slice(&a) == leanrt::array::as_slice(&b) }];
+fn lean_sarray_dec_eq(a : RVec<u8>, b : RVec<u8>) -> bool [{ { let r = leanrt::array::as_slice(&a) == leanrt::array::as_slice(&b); leanrt::array::release(a); leanrt::array::release(b); r } }];
 #[ffi(import)]
 fn l2r_byte_array_copy_slice(src : RVec<u8>, so : u64, dest : RVec<u8>, d : u64, len : u64, exact : bool) -> RVec<u8> [{
     leanrt::array::copy_slice(src, so, dest, d, len, exact)
@@ -2027,10 +2311,10 @@ fn lean_float_array_data(a : RVec<f64>) -> RVec<f64> { a }
 // like C stdio and flushed at exit.
 
 #[ffi(import)]
-fn l2r_stream_putStr(fd : u64, s : LStr) -> u64 [{ { leanrt::io::write_std(fd, &s); 0 } }];
+fn l2r_stream_putStr(fd : u64, s : LStr) -> u64 [{ { leanrt::io::write_std(fd, &s); leanrt::rc_release(s); 0 } }];
 
 #[ffi(import)]
-fn l2r_stream_write(fd : u64, b : RVec<u8>) -> u64 [{ { leanrt::io::write_std(fd, leanrt::array::as_slice(&b)); 0 } }];
+fn l2r_stream_write(fd : u64, b : RVec<u8>) -> u64 [{ { leanrt::io::write_std(fd, leanrt::array::as_slice(&b)); leanrt::array::release(b); 0 } }];
 
 #[ffi(import)]
 fn l2r_stream_flush(fd : u64) -> u64 [{ { leanrt::io::flush_std(fd); 0 } }];

@@ -60,8 +60,23 @@ fn make_mut(s: &mut LStr, extra: usize) -> &mut Vec<u8> {
     unsafe { s.data_mut() }
 }
 
-#[inline(never)]
+/// `String.push`: an inline fast path for an ASCII character appended to
+/// a unique string with spare capacity.
+#[inline(always)]
 pub fn push(s: LStr, c: u32) -> LStr {
+    let mut s = s;
+    if c < 0x80 && s.is_unique() {
+        let v = unsafe { s.data_mut() };
+        if v.len() < v.capacity() {
+            v.push(c as u8);
+            return s;
+        }
+    }
+    push_slow(s, c)
+}
+
+#[inline(never)]
+fn push_slow(s: LStr, c: u32) -> LStr {
     let mut s = s;
     push_scalar(make_mut(&mut s, 4), c);
     s
@@ -91,7 +106,7 @@ fn is_utf8_first_byte(c: u8) -> bool {
 
 /// `lean_string_utf8_get_core`: decode at `i < size`, validating the value
 /// ranges (not the continuation bits), or `None`.
-#[inline]
+#[inline(never)]
 fn get_core(s: &[u8], size: usize, i: usize) -> Option<u32> {
     let c = s[i] as u32;
     if c & 0x80 == 0 {
@@ -120,12 +135,13 @@ fn get_core(s: &[u8], size: usize, i: usize) -> Option<u32> {
 }
 
 /// `String.Pos.Raw.get`: the character at byte `i`, or `'A'`.
-#[inline]
+#[inline(always)]
 pub fn get(s: &[u8], i: u64) -> u32 {
-    if i >= s.len() as u64 {
-        return DEFAULT_CHAR;
+    match s.get(i as usize) {
+        None => DEFAULT_CHAR,
+        Some(&c) if c < 0x80 => c as u32,
+        Some(_) => get_core(s, s.len(), i as usize).unwrap_or(DEFAULT_CHAR),
     }
-    get_core(s, s.len(), i as usize).unwrap_or(DEFAULT_CHAR)
 }
 
 /// `String.Pos.Raw.get?`: `0x110000` encodes `none` (not a scalar value).
@@ -139,7 +155,7 @@ pub fn get_opt(s: &[u8], i: u64) -> u32 {
 
 /// `lean_string_utf8_get_fast` (valid position): note the cold path bounds
 /// against the size including C's terminating NUL.
-#[inline]
+#[inline(always)]
 pub fn get_fast(s: &[u8], i: u64) -> u32 {
     let i = i as usize;
     match s.get(i) {
@@ -151,7 +167,7 @@ pub fn get_fast(s: &[u8], i: u64) -> u32 {
 
 /// `String.Pos.Raw.next` for `i < size`; `0` stands for "the position is at
 /// or past the end" (the caller then returns `i + 1` as a `Nat`).
-#[inline]
+#[inline(always)]
 pub fn next(s: &[u8], i: u64) -> u64 {
     if i >= s.len() as u64 {
         return 0;
@@ -171,7 +187,7 @@ pub fn next(s: &[u8], i: u64) -> u64 {
 }
 
 /// `lean_string_utf8_next_fast` (valid position before the end).
-#[inline]
+#[inline(always)]
 pub fn next_fast(s: &[u8], i: u64) -> u64 {
     match s.get(i as usize) {
         None => i + 1,
@@ -192,7 +208,7 @@ pub fn next_fast(s: &[u8], i: u64) -> u64 {
 }
 
 /// `String.Pos.Raw.prev`.
-#[inline]
+#[inline(always)]
 pub fn prev(s: &[u8], i: u64) -> u64 {
     let sz = s.len() as u64;
     if i == 0 {

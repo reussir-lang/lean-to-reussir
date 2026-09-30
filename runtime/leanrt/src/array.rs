@@ -24,6 +24,28 @@ pub fn from_rc<T: Clone>(v: Rc<Vec<T>>) -> RVec<T> {
     unsafe { std::mem::transmute::<Rc<Vec<T>>, RVec<T>>(v) }
 }
 
+/// Give up an array handle that a texture received (every FFI call
+/// consumes its arguments). The common case, a shared handle, is a
+/// decrement; freeing the last reference is kept out of line so textures
+/// stay small enough for LLVM to inline into Reussir code.
+#[inline(always)]
+pub fn release<T: Clone>(v: RVec<T>) {
+    let r = into_rc(v);
+    let c = r.count_ref().get();
+    if c == 1 {
+        drop_last(r)
+    } else {
+        r.count_ref().set(c - 1);
+        std::mem::forget(r);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn drop_last<T>(r: Rc<Vec<T>>) {
+    drop(r)
+}
+
 #[inline(always)]
 pub fn as_slice<T: Clone>(v: &RVec<T>) -> &[T] {
     let r: &Rc<Vec<T>> = unsafe { &*(v as *const RVec<T> as *const Rc<Vec<T>>) };
@@ -34,11 +56,26 @@ pub fn as_slice<T: Clone>(v: &RVec<T>) -> &[T] {
 #[inline(always)]
 pub fn make_mut<T: Clone>(v: &mut Rc<Vec<T>>, extra: usize) -> &mut Vec<T> {
     if !v.is_unique() {
-        let mut n = Vec::with_capacity(v.len() + extra);
-        n.extend_from_slice(v);
-        *v = Rc::new(n);
+        copy_shared(v, extra);
     }
     unsafe { v.data_mut() }
+}
+
+/// Replace a shared array by a private copy (with room for `extra` more).
+#[cold]
+#[inline(never)]
+fn copy_shared<T: Clone>(v: &mut Rc<Vec<T>>, extra: usize) {
+    let mut n = Vec::with_capacity(v.len() + extra);
+    n.extend_from_slice(v);
+    *v = Rc::new(n);
+}
+
+/// An index that the Lean-level proof (or the prelude's bounds check)
+/// guarantees to be in range was not: a lean2rr/runtime bug.
+#[cold]
+#[inline(never)]
+fn index_bug(i: u64, n: usize) -> ! {
+    crate::internal_panic(&format!("array index {} out of bounds {} (runtime invariant)", i, n))
 }
 
 #[inline]
@@ -51,48 +88,109 @@ pub fn empty<T: Clone>() -> RVec<T> {
     from_rc(Rc::new(Vec::new()))
 }
 
-#[inline]
+#[inline(always)]
 pub fn size<T: Clone>(v: &RVec<T>) -> u64 {
     as_slice(v).len() as u64
 }
 
 /// Element `i`, which must be in bounds.
-#[inline]
+#[inline(always)]
 pub fn get<T: Clone>(v: &RVec<T>, i: u64) -> T {
-    as_slice(v)[i as usize].clone()
+    let s = as_slice(v);
+    match s.get(i as usize) {
+        Some(x) => x.clone(),
+        None => index_bug(i, s.len()),
+    }
 }
 
-#[inline]
+/// `push`: in place when unique with spare capacity; otherwise grow or copy
+/// out of line.
+#[inline(always)]
 pub fn push<T: Clone>(v: RVec<T>, x: T) -> RVec<T> {
     let mut r = into_rc(v);
+    if r.is_unique() {
+        let vec = unsafe { r.data_mut() };
+        if vec.len() < vec.capacity() {
+            vec.push(x);
+            return from_rc(r);
+        }
+    }
+    push_slow(r, x)
+}
+
+#[cold]
+#[inline(never)]
+fn push_slow<T: Clone>(mut r: Rc<Vec<T>>, x: T) -> RVec<T> {
     let n = r.len();
     make_mut(&mut r, n.max(4)).push(x);
     from_rc(r)
 }
 
-/// Replace element `i` (in bounds).
-#[inline]
+/// Replace element `i` (in bounds): in place when unique.
+#[inline(always)]
 pub fn set<T: Clone>(v: RVec<T>, i: u64, x: T) -> RVec<T> {
     let mut r = into_rc(v);
-    make_mut(&mut r, 0)[i as usize] = x;
+    if r.is_unique() {
+        let vec = unsafe { r.data_mut() };
+        match vec.get_mut(i as usize) {
+            Some(slot) => *slot = x,
+            None => index_bug(i, vec.len()),
+        }
+        return from_rc(r);
+    }
+    set_slow(r, i, x)
+}
+
+#[cold]
+#[inline(never)]
+fn set_slow<T: Clone>(mut r: Rc<Vec<T>>, i: u64, x: T) -> RVec<T> {
+    let vec = make_mut(&mut r, 0);
+    match vec.get_mut(i as usize) {
+        Some(slot) => *slot = x,
+        None => index_bug(i, vec.len()),
+    }
     from_rc(r)
 }
 
 /// Drop the last element (no-op when empty).
-#[inline]
+#[inline(always)]
 pub fn pop<T: Clone>(v: RVec<T>) -> RVec<T> {
-    if as_slice(&v).is_empty() {
-        return v;
-    }
     let mut r = into_rc(v);
+    if r.is_empty() {
+        return from_rc(r);
+    }
+    if r.is_unique() {
+        unsafe { r.data_mut() }.pop();
+        return from_rc(r);
+    }
+    pop_slow(r)
+}
+
+#[cold]
+#[inline(never)]
+fn pop_slow<T: Clone>(mut r: Rc<Vec<T>>) -> RVec<T> {
     make_mut(&mut r, 0).pop();
     from_rc(r)
 }
 
 /// Swap elements `i` and `j` (both in bounds).
-#[inline]
+#[inline(always)]
 pub fn swap<T: Clone>(v: RVec<T>, i: u64, j: u64) -> RVec<T> {
     let mut r = into_rc(v);
+    let n = r.len();
+    if (i as usize) >= n || (j as usize) >= n {
+        index_bug(i.max(j), n);
+    }
+    if r.is_unique() {
+        unsafe { r.data_mut() }.swap(i as usize, j as usize);
+        return from_rc(r);
+    }
+    swap_slow(r, i, j)
+}
+
+#[cold]
+#[inline(never)]
+fn swap_slow<T: Clone>(mut r: Rc<Vec<T>>, i: u64, j: u64) -> RVec<T> {
     make_mut(&mut r, 0).swap(i as usize, j as usize);
     from_rc(r)
 }
