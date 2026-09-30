@@ -198,7 +198,7 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
       chain := s!"if tag == {j} \{\n    let c : LCell<{z}> = l2r_task_take<{z}>();\n    let v : u64 = {step}(c);\n    l2r_run_pending_tasks()\n    } else \{\n    {chain}\n    }"
     pre := pre ++ s!"fn l2r_run_pending_tasks() -> u64 \{\n    let tag : u64 = l2r_task_next_tag();\n    {chain}\n}\n\n"
     drain := "let sd : u64 = l2r_task_shutdown();\nlet pt : u64 = l2r_run_pending_tasks();\n"
-  let mainCode := s!"let tm : u64 = l2r_task_manager_start();\nlet se : u64 = l2r_std_enter();\nlet r = {fnName mainInst}({argExpr}L2RUnit::u\{});\n{drain}match r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
+  let mainCode := s!"let tm : u64 = l2r_task_manager_start();\nlet se : u64 = l2r_std_enter();\nlet r = {fnName mainInst}({argExpr}L2RUnit::u\{});\nlet sl : u64 = l2r_std_leave();\n{drain}match r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
   -- The startup chain ends by clearing `IO.initializing`; an error stops
   -- the program before main (`l2r_uncaught_exception` exits).
   let mut code := "l2r_init_done()"
