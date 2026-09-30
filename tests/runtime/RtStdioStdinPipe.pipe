@@ -1,0 +1,1 @@
+cat | (sleep 0.5; $BIN; echo "rest:"; head -c 30; echo)

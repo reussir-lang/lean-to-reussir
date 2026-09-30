@@ -107,8 +107,11 @@ pub fn check_alloc(n: u64, elem: u64) {
 #[cold]
 #[inline(never)]
 extern "C" fn check_alloc_slow(n: u64, elem: u64) {
+    // Lean allocates big objects with mimalloc too.
     extern "C" {
+        #[link_name = "mi_malloc"]
         fn malloc(n: usize) -> *mut std::ffi::c_void;
+        #[link_name = "mi_free"]
         fn free(p: *mut std::ffi::c_void);
     }
     let Some(bytes) = n.checked_mul(elem).and_then(|b| b.checked_add(24)) else {

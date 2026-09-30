@@ -2342,36 +2342,28 @@ fn lean_float_array_data(a : RVec<f64>) -> RVec<f64> { a }
 // Standard streams
 //
 // lean2rr builds each `IO.FS.Stream` field as a closure over these
-// primitives (fd 0 = stdin, 1 = stdout, 2 = stderr). stdout is buffered
-// like glibc's stdio and flushed at exit. putStr/write/flush/read/getLine
-// record their outcome in the last-error slot (use `l2r_io_finish`, as for
-// files): EPIPE, EBADF, EINVAL on closed streams, EBADF for the wrong
-// direction; isTty cannot fail.
+// primitives (fd 0 = stdin, 1 = stdout, 2 = stderr). They are the handle
+// operations on models of glibc's stdin/stdout/stderr `FILE`s
+// (leanrt::cfile): stdout buffered, stderr unbuffered, all finished at exit
+// as natively. putStr/write/flush/read/getLine record their outcome in the
+// last-error slot (use `l2r_io_finish`, as for files): EPIPE, EBADF (also
+// for the wrong direction), EINVAL on streams closed at startup; isTty
+// cannot fail.
 
 #[ffi(import)]
-fn l2r_stream_putStr(fd : u64, s : LStr) -> u64 [{ { if fd == 0 { leanrt::io::wrong_direction(fd) } else { leanrt::io::write_std(fd, &s) }; leanrt::rc_release(s); 0 } }];
+fn l2r_stream_putStr(fd : u64, s : LStr) -> u64 [{ { leanrt::io::stream_put(fd, &s); leanrt::rc_release(s); 0 } }];
 
 #[ffi(import)]
-fn l2r_stream_write(fd : u64, b : RVec<u8>) -> u64 [{ { if fd == 0 { leanrt::io::wrong_direction(fd) } else { leanrt::io::write_std(fd, leanrt::array::as_slice(&b)) }; leanrt::array::release(b); 0 } }];
+fn l2r_stream_write(fd : u64, b : RVec<u8>) -> u64 [{ { leanrt::io::stream_put(fd, leanrt::array::as_slice(&b)); leanrt::array::release(b); 0 } }];
 
 #[ffi(import)]
-fn l2r_stream_flush(fd : u64) -> u64 [{ { leanrt::io::flush_std(fd); 0 } }];
+fn l2r_stream_flush(fd : u64) -> u64 [{ { leanrt::io::stream_flush(fd); 0 } }];
 
 #[ffi(import)]
-fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{
-    {
-        let bytes = if fd == 0 { leanrt::io::read_stdin(n as usize) } else { leanrt::io::wrong_direction(fd); std::vec::Vec::new() };
-        leanrt::array::bytes_of_string(Rc::new(bytes))
-    }
-}];
+fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{ leanrt::array::bytes_of_string(Rc::new(leanrt::io::stream_read(fd, n))) }];
 
 #[ffi(import)]
-fn l2r_stream_getLine(fd : u64) -> LStr [{
-    {
-        let bytes = if fd == 0 { leanrt::io::read_line_stdin() } else { leanrt::io::wrong_direction(fd); std::vec::Vec::new() };
-        leanrt::string::from_bytes_lossy(&bytes)
-    }
-}];
+fn l2r_stream_getLine(fd : u64) -> LStr [{ leanrt::string::from_bytes_lossy(&leanrt::io::stream_get_line(fd)) }];
 
 #[ffi(import)]
 fn l2r_stream_isTty(fd : u64) -> bool [{ leanrt::io::is_tty(fd) }];
@@ -2570,7 +2562,7 @@ fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
         };
         if shared {
             let mut line = b"shared RC ".to_vec();
-            line.extend_from_slice(&msg);
+            line.extend_from_slice(&msg[..msg.iter().position(|&b| b == 0).unwrap_or(msg.len())]);
             line.push(b'\n');
             leanrt::io::eprint(&line);
         }
