@@ -119,7 +119,11 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (eager : Array Name
     (keys : NameMap InstKey) : CoreM String := do
   let table ← programRelevance decls
   let decls ← retypeMono table decls
-  let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys }
+  -- Function names the prelude defines (`fn NAME`).
+  let preludeFns := (prelude.splitOn "fn ").foldl (init := ({} : Std.HashSet String)) fun acc chunk =>
+    let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
+    if name.isEmpty then acc else acc.insert name.toString
+  let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns }
   let act : LowerM Unit := do
     for d in decls do lowerDecl d
     let entry ← lowerEntry mainInst errStr eager

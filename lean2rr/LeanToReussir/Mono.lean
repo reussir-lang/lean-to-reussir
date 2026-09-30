@@ -78,6 +78,8 @@ structure MonoState where
   /-- `unsafe` implementation ↦ the safe declaration it implements
   (`@[implemented_by]`), built on first use. -/
   unsafeImpls : Option (NameMap Name) := none
+  /-- Export symbol ↦ declaration (lazily computed). -/
+  exports : Option (Std.HashMap String Name) := none
   /-- Base declarations compiled by lean2rr itself (safe reference
   definitions of unsafe implementations, and their auxiliary declarations). -/
   extraBase : NameMap (Decl .pure) := {}
@@ -115,9 +117,12 @@ def freshInstName (decl : Name) (k : Nat) : Name :=
 def instanceName (key : InstKey) : MonoM Name := do
   if let some n := (← get).names[key]? then return n
   let count := (← get).perDecl.getD key.decl 0
-  let key ← if count ≥ (← get).config.maxInstancesPerDecl && !key.typeArgs.all (· == anyExpr) then
+  let key ← if count ≥ (← get).config.maxInstancesPerDecl &&
+       !(key.typeArgs.all (· == anyExpr) && key.dicts.isEmpty) then
+      -- Past the cap: the uniform instance (no static dictionaries either,
+      -- which can grow without bound under polymorphic recursion too).
       modify fun s => { s with uniformArgs := s.uniformArgs + key.typeArgs.size }
-      pure { key with typeArgs := key.typeArgs.map fun _ => anyExpr }
+      pure { key with typeArgs := key.typeArgs.map fun _ => anyExpr, dicts := #[] }
     else pure key
   if let some n := (← get).names[key]? then return n
   let n := freshInstName key.decl count
@@ -140,6 +145,17 @@ def unsafeImplMap : MonoM (NameMap Name) := do
         if ci.isUnsafe && !(env.find? n |>.map (·.isUnsafe) |>.getD true) then
           m := m.insert impl n
   modify fun s => { s with unsafeImpls := some m }
+  return m
+
+/-- C symbol ↦ the Lean definition exported under it (`@[export sym]`). -/
+def exportMap : MonoM (Std.HashMap String Name) := do
+  if let some m := (← get).exports then return m
+  let env ← getEnv
+  let mut m : Std.HashMap String Name := {}
+  for i in [:env.header.moduleNames.size] do
+    for (decl, sym) in exportAttr.ext.getModuleEntries env i do
+      m := m.insert (sym.toString (escape := false)) decl
+  modify fun s => { s with exports := some m }
   return m
 
 /-- Whether a constant's definition casts through `unsafeCast`/`NonScalar`. -/
@@ -282,9 +298,16 @@ def baseDeclFor? (n : Name) : MonoM (Option (Decl .pure)) := do
       if ← recompile n then return (← get).extraBase.find? n
   return some d
 
-/-- Redirect a call target: a type-unsafe implementation becomes the safe
-declaration it implements. -/
+/-- Redirect a call target: an extern implemented by an exported Lean
+definition becomes that definition; with `safeSources`, a type-unsafe
+implementation becomes the safe declaration it implements. -/
 def redirectTarget (f : Name) : MonoM Name := do
+  -- An extern whose C symbol is provided by an `@[export]` Lean definition
+  -- is that definition (Lean's runtime calls it; we compile it).
+  if isExtern (← getEnv) f then
+    if let some sym := getExternNameFor (← getEnv) `c f then
+      if let some d := (← exportMap).get? sym then
+        if d != f then return d
   if !(← get).config.safeSources then return f
   if ← isTypeUnsafeImpl f then
     if let some safe := (← unsafeImplMap).find? f then
@@ -329,7 +352,11 @@ def staticDict? (statics : Std.HashMap FVarId Expr) (v : LetValue .pure) (ty : E
         match statics[x]? with
         | some e => out := out.push e
         | none => return none
-    return some (mkAppN (.const c []) out)
+    let e := mkAppN (.const c []) out
+    -- Bounded like type arguments (polymorphic recursion builds ever
+    -- larger dictionaries).
+    if e.approxDepth.toNat > (← get).config.maxTypeArgSize then return none
+    return some e
   | .proj sn i x _ =>
     match statics[x]? with
     | some e => return some (.proj sn i e)

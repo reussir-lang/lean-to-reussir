@@ -52,6 +52,8 @@ structure TypeInfo where
 
 structure LowerCtx where
   table : RelevanceTable
+  /-- Functions the runtime prelude defines. -/
+  preludeFns : Std.HashSet String := {}
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/
@@ -120,7 +122,7 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
   match t with
   | .named n =>
     if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
-            "LStr", "LBig", boxName] then return true
+            "LStr", "LBig", "LNatArr", "LIntArr", boxName] then return true
     match (← get).typeInfos[n]? with
     | some info => return info.shape != .enumLike
     | none => return false
@@ -173,6 +175,47 @@ def strLitTable (lits : Array String) : String :=
   s!"    const LITS: &[&[u8]] = &[{", ".intercalate items}];\n" ++
   "    leanrt::string::from_bytes(LITS[id as usize])\n} }];\n"
 
+/-- How a Lean array is represented: the runtime function family
+(`l2r_array_*` generic over the storage type, or the one-word
+`l2r_natarr_*`/`l2r_intarr_*`), the type arguments its functions take, the
+element's storage type, the element's own type, and whether the storage
+wraps it. -/
+structure ArrayRepr where
+  family : String
+  tyArgs : Array RR.Ty
+  storage : RR.Ty
+  value : RR.Ty
+  wrapped : Bool
+
+def arrayRepr? (t : RR.Ty) : LowerM (Option ArrayRepr) := do
+  match t with
+  | .named "LNatArr" => return some ⟨"natarr", #[], .named "Nat", .named "Nat", false⟩
+  | .named "LIntArr" => return some ⟨"intarr", #[], .named "Int", .named "Int", false⟩
+  | .app "RVec" #[st] =>
+    let (v, w) ← storageElem st
+    return some ⟨"array", #[st], st, v, w⟩
+  | _ => return none
+
+/-- A call of runtime array primitive `l2r_<family>_<op>`. -/
+def ArrayRepr.call (r : ArrayRepr) (op : String) (args : Array RR.Expr) : RR.Expr :=
+  .call s!"l2r_{r.family}_{op}" r.tyArgs args
+
+/-- Store / load an element (wrapping into the storage type if needed). -/
+def ArrayRepr.store (r : ArrayRepr) (x : RR.Expr) : RR.Expr :=
+  if r.wrapped then match r.storage with | .named n => .ctor n none #[x] | _ => x else x
+def ArrayRepr.load (r : ArrayRepr) (x : RR.Expr) : RR.Expr :=
+  if r.wrapped then .field x 0 else x
+
+/-- The runtime function implementing Lean array extern `sym` for arrays of
+family `fam` (`natarr`, `intarr`): the same argument list, element type
+`Nat`/`Int`. -/
+def natArrSym? (sym fam : String) : Option String :=
+  if sym.startsWith "lean_array_" then some ("lean_" ++ fam ++ "_" ++ (sym.drop 11).toString)
+  else if sym == "lean_mk_empty_array_with_capacity" then some s!"lean_mk_empty_{fam}_with_capacity"
+  else if sym == "lean_mk_empty_array" then some s!"lean_mk_empty_{fam}"
+  else if sym == "lean_mk_array" then some s!"lean_mk_{fam}"
+  else none
+
 /-- Relevance of the parameters of inductive `ind` (see `Relevance.lean`). -/
 def relevanceOf (ind : Name) (numParams : Nat) : LowerM (Array Bool) := do
   match (← read).table.find? ind with
@@ -212,6 +255,10 @@ mutual
       let elem ← match args[0]? with
         | some a => lowerType a
         | none => pure RR.Ty.box
+      -- Arrays of `Nat`/`Int` store one word per element, like Lean's
+      -- boxed scalars (runtime `LNatArr`/`LIntArr`).
+      if elem == .named "Nat" then return .named "LNatArr"
+      if elem == .named "Int" then return .named "LIntArr"
       let (elem, _) ← arrayElemTy elem
       return .app "RVec" #[elem]
     | _ =>
@@ -221,7 +268,10 @@ mutual
       if let some (.inductInfo ival) := (← getEnv).find? (n ++ `_impl) then
         return ← nominalType ival args
       match (← getEnv).find? n with
-      | some (.inductInfo ival) => nominalType ival args
+      | some (.inductInfo ival) =>
+        -- A proposition has no representation (its values are proofs).
+        if ival.type.getForallBody.isProp then return .unit
+        nominalType ival args
       | _ => return RR.Ty.box
 
   /-- The generated nominal type for an instantiated inductive. -/

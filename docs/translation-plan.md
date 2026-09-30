@@ -323,6 +323,7 @@ Stage 4 sees only mono types:
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | `String` | `LStr`, an opaque copy-on-write handle over UTF-8 bytes (`Rc<Vec<u8>>`) | literals: §5.4 |
 | `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records), otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
+| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
 | `ST.Ref σ α` | `LRef<S>`, a shared mutable cell | mono types a reference as `lcAny`, so it travels boxed |
 | `Thunk α`, `Task α` | generated one-field structs | a thunk is forced when built; a pure task is computed when spawned (§6) |
@@ -548,10 +549,13 @@ declaration (a loop whose body is a DAG of join points, e.g. a chain of
 recursive. Instead the declaration becomes one function over an enum of
 entry points: one variant for the declaration's own parameters and one per
 outlined join point (its captured variables and parameters). The function
-matches on the entry point; a jump to an outlined join point and a self
-tail call both become a self tail call with the corresponding variant, and
-LLVM turns them into a loop. The declaration itself is a wrapper that
-enters at its own variant. The enum is a shared (heap) type for now:
+takes the declaration's parameters followed by the entry point, and matches
+on the entry point. The declaration's own variant is nullary, so calling the
+declaration (through a wrapper) and its self tail calls allocate nothing; a
+jump to an outlined join point passes the parameters on unchanged together
+with that join point's variant. All of these are self tail calls, which
+LLVM turns into a loop. J4 is used only when an outlined join point makes a
+self tail call; other calls back into the declaration are ordinary calls. The enum is a shared (heap) type for now:
 Reussir miscompiles `[value]` enums with fields of mixed layout (§9);
 Reussir's reuse makes the shared cell cheap.
 

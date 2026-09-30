@@ -42,13 +42,18 @@ those join points and self tail calls become self tail calls of that
 function, which LLVM turns into a loop; separate functions would make the
 loop mutually recursive. -/
 structure StateMachine where
-  /-- The dispatching function. -/
+  /-- The dispatching function: the declaration's parameters, then the
+  entry point. -/
   fn : String
-  /-- The entry-point enum. -/
+  /-- The entry-point enum: nullary `e` for the declaration itself (no
+  allocation), one variant per outlined join point. -/
   mode : String
   /-- The declaration, whose tail calls re-enter at `entry`. -/
   self : Name
   arity : Nat
+  /-- Names of the declaration's parameters, passed through unchanged when
+  entering a join point. -/
+  params : Array String
   entry : String := "e"
 
 structure CodeCtx where
@@ -93,6 +98,8 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
       else if n == "Int" then
         pure ⟨#[("z", some (.named "i64"), .atom "0")], .ctor "Int" (some "Small") #[.var "z"]⟩
       else if n == "LStr" then pure (.ofExpr (← strLit ""))
+      else if n == "LNatArr" then pure (.ofExpr (.call "l2r_natarr_empty" #[] #[]))
+      else if n == "LIntArr" then pure (.ofExpr (.call "l2r_intarr_empty" #[] #[]))
       else if n == boxName then
         pure (.ofExpr (.ctor boxName (some (← boxVariant .unit)) #[.unitVal]))
       else if let some info := (← get).typeInfos[n]? then
@@ -206,42 +213,37 @@ mutual
       let some dh ← nominalHead dn | return none
       if sh != dh then return none
       return some (.call (← structConv sn dn) #[] #[e])
-    | .app "RVec" #[se], .app "RVec" #[de] =>
+    | _, _ =>
       -- Arrays whose element types differ (an array reinterpreted by
       -- Lean's uniform-representation code, e.g. `Array α` as
       -- `Array NonScalar`): rebuilt element by element.
-      match ← vecConv se de with
+      let some sr ← arrayRepr? src | return none
+      let some dr ← arrayRepr? dst | return none
+      match ← vecConv src dst sr dr with
       | some f => return some (.call f #[] #[e])
       | none => return none
-    | _, _ => return none
 
   /-- The generated function converting an array with element storage `se`
   to one with element storage `de` (cached); `none` if the elements are not
   convertible. -/
-  partial def vecConv (se de : RR.Ty) : LowerM (Option String) := do
-    if let some f := (← get).vecConvs[(se, de)]? then return some f
-    let (st, sboxed) ← storageElem se
-    let (dt, dboxed) ← storageElem de
+  partial def vecConv (src dst : RR.Ty) (sr dr : ArrayRepr) : LowerM (Option String) := do
+    if let some f := (← get).vecConvs[(src, dst)]? then return some f
     let f ← fresh "l2r_vconv_"
-    modify fun s => { s with vecConvs := s.vecConvs.insert (se, de) f }
-    let x := RR.Expr.call "l2r_array_get" #[se] #[.var "src", .var "i"]
-    let x := if sboxed then RR.Expr.field x 0 else x
-    let some y ← tryCoerce x st dt | return none
-    let y := if dboxed then RR.Expr.ctor (match de with | .named n => n | _ => "") none #[y] else y
+    modify fun s => { s with vecConvs := s.vecConvs.insert (src, dst) f }
+    let x := sr.load (sr.call "get" #[.var "src", .var "i"])
+    let some y ← tryCoerce x sr.value dr.value | return none
     let go := f ++ "_go"
-    let vec (t : RR.Ty) := RR.Ty.app "RVec" #[t]
     let u64 := RR.Ty.named "u64"
     let loop : RR.Block := .ofExpr <| .ite (.atom "i < n")
-      ⟨#[("one", some u64, .atom "1"), ("y", some de, y)],
-        .call go #[] #[.var "src", .atom "i + one", .var "n",
-          .call "l2r_array_push" #[de] #[.var "acc", .var "y"]]⟩
+      ⟨#[("one", some u64, .atom "1"), ("y", some dr.storage, dr.store y)],
+        .call go #[] #[.var "src", .atom "i + one", .var "n", dr.call "push" #[.var "acc", .var "y"]]⟩
       (.ofExpr (.var "acc"))
     let entry : RR.Block :=
-      ⟨#[("n", some u64, .call "l2r_array_size" #[se] #[.var "src"]), ("zero", some u64, .atom "0")],
-        .call go #[] #[.var "src", .var "zero", .var "n", .call "l2r_array_empty" #[de] #[]]⟩
+      ⟨#[("n", some u64, sr.call "size" #[.var "src"]), ("zero", some u64, .atom "0")],
+        .call go #[] #[.var "src", .var "zero", .var "n", dr.call "empty" #[]]⟩
     modify fun s => { s with fns := s.fns ++ #[
-      .fn go #[("src", vec se), ("i", u64), ("n", u64), ("acc", vec de)] (vec de) loop,
-      .fn f #[("src", vec se)] (vec de) entry] }
+      .fn go #[("src", src), ("i", u64), ("n", u64), ("acc", dst)] dst loop,
+      .fn f #[("src", src)] dst entry] }
     return some f
 
   /-- The generated function converting instantiation `sn` to `dn` of the
@@ -428,6 +430,14 @@ def externParamPassed (t : Expr) : Bool :=
   let t := t.consumeMData
   !(t.isErased || t == mkConst ``lcVoid || t.isSort)
 
+/-- Is `t` a proposition (an application of a `Prop`-valued inductive)?
+Its values are proofs, which externs do not receive. -/
+def isPropTy (t : Expr) : CoreM Bool := do
+  let .const n _ := t.consumeMData.getAppFn | return false
+  match (← getEnv).find? n with
+  | some (.inductInfo iv) => return iv.type.getForallBody.isProp
+  | _ => return false
+
 /-- Wrap a value as the successful result of an IO action: `EST.Out.ok v`
 for `EST.Out`-typed results, `ST.Out` (a one-field struct once the world
 field is dropped) for `BaseIO` results. -/
@@ -600,6 +610,10 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     | .named n => return n
     | rt => throwError "lean2rr: expected a structure type, got {rt.render}"
   match orig with
+  -- Generic Reussir functions in the prelude (not FFI): instantiated at
+  -- the value type itself, not at its array storage type.
+  | ``dbgTrace => return some (.call "lean_dbg_trace" #[← lowerType ret] args)
+  | ``dbgTraceIfShared => return some (.call "lean_dbg_trace_if_shared" #[← lowerType ret] args)
   | ``Task.get => return some (.field args[0]! 0)
   | ``Task.spawn => return some (.ctor (← structOf ret) none #[.apply args[0]! .unitVal])
   | ``Task.map => return some (.ctor (← structOf ret) none #[.apply args[0]! (.field args[1]! 0)])
@@ -613,7 +627,7 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   -- BaseIO task combinators, run eagerly: `asTask act := Task.pure <$> act`,
   -- `mapTask f t := Task.pure <$> f t.get`, `bindTask t f := f t.get`,
   -- `wait t := pure t.get`. Results are `ST.Out` structs.
-  | ``IO.asTask =>
+  | ``BaseIO.asTask =>
     let resTy ← lowerType ret
     let taskTy ← ioPayloadTy resTy
     let .named taskN := taskTy | return none
@@ -621,7 +635,7 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     let rTy ← match ← lowerType params[0]! with | .fn _ c => pure c | t => pure t
     return some (.block ⟨#[(r, some rTy, .apply args[0]! args[2]!)],
       ← wrapIOResult resTy (.ctor taskN none #[.field (.var r) 0])⟩)
-  | ``IO.mapTask =>
+  | ``BaseIO.mapTask =>
     let resTy ← lowerType ret
     let taskTy ← ioPayloadTy resTy
     let .named taskN := taskTy | return none
@@ -630,7 +644,7 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     let rTy := match fTy with | .fn _ (.fn _ c) => c | t => t
     return some (.block ⟨#[(r, some rTy, .apply (.apply args[0]! (.field args[1]! 0)) args[4]!)],
       ← wrapIOResult resTy (.ctor taskN none #[.field (.var r) 0])⟩)
-  | ``IO.bindTask => return some (.apply (.apply args[1]! (.field args[0]! 0)) args[4]!)
+  | ``BaseIO.bindTask => return some (.apply (.apply args[1]! (.field args[0]! 0)) args[4]!)
   | ``IO.wait => return some (← wrapIOResult (← lowerType ret) (.field args[0]! 0))
   -- `IO.Process.exit : UInt8 → IO α` never returns.
   | ``IO.Process.exit =>
@@ -649,34 +663,24 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   if orig == ``Array.mk then
     let lt ← lowerType params[0]!
     let arrTy ← lowerType ret
-    let .app _ #[elemTy] := arrTy | throwError "lean2rr: bad array type {arrTy.render}"
-    -- The list holds unboxed elements; wrap them if the array stores boxes.
-    let .named ltn := lt | throwError "lean2rr: bad list type"
-    let some info := (← get).typeInfos[ltn]? | throwError "lean2rr: bad list type"
-    let some cons := info.ctors.find? ``List.cons | throwError "lean2rr: bad list type"
-    let some (some (_, valTy)) := cons.fields[0]? | throwError "lean2rr: bad list type"
-    let (_, boxed) ← arrayElemTy valTy
-    let wrap (x : RR.Expr) : RR.Expr := match elemTy with
-      | .named en => if boxed then .ctor en none #[x] else x
-      | _ => x
+    let some repr ← arrayRepr? arrTy | throwError "lean2rr: bad array type {arrTy.render}"
     let fn ← listFold s!"l2r_list_to_array_{lt.render.map fun c => if c.isAlphanum then c else '_'}" lt arrTy
-      elemTy fun acc x => .call "l2r_array_push" #[] #[acc, wrap x]
-    return some (.call fn #[] #[args[0]!, .call "l2r_array_empty" #[elemTy] #[]])
+      repr.storage fun acc x => repr.call "push" #[acc, repr.store x]
+    return some (.call fn #[] #[args[0]!, repr.call "empty" #[]])
   -- `Array.toList : Array α → List α`: cons the elements from the last.
   if orig == ``Array.toList then
     let arrTy ← lowerType params[0]!
     let lt ← lowerType ret
-    let .app _ #[elemTy] := arrTy | throwError "lean2rr: bad array type {arrTy.render}"
+    let some repr ← arrayRepr? arrTy | throwError "lean2rr: bad array type {arrTy.render}"
     let .named ltn := lt | throwError "lean2rr: bad list type"
     let some info := (← get).typeInfos[ltn]? | throwError "lean2rr: bad list type"
     let some nil := info.ctors.find? ``List.nil | throwError "lean2rr: bad list type"
     let some cons := info.ctors.find? ``List.cons | throwError "lean2rr: bad list type"
     let some (some (_, valTy)) := cons.fields[0]? | throwError "lean2rr: bad list type"
-    let (_, boxed) ← storageElem elemTy
-    let name := s!"l2r_array_to_list_{ltn}"
+    let name := s!"l2r_array_to_list_{ltn}_{repr.family}"
     unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
-      let x := RR.Expr.call "l2r_array_get" #[elemTy] #[.var "v", .var "j"]
-      let x ← coerce (if boxed then .field x 0 else x) (← storageElem elemTy).1 valTy
+      let x := repr.load (repr.call "get" #[.var "v", .var "j"])
+      let x ← coerce x repr.value valTy
       let u64 := RR.Ty.named "u64"
       let body : RR.Block := ⟨#[("zero", some u64, .atom "0")], .ite (.atom "zero < i")
         ⟨#[("one", some u64, .atom "1"), ("j", some u64, .atom "i - one"), ("x", some valTy, x),
@@ -684,7 +688,7 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
           .call (name ++ "_go") #[] #[.var "v", .var "j", .var "c"]⟩
         (.ofExpr (.var "acc"))⟩
       let entry : RR.Block :=
-        .ofExpr (.call (name ++ "_go") #[] #[.var "v", .call "l2r_array_size" #[elemTy] #[.var "v"],
+        .ofExpr (.call (name ++ "_go") #[] #[.var "v", repr.call "size" #[.var "v"],
           .ctor ltn (some nil.variant) #[]])
       modify fun s => { s with fns := s.fns ++ #[
         .fn (name ++ "_go") #[("v", arrTy), ("i", u64), ("acc", lt)] lt body,
@@ -725,6 +729,29 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
   if orig.getPrefix == `ST.Prim || orig.getPrefix == `ST.Prim.Ref then
     if let some e ← refGlue orig typeArgs (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
   let sym ← externSymbol orig
+  -- Which parameters the runtime receives: not erased ones, not the world,
+  -- not proofs.
+  let mask ← params.mapM fun p => return externParamPassed p && !(← isPropTy p)
+  let passedArgs := (mask.zip args).filterMap fun (m, a) => if m then some a else none
+  -- A `BaseIO` extern that cannot fail: the runtime provides its payload
+  -- as `l2r_<sym without lean_>`; the result is wrapped as an IO result.
+  if sym.startsWith "lean_" then
+    let prim := "l2r_" ++ (sym.drop 5).toString
+    if (← read).preludeFns.contains prim then
+      let resTy ← lowerType ret
+      if let .named rn := resTy then
+        if let some k := (← get).typeKeys[rn]? then
+          if k.isAppOf ``EST.Out || k.isAppOf ``ST.Out then
+            return ← wrapIOResult resTy (.call prim #[] passedArgs)
+  -- Array externs at `Array Nat`/`Array Int` use the one-word arrays.
+  if let some α := typeArgs[0]? then
+    let fam? := match ← lowerType (← toMonoType α) with
+      | .named "Nat" => some "natarr"
+      | .named "Int" => some "intarr"
+      | _ => none
+    if let some fam := fam? then
+      if let some sym' := natArrSym? sym fam then
+        return .call sym' #[] passedArgs
   -- Storage for each type argument: (storage type, boxed?).
   let mut storage := #[]
   for t in typeArgs do
@@ -740,8 +767,8 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
     if boxed then if let .named bn := st then return bn
     none
   let mut passed := #[]
-  for h : i in [:params.size] do
-    if externParamPassed params[i] then
+  for i in [:params.size] do
+    if mask[i]! then
       let a := args[i]!
       match boxOf (uses[i]?.join) with
       | some bn => passed := passed.push (.ctor bn none #[a])
@@ -956,6 +983,19 @@ partial def sinkJoinPoints : Code .pure → Code .pure
       | other => other⟩
   | c => c
 
+/-- Does `c` contain a tail call `let x := f args; return x` of `f` with
+`arity` arguments (outside nested join-point bodies, which are checked on
+their own when outlined)? -/
+partial def hasSelfTailCall (f : Name) (arity : Nat) : Code .pure → Bool
+  | .let d k =>
+    match d.value, k with
+    | .const g _ args _, .return x => (g == f && args.size == arity && x == d.fvarId) || hasSelfTailCall f arity k
+    | _, _ => hasSelfTailCall f arity k
+  | .fun _ k _ => hasSelfTailCall f arity k
+  | .jp d k => hasSelfTailCall f arity d.value || hasSelfTailCall f arity k
+  | .cases c => c.alts.any (hasSelfTailCall f arity ·.getCode)
+  | _ => false
+
 /-- The bodies of the outlined join points of `c`. -/
 partial def outlinedBodies (c : Code .pure) (outlined : FVarIdSet) : Array (Code .pure) :=
   go c #[]
@@ -1036,7 +1076,7 @@ mutual
                 let some selfDecl := (← read).decls.find? f | throwError "lean2rr: no declaration {f}"
                 let (ps, _) := splitFnType selfDecl.type sm.arity
                 let vals ← (args.zip ps).mapM fun (a, p) => do lowerArg ctx a (← lowerType p)
-                return .ofExpr (.call sm.fn #[] #[.ctor sm.mode (some sm.entry) vals])
+                return .ofExpr (.call sm.fn #[] (vals.push (.ctor sm.mode (some sm.entry) #[])))
       let e ← try lowerLetValue ctx d.value d.type t
         catch ex => throwError "{ex.toMessageData}\n  in let {d.binderName} : {d.type}"
       let x ← fresh "x"
@@ -1075,7 +1115,7 @@ mutual
         let some sm := ctx.sm | throwError "lean2rr: state-machine jump outside a state machine"
         let tys := ctx.jpParams.getD j #[]
         let vals ← (args.zip tys).mapM fun (a, t) => lowerArg ctx a t
-        return .ofExpr (.call sm.fn #[] #[.ctor sm.mode (some variant) (captured.map .var ++ vals)])
+        return .ofExpr (.call sm.fn #[] (sm.params.map .var |>.push (.ctor sm.mode (some variant) (captured.map .var ++ vals))))
       | none => throwError "lean2rr: jump to unknown join point (internal error)"
     | .jp d k =>
       let ptys ← d.params.mapM (lowerType ·.type)
@@ -1271,13 +1311,15 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let ret ← lowerType r
   let pnames ← d.params.mapM fun _ => fresh "a"
   let outlined := chooseOutlined body
-  -- J4 when an outlined join point calls the declaration back.
-  let callsBack := outlinedBodies body outlined |>.any fun c => (codeConsts c #[]).contains d.name
+  -- J4 when an outlined join point tail-calls the declaration: a loop
+  -- passes through it. (Other calls need no state machine; going through
+  -- its entry wrapper would only cost an allocation per call.)
+  let callsBack := outlinedBodies body outlined |>.any (hasSelfTailCall d.name d.params.size)
   let sm? : Option StateMachine ← do
-    if !callsBack || d.params.isEmpty then pure none
+    if !callsBack || d.params.isEmpty || (← IO.getEnv "L2R_NO_J4").isSome then pure none
     else
       let base := fnName d.name
-      pure (some { fn := base ++ "_sm", mode := base ++ "_mode", self := d.name, arity := d.params.size })
+      pure (some { fn := base ++ "_sm", mode := base ++ "_mode", self := d.name, arity := d.params.size, params := pnames })
   modify fun s => { s with smArms := #[] }
   let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm? }
   let block ← try lowerCode ctx outlined ret body
@@ -1288,17 +1330,17 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
     -- different layouts (translation plan §9); Reussir reuses the cell of
     -- the matched value.
     let mode := RR.Item.enum sm.mode false
-      (#[(sm.entry, ptys)] ++ arms.map fun (v, fps, _) => (v, fps.map (·.2)))
+      (#[(sm.entry, #[])] ++ arms.map fun (v, fps, _) => (v, fps.map (·.2)))
     let mkArm (v : String) (names : Array String) (b : RR.Block) : RR.Arm :=
       { ty := sm.mode, ctor := some v, binders := names.map some, body := b }
-    let matchArms := #[mkArm sm.entry pnames block] ++ arms.map fun (v, fps, b) => mkArm v (fps.map (·.1)) b
+    let matchArms := #[mkArm sm.entry #[] block] ++ arms.map fun (v, fps, b) => mkArm v (fps.map (·.1)) b
     let m ← fresh "m"
     modify fun s => { s with
       typeItems := s.typeItems.push mode
       fns := s.fns
-        |>.push (.fn sm.fn #[(m, .named sm.mode)] ret (.ofExpr (.mtch (.var m) matchArms)))
+        |>.push (.fn sm.fn ((pnames.zip ptys).push (m, .named sm.mode)) ret (.ofExpr (.mtch (.var m) matchArms)))
         |>.push (.fn (fnName d.name) (pnames.zip ptys) ret
-            (.ofExpr (.call sm.fn #[] #[.ctor sm.mode (some sm.entry) (pnames.map .var)])))
+            (.ofExpr (.call sm.fn #[] ((pnames.map .var).push (.ctor sm.mode (some sm.entry) #[])))))
       smArms := #[] }
     return
   if d.params.isEmpty then
