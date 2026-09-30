@@ -75,13 +75,13 @@ def lowerEntry (mainInst errStr : Name) (eager : Array Name) : LowerM RR.Item :=
   for h : i in [:eager.size] do
     forced := forced ++ s!"    let caf{i} = {fnName eager[i]}();\n"
   let body := s!"fn l2r_main_body() \{\n{forced}    let r = {fnName mainInst}({argExpr}L2RUnit::u\{});\n    match r \{\n        {outTy}::{okV}(v) => \{ {exitCode} },\n        {outTy}::{errV}(e) => \{ l2r_uncaught_exception({fnName errStr}(e)) }\n    }\n}\n"
-  -- Like Lean's runtime, run the program on a thread with a 1 GiB stack
-  -- (deep non-tail recursion is common in Lean programs).
+  -- Like Lean's runtime, run the program on a thread with a big stack
+  -- (1 GiB, `LEAN_STACK_SIZE_KB`, `LEAN_MAIN_USE_THREAD`) and report a stack
+  -- overflow as Lean does; `leanrt::rt::run_main` implements both.
   let entry := "extern \"C\" trampoline \"l2r_main_body\" = l2r_main_body;\n\n" ++
     "#[ffi(import)]\nfn l2r_run_main() [{ {\n" ++
     "    extern \"C\" { fn l2r_main_body(); }\n" ++
-    "    ::std::thread::Builder::new().name(\"main\".into()).stack_size(1 << 30)\n" ++
-    "        .spawn(|| unsafe { l2r_main_body() }).unwrap().join().unwrap()\n} }];\n\n" ++
+    "    leanrt::rt::run_main(|| unsafe { l2r_main_body() })\n} }];\n\n" ++
     "#[main]\npub fn lean_main_entry() { l2r_run_main() }\n"
   return .raw (pre ++ body ++ "\n" ++ entry)
 
