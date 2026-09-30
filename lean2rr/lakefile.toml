@@ -1,0 +1,12 @@
+name = "lean2rr"
+version = "0.1.0"
+defaultTargets = ["lean2rr"]
+
+[[lean_lib]]
+name = "LeanToReussir"
+
+[[lean_exe]]
+name = "lean2rr"
+root = "Main"
+# The tool imports compiled Lean environments at run time.
+supportInterpreter = true

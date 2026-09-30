@@ -1,0 +1,5 @@
+# upstream Reussir checkout and local build dependencies
+/reussir/
+/.deps/
+# Lake build outputs
+.lake/
