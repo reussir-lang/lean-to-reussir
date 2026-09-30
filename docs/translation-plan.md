@@ -227,14 +227,21 @@ giving it the representation it assumes:
 - `NonScalar` and `PNonScalar` (types that stand for "any object") become
   `lcAny`, so values of those types are `Box`es. The casts become the
   ordinary representation conversions of §5.1; between arrays of different
-  element types the conversion is element by element.
+  element types the conversion is element by element. Stage 3 (§4) recovers
+  the precise types around this code. When source and target elements have
+  the same representation, the `map` loop runs on the precise array. When
+  they differ, the array is converted once on entry and once on exit, never
+  inside a loop.
 - A `box(0)` placeholder is a value that is never inspected. It arrives as
   a unit-like value used at another type, or as `◾` at a relevant type.
   Stage 4 materializes it as the *zero* of the expected type: `0`, `false`,
   the first constructor whose fields have zeros, a closure returning a zero,
   an empty array. For `Nat`, `Bool` and enumerations this is exactly what
   `box(0)` denotes in Lean. Only a type without a finite value gets
-  `unreachable`.
+  `unreachable`. A zero that would allocate (a string, an array, a record,
+  a closure) is built once and kept in a once-cell, like a constant
+  (§5.12): `modify` stores one per update, and since a placeholder is never
+  inspected, a shared value serves as well as a fresh one.
 
 This keeps Lean's in-place update tricks, including `modify`'s unshared
 element. An alternative, redirecting to the safe reference implementations
@@ -331,21 +338,85 @@ def loop (a.1 : List (Prod Nat P)) (a.2 : List Float) : List Float :=
 
 ## 4. Stage 3 — check and recover lost types
 
-Mono can still lose type information in a few places. Types inferred
-*during* the passes go through erased signatures; for example, a
-constructor's mono signature is `List.cons : lcAny → List lcAny → …`. Where
-a binder ends up with `lcAny` in a position that holds data, its exact type
-is recovered from its context, and only when that context determines it:
-- a `cases` field: the constructor's field type, instantiated at the
-  discriminant's type;
-- a constructor application: from its argument types;
-- a call: from the callee's exact signature, which all our instances have;
-- a join-point parameter: from its jump arguments, when they agree.
+Mono can still lose type information in two ways:
+- Types inferred *during* the passes go through erased signatures. A
+  constructor's mono signature is `List.cons : lcAny → List lcAny → …`, so
+  `structProjCases` can type the fields of an exactly typed pair `lcAny`, and
+  lambda lifting can give a lifted lambda the result type `lcAny`.
+- The library code of §2.7 casts with `unsafeCast`, which LCNF erases. The
+  result of `xs.map f` is bound at `Array NonScalar`, i.e. `Array lcAny`, and
+  so is every loop parameter it is passed to.
 
-Where the context does not determine the type, the binder keeps `lcAny` and
-uses the uniform `Box` representation (§5.1), with conversions where it meets
-a precise type. Recovery is therefore an optimization that avoids boxing, but
-it must be exact: a recovered type is always the binder's real type.
+A binder typed `lcAny` uses the uniform `Box` representation (§5.1), and each
+use at a precise type converts it. For an array that is an element-by-element
+copy: a loop reading `ys[i]!` from a loop-invariant `Array lcAny` would copy
+the whole array at every step, which is quadratic. So Stage 3 recovers the
+exact type wherever the program determines it. It iterates over the whole
+program until nothing changes.
+
+A binder's type is recovered from what flows *into* it, never from how it
+is used. A use at a precise type only speaks for its own branch. With a type
+that depends on a value, `data : Array t.denote` is used as `Array Nat` only
+in the branch where `t = .nat`. A conversion moved from that use to the
+binder would also run, and fail, when `t = .str`. The rules:
+- **From definitions.** A `cases` field gets the constructor's field type,
+  instantiated at the discriminant's type. A constructor application gets
+  the type its argument types determine. Parameters that no field
+  determines, such as the error type of `EST.Out.ok`, come from the binder's
+  own type. A call, full or partial, gets the type the callee's signature
+  gives. A join-point parameter gets the type of its jump arguments when all
+  of them are known and agree.
+- **Result types.** A declaration whose result type is unknown gets `T` when
+  all its returned values have type `T`. The results of its own self calls
+  do not count, and neither do constructors without fields (`none`) of `T`'s
+  inductive. It also gets `T` when every call of it binds the result at `T`,
+  provided it is used nowhere else, e.g. not as a closure. The callers would
+  convert right away anyway; the conversion moves to the callee's `return`,
+  which for a constant happens once instead of at every read.
+- **The `map` loops of §2.7.** The loop of `Array.mapMUnsafe` or
+  `Array.mapFinIdxMUnsafe` (recognized by name, as Lean's specializations of
+  it) returns its array once `Array.uset` has replaced every element. If
+  every value it stores, other than the `box(0)` placeholder, has the same
+  precise type `β`, its result is an `Array β`: `Array lcAny` becomes
+  `Array β` in its result type (`Option (Array β)` for `mapM` in `Option`).
+  The rule only applies when the loop's array stays within the loop: it is
+  read, written, passed back to the loop, returned or jumped with.
+- **Parameters from callers.** A parameter whose type holds an erased array
+  (`Array lcAny`, `Option (Array lcAny)`, …) gets `T` if every call site
+  passes it at the same precise type `T`. The assumption is checked: the
+  body is retyped under it, and the self calls must then pass `T` too. By
+  induction on the calls, every value reaching the parameter has type `T`.
+  Only call sites in declarations reachable from `main` and the startup
+  work count. A partial application that leaves the parameter open blocks
+  the rule. Other `lcAny` parameters are left alone. Code over a dynamically
+  typed value (`Dynamic.get?`) casts it, in branches that a runtime check
+  rules out, to types that a precise parameter type could not be converted
+  to.
+- **Externs at unknown types.** A call of a polymorphic extern instantiated
+  at `lcAny`, e.g. `Array.uget` and `Array.uset` at `NonScalar`, is
+  redirected to the extern's instance at the type arguments the arguments
+  determine. Every argument must then have exactly the expected type, or be a
+  `◾` placeholder, and a binder that already has a precise type must be
+  given exactly that type. An extern does not depend on its type arguments;
+  only the representation changes.
+- **Placeholders.** A placeholder `let z := ◾` gets the type its uses
+  expect when they agree: it has no value to convert.
+
+For `xs.map (· * 2)` these rules make the whole map run on the precise array,
+in place and without boxing, like native Lean. The loop is assumed to
+receive `Array Nat`. Its reads become `Array.uget@Nat`, its placeholder is a
+`Nat` zero, and its writes of `Nat` values become `Array.uset@Nat`, so it
+passes `Array Nat` back. When `f` changes the representation (`Nat →
+String`), the loop keeps the `Box` array, its input is converted once on
+entry, and the loop's result type, `Array String` by the `map` rule, makes
+it convert once on exit. The loops that read the result then receive
+`Array String` from their callers.
+
+Each rule is exact. A value's type is taken only from its definition or from
+everything that flows into it, so the recovered type is the type the value
+has on every path. Where the program does not determine the type, the
+binder keeps `lcAny` and uses `Box`, with conversions where it meets a
+precise type.
 
 Stage 3 also checks the structural facts Stage 4 relies on:
 - join points are not recursive, and jumps are in tail position;
@@ -432,13 +503,20 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
 **The uniform type `Box`.** When a data position has type `lcAny` (§2.6, §4),
 its value is stored as `Box`.
 - `Box` is a generated enum with one variant per concrete Reussir type that
-  the program ever boxes. Variants are created as Stage 4 needs them, and
-  the unboxing functions are regenerated until the set stops growing, so
-  the set is known at the end of Stage 4.
-- Converting between a precise type `T` and `Box` means wrapping into or
-  unwrapping out of `T`'s variant. The variant is fixed by the Lean types
-  at both ends, so the unwrap always succeeds; its "other variant" arm is
-  unreachable.
+  the program ever boxes, plus a unit variant. Variants are created as
+  Stage 4 needs them, and the unboxing functions are regenerated until the
+  set stops growing, so the set is known at the end of Stage 4. `Box` is
+  always emitted, since types can mention it even when nothing is boxed.
+- Converting a precise type `T` to `Box` wraps the value into `T`'s variant.
+  Unwrapping must accept every variant that can hold a value of the same
+  Lean type, because one Lean type can have several Reussir
+  representations: the instantiations of an inductive (`List Nat` and a
+  uniform `List Box`), or the representations of an array (`LNatArr`, and
+  `RVec<Box>` for an `Array Nat` built by the code of §2.7). Unboxing to a
+  nominal or array type is therefore a generated function that matches all
+  such variants and converts structurally, element by element for arrays. A
+  boxed unit unwraps to the zero of `T`: a unit used at another type is
+  Lean's `box(0)` placeholder (§2.7). Any other variant is unreachable.
 - Conversions are inserted wherever a value's Reussir type differs from
   the type expected where it is used: call arguments, return values,
   constructor fields, join-point arguments, closure arguments and results.
@@ -449,10 +527,20 @@ its value is stored as `Box`.
 - A closure passed where `Box -> Box` is expected is wrapped as
   `|b| box(f(unbox(b)))`. The wrapper calls `f` exactly once per
   application, so evaluation timing does not change.
+- A partial application is built directly at the type of the binder that
+  receives it. Lambda lifting can give a lifted lambda the result type
+  `lcAny` while its closure is used at `Nat × Int → Int`, or the reverse. The
+  chain's lambdas take the binder's parameter types, and the conversions go
+  inside the innermost lambda, so the callee still runs only when the last
+  argument arrives.
 - When a structure built at a uniform type (for example a `List Box` coming
   out of polymorphically recursive code) meets code expecting the precise
   type (`List Nat`), the conversion is structural, element by element.
   Programs observe values, not object identity, so this is transparent.
+  An array whose elements cannot be converted (`Array Nat` to `Array Int`)
+  must be empty when that happens: an empty array that `cse` shared between
+  two element types, or the result of mapping nothing. Its element step is
+  therefore `unreachable`.
 - Between two different inductives with the same constructor shapes, or
   between `Nat` and an enumeration (only reachable through `unsafeCast`,
   where Lean's representations coincide), values convert constructor by

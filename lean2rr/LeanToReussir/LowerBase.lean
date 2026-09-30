@@ -102,6 +102,9 @@ structure LowerState where
   /-- Nominal types that some `Box` value is unboxed to (converter bodies
   are generated at the end, once all `Box` variants are known). -/
   unboxTargets : Array String := #[]
+  /-- Array types that some `Box` value is unboxed to, with the name of
+  their converter (bodies generated at the end, like `unboxTargets`). -/
+  unboxArrTargets : Array (RR.Ty × String) := #[]
   /-- Next once-cell slot for constants. -/
   cafSlots : Nat := 0
   /-- Once-cell slots of constants defined by `initialize`. -/
@@ -440,6 +443,16 @@ def unboxFn (t : String) : LowerM String := do
   unless (← get).unboxTargets.contains t do
     modify fun s => { s with unboxTargets := s.unboxTargets.push t }
   return s!"l2r_unbox_{t}"
+
+/-- Name of the generated function converting a `Box` to array type `t`
+(its body is generated at the end): an array may have been boxed under the
+variant of any array representation of the same Lean type, e.g. as
+`RVec<Box>` when it was built by uniform-representation code. -/
+def unboxArrFn (t : RR.Ty) : LowerM String := do
+  if let some (_, f) := (← get).unboxArrTargets.find? (·.1 == t) then return f
+  let f := s!"l2r_unbox_arr_{(← get).unboxArrTargets.size}"
+  modify fun s => { s with unboxArrTargets := s.unboxArrTargets.push (t, f) }
+  return f
 
 /-- A `[value]` struct type carrying several join-point arguments. -/
 def tupleType (tys : Array RR.Ty) : LowerM String := do
