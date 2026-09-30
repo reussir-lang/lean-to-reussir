@@ -219,11 +219,19 @@ def lazyGetFn (z : String) : LowerM String := do
     let zt := RR.Ty.named z
     let cellTy := RR.Ty.app "LCell" #[zt]
     let u64 := RR.Ty.named "u64"
-    let getBody : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
+    let getWith (other : RR.Block) : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
       lazyArm z "done" #[some "v"] (.ofExpr (.var "v")),
       lazyArm z "busy" #[] (.ofExpr (.call "l2r_lazy_cycle" #[t] #[])),
       lazyArm z "busyconv" #[none] (.ofExpr (.call "l2r_lazy_cycle" #[t] #[])),
-      { ty := z, ctor := none, binders := #[], body := .ofExpr (.call run #[] #[.var "c"]) }])
+      { ty := z, ctor := none, binders := #[], body := other }])
+    -- A task first runs the chain of pending tasks it waits for, deepest
+    -- first (`l2r_task_force_sources`), then looks again (one of them may
+    -- have run it, as a `sync` dependent).
+    let getBody : RR.Block := if task then
+        getWith ⟨#[("fs", some u64, .call "l2r_task_force_sources" #[] #[.call "l2r_lcell_addr" #[zt] #[.var "c"]])],
+          .call (get ++ "_now") #[] #[.var "c"]⟩
+      else getWith (.ofExpr (.call run #[] #[.var "c"]))
+    let nowBody : RR.Block := getWith (.ofExpr (.call run #[] #[.var "c"]))
     let onCell (f : String) : RR.Expr := .call f #[zt] #[.var "c"]
     let force ← applyCall (.var "f") (.fn .unit t) #[.unitVal]
     let lets : Array (String × Option RR.Ty × RR.Expr) :=
@@ -231,7 +239,8 @@ def lazyGetFn (z : String) : LowerM String := do
         else #[]) ++
       #[("v", some t, force),
         ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]])] ++
-      (if task then #[("sl", some u64, .call "l2r_std_leave" #[] #[]), ("e", some u64, onCell "l2r_task_end")]
+      (if task then #[("sl", some u64, .call "l2r_std_leave" #[] #[]), ("e", some u64, onCell "l2r_task_end"),
+          ("wk", some u64, .call "l2r_task_walk" #[] #[])]
         else #[])
     -- A `bind` task runs `f` for the task it continues as, then needs that.
     let bindArm ← if task then do
@@ -240,7 +249,7 @@ def lazyGetFn (z : String) : LowerM String := do
           ("se", some u64, .call "l2r_std_enter" #[] #[]), ("t2", some cellTy, cont),
           ("sl", some u64, .call "l2r_std_leave" #[] #[]), ("v", some t, .call get #[] #[.var "t2"]),
           ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]]),
-          ("e", some u64, onCell "l2r_task_end")]
+          ("e", some u64, onCell "l2r_task_end"), ("wk", some u64, .call "l2r_task_walk" #[] #[])]
         pure #[lazyArm z "bind" #[some "g"] ⟨lets, .var "v"⟩]
       else pure #[]
     let runBody : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_swap" #[zt] #[.var "c", .ctor z (some "busy") #[]]) (#[
@@ -249,7 +258,8 @@ def lazyGetFn (z : String) : LowerM String := do
         ⟨#[("ba", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "busyconv") #[.var "a"]])] ++ lets,
           .var "v"⟩] ++ bindArm ++ #[
       { ty := z, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) }]))
-    return #[.fn run #[("c", cellTy)] t runBody, .fn get #[("c", cellTy)] t getBody]
+    return #[.fn run #[("c", cellTy)] t runBody, .fn get #[("c", cellTy)] t getBody] ++
+      (if task then #[.fn (get ++ "_now") #[("c", cellTy)] t nowBody] else #[])
 
 /-- The runtime tag of task state type `z`: the entry point runs the tasks
 still queued when `main` returns, dispatching on it. -/
@@ -1388,7 +1398,7 @@ def taskNewFn (z : String) (pure : Bool) (bind : Bool := false) : LowerM String 
     let gTy := RR.Ty.fn .unit (if bind then cellTy else t)
     let deferred : RR.Block := ⟨#[
         ("c", some cellTy, .call "l2r_lcell_new" #[zt] #[.ctor z (some (if bind then "bind" else "pending")) #[.var "g"]]),
-        ("r", some u64, .call "l2r_task_register" #[zt] #[.var "c", .atom (toString tag)])], .var "c"⟩
+        ("r", some u64, .call "l2r_task_register" #[zt] #[.var "c", .atom (toString tag), .var "prio"])], .var "c"⟩
     let call ← applyCall (.var "g") gTy #[.unitVal]
     let force := if bind then RR.Expr.block ⟨#[("t2", some cellTy, call)], .call get #[] #[.var "t2"]⟩ else call
     let eager : RR.Block := ⟨#[("v", some t, force)], lazyDone z (.var "v")⟩
@@ -1400,7 +1410,7 @@ def taskNewFn (z : String) (pure : Bool) (bind : Bool := false) : LowerM String 
         RR.Expr.ite (.call "l2r_task_eager_pure" #[] #[])
           (.ofExpr (.ite (.call "l2r_task_deferring" #[] #[]) eagerWorker eager)) deferred
       else .ite (.call "l2r_task_deferring" #[] #[]) deferred eager
-    return #[.fn name #[("g", gTy)] cellTy (.ofExpr body)]
+    return #[.fn name #[("g", gTy), ("prio", u64)] cellTy (.ofExpr body)]
 
 /-- `l2r_task_addr_S(c)`: a task's identity for the runtime (`leanrt::task`):
 the address of its cell, or the original's that a converted task records
@@ -1432,10 +1442,10 @@ def lazyGet (c : RR.Expr) (ty : RR.Ty) (dst : RR.Ty) : LowerM RR.Expr := do
 
 /-- A new task of Reussir type `taskTy` whose value is `body u` (`u` is the
 world, for IO tasks). -/
-def newTask (taskTy : RR.Ty) (pure : Bool) (body : RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
+def newTask (taskTy : RR.Ty) (pure : Bool) (prio : RR.Expr) (body : RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
   let (z, t) ← lazyOf taskTy
   let u ← fresh "w"
-  return .call (← taskNewFn z pure) #[] #[rawFnValue (.fn .unit t) u (.ofExpr (← body (.var u)))]
+  return .call (← taskNewFn z pure) #[] #[rawFnValue (.fn .unit t) u (.ofExpr (← body (.var u))), prio]
 
 /-- `l2r_task_step_S(c)`: run task `c` when `main` has returned, as a
 worker would: a `bind` task (`IO.bindTask`) only runs `f`; it then waits,
@@ -1459,10 +1469,10 @@ def taskStepFn (z : String) : LowerM String := do
     -- (`task_bind_fn1`); otherwise wait for it, queued again.
     let finish : RR.Block := ⟨#[("v", some t, .call get #[] #[.var "t2"]),
       ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]]),
-      ("e", some u64, onCell "l2r_task_end")], .atom "0"⟩
+      ("e", some u64, onCell "l2r_task_end"), ("wk", some u64, .call "l2r_task_walk" #[] #[])], .atom "0"⟩
     let wait : RR.Block := ⟨#[("sp", some u64, onCell "l2r_task_suspend"),
       ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "pending") #[cont]]),
-      ("r", some u64, .call "l2r_task_register" #[zt] #[.var "c", .atom (toString tag)]),
+      ("r", some u64, .call "l2r_task_register" #[zt] #[.var "c", .atom (toString tag), .atom "0"]),
       ("d", some u64, .call "l2r_task_depend_at" #[] #[.call addr #[] #[.var "t2"], onCell "l2r_lcell_addr", .atom "false"])],
       .atom "0"⟩
     let stepLets : Array (String × Option RR.Ty × RR.Expr) := #[("b", some u64, onCell "l2r_task_begin"),
@@ -1537,6 +1547,9 @@ def taskWaitAnyFn (listTy : RR.Ty) (taskTy : RR.Ty) : LowerM String := do
     return #[.fn run #[("l", listTy)] t firstPending,
       .fn name #[("l", listTy), ("all", listTy)] t firstDone]
 
+/-- A task priority (`Task.Priority`, a `Nat`) for the runtime. -/
+def prioOf (p : RR.Expr) : RR.Expr := .call "lean_usize_of_nat" #[] #[p]
+
 /-- The glue of `lazyExtern`, on arguments that are variables. -/
 def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Array RR.Expr) :
     LowerM (Option RR.Expr) := do
@@ -1555,12 +1568,18 @@ def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Arra
     let (z, t) ← lazyOf (← lowerType ret)
     return some (lazyDone z (← coerce args[0]! (← pty 0) t))
   | ``Thunk.get | ``Task.get => return some (← lazyGet args[0]! (← pty 0) (← lowerType ret))
+  -- `IO.getTID` inside a task: natively a worker thread's (see
+  -- `leanrt::task::tid_offset`).
+  | ``IO.getTID =>
+    let u64 := RR.Ty.named "u64"
+    return some (← wrapIOResult (← lowerType ret) (.block ⟨#[("tid", some u64, .call "l2r_io_get_tid" #[] #[]),
+      ("toff", some u64, .call "l2r_task_tid_offset" #[] #[])], .atom "tid + toff"⟩))
   -- Pure tasks (see `taskNewFn`).
   | ``Task.spawn =>
     let rt ← lowerType ret
     let (z, t) ← lazyOf rt
     let f ← coerce args[0]! (← pty 0) (.fn .unit t)
-    return some (.call (← taskNewFn z true) #[] #[f])
+    return some (.call (← taskNewFn z true) #[] #[f, prioOf args[1]!])
   | ``Task.map | ``Task.bind =>
     -- `map f x prio sync`, `bind x f prio sync`. With `sync := true` and
     -- `x` finished, Lean applies `f` at once in the calling thread
@@ -1580,7 +1599,7 @@ def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Arra
     let now ← if isMap then do pure (lazyDone z (← applied)) else applied
     let u ← fresh "w"
     let g := rawFnValue (.fn .unit (if isMap then t else rt)) u (.ofExpr (← applied))
-    let later := RR.Expr.call (← taskNewFn z true (bind := !isMap)) #[] #[g]
+    let later := RR.Expr.call (← taskNewFn z true (bind := !isMap)) #[] #[g, prioOf args[2]!]
     let _ := fRes
     let c ← fresh "tn"
     let laterB : RR.Block := ⟨#[(c, some rt, later),
@@ -1596,7 +1615,7 @@ def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Arra
     let taskTy ← ioPayloadTy resTy
     let (_, t) ← lazyOf taskTy
     let actTy ← pty 0
-    let c ← newTask taskTy false fun w => runIO args[0]! actTy w t
+    let c ← newTask taskTy false (prioOf args[1]!) fun w => runIO args[0]! actTy w t
     return some (← wrapIOResult resTy c)
   | ``BaseIO.mapTask | ``BaseIO.bindTask =>
     let isMap := orig == ``BaseIO.mapTask
@@ -1626,10 +1645,10 @@ def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Arra
         let x ← lazyGet args[ti]! srcTy fd
         withVar "tf" fTy args[fi]! fun f => do
           runIO (← applyCall f fTy #[x]) actTy args[4]! taskTy
-    let later ← if isMap then newTask taskTy false value else do
+    let later ← if isMap then newTask taskTy false (prioOf args[2]!) value else do
       let u ← fresh "w"
       pure (RR.Expr.call (← taskNewFn z false (bind := true)) #[]
-        #[rawFnValue (.fn .unit taskTy) u (.ofExpr (← value (.var u)))])
+        #[rawFnValue (.fn .unit taskTy) u (.ofExpr (← value (.var u))), prioOf args[2]!])
     let d ← fresh "sync"
     let cond : RR.Expr := .ite args[3]! (.ofExpr (← taskDone sz args[ti]!)) (.ofExpr (.atom "false"))
     let c ← fresh "tn"
@@ -1669,7 +1688,7 @@ def lazyExtern (orig : Name) (params : Array Expr) (ret : Expr) (args0 : Array R
     LowerM (Option RR.Expr) := do
   unless orig ∈ [``Thunk.mk, ``Thunk.pure, ``Task.pure, ``Thunk.get, ``Task.get, ``Task.spawn,
       ``Task.map, ``Task.bind, ``BaseIO.asTask, ``BaseIO.mapTask, ``BaseIO.bindTask, ``IO.wait,
-      ``IO.waitAny, ``IO.getTaskState, ``IO.cancel] do return none
+      ``IO.waitAny, ``IO.getTaskState, ``IO.cancel, ``IO.getTID] do return none
   let pty (i : Nat) : LowerM RR.Ty := lowerType params[i]!
   -- Arguments may be used several times below: bind them to variables.
   let mut pre := #[]
@@ -2003,6 +2022,34 @@ def processOutputBody (ps : Array (String × RR.Ty)) (ret : RR.Ty) : LowerM RR.B
     return ⟨#[(hi, some hTy, pipeEnd 0), (ho, some hTy, pipeEnd 1), (he, some hTy, pipeEnd 2),
         (r1, some u64, .call "l2r_fs_put_str" #[] #[.var hi, ← coerce s st str])], ← ioCheck ret afterPut⟩
   return .ofExpr (← optionCases (.var inp) inTy withInput noInput)
+
+/-- The functions that run tasks handed over by the runtime, dispatching on
+their state type's tag: `l2r_run_pending_tasks()` (the final run of queued
+tasks when `main` has returned), `l2r_task_walk()` (the `sync` dependents of
+a task that just finished, in Lean's walk order) and
+`l2r_task_force_sources(a)` (the chain of pending tasks that task `a` waits
+for, deepest first). Each runs its task as a worker would (`taskStepFn`),
+then asks again. Generated once every task type is known. -/
+def taskDispatchFns : LowerM (Array RR.Item) := do
+  let tags := (← get).taskTags
+  let u64 := RR.Ty.named "u64"
+  let mk (name : String) (params : Array (String × RR.Ty)) (first : RR.Expr) (take : String) (again : RR.Expr) :
+      LowerM RR.Item := do
+    let mut chain : RR.Block := ⟨#[("none", some u64, .atom "0")], .var "none"⟩
+    for i in [:tags.size] do
+      let j := tags.size - 1 - i
+      let z := tags[j]!
+      let step ← taskStepFn z
+      chain := ⟨#[(s!"k{j}", some u64, .atom (toString j))], .ite (.atom s!"tag == k{j}")
+        ⟨#[("c", some (.app "LCell" #[.named z]), .call take #[.named z] #[]),
+          ("v", some u64, .call step #[] #[.var "c"])], again⟩ chain⟩
+    return .fn name params u64 ⟨#[("tag", some u64, first)], .block chain⟩
+  return #[
+    ← mk "l2r_run_pending_tasks" #[] (.call "l2r_task_next_tag" #[] #[]) "l2r_task_take"
+      (.call "l2r_run_pending_tasks" #[] #[]),
+    ← mk "l2r_task_walk" #[] (.call "l2r_task_walk_next" #[] #[]) "l2r_task_handed" (.call "l2r_task_walk" #[] #[]),
+    ← mk "l2r_task_force_sources" #[("a", u64)] (.call "l2r_task_source_next_at" #[] #[.var "a"]) "l2r_task_handed"
+      (.call "l2r_task_force_sources" #[] #[.var "a"])]
 
 /-- Externs whose results mention Lean-defined types get generated glue
 (translation plan §5.8); returns `none` for ordinary externs. -/

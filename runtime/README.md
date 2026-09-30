@@ -140,17 +140,22 @@ lean2rr generates the forcing functions (run the closure once, store
 `done`); `l2r_lazy_cycle<T>()` waits forever, for a thunk or task needed by
 its own computation, as native Lean does. Tasks are deferred until needed
 (translation plan §5.14); `leanrt::task` keeps the queue of pending tasks
-(holding one reference each, in the order Lean's task manager would start
-them), the stack of running tasks, cancellation flags and their
+(one per priority, holding one reference each, in the order Lean's task
+manager with one worker would start them), the walk of a finished task's
+dependents, the stack of running tasks, cancellation flags and their
 propagation. A task is identified by an address: its cell's, or the one a
-converted task records. `l2r_task_register<S>(c, tag)` queues a pending
-task (`tag` identifies `S` at exit), `l2r_task_depend_at(src, dep, sync)`
+converted task records. `l2r_task_register<S>(c, tag, prio)` queues a
+pending task (`tag` identifies `S` for the generated dispatchers), `l2r_task_depend_at(src, dep, sync)`
 records that `dep` depends on `src`, `l2r_task_begin<S>(c)` / `l2r_task_end<S>(c)`
 bracket a run (`begin` takes the task off the queue; `l2r_task_suspend<S>(c)`
-stops a `bind` task that now waits for its continuation),
+stops a `bind` task that now waits for its continuation;
+`l2r_task_walk_next()` then gives the `sync` dependents to run, and
+`l2r_task_source_next_at(a)` the pending tasks a task about to run waits
+for, deepest first, both handed over by `l2r_task_handed<S>()`),
 `l2r_task_status_at(a)` (0 waiting, 1 running, 2 finished),
 `l2r_task_query_at(a)` (for `IO.getTaskState`; 3: run it first),
-`l2r_task_cancel_at(a)`, `l2r_task_check_canceled()`,
+`l2r_task_cancel_at(a)`, `l2r_task_check_canceled()`, `l2r_task_tid_offset()`
+(added to `IO.getTID` inside tasks),
 `l2r_task_deferring()` (false during initialization, when Lean runs IO
 tasks at once), `l2r_task_eager_pure()` (a pure task may be computed at
 once), `l2r_task_manager_start()` (before `main`), `l2r_task_shutdown()`

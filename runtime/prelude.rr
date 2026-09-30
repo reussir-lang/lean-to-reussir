@@ -2648,16 +2648,36 @@ fn l2r_lcell_swap<T>(c : LCell<T>, v : T) -> T [{
     }
 }];
 
-// Queue a pending IO task (the queue keeps a reference until it runs).
+// Queue a pending task at priority `prio` (the queue keeps a reference
+// until it runs).
 #[ffi(import)]
-fn l2r_task_register<S>(c : LCell<S>, tag : u64) -> u64 [{
+fn l2r_task_register<S>(c : LCell<S>, tag : u64, prio : u64) -> u64 [{
     {
         let c = ::std::mem::ManuallyDrop::new(c);
         let p: usize = unsafe { ::std::mem::transmute_copy(&*c) };
-        leanrt::task::register(p, tag);
+        leanrt::task::register(p, tag, prio);
         0
     }
 }];
+
+// The walk of a finished task's dependents: the tag of the next `sync`
+// dependent to run (`u64::MAX`: the walk is over), which
+// `l2r_task_handed<S>()` then gives (with the queue's reference).
+#[ffi(import)]
+fn l2r_task_walk_next() -> u64 [{ leanrt::task::walk_next() }];
+
+// Before task `a` runs: the tag of the deepest pending task of the chain of
+// tasks it waits for (`u64::MAX`: none), given by `l2r_task_handed<S>()`.
+#[ffi(import)]
+fn l2r_task_source_next_at(a : u64) -> u64 [{ leanrt::task::source_next(a as usize) }];
+
+#[ffi(import)]
+fn l2r_task_handed<S>() -> LCell<S> [{ unsafe { ::std::mem::transmute_copy(&leanrt::task::handed()) } }];
+
+// Added to the thread id inside tasks (`IO.getTID`): the depth of running
+// tasks, as if each ran on a worker thread of its own.
+#[ffi(import)]
+fn l2r_task_tid_offset() -> u64 [{ leanrt::task::tid_offset() }];
 
 // A task starts / stops running (for `IO.checkCanceled` and the task's
 // state); `begin` removes it from the queue and drops the queue's reference.
