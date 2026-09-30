@@ -16,11 +16,11 @@ import argparse, fcntl, hashlib, os, subprocess, sys, tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-REUSSIR = Path(os.environ.get("L2R_REUSSIR", ROOT / "reussir"))
+REUSSIR = Path(os.environ.get("L2R_REUSSIR", ROOT / "reussir")).resolve()
 RUSTC = Path(os.environ.get(
     "L2R_RUSTC",
-    Path.home() / ".rustup/toolchains/nightly-2026-08-31-aarch64-unknown-linux-gnu/bin/rustc"))
-LEAN2RR = Path(os.environ.get("L2R_LEAN2RR", ROOT / "lean2rr" / ".lake" / "build" / "bin" / "lean2rr"))
+    Path.home() / ".rustup/toolchains/nightly-2026-08-31-aarch64-unknown-linux-gnu/bin/rustc")).resolve()
+LEAN2RR = Path(os.environ.get("L2R_LEAN2RR", ROOT / "lean2rr" / ".lake" / "build" / "bin" / "lean2rr")).resolve()
 PRELUDE = ROOT / "runtime" / "prelude.rr"
 LEANRT_SRC = ROOT / "runtime" / "leanrt" / "src"
 LEANRT_OUT = ROOT / "runtime" / "leanrt" / "target"
@@ -34,8 +34,8 @@ LEANRT_OUT = ROOT / "runtime" / "leanrt" / "target"
 NATIVE_FLAGS = ["-C", "target-cpu=native", "-C", "target-feature=-outline-atomics"]
 
 
-def run(cmd, env=None):
-    res = subprocess.run(cmd, env=env, capture_output=True, text=True)
+def run(cmd, env=None, cwd=None):
+    res = subprocess.run(cmd, env=env, cwd=cwd, capture_output=True, text=True)
     if res.returncode != 0:
         sys.stderr.write(res.stdout + res.stderr)
         sys.exit(res.returncode or 1)
@@ -100,7 +100,7 @@ def build_leanrt():
 
 def gmp_archive():
     if os.environ.get("L2R_GMP"):
-        return Path(os.environ["L2R_GMP"])
+        return Path(os.environ["L2R_GMP"]).resolve()
     prefix = subprocess.run(["lean", "--print-prefix"], capture_output=True, text=True).stdout.strip()
     return Path(prefix) / "lib" / "libgmp.a"
 
@@ -124,12 +124,14 @@ def main():
 
     rlib = build_leanrt()
     with tempfile.TemporaryDirectory() as tmp:
-        rr = Path(args.keep_rr) if args.keep_rr else Path(tmp) / "prog.rr"
+        rr = Path(args.keep_rr).resolve() if args.keep_rr else Path(tmp) / "prog.rr"
         run([str(LEAN2RR), args.module, "--root", args.root, "--emit", "rr",
              "--prelude", str(PRELUDE), "-o", str(rr)], env=env)
         rt, deps = rt_dirs()
         target_libdir = run([str(RUSTC), "--print", "target-libdir"]).stdout.strip()
-        rrc = ([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", args.output,
+        # rrc runs in the temporary directory: it leaves its polymorphic-FFI
+        # scratch files (reussir_rust_module_*) in the current directory.
+        rrc = ([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", str(Path(args.output).resolve()),
                 "--emit", "executable", "-O", args.opt,
                 "--polyffi-rust-path", str(rustc_wrapper()),
                 "--polyffi-libdir", str(rt), "--polyffi-libdir", str(deps),
@@ -140,15 +142,15 @@ def main():
                # avoidance): keep declaration-order layouts until that is fixed.
                + ["--no-pack-record-members"])
         if args.no_reuse_across_call:
-            run(rrc)
+            run(rrc, cwd=tmp)
         else:
-            res = subprocess.run(rrc + ["--reuse-across-call"], env=env, capture_output=True, text=True)
+            res = subprocess.run(rrc + ["--reuse-across-call"], env=env, cwd=tmp, capture_output=True, text=True)
             if res.returncode < 0:
                 # rrc crashed (RcCreateFusion's structural type comparison
                 # recurses forever on two structurally equal recursive types,
                 # e.g. a user list and `List`): retry without reuse across calls.
                 sys.stderr.write(f"l2r: rrc crashed (signal {-res.returncode}); retrying without --reuse-across-call\n")
-                run(rrc)
+                run(rrc, cwd=tmp)
             elif res.returncode != 0:
                 sys.stderr.write(res.stdout + res.stderr)
                 sys.exit(res.returncode)
