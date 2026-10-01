@@ -180,8 +180,8 @@ def unboxFnFn (t : RR.Ty) : LowerM String := do
 
 A `Thunk α` or `Task α` is a runtime cell `LCell<S>` holding a generated
 state `S { pending(L2RUnit -> α), busy, done(α), conv(L2RUnit -> α, Box,
-u64) }` (`lazyState`, translation plan §5.14). The functions below are
-generated once per state type. -/
+u64), busyconv(u64), convdone(α, Box, u64) }` (`lazyState`, translation plan
+§5.14). The functions below are generated once per state type. -/
 
 /-- Generate the functions `mk` builds under the name `name`, once. -/
 def lazyFn (name : String) (mk : LowerM (Array RR.Item)) : LowerM String := do
