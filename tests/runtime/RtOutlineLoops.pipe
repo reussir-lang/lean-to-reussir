@@ -1,0 +1,2 @@
+LEAN_STACK_SIZE_KB=1024 $BIN loops 3000000; echo "loops (1 MiB stack): exit $?"
+$BIN; echo "exit $?"

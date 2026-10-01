@@ -194,15 +194,19 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
     return ← fnTypeItems
   let (fnItems, st) ← (act.run ctx).run {}
   let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))
-  -- The registry's passes over the generated functions (`Opt/SinkProj`:
-  -- projections sunk into the branches that use them), then deep and long
-  -- tail paths cut into chains of functions, for rrc (`Outline`).
-  let rrProg : RRProgram := { prelude, preludeFns, types := st.typeItems ++ fnItems |>.push boxItem }
-  let fns := cfg.rrPasses.foldl (fun fns p => p rrProg fns) st.fns
-  let fns := Outline.outlineFns {} (Outline.variantTable rrProg.types prelude) (Outline.takenNames preludeFns fns) fns
+  -- Deep and long tail paths and `let` values cut into functions, for rrc
+  -- (`Outline`; first, so that the passes after it see bounded functions),
+  -- then the registry's passes over the generated functions
+  -- (`Opt/SinkProj`: projections sunk into the branches that use them).
+  let types := st.typeItems ++ fnItems |>.push boxItem
+  let (fns, stepItems) := Outline.outlineFns {} (Outline.variantTable types prelude)
+    (Outline.takenNames preludeFns st.fns) st.fns
+  let rrProg : RRProgram := { prelude, preludeFns, types := types ++ stepItems }
+  let fns := cfg.rrPasses.foldl (fun fns p => p rrProg fns) fns
   let mut out := prelude ++ "\n// ---- generated types ----\n\n"
   for it in st.typeItems do out := out ++ it.render ++ "\n"
   for it in fnItems do out := out ++ it.render ++ "\n"
+  for it in stepItems do out := out ++ it.render ++ "\n"
   out := out ++ boxItem.render ++ "\n"
   out := out ++ "// ---- generated functions ----\n\n"
   for f in fns do out := out ++ f.render ++ "\n"
