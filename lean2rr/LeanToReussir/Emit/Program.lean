@@ -124,18 +124,46 @@ partial def straightLine : Code .pure → Bool
   | .return _ => true
   | _ => false
 
+/-- Whether closed term `n`'s code is literals only (`let`s of literals,
+then `return`): spliced, its `let`s wait for their first use. -/
+partial def literalsOnly (byName : NameMap (Decl .pure)) (n : Name) : Bool :=
+  match byName.find? n with
+  | some { value := .code body, .. } =>
+    let rec go : Code .pure → Bool
+      | .let d k => d.value matches .lit _ && go k
+      | .return _ => true
+      | _ => false
+    go body
+  | _ => false
+
 /-- If closed term `n` of `inline` can be spliced into its use (see
 `spliceChainConsts`): the type of the value it returns, which its body
-binds by its last `let`. -/
+binds by its last `let`. Its code must be straight-line, and no `let` but
+a literal, or a read of a closed term of literals, may come before a read
+of another closed term that is spliced in turn: spliced, such a value
+would be computed before the whole rest of the chain and live across it
+(an `Array Float` literal whose elements are shared constants: every
+element, then every push), where evaluating the chain step by step keeps
+one at a time. -/
 def spliceable (byName : NameMap (Decl .pure)) (inline : NameSet) (n : Name) : Option Expr := do
   guard (inline.contains n)
   let cd ← byName.find? n
   let .code body := cd.value | none
-  let rec last : Code .pure → Option Expr
-    | .let d (.return x) => if x == d.fvarId then some d.type else none
-    | .let _ k => last k
-    | _ => none
-  last body
+  -- `early`: a `let` that is computed where it stands has been seen.
+  let rec check : Code .pure → Bool → Option Expr
+    | .let d (.return x), _ => if x == d.fvarId then some d.type else none
+    | .let d k, early =>
+      match d.value with
+      | .lit _ => check k early
+      | .const m _ #[] _ =>
+        if inline.contains m then
+          if literalsOnly byName m then check k early
+          else if early then none
+          else check k early
+        else check k true
+      | _ => check k true
+    | _, _ => none
+  check body false
 
 /-- The variables a `let` value reads. -/
 def letValueFVars (v : LetValue .pure) : Array FVarId :=
@@ -215,9 +243,11 @@ makes an `n`-element literal (`#[…]`, `[…]`, a `ByteArray`) a chain of `n`
 closed terms, `_closed_k := push _closed_(k-1) e_k`, and rrc compiles
 about 80 functions per second: a 100000-element array literal took ten
 minutes to build as 100000 functions calling each other. Spliced, the
-literal is one straight-line body (cut into parts by `Outline`), evaluated
-as before: once, where the constant using it is evaluated. Code that is not
-straight-line is left as it is. -/
+literal is one straight-line body (cut into parts by `Outline`, its runs of
+`Nat` literals made tables by `ArrayLits`), evaluated as before: once, where
+the constant using it is evaluated, in the same order. Code that is not
+straight-line, and chains that compute more than literals before reading
+their previous step (`spliceable`), are left as they are. -/
 def spliceChainConsts (decls : Array (Decl .pure)) (inline : NameSet) : Array (Decl .pure) := Id.run do
   if inline.isEmpty then return decls
   let byName := decls.foldl (fun m d => m.insert d.name d) ({} : NameMap (Decl .pure))
