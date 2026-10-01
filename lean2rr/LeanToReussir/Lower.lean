@@ -275,11 +275,16 @@ def lazyGetFn (z : String) : LowerM String := do
     -- the current context, it needs itself (`l2r_task_wait_running` waits
     -- forever then). A converted copy being forced (`busyconv`) runs as a
     -- task of its own cell (`l2r_task_begin`), so it is waited for by that
-    -- cell's address too.
+    -- cell's address too. A `busy` thunk is being forced on another context
+    -- (natively another thread, which this one waits for) or by its own
+    -- computation (natively a wait forever): wait until it has its value
+    -- (`l2r_thunk_wait_busy`, woken by `l2r_thunk_done`).
     let busy : RR.Block := if task then
         ⟨#[("wb", some u64, .call "l2r_task_wait_running" #[] #[.call "l2r_lcell_addr" #[zt] #[.var "c"]])],
           .call get #[] #[.var "c"]⟩
-      else .ofExpr (.call "l2r_lazy_cycle" #[t] #[])
+      else
+        ⟨#[("wb", some u64, .call "l2r_thunk_wait_busy" #[] #[.call "l2r_lcell_addr" #[zt] #[.var "c"]])],
+          .call get #[] #[.var "c"]⟩
     let getWith (other : RR.Block) : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
       lazyArm z "done" #[some "v"] (.ofExpr (.var "v")),
       lazyArm z "convdone" #[some "v", none, none] (.ofExpr (.var "v")),
@@ -305,7 +310,7 @@ def lazyGetFn (z : String) : LowerM String := do
         ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", final])] ++
       (if task then #[("e", some u64, onCell "l2r_task_end"), ("wk", some u64, .call "l2r_task_walk_if" #[] #[.var "e"]),
           ("sl", some u64, .call "l2r_std_leave_if" #[] #[.var "b"])]
-        else #[])
+        else #[("td", some u64, .call "l2r_thunk_done" #[] #[onCell "l2r_lcell_addr"])])
     let doneV := RR.Expr.ctor z (some "done") #[.var "v"]
     -- A `bind` task runs `f` (`taskBindStepFn`): it has then finished, or
     -- waits for the task it continues as; either way it is needed now.

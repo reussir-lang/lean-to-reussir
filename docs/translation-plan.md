@@ -1435,16 +1435,17 @@ running code blocks (*Blocking*, below).
   - a program polling for it: `IO.getTaskState`/`IO.hasFinished` report a
     pending task `waiting`, until the program asks again after time has
     passed (an `IO.sleep`/`dbgSleep` since the first answer) or keeps asking
-    (1000 times); the task then runs and is reported `finished` (a task
-    waiting for an unresolved promise does not run: the other contexts and
-    queued tasks run until it finishes or nothing else can, and its state is
-    reported then); a task running on another context is reported
-    `running`, and a program that keeps asking (by the same rule) lets the
-    other contexts run until it has finished or nothing else can;
+    (1000 times); the task then runs and is reported `finished`. A task
+    that cannot finish without others (it waits for an unresolved promise,
+    or for a task running on another context) does not run: the others go
+    on once (due sleepers and timers, the contexts able to run, a queued
+    task if a worker is free, as natively other threads run while the
+    program polls), and its state is reported then; so is a task running on
+    another context, at every question;
   - the running code blocks (a sleep, a lock, a promise, *Blocking* below)
-    and a worker is free for it: it starts on a context of its own; or the
-    worker picked it a while ago (5 ms) and the running code writes
-    output (below);
+    and a worker is free for it: it starts on a context of its own; or it
+    was queued a while ago (5 ms) with a worker free, and the running code
+    writes output (below);
   - `main` returning (§5.11): the queued tasks run in the order Lean's task
     manager starts them. It keeps a queue per priority and takes the first
     task of the highest non-empty one. An idle worker is woken by the first
@@ -1530,10 +1531,10 @@ running code blocks (*Blocking*, below).
   promise object). Waiting for an unresolved promise blocks (below): other
   contexts and queued tasks run, as other threads would meanwhile, until
   one resolves it; when nothing can any more, the wait lasts forever, as
-  natively. Polling a promise (`isResolved`) lets them run the same way
-  once time has passed, until it is resolved or nothing else can go on,
-  and `IO.waitAny` does not run a pending task that waits for an
-  unresolved promise. `IO.Promise.new` during initialization is Lean's
+  natively. Polling a promise (`isResolved`) lets them go on once per
+  question once time has passed, and `IO.waitAny` does not run a pending
+  task that waits for an unresolved promise (or for a task running on
+  another context). `IO.Promise.new` during initialization is Lean's
   internal panic.
 - *The event loop* (`leanrt::net`): timers, sockets, name resolution and
   signals, as libuv's loop natively on a thread of its own. An operation
@@ -1600,14 +1601,25 @@ native one does. A context does not lose the processor otherwise, except at
 `IO.sleep 0`: what natively would have run by then on other threads goes
 first: a context whose sleep is over, a due timer of the event loop and
 what its completion releases (its continuations, the contexts waiting for
-it, the tasks it queues, which a free worker starts at once), a context
-able to go on for a while (5 ms: a lock handed over, a promise resolved),
-the task the worker picked a while ago (5 ms; thread wake-ups take
-microseconds, so these would have got past anything that takes no time).
-So sleeps and timers order the output of tasks by time, as natively, as
-long as code between two outputs takes less time than the sleeps that
-order them, and a context that computes for a while lets the others print
-first. A `sleep 0` lets those run whatever their age.
+it, the tasks it queues, which a free worker starts at once), descriptors
+and signals that have become ready, a context able to go on for a while
+(5 ms: a lock handed over, a promise resolved), a task queued a while ago
+(5 ms) with a worker free for it (thread wake-ups take microseconds, so
+these would have got past anything that takes no time); then, round after
+round (up to 64), what those release in turn. What runs in those rounds
+happened before natively: its own effect points start no tasks, and let
+go first only what is due or able to run for a while (the context that
+let it run, once it has computed for 5 ms). So sleeps and timers order
+the output of tasks by time, as natively, as long as code between two
+outputs takes less time than the sleeps that order them, and a context
+that computes for a while lets the others print first. A `sleep 0` lets
+those run whatever their age (a queued task after a worker's wake-up
+time). Spawning a process and flushing a handle are effect points too.
+
+A thunk being forced on one context and needed on another (the first
+blocked in its computation, or let others run at an effect point) is
+waited for until it has its value (`l2r_thunk_wait_busy`, woken by
+`l2r_thunk_done`), as natively a thread waits for the one forcing it.
 
 `LEAN_NUM_THREADS` is read as Lean reads it (`atoi`, taken as an
 `unsigned`): 0 (or not a number) is no task manager: tasks run at once, as
@@ -1660,9 +1672,8 @@ What a single thread cannot do:
 - a deferred task is reported `waiting` at the first question even after a
   sleep, when no worker was free to start it meanwhile (a pure task
   deferred behind a pending IO task, for example);
-- a thunk that another context is forcing (it blocked inside the thunk's
-  computation) waits forever when forced again (natively it waits for the
-  value).
+- a task or context that starts or goes on late counts its sleeps and
+  timers from then (above).
 
 Tasks that wait for each other in a cycle wait forever, as natively.
 
@@ -1852,21 +1863,27 @@ Each item says what differs and when.
   when `main` returns (§5.14). Contexts never run in parallel and switch
   only when one blocks or at an effect point (output, an exit,
   `IO.sleep 0`), to what natively would have run by then (a due sleep or
-  timer, a context able to run or a task the worker picked 5 ms ago or
-  more): a loop polling shared state that another task sets never sees it
-  change unless it sleeps or prints, a context that computes without
-  output or blocking delays the others (so output that sleeps order
-  natively comes in time order only as far as the code between outputs is
-  shorter than the sleeps; a context or task made able to run less than
-  5 ms before an output comes after it, natively a race), and
-  `IO.waitAny` does not pick the fastest task. A deferred
+  timer, a context able to run or a task queued 5 ms ago or more): a loop
+  polling shared state that another task sets never sees it change unless
+  it sleeps or prints, a context that computes without output or blocking
+  delays the others (so output that sleeps order natively comes in time
+  order only as far as the code between outputs is shorter than the
+  sleeps; a context or task made able to run less than 5 ms before an
+  output comes after it, natively a race), and `IO.waitAny` does not pick
+  the fastest task. A task or context that starts or goes on late (at an
+  effect point, when the running code blocks, in the final run) counts its
+  sleeps and timers from then, natively from when a worker started it: a
+  task queued long before an effect point that then sleeps 30 ms prints
+  30 ms after that point. A pure task the program drops before any effect
+  point or block is deleted, even where a free native worker would already
+  have started it, and `IO.checkCanceled` at shutdown follows the
+  heuristics above (§5.14), not the time a task natively spent before
+  `main` returned. A deferred
   task is reported `waiting` at the first `IO.hasFinished`. The order of
   the final run is that of Lean's task manager, whose first pick is timed
   against a native worker's measured wake-up latency (about 90 µs, 20 µs
   when idle): tasks created about that far apart can come in either order,
-  as natively. A thunk that a blocked context is forcing waits forever
-  when another context forces it (natively it waits for the value).
-  Tasks other than `sync` dependents run as if
+  as natively. Tasks other than `sync` dependents run as if
   each had a fresh worker thread, so a redirection a task leaves behind
   never reaches another task (natively it can, on the same worker);
   `IO.getTID` inside a task is main's thread id plus a worker number (a

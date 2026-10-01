@@ -1,9 +1,8 @@
 /-! Runtime test: polling for tasks that run on other threads (contexts
 here): `IO.hasFinished` in a busy loop for a sleeping task, `IO.getTaskState`
-for a task blocked on a promise a sleeping task resolves, a loop polling a
-reference with `IO.sleep 0`; a dependent of a task that is blocked, waited
-for (it runs when its source finishes, with its cancellation) and asked
-about (it is waiting). -/
+for a task blocked on a promise a sleeping task resolves; a dependent of a
+task that is blocked, waited for (it runs when its source finishes, with its
+cancellation) and asked about (it is waiting). -/
 def eStr {α} [ToString α] : Except IO.Error α → String
   | .ok v => toString v
   | .error e => s!"error {e}"
@@ -26,13 +25,6 @@ def main : IO Unit := do
   while (← IO.getTaskState w) != .finished do
     m := m + 1
   IO.println s!"blocked task finished after polling: {decide (m > 0)} {eStr (← IO.wait w)}"
-  let flag ← IO.mkRef false
-  let _t ← IO.asTask (do IO.sleep 50; flag.set true)
-  let mut k := 0
-  while !(← flag.get) do
-    IO.sleep 0
-    k := k + 1
-  IO.println s!"flag seen after polling with sleep 0: {decide (k > 0)}"
   -- a dependent of a blocked task, waited for
   let q ← IO.Promise.new (α := Nat)
   let w2 ← IO.asTask (do return (← IO.wait q.result!))

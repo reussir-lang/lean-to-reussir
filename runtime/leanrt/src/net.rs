@@ -336,6 +336,18 @@ impl Drop for Ready {
     }
 }
 
+/// At an effect point: what the event loop would have seen by now (ready
+/// descriptors, signals, due timers), without waiting; whether something
+/// is to be delivered.
+pub fn poll_now() -> bool {
+    let r = reactor();
+    if r.sockets.is_empty() && r.signals.is_empty() {
+        return false;
+    }
+    wait(Some(Duration::ZERO));
+    has_fired()
+}
+
 /// Whether completions wait to be delivered.
 pub fn has_fired() -> bool {
     !reactor().fired.is_empty()

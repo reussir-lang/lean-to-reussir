@@ -48,9 +48,6 @@ pub enum Wait {
     None,
     /// The task or promise with this identity finishes.
     Cell(usize),
-    /// The same, for a program polling it (`IO.getTaskState`): also woken
-    /// when nothing else can go on.
-    CellPoll(usize),
     /// Any task finishes (`IO.waitAny` when every task is running).
     Progress,
     /// `main` has returned and waits for the remaining tasks: woken when a
@@ -96,10 +93,13 @@ struct Ctx {
     thread_base: u32,
     tasks: crate::task::CtxState,
     once: crate::once::CtxState,
-    /// A worker's first task (`task::next_tag` hands it over).
-    preselect: u32,
+    /// A worker's first task, with its entry's serial number
+    /// (`task::next_tag` hands it over if it is still that task).
+    preselect: (u32, u32),
     /// When it last became able to run (`effect`).
     ready: Instant,
+    /// It lets the others go first at an effect point (`effect_slow`).
+    at_effect: bool,
 }
 
 impl Ctx {
@@ -113,8 +113,9 @@ impl Ctx {
             thread_base,
             tasks: Default::default(),
             once: Default::default(),
-            preselect: crate::task::NONE,
+            preselect: (crate::task::NONE, 0),
             ready: Instant::now(),
+            at_effect: false,
         }
     }
 }
@@ -144,6 +145,10 @@ struct Sched {
     next_thread: u32,
     /// Free stacks for new contexts.
     pool: Vec<Stack>,
+    /// A context is letting the others go first at an effect point
+    /// (`effect_slow`): what they do meanwhile happened before it natively,
+    /// so their own effect points do not start anything more.
+    in_effect: bool,
 }
 
 static SCHED: Global<Option<Sched>> = Global(UnsafeCell::new(None));
@@ -176,6 +181,7 @@ fn init(s: &mut Option<Sched>) {
         pool_limit: pool_limit(),
         next_thread: 1,
         pool: Vec::new(),
+        in_effect: false,
     });
 }
 
@@ -192,15 +198,17 @@ fn pool_limit() -> u32 {
         if i < s.len() && (s[i] == b'-' || s[i] == b'+') {
             i += 1;
         }
-        let mut n: i64 = 0;
+        // glibc's `atoi` is `(int) strtol(s, NULL, 10)`: `strtol` saturates
+        // at the bounds of a `long`, the cast keeps the low 32 bits; Lean
+        // takes the result as an `unsigned` (`lean_init_task_manager_using`):
+        // 0 is no task manager (`task::start`), a negative number wraps.
+        let mut n: i128 = 0;
         while i < s.len() && s[i].is_ascii_digit() {
-            n = n.wrapping_mul(10).wrapping_add((s[i] - b'0') as i64);
+            n = (n * 10 + (s[i] - b'0') as i128).min(i64::MAX as i128 + 1);
             i += 1;
         }
-        // `atoi`, taken as an `unsigned` (`lean_init_task_manager_using`):
-        // 0 is no task manager (`task::start`), a negative number wraps.
-        let n = if neg { -n } else { n } as i32;
-        return n as u32;
+        let n = if neg { -n } else { n }.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        return n as i32 as u32;
     }
     std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1)
 }
@@ -257,10 +265,10 @@ pub fn workers_limit() -> u32 {
 }
 
 /// A worker's first task, once (see `task::next_tag`).
-pub fn take_preselect() -> u32 {
+pub fn take_preselect() -> (u32, u32) {
     let s = sched();
     let c = &mut s.ctxs[s.cur as usize];
-    std::mem::replace(&mut c.preselect, crate::task::NONE)
+    std::mem::replace(&mut c.preselect, (crate::task::NONE, 0))
 }
 
 /// Visit the task bookkeeping of every live context other than the running
@@ -293,7 +301,7 @@ pub fn block(w: Wait) {
     }
     s.blocked += 1;
     match w {
-        Wait::Cell(a) | Wait::CellPoll(a) => s.cell_waiters.entry(a).or_default().push(c),
+        Wait::Cell(a) => s.cell_waiters.entry(a).or_default().push(c),
         Wait::Progress | Wait::FinalRun => s.progress_waiters.push(c),
         Wait::Sleep(d) => s.sleepers.push((d, c)),
         _ => {}
@@ -339,7 +347,7 @@ fn on_finish_slow(a: usize) {
     let s = sched();
     if let Some(ws) = s.cell_waiters.remove(&a) {
         for c in ws {
-            if matches!(s.ctxs[c as usize].wait, Wait::Cell(x) | Wait::CellPoll(x) if x == a) {
+            if matches!(s.ctxs[c as usize].wait, Wait::Cell(x) if x == a) {
                 wake(c);
             }
         }
@@ -447,45 +455,69 @@ fn effect_slow() {
     if !crate::task::deferring() {
         return;
     }
-    let now = Instant::now();
-    let mut due = false;
-    if sleeper_due(now) {
-        promote_sleepers(now);
-        due = true;
-    }
-    if crate::net::due(now) {
-        // Due timers fire; completions are delivered by the event loop's
-        // context, which is then able to run.
-        crate::net::process_due(now);
-        due = crate::net::has_fired() || due;
-    }
-    let s = sched();
-    let stale = s.runnable.iter().any(|&c| now.saturating_duration_since(s.ctxs[c as usize].ready) >= STALE);
-    let picked = crate::task::picked_startable(STALE);
-    if !due && !stale && picked == crate::task::NONE {
-        return;
-    }
-    if picked != crate::task::NONE {
-        start_worker(picked);
-    }
-    // They go first, then what they release in turn (contexts woken, tasks
-    // queued that a free worker starts at once), for a few rounds.
+    // What is due goes first, then what it releases in turn (contexts
+    // woken meanwhile, tasks queued that a free worker starts at once),
+    // round after round (a bound: contexts that keep waking each other
+    // natively run beside this one). Inside such a round (`in_effect`),
+    // what runs happened before natively: its own effect points do not
+    // start tasks, and let go first only what is due or able to run for a
+    // while (the context that let it run, if it has computed since).
+    let nested = sched().in_effect;
     let mark = crate::task::queue_mark();
-    for _ in 0..8 {
-        if sched().runnable.is_empty() {
+    sched().in_effect = true;
+    for round in 0..64 {
+        let now = Instant::now();
+        let mut go = false;
+        if sleeper_due(now) {
+            promote_sleepers(now);
+            go = true;
+        }
+        if crate::net::due(now) {
+            // Due timers fire; completions are delivered by the event
+            // loop's context, which is then able to run.
+            crate::net::process_due(now);
+            go = crate::net::has_fired() || go;
+        }
+        // Descriptors and signals the event loop would have seen by now.
+        if crate::net::poll_now() {
+            go = true;
+        }
+        let s = sched();
+        if s.runnable.iter().any(|&c| {
+            let x = &s.ctxs[c as usize];
+            (round > 0 && !x.at_effect) || now.saturating_duration_since(x.ready) >= STALE
+        }) {
+            go = true;
+        }
+        if !nested {
+            let mut w = crate::task::stale_startable(STALE);
+            if w == crate::task::NONE && round > 0 {
+                w = crate::task::released_startable(mark);
+            }
+            if w != crate::task::NONE {
+                start_worker(w);
+                go = true;
+            }
+        }
+        if !go || sched().runnable.is_empty() {
             break;
         }
+        let s = sched();
+        let c = s.cur as usize;
+        s.ctxs[c].at_effect = true;
         yield_now();
-        let w = crate::task::released_startable(mark);
-        if w != crate::task::NONE {
-            start_worker(w);
-        }
+        let s = sched();
+        let c = s.cur as usize;
+        s.ctxs[c].at_effect = false;
+    }
+    if !nested {
+        sched().in_effect = false;
     }
 }
 
 /// `IO.sleep 0`: no time passes, but what natively runs meanwhile does: the
 /// contexts whose sleep has ended, due timers, the contexts able to run, a
-/// task the worker has picked.
+/// queued task a worker would have started by now.
 pub fn zero_sleep() {
     if !crate::task::deferring() {
         return;
@@ -495,9 +527,36 @@ pub fn zero_sleep() {
     if crate::net::due(now) {
         crate::net::process_due(now);
     }
-    let w = crate::task::picked_startable(Duration::ZERO);
+    crate::net::poll_now();
+    let w = crate::task::stale_startable(crate::task::WORKER_LATENCY);
     if w != crate::task::NONE {
         start_worker(w);
+    }
+    if !sched().runnable.is_empty() {
+        yield_now();
+    }
+}
+
+/// A program polling for a task that cannot finish without the others (it
+/// runs on another context, or waits for one or for a promise): natively
+/// they go on meanwhile, so they do now: due sleepers and timers, the
+/// contexts able to run, a queued task if a worker is free (as when the
+/// running code blocks).
+pub fn poll_yield() {
+    if !crate::task::deferring() {
+        return;
+    }
+    let now = Instant::now();
+    promote_sleepers(now);
+    if crate::net::due(now) {
+        crate::net::process_due(now);
+    }
+    crate::net::poll_now();
+    if sched().runnable.is_empty() {
+        let e = crate::task::startable(false);
+        if e != crate::task::NONE {
+            start_worker(e);
+        }
     }
     if !sched().runnable.is_empty() {
         yield_now();
@@ -507,7 +566,7 @@ pub fn zero_sleep() {
 /// Start queued task `e` on a new worker context (able to run).
 fn start_worker(e: u32) {
     let id = new_ctx(Kind::Worker, worker_entry);
-    sched().ctxs[id as usize].preselect = e;
+    sched().ctxs[id as usize].preselect = (e, crate::task::serial_of(e));
 }
 
 /// Mark the event loop's context (`net`) able to run: it has events to
@@ -571,7 +630,7 @@ extern "C" fn worker_entry(_: usize) -> ! {
             break;
         }
         let s = sched();
-        s.ctxs[s.cur as usize].preselect = e;
+        s.ctxs[s.cur as usize].preselect = (e, crate::task::serial_of(e));
     }
     die()
 }
@@ -664,26 +723,8 @@ fn schedule() {
             std::thread::sleep(t);
             continue;
         }
-        // Nothing can go on: a program polling for a task learns that it
-        // has not finished.
-        if wake_pollers() {
-            continue;
-        }
         crate::task::hang_thread();
     }
-}
-
-/// Wake the contexts polling for a task (`Wait::CellPoll`).
-fn wake_pollers() -> bool {
-    let s = sched();
-    let mut any = false;
-    for i in 0..s.ctxs.len() {
-        if matches!(s.ctxs[i].wait, Wait::CellPoll(_)) && s.ctxs[i].status == Status::Blocked {
-            wake(i as CtxId);
-            any = true;
-        }
-    }
-    any
 }
 
 /// Switch from the running context to `n` (able to run).

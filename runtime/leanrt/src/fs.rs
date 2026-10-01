@@ -223,8 +223,9 @@ pub fn put_str(h: &LHandle, s: &[u8]) {
     outcome(fh(h).put(s))
 }
 
-/// `Handle.flush` (`fflush`).
+/// `Handle.flush` (`fflush`): output, an effect point.
 pub fn flush(h: &LHandle) {
+    crate::sched::effect();
     outcome(fh(h).flush())
 }
 

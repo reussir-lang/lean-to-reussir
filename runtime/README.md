@@ -229,15 +229,20 @@ context switch (`coro::switch`) saves the callee-saved registers on the
 stack and swaps stack pointers (aarch64 and x86-64 assembly). The program
 exports `l2r_task_run_one_c` (lean2rr's `l2r_task_run_one`), which a new
 context calls to run its first queued task. Output (`io::stream_put`,
-`fs::put_str`, flushes) and `IO.Process.exit` are effect points
-(`sched::effect`): a context whose sleep is over, a due timer and what its
-completion releases, a context able to run for 5 ms, the task the worker
-picked 5 ms ago run first; `IO.sleep 0` lets them run whatever their age
-(`sched::zero_sleep`). `l2r_task_wait_running(a)` waits for a `busy` task
-that runs on another context; `l2r_task_wait_progress()` for some task to
-finish (`IO.waitAny`). Forcing a task that waits for one running on
+`fs::put_str`, `fs::flush`), spawning a process and `IO.Process.exit` are
+effect points (`sched::effect`): a context whose sleep is over, a due timer
+and what its completion releases, ready descriptors (`net::poll_now`), a
+context able to run for 5 ms, a task queued 5 ms ago with a worker free run
+first, round after round (up to 64; what runs in those rounds starts no
+tasks at its own effect points); `IO.sleep 0` lets them run whatever
+their age (`sched::zero_sleep`). `l2r_task_wait_running(a)` waits for a
+`busy` task that runs on another context; `l2r_thunk_wait_busy(a)` for a
+`busy` thunk until `l2r_thunk_done(a)`; `l2r_task_wait_progress()` for some
+task to finish (`IO.waitAny`). Forcing a task that waits for one running on
 another context waits for that one first (`task::source_next`); polling a
-running task blocks once the program keeps asking (`task::query`). Forcing
+task that cannot finish without the others lets them go on once per
+question (`sched::poll_yield`). A worker context remembers its first task
+with the entry's serial number. Forcing
 chains remember tasks by their entry's serial number (entries and cell
 addresses are reused). A constant's accessor calls `l2r_once_claim(slot)`
 (`once::claim`): a context that needs a constant another is computing

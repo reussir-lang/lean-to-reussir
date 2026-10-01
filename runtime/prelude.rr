@@ -2743,6 +2743,15 @@ fn l2r_ref_ptr_eq<T>(a : LRef<T>, b : LRef<T>) -> bool [{
 #[ffi(import)]
 fn l2r_once_has(slot : u64) -> bool [{ leanrt::once::has(slot) }];
 
+// A thunk has its value: whoever waits for it goes on
+// (`l2r_thunk_wait_busy`).
+#[ffi(import)]
+fn l2r_thunk_done(a : u64) -> u64 [{ { leanrt::sched::on_finish(a as usize); 0 } }];
+
+// A `busy` thunk is needed: wait until it has its value.
+#[ffi(import)]
+fn l2r_thunk_wait_busy(a : u64) -> u64 [{ { leanrt::task::thunk_wait_busy(a as usize); 0 } }];
+
 // The accessor of a constant: whether it has its value, else the caller
 // computes and sets it (another context computing it is waited for).
 #[ffi(import)]
