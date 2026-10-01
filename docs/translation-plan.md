@@ -1233,6 +1233,15 @@ A generated Reussir `#[main]` does what Lean's generated `main` does
 (`EmitC`: `initialize_Main`, then `lean_io_mark_end_initialization` and
 `lean_init_task_manager`, then `lean_run_main`, then
 `lean_finalize_task_manager`):
+0. before any of it (an ELF constructor, so before Rust's runtime starts),
+   the runtime opens the descriptors that native Lean's runtime has open
+   when the program starts: libuv's event loop opens an epoll descriptor,
+   two io_uring rings (when the kernel has them), its two signal pipes and
+   an eventfd, close-on-exec, at the lowest free numbers (3 to 10 when the
+   standard descriptors are open; a standard descriptor closed at startup is
+   taken by the first of them, as natively, so using it fails as natively).
+   `/proc/self/fd`, the numbers of the descriptors the program opens and the
+   point where opening fails with `EMFILE` are native's;
 1. it runs the startup work of §5.12 on the process's main thread (8 MiB
    stack), with `IO.initializing` answering `true`. An error there prints
    `uncaught exception: <message>` and exits with status 1 before `main`;
@@ -1880,9 +1889,6 @@ Each item says what differs and when.
   the parts is not always a sibling call and would use stack on every
   iteration, so a loop with such a body still builds slowly. A 2000-line
   `main` builds in about three minutes and 2 GB.
-- *Open descriptors*: native Lean starts with libuv's descriptors open (8
-  more), so `/proc/self/fd` listings and the point where opening files
-  fails with `EMFILE` differ.
 - *Casts that natively read an address* (§5.1): `unsafeCast` of a big
   `Nat` or `Int` to a fixed-width scalar or an enumeration natively reads
   the bits of its object's address; lean2rr uses the low bits of its value.
@@ -2010,9 +2016,7 @@ Each item says what differs and when.
   `output` reports a non-UTF-8 stderr once both pipes are at end of file
   (natively as soon as stderr is: different timing when a grandchild holds
   stdout open), and a read error on either pipe at once (natively a stdout
-  read error after `wait`). Native Lean has
-  about 8 more descriptors open (libuv's), so descriptor numbers inherited
-  by children and `EMFILE` thresholds differ.
+  read error after `wait`).
 
 **Diagnostics**
 - lean2rr's own impossibilities (a `Box` unwrap of another variant, a cast

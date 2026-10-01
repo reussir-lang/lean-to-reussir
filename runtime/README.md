@@ -314,15 +314,21 @@ and is reported at once.
 **Main thread.** `leanrt::rt::run_main(|| body())` runs the program on a
 thread with a 1 GiB stack and Lean's stack-overflow report (a fault in the
 stack guard page prints `\nStack overflow detected. Aborting.` and aborts,
-exit 134, without flushing stdout — as native).
+exit 134, without flushing stdout — as native; also a fault below the stack
+while the stack pointer is below it, which a frame without stack probes,
+such as GMP's scratch space, causes when it skips the guard page).
 `leanrt::rt::run_main2(|| init(), || body())` first runs `init` (the
-module initializers) on the calling thread, as native `main` does. Both
-put close-on-exec epoll descriptors in place of standard descriptors
-closed at startup (native Lean's libuv descriptors take their place, so
-using them fails with `EINVAL`, and children see them closed), including
-the `/dev/null` Rust's runtime substitutes; an ELF constructor records
-which were closed before Rust's runtime runs, so a `/dev/null` the program
-was given (Python's `subprocess.DEVNULL`) stays.
+module initializers) on the calling thread, as native `main` does. Every
+thread that runs Lean code calls `install_stack_overflow_handler` (its
+guard page is recorded per thread). Before `main`, an ELF constructor
+opens the descriptors native Lean's runtime has open at startup (libuv's
+epoll descriptor, two io_uring rings when the kernel has them, two signal
+pipes and an eventfd, close-on-exec, in that order at the lowest free
+numbers): `/proc/self/fd`, descriptor numbers and `EMFILE` thresholds are
+native's, and a standard descriptor closed at startup is taken by the
+first of them, as natively (using it fails with `EINVAL`, children see it
+closed). Running before Rust's runtime, the constructor also keeps Rust
+from putting `/dev/null` in the place of closed standard descriptors.
 `l2r_set_initializing(b)` sets what `IO.initializing` answers.
 
 ## Requests for lean2rr
@@ -501,10 +507,6 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   stdout open), and a read error on either pipe at once (natively a stdout
   read error after `wait`); the bytes and messages are the same, only when
   it happens differs.
-- Native Lean has libuv's descriptors open (about 8 more than here), so
-  descriptor numbers (those a child inherits, such as the `/dev/null` that
-  `Stdio.null` leaves open, as natively) and the point where a low
-  `ulimit -n` makes `open` or `spawn` fail with `EMFILE` differ.
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
 - The C `errno` reported by a handle's sticky error indicator (see file
