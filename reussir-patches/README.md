@@ -40,6 +40,6 @@ On the development machine they are applied to `./reussir` as the local
 branch `l2r-local` (ef922049 + these nine commits), which is never
 pushed. `docs/reussir-bugs/run.sh ./reussir` prints FIXED for each patched
 bug. Each patch passed adversarial review, one to three rounds until a
-round found nothing (0014: in review): code review, differential fuzzing
+round found nothing: code review, differential fuzzing
 against a reference evaluator, ASan builds, and the lean2rr runtime suite
 and corpus.

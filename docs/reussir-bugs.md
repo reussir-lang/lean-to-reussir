@@ -75,7 +75,7 @@ Builds used to check the repros (on the aarch64 test machine):
 | 10 | closure devirtualization prints types exponentially (build time) | yes, build time and memory | `--no-closure-wpd` | none | - | - |
 | 11 | interprocedural SCCP is superlinear (build time) | yes, build time of large programs | none | none | - | - |
 | 12 | the parser swaps syntax subtrees whose hashes collide | yes, wrong code or bogus errors on very large files | none | 0012 | passed | yes |
-| 13 | releasing a long list or a deep tree recurses once per cell | yes, stack overflow, 2x time and memory | none | 0013, 0014 | 0013 passed (extended after round 2); 0014 in review (round 4) | yes |
+| 13 | releasing a long list or a deep tree recurses once per cell | yes, stack overflow, 2x time and memory | none | 0013, 0014 | 0013 passed (extended after round 2); 0014 passed (round 4, revised twice) | yes |
 | 14 | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | in 0009 | passed | yes |
 | 15 | a `match` on a `Nullable` yielding a counted value does not compile | no, `Nullable` not used | - | none | - | - |
 | 16 | reuse across calls is superlinear in match nesting (build time) | yes, build time and memory | deep tail paths outlined, except in recursive functions | none | - | - |
