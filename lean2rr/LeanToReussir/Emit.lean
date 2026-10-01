@@ -1,5 +1,6 @@
 import Lean
 import LeanToReussir.Lower
+import LeanToReussir.SinkProj
 import LeanToReussir.MonoRetype
 import LeanToReussir.FloatLits
 
@@ -542,7 +543,7 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
   for it in fnItems do out := out ++ it.render ++ "\n"
   out := out ++ (RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))).render ++ "\n"
   out := out ++ "// ---- generated functions ----\n\n"
-  for f in st.fns do out := out ++ f.render ++ "\n"
+  for f in st.fns do out := out ++ f.sinkProj.render ++ "\n"
   unless st.strLits.isEmpty do out := out ++ strLitTable st.strLits
   return out
 

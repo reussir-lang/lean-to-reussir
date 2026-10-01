@@ -794,6 +794,16 @@ to a later construction:
   value only passed to calls (merge's `go l₁ ys (y :: acc)`), reusing its
   cell measured slower on the classic `mergesort`: the result keeps the
   scattered memory order of the input cells.
+- The same holds for the fields of a structure, which are projected
+  (`let f = s.0`) at the top of the alternative: when the alternative then
+  branches and one branch keeps `s` whole while only other branches use
+  the field, the projection moves into the branches that use it (a pass
+  over the generated code, `SinkProj`). An association-list update
+  `if k == k' then (k', f v) :: more else (k', v) :: go k more` keeps the
+  pair whole in the second branch; with `v` projected before the `if`, the
+  skipping branch allocated a new cons per element and freed the matched
+  one after the recursive call, which was then no longer a tail call.
+
 ### 5.6 Join points
 
 A join point is a local continuation: `jp j y := body; k`, where the code

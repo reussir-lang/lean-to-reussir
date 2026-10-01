@@ -17,3 +17,4 @@ import LeanToReussir.Passes
 import LeanToReussir.MonoTypesKeep
 import LeanToReussir.TypedToMono
 import LeanToReussir.TypedStructProjCases
+import LeanToReussir.SinkProj
