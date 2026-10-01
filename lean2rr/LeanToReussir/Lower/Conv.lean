@@ -532,6 +532,24 @@ def ctorAtTag (info : TypeInfo) (i : Nat) : Option (Name × CtorLayout) := do
   let l ← info.ctors.find? c
   return (c, l)
 
+/-- Whether some constructor of generated type `sn` read as `dn` (both
+heap objects natively when they have fields) has a native value: by its tag
+(`ctorAtTag`), a target constructor without fields, or one with fields that
+read the source's (`castFieldMap`). The conversion then goes constructor by
+constructor (`structConv`), the others unreachable. -/
+def ctorCastable (sn dn : String) : LowerM Bool := do
+  unless (← isObjectNominal sn) && (← isObjectNominal dn) do return false
+  let some si := (← get).typeInfos[sn]? | return false
+  let some di := (← get).typeInfos[dn]? | return false
+  for h : i in [:si.ctorOrder.size] do
+    let sc := si.ctorOrder[i]
+    let some sl := si.ctors.find? sc | continue
+    let some (dc, dl) := ctorAtTag di i | continue
+    if ← nativeScalarCtor dc dl then return true
+    if ← nativeScalarCtor sc sl then continue
+    if (← castFieldMap sc dc sl dl).isSome then return true
+  return false
+
 /-- See `retypable`; `assumed`: pairs of types under comparison. -/
 partial def retypableAux (a b : RR.Ty) (assumed : Array (String × String)) :
     LowerM (Option (Array (String × String))) := do
@@ -683,6 +701,12 @@ mutual
   target type is always possible (an arm that would need an impossible
   element conversion is unreachable). -/
   partial def coerce (e : RR.Expr) (src dst : RR.Ty) : LowerM RR.Expr := do
+    -- A cast the program performs between inductives that do not
+    -- correspond constructor for constructor: by constructor (see
+    -- `castFallback`), not by `tryCoerce`'s words.
+    if let (.named sn, .named dn) := (src, dst) then
+      if (← nominalHead sn) != (← nominalHead dn) && !(← isomorphic sn dn) && (← ctorCastable sn dn) then
+        return .call (← structConv sn dn) #[] #[e]
     match ← tryCoerce e src dst with
     | some r => return r
     | none =>
@@ -815,11 +839,11 @@ mutual
       | none => return none
     | _, _ => vecCoerce e src dst
 
-  /-- A cast the program performs that `tryCoerce` has no conversion for:
-  an object read as a word (`wordCastable` with `objects`: natively an
-  address, here a deterministic word), or a word read as a `USize` (here
-  `u64`, which `UInt64` shares: natively `lean_unbox` for `USize`). `none`
-  otherwise. -/
+  /-- A cast the program performs that `tryCoerce` has no conversion for: an
+  object read
+  as a word (`wordCastable` with `objects`: natively an address, here a
+  deterministic word), or a word read as a `USize` (here `u64`, which
+  `UInt64` shares: natively `lean_unbox` for `USize`). `none` otherwise. -/
   partial def castFallback (e : RR.Expr) (src dst : RR.Ty) : LowerM (Option RR.Expr) := do
     let .named dn := dst | return none
     let sn ← match src with
@@ -1293,11 +1317,16 @@ that an `unsafeCast` reads as Lean represents them (plan §5.1):
   with a constructor without fields (`isWordTarget`) read any of those, any
   other inductive and any other heap object (natively an address; here
   `objectWordBase`, see `wordOf`);
-- another inductive with constructors with fields that read the value's
-  native slots (`fieldCastable`): constructor by constructor (`structConv`),
-  or the same object when the layouts agree (`retypable`).
+- another inductive whose constructors correspond to the value's
+  (`isomorphic`): constructor by constructor (`structConv`), or the same
+  object when the layouts agree (`retypable`).
 A word or a scalar read as an object with fields (natively a number used as
-an address) has no native value and stays unreachable. -/
+an address) has no native value and stays unreachable. So does an inductive
+read as one whose constructors do not all correspond (another number of
+constructors): typed code converts such casts (`castFallback`), but every
+unboxing function would then convert from every other inductive that
+shares a constructor shape (programs over monad transformers grew by 3 to
+5 %), for casts that hardly ever occur. -/
 partial def boxCastable (vt t : RR.Ty) : LowerM Bool := do
   if vt == t then return true
   match vt, t with

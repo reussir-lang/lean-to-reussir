@@ -8,6 +8,9 @@ payloads), and casts that natively read an address (plan §5.1, §10).
   (field declaration order, `Float`/`UInt64` bits, `Nat`/`Int` fields,
   `Bool`/`UInt8`/enumeration scalars, lists of other element types):
   converted constructor by constructor through the target's layout.
+- `T`: typed casts between inductives that do not correspond constructor
+  for constructor (another number of constructors): by tag, as Lean's
+  `cases` reads them.
 - `A`: objects read as narrow words (natively bits of an address; lean2rr
   a deterministic word): only results that hold for every address are
   printed, and nothing may panic. -/
@@ -115,6 +118,17 @@ def E3.sum : E3 → Int
 
 end L
 
+namespace T
+inductive Sum3 | a | b (x : Nat) | c (y : String)
+inductive Pair2 | mk (x : Nat) (y : String)
+@[noinline] unsafe def tOptN (s : Sum3) : String := match (unsafeCast s : Option Nat) with
+  | none => "none" | some n => s!"some {n}"
+@[noinline] unsafe def tOptS (s : Sum3) : String := match (unsafeCast s : Option String) with
+  | none => "none" | some s => s!"some {s}"
+@[noinline] unsafe def tPairOpt (s : Pair2) : String := match (unsafeCast s : Option Nat) with
+  | none => "none" | some n => s!"some {n}"
+end T
+
 namespace A
 structure Pkg where
   α : Type
@@ -164,6 +178,10 @@ unsafe def runL (k : Nat) : IO Unit := do
   IO.println s!"L09 V1 as V2 {asV2 ⟨V1, ⟨⟨5 + k⟩, "v"⟩⟩}"
   IO.println s!"L10 R1 as R2 {asR2 ⟨R1, ⟨[1, 2 + k], some 3⟩⟩}"
 
+open T in
+unsafe def runT (k : Nat) : IO Unit := do
+  IO.println s!"T01 typed {tOptN .a} {tOptN (.b (6 + k))} {tOptS (.c "t")} {tPairOpt (.mk 4 "r")}"
+
 open A in
 unsafe def runA (k : Nat) : IO Unit := do
   let s : S := ⟨k, "s"⟩
@@ -174,4 +192,5 @@ unsafe def main (args : List String) : IO Unit := do
   let k := args.length
   runN k
   runL k
+  runT k
   runA k

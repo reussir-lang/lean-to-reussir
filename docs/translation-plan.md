@@ -644,13 +644,17 @@ its value is stored as `Box`.
   inductive with a constructor without fields) reads any word, any
   constructor (natively the boxed scalar of its index, or an object whose
   address is read: see the words below) and, if it is only ever a boxed
-  scalar, any other heap object. One kind of cast is left out: one whose
-  conversion would need a function value at another representation (a
-  wrapper, §5.3). Every unboxing function would then match every other
+  scalar, any other heap object. Two kinds of casts are left out. One
+  whose conversion would need a function value at another representation
+  (a wrapper, §5.3): every unboxing function would then match every other
   type with function fields at the same slots (the dictionaries of uniform
   code), each wrapper adding arms to the application functions of its
-  type: programs built from monad transformer towers grew by a fifth.
-  Such a cast panics (§10).
+  type (programs built from monad transformer towers grew by a fifth).
+  And one between inductives that do not correspond constructor for
+  constructor (another number of constructors), which typed code converts:
+  every unboxing function would convert from every inductive sharing a
+  constructor shape with its own (3 to 5 % more code). Such a cast panics
+  (§10).
   A boxed unit unwraps to the zero of `T`: a unit used at another type is
   Lean's `box(0)` placeholder (§2.7). Any other variant is unreachable.
 - Conversions are inserted wherever a value's Reussir type differs from
@@ -732,10 +736,17 @@ its value is stored as `Box`.
     is `x = b`, `y = a`. Same-size scalars in the scalar area are
     reinterpreted: a `UInt64` field read as `Float` is its bits. The
     conversion goes constructor by constructor, as Lean's `cases` reads the
-    value: a constructor without fields of the target is selected whatever
-    the source constructor at that tag holds; a source constructor without
-    fields read as a target constructor with fields has no value
-    (unreachable).
+    value: by tag (past the target's last constructor, the last one, as
+    Lean's `switch`), a constructor without fields of the target is
+    selected whatever the source constructor at that tag holds; a source
+    constructor without fields, or one with fewer fields, read as a target
+    constructor with fields has no value (unreachable). Types that
+    correspond constructor for constructor (`isomorphic`) convert wherever
+    their representations meet; others whose constructors with fields read
+    some of the source's (`Sum3 | a | b (x : Nat) | c (y : String)` read
+    as `Option`) only where the program casts (`coerce`), so that
+    asking whether two function types convert (§5.3) does not pair every
+    inductive with every other.
   - *Words*: `Nat`, `Int`, `UInt8/16/32`, `Char`, `Bool`, enumerations and
     constructors without fields are boxed scalars natively, and convert as
     Lean's `lean_unbox` reads them: truncated to the target's width
@@ -1940,9 +1951,8 @@ Each item says what differs and when.
   source does not have, a `UInt64` cell read as `Nat`; and, through a
   `Box` only, a cast whose conversion would need a function value at
   another representation, or between inductives whose constructors do not
-  all correspond (another number of constructors, or a constructor with
-  fields read where the other type has more), which typed code converts
-  (§5.1).
+  all correspond (another number of constructors), which typed code
+  converts (§5.1).
 - *Pointer identity* (§9): a value converted to another representation
   answers its original's identity (a thunk or task through its recorded
   original, §5.14; a record, list or array through the runtime's origin
