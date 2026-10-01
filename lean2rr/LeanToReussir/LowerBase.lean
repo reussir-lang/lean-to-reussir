@@ -88,6 +88,10 @@ structure LowerCtx where
   /-- Constants evaluated where they are used instead of cached in a
   once-cell (`PassConfig.uncachedConsts`, see `lowerDecl`). -/
   uncachedConsts : NameSet := {}
+  /-- Unary Lean definitions returning a `String` that are replaced by a
+  prelude function with the same results: definition ↦ prelude function and
+  its parameter type (`PassConfig.preludeReplacements`). -/
+  preludeReplacements : NameMap (String × RR.Ty) := {}
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/

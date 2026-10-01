@@ -33,6 +33,10 @@ structure PassConfig where
   /-- Constants evaluated where they are used instead of cached in a
   once-cell, from the mono declarations and the entry point's roots. -/
   uncachedConsts : Array (Decl .pure) → Array Name → NameSet := fun _ _ => {}
+  /-- Unary Lean definitions returning a `String` replaced by a prelude
+  function with the same results (definition ↦ prelude function and its
+  parameter type). -/
+  preludeReplacements : NameMap (String × RR.Ty) := {}
   /-- The hooks of code lowering. -/
   lower : LowerHooks := {}
   /-- Passes over the generated Reussir functions (before the program text is

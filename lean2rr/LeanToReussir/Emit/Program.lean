@@ -135,7 +135,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
   let uncachedConsts := cfg.uncachedConsts decls roots
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
                           preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls,
-                          uncachedConsts }
+                          uncachedConsts, preludeReplacements := cfg.preludeReplacements }
   let act : LowerM (Array RR.Item) := do
     -- `Box` always exists (with at least the unit variant, `box(0)`): types
     -- may mention it even when nothing is ever boxed.

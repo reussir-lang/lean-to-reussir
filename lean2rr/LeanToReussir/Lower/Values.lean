@@ -38,15 +38,12 @@ def ctorBuild (c : Name) (fullRt : RR.Ty) (vals : Array RR.Expr) : LowerM RR.Exp
     | none => throwError "lean2rr: constructor {c} of non-nominal type {tn}"
   | t => throwError "lean2rr: constructor {c} at type {t.render}"
 
-/-- Lean definitions replaced by prelude functions with the same results
-(runtime requests 12, 27): `Nat.repr` divides by 10 digit by digit, and
-`Nat.reprFast` reads a table of strings through a once-cell. -/
+/-- The prelude function replacing a call of `f` (an instance of a Lean
+definition the configuration replaces, see `LowerCtx.preludeReplacements`),
+and its parameter type. -/
 def preludeReplacement? (f : Name) : LowerM (Option (String × RR.Ty)) := do
   let orig := ((← read).keys.find? f).map (·.decl) |>.getD f
-  match orig with
-  | ``Nat.repr | ``Nat.reprFast => return some ("l2r_nat_repr", .named "Nat")
-  | ``Int.repr => return some ("l2r_int_repr", .named "Int")
-  | _ => return none
+  return (← read).preludeReplacements.find? orig
 
 /-- A saturated call of an `ST.Ref` operation: the reference arguments are
 passed at their own representation (a typed reference, or a `Box`; see
