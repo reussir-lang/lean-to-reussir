@@ -1,4 +1,4 @@
-From ae4e9b9e32437e76f2af78edfe36c572c27835fc Mon Sep 17 00:00:00 2001
+From c66d301a02b7d7753a5c0adcf3aa5046d702221c Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Thu, 1 Oct 2026 10:10:05 -0400
 Subject: [PATCH] l2r-local: bug 13b: free cells deep through records with a
@@ -22,30 +22,47 @@ started while one runs returns at once, so the outermost one runs all the
 work). drop_and_free, which only runs from a drain, releases a cell's
 members (deferring its record boxes) but the last record box, frees the
 cell, and releases that box by a tail call when its count is 1, so a chain
-is still a loop. Draining dtors no longer claim nocallback.
+is still a loop. Draining dtors and drop_and_free do not claim nocallback.
+drop_and_free is now named drop_and_free_in_drain, as its contract changed
+(it must run inside a drain), so it cannot merge, as a linkonce_odr
+definition, with one from an rrc without the stack.
+
+Like Lean's list, the stack takes no memory per pending cell (freeing a
+list whose elements are boxes keeps every element pending until the spine
+is freed): consecutive deferred cells form one entry, linked through the
+cells themselves. A deferred cell's count is known to be 1, so 48 bits of
+its header word (the count, and the upper half of the word after it,
+padding or a fused tag below 2^16, which is kept) hold the offset to the
+previous cell (40 bits, in 8-byte units) and that cell's release function
+(the same as this cell's, or an index in a small per-thread table emptied
+with the stack). The compiler defers such boxes through
+__reussir_drop_defer_wide; a box without that header room is deferred
+unlinked (__reussir_drop_defer), and a box of a record with no managed
+members is freed at once, not deferred (it cannot recurse and has no
+effect to order). The stack shrinks back after a large drain.
 
 The runtime also lets a host share the stack (active, depth, defer_step,
 run_step), so that a host's own iterative frees and the glue release
 everything in one order.
 ---
- crates/reussir-rt/src/drop.rs                 | 101 +++++++
+ crates/reussir-rt/src/drop.rs                 | 257 +++++++++++++++
  crates/reussir-rt/src/lib.rs                  |   1 +
- crates/reussir-rt/src/symbols.rs              |   3 +
+ crates/reussir-rt/src/symbols.rs              |   4 +
  include/Reussir/IR/ReussirOps.td              |  24 ++
- .../AcquireDropExpansion.cpp                  | 268 ++++++------------
- .../BasicOpsLowering/BasicOpsLowering.cpp     |  40 ++-
+ .../AcquireDropExpansion.cpp                  | 307 ++++++++----------
+ .../BasicOpsLowering/BasicOpsLowering.cpp     |  58 +++-
  lib/IR/ReussirOps.cpp                         |  28 +-
  tests/integration/frontend/drop_long_list.c   |   4 +-
- tests/integration/frontend/drop_long_list.rr  |  15 +-
- 9 files changed, 299 insertions(+), 185 deletions(-)
+ tests/integration/frontend/drop_long_list.rr  |  17 +-
+ 9 files changed, 517 insertions(+), 183 deletions(-)
  create mode 100644 crates/reussir-rt/src/drop.rs
 
 diff --git a/crates/reussir-rt/src/drop.rs b/crates/reussir-rt/src/drop.rs
 new file mode 100644
-index 00000000..b31fd822
+index 00000000..d20c20c5
 --- /dev/null
 +++ b/crates/reussir-rt/src/drop.rs
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,257 @@
 +//! Pending releases of the compiler's drop glue.
 +//!
 +//! Freeing a value releases the cells it holds, and theirs, and so on. Doing
@@ -53,11 +70,27 @@ index 00000000..b31fd822
 +//! the drop glue instead hands the members it frees to one stack of pending
 +//! work per thread, as Lean's `lean_del` does with its to-do list: a member
 +//! whose last reference the glue drops is pushed together with the glue
-+//! function that releases it ([`__reussir_drop_defer`]), and the outermost
-+//! drop empties the stack ([`__reussir_drop_drain`]), last pushed first. The
-+//! depth of the native stack stays bounded however deep the value is, and
-+//! resources held in records are released in Lean's order (a record's last
-+//! member first).
++//! function that releases it ([`__reussir_drop_defer_wide`],
++//! [`__reussir_drop_defer`]), and the outermost drop empties the stack
++//! ([`__reussir_drop_drain`]), last pushed first. The depth of the native
++//! stack stays bounded however deep the value is, and resources held in
++//! records are released in Lean's order (a record's last member first).
++//!
++//! Like Lean's list, the stack takes no memory per pending cell: consecutive
++//! deferred cells form one entry, a run, linked through the cells
++//! themselves. A deferred cell's count is known to be 1 and nothing else
++//! references it, and the compiler defers through
++//! [`__reussir_drop_defer_wide`] a cell whose first 8 bytes are header: the
++//! 32-bit count, then a 32-bit word that is padding or the variant's tag,
++//! below 2^16. The link to the cell pushed before it takes the count and the
++//! upper 16 bits of that word (48 bits; the tag is kept): the offset in
++//! 8-byte units (40 bits) and its release function (8 bits: the same as
++//! this cell's, or an index in a small per-thread table, emptied whenever
++//! the stack is). Both are set back when the cell is popped. A cell that
++//! cannot be linked starts a new run: one deferred through
++//! [`__reussir_drop_defer`] (no free header bits), an immediate's shared
++//! dummy box (nonzero top byte), one farther than 2^42 bytes from the
++//! previous cell, or a new function with the table full.
 +//!
 +//! Code that frees other kinds of objects (a host runtime's containers, say)
 +//! can share the stack, so that one free releases everything in one order:
@@ -75,13 +108,30 @@ index 00000000..b31fd822
 +
 +#[derive(Clone, Copy)]
 +enum Work {
-+    Release(*mut u8, Release),
++    /// `n` deferred cells, the last pushed at `head`, to be released with
++    /// `release`; every cell of the run but the first pushed links to the
++    /// cell pushed before it (see the module comment).
++    Run { release: Release, head: *mut u8, n: u32 },
 +    Step(usize, Step),
 +}
++
++const _: () = assert!(core::mem::size_of::<Work>() <= 24);
++
++/// Capacity kept after a drain: the stack shrinks back to this once a large
++/// drop has emptied it.
++const KEEP: usize = 64;
++
++/// A link's release index meaning "the same function as this cell's".
++const SAME: u32 = 0xff;
++
++/// Offsets (in 8-byte units) a link can hold: 40 bits, signed.
++const OFFSET_BITS: u32 = 40;
 +
 +thread_local! {
 +    static PENDING: RefCell<Vec<Work>> = const { RefCell::new(Vec::new()) };
 +    static DRAINING: Cell<bool> = const { Cell::new(false) };
++    /// The release functions that links name, by index (at most 255).
++    static RELEASES: RefCell<Vec<Release>> = const { RefCell::new(Vec::new()) };
 +}
 +
 +/// Whether the current thread is emptying its pending stack (work started
@@ -91,7 +141,9 @@ index 00000000..b31fd822
 +    DRAINING.with(|draining| draining.get())
 +}
 +
-+/// The number of pending entries (a step can tell whether it pushed work).
++/// The number of entries on the pending stack. Work pushed while a step runs
++/// (the step is then the top entry) makes a new entry, so a step can tell
++/// whether a release it made pushed work.
 +#[inline]
 +pub fn depth() -> usize {
 +    PENDING.with(|pending| pending.borrow().len())
@@ -110,10 +162,108 @@ index 00000000..b31fd822
 +    unsafe { __reussir_drop_drain() };
 +}
 +
++/// The link's index for `prev_release`, the function of the cell linked to,
++/// from a cell released with `release`.
++fn release_index(prev_release: Release, release: Release) -> Option<u32> {
++    if prev_release as usize == release as usize {
++        return Some(SAME);
++    }
++    RELEASES.with(|releases| {
++        let mut releases = releases.borrow_mut();
++        match releases
++            .iter()
++            .rposition(|&known| known as usize == prev_release as usize)
++        {
++            Some(index) => Some(index as u32),
++            None if releases.len() < SAME as usize => {
++                releases.push(prev_release);
++                Some(releases.len() as u32 - 1)
++            }
++            None => None,
++        }
++    })
++}
++
++/// Links `cell`, deferred with `release` and with a wide header, to `prev`,
++/// the head of the run on top, deferred with `prev_release`; answers
++/// whether it did.
++unsafe fn link(cell: *mut u8, release: Release, prev: *mut u8, prev_release: Release) -> bool {
++    let (at, to) = (cell as usize, prev as usize);
++    // An immediate's dummy box (nonzero top byte) is shared: never written.
++    if at >> 56 != 0 || (at | to) & 7 != 0 {
++        return false;
++    }
++    let units = (to as isize).wrapping_sub(at as isize) >> 3;
++    let limit = 1isize << (OFFSET_BITS - 1);
++    if units == 0 || !(-limit..limit).contains(&units) {
++        return false;
++    }
++    let Some(index) = release_index(prev_release, release) else {
++        return false;
++    };
++    let units = units as u64;
++    let words = cell.cast::<u32>();
++    unsafe {
++        words.write(((units as u32 & 0xff_ffff) << 8) | index);
++        let tag = words.add(1).read() & 0xffff;
++        words.add(1).write((((units >> 24) as u32 & 0xffff) << 16) | tag);
++    }
++    true
++}
++
++/// The cell that `cell` links to and the index of its release function;
++/// sets the header back (count 1, the upper half of the tag word 0).
++unsafe fn unlink(cell: *mut u8) -> (*mut u8, u32) {
++    let words = cell.cast::<u32>();
++    let (low, high) = unsafe { (words.read(), words.add(1).read()) };
++    unsafe {
++        words.write(1);
++        words.add(1).write(high & 0xffff);
++    }
++    let raw = (((high >> 16) as u64) << 24) | (low >> 8) as u64;
++    let units = ((raw << (64 - OFFSET_BITS)) as i64) >> (64 - OFFSET_BITS);
++    (cell.wrapping_offset(units as isize * 8), low & 0xff)
++}
++
++fn defer(cell: *mut u8, release: Release, wide: bool) {
++    PENDING.with(|pending| {
++        let mut pending = pending.borrow_mut();
++        if wide
++            && let Some(Work::Run {
++                release: head_release,
++                head,
++                n,
++            }) = pending.last_mut()
++            && *n < u32::MAX
++            && unsafe { link(cell, release, *head, *head_release) }
++        {
++            *head_release = release;
++            *head = cell;
++            *n += 1;
++            return;
++        }
++        pending.push(Work::Run {
++            release,
++            head: cell,
++            n: 1,
++        });
++    });
++}
++
 +/// Defers `release(cell)` until the current thread drains its pending work.
++/// `cell` is a box whose count was read as 1 and which nothing else
++/// references (or an immediate's dummy box); the cell is not written.
 +#[unsafe(no_mangle)]
 +pub unsafe extern "C" fn __reussir_drop_defer(cell: *mut u8, release: Release) {
-+    PENDING.with(|pending| pending.borrow_mut().push(Work::Release(cell, release)));
++    defer(cell, release, false);
++}
++
++/// [`__reussir_drop_defer`] for a cell whose first 8 bytes are header: its
++/// 32-bit count, then padding or a tag below 2^16 as a 32-bit word. The
++/// cell may be linked through them.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __reussir_drop_defer_wide(cell: *mut u8, release: Release) {
++    defer(cell, release, true);
 +}
 +
 +/// Runs the current thread's pending work, last pushed first, until none is
@@ -126,17 +276,32 @@ index 00000000..b31fd822
 +        return;
 +    }
 +    loop {
-+        let top = PENDING.with(|pending| {
-+            let pending = pending.borrow();
-+            pending.last().map(|&work| (pending.len() - 1, work))
-+        });
-+        match top {
-+            None => break,
-+            Some((_, Work::Release(cell, release))) => {
-+                PENDING.with(|pending| pending.borrow_mut().pop());
-+                unsafe { release(cell) };
++        let next = PENDING.with(|pending| {
++            let mut pending = pending.borrow_mut();
++            let len = pending.len();
++            match pending.last_mut() {
++                None => None,
++                Some(Work::Run { release, head, n }) => {
++                    let (popped, cell) = (*release, *head);
++                    if *n == 1 {
++                        pending.pop();
++                    } else {
++                        let (prev, index) = unsafe { unlink(cell) };
++                        *head = prev;
++                        if index != SAME {
++                            *release = RELEASES.with(|releases| releases.borrow()[index as usize]);
++                        }
++                        *n -= 1;
++                    }
++                    Some(Ok((popped, cell)))
++                }
++                Some(&mut Work::Step(p, step)) => Some(Err((len - 1, p, step))),
 +            }
-+            Some((index, Work::Step(p, step))) => {
++        });
++        match next {
++            None => break,
++            Some(Ok((release, cell))) => unsafe { release(cell) },
++            Some(Err((index, p, step))) => {
 +                if unsafe { step(p) } {
 +                    PENDING.with(|pending| {
 +                        pending.borrow_mut().remove(index);
@@ -145,6 +310,14 @@ index 00000000..b31fd822
 +            }
 +        }
 +    }
++    // Nothing is pending, so no link names a table entry.
++    RELEASES.with(|releases| releases.borrow_mut().clear());
++    PENDING.with(|pending| {
++        let mut pending = pending.borrow_mut();
++        if pending.capacity() > KEEP {
++            pending.shrink_to(KEEP);
++        }
++    });
 +    DRAINING.with(|draining| draining.set(false));
 +}
 diff --git a/crates/reussir-rt/src/lib.rs b/crates/reussir-rt/src/lib.rs
@@ -160,22 +333,23 @@ index 3a2dd1ee..389617ed 100644
  pub mod instrument;
  pub mod nullable;
 diff --git a/crates/reussir-rt/src/symbols.rs b/crates/reussir-rt/src/symbols.rs
-index 37adc7d6..4a1847ad 100644
+index 37adc7d6..29126f6c 100644
 --- a/crates/reussir-rt/src/symbols.rs
 +++ b/crates/reussir-rt/src/symbols.rs
 @@ -14,6 +14,7 @@ use crate::alloc::{
      __reussir_allocate, __reussir_allocate_small, __reussir_dealloc_unsized, __reussir_deallocate,
      __reussir_realloc_unsized, __reussir_reallocate,
  };
-+use crate::drop::{__reussir_drop_defer, __reussir_drop_drain};
++use crate::drop::{__reussir_drop_defer, __reussir_drop_defer_wide, __reussir_drop_drain};
  use crate::instrument::__reussir_report_nonlinear_usage;
  use crate::panic::__reussir_panic;
  #[cfg(feature = "pjrt")]
-@@ -60,6 +61,8 @@ pub fn exported_symbols() -> &'static [RuntimeSymbol] {
+@@ -60,6 +61,9 @@ pub fn exported_symbols() -> &'static [RuntimeSymbol] {
          __reussir_realloc_unsized,
          __reussir_panic,
          __reussir_report_nonlinear_usage,
 +        __reussir_drop_defer,
++        __reussir_drop_defer_wide,
 +        __reussir_drop_drain,
          __reussir_freeze_flex_object,
          __reussir_cleanup_region,
@@ -216,10 +390,10 @@ index f127a2df..bda58a9a 100644
      : ReussirRcOp<
            "create", [AttrSizedOperandSegments,
 diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
-index 0de140da..69e4771b 100644
+index 0de140da..d6569ad9 100644
 --- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
 +++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
-@@ -55,19 +55,20 @@ namespace reussir {
+@@ -55,19 +55,21 @@ namespace reussir {
  //===----------------------------------------------------------------------===//
  // Releases inside drop glue
  //===----------------------------------------------------------------------===//
@@ -242,18 +416,19 @@ index 0de140da..69e4771b 100644
 +// freeing a value deep through records takes bounded stack. No token
 +// produced inside drop glue can be reused, so there a member that is a plain
 +// shared record box is, when its count is 1, deferred with its type's
-+// `drop_and_free` (else decremented); other members are released as before.
++// `drop_and_free` (else decremented), unless its record has no managed
++// members (a leaf, freed at once); other members are released as before.
 +// `drop_in_place` (the glue entry: it drops a record's contents) drains the
 +// stack before returning. `drop_and_free`, which only ever runs from that
 +// drain, frees a cell whose count was read as 1: per arm it releases the
-+// members (deferring the record boxes) but the last record box, frees the
-+// cell, and then releases that last box directly, by a tail call when its
-+// count is 1, so a chain is a loop. Releases outside drop glue (whose tokens
-+// may be reused) are unchanged.
++// members (deferring the record boxes) but the last non-leaf record box,
++// frees the cell, and then releases that last box directly, by a tail call
++// when its count is 1, so a chain is a loop. Releases outside drop glue
++// (whose tokens may be reused) are unchanged.
  
  namespace {
  
-@@ -80,58 +81,9 @@ bool isPlainSharedRecordBox(RcType rcType) {
+@@ -80,58 +82,9 @@ bool isPlainSharedRecordBox(RcType rcType) {
    return record && record.getName() && record.getComplete();
  }
  
@@ -315,23 +490,49 @@ index 0de140da..69e4771b 100644
  }
  
  // The compound payload of arm `tag` of a variant (or the compound itself).
-@@ -146,30 +98,27 @@ RecordType compoundPayload(RecordType record, std::optional<size_t> tag) {
+@@ -146,30 +99,66 @@ RecordType compoundPayload(RecordType record, std::optional<size_t> tag) {
    return payload;
  }
  
 -bool releasesThroughDropAndFree(RcType rcType) {
 -  if (!isPlainSharedRecordBox(rcType))
--    return false;
++// Whether freeing a cell of `record` releases anything besides the cell:
++// some arm has a member that is not trivially copyable. A cell without
++// (a leaf) is freed directly, never deferred: that cannot recurse and has
++// no effect to order.
++bool hasManagedMembers(RecordType record) {
++  auto anyManaged = [](RecordType payload) {
++    for (auto [memberTy, memberIsField] :
++         llvm::zip(payload.getMembers(), payload.getMemberIsField()))
++      if (!memberIsField &&
++          !isTriviallyCopyable(getProjectedType(
++              memberTy, false, Capability::unspecified, AtomicKind::normal)))
++        return true;
+     return false;
 -  auto record = llvm::cast<RecordType>(rcType.getElementType());
--  if (record.isCompound())
++  };
+   if (record.isCompound())
 -    return !chainMembers(record, record).empty();
 -  for (size_t tag = 0, n = record.getMembers().size(); tag < n; ++tag)
 -    if (RecordType payload = compoundPayload(record, tag))
 -      if (!chainMembers(payload, record).empty())
 -        return true;
--  return false;
--}
--
++    return anyManaged(record);
++  for (size_t tag = 0, n = record.getMembers().size(); tag < n; ++tag) {
++    RecordType payload = compoundPayload(record, tag);
++    if (!payload || anyManaged(payload))
++      return true;
++  }
+   return false;
+ }
+ 
++// A deferrable box whose record has managed members.
++bool isDeferredNonLeaf(mlir::Type type) {
++  return isDeferrable(type) &&
++         hasManagedMembers(llvm::cast<RecordType>(
++             llvm::cast<RcType>(type).getElementType()));
++}
++
  mlir::func::FuncOp getOrCreateDropAndFree(mlir::ModuleOp moduleOp,
                                            RcType rcType,
                                            mlir::PatternRewriter &rewriter);
@@ -341,6 +542,9 @@ index 0de140da..69e4771b 100644
 -                     mlir::ModuleOp moduleOp, mlir::Value rc) {
 -  mlir::func::FuncOp dropAndFree = getOrCreateDropAndFree(
 -      moduleOp, llvm::cast<RcType>(rc.getType()), rewriter);
++void emitLastRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
++                     mlir::ModuleOp moduleOp, mlir::Value value);
++
 +// Defers `releaseFn(value)` to the thread's pending stack.
 +void emitDefer(mlir::PatternRewriter &rewriter, mlir::Location loc,
 +               mlir::Value value, mlir::func::FuncOp releaseFn) {
@@ -350,9 +554,14 @@ index 0de140da..69e4771b 100644
 +}
 +
 +// The release of a record box `value` in drop glue: deferred with its type's
-+// drop_and_free when its count is 1, otherwise decremented.
++// drop_and_free when its count is 1, otherwise decremented. A leaf is freed
++// at once.
 +void emitDeferredRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
 +                         mlir::ModuleOp moduleOp, mlir::Value value) {
++  if (!isDeferredNonLeaf(value.getType())) {
++    emitLastRelease(rewriter, loc, moduleOp, value);
++    return;
++  }
 +  auto rcType = llvm::cast<RcType>(value.getType());
 +  mlir::func::FuncOp dropAndFree =
 +      getOrCreateDropAndFree(moduleOp, rcType, rewriter);
@@ -362,7 +571,7 @@ index 0de140da..69e4771b 100644
    mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
    mlir::Value isOne = mlir::arith::CmpIOp::create(
        rewriter, loc, mlir::arith::CmpIPredicate::eq, count, one);
-@@ -178,74 +127,39 @@ void emitGlueRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+@@ -178,74 +167,39 @@ void emitGlueRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
        ReussirExpectOp::create(rewriter, loc, isOne, true).getLikely(),
        /*withElseRegion=*/true);
    rewriter.setInsertionPoint(ifOp.thenBlock()->getTerminator());
@@ -465,7 +674,7 @@ index 0de140da..69e4771b 100644
  }
  
  // rc.dec of `rc` and the free of its token.
-@@ -285,33 +199,37 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+@@ -285,33 +239,37 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
        moduleOp->hasAttr(kSpecialPtrTagAttr) &&
        rcType.mayCarrySpecialPointerTag())
      return;
@@ -502,7 +711,7 @@ index 0de140da..69e4771b 100644
 +  std::optional<size_t> last;
 +  for (auto [idx, memberTy, memberIsField] : llvm::enumerate(
 +           payload.getMembers(), payload.getMemberIsField()))
-+    if (!memberIsField && isDeferrable(projected(idx)))
++    if (!memberIsField && isDeferredNonLeaf(projected(idx)))
 +      last = idx;
 +  mlir::Value lastValue;
 +  if (last)
@@ -526,7 +735,7 @@ index 0de140da..69e4771b 100644
    }
    // Free the cell: a variant cell has its arm's size.
    auto layout =
-@@ -325,7 +243,8 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+@@ -325,14 +283,18 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
    mlir::Value token =
        ReussirRcReinterpretOp::create(rewriter, loc, tokenType, rc);
    ReussirTokenFreeOp::create(rewriter, loc, token);
@@ -536,7 +745,31 @@ index 0de140da..69e4771b 100644
  }
  
  mlir::func::FuncOp getOrCreateDropAndFree(mlir::ModuleOp moduleOp,
-@@ -488,12 +407,11 @@ private:
+                                           RcType rcType,
+                                           mlir::PatternRewriter &rewriter) {
+   auto record = llvm::cast<RecordType>(rcType.getElementType());
+-  std::string name = ("_RINvNvC4core9intrinsic13drop_and_free" +
++  // Named `drop_and_free_in_drain`: it must run inside a drain (it defers
++  // members and does not drain), so it must not merge, as a linkonce_odr
++  // definition, with a `drop_and_free` from an rrc without the pending stack.
++  std::string name = ("_RINvNvC4core9intrinsic22drop_and_free_in_drain" +
+                       record.getName().getValue().ltrim("_R") + "E")
+                          .str();
+   if (auto existing = moduleOp.lookupSymbol<mlir::func::FuncOp>(name))
+@@ -346,9 +308,11 @@ mlir::func::FuncOp getOrCreateDropAndFree(mlir::ModuleOp moduleOp,
+   func->setAttr(kDropGlueAttr, rewriter.getUnitAttr());
+   func->setAttr("llvm.linkage", rewriter.getAttr<mlir::LLVM::LinkageAttr>(
+                                     mlir::LLVM::linkage::Linkage::LinkonceODR));
++  // No `nocallback`: releases reach the module again (FFI release hooks, the
++  // drain).
+   func->setAttr("llvm.passthrough",
+                 rewriter.getStrArrayAttr(
+-                    {"mustprogress", "nounwind", "willreturn", "nocallback"}));
++                    {"mustprogress", "nounwind", "willreturn"}));
+   inheritSanitizerPassthrough(moduleOp, func);
+   func.setArgAttr(0, "llvm.nonnull", rewriter.getUnitAttr());
+   func.setArgAttr(0, "llvm.noundef", rewriter.getUnitAttr());
+@@ -488,12 +452,11 @@ private:
    mlir::LogicalResult rewriteDropRc(RcType rcType, ReussirRefDropOp op,
                                      mlir::PatternRewriter &rewriter) const {
      if (auto func = op->getParentOfType<mlir::func::FuncOp>();
@@ -553,10 +786,10 @@ index 0de140da..69e4771b 100644
        return mlir::success();
      }
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 82305558..81bc94a4 100644
+index 82305558..9712f280 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-@@ -633,6 +633,36 @@ struct ReussirRcFetchSubConversionPattern
+@@ -633,6 +633,54 @@ struct ReussirRcFetchSubConversionPattern
    }
  };
  
@@ -565,18 +798,36 @@ index 82305558..81bc94a4 100644
 +    : public mlir::OpConversionPattern<ReussirRcDeferReleaseOp> {
 +  using OpConversionPattern::OpConversionPattern;
 +
++  // Whether the box's first 8 bytes are header: the 32-bit count, then a
++  // fused tag below 2^16 or padding. The runtime then links the deferred
++  // cell through the count and the word's upper 16 bits.
++  static bool hasWideHeader(RcType rcType, const mlir::DataLayout &layout) {
++    RcBoxType box = rcType.getInnerBoxType();
++    auto record = llvm::dyn_cast<RecordType>(box.getElementType());
++    if (!record || box.isRegional())
++      return false;
++    if (box.isHeaderFused())
++      return record.getMembers().size() <= (1u << 16);
++    return record.isCompound() && layout.getTypeABIAlignment(record) >= 8;
++  }
++
 +  mlir::LogicalResult
 +  matchAndRewrite(ReussirRcDeferReleaseOp op, OpAdaptor adaptor,
 +                  mlir::ConversionPatternRewriter &rewriter) const override {
 +    auto ptrTy = mlir::LLVM::LLVMPointerType::get(rewriter.getContext());
 +    auto module = op->getParentOfType<mlir::ModuleOp>();
-+    mlir::LLVM::LLVMFuncOp defer = module.lookupSymbol<mlir::LLVM::LLVMFuncOp>(
-+        "__reussir_drop_defer");
++    llvm::StringRef name =
++        hasWideHeader(op.getRcPtr().getType(),
++                      mlir::DataLayout::closest(op.getOperation()))
++            ? "__reussir_drop_defer_wide"
++            : "__reussir_drop_defer";
++    mlir::LLVM::LLVMFuncOp defer =
++        module.lookupSymbol<mlir::LLVM::LLVMFuncOp>(name);
 +    if (!defer) {
 +      mlir::OpBuilder::InsertionGuard guard(rewriter);
 +      rewriter.setInsertionPointToStart(module.getBody());
 +      defer = mlir::LLVM::LLVMFuncOp::create(
-+          rewriter, op.getLoc(), "__reussir_drop_defer",
++          rewriter, op.getLoc(), name,
 +          mlir::LLVM::LLVMFunctionType::get(
 +              mlir::LLVM::LLVMVoidType::get(rewriter.getContext()),
 +              {ptrTy, ptrTy}));
@@ -593,7 +844,7 @@ index 82305558..81bc94a4 100644
  struct ReussirRcSetConversionPattern
      : public mlir::OpConversionPattern<ReussirRcSetOp> {
    using OpConversionPattern::OpConversionPattern;
-@@ -3978,9 +4008,10 @@ struct ReussirConvertToLLVMPatternInterface
+@@ -3978,9 +4026,10 @@ struct ReussirConvertToLLVMPatternInterface
          ReussirClosureInspectPayloadOp, ReussirClosureCursorOp,
          ReussirClosureInstantiateOp, ReussirClosureVtableOp,
          ReussirClosureCreateOp, ReussirRcFetchOp, ReussirRcFetchSubOp,
@@ -607,7 +858,7 @@ index 82305558..81bc94a4 100644
          ReussirStrUnsafeMemcmpOp, ReussirTrampolineOp, ReussirTokenLaunderOp>();
      // `reussir.closure.wpd_test` is created BY the dispatch conversion
      // patterns above, already in its final form (operand = the loaded vtable
-@@ -4140,7 +4171,8 @@ void populateBasicOpsLoweringToLLVMConversionPatterns(
+@@ -4140,7 +4189,8 @@ void populateBasicOpsLoweringToLLVMConversionPatterns(
        ReussirClosureVtableOpConversionPattern,
        ReussirClosureCreateOpConversionPattern,
        ReussirRcReinterpretConversionPattern, ReussirRcFetchConversionPattern,
@@ -680,7 +931,7 @@ index b7545fad..5db3c6d7 100644
 -int main(void) { return reussir_main() == 1111 ? 0 : 1; }
 +int main(void) { return reussir_main() == 111111 ? 0 : 1; }
 diff --git a/tests/integration/frontend/drop_long_list.rr b/tests/integration/frontend/drop_long_list.rr
-index 5b72f7db..75ed1ab6 100644
+index 5b72f7db..177ed8a7 100644
 --- a/tests/integration/frontend/drop_long_list.rr
 +++ b/tests/integration/frontend/drop_long_list.rr
 @@ -6,6 +6,11 @@
@@ -714,7 +965,7 @@ index 5b72f7db..75ed1ab6 100644
  fn last(s : S) -> u64 { match s { S::Snoc(t, b) => b.0, S::Lin => 0 } }
  
  pub fn main() -> i64 {
-@@ -34,7 +44,10 @@ pub fn main() -> i64 {
+@@ -34,9 +44,12 @@ pub fn main() -> i64 {
      let tree_ok = if root(spine(2000000, T::Leaf {})) == 1 { 1 } else { 0 };
      let left_ok = if root(lspine(2000000, T::Leaf {})) == 1 { 1 } else { 0 };
      let snoc_ok = if last(snocs(2000000, S::Lin {})) == 1 { 1 } else { 0 };
@@ -726,6 +977,9 @@ index 5b72f7db..75ed1ab6 100644
  }
  
  extern "C" trampoline "reussir_main" = main;
+ 
+-// CHECK: define {{.*}}@_RINvNvC4core9intrinsic13drop_and_freeC1TE(
++// CHECK: define {{.*}}@_RINvNvC4core9intrinsic22drop_and_free_in_drainC1TE(
 -- 
 2.43.0
 

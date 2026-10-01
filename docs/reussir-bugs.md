@@ -868,6 +868,22 @@ release records directly in the glue.
   cell; when the chain ends, the drain pops the next pending member. This
   replaces 0013's choice of chain members. `drop_in_place` empties the
   stack before it returns.
+- Like Lean's list, the stack takes no memory per pending cell.
+  Consecutive deferred cells form one entry, linked through their header
+  words (a deferred cell's count is known to be 1). Each link holds the
+  offset to the previous cell (40 bits) and its release function: the same
+  as this cell's, or an index in a small per-thread table emptied with the
+  stack. A fused variant's tag is kept. A box of a record with no managed
+  members is freed at once instead. The stack shrinks back after a large
+  drain. The version reviewed in round 4 pushed one 24-byte entry per cell.
+  Freeing a list whose elements are boxes keeps every element pending until
+  the spine is freed, so that took 24 extra bytes per element, more at the
+  peak (10⁷ pairs: 1.14 GB against 633 MB), and the thread kept them. A
+  first fix linked through the 32-bit count only. It still paid that cost
+  for elements more than 64 MB apart (a sorted list: 1.00 GB against
+  555 MB) and after 256 release functions on a thread (round 4b).
+  `drop_and_free` is named `drop_and_free_in_drain` and claims no
+  `nocallback`.
 - Reussir's lit test `frontend/drop_long_list.rr` gains the left-deep tree
   and the rose tree.
 
