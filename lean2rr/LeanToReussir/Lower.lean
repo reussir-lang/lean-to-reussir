@@ -249,9 +249,11 @@ def taskBindStepFn (z get : String) : LowerM String := do
 task, computed on first use and kept. The slow path swaps in `busy` (so the
 pending state, now uniquely held, can be reused for `done`), runs the
 closure and stores its value, like `lean_thunk_get_core`, which takes the
-closure out before calling it. Forcing a `busy` state means the value is
+closure out before calling it. Forcing a `busy` thunk means the value is
 needed by its own computation: native Lean then waits forever, and so do
-we. A `conv` state (see `lazyConv`) is forced like a pending one. A task is
+we; a `busy` task runs on another (blocked) context of the runtime's
+scheduler and is waited for, unless it is the running context's own
+(translation plan §5.14). A `conv` state (see `lazyConv`) is forced like a pending one. A task is
 also registered as running for the duration (`IO.checkCanceled`, and it
 leaves the queue of pending tasks), and runs with its own standard streams,
 as a native task runs on a worker thread (`l2r_std_enter_if`/`l2r_std_leave_if`),
@@ -271,15 +273,18 @@ def lazyGetFn (z : String) : LowerM String := do
     -- A `busy` task runs on another context of the runtime's scheduler (a
     -- task that blocked): wait until it has finished, then look again; on
     -- the current context, it needs itself (`l2r_task_wait_running` waits
-    -- forever then).
-    let busy (a : RR.Expr) : RR.Block := if task then
-        ⟨#[("wb", some u64, .call "l2r_task_wait_running" #[] #[a])], .call get #[] #[.var "c"]⟩
+    -- forever then). A converted copy being forced (`busyconv`) runs as a
+    -- task of its own cell (`l2r_task_begin`), so it is waited for by that
+    -- cell's address too.
+    let busy : RR.Block := if task then
+        ⟨#[("wb", some u64, .call "l2r_task_wait_running" #[] #[.call "l2r_lcell_addr" #[zt] #[.var "c"]])],
+          .call get #[] #[.var "c"]⟩
       else .ofExpr (.call "l2r_lazy_cycle" #[t] #[])
     let getWith (other : RR.Block) : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
       lazyArm z "done" #[some "v"] (.ofExpr (.var "v")),
       lazyArm z "convdone" #[some "v", none, none] (.ofExpr (.var "v")),
-      lazyArm z "busy" #[] (busy (.call "l2r_lcell_addr" #[zt] #[.var "c"])),
-      lazyArm z "busyconv" #[some "ba"] (busy (.var "ba")),
+      lazyArm z "busy" #[] busy,
+      lazyArm z "busyconv" #[none] busy,
       { ty := z, ctor := none, binders := #[], body := other }])
     -- A task first runs the chain of pending tasks it waits for, deepest
     -- first (`l2r_task_force_sources`), then looks again (one of them may

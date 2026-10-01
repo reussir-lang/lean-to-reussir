@@ -90,6 +90,10 @@ const SYNCPRIO: u16 = 1 << 11;
 const FROM_WALK: u16 = 1 << 12;
 /// Running on the thread of whoever ran it (it began `INLINE`).
 const ON_THREAD: u16 = 1 << 13;
+/// Handed to the generated code to run (`hand`), not begun yet: it is off
+/// its queue and its source's dependents, and no one else hands it (the
+/// generated code may block before it begins, e.g. forcing its sources).
+const HANDED: u16 = 1 << 14;
 
 struct Entry {
     /// The cell's address; 0 for a free slot.
@@ -110,6 +114,10 @@ struct Entry {
     /// of answers. Running (or about to run `INLINE`): its thread number
     /// (0 is `main`'s), and the sleep count when the run started.
     aux: [u32; 2],
+    /// The number of its allocation: an entry and a cell address are both
+    /// reused once a task is gone, so a task remembered across a switch of
+    /// contexts (`CtxState::chains`) is recognized by this.
+    serial: u32,
 }
 
 impl Entry {
@@ -128,7 +136,7 @@ impl Entry {
 }
 
 const FREE: Entry = Entry {
-    cell: 0, tag: 0, flags: 0, prio: 0, head_dep: NONE, next_dep: NONE, prev_dep: NONE, link: NONE, aux: [0, 0],
+    cell: 0, tag: 0, flags: 0, prio: 0, head_dep: NONE, next_dep: NONE, prev_dep: NONE, link: NONE, aux: [0, 0], serial: 0,
 };
 
 /// The dependents of a finished task still to be walked.
@@ -187,6 +195,12 @@ struct Tasks {
     /// `IO.getTaskState` answered 4 (poll a promise) for this task: the
     /// `source_next` that follows does not wait for it for good.
     poll: usize,
+    /// The last entry allocation's number (`Entry::serial`).
+    serial: u32,
+    /// Dropped pure tasks still to delete, the next one last, and the
+    /// sources of tasks just deleted (`dropped`).
+    deletions: Vec<u32>,
+    recheck: Vec<u32>,
 }
 
 /// What belongs to the running context of the scheduler (`sched`), as
@@ -197,10 +211,10 @@ struct Tasks {
 pub struct CtxState {
     /// Walks in progress, innermost last.
     walks: Vec<Walk>,
-    /// For `source_next`: a task being forced (its cell) and the pending
-    /// tasks it waits for, still to run (entry and cell, deepest last),
-    /// innermost last.
-    chains: Vec<(usize, Vec<(u32, usize)>)>,
+    /// For `source_next`: a task being forced (its cell and its entry's
+    /// `serial`) and the pending tasks it waits for, still to run (entry
+    /// and `serial`, deepest last), innermost last.
+    chains: Vec<((usize, u32), Vec<(u32, u32)>)>,
     /// Running tasks (entries), innermost last.
     running: Vec<u32>,
 }
@@ -238,6 +252,9 @@ static TASKS: Global<Tasks> = Global(UnsafeCell::new(Tasks {
     wake: None,
     worker_exists: false,
     poll: 0,
+    serial: 0,
+    deletions: Vec::new(),
+    recheck: Vec::new(),
 }));
 
 #[inline]
@@ -279,7 +296,8 @@ fn ent(i: u32) -> &'static mut Entry {
 
 fn alloc(cell: usize, tag: u32, flags: u16, prio: u8) -> u32 {
     let t = tasks();
-    let e = Entry { cell, tag, flags, prio, ..FREE };
+    t.serial = t.serial.wrapping_add(1);
+    let e = Entry { cell, tag, flags, prio, serial: t.serial, ..FREE };
     let i = match t.free.pop() {
         Some(i) => {
             t.slab[i as usize] = e;
@@ -426,9 +444,11 @@ fn enqueue(i: u32) {
     e.link = t.next_q;
     t.queues[e.prio as usize].push_back((i, e.link));
     t.queued[e.prio as usize] += 1;
-    // An enqueue by `main` wakes the idle worker.
+    // An enqueue by `main` wakes the idle worker (if one is free: tasks
+    // the scheduler started on contexts of their own hold workers).
     if t.started && !t.shutting_down && t.worker == NONE && t.wake.is_none() && ctx().running.is_empty()
         && crate::sched::cur() == crate::sched::MAIN
+        && pool_in_use() < crate::sched::workers_limit()
     {
         t.wake = Some(Instant::now());
     }
@@ -534,7 +554,7 @@ pub fn bind_wait(cell: usize, src: usize) {
         ctx().running.pop();
     }
     let e = ent(i);
-    e.flags &= !(RUNNING | INLINE | FROM_WALK | ON_THREAD);
+    e.flags &= !(RUNNING | INLINE | FROM_WALK | ON_THREAD | HANDED);
     e.flags |= HELD;
     e.aux = [0, 0];
     let s = find(src);
@@ -574,7 +594,7 @@ pub fn begin(cell: usize) -> u64 {
         on = 0;
         e.aux[0] = cur_thread() + 1;
     }
-    e.flags = (e.flags & !(HELD | INLINE | CHECKED | ON_THREAD)) | RUNNING | on;
+    e.flags = (e.flags & !(HELD | INLINE | CHECKED | ON_THREAD | HANDED)) | RUNNING | on;
     e.aux[1] = t.epoch;
     ctx().running.push(i);
     r
@@ -680,43 +700,97 @@ pub fn promise_cell(p: &LPromise) -> usize {
     p.downcast_ref::<Promise>().expect("leanrt: not a promise").cell
 }
 
-/// Whether pending pure task `i` is to be deleted rather than run: the
-/// runtime holds the only reference, or the other references come from
-/// pure dependents that are themselves dropped (one each), within a small
-/// search. Returns the task to delete now (`i`, or such a dependent, which
-/// goes first: it holds a reference to `i`), or `NONE`.
-fn dropped(i: u32) -> u32 {
-    let mut budget = 32u32;
-    let mut first = NONE;
-    if dropped_rec(i, &mut budget, &mut first) { first } else { NONE }
+/// Whether pending task `x` could be deleted rather than run: a pure task
+/// the runtime holds, not running, not an unresolved promise, not started
+/// by the worker.
+fn deletable(x: u32) -> bool {
+    let e = ent(x);
+    e.flags & (PURE | HELD) == (PURE | HELD) && e.flags & (RUNNING | PROMISE) == 0 && tasks().worker != x
 }
 
-fn dropped_rec(i: u32, budget: &mut u32, first: &mut u32) -> bool {
-    let e = ent(i);
-    if e.flags & (PURE | HELD) != (PURE | HELD) || e.flags & (RUNNING | PROMISE) != 0 || tasks().worker == i {
-        return false;
+/// Whether pending task `x` is to be deleted now: a pure task that only
+/// the runtime refers to (natively nothing refers to it any more, and Lean
+/// has deleted it).
+fn droppable_now(x: u32) -> bool {
+    let e = ent(x);
+    e.cell != 0 && deletable(x) && count(e.cell) == 1
+}
+
+/// The tasks to delete now among pending task `i` and the tasks that wait
+/// for it, to any depth (an iterative search): those only the runtime
+/// refers to, the ones deeper in the tree first. Deleting a task releases
+/// what it holds (its source, directly or through a converted copy of it),
+/// so its source may follow (`Tasks::recheck`): as natively, where
+/// dropping the last reference to a dependent releases its source, a whole
+/// chain or tree of dropped pure tasks is deleted.
+///
+/// The search goes only through tasks that could be deleted: one that
+/// cannot (an IO task, a running one, a promise) holds its source for good,
+/// so nothing below it can release `i`. Its own dropped dependents are
+/// deleted when they come up (walked, or queued, once it has finished);
+/// they cannot run before.
+fn droppable_in(i: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    if !deletable(i) {
+        return out;
     }
-    let c = count(e.cell);
-    if c == 1 {
-        if *first == NONE {
-            *first = i;
+    // (task, its next dependent to look at)
+    let mut stack: Vec<(u32, u32)> = vec![(i, ent(i).head_dep)];
+    // Each task once (a bound, for tasks that wait for each other in a
+    // cycle).
+    let mut budget = 2 * tasks().slab.len() + 2;
+    while let Some(top) = stack.last_mut() {
+        if budget == 0 {
+            break;
         }
-        return true;
+        budget -= 1;
+        let d = top.1;
+        if d != NONE {
+            top.1 = ent(d).next_dep;
+            if deletable(d) {
+                stack.push((d, ent(d).head_dep));
+            }
+        } else {
+            let (x, _) = stack.pop().unwrap();
+            if droppable_now(x) {
+                out.push(x);
+            }
+        }
     }
-    let mut n = 0;
-    let mut d = e.head_dep;
-    while d != NONE {
-        if *budget == 0 {
-            return false;
+    out
+}
+
+/// Whether pending task `i` is to be deleted, or tasks waiting for it are,
+/// before it can be decided whether it runs.
+fn is_dropped(i: u32) -> bool {
+    !droppable_in(i).is_empty()
+}
+
+/// The next task to delete: the source of a task just deleted, if only
+/// the runtime refers to it now, one left by an earlier search, or the
+/// first of those found among `i` and the tasks that wait for it (the
+/// others are left for the next calls); `NONE` if there is none (`i` is to
+/// run).
+fn dropped(i: u32) -> u32 {
+    let t = tasks();
+    while let Some(x) = t.recheck.pop() {
+        if droppable_now(x) {
+            return x;
         }
-        *budget -= 1;
-        if !dropped_rec(d, budget, first) {
-            return false;
-        }
-        n += 1;
-        d = ent(d).next_dep;
     }
-    n > 0 && c == 1 + n
+    while let Some(x) = t.deletions.pop() {
+        if droppable_now(x) {
+            return x;
+        }
+    }
+    let mut v = droppable_in(i);
+    if v.is_empty() {
+        return NONE;
+    }
+    v.reverse();
+    let first = v.pop().unwrap();
+    tasks().deletions = v;
+    first
 }
 
 /// Hand pending task `i` to the generated code (with the runtime's
@@ -729,12 +803,19 @@ fn hand(i: u32, del: bool) -> u64 {
     t.handed = e.cell;
     t.deleting = del;
     if del {
+        // Its source may only be referred to by the runtime once this one
+        // is dropped.
+        if e.flags & WAITING != 0 && e.source() != NONE {
+            t.recheck.push(e.source());
+        }
         unlink(i);
         // Its own (deleted) dependents went first.
         debug_assert_eq!(ent(i).head_dep, NONE);
         release(i);
     } else {
-        e.flags &= !HELD;
+        unlink(i);
+        let e = ent(i);
+        e.flags = (e.flags & !HELD) | HANDED;
     }
     tag
 }
@@ -865,7 +946,7 @@ pub fn startable(from_worker: bool) -> u32 {
     if cand == NONE {
         return NONE;
     }
-    if cand != w && dropped(cand) != NONE {
+    if cand != w && (!t.deletions.is_empty() || !t.recheck.is_empty() || is_dropped(cand)) {
         // Deleting it needs no worker.
         return cand;
     }
@@ -959,7 +1040,7 @@ fn pick() -> u32 {
         for k in 0..t.queues[p].len() {
             let (i, q) = t.queues[p][k];
             let e = ent(i);
-            if e.cell != 0 && e.flags & QUEUED != 0 && e.link == q && dropped(i) == NONE {
+            if e.cell != 0 && e.flags & QUEUED != 0 && e.link == q && !is_dropped(i) {
                 return i;
             }
         }
@@ -971,7 +1052,7 @@ fn pick() -> u32 {
 fn worker_idle() {
     let t = tasks();
     t.wake = None;
-    t.worker = if t.started && !t.shutting_down { pick() } else { NONE };
+    t.worker = if t.started && !t.shutting_down && pool_in_use() < crate::sched::workers_limit() { pick() } else { NONE };
 }
 
 /// The woken worker has picked its task if enough time has passed.
@@ -997,25 +1078,30 @@ fn settle_worker() {
 #[inline(never)]
 pub fn source_next(cell: usize) -> u64 {
     let t = tasks();
-    if ctx().chains.last().map(|(c, _)| *c) != Some(cell) {
+    let i = find(cell);
+    let key = (cell, if i == NONE { 0 } else { ent(i).serial });
+    if ctx().chains.last().map(|(k, _)| *k) != Some(key) {
         // A new chain: the pending tasks `cell` waits for, transitively
         // (bounded: a bind task waiting for a task that depends on it is a
-        // cycle).
-        let i = find(cell);
+        // cycle). Chains run to their end were left behind by forcing that
+        // has finished.
+        while ctx().chains.last().is_some_and(|(_, c)| c.is_empty()) {
+            ctx().chains.pop();
+        }
         if i == NONE {
             return u64::MAX;
         }
         let mut chain = Vec::new();
         if ent(i).flags & PROMISE != 0 {
-            chain.push((i, cell));
+            chain.push((i, ent(i).serial));
         } else {
             let mut c = i;
             for _ in 0..=t.slab.len() {
                 let s = ent(c).source();
-                if ent(c).flags & WAITING == 0 || s == NONE || s == i || ent(s).flags & RUNNING != 0 {
+                if ent(c).flags & WAITING == 0 || s == NONE || s == i || ent(s).flags & (RUNNING | HANDED) != 0 {
                     break;
                 }
-                chain.push((s, ent(s).cell));
+                chain.push((s, ent(s).serial));
                 if ent(s).flags & PROMISE != 0 {
                     break;
                 }
@@ -1025,20 +1111,22 @@ pub fn source_next(cell: usize) -> u64 {
         if chain.is_empty() {
             return u64::MAX;
         }
-        ctx().chains.push((cell, chain));
+        ctx().chains.push((key, chain));
     }
     loop {
         let (_, chain) = ctx().chains.last_mut().unwrap();
-        let Some(&(d, c)) = chain.last() else {
+        let Some(&(d, sr)) = chain.last() else {
             ctx().chains.pop();
             return u64::MAX;
         };
         let e = ent(d);
-        if e.cell != c || e.flags & RUNNING != 0 {
-            // Finished (or started) meanwhile.
+        if e.cell == 0 || e.serial != sr || e.flags & (RUNNING | HANDED) != 0 {
+            // Finished (or started, or handed to another) meanwhile; its
+            // entry may hold another task since.
             chain.pop();
             continue;
         }
+        let c = e.cell;
         if e.flags & PROMISE != 0 {
             // Wait until it is resolved (other contexts and queued tasks
             // run meanwhile, as other threads would). A program polling
@@ -1091,7 +1179,7 @@ pub fn status(cell: usize) -> u8 {
     if i == NONE {
         return 2;
     }
-    if ent(i).flags & (RUNNING | PROMISE) != 0 { 1 } else { 0 }
+    if ent(i).flags & (RUNNING | PROMISE | HANDED) != 0 { 1 } else { 0 }
 }
 
 /// For `IO.waitAny`: as `status`, or 3 for a pending task that waits,
@@ -1116,7 +1204,7 @@ pub fn wait_status(cell: usize) -> u8 {
         if ent(c).flags & PROMISE != 0 {
             return 3;
         }
-        if ent(c).flags & RUNNING != 0 {
+        if ent(c).flags & (RUNNING | HANDED) != 0 {
             break;
         }
     }
@@ -1137,7 +1225,7 @@ pub fn query(cell: usize) -> u8 {
         return 2;
     }
     let e = ent(i);
-    if e.flags & RUNNING != 0 {
+    if e.flags & (RUNNING | HANDED) != 0 {
         return 1;
     }
     let idle = if e.flags & PROMISE != 0 { 1 } else { 0 };
@@ -1165,6 +1253,25 @@ pub fn query(cell: usize) -> u8 {
     }
     e.aux[1] += 1;
     idle
+}
+
+/// `IO.Promise.isResolved` (lean2rr's shim, `L2RShim.promiseIsResolved`):
+/// `IO.hasFinished` of the promise's task, as `IO.getTaskState` answers it
+/// (`query`; when it answers 4, the program polls: other contexts and
+/// queued tasks run first, until the promise is resolved or nothing else
+/// can go on). The caller releases the promise afterwards: natively
+/// `isResolved` borrows it, so a last reference is dropped (resolving the
+/// promise with `none`) only after the question.
+#[inline(never)]
+pub fn promise_is_resolved(cell: usize) -> bool {
+    match query(cell) {
+        2 => true,
+        4 => {
+            source_next(cell);
+            status(cell) == 2
+        }
+        _ => false,
+    }
 }
 
 /// `IO.cancel` of a task.
