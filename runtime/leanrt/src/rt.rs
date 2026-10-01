@@ -2,8 +2,8 @@
 //! overflow report.
 //!
 //! Lean's runtime (`src/runtime/stack_overflow.cpp`) installs a SIGSEGV /
-//! SIGBUS handler on an alternate signal stack; a fault inside the guard
-//! page just below the faulting thread's stack prints
+//! SIGBUS handler on an alternate signal stack, in every thread; a fault
+//! inside the guard page just below the faulting thread's stack prints
 //! `\nStack overflow detected. Aborting.\n` to stderr and calls `abort()`
 //! (exit status 134, buffered stdout is *not* flushed). Any other fault
 //! resets the handler to the default, so the fault is re-raised on return.
@@ -60,12 +60,15 @@ extern "C" {
     fn write(fd: i32, buf: *const c_void, n: usize) -> isize;
 }
 
-/// The guard page just below the Lean thread's stack, `[lo, hi)`, computed
-/// when the handler is installed (`pthread_getattr_np` is not
-/// async-signal-safe; there is one Lean thread).
-struct Guard(std::cell::UnsafeCell<(usize, usize)>);
-unsafe impl Sync for Guard {}
-static GUARD: Guard = Guard(std::cell::UnsafeCell::new((0, 0)));
+thread_local! {
+    /// The guard page just below the current thread's stack, `[lo, hi)`,
+    /// computed when the thread installs the handler
+    /// (`pthread_getattr_np` is not async-signal-safe). A constant-
+    /// initialized `Copy` cell: reading it is a plain thread-local load, safe
+    /// in a signal handler. Every thread that runs Lean code installs it
+    /// (`install_stack_overflow_handler`).
+    static GUARD: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
 
 /// `is_within_stack_guard` of `stack_overflow.cpp`, for the current thread.
 unsafe fn current_stack_guard() -> (usize, usize) {
@@ -84,11 +87,37 @@ unsafe fn current_stack_guard() -> (usize, usize) {
     (lo.wrapping_sub(page), lo)
 }
 
-extern "C" fn segv_handler(signum: i32, info: *mut SigInfo, _ctx: *mut c_void) {
+/// The stack pointer of the interrupted code, from the signal context
+/// (`uc_mcontext.sp` on aarch64, `gregs[REG_RSP]` on x86-64).
+unsafe fn interrupted_sp(ctx: *mut c_void) -> Option<usize> {
+    if ctx.is_null() {
+        return None;
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    return Some(unsafe { *((ctx as *const u8).add(432) as *const usize) });
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return Some(unsafe { *((ctx as *const u8).add(160) as *const usize) });
+    #[allow(unreachable_code)]
+    None
+}
+
+/// How far below its stack a thread's stack pointer can be after a frame
+/// was allocated past the stack's end.
+const OVERFLOW_SP_REACH: usize = 256 << 20;
+
+extern "C" fn segv_handler(signum: i32, info: *mut SigInfo, ctx: *mut c_void) {
     unsafe {
-        let (lo, hi) = *GUARD.0.get();
+        let (lo, hi) = GUARD.with(|g| g.get());
         let addr = (*info).si_addr as usize;
-        if lo <= addr && addr < hi {
+        // Lean's rule: a fault in the guard page. Also a fault below the
+        // stack while the stack pointer is below it: a frame bigger than the
+        // guard page without stack probes (GMP's scratch space; Reussir's and
+        // Rust's code probe) skips the guard page and faults further down.
+        let in_guard = lo <= addr && addr < hi;
+        let past_end = hi != 0
+            && addr < hi
+            && interrupted_sp(ctx).is_some_and(|sp| sp < hi && hi - sp <= OVERFLOW_SP_REACH);
+        if in_guard || past_end {
             let msg = b"\nStack overflow detected. Aborting.\n";
             write(2, msg.as_ptr() as *const c_void, msg.len());
             abort();
@@ -100,11 +129,14 @@ extern "C" fn segv_handler(signum: i32, info: *mut SigInfo, _ctx: *mut c_void) {
     }
 }
 
-/// Give the current thread an alternate signal stack and install the
-/// stack-overflow handler (process-wide, replacing Rust's own report).
+/// Give the current thread an alternate signal stack and its guard record,
+/// and install the stack-overflow handler (process-wide, replacing Rust's
+/// own report). Every thread that runs Lean code calls it when it starts:
+/// the process's main thread (initializers), `main`'s thread, and any other
+/// thread the runtime starts.
 pub fn install_stack_overflow_handler() {
     unsafe {
-        *GUARD.0.get() = current_stack_guard();
+        GUARD.with(|g| g.set(current_stack_guard()));
         // The alternate stack gets its own guard page (as Rust's std does),
         // so overflowing it faults instead of corrupting memory.
         let page = sysconf(SC_PAGESIZE) as usize;

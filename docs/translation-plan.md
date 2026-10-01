@@ -1251,7 +1251,14 @@ A generated Reussir `#[main]` does what Lean's generated `main` does
 6. otherwise it exits with the returned `UInt32` (0 for `IO Unit`).
 
 `leanrt::rt::run_main2` implements the two threads and Lean's stack
-overflow report.
+overflow report: a stack overflow in either thread, so also in a task
+(tasks run on them, §5.14), prints `Stack overflow detected. Aborting.` and
+aborts (status 134, stdout not flushed), as Lean's handler does in every
+thread. Each thread records the guard page below its stack and gets an
+alternate signal stack; a fault in the guard page is an overflow, and so is
+a fault below the stack while the stack pointer is below it (a frame
+without stack probes, such as GMP's scratch space, can skip the guard
+page).
 
 The runtime flushes stdout at exit. These behaviours were observed on native
 executables.
@@ -1915,7 +1922,10 @@ Each item says what differs and when.
   list of pending task cells at the top), where Lean frees iteratively: at
   an 8 MB stack (`LEAN_STACK_SIZE_KB=8192`) a list of a few 10⁵ elements
   dropped at once overflows. The depth at which `Stack overflow detected.
-  Aborting.` (exit 134) happens is not native's, in either direction.
+  Aborting.` (exit 134) happens is not native's, in either direction (the
+  report itself is, in every thread: §5.11). Tasks run on `main`'s thread
+  (Lean's 1 GiB, or `LEAN_STACK_SIZE_KB`), where native task workers have
+  the same size of stack each.
 - *Stream redirection* (`IO.setStdout`, `setStderr`, `setStdin`,
   `IO.FS.withIsolatedStreams`) is translated: the current streams live in
   cell slots, and panics, `dbgTrace` and `timeit` write through the current
