@@ -232,13 +232,18 @@ Every insertion reallocates the whole path. Returning `Tr::Node{l, x, r}`
 instead of `t` is 5x faster (3.1M insertions into a 100k-node tree: 0.76 s
 vs 0.14 s).
 
-lean2rr: a value stored whole in a constructor has its fields bound where
-they are used (plan §5.5, "reuse-friendly shapes"). That makes the
-Std.TreeMap insert as fast as native Lean. An arm that returns the matched
-value itself has no such workaround. lean2rr used to return the constructor
-rebuilt from the arm's fields instead, which broke `ptrEq` identity and
-sharing (Lean's `Expr.replace`-style fixpoints never stopped), so the bug is
-patched.
+lean2rr: a value stored whole in a constructor, a value returned whole (an
+insert that returns the node for an equal key), and a structure stored or
+returned whole have their fields bound only where they are used (plan §5.5,
+"reuse-friendly shapes"). The matched value's fields are then not retained
+while it stays live, so there is no phantom donor. With this, the
+Std.TreeMap insert is as fast as native Lean. BST inserts with `Nat` or
+`String` keys whose equal arm returns the node, and an association-list
+update that keeps skipped pairs whole, run at or below native time, even
+on an unpatched Reussir. An earlier workaround returned the constructor
+rebuilt from the arm's fields instead of the matched value. That broke
+`ptrEq` identity and sharing (Lean's `Expr.replace`-style fixpoints never
+stopped), so it was removed and the bug is also patched.
 
 The patch changes `RcDispatchFusion`. When the release of the scrutinee sits
 inside a branch that runs exactly one of its regions once (`if` with an

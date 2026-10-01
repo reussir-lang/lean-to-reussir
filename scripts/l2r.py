@@ -34,11 +34,15 @@ LEANRT_OUT = ROOT / "runtime" / "leanrt" / "target"
 NATIVE_FLAGS = ["-C", "target-cpu=native", "-C", "target-feature=-outline-atomics"]
 
 
-def run(cmd, env=None, cwd=None):
+def run(cmd, env=None, cwd=None, show_stderr=False):
     res = subprocess.run(cmd, env=env, cwd=cwd, capture_output=True, text=True)
     if res.returncode != 0:
         sys.stderr.write(res.stdout + res.stderr)
         sys.exit(res.returncode or 1)
+    if show_stderr and res.stderr:
+        # Diagnostics of a successful step (lean2rr's warnings: a cast with no
+        # representation conversion panics at run time).
+        sys.stderr.write(res.stderr)
     return res
 
 
@@ -131,7 +135,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         rr = Path(args.keep_rr).resolve() if args.keep_rr else Path(tmp) / "prog.rr"
         run([str(LEAN2RR), args.module, "--root", args.root, "--emit", "rr",
-             "--prelude", str(PRELUDE), "-o", str(rr)], env=env)
+             "--prelude", str(PRELUDE), "-o", str(rr)], env=env, show_stderr=True)
         rt, deps = rt_dirs()
         target_libdir = run([str(RUSTC), "--print", "target-libdir"]).stdout.strip()
         # rrc runs in the temporary directory: it leaves its polymorphic-FFI

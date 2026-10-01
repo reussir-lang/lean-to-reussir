@@ -131,7 +131,8 @@ fallible primitives below.) References: `l2r_ref_new/get/set/swap/take/ptr_eq`.
 
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
 lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),
-conv(L2RUnit -> α, L2RBox, u64), busyconv(u64) }` (tasks also
+conv(L2RUnit -> α, L2RBox, u64), busyconv(u64), convdone(α, L2RBox, u64) }`
+(tasks also
 `bind(L2RUnit -> LCell<S>)`;
 a shared enum, so any `α` fits). Cell primitives: `l2r_lcell_new<S>(v)`,
 `l2r_lcell_get<S>(c)`, `l2r_lcell_set<S>(c, v)`, `l2r_lcell_swap<S>(c, v)`
@@ -424,15 +425,18 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   prelude returns the string (the intended semantics).
 - Panics print `backtrace:` and `(stack trace unavailable)` instead of a
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
-- Sharing is not observable: `isExclusiveUnsafe` answers `false`,
-  `ptrAddrUnsafe` is the handle pointer (the field's for a `[value]`
-  struct; the value's bits for scalars; a fresh, never repeated number for
-  the wrappers lean2rr builds at the call for values that cannot cross the
-  FFI boundary, such as `Nat`s and enumerations, so pointer-equality
-  shortcuts are not taken for them; a `PtrSet`/`PtrMap` of such values
-  does not find them again), and
-  `dbgTraceIfShared` of such wrapped values (`Nat`, structures held by
-  value) never reports sharing.
+- Sharing is not observable: `isExclusiveUnsafe` answers `false`, and
+  `dbgTraceIfShared` of values held by value (`Nat`, `[value]` structures)
+  never reports sharing. `ptrAddrUnsafe` answers what native Lean answers
+  (translation plan §9): the boxed scalar `2n+1` for small `Nat`s, `int32`
+  `Int`s, `UInt8/16/32`, `Char`, `Bool`, enumerations, nullary
+  constructors and `Unit` (`l2r_addr_word`, `l2r_addr_nat`,
+  `l2r_addr_int`); the handle pointer for heap values (`l2r_ptr_addr_obj`,
+  `l2r_ptr_addr_rec`); a fresh, never repeated even number in
+  `[2^62, 2^63)` for `UInt64`, `Float` and the like, which natively are
+  boxed into a new cell at each call (`l2r_addr_fresh`). A `Nat` in
+  `[2^63, 2^64)` and an `Int` outside `int32` but inside `i64` (natively
+  big number objects) answer a number computed from their value.
 - Everything runs on one thread: tasks run when they are first needed or
   when `main` returns, pure tasks at once while no task is pending (a
   schedule native Lean can produce; translation plan §5.14). A task or

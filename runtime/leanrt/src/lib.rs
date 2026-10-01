@@ -49,10 +49,12 @@ pub fn last_shared() -> bool {
     LAST_SHARED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// A fresh "address" for `ptrAddrUnsafe` of a value without one: odd (so
-/// never a real pointer) and never repeated.
+/// A fresh "address" for `ptrAddrUnsafe` of a value that natively is a new
+/// object at every boxing (`UInt64`, `Float`, ...): never repeated, even (so
+/// never a boxed scalar, whose "address" is odd) and in `[2^62, 2^63)` (so
+/// never a real pointer).
 pub fn fresh_addr() -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1 << 62);
     NEXT.fetch_add(2, std::sync::atomic::Ordering::Relaxed)
 }
 

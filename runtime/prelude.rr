@@ -902,6 +902,30 @@ fn lean_int_dec_nonneg(a : Int) -> bool {
     }
 }
 
+// `unsafeCast` between `Int` and scalars (lean2rr's `wordOf`/`ofWord`):
+// natively a small `Int` is the boxed scalar of its 32 bits, which
+// `lean_unbox` reads; a big one is an object (its "word" an address; here
+// the low bits of its two's complement value).
+fn l2r_int_word(i : Int) -> u64 {
+    match i {
+        Int::Small(x) => if ((x as i32) as i64) == x { (x as u32) as u64 } else { x as u64 },
+        Int::Big(b) => l2r_big_low_twos(b)
+    }
+}
+
+// The `Int` whose boxed scalar is word `w` (`lean_scalar_to_int64`: its low
+// 32 bits, signed).
+fn l2r_int_of_word(w : u64) -> Int { Int::Small{((w as u32) as i32) as i64} }
+
+// `unsafeCast (i : Int) : Nat`: a small `Int` is read as the `Nat` of its 32
+// bits, a big number object as a `Nat` of its magnitude.
+fn l2r_int_cast_nat(i : Int) -> Nat {
+    match i {
+        Int::Small(x) => if ((x as i32) as i64) == x { Nat::Small{(x as u32) as u64} } else { lean_nat_abs(Int::Small{x}) },
+        Int::Big(b) => lean_nat_abs(Int::Big{b})
+    }
+}
+
 // `Int.natAbs`.
 fn lean_nat_abs(a : Int) -> Nat {
     match a {
@@ -2860,39 +2884,58 @@ fn lean_dbg_sleep<T>(ms : u32, f : L2RUnit -> T) -> T {
     f(L2RUnit::u{})
 }
 
-// `ptrAddrUnsafe` of a value lean2rr may have wrapped or converted for the
-// call (a heap value passed as it is goes to `l2r_ptr_addr_obj` below):
-// the bits for scalars, the pointer for heap objects
-// (runtime handles and Reussir records). Lean uses equal addresses as a
-// shortcut for equal values, so an address must never be shared by unequal
-// values. An object whose count is 1 here dies with this call (the texture
-// holds the only reference): it cannot be the same object as any other live
-// value, and a later object may reuse its memory (lean2rr builds wrappers
-// such as `ElemBox{x}` at the call for values that cannot cross the FFI
-// boundary). It, and any other type, gets a fresh odd number (never equal,
-// which only makes such code take its general path). Nullary constructors
-// (Reussir immediates: nonzero top byte, or an immortal count) keep their
-// pointer.
+// `ptrAddrUnsafe` (lean2rr's `addrOf`): what native Lean answers. A value
+// natively represented by a boxed scalar answers that word, `lean_box(n) =
+// 2n+1`: a `Nat` below 2^63, an `Int` in the `int32` range (its 32 bits),
+// `UInt8/16/32`, `Char`, `Bool`, enumerations (their index), nullary
+// constructors (their index), `Unit` (`box(0) = 1`). A heap value answers its
+// handle pointer (below). A `[value]` struct answers its field's. `UInt64`,
+// `Float` and the like are natively boxed into a new cell at every call
+// (`ptrEq x x` is only true once Lean's CSE merged the two calls): they
+// answer a fresh number (`l2r_addr_fresh`), and a `Box` holding one answers
+// the `Box` cell (natively the cell that boxing made).
+
+fn l2r_addr_word(w : u64) -> u64 { w + w + 1 }
+
 #[ffi(import)]
-fn lean_ptr_addr<T>(a : T) -> u64 [{
-    {
-        let name = ::std::any::type_name::<[:T:]>();
-        let size = ::std::mem::size_of::<[:T:]>();
-        let scalar = matches!(name, "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "usize" | "isize" | "bool" | "char" | "f32" | "f64");
-        let handle = size == ::std::mem::size_of::<usize>() && name.starts_with("reussir_rt::");
-        if scalar {
-            let mut w: u64 = 0;
-            unsafe { ::std::ptr::copy_nonoverlapping(&a as *const [:T:] as *const u8, &mut w as *mut u64 as *mut u8, size) };
-            w
-        } else if handle {
-            let p = unsafe { *(&a as *const [:T:] as *const usize) };
-            let dying = (p >> 56) == 0 && unsafe { *(p as *const u32) } == 1;
-            if dying { leanrt::fresh_addr() } else { p as u64 }
-        } else {
-            leanrt::fresh_addr()
-        }
+fn l2r_addr_fresh() -> u64 [{ leanrt::fresh_addr() }];
+
+// A `Nat` from 2^63 to 2^64 is natively a big number object (one per
+// computation); here it has no object, so it answers a number computed from
+// its value: even (never a boxed scalar), and scrambled, so that the values
+// that land on real pointers (a `Big` handle's address) are unlikely ones.
+// Equal values are therefore `ptrEq` (natively only the same object is).
+fn l2r_addr_nat(n : Nat) -> u64 {
+    match n {
+        Nat::Small(x) => if (x >> 63) == 0 { x + x + 1 } else { (x + x) ^ 6510615555426900570 },
+        Nat::Big(b) => l2r_ptr_addr_obj<LBig>(b)
     }
-}];
+}
+
+// An `Int` in the `int32` range is natively the boxed scalar of its 32 bits
+// (`lean_int64_to_int`); others are big number objects. An `i64` outside
+// that range answers a number computed from its value (as `l2r_addr_nat`):
+// the bits rotated left by one, which is injective, except that the 2^32
+// values landing on a boxed `int32` word are moved to the words the
+// rotation gives the `int32` values themselves (unused otherwise).
+fn l2r_addr_int(i : Int) -> u64 {
+    match i {
+        Int::Small(x) => if ((x as i32) as i64) == x { l2r_addr_word((x as u32) as u64) } else { l2r_addr_int_wide(x) },
+        Int::Big(b) => l2r_ptr_addr_obj<LBig>(b)
+    }
+}
+
+fn l2r_addr_int_wide(x : i64) -> u64 {
+    let u : u64 = x as u64;
+    let r : u64 = (u << 1) | (u >> 63);
+    let lim : u64 = 8589934592;
+    if (r & 1) == 1 {
+        if r < lim {
+            let w : u64 = r >> 1;
+            if w < 2147483648 { w + w } else { (w + w + 1) - lim }
+        } else { r }
+    } else { r }
+}
 
 // `ptrAddrUnsafe` of a heap value that lean2rr passes as it is (not a
 // wrapper built for the call): its handle pointer, whatever its count. The
@@ -2931,6 +2974,13 @@ fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
         p as u64
     }
 }];
+
+// A shared record or array used at another Reussir type with the same
+// layout (lean2rr's `retypable`: instantiations differing only in phantom
+// positions, isomorphic inductives read through `unsafeCast`): the same
+// object, reinterpreted. Their drop and copy glue do the same.
+#[ffi(import)]
+fn l2r_retype<S, D>(x : S) -> D [{ unsafe { ::std::mem::transmute::<[:S:], [:D:]>(x) } }];
 
 // Sharing is not observable here: answering "shared" / "not a scalar" only
 // makes such code take its general path.

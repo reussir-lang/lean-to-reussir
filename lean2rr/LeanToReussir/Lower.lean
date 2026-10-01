@@ -69,6 +69,9 @@ structure LazyMatch where
   nbinders : Nat
   fields : Array (FVarId × Nat × RR.Ty)
   pending : Array (FVarId × Nat × RR.Ty)
+  /-- A structure: its pending fields are projected where they are used
+  (Reussir has no structure patterns). -/
+  struct : Bool := false
 
 structure CodeCtx where
   vars : Std.HashMap FVarId (String × RR.Ty) := {}
@@ -177,8 +180,8 @@ def unboxFnFn (t : RR.Ty) : LowerM String := do
 
 A `Thunk α` or `Task α` is a runtime cell `LCell<S>` holding a generated
 state `S { pending(L2RUnit -> α), busy, done(α), conv(L2RUnit -> α, Box,
-u64) }` (`lazyState`, translation plan §5.14). The functions below are
-generated once per state type. -/
+u64), busyconv(u64), convdone(α, Box, u64) }` (`lazyState`, translation plan
+§5.14). The functions below are generated once per state type. -/
 
 /-- Generate the functions `mk` builds under the name `name`, once. -/
 def lazyFn (name : String) (mk : LowerM (Array RR.Item)) : LowerM String := do
@@ -219,6 +222,7 @@ def lazyGetFn (z : String) : LowerM String := do
     let u64 := RR.Ty.named "u64"
     let getWith (other : RR.Block) : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
       lazyArm z "done" #[some "v"] (.ofExpr (.var "v")),
+      lazyArm z "convdone" #[some "v", none, none] (.ofExpr (.var "v")),
       lazyArm z "busy" #[] (.ofExpr (.call "l2r_lazy_cycle" #[t] #[])),
       lazyArm z "busyconv" #[none] (.ofExpr (.call "l2r_lazy_cycle" #[t] #[])),
       { ty := z, ctor := none, binders := #[], body := other }])
@@ -232,14 +236,17 @@ def lazyGetFn (z : String) : LowerM String := do
     let nowBody : RR.Block := getWith (.ofExpr (.call run #[] #[.var "c"]))
     let onCell (f : String) : RR.Expr := .call f #[zt] #[.var "c"]
     let force ← applyCall (.var "f") (.fn .unit t) #[.unitVal]
-    let lets : Array (String × Option RR.Ty × RR.Expr) :=
+    -- The computed state: `done(v)`, or for a converted cell `convdone`,
+    -- which keeps the original and its identity (see `addrOf`).
+    let lets (final : RR.Expr) : Array (String × Option RR.Ty × RR.Expr) :=
       (if task then #[("b", some u64, onCell "l2r_task_begin"), ("se", some u64, .call "l2r_std_enter" #[] #[])]
         else #[]) ++
       #[("v", some t, force),
-        ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]])] ++
+        ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", final])] ++
       (if task then #[("sl", some u64, .call "l2r_std_leave" #[] #[]), ("e", some u64, onCell "l2r_task_end"),
           ("wk", some u64, .call "l2r_task_walk" #[] #[])]
         else #[])
+    let doneV := RR.Expr.ctor z (some "done") #[.var "v"]
     -- A `bind` task runs `f` for the task it continues as, then needs that.
     let bindArm ← if task then do
         let cont ← applyCall (.var "g") (.fn .unit cellTy) #[.unitVal]
@@ -251,9 +258,10 @@ def lazyGetFn (z : String) : LowerM String := do
         pure #[lazyArm z "bind" #[some "g"] ⟨lets, .var "v"⟩]
       else pure #[]
     let runBody : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_swap" #[zt] #[.var "c", .ctor z (some "busy") #[]]) (#[
-      lazyArm z "pending" #[some "f"] ⟨lets, .var "v"⟩,
-      lazyArm z "conv" #[some "f", none, some "a"]
-        ⟨#[("ba", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "busyconv") #[.var "a"]])] ++ lets,
+      lazyArm z "pending" #[some "f"] ⟨lets doneV, .var "v"⟩,
+      lazyArm z "conv" #[some "f", some "o", some "a"]
+        ⟨#[("ba", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "busyconv") #[.var "a"]])] ++
+            lets (.ctor z (some "convdone") #[.var "v", .var "o", .var "a"]),
           .var "v"⟩] ++ bindArm ++ #[
       { ty := z, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) }]))
     return #[.fn run #[("c", cellTy)] t runBody, .fn get #[("c", cellTy)] t getBody] ++
@@ -425,7 +433,7 @@ def enumOfIndexFn (tn : String) : LowerM String := do
 types: the variant's payload, or, for a boxed unit, the placeholder of `t`
 (a boxed unit used at another type is Lean's `box(0)`, see `zeroValue`); any
 other variant is unreachable. -/
-def unboxMatch (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
+def unboxMatch (e : RR.Expr) (t : RR.Ty) (slow : Option String := none) : LowerM RR.Expr := do
   let v ← boxVariant t
   let u ← boxVariant .unit
   let x ← fresh "ub"
@@ -433,21 +441,29 @@ def unboxMatch (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
     #[{ ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) }]
   if u != v then
     arms := arms.push { ty := boxName, ctor := some u, binders := #[none], body := .ofExpr (← zeroValue t) }
-  return .mtch e (arms.push
-    { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) })
+  -- Other variants: unreachable, or the generated unboxing function `slow`
+  -- (values of other types read through `unsafeCast`).
+  let (e, pre) ← match slow, e with
+    | none, _ | some _, .var _ => pure (e, #[])
+    | some _, _ => do
+      let b ← fresh "ubx"
+      pure (RR.Expr.var b, #[(b, some RR.Ty.box, e)])
+  let other : RR.Expr := match slow with
+    | some f => .call f #[] #[e]
+    | none => .call "l2r_unreachable" #[t] #[]
+  let m := RR.Expr.mtch e (arms.push { ty := boxName, ctor := none, binders := #[], body := .ofExpr other })
+  return if pre.isEmpty then m else .block ⟨pre, m⟩
 
 /-- An enumeration: `bool`, or a generated `[value]` enum without fields. -/
 def isEnumName (n : String) : LowerM Bool := do
   if n == "bool" then return true
   return ((← get).typeInfos[n]?.map (·.shape == .enumLike)).getD false
 
-/-- The index of value `e` of Reussir type `n`, as `u64`: a `Nat`, a
-fixed-width unsigned integer, `bool` (`false` is 0) or an enumeration
-(constructor position). `none` for other types. -/
-def indexOf (e : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
+/-- The word `lean_unbox` gives for value `e` of Reussir type `n` natively
+represented by a boxed scalar of its own (`UInt8/16/32`, `Char`, `Bool`, an
+enumeration: its index), as `u64`. `none` for other types. -/
+def scalarWord (e : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
   let u64 := RR.Ty.named "u64"
-  if n == "Nat" then return some (.call "lean_usize_of_nat" #[] #[e])
-  if n == "u64" then return some e
   if n ∈ ["u8", "u16", "u32"] then return some (.cast e u64)
   if n == "bool" then
     let o ← fresh "ix"
@@ -455,20 +471,203 @@ def indexOf (e : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
   if ← isEnumName n then return some (.call (← enumIndexFn n) #[] #[e])
   return none
 
-/-- The value of Reussir type `n` with index `i : u64` (see `indexOf`); an
-index past the last constructor of an enumeration gives the last one, a
-nonzero one `true`. -/
-def ofIndex (i : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
+/-- Whether a generated type has a constructor without relevant fields
+(natively the boxed scalar of its index). -/
+def hasNullaryCtor (info : TypeInfo) : Bool :=
+  info.ctorOrder.any fun c => (info.ctors.find? c).any (·.fields.all Option.isNone)
+
+/-- `l2r_ctor_word_T(x)`: the index of a constructor without fields of
+generated type `tn`, which natively is the boxed scalar of its index; a
+value with fields is an object (its "word" an address): unreachable. -/
+def ctorWordFn (tn : String) (info : TypeInfo) : LowerM String := do
+  let name := s!"l2r_ctor_word_{tn}"
+  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+    let u64 := RR.Ty.named "u64"
+    let mut arms : Array RR.Arm := #[]
+    for h : i in [:info.ctorOrder.size] do
+      let some l := info.ctors.find? info.ctorOrder[i] | continue
+      if l.fields.all Option.isNone then
+        arms := arms.push { ty := tn, ctor := some l.variant, binders := #[], body := ⟨#[("i", some u64, .atom (toString i))], .var "i"⟩ }
+    arms := arms.push { ty := tn, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[u64] #[]) }
+    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named tn)] u64 (.ofExpr (.mtch (.var "x") arms))) }
+  return name
+
+/-- `l2r_ctor_of_word_T(w)`: the value of generated type `tn` that is the
+boxed scalar `w` natively: its constructor `w` when that has no fields (a
+word past the last constructor selects the last one, as Lean's `switch`
+does); otherwise unreachable (natively an object read from a scalar). -/
+def ctorOfWordFn (tn : String) (info : TypeInfo) : LowerM String := do
+  let name := s!"l2r_ctor_of_word_{tn}"
+  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+    let u64 := RR.Ty.named "u64"
+    let t := RR.Ty.named tn
+    let ls := info.ctorOrder.filterMap info.ctors.find?
+    let nullary (l : CtorLayout) := l.fields.all Option.isNone
+    let mk (l : CtorLayout) : RR.Expr := if info.shape == .struct then .ctor tn none #[] else .ctor tn (some l.variant) #[]
+    let unreachable := RR.Expr.call "l2r_unreachable" #[t] #[]
+    let mut e : RR.Expr := match ls.back? with
+      | some l => if nullary l then .block ⟨#[("k", some u64, .atom (toString (ls.size - 1)))],
+          .ite (.atom "w >= k") (.ofExpr (mk l)) (.ofExpr unreachable)⟩ else unreachable
+      | none => unreachable
+    for j in [:ls.size - 1] do
+      let i := ls.size - 2 - j
+      let some l := ls[i]? | continue
+      if !nullary l then continue
+      e := .block ⟨#[("k", some u64, .atom (toString i))], .ite (.atom "w == k") (.ofExpr (mk l)) (.ofExpr e)⟩
+    modify fun s => { s with fns := s.fns.push (.fn name #[("w", u64)] t (.ofExpr e)) }
+  return name
+
+/-- The word `lean_unbox` gives natively for value `e` of Reussir type `n`
+(`unsafeCast` to a scalar reads it): a `Nat`'s value (`lean_usize_of_nat`;
+for a big one, natively an address, its low bits), an `Int`'s 32 bits
+(`l2r_int_word`), the index of an enumeration or of a constructor without
+fields, a fixed-width integer's value. `none` for other types. -/
+def wordOf (e : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
+  if n == "Nat" then return some (.call "lean_usize_of_nat" #[] #[e])
+  if n == "Int" then return some (.call "l2r_int_word" #[] #[e])
+  if let some w ← scalarWord e n then return some w
+  if let some info := (← get).typeInfos[n]? then
+    if !info.value && hasNullaryCtor info then return some (.call (← ctorWordFn n info) #[] #[e])
+  return none
+
+/-- The value of Reussir type `n` that natively is the boxed scalar of word
+`w : u64` (see `wordOf`): `Nat` `w`; `Int` the signed value of its 32 bits
+(`lean_scalar_to_int64`); a fixed-width integer, `Bool` (nonzero) or an
+enumeration the bits of its width (`lean_unbox` then truncation; an index
+past the last constructor gives the last one, as Lean's `switch` does); a
+constructor without fields (`ctorOfWordFn`). `none` for other types. -/
+def ofWord (w : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
   let u64 := RR.Ty.named "u64"
-  if n == "Nat" then return some (.ctor "Nat" (some "Small") #[i])
-  if n == "u64" then return some i
-  if n ∈ ["u8", "u16", "u32"] then return some (.cast i (.named n))
+  if n == "Nat" then return some (.ctor "Nat" (some "Small") #[w])
+  if n == "Int" then return some (.call "l2r_int_of_word" #[] #[w])
+  if n ∈ ["u8", "u16", "u32"] then return some (.cast w (.named n))
   if n == "bool" then
     let x ← fresh "ix"
     let z ← fresh "iz"
-    return some (.block ⟨#[(x, some u64, i), (z, some u64, .atom "0")], .atom s!"{x} != {z}"⟩)
-  if ← isEnumName n then return some (.call (← enumOfIndexFn n) #[] #[i])
+    return some (.block ⟨#[(x, some (.named "u8"), .cast w (.named "u8")), (z, some (.named "u8"), .atom "0")],
+      .atom s!"{x} != {z}"⟩)
+  if let some info := (← get).typeInfos[n]? then
+    if info.shape == .enumLike then
+      let size := info.ctorOrder.size
+      let mask := if size ≤ 256 then 255 else if size ≤ 65536 then 65535 else 4294967295
+      let x ← fresh "ix"
+      let m ← fresh "im"
+      return some (.block ⟨#[(x, some u64, w), (m, some u64, .atom (toString mask))],
+        .call (← enumOfIndexFn n) #[] #[.atom s!"{x} & {m}"]⟩)
+    if !info.value && hasNullaryCtor info then return some (.call (← ctorOfWordFn n info) #[] #[w])
   return none
+
+/-- Lean's native layout slot of each field of constructor `c` (Lean's own
+`getCtorLayout`): `(0, i, 8)` the `i`-th object field, `(1, i, 8)` the
+`i`-th `usize` field, `(2, offset, size)` a scalar in the scalar area;
+`none` for a field without data. `none` if Lean has no layout for it. -/
+def nativeSlots (c : Name) : LowerM (Option (Array (Option (Nat × Nat × Nat)))) := do
+  try
+    let l ← Lean.Compiler.LCNF.getCtorLayout c
+    return some (l.fieldInfo.map fun
+      | .object i _ => some (0, i, 8)
+      | .usize i => some (1, i, 8)
+      | .scalar sz off _ => some (2, off, sz)
+      | _ => none)
+  catch _ => return none
+
+/-- Which field of constructor `sc` (layout `sl`, of a value's own type) each
+field of constructor `dc` (layout `dl`, of the type the value is cast to)
+reads, as natively. Lean stores the object fields of a constructor first,
+in declaration order, then the `usize` fields, then the other scalars by
+decreasing size (ties in declaration order), so fields correspond by their
+native slot, not by declaration position: `S₁ {a : UInt8, b : Nat}` read as
+`S₂ {x : Nat, y : UInt8}` is `x = b`, `y = a`. For each Lean field of `dc`:
+`none` if it has no representation, `some (some k)` if it reads field `k`
+of `sc`, `some none` if the field there has no representation here (a
+placeholder: the zero). The result is `none` when a field reads data that
+the source does not have, or only part of a scalar. Without native layouts,
+relevant fields correspond by position. -/
+def castFieldMap (sc dc : Name) (sl dl : CtorLayout) : LowerM (Option (Array (Option (Option Nat)))) := do
+  let positional : Option (Array (Option (Option Nat))) := Id.run do
+    let srcIdx := (List.range sl.fields.size).toArray.filter fun k => (sl.fields[k]?.join).isSome
+    let mut out := #[]
+    let mut r := 0
+    for f in dl.fields do
+      match f with
+      | some _ =>
+        let some k := srcIdx[r]? | return none
+        out := out.push (some (some k))
+        r := r + 1
+      | none => out := out.push none
+    return some out
+  let (some ss, some ds) := (← nativeSlots sc, ← nativeSlots dc) | return positional
+  if ss.size != sl.fields.size || ds.size != dl.fields.size then return positional
+  let mut out := #[]
+  for h : j in [:dl.fields.size] do
+    if dl.fields[j].isNone then
+      out := out.push none
+      continue
+    match ds[j]! with
+    -- No data natively (a field relevant only here): a placeholder.
+    | none => out := out.push (some none)
+    | some slot =>
+      match ss.findIdx? (· == some slot) with
+      | some k => out := out.push (some (if (sl.fields[k]?.join).isSome then some k else none))
+      | none => return none
+  return some out
+
+/-- See `retypable`; `assumed`: pairs of types under comparison. -/
+partial def retypableAux (a b : RR.Ty) (assumed : Array (String × String)) :
+    LowerM (Option (Array (String × String))) := do
+  if a == b then return some assumed
+  match a, b with
+  | .named an, .named bn =>
+    if assumed.contains (an, bn) then return some assumed
+    let infos := (← get).typeInfos
+    let (some ai, some bi) := (infos[an]?, infos[bn]?) | return none
+    if ai.value != bi.value || ai.shape != bi.shape || ai.ctorOrder.size != bi.ctorOrder.size then return none
+    let sameHead := (← nominalHead an) == (← nominalHead bn)
+    let mut asm := assumed.push (an, bn)
+    for (ca, cb) in ai.ctorOrder.zip bi.ctorOrder do
+      let (some la, some lb) := (ai.ctors.find? ca, bi.ctors.find? cb) | return none
+      let pa := la.posTys
+      let pb := lb.posTys
+      if pa.size != pb.size then return none
+      -- The fields a conversion pairs are at the same record positions.
+      if sameHead then
+        if la.fields.map (·.map (·.1)) != lb.fields.map (·.map (·.1)) then return none
+      else
+        let some fm ← castFieldMap ca cb la lb | return none
+        for h : j in [:lb.fields.size] do
+          let some (p, _) := lb.fields[j] | continue
+          let some (some k) := fm[j]?.join | return none
+          if (la.fields[k]?.join.map (·.1)) != some p then return none
+      for (x, y) in pa.zip pb do
+        let some asm' ← retypableAux x y asm | return none
+        asm := asm'
+    return some asm
+  | .app "RVec" #[x], .app "RVec" #[y] =>
+    -- Element storage: the same wrapping, wrapped values retypable.
+    let (ex, bx) ← storageElem x
+    let (ey, by_) ← storageElem y
+    if bx != by_ then return none
+    retypableAux (if bx then ex else x) (if bx then ey else y) assumed
+  | _, _ => return none
+
+/-- Whether a value of Reussir type `a` can be used as a value of type `b`
+as it is, the same object reinterpreted (`l2r_retype`): both cross the FFI
+boundary (shared records, arrays), and their layouts are the same: records
+with the same constructors whose fields, position by position, have the
+same layouts (coinductively, for recursive types), arrays of such
+elements; the conversion between them (`structConv`, `vecConv`) would pair
+exactly those fields. Instantiations of an inductive that differ only in
+phantom positions, and isomorphic inductives read through `unsafeCast` (a
+user list as `List`), are then not converted at all: no time, no copy, and
+the value keeps its identity. -/
+def retypable (a b : RR.Ty) : LowerM Bool := do
+  if a == b then return false
+  if !(← isBoundaryTy a) || !(← isBoundaryTy b) then return false
+  match a with
+  | .named n => if n == boxName || !(← get).typeInfos.contains n then return false
+  | .app "RVec" _ => pure ()
+  | _ => return false
+  return (← retypableAux a b #[]).isSome
 
 mutual
   /-- Convert `e` from representation `src` to `dst`. Besides `Box`
@@ -505,8 +704,14 @@ mutual
       | _ =>
         if let .named tn := dst then
           if (← get).typeInfos.contains tn then
-            -- Any instantiation of the same inductive may have been boxed.
+            -- Any instantiation of the same inductive may have been boxed,
+            -- and (through `unsafeCast`) values of types Lean represents
+            -- alike (`boxCastCompatible`).
             return some (.call (← unboxFn tn) #[] #[e])
+          if tn ∈ ["Nat", "Int", "u8", "u16", "u32", "bool", "u64", "f64", "f32"] then
+            -- The variant of `dst` in line; others (another word type read
+            -- through `unsafeCast`) through the generated function.
+            return some (← unboxMatch e dst (slow := some (← unboxFn tn)))
         if (← arrayRepr? dst).isSome || dst matches .app "LCell" _ then
           -- Any representation of the same array (or thunk, task) type may
           -- have been boxed.
@@ -553,22 +758,48 @@ mutual
       let f := rawFnValue dst x (.ofExpr res)
       return some (if pre.isEmpty then f else .block ⟨pre, f⟩)
     | .named sn, .named dn =>
-      -- Enumerations (and `Bool`) and `Nat` or fixed-width integers, by
-      -- index: natively an enumeration is a `uint8`/`16`/`32` (`Bool` a
-      -- `uint8`), a `Nat` its boxed scalar. Only reachable through
-      -- `unsafeCast`.
-      if (← isEnumName sn) || (← isEnumName dn) then
-        let infos := (← get).typeInfos
-        let related ← if infos.contains sn && infos.contains dn then
-            pure ((← nominalHead sn) == (← nominalHead dn) || (← isomorphic sn dn))
-          else pure false
-        if !related then
-          if let some i ← indexOf e sn then
-            if let some r ← ofIndex i dn then return some r
-      if let some sh ← nominalHead sn then
-        let some dh ← nominalHead dn | return none
-        if sh != dh && !(← isomorphic sn dn) then return none
-        return some (.call (← structConv sn dn) #[] #[e])
+      -- Instantiations of one inductive, or (through `unsafeCast`) another
+      -- inductive that Lean represents alike: structurally.
+      if let (some sh, some dh) := (← nominalHead sn, ← nominalHead dn) then
+        if sh == dh || (← isomorphic sn dn) then
+          if ← retypable src dst then return some (.call "l2r_retype" #[src, dst] #[e])
+          return some (.call (← structConv sn dn) #[] #[e])
+      -- The rest is only reachable through `unsafeCast`, between values that
+      -- Lean represents by the same word; the conversions follow Lean's
+      -- `lean_box`/`lean_unbox`. Scalars of the same size in a constructor's
+      -- scalar area: the bits.
+      match sn, dn with
+      | "u64", "f64" => return some (.call "lean_float_of_bits" #[] #[e])
+      | "f64", "u64" => return some (.call "lean_float_to_bits" #[] #[e])
+      | "u32", "f32" => return some (.call "lean_float32_of_bits" #[] #[e])
+      | "f32", "u32" => return some (.call "lean_float32_to_bits" #[] #[e])
+      -- `Nat` and `Int`: the same value (natively the same boxed scalar for
+      -- small values, the same big number object otherwise; a `Nat` from
+      -- 2^31 to 2^63 is not a valid small `Int` natively).
+      | "Nat", "Int" => return some (.call "lean_nat_to_int" #[] #[e])
+      | "Int", "Nat" => return some (.call "l2r_int_cast_nat" #[] #[e])
+      | _, _ => pure ()
+      -- A `[value]` struct is natively its field.
+      let infos := (← get).typeInfos
+      if let some si := infos[sn]? then
+        if si.value && (← nominalHead sn) != (← nominalHead dn) then
+          if let some ft := (si.ctors.find? si.ctorOrder[0]!).bind (·.posTys[0]?) then
+            let (pre, v) ← match e with
+              | .var _ => pure (#[], e)
+              | _ => do
+                let x ← fresh "vs"
+                pure (#[(x, some src, e)], RR.Expr.var x)
+            let some r ← tryCoerce (.field v 0) ft dst | return none
+            return some (if pre.isEmpty then r else .block ⟨pre, r⟩)
+      if let some di := infos[dn]? then
+        if di.value && (← nominalHead sn) != (← nominalHead dn) then
+          if let some ft := (di.ctors.find? di.ctorOrder[0]!).bind (·.posTys[0]?) then
+            let some v ← tryCoerce e src ft | return none
+            return some (.ctor dn none #[v])
+      -- Boxed scalars: `Nat`, `Int`, fixed-width integers, `Bool`,
+      -- enumerations, constructors without fields.
+      if let some w ← wordOf e sn then
+        if let some r ← ofWord w dn then return some r
       vecCoerce e src dst
     | .app "LCell" #[.named sz], .app "LCell" #[.named dz] =>
       match ← lazyConv sz dz with
@@ -582,6 +813,7 @@ mutual
   partial def vecCoerce (e : RR.Expr) (src dst : RR.Ty) : LowerM (Option RR.Expr) := do
     let some sr ← arrayRepr? src | return none
     let some dr ← arrayRepr? dst | return none
+    if ← retypable src dst then return some (.call "l2r_retype" #[src, dst] #[e])
     match ← vecConv src dst sr dr with
     | some f => return some (.call f #[] #[e])
     | none => return none
@@ -614,28 +846,33 @@ mutual
       .fn f #[("src", src)] dst entry] }
     return some f
 
-  /-- Two generated types with the same number of constructors and, at each
-  position, the same number of relevant fields. -/
+  /-- Whether values of generated type `sn` can be read as values of `dn`
+  (through `unsafeCast`, where Lean's representations coincide): the same
+  number of constructors, and each field of a constructor of `dn` reads a
+  field of the corresponding constructor of `sn` (`castFieldMap`). -/
   partial def isomorphic (sn dn : String) : LowerM Bool := do
     let some si := (← get).typeInfos[sn]? | return false
     let some di := (← get).typeInfos[dn]? | return false
     if si.ctorOrder.size != di.ctorOrder.size then return false
-    return (si.ctorOrder.zip di.ctorOrder).all fun (a, b) =>
-      match si.ctors.find? a, di.ctors.find? b with
-      | some la, some lb => (la.fields.filterMap id).size == (lb.fields.filterMap id).size
-      | _, _ => false
+    for (a, b) in si.ctorOrder.zip di.ctorOrder do
+      let (some la, some lb) := (si.ctors.find? a, di.ctors.find? b) | return false
+      if (← castFieldMap a b la lb).isNone then return false
+    return true
 
   /-- The generated function converting a thunk or task with state type `sz`
   to one with state type `dz` (same kind, value types differing only in
-  representation, as for `structConv`). A computed value is converted now.
-  Otherwise the result is a new cell in state `conv`: its computation forces
-  the original and converts the value (so the original's computation still
-  runs at most once), and it records the cell it was converted from, boxed,
-  so that converting it back gives that very cell (a thunk crossing between
-  typed and uniform code in a loop does not build a chain of cells), and,
-  for a task, the original's identity for the runtime (`l2r_task_addr_S`).
-  A cell converted from a converted one records the first original. `none`
-  if the values are not convertible. -/
+  representation, as for `structConv`). The result is a new cell that
+  records the cell it was converted from, boxed, and that cell's address:
+  converting it back gives that very cell (a thunk crossing between typed
+  and uniform code in a loop does not build a chain of cells), its identity
+  is the original's (`ptrAddrUnsafe`, see `addrOf`; for a task also the
+  runtime's, `l2r_task_addr_S`), and keeping the original keeps that
+  address from being reused. A computed value is converted now (state
+  `convdone`). Otherwise the new cell is in state `conv`: its computation
+  forces the original and converts the value (so the original's
+  computation still runs at most once). A cell converted from a converted
+  one records the first original. `none` if the values are not
+  convertible. -/
   partial def lazyConv (sz dz : String) : LowerM (Option String) := do
     let some (sk, st) := (← get).lazyInfos[sz]? | return none
     let some (dk, dt) := (← get).lazyInfos[dz]? | return none
@@ -656,9 +893,12 @@ mutual
     let u ← fresh "u"
     let mkConv (o a : RR.Expr) : RR.Expr := .call "l2r_lcell_new" #[.named dz]
       #[.ctor dz (some "conv") #[rawFnValue (.fn .unit dt) u (.ofExpr later), o, a]]
-    let ident : RR.Expr := if sk then .call "l2r_lcell_addr" #[.named sz] #[.var "c"] else .atom "0"
+    let ident : RR.Expr := .call "l2r_lcell_addr" #[.named sz] #[.var "c"]
     let fresh' : RR.Block := ⟨#[("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"]),
       ("a", some (.named "u64"), ident)], mkConv (.var "o") (.var "a")⟩
+    let doneConv : RR.Block := ⟨#[("w", some dt, now), ("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"]),
+      ("a", some (.named "u64"), ident)],
+      .call "l2r_lcell_new" #[.named dz] #[.ctor dz (some "convdone") #[.var "w", .var "o", .var "a"]]⟩
     -- From a converted cell: its original if that has the target type,
     -- otherwise the original converted directly (through the `Box`
     -- converter, which knows every representation), so chains through
@@ -668,8 +908,9 @@ mutual
       { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call (← unboxArrFn dstCell) #[] #[.var "o"]) }]
     let busy : RR.Block := ⟨#[("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"])], mkConv (.var "o") (.var "a")⟩
     let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[.named sz] #[.var "c"]) #[
-      lazyArm sz "done" #[some "v"] (.ofExpr (lazyDone dz now)),
+      lazyArm sz "done" #[some "v"] doneConv,
       lazyArm sz "conv" #[none, some "o", some "a"] (.ofExpr back),
+      lazyArm sz "convdone" #[none, some "o", some "a"] (.ofExpr back),
       lazyArm sz "busyconv" #[some "a"] busy,
       { ty := sz, ctor := none, binders := #[], body := fresh' }])
     modify fun s => { s with fns := s.fns.push (.fn name #[("c", srcCell)] dstCell body) }
@@ -713,15 +954,22 @@ mutual
             | none => possible := false
           | _, _ => vals := vals.push (← zeroValue dt)
       else
-        -- Isomorphic inductives: relevant fields by position.
-        for h : i in [:dstFields.size] do
-          let (_, dt) := dstFields[i]
-          match srcFields[i]? with
-          | some (_, st) =>
-            match ← tryCoerce (.var names[i]!) st dt with
-            | some v => vals := vals.push v
-            | none => possible := false
-          | none => possible := false
+        -- Another inductive (through `unsafeCast`): fields by native
+        -- layout slot (`castFieldMap`).
+        let srcIdx := (List.range sl.fields.size).toArray.filter fun j => (sl.fields[j]?.join).isSome
+        match ← castFieldMap ctor dctor sl dl with
+        | none => possible := false
+        | some fm =>
+          for h : j in [:dl.fields.size] do
+            let some (_, dt) := dl.fields[j] | continue
+            match fm[j]?.join with
+            | some (some k) =>
+              let some (_, st) := sl.fields[k]?.join | possible := false
+              let some r := srcIdx.idxOf? k | possible := false
+              match ← tryCoerce (.var names[r]!) st dt with
+              | some v => vals := vals.push v
+              | none => possible := false
+            | _ => vals := vals.push (← zeroValue dt)
       -- Fields are bound from and placed at their record positions.
       let placedVals := dl.place vals
       let body : RR.Block := if possible then
@@ -2085,6 +2333,148 @@ def taskDispatchFns : LowerM (Array RR.Item) := do
     ← mk "l2r_task_force_sources" #[("a", u64)] (.call "l2r_task_source_next_at" #[] #[.var "a"]) "l2r_task_handed"
       (.call "l2r_task_force_sources" #[] #[.var "a"])]
 
+/-! ## Identity (`ptrAddrUnsafe`)
+
+`ptrAddrUnsafe x` answers what native Lean answers (translation plan §9):
+the word of a boxed scalar (`lean_box(n) = 2n+1`) for values Lean
+represents so, the address of the Lean object otherwise. lean2rr's
+representations are mapped back to Lean's: a `Box` answers its payload's
+identity, a function value wrapped for another representation the wrapped
+value's, a thunk or task converted to another representation the
+original's, a `[value]` struct its field's. -/
+
+/-- Whether values of type `t` are natively boxed into a new cell each time
+they are boxed (`lean_box_uint64`, `lean_box_float`, …; also `Int64`,
+`ISize`, which are `UInt64` underneath). -/
+def cellScalar (t : RR.Ty) : Bool :=
+  match t with
+  | .named n => n ∈ ["u64", "i64", "f64", "f32"]
+  | _ => false
+
+/-- The type a value of type `t` is natively represented by: through
+`[value]` structs, their field's type. -/
+partial def nativeLeaf (t : RR.Ty) : LowerM RR.Ty := do
+  let .named n := t | return t
+  let some info := (← get).typeInfos[n]? | return t
+  if !info.value then return t
+  let some layout := info.ctors.find? info.ctorOrder[0]! | return t
+  let some ft := layout.posTys[0]? | return t
+  nativeLeaf ft
+
+/-- `l2r_lazy_addr_S(c)`: the identity of a thunk or task: its cell's
+address, or the original's that a converted cell records (see
+`lazyConv`). -/
+def lazyAddrFn (z : String) : LowerM String := do
+  let name := s!"l2r_lazy_addr_{z}"
+  lazyFn name do
+    let zt := RR.Ty.named z
+    let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
+      lazyArm z "conv" #[none, none, some "a"] (.ofExpr (.var "a")),
+      lazyArm z "busyconv" #[some "a"] (.ofExpr (.var "a")),
+      lazyArm z "convdone" #[none, none, some "a"] (.ofExpr (.var "a")),
+      { ty := z, ctor := none, binders := #[], body := .ofExpr (.call "l2r_lcell_addr" #[zt] #[.var "c"]) }])
+    return #[.fn name #[("c", .app "LCell" #[zt])] (.named "u64") body]
+
+/-- `l2r_fn_addr_T(f)`, the identity of a function value of type `t`
+(generated at the end, when its variants are known: `genFnAddr`). -/
+def fnAddrFn (t : RR.Ty) : LowerM String := do
+  unless (← get).fnAddrTargets.contains t do
+    modify fun s => { s with fnAddrTargets := s.fnAddrTargets.push t }
+  return s!"l2r_fn_addr_{t.enc}"
+
+/-- `l2r_box_addr(b)`, the identity of a `Box`'s payload (generated at the
+end, when the variants are known: `genBoxAddr`). -/
+def boxAddrFn : LowerM String := do
+  modify fun s => { s with boxAddrWanted := true }
+  return "l2r_box_addr"
+
+/-- A `u64` literal as an expression. -/
+def u64Lit (k : Nat) : LowerM RR.Expr := do
+  let o ← fresh "pa"
+  return .block ⟨#[(o, some (.named "u64"), .atom (toString k))], .var o⟩
+
+/-- `l2r_addr_T(x)` for a shared nominal type `tn` with constructors
+without fields: natively those are the boxed scalars of their index. -/
+def recAddrFn (tn : String) (info : TypeInfo) : LowerM String := do
+  let name := s!"l2r_addr_{tn}"
+  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+    let mut arms : Array RR.Arm := #[]
+    for h : i in [:info.ctorOrder.size] do
+      let some l := info.ctors.find? info.ctorOrder[i] | continue
+      if (l.fields.filterMap id).isEmpty then
+        arms := arms.push { ty := tn, ctor := some l.variant, binders := #[], body := .ofExpr (← u64Lit (2 * i + 1)) }
+    let dflt := RR.Expr.call "l2r_ptr_addr_rec" #[.named tn] #[.var "x"]
+    arms := arms.push { ty := tn, ctor := none, binders := #[], body := .ofExpr dflt }
+    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named tn)] (.named "u64") (.ofExpr (.mtch (.var "x") arms))) }
+  return name
+
+/-- `ptrAddrUnsafe` of value `e : t` (see the section comment). A value
+natively boxed into a new cell at each boxing (`UInt64`, `Float`) answers
+a fresh number: natively two calls on the same variable box it twice (only
+Lean's CSE, which lean2rr keeps, merges calls). -/
+partial def addrOf (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
+  let evalThen (k : RR.Expr) : LowerM RR.Expr := do
+    let d ← fresh "pd"
+    return .block ⟨#[(d, some t, e)], k⟩
+  match t with
+  | .named n =>
+    if n == "Nat" then return .call "l2r_addr_nat" #[] #[e]
+    if n == "Int" then return .call "l2r_addr_int" #[] #[e]
+    -- `box(0)`.
+    if n == "L2RUnit" then return ← evalThen (← u64Lit 1)
+    if cellScalar t then return ← evalThen (.call "l2r_addr_fresh" #[] #[])
+    if n == boxName then return .call (← boxAddrFn) #[] #[e]
+    -- `UInt8/16/32`, `Char`, `Bool`, enumerations.
+    if let some i ← scalarWord e n then return .call "l2r_addr_word" #[] #[i]
+    if n ∈ ["LStr", "LBig", "LNatArr", "LIntArr", "LHandle"] then
+      return .call "l2r_ptr_addr_obj" #[t] #[e]
+    match (← get).typeInfos[n]? with
+    | some info =>
+      if info.value then
+        let some layout := info.ctors.find? info.ctorOrder[0]! | return ← evalThen (← u64Lit 1)
+        let some ft := layout.posTys[0]? | return ← evalThen (← u64Lit 1)
+        return ← withVar "pv" t e fun v => addrOf (.field v 0) ft
+      if hasNullaryCtor info then return .call (← recAddrFn n info) #[] #[e]
+      return .call "l2r_ptr_addr_rec" #[t] #[e]
+    | none =>
+      if ← isBoundaryTy t then return .call "l2r_ptr_addr_obj" #[t] #[e]
+      evalThen (.call "l2r_addr_fresh" #[] #[])
+  | .app "RVec" _ | .app "LRef" _ => return .call "l2r_ptr_addr_obj" #[t] #[e]
+  | .app "LCell" #[.named z] => return .call (← lazyAddrFn z) #[] #[e]
+  | .fn .. => return .call (← fnAddrFn t) #[] #[e]
+  | _ => evalThen (.call "l2r_addr_fresh" #[] #[])
+
+/-- Generate `l2r_fn_addr_T` (see `fnAddrFn`): a wrapped value answers the
+identity of the value it wraps, the `box(0)` placeholder `1`, others their
+cell. -/
+def genFnAddr (t : RR.Ty) : LowerM Unit := do
+  let name := s!"l2r_fn_addr_{t.enc}"
+  let tn := RR.fnTypeName t
+  let mut arms : Array RR.Arm := #[{ ty := tn, ctor := some "z", binders := #[], body := .ofExpr (← u64Lit 1) }]
+  for v in (← get).fnVariants.getD t #[] do
+    let .wrap src := v | continue
+    let a ← addrOf (.var "l2rg") src
+    arms := arms.push { ty := tn, ctor := some (fnVariantName v), binders := #[some "l2rg"], body := .ofExpr a }
+  arms := arms.push { ty := tn, ctor := none, binders := #[], body := .ofExpr (.call "l2r_ptr_addr_rec" #[t] #[.var "l2rf"]) }
+  let item := RR.Item.fn name #[("l2rf", t)] (.named "u64") (.ofExpr (.mtch (.var "l2rf") arms))
+  modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
+
+/-- Generate `l2r_box_addr` (see `boxAddrFn`): the payload's identity; a
+payload natively boxed into a cell (`UInt64`, `Float`, or a `[value]`
+struct over one) answers the `Box` cell, which is that cell here. -/
+def genBoxAddr : LowerM Unit := do
+  let name := "l2r_box_addr"
+  let mut arms : Array RR.Arm := #[]
+  for (vt, v) in (← get).boxVariants do
+    if cellScalar (← nativeLeaf vt) then
+      let cell := RR.Expr.call "l2r_ptr_addr_rec" #[RR.Ty.box] #[.var "b"]
+      arms := arms.push { ty := boxName, ctor := some v, binders := #[none], body := .ofExpr cell }
+    else
+      arms := arms.push { ty := boxName, ctor := some v, binders := #[some "x"], body := .ofExpr (← addrOf (.var "x") vt) }
+  let item := RR.Item.fn name #[("b", RR.Ty.box)] (.named "u64") (.ofExpr (.mtch (.var "b") arms))
+  modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item,
+                           boxAddrDone := s.boxVariants.size }
+
 /-- Externs whose results mention Lean-defined types get generated glue
 (translation plan §5.8); returns `none` for ordinary externs. -/
 def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array RR.Expr) :
@@ -2102,47 +2492,10 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     return some (.block ⟨#[(e, some (.named "u64"), .call prim #[] #[args[0]!])],
       .call "l2r_unreachable" #[rt] #[]⟩)
   | _ => pure ()
-  -- `ptrAddrUnsafe`: the address of the Lean object, as natively. A heap
-  -- value passed as it is (a variable, not a wrapper or a conversion built
-  -- for the call) answers its handle pointer (`l2r_ptr_addr_obj`), whatever
-  -- its count: when the call holds the last reference, the value may still
-  -- be the same object as another one whose address was taken before (the
-  -- other side of `ptrEq a b`, when `a` was released by its own call). A
-  -- `[value]` struct is represented natively by its field (Lean unboxes
-  -- structures with one relevant field), so its address is the field's,
-  -- recursively. Everything else (scalars, and values wrapped at the call,
-  -- such as `Nat`s, which cannot cross the FFI boundary) goes through the
-  -- generic path: `lean_ptr_addr` answers the bits of a scalar, and a fresh
-  -- number for a wrapper that dies with the call (§9).
+  -- `ptrAddrUnsafe`: what native Lean answers (see `addrOf`).
   if (← externSymbol orig) == "lean_ptr_addr" then
     let some p := params[0]? | return none
-    let mut t ← lowerType p
-    let mut e := args[0]!
-    repeat
-      let .named tn := t | break
-      let some info := (← get).typeInfos[tn]? | break
-      if !info.value then break
-      let some layout := info.ctors.find? info.ctorOrder[0]! | break
-      let some ft := layout.posTys[0]? | break
-      e := .field e 0
-      t := ft
-    let rec place : RR.Expr → Bool
-      | .var n => !n.startsWith "L2RUnit"
-      | .field x _ => place x
-      | _ => false
-    let scalar := match t with
-      | .named n => n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool"]
-      | _ => false
-    if place e && !scalar && (← isBoundaryTy t) then
-      -- Records generated by lean2rr (shared structs and enums, `Box`,
-      -- function values) and runtime handles.
-      let infos := (← get).typeInfos
-      let record := match t with
-        | .named n => n == boxName || infos.contains n
-        | .fn .. => true
-        | _ => false
-      return some (.call (if record then "l2r_ptr_addr_rec" else "l2r_ptr_addr_obj") #[t] #[e])
-    return none
+    return some (← addrOf args[0]! (← lowerType p))
   -- `Lean.Name.beq`: structural equality (see `structEqFn`).
   if (← externSymbol orig) == "lean_name_eq" then
     let .named tn ← lowerType params[0]! | return none
@@ -2425,6 +2778,12 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     let ptys ← params.mapM lowerType
     let retTy ← lowerType ret
     if args.size == n then
+      -- `ptrAddrUnsafe x`: the identity of `x` in its own representation
+      -- (converted to the parameter's, it would be another object).
+      if (← externSymbol orig) == "lean_ptr_addr" then
+        if let some (.fvar x) := args.back? then
+          if let some (vn, vt) := ctx.vars[x]? then
+            return ← coerce (← addrOf (.var vn) vt) (.named "u64") (← lowerType resTy)
       let as ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
       coerce (← lowerExternCall orig typeArgs params ret as) retTy (← lowerType resTy)
     else if args.size < n then
@@ -2506,21 +2865,17 @@ def castCases (sty : RR.Ty) (typeName : Name) : LowerM CastCases := do
         if (← get).typeInfos.contains dn && (← isomorphic tn dn) then return .view tn dn
   return .convert uniform
 
-/-- The layout of constructor `dl` (of the instance a cast value is matched
-as) over the record of the corresponding constructor `sl` of the value's
-own type: the `k`-th relevant field of `dl` is the `k`-th relevant field of
-`sl`, at its record position and type (as `structConv` converts isomorphic
-inductives). -/
-def viewLayout (sl dl : CtorLayout) : CtorLayout := Id.run do
-  let srcRel := sl.fields.filterMap id
-  let mut fields := #[]
-  let mut k := 0
-  for f in dl.fields do
-    match f with
-    | some _ =>
-      fields := fields.push srcRel[k]?
-      k := k + 1
-    | none => fields := fields.push none
+/-- The layout of constructor `dc` (layout `dl`, of the instance a cast
+value is matched as) over the record of the corresponding constructor `sc`
+(layout `sl`) of the value's own type: each field of `dl` is the field of
+`sl` it reads natively (`castFieldMap`), at its record position and type (as
+`structConv` converts). A field reading nothing here is a placeholder. -/
+def viewLayout (sc dc : Name) (sl dl : CtorLayout) : LowerM CtorLayout := do
+  let fm := (← castFieldMap sc dc sl dl).getD #[]
+  let fields := (List.range dl.fields.size).toArray.map fun j =>
+    match fm[j]?.join.join with
+    | some k => sl.fields[k]?.join
+    | none => none
   return { variant := sl.variant, numParams := dl.numParams, fields }
 
 def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty) : LowerM RR.Expr := do
@@ -2539,9 +2894,14 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
         | .view src dst =>
           let si := (← get).typeInfos[src]?
           let di := (← get).typeInfos[dst]?
+          let sc := si.bind (·.ctorOrder[0]?)
+          let dc := di.bind (·.ctorOrder[0]?)
           let sl := si.bind fun i => i.ctorOrder[0]?.bind i.ctors.find?
           let dl := di.bind fun i => i.ctorOrder[0]?.bind i.ctors.find?
-          pure (RR.Expr.var n, src, (do viewLayout (← sl) (← dl)))
+          let layout ← match sc, dc, sl, dl with
+            | some sc, some dc, some sl, some dl => some <$> viewLayout sc dc sl dl
+            | _, _, _, _ => pure none
+          pure (RR.Expr.var n, src, layout)
         | .convert dty =>
           let .named dn := dty | return ← zeroValue rty
           let di := (← get).typeInfos[dn]?
@@ -2806,6 +3166,24 @@ where
     | .cases cs => cs.alts.any (go seen ·.getCode)
     | .return _ | .unreach _ => false
 
+/-- Whether `c` returns `x` itself, or passes it to a join point (which may
+return it), following jumps to the join points in scope (`jps`). -/
+partial def returnedWhole (jps : Std.HashMap FVarId (Code .pure)) (x : FVarId) (c : Code .pure) : Bool :=
+  go {} c
+where
+  go (seen : FVarIdSet) (c : Code .pure) : Bool :=
+    match c with
+    | .let _ k => go seen k
+    | .fun d k _ | .jp d k => go seen d.value || go seen k
+    | .jmp j args =>
+      args.any (fun | .fvar y => y == x | _ => false) ||
+        match jps[j]? with
+        | some b => !seen.contains j && go (seen.insert j) b
+        | none => false
+    | .cases cs => cs.alts.any (go seen ·.getCode)
+    | .return y => y == x
+    | .unreach _ => false
+
 /-- One pass over `c` for a matched value `x`: whether `c` uses `x` (as
 `usesVar`, with `jps` the bodies of the join points declared outside `c`),
 and the variables used in `c` outside the alternatives (of `cases` in `c`)
@@ -3066,7 +3444,7 @@ mutual
           let mut m : NameMap CtorLayout := {}
           for (sc, dc) in info.ctorOrder.zip di.ctorOrder do
             if let (some sl, some dl) := (info.ctors.find? sc, di.ctors.find? dc) then
-              m := m.insert dc (viewLayout sl dl)
+              m := m.insert dc (← viewLayout sc dc sl dl)
           pure (di.ctorOrder, fun c => m.find? c)
       match info.shape with
       | .struct =>
@@ -3076,14 +3454,32 @@ mutual
           let some layout := layoutOf ctor | throwError "lean2rr: bad constructor"
           let mut ctx' := ctx
           let mut lets := #[]
+          -- A shared structure that stays live because it is stored or
+          -- returned whole binds only the fields used while it is live; the
+          -- others are projected in the inner alternatives that use them
+          -- (`lowerAlt`), as for the constructors of an enum (below): a
+          -- field projected here would be an extra reference whose release
+          -- Reussir's token reuse takes for a freed cell.
+          let lazyOk := !info.value && view.isNone &&
+            (usedAsField (← getEnv) ctx.jpBodies cs.discr k || returnedWhole ctx.jpBodies cs.discr k)
+          let early := if lazyOk then usesWhileLive ctx.jpBodies cs.discr k {} else {}
+          let used := if lazyOk then codeUses k {} else {}
+          let mut pending := #[]
           for h : i in [:ps.size] do
             let p := ps[i]
             match layout.fields[i]? with
             | some (some (j, ft)) =>
-              let x ← fresh "f"
-              lets := lets.push (x, some ft, RR.Expr.field (.var scrut) j)
-              ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
+              if lazyOk && !early.contains p.fvarId then
+                if used.contains p.fvarId then pending := pending.push (p.fvarId, j, ft)
+              else
+                let x ← fresh "f"
+                lets := lets.push (x, some ft, RR.Expr.field (.var scrut) j)
+                ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
             | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
+          if !pending.isEmpty then
+            let l : LazyMatch := { discr := cs.discr, scrut, ty := tn, variant := layout.variant, nbinders := 0,
+                                   fields := pending, pending, struct := true }
+            ctx' := { ctx' with lazy := ctx'.lazy.push l }
           let b ← lowerCode ctx' outlined retTy k
           return .block { b with lets := lets ++ b.lets }
         | .default k => return .block (← lowerCode ctx outlined retTy k)
@@ -3105,20 +3501,23 @@ mutual
                 ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
               | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
             -- An arm in which the matched value stays live because it is
-            -- stored whole in a new constructor binds only the fields needed
-            -- while it is live; a field used only in inner alternatives that
-            -- do not use the value is bound there, by matching the value
-            -- again (`lowerAlt`). Reussir projects a match's fields at the
-            -- match: a field of a value that stays live is then an extra
-            -- reference (inc and dec), and its release looks like a
-            -- reusable cell to Reussir's token reuse, which prefers it to
-            -- the cell actually freed and then never reuses anything
-            -- (TreeMap's `balance` rebuilt every node of the path). Not for
-            -- values only passed to calls: there reusing the cell (merge's
-            -- `go l₁ ys (y :: acc)`) measured slower for mergesort, whose
-            -- lists then keep the scattered order of the input cells.
+            -- stored whole in a new constructor, or returned whole (`simp`
+            -- turns `t@(node l k r)` rebuilt into `t`: a BST insert of a key
+            -- already present), binds only the fields needed while it is
+            -- live; a field used only in inner alternatives that do not use
+            -- the value is bound there, by matching the value again
+            -- (`lowerAlt`). Reussir projects a match's fields at the match:
+            -- a field of a value that stays live is then an extra reference
+            -- (inc and dec), and its release looks like a reusable cell to
+            -- Reussir's token reuse, which prefers it to the cell actually
+            -- freed and then never reuses anything (TreeMap's `balance`
+            -- rebuilt every node of the path; a BST insert with `Nat` keys,
+            -- whose comparison is a call before the branch, every node).
+            -- Not for values only passed to calls: there reusing the cell
+            -- (merge's `go l₁ ys (y :: acc)`) measured slower for mergesort,
+            -- whose lists then keep the scattered order of the input cells.
             if !binders.isEmpty && info.shape == .enum &&
-                usedAsField (← getEnv) ctx.jpBodies cs.discr k then
+                (usedAsField (← getEnv) ctx.jpBodies cs.discr k || returnedWhole ctx.jpBodies cs.discr k) then
               let early := usesWhileLive ctx.jpBodies cs.discr k {}
               let used := codeUses k {}
               let mut fields := #[]
@@ -3171,6 +3570,29 @@ mutual
     for h : i in [:ctx.lazy.size] do
       let l := ctx.lazy[i]
       let live := usesVar ctx.jpBodies l.discr k
+      if l.struct then
+        -- A structure: project the pending fields this code uses (while
+        -- the structure is live, only those needed before it dies).
+        let need := l.pending.filter (used.contains ·.1)
+        let now := if live && !need.isEmpty then
+            let early := usesWhileLive ctx.jpBodies l.discr k {}
+            need.filter (early.contains ·.1)
+          else need
+        if now.isEmpty then continue
+        let scrut := match ctx.vars[l.discr]? with
+          | some (n, _) => n
+          | none => l.scrut
+        let mut lets := #[]
+        let mut ctx' := ctx
+        for (p, j, ft) in now do
+          let x ← fresh "f"
+          lets := lets.push (x, some ft, RR.Expr.field (.var scrut) j)
+          ctx' := { ctx' with vars := ctx'.vars.insert p (x, ft) }
+        let rest := l.pending.filter fun q => !now.any (·.1 == q.1)
+        ctx' := { ctx' with lazy :=
+          if rest.isEmpty then ctx'.lazy.eraseIdx! i else ctx'.lazy.set! i { l with pending := rest } }
+        let body ← lowerAlt ctx' outlined retTy k
+        return { body with lets := lets ++ body.lets }
       let now := if live then
           let need := l.pending.filter (used.contains ·.1)
           if need.isEmpty then need else
@@ -3221,6 +3643,31 @@ partial def reprCompatible (a b : RR.Ty) : LowerM Bool := do
       | _, _ => return false
     | _, _ => return false
 
+/-- Whether a `Box` holding a value of type `vt` may be read at type `t`
+(itself, or through `unsafeCast` a type that Lean represents alike), so that
+the unboxing function to `t` converts it: words (`Nat`, `Int`,
+`UInt8/16/32`, `Bool`, enumerations) as words (`wordOf`/`ofWord`), values
+of another inductive with the same layout (`isomorphic` and `retypableAux`:
+the value as it is), `UInt64` and `Float` (`UInt32` and `Float32`) by their
+bits. Other casts convert in typed code, where they are written, but not
+through a `Box`: every unboxing function would match (and convert from)
+every type its constructors can read, e.g. every structure with one
+function field (the dictionaries of uniform code), building wrappers between
+unrelated function types. -/
+def boxCastCompatible (vt t : RR.Ty) : LowerM Bool := do
+  let .named a := vt | return false
+  let .named b := t | return false
+  if a == b then return true
+  let word (n : String) : LowerM Bool := do
+    if n ∈ ["Nat", "Int", "u8", "u16", "u32", "bool"] then return true
+    return ((← get).typeInfos[n]?.map (·.shape == .enumLike)).getD false
+  if (← word a) && (← word b) then return true
+  if [("u64", "f64"), ("f64", "u64"), ("u32", "f32"), ("f32", "u32")].contains (a, b) then return true
+  let infos := (← get).typeInfos
+  if infos.contains a && infos.contains b then
+    return (← isomorphic a b) && (← retypableAux vt t #[]).isSome
+  return false
+
 /-- Generate the bodies of all `Box → nominal` and `Box → array` converters.
 A converter matches every `Box` variant that can hold a value of the
 target's Lean type and converts it: for a nominal type, any instantiation of
@@ -3239,7 +3686,10 @@ partial def finishUnboxFns : LowerM Unit := do
     let arrays := (← get).unboxArrTargets.map fun (t, f) => (f, t)
     let fns := (← get).fnUnboxTargets.map fun t => (s!"l2r_unbox_fn_{t.enc}", t)
     let pending := (nominal ++ arrays ++ fns).filter fun (f, _) => done.getD f 0 != nvars + 1
-    if pending.isEmpty then break
+    -- The identity of a `Box` (`genBoxAddr`) matches every variant too.
+    let boxAddrPending := (← get).boxAddrWanted && (← get).boxAddrDone != nvars
+    if pending.isEmpty && !boxAddrPending then break
+    if boxAddrPending then genBoxAddr
     for (fname, t) in pending do
       let th? ← match t with
         | .named tn => nominalHead tn
@@ -3259,6 +3709,7 @@ partial def finishUnboxFns : LowerM Unit := do
             | some (_, k1, a), some (_, k2, b) => pure (k1 == k2 && (← reprCompatible a b))
             | _, _ => pure false
           | none, _ => pure (tArr && (← arrayRepr? vt).isSome && (← reprCompatible vt t))
+        let accept := accept || (vt != .unit && (← boxCastCompatible vt t))
         if !accept then continue
         let x ← fresh "bx"
         -- Arrays of another representation go through `RVec<Box>` (boxing,
@@ -3266,9 +3717,8 @@ partial def finishUnboxFns : LowerM Unit := do
         -- stay linear in the number of array types, not quadratic (nested
         -- arrays under polymorphic recursion have many representations).
         let boxArr := RR.Ty.app "RVec" #[RR.Ty.box]
-        let body ← if th?.isSome || vt == t || vt == boxArr || t == boxArr || t matches .fn ..
-            || t matches .app "LCell" _ then
-            tryCoerce (.var x) vt t
+        let viaBoxArr := tArr && vt != t && vt != boxArr && t != boxArr && (← arrayRepr? vt).isSome
+        let body ← if !viaBoxArr then tryCoerce (.var x) vt t
           else match ← tryCoerce (.var x) vt boxArr with
             | some b => tryCoerce b boxArr t
             | none => pure none
@@ -3375,6 +3825,12 @@ partial def finishFnValues : LowerM Bool := do
       if (← get).fnApplyDone[(t, j)]? == some nv then continue
       genApply t j
       modify fun s => { s with fnApplyDone := s.fnApplyDone.insert (t, j) nv }
+      progress := true
+    for t in (← get).fnAddrTargets do
+      let nv := ((← get).fnVariants.getD t #[]).size
+      if (← get).fnAddrDone[t]? == some nv then continue
+      genFnAddr t
+      modify fun s => { s with fnAddrDone := s.fnAddrDone.insert t nv }
       progress := true
     if !progress then break
     any := true

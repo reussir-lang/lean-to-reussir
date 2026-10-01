@@ -194,6 +194,14 @@ structure LowerState where
   taskTags : Array String := #[]
   /-- Names of generated thunk/task helper functions (see `lazyFn`). -/
   lazyFnNames : Std.HashSet String := {}
+  /-- Function types whose identity function (`l2r_fn_addr_T`, see `addrOf`)
+  is requested, and the variant count its body was generated for. -/
+  fnAddrTargets : Array RR.Ty := #[]
+  fnAddrDone : Std.HashMap RR.Ty Nat := {}
+  /-- Whether `l2r_box_addr` is requested, and the `Box` variant count its
+  body was generated for. -/
+  boxAddrWanted : Bool := false
+  boxAddrDone : Nat := 0
   counter : Nat := 0
 
 abbrev LowerM := ReaderT LowerCtx (StateRefT LowerState CoreM)
@@ -248,8 +256,8 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
 
 /-- The state type of a thunk (`task = false`) or task over values of type
 `t`: a generated shared enum `{ pending(L2RUnit -> t), busy, done(t),
-conv(L2RUnit -> t, Box, u64), busyconv(u64) }` (tasks also
-`bind(L2RUnit -> LCell<S>)`)
+conv(L2RUnit -> t, Box, u64), busyconv(u64), convdone(t, Box, u64) }`
+(tasks also `bind(L2RUnit -> LCell<S>)`)
 held in a runtime cell `LCell<S>` (translation plan §5.14). A thunk
 starts `pending` (or `done`, for `Thunk.pure`) and is `busy` while its
 closure runs; a task is `done` from the start unless it is a deferred IO
@@ -258,7 +266,7 @@ def lazyState (task : Bool) (t : RR.Ty) : LowerM String := do
   if let some n := (← get).lazyStates[(task, t)]? then return n
   let n ← fresh (if task then "L2RTask" else "L2RThunk")
   -- `conv`: converted from another representation (see `lazyConv`): the
-  -- computation, the original cell (boxed), the original task's identity.
+  -- computation, the original cell (boxed), the original's identity.
   let cellTy := RR.Ty.app "LCell" #[.named n]
   modify fun s => { s with
     lazyStates := s.lazyStates.insert (task, t) n
@@ -266,7 +274,11 @@ def lazyState (task : Bool) (t : RR.Ty) : LowerM String := do
     typeItems := s.typeItems.push (.enum n false (#[("pending", #[.fn .unit t]), ("busy", #[]), ("done", #[t]),
       ("conv", #[.fn .unit t, RR.Ty.box, .named "u64"]),
       -- `busyconv`: a `conv` cell being forced (it keeps the identity).
-      ("busyconv", #[.named "u64"])] ++
+      ("busyconv", #[.named "u64"]),
+      -- `convdone`: a converted cell with its value: the value, the
+      -- original (kept, so that its address stays this cell's identity),
+      -- the original's identity.
+      ("convdone", #[t, RR.Ty.box, .named "u64"])] ++
       -- `bind`: an `IO.bindTask` task before it has run `f` (its computation
       -- yields the task it continues as, see `taskStepFn`).
       (if task then #[("bind", #[.fn .unit cellTy])] else #[])))

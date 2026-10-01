@@ -155,9 +155,16 @@ def instanceName (key : InstKey) : MonoM Name := do
   -- helper, a mutual partner: `nestI` → `nestI.helper` → `nestI` at
   -- `StateT Nat m`), so it is compared with the instances of the same
   -- declaration on the path that led to the requesting instance, up to the
-  -- nearest uniform one: from there on, as for a direct self-call, one
-  -- typed instance at `F lcAny` is made, whose own request `F (F lcAny)`
-  -- grows.
+  -- nearest uniform one. A request made under the uniform instance at a
+  -- type built from its `lcAny` (`List lcAny`, `lcAny × lcAny`) is the same
+  -- recursion, and goes to the uniform instance too: a typed instance at
+  -- that type would receive whatever the uniform code passes there,
+  -- converted structurally on every call, and a value only `unsafeCast` to
+  -- it (natively any object) could not be converted at all. A type function
+  -- (a monad `m` → `OptionT m`) instead gets one typed instance at
+  -- `F lcAny`, whose own request `F (F lcAny)` grows: the uniform instance
+  -- has no static dictionary, and the typed one adapts the dictionary it
+  -- receives.
   let s ← get
   let onPath : Bool := Id.run do
     let mut inst := s.currentInst
@@ -166,7 +173,8 @@ def instanceName (key : InstKey) : MonoM Name := do
       let some n := inst | return false
       if let some k := s.keys.find? n then
         if k.decl == key.decl && k.typeArgs.size == key.typeArgs.size then
-          if k.typeArgs.all (· == anyExpr) then return false
+          if k.typeArgs.all (· == anyExpr) then
+            return key.typeArgs.any fun b => b != anyExpr && !b.isLambda && (b.find? (· == anyExpr)).isSome
           if (k.typeArgs.zip key.typeArgs).any (fun (a, b) => grows a b) then return true
       inst := s.parentOf.find? n
       fuel := fuel - 1
