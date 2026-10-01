@@ -221,9 +221,13 @@ pub struct CtxState {
     chains: Vec<((usize, u32), Vec<(u32, u32)>)>,
     /// Running tasks (entries), innermost last.
     running: Vec<u32>,
+    /// Walks of promises resolved inside a free, to do once it is over
+    /// (`resolve`, `run_later_walks`), in resolution order.
+    later: Vec<Walk>,
 }
 
-static CTX: Global<CtxState> = Global(UnsafeCell::new(CtxState { walks: Vec::new(), chains: Vec::new(), running: Vec::new() }));
+static CTX: Global<CtxState> =
+    Global(UnsafeCell::new(CtxState { walks: Vec::new(), chains: Vec::new(), running: Vec::new(), later: Vec::new() }));
 
 #[inline]
 fn ctx() -> &'static mut CtxState {
@@ -364,6 +368,7 @@ pub fn deferring() -> bool {
 /// queued now could have been started by native workers before Lean's
 /// shutdown flag was set (`EARLY`).
 pub fn shutdown() {
+    run_later_walks();
     settle_worker();
     let t = tasks();
     t.shutting_down = true;
@@ -660,9 +665,57 @@ pub fn resolve(cell: usize) -> u64 {
     e.cell = 0;
     e.flags = 0;
     let thread = cur_thread();
-    ctx().walks.push(Walk { owner: i, thread, early, canceled, worker: false, base: true });
+    let w = Walk { owner: i, thread, early, canceled, worker: false, base: true };
     crate::sched::on_finish(cell);
+    if crate::drop::active() {
+        // Resolved inside a free (a promise dropped there): its dependents
+        // run Lean code, which may block, and a context must not be
+        // suspended inside a free (the free is the thread's, in
+        // `reussir_rt::drop`: the other contexts' frees would wait for it).
+        // They are walked once the free is over, at the context's next
+        // point that may run Lean code (`run_later_walks`).
+        ctx().later.push(w);
+        return 0;
+    }
+    ctx().walks.push(w);
     1
+}
+
+extern "C" {
+    /// lean2rr's `l2r_task_walk() -> u64`: walks the dependents of the
+    /// innermost walk (`walk_next`), exported by every program.
+    #[linkage = "extern_weak"]
+    static l2r_task_walk_c: *const std::ffi::c_void;
+}
+
+/// Walk the dependents of the promises resolved inside a free on this
+/// context (`resolve`). Natively their `sync` dependents run at once on the
+/// resolving thread; here at the next point after the free where the
+/// running context may run Lean code: an effect point, blocking, a
+/// question about a task, the end of a task or of `main`.
+#[inline]
+pub fn run_later_walks() {
+    if !ctx().later.is_empty() {
+        run_later_walks_slow()
+    }
+}
+
+#[inline(never)]
+fn run_later_walks_slow() {
+    if crate::drop::active() {
+        return;
+    }
+    let f = unsafe { l2r_task_walk_c };
+    assert!(!f.is_null(), "leanrt: no l2r_task_walk_c");
+    let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(f) };
+    // All of them, in order: a walk's own effect points do not start the
+    // next ones before its code has gone on.
+    while !ctx().later.is_empty() {
+        for w in std::mem::take(&mut ctx().later) {
+            ctx().walks.push(w);
+            unsafe { f() };
+        }
+    }
 }
 
 /// An `IO.Promise`: the cell of its task, with one reference (natively the
@@ -1294,6 +1347,7 @@ pub fn released_startable(mark: u32) -> u32 {
 /// one may resolve it. `u64::MAX` when there is nothing (more) to run.
 #[inline(never)]
 pub fn source_next(cell: usize) -> u64 {
+    run_later_walks();
     let t = tasks();
     let i = find(cell);
     let key = (cell, if i == NONE { 0 } else { ent(i).serial });
@@ -1427,6 +1481,7 @@ pub fn tid_offset() -> u64 {
 /// promise, as natively), 2 finished.
 #[inline(never)]
 pub fn status(cell: usize) -> u8 {
+    run_later_walks();
     let i = find(cell);
     if i == NONE {
         return 2;
@@ -1439,6 +1494,7 @@ pub fn status(cell: usize) -> u8 {
 /// (running it would wait for the promise).
 #[inline(never)]
 pub fn wait_status(cell: usize) -> u8 {
+    run_later_walks();
     let t = tasks();
     let i = find(cell);
     if i == NONE {
@@ -1476,6 +1532,7 @@ pub fn wait_status(cell: usize) -> u8 {
 /// is then polling for the task, which a worker would have run meanwhile.
 #[inline(never)]
 pub fn query(cell: usize) -> u8 {
+    run_later_walks();
     let t = tasks();
     let i = find(cell);
     if i == NONE {

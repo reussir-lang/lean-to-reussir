@@ -9,10 +9,11 @@ this repository. Reussir is patched locally only where a bug breaks
 lean2rr's output and lean2rr has no reasonable way around it. Each patch
 was reviewed adversarially before it was applied: code review,
 differential fuzzing against a reference evaluator, ASan builds and the
-lean2rr test suites, over three rounds. The eight patches are in
-`reussir-patches/` (see its README). They are applied to `./reussir` as
-local commits on its branch `l2r-local` (ef922049 + the eight). They are
-not submitted upstream. lean2rr's workarounds stay in place where they are
+lean2rr test suites, over three rounds (0014 in a fourth). The nine patches
+are in `reussir-patches/` (see its README). They are applied to
+`./reussir` as local commits on its branch `l2r-local` (ef922049 + the
+nine). They are not submitted upstream. lean2rr's runtime needs 0014 to
+build (bug 13). lean2rr's workarounds stay in place where they are
 still needed (bugs 1, 2 for variants, 3, 10, 16, 17, 19, 20).
 
 ## Repros
@@ -53,9 +54,10 @@ Builds used to check the repros (on the aarch64 test machine):
   extended for chains through a member that is not last, work in progress
   ("0013, extended").
 - ef922049 + 0012.
-- the final set: ef922049 + 0006, 0004, 0002, 0007, 0009, 0005, 0013,
-  0012 as applied to `./reussir` (`l2r-local`). The third review round
-  checked it.
+- the eight-patch set: ef922049 + 0006, 0004, 0002, 0007, 0009, 0005,
+  0013, 0012 as applied to `./reussir` (`l2r-local`) before 0014. The
+  third review round checked it.
+- the final set: the eight-patch set + 0014 (`l2r-local`).
 
 ## Status
 
@@ -73,7 +75,7 @@ Builds used to check the repros (on the aarch64 test machine):
 | 10 | closure devirtualization prints types exponentially (build time) | yes, build time and memory | `--no-closure-wpd` | none | - | - |
 | 11 | interprocedural SCCP is superlinear (build time) | yes, build time of large programs | none (the towers it was blamed for were mostly bug 20) | none | - | - |
 | 12 | the parser swaps syntax subtrees whose hashes collide | yes, wrong code or bogus errors on very large files | none | 0012 | passed | yes |
-| 13 | releasing a long list recurses once per cell | yes, stack overflow, 2x time and memory | none | 0013 | passed (extended after round 2) | yes |
+| 13 | releasing a long list or a deep tree recurses once per cell | yes, stack overflow, 2x time and memory | none | 0013, 0014 | 0013 passed (extended after round 2); 0014 passed (round 4, revised twice) | yes |
 | 14 | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | in 0009 | passed | yes |
 | 15 | a `match` on a `Nullable` yielding a counted value does not compile | no, `Nullable` not used | - | none | - | - |
 | 16 | reuse across calls is superlinear in match nesting (build time) | yes, build time and memory | deep tail paths and `let` values outlined, recursive functions included | none | - | - |
@@ -83,8 +85,8 @@ Builds used to check the repros (on the aarch64 test machine):
 | 20 | the MLIR inliner grows lean2rr's conversion code exponentially (build time) | yes, build time and memory (monad transformer towers did not build) | conversion, unboxing and uniform-code application functions marked `#[transform_anchor]` | none | - | - |
 
 Patch files (`git format-patch` output; they apply on ef922049 in the
-order 0006, 0004, 0002, 0007, 0009, 0005, 0013, 0012, and 0012 also applies
-alone):
+order 0006, 0004, 0002, 0007, 0009, 0005, 0013, 0012, 0014, and 0012 also
+applies alone):
 
 - `0002-l2r-local-bug-2-compound-skip-a-reused-struct-cell-s-field-store.patch`
 - `0004-l2r-local-bug-4-compare-recursive-record-types-coind.patch`
@@ -94,6 +96,7 @@ alone):
 - `0009-l2r-local-bug-9-fuse-an-arm-s-retains-only-when-the-.patch`
 - `0012-l2r-local-bug-12-build-syntax-nodes-without-cstree-s-hash-only-node-cache.patch`
 - `0013-l2r-local-bug-13-release-chains-of-cells-in-a-loop-in-the-drop-glue.patch`
+- `0014-l2r-local-bug-13b-free-cells-deep-through-records-with-a-stack-of-pending-releases.patch`
 
 Status words used below:
 - *worked around*: no patch; lean2rr avoids the construct or works around
@@ -770,7 +773,7 @@ GB) and no change in rrc's peak memory on full builds. With 0012: FIXED
 
 ## 13. Drop glue recurses once per cell of a long list
 
-**Status.** Patched locally (0013).
+**Status.** Patched locally (0013, 0014).
 
 Releasing a chain of cells at once takes one stack frame per cell. Native
 Lean frees iteratively. The program needs no recursion of its own:
@@ -855,20 +858,101 @@ the cell; of those about to be freed, the last is released as the tail
 call. So the loop follows whichever member carries the chain. A build of
 it passes all three plain shapes at 1M cells and both Lean cases at 40M.
 
-**Still recursive.** A cell with two chain members being freed loops
-along the last one only and recurses into the other: a binary tree deep
-along its left child whose right children are fresh nodes, or a rose tree
-in uniform code (`List` cells whose head holds the deep tree and whose
+**Still recursive with 0013.** A cell with two chain members being freed
+loops along the last one only and recurses into the other: a binary tree
+deep along its left child whose right children are fresh nodes, or a rose
+tree in uniform code (`List` cells whose head holds the deep tree and whose
 tail a fresh node), overflows an 8 MB stack at 10⁶ levels (lean2rr test
-`RtDropGlue`, an expected failure). Native Lean pushes every child that is
-freed onto a stack of objects to free. lean2rr's runtime cannot reach this
-recursion: records release records directly in the glue. Containers
-(arrays, thunk and task cells, references) are freed iteratively by the
-runtime since fix-drop5, so only record → record chains remain. A fix
-would extend 0013: inside `drop_and_free`, push the chain members being
-freed other than the last onto a per-thread stack instead of releasing
-them, and when the loop's chain ends, pop the next one (Lean's
-`lean_del_core` todo list). Not done yet: reported for a decision.
+`RtDropGlue`). Native Lean pushes every child that is freed onto a stack of
+objects to free. lean2rr's runtime cannot reach this recursion: records
+release records directly in the glue.
+
+**Patch 0014** (bug 13b, on top of the other eight): Lean's
+`lean_del_core` to-do list in the drop glue.
+
+- Reussir's runtime gets one stack of pending work per thread
+  (`reussir_rt::drop`; C entry points `__reussir_drop_defer(cell, release)`
+  and `__reussir_drop_drain()`). The outermost drain empties it, last
+  pushed first, including what the releases push; a drain started while
+  one runs returns at once.
+- Inside drop glue, a record member whose count is 1 is pushed with its
+  type's `drop_and_free` (new op `reussir.rc.defer_release`) instead of
+  released by a call. `drop_and_free` still releases its cell's last record
+  member by a tail call, so a chain stays a loop with no runtime call per
+  cell; when the chain ends, the drain pops the next pending member. This
+  replaces 0013's choice of chain members. `drop_in_place` empties the
+  stack before it returns.
+- Like Lean's list, the stack takes no memory per pending cell.
+  Consecutive deferred cells form one entry, linked through their header
+  words (a deferred cell's count is known to be 1). Each link holds the
+  offset to the previous cell (40 bits) and its release function: the same
+  as this cell's, or an index in a small per-thread table emptied with the
+  stack. A fused variant's tag is kept. A box of a record with no managed
+  members is freed at once instead. The stack shrinks back after a large
+  drain. The version reviewed in round 4 pushed one 24-byte entry per cell.
+  Freeing a list whose elements are boxes keeps every element pending until
+  the spine is freed, so that took 24 extra bytes per element, more at the
+  peak (10⁷ pairs: 1.14 GB against 633 MB), and the thread kept them. A
+  first fix linked through the 32-bit count only. It still paid that cost
+  for elements more than 64 MB apart (a sorted list: 1.00 GB against
+  555 MB) and after 256 release functions on a thread (round 4b).
+  `drop_and_free` is named `drop_and_free_in_drain` and claims no
+  `nocallback`.
+- Reussir's lit test `frontend/drop_long_list.rr` gains the left-deep tree
+  and the rose tree.
+
+With it, every value deep through records is freed at a bounded depth: at
+an 8 MB stack, `RtDropGlue` passes (both trees at 10⁶ levels), the
+left-deep tree is freed at 10⁷ levels, and the list, snoc list and spine
+shapes of the review rounds at 4·10⁷ cells. ASan with leak detection is
+clean.
+
+**lean2rr's runtime** frees its containers (`leanrt::drop`) through the
+same stack (`reussir_rt::drop::{active, defer_step, run_step, depth}`), so
+one free has one worklist through records and containers alike; the
+runtime therefore needs 0014 to build. Two stacks did not compose: each is
+last-in first-out on its own, and with 0014 and the runtime's own stack,
+handles in lists or trees inside an array no longer came out in Lean's
+order (lists `A0 … A3` and `B0 B1 B2` in one array: `B1 B2 B0 A1 A2 A3
+A0`, natively `B2 B1 B0 A3 A2 A1 A0`; test `RtDropOrderRec`).
+
+**Order that still differs.** With one stack, the order of observable
+releases (handles closed, promises resolved) is Lean's in every free that
+starts at a container, and mostly below the first cell of a free that
+starts at a record. That first cell is released by the inline code Reussir
+emits in the user's function (`RcDecrementExpansion`, the unique path),
+outside any drain: its fields in field order, each completely before the
+next. Native Lean does the same where its code knows the constructor of
+the value it drops (`lean_dec_ref_known`); elsewhere (`lean_dec`, then
+`lean_del_core`) it goes last first. lean2rr's release points are not
+Lean's (where Lean borrows a parameter and drops the value in the caller,
+lean2rr's function takes it and releases it as it destructures it), so a
+value dropped by itself can come out in the other order: a list of handles
+`L0 … L7` is closed `L0 L7 L6 … L1` (natively `L7 … L0`; before 0014 `L0
+… L7`), and a tree of handles closes its left subtree, then its handle,
+then its right subtree (natively the reverse; each subtree is in Lean's
+order). No fixed member order in Reussir matches both kinds of site. Both
+reversals were tried with the shared stack:
+- Reversing the members in the drop glue changes nothing at the first
+  cell, which is not glue. Below it, it breaks the order everywhere (in
+  arrays, trees and lists): the glue's order is already `lean_del_core`'s.
+  It pushes members in field order and they are popped last first, and the
+  tail call is the last member, which `lean_del_core` pops first.
+- Reversing them in user code's inline releases matches lists and trees
+  dropped by themselves. But it breaks the cases where Lean uses field
+  order (a structure of two handles dropped after a call: natively `a b`),
+  and it breaks the order inside containers. The release code that
+  leanrt's containers call for their Reussir elements (`_ffi_release`) is
+  user code of this kind, and it runs inside a drain, where each member is
+  pushed instead of finished.
+
+One case below the first cell also differs. A cell that the first cell
+holds is released by its `drop_in_place` outside any drain. That function
+pushes record members, but a container member's free (an array, a
+reference, a thunk) runs at once and empties the stack. So a structure
+`{a : Array Handle, l : List Handle}` in a list dropped by itself closes
+`A1 A0 L1 L0` (natively `L1 L0 A1 A0`). Running such a `drop_in_place` as
+a drain would take a runtime call more on each one. Not done (plan §10).
 
 ## 14. `fuseArm` loses a count when a bound member is consumed before the scrutinee's release
 

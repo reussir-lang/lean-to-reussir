@@ -1,11 +1,12 @@
-/-! Runtime test (expected failure, `RtDropGlue.xfail`): dropping a value
-deep through records only, along a field that is not the last one freed,
-at an 8 MB stack (`RtDropGlue.pipe`). Reussir's drop glue (with the local
-patch 0013) releases the last chain member being freed in a loop and
-recurses into the others: a binary tree deep along its left child whose
-right children are fresh nodes, and a rose tree in uniform code, whose
-list cells hold the deep tree in their head and a fresh node in the tail,
-use stack per level; native Lean frees iteratively. -/
+/-! Runtime test: dropping a value deep through records only, along a
+field that is not the last one freed, at an 8 MB stack (`RtDropGlue.pipe`):
+a binary tree deep along its left child whose right children are fresh
+nodes, and a rose tree in uniform code, whose list cells hold the deep tree
+in their head and a fresh node in the tail. Native Lean frees iteratively.
+Reussir's drop glue releases the last chain member being freed in a loop
+(local patch 0013) and pushes the other members being freed on a stack of
+pending work (0014), so it does not recurse either; with 0013 alone it
+recursed once per level and overflowed. -/
 
 inductive T2 | leaf | node (l : T2) (v : Nat) (r : T2)
 inductive Rose (α : Type) | node (v : α) (kids : List (Rose α))
