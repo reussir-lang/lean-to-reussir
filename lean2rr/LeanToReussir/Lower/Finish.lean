@@ -225,9 +225,11 @@ partial def finishFnValues : LowerM Bool := do
 line (`#[transform_anchor]`, see `Emit/Program`): the conversions between
 representations of a function type (`l2r_fconv_S_T`), the unboxing
 functions (`l2r_unbox_…`: to a nominal type, an array, a function type),
-and the application and identity functions of a function type with
-wrapped values of other representations (their `w<S>` arms apply or
-inspect the wrapped value at `S`).
+the application and identity functions of a function type with wrapped
+values of other representations (their `w<S>` arms apply or inspect the
+wrapped value at `S`), and the application functions of the function types
+of uniform code (types that mention `Box`), whose arms call the targets of
+the uniform code.
 
 These functions call each other: an unboxing function converts what a
 `Box` holds from every representation it can hold, a conversion of a
@@ -239,10 +241,13 @@ mutually recursive functions. rrc's MLIR inliner follows every path of
 distinct small functions in such a cycle, so the program grows
 exponentially with the number of representations (an 8-line `StateT`
 tower used at `IO` did not build within 30 minutes or 15 GB;
-docs/reussir-bugs.md, bug 20). Out of line, they cost a call each (LLVM,
-which runs after Reussir's passes, still inlines them where it pays): the
-unboxing of statically unknown values and the conversions are slow paths
-anyway, and wrapped applications are rare outside such programs. -/
+docs/reussir-bugs.md, bug 20); with the application functions of uniform
+types inlinable, four towers in one program (`Cn3PolyScalar`) still took
+4.5 GB, 2 GB without. Out of line, they cost a call each (LLVM, which runs
+after Reussir's passes, still inlines them where it pays): the unboxing of
+statically unknown values and the conversions are slow paths anyway, and
+wrapped applications and function values of uniform types are rare outside
+such programs. -/
 def anchoredFns : LowerM (Std.HashSet String) := do
   let st ← get
   let wraps (t : RR.Ty) : Bool := (st.fnVariants.getD t #[]).any (· matches .wrap _)
@@ -252,7 +257,7 @@ def anchoredFns : LowerM (Std.HashSet String) := do
   for t in st.unboxTargets do out := out.insert s!"l2r_unbox_{t}"
   for (_, f) in st.unboxArrTargets do out := out.insert f
   for (t, j) in st.fnApplies do
-    if wraps t then out := out.insert (applyFnName t j)
+    if wraps t || (t.subterms).contains RR.Ty.box then out := out.insert (applyFnName t j)
   for t in st.fnAddrTargets do
     if wraps t then out := out.insert s!"l2r_fn_addr_{t.enc}"
   return out
