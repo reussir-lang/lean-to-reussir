@@ -42,6 +42,7 @@ pub type LTagVec = Rc<Box<dyn Any>>;
 extern "C" {
     fn mi_malloc(size: usize) -> *mut c_void;
     fn mi_realloc(p: *mut c_void, size: usize) -> *mut c_void;
+    fn mi_good_size(size: usize) -> usize;
 }
 
 #[repr(C)]
@@ -141,20 +142,28 @@ fn alloc(cap: usize) -> LTagVec {
     }
 }
 
-/// Grow a unique object to room for at least `need` words.
+/// Grow a unique object to room for at least `need` words (at least
+/// doubling). The capacity is all of the block: mimalloc's size classes
+/// for small blocks (`mi_good_size`), and powers of two beyond 4 KiB, as a
+/// vector buffer's would be. With the 40-byte header added to a power of
+/// two, large blocks fell just past mimalloc's size steps, and growing a
+/// 10M-element array peaked 35 MB higher (realloc copies a block's whole
+/// usable size).
 #[cold]
 #[inline(never)]
 extern "C" fn grow(a: LTagVec, need: usize) -> LTagVec {
     let o = obj(&a);
     std::mem::forget(a);
     unsafe {
-        let cap = need.max((*o).cap.saturating_mul(2)).max(4);
-        let n = mi_realloc(o as *mut c_void, bytes_for(cap)) as *mut Obj;
+        let want = need.max((*o).cap.saturating_mul(2)).max(4);
+        let b = bytes_for(want);
+        let bytes = if b > 4096 { b.checked_next_power_of_two().unwrap_or(b) } else { mi_good_size(b) };
+        let n = mi_realloc(o as *mut c_void, bytes) as *mut Obj;
         if n.is_null() {
             oom();
         }
         set_marker(n);
-        (*n).cap = cap;
+        (*n).cap = (bytes - HDR) / 8;
         std::mem::transmute::<*mut Obj, LTagVec>(n)
     }
 }
