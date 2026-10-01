@@ -236,9 +236,11 @@ giving it the representation it assumes:
   ordinary representation conversions of §5.1; between arrays of different
   element types the conversion is element by element. Stage 3 (§4) recovers
   the precise types around this code. When source and target elements have
-  the same representation, the `map` loop runs on the precise array. When
-  they differ, the array is converted once on entry and once on exit, never
-  inside a loop.
+  the same representation, the `map` loop runs on the precise array, in
+  place. When they differ, Stage 3 splits the loop over two arrays: it reads
+  the source at its own representation (still replacing each slot by the
+  placeholder after reading it) and pushes each mapped value onto a new
+  result array created with the source's size as capacity (§4).
 - A `box(0)` placeholder is a value that is never inspected. It arrives as
   a unit-like value used at another type, or as `◾` at a relevant type.
   Stage 4 materializes it as the *zero* of the expected type: `0`, `false`,
@@ -413,11 +415,38 @@ For `xs.map (· * 2)` these rules make the whole map run on the precise array,
 in place and without boxing, like native Lean. The loop is assumed to
 receive `Array Nat`. Its reads become `Array.uget@Nat`, its placeholder is a
 `Nat` zero, and its writes of `Nat` values become `Array.uset@Nat`, so it
-passes `Array Nat` back. When `f` changes the representation (`Nat →
-String`), the loop keeps the `Box` array, its input is converted once on
-entry, and the loop's result type, `Array String` by the `map` rule, makes
-it convert once on exit. The loops that read the result then receive
-`Array String` from their callers.
+passes `Array Nat` back. The loops that read the result then receive the
+precise array from their callers.
+
+When `f` changes the representation (`Nat → Bool`), the loop's array
+parameter stays `Array lcAny` after the fixpoint: it holds `Nat`s and
+`Bool`s. Such a loop is *split*. Its split instance takes two arrays instead
+of one, the source `src : Array α` and the result `dst : Array β`:
+- a read `uget bs i` of an array derived from the parameter becomes
+  `uget@α src i`, a value of `α`'s own representation;
+- the placeholder write `uset bs i ◾` becomes `uset@α src i ◾` (the element
+  stays unshared, as in Lean);
+- the value write `uset bs i v` becomes `push@β dst v`;
+- `usize`/`size` measure `src`; a self call passes both arrays; a returned
+  array, or one put in a constructor (`EST.Out.ok bs w`, `some bs`), is `dst`;
+  a join-point parameter receiving derived arrays gets two parameters.
+
+An entry call `map sz 0 xs` with `xs : Array α` becomes `map' sz 0 xs
+(Array.emptyWithCapacity@β xs.size)`. The push is the write at index `i`
+because `dst` holds exactly the `i` values mapped so far whenever the loop
+runs at index `i`: it starts empty at index 0, and every path to a self call
+writes one value and passes `i + 1`. The split only happens when the loop
+has this shape: derived arrays are read and written only at the loop index
+(reads before the value write, the value write once per path), passed to the
+loop with the index plus one after the write (or with the index to the loop
+that a `_redArg` wrapper calls), returned, put in constructors or passed to
+join points, and never captured or used otherwise; the entry passes the
+literal index `0` (possibly through join-point parameters). Otherwise the
+loop keeps the `Box` array: its input is converted once on entry, and its
+result type (`Array β` by the `map` rule) makes it convert once on exit.
+The original loop is dropped when nothing reachable calls it any more, and
+the fixpoint runs once more, so the values the split loop reads can type
+what they flow into.
 
 Each rule is exact. A value's type is taken only from its definition or from
 everything that flows into it, so the recovered type is the type the value
@@ -1574,10 +1603,13 @@ Each item says what differs and when.
   rebuild the node from its fields in such arms (0.5-0.8x native), which
   broke identity and sharing (§5.5).
 - *`Array.map` that changes the representation* (for example
-  `(Array.range n).map some`) converts the input to an array of `Box` on
-  entry and back on exit (§2.7), so the input, the boxed copy with one box
-  per element, and the result are live together: peak memory 1.5–2.7x
-  native in tests. Maps that keep the representation run in place.
+  `(Array.range n).map (· % 3 == 0)`) reads the input and pushes onto a new
+  result array (§4): the two arrays are live together until the map ends,
+  where native Lean replaces the elements of one array (peak memory
+  0.7–1.1x native for scalar targets in tests, more for records, whose cells
+  are larger: §7's cheaper `Nat`). Maps that keep the representation run in
+  place. A map loop of another shape (not Lean's) still converts its input
+  to an array of `Box` on entry and back on exit.
 - *Element storage*: array elements, `ST.Ref` contents, once-cell values and
   polymorphic extern arguments whose type cannot cross the FFI boundary
   (enumerations, `L2RUnit`, `[value]` tuples) are wrapped in an
