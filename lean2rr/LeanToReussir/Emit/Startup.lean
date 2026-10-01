@@ -96,6 +96,16 @@ where
       | .num .., .str .. => true
       | _, _ => false
 
+/-- The last resort among startup declarations that nothing else orders:
+two hygienic names made in one command by their macro scopes (which
+increase as the command expands its macros), then `natNameLt`. -/
+def startupNameLt (n1 n2 : Name) : Bool :=
+  if n1.hasMacroScopes && n2.hasMacroScopes then
+    let s1 := (extractMacroScopes n1).scopes.reverse
+    let s2 := (extractMacroScopes n2).scopes.reverse
+    if s1 != s2 then lexLtNat s1.toArray s2.toArray else natNameLt n1 n2
+  else natNameLt n1 n2
+
 /-- Position of a declaration for ordering: module index, then the source
 position of the declaration or of its nearest prefix that has one. -/
 def declOrder (n : Name) : CoreM (Array Nat) := do
@@ -124,22 +134,65 @@ def specTarget? (n : Name) : Option Name := Id.run do
   if rest.isEmpty then return none
   return some (nameOfComponents rest)
 
+/-- The declaration that compiled to the IR-only declaration `n`: `n`
+without the suffixes the compiler appends (`c._closed_3`, `c._boxed`,
+`c._lam_0`, `f._at_.c.spec_2._redArg`), the nearest prefix that `known`
+accepts. A hygienic name keeps its macro scopes at the end
+(`zz._closed_0._@.M._hyg.3` is a closed term of `zz._@.M._hyg.3`). -/
+partial def compiledOwner (known : Name → Bool) (n : Name) : Option Name :=
+  if known n then some n
+  else if n.hasMacroScopes then
+    let v := extractMacroScopes n
+    match v.name with
+    | .str p _ | .num p _ => compiledOwner known { v with name := p }.review
+    | .anonymous => none
+  else match n with
+    | .str p _ | .num p _ => compiledOwner known p
+    | .anonymous => none
+
+/-- Lean's compilation order of a module's declarations, as far as the
+`.olean` records it: the module's `extraConstNames` are its IR
+declarations that are not kernel constants (closed terms, `_boxed`
+wrappers, lifted lambdas, specializations), newest first, and Lean adds a
+command's IR when it compiles the command. So each declaration that
+compiled to at least one of them (in practice every constant whose value
+calls a function) gets the index of its first one; the specializations
+made while compiling a declaration come right before it. Native Lean runs
+the module's initializers in exactly this order (`EmitC.emitInitFn`). -/
+def compileOrder (idx : Nat) : CoreM (Std.HashMap Name Nat) := do
+  let env ← getEnv
+  let some md := env.header.moduleData[idx]? | return {}
+  let mut baseNames : Std.HashSet Name := {}
+  for d in baseExt.getModuleEntries env idx (level := .private) do
+    baseNames := baseNames.insert d.name
+  let known (n : Name) : Bool := baseNames.contains n || env.contains n
+  let extra := md.extraConstNames
+  let mut out : Std.HashMap Name Nat := {}
+  for i in [:extra.size] do
+    if let some d := compiledOwner known extra[extra.size - 1 - i]! then
+      unless out.contains d do out := out.insert d i
+  return out
+
 /-- Lean's initializer order for the startup declarations `items` of one
-module (translation plan §5.12). Native Lean initializes a module's
-declarations in compilation order. A `def`/`instance` command is compiled
-after it is elaborated, together with its `where`/`let rec` helpers: the
-elaborator lists the helpers (those of later mutual members first, outer
-before nested ones) and then the command's declarations, and compiles the
-strongly connected components of their reference graph one by one, callees
-first (Tarjan over that list, `addPreDefinitions`). The specializations
-made while compiling a component come before its members, and an auxiliary
-declaration made during elaboration (`c.unsafe_1`, `instInhabitedP.default`)
-before the whole command. lean2rr sees the command through declaration
-ranges: a helper's range lies inside its parent's, and the kernel's `all`
-lists a recursive mutual block. Non-recursive members of a `mutual` block
-are not recorded, so they are ordered as separate commands. Returns a sort
-key per item. -/
-partial def moduleStartupKeys (idx : Nat) (items : Array Name) : CoreM (Std.HashMap Name (Array Nat)) := do
+module (translation plan §5.12), as far as the program's structure tells
+it; `startupItems` then puts the items that `comp` (`compileOrder`) places
+in that order. Native Lean initializes a module's declarations in
+compilation order. A `def`/`instance` command is compiled after it is
+elaborated, together with its `where`/`let rec` helpers: the elaborator
+lists the helpers (those of later mutual members first, outer before
+nested ones, a member's `where` helpers before the `let rec`s of its body)
+and then the command's declarations, and compiles the strongly connected
+components of their reference graph one by one, callees first (Tarjan over
+that list, `addPreDefinitions`). The specializations made while compiling
+a component come before its members, and an auxiliary declaration made
+during elaboration (`c.unsafe_1`, `instInhabitedP.default`) before the
+whole command. lean2rr sees the command through declaration ranges: a
+helper's range lies inside its parent's, the kernel's `all` lists a
+recursive mutual block, and a `mutual` block whose members do not call
+each other shows in `comp` (a later member's code compiled before an
+earlier one's). Returns a sort key per item. -/
+partial def moduleStartupKeys (idx : Nat) (items : Array Name) (comp : Std.HashMap Name Nat) :
+    CoreM (Std.HashMap Name (Array Nat)) := do
   let env ← getEnv
   let some md := env.header.moduleData[idx]? | return {}
   -- Ranges of the module's declarations, and each `initialize` function's
@@ -202,7 +255,46 @@ partial def moduleStartupKeys (idx : Nat) (items : Array Name) : CoreM (Std.Hash
         best := m
         bestKey := posKey m
     return best
-  let rootOf (v : Name) : Name := blockOf (memberOf v).1
+  let rootOf0 (v : Name) : Name := blockOf (memberOf v).1
+  -- `mutual` blocks whose members do not call each other (the kernel
+  -- records them as separate definitions): Lean compiles one command after
+  -- another, in source order, so a command with code compiled before code of
+  -- an earlier command (`comp`) shares a `mutual` block with it, and with
+  -- every command in between. The commands, by position, are merged into
+  -- groups whose compilation intervals overlap.
+  let mut rootC : Std.HashMap Name Nat := {}
+  for (d, i) in comp do
+    if let some v := vertexOf? ((specTarget? d).getD d) then
+      let r := rootOf0 v
+      if rootC.getD r i ≥ i then rootC := rootC.insert r i
+  let mut rootSet : Std.HashSet Name := {}
+  for (c, _) in ranges do
+    unless initOf.contains c do rootSet := rootSet.insert (rootOf0 c)
+  let roots := rootSet.toArray.qsort fun a b =>
+    lexLtNat (posKey a) (posKey b) || (posKey a == posKey b && natNameLt a b)
+  -- A stack of groups (members, the latest first compilation among them);
+  -- the latter never decreases up the stack.
+  let mut groups : Array (Array Name × Nat) := #[]
+  for r in roots do
+    match rootC[r]? with
+    | none => groups := groups.push (#[r], (groups.back?.map (·.2)).getD 0)
+    | some c =>
+      let mut members := #[r]
+      let mut top := c
+      while h : groups.size > 0 do
+        let g := groups[groups.size - 1]
+        unless g.2 > c do break
+        members := g.1 ++ members
+        top := max top g.2
+        groups := groups.pop
+      groups := groups.push (members, top)
+  let mut superOf : Std.HashMap Name Name := {}
+  let mut superMembers : Std.HashMap Name (List Name) := {}
+  for (ms, _) in groups do
+    if ms.size > 1 then
+      for m in ms do superOf := superOf.insert m ms[0]!
+      superMembers := superMembers.insert ms[0]! ms.toList
+  let rootOf (v : Name) : Name := let r := rootOf0 v; superOf.getD r r
   let rootKey (root : Name) : Array Nat := posKey root
   -- The vertices of the commands that have startup items.
   let mut wanted : Std.HashSet Name := {}
@@ -220,15 +312,37 @@ partial def moduleStartupKeys (idx : Nat) (items : Array Name) : CoreM (Std.Hash
       rank := rank.insert vs[0]! 0
       continue
     let vset : Std.HashSet Name := vs.foldl (·.insert ·) {}
-    let order := allOf r
+    let order := superMembers[r]?.getD (allOf r)
     let blockIdx (v : Name) : Nat := (order.findIdx? (· == v)).getD order.length
     let mains := (vs.filter fun v => (memberOf v).1 == v).qsort fun a b =>
       lexLtNat ((posKey a).push (blockIdx a)) ((posKey b).push (blockIdx b))
     let memberIdx (v : Name) : Nat := (mains.findIdx? (· == (memberOf v).1)).getD 0
+    -- A member's `where` helpers come before the `let rec`s of its body (a
+    -- `where` clause is a `let rec` around the body). They are the last
+    -- direct helpers: the last one ends where the member ends, and the
+    -- others start at its column on earlier lines (each `where` declaration
+    -- on a new line starts at the first one's column).
+    let mut whereHelpers : Std.HashSet Name := {}
+    for m in mains do
+      let direct := (vs.filter fun v => v != m && memberOf v == (m, 1)).qsort fun a b =>
+        lexLtNat (posKey a) (posKey b)
+      let some last := direct.back? | continue
+      let (some mr, some lr) := (ranges[m]?, ranges[last]?) | continue
+      unless lr.range.endPos == mr.range.endPos do continue
+      whereHelpers := whereHelpers.insert last
+      let mut next := lr.selectionRange.pos
+      for i in [:direct.size - 1] do
+        let v := direct[direct.size - 2 - i]!
+        let some vr := ranges[v]? | break
+        let p := vr.selectionRange.pos
+        unless p.column == next.column && p.line < next.line do break
+        whereHelpers := whereHelpers.insert v
+        next := p
     let key (v : Name) : Array Nat :=
-      #[mains.size - memberIdx v, (memberOf v).2] ++ posKey v
+      let depth := (memberOf v).2
+      #[mains.size - memberIdx v, depth, if depth == 1 && !whereHelpers.contains v then 1 else 0] ++ posKey v
     let helpers := (vs.filter fun v => (memberOf v).1 != v).qsort fun a b =>
-      lexLtNat (key a) (key b) || (key a == key b && natNameLt a b)
+      lexLtNat (key a) (key b) || (key a == key b && startupNameLt a b)
     -- References of a vertex's value to other vertices of the command,
     -- through its own auxiliary declarations (`._unary`, `.match_1`); a
     -- `partial` definition's code is its `._unsafe_rec`. Lean lists them in
@@ -298,26 +412,73 @@ def startupItems : CoreM (Array StartupItem) := do
       else none
     let some item := item? | continue
     byModule := byModule.insert idx.toNat ((byModule.getD idx.toNat #[]).push (item, n))
+  -- The constants each constant reads (see the end).
+  let mut reads : Std.HashMap Name (Array Name) := {}
   for h : idx in [:env.header.moduleNames.size] do
     if isToolchainModule env.header.moduleNames[idx] then continue
     for d in baseExt.getModuleEntries env idx (level := .private) do
       let n := d.name
-      unless d.value matches .code _ && d.params.isEmpty do continue
+      let .code c := d.value | continue
+      unless d.params.isEmpty do continue
       if isIOUnitInitFn env n || (getInitFnNameFor? env n).isSome then continue
       byModule := byModule.insert idx ((byModule.getD idx #[]).push (.caf n, n))
-  -- Ties: by name, numbers by value (`c._unsafe_4` before `c._unsafe_10`,
-  -- Lean's order of the auxiliary declarations of one command; see also
-  -- `specNo`). Lean's order of specializations depends on how its
-  -- specializer recursed, which is not persisted.
+      reads := reads.insert n (codeConsts c #[])
+  -- Ties: by name (`startupNameLt`). Then the items that Lean's recorded
+  -- compilation order places (`compileOrder`) are put in that order, in the
+  -- places the sort gave them: they include every specialization, and in
+  -- practice every constant that can trace or panic.
   let mut out := #[]
   for idx in (byModule.toArray.map (·.1)).qsort (· < ·) do
     let its := byModule.getD idx #[]
-    let keys ← moduleStartupKeys idx (its.map (·.2))
+    let comp ← compileOrder idx
+    let keys ← moduleStartupKeys idx (its.map (·.2)) comp
     let sorted := its.qsort fun (_, n1) (_, n2) =>
       let k1 := keys.getD n1 #[]
       let k2 := keys.getD n2 #[]
-      lexLtNat k1 k2 || (k1 == k2 && natNameLt n1 n2)
-    out := out ++ sorted.map (·.1)
+      lexLtNat k1 k2 || (k1 == k2 && startupNameLt n1 n2)
+    -- An item's compiled code: an `initialize` constant's is its action's,
+    -- a `partial` constant's its `_unsafe_rec`.
+    let compOf (it : StartupItem) (n : Name) : Option Nat :=
+      comp[n]? <|> (match it with | .init _ f => comp[f]? | _ => none) <|> comp[n ++ `_unsafe_rec]?
+    let placed := sorted.filterMap fun (it, n) => (compOf it n).map fun c => (c, (it, n))
+    let byComp := (placed.qsort fun a b => a.1 < b.1).map (·.2)
+    let mut refilled : Array (StartupItem × Name) := #[]
+    let mut j := 0
+    for (it, n) in sorted do
+      if (compOf it n).isSome then
+        refilled := refilled.push byComp[j]!
+        j := j + 1
+      else
+        refilled := refilled.push (it, n)
+    -- The others keep their places, except that a constant goes after the
+    -- constants it reads. Compiled to no IR-only declaration, it only builds
+    -- a value from literals and other constants (it cannot trace or panic),
+    -- but evaluating it evaluates the constants it reads (accessors compute
+    -- on demand), which natively come before it (a constant reads constants
+    -- declared before it, or its own helpers). Key: the place of the last
+    -- constant it reads (transitively), then the length of that chain.
+    let mut place : Std.HashMap Name (Nat × Nat) := {}
+    for h : i in [:refilled.size] do place := place.insert refilled[i].2 (i, 0)
+    let movable := refilled.filter fun (it, n) => (compOf it n).isNone
+    let mut changed := true
+    let mut rounds := 0
+    while changed && rounds < 64 do
+      changed := false
+      rounds := rounds + 1
+      for (_, n) in movable do
+        let mut k := place.getD n (0, 0)
+        for r in reads.getD n #[] do
+          if let some (p, d) := place[r]? then
+            if r != n && lexLtNat #[k.1, k.2] #[p, d + 1] then k := (p, d + 1)
+        if k != place.getD n (0, 0) then
+          place := place.insert n k
+          changed := true
+    let idxOf : Std.HashMap Name Nat := (refilled.zipIdx.map fun ((_, n), i) => (n, i)).foldl
+      (fun m (n, i) => m.insert n i) {}
+    let ordered := refilled.qsort fun (_, a) (_, b) =>
+      let (ka, kb) := (place.getD a (0, 0), place.getD b (0, 0))
+      lexLtNat #[ka.1, ka.2, idxOf.getD a 0] #[kb.1, kb.2, idxOf.getD b 0]
+    out := out ++ ordered.map (·.1)
   return out
 
 /-- A startup step with instance names (see `StartupItem`). -/

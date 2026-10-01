@@ -1290,18 +1290,42 @@ an exponent above 2000 or a mantissa of more than 4096 bits are left to run
 (cached as usual when they are a constant), as are all of them without the
 optional pass `float-lits`.
 
-The initializer follows Lean's compilation order, which is not persisted in
-the `.olean`. Compilation follows the source, command by command. A `def`
+The initializer follows Lean's compilation order: native Lean initializes a
+module's declarations in the order in which it compiled them
+(`EmitC.emitInitFn`). The `.olean` records part of that order. Its
+`extraConstNames` are the module's IR declarations that are not kernel
+constants (closed terms `c._closed_N`, `_boxed` wrappers, lifted lambdas
+`_lam_N`, specializations), newest first, and Lean adds a command's IR when
+it compiles the command. So each declaration that compiled to at least one
+of them gets its place in the compilation order (`compileOrder`): in
+practice every constant whose value calls a function (Lean extracts the
+call as a closed term), so every constant that can trace or panic, every
+`initialize` action and every specialization (whose order among themselves
+depends on how Lean's specializer recursed). A hygienic name keeps its
+macro scopes at the end: `zz._closed_0._@.M._hyg.3` is a closed term of
+`zz._@.M._hyg.3`.
+
+lean2rr orders the startup items by the program's structure (below), then
+puts the items that the record places in the recorded order, in the places
+the structural order gave them. The others keep their places, except that a
+constant goes after the constants it reads: it calls no function, so it
+cannot trace or panic, but evaluating it evaluates the constants it reads
+(their accessors compute them on demand), which natively come before it (a
+constant reads only constants declared before it, or its own helpers).
+
+The structure: compilation follows the source, command by command. A `def`
 or `instance` command is compiled after it is elaborated, together with its
 `where`/`let rec` helpers: the elaborator lists the helpers (those of later
-`mutual` members first, outer ones before nested ones, otherwise in source
-order), then the command's own declarations, and compiles the strongly
-connected components of their reference graph one at a time, callees first
-(Tarjan's order over that list). A declaration generated while compiling a
-component, such as a specialization `f._at_.g.spec_N` made while compiling
-`g`, comes right before the component's members; an auxiliary declaration
-made during elaboration (`c.unsafe_1`, `instInhabitedP.default`) comes
-before the whole command. For example
+`mutual` members first, outer ones before nested ones, a member's `where`
+helpers before the `let rec`s of its body, since a `where` clause is a
+`let rec` around the body, otherwise in source order), then the command's
+own declarations, and compiles the strongly connected components of their
+reference graph one at a time, callees first (Tarjan's order over that
+list). A declaration generated while compiling a component, such as a
+specialization `f._at_.g.spec_N` made while compiling `g`, comes right
+before the component's members; an auxiliary declaration made during
+elaboration (`c.unsafe_1`, `instInhabitedP.default`) comes before the whole
+command. For example
 
     def p : Nat := t "p" (h1 + h2)
     where
@@ -1311,27 +1335,42 @@ before the whole command. For example
 
 initializes `p.h1`, `p.h3`, `p.h2`, then the specializations made in `p`,
 then `p`. lean2rr rebuilds this order from declaration ranges (a helper's
-range lies inside its parent's; the kernel's `all` lists a recursive mutual
-block) and from the references in the declarations' kernel values (for a
-`partial` definition, its `_unsafe_rec`). The function of an `initialize`
-declaration belongs to its constant: a specialization made inside the
-action comes right before the action.
+range lies inside its parent's; the `where` helpers are the last direct
+helpers: the last one ends where its parent ends, and the others start at
+its column on earlier lines), from the kernel's `all` (a recursive mutual
+block), from the compilation record (a `mutual` block whose members do not
+call each other is recorded as separate definitions, but a later member's
+code compiled before an earlier member's shows that they share a block,
+with every command in between), and from the references in the
+declarations' kernel values (for a `partial` definition, its
+`_unsafe_rec`). The function of an `initialize` declaration belongs to its
+constant: a specialization made inside the action comes right before the
+action.
 
-Positions are compared as (line, column). Lean's own record of the order
-(`declOrderExt`, which `EmitC` follows) is not persisted, and neither the
-module's constant list nor the compiler's declaration tables keep the order
-of addition, so declarations with the same range need more. Every
-declaration of one macro expansion has the macro call's range, and the
-instances of one `deriving instance … for A, B` command share one range
-too. A range equal to another one is therefore not "inside" it: `mk foo
-foo.bar` makes two commands, not `foo` and its helper. Such commands are
-ordered by the position of their names (a macro that takes the names from
-its arguments keeps their positions; a hygienic name made by the macro has
-the call's position, so it comes first), then by the order in which the
-module added its instances (the instance extension keeps it), and last by
+Positions are compared as (line, column). Declarations with the same range
+need more. Every declaration of one macro expansion has the macro call's
+range, and the instances of one `deriving instance … for A, B` command
+share one range too. A range equal to another one is therefore not
+"inside" it: `mk foo foo.bar` makes two commands, not `foo` and its helper.
+Such commands are ordered by the position of their names (a macro that
+takes the names from its arguments keeps their positions; a hygienic name
+made by the macro has the call's position, so it comes first), then by the
+order in which the module added its instances (the instance extension keeps
+it), then hygienic names by their macro scopes (which grow as a command
+expands its macros; the names of one quotation share them), and last by
 name, with the numbers in names compared by value: the auxiliary constants
 `c._unsafe_1`, `c._unsafe_4`, …, `c._unsafe_10` of a declaration with
-several `unsafe` parts start in that order.
+several `unsafe` parts start in that order. The compilation record then
+orders all of these that can trace or panic, as the macro wrote them.
+
+What no rule recovers is the order of constants that call no function,
+where the structure does not fix it (the members of a `mutual` block that
+only build values from literals, the made-up names of one quotation with
+such values): the `.olean` of a non-recursive `mutual` block of such
+constants and that of the same text without `mutual` differ only in a
+fresh-name counter left in another declaration's code, and the
+declarations' own records (names, ranges, values, IR) are equal. Their
+evaluation cannot be observed.
 
 Our translation runs, before `main`, the startup work of Lean's module
 initializers:
@@ -1790,25 +1829,6 @@ Each item says what differs and when.
   worker's. A closed term waits for the tasks it holds directly or in
   structures, lists and arrays, not for tasks inside closures or thunks
   (Lean's `lean_mark_persistent` waits for all of them).
-- *Startup order of generated constants*: specializations with every
-  parameter fixed that Lean generated while compiling the same declaration
-  run in the order of their numbers (`spec_0`, `spec_2`, …). Lean's own
-  order among them depends on how its specializer recursed, which the
-  `.olean` does not record, and can differ. Visible only when such
-  constants trace or panic.
-- *Startup order of a macro's made-up names* (§5.12): declarations of one
-  macro expansion that the macro names itself (hygienic names, which all
-  have the macro call's position) and that are not instances start in name
-  order; natively in the order the macro wrote them. Declarations named by
-  the macro's arguments start in the order of those arguments.
-- *Startup order in `mutual` blocks and several `let rec` groups* (§5.12):
-  the members of a `mutual` block that do not call each other are ordered
-  as separate commands, because the block is not recorded in the `.olean`
-  (natively the helpers of all its members run first, those of later
-  members first). Within one declaration, a `let rec` in the body and a
-  `where` clause are ordered by source position (natively the `where`
-  helpers come first). Visible only when such helper constants trace or
-  panic.
 - *Compiler options of the program's modules* (`set_option
   compiler.extract_closed false`, `compiler.small`, `maxRecInline`, …) are
   not recorded in the `.olean`, so lean2rr runs Lean's passes with the
