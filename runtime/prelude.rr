@@ -2497,24 +2497,50 @@ fn l2r_ref_is_empty<T>(r : LRef<T>) -> bool [{
     { let c = leanrt::array::into_rc(r); let e = c.is_empty(); leanrt::rc_release(c); e }
 }];
 
-// ---- IO.Promise (`IO.Promise α` as `LRef<E>`, empty until resolved) ----
+// ---- IO.Promise ----
 //
-// Tasks run eagerly (translation plan §6), so reading a promise's result
-// happens after every resolution that can precede it; an unresolved promise
-// reads as dropped (`none`).
+// A promise is an `LPromise`: a runtime object holding the cell of its
+// task (`Promise.result?`, a task whose value is an `Option`, lean2rr's
+// `Option Box` so that typed and uniform code share it), which stays
+// unresolved until `Promise.resolve` (translation plan §5.14). Dropping the
+// last reference to an unresolved promise resolves it with `none`, as
+// natively (`leanrt::task::Promise`, through the program's
+// `l2r_promise_drop_c`).
+#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+pub struct LPromise;
 
-fn l2r_promise_new<T>() -> LRef<T> { l2r_ref_empty<T>() }
+// A new promise for the unresolved task `c`. Before `main` (no task manager)
+// Lean's internal panic.
+#[ffi(import)]
+fn l2r_promise_new<S>(c : LCell<S>) -> LPromise [{
+    {
+        let c = ::std::mem::ManuallyDrop::new(c);
+        let p: usize = unsafe { ::std::mem::transmute_copy(&*c) };
+        leanrt::task::promise_new(p)
+    }
+}];
 
-// `Promise.resolve v p`: only the first resolution counts.
-fn l2r_promise_resolve<T>(v : T, p : LRef<T>) -> L2RUnit {
-    let r = if l2r_ref_is_empty(p) { l2r_ref_set(p, v) } else { 0 };
-    L2RUnit::u{}
-}
+// The task of promise `p` (a new reference).
+#[ffi(import)]
+fn l2r_promise_cell<S>(p : LPromise) -> LCell<S> [{
+    {
+        let a = leanrt::task::promise_cell(&p);
+        let c: Rc<[:S:]> = unsafe { ::std::mem::transmute_copy(&a) };
+        let r = c.clone();
+        ::std::mem::forget(c);
+        leanrt::rc_release(p);
+        r
+    }
+}];
 
-// `Promise.result?` (the task's value; lean2rr wraps it in its `Task`).
-fn l2r_promise_result_with<T, O>(p : LRef<T>, none : O, some : T -> O) -> O {
-    if l2r_ref_is_empty(p) { none } else { some(l2r_ref_get(p)) }
-}
+// Release a promise (after an operation that borrows it).
+#[ffi(import)]
+fn l2r_promise_release(p : LPromise) -> u64 [{ { drop(p); 0 } }];
+
+// Promise `a` was resolved (its cell is `done`): 1 if its dependents must be
+// walked now (`l2r_task_walk`).
+#[ffi(import)]
+fn l2r_task_resolve_at(a : u64) -> u64 [{ leanrt::task::resolve(a as usize) }];
 
 // `Option.getOrBlock!` on `none`: Lean's forced panic message, then block
 // forever (as natively).
