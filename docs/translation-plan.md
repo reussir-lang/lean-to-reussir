@@ -1204,23 +1204,37 @@ at any time after it is created and must have finished it when its value is
 needed. The translation is single-threaded and picks one such schedule: a
 task runs when it is needed, on the stack of whoever needs it.
 
-- *IO tasks* (`BaseIO.asTask`, `mapTask`, `bindTask`) are deferred. The new
-  cell is `pending(|w| act(w).val)` (for `mapTask f t`, the action is `f
-  t.get`); for `bindTask t f` it is `bind(|w| (f t.get w).val)`, whose
-  computation yields the task the new one continues as. The runtime
-  (`leanrt::task`) queues it and holds a reference until it runs, since
-  Lean runs an IO task even if the program drops it. A task that depends
-  on a task unfinished at its creation (`mapTask`, `bindTask`, and the pure
-  `Task.map`, `Task.bind`) is recorded as its dependent, as Lean's
-  `add_dep` does.
-- *Pure tasks* (`Task.spawn`, `Task.map`, `Task.bind`) are computed when
-  they are created if no task is pending or running: `Task.spawn f` is then
-  `l2r_lcell_new(S::done{f(())})`, and nothing, not even `dbgTrace`,
-  shows the difference from a worker computing it. Otherwise they are
-  deferred and queued like IO tasks: their code may need a pending task,
-  which may be waiting for `main` (`Task.spawn fun _ => t.get + 1` with `t`
-  waiting for a flag `main` sets later finishes natively). `Task.pure a` is
-  `done(a)`.
+- Every task created after `main` has started is *deferred*: its cell is
+  `pending(|w| …)`, and the runtime (`leanrt::task`) records it and holds
+  a reference while it is pending. For IO tasks (`BaseIO.asTask`,
+  `mapTask`, `bindTask`) the computation is `act(w).val` (for `mapTask f
+  t`, `f t.get`); for `bindTask t f` the cell is `bind(|w| (f t.get
+  w).val)`, whose computation yields the task the new one continues as.
+  Pure tasks (`Task.spawn`, `Task.map`, `Task.bind`) are deferred the same
+  way; `Task.pure a` is `done(a)`. During module initialization Lean has no
+  task manager and `lean_task_spawn_core` runs the computation at once; so
+  does the translation (those tasks share the initializer's streams).
+- A task that depends on a task unfinished at its creation (`mapTask`,
+  `bindTask`, `Task.map`, `Task.bind`) is recorded as its dependent, as
+  Lean's `add_dep` does, and waits for it; one of a finished task is queued
+  at once.
+- *Dropped pure tasks.* Lean keeps an IO task alive until it has run
+  (`keep_alive`), but not a pure one: when the program drops a pure task
+  before a worker has started it, Lean deletes it and it never runs. The
+  runtime's reference does not count: when the runtime is about to start a
+  pure task (the final run, the worker's pick below, a `sync` dependent
+  released by its source) and holds the only reference to it, the task is
+  dropped instead. So is one whose other references all come from pure
+  dependents that are dropped themselves (`Task.spawn f` and its `map`,
+  both dropped), searched up to 32 tasks deep. A pure task a pending IO
+  task still refers to runs.
+- *Priorities.* Lean passes `lean_unbox(prio)` as an `unsigned`: the
+  priority is taken modulo 2^32. 2^32-1 is `LEAN_SYNC_PRIO`: such a task
+  runs as soon as it is enqueued, on the enqueuing thread (an `asTask` or
+  `Task.spawn` at once, before `main`'s next line, with `main`'s streams
+  and thread id; a dependent as soon as its source finishes, like `sync :=
+  true`). 0 to 8 are the task manager's queues; above 8 is a dedicated
+  thread, which comes first here.
 - A pending task runs at the first of:
   - `IO.wait`/`Task.get` of it, or a task that needs it running;
   - `IO.waitAny` on a list none of whose tasks has finished: the first
@@ -1230,37 +1244,54 @@ task runs when it is needed, on the stack of whoever needs it.
     passed (an `IO.sleep`/`dbgSleep` since the first answer) or keeps asking
     (1000 times); the task then runs and is reported `finished`;
   - `main` returning (§5.11): the queued tasks run in the order Lean's task
-    manager with one worker (`LEAN_NUM_THREADS=1`) starts them. The task
-    manager keeps a queue per priority (0 to 8; a dedicated task, above 8,
-    has a thread of its own, so it comes first here) and takes the first
-    task of the highest non-empty one. An idle worker starts the first
-    task queued at once, and when a task finishes it starts the next one
-    right away: that started task runs first, whatever is queued after it.
-    `IO.Process.exit` exits at once, as natively.
-- *Dependents.* A task that waits for a task unfinished at its creation
-  (`mapTask`, `bindTask`, `Task.map`, `Task.bind`) is off the queue until
-  that task finishes. Then, whoever finished it (during `main` too), Lean
+    manager with one worker (`LEAN_NUM_THREADS=1`) starts them. It keeps a
+    queue per priority and takes the first task of the highest non-empty
+    one. An idle worker is woken by the first enqueue and picks its task
+    once it is awake: about 90 µs later for the new worker thread of the
+    first task, 20 µs for an idle one (measured natively). Tasks `main`
+    queues back to back therefore compete by priority, while a task queued
+    before a sleep or some work has been started by then: the runtime
+    compares the enqueue times, and the started task runs first in the
+    final run. When a task the worker ran finishes, it picks the next one
+    at once. `IO.Process.exit` exits at once, as natively.
+- *Dependents.* A task that waits for another is off the queue until that
+  task finishes. Then, whoever finished it (during `main` too), Lean
   walks its dependents from the newest (`handle_finished`): one created
-  with `sync := true` runs there and then, on the finishing thread, before
-  anything waiting for the finished task resumes; the others are enqueued
-  at their priority. A bind task that has run `f` finishes at once if the
-  task `f` returned has finished, and otherwise waits for it, keeping its
-  priority and `sync` flag, and finishes as that one (`task_bind_fn1`).
-  Dependents of a cycle are left behind, as Lean's workers stop when the
-  queue is empty. A task needed while the tasks it waits for are pending
-  first runs that chain from its deepest end, one task after the other,
-  so a long chain does not recurse.
+  with `sync := true` (or at priority 2^32-1) runs there and then, on the
+  finishing thread, with that thread's current streams (whatever the
+  finished task left installed), before anything waiting for the finished
+  task resumes; the others are enqueued at their priority. A `sync`
+  dependent's own dependents are walked by the same loop, so a long chain
+  of `sync` dependents does not recurse. A bind task that has run `f`
+  finishes at once if the task `f` returned has finished, and otherwise
+  waits for it, keeping its priority and `sync` flag, reported `waiting`
+  (natively its closure is set again), and finishes as that one
+  (`task_bind_fn1`). Dependents of a cycle are left behind, as Lean's
+  workers stop when the queue is empty. A task needed while the tasks it
+  waits for are pending first runs that chain from its deepest end, one
+  task after the other, so a long chain does not recurse.
 - `mapTask`/`bindTask`/`Task.map`/`Task.bind` with `sync := true` of a
   finished task apply `f` at once in the calling thread (its streams too),
   as `lean_task_map_core`/`lean_task_bind_core` do.
-- `IO.cancel` sets the flag of a pending or running task; when a canceled
-  task finishes, the tasks created while it was unfinished that depend on
-  it (`mapTask`, `bindTask`) are canceled too, as Lean's `handle_finished`
-  does. `IO.checkCanceled` answers for the innermost running task, and is
-  false in `main`. During the final run of queued tasks, Lean has set its
-  shutdown flag, which makes `IO.checkCanceled` true; natively those tasks
-  have usually started long before, so a task sees the flag only once time
-  has passed in it (a sleep) or from its second check on.
+- `IO.cancel` sets the flag of an unfinished task; when a canceled task
+  finishes, the tasks created while it was unfinished that depend on it
+  are canceled too, as Lean's `handle_finished` does. `IO.checkCanceled`
+  answers for the innermost running task, and is false in `main`. When
+  `main` returns, Lean sets its shutdown flag, which makes
+  `IO.checkCanceled` true. A task that was queued then could have been
+  started by a native worker before the flag was set, so it sees the flag
+  only once time has passed in it (a sleep) or from its second check on;
+  so does a task it creates or releases (a dependent) before time has
+  passed in it. Any other task of the final run (a dependent of a task
+  still pending when `main` returned, a task created by a task that has
+  slept, a bind continuation created then) could only start after the
+  flag was set and sees it at once.
+- *Closed terms.* Lean evaluates a closed term once, at its first use, and
+  then marks it persistent (`lean_mark_persistent`), which waits for every
+  task it reaches. A closed term whose type may hold tasks (a task, a
+  structure, list or array of them) runs its tasks right after it is
+  evaluated (`l2r_persist_T`), so `Task.spawn` of a closed function has
+  finished once the term has been used.
 - A thunk or task stored at another representation (in `Box`, §5.1) is
   converted to a new cell in state `conv(g, o, a)`: `g` forces the original
   and converts its value (so it still runs at most once); `o` is the
@@ -1272,28 +1303,42 @@ task runs when it is needed, on the stack of whoever needs it.
   copy records the first original, and converting it to a third
   representation converts the original directly, so chains stay one level
   deep.
+- *Promises* (`IO.Promise α`, `lcAny` in mono code) are a runtime object
+  (`LPromise`) holding the cell of their task, a task over `Option Box`
+  whatever `α` is, so that typed and uniform code share it. The task stays
+  unresolved (status `running`, as natively) until `Promise.resolve`, which
+  stores `some v` (only the first resolution counts) and walks the task's
+  dependents on the resolving thread, as Lean's `resolve_core`.
+  `Promise.result?` converts the task to `Task (Option α)`, and
+  `Promise.result!` maps `Option.getOrBlock!` over it, as natively.
+  Dropping the last reference to an unresolved promise resolves it with
+  `none` (`deactivate_promise`, through the runtime's finalizer of the
+  promise object). Waiting for an unresolved promise runs queued tasks, as
+  a worker would meanwhile, until one resolves it; when none is left, the
+  wait lasts forever, as natively. Polling a promise (`isResolved`) runs
+  queued tasks the same way once time has passed, and `IO.waitAny` does
+  not run a pending task that waits for an unresolved promise.
+  `IO.Promise.new` during initialization is Lean's internal panic.
 - *Standard streams.* Natively each thread has its own current standard
   streams (`IO.setStdout` & co. replace the current thread's, which start as
   the process's), and a task runs on a worker thread. So a task starts with
   the process's streams, and when it ends the streams of whoever ran it are
-  back (`l2r_std_enter`/`l2r_std_leave` set the stream cells aside and
-  restore them); a pure task computed at once does the same. During module
-  initialization, where Lean runs tasks on the calling thread, they share
-  the caller's streams. `main`, on its own thread, starts with the
-  process's streams whatever the initializers installed (§5.11). Natively
-  a worker keeps its streams from one task to the next, so a task that
-  leaves a redirection behind can affect the next task on the same worker;
-  the translation behaves as if every task ran on a fresh worker.
-- During module initialization Lean has no task manager, and
-  `lean_task_spawn_core` runs the action at once; so does the translation.
+  back (`l2r_std_enter_if`/`l2r_std_leave_if` set the stream cells aside and
+  restore them). A task that runs on the current thread (a `sync`
+  dependent, priority 2^32-1) shares that thread's streams. `main`, on its
+  own thread, starts with the process's streams whatever the initializers
+  installed (§5.11). Natively a worker keeps its streams from one task to
+  the next, so a task that leaves a redirection behind can affect the next
+  task on the same worker; the translation behaves as if every task (other
+  than a `sync` dependent) ran on a fresh worker.
 
 Why tasks are deferred rather than run at creation: a task may wait for
 `main`. `IO.asTask (do while !(← flag.get) do IO.sleep 1; …)` followed by
 `flag.set true; IO.wait t` finishes natively; run at creation, the task
 would spin forever. Running at creation also prints the task's output
 before `main`'s next line, which natively comes first when the task starts
-with a sleep. A task that runs only when needed never waits for something
-that is still to happen.
+with a sleep, and computes pure tasks the program then drops. A task that
+runs only when needed never waits for something that is still to happen.
 
 What a single thread cannot do:
 - a task that waits for another by other means than the task operations
@@ -1303,10 +1348,14 @@ What a single thread cannot do:
   needed, not by time, and `IO.waitAny` does not pick the fastest of
   several unfinished tasks;
 - tasks nobody waits for stay queued, with what they hold, until `main`
-  returns (a chain of 4·10⁶ `mapTask`s built by `main` takes 1.6 GB, where
-  native workers run it as it is built);
+  returns (a chain of 4·10⁶ `mapTask`s built by `main` takes 0.7 GB, as
+  natively with one worker; with free workers native Lean runs it as it is
+  built), and a dropped pure task keeps its memory until the runtime would
+  start it;
 - a task needed by `main` runs at once, where a single native worker would
-  first finish the tasks queued before it;
+  first finish the tasks queued before it, and a task the worker would
+  start right after one `main` waits for runs only when `main` returns or
+  needs it, after `main`'s next lines;
 - Lean's panic for `Task.get` inside a `sync := true` task is not
   reproduced;
 - a deferred task is reported `waiting` at the first question even after a
@@ -1315,7 +1364,6 @@ What a single thread cannot do:
   hang, if it needs a task that waits for `main`.
 
 Tasks that wait for each other in a cycle wait forever, as natively.
-Promises are not translated yet.
 
 ---
 
@@ -1328,13 +1376,13 @@ The runtime provides what Reussir lacks:
 - `Float` math through libm;
 - IO: stdout/stderr/stdin streams, `IO.Error`, argv, exit;
 - `ST.Ref` cells;
-- the mutable cells of thunks and tasks, and the queue of deferred IO
-  tasks (§5.14);
+- the mutable cells of thunks and tasks, the queues of deferred tasks, and
+  promises (§5.14);
 - panic, trace;
 - once-cells for constants.
 
-Everything runs on one thread: IO tasks are deferred until needed
-(§5.14), which gives one of the schedules native Lean can produce. Real
+Everything runs on one thread: tasks are deferred until needed (§5.14),
+which gives one of the schedules native Lean can produce. Real
 threads, using Reussir's atomic reference counting, come later. Each
 runtime function consumes the arguments it owns, and never mutates in
 place unless it has checked for uniqueness (the cells of refs, thunks and
@@ -1482,15 +1530,21 @@ Each item says what differs and when.
   (§5.14): a task or `main` polling shared state that another task sets
   never sees it change, output ordered by sleeps across tasks comes in the
   order tasks are needed, and `IO.waitAny` does not pick the fastest task.
-  A pure task created while no other task is pending is computed at once,
-  so one that never finishes hangs the program, where native Lean runs it
-  on a worker thread and can exit without it. A deferred task is reported
-  `waiting` at the first `IO.hasFinished`, even after a sleep. Tasks run as
-  if each had a fresh worker thread, so a redirection a task leaves behind
+  A deferred task is reported `waiting` at the first `IO.hasFinished`,
+  even after a sleep. The order of the final run is that of one native
+  worker (`LEAN_NUM_THREADS=1`), whose pick of its first task is timed
+  against its measured wake-up latency (about 90 µs, 20 µs when idle):
+  tasks created about that far apart can come in either order, as
+  natively. A pure task the program drops is deleted when nothing but
+  dropped pure tasks refers to it, searched 32 levels deep (longer chains
+  of dropped pure tasks run). Tasks other than `sync` dependents run as if
+  each had a fresh worker thread, so a redirection a task leaves behind
   never reaches another task (natively it can, on the same worker);
-  `IO.getTID` inside a task is main's thread id plus the depth of running
-  tasks, as distinct from main's as a worker's. Promises are not
-  translated yet.
+  `IO.getTID` inside a task is main's thread id plus a worker number (a
+  `sync` dependent's is its source's), as distinct from main's as a
+  worker's. A closed term waits for the tasks it holds directly or in
+  structures, lists and arrays, not for tasks inside closures or thunks
+  (Lean's `lean_mark_persistent` waits for all of them).
 - *Startup order of generated constants*: specializations with every
   parameter fixed that Lean generated while compiling the same declaration
   run in the order of their numbers (`spec_0`, `spec_2`, …). Lean's own
@@ -1550,7 +1604,11 @@ Each item says what differs and when.
   same.
 - *Stack depth* in general: frame sizes differ from native, and lean2rr
   adds recursion of its own (structural conversions, the `Array.mk` and
-  `String.mk` list folds). The depth at which `Stack overflow detected.
+  `String.mk` list folds). Dropping a long list or other deep value
+  recurses in Reussir's drop glue, 16 to 32 bytes of stack per node (a
+  list of pending task cells at the top), where Lean frees iteratively: at
+  an 8 MB stack (`LEAN_STACK_SIZE_KB=8192`) a list of a few 10⁵ elements
+  dropped at once overflows. The depth at which `Stack overflow detected.
   Aborting.` (exit 134) happens is not native's, in either direction.
 - *Stream redirection* (`IO.setStdout`, `setStderr`, `setStdin`,
   `IO.FS.withIsolatedStreams`) is translated: the current streams live in
