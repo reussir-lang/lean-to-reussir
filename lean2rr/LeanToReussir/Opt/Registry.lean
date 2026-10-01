@@ -13,6 +13,9 @@ import LeanToReussir.Opt.NullaryScrutinee
 import LeanToReussir.Opt.StateMachines
 import LeanToReussir.Opt.ValueStructs
 import LeanToReussir.Opt.FieldOrder
+import LeanToReussir.Opt.NatArrays
+import LeanToReussir.Opt.PlaceholderCache
+import LeanToReussir.Opt.SplitMapLoops
 
 /-!
 # The pass registry
@@ -68,6 +71,9 @@ def stage2 : Stage2Config := #[
 def optimizations : Array OptPass := #[
   ⟨"field-order", true, "record fields in decreasing alignment, so records have no padding (declaration order otherwise)", FieldOrder.install⟩,
   ⟨"value-structs", true, "a structure with one relevant field (ST.Out of every BaseIO call) is a [value] struct, not a heap record", ValueStructs.install⟩,
+  ⟨"nat-arrays", true, "Array Nat/Int as the runtime's one-word-per-element LNatArr/LIntArr", NatArrays.install⟩,
+  ⟨"split-map-loops", true, "an Array.map loop whose element representation changes split into source and result arrays, instead of running on Boxes (Stage 3)", SplitMapLoops.install⟩,
+  ⟨"placeholder-cache", true, "placeholders (box(0) at a type) that would allocate built once, in a once-cell", PlaceholderCache.install⟩,
   ⟨"float-lits", true, "Float literals (Float.ofScientific/ofNat on literals) folded to their bits at compile time", FloatLits.install⟩,
   ⟨"cheap-consts", true, "constants built from small literals and scalar conversions recomputed at each use, not cached", CheapConsts.install⟩,
   ⟨"prelude-repr", true, "Nat.repr/Int.repr calls replaced by the runtime's GMP versions (same strings; the runtime keeps them, unused, without the pass)", PreludeRepr.install⟩,
@@ -87,6 +93,8 @@ def required : Array RequiredPass := #[
     "otherwise a loop through an outlined join point is mutually recursive and uses stack per iteration where native Lean uses none: without it, and with the join-point passes off, the classic Sieve and Strings overflowed Lean's 1 GiB stack at their medium size"⟩,
   ⟨"closed-chains", "a closed term used once, by another constant, is evaluated there instead of cached (Emit/Program, chainConsts)",
     "an array literal is a chain of closed terms, and caching every step keeps every intermediate array: memory quadratic in the literal's length (10000 elements: 1036 MB instead of 7 MB)"⟩,
+  ⟨"stage3-types", "Stage 3 recovers parameter types from call sites and result types from callers' bindings (MonoRetype: paramsFromCallers, refineSignature)",
+    "type recovery, not a choice of representation: a value left at lcAny is a Box, and an array whose representation differs is converted, a copy, each time it crosses such a position (a call in a loop, each read of a constant), and the copy is another object than native Lean's"⟩,
   ⟨"outline", "deep and long tail paths of a function cut into chains of functions (Outline)",
     "rrc's analyses are superlinear in nesting depth and straight-line length (Reussir bugs 16, 17), and so is the .rr text, whose indentation follows the nesting: without it a 3000-arm literal match in tail position gives 126 MB of .rr instead of 1 MB"⟩]
 

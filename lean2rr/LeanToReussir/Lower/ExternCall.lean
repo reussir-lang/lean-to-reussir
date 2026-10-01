@@ -205,8 +205,9 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
       | .fn d c => if cls[i]?.getD false then coerce a t (.cls d c) else pure a
       | _ => pure a
     return .call sym tys passed
-  -- Array externs at `Array Nat`/`Array Int` use the one-word arrays.
-  if let some α := typeArgs[0]? then
+  -- Array externs at `Array Nat`/`Array Int` use the one-word arrays,
+  -- when those represent them (`LowerCtx.natArrays`).
+  if let (some α, true) := (typeArgs[0]?, (← read).natArrays) then
     let fam? := match ← lowerType (← toMonoTypeKeep α) with
       | .named "Nat" => some "natarr"
       | .named "Int" => some "intarr"

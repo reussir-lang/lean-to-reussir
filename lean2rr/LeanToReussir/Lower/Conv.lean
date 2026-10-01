@@ -210,7 +210,7 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
   let nullary := match body with
     | ⟨#[], .ctor _ _ #[]⟩ => true
     | _ => false
-  if heap && !nullary then
+  if heap && !nullary && (← read).cachePlaceholders then
     let acc ← cafAccessor f t
     modify fun s => { s with fns := s.fns.push (.fn (f ++ "_init") #[] t body) |>.push acc }
   else

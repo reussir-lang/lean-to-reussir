@@ -90,7 +90,7 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   if stage == "mono" then return dumpDecls header decls
   if stage == "retyped" then
     -- Stage 3 alone (`lowerProgram` runs it itself).
-    let (decls, _) ← retypeMono cfg.stage2 (← programRelevance decls) decls st.keys rootInsts
+    let (decls, _) ← retypeMono cfg.stage2 cfg.stage3 (← programRelevance decls) decls st.keys rootInsts
     return dumpDecls header decls
   -- Stages 3 and 4: retyping, the registry's optional passes, lowering, and
   -- the program text (prelude, types, functions, startup chain, entry point).

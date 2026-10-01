@@ -111,7 +111,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
   let table ← programRelevance decls
   let roots := #[mainInst, errStr] ++ startup.map fun
     | .caf i | .ioUnit i | .init _ i => i
-  let (decls, keys) ← retypeMono cfg.stage2 table decls keys roots
+  let (decls, keys) ← retypeMono cfg.stage2 cfg.stage3 table decls keys roots
   -- The registry's passes over mono LCNF (`Opt/FloatLits`: float literals
   -- become bit patterns).
   let decls := cfg.monoPasses.foldl (fun ds p => p keys ds) decls
@@ -159,7 +159,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
                           preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls,
                           uncachedConsts, preludeReplacements := cfg.preludeReplacements,
-                          valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder }
+                          valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
+                          cachePlaceholders := cfg.cachePlaceholders, natArrays := cfg.natArrays }
   let act : LowerM (Array RR.Item) := do
     -- `Box` always exists (with at least the unit variant, `box(0)`): types
     -- may mention it even when nothing is ever boxed.
