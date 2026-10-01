@@ -3,7 +3,7 @@
 //!
 //! `Nat` and `Int` are Reussir `[value]` enums, which cannot be stored in a
 //! Rust vector; storing them boxed costs an allocation per element update.
-//! A `TagVec` stores each element as a tagged word instead:
+//! A tag vector stores each element as a tagged word instead:
 //!
 //! - odd words are small values: `(v << 1) | 1` (the Reussir side decides
 //!   the range and the signedness: `Nat` below 2^63, `Int` in [-2^62, 2^62));
@@ -11,19 +11,65 @@
 //!   other values.
 //!
 //! The Reussir-visible type is `Rc<Box<dyn Any>>` (spellable with std and
-//! reussir_rt only, as opaque FFI types must be); the `Box` holds a
-//! `TagVec`, whose `Clone`/`Drop` maintain the big elements' counts. Like
-//! every array it is copy-on-write: updated in place when unique.
+//! reussir_rt only, as opaque FFI types must be), but the object is one
+//! allocation, like Lean's array object: the `Rc` box (count, then the
+//! `Box<dyn Any>`), the size, the capacity and the words.
+//!
+//! ```text
+//!   0: count: u32, (padding)     the reussir_rt RcBox header
+//!   8: Box<dyn Any>              (data pointer = this object, vtable of `Marker`)
+//!  24: len: usize
+//!  32: cap: usize
+//!  40: words: [u64; cap]
+//! ```
+//!
+//! The box holds a zero-sized `Marker`, so it owns no memory of its own
+//! (dropping a `Box` of a zero-sized type deallocates nothing) and its data
+//! pointer is free to point at the object itself: dropping the last
+//! reference (Reussir's drop hook, or `Rc`'s `Drop` here) runs
+//! `Marker::drop` through the vtable, which releases the big elements, and
+//! then frees the `Rc` box, i.e. the whole block (mimalloc frees by address;
+//! the global allocator ignores the layout). Like every array it is
+//! copy-on-write: updated in place when unique.
 
-use crate::alloc::{box_new, rc_new, reserve, vec_from_slice, vec_with_capacity};
 use crate::big::LBig;
 use reussir_rt::rc::Rc;
 use std::any::Any;
+use std::ffi::c_void;
 
 pub type LTagVec = Rc<Box<dyn Any>>;
 
-pub struct TagVec {
-    w: Vec<u64>,
+extern "C" {
+    fn mi_malloc(size: usize) -> *mut c_void;
+    fn mi_realloc(p: *mut c_void, size: usize) -> *mut c_void;
+}
+
+#[repr(C)]
+struct Obj {
+    count: u32,
+    _pad: u32,
+    marker: std::mem::ManuallyDrop<Box<dyn Any>>,
+    len: usize,
+    cap: usize,
+}
+
+const HDR: usize = std::mem::size_of::<Obj>();
+
+/// The zero-sized content of the box; its `Drop` releases the big elements
+/// of the object its box points at.
+struct Marker;
+
+impl Drop for Marker {
+    fn drop(&mut self) {
+        let o = self as *mut Marker as *mut Obj;
+        unsafe {
+            for w in std::slice::from_raw_parts(words(o), (*o).len) {
+                if !is_small(*w) {
+                    drop(std::mem::transmute::<usize, LBig>(*w as usize));
+                }
+            }
+        }
+    }
 }
 
 #[inline(always)]
@@ -43,55 +89,118 @@ fn word_as_big(w: &u64) -> &LBig {
     unsafe { &*(w as *const u64 as *const LBig) }
 }
 
-impl Clone for TagVec {
-    fn clone(&self) -> Self {
-        TagVec { w: copy_words(&self.w) }
-    }
-}
-
-impl Drop for TagVec {
-    fn drop(&mut self) {
-        for w in &self.w {
-            if !is_small(*w) {
-                drop(unsafe { std::mem::transmute::<usize, LBig>(*w as usize) });
-            }
-        }
-    }
+#[inline(always)]
+fn obj(a: &LTagVec) -> *mut Obj {
+    // `Rc` is a transparent pointer to its box, which is the object.
+    unsafe { std::mem::transmute_copy::<LTagVec, *mut Obj>(a) }
 }
 
 #[inline(always)]
-fn tv(a: &LTagVec) -> &TagVec {
-    // Only this module creates these objects, always holding a `TagVec`.
-    unsafe { &*(&***a as *const dyn Any as *const TagVec) }
+unsafe fn words(o: *mut Obj) -> *mut u64 {
+    (o as *mut u8).add(HDR) as *mut u64
 }
 
 #[inline(always)]
-fn tv_mut(a: &mut LTagVec) -> &mut TagVec {
-    unsafe { &mut *(&mut **a.data_mut() as *mut dyn Any as *mut TagVec) }
+fn slice(a: &LTagVec) -> &[u64] {
+    let o = obj(a);
+    unsafe { std::slice::from_raw_parts(words(o), (*o).len) }
 }
 
-fn mk(w: Vec<u64>) -> LTagVec {
-    rc_new(box_new(TagVec { w }) as Box<dyn Any>)
-}
-
-/// Unique access, copying a shared vector first.
-#[inline(always)]
-fn make_mut(a: &mut LTagVec) -> &mut TagVec {
-    if !a.is_unique() {
-        // By value: the address of `a` (often a local of the Reussir caller
-        // once this is inlined) must not escape, or tail calls are lost.
-        unsafe { std::ptr::write(a, copy_shared(std::ptr::read(a))) };
-    }
-    tv_mut(a)
-}
-
-/// A private copy of a shared vector (releasing the shared one).
 #[cold]
 #[inline(never)]
-extern "C" fn copy_shared(a: LTagVec) -> LTagVec {
-    let c = rc_new(box_new(tv(&a).clone()) as Box<dyn Any>);
-    drop(a);
+fn oom() -> ! {
+    crate::internal_panic("out of memory")
+}
+
+#[inline(always)]
+fn bytes_for(cap: usize) -> usize {
+    cap.checked_mul(8).and_then(|b| b.checked_add(HDR)).unwrap_or_else(|| oom())
+}
+
+/// Point the box at the object (after allocation or a move by realloc).
+#[inline(always)]
+unsafe fn set_marker(o: *mut Obj) {
+    let b: Box<dyn Any> = Box::from_raw(o as *mut Marker);
+    std::ptr::write(std::ptr::addr_of_mut!((*o).marker), std::mem::ManuallyDrop::new(b));
+}
+
+/// A fresh unique object with room for `cap` words and no elements.
+#[inline(always)]
+fn alloc(cap: usize) -> LTagVec {
+    unsafe {
+        let o = mi_malloc(bytes_for(cap)) as *mut Obj;
+        if o.is_null() {
+            oom();
+        }
+        std::ptr::write(std::ptr::addr_of_mut!((*o).count), 1);
+        std::ptr::write(std::ptr::addr_of_mut!((*o)._pad), 0);
+        set_marker(o);
+        std::ptr::write(std::ptr::addr_of_mut!((*o).len), 0);
+        std::ptr::write(std::ptr::addr_of_mut!((*o).cap), cap);
+        std::mem::transmute::<*mut Obj, LTagVec>(o)
+    }
+}
+
+/// Grow a unique object to room for at least `need` words.
+#[cold]
+#[inline(never)]
+extern "C" fn grow(a: LTagVec, need: usize) -> LTagVec {
+    let o = obj(&a);
+    std::mem::forget(a);
+    unsafe {
+        let cap = need.max((*o).cap.saturating_mul(2)).max(4);
+        let n = mi_realloc(o as *mut c_void, bytes_for(cap)) as *mut Obj;
+        if n.is_null() {
+            oom();
+        }
+        set_marker(n);
+        (*n).cap = cap;
+        std::mem::transmute::<*mut Obj, LTagVec>(n)
+    }
+}
+
+/// A private copy of a shared vector with room for `extra` more words
+/// (keeping at least the capacity, as `lean_copy_expand_array` does),
+/// releasing the shared one.
+#[cold]
+#[inline(never)]
+extern "C" fn copy_shared(a: LTagVec, extra: usize) -> LTagVec {
+    let src = slice(&a);
+    let cap = (src.len() + extra).max(unsafe { (*obj(&a)).cap });
+    let c = alloc(cap);
+    unsafe { copy_words(src, words(obj(&c))) };
+    unsafe { (*obj(&c)).len = src.len() };
+    crate::rc_release(a);
     c
+}
+
+/// Unique access with room for `extra` more words, copying a shared vector
+/// first.
+#[inline(always)]
+fn make_mut(a: &mut LTagVec, extra: usize) -> *mut Obj {
+    // By value: the address of `a` (often a local of the Reussir caller once
+    // this is inlined) must not escape, or tail calls are lost.
+    if !a.is_unique() {
+        unsafe { std::ptr::write(a, copy_shared(std::ptr::read(a), extra)) };
+    } else {
+        let o = obj(a);
+        let need = unsafe { (*o).len } + extra;
+        if need > unsafe { (*o).cap } {
+            unsafe { std::ptr::write(a, grow(std::ptr::read(a), need)) };
+        }
+    }
+    obj(a)
+}
+
+/// Copy words to `dst`, taking a reference to every big element among them.
+#[inline]
+unsafe fn copy_words(ws: &[u64], dst: *mut u64) {
+    for w in ws {
+        if !is_small(*w) {
+            std::mem::forget(word_as_big(w).clone());
+        }
+    }
+    std::ptr::copy_nonoverlapping(ws.as_ptr(), dst, ws.len());
 }
 
 #[cold]
@@ -110,55 +219,64 @@ extern "C" fn drop_word(w: u64) {
 
 #[inline(never)]
 pub fn empty() -> LTagVec {
-    mk(Vec::new())
+    alloc(0)
 }
 
 #[inline(never)]
 pub fn with_capacity(n: u64) -> LTagVec {
     crate::array::check_alloc(n, 8);
-    mk(vec_with_capacity(n.min(crate::array::CAPACITY_CAP) as usize))
+    alloc(n.min(crate::array::CAPACITY_CAP) as usize)
 }
 
 /// `n` copies of a small (odd) word.
 #[inline(never)]
 pub fn replicate_word(n: u64, w: u64) -> LTagVec {
-    {
-        crate::array::check_alloc(n, 8);
-        let mut v = vec_with_capacity(n as usize);
-        v.resize(n as usize, w);
-        mk(v)
+    crate::array::check_alloc(n, 8);
+    let a = alloc(n as usize);
+    let o = obj(&a);
+    unsafe {
+        std::slice::from_raw_parts_mut(words(o), n as usize).fill(w);
+        (*o).len = n as usize;
     }
+    a
 }
 
 /// `n` references to one big value.
 #[inline(never)]
 pub fn replicate_big(n: u64, b: LBig) -> LTagVec {
     crate::array::check_alloc(n, 8);
-    let mut v = vec_with_capacity(n as usize);
-    for _ in 0..n {
-        v.push(big_to_word(b.clone()));
+    let a = alloc(n as usize);
+    let o = obj(&a);
+    unsafe {
+        for i in 0..n as usize {
+            *words(o).add(i) = big_to_word(b.clone());
+        }
+        (*o).len = n as usize;
     }
-    mk(v)
+    a
 }
 
 #[inline(always)]
 pub fn size(a: &LTagVec) -> u64 {
-    tv(a).w.len() as u64
+    unsafe { (*obj(a)).len as u64 }
 }
 
 /// The raw word at `i` (in bounds).
 #[inline(always)]
 pub fn word(a: &LTagVec, i: u64) -> u64 {
-    match tv(a).w.get(i as usize) {
-        Some(w) => *w,
-        None => index_bug(i, tv(a).w.len()),
+    let o = obj(a);
+    let n = unsafe { (*o).len };
+    if (i as usize) < n {
+        unsafe { *words(o).add(i as usize) }
+    } else {
+        index_bug(i, n)
     }
 }
 
 /// The big value at `i` (the word there must be even).
 #[inline(always)]
 pub fn big(a: &LTagVec, i: u64) -> LBig {
-    word_as_big(&tv(a).w[i as usize]).clone()
+    word_as_big(&slice(a)[i as usize]).clone()
 }
 
 /// The word at `i`; when it is a big value, the returned word owns one
@@ -189,15 +307,14 @@ pub fn big_of_owned_word(w: u64) -> LBig {
 
 #[inline(always)]
 fn set_raw(mut a: LTagVec, i: u64, w: u64) -> LTagVec {
-    let v = make_mut(&mut a);
-    match v.w.get_mut(i as usize) {
-        Some(slot) => {
-            let old = std::mem::replace(slot, w);
-            if !is_small(old) {
-                drop_word(old);
-            }
-        }
-        None => index_bug(i, v.w.len()),
+    let o = make_mut(&mut a, 0);
+    let n = unsafe { (*o).len };
+    if (i as usize) >= n {
+        index_bug(i, n);
+    }
+    let old = unsafe { std::ptr::replace(words(o).add(i as usize), w) };
+    if !is_small(old) {
+        drop_word(old);
     }
     a
 }
@@ -214,24 +331,40 @@ pub fn set_big(a: LTagVec, i: u64, b: LBig) -> LTagVec {
 }
 
 #[inline(always)]
-fn push_raw(mut a: LTagVec, w: u64) -> LTagVec {
+fn push_raw(a: LTagVec, w: u64) -> LTagVec {
     if a.is_unique() {
-        let v = tv_mut(&mut a);
-        if v.w.len() < v.w.capacity() {
-            v.w.push(w);
-            return a;
+        let o = obj(&a);
+        unsafe {
+            let n = (*o).len;
+            if n < (*o).cap {
+                *words(o).add(n) = w;
+                (*o).len = n + 1;
+                return a;
+            }
         }
     }
     push_slow(a, w)
 }
 
+/// `push` when shared or full. A shared array is copied with the capacity
+/// `lean_array_push` gives it (its own, unless that is below `2 * size + 1`:
+/// then `(capacity + 1) * 2`), so a literal pushing onto a shared empty
+/// array of capacity `k` allocates once, `k` words.
 #[cold]
 #[inline(never)]
 extern "C" fn push_slow(mut a: LTagVec, w: u64) -> LTagVec {
-    let v = make_mut(&mut a);
-    let n = v.w.len();
-    reserve(&mut v.w, n.max(4));
-    v.w.push(w);
+    let n = slice(&a).len();
+    let cap = unsafe { (*obj(&a)).cap };
+    let want = if cap < 2 * n + 1 { (cap + 1) * 2 } else { cap };
+    let o = if a.is_unique() {
+        make_mut(&mut a, n.max(4))
+    } else {
+        make_mut(&mut a, want.max(n + 1) - n)
+    };
+    unsafe {
+        *words(o).add(n) = w;
+        (*o).len = n + 1;
+    }
     a
 }
 
@@ -247,70 +380,84 @@ pub fn push_big(a: LTagVec, b: LBig) -> LTagVec {
 
 #[inline(never)]
 pub fn pop(mut a: LTagVec) -> LTagVec {
-    if tv(&a).w.is_empty() {
+    if slice(&a).is_empty() {
         return a;
     }
-    let v = make_mut(&mut a);
-    if let Some(w) = v.w.pop() {
-        drop_word(w);
+    let o = make_mut(&mut a, 0);
+    unsafe {
+        let n = (*o).len - 1;
+        (*o).len = n;
+        drop_word(*words(o).add(n));
     }
     a
 }
 
 #[inline(always)]
 pub fn swap(mut a: LTagVec, i: u64, j: u64) -> LTagVec {
-    let n = tv(&a).w.len();
+    let n = slice(&a).len();
     if (i as usize) >= n || (j as usize) >= n {
         index_bug(i.max(j), n);
     }
-    make_mut(&mut a).w.swap(i as usize, j as usize);
+    let o = make_mut(&mut a, 0);
+    unsafe { std::ptr::swap(words(o).add(i as usize), words(o).add(j as usize)) };
     a
-}
-
-/// Copy words, taking a reference to every big element among them.
-fn copy_words(ws: &[u64]) -> Vec<u64> {
-    for w in ws {
-        if !is_small(*w) {
-            std::mem::forget(word_as_big(w).clone());
-        }
-    }
-    vec_from_slice(ws, 0)
 }
 
 #[inline(never)]
 pub fn append(a: LTagVec, b: LTagVec) -> LTagVec {
+    let k = slice(&b).len();
+    if k == 0 {
+        crate::rc_release(b);
+        return a;
+    }
     let mut a = a;
-    let extra = copy_words(&tv(&b).w);
-    make_mut(&mut a).w.extend_from_slice(&extra);
+    let o = make_mut(&mut a, k);
+    unsafe {
+        let n = (*o).len;
+        copy_words(slice(&b), words(o).add(n));
+        (*o).len = n + k;
+    }
+    crate::rc_release(b);
     a
 }
 
 #[inline(never)]
 pub fn extract(a: LTagVec, start: u64, stop: u64) -> LTagVec {
-    let v = &tv(&a).w;
+    let v = slice(&a);
     let stop = (stop as usize).min(v.len());
     let start = (start as usize).min(stop);
     if start == 0 && stop == v.len() {
         return a;
     }
-    mk(copy_words(&v[start..stop]))
+    let c = alloc(stop - start);
+    unsafe {
+        copy_words(&v[start..stop], words(obj(&c)));
+        (*obj(&c)).len = stop - start;
+    }
+    crate::rc_release(a);
+    c
 }
 
 #[inline(never)]
 pub fn truncate(mut a: LTagVec, n: u64) -> LTagVec {
-    if (n as usize) >= tv(&a).w.len() {
+    let len = slice(&a).len();
+    if (n as usize) >= len {
         return a;
     }
-    let v = make_mut(&mut a);
-    for w in v.w.drain(n as usize..) {
-        drop_word(w);
+    let o = make_mut(&mut a, 0);
+    unsafe {
+        (*o).len = n as usize;
+        for i in n as usize..len {
+            drop_word(*words(o).add(i));
+        }
     }
     a
 }
 
 #[inline(never)]
 pub fn reverse(mut a: LTagVec) -> LTagVec {
-    make_mut(&mut a).w.reverse();
+    let o = make_mut(&mut a, 0);
+    unsafe { std::slice::from_raw_parts_mut(words(o), (*o).len).reverse() };
     a
 }
 
@@ -320,6 +467,12 @@ mod tests {
 
     fn rc(b: &LBig) -> u32 {
         b.count_ref().get()
+    }
+
+    #[test]
+    fn layout() {
+        assert_eq!(HDR, 40);
+        assert_eq!(std::mem::size_of::<Box<dyn Any>>(), 16);
     }
 
     #[test]
@@ -336,6 +489,7 @@ mod tests {
         drop(e);
         let ap = append(a.clone(), a.clone());
         assert_eq!(rc(&b), 4);
+        assert_eq!(size(&ap), 4);
         drop(ap);
         assert_eq!(rc(&b), 2);
         let t = truncate(a.clone(), 1);
@@ -353,6 +507,35 @@ mod tests {
         assert_eq!(rc(&b), 2);
         assert_eq!(big(&r, 1).1, b.1);
         drop(r);
+        assert_eq!(rc(&b), 1);
+    }
+
+    #[test]
+    fn growth_and_sharing() {
+        let b = crate::big::of_limbs2(5, 5);
+        let mut a = empty();
+        for i in 0..1000u64 {
+            a = if i % 100 == 0 { push_big(a, b.clone()) } else { push_word(a, (i << 1) | 1) };
+        }
+        assert_eq!(size(&a), 1000);
+        assert_eq!(rc(&b), 11);
+        for i in 0..1000u64 {
+            if i % 100 != 0 {
+                assert_eq!(word(&a, i), (i << 1) | 1);
+            }
+        }
+        // A shared empty array with capacity (a literal's closed term):
+        // the first push copies it once, keeping the capacity.
+        let lit = with_capacity(4);
+        let x = push_word(lit.clone(), 3);
+        assert_eq!(unsafe { (*obj(&x)).cap }, 4);
+        let x = push_word(push_word(push_word(x, 5), 7), 9);
+        assert_eq!(slice(&x), &[3, 5, 7, 9]);
+        assert_eq!(size(&lit), 0);
+        let s = swap(reverse(a.clone()), 0, 1);
+        assert_eq!(rc(&b), 21);
+        drop(s);
+        drop(a);
         assert_eq!(rc(&b), 1);
     }
 }

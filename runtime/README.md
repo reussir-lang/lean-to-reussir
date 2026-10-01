@@ -79,7 +79,12 @@ handles inline, so a tagged scalar cannot be an opaque value). Every
 `lean_array_xxx<E>` / `l2r_array_xxx<E>` has `lean_natarr_xxx` /
 `l2r_natarr_xxx` (and `intarr`) with the same arguments and element type
 `Nat` (`Int`); `lean_mk_array`/`lean_mk_empty_array_with_capacity` become
-`lean_mk_natarr`/`lean_mk_empty_natarr_with_capacity`.
+`lean_mk_natarr`/`lean_mk_empty_natarr_with_capacity`. A tag vector is one
+allocation, like Lean's array object (header, size, capacity, words; see
+`tagvec.rs` for how it is spelled as `Rc<Box<dyn Any>>`), and a copy of a
+shared one keeps its capacity (`lean_copy_expand_array`), so a literal
+`#[a, b, c]`, which pushes onto a shared empty array of capacity 3, allocates
+once.
 
 ## Calling convention
 

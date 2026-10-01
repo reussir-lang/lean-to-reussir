@@ -169,11 +169,22 @@ pub fn push<T: Clone>(v: RVec<T>, x: T) -> RVec<T> {
     push_slow(r, x)
 }
 
+/// `push` when shared or full. A shared array is copied with the capacity
+/// `lean_array_push` gives it (its own, unless that is below `2 * size + 1`:
+/// then `(capacity + 1) * 2`), so a literal pushing onto a shared empty
+/// array of capacity `k` allocates a buffer of `k` elements once.
 #[cold]
 #[inline(never)]
 extern "C" fn push_slow<T: Clone>(mut r: Rc<Vec<T>>, x: T) -> RVec<T> {
     let n = r.len();
-    make_mut(&mut r, n.max(4)).push(x);
+    let extra = if r.is_unique() {
+        n.max(4)
+    } else {
+        let cap = r.capacity();
+        let want = if cap < 2 * n + 1 { (cap + 1) * 2 } else { cap };
+        want.max(n + 1) - n
+    };
+    make_mut(&mut r, extra).push(x);
     from_rc(r)
 }
 
