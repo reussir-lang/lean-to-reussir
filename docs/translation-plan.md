@@ -1669,6 +1669,11 @@ Each item says what differs and when.
   process's streams (§5.14).
 
 **Cost** (time and memory, not results)
+- *No borrowed parameters* (§5.8, §7): a parameter Lean borrows is owned
+  here, so a traversal that keeps the nodes it visits (an `Expr.replace`
+  over a DAG that replaces nothing) increments and releases the fields of
+  every node it keeps, and every `ptrEq` operand: 1.5x native on such a
+  traversal (adv4 RP4-09).
 - *Structural conversions* (§5.1) rebuild a value as a tree: sharing is lost,
   so a DAG costs exponential time and memory, and a conversion on every call
   costs O(size) per call. Past the instance caps of §2.6 this can happen
