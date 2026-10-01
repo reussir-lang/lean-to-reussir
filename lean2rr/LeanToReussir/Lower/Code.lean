@@ -1,4 +1,4 @@
-import LeanToReussir.Lower.JoinPoints
+import LeanToReussir.Lower.Hooks
 
 /-! # Code -/
 
@@ -25,6 +25,9 @@ where
   blockFreeVars (b : RR.Block) (bound : Std.HashSet String) (acc : Std.HashSet String) : Std.HashSet String :=
     let (bound, acc) := b.lets.foldl (fun (bound, acc) (x, _, e) => (bound.insert x, rrFreeVars e bound acc)) (bound, acc)
     rrFreeVars b.result bound acc
+
+section
+variable (H : LowerHooks)
 
 mutual
   /-- Lower a code block whose value has Reussir type `retTy`. -/
@@ -381,53 +384,6 @@ mutual
     lowerCode ctx outlined retTy k
 end
 
-/-- Types whose values need no heap cell. -/
-def isUnboxedTy (t : RR.Ty) : LowerM Bool := do
-  match t with
-  | .named n =>
-    if n ∈ ["Nat", "Int", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64",
-            "bool", "L2RUnit"] then return true
-    return ((← get).typeInfos[n]?.map (·.shape == .enumLike)).getD false
-  | _ => return false
-
-/-- A constant whose code only builds unboxed values from small literals
-and constructors (`Int.ofNat 0`, an enumeration value). It cannot panic,
-trace or allocate, so it is recomputed at every use: cheaper than reading a
-once-cell (native Lean emits such constants as static data). -/
-partial def isCheapConst (c : Code .pure) (fuel : Nat := 8) : LowerM Bool := do
-  match c with
-  | .let d k =>
-    unless ← isUnboxedTy (← lowerType d.type) do return false
-    let ok ← match d.value with
-      | .lit (.str _) => pure false
-      | .lit (.nat n) => pure (n < 2 ^ 63)
-      | .lit _ => pure true
-      | .erased => pure true
-      | .const f _ args =>
-        if (← getEnv).isConstructor f then pure true
-        -- Total conversions of scalars (`UInt32.ofNat 0`, the default of
-        -- `Inhabited UInt32`, a float literal's bits: `foldFloatLits`).
-        else if isScalarConversion (((← read).keys.find? f).map (·.decl) |>.getD f) then pure true
-        -- Another such constant.
-        else if args.isEmpty && fuel > 0 then
-          match (← read).decls.find? f with
-          | some { params := #[], value := .code b, .. } => isCheapConst b (fuel - 1)
-          | _ => pure false
-        else pure false
-      | _ => pure false
-    if ok then isCheapConst k fuel else return false
-  | .return _ => return true
-  | _ => return false
-where
-  isScalarConversion (f : Name) : Bool :=
-    f ∈ [``UInt8.ofNat, ``UInt16.ofNat, ``UInt32.ofNat, ``UInt64.ofNat, ``USize.ofNat,
-         ``UInt8.ofNatLT, ``UInt16.ofNatLT, ``UInt32.ofNatLT, ``UInt64.ofNatLT, ``USize.ofNatLT,
-         ``Int8.ofNat, ``Int16.ofNat, ``Int32.ofNat, ``Int64.ofNat, ``ISize.ofNat,
-         ``Int8.ofInt, ``Int16.ofInt, ``Int32.ofInt, ``Int64.ofInt, ``ISize.ofInt,
-         ``Float.ofBits, ``Float32.ofBits,
-         ``Char.ofNat, ``Nat.toUInt8, ``Nat.toUInt16, ``Nat.toUInt32, ``Nat.toUInt64,
-         ``Nat.toUSize]
-
 /-- Lower a declaration with code to a Reussir function. -/
 def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let .code body := d.value | return
@@ -477,13 +433,15 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
             (.ofExpr (.call sm.fn #[] ((pnames.map .var).push (.ctor sm.mode (some sm.entry) #[])))))
       smArms := #[] }
     return
-  -- A constant is cached in a once-cell, unless it is cheap to recompute
-  -- or a closed term used only once, by another constant (which runs once;
-  -- caching every step of an array literal kept every intermediate array).
-  if d.params.isEmpty && !(← isCheapConst body) && !(← read).chainConsts.contains d.name then
+  -- A constant is cached in a once-cell, unless a hook has it recomputed
+  -- at each use (Opt/CheapConsts) or evaluated where it is used
+  -- (`uncachedConsts`, Opt/ClosedChains).
+  if d.params.isEmpty && !(← H.recomputeConst body) && !(← read).uncachedConsts.contains d.name then
     let acc ← cafAccessor (fnName d.name) ret
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name ++ "_init") #[] ret block) |>.push acc }
   else
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
+
+end
 
 end LeanToReussir

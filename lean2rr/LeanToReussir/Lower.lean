@@ -11,6 +11,7 @@ import LeanToReussir.Lower.Identity
 import LeanToReussir.Lower.ExternCall
 import LeanToReussir.Lower.Values
 import LeanToReussir.Lower.JoinPoints
+import LeanToReussir.Lower.Hooks
 import LeanToReussir.Lower.Code
 import LeanToReussir.Lower.Finish
 
@@ -34,5 +35,6 @@ The parts, each importing the previous one (Lean needs definitions before
 their uses, so the split follows the original order): `Lower/Ctx` (the
 code-lowering context), `FnValues`, `LazyForce`, `Conv`, `Decls`,
 `Externs`, `LazyGlue`, `Process`, `Promises`, `Identity`, `ExternCall`,
-`Values`, `JoinPoints`, `Code` (including `lowerDecl`), `Finish`.
+`Values`, `JoinPoints`, `Hooks` (where optional passes plug in), `Code`
+(including `lowerDecl`), `Finish`.
 -/

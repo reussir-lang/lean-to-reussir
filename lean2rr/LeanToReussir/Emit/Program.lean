@@ -130,24 +130,12 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
   let ioErrorBuilders := ioErrorBuilderSyms.map fun sym => (exports.get? sym).bind byDecl.find?
   let valueGenericFns := valueGenericPreludeFns prelude
   let valueGenericCls := valueGenericClosureParams prelude
-  -- Closed terms referenced once, from a constant (the steps of an array
-  -- literal: `_closed_k := push _closed_(k-1) e_k`).
-  let mut uses : NameMap Nat := {}
-  let mut fromFunction : NameSet := {}
-  for d in decls do
-    let .code c := d.value | continue
-    for n in codeConsts c #[] do
-      uses := uses.insert n (uses.getD n 0 + 1)
-      unless d.params.isEmpty do fromFunction := fromFunction.insert n
-  let isClosed (n : Name) : Bool := match n with
-    | .str _ s => s.startsWith "_closed"
-    | _ => false
-  let chainConsts := decls.foldl (init := ({} : NameSet)) fun acc d =>
-    if d.params.isEmpty && isClosed d.name && uses.getD d.name 0 == 1 && !fromFunction.contains d.name
-      && !roots.contains d.name then acc.insert d.name else acc
+  -- Constants not cached (`Opt/ClosedChains`: closed terms used once, by
+  -- another constant).
+  let uncachedConsts := cfg.uncachedConsts decls roots
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
                           preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls,
-                          chainConsts }
+                          uncachedConsts }
   let act : LowerM (Array RR.Item) := do
     -- `Box` always exists (with at least the unit variant, `box(0)`): types
     -- may mention it even when nothing is ever boxed.
@@ -156,7 +144,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
     for st in startup do
       if let .init decl _ := st then
         modify fun s => { s with initSlots := s.initSlots.insert decl s.cafSlots, cafSlots := s.cafSlots + 1 }
-    for d in decls do lowerDecl d
+    for d in decls do lowerDecl cfg.lower d
     let entry ← lowerEntry mainInst errStr startup
     modify fun s => { s with fns := s.fns.push entry }
     -- Converters and application functions can need each other.

@@ -30,6 +30,11 @@ structure PassConfig where
   /-- Passes over the checked mono declarations (after Stage 3, before
   lowering), in order; they get the instance keys. -/
   monoPasses : Array (NameMap InstKey → Array (Decl .pure) → Array (Decl .pure)) := #[]
+  /-- Constants evaluated where they are used instead of cached in a
+  once-cell, from the mono declarations and the entry point's roots. -/
+  uncachedConsts : Array (Decl .pure) → Array Name → NameSet := fun _ _ => {}
+  /-- The hooks of code lowering. -/
+  lower : LowerHooks := {}
   /-- Passes over the generated Reussir functions (before the program text is
   assembled), in order. -/
   rrPasses : Array (RRProgram → Array RR.Item → Array RR.Item) := #[]
