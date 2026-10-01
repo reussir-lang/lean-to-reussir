@@ -517,6 +517,39 @@ pub fn of_i64(n: i64) -> LStr {
     from_parts(v, k)
 }
 
+struct Global<T>(std::cell::UnsafeCell<T>);
+unsafe impl<T> Sync for Global<T> {}
+
+/// The strings of `Nat.reprArray` (natively a closed term, built at
+/// initialization): `Nat.repr n` for `n < 128` returns the same string
+/// every time, so it is shared and costs no allocation. Built on first use;
+/// the table keeps one reference to each (the runtime is single-threaded).
+static SMALL_REPR: Global<[usize; 128]> = Global(std::cell::UnsafeCell::new([0; 128]));
+
+/// `Nat.repr n` for `n < 128`: the shared string.
+#[inline(always)]
+pub fn repr_small(n: u64) -> LStr {
+    let p = match unsafe { (*SMALL_REPR.0.get()).get(n as usize) } {
+        Some(&p) if p != 0 => p,
+        _ => return repr_small_init(n),
+    };
+    // A new reference to the table's string (`Rc` is a transparent pointer).
+    let r = std::mem::ManuallyDrop::new(unsafe { std::mem::transmute::<usize, LStr>(p) });
+    LStr::clone(&r)
+}
+
+#[cold]
+#[inline(never)]
+extern "C" fn repr_small_init(n: u64) -> LStr {
+    if n >= 128 {
+        return of_u64(n);
+    }
+    let s = of_u64(n);
+    let p = unsafe { std::mem::transmute::<LStr, usize>(s.clone()) };
+    unsafe { (*SMALL_REPR.0.get())[n as usize] = p };
+    s
+}
+
 /// `lean_mk_string_from_bytes`: validate, replacing each maximal invalid
 /// sequence start with U+FFFD as `lean_mk_string_lossy_recover` does.
 pub fn from_bytes_lossy(s: &[u8]) -> LStr {
@@ -801,6 +834,20 @@ mod tests {
         ok(&from_vec("é€😀".as_bytes().to_vec()), "é€😀");
         let long = "é".repeat(100) + &"a".repeat(37);
         ok(&s(&long), &long);
+    }
+
+    #[test]
+    fn small_reprs_are_shared() {
+        let a = repr_small(7);
+        let b = repr_small(7);
+        ok(&a, "7");
+        assert!(std::ptr::eq(bytes(&a).as_ptr(), bytes(&b).as_ptr()));
+        assert!(!a.is_unique());
+        ok(&repr_small(127), "127");
+        ok(&repr_small(0), "0");
+        let p = push(b, '!' as u32); // shared: copied
+        ok(&p, "7!");
+        ok(&repr_small(7), "7");
     }
 
     #[test]

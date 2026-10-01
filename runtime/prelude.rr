@@ -610,11 +610,16 @@ fn lean_nat_gcd(a : Nat, b : Nat) -> Nat {
     }
 }
 
-// Decimal representation (`Nat.repr`); lean2rr may use it to replace Lean's
-// `Nat.repr`, which builds big numbers digit by digit.
+// `Nat.repr n` for `n < 128`: as natively (`Nat.reprFast` reads the
+// closed term `Nat.reprArray`), the same shared string every time.
+#[ffi(import)]
+fn l2r_nat_repr_small(x : u64) -> LStr [{ leanrt::string::repr_small(x) }];
+
+// Decimal representation (`Nat.repr`); lean2rr replaces Lean's `Nat.repr`
+// and `Nat.reprFast` with it (the former builds big numbers digit by digit).
 fn l2r_nat_repr(a : Nat) -> LStr {
     match a {
-        Nat::Small(x) => lean_string_of_usize(x),
+        Nat::Small(x) => if x < 128 { l2r_nat_repr_small(x) } else { lean_string_of_usize(x) },
         Nat::Big(ba) => l2r_big_to_lstr(ba)
     }
 }
@@ -920,10 +925,11 @@ fn lean_int_to_nat(a : Int) -> Nat {
 #[ffi(import)]
 fn l2r_string_of_i64(x : i64) -> LStr [{ leanrt::string::of_i64(x) }];
 
-// Decimal representation (`Int.repr`); see `l2r_nat_repr`.
+// Decimal representation (`Int.repr`); see `l2r_nat_repr`. Natively
+// `Int.repr (ofNat m) = Nat.repr m`: a shared string below 128.
 fn l2r_int_repr(a : Int) -> LStr {
     match a {
-        Int::Small(x) => l2r_string_of_i64(x),
+        Int::Small(x) => if x >= 0 && x < 128 { l2r_nat_repr_small(x as u64) } else { l2r_string_of_i64(x) },
         Int::Big(b) => l2r_big_to_lstr(b)
     }
 }
