@@ -762,13 +762,13 @@ pub mod owned {
     use reussir_rt::collections::vec::Vec as RVec;
 
     #[inline(never)]
-    pub fn put_str(h: LHandle, s: LStr) { super::put_str(&h, &s); rc_release(s); rc_release(h); }
+    pub fn put_str(h: LHandle, s: LStr) { super::put_str(&h, &s.0); rc_release(s); rc_release(h); }
     #[inline(never)]
     pub fn write(h: LHandle, b: RVec<u8>) { super::put_str(&h, array::as_slice(&b)); array::release(b); rc_release(h); }
     #[inline(never)]
     pub fn flush(h: LHandle) { super::flush(&h); rc_release(h); }
     #[inline(never)]
-    pub fn read(h: LHandle, n: u64) -> RVec<u8> { let v = read_bytes(&h, n); rc_release(h); array::bytes_of_string(Rc::new(v)) }
+    pub fn read(h: LHandle, n: u64) -> RVec<u8> { let v = read_bytes(&h, n); rc_release(h); array::bytes_of_vec(v) }
     #[inline(never)]
     pub fn get_line(h: LHandle) -> LStr { let s = super::get_line(&h); rc_release(h); s }
     #[inline(never)]

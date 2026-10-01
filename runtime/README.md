@@ -46,10 +46,10 @@ Generated sections of the prelude (edit the generator, then run it):
 | `Nat` | `enum [value] Nat { Small(u64), Big(LBig) }` | `Big` only for values `>= 2^64` |
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | big numbers | `LBig` = `Rc<(bool, Vec<u64>)>` | sign, little-endian limbs, normalized; GMP `mpn`/`mpz` |
-| `String` | `LStr` = `Rc<Vec<u8>>` | valid UTF-8, no terminator; copy-on-write |
+| `String` | `LStr` = `Rc<(Vec<u8>, u64)>` | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write |
 | `Array α` | `RVec<E>` = `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one tagged word per element (below) |
-| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `RVec<u8>` and `LStr` share a layout: `String.toUTF8` is free |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `String.toUTF8`/`fromUTF8` move a unique buffer (natively a copy) |
 | `ST.Ref σ α` / `IO.Ref α` | `LRef<E>` (a shared 0/1-element vector) | mutated through every alias; empty after `take` |
 | `Thunk α`, `Task α` | `LCell<S>` = `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
 | `IO.FS.Handle` | `LHandle` | shared buffered file, closed with its last reference |
@@ -67,7 +67,15 @@ release it through `leanrt::rc_release`/`array::release`, whose last-reference
 drop is out of line; together with `#[inline(always)]` fast paths and
 `#[cold]` slow paths this lets LLVM inline the hot textures (array
 get/set/push/size, string get/next/push, the Nat helpers) into Reussir code
-(checked with `rrc --emit llvm-ir`).
+(checked with `rrc --emit llvm-ir`). Inlined, a read's release meets the
+caller's increment, and LLVM folds the pair (the free check included,
+thanks to the `old count >= 1` that Reussir's `rc.inc` asserts) as long as
+no other store or call lies on a path between them. So indices that are
+in bounds by a proof (`fget`, `fset`, `fswap`, and the checked variants
+after their bounds test) and positions proved valid (`String.Pos.get`,
+`next`) are converted by `l2r_index_of_nat`, whose impossible `Nat::Big`
+arm ends the program instead of rejoining the read with refcount traffic
+on the big number.
 
 **`Array Nat`/`Array Int`.** `Nat`/`Int` are `[value]` enums, which cannot
 cross the FFI boundary, so a generic `RVec` stores them in a heap box per
@@ -79,7 +87,12 @@ handles inline, so a tagged scalar cannot be an opaque value). Every
 `lean_array_xxx<E>` / `l2r_array_xxx<E>` has `lean_natarr_xxx` /
 `l2r_natarr_xxx` (and `intarr`) with the same arguments and element type
 `Nat` (`Int`); `lean_mk_array`/`lean_mk_empty_array_with_capacity` become
-`lean_mk_natarr`/`lean_mk_empty_natarr_with_capacity`.
+`lean_mk_natarr`/`lean_mk_empty_natarr_with_capacity`. A tag vector is one
+allocation, like Lean's array object (header, size, capacity, words; see
+`tagvec.rs` for how it is spelled as `Rc<Box<dyn Any>>`), and a copy of a
+shared one keeps its capacity (`lean_copy_expand_array`), so a literal
+`#[a, b, c]`, which pushes onto a shared empty array of capacity 3, allocates
+once.
 
 ## Calling convention
 
@@ -468,9 +481,6 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   `ulimit -n` makes `open` or `spawn` fail with `EMFILE` differ.
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
-- Huge `Array.mkEmpty`/`ByteArray.emptyWithCapacity` capacities are checked
-  as natively (overflow panic; `out of memory` when `malloc` of the full
-  size fails) but only `2^24` elements are reserved.
 - The C `errno` reported by a handle's sticky error indicator (see file
   primitives) is the current `errno`, which may differ from native after
   unrelated failing calls (the runtime's own calls are not libc++'s).

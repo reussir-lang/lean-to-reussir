@@ -458,7 +458,7 @@ Stage 4 sees only mono types:
 | `Unit`/`PUnit`, `lcVoid`, `◾` | `L2RUnit` | Reussir's `unit` is result-only, so unit-like values are a one-variant `[value]` enum from the prelude. The IO world is an `L2RUnit` value. |
 | `Nat` | `enum [value] Nat { Small(u64), Big(LBig) }` | `Big` only for values ≥ 2^64; `LBig` is an opaque runtime bignum (GMP) |
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
-| `String` | `LStr`, an opaque copy-on-write handle over UTF-8 bytes (`Rc<Vec<u8>>`) | literals: §5.4 |
+| `String` | `LStr`, an opaque copy-on-write handle over UTF-8 bytes and their character count (`Rc<(Vec<u8>, u64)>`) | literals: §5.4 |
 | `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records), otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
@@ -1409,7 +1409,7 @@ Promises are not translated yet.
 
 The runtime provides what Reussir lacks:
 - `Nat`/`Int`: a small value, or a GMP bignum (`leanrt::big`);
-- Lean's `String` operations over UTF-8 bytes (`Rc<Vec<u8>>`, §5.1);
+- Lean's `String` operations over UTF-8 bytes (`Rc<(Vec<u8>, u64)>` with the character count, §5.1);
 - `Array`/`ByteArray`/`FloatArray` operations over the copy-on-write `Vec`;
 - `Float` math through libm;
 - IO: stdout/stderr/stdin streams, `IO.Error`, argv, exit;
@@ -1727,12 +1727,38 @@ Each item says what differs and when.
   `ElemBox` cell, one allocation each, where native stores tagged scalars.
   `ST.Ref` contents are always boxed (§5.1). `UInt64` and `Float` arrays, on
   the other hand, are unboxed, unlike native.
+- *Reads take their container owned* (Reussir has no borrowed FFI
+  parameters, §9): every array or string read is an increment by the caller
+  and a release in the inlined runtime function. LLVM cancels the pair when
+  the increment's store reaches the release with no store or call on any
+  path in between (Reussir's `rc.inc` lets it assume the old count was at
+  least 1; the prelude ends the impossible `Nat::Big` index paths instead of
+  rejoining them for this): index loops and insertion sort on
+  `Array UInt64` run at 1.2x native or better. It does not when a
+  structure field projected at the top of a loop body is released by the
+  iteration's last read, as in Lean's `String.Slice` loops (`String.any`,
+  `contains`, `toNat?`): 1.7x native (Pf4MinStrAny; 1.1x with the projection
+  moved by hand to its first use); insertion sort on `Array Nat` keeps
+  the count's stores and reloads it for the swap's uniqueness check: 2.1x.
+- *`Array Nat`/`Array Int` objects* have a 40-byte header (a Lean array's is 24): six
+  million three-element `Array Nat` rows take 1.3x native memory
+  (Pf4SmallArrs 0).
+- *Strings* are two allocations, the counted box (with the character
+  count, 40 bytes) and the byte buffer, where a Lean string is one object:
+  five million short live strings take 306 MB (native 352 MB; 270 MB
+  before the count was cached; Pf4ManyStrs).
+- *Dropping a large array of records* releases each element through
+  Reussir's out-of-line `<record>_ffi_release` (natively an inline
+  decrement in `lean_del`'s loop): freeing 6,000 hash-map versions (300
+  million bucket references) at the end of Pf4HashPersist takes about half
+  of its 0.8 s CPU time (native 0.4 s).
+- *Constants read in a loop* (a top-level `Array` or `String` table)
+  check their once-cell on every read: Pf4BigLit 1.16x native.
 
 **Runtime** (details in `runtime/README.md`, "Known divergences")
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`.
 - `IO.getNumHeartbeats` is 0; `dbgStackTrace` prints nothing; a panic's
   backtrace line is `(stack trace unavailable)`.
-- Huge capacity reservations are capped.
 - `errno` after a sticky handle error can differ.
 - Child processes (§5.8): code that reads one of a child's pipes in a task
   while it reads the other (as `IO.Process.output` does natively, stdout

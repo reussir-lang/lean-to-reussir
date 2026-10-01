@@ -170,7 +170,7 @@ extern "C" {
 pub fn diag_put(s: crate::string::LStr) {
     let f = unsafe { l2r_stderr_put_c };
     if f.is_null() {
-        eprint(&s);
+        eprint(&s.0);
         crate::rc_release(s);
     } else {
         let put: unsafe extern "C" fn(*mut std::ffi::c_void) -> u64 = unsafe { std::mem::transmute(f) };

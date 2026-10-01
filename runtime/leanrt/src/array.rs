@@ -7,9 +7,7 @@
 //! shared buffer first: arrays are values, updated in place only when
 //! uniquely referenced, like Lean's.
 //!
-//! `ByteArray` and `FloatArray` are `RVec<u8>`/`RVec<f64>`; a `String`
-//! (`Rc<Vec<u8>>`) has the same layout as `RVec<u8>`, which makes
-//! `String.toUTF8`/`String.fromUTF8` free.
+//! `ByteArray` and `FloatArray` are `RVec<u8>`/`RVec<f64>`.
 
 use reussir_rt::collections::vec::Vec as RVec;
 use reussir_rt::rc::Rc;
@@ -71,9 +69,65 @@ pub fn make_mut<T: Clone>(v: &mut Rc<Vec<T>>, extra: usize) -> &mut Vec<T> {
 #[cold]
 #[inline(never)]
 extern "C" fn copy_shared<T: Clone>(v: Rc<Vec<T>>, extra: usize) -> Rc<Vec<T>> {
-    let c = rc_new(vec_from_slice(&v, extra));
+    let c = rc_new(copy_from_slice(&v, extra));
     drop(v);
     c
+}
+
+/// Append clones of `src` to `v` (which has room for them).
+trait ExtendCloned: Sized {
+    fn extend_cloned(v: &mut Vec<Self>, src: &[Self]);
+}
+
+impl<T: Clone> ExtendCloned for T {
+    #[inline(always)]
+    default fn extend_cloned(v: &mut Vec<T>, src: &[T]) {
+        v.extend_from_slice(src)
+    }
+}
+
+/// A Reussir record crossing the boundary is `Bridge<Inner>`, a pointer to
+/// its box, and `Clone` is the compiler-emitted `<record>_ffi_acquire`, an
+/// `rc.inc` (inlined into the copy loop). Under the aarch64 encoding of
+/// nullary variants (TBI) a nullary constructor is an immediate whose top
+/// byte is a tag and whose address is a static dummy box shared by all of
+/// them, and `rc.inc` increments its count unguarded: copying an array full
+/// of `nil`s (hash map buckets) made all those increments one serial chain
+/// through a single word. The dummy's count is never decremented (Reussir
+/// steers decrements of immediates away) and never frees, so these
+/// increments are skipped here; real boxes are incremented as `rc.inc` does
+/// (the 32-bit count at offset 0; these records are not atomic). Other
+/// targets use the immortal encoding: the generic clone there.
+impl<X: Clone> ExtendCloned for reussir_rt::bridge::Bridge<X> {
+    #[inline(always)]
+    fn extend_cloned(v: &mut Vec<Self>, src: &[Self]) {
+        if cfg!(target_arch = "aarch64") && std::mem::size_of::<Self>() == 8 && v.capacity() - v.len() >= src.len() {
+            let mut scratch: u32 = 0;
+            for x in src {
+                unsafe {
+                    let p = std::mem::transmute_copy::<Self, *mut u32>(x);
+                    let q = if (p as usize) >> 56 == 0 { p } else { &mut scratch as *mut u32 };
+                    *q = (*q).wrapping_add(1);
+                }
+            }
+            std::hint::black_box(scratch);
+            unsafe {
+                let n = v.len();
+                std::ptr::copy_nonoverlapping(src.as_ptr(), v.as_mut_ptr().add(n), src.len());
+                v.set_len(n + src.len());
+            }
+        } else {
+            v.extend_from_slice(src)
+        }
+    }
+}
+
+/// A copy of a slice with room for `extra` more elements.
+#[inline(always)]
+fn copy_from_slice<T: Clone>(s: &[T], extra: usize) -> Vec<T> {
+    let mut v = vec_with_capacity(s.len() + extra);
+    T::extend_cloned(&mut v, s);
+    v
 }
 
 /// An index that the Lean-level proof (or the prelude's bounds check)
@@ -89,9 +143,9 @@ pub fn with_capacity<T: Clone>(n: usize) -> RVec<T> {
     from_rc(rc_new(vec_with_capacity(n)))
 }
 
-/// Capacities up to this many elements are reserved as asked; larger ones
-/// are checked (`check_alloc`) but reserved only this far.
-pub const CAPACITY_CAP: u64 = 1 << 24;
+/// Allocations of more elements than this are checked against what the
+/// native allocation would do (`check_alloc_slow`) first.
+pub const CHECK_THRESHOLD: u64 = 1 << 24;
 
 /// Lean's allocation of an array object of `n` elements of `elem` bytes
 /// (`lean_alloc_array`, `lean_alloc_sarray`): `24 + elem * n` bytes, where
@@ -99,7 +153,7 @@ pub const CAPACITY_CAP: u64 = 1 << 24;
 /// computation` and a failed `malloc` is `out of memory`.
 #[inline(always)]
 pub fn check_alloc(n: u64, elem: u64) {
-    if n > CAPACITY_CAP {
+    if n > CHECK_THRESHOLD {
         check_alloc_slow(n, elem)
     }
 }
@@ -128,12 +182,12 @@ extern "C" fn check_alloc_slow(n: u64, elem: u64) {
 }
 
 /// `Array.mkEmpty n` (and the scalar-array variants, `elem` bytes per
-/// element): Lean's allocation checks, then a capacity of at most
-/// `CAPACITY_CAP` elements.
+/// element): Lean's allocation checks, then the capacity asked for, as
+/// natively (reserved address space: untouched pages cost no memory).
 #[inline(never)]
 pub fn with_capacity_checked<T: Clone>(n: u64, elem: u64) -> RVec<T> {
     check_alloc(n, elem);
-    with_capacity(n.min(CAPACITY_CAP) as usize)
+    with_capacity(n as usize)
 }
 
 #[inline]
@@ -171,11 +225,22 @@ pub fn push<T: Clone>(v: RVec<T>, x: T) -> RVec<T> {
     push_slow(r, x)
 }
 
+/// `push` when shared or full. A shared array is copied with the capacity
+/// `lean_array_push` gives it (its own, unless that is below `2 * size + 1`:
+/// then `(capacity + 1) * 2`), so a literal pushing onto a shared empty
+/// array of capacity `k` allocates a buffer of `k` elements once.
 #[cold]
 #[inline(never)]
 extern "C" fn push_slow<T: Clone>(mut r: Rc<Vec<T>>, x: T) -> RVec<T> {
     let n = r.len();
-    make_mut(&mut r, n.max(4)).push(x);
+    let extra = if r.is_unique() {
+        n.max(4)
+    } else {
+        let cap = r.capacity();
+        let want = if cap < 2 * n + 1 { (cap + 1) * 2 } else { cap };
+        want.max(n + 1) - n
+    };
+    make_mut(&mut r, extra).push(x);
     from_rc(r)
 }
 
@@ -278,7 +343,7 @@ pub fn append<T: Clone>(a: RVec<T>, b: RVec<T>) -> RVec<T> {
         return a;
     }
     let mut r = into_rc(a);
-    make_mut(&mut r, bs.len()).extend_from_slice(bs);
+    T::extend_cloned(make_mut(&mut r, bs.len()), bs);
     from_rc(r)
 }
 
@@ -291,7 +356,7 @@ pub fn extract<T: Clone>(v: RVec<T>, start: u64, stop: u64) -> RVec<T> {
     if start == 0 && stop == s.len() {
         return v;
     }
-    from_rc(rc_new(vec_from_slice(&s[start..stop], 0)))
+    from_rc(rc_new(copy_from_slice(&s[start..stop], 0)))
 }
 
 /// Reverse in place.
@@ -302,16 +367,33 @@ pub fn reverse<T: Clone>(v: RVec<T>) -> RVec<T> {
     from_rc(r)
 }
 
-// ---- byte arrays and strings share a layout -------------------------------
+// ---- byte arrays and strings -----------------------------------------------
 
-#[inline(always)]
-pub fn bytes_of_string(s: crate::string::LStr) -> RVec<u8> {
-    from_rc(s)
+/// A byte vector as a `ByteArray`.
+#[inline]
+pub fn bytes_of_vec(v: Vec<u8>) -> RVec<u8> {
+    from_rc(rc_new(v))
 }
 
-#[inline(always)]
+/// `String.toUTF8`: the buffer of a unique string moves (natively a copy).
+#[inline(never)]
+pub fn bytes_of_string(s: crate::string::LStr) -> RVec<u8> {
+    bytes_of_vec(crate::string::into_vec(s))
+}
+
+/// `String.fromUTF8` of valid UTF-8 (counting the characters): the buffer
+/// of a unique array moves (natively a copy).
+#[inline(never)]
 pub fn string_of_bytes(b: RVec<u8>) -> crate::string::LStr {
-    into_rc(b)
+    let r = into_rc(b);
+    let v = if r.is_unique() {
+        unsafe { crate::alloc::rc_into_inner(r) }
+    } else {
+        let v = vec_from_slice(&r, 0);
+        drop(r);
+        v
+    };
+    crate::string::from_vec(v)
 }
 
 /// `ByteArray.copySlice src srcOff dest destOff len exact`.

@@ -136,27 +136,27 @@ fn lean_mk_empty_{k}arr_with_capacity(n : Nat) -> {T} {{
 
 fn lean_{k}arr_get_size(v : {T}) -> Nat {{ Nat::Small{{l2r_{k}arr_size(v)}} }}
 fn lean_{k}arr_size(v : {T}) -> u64 {{ l2r_{k}arr_size(v) }}
-fn lean_{k}arr_fget(v : {T}, i : Nat) -> {E} {{ l2r_{k}arr_get(v, lean_usize_of_nat(i)) }}
-fn lean_{k}arr_fget_borrowed(v : {T}, i : Nat) -> {E} {{ l2r_{k}arr_get(v, lean_usize_of_nat(i)) }}
+fn lean_{k}arr_fget(v : {T}, i : Nat) -> {E} {{ l2r_{k}arr_get(v, l2r_index_of_nat(i)) }}
+fn lean_{k}arr_fget_borrowed(v : {T}, i : Nat) -> {E} {{ l2r_{k}arr_get(v, l2r_index_of_nat(i)) }}
 fn lean_{k}arr_uget(v : {T}, i : u64) -> {E} {{ l2r_{k}arr_get(v, i) }}
 fn lean_{k}arr_uget_borrowed(v : {T}, i : u64) -> {E} {{ l2r_{k}arr_get(v, i) }}
 
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
 // return the default.
 fn lean_{k}arr_get(dflt : {E}, v : {T}, i : Nat) -> {E} {{
-    if l2r_index_ok(i, l2r_{k}arr_size(v)) {{ l2r_{k}arr_get(v, lean_usize_of_nat(i)) }} else {{
+    if l2r_index_ok(i, l2r_{k}arr_size(v)) {{ l2r_{k}arr_get(v, l2r_index_of_nat(i)) }} else {{
         let ignored = l2r_panic_code(0);
         dflt
     }}
 }}
 
 fn lean_{k}arr_get_borrowed(dflt : {E}, v : {T}, i : Nat) -> {E} {{ lean_{k}arr_get(dflt, v, i) }}
-fn lean_{k}arr_fset(v : {T}, i : Nat, x : {E}) -> {T} {{ l2r_{k}arr_set(v, lean_usize_of_nat(i), x) }}
+fn lean_{k}arr_fset(v : {T}, i : Nat, x : {E}) -> {T} {{ l2r_{k}arr_set(v, l2r_index_of_nat(i), x) }}
 fn lean_{k}arr_uset(v : {T}, i : u64, x : {E}) -> {T} {{ l2r_{k}arr_set(v, i, x) }}
 
 // `Array.set!`: out of bounds, panic and return the array unchanged.
 fn lean_{k}arr_set(v : {T}, i : Nat, x : {E}) -> {T} {{
-    if l2r_index_ok(i, l2r_{k}arr_size(v)) {{ l2r_{k}arr_set(v, lean_usize_of_nat(i), x) }} else {{
+    if l2r_index_ok(i, l2r_{k}arr_size(v)) {{ l2r_{k}arr_set(v, l2r_index_of_nat(i), x) }} else {{
         let ignored = l2r_panic_code(0);
         v
     }}
@@ -164,13 +164,13 @@ fn lean_{k}arr_set(v : {T}, i : Nat, x : {E}) -> {T} {{
 
 fn lean_{k}arr_push(v : {T}, x : {E}) -> {T} {{ l2r_{k}arr_push(v, x) }}
 fn lean_{k}arr_pop(v : {T}) -> {T} {{ l2r_{k}arr_pop(v) }}
-fn lean_{k}arr_fswap(v : {T}, i : Nat, j : Nat) -> {T} {{ l2r_{k}arr_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j)) }}
+fn lean_{k}arr_fswap(v : {T}, i : Nat, j : Nat) -> {T} {{ l2r_{k}arr_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) }}
 fn lean_{k}arr_uswap(v : {T}, i : u64, j : u64) -> {T} {{ l2r_{k}arr_swap(v, i, j) }}
 
 // `Array.swapIfInBounds`.
 fn lean_{k}arr_swap(v : {T}, i : Nat, j : Nat) -> {T} {{
     let n = l2r_{k}arr_size(v);
-    if l2r_index_ok(i, n) && l2r_index_ok(j, n) {{ l2r_{k}arr_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j)) }} else {{ v }}
+    if l2r_index_ok(i, n) && l2r_index_ok(j, n) {{ l2r_{k}arr_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) }} else {{ v }}
 }}
 
 // `Array.replicate n x`.
