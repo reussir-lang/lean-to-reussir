@@ -135,8 +135,6 @@ inductive Item where
   /-- Verbatim source (the runtime prelude, the entry point). -/
   | raw (text : String)
 
-private def indent (n : Nat) : String := "".pushn ' ' (4 * n)
-
 mutual
   /-- The types written in an expression (annotations, lambda parameters,
   explicit type arguments). -/
@@ -162,51 +160,79 @@ def Item.tys : Item → Array Ty
   | .fn _ ps ret body => Block.tys body (ps.map (·.2) |>.push ret)
   | .raw _ => #[]
 
+/-! The printer appends to one string, so rendering is linear in the size
+of the output: each piece of text is written once, where building every
+nested block's text and concatenating it into its parent's would copy it
+once per nesting level. -/
+
+/-- `out` followed by `items`, each written by `f`, separated by `sep`. -/
+@[inline] def joinTo {α : Type} (out : String) (items : Array α) (sep : String) (f : α → String → String) : String :=
+  Id.run do
+    let mut out := out
+    for h : i in [:items.size] do
+      if i > 0 then out := out ++ sep
+      out := f items[i] out
+    return out
+
 mutual
-  partial def Expr.render (d : Nat) : Expr → String
-    | .var n => n
-    | .atom t => t
+  partial def Expr.renderTo (d : Nat) (e : Expr) (out : String) : String :=
+    match e with
+    | .var n => out ++ n
+    | .atom t => out ++ t
     | .call f tys args =>
-      let tyArgs := if tys.isEmpty then "" else s!"<{", ".intercalate (tys.toList.map Ty.render)}>"
-      s!"{f}{tyArgs}({", ".intercalate (args.toList.map (Expr.render d))})"
+      let out := out ++ f
+      let out := if tys.isEmpty then out
+        else joinTo (out ++ "<") tys ", " (fun t o => o ++ t.render) ++ ">"
+      joinTo (out ++ "(") args ", " (Expr.renderTo d) ++ ")"
     | .apply f a =>
-      let fs := match f with
-        | .var _ | .apply .. | .call .. => f.render d
-        | _ => s!"({f.render d})"
-      s!"{fs}({a.render d})"
+      let out := match f with
+        | .var _ | .apply .. | .call .. => f.renderTo d out
+        | _ => f.renderTo d (out ++ "(") ++ ")"
+      a.renderTo d (out ++ "(") ++ ")"
     | .ctor ty v args =>
-      let head := match v with | some v => s!"{ty}::{v}" | none => ty
-      if args.isEmpty then head ++ "{}" else s!"{head}\{{", ".intercalate (args.toList.map (Expr.render d))}}"
-    | .field e i => s!"{e.render d}.{i}"
-    | .cast e t => s!"({e.render d} as {t.render})"
-    | .lam x ty body => s!"|{x} : {ty.render}| {Block.render d body}"
+      let out := match v with | some v => out ++ ty ++ "::" ++ v | none => out ++ ty
+      if args.isEmpty then out ++ "{}" else joinTo (out ++ "{") args ", " (Expr.renderTo d) ++ "}"
+    | .field e i => e.renderTo d out ++ "." ++ toString i
+    | .cast e t => e.renderTo d (out ++ "(") ++ " as " ++ t.render ++ ")"
+    | .lam x ty body => Block.renderTo d body (out ++ "|" ++ x ++ " : " ++ ty.render ++ "| ")
     | .ite c t e =>
       -- No `else if` in Reussir: an `if` in the else branch stays inside braces.
-      s!"if {c.render d} {Block.render d t} else {Block.render d e}"
+      let out := c.renderTo d (out ++ "if ") ++ " "
+      Block.renderTo d e (Block.renderTo d t out ++ " else ")
     | .mtch s arms =>
-      let armTexts := arms.toList.map (Arm.render (d + 1))
-      s!"match {s.render d} \{\n{",\n".intercalate armTexts}\n{indent d}}"
-    | .block b => Block.render d b
+      let out := s.renderTo d (out ++ "match ") ++ " {\n"
+      (joinTo out arms ",\n" (Arm.renderTo (d + 1)) ++ "\n").pushn ' ' (4 * d) ++ "}"
+    | .block b => Block.renderTo d b out
 
-  partial def Arm.render (d : Nat) (a : Arm) : String :=
-    let pat := match a.ctor with
-      | none => "_"
+  partial def Arm.renderTo (d : Nat) (a : Arm) (out : String) : String :=
+    let out := out.pushn ' ' (4 * d)
+    let out := match a.ctor with
+      | none => out ++ "_"
       | some c =>
-        let bs := a.binders.toList.map fun | some b => b | none => "_"
-        if bs.isEmpty then s!"{a.ty}::{c}" else s!"{a.ty}::{c}({", ".intercalate bs})"
-    s!"{indent d}{pat} => {Block.render d a.body}"
+        let out := out ++ a.ty ++ "::" ++ c
+        if a.binders.isEmpty then out
+        else joinTo (out ++ "(") a.binders ", " (fun b o => o ++ (match b with | some b => b | none => "_")) ++ ")"
+    Block.renderTo d a.body (out ++ " => ")
 
-  partial def Block.render (d : Nat) (b : Block) : String :=
+  partial def Block.renderTo (d : Nat) (b : Block) (out : String) : String :=
     if b.lets.isEmpty then
       match b.result with
-      | .mtch .. | .ite .. | .block .. => s!"\{\n{indent (d + 1)}{b.result.render (d + 1)}\n{indent d}}"
-      | _ => s!"\{ {b.result.render d} }"
-    else
-      let lets := b.lets.toList.map fun (x, ty, e) =>
-        let ann := match ty with | some t => s!" : {t.render}" | none => ""
-        s!"{indent (d + 1)}let {x}{ann} = {e.render (d + 1)};\n"
-      s!"\{\n{String.join lets}{indent (d + 1)}{b.result.render (d + 1)}\n{indent d}}"
+      | .mtch .. | .ite .. | .block .. =>
+        ((b.result.renderTo (d + 1) ((out ++ "{\n").pushn ' ' (4 * (d + 1)))) ++ "\n").pushn ' ' (4 * d) ++ "}"
+      | _ => b.result.renderTo d (out ++ "{ ") ++ " }"
+    else Id.run do
+      let mut out := out ++ "{\n"
+      for (x, ty, e) in b.lets do
+        out := out.pushn ' ' (4 * (d + 1)) ++ "let " ++ x
+        if let some t := ty then out := out ++ " : " ++ t.render
+        out := e.renderTo (d + 1) (out ++ " = ") ++ ";\n"
+      out := b.result.renderTo (d + 1) (out.pushn ' ' (4 * (d + 1)))
+      return (out ++ "\n").pushn ' ' (4 * d) ++ "}"
 end
+
+def Expr.render (d : Nat) (e : Expr) : String := e.renderTo d ""
+def Arm.render (d : Nat) (a : Arm) : String := a.renderTo d ""
+def Block.render (d : Nat) (b : Block) : String := b.renderTo d ""
 
 def Item.render : Item → String
   | .enum n value vs =>
@@ -218,8 +244,8 @@ def Item.render : Item → String
     let cap := if value then "[value] " else ""
     s!"struct {cap}{n}({", ".intercalate (fields.toList.map Ty.render)})\n"
   | .fn n ps ret body =>
-    let params := ", ".intercalate (ps.toList.map fun (x, t) => s!"{x} : {t.render}")
-    s!"fn {n}({params}) -> {ret.render} {Block.render 0 body}\n"
+    let out := joinTo s!"fn {n}(" ps ", " (fun (x, t) o => o ++ x ++ " : " ++ t.render)
+    Block.renderTo 0 body (out ++ ") -> " ++ ret.render ++ " ") ++ "\n"
   | .raw t => t
 
 end LeanToReussir.RR
