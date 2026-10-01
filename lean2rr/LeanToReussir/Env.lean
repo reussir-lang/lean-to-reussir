@@ -42,7 +42,7 @@ def runCoreM (env : Environment) (x : CoreM α) : IO α := do
   -- passes recurse once per nested `let` (a large literal), so any fixed
   -- limit rejects some program that Lean compiled; instances can also be
   -- deeper than anything Lean compiled. Only the stack bounds the depth
-  -- (the driver gives lean2rr a 4 GiB stack). The limit is also reset from
+  -- (the driver gives lean2rr a 1 GiB stack). The limit is also reset from
   -- the options by `withOptions`.
   let depth := 100000000
   let ctx : Core.Context := { fileName := "<lean2rr>", fileMap := default, maxHeartbeats := 0,

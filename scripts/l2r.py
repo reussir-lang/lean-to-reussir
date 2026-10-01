@@ -159,10 +159,13 @@ def main():
 
     env = dict(os.environ)
     # lean2rr runs Lean's compiler passes, which recurse once per nested
-    # `let` (a 60000-element list literal needs more than 64 MiB of stack):
-    # a bigger stack than Lean's default 1 GiB for its main thread, so that
-    # whatever Lean compiled translates.
-    env.setdefault("LEAN_STACK_SIZE_KB", str(4 * 1024 * 1024))
+    # `let` (a 60000-element list literal needs more than 64 MiB of stack,
+    # a 100000-element array literal translates in 1 GiB): the 1 GiB stack
+    # Lean's own compiler runs on, set explicitly. A bigger stack is more
+    # reserved address space: with 4 GiB, a 1500-line recursive `do` block
+    # (adv5 OlRecLongDo) peaked at 16.6 GB of address space for 1.2 GB
+    # resident and failed under `ulimit -v 16000000`; with 1 GiB, 13.6 GB.
+    env.setdefault("LEAN_STACK_SIZE_KB", str(1024 * 1024))
     if lean_path:
         env["LEAN_PATH"] = lean_path + (":" + env["LEAN_PATH"] if env.get("LEAN_PATH") else "")
 

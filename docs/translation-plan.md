@@ -1902,9 +1902,10 @@ Each item says what differs and when.
   defaults: a declaration compiled without closed-term extraction natively
   can have its closed terms extracted (and evaluated once) under lean2rr.
   The recursion limit (`maxRecDepth`, which large literals need raised)
-  is effectively unlimited in lean2rr, bounded by its stack (4 GiB, set by
-  `scripts/l2r.py` through `LEAN_STACK_SIZE_KB`): a 60000-element list
-  literal needs more than 64 MiB. Only lean2rr's main thread, which runs
+  is effectively unlimited in lean2rr, bounded by its stack (1 GiB, as for
+  Lean's own compiler, set by `scripts/l2r.py` through
+  `LEAN_STACK_SIZE_KB`): a 60000-element list literal needs more than 64
+  MiB, and a 100000-element array literal translates. Only lean2rr's main thread, which runs
   everything, has that stack; it gives the other threads Lean's runtime
   starts (task workers) 64 MiB, so that lean2rr fits an address-space limit
   (`ulimit -v 16000000`) on such inputs.

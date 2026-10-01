@@ -135,9 +135,9 @@ opaque setThreadStackSize (sz : USize) : BaseIO Unit
 
 /-- The stack of the threads Lean's runtime starts besides the one running
 `main` (its task workers): `LEAN_STACK_SIZE_KB` (which the driver sets to
-4 GiB, for Lean's passes on deep terms) sizes every thread Lean's runtime
-creates, and four such reservations do not fit an address-space limit of
-16 GB. lean2rr runs everything on its main thread; the workers only serve
+1 GiB, for Lean's passes on deep terms) sizes every thread Lean's runtime
+creates, and such reservations add up against an address-space limit
+(`ulimit -v`). lean2rr runs everything on its main thread; the workers only serve
 the library's own tasks. -/
 def workerStackSize : USize := 64 * 1024 * 1024
 
