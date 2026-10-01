@@ -45,7 +45,7 @@ mutual
                 let some selfDecl := (← read).decls.find? f | throwError "lean2rr: no declaration {f}"
                 let (ps, _) := splitFnType selfDecl.type sm.arity
                 let vals ← (args.zip ps).mapM fun (a, p) => do lowerArg ctx a (← lowerType p)
-                return .ofExpr (.call sm.fn #[] (vals.push (.ctor sm.mode (some sm.entry) #[])))
+                return .ofExpr (sm.selfCall vals)
       let e ← try lowerLetValue ctx d.value d.type t
         catch ex => throwError "{ex.toMessageData}\n  in let {d.binderName} : {d.type}"
       let x ← fresh "x"
@@ -84,7 +84,7 @@ mutual
         let some sm := ctx.sm | throwError "lean2rr: state-machine jump outside a state machine"
         let tys := ctx.jpParams.getD j #[]
         let vals ← (args.zip tys).mapM fun (a, t) => lowerArg ctx a t
-        return .ofExpr (.call sm.fn #[] (sm.params.map .var |>.push (.ctor sm.mode (some variant) (captured.map .var ++ vals))))
+        return .ofExpr (sm.jumpCall variant (captured.map .var ++ vals))
       | none => throwError "lean2rr: jump to unknown join point (internal error)"
     | .jp d k =>
       let ptys ← d.params.mapM (lowerType ·.type)
@@ -281,18 +281,19 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
     return
   let outlined := chooseOutlined H.duplicateJp body
-  -- J4 (Opt/StateMachines): the declaration as one state machine.
-  let sm? := H.stateMachines.bind (·.plan d body outlined pnames)
+  -- J4: the declaration as one state machine when an outlined join point
+  -- calls it back in tail position (`LowerHooks.stateMachine`).
+  let sm? := H.stateMachine.plan d body outlined pnames
   modify fun s => { s with smArms := #[] }
   let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm? }
   let block ← try lowerCode H ctx outlined ret body
     catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
-  if let (some j, some sm) := (H.stateMachines, sm?) then
-    j.emit d sm (pnames.zip ptys) ret block
+  if let some sm := sm? then
+    H.stateMachine.emit d sm (pnames.zip ptys) ret block
     return
   -- A constant is cached in a once-cell, unless a hook has it recomputed
-  -- at each use (Opt/CheapConsts) or evaluated where it is used
-  -- (`uncachedConsts`, Opt/ClosedChains).
+  -- at each use (Opt/CheapConsts) or it is a closed term evaluated where
+  -- it is used (`uncachedConsts`, `chainConsts`).
   if d.params.isEmpty && !(← H.recomputeConst body) && !(← read).uncachedConsts.contains d.name then
     let acc ← cafAccessor (fnName d.name) ret
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name ++ "_init") #[] ret block) |>.push acc }

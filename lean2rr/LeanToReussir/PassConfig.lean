@@ -30,9 +30,6 @@ structure PassConfig where
   /-- Passes over the checked mono declarations (after Stage 3, before
   lowering), in order; they get the instance keys. -/
   monoPasses : Array (NameMap InstKey → Array (Decl .pure) → Array (Decl .pure)) := #[]
-  /-- Constants evaluated where they are used instead of cached in a
-  once-cell, from the mono declarations and the entry point's roots. -/
-  uncachedConsts : Array (Decl .pure) → Array Name → NameSet := fun _ _ => {}
   /-- Unary Lean definitions returning a `String` replaced by a prelude
   function with the same results (definition ↦ prelude function and its
   parameter type). -/

@@ -1,6 +1,7 @@
 import Lean
 import LeanToReussir.Emit.Entry
 import LeanToReussir.PassConfig
+import LeanToReussir.Outline
 import LeanToReussir.MonoRetype
 
 /-!
@@ -81,6 +82,29 @@ def valueGenericClosureParams (prelude : String) : Std.HashMap String (Array Boo
       out := out.insert name (ps.map (·.contains '-')).toArray
   return out
 
+/-- The closed terms of `decls` referenced exactly once, from a constant
+(not from a function, and not a root of the entry point): they are
+evaluated where they are used instead of cached in a once-cell (translation
+plan §5.12). Lean's `extractClosed` turns an array literal into a chain of
+closed terms, `_closed_k := push _closed_(k-1) e_k`, and caching every step
+kept every intermediate array alive: memory quadratic in the literal's
+length (10000 elements: 1036 MB instead of 7 MB). A chain step still runs
+once, at the same point. -/
+def chainConsts (decls : Array (Decl .pure)) (roots : Array Name) : NameSet := Id.run do
+  let mut uses : NameMap Nat := {}
+  let mut fromFunction : NameSet := {}
+  for d in decls do
+    let .code c := d.value | continue
+    for n in codeConsts c #[] do
+      uses := uses.insert n (uses.getD n 0 + 1)
+      unless d.params.isEmpty do fromFunction := fromFunction.insert n
+  let isClosed (n : Name) : Bool := match n with
+    | .str _ s => s.startsWith "_closed"
+    | _ => false
+  return decls.foldl (init := ({} : NameSet)) fun acc d =>
+    if d.params.isEmpty && isClosed d.name && uses.getD d.name 0 == 1 && !fromFunction.contains d.name
+      && !roots.contains d.name then acc.insert d.name else acc
+
 /-- Lower a whole program. -/
 def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) (startup : Array StartupStep)
     (decls : Array (Decl .pure)) (keys : NameMap InstKey) : CoreM String := do
@@ -130,9 +154,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
   let ioErrorBuilders := ioErrorBuilderSyms.map fun sym => (exports.get? sym).bind byDecl.find?
   let valueGenericFns := valueGenericPreludeFns prelude
   let valueGenericCls := valueGenericClosureParams prelude
-  -- Constants not cached (`Opt/ClosedChains`: closed terms used once, by
-  -- another constant).
-  let uncachedConsts := cfg.uncachedConsts decls roots
+  -- Closed terms used once, by another constant, are not cached.
+  let uncachedConsts := chainConsts decls roots
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
                           preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls,
                           uncachedConsts, preludeReplacements := cfg.preludeReplacements,
@@ -172,10 +195,11 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
   let (fnItems, st) ← (act.run ctx).run {}
   let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))
   -- The registry's passes over the generated functions (`Opt/SinkProj`:
-  -- projections sunk into the branches that use them; `Opt/Outline`: deep
-  -- and long tail paths cut into chains of functions, for rrc).
+  -- projections sunk into the branches that use them), then deep and long
+  -- tail paths cut into chains of functions, for rrc (`Outline`).
   let rrProg : RRProgram := { prelude, preludeFns, types := st.typeItems ++ fnItems |>.push boxItem }
   let fns := cfg.rrPasses.foldl (fun fns p => p rrProg fns) st.fns
+  let fns := Outline.outlineFns {} (Outline.variantTable rrProg.types prelude) (Outline.takenNames preludeFns fns) fns
   let mut out := prelude ++ "\n// ---- generated types ----\n\n"
   for it in st.typeItems do out := out ++ it.render ++ "\n"
   for it in fnItems do out := out ++ it.render ++ "\n"

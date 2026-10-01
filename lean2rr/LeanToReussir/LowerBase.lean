@@ -86,7 +86,7 @@ structure LowerCtx where
   /-- Which parameters of those functions are Reussir closures. -/
   valueGenericCls : Std.HashMap String (Array Bool) := {}
   /-- Constants evaluated where they are used instead of cached in a
-  once-cell (`PassConfig.uncachedConsts`, see `lowerDecl`). -/
+  once-cell (`chainConsts`, see `lowerDecl`). -/
   uncachedConsts : NameSet := {}
   /-- Unary Lean definitions returning a `String` that are replaced by a
   prelude function with the same results: definition ↦ prelude function and

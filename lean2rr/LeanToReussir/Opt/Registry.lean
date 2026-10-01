@@ -4,9 +4,7 @@ import LeanToReussir.TypedToMono
 import LeanToReussir.TypedStructProjCases
 import LeanToReussir.Opt.FloatLits
 import LeanToReussir.Opt.SinkProj
-import LeanToReussir.Opt.Outline
 import LeanToReussir.Opt.CheapConsts
-import LeanToReussir.Opt.ClosedChains
 import LeanToReussir.Opt.PreludeRepr
 import LeanToReussir.Opt.JpSink
 import LeanToReussir.Opt.JpSmall
@@ -38,7 +36,9 @@ Adding a pass: write `Opt/Name.lean` with the transformation and an
 `PassConfig` (passes over mono LCNF or over the generated Reussir functions,
 or a lowering hook of `LowerHooks`), import it here and add its line to
 `optimizations`. The order of the lines is the order of installation, so
-passes of the same kind run in this order.
+passes of the same kind run in this order (the core's own passes, such as
+`Outline` after the passes over the generated functions, are not listed
+there).
 -/
 
 namespace LeanToReussir.Opt
@@ -61,21 +61,25 @@ def optimizations : Array OptPass := #[
   ⟨"value-structs", true, "a structure with one relevant field (ST.Out of every BaseIO call) is a [value] struct, not a heap record", ValueStructs.install⟩,
   ⟨"float-lits", true, "Float literals (Float.ofScientific/ofNat on literals) folded to their bits at compile time", FloatLits.install⟩,
   ⟨"cheap-consts", true, "constants built from small literals and scalar conversions recomputed at each use, not cached", CheapConsts.install⟩,
-  ⟨"closed-chains", true, "closed terms used once, by another constant, evaluated there instead of cached", ClosedChains.install⟩,
   ⟨"prelude-repr", true, "Nat.repr/Int.repr calls replaced by the runtime's GMP versions (same strings)", PreludeRepr.install⟩,
   ⟨"jp-sink", true, "join points moved down to the smallest code containing their jumps, before the J1-J4 choice", JpSink.install⟩,
   ⟨"jp-small", true, "small join points (at most 40 nodes) duplicated at their jumps (J1') instead of outlined", JpSmall.install⟩,
-  ⟨"state-machines", true, "a loop through outlined join points lowered as one function over an entry-point enum (J4)", StateMachines.install⟩,
+  ⟨"state-machines", true, "a loop's state machine (J4) entered without allocation: parameters passed beside a nullary entry variant", StateMachines.install⟩,
   ⟨"lazy-fields", true, "fields of a matched value kept live (stored or returned whole) bound where used (Reussir bug 7 workaround)", LazyFields.install⟩,
   ⟨"nullary-scrutinee", true, "in the arm of a constructor without fields, the matched value rebuilt instead of kept", NullaryScrutinee.install⟩,
-  ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩,
-  ⟨"outline", true, "deep and long tail paths cut into chains of functions: not faster, but needed to build very deep or long functions (Reussir bugs 16, 17)", Outline.install⟩]
+  ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩]
 
 /-- Parts of the translation that look like optimizations but are not
 optional. -/
 def required : Array RequiredPass := #[
   ⟨"startup-chunks", "the startup chain cut into functions of at most 128 steps (Emit/Startup, startupChunk)",
-    "not an optimization: one chain of nested matches would be as deep as the program has initializers, and rrc's recursive lowering overflows its stack on a few thousand (translation plan §5.12)"⟩]
+    "not an optimization: one chain of nested matches would be as deep as the program has initializers, and rrc's recursive lowering overflows its stack on a few thousand (translation plan §5.12)"⟩,
+  ⟨"loop-state-machines", "a declaration whose outlined join point calls it back in tail position is one state machine, its entry variant carrying the parameters (J4; Lower/StateMachine)",
+    "otherwise a loop through an outlined join point is mutually recursive and uses stack per iteration where native Lean uses none: without the join-point passes, the classic Sieve and Strings overflow Lean's 1 GiB stack at their medium size"⟩,
+  ⟨"closed-chains", "a closed term used once, by another constant, is evaluated there instead of cached (Emit/Program, chainConsts)",
+    "an array literal is a chain of closed terms, and caching every step keeps every intermediate array: memory quadratic in the literal's length (10000 elements: 1036 MB instead of 7 MB)"⟩,
+  ⟨"outline", "deep and long tail paths of a function cut into chains of functions (Outline)",
+    "rrc's analyses are superlinear in nesting depth and straight-line length (Reussir bugs 16, 17), and so is the .rr text: without it a 3000-arm literal match gives 126 MB of .rr and lean2rr runs out of memory at 16 GB"⟩]
 
 /-- The configuration with the enabled optimizations, after turning off
 those named in `disabled` and on those named in `enabled`. An unknown name,

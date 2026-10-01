@@ -2,74 +2,28 @@ import Lean
 import LeanToReussir.PassConfig
 
 /-!
-# Loops through outlined join points as state machines (optimization `state-machines`)
+# State machines entered without allocation (optimization `state-machines`)
 
-J4 of the join-point strategy (translation plan §5.6). When a
-self-recursive declaration has outlined join points (J3) whose bodies call
-the declaration in tail position (a loop whose body is a DAG of join
-points), J3 makes the loop mutually recursive, and LLVM turns a mutual tail
-call into a jump only when it is a sibling call. Instead the declaration
-becomes one function over an enum of entry points: one variant for the
-declaration's own parameters and one per outlined join point. Jumps to
-those join points and self tail calls are self tail calls of that
-function, which LLVM turns into a loop. Calling the declaration (through a
-wrapper) and its self tail calls allocate nothing: its own variant is
-nullary.
-
-This module decides when (`stateMachinePlan`) and emits the function, its
-wrapper and the entry-point enum (`emitStateMachine`); the code lowering
-re-enters the state machine at self tail calls and at jumps to outlined
-join points when the context has one (`CodeCtx.sm`). Without this pass
-such loops are mutually recursive (J3).
+The core lowers a loop through outlined join points as a state machine
+whose entry variant `e` carries the declaration's parameters (J4,
+`Lower/StateMachine`). This pass passes the parameters alongside the entry
+point instead, unchanged when entering a join point, so that `e` is
+nullary: calling the declaration (through its wrapper) and its self tail
+calls allocate nothing (translation plan §5.6). A parameter is then still
+referenced at a jump to a join point that does not use it, which keeps an
+array the loop updates shared (copied on update) when it is passed both as
+that parameter and in the join point's variant.
 -/
 
 namespace LeanToReussir
 open Lean Compiler LCNF
 
-/-- Does `c` contain a tail call `let x := f args; return x` of `f` with
-`arity` arguments (outside nested join-point bodies, which are checked on
-their own when outlined)? -/
-partial def hasSelfTailCall (f : Name) (arity : Nat) : Code .pure → Bool
-  | .let d k =>
-    match d.value, k with
-    | .const g _ args _, .return x => (g == f && args.size == arity && x == d.fvarId) || hasSelfTailCall f arity k
-    | _, _ => hasSelfTailCall f arity k
-  | .fun _ k _ => hasSelfTailCall f arity k
-  | .jp d k => hasSelfTailCall f arity d.value || hasSelfTailCall f arity k
-  | .cases c => c.alts.any (hasSelfTailCall f arity ·.getCode)
-  | _ => false
-
-/-- The bodies of the outlined join points of `c`. -/
-partial def outlinedBodies (c : Code .pure) (outlined : FVarIdSet) : Array (Code .pure) :=
-  go c #[]
-where
-  go (c : Code .pure) (acc : Array (Code .pure)) : Array (Code .pure) :=
-    match c with
-    | .let _ k => go k acc
-    | .fun d k _ => go k (go d.value acc)
-    | .jp d k => go k (go d.value (if outlined.contains d.fvarId then acc.push d.value else acc))
-    | .cases cs => cs.alts.foldl (fun acc alt => go alt.getCode acc) acc
-    | _ => acc
-
-/-- The state machine of declaration `d` (body `body`, outlined join points
-`outlined`, parameter names `pnames`): J4 when an outlined join point
-tail-calls the declaration, so that a loop passes through it. (Other calls
-need no state machine; going through its entry wrapper would only cost an
-allocation per call.) -/
-def stateMachinePlan (d : Decl .pure) (body : Code .pure) (outlined : FVarIdSet) (pnames : Array String) :
-    Option StateMachine :=
-  let callsBack := outlinedBodies body outlined |>.any (hasSelfTailCall d.name d.params.size)
-  if !callsBack || d.params.isEmpty then none
-  else
-    let base := fnName d.name
-    some { fn := base ++ "_sm", mode := base ++ "_mode", self := d.name, arity := d.params.size, params := pnames }
-
-/-- Emit declaration `d` lowered as state machine `sm`: the dispatching
-function (its parameters `params`, then the entry point) over the lowered
-entry code `block` and the outlined join points' variants
-(`LowerState.smArms`), the declaration's function, which enters at its own
-variant, and the entry-point enum. -/
-def emitStateMachine (d : Decl .pure) (sm : StateMachine) (params : Array (String × RR.Ty)) (ret : RR.Ty)
+/-- Emit declaration `d` lowered as state machine `sm` with its parameters
+alongside: the dispatching function (its parameters `params`, then the
+entry point) over the lowered entry code `block` and the outlined join
+points' variants (`LowerState.smArms`), the declaration's function, which
+enters at its own variant, and the entry-point enum. -/
+def emitStateMachineAlongside (d : Decl .pure) (sm : StateMachine) (params : Array (String × RR.Ty)) (ret : RR.Ty)
     (block : RR.Block) : LowerM Unit := do
   let arms := (← get).smArms
   -- A shared enum: Reussir miscompiles `[value]` enums whose arms have
@@ -89,8 +43,11 @@ def emitStateMachine (d : Decl .pure) (sm : StateMachine) (params : Array (Strin
           (.ofExpr (.call sm.fn #[] ((params.map fun (n, _) => RR.Expr.var n).push (.ctor sm.mode (some sm.entry) #[])))))
     smArms := #[] }
 
-/-- Registry entry point. -/
+/-- Registry entry point: the core's plan, with the parameters alongside. -/
 def Opt.StateMachines.install (c : PassConfig) : PassConfig :=
-  { c with lower := { c.lower with stateMachines := some { plan := stateMachinePlan, emit := emitStateMachine } } }
+  let prev := c.lower.stateMachine
+  { c with lower := { c.lower with stateMachine :=
+      { plan := fun d body outlined pnames => (prev.plan d body outlined pnames).map ({ · with alongside := true })
+        emit := emitStateMachineAlongside } } }
 
 end LeanToReussir

@@ -28,27 +28,46 @@ inductive JumpAction where
   variant (see `StateMachine`). -/
   | enter (variant : String) (captured : Array String)
 
-/-- A self-recursive declaration with outlined join points is lowered as one
-function over a `[value]` enum of entry points (J4, translation plan §5.6):
-the declaration's own entry and one variant per outlined join point. Jumps to
-those join points and self tail calls become self tail calls of that
-function, which LLVM turns into a loop; separate functions would make the
-loop mutually recursive. Planned and emitted by Opt/StateMachines (a
-lowering hook); `lowerCode` re-enters it when the context has one. -/
+/-- A self-recursive declaration whose outlined join points call it back in
+tail position is lowered as one function over an enum of entry points (J4,
+translation plan §5.6): the declaration's own entry and one variant per
+outlined join point. Jumps to those join points and self tail calls become
+self tail calls of that function, which LLVM turns into a loop; separate
+functions would make the loop mutually recursive, using stack per
+iteration. Planned and emitted by the lowering hook
+`LowerHooks.stateMachine`; `lowerCode` re-enters it when the context has
+one. -/
 structure StateMachine where
-  /-- The dispatching function: the declaration's parameters, then the
-  entry point. -/
+  /-- The dispatching function: its entry point, preceded by the
+  declaration's parameters when they are passed alongside. -/
   fn : String
-  /-- The entry-point enum: nullary `e` for the declaration itself (no
-  allocation), one variant per outlined join point. -/
+  /-- The entry-point enum: `e` for the declaration itself, one variant per
+  outlined join point. -/
   mode : String
   /-- The declaration, whose tail calls re-enter at `entry`. -/
   self : Name
   arity : Nat
-  /-- Names of the declaration's parameters, passed through unchanged when
-  entering a join point. -/
+  /-- Names of the declaration's parameters. -/
   params : Array String
   entry : String := "e"
+  /-- Whether the declaration's parameters are passed alongside the entry
+  point (unchanged when entering a join point), so that `e` is nullary and
+  entering the declaration allocates nothing (Opt/StateMachines). Otherwise
+  `e` carries them, and a jump passes nothing but its variant: no value is
+  kept alive by being passed along. -/
+  alongside : Bool := false
+
+/-- A self tail call of the state machine's declaration with arguments
+`args`: entering the state machine at the declaration's own entry. -/
+def StateMachine.selfCall (sm : StateMachine) (args : Array RR.Expr) : RR.Expr :=
+  if sm.alongside then .call sm.fn #[] (args.push (.ctor sm.mode (some sm.entry) #[]))
+  else .call sm.fn #[] #[.ctor sm.mode (some sm.entry) args]
+
+/-- A jump entering the state machine at join-point variant `variant` with
+its fields `fields` (captured variables, then the jump's arguments). -/
+def StateMachine.jumpCall (sm : StateMachine) (variant : String) (fields : Array RR.Expr) : RR.Expr :=
+  if sm.alongside then .call sm.fn #[] (sm.params.map .var |>.push (.ctor sm.mode (some variant) fields))
+  else .call sm.fn #[] #[.ctor sm.mode (some variant) fields]
 
 /-- A matched value that stays live in its arm, whose fields are bound where
 they are used (Opt/LazyFields). `fields` are the arm's field parameters

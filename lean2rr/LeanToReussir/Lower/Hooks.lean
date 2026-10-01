@@ -1,4 +1,4 @@
-import LeanToReussir.Lower.JoinPoints
+import LeanToReussir.Lower.StateMachine
 
 /-!
 # Stage 4: the hooks of code lowering
@@ -63,10 +63,11 @@ structure LowerHooks where
   /-- Whether a join point that is neither J1 nor J2 is duplicated at its
   jumps (J1′) instead of outlined (J3). Plain: outlined (Opt/JpSmall). -/
   duplicateJp : FunDecl .pure → Bool := fun _ => false
-  /-- Declarations lowered as state machines (J4). Plain: none; loops
-  through outlined join points are then mutually recursive (J3)
-  (Opt/StateMachines). -/
-  stateMachines : Option StateMachineHook := none
+  /-- Declarations lowered as state machines (J4): when an outlined join
+  point calls the declaration back in tail position. Plain: the entry
+  variant carries the parameters (`Lower/StateMachine`; Opt/StateMachines
+  passes them alongside). -/
+  stateMachine : StateMachineHook := { plan := stateMachinePlan, emit := emitStateMachine }
   /-- Whether a constant (a declaration without parameters) with body
   `body` is recomputed at every use instead of computed once and kept in a
   once-cell (`cafAccessor`). Plain: kept (Opt/CheapConsts). -/
