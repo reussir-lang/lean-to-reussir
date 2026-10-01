@@ -430,7 +430,7 @@ def enumOfIndexFn (tn : String) : LowerM String := do
 types: the variant's payload, or, for a boxed unit, the placeholder of `t`
 (a boxed unit used at another type is Lean's `box(0)`, see `zeroValue`); any
 other variant is unreachable. -/
-def unboxMatch (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
+def unboxMatch (e : RR.Expr) (t : RR.Ty) (slow : Option String := none) : LowerM RR.Expr := do
   let v ← boxVariant t
   let u ← boxVariant .unit
   let x ← fresh "ub"
@@ -438,8 +438,18 @@ def unboxMatch (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
     #[{ ty := boxName, ctor := some v, binders := #[some x], body := .ofExpr (.var x) }]
   if u != v then
     arms := arms.push { ty := boxName, ctor := some u, binders := #[none], body := .ofExpr (← zeroValue t) }
-  return .mtch e (arms.push
-    { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) })
+  -- Other variants: unreachable, or the generated unboxing function `slow`
+  -- (values of other types read through `unsafeCast`).
+  let (e, pre) ← match slow, e with
+    | none, _ | some _, .var _ => pure (e, #[])
+    | some _, _ => do
+      let b ← fresh "ubx"
+      pure (RR.Expr.var b, #[(b, some RR.Ty.box, e)])
+  let other : RR.Expr := match slow with
+    | some f => .call f #[] #[e]
+    | none => .call "l2r_unreachable" #[t] #[]
+  let m := RR.Expr.mtch e (arms.push { ty := boxName, ctor := none, binders := #[], body := .ofExpr other })
+  return if pre.isEmpty then m else .block ⟨pre, m⟩
 
 /-- An enumeration: `bool`, or a generated `[value]` enum without fields. -/
 def isEnumName (n : String) : LowerM Bool := do
@@ -690,11 +700,15 @@ mutual
       | .fn .. => return some (.call (← unboxFnFn dst) #[] #[e])
       | _ =>
         if let .named tn := dst then
-          if (← get).typeInfos.contains tn || tn ∈ ["Nat", "Int", "u8", "u16", "u32", "bool", "u64", "f64", "f32"] then
+          if (← get).typeInfos.contains tn then
             -- Any instantiation of the same inductive may have been boxed,
             -- and (through `unsafeCast`) values of types Lean represents
             -- alike (`boxCastCompatible`).
             return some (.call (← unboxFn tn) #[] #[e])
+          if tn ∈ ["Nat", "Int", "u8", "u16", "u32", "bool", "u64", "f64", "f32"] then
+            -- The variant of `dst` in line; others (another word type read
+            -- through `unsafeCast`) through the generated function.
+            return some (← unboxMatch e dst (slow := some (← unboxFn tn)))
         if (← arrayRepr? dst).isSome || dst matches .app "LCell" _ then
           -- Any representation of the same array (or thunk, task) type may
           -- have been boxed.
