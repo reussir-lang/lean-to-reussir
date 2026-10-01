@@ -1182,6 +1182,22 @@ block) and from the references in the declarations' kernel values (for a
 declaration belongs to its constant: a specialization made inside the
 action comes right before the action.
 
+Positions are compared as (line, column). Lean's own record of the order
+(`declOrderExt`, which `EmitC` follows) is not persisted, and neither the
+module's constant list nor the compiler's declaration tables keep the order
+of addition, so declarations with the same range need more. Every
+declaration of one macro expansion has the macro call's range, and the
+instances of one `deriving instance … for A, B` command share one range
+too. A range equal to another one is therefore not "inside" it: `mk foo
+foo.bar` makes two commands, not `foo` and its helper. Such commands are
+ordered by the position of their names (a macro that takes the names from
+its arguments keeps their positions; a hygienic name made by the macro has
+the call's position, so it comes first), then by the order in which the
+module added its instances (the instance extension keeps it), and last by
+name, with the numbers in names compared by value: the auxiliary constants
+`c._unsafe_1`, `c._unsafe_4`, …, `c._unsafe_10` of a declaration with
+several `unsafe` parts start in that order.
+
 Our translation runs, before `main`, the startup work of Lean's module
 initializers:
 - for each program module, for each declaration in that order:
@@ -1586,6 +1602,11 @@ Each item says what differs and when.
   order among them depends on how its specializer recursed, which the
   `.olean` does not record, and can differ. Visible only when such
   constants trace or panic.
+- *Startup order of a macro's made-up names* (§5.12): declarations of one
+  macro expansion that the macro names itself (hygienic names, which all
+  have the macro call's position) and that are not instances start in name
+  order; natively in the order the macro wrote them. Declarations named by
+  the macro's arguments start in the order of those arguments.
 - *Startup order in `mutual` blocks and several `let rec` groups* (§5.12):
   the members of a `mutual` block that do not call each other are ordered
   as separate commands, because the block is not recorded in the `.olean`
@@ -1622,6 +1643,19 @@ Each item says what differs and when.
   function values itself). Such programs still take a minute or more to
   build, and the largest towers (four transformers) up to a quarter of an
   hour and several GB.
+  rrc's costs also grow faster than linearly in the depth of nested matches
+  (reuse across calls; every IO bind nests one) and in the length of
+  straight-line code on `Nat` (Reussir bugs 16 and 17). So after lowering,
+  a function with a tail path 32 matches or `if`s deep, or 256 `let`s long
+  (a long `main`, a 3000-arm literal match, a long `do` block), is cut into
+  a chain of functions of at most 8 levels and 64 `let`s on a path, each
+  part a function of the variables it uses, called in tail position
+  (`Outline`). Ordinary functions are below both bounds; the classic
+  corpus only has some `main`s cut. Recursive functions are not cut: LLVM
+  turns a self tail call into a loop, but a cycle of tail calls through
+  the parts is not always a sibling call and would use stack on every
+  iteration, so a loop with such a body still builds slowly. A 2000-line
+  `main` builds in about three minutes and 2 GB.
 - *Open descriptors*: native Lean starts with libuv's descriptors open (8
   more), so `/proc/self/fd` listings and the point where opening files
   fails with `EMFILE` differ.
