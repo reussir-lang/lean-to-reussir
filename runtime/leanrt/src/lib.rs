@@ -15,7 +15,9 @@
 //! threshold.
 
 #![allow(improper_ctypes_definitions)]
+#![allow(incomplete_features)]
 #![feature(linkage)]
+#![feature(specialization)]
 
 extern crate reussir_rt;
 

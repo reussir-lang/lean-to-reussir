@@ -69,9 +69,65 @@ pub fn make_mut<T: Clone>(v: &mut Rc<Vec<T>>, extra: usize) -> &mut Vec<T> {
 #[cold]
 #[inline(never)]
 extern "C" fn copy_shared<T: Clone>(v: Rc<Vec<T>>, extra: usize) -> Rc<Vec<T>> {
-    let c = rc_new(vec_from_slice(&v, extra));
+    let c = rc_new(copy_from_slice(&v, extra));
     drop(v);
     c
+}
+
+/// Append clones of `src` to `v` (which has room for them).
+trait ExtendCloned: Sized {
+    fn extend_cloned(v: &mut Vec<Self>, src: &[Self]);
+}
+
+impl<T: Clone> ExtendCloned for T {
+    #[inline(always)]
+    default fn extend_cloned(v: &mut Vec<T>, src: &[T]) {
+        v.extend_from_slice(src)
+    }
+}
+
+/// A Reussir record crossing the boundary is `Bridge<Inner>`, a pointer to
+/// its box, and `Clone` is the compiler-emitted `<record>_ffi_acquire`, an
+/// `rc.inc` (inlined into the copy loop). Under the aarch64 encoding of
+/// nullary variants (TBI) a nullary constructor is an immediate whose top
+/// byte is a tag and whose address is a static dummy box shared by all of
+/// them, and `rc.inc` increments its count unguarded: copying an array full
+/// of `nil`s (hash map buckets) made all those increments one serial chain
+/// through a single word. The dummy's count is never decremented (Reussir
+/// steers decrements of immediates away) and never frees, so these
+/// increments are skipped here; real boxes are incremented as `rc.inc` does
+/// (the 32-bit count at offset 0; these records are not atomic). Other
+/// targets use the immortal encoding: the generic clone there.
+impl<X: Clone> ExtendCloned for reussir_rt::bridge::Bridge<X> {
+    #[inline(always)]
+    fn extend_cloned(v: &mut Vec<Self>, src: &[Self]) {
+        if cfg!(target_arch = "aarch64") && std::mem::size_of::<Self>() == 8 && v.capacity() - v.len() >= src.len() {
+            let mut scratch: u32 = 0;
+            for x in src {
+                unsafe {
+                    let p = std::mem::transmute_copy::<Self, *mut u32>(x);
+                    let q = if (p as usize) >> 56 == 0 { p } else { &mut scratch as *mut u32 };
+                    *q = (*q).wrapping_add(1);
+                }
+            }
+            std::hint::black_box(scratch);
+            unsafe {
+                let n = v.len();
+                std::ptr::copy_nonoverlapping(src.as_ptr(), v.as_mut_ptr().add(n), src.len());
+                v.set_len(n + src.len());
+            }
+        } else {
+            v.extend_from_slice(src)
+        }
+    }
+}
+
+/// A copy of a slice with room for `extra` more elements.
+#[inline(always)]
+fn copy_from_slice<T: Clone>(s: &[T], extra: usize) -> Vec<T> {
+    let mut v = vec_with_capacity(s.len() + extra);
+    T::extend_cloned(&mut v, s);
+    v
 }
 
 /// An index that the Lean-level proof (or the prelude's bounds check)
@@ -287,7 +343,7 @@ pub fn append<T: Clone>(a: RVec<T>, b: RVec<T>) -> RVec<T> {
         return a;
     }
     let mut r = into_rc(a);
-    make_mut(&mut r, bs.len()).extend_from_slice(bs);
+    T::extend_cloned(make_mut(&mut r, bs.len()), bs);
     from_rc(r)
 }
 
@@ -300,7 +356,7 @@ pub fn extract<T: Clone>(v: RVec<T>, start: u64, stop: u64) -> RVec<T> {
     if start == 0 && stop == s.len() {
         return v;
     }
-    from_rc(rc_new(vec_from_slice(&s[start..stop], 0)))
+    from_rc(rc_new(copy_from_slice(&s[start..stop], 0)))
 }
 
 /// Reverse in place.
