@@ -55,6 +55,11 @@ structure StateMachineHook where
   its parameters, result type and lowered entry code (the outlined join
   points' variants are in `LowerState.smArms`). -/
   emit : (d : Decl .pure) → StateMachine → Array (String × RR.Ty) → RR.Ty → RR.Block → LowerM Unit
+  /-- A self tail call of the declaration, with the new arguments. -/
+  selfCall : StateMachine → Array RR.Expr → LowerM RR.Expr
+  /-- A jump to an outlined join point: its variant and the variant's
+  fields (captured variables, then the jump's arguments). -/
+  jumpCall : StateMachine → String → Array RR.Expr → LowerM RR.Expr
 
 structure LowerHooks where
   /-- A rewrite of a declaration's body before it is lowered (LCNF to LCNF,
@@ -67,7 +72,9 @@ structure LowerHooks where
   point calls the declaration back in tail position. Plain: the entry
   variant carries the parameters (`Lower/StateMachine`; Opt/StateMachines
   passes them alongside). -/
-  stateMachine : StateMachineHook := { plan := stateMachinePlan, emit := emitStateMachine }
+  stateMachine : StateMachineHook :=
+    { plan := stateMachinePlan, emit := emitStateMachine,
+      selfCall := stateMachineSelfCall, jumpCall := stateMachineJumpCall }
   /-- Whether a constant (a declaration without parameters) with body
   `body` is recomputed at every use instead of computed once and kept in a
   once-cell (`cafAccessor`). Plain: kept (Opt/CheapConsts). -/
