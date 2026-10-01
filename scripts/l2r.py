@@ -3,11 +3,18 @@
 
     l2r.py MODULE -o EXE [--lean-path DIR[:DIR...]] [-O LEVEL] [--keep-rr FILE]
            [--disable-opt NAME]...
+    l2r.py path/to/File.lean -o EXE [...]
 
 MODULE must already be compiled by Lean 4.33 (its .olean on LEAN_PATH, or in
---lean-path). Steps: lean2rr (Lean LCNF -> .rr, with the runtime prelude),
-then rrc (Reussir -> executable), linking the runtime crate `leanrt`
-(runtime/leanrt, rebuilt here when its sources change) and GMP.
+--lean-path). A module name may contain characters that are not identifier
+characters (`rbtree-zipper`, or Lean's escaped `«rbtree-zipper»`). Given a
+.lean file instead, the module is the file's name without `.lean`, compiled
+in the file's directory (`lean -o File.olean File.lean` there), and its
+.olean is looked for next to the file.
+
+Steps: lean2rr (Lean LCNF -> .rr, with the runtime prelude), then rrc
+(Reussir -> executable), linking the runtime crate `leanrt` (runtime/leanrt,
+rebuilt here when its sources change) and GMP.
 
 Environment overrides: L2R_REUSSIR (Reussir checkout with build/), L2R_RUSTC
 (the rustc that built Reussir's runtime rlibs), L2R_GMP (path of libgmp.a;
@@ -112,6 +119,24 @@ def gmp_archive():
     return Path(prefix) / "lib" / "libgmp.a"
 
 
+def module_and_path(arg, lean_path):
+    """The module to translate and the LEAN_PATH entries to add: `arg` is a
+    module name (passed on as it is: lean2rr reads non-identifier
+    characters and `«»`), or a .lean file, whose module is its file name
+    without `.lean` and whose .olean lies next to it (`lean -o File.olean
+    File.lean`, run in its directory)."""
+    if not arg.endswith(".lean"):
+        return arg, lean_path
+    src = Path(arg).resolve()
+    olean = src.with_suffix(".olean")
+    if not olean.exists():
+        sys.exit(f"l2r: {olean} not found; compile the file first, in its directory: "
+                 f"lean -o {olean.name} {src.name}")
+    if src.exists() and olean.stat().st_mtime < src.stat().st_mtime:
+        sys.exit(f"l2r: {olean} is older than {src}; recompile it: lean -o {olean.name} {src.name}")
+    return src.stem, str(src.parent) + (":" + lean_path if lean_path else "")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("module")
@@ -127,6 +152,7 @@ def main():
     # from L2R_DISABLE_OPTS (comma-separated), for test runners.
     ap.add_argument("--disable-opt", action="append", default=[], metavar="NAME")
     args = ap.parse_args()
+    module, lean_path = module_and_path(args.module, args.lean_path)
 
     env = dict(os.environ)
     # lean2rr runs Lean's compiler passes, which recurse once per nested
@@ -134,14 +160,14 @@ def main():
     # a bigger stack than Lean's default 1 GiB for its main thread, so that
     # whatever Lean compiled translates.
     env.setdefault("LEAN_STACK_SIZE_KB", str(4 * 1024 * 1024))
-    if args.lean_path:
-        env["LEAN_PATH"] = args.lean_path + (":" + env["LEAN_PATH"] if env.get("LEAN_PATH") else "")
+    if lean_path:
+        env["LEAN_PATH"] = lean_path + (":" + env["LEAN_PATH"] if env.get("LEAN_PATH") else "")
 
     rlib = build_leanrt()
     with tempfile.TemporaryDirectory() as tmp:
         rr = Path(args.keep_rr).resolve() if args.keep_rr else Path(tmp) / "prog.rr"
         disabled = args.disable_opt + [n for n in os.environ.get("L2R_DISABLE_OPTS", "").split(",") if n]
-        run([str(LEAN2RR), args.module, "--root", args.root, "--emit", "rr",
+        run([str(LEAN2RR), module, "--root", args.root, "--emit", "rr",
              "--prelude", str(PRELUDE), "-o", str(rr)]
             + [a for n in disabled for a in ("--disable-opt", n)], env=env, show_stderr=True)
         rt, deps = rt_dirs()

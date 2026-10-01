@@ -1,4 +1,4 @@
-import LeanToReussir.Lower.ExternCall
+import LeanToReussir.Lower.Borrow
 
 /-! # Values -/
 
@@ -88,15 +88,19 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     coerce e t (← lowerType resTy)
   | .code fn params ret =>
     let n := params.size
+    -- Arguments Lean lends to the callee: released after the call
+    -- (Lower/Borrow).
+    let keeps ← borrowKeeps ctx f args n
     if args.size == n then
       let as ← (args.zip params).mapM fun (a, t) => lowerArg ctx a t
-      coerce (.call fn #[] as) ret (← lowerType resTy)
+      coerce (← releaseAfter (.call fn #[] as) ret keeps) ret (← lowerType resTy)
     else if args.size < n then
       let supplied ← (args.zip params).mapM fun (a, t) => lowerArg ctx a t
-      partialApp { id := "d" ++ fn, params, ret, call := .code fn } supplied (← lowerType resTy)
+      let target ← boxedTarget f fn params ret
+      partialApp { id := "d" ++ target, params, ret, call := .code target } supplied (← lowerType resTy)
     else
       let as ← (args[:n].toArray.zip params).mapM fun (a, t) => lowerArg ctx a t
-      let (e, t) ← applyChain (.call fn #[] as) ret ctx args[n:].toArray
+      let (e, t) ← applyChain (← releaseAfter (.call fn #[] as) ret keeps) ret ctx args[n:].toArray
       coerce e t (← lowerType resTy)
   | .extern orig typeArgs params ret =>
     let n := params.size
