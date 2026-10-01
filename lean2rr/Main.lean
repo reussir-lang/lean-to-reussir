@@ -92,7 +92,21 @@ def run (opts : CliOptions) (cfg : PassConfig) (module : Name) : IO UInt32 := do
   | none => IO.print text
   return 0
 
+/-- The stack size of the threads Lean's runtime creates from now on
+(`Lean.Internal.setThreadStackSize`). -/
+@[extern "lean_internal_set_thread_stack_size"]
+opaque setThreadStackSize (sz : USize) : BaseIO Unit
+
+/-- The stack of the threads Lean's runtime starts besides the one running
+`main` (its task workers): `LEAN_STACK_SIZE_KB` (which the driver sets to
+4 GiB, for Lean's passes on deep terms) sizes every thread Lean's runtime
+creates, and four such reservations do not fit an address-space limit of
+16 GB. lean2rr runs everything on its main thread; the workers only serve
+the library's own tasks. -/
+def workerStackSize : USize := 64 * 1024 * 1024
+
 def main (args : List String) : IO UInt32 := do
+  setThreadStackSize workerStackSize
   match parseArgs args {} with
   | .error e =>
     IO.eprintln s!"lean2rr: {e}\n{usage}"
