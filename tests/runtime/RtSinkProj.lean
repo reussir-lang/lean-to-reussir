@@ -15,15 +15,15 @@ def Tr.go (k : UInt32) (rest : List UInt32) : List (UInt32 × Tr) → List (UInt
   | [] => [(k, Tr.bump (.node 0 []) rest)]
   | (k', t) :: more => if k == k' then (k', t.bump rest) :: more else (k', t) :: Tr.go k rest more
 
-def Tr.size : Tr → Nat
+partial def Tr.size : Tr → Nat
   | .node c ks => c + (ks.map fun (_, t) => t.size).foldl (· + ·) 0
 
 mutual
-  def insT (path : List UInt32) : Tr → Tr
+  partial def insT (path : List UInt32) : Tr → Tr
     | .node c ks => match path with
       | [] => .node (c + 1) ks
       | k :: rest => .node c (insL k rest ks)
-  def insL (k : UInt32) (rest : List UInt32) : List (UInt32 × Tr) → List (UInt32 × Tr)
+  partial def insL (k : UInt32) (rest : List UInt32) : List (UInt32 × Tr) → List (UInt32 × Tr)
     | [] => [(k, insT rest (.node 0 []))]
     | (k', t) :: more => if k == k' then (k', insT rest t) :: more else (k', t) :: insL k rest more
 end
