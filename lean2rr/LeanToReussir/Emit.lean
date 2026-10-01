@@ -42,19 +42,76 @@ def StartupItem.root : StartupItem → Name
   | .ioUnit f => f
   | .init _ f => f
 
-/-- A declaration's source position as one number (line, then column, so
-declarations on one line keep their order). -/
-def rangeKey (r : DeclarationRanges) : Nat := r.range.pos.line * 100000 + r.range.pos.column
+/-- Lexicographic order on arrays of numbers (shorter first on a common
+prefix). -/
+def lexLtNat (a b : Array Nat) : Bool := Id.run do
+  for i in [:min a.size b.size] do
+    if a[i]! < b[i]! then return true
+    if a[i]! > b[i]! then return false
+  return a.size < b.size
+
+/-- Source positions compared as (line, column). -/
+def posLt (a b : Position) : Bool := a.line < b.line || (a.line == b.line && a.column < b.column)
+
+def posLe (a b : Position) : Bool := !posLt b a
+
+/-- A declaration's source position for ordering: its range's start, then
+its name's position (`selectionRange`), each as (line, column). The
+declarations of one macro expansion all have the macro call's range; their
+names, when the macro takes them from its arguments, keep their own
+positions. -/
+def rangeKey (r : DeclarationRanges) : Array Nat :=
+  #[r.range.pos.line, r.range.pos.column, r.selectionRange.pos.line, r.selectionRange.pos.column]
+
+/-- Strings compared with their runs of digits as numbers (`_unsafe_4`
+before `_unsafe_10`, `spec_9` before `spec_10`). -/
+def natStrLt (a b : String) : Bool := Id.run do
+  let mut i := 0
+  let mut j := 0
+  let a := a.toList.toArray
+  let b := b.toList.toArray
+  while i < a.size && j < b.size do
+    if a[i]!.isDigit && b[j]!.isDigit then
+      let mut x := 0
+      while i < a.size && a[i]!.isDigit do
+        x := x * 10 + (a[i]!.toNat - '0'.toNat)
+        i := i + 1
+      let mut y := 0
+      while j < b.size && b[j]!.isDigit do
+        y := y * 10 + (b[j]!.toNat - '0'.toNat)
+        j := j + 1
+      if x != y then return x < y
+    else
+      if a[i]! != b[j]! then return a[i]! < b[j]!
+      i := i + 1
+      j := j + 1
+  return a.size - i < b.size - j
+
+/-- Names compared component by component, numbers in strings by value
+(see `natStrLt`); the last resort among startup declarations that nothing
+else orders. -/
+def natNameLt (n1 n2 : Name) : Bool := go n1.components n2.components
+where
+  go : List Name → List Name → Bool
+    | [], [] => false
+    | [], _ => true
+    | _, [] => false
+    | c1 :: r1, c2 :: r2 =>
+      match c1, c2 with
+      | .str _ s1, .str _ s2 => if s1 == s2 then go r1 r2 else natStrLt s1 s2 || (!natStrLt s2 s1 && s1 < s2)
+      | .num _ k1, .num _ k2 => if k1 == k2 then go r1 r2 else k1 < k2
+      | .num .., .str .. => true
+      | _, _ => false
 
 /-- Position of a declaration for ordering: module index, then the source
 position of the declaration or of its nearest prefix that has one. -/
-def declOrder (n : Name) : CoreM (Nat × Nat) := do
+def declOrder (n : Name) : CoreM (Array Nat) := do
   let idx := ((← getEnv).getModuleIdxFor? n).map (·.toNat) |>.getD 0
   let mut m := n
   while !m.isAnonymous do
-    if let some r ← findDeclarationRanges? m then return (idx, rangeKey r)
+    if let some r ← findDeclarationRanges? m then return #[idx] ++ rangeKey r
     m := m.getPrefix
-  return (idx, 0)
+  return #[idx]
 
 /-- A name rebuilt from its components (`Name.append` would reinterpret the
 macro scopes of a hygienic component, such as an `initialize` function's
@@ -107,11 +164,24 @@ partial def moduleStartupKeys (idx : Nat) (items : Array Name) : CoreM (Std.Hash
       m := m.getPrefix
     return none
   let vertexOf? (n : Name) : Option Name := (ranged? n).map fun v => initOf.getD v v
+  -- A `where`/`let rec` helper's range is a part of its parent's. Equal
+  -- ranges are not enclosure: every declaration of a macro expansion has
+  -- the macro call's range (`mk foo foo.bar` defines two commands).
   let encloses (outer inner : Name) : Bool := Id.run do
     let some o := ranges[outer]? | return false
     let some i := ranges[inner]? | return false
-    let k (q : Position) : Nat := q.line * 100000 + q.column
-    return k o.range.pos ≤ k i.range.pos && k i.range.endPos ≤ k o.range.endPos
+    let same := o.range.pos == i.range.pos && o.range.endPos == i.range.endPos
+    return !same && posLe o.range.pos i.range.pos && posLe i.range.endPos o.range.endPos
+  -- Declarations that no position orders (the instances of one `deriving
+  -- instance … for A, B` command have the same range and name position):
+  -- the order in which the module added its instances.
+  let mut instIdx : Std.HashMap Name Nat := {}
+  for e in Meta.instanceExtension.ext.getModuleEntries env idx do
+    let i := match e with | .global i | .scoped _ i => i
+    if let some g := i.globalName? then
+      unless instIdx.contains g do instIdx := instIdx.insert g (instIdx.size + 1)
+  let posKey (v : Name) : Array Nat :=
+    ((ranges[v]?.map rangeKey).getD #[0, 0, 0, 0]).push (instIdx.getD v 0)
   -- The enclosing declaration of a helper (outermost prefix whose range
   -- contains its range), and its nesting depth.
   let memberOf (v : Name) : Name × Nat := Id.run do
@@ -124,22 +194,23 @@ partial def moduleStartupKeys (idx : Nat) (items : Array Name) : CoreM (Std.Hash
         depth := depth + 1
       p := p.getPrefix
     return (initOf.getD top top, depth)
-  -- The first member of a recursive mutual block.
+  -- The members of a recursive mutual block, in the block's order.
+  let allOf (main : Name) : List Name := match env.find? main with
+    | some (.defnInfo d) => d.all
+    | some (.opaqueInfo o) => o.all
+    | _ => [main]
+  -- The first member of a recursive mutual block (by position, then the
+  -- block's order: a macro-made block has one range).
   let blockOf (main : Name) : Name := Id.run do
-    let members := match env.find? main with
-      | some (.defnInfo d) => d.all
-      | some (.opaqueInfo o) => o.all
-      | _ => [main]
     let mut best := main
-    let mut bestKey := (ranges[main]?.map rangeKey).getD 0
-    for m in members do
-      if let some r := ranges[m]? then
-        if rangeKey r < bestKey then
-          best := m
-          bestKey := rangeKey r
+    let mut bestKey := posKey main
+    for m in allOf main do
+      if ranges.contains m && lexLtNat (posKey m) bestKey then
+        best := m
+        bestKey := posKey m
     return best
   let rootOf (v : Name) : Name := blockOf (memberOf v).1
-  let rootKey (root : Name) : Nat := (ranges[root]?.map rangeKey).getD 0
+  let rootKey (root : Name) : Array Nat := posKey root
   -- The vertices of the commands that have startup items.
   let mut wanted : Std.HashSet Name := {}
   for n in items do
@@ -151,18 +222,20 @@ partial def moduleStartupKeys (idx : Nat) (items : Array Name) : CoreM (Std.Hash
     if wanted.contains r then blocks := blocks.insert r ((blocks.getD r #[]).push c)
   -- Rank of each vertex: the index of its component in compilation order.
   let mut rank : Std.HashMap Name Nat := {}
-  for (_, vs) in blocks do
+  for (r, vs) in blocks do
     if vs.size == 1 then
       rank := rank.insert vs[0]! 0
       continue
     let vset : Std.HashSet Name := vs.foldl (·.insert ·) {}
+    let order := allOf r
+    let blockIdx (v : Name) : Nat := (order.findIdx? (· == v)).getD order.length
     let mains := (vs.filter fun v => (memberOf v).1 == v).qsort fun a b =>
-      (ranges[a]?.map rangeKey).getD 0 < (ranges[b]?.map rangeKey).getD 0
+      lexLtNat ((posKey a).push (blockIdx a)) ((posKey b).push (blockIdx b))
     let memberIdx (v : Name) : Nat := (mains.findIdx? (· == (memberOf v).1)).getD 0
-    let key (v : Name) : Nat × Nat × Nat :=
-      (mains.size - memberIdx v, (memberOf v).2, (ranges[v]?.map rangeKey).getD 0)
-    let lex (a b : Nat × Nat × Nat) : Bool := a.1 < b.1 || (a.1 == b.1 && (a.2.1 < b.2.1 || (a.2.1 == b.2.1 && a.2.2 < b.2.2)))
-    let helpers := (vs.filter fun v => (memberOf v).1 != v).qsort fun a b => lex (key a) (key b)
+    let key (v : Name) : Array Nat :=
+      #[mains.size - memberIdx v, (memberOf v).2] ++ posKey v
+    let helpers := (vs.filter fun v => (memberOf v).1 != v).qsort fun a b =>
+      lexLtNat (key a) (key b) || (key a == key b && natNameLt a b)
     -- References of a vertex's value to other vertices of the command,
     -- through its own auxiliary declarations (`._unary`, `.match_1`); a
     -- `partial` definition's code is its `._unsafe_rec`. Lean lists them in
@@ -200,17 +273,18 @@ partial def moduleStartupKeys (idx : Nat) (items : Array Name) : CoreM (Std.Hash
     match n.components.getLast? with
     | some (.str _ s) => if s.startsWith "spec_" then ((s.drop 5).toString.toNat?).getD 0 else 0
     | _ => 0
+  let none5 : Array Nat := #[0, 0, 0, 0, 0]
   let mut out : Std.HashMap Name (Array Nat) := {}
   for n in items do
     let key := match specTarget? n with
       | some g => match vertexOf? g with
-        | some v => #[rootKey (rootOf v), 1 + rank.getD v 0, 0, specNo n]
-        | none => #[0, 0, 0, specNo n]
+        | some v => rootKey (rootOf v) ++ #[1 + rank.getD v 0, 0, specNo n]
+        | none => none5 ++ #[0, 0, specNo n]
       | none => match vertexOf? n with
         | some v =>
-          if ranges.contains n then #[rootKey (rootOf v), 1 + rank.getD v 0, 1, 0]
-          else #[rootKey (rootOf v), 0, (ranges[ranged? n |>.getD v]?.map rangeKey).getD 0, 0]
-        | none => #[0, 0, 0, 0]
+          if ranges.contains n then rootKey (rootOf v) ++ #[1 + rank.getD v 0, 1, 0]
+          else rootKey (rootOf v) ++ #[0] ++ posKey (ranged? n |>.getD v)
+        | none => none5 ++ #[0, 0, 0]
     out := out.insert n key
   return out
 
@@ -238,14 +312,10 @@ def startupItems : CoreM (Array StartupItem) := do
       unless d.value matches .code _ && d.params.isEmpty do continue
       if isIOUnitInitFn env n || (getInitFnNameFor? env n).isSome then continue
       byModule := byModule.insert idx ((byModule.getD idx #[]).push (.caf n, n))
-  -- Ties (specializations generated with the same component): by their
-  -- number, which is Lean's order in simple cases; Lean's real order depends
-  -- on how its specializer recursed, which is not persisted.
-  let lexLt (a b : Array Nat) : Bool := Id.run do
-    for i in [:min a.size b.size] do
-      if a[i]! < b[i]! then return true
-      if a[i]! > b[i]! then return false
-    return a.size < b.size
+  -- Ties: by name, numbers by value (`c._unsafe_4` before `c._unsafe_10`,
+  -- Lean's order of the auxiliary declarations of one command; see also
+  -- `specNo`). Lean's order of specializations depends on how its
+  -- specializer recursed, which is not persisted.
   let mut out := #[]
   for idx in (byModule.toArray.map (·.1)).qsort (· < ·) do
     let its := byModule.getD idx #[]
@@ -253,7 +323,7 @@ def startupItems : CoreM (Array StartupItem) := do
     let sorted := its.qsort fun (_, n1) (_, n2) =>
       let k1 := keys.getD n1 #[]
       let k2 := keys.getD n2 #[]
-      lexLt k1 k2 || (k1 == k2 && Name.lt n1 n2)
+      lexLtNat k1 k2 || (k1 == k2 && natNameLt n1 n2)
     out := out ++ sorted.map (·.1)
   return out
 

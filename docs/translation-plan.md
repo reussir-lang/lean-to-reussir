@@ -1118,6 +1118,22 @@ block) and from the references in the declarations' kernel values (for a
 declaration belongs to its constant: a specialization made inside the
 action comes right before the action.
 
+Positions are compared as (line, column). Lean's own record of the order
+(`declOrderExt`, which `EmitC` follows) is not persisted, and neither the
+module's constant list nor the compiler's declaration tables keep the order
+of addition, so declarations with the same range need more. Every
+declaration of one macro expansion has the macro call's range, and the
+instances of one `deriving instance … for A, B` command share one range
+too. A range equal to another one is therefore not "inside" it: `mk foo
+foo.bar` makes two commands, not `foo` and its helper. Such commands are
+ordered by the position of their names (a macro that takes the names from
+its arguments keeps their positions; a hygienic name made by the macro has
+the call's position, so it comes first), then by the order in which the
+module added its instances (the instance extension keeps it), and last by
+name, with the numbers in names compared by value: the auxiliary constants
+`c._unsafe_1`, `c._unsafe_4`, …, `c._unsafe_10` of a declaration with
+several `unsafe` parts start in that order.
+
 Our translation runs, before `main`, the startup work of Lean's module
 initializers:
 - for each program module, for each declaration in that order:
@@ -1497,6 +1513,11 @@ Each item says what differs and when.
   order among them depends on how its specializer recursed, which the
   `.olean` does not record, and can differ. Visible only when such
   constants trace or panic.
+- *Startup order of a macro's made-up names* (§5.12): declarations of one
+  macro expansion that the macro names itself (hygienic names, which all
+  have the macro call's position) and that are not instances start in name
+  order; natively in the order the macro wrote them. Declarations named by
+  the macro's arguments start in the order of those arguments.
 - *Startup order in `mutual` blocks and several `let rec` groups* (§5.12):
   the members of a `mutual` block that do not call each other are ordered
   as separate commands, because the block is not recorded in the `.olean`

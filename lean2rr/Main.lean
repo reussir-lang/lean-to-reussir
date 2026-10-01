@@ -76,7 +76,7 @@ def run (opts : CliOptions) (module : Name) : IO UInt32 := do
             unless userInits.contains d do
               let some inst := st.names[({ decl := f, typeArgs := #[] } : InstKey)]? | continue
               tool := tool.push (d, inst, ← declOrder d)
-          let toolSorted := tool.qsort fun (_, _, (m1, p1)) (_, _, (m2, p2)) => m1 < m2 || (m1 == m2 && p1 < p2)
+          let toolSorted := tool.qsort fun (_, _, k1) (_, _, k2) => lexLtNat k1 k2
           let base := 1 + entryRoots.size
           let user := items.zipIdx.map fun (it, i) =>
             let inst := rootInsts[base + i]!
