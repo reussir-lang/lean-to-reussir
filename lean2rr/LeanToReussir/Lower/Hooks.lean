@@ -14,6 +14,12 @@ namespace LeanToReussir
 open Lean Compiler LCNF
 
 structure LowerHooks where
+  /-- A rewrite of a declaration's body before it is lowered (LCNF to LCNF,
+  the same behaviour). Plain: none (Opt/JpSink). -/
+  prepareBody : Code .pure → Code .pure := id
+  /-- Whether a join point that is neither J1 nor J2 is duplicated at its
+  jumps (J1′) instead of outlined (J3). Plain: outlined (Opt/JpSmall). -/
+  duplicateJp : FunDecl .pure → Bool := fun _ => false
   /-- Whether a constant (a declaration without parameters) with body
   `body` is recomputed at every use instead of computed once and kept in a
   once-cell (`cafAccessor`). Plain: kept (Opt/CheapConsts). -/

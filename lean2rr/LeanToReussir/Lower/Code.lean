@@ -110,7 +110,7 @@ mutual
         modify fun s => { s with fns := s.fns.push (.fn fn fparams retTy body) }
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.call fn captured) } outlined retTy k
       else if (countJumps k {}).getD d.fvarId 0 ≤ 1 ||
-          (isSmallJp d && !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined) then
+          (H.duplicateJp d && !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined) then
         -- J1, or a small join point that is not J2: its body at each jump.
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.inline d.params d.value) } outlined retTy k
       else
@@ -387,7 +387,7 @@ end
 /-- Lower a declaration with code to a Reussir function. -/
 def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let .code body := d.value | return
-  let body := sinkJoinPoints body
+  let body := H.prepareBody body
   let (ps, r) := splitFnType d.type d.params.size
   let _ := ps
   let ptys ← d.params.mapM (lowerType ·.type)
@@ -400,7 +400,7 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
     let block ← processOutputBody (pnames.zip ptys) ret
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
     return
-  let outlined := chooseOutlined body
+  let outlined := chooseOutlined H.duplicateJp body
   -- J4 when an outlined join point tail-calls the declaration: a loop
   -- passes through it. (Other calls need no state machine; going through
   -- its entry wrapper would only cost an allocation per call.)
@@ -412,7 +412,7 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
       pure (some { fn := base ++ "_sm", mode := base ++ "_mode", self := d.name, arity := d.params.size, params := pnames })
   modify fun s => { s with smArms := #[] }
   let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm? }
-  let block ← try lowerCode ctx outlined ret body
+  let block ← try lowerCode H ctx outlined ret body
     catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
   if let some sm := sm? then
     let arms := (← get).smArms

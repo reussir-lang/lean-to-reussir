@@ -8,6 +8,8 @@ import LeanToReussir.Opt.Outline
 import LeanToReussir.Opt.CheapConsts
 import LeanToReussir.Opt.ClosedChains
 import LeanToReussir.Opt.PreludeRepr
+import LeanToReussir.Opt.JpSink
+import LeanToReussir.Opt.JpSmall
 
 /-!
 # The pass registry
@@ -54,6 +56,8 @@ def optimizations : Array OptPass := #[
   ⟨"cheap-consts", true, "constants built from small literals and scalar conversions recomputed at each use, not cached", CheapConsts.install⟩,
   ⟨"closed-chains", true, "closed terms used once, by another constant, evaluated there instead of cached", ClosedChains.install⟩,
   ⟨"prelude-repr", true, "Nat.repr/Int.repr calls replaced by the runtime's GMP versions (same strings)", PreludeRepr.install⟩,
+  ⟨"jp-sink", true, "join points moved down to the smallest code containing their jumps, before the J1-J4 choice", JpSink.install⟩,
+  ⟨"jp-small", true, "small join points (at most 40 nodes) duplicated at their jumps (J1') instead of outlined", JpSmall.install⟩,
   ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩,
   ⟨"outline", true, "deep and long tail paths cut into chains of functions (bounds rrc's build time and memory)", Outline.install⟩]
 

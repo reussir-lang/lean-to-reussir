@@ -38,58 +38,6 @@ partial def jumpsIn : Code .pure → FVarIdSet → FVarIdSet
   | .cases c, s => c.alts.foldl (fun s alt => jumpsIn alt.getCode s) s
   | _, s => s
 
-/-- Does `c` jump to `j`? -/
-partial def hasJumpTo (j : FVarId) : Code .pure → Bool
-  | .jmp j' _ => j == j'
-  | .let _ k => hasJumpTo j k
-  | .fun d k _ | .jp d k => hasJumpTo j d.value || hasJumpTo j k
-  | .cases c => c.alts.any (hasJumpTo j ·.getCode)
-  | _ => false
-
-/-- Place join point `d` (whose scope is `k`) as deep as possible: into the
-single branch, join-point body or continuation containing all its jumps.
-Free variables of `d` stay in scope (binders are unique), and code does not
-grow. Sunk into the subtree its jumps come from, a join point is more often
-structured (J2) instead of outlined: an outlined join point that calls the
-enclosing function back makes a loop mutually recursive, which LLVM does not
-turn into a loop. -/
-partial def sinkInto (d : FunDecl .pure) (k : Code .pure) : Code .pure :=
-  let j := d.fvarId
-  match k with
-  | .let x k' => .let x (sinkInto d k')
-  | .fun f k' _ => if hasJumpTo j f.value then .jp d k else .fun f (sinkInto d k')
-  | .jp d2 k2 =>
-    match hasJumpTo j d2.value, hasJumpTo j k2 with
-    | true, true => .jp d k
-    | true, false => .jp (FunDecl.mk d2.fvarId d2.binderName d2.params d2.type (sinkInto d d2.value)) k2
-    | false, true => .jp d2 (sinkInto d k2)
-    | false, false => k
-  | .cases c =>
-    if (c.alts.filter (hasJumpTo j ·.getCode)).size == 1 then
-      .cases ⟨c.typeName, c.resultType, c.discr, c.alts.map fun alt =>
-        if hasJumpTo j alt.getCode then
-          match alt with
-          | .alt ctor ps code _ => .alt ctor ps (sinkInto d code)
-          | .default code => .default (sinkInto d code)
-          | other => other
-        else alt⟩
-    else .jp d k
-  | _ => .jp d k
-
-/-- Sink every join point of `c` (innermost first). -/
-partial def sinkJoinPoints : Code .pure → Code .pure
-  | .let x k => .let x (sinkJoinPoints k)
-  | .fun d k _ =>
-    .fun (FunDecl.mk d.fvarId d.binderName d.params d.type (sinkJoinPoints d.value)) (sinkJoinPoints k)
-  | .jp d k =>
-    sinkInto (FunDecl.mk d.fvarId d.binderName d.params d.type (sinkJoinPoints d.value)) (sinkJoinPoints k)
-  | .cases c =>
-    .cases ⟨c.typeName, c.resultType, c.discr, c.alts.map fun
-      | .alt ctor ps code _ => .alt ctor ps (sinkJoinPoints code)
-      | .default code => .default (sinkJoinPoints code)
-      | other => other⟩
-  | c => c
-
 /-- Does `c` contain a tail call `let x := f args; return x` of `f` with
 `arity` arguments (outside nested join-point bodies, which are checked on
 their own when outlined)? -/
@@ -115,29 +63,11 @@ where
     | .cases cs => cs.alts.foldl (fun acc alt => go alt.getCode acc) acc
     | _ => acc
 
-/-- Size of a code block (bindings, alternatives and exits), counted up to
-`cap`. -/
-partial def codeSize (c : Code .pure) (cap : Nat) : Nat :=
-  go c 0
-where
-  go (c : Code .pure) (acc : Nat) : Nat :=
-    if acc ≥ cap then acc else
-    match c with
-    | .let _ k => go k (acc + 1)
-    | .fun d k _ | .jp d k => go k (go d.value (acc + 1))
-    | .cases cs => cs.alts.foldl (fun acc alt => go alt.getCode (acc + 1)) (acc + 1)
-    | _ => acc + 1
-
-/-- Small join points (nested join points included, since sinking nests
-them) are duplicated at their jumps (like J1) rather than
-outlined: outlining one on a loop's path makes the loop a state machine
-(J4) or mutually recursive (J3), and keeps the reuse of cells matched
-before the jump from reaching constructions after it. -/
-def isSmallJp (d : FunDecl .pure) : Bool := codeSize d.value 41 ≤ 40
-
 /-- Choose a strategy for every join point of a declaration body: the set
-of outlined (J3) join points; others are J1 (single jump) or J2. -/
-partial def chooseOutlined (body : Code .pure) : FVarIdSet := Id.run do
+of outlined (J3) join points; others are J1 (single jump), J2, or
+duplicated at their jumps (J1′, those `duplicate` selects: the lowering hook
+`LowerHooks.duplicateJp`). -/
+partial def chooseOutlined (duplicate : FunDecl .pure → Bool) (body : Code .pure) : FVarIdSet := Id.run do
   let counts := countJumps body {}
   -- All join points with their scope.
   let mut jps : Array (FunDecl .pure × Code .pure) := #[]
@@ -159,7 +89,7 @@ partial def chooseOutlined (body : Code .pure) : FVarIdSet := Id.run do
       -- A J2 join point cannot be the target of a jump from inside an outlined body.
       let jumpedFromOutlined := jps.any fun (d', _) =>
         outlined.contains d'.fvarId && (jumpsIn d'.value {}).contains d.fvarId
-      let ok := single || isSmallJp d ||
+      let ok := single || duplicate d ||
         (endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined && !jumpedFromOutlined)
       if !ok then
         outlined := outlined.insert d.fvarId
