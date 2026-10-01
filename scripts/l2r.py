@@ -61,14 +61,22 @@ def rt_dirs():
     return rt, rt / "deps"
 
 
-def rustc_wrapper():
-    """A rustc wrapper script adding NATIVE_FLAGS (rrc takes one executable)."""
-    LEANRT_OUT.mkdir(parents=True, exist_ok=True)
-    w = LEANRT_OUT / "rustc-native"
-    text = "#!/bin/sh\nexec '%s' \"$@\" %s\n" % (RUSTC, " ".join(NATIVE_FLAGS))
+def rustc_wrapper(rlib):
+    """A rustc wrapper script adding NATIVE_FLAGS (rrc takes one executable)
+    and `leanrt` as an extern crate (and edition 2018 when rrc gives none,
+    so that `::leanrt` resolves without `extern crate`): the drop hooks Reussir generates for
+    the prelude's opaque types have no prelude block, and name the runtime's
+    container types (`::leanrt::drop::Vec`, `::leanrt::drop::Cell`). One
+    per `leanrt` build directory (per Reussir checkout)."""
+    w = rlib.parent / "rustc-native"
+    flags = "%s --extern leanrt='%s'" % (" ".join(NATIVE_FLAGS), rlib)
+    text = ("#!/bin/sh\ncase \" $* \" in *--edition*) exec '%s' \"$@\" %s ;; esac\n"
+            "exec '%s' \"$@\" %s --edition 2018\n" % (RUSTC, flags, RUSTC, flags))
     if not w.exists() or w.read_text() != text:
-        w.write_text(text)
-        w.chmod(0o755)
+        tmp = w.with_name(w.name + ".%d" % os.getpid())
+        tmp.write_text(text)
+        tmp.chmod(0o755)
+        os.replace(tmp, w)
     return w
 
 
@@ -176,7 +184,7 @@ def main():
         # scratch files (reussir_rust_module_*) in the current directory.
         rrc = ([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", str(Path(args.output).resolve()),
                 "--emit", "executable", "-O", args.opt,
-                "--polyffi-rust-path", str(rustc_wrapper()),
+                "--polyffi-rust-path", str(rustc_wrapper(rlib)),
                 "--polyffi-libdir", str(rt), "--polyffi-libdir", str(deps),
                 "--polyffi-libdir", target_libdir, "--polyffi-libdir", str(rlib.parent),
                 "--link-lib", str(rlib), "--link-lib", str(gmp_archive())]

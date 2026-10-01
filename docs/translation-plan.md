@@ -719,8 +719,12 @@ its value is stored as `Box`.
     to itself, and a fixpoint step that goes from uniform code through a
     typed function and back returns its argument. The record also holds the
     converted value, so it stays unchanged (an update copies it) and its
-    address is not reused; a record whose converted value only it still
-    holds is dropped, two records being checked at each new one. Only the
+    address is not reused. A converted array's record goes with the array
+    (when the program drops it, `leanrt::drop`); a record whose converted
+    value only it still holds is dropped, two records being checked at
+    each new one, so a converted record's origin, and a resource it holds,
+    can live until the next conversion (natively, one object, freed with
+    the converted value). Only the
     outermost value of a conversion is recorded (its parts are new
     objects).
 - Through `unsafeCast` (mono erases it), a value can meet code expecting
@@ -2021,6 +2025,16 @@ Each item says what differs and when.
   new big number object per computation) answer a number computed from
   their value, so equal values are `ptrEq` (natively only the same object
   is); likewise a rebuilt `[value]` struct over the same field.
+- *Order of releases in one free*: when a value holding several resources
+  is freed at once (handles closed, and so flushed; promises resolved),
+  native Lean releases them last pushed first: an array's last element
+  first, a nested array's elements before the elements before it, a
+  record's last field first. A free that starts at a container (an array,
+  a reference, a thunk or task cell) does the same here (`leanrt::drop`
+  pushes the resources it reaches, through records too). One that starts
+  at a record (a list of handles, a structure of handles, dropped by
+  itself) follows Reussir's drop glue, fields in order: a list's handles
+  are closed first to last, natively last to first.
 - *Release time of borrowed parameters* (§5.8): emulated for values that
   may hold a resource, with Lean's inference run on lean2rr's monomorphic
   instances: where Lean infers a polymorphic declaration or one of its own
@@ -2039,14 +2053,25 @@ Each item says what differs and when.
   no recursion of its own: structural conversions are loops (§5.1) and the
   `Array.mk`, `String.mk` and `String.ofList` list folds are tail-recursive
   loops, so converting or folding a list of 10⁷ elements works at an 8 MB
-  stack (`LEAN_STACK_SIZE_KB=8192`) as natively. Dropping a deep value
-  recurses in Reussir's drop glue where Lean frees iteratively: with the
-  local patch 0013 a chain through each cell's last shared member (a list,
-  a snoc list, a left or right spine) is released in a loop, but a value
-  deep along another member recurses, 16 to 32 bytes of stack per node: a
-  tree of arrays of children deep through the arrays, or a rose tree held
-  at a uniform type (`List Box` of trees) deep through the list's heads,
-  overflows at an 8 MB stack when dropped (10⁶ levels). The depth at which
+  stack (`LEAN_STACK_SIZE_KB=8192`) as natively. Dropping a deep value:
+  Lean frees iteratively, through a stack of objects to free. The
+  runtime's containers (arrays, references, thunk and task cells:
+  `leanrt::drop`) do the same: a container freed while another is being
+  freed is pushed on a stack of pending work instead, which the outermost
+  free empties; so a value deep through containers, with records in
+  between (a tree whose children are in arrays, a record → array → record
+  chain, a chain of thunks or tasks), is freed at a bounded depth.
+  Records are freed by Reussir's drop glue, which with the local patch 0013
+  releases the last chain member being freed in a loop (a list, a snoc
+  list, a left or right spine whose other children are shared or nullary)
+  but recurses into the others, 16 to 32 bytes of stack per node: a value
+  deep through records alone along a field that is not the last one freed
+  (a binary tree deep along its left child whose right children are fresh
+  nodes; a rose tree in uniform code, whose list cells hold the deep tree
+  in their head and a fresh node in the tail) overflows at an 8 MB stack
+  when dropped (10⁶ levels; test `RtDropGlue`, an expected failure). The
+  runtime cannot reach that recursion: it needs a stack of pending members
+  in Reussir's drop glue (0013 extended). The depth at which
   `Stack overflow detected. Aborting.` (exit 134) happens is not native's,
   in either direction (the report itself is, in every thread: §5.11).
   Tasks run on `main`'s thread (Lean's 1 GiB, or `LEAN_STACK_SIZE_KB`),

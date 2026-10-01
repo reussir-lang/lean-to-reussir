@@ -25,6 +25,7 @@ pub mod alloc;
 pub mod array;
 pub mod big;
 pub mod cfile;
+pub mod drop;
 pub mod float;
 pub mod fs;
 pub mod gmp;
