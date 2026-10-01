@@ -1,0 +1,23 @@
+// Bug 5: TokenReuse frees a token on the empty else region of an scf.if
+// without else (here the `if a2 == 0` inside a constructor argument, after
+// canonicalization) and crashes in ReussirTokenFreeOp::create.
+// Expected: compiles, prints 3. Reussir ef922049: rrc SIGSEGV (exit 139) at
+// every -O level, with or without --reuse-across-call.
+enum T { N(u64, T, T), L }
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+fn f(x : T, y : T) -> T {
+    match x {
+        T::N(a, l, r) => {
+            T::N { 0, match y { T::N(a2, l2, r2) => { if a2 == 0 { l } else { l2 } }, T::L => T::L{} }, l }
+        },
+        T::L => T::L{}
+    }
+}
+fn size(t : T) -> u64 { match t { T::N(a, l, r) => { 1 + size(l) + size(r) }, T::L => { 0 } } }
+#[main]
+fn main() {
+    let x = T::N{1, T::N{2, T::L{}, T::L{}}, T::L{}};
+    let y = T::N{0, T::L{}, T::L{}};
+    say(size(f(x, y)));
+}

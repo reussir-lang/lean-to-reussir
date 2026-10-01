@@ -1,0 +1,55 @@
+// Bug 7: TokenReuse picks a decrement that can never free as the donor for
+// a new cell, so the construction allocates and the cell that really became
+// free is freed.
+// ins returns the matched node t when the key is present. On the paths that
+// rebuild a node, t's children l and r were retained (t stays live on the
+// equal-key path) and are released again; those releases (count >= 2, they
+// never free) win the token over t's own cell. ins_b differs only in its
+// equal-key arm, which rebuilds the node, so t is consumed on every path.
+// Both build a 100,003-key tree and then insert 3,000,000 keys that are all
+// present (only the equal-key arm returns without building).
+// Output: "<size> <size> ratio <t(ins) / t(ins_b)>". Expected: both sizes
+// 100003 and a ratio near 1 (the two insertions allocate the same).
+// Reussir ef922049 with -O aggressive --no-pack-record-members
+// --reuse-across-call: ratio about 6 (ins reallocates every node on the path).
+enum Tr { Leaf, Node(Tr, u64, Tr) }
+fn ins(t : Tr, k : u64) -> Tr {
+    match t {
+        Tr::Leaf => { Tr::Node{Tr::Leaf{}, k, Tr::Leaf{}} },
+        Tr::Node(l, x, r) => {
+            if k < x { Tr::Node{ins(l, k), x, r} }
+            else { if x < k { Tr::Node{l, x, ins(r, k)} } else { t } }
+        }
+    }
+}
+fn ins_b(t : Tr, k : u64) -> Tr {
+    match t {
+        Tr::Leaf => { Tr::Node{Tr::Leaf{}, k, Tr::Leaf{}} },
+        Tr::Node(l, x, r) => {
+            if k < x { Tr::Node{ins_b(l, k), x, r} }
+            else { if x < k { Tr::Node{l, x, ins_b(r, k)} } else { Tr::Node{l, x, r} } }
+        }
+    }
+}
+fn size(t : Tr) -> u64 {
+    match t { Tr::Leaf => { 0 }, Tr::Node(l, x, r) => { size(l) + 1 + size(r) } }
+}
+fn loop_(t : Tr, i : u64, n : u64) -> Tr {
+    if i == n { t } else { loop_(ins(t, (i * 7919) % 100003), i + 1, n) }
+}
+fn loop_b(t : Tr, i : u64, n : u64) -> Tr {
+    if i == n { t } else { loop_b(ins_b(t, (i * 7919) % 100003), i + 1, n) }
+}
+#[ffi(import)]
+fn now() -> u64 [{ std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 }];
+#[ffi(import)]
+fn report(a : u64, b : u64, ta : u64, tb : u64) [{ println!("{} {} ratio {:.2}", a, b, ta as f64 / tb as f64) }];
+#[main]
+fn main() {
+    let t0 = now();
+    let a = size(loop_(loop_(Tr::Leaf{}, 0, 100003), 0, 3000000));
+    let t1 = now();
+    let b = size(loop_b(loop_b(Tr::Leaf{}, 0, 100003), 0, 3000000));
+    let t2 = now();
+    report(a, b, t1 - t0, t2 - t1);
+}

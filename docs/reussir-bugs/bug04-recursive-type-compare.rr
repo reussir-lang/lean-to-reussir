@@ -1,0 +1,23 @@
+// Bug 4: L1 and L2 are distinct recursive types with the same structure,
+// reached through the [value] members V and W. When conv reuses the S1 cell
+// for an S2, copy avoidance compares the member types before the reused
+// field (V vs W, hence L1 vs L2) with structurallySameType, which recurses
+// through L1/L2 forever.
+// Expected: compiles, prints 1005. Reussir ef922049: rrc dies with SIGSEGV
+// (exit 139) at every -O level.
+enum L1 { Cons(u64, L1), Nil }
+enum L2 { Cons(u64, L2), Nil }
+enum [value] V { C(u64, L1), N }
+enum [value] W { C(u64, L2), N }
+enum S1 { A(V, u64), Z }
+enum S2 { A(W, u64), Z }
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+#[ffi(import)]
+fn num() -> u64 [{ 1005 }];
+fn conv(s : S1) -> S2 {
+    match s { S1::A(c, v) => { S2::A{W::N{}, v} }, S1::Z => { S2::Z{} } }
+}
+fn get(s : S2) -> u64 { match s { S2::A(d, v) => { v }, S2::Z => { 0 } } }
+#[main]
+fn main() { say(get(conv(S1::A{V::C{1, L1::Nil{}}, num()}))); }

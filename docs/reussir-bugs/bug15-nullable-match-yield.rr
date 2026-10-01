@@ -1,0 +1,16 @@
+// Bug 15: a match on a Nullable<T> whose arms yield a reference-counted
+// value does not compile.
+// Expected: compiles, prints 1. Reussir ef922049: rrc fails with
+//   'reussir.scf.yield' op parent operation expected a value, but nothing is yielded
+struct [shared] B { v: u64 }
+enum T { N(u64, T, T), L }
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+fn g(nb : Nullable<B>, x : T) -> T {
+    match nb {
+        Nullable::NonNull(b) => { x },
+        Nullable::Null => { T::L{} }
+    }
+}
+#[main]
+fn main() { say(match g(Nullable::Null, T::N{5, T::L{}, T::L{}}) { T::L => 1, T::N(a, l, r) => a }); }

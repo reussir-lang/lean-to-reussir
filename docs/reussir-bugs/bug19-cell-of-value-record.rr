@@ -1,0 +1,22 @@
+// Bug 19: a Cell of a [value] record with a counted member (Nat::Big holds
+// a shared Bg) does not compile: cell::get and cell::set project the slot
+// with a `field` reference and pass it to the record's outlined acquire or
+// drop function, whose parameter has unspecified capability.
+// Expected: compiles, prints 42. Reussir ef922049: rrc fails with
+//   'func.call' op operand type mismatch: expected operand type
+//   '!reussir.ref<!reussir.record<variant "_RC3Nat" [value] {...}>>', but
+//   provided '!reussir.ref<... field>' for operand number 0
+// With Big(u64) instead of Big(Bg) it compiles.
+struct [shared] Bg(u64)
+enum [value] Nat { Small(u64), Big(Bg) }
+struct RNat(Cell<Nat>)
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+fn mk(v : Nat) -> RNat { RNat{core::intrinsic::cell::alloc(v)} }
+fn run(n : u64) -> u64 {
+    let r : RNat = mk(Nat::Small{n});
+    let x : Nat = core::intrinsic::cell::get(r.0);
+    match x { Nat::Small(y) => y, Nat::Big(b) => b.0 }
+}
+#[main]
+fn main() { say(run(42)); }

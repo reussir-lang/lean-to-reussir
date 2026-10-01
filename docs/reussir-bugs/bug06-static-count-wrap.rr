@@ -1,0 +1,21 @@
+// Bug 6: Nil is a static (immortal) cell. Every call of len takes a
+// reference to the tail Nil: the increment is a plain 32-bit add, the
+// decrement skips static cells but tests "count == 1 -> free" first. After
+// 2^32 references the count wraps to 1 and a decrement frees the static
+// cell.
+// Usage: bug06 [N] (default 4294967300). Expected: prints N.
+// Reussir ef922049: N = 4294967290 prints 4294967290; N = 4294967300 dies
+// with SIGSEGV (exit 139) after about 15 s.
+enum L { Nil, Cons(u64, L) }
+fn len(l : L) -> u64 {
+    match l { L::Nil => { 0 }, L::Cons(x, t) => { 1 + len(t) } }
+}
+fn loop_(x : L, n : u64, acc : u64) -> u64 {
+    if n == 0 { acc } else { loop_(x, n - 1, acc + len(x)) }
+}
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+#[ffi(import)]
+fn count() -> u64 [{ std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(4294967300) }];
+#[main]
+fn main() { say(loop_(L::Cons{1, L::Nil{}}, count(), 0)); }

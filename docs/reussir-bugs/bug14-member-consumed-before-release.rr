@@ -1,0 +1,32 @@
+// Bug 14: in f's arm, the member l is stored in a new cell z that is
+// released again before x's release. fuseArm still fuses l's retain into x's
+// release, so z's release drops l's count below its holders; with x shared
+// (t is used after f), the fused decrement's shared path reloads l from x
+// and retains a freed cell.
+// go runs f on 1000 fresh trees and counts wrong checksums.
+// Expected output: 0. Reussir ef922049: SIGSEGV, an abort or a nonzero
+// count, at every -O level.
+enum T { N(u64, T, T), L }
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+#[ffi(import)]
+fn one() -> u64 [{ 1 }];
+fn cs(t : T) -> u64 { match t { T::L => 1, T::N(a, l, r) => (a + 31 * cs(l) + 17 * cs(r)) % 1000000007 } }
+fn f(x : T) -> T {
+    match x {
+        T::N(a, l, r) => { let y : T = { let z : T = T::N { a, l, T::L{} }; x }; T::L{} },
+        T::L => x
+    }
+}
+fn mk(k : u64) -> T { T::N { k, T::N { k + 1, T::L{}, T::L{} }, T::N { k + 2, T::L{}, T::L{} } } }
+fn go(i : u64, n : u64, bad : u64) -> u64 {
+    if i == n { bad } else {
+        let t = mk(i);
+        let u = f(t);
+        let c = cs(t) * 10 + cs(u);
+        let e = ((i + 31 * (i + 1 + 31 + 17) + 17 * (i + 2 + 31 + 17)) % 1000000007) * 10 + 1;
+        go(i + 1, n, if c == e { bad } else { bad + 1 })
+    }
+}
+#[main]
+fn main() { say(go(one(), 1001, 0)); }

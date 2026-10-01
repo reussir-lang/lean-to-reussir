@@ -1,0 +1,19 @@
+// Bug 8: under --no-pack-record-members the type converter widens S3 (3
+// bytes, followed by 1 byte of padding before the u16) to an i32. Q is then
+// { i32, i16 } in LLVM (8 bytes, align 4), while Reussir's layout of Q is 6
+// bytes with align 2. R holds six Qs: Reussir allocates 38-byte payloads,
+// LLVM's struct is 52 bytes, so building the list writes past each cell.
+// Expected output: 2550200000. Reussir ef922049 with -O aggressive
+// --no-pack-record-members: SIGSEGV (heap overflow); with the default
+// (packed) layout it prints 2550200000.
+struct [value] S3(u8, u8, u8)
+struct [value] Q(S3, u16)
+struct R(Q, Q, Q, Q, Q, Q, u16)
+enum L { Nil, Cons(R, L) }
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+fn mkq(i : u64) -> Q { Q{S3{1, 2, 3}, (i % 1000) as u16} }
+fn build(n : u64, acc : L) -> L { if n == 0 { acc } else { build(n - 1, L::Cons{R{mkq(n), mkq(n), mkq(n), mkq(n), mkq(n), mkq(n), (n % 50000) as u16}, acc}) } }
+fn sum(l : L, acc : u64) -> u64 { match l { L::Nil => { acc }, L::Cons(r, t) => { sum(t, acc + (r.6 as u64) + (r.5.1 as u64) + (r.0.0.2 as u64)) } } }
+#[main]
+fn main() { say(sum(build(100000, L::Nil{}), 0)); }

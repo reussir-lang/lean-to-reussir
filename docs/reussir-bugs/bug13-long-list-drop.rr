@@ -1,0 +1,33 @@
+// Bug 13: the drop glue of a list cell releases the cell's members, recursing
+// into the tail, and frees the cell afterwards. That is not a tail call, so
+// releasing a chain of N cells at once takes N stack frames.
+// Usage: bug13 SHAPE N
+//   SHAPE 0 list:   Cons(u64, L)       recursive member last (Lean's List)
+//   SHAPE 1 snoc:   S(Snoc, Box)       recursive member first, a box last
+//   SHAPE 2 lspine: N(u64, T, T)       a tree whose left child carries the chain
+// Each case builds the chain (a tail-recursive loop), reads one field and
+// drops the whole chain at once. Expected output: N (the field read).
+// Reussir ef922049 on the 8 MB main thread: N = 1000000 dies with
+// "thread 'main' has overflowed its stack" (SIGABRT) for every shape.
+enum L { Cons(u64, L), Nil }
+struct [shared] Box { v : u64 }
+enum Snoc { S(Snoc, Box), E }
+enum T { N(u64, T, T), Lf }
+fn mk(n : u64, acc : L) -> L { if n == 0 { acc } else { mk(n - 1, L::Cons{n, acc}) } }
+fn mks(i : u64, n : u64, acc : Snoc) -> Snoc { if i > n { acc } else { mks(i + 1, n, Snoc::S{acc, Box{v: i}}) } }
+fn lspine(i : u64, n : u64, acc : T) -> T { if i > n { acc } else { lspine(i + 1, n, T::N{i, acc, T::Lf{}}) } }
+fn hd(l : L, n : u64) -> u64 { match l { L::Cons(a, t) => { a * n }, L::Nil => { 0 } } }
+fn hs(s : Snoc) -> u64 { match s { Snoc::S(t, b) => { b.v }, Snoc::E => { 0 } } }
+fn root(t : T) -> u64 { match t { T::N(a, l, r) => { a }, T::Lf => { 0 } } }
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+#[ffi(import)]
+fn arg(i : u64) -> u64 [{ std::env::args().nth(i as usize).and_then(|s| s.parse().ok()).unwrap_or(0) }];
+#[main]
+fn main() {
+    let shape = arg(1);
+    let n = arg(2);
+    if shape == 0 { say(hd(mk(n, L::Nil{}), n)) }
+    else { if shape == 1 { say(hs(mks(1, n, Snoc::E{}))) }
+    else { say(root(lspine(1, n, T::Lf{}))) } }
+}

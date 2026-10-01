@@ -1,0 +1,11 @@
+// Bug 1: a [value] enum is moved as the LLVM struct of one "representative"
+// arm (here B(bool)), so A's u8 payload keeps only the bit that fits B's i1.
+// Expected output: 42. Reussir ef922049 prints 0 (at every -O level).
+enum [value] M { A(u8), B(bool) }
+#[ffi(import)]
+fn say(x : u8) [{ println!("{}", x) }];
+#[main]
+fn main() {
+    let m = M::A{42};
+    match m { M::A(x) => { say(x) }, M::B(v) => { say(7) } }
+}

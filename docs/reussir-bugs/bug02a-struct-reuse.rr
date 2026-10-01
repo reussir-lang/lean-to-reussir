@@ -1,0 +1,15 @@
+// Bug 2, structures: a cell of struct A is reused for struct B (same size).
+// RcCreateFusion skips the store of B's field 1 because its value is a load
+// of A's field 1, comparing only the index. B.1 sits at offset 4, A.1 at 8.
+// Fails under declaration-order layout too (--no-pack-record-members).
+// Expected output: 7005009 (B{7, 5, 9}). Reussir ef922049 prints 7000009.
+struct A(u64, u32)
+struct B(u32, u32, u64)
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+#[ffi(import)]
+fn five() -> u32 [{ 5 }];
+fn f(a : A) -> B { B{7, a.1, 9} }
+fn g(b : B) -> u64 { (b.0 as u64) * 1000000 + (b.1 as u64) * 1000 + b.2 }
+#[main]
+fn main() { say(g(f(A{123, five()}))); }

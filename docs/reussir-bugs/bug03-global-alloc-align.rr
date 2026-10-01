@@ -1,0 +1,44 @@
+// Bug 3: Reussir's Rust global allocator (ReussirGlobalAlloc) raises every
+// Rust allocation to 16-byte alignment. Reussir builds mimalloc with
+// MI_MAX_ALIGN_SIZE=8, so every Rust Box/Vec allocation takes mimalloc's
+// aligned path (mi_malloc_aligned), and later frees in those pages take
+// mimalloc's generic path.
+// The texture keeps 1000 Box<u64> (size 8, align 8) and 1000 mi_malloc(8)
+// blocks alive and counts how many are 16-aligned. Then it times
+// allocate/free pairs of 16 bytes through Box::new and through mi_malloc
+// (best of 5 rounds of 20,000,000).
+// Expected (an allocator that keeps Rust's alignment): about half of the
+// boxes 16-aligned, as for mi_malloc(8).
+// Reussir ef922049: "Box<u64> 16-aligned: 1000 of 1000"; the pairs took
+// 6-33% longer through Box::new on the (loaded) test machine.
+#[ffi(import)]
+fn probe() [{
+    use std::time::Instant;
+    extern "C" { fn mi_malloc(size: usize) -> *mut u8; fn mi_free(p: *mut u8); }
+    let boxes: Vec<Box<u64>> = (0..1000u64).map(Box::new).collect();
+    let raw: Vec<*mut u8> = (0..1000).map(|_| unsafe { mi_malloc(8) }).collect();
+    let a = boxes.iter().filter(|b| (&***b as *const u64 as usize) % 16 == 0).count();
+    let m = raw.iter().filter(|p| (**p as usize) % 16 == 0).count();
+    for p in raw { unsafe { mi_free(p) } }
+    drop(boxes);
+    let n = 20_000_000u64;
+    let (mut t_box, mut t_mi) = (f64::MAX, f64::MAX);
+    for _ in 0..5 {
+        let t0 = Instant::now();
+        for i in 0..n { drop(std::hint::black_box(Box::new([i, i]))); }
+        t_box = t_box.min(t0.elapsed().as_secs_f64());
+        let t1 = Instant::now();
+        for i in 0..n {
+            unsafe {
+                let p = std::hint::black_box(mi_malloc(16));
+                *(p as *mut u64) = i;
+                mi_free(p);
+            }
+        }
+        t_mi = t_mi.min(t1.elapsed().as_secs_f64());
+    }
+    println!("Box<u64> 16-aligned: {} of 1000; mi_malloc(8) 16-aligned: {} of 1000", a, m);
+    println!("alloc/free pairs: Box::new {:.3} s, mi_malloc {:.3} s, ratio {:.2}", t_box, t_mi, t_box / t_mi);
+}];
+#[main]
+fn main() { probe(); }

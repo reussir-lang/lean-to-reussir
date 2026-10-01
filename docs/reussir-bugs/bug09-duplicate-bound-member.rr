@@ -1,0 +1,32 @@
+// Bug 9: in f's arm, the members l and r are used twice while x is still
+// live (once in the dead z, once in the result). RcDispatchFusion's fuseArm
+// fuses every retain of a member into x's release without a duplicate
+// check (boundMembers = [1, 2, 1, 2]); the unique path of the decrement
+// transfers one reference per member, so each member loses a count and is
+// freed while the result still points to it.
+// go runs f on 1000 fresh trees and counts wrong checksums.
+// Expected output: 0. Reussir ef922049: SIGSEGV (or a nonzero count) at
+// every -O level, e.g. with -O aggressive --no-pack-record-members
+// --reuse-across-call.
+enum T { N(u64, T, T), L }
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+#[ffi(import)]
+fn one() -> u64 [{ 1 }];
+fn cs(t : T) -> u64 { match t { T::L => 1, T::N(a, l, r) => (a + 31 * cs(l) + 17 * cs(r)) % 1000000007 } }
+fn f(x : T) -> T {
+    match x {
+        T::N(a, l, r) => { let y : T = { let z : T = T::N { a, l, r }; x }; T::N { a, r, l } },
+        T::L => x
+    }
+}
+fn mk(k : u64) -> T { T::N { k, T::N { k + 1, T::L{}, T::L{} }, T::N { k + 2, T::L{}, T::L{} } } }
+fn go(i : u64, n : u64, bad : u64) -> u64 {
+    if i == n { bad } else {
+        let c = cs(f(mk(i)));
+        let e = (i + 31 * (i + 2 + 31 + 17) + 17 * (i + 1 + 31 + 17)) % 1000000007;
+        go(i + 1, n, if c == e { bad } else { bad + 1 })
+    }
+}
+#[main]
+fn main() { say(go(one(), 1001, 0)); }

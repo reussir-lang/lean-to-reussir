@@ -1,0 +1,17 @@
+// Bug 2, variants: a unique cell of M::A is reused in place for M::B. The
+// store of B's field 0 is skipped because it is a load of A's field 0 and
+// the member types agree for indices 0..0 in declaration order. The packed
+// layout (the default) puts A.0 at offset 8 and B.0 at offset 0.
+// Expected output: 5001. Reussir ef922049 prints 11001 with the default
+// (packed) layout and 5001 with --no-pack-record-members.
+enum M { A(u32, u64), B(u32, u32, u32) }
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+fn f(m : M) -> u64 {
+    match m {
+        M::A(c, x) => { f(M::B{c, 1, 0}) },
+        M::B(c, d, e) => { (c as u64) * 1000 + (d as u64) }
+    }
+}
+#[main]
+fn main() { say(f(M::A{5, 11})); }
