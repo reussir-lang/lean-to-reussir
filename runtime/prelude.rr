@@ -2478,9 +2478,137 @@ fn l2r_diag_println(s : LStr) -> u64 { l2r_stderr_put(lean_string_push(s, 10)) }
 // ===========================================================================
 // ST.Ref / IO.Ref
 //
-// A reference is a shared cell (`LRef<T>`); all aliases see updates. The
-// `lean_st_*` externs return BaseIO results, so lean2rr wraps these
-// primitives.
+// lean2rr represents a reference whose contents have type `T` as a generated
+// shared record `L2RRef_N(Cell<T>)` around Reussir's mutable cell, so all
+// aliases see updates and the value keeps its own representation; these
+// helpers act on the cell (`r.0`). `get` returns a copy (the cell keeps its
+// reference); `swap` moves the old value out, so after `swap` with the
+// placeholder (Lean's `take`) a value held only by the cell is unshared.
+// The `lean_st_*` externs return BaseIO results, so lean2rr wraps these.
+
+fn l2r_rc_get<T>(c : Cell<T>) -> T { core::intrinsic::cell::get(c) }
+
+fn l2r_rc_set<T>(c : Cell<T>, v : T) -> u64 {
+    core::intrinsic::cell::set(c, v);
+    0
+}
+
+fn l2r_rc_swap<T>(c : Cell<T>, v : T) -> T {
+    let old = core::intrinsic::cell::get(c);
+    core::intrinsic::cell::set(c, v);
+    old
+}
+
+// A reference to a `Nat` / `Int`: Reussir's cells do not hold `[value]`
+// records with counted members, so the value is split as in `LNatArr`: a
+// small value is an odd tagged word in the first cell; any other value has
+// an even word there and its big number in the second cell. Each operation
+// touches only the first cell on the small path (every access of a cell
+// through the record costs its count). A big number replaced by a small
+// value stays in the second cell until the next big value or the end of the
+// reference.
+enum L2RBigOpt {
+    n,
+    s(LBig)
+}
+
+struct L2RNatRef(Cell<u64>, Cell<L2RBigOpt>)
+
+struct L2RIntRef(Cell<u64>, Cell<L2RBigOpt>)
+
+fn l2r_bigref_big(c : Cell<L2RBigOpt>) -> LBig {
+    match core::intrinsic::cell::get(c) {
+        L2RBigOpt::s(b) => b,
+        L2RBigOpt::n => l2r_unreachable<LBig>()
+    }
+}
+
+fn l2r_bigref_put_big(w0 : Cell<u64>, w1 : Cell<L2RBigOpt>, b : LBig) -> u64 {
+    core::intrinsic::cell::set(w1, L2RBigOpt::s{b});
+    core::intrinsic::cell::set(w0, 0);
+    0
+}
+
+fn l2r_natref_new(x : Nat) -> L2RNatRef {
+    match x {
+        Nat::Small(v) => if (v >> 63) == 0 {
+            L2RNatRef{core::intrinsic::cell::alloc((v << 1) | 1), core::intrinsic::cell::alloc(L2RBigOpt::n{})}
+        } else {
+            L2RNatRef{core::intrinsic::cell::alloc(0), core::intrinsic::cell::alloc(L2RBigOpt::s{l2r_big_of_u64(v)})}
+        },
+        Nat::Big(b) => L2RNatRef{core::intrinsic::cell::alloc(0), core::intrinsic::cell::alloc(L2RBigOpt::s{b})}
+    }
+}
+
+fn l2r_natref_get(r : L2RNatRef) -> Nat {
+    let w : u64 = core::intrinsic::cell::get(r.0);
+    if (w & 1) == 1 { Nat::Small{w >> 1} } else { l2r_nat_norm(l2r_bigref_big(r.1)) }
+}
+
+fn l2r_natref_set(r : L2RNatRef, x : Nat) -> u64 {
+    match x {
+        Nat::Small(v) => if (v >> 63) == 0 { l2r_rc_set<u64>(r.0, (v << 1) | 1) } else { l2r_bigref_put_big(r.0, r.1, l2r_big_of_u64(v)) },
+        Nat::Big(b) => l2r_bigref_put_big(r.0, r.1, b)
+    }
+}
+
+fn l2r_natref_swap(r : L2RNatRef, x : Nat) -> Nat {
+    match x {
+        Nat::Small(v) => if (v >> 63) == 0 {
+            let w : u64 = l2r_rc_swap<u64>(r.0, (v << 1) | 1);
+            if (w & 1) == 1 { Nat::Small{w >> 1} } else { l2r_nat_norm(l2r_bigref_big(r.1)) }
+        } else { l2r_natref_swap_big(r, l2r_big_of_u64(v)) },
+        Nat::Big(b) => l2r_natref_swap_big(r, b)
+    }
+}
+
+fn l2r_natref_swap_big(r : L2RNatRef, b : LBig) -> Nat {
+    let old : Nat = l2r_natref_get(r);
+    let z : u64 = l2r_bigref_put_big(r.0, r.1, b);
+    old
+}
+
+fn l2r_intref_new(x : Int) -> L2RIntRef {
+    match x {
+        Int::Small(v) => if l2r_int_is_tag_small(v) {
+            L2RIntRef{core::intrinsic::cell::alloc(((v << 1) | 1) as u64), core::intrinsic::cell::alloc(L2RBigOpt::n{})}
+        } else {
+            L2RIntRef{core::intrinsic::cell::alloc(0), core::intrinsic::cell::alloc(L2RBigOpt::s{l2r_big_of_i64(v)})}
+        },
+        Int::Big(b) => L2RIntRef{core::intrinsic::cell::alloc(0), core::intrinsic::cell::alloc(L2RBigOpt::s{b})}
+    }
+}
+
+fn l2r_intref_get(r : L2RIntRef) -> Int {
+    let w : u64 = core::intrinsic::cell::get(r.0);
+    if (w & 1) == 1 { Int::Small{(w as i64) >> 1} } else { l2r_int_norm(l2r_bigref_big(r.1)) }
+}
+
+fn l2r_intref_set(r : L2RIntRef, x : Int) -> u64 {
+    match x {
+        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_rc_set<u64>(r.0, ((v << 1) | 1) as u64) } else { l2r_bigref_put_big(r.0, r.1, l2r_big_of_i64(v)) },
+        Int::Big(b) => l2r_bigref_put_big(r.0, r.1, b)
+    }
+}
+
+fn l2r_intref_swap(r : L2RIntRef, x : Int) -> Int {
+    match x {
+        Int::Small(v) => if l2r_int_is_tag_small(v) {
+            let w : u64 = l2r_rc_swap<u64>(r.0, ((v << 1) | 1) as u64);
+            if (w & 1) == 1 { Int::Small{(w as i64) >> 1} } else { l2r_int_norm(l2r_bigref_big(r.1)) }
+        } else { l2r_intref_swap_big(r, l2r_big_of_i64(v)) },
+        Int::Big(b) => l2r_intref_swap_big(r, b)
+    }
+}
+
+fn l2r_intref_swap_big(r : L2RIntRef, b : LBig) -> Int {
+    let old : Int = l2r_intref_get(r);
+    let z : u64 = l2r_bigref_put_big(r.0, r.1, b);
+    old
+}
+
+// `LRef<T>`: a shared cell of the runtime (a 0-or-1 element vector), used
+// for promises.
 
 #[ffi(import)]
 fn l2r_ref_new<T>(v : T) -> LRef<T> [{ leanrt::array::from_rc(Rc::new(vec![v])) }];

@@ -1,5 +1,6 @@
 import Lean
 import LeanToReussir.Lower
+import LeanToReussir.SinkProj
 import LeanToReussir.MonoRetype
 import LeanToReussir.FloatLits
 import LeanToReussir.Outline
@@ -618,7 +619,9 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
       let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
       if name.isEmpty then acc else acc.insert name.toString
     | _ => acc
-  let fns := Outline.outlineFns {} variants taken st.fns
+  -- Projections sunk into the branches that use them (`SinkProj`), then
+  -- oversized tail paths outlined (`Outline`).
+  let fns := Outline.outlineFns {} variants taken (st.fns.map (·.sinkProj))
   let mut out := prelude ++ "\n// ---- generated types ----\n\n"
   for it in st.typeItems do out := out ++ it.render ++ "\n"
   for it in fnItems do out := out ++ it.render ++ "\n"

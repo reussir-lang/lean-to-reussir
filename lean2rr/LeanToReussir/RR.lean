@@ -37,6 +37,9 @@ def fnTypeName (t : Ty) : String := "L2RFn_" ++ t.enc
 
 partial def Ty.render : Ty → String
   | .named n => n
+  -- An enumeration stored in an array as its index (Lower's
+  -- `arrayStorage`): the index type, `L2RIx<u8, T>` renders as `u8`.
+  | .app "L2RIx" #[w, _] => w.render
   | .app n args => s!"{n}<{", ".intercalate (args.toList.map Ty.render)}>"
   | t@(.fn ..) => fnTypeName t
   -- The arrow is right-associative; parenthesize a function domain.

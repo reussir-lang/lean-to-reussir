@@ -127,6 +127,17 @@ inductive FnVariant where
   | wrap (src : RR.Ty)
   deriving BEq, Hashable, Inhabited
 
+/-- How a reference's cell stores its element (see `refType`). -/
+inductive RefKind where
+  /-- `L2RRef_N(Cell<e>)`. -/
+  | direct
+  /-- `L2RRef_N(Cell<ElemBox(e)>)`, for `[value]` structures. -/
+  | boxed (bn : String)
+  /-- The prelude's `L2RNatRef` / `L2RIntRef`. -/
+  | nat
+  | int
+  deriving BEq, Inhabited
+
 structure LowerState where
   /-- Targets of function values, by id. -/
   fnTargets : Std.HashMap String FnTarget := {}
@@ -202,6 +213,13 @@ structure LowerState where
   body was generated for. -/
   boxAddrWanted : Bool := false
   boxAddrDone : Nat := 0
+  /-- Reference types (see `refType`): element type ↦ name, and back (with
+  how the cell stores the element). -/
+  refTypes : Std.HashMap RR.Ty String := {}
+  refInfos : Std.HashMap String (RR.Ty × RefKind) := {}
+  /-- Operations on references held in a `Box` (see Lower's
+  `refBoxOpFn`): operation and element type. -/
+  refBoxOps : Array (String × RR.Ty) := #[]
   counter : Nat := 0
 
 abbrev LowerM := ReaderT LowerCtx (StateRefT LowerState CoreM)
@@ -243,13 +261,15 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
   | .named n =>
     if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
             "LStr", "LBig", "LNatArr", "LIntArr", "LHandle", boxName] then return true
+    -- A reference is a shared record (see `refType`).
+    if (← get).refInfos.contains n then return true
     match (← get).typeInfos[n]? with
     | some info => return info.shape != .enumLike && !info.value
     -- A type whose fields are being lowered: decided from its shape
     -- beforehand (`nominalType`), so that `Array T` in its own fields has
     -- the representation it has everywhere else.
     | none => return ((← get).pendingBoundary[n]?).getD false
-  | .app n _ => return n == "RVec" || n == "LRef" || n == "LCell"
+  | .app n _ => return n == "RVec" || n == "LRef" || n == "LCell" || n == "L2RIx"
   -- A function value is a shared enum.
   | .fn .. => return true
   | .cls .. => return false
@@ -305,13 +325,97 @@ def arrayElemTy (t : RR.Ty) : LowerM (RR.Ty × Bool) := do
     typeItems := s.typeItems.push (.struct n false #[t]) }
   return (.named n, true)
 
+/-- An enumeration (a generated `[value]` enum without fields) or the unit
+type, which arrays store as an index (translation plan §5.1, where native
+Lean stores a tagged scalar): its index type (`u8`, `u16` or `u32`, by the
+number of constructors) and the generated conversions to and from it
+(`l2r_ix_of_T`, `l2r_ix_to_T`; an index past the last constructor gives the
+last one, as `ofIndex`). -/
+def ixStorage? (t : RR.Ty) : LowerM (Option (RR.Ty × String × String)) := do
+  let .named tn := t | return none
+  let ctors ← if tn == "L2RUnit" then pure #["u"] else
+    match (← get).typeInfos[tn]? with
+    | some info =>
+      if info.shape != .enumLike then return none
+      pure (info.ctorOrder.filterMap fun c => (info.ctors.find? c).map (·.variant))
+    | none => return none
+  let w := RR.Ty.named (if ctors.size ≤ 256 then "u8" else if ctors.size ≤ 65536 then "u16" else "u32")
+  let ofFn := s!"l2r_ix_of_{tn}"
+  let toFn := s!"l2r_ix_to_{tn}"
+  unless (← get).fns.any (fun | .fn n .. => n == ofFn | _ => false) do
+    let lit (i : Nat) : RR.Block := ⟨#[("i", some w, .atom (toString i))], .var "i"⟩
+    let ofBody : RR.Block :=
+      if ctors.isEmpty then .ofExpr (.call "l2r_unreachable" #[w] #[])
+      else if tn == "L2RUnit" then lit 0
+      else .ofExpr (.mtch (.var "x") (ctors.zipIdx.map fun (v, i) =>
+        { ty := tn, ctor := some v, binders := #[], body := lit i : RR.Arm }))
+    -- A binary search over the constructor positions.
+    let rec search (lo hi : Nat) (fuel : Nat) : RR.Expr :=
+      match fuel with
+      | 0 => .ctor tn (some ctors[lo]!) #[]
+      | fuel + 1 =>
+        if hi ≤ lo + 1 then .ctor tn (some ctors[lo]!) #[]
+        else
+          let mid := (lo + hi) / 2
+          .block ⟨#[(s!"m{mid}", some w, .atom (toString mid))],
+            .ite (.atom s!"i < m{mid}") (.ofExpr (search lo mid fuel)) (.ofExpr (search mid hi fuel))⟩
+    let toBody : RR.Block :=
+      if ctors.isEmpty then .ofExpr (.call "l2r_unreachable" #[t] #[])
+      else .ofExpr (search 0 ctors.size 64)
+    modify fun s => { s with fns := s.fns ++ #[.fn ofFn #[("x", t)] w ofBody, .fn toFn #[("i", w)] t toBody] }
+  return some (w, ofFn, toFn)
+
+/-- The storage type of array elements of Reussir type `t`: an index for an
+enumeration or the unit type (`ixStorage?`), otherwise as `arrayElemTy`. -/
+def arrayStorage (t : RR.Ty) : LowerM RR.Ty := do
+  if let some (w, _, _) ← ixStorage? t then return .app "L2RIx" #[w, t]
+  return (← arrayElemTy t).1
+
 /-- The element type an array storage type holds, and whether the storage
 is a one-field wrapper (see `arrayElemTy`). -/
 def storageElem (st : RR.Ty) : LowerM (RR.Ty × Bool) := do
+  if let .app "L2RIx" #[_, v] := st then return (v, false)
   let .named n := st | return (st, false)
   for (k, v) in (← get).tupleTypes.toList do
     if v == n && k.size == 2 && k[1]! == .named "__elem_box" then return (k[0]!, true)
   return (st, false)
+
+/-- The representation of an `ST.Ref` whose contents have Reussir type `e`
+(translation plan §5.1): a shared record holding Reussir's mutable cell, one
+per element type, which stores the element in its own representation (all
+aliases of a reference share the record). A `Nat` or `Int` is stored as in
+`LNatArr` (a tagged word in a `Cell<u64>`, a big value in a second cell:
+the prelude's `L2RNatRef`/`L2RIntRef`), a `[value]` structure in an
+`ElemBox` (Reussir's cells do not hold `[value]` records with counted
+members); other values as they are, `L2RRef_N(Cell<e>)`. -/
+def refType (e : RR.Ty) : LowerM RR.Ty := do
+  if let some n := (← get).refTypes[e]? then return .named n
+  let register (n : String) (k : RefKind) (item : Option RR.Item) : LowerM RR.Ty := do
+    modify fun s => { s with
+      refTypes := s.refTypes.insert e n
+      refInfos := s.refInfos.insert n (e, k)
+      typeItems := match item with | some it => s.typeItems.push it | none => s.typeItems }
+    return .named n
+  if e == .named "Nat" then return ← register "L2RNatRef" .nat none
+  if e == .named "Int" then return ← register "L2RIntRef" .int none
+  let direct ← match e with
+    | .named t =>
+      if t ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "L2RUnit"] then pure true
+      else if ((← get).typeInfos[t]?.map (·.shape == .enumLike)).getD false then pure true
+      else isBoundaryTy e
+    | .cls .. => pure false
+    | _ => isBoundaryTy e
+  let n ← fresh "L2RRef"
+  if direct then return ← register n .direct (some (.struct n false #[.app "Cell" #[e]]))
+  let (st, _) ← arrayElemTy e
+  let .named bn := st | return ← register n .direct (some (.struct n false #[.app "Cell" #[e]]))
+  register n (.boxed bn) (some (.struct n false #[.app "Cell" #[st]]))
+
+/-- The element type of reference type `t` and how its cell stores it, if
+`t` is a reference type. -/
+def refElem? (t : RR.Ty) : LowerM (Option (RR.Ty × RefKind)) := do
+  let .named n := t | return none
+  return (← get).refInfos[n]?
 
 /-- A string literal: `l2r_str_lit(id)`, which builds the string from a
 table of byte strings generated with the program (`strLitTable`). Passing
@@ -349,14 +453,18 @@ structure ArrayRepr where
   storage : RR.Ty
   value : RR.Ty
   wrapped : Bool
+  /-- For an enumeration stored as an index (`ixStorage?`): the conversions
+  to and from the index. -/
+  ix : Option (String × String) := none
 
 def arrayRepr? (t : RR.Ty) : LowerM (Option ArrayRepr) := do
   match t with
-  | .named "LNatArr" => return some ⟨"natarr", #[], .named "Nat", .named "Nat", false⟩
-  | .named "LIntArr" => return some ⟨"intarr", #[], .named "Int", .named "Int", false⟩
+  | .named "LNatArr" => return some { family := "natarr", tyArgs := #[], storage := .named "Nat", value := .named "Nat", wrapped := false }
+  | .named "LIntArr" => return some { family := "intarr", tyArgs := #[], storage := .named "Int", value := .named "Int", wrapped := false }
   | .app "RVec" #[st] =>
     let (v, w) ← storageElem st
-    return some ⟨"array", #[st], st, v, w⟩
+    let ix ← if st matches .app "L2RIx" _ then pure ((← ixStorage? v).map fun (_, o, t) => (o, t)) else pure none
+    return some { family := "array", tyArgs := #[st], storage := st, value := v, wrapped := w, ix }
   | _ => return none
 
 /-- A call of runtime array primitive `l2r_<family>_<op>`. -/
@@ -365,9 +473,13 @@ def ArrayRepr.call (r : ArrayRepr) (op : String) (args : Array RR.Expr) : RR.Exp
 
 /-- Store / load an element (wrapping into the storage type if needed). -/
 def ArrayRepr.store (r : ArrayRepr) (x : RR.Expr) : RR.Expr :=
-  if r.wrapped then match r.storage with | .named n => .ctor n none #[x] | _ => x else x
+  match r.ix with
+  | some (o, _) => .call o #[] #[x]
+  | none => if r.wrapped then match r.storage with | .named n => .ctor n none #[x] | _ => x else x
 def ArrayRepr.load (r : ArrayRepr) (x : RR.Expr) : RR.Expr :=
-  if r.wrapped then .field x 0 else x
+  match r.ix with
+  | some (_, t) => .call t #[] #[x]
+  | none => if r.wrapped then .field x 0 else x
 
 /-- The runtime function implementing Lean array extern `sym` for arrays of
 family `fam` (`natarr`, `intarr`): the same argument list, element type
@@ -403,7 +515,7 @@ def fieldAlign (t : RR.Ty) : LowerM Nat := do
 def builtinTypeNames : List Name :=
   [``UInt8, ``UInt16, ``UInt32, ``UInt64, ``USize, ``Float, ``Float32, ``Bool, ``IO.FS.Handle,
    ``Unit, ``PUnit, ``lcVoid, ``lcErased, ``lcAny, ``Nat, ``Int, ``String, ``Thunk, ``Task,
-   ``ByteArray, ``FloatArray, ``Array]
+   ``ByteArray, ``FloatArray, ``Array, typedRefName]
 
 /-- The key of the generated type for inductive `ival` applied to `args`
 (only relevant arguments distinguish instances). -/
@@ -442,6 +554,10 @@ mutual
     | _ => return RR.Ty.box
 
   partial def lowerTypeApp (n : Name) (args : Array Expr) : LowerM RR.Ty := do
+    if n == typedRefName then
+      return ← refType (← match args[0]? with
+        | some a => lowerType a
+        | none => pure RR.Ty.box)
     match n with
     | ``UInt8 => return .named "u8"
     | ``UInt16 => return .named "u16"
@@ -471,8 +587,7 @@ mutual
       -- boxed scalars (runtime `LNatArr`/`LIntArr`).
       if elem == .named "Nat" then return .named "LNatArr"
       if elem == .named "Int" then return .named "LIntArr"
-      let (elem, _) ← arrayElemTy elem
-      return .app "RVec" #[elem]
+      return .app "RVec" #[← arrayStorage elem]
     | _ =>
       -- An inductive with computed fields is represented by its
       -- implementation inductive `T._impl` (whose constructors also store

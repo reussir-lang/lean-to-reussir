@@ -282,6 +282,16 @@ computed at once). -/
 def lazyDone (z : String) (v : RR.Expr) : RR.Expr :=
   .call "l2r_lcell_new" #[.named z] #[.ctor z (some "done") #[v]]
 
+/-- A new reference of type `rt` (element type `e`, stored as `k`) holding
+`v : e`. -/
+def refNew (rt : RR.Ty) (e : RR.Ty) (k : RefKind) (v : RR.Expr) : RR.Expr :=
+  let rn := match rt with | .named n => n | _ => ""
+  match k with
+  | .direct => .ctor rn none #[.call "core::intrinsic::cell::alloc" #[] #[v]]
+  | .boxed bn => .ctor rn none #[.call "core::intrinsic::cell::alloc" #[] #[.ctor bn none #[v]]]
+  | .nat => .call "l2r_natref_new" #[] #[v]
+  | .int => .call "l2r_intref_new" #[] #[v]
+
 /-! ## Conversions -/
 
 /-- Head constant of the Lean type a generated nominal type represents. -/
@@ -342,6 +352,10 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
       else if n == "LIntArr" then pure (.ofExpr (.call "l2r_intarr_empty" #[] #[]))
       else if n == boxName then
         pure (.ofExpr (.ctor boxName (some (← boxVariant .unit)) #[.unitVal]))
+      else if let some (e, k) := (← get).refInfos[n]? then
+        -- A reference (never used: any cell will do).
+        if (← get).zeroBusy.contains e then pure unreachable
+        else pure (.ofExpr (refNew t e k (← zeroValue e)))
       else if let some info := (← get).typeInfos[n]? then
         -- The first constructor none of whose fields is a type whose
         -- placeholder is being built (so the value is finite).
@@ -379,7 +393,7 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
   -- allocate).
   let heap ← match t with
     | .named n =>
-      if n ∈ ["LStr", "LNatArr", "LIntArr", boxName] then pure true
+      if n ∈ ["LStr", "LNatArr", "LIntArr", boxName] || (← get).refInfos.contains n then pure true
       else match (← get).typeInfos[n]? with
         | some info => pure (info.shape != .enumLike && !info.value)
         | none => pure ((← storageElem t).2)
@@ -1534,47 +1548,134 @@ def listFold (name : String) (listTy accTy elemTy : RR.Ty) (step : RR.Expr → R
   modify fun s => { s with fns := s.fns.push (.fn name #[("l", listTy), ("acc", accTy)] accTy body) }
   return name
 
-/-- Glue for `ST.Ref` operations on the runtime cell `LRef<L2RBox>`.
-A reference itself has mono type `lcAny` (Lean unwraps `ST.Ref` to an opaque
-pointer), so it is passed around boxed. Its contents are boxed too, whatever
-the element type `α` of the operation: a reference created by uniform code
-(at `α = lcAny`) is read and written by typed code as well, and a cell
-cannot be converted without losing aliasing. -/
+/-- The generated function performing reference operation `op` (`get`,
+`take`, `set`, `swap`, at element type `a`; `addr`) on a reference held in
+a `Box`: a match over the reference types the program boxes. Its body is
+generated at the end (`finishRefFns`), when they are all known. -/
+def refBoxOpFn (op : String) (a : RR.Ty) : LowerM String := do
+  let a := if op == "addr" then RR.Ty.named "u64" else a
+  unless (← get).refBoxOps.contains (op, a) do
+    modify fun s => { s with refBoxOps := s.refBoxOps.push (op, a) }
+  return if op == "addr" then "l2r_refbox_addr" else s!"l2r_refbox_{op}_{a.enc}"
+
+/-- Reference operation `op` on a reference `r` whose cell stores elements
+of type `e` as `k`, for an operation at element type `a` (values converted
+between the two; `none` if they cannot be): `get` (a copy: the cell keeps
+its reference), `take` (the value moves out and the cell gets the
+placeholder, as `lean_st_ref_take` stores `box(0)`: Lean's `modify` is
+take-then-set, so a value only the cell holds stays unshared and is updated
+in place), `set` (`u64` result), `swap`. -/
+def refCellOp (op : String) (r : RR.Expr) (e : RR.Ty) (k : RefKind) (a : RR.Ty) (v : Option RR.Expr) :
+    LowerM (Option RR.Expr) := do
+  let cell := RR.Expr.field r 0
+  let toA (x : RR.Expr) : LowerM (Option RR.Expr) := tryCoerce x e a
+  let fam := if k == .int then "intref" else "natref"
+  let v' ← match v with
+    | some v => tryCoerce v a e
+    | none => pure none
+  if v.isSome && v'.isNone then return none
+  match k, op with
+  | .direct, "get" => toA (.call "l2r_rc_get" #[e] #[cell])
+  | .direct, "take" => toA (.call "l2r_rc_swap" #[e] #[cell, ← zeroValue e])
+  | .direct, "set" => return some (.call "l2r_rc_set" #[e] #[cell, v'.get!])
+  | .direct, "swap" => toA (.call "l2r_rc_swap" #[e] #[cell, v'.get!])
+  | .boxed bn, "get" => toA (.field (.call "l2r_rc_get" #[.named bn] #[cell]) 0)
+  | .boxed bn, "take" => toA (.field (.call "l2r_rc_swap" #[.named bn] #[cell, .ctor bn none #[← zeroValue e]]) 0)
+  | .boxed bn, "set" => return some (.call "l2r_rc_set" #[.named bn] #[cell, .ctor bn none #[v'.get!]])
+  | .boxed bn, "swap" => toA (.field (.call "l2r_rc_swap" #[.named bn] #[cell, .ctor bn none #[v'.get!]]) 0)
+  | _, "get" => toA (.call s!"l2r_{fam}_get" #[] #[r])
+  | _, "take" => toA (.call s!"l2r_{fam}_swap" #[] #[r, ← zeroValue e])
+  | _, "set" => return some (.call s!"l2r_{fam}_set" #[] #[r, v'.get!])
+  | _, "swap" => toA (.call s!"l2r_{fam}_swap" #[] #[r, v'.get!])
+  | _, _ => return none
+
+/-- Glue for `ST.Ref` operations (translation plan §5.1). A reference whose
+contents have Reussir type `e` is a generated record holding a Reussir
+cell, `L2RRef_N(Cell<e>)` (`refType`): one allocation per reference, the
+value stored in its own representation. `ST.Prim.mkRef` at element type `α`
+creates one at `⟦α⟧` (`Box` for uniform code, at `α = lcAny`). Lean's mono
+phase types every reference `lcAny`, so a reference travels in a `Box`
+except where Stage 3 typed its binders (`typedRef`, §4). An operation on a
+typed handle accesses its cell directly, converting between the cell's
+element type and the operation's (they differ when uniform code works on a
+typed reference or the reverse); on a handle in a `Box`, it calls a
+generated dispatch over the reference types that are ever boxed
+(`refBoxOpFn`). So all aliases of a reference share its one cell, whatever
+representation they see it at. `argTys` are the Reussir types of `args`
+(the handles' own, for direct calls). -/
 def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
-    (args : Array RR.Expr) : LowerM (Option RR.Expr) := do
+    (args : Array RR.Expr) (argTys : Array RR.Ty) : LowerM (Option RR.Expr) := do
   let some α := typeArgs[1]? | return none
-  let α ← toMonoTypeKeep α
-  let elemTy ← lowerType α
-  let st := RR.Ty.box
-  let refTy := RR.Ty.app "LRef" #[st]
-  let wrap (e : RR.Expr) : LowerM RR.Expr := coerce e elemTy st
-  let unwrap (e : RR.Expr) : LowerM RR.Expr := coerce e st elemTy
+  let a ← lowerType (← toMonoTypeKeep α)
   let resTy ← lowerType ret
   let payload ← ioPayloadTy resTy
-  let asRef (i : Nat) : LowerM RR.Expr := do
-    coerce args[i]! (← lowerType params[i]!) refTy
+  let tyOf (i : Nat) : LowerM RR.Ty := do
+    match argTys[i]? with
+    | some t => pure t
+    | none => lowerType params[i]!
+  let value (i : Nat) : LowerM RR.Expr := do coerce args[i]! (← tyOf i) a
+  -- Operation `op` on handle `i` (with value `v`): its result at `a` (`u64`
+  -- for `set`).
+  let onHandle (op : String) (i : Nat) (v : Option RR.Expr) : LowerM RR.Expr := do
+    let ht ← tyOf i
+    if let some (e, k) ← refElem? ht then
+      let resT := if op == "set" then RR.Ty.named "u64" else a
+      let (pre, h) ← match args[i]! with
+        | .var x => pure (#[], RR.Expr.var x)
+        | x => do
+          let n ← fresh "rh"
+          pure (#[(n, some ht, x)], RR.Expr.var n)
+      let r ← match ← refCellOp op h e k a v with
+        | some r => pure r
+        | none => coerce (.call "l2r_internal_panic_at" #[e] #[.atom "0"]) e resT
+      return if pre.isEmpty then r else .block ⟨pre, r⟩
+    let h ← coerce args[i]! ht RR.Ty.box
+    return .call (← refBoxOpFn op a) #[] (#[h] ++ v.toArray)
+  let addrOf (i : Nat) : LowerM RR.Expr := do
+    let ht ← tyOf i
+    if (← refElem? ht).isSome then return .call "l2r_ptr_addr_rec" #[ht] #[args[i]!]
+    return .call (← refBoxOpFn "addr" a) #[] #[← coerce args[i]! ht RR.Ty.box]
   match orig with
   | ``ST.Prim.mkRef =>
-    let r ← coerce (.call "l2r_ref_new" #[st] #[← wrap args[0]!]) refTy payload
-    return some (← wrapIOResult resTy r)
+    let rt ← refType a
+    let some (e, k) ← refElem? rt | return none
+    let r := refNew rt e k (← value 0)
+    return some (← wrapIOResult resTy (← coerce r rt payload))
   | ``ST.Prim.Ref.get =>
-    let v ← coerce (← unwrap (.call "l2r_ref_get" #[st] #[← asRef 0])) elemTy payload
-    return some (← wrapIOResult resTy v)
-  -- `take` moves the value out (Lean's `modify` is take-then-set, so the
-  -- value stays unshared and is updated in place).
+    return some (← wrapIOResult resTy (← coerce (← onHandle "get" 0 none) a payload))
   | ``ST.Prim.Ref.take =>
-    let v ← coerce (← unwrap (.call "l2r_ref_take" #[st] #[← asRef 0])) elemTy payload
-    return some (← wrapIOResult resTy v)
+    return some (← wrapIOResult resTy (← coerce (← onHandle "take" 0 none) a payload))
   | ``ST.Prim.Ref.set =>
     let r ← fresh "rs"
-    return some (.block ⟨#[(r, some (.named "u64"), .call "l2r_ref_set" #[st] #[← asRef 0, ← wrap args[1]!])],
+    return some (.block ⟨#[(r, some (.named "u64"), ← onHandle "set" 0 (some (← value 1)))],
       ← wrapIOResult resTy .unitVal⟩)
   | ``ST.Prim.Ref.swap =>
-    let v ← coerce (← unwrap (.call "l2r_ref_swap" #[st] #[← asRef 0, ← wrap args[1]!])) elemTy payload
-    return some (← wrapIOResult resTy v)
+    return some (← wrapIOResult resTy (← coerce (← onHandle "swap" 0 (some (← value 1))) a payload))
   | ``ST.Prim.Ref.ptrEq =>
-    return some (← wrapIOResult resTy (.call "l2r_ref_ptr_eq" #[st] #[← asRef 0, ← asRef 1]))
+    let (x, y) := (← fresh "ra", ← fresh "ra")
+    let u64 := RR.Ty.named "u64"
+    return some (← wrapIOResult resTy
+      (.block ⟨#[(x, some u64, ← addrOf 0), (y, some u64, ← addrOf 1)], .atom s!"{x} == {y}"⟩))
   | _ => return none
+
+/-- The bodies of the reference dispatch functions (`refBoxOpFn`): one arm
+per reference type that is boxed. A `Box` that holds no reference is
+unreachable there. -/
+def finishRefFns : LowerM Unit := do
+  for (op, a) in (← get).refBoxOps do
+    let fname := if op == "addr" then "l2r_refbox_addr" else s!"l2r_refbox_{op}_{a.enc}"
+    let resT := if op == "set" || op == "addr" then RR.Ty.named "u64" else a
+    let mut arms : Array RR.Arm := #[]
+    for (vt, vname) in (← get).boxVariants do
+      let some (e, k) ← refElem? vt | continue
+      let body ← if op == "addr" then pure (some (RR.Expr.call "l2r_ptr_addr_rec" #[vt] #[.var "r"]))
+        else refCellOp op (.var "r") e k a (if op == "set" || op == "swap" then some (.var "v") else none)
+      let body := body.getD (.call "l2r_unreachable" #[resT] #[])
+      arms := arms.push { ty := boxName, ctor := some vname, binders := #[some "r"], body := .ofExpr body }
+    arms := arms.push { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[resT] #[]) }
+    let params := #[("b", RR.Ty.box)] ++ (if op == "set" || op == "swap" then #[("v", a)] else #[])
+    let item := RR.Item.fn fname params resT (.ofExpr (.mtch (.var "b") arms))
+    modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != fname | _ => true).push item }
 
 /-- Externs over Lean-defined types: the runtime's generic helpers receive
 the generated constructors as arguments. -/
@@ -2620,7 +2721,8 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
     !(p.isErased || p.isSort)
   if let some e ← customExtern orig (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
   if orig.getPrefix == `ST.Prim || orig.getPrefix == `ST.Prim.Ref then
-    if let some e ← refGlue orig typeArgs (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
+    if let some e ← refGlue orig typeArgs (relevant.map (·.1)) ret (relevant.map (·.2))
+        (← relevant.mapM (lowerType ·.1)) then return e
   let sym ← externSymbol orig
   -- Which parameters the runtime receives: not erased ones, not the world,
   -- not proofs.
@@ -2676,30 +2778,33 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
     if let some fam := fam? then
       if let some sym' := natArrSym? sym fam then
         return .call sym' #[] passedArgs
-  -- Storage for each type argument: (storage type, boxed?).
-  let mut storage := #[]
+  -- Storage for each type argument: the storage type, and the conversions
+  -- of a value to and from it (`ArrayRepr.store`/`load`). An extern over
+  -- arrays of the type argument stores it as the arrays do (an enumeration
+  -- as its index, `arrayStorage`); any other as `arrayElemTy`.
+  let overArrays := (params.push ret).any fun p => (p.find? (·.isAppOf ``Array)).isSome
+  let mut storage : Array ArrayRepr := #[]
   for t in typeArgs do
     -- Instance keys hold base-phase types.
     let rt ← lowerType (← toMonoTypeKeep t)
-    storage := storage.push (← arrayElemTy rt)
+    let st ← if overArrays then arrayStorage rt else pure (← arrayElemTy rt).1
+    let some r ← arrayRepr? (.app "RVec" #[st]) | throwError "lean2rr: no storage for {rt.render}"
+    storage := storage.push r
   -- Values whose declared type is a type parameter `α` are passed and
   -- returned in `α`'s storage (e.g. `Array.push`'s element): wrapped if the
-  -- storage is a wrapper.
+  -- storage is a wrapper, as an index for an enumeration.
   let (uses, retUse) ← typeVarUses orig
-  let boxOf (use : Option Nat) : Option String := do
-    let (st, boxed) ← storage[← use]?
-    if boxed then if let .named bn := st then return bn
-    none
+  let reprOf (use : Option Nat) : Option ArrayRepr := do storage[← use]?
   let mut passed := #[]
   for i in [:params.size] do
     if mask[i]! then
       let a := args[i]!
-      match boxOf (uses[i]?.join) with
-      | some bn => passed := passed.push (.ctor bn none #[a])
+      match reprOf (uses[i]?.join) with
+      | some r => passed := passed.push (r.store a)
       | none => passed := passed.push a
-  let call := RR.Expr.call sym (storage.map (·.1)) passed
-  match boxOf retUse with
-  | some _ => return .field call 0
+  let call := RR.Expr.call sym (storage.map (·.storage)) passed
+  match reprOf retUse with
+  | some r => return r.load call
   | none => return call
 
 /-! ## Values -/
@@ -2747,6 +2852,33 @@ def preludeReplacement? (f : Name) : LowerM (Option (String × RR.Ty)) := do
   | ``Int.repr => return some ("l2r_int_repr", .named "Int")
   | _ => return none
 
+/-- A saturated call of an `ST.Ref` operation: the reference arguments are
+passed at their own representation (a typed reference, or a `Box`; see
+`refGlue`), not converted to the extern's parameter type (`lcAny`, which
+would box a typed reference). -/
+def refCall? (ctx : CodeCtx) (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
+    (args : Array (Arg .pure)) : LowerM (Option RR.Expr) := do
+  unless orig.getPrefix == `ST.Prim.Ref do return none
+  let mut ps := #[]
+  let mut as := #[]
+  let mut ts := #[]
+  for (a, p) in args.zip params do
+    let p' := p.consumeMData
+    if p'.isErased || p'.isSort then continue
+    let pt ← lowerType p
+    -- The references: the first relevant parameter (both, for `ptrEq`).
+    let handle := ps.size == 0 || (orig == ``ST.Prim.Ref.ptrEq && ps.size == 1)
+    match a, handle with
+    | .fvar x, true =>
+      let some (vn, vt) := ctx.vars[x]? | throwError "lean2rr: unbound variable {x.name} (internal error)"
+      as := as.push (RR.Expr.var vn)
+      ts := ts.push vt
+    | _, _ =>
+      as := as.push (← lowerArg ctx a pt)
+      ts := ts.push pt
+    ps := ps.push p
+  refGlue orig typeArgs ps ret as ts
+
 /-- Lower a constant application with Lean's arity rules. -/
 def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy : Expr) :
     LowerM RR.Expr := do
@@ -2784,6 +2916,8 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
         if let some (.fvar x) := args.back? then
           if let some (vn, vt) := ctx.vars[x]? then
             return ← coerce (← addrOf (.var vn) vt) (.named "u64") (← lowerType resTy)
+      if let some e ← refCall? ctx orig typeArgs params ret args then
+        return ← coerce e retTy (← lowerType resTy)
       let as ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
       coerce (← lowerExternCall orig typeArgs params ret as) retTy (← lowerType resTy)
     else if args.size < n then
@@ -3681,6 +3815,8 @@ variant set is stable. -/
 partial def finishUnboxFns : LowerM Unit := do
   let mut done : Std.HashMap String Nat := {}
   repeat
+    -- Reference dispatch over the boxed reference types (it can box more).
+    finishRefFns
     let nvars := (← get).boxVariants.size
     let nominal := (← get).unboxTargets.map fun t => (s!"l2r_unbox_{t}", RR.Ty.named t)
     let arrays := (← get).unboxArrTargets.map fun (t, f) => (f, t)

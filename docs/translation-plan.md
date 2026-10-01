@@ -241,9 +241,11 @@ giving it the representation it assumes:
   ordinary representation conversions of §5.1; between arrays of different
   element types the conversion is element by element. Stage 3 (§4) recovers
   the precise types around this code. When source and target elements have
-  the same representation, the `map` loop runs on the precise array. When
-  they differ, the array is converted once on entry and once on exit, never
-  inside a loop.
+  the same representation, the `map` loop runs on the precise array, in
+  place. When they differ, Stage 3 splits the loop over two arrays: it reads
+  the source at its own representation (still replacing each slot by the
+  placeholder after reading it) and pushes each mapped value onto a new
+  result array created with the source's size as capacity (§4).
 - A `box(0)` placeholder is a value that is never inspected. It arrives as
   a unit-like value used at another type, or as `◾` at a relevant type.
   Stage 4 materializes it as the *zero* of the expected type: `0`, `false`,
@@ -413,16 +415,53 @@ binder would also run, and fail, when `t = .str`. The rules:
   only the representation changes.
 - **Placeholders.** A placeholder `let z := ◾` gets the type its uses
   expect when they agree: it has no value to convert.
+- **References.** Mono types every `ST.Ref σ α` `lcAny`. An instance of
+  `ST.Prim.mkRef` at a precise `α` returns `typedRef α` instead (a type
+  only lean2rr uses), and the rules above carry it to the binders the
+  reference flows into: the `ST.Out` field, join-point parameters, and the
+  parameters of functions that every caller passes it to (the rule
+  *parameters from callers* also applies to parameters that receive a
+  typed reference). Stage 4 gives `typedRef α` the typed representation of
+  §5.1, so an `IO.Ref Nat` counter or the state of a `StateRefT` is read
+  and written without boxing. A reference stored in a structure field,
+  passed to uniform code or created there stays `lcAny`.
 
 For `xs.map (· * 2)` these rules make the whole map run on the precise array,
 in place and without boxing, like native Lean. The loop is assumed to
 receive `Array Nat`. Its reads become `Array.uget@Nat`, its placeholder is a
 `Nat` zero, and its writes of `Nat` values become `Array.uset@Nat`, so it
-passes `Array Nat` back. When `f` changes the representation (`Nat →
-String`), the loop keeps the `Box` array, its input is converted once on
-entry, and the loop's result type, `Array String` by the `map` rule, makes
-it convert once on exit. The loops that read the result then receive
-`Array String` from their callers.
+passes `Array Nat` back. The loops that read the result then receive the
+precise array from their callers.
+
+When `f` changes the representation (`Nat → Bool`), the loop's array
+parameter stays `Array lcAny` after the fixpoint: it holds `Nat`s and
+`Bool`s. Such a loop is *split*. Its split instance takes two arrays instead
+of one, the source `src : Array α` and the result `dst : Array β`:
+- a read `uget bs i` of an array derived from the parameter becomes
+  `uget@α src i`, a value of `α`'s own representation;
+- the placeholder write `uset bs i ◾` becomes `uset@α src i ◾` (the element
+  stays unshared, as in Lean);
+- the value write `uset bs i v` becomes `push@β dst v`;
+- `usize`/`size` measure `src`; a self call passes both arrays; a returned
+  array, or one put in a constructor (`EST.Out.ok bs w`, `some bs`), is `dst`;
+  a join-point parameter receiving derived arrays gets two parameters.
+
+An entry call `map sz 0 xs` with `xs : Array α` becomes `map' sz 0 xs
+(Array.emptyWithCapacity@β xs.size)`. The push is the write at index `i`
+because `dst` holds exactly the `i` values mapped so far whenever the loop
+runs at index `i`: it starts empty at index 0, and every path to a self call
+writes one value and passes `i + 1`. The split only happens when the loop
+has this shape: derived arrays are read and written only at the loop index
+(reads before the value write, the value write once per path), passed to the
+loop with the index plus one after the write (or with the index to the loop
+that a `_redArg` wrapper calls), returned, put in constructors or passed to
+join points, and never captured or used otherwise; the entry passes the
+literal index `0` (possibly through join-point parameters). Otherwise the
+loop keeps the `Box` array: its input is converted once on entry, and its
+result type (`Array β` by the `map` rule) makes it convert once on exit.
+The original loop is dropped when nothing reachable calls it any more, and
+the fixpoint runs once more, so the values the split loop reads can type
+what they flow into.
 
 Each rule is exact. A value's type is taken only from its definition or from
 everything that flows into it, so the recovered type is the type the value
@@ -459,10 +498,10 @@ Stage 4 sees only mono types:
 | `Nat` | `enum [value] Nat { Small(u64), Big(LBig) }` | `Big` only for values ≥ 2^64; `LBig` is an opaque runtime bignum (GMP) |
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | `String` | `LStr`, an opaque copy-on-write handle over UTF-8 bytes and their character count (`Rc<(Vec<u8>, u64)>`) | literals: §5.4 |
-| `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records), otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
+| `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records); for an enumeration or `Unit`, its index (`u8`, `u16` or `u32` by the number of constructors; Lean stores a tagged scalar); otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
-| `ST.Ref σ α` | `LRef<Box>`, a shared mutable cell | mono types a reference as `lcAny`, so it travels boxed. Its contents are boxed too, whatever `α` is: uniform code (`α = lcAny`) and typed code can share one cell, and a cell cannot be converted without losing aliasing. Each `set` allocates the box. |
+| `ST.Ref σ α` | a generated shared record `L2RRef_N(Cell<⟦α⟧>)` around Reussir's mutable cell | the contents keep their own representation; `Nat`/`Int` (`L2RNatRef`/`L2RIntRef`, a tagged word as in `LNatArr` plus a cell for a big value) and `[value]` structures (in an `ElemBox`) are stored apart, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧), … }` | memoized thunks, deferred tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
 
@@ -567,6 +606,17 @@ its value is stored as `Box`.
   wrapped at all (it is the same object), and one read at three
   representations in a loop (`Nat → Nat`, `Nat → Box`, `Box → Box`)
   stays one wrapper deep.
+- A reference (`ST.Ref`) is boxed under the variant of its own type. A
+  reference cannot be converted without losing aliasing, so where one is
+  used in a `Box` (uniform code, or typed code that got it through a
+  `lcAny` position), each operation goes through a generated dispatch over
+  every reference type the program boxes: it acts on that reference's one
+  cell, converting the value between the cell's element type and the
+  operation's (`get` at `Box` on an `L2RNatRef` boxes the `Nat`; `set`
+  unboxes). Typed references come only from `ST.Prim.mkRef` instances at a
+  precise element type, and flow only to binders that Stage 3 types from
+  them (§4), so a typed position never receives a reference of another
+  representation. `ST.Ref.ptrEq` compares the records' addresses.
 - A partial application has the type of its target with the supplied
   arguments removed. Lambda lifting can give a lifted lambda the result type
   `lcAny` while its closure is used at `Nat × Int → Int`, or the reverse; the
@@ -808,6 +858,15 @@ to a later construction:
   only passed to calls (merge's `go l₁ ys (y :: acc)`), reusing its cell
   measured slower on the classic `mergesort`: the result keeps the
   scattered memory order of the input cells.
+- The same holds for the fields of a structure, which are projected
+  (`let f = s.0`) at the top of the alternative: when the alternative then
+  branches and one branch keeps `s` whole while only other branches use
+  the field, the projection moves into the branches that use it (a pass
+  over the generated code, `SinkProj`). An association-list update
+  `if k == k' then (k', f v) :: more else (k', v) :: go k more` keeps the
+  pair whole in the second branch; with `v` projected before the `if`, the
+  skipping branch allocated a new cons per element and freed the matched
+  one after the recursive call, which was then no longer a tail call.
 
 ### 5.6 Join points
 
@@ -1026,8 +1085,10 @@ Rules:
   arguments. A value whose *declared* type is a type parameter `α` (the
   element of `Array.push`, or a trivial structure over `α` such as
   `[Inhabited α]`, which mono represents by its field) is passed and
-  returned in `α`'s array storage type, wrapped or unwrapped if that is an
-  `ElemBox`. Other parameters, like an index, are passed as they are.
+  returned in `α`'s storage type, wrapped or unwrapped if that is an
+  `ElemBox`, converted to or from its index for an enumeration stored as
+  one (only for externs over arrays of `α`, whose storage must be the
+  array's). Other parameters, like an index, are passed as they are.
   Instance keys hold base-phase types, so type arguments go through
   `toMonoType` first.
 - **Generic prelude functions over values.** Storage types exist only
@@ -1413,7 +1474,6 @@ The runtime provides what Reussir lacks:
 - `Array`/`ByteArray`/`FloatArray` operations over the copy-on-write `Vec`;
 - `Float` math through libm;
 - IO: stdout/stderr/stdin streams, `IO.Error`, argv, exit;
-- `ST.Ref` cells;
 - the mutable cells of thunks and tasks, and the queue of deferred IO
   tasks (§5.14);
 - panic, trace;
@@ -1452,7 +1512,7 @@ tasks are mutable by design).
 **Gained from typing:**
 - no boxing;
 - unboxed scalars in fields, closures and arrays (`Vec<u32>`, where Lean
-  boxes array elements);
+  boxes array elements), enumerations in arrays as indices;
 - unboxed enum-like types;
 - per-type drop code;
 - exact allocation sizes.
@@ -1570,7 +1630,9 @@ Answered (Lean):
   `Int` outside `int32` but inside `i64`: natively big number objects) answer
   a number computed from the value, so equal ones are `ptrEq`; an array
   converted to another element representation (§5.1) is a new array (§10).
-  `ST.Ref.ptrEq` is real identity, implemented by `l2r_ref_ptr_eq`.
+  `ST.Ref.ptrEq` is real identity: the addresses of the references'
+  records (`l2r_ptr_addr_rec`), whatever representation each side is seen
+  at.
 
 ---
 
@@ -1717,15 +1779,23 @@ Each item says what differs and when.
   elements hold an `Int` where `T₁`'s hold a `Nat`) converts the field at
   each use, where natively the cast is free.
 - *`Array.map` that changes the representation* (for example
-  `(Array.range n).map some`) converts the input to an array of `Box` on
-  entry and back on exit (§2.7), so the input, the boxed copy with one box
-  per element, and the result are live together: peak memory 1.5–2.7x
-  native in tests. Maps that keep the representation run in place.
-- *Element storage*: array elements, `ST.Ref` contents, once-cell values and
-  polymorphic extern arguments whose type cannot cross the FFI boundary
-  (enumerations, `L2RUnit`, `[value]` tuples) are wrapped in an
-  `ElemBox` cell, one allocation each, where native stores tagged scalars.
-  `ST.Ref` contents are always boxed (§5.1). `UInt64` and `Float` arrays, on
+  `(Array.range n).map (· % 3 == 0)`) reads the input and pushes onto a new
+  result array (§4): the two arrays are live together until the map ends,
+  where native Lean replaces the elements of one array (peak memory
+  0.7–1.1x native for scalar targets in tests, more for records, whose cells
+  are larger: §7's cheaper `Nat`). Maps that keep the representation run in
+  place. A map loop of another shape (not Lean's) still converts its input
+  to an array of `Box` on entry and back on exit.
+- *Element storage*: array elements, once-cell values and polymorphic
+  extern arguments whose type cannot cross the FFI boundary (`[value]`
+  tuples, closures) are wrapped in an `ElemBox` cell, one allocation each;
+  enumerations and `Unit` in arrays are stored as indices, but once-cell
+  values and other extern arguments of those types are still wrapped.
+  `ST.Ref` contents are stored in their own representation (§5.1), except
+  `[value]` structures (an `ElemBox` per `set`); a `Nat` reference keeps a
+  big number it held until it is replaced by another big number or the
+  reference dies. A reference used through a `Box` costs a dispatch on its
+  type at each operation. `UInt64` and `Float` arrays, on
   the other hand, are unboxed, unlike native.
 - *Reads take their container owned* (Reussir has no borrowed FFI
   parameters, §9): every array or string read is an increment by the caller
