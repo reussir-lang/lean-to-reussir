@@ -2,6 +2,7 @@ import Lean
 import LeanToReussir.Lower
 import LeanToReussir.MonoRetype
 import LeanToReussir.FloatLits
+import LeanToReussir.Outline
 
 /-!
 # Program assembly
@@ -607,12 +608,23 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
       unless ← finishFnValues do break
     return ← fnTypeItems
   let (fnItems, st) ← (act.run ctx).run {}
+  let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))
+  -- Deep and long tail paths become chains of functions (rrc's analyses
+  -- are superlinear in them; see `Outline`).
+  let variants := Outline.variantTable (st.typeItems ++ fnItems |>.push boxItem) prelude
+  let taken := st.fns.foldl (init := preludeFns) fun acc it => match it with
+    | .fn n .. => acc.insert n
+    | .raw t => (t.splitOn "fn ").foldl (init := acc) fun acc chunk =>
+      let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
+      if name.isEmpty then acc else acc.insert name.toString
+    | _ => acc
+  let fns := Outline.outlineFns {} variants taken st.fns
   let mut out := prelude ++ "\n// ---- generated types ----\n\n"
   for it in st.typeItems do out := out ++ it.render ++ "\n"
   for it in fnItems do out := out ++ it.render ++ "\n"
-  out := out ++ (RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))).render ++ "\n"
+  out := out ++ boxItem.render ++ "\n"
   out := out ++ "// ---- generated functions ----\n\n"
-  for f in st.fns do out := out ++ f.render ++ "\n"
+  for f in fns do out := out ++ f.render ++ "\n"
   unless st.strLits.isEmpty do out := out ++ strLitTable st.strLits
   return out
 

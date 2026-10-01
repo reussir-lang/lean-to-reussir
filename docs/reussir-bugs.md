@@ -398,7 +398,7 @@ is yielded". lean2rr does not use `Nullable`.
 
 ## 16. Reuse across calls is superlinear in the nesting depth of matches
 
-Status: open (build time only).
+Status: worked around (lean2rr outlines deep tail paths; build time only).
 
 Each IO bind is a match on the action's result, so a `main` of N
 statements nests N matches deep. With `--reuse-across-call`, rrc's time and
@@ -413,15 +413,30 @@ memory grow much faster than N:
 Without `--reuse-across-call`, 250 statements build in 16 s and 221 MB. The
 generated program is correct when the build finishes.
 
+Workaround: lean2rr cuts a function whose tail path is 32 matches (or
+`if`s) deep into a chain of functions of at most 8 levels, each calling the
+next in tail position (`LeanToReussir/Outline.lean`, plan §10 "Build
+time"). rrc on 250 statements: 38 s, 650 MB with parts of 32 levels, 27 s,
+343 MB with 8; 2000 statements: 161 s, 1.9 GB (before: killed after
+1500 s). Recursive functions are not cut (a cycle of tail calls through
+the parts is not always a loop), so a loop with such a body still builds
+slowly.
+
 ## 17. rrc memory is quadratic in the length of a straight-line function on `Nat`
 
-Status: open (build time only).
+Status: worked around (lean2rr outlines long tail paths; build time only).
 
 A `do` block of 1000 `let`s on `Nat` (a two-arm `[value]` enum) takes rrc
 4.1 GB and 45 s; 2500 `let`s run out of memory (`std::bad_alloc` at 14 GB).
 The same block on `UInt64` takes 127 MB. `--reuse-across-call` is not the
 cause. Large literals and long generated functions hit it (a test with a
 1500-`let` function needed 5.5 GB).
+
+Workaround: as for bug 16, a function with a tail path of 256 `let`s is cut
+into parts of at most 64 `let`s on a path. rrc on the 1000-`let` block:
+877 MB (was 4.1 GB; the rest grows linearly, about 0.3 MB per `Nat`
+operation); 2500 `let`s: 99 s, 2.0 GB (was out of memory). Recursive
+functions are not cut.
 
 ## 18. The `rrc` build target alone does not link
 

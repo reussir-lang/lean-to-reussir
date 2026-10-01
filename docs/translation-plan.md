@@ -1554,6 +1554,19 @@ Each item says what differs and when.
   function values itself). Such programs still take a minute or more to
   build, and the largest towers (four transformers) up to a quarter of an
   hour and several GB.
+  rrc's costs also grow faster than linearly in the depth of nested matches
+  (reuse across calls; every IO bind nests one) and in the length of
+  straight-line code on `Nat` (Reussir bugs 16 and 17). So after lowering,
+  a function with a tail path 32 matches or `if`s deep, or 256 `let`s long
+  (a long `main`, a 3000-arm literal match, a long `do` block), is cut into
+  a chain of functions of at most 8 levels and 64 `let`s on a path, each
+  part a function of the variables it uses, called in tail position
+  (`Outline`). Ordinary functions are below both bounds; the classic
+  corpus only has some `main`s cut. Recursive functions are not cut: LLVM
+  turns a self tail call into a loop, but a cycle of tail calls through
+  the parts is not always a sibling call and would use stack on every
+  iteration, so a loop with such a body still builds slowly. A 2000-line
+  `main` builds in about three minutes and 2 GB.
 - *Open descriptors*: native Lean starts with libuv's descriptors open (8
   more), so `/proc/self/fd` listings and the point where opening files
   fails with `EMFILE` differ.
