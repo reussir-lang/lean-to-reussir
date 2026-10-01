@@ -357,19 +357,20 @@ def nominalHead (n : String) : LowerM (Option Name) := do
   | none => return none
 
 /-- Whether a value of type `t` may contain a task (in fields, array
-elements, a task's value). Types already being examined count as not
-containing one (the least fixed point, for recursive types). Thunks,
-function values and `Box` are not looked into. -/
+elements, a task's value, a thunk, a function value's captured values, a
+`Box`'s payload), as far as can be told before all variants of function
+types and `Box` are known: those, and thunks, may. Types already being
+examined count as not containing one (the least fixed point, for recursive
+types). -/
 partial def mayHoldTask (t : RR.Ty) (seen : List RR.Ty := []) : LowerM Bool := do
   if seen.contains t then return false
   let seen := t :: seen
   match t with
-  | .app "LCell" _ =>
-    match ← lazyOf? t with
-    | some (_, true, _) => return true
-    | _ => return false
+  | .app "LCell" _ => return (← lazyOf? t).isSome
   | .app "RVec" #[st] => mayHoldTask st seen
+  | .fn .. => return true
   | .named n =>
+    if n == boxName then return true
     if let some info := (← get).typeInfos[n]? then
       for c in info.ctorOrder do
         let some l := info.ctors.find? c | continue
@@ -385,74 +386,30 @@ partial def mayHoldTask (t : RR.Ty) (seen : List RR.Ty := []) : LowerM Bool := d
     | none => return false
   | _ => return false
 
-/-- `l2r_persist_T(v)`, for a type that may contain tasks: waits for (runs)
-every task in `v`, and the tasks in their values. Native Lean calls
-`lean_mark_persistent` on a closed term when it is first evaluated
-(`lean_obj_once_cold`), and that waits for each task it reaches
-(`lean_task_get`): a `Task.spawn` extracted as a closed term has finished
-once the term has been evaluated. `none` if `t` holds no task. -/
-partial def taskPersistFn (t : RR.Ty) : LowerM (Option String) := do
+/-- The name of the traversal of values of type `t` for tasks
+(`finishPersistFns`). -/
+def persistFnName (t : RR.Ty) : String := s!"l2r_persist_{t.enc}"
+
+/-- `l2r_persist_T(v)` for the value `v : t` of a constant when it is first
+computed, if `t` may contain tasks: native Lean calls `lean_mark_persistent`
+on a closed term when it is first evaluated (`lean_obj_once_cold`), which
+waits for every task it reaches (`lean_task_get`), through fields, arrays,
+the values of tasks, thunks (their computation, or their value: not
+forcing them), closures (their captured values) and boxed values. A
+`Task.spawn` extracted as a closed term has finished once the term has
+been evaluated. The traversal is generated at the end
+(`finishPersistFns`). -/
+def persistCall (t : RR.Ty) (v : RR.Expr) : LowerM (Option RR.Expr) := do
   unless ← mayHoldTask t do return none
-  let name := s!"l2r_persist_{t.enc}"
-  let u64 := RR.Ty.named "u64"
-  let zero : RR.Block := ⟨#[("z", some u64, .atom "0")], .var "z"⟩
-  -- Persist each of the variables `xs`, then 0.
-  let each (xs : Array (String × RR.Ty)) : LowerM RR.Block := do
-    let mut lets := #[]
-    for (x, xt) in xs do
-      if let some f ← taskPersistFn xt then
-        lets := lets.push (← fresh "pp", some u64, RR.Expr.call f #[] #[.var x])
-    return ⟨lets, .atom "0"⟩
-  let name ← lazyFn name do
-    let body : RR.Block ← match t with
-      | .app "LCell" _ =>
-        let some (z, _, vt) ← lazyOf? t | pure zero
-        let get ← lazyGetFn z
-        let rest ← each #[("x", vt)]
-        pure ⟨#[("x", some vt, .call get #[] #[.var "v"])] ++ rest.lets, rest.result⟩
-      | .app "RVec" #[_] =>
-        let some r ← arrayRepr? t | pure zero
-        let go := name ++ "_go"
-        let rest ← each #[("x", r.value)]
-        let loop : RR.Block := .ofExpr <| .ite (.atom "i < n")
-          ⟨#[("x", some r.value, r.load (r.call "get" #[.var "v", .var "i"]))] ++ rest.lets ++
-            #[("one", some u64, .atom "1")], .call go #[] #[.var "v", .atom "i + one", .var "n"]⟩ zero
-        modify fun s => { s with fns := s.fns.push (.fn go #[("v", t), ("i", u64), ("n", u64)] u64 loop) }
-        pure ⟨#[("n", some u64, r.call "size" #[.var "v"]), ("i0", some u64, .atom "0")],
-          .call go #[] #[.var "v", .var "i0", .var "n"]⟩
-      | .named n =>
-        if let some info := (← get).typeInfos[n]? then
-          if info.shape == .struct then
-            let some l := info.ctors.find? info.ctorOrder[0]! | pure zero
-            let tys := l.posTys
-            let xs := (List.range tys.size).toArray.map fun i => (s!"f{i}", tys[i]!)
-            let rest ← each xs
-            pure ⟨xs.mapIdx (fun i (x, xt) => (x, some xt, RR.Expr.field (.var "v") i)) ++ rest.lets, rest.result⟩
-          else
-            let mut arms : Array RR.Arm := #[]
-            for c in info.ctorOrder do
-              let some l := info.ctors.find? c | continue
-              let tys := l.posTys
-              let xs := (List.range tys.size).toArray.map fun i => (s!"f{i}", tys[i]!)
-              arms := arms.push { ty := n, ctor := some l.variant, binders := xs.map (some ·.1), body := ← each xs }
-            pure (.ofExpr (.mtch (.var "v") arms))
-        else
-          match (← get).tupleTypes.toList.find? (·.2 == n) with
-          | some (k, _) =>
-            let fields := if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k
-            let xs := (List.range fields.size).toArray.map fun i => (s!"f{i}", fields[i]!)
-            let rest ← each xs
-            pure ⟨xs.mapIdx (fun i (x, xt) => (x, some xt, RR.Expr.field (.var "v") i)) ++ rest.lets, rest.result⟩
-          | none => pure zero
-      | _ => pure zero
-    return #[.fn name #[("v", t)] u64 body]
-  return some name
+  unless (← get).persistReqs.contains t do
+    modify fun s => { s with persistReqs := s.persistReqs.push t }
+  return some (.call (persistFnName t) #[] #[v])
 
 /-- The accessor of a constant (a declaration without parameters): its value
 is computed once, by `<name>_init`, and kept in a runtime once-cell for the
 rest of the run, like native Lean's CAFs and closed terms (translation plan
 §5.12). The cell stores a boundary type; other values are boxed. A value
-that may contain tasks first waits for them (`taskPersistFn`). -/
+that may contain tasks first waits for them (`persistCall`). -/
 def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
   let slot := (← get).cafSlots
   modify fun s => { s with cafSlots := slot + 1 }
@@ -463,8 +420,8 @@ def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
   let unwrap (e : RR.Expr) : RR.Expr := if boxed then .field e 0 else e
   let k := RR.Expr.atom (toString slot)
   let init := RR.Expr.call (name ++ "_init") #[] #[]
-  let init := match ← taskPersistFn ret with
-    | some f => RR.Expr.block ⟨#[("v", some ret, init), ("p", some (.named "u64"), .call f #[] #[.var "v"])], .var "v"⟩
+  let init := match ← persistCall ret (.var "v") with
+    | some p => RR.Expr.block ⟨#[("v", some ret, init), ("p", some (.named "u64"), p)], .var "v"⟩
     | none => init
   let body : RR.Block := .ofExpr (.ite (.call "l2r_once_has" #[] #[k])
     (.ofExpr (unwrap (.call "l2r_once_get" #[st] #[k])))
@@ -4245,6 +4202,170 @@ def fnVariantFields (v : FnVariant) : LowerM (Array RR.Ty) := do
   | .part id m =>
     let some tg := (← get).fnTargets[id]? | throwError "lean2rr: unknown function target {id}"
     return tg.params.extract 0 m
+
+/-- Whether a value of type `t` can hold a task, with the final variants
+of function types and `Box` (see `mayHoldTask`). A thunk can through its
+value, its computation and, converted from another representation, its
+original (a `Box`). -/
+partial def holdsTask (t : RR.Ty) (seen : List RR.Ty := []) : LowerM Bool := do
+  if seen.contains t then return false
+  let seen := t :: seen
+  match t with
+  | .app "LCell" _ =>
+    match ← lazyOf? t with
+    | some (_, true, _) => return true
+    | some (_, false, vt) =>
+      return (← holdsTask vt seen) || (← holdsTask (.fn .unit vt) seen) || (← holdsTask RR.Ty.box seen)
+    | none => return false
+  | .app "RVec" #[st] => holdsTask st seen
+  | .fn .. =>
+    for v in (← get).fnVariants.getD t #[] do
+      for f in ← fnVariantFields v do
+        if ← holdsTask f seen then return true
+    return false
+  | .named n =>
+    if n == boxName then
+      for (vt, _) in (← get).boxVariants do
+        if ← holdsTask vt seen then return true
+      return false
+    if let some info := (← get).typeInfos[n]? then
+      for c in info.ctorOrder do
+        let some l := info.ctors.find? c | continue
+        for ft in l.posTys do
+          if ← holdsTask ft seen then return true
+      return false
+    match (← get).tupleTypes.toList.find? (·.2 == n) with
+    | some (k, _) =>
+      let fields := if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k
+      for ft in fields do
+        if ← holdsTask ft seen then return true
+      return false
+    | none => return false
+  | _ => return false
+
+/-- Generate `l2r_persist_T` (`persistCall`) and the traversals it calls,
+for the current variants (replacing earlier ones); `done` holds the names
+generated in this round. A type that cannot hold a task gets none, and its
+values are not looked at. -/
+partial def genPersist (t : RR.Ty) (done : IO.Ref (Std.HashSet String)) : LowerM (Option String) := do
+  unless ← holdsTask t do return none
+  let name := persistFnName t
+  if (← done.get).contains name then return some name
+  done.modify (·.insert name)
+  let u64 := RR.Ty.named "u64"
+  let zero : RR.Block := ⟨#[("z", some u64, .atom "0")], .var "z"⟩
+  -- Traverse each of the variables `xs`, then 0; the last traversal is a
+  -- tail call (a list is traversed in a loop).
+  let each (xs : Array (String × RR.Ty)) : LowerM RR.Block := do
+    let mut calls : Array (String × RR.Ty × String) := #[]
+    for (x, xt) in xs do
+      if let some f ← genPersist xt done then calls := calls.push (x, xt, f)
+    if calls.isEmpty then return zero
+    let mut lets := #[]
+    for (x, _, f) in calls.pop do
+      lets := lets.push (← fresh "pp", some u64, RR.Expr.call f #[] #[.var x])
+    let (lx, _, lf) := calls.back!
+    return ⟨lets, .call lf #[] #[.var lx]⟩
+  let arm (ty : String) (ctor : String) (xs : Array (Option (String × RR.Ty))) : LowerM RR.Arm := do
+    let body ← each (xs.filterMap id)
+    return { ty, ctor := some ctor, binders := xs.map (·.map (·.1)), body }
+  let body : RR.Block ← match t with
+    | .app "LCell" #[.named z] =>
+      let some (_, task, vt) ← lazyOf? t | pure zero
+      if task then
+        -- A task: wait for it (run it), then its value.
+        let get ← lazyGetFn z
+        let rest ← each #[("x", vt)]
+        pure ⟨#[("x", some vt, .call get #[] #[.var "v"])] ++ rest.lets, rest.result⟩
+      else
+        -- A thunk: its computation or its value, without forcing it.
+        let ft := RR.Ty.fn .unit vt
+        let arms := #[
+          ← arm z "pending" #[some ("f", ft)],
+          ← arm z "done" #[some ("x", vt)],
+          ← arm z "conv" #[some ("f", ft), some ("o", RR.Ty.box), none],
+          ← arm z "convdone" #[some ("x", vt), some ("o", RR.Ty.box), none],
+          { ty := z, ctor := none, binders := #[], body := zero }]
+        pure (.ofExpr (.mtch (.call "l2r_lcell_get" #[.named z] #[.var "v"]) arms))
+    | .app "RVec" #[_] =>
+      let some r ← arrayRepr? t | pure zero
+      let go := name ++ "_go"
+      let rest ← each #[("x", r.value)]
+      let loop : RR.Block := .ofExpr <| .ite (.atom "i < n")
+        ⟨#[("x", some r.value, r.load (r.call "get" #[.var "v", .var "i"]))] ++ rest.lets ++
+          #[("pl", some u64, rest.result), ("one", some u64, .atom "1")],
+          .call go #[] #[.var "v", .atom "i + one", .var "n"]⟩ zero
+      let goItem := RR.Item.fn go #[("v", t), ("i", u64), ("n", u64)] u64 loop
+      modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != go | _ => true).push goItem }
+      pure ⟨#[("n", some u64, r.call "size" #[.var "v"]), ("i0", some u64, .atom "0")],
+        .call go #[] #[.var "v", .var "i0", .var "n"]⟩
+    | .fn .. =>
+      -- A function value: the values it captures (a Reussir closure's
+      -- cannot be looked at).
+      let tn := RR.fnTypeName t
+      let mut arms : Array RR.Arm := #[]
+      for v in (← get).fnVariants.getD t #[] do
+        let fs ← fnVariantFields v
+        arms := arms.push (← arm tn (fnVariantName v) ((List.range fs.size).toArray.map fun i => some (s!"c{i}", fs[i]!)))
+      arms := arms.push { ty := tn, ctor := none, binders := #[], body := zero }
+      pure (.ofExpr (.mtch (.var "v") arms))
+    | .named n =>
+      if n == boxName then
+        let mut arms : Array RR.Arm := #[]
+        for (vt, bv) in (← get).boxVariants do
+          arms := arms.push (← arm boxName bv #[some ("x", vt)])
+        pure (.ofExpr (.mtch (.var "v") arms))
+      else if let some info := (← get).typeInfos[n]? then
+        if info.shape == .struct then
+          let some l := info.ctors.find? info.ctorOrder[0]! | pure zero
+          let tys := l.posTys
+          let xs := (List.range tys.size).toArray.map fun i => (s!"f{i}", tys[i]!)
+          let rest ← each xs
+          pure ⟨xs.mapIdx (fun i (x, xt) => (x, some xt, RR.Expr.field (.var "v") i)) ++ rest.lets, rest.result⟩
+        else
+          let mut arms : Array RR.Arm := #[]
+          for c in info.ctorOrder do
+            let some l := info.ctors.find? c | continue
+            let tys := l.posTys
+            arms := arms.push (← arm n l.variant ((List.range tys.size).toArray.map fun i => some (s!"f{i}", tys[i]!)))
+          pure (.ofExpr (.mtch (.var "v") arms))
+      else
+        match (← get).tupleTypes.toList.find? (·.2 == n) with
+        | some (k, _) =>
+          let fields := if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k
+          let xs := (List.range fields.size).toArray.map fun i => (s!"f{i}", fields[i]!)
+          let rest ← each xs
+          pure ⟨xs.mapIdx (fun i (x, xt) => (x, some xt, RR.Expr.field (.var "v") i)) ++ rest.lets, rest.result⟩
+        | none => pure zero
+    | _ => pure zero
+  let item := RR.Item.fn name #[("v", t)] u64 body
+  modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
+  return some name
+
+/-- The number of variants of function types and of `Box`: the traversals
+of `persistCall` depend on them. -/
+def variantCount : LowerM (Nat × Nat) := do
+  let st ← get
+  return (st.fnVariants.fold (fun acc _ vs => acc + vs.size) 0, st.boxVariants.size)
+
+/-- Generate the traversals `persistCall` requested (again when variants
+were added since): a type that cannot hold a task gets a traversal that
+does nothing. Whether anything was generated. -/
+def finishPersistFns : LowerM Bool := do
+  let reqs := (← get).persistReqs
+  if reqs.isEmpty then return false
+  let vc ← variantCount
+  if (← get).persistDone == some (reqs.size, vc.1 + vc.2 * 1000003) then return false
+  let done ← IO.mkRef ({} : Std.HashSet String)
+  for t in reqs do
+    if (← genPersist t done).isNone then
+      let name := persistFnName t
+      let item := RR.Item.fn name #[("v", t)] (.named "u64") ⟨#[("z", some (.named "u64"), .atom "0")], .var "z"⟩
+      modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
+  let vc ← variantCount
+  let n := (← get).persistReqs.size
+  modify fun s => { s with persistDone := some (n, vc.1 + vc.2 * 1000003) }
+  return true
 
 /-- The enums of all function types the generated program mentions. -/
 def fnTypeItems : LowerM (Array RR.Item) := do

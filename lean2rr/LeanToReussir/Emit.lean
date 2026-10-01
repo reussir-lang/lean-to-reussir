@@ -606,7 +606,9 @@ def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array St
     modify fun s => { s with fns := s.fns ++ disp }
     repeat
       finishUnboxFns
-      unless ← finishFnValues do break
+      -- The traversals of constants for tasks (`persistCall`), for the
+      -- final variants of function types and `Box`.
+      unless (← finishFnValues) || (← finishPersistFns) do break
     return ← fnTypeItems
   let (fnItems, st) ← (act.run ctx).run {}
   let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))

@@ -163,6 +163,13 @@ structure LowerState where
   typeItems : Array RR.Item := #[]
   /-- Variants of the uniform `Box` type: boxed Reussir type ↦ variant name. -/
   boxVariants : Array (RR.Ty × String) := #[]
+  /-- Types of constants whose value is traversed for tasks when it is
+  first computed (`persistCall`); the traversals are generated at the end,
+  once all variants of function types and `Box` are known
+  (`finishPersistFns`), with the number of variants they were generated
+  for. -/
+  persistReqs : Array RR.Ty := #[]
+  persistDone : Option (Nat × Nat) := none
   /-- Generated `[value]` structs carrying several join-point arguments. -/
   tupleTypes : Std.HashMap (Array RR.Ty) String := {}
   /-- Generated functions (declarations and outlined join points). -/
