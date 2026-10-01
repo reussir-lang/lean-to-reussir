@@ -87,9 +87,9 @@ pub fn with_capacity<T: Clone>(n: usize) -> RVec<T> {
     from_rc(rc_new(vec_with_capacity(n)))
 }
 
-/// Capacities up to this many elements are reserved as asked; larger ones
-/// are checked (`check_alloc`) but reserved only this far.
-pub const CAPACITY_CAP: u64 = 1 << 24;
+/// Allocations of more elements than this are checked against what the
+/// native allocation would do (`check_alloc_slow`) first.
+pub const CHECK_THRESHOLD: u64 = 1 << 24;
 
 /// Lean's allocation of an array object of `n` elements of `elem` bytes
 /// (`lean_alloc_array`, `lean_alloc_sarray`): `24 + elem * n` bytes, where
@@ -97,7 +97,7 @@ pub const CAPACITY_CAP: u64 = 1 << 24;
 /// computation` and a failed `malloc` is `out of memory`.
 #[inline(always)]
 pub fn check_alloc(n: u64, elem: u64) {
-    if n > CAPACITY_CAP {
+    if n > CHECK_THRESHOLD {
         check_alloc_slow(n, elem)
     }
 }
@@ -126,12 +126,12 @@ extern "C" fn check_alloc_slow(n: u64, elem: u64) {
 }
 
 /// `Array.mkEmpty n` (and the scalar-array variants, `elem` bytes per
-/// element): Lean's allocation checks, then a capacity of at most
-/// `CAPACITY_CAP` elements.
+/// element): Lean's allocation checks, then the capacity asked for, as
+/// natively (reserved address space: untouched pages cost no memory).
 #[inline(never)]
 pub fn with_capacity_checked<T: Clone>(n: u64, elem: u64) -> RVec<T> {
     check_alloc(n, elem);
-    with_capacity(n.min(CAPACITY_CAP) as usize)
+    with_capacity(n as usize)
 }
 
 #[inline]

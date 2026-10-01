@@ -469,9 +469,6 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   `ulimit -n` makes `open` or `spawn` fail with `EMFILE` differ.
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
-- Huge `Array.mkEmpty`/`ByteArray.emptyWithCapacity` capacities are checked
-  as natively (overflow panic; `out of memory` when `malloc` of the full
-  size fails) but only `2^24` elements are reserved.
 - The C `errno` reported by a handle's sticky error indicator (see file
   primitives) is the current `errno`, which may differ from native after
   unrelated failing calls (the runtime's own calls are not libc++'s).

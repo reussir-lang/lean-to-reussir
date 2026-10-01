@@ -1589,7 +1589,6 @@ Each item says what differs and when.
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`.
 - `IO.getNumHeartbeats` is 0; `dbgStackTrace` prints nothing; a panic's
   backtrace line is `(stack trace unavailable)`.
-- Huge capacity reservations are capped.
 - `errno` after a sticky handle error can differ.
 - Child processes (§5.8): code that reads one of a child's pipes in a task
   while it reads the other (as `IO.Process.output` does natively, stdout

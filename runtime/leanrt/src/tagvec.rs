@@ -222,10 +222,12 @@ pub fn empty() -> LTagVec {
     alloc(0)
 }
 
+/// `Array.mkEmpty n`: Lean's allocation checks, then the capacity asked
+/// for (natively reserved too; untouched pages cost no memory).
 #[inline(never)]
 pub fn with_capacity(n: u64) -> LTagVec {
     crate::array::check_alloc(n, 8);
-    alloc(n.min(crate::array::CAPACITY_CAP) as usize)
+    alloc(n as usize)
 }
 
 /// `n` copies of a small (odd) word.
