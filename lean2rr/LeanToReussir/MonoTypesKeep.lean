@@ -20,6 +20,18 @@ constructor fields, Stage 3) it uses this function, so the types agree.
 namespace LeanToReussir
 open Lean Compiler LCNF
 
+/-- `typedRef α`: the mono type lean2rr gives a reference (`ST.Ref σ α`,
+which Lean's mono phase erases to `lcAny`) whose contents have the precise
+mono type `α` (Stage 3 assigns it from `ST.Prim.mkRef` instances,
+translation plan §4; Stage 4 represents it by a typed cell, §5.1). Not a
+Lean constant: it only occurs in types lean2rr computes. -/
+def typedRefName : Name := `_l2r.TypedRef
+
+def mkTypedRef (α : Expr) : Expr := mkApp (mkConst typedRefName) α
+
+/-- Does `t` mention `typedRef`? -/
+def hasTypedRef (t : Expr) : Bool := (t.find? (·.isConstOf typedRefName)).isSome
+
 /-- The type-former argument `arg` as kept in a mono type, if it is closed
 and not dependent. -/
 partial def keepFormer? (arg : Expr) (conv : Expr → CoreM Expr) : CoreM (Option Expr) := do
@@ -62,6 +74,11 @@ where
     -- unwrap): values of every type are cast to it, so its representation
     -- is the uniform one, in data structures as in library code.
     | .const ``NonScalar _ | .const ``PNonScalar _ => return anyExpr
+    -- Already a mono type (see `typedRefName`).
+    | .const n _ => if n == typedRefName then return mkAppN f args else visitConst f args
+    | _ => return anyExpr
+  visitConst (f : Expr) (args : Array Expr) : CoreM Expr := do
+    match f with
     | .const declName us =>
       if let some info ← hasTrivialStructure? declName then
         let ctorType ← getOtherDeclBaseType info.ctorName []

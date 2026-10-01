@@ -410,6 +410,16 @@ binder would also run, and fail, when `t = .str`. The rules:
   only the representation changes.
 - **Placeholders.** A placeholder `let z := ◾` gets the type its uses
   expect when they agree: it has no value to convert.
+- **References.** Mono types every `ST.Ref σ α` `lcAny`. An instance of
+  `ST.Prim.mkRef` at a precise `α` returns `typedRef α` instead (a type
+  only lean2rr uses), and the rules above carry it to the binders the
+  reference flows into: the `ST.Out` field, join-point parameters, and the
+  parameters of functions that every caller passes it to (the rule
+  *parameters from callers* also applies to parameters that receive a
+  typed reference). Stage 4 gives `typedRef α` the typed representation of
+  §5.1, so an `IO.Ref Nat` counter or the state of a `StateRefT` is read
+  and written without boxing. A reference stored in a structure field,
+  passed to uniform code or created there stays `lcAny`.
 
 For `xs.map (· * 2)` these rules make the whole map run on the precise array,
 in place and without boxing, like native Lean. The loop is assumed to
@@ -486,7 +496,7 @@ Stage 4 sees only mono types:
 | `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records), otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
-| `ST.Ref σ α` | `LRef<Box>`, a shared mutable cell | mono types a reference as `lcAny`, so it travels boxed. Its contents are boxed too, whatever `α` is: uniform code (`α = lcAny`) and typed code can share one cell, and a cell cannot be converted without losing aliasing. Each `set` allocates the box. |
+| `ST.Ref σ α` | a generated shared record `L2RRef_N(Cell<⟦α⟧>)` around Reussir's mutable cell | the contents keep their own representation; `Nat`/`Int` (`L2RNatRef`/`L2RIntRef`, a tagged word as in `LNatArr` plus a cell for a big value) and `[value]` structures (in an `ElemBox`) are stored apart, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧), … }` | memoized thunks, deferred tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
 
@@ -581,6 +591,17 @@ its value is stored as `Box`.
   wrapped at all (it is the same object), and one read at three
   representations in a loop (`Nat → Nat`, `Nat → Box`, `Box → Box`)
   stays one wrapper deep.
+- A reference (`ST.Ref`) is boxed under the variant of its own type. A
+  reference cannot be converted without losing aliasing, so where one is
+  used in a `Box` (uniform code, or typed code that got it through a
+  `lcAny` position), each operation goes through a generated dispatch over
+  every reference type the program boxes: it acts on that reference's one
+  cell, converting the value between the cell's element type and the
+  operation's (`get` at `Box` on an `L2RNatRef` boxes the `Nat`; `set`
+  unboxes). Typed references come only from `ST.Prim.mkRef` instances at a
+  precise element type, and flow only to binders that Stage 3 types from
+  them (§4), so a typed position never receives a reference of another
+  representation. `ST.Ref.ptrEq` compares the records' addresses.
 - A partial application has the type of its target with the supplied
   arguments removed. Lambda lifting can give a lifted lambda the result type
   `lcAny` while its closure is used at `Nat × Int → Int`, or the reverse; the
@@ -1356,7 +1377,6 @@ The runtime provides what Reussir lacks:
 - `Array`/`ByteArray`/`FloatArray` operations over the copy-on-write `Vec`;
 - `Float` math through libm;
 - IO: stdout/stderr/stdin streams, `IO.Error`, argv, exit;
-- `ST.Ref` cells;
 - the mutable cells of thunks and tasks, and the queue of deferred IO
   tasks (§5.14);
 - panic, trace;
@@ -1494,7 +1514,9 @@ Answered (Lean):
   represented natively by its field, answers its field's address. Values
   lean2rr wraps at the call (`Nat`s, enumerations: `ElemBox`) get a fresh
   number, so they always compare unequal and the shortcut is just lost.
-  `ST.Ref.ptrEq` is real identity, implemented by `l2r_ref_ptr_eq`.
+  `ST.Ref.ptrEq` is real identity: the addresses of the references'
+  records (`l2r_ptr_addr_rec`), whatever representation each side is seen
+  at.
 
 ---
 
@@ -1610,11 +1632,14 @@ Each item says what differs and when.
   are larger: §7's cheaper `Nat`). Maps that keep the representation run in
   place. A map loop of another shape (not Lean's) still converts its input
   to an array of `Box` on entry and back on exit.
-- *Element storage*: array elements, `ST.Ref` contents, once-cell values and
-  polymorphic extern arguments whose type cannot cross the FFI boundary
-  (enumerations, `L2RUnit`, `[value]` tuples) are wrapped in an
-  `ElemBox` cell, one allocation each, where native stores tagged scalars.
-  `ST.Ref` contents are always boxed (§5.1). `UInt64` and `Float` arrays, on
+- *Element storage*: array elements, once-cell values and polymorphic
+  extern arguments whose type cannot cross the FFI boundary (enumerations,
+  `L2RUnit`, `[value]` tuples) are wrapped in an `ElemBox` cell, one
+  allocation each, where native stores tagged scalars. `ST.Ref` contents are stored in their own representation (§5.1), except
+  `[value]` structures (an `ElemBox` per `set`); a `Nat` reference keeps a
+  big number it held until it is replaced by another big number or the
+  reference dies. A reference used through a `Box` costs a dispatch on its
+  type at each operation. `UInt64` and `Float` arrays, on
   the other hand, are unboxed, unlike native.
 
 **Runtime** (details in `runtime/README.md`, "Known divergences")

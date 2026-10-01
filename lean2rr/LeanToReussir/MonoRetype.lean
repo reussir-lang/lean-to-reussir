@@ -806,20 +806,24 @@ def paramsFromCallers (decls : Array (Decl .pure)) (types : Array Types) :
     let mut hyp : Array (Nat × Expr) := #[]
     for h : j in [:d.params.size] do
       let p := d.params[j]
-      -- Only types holding an erased array (`Array lcAny`, `Option (Array
-      -- lcAny)`, …): code over a dynamically typed value (`Dynamic.get?`)
-      -- casts it to other types in branches that a runtime check rules out,
-      -- and at a precise parameter type those casts could not be translated.
-      unless countArrayAny p.type > 0 && (← unknown p.type) do continue
+      -- (A borrow annotation, `mdata`, does not change the type.)
+      let pt := p.type.consumeMData
+      unless ← unknown pt do continue
       if sites.blocked.contains (d.name, j) then continue
       let ts := ((sites.args.getD (d.name, j) #[]).filterMap id)
       let some t := ts[0]? | continue
+      -- Only types holding an erased array (`Array lcAny`, `Option (Array
+      -- lcAny)`, …) or receiving a typed reference: code over a dynamically
+      -- typed value (`Dynamic.get?`) casts it to other types in branches
+      -- that a runtime check rules out, and at a precise parameter type
+      -- those casts could not be translated.
+      unless countArrayAny pt > 0 || hasTypedRef t do continue
       let n ← norm t
       let mut agree := true
       for t' in ts do
         if (← unknown t') || (← norm t') != n then agree := false
       if !agree then continue
-      if let some t ← refineTo? p.type (some t) then hyp := hyp.push (j, t)
+      if let some t ← refineTo? pt (some t) then hyp := hyp.push (j, t)
     if hyp.isEmpty then continue
     let oldSig := (← get).sigs[d.name]?
     let params := hyp.foldl (fun ps (j, t) => ps.set! j { ps[j]! with type := t }) d.params
@@ -1353,6 +1357,24 @@ def splitMapLoops (decls : Array (Decl .pure)) (types : Array Types) (roots : Ar
       unless live.contains f do work := f :: work
   return all.filter fun d => !(shapes.contains d.name) || live.contains d.name
 
+/-- An instance of `ST.Prim.mkRef` at a precise element type `α` returns a
+`typedRef α` (Lean's mono type of a reference is `lcAny`): the references
+it creates, and the binders they flow into by the rules above, get a typed
+representation (translation plan §5.1). -/
+def typeMkRef (d : Decl .pure) : MRetypeM (Decl .pure) := do
+  unless d.value matches .extern _ do return d
+  let some k := (← get).keys.find? d.name | return d
+  unless k.decl == ``ST.Prim.mkRef do return d
+  let some α := k.typeArgs[1]? | return d
+  let α ← toMonoTypeKeep α
+  if (← unknown α) || α.isErased then return d
+  let ret := (splitArrows d.type d.params.size).2.consumeMData
+  let args := ret.getAppArgs
+  unless (ret.isAppOf ``ST.Out || ret.isAppOf ``EST.Out) && args.back? == some anyExpr do return d
+  let d := withSig d d.params (mkAppN ret.getAppFn (args.pop.push (mkTypedRef α)))
+  modify fun s => { s with sigs := s.sigs.insert d.name (declSig d) }
+  return d
+
 /-- Stage 3 on all mono declarations (bounded global fixpoint). `roots` are
 the declarations the entry point calls (`main`, startup work). Returns the
 declarations, including extern instances created by re-instantiation, and
@@ -1383,7 +1405,7 @@ def retypeMono (table : RelevanceTable) (decls : Array (Decl .pure)) (keys : Nam
       unless live.contains f do work := f :: work
   st := { st with live }
   let act : MRetypeM (Array (Decl .pure)) := do
-    let mut decls := decls
+    let mut decls ← decls.mapM typeMkRef
     let mut types : Array Types := decls.map fun _ => {}
     -- The fixpoint, then the split of `map` loops (whose split instances
     -- type the values they read, so a second fixpoint can type what those

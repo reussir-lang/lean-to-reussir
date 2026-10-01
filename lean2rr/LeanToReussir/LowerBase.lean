@@ -127,6 +127,17 @@ inductive FnVariant where
   | wrap (src : RR.Ty)
   deriving BEq, Hashable, Inhabited
 
+/-- How a reference's cell stores its element (see `refType`). -/
+inductive RefKind where
+  /-- `L2RRef_N(Cell<e>)`. -/
+  | direct
+  /-- `L2RRef_N(Cell<ElemBox(e)>)`, for `[value]` structures. -/
+  | boxed (bn : String)
+  /-- The prelude's `L2RNatRef` / `L2RIntRef`. -/
+  | nat
+  | int
+  deriving BEq, Inhabited
+
 structure LowerState where
   /-- Targets of function values, by id. -/
   fnTargets : Std.HashMap String FnTarget := {}
@@ -194,6 +205,13 @@ structure LowerState where
   taskTags : Array String := #[]
   /-- Names of generated thunk/task helper functions (see `lazyFn`). -/
   lazyFnNames : Std.HashSet String := {}
+  /-- Reference types (see `refType`): element type ↦ name, and back (with
+  how the cell stores the element). -/
+  refTypes : Std.HashMap RR.Ty String := {}
+  refInfos : Std.HashMap String (RR.Ty × RefKind) := {}
+  /-- Operations on references held in a `Box` (see Lower's
+  `refBoxOpFn`): operation and element type. -/
+  refBoxOps : Array (String × RR.Ty) := #[]
   counter : Nat := 0
 
 abbrev LowerM := ReaderT LowerCtx (StateRefT LowerState CoreM)
@@ -235,6 +253,8 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
   | .named n =>
     if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
             "LStr", "LBig", "LNatArr", "LIntArr", "LHandle", boxName] then return true
+    -- A reference is a shared record (see `refType`).
+    if (← get).refInfos.contains n then return true
     match (← get).typeInfos[n]? with
     | some info => return info.shape != .enumLike && !info.value
     -- A type whose fields are being lowered: decided from its shape
@@ -300,6 +320,43 @@ def storageElem (st : RR.Ty) : LowerM (RR.Ty × Bool) := do
   for (k, v) in (← get).tupleTypes.toList do
     if v == n && k.size == 2 && k[1]! == .named "__elem_box" then return (k[0]!, true)
   return (st, false)
+
+/-- The representation of an `ST.Ref` whose contents have Reussir type `e`
+(translation plan §5.1): a shared record holding Reussir's mutable cell, one
+per element type, which stores the element in its own representation (all
+aliases of a reference share the record). A `Nat` or `Int` is stored as in
+`LNatArr` (a tagged word in a `Cell<u64>`, a big value in a second cell:
+the prelude's `L2RNatRef`/`L2RIntRef`), a `[value]` structure in an
+`ElemBox` (Reussir's cells do not hold `[value]` records with counted
+members); other values as they are, `L2RRef_N(Cell<e>)`. -/
+def refType (e : RR.Ty) : LowerM RR.Ty := do
+  if let some n := (← get).refTypes[e]? then return .named n
+  let register (n : String) (k : RefKind) (item : Option RR.Item) : LowerM RR.Ty := do
+    modify fun s => { s with
+      refTypes := s.refTypes.insert e n
+      refInfos := s.refInfos.insert n (e, k)
+      typeItems := match item with | some it => s.typeItems.push it | none => s.typeItems }
+    return .named n
+  if e == .named "Nat" then return ← register "L2RNatRef" .nat none
+  if e == .named "Int" then return ← register "L2RIntRef" .int none
+  let direct ← match e with
+    | .named t =>
+      if t ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "L2RUnit"] then pure true
+      else if ((← get).typeInfos[t]?.map (·.shape == .enumLike)).getD false then pure true
+      else isBoundaryTy e
+    | .cls .. => pure false
+    | _ => isBoundaryTy e
+  let n ← fresh "L2RRef"
+  if direct then return ← register n .direct (some (.struct n false #[.app "Cell" #[e]]))
+  let (st, _) ← arrayElemTy e
+  let .named bn := st | return ← register n .direct (some (.struct n false #[.app "Cell" #[e]]))
+  register n (.boxed bn) (some (.struct n false #[.app "Cell" #[st]]))
+
+/-- The element type of reference type `t` and how its cell stores it, if
+`t` is a reference type. -/
+def refElem? (t : RR.Ty) : LowerM (Option (RR.Ty × RefKind)) := do
+  let .named n := t | return none
+  return (← get).refInfos[n]?
 
 /-- A string literal: `l2r_str_lit(id)`, which builds the string from a
 table of byte strings generated with the program (`strLitTable`). Passing
@@ -391,7 +448,7 @@ def fieldAlign (t : RR.Ty) : LowerM Nat := do
 def builtinTypeNames : List Name :=
   [``UInt8, ``UInt16, ``UInt32, ``UInt64, ``USize, ``Float, ``Float32, ``Bool, ``IO.FS.Handle,
    ``Unit, ``PUnit, ``lcVoid, ``lcErased, ``lcAny, ``Nat, ``Int, ``String, ``Thunk, ``Task,
-   ``ByteArray, ``FloatArray, ``Array]
+   ``ByteArray, ``FloatArray, ``Array, typedRefName]
 
 /-- The key of the generated type for inductive `ival` applied to `args`
 (only relevant arguments distinguish instances). -/
@@ -430,6 +487,10 @@ mutual
     | _ => return RR.Ty.box
 
   partial def lowerTypeApp (n : Name) (args : Array Expr) : LowerM RR.Ty := do
+    if n == typedRefName then
+      return ← refType (← match args[0]? with
+        | some a => lowerType a
+        | none => pure RR.Ty.box)
     match n with
     | ``UInt8 => return .named "u8"
     | ``UInt16 => return .named "u16"

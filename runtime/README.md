@@ -127,7 +127,12 @@ lean2rr wraps its result with `wrapIOResult`: `l2r_io_mono_ms_now()`,
 `l2r_runtime_hold<T>(a)`, `l2r_io_prim_handle_is_eof(h)`,
 `l2r_io_prim_handle_is_tty(h)`. (`l2r_io_app_path()`, `l2r_io_current_dir()`
 and `l2r_io_process_get_current_dir()` are infallible stand-ins for the
-fallible primitives below.) References: `l2r_ref_new/get/set/swap/take/ptr_eq`.
+fallible primitives below.) References are Reussir cells in a
+lean2rr-generated record (`L2RRef_N(Cell<T>)`; translation plan §5.1), read
+and written by the plain-Reussir helpers `l2r_rc_get/set/swap<T>`; a `Nat`
+or `Int` reference is the prelude's `L2RNatRef`/`L2RIntRef` (a tagged word
+and a cell for a big number, `l2r_natref_*`/`l2r_intref_*`). `LRef<T>`
+(`l2r_ref_*`, a runtime cell) backs promises.
 
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
 lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),
@@ -336,7 +341,7 @@ lean2rr's dev branch (the tests pass with it).
 16. *done* — `ST.Prim.Ref.take` is lowered to `l2r_ref_get`, so the value stays in
     the cell and the taken copy is shared: every `modify`/`modifyGet`
     copies the array or string it updates (quadratic loops). Map it to
-    `l2r_ref_take`.
+    `l2r_ref_take` (now `l2r_rc_swap` with the placeholder).
 17. *done* — `allocprof` (`lean_io_allocprof`) has no glue: use
     `l2r_io_allocprof_with(msg, act)` (test `RtAllocProf`); likewise
     `timeit` → `l2r_io_timeit_with`.
