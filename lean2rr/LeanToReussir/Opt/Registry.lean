@@ -67,8 +67,15 @@ def optimizations : Array OptPass := #[
   ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩,
   ⟨"outline", true, "deep and long tail paths cut into chains of functions (bounds rrc's build time and memory)", Outline.install⟩]
 
-/-- Parts of the translation that are not optional. -/
-def required : Array RequiredPass := #[]
+/-- Parts of the translation that look like optimizations but are not
+optional. -/
+def required : Array RequiredPass := #[
+  ⟨"startup-chunks", "the startup chain cut into functions of at most 128 steps (Emit/Startup, startupChunk)",
+    "not an optimization: one chain of nested matches would be as deep as the program has initializers, and rrc's recursive lowering overflows its stack on a few thousand (translation plan §5.12)"⟩,
+  ⟨"field-order", "each constructor's fields in decreasing alignment, ties in declaration order (LowerBase, nominalType)",
+    "the driver turns Reussir's member packing off (--no-pack-record-members, the workaround for Reussir bug 2), so this order is the record layout; it leaves no padding between members, and a declaration-order record with padding meets Reussir bug 8 (a padding \"lift\" that overflows cells; docs/reussir-bugs.md)"⟩,
+  ⟨"value-structs", "a structure with one relevant field (ST.Out, the result of every BaseIO call) is a [value] struct (LowerBase, nominalType)",
+    "a representation choice the rest of the lowering is written against: conversions (a [value] struct is natively its field), identity (ptrAddrUnsafe), references and array storage (ElemBox) treat it as its field; Reussir's [value] enums are avoided instead (Reussir bug 1), not these structs"⟩]
 
 /-- The configuration with the enabled optimizations, after turning off
 those named in `disabled` and on those named in `enabled`. An unknown name,

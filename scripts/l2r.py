@@ -2,6 +2,7 @@
 """Compile a compiled Lean module to a native executable through Reussir.
 
     l2r.py MODULE -o EXE [--lean-path DIR[:DIR...]] [-O LEVEL] [--keep-rr FILE]
+           [--disable-opt NAME]...
 
 MODULE must already be compiled by Lean 4.33 (its .olean on LEAN_PATH, or in
 --lean-path). Steps: lean2rr (Lean LCNF -> .rr, with the runtime prelude),
@@ -10,7 +11,9 @@ then rrc (Reussir -> executable), linking the runtime crate `leanrt`
 
 Environment overrides: L2R_REUSSIR (Reussir checkout with build/), L2R_RUSTC
 (the rustc that built Reussir's runtime rlibs), L2R_GMP (path of libgmp.a;
-default: the one shipped with the Lean toolchain).
+default: the one shipped with the Lean toolchain), L2R_LEAN2RR (the lean2rr
+binary), L2R_DISABLE_OPTS (comma-separated lean2rr optimizations to turn
+off, as --disable-opt; `lean2rr --list-opts` lists them).
 """
 import argparse, fcntl, hashlib, os, subprocess, sys, tempfile
 from pathlib import Path
@@ -120,6 +123,9 @@ def main():
     # Reuse a matched cell for a constructor after intervening calls (like
     # Lean's reset/reuse); `--no-reuse-across-call` turns it off.
     ap.add_argument("--no-reuse-across-call", action="store_true")
+    # lean2rr optimizations to turn off (see `lean2rr --list-opts`); also
+    # from L2R_DISABLE_OPTS (comma-separated), for test runners.
+    ap.add_argument("--disable-opt", action="append", default=[], metavar="NAME")
     args = ap.parse_args()
 
     env = dict(os.environ)
@@ -134,8 +140,10 @@ def main():
     rlib = build_leanrt()
     with tempfile.TemporaryDirectory() as tmp:
         rr = Path(args.keep_rr).resolve() if args.keep_rr else Path(tmp) / "prog.rr"
+        disabled = args.disable_opt + [n for n in os.environ.get("L2R_DISABLE_OPTS", "").split(",") if n]
         run([str(LEAN2RR), args.module, "--root", args.root, "--emit", "rr",
-             "--prelude", str(PRELUDE), "-o", str(rr)], env=env, show_stderr=True)
+             "--prelude", str(PRELUDE), "-o", str(rr)]
+            + [a for n in disabled for a in ("--disable-opt", n)], env=env, show_stderr=True)
         rt, deps = rt_dirs()
         target_libdir = run([str(RUSTC), "--print", "target-libdir"]).stdout.strip()
         # rrc runs in the temporary directory: it leaves its polymorphic-FFI
