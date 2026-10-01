@@ -446,13 +446,11 @@ def isEnumName (n : String) : LowerM Bool := do
   if n == "bool" then return true
   return ((← get).typeInfos[n]?.map (·.shape == .enumLike)).getD false
 
-/-- The index of value `e` of Reussir type `n`, as `u64`: a `Nat`, a
-fixed-width unsigned integer, `bool` (`false` is 0) or an enumeration
-(constructor position). `none` for other types. -/
-def indexOf (e : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
+/-- The word `lean_unbox` gives for value `e` of Reussir type `n` natively
+represented by a boxed scalar of its own (`UInt8/16/32`, `Char`, `Bool`, an
+enumeration: its index), as `u64`. `none` for other types. -/
+def scalarWord (e : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
   let u64 := RR.Ty.named "u64"
-  if n == "Nat" then return some (.call "lean_usize_of_nat" #[] #[e])
-  if n == "u64" then return some e
   if n ∈ ["u8", "u16", "u32"] then return some (.cast e u64)
   if n == "bool" then
     let o ← fresh "ix"
@@ -460,20 +458,146 @@ def indexOf (e : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
   if ← isEnumName n then return some (.call (← enumIndexFn n) #[] #[e])
   return none
 
-/-- The value of Reussir type `n` with index `i : u64` (see `indexOf`); an
-index past the last constructor of an enumeration gives the last one, a
-nonzero one `true`. -/
-def ofIndex (i : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
+/-- Whether a generated type has a constructor without relevant fields
+(natively the boxed scalar of its index). -/
+def hasNullaryCtor (info : TypeInfo) : Bool :=
+  info.ctorOrder.any fun c => (info.ctors.find? c).any (·.fields.all Option.isNone)
+
+/-- `l2r_ctor_word_T(x)`: the index of a constructor without fields of
+generated type `tn`, which natively is the boxed scalar of its index; a
+value with fields is an object (its "word" an address): unreachable. -/
+def ctorWordFn (tn : String) (info : TypeInfo) : LowerM String := do
+  let name := s!"l2r_ctor_word_{tn}"
+  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+    let u64 := RR.Ty.named "u64"
+    let mut arms : Array RR.Arm := #[]
+    for h : i in [:info.ctorOrder.size] do
+      let some l := info.ctors.find? info.ctorOrder[i] | continue
+      if l.fields.all Option.isNone then
+        arms := arms.push { ty := tn, ctor := some l.variant, binders := #[], body := ⟨#[("i", some u64, .atom (toString i))], .var "i"⟩ }
+    arms := arms.push { ty := tn, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[u64] #[]) }
+    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named tn)] u64 (.ofExpr (.mtch (.var "x") arms))) }
+  return name
+
+/-- `l2r_ctor_of_word_T(w)`: the value of generated type `tn` that is the
+boxed scalar `w` natively: its constructor `w` when that has no fields (a
+word past the last constructor selects the last one, as Lean's `switch`
+does); otherwise unreachable (natively an object read from a scalar). -/
+def ctorOfWordFn (tn : String) (info : TypeInfo) : LowerM String := do
+  let name := s!"l2r_ctor_of_word_{tn}"
+  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+    let u64 := RR.Ty.named "u64"
+    let t := RR.Ty.named tn
+    let ls := info.ctorOrder.filterMap info.ctors.find?
+    let nullary (l : CtorLayout) := l.fields.all Option.isNone
+    let mk (l : CtorLayout) : RR.Expr := if info.shape == .struct then .ctor tn none #[] else .ctor tn (some l.variant) #[]
+    let unreachable := RR.Expr.call "l2r_unreachable" #[t] #[]
+    let mut e : RR.Expr := match ls.back? with
+      | some l => if nullary l then .block ⟨#[("k", some u64, .atom (toString (ls.size - 1)))],
+          .ite (.atom "w >= k") (.ofExpr (mk l)) (.ofExpr unreachable)⟩ else unreachable
+      | none => unreachable
+    for j in [:ls.size - 1] do
+      let i := ls.size - 2 - j
+      let some l := ls[i]? | continue
+      if !nullary l then continue
+      e := .block ⟨#[("k", some u64, .atom (toString i))], .ite (.atom "w == k") (.ofExpr (mk l)) (.ofExpr e)⟩
+    modify fun s => { s with fns := s.fns.push (.fn name #[("w", u64)] t (.ofExpr e)) }
+  return name
+
+/-- The word `lean_unbox` gives natively for value `e` of Reussir type `n`
+(`unsafeCast` to a scalar reads it): a `Nat`'s value (`lean_usize_of_nat`;
+for a big one, natively an address, its low bits), an `Int`'s 32 bits
+(`l2r_int_word`), the index of an enumeration or of a constructor without
+fields, a fixed-width integer's value. `none` for other types. -/
+def wordOf (e : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
+  if n == "Nat" then return some (.call "lean_usize_of_nat" #[] #[e])
+  if n == "Int" then return some (.call "l2r_int_word" #[] #[e])
+  if let some w ← scalarWord e n then return some w
+  if let some info := (← get).typeInfos[n]? then
+    if !info.value && hasNullaryCtor info then return some (.call (← ctorWordFn n info) #[] #[e])
+  return none
+
+/-- The value of Reussir type `n` that natively is the boxed scalar of word
+`w : u64` (see `wordOf`): `Nat` `w`; `Int` the signed value of its 32 bits
+(`lean_scalar_to_int64`); a fixed-width integer, `Bool` (nonzero) or an
+enumeration the bits of its width (`lean_unbox` then truncation; an index
+past the last constructor gives the last one, as Lean's `switch` does); a
+constructor without fields (`ctorOfWordFn`). `none` for other types. -/
+def ofWord (w : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
   let u64 := RR.Ty.named "u64"
-  if n == "Nat" then return some (.ctor "Nat" (some "Small") #[i])
-  if n == "u64" then return some i
-  if n ∈ ["u8", "u16", "u32"] then return some (.cast i (.named n))
+  if n == "Nat" then return some (.ctor "Nat" (some "Small") #[w])
+  if n == "Int" then return some (.call "l2r_int_of_word" #[] #[w])
+  if n ∈ ["u8", "u16", "u32"] then return some (.cast w (.named n))
   if n == "bool" then
     let x ← fresh "ix"
     let z ← fresh "iz"
-    return some (.block ⟨#[(x, some u64, i), (z, some u64, .atom "0")], .atom s!"{x} != {z}"⟩)
-  if ← isEnumName n then return some (.call (← enumOfIndexFn n) #[] #[i])
+    return some (.block ⟨#[(x, some (.named "u8"), .cast w (.named "u8")), (z, some (.named "u8"), .atom "0")],
+      .atom s!"{x} != {z}"⟩)
+  if let some info := (← get).typeInfos[n]? then
+    if info.shape == .enumLike then
+      let size := info.ctorOrder.size
+      let mask := if size ≤ 256 then 255 else if size ≤ 65536 then 65535 else 4294967295
+      let x ← fresh "ix"
+      let m ← fresh "im"
+      return some (.block ⟨#[(x, some u64, w), (m, some u64, .atom (toString mask))],
+        .call (← enumOfIndexFn n) #[] #[.atom s!"{x} & {m}"]⟩)
+    if !info.value && hasNullaryCtor info then return some (.call (← ctorOfWordFn n info) #[] #[w])
   return none
+
+/-- Lean's native layout slot of each field of constructor `c` (Lean's own
+`getCtorLayout`): `(0, i, 8)` the `i`-th object field, `(1, i, 8)` the
+`i`-th `usize` field, `(2, offset, size)` a scalar in the scalar area;
+`none` for a field without data. `none` if Lean has no layout for it. -/
+def nativeSlots (c : Name) : LowerM (Option (Array (Option (Nat × Nat × Nat)))) := do
+  try
+    let l ← Lean.Compiler.LCNF.getCtorLayout c
+    return some (l.fieldInfo.map fun
+      | .object i _ => some (0, i, 8)
+      | .usize i => some (1, i, 8)
+      | .scalar sz off _ => some (2, off, sz)
+      | _ => none)
+  catch _ => return none
+
+/-- Which field of constructor `sc` (layout `sl`, of a value's own type) each
+field of constructor `dc` (layout `dl`, of the type the value is cast to)
+reads, as natively. Lean stores the object fields of a constructor first,
+in declaration order, then the `usize` fields, then the other scalars by
+decreasing size (ties in declaration order), so fields correspond by their
+native slot, not by declaration position: `S₁ {a : UInt8, b : Nat}` read as
+`S₂ {x : Nat, y : UInt8}` is `x = b`, `y = a`. For each Lean field of `dc`:
+`none` if it has no representation, `some (some k)` if it reads field `k`
+of `sc`, `some none` if the field there has no representation here (a
+placeholder: the zero). The result is `none` when a field reads data that
+the source does not have, or only part of a scalar. Without native layouts,
+relevant fields correspond by position. -/
+def castFieldMap (sc dc : Name) (sl dl : CtorLayout) : LowerM (Option (Array (Option (Option Nat)))) := do
+  let positional : Option (Array (Option (Option Nat))) := Id.run do
+    let srcIdx := (List.range sl.fields.size).toArray.filter fun k => (sl.fields[k]?.join).isSome
+    let mut out := #[]
+    let mut r := 0
+    for f in dl.fields do
+      match f with
+      | some _ =>
+        let some k := srcIdx[r]? | return none
+        out := out.push (some (some k))
+        r := r + 1
+      | none => out := out.push none
+    return some out
+  let (some ss, some ds) := (← nativeSlots sc, ← nativeSlots dc) | return positional
+  if ss.size != sl.fields.size || ds.size != dl.fields.size then return positional
+  let mut out := #[]
+  for h : j in [:dl.fields.size] do
+    if dl.fields[j].isNone then
+      out := out.push none
+      continue
+    match ds[j]! with
+    -- No data natively (a field relevant only here): a placeholder.
+    | none => out := out.push (some none)
+    | some slot =>
+      match ss.findIdx? (· == some slot) with
+      | some k => out := out.push (some (if (sl.fields[k]?.join).isSome then some k else none))
+      | none => return none
+  return some out
 
 mutual
   /-- Convert `e` from representation `src` to `dst`. Besides `Box`
@@ -558,22 +682,46 @@ mutual
       let f := rawFnValue dst x (.ofExpr res)
       return some (if pre.isEmpty then f else .block ⟨pre, f⟩)
     | .named sn, .named dn =>
-      -- Enumerations (and `Bool`) and `Nat` or fixed-width integers, by
-      -- index: natively an enumeration is a `uint8`/`16`/`32` (`Bool` a
-      -- `uint8`), a `Nat` its boxed scalar. Only reachable through
-      -- `unsafeCast`.
-      if (← isEnumName sn) || (← isEnumName dn) then
-        let infos := (← get).typeInfos
-        let related ← if infos.contains sn && infos.contains dn then
-            pure ((← nominalHead sn) == (← nominalHead dn) || (← isomorphic sn dn))
-          else pure false
-        if !related then
-          if let some i ← indexOf e sn then
-            if let some r ← ofIndex i dn then return some r
-      if let some sh ← nominalHead sn then
-        let some dh ← nominalHead dn | return none
-        if sh != dh && !(← isomorphic sn dn) then return none
-        return some (.call (← structConv sn dn) #[] #[e])
+      -- Instantiations of one inductive, or (through `unsafeCast`) another
+      -- inductive that Lean represents alike: structurally.
+      if let (some sh, some dh) := (← nominalHead sn, ← nominalHead dn) then
+        if sh == dh || (← isomorphic sn dn) then return some (.call (← structConv sn dn) #[] #[e])
+      -- The rest is only reachable through `unsafeCast`, between values that
+      -- Lean represents by the same word; the conversions follow Lean's
+      -- `lean_box`/`lean_unbox`. Scalars of the same size in a constructor's
+      -- scalar area: the bits.
+      match sn, dn with
+      | "u64", "f64" => return some (.call "lean_float_of_bits" #[] #[e])
+      | "f64", "u64" => return some (.call "lean_float_to_bits" #[] #[e])
+      | "u32", "f32" => return some (.call "lean_float32_of_bits" #[] #[e])
+      | "f32", "u32" => return some (.call "lean_float32_to_bits" #[] #[e])
+      -- `Nat` and `Int`: the same value (natively the same boxed scalar for
+      -- small values, the same big number object otherwise; a `Nat` from
+      -- 2^31 to 2^63 is not a valid small `Int` natively).
+      | "Nat", "Int" => return some (.call "lean_nat_to_int" #[] #[e])
+      | "Int", "Nat" => return some (.call "l2r_int_cast_nat" #[] #[e])
+      | _, _ => pure ()
+      -- A `[value]` struct is natively its field.
+      let infos := (← get).typeInfos
+      if let some si := infos[sn]? then
+        if si.value && (← nominalHead sn) != (← nominalHead dn) then
+          if let some ft := (si.ctors.find? si.ctorOrder[0]!).bind (·.posTys[0]?) then
+            let (pre, v) ← match e with
+              | .var _ => pure (#[], e)
+              | _ => do
+                let x ← fresh "vs"
+                pure (#[(x, some src, e)], RR.Expr.var x)
+            let some r ← tryCoerce (.field v 0) ft dst | return none
+            return some (if pre.isEmpty then r else .block ⟨pre, r⟩)
+      if let some di := infos[dn]? then
+        if di.value && (← nominalHead sn) != (← nominalHead dn) then
+          if let some ft := (di.ctors.find? di.ctorOrder[0]!).bind (·.posTys[0]?) then
+            let some v ← tryCoerce e src ft | return none
+            return some (.ctor dn none #[v])
+      -- Boxed scalars: `Nat`, `Int`, fixed-width integers, `Bool`,
+      -- enumerations, constructors without fields.
+      if let some w ← wordOf e sn then
+        if let some r ← ofWord w dn then return some r
       vecCoerce e src dst
     | .app "LCell" #[.named sz], .app "LCell" #[.named dz] =>
       match ← lazyConv sz dz with
@@ -619,16 +767,18 @@ mutual
       .fn f #[("src", src)] dst entry] }
     return some f
 
-  /-- Two generated types with the same number of constructors and, at each
-  position, the same number of relevant fields. -/
+  /-- Whether values of generated type `sn` can be read as values of `dn`
+  (through `unsafeCast`, where Lean's representations coincide): the same
+  number of constructors, and each field of a constructor of `dn` reads a
+  field of the corresponding constructor of `sn` (`castFieldMap`). -/
   partial def isomorphic (sn dn : String) : LowerM Bool := do
     let some si := (← get).typeInfos[sn]? | return false
     let some di := (← get).typeInfos[dn]? | return false
     if si.ctorOrder.size != di.ctorOrder.size then return false
-    return (si.ctorOrder.zip di.ctorOrder).all fun (a, b) =>
-      match si.ctors.find? a, di.ctors.find? b with
-      | some la, some lb => (la.fields.filterMap id).size == (lb.fields.filterMap id).size
-      | _, _ => false
+    for (a, b) in si.ctorOrder.zip di.ctorOrder do
+      let (some la, some lb) := (si.ctors.find? a, di.ctors.find? b) | return false
+      if (← castFieldMap a b la lb).isNone then return false
+    return true
 
   /-- The generated function converting a thunk or task with state type `sz`
   to one with state type `dz` (same kind, value types differing only in
@@ -725,15 +875,22 @@ mutual
             | none => possible := false
           | _, _ => vals := vals.push (← zeroValue dt)
       else
-        -- Isomorphic inductives: relevant fields by position.
-        for h : i in [:dstFields.size] do
-          let (_, dt) := dstFields[i]
-          match srcFields[i]? with
-          | some (_, st) =>
-            match ← tryCoerce (.var names[i]!) st dt with
-            | some v => vals := vals.push v
-            | none => possible := false
-          | none => possible := false
+        -- Another inductive (through `unsafeCast`): fields by native
+        -- layout slot (`castFieldMap`).
+        let srcIdx := (List.range sl.fields.size).toArray.filter fun j => (sl.fields[j]?.join).isSome
+        match ← castFieldMap ctor dctor sl dl with
+        | none => possible := false
+        | some fm =>
+          for h : j in [:dl.fields.size] do
+            let some (_, dt) := dl.fields[j] | continue
+            match fm[j]?.join with
+            | some (some k) =>
+              let some (_, st) := sl.fields[k]?.join | possible := false
+              let some r := srcIdx.idxOf? k | possible := false
+              match ← tryCoerce (.var names[r]!) st dt with
+              | some v => vals := vals.push v
+              | none => possible := false
+            | _ => vals := vals.push (← zeroValue dt)
       -- Fields are bound from and placed at their record positions.
       let placedVals := dl.place vals
       let body : RR.Block := if possible then
@@ -2189,7 +2346,7 @@ partial def addrOf (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
     if cellScalar t then return ← evalThen (.call "l2r_addr_fresh" #[] #[])
     if n == boxName then return .call (← boxAddrFn) #[] #[e]
     -- `UInt8/16/32`, `Char`, `Bool`, enumerations.
-    if let some i ← indexOf e n then return .call "l2r_addr_word" #[] #[i]
+    if let some i ← scalarWord e n then return .call "l2r_addr_word" #[] #[i]
     if n ∈ ["LStr", "LBig", "LNatArr", "LIntArr", "LHandle"] then
       return .call "l2r_ptr_addr_obj" #[t] #[e]
     match (← get).typeInfos[n]? with
@@ -2198,8 +2355,7 @@ partial def addrOf (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
         let some layout := info.ctors.find? info.ctorOrder[0]! | return ← evalThen (← u64Lit 1)
         let some ft := layout.posTys[0]? | return ← evalThen (← u64Lit 1)
         return ← withVar "pv" t e fun v => addrOf (.field v 0) ft
-      if info.ctorOrder.any fun c => (info.ctors.find? c).any (·.fields.all Option.isNone) then
-        return .call (← recAddrFn n info) #[] #[e]
+      if hasNullaryCtor info then return .call (← recAddrFn n info) #[] #[e]
       return .call "l2r_ptr_addr_rec" #[t] #[e]
     | none =>
       if ← isBoundaryTy t then return .call "l2r_ptr_addr_obj" #[t] #[e]
@@ -2630,21 +2786,17 @@ def castCases (sty : RR.Ty) (typeName : Name) : LowerM CastCases := do
         if (← get).typeInfos.contains dn && (← isomorphic tn dn) then return .view tn dn
   return .convert uniform
 
-/-- The layout of constructor `dl` (of the instance a cast value is matched
-as) over the record of the corresponding constructor `sl` of the value's
-own type: the `k`-th relevant field of `dl` is the `k`-th relevant field of
-`sl`, at its record position and type (as `structConv` converts isomorphic
-inductives). -/
-def viewLayout (sl dl : CtorLayout) : CtorLayout := Id.run do
-  let srcRel := sl.fields.filterMap id
-  let mut fields := #[]
-  let mut k := 0
-  for f in dl.fields do
-    match f with
-    | some _ =>
-      fields := fields.push srcRel[k]?
-      k := k + 1
-    | none => fields := fields.push none
+/-- The layout of constructor `dc` (layout `dl`, of the instance a cast
+value is matched as) over the record of the corresponding constructor `sc`
+(layout `sl`) of the value's own type: each field of `dl` is the field of
+`sl` it reads natively (`castFieldMap`), at its record position and type (as
+`structConv` converts). A field reading nothing here is a placeholder. -/
+def viewLayout (sc dc : Name) (sl dl : CtorLayout) : LowerM CtorLayout := do
+  let fm := (← castFieldMap sc dc sl dl).getD #[]
+  let fields := (List.range dl.fields.size).toArray.map fun j =>
+    match fm[j]?.join.join with
+    | some k => sl.fields[k]?.join
+    | none => none
   return { variant := sl.variant, numParams := dl.numParams, fields }
 
 def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty) : LowerM RR.Expr := do
@@ -2663,9 +2815,14 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
         | .view src dst =>
           let si := (← get).typeInfos[src]?
           let di := (← get).typeInfos[dst]?
+          let sc := si.bind (·.ctorOrder[0]?)
+          let dc := di.bind (·.ctorOrder[0]?)
           let sl := si.bind fun i => i.ctorOrder[0]?.bind i.ctors.find?
           let dl := di.bind fun i => i.ctorOrder[0]?.bind i.ctors.find?
-          pure (RR.Expr.var n, src, (do viewLayout (← sl) (← dl)))
+          let layout ← match sc, dc, sl, dl with
+            | some sc, some dc, some sl, some dl => some <$> viewLayout sc dc sl dl
+            | _, _, _, _ => pure none
+          pure (RR.Expr.var n, src, layout)
         | .convert dty =>
           let .named dn := dty | return ← zeroValue rty
           let di := (← get).typeInfos[dn]?
@@ -3190,7 +3347,7 @@ mutual
           let mut m : NameMap CtorLayout := {}
           for (sc, dc) in info.ctorOrder.zip di.ctorOrder do
             if let (some sl, some dl) := (info.ctors.find? sc, di.ctors.find? dc) then
-              m := m.insert dc (viewLayout sl dl)
+              m := m.insert dc (← viewLayout sc dc sl dl)
           pure (di.ctorOrder, fun c => m.find? c)
       match info.shape with
       | .struct =>

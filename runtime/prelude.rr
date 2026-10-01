@@ -902,6 +902,30 @@ fn lean_int_dec_nonneg(a : Int) -> bool {
     }
 }
 
+// `unsafeCast` between `Int` and scalars (lean2rr's `wordOf`/`ofWord`):
+// natively a small `Int` is the boxed scalar of its 32 bits, which
+// `lean_unbox` reads; a big one is an object (its "word" an address; here
+// the low bits of its two's complement value).
+fn l2r_int_word(i : Int) -> u64 {
+    match i {
+        Int::Small(x) => if ((x as i32) as i64) == x { (x as u32) as u64 } else { x as u64 },
+        Int::Big(b) => l2r_big_low_twos(b)
+    }
+}
+
+// The `Int` whose boxed scalar is word `w` (`lean_scalar_to_int64`: its low
+// 32 bits, signed).
+fn l2r_int_of_word(w : u64) -> Int { Int::Small{((w as u32) as i32) as i64} }
+
+// `unsafeCast (i : Int) : Nat`: a small `Int` is read as the `Nat` of its 32
+// bits, a big number object as a `Nat` of its magnitude.
+fn l2r_int_cast_nat(i : Int) -> Nat {
+    match i {
+        Int::Small(x) => if ((x as i32) as i64) == x { Nat::Small{(x as u32) as u64} } else { lean_nat_abs(Int::Small{x}) },
+        Int::Big(b) => lean_nat_abs(Int::Big{b})
+    }
+}
+
 // `Int.natAbs`.
 fn lean_nat_abs(a : Int) -> Nat {
     match a {
