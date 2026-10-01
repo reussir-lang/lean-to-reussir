@@ -13,7 +13,7 @@ lean2rr test suites, over three rounds. The eight patches are in
 `reussir-patches/` (see its README). They are applied to `./reussir` as
 local commits on its branch `l2r-local` (ef922049 + the eight). They are
 not submitted upstream. lean2rr's workarounds stay in place where they are
-still needed (bugs 1, 2 for variants, 3, 10, 16, 17, 19).
+still needed (bugs 1, 2 for variants, 3, 10, 16, 17, 19, 20).
 
 ## Repros
 
@@ -71,15 +71,16 @@ Builds used to check the repros (on the aarch64 test machine):
 | 8 | padding "lift" gives LLVM a larger layout than Reussir's | no, shape never emitted | - | none | - | - |
 | 9 | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | 0009 | passed (revised after round 2) | yes |
 | 10 | closure devirtualization prints types exponentially (build time) | yes, build time and memory | `--no-closure-wpd` | none | - | - |
-| 11 | interprocedural SCCP is superlinear (build time) | yes, build time of large programs | none | none | - | - |
+| 11 | interprocedural SCCP is superlinear (build time) | yes, build time of large programs | none (the towers it was blamed for were mostly bug 20) | none | - | - |
 | 12 | the parser swaps syntax subtrees whose hashes collide | yes, wrong code or bogus errors on very large files | none | 0012 | passed | yes |
 | 13 | releasing a long list recurses once per cell | yes, stack overflow, 2x time and memory | none | 0013 | passed (extended after round 2) | yes |
 | 14 | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | in 0009 | passed | yes |
 | 15 | a `match` on a `Nullable` yielding a counted value does not compile | no, `Nullable` not used | - | none | - | - |
-| 16 | reuse across calls is superlinear in match nesting (build time) | yes, build time and memory | deep tail paths outlined, except in recursive functions | none | - | - |
-| 17 | rrc memory is quadratic in a straight-line `Nat` function (build time) | yes, build memory | long tail paths outlined, except in recursive functions | none | - | - |
+| 16 | reuse across calls is superlinear in match nesting (build time) | yes, build time and memory | deep tail paths and `let` values outlined, recursive functions included | none | - | - |
+| 17 | rrc memory is quadratic in a straight-line `Nat` function (build time) | yes, build memory | long tail paths and `let` values outlined, recursive functions included; `Array Nat` literals as tables | none | - | - |
 | 18 | the `rrc` build target alone does not link | no, Reussir's build only | build the default target | none | - | - |
 | 19 | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `Nat`/`Int` references in two cells; other `[value]` records boxed | none | - | - |
+| 20 | the MLIR inliner grows lean2rr's conversion code exponentially (build time) | yes, build time and memory (monad transformer towers did not build) | conversion, unboxing and uniform-code application functions marked `#[transform_anchor]` | none | - | - |
 
 Patch files (`git format-patch` output; they apply on ef922049 in the
 order 0006, 0004, 0002, 0007, 0009, 0005, 0013, 0012, and 0012 also applies
@@ -646,7 +647,10 @@ deeply in polymorphic recursion, so the text grows exponentially.
 
 **lean2rr.** The driver passes `--no-closure-wpd`. The classic benchmarks
 measured the same with and without it, within noise (lean2rr dispatches
-its function values itself).
+its function values itself). Fewer and smaller types would shrink the
+printed text, but the text is exponential in nesting either way, and the
+towers that hit this also hit bug 20; with both worked around the towers of
+the adversarial rounds build in 15 s to 2.5 minutes.
 
 **Patch.** None.
 
@@ -692,8 +696,18 @@ and all of its call sites. lean2rr's uniform code for polymorphic
 recursion has large, heavily shared callees (the conversion and
 application functions of its function and `Box` representations).
 
-**lean2rr.** Nothing yet. Sharing one representation per uniform function
-type would shrink the number of such callees.
+**lean2rr.** No workaround of its own. The tower programs above were
+mostly bug 20: rrc's inliner multiplied lean2rr's conversion code, and SCCP
+then iterated over the result. With bug 20 worked around (lean2rr keeps
+those functions out of the inliner), `Cn3PolyM1` builds in 70 s and 1.5 GB
+(the whole build, lean2rr included) and the `StateT` tower at `IO` in 21 s
+and 0.4 GB. One representation shared by all uniform function
+types (every `Box`-mentioning function type one enum, applied with boxed
+arguments, `lean_apply`-style) was tried and measured: it removes most of
+the conversions, but its single application function, an arm for every
+target of the uniform code, is a hub through which SCCP and the
+decrement expansion of the arguments cost more than they save (`Cn3PolyS1`
+649 s and 5.7 GB against 115 s and 2 GB without it).
 
 **Patch.** None.
 
@@ -936,11 +950,12 @@ def loop : Nat → IO Unit
     loop k
 ```
 
-built through lean2rr. `loop` is recursive, so lean2rr's workaround below
-does not cut it. It prints `line 0` to `line N-1`.
+built through lean2rr with its workaround below turned off
+(`L2R_NO_OUTLINE=1` in lean2rr's environment). It prints `line 0` to
+`line N-1`.
 
-**Command.** `scripts/l2r.py` on the generated module (lean2rr's flags),
-and with `--no-reuse-across-call`.
+**Command.** `L2R_NO_OUTLINE=1 scripts/l2r.py` on the generated module
+(lean2rr's flags), and with `--no-reuse-across-call`.
 
 **Expected.** Build time and memory about linear in N.
 
@@ -967,13 +982,19 @@ grows quadratically with the nesting depth: the LLVM IR of the repro has
 without. The Reussir MLIR going into the pipeline is the same with and
 without the flag.
 
-**lean2rr.** A function whose tail path is 32 matches (or `if`s) deep is
-cut into a chain of functions of at most 8 levels, each calling the next in
-tail position (`LeanToReussir/Outline.lean`, plan §10 "Build time"). rrc
-on 250 statements: 27 s, 343 MB; 2000 statements: 161 s, 1.9 GB (before:
-killed after 1500 s). Recursive functions are not cut (a cycle of tail
-calls through the parts is not always a loop), so a loop with such a body,
-as in the repro, still builds slowly.
+**lean2rr.** A function whose tail path is 32 matches (or `if`s) deep, or
+with a `let` whose value is that deep, is cut: once a path is 8 levels
+deep, its rest becomes a function called in tail position, and a deep value
+comes from a function (`LeanToReussir/Outline.lean`, plan §10 "Build
+time"). In a recursive function a rest that holds a tail call of the
+function's cycle returns a step value instead (`done(v)`, or the callee and
+its arguments) and the function makes the tail call itself, so its loops
+stay loops (a 1 MiB stack runs them: `tests/runtime/RtOutlineLoops`). rrc
+on 250 statements: 27 s, 343 MB; a 2000-statement `main`: about two
+minutes and 2 GB (before: killed after 1500 s); the repro's recursive loop
+with 500 statements: 23 s and 0.5 GB for the whole build, with 2000: 72 s
+and 1.5 GB. `run.sh` builds the repro with `L2R_NO_OUTLINE=1`, which turns
+the cutting off.
 
 **Patch.** None.
 
@@ -992,10 +1013,10 @@ def longDo (x0 : Nat) : Nat → Nat
     return longDo xN k
 ```
 
-built through lean2rr (recursive, so not cut by the workaround). It prints
-the same number as native Lean.
+built through lean2rr with its workaround turned off (`L2R_NO_OUTLINE=1`).
+It prints the same number as native Lean.
 
-**Command.** `scripts/l2r.py` on the generated module.
+**Command.** `L2R_NO_OUTLINE=1 scripts/l2r.py` on the generated module.
 
 **Expected.** rrc memory about linear in N.
 
@@ -1021,11 +1042,15 @@ over reference-counted values (`Nat` is a two-arm `[value]` enum whose
 `Big` arm holds a box) keeps a set of live values per program point; with
 `UInt64` there are no such values.
 
-**lean2rr.** As for bug 16, a function with a tail path of 256 `let`s is
-cut into parts of at most 64 `let`s on a path. rrc on the 1000-`let`
-block: 877 MB (was 4.1 GB; the rest grows linearly, about 0.3 MB per `Nat`
-operation); 2500 `let`s: 99 s, 2.0 GB (was out of memory). Recursive
-functions are not cut.
+**lean2rr.** As for bug 16, a function with a tail path (or a `let` value)
+of 256 `let`s is cut into parts of at most 64 `let`s on a path, recursive
+functions included. rrc on the 1000-`let` block: 877 MB (was 4.1 GB; the
+rest grows linearly, about 0.3 MB per `Nat` operation); the repro's
+recursive function with 1000 `let`s: 37 s and 0.9 GB for the whole build,
+with 2500: 66 s and 2.1 GB (was out of memory). A spliced `Array Nat`
+literal, one push per element, becomes a table (plan §5.12): a
+100000-element literal is one call. `run.sh` builds the repro with
+`L2R_NO_OUTLINE=1`.
 
 **Patch.** None.
 
@@ -1106,6 +1131,76 @@ big number in a `Cell<L2RBigOpt>`. A reference to any other `[value]`
 record keeps the element in an `ElemBox` (one allocation per `set`; such
 references do not occur in practice, since lean2rr's `[value]` structs are
 IO results).
+
+**Patch.** None.
+
+## 20. The MLIR inliner grows lean2rr's conversion code exponentially
+
+**Status.** Worked around (build time only).
+
+**Repro.** `bug20-statet-tower.lean`, built through lean2rr with its
+workaround turned off (`L2R_NO_INLINE_ANCHORS=1` in lean2rr's
+environment):
+
+```
+def nestS {m : Type → Type} [Monad m] : Nat → m Nat
+  | 0 => pure 0
+  | n+1 => do
+    let r ← (nestS (m := StateT Nat m) n).run' n
+    pure (r + 1)
+def main (args : List String) : IO Unit := do
+  IO.println s!"S {Id.run (nestS (args.length + 5))}"
+```
+
+Polymorphic recursion through `StateT`: lean2rr makes a uniform instance
+of `nestS` and a few typed ones, with many representations of the same
+function types (`Nat → Box`, `Box → Box`, `Nat → Nat → Box`, ...), the
+wrapper variants that convert between them, and the unboxing functions of
+`Box`. Prints `S 5`.
+
+**Command.** `scripts/l2r.py` with lean2rr's flags (`run.sh` measures rrc
+alone), with and without `L2R_NO_INLINE_ANCHORS=1`.
+
+**Expected.** About the same build time and memory with and without, as
+for the same program compiled natively (3 s).
+
+**Actual on 42635042** (rrc to an object file, this machine; times on a
+loaded host): 115-182 s and 2.0-2.9 GB without the workaround, 27 s and
+0.5 GB with it. Sizes that hit the limits: the same tower used at `IO`
+(adv4 `St4PolyP1a`, 8 lines) did not build within 30 minutes or 15 GB
+(rrc killed or out of memory); five towers in one program (`Cn3PolyM1`)
+took 715-936 s and 7.3-7.5 GB.
+
+**Cause.** Not narrowed down to the inliner's code. rrc's
+`reussir-default-inliner` (MLIR's SCC inliner, one iteration, callees of at
+most 256 operations) runs before every other optimization. Marking
+functions `#[transform_anchor]`, which keeps them out of that inliner and
+nothing else, removes the growth: with lean2rr's conversions
+(`l2r_fconv_*`), unboxing functions (`l2r_unbox_*`) and the application
+functions of types with wrapped values out of it, `St4PolyP1a` builds in
+26 s and 0.4 GB (rrc alone), and with the application functions of the
+`Box`-mentioning function types out as well, four towers in one program
+(`Cn3PolyScalar`) in 93 s and 2 GB instead of 216 s and 4.5 GB; with only
+the conversions and function unboxing out, `St4PolyP1a` takes 134 s and
+2 GB; with only the application functions out, it
+does not build within 400 s; with `-O none` (no inliner) it builds in 18 s. A
+perf profile of the unpatched build is mostly MLIR's SCCP data-flow solver,
+canonicalization and region simplification over the inlined code. These
+functions call each other: an unboxing function converts what a `Box`
+holds from every representation it may hold, a conversion converts from
+the wrapped representation, an application of a wrapped value applies it
+at its own representation; a small synthetic cycle of mutually calling
+functions (each calling the next two) does not grow, so the trigger is
+more specific than a cycle of small functions.
+
+**lean2rr.** It marks these functions, and the application functions of
+the function types of uniform code (those that mention `Box`),
+`#[transform_anchor]` (`Lower/Finish.lean`, `anchoredFns`; plan §5.3). LLVM
+still inlines them after Reussir's passes. The towers of the adversarial
+rounds build in 15 s to 2.5 minutes and at most 3 GB, the whole build
+(`St4PolyP1a`: 21 s, 0.4 GB; `Cn3PolyM1`: 70 s, 1.5 GB). `run.sh` builds
+the repro with `L2R_NO_INLINE_ANCHORS=1` and without: 136 s and 2.9 GB
+against 18 s and 0.3 GB (rrc, to an executable).
 
 **Patch.** None.
 

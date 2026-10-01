@@ -5,9 +5,10 @@
 
 `longDo` computes x1 .. xN, each from the previous one, and calls itself
 three times. `Nat` is a two-arm [value] enum in lean2rr's output (a small
-number or a big one). lean2rr cuts long tail paths (bug 17 workaround), but
-not in recursive functions, so this body reaches rrc whole. rrc's memory
-grows about as N^2 on Nat and stays small on UInt64.
+number or a big one). lean2rr cuts long tail paths (bug 17 workaround, also
+in recursive functions); build with L2R_NO_OUTLINE=1 in lean2rr's
+environment (as run.sh does) so that this body reaches rrc whole. rrc's
+memory grows about as N^2 on Nat and stays small on UInt64.
 
 Output: one number, the same as native Lean's. Measured on this machine,
 rrc only (Reussir ef922049): N = 250: 21 s, 417 MB; N = 500: 32 s, 1.16 GB;

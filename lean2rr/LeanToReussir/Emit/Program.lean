@@ -370,8 +370,13 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
   let types := st.typeItems ++ fnItems |>.push boxItem
   -- Runs of pushed `Nat` literals (a spliced `Array Nat` literal) as tables.
   let (fns, natTables) := ArrayLits.natArrLits st.fns
-  let (fns, stepItems) := Outline.outlineFns {} (Outline.variantTable types prelude)
-    (Outline.takenNames preludeFns fns) fns
+  -- `L2R_NO_OUTLINE` and `L2R_NO_INLINE_ANCHORS` turn the two build-time
+  -- workarounds off, for the repros of Reussir bugs 16, 17 and 20
+  -- (docs/reussir-bugs/run.sh); the output is then the same program.
+  let noOutline := (← IO.getEnv "L2R_NO_OUTLINE").isSome
+  let anchored := if (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome then {} else anchored
+  let (fns, stepItems) := if noOutline then (fns, #[]) else
+    Outline.outlineFns {} (Outline.variantTable types prelude) (Outline.takenNames preludeFns fns) fns
   let rrProg : RRProgram := { prelude, preludeFns, types := types ++ stepItems }
   let fns := cfg.rrPasses.foldl (fun fns p => p rrProg fns) fns
   let mut out := prelude ++ "\n// ---- generated types ----\n\n"

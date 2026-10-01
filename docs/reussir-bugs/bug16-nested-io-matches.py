@@ -5,9 +5,10 @@
 
 `loop` runs N `IO.println` statements and calls itself. Every IO bind is a
 match on the action's result whose ok arm holds the rest of the function,
-so the body nests N matches deep. lean2rr cuts such tail paths into a chain
-of functions (bug 16 workaround), but not in recursive functions, so this
-one reaches rrc whole. With --reuse-across-call (lean2rr's default) rrc's
+so the body nests N matches deep. lean2rr cuts such tail paths into
+functions (bug 16 workaround, also in recursive functions); build with
+L2R_NO_OUTLINE=1 in lean2rr's environment (as run.sh does) so that this one
+reaches rrc whole. With --reuse-across-call (lean2rr's default) rrc's
 memory grows about as N^2.5.
 
 Output: the N lines "line 0" .. "line N-1", once (the program runs loop 1

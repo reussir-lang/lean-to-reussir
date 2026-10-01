@@ -22,10 +22,13 @@
 # (`lake build` in lean2rr/, or L2R_LEAN2RR). l2r.py builds the runtime crate
 # leanrt for the checkout once, under runtime/leanrt/target/.
 #
-# Bugs 10, 11, 16 and 17 are build-time bugs: their repros are generated at
-# two sizes and the line reports the growth. They take one to three minutes
-# each, and bug 16 needs about 1.2 GB; bug 6 runs for about 15 s. Everything
-# else takes seconds (a first .lean build also builds leanrt).
+# Bugs 10, 11, 16, 17 and 20 are build-time bugs: the repros of 10, 11, 16
+# and 17 are generated at two sizes and the line reports the growth; bug
+# 20's is built with and without lean2rr's workaround. They take one to
+# three minutes each, and bugs 16 and 20 need 1.2 to 3 GB; bug 6 runs for
+# about 15 s. Everything else takes seconds (a first .lean build also builds
+# leanrt). lean2rr works around 16, 17 and 20; the repros turn its
+# workarounds off (L2R_NO_OUTLINE, L2R_NO_INLINE_ANCHORS).
 #
 # Environment:
 #   WORK    scratch directory (default: a new one under /tmp); rrc writes
@@ -34,7 +37,7 @@
 #   RUSTC   the rustc that built Reussir's runtime (default: the toolchain
 #           named in RRC_CHECKOUT/rust-toolchain.toml, else the one l2r.py
 #           uses)
-#   QUICK=1 skip the slow repros (6, 10, 11, 16, 17)
+#   QUICK=1 skip the slow repros (6, 10, 11, 16, 17, 20)
 set -u
 
 usage() { sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//; /^set -u/d'; exit 2; }
@@ -296,9 +299,12 @@ bug16() {
     if ! why=$(have_lean); then say_line SKIPPED 16 "$why"; return; fi
     python3 "$HERE/bug16-nested-io-matches.py" 50 "$WORK/out/Nest50.lean"
     python3 "$HERE/bug16-nested-io-matches.py" 100 "$WORK/out/Nest100.lean"
+    # Without lean2rr's workaround (Outline), so that rrc sees the nesting.
+    export L2R_NO_OUTLINE=1
     lean_build "$WORK/out/Nest50.lean" Nest50 16a; local s1=$RSECS m1=$RKB r1=$RC
     lean_build "$WORK/out/Nest100.lean" Nest100 16b; local s2=$RSECS m2=$RKB r2=$RC
     lean_build "$WORK/out/Nest100.lean" Nest100 16c --no-reuse-across-call; local s3=$RSECS m3=$RKB
+    unset L2R_NO_OUTLINE
     if [ $r1 != 0 ] || [ $r2 != 0 ] || [ -z "$m1" ] || [ -z "$m2" ]; then say_line OTHER 16 "build failed (see $WORK/out/16?.log)" "l2r.py"; return; fi
     local r msg
     r=$(ratio "$m2" "$m1")
@@ -312,8 +318,11 @@ bug17() {
     if ! why=$(have_lean); then say_line SKIPPED 17 "$why"; return; fi
     python3 "$HERE/bug17-long-nat-block.py" 250 "$WORK/out/Lets250.lean"
     python3 "$HERE/bug17-long-nat-block.py" 500 "$WORK/out/Lets500.lean"
+    # Without lean2rr's workaround (Outline), so that rrc sees the long block.
+    export L2R_NO_OUTLINE=1
     lean_build "$WORK/out/Lets250.lean" Lets250 17a; local s1=$RSECS m1=$RKB r1=$RC
     lean_build "$WORK/out/Lets500.lean" Lets500 17b; local s2=$RSECS m2=$RKB r2=$RC
+    unset L2R_NO_OUTLINE
     if [ $r1 != 0 ] || [ $r2 != 0 ] || [ -z "$m1" ] || [ -z "$m2" ]; then say_line OTHER 17 "build failed (see $WORK/out/17?.log)" "l2r.py"; return; fi
     local r msg
     r=$(ratio "$m2" "$m1")
@@ -328,9 +337,26 @@ bug18() {
     say_line "${r%% *}" 18 "${r#* }"
 }
 bug19() { compile_error 19 bug19-cell-of-value-record 42 "operand type mismatch" -O aggressive; }
+bug20() {
+    local why
+    if ! why=$(have_lean); then say_line SKIPPED 20 "$why"; return; fi
+    # Without lean2rr's workaround (#[transform_anchor] on its conversion
+    # and unboxing functions), then with it.
+    export L2R_NO_INLINE_ANCHORS=1
+    lean_build "$HERE/bug20-statet-tower.lean" Tower 20a; local s1=$RSECS m1=$RKB r1=$RC
+    unset L2R_NO_INLINE_ANCHORS
+    lean_build "$HERE/bug20-statet-tower.lean" Tower 20b; local s2=$RSECS m2=$RKB r2=$RC
+    if [ $r1 != 0 ] || [ $r2 != 0 ] || [ -z "$m1" ] || [ -z "$m2" ]; then say_line OTHER 20 "build failed (see $WORK/out/20?.log)" "l2r.py"; return; fi
+    local r msg
+    r=$(ratio "$m1" "$m2")
+    msg="rrc: ${s1} s, $((m1 / 1024)) MB; with the conversion functions kept out of the inliner: ${s2} s, $((m2 / 1024)) MB (${r}x memory)"
+    if ge "$r" 2.5; then say_line REPRODUCES 20 "$msg" "l2r.py"
+    elif le "$r" 1.5; then say_line FIXED 20 "$msg" "l2r.py"
+    else say_line OTHER 20 "$msg" "l2r.py"; fi
+}
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19"
-SLOW=" 06 10 11 16 17 "
+ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20"
+SLOW=" 06 10 11 16 17 20 "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do
     b=$(printf '%02d' "$((10#${b%%[ab]}))")

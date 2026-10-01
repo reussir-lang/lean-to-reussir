@@ -77,7 +77,9 @@ an `--emit` checkpoint after each stage. The modules of
   `Finish`;
 - assembly: `Emit/Startup` (initializer order, the startup chain),
   `Emit/Entry` (the entry point), `Emit/Program` (`lowerProgram`, which
-  also runs `Outline` on the generated functions);
+  also splices chains of closed terms before lowering, and runs
+  `ArrayLits` and `Outline` on the generated functions, before the
+  optional passes over them);
 - `PassConfig`: the configurable parts of the pipeline;
 - `Opt/*.lean`: the optional passes, and `Opt/Registry.lean`.
 
@@ -864,6 +866,24 @@ The enums and the application functions are generated at the end of
 Stage 4, together with the `Box` unboxing functions, until no new variant or
 application appears.
 
+- **Kept out of rrc's MLIR inliner.** The conversions between
+  representations (`l2r_fconv_S_T`), the unboxing functions (`l2r_unbox_…`,
+  to a nominal type, an array or a function type), the application and
+  identity functions of a type with `w<S>` variants, and the application
+  functions of the function types of uniform code (types that mention
+  `Box`) are marked `#[transform_anchor]`: Reussir keeps a transform anchor a function
+  through its MLIR pipeline (its inliner skips it; there are no transform
+  scripts), and LLVM, which runs after Reussir's passes, still inlines it
+  where that pays. These functions call each other through the wrapper
+  variants and through what a `Box` can hold, and polymorphic recursion
+  through monad transformers makes hundreds of representations of a few
+  Lean types: with these functions inlinable, rrc's inliner grew such
+  programs exponentially (an 8-line `StateT` tower used at `IO` did not
+  build within 30 minutes or 15 GB; Reussir bug 20). Out of line, a
+  conversion, an unboxing, or the application of a wrapped value or of a
+  value of uniform type costs a call (until LLVM inlines it); all are rare
+  outside uniform code, and typed function values are unaffected.
+
 ### 5.4 `let`, `return`, literals
 
 - `let x := v; k` becomes `let x = ⟦v⟧; ⟦k⟧`, and `return x` becomes `x`.
@@ -1371,7 +1391,23 @@ unobservable, and it is cheaper than a once-cell read (optional pass
 (the steps of an array literal, `_closed_k := push _closed_(k-1) e_k`), is
 evaluated where it is used instead of cached: it still runs once, and the
 intermediate values are not kept (caching every step of a 10000-element
-literal kept 1 GB of intermediate arrays).
+literal kept 1 GB of intermediate arrays). When its code and its user's are
+straight-line (`let`s, then `return`), it is spliced into the user before
+lowering (`spliceChainConsts`): an `n`-element literal (`#[…]`, `[…]`, a
+`ByteArray`) becomes one straight-line body instead of `n` functions
+calling each other (rrc compiles about 80 functions per second: a
+100000-element `Array Nat` took ten minutes to build), each element's
+literal placed right before its push. In that body, a run of 32 or more
+small `Nat` literals pushed onto an `Array Nat` becomes one call
+`l2r_natarr_lits(a, id)` that pushes the words of a table generated with the
+program (`ArrayLits`); other long bodies are cut by `Outline` (§10, "Build
+time"). The 100000-element `Array Nat` literal builds in about 25 s.
+Only a chain where nothing but literals (and closed terms of literals) is
+computed before a step reads the previous one is spliced: otherwise every
+element would be computed before the whole rest of the chain and live
+across it (an `Array Float` literal whose elements are shared constants),
+where the chain evaluated step by step holds one element at a time; such a
+literal stays a chain of functions.
 
 A float literal arrives as a call of a Lean function on literal arguments,
 `Float.ofScientific 15 true 301` for `1.5e-300` (or `Float.ofNat n`,
@@ -1970,29 +2006,38 @@ Each item says what differs and when.
   with thousands of constants (each an initializer and an accessor, plus its
   closed terms) takes minutes to build where native takes seconds.
   Polymorphic recursion through type functions (monad transformer towers)
-  makes deeply nested function representations (`L2RFn_*` enums, `Box`),
-  and two rrc costs grow superlinearly on them: closure devirtualization
-  (part of `-O aggressive`) prints each closure's result type, every named
-  type expanded, at every vtable and indirect call site, and the
-  module-level SCCP pass iterates over the large call graph of the uniform
-  code. The driver turns closure devirtualization off (`--no-closure-wpd`:
-  no classic benchmark changes by more than 1%, since lean2rr dispatches
-  function values itself). Such programs still take a minute or more to
-  build, and the largest towers (four transformers) up to a quarter of an
-  hour and several GB.
-  rrc's costs also grow faster than linearly in the depth of nested matches
-  (reuse across calls; every IO bind nests one) and in the length of
-  straight-line code on `Nat` (Reussir bugs 16 and 17). So after lowering,
-  a function with a tail path 32 matches or `if`s deep, or 256 `let`s long
-  (a long `main`, a 3000-arm literal match, a long `do` block), is cut into
-  a chain of functions of at most 8 levels and 64 `let`s on a path, each
-  part a function of the variables it uses, called in tail position
-  (`Outline`). Ordinary functions are below both bounds; the classic
-  corpus only has some `main`s cut. Recursive functions are not cut: LLVM
-  turns a self tail call into a loop, but a cycle of tail calls through
-  the parts is not always a sibling call and would use stack on every
-  iteration, so a loop with such a body still builds slowly. A 2000-line
-  `main` builds in about three minutes and 2 GB.
+  makes hundreds of representations of a few function types, with
+  conversions between them, and several rrc costs grow superlinearly on
+  such code. The driver turns closure devirtualization off
+  (`--no-closure-wpd`: it prints each closure's result type, every named
+  type expanded, at every vtable and indirect call site; no classic
+  benchmark changes by more than 1%, since lean2rr dispatches function
+  values itself; Reussir bug 10), and lean2rr keeps the conversions,
+  unboxings and the applications of wrapped and uniform function values
+  out of rrc's MLIR inliner (§5.3; bug 20). The towers of the adversarial
+  rounds then build in 15 s to 2.5 minutes and at most 3 GB, the whole
+  build (a single `StateT` tower used at `IO`: 21 s, 0.4 GB, where it did
+  not build in 30 minutes; five towers in one program: 70 s, 1.5 GB, where
+  they took 15 minutes and 7.5 GB). rrc's costs also grow faster than
+  linearly in the depth of nested matches (reuse across calls; every IO
+  bind nests one) and in the length of straight-line code on `Nat`
+  (Reussir bugs 16 and 17). So after lowering, a function with a tail path
+  32 matches or `if`s deep, or 256 `let`s long (a long `main`, a 3000-arm
+  literal match, a long `do` block), or with a `let` whose value is that
+  deep or long, is cut (`Outline`): once a tail path is 8 levels deep or
+  64 `let`s long, its rest becomes a function of the variables it uses,
+  called in tail position; a value that deep or long comes from a function
+  of the variables it uses. A recursive function keeps its loops: a rest
+  that holds a tail call of the function's cycle returns what to do, a
+  value of a generated enum `L2RStep_k` (`done(v)`, or one variant per
+  function of the cycle, with its arguments), and the function matches it
+  and makes the tail call itself; a cycle of tail calls through the parts
+  would not always be a sibling call and would use stack per iteration.
+  Such a loop allocates a step per iteration, only in functions this long.
+  Ordinary functions are below the bounds; the classic corpus only has
+  some `main`s cut. A 2000-line `main` builds in about two minutes and
+  2 GB, a recursive IO function of 2000 statements in about 70 s and
+  1.5 GB, a recursive function with a 3000-arm match in 80 s.
 - *Casts that natively read an address* (§5.1): an object read as a word
   (`unsafeCast` of a constructor with fields, a string, an array, a closure
   to `Nat`, `UInt8`, an enumeration, ...) natively gives its address

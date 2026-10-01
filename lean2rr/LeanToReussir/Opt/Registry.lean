@@ -37,7 +37,7 @@ Adding a pass: write `Opt/Name.lean` with the transformation and an
 or a lowering hook of `LowerHooks`), import it here and add its line to
 `optimizations`. The order of the lines is the order of installation, so
 passes of the same kind run in this order (the core's own passes, such as
-`Outline` after the passes over the generated functions, are not listed
+`Outline` before the passes over the generated functions, are not listed
 there).
 -/
 
@@ -76,10 +76,12 @@ def required : Array RequiredPass := #[
     "not an optimization: one chain of nested matches would be as deep as the program has initializers, and rrc's recursive lowering overflows its stack on a few thousand (translation plan §5.12)"⟩,
   ⟨"loop-state-machines", "a declaration whose outlined join point calls it back in tail position is one state machine, its entry variant carrying the parameters (J4; Lower/StateMachine)",
     "otherwise a loop through an outlined join point is mutually recursive and uses stack per iteration where native Lean uses none: without it, and with the join-point passes off, the classic Sieve and Strings overflowed Lean's 1 GiB stack at their medium size"⟩,
-  ⟨"closed-chains", "a closed term used once, by another constant, is evaluated there instead of cached (Emit/Program, chainConsts)",
-    "an array literal is a chain of closed terms, and caching every step keeps every intermediate array: memory quadratic in the literal's length (10000 elements: 1036 MB instead of 7 MB)"⟩,
-  ⟨"outline", "deep and long tail paths of a function cut into chains of functions (Outline)",
-    "rrc's analyses are superlinear in nesting depth and straight-line length (Reussir bugs 16, 17), and so is the .rr text: without it a 3000-arm literal match gives 126 MB of .rr and lean2rr runs out of memory at 16 GB"⟩]
+  ⟨"closed-chains", "a closed term used once, by another constant, is evaluated there instead of cached, and spliced into it when both are straight-line (Emit/Program, chainConsts, spliceChainConsts; Array Nat runs as tables: ArrayLits)",
+    "an array literal is a chain of closed terms, and caching every step keeps every intermediate array: memory quadratic in the literal's length (10000 elements: 1036 MB instead of 7 MB); as one function per step, a 100000-element literal took ten minutes to build"⟩,
+  ⟨"outline", "deep and long tail paths and let values of a function cut into functions, recursive functions included (their loops through step values) (Outline)",
+    "rrc's analyses are superlinear in nesting depth and straight-line length (Reussir bugs 16, 17), and so is the .rr text: without it a 3000-arm literal match gives 126 MB of .rr and lean2rr runs out of memory at 16 GB"⟩,
+  ⟨"inline-anchors", "conversions, unboxings, and the applications of wrapped function values and of those of uniform types, kept out of rrc's MLIR inliner (#[transform_anchor]; Lower/Finish, anchoredFns)",
+    "rrc's inliner grows the conversion code of polymorphic recursion through monad transformers exponentially (Reussir bug 20): an 8-line StateT tower used at IO did not build within 30 minutes or 15 GB"⟩]
 
 /-- The configuration with the enabled optimizations, after turning off
 those named in `disabled` and on those named in `enabled`. An unknown name,
