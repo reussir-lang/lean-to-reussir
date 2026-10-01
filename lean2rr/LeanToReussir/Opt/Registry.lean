@@ -13,6 +13,8 @@ import LeanToReussir.Opt.JpSmall
 import LeanToReussir.Opt.LazyFields
 import LeanToReussir.Opt.NullaryScrutinee
 import LeanToReussir.Opt.StateMachines
+import LeanToReussir.Opt.ValueStructs
+import LeanToReussir.Opt.FieldOrder
 
 /-!
 # The pass registry
@@ -55,6 +57,8 @@ def stage2 : Stage2Config := #[
 
 /-- The optional passes, in installation order. -/
 def optimizations : Array OptPass := #[
+  ⟨"field-order", true, "record fields in decreasing alignment, so records have no padding (declaration order otherwise)", FieldOrder.install⟩,
+  ⟨"value-structs", true, "a structure with one relevant field (ST.Out of every BaseIO call) is a [value] struct, not a heap record", ValueStructs.install⟩,
   ⟨"float-lits", true, "Float literals (Float.ofScientific/ofNat on literals) folded to their bits at compile time", FloatLits.install⟩,
   ⟨"cheap-consts", true, "constants built from small literals and scalar conversions recomputed at each use, not cached", CheapConsts.install⟩,
   ⟨"closed-chains", true, "closed terms used once, by another constant, evaluated there instead of cached", ClosedChains.install⟩,
@@ -71,11 +75,7 @@ def optimizations : Array OptPass := #[
 optional. -/
 def required : Array RequiredPass := #[
   ⟨"startup-chunks", "the startup chain cut into functions of at most 128 steps (Emit/Startup, startupChunk)",
-    "not an optimization: one chain of nested matches would be as deep as the program has initializers, and rrc's recursive lowering overflows its stack on a few thousand (translation plan §5.12)"⟩,
-  ⟨"field-order", "each constructor's fields in decreasing alignment, ties in declaration order (LowerBase, nominalType)",
-    "the driver turns Reussir's member packing off (--no-pack-record-members, the workaround for Reussir bug 2), so this order is the record layout; it leaves no padding between members, and a declaration-order record with padding meets Reussir bug 8 (a padding \"lift\" that overflows cells; docs/reussir-bugs.md)"⟩,
-  ⟨"value-structs", "a structure with one relevant field (ST.Out, the result of every BaseIO call) is a [value] struct (LowerBase, nominalType)",
-    "a representation choice the rest of the lowering is written against: conversions (a [value] struct is natively its field), identity (ptrAddrUnsafe), references and array storage (ElemBox) treat it as its field; Reussir's [value] enums are avoided instead (Reussir bug 1), not these structs"⟩]
+    "not an optimization: one chain of nested matches would be as deep as the program has initializers, and rrc's recursive lowering overflows its stack on a few thousand (translation plan §5.12)"⟩]
 
 /-- The configuration with the enabled optimizations, after turning off
 those named in `disabled` and on those named in `enabled`. An unknown name,

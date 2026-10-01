@@ -11,13 +11,14 @@ arguments. These are Lean functions, not C: on the slow path (`m ≥ 2^53` or
 fast path reads a table and divides. Natively the value is computed once
 (`lean_float_once`); lean2rr evaluates the call itself, with the same Lean
 functions (compiled into lean2rr from the same `Init` code), and replaces it
-by `Float.ofBits` of the resulting bit pattern, which Stage 4 treats as a
-cheap constant (translation plan §5.12). The functions are pure, total and
-do not trace, so evaluating them early is unobservable.
+by `Float.ofBits` of the resulting bit pattern, a cheap constant that
+Opt/CheapConsts recomputes at each use (translation plan §5.12). The
+functions are pure, total and do not trace, so evaluating them early is
+unobservable.
 
-Without this pass the calls run when the constant holding the literal is
-evaluated, which gives the same bits (the runtime evaluates the same
-functions); the constant is then cached rather than recomputed.
+Without this pass the translated program runs those Lean functions itself
+when the constant holding the literal is evaluated (the same bits), and
+caches the constant rather than recomputing it.
 -/
 
 namespace LeanToReussir

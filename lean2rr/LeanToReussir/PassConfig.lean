@@ -37,6 +37,13 @@ structure PassConfig where
   function with the same results (definition ↦ prelude function and its
   parameter type). -/
   preludeReplacements : NameMap (String × RR.Ty) := {}
+  /-- Whether a structure with a single relevant field is a `[value]`
+  struct (no heap cell per value) rather than a shared record. -/
+  valueStructs : Bool := false
+  /-- The order of a constructor's relevant fields in its record, given
+  their alignments: the fields' indices in record order. Plain: declaration
+  order. -/
+  fieldOrder : Array Nat → Array Nat := fun aligns => (List.range aligns.size).toArray
   /-- The hooks of code lowering. -/
   lower : LowerHooks := {}
   /-- Passes over the generated Reussir functions (before the program text is
