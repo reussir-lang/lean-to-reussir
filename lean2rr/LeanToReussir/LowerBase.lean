@@ -108,6 +108,11 @@ structure LowerCtx where
   permutation (`PassConfig.fieldOrder`). Reussir keeps the given order (the
   driver turns its own member packing off). -/
   fieldOrder : Array Nat → Array Nat := fun aligns => (List.range aligns.size).toArray
+  /-- Whether the program can ask for an object's identity
+  (`ptrAddrUnsafe`, what inlines to it, `ST.Ref.ptrEq`;
+  `programObservesIdentity`): otherwise a value and an equal copy cannot be
+  told apart. -/
+  observesIdentity : Bool := true
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/

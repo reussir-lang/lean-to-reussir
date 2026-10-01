@@ -44,6 +44,7 @@ mutual
       let base := { ctx with vars := {} }
       let outer := ctx.vars
       let mut runVars : Std.HashMap FVarId (String × RR.Ty) := {}
+      let mut runFresh := ctx.fresh
       let mut c := c
       let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[]
       repeat
@@ -70,11 +71,15 @@ mutual
         let x ← fresh "x"
         lets := lets.push (x, some t, e)
         runVars := runVars.insert d.fvarId (x, t)
+        match d.value with
+        | .const _ _ args _ | .fvar _ args => if !args.isEmpty then runFresh := runFresh.insert d.fvarId
+        | _ => pure ()
         c := k
       let vars := runVars.fold (init := outer) fun m k v => m.insert k v
-      let b ← lowerCode { base with vars } outlined retTy c
+      let b ← lowerCode { base with vars, fresh := runFresh } outlined retTy c
       return { b with lets := lets ++ b.lets }
     | .return x =>
+      if let some (e, t) := ctx.rebuild[x]? then return .ofExpr (← coerce e t retTy)
       match ctx.vars[x]? with
       | some (n, t) => return .ofExpr (← coerce (.var n) t retTy)
       | none => throwError "lean2rr: return of unbound variable (internal error)"
@@ -265,7 +270,7 @@ mutual
             -- Hooks: fields bound later instead (Opt/LazyFields), bindings
             -- before the arm's code (Opt/NullaryScrutinee).
             let arm : CasesArm := { discr := cs.discr, scrut, ty := tn, layout, params := ps, code := k,
-                                    shared := info.shape == .enum }
+                                    shared := info.shape == .enum, view := view.isSome }
             let (armBinders, armCtx) ← H.enumFields ctx' arm binders
             let (pre, armCtx) ← H.armPrelude armCtx arm armBinders
             let body ← lowerAlt armCtx outlined retTy k

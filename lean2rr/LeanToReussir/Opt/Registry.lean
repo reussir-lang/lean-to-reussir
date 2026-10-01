@@ -17,6 +17,7 @@ import LeanToReussir.Opt.NatArrays
 import LeanToReussir.Opt.PlaceholderCache
 import LeanToReussir.Opt.SplitMapLoops
 import LeanToReussir.Opt.OriginFreeReads
+import LeanToReussir.Opt.FreshRebuild
 
 /-!
 # The pass registry
@@ -86,6 +87,7 @@ def optimizations : Array OptPass := #[
   ⟨"lazy-fields", true, "fields of a matched value kept live (stored or returned whole) bound where used (Reussir bug 7 workaround)", LazyFields.install⟩,
   ⟨"nullary-scrutinee", true, "in the arm of a constructor without fields, the matched value rebuilt instead of kept", NullaryScrutinee.install⟩,
   ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩,
+  ⟨"fresh-rebuild", true, "in a program that never asks for an object's identity, an alternative that only returns a freshly built matched value returns it rebuilt from its fields (Reussir then reuses the cell in every alternative)", FreshRebuild.install⟩,
   ⟨"origin-free-reads", true, "in a program whose conversions never produce an array, array reads release without checking the origin table (LLVM then cancels a read's increment and release)", OriginFreeReads.install⟩]
 
 /-- Parts of the translation that look like optimizations but are not

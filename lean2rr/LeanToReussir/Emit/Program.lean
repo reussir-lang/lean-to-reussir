@@ -401,7 +401,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
                           preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls,
                           uncachedConsts, preludeReplacements := cfg.preludeReplacements,
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
-                          cachePlaceholders := cfg.cachePlaceholders, natArrays := cfg.natArrays }
+                          cachePlaceholders := cfg.cachePlaceholders, natArrays := cfg.natArrays,
+                          observesIdentity := programObservesIdentity (← getEnv) keys decls }
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit variant, `box(0)`): types
     -- may mention it even when nothing is ever boxed.

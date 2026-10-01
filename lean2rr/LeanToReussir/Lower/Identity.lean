@@ -145,4 +145,27 @@ def genBoxAddr : LowerM Unit := do
   modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item,
                            boxAddrDone := s.boxVariants.size }
 
+/-- Whether code `c` asks for an object's identity: a call of
+`ptrAddrUnsafe` (extern `lean_ptr_addr`, to which `ptrEq`,
+`withPtrAddrUnsafe` and the like inline) or of `ST.Prim.Ref.ptrEq`, also
+as a function value (`keys`: instance ↦ original declaration). -/
+partial def codeObservesIdentity (env : Environment) (keys : NameMap InstKey) (c : Code .pure) : Bool :=
+  match c with
+  | .let d k =>
+    (match d.value with
+     | .const f _ _ _ =>
+       let orig := (keys.find? f).map (·.decl) |>.getD f
+       orig == ``ST.Prim.Ref.ptrEq || getExternNameFor env `c orig == some "lean_ptr_addr"
+     | _ => false) || codeObservesIdentity env keys k
+  | .fun d k _ | .jp d k => codeObservesIdentity env keys d.value || codeObservesIdentity env keys k
+  | .cases cs => cs.alts.any (codeObservesIdentity env keys ·.getCode)
+  | .jmp .. | .return _ | .unreach _ => false
+
+/-- Whether any declaration of the program asks for an object's identity
+(`LowerCtx.observesIdentity`). -/
+def programObservesIdentity (env : Environment) (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Bool :=
+  decls.any fun d => match d.value with
+    | .code c => codeObservesIdentity env keys c
+    | _ => false
+
 end LeanToReussir

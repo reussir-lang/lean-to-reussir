@@ -66,6 +66,14 @@ structure CodeCtx where
   value of its own equal to theirs (Opt/NullaryScrutinee): other hooks must
   not bind them again there. -/
   pinned : FVarIdSet := {}
+  /-- Variables bound in the function being lowered to the result of a call
+  or a constructor application (not a parameter, a projection, a constant
+  or another variable). -/
+  fresh : FVarIdSet := {}
+  /-- Matched values that the current alternative returns as an expression
+  of their type instead of themselves (Opt/FreshRebuild: the constructor
+  rebuilt from the alternative's fields). Plain: none. -/
+  rebuild : Std.HashMap FVarId (RR.Expr × RR.Ty) := {}
   /-- The state optional passes keep in the context, by the pass's name
   (`CodeCtx.getExt?`, `CodeCtx.setExt`). -/
   ext : NameMap Dynamic := {}
