@@ -307,6 +307,11 @@ def LoweredProgram.rrProgram (p : LoweredProgram) : RRProgram :=
 def LoweredProgram.runRRPasses (cfg : PassConfig) (p : LoweredProgram) : LoweredProgram :=
   { p with fns := cfg.rrPasses.foldl (fun fns pass => pass p.rrProgram fns) p.fns }
 
+/-- The registry's edits of the prelude, given the final functions
+(`Opt/OriginFreeReads`). -/
+def LoweredProgram.runPreludePasses (cfg : PassConfig) (p : LoweredProgram) : LoweredProgram :=
+  { p with prelude := cfg.preludePasses.foldl (fun pre pass => pass p.fns pre) p.prelude }
+
 /-- Runs of pushed small `Nat` literals (a spliced `Array Nat` literal) as
 tables (`ArrayLits`; core). -/
 def LoweredProgram.literalTables (p : LoweredProgram) : LoweredProgram :=

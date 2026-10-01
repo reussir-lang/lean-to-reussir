@@ -34,9 +34,16 @@ static CLAIMS: Claims = Claims(UnsafeCell::new(Vec::new()));
 /// thread waits for the one computing it (`lean_obj_once_cold` takes a
 /// lock). Needed again by the context computing it (by a task its
 /// computation needs, which natively runs on another thread), it waits
-/// forever, as natively.
-#[inline(never)]
+/// forever, as natively. The test for a value is inlined into the accessor
+/// (every read of a constant), as `has` was before the scheduler.
+#[inline(always)]
 pub fn claim(slot: u64) -> bool {
+    has(slot) || claim_cold(slot)
+}
+
+#[cold]
+#[inline(never)]
+fn claim_cold(slot: u64) -> bool {
     loop {
         if has(slot) {
             return true;
