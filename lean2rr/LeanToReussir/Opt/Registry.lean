@@ -75,7 +75,7 @@ def required : Array RequiredPass := #[
   ⟨"startup-chunks", "the startup chain cut into functions of at most 128 steps (Emit/Startup, startupChunk)",
     "not an optimization: one chain of nested matches would be as deep as the program has initializers, and rrc's recursive lowering overflows its stack on a few thousand (translation plan §5.12)"⟩,
   ⟨"loop-state-machines", "a declaration whose outlined join point calls it back in tail position is one state machine, its entry variant carrying the parameters (J4; Lower/StateMachine)",
-    "otherwise a loop through an outlined join point is mutually recursive and uses stack per iteration where native Lean uses none: without the join-point passes, the classic Sieve and Strings overflow Lean's 1 GiB stack at their medium size"⟩,
+    "otherwise a loop through an outlined join point is mutually recursive and uses stack per iteration where native Lean uses none: without it, and with the join-point passes off, the classic Sieve and Strings overflowed Lean's 1 GiB stack at their medium size"⟩,
   ⟨"closed-chains", "a closed term used once, by another constant, is evaluated there instead of cached (Emit/Program, chainConsts)",
     "an array literal is a chain of closed terms, and caching every step keeps every intermediate array: memory quadratic in the literal's length (10000 elements: 1036 MB instead of 7 MB)"⟩,
   ⟨"outline", "deep and long tail paths of a function cut into chains of functions (Outline)",
