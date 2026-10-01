@@ -34,8 +34,7 @@ This is part of the core translation, run after the optional passes over
 the generated functions: it does not make the program faster, but without
 it rrc's build time and memory grow superlinearly on long `main`s and big
 literal matches, and so does the `.rr` text, whose indentation follows the
-nesting (a 3000-arm literal match: 126 MB instead of 1 MB, and lean2rr ran
-out of memory at 16 GB).
+nesting (a 3000-arm literal match: 126 MB instead of 1 MB).
 -/
 
 namespace LeanToReussir.Outline

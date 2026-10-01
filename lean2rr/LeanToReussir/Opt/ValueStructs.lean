@@ -16,7 +16,7 @@ this pass such a structure is a shared record like any other.
 namespace LeanToReussir
 open Lean Compiler LCNF
 
-/-- Registry entry point. -/
+/-- Registry entry point (a switch: installing it twice changes nothing). -/
 def Opt.ValueStructs.install (c : PassConfig) : PassConfig :=
   { c with valueStructs := true }
 

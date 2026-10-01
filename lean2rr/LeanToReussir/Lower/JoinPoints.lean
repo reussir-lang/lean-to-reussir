@@ -6,9 +6,10 @@ import LeanToReussir.Lower.Values
 The choice between J1 (single jump: inline), J2 (all paths join:
 structured `let`) and J3 (outline) for each join point (translation plan
 §5.6), and the variable-use analyses of LCNF code that the lowering and
-its optional passes share. J1′ (small join points duplicated), J4 (state
-machines) and the sinking of join points before the choice are optional
-passes (Opt/JpSmall, Opt/StateMachines, Opt/JpSink).
+its optional passes share. J4 (state machines, `Lower/StateMachine`) is
+core; J1′ (small join points duplicated) and the sinking of join points
+before the choice are optional passes (Opt/JpSmall, Opt/JpSink), and so is
+the allocation-free form of J4's state machines (Opt/StateMachines).
 -/
 
 namespace LeanToReussir
