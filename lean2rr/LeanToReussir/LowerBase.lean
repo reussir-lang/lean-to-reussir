@@ -85,9 +85,22 @@ structure LowerCtx where
   valueGenericFns : Std.HashMap String Nat := {}
   /-- Which parameters of those functions are Reussir closures. -/
   valueGenericCls : Std.HashMap String (Array Bool) := {}
-  /-- Closed terms used exactly once, by another constant: evaluated where
-  used, not cached (see `lowerDecl`). -/
-  chainConsts : NameSet := {}
+  /-- Constants evaluated where they are used instead of cached in a
+  once-cell (`chainConsts`, see `lowerDecl`). -/
+  uncachedConsts : NameSet := {}
+  /-- Unary Lean definitions returning a `String` that are replaced by a
+  prelude function with the same results: definition ↦ prelude function and
+  its parameter type (`PassConfig.preludeReplacements`). -/
+  preludeReplacements : NameMap (String × RR.Ty) := {}
+  /-- Whether a structure with a single relevant field is a `[value]`
+  struct (`PassConfig.valueStructs`, see `nominalType`); otherwise it is a
+  shared record like the others. -/
+  valueStructs : Bool := false
+  /-- The order of a constructor's relevant fields in its record, given
+  their alignments (`fieldAlign`): the record position of each field, as a
+  permutation (`PassConfig.fieldOrder`). Reussir keeps the given order (the
+  driver turns its own member packing off). -/
+  fieldOrder : Array Nat → Array Nat := fun aligns => (List.range aligns.size).toArray
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/
@@ -632,7 +645,7 @@ mutual
     let relCounts := monos.map fun ms => (ms.filter Option.isSome).size +
       (if ival.name == ``IO.Process.Child then 2 else 0)
     let predictValue ← do
-      if relCounts.size != 1 || relCounts[0]! != 1 then pure false else
+      if !(← read).valueStructs || relCounts.size != 1 || relCounts[0]! != 1 then pure false else
       match (monos[0]!.filterMap id)[0]? with
       | some m => pure !(← inProgressType m)
       | none => pure false
@@ -666,12 +679,12 @@ mutual
       let base := match ival.name with | .str p "_impl" => p | n => n
       let rel := (ctorName.replacePrefix base .anonymous).toString (escape := false)
       let variant := "c_" ++ identEscape rel
-      -- Fields in decreasing alignment (ties in declaration order), so the
-      -- record has no padding: Reussir keeps the given order (the driver
-      -- turns its own member packing off, see scripts/l2r.py).
+      -- The record's field order (`fieldOrder`; Opt/FieldOrder sorts by
+      -- decreasing alignment, so the record has no padding): Reussir keeps
+      -- the given order (the driver turns its own member packing off, see
+      -- scripts/l2r.py).
       let aligns ← rrFields.mapM fieldAlign
-      let perm := ((List.range rrFields.size).toArray.qsort fun i j =>
-        aligns[i]! > aligns[j]! || (aligns[i]! == aligns[j]! && i < j))
+      let perm := (← read).fieldOrder aligns
       let mut posOf := Array.replicate rrFields.size 0
       for h : r in [:perm.size] do posOf := posOf.set! perm[r] r
       let placed := fields.map (·.map fun (i, t) => (posOf[i]!, t))
@@ -684,9 +697,10 @@ mutual
       else Shape.enum
     -- A structure with a single field (after dropping irrelevant ones, e.g.
     -- `ST.Out`, the result of every `BaseIO` call, once the world is gone)
-    -- is a `[value]` struct: passed by value, no heap cell per value. Its
-    -- field must be of a finished type (or a primitive), so that no type
-    -- contains itself by value.
+    -- is a `[value]` struct, when the configuration says so
+    -- (`valueStructs`, Opt/ValueStructs): passed by value, no heap cell per
+    -- value. Its field must be of a finished type (or a primitive), so that
+    -- no type contains itself by value.
     let value ← do
       if shape != .struct || !predictValue then pure false else
       match variants[0]!.2 with

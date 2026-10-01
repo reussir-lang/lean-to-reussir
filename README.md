@@ -18,6 +18,8 @@ Status: early development.
 
 ## Layout
 
-- `lean2rr/` — the translator (a Lake package)
+- `lean2rr/` — the translator (a Lake package); its optional passes live in
+  `lean2rr/LeanToReussir/Opt/`, listed in `Opt/Registry.lean`
+  (`lean2rr --list-opts`)
 - `docs/` — design documents
 - `tests/` — the classic test corpus and its native-Lean oracle (see [`tests/README.md`](tests/README.md))
