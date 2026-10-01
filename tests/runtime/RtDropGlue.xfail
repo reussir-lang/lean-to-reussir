@@ -1,1 +1,0 @@
-Reussir's drop glue recurses into a chain member that is not the last one freed (record → record): lean2rr's runtime cannot reach it; needs Reussir patch 0013 extended with a stack of pending members (plan §10, docs/reussir-bugs.md bug 13).

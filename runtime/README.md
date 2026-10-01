@@ -160,19 +160,22 @@ and a cell for a big number, `l2r_natref_*`/`l2r_intref_*`). `LRef<T>`
 
 **Freeing containers.** Native Lean frees an object iteratively: the
 children whose count drops to zero go on a stack of objects to free, popped
-last first. Reussir's drop glue frees a record's fields recursively (along
-the last chain member being freed it loops: patch 0013), and releases a
-container field through the container's Rust `Drop` (the opaque type's
-drop hook), which releases the elements. The prelude's containers are
-therefore `leanrt::drop`'s wrappers, whose `Drop` frees the last reference
-through one stack of pending work per thread: a container freed while
-another free runs (from an element's release, through any record glue in
-between) is pushed instead, and the outermost free pops the stack until it
-is empty. An array is emptied from its last element, and what an element's
-release pushes is done before the next element, so the order of
-observable releases matches Lean's (file handles closed, and so flushed,
-promises resolved; `fs` and `task` push those too while a free runs). An
-array that a structural conversion built also releases its origin record
+last first. Reussir's drop glue does the same for records with the local
+patches 0013 and 0014: the record members it frees go on a stack of
+pending work per thread (`reussir_rt::drop`), and it releases a container
+field through the container's Rust `Drop` (the opaque type's drop hook),
+which releases the elements. The prelude's containers are therefore
+`leanrt::drop`'s wrappers, whose `Drop` frees the last reference through
+that same stack (so the runtime needs Reussir with 0014): a container
+freed while another free runs (from an element's release, or from record
+glue) is pushed instead, and the outermost free, glue or container, pops
+the stack until it is empty. An array is emptied from its last element,
+and what an element's release pushes is done before the next element, so
+the order of observable releases matches Lean's (file handles closed, and
+so flushed, promises resolved; `fs` and `task` push those too while a free
+runs), except at the top of a free that starts at a record that user code
+drops by itself (translation plan §10). An array
+that a structural conversion built also releases its origin record
 (`origin::release_shared`) when the program drops it.
 
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
@@ -246,10 +249,13 @@ start), else the event loop's timers and sockets or the earliest sleeper.
 Nothing can go on: the program waits forever. A switch saves and restores
 the per-context state: the running tasks, walks and chains of
 `leanrt::task` (`task::CtxState`) and the mutable cells (the current
-standard streams) with their saved contexts (`once::CtxState`), and the
-container free in progress with its pending work (`drop::CtxState`: a
-context can be suspended inside a free, when a promise released there
-resolves and code waiting for it blocks). The
+standard streams) with their saved contexts (`once::CtxState`). A free's
+pending work is the thread's (`reussir_rt::drop`), so no context is
+suspended inside a free (`sched::switch_to` checks): a promise dropped
+there is resolved in its turn, but its dependents, which run Lean code that
+may block, are walked after the free, at the context's next effect point,
+block or question about a task (`task::run_later_walks`, through the
+program's `l2r_task_walk_c`). The
 context switch (`coro::switch`) saves the callee-saved registers on the
 stack and swaps stack pointers (aarch64 and x86-64 assembly). The program
 exports `l2r_task_run_one_c` (lean2rr's `l2r_task_run_one`), which a new

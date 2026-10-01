@@ -93,7 +93,6 @@ struct Ctx {
     thread_base: u32,
     tasks: crate::task::CtxState,
     once: crate::once::CtxState,
-    drops: crate::drop::CtxState,
     /// A worker's first task, with its entry's serial number
     /// (`task::next_tag` hands it over if it is still that task).
     preselect: (u32, u32),
@@ -114,7 +113,6 @@ impl Ctx {
             thread_base,
             tasks: Default::default(),
             once: Default::default(),
-            drops: Default::default(),
             preselect: (crate::task::NONE, 0),
             ready: Instant::now(),
             at_effect: false,
@@ -293,6 +291,7 @@ pub fn cur_wait() -> Wait {
 /// Block the running context until it is woken (`wake`) for `w`; other
 /// contexts run meanwhile. Returns once it runs again.
 pub fn block(w: Wait) {
+    crate::task::run_later_walks();
     let s = sched();
     let c = s.cur;
     {
@@ -314,6 +313,7 @@ pub fn block(w: Wait) {
 /// Let other contexts that can go on run first (the running one goes on
 /// after them).
 pub fn yield_now() {
+    crate::task::run_later_walks();
     let s = sched();
     let c = s.cur;
     s.ctxs[c as usize].status = Status::Runnable;
@@ -444,6 +444,7 @@ const STALE: Duration = Duration::from_millis(5);
 /// a promise resolved), a task the worker picked a while ago.
 #[inline]
 pub fn effect() {
+    crate::task::run_later_walks();
     let s = unsafe { &*SCHED.0.get() };
     if let Some(s) = s {
         if !s.sleepers.is_empty() || s.evloop.is_some() || !s.runnable.is_empty() || crate::task::worker_busy() {
@@ -621,6 +622,7 @@ extern "C" fn worker_entry(_: usize) -> ! {
     let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(f) };
     loop {
         unsafe { f() };
+        crate::task::run_later_walks();
         // Natively the worker takes the next queued task; here a context
         // that can go on comes first, and this one ends.
         let s = sched();
@@ -731,16 +733,21 @@ fn schedule() {
 
 /// Switch from the running context to `n` (able to run).
 fn switch_to(n: CtxId) {
+    // Nothing that may block runs inside a free (`task::resolve` walks the
+    // dependents of a promise dropped there afterwards): the free in
+    // progress is the thread's (`reussir_rt::drop`), and the other contexts
+    // would push their frees onto it.
+    if crate::drop::active() {
+        crate::internal_panic("leanrt: a context switch inside a free");
+    }
     let s = sched();
     let c = s.cur;
     // The leaving context's bookkeeping is set aside, the arriving one's
     // put in place.
     crate::task::swap_ctx_state(&mut s.ctxs[c as usize].tasks);
     crate::once::swap_ctx_state(&mut s.ctxs[c as usize].once);
-    crate::drop::swap_ctx_state(&mut s.ctxs[c as usize].drops);
     crate::task::swap_ctx_state(&mut s.ctxs[n as usize].tasks);
     crate::once::swap_ctx_state(&mut s.ctxs[n as usize].once);
-    crate::drop::swap_ctx_state(&mut s.ctxs[n as usize].drops);
     s.ctxs[n as usize].status = Status::Running;
     s.cur = n;
     let to = s.ctxs[n as usize].sp;
