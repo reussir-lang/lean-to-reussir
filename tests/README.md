@@ -135,3 +135,14 @@ native outputs are reproducible.
 | typeclass-generic | 10000000 | 2.15 | 12.1 |
 | strings | 1000000 | 1.80 | 149.9 |
 | hashmap | 4000000 | 1.53 | 233.9 |
+
+## The Reussir benchmark programs
+
+`tests/reussir-benchmark/run.sh BENCHMARK_CHECKOUT [NAME...]` checks the
+Lean programs of the Reussir benchmark suite (a checkout of
+github.com/reussir-lang/benchmark, `lean/*.lean`, used under their own file
+names such as `rbtree-zipper.lean`): it builds each one natively as the
+suite's `compile.py` does (`lean FILE -c`, `leanc -flto -O3`) and through
+lean2rr (`lean -o`, then `scripts/l2r.py FILE.lean`), runs both and compares
+stdout, stderr and the exit code. The programs check their own results. It
+is a correctness check only; the suite itself does the timing.

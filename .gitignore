@@ -7,6 +7,7 @@
 /runtime/leanrt/target/
 # runtime test builds
 /tests/runtime/build/
+/tests/reussir-benchmark/build/
 __pycache__/
 # rrc polymorphic-FFI scratch files (rrc run from the repository)
 reussir_rust_module_*
