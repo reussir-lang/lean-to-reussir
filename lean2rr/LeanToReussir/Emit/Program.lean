@@ -160,7 +160,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
                           preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls,
                           uncachedConsts, preludeReplacements := cfg.preludeReplacements,
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder }
-  let act : LowerM (Array RR.Item) := do
+  let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit variant, `box(0)`): types
     -- may mention it even when nothing is ever boxed.
     let _ ← boxVariant .unit
@@ -191,8 +191,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
     repeat
       finishUnboxFns
       unless ← finishFnValues do break
-    return ← fnTypeItems
-  let (fnItems, st) ← (act.run ctx).run {}
+    return (← fnTypeItems, ← anchoredFns)
+  let ((fnItems, anchored), st) ← (act.run ctx).run {}
   let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))
   -- Deep and long tail paths and `let` values cut into functions, for rrc
   -- (`Outline`; first, so that the passes after it see bounded functions),
@@ -209,7 +209,14 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
   for it in stepItems do out := out ++ it.render ++ "\n"
   out := out ++ boxItem.render ++ "\n"
   out := out ++ "// ---- generated functions ----\n\n"
-  for f in fns do out := out ++ f.render ++ "\n"
+  -- `#[transform_anchor]` keeps a function out of Reussir's MLIR inliner (a
+  -- transform anchor stays a function for transform scripts; lean2rr has
+  -- none, and LLVM still inlines it): see `anchoredFns`.
+  for f in fns do
+    let anchor := match f with
+      | .fn n .. => anchored.contains n
+      | _ => false
+    out := out ++ (if anchor then "#[transform_anchor]\n" else "") ++ f.render ++ "\n"
   unless st.strLits.isEmpty do out := out ++ strLitTable st.strLits
   return out
 

@@ -12,6 +12,16 @@ application and conversion functions of function values
 namespace LeanToReussir
 open Lean Compiler LCNF
 
+/-- Release `Box` value `b` out of line (`l2r_ptr_addr_rec` releases the
+reference it receives), as a `let` binding (of a fixed name: the only
+binding of the `unreachable` arm it is used in). rrc expands every release of an
+enum in line into a match over its variants, one release per variant, and
+`Box` has a variant per boxed type: an unboxing function, inlined wherever
+it is called, would otherwise hold one such expansion in its `unreachable`
+arm. -/
+def boxSink (b : RR.Expr) : String × Option RR.Ty × RR.Expr :=
+  ("l2rbs", some (.named "u64"), .call "l2r_ptr_addr_rec" #[RR.Ty.box] #[b])
+
 /-- Can Reussir types `a` and `b` represent the same Lean type? `Box` stands
 for any type; arrays compare their elements, instantiations of an inductive
 their head. -/
@@ -100,7 +110,9 @@ partial def finishUnboxFns : LowerM Unit := do
       let u ← boxVariant .unit
       unless arms.any (·.ctor == some u) do
         arms := arms.push { ty := boxName, ctor := some u, binders := #[none], body := .ofExpr (← zeroValue t) }
-      arms := arms.push { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) }
+      -- The `Box` is released out of line (`boxSink`) before the panic.
+      arms := arms.push { ty := boxName, ctor := none, binders := #[],
+                          body := ⟨#[boxSink (.var "b")], .call "l2r_unreachable" #[t] #[]⟩ }
       let item := RR.Item.fn fname #[("b", RR.Ty.box)] t (.ofExpr (.mtch (.var "b") arms))
       modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != fname | _ => true).push item }
       -- Record the variant count this body was generated against; a later
@@ -208,6 +220,42 @@ partial def finishFnValues : LowerM Bool := do
     if !progress then break
     any := true
   return any
+
+/-- The generated functions that rrc's MLIR inliner is to leave out of
+line (`#[transform_anchor]`, see `Emit/Program`): the conversions between
+representations of a function type (`l2r_fconv_S_T`), the unboxing
+functions (`l2r_unbox_…`: to a nominal type, an array, a function type),
+and the application and identity functions of a function type with
+wrapped values of other representations (their `w<S>` arms apply or
+inspect the wrapped value at `S`).
+
+These functions call each other: an unboxing function converts what a
+`Box` holds from every representation it can hold, a conversion of a
+function value converts from the wrapped representation, and the
+application of a wrapped value applies it at its own representation.
+Polymorphic recursion through monad transformers makes hundreds of
+representations of a few Lean types, and with them a call graph of small
+mutually recursive functions. rrc's MLIR inliner follows every path of
+distinct small functions in such a cycle, so the program grows
+exponentially with the number of representations (an 8-line `StateT`
+tower used at `IO` did not build within 30 minutes or 15 GB;
+docs/reussir-bugs.md, bug 20). Out of line, they cost a call each (LLVM,
+which runs after Reussir's passes, still inlines them where it pays): the
+unboxing of statically unknown values and the conversions are slow paths
+anyway, and wrapped applications are rare outside such programs. -/
+def anchoredFns : LowerM (Std.HashSet String) := do
+  let st ← get
+  let wraps (t : RR.Ty) : Bool := (st.fnVariants.getD t #[]).any (· matches .wrap _)
+  let mut out : Std.HashSet String := {}
+  for (src, dst) in st.fnConvs do out := out.insert s!"l2r_fconv_{src.enc}_{dst.enc}"
+  for t in st.fnUnboxTargets do out := out.insert s!"l2r_unbox_fn_{t.enc}"
+  for t in st.unboxTargets do out := out.insert s!"l2r_unbox_{t}"
+  for (_, f) in st.unboxArrTargets do out := out.insert f
+  for (t, j) in st.fnApplies do
+    if wraps t then out := out.insert (applyFnName t j)
+  for t in st.fnAddrTargets do
+    if wraps t then out := out.insert s!"l2r_fn_addr_{t.enc}"
+  return out
 
 /-- The fields of the variants of function type `t`, besides `z`/`raw`. -/
 def fnVariantFields (v : FnVariant) : LowerM (Array RR.Ty) := do
