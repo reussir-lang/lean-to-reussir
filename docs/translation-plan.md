@@ -1171,14 +1171,16 @@ generated state, one type per value type `α` (and per kind, thunk or task):
 
 ```
 enum L2RThunk_N { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧),
-                  conv(L2RUnit -> ⟦α⟧, Box, u64), busyconv(u64) }
+                  conv(L2RUnit -> ⟦α⟧, Box, u64), busyconv(u64),
+                  convdone(⟦α⟧, Box, u64) }
 enum L2RTask_N  { …the same…, bind(L2RUnit -> LCell<L2RTask_N>) }
 ```
 
 The state is a shared Reussir enum, so every `α` fits, closures and value
 types included; a closure cannot be stored in a runtime cell directly.
-`conv` is a converted thunk or task (`busyconv` while it is forced) and
-`bind` a bind task that has not started (both below).
+`conv` is a converted thunk or task (`busyconv` while it is forced,
+`convdone` once it has its value) and `bind` a bind task that has not
+started (both below).
 toMono leaves only a few externs to translate: `cases` on a thunk or task
 becomes `Thunk.get`/`Task.get`, and `Thunk.fn` a closure calling
 `Thunk.get`.
@@ -1266,10 +1268,14 @@ task runs when it is needed, on the stack of whoever needs it.
   and converts its value (so it still runs at most once); `o` is the
   original cell, boxed, so that converting back gives that very cell (a
   thunk crossing between typed and uniform code in a loop stays one cell
-  instead of growing a chain); `a` is, for a task, the original's identity
-  for the runtime, so the copy's state, `IO.cancel` and cancellation are the
-  original's, also while the copy is being forced (`busyconv`). A copy of a
-  copy records the first original, and converting it to a third
+  instead of growing a chain); `a` is the original's address: the copy's
+  identity (`ptrAddrUnsafe`, §9) and, for a task, its identity for the
+  runtime, so the copy's state, `IO.cancel` and cancellation are the
+  original's, also while the copy is being forced (`busyconv`). A forced
+  copy, and the copy of a thunk or task that already has its value, is
+  `convdone(v, o, a)`: it keeps the original, so that its identity stays
+  the original's (which stays alive, so its address is not reused). A copy
+  of a copy records the first original, and converting it to a third
   representation converts the original directly, so chains stay one level
   deep.
 - *Standard streams.* Natively each thread has its own current standard
@@ -1459,12 +1465,31 @@ Answered (Lean):
 - Pointer equality in `Init`: `Array.mapMono`, `List.mapMono`,
   `withPtrEq` and `ShareCommon` use it only as a shortcut, so "not equal"
   is safe there. Other code stops when `ptrEq` says a step returned its
-  argument itself (`Expr.replace`, fixpoint loops), so a heap value must
-  keep its identity: `ptrAddrUnsafe` of a heap value passed as it is
-  answers its handle pointer (`l2r_ptr_addr_obj`), and a `[value]` struct,
-  represented natively by its field, answers its field's address. Values
-  lean2rr wraps at the call (`Nat`s, enumerations: `ElemBox`) get a fresh
-  number, so they always compare unequal and the shortcut is just lost.
+  argument itself (`Expr.replace`, fixpoint loops, over any type), so
+  `ptrAddrUnsafe` answers what native Lean answers (`addrOf`):
+  - a boxed scalar's word, `lean_box(n) = 2n+1`, for what Lean represents
+    so: a `Nat` below 2^63, an `Int` in the `int32` range (`2·u32(i)+1`),
+    `UInt8/16/32`, `Char`, `Bool` and enumerations (their index), a
+    nullary constructor of any inductive (its index: `[]` and `none` are
+    1), `Unit` and erased values (`box(0) = 1`);
+  - a heap value's handle pointer (`l2r_ptr_addr_obj`, `l2r_ptr_addr_rec`),
+    big numbers included;
+  - a `[value]` struct, represented natively by its field: the field's;
+  - `UInt64`, `Float`, `Float32`, `USize`: natively boxed into a new cell at
+    each call (two calls on the same variable give different cells, unless
+    Lean's CSE merged them, which lean2rr keeps): a fresh number;
+  - uniform code holds lean2rr's own wrappers, which answer what they hold:
+    a `Box` its payload's identity (for a `UInt64`/`Float` payload, the `Box`
+    cell, which is the cell native boxing made), a function value wrapped for
+    another representation (`w`) the wrapped value's, a thunk or task
+    converted to another representation (`conv`, `convdone`, §5.14) the
+    original's address, which it records.
+  So `ptrEq x x` holds for every representation, a payload returned by its
+  own function is `ptrEq` to itself, and fixpoint loops stop where native
+  ones do. Values without a native object (a `Nat` from 2^63 to 2^64, an
+  `Int` outside `int32` but inside `i64`: natively big number objects) answer
+  a number computed from the value, so equal ones are `ptrEq`; an array
+  converted to another element representation (§5.1) is a new array (§10).
   `ST.Ref.ptrEq` is real identity, implemented by `l2r_ref_ptr_eq`.
 
 ---
@@ -1536,6 +1561,16 @@ Each item says what differs and when.
 - *Open descriptors*: native Lean starts with libuv's descriptors open (8
   more), so `/proc/self/fd` listings and the point where opening files
   fails with `EMFILE` differ.
+- *Pointer identity* (§9): a structural conversion (§5.1) builds new
+  objects, so a value converted to another representation is not `ptrEq`
+  to the original; in particular an array converted to another element
+  representation (an `Array Nat` stored in a field of uniform type `Array α`)
+  is a new array each time. A `Nat` from 2^63 to 2^64 and an `Int` outside
+  `int32` (natively a new big number object per computation) answer a
+  number computed from their value, so equal values are `ptrEq` (natively
+  only the same object is); likewise a rebuilt `[value]` struct over the
+  same field. A thunk or task converted to another representation keeps its
+  original alive (§5.14), so that its identity stays unique.
 - *Release time of borrowed parameters* (§5.8): a resource passed to a
   function that Lean infers to borrow it is released by Lean's caller
   after the call; here it is released at its last use inside the callee.
