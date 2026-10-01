@@ -176,7 +176,19 @@ so flushed, promises resolved; `fs` and `task` push those too while a free
 runs), except at the top of a free that starts at a record that user code
 drops by itself (translation plan §10). An array
 that a structural conversion built also releases its origin record
-(`origin::release_shared`) when the program drops it.
+(`origin::release_shared`) when the program drops it; array reads skip
+that check (`array::release_unrecorded`) in programs where no conversion
+produces an array (lean2rr's optimization `origin-free-reads`). For an
+array of Reussir records (`Bridge` elements), a shared element is
+decremented inline instead of through `<record>_ffi_release` (the
+compiler's glue, an out-of-line call; it decrements the same count), and
+an array none of whose elements is freed is freed without the stack
+(`ReleaseElems`): only an element whose last reference goes takes the
+glue and the stack, so the order of releases is unchanged.
+
+**Constants.** A constant's accessor tests its once-cell inline
+(`once::claim`'s fast path); the slow path, out of line, computes it or
+waits for the scheduler context computing it.
 
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
 lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),

@@ -120,8 +120,11 @@ element representation), a pass over the checked mono declarations
 (`monoPasses`), Lean definitions replaced by prelude functions, a lowering
 hook (`LowerHooks`: the body before lowering, the J1′ choice, the form of
 J4's state machine, constant caching, the binding of a `cases`
-alternative's fields), or a pass over the generated Reussir functions
-(`rrPasses`). Every hook's default is the plain translation. A pass keeps
+alternative's fields), a pass over the generated Reussir functions
+(`rrPasses`), or an edit of the prelude given those functions
+(`preludePasses`: `origin-free-reads` points the array reads at the
+runtime's plain release when no conversion of the program produces an
+array, §5.1). Every hook's default is the plain translation. A pass keeps
 its own state in the code-lowering context's extension slot
 (`CodeCtx.ext`), not in the core's.
 
@@ -2450,6 +2453,11 @@ Each item says what differs and when.
   `contains`, `toNat?`): 1.7x native (Pf4MinStrAny; 1.1x with the projection
   moved by hand to its first use); insertion sort on `Array Nat` keeps
   the count's stores and reloads it for the swap's uniqueness check: 2.1x.
+  In a program where a conversion produces an array, the release also
+  checks for the origin table's reference to a converted array (§5.1), and
+  LLVM no longer cancels the pair: the optional pass `origin-free-reads`
+  drops that check from programs with no such conversion (17 of the 18
+  classic programs; Qsort 1.32x native with the check, 0.93x without).
 - *`Array Nat`/`Array Int` objects* have a 40-byte header (a Lean array's is 24): six
   million three-element `Array Nat` rows take 1.3x native memory
   (Pf4SmallArrs 0).
@@ -2457,11 +2465,14 @@ Each item says what differs and when.
   count, 40 bytes) and the byte buffer, where a Lean string is one object:
   five million short live strings take 306 MB (native 352 MB; 270 MB
   before the count was cached; Pf4ManyStrs).
-- *Dropping a large array of records* releases each element through
-  Reussir's out-of-line `<record>_ffi_release` (natively an inline
-  decrement in `lean_del`'s loop): freeing 6,000 hash-map versions (300
-  million bucket references) at the end of Pf4HashPersist takes about half
-  of its 0.8 s CPU time (native 0.4 s).
+- *Dropping a large array of records*: the runtime decrements shared
+  elements inline (as `lean_del` does natively) and frees the array
+  without the stack of pending work when no element is freed; an element
+  whose last reference it holds goes through Reussir's out-of-line
+  `<record>_ffi_release` (`leanrt::drop`, `ReleaseElems`). The Reussir
+  suite's `hash-map-heavily-shared`, which frees an old version of its
+  bucket array after each update while a parked version is live, went from
+  1.79x native to 1.05x with this.
 - *Constants read in a loop* (a top-level `Array` or `String` table)
   check their once-cell on every read: Pf4BigLit 1.16x native.
 
