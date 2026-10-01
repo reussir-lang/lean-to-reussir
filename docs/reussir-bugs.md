@@ -172,6 +172,18 @@ Every insertion reallocates the whole path. Returning `Tr::Node{l, x, r}`
 instead of `t` is 5x faster (3.1M insertions into a 100k-node tree: 0.76 s
 vs 0.14 s).
 
-lean2rr: a value stored whole in a constructor has its fields bound where
-they are used (plan §5.5, "reuse-friendly shapes"). The Std.TreeMap
-insert is at parity with native Lean.
+The local Reussir builds carry a partial fix (sink the bound retains into
+the branch that releases the scrutinee), which applies only when nothing
+but retains, reads and pure operations comes between the retains and the
+branch: a key comparison through a call (`Nat`, `String`, `compare`)
+still defeats it.
+
+lean2rr: a value stored whole in a constructor, or returned whole (an
+insert returning the node for an equal key), and a structure stored or
+returned whole, has its fields bound where they are used (plan §5.5,
+"reuse-friendly shapes"): the matched value's fields are not retained
+while it stays live, so there is no phantom donor. The Std.TreeMap insert
+is at parity with native Lean; BST inserts with `Nat` or `String` keys
+whose equal arm returns the node (adv4 RP4-08, PF4-03), and an
+association-list update keeping skipped pairs whole (PF4-10), are at or
+below native time.

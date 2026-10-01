@@ -69,6 +69,9 @@ structure LazyMatch where
   nbinders : Nat
   fields : Array (FVarId × Nat × RR.Ty)
   pending : Array (FVarId × Nat × RR.Ty)
+  /-- A structure: its pending fields are projected where they are used
+  (Reussir has no structure patterns). -/
+  struct : Bool := false
 
 structure CodeCtx where
   vars : Std.HashMap FVarId (String × RR.Ty) := {}
@@ -3163,6 +3166,24 @@ where
     | .cases cs => cs.alts.any (go seen ·.getCode)
     | .return _ | .unreach _ => false
 
+/-- Whether `c` returns `x` itself, or passes it to a join point (which may
+return it), following jumps to the join points in scope (`jps`). -/
+partial def returnedWhole (jps : Std.HashMap FVarId (Code .pure)) (x : FVarId) (c : Code .pure) : Bool :=
+  go {} c
+where
+  go (seen : FVarIdSet) (c : Code .pure) : Bool :=
+    match c with
+    | .let _ k => go seen k
+    | .fun d k _ | .jp d k => go seen d.value || go seen k
+    | .jmp j args =>
+      args.any (fun | .fvar y => y == x | _ => false) ||
+        match jps[j]? with
+        | some b => !seen.contains j && go (seen.insert j) b
+        | none => false
+    | .cases cs => cs.alts.any (go seen ·.getCode)
+    | .return y => y == x
+    | .unreach _ => false
+
 /-- One pass over `c` for a matched value `x`: whether `c` uses `x` (as
 `usesVar`, with `jps` the bodies of the join points declared outside `c`),
 and the variables used in `c` outside the alternatives (of `cases` in `c`)
@@ -3433,14 +3454,32 @@ mutual
           let some layout := layoutOf ctor | throwError "lean2rr: bad constructor"
           let mut ctx' := ctx
           let mut lets := #[]
+          -- A shared structure that stays live because it is stored or
+          -- returned whole binds only the fields used while it is live; the
+          -- others are projected in the inner alternatives that use them
+          -- (`lowerAlt`), as for the constructors of an enum (below): a
+          -- field projected here would be an extra reference whose release
+          -- Reussir's token reuse takes for a freed cell.
+          let lazyOk := !info.value && view.isNone &&
+            (usedAsField (← getEnv) ctx.jpBodies cs.discr k || returnedWhole ctx.jpBodies cs.discr k)
+          let early := if lazyOk then usesWhileLive ctx.jpBodies cs.discr k {} else {}
+          let used := if lazyOk then codeUses k {} else {}
+          let mut pending := #[]
           for h : i in [:ps.size] do
             let p := ps[i]
             match layout.fields[i]? with
             | some (some (j, ft)) =>
-              let x ← fresh "f"
-              lets := lets.push (x, some ft, RR.Expr.field (.var scrut) j)
-              ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
+              if lazyOk && !early.contains p.fvarId then
+                if used.contains p.fvarId then pending := pending.push (p.fvarId, j, ft)
+              else
+                let x ← fresh "f"
+                lets := lets.push (x, some ft, RR.Expr.field (.var scrut) j)
+                ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
             | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
+          if !pending.isEmpty then
+            let l : LazyMatch := { discr := cs.discr, scrut, ty := tn, variant := layout.variant, nbinders := 0,
+                                   fields := pending, pending, struct := true }
+            ctx' := { ctx' with lazy := ctx'.lazy.push l }
           let b ← lowerCode ctx' outlined retTy k
           return .block { b with lets := lets ++ b.lets }
         | .default k => return .block (← lowerCode ctx outlined retTy k)
@@ -3462,20 +3501,23 @@ mutual
                 ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
               | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
             -- An arm in which the matched value stays live because it is
-            -- stored whole in a new constructor binds only the fields needed
-            -- while it is live; a field used only in inner alternatives that
-            -- do not use the value is bound there, by matching the value
-            -- again (`lowerAlt`). Reussir projects a match's fields at the
-            -- match: a field of a value that stays live is then an extra
-            -- reference (inc and dec), and its release looks like a
-            -- reusable cell to Reussir's token reuse, which prefers it to
-            -- the cell actually freed and then never reuses anything
-            -- (TreeMap's `balance` rebuilt every node of the path). Not for
-            -- values only passed to calls: there reusing the cell (merge's
-            -- `go l₁ ys (y :: acc)`) measured slower for mergesort, whose
-            -- lists then keep the scattered order of the input cells.
+            -- stored whole in a new constructor, or returned whole (`simp`
+            -- turns `t@(node l k r)` rebuilt into `t`: a BST insert of a key
+            -- already present), binds only the fields needed while it is
+            -- live; a field used only in inner alternatives that do not use
+            -- the value is bound there, by matching the value again
+            -- (`lowerAlt`). Reussir projects a match's fields at the match:
+            -- a field of a value that stays live is then an extra reference
+            -- (inc and dec), and its release looks like a reusable cell to
+            -- Reussir's token reuse, which prefers it to the cell actually
+            -- freed and then never reuses anything (TreeMap's `balance`
+            -- rebuilt every node of the path; a BST insert with `Nat` keys,
+            -- whose comparison is a call before the branch, every node).
+            -- Not for values only passed to calls: there reusing the cell
+            -- (merge's `go l₁ ys (y :: acc)`) measured slower for mergesort,
+            -- whose lists then keep the scattered order of the input cells.
             if !binders.isEmpty && info.shape == .enum &&
-                usedAsField (← getEnv) ctx.jpBodies cs.discr k then
+                (usedAsField (← getEnv) ctx.jpBodies cs.discr k || returnedWhole ctx.jpBodies cs.discr k) then
               let early := usesWhileLive ctx.jpBodies cs.discr k {}
               let used := codeUses k {}
               let mut fields := #[]
@@ -3528,6 +3570,29 @@ mutual
     for h : i in [:ctx.lazy.size] do
       let l := ctx.lazy[i]
       let live := usesVar ctx.jpBodies l.discr k
+      if l.struct then
+        -- A structure: project the pending fields this code uses (while
+        -- the structure is live, only those needed before it dies).
+        let need := l.pending.filter (used.contains ·.1)
+        let now := if live && !need.isEmpty then
+            let early := usesWhileLive ctx.jpBodies l.discr k {}
+            need.filter (early.contains ·.1)
+          else need
+        if now.isEmpty then continue
+        let scrut := match ctx.vars[l.discr]? with
+          | some (n, _) => n
+          | none => l.scrut
+        let mut lets := #[]
+        let mut ctx' := ctx
+        for (p, j, ft) in now do
+          let x ← fresh "f"
+          lets := lets.push (x, some ft, RR.Expr.field (.var scrut) j)
+          ctx' := { ctx' with vars := ctx'.vars.insert p (x, ft) }
+        let rest := l.pending.filter fun q => !now.any (·.1 == q.1)
+        ctx' := { ctx' with lazy :=
+          if rest.isEmpty then ctx'.lazy.eraseIdx! i else ctx'.lazy.set! i { l with pending := rest } }
+        let body ← lowerAlt ctx' outlined retTy k
+        return { body with lets := lets ++ body.lets }
       let now := if live then
           let need := l.pending.filter (used.contains ·.1)
           if need.isEmpty then need else

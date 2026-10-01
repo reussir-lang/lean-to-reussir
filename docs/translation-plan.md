@@ -762,11 +762,12 @@ to a later construction:
 - In the arm of a constructor without fields, the matched value is that
   constructor (`leaf{}`), which costs nothing to build.
 - In an arm where the matched value stays live because it is stored whole
-  in a new constructor, the match binds only the fields used while the
-  value is live; an inner alternative that no longer uses the value matches
-  it again and binds the fields it uses there. `balance` keeps the
-  recursive result `x` when no rotation is needed and takes it apart
-  otherwise:
+  in a new constructor or returned whole (`simp` turns `t@(node l k r)`
+  rebuilt into `t`: a BST insert of a key already present), the match binds
+  only the fields used while the value is live; an inner alternative that
+  no longer uses the value matches it again and binds the fields it uses
+  there. `balance` keeps the recursive result `x` when no rotation is needed
+  and takes it apart otherwise:
 
   ```
   match x {
@@ -780,13 +781,32 @@ to a later construction:
       }, …
   ```
 
+  An insert returning the node for an equal key binds only the key, which
+  the comparisons need, and matches again in the arms that rebuild:
+
+  ```
+  match t {
+      T::node(_, k2, _) => {              // t stays live: only its key
+          if lean_nat_dec_lt(k, k2) {
+              match t { T::node(l, k3, r) => T::node{ins(l, k), k3, r}, … }
+          } else { if lean_nat_dec_lt(k2, k) { … } else { t } }
+      }, …
+  ```
+
   Reussir projects every bound field at the match. A field of a value that
   stays live then gets an extra reference, released where the field dies,
   and token reuse takes that release for a freed cell, which it never is,
   instead of the cell actually freed: `TreeMap.insert` rebuilt every node
-  of the path. The rule is limited to values stored in constructors. For a
-  value only passed to calls (merge's `go l₁ ys (y :: acc)`), reusing its
-  cell measured slower on the classic `mergesort`: the result keeps the
+  of the path, and so did a BST insert whose key comparison is a call
+  before the branch (`Nat`, `String`, `compare`), even with the local fix
+  of Reussir bug 7 (docs/reussir-bugs.md). A structure (one constructor:
+  no match, its fields are projections) that stays live the same way
+  projects only the fields used while it is live; an inner alternative
+  that no longer uses it projects the others there (the pair `(k', t)` of
+  an association list, kept whole when its key does not match). The rule
+  is limited to values stored in constructors or returned. For a value
+  only passed to calls (merge's `go l₁ ys (y :: acc)`), reusing its cell
+  measured slower on the classic `mergesort`: the result keeps the
   scattered memory order of the input cells.
 
 ### 5.6 Join points
@@ -1657,15 +1677,6 @@ Each item says what differs and when.
   between layouts that differ (an `Array T₁` field read at `Array T₃` whose
   elements hold an `Int` where `T₁`'s hold a `Nat`) converts the field at
   each use, where natively the cast is free.
-- *A match with an arm that returns the matched value* (a BST insert of a
-  key already present, whose `simp`ed code returns `t` itself) keeps the
-  value live across the match, and Reussir's token reuse then offers the
-  projected fields' releases as reuse donors in the other arms, where they
-  never free anything, instead of the cell the match frees (Reussir bug 7,
-  being fixed in Reussir): the other arms allocate a new node per level. A
-  user BST insert (1e6 keys) takes 3.6-5.6x native time; lean2rr used to
-  rebuild the node from its fields in such arms (0.5-0.8x native), which
-  broke identity and sharing (§5.5).
 - *`Array.map` that changes the representation* (for example
   `(Array.range n).map some`) converts the input to an array of `Box` on
   entry and back on exit (§2.7), so the input, the boxed copy with one box
