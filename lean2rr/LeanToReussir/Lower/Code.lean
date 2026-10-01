@@ -34,23 +34,46 @@ mutual
   partial def lowerCode (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (c : Code .pure) :
       LowerM RR.Block := do
     match c with
-    | .let d k =>
-      let t ← lowerType d.type
-      -- J4: a self tail call re-enters the state machine.
-      if let some sm := ctx.sm then
-        if let .const f _ args _ := d.value then
-          if f == sm.self && args.size == sm.arity && t == retTy then
-            if let .return x := k then
-              if x == d.fvarId then
-                let some selfDecl := (← read).decls.find? f | throwError "lean2rr: no declaration {f}"
-                let (ps, _) := splitFnType selfDecl.type sm.arity
-                let vals ← (args.zip ps).mapM fun (a, p) => do lowerArg ctx a (← lowerType p)
-                return .ofExpr (sm.selfCall vals)
-      let e ← try lowerLetValue ctx d.value d.type t
-        catch ex => throwError "{ex.toMessageData}\n  in let {d.binderName} : {d.type}"
-      let x ← fresh "x"
-      let b ← lowerCode { ctx with vars := ctx.vars.insert d.fvarId (x, t) } outlined retTy k
-      return { b with lets := #[(x, some t, e)] ++ b.lets }
+    | .let .. =>
+      -- A run of `let`s is lowered in a loop and prepended once, and each
+      -- value is lowered with a map of just the variables it reads (all
+      -- that `lowerLetValue` looks up), while the run's own variables
+      -- collect in a map of their own, merged once at the end: so a long
+      -- straight-line body (a spliced literal) costs linear time, where
+      -- growing the context's map would copy it at every `let`.
+      let base := { ctx with vars := {} }
+      let outer := ctx.vars
+      let mut runVars : Std.HashMap FVarId (String × RR.Ty) := {}
+      let mut c := c
+      let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[]
+      repeat
+        let .let d k := c | break
+        let t ← lowerType d.type
+        let used := valueUses d.value {}
+        let small := used.fold (init := ({} : Std.HashMap FVarId (String × RR.Ty))) fun m x =>
+          match runVars[x]?, outer[x]? with
+          | some v, _ | none, some v => m.insert x v
+          | none, none => m
+        let ctx := { base with vars := small }
+        -- J4: a self tail call re-enters the state machine.
+        if let some sm := ctx.sm then
+          if let .const f _ args _ := d.value then
+            if f == sm.self && args.size == sm.arity && t == retTy then
+              if let .return x := k then
+                if x == d.fvarId then
+                  let some selfDecl := (← read).decls.find? f | throwError "lean2rr: no declaration {f}"
+                  let (ps, _) := splitFnType selfDecl.type sm.arity
+                  let vals ← (args.zip ps).mapM fun (a, p) => do lowerArg ctx a (← lowerType p)
+                  return ⟨lets, sm.selfCall vals⟩
+        let e ← try lowerLetValue ctx d.value d.type t
+          catch ex => throwError "{ex.toMessageData}\n  in let {d.binderName} : {d.type}"
+        let x ← fresh "x"
+        lets := lets.push (x, some t, e)
+        runVars := runVars.insert d.fvarId (x, t)
+        c := k
+      let vars := runVars.fold (init := outer) fun m k v => m.insert k v
+      let b ← lowerCode { base with vars } outlined retTy c
+      return { b with lets := lets ++ b.lets }
     | .return x =>
       match ctx.vars[x]? with
       | some (n, t) => return .ofExpr (← coerce (.var n) t retTy)
