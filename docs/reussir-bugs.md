@@ -332,21 +332,42 @@ It gives the right output. A single growing `StateT` tower used at `IO` (8
 lines of Lean) does not build within 30 minutes or 12-15 GB. The same
 tower at `Id` builds in 60 s. Ordinary programs are unaffected.
 
-## 12. rrc reports an unknown variable in a very large function
+## 12. The parser's node cache swaps subtrees whose hashes collide
 
-Status: open.
+Status: patched locally (`0012-...-bug-12-...`, in review).
 
-A 60,000-element `List` literal (a program compiled with a raised
-`maxRecDepth`) translates, but rrc stops in its frontend (`--emit hir`)
-with an error like ``unknown variable `x78617` ``. The reported position is
-an integer literal (`Nat::Small{368973}`), and the variable belongs to an
-unrelated function 114,000 lines earlier. The failure depends on content:
-changing that one literal to 368974 makes rrc pass, and other random
-literals, or 50k, 55k or 70k elements, build and run correctly. Removing
-one three-`let` function also makes it pass. It looks like a token or name
-confusion in the frontend. If the confused name were a variable in scope,
-it might miscompile silently instead of failing. The cause is not yet
-known.
+Reussir builds its syntax tree with the `cstree` 0.14 library
+(`crates/reussir-syntax/src/parser/sink.rs`, `Sink::finish`, through
+`GreenNodeBuilder`). The builder's node cache reuses an earlier node for
+any node of at most three children with the same kind, the same text length
+and the same 32-bit hash of its children. It never compares the children,
+so a node whose hash collides silently gets the earlier node's whole
+subtree. Token texts enter the hash through their interner keys, which are
+handed out in order of first occurrence, so whether two nodes collide
+depends on the whole file's content.
+
+On large lean2rr outputs this showed up as rrc errors that seemed to make
+no sense:
+- `unknown variable x78617` on a 60,000-element list literal, reported at
+  an integer literal. That literal's node had collided with a node holding
+  a variable from a function 114,000 lines earlier. Changing the literal to
+  one that occurs earlier in the file (an older key) made it pass.
+- Earlier adversarial findings: a call swapped for another function's call
+  (round 1, R03Nest) and a match pattern swapped for another variant
+  (round 2, PRG-01's type mismatch).
+
+It can also miscompile silently. A program with enough distinct tokens
+makes a function return another node's literal (7 instead of 424242) with
+no diagnostic. In lean2rr output, a swapped subtree that contains a local
+name almost always fails to compile, since local names are unique. Subtrees
+made only of global names and literals can be swapped silently whenever
+their types agree, for example zero-argument calls, patterns without
+binders, and calls with literal arguments. Expect about one collision per
+very large file. lean2rr cannot avoid this, so the bug is patched: the
+parser builds every node without the cache. Tokens still come from the
+builder, because its token cache compares whole tokens. This costs about
+7-18% more parse memory (a 101 MB file: 2.1 -> 2.5 GB) and no change in
+rrc's peak memory on full builds.
 
 ## 13. Drop glue recurses once per cell of a long list
 
