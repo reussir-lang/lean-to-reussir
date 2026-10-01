@@ -182,7 +182,7 @@ fn make_mut(a: &mut LTagVec, extra: usize) -> *mut Obj {
     // this is inlined) must not escape, or tail calls are lost.
     if !a.is_unique() {
         unsafe { std::ptr::write(a, copy_shared(std::ptr::read(a), extra)) };
-    } else {
+    } else if extra > 0 {
         let o = obj(a);
         let need = unsafe { (*o).len } + extra;
         if need > unsafe { (*o).cap } {
