@@ -105,16 +105,58 @@ def chainConsts (decls : Array (Decl .pure)) (roots : Array Name) : NameSet := I
     if d.params.isEmpty && isClosed d.name && uses.getD d.name 0 == 1 && !fromFunction.contains d.name
       && !roots.contains d.name then acc.insert d.name else acc
 
-/-- Lower a whole program. -/
-def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) (startup : Array StartupStep)
-    (decls : Array (Decl .pure)) (keys : NameMap InstKey) : CoreM String := do
-  let table ← programRelevance decls
-  let roots := #[mainInst, errStr] ++ startup.map fun
+/-- The declarations the entry point calls: `main`, the error printer, and
+the startup steps' instances. Stage 3 takes the program's reachable code
+from them. -/
+def entryCallees (mainInst errStr : Name) (startup : Array StartupStep) : Array Name :=
+  #[mainInst, errStr] ++ startup.map fun
     | .caf i | .ioUnit i | .init _ i => i
-  let (decls, keys) ← retypeMono cfg.stage2 cfg.stage3 table decls keys roots
-  -- The registry's passes over mono LCNF (`Opt/FloatLits`: float literals
-  -- become bit patterns).
-  let decls := cfg.monoPasses.foldl (fun ds p => p keys ds) decls
+
+/-- A lowered program before its text is assembled: the prelude, the
+generated types (`typeItems`, the enums of function types `fnItems`, the
+`Box` enum) and functions, and the string literals. -/
+structure LoweredProgram where
+  prelude : String
+  preludeFns : Std.HashSet String
+  typeItems : Array RR.Item
+  fnItems : Array RR.Item
+  boxItem : RR.Item
+  fns : Array RR.Item
+  strLits : Array String
+
+/-- What passes over the generated functions see of the program. -/
+def LoweredProgram.rrProgram (p : LoweredProgram) : RRProgram :=
+  { prelude := p.prelude, preludeFns := p.preludeFns, types := p.typeItems ++ p.fnItems |>.push p.boxItem }
+
+/-- The registry's passes over the generated functions, in order
+(`Opt/SinkProj`: projections sunk into the branches that use them). -/
+def LoweredProgram.runRRPasses (cfg : PassConfig) (p : LoweredProgram) : LoweredProgram :=
+  { p with fns := cfg.rrPasses.foldl (fun fns pass => pass p.rrProgram fns) p.fns }
+
+/-- Deep and long tail paths cut into chains of functions, for rrc
+(`Outline`; core). -/
+def LoweredProgram.outline (p : LoweredProgram) : LoweredProgram :=
+  { p with fns := Outline.outlineFns {} (Outline.variantTable p.rrProgram.types p.prelude)
+                    (Outline.takenNames p.preludeFns p.fns) p.fns }
+
+/-- The program text: the prelude, the generated types, the functions, and
+the string literal table. -/
+def LoweredProgram.render (p : LoweredProgram) : String := Id.run do
+  let mut out := p.prelude ++ "\n// ---- generated types ----\n\n"
+  for it in p.typeItems do out := out ++ it.render ++ "\n"
+  for it in p.fnItems do out := out ++ it.render ++ "\n"
+  out := out ++ p.boxItem.render ++ "\n"
+  out := out ++ "// ---- generated functions ----\n\n"
+  for f in p.fns do out := out ++ f.render ++ "\n"
+  unless p.strLits.isEmpty do out := out ++ strLitTable p.strLits
+  return out
+
+/-- Stage 4: lower every declaration of the (retyped) program `decls`, the
+entry point and what they need (translation plan §5), with the relevance
+`table` Stage 3 used and the entry point's callees `roots`. -/
+def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) (mainInst errStr : Name)
+    (startup : Array StartupStep) (roots : Array Name) (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
+    CoreM LoweredProgram := do
   -- Function names the prelude defines (`fn NAME`).
   let preludeFns := (prelude.splitOn "fn ").foldl (init := ({} : Std.HashSet String)) fun acc chunk =>
     let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
@@ -195,19 +237,6 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
     return ← fnTypeItems
   let (fnItems, st) ← (act.run ctx).run {}
   let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))
-  -- The registry's passes over the generated functions (`Opt/SinkProj`:
-  -- projections sunk into the branches that use them), then deep and long
-  -- tail paths cut into chains of functions, for rrc (`Outline`).
-  let rrProg : RRProgram := { prelude, preludeFns, types := st.typeItems ++ fnItems |>.push boxItem }
-  let fns := cfg.rrPasses.foldl (fun fns p => p rrProg fns) st.fns
-  let fns := Outline.outlineFns {} (Outline.variantTable rrProg.types prelude) (Outline.takenNames preludeFns fns) fns
-  let mut out := prelude ++ "\n// ---- generated types ----\n\n"
-  for it in st.typeItems do out := out ++ it.render ++ "\n"
-  for it in fnItems do out := out ++ it.render ++ "\n"
-  out := out ++ boxItem.render ++ "\n"
-  out := out ++ "// ---- generated functions ----\n\n"
-  for f in fns do out := out ++ f.render ++ "\n"
-  unless st.strLits.isEmpty do out := out ++ strLitTable st.strLits
-  return out
+  return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := st.fns, strLits := st.strLits }
 
 end LeanToReussir

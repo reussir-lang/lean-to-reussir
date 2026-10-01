@@ -16,8 +16,8 @@ structure CliOptions where
   listOpts : Bool := false
 
 def usage : String :=
-  "usage: lean2rr <Module> [--root NAME] [--stats] [--emit base|inst|mono|retyped|rr] [--prelude FILE] [--no-check]\n" ++
-  "               [--disable-opt NAME]... [--enable-opt NAME]... [-o FILE]\n" ++
+  "usage: lean2rr <Module> [--root NAME] [--stats] [--emit base|inst|mono|externs|retyped|rr] [--prelude FILE]\n" ++
+  "               [--no-check] [--disable-opt NAME]... [--enable-opt NAME]... [-o FILE]\n" ++
   "       lean2rr --list-opts\n" ++
   "  Modules are found via LEAN_PATH; run inside `lake env` for Lake projects. A module name\n" ++
   "  may contain non-identifier characters (`rbtree-zipper`) or be written `«rbtree-zipper»`."
@@ -48,8 +48,8 @@ partial def parseArgs : List String → CliOptions → Except String CliOptions
   | [], o => .ok o
   | "--root" :: r :: rest, o => parseArgs rest { o with root := r.toName }
   | "--emit" :: e :: rest, o =>
-    if e ∈ ["base", "inst", "mono", "retyped", "rr", "externs"] then parseArgs rest { o with emit := some e }
-    else .error s!"unknown --emit stage '{e}' (supported: base, inst, mono, retyped, rr)"
+    if e ∈ ["base", "inst", "mono", "externs", "retyped", "rr"] then parseArgs rest { o with emit := some e }
+    else .error s!"unknown --emit stage '{e}' (supported: base, inst, mono, externs, retyped, rr)"
   | "--prelude" :: f :: rest, o => parseArgs rest { o with prelude := some f }
   | "--no-check" :: rest, o => parseArgs rest { o with check := false }
   | "--stats" :: rest, o => parseArgs rest { o with stats := true }
@@ -58,7 +58,10 @@ partial def parseArgs : List String → CliOptions → Except String CliOptions
   | "--list-opts" :: rest, o => parseArgs rest { o with listOpts := true }
   | "-o" :: f :: rest, o => parseArgs rest { o with output := some f }
   | a :: rest, o =>
-    if a.startsWith "-" then .error s!"unknown option '{a}'"
+    -- An option that takes an argument gets here only without one.
+    if a ∈ ["--root", "--emit", "--prelude", "--disable-opt", "--enable-opt", "-o"] then
+      .error s!"option '{a}' needs an argument"
+    else if a.startsWith "-" then .error s!"unknown option '{a}'"
     else if o.module.isSome then .error s!"unexpected argument '{a}'"
     else do
       let m ← parseModuleName a
@@ -75,8 +78,8 @@ def emitBase (prog : Program) : CoreM String := do
 def dumpDecls (header : String) (decls : Array (Decl .pure)) : String :=
   decls.foldl (init := header) fun out d => out ++ fmtDecl d ++ "\n"
 
-/-- Stages 1–4 (translation plan §1), stopping after the stage that `--emit
-stage` prints. -/
+/-- The pipeline (translation plan §1), stopping after the stage that
+`--emit stage` prints. -/
 def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM String := do
   -- Stage 1: monomorphize from `main`, the entry point's roots and the
   -- startup items (constants, `initialize` actions).
@@ -88,29 +91,37 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let decls ← runStage2 cfg.stage2 st.decls st.externs opts.check
   if stage == "externs" then return ← externReport decls st.keys
   if stage == "mono" then return dumpDecls header decls
-  if stage == "retyped" then
-    -- Stage 3 alone (`lowerProgram` runs it itself).
-    let (decls, _) ← retypeMono cfg.stage2 cfg.stage3 (← programRelevance decls) decls st.keys rootInsts
-    return dumpDecls header decls
-  -- Stages 3 and 4: retyping, the registry's optional passes, lowering, and
-  -- the program text (prelude, types, functions, startup chain, entry point).
+  -- Stage 3: the types mono lost, recovered from the code the entry point
+  -- reaches (`main`, the error printer, the startup steps).
+  let mainInst := rootInsts[0]!
+  let errStr := rootInsts[1]!
+  let startup ← startupSteps items rootInsts st
+  let roots := entryCallees mainInst errStr startup
+  let table ← programRelevance decls
+  let (decls, keys) ← retypeMono cfg.stage2 cfg.stage3 table decls st.keys roots
+  if stage == "retyped" then return dumpDecls header decls
+  -- The registry's passes over mono LCNF (`Opt/FloatLits`).
+  let decls := cfg.monoPasses.foldl (fun ds pass => pass keys ds) decls
+  -- Stage 4: lowering, with the registry's lowering hooks.
   let prelude ← match opts.prelude with
     | some p => IO.FS.readFile p
     | none => pure ""
-  let startup ← startupSteps items rootInsts st
-  lowerProgram cfg prelude rootInsts[0]! rootInsts[1]! startup decls st.keys
+  let prog ← lowerProgram cfg prelude table mainInst errStr startup roots decls keys
+  -- The registry's passes over the generated functions, then `Outline`
+  -- (core), and the program text.
+  return prog.runRRPasses cfg |>.outline |>.render
 
 def run (opts : CliOptions) (cfg : PassConfig) (module : Name) : IO UInt32 := do
   let env ← loadEnvironment #[module]
   let text ← runCoreM env do
-    -- What `main` reaches (`--emit base`, `--stats`).
-    let prog ← collect opts.root
     let mut text := ""
-    match opts.emit with
-    | some "base" => text := ← emitBase prog
-    | some stage => text := ← pipeline opts cfg stage
-    | none => pure ()
-    if opts.stats then text := text ++ (← statsReport prog)
+    -- What `main` reaches, for `--emit base` and `--stats` only.
+    let prog? ← if opts.emit == some "base" || opts.stats then some <$> collect opts.root else pure none
+    match opts.emit, prog? with
+    | some "base", some prog => text := ← emitBase prog
+    | some stage, _ => text := ← pipeline opts cfg stage
+    | none, _ => pure ()
+    if let (true, some prog) := (opts.stats, prog?) then text := text ++ (← statsReport prog)
     return text
   match opts.output with
   | some path => IO.FS.writeFile path text
@@ -137,17 +148,18 @@ def main (args : List String) : IO UInt32 := do
     IO.eprintln s!"lean2rr: {e}\n{usage}"
     return 2
   | .ok opts =>
+    -- The registry's passes, minus `--disable-opt`, plus `--enable-opt`
+    -- (the names are checked first, also for `--list-opts`).
+    let cfg ← match Opt.config opts.disabled opts.enabled with
+      | .ok cfg => pure cfg
+      | .error e =>
+        IO.eprintln s!"lean2rr: {e}"
+        return 2
     if opts.listOpts then
       IO.print Opt.listing
       return 0
     let some module := opts.module
       | IO.eprintln usage
-        return 2
-    -- The registry's passes, minus `--disable-opt`, plus `--enable-opt`.
-    let cfg ← match Opt.config opts.disabled opts.enabled with
-      | .ok cfg => pure cfg
-      | .error e =>
-        IO.eprintln s!"lean2rr: {e}"
         return 2
     try run opts cfg module
     catch e =>

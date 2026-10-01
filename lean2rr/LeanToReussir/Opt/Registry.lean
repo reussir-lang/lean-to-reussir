@@ -100,13 +100,16 @@ def required : Array RequiredPass := #[
 
 /-- The configuration with the enabled optimizations, after turning off
 those named in `disabled` and on those named in `enabled`. An unknown name,
-or the name of a required part, is an error. -/
+the name of a required part, or a name both turned off and on is an
+error. -/
 def config (disabled enabled : Array String := #[]) : Except String PassConfig := do
   for n in disabled ++ enabled do
     if let some r := required.find? (·.name == n) then
       throw s!"'{n}' is required, not an optimization: {r.reason}"
     unless optimizations.any (·.name == n) do
       throw s!"unknown optimization '{n}' (see --list-opts)"
+    if disabled.contains n && enabled.contains n then
+      throw s!"'{n}' is both disabled and enabled"
   let on (o : OptPass) : Bool := (o.enabled || enabled.contains o.name) && !disabled.contains o.name
   return optimizations.foldl (init := { stage2 }) fun c o => if on o then o.install c else c
 
