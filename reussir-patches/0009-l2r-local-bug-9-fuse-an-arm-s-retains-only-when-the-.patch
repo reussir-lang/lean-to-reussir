@@ -1,0 +1,146 @@
+From b7bff6e2d05e1d1124b1ce15d91a5a1cd3c82e6f Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Wed, 30 Sep 2026 21:38:24 -0400
+Subject: [PATCH] l2r-local: bug 9: fuse an arm's retains only when the release
+ can replace them
+
+`fuseArm` erases the retains of members extracted from the arm's payload
+and lets the scrutinee's release transfer the box's references instead.
+Two cases broke the counts (use after free; wrong output, ASan
+heap-use-after-free):
+
+- A member used twice has two retains before the release (e.g. after the
+  inliner turns a callee that drops the scrutinee into a plain `rc.dec`).
+  All were erased and the member bound twice (`boundMembers = [1, 1]`), but
+  the destructuring expansion's unique path transfers the box's single
+  reference per member, so a count was lost. Bind a member once and erase
+  only its first retain; further retains are real copies and stay (as
+  `fuseCompoundConsumption` does).
+- A member consumed before the release (built into a cell that is then
+  released) loses the reference its retain provided, and the release of
+  that cell drops its count below its holders while the scrutinee's box
+  still points at it. Do not fuse when an op before the release consumes a
+  bound member, i.e. uses it other than by a borrow or a retain
+  (`consumesFusedMember`, as for the retains sunk into a branch).
+---
+ .../RcDispatchFusion/RcDispatchFusion.cpp     | 15 ++++-
+ .../conversion/rc_dispatch_fusion.mlir        | 63 +++++++++++++++++++
+ 2 files changed, 76 insertions(+), 2 deletions(-)
+
+diff --git a/lib/Transformation/RcDispatchFusion/RcDispatchFusion.cpp b/lib/Transformation/RcDispatchFusion/RcDispatchFusion.cpp
+index 010e3d3c..ee029371 100644
+--- a/lib/Transformation/RcDispatchFusion/RcDispatchFusion.cpp
++++ b/lib/Transformation/RcDispatchFusion/RcDispatchFusion.cpp
+@@ -285,6 +285,7 @@ bool fuseArm(mlir::Region &region, int64_t tag,
+   // touches the scrutinee (or is opaque) aborts.
+   ReussirRcDecOp dec;
+   llvm::SmallVector<ReussirRcIncOp> boundIncs;
++  llvm::SmallDenseSet<int64_t> boundIndices;
+   for (mlir::Operation &op : region.front()) {
+     if (auto candidate = llvm::dyn_cast<ReussirRcDecOp>(op)) {
+       if (candidate.getRcPtr() == scrutinee) {
+@@ -298,10 +299,14 @@ bool fuseArm(mlir::Region &region, int64_t tag,
+       continue;
+     }
+     if (auto inc = llvm::dyn_cast<ReussirRcIncOp>(op)) {
+-      if (extractedMemberIndex(inc.getRcPtr(), payloadRef)) {
++      if (auto index = extractedMemberIndex(inc.getRcPtr(), payloadRef)) {
+         if (!inc.isSingleAcquire())
+           return false;
+-        boundIncs.push_back(inc);
++        // The box owns one reference per member, so only one retain per
++        // member can be replaced by the transferred owner; a further retain
++        // of the same member is a real copy and must stay.
++        if (boundIndices.insert(*index).second)
++          boundIncs.push_back(inc);
+       }
+       continue;
+     }
+@@ -319,6 +324,12 @@ bool fuseArm(mlir::Region &region, int64_t tag,
+     return false;
+   if (dec.getNullableToken() && !dec.getNullableToken().use_empty())
+     return false;
++  for (mlir::Operation &op : region.front()) {
++    if (&op == dec.getOperation())
++      break;
++    if (consumesFusedMember(op, boundIncs))
++      return false;
++  }
+ 
+   llvm::SmallVector<int64_t> bound;
+   for (ReussirRcIncOp inc : boundIncs)
+diff --git a/tests/integration/conversion/rc_dispatch_fusion.mlir b/tests/integration/conversion/rc_dispatch_fusion.mlir
+index 6a94702d..bc4023eb 100644
+--- a/tests/integration/conversion/rc_dispatch_fusion.mlir
++++ b/tests/integration/conversion/rc_dispatch_fusion.mlir
+@@ -221,4 +221,67 @@ module @test attributes {dlti.dl_spec = #dlti.dl_spec<#dlti.dl_entry<i64, dense<
+     }
+     return %r : !rclist
+   }
++
++  // A member used twice is retained twice before the release. The box owns
++  // one reference to it, so only one retain is fused away and the member is
++  // bound once; the other retain is a real copy and stays.
++  // FUSE-LABEL: func.func @take_twice
++  // FUSE: reussir.rc.inc(
++  // FUSE-NOT: reussir.rc.inc
++  // FUSE: reussir.rc.dec(%arg0 : {{.+}}) : {{.+}}boundMembers = array<i64: 1>, destructureTag = 0 : index}
++  func.func private @pair(!rclist, !rclist) -> !rclist
++  func.func @take_twice(%l: !rclist) -> !rclist {
++    %ref = reussir.rc.borrow (%l : !rclist) : !reussir.ref<!listty>
++    %r = reussir.record.dispatch (%ref : !reussir.ref<!listty>) -> !rclist {
++      [0] -> {
++        ^bb0(%cons: !reussir.ref<!consty>):
++        %slot = reussir.ref.project (%cons : !reussir.ref<!consty>) [1] : !reussir.ref<!rclist>
++        %tail = reussir.ref.load (%slot : !reussir.ref<!rclist>) : !rclist
++        reussir.rc.inc (%tail : !rclist)
++        reussir.rc.inc (%tail : !rclist)
++        %t = reussir.rc.dec (%l : !rclist) : !reussir.nullable<!tk>
++        %p = func.call @pair(%tail, %tail) : (!rclist, !rclist) -> !rclist
++        reussir.scf.yield %p : !rclist
++      }
++      [1] -> {
++        ^bb1(%nil: !reussir.ref<!nilty>):
++        reussir.scf.yield %l : !rclist
++      }
++    }
++    return %r : !rclist
++  }
++
++  // A bound member consumed (built into a cell that is released) before the
++  // scrutinee's release: the release of that cell drops the member's count
++  // below its holders if the retain is fused away, so nothing is fused.
++  // FUSE-LABEL: func.func @consume_then_take
++  // FUSE: reussir.rc.inc
++  // FUSE-NOT: boundMembers
++  // FUSE: return
++  func.func @consume_then_take(%l: !rclist) -> !rclist {
++    %ref = reussir.rc.borrow (%l : !rclist) : !reussir.ref<!listty>
++    %r = reussir.record.dispatch (%ref : !reussir.ref<!listty>) -> !rclist {
++      [0] -> {
++        ^bb0(%cons: !reussir.ref<!consty>):
++        %slot = reussir.ref.project (%cons : !reussir.ref<!consty>) [1] : !reussir.ref<!rclist>
++        %tail = reussir.ref.load (%slot : !reussir.ref<!rclist>) : !rclist
++        reussir.rc.inc (%tail : !rclist)
++        %k = arith.constant 0 : i64
++        %v = reussir.record.compound (%k, %tail : i64, !rclist) : !consty
++        %vv = reussir.record.variant [0] (%v : !consty) : !listty
++        %z = reussir.rc.create value(%vv : !listty) : !rclist
++        %tz = reussir.rc.dec (%z : !rclist) : !reussir.nullable<!tk>
++        %t = reussir.rc.dec (%l : !rclist) : !reussir.nullable<!tk>
++        %n = reussir.record.compound : !nilty
++        %nv = reussir.record.variant [1] (%n : !nilty) : !listty
++        %nil = reussir.rc.create value(%nv : !listty) : !rclist
++        reussir.scf.yield %nil : !rclist
++      }
++      [1] -> {
++        ^bb1(%nil: !reussir.ref<!nilty>):
++        reussir.scf.yield %l : !rclist
++      }
++    }
++    return %r : !rclist
++  }
+ }
+-- 
+2.43.0
+

@@ -5,14 +5,15 @@ never triggers, with a repro, the cause where known, what lean2rr does about
 it, and the state of a local patch.
 
 Reussir revision: `ef922049`. The checkout at `./reussir` is not part of
-this repository, and today it is unpatched. Reussir is patched locally only
-where a bug breaks lean2rr's output and lean2rr has no reasonable way around
-it. A patch is reviewed adversarially (code review, differential fuzzing
-against a reference evaluator, ASan builds, the lean2rr test suites) before
-it is used. Patches are applied only to local builds and are not submitted
-upstream. The patch files are not in this repository yet; they will be
-added under `reussir-patches/` when they are applied to `./reussir`. Until
-then the lean2rr workarounds stay in place.
+this repository. Reussir is patched locally only where a bug breaks
+lean2rr's output and lean2rr has no reasonable way around it. Each patch
+was reviewed adversarially before it was applied: code review,
+differential fuzzing against a reference evaluator, ASan builds and the
+lean2rr test suites, over three rounds. The eight patches are in
+`reussir-patches/` (see its README). They are applied to `./reussir` as
+local commits on its branch `l2r-local` (ef922049 + the eight). They are
+not submitted upstream. lean2rr's workarounds stay in place where they are
+still needed (bugs 1, 2 for variants, 3, 10, 16, 17, 19).
 
 ## Repros
 
@@ -52,25 +53,28 @@ Builds used to check the repros (on the aarch64 test machine):
   extended for chains through a member that is not last, work in progress
   ("0013, extended").
 - ef922049 + 0012.
+- the final set: ef922049 + 0006, 0004, 0002, 0007, 0009, 0005, 0013,
+  0012 as applied to `./reussir` (`l2r-local`). The third review round
+  checked it.
 
 ## Status
 
 | Bug | Effect | Affects lean2rr output? | lean2rr workaround | Local patch | Patch review | Applied to `./reussir` |
 |---|---|---|---|---|---|---|
 | 1 | `[value]` enum payload bytes lost when a variant is moved | no, shape avoided | emits only unaffected `[value]` enums | none | - | - |
-| 2 | in-place reuse skips the store of a field that sits elsewhere in the new cell | structures: yes, wrong values; variants: no | variants: `--no-pack-record-members` and fields ordered by alignment; structures: none | 0002 (structures) | passed | no |
+| 2 | in-place reuse skips the store of a field that sits elsewhere in the new cell | structures: yes, wrong values; variants: no | variants: `--no-pack-record-members` and fields ordered by alignment; structures: none | 0002 (structures) | passed | yes |
 | 3 | Rust allocations take mimalloc's aligned path | speed only | runtime calls `mi_malloc` itself | none | - | - |
-| 4 | rrc recurses forever on two equal recursive types (SIGSEGV) | yes, rrc crash | driver retries without `--reuse-across-call` | 0004 | passed | no |
-| 5 | TokenReuse crashes on a one-armed `if` (SIGSEGV) | yes, rrc crash | prelude panics avoid the shape; user code can still hit it | 0005 | passed | no |
-| 6 | a static cell is freed after 2^32 references | yes, crash | none | 0006 | passed | no |
-| 7 | token reuse picks decrements that never free | yes, speed | fields bound lazily (plan §5.5) | 0007 | revised after review (a use after free was found), re-review pending | no |
+| 4 | rrc recurses forever on two equal recursive types (SIGSEGV) | yes, rrc crash | driver retries without `--reuse-across-call` | 0004 | passed | yes |
+| 5 | TokenReuse crashes on a one-armed `if` (SIGSEGV) | yes, rrc crash | prelude panics avoid the shape; user code can still hit it | 0005 | passed | yes |
+| 6 | a static cell is freed after 2^32 references | yes, crash | none | 0006 | passed | yes |
+| 7 | token reuse picks decrements that never free | yes, speed | fields bound lazily (plan §5.5) | 0007 | passed (revised after round 2) | yes |
 | 8 | padding "lift" gives LLVM a larger layout than Reussir's | no, shape never emitted | - | none | - | - |
-| 9 | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | 0009 | revised after review (a use after free was found), re-review pending | no |
+| 9 | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | 0009 | passed (revised after round 2) | yes |
 | 10 | closure devirtualization prints types exponentially (build time) | yes, build time and memory | `--no-closure-wpd` | none | - | - |
 | 11 | interprocedural SCCP is superlinear (build time) | yes, build time of large programs | none | none | - | - |
-| 12 | the parser swaps syntax subtrees whose hashes collide | yes, wrong code or bogus errors on very large files | none | 0012 | not yet reviewed | no |
-| 13 | releasing a long list recurses once per cell | yes, stack overflow, 2x time and memory | none | 0013 | being extended (chains through a member that is not last) | no |
-| 14 | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | in 0009 | revised after review, re-review pending | no |
+| 12 | the parser swaps syntax subtrees whose hashes collide | yes, wrong code or bogus errors on very large files | none | 0012 | passed | yes |
+| 13 | releasing a long list recurses once per cell | yes, stack overflow, 2x time and memory | none | 0013 | passed (extended after round 2) | yes |
+| 14 | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | in 0009 | passed | yes |
 | 15 | a `match` on a `Nullable` yielding a counted value does not compile | no, `Nullable` not used | - | none | - | - |
 | 16 | reuse across calls is superlinear in match nesting (build time) | yes, build time and memory | deep tail paths outlined, except in recursive functions | none | - | - |
 | 17 | rrc memory is quadratic in a straight-line `Nat` function (build time) | yes, build memory | long tail paths outlined, except in recursive functions | none | - | - |
@@ -93,8 +97,8 @@ alone):
 Status words used below:
 - *worked around*: no patch; lean2rr avoids the construct or works around
   it.
-- *patched locally*: a local patch fixes it (not applied to `./reussir`
-  yet).
+- *patched locally*: a local patch fixes it; it is applied to `./reussir`
+  (branch `l2r-local`).
 - *does not affect lean2rr*: lean2rr never produces the triggering shape.
 - *open*: lean2rr can hit it and has no fix or workaround.
 
@@ -480,7 +484,7 @@ from the arm's fields instead of the matched value; it broke `ptrEq`
 identity and sharing (Lean's `Expr.replace`-style fixpoints never stopped)
 and was removed.
 
-**Patch.** 0007 (revised after review, re-review pending). When the release
+**Patch.** 0007 (passed review; revised after round 2). When the release
 of the scrutinee sits inside a branch that runs exactly one of its regions
 once (`if` with an else, `index_switch`, record or nullable dispatch), the
 arm's retains of the bound members move into every region of that branch.
@@ -592,7 +596,7 @@ still referenced.
 inlining at `-O aggressive` can recreate them, and lean2rr cannot prevent
 that.
 
-**Patch.** 0009 (revised after review, re-review pending): `fuseArm` binds
+**Patch.** 0009 (passed review; revised after round 2): `fuseArm` binds
 each member once and erases only its first retain; further retains of the
 same member are real copies and stay, as in `fuseCompoundConsumption`. The
 revision also covers bug 14. FIXED (`0`) on the round-2 stack and with the
@@ -744,7 +748,7 @@ agree.
 
 **lean2rr.** Cannot avoid it: any shape, name or literal can collide.
 
-**Patch.** 0012 (not yet reviewed): the parser builds every node without
+**Patch.** 0012 (passed review): the parser builds every node without
 the cache; tokens still come from the builder, whose token cache compares
 whole tokens. It costs 7-18% more parse memory (a 101 MB file: 2.1 → 2.5
 GB) and no change in rrc's peak memory on full builds. With 0012: FIXED
@@ -752,7 +756,7 @@ GB) and no change in rrc's peak memory on full builds. With 0012: FIXED
 
 ## 13. Drop glue recurses once per cell of a long list
 
-**Status.** Patched locally (0013, being extended).
+**Status.** Patched locally (0013).
 
 Releasing a chain of cells at once takes one stack frame per cell. Native
 Lean frees iteratively. The program needs no recursion of its own:
@@ -815,7 +819,7 @@ of each cell follows the recursive call on its tail: not a tail call.
 
 **lean2rr.** Cannot avoid releasing such values.
 
-**Patch.** 0013, being extended.
+**Patch.** 0013 (passed review; extended after round 2).
 
 The first version, reviewed in round 2: inside drop functions, a release
 whose count is 1 calls a new `drop_and_free::<T>`, which drops the cell's
@@ -830,8 +834,8 @@ It does not cover the snoc list or the left spine: SHAPE 1 and 2 and CASE 1
 still overflow. At `-O none` LLVM does not turn the tail call into a loop,
 so every chain still overflows there.
 
-The extension, which the patch file now holds and which is not reviewed
-yet: `drop_and_free` releases the cell's chain members (the plain shared
+The extension, which the patch file holds and the third review round
+checked: `drop_and_free` releases the cell's chain members (the plain shared
 boxes whose type can contain the cell's type again) wherever they sit in
 the cell; of those about to be freed, the last is released as the tail
 call. So the loop follows whichever member carries the chain. A build of
@@ -874,7 +878,7 @@ cell and retains it.
 **lean2rr.** Can reach the shape through Reussir's inliner (a callee that
 drops a constructed argument); not seen in the corpus or test suites.
 
-**Patch.** In the revised 0009 (re-review pending): no fusion when an op
+**Patch.** In 0009 (passed review): no fusion when an op
 before the release uses a bound member other than by a borrow or a retain.
 0007 had the same flaw in its own scan, found in review, and is fixed the
 same way. The round-2 stack, which has the earlier 0009, still crashes;

@@ -1,0 +1,109 @@
+From d8ffbe7dc0c8de8fa5e0c911d548b0027c16a797 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Wed, 30 Sep 2026 15:22:52 -0400
+Subject: [PATCH] l2r-local: bug 5: free tokens on the else path of an scf.if
+ without else
+
+When a token available before a branch op does not survive one of its
+regions (it is consumed there, or freed at a call inside it), the matcher
+frees it at the end of every other region. For an `scf.if` without an else
+region (the canonical form of a one-armed `if`, e.g. an `if` whose value
+became a select and whose branch only has side effects) it took
+`op.getRegion(i).front()` of the empty else region, a dangling block, and
+anchored the free at a garbage terminator: rrc crashed with SIGSEGV (or
+hung) when materializing the frees (ReussirTokenFreeOp::create). This hits
+any -O level, with or without --reuse-across-call.
+
+Materialize the missing else block (an `scf.yield`; an `scf.if` with
+results always has an else) to hold those frees, which gives the same IR as
+an explicit empty else. Any other op with an empty region is reported as a
+pass failure instead of undefined behavior.
+---
+ lib/Transformation/TokenReuse/TokenReuse.cpp  | 29 +++++++++++++++++--
+ .../conversion/reuse_inside_scf.mlir          | 25 ++++++++++++++++
+ 2 files changed, 52 insertions(+), 2 deletions(-)
+
+diff --git a/lib/Transformation/TokenReuse/TokenReuse.cpp b/lib/Transformation/TokenReuse/TokenReuse.cpp
+index 9f3710b0..707fb91a 100644
+--- a/lib/Transformation/TokenReuse/TokenReuse.cpp
++++ b/lib/Transformation/TokenReuse/TokenReuse.cpp
+@@ -483,6 +483,25 @@ int scoreToken(mlir::Value token, TokenAcceptor acceptor,
+   return heuristic(producedType, producerRc, acceptor, equivalence, sizes);
+ }
+ 
++// The block ending the path through `region` of a region branch op, where
++// the tokens that do not survive the op on that path are freed. A region
++// without a block is still a path: an `scf.if` without an else runs no region
++// when its condition is false, so a token consumed in its then region must be
++// freed there too. Its else block (an `scf.if` with results always has one)
++// is materialized to hold the frees. Null for an empty region of any other
++// op.
++mlir::Block *getOrCreateExitBlock(mlir::Region &region) {
++  if (!region.empty())
++    return &region.front();
++  auto ifOp = llvm::dyn_cast<mlir::scf::IfOp>(region.getParentOp());
++  if (!ifOp || &ifOp.getElseRegion() != &region)
++    return nullptr;
++  mlir::OpBuilder builder(ifOp.getContext());
++  builder.createBlock(&region);
++  mlir::scf::YieldOp::create(builder, ifOp.getLoc());
++  return &region.front();
++}
++
+ bool escapeTrappedTokensSweep(mlir::func::FuncOp func) {
+   llvm::SmallVector<mlir::scf::IfOp> worklist;
+   func.walk<mlir::WalkOrder::PostOrder>([&](mlir::scf::IfOp op) {
+@@ -664,8 +683,14 @@ struct TokenReusePass : public impl::ReussirTokenReusePassBase<TokenReusePass> {
+             for (mlir::Value val :
+                  tokensInStableOrder(branchResults[i], dfsOrder)) {
+               if (!intersection.count(val)) {
+-                mlir::Block &block = op.getRegion(i).front();
+-                frees.push_back({val, block.getTerminator()});
++                mlir::Block *exit = getOrCreateExitBlock(op.getRegion(i));
++                if (!exit) {
++                  op.emitOpError() << "token reuse cannot free a token on "
++                                      "the path through an empty region";
++                  signalPassFailure();
++                  return {};
++                }
++                frees.push_back({val, exit->getTerminator()});
+               }
+             }
+           }
+diff --git a/tests/integration/conversion/reuse_inside_scf.mlir b/tests/integration/conversion/reuse_inside_scf.mlir
+index 36eadcb2..ba002d13 100644
+--- a/tests/integration/conversion/reuse_inside_scf.mlir
++++ b/tests/integration/conversion/reuse_inside_scf.mlir
+@@ -56,4 +56,29 @@ module @test attributes {dlti.dl_spec = #dlti.dl_spec<#dlti.dl_entry<f80, dense<
+         }
+         return
+     }
++
++    // The same with no else region (the canonical form of a one-armed
++    // `scf.if`): the path that skips the then region still has to free the
++    // token, so the else block is materialized to hold the free.
++    // CHECK-LABEL: func.func @partial_no_else
++    // CHECK-SAME: (%[[regarg0:[a-z0-9]+]]: !reussir.rc<i64>, %[[regarg1:[a-z0-9]+]]: i1, %[[regarg2:[a-z0-9]+]]: i64) {
++    // CHECK:  %[[reg0:[a-z0-9]+]] = reussir.rc.dec(%[[regarg0]] : !reussir.rc<i64>) : !reussir.nullable<!reussir.token<align : 8, size : 16>>
++    // CHECK:  scf.if %[[regarg1]] {
++    // CHECK:    %[[reg1:[a-z0-9]+]] = reussir.token.ensure(%[[reg0]] : <!reussir.token<align : 8, size : 16>>) : <align : 8, size : 16>
++    // CHECK:    %[[reg2:[a-z0-9]+]] = reussir.rc.create value(%[[regarg2]] : i64) token(%[[reg1]] : !reussir.token<align : 8, size : 16>) : !reussir.rc<i64>
++    // CHECK:    func.call @opaque(%[[reg2]]) : (!reussir.rc<i64>) -> ()
++    // CHECK:  } else {
++    // CHECK:    reussir.token.free(%[[reg0]] : !reussir.nullable<!reussir.token<align : 8, size : 16>>)
++    // CHECK:  }
++    // CHECK:  return
++    // CHECK: }
++    func.func @partial_no_else(%0: !rc64, %1: i1, %x: i64) {
++        %2 = reussir.rc.dec (%0 : !rc64) : !reussir.nullable<!reussir.token<align: 8, size: 16>>
++        scf.if %1 {
++          %tk = reussir.token.alloc : !i64token
++          %5 = reussir.rc.create value(%x : i64) token(%tk : !i64token) : !rc64
++          func.call @opaque(%5) : (!rc64) -> ()
++        }
++        return
++    }
+ }
+-- 
+2.43.0
+

@@ -1,0 +1,255 @@
+From edbd50b4d36c1fcafb71a8528cd0ade3392acdee Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Wed, 30 Sep 2026 18:10:30 -0400
+Subject: [PATCH] l2r-local: bug 6: never free a tagged immediate whose wrapped
+ count reads 1
+
+Nullary variants of taggable shared enums are immediates pointing at a
+per-tag static dummy box. Under the TBI encoding rc.inc stores to the
+dummy's count unconditionally (the comment assumed a 64-bit count; the
+count word is 32 bits), and rc.set, the only decrementing store, skips it.
+So the count only grows: after 2^32 references to one nullary constructor
+it wrapped to 1, the next decrement took the unique branch and freed the
+static dummy (SIGSEGV in mi_free).
+
+Leave rc.inc unguarded (a guard on its store costs up to 30% on rc-heavy
+code on some cores and hides the count from LLVM on fresh cells), and make
+the decrement's unique branch test the value against the type's nullary
+immediates (rc.compare_immortal, only emitted for taggable types under the
+special-pointer-tag scheme; skipped for destructuring decrements of an arm
+with members). For an immediate the branch releases nothing and yields no
+token, so a wrapped count can never free or reuse the dummy. Since the
+dummy's count now passes through 0, rc.inc under TBI only assumes
+old >= 1 when the pointer's top byte is zero.
+---
+ .../BasicOpsLowering/BasicOpsLowering.cpp     | 39 +++++++++-----
+ .../RcDecrementExpansion.cpp                  | 54 +++++++++++++++++++
+ .../rc_dec_expansion_immediates.mlir          | 43 +++++++++++++++
+ .../special_pointer_tag_lowering.mlir         | 18 +++++++
+ 4 files changed, 140 insertions(+), 14 deletions(-)
+ create mode 100644 tests/integration/conversion/rc_dec_expansion_immediates.mlir
+
+diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+index a1a0763c..82305558 100644
+--- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
++++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+@@ -114,11 +114,13 @@ namespace {
+ //   * the dummy's refcount is pinned above the shared/unique decision point,
+ //     so an immediate's decrement always takes the *shared* branch (no field
+ //     drop, no token, no free of the dummy) and `rc.is_unique` answers
+-//     false. In the immortal encoding on targets narrower than 64 bits,
+-//     `rc.inc`'s store is steered away from a recognized dummy as well —
+-//     2^(w-2) unbalanced increments would otherwise be reachable and wrap
+-//     the count. (With w = 64 that is > 4 * 10^18 increments: unreachable,
+-//     so the increment stays guard-free on 64-bit targets.)
++//     false. In the immortal encoding `rc.inc`'s store is steered away from
++//     a recognized dummy as well. Under TBI the increment stays guard-free
++//     and does land on the dummy: its count word is 32 bits, so 2^32
++//     references wrap it through 0 and 1. The decrement expansion therefore
++//     tests a value against the type's immediates on its unique branch
++//     (RcDecrementExpansion) and releases nothing for one, and rc.inc only
++//     assumes `old >= 1` for real boxes.
+ //   * `rc.set` — the one decrementing store — steers a recognized-immediate
+ //     access to a separate scratch word (an address select off the critical
+ //     path), so the dummy count can never decay to 1.
+@@ -1640,13 +1642,13 @@ struct ReussirRcIncConversionPattern
+           rewriter, op.getLoc(), llvmPtrType, convertedBoxType,
+           adaptor.getRcPtr(), llvm::ArrayRef<mlir::LLVM::GEPArg>{0, 0});
+     }
+-    // Usually no guard for tagged immediates: the increment lands on the
+-    // dummy box's refcount — a benign write that only ever grows it (rc.set,
+-    // the sole decrementing store, is steered away). The exception is the
+-    // immortal encoding on refcount words narrower than 64 bits, where the
+-    // dummy could actually be grown past wrap-around within a program's
+-    // lifetime: there the increment's store is steered to the scratch word
+-    // instead (the load stays plain, so nothing on the read path changes).
++    // No guard for tagged immediates under TBI: the increment lands on the
++    // dummy box's refcount (rc.set, the sole decrementing store, is steered
++    // away), so the 32-bit count grows and wraps after 2^32 references; the
++    // decrement expansion's unique branch rejects immediates, so a wrapped
++    // count frees nothing. The immortal encoding steers the increment's
++    // store away from a recognized dummy (the load stays plain, so nothing
++    // on the read path changes).
+     auto countType = rewriter.getI32Type();
+     TagEncoding encoding = specialPtrTagEncoding(op);
+     bool steerNarrowImmortal = encoding == TagEncoding::Immortal &&
+@@ -1686,10 +1688,19 @@ struct ReussirRcIncConversionPattern
+           rewriter, op.getLoc(), mlir::LLVM::AtomicBinOp::add, refcntPtr, delta,
+           mlir::LLVM::AtomicOrdering::monotonic);
+     }
+-    // Valid for immediates too: the dummy box's count starts at 2 and only
+-    // ever grows, so `old >= 1` holds on that path as well.
++    // Under TBI an immediate's increment lands on its dummy box, whose 32-bit
++    // count grows and wraps through 0 after 2^32 references, so `old >= 1`
++    // is only assumed for real boxes there (the decrement expansion rejects
++    // immediates on its unique branch). Otherwise the dummy's count is never
++    // written and `old >= 1` holds for immediates as well.
+     mlir::Value geOne = mlir::LLVM::ICmpOp::create(
+         rewriter, op.getLoc(), mlir::LLVM::ICmpPredicate::uge, oldRefCnt, one);
++    if (encoding == TagEncoding::TBI && rcPtrTy.mayCarrySpecialPointerTag()) {
++      mlir::Value top = topByteOf(adaptor.getRcPtr(), op.getLoc(), rewriter);
++      geOne = mlir::LLVM::OrOp::create(
++          rewriter, op.getLoc(), geOne,
++          isTaggedImmediate(top, op.getLoc(), rewriter));
++    }
+     mlir::LLVM::AssumeOp::create(rewriter, op.getLoc(), geOne);
+ 
+     rewriter.eraseOp(op);
+diff --git a/lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp b/lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp
+index fc194dac..95882417 100644
+--- a/lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp
++++ b/lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp
+@@ -43,6 +43,7 @@
+ #include "Reussir/IR/ReussirEnumAttrs.h"
+ #include "Reussir/IR/ReussirOps.h"
+ #include "Reussir/IR/ReussirTypes.h"
++#include "Reussir/Transformation/SpecialPointerTag.h"
+ 
+ namespace reussir {
+ 
+@@ -55,6 +56,34 @@ namespace reussir {
+ 
+ namespace {
+ 
++// Under the special-pointer-tag scheme a nullary constructor is an immediate
++// pointing at a static per-tag dummy box. Increments of an immediate land on
++// the dummy's 32-bit count (the LLVM lowering keeps rc.inc unguarded), so
++// after 2^32 references the count wraps and a decrement reads 1. Its unique
++// branch must then release nothing and produce no token (the dummy is not
++// heap memory). Returns the nullary tags the value may be the immediate of,
++// to be tested on that branch: none for types without immediates, and none
++// for a destructuring decrement of an arm with members.
++llvm::SmallVector<int64_t> immediateTagsToGuard(ReussirRcDecOp op) {
++  RcType type = op.getRcPtr().getType();
++  auto module = op->getParentOfType<mlir::ModuleOp>();
++  if (!module || !module->hasAttr(kSpecialPtrTagAttr) ||
++      !type.mayCarrySpecialPointerTag())
++    return {};
++  auto variant = llvm::cast<RecordType>(type.getElementType());
++  llvm::SmallVector<int64_t> tags;
++  if (op.isVariantDestructuring()) {
++    size_t tag = op.getDestructureTagAttr().getValue().getZExtValue();
++    if (variant.isNullaryArm(tag))
++      tags.push_back(static_cast<int64_t>(tag));
++    return tags;
++  }
++  for (size_t tag = 0, n = variant.getMembers().size(); tag < n; ++tag)
++    if (variant.isNullaryArm(tag))
++      tags.push_back(static_cast<int64_t>(tag));
++  return tags;
++}
++
+ struct RcDecrementExpansionPattern
+     : public mlir::OpRewritePattern<ReussirRcDecOp> {
+   using mlir::OpRewritePattern<ReussirRcDecOp>::OpRewritePattern;
+@@ -102,6 +131,31 @@ struct RcDecrementExpansionPattern
+     // drop glue as before.
+     {
+       rewriter.setInsertionPointToStart(ifOp.thenBlock());
++      if (llvm::SmallVector<int64_t> tags = immediateTagsToGuard(op);
++          !tags.empty()) {
++        mlir::Value isImmediate;
++        for (int64_t tag : tags) {
++          mlir::Value same = ReussirRcCompareImmortalOp::create(
++              rewriter, op.getLoc(), rewriter.getI1Type(), op.getRcPtr(),
++              rewriter.getIndexAttr(tag));
++          isImmediate = isImmediate ? mlir::arith::OrIOp::create(
++                                          rewriter, op.getLoc(), isImmediate,
++                                          same)
++                                          .getResult()
++                                    : same;
++        }
++        auto guard = mlir::scf::IfOp::create(
++            rewriter, op.getLoc(), op->getResultTypes(),
++            ReussirExpectOp::create(rewriter, op.getLoc(), isImmediate, false)
++                .getLikely(),
++            true, true);
++        mlir::scf::YieldOp::create(rewriter, op.getLoc(), guard->getResults());
++        rewriter.setInsertionPointToStart(guard.thenBlock());
++        auto none = ReussirNullableCreateOp::create(
++            rewriter, op.getLoc(), op.getNullableToken().getType(), nullptr);
++        mlir::scf::YieldOp::create(rewriter, op.getLoc(), none->getResults());
++        rewriter.setInsertionPointToStart(guard.elseBlock());
++      }
+       if (op.isDestructuring()) {
+         llvm::SmallDenseSet<int64_t> bound;
+         for (int64_t index : op.getBoundMembersAttr().asArrayRef())
+diff --git a/tests/integration/conversion/rc_dec_expansion_immediates.mlir b/tests/integration/conversion/rc_dec_expansion_immediates.mlir
+new file mode 100644
+index 00000000..00bdd5ff
+--- /dev/null
++++ b/tests/integration/conversion/rc_dec_expansion_immediates.mlir
+@@ -0,0 +1,43 @@
++// RUN: %reussir-opt %s --reussir-rc-decrement-expansion | %FileCheck %s
++
++// Under the special-pointer-tag scheme a nullary constructor is an immediate
++// pointing at a static dummy box. Under TBI its increments land on the
++// dummy's 32-bit count, which wraps after 2^32 references and can then read
++// 1: the decrement's unique branch tests the value against the type's
++// immediates and releases nothing (no drop, no token) for one.
++
++!list_ = !reussir.record<variant "List" incomplete>
++!list_nil = !reussir.record<compound "List::Nil" [value] { }>
++!list_cons = !reussir.record<compound "List::Cons" [value] { i64, !list_ }>
++!list = !reussir.record<variant "List" { !list_nil, !list_cons }>
++!pair_a = !reussir.record<compound "Pair::A" [value] { i64 }>
++!pair_b = !reussir.record<compound "Pair::B" [value] { i64, i64 }>
++!pair = !reussir.record<variant "Pair" { !pair_a, !pair_b }>
++
++module attributes { reussir.special_ptr_tag = "tbi" } {
++  // CHECK-LABEL: func.func @dec_list
++  // CHECK: %[[CNT:.+]] = reussir.rc.fetch
++  // CHECK: %[[ONE:.+]] = arith.cmpi eq, %[[CNT]]
++  // CHECK: scf.if
++  // CHECK: %[[IMM:.+]] = reussir.rc.compare_immortal(%arg0 : {{.+}}) tag(0)
++  // CHECK: %[[EXP:.+]] = reussir.expect(%[[IMM]] : i1, false)
++  // CHECK: scf.if %[[EXP]]
++  // CHECK-NEXT: %[[NONE:.+]] = reussir.nullable.create : <
++  // CHECK-NEXT: scf.yield %[[NONE]]
++  // CHECK-NEXT: } else {
++  // CHECK: reussir.ref.drop
++  // CHECK: reussir.rc.reinterpret
++  func.func @dec_list(%rc: !reussir.rc<!list>) -> !reussir.nullable<!reussir.token<align: 8, size: 24>> {
++    %token = reussir.rc.dec (%rc : !reussir.rc<!list>) : !reussir.nullable<!reussir.token<align: 8, size: 24>>
++    return %token : !reussir.nullable<!reussir.token<align: 8, size: 24>>
++  }
++
++  // No nullary arm, no immediates: no test.
++  // CHECK-LABEL: func.func @dec_pair
++  // CHECK-NOT: compare_immortal
++  // CHECK: return
++  func.func @dec_pair(%rc: !reussir.rc<!pair>) -> !reussir.nullable<!reussir.token<align: 8, size: 24>> {
++    %token = reussir.rc.dec (%rc : !reussir.rc<!pair>) : !reussir.nullable<!reussir.token<align: 8, size: 24>>
++    return %token : !reussir.nullable<!reussir.token<align: 8, size: 24>>
++  }
++}
+diff --git a/tests/integration/conversion/special_pointer_tag_lowering.mlir b/tests/integration/conversion/special_pointer_tag_lowering.mlir
+index 7371ac77..e6c1ac95 100644
+--- a/tests/integration/conversion/special_pointer_tag_lowering.mlir
++++ b/tests/integration/conversion/special_pointer_tag_lowering.mlir
+@@ -69,4 +69,22 @@ module @test attributes { reussir.special_ptr_tag = "tbi", dlti.dl_spec = #dlti.
+     reussir.rc.set(%rc : !rclist, %v : index)
+     return
+   }
++
++  // The increment stays a plain load/add/store, landing on the dummy for an
++  // immediate. Its count then grows and wraps, so `old >= 1` is only assumed
++  // for real boxes (zero top byte).
++  // CHECK-LABEL: define void @inc(ptr %0)
++  // CHECK: %[[OLD:.+]] = load i32, ptr %[[CNTP:.+]], align 4
++  // CHECK: %[[NEW:.+]] = add i32 %[[OLD]], 1
++  // CHECK: store i32 %[[NEW]], ptr %[[CNTP]]
++  // CHECK: %[[GE:.+]] = icmp uge i32 %[[OLD]], 1
++  // CHECK: %[[INT:.+]] = ptrtoint ptr %0 to i64
++  // CHECK: %[[TOP:.+]] = lshr i64 %[[INT]], 56
++  // CHECK: %[[ISTAG:.+]] = icmp ne i64 %[[TOP]], 0
++  // CHECK: %[[OK:.+]] = or i1 %[[GE]], %[[ISTAG]]
++  // CHECK: call void @llvm.assume(i1 %[[OK]])
++  func.func @inc(%rc: !rclist) {
++    reussir.rc.inc (%rc : !rclist)
++    return
++  }
+ }
+-- 
+2.43.0
+
