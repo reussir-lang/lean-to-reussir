@@ -503,7 +503,13 @@ binder would also run, and fail, when `t = .str`. The rules:
   inductive. It also gets `T` when every call of it binds the result at `T`,
   provided it is used nowhere else, e.g. not as a closure. The callers would
   convert right away anyway; the conversion moves to the callee's `return`,
-  which for a constant happens once instead of at every read.
+  which for a constant happens once instead of at every read. A self call
+  that binds the result at another type than the declaration's own counts
+  as a call here: that is polymorphic recursion into the uniform instance
+  (`FSeq.flatten` at `lcAny` calls itself at `lcAny × lcAny`), which returns
+  a value of a different type at every depth, so the type at which the one
+  typed caller binds the result (`List (Nat × Nat)`) does not hold for all
+  of them (adv2 PrgPoly1, runtime test RtPolyRecResult).
 - **The `map` loops of §2.7.** The loop of `Array.mapMUnsafe` or
   `Array.mapFinIdxMUnsafe` (recognized by name, as Lean's specializations of
   it) returns its array once `Array.uset` has replaced every element. If

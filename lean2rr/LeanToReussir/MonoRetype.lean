@@ -744,11 +744,18 @@ def refineSignature (d : Decl .pure) (types : Types) : MRetypeM (Decl .pure × B
 /-! ## Parameters from call sites -/
 
 /-- What the call sites in the program's live declarations tell (self calls
-not included): the argument types per (callee, parameter), `none` for a
-placeholder argument; the parameters that some partial application leaves
-open (`blocked`: they receive whatever the closure is applied to); the types
-of the binders of saturated calls, per callee; and which callees are
-referenced otherwise. -/
+not included, except as below): the argument types per (callee, parameter),
+`none` for a placeholder argument; the parameters that some partial
+application leaves open (`blocked`: they receive whatever the closure is
+applied to); the types of the binders of saturated calls, per callee; and
+which callees are referenced otherwise.
+
+A saturated self call whose binder has another type than the declaration's
+result is polymorphic recursion, which Mono sends to the uniform instance
+(`FSeq.flatten` at `lcAny` calls itself at `lcAny × lcAny`, Mono.instanceName):
+its binder counts among the results, since the value returned has a
+different type at every depth and no caller's binder type holds for all of
+them (adv2 PrgPoly1). -/
 structure CallSites where
   args : Std.HashMap (Name × Nat) (Array (Option Expr)) := {}
   blocked : Std.HashSet (Name × Nat) := {}
@@ -769,7 +776,10 @@ def callSites (decls : Array (Decl .pure)) (types : Array Types) : MRetypeM Call
       if !st.codeDecls.contains f then continue
       let some sig := st.sigs[f]? | continue
       if args.size != sig.params.size then cs := { cs with escapes := cs.escapes.insert f }
-      if f == d.name then continue
+      if f == d.name then
+        if args.size == sig.params.size && (← norm resTy) != (← norm sig.ret) then
+          cs := { cs with results := cs.results.insert f ((cs.results.getD f #[]).push resTy) }
+        continue
       for j in [:sig.params.size] do
         match args[j]? with
         | some a =>
