@@ -1189,7 +1189,7 @@ fn l_main___l2r_0____closed__0_init() -> LStr {
     x504
 }
 fn l_main___l2r_0____closed__0() -> LStr {
-    if l2r_once_has(28) { l2r_once_get<LStr>(28) } else { l2r_once_set<LStr>(28, l_main___l2r_0____closed__0_init()) }
+    if l2r_once_claim(28) { l2r_once_get<LStr>(28) } else { l2r_once_set<LStr>(28, l_main___l2r_0____closed__0_init()) }
 }
 fn l_main___l2r_0_(a505 : L2RUnit) -> T_EST_Out_348 {
     let x506 : LStr = l_main___l2r_0____closed__0();
@@ -1326,8 +1326,13 @@ overflows its stack on a few thousand. An error in a step exits from inside
 it, so later steps do not run.
 
 The storage is a runtime once-cell per constant (the prelude's
-`l2r_once_has`/`get`/`set` over `leanrt::once`), holding a value that is
-never freed. A value that is not a pointer-sized boundary type is wrapped in
+`l2r_once_claim`/`get`/`set` over `leanrt::once`), holding a value that is
+never freed. `l2r_once_claim` answers whether the value is there; if not,
+the caller computes it, and another context of the scheduler (§5.14) that
+needs it meanwhile (the computation blocked) waits until it is set, as
+natively a thread waits for the one computing a closed term
+(`lean_obj_once_cold` holds a lock); needed again by the context computing
+it, it waits forever, as natively. A value that is not a pointer-sized boundary type is wrapped in
 an `ElemBox` struct. The same slots back the runtime's mutable cells
 (`l2r_cell_swap`). Reussir globals would be a cheaper replacement.
 
@@ -1433,9 +1438,13 @@ running code blocks (*Blocking*, below).
     (1000 times); the task then runs and is reported `finished` (a task
     waiting for an unresolved promise does not run: the other contexts and
     queued tasks run until it finishes or nothing else can, and its state is
-    reported then);
+    reported then); a task running on another context is reported
+    `running`, and a program that keeps asking (by the same rule) lets the
+    other contexts run until it has finished or nothing else can;
   - the running code blocks (a sleep, a lock, a promise, *Blocking* below)
-    and a worker is free for it: it starts on a context of its own;
+    and a worker is free for it: it starts on a context of its own; or the
+    worker picked it a while ago (5 ms) and the running code writes
+    output (below);
   - `main` returning (§5.11): the queued tasks run in the order Lean's task
     manager starts them. It keeps a queue per priority and takes the first
     task of the highest non-empty one. An idle worker is woken by the first
@@ -1587,11 +1596,28 @@ order:
 
 When nothing can ever go on, the program waits forever, as a deadlocked
 native one does. A context does not lose the processor otherwise, except at
-output: when the program writes to a stream or file and a sleeping context's
-time is up (or a timer of the event loop is due), that context runs first,
-since natively it would already have printed. So sleeps and timers order
-the output of tasks by time, as natively, as long as code between two
-outputs takes less time than the sleeps that order them.
+*effect points* (output to a stream or file, `IO.Process.exit`) and
+`IO.sleep 0`: what natively would have run by then on other threads goes
+first: a context whose sleep is over, a due timer of the event loop and
+what its completion releases (its continuations, the contexts waiting for
+it, the tasks it queues, which a free worker starts at once), a context
+able to go on for a while (5 ms: a lock handed over, a promise resolved),
+the task the worker picked a while ago (5 ms; thread wake-ups take
+microseconds, so these would have got past anything that takes no time).
+So sleeps and timers order the output of tasks by time, as natively, as
+long as code between two outputs takes less time than the sleeps that
+order them, and a context that computes for a while lets the others print
+first. A `sleep 0` lets those run whatever their age.
+
+`LEAN_NUM_THREADS` is read as Lean reads it (`atoi`, taken as an
+`unsigned`): 0 (or not a number) is no task manager: tasks run at once, as
+during initialization, and `IO.Promise.new` is Lean's internal panic.
+
+A pending task that waits for one running on another context is natively
+its dependent: it runs, or is queued, when that one finishes. So `Task.get`
+of it waits until that one has finished and looks again (it does not run
+the dependent at once, which would then wait inside its own computation:
+its state, cancellation and `sync` thread would differ).
 
 Each context has what a thread has: its running tasks (`IO.checkCanceled`,
 `IO.getTID`), the walks of dependents it does, its current standard streams
@@ -1613,9 +1639,9 @@ runs only when needed never waits for something that is still to happen.
 
 What a single thread cannot do:
 - a context that waits for another without blocking (a loop polling an
-  `IO.Ref` that another task sets, without `IO.sleep` in it) does not let
-  the others run, and does not terminate; with a sleep in the loop, it
-  does;
+  `IO.Ref` that another task sets, without `IO.sleep` or output in it) does
+  not let the others run, and does not terminate; with a sleep in the
+  loop, it does;
 - contexts do not run in parallel: one that computes without output or
   blocking delays the others (output ordered by time comes in time order
   only as far as the code between outputs is shorter than the sleeps), and
@@ -1824,18 +1850,23 @@ Each item says what differs and when.
 - *Tasks* run on one thread, when they are needed, when the running code
   blocks (a sleep, a lock, a condition variable, a promise, a socket) or
   when `main` returns (§5.14). Contexts never run in parallel and switch
-  only when one blocks or, at output, to one whose sleep or timer is due:
-  a loop polling shared state that another task sets never sees it change
-  unless it sleeps, a context that computes without output or blocking
-  delays the others (so output that sleeps order natively comes in time
-  order only as far as the code between outputs is shorter than the
-  sleeps), and `IO.waitAny` does not pick the fastest task. A deferred
+  only when one blocks or at an effect point (output, an exit,
+  `IO.sleep 0`), to what natively would have run by then (a due sleep or
+  timer, a context able to run or a task the worker picked 5 ms ago or
+  more): a loop polling shared state that another task sets never sees it
+  change unless it sleeps or prints, a context that computes without
+  output or blocking delays the others (so output that sleeps order
+  natively comes in time order only as far as the code between outputs is
+  shorter than the sleeps; a context or task made able to run less than
+  5 ms before an output comes after it, natively a race), and
+  `IO.waitAny` does not pick the fastest task. A deferred
   task is reported `waiting` at the first `IO.hasFinished`. The order of
   the final run is that of Lean's task manager, whose first pick is timed
   against a native worker's measured wake-up latency (about 90 µs, 20 µs
   when idle): tasks created about that far apart can come in either order,
   as natively. A thunk that a blocked context is forcing waits forever
-  when another context forces it (natively it waits for the value). Tasks other than `sync` dependents run as if
+  when another context forces it (natively it waits for the value).
+  Tasks other than `sync` dependents run as if
   each had a fresh worker thread, so a redirection a task leaves behind
   never reaches another task (natively it can, on the same worker);
   `IO.getTID` inside a task is main's thread id plus a worker number (a

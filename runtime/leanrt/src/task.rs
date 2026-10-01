@@ -192,6 +192,8 @@ struct Tasks {
     worker: u32,
     wake: Option<Instant>,
     worker_exists: bool,
+    /// When the worker picked `worker`.
+    picked_at: Option<Instant>,
     /// `IO.getTaskState` answered 4 (poll a promise) for this task: the
     /// `source_next` that follows does not wait for it for good.
     poll: usize,
@@ -201,6 +203,14 @@ struct Tasks {
     /// sources of tasks just deleted (`dropped`).
     deletions: Vec<u32>,
     recheck: Vec<u32>,
+    /// Per entry, a pending task in the tree of its dependents that keeps
+    /// it from being deleted, if one was found (`droppable_in`), with that
+    /// task's `serial`.
+    pins: Vec<(u32, u32)>,
+    /// The running task last asked about (`poll_running`): its entry and
+    /// `serial`, the sleep count + 1 at the first question, the number of
+    /// questions.
+    run_poll: (u32, u32, u32, u32),
 }
 
 /// What belongs to the running context of the scheduler (`sched`), as
@@ -251,10 +261,13 @@ static TASKS: Global<Tasks> = Global(UnsafeCell::new(Tasks {
     worker: NONE,
     wake: None,
     worker_exists: false,
+    picked_at: None,
     poll: 0,
     serial: 0,
     deletions: Vec::new(),
     recheck: Vec::new(),
+    pins: Vec::new(),
+    run_poll: (NONE, 0, 0, 0),
 }));
 
 #[inline]
@@ -309,6 +322,9 @@ fn alloc(cell: usize, tag: u32, flags: u16, prio: u8) -> u32 {
         }
     };
     unsafe { *slot(cell) = i };
+    if let Some(p) = t.pins.get_mut(i as usize) {
+        *p = (NONE, 0);
+    }
     i
 }
 
@@ -338,6 +354,11 @@ pub fn thread_now() -> u32 {
 /// The entry point calls this right before `main`
 /// (`lean_io_mark_end_initialization` + `lean_init_task_manager`).
 pub fn start() {
+    // `LEAN_NUM_THREADS=0` (or not a number): natively no task manager is
+    // created, and tasks run at once, as during initialization here.
+    if crate::sched::workers_limit() == 0 {
+        return;
+    }
     tasks().started = true;
 }
 
@@ -373,7 +394,7 @@ pub fn sleep_ms(ms: u32) {
     // Other contexts and queued tasks run meanwhile, as other threads
     // would (`sched::sleep`).
     if ms == 0 {
-        std::thread::sleep(Duration::ZERO);
+        crate::sched::zero_sleep();
     } else {
         crate::sched::sleep(Duration::from_millis(ms as u64));
     }
@@ -725,17 +746,22 @@ fn droppable_now(x: u32) -> bool {
 /// chain or tree of dropped pure tasks is deleted.
 ///
 /// The search goes only through tasks that could be deleted: one that
-/// cannot (an IO task, a running one, a promise) holds its source for good,
-/// so nothing below it can release `i`. Its own dropped dependents are
-/// deleted when they come up (walked, or queued, once it has finished);
-/// they cannot run before.
+/// cannot (an IO task, a running one) holds its source for good, so
+/// nothing below it can release `i`; nor can anything below a task that
+/// something else refers to (a pure task the program keeps). Such a task
+/// is remembered as the *pin* of the tasks between it and `i` (`pinned`):
+/// while it stays so, the tree need not be searched again (a long chain
+/// of pending tasks is searched once, not once per task that runs). The
+/// dropped dependents of a pinned or undeletable task are deleted when they
+/// come up (walked, or queued, once their source has finished); they
+/// cannot run before.
 fn droppable_in(i: u32) -> Vec<u32> {
     let mut out = Vec::new();
-    if !deletable(i) {
+    if !deletable(i) || pinned(i) {
         return out;
     }
-    // (task, its next dependent to look at)
-    let mut stack: Vec<(u32, u32)> = vec![(i, ent(i).head_dep)];
+    // (task, its next dependent to look at, a pin found below it)
+    let mut stack: Vec<(u32, u32, u32)> = vec![(i, ent(i).head_dep, NONE)];
     // Each task once (a bound, for tasks that wait for each other in a
     // cycle).
     let mut budget = 2 * tasks().slab.len() + 2;
@@ -747,17 +773,68 @@ fn droppable_in(i: u32) -> Vec<u32> {
         let d = top.1;
         if d != NONE {
             top.1 = ent(d).next_dep;
-            if deletable(d) {
-                stack.push((d, ent(d).head_dep));
+            if !deletable(d) {
+                if top.2 == NONE {
+                    top.2 = d;
+                }
+            } else if pinned(d) {
+                if top.2 == NONE {
+                    top.2 = tasks().pins[d as usize].0;
+                }
+            } else {
+                stack.push((d, ent(d).head_dep, NONE));
             }
         } else {
-            let (x, _) = stack.pop().unwrap();
-            if droppable_now(x) {
+            let (x, _, mut pin) = stack.pop().unwrap();
+            let e = ent(x);
+            if pin == NONE && e.head_dep == NONE && count(e.cell) >= 2 {
+                // A leaf something else refers to.
+                pin = x;
+            }
+            if pin != NONE {
+                set_pin(x, pin);
+                if let Some(up) = stack.last_mut() {
+                    if up.2 == NONE {
+                        up.2 = pin;
+                    }
+                }
+            } else if droppable_now(x) {
                 out.push(x);
             }
         }
     }
     out
+}
+
+/// Remember `p` as the pin of pending task `x` (`droppable_in`).
+fn set_pin(x: u32, p: u32) {
+    let t = tasks();
+    if t.pins.len() <= x as usize {
+        t.pins.resize(t.slab.len().max(x as usize + 1), (NONE, 0));
+    }
+    let sr = ent(p).serial;
+    t.pins[x as usize] = (p, sr);
+}
+
+/// Whether pending task `x` has a pin that still keeps it from being
+/// deleted: the same task, pending, and either one that cannot be deleted
+/// or a leaf something else refers to. (A pending task stays in the tree
+/// of the pending tasks it waits for: tasks only leave the tree when they
+/// begin or are deleted, and those with pending dependents do neither.)
+fn pinned(x: u32) -> bool {
+    let t = tasks();
+    let Some(&(p, sr)) = t.pins.get(x as usize) else { return false };
+    if p == NONE {
+        return false;
+    }
+    let e = ent(p);
+    if e.serial != sr || e.cell == 0 || e.flags & (RUNNING | HANDED | PROMISE) != 0 {
+        return false;
+    }
+    if !deletable(p) {
+        return true;
+    }
+    e.head_dep == NONE && count(e.cell) >= 2
 }
 
 /// Whether pending task `i` is to be deleted, or tasks waiting for it are,
@@ -791,6 +868,17 @@ fn dropped(i: u32) -> u32 {
     let first = v.pop().unwrap();
     tasks().deletions = v;
     first
+}
+
+/// Whether a deletion found earlier is due (`dropped` would hand it over
+/// without a search): the sources of deleted tasks and the tasks left by an
+/// earlier search, keeping only those still to be deleted (an entry may be
+/// gone, or hold another task, since).
+fn deletion_due() -> bool {
+    let t = tasks();
+    t.recheck.retain(|&x| droppable_now(x));
+    t.deletions.retain(|&x| droppable_now(x));
+    !t.recheck.is_empty() || !t.deletions.is_empty()
 }
 
 /// Hand pending task `i` to the generated code (with the runtime's
@@ -946,7 +1034,7 @@ pub fn startable(from_worker: bool) -> u32 {
     if cand == NONE {
         return NONE;
     }
-    if cand != w && (!t.deletions.is_empty() || !t.recheck.is_empty() || is_dropped(cand)) {
+    if cand != w && (deletion_due() || is_dropped(cand)) {
         // Deleting it needs no worker.
         return cand;
     }
@@ -1050,9 +1138,14 @@ fn pick() -> u32 {
 
 /// The worker is free: it starts the next queued task, if any.
 fn worker_idle() {
+    worker_idle_at(Instant::now());
+}
+
+fn worker_idle_at(at: Instant) {
     let t = tasks();
     t.wake = None;
     t.worker = if t.started && !t.shutting_down && pool_in_use() < crate::sched::workers_limit() { pick() } else { NONE };
+    t.picked_at = if t.worker != NONE { Some(at) } else { None };
 }
 
 /// The woken worker has picked its task if enough time has passed.
@@ -1062,9 +1155,52 @@ fn settle_worker() {
         let lat = if t.worker_exists { LATENCY_WARM } else { LATENCY_COLD };
         if w.elapsed() >= lat {
             t.worker_exists = true;
-            worker_idle();
+            worker_idle_at(w + lat);
         }
     }
+}
+
+/// Whether the worker is waking up or has picked a task (`sched::effect`).
+#[inline]
+pub fn worker_busy() -> bool {
+    let t = tasks();
+    t.wake.is_some() || t.worker != NONE
+}
+
+/// The queued task the worker picked at least `age` ago, if the scheduler
+/// can start it now (`startable`): natively it has been running since.
+pub fn picked_startable(age: Duration) -> u32 {
+    let t = tasks();
+    if !t.started || t.shutting_down {
+        return NONE;
+    }
+    settle_worker();
+    let w = t.worker;
+    if w == NONE || ent(w).flags & QUEUED == 0 || !t.picked_at.is_some_and(|p| p.elapsed() >= age) {
+        return NONE;
+    }
+    if startable(false) == w { w } else { NONE }
+}
+
+/// The position of the task queues (`released_startable`).
+pub fn queue_mark() -> u32 {
+    tasks().next_q
+}
+
+/// The queued task the scheduler can start now (`startable`), if it was
+/// queued after `mark`: released by what ran at an effect point (a due
+/// timer's completion), a free worker natively starts it at once.
+pub fn released_startable(mark: u32) -> u32 {
+    let t = tasks();
+    if !t.started || t.shutting_down {
+        return NONE;
+    }
+    let c = startable(false);
+    if c == NONE {
+        return NONE;
+    }
+    let e = ent(c);
+    if e.flags & QUEUED != 0 && (e.link.wrapping_sub(mark) as i32) > 0 { c } else { NONE }
 }
 
 /// Before a task runs: if it waits for a pending task, which waits for
@@ -1109,6 +1245,12 @@ pub fn source_next(cell: usize) -> u64 {
             }
         }
         if chain.is_empty() {
+            // It waits for a task running on another context: natively a
+            // dependent, run or queued when that task finishes. Wait for
+            // it, then the caller looks again.
+            if let Some(c) = source_elsewhere(i) {
+                crate::sched::block(crate::sched::Wait::Cell(c));
+            }
             return u64::MAX;
         }
         ctx().chains.push((key, chain));
@@ -1139,9 +1281,36 @@ pub fn source_next(cell: usize) -> u64 {
             }
             continue;
         }
+        if let Some(s) = source_elsewhere(d) {
+            // The deepest pending task waits for one running on another
+            // context: it runs once that one has finished (above).
+            crate::sched::block(crate::sched::Wait::Cell(s));
+            continue;
+        }
         chain.pop();
         return hand(d, false);
     }
+}
+
+/// The task pending task `x` waits for, if it runs on another context of
+/// the scheduler (or was handed to one and has not begun): `x` is to wait
+/// until it has finished. `None` if `x` does not wait, or waits for a task
+/// running on the current context (it needs itself: it then runs, and
+/// waits forever, as natively).
+fn source_elsewhere(x: u32) -> Option<usize> {
+    let e = ent(x);
+    if e.flags & WAITING == 0 {
+        return None;
+    }
+    let s = e.source();
+    if s == NONE {
+        return None;
+    }
+    let se = ent(s);
+    if se.cell == 0 || se.flags & (RUNNING | HANDED) == 0 || ctx().running.contains(&s) {
+        return None;
+    }
+    Some(se.cell)
 }
 
 /// The task handed over by `walk_next`, `source_next` or `next_tag`, with
@@ -1226,6 +1395,14 @@ pub fn query(cell: usize) -> u8 {
     }
     let e = ent(i);
     if e.flags & (RUNNING | HANDED) != 0 {
+        // Running on another context (blocked there): a program polling for
+        // it lets the others go on, as its thread would run meanwhile, once
+        // time has passed or it keeps asking, until the task has finished
+        // or nothing else can go on.
+        if !ctx().running.contains(&i) && poll_running(i) {
+            crate::sched::block(crate::sched::Wait::CellPoll(cell));
+            return status(cell);
+        }
         return 1;
     }
     let idle = if e.flags & PROMISE != 0 { 1 } else { 0 };
@@ -1253,6 +1430,26 @@ pub fn query(cell: usize) -> u8 {
     }
     e.aux[1] += 1;
     idle
+}
+
+/// A question about running task `i` (`query`): whether the program is
+/// polling for it, as `query` decides for a pending task: asked again once
+/// time has passed since the first answer, or 1000 times. The questions are
+/// counted for the last task asked about.
+fn poll_running(i: u32) -> bool {
+    let t = tasks();
+    let sr = ent(i).serial;
+    let (pi, psr, observed, n) = t.run_poll;
+    if pi == i && psr == sr {
+        if t.epoch + 1 > observed || n + 1 >= 1000 {
+            t.run_poll = (NONE, 0, 0, 0);
+            return true;
+        }
+        t.run_poll.3 = n + 1;
+        return false;
+    }
+    t.run_poll = (i, sr, t.epoch + 1, 1);
+    false
 }
 
 /// `IO.Promise.isResolved` (lean2rr's shim, `L2RShim.promiseIsResolved`):

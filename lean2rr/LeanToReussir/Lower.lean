@@ -423,7 +423,9 @@ def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
   let init := match ← persistCall ret (.var "v") with
     | some p => RR.Expr.block ⟨#[("v", some ret, init), ("p", some (.named "u64"), p)], .var "v"⟩
     | none => init
-  let body : RR.Block := .ofExpr (.ite (.call "l2r_once_has" #[] #[k])
+  -- `l2r_once_claim`: a context of the runtime's scheduler that needs the
+  -- value while another computes it waits for it.
+  let body : RR.Block := .ofExpr (.ite (.call "l2r_once_claim" #[] #[k])
     (.ofExpr (unwrap (.call "l2r_once_get" #[st] #[k])))
     (.ofExpr (unwrap (.call "l2r_once_set" #[st] #[k, wrap init]))))
   return .fn name #[] ret body

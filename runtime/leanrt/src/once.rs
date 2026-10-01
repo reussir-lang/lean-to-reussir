@@ -3,7 +3,9 @@
 //! pointer-sized bit pattern (the prelude's generic wrappers transmute; the
 //! caller guarantees that a slot is always used at one type).
 //!
-//! Single-threaded, like the rest of the runtime.
+//! Single-threaded, like the rest of the runtime; a constant being computed
+//! by a context of the scheduler that blocked meanwhile is waited for by the
+//! others (`claim`).
 
 use std::cell::UnsafeCell;
 
@@ -16,6 +18,54 @@ static SLOTS: Slots = Slots(UnsafeCell::new(Vec::new()), UnsafeCell::new(Vec::ne
 pub fn has(slot: u64) -> bool {
     let set = unsafe { &*SLOTS.1.get() };
     set.get(slot as usize).copied().unwrap_or(false)
+}
+
+/// Constants being computed (`claim`): the slot, the context computing it,
+/// the contexts waiting for its value.
+struct Claims(UnsafeCell<Vec<(u64, u32, Vec<u32>)>>);
+unsafe impl Sync for Claims {}
+static CLAIMS: Claims = Claims(UnsafeCell::new(Vec::new()));
+
+/// Whether constant `slot` has its value (the accessor of a constant or
+/// closed term, `l2r_once_claim`). If not, the running context is to
+/// compute it and then set it, unless another context is computing it
+/// (it blocked in the computation, or in waiting for the tasks the value
+/// holds): then this one waits until the value is set, as natively a
+/// thread waits for the one computing it (`lean_obj_once_cold` takes a
+/// lock). Needed again by the context computing it (by a task its
+/// computation needs, which natively runs on another thread), it waits
+/// forever, as natively.
+#[inline(never)]
+pub fn claim(slot: u64) -> bool {
+    loop {
+        if has(slot) {
+            return true;
+        }
+        let cur = crate::sched::cur();
+        let claims = unsafe { &mut *CLAIMS.0.get() };
+        match claims.iter_mut().find(|c| c.0 == slot) {
+            None => {
+                claims.push((slot, cur, Vec::new()));
+                return false;
+            }
+            Some(c) if c.1 == cur => crate::task::hang(),
+            Some(c) => {
+                c.2.push(cur);
+                crate::sched::block(crate::sched::Wait::Sync(slot as usize));
+            }
+        }
+    }
+}
+
+/// The value of constant `slot` was set: whoever waits for it goes on.
+fn release_claim(slot: u64) {
+    let claims = unsafe { &mut *CLAIMS.0.get() };
+    if let Some(k) = claims.iter().position(|c| c.0 == slot) {
+        let (_, _, waiters) = claims.swap_remove(k);
+        for w in waiters {
+            crate::sched::wake(w);
+        }
+    }
 }
 
 /// The value of a set slot (reading an unset slot is a runtime bug:
@@ -146,4 +196,7 @@ pub fn set_raw(slot: u64, raw: usize) {
     assert!(!set[i], "leanrt: once slot {} set twice", slot);
     vals[i] = raw;
     set[i] = true;
+    if unsafe { !(*CLAIMS.0.get()).is_empty() } {
+        release_claim(slot);
+    }
 }

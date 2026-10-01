@@ -81,9 +81,10 @@ enum [value] Int {
 #[ffi(import)]
 fn l2r_exit(code : u32) -> unit [{ leanrt::io::exit(code as i32) }];
 
-// `IO.Process.exit` (the status is a `UInt8`).
+// `IO.Process.exit` (the status is a `UInt8`): what other threads would
+// have done by now goes first (`sched::effect`).
 #[ffi(import)]
-fn l2r_process_exit(code : u8) -> u64 [{ leanrt::io::exit(code as i32) }];
+fn l2r_process_exit(code : u8) -> u64 [{ { leanrt::sched::effect(); leanrt::io::exit(code as i32) } }];
 
 // `IO.Process.forceExit` (`std::_Exit`): no flushing, no exit handlers.
 #[ffi(import)]
@@ -2741,6 +2742,11 @@ fn l2r_ref_ptr_eq<T>(a : LRef<T>, b : LRef<T>) -> bool [{
 
 #[ffi(import)]
 fn l2r_once_has(slot : u64) -> bool [{ leanrt::once::has(slot) }];
+
+// The accessor of a constant: whether it has its value, else the caller
+// computes and sets it (another context computing it is waited for).
+#[ffi(import)]
+fn l2r_once_claim(slot : u64) -> bool [{ leanrt::once::claim(slot) }];
 
 #[ffi(import)]
 fn l2r_once_get<T>(slot : u64) -> T [{

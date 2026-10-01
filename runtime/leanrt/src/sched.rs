@@ -98,6 +98,8 @@ struct Ctx {
     once: crate::once::CtxState,
     /// A worker's first task (`task::next_tag` hands it over).
     preselect: u32,
+    /// When it last became able to run (`effect`).
+    ready: Instant,
 }
 
 impl Ctx {
@@ -112,6 +114,7 @@ impl Ctx {
             tasks: Default::default(),
             once: Default::default(),
             preselect: crate::task::NONE,
+            ready: Instant::now(),
         }
     }
 }
@@ -194,8 +197,10 @@ fn pool_limit() -> u32 {
             n = n.wrapping_mul(10).wrapping_add((s[i] - b'0') as i64);
             i += 1;
         }
+        // `atoi`, taken as an `unsigned` (`lean_init_task_manager_using`):
+        // 0 is no task manager (`task::start`), a negative number wraps.
         let n = if neg { -n } else { n } as i32;
-        return if n <= 0 { 1 } else { n as u32 };
+        return n as u32;
     }
     std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1)
 }
@@ -302,6 +307,7 @@ pub fn yield_now() {
     let s = sched();
     let c = s.cur;
     s.ctxs[c as usize].status = Status::Runnable;
+    s.ctxs[c as usize].ready = Instant::now();
     s.runnable.push_back(c);
     schedule();
 }
@@ -312,6 +318,7 @@ pub fn wake(c: CtxId) {
     let x = &mut s.ctxs[c as usize];
     if x.status == Status::Blocked {
         x.status = Status::Runnable;
+        x.ready = Instant::now();
         x.wait = Wait::None;
         s.blocked -= 1;
         s.runnable.push_back(c);
@@ -413,14 +420,23 @@ pub fn sleeper_due(now: Instant) -> bool {
     s.sleepers.iter().any(|&(d, c)| d <= now && s.ctxs[c as usize].wait == Wait::Sleep(d))
 }
 
-/// An observable effect (output) of the running context: a context whose
-/// sleep has ended meanwhile would natively have run by now, so it goes
-/// first.
+/// How long a context able to run, or a task a worker has picked, waits
+/// before an output of the running context lets it go first: natively it
+/// runs meanwhile on its own thread, and would by then have got past
+/// anything that takes no time (thread wake-ups take microseconds).
+const STALE: Duration = Duration::from_millis(5);
+
+/// An observable effect (output, an exit) of the running context: what
+/// natively would have run by now on other threads goes first: a context
+/// whose sleep has ended, a due timer of the event loop and what its
+/// completion releases (`sync` continuations, contexts waiting for it, the
+/// tasks it queues), a context able to run for a while (a lock handed over,
+/// a promise resolved), a task the worker picked a while ago.
 #[inline]
 pub fn effect() {
     let s = unsafe { &*SCHED.0.get() };
     if let Some(s) = s {
-        if !s.sleepers.is_empty() || s.evloop.is_some() {
+        if !s.sleepers.is_empty() || s.evloop.is_some() || !s.runnable.is_empty() || crate::task::worker_busy() {
             effect_slow();
         }
     }
@@ -443,9 +459,55 @@ fn effect_slow() {
         crate::net::process_due(now);
         due = crate::net::has_fired() || due;
     }
-    if due && !sched().runnable.is_empty() {
+    let s = sched();
+    let stale = s.runnable.iter().any(|&c| now.saturating_duration_since(s.ctxs[c as usize].ready) >= STALE);
+    let picked = crate::task::picked_startable(STALE);
+    if !due && !stale && picked == crate::task::NONE {
+        return;
+    }
+    if picked != crate::task::NONE {
+        start_worker(picked);
+    }
+    // They go first, then what they release in turn (contexts woken, tasks
+    // queued that a free worker starts at once), for a few rounds.
+    let mark = crate::task::queue_mark();
+    for _ in 0..8 {
+        if sched().runnable.is_empty() {
+            break;
+        }
+        yield_now();
+        let w = crate::task::released_startable(mark);
+        if w != crate::task::NONE {
+            start_worker(w);
+        }
+    }
+}
+
+/// `IO.sleep 0`: no time passes, but what natively runs meanwhile does: the
+/// contexts whose sleep has ended, due timers, the contexts able to run, a
+/// task the worker has picked.
+pub fn zero_sleep() {
+    if !crate::task::deferring() {
+        return;
+    }
+    let now = Instant::now();
+    promote_sleepers(now);
+    if crate::net::due(now) {
+        crate::net::process_due(now);
+    }
+    let w = crate::task::picked_startable(Duration::ZERO);
+    if w != crate::task::NONE {
+        start_worker(w);
+    }
+    if !sched().runnable.is_empty() {
         yield_now();
     }
+}
+
+/// Start queued task `e` on a new worker context (able to run).
+fn start_worker(e: u32) {
+    let id = new_ctx(Kind::Worker, worker_entry);
+    sched().ctxs[id as usize].preselect = e;
 }
 
 /// Mark the event loop's context (`net`) able to run: it has events to
@@ -590,9 +652,7 @@ fn schedule() {
         // A queued task on a new worker context.
         let e = crate::task::startable(false);
         if e != crate::task::NONE {
-            let id = new_ctx(Kind::Worker, worker_entry);
-            let s = sched();
-            s.ctxs[id as usize].preselect = e;
+            start_worker(e);
             continue;
         }
         // The event loop's timers and sockets, or the earliest sleeper.

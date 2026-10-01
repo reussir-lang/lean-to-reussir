@@ -229,10 +229,20 @@ context switch (`coro::switch`) saves the callee-saved registers on the
 stack and swaps stack pointers (aarch64 and x86-64 assembly). The program
 exports `l2r_task_run_one_c` (lean2rr's `l2r_task_run_one`), which a new
 context calls to run its first queued task. Output (`io::stream_put`,
-`fs::put_str`, flushes) is an effect point: a context whose sleep is over,
-or a due timer, runs first (`sched::effect`). `l2r_task_wait_running(a)`
-waits for a `busy` task that runs on another context; `l2r_task_wait_progress()`
-for some task to finish (`IO.waitAny`).
+`fs::put_str`, flushes) and `IO.Process.exit` are effect points
+(`sched::effect`): a context whose sleep is over, a due timer and what its
+completion releases, a context able to run for 5 ms, the task the worker
+picked 5 ms ago run first; `IO.sleep 0` lets them run whatever their age
+(`sched::zero_sleep`). `l2r_task_wait_running(a)` waits for a `busy` task
+that runs on another context; `l2r_task_wait_progress()` for some task to
+finish (`IO.waitAny`). Forcing a task that waits for one running on
+another context waits for that one first (`task::source_next`); polling a
+running task blocks once the program keeps asking (`task::query`). Forcing
+chains remember tasks by their entry's serial number (entries and cell
+addresses are reused). A constant's accessor calls `l2r_once_claim(slot)`
+(`once::claim`): a context that needs a constant another is computing
+waits for it. `LEAN_NUM_THREADS=0` (C's `atoi`) is no task manager: tasks
+run at once (`task::start` does not start deferring).
 
 **`Std.Sync`** (`leanrt::sync`): `BaseMutex`, `Condvar`,
 `BaseRecursiveMutex`, `BaseSharedMutex` are `LHandle`s; the externs'
@@ -385,7 +395,7 @@ and is reported at once.
 
 | Lean | primitives |
 |---|---|
-| `initialize`, closed terms | once-cells `l2r_once_has(slot)`, `l2r_once_get<T>(slot)`, `l2r_once_set<T>(slot, v)` |
+| `initialize`, closed terms | once-cells `l2r_once_claim(slot)` (`l2r_once_has` for the mutable cells), `l2r_once_get<T>(slot)`, `l2r_once_set<T>(slot, v)` |
 | `IO.setStdout`/`setStderr`/`setStdin` | a cell per stream: `l2r_once_*` plus `l2r_cell_swap<T>(slot, v) -> T` (returns the previous value) |
 | `timeit`, `allocprof` | `l2r_io_timeit_with<R>(msg, act)`, `l2r_io_allocprof_with<R>(msg, act)` |
 | `Void.mk` | `lean_void_mk<T>(x)` |
