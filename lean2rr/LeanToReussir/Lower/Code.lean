@@ -281,37 +281,14 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
     return
   let outlined := chooseOutlined H.duplicateJp body
-  -- J4 when an outlined join point tail-calls the declaration: a loop
-  -- passes through it. (Other calls need no state machine; going through
-  -- its entry wrapper would only cost an allocation per call.)
-  let callsBack := outlinedBodies body outlined |>.any (hasSelfTailCall d.name d.params.size)
-  let sm? : Option StateMachine ← do
-    if !callsBack || d.params.isEmpty || (← IO.getEnv "L2R_NO_J4").isSome then pure none
-    else
-      let base := fnName d.name
-      pure (some { fn := base ++ "_sm", mode := base ++ "_mode", self := d.name, arity := d.params.size, params := pnames })
+  -- J4 (Opt/StateMachines): the declaration as one state machine.
+  let sm? := H.stateMachines.bind (·.plan d body outlined pnames)
   modify fun s => { s with smArms := #[] }
   let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm? }
   let block ← try lowerCode H ctx outlined ret body
     catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
-  if let some sm := sm? then
-    let arms := (← get).smArms
-    -- A shared enum: Reussir miscompiles `[value]` enums whose arms have
-    -- different layouts (translation plan §9); Reussir reuses the cell of
-    -- the matched value.
-    let mode := RR.Item.enum sm.mode false
-      (#[(sm.entry, #[])] ++ arms.map fun (v, fps, _) => (v, fps.map (·.2)))
-    let mkArm (v : String) (names : Array String) (b : RR.Block) : RR.Arm :=
-      { ty := sm.mode, ctor := some v, binders := names.map some, body := b }
-    let matchArms := #[mkArm sm.entry #[] block] ++ arms.map fun (v, fps, b) => mkArm v (fps.map (·.1)) b
-    let m ← fresh "m"
-    modify fun s => { s with
-      typeItems := s.typeItems.push mode
-      fns := s.fns
-        |>.push (.fn sm.fn ((pnames.zip ptys).push (m, .named sm.mode)) ret (.ofExpr (.mtch (.var m) matchArms)))
-        |>.push (.fn (fnName d.name) (pnames.zip ptys) ret
-            (.ofExpr (.call sm.fn #[] ((pnames.map .var).push (.ctor sm.mode (some sm.entry) #[])))))
-      smArms := #[] }
+  if let (some j, some sm) := (H.stateMachines, sm?) then
+    j.emit d sm (pnames.zip ptys) ret block
     return
   -- A constant is cached in a once-cell, unless a hook has it recomputed
   -- at each use (Opt/CheapConsts) or evaluated where it is used

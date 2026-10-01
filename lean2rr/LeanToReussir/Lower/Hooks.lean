@@ -46,6 +46,16 @@ def bindStructFields (ctx : CodeCtx) (arm : CasesArm) : LowerM (ArmLets × CodeC
     | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
   return (lets, ctx')
 
+/-- J4 (translation plan §5.6): a declaration lowered as one state machine. -/
+structure StateMachineHook where
+  /-- The state machine to lower declaration `d` as (its body, outlined join
+  points and parameter names given), if any. -/
+  plan : (d : Decl .pure) → Code .pure → FVarIdSet → Array String → Option StateMachine
+  /-- Emit the functions of declaration `d` lowered as a state machine, given
+  its parameters, result type and lowered entry code (the outlined join
+  points' variants are in `LowerState.smArms`). -/
+  emit : (d : Decl .pure) → StateMachine → Array (String × RR.Ty) → RR.Ty → RR.Block → LowerM Unit
+
 structure LowerHooks where
   /-- A rewrite of a declaration's body before it is lowered (LCNF to LCNF,
   the same behaviour). Plain: none (Opt/JpSink). -/
@@ -53,6 +63,10 @@ structure LowerHooks where
   /-- Whether a join point that is neither J1 nor J2 is duplicated at its
   jumps (J1′) instead of outlined (J3). Plain: outlined (Opt/JpSmall). -/
   duplicateJp : FunDecl .pure → Bool := fun _ => false
+  /-- Declarations lowered as state machines (J4). Plain: none; loops
+  through outlined join points are then mutually recursive (J3)
+  (Opt/StateMachines). -/
+  stateMachines : Option StateMachineHook := none
   /-- Whether a constant (a declaration without parameters) with body
   `body` is recomputed at every use instead of computed once and kept in a
   once-cell (`cafAccessor`). Plain: kept (Opt/CheapConsts). -/

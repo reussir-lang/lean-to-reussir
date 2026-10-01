@@ -33,7 +33,8 @@ function over a `[value]` enum of entry points (J4, translation plan §5.6):
 the declaration's own entry and one variant per outlined join point. Jumps to
 those join points and self tail calls become self tail calls of that
 function, which LLVM turns into a loop; separate functions would make the
-loop mutually recursive. -/
+loop mutually recursive. Planned and emitted by Opt/StateMachines (a
+lowering hook); `lowerCode` re-enters it when the context has one. -/
 structure StateMachine where
   /-- The dispatching function: the declaration's parameters, then the
   entry point. -/
@@ -50,7 +51,7 @@ structure StateMachine where
   entry : String := "e"
 
 /-- A matched value that stays live in its arm, whose fields are bound where
-they are used (see `lowerCases`). `fields` are the arm's field parameters
+they are used (Opt/LazyFields). `fields` are the arm's field parameters
 that the arm uses, with their binder index and type; `pending` those not
 bound yet. -/
 structure LazyMatch where
@@ -71,7 +72,8 @@ structure CodeCtx where
   /-- Types of join-point parameters, for lowering jump arguments. -/
   jpParams : Std.HashMap FVarId (Array RR.Ty) := {}
   sm : Option StateMachine := none
-  /-- Matched values whose fields are bound lazily (outermost first). -/
+  /-- Matched values whose fields are bound lazily (outermost first; set by
+  Opt/LazyFields). -/
   lazy : Array LazyMatch := #[]
   /-- Bodies of the join points in scope. -/
   jpBodies : Std.HashMap FVarId (Code .pure) := {}

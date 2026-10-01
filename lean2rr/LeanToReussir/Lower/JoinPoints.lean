@@ -38,31 +38,6 @@ partial def jumpsIn : Code .pure → FVarIdSet → FVarIdSet
   | .cases c, s => c.alts.foldl (fun s alt => jumpsIn alt.getCode s) s
   | _, s => s
 
-/-- Does `c` contain a tail call `let x := f args; return x` of `f` with
-`arity` arguments (outside nested join-point bodies, which are checked on
-their own when outlined)? -/
-partial def hasSelfTailCall (f : Name) (arity : Nat) : Code .pure → Bool
-  | .let d k =>
-    match d.value, k with
-    | .const g _ args _, .return x => (g == f && args.size == arity && x == d.fvarId) || hasSelfTailCall f arity k
-    | _, _ => hasSelfTailCall f arity k
-  | .fun _ k _ => hasSelfTailCall f arity k
-  | .jp d k => hasSelfTailCall f arity d.value || hasSelfTailCall f arity k
-  | .cases c => c.alts.any (hasSelfTailCall f arity ·.getCode)
-  | _ => false
-
-/-- The bodies of the outlined join points of `c`. -/
-partial def outlinedBodies (c : Code .pure) (outlined : FVarIdSet) : Array (Code .pure) :=
-  go c #[]
-where
-  go (c : Code .pure) (acc : Array (Code .pure)) : Array (Code .pure) :=
-    match c with
-    | .let _ k => go k acc
-    | .fun d k _ => go k (go d.value acc)
-    | .jp d k => go k (go d.value (if outlined.contains d.fvarId then acc.push d.value else acc))
-    | .cases cs => cs.alts.foldl (fun acc alt => go alt.getCode acc) acc
-    | _ => acc
-
 /-- Choose a strategy for every join point of a declaration body: the set
 of outlined (J3) join points; others are J1 (single jump), J2, or
 duplicated at their jumps (J1′, those `duplicate` selects: the lowering hook
