@@ -52,6 +52,8 @@ def stage2 : Stage2Config := #[
     "the other pass that converts types: its result types must agree with toMonoK's",
   .skip `inferVisibility
     "module-visibility bookkeeping; it transforms no code",
+  .skip `extractClosed
+    "run last, over all declarations, as Lean ran it (Pipeline.extractLikeLean, ExtractClosedK): module by module in Lean's order, following what the .olean records of each declaration's closed terms",
   .skip `toImpure
     "boxing, reference counting and reset/reuse belong to Reussir (Stage 2 ends at mono, plus extractClosed)"]
 
