@@ -64,9 +64,11 @@ then `lowerProgram` (Stage 3, the optional passes, Stage 4, assembly), with
 an `--emit` checkpoint after each stage. The modules of
 `lean2rr/LeanToReussir/`:
 - Stage 1: `Collect`, `Mono`, `Specialize`, `Relevance`, `Retype`;
-- Stage 2: `Pipeline` (the driver), `TypedToMono` and
-  `TypedStructProjCases` (lean2rr's copies of two Lean passes),
-  `MonoTypesKeep`;
+- Stage 2: `Pipeline` (the driver), `TypedToMono`,
+  `TypedStructProjCases` and `ExtractClosedK` (lean2rr's copies of three
+  Lean passes), `MonoTypesKeep`, `CompileRecord` (what the `.olean`
+  records of Lean's compilation: its order and its closed terms, also read
+  by `Emit/Startup`);
 - Stage 3: `MonoRetype`;
 - Stage 4: `LowerBase` (state, type translation), then `Lower/*.lean`, each
   importing the previous one: `Ctx` (the code-lowering context),
@@ -373,7 +375,32 @@ exactly the ones Lean's runtime and `lean.h` externs assume.
 - `elimDeadBranches`: remove impossible branches;
 - `cse`: common subexpressions;
 - `extractClosed`: closed subterms become lazily evaluated constants
-  `f._closed_N`.
+  `f._closed_N`. lean2rr runs it last, over all declarations, as Lean ran
+  it (`extractLikeLean`, Pipeline.lean). Lean extracts a module's closed
+  terms in compilation order with a cache of the terms the module made so
+  far: a declaration with a term equal to an earlier one's reads the
+  earlier one's, so the earlier one decides how the shared terms evaluate
+  (Lean evaluates a constructor's closed fields in reverse order), and the
+  later one, making no term of its own, keeps the values the extraction
+  left dead (a call there still runs). `set_option compiler.extract_closed
+  false` turns extraction off for a declaration or a module. The record
+  says what Lean did: each module's IR-only declarations list the closed
+  terms `d._closed_N` each declaration made, in the order Lean made them,
+  and the IR bodies (in the `.olean`, or in the `.ir` file of a `module`
+  file) say which closed terms each declaration reads. So lean2rr extracts
+  the declarations that made closed terms first, in Lean's order, with
+  one cache per module, then those whose IR reads closed terms, and leaves
+  the others as they are (Lean extracted nothing from them: nothing was
+  closed, or extraction was off), instances of polymorphic declarations
+  included (Lean computes at each call what an instance's known types or
+  dictionaries make closed). Only a declaration Lean compiled to no IR
+  (lean2rr translates the reference definition of an `@[extern]` or
+  `@[implemented_by]` declaration) is extracted as usual. lean2rr's copy of
+  the pass (`ExtractClosedK`) checks a callee's attributes and kernel type
+  on the declaration of Lean's compilation the instance was made from, so
+  `@[never_extract]` functions are not extracted and, as natively, a call
+  of a function whose type is not syntactically a function type
+  (`def F := Nat → Nat`) is not extracted on its own.
 
 **Output shape.** Top-level declarations only; there are no local functions
 left. Closures are partial applications of top-level declarations. Join
@@ -1868,12 +1895,10 @@ Each item says what differs and when.
   recursive macro that expands the rest before its own definition (here
   in the order of the macro scopes). The `.olean` does not record these
   orders. Visible only when such constants trace or panic.
-- *Compiler options of the program's modules* (`set_option
-  compiler.extract_closed false`, `compiler.small`, `maxRecInline`, …) are
-  not recorded in the `.olean`, so lean2rr runs Lean's passes with the
-  defaults: a declaration compiled without closed-term extraction natively
-  can have its closed terms extracted (and evaluated once) under lean2rr.
-  The recursion limit (`maxRecDepth`, which large literals need raised)
+- *Compiler options of the program's modules* (`compiler.small`,
+  `maxRecInline`, …) are not recorded in the `.olean`, so lean2rr runs
+  Lean's passes with the defaults (`compiler.extract_closed` shows in the
+  record of closed terms and is followed, §3). The recursion limit (`maxRecDepth`, which large literals need raised)
   is effectively unlimited in lean2rr, bounded by its stack (4 GiB, set by
   `scripts/l2r.py` through `LEAN_STACK_SIZE_KB`): a 60000-element list
   literal needs more than 64 MiB. Only lean2rr's main thread, which runs

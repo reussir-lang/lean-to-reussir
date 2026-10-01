@@ -85,7 +85,7 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let header := s!"-- root instances: {rootInsts}; instances: {st.decls.size}, extern instances: {st.externs.size}, lcAny type arguments: {st.uniformArgs}\n"
   if stage == "inst" then return dumpDecls header (st.externs ++ st.decls)
   -- Stage 2: Lean's own mono pipeline, with the registry's edits.
-  let decls ← runStage2 cfg.stage2 st.decls st.externs opts.check
+  let decls ← runStage2 cfg.stage2 st.decls st.externs st.keys opts.check
   if stage == "externs" then return ← externReport decls st.keys
   if stage == "mono" then return dumpDecls header decls
   if stage == "retyped" then
