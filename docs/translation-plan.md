@@ -71,7 +71,8 @@ an `--emit` checkpoint after each stage. The modules of
 - Stage 4: `LowerBase` (state, type translation), then `Lower/*.lean`, each
   importing the previous one: `Ctx` (the code-lowering context),
   `FnValues`, `LazyForce`, `Conv`, `Decls`, `Externs`, `LazyGlue`,
-  `Process`, `Promises`, `Identity`, `ExternCall`, `Values`, `JoinPoints`,
+  `Process`, `Promises`, `Identity`, `ExternCall`, `Borrow` (release times
+  of borrowed resources, §5.8), `Values`, `JoinPoints`,
   `StateMachine` (J4), `Hooks`, `Code` (`lowerCode`, `lowerDecl`),
   `Finish`;
 - assembly: `Emit/Startup` (initializer order, the startup chain),
@@ -632,15 +633,28 @@ its value is stored as `Box`.
   nominal, array or word type (`Nat`, `Int`, `UInt8/16/32`, `Bool`,
   `UInt64`, floats) is therefore a generated function that matches all
   such variants and converts structurally, element by element for arrays.
-  It also accepts the variants of types that an `unsafeCast` can read this
-  way (below): another inductive with the same layout (the value as it
-  is), words as words, `UInt64`/`Float` by their bits; an existential
-  payload, an `IO.Ref`'s contents or a value in polymorphically recursive
-  code cast to such a type converts like a typed value. Other casts convert
-  only in typed code, where they are written: through a `Box`, every
-  unboxing function would have to match and convert every type its
-  constructors can read (every structure with one function field, the
-  dictionaries of uniform code, reads every other one).
+  It also accepts the variants of types that an `unsafeCast` can read
+  (below), so that an existential payload, an `IO.Ref`'s contents or a
+  value in polymorphically recursive code cast to another type converts
+  like a typed value: another inductive with the same native layout
+  (the value as it is when lean2rr's layouts agree too, otherwise
+  converted constructor by constructor through the target's layout), a
+  `[value]` struct as its field, `UInt64`/`Float` by their bits, and words:
+  a word type (`Nat`, `Int`, `UInt8/16/32`, `Bool`, an enumeration, an
+  inductive with a constructor without fields) reads any word, any
+  constructor (natively the boxed scalar of its index, or an object whose
+  address is read: see the words below) and, if it is only ever a boxed
+  scalar, any other heap object. Two kinds of casts are left out. One
+  whose conversion would need a function value at another representation
+  (a wrapper, §5.3): every unboxing function would then match every other
+  type with function fields at the same slots (the dictionaries of uniform
+  code), each wrapper adding arms to the application functions of its
+  type (programs built from monad transformer towers grew by a fifth).
+  And one between inductives that do not correspond constructor for
+  constructor (another number of constructors), which typed code converts:
+  every unboxing function would convert from every inductive sharing a
+  constructor shape with its own (3 to 5 % more code). Such a cast panics
+  (§10).
   A boxed unit unwraps to the zero of `T`: a unit used at another type is
   Lean's `box(0)` placeholder (§2.7). Any other variant is unreachable.
 - Conversions are inserted wherever a value's Reussir type differs from
@@ -680,11 +694,35 @@ its value is stored as `Box`.
 - When a structure built at a uniform type (for example a `List Box` coming
   out of polymorphically recursive code) meets code expecting the precise
   type (`List Nat`), the conversion is structural, element by element.
-  Programs observe values, not object identity, so this is transparent.
   An array whose elements cannot be converted (`Array Nat` to `Array Int`)
   must be empty when that happens: an empty array that `cse` shared between
   two element types, or the result of mapping nothing. Its element step is
   therefore `unreachable`.
+  - *Loops, not recursion.* A conversion whose recursion goes through one
+    field of each constructor (a list's tail, a snoc list's init) is a
+    directly recursive function that Reussir compiles as a loop (tail
+    recursion modulo constructors). Any other recursion (several recursive
+    fields, as in a tree; through other types, as a rose tree's `List` of
+    trees or mutual inductives; through array elements) is an explicit
+    stack: the generated function is a loop over a stack of pending
+    constructors, each holding the source value and the fields converted
+    so far (`convMachine`). Converting a deep value uses heap, not stack,
+    as native Lean, which converts nothing, uses none.
+  - *Identity.* Natively there is one object, so a conversion keeps the
+    identity: the converted value records the value it was converted from
+    (its first origin, for a value converted from a converted one), which
+    the record keeps alive, and that value's address (the runtime's
+    `origin` table; `l2r_origin_note`). `ptrAddrUnsafe` of a converted value
+    is its origin's address, and converting it back to its origin's
+    representation gives the origin itself (`l2r_origin_back`): an
+    `Array Nat` stored in two existential packages at `Array α` is `ptrEq`
+    to itself, and a fixpoint step that goes from uniform code through a
+    typed function and back returns its argument. The record also holds the
+    converted value, so it stays unchanged (an update copies it) and its
+    address is not reused; a record whose converted value only it still
+    holds is dropped, two records being checked at each new one. Only the
+    outermost value of a conversion is recorded (its parts are new
+    objects).
 - Through `unsafeCast` (mono erases it), a value can meet code expecting
   another type that Lean represents alike. The conversions follow Lean's
   representation:
@@ -696,7 +734,19 @@ its value is stored as `Box`.
     `getCtorLayout`), so fields correspond by slot, not by declaration
     position: `S₁ {a : UInt8, b : Nat}` read as `S₂ {x : Nat, y : UInt8}`
     is `x = b`, `y = a`. Same-size scalars in the scalar area are
-    reinterpreted: a `UInt64` field read as `Float` is its bits.
+    reinterpreted: a `UInt64` field read as `Float` is its bits. The
+    conversion goes constructor by constructor, as Lean's `cases` reads the
+    value: by tag (past the target's last constructor, the last one, as
+    Lean's `switch`), a constructor without fields of the target is
+    selected whatever the source constructor at that tag holds; a source
+    constructor without fields, or one with fewer fields, read as a target
+    constructor with fields has no value (unreachable). Types that
+    correspond constructor for constructor (`isomorphic`) convert wherever
+    their representations meet; others whose constructors with fields read
+    some of the source's (`Sum3 | a | b (x : Nat) | c (y : String)` read
+    as `Option`) only where the program casts (`coerce`), so that
+    asking whether two function types convert (§5.3) does not pair every
+    inductive with every other.
   - *Words*: `Nat`, `Int`, `UInt8/16/32`, `Char`, `Bool`, enumerations and
     constructors without fields are boxed scalars natively, and convert as
     Lean's `lean_unbox` reads them: truncated to the target's width
@@ -706,8 +756,19 @@ its value is stored as `Box`.
     `Nat`, `-5` is `2^32 - 5`), a word read as an `Int` is signed 32 bits.
     `Nat` and `Int` convert by value (natively the same object when big). An
     index selects the nullary constructor at that position (`0` is `[]` or
-    `none`), and back; a constructor with fields read as a word is natively
-    an address: unreachable.
+    `none`), and back. An object read as a word is natively its address
+    shifted, different on every run: lean2rr gives a deterministic word
+    with the properties every address has (nonzero, a multiple of 4, far
+    above any index): `2^44 + 8i` for a constructor with fields of index
+    `i` (constructors stay distinct), `2^44` for a string, an array, a
+    closure, a thunk or a float cell; a big `Nat` or `Int` reads as the low
+    bits of its value. A `USize` (here `u64`, shared with `UInt64`) reads a
+    word as it is. These casts happen only where the program performs a
+    cast (`castFallback`), never when lean2rr merely asks whether two
+    representations convert (function values: every function type over a
+    `String` would otherwise convert to the same one over a `Nat`). A word
+    read as an object with fields is natively a number used as an address
+    (a crash): unreachable.
   - A `[value]` struct is natively its field.
   When the two Reussir types have the same layout (the same constructors
   with fields of the same layouts, position by position, coinductively;
@@ -1169,14 +1230,32 @@ Rules:
   `lean_dbg_sleep<ElemBox>` with a closure returning a `Nat`. This covers
   `dbgTrace`, `dbgTraceIfShared`, `dbgSleep`, `dbgStackTrace`, `panic`
   and `sorry`; lean2rr finds these functions by reading the prelude.
-- **Borrowing.** Lean's borrow annotations (`@&`) are dropped. Reussir's
-  owned convention plus its Perceus analysis gives the same results, except
-  for when a value is freed: natively a parameter that Lean's IR infers as
-  borrowed is released by the caller after the call returns, while here the
-  callee releases it at its last use, possibly earlier. Only resources can
-  tell: a file handle is closed (and so flushed) earlier, a child sees end
-  of file on a pipe earlier (§10). The process glue keeps a `Child` alive
-  across `wait`, `tryWait` and `kill`, which borrow it by annotation.
+- **Borrowing.** Reussir passes every argument owned and releases a value
+  at its last use. Natively a parameter that Lean borrows (its
+  `inferBorrow`, and `@&` annotations) is released by the caller after the
+  call returns. Only resources can tell: natively a file handle written by
+  a helper that borrows it is still open (its data still buffered) when the
+  helper reads the file again; a child whose stdin pipe a helper borrows
+  does not see end of file while the helper waits for it. So for a program
+  that creates resources (it calls `IO.FS.Handle.mk`, `createTempFile` or
+  `IO.Process.spawn`), lean2rr runs Lean's own borrow inference on its mono
+  declarations (Lower/Borrow: copies go through `toImpure` and the impure
+  passes up to `inferBorrow`, as Lean compiles its own declarations; extern
+  instances get their extern's `@&`) and emulates Lean's reference counting
+  where a value may hold a resource (a handle, which mono types `lcAny`, so
+  any `Box`; a record, array or reference with such a field):
+  - a direct call keeps an argument passed to a borrowed parameter until
+    the call returns (`l2r_release_after`, an effectful FFI call after the
+    call, as Lean's `dec`), when the caller owns it; an argument the caller
+    itself borrows (a borrowed parameter, a field or array element of one,
+    a join point parameter to which every jump passes such a value) is left
+    alone, as natively, so a loop's tail calls stay tail calls;
+  - a function value of such a declaration calls a `_boxed` variant that
+    releases its borrowed arguments after the call, as Lean's `_boxed`
+    functions do for closures.
+  Other values keep Reussir's release times: the same results without the
+  extra reference counting. The process glue keeps a `Child` alive across
+  `wait`, `tryWait` and `kill`, which borrow it by annotation.
 
 ### 5.9 Panics and unreachable code
 
@@ -1815,13 +1894,15 @@ Answered (Lean):
     cell, which is the cell native boxing made), a function value wrapped for
     another representation (`w`) the wrapped value's, a thunk or task
     converted to another representation (`conv`, `convdone`, §5.14) the
-    original's address, which it records.
+    original's address, which it records; a record, list or array that a
+    structural conversion built (§5.1) the address of the value it was
+    converted from, which the runtime's `origin` table records
+    (`l2r_ptr_addr_rec` and `l2r_ptr_addr_obj` look it up).
   So `ptrEq x x` holds for every representation, a payload returned by its
   own function is `ptrEq` to itself, and fixpoint loops stop where native
   ones do. Values without a native object (a `Nat` from 2^63 to 2^64, an
   `Int` outside `int32` but inside `i64`: natively big number objects) answer
-  a number computed from the value, so equal ones are `ptrEq`; an array
-  converted to another element representation (§5.1) is a new array (§10).
+  a number computed from the value, so equal ones are `ptrEq`.
   `ST.Ref.ptrEq` is real identity: the addresses of the references'
   records (`l2r_ptr_addr_rec`), whatever representation each side is seen
   at.
@@ -1912,49 +1993,64 @@ Each item says what differs and when.
   the parts is not always a sibling call and would use stack on every
   iteration, so a loop with such a body still builds slowly. A 2000-line
   `main` builds in about three minutes and 2 GB.
-- *Casts that natively read an address* (§5.1): `unsafeCast` of a big
-  `Nat` or `Int` to a fixed-width scalar or an enumeration natively reads
-  the bits of its object's address; lean2rr uses the low bits of its value.
-  A constructor with fields read as a word, or a word read as a constructor
-  with fields, is natively an address read as a number or a number used as
-  an address; it panics here. A `Nat` from 2^31 to 2^63 cast to `Int` is
-  natively not a valid small `Int` (results then depend on the operation);
-  lean2rr keeps its value. A `Box` holding a constructor without fields,
-  read as a word (or the reverse), or a value of an inductive whose
-  lean2rr layout differs from the one it is read as, panics (§5.1).
-- *Pointer identity* (§9): a structural conversion (§5.1) builds new
-  objects, so a value converted to another representation is not `ptrEq`
-  to the original; in particular an array converted to another element
-  representation (an `Array Nat` stored in a field of uniform type `Array α`)
-  is a new array each time. A `Nat` from 2^63 to 2^64 and an `Int` outside
-  `int32` (natively a new big number object per computation) answer a
-  number computed from their value, so equal values are `ptrEq` (natively
-  only the same object is); likewise a rebuilt `[value]` struct over the
-  same field. A thunk or task converted to another representation keeps its
-  original alive (§5.14), so that its identity stays unique.
-- *Release time of borrowed parameters* (§5.8): a resource passed to a
-  function that Lean infers to borrow it is released by Lean's caller
-  after the call; here it is released at its last use inside the callee.
-  A handle written and then dropped by a helper that goes on to read the
-  same file, or a pipe to a child that the helper then waits for, is
-  closed earlier than natively (the file is already flushed; the child
-  sees end of file, where natively it may wait forever).
+- *Casts that natively read an address* (§5.1): an object read as a word
+  (`unsafeCast` of a constructor with fields, a string, an array, a closure
+  to `Nat`, `UInt8`, an enumeration, ...) natively gives its address
+  shifted, different on every run; lean2rr gives a deterministic word
+  with the properties every address has (nonzero, a multiple of 4, far
+  above any constructor index: `2^44 + 8i` for constructor `i`, `2^44`
+  otherwise), and a big `Nat` or `Int` the low bits of its value, so only
+  results that depend on the address itself differ. A `Nat` from 2^31 to
+  2^63 cast to `Int` is natively not a valid small `Int` (results then
+  depend on the operation); lean2rr keeps its value. Casts with no native
+  value panic (`INTERNAL PANIC: unreachable code has been reached`, exit
+  1), where native Lean crashes or reads garbage: a word read as a
+  constructor with fields or as a string (a number used as an address), a
+  constructor read as another inductive's constructor that has fields its
+  source does not have, a `UInt64` cell read as `Nat`; and, through a
+  `Box` only, a cast whose conversion would need a function value at
+  another representation, or between inductives whose constructors do not
+  all correspond (another number of constructors), which typed code
+  converts (§5.1).
+- *Pointer identity* (§9): a value converted to another representation
+  answers its original's identity (a thunk or task through its recorded
+  original, §5.14; a record, list or array through the runtime's origin
+  table, §5.1), but the parts of a structurally converted value are new
+  objects: the tail of a converted list is not `ptrEq` to the original's
+  tail. A `Nat` from 2^63 to 2^64 and an `Int` outside `int32` (natively a
+  new big number object per computation) answer a number computed from
+  their value, so equal values are `ptrEq` (natively only the same object
+  is); likewise a rebuilt `[value]` struct over the same field.
+- *Release time of borrowed parameters* (§5.8): emulated for values that
+  may hold a resource, with Lean's inference run on lean2rr's monomorphic
+  instances: where Lean infers a polymorphic declaration or one of its own
+  specializations differently from lean2rr's instance of it, the release
+  time follows the instance. A resource captured in a closure or a thunk
+  is not looked into (released at its last use). In a program that
+  creates resources, a value of uniform type (`Box`) passed owned to a
+  borrowed parameter is kept until the call returns: one more increment
+  and release per such call.
 - *Order of panics in pure code*: when several pure computations panic
   (`get!` on a short array, an `assert!`), their messages can come out in
   another order than natively, because Lean's closed-term extraction may
   group them differently in lean2rr's instances. stdout and results are the
   same.
-- *Stack depth* in general: frame sizes differ from native, and lean2rr
-  adds recursion of its own (structural conversions, the `Array.mk` and
-  `String.mk` list folds). Dropping a long list or other deep value
-  recurses in Reussir's drop glue, 16 to 32 bytes of stack per node (a
-  list of pending task cells at the top), where Lean frees iteratively: at
-  an 8 MB stack (`LEAN_STACK_SIZE_KB=8192`) a list of a few 10⁵ elements
-  dropped at once overflows. The depth at which `Stack overflow detected.
-  Aborting.` (exit 134) happens is not native's, in either direction (the
-  report itself is, in every thread: §5.11). Tasks run on `main`'s thread
-  (Lean's 1 GiB, or `LEAN_STACK_SIZE_KB`), where native task workers have
-  the same size of stack each.
+- *Stack depth* in general: frame sizes differ from native. lean2rr adds
+  no recursion of its own: structural conversions are loops (§5.1) and the
+  `Array.mk`, `String.mk` and `String.ofList` list folds are tail-recursive
+  loops, so converting or folding a list of 10⁷ elements works at an 8 MB
+  stack (`LEAN_STACK_SIZE_KB=8192`) as natively. Dropping a deep value
+  recurses in Reussir's drop glue where Lean frees iteratively: with the
+  local patch 0013 a chain through each cell's last shared member (a list,
+  a snoc list, a left or right spine) is released in a loop, but a value
+  deep along another member recurses, 16 to 32 bytes of stack per node: a
+  tree of arrays of children deep through the arrays, or a rose tree held
+  at a uniform type (`List Box` of trees) deep through the list's heads,
+  overflows at an 8 MB stack when dropped (10⁶ levels). The depth at which
+  `Stack overflow detected. Aborting.` (exit 134) happens is not native's,
+  in either direction (the report itself is, in every thread: §5.11).
+  Tasks run on `main`'s thread (Lean's 1 GiB, or `LEAN_STACK_SIZE_KB`),
+  where native task workers have the same size of stack each.
 - *Stream redirection* (`IO.setStdout`, `setStderr`, `setStdin`,
   `IO.FS.withIsolatedStreams`) is translated: the current streams live in
   cell slots, and panics, `dbgTrace` and `timeit` write through the current
@@ -1970,7 +2066,12 @@ Each item says what differs and when.
   traversal (adv4 RP4-09).
 - *Structural conversions* (§5.1) rebuild a value as a tree: sharing is lost,
   so a DAG costs exponential time and memory, and a conversion on every call
-  costs O(size) per call. Past the instance caps of §2.6 this can happen
+  costs O(size) per call. Each conversion also records its origin (a table
+  entry holding both values until the converted one is dropped), so the
+  converted value is shared and its first update copies it (an array) or
+  allocates a new cell instead of reusing it (a record); a conversion
+  through an explicit stack (a tree, a rose tree) allocates a stack frame
+  per node. Past the instance caps of §2.6 this can happen
   inside loops. Running out of memory changes the exit status. Values of
   types with the same layout are not converted (`l2r_retype`); a cast
   between layouts that differ (an `Array T₁` field read at `Array T₃` whose

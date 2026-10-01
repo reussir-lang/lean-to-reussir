@@ -35,29 +35,8 @@ partial def reprCompatible (a b : RR.Ty) : LowerM Bool := do
     | _, _ => return false
 
 /-- Whether a `Box` holding a value of type `vt` may be read at type `t`
-(itself, or through `unsafeCast` a type that Lean represents alike), so that
-the unboxing function to `t` converts it: words (`Nat`, `Int`,
-`UInt8/16/32`, `Bool`, enumerations) as words (`wordOf`/`ofWord`), values
-of another inductive with the same layout (`isomorphic` and `retypableAux`:
-the value as it is), `UInt64` and `Float` (`UInt32` and `Float32`) by their
-bits. Other casts convert in typed code, where they are written, but not
-through a `Box`: every unboxing function would match (and convert from)
-every type its constructors can read, e.g. every structure with one
-function field (the dictionaries of uniform code), building wrappers between
-unrelated function types. -/
-def boxCastCompatible (vt t : RR.Ty) : LowerM Bool := do
-  let .named a := vt | return false
-  let .named b := t | return false
-  if a == b then return true
-  let word (n : String) : LowerM Bool := do
-    if n ∈ ["Nat", "Int", "u8", "u16", "u32", "bool"] then return true
-    return ((← get).typeInfos[n]?.map (·.shape == .enumLike)).getD false
-  if (← word a) && (← word b) then return true
-  if [("u64", "f64"), ("f64", "u64"), ("u32", "f32"), ("f32", "u32")].contains (a, b) then return true
-  let infos := (← get).typeInfos
-  if infos.contains a && infos.contains b then
-    return (← isomorphic a b) && (← retypableAux vt t #[]).isSome
-  return false
+through `unsafeCast` (`boxCastable`, Lower/Conv). -/
+def boxCastCompatible (vt t : RR.Ty) : LowerM Bool := boxCastable vt t
 
 /-- Generate the bodies of all `Box → nominal` and `Box → array` converters.
 A converter matches every `Box` variant that can hold a value of the
@@ -102,8 +81,8 @@ partial def finishUnboxFns : LowerM Unit := do
             | some (_, k1, a), some (_, k2, b) => pure (k1 == k2 && (← reprCompatible a b))
             | _, _ => pure false
           | none, _ => pure (tArr && (← arrayRepr? vt).isSome && (← reprCompatible vt t))
-        let accept := accept || (vt != .unit && (← boxCastCompatible vt t))
-        if !accept then continue
+        let cast := !accept && vt != .unit && (← boxCastCompatible vt t)
+        if !accept && !cast then continue
         let x ← fresh "bx"
         -- Arrays of another representation go through `RVec<Box>` (boxing,
         -- then unboxing each element), so that the conversions generated
@@ -111,7 +90,8 @@ partial def finishUnboxFns : LowerM Unit := do
         -- arrays under polymorphic recursion have many representations).
         let boxArr := RR.Ty.app "RVec" #[RR.Ty.box]
         let viaBoxArr := tArr && vt != t && vt != boxArr && t != boxArr && (← arrayRepr? vt).isSome
-        let body ← if !viaBoxArr then tryCoerce (.var x) vt t
+        let body ← if cast then boxCastConv (.var x) vt t
+          else if !viaBoxArr then tryCoerce (.var x) vt t
           else match ← tryCoerce (.var x) vt boxArr with
             | some b => tryCoerce b boxArr t
             | none => pure none
