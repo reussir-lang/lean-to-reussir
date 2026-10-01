@@ -493,7 +493,7 @@ Stage 4 sees only mono types:
 | `Nat` | `enum [value] Nat { Small(u64), Big(LBig) }` | `Big` only for values ≥ 2^64; `LBig` is an opaque runtime bignum (GMP) |
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | `String` | `LStr`, an opaque copy-on-write handle over UTF-8 bytes (`Rc<Vec<u8>>`) | literals: §5.4 |
-| `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records), otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
+| `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records); for an enumeration or `Unit`, its index (`u8`, `u16` or `u32` by the number of constructors; Lean stores a tagged scalar); otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
 | `ST.Ref σ α` | a generated shared record `L2RRef_N(Cell<⟦α⟧>)` around Reussir's mutable cell | the contents keep their own representation; `Nat`/`Int` (`L2RNatRef`/`L2RIntRef`, a tagged word as in `LNatArr` plus a cell for a big value) and `[value]` structures (in an `ElemBox`) are stored apart, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
@@ -794,7 +794,6 @@ to a later construction:
   value only passed to calls (merge's `go l₁ ys (y :: acc)`), reusing its
   cell measured slower on the classic `mergesort`: the result keeps the
   scattered memory order of the input cells.
-
 ### 5.6 Join points
 
 A join point is a local continuation: `jp j y := body; k`, where the code
@@ -1012,8 +1011,10 @@ Rules:
   arguments. A value whose *declared* type is a type parameter `α` (the
   element of `Array.push`, or a trivial structure over `α` such as
   `[Inhabited α]`, which mono represents by its field) is passed and
-  returned in `α`'s array storage type, wrapped or unwrapped if that is an
-  `ElemBox`. Other parameters, like an index, are passed as they are.
+  returned in `α`'s storage type, wrapped or unwrapped if that is an
+  `ElemBox`, converted to or from its index for an enumeration stored as
+  one (only for externs over arrays of `α`, whose storage must be the
+  array's). Other parameters, like an index, are passed as they are.
   Instance keys hold base-phase types, so type arguments go through
   `toMonoType` first.
 - **Generic prelude functions over values.** Storage types exist only
@@ -1415,7 +1416,7 @@ tasks are mutable by design).
 **Gained from typing:**
 - no boxing;
 - unboxed scalars in fields, closures and arrays (`Vec<u32>`, where Lean
-  boxes array elements);
+  boxes array elements), enumerations in arrays as indices;
 - unboxed enum-like types;
 - per-type drop code;
 - exact allocation sizes.
@@ -1633,9 +1634,11 @@ Each item says what differs and when.
   place. A map loop of another shape (not Lean's) still converts its input
   to an array of `Box` on entry and back on exit.
 - *Element storage*: array elements, once-cell values and polymorphic
-  extern arguments whose type cannot cross the FFI boundary (enumerations,
-  `L2RUnit`, `[value]` tuples) are wrapped in an `ElemBox` cell, one
-  allocation each, where native stores tagged scalars. `ST.Ref` contents are stored in their own representation (§5.1), except
+  extern arguments whose type cannot cross the FFI boundary (`[value]`
+  tuples, closures) are wrapped in an `ElemBox` cell, one allocation each;
+  enumerations and `Unit` in arrays are stored as indices, but once-cell
+  values and other extern arguments of those types are still wrapped.
+  `ST.Ref` contents are stored in their own representation (§5.1), except
   `[value]` structures (an `ElemBox` per `set`); a `Nat` reference keeps a
   big number it held until it is replaced by another big number or the
   reference dies. A reference used through a `Box` costs a dispatch on its

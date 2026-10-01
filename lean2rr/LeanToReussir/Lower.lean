@@ -2425,30 +2425,33 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
     if let some fam := fam? then
       if let some sym' := natArrSym? sym fam then
         return .call sym' #[] passedArgs
-  -- Storage for each type argument: (storage type, boxed?).
-  let mut storage := #[]
+  -- Storage for each type argument: the storage type, and the conversions
+  -- of a value to and from it (`ArrayRepr.store`/`load`). An extern over
+  -- arrays of the type argument stores it as the arrays do (an enumeration
+  -- as its index, `arrayStorage`); any other as `arrayElemTy`.
+  let overArrays := (params.push ret).any fun p => (p.find? (·.isAppOf ``Array)).isSome
+  let mut storage : Array ArrayRepr := #[]
   for t in typeArgs do
     -- Instance keys hold base-phase types.
     let rt ← lowerType (← toMonoTypeKeep t)
-    storage := storage.push (← arrayElemTy rt)
+    let st ← if overArrays then arrayStorage rt else pure (← arrayElemTy rt).1
+    let some r ← arrayRepr? (.app "RVec" #[st]) | throwError "lean2rr: no storage for {rt.render}"
+    storage := storage.push r
   -- Values whose declared type is a type parameter `α` are passed and
   -- returned in `α`'s storage (e.g. `Array.push`'s element): wrapped if the
-  -- storage is a wrapper.
+  -- storage is a wrapper, as an index for an enumeration.
   let (uses, retUse) ← typeVarUses orig
-  let boxOf (use : Option Nat) : Option String := do
-    let (st, boxed) ← storage[← use]?
-    if boxed then if let .named bn := st then return bn
-    none
+  let reprOf (use : Option Nat) : Option ArrayRepr := do storage[← use]?
   let mut passed := #[]
   for i in [:params.size] do
     if mask[i]! then
       let a := args[i]!
-      match boxOf (uses[i]?.join) with
-      | some bn => passed := passed.push (.ctor bn none #[a])
+      match reprOf (uses[i]?.join) with
+      | some r => passed := passed.push (r.store a)
       | none => passed := passed.push a
-  let call := RR.Expr.call sym (storage.map (·.1)) passed
-  match boxOf retUse with
-  | some _ => return .field call 0
+  let call := RR.Expr.call sym (storage.map (·.storage)) passed
+  match reprOf retUse with
+  | some r => return r.load call
   | none => return call
 
 /-! ## Values -/

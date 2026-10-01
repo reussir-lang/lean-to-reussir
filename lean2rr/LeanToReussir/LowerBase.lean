@@ -261,7 +261,7 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
     -- beforehand (`nominalType`), so that `Array T` in its own fields has
     -- the representation it has everywhere else.
     | none => return ((← get).pendingBoundary[n]?).getD false
-  | .app n _ => return n == "RVec" || n == "LRef" || n == "LCell"
+  | .app n _ => return n == "RVec" || n == "LRef" || n == "LCell" || n == "L2RIx"
   -- A function value is a shared enum.
   | .fn .. => return true
   | .cls .. => return false
@@ -313,9 +313,56 @@ def arrayElemTy (t : RR.Ty) : LowerM (RR.Ty × Bool) := do
     typeItems := s.typeItems.push (.struct n false #[t]) }
   return (.named n, true)
 
+/-- An enumeration (a generated `[value]` enum without fields) or the unit
+type, which arrays store as an index (translation plan §5.1, where native
+Lean stores a tagged scalar): its index type (`u8`, `u16` or `u32`, by the
+number of constructors) and the generated conversions to and from it
+(`l2r_ix_of_T`, `l2r_ix_to_T`; an index past the last constructor gives the
+last one, as `ofIndex`). -/
+def ixStorage? (t : RR.Ty) : LowerM (Option (RR.Ty × String × String)) := do
+  let .named tn := t | return none
+  let ctors ← if tn == "L2RUnit" then pure #["u"] else
+    match (← get).typeInfos[tn]? with
+    | some info =>
+      if info.shape != .enumLike then return none
+      pure (info.ctorOrder.filterMap fun c => (info.ctors.find? c).map (·.variant))
+    | none => return none
+  let w := RR.Ty.named (if ctors.size ≤ 256 then "u8" else if ctors.size ≤ 65536 then "u16" else "u32")
+  let ofFn := s!"l2r_ix_of_{tn}"
+  let toFn := s!"l2r_ix_to_{tn}"
+  unless (← get).fns.any (fun | .fn n .. => n == ofFn | _ => false) do
+    let lit (i : Nat) : RR.Block := ⟨#[("i", some w, .atom (toString i))], .var "i"⟩
+    let ofBody : RR.Block :=
+      if ctors.isEmpty then .ofExpr (.call "l2r_unreachable" #[w] #[])
+      else if tn == "L2RUnit" then lit 0
+      else .ofExpr (.mtch (.var "x") (ctors.zipIdx.map fun (v, i) =>
+        { ty := tn, ctor := some v, binders := #[], body := lit i : RR.Arm }))
+    -- A binary search over the constructor positions.
+    let rec search (lo hi : Nat) (fuel : Nat) : RR.Expr :=
+      match fuel with
+      | 0 => .ctor tn (some ctors[lo]!) #[]
+      | fuel + 1 =>
+        if hi ≤ lo + 1 then .ctor tn (some ctors[lo]!) #[]
+        else
+          let mid := (lo + hi) / 2
+          .block ⟨#[(s!"m{mid}", some w, .atom (toString mid))],
+            .ite (.atom s!"i < m{mid}") (.ofExpr (search lo mid fuel)) (.ofExpr (search mid hi fuel))⟩
+    let toBody : RR.Block :=
+      if ctors.isEmpty then .ofExpr (.call "l2r_unreachable" #[t] #[])
+      else .ofExpr (search 0 ctors.size 64)
+    modify fun s => { s with fns := s.fns ++ #[.fn ofFn #[("x", t)] w ofBody, .fn toFn #[("i", w)] t toBody] }
+  return some (w, ofFn, toFn)
+
+/-- The storage type of array elements of Reussir type `t`: an index for an
+enumeration or the unit type (`ixStorage?`), otherwise as `arrayElemTy`. -/
+def arrayStorage (t : RR.Ty) : LowerM RR.Ty := do
+  if let some (w, _, _) ← ixStorage? t then return .app "L2RIx" #[w, t]
+  return (← arrayElemTy t).1
+
 /-- The element type an array storage type holds, and whether the storage
 is a one-field wrapper (see `arrayElemTy`). -/
 def storageElem (st : RR.Ty) : LowerM (RR.Ty × Bool) := do
+  if let .app "L2RIx" #[_, v] := st then return (v, false)
   let .named n := st | return (st, false)
   for (k, v) in (← get).tupleTypes.toList do
     if v == n && k.size == 2 && k[1]! == .named "__elem_box" then return (k[0]!, true)
@@ -394,14 +441,18 @@ structure ArrayRepr where
   storage : RR.Ty
   value : RR.Ty
   wrapped : Bool
+  /-- For an enumeration stored as an index (`ixStorage?`): the conversions
+  to and from the index. -/
+  ix : Option (String × String) := none
 
 def arrayRepr? (t : RR.Ty) : LowerM (Option ArrayRepr) := do
   match t with
-  | .named "LNatArr" => return some ⟨"natarr", #[], .named "Nat", .named "Nat", false⟩
-  | .named "LIntArr" => return some ⟨"intarr", #[], .named "Int", .named "Int", false⟩
+  | .named "LNatArr" => return some { family := "natarr", tyArgs := #[], storage := .named "Nat", value := .named "Nat", wrapped := false }
+  | .named "LIntArr" => return some { family := "intarr", tyArgs := #[], storage := .named "Int", value := .named "Int", wrapped := false }
   | .app "RVec" #[st] =>
     let (v, w) ← storageElem st
-    return some ⟨"array", #[st], st, v, w⟩
+    let ix ← if st matches .app "L2RIx" _ then pure ((← ixStorage? v).map fun (_, o, t) => (o, t)) else pure none
+    return some { family := "array", tyArgs := #[st], storage := st, value := v, wrapped := w, ix }
   | _ => return none
 
 /-- A call of runtime array primitive `l2r_<family>_<op>`. -/
@@ -410,9 +461,13 @@ def ArrayRepr.call (r : ArrayRepr) (op : String) (args : Array RR.Expr) : RR.Exp
 
 /-- Store / load an element (wrapping into the storage type if needed). -/
 def ArrayRepr.store (r : ArrayRepr) (x : RR.Expr) : RR.Expr :=
-  if r.wrapped then match r.storage with | .named n => .ctor n none #[x] | _ => x else x
+  match r.ix with
+  | some (o, _) => .call o #[] #[x]
+  | none => if r.wrapped then match r.storage with | .named n => .ctor n none #[x] | _ => x else x
 def ArrayRepr.load (r : ArrayRepr) (x : RR.Expr) : RR.Expr :=
-  if r.wrapped then .field x 0 else x
+  match r.ix with
+  | some (_, t) => .call t #[] #[x]
+  | none => if r.wrapped then .field x 0 else x
 
 /-- The runtime function implementing Lean array extern `sym` for arrays of
 family `fam` (`natarr`, `intarr`): the same argument list, element type
@@ -520,8 +575,7 @@ mutual
       -- boxed scalars (runtime `LNatArr`/`LIntArr`).
       if elem == .named "Nat" then return .named "LNatArr"
       if elem == .named "Int" then return .named "LIntArr"
-      let (elem, _) ← arrayElemTy elem
-      return .app "RVec" #[elem]
+      return .app "RVec" #[← arrayStorage elem]
     | _ =>
       -- An inductive with computed fields is represented by its
       -- implementation inductive `T._impl` (whose constructors also store
