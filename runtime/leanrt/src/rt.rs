@@ -88,7 +88,8 @@ extern "C" fn segv_handler(signum: i32, info: *mut SigInfo, _ctx: *mut c_void) {
     unsafe {
         let (lo, hi) = *GUARD.0.get();
         let addr = (*info).si_addr as usize;
-        if lo <= addr && addr < hi {
+        // The guard page of `main`'s stack, or of a task's (`coro`).
+        if (lo <= addr && addr < hi) || crate::coro::in_guard(addr) {
             let msg = b"\nStack overflow detected. Aborting.\n";
             write(2, msg.as_ptr() as *const c_void, msg.len());
             abort();
@@ -138,6 +139,24 @@ fn main_stack_size() -> usize {
         }
     }
     1 << 30
+}
+
+/// The stack size of Lean's worker threads (`lthread`): the same as the
+/// main thread's (1 GiB, or `LEAN_STACK_SIZE_KB` plus a buffer). The
+/// scheduler's contexts get stacks of this size (`sched`).
+pub fn thread_stack_size() -> usize {
+    main_stack_size()
+}
+
+/// Creating a thread failed: native Lean throws `lean::exception("failed
+/// to create thread")`, which nothing catches: libc++ reports it and
+/// aborts (nothing is flushed).
+pub fn thread_create_failed() -> ! {
+    let msg = b"libc++abi: terminating due to uncaught exception of type lean::exception: failed to create thread\n";
+    unsafe {
+        write(2, msg.as_ptr() as *const c_void, msg.len());
+        abort()
+    }
 }
 
 /// C's `strtoull(s, nullptr, 10)`: leading white space, an optional sign

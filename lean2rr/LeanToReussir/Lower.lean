@@ -268,11 +268,18 @@ def lazyGetFn (z : String) : LowerM String := do
     let zt := RR.Ty.named z
     let cellTy := RR.Ty.app "LCell" #[zt]
     let u64 := RR.Ty.named "u64"
+    -- A `busy` task runs on another context of the runtime's scheduler (a
+    -- task that blocked): wait until it has finished, then look again; on
+    -- the current context, it needs itself (`l2r_task_wait_running` waits
+    -- forever then).
+    let busy (a : RR.Expr) : RR.Block := if task then
+        ⟨#[("wb", some u64, .call "l2r_task_wait_running" #[] #[a])], .call get #[] #[.var "c"]⟩
+      else .ofExpr (.call "l2r_lazy_cycle" #[t] #[])
     let getWith (other : RR.Block) : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
       lazyArm z "done" #[some "v"] (.ofExpr (.var "v")),
       lazyArm z "convdone" #[some "v", none, none] (.ofExpr (.var "v")),
-      lazyArm z "busy" #[] (.ofExpr (.call "l2r_lazy_cycle" #[t] #[])),
-      lazyArm z "busyconv" #[none] (.ofExpr (.call "l2r_lazy_cycle" #[t] #[])),
+      lazyArm z "busy" #[] (busy (.call "l2r_lcell_addr" #[zt] #[.var "c"])),
+      lazyArm z "busyconv" #[some "ba"] (busy (.var "ba")),
       { ty := z, ctor := none, binders := #[], body := other }])
     -- A task first runs the chain of pending tasks it waits for, deepest
     -- first (`l2r_task_force_sources`), then looks again (one of them may
@@ -2035,9 +2042,11 @@ def taskStateFn (z : String) (stateTy : RR.Ty) : LowerM String := do
 /-- `IO.waitAny` glue over a list of tasks of type `listTy`: the value of the
 first task of the list that has finished; if none has, the first pending
 one is run (it finished first), unless it waits for an unresolved promise.
-If every task is running (or waits for a promise), a queued task runs, as a
-worker would meanwhile, and the list is looked at again; when none is left,
-they all wait for the caller: native Lean deadlocks. -/
+If every task is running (or waits for a promise), the caller waits until
+some task finishes (`l2r_task_wait_progress`: other contexts and queued
+tasks run meanwhile, as workers would) and looks at the list again; when
+nothing can make progress any more, they all wait for the caller: native
+Lean deadlocks. -/
 def taskWaitAnyFn (listTy : RR.Ty) (taskTy : RR.Ty) : LowerM String := do
   let (z, t) ← lazyOf taskTy
   let .named ln := listTy | throwError "lean2rr: bad list type {listTy.render}"
@@ -2063,7 +2072,7 @@ def taskWaitAnyFn (listTy : RR.Ty) (taskTy : RR.Ty) : LowerM String := do
     let firstDone : RR.Block := .ofExpr (.mtch (.var "l") #[
       listArm nil.variant #[] (.ofExpr (.call run #[] #[.var "all", .var "all"])),
       listArm cons.variant consBinders (pick 2 (.call name #[] #[.var "rest", .var "all"]))])
-    let again : RR.Block := ⟨#[("r1", some (.named "u64"), .call "l2r_task_run_one" #[] #[]),
+    let again : RR.Block := ⟨#[("r1", some (.named "u64"), .call "l2r_task_wait_progress" #[] #[]),
         ("one", some (.named "u64"), .atom "1")],
       .ite (.atom "r1 == one") (.ofExpr (.call name #[] #[.var "all", .var "all"]))
         (.ofExpr (.call "l2r_lazy_cycle" #[t] #[]))⟩
@@ -2674,7 +2683,10 @@ def taskDispatchFns : LowerM (Array RR.Item) := do
     ← mk "l2r_task_walk" #[] (.call "l2r_task_walk_next" #[] #[]) "l2r_task_handed" (.call "l2r_task_walk" #[] #[]),
     .fn "l2r_task_walk_if" #[("e", u64)] u64 (ifOne "e" (.call "l2r_task_walk" #[] #[])),
     ← mk "l2r_task_force_sources" #[("a", u64)] (.call "l2r_task_source_next_at" #[] #[.var "a"]) "l2r_task_handed"
-      (.call "l2r_task_force_sources" #[] #[.var "a"])]
+      (.call "l2r_task_force_sources" #[] #[.var "a"]),
+    -- The runtime's scheduler starts queued tasks on contexts of their own
+    -- (`leanrt::sched`) through this entry point.
+    .raw "extern \"C\" trampoline \"l2r_task_run_one_c\" = l2r_task_run_one;\n"]
 
 /-! ## Identity (`ptrAddrUnsafe`)
 
@@ -2996,7 +3008,13 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
             let argTys ← (mask.zip params).filterMapM fun (m, p) => if m then some <$> lowerType p else pure none
             let want := (← read).preludeParams[prim]?.getD argTys
             let passed ← (passedArgs.zip (argTys.zip want)).mapM fun (a, (t, w)) => coerce a t w
-            return ← wrapIOResult resTy (.call prim #[] passed)
+            -- The result too, from a non-generic primitive's result type (a
+            -- runtime object such as a mutex or promise is `lcAny` in mono
+            -- code).
+            let payload ← match (← read).preludeRets[prim]?, (← read).preludeParams.contains prim with
+              | some r, true => coerce (.call prim #[] passed) r (← ioPayloadTy resTy)
+              | _, _ => pure (.call prim #[] passed)
+            return ← wrapIOResult resTy payload
   -- A generic prelude function in plain Reussir that does not store its
   -- values in runtime containers (`dbgTrace`, `dbgSleep`, `panic`, …) is
   -- instantiated at the value types themselves: its arguments and result

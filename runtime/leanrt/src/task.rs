@@ -169,8 +169,6 @@ struct Tasks {
     /// The number of valid items of each queue.
     queued: [u32; PRIOS],
     next_q: u32,
-    /// Walks in progress, innermost last.
-    walks: Vec<Walk>,
     /// A task handed to the generated code (`walk_next`, `source_next`,
     /// `next_tag`), with the runtime's reference, to be run or, when
     /// `deleting`, dropped.
@@ -186,12 +184,37 @@ struct Tasks {
     worker: u32,
     wake: Option<Instant>,
     worker_exists: bool,
+    /// `IO.getTaskState` answered 4 (poll a promise) for this task: the
+    /// `source_next` that follows does not wait for it for good.
+    poll: usize,
+}
+
+/// What belongs to the running context of the scheduler (`sched`), as
+/// natively to a thread: the tasks running on it, the walks of dependents
+/// in progress, and the chains of tasks being forced. A context that
+/// blocks keeps its own (`swap_ctx_state`).
+#[derive(Default)]
+pub struct CtxState {
+    /// Walks in progress, innermost last.
+    walks: Vec<Walk>,
     /// For `source_next`: a task being forced (its cell) and the pending
     /// tasks it waits for, still to run (entry and cell, deepest last),
     /// innermost last.
     chains: Vec<(usize, Vec<(u32, usize)>)>,
     /// Running tasks (entries), innermost last.
     running: Vec<u32>,
+}
+
+static CTX: Global<CtxState> = Global(UnsafeCell::new(CtxState { walks: Vec::new(), chains: Vec::new(), running: Vec::new() }));
+
+#[inline]
+fn ctx() -> &'static mut CtxState {
+    unsafe { &mut *CTX.0.get() }
+}
+
+/// Exchange the running context's state with `st` (`sched::switch_to`).
+pub fn swap_ctx_state(st: &mut CtxState) {
+    std::mem::swap(ctx(), st)
 }
 
 /// How long a native worker takes to pick up a task after the enqueue that
@@ -209,14 +232,12 @@ static TASKS: Global<Tasks> = Global(UnsafeCell::new(Tasks {
     queues: [const { VecDeque::new() }; PRIOS],
     queued: [0; PRIOS],
     next_q: 0,
-    walks: Vec::new(),
     handed: 0,
     deleting: false,
     worker: NONE,
     wake: None,
     worker_exists: false,
-    chains: Vec::new(),
-    running: Vec::new(),
+    poll: 0,
 }));
 
 #[inline]
@@ -284,10 +305,16 @@ fn release(i: u32) {
 /// The thread of the innermost running task (0: `main`).
 #[inline]
 fn cur_thread() -> u32 {
-    match tasks().running.last() {
+    match ctx().running.last() {
         Some(&r) => ent(r).thread(),
-        None => 0,
+        None => crate::sched::cur_thread_base(),
     }
+}
+
+/// The thread number of the running task, or of the running context
+/// (`sync`'s lock owners).
+pub fn thread_now() -> u32 {
+    cur_thread()
 }
 
 /// The entry point calls this right before `main`
@@ -325,7 +352,13 @@ pub fn shutdown() {
 pub fn sleep_ms(ms: u32) {
     settle_worker();
     tasks().epoch += 1;
-    std::thread::sleep(Duration::from_millis(ms as u64));
+    // Other contexts and queued tasks run meanwhile, as other threads
+    // would (`sched::sleep`).
+    if ms == 0 {
+        std::thread::sleep(Duration::ZERO);
+    } else {
+        crate::sched::sleep(Duration::from_millis(ms as u64));
+    }
     settle_worker();
 }
 
@@ -359,7 +392,7 @@ pub fn register(cell: usize, tag: u64, prio: u64, kind: u64) -> u64 {
     if sp {
         flags |= SYNC | SYNCPRIO;
     }
-    if let Some(&r) = tasks().running.last() {
+    if let Some(&r) = ctx().running.last() {
         if early_now(r) {
             flags |= EARLY;
         }
@@ -394,9 +427,12 @@ fn enqueue(i: u32) {
     t.queues[e.prio as usize].push_back((i, e.link));
     t.queued[e.prio as usize] += 1;
     // An enqueue by `main` wakes the idle worker.
-    if t.started && !t.shutting_down && t.worker == NONE && t.wake.is_none() && t.running.is_empty() {
+    if t.started && !t.shutting_down && t.worker == NONE && t.wake.is_none() && ctx().running.is_empty()
+        && crate::sched::cur() == crate::sched::MAIN
+    {
         t.wake = Some(Instant::now());
     }
+    crate::sched::on_enqueue();
 }
 
 /// Take task `i` off its queue: its item is removed if it is at an end of
@@ -493,10 +529,9 @@ pub fn depend(src: usize, dep: usize, sync: bool) -> u64 {
 /// reference to the cell.
 #[inline(never)]
 pub fn bind_wait(cell: usize, src: usize) {
-    let t = tasks();
     let i = find(cell);
-    if t.running.last() == Some(&i) {
-        t.running.pop();
+    if ctx().running.last() == Some(&i) {
+        ctx().running.pop();
     }
     let e = ent(i);
     e.flags &= !(RUNNING | INLINE | FROM_WALK | ON_THREAD);
@@ -541,7 +576,7 @@ pub fn begin(cell: usize) -> u64 {
     }
     e.flags = (e.flags & !(HELD | INLINE | CHECKED | ON_THREAD)) | RUNNING | on;
     e.aux[1] = t.epoch;
-    t.running.push(i);
+    ctx().running.push(i);
     r
 }
 
@@ -552,7 +587,7 @@ pub fn begin(cell: usize) -> u64 {
 #[inline(never)]
 pub fn end(cell: usize) -> u64 {
     let t = tasks();
-    let Some(i) = t.running.pop() else { return 0 };
+    let Some(i) = ctx().running.pop() else { return 0 };
     debug_assert_eq!(ent(i).cell, cell);
     let early = early_now(i);
     let e = ent(i);
@@ -564,12 +599,13 @@ pub fn end(cell: usize) -> u64 {
     let base = flags & FROM_WALK == 0;
     // The worker that ran it picks the next task once the walk is over.
     let worker = t.worker == i
-        || (t.worker == NONE && t.running.is_empty() && t.started && !t.shutting_down && flags & ON_THREAD == 0);
+        || (t.worker == NONE && ctx().running.is_empty() && t.started && !t.shutting_down && flags & ON_THREAD == 0);
     if worker {
         t.worker = NONE;
         t.wake = None;
     }
-    t.walks.push(Walk { owner: i, thread, early, canceled: flags & CANCELED != 0, worker, base });
+    ctx().walks.push(Walk { owner: i, thread, early, canceled: flags & CANCELED != 0, worker, base });
+    crate::sched::on_finish(cell);
     if base { 1 } else { 0 }
 }
 
@@ -578,12 +614,11 @@ pub fn end(cell: usize) -> u64 {
 /// walk them (`l2r_task_walk`).
 #[inline(never)]
 pub fn resolve(cell: usize) -> u64 {
-    let t = tasks();
     let i = find(cell);
     if i == NONE || ent(i).flags & PROMISE == 0 {
         return 0;
     }
-    let early = match t.running.last() {
+    let early = match ctx().running.last() {
         Some(&r) => early_now(r),
         None => false,
     };
@@ -592,7 +627,8 @@ pub fn resolve(cell: usize) -> u64 {
     e.cell = 0;
     e.flags = 0;
     let thread = cur_thread();
-    t.walks.push(Walk { owner: i, thread, early, canceled, worker: false, base: true });
+    ctx().walks.push(Walk { owner: i, thread, early, canceled, worker: false, base: true });
+    crate::sched::on_finish(cell);
     1
 }
 
@@ -710,13 +746,12 @@ fn hand(i: u32, del: bool) -> u64 {
 /// `u64::MAX` when the walk is over.
 #[inline(never)]
 pub fn walk_next() -> u64 {
-    let t = tasks();
     loop {
-        let Some(f) = t.walks.last() else { return u64::MAX };
+        let Some(f) = ctx().walks.last() else { return u64::MAX };
         let (owner, thread, early, canceled) = (f.owner, f.thread, f.early, f.canceled);
         let d = ent(owner).head_dep;
         if d == NONE {
-            let f = t.walks.pop().unwrap();
+            let f = ctx().walks.pop().unwrap();
             release(owner);
             if f.worker {
                 worker_idle();
@@ -753,24 +788,145 @@ pub fn walk_next() -> u64 {
 
 /// The next queued task to run (the worker's started one first, then the
 /// first of the highest non-empty queue), handed over with its tag (or a
-/// dropped pure task to delete); `u64::MAX` if none. When only tasks
-/// waiting for others remain (a cycle), there is none: Lean's workers stop
-/// when the queue is empty and leave such tasks behind.
+/// dropped pure task to delete); `u64::MAX` if none.
+///
+/// For a worker context of the scheduler, its first task (`sched`). After
+/// `main` has returned (the final run, on `main`'s context), a task starts
+/// only when a worker would be free for it (`startable`); otherwise, and
+/// while tasks started on other contexts are still running, `main` waits.
+/// When only tasks waiting for others remain (a cycle), there is none:
+/// Lean's workers stop when the queue is empty and leave such tasks behind.
 #[inline(never)]
 pub fn next_tag() -> u64 {
+    let p = crate::sched::take_preselect();
+    if p != NONE {
+        return hand_candidate(p);
+    }
     let t = tasks();
+    if t.shutting_down && crate::sched::cur() == crate::sched::MAIN && ctx().running.is_empty() {
+        loop {
+            let e = startable(true);
+            if e != NONE {
+                return hand_candidate(e);
+            }
+            if !has_queued() && !crate::sched::workers_alive() {
+                return u64::MAX;
+            }
+            crate::sched::block(crate::sched::Wait::FinalRun);
+        }
+    }
     let w = t.worker;
     let cand = if w != NONE && ent(w).flags & QUEUED != 0 { w } else { first_queued() };
     if cand == NONE {
         return u64::MAX;
     }
-    if cand != w {
+    hand_candidate(cand)
+}
+
+/// Hand queued task `cand` over to be run, or the dropped pure task it
+/// stands for to be deleted (`dropped`).
+fn hand_candidate(cand: u32) -> u64 {
+    let e = ent(cand);
+    if e.cell == 0 || e.flags & QUEUED == 0 {
+        // Started or deleted meanwhile.
+        return u64::MAX;
+    }
+    if cand != tasks().worker {
         let x = dropped(cand);
         if x != NONE {
             return hand(x, true);
         }
     }
     hand(cand, false)
+}
+
+/// Whether tasks are queued.
+pub fn has_queued() -> bool {
+    first_queued() != NONE
+}
+
+/// The queued task the scheduler can start now on a new context (or a
+/// worker context that has finished its task, `from_worker`, which holds no
+/// worker then): the one `next_tag` would hand over, if a worker is free
+/// for it. Natively a task at a priority up to `Task.Priority.max` waits
+/// for one of the task manager's workers (`LEAN_NUM_THREADS`, or one per
+/// processor); a worker waiting for a task (`IO.wait`, `Task.get`) frees
+/// its place meanwhile (`wait_for`); a dedicated task has a thread of its
+/// own. `NONE` if none.
+pub fn startable(from_worker: bool) -> u32 {
+    let t = tasks();
+    if !t.started {
+        return NONE;
+    }
+    let _ = from_worker;
+    settle_worker();
+    let w = t.worker;
+    let cand = if w != NONE && ent(w).flags & QUEUED != 0 { w } else { first_queued() };
+    if cand == NONE {
+        return NONE;
+    }
+    if cand != w && dropped(cand) != NONE {
+        // Deleting it needs no worker.
+        return cand;
+    }
+    if ent(cand).prio as usize == PRIOS - 1 {
+        return cand;
+    }
+    if pool_in_use() < crate::sched::workers_limit() { cand } else { NONE }
+}
+
+/// Whether a context with this bookkeeping holds one of the task manager's
+/// workers: the innermost task running on it (not on the thread of whoever
+/// ran it) is at a pool priority, and it is not waiting for a task.
+fn holds_worker(st: &CtxState, w: crate::sched::Wait) -> bool {
+    use crate::sched::Wait;
+    if matches!(w, Wait::Cell(_) | Wait::CellPoll(_) | Wait::Progress) {
+        return false;
+    }
+    for &i in st.running.iter().rev() {
+        let e = ent(i);
+        if e.flags & ON_THREAD != 0 {
+            continue;
+        }
+        return (e.prio as usize) < PRIOS - 1;
+    }
+    false
+}
+
+/// The number of the task manager's workers in use.
+fn pool_in_use() -> u32 {
+    let mut n = if holds_worker(ctx(), crate::sched::cur_wait()) { 1 } else { 0 };
+    crate::sched::for_each_other(|st, w| {
+        if holds_worker(st, w) {
+            n += 1
+        }
+    });
+    n
+}
+
+/// A `busy` task (`Task.get` of a task that is running): it runs on
+/// another context, which has blocked; wait until it has finished. On the
+/// running context it needs itself: native Lean waits forever then.
+#[inline(never)]
+pub fn wait_running(a: usize) -> u64 {
+    let i = find(a);
+    if i == NONE {
+        return 1;
+    }
+    if ctx().running.contains(&i) {
+        hang();
+    }
+    crate::sched::block(crate::sched::Wait::Cell(a));
+    1
+}
+
+/// `IO.waitAny` when every task of the list is running or waits for a
+/// promise: wait until some task finishes (other contexts and queued tasks
+/// run meanwhile), then the list is looked at again.
+#[inline(never)]
+pub fn wait_progress() -> u64 {
+    crate::sched::block(crate::sched::Wait::Progress);
+    1
 }
 
 /// The first valid item of the highest non-empty queue (stale items in
@@ -841,7 +997,7 @@ fn settle_worker() {
 #[inline(never)]
 pub fn source_next(cell: usize) -> u64 {
     let t = tasks();
-    if t.chains.last().map(|(c, _)| *c) != Some(cell) {
+    if ctx().chains.last().map(|(c, _)| *c) != Some(cell) {
         // A new chain: the pending tasks `cell` waits for, transitively
         // (bounded: a bind task waiting for a task that depends on it is a
         // cycle).
@@ -869,13 +1025,12 @@ pub fn source_next(cell: usize) -> u64 {
         if chain.is_empty() {
             return u64::MAX;
         }
-        t.chains.push((cell, chain));
+        ctx().chains.push((cell, chain));
     }
     loop {
-        let t = tasks();
-        let (_, chain) = t.chains.last_mut().unwrap();
+        let (_, chain) = ctx().chains.last_mut().unwrap();
         let Some(&(d, c)) = chain.last() else {
-            t.chains.pop();
+            ctx().chains.pop();
             return u64::MAX;
         };
         let e = ent(d);
@@ -885,11 +1040,16 @@ pub fn source_next(cell: usize) -> u64 {
             continue;
         }
         if e.flags & PROMISE != 0 {
-            let tag = next_tag();
-            if tag == u64::MAX {
-                tasks().chains.pop();
+            // Wait until it is resolved (other contexts and queued tasks
+            // run meanwhile, as other threads would). A program polling
+            // for it (`query` answered 4) goes on once nothing else can.
+            let poll = std::mem::replace(&mut tasks().poll, 0) == cell;
+            crate::sched::block(if poll { crate::sched::Wait::CellPoll(c) } else { crate::sched::Wait::Cell(c) });
+            if poll {
+                ctx().chains.pop();
+                return u64::MAX;
             }
-            return tag;
+            continue;
         }
         chain.pop();
         return hand(d, false);
@@ -990,6 +1150,17 @@ pub fn query(cell: usize) -> u8 {
     if t.epoch + 1 > observed || queries >= 1000 {
         // The next question starts over (a promise may stay unresolved).
         e.aux = [0, 0];
+        if poll == 4 {
+            t.poll = cell;
+        }
+        if poll == 3 && wait_status(cell) == 3 {
+            // It waits for an unresolved promise: running it would wait
+            // for the promise. Other contexts and queued tasks run
+            // meanwhile, as other threads would, until it has finished or
+            // nothing else can go on; its state then.
+            crate::sched::block(crate::sched::Wait::CellPoll(cell));
+            return status(cell);
+        }
         return poll;
     }
     e.aux[1] += 1;
@@ -1015,7 +1186,7 @@ pub fn cancel(cell: usize) {
 #[inline(never)]
 pub fn check_canceled() -> bool {
     let t = tasks();
-    let Some(&i) = t.running.last() else { return false };
+    let Some(&i) = ctx().running.last() else { return false };
     let late = if t.shutting_down {
         let late = !early_now(i);
         ent(i).flags |= CHECKED;
@@ -1029,6 +1200,17 @@ pub fn check_canceled() -> bool {
 /// A thunk forced from its own computation, or tasks waiting for each other:
 /// native Lean waits forever (without flushing stdout).
 pub fn hang() -> ! {
+    // Other contexts go on meanwhile, as other threads would.
+    if tasks().started {
+        loop {
+            crate::sched::block(crate::sched::Wait::Forever);
+        }
+    }
+    hang_thread()
+}
+
+/// Wait forever: nothing can go on any more.
+pub fn hang_thread() -> ! {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
     }

@@ -2986,11 +2986,94 @@ fn l2r_task_check_canceled() -> bool [{ leanrt::task::check_canceled() }];
 fn l2r_hang() -> u64 [{ leanrt::task::hang() }];
 
 // A thunk forced by its own computation, or a cycle of tasks waiting for
-// each other: native Lean waits forever.
+// each other: native Lean waits forever (other tasks go on).
 fn l2r_lazy_cycle<T>() -> T {
     let ignored = l2r_hang();
     l2r_unreachable<T>()
 }
+
+// `Task.get` of a `busy` task `a`: it runs on another context of the
+// runtime's scheduler, which has blocked (`leanrt::sched`); wait until it
+// has finished (1), then the caller looks again. On the running context it
+// needs itself, and this waits forever.
+#[ffi(import)]
+fn l2r_task_wait_running(a : u64) -> u64 [{ leanrt::task::wait_running(a as usize) }];
+
+// `IO.waitAny` when every task of the list is running or waits for a
+// promise: wait until some task finishes (1), then the list is looked at
+// again.
+#[ffi(import)]
+fn l2r_task_wait_progress() -> u64 [{ leanrt::task::wait_progress() }];
+
+// ===========================================================================
+// Std.Sync (`leanrt::sync`): `BaseMutex`, `Condvar`, `BaseRecursiveMutex`,
+// `BaseSharedMutex`. Each is a runtime handle (`LHandle`; `lcAny` in mono
+// code). A thread that must wait blocks its context of the scheduler and
+// the others run meanwhile (`leanrt::sched`). The `l2r_io_*` functions are
+// the payloads of the `BaseIO` externs `lean_io_*`.
+
+#[ffi(import)]
+fn l2r_sync_new(kind : u64) -> LHandle [{
+    match kind { 0 => leanrt::sync::mutex_new(), 1 => leanrt::sync::condvar_new(), 2 => leanrt::sync::recmutex_new(), _ => leanrt::sync::sharedmutex_new() }
+}];
+
+// Operation `op` on `h` (see the functions below); the result of a `try`.
+#[ffi(import)]
+fn l2r_sync_op(op : u64, h : LHandle) -> bool [{
+    {
+        let r = match op {
+            0 => { leanrt::sync::mutex_lock(&h); true }
+            1 => leanrt::sync::mutex_try_lock(&h),
+            2 => { leanrt::sync::mutex_unlock(&h); true }
+            3 => { leanrt::sync::condvar_notify_one(&h); true }
+            4 => { leanrt::sync::condvar_notify_all(&h); true }
+            5 => { leanrt::sync::recmutex_lock(&h); true }
+            6 => leanrt::sync::recmutex_try_lock(&h),
+            7 => { leanrt::sync::recmutex_unlock(&h); true }
+            8 => { leanrt::sync::sharedmutex_write(&h); true }
+            9 => leanrt::sync::sharedmutex_try_write(&h),
+            10 => { leanrt::sync::sharedmutex_unlock_write(&h); true }
+            11 => { leanrt::sync::sharedmutex_read(&h); true }
+            12 => leanrt::sync::sharedmutex_try_read(&h),
+            _ => { leanrt::sync::sharedmutex_unlock_read(&h); true }
+        };
+        leanrt::rc_release(h);
+        r
+    }
+}];
+
+#[ffi(import)]
+fn l2r_condvar_wait_h(c : LHandle, m : LHandle) -> u64 [{
+    { leanrt::sync::condvar_wait(&c, &m); leanrt::rc_release(c); leanrt::rc_release(m); 0 }
+}];
+
+fn l2r_sync_unit(op : u64, h : LHandle) -> L2RUnit {
+    let ignored = l2r_sync_op(op, h);
+    L2RUnit::u{}
+}
+
+fn l2r_io_basemutex_new() -> LHandle { l2r_sync_new(0) }
+fn l2r_io_basemutex_lock(m : LHandle) -> L2RUnit { l2r_sync_unit(0, m) }
+fn l2r_io_basemutex_try_lock(m : LHandle) -> bool { l2r_sync_op(1, m) }
+fn l2r_io_basemutex_unlock(m : LHandle) -> L2RUnit { l2r_sync_unit(2, m) }
+fn l2r_io_condvar_new() -> LHandle { l2r_sync_new(1) }
+fn l2r_io_condvar_wait(c : LHandle, m : LHandle) -> L2RUnit {
+    let ignored = l2r_condvar_wait_h(c, m);
+    L2RUnit::u{}
+}
+fn l2r_io_condvar_notify_one(c : LHandle) -> L2RUnit { l2r_sync_unit(3, c) }
+fn l2r_io_condvar_notify_all(c : LHandle) -> L2RUnit { l2r_sync_unit(4, c) }
+fn l2r_io_baserecmutex_new() -> LHandle { l2r_sync_new(2) }
+fn l2r_io_baserecmutex_lock(m : LHandle) -> L2RUnit { l2r_sync_unit(5, m) }
+fn l2r_io_baserecmutex_try_lock(m : LHandle) -> bool { l2r_sync_op(6, m) }
+fn l2r_io_baserecmutex_unlock(m : LHandle) -> L2RUnit { l2r_sync_unit(7, m) }
+fn l2r_io_basesharedmutex_new() -> LHandle { l2r_sync_new(3) }
+fn l2r_io_basesharedmutex_write(m : LHandle) -> L2RUnit { l2r_sync_unit(8, m) }
+fn l2r_io_basesharedmutex_try_write(m : LHandle) -> bool { l2r_sync_op(9, m) }
+fn l2r_io_basesharedmutex_unlock_write(m : LHandle) -> L2RUnit { l2r_sync_unit(10, m) }
+fn l2r_io_basesharedmutex_read(m : LHandle) -> L2RUnit { l2r_sync_unit(11, m) }
+fn l2r_io_basesharedmutex_try_read(m : LHandle) -> bool { l2r_sync_op(12, m) }
+fn l2r_io_basesharedmutex_unlock_read(m : LHandle) -> L2RUnit { l2r_sync_unit(13, m) }
 
 // ===========================================================================
 // Debugging, platform

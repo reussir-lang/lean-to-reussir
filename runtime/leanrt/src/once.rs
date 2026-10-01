@@ -40,6 +40,7 @@ fn unset(slot: u64) -> ! {
 /// (the current standard streams).
 #[inline(never)]
 pub fn swap_raw(slot: u64, raw: usize) -> usize {
+    note_mutable(slot);
     let vals = unsafe { &mut *SLOTS.0.get() };
     assert!(has(slot), "leanrt: swap of an unset cell {}", slot);
     std::mem::replace(&mut vals[slot as usize], raw)
@@ -49,6 +50,7 @@ pub fn swap_raw(slot: u64, raw: usize) -> usize {
 /// the caller).
 #[inline(never)]
 pub fn take_raw(slot: u64) -> usize {
+    note_mutable(slot);
     if !has(slot) {
         unset(slot)
     }
@@ -64,6 +66,45 @@ struct Saved(UnsafeCell<Vec<[Option<usize>; 3]>>);
 unsafe impl Sync for Saved {}
 static SAVED: Saved = Saved(UnsafeCell::new(Vec::new()));
 
+/// The slots used as mutable cells (the current standard streams): they
+/// belong to the running context of the scheduler (`sched`), as natively
+/// each thread has its own current streams.
+struct Mutable(UnsafeCell<Vec<u64>>);
+unsafe impl Sync for Mutable {}
+static MUTABLE: Mutable = Mutable(UnsafeCell::new(Vec::new()));
+
+fn note_mutable(slot: u64) {
+    let m = unsafe { &mut *MUTABLE.0.get() };
+    if !m.contains(&slot) {
+        m.push(slot);
+    }
+}
+
+/// A suspended context's mutable cells and saved contexts.
+#[derive(Default)]
+pub struct CtxState {
+    saved: Vec<[Option<usize>; 3]>,
+    cells: Vec<(u64, Option<usize>)>,
+}
+
+/// Exchange the running context's mutable cells and saved contexts with
+/// `st` (see `sched::switch_to`: the leaving context's go to its record,
+/// whose own were emptied when it last arrived; then the arriving
+/// context's come from its record). A cell missing from `st` is empty.
+pub fn swap_ctx_state(st: &mut CtxState) {
+    std::mem::swap(unsafe { &mut *SAVED.0.get() }, &mut st.saved);
+    let m = unsafe { (*MUTABLE.0.get()).clone() };
+    let mut cells = Vec::with_capacity(m.len());
+    for &slot in m.iter() {
+        let cur = if has(slot) { Some(take_raw(slot)) } else { None };
+        if let Some(&(_, Some(v))) = st.cells.iter().find(|(s, _)| *s == slot) {
+            set_raw(slot, v);
+        }
+        cells.push((slot, cur));
+    }
+    st.cells = cells;
+}
+
 /// Set the cells `base..base + n` aside, leaving them empty: a new context
 /// (a task starting, which natively runs on its own thread with its own
 /// current standard streams). The references move to the saved context.
@@ -73,6 +114,7 @@ pub fn push_context(base: u64, n: u64) {
     let mut ctx = [None; 3];
     for i in 0..n {
         let slot = base + i;
+        note_mutable(slot);
         ctx[i as usize] = if has(slot) { Some(take_raw(slot)) } else { None };
     }
     unsafe { &mut *SAVED.0.get() }.push(ctx);
