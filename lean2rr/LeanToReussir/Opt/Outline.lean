@@ -33,7 +33,9 @@ declarations). Otherwise it stays where it is.
 
 This works around rrc's limits; it does not make the program faster.
 Without it the output is the same program, but rrc's build time and memory
-grow superlinearly on long `main`s and big literal matches.
+grow superlinearly on long `main`s and big literal matches, and so does the
+`.rr` text, whose indentation follows the nesting (a 3000-arm literal match:
+126 MB instead of 1 MB, and lean2rr runs out of memory at 16 GB).
 -/
 
 namespace LeanToReussir.Outline
