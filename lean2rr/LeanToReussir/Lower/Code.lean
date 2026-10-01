@@ -215,34 +215,10 @@ mutual
         match alt with
         | .alt ctor ps k _ =>
           let some layout := layoutOf ctor | throwError "lean2rr: bad constructor"
-          let mut ctx' := ctx
-          let mut lets := #[]
-          -- A shared structure that stays live because it is stored or
-          -- returned whole binds only the fields used while it is live; the
-          -- others are projected in the inner alternatives that use them
-          -- (`lowerAlt`), as for the constructors of an enum (below): a
-          -- field projected here would be an extra reference whose release
-          -- Reussir's token reuse takes for a freed cell.
-          let lazyOk := !info.value && view.isNone &&
-            (usedAsField (← getEnv) ctx.jpBodies cs.discr k || returnedWhole ctx.jpBodies cs.discr k)
-          let early := if lazyOk then usesWhileLive ctx.jpBodies cs.discr k {} else {}
-          let used := if lazyOk then codeUses k {} else {}
-          let mut pending := #[]
-          for h : i in [:ps.size] do
-            let p := ps[i]
-            match layout.fields[i]? with
-            | some (some (j, ft)) =>
-              if lazyOk && !early.contains p.fvarId then
-                if used.contains p.fvarId then pending := pending.push (p.fvarId, j, ft)
-              else
-                let x ← fresh "f"
-                lets := lets.push (x, some ft, RR.Expr.field (.var scrut) j)
-                ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
-            | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
-          if !pending.isEmpty then
-            let l : LazyMatch := { discr := cs.discr, scrut, ty := tn, variant := layout.variant, nbinders := 0,
-                                   fields := pending, pending, struct := true }
-            ctx' := { ctx' with lazy := ctx'.lazy.push l }
+          -- The fields, projected (a hook may bind some later: Opt/LazyFields).
+          let arm : CasesArm := { discr := cs.discr, scrut, ty := tn, layout, params := ps, code := k,
+                                  shared := !info.value && view.isNone }
+          let (lets, ctx') ← H.structFields ctx arm
           let b ← lowerCode ctx' outlined retTy k
           return .block { b with lets := lets ++ b.lets }
         | .default k => return .block (← lowerCode ctx outlined retTy k)
@@ -263,54 +239,15 @@ mutual
                 binders := binders.set! j (some x)
                 ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
               | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
-            -- An arm in which the matched value stays live because it is
-            -- stored whole in a new constructor, or returned whole (`simp`
-            -- turns `t@(node l k r)` rebuilt into `t`: a BST insert of a key
-            -- already present), binds only the fields needed while it is
-            -- live; a field used only in inner alternatives that do not use
-            -- the value is bound there, by matching the value again
-            -- (`lowerAlt`). Reussir projects a match's fields at the match:
-            -- a field of a value that stays live is then an extra reference
-            -- (inc and dec), and its release looks like a reusable cell to
-            -- Reussir's token reuse, which prefers it to the cell actually
-            -- freed and then never reuses anything (TreeMap's `balance`
-            -- rebuilt every node of the path; a BST insert with `Nat` keys,
-            -- whose comparison is a call before the branch, every node).
-            -- Not for values only passed to calls: there reusing the cell
-            -- (merge's `go l₁ ys (y :: acc)`) measured slower for mergesort,
-            -- whose lists then keep the scattered order of the input cells.
-            if !binders.isEmpty && info.shape == .enum &&
-                (usedAsField (← getEnv) ctx.jpBodies cs.discr k || returnedWhole ctx.jpBodies cs.discr k) then
-              let early := usesWhileLive ctx.jpBodies cs.discr k {}
-              let used := codeUses k {}
-              let mut fields := #[]
-              let mut pending := #[]
-              for h : i in [:ps.size] do
-                let p := ps[i]
-                if let some (some (j, ft)) := layout.fields[i]? then
-                  if used.contains p.fvarId then fields := fields.push (p.fvarId, j, ft)
-                  if !early.contains p.fvarId then
-                    binders := binders.set! j none
-                    ctx' := { ctx' with vars := ctx'.vars.erase p.fvarId }
-                    if used.contains p.fvarId then pending := pending.push (p.fvarId, j, ft)
-              if !fields.isEmpty then
-                let l : LazyMatch :=
-                  { discr := cs.discr, scrut, ty := tn, variant := layout.variant,
-                    nbinders := binders.size, fields, pending }
-                ctx' := { ctx' with lazy := ctx'.lazy.push l }
-            -- In the arm of a constructor without fields, the matched value
-            -- is that constructor, which costs nothing to build (`leaf` used
-            -- as the children of a new node).
-            let mut pre := #[]
-            if binders.isEmpty && hasFVar cs.discr k then
-              let x ← fresh "nc"
-              pre := #[(x, some sty, RR.Expr.ctor tn (some layout.variant) #[])]
-              ctx' := { ctx' with vars := ctx'.vars.insert cs.discr (x, sty),
-                                  lazy := ctx'.lazy.map fun l =>
-                                    { l with fields := l.fields.filter (·.1 != cs.discr),
-                                             pending := l.pending.filter (·.1 != cs.discr) } }
-            let body ← lowerAlt ctx' outlined retTy k
-            arms := arms.push { ty := tn, ctor := some layout.variant, binders, body := { body with lets := pre ++ body.lets } }
+            -- Hooks: fields bound later instead (Opt/LazyFields), bindings
+            -- before the arm's code (Opt/NullaryScrutinee).
+            let arm : CasesArm := { discr := cs.discr, scrut, ty := tn, layout, params := ps, code := k,
+                                    shared := info.shape == .enum }
+            let (armBinders, armCtx) ← H.enumFields ctx' arm binders
+            let (pre, armCtx) ← H.armPrelude armCtx arm armBinders
+            let body ← lowerAlt armCtx outlined retTy k
+            arms := arms.push { ty := tn, ctor := some layout.variant, binders := armBinders,
+                                body := { body with lets := pre ++ body.lets } }
           | _ => pure ()
         if arms.size < info.ctorOrder.size then
           let body ← match dflt with
@@ -320,68 +257,11 @@ mutual
         return .mtch (.var scrut) arms
     | t => throwError "lean2rr: cases on value of type {t.render} ({cs.typeName})"
 
-  /-- Lower the code of an alternative. A lazily matched value (see
-  `lowerCases`) whose fields the alternative uses is matched again first.
-  When the alternative does not use the value itself, the value dies here:
-  this match consumes it and binds every field the alternative uses (also
-  those bound before, which are then only borrowed). Otherwise it binds the
-  pending fields needed while the value is live. -/
+  /-- Lower the code of an alternative, after its fields are bound (a hook
+  may bind more first: Opt/LazyFields). -/
   partial def lowerAlt (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (k : Code .pure) :
-      LowerM RR.Block := do
-    if ctx.lazy.isEmpty then return ← lowerCode ctx outlined retTy k
-    let used := codeUses k {}
-    for h : i in [:ctx.lazy.size] do
-      let l := ctx.lazy[i]
-      let live := usesVar ctx.jpBodies l.discr k
-      if l.struct then
-        -- A structure: project the pending fields this code uses (while
-        -- the structure is live, only those needed before it dies).
-        let need := l.pending.filter (used.contains ·.1)
-        let now := if live && !need.isEmpty then
-            let early := usesWhileLive ctx.jpBodies l.discr k {}
-            need.filter (early.contains ·.1)
-          else need
-        if now.isEmpty then continue
-        let scrut := match ctx.vars[l.discr]? with
-          | some (n, _) => n
-          | none => l.scrut
-        let mut lets := #[]
-        let mut ctx' := ctx
-        for (p, j, ft) in now do
-          let x ← fresh "f"
-          lets := lets.push (x, some ft, RR.Expr.field (.var scrut) j)
-          ctx' := { ctx' with vars := ctx'.vars.insert p (x, ft) }
-        let rest := l.pending.filter fun q => !now.any (·.1 == q.1)
-        ctx' := { ctx' with lazy :=
-          if rest.isEmpty then ctx'.lazy.eraseIdx! i else ctx'.lazy.set! i { l with pending := rest } }
-        let body ← lowerAlt ctx' outlined retTy k
-        return { body with lets := lets ++ body.lets }
-      let now := if live then
-          let need := l.pending.filter (used.contains ·.1)
-          if need.isEmpty then need else
-            let early := usesWhileLive ctx.jpBodies l.discr k {}
-            need.filter (early.contains ·.1)
-        else l.fields.filter (used.contains ·.1)
-      if now.isEmpty then continue
-      -- The value's current name: the match of an enclosing lazy value may
-      -- have bound it again (it is a field of that value).
-      let scrut := match ctx.vars[l.discr]? with
-        | some (n, _) => n
-        | none => l.scrut
-      let mut binders := Array.replicate l.nbinders (none : Option String)
-      let mut ctx' := ctx
-      for (p, j, ft) in now do
-        let x ← fresh "f"
-        binders := binders.set! j (some x)
-        ctx' := { ctx' with vars := ctx'.vars.insert p (x, ft) }
-      let rest := l.pending.filter fun q => !now.any (·.1 == q.1)
-      ctx' := { ctx' with lazy :=
-        if live then ctx'.lazy.set! i { l with pending := rest } else ctx'.lazy.eraseIdx! i }
-      let body ← lowerAlt ctx' outlined retTy k
-      return .ofExpr (.mtch (.var scrut) #[
-        { ty := l.ty, ctor := some l.variant, binders, body },
-        { ty := l.ty, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[retTy] #[]) }])
-    lowerCode ctx outlined retTy k
+      LowerM RR.Block :=
+    H.lowerAlt (lowerAlt · outlined retTy) (lowerCode · outlined retTy) ctx retTy k
 end
 
 /-- Lower a declaration with code to a Reussir function. -/
