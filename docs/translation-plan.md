@@ -124,7 +124,9 @@ alternative's fields), a pass over the generated Reussir functions
 (`rrPasses`), or an edit of the prelude given those functions
 (`preludePasses`: `origin-free-reads` points the array reads at the
 runtime's plain release when no conversion of the program produces an
-array, §5.1). Every hook's default is the plain translation. A pass keeps
+array, §5.1). Facts about the whole program that passes consult are
+computed once by the core (`LowerCtx.observesIdentity`, used by
+`fresh-rebuild`, §5.5). Every hook's default is the plain translation. A pass keeps
 its own state in the code-lowering context's extension slot
 (`CodeCtx.ext`), not in the core's.
 
@@ -1018,6 +1020,21 @@ into `t`) returns that value itself, as natively: the same object, with its
 sharing. Code that stops when `ptrEq` says a step changed nothing (Lean's
 `Expr.replace`, fixpoint loops) depends on it, and a lookup returning an
 existing node must not copy it.
+
+The matched value then stays live across the match, and Reussir cannot
+reuse its cell for what the other arms build. That is the error arm of
+every `ExceptT`/`Option`/`EStateM` bind (`| .error _ => r`), so each bind's
+success path would allocate its result and free the matched one. The
+optional pass `fresh-rebuild` returns the constructor rebuilt from the
+arm's fields instead, where nothing can tell the two apart and no copy is
+likely: in a program that never asks for an object's identity (no
+`ptrAddrUnsafe`, nothing that inlines to it such as `ptrEq`, no
+`ST.Ref.ptrEq`), when the matched value is the result of a call or a
+constructor application in the same function (a bind's result, normally
+unique: Reussir reuses its cell, and the rebuilt value is the same cell),
+and the arm binds every field and uses the value only by returning it.
+A parameter or a field (a node that a lookup returns) is still returned
+itself. MonadicInterp: 1.25x native without the pass, 1.10x with it.
 
 Two shapes help Reussir's token reuse, which gives a cell freed by a match
 to a later construction (the optional passes `nullary-scrutinee`,
