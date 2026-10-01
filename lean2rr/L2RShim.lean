@@ -22,6 +22,10 @@ in the same order, the same errors (`lean_decode_uv_error`: libuv's code as
 the error number, `uv_strerror`'s message), the same promises (resolved at
 once or later, the same values).
 
+The shim also replaces a few Lean definitions whose native behaviour
+depends on Lean's reference counting in a way the translation does not
+reproduce (the end of this file).
+
 An operation that completes later works the same way everywhere: a promise
 `r` (of `Unit`) goes to the runtime with the operation; when the operation
 completes, the runtime stores its outcome in its `Op` and drops `r`, which
@@ -49,6 +53,7 @@ instance : Nonempty Op := OpImpl.property
 @[extern "lean_shim_op_bytes"] opaque opBytes (o : @& Op) : BaseIO ByteArray
 @[extern "lean_shim_op_addr"] opaque opAddr (o : @& Op) : BaseIO ByteArray
 @[extern "lean_shim_op_str"] opaque opStr (o : @& Op) (i : UInt32) : BaseIO String
+@[extern "lean_shim_op_str_count"] opaque opStrCount (o : @& Op) : BaseIO UInt32
 @[extern "lean_shim_op_has_handle"] opaque opHasHandle (o : @& Op) : BaseIO Bool
 @[extern "lean_shim_op_handle"] opaque opSocket (o : @& Op) : BaseIO TCP.Socket
 
@@ -552,5 +557,241 @@ def interfaceAddresses : IO (Array InterfaceAddress) := do
       address := ipOf b (i + 7)
       netMask := ipOf b (i + 24) }
   return out
+
+/-! ## The system (`uv/system.cpp`) -/
+
+namespace Sys
+open Std.Internal.UV.System
+
+@[extern "lean_shim_sys_title_get"] opaque primTitleGet : BaseIO String
+@[extern "lean_shim_sys_title_set"] opaque primTitleSet (s : @& String) : BaseIO Unit
+/-- 0 `uptime`, 1 `cpuInfo`, 2 `cwd`, 3 `osHomedir`, 4 `osTmpdir`,
+5 `osGetPasswd`, 6 `osEnviron`, 7 `osGetHostname`, 8 `osUname`,
+9 `getrusage`, 10 `exePath`: an operation with the result. -/
+@[extern "lean_shim_sys_query"] opaque primQuery (which : UInt8) : BaseIO Op
+@[extern "lean_shim_sys_group"] opaque primGroup (gid : UInt64) : BaseIO Op
+@[extern "lean_shim_sys_getenv"] opaque primGetenv (name : @& String) : BaseIO Op
+@[extern "lean_shim_sys_priority"] opaque primGetPriority (pid : UInt64) : BaseIO Op
+/-- 0 `osGetPid`, 1 `osGetPpid`, 2 `hrtime`, 3 `freeMemory`,
+4 `totalMemory`, 5 `constrainedMemory`, 6 `availableMemory`. -/
+@[extern "lean_shim_sys_word"] opaque primWord (which : UInt8) : BaseIO UInt64
+@[extern "lean_shim_sys_chdir"] opaque primChdir (p : @& String) : BaseIO UInt32
+@[extern "lean_shim_sys_setenv"] opaque primSetenv (n v : @& String) (set : Bool) : BaseIO UInt32
+@[extern "lean_shim_sys_setpriority"] opaque primSetPriority (pid prio : UInt64) : BaseIO UInt32
+@[extern "lean_shim_sys_random"] opaque primRandom (size : UInt64) (r : IO.Promise Unit) : BaseIO Op
+
+/-- The little-endian word at byte `i`. -/
+def word (b : ByteArray) (i : Nat) : UInt64 :=
+  (List.range 8).foldl (fun acc k => acc ||| ((b.get! (i + k)).toUInt64 <<< (8 * k).toUInt64)) 0
+
+/-- `mk_embedded_nul_error`. -/
+def nulError (s : String) : IO.Error :=
+  .mkInvalidArgumentFile s 22 "string contains NUL bytes"
+
+def hasNul (s : String) : Bool := s.toUTF8.data.contains 0
+
+/-- An operation's result: its error, or its first string. -/
+def str0 (o : Op) : IO String := do
+  check (← opCode o)
+  opStr o 0
+
+@[export lean_uv_get_process_title]
+def getProcessTitle : IO String := primTitleGet
+
+@[export lean_uv_set_process_title]
+def setProcessTitle (t : String) : IO Unit := do
+  if hasNul t then throw (nulError t)
+  primTitleSet t
+
+@[export lean_uv_uptime]
+def uptime : IO UInt64 := do
+  let o ← primQuery 0
+  check (← opCode o)
+  return word (← opBytes o) 0
+
+@[export lean_uv_os_getpid]
+def osGetPid : IO UInt64 := primWord 0
+
+@[export lean_uv_os_getppid]
+def osGetPpid : IO UInt64 := primWord 1
+
+@[export lean_uv_cpu_info]
+def cpuInfo : IO (Array CPUInfo) := do
+  let o ← primQuery 1
+  check (← opCode o)
+  let b ← opBytes o
+  let n := b.size / 48
+  let mut out := #[]
+  for k in [0:n] do
+    let i := 48 * k
+    out := out.push {
+      model := ← opStr o k.toUInt32
+      speed := word b i
+      times := { user := word b (i + 8), nice := word b (i + 16), sys := word b (i + 24),
+                 idle := word b (i + 32), irq := word b (i + 40) } }
+  return out
+
+@[export lean_uv_cwd]
+def cwd : IO String := do str0 (← primQuery 2)
+
+@[export lean_uv_chdir]
+def chdir (p : String) : IO Unit := do
+  if hasNul p then throw (nulError p)
+  let c ← primChdir p
+  if c != 0 then
+    -- `lean_decode_uv_error(result, path)`: the file name variants.
+    let d := uvStrerror c
+    throw <| match uvKind c with
+      | 1 => .mkInterrupted p c d
+      | 2 => .mkInvalidArgumentFile p c d
+      | 4 => .mkNoFileOrDirectory p c d
+      | 5 => .mkPermissionDeniedFile p c d
+      | 7 => .mkResourceExhaustedFile p c d
+      | 9 => .mkInappropriateTypeFile p c d
+      | 11 => .mkNoSuchThingFile p c d
+      | 13 => .mkAlreadyExistsFile p c d
+      | _ => uvError c
+
+@[export lean_uv_os_homedir]
+def osHomedir : IO String := do str0 (← primQuery 3)
+
+@[export lean_uv_os_tmpdir]
+def osTmpdir : IO String := do str0 (← primQuery 4)
+
+@[export lean_uv_os_get_passwd]
+def osGetPasswd : IO PasswdInfo := do
+  let o ← primQuery 5
+  check (← opCode o)
+  let b ← opBytes o
+  let shell ← opStr o 1
+  let home ← opStr o 2
+  return { username := ← opStr o 0, uid := some (word b 0), gid := some (word b 8),
+           shell := some shell, homedir := some home }
+
+@[export lean_uv_os_get_group]
+def osGetGroup (gid : UInt64) : IO (Option GroupInfo) := do
+  let o ← primGroup gid
+  let c ← opCode o
+  if c == (0 : UInt32) - 2 then return none
+  if c != 0 then
+    -- `lean_decode_uv_error(result, "group")`.
+    let d := uvStrerror c
+    throw <| match uvKind c with
+      | 2 => .mkInvalidArgumentFile "group" c d
+      | 5 => .mkPermissionDeniedFile "group" c d
+      | 7 => .mkResourceExhaustedFile "group" c d
+      | 11 => .mkNoSuchThingFile "group" c d
+      | _ => uvError c
+  let n := (← opBytes o)
+  let mut members := #[]
+  for k in [1:(← opStrCount o).toNat] do
+    members := members.push (← opStr o k.toUInt32)
+  return some { groupname := ← opStr o 0, gid := word n 0, members }
+
+@[export lean_uv_os_environ]
+def osEnviron : IO (Array (String × String)) := do
+  let o ← primQuery 6
+  let mut out := #[]
+  for k in [0:(← opStrCount o).toNat / 2] do
+    out := out.push (← opStr o (2 * k).toUInt32, ← opStr o (2 * k + 1).toUInt32)
+  return out
+
+@[export lean_uv_os_getenv]
+def osGetenv (name : String) : IO (Option String) := do
+  if hasNul name then return none
+  let o ← primGetenv name
+  if (← opCode o) != 0 then return none
+  return some (← opStr o 0)
+
+@[export lean_uv_os_setenv]
+def osSetenv (name value : String) : IO Unit := do
+  if hasNul name then throw (nulError name)
+  if hasNul value then throw (nulError value)
+  check (← primSetenv name value true)
+
+@[export lean_uv_os_unsetenv]
+def osUnsetenv (name : String) : IO Unit := do
+  if hasNul name then throw (nulError name)
+  check (← primSetenv name "" false)
+
+@[export lean_uv_os_gethostname]
+def osGetHostname : IO String := do str0 (← primQuery 7)
+
+@[export lean_uv_os_getpriority]
+def osGetPriority (pid : UInt64) : IO Int64 := do
+  let o ← primGetPriority pid
+  check (← opCode o)
+  return (word (← opBytes o) 0).toInt64
+
+@[export lean_uv_os_setpriority]
+def osSetPriority (pid : UInt64) (prio : Int64) : IO Unit := do
+  check (← primSetPriority pid prio.toUInt64)
+
+@[export lean_uv_os_uname]
+def osUname : IO UnameInfo := do
+  let o ← primQuery 8
+  check (← opCode o)
+  return { sysname := ← opStr o 0, release := ← opStr o 1, version := ← opStr o 2, machine := ← opStr o 3 }
+
+@[export lean_uv_hrtime]
+def hrtime : IO UInt64 := primWord 2
+
+@[export lean_uv_random]
+def random (size : UInt64) : IO (IO.Promise (Except IO.Error ByteArray)) := do
+  let r ← IO.Promise.new
+  let o ← primRandom size r
+  let p ← IO.Promise.new
+  whenDone r o do
+    let c ← opCode o
+    if c != 0 then p.resolve (.error (uvError c)) else p.resolve (.ok (← opBytes o))
+  return p
+
+@[export lean_uv_getrusage]
+def getrusage : IO RUsage := do
+  let o ← primQuery 9
+  check (← opCode o)
+  let b ← opBytes o
+  let w (k : Nat) := word b (8 * k)
+  return { userTime := w 0, systemTime := w 1, maxRSS := w 2, ixRSS := w 3, idRSS := w 4,
+           isRSS := w 5, minFlt := w 6, majFlt := w 7, nSwap := w 8, inBlock := w 9,
+           outBlock := w 10, msgSent := w 11, msgRecv := w 12, signals := w 13,
+           voluntaryCS := w 14, involuntaryCS := w 15 }
+
+@[export lean_uv_exepath]
+def exePath : IO String := do str0 (← primQuery 10)
+
+@[export lean_uv_get_free_memory]
+def freeMemory : IO UInt64 := primWord 3
+
+@[export lean_uv_get_total_memory]
+def totalMemory : IO UInt64 := primWord 4
+
+@[export lean_uv_get_constrained_memory]
+def constrainedMemory : IO UInt64 := primWord 5
+
+@[export lean_uv_get_available_memory]
+def availableMemory : IO UInt64 := primWord 6
+
+end Sys
+
+/-! ## Definitions the shim replaces
+
+A definition exported as `l2r_override_<its mangled name>` replaces the
+Lean definition wherever the program calls it (`Mono.redirectTarget`). -/
+
+/-- `IO.hasFinished promise.result?`, the promise released after the
+question (`leanrt::task::promise_is_resolved`). -/
+@[extern "lean_shim_promise_is_resolved"]
+opaque primPromiseIsResolved {α : Type} (promise : @& IO.Promise α) : BaseIO Bool
+
+/-- `IO.Promise.isResolved`. Natively its parameter is borrowed (Lean's
+borrow inference: `result?` borrows it), so the caller releases the promise
+after the question; were this the last reference, which resolves the
+promise with `none`, the answer is still the state before. Compiled as
+written, the promise would be released inside `result?`, before the
+question. -/
+@[export l2r_override_IO_Promise_isResolved]
+def promiseIsResolved {α : Type} (promise : IO.Promise α) : BaseIO Bool :=
+  primPromiseIsResolved promise
 
 end L2RShim

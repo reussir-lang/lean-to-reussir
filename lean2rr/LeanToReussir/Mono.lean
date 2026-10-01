@@ -415,9 +415,14 @@ def ensureIOErrorBuilders (f : Name) : MonoM Unit := do
       discard <| instanceName { decl := d, typeArgs := #[] }
 
 /-- Redirect a call target: an extern implemented by an exported Lean
-definition becomes that definition; with `safeSources`, a type-unsafe
+definition becomes that definition, as does a definition lean2rr's shim
+replaces; with `safeSources`, a type-unsafe
 implementation becomes the safe declaration it implements. -/
 def redirectTarget (f : Name) : MonoM Name := do
+  -- A definition the shim replaces (`L2RShim`, exported as
+  -- `l2r_override_<f mangled>`) is that definition.
+  if let some d := (← exportMap).get? (f.mangle "l2r_override_") then
+    if d != f then return d
   -- An extern whose C symbol is provided by an `@[export]` Lean definition
   -- is that definition (Lean's runtime calls it; we compile it).
   if isExtern (← getEnv) f then

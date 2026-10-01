@@ -38,6 +38,7 @@ pub mod rt;
 pub mod sched;
 pub mod string;
 pub mod sync;
+pub mod sys;
 pub mod tagvec;
 pub mod task;
 

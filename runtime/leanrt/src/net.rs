@@ -270,6 +270,12 @@ impl Pending {
     }
 }
 
+/// Complete operation `o` (its promise `r`) now: the continuation runs on
+/// the event loop's context (as a libuv callback on its next iteration).
+pub fn complete_now(o: &LHandle, r: LPromise, code: i32) {
+    Pending::new(o, r).complete(code)
+}
+
 // ---------------------------------------------------------------------------
 // The reactor
 
@@ -303,6 +309,31 @@ fn fire(r: LPromise) {
     sched::ensure_evloop();
     reactor().fired.push(r);
     sched::wake_evloop();
+}
+
+/// Give up a promise the runtime held: it is dropped on the event loop's
+/// context, like a completion (dropping the last reference resolves it with
+/// `none` and runs its dependents, which must not run inside a primitive).
+pub fn release(p: LPromise) {
+    fire(p)
+}
+
+/// A promise an operation's start received: given up through the event
+/// loop unless the operation keeps it (`take`).
+struct Ready(Option<LPromise>);
+
+impl Ready {
+    fn take(&mut self) -> LPromise {
+        self.0.take().expect("leanrt: promise taken twice")
+    }
+}
+
+impl Drop for Ready {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            release(p);
+        }
+    }
 }
 
 /// Whether completions wait to be delivered.
@@ -479,7 +510,9 @@ pub fn timer_promise(h: &LHandle) -> LPromise {
 fn timer_set_promise(h: &LHandle, p: LPromise, r: LPromise) -> LHandle {
     let o = op_new();
     let t = timer(h);
-    t.promise = Some(p);
+    if let Some(old) = t.promise.replace(p) {
+        release(old);
+    }
     if let Some(old) = t.pending.take() {
         old.cancel();
     }
@@ -495,6 +528,8 @@ pub fn timer_start(h: &LHandle, p: LPromise, r: LPromise) -> LHandle {
     if t.signum < 0 {
         let o = op_new();
         op(&o).sync_err = UV_EINVAL;
+        release(p);
+        release(r);
         return o;
     }
     let o = timer_set_promise(h, p, r);
@@ -540,7 +575,9 @@ pub fn timer_reset(h: &LHandle) {
 /// finishes.
 pub fn timer_stop(h: &LHandle) {
     let t = timer(h);
-    t.promise = None;
+    if let Some(old) = t.promise.take() {
+        release(old);
+    }
     if let Some(p) = t.pending.take() {
         p.cancel();
     }
@@ -559,7 +596,9 @@ pub fn timer_stop(h: &LHandle) {
 pub fn timer_cancel(h: &LHandle) {
     let t = timer(h);
     if t.state == RUNNING && t.promise.is_some() {
-        t.promise = None;
+        if let Some(old) = t.promise.take() {
+            release(old);
+        }
         if let Some(p) = t.pending.take() {
             p.cancel();
         }
@@ -890,6 +929,7 @@ pub fn tcp_listen(h: &LHandle, backlog: i32) -> i32 {
 /// `uv_tcp_connect`: `sync_err` if it fails at once.
 pub fn tcp_connect(h: &LHandle, a: &[u8], r: LPromise) -> LHandle {
     let o = op_new();
+    let mut r = Ready(Some(r));
     let s = sock(h);
     let Some((sa, len)) = decode_addr(a) else {
         op(&o).sync_err = UV_EINVAL;
@@ -899,7 +939,7 @@ pub fn tcp_connect(h: &LHandle, a: &[u8], r: LPromise) -> LHandle {
         op(&o).sync_err = UV_EALREADY;
         return o;
     }
-    let p = Pending::new(&o, r);
+    let p = Pending::new(&o, r.take());
     if s.delayed_error != 0 {
         let e = std::mem::replace(&mut s.delayed_error, 0);
         p.complete(e);
@@ -937,6 +977,7 @@ pub fn tcp_connect(h: &LHandle, a: &[u8], r: LPromise) -> LHandle {
 /// `uv_write` of `data` (the shim joins the buffers).
 pub fn tcp_send(h: &LHandle, data: Vec<u8>, r: LPromise) -> LHandle {
     let o = op_new();
+    let mut r = Ready(Some(r));
     let s = sock(h);
     if s.fd < 0 {
         op(&o).sync_err = UV_EBADF;
@@ -946,7 +987,7 @@ pub fn tcp_send(h: &LHandle, data: Vec<u8>, r: LPromise) -> LHandle {
         op(&o).sync_err = UV_EPIPE;
         return o;
     }
-    s.writes.push_back(Write { data, off: 0, dest: None, pending: Pending::new(&o, r) });
+    s.writes.push_back(Write { data, off: 0, dest: None, pending: Pending::new(&o, r.take()) });
     if s.connect.is_none() {
         flush_writes(h);
     }
@@ -1006,6 +1047,7 @@ fn flush_writes(h: &LHandle) {
 /// bytes; `size` 0 waits until the socket is readable (`waitReadable`).
 pub fn sock_recv(h: &LHandle, size: u64, r: LPromise) -> LHandle {
     let o = op_new();
+    let mut r = Ready(Some(r));
     let s = sock(h);
     if s.read.is_some() {
         op(&o).sync_err = UV_EALREADY;
@@ -1023,7 +1065,7 @@ pub fn sock_recv(h: &LHandle, size: u64, r: LPromise) -> LHandle {
             return o;
         }
     }
-    s.read = Some((Pending::new(&o, r), size));
+    s.read = Some((Pending::new(&o, r.take()), size));
     watch(h);
     o
 }
@@ -1060,6 +1102,7 @@ fn accept_now(s: &mut Socket) -> Result<Option<LHandle>, i32> {
 /// otherwise when one arrives.
 pub fn tcp_accept(h: &LHandle, r: LPromise) -> LHandle {
     let o = op_new();
+    let mut r = Ready(Some(r));
     let s = sock(h);
     if s.accept.is_some() {
         op(&o).sync_err = UV_EALREADY;
@@ -1072,7 +1115,7 @@ pub fn tcp_accept(h: &LHandle, r: LPromise) -> LHandle {
             x.handle = Some(c);
         }
         Ok(None) => {
-            s.accept = Some(Pending::new(&o, r));
+            s.accept = Some(Pending::new(&o, r.take()));
             watch(h);
         }
         Err(e) => {
@@ -1110,6 +1153,7 @@ pub fn tcp_cancel_accept(h: &LHandle) {
 /// `uv_shutdown`: after the pending writes.
 pub fn tcp_shutdown(h: &LHandle, r: LPromise) -> LHandle {
     let o = op_new();
+    let mut r = Ready(Some(r));
     let s = sock(h);
     if s.shutdown.is_some() {
         op(&o).sync_err = UV_EALREADY;
@@ -1119,7 +1163,7 @@ pub fn tcp_shutdown(h: &LHandle, r: LPromise) -> LHandle {
         op(&o).sync_err = UV_ENOTCONN;
         return o;
     }
-    s.shutdown = Some(Pending::new(&o, r));
+    s.shutdown = Some(Pending::new(&o, r.take()));
     if s.connect.is_none() {
         flush_writes(h);
     }
@@ -1259,6 +1303,7 @@ pub fn udp_connect(h: &LHandle, a: &[u8]) -> i32 {
 /// `uv_udp_send` to `a` (empty: to the connected peer).
 pub fn udp_send(h: &LHandle, data: Vec<u8>, a: &[u8], r: LPromise) -> LHandle {
     let o = op_new();
+    let mut r = Ready(Some(r));
     let s = sock(h);
     let dest = if a.is_empty() { None } else { decode_addr(a) };
     if dest.is_some() && s.flags & F_UDP_CONNECTED != 0 {
@@ -1276,7 +1321,7 @@ pub fn udp_send(h: &LHandle, data: Vec<u8>, a: &[u8], r: LPromise) -> LHandle {
             return o;
         }
     }
-    s.writes.push_back(Write { data, off: 0, dest, pending: Pending::new(&o, r) });
+    s.writes.push_back(Write { data, off: 0, dest, pending: Pending::new(&o, r.take()) });
     flush_writes(h);
     if s.has_pending() {
         watch(h);
@@ -1496,6 +1541,7 @@ fn eai_code(e: i32) -> i32 {
 /// family, then 16 bytes).
 pub fn dns_get_info(host: &[u8], service: &[u8], family: u8, r: LPromise) -> LHandle {
     let o = op_new();
+    let mut r = Ready(Some(r));
     let hints = AddrInfo {
         ai_flags: 0,
         ai_family: match family {
@@ -1516,7 +1562,7 @@ pub fn dns_get_info(host: &[u8], service: &[u8], family: u8, r: LPromise) -> LHa
     sz.push(0);
     let mut res: *mut AddrInfo = std::ptr::null_mut();
     let rc = unsafe { getaddrinfo(hz.as_ptr() as *const std::ffi::c_char, sz.as_ptr() as *const std::ffi::c_char, &hints, &mut res) };
-    let p = Pending::new(&o, r);
+    let p = Pending::new(&o, r.take());
     if rc != 0 {
         p.complete(eai_code(rc));
         return o;
@@ -1551,7 +1597,8 @@ pub fn dns_get_info(host: &[u8], service: &[u8], family: u8, r: LPromise) -> LHa
 /// `getNameInfo addr`: the host and service names (`strs`).
 pub fn dns_get_name(a: &[u8], r: LPromise) -> LHandle {
     let o = op_new();
-    let p = Pending::new(&o, r);
+    let mut r = Ready(Some(r));
+    let p = Pending::new(&o, r.take());
     let Some((sa, len)) = decode_addr(a) else {
         p.complete(UV_EINVAL);
         return o;

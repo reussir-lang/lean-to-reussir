@@ -3142,6 +3142,13 @@ fn lean_shim_ntop(a : RVec<u8>) -> LStr [{
 #[ffi(import)]
 fn l2r_shim_ifaces() -> LHandle [{ leanrt::net::ifaces() }];
 
+// `IO.Promise.isResolved`, which borrows the promise: released after the
+// question (a last reference resolves it with `none`).
+#[ffi(import)]
+fn l2r_shim_promise_is_resolved(p : LPromise) -> bool [{
+    { let r = leanrt::task::promise_is_resolved(leanrt::task::promise_cell(&p)); drop(p); r }
+}];
+
 // Timers and signal watchers.
 #[ffi(import)]
 fn l2r_shim_timer_new(timeout : u64, repeating : bool) -> LHandle [{ leanrt::net::timer_new(timeout, repeating) }];
@@ -3261,6 +3268,52 @@ fn l2r_shim_dns_get_name(a : RVec<u8>, r : LPromise) -> LHandle [{
 // `Std.Internal.UV.Loop.alive`: libuv's loop is always alive natively (its
 // wake-up handle).
 fn l2r_uv_event_loop_alive() -> bool { true }
+
+#[ffi(import)]
+fn l2r_shim_op_str_count(o : LHandle) -> u32 [{ { let r = leanrt::net::op(&o).strs.len() as u32; leanrt::rc_release(o); r } }];
+
+// Std.Internal.UV.System (`leanrt::sys`).
+#[ffi(import)]
+fn l2r_shim_sys_title_get() -> LStr [{ leanrt::string::from_bytes(&leanrt::sys::title_get()) }];
+#[ffi(import)]
+fn l2r_shim_sys_title_set_h(s : LStr) -> u64 [{ { leanrt::sys::title_set(s.utf8()); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_sys_title_set(s : LStr) -> L2RUnit { l2r_unit_of(l2r_shim_sys_title_set_h(s)) }
+#[ffi(import)]
+fn l2r_shim_sys_query(which : u8) -> LHandle [{
+    match which {
+        0 => leanrt::sys::uptime(), 1 => leanrt::sys::cpu_info(), 2 => leanrt::sys::cwd(), 3 => leanrt::sys::homedir(),
+        4 => leanrt::sys::tmpdir(), 5 => leanrt::sys::passwd(), 6 => leanrt::sys::environ_all(), 7 => leanrt::sys::hostname(),
+        8 => leanrt::sys::uname_all(), 9 => leanrt::sys::rusage(), _ => leanrt::sys::exepath()
+    }
+}];
+#[ffi(import)]
+fn l2r_shim_sys_group(gid : u64) -> LHandle [{ leanrt::sys::group(gid) }];
+#[ffi(import)]
+fn l2r_shim_sys_getenv(n : LStr) -> LHandle [{ { let o = leanrt::sys::getenv(n.utf8()); leanrt::rc_release(n); o } }];
+#[ffi(import)]
+fn l2r_shim_sys_priority(pid : u64) -> LHandle [{ leanrt::sys::get_priority(pid) }];
+#[ffi(import)]
+fn l2r_shim_sys_word(which : u8) -> u64 [{
+    match which {
+        0 => leanrt::sys::pid(false), 1 => leanrt::sys::pid(true), 2 => leanrt::sys::hrtime(),
+        3 => leanrt::sys::memory(0), 4 => leanrt::sys::memory(1), 5 => leanrt::sys::memory(2), _ => leanrt::sys::memory(3)
+    }
+}];
+#[ffi(import)]
+fn l2r_shim_sys_chdir(p : LStr) -> u32 [{ { let r = leanrt::sys::chdir_to(p.utf8()) as u32; leanrt::rc_release(p); r } }];
+#[ffi(import)]
+fn l2r_shim_sys_setenv(n : LStr, v : LStr, set : bool) -> u32 [{
+    {
+        let r = leanrt::sys::setenv_to(n.utf8(), if set { Some(v.utf8()) } else { None }) as u32;
+        leanrt::rc_release(n);
+        leanrt::rc_release(v);
+        r
+    }
+}];
+#[ffi(import)]
+fn l2r_shim_sys_setpriority(pid : u64, prio : u64) -> u32 [{ leanrt::sys::set_priority(pid, prio) as u32 }];
+#[ffi(import)]
+fn l2r_shim_sys_random(size : u64, r : LPromise) -> LHandle [{ leanrt::sys::random(size, r) }];
 
 // ===========================================================================
 // Debugging, platform
