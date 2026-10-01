@@ -1668,12 +1668,10 @@ fn lean_string_utf8_get_bang(s : LStr, p : Nat) -> u32 {
     if c == 1114112 { let ignored = l2r_panic_code(1); 65 } else { c }
 }
 
-fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 {
-    match p {
-        Nat::Small(i) => l2r_string_get_fast(s, i),
-        Nat::Big(_) => 65
-    }
-}
+// `String.Pos.get`/`Pos.Raw.get'` and `next'` take a proof that the
+// position is valid and not the end: never a `Nat::Big` (see
+// `l2r_index_of_nat`).
+fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 { l2r_string_get_fast(s, l2r_index_of_nat(p)) }
 
 // `String.Pos.Raw.next`: `p + 1` at or past the end.
 fn lean_string_utf8_next(s : LStr, p : Nat) -> Nat {
@@ -1686,12 +1684,7 @@ fn lean_string_utf8_next(s : LStr, p : Nat) -> Nat {
     }
 }
 
-fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat {
-    match p {
-        Nat::Small(i) => Nat::Small{l2r_string_next_fast(s, i)},
-        Nat::Big(_) => lean_nat_add(p, Nat::Small{1})
-    }
-}
+fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat { Nat::Small{l2r_string_next_fast(s, l2r_index_of_nat(p))} }
 
 fn lean_string_utf8_prev(s : LStr, p : Nat) -> Nat {
     match p {
@@ -1983,8 +1976,8 @@ fn lean_mk_empty_array_with_capacity<T>(n : Nat) -> RVec<T> { l2r_mk_empty_with_
 fn lean_array_get_size<T>(v : RVec<T>) -> Nat { Nat::Small{l2r_array_size(v)} }
 fn lean_array_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
 
-fn lean_array_fget<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get(v, lean_usize_of_nat(i)) }
-fn lean_array_fget_borrowed<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get(v, lean_usize_of_nat(i)) }
+fn lean_array_fget<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get(v, l2r_index_of_nat(i)) }
+fn lean_array_fget_borrowed<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get(v, l2r_index_of_nat(i)) }
 fn lean_array_uget<T>(v : RVec<T>, i : u64) -> T { l2r_array_get(v, i) }
 fn lean_array_uget_borrowed<T>(v : RVec<T>, i : u64) -> T { l2r_array_get(v, i) }
 
@@ -1996,10 +1989,23 @@ fn l2r_index_ok(i : Nat, n : u64) -> bool {
     }
 }
 
+// An index that is in bounds (a `Fin` of the size, or checked by
+// `l2r_index_ok`): never a `Nat::Big` (natively `lean_unbox` of it would be
+// garbage). The `Big` arm ends the program instead of rejoining the read:
+// a rejoining arm with refcount traffic on the big number would make LLVM
+// reload the array's count after the caller's increment, and the read's
+// release could then not cancel against it.
+fn l2r_index_of_nat(i : Nat) -> u64 {
+    match i {
+        Nat::Small(k) => k,
+        Nat::Big(_) => l2r_unreachable<u64>()
+    }
+}
+
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
 // return the default.
 fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_get(v, lean_usize_of_nat(i)) } else {
+    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_get(v, l2r_index_of_nat(i)) } else {
         let ignored = l2r_panic_code(0);
         dflt
     }
@@ -2007,12 +2013,12 @@ fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
 
 fn lean_array_get_borrowed<T>(dflt : T, v : RVec<T>, i : Nat) -> T { lean_array_get(dflt, v, i) }
 
-fn lean_array_fset<T>(v : RVec<T>, i : Nat, x : T) -> RVec<T> { l2r_array_set(v, lean_usize_of_nat(i), x) }
+fn lean_array_fset<T>(v : RVec<T>, i : Nat, x : T) -> RVec<T> { l2r_array_set(v, l2r_index_of_nat(i), x) }
 fn lean_array_uset<T>(v : RVec<T>, i : u64, x : T) -> RVec<T> { l2r_array_set(v, i, x) }
 
 // `Array.set!`: out of bounds, panic and return the array unchanged.
 fn lean_array_set<T>(v : RVec<T>, i : Nat, x : T) -> RVec<T> {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_set(v, lean_usize_of_nat(i), x) } else {
+    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_set(v, l2r_index_of_nat(i), x) } else {
         let ignored = l2r_panic_code(0);
         v
     }
@@ -2022,7 +2028,7 @@ fn lean_array_push<T>(v : RVec<T>, x : T) -> RVec<T> { l2r_array_push(v, x) }
 fn lean_array_pop<T>(v : RVec<T>) -> RVec<T> { l2r_array_pop(v) }
 
 fn lean_array_fswap<T>(v : RVec<T>, i : Nat, j : Nat) -> RVec<T> {
-    l2r_array_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j))
+    l2r_array_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j))
 }
 
 fn lean_array_uswap<T>(v : RVec<T>, i : u64, j : u64) -> RVec<T> { l2r_array_swap(v, i, j) }
@@ -2030,7 +2036,7 @@ fn lean_array_uswap<T>(v : RVec<T>, i : u64, j : u64) -> RVec<T> { l2r_array_swa
 // `Array.swapIfInBounds`.
 fn lean_array_swap<T>(v : RVec<T>, i : Nat, j : Nat) -> RVec<T> {
     let n = l2r_array_size(v);
-    if l2r_index_ok(i, n) && l2r_index_ok(j, n) { l2r_array_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j)) } else { v }
+    if l2r_index_ok(i, n) && l2r_index_ok(j, n) { l2r_array_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) } else { v }
 }
 
 // `Array.replicate n x`.
@@ -2145,27 +2151,27 @@ fn lean_mk_empty_natarr_with_capacity(n : Nat) -> LNatArr {
 
 fn lean_natarr_get_size(v : LNatArr) -> Nat { Nat::Small{l2r_natarr_size(v)} }
 fn lean_natarr_size(v : LNatArr) -> u64 { l2r_natarr_size(v) }
-fn lean_natarr_fget(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get(v, lean_usize_of_nat(i)) }
-fn lean_natarr_fget_borrowed(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get(v, lean_usize_of_nat(i)) }
+fn lean_natarr_fget(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get(v, l2r_index_of_nat(i)) }
+fn lean_natarr_fget_borrowed(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get(v, l2r_index_of_nat(i)) }
 fn lean_natarr_uget(v : LNatArr, i : u64) -> Nat { l2r_natarr_get(v, i) }
 fn lean_natarr_uget_borrowed(v : LNatArr, i : u64) -> Nat { l2r_natarr_get(v, i) }
 
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
 // return the default.
 fn lean_natarr_get(dflt : Nat, v : LNatArr, i : Nat) -> Nat {
-    if l2r_index_ok(i, l2r_natarr_size(v)) { l2r_natarr_get(v, lean_usize_of_nat(i)) } else {
+    if l2r_index_ok(i, l2r_natarr_size(v)) { l2r_natarr_get(v, l2r_index_of_nat(i)) } else {
         let ignored = l2r_panic_code(0);
         dflt
     }
 }
 
 fn lean_natarr_get_borrowed(dflt : Nat, v : LNatArr, i : Nat) -> Nat { lean_natarr_get(dflt, v, i) }
-fn lean_natarr_fset(v : LNatArr, i : Nat, x : Nat) -> LNatArr { l2r_natarr_set(v, lean_usize_of_nat(i), x) }
+fn lean_natarr_fset(v : LNatArr, i : Nat, x : Nat) -> LNatArr { l2r_natarr_set(v, l2r_index_of_nat(i), x) }
 fn lean_natarr_uset(v : LNatArr, i : u64, x : Nat) -> LNatArr { l2r_natarr_set(v, i, x) }
 
 // `Array.set!`: out of bounds, panic and return the array unchanged.
 fn lean_natarr_set(v : LNatArr, i : Nat, x : Nat) -> LNatArr {
-    if l2r_index_ok(i, l2r_natarr_size(v)) { l2r_natarr_set(v, lean_usize_of_nat(i), x) } else {
+    if l2r_index_ok(i, l2r_natarr_size(v)) { l2r_natarr_set(v, l2r_index_of_nat(i), x) } else {
         let ignored = l2r_panic_code(0);
         v
     }
@@ -2173,13 +2179,13 @@ fn lean_natarr_set(v : LNatArr, i : Nat, x : Nat) -> LNatArr {
 
 fn lean_natarr_push(v : LNatArr, x : Nat) -> LNatArr { l2r_natarr_push(v, x) }
 fn lean_natarr_pop(v : LNatArr) -> LNatArr { l2r_natarr_pop(v) }
-fn lean_natarr_fswap(v : LNatArr, i : Nat, j : Nat) -> LNatArr { l2r_natarr_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j)) }
+fn lean_natarr_fswap(v : LNatArr, i : Nat, j : Nat) -> LNatArr { l2r_natarr_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) }
 fn lean_natarr_uswap(v : LNatArr, i : u64, j : u64) -> LNatArr { l2r_natarr_swap(v, i, j) }
 
 // `Array.swapIfInBounds`.
 fn lean_natarr_swap(v : LNatArr, i : Nat, j : Nat) -> LNatArr {
     let n = l2r_natarr_size(v);
-    if l2r_index_ok(i, n) && l2r_index_ok(j, n) { l2r_natarr_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j)) } else { v }
+    if l2r_index_ok(i, n) && l2r_index_ok(j, n) { l2r_natarr_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) } else { v }
 }
 
 // `Array.replicate n x`.
@@ -2283,27 +2289,27 @@ fn lean_mk_empty_intarr_with_capacity(n : Nat) -> LIntArr {
 
 fn lean_intarr_get_size(v : LIntArr) -> Nat { Nat::Small{l2r_intarr_size(v)} }
 fn lean_intarr_size(v : LIntArr) -> u64 { l2r_intarr_size(v) }
-fn lean_intarr_fget(v : LIntArr, i : Nat) -> Int { l2r_intarr_get(v, lean_usize_of_nat(i)) }
-fn lean_intarr_fget_borrowed(v : LIntArr, i : Nat) -> Int { l2r_intarr_get(v, lean_usize_of_nat(i)) }
+fn lean_intarr_fget(v : LIntArr, i : Nat) -> Int { l2r_intarr_get(v, l2r_index_of_nat(i)) }
+fn lean_intarr_fget_borrowed(v : LIntArr, i : Nat) -> Int { l2r_intarr_get(v, l2r_index_of_nat(i)) }
 fn lean_intarr_uget(v : LIntArr, i : u64) -> Int { l2r_intarr_get(v, i) }
 fn lean_intarr_uget_borrowed(v : LIntArr, i : u64) -> Int { l2r_intarr_get(v, i) }
 
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
 // return the default.
 fn lean_intarr_get(dflt : Int, v : LIntArr, i : Nat) -> Int {
-    if l2r_index_ok(i, l2r_intarr_size(v)) { l2r_intarr_get(v, lean_usize_of_nat(i)) } else {
+    if l2r_index_ok(i, l2r_intarr_size(v)) { l2r_intarr_get(v, l2r_index_of_nat(i)) } else {
         let ignored = l2r_panic_code(0);
         dflt
     }
 }
 
 fn lean_intarr_get_borrowed(dflt : Int, v : LIntArr, i : Nat) -> Int { lean_intarr_get(dflt, v, i) }
-fn lean_intarr_fset(v : LIntArr, i : Nat, x : Int) -> LIntArr { l2r_intarr_set(v, lean_usize_of_nat(i), x) }
+fn lean_intarr_fset(v : LIntArr, i : Nat, x : Int) -> LIntArr { l2r_intarr_set(v, l2r_index_of_nat(i), x) }
 fn lean_intarr_uset(v : LIntArr, i : u64, x : Int) -> LIntArr { l2r_intarr_set(v, i, x) }
 
 // `Array.set!`: out of bounds, panic and return the array unchanged.
 fn lean_intarr_set(v : LIntArr, i : Nat, x : Int) -> LIntArr {
-    if l2r_index_ok(i, l2r_intarr_size(v)) { l2r_intarr_set(v, lean_usize_of_nat(i), x) } else {
+    if l2r_index_ok(i, l2r_intarr_size(v)) { l2r_intarr_set(v, l2r_index_of_nat(i), x) } else {
         let ignored = l2r_panic_code(0);
         v
     }
@@ -2311,13 +2317,13 @@ fn lean_intarr_set(v : LIntArr, i : Nat, x : Int) -> LIntArr {
 
 fn lean_intarr_push(v : LIntArr, x : Int) -> LIntArr { l2r_intarr_push(v, x) }
 fn lean_intarr_pop(v : LIntArr) -> LIntArr { l2r_intarr_pop(v) }
-fn lean_intarr_fswap(v : LIntArr, i : Nat, j : Nat) -> LIntArr { l2r_intarr_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j)) }
+fn lean_intarr_fswap(v : LIntArr, i : Nat, j : Nat) -> LIntArr { l2r_intarr_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) }
 fn lean_intarr_uswap(v : LIntArr, i : u64, j : u64) -> LIntArr { l2r_intarr_swap(v, i, j) }
 
 // `Array.swapIfInBounds`.
 fn lean_intarr_swap(v : LIntArr, i : Nat, j : Nat) -> LIntArr {
     let n = l2r_intarr_size(v);
-    if l2r_index_ok(i, n) && l2r_index_ok(j, n) { l2r_intarr_swap(v, lean_usize_of_nat(i), lean_usize_of_nat(j)) } else { v }
+    if l2r_index_ok(i, n) && l2r_index_ok(j, n) { l2r_intarr_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) } else { v }
 }
 
 // `Array.replicate n x`.
@@ -2345,17 +2351,17 @@ fn lean_mk_empty_byte_array(n : Nat) -> RVec<u8> { l2r_mk_empty_with_capacity<u8
 fn lean_byte_array_size(v : RVec<u8>) -> Nat { Nat::Small{l2r_array_size(v)} }
 fn lean_sarray_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
 fn lean_byte_array_uget(v : RVec<u8>, i : u64) -> u8 { l2r_array_get(v, i) }
-fn lean_byte_array_fget(v : RVec<u8>, i : Nat) -> u8 { l2r_array_get(v, lean_usize_of_nat(i)) }
+fn lean_byte_array_fget(v : RVec<u8>, i : Nat) -> u8 { l2r_array_get(v, l2r_index_of_nat(i)) }
 // `ByteArray.get!`: 0 out of bounds (no panic, as lean.h).
 fn lean_byte_array_get(v : RVec<u8>, i : Nat) -> u8 {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_get(v, lean_usize_of_nat(i)) } else { 0 }
+    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_get(v, l2r_index_of_nat(i)) } else { 0 }
 }
 fn lean_byte_array_push(v : RVec<u8>, x : u8) -> RVec<u8> { l2r_array_push(v, x) }
 fn lean_byte_array_uset(v : RVec<u8>, i : u64, x : u8) -> RVec<u8> { l2r_array_set(v, i, x) }
-fn lean_byte_array_fset(v : RVec<u8>, i : Nat, x : u8) -> RVec<u8> { l2r_array_set(v, lean_usize_of_nat(i), x) }
+fn lean_byte_array_fset(v : RVec<u8>, i : Nat, x : u8) -> RVec<u8> { l2r_array_set(v, l2r_index_of_nat(i), x) }
 // `ByteArray.set!`: unchanged out of bounds.
 fn lean_byte_array_set(v : RVec<u8>, i : Nat, x : u8) -> RVec<u8> {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_set(v, lean_usize_of_nat(i), x) } else { v }
+    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_set(v, l2r_index_of_nat(i), x) } else { v }
 }
 #[ffi(import)]
 fn lean_byte_array_hash(v : RVec<u8>) -> u64 [{ { let r = leanrt::hash::murmur64a(leanrt::array::as_slice(&v), 11); leanrt::array::release(v); r } }];
@@ -2394,16 +2400,16 @@ fn lean_byte_array_data(a : RVec<u8>) -> RVec<u8> { a }
 fn lean_mk_empty_float_array(n : Nat) -> RVec<f64> { l2r_mk_empty_with_capacity<f64>(n, 8) }
 fn lean_float_array_size(v : RVec<f64>) -> Nat { Nat::Small{l2r_array_size(v)} }
 fn lean_float_array_uget(v : RVec<f64>, i : u64) -> f64 { l2r_array_get(v, i) }
-fn lean_float_array_fget(v : RVec<f64>, i : Nat) -> f64 { l2r_array_get(v, lean_usize_of_nat(i)) }
+fn lean_float_array_fget(v : RVec<f64>, i : Nat) -> f64 { l2r_array_get(v, l2r_index_of_nat(i)) }
 // `FloatArray.get!`: 0.0 out of bounds.
 fn lean_float_array_get(v : RVec<f64>, i : Nat) -> f64 {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_get(v, lean_usize_of_nat(i)) } else { 0.0 }
+    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_get(v, l2r_index_of_nat(i)) } else { 0.0 }
 }
 fn lean_float_array_push(v : RVec<f64>, x : f64) -> RVec<f64> { l2r_array_push(v, x) }
 fn lean_float_array_uset(v : RVec<f64>, i : u64, x : f64) -> RVec<f64> { l2r_array_set(v, i, x) }
-fn lean_float_array_fset(v : RVec<f64>, i : Nat, x : f64) -> RVec<f64> { l2r_array_set(v, lean_usize_of_nat(i), x) }
+fn lean_float_array_fset(v : RVec<f64>, i : Nat, x : f64) -> RVec<f64> { l2r_array_set(v, l2r_index_of_nat(i), x) }
 fn lean_float_array_set(v : RVec<f64>, i : Nat, x : f64) -> RVec<f64> {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_set(v, lean_usize_of_nat(i), x) } else { v }
+    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_set(v, l2r_index_of_nat(i), x) } else { v }
 }
 fn lean_float_array_mk(a : RVec<f64>) -> RVec<f64> { a }
 fn lean_float_array_data(a : RVec<f64>) -> RVec<f64> { a }
