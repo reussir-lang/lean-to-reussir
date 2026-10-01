@@ -92,6 +92,31 @@ def main : IO Unit := do
   | .ok b => IO.println s!"first recv: {str b}"
   | .error e => IO.println s!"first recv failed: {e}"
   IO.ofExcept (← IO.wait acc)
+  -- a send after a shutdown while a large write is still queued fails:
+  -- `uv_shutdown` stops the writes at once
+  let srv2 ← IO.asTask (prio := .dedicated) do
+    let c ← s.accept.block
+    IO.sleep 50
+    let mut total := 0
+    repeat
+      match ← (c.recv? 65536).block with
+      | none => break
+      | some b => total := total + b.size
+    return total
+  let c4 ← TCP.Socket.Client.mk
+  (← c4.connect (localhost port) |>.toBaseIO).block
+  let raw4 := c4.native
+  let big := ByteArray.mk (Array.replicate (16 * 1024 * 1024) 7)
+  let p1 ← raw4.send #[big]
+  let p2 ← raw4.shutdown
+  try
+    let p3 ← raw4.send #[String.toUTF8 "x"]
+    IO.println s!"send after shutdown accepted: {(← IO.wait p3.result!).isOk}"
+  catch e => IO.println s!"send after shutdown: {e}"
+  IO.println s!"big send ok: {(← IO.wait p1.result!).isOk}, shutdown ok: {(← IO.wait p2.result!).isOk}"
+  match ← IO.wait srv2 with
+  | .ok n => IO.println s!"server received {n}"
+  | .error e => IO.println s!"server: {e}"
   -- tryAccept with nobody connecting
   match ← s.native.tryAccept with
   | .ok none => IO.println "tryAccept: none"

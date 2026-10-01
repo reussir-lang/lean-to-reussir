@@ -42,7 +42,9 @@ def main : IO Unit := do
   IO.println s!"exePath {(← exePath) == (← IO.appPath).toString}"
   let total ← totalMemory
   IO.println s!"memory {decide (total > 0)} {decide ((← freeMemory) ≤ total)} {decide ((← availableMemory) ≤ total)}"
-  IO.println s!"cpus {decide ((← cpuInfo).size > 0)}"
+  let cpus ← cpuInfo
+  IO.println s!"cpus {cpus.size} models {(cpus.toList.map (·.model)).eraseDups}"
+  IO.println s!"constrained memory {← constrainedMemory}"
   IO.println s!"uptime positive {decide ((← uptime) > 0)}"
   setProcessTitle "ab"
   IO.println s!"title {← getProcessTitle}"

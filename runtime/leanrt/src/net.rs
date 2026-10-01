@@ -1164,6 +1164,9 @@ pub fn tcp_shutdown(h: &LHandle, r: LPromise) -> LHandle {
         return o;
     }
     s.shutdown = Some(Pending::new(&o, r.take()));
+    // `uv_shutdown`: no more writes from now on (a `send` fails with
+    // `EPIPE`); the queued ones go first.
+    s.flags &= !F_WRITABLE;
     if s.connect.is_none() {
         flush_writes(h);
     }

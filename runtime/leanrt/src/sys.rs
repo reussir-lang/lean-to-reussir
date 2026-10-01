@@ -448,42 +448,135 @@ fn meminfo(field: &str) -> Option<u64> {
     None
 }
 
-/// The memory limit of the process's cgroup (v2 `memory.max`, or v1
-/// `memory.limit_in_bytes`), 0 if none.
-fn cgroup_limit() -> u64 {
-    let cg = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-    for l in cg.lines() {
-        if let Some(p) = l.strip_prefix("0::") {
-            let f = format!("/sys/fs/cgroup{}/memory.max", p.trim());
-            if let Ok(v) = std::fs::read_to_string(f) {
-                return v.trim().parse().unwrap_or(0);
-            }
+/// libuv's `uv__read_uint64`: the number a file starts with (`sscanf`'s
+/// `%lu`), `u64::MAX` for cgroup v2's `max`, 0 if it cannot be read.
+fn read_u64(path: &str) -> u64 {
+    let Ok(b) = std::fs::read(path) else { return 0 };
+    let b = &b[..b.len().min(31)];
+    let mut i = 0;
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let neg = i < b.len() && b[i] == b'-';
+    if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
+        i += 1;
+    }
+    let st = i;
+    let mut n: u64 = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        n = n.saturating_mul(10).saturating_add((b[i] - b'0') as u64);
+        i += 1;
+    }
+    if i > st {
+        return if neg { n.wrapping_neg() } else { n };
+    }
+    if b == b"max\n" { u64::MAX } else { 0 }
+}
+
+/// `/proc/self/cgroup` as libuv reads it (`uv__slurp` into 1024 bytes).
+fn cgroup_file() -> Option<Vec<u8>> {
+    let mut b = std::fs::read("/proc/self/cgroup").ok()?;
+    b.truncate(1023);
+    Some(b)
+}
+
+/// The path of the cgroup v1 memory controller (`uv__cgroup1_find_memory_controller`).
+fn cgroup1_memory_path(buf: &[u8]) -> Option<String> {
+    let s = String::from_utf8_lossy(buf);
+    let mut rest: &str = &s;
+    // `strchr(':')` then lines until one with `:memory:`.
+    let mut p = rest.find(':')?;
+    loop {
+        if rest[p..].starts_with(":memory:") {
+            let q = &rest[p + ":memory:/".len().min(rest.len() - p)..];
+            let n = q.find('\n').unwrap_or(q.len());
+            return Some(q[..n].to_string());
+        }
+        let nl = rest[p..].find('\n')? + p;
+        rest = &rest[nl..];
+        p = rest.find(':')?;
+    }
+}
+
+/// The cgroup's memory limits (`uv__get_cgroup{1,2}_memory_limits`):
+/// (high, max).
+fn cgroup_limits(buf: &[u8]) -> (u64, u64) {
+    if buf.starts_with(b"0::/") {
+        let p = String::from_utf8_lossy(&buf[4..]);
+        let p = &p[..p.find('\n').unwrap_or(p.len())];
+        let max = read_u64(&format!("/sys/fs/cgroup/{}/memory.max", p));
+        let high = read_u64(&format!("/sys/fs/cgroup/{}/memory.high", p));
+        return (high, max);
+    }
+    let mut lim = None;
+    if let Some(p) = cgroup1_memory_path(buf) {
+        let high = read_u64(&format!("/sys/fs/cgroup/memory/{}/memory.soft_limit_in_bytes", p));
+        let max = read_u64(&format!("/sys/fs/cgroup/memory/{}/memory.limit_in_bytes", p));
+        if high != 0 && max != 0 {
+            lim = Some((high, max));
         }
     }
-    if let Ok(v) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
-        let n: u64 = v.trim().parse().unwrap_or(0);
-        if n < (1u64 << 62) {
-            return n;
+    let (mut high, mut max) = lim.unwrap_or_else(|| {
+        (
+            read_u64("/sys/fs/cgroup/memory/memory.soft_limit_in_bytes"),
+            read_u64("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+        )
+    });
+    // cgroup v1's "no limit" is `LONG_MAX` rounded down to the page size.
+    let page = unsafe { sysconf(30) }.max(1) as u64; // _SC_PAGESIZE
+    let v1_max = (i64::MAX as u64) & !(page - 1);
+    if high == v1_max {
+        high = u64::MAX;
+    }
+    if max == v1_max {
+        max = u64::MAX;
+    }
+    (high, max)
+}
+
+/// `uv__get_cgroup_constrained_memory`: the lower of the limits, 0 if one
+/// is unknown.
+fn cgroup_limit(buf: &[u8]) -> u64 {
+    let (high, max) = cgroup_limits(buf);
+    if high == 0 || max == 0 {
+        return 0;
+    }
+    high.min(max)
+}
+
+/// `uv__get_cgroup_current_memory`.
+fn cgroup_current(buf: &[u8]) -> u64 {
+    if buf.starts_with(b"0::/") {
+        let p = String::from_utf8_lossy(&buf[4..]);
+        let p = &p[..p.find('\n').unwrap_or(p.len())];
+        return read_u64(&format!("/sys/fs/cgroup/{}/memory.current", p));
+    }
+    if let Some(p) = cgroup1_memory_path(buf) {
+        let c = read_u64(&format!("/sys/fs/cgroup/memory/{}/memory.usage_in_bytes", p));
+        if c != 0 {
+            return c;
         }
     }
-    0
+    read_u64("/sys/fs/cgroup/memory/memory.usage_in_bytes")
 }
 
 /// `uv_get_free_memory` (0), `uv_get_total_memory` (1),
 /// `uv_get_constrained_memory` (2), `uv_get_available_memory` (3).
 pub fn memory(which: u8) -> u64 {
+    let free = || meminfo("MemAvailable:").unwrap_or(0);
     match which {
-        0 => meminfo("MemAvailable:").unwrap_or(0),
+        0 => free(),
         1 => meminfo("MemTotal:").unwrap_or(0),
-        2 => cgroup_limit(),
+        2 => cgroup_file().map_or(0, |b| cgroup_limit(&b)),
         _ => {
-            let free = meminfo("MemAvailable:").unwrap_or(0);
-            let limit = cgroup_limit();
-            if limit == 0 {
-                free
-            } else {
-                limit.min(free)
+            // `uv_get_available_memory`.
+            let Some(b) = cgroup_file() else { return 0 };
+            let limit = cgroup_limit(&b);
+            if limit == 0 || limit > meminfo("MemTotal:").unwrap_or(0) {
+                return free();
             }
+            let cur = cgroup_current(&b);
+            if limit < cur { 0 } else { limit - cur }
         }
     }
 }
@@ -511,7 +604,11 @@ pub fn cpu_info() -> LHandle {
         .collect();
     let mut n = 0usize;
     for l in stat.lines() {
+        // `cpuN` lines (not the `cpu` line of the totals).
         let Some(rest) = l.strip_prefix("cpu") else { continue };
+        if !rest.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
         let mut it = rest.split_whitespace();
         let Some(idx) = it.next() else { continue };
         let Ok(cpu) = idx.parse::<usize>() else { continue };
