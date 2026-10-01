@@ -478,7 +478,13 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   `[2^62, 2^63)` for `UInt64`, `Float` and the like, which natively are
   boxed into a new cell at each call (`l2r_addr_fresh`). A `Nat` in
   `[2^63, 2^64)` and an `Int` outside `int32` but inside `i64` (natively
-  big number objects) answer a number computed from their value.
+  big number objects) answer a number computed from their value. A record,
+  list or array that a structural conversion built answers the address of
+  the value it was converted from: lean2rr records it (`l2r_origin_note`,
+  `leanrt::origin`: the table keeps both values alive while the converted
+  one lives, and gives the original back when the value is converted back,
+  `l2r_origin_back`/`l2r_origin_take`), and `l2r_ptr_addr_obj` and
+  `l2r_ptr_addr_rec` look it up once any conversion was recorded.
 - Everything runs on one thread: tasks run when they are first needed or
   when `main` returns (a schedule native Lean can produce; translation plan
   §5.14). A task or `main` polling shared state that another task sets

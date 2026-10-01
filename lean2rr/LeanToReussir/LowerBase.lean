@@ -199,6 +199,10 @@ structure LowerState where
   pendingBoundary : Std.HashMap String Bool := {}
   /-- Structural conversions being generated (for recursive types). -/
   convsInProgress : Std.HashSet String := {}
+  /-- Whether the body of a structural conversion is being generated: a
+  conversion it needs is the bare one (`_w`), not the one that records and
+  looks up origins (`l2r_origin_note`, see `structConv`). -/
+  convNested : Bool := false
   /-- Generated placeholder (`box(0)`) functions, per type. -/
   zeroFns : Std.HashMap RR.Ty String := {}
   /-- Placeholder functions whose body is being generated. -/
