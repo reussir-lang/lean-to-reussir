@@ -2,7 +2,7 @@
 """Compile a compiled Lean module to a native executable through Reussir.
 
     l2r.py MODULE -o EXE [--lean-path DIR[:DIR...]] [-O LEVEL] [--keep-rr FILE]
-           [--disable-opt NAME]...
+           [--disable-opt NAME]... [--enable-opt NAME]...
     l2r.py path/to/File.lean -o EXE [...]
 
 MODULE must already be compiled by Lean 4.33 (its .olean on LEAN_PATH, or in
@@ -19,8 +19,9 @@ rebuilt here when its sources change) and GMP.
 Environment overrides: L2R_REUSSIR (Reussir checkout with build/), L2R_RUSTC
 (the rustc that built Reussir's runtime rlibs), L2R_GMP (path of libgmp.a;
 default: the one shipped with the Lean toolchain), L2R_LEAN2RR (the lean2rr
-binary), L2R_DISABLE_OPTS (comma-separated lean2rr optimizations to turn
-off, as --disable-opt; `lean2rr --list-opts` lists them).
+binary), L2R_DISABLE_OPTS and L2R_ENABLE_OPTS (comma-separated lean2rr
+optimizations to turn off or on, as --disable-opt/--enable-opt; spaces
+around the names are ignored; `lean2rr --list-opts` lists them).
 """
 import argparse, fcntl, hashlib, os, subprocess, sys, tempfile
 from pathlib import Path
@@ -32,6 +33,7 @@ RUSTC = Path(os.environ.get(
     Path.home() / ".rustup/toolchains/nightly-2026-08-31-aarch64-unknown-linux-gnu/bin/rustc")).resolve()
 LEAN2RR = Path(os.environ.get("L2R_LEAN2RR", ROOT / "lean2rr" / ".lake" / "build" / "bin" / "lean2rr")).resolve()
 PRELUDE = ROOT / "runtime" / "prelude.rr"
+SHIM_DIR = ROOT / "lean2rr" / ".lake" / "build" / "lib" / "lean"
 LEANRT_SRC = ROOT / "runtime" / "leanrt" / "src"
 LEANRT_OUT = ROOT / "runtime" / "leanrt" / "target"
 
@@ -61,14 +63,22 @@ def rt_dirs():
     return rt, rt / "deps"
 
 
-def rustc_wrapper():
-    """A rustc wrapper script adding NATIVE_FLAGS (rrc takes one executable)."""
-    LEANRT_OUT.mkdir(parents=True, exist_ok=True)
-    w = LEANRT_OUT / "rustc-native"
-    text = "#!/bin/sh\nexec '%s' \"$@\" %s\n" % (RUSTC, " ".join(NATIVE_FLAGS))
+def rustc_wrapper(rlib):
+    """A rustc wrapper script adding NATIVE_FLAGS (rrc takes one executable)
+    and `leanrt` as an extern crate (and edition 2018 when rrc gives none,
+    so that `::leanrt` resolves without `extern crate`): the drop hooks Reussir generates for
+    the prelude's opaque types have no prelude block, and name the runtime's
+    container types (`::leanrt::drop::Vec`, `::leanrt::drop::Cell`). One
+    per `leanrt` build directory (per Reussir checkout)."""
+    w = rlib.parent / "rustc-native"
+    flags = "%s --extern leanrt='%s'" % (" ".join(NATIVE_FLAGS), rlib)
+    text = ("#!/bin/sh\ncase \" $* \" in *--edition*) exec '%s' \"$@\" %s ;; esac\n"
+            "exec '%s' \"$@\" %s --edition 2018\n" % (RUSTC, flags, RUSTC, flags))
     if not w.exists() or w.read_text() != text:
-        w.write_text(text)
-        w.chmod(0o755)
+        tmp = w.with_name(w.name + ".%d" % os.getpid())
+        tmp.write_text(text)
+        tmp.chmod(0o755)
+        os.replace(tmp, w)
     return w
 
 
@@ -148,35 +158,50 @@ def main():
     # Reuse a matched cell for a constructor after intervening calls (like
     # Lean's reset/reuse); `--no-reuse-across-call` turns it off.
     ap.add_argument("--no-reuse-across-call", action="store_true")
-    # lean2rr optimizations to turn off (see `lean2rr --list-opts`); also
-    # from L2R_DISABLE_OPTS (comma-separated), for test runners.
+    # lean2rr optimizations to turn off or on (see `lean2rr --list-opts`);
+    # also from L2R_DISABLE_OPTS / L2R_ENABLE_OPTS (comma-separated), for
+    # test runners.
     ap.add_argument("--disable-opt", action="append", default=[], metavar="NAME")
+    ap.add_argument("--enable-opt", action="append", default=[], metavar="NAME")
     args = ap.parse_args()
     module, lean_path = module_and_path(args.module, args.lean_path)
 
     env = dict(os.environ)
     # lean2rr runs Lean's compiler passes, which recurse once per nested
-    # `let` (a 60000-element list literal needs more than 64 MiB of stack):
-    # a bigger stack than Lean's default 1 GiB for its main thread, so that
-    # whatever Lean compiled translates.
-    env.setdefault("LEAN_STACK_SIZE_KB", str(4 * 1024 * 1024))
+    # `let` (a 60000-element list literal needs more than 64 MiB of stack,
+    # a 100000-element array literal translates in 1 GiB): the 1 GiB stack
+    # Lean's own compiler runs on, set explicitly. A bigger stack is more
+    # reserved address space: with 4 GiB, a 1500-line recursive `do` block
+    # (adv5 OlRecLongDo) peaked at 16.6 GB of address space for 1.2 GB
+    # resident and failed under `ulimit -v 16000000`; with 1 GiB, 13.6 GB.
+    env.setdefault("LEAN_STACK_SIZE_KB", str(1024 * 1024))
     if lean_path:
         env["LEAN_PATH"] = lean_path + (":" + env["LEAN_PATH"] if env.get("LEAN_PATH") else "")
+    # lean2rr's shim library (lean2rr/L2RShim.lean, built with lean2rr):
+    # Lean implementations of Std.Internal.UV's externs, which lean2rr
+    # compiles with the program. Last, so that the program's modules come
+    # first.
+    if SHIM_DIR.joinpath("L2RShim.olean").exists():
+        env["LEAN_PATH"] = (env["LEAN_PATH"] + ":" if env.get("LEAN_PATH") else "") + str(SHIM_DIR)
 
     rlib = build_leanrt()
     with tempfile.TemporaryDirectory() as tmp:
         rr = Path(args.keep_rr).resolve() if args.keep_rr else Path(tmp) / "prog.rr"
-        disabled = args.disable_opt + [n for n in os.environ.get("L2R_DISABLE_OPTS", "").split(",") if n]
+        def env_names(var):
+            return [n.strip() for n in os.environ.get(var, "").split(",") if n.strip()]
+        disabled = args.disable_opt + env_names("L2R_DISABLE_OPTS")
+        enabled = args.enable_opt + env_names("L2R_ENABLE_OPTS")
         run([str(LEAN2RR), module, "--root", args.root, "--emit", "rr",
              "--prelude", str(PRELUDE), "-o", str(rr)]
-            + [a for n in disabled for a in ("--disable-opt", n)], env=env, show_stderr=True)
+            + [a for n in disabled for a in ("--disable-opt", n)]
+            + [a for n in enabled for a in ("--enable-opt", n)], env=env, show_stderr=True)
         rt, deps = rt_dirs()
         target_libdir = run([str(RUSTC), "--print", "target-libdir"]).stdout.strip()
         # rrc runs in the temporary directory: it leaves its polymorphic-FFI
         # scratch files (reussir_rust_module_*) in the current directory.
         rrc = ([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", str(Path(args.output).resolve()),
                 "--emit", "executable", "-O", args.opt,
-                "--polyffi-rust-path", str(rustc_wrapper()),
+                "--polyffi-rust-path", str(rustc_wrapper(rlib)),
                 "--polyffi-libdir", str(rt), "--polyffi-libdir", str(deps),
                 "--polyffi-libdir", target_libdir, "--polyffi-libdir", str(rlib.parent),
                 "--link-lib", str(rlib), "--link-lib", str(gmp_archive())]

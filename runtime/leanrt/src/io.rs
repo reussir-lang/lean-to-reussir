@@ -98,12 +98,15 @@ fn record(r: Result<(), i32>) {
 /// in the last-error slot.
 #[inline(never)]
 pub fn stream_put(fd: u64, data: &[u8]) {
+    // Output is where the order of threads shows (`sched::effect`).
+    crate::sched::effect();
     record(std_file(fd).put(data))
 }
 
 /// `flush` on a standard stream (`fflush`).
 #[inline(never)]
 pub fn stream_flush(fd: u64) {
+    crate::sched::effect();
     record(std_file(fd).flush())
 }
 

@@ -64,7 +64,7 @@ mutual
                   let some selfDecl := (← read).decls.find? f | throwError "lean2rr: no declaration {f}"
                   let (ps, _) := splitFnType selfDecl.type sm.arity
                   let vals ← (args.zip ps).mapM fun (a, p) => do lowerArg ctx a (← lowerType p)
-                  return ⟨lets, sm.selfCall vals⟩
+                  return ⟨lets, ← H.stateMachine.selfCall sm vals⟩
         let e ← try lowerLetValue ctx d.value d.type t
           catch ex => throwError "{ex.toMessageData}\n  in let {d.binderName} : {d.type}"
         let x ← fresh "x"
@@ -107,7 +107,7 @@ mutual
         let some sm := ctx.sm | throwError "lean2rr: state-machine jump outside a state machine"
         let tys := ctx.jpParams.getD j #[]
         let vals ← (args.zip tys).mapM fun (a, t) => lowerArg ctx a t
-        return .ofExpr (sm.jumpCall variant (captured.map .var ++ vals))
+        return .ofExpr (← H.stateMachine.jumpCall sm variant (captured.map .var ++ vals))
       | none => throwError "lean2rr: jump to unknown join point (internal error)"
     | .jp d k =>
       let ptys ← d.params.mapM (lowerType ·.type)

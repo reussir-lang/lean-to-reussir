@@ -132,6 +132,9 @@ def taskDispatchFns : LowerM (Array RR.Item) := do
     ← mk "l2r_task_walk" #[] (.call "l2r_task_walk_next" #[] #[]) "l2r_task_handed" (.call "l2r_task_walk" #[] #[]),
     .fn "l2r_task_walk_if" #[("e", u64)] u64 (ifOne "e" (.call "l2r_task_walk" #[] #[])),
     ← mk "l2r_task_force_sources" #[("a", u64)] (.call "l2r_task_source_next_at" #[] #[.var "a"]) "l2r_task_handed"
-      (.call "l2r_task_force_sources" #[] #[.var "a"])]
+      (.call "l2r_task_force_sources" #[] #[.var "a"]),
+    -- The runtime's scheduler starts queued tasks on contexts of their own
+    -- (`leanrt::sched`) through this entry point.
+    .raw "extern \"C\" trampoline \"l2r_task_run_one_c\" = l2r_task_run_one;\n"]
 
 end LeanToReussir

@@ -109,14 +109,18 @@ extern "C" fn segv_handler(signum: i32, info: *mut SigInfo, ctx: *mut c_void) {
     unsafe {
         let (lo, hi) = GUARD.with(|g| g.get());
         let addr = (*info).si_addr as usize;
-        // Lean's rule: a fault in the guard page. Also a fault below the
-        // stack while the stack pointer is below it: a frame bigger than the
-        // guard page without stack probes (GMP's scratch space; Reussir's and
+        // Lean's rule: a fault in the guard page (of this thread's stack, or
+        // of a scheduler context's, `coro`). Also a fault below the stack
+        // while the stack pointer is below it: a frame bigger than the guard
+        // page without stack probes (GMP's scratch space; Reussir's and
         // Rust's code probe) skips the guard page and faults further down.
-        let in_guard = lo <= addr && addr < hi;
-        let past_end = hi != 0
-            && addr < hi
-            && interrupted_sp(ctx).is_some_and(|sp| sp < hi && hi - sp <= OVERFLOW_SP_REACH);
+        let in_guard = (lo <= addr && addr < hi) || crate::coro::in_guard(addr);
+        let sp = interrupted_sp(ctx);
+        let past_end = sp.is_some_and(|sp| {
+            !crate::coro::within_stack(sp)
+                && ((hi != 0 && addr < hi && sp < hi && hi - sp <= OVERFLOW_SP_REACH)
+                    || crate::coro::past_end(addr, sp, OVERFLOW_SP_REACH))
+        });
         if in_guard || past_end {
             let msg = b"\nStack overflow detected. Aborting.\n";
             write(2, msg.as_ptr() as *const c_void, msg.len());
@@ -170,6 +174,24 @@ fn main_stack_size() -> usize {
         }
     }
     1 << 30
+}
+
+/// The stack size of Lean's worker threads (`lthread`): the same as the
+/// main thread's (1 GiB, or `LEAN_STACK_SIZE_KB` plus a buffer). The
+/// scheduler's contexts get stacks of this size (`sched`).
+pub fn thread_stack_size() -> usize {
+    main_stack_size()
+}
+
+/// Creating a thread failed: native Lean throws `lean::exception("failed
+/// to create thread")`, which nothing catches: libc++ reports it and
+/// aborts (nothing is flushed).
+pub fn thread_create_failed() -> ! {
+    let msg = b"libc++abi: terminating due to uncaught exception of type lean::exception: failed to create thread\n";
+    unsafe {
+        write(2, msg.as_ptr() as *const c_void, msg.len());
+        abort()
+    }
 }
 
 /// C's `strtoull(s, nullptr, 10)`: leading white space, an optional sign

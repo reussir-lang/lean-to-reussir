@@ -85,6 +85,9 @@ pub fn spawn(
     new_session: bool,
 ) -> u32 {
     let mode = [(modes & 0xff) as u8, ((modes >> 8) & 0xff) as u8, ((modes >> 16) & 0xff) as u8];
+    // A child is an effect: what other threads would have done by now
+    // (their output) comes first (`sched::effect`).
+    crate::sched::effect();
     // `lean_io_process_spawn`: `std::cout.flush()` before a child inherits stdin.
     if mode[0] == 1 {
         crate::io::flush_stdout();

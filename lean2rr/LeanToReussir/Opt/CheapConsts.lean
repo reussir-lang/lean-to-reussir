@@ -42,7 +42,7 @@ partial def isCheapConst (c : Code .pure) (fuel : Nat := 8) : LowerM Bool := do
       | .const f _ args =>
         if (← getEnv).isConstructor f then pure true
         -- Total conversions of scalars (`UInt32.ofNat 0`, the default of
-        -- `Inhabited UInt32`, a float literal's bits: `foldFloatLits`).
+        -- `Inhabited UInt32`, `Float.ofBits` of a bit pattern).
         else if isScalarConversion (((← read).keys.find? f).map (·.decl) |>.getD f) then pure true
         -- Another such constant.
         else if args.isEmpty && fuel > 0 then

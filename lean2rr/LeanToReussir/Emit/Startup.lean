@@ -1,5 +1,6 @@
 import Lean
 import LeanToReussir.Lower
+import LeanToReussir.CompileRecord
 
 /-!
 # Program startup
@@ -12,11 +13,6 @@ most `startupChunk` steps.
 
 namespace LeanToReussir
 open Lean Compiler LCNF
-
-/-- Whether a module belongs to the Lean toolchain (its constants are
-evaluated lazily; see translation plan §5.12). -/
-def isToolchainModule (m : Name) : Bool :=
-  m.getRoot ∈ [`Init, `Std, `Lean, `Lake]
 
 /-- What a program does at startup, before `main`, like Lean's module
 initializers: for each module in import order, for each declaration in
@@ -133,45 +129,6 @@ def specTarget? (n : Name) : Option Name := Id.run do
   let rest := cs.drop (i + 1)
   if rest.isEmpty then return none
   return some (nameOfComponents rest)
-
-/-- The declaration that compiled to the IR-only declaration `n`: `n`
-without the suffixes the compiler appends (`c._closed_3`, `c._boxed`,
-`c._lam_0`, `f._at_.c.spec_2._redArg`), the nearest prefix that `known`
-accepts. A hygienic name keeps its macro scopes at the end
-(`zz._closed_0._@.M._hyg.3` is a closed term of `zz._@.M._hyg.3`). -/
-partial def compiledOwner (known : Name → Bool) (n : Name) : Option Name :=
-  if known n then some n
-  else if n.hasMacroScopes then
-    let v := extractMacroScopes n
-    match v.name with
-    | .str p _ | .num p _ => compiledOwner known { v with name := p }.review
-    | .anonymous => none
-  else match n with
-    | .str p _ | .num p _ => compiledOwner known p
-    | .anonymous => none
-
-/-- Lean's compilation order of a module's declarations, as far as the
-`.olean` records it: the module's `extraConstNames` are its IR
-declarations that are not kernel constants (closed terms, `_boxed`
-wrappers, lifted lambdas, specializations), newest first, and Lean adds a
-command's IR when it compiles the command. So each declaration that
-compiled to at least one of them (nearly every constant whose value
-calls a function) gets the index of its first one; the specializations
-made while compiling a declaration come right before it. Native Lean runs
-the module's initializers in exactly this order (`EmitC.emitInitFn`). -/
-def compileOrder (idx : Nat) : CoreM (Std.HashMap Name Nat) := do
-  let env ← getEnv
-  let some md := env.header.moduleData[idx]? | return {}
-  let mut baseNames : Std.HashSet Name := {}
-  for d in baseExt.getModuleEntries env idx (level := .private) do
-    baseNames := baseNames.insert d.name
-  let known (n : Name) : Bool := baseNames.contains n || env.contains n
-  let extra := md.extraConstNames
-  let mut out : Std.HashMap Name Nat := {}
-  for i in [:extra.size] do
-    if let some d := compiledOwner known extra[extra.size - 1 - i]! then
-      unless out.contains d do out := out.insert d i
-  return out
 
 /-- Whether `f` is the function that `initialize c : T ← act` (or
 `builtin_initialize`) makes for its action, a hygienic `initFn`: it is

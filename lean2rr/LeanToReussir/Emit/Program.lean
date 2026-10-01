@@ -272,16 +272,83 @@ def spliceChainConsts (decls : Array (Decl .pure)) (inline : NameSet) : Array (D
     | _ => out := out.push d
   return out.filter fun d => !spliced.contains d.name
 
-/-- Lower a whole program. -/
-def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) (startup : Array StartupStep)
-    (decls : Array (Decl .pure)) (keys : NameMap InstKey) : CoreM String := do
-  let table ← programRelevance decls
-  let roots := #[mainInst, errStr] ++ startup.map fun
+/-- The declarations the entry point calls: `main`, the error printer, and
+the startup steps' instances. Stage 3 takes the program's reachable code
+from them. -/
+def entryCallees (mainInst errStr : Name) (startup : Array StartupStep) : Array Name :=
+  #[mainInst, errStr] ++ startup.map fun
     | .caf i | .ioUnit i | .init _ i => i
-  let (decls, keys) ← retypeMono cfg.stage2 table decls keys roots
-  -- The registry's passes over mono LCNF (`Opt/FloatLits`: float literals
-  -- become bit patterns).
-  let decls := cfg.monoPasses.foldl (fun ds p => p keys ds) decls
+
+/-- A lowered program before its text is assembled: the prelude, the
+generated types (`typeItems`, the enums of function types `fnItems`, the
+`Box` enum, the step enums of the recursive functions `Outline` cut) and
+functions, the string literals, the functions kept out of rrc's MLIR
+inliner (`anchoredFns`), and the tables of `Array Nat` literals
+(`ArrayLits`). -/
+structure LoweredProgram where
+  prelude : String
+  preludeFns : Std.HashSet String
+  typeItems : Array RR.Item
+  fnItems : Array RR.Item
+  boxItem : RR.Item
+  fns : Array RR.Item
+  strLits : Array String
+  anchored : Std.HashSet String := {}
+  stepItems : Array RR.Item := #[]
+  natTables : Array (Array UInt64) := #[]
+
+/-- What passes over the generated functions see of the program. -/
+def LoweredProgram.rrProgram (p : LoweredProgram) : RRProgram :=
+  { prelude := p.prelude, preludeFns := p.preludeFns,
+    types := p.typeItems ++ p.fnItems ++ p.stepItems |>.push p.boxItem }
+
+/-- The registry's passes over the generated functions, in order
+(`Opt/SinkProj`: projections sunk into the branches that use them). -/
+def LoweredProgram.runRRPasses (cfg : PassConfig) (p : LoweredProgram) : LoweredProgram :=
+  { p with fns := cfg.rrPasses.foldl (fun fns pass => pass p.rrProgram fns) p.fns }
+
+/-- Runs of pushed small `Nat` literals (a spliced `Array Nat` literal) as
+tables (`ArrayLits`; core). -/
+def LoweredProgram.literalTables (p : LoweredProgram) : LoweredProgram :=
+  let (fns, tables) := ArrayLits.natArrLits p.fns
+  { p with fns, natTables := p.natTables ++ tables }
+
+/-- Deep and long tail paths and `let` values cut into functions, for rrc
+(`Outline`; core), with the step enums of the recursive functions cut. Run
+before the passes over the generated functions, which then see bounded
+functions. -/
+def LoweredProgram.outline (p : LoweredProgram) : LoweredProgram :=
+  let (fns, steps) := Outline.outlineFns {} (Outline.variantTable p.rrProgram.types p.prelude)
+    (Outline.takenNames p.preludeFns p.fns) p.fns
+  { p with fns, stepItems := p.stepItems ++ steps }
+
+/-- The program text: the prelude, the generated types, the functions
+(`#[transform_anchor]` on those kept out of rrc's MLIR inliner: a transform
+anchor stays a function for transform scripts, lean2rr has none, and LLVM
+still inlines it; see `anchoredFns`), the string literal table and the
+`Array Nat` literal tables. -/
+def LoweredProgram.render (p : LoweredProgram) : String := Id.run do
+  let mut out := p.prelude ++ "\n// ---- generated types ----\n\n"
+  for it in p.typeItems do out := out ++ it.render ++ "\n"
+  for it in p.fnItems do out := out ++ it.render ++ "\n"
+  for it in p.stepItems do out := out ++ it.render ++ "\n"
+  out := out ++ p.boxItem.render ++ "\n"
+  out := out ++ "// ---- generated functions ----\n\n"
+  for f in p.fns do
+    let anchor := match f with
+      | .fn n .. => p.anchored.contains n
+      | _ => false
+    out := out ++ (if anchor then "#[transform_anchor]\n" else "") ++ f.render ++ "\n"
+  unless p.strLits.isEmpty do out := out ++ strLitTable p.strLits
+  unless p.natTables.isEmpty do out := out ++ ArrayLits.natLitTable p.natTables
+  return out
+
+/-- Stage 4: lower every declaration of the (retyped) program `decls`, the
+entry point and what they need (translation plan §5), with the relevance
+`table` Stage 3 used and the entry point's callees `roots`. -/
+def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) (mainInst errStr : Name)
+    (startup : Array StartupStep) (roots : Array Name) (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
+    CoreM LoweredProgram := do
   -- Function names the prelude defines (`fn NAME`).
   let preludeFns := (prelude.splitOn "fn ").foldl (init := ({} : Std.HashSet String)) fun acc chunk =>
     let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
@@ -328,7 +395,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
                           preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls,
                           uncachedConsts, preludeReplacements := cfg.preludeReplacements,
-                          valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder }
+                          valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
+                          cachePlaceholders := cfg.cachePlaceholders, natArrays := cfg.natArrays }
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit variant, `box(0)`): types
     -- may mention it even when nothing is ever boxed.
@@ -359,42 +427,12 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
     modify fun s => { s with fns := s.fns ++ disp }
     repeat
       finishUnboxFns
-      unless ← finishFnValues do break
+      -- The traversals of constants for tasks (`persistCall`), for the
+      -- final variants of function types and `Box`.
+      unless (← finishFnValues) || (← finishPersistFns) do break
     return (← fnTypeItems, ← anchoredFns)
   let ((fnItems, anchored), st) ← (act.run ctx).run {}
   let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))
-  -- Deep and long tail paths and `let` values cut into functions, for rrc
-  -- (`Outline`; first, so that the passes after it see bounded functions),
-  -- then the registry's passes over the generated functions
-  -- (`Opt/SinkProj`: projections sunk into the branches that use them).
-  let types := st.typeItems ++ fnItems |>.push boxItem
-  -- Runs of pushed `Nat` literals (a spliced `Array Nat` literal) as tables.
-  let (fns, natTables) := ArrayLits.natArrLits st.fns
-  -- `L2R_NO_OUTLINE` and `L2R_NO_INLINE_ANCHORS` turn the two build-time
-  -- workarounds off, for the repros of Reussir bugs 16, 17 and 20
-  -- (docs/reussir-bugs/run.sh); the output is then the same program.
-  let noOutline := (← IO.getEnv "L2R_NO_OUTLINE").isSome
-  let anchored := if (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome then {} else anchored
-  let (fns, stepItems) := if noOutline then (fns, #[]) else
-    Outline.outlineFns {} (Outline.variantTable types prelude) (Outline.takenNames preludeFns fns) fns
-  let rrProg : RRProgram := { prelude, preludeFns, types := types ++ stepItems }
-  let fns := cfg.rrPasses.foldl (fun fns p => p rrProg fns) fns
-  let mut out := prelude ++ "\n// ---- generated types ----\n\n"
-  for it in st.typeItems do out := out ++ it.render ++ "\n"
-  for it in fnItems do out := out ++ it.render ++ "\n"
-  for it in stepItems do out := out ++ it.render ++ "\n"
-  out := out ++ boxItem.render ++ "\n"
-  out := out ++ "// ---- generated functions ----\n\n"
-  -- `#[transform_anchor]` keeps a function out of Reussir's MLIR inliner (a
-  -- transform anchor stays a function for transform scripts; lean2rr has
-  -- none, and LLVM still inlines it): see `anchoredFns`.
-  for f in fns do
-    let anchor := match f with
-      | .fn n .. => anchored.contains n
-      | _ => false
-    out := out ++ (if anchor then "#[transform_anchor]\n" else "") ++ f.render ++ "\n"
-  unless st.strLits.isEmpty do out := out ++ strLitTable st.strLits
-  unless natTables.isEmpty do out := out ++ ArrayLits.natLitTable natTables
-  return out
+  return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := st.fns, strLits := st.strLits, anchored }
 
 end LeanToReussir

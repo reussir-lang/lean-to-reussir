@@ -3,7 +3,9 @@
 //! pointer-sized bit pattern (the prelude's generic wrappers transmute; the
 //! caller guarantees that a slot is always used at one type).
 //!
-//! Single-threaded, like the rest of the runtime.
+//! Single-threaded, like the rest of the runtime; a constant being computed
+//! by a context of the scheduler that blocked meanwhile is waited for by the
+//! others (`claim`).
 
 use std::cell::UnsafeCell;
 
@@ -16,6 +18,54 @@ static SLOTS: Slots = Slots(UnsafeCell::new(Vec::new()), UnsafeCell::new(Vec::ne
 pub fn has(slot: u64) -> bool {
     let set = unsafe { &*SLOTS.1.get() };
     set.get(slot as usize).copied().unwrap_or(false)
+}
+
+/// Constants being computed (`claim`): the slot, the context computing it,
+/// the contexts waiting for its value.
+struct Claims(UnsafeCell<Vec<(u64, u32, Vec<u32>)>>);
+unsafe impl Sync for Claims {}
+static CLAIMS: Claims = Claims(UnsafeCell::new(Vec::new()));
+
+/// Whether constant `slot` has its value (the accessor of a constant or
+/// closed term, `l2r_once_claim`). If not, the running context is to
+/// compute it and then set it, unless another context is computing it
+/// (it blocked in the computation, or in waiting for the tasks the value
+/// holds): then this one waits until the value is set, as natively a
+/// thread waits for the one computing it (`lean_obj_once_cold` takes a
+/// lock). Needed again by the context computing it (by a task its
+/// computation needs, which natively runs on another thread), it waits
+/// forever, as natively.
+#[inline(never)]
+pub fn claim(slot: u64) -> bool {
+    loop {
+        if has(slot) {
+            return true;
+        }
+        let cur = crate::sched::cur();
+        let claims = unsafe { &mut *CLAIMS.0.get() };
+        match claims.iter_mut().find(|c| c.0 == slot) {
+            None => {
+                claims.push((slot, cur, Vec::new()));
+                return false;
+            }
+            Some(c) if c.1 == cur => crate::task::hang(),
+            Some(c) => {
+                c.2.push(cur);
+                crate::sched::block(crate::sched::Wait::Sync(slot as usize));
+            }
+        }
+    }
+}
+
+/// The value of constant `slot` was set: whoever waits for it goes on.
+fn release_claim(slot: u64) {
+    let claims = unsafe { &mut *CLAIMS.0.get() };
+    if let Some(k) = claims.iter().position(|c| c.0 == slot) {
+        let (_, _, waiters) = claims.swap_remove(k);
+        for w in waiters {
+            crate::sched::wake(w);
+        }
+    }
 }
 
 /// The value of a set slot (reading an unset slot is a runtime bug:
@@ -40,6 +90,7 @@ fn unset(slot: u64) -> ! {
 /// (the current standard streams).
 #[inline(never)]
 pub fn swap_raw(slot: u64, raw: usize) -> usize {
+    note_mutable(slot);
     let vals = unsafe { &mut *SLOTS.0.get() };
     assert!(has(slot), "leanrt: swap of an unset cell {}", slot);
     std::mem::replace(&mut vals[slot as usize], raw)
@@ -49,6 +100,7 @@ pub fn swap_raw(slot: u64, raw: usize) -> usize {
 /// the caller).
 #[inline(never)]
 pub fn take_raw(slot: u64) -> usize {
+    note_mutable(slot);
     if !has(slot) {
         unset(slot)
     }
@@ -64,6 +116,45 @@ struct Saved(UnsafeCell<Vec<[Option<usize>; 3]>>);
 unsafe impl Sync for Saved {}
 static SAVED: Saved = Saved(UnsafeCell::new(Vec::new()));
 
+/// The slots used as mutable cells (the current standard streams): they
+/// belong to the running context of the scheduler (`sched`), as natively
+/// each thread has its own current streams.
+struct Mutable(UnsafeCell<Vec<u64>>);
+unsafe impl Sync for Mutable {}
+static MUTABLE: Mutable = Mutable(UnsafeCell::new(Vec::new()));
+
+fn note_mutable(slot: u64) {
+    let m = unsafe { &mut *MUTABLE.0.get() };
+    if !m.contains(&slot) {
+        m.push(slot);
+    }
+}
+
+/// A suspended context's mutable cells and saved contexts.
+#[derive(Default)]
+pub struct CtxState {
+    saved: Vec<[Option<usize>; 3]>,
+    cells: Vec<(u64, Option<usize>)>,
+}
+
+/// Exchange the running context's mutable cells and saved contexts with
+/// `st` (see `sched::switch_to`: the leaving context's go to its record,
+/// whose own were emptied when it last arrived; then the arriving
+/// context's come from its record). A cell missing from `st` is empty.
+pub fn swap_ctx_state(st: &mut CtxState) {
+    std::mem::swap(unsafe { &mut *SAVED.0.get() }, &mut st.saved);
+    let m = unsafe { (*MUTABLE.0.get()).clone() };
+    let mut cells = Vec::with_capacity(m.len());
+    for &slot in m.iter() {
+        let cur = if has(slot) { Some(take_raw(slot)) } else { None };
+        if let Some(&(_, Some(v))) = st.cells.iter().find(|(s, _)| *s == slot) {
+            set_raw(slot, v);
+        }
+        cells.push((slot, cur));
+    }
+    st.cells = cells;
+}
+
 /// Set the cells `base..base + n` aside, leaving them empty: a new context
 /// (a task starting, which natively runs on its own thread with its own
 /// current standard streams). The references move to the saved context.
@@ -73,6 +164,7 @@ pub fn push_context(base: u64, n: u64) {
     let mut ctx = [None; 3];
     for i in 0..n {
         let slot = base + i;
+        note_mutable(slot);
         ctx[i as usize] = if has(slot) { Some(take_raw(slot)) } else { None };
     }
     unsafe { &mut *SAVED.0.get() }.push(ctx);
@@ -104,4 +196,7 @@ pub fn set_raw(slot: u64, raw: usize) {
     assert!(!set[i], "leanrt: once slot {} set twice", slot);
     vals[i] = raw;
     set[i] = true;
+    if unsafe { !(*CLAIMS.0.get()).is_empty() } {
+        release_claim(slot);
+    }
 }

@@ -42,20 +42,29 @@ pub struct LStr;
 pub struct LBig;
 
 // A Lean `Array` (and `ByteArray` = RVec<u8>, `FloatArray` = RVec<f64>):
-// a copy-on-write vector, updated in place when unique.
-#[ffi(rust = "::reussir_rt::collections::vec::Vec")]
+// a copy-on-write vector, updated in place when unique. The Rust type wraps
+// Reussir's vector so that freeing nested containers does not recurse
+// (`leanrt::drop`).
+#[ffi(rust = "::leanrt::drop::Vec")]
 pub struct RVec<T>;
 
 // A mutable reference cell (`ST.Ref`/`IO.Ref`): a shared 0-or-1 element
 // vector, mutated in place through every alias (empty after `take`).
-#[ffi(rust = "::reussir_rt::collections::vec::Vec")]
+#[ffi(rust = "::leanrt::drop::Vec")]
 pub struct LRef<T>;
 
 // A mutable cell holding one value, mutated in place through every alias:
 // the state of a `Thunk` or `Task` (lean2rr generates the state type).
-// One allocation: the count and the value.
-#[ffi(rust = "::reussir_rt::rc::Rc")]
+// One allocation: the count and the value. (`leanrt::drop::Cell` wraps
+// Reussir's `Rc`, as `RVec` does.)
+#[ffi(rust = "::leanrt::drop::Cell")]
 pub struct LCell<T>;
+
+// A runtime object (`Rc<Box<dyn Any>>`): a file handle (`IO.FS.Handle`), a
+// `Std.Sync` mutex or condition variable, a timer, socket or operation of
+// the event loop (all `lcAny` in mono code).
+#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+pub struct LHandle;
 
 // A Lean `Nat`. Invariant: `Big` only holds values >= 2^64.
 enum [value] Nat {
@@ -75,9 +84,10 @@ enum [value] Int {
 #[ffi(import)]
 fn l2r_exit(code : u32) -> unit [{ leanrt::io::exit(code as i32) }];
 
-// `IO.Process.exit` (the status is a `UInt8`).
+// `IO.Process.exit` (the status is a `UInt8`): what other threads would
+// have done by now goes first (`sched::effect`).
 #[ffi(import)]
-fn l2r_process_exit(code : u8) -> u64 [{ leanrt::io::exit(code as i32) }];
+fn l2r_process_exit(code : u8) -> u64 [{ { leanrt::sched::effect(); leanrt::io::exit(code as i32) } }];
 
 // `IO.Process.forceExit` (`std::_Exit`): no flushing, no exit handlers.
 #[ffi(import)]
@@ -2696,7 +2706,7 @@ fn l2r_promise_cell<S>(p : LPromise) -> LCell<S> [{
         let r = c.clone();
         ::std::mem::forget(c);
         leanrt::rc_release(p);
-        r
+        leanrt::drop::Cell::from_inner(r)
     }
 }];
 
@@ -2735,6 +2745,20 @@ fn l2r_ref_ptr_eq<T>(a : LRef<T>, b : LRef<T>) -> bool [{
 
 #[ffi(import)]
 fn l2r_once_has(slot : u64) -> bool [{ leanrt::once::has(slot) }];
+
+// A thunk has its value: whoever waits for it goes on
+// (`l2r_thunk_wait_busy`).
+#[ffi(import)]
+fn l2r_thunk_done(a : u64) -> u64 [{ { leanrt::sched::on_finish(a as usize); 0 } }];
+
+// A `busy` thunk is needed: wait until it has its value.
+#[ffi(import)]
+fn l2r_thunk_wait_busy(a : u64) -> u64 [{ { leanrt::task::thunk_wait_busy(a as usize); 0 } }];
+
+// The accessor of a constant: whether it has its value, else the caller
+// computes and sets it (another context computing it is waited for).
+#[ffi(import)]
+fn l2r_once_claim(slot : u64) -> bool [{ leanrt::once::claim(slot) }];
 
 #[ffi(import)]
 fn l2r_once_get<T>(slot : u64) -> T [{
@@ -2824,7 +2848,7 @@ fn l2r_lcell_new<T>(v : T) -> LCell<T> [{
         assert!(::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>());
         let c = Rc::new(v);
         leanrt::task::init_cell(unsafe { ::std::mem::transmute_copy::<Rc<[:T:]>, usize>(&c) });
-        c
+        leanrt::drop::Cell::from_inner(c)
     }
 }];
 
@@ -2986,11 +3010,328 @@ fn l2r_task_check_canceled() -> bool [{ leanrt::task::check_canceled() }];
 fn l2r_hang() -> u64 [{ leanrt::task::hang() }];
 
 // A thunk forced by its own computation, or a cycle of tasks waiting for
-// each other: native Lean waits forever.
+// each other: native Lean waits forever (other tasks go on).
 fn l2r_lazy_cycle<T>() -> T {
     let ignored = l2r_hang();
     l2r_unreachable<T>()
 }
+
+// `Task.get` of a `busy` task `a`: it runs on another context of the
+// runtime's scheduler, which has blocked (`leanrt::sched`); wait until it
+// has finished (1), then the caller looks again. On the running context it
+// needs itself, and this waits forever.
+#[ffi(import)]
+fn l2r_task_wait_running(a : u64) -> u64 [{ leanrt::task::wait_running(a as usize) }];
+
+// `IO.waitAny` when every task of the list is running or waits for a
+// promise: wait until some task finishes (1), then the list is looked at
+// again.
+#[ffi(import)]
+fn l2r_task_wait_progress() -> u64 [{ leanrt::task::wait_progress() }];
+
+// ===========================================================================
+// Std.Sync (`leanrt::sync`): `BaseMutex`, `Condvar`, `BaseRecursiveMutex`,
+// `BaseSharedMutex`. Each is a runtime handle (`LHandle`; `lcAny` in mono
+// code). A thread that must wait blocks its context of the scheduler and
+// the others run meanwhile (`leanrt::sched`). The `l2r_io_*` functions are
+// the payloads of the `BaseIO` externs `lean_io_*`.
+
+#[ffi(import)]
+fn l2r_sync_new(kind : u64) -> LHandle [{
+    match kind { 0 => leanrt::sync::mutex_new(), 1 => leanrt::sync::condvar_new(), 2 => leanrt::sync::recmutex_new(), _ => leanrt::sync::sharedmutex_new() }
+}];
+
+// Operation `op` on `h` (see the functions below); the result of a `try`.
+#[ffi(import)]
+fn l2r_sync_op(op : u64, h : LHandle) -> bool [{
+    {
+        let r = match op {
+            0 => { leanrt::sync::mutex_lock(&h); true }
+            1 => leanrt::sync::mutex_try_lock(&h),
+            2 => { leanrt::sync::mutex_unlock(&h); true }
+            3 => { leanrt::sync::condvar_notify_one(&h); true }
+            4 => { leanrt::sync::condvar_notify_all(&h); true }
+            5 => { leanrt::sync::recmutex_lock(&h); true }
+            6 => leanrt::sync::recmutex_try_lock(&h),
+            7 => { leanrt::sync::recmutex_unlock(&h); true }
+            8 => { leanrt::sync::sharedmutex_write(&h); true }
+            9 => leanrt::sync::sharedmutex_try_write(&h),
+            10 => { leanrt::sync::sharedmutex_unlock_write(&h); true }
+            11 => { leanrt::sync::sharedmutex_read(&h); true }
+            12 => leanrt::sync::sharedmutex_try_read(&h),
+            _ => { leanrt::sync::sharedmutex_unlock_read(&h); true }
+        };
+        leanrt::rc_release(h);
+        r
+    }
+}];
+
+#[ffi(import)]
+fn l2r_condvar_wait_h(c : LHandle, m : LHandle) -> u64 [{
+    { leanrt::sync::condvar_wait(&c, &m); leanrt::rc_release(c); leanrt::rc_release(m); 0 }
+}];
+
+fn l2r_sync_unit(op : u64, h : LHandle) -> L2RUnit {
+    let ignored = l2r_sync_op(op, h);
+    L2RUnit::u{}
+}
+
+fn l2r_io_basemutex_new() -> LHandle { l2r_sync_new(0) }
+fn l2r_io_basemutex_lock(m : LHandle) -> L2RUnit { l2r_sync_unit(0, m) }
+fn l2r_io_basemutex_try_lock(m : LHandle) -> bool { l2r_sync_op(1, m) }
+fn l2r_io_basemutex_unlock(m : LHandle) -> L2RUnit { l2r_sync_unit(2, m) }
+fn l2r_io_condvar_new() -> LHandle { l2r_sync_new(1) }
+fn l2r_io_condvar_wait(c : LHandle, m : LHandle) -> L2RUnit {
+    let ignored = l2r_condvar_wait_h(c, m);
+    L2RUnit::u{}
+}
+fn l2r_io_condvar_notify_one(c : LHandle) -> L2RUnit { l2r_sync_unit(3, c) }
+fn l2r_io_condvar_notify_all(c : LHandle) -> L2RUnit { l2r_sync_unit(4, c) }
+fn l2r_io_baserecmutex_new() -> LHandle { l2r_sync_new(2) }
+fn l2r_io_baserecmutex_lock(m : LHandle) -> L2RUnit { l2r_sync_unit(5, m) }
+fn l2r_io_baserecmutex_try_lock(m : LHandle) -> bool { l2r_sync_op(6, m) }
+fn l2r_io_baserecmutex_unlock(m : LHandle) -> L2RUnit { l2r_sync_unit(7, m) }
+fn l2r_io_basesharedmutex_new() -> LHandle { l2r_sync_new(3) }
+fn l2r_io_basesharedmutex_write(m : LHandle) -> L2RUnit { l2r_sync_unit(8, m) }
+fn l2r_io_basesharedmutex_try_write(m : LHandle) -> bool { l2r_sync_op(9, m) }
+fn l2r_io_basesharedmutex_unlock_write(m : LHandle) -> L2RUnit { l2r_sync_unit(10, m) }
+fn l2r_io_basesharedmutex_read(m : LHandle) -> L2RUnit { l2r_sync_unit(11, m) }
+fn l2r_io_basesharedmutex_try_read(m : LHandle) -> bool { l2r_sync_op(12, m) }
+fn l2r_io_basesharedmutex_unlock_read(m : LHandle) -> L2RUnit { l2r_sync_unit(13, m) }
+
+// ===========================================================================
+// Std.Internal.UV (`leanrt::net`): the primitives of lean2rr's shim
+// (lean2rr/L2RShim.lean), which implements the `lean_uv_*` externs in Lean.
+// Each `l2r_shim_*` is the payload of the shim's `BaseIO` extern
+// `lean_shim_*`. Timers, sockets, signal watchers and operations are
+// runtime handles (`LHandle`), promises `LPromise`; addresses are byte
+// arrays (`leanrt::net::decode_addr`); errors libuv's codes as `u32`.
+
+fn l2r_unit_of(x : u64) -> L2RUnit { L2RUnit::u{} }
+
+// Operations: their outcome (`leanrt::net::OpSt`).
+#[ffi(import)]
+fn l2r_shim_op_done(o : LHandle) -> bool [{ { let r = leanrt::net::op(&o).done; leanrt::rc_release(o); r } }];
+#[ffi(import)]
+fn l2r_shim_op_canceled(o : LHandle) -> bool [{ { let r = leanrt::net::op(&o).canceled; leanrt::rc_release(o); r } }];
+#[ffi(import)]
+fn l2r_shim_op_code(o : LHandle) -> u32 [{ { let r = leanrt::net::op(&o).code as u32; leanrt::rc_release(o); r } }];
+#[ffi(import)]
+fn l2r_shim_op_sync_err(o : LHandle) -> u32 [{ { let r = leanrt::net::op(&o).sync_err as u32; leanrt::rc_release(o); r } }];
+#[ffi(import)]
+fn l2r_shim_op_bytes(o : LHandle) -> RVec<u8> [{
+    { let b = ::std::mem::take(&mut leanrt::net::op(&o).bytes); leanrt::rc_release(o); leanrt::array::bytes_of_vec(b) }
+}];
+#[ffi(import)]
+fn l2r_shim_op_addr(o : LHandle) -> RVec<u8> [{
+    { let b = leanrt::net::op(&o).addr.clone(); leanrt::rc_release(o); leanrt::array::bytes_of_vec(b) }
+}];
+#[ffi(import)]
+fn l2r_shim_op_str(o : LHandle, i : u32) -> LStr [{
+    {
+        let x = leanrt::net::op(&o);
+        let s = leanrt::string::from_bytes(x.strs.get(i as usize).map(|v| v.as_slice()).unwrap_or(b""));
+        leanrt::rc_release(o);
+        s
+    }
+}];
+#[ffi(import)]
+fn l2r_shim_op_has_handle(o : LHandle) -> bool [{ { let r = leanrt::net::op(&o).handle.is_some(); leanrt::rc_release(o); r } }];
+#[ffi(import)]
+fn l2r_shim_op_handle(o : LHandle) -> LHandle [{
+    { let h = leanrt::net::op(&o).handle.take().expect("leanrt: operation without a handle"); leanrt::rc_release(o); h }
+}];
+
+// Errors (pure externs of the shim).
+#[ffi(import)]
+fn lean_shim_uv_kind(code : u32) -> u32 [{ leanrt::net::uv_error_kind(code as i32) }];
+#[ffi(import)]
+fn lean_shim_uv_strerror(code : u32) -> LStr [{ leanrt::string::from_bytes(&leanrt::net::uv_strerror(code as i32)) }];
+
+// Addresses (pure externs of the shim).
+#[ffi(import)]
+fn lean_shim_pton(s : LStr, v6 : bool) -> RVec<u8> [{
+    { let b = leanrt::net::pton(s.utf8(), v6); leanrt::rc_release(s); leanrt::array::bytes_of_vec(b) }
+}];
+#[ffi(import)]
+fn lean_shim_ntop(a : RVec<u8>) -> LStr [{
+    { let s = leanrt::string::from_bytes(&leanrt::net::ntop(leanrt::array::as_slice(&a))); leanrt::array::release(a); s }
+}];
+#[ffi(import)]
+fn l2r_shim_ifaces() -> LHandle [{ leanrt::net::ifaces() }];
+
+// `IO.Promise.isResolved`, which borrows the promise: released after the
+// question (a last reference resolves it with `none`).
+#[ffi(import)]
+fn l2r_shim_promise_is_resolved(p : LPromise) -> bool [{
+    { let r = leanrt::task::promise_is_resolved(leanrt::task::promise_cell(&p)); drop(p); r }
+}];
+
+// Timers and signal watchers.
+#[ffi(import)]
+fn l2r_shim_timer_new(timeout : u64, repeating : bool) -> LHandle [{ leanrt::net::timer_new(timeout, repeating) }];
+#[ffi(import)]
+fn l2r_shim_signal_new(signum : u32, repeating : bool) -> LHandle [{ leanrt::net::signal_new(signum, repeating) }];
+#[ffi(import)]
+fn l2r_shim_timer_next_kind(t : LHandle) -> u8 [{ { let r = leanrt::net::timer_next_kind(&t); leanrt::rc_release(t); r } }];
+#[ffi(import)]
+fn l2r_shim_timer_promise(t : LHandle) -> LPromise [{ { let p = leanrt::net::timer_promise(&t); leanrt::rc_release(t); p } }];
+#[ffi(import)]
+fn l2r_shim_timer_start(t : LHandle, p : LPromise, r : LPromise) -> LHandle [{ { let o = leanrt::net::timer_start(&t, p, r); leanrt::rc_release(t); o } }];
+#[ffi(import)]
+fn l2r_shim_timer_set(t : LHandle, p : LPromise, r : LPromise) -> LHandle [{ { let o = leanrt::net::timer_set(&t, p, r); leanrt::rc_release(t); o } }];
+#[ffi(import)]
+fn l2r_shim_timer_ctl_h(t : LHandle, which : u8) -> u64 [{
+    {
+        match which { 0 => leanrt::net::timer_reset(&t), 1 => leanrt::net::timer_stop(&t), _ => leanrt::net::timer_cancel(&t) }
+        leanrt::rc_release(t);
+        0
+    }
+}];
+fn l2r_shim_timer_ctl(t : LHandle, which : u8) -> L2RUnit { l2r_unit_of(l2r_shim_timer_ctl_h(t, which)) }
+
+// Sockets.
+#[ffi(import)]
+fn l2r_shim_tcp_new() -> LHandle [{ leanrt::net::tcp_new() }];
+#[ffi(import)]
+fn l2r_shim_udp_new() -> LHandle [{ leanrt::net::udp_new() }];
+#[ffi(import)]
+fn l2r_shim_tcp_bind(s : LHandle, a : RVec<u8>) -> u32 [{
+    { let r = leanrt::net::tcp_bind(&s, leanrt::array::as_slice(&a)) as u32; leanrt::array::release(a); leanrt::rc_release(s); r }
+}];
+#[ffi(import)]
+fn l2r_shim_tcp_listen(s : LHandle, backlog : u32) -> u32 [{
+    { let r = leanrt::net::tcp_listen(&s, backlog as i32) as u32; leanrt::rc_release(s); r }
+}];
+#[ffi(import)]
+fn l2r_shim_tcp_connect(s : LHandle, a : RVec<u8>, r : LPromise) -> LHandle [{
+    { let o = leanrt::net::tcp_connect(&s, leanrt::array::as_slice(&a), r); leanrt::array::release(a); leanrt::rc_release(s); o }
+}];
+#[ffi(import)]
+fn l2r_shim_tcp_send(s : LHandle, d : RVec<u8>, r : LPromise) -> LHandle [{
+    { let v = leanrt::array::as_slice(&d).to_vec(); leanrt::array::release(d); let o = leanrt::net::tcp_send(&s, v, r); leanrt::rc_release(s); o }
+}];
+#[ffi(import)]
+fn l2r_shim_sock_recv(s : LHandle, size : u64, r : LPromise) -> LHandle [{
+    { let o = leanrt::net::sock_recv(&s, size, r); leanrt::rc_release(s); o }
+}];
+#[ffi(import)]
+fn l2r_shim_sock_cancel_recv_h(s : LHandle) -> u64 [{ { leanrt::net::sock_cancel_recv(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_sock_cancel_recv(s : LHandle) -> L2RUnit { l2r_unit_of(l2r_shim_sock_cancel_recv_h(s)) }
+#[ffi(import)]
+fn l2r_shim_tcp_accept(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_accept(&s, r); leanrt::rc_release(s); o } }];
+#[ffi(import)]
+fn l2r_shim_tcp_try_accept(s : LHandle) -> LHandle [{ { let o = leanrt::net::tcp_try_accept(&s); leanrt::rc_release(s); o } }];
+#[ffi(import)]
+fn l2r_shim_tcp_cancel_accept_h(s : LHandle) -> u64 [{ { leanrt::net::tcp_cancel_accept(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_tcp_cancel_accept(s : LHandle) -> L2RUnit { l2r_unit_of(l2r_shim_tcp_cancel_accept_h(s)) }
+#[ffi(import)]
+fn l2r_shim_tcp_shutdown(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_shutdown(&s, r); leanrt::rc_release(s); o } }];
+#[ffi(import)]
+fn l2r_shim_sock_name(s : LHandle, peer : bool) -> LHandle [{ { let o = leanrt::net::sock_name(&s, peer); leanrt::rc_release(s); o } }];
+#[ffi(import)]
+fn l2r_shim_tcp_nodelay(s : LHandle) -> u32 [{ { let r = leanrt::net::tcp_nodelay(&s) as u32; leanrt::rc_release(s); r } }];
+#[ffi(import)]
+fn l2r_shim_tcp_keepalive(s : LHandle, enable : u32, delay : u32) -> u32 [{
+    { let r = leanrt::net::tcp_keepalive(&s, enable as i32, delay) as u32; leanrt::rc_release(s); r }
+}];
+#[ffi(import)]
+fn l2r_shim_udp_bind(s : LHandle, a : RVec<u8>) -> u32 [{
+    { let r = leanrt::net::udp_bind(&s, leanrt::array::as_slice(&a)) as u32; leanrt::array::release(a); leanrt::rc_release(s); r }
+}];
+#[ffi(import)]
+fn l2r_shim_udp_connect(s : LHandle, a : RVec<u8>) -> u32 [{
+    { let r = leanrt::net::udp_connect(&s, leanrt::array::as_slice(&a)) as u32; leanrt::array::release(a); leanrt::rc_release(s); r }
+}];
+#[ffi(import)]
+fn l2r_shim_udp_send(s : LHandle, d : RVec<u8>, a : RVec<u8>, r : LPromise) -> LHandle [{
+    {
+        let v = leanrt::array::as_slice(&d).to_vec();
+        leanrt::array::release(d);
+        let o = leanrt::net::udp_send(&s, v, leanrt::array::as_slice(&a), r);
+        leanrt::array::release(a);
+        leanrt::rc_release(s);
+        o
+    }
+}];
+#[ffi(import)]
+fn l2r_shim_udp_option(s : LHandle, which : u8, v : u32) -> u32 [{
+    { let r = leanrt::net::udp_option(&s, which, v) as u32; leanrt::rc_release(s); r }
+}];
+#[ffi(import)]
+fn l2r_shim_udp_membership(s : LHandle, m : RVec<u8>, i : RVec<u8>, membership : u8) -> u32 [{
+    {
+        let r = leanrt::net::udp_membership(&s, leanrt::array::as_slice(&m), leanrt::array::as_slice(&i), membership) as u32;
+        leanrt::array::release(m);
+        leanrt::array::release(i);
+        leanrt::rc_release(s);
+        r
+    }
+}];
+#[ffi(import)]
+fn l2r_shim_udp_multicast_interface(s : LHandle, i : RVec<u8>) -> u32 [{
+    { let r = leanrt::net::udp_multicast_interface(&s, leanrt::array::as_slice(&i)) as u32; leanrt::array::release(i); leanrt::rc_release(s); r }
+}];
+
+// Name resolution.
+#[ffi(import)]
+fn l2r_shim_dns_get_info(h : LStr, sv : LStr, family : u8, r : LPromise) -> LHandle [{
+    { let o = leanrt::net::dns_get_info(h.utf8(), sv.utf8(), family, r); leanrt::rc_release(h); leanrt::rc_release(sv); o }
+}];
+#[ffi(import)]
+fn l2r_shim_dns_get_name(a : RVec<u8>, r : LPromise) -> LHandle [{
+    { let o = leanrt::net::dns_get_name(leanrt::array::as_slice(&a), r); leanrt::array::release(a); o }
+}];
+
+// `Std.Internal.UV.Loop.alive`: libuv's loop is always alive natively (its
+// wake-up handle).
+fn l2r_uv_event_loop_alive() -> bool { true }
+
+#[ffi(import)]
+fn l2r_shim_op_str_count(o : LHandle) -> u32 [{ { let r = leanrt::net::op(&o).strs.len() as u32; leanrt::rc_release(o); r } }];
+
+// Std.Internal.UV.System (`leanrt::sys`).
+#[ffi(import)]
+fn l2r_shim_sys_title_get() -> LStr [{ leanrt::string::from_bytes(&leanrt::sys::title_get()) }];
+#[ffi(import)]
+fn l2r_shim_sys_title_set_h(s : LStr) -> u64 [{ { leanrt::sys::title_set(s.utf8()); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_sys_title_set(s : LStr) -> L2RUnit { l2r_unit_of(l2r_shim_sys_title_set_h(s)) }
+#[ffi(import)]
+fn l2r_shim_sys_query(which : u8) -> LHandle [{
+    match which {
+        0 => leanrt::sys::uptime(), 1 => leanrt::sys::cpu_info(), 2 => leanrt::sys::cwd(), 3 => leanrt::sys::homedir(),
+        4 => leanrt::sys::tmpdir(), 5 => leanrt::sys::passwd(), 6 => leanrt::sys::environ_all(), 7 => leanrt::sys::hostname(),
+        8 => leanrt::sys::uname_all(), 9 => leanrt::sys::rusage(), _ => leanrt::sys::exepath()
+    }
+}];
+#[ffi(import)]
+fn l2r_shim_sys_group(gid : u64) -> LHandle [{ leanrt::sys::group(gid) }];
+#[ffi(import)]
+fn l2r_shim_sys_getenv(n : LStr) -> LHandle [{ { let o = leanrt::sys::getenv(n.utf8()); leanrt::rc_release(n); o } }];
+#[ffi(import)]
+fn l2r_shim_sys_priority(pid : u64) -> LHandle [{ leanrt::sys::get_priority(pid) }];
+#[ffi(import)]
+fn l2r_shim_sys_word(which : u8) -> u64 [{
+    match which {
+        0 => leanrt::sys::pid(false), 1 => leanrt::sys::pid(true), 2 => leanrt::sys::hrtime(),
+        3 => leanrt::sys::memory(0), 4 => leanrt::sys::memory(1), 5 => leanrt::sys::memory(2), _ => leanrt::sys::memory(3)
+    }
+}];
+#[ffi(import)]
+fn l2r_shim_sys_chdir(p : LStr) -> u32 [{ { let r = leanrt::sys::chdir_to(p.utf8()) as u32; leanrt::rc_release(p); r } }];
+#[ffi(import)]
+fn l2r_shim_sys_setenv(n : LStr, v : LStr, set : bool) -> u32 [{
+    {
+        let r = leanrt::sys::setenv_to(n.utf8(), if set { Some(v.utf8()) } else { None }) as u32;
+        leanrt::rc_release(n);
+        leanrt::rc_release(v);
+        r
+    }
+}];
+#[ffi(import)]
+fn l2r_shim_sys_setpriority(pid : u64, prio : u64) -> u32 [{ leanrt::sys::set_priority(pid, prio) as u32 }];
+#[ffi(import)]
+fn l2r_shim_sys_random(size : u64, r : LPromise) -> LHandle [{ leanrt::sys::random(size, r) }];
 
 // ===========================================================================
 // Debugging, platform
@@ -3285,8 +3626,7 @@ fn l2r_io_process_get_pid() -> u32 [{ std::process::id() }];
 // where `mkError kind errno fname details` builds the `IO.Error` with the
 // `lean_mk_io_error_*` constructor numbered `kind` (runtime/README.md).
 
-#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
-pub struct LHandle;
+// (`LHandle` is declared with the runtime types.)
 
 #[ffi(import)]
 fn l2r_io_ok() -> bool [{ leanrt::fs::ok() }];

@@ -1,9 +1,14 @@
 name = "lean2rr"
 version = "0.1.0"
-defaultTargets = ["lean2rr"]
+defaultTargets = ["lean2rr", "L2RShim"]
 
 [[lean_lib]]
 name = "LeanToReussir"
+
+# Lean implementations of `Std.Internal.UV`'s externs over the runtime's
+# event loop, compiled with the programs that use them (L2RShim.lean).
+[[lean_lib]]
+name = "L2RShim"
 
 [[lean_exe]]
 name = "lean2rr"

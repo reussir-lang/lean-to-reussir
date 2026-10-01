@@ -169,9 +169,11 @@ def taskStateFn (z : String) (stateTy : RR.Ty) : LowerM String := do
 /-- `IO.waitAny` glue over a list of tasks of type `listTy`: the value of the
 first task of the list that has finished; if none has, the first pending
 one is run (it finished first), unless it waits for an unresolved promise.
-If every task is running (or waits for a promise), a queued task runs, as a
-worker would meanwhile, and the list is looked at again; when none is left,
-they all wait for the caller: native Lean deadlocks. -/
+If every task is running (or waits for a promise), the caller waits until
+some task finishes (`l2r_task_wait_progress`: other contexts and queued
+tasks run meanwhile, as workers would) and looks at the list again; when
+nothing can make progress any more, they all wait for the caller: native
+Lean deadlocks. -/
 def taskWaitAnyFn (listTy : RR.Ty) (taskTy : RR.Ty) : LowerM String := do
   let (z, t) ← lazyOf taskTy
   let .named ln := listTy | throwError "lean2rr: bad list type {listTy.render}"
@@ -197,7 +199,7 @@ def taskWaitAnyFn (listTy : RR.Ty) (taskTy : RR.Ty) : LowerM String := do
     let firstDone : RR.Block := .ofExpr (.mtch (.var "l") #[
       listArm nil.variant #[] (.ofExpr (.call run #[] #[.var "all", .var "all"])),
       listArm cons.variant consBinders (pick 2 (.call name #[] #[.var "rest", .var "all"]))])
-    let again : RR.Block := ⟨#[("r1", some (.named "u64"), .call "l2r_task_run_one" #[] #[]),
+    let again : RR.Block := ⟨#[("r1", some (.named "u64"), .call "l2r_task_wait_progress" #[] #[]),
         ("one", some (.named "u64"), .atom "1")],
       .ite (.atom "r1 == one") (.ofExpr (.call name #[] #[.var "all", .var "all"]))
         (.ofExpr (.call "l2r_lazy_cycle" #[t] #[]))⟩

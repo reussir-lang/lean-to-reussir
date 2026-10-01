@@ -90,6 +90,10 @@ const SYNCPRIO: u16 = 1 << 11;
 const FROM_WALK: u16 = 1 << 12;
 /// Running on the thread of whoever ran it (it began `INLINE`).
 const ON_THREAD: u16 = 1 << 13;
+/// Handed to the generated code to run (`hand`), not begun yet: it is off
+/// its queue and its source's dependents, and no one else hands it (the
+/// generated code may block before it begins, e.g. forcing its sources).
+const HANDED: u16 = 1 << 14;
 
 struct Entry {
     /// The cell's address; 0 for a free slot.
@@ -110,6 +114,10 @@ struct Entry {
     /// of answers. Running (or about to run `INLINE`): its thread number
     /// (0 is `main`'s), and the sleep count when the run started.
     aux: [u32; 2],
+    /// The number of its allocation: an entry and a cell address are both
+    /// reused once a task is gone, so a task remembered across a switch of
+    /// contexts (`CtxState::chains`) is recognized by this.
+    serial: u32,
 }
 
 impl Entry {
@@ -128,7 +136,7 @@ impl Entry {
 }
 
 const FREE: Entry = Entry {
-    cell: 0, tag: 0, flags: 0, prio: 0, head_dep: NONE, next_dep: NONE, prev_dep: NONE, link: NONE, aux: [0, 0],
+    cell: 0, tag: 0, flags: 0, prio: 0, head_dep: NONE, next_dep: NONE, prev_dep: NONE, link: NONE, aux: [0, 0], serial: 0,
 };
 
 /// The dependents of a finished task still to be walked.
@@ -165,12 +173,10 @@ struct Tasks {
     /// priority as in Lean's task manager (the highest non-empty one is
     /// taken first), in the order they were enqueued: (entry, sequence
     /// number).
-    queues: [VecDeque<(u32, u32)>; PRIOS],
+    queues: [VecDeque<(u32, u32, Instant)>; PRIOS],
     /// The number of valid items of each queue.
     queued: [u32; PRIOS],
     next_q: u32,
-    /// Walks in progress, innermost last.
-    walks: Vec<Walk>,
     /// A task handed to the generated code (`walk_next`, `source_next`,
     /// `next_tag`), with the runtime's reference, to be run or, when
     /// `deleting`, dropped.
@@ -186,12 +192,47 @@ struct Tasks {
     worker: u32,
     wake: Option<Instant>,
     worker_exists: bool,
-    /// For `source_next`: a task being forced (its cell) and the pending
-    /// tasks it waits for, still to run (entry and cell, deepest last),
-    /// innermost last.
-    chains: Vec<(usize, Vec<(u32, usize)>)>,
+    /// `IO.getTaskState` answered 4 (poll a promise) for this task: the
+    /// `source_next` that follows does not wait for it for good.
+    poll: usize,
+    /// The last entry allocation's number (`Entry::serial`).
+    serial: u32,
+    /// Dropped pure tasks still to delete, the next one last, and the
+    /// sources of tasks just deleted (`dropped`).
+    deletions: Vec<u32>,
+    recheck: Vec<u32>,
+    /// Per entry, a pending task in the tree of its dependents that keeps
+    /// it from being deleted, if one was found (`droppable_in`), with that
+    /// task's `serial`.
+    pins: Vec<(u32, u32)>,
+}
+
+/// What belongs to the running context of the scheduler (`sched`), as
+/// natively to a thread: the tasks running on it, the walks of dependents
+/// in progress, and the chains of tasks being forced. A context that
+/// blocks keeps its own (`swap_ctx_state`).
+#[derive(Default)]
+pub struct CtxState {
+    /// Walks in progress, innermost last.
+    walks: Vec<Walk>,
+    /// For `source_next`: a task being forced (its cell and its entry's
+    /// `serial`) and the pending tasks it waits for, still to run (entry
+    /// and `serial`, deepest last), innermost last.
+    chains: Vec<((usize, u32), Vec<(u32, u32)>)>,
     /// Running tasks (entries), innermost last.
     running: Vec<u32>,
+}
+
+static CTX: Global<CtxState> = Global(UnsafeCell::new(CtxState { walks: Vec::new(), chains: Vec::new(), running: Vec::new() }));
+
+#[inline]
+fn ctx() -> &'static mut CtxState {
+    unsafe { &mut *CTX.0.get() }
+}
+
+/// Exchange the running context's state with `st` (`sched::switch_to`).
+pub fn swap_ctx_state(st: &mut CtxState) {
+    std::mem::swap(ctx(), st)
 }
 
 /// How long a native worker takes to pick up a task after the enqueue that
@@ -209,14 +250,16 @@ static TASKS: Global<Tasks> = Global(UnsafeCell::new(Tasks {
     queues: [const { VecDeque::new() }; PRIOS],
     queued: [0; PRIOS],
     next_q: 0,
-    walks: Vec::new(),
     handed: 0,
     deleting: false,
     worker: NONE,
     wake: None,
     worker_exists: false,
-    chains: Vec::new(),
-    running: Vec::new(),
+    poll: 0,
+    serial: 0,
+    deletions: Vec::new(),
+    recheck: Vec::new(),
+    pins: Vec::new(),
 }));
 
 #[inline]
@@ -258,7 +301,8 @@ fn ent(i: u32) -> &'static mut Entry {
 
 fn alloc(cell: usize, tag: u32, flags: u16, prio: u8) -> u32 {
     let t = tasks();
-    let e = Entry { cell, tag, flags, prio, ..FREE };
+    t.serial = t.serial.wrapping_add(1);
+    let e = Entry { cell, tag, flags, prio, serial: t.serial, ..FREE };
     let i = match t.free.pop() {
         Some(i) => {
             t.slab[i as usize] = e;
@@ -270,6 +314,9 @@ fn alloc(cell: usize, tag: u32, flags: u16, prio: u8) -> u32 {
         }
     };
     unsafe { *slot(cell) = i };
+    if let Some(p) = t.pins.get_mut(i as usize) {
+        *p = (NONE, 0);
+    }
     i
 }
 
@@ -284,15 +331,26 @@ fn release(i: u32) {
 /// The thread of the innermost running task (0: `main`).
 #[inline]
 fn cur_thread() -> u32 {
-    match tasks().running.last() {
+    match ctx().running.last() {
         Some(&r) => ent(r).thread(),
-        None => 0,
+        None => crate::sched::cur_thread_base(),
     }
+}
+
+/// The thread number of the running task, or of the running context
+/// (`sync`'s lock owners).
+pub fn thread_now() -> u32 {
+    cur_thread()
 }
 
 /// The entry point calls this right before `main`
 /// (`lean_io_mark_end_initialization` + `lean_init_task_manager`).
 pub fn start() {
+    // `LEAN_NUM_THREADS=0` (or not a number): natively no task manager is
+    // created, and tasks run at once, as during initialization here.
+    if crate::sched::workers_limit() == 0 {
+        return;
+    }
     tasks().started = true;
 }
 
@@ -311,7 +369,7 @@ pub fn shutdown() {
     t.shutting_down = true;
     for p in 0..PRIOS {
         for k in 0..t.queues[p].len() {
-            let (i, q) = t.queues[p][k];
+            let (i, q, _) = t.queues[p][k];
             let e = ent(i);
             if e.cell != 0 && e.flags & QUEUED != 0 && e.link == q {
                 e.flags |= EARLY;
@@ -325,7 +383,13 @@ pub fn shutdown() {
 pub fn sleep_ms(ms: u32) {
     settle_worker();
     tasks().epoch += 1;
-    std::thread::sleep(Duration::from_millis(ms as u64));
+    // Other contexts and queued tasks run meanwhile, as other threads
+    // would (`sched::sleep`).
+    if ms == 0 {
+        crate::sched::zero_sleep();
+    } else {
+        crate::sched::sleep(Duration::from_millis(ms as u64));
+    }
     settle_worker();
 }
 
@@ -359,7 +423,7 @@ pub fn register(cell: usize, tag: u64, prio: u64, kind: u64) -> u64 {
     if sp {
         flags |= SYNC | SYNCPRIO;
     }
-    if let Some(&r) = tasks().running.last() {
+    if let Some(&r) = ctx().running.last() {
         if early_now(r) {
             flags |= EARLY;
         }
@@ -391,12 +455,17 @@ fn enqueue(i: u32) {
     e.flags |= QUEUED;
     t.next_q = t.next_q.wrapping_add(1);
     e.link = t.next_q;
-    t.queues[e.prio as usize].push_back((i, e.link));
+    t.queues[e.prio as usize].push_back((i, e.link, Instant::now()));
     t.queued[e.prio as usize] += 1;
-    // An enqueue by `main` wakes the idle worker.
-    if t.started && !t.shutting_down && t.worker == NONE && t.wake.is_none() && t.running.is_empty() {
+    // An enqueue by `main` wakes the idle worker (if one is free: tasks
+    // the scheduler started on contexts of their own hold workers).
+    if t.started && !t.shutting_down && t.worker == NONE && t.wake.is_none() && ctx().running.is_empty()
+        && crate::sched::cur() == crate::sched::MAIN
+        && pool_in_use() < crate::sched::workers_limit()
+    {
         t.wake = Some(Instant::now());
     }
+    crate::sched::on_enqueue();
 }
 
 /// Take task `i` off its queue: its item is removed if it is at an end of
@@ -410,12 +479,12 @@ fn unqueue(i: u32) {
         let p = e.prio as usize;
         t.queued[p] -= 1;
         let q = &mut t.queues[p];
-        if q.back() == Some(&(i, e.link)) {
+        if q.back().is_some_and(|b| (b.0, b.1) == (i, e.link)) {
             q.pop_back();
-        } else if q.front() == Some(&(i, e.link)) {
+        } else if q.front().is_some_and(|f| (f.0, f.1) == (i, e.link)) {
             q.pop_front();
         } else if q.len() > 64 && q.len() > 4 * t.queued[p] as usize {
-            q.retain(|&(j, l)| {
+            q.retain(|&(j, l, _)| {
                 let f = ent(j);
                 f.cell != 0 && f.flags & QUEUED != 0 && f.link == l
             });
@@ -493,13 +562,12 @@ pub fn depend(src: usize, dep: usize, sync: bool) -> u64 {
 /// reference to the cell.
 #[inline(never)]
 pub fn bind_wait(cell: usize, src: usize) {
-    let t = tasks();
     let i = find(cell);
-    if t.running.last() == Some(&i) {
-        t.running.pop();
+    if ctx().running.last() == Some(&i) {
+        ctx().running.pop();
     }
     let e = ent(i);
-    e.flags &= !(RUNNING | INLINE | FROM_WALK | ON_THREAD);
+    e.flags &= !(RUNNING | INLINE | FROM_WALK | ON_THREAD | HANDED);
     e.flags |= HELD;
     e.aux = [0, 0];
     let s = find(src);
@@ -539,9 +607,9 @@ pub fn begin(cell: usize) -> u64 {
         on = 0;
         e.aux[0] = cur_thread() + 1;
     }
-    e.flags = (e.flags & !(HELD | INLINE | CHECKED | ON_THREAD)) | RUNNING | on;
+    e.flags = (e.flags & !(HELD | INLINE | CHECKED | ON_THREAD | HANDED)) | RUNNING | on;
     e.aux[1] = t.epoch;
-    t.running.push(i);
+    ctx().running.push(i);
     r
 }
 
@@ -552,7 +620,7 @@ pub fn begin(cell: usize) -> u64 {
 #[inline(never)]
 pub fn end(cell: usize) -> u64 {
     let t = tasks();
-    let Some(i) = t.running.pop() else { return 0 };
+    let Some(i) = ctx().running.pop() else { return 0 };
     debug_assert_eq!(ent(i).cell, cell);
     let early = early_now(i);
     let e = ent(i);
@@ -564,12 +632,13 @@ pub fn end(cell: usize) -> u64 {
     let base = flags & FROM_WALK == 0;
     // The worker that ran it picks the next task once the walk is over.
     let worker = t.worker == i
-        || (t.worker == NONE && t.running.is_empty() && t.started && !t.shutting_down && flags & ON_THREAD == 0);
+        || (t.worker == NONE && ctx().running.is_empty() && t.started && !t.shutting_down && flags & ON_THREAD == 0);
     if worker {
         t.worker = NONE;
         t.wake = None;
     }
-    t.walks.push(Walk { owner: i, thread, early, canceled: flags & CANCELED != 0, worker, base });
+    ctx().walks.push(Walk { owner: i, thread, early, canceled: flags & CANCELED != 0, worker, base });
+    crate::sched::on_finish(cell);
     if base { 1 } else { 0 }
 }
 
@@ -578,12 +647,11 @@ pub fn end(cell: usize) -> u64 {
 /// walk them (`l2r_task_walk`).
 #[inline(never)]
 pub fn resolve(cell: usize) -> u64 {
-    let t = tasks();
     let i = find(cell);
     if i == NONE || ent(i).flags & PROMISE == 0 {
         return 0;
     }
-    let early = match t.running.last() {
+    let early = match ctx().running.last() {
         Some(&r) => early_now(r),
         None => false,
     };
@@ -592,7 +660,8 @@ pub fn resolve(cell: usize) -> u64 {
     e.cell = 0;
     e.flags = 0;
     let thread = cur_thread();
-    t.walks.push(Walk { owner: i, thread, early, canceled, worker: false, base: true });
+    ctx().walks.push(Walk { owner: i, thread, early, canceled, worker: false, base: true });
+    crate::sched::on_finish(cell);
     1
 }
 
@@ -615,11 +684,22 @@ extern "C" {
 
 impl Drop for Promise {
     fn drop(&mut self) {
-        let f = unsafe { l2r_promise_drop_c };
-        assert!(!f.is_null(), "leanrt: promise without l2r_promise_drop_c");
-        let f: unsafe extern "C" fn(usize) -> u64 = unsafe { std::mem::transmute(f) };
-        unsafe { f(self.cell) };
+        if crate::drop::active() {
+            // Released while a container is freed: resolved when the free
+            // reaches it, in Lean's order (`crate::drop`).
+            crate::drop::defer(self.cell, drop_promise_now);
+            return;
+        }
+        unsafe { drop_promise_now(self.cell) };
     }
+}
+
+unsafe fn drop_promise_now(cell: usize) -> bool {
+    let f = l2r_promise_drop_c;
+    assert!(!f.is_null(), "leanrt: promise without l2r_promise_drop_c");
+    let f: unsafe extern "C" fn(usize) -> u64 = std::mem::transmute(f);
+    f(cell);
+    true
 }
 
 pub type LPromise = reussir_rt::rc::Rc<Box<dyn std::any::Any>>;
@@ -644,43 +724,227 @@ pub fn promise_cell(p: &LPromise) -> usize {
     p.downcast_ref::<Promise>().expect("leanrt: not a promise").cell
 }
 
-/// Whether pending pure task `i` is to be deleted rather than run: the
-/// runtime holds the only reference, or the other references come from
-/// pure dependents that are themselves dropped (one each), within a small
-/// search. Returns the task to delete now (`i`, or such a dependent, which
-/// goes first: it holds a reference to `i`), or `NONE`.
-fn dropped(i: u32) -> u32 {
-    let mut budget = 32u32;
-    let mut first = NONE;
-    if dropped_rec(i, &mut budget, &mut first) { first } else { NONE }
+/// Whether pending task `x` could be deleted rather than run: a pure task
+/// the runtime holds, not running, not an unresolved promise, not started
+/// by the worker.
+fn deletable(x: u32) -> bool {
+    let e = ent(x);
+    e.flags & (PURE | HELD) == (PURE | HELD) && e.flags & (RUNNING | PROMISE) == 0 && tasks().worker != x
 }
 
-fn dropped_rec(i: u32, budget: &mut u32, first: &mut u32) -> bool {
-    let e = ent(i);
-    if e.flags & (PURE | HELD) != (PURE | HELD) || e.flags & (RUNNING | PROMISE) != 0 || tasks().worker == i {
+/// Whether pending task `x` is to be deleted now: a pure task that only
+/// the runtime refers to (natively nothing refers to it any more, and Lean
+/// has deleted it).
+fn droppable_now(x: u32) -> bool {
+    let e = ent(x);
+    e.cell != 0 && deletable(x) && count(e.cell) == 1
+}
+
+/// The tasks to delete now among pending task `i` and the tasks that wait
+/// for it, to any depth (an iterative search): those only the runtime
+/// refers to, the ones deeper in the tree first. Deleting a task releases
+/// what it holds (its source, directly or through a converted copy of it),
+/// so its source may follow (`Tasks::recheck`): as natively, where
+/// dropping the last reference to a dependent releases its source, a whole
+/// chain or tree of dropped pure tasks is deleted.
+///
+/// The search goes only through tasks that could be deleted: one that
+/// cannot (an IO task, a running one) holds its source for good, so
+/// nothing below it can release `i`; nor can anything below a task that
+/// something else refers to (a pure task the program keeps). Such a task
+/// is remembered as the *pin* of the tasks between it and `i` (`pinned`):
+/// while it stays so, the tree need not be searched again (a long chain
+/// of pending tasks is searched once, not once per task that runs). The
+/// dropped dependents of a pinned or undeletable task are deleted when they
+/// come up (walked, or queued, once their source has finished); they
+/// cannot run before.
+fn droppable_in(i: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    if !deletable(i) || pinned(i) {
+        return out;
+    }
+    // (task, its next dependent to look at, a pin found below it)
+    let mut stack: Vec<(u32, u32, u32)> = vec![(i, ent(i).head_dep, NONE)];
+    // Each task once (a bound, for tasks that wait for each other in a
+    // cycle).
+    let mut budget = 2 * tasks().slab.len() + 2;
+    while let Some(top) = stack.last_mut() {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
+        let d = top.1;
+        if d != NONE {
+            top.1 = ent(d).next_dep;
+            if !deletable(d) {
+                if top.2 == NONE {
+                    top.2 = d;
+                }
+            } else if pinned(d) {
+                if top.2 == NONE {
+                    top.2 = tasks().pins[d as usize].0;
+                }
+            } else {
+                stack.push((d, ent(d).head_dep, NONE));
+            }
+        } else {
+            let (x, _, mut pin) = stack.pop().unwrap();
+            let e = ent(x);
+            if pin == NONE && e.head_dep == NONE && count(e.cell) >= 2 {
+                // A leaf something else refers to.
+                pin = x;
+            }
+            if pin != NONE {
+                set_pin(x, pin);
+                if let Some(up) = stack.last_mut() {
+                    if up.2 == NONE {
+                        up.2 = pin;
+                    }
+                }
+            } else if droppable_now(x) {
+                out.push(x);
+            }
+        }
+    }
+    out
+}
+
+/// Remember `p` as the pin of pending task `x` (`droppable_in`).
+fn set_pin(x: u32, p: u32) {
+    let t = tasks();
+    if t.pins.len() <= x as usize {
+        t.pins.resize(t.slab.len().max(x as usize + 1), (NONE, 0));
+    }
+    let sr = ent(p).serial;
+    t.pins[x as usize] = (p, sr);
+}
+
+/// Whether pending task `x` has a pin that still keeps it from being
+/// deleted: the same task, pending, and either one that cannot be deleted
+/// or a leaf something else refers to. (A pending task stays in the tree
+/// of the pending tasks it waits for: tasks only leave the tree when they
+/// begin or are deleted, and those with pending dependents do neither.)
+fn pinned(x: u32) -> bool {
+    let t = tasks();
+    let Some(&(p, sr)) = t.pins.get(x as usize) else { return false };
+    if p == NONE {
         return false;
     }
-    let c = count(e.cell);
-    if c == 1 {
-        if *first == NONE {
-            *first = i;
-        }
+    let e = ent(p);
+    if e.serial != sr || e.cell == 0 || e.flags & (RUNNING | HANDED | PROMISE) != 0 {
+        return false;
+    }
+    if !deletable(p) {
         return true;
     }
-    let mut n = 0;
-    let mut d = e.head_dep;
-    while d != NONE {
-        if *budget == 0 {
-            return false;
-        }
-        *budget -= 1;
-        if !dropped_rec(d, budget, first) {
-            return false;
-        }
-        n += 1;
-        d = ent(d).next_dep;
+    e.head_dep == NONE && count(e.cell) >= 2
+}
+
+/// For the worker's pick (`pick`): whether pending task `i` is natively
+/// deleted by now: a pure task only the runtime refers to, or whose other
+/// references all come from dependents that are, one each (counted, not
+/// deleted: deletion needs the generated code; a dependent holding a
+/// converted copy holds two, so such a task counts as kept).
+fn dropped_by_now(i: u32) -> bool {
+    if !deletable(i) || pinned(i) {
+        return false;
     }
-    n > 0 && c == 1 + n
+    // (task, its next dependent to look at, its dependents counted as
+    // deleted, whether all of them are, a pin found below it: remembered
+    // as in `droppable_in`, so that a long chain is searched once)
+    let mut stack: Vec<(u32, u32, u32, bool, u32)> = vec![(i, ent(i).head_dep, 0, true, NONE)];
+    let mut budget = 2 * tasks().slab.len() + 2;
+    while let Some(top) = stack.last_mut() {
+        if budget == 0 {
+            return false;
+        }
+        budget -= 1;
+        let d = top.1;
+        if d != NONE {
+            top.1 = ent(d).next_dep;
+            if !top.3 {
+                continue;
+            }
+            if !deletable(d) {
+                top.3 = false;
+                top.4 = d;
+            } else if pinned(d) {
+                top.3 = false;
+                top.4 = tasks().pins[d as usize].0;
+            } else {
+                stack.push((d, ent(d).head_dep, 0, true, NONE));
+            }
+        } else {
+            let (x, _, n, all, mut pin) = stack.pop().unwrap();
+            let e = ent(x);
+            if pin == NONE && e.head_dep == NONE && count(e.cell) >= 2 {
+                // A leaf something else refers to.
+                pin = x;
+            }
+            if pin != NONE {
+                set_pin(x, pin);
+            }
+            let gone = all && pin == NONE && count(e.cell) as u64 == 1 + n as u64;
+            match stack.last_mut() {
+                Some(up) => {
+                    if gone {
+                        up.2 += 1;
+                    } else {
+                        up.3 = false;
+                        if up.4 == NONE {
+                            up.4 = pin;
+                        }
+                    }
+                }
+                None => return gone,
+            }
+        }
+    }
+    false
+}
+
+/// Whether pending task `i` is to be deleted, or tasks waiting for it are,
+/// before it can be decided whether it runs.
+fn is_dropped(i: u32) -> bool {
+    !droppable_in(i).is_empty()
+}
+
+/// The next task to delete: the source of a task just deleted, if only
+/// the runtime refers to it now, one left by an earlier search, or the
+/// first of those found among `i` and the tasks that wait for it (the
+/// others are left for the next calls); `NONE` if there is none (`i` is to
+/// run).
+fn dropped(i: u32) -> u32 {
+    let t = tasks();
+    while let Some(x) = t.recheck.pop() {
+        if droppable_now(x) {
+            return x;
+        }
+    }
+    while let Some(x) = t.deletions.pop() {
+        if droppable_now(x) {
+            return x;
+        }
+    }
+    let mut v = droppable_in(i);
+    if v.is_empty() {
+        return NONE;
+    }
+    v.reverse();
+    let first = v.pop().unwrap();
+    tasks().deletions = v;
+    first
+}
+
+/// Whether a deletion found earlier is due (`dropped` would hand it over
+/// without a search): the sources of deleted tasks and the tasks left by an
+/// earlier search, keeping only those still to be deleted (an entry may be
+/// gone, or hold another task, since).
+fn deletion_due() -> bool {
+    let t = tasks();
+    t.recheck.retain(|&x| droppable_now(x));
+    t.deletions.retain(|&x| droppable_now(x));
+    !t.recheck.is_empty() || !t.deletions.is_empty()
 }
 
 /// Hand pending task `i` to the generated code (with the runtime's
@@ -693,12 +957,19 @@ fn hand(i: u32, del: bool) -> u64 {
     t.handed = e.cell;
     t.deleting = del;
     if del {
+        // Its source may only be referred to by the runtime once this one
+        // is dropped.
+        if e.flags & WAITING != 0 && e.source() != NONE {
+            t.recheck.push(e.source());
+        }
         unlink(i);
         // Its own (deleted) dependents went first.
         debug_assert_eq!(ent(i).head_dep, NONE);
         release(i);
     } else {
-        e.flags &= !HELD;
+        unlink(i);
+        let e = ent(i);
+        e.flags = (e.flags & !HELD) | HANDED;
     }
     tag
 }
@@ -710,13 +981,12 @@ fn hand(i: u32, del: bool) -> u64 {
 /// `u64::MAX` when the walk is over.
 #[inline(never)]
 pub fn walk_next() -> u64 {
-    let t = tasks();
     loop {
-        let Some(f) = t.walks.last() else { return u64::MAX };
+        let Some(f) = ctx().walks.last() else { return u64::MAX };
         let (owner, thread, early, canceled) = (f.owner, f.thread, f.early, f.canceled);
         let d = ent(owner).head_dep;
         if d == NONE {
-            let f = t.walks.pop().unwrap();
+            let f = ctx().walks.pop().unwrap();
             release(owner);
             if f.worker {
                 worker_idle();
@@ -753,24 +1023,147 @@ pub fn walk_next() -> u64 {
 
 /// The next queued task to run (the worker's started one first, then the
 /// first of the highest non-empty queue), handed over with its tag (or a
-/// dropped pure task to delete); `u64::MAX` if none. When only tasks
-/// waiting for others remain (a cycle), there is none: Lean's workers stop
-/// when the queue is empty and leave such tasks behind.
+/// dropped pure task to delete); `u64::MAX` if none.
+///
+/// For a worker context of the scheduler, its first task (`sched`). After
+/// `main` has returned (the final run, on `main`'s context), a task starts
+/// only when a worker would be free for it (`startable`); otherwise, and
+/// while tasks started on other contexts are still running, `main` waits.
+/// When only tasks waiting for others remain (a cycle), there is none:
+/// Lean's workers stop when the queue is empty and leave such tasks behind.
 #[inline(never)]
 pub fn next_tag() -> u64 {
+    let (p, sr) = crate::sched::take_preselect();
+    if p != NONE {
+        // Still the task it was started for (the entry may hold another
+        // since).
+        return if ent(p).serial == sr { hand_candidate(p) } else { u64::MAX };
+    }
     let t = tasks();
+    if t.shutting_down && crate::sched::cur() == crate::sched::MAIN && ctx().running.is_empty() {
+        loop {
+            let e = startable(true);
+            if e != NONE {
+                return hand_candidate(e);
+            }
+            if !has_queued() && !crate::sched::workers_alive() {
+                return u64::MAX;
+            }
+            crate::sched::block(crate::sched::Wait::FinalRun);
+        }
+    }
     let w = t.worker;
     let cand = if w != NONE && ent(w).flags & QUEUED != 0 { w } else { first_queued() };
     if cand == NONE {
         return u64::MAX;
     }
-    if cand != w {
+    hand_candidate(cand)
+}
+
+/// Hand queued task `cand` over to be run, or the dropped pure task it
+/// stands for to be deleted (`dropped`).
+fn hand_candidate(cand: u32) -> u64 {
+    let e = ent(cand);
+    if e.cell == 0 || e.flags & QUEUED == 0 {
+        // Started or deleted meanwhile.
+        return u64::MAX;
+    }
+    if cand != tasks().worker {
         let x = dropped(cand);
         if x != NONE {
             return hand(x, true);
         }
     }
     hand(cand, false)
+}
+
+/// Whether tasks are queued.
+pub fn has_queued() -> bool {
+    first_queued() != NONE
+}
+
+/// The queued task the scheduler can start now on a new context (or a
+/// worker context that has finished its task, `from_worker`, which holds no
+/// worker then): the one `next_tag` would hand over, if a worker is free
+/// for it. Natively a task at a priority up to `Task.Priority.max` waits
+/// for one of the task manager's workers (`LEAN_NUM_THREADS`, or one per
+/// processor); a worker waiting for a task (`IO.wait`, `Task.get`) frees
+/// its place meanwhile (`wait_for`); a dedicated task has a thread of its
+/// own. `NONE` if none.
+pub fn startable(from_worker: bool) -> u32 {
+    let t = tasks();
+    if !t.started {
+        return NONE;
+    }
+    let _ = from_worker;
+    settle_worker();
+    let w = t.worker;
+    let cand = if w != NONE && ent(w).flags & QUEUED != 0 { w } else { first_queued() };
+    if cand == NONE {
+        return NONE;
+    }
+    if cand != w && (deletion_due() || is_dropped(cand)) {
+        // Deleting it needs no worker.
+        return cand;
+    }
+    if ent(cand).prio as usize == PRIOS - 1 {
+        return cand;
+    }
+    if pool_in_use() < crate::sched::workers_limit() { cand } else { NONE }
+}
+
+/// Whether a context with this bookkeeping holds one of the task manager's
+/// workers: the innermost task running on it (not on the thread of whoever
+/// ran it) is at a pool priority, and it is not waiting for a task.
+fn holds_worker(st: &CtxState, w: crate::sched::Wait) -> bool {
+    use crate::sched::Wait;
+    if matches!(w, Wait::Cell(_) | Wait::Progress) {
+        return false;
+    }
+    for &i in st.running.iter().rev() {
+        let e = ent(i);
+        if e.flags & ON_THREAD != 0 {
+            continue;
+        }
+        return (e.prio as usize) < PRIOS - 1;
+    }
+    false
+}
+
+/// The number of the task manager's workers in use.
+fn pool_in_use() -> u32 {
+    let mut n = if holds_worker(ctx(), crate::sched::cur_wait()) { 1 } else { 0 };
+    crate::sched::for_each_other(|st, w| {
+        if holds_worker(st, w) {
+            n += 1
+        }
+    });
+    n
+}
+
+/// A `busy` task (`Task.get` of a task that is running): it runs on
+/// another context, which has blocked; wait until it has finished. On the
+/// running context it needs itself: native Lean waits forever then.
+#[inline(never)]
+pub fn wait_running(a: usize) -> u64 {
+    let i = find(a);
+    if i == NONE {
+        return 1;
+    }
+    if ctx().running.contains(&i) {
+        hang();
+    }
+    crate::sched::block(crate::sched::Wait::Cell(a));
+    1
+}
+
+/// `IO.waitAny` when every task of the list is running or waits for a
+/// promise: wait until some task finishes (other contexts and queued tasks
+/// run meanwhile), then the list is looked at again.
+#[inline(never)]
+pub fn wait_progress() -> u64 {
+    crate::sched::block(crate::sched::Wait::Progress);
+    1
 }
 
 /// The first valid item of the highest non-empty queue (stale items in
@@ -781,7 +1174,7 @@ fn first_queued() -> u32 {
         if t.queued[p] == 0 {
             continue;
         }
-        while let Some(&(i, q)) = t.queues[p].front() {
+        while let Some(&(i, q, _)) = t.queues[p].front() {
             let e = ent(i);
             if e.cell != 0 && e.flags & QUEUED != 0 && e.link == q {
                 return i;
@@ -801,9 +1194,9 @@ fn pick() -> u32 {
             continue;
         }
         for k in 0..t.queues[p].len() {
-            let (i, q) = t.queues[p][k];
+            let (i, q, _) = t.queues[p][k];
             let e = ent(i);
-            if e.cell != 0 && e.flags & QUEUED != 0 && e.link == q && dropped(i) == NONE {
+            if e.cell != 0 && e.flags & QUEUED != 0 && e.link == q && !dropped_by_now(i) {
                 return i;
             }
         }
@@ -815,7 +1208,7 @@ fn pick() -> u32 {
 fn worker_idle() {
     let t = tasks();
     t.wake = None;
-    t.worker = if t.started && !t.shutting_down { pick() } else { NONE };
+    t.worker = if t.started && !t.shutting_down && pool_in_use() < crate::sched::workers_limit() { pick() } else { NONE };
 }
 
 /// The woken worker has picked its task if enough time has passed.
@@ -830,6 +1223,67 @@ fn settle_worker() {
     }
 }
 
+/// Whether tasks are queued, or the worker is waking up (`sched::effect`).
+#[inline]
+pub fn worker_busy() -> bool {
+    let t = tasks();
+    t.wake.is_some() || t.worker != NONE || t.queued.iter().any(|&n| n > 0)
+}
+
+/// How long a native worker takes to start a task it is woken for (a new
+/// thread's start; `sched::zero_sleep`).
+pub const WORKER_LATENCY: Duration = LATENCY_COLD;
+
+/// The queued task the scheduler can start now (`startable`), if natively
+/// a worker would have been running it for `age` already: one queued `age`
+/// ago or more (a free worker starts it at once natively, and `startable`
+/// gives it only if a worker is free now; one that was busy since has
+/// natively long finished what it ran here late). A dropped pure task to
+/// delete comes at once.
+pub fn stale_startable(age: Duration) -> u32 {
+    let t = tasks();
+    if !t.started || t.shutting_down {
+        return NONE;
+    }
+    let c = startable(false);
+    if c == NONE {
+        return NONE;
+    }
+    let e = ent(c);
+    let p = e.prio as usize;
+    match t.queues[p].iter().find(|x| x.0 == c && x.1 == e.link) {
+        Some(&(_, _, at)) if at.elapsed() >= age => c,
+        Some(_) => NONE,
+        None => c,
+    }
+}
+
+/// The serial number of entry `i`'s task (`Entry::serial`).
+pub fn serial_of(i: u32) -> u32 {
+    ent(i).serial
+}
+
+/// The position of the task queues (`released_startable`).
+pub fn queue_mark() -> u32 {
+    tasks().next_q
+}
+
+/// The queued task the scheduler can start now (`startable`), if it was
+/// queued after `mark`: released by what ran at an effect point (a due
+/// timer's completion), a free worker natively starts it at once.
+pub fn released_startable(mark: u32) -> u32 {
+    let t = tasks();
+    if !t.started || t.shutting_down {
+        return NONE;
+    }
+    let c = startable(false);
+    if c == NONE {
+        return NONE;
+    }
+    let e = ent(c);
+    if e.flags & QUEUED != 0 && (e.link.wrapping_sub(mark) as i32) > 0 { c } else { NONE }
+}
+
 /// Before a task runs: if it waits for a pending task, which waits for
 /// another, and so on, the deepest pending one of that chain is handed to
 /// the caller, which runs it first (its tag is returned), so that a long
@@ -841,25 +1295,30 @@ fn settle_worker() {
 #[inline(never)]
 pub fn source_next(cell: usize) -> u64 {
     let t = tasks();
-    if t.chains.last().map(|(c, _)| *c) != Some(cell) {
+    let i = find(cell);
+    let key = (cell, if i == NONE { 0 } else { ent(i).serial });
+    if ctx().chains.last().map(|(k, _)| *k) != Some(key) {
         // A new chain: the pending tasks `cell` waits for, transitively
         // (bounded: a bind task waiting for a task that depends on it is a
-        // cycle).
-        let i = find(cell);
+        // cycle). Chains run to their end were left behind by forcing that
+        // has finished.
+        while ctx().chains.last().is_some_and(|(_, c)| c.is_empty()) {
+            ctx().chains.pop();
+        }
         if i == NONE {
             return u64::MAX;
         }
         let mut chain = Vec::new();
         if ent(i).flags & PROMISE != 0 {
-            chain.push((i, cell));
+            chain.push((i, ent(i).serial));
         } else {
             let mut c = i;
             for _ in 0..=t.slab.len() {
                 let s = ent(c).source();
-                if ent(c).flags & WAITING == 0 || s == NONE || s == i || ent(s).flags & RUNNING != 0 {
+                if ent(c).flags & WAITING == 0 || s == NONE || s == i || ent(s).flags & (RUNNING | HANDED) != 0 {
                     break;
                 }
-                chain.push((s, ent(s).cell));
+                chain.push((s, ent(s).serial));
                 if ent(s).flags & PROMISE != 0 {
                     break;
                 }
@@ -867,33 +1326,74 @@ pub fn source_next(cell: usize) -> u64 {
             }
         }
         if chain.is_empty() {
+            // It waits for a task running on another context: natively a
+            // dependent, run or queued when that task finishes. Wait for
+            // it, then the caller looks again.
+            if let Some(c) = source_elsewhere(i) {
+                crate::sched::block(crate::sched::Wait::Cell(c));
+            }
             return u64::MAX;
         }
-        t.chains.push((cell, chain));
+        ctx().chains.push((key, chain));
     }
     loop {
-        let t = tasks();
-        let (_, chain) = t.chains.last_mut().unwrap();
-        let Some(&(d, c)) = chain.last() else {
-            t.chains.pop();
+        let (_, chain) = ctx().chains.last_mut().unwrap();
+        let Some(&(d, sr)) = chain.last() else {
+            ctx().chains.pop();
             return u64::MAX;
         };
         let e = ent(d);
-        if e.cell != c || e.flags & RUNNING != 0 {
-            // Finished (or started) meanwhile.
+        if e.cell == 0 || e.serial != sr || e.flags & (RUNNING | HANDED) != 0 {
+            // Finished (or started, or handed to another) meanwhile; its
+            // entry may hold another task since.
             chain.pop();
             continue;
         }
+        let c = e.cell;
         if e.flags & PROMISE != 0 {
-            let tag = next_tag();
-            if tag == u64::MAX {
-                tasks().chains.pop();
+            // Wait until it is resolved (other contexts and queued tasks
+            // run meanwhile, as other threads would). A program polling
+            // for it (`query` answered 4) lets the others go on once
+            // (`sched::poll_yield`) and then looks at it.
+            let poll = std::mem::replace(&mut tasks().poll, 0) == cell;
+            if poll {
+                crate::sched::poll_yield();
+                ctx().chains.pop();
+                return u64::MAX;
             }
-            return tag;
+            crate::sched::block(crate::sched::Wait::Cell(c));
+            continue;
+        }
+        if let Some(s) = source_elsewhere(d) {
+            // The deepest pending task waits for one running on another
+            // context: it runs once that one has finished (above).
+            crate::sched::block(crate::sched::Wait::Cell(s));
+            continue;
         }
         chain.pop();
         return hand(d, false);
     }
+}
+
+/// The task pending task `x` waits for, if it runs on another context of
+/// the scheduler (or was handed to one and has not begun): `x` is to wait
+/// until it has finished. `None` if `x` does not wait, or waits for a task
+/// running on the current context (it needs itself: it then runs, and
+/// waits forever, as natively).
+fn source_elsewhere(x: u32) -> Option<usize> {
+    let e = ent(x);
+    if e.flags & WAITING == 0 {
+        return None;
+    }
+    let s = e.source();
+    if s == NONE {
+        return None;
+    }
+    let se = ent(s);
+    if se.cell == 0 || se.flags & (RUNNING | HANDED) == 0 || ctx().running.contains(&s) {
+        return None;
+    }
+    Some(se.cell)
 }
 
 /// The task handed over by `walk_next`, `source_next` or `next_tag`, with
@@ -931,7 +1431,7 @@ pub fn status(cell: usize) -> u8 {
     if i == NONE {
         return 2;
     }
-    if ent(i).flags & (RUNNING | PROMISE) != 0 { 1 } else { 0 }
+    if ent(i).flags & (RUNNING | PROMISE | HANDED) != 0 { 1 } else { 0 }
 }
 
 /// For `IO.waitAny`: as `status`, or 3 for a pending task that waits,
@@ -956,7 +1456,12 @@ pub fn wait_status(cell: usize) -> u8 {
         if ent(c).flags & PROMISE != 0 {
             return 3;
         }
-        if ent(c).flags & RUNNING != 0 {
+        if ent(c).flags & (RUNNING | HANDED) != 0 {
+            // Running on another context: it waits for that one too
+            // (running it would wait; `source_next`).
+            if !ctx().running.contains(&c) {
+                return 3;
+            }
             break;
         }
     }
@@ -977,7 +1482,14 @@ pub fn query(cell: usize) -> u8 {
         return 2;
     }
     let e = ent(i);
-    if e.flags & RUNNING != 0 {
+    if e.flags & (RUNNING | HANDED) != 0 {
+        // Running on another context (blocked there): natively it goes on
+        // meanwhile, so the others do now (`sched::poll_yield`), and its
+        // state is answered then.
+        if !ctx().running.contains(&i) {
+            crate::sched::poll_yield();
+            return status(cell);
+        }
         return 1;
     }
     let idle = if e.flags & PROMISE != 0 { 1 } else { 0 };
@@ -990,10 +1502,54 @@ pub fn query(cell: usize) -> u8 {
     if t.epoch + 1 > observed || queries >= 1000 {
         // The next question starts over (a promise may stay unresolved).
         e.aux = [0, 0];
+        if poll == 4 {
+            t.poll = cell;
+        }
+        if poll == 3 && wait_status(cell) == 3 {
+            // It waits for an unresolved promise or a task running on
+            // another context: running it would wait. The others go on
+            // meanwhile, as other threads would (`sched::poll_yield`); its
+            // state then.
+            crate::sched::poll_yield();
+            return status(cell);
+        }
         return poll;
     }
     e.aux[1] += 1;
     idle
+}
+
+/// `IO.Promise.isResolved` (lean2rr's shim, `L2RShim.promiseIsResolved`):
+/// `IO.hasFinished` of the promise's task, as `IO.getTaskState` answers it
+/// (`query`; when it answers 4, the program polls: other contexts and
+/// queued tasks run first, until the promise is resolved or nothing else
+/// can go on). The caller releases the promise afterwards: natively
+/// `isResolved` borrows it, so a last reference is dropped (resolving the
+/// promise with `none`) only after the question.
+#[inline(never)]
+pub fn promise_is_resolved(cell: usize) -> bool {
+    match query(cell) {
+        2 => true,
+        4 => {
+            source_next(cell);
+            status(cell) == 2
+        }
+        _ => false,
+    }
+}
+
+/// A `busy` thunk is needed (`l2r_thunk_wait_busy`): another context is
+/// forcing it (its computation blocked, or let others run at an effect
+/// point): wait until it has its value (`l2r_thunk_done`), as natively a
+/// thread waits for the one forcing it. Needed by its own computation, it
+/// waits forever, as natively.
+#[inline(never)]
+pub fn thunk_wait_busy(addr: usize) {
+    if tasks().started {
+        crate::sched::block(crate::sched::Wait::Cell(addr));
+    } else {
+        hang()
+    }
 }
 
 /// `IO.cancel` of a task.
@@ -1015,7 +1571,7 @@ pub fn cancel(cell: usize) {
 #[inline(never)]
 pub fn check_canceled() -> bool {
     let t = tasks();
-    let Some(&i) = t.running.last() else { return false };
+    let Some(&i) = ctx().running.last() else { return false };
     let late = if t.shutting_down {
         let late = !early_now(i);
         ent(i).flags |= CHECKED;
@@ -1029,6 +1585,17 @@ pub fn check_canceled() -> bool {
 /// A thunk forced from its own computation, or tasks waiting for each other:
 /// native Lean waits forever (without flushing stdout).
 pub fn hang() -> ! {
+    // Other contexts go on meanwhile, as other threads would.
+    if tasks().started {
+        loop {
+            crate::sched::block(crate::sched::Wait::Forever);
+        }
+    }
+    hang_thread()
+}
+
+/// Wait forever: nothing can go on any more.
+pub fn hang_thread() -> ! {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
     }

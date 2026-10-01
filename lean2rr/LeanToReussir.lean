@@ -5,6 +5,8 @@ import LeanToReussir.Retype
 import LeanToReussir.Specialize
 import LeanToReussir.Stats
 import LeanToReussir.Mono
+import LeanToReussir.CompileRecord
+import LeanToReussir.ExtractClosedK
 import LeanToReussir.Pipeline
 import LeanToReussir.Dump
 import LeanToReussir.RR

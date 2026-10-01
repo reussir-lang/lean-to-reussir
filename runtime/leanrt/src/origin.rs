@@ -54,6 +54,8 @@ impl Hasher for AddrHasher {
 }
 
 struct Entry {
+    /// Its index in `Table::keys`.
+    slot: usize,
     conv_drop: unsafe fn(usize),
     orig: usize,
     orig_drop: unsafe fn(usize),
@@ -99,13 +101,25 @@ fn sweep(t: &mut Table, n: usize, out: &mut Vec<(unsafe fn(usize), usize)>) {
         }
         let k = t.keys[t.cursor];
         if unsafe { *(k as *const u32) } == 1 {
-            t.keys.swap_remove(t.cursor);
+            let i = t.cursor;
+            remove_key(t, i);
             if let Some(e) = t.map.remove(&k) {
                 out.push((e.conv_drop, k));
                 out.push((e.orig_drop, e.orig));
             }
         } else {
             t.cursor += 1;
+        }
+    }
+}
+
+/// Remove `keys[i]`, keeping the slots of the others right.
+fn remove_key(t: &mut Table, i: usize) {
+    t.keys.swap_remove(i);
+    if i < t.keys.len() {
+        let moved = t.keys[i];
+        if let Some(e) = t.map.get_mut(&moved) {
+            e.slot = i;
         }
     }
 }
@@ -139,19 +153,24 @@ pub fn note<S, D>(src: S, dst: D, code: u64) -> D {
             // Converted from a converted value: the first origin.
             Some(e) => {
                 unsafe { *(e.orig as *mut u32) += 1 };
-                Entry { conv_drop: drop_as::<D>, orig: e.orig, orig_drop: e.orig_drop, orig_code: e.orig_code, orig_addr: e.orig_addr }
+                Entry { slot: 0, conv_drop: drop_as::<D>, orig: e.orig, orig_drop: e.orig_drop, orig_code: e.orig_code, orig_addr: e.orig_addr }
             }
             None => {
                 // The record keeps the reference `src` came with.
                 std::mem::forget(src.take());
-                Entry { conv_drop: drop_as::<D>, orig: sp, orig_drop: drop_as::<S>, orig_code: code, orig_addr: sp as u64 }
+                Entry { slot: 0, conv_drop: drop_as::<D>, orig: sp, orig_drop: drop_as::<S>, orig_code: code, orig_addr: sp as u64 }
             }
         };
         // The record's own reference to the converted object.
         unsafe { *(dp as *mut u32) += 1 };
+        let mut entry = entry;
+        entry.slot = t.keys.len();
         if let Some(old) = t.map.insert(dp, entry) {
             refs.push((old.conv_drop, dp));
             refs.push((old.orig_drop, old.orig));
+            if let Some(e) = t.map.get_mut(&dp) {
+                e.slot = old.slot;
+            }
         } else {
             t.keys.push(dp);
         }
@@ -188,6 +207,37 @@ pub fn take<S, D>(x: S) -> D {
     });
     drop(x);
     unsafe { std::ptr::read(&o as *const usize as *const D) }
+}
+
+/// The program gives up its last reference to the object at address `p`
+/// (count 2: one of them may be the table's): if the table holds it, the
+/// record is dead, and is released now, with its origin (the containers of
+/// `crate::drop` call this, so that a resource held by an array's origin is
+/// released when the array is, as natively, where they are one object).
+/// Whether the caller's reference was given up here.
+#[inline(always)]
+pub fn release_shared(p: usize) -> bool {
+    if !ANY.load(Ordering::Relaxed) {
+        return false;
+    }
+    release_shared_slow(p)
+}
+
+#[inline(never)]
+fn release_shared_slow(p: usize) -> bool {
+    let e = TABLE.with(|t| {
+        let mut t = t.borrow_mut();
+        let e = t.map.remove(&p)?;
+        remove_key(&mut t, e.slot);
+        Some(e)
+    });
+    let Some(e) = e else { return false };
+    // The caller's reference, then the table's (the last: the object is
+    // freed), then the origin.
+    unsafe { *(p as *mut u32) -= 1 };
+    unsafe { (e.conv_drop)(p) };
+    unsafe { (e.orig_drop)(e.orig) };
+    true
 }
 
 /// The identity (`ptrAddrUnsafe`) of the object at address `p`, when it was

@@ -63,6 +63,16 @@ def stateMachinePlan (d : Decl .pure) (body : Code .pure) (outlined : FVarIdSet)
     let base := fnName d.name
     some { fn := base ++ "_sm", mode := base ++ "_mode", self := d.name, arity := d.params.size, params := pnames }
 
+/-- A self tail call of the state machine's declaration with arguments
+`args`: entering it at the declaration's own entry, which carries them. -/
+def stateMachineSelfCall (sm : StateMachine) (args : Array RR.Expr) : LowerM RR.Expr :=
+  return .call sm.fn #[] #[.ctor sm.mode (some sm.entry) args]
+
+/-- A jump entering the state machine at join-point variant `variant` with
+its fields `fields` (captured variables, then the jump's arguments). -/
+def stateMachineJumpCall (sm : StateMachine) (variant : String) (fields : Array RR.Expr) : LowerM RR.Expr :=
+  return .call sm.fn #[] #[.ctor sm.mode (some variant) fields]
+
 /-- Emit declaration `d` lowered as state machine `sm` (parameters carried by
 the entry variant): the dispatching function over its entry point, whose
 arms are the lowered entry code `block` and the outlined join points'

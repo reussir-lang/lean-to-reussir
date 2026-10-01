@@ -189,7 +189,13 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
             let argTys ← (mask.zip params).filterMapM fun (m, p) => if m then some <$> lowerType p else pure none
             let want := (← read).preludeParams[prim]?.getD argTys
             let passed ← (passedArgs.zip (argTys.zip want)).mapM fun (a, (t, w)) => coerce a t w
-            return ← wrapIOResult resTy (.call prim #[] passed)
+            -- The result too, from a non-generic primitive's result type (a
+            -- runtime object such as a mutex or promise is `lcAny` in mono
+            -- code).
+            let payload ← match (← read).preludeRets[prim]?, (← read).preludeParams.contains prim with
+              | some r, true => coerce (.call prim #[] passed) r (← ioPayloadTy resTy)
+              | _, _ => pure (.call prim #[] passed)
+            return ← wrapIOResult resTy payload
   -- A generic prelude function in plain Reussir that does not store its
   -- values in runtime containers (`dbgTrace`, `dbgSleep`, `panic`, …) is
   -- instantiated at the value types themselves: its arguments and result
@@ -205,8 +211,9 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
       | .fn d c => if cls[i]?.getD false then coerce a t (.cls d c) else pure a
       | _ => pure a
     return .call sym tys passed
-  -- Array externs at `Array Nat`/`Array Int` use the one-word arrays.
-  if let some α := typeArgs[0]? then
+  -- Array externs at `Array Nat`/`Array Int` use the one-word arrays,
+  -- when those represent them (`LowerCtx.natArrays`).
+  if let (some α, true) := (typeArgs[0]?, (← read).natArrays) then
     let fam? := match ← lowerType (← toMonoTypeKeep α) with
       | .named "Nat" => some "natarr"
       | .named "Int" => some "intarr"

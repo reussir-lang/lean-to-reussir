@@ -22,16 +22,17 @@ def nullaryPrelude (ctx : CodeCtx) (arm : CasesArm) (binders : Array (Option Str
   unless binders.isEmpty && hasFVar arm.discr arm.code do return (#[], ctx)
   let sty := RR.Ty.named arm.ty
   let x ← fresh "nc"
-  -- Fields of enclosing lazily matched values (Opt/LazyFields) that are
-  -- this variable need no binding here any more.
+  -- The variable is pinned to this binding: no other hook binds it again
+  -- in this alternative (e.g. as a field of an enclosing value).
   return (#[(x, some sty, RR.Expr.ctor arm.ty (some arm.layout.variant) #[])],
-    { ctx with vars := ctx.vars.insert arm.discr (x, sty),
-               lazy := ctx.lazy.map fun l =>
-                 { l with fields := l.fields.filter (·.1 != arm.discr),
-                          pending := l.pending.filter (·.1 != arm.discr) } })
+    { ctx with vars := ctx.vars.insert arm.discr (x, sty), pinned := ctx.pinned.insert arm.discr })
 
-/-- Registry entry point. -/
+/-- Registry entry point: after the bindings of the hooks installed before. -/
 def Opt.NullaryScrutinee.install (c : PassConfig) : PassConfig :=
-  { c with lower := { c.lower with armPrelude := nullaryPrelude } }
+  let prev := c.lower.armPrelude
+  { c with lower := { c.lower with armPrelude := fun ctx arm binders => do
+      let (lets, ctx) ← prev ctx arm binders
+      let (more, ctx) ← nullaryPrelude ctx arm binders
+      return (lets ++ more, ctx) } }
 
 end LeanToReussir

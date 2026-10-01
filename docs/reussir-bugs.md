@@ -855,6 +855,21 @@ the cell; of those about to be freed, the last is released as the tail
 call. So the loop follows whichever member carries the chain. A build of
 it passes all three plain shapes at 1M cells and both Lean cases at 40M.
 
+**Still recursive.** A cell with two chain members being freed loops
+along the last one only and recurses into the other: a binary tree deep
+along its left child whose right children are fresh nodes, or a rose tree
+in uniform code (`List` cells whose head holds the deep tree and whose
+tail a fresh node), overflows an 8 MB stack at 10⁶ levels (lean2rr test
+`RtDropGlue`, an expected failure). Native Lean pushes every child that is
+freed onto a stack of objects to free. lean2rr's runtime cannot reach this
+recursion: records release records directly in the glue. Containers
+(arrays, thunk and task cells, references) are freed iteratively by the
+runtime since fix-drop5, so only record → record chains remain. A fix
+would extend 0013: inside `drop_and_free`, push the chain members being
+freed other than the last onto a per-thread stack instead of releasing
+them, and when the loop's chain ends, pop the next one (Lean's
+`lean_del_core` todo list). Not done yet: reported for a decision.
+
 ## 14. `fuseArm` loses a count when a bound member is consumed before the scrutinee's release
 
 **Status.** Patched locally (in the revised 0009).

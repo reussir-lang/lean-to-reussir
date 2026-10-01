@@ -1,6 +1,7 @@
 import Lean
 import LeanToReussir.Pipeline
 import LeanToReussir.Lower
+import LeanToReussir.MonoRetype
 
 /-!
 # The configurable parts of the pipeline
@@ -27,6 +28,8 @@ structure RRProgram where
 structure PassConfig where
   /-- Edits of Lean's pass lists for Stage 2. -/
   stage2 : Stage2Config := #[]
+  /-- The optional parts of Stage 3. -/
+  stage3 : Stage3Config := {}
   /-- Passes over the checked mono declarations (after Stage 3, before
   lowering), in order; they get the instance keys. -/
   monoPasses : Array (NameMap InstKey → Array (Decl .pure) → Array (Decl .pure)) := #[]
@@ -37,6 +40,12 @@ structure PassConfig where
   /-- Whether a structure with a single relevant field is a `[value]`
   struct (no heap cell per value) rather than a shared record. -/
   valueStructs : Bool := false
+  /-- Whether a placeholder (Lean's `box(0)` at a type) that would allocate
+  is built once and kept in a once-cell. Plain: built where it is used. -/
+  cachePlaceholders : Bool := false
+  /-- Whether `Array Nat`/`Array Int` are the runtime's one-word-per-element
+  arrays `LNatArr`/`LIntArr`. Plain: arrays like the others. -/
+  natArrays : Bool := false
   /-- The order of a constructor's relevant fields in its record, given
   their alignments: the fields' indices in record order. Plain: declaration
   order. -/

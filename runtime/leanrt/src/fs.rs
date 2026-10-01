@@ -153,8 +153,8 @@ pub(crate) fn for_each_open(mut op: impl FnMut(&mut CFile)) {
     }
 }
 
-impl Drop for FileHandle {
-    fn drop(&mut self) {
+impl FileHandle {
+    fn close_now(&mut self) {
         if self.f.fd >= 0 {
             let open = unsafe { &mut *OPEN.0.get() };
             let me = self as *mut FileHandle as usize;
@@ -164,6 +164,35 @@ impl Drop for FileHandle {
             self.f.close();
         }
     }
+}
+
+impl Drop for FileHandle {
+    fn drop(&mut self) {
+        if self.f.fd < 0 {
+            return;
+        }
+        if crate::drop::active() {
+            // Released while a container is freed: closed when the free
+            // reaches it, in Lean's order (`crate::drop`). The handle moves
+            // to a box of its own, which the open list now names.
+            let moved = Box::new(UnsafeCell::new(FileHandle { f: std::mem::replace(&mut self.f, CFile::new(-1, 0)) }));
+            let open = unsafe { &mut *OPEN.0.get() };
+            let me = self as *mut FileHandle as usize;
+            if let Some(i) = open.iter().rposition(|&p| p == me) {
+                open[i] = moved.get() as usize;
+            }
+            crate::drop::defer(Box::into_raw(moved) as usize, close_deferred);
+            return;
+        }
+        self.close_now();
+    }
+}
+
+unsafe fn close_deferred(p: usize) -> bool {
+    let mut b = Box::from_raw(p as *mut UnsafeCell<FileHandle>);
+    b.get_mut().close_now();
+    drop(b);
+    true
 }
 
 #[inline(always)]
@@ -219,11 +248,13 @@ fn outcome(r: Result<(), i32>) {
 
 /// `Handle.putStr` / `Handle.write` (`fwrite`).
 pub fn put_str(h: &LHandle, s: &[u8]) {
+    crate::sched::effect();
     outcome(fh(h).put(s))
 }
 
-/// `Handle.flush` (`fflush`).
+/// `Handle.flush` (`fflush`): output, an effect point.
 pub fn flush(h: &LHandle) {
+    crate::sched::effect();
     outcome(fh(h).flush())
 }
 
@@ -724,6 +755,32 @@ fn uv_strerror(e: i32) -> Option<&'static str> {
     })
 }
 
+/// `uv_strerror` of a (positive) errno, for `net`: libuv's message, or
+/// `Unknown system error -e`.
+pub fn uv_strerror_bytes(e: i32) -> Vec<u8> {
+    match uv_strerror(e) {
+        Some(m) => m.as_bytes().to_vec(),
+        None => format!("Unknown system error {}", -e).into_bytes(),
+    }
+}
+
+/// The error kind `decode_uv_error` gives a (positive) errno without a file
+/// name, for `net`.
+pub fn uv_kind(e: i32) -> u32 {
+    if !uv_maps(e) {
+        return 0;
+    }
+    decode_kind(e, false)
+}
+
+/// `write(2)`, for the signal handler (`net`).
+pub fn raw_write(fd: i32, buf: *const std::ffi::c_void, n: usize) -> isize {
+    extern "C" {
+        fn write(fd: i32, buf: *const std::ffi::c_void, n: usize) -> isize;
+    }
+    unsafe { write(fd, buf, n) }
+}
+
 pub fn decode_kind(e: i32, has_fname: bool) -> u32 {
     let file = |no: u32, yes: u32| if has_fname { yes } else { no };
     match e {
@@ -759,7 +816,7 @@ pub fn is_open(h: &LHandle) -> bool {
 pub mod owned {
     use super::*;
     use crate::{array, rc_release};
-    use reussir_rt::collections::vec::Vec as RVec;
+    use crate::drop::Vec as RVec;
 
     #[inline(never)]
     pub fn put_str(h: LHandle, s: LStr) { super::put_str(&h, &s.0); rc_release(s); rc_release(h); }

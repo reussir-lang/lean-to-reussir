@@ -59,58 +59,93 @@ instance; Lean's base `specialize` is not run again (§7).
 
 ### Code structure and passes
 
-`lean2rr/Main.lean` reads as the pipeline: collect, Stage 1, Stage 2,
-then `lowerProgram` (Stage 3, the optional passes, Stage 4, assembly), with
-an `--emit` checkpoint after each stage. The modules of
+`lean2rr/Main.lean` reads as the pipeline, with an `--emit` checkpoint
+after the stages: Stage 1 (`monomorphize`, `--emit inst`), Stage 2
+(`runStage2`, `--emit mono` and `externs`), Stage 3 (`retypeMono`, from the
+declarations the entry point calls, `--emit retyped`), the registry's
+passes over mono LCNF, Stage 4 (`lowerProgram`, with the registry's
+lowering hooks), the `Array Nat` literal tables and `Outline`, the
+registry's passes over the generated functions, and the program text
+(`--emit rr`). The modules of
 `lean2rr/LeanToReussir/`:
-- Stage 1: `Collect`, `Mono`, `Specialize`, `Relevance`, `Retype`;
-- Stage 2: `Pipeline` (the driver), `TypedToMono` and
-  `TypedStructProjCases` (lean2rr's copies of two Lean passes),
-  `MonoTypesKeep`;
+- loading: `Env` (importing the program's modules with their extension
+  states), `Collect` (reachability; `--emit base`);
+- Stage 1: `Mono` (instances), `Passes` (running Lean's passes, for Stage
+  1's recompilation and for Stage 2), `Relevance` (relevant type
+  parameters, also used by Stage 4);
+- the `--stats` dry run: `Stats`, `Specialize`, `Retype`;
+- Stage 2: `Pipeline` (the driver), `TypedToMono`,
+  `TypedStructProjCases` and `ExtractClosedK` (lean2rr's copies of three
+  Lean passes), `MonoTypesKeep`, `CompileRecord` (what the `.olean`
+  records of Lean's compilation: its order and its closed terms, also read
+  by `Emit/Startup`);
 - Stage 3: `MonoRetype`;
-- Stage 4: `LowerBase` (state, type translation), then `Lower/*.lean`, each
-  importing the previous one: `Ctx` (the code-lowering context),
-  `FnValues`, `LazyForce`, `Conv`, `Decls`, `Externs`, `LazyGlue`,
-  `Process`, `Promises`, `Identity`, `ExternCall`, `Borrow` (release times
-  of borrowed resources, §5.8), `Values`, `JoinPoints`,
-  `StateMachine` (J4), `Hooks`, `Code` (`lowerCode`, `lowerDecl`),
-  `Finish`;
-- assembly: `Emit/Startup` (initializer order, the startup chain),
+- Stage 4: `RR` (the `.rr` syntax tree and its text), `LowerBase` (state,
+  type translation), then `Lower/*.lean`, each importing the previous one:
+  `Ctx` (the code-lowering context), `FnValues`, `LazyForce`, `Conv`,
+  `Decls`, `Externs`, `LazyGlue`, `Process`, `Promises`, `Identity`,
+  `ExternCall`, `Borrow` (release times of borrowed resources, §5.8),
+  `Values`, `JoinPoints`, `StateMachine` (J4), `Hooks`,
+  `Code` (`lowerCode`, `lowerDecl`), `Finish`;
+- the program: `Emit/Startup` (initializer order, the startup chain),
   `Emit/Entry` (the entry point), `Emit/Program` (`lowerProgram`, which
-  also splices chains of closed terms before lowering, and runs
-  `ArrayLits` and `Outline` on the generated functions, before the
-  optional passes over them);
-- `PassConfig`: the configurable parts of the pipeline;
-- `Opt/*.lean`: the optional passes, and `Opt/Registry.lean`.
+  splices chains of closed terms before lowering, and the lowered
+  program's steps), `ArrayLits` (`Array Nat` literals as tables),
+  `Outline` (deep and long tail paths and `let` values cut into
+  functions, for rrc; run before the optional passes over the generated
+  functions);
+- `Dump`: typed LCNF dumps for the `--emit` checkpoints;
+- `PassConfig`: the configurable parts of the pipeline; `Opt/*.lean`: the
+  optional passes, and `Opt/Registry.lean`.
+
+`lean2rr/L2RShim.lean` is a library of its own (built with lean2rr, on the
+driver's `LEAN_PATH`): Lean implementations of `Std.Internal.UV`'s externs
+and of the few Lean definitions lean2rr replaces (§5.8), which `Env`
+imports with the program and Stage 1 calls instead (`Mono.redirectTarget`).
+
+Outside `lean2rr/`: `runtime/` (the prelude `prelude.rr` and the runtime
+crate `leanrt`), `scripts/l2r.py` (the driver: lean2rr, then rrc),
+`reussir-patches/` (the local Reussir patches, docs/reussir-bugs.md),
+`tests/`, `docs/`.
 
 The core translation is the plain one: the rules of this plan without the
 optional passes, and correct on its own (the classic corpus at every size
 and the runtime suite match native Lean with every optional pass off).
 Each optimization is a module of `Opt/` with an `install : PassConfig →
-PassConfig` that plugs it into a hook of `PassConfig`: a representation
-choice of the type translation (record field order, `[value]` structs), a
-pass over the checked mono declarations (`monoPasses`), Lean definitions
-replaced by prelude functions, a lowering hook (`LowerHooks`: the body
-before lowering, the J1′ choice, the form of J4's state machine, constant
-caching, the binding of a `cases` alternative's fields), or a pass over
-the generated Reussir functions (`rrPasses`). Every hook's default is the
-plain translation.
+PassConfig` that plugs it into a hook of `PassConfig`, keeping what was
+installed before: a representation choice of the type translation (record
+field order, `[value]` structs, one-word `Nat`/`Int` arrays,
+placeholders kept in once-cells), a part of Stage 3 (map loops split by
+element representation), a pass over the checked mono declarations
+(`monoPasses`), Lean definitions replaced by prelude functions, a lowering
+hook (`LowerHooks`: the body before lowering, the J1′ choice, the form of
+J4's state machine, constant caching, the binding of a `cases`
+alternative's fields), or a pass over the generated Reussir functions
+(`rrPasses`). Every hook's default is the plain translation. A pass keeps
+its own state in the code-lowering context's extension slot
+(`CodeCtx.ext`), not in the core's.
 
 `Opt/Registry.lean` lists every pass in one place: Stage 2's edits of
 Lean's pass lists (two passes replaced, two not run, each with its
 reason); the optional passes, one line each (name, enabled by default,
-description, `install`), in installation order; and the parts that look
-optional but are not, with the reason: the startup chain's chunks (rrc's
-stack), J4's state machines (a loop through an outlined join point would
-use stack per iteration), closed-term chains not cached (an array literal
-would need memory quadratic in its length) and `Outline` (rrc's build time
-and memory). `lean2rr --list-opts` prints it, and `lean2rr --disable-opt
-NAME` turns one optimization off for a run (`scripts/l2r.py --disable-opt
-NAME`, or `L2R_DISABLE_OPTS=a,b` for test runners). To remove an
-optimization, delete its line; to add one, write `Opt/Name.lean` with the
-transformation and its `install`, import it in the registry and add its
-line. With all optional passes off, and with each one off in turn, the
-classic corpus and the runtime tests match native Lean.
+description, `install`), in installation order (it says what the order
+means for each kind of hook); and the parts that look optional but are
+not, with the reason: the startup chain's chunks (rrc's stack), J4's state
+machines (a loop through an outlined join point would use stack per
+iteration), Stage 3's type recovery from call sites (an array left at
+`lcAny` would be copied at every crossing), closed-term chains not cached
+(an array literal would need memory quadratic in its length), `Outline`
+(rrc's build time and memory, and the size of the `.rr` text) and the
+functions kept out of rrc's MLIR inliner (rrc's build time and memory on
+polymorphic recursion, §5.3).
+`lean2rr --list-opts` prints it, and `lean2rr --disable-opt NAME` turns one
+optimization off for a run (`--enable-opt NAME` one that is off by
+default; `scripts/l2r.py` passes both on, also from `L2R_DISABLE_OPTS=a,b`
+and `L2R_ENABLE_OPTS`). To remove an optimization, delete its line; to add
+one, write `Opt/Name.lean` with the transformation and its `install`,
+import it in the registry and add its line. With all optional passes off,
+and with each one off in turn, the classic corpus and the runtime tests
+match native Lean.
 
 ---
 
@@ -310,7 +345,9 @@ giving it the representation it assumes:
   `unreachable`. A zero that would allocate (a string, an array, a record,
   a closure) is built once and kept in a once-cell, like a constant
   (§5.12): `modify` stores one per update, and since a placeholder is never
-  inspected, a shared value serves as well as a fresh one.
+  inspected, a shared value serves as well as a fresh one (optional pass
+  `placeholder-cache`; without it each placeholder is built where it is
+  used).
 
 This keeps Lean's in-place update tricks, including `modify`'s unshared
 element. An alternative, redirecting to the safe reference implementations
@@ -376,7 +413,32 @@ exactly the ones Lean's runtime and `lean.h` externs assume.
 - `elimDeadBranches`: remove impossible branches;
 - `cse`: common subexpressions;
 - `extractClosed`: closed subterms become lazily evaluated constants
-  `f._closed_N`.
+  `f._closed_N`. lean2rr runs it last, over all declarations, as Lean ran
+  it (`extractLikeLean`, Pipeline.lean). Lean extracts a module's closed
+  terms in compilation order with a cache of the terms the module made so
+  far: a declaration with a term equal to an earlier one's reads the
+  earlier one's, so the earlier one decides how the shared terms evaluate
+  (Lean evaluates a constructor's closed fields in reverse order), and the
+  later one, making no term of its own, keeps the values the extraction
+  left dead (a call there still runs). `set_option compiler.extract_closed
+  false` turns extraction off for a declaration or a module. The record
+  says what Lean did: each module's IR-only declarations list the closed
+  terms `d._closed_N` each declaration made, in the order Lean made them,
+  and the IR bodies (in the `.olean`, or in the `.ir` file of a `module`
+  file) say which closed terms each declaration reads. So lean2rr extracts
+  the declarations that made closed terms first, in Lean's order, with
+  one cache per module, then those whose IR reads closed terms, and leaves
+  the others as they are (Lean extracted nothing from them: nothing was
+  closed, or extraction was off), instances of polymorphic declarations
+  included (Lean computes at each call what an instance's known types or
+  dictionaries make closed). Only a declaration Lean compiled to no IR
+  (lean2rr translates the reference definition of an `@[extern]` or
+  `@[implemented_by]` declaration) is extracted as usual. lean2rr's copy of
+  the pass (`ExtractClosedK`) checks a callee's attributes and kernel type
+  on the declaration of Lean's compilation the instance was made from, so
+  `@[never_extract]` functions are not extracted and, as natively, a call
+  of a function whose type is not syntactically a function type
+  (`def F := Nat → Nat`) is not extracted on its own.
 
 **Output shape.** Top-level declarations only; there are no local functions
 left. Closures are partial applications of top-level declarations. Join
@@ -490,7 +552,8 @@ precise array from their callers.
 
 When `f` changes the representation (`Nat → Bool`), the loop's array
 parameter stays `Array lcAny` after the fixpoint: it holds `Nat`s and
-`Bool`s. Such a loop is *split*. Its split instance takes two arrays instead
+`Bool`s. Such a loop is *split* (optional pass `split-map-loops`; without it
+the loop runs on an array of `Box`es). Its split instance takes two arrays instead
 of one, the source `src : Array α` and the result `dst : Array β`:
 - a read `uget bs i` of an array derived from the parameter becomes
   `uget@α src i`, a value of `α`'s own representation;
@@ -554,7 +617,7 @@ Stage 4 sees only mono types:
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | `String` | `LStr`, an opaque copy-on-write handle over UTF-8 bytes and their character count (`Rc<(Vec<u8>, u64)>`) | literals: §5.4 |
 | `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records); for an enumeration or `Unit`, its index (`u8`, `u16` or `u32` by the number of constructors; Lean stores a tagged scalar); otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
-| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
+| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments (optional pass `nat-arrays`; without it they are arrays like the others) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
 | `ST.Ref σ α` | a generated shared record `L2RRef_N(Cell<⟦α⟧>)` around Reussir's mutable cell | the contents keep their own representation; `Nat`/`Int` (`L2RNatRef`/`L2RIntRef`, a tagged word as in `LNatArr` plus a cell for a big value) and `[value]` structures (in an `ElemBox`) are stored apart, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧), … }` | memoized thunks, deferred tasks (§5.14) |
@@ -721,8 +784,12 @@ its value is stored as `Box`.
     to itself, and a fixpoint step that goes from uniform code through a
     typed function and back returns its argument. The record also holds the
     converted value, so it stays unchanged (an update copies it) and its
-    address is not reused; a record whose converted value only it still
-    holds is dropped, two records being checked at each new one. Only the
+    address is not reused. A converted array's record goes with the array
+    (when the program drops it, `leanrt::drop`); a record whose converted
+    value only it still holds is dropped, two records being checked at
+    each new one, so a converted record's origin, and a resource it holds,
+    can live until the next conversion (natively, one object, freed with
+    the converted value). Only the
     outermost value of a conversion is recorded (its parts are new
     objects).
 - Through `unsafeCast` (mono erases it), a value can meet code expecting
@@ -1103,9 +1170,10 @@ shared (heap) type for now: Reussir miscompiles `[value]` enums with fields
 of mixed layout (§9); Reussir's reuse makes the shared cell cheap. The
 optional pass `state-machines` enters without allocation instead: the
 function takes the declaration's parameters followed by the entry point,
-`e` is nullary, and a jump passes the parameters on unchanged together with
-its variant (which keeps a parameter referenced across the jump even when
-the join point does not use it).
+and `e` is nullary. A jump passes placeholders for the parameters beside
+its variant: the variant carries every variable the join point's body
+uses, and passing a parameter itself would keep it alive across the jump
+(an array updated before the jump would be copied at every iteration).
 
 **Choice and nesting.** J1 applies first, then J2, then J1' (small), then
 J3 (J4 when an outlined body tail-calls the declaration).
@@ -1226,7 +1294,46 @@ Rules:
   parameter of such a type (a proof) is not passed to the runtime.
 - **`BaseIO` externs that cannot fail** call the runtime's payload
   primitive `l2r_<symbol without lean_>` when the prelude defines it; its
-  result is wrapped as the IO result (`EST.Out.ok` / `ST.Out`).
+  result is wrapped as the IO result (`EST.Out.ok` / `ST.Out`). Its
+  arguments and, for a non-generic primitive, its result are converted
+  between the extern's mono types and the primitive's: a runtime object is
+  `lcAny` in mono code (a `Box`) and the runtime's `LHandle` or `LPromise`
+  for the primitive.
+- **`Std.Sync`** (`BaseMutex`, `Condvar`, `BaseRecursiveMutex`,
+  `BaseSharedMutex`, whose externs Lean implements over `std::mutex` & co.
+  in `mutex.cpp`) are runtime handles, and their externs payload
+  primitives over `leanrt::sync`. A thread that must wait blocks its
+  context (§5.14, *Blocking*); a lock's owner is a thread: a context, and
+  on it the innermost running task's thread (a task needed by another runs
+  on a worker thread natively). As with glibc, locking a `BaseMutex` the
+  same thread holds waits forever, `tryLock` then fails, and a released
+  mutex goes to the thread that waited longest; the shared mutex follows
+  libc++'s (a writer that has entered keeps new readers out). Everything
+  else (`Mutex`, `Barrier`, channels, `Notify`, `Broadcast`, cancellation
+  tokens) is Lean code over these and promises.
+- **`Std.Internal.UV`** (timers, TCP and UDP sockets, name resolution,
+  signals, the system queries of `Std.Internal.UV.System`, and `Std.Net`'s
+  address conversions and interfaces, natively C over libuv that builds
+  Lean values) is implemented in Lean by lean2rr's shim library
+  `L2RShim` (`lean2rr/L2RShim.lean`): each definition is exported under an
+  extern's C symbol, so it is the extern's implementation (above), and
+  lean2rr imports the shim with the program (`LeanToReussir.Env`; the
+  driver puts lean2rr's build directory on `LEAN_PATH`) and treats it as a
+  toolchain module (no startup work). The shim follows the C functions
+  (`uv/*.cpp`) check by check, over primitives of the runtime's event loop
+  (`leanrt::net`, §5.14) on plain values (numbers, strings, byte arrays,
+  handles, promises); errors are built in Lean as `lean_decode_uv_error`
+  builds them (libuv's code as the error number, `uv_strerror`'s text).
+  The shim also replaces Lean definitions whose native behaviour depends
+  on Lean's borrow inference: a definition exported as
+  `l2r_override_<mangled name>` is called instead of the definition of
+  that name (`Mono.redirectTarget`). `IO.Promise.isResolved` is one:
+  natively it borrows the promise (`result?` does), so the caller releases
+  it after the question, and a last reference resolves the promise with
+  `none` only then; compiled as written, the release would come inside
+  `result?`, before the question (`isResolved` on a promise's last use
+  would answer `true`). The replacement asks the runtime, then releases
+  the promise.
 - **Constructors with an implementation.** Constructors of builtin types
   that Lean implements in its runtime (`Int.ofNat` is `lean_nat_to_int`,
   `Int.negSucc`, `ByteArray.mk`, …) are calls, as in Lean's IR.
@@ -1317,7 +1424,7 @@ fn l_main___l2r_0____closed__0_init() -> LStr {
     x504
 }
 fn l_main___l2r_0____closed__0() -> LStr {
-    if l2r_once_has(28) { l2r_once_get<LStr>(28) } else { l2r_once_set<LStr>(28, l_main___l2r_0____closed__0_init()) }
+    if l2r_once_claim(28) { l2r_once_get<LStr>(28) } else { l2r_once_set<LStr>(28, l_main___l2r_0____closed__0_init()) }
 }
 fn l_main___l2r_0_(a505 : L2RUnit) -> T_EST_Out_348 {
     let x506 : LStr = l_main___l2r_0____closed__0();
@@ -1542,8 +1649,13 @@ overflows its stack on a few thousand. An error in a step exits from inside
 it, so later steps do not run.
 
 The storage is a runtime once-cell per constant (the prelude's
-`l2r_once_has`/`get`/`set` over `leanrt::once`), holding a value that is
-never freed. A value that is not a pointer-sized boundary type is wrapped in
+`l2r_once_claim`/`get`/`set` over `leanrt::once`), holding a value that is
+never freed. `l2r_once_claim` answers whether the value is there; if not,
+the caller computes it, and another context of the scheduler (§5.14) that
+needs it meanwhile (the computation blocked) waits until it is set, as
+natively a thread waits for the one computing a closed term
+(`lean_obj_once_cold` holds a lock); needed again by the context computing
+it, it waits forever, as natively. A value that is not a pointer-sized boundary type is wrapped in
 an `ElemBox` struct. The same slots back the runtime's mutable cells
 (`l2r_cell_swap`). Reussir globals would be a cheaper replacement.
 
@@ -1600,7 +1712,8 @@ becomes `Thunk.get`/`Task.get`, and `Thunk.fn` a closure calling
 **Tasks.** Native Lean runs tasks on a thread pool. A worker may start a task
 at any time after it is created and must have finished it when its value is
 needed. The translation is single-threaded and picks one such schedule: a
-task runs when it is needed, on the stack of whoever needs it.
+task runs when it is needed, on the stack of whoever needs it, or when the
+running code blocks (*Blocking*, below).
 
 - Every task created after `main` has started is *deferred*: its cell is
   `pending(|w| …)`, and the runtime (`leanrt::task`) records it and holds
@@ -1624,8 +1737,13 @@ task runs when it is needed, on the stack of whoever needs it.
   released by its source) and holds the only reference to it, the task is
   dropped instead. So is one whose other references all come from pure
   dependents that are dropped themselves (`Task.spawn f` and its `map`,
-  both dropped), searched up to 32 tasks deep. A pure task a pending IO
-  task still refers to runs.
+  both dropped), to any depth (an iterative search over the tree of
+  dependents that could be deleted: pure, held by the runtime, not
+  running); the whole tree is then deleted, dependents before the tasks
+  they hold, as natively the release of a dependent releases its source.
+  A pure task a pending IO task still refers to runs; dropped pure
+  dependents of a task that cannot be deleted are deleted once it has
+  finished, when they come up (they cannot run before).
 - *Priorities.* Lean passes `lean_unbox(prio)` as an `unsigned`: the
   priority is taken modulo 2^32. 2^32-1 is `LEAN_SYNC_PRIO`: such a task
   runs as soon as it is enqueued, on the enqueuing thread (an `asTask` or
@@ -1640,18 +1758,30 @@ task runs when it is needed, on the stack of whoever needs it.
   - a program polling for it: `IO.getTaskState`/`IO.hasFinished` report a
     pending task `waiting`, until the program asks again after time has
     passed (an `IO.sleep`/`dbgSleep` since the first answer) or keeps asking
-    (1000 times); the task then runs and is reported `finished`;
+    (1000 times); the task then runs and is reported `finished`. A task
+    that cannot finish without others (it waits for an unresolved promise,
+    or for a task running on another context) does not run: the others go
+    on once (due sleepers and timers, the contexts able to run, a queued
+    task if a worker is free, as natively other threads run while the
+    program polls), and its state is reported then; so is a task running on
+    another context, at every question;
+  - the running code blocks (a sleep, a lock, a promise, *Blocking* below)
+    and a worker is free for it: it starts on a context of its own; or it
+    was queued a while ago (5 ms) with a worker free, and the running code
+    writes output (below);
   - `main` returning (§5.11): the queued tasks run in the order Lean's task
-    manager with one worker (`LEAN_NUM_THREADS=1`) starts them. It keeps a
-    queue per priority and takes the first task of the highest non-empty
-    one. An idle worker is woken by the first enqueue and picks its task
-    once it is awake: about 90 µs later for the new worker thread of the
-    first task, 20 µs for an idle one (measured natively). Tasks `main`
-    queues back to back therefore compete by priority, while a task queued
-    before a sleep or some work has been started by then: the runtime
-    compares the enqueue times, and the started task runs first in the
-    final run. When a task the worker ran finishes, it picks the next one
-    at once. `IO.Process.exit` exits at once, as natively.
+    manager starts them. It keeps a queue per priority and takes the first
+    task of the highest non-empty one. An idle worker is woken by the first
+    enqueue and picks its task once it is awake: about 90 µs later for the
+    new worker thread of the first task, 20 µs for an idle one (measured
+    natively with `LEAN_NUM_THREADS=1`). Tasks `main` queues back to back
+    therefore compete by priority, while a task queued before some work has
+    been started by then: the runtime compares the enqueue times, and the
+    started task runs first in the final run. When a task a worker ran
+    finishes, it picks the next one at once. A task starts only when one
+    of the task manager's workers is free for it (below); `main` waits for
+    the tasks running on other contexts too, as Lean's finalization joins
+    its workers. `IO.Process.exit` exits at once, as natively.
 - *Dependents.* A task that waits for another is off the queue until that
   task finishes. Then, whoever finished it (during `main` too), Lean
   walks its dependents from the newest (`handle_finished`): one created
@@ -1686,10 +1816,16 @@ task runs when it is needed, on the stack of whoever needs it.
   flag was set and sees it at once.
 - *Closed terms.* Lean evaluates a closed term once, at its first use, and
   then marks it persistent (`lean_mark_persistent`), which waits for every
-  task it reaches. A closed term whose type may hold tasks (a task, a
-  structure, list or array of them) runs its tasks right after it is
-  evaluated (`l2r_persist_T`), so `Task.spawn` of a closed function has
-  finished once the term has been used.
+  task it reaches. A closed term whose type may hold tasks runs its tasks
+  right after it is evaluated (`l2r_persist_T`), whether they are in
+  fields, arrays, the values of tasks, the values captured by function
+  values (partial applications), thunks (their computation, or their
+  value: the thunk is not forced) or boxed values; so `Task.spawn` of a
+  closed function has finished once the term has been used. The
+  traversals are generated at the end of lowering, once every variant of
+  the function types and of `Box` is known, and do nothing for types that
+  cannot hold a task. Values captured by a Reussir closure (only lean2rr's
+  own glue makes them, not Lean code) are not looked into.
 - A thunk or task stored at another representation (in `Box`, §5.1) is
   converted to a new cell in state `conv(g, o, a)`: `g` forces the original
   and converts its value (so it still runs at most once); `o` is the
@@ -1715,12 +1851,35 @@ task runs when it is needed, on the stack of whoever needs it.
   `Promise.result!` maps `Option.getOrBlock!` over it, as natively.
   Dropping the last reference to an unresolved promise resolves it with
   `none` (`deactivate_promise`, through the runtime's finalizer of the
-  promise object). Waiting for an unresolved promise runs queued tasks, as
-  a worker would meanwhile, until one resolves it; when none is left, the
-  wait lasts forever, as natively. Polling a promise (`isResolved`) runs
-  queued tasks the same way once time has passed, and `IO.waitAny` does
-  not run a pending task that waits for an unresolved promise.
-  `IO.Promise.new` during initialization is Lean's internal panic.
+  promise object). Waiting for an unresolved promise blocks (below): other
+  contexts and queued tasks run, as other threads would meanwhile, until
+  one resolves it; when nothing can any more, the wait lasts forever, as
+  natively. Polling a promise (`isResolved`) lets them go on once per
+  question once time has passed, and `IO.waitAny` does not run a pending
+  task that waits for an unresolved promise (or for a task running on
+  another context). `IO.Promise.new` during initialization is Lean's
+  internal panic.
+- *The event loop* (`leanrt::net`): timers, sockets, name resolution and
+  signals, as libuv's loop natively on a thread of its own. An operation
+  that completes later (a timer firing, data received, a connection
+  accepted) gets, from the shim, a promise `r` of `Unit` and a `sync`
+  continuation on `r` that resolves the program's promise; when the
+  operation completes, the runtime stores its outcome and drops `r`, which
+  resolves it with `none` (`deactivate_promise`) and so runs the
+  continuation, on the event loop's own context, as libuv's callback
+  natively runs on libuv's thread (its `sync` dependents too, the others
+  are queued). The scheduler polls the descriptors and timers when nothing
+  else can go on, and fires a due timer at the program's next output.
+  Sockets follow libuv's Unix code (descriptors created on `bind`,
+  `connect` or `listen` with the address's family, nonblocking;
+  `SO_REUSEADDR` before a TCP bind, whose `EADDRINUSE` `listen` reports;
+  an `accept` with a connection waiting completes at once; writes complete
+  through the loop). Name resolution calls `getaddrinfo`/`getnameinfo`
+  at once (natively on libuv's thread pool) and completes through the
+  loop. Signals are caught by a handler that writes to a pipe the loop
+  watches; stopping the last watcher of a signal restores its default
+  action, as libuv does. `Std.Async` (`Async`, `sleep`, `Interval`,
+  `Selector`, TCP and UDP clients and servers) is Lean code over these.
 - *Standard streams.* Natively each thread has its own current standard
   streams (`IO.setStdout` & co. replace the current thread's, which start as
   the process's), and a task runs on a worker thread. So a task starts with
@@ -1734,6 +1893,79 @@ task runs when it is needed, on the stack of whoever needs it.
   task on the same worker; the translation behaves as if every task (other
   than a `sync` dependent) ran on a fresh worker.
 
+*Blocking.* A thread that blocks natively (a mutex another thread holds, a
+condition variable, `IO.wait` of a task another worker runs or of an
+unresolved promise, a channel, a socket, `IO.sleep`) lets the others go on.
+A task that is needed runs nested on the stack of whoever needs it, but
+then everything below it would have to wait for it too. So the runtime has
+*contexts* (`leanrt::sched`, `coro`): `main`'s (its thread's stack) and one
+per task the scheduler starts, each on a stack of its own of the size of a
+native worker's (1 GiB, or `LEAN_STACK_SIZE_KB`, reserved but not
+committed, with a guard page that reports Lean's stack overflow). When the
+running context blocks, it is suspended, and the scheduler runs, in this
+order:
+
+1. a suspended context that can go on (its lock was handed to it, it was
+   notified, the task or promise it waited for finished, its sleep ended),
+   in the order they became able to;
+2. a queued task, on a new context, in the order `next_tag` would start it
+   (above), if one of the task manager's workers is free: their number is
+   `LEAN_NUM_THREADS`, or the number of processors, as natively; a context
+   running a task at a priority up to `Task.Priority.max` holds one, except
+   while it waits for a task or promise (Lean's `wait_for` lets another
+   worker start then); a dedicated task (priority above 8) has a thread of
+   its own and always starts;
+3. the event loop's timers and sockets (`leanrt::net`, below) and the
+   sleepers, waiting for the first of them.
+
+When nothing can ever go on, the program waits forever, as a deadlocked
+native one does. A context does not lose the processor otherwise, except at
+*effect points* (output to a stream or file, `IO.Process.exit`) and
+`IO.sleep 0`: what natively would have run by then on other threads goes
+first: a context whose sleep is over, a due timer of the event loop and
+what its completion releases (its continuations, the contexts waiting for
+it, the tasks it queues, which a free worker starts at once), descriptors
+and signals that have become ready, a context able to go on for a while
+(5 ms: a lock handed over, a promise resolved), a task queued a while ago
+(5 ms) with a worker free for it (thread wake-ups take microseconds, so
+these would have got past anything that takes no time); then, round after
+round (up to 64), what those release in turn. What runs in those rounds
+happened before natively: its own effect points start no tasks, and let
+go first only what is due or able to run for a while (the context that
+let it run, once it has computed for 5 ms). So sleeps and timers order
+the output of tasks by time, as natively, as long as code between two
+outputs takes less time than the sleeps that order them, and a context
+that computes for a while lets the others print first. A `sleep 0` lets
+those run whatever their age (a queued task after a worker's wake-up
+time). Spawning a process and flushing a handle are effect points too.
+
+A thunk being forced on one context and needed on another (the first
+blocked in its computation, or let others run at an effect point) is
+waited for until it has its value (`l2r_thunk_wait_busy`, woken by
+`l2r_thunk_done`), as natively a thread waits for the one forcing it.
+
+`LEAN_NUM_THREADS` is read as Lean reads it (`atoi`, taken as an
+`unsigned`): 0 (or not a number) is no task manager: tasks run at once, as
+during initialization, and `IO.Promise.new` is Lean's internal panic.
+
+A pending task that waits for one running on another context is natively
+its dependent: it runs, or is queued, when that one finishes. So `Task.get`
+of it waits until that one has finished and looks again (it does not run
+the dependent at once, which would then wait inside its own computation:
+its state, cancellation and `sync` thread would differ).
+
+Each context has what a thread has: its running tasks (`IO.checkCanceled`,
+`IO.getTID`), the walks of dependents it does, its current standard streams
+(saved and restored at a switch: the cells of `l2r_std_*`, which the
+runtime records as mutable), the free of nested containers it is doing
+(`leanrt::drop`'s pending work, as natively each thread frees with its
+own stack). `Task.get` of a task that is `busy` because it
+runs on another (suspended) context waits until it has finished
+(`l2r_task_wait_running`, then it looks again); on the running context it
+needs itself, and waits forever, as natively. `IO.waitAny` when every task
+of its list is running waits until some task finishes
+(`l2r_task_wait_progress`) and looks again.
+
 Why tasks are deferred rather than run at creation: a task may wait for
 `main`. `IO.asTask (do while !(← flag.get) do IO.sleep 1; …)` followed by
 `flag.set true; IO.wait t` finishes natively; run at creation, the task
@@ -1743,12 +1975,14 @@ with a sleep, and computes pure tasks the program then drops. A task that
 runs only when needed never waits for something that is still to happen.
 
 What a single thread cannot do:
-- a task that waits for another by other means than the task operations
-  above (`main` or a task polling an `IO.Ref` that another task sets) does
-  not terminate;
-- output ordered by sleeps across tasks comes in the order tasks are
-  needed, not by time, and `IO.waitAny` does not pick the fastest of
-  several unfinished tasks;
+- a context that waits for another without blocking (a loop polling an
+  `IO.Ref` that another task sets, without `IO.sleep` or output in it) does
+  not let the others run, and does not terminate; with a sleep in the
+  loop, it does;
+- contexts do not run in parallel: one that computes without output or
+  blocking delays the others (output ordered by time comes in time order
+  only as far as the code between outputs is shorter than the sleeps), and
+  `IO.waitAny` does not pick the fastest of several unfinished tasks;
 - tasks nobody waits for stay queued, with what they hold, until `main`
   returns (a chain of 4·10⁶ `mapTask`s built by `main` takes 0.7 GB, as
   natively with one worker; with free workers native Lean runs it as it is
@@ -1761,9 +1995,10 @@ What a single thread cannot do:
 - Lean's panic for `Task.get` inside a `sync := true` task is not
   reproduced;
 - a deferred task is reported `waiting` at the first question even after a
-  sleep, where natively a worker would long have run it (a pure task
-  deferred behind a pending IO task, for example): running it then could
-  hang, if it needs a task that waits for `main`.
+  sleep, when no worker was free to start it meanwhile (a pure task
+  deferred behind a pending IO task, for example);
+- a task or context that starts or goes on late counts its sleeps and
+  timers from then (above).
 
 Tasks that wait for each other in a cycle wait forever, as natively.
 
@@ -1954,25 +2189,39 @@ Each item says what differs and when.
 - *Dictionary rebuilding* (§2.4): an instance function applied to static
   arguments may run more often than natively. Visible only through traces
   or panics inside instance code, or as extra time.
-- *Tasks* run on one thread, when they are needed or when `main` returns
-  (§5.14): a task or `main` polling shared state that another task sets
-  never sees it change, output ordered by sleeps across tasks comes in the
-  order tasks are needed, and `IO.waitAny` does not pick the fastest task.
-  A deferred task is reported `waiting` at the first `IO.hasFinished`,
-  even after a sleep. The order of the final run is that of one native
-  worker (`LEAN_NUM_THREADS=1`), whose pick of its first task is timed
-  against its measured wake-up latency (about 90 µs, 20 µs when idle):
-  tasks created about that far apart can come in either order, as
-  natively. A pure task the program drops is deleted when nothing but
-  dropped pure tasks refers to it, searched 32 levels deep (longer chains
-  of dropped pure tasks run). Tasks other than `sync` dependents run as if
+- *Tasks* run on one thread, when they are needed, when the running code
+  blocks (a sleep, a lock, a condition variable, a promise, a socket) or
+  when `main` returns (§5.14). Contexts never run in parallel and switch
+  only when one blocks or at an effect point (output, an exit,
+  `IO.sleep 0`), to what natively would have run by then (a due sleep or
+  timer, a context able to run or a task queued 5 ms ago or more): a loop
+  polling shared state that another task sets never sees it change unless
+  it sleeps or prints, a context that computes without output or blocking
+  delays the others (so output that sleeps order natively comes in time
+  order only as far as the code between outputs is shorter than the
+  sleeps; a context or task made able to run less than 5 ms before an
+  output comes after it, natively a race), and `IO.waitAny` does not pick
+  the fastest task. A task or context that starts or goes on late (at an
+  effect point, when the running code blocks, in the final run) counts its
+  sleeps and timers from then, natively from when a worker started it: a
+  task queued long before an effect point that then sleeps 30 ms prints
+  30 ms after that point. A pure task the program drops before any effect
+  point or block is deleted, even where a free native worker would already
+  have started it, and `IO.checkCanceled` at shutdown follows the
+  heuristics above (§5.14), not the time a task natively spent before
+  `main` returned. A deferred
+  task is reported `waiting` at the first `IO.hasFinished`. The order of
+  the final run is that of Lean's task manager, whose first pick is timed
+  against a native worker's measured wake-up latency (about 90 µs, 20 µs
+  when idle): tasks created about that far apart can come in either order,
+  as natively. Tasks other than `sync` dependents run as if
   each had a fresh worker thread, so a redirection a task leaves behind
   never reaches another task (natively it can, on the same worker);
   `IO.getTID` inside a task is main's thread id plus a worker number (a
   `sync` dependent's is its source's), as distinct from main's as a
-  worker's. A closed term waits for the tasks it holds directly or in
-  structures, lists and arrays, not for tasks inside closures or thunks
-  (Lean's `lean_mark_persistent` waits for all of them).
+  worker's. A closed term does not wait for tasks held by a reference
+  (`IO.Ref`) or a promise in it (Lean's `lean_mark_persistent` does; a
+  closed term cannot create either).
 - *Startup order of unrecorded constants* (§5.12): a constant that Lean
   compiled to no IR-only declaration although its value calls a function
   (a callee whose type is not syntactically a function, such as
@@ -1985,15 +2234,15 @@ Each item says what differs and when.
   recursive macro that expands the rest before its own definition (here
   in the order of the macro scopes). The `.olean` does not record these
   orders. Visible only when such constants trace or panic.
-- *Compiler options of the program's modules* (`set_option
-  compiler.extract_closed false`, `compiler.small`, `maxRecInline`, …) are
-  not recorded in the `.olean`, so lean2rr runs Lean's passes with the
-  defaults: a declaration compiled without closed-term extraction natively
-  can have its closed terms extracted (and evaluated once) under lean2rr.
-  The recursion limit (`maxRecDepth`, which large literals need raised)
-  is effectively unlimited in lean2rr, bounded by its stack (4 GiB, set by
-  `scripts/l2r.py` through `LEAN_STACK_SIZE_KB`): a 60000-element list
-  literal needs more than 64 MiB. Only lean2rr's main thread, which runs
+- *Compiler options of the program's modules* (`compiler.small`,
+  `maxRecInline`, …) are not recorded in the `.olean`, so lean2rr runs
+  Lean's passes with the defaults (`compiler.extract_closed` shows in the
+  record of closed terms and is followed, §3). The recursion limit
+  (`maxRecDepth`, which large literals need raised) is effectively
+  unlimited in lean2rr, bounded by its stack (1 GiB, as for Lean's own
+  compiler, set by `scripts/l2r.py` through `LEAN_STACK_SIZE_KB`): a
+  60000-element list literal needs more than 64 MiB, and a 100000-element
+  array literal translates. Only lean2rr's main thread, which runs
   everything, has that stack; it gives the other threads Lean's runtime
   starts (task workers) 64 MiB, so that lean2rr fits an address-space limit
   (`ulimit -v 16000000`) on such inputs.
@@ -2066,6 +2315,16 @@ Each item says what differs and when.
   new big number object per computation) answer a number computed from
   their value, so equal values are `ptrEq` (natively only the same object
   is); likewise a rebuilt `[value]` struct over the same field.
+- *Order of releases in one free*: when a value holding several resources
+  is freed at once (handles closed, and so flushed; promises resolved),
+  native Lean releases them last pushed first: an array's last element
+  first, a nested array's elements before the elements before it, a
+  record's last field first. A free that starts at a container (an array,
+  a reference, a thunk or task cell) does the same here (`leanrt::drop`
+  pushes the resources it reaches, through records too). One that starts
+  at a record (a list of handles, a structure of handles, dropped by
+  itself) follows Reussir's drop glue, fields in order: a list's handles
+  are closed first to last, natively last to first.
 - *Release time of borrowed parameters* (§5.8): emulated for values that
   may hold a resource, with Lean's inference run on lean2rr's monomorphic
   instances: where Lean infers a polymorphic declaration or one of its own
@@ -2084,14 +2343,25 @@ Each item says what differs and when.
   no recursion of its own: structural conversions are loops (§5.1) and the
   `Array.mk`, `String.mk` and `String.ofList` list folds are tail-recursive
   loops, so converting or folding a list of 10⁷ elements works at an 8 MB
-  stack (`LEAN_STACK_SIZE_KB=8192`) as natively. Dropping a deep value
-  recurses in Reussir's drop glue where Lean frees iteratively: with the
-  local patch 0013 a chain through each cell's last shared member (a list,
-  a snoc list, a left or right spine) is released in a loop, but a value
-  deep along another member recurses, 16 to 32 bytes of stack per node: a
-  tree of arrays of children deep through the arrays, or a rose tree held
-  at a uniform type (`List Box` of trees) deep through the list's heads,
-  overflows at an 8 MB stack when dropped (10⁶ levels). The depth at which
+  stack (`LEAN_STACK_SIZE_KB=8192`) as natively. Dropping a deep value:
+  Lean frees iteratively, through a stack of objects to free. The
+  runtime's containers (arrays, references, thunk and task cells:
+  `leanrt::drop`) do the same: a container freed while another is being
+  freed is pushed on a stack of pending work instead, which the outermost
+  free empties; so a value deep through containers, with records in
+  between (a tree whose children are in arrays, a record → array → record
+  chain, a chain of thunks or tasks), is freed at a bounded depth.
+  Records are freed by Reussir's drop glue, which with the local patch 0013
+  releases the last chain member being freed in a loop (a list, a snoc
+  list, a left or right spine whose other children are shared or nullary)
+  but recurses into the others, 16 to 32 bytes of stack per node: a value
+  deep through records alone along a field that is not the last one freed
+  (a binary tree deep along its left child whose right children are fresh
+  nodes; a rose tree in uniform code, whose list cells hold the deep tree
+  in their head and a fresh node in the tail) overflows at an 8 MB stack
+  when dropped (10⁶ levels; test `RtDropGlue`, an expected failure). The
+  runtime cannot reach that recursion: it needs a stack of pending members
+  in Reussir's drop glue (0013 extended). The depth at which
   `Stack overflow detected. Aborting.` (exit 134) happens is not native's,
   in either direction (the report itself is, in every thread: §5.11).
   Tasks run on `main`'s thread (Lean's 1 GiB, or `LEAN_STACK_SIZE_KB`),
@@ -2192,8 +2462,27 @@ Each item says what differs and when.
   with no conversion) print Lean's `INTERNAL PANIC: unreachable code has
   been reached` and exit 1, like a real unreachable.
 
+- *Blocking system calls* (reading a file, a pipe or standard input,
+  waiting for a child process) block the whole program, where natively
+  only the calling thread waits: a task reading a pipe that another task
+  of the program writes, or that a child writes only after the program has
+  done something else, waits forever. Name resolution
+  (`Std.Async.DNS`) runs `getaddrinfo` at once, so a slow lookup holds up
+  the other tasks and timers meanwhile (natively it runs on libuv's thread
+  pool).
+- *Event loop details* (§5.14): libuv accepts a waiting connection on
+  its own when no `accept` is pending, and keeps it; here it stays in the
+  kernel's queue until an `accept` (only descriptor numbers and `EMFILE`
+  can tell). Timers count from the monotonic clock when they start
+  (libuv from its loop's cached time, which can make a timer fire a little
+  earlier). A promise the loop gives up without resolving it (a timer
+  stopped, reset or re-armed, an operation whose start failed) is released
+  on the loop's context, at its next turn, where natively the C function
+  releases it at once: when that was the last reference, the promise is
+  resolved with `none`, and its `sync` dependents run, that much later
+  (generated code does not run inside a runtime primitive).
+
 **Not supported** (translation succeeds; `rrc` reports an unknown function)
-- Sockets, `Std.Sync`, timers.
 - Every constant of the program is translated (§2.2), so an unused constant
   that reaches an unsupported extern makes the whole program fail to link.
   A program is therefore translated by lean2rr, but links only if the

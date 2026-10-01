@@ -9,9 +9,15 @@ The runtime has two parts:
 - `leanrt/` — a Rust crate (rlib) linked into every program. The prelude's
   `#[ffi(import)]` textures call into it. It holds the bignum code (GMP),
   string algorithms, float formatting, buffered stdio, files, once-cells,
-  panics and the main-thread setup — and, being a single crate, the one copy
-  of all global state (statics in the prelude's `extern "rust"` block would
-  be duplicated per texture).
+  panics and the main-thread setup, the task scheduler and its contexts,
+  `Std.Sync`'s locks and the event loop of timers and sockets — and, being
+  a single crate, the one copy of all global state (statics in the
+  prelude's `extern "rust"` block would be duplicated per texture).
+- `lean2rr/L2RShim.lean` (built with lean2rr) — Lean implementations of the
+  `Std.Internal.UV` externs (timers, sockets, name resolution, signals,
+  `Std.Net` addresses), exported under their C symbols, which lean2rr
+  compiles with the program over the event loop's `l2r_shim_*`
+  primitives (below).
 
 Semantics follow Lean 4.33's C runtime (`lean.h`, `src/runtime/*.cpp`)
 exactly; comments at each function say which C function it mirrors.
@@ -25,16 +31,21 @@ Generated sections of the prelude (edit the generator, then run it):
 `scripts/l2r.py` does everything:
 
 1. builds `leanrt` with the pinned rustc (`L2R_RUSTC`) into
-   `runtime/leanrt/target/libleanrt.rlib`, cached by a hash of its sources;
+   `runtime/leanrt/target/libleanrt.rlib` (`target/rt-<hash>/` for another
+   Reussir checkout), cached by a hash of its sources;
 2. runs lean2rr (`L2R_LEAN2RR`) with `--prelude runtime/prelude.rr`;
 3. runs rrc (`L2R_REUSSIR`; with `--reuse-across-call` unless `l2r.py` gets
    `--no-reuse-across-call`) with
-   - `--polyffi-rust-path runtime/leanrt/target/rustc-native`: a wrapper that
+   - `--polyffi-rust-path <leanrt dir>/rustc-native`: a wrapper that
      adds `-C target-cpu=native -C target-feature=-outline-atomics`. With the
      plain rustc, textures are not inlined into Reussir code, and calls through
      the packed-argument boundary (float or `str` arguments, four or more
      parameters) leave an escaping stack slot that blocks tail-call
-     elimination: loops that print floats overflow the stack.
+     elimination: loops that print floats overflow the stack. It also adds
+     `--extern leanrt=<rlib>` (and `--edition 2018` when rrc gives no
+     edition): the drop hooks Reussir generates for the prelude's opaque
+     types are textures without the prelude's `extern crate leanrt;`, and
+     the containers' Rust types are `leanrt`'s (below).
    - `--polyffi-libdir runtime/leanrt/target` (so textures find `leanrt`),
    - `--link-lib libleanrt.rlib --link-lib libgmp.a` (GMP from the Lean
      toolchain, `$(lean --print-prefix)/lib/libgmp.a`, or `L2R_GMP`).
@@ -47,11 +58,11 @@ Generated sections of the prelude (edit the generator, then run it):
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | big numbers | `LBig` = `Rc<(bool, Vec<u64>)>` | sign, little-endian limbs, normalized; GMP `mpn`/`mpz` |
 | `String` | `LStr` = `Rc<(Vec<u8>, u64)>` | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write |
-| `Array α` | `RVec<E>` = `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types) |
+| `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a transparent wrapper of `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types); freed without recursion (below) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one tagged word per element (below) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `String.toUTF8`/`fromUTF8` move a unique buffer (natively a copy) |
-| `ST.Ref σ α` / `IO.Ref α` | `LRef<E>` (a shared 0/1-element vector) | mutated through every alias; empty after `take` |
-| `Thunk α`, `Task α` | `LCell<S>` = `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
+| `ST.Ref σ α` / `IO.Ref α` | `LRef<E>` (a shared 0/1-element vector, `leanrt::drop::Vec<E>`) | mutated through every alias; empty after `take` |
+| `Thunk α`, `Task α` | `LCell<S>` = `leanrt::drop::Cell<S>`, a transparent wrapper of `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
 | `IO.FS.Handle` | `LHandle` | shared buffered file, closed with its last reference |
 | `UInt8..64`, `USize` | `u8..u64`, `u64` | |
 | `Int8..64`, `ISize` | `u8..u64`, `u64` (bit patterns) | signed semantics as `lean_int8_*` etc. |
@@ -147,6 +158,23 @@ or `Int` reference is the prelude's `L2RNatRef`/`L2RIntRef` (a tagged word
 and a cell for a big number, `l2r_natref_*`/`l2r_intref_*`). `LRef<T>`
 (`l2r_ref_*`, a runtime cell) backs promises.
 
+**Freeing containers.** Native Lean frees an object iteratively: the
+children whose count drops to zero go on a stack of objects to free, popped
+last first. Reussir's drop glue frees a record's fields recursively (along
+the last chain member being freed it loops: patch 0013), and releases a
+container field through the container's Rust `Drop` (the opaque type's
+drop hook), which releases the elements. The prelude's containers are
+therefore `leanrt::drop`'s wrappers, whose `Drop` frees the last reference
+through one stack of pending work per thread: a container freed while
+another free runs (from an element's release, through any record glue in
+between) is pushed instead, and the outermost free pops the stack until it
+is empty. An array is emptied from its last element, and what an element's
+release pushes is done before the next element, so the order of
+observable releases matches Lean's (file handles closed, and so flushed,
+promises resolved; `fs` and `task` push those too while a free runs). An
+array that a structural conversion built also releases its origin record
+(`origin::release_shared`) when the program drops it.
+
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
 lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),
 conv(L2RUnit -> α, L2RBox, u64), busyconv(u64), convdone(α, L2RBox, u64) }`
@@ -183,8 +211,12 @@ for its continuation `src`), `l2r_task_walk_next()` (the `sync` dependents
 to run), `l2r_task_source_next_at(a)` (the pending tasks a task about to
 run waits for, deepest first, or queued tasks while it waits for a promise)
 and `l2r_task_next_tag()` (the next queued task), all handed over by
-`l2r_task_handed<S>()` / `l2r_task_take<S>()`, to be dropped instead of run
-when `l2r_task_deleting()` (a pure task the program has dropped),
+`l2r_task_handed<S>()` / `l2r_task_take<S>()` (a handed task is off its
+queue and its source's dependents, and is handed to no one else before it
+begins: the generated code may block before that, forcing its sources),
+to be dropped instead of run when `l2r_task_deleting()` (a pure task the
+program has dropped: only the runtime refers to it; deleting it releases
+what it holds, so a whole chain or tree of dropped pure tasks goes),
 `l2r_task_status_at(a)` (0 waiting, 1 running or an unresolved promise, 2
 finished), `l2r_task_wait_status_at(a)` (for `IO.waitAny`; 3: waits for an
 unresolved promise), `l2r_task_query_at(a)` (for `IO.getTaskState`; 3: run
@@ -195,11 +227,98 @@ task's worker number), `l2r_task_deferring()` (false during
 initialization, when Lean runs tasks at once), `l2r_task_manager_start()`
 (before `main`) and `l2r_task_shutdown()` (after `main`, before the final
 run of queued tasks). `l2r_sleep_ms` goes through `leanrt::task` (sleeps
-count as time passing for its heuristics). Standard streams are per task,
+count as time passing for its heuristics) and the scheduler (below). Standard streams are per task,
 as they are per thread natively: `l2r_std_push(base)` / `l2r_std_pop(base)`
 set the stream cells aside and put them back
 (`leanrt::once::push_context`), and `l2r_once_take<T>(slot)` empties a
 cell.
+
+**The scheduler** (`leanrt::sched`, `coro`; translation plan §5.14,
+*Blocking*). Code that blocks (a contended lock, a condition variable, a
+task running on another context or a promise not resolved yet, a sleep, the
+final run after `main`) suspends its *context* (`main`'s thread stack, or a
+stack of a worker thread's size, 1 GiB reserved, with a guard page that the
+stack-overflow handler recognizes) and the scheduler runs: a context that
+can go on, else a queued task on a new context if one of Lean's task
+manager workers is free (`LEAN_NUM_THREADS`, or the number of processors;
+a context waiting for a task frees its worker; dedicated tasks always
+start), else the event loop's timers and sockets or the earliest sleeper.
+Nothing can go on: the program waits forever. A switch saves and restores
+the per-context state: the running tasks, walks and chains of
+`leanrt::task` (`task::CtxState`) and the mutable cells (the current
+standard streams) with their saved contexts (`once::CtxState`), and the
+container free in progress with its pending work (`drop::CtxState`: a
+context can be suspended inside a free, when a promise released there
+resolves and code waiting for it blocks). The
+context switch (`coro::switch`) saves the callee-saved registers on the
+stack and swaps stack pointers (aarch64 and x86-64 assembly). The program
+exports `l2r_task_run_one_c` (lean2rr's `l2r_task_run_one`), which a new
+context calls to run its first queued task. Output (`io::stream_put`,
+`fs::put_str`, `fs::flush`), spawning a process and `IO.Process.exit` are
+effect points (`sched::effect`): a context whose sleep is over, a due timer
+and what its completion releases, ready descriptors (`net::poll_now`), a
+context able to run for 5 ms, a task queued 5 ms ago with a worker free run
+first, round after round (up to 64; what runs in those rounds starts no
+tasks at its own effect points); `IO.sleep 0` lets them run whatever
+their age (`sched::zero_sleep`). `l2r_task_wait_running(a)` waits for a
+`busy` task that runs on another context; `l2r_thunk_wait_busy(a)` for a
+`busy` thunk until `l2r_thunk_done(a)`; `l2r_task_wait_progress()` for some
+task to finish (`IO.waitAny`). Forcing a task that waits for one running on
+another context waits for that one first (`task::source_next`); polling a
+task that cannot finish without the others lets them go on once per
+question (`sched::poll_yield`). A worker context remembers its first task
+with the entry's serial number. Forcing
+chains remember tasks by their entry's serial number (entries and cell
+addresses are reused). A constant's accessor calls `l2r_once_claim(slot)`
+(`once::claim`): a context that needs a constant another is computing
+waits for it. `LEAN_NUM_THREADS=0` (C's `atoi`) is no task manager: tasks
+run at once (`task::start` does not start deferring).
+
+**`Std.Sync`** (`leanrt::sync`): `BaseMutex`, `Condvar`,
+`BaseRecursiveMutex`, `BaseSharedMutex` are `LHandle`s; the externs'
+payloads are `l2r_io_basemutex_new()`, `l2r_io_basemutex_lock(m)`, ... (over
+`l2r_sync_new(kind)`, `l2r_sync_op(op, h)`, `l2r_condvar_wait_h(c, m)`).
+A lock is owned by a thread: the context and its innermost running task's
+thread number; waiting blocks the context; an unlock hands the lock to the
+longest waiter. Relocking a held `BaseMutex` waits forever (glibc); the
+shared mutex is libc++'s (an entered writer keeps new readers out).
+
+**The event loop** (`leanrt::net`, for `lean2rr/L2RShim.lean`): timers,
+signal watchers and sockets are `LHandle`s; an operation returns an `Op`
+handle (`OpSt`: done, canceled, code, a synchronous error, bytes, address,
+strings, a new socket) read by `l2r_shim_op_*`. An operation completing
+later takes a promise `r` from the shim and drops it (on the event loop's
+own context, `sched::ensure_evloop`) when it completes, which runs the
+shim's continuation (a `sync` dependent of `r`). `net::wait` polls the
+watched descriptors (and a self-pipe of the signal handler) with the
+earliest timer as timeout. The primitives (`l2r_shim_*`, the payloads of
+the shim's `lean_shim_*` externs): timers and signals
+(`timer_new`, `signal_new`, `timer_next_kind`, `timer_promise`,
+`timer_start`, `timer_set`, `timer_ctl`), TCP (`tcp_new`, `tcp_bind`,
+`tcp_listen`, `tcp_connect`, `tcp_send`, `tcp_accept`, `tcp_try_accept`,
+`tcp_cancel_accept`, `tcp_shutdown`, `tcp_nodelay`, `tcp_keepalive`), both
+(`sock_recv` (size 0: `waitReadable`), `sock_cancel_recv`, `sock_name`),
+UDP (`udp_new`, `udp_bind`, `udp_connect`, `udp_send`, `udp_option`,
+`udp_membership`, `udp_multicast_interface`), name resolution
+(`dns_get_info`, `dns_get_name`), interfaces (`ifaces`), and the pure
+`lean_shim_uv_kind`, `lean_shim_uv_strerror` (libuv's error kinds and
+messages), `lean_shim_pton`, `lean_shim_ntop`; `Std.Internal.UV.System`
+over `leanrt::sys` (`sys_title_get`, `sys_title_set`, `sys_query(which)`
+for the queries with several results, `sys_group`, `sys_getenv`,
+`sys_priority`, `sys_word(which)` for single numbers, `sys_chdir`,
+`sys_setenv`, `sys_setpriority`, `sys_random`), following libuv's Linux
+code (`/proc/uptime`, `/proc/stat`, `/proc/meminfo`, the cgroup's memory
+limit, `getpwuid_r`, ...). Addresses are byte arrays:
+the family (4 or 6), the port (big-endian, for socket addresses), the
+address bytes. `l2r_uv_event_loop_alive()` is true, as natively. A promise
+the loop gives up unresolved (a timer stopped, reset or re-armed, an
+operation whose start failed) is released on the loop's context too
+(`net::release`), so no generated code runs inside a primitive. The shim's
+`l2r_shim_promise_is_resolved(p)` answers `IO.Promise.isResolved`
+(`task::promise_is_resolved`, as `IO.getTaskState` answers for the
+promise's task) and then releases `p`: natively `isResolved` borrows the
+promise, so a last reference resolves it with `none` only after the
+question.
 
 **Promises.** `LPromise` is a runtime object holding the cell of the
 promise's task (`leanrt::task::Promise`): `l2r_promise_new<S>(c)` (Lean's
@@ -306,7 +425,7 @@ and is reported at once.
 
 | Lean | primitives |
 |---|---|
-| `initialize`, closed terms | once-cells `l2r_once_has(slot)`, `l2r_once_get<T>(slot)`, `l2r_once_set<T>(slot, v)` |
+| `initialize`, closed terms | once-cells `l2r_once_claim(slot)` (`l2r_once_has` for the mutable cells), `l2r_once_get<T>(slot)`, `l2r_once_set<T>(slot, v)` |
 | `IO.setStdout`/`setStderr`/`setStdin` | a cell per stream: `l2r_once_*` plus `l2r_cell_swap<T>(slot, v) -> T` (returns the previous value) |
 | `timeit`, `allocprof` | `l2r_io_timeit_with<R>(msg, act)`, `l2r_io_allocprof_with<R>(msg, act)` |
 | `Void.mk` | `lean_void_mk<T>(x)` |
@@ -491,17 +610,19 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   one lives, and gives the original back when the value is converted back,
   `l2r_origin_back`/`l2r_origin_take`), and `l2r_ptr_addr_obj` and
   `l2r_ptr_addr_rec` look it up once any conversion was recorded.
-- Everything runs on one thread: tasks run when they are first needed or
-  when `main` returns (a schedule native Lean can produce; translation plan
-  §5.14). A task or `main` polling shared state that another task sets
-  never sees it change, and `IO.waitAny` does not pick the fastest of
-  several unfinished tasks.
-  Sockets, `Std.Sync` and timers are not implemented. Code that reads one
-  of a child's pipes in a task while it reads the other itself (as
+- Everything runs on one thread: tasks run when they are first needed,
+  when the running code blocks, or when `main` returns (a schedule native
+  Lean can produce; translation plan §5.14). Contexts switch only when one
+  blocks or at an effect point (above): a loop polling shared state that
+  another task sets without sleeping or output never sees it change, a
+  context that computes without blocking or output delays the others,
+  and `IO.waitAny` does not pick the fastest of several unfinished tasks.
+  Blocking system calls (reading a file, pipe or standard input, waiting
+  for a child, name resolution) block the whole program: code that reads
+  one of a child's pipes in a task while it reads the other itself (as
   `IO.Process.output` does natively, stdout in the task; its glue drains
   both together) deadlocks if the child writes more than a pipe holds
-  (64 KiB) to the task's pipe before closing the other one: the task runs
-  only when its value is needed.
+  (64 KiB) to the task's pipe before closing the other one.
 - Child processes: natively `Child.pid` leaks its argument (Lean passes
   the child owned, the C function treats it as borrowed), so the child's
   pipes are never closed after a `pid` call, and a child waiting for end of
