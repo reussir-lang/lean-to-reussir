@@ -3172,6 +3172,12 @@ fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
     }
 }];
 
+// The release, after a call, of an argument the callee only borrows
+// natively (lean2rr's Lower/Borrow): an effectful FFI call, so it stays
+// after the call. Returns 0.
+#[ffi(import)]
+fn l2r_release_after<T>(x : T) -> u64 [{ { drop(x); 0 } }];
+
 // Conversion origins (`leanrt::origin`): `l2r_origin_note(src, dst, code)`
 // records that `dst` was converted from `src` (whose representation
 // lean2rr numbers `code`) and returns `dst`; `l2r_origin_back(x, code)`

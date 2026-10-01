@@ -203,6 +203,9 @@ structure LowerState where
   conversion it needs is the bare one (`_w`), not the one that records and
   looks up origins (`l2r_origin_note`, see `structConv`). -/
   convNested : Bool := false
+  /-- Lean's borrowed parameters of the program's declarations, and the
+  variables they lend (`Lower/Borrow`), once computed. -/
+  borrowInfo : Option (NameMap (Array Bool) × FVarIdSet) := none
   /-- Generated placeholder (`box(0)`) functions, per type. -/
   zeroFns : Std.HashMap RR.Ty String := {}
   /-- Placeholder functions whose body is being generated. -/

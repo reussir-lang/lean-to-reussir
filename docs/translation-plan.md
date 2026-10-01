@@ -71,7 +71,8 @@ an `--emit` checkpoint after each stage. The modules of
 - Stage 4: `LowerBase` (state, type translation), then `Lower/*.lean`, each
   importing the previous one: `Ctx` (the code-lowering context),
   `FnValues`, `LazyForce`, `Conv`, `Decls`, `Externs`, `LazyGlue`,
-  `Process`, `Promises`, `Identity`, `ExternCall`, `Values`, `JoinPoints`,
+  `Process`, `Promises`, `Identity`, `ExternCall`, `Borrow` (release times
+  of borrowed resources, §5.8), `Values`, `JoinPoints`,
   `StateMachine` (J4), `Hooks`, `Code` (`lowerCode`, `lowerDecl`),
   `Finish`;
 - assembly: `Emit/Startup` (initializer order, the startup chain),
@@ -1218,14 +1219,32 @@ Rules:
   `lean_dbg_sleep<ElemBox>` with a closure returning a `Nat`. This covers
   `dbgTrace`, `dbgTraceIfShared`, `dbgSleep`, `dbgStackTrace`, `panic`
   and `sorry`; lean2rr finds these functions by reading the prelude.
-- **Borrowing.** Lean's borrow annotations (`@&`) are dropped. Reussir's
-  owned convention plus its Perceus analysis gives the same results, except
-  for when a value is freed: natively a parameter that Lean's IR infers as
-  borrowed is released by the caller after the call returns, while here the
-  callee releases it at its last use, possibly earlier. Only resources can
-  tell: a file handle is closed (and so flushed) earlier, a child sees end
-  of file on a pipe earlier (§10). The process glue keeps a `Child` alive
-  across `wait`, `tryWait` and `kill`, which borrow it by annotation.
+- **Borrowing.** Reussir passes every argument owned and releases a value
+  at its last use. Natively a parameter that Lean borrows (its
+  `inferBorrow`, and `@&` annotations) is released by the caller after the
+  call returns. Only resources can tell: natively a file handle written by
+  a helper that borrows it is still open (its data still buffered) when the
+  helper reads the file again; a child whose stdin pipe a helper borrows
+  does not see end of file while the helper waits for it. So for a program
+  that creates resources (it calls `IO.FS.Handle.mk`, `createTempFile` or
+  `IO.Process.spawn`), lean2rr runs Lean's own borrow inference on its mono
+  declarations (Lower/Borrow: copies go through `toImpure` and the impure
+  passes up to `inferBorrow`, as Lean compiles its own declarations; extern
+  instances get their extern's `@&`) and emulates Lean's reference counting
+  where a value may hold a resource (a handle, which mono types `lcAny`, so
+  any `Box`; a record, array or reference with such a field):
+  - a direct call keeps an argument passed to a borrowed parameter until
+    the call returns (`l2r_release_after`, an effectful FFI call after the
+    call, as Lean's `dec`), when the caller owns it; an argument the caller
+    itself borrows (a borrowed parameter, a field or array element of one,
+    a join point parameter to which every jump passes such a value) is left
+    alone, as natively, so a loop's tail calls stay tail calls;
+  - a function value of such a declaration calls a `_boxed` variant that
+    releases its borrowed arguments after the call, as Lean's `_boxed`
+    functions do for closures.
+  Other values keep Reussir's release times: the same results without the
+  extra reference counting. The process glue keeps a `Child` alive across
+  `wait`, `tryWait` and `kill`, which borrow it by annotation.
 
 ### 5.9 Panics and unreachable code
 
@@ -1933,13 +1952,15 @@ Each item says what differs and when.
   new big number object per computation) answer a number computed from
   their value, so equal values are `ptrEq` (natively only the same object
   is); likewise a rebuilt `[value]` struct over the same field.
-- *Release time of borrowed parameters* (§5.8): a resource passed to a
-  function that Lean infers to borrow it is released by Lean's caller
-  after the call; here it is released at its last use inside the callee.
-  A handle written and then dropped by a helper that goes on to read the
-  same file, or a pipe to a child that the helper then waits for, is
-  closed earlier than natively (the file is already flushed; the child
-  sees end of file, where natively it may wait forever).
+- *Release time of borrowed parameters* (§5.8): emulated for values that
+  may hold a resource, with Lean's inference run on lean2rr's monomorphic
+  instances: where Lean infers a polymorphic declaration or one of its own
+  specializations differently from lean2rr's instance of it, the release
+  time follows the instance. A resource captured in a closure or a thunk
+  is not looked into (released at its last use). In a program that
+  creates resources, a value of uniform type (`Box`) passed owned to a
+  borrowed parameter is kept until the call returns: one more increment
+  and release per such call.
 - *Order of panics in pure code*: when several pure computations panic
   (`get!` on a short array, an `assert!`), their messages can come out in
   another order than natively, because Lean's closed-term extraction may
