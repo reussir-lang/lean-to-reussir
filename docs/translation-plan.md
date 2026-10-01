@@ -57,6 +57,58 @@ with two of them replaced by lean2rr's copies that keep more types (§3).
 Stage 1 adds type specialization and runs Lean's base-phase `simp` on each
 instance; Lean's base `specialize` is not run again (§7).
 
+### Code structure and passes
+
+`lean2rr/Main.lean` reads as the pipeline: collect, Stage 1, Stage 2,
+then `lowerProgram` (Stage 3, the optional passes, Stage 4, assembly), with
+an `--emit` checkpoint after each stage. The modules of
+`lean2rr/LeanToReussir/`:
+- Stage 1: `Collect`, `Mono`, `Specialize`, `Relevance`, `Retype`;
+- Stage 2: `Pipeline` (the driver), `TypedToMono` and
+  `TypedStructProjCases` (lean2rr's copies of two Lean passes),
+  `MonoTypesKeep`;
+- Stage 3: `MonoRetype`;
+- Stage 4: `LowerBase` (state, type translation), then `Lower/*.lean`, each
+  importing the previous one: `Ctx` (the code-lowering context),
+  `FnValues`, `LazyForce`, `Conv`, `Decls`, `Externs`, `LazyGlue`,
+  `Process`, `Promises`, `Identity`, `ExternCall`, `Values`, `JoinPoints`,
+  `StateMachine` (J4), `Hooks`, `Code` (`lowerCode`, `lowerDecl`),
+  `Finish`;
+- assembly: `Emit/Startup` (initializer order, the startup chain),
+  `Emit/Entry` (the entry point), `Emit/Program` (`lowerProgram`, which
+  also runs `Outline` on the generated functions);
+- `PassConfig`: the configurable parts of the pipeline;
+- `Opt/*.lean`: the optional passes, and `Opt/Registry.lean`.
+
+The core translation is the plain one: the rules of this plan without the
+optional passes, and correct on its own (the classic corpus at every size
+and the runtime suite match native Lean with every optional pass off).
+Each optimization is a module of `Opt/` with an `install : PassConfig →
+PassConfig` that plugs it into a hook of `PassConfig`: a representation
+choice of the type translation (record field order, `[value]` structs), a
+pass over the checked mono declarations (`monoPasses`), Lean definitions
+replaced by prelude functions, a lowering hook (`LowerHooks`: the body
+before lowering, the J1′ choice, the form of J4's state machine, constant
+caching, the binding of a `cases` alternative's fields), or a pass over
+the generated Reussir functions (`rrPasses`). Every hook's default is the
+plain translation.
+
+`Opt/Registry.lean` lists every pass in one place: Stage 2's edits of
+Lean's pass lists (two passes replaced, two not run, each with its
+reason); the optional passes, one line each (name, enabled by default,
+description, `install`), in installation order; and the parts that look
+optional but are not, with the reason: the startup chain's chunks (rrc's
+stack), J4's state machines (a loop through an outlined join point would
+use stack per iteration), closed-term chains not cached (an array literal
+would need memory quadratic in its length) and `Outline` (rrc's build time
+and memory). `lean2rr --list-opts` prints it, and `lean2rr --disable-opt
+NAME` turns one optimization off for a run (`scripts/l2r.py --disable-opt
+NAME`, or `L2R_DISABLE_OPTS=a,b` for test runners). To remove an
+optimization, delete its line; to add one, write `Opt/Name.lean` with the
+transformation and its `install`, import it in the registry and add its
+line. With all optional passes off, and with each one off in turn, the
+classic corpus and the runtime tests match native Lean.
+
 ---
 
 ## 2. Stage 1 — collect and monomorphize
@@ -541,13 +593,16 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   (`ST.Out`, the result of every `BaseIO` call, once the world is gone) is
   a `[value]` struct instead, as natively Lean represents it by its field,
   unless that field's type is being translated at the same time (no type
-  contains itself by value).
+  contains itself by value). (Optional pass `value-structs`; without it
+  such a structure is a shared record like the others.)
 - **Field order.** lean2rr orders each constructor's fields by decreasing
   alignment (ties in declaration order), so records have no padding; the
   layout maps each Lean field to its record position, and constructions,
   patterns and projections go through it. (Reussir's own member packing is
   off: its in-place reuse of a cell for another variant mishandles fields
-  that packing moves.)
+  that packing moves.) This is the optional pass `field-order`; without it
+  the fields stay in declaration order, and Reussir lays the padding out as
+  bytes.
 - **Recursion.** Recursive, mutual and nested inductives refer to each
   other's instances; `inductive Rose | node : List Rose → Rose` gives
   `Rose` and `List_Rose`, defined together. Whether a type is a shared
@@ -808,7 +863,9 @@ sharing. Code that stops when `ptrEq` says a step changed nothing (Lean's
 existing node must not copy it.
 
 Two shapes help Reussir's token reuse, which gives a cell freed by a match
-to a later construction:
+to a later construction (the optional passes `nullary-scrutinee`,
+`lazy-fields` and `sink-proj`; without them the matched value itself is
+used and every field is bound at the match):
 - In the arm of a constructor without fields, the matched value is that
   constructor (`leaf{}`), which costs nothing to build.
 - In an arm where the matched value stays live because it is stored whole
@@ -862,7 +919,7 @@ to a later construction:
   (`let f = s.0`) at the top of the alternative: when the alternative then
   branches and one branch keeps `s` whole while only other branches use
   the field, the projection moves into the branches that use it (a pass
-  over the generated code, `SinkProj`). An association-list update
+  over the generated code, `Opt/SinkProj`). An association-list update
   `if k == k' then (k', f v) :: more else (k', v) :: go k more` keeps the
   pair whole in the second branch; with `v` projected before the `if`, the
   skipping branch allocated a new cons per element and freed the matched
@@ -919,7 +976,8 @@ before the jump for a construction after it. Duplication is recursive:
 small join points inside a duplicated body are duplicated again. The
 40-node bound covers the whole nest, so growth is bounded, but code size can
 still grow by a large factor (up to about 2^10 copies of an innermost
-body). Behaviour does not change.
+body). Behaviour does not change. (Optional pass `jp-small`; without it
+such join points are outlined, J3.)
 
 **J3, otherwise: outline.** Some paths `return` directly or jump to a
 different join point. Then `j` becomes a separate top-level function over
@@ -940,23 +998,33 @@ the single `cases` branch that jumps to it, into the continuation or body of
 another join point. Free variables stay in scope (binders are unique), and
 no code is duplicated. A join point declared before a `cases` of which only
 one branch uses it often satisfies J2 once sunk into that branch.
+(Optional pass `jp-sink`.)
 
 **J4, outlined join points that call back: one state machine.** When a
 self-recursive declaration has outlined join points whose bodies call the
 declaration (a loop whose body is a DAG of join points, e.g. a chain of
 `if`s with shared continuations), J3 would make the loop mutually
-recursive. Instead the declaration becomes one function over an enum of
-entry points: one variant for the declaration's own parameters and one per
-outlined join point (its captured variables and parameters). The function
-takes the declaration's parameters followed by the entry point, and matches
-on the entry point. The declaration's own variant is nullary, so calling the
-declaration (through a wrapper) and its self tail calls allocate nothing; a
-jump to an outlined join point passes the parameters on unchanged together
-with that join point's variant. All of these are self tail calls, which
-LLVM turns into a loop. J4 is used only when an outlined join point makes a
-self tail call; other calls back into the declaration are ordinary calls. The enum is a shared (heap) type for now:
-Reussir miscompiles `[value]` enums with fields of mixed layout (§9);
-Reussir's reuse makes the shared cell cheap.
+recursive, and a mutual tail call is a jump only when LLVM can make it a
+sibling call, which Reussir's reference counting after the call can
+prevent: the loop would use stack per iteration (the classic Sieve and
+Strings overflowed a 1 GiB stack that way at their medium size). Instead
+the declaration becomes one function over an enum of entry points: one
+variant `e` for the declaration's own parameters and one per outlined join
+point (its captured variables and parameters). The function matches on the
+entry point; the declaration's wrapper enters it at `e` with its
+parameters, a self tail call enters at `e` with the new arguments, and a
+jump to an outlined join point enters at that join point's variant. All of
+these are self tail calls, which LLVM turns into a loop. Every value a
+jump needs travels in its variant, so nothing is kept alive by being passed
+along. J4 is used only when an outlined join point makes a self tail call;
+other calls back into the declaration are ordinary calls. The enum is a
+shared (heap) type for now: Reussir miscompiles `[value]` enums with fields
+of mixed layout (§9); Reussir's reuse makes the shared cell cheap. The
+optional pass `state-machines` enters without allocation instead: the
+function takes the declaration's parameters followed by the entry point,
+`e` is nullary, and a jump passes the parameters on unchanged together with
+its variant (which keeps a parameter referenced across the jump even when
+the join point does not use it).
 
 **Choice and nesting.** J1 applies first, then J2, then J1' (small), then
 J3 (J4 when an outlined body tail-calls the declaration).
@@ -1203,7 +1271,12 @@ Native Lean behaves as follows (observed; `EmitC.emitInitFn`):
 A constant whose code only builds unboxed values from small literals and
 constructors (`Int.ofNat 0`, an enumeration value) is recomputed at every
 use instead of cached. It cannot panic, trace or allocate, so this is
-unobservable, and it is cheaper than a once-cell read.
+unobservable, and it is cheaper than a once-cell read (optional pass
+`cheap-consts`). A closed term referenced exactly once, by another constant
+(the steps of an array literal, `_closed_k := push _closed_(k-1) e_k`), is
+evaluated where it is used instead of cached: it still runs once, and the
+intermediate values are not kept (caching every step of a 10000-element
+literal kept 1 GB of intermediate arrays).
 
 A float literal arrives as a call of a Lean function on literal arguments,
 `Float.ofScientific 15 true 301` for `1.5e-300` (or `Float.ofNat n`,
@@ -1214,7 +1287,8 @@ functions (lean2rr is compiled from the same `Init` code, so the bits are
 Lean's, subnormals and rounding included), and replaces them by
 `Float.ofBits` of the bit pattern, a cheap constant as above. Calls with
 an exponent above 2000 or a mantissa of more than 4096 bits are left to run
-(cached as usual when they are a constant).
+(cached as usual when they are a constant), as are all of them without the
+optional pass `float-lits`.
 
 The initializer follows Lean's compilation order, which is not persisted in
 the `.olean`. Compilation follows the source, command by command. A `def`
@@ -1577,6 +1651,10 @@ The lowering keeps Reussir's job easy:
 - it prefers J1/J2 over J3;
 - it emits structured control flow;
 - it adds no closures, reference counting or reuse of its own.
+
+lean2rr's own optimizations are optional passes, listed with the required
+parts in `lean2rr/LeanToReussir/Opt/Registry.lean` (§1, "Code structure
+and passes").
 
 ---
 
