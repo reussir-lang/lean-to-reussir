@@ -219,6 +219,7 @@ fn outcome(r: Result<(), i32>) {
 
 /// `Handle.putStr` / `Handle.write` (`fwrite`).
 pub fn put_str(h: &LHandle, s: &[u8]) {
+    crate::sched::effect();
     outcome(fh(h).put(s))
 }
 
@@ -722,6 +723,32 @@ fn uv_strerror(e: i32) -> Option<&'static str> {
         125 => "operation canceled",
         _ => return None,
     })
+}
+
+/// `uv_strerror` of a (positive) errno, for `net`: libuv's message, or
+/// `Unknown system error -e`.
+pub fn uv_strerror_bytes(e: i32) -> Vec<u8> {
+    match uv_strerror(e) {
+        Some(m) => m.as_bytes().to_vec(),
+        None => format!("Unknown system error {}", -e).into_bytes(),
+    }
+}
+
+/// The error kind `decode_uv_error` gives a (positive) errno without a file
+/// name, for `net`.
+pub fn uv_kind(e: i32) -> u32 {
+    if !uv_maps(e) {
+        return 0;
+    }
+    decode_kind(e, false)
+}
+
+/// `write(2)`, for the signal handler (`net`).
+pub fn raw_write(fd: i32, buf: *const std::ffi::c_void, n: usize) -> isize {
+    extern "C" {
+        fn write(fd: i32, buf: *const std::ffi::c_void, n: usize) -> isize;
+    }
+    unsafe { write(fd, buf, n) }
 }
 
 pub fn decode_kind(e: i32, has_fname: bool) -> u32 {

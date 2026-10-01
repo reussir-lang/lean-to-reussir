@@ -22,6 +22,7 @@ RUSTC = Path(os.environ.get(
     Path.home() / ".rustup/toolchains/nightly-2026-08-31-aarch64-unknown-linux-gnu/bin/rustc")).resolve()
 LEAN2RR = Path(os.environ.get("L2R_LEAN2RR", ROOT / "lean2rr" / ".lake" / "build" / "bin" / "lean2rr")).resolve()
 PRELUDE = ROOT / "runtime" / "prelude.rr"
+SHIM_DIR = ROOT / "lean2rr" / ".lake" / "build" / "lib" / "lean"
 LEANRT_SRC = ROOT / "runtime" / "leanrt" / "src"
 LEANRT_OUT = ROOT / "runtime" / "leanrt" / "target"
 
@@ -130,6 +131,12 @@ def main():
     env.setdefault("LEAN_STACK_SIZE_KB", str(4 * 1024 * 1024))
     if args.lean_path:
         env["LEAN_PATH"] = args.lean_path + (":" + env["LEAN_PATH"] if env.get("LEAN_PATH") else "")
+    # lean2rr's shim library (lean2rr/L2RShim.lean, built with lean2rr):
+    # Lean implementations of Std.Internal.UV's externs, which lean2rr
+    # compiles with the program. Last, so that the program's modules come
+    # first.
+    if SHIM_DIR.joinpath("L2RShim.olean").exists():
+        env["LEAN_PATH"] = (env["LEAN_PATH"] + ":" if env.get("LEAN_PATH") else "") + str(SHIM_DIR)
 
     rlib = build_leanrt()
     with tempfile.TemporaryDirectory() as tmp:

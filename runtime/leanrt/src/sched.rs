@@ -428,9 +428,22 @@ pub fn effect() {
 
 #[inline(never)]
 fn effect_slow() {
+    if !crate::task::deferring() {
+        return;
+    }
     let now = Instant::now();
-    let due = sleeper_due(now) || crate::net::due(now);
-    if due {
+    let mut due = false;
+    if sleeper_due(now) {
+        promote_sleepers(now);
+        due = true;
+    }
+    if crate::net::due(now) {
+        // Due timers fire; completions are delivered by the event loop's
+        // context, which is then able to run.
+        crate::net::process_due(now);
+        due = crate::net::has_fired() || due;
+    }
+    if due && !sched().runnable.is_empty() {
         yield_now();
     }
 }

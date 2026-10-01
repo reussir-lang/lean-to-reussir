@@ -25,7 +25,7 @@ def entryRoots : Array Name := #[``IO.Error.toString]
 /-- Whether a module belongs to the Lean toolchain (its constants are
 evaluated lazily; see translation plan §5.12). -/
 def isToolchainModule (m : Name) : Bool :=
-  m.getRoot ∈ [`Init, `Std, `Lean, `Lake]
+  m.getRoot ∈ [`Init, `Std, `Lean, `Lake, `L2RShim]
 
 /-- What a program does at startup, before `main`, like Lean's module
 initializers: for each module in import order, for each declaration in
