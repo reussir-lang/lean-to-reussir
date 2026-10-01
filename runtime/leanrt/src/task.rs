@@ -615,11 +615,22 @@ extern "C" {
 
 impl Drop for Promise {
     fn drop(&mut self) {
-        let f = unsafe { l2r_promise_drop_c };
-        assert!(!f.is_null(), "leanrt: promise without l2r_promise_drop_c");
-        let f: unsafe extern "C" fn(usize) -> u64 = unsafe { std::mem::transmute(f) };
-        unsafe { f(self.cell) };
+        if crate::drop::active() {
+            // Released while a container is freed: resolved when the free
+            // reaches it, in Lean's order (`crate::drop`).
+            crate::drop::defer(self.cell, drop_promise_now);
+            return;
+        }
+        unsafe { drop_promise_now(self.cell) };
     }
+}
+
+unsafe fn drop_promise_now(cell: usize) -> bool {
+    let f = l2r_promise_drop_c;
+    assert!(!f.is_null(), "leanrt: promise without l2r_promise_drop_c");
+    let f: unsafe extern "C" fn(usize) -> u64 = std::mem::transmute(f);
+    f(cell);
+    true
 }
 
 pub type LPromise = reussir_rt::rc::Rc<Box<dyn std::any::Any>>;

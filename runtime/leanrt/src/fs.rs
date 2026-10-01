@@ -153,8 +153,8 @@ pub(crate) fn for_each_open(mut op: impl FnMut(&mut CFile)) {
     }
 }
 
-impl Drop for FileHandle {
-    fn drop(&mut self) {
+impl FileHandle {
+    fn close_now(&mut self) {
         if self.f.fd >= 0 {
             let open = unsafe { &mut *OPEN.0.get() };
             let me = self as *mut FileHandle as usize;
@@ -164,6 +164,35 @@ impl Drop for FileHandle {
             self.f.close();
         }
     }
+}
+
+impl Drop for FileHandle {
+    fn drop(&mut self) {
+        if self.f.fd < 0 {
+            return;
+        }
+        if crate::drop::active() {
+            // Released while a container is freed: closed when the free
+            // reaches it, in Lean's order (`crate::drop`). The handle moves
+            // to a box of its own, which the open list now names.
+            let moved = Box::new(UnsafeCell::new(FileHandle { f: std::mem::replace(&mut self.f, CFile::new(-1, 0)) }));
+            let open = unsafe { &mut *OPEN.0.get() };
+            let me = self as *mut FileHandle as usize;
+            if let Some(i) = open.iter().rposition(|&p| p == me) {
+                open[i] = moved.get() as usize;
+            }
+            crate::drop::defer(Box::into_raw(moved) as usize, close_deferred);
+            return;
+        }
+        self.close_now();
+    }
+}
+
+unsafe fn close_deferred(p: usize) -> bool {
+    let mut b = Box::from_raw(p as *mut UnsafeCell<FileHandle>);
+    b.get_mut().close_now();
+    drop(b);
+    true
 }
 
 #[inline(always)]
@@ -759,7 +788,7 @@ pub fn is_open(h: &LHandle) -> bool {
 pub mod owned {
     use super::*;
     use crate::{array, rc_release};
-    use reussir_rt::collections::vec::Vec as RVec;
+    use crate::drop::Vec as RVec;
 
     #[inline(never)]
     pub fn put_str(h: LHandle, s: LStr) { super::put_str(&h, &s.0); rc_release(s); rc_release(h); }

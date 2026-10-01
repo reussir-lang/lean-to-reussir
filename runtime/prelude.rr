@@ -42,19 +42,22 @@ pub struct LStr;
 pub struct LBig;
 
 // A Lean `Array` (and `ByteArray` = RVec<u8>, `FloatArray` = RVec<f64>):
-// a copy-on-write vector, updated in place when unique.
-#[ffi(rust = "::reussir_rt::collections::vec::Vec")]
+// a copy-on-write vector, updated in place when unique. The Rust type wraps
+// Reussir's vector so that freeing nested containers does not recurse
+// (`leanrt::drop`).
+#[ffi(rust = "::leanrt::drop::Vec")]
 pub struct RVec<T>;
 
 // A mutable reference cell (`ST.Ref`/`IO.Ref`): a shared 0-or-1 element
 // vector, mutated in place through every alias (empty after `take`).
-#[ffi(rust = "::reussir_rt::collections::vec::Vec")]
+#[ffi(rust = "::leanrt::drop::Vec")]
 pub struct LRef<T>;
 
 // A mutable cell holding one value, mutated in place through every alias:
 // the state of a `Thunk` or `Task` (lean2rr generates the state type).
-// One allocation: the count and the value.
-#[ffi(rust = "::reussir_rt::rc::Rc")]
+// One allocation: the count and the value. (`leanrt::drop::Cell` wraps
+// Reussir's `Rc`, as `RVec` does.)
+#[ffi(rust = "::leanrt::drop::Cell")]
 pub struct LCell<T>;
 
 // A Lean `Nat`. Invariant: `Big` only holds values >= 2^64.
@@ -2696,7 +2699,7 @@ fn l2r_promise_cell<S>(p : LPromise) -> LCell<S> [{
         let r = c.clone();
         ::std::mem::forget(c);
         leanrt::rc_release(p);
-        r
+        leanrt::drop::Cell::from_inner(r)
     }
 }];
 
@@ -2824,7 +2827,7 @@ fn l2r_lcell_new<T>(v : T) -> LCell<T> [{
         assert!(::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>());
         let c = Rc::new(v);
         leanrt::task::init_cell(unsafe { ::std::mem::transmute_copy::<Rc<[:T:]>, usize>(&c) });
-        c
+        leanrt::drop::Cell::from_inner(c)
     }
 }];
 

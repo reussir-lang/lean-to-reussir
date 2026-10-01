@@ -25,16 +25,21 @@ Generated sections of the prelude (edit the generator, then run it):
 `scripts/l2r.py` does everything:
 
 1. builds `leanrt` with the pinned rustc (`L2R_RUSTC`) into
-   `runtime/leanrt/target/libleanrt.rlib`, cached by a hash of its sources;
+   `runtime/leanrt/target/libleanrt.rlib` (`target/rt-<hash>/` for another
+   Reussir checkout), cached by a hash of its sources;
 2. runs lean2rr (`L2R_LEAN2RR`) with `--prelude runtime/prelude.rr`;
 3. runs rrc (`L2R_REUSSIR`; with `--reuse-across-call` unless `l2r.py` gets
    `--no-reuse-across-call`) with
-   - `--polyffi-rust-path runtime/leanrt/target/rustc-native`: a wrapper that
+   - `--polyffi-rust-path <leanrt dir>/rustc-native`: a wrapper that
      adds `-C target-cpu=native -C target-feature=-outline-atomics`. With the
      plain rustc, textures are not inlined into Reussir code, and calls through
      the packed-argument boundary (float or `str` arguments, four or more
      parameters) leave an escaping stack slot that blocks tail-call
-     elimination: loops that print floats overflow the stack.
+     elimination: loops that print floats overflow the stack. It also adds
+     `--extern leanrt=<rlib>` (and `--edition 2018` when rrc gives no
+     edition): the drop hooks Reussir generates for the prelude's opaque
+     types are textures without the prelude's `extern crate leanrt;`, and
+     the containers' Rust types are `leanrt`'s (below).
    - `--polyffi-libdir runtime/leanrt/target` (so textures find `leanrt`),
    - `--link-lib libleanrt.rlib --link-lib libgmp.a` (GMP from the Lean
      toolchain, `$(lean --print-prefix)/lib/libgmp.a`, or `L2R_GMP`).
@@ -47,11 +52,11 @@ Generated sections of the prelude (edit the generator, then run it):
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | big numbers | `LBig` = `Rc<(bool, Vec<u64>)>` | sign, little-endian limbs, normalized; GMP `mpn`/`mpz` |
 | `String` | `LStr` = `Rc<(Vec<u8>, u64)>` | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write |
-| `Array α` | `RVec<E>` = `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types) |
+| `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a transparent wrapper of `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types); freed without recursion (below) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one tagged word per element (below) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `String.toUTF8`/`fromUTF8` move a unique buffer (natively a copy) |
-| `ST.Ref σ α` / `IO.Ref α` | `LRef<E>` (a shared 0/1-element vector) | mutated through every alias; empty after `take` |
-| `Thunk α`, `Task α` | `LCell<S>` = `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
+| `ST.Ref σ α` / `IO.Ref α` | `LRef<E>` (a shared 0/1-element vector, `leanrt::drop::Vec<E>`) | mutated through every alias; empty after `take` |
+| `Thunk α`, `Task α` | `LCell<S>` = `leanrt::drop::Cell<S>`, a transparent wrapper of `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
 | `IO.FS.Handle` | `LHandle` | shared buffered file, closed with its last reference |
 | `UInt8..64`, `USize` | `u8..u64`, `u64` | |
 | `Int8..64`, `ISize` | `u8..u64`, `u64` (bit patterns) | signed semantics as `lean_int8_*` etc. |
@@ -146,6 +151,23 @@ and written by the plain-Reussir helpers `l2r_rc_get/set/swap<T>`; a `Nat`
 or `Int` reference is the prelude's `L2RNatRef`/`L2RIntRef` (a tagged word
 and a cell for a big number, `l2r_natref_*`/`l2r_intref_*`). `LRef<T>`
 (`l2r_ref_*`, a runtime cell) backs promises.
+
+**Freeing containers.** Native Lean frees an object iteratively: the
+children whose count drops to zero go on a stack of objects to free, popped
+last first. Reussir's drop glue frees a record's fields recursively (along
+the last chain member being freed it loops: patch 0013), and releases a
+container field through the container's Rust `Drop` (the opaque type's
+drop hook), which releases the elements. The prelude's containers are
+therefore `leanrt::drop`'s wrappers, whose `Drop` frees the last reference
+through one stack of pending work per thread: a container freed while
+another free runs (from an element's release, through any record glue in
+between) is pushed instead, and the outermost free pops the stack until it
+is empty. An array is emptied from its last element, and what an element's
+release pushes is done before the next element, so the order of
+observable releases matches Lean's (file handles closed, and so flushed,
+promises resolved; `fs` and `task` push those too while a free runs). An
+array that a structural conversion built also releases its origin record
+(`origin::release_shared`) when the program drops it.
 
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
 lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),
