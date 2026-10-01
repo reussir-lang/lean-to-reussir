@@ -38,6 +38,50 @@ where
   h1 : Nat := t "u.h1" 1
   h2 : Nat := t "u.h2" 2
 
+-- The same layouts with calls that Lean's closed-term extraction leaves in
+-- place (the callee's type is not syntactically a function), so that Lean
+-- records no compilation order for these constants and only the structure
+-- places them: `where` declarations separated by `;`, or shifted by an
+-- attribute or a doc comment (which their ranges leave out).
+def F := Nat → Nat
+@[noinline] def gv_lr : F := fun n => t "v.lr" n
+@[noinline] def gv_a : F := fun n => t "v.a" n
+@[noinline] def gv_b : F := fun n => t "v.b" n
+@[noinline] def gw_lr : F := fun n => t "w.lr" n
+@[noinline] def gw_a : F := fun n => t "w.a" n
+@[noinline] def gw_b : F := fun n => t "w.b" n
+@[noinline] def gx_lr : F := fun n => t "x.lr" n
+@[noinline] def gx_a : F := fun n => t "x.a" n
+@[noinline] def gx_b : F := fun n => t "x.b" n
+@[noinline] def gy_lr : F := fun n => t "y.lr" n
+@[noinline] def gy_a : F := fun n => t "y.a" n
+@[noinline] def gy_b : F := fun n => t "y.b" n
+
+def v : Nat :=
+  let rec lr : Nat := gv_lr 0
+  lr + a + b
+where a : Nat := gv_a 1; b : Nat := gv_b 2
+
+def w : Nat :=
+  let rec lr : Nat := gw_lr 0
+  lr + a + b
+where
+  a : Nat := gw_a 1
+  @[noinline] b : Nat := gw_b 2
+
+def x : Nat :=
+  let rec lr : Nat := gx_lr 0
+  lr + a + b
+where
+  /-- a doc comment -/ a : Nat := gx_a 1
+  b : Nat := gx_b 2
+
+def y : Nat :=
+  let rec lr : Nat := gy_lr 0
+  lr + a + b
+where a : Nat := gy_a 1
+      b : Nat := gy_b 2
+
 class K (α : Type) where
   k : Nat
 
@@ -49,4 +93,4 @@ where hk : Nat := t "inst.hk" 6
 
 def main : IO Unit := do
   IO.eprintln "main"
-  IO.println s!"{p} {q} {r} {s} {u} {K.k Nat}"
+  IO.println s!"{p} {q} {r} {s} {u} {v} {w} {x} {y} {K.k Nat}"

@@ -1313,21 +1313,24 @@ module's declarations in the order in which it compiled them
 constants (closed terms `c._closed_N`, `_boxed` wrappers, lifted lambdas
 `_lam_N`, specializations), newest first, and Lean adds a command's IR when
 it compiles the command. So each declaration that compiled to at least one
-of them gets its place in the compilation order (`compileOrder`): in
-practice every constant whose value calls a function (Lean extracts the
-call as a closed term), so every constant that can trace or panic, every
-`initialize` action and every specialization (whose order among themselves
-depends on how Lean's specializer recursed). A hygienic name keeps its
+of them gets its place in the compilation order (`compileOrder`): every
+specialization (whose order among themselves depends on how Lean's
+specializer recursed), every `initialize` action, and nearly every constant
+whose value calls a function (Lean extracts the call as a closed term).
+Not recorded are constants whose calls Lean leaves in place: a callee whose
+type is not syntactically a function (`def F := Nat → Nat`), a value equal
+to a closed term an earlier declaration made (Lean's closed-term cache), or
+a module compiled with `set_option compiler.extract_closed false`. A
+hygienic name keeps its
 macro scopes at the end: `zz._closed_0._@.M._hyg.3` is a closed term of
 `zz._@.M._hyg.3`.
 
 lean2rr orders the startup items by the program's structure (below), then
 puts the items that the record places in the recorded order, in the places
 the structural order gave them. The others keep their places, except that a
-constant goes after the constants it reads: it calls no function, so it
-cannot trace or panic, but evaluating it evaluates the constants it reads
-(their accessors compute them on demand), which natively come before it (a
-constant reads only constants declared before it, or its own helpers).
+constant goes after the constants it reads: evaluating it evaluates them
+(their accessors compute them on demand), and natively they come before it
+(a constant reads only constants declared before it, or its own helpers).
 
 The structure: compilation follows the source, command by command. A `def`
 or `instance` command is compiled after it is elaborated, together with its
@@ -1352,12 +1355,15 @@ command. For example
 initializes `p.h1`, `p.h3`, `p.h2`, then the specializations made in `p`,
 then `p`. lean2rr rebuilds this order from declaration ranges (a helper's
 range lies inside its parent's; the `where` helpers are the last direct
-helpers: the last one ends where its parent ends, and the others start at
-its column on earlier lines), from the kernel's `all` (a recursive mutual
-block), from the compilation record (a `mutual` block whose members do not
+helpers: the last one ends where its parent ends, and each other one starts
+on the line of the next one, after `;`, or at the column of the next one on
+an earlier line, or is shifted by a doc comment or an attribute, which the
+ranges leave out), from the kernel's `all` (a recursive mutual block), from
+the compilation record and from uses (a `mutual` block whose members do not
 call each other is recorded as separate definitions, but a later member's
 code compiled before an earlier member's shows that they share a block,
-with every command in between), and from the references in the
+with every command in between, and so does a declaration that uses a later
+one, which only a `mutual` block allows), and from the references in the
 declarations' kernel values (for a `partial` definition, its
 `_unsafe_rec`). The function of an `initialize` declaration belongs to its
 constant: a specialization made inside the action comes right before the
@@ -1377,16 +1383,21 @@ expands its macros; the names of one quotation share them), and last by
 name, with the numbers in names compared by value: the auxiliary constants
 `c._unsafe_1`, `c._unsafe_4`, …, `c._unsafe_10` of a declaration with
 several `unsafe` parts start in that order. The compilation record then
-orders all of these that can trace or panic, as the macro wrote them.
+orders those it records, as the macro wrote them. For the others macro
+scopes are only a guess: a macro that defines a name and then expands the
+rest makes increasing scopes in elaboration order, one that expands the
+rest first makes them in the reverse order.
 
-What no rule recovers is the order of constants that call no function,
-where the structure does not fix it (the members of a `mutual` block that
-only build values from literals, the made-up names of one quotation with
-such values): the `.olean` of a non-recursive `mutual` block of such
-constants and that of the same text without `mutual` differ only in a
-fresh-name counter left in another declaration's code, and the
-declarations' own records (names, ranges, values, IR) are equal. Their
-evaluation cannot be observed.
+What no rule recovers is the order of unrecorded constants where the
+structure does not fix it: the members of a `mutual` block that do not use
+each other, the made-up names of one quotation, the names a recursive
+macro makes in the reverse of their scopes (§10). The `.olean` of a
+non-recursive `mutual` block of such constants and that of the same text
+without `mutual` differ only in fresh-name counters left in later
+declarations' code (one name fewer used before them); the declarations'
+own records (names, ranges, kernel values, LCNF, IR, extension entries)
+are equal. For the made-up names of one quotation, only the macro's own
+definition (its code) holds the order.
 
 Our translation runs, before `main`, the startup work of Lean's module
 initializers:
@@ -1845,6 +1856,18 @@ Each item says what differs and when.
   worker's. A closed term waits for the tasks it holds directly or in
   structures, lists and arrays, not for tasks inside closures or thunks
   (Lean's `lean_mark_persistent` waits for all of them).
+- *Startup order of unrecorded constants* (§5.12): a constant that Lean
+  compiled to no IR-only declaration although its value calls a function
+  (a callee whose type is not syntactically a function, such as
+  `def F := Nat → Nat`; a value whose closed term an earlier declaration
+  made; a module with `set_option compiler.extract_closed false`) is
+  placed by the program's structure alone. It starts in another order than
+  natively when it is a member of a `mutual` block whose members do not use
+  each other (natively the helpers of all members first), one of the
+  made-up names of one macro quotation (here by name), or a name made by a
+  recursive macro that expands the rest before its own definition (here
+  in the order of the macro scopes). The `.olean` does not record these
+  orders. Visible only when such constants trace or panic.
 - *Compiler options of the program's modules* (`set_option
   compiler.extract_closed false`, `compiler.small`, `maxRecInline`, …) are
   not recorded in the `.olean`, so lean2rr runs Lean's passes with the

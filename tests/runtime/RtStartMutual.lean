@@ -62,6 +62,27 @@ end
 
 def a4 : Nat := t "a4" 4
 
+-- Constants whose calls Lean's closed-term extraction leaves in place (the
+-- callee's type is not syntactically a function): Lean records no
+-- compilation order for them, but a member that uses a later one shows the
+-- block (only `mutual` allows such a use), here around a recursive pair.
+def F := Nat → Nat
+@[noinline] def gc1 : F := fun n => t "c1" n
+@[noinline] def gc1_h1 : F := fun n => t "c1.h1" n
+@[noinline] def gc2 : F := fun n => t "c2" n
+
+mutual
+def r1 : Nat → Nat
+  | 0 => c1 + c2
+  | n + 1 => r2 n
+def c1 : Nat := gc1 h1
+where h1 : Nat := gc1_h1 1
+def r2 : Nat → Nat
+  | 0 => c2
+  | n + 1 => r1 n
+def c2 : Nat := gc2 2
+end
+
 def main : IO Unit := do
   IO.eprintln "main"
-  IO.println s!"{a0} {m1} {m2} {a1} {n1} {n2} {n3} {a2} {f1} {f2} {a3} {g1 1} {g2 2} {C.c Nat} {afterInst} {a4}"
+  IO.println s!"{a0} {m1} {m2} {a1} {n1} {n2} {n3} {a2} {f1} {f2} {a3} {g1 1} {g2 2} {C.c Nat} {afterInst} {a4} {r1 3}"

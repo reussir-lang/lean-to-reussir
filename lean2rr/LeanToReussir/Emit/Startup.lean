@@ -155,7 +155,7 @@ partial def compiledOwner (known : Name → Bool) (n : Name) : Option Name :=
 declarations that are not kernel constants (closed terms, `_boxed`
 wrappers, lifted lambdas, specializations), newest first, and Lean adds a
 command's IR when it compiles the command. So each declaration that
-compiled to at least one of them (in practice every constant whose value
+compiled to at least one of them (nearly every constant whose value
 calls a function) gets the index of its first one; the specializations
 made while compiling a declaration come right before it. Native Lean runs
 the module's initializers in exactly this order (`EmitC.emitInitFn`). -/
@@ -172,6 +172,12 @@ def compileOrder (idx : Nat) : CoreM (Std.HashMap Name Nat) := do
     if let some d := compiledOwner known extra[extra.size - 1 - i]! then
       unless out.contains d do out := out.insert d i
   return out
+
+/-- Whether `f` is the function that `initialize c : T ← act` (or
+`builtin_initialize`) makes for its action, a hygienic `initFn`: it is
+compiled with its constant, unlike the function of a hand-written
+`@[init f]`. -/
+def isGeneratedInitFn (f : Name) : Bool := f.hasMacroScopes
 
 /-- Lean's initializer order for the startup declarations `items` of one
 module (translation plan §5.12), as far as the program's structure tells
@@ -190,19 +196,22 @@ whole command. lean2rr sees the command through declaration ranges: a
 helper's range lies inside its parent's, the kernel's `all` lists a
 recursive mutual block, and a `mutual` block whose members do not call
 each other shows in `comp` (a later member's code compiled before an
-earlier one's). Returns a sort key per item. -/
+earlier one's) or in a use of a later member. Returns a sort key per
+item. -/
 partial def moduleStartupKeys (idx : Nat) (items : Array Name) (comp : Std.HashMap Name Nat) :
     CoreM (Std.HashMap Name (Array Nat)) := do
   let env ← getEnv
   let some md := env.header.moduleData[idx]? | return {}
   -- Ranges of the module's declarations, and each `initialize` function's
-  -- constant (the function belongs to its constant's position).
+  -- constant (the function belongs to its constant's position). Only the
+  -- functions `initialize` makes (`isGeneratedInitFn`): the function of a
+  -- hand-written `@[init f]` is an ordinary declaration of its own.
   let mut ranges : Std.HashMap Name DeclarationRanges := {}
   let mut initOf : Std.HashMap Name Name := {}
   for c in md.constNames do
     if let some r ← findDeclarationRanges? c then ranges := ranges.insert c r
     if let some f := getInitFnNameFor? env c <|> getBuiltinInitFnNameFor? env c then
-      initOf := initOf.insert f c
+      if isGeneratedInitFn f then initOf := initOf.insert f c
   let ranged? (n : Name) : Option Name := Id.run do
     let mut m := n
     while !m.isAnonymous do
@@ -288,12 +297,54 @@ partial def moduleStartupKeys (idx : Nat) (items : Array Name) (comp : Std.HashM
         top := max top g.2
         groups := groups.pop
       groups := groups.push (members, top)
+  -- `reach[i]`: the last command (by position) that command `i` shares a
+  -- block with.
+  let mut reach : Array Nat := Array.range roots.size
+  let mut first := 0
+  for (ms, _) in groups do
+    reach := reach.set! first (first + ms.size - 1)
+    first := first + ms.size
+  -- Also a command that uses a later command shares a block with it:
+  -- outside a `mutual` block a declaration can only use earlier ones. The
+  -- uses are those of the declaration's value and of its own auxiliary
+  -- declarations (`._unary`, `.match_1`; a `partial` definition's code is
+  -- its `._unsafe_rec`).
+  let mut rootIdx : Std.HashMap Name Nat := {}
+  for h : i in [:roots.size] do rootIdx := rootIdx.insert roots[i] i
+  for (c, _) in ranges do
+    if initOf.contains c then continue
+    let some i := rootIdx[rootOf0 c]? | continue
+    let mut todo : Array Name := #[c, c ++ `_unsafe_rec]
+    let mut visited : Std.HashSet Name := {}
+    while h : todo.size > 0 do
+      let d := todo.back
+      todo := todo.pop
+      if visited.contains d then continue
+      visited := visited.insert d
+      let some info := env.find? d | continue
+      if info matches .thmInfo _ then continue
+      let some val := info.value? (allowOpaque := true) | continue
+      for u in val.getUsedConstants do
+        match vertexOf? u with
+        | some w =>
+          if w == c && !ranges.contains u then todo := todo.push u
+          else if let some j := rootIdx[rootOf0 w]? then
+            if j > i && j > reach[i]! then reach := reach.set! i j
+        | none => pure ()
   let mut superOf : Std.HashMap Name Name := {}
   let mut superMembers : Std.HashMap Name (List Name) := {}
-  for (ms, _) in groups do
-    if ms.size > 1 then
+  let mut start := 0
+  while start < roots.size do
+    let mut last := reach[start]!
+    let mut k := start + 1
+    while k ≤ last && k < roots.size do
+      last := max last reach[k]!
+      k := k + 1
+    if last > start then
+      let ms := roots.extract start (last + 1)
       for m in ms do superOf := superOf.insert m ms[0]!
       superMembers := superMembers.insert ms[0]! ms.toList
+    start := last + 1
   let rootOf (v : Name) : Name := let r := rootOf0 v; superOf.getD r r
   let rootKey (root : Name) : Array Nat := posKey root
   -- The vertices of the commands that have startup items.
@@ -319,9 +370,17 @@ partial def moduleStartupKeys (idx : Nat) (items : Array Name) (comp : Std.HashM
     let memberIdx (v : Name) : Nat := (mains.findIdx? (· == (memberOf v).1)).getD 0
     -- A member's `where` helpers come before the `let rec`s of its body (a
     -- `where` clause is a `let rec` around the body). They are the last
-    -- direct helpers: the last one ends where the member ends, and the
-    -- others start at its column on earlier lines (each `where` declaration
-    -- on a new line starts at the first one's column).
+    -- direct helpers: the last one ends where the member ends, and each
+    -- other one starts on the line of the next one (separated by `;`) or at
+    -- its column on an earlier line (each `where` declaration on a new line
+    -- starts at the first one's column), unless a doc comment or an
+    -- attribute, which the ranges leave out, shifts one of them.
+    let doc? (v : Name) : Option String := docStringExt.find? (level := .server) env v
+    let shifted (v : Name) : Bool := (doc? v).isSome || (Compiler.getInlineAttribute? env v).isSome
+    -- The most lines a doc comment and an attribute before `v` can take.
+    let shiftLines (v : Name) : Nat :=
+      ((doc? v).map fun d => (d.splitOn "\n").length).getD 0 +
+        (if (Compiler.getInlineAttribute? env v).isSome then 1 else 0)
     let mut whereHelpers : Std.HashSet Name := {}
     for m in mains do
       let direct := (vs.filter fun v => v != m && memberOf v == (m, 1)).qsort fun a b =>
@@ -330,14 +389,22 @@ partial def moduleStartupKeys (idx : Nat) (items : Array Name) (comp : Std.HashM
       let (some mr, some lr) := (ranges[m]?, ranges[last]?) | continue
       unless lr.range.endPos == mr.range.endPos do continue
       whereHelpers := whereHelpers.insert last
-      let mut next := lr.selectionRange.pos
+      -- `next`: the one after `v`; `ref`: the start of the nearest unshifted
+      -- one after `v`. Without one, `v` must end on the line before `next`
+      -- (or before its doc comment and attribute lines).
+      let mut next := last
+      let mut ref := if shifted last then none else some lr.range.pos
       for i in [:direct.size - 1] do
         let v := direct[direct.size - 2 - i]!
-        let some vr := ranges[v]? | break
-        let p := vr.selectionRange.pos
-        unless p.column == next.column && p.line < next.line do break
+        let (some vr, some nr) := (ranges[v]?, ranges[next]?) | break
+        let (p, q) := (vr.range.pos, nr.range.pos)
+        let ok := match ref with
+          | some r => p.column == r.column && p.line < r.line
+          | none => q.line ≤ vr.range.endPos.line + 1 + shiftLines next
+        unless ok || p.line == q.line || shifted v do break
         whereHelpers := whereHelpers.insert v
-        next := p
+        next := v
+        unless shifted v do ref := some p
     let key (v : Name) : Array Nat :=
       let depth := (memberOf v).2
       #[mains.size - memberIdx v, depth, if depth == 1 && !whereHelpers.contains v then 1 else 0] ++ posKey v
@@ -425,8 +492,8 @@ def startupItems : CoreM (Array StartupItem) := do
       reads := reads.insert n (codeConsts c #[])
   -- Ties: by name (`startupNameLt`). Then the items that Lean's recorded
   -- compilation order places (`compileOrder`) are put in that order, in the
-  -- places the sort gave them: they include every specialization, and in
-  -- practice every constant that can trace or panic.
+  -- places the sort gave them: they include every specialization and
+  -- `initialize` action, and nearly every constant that calls a function.
   let mut out := #[]
   for idx in (byModule.toArray.map (·.1)).qsort (· < ·) do
     let its := byModule.getD idx #[]
@@ -436,10 +503,12 @@ def startupItems : CoreM (Array StartupItem) := do
       let k1 := keys.getD n1 #[]
       let k2 := keys.getD n2 #[]
       lexLtNat k1 k2 || (k1 == k2 && startupNameLt n1 n2)
-    -- An item's compiled code: an `initialize` constant's is its action's,
-    -- a `partial` constant's its `_unsafe_rec`.
+    -- An item's compiled code: an `initialize` constant's is its action's
+    -- (not that of a hand-written `@[init f]`'s `f`, compiled earlier), a
+    -- `partial` constant's its `_unsafe_rec`.
     let compOf (it : StartupItem) (n : Name) : Option Nat :=
-      comp[n]? <|> (match it with | .init _ f => comp[f]? | _ => none) <|> comp[n ++ `_unsafe_rec]?
+      comp[n]? <|> (match it with | .init _ f => if isGeneratedInitFn f then comp[f]? else none | _ => none) <|>
+        comp[n ++ `_unsafe_rec]?
     let placed := sorted.filterMap fun (it, n) => (compOf it n).map fun c => (c, (it, n))
     let byComp := (placed.qsort fun a b => a.1 < b.1).map (·.2)
     let mut refilled : Array (StartupItem × Name) := #[]
@@ -451,12 +520,11 @@ def startupItems : CoreM (Array StartupItem) := do
       else
         refilled := refilled.push (it, n)
     -- The others keep their places, except that a constant goes after the
-    -- constants it reads. Compiled to no IR-only declaration, it only builds
-    -- a value from literals and other constants (it cannot trace or panic),
-    -- but evaluating it evaluates the constants it reads (accessors compute
-    -- on demand), which natively come before it (a constant reads constants
-    -- declared before it, or its own helpers). Key: the place of the last
-    -- constant it reads (transitively), then the length of that chain.
+    -- constants it reads: evaluating it evaluates them (accessors compute
+    -- on demand), and natively they come before it (a constant reads
+    -- constants declared before it, or its own helpers). Key: the place of
+    -- the last constant it reads (transitively), then the length of that
+    -- chain.
     let mut place : Std.HashMap Name (Nat × Nat) := {}
     for h : i in [:refilled.size] do place := place.insert refilled[i].2 (i, 0)
     let movable := refilled.filter fun (it, n) => (compOf it n).isNone
