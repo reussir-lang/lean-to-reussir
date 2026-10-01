@@ -5,8 +5,9 @@ stack of objects, last pushed first: an array's last element first, a
 nested array's elements before the elements before it, a record's last
 field first. The runtime's containers do the same (`leanrt::drop`), and
 handles reached through records while a container is freed are closed in
-that order too. (A list or structure of handles dropped by itself, with no
-container, is released by Reussir's drop glue, fields in order; plan §10.) -/
+that order too (`RtDropOrderRec` has handles deeper in records). (A list
+or structure of handles dropped by itself, with no container, starts with
+its first cell's fields in order; plan §10.) -/
 @[noinline] def openAll (path : System.FilePath) (tags : List String) : IO (Array IO.FS.Handle) := do
   let mut hs := #[]
   for tag in tags do

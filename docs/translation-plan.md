@@ -2054,12 +2054,33 @@ Each item says what differs and when.
   is freed at once (handles closed, and so flushed; promises resolved),
   native Lean releases them last pushed first: an array's last element
   first, a nested array's elements before the elements before it, a
-  record's last field first. A free that starts at a container (an array,
-  a reference, a thunk or task cell) does the same here (`leanrt::drop`
-  pushes the resources it reaches, through records too). One that starts
-  at a record (a list of handles, a structure of handles, dropped by
-  itself) follows Reussir's drop glue, fields in order: a list's handles
-  are closed first to last, natively last to first.
+  record's last field first. Here the runtime's containers (`leanrt::drop`)
+  and Reussir's drop glue for records (local patch 0014) push what they
+  free on one stack of pending work per thread, so the order is Lean's
+  inside every free that starts at a container (an array, a reference, a
+  thunk or task cell), through any records (tests `RtDropOrder`,
+  `RtDropOrderRec`), and mostly below the first cell of a free that starts
+  at a record. That first cell is the difference. When user code drops a
+  record by itself (a list, tree or structure of handles), Reussir's
+  inline release in the user's function releases its fields in field
+  order, each completely before the next. Natively the order depends on
+  where the value is dropped: where Lean's code knows the constructor
+  (`lean_dec_ref_known`, e.g. a structure it has just built), the fields
+  go in field order too, each completely; elsewhere (`lean_dec`) they go
+  last first. lean2rr's code does not drop values where Lean's does: where
+  Lean borrows a parameter and drops the value in the caller, lean2rr's
+  function takes the value and releases it as it destructures it. So a
+  value dropped by itself can come out in the other order: a list of
+  handles `L0 … L7` is closed `L0 L7 L6 … L1` (natively `L7 … L0`), and a
+  tree's left subtree goes before its handle and its right subtree. No fixed
+  order of the fields in Reussir's releases matches both cases. Reversing
+  it was tried: that fixes these cases but breaks the field-order ones and
+  the order inside containers. One case below the first cell also differs:
+  a record that the first cell holds is released through its drop function
+  while no free runs, and that function frees a container field (an array,
+  a reference, a thunk) as soon as it reaches it, before the record fields.
+  So a structure `{a : Array Handle, l : List Handle}` in a list dropped by
+  itself closes `A1 A0 L1 L0` (natively `L1 L0 A1 A0`).
 - *Release time of borrowed parameters* (§5.8): emulated for values that
   may hold a resource, with Lean's inference run on lean2rr's monomorphic
   instances: where Lean infers a polymorphic declaration or one of its own
@@ -2086,17 +2107,13 @@ Each item says what differs and when.
   free empties; so a value deep through containers, with records in
   between (a tree whose children are in arrays, a record → array → record
   chain, a chain of thunks or tasks), is freed at a bounded depth.
-  Records are freed by Reussir's drop glue, which with the local patch 0013
-  releases the last chain member being freed in a loop (a list, a snoc
-  list, a left or right spine whose other children are shared or nullary)
-  but recurses into the others, 16 to 32 bytes of stack per node: a value
-  deep through records alone along a field that is not the last one freed
-  (a binary tree deep along its left child whose right children are fresh
-  nodes; a rose tree in uniform code, whose list cells hold the deep tree
-  in their head and a fresh node in the tail) overflows at an 8 MB stack
-  when dropped (10⁶ levels; test `RtDropGlue`, an expected failure). The
-  runtime cannot reach that recursion: it needs a stack of pending members
-  in Reussir's drop glue (0013 extended). The depth at which
+  Records are freed by Reussir's drop glue, which with the local patches
+  releases the last record member being freed in a loop (0013) and pushes
+  the other record members being freed on the same stack (0014), so a
+  value deep through records too is freed at a bounded depth: a list, a
+  snoc list, a binary tree deep along its left child whose right children
+  are fresh nodes, a rose tree in uniform code (test `RtDropGlue`, 10⁶
+  levels at an 8 MB stack). The depth at which
   `Stack overflow detected. Aborting.` (exit 134) happens is not native's,
   in either direction (the report itself is, in every thread: §5.11).
   Tasks run on `main`'s thread (Lean's 1 GiB, or `LEAN_STACK_SIZE_KB`),

@@ -16,6 +16,7 @@ local and are not submitted upstream.
 | `0005-*` | 5 | `TokenReusePass` | no rrc crash on a one-armed `if` that has to free a token |
 | `0012-*` | 12 | parser (`reussir-syntax` sink) | syntax nodes are never swapped for an earlier node with a colliding hash (could fail with bogus errors or miscompile silently) |
 | `0013-*` | 13 | `AcquireDropExpansion` (drop glue) | releasing a long list (or any chain of cells) runs in a loop, not one stack frame per cell |
+| `0014-*` | 13 | `AcquireDropExpansion` (drop glue), `reussir-rt` | the other record members being freed go on a stack of pending work per thread, so any value deep through records is freed at a bounded depth; lean2rr's runtime frees its containers through the same stack |
 
 Apply them in this order and rebuild:
 
@@ -24,17 +25,21 @@ git -C reussir checkout ef922049
 git -C reussir am ../reussir-patches/0006-*.patch ../reussir-patches/0004-*.patch \
     ../reussir-patches/0002-*.patch ../reussir-patches/0007-*.patch \
     ../reussir-patches/0009-*.patch ../reussir-patches/0005-*.patch \
-    ../reussir-patches/0013-*.patch ../reussir-patches/0012-*.patch
+    ../reussir-patches/0013-*.patch ../reussir-patches/0012-*.patch \
+    ../reussir-patches/0014-*.patch
 cmake --build reussir/build
 ```
 
 `git am` records them as local commits. `git apply` works as well, if you
-would rather keep them as uncommitted changes. Unpatched, lean2rr programs
-still compile, but the bugs above can appear.
+would rather keep them as uncommitted changes. lean2rr's runtime needs 0014
+(it uses `reussir_rt::drop`, the pending stack 0014 adds to Reussir's
+runtime). Without the others, lean2rr programs still compile, but the bugs
+above can appear.
 
 On the development machine they are applied to `./reussir` as the local
-branch `l2r-local` (ef922049 + these eight commits), which is never
+branch `l2r-local` (ef922049 + these nine commits), which is never
 pushed. `docs/reussir-bugs/run.sh ./reussir` prints FIXED for each patched
 bug. Each patch passed adversarial review, one to three rounds until a
-round found nothing: code review, differential fuzzing against a reference
-evaluator, ASan builds, and the lean2rr runtime suite and corpus.
+round found nothing (0014: in review): code review, differential fuzzing
+against a reference evaluator, ASan builds, and the lean2rr runtime suite
+and corpus.
