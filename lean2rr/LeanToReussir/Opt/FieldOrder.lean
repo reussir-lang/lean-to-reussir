@@ -18,13 +18,17 @@ padding out as bytes, also after a one-field `[value]` member).
 namespace LeanToReussir
 open Lean Compiler LCNF
 
-/-- Field indices in decreasing alignment, ties in declaration order. -/
-def alignmentOrder (aligns : Array Nat) : Array Nat :=
-  (List.range aligns.size).toArray.qsort fun i j =>
-    aligns[i]! > aligns[j]! || (aligns[i]! == aligns[j]! && i < j)
+/-- The field indices of `order` (a record order) sorted by decreasing
+alignment, ties in `order`'s order. -/
+def alignmentOrder (order : Array Nat) (aligns : Array Nat) : Array Nat :=
+  let rank : Std.HashMap Nat Nat := order.zipIdx.foldl (fun m (i, r) => m.insert i r) {}
+  order.qsort fun i j =>
+    aligns[i]! > aligns[j]! || (aligns[i]! == aligns[j]! && rank.getD i 0 < rank.getD j 0)
 
-/-- Registry entry point. -/
+/-- Registry entry point: the order of the hooks installed before, sorted by
+alignment. -/
 def Opt.FieldOrder.install (c : PassConfig) : PassConfig :=
-  { c with fieldOrder := alignmentOrder }
+  let prev := c.fieldOrder
+  { c with fieldOrder := fun aligns => alignmentOrder (prev aligns) aligns }
 
 end LeanToReussir

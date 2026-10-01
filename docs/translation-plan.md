@@ -59,58 +59,82 @@ instance; Lean's base `specialize` is not run again (§7).
 
 ### Code structure and passes
 
-`lean2rr/Main.lean` reads as the pipeline: collect, Stage 1, Stage 2,
-then `lowerProgram` (Stage 3, the optional passes, Stage 4, assembly), with
-an `--emit` checkpoint after each stage. The modules of
+`lean2rr/Main.lean` reads as the pipeline, with an `--emit` checkpoint
+after the stages: Stage 1 (`monomorphize`, `--emit inst`), Stage 2
+(`runStage2`, `--emit mono` and `externs`), Stage 3 (`retypeMono`, from the
+declarations the entry point calls, `--emit retyped`), the registry's
+passes over mono LCNF, Stage 4 (`lowerProgram`, with the registry's
+lowering hooks), the registry's passes over the generated functions,
+`Outline`, and the program text (`--emit rr`). The modules of
 `lean2rr/LeanToReussir/`:
-- Stage 1: `Collect`, `Mono`, `Specialize`, `Relevance`, `Retype`;
+- loading: `Env` (importing the program's modules with their extension
+  states), `Collect` (reachability; `--emit base`);
+- Stage 1: `Mono` (instances), `Passes` (running Lean's passes, for Stage
+  1's recompilation and for Stage 2), `Relevance` (relevant type
+  parameters, also used by Stage 4);
+- the `--stats` dry run: `Stats`, `Specialize`, `Retype`;
 - Stage 2: `Pipeline` (the driver), `TypedToMono`,
   `TypedStructProjCases` and `ExtractClosedK` (lean2rr's copies of three
   Lean passes), `MonoTypesKeep`, `CompileRecord` (what the `.olean`
   records of Lean's compilation: its order and its closed terms, also read
   by `Emit/Startup`);
 - Stage 3: `MonoRetype`;
-- Stage 4: `LowerBase` (state, type translation), then `Lower/*.lean`, each
-  importing the previous one: `Ctx` (the code-lowering context),
-  `FnValues`, `LazyForce`, `Conv`, `Decls`, `Externs`, `LazyGlue`,
-  `Process`, `Promises`, `Identity`, `ExternCall`, `Borrow` (release times
-  of borrowed resources, §5.8), `Values`, `JoinPoints`,
-  `StateMachine` (J4), `Hooks`, `Code` (`lowerCode`, `lowerDecl`),
-  `Finish`;
-- assembly: `Emit/Startup` (initializer order, the startup chain),
-  `Emit/Entry` (the entry point), `Emit/Program` (`lowerProgram`, which
-  also runs `Outline` on the generated functions);
-- `PassConfig`: the configurable parts of the pipeline;
-- `Opt/*.lean`: the optional passes, and `Opt/Registry.lean`.
+- Stage 4: `RR` (the `.rr` syntax tree and its text), `LowerBase` (state,
+  type translation), then `Lower/*.lean`, each importing the previous one:
+  `Ctx` (the code-lowering context), `FnValues`, `LazyForce`, `Conv`,
+  `Decls`, `Externs`, `LazyGlue`, `Process`, `Promises`, `Identity`,
+  `ExternCall`, `Borrow` (release times of borrowed resources, §5.8),
+  `Values`, `JoinPoints`, `StateMachine` (J4), `Hooks`,
+  `Code` (`lowerCode`, `lowerDecl`), `Finish`;
+- the program: `Emit/Startup` (initializer order, the startup chain),
+  `Emit/Entry` (the entry point), `Emit/Program` (`lowerProgram` and the
+  lowered program's steps), `Outline` (deep and long tail paths cut into
+  functions, for rrc);
+- `Dump`: typed LCNF dumps for the `--emit` checkpoints;
+- `PassConfig`: the configurable parts of the pipeline; `Opt/*.lean`: the
+  optional passes, and `Opt/Registry.lean`.
+
+Outside `lean2rr/`: `runtime/` (the prelude `prelude.rr` and the runtime
+crate `leanrt`), `scripts/l2r.py` (the driver: lean2rr, then rrc),
+`reussir-patches/` (the local Reussir patches, docs/reussir-bugs.md),
+`tests/`, `docs/`.
 
 The core translation is the plain one: the rules of this plan without the
 optional passes, and correct on its own (the classic corpus at every size
 and the runtime suite match native Lean with every optional pass off).
 Each optimization is a module of `Opt/` with an `install : PassConfig →
-PassConfig` that plugs it into a hook of `PassConfig`: a representation
-choice of the type translation (record field order, `[value]` structs), a
-pass over the checked mono declarations (`monoPasses`), Lean definitions
-replaced by prelude functions, a lowering hook (`LowerHooks`: the body
-before lowering, the J1′ choice, the form of J4's state machine, constant
-caching, the binding of a `cases` alternative's fields), or a pass over
-the generated Reussir functions (`rrPasses`). Every hook's default is the
-plain translation.
+PassConfig` that plugs it into a hook of `PassConfig`, keeping what was
+installed before: a representation choice of the type translation (record
+field order, `[value]` structs, one-word `Nat`/`Int` arrays,
+placeholders kept in once-cells), a part of Stage 3 (map loops split by
+element representation), a pass over the checked mono declarations
+(`monoPasses`), Lean definitions replaced by prelude functions, a lowering
+hook (`LowerHooks`: the body before lowering, the J1′ choice, the form of
+J4's state machine, constant caching, the binding of a `cases`
+alternative's fields), or a pass over the generated Reussir functions
+(`rrPasses`). Every hook's default is the plain translation. A pass keeps
+its own state in the code-lowering context's extension slot
+(`CodeCtx.ext`), not in the core's.
 
 `Opt/Registry.lean` lists every pass in one place: Stage 2's edits of
 Lean's pass lists (two passes replaced, two not run, each with its
 reason); the optional passes, one line each (name, enabled by default,
-description, `install`), in installation order; and the parts that look
-optional but are not, with the reason: the startup chain's chunks (rrc's
-stack), J4's state machines (a loop through an outlined join point would
-use stack per iteration), closed-term chains not cached (an array literal
-would need memory quadratic in its length) and `Outline` (rrc's build time
-and memory). `lean2rr --list-opts` prints it, and `lean2rr --disable-opt
-NAME` turns one optimization off for a run (`scripts/l2r.py --disable-opt
-NAME`, or `L2R_DISABLE_OPTS=a,b` for test runners). To remove an
-optimization, delete its line; to add one, write `Opt/Name.lean` with the
-transformation and its `install`, import it in the registry and add its
-line. With all optional passes off, and with each one off in turn, the
-classic corpus and the runtime tests match native Lean.
+description, `install`), in installation order (it says what the order
+means for each kind of hook); and the parts that look optional but are
+not, with the reason: the startup chain's chunks (rrc's stack), J4's state
+machines (a loop through an outlined join point would use stack per
+iteration), Stage 3's type recovery from call sites (an array left at
+`lcAny` would be copied at every crossing), closed-term chains not cached
+(an array literal would need memory quadratic in its length) and `Outline`
+(rrc's build time and memory, and the size of the `.rr` text).
+`lean2rr --list-opts` prints it, and `lean2rr --disable-opt NAME` turns one
+optimization off for a run (`--enable-opt NAME` one that is off by
+default; `scripts/l2r.py` passes both on, also from `L2R_DISABLE_OPTS=a,b`
+and `L2R_ENABLE_OPTS`). To remove an optimization, delete its line; to add
+one, write `Opt/Name.lean` with the transformation and its `install`,
+import it in the registry and add its line. With all optional passes off,
+and with each one off in turn, the classic corpus and the runtime tests
+match native Lean.
 
 ---
 
@@ -310,7 +334,9 @@ giving it the representation it assumes:
   `unreachable`. A zero that would allocate (a string, an array, a record,
   a closure) is built once and kept in a once-cell, like a constant
   (§5.12): `modify` stores one per update, and since a placeholder is never
-  inspected, a shared value serves as well as a fresh one.
+  inspected, a shared value serves as well as a fresh one (optional pass
+  `placeholder-cache`; without it each placeholder is built where it is
+  used).
 
 This keeps Lean's in-place update tricks, including `modify`'s unshared
 element. An alternative, redirecting to the safe reference implementations
@@ -515,7 +541,8 @@ precise array from their callers.
 
 When `f` changes the representation (`Nat → Bool`), the loop's array
 parameter stays `Array lcAny` after the fixpoint: it holds `Nat`s and
-`Bool`s. Such a loop is *split*. Its split instance takes two arrays instead
+`Bool`s. Such a loop is *split* (optional pass `split-map-loops`; without it
+the loop runs on an array of `Box`es). Its split instance takes two arrays instead
 of one, the source `src : Array α` and the result `dst : Array β`:
 - a read `uget bs i` of an array derived from the parameter becomes
   `uget@α src i`, a value of `α`'s own representation;
@@ -579,7 +606,7 @@ Stage 4 sees only mono types:
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | `String` | `LStr`, an opaque copy-on-write handle over UTF-8 bytes and their character count (`Rc<(Vec<u8>, u64)>`) | literals: §5.4 |
 | `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records); for an enumeration or `Unit`, its index (`u8`, `u16` or `u32` by the number of constructors; Lean stores a tagged scalar); otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
-| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
+| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments (optional pass `nat-arrays`; without it they are arrays like the others) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
 | `ST.Ref σ α` | a generated shared record `L2RRef_N(Cell<⟦α⟧>)` around Reussir's mutable cell | the contents keep their own representation; `Nat`/`Int` (`L2RNatRef`/`L2RIntRef`, a tagged word as in `LNatArr` plus a cell for a big value) and `[value]` structures (in an `ElemBox`) are stored apart, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧), … }` | memoized thunks, deferred tasks (§5.14) |
@@ -1114,9 +1141,10 @@ shared (heap) type for now: Reussir miscompiles `[value]` enums with fields
 of mixed layout (§9); Reussir's reuse makes the shared cell cheap. The
 optional pass `state-machines` enters without allocation instead: the
 function takes the declaration's parameters followed by the entry point,
-`e` is nullary, and a jump passes the parameters on unchanged together with
-its variant (which keeps a parameter referenced across the jump even when
-the join point does not use it).
+and `e` is nullary. A jump passes placeholders for the parameters beside
+its variant: the variant carries every variable the join point's body
+uses, and passing a parameter itself would keep it alive across the jump
+(an array updated before the jump would be copied at every iteration).
 
 **Choice and nesting.** J1 applies first, then J2, then J1' (small), then
 J3 (J4 when an outlined body tail-calls the declaration).
@@ -1983,10 +2011,12 @@ Each item says what differs and when.
 - *Compiler options of the program's modules* (`compiler.small`,
   `maxRecInline`, …) are not recorded in the `.olean`, so lean2rr runs
   Lean's passes with the defaults (`compiler.extract_closed` shows in the
-  record of closed terms and is followed, §3). The recursion limit (`maxRecDepth`, which large literals need raised)
-  is effectively unlimited in lean2rr, bounded by its stack (4 GiB, set by
-  `scripts/l2r.py` through `LEAN_STACK_SIZE_KB`): a 60000-element list
-  literal needs more than 64 MiB. Only lean2rr's main thread, which runs
+  record of closed terms and is followed, §3). The recursion limit
+  (`maxRecDepth`, which large literals need raised) is effectively
+  unlimited in lean2rr, bounded by its stack (1 GiB, as for Lean's own
+  compiler, set by `scripts/l2r.py` through `LEAN_STACK_SIZE_KB`): a
+  60000-element list literal needs more than 64 MiB, and a 100000-element
+  array literal translates. Only lean2rr's main thread, which runs
   everything, has that stack; it gives the other threads Lean's runtime
   starts (task workers) 64 MiB, so that lean2rr fits an address-space limit
   (`ulimit -v 16000000`) on such inputs.

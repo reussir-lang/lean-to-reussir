@@ -13,6 +13,9 @@ import LeanToReussir.Opt.NullaryScrutinee
 import LeanToReussir.Opt.StateMachines
 import LeanToReussir.Opt.ValueStructs
 import LeanToReussir.Opt.FieldOrder
+import LeanToReussir.Opt.NatArrays
+import LeanToReussir.Opt.PlaceholderCache
+import LeanToReussir.Opt.SplitMapLoops
 
 /-!
 # The pass registry
@@ -35,10 +38,19 @@ Adding a pass: write `Opt/Name.lean` with the transformation and an
 `install : PassConfig → PassConfig` that plugs it into a hook of
 `PassConfig` (passes over mono LCNF or over the generated Reussir functions,
 or a lowering hook of `LowerHooks`), import it here and add its line to
-`optimizations`. The order of the lines is the order of installation, so
-passes of the same kind run in this order (the core's own passes, such as
-`Outline` after the passes over the generated functions, are not listed
-there).
+`optimizations`.
+
+Order. The lines are installed in order, and every `install` keeps what
+was installed before: list hooks (`monoPasses`, `rrPasses`) append, so
+their passes run in line order; `prepareBody` and `fieldOrder` apply the
+new pass after the earlier ones; the predicates (`duplicateJp`,
+`recomputeConst`) are true if any pass says so; the binding hooks
+(`structFields`, `enumFields`, `lowerAlt`, `stateMachine`) are consulted
+newest first and hand what they do not handle to the earlier ones;
+`armPrelude` places the earlier passes' `let`s first;
+`preludeReplacements` is a map, where a later line wins for the same
+definition; `valueStructs` is a switch. The core's own steps (`Outline`
+after the passes over the generated functions) are not listed here.
 -/
 
 namespace LeanToReussir.Opt
@@ -61,12 +73,15 @@ def stage2 : Stage2Config := #[
 def optimizations : Array OptPass := #[
   ⟨"field-order", true, "record fields in decreasing alignment, so records have no padding (declaration order otherwise)", FieldOrder.install⟩,
   ⟨"value-structs", true, "a structure with one relevant field (ST.Out of every BaseIO call) is a [value] struct, not a heap record", ValueStructs.install⟩,
+  ⟨"nat-arrays", true, "Array Nat/Int as the runtime's one-word-per-element LNatArr/LIntArr", NatArrays.install⟩,
+  ⟨"split-map-loops", true, "an Array.map loop whose element representation changes split into source and result arrays, instead of running on Boxes (Stage 3)", SplitMapLoops.install⟩,
+  ⟨"placeholder-cache", true, "placeholders (box(0) at a type) that would allocate built once, in a once-cell", PlaceholderCache.install⟩,
   ⟨"float-lits", true, "Float literals (Float.ofScientific/ofNat on literals) folded to their bits at compile time", FloatLits.install⟩,
   ⟨"cheap-consts", true, "constants built from small literals and scalar conversions recomputed at each use, not cached", CheapConsts.install⟩,
-  ⟨"prelude-repr", true, "Nat.repr/Int.repr calls replaced by the runtime's GMP versions (same strings)", PreludeRepr.install⟩,
+  ⟨"prelude-repr", true, "Nat.repr/Int.repr calls replaced by the runtime's GMP versions (same strings; the runtime keeps them, unused, without the pass)", PreludeRepr.install⟩,
   ⟨"jp-sink", true, "join points moved down to the smallest code containing their jumps, before the J1-J4 choice", JpSink.install⟩,
   ⟨"jp-small", true, "small join points (at most 40 nodes) duplicated at their jumps (J1') instead of outlined", JpSmall.install⟩,
-  ⟨"state-machines", true, "a loop's state machine (J4) entered without allocation: parameters passed beside a nullary entry variant", StateMachines.install⟩,
+  ⟨"state-machines", true, "a loop's state machine (J4) entered without allocation: parameters passed beside a nullary entry variant (placeholders at jumps)", StateMachines.install⟩,
   ⟨"lazy-fields", true, "fields of a matched value kept live (stored or returned whole) bound where used (Reussir bug 7 workaround)", LazyFields.install⟩,
   ⟨"nullary-scrutinee", true, "in the arm of a constructor without fields, the matched value rebuilt instead of kept", NullaryScrutinee.install⟩,
   ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩]
@@ -80,18 +95,23 @@ def required : Array RequiredPass := #[
     "otherwise a loop through an outlined join point is mutually recursive and uses stack per iteration where native Lean uses none: without it, and with the join-point passes off, the classic Sieve and Strings overflowed Lean's 1 GiB stack at their medium size"⟩,
   ⟨"closed-chains", "a closed term used once, by another constant, is evaluated there instead of cached (Emit/Program, chainConsts)",
     "an array literal is a chain of closed terms, and caching every step keeps every intermediate array: memory quadratic in the literal's length (10000 elements: 1036 MB instead of 7 MB)"⟩,
+  ⟨"stage3-types", "Stage 3 recovers parameter types from call sites and result types from callers' bindings (MonoRetype: paramsFromCallers, refineSignature)",
+    "type recovery, not a choice of representation: a value left at lcAny is a Box, and an array whose representation differs is converted, a copy, each time it crosses such a position (a call in a loop, each read of a constant), and the copy is another object than native Lean's"⟩,
   ⟨"outline", "deep and long tail paths of a function cut into chains of functions (Outline)",
-    "rrc's analyses are superlinear in nesting depth and straight-line length (Reussir bugs 16, 17), and so is the .rr text: without it a 3000-arm literal match gives 126 MB of .rr and lean2rr runs out of memory at 16 GB"⟩]
+    "rrc's analyses are superlinear in nesting depth and straight-line length (Reussir bugs 16, 17), and so is the .rr text, whose indentation follows the nesting: without it a 3000-arm literal match in tail position gives 126 MB of .rr instead of 1 MB"⟩]
 
 /-- The configuration with the enabled optimizations, after turning off
 those named in `disabled` and on those named in `enabled`. An unknown name,
-or the name of a required part, is an error. -/
+the name of a required part, or a name both turned off and on is an
+error. -/
 def config (disabled enabled : Array String := #[]) : Except String PassConfig := do
   for n in disabled ++ enabled do
     if let some r := required.find? (·.name == n) then
       throw s!"'{n}' is required, not an optimization: {r.reason}"
     unless optimizations.any (·.name == n) do
       throw s!"unknown optimization '{n}' (see --list-opts)"
+    if disabled.contains n && enabled.contains n then
+      throw s!"'{n}' is both disabled and enabled"
   let on (o : OptPass) : Bool := (o.enabled || enabled.contains o.name) && !disabled.contains o.name
   return optimizations.foldl (init := { stage2 }) fun c o => if on o then o.install c else c
 

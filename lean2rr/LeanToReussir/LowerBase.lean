@@ -96,6 +96,13 @@ structure LowerCtx where
   struct (`PassConfig.valueStructs`, see `nominalType`); otherwise it is a
   shared record like the others. -/
   valueStructs : Bool := false
+  /-- Whether a placeholder that would allocate is built once and kept in
+  a once-cell (`zeroValue`, `PassConfig.cachePlaceholders`). -/
+  cachePlaceholders : Bool := false
+  /-- Whether `Array Nat`/`Array Int` are the runtime's one-word-per-element
+  `LNatArr`/`LIntArr` (`PassConfig.natArrays`); otherwise they are arrays
+  like the others. -/
+  natArrays : Bool := false
   /-- The order of a constructor's relevant fields in its record, given
   their alignments (`fieldAlign`): the record position of each field, as a
   permutation (`PassConfig.fieldOrder`). Reussir keeps the given order (the
@@ -605,8 +612,9 @@ mutual
         | none => pure RR.Ty.box
       -- Arrays of `Nat`/`Int` store one word per element, like Lean's
       -- boxed scalars (runtime `LNatArr`/`LIntArr`).
-      if elem == .named "Nat" then return .named "LNatArr"
-      if elem == .named "Int" then return .named "LIntArr"
+      if (← read).natArrays then
+        if elem == .named "Nat" then return .named "LNatArr"
+        if elem == .named "Int" then return .named "LIntArr"
       return .app "RVec" #[← arrayStorage elem]
     | _ =>
       -- An inductive with computed fields is represented by its
