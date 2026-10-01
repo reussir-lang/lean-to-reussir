@@ -19,7 +19,30 @@ def usage : String :=
   "usage: lean2rr <Module> [--root NAME] [--stats] [--emit base|inst|mono|retyped|rr] [--prelude FILE] [--no-check]\n" ++
   "               [--disable-opt NAME]... [--enable-opt NAME]... [-o FILE]\n" ++
   "       lean2rr --list-opts\n" ++
-  "  Modules are found via LEAN_PATH; run inside `lake env` for Lake projects."
+  "  Modules are found via LEAN_PATH; run inside `lake env` for Lake projects. A module name\n" ++
+  "  may contain non-identifier characters (`rbtree-zipper`) or be written `«rbtree-zipper»`."
+
+/-- A module name as given on the command line: components separated by
+dots, each written as is (any characters but `.`: the module that
+`lean -o rbtree-zipper.olean rbtree-zipper.lean` makes is `rbtree-zipper`)
+or between `«` and `»`, as Lean prints names (`«rbtree-zipper»`, which may
+contain dots). -/
+def parseModuleName (s : String) : Except String Name := do
+  let mut parts : Array String := #[]
+  let mut cur := ""
+  let mut quoted := false
+  for c in s.toList do
+    if quoted then
+      if c == '»' then quoted := false else cur := cur.push c
+    else if c == '«' then quoted := true
+    else if c == '.' then
+      parts := parts.push cur
+      cur := ""
+    else cur := cur.push c
+  if quoted then throw s!"unterminated « in module name '{s}'"
+  parts := parts.push cur
+  if parts.any (·.isEmpty) then throw s!"bad module name '{s}'"
+  return parts.foldl Name.mkStr .anonymous
 
 partial def parseArgs : List String → CliOptions → Except String CliOptions
   | [], o => .ok o
@@ -37,7 +60,9 @@ partial def parseArgs : List String → CliOptions → Except String CliOptions
   | a :: rest, o =>
     if a.startsWith "-" then .error s!"unknown option '{a}'"
     else if o.module.isSome then .error s!"unexpected argument '{a}'"
-    else parseArgs rest { o with module := some a.toName }
+    else do
+      let m ← parseModuleName a
+      parseArgs rest { o with module := some m }
 
 /-- Pretty-print every reachable declaration as base-phase LCNF. -/
 def emitBase (prog : Program) : CoreM String := do
