@@ -1,4 +1,7 @@
-//! Lean strings: `Rc<Vec<u8>>` holding valid UTF-8 (no terminator).
+//! Lean strings: `Rc<(Vec<u8>, u64)>`: valid UTF-8 bytes (no terminator)
+//! and the number of characters, Lean's `m_length`, kept up to date by every
+//! function that builds or changes a string, so that `String.length` is a
+//! field read as natively.
 //!
 //! Positions are byte offsets (`String.Pos.Raw`). Every function follows the
 //! C implementation in Lean's `src/runtime/object.cpp` (which in turn follows
@@ -13,52 +16,151 @@
 use reussir_rt::rc::Rc;
 use crate::alloc::{rc_new, reserve, vec_from_slice, vec_with_capacity};
 
-pub type LStr = Rc<Vec<u8>>;
+/// The Reussir-visible type (spelled with std and reussir_rt types only, as
+/// opaque FFI types must be): the bytes and the character count. The
+/// count is only written while the string is unique.
+pub type LStr = Rc<(Vec<u8>, u64)>;
+
+/// Byte views of strings and byte buffers, for functions that accept either.
+pub trait Utf8 {
+    fn utf8(&self) -> &[u8];
+}
+
+impl Utf8 for [u8] {
+    #[inline(always)]
+    fn utf8(&self) -> &[u8] {
+        self
+    }
+}
+
+impl Utf8 for Vec<u8> {
+    #[inline(always)]
+    fn utf8(&self) -> &[u8] {
+        self
+    }
+}
+
+impl Utf8 for LStr {
+    #[inline(always)]
+    fn utf8(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// The bytes of a string.
+#[inline(always)]
+pub fn bytes(s: &LStr) -> &[u8] {
+    &s.0
+}
 
 /// `lean_char_default_value`: `'A'`.
 pub const DEFAULT_CHAR: u32 = 65;
 
+/// A string from bytes and their character count (`utf8_count(&v)`).
+#[inline(always)]
+pub fn from_parts(v: Vec<u8>, chars: u64) -> LStr {
+    debug_assert_eq!(chars, utf8_count(&v));
+    rc_new((v, chars))
+}
+
 #[inline]
 pub fn from_bytes(b: &[u8]) -> LStr {
-    rc_new(vec_from_slice(b, 0))
+    from_parts(vec_from_slice(b, 0), utf8_count(b))
 }
 
 #[inline]
 pub fn from_vec(v: Vec<u8>) -> LStr {
-    rc_new(v)
+    let n = utf8_count(&v);
+    from_parts(v, n)
 }
 
-/// `utf8.cpp:push_unicode_scalar` (also used for invalid code points,
-/// which it encodes by masking, exactly as C does).
+/// The bytes of a string as a vector: moved out when the string is unique.
+#[inline]
+pub fn into_vec(s: LStr) -> Vec<u8> {
+    if s.is_unique() {
+        unsafe { crate::alloc::rc_into_inner(s) }.0
+    } else {
+        let v = vec_from_slice(&s.0, 0);
+        crate::rc_release(s);
+        v
+    }
+}
+
+/// Number of Unicode scalars of valid UTF-8, counted like `utf8_strlen`:
+/// every byte that is not a continuation byte starts a character.
+#[inline]
+pub fn utf8_count(s: &[u8]) -> u64 {
+    if s.len() <= 16 {
+        let mut n = 0;
+        for &b in s {
+            n += ((b & 0xC0) != 0x80) as u64;
+        }
+        n
+    } else {
+        utf8_count_long(s)
+    }
+}
+
+#[inline(never)]
+fn utf8_count_long(s: &[u8]) -> u64 {
+    s.iter().filter(|&&b| (b & 0xC0) != 0x80).count() as u64
+}
+
+/// The UTF-8 encoding of a scalar into `buf`, returning its length
+/// (`utf8.cpp:push_unicode_scalar`, which also encodes invalid code points,
+/// by masking, as C does).
+#[inline(always)]
+pub fn encode_scalar(buf: &mut [u8; 4], code: u32) -> usize {
+    if code < 0x80 {
+        buf[0] = code as u8;
+        1
+    } else if code < 0x800 {
+        buf[0] = ((code >> 6) & 0x1F) as u8 | 0xC0;
+        buf[1] = (code & 0x3F) as u8 | 0x80;
+        2
+    } else if code < 0x10000 {
+        buf[0] = ((code >> 12) & 0x0F) as u8 | 0xE0;
+        buf[1] = ((code >> 6) & 0x3F) as u8 | 0x80;
+        buf[2] = (code & 0x3F) as u8 | 0x80;
+        3
+    } else {
+        buf[0] = ((code >> 18) & 0x07) as u8 | 0xF0;
+        buf[1] = ((code >> 12) & 0x3F) as u8 | 0x80;
+        buf[2] = ((code >> 6) & 0x3F) as u8 | 0x80;
+        buf[3] = (code & 0x3F) as u8 | 0x80;
+        4
+    }
+}
+
+/// `utf8.cpp:push_unicode_scalar`.
 #[inline]
 pub fn push_scalar(v: &mut Vec<u8>, code: u32) {
-    if code < 0x80 {
-        v.push(code as u8);
-    } else if code < 0x800 {
-        v.push(((code >> 6) & 0x1F) as u8 | 0xC0);
-        v.push((code & 0x3F) as u8 | 0x80);
-    } else if code < 0x10000 {
-        v.push(((code >> 12) & 0x0F) as u8 | 0xE0);
-        v.push(((code >> 6) & 0x3F) as u8 | 0x80);
-        v.push((code & 0x3F) as u8 | 0x80);
-    } else {
-        v.push(((code >> 18) & 0x07) as u8 | 0xF0);
-        v.push(((code >> 12) & 0x3F) as u8 | 0x80);
-        v.push(((code >> 6) & 0x3F) as u8 | 0x80);
-        v.push((code & 0x3F) as u8 | 0x80);
-    }
+    let mut buf = [0u8; 4];
+    let n = encode_scalar(&mut buf, code);
+    v.extend_from_slice(&buf[..n]);
 }
 
 /// Mutable access for an in-place update; copies (with room for `extra`
 /// more bytes) when shared.
 #[inline]
-fn make_mut(s: &mut LStr, extra: usize) -> &mut Vec<u8> {
+fn make_mut(s: &mut LStr, extra: usize) -> &mut (Vec<u8>, u64) {
     if !s.is_unique() {
-        *s = rc_new(vec_from_slice(s, extra.max(s.len())));
+        // By value: the address of `s` must not escape (see array::make_mut).
+        unsafe { std::ptr::write(s, copy_shared(std::ptr::read(s), extra)) };
     }
-    let v = unsafe { s.data_mut() };
-    reserve(v, extra);
-    v
+    let d = unsafe { s.data_mut() };
+    reserve(&mut d.0, extra);
+    d
+}
+
+/// A private copy of a shared string (with room for `extra` more bytes, at
+/// least doubling as `lean_string_push` does), releasing the shared one.
+#[cold]
+#[inline(never)]
+extern "C" fn copy_shared(s: LStr, extra: usize) -> LStr {
+    let c = rc_new((vec_from_slice(&s.0, extra.max(s.0.len())), s.1));
+    crate::rc_release(s);
+    c
 }
 
 /// `String.push`: an inline fast path for an ASCII character appended to
@@ -67,9 +169,10 @@ fn make_mut(s: &mut LStr, extra: usize) -> &mut Vec<u8> {
 pub fn push(s: LStr, c: u32) -> LStr {
     let mut s = s;
     if c < 0x80 && s.is_unique() {
-        let v = unsafe { s.data_mut() };
-        if v.len() < v.capacity() {
-            v.push(c as u8);
+        let d = unsafe { s.data_mut() };
+        if d.0.len() < d.0.capacity() {
+            d.0.push(c as u8);
+            d.1 += 1;
             return s;
         }
     }
@@ -79,7 +182,9 @@ pub fn push(s: LStr, c: u32) -> LStr {
 #[inline(never)]
 fn push_slow(s: LStr, c: u32) -> LStr {
     let mut s = s;
-    push_scalar(make_mut(&mut s, 4), c);
+    let d = make_mut(&mut s, 4);
+    push_scalar(&mut d.0, c);
+    d.1 += 1;
     s
 }
 
@@ -87,9 +192,10 @@ fn push_slow(s: LStr, c: u32) -> LStr {
 pub fn append(a: LStr, b: LStr) -> LStr {
     let mut a = a;
     if a.is_unique() {
-        let v = unsafe { a.data_mut() };
-        if v.len() + b.len() <= v.capacity() {
-            v.extend_from_slice(&b);
+        let d = unsafe { a.data_mut() };
+        if d.0.len() + b.0.len() <= d.0.capacity() {
+            d.0.extend_from_slice(&b.0);
+            d.1 += b.1;
             crate::rc_release(b);
             return a;
         }
@@ -99,19 +205,22 @@ pub fn append(a: LStr, b: LStr) -> LStr {
 
 #[inline(never)]
 fn append_slow(a: LStr, b: LStr) -> LStr {
-    if b.is_empty() {
+    if b.0.is_empty() {
+        crate::rc_release(b);
         return a;
     }
     let mut a = a;
-    make_mut(&mut a, b.len()).extend_from_slice(&b);
+    let d = make_mut(&mut a, b.0.len());
+    d.0.extend_from_slice(&b.0);
+    d.1 += b.1;
+    crate::rc_release(b);
     a
 }
 
-/// Number of Unicode scalars, counted like `utf8_strlen`: every byte that
-/// is not a continuation byte starts a character (for valid UTF-8).
-#[inline(never)]
-pub fn length(s: &[u8]) -> u64 {
-    s.iter().filter(|&&b| (b & 0xC0) != 0x80).count() as u64
+/// `String.length`: the character count.
+#[inline(always)]
+pub fn length(s: &LStr) -> u64 {
+    s.1
 }
 
 #[inline]
@@ -258,32 +367,49 @@ pub fn is_valid_pos(s: &[u8], i: u64) -> bool {
 /// `String.Pos.Raw.extract` for scalar positions.
 #[inline(never)]
 pub fn extract(s: LStr, b: u64, e: u64) -> LStr {
-    let sz = s.len() as u64;
-    if b >= e || b >= sz {
-        return rc_new(Vec::new());
-    }
-    if !is_utf8_first_byte(s[b as usize]) {
-        return rc_new(Vec::new());
+    let sz = s.0.len() as u64;
+    if b >= e || b >= sz || !is_utf8_first_byte(s.0[b as usize]) {
+        crate::rc_release(s);
+        return from_parts(Vec::new(), 0);
     }
     let mut e = e.min(sz);
-    if e < sz && !is_utf8_first_byte(s[e as usize]) {
+    if e < sz && !is_utf8_first_byte(s.0[e as usize]) {
         e = sz;
     }
     if b == 0 && e == sz {
         return s;
     }
-    from_bytes(&s[b as usize..e as usize])
+    let r = from_bytes(&s.0[b as usize..e as usize]);
+    crate::rc_release(s);
+    r
 }
 
-/// `String.Pos.Raw.set` for a scalar position.
-#[inline(never)]
+/// `String.Pos.Raw.set` for a scalar position. The fast path (natively
+/// too) overwrites an ASCII character of a unique string with an ASCII
+/// character. One character replaces one: the count does not change.
+#[inline(always)]
 pub fn set(s: LStr, i: u64, c: u32) -> LStr {
-    let sz = s.len() as u64;
+    let mut s = s;
+    if c < 0x80 && s.is_unique() {
+        let d = unsafe { s.data_mut() };
+        if let Some(b) = d.0.get_mut(i as usize) {
+            if *b < 0x80 {
+                *b = c as u8;
+                return s;
+            }
+        }
+    }
+    set_slow(s, i, c)
+}
+
+#[inline(never)]
+fn set_slow(s: LStr, i: u64, c: u32) -> LStr {
+    let sz = s.0.len() as u64;
     if i >= sz {
         return s;
     }
     let i = i as usize;
-    let old = s[i];
+    let old = s.0[i];
     if !is_utf8_first_byte(old) {
         return s;
     }
@@ -296,16 +422,25 @@ pub fn set(s: LStr, i: u64, c: u32) -> LStr {
     } else {
         4
     };
-    let mut enc = Vec::with_capacity(4);
-    push_scalar(&mut enc, c);
+    let mut enc = [0u8; 4];
+    let n = encode_scalar(&mut enc, c);
     let mut s = s;
-    let v = make_mut(&mut s, 4);
-    let end = (i + old_len).min(v.len());
-    if end - i == enc.len() {
-        v[i..end].copy_from_slice(&enc);
-    } else {
-        v.splice(i..end, enc);
+    let d = make_mut(&mut s, n.saturating_sub(old_len));
+    let v = &mut d.0;
+    let len = v.len();
+    let end = (i + old_len).min(len);
+    let old_n = end - i;
+    if n != old_n {
+        if n > old_n {
+            // Room was reserved by `make_mut`.
+            v.resize(len + (n - old_n), 0);
+        }
+        v.copy_within(end..len, i + n);
+        if n < old_n {
+            v.truncate(len - (old_n - n));
+        }
     }
+    v[i..i + n].copy_from_slice(&enc[..n]);
     s
 }
 
@@ -336,6 +471,12 @@ pub fn hash(s: &[u8]) -> u64 {
     crate::hash::murmur64a(s, 11)
 }
 
+/// An ASCII string.
+#[inline]
+fn from_ascii(b: &[u8]) -> LStr {
+    from_parts(vec_from_slice(b, 0), b.len() as u64)
+}
+
 /// `lean_string_of_usize`.
 #[inline(never)]
 pub fn of_u64(n: u64) -> LStr {
@@ -350,7 +491,7 @@ pub fn of_u64(n: u64) -> LStr {
             break;
         }
     }
-    from_bytes(&buf[i..])
+    from_ascii(&buf[i..])
 }
 
 /// Decimal representation of a signed word.
@@ -372,7 +513,8 @@ pub fn of_i64(n: i64) -> LStr {
         }
     }
     v.extend_from_slice(&buf[i..]);
-    from_vec(v)
+    let k = v.len() as u64;
+    from_parts(v, k)
 }
 
 /// `lean_mk_string_from_bytes`: validate, replacing each maximal invalid
@@ -489,26 +631,30 @@ fn skip_chars(s: &[u8], mut i: usize, mut n: u64) -> usize {
 /// `String.Internal.drop s n`: drop the first `n` characters.
 #[inline(never)]
 pub fn drop(s: LStr, n: u64) -> LStr {
-    let i = skip_chars(&s, 0, n);
+    let i = skip_chars(&s.0, 0, n);
     if i == 0 {
         return s;
     }
-    from_bytes(&s[i..])
+    let r = from_bytes(&s.0[i..]);
+    crate::rc_release(s);
+    r
 }
 
 /// `String.Internal.dropRight s n`: drop the last `n` characters.
 #[inline(never)]
 pub fn drop_right(s: LStr, n: u64) -> LStr {
-    let mut e = s.len() as u64;
+    let mut e = s.0.len() as u64;
     let mut n = n;
     while n > 0 && e > 0 {
-        e = prev(&s, e);
+        e = prev(&s.0, e);
         n -= 1;
     }
-    if e == s.len() as u64 {
+    if e == s.0.len() as u64 {
         return s;
     }
-    from_bytes(&s[..e as usize])
+    let r = from_bytes(&s.0[..e as usize]);
+    crate::rc_release(s);
+    r
 }
 
 /// Byte position of the first occurrence of character `c`, or the end.
@@ -535,13 +681,14 @@ pub fn pushn(s: LStr, c: u32, n: u64) -> LStr {
     if n == 0 {
         return s;
     }
-    let mut enc = Vec::with_capacity(4);
-    push_scalar(&mut enc, c);
+    let mut enc = [0u8; 4];
+    let k = encode_scalar(&mut enc, c);
     let mut s = s;
-    let v = make_mut(&mut s, enc.len() * n as usize);
+    let d = make_mut(&mut s, k * n as usize);
     for _ in 0..n {
-        v.extend_from_slice(&enc);
+        d.0.extend_from_slice(&enc[..k]);
     }
+    d.1 += n;
     s
 }
 
@@ -555,22 +702,26 @@ fn is_ascii_ws(b: u8) -> bool {
 /// `String.Internal.trim` (= `trimAscii`).
 #[inline(never)]
 pub fn trim(s: LStr) -> LStr {
-    let b = s.iter().position(|&c| !is_ascii_ws(c)).unwrap_or(s.len());
-    let e = s.iter().rposition(|&c| !is_ascii_ws(c)).map(|p| p + 1).unwrap_or(b);
-    if b == 0 && e == s.len() {
+    let v = &s.0;
+    let b = v.iter().position(|&c| !is_ascii_ws(c)).unwrap_or(v.len());
+    let e = v.iter().rposition(|&c| !is_ascii_ws(c)).map(|p| p + 1).unwrap_or(b);
+    if b == 0 && e == v.len() {
         return s;
     }
-    from_bytes(&s[b..e.max(b)])
+    // Only ASCII whitespace (one byte, one character each) is removed.
+    let r = from_parts(vec_from_slice(&v[b..e.max(b)], 0), s.1 - (v.len() - (e.max(b) - b)) as u64);
+    crate::rc_release(s);
+    r
 }
 
 /// `String.Internal.capitalize`: upper-case the first character (ASCII
 /// letters only, as `Char.toUpper`).
 #[inline(never)]
 pub fn capitalize(s: LStr) -> LStr {
-    match s.first() {
+    match s.0.first() {
         Some(&c) if c.is_ascii_lowercase() => {
             let mut s = s;
-            make_mut(&mut s, 0)[0] = c.to_ascii_uppercase();
+            make_mut(&mut s, 0).0[0] = c.to_ascii_uppercase();
             s
         }
         _ => s,
@@ -588,4 +739,79 @@ pub fn offset_of_pos(s: &[u8], pos: u64) -> u64 {
         k += 1;
     }
     k
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(b: &str) -> LStr {
+        from_bytes(b.as_bytes())
+    }
+
+    /// The cached count agrees with a recount, and the bytes are `want`.
+    fn ok(x: &LStr, want: &str) {
+        assert_eq!(bytes(x), want.as_bytes());
+        assert_eq!(length(x), want.chars().count() as u64, "count of {:?}", want);
+    }
+
+    #[test]
+    fn counts_follow_every_update() {
+        let a = push(push(s("aé"), 'x' as u32), 0x1F600);
+        ok(&a, "aéx😀");
+        let shared = a.clone();
+        let b = push(shared, 'ü' as u32); // copy-on-write
+        ok(&b, "aéx😀ü");
+        ok(&a, "aéx😀");
+        let c = append(a.clone(), b.clone());
+        ok(&c, "aéx😀aéx😀ü");
+        ok(&append(s(""), s("€")), "€");
+        ok(&append(s("€"), s("")), "€");
+        // set: every width over every width, unique and shared.
+        let ws = ['a', 'é', '€', '😀'];
+        for &o in &ws {
+            for &n in &ws {
+                let base = format!("x{}y", o);
+                let t = set(s(&base), 1, n as u32);
+                ok(&t, &format!("x{}y", n));
+                let keep = s(&base);
+                let t2 = set(keep.clone(), 1, n as u32);
+                ok(&t2, &format!("x{}y", n));
+                ok(&keep, &base);
+                // Not a character boundary, or out of range: unchanged.
+                if o.len_utf8() > 1 {
+                    ok(&set(s(&base), 2, n as u32), &base);
+                }
+                ok(&set(s(&base), 99, n as u32), &base);
+            }
+        }
+        ok(&extract(s("aé€😀b"), 1, 6), "é€");
+        ok(&extract(s("aé€😀b"), 2, 6), "");
+        ok(&extract(s("aé€😀b"), 0, 99), "aé€😀b");
+        ok(&drop(s("é€😀b"), 2), "😀b");
+        ok(&drop_right(s("é€😀b"), 2), "é€");
+        ok(&trim(s(" \t é€ \n")), "é€");
+        ok(&trim(s("   ")), "");
+        ok(&pushn(s("é"), '€' as u32, 3), "é€€€");
+        ok(&capitalize(s("ébc")), "ébc");
+        ok(&capitalize(s("abc")), "Abc");
+        ok(&of_u64(18446744073709551615), "18446744073709551615");
+        ok(&of_i64(-9223372036854775808), "-9223372036854775808");
+        ok(&from_bytes_lossy(b"a\xffb\xe2\x82"), "a\u{fffd}b\u{fffd}");
+        ok(&from_vec("é€😀".as_bytes().to_vec()), "é€😀");
+        let long = "é".repeat(100) + &"a".repeat(37);
+        ok(&s(&long), &long);
+    }
+
+    #[test]
+    fn byte_array_round_trip() {
+        let a = s("é€");
+        let keep = a.clone();
+        let v = crate::array::bytes_of_string(a); // shared: copied
+        ok(&keep, "é€");
+        let back = crate::array::string_of_bytes(v);
+        ok(&back, "é€");
+        let v2 = crate::array::bytes_of_string(back); // unique: moved
+        ok(&crate::array::string_of_bytes(v2), "é€");
+    }
 }

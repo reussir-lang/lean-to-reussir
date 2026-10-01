@@ -7,9 +7,7 @@
 //! shared buffer first: arrays are values, updated in place only when
 //! uniquely referenced, like Lean's.
 //!
-//! `ByteArray` and `FloatArray` are `RVec<u8>`/`RVec<f64>`; a `String`
-//! (`Rc<Vec<u8>>`) has the same layout as `RVec<u8>`, which makes
-//! `String.toUTF8`/`String.fromUTF8` free.
+//! `ByteArray` and `FloatArray` are `RVec<u8>`/`RVec<f64>`.
 
 use reussir_rt::collections::vec::Vec as RVec;
 use reussir_rt::rc::Rc;
@@ -302,16 +300,33 @@ pub fn reverse<T: Clone>(v: RVec<T>) -> RVec<T> {
     from_rc(r)
 }
 
-// ---- byte arrays and strings share a layout -------------------------------
+// ---- byte arrays and strings -----------------------------------------------
 
-#[inline(always)]
-pub fn bytes_of_string(s: crate::string::LStr) -> RVec<u8> {
-    from_rc(s)
+/// A byte vector as a `ByteArray`.
+#[inline]
+pub fn bytes_of_vec(v: Vec<u8>) -> RVec<u8> {
+    from_rc(rc_new(v))
 }
 
-#[inline(always)]
+/// `String.toUTF8`: the buffer of a unique string moves (natively a copy).
+#[inline(never)]
+pub fn bytes_of_string(s: crate::string::LStr) -> RVec<u8> {
+    bytes_of_vec(crate::string::into_vec(s))
+}
+
+/// `String.fromUTF8` of valid UTF-8 (counting the characters): the buffer
+/// of a unique array moves (natively a copy).
+#[inline(never)]
 pub fn string_of_bytes(b: RVec<u8>) -> crate::string::LStr {
-    into_rc(b)
+    let r = into_rc(b);
+    let v = if r.is_unique() {
+        unsafe { crate::alloc::rc_into_inner(r) }
+    } else {
+        let v = vec_from_slice(&r, 0);
+        drop(r);
+        v
+    };
+    crate::string::from_vec(v)
 }
 
 /// `ByteArray.copySlice src srcOff dest destOff len exact`.

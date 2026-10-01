@@ -46,10 +46,10 @@ Generated sections of the prelude (edit the generator, then run it):
 | `Nat` | `enum [value] Nat { Small(u64), Big(LBig) }` | `Big` only for values `>= 2^64` |
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | big numbers | `LBig` = `Rc<(bool, Vec<u64>)>` | sign, little-endian limbs, normalized; GMP `mpn`/`mpz` |
-| `String` | `LStr` = `Rc<Vec<u8>>` | valid UTF-8, no terminator; copy-on-write |
+| `String` | `LStr` = `Rc<(Vec<u8>, u64)>` | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write |
 | `Array α` | `RVec<E>` = `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one tagged word per element (below) |
-| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `RVec<u8>` and `LStr` share a layout: `String.toUTF8` is free |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `String.toUTF8`/`fromUTF8` move a unique buffer (natively a copy) |
 | `ST.Ref σ α` / `IO.Ref α` | `LRef<E>` (a shared 0/1-element vector) | mutated through every alias; empty after `take` |
 | `Thunk α`, `Task α` | `LCell<S>` = `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
 | `IO.FS.Handle` | `LHandle` | shared buffered file, closed with its last reference |

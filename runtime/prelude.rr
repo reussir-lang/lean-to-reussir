@@ -17,6 +17,7 @@
 
 extern "rust" [{
     extern crate leanrt;
+    use leanrt::string::Utf8;
     use reussir_rt::rc::Rc;
     use reussir_rt::collections::vec::Vec as RVecImpl;
 }];
@@ -30,8 +31,9 @@ enum [value] L2RUnit {
     u
 }
 
-// A Lean `String`: valid UTF-8 bytes, copy-on-write.
-#[ffi(rust = "::reussir_rt::rc::Rc<::std::vec::Vec<u8>>")]
+// A Lean `String`: valid UTF-8 bytes and the number of characters (Lean's
+// `m_length`, kept by every operation), copy-on-write.
+#[ffi(rust = "::reussir_rt::rc::Rc<(::std::vec::Vec<u8>, u64)>")]
 pub struct LStr;
 
 // A big number: (negative?, magnitude limbs), little-endian 64-bit limbs,
@@ -94,7 +96,7 @@ fn l2r_argv(i : u64) -> LStr [{
 
 // Top-level `error e`: `uncaught exception: <e.toString>`, exit 1.
 #[ffi(import)]
-fn l2r_uncaught_exception(msg : LStr) -> unit [{ leanrt::uncaught_exception(&msg) }];
+fn l2r_uncaught_exception(msg : LStr) -> unit [{ leanrt::uncaught_exception(msg.utf8()) }];
 
 // `lean_internal_panic` messages, by code (no `str` arguments on hot paths).
 #[ffi(import)]
@@ -137,9 +139,9 @@ fn l2r_internal_panic_at<T>(code : u64) -> T {
 fn l2r_panic_text(msg : LStr) -> LStr [{
     {
         if std::env::var_os("LEAN_ABORT_ON_PANIC").is_some() {
-            leanrt::panic_msg(&msg);
+            leanrt::panic_msg(msg.utf8());
         }
-        let mut t = msg.to_vec();
+        let mut t = msg.utf8().to_vec();
         t.push(b'\n');
         if std::env::var("LEAN_BACKTRACE").map(|v| v != "0").unwrap_or(true) {
             t.extend_from_slice(b"backtrace:\n(stack trace unavailable)\n");
@@ -205,7 +207,7 @@ fn l2r_big_low(a : LBig) -> u64 [{ { let r = leanrt::big::low_limb(&a); leanrt::
 fn l2r_big_of_decimal(s : str) -> LBig [{ leanrt::big::of_decimal(&*s) }];
 // A big `Nat` literal: its decimal digits (from the string literal table).
 #[ffi(import)]
-fn l2r_big_of_decimal_lstr(s : LStr) -> LBig [{ { let r = leanrt::big::of_decimal(unsafe { ::std::str::from_utf8_unchecked(&s[..]) }); leanrt::rc_release(s); r } }];
+fn l2r_big_of_decimal_lstr(s : LStr) -> LBig [{ { let r = leanrt::big::of_decimal(unsafe { ::std::str::from_utf8_unchecked(&s.utf8()[..]) }); leanrt::rc_release(s); r } }];
 #[ffi(import)]
 fn l2r_big_to_lstr(a : LBig) -> LStr [{ leanrt::string::from_vec(leanrt::big::to_decimal(&a)) }];
 #[ffi(import)]
@@ -1606,7 +1608,7 @@ fn lean_string_append(a : LStr, b : LStr) -> LStr [{ leanrt::string::append(a, b
 fn lean_string_push(s : LStr, c : u32) -> LStr [{ leanrt::string::push(s, c) }];
 
 #[ffi(import)]
-fn l2r_string_size(s : LStr) -> u64 [{ { let r = s.len() as u64; leanrt::rc_release(s); r } }];
+fn l2r_string_size(s : LStr) -> u64 [{ { let r = s.utf8().len() as u64; leanrt::rc_release(s); r } }];
 
 #[ffi(import)]
 fn l2r_string_length(s : LStr) -> u64 [{ { let r = leanrt::string::length(&s); leanrt::rc_release(s); r } }];
@@ -1617,25 +1619,25 @@ fn lean_string_size(s : LStr) -> Nat { Nat::Small{l2r_string_size(s) + 1} }
 fn lean_string_len(s : LStr) -> Nat { Nat::Small{l2r_string_length(s)} }
 
 #[ffi(import)]
-fn l2r_string_get(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get(&s, i); leanrt::rc_release(s); r } }];
+fn l2r_string_get(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_get_opt(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get_opt(&s, i); leanrt::rc_release(s); r } }];
+fn l2r_string_get_opt(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get_opt(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_get_fast(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get_fast(&s, i); leanrt::rc_release(s); r } }];
+fn l2r_string_get_fast(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get_fast(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_next(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::next(&s, i); leanrt::rc_release(s); r } }];
+fn l2r_string_next(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::next(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_next_fast(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::next_fast(&s, i); leanrt::rc_release(s); r } }];
+fn l2r_string_next_fast(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::next_fast(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_prev(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::prev(&s, i); leanrt::rc_release(s); r } }];
+fn l2r_string_prev(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::prev(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_is_valid_pos(s : LStr, i : u64) -> bool [{ { let r = leanrt::string::is_valid_pos(&s, i); leanrt::rc_release(s); r } }];
+fn l2r_string_is_valid_pos(s : LStr, i : u64) -> bool [{ { let r = leanrt::string::is_valid_pos(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
 fn l2r_string_extract(s : LStr, b : u64, e : u64) -> LStr [{ leanrt::string::extract(s, b, e) }];
 #[ffi(import)]
 fn l2r_string_set(s : LStr, i : u64, c : u32) -> LStr [{ leanrt::string::set(s, i, c) }];
 #[ffi(import)]
-fn l2r_string_get_byte(s : LStr, i : u64) -> u8 [{ { let r = s.get(i as usize).copied().unwrap_or(0); leanrt::rc_release(s); r } }];
+fn l2r_string_get_byte(s : LStr, i : u64) -> u8 [{ { let r = s.utf8().get(i as usize).copied().unwrap_or(0); leanrt::rc_release(s); r } }];
 
 // `String.Pos.Raw.get`: the character at byte `p`, or `'A'`.
 fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 {
@@ -1732,21 +1734,22 @@ fn lean_string_get_byte_fast(s : LStr, i : Nat) -> u8 { l2r_string_get_byte(s, l
 fn lean_string_uget_byte_fast(s : LStr, i : u64) -> u8 { l2r_string_get_byte(s, i) }
 
 #[ffi(import)]
-fn lean_string_dec_eq(a : LStr, b : LStr) -> bool [{ { let r = *a == *b; leanrt::rc_release(a); leanrt::rc_release(b); r } }];
+fn lean_string_dec_eq(a : LStr, b : LStr) -> bool [{ { let r = a.utf8() == b.utf8(); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 #[ffi(import)]
-fn lean_string_dec_lt(a : LStr, b : LStr) -> bool [{ { let r = leanrt::string::dec_lt(&a, &b); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
+fn lean_string_dec_lt(a : LStr, b : LStr) -> bool [{ { let r = leanrt::string::dec_lt(a.utf8(), b.utf8()); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 #[ffi(import)]
-fn lean_string_lt(a : LStr, b : LStr) -> bool [{ { let r = leanrt::string::dec_lt(&a, &b); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
+fn lean_string_lt(a : LStr, b : LStr) -> bool [{ { let r = leanrt::string::dec_lt(a.utf8(), b.utf8()); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 fn lean_string_eq(a : LStr, b : LStr) -> bool { lean_string_dec_eq(a, b) }
 fn lean_string_ne(a : LStr, b : LStr) -> bool { !lean_string_dec_eq(a, b) }
 // `String.compare`: 0 = lt, 1 = eq, 2 = gt (lean2rr maps it to `Ordering`).
 #[ffi(import)]
-fn l2r_string_compare(a : LStr, b : LStr) -> u8 [{ { let r = leanrt::string::compare(&a, &b); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
+fn l2r_string_compare(a : LStr, b : LStr) -> u8 [{ { let r = leanrt::string::compare(a.utf8(), b.utf8()); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 #[ffi(import)]
-fn lean_string_hash(s : LStr) -> u64 [{ { let r = leanrt::string::hash(&s); leanrt::rc_release(s); r } }];
+fn lean_string_hash(s : LStr) -> u64 [{ { let r = leanrt::string::hash(s.utf8()); leanrt::rc_release(s); r } }];
 
-// `String.toUTF8` / `String.ofByteArray` / `String.fromUTF8`: a string and
-// a byte array share their representation, so these do not copy.
+// `String.toUTF8` / `String.ofByteArray` / `String.fromUTF8`: the buffer of
+// a unique value moves (natively these copy); from bytes, the characters are
+// counted.
 #[ffi(import)]
 fn lean_string_to_utf8(s : LStr) -> RVec<u8> [{ leanrt::array::bytes_of_string(s) }];
 #[ffi(import)]
@@ -1758,7 +1761,7 @@ fn lean_string_validate_utf8(b : RVec<u8>) -> bool [{ { let r = leanrt::string::
 fn lean_decode_lossy_utf8(b : RVec<u8>) -> LStr [{ leanrt::string::from_bytes_lossy(leanrt::array::as_slice(&b)) }];
 
 #[ffi(import)]
-fn l2r_string_memcmp(a : LStr, b : LStr, ls : u64, rs : u64, len : u64) -> bool [{ { let r = leanrt::string::memcmp(&a, &b, ls, rs, len); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
+fn l2r_string_memcmp(a : LStr, b : LStr, ls : u64, rs : u64, len : u64) -> bool [{ { let r = leanrt::string::memcmp(a.utf8(), b.utf8(), ls, rs, len); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 
 fn lean_string_memcmp(a : LStr, b : LStr, ls : Nat, rs : Nat, len : Nat) -> bool {
     l2r_string_memcmp(a, b, lean_usize_of_nat(ls), lean_usize_of_nat(rs), lean_usize_of_nat(len))
@@ -1768,11 +1771,11 @@ fn lean_string_memcmp(a : LStr, b : LStr, ls : Nat, rs : Nat, len : Nat) -> bool
 // string and byte bounds).
 #[ffi(import)]
 fn l2r_slice_hash(s : LStr, b : u64, e : u64) -> u64 [{
-    leanrt::string::hash(s.get(b as usize..e as usize).unwrap_or(&[]))
+    leanrt::string::hash(s.utf8().get(b as usize..e as usize).unwrap_or(&[]))
 }];
 #[ffi(import)]
 fn l2r_slice_dec_lt(s1 : LStr, b1 : u64, e1 : u64, s2 : LStr, b2 : u64, e2 : u64) -> bool [{
-    s1.get(b1 as usize..e1 as usize).unwrap_or(&[]) < s2.get(b2 as usize..e2 as usize).unwrap_or(&[])
+    s1.utf8().get(b1 as usize..e1 as usize).unwrap_or(&[]) < s2.utf8().get(b2 as usize..e2 as usize).unwrap_or(&[])
 }];
 // `ByteSlice.beq` (`lean_byteslice_beq`) on the fields `byteArray`,
 // `start`, `stop` of both slices (`start ≤ stop ≤ size` by the structure's
@@ -1852,11 +1855,11 @@ fn l2r_string_drop(s : LStr, n : u64) -> LStr [{ leanrt::string::drop(s, n) }];
 #[ffi(import)]
 fn l2r_string_drop_right(s : LStr, n : u64) -> LStr [{ leanrt::string::drop_right(s, n) }];
 #[ffi(import)]
-fn lean_string_isprefixof(p : LStr, s : LStr) -> bool [{ { let r = leanrt::string::is_prefix_of(&p, &s); leanrt::rc_release(p); leanrt::rc_release(s); r } }];
+fn lean_string_isprefixof(p : LStr, s : LStr) -> bool [{ { let r = leanrt::string::is_prefix_of(p.utf8(), s.utf8()); leanrt::rc_release(p); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_pos_of(s : LStr, c : u32) -> u64 [{ { let r = leanrt::string::pos_of(&s, c); leanrt::rc_release(s); r } }];
+fn l2r_string_pos_of(s : LStr, c : u32) -> u64 [{ { let r = leanrt::string::pos_of(s.utf8(), c); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn lean_string_contains(s : LStr, c : u32) -> bool [{ { let r = leanrt::string::contains(&s, c); leanrt::rc_release(s); r } }];
+fn lean_string_contains(s : LStr, c : u32) -> bool [{ { let r = leanrt::string::contains(s.utf8(), c); leanrt::rc_release(s); r } }];
 #[ffi(import)]
 fn l2r_string_pushn(s : LStr, c : u32, n : u64) -> LStr [{ leanrt::string::pushn(s, c, n) }];
 #[ffi(import)]
@@ -1864,7 +1867,7 @@ fn lean_string_trim(s : LStr) -> LStr [{ leanrt::string::trim(s) }];
 #[ffi(import)]
 fn lean_string_capitalize(s : LStr) -> LStr [{ leanrt::string::capitalize(s) }];
 #[ffi(import)]
-fn l2r_string_offset_of_pos(s : LStr, p : u64) -> u64 [{ { let r = leanrt::string::offset_of_pos(&s, p); leanrt::rc_release(s); r } }];
+fn l2r_string_offset_of_pos(s : LStr, p : u64) -> u64 [{ { let r = leanrt::string::offset_of_pos(s.utf8(), p); leanrt::rc_release(s); r } }];
 
 fn lean_string_drop(s : LStr, n : Nat) -> LStr { l2r_string_drop(s, l2r_nat_sat_u64(n)) }
 fn lean_string_dropright(s : LStr, n : Nat) -> LStr { l2r_string_drop_right(s, l2r_nat_sat_u64(n)) }
@@ -2412,7 +2415,7 @@ fn lean_float_array_data(a : RVec<f64>) -> RVec<f64> { a }
 // cannot fail.
 
 #[ffi(import)]
-fn l2r_stream_putStr(fd : u64, s : LStr) -> u64 [{ { leanrt::io::stream_put(fd, &s); leanrt::rc_release(s); 0 } }];
+fn l2r_stream_putStr(fd : u64, s : LStr) -> u64 [{ { leanrt::io::stream_put(fd, s.utf8()); leanrt::rc_release(s); 0 } }];
 
 #[ffi(import)]
 fn l2r_stream_write(fd : u64, b : RVec<u8>) -> u64 [{ { leanrt::io::stream_put(fd, leanrt::array::as_slice(&b)); leanrt::array::release(b); 0 } }];
@@ -2421,7 +2424,7 @@ fn l2r_stream_write(fd : u64, b : RVec<u8>) -> u64 [{ { leanrt::io::stream_put(f
 fn l2r_stream_flush(fd : u64) -> u64 [{ { leanrt::io::stream_flush(fd); 0 } }];
 
 #[ffi(import)]
-fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{ leanrt::array::bytes_of_string(Rc::new(leanrt::io::stream_read(fd, n))) }];
+fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{ leanrt::array::bytes_of_vec(leanrt::io::stream_read(fd, n)) }];
 
 #[ffi(import)]
 fn l2r_stream_getLine(fd : u64) -> LStr [{ leanrt::string::from_bytes_lossy(&leanrt::io::stream_get_line(fd)) }];
@@ -2809,7 +2812,7 @@ fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
         };
         if shared {
             let mut line = b"shared RC ".to_vec();
-            line.extend_from_slice(&msg[..msg.iter().position(|&b| b == 0).unwrap_or(msg.len())]);
+            line.extend_from_slice(&msg.utf8()[..msg.utf8().iter().position(|&b| b == 0).unwrap_or(msg.utf8().len())]);
             line.push(b'\n');
             leanrt::io::diag_put(leanrt::string::from_bytes(&line));
         }
@@ -2840,7 +2843,7 @@ fn l2r_last_shared() -> bool [{ leanrt::last_shared() }];
 fn l2r_shared_rc_text(msg : LStr) -> LStr [{
     {
         let mut line = b"shared RC ".to_vec();
-        line.extend_from_slice(&msg[..msg.iter().position(|&b| b == 0).unwrap_or(msg.len())]);
+        line.extend_from_slice(&msg.utf8()[..msg.utf8().iter().position(|&b| b == 0).unwrap_or(msg.utf8().len())]);
         line.push(b'\n');
         leanrt::rc_release(msg);
         leanrt::string::from_bytes(&line)
@@ -3002,7 +3005,7 @@ fn l2r_io_get_random_bytes(n : u64) -> RVec<u8> [{
         use std::io::Read;
         let mut buf = vec![0u8; n as usize];
         if let Ok(mut f) = std::fs::File::open("/dev/urandom") { let _r = f.read_exact(&mut buf); }
-        leanrt::array::bytes_of_string(Rc::new(buf))
+        leanrt::array::bytes_of_vec(buf)
     }
 }];
 
@@ -3046,7 +3049,7 @@ fn l2r_io_finish<T, R>(v : T, ok : T -> R, err : u32 -> (u32 -> (LStr -> (LStr -
 // `IO.FS.Handle.mk path mode` (mode = constructor index of `IO.FS.Mode`:
 // read, write, writeNew, readWrite, append).
 #[ffi(import)]
-fn l2r_fs_open(path : LStr, mode : u8) -> LHandle [{ { let h = leanrt::fs::open_file(&path, mode); leanrt::rc_release(path); h } }];
+fn l2r_fs_open(path : LStr, mode : u8) -> LHandle [{ { let h = leanrt::fs::open_file(path.utf8(), mode); leanrt::rc_release(path); h } }];
 #[ffi(import)]
 fn l2r_fs_put_str(h : LHandle, s : LStr) -> u64 [{ { leanrt::fs::owned::put_str(h, s); 0 } }];
 #[ffi(import)]
@@ -3070,24 +3073,24 @@ fn l2r_fs_try_lock(h : LHandle, exclusive : bool) -> bool [{ leanrt::fs::owned::
 #[ffi(import)]
 fn l2r_fs_unlock(h : LHandle) -> u64 [{ { leanrt::fs::owned::unlock(h); 0 } }];
 #[ffi(import)]
-fn l2r_fs_remove_file(p : LStr) -> u64 [{ { leanrt::fs::remove_file(&p); leanrt::rc_release(p); 0 } }];
+fn l2r_fs_remove_file(p : LStr) -> u64 [{ { leanrt::fs::remove_file(p.utf8()); leanrt::rc_release(p); 0 } }];
 #[ffi(import)]
-fn l2r_fs_create_dir(p : LStr) -> u64 [{ { leanrt::fs::create_dir(&p); leanrt::rc_release(p); 0 } }];
+fn l2r_fs_create_dir(p : LStr) -> u64 [{ { leanrt::fs::create_dir(p.utf8()); leanrt::rc_release(p); 0 } }];
 #[ffi(import)]
-fn l2r_fs_remove_dir(p : LStr) -> u64 [{ { leanrt::fs::remove_dir(&p); leanrt::rc_release(p); 0 } }];
+fn l2r_fs_remove_dir(p : LStr) -> u64 [{ { leanrt::fs::remove_dir(p.utf8()); leanrt::rc_release(p); 0 } }];
 #[ffi(import)]
-fn l2r_fs_rename(a : LStr, b : LStr) -> u64 [{ { leanrt::fs::rename_file(&a, &b); leanrt::rc_release(a); leanrt::rc_release(b); 0 } }];
+fn l2r_fs_rename(a : LStr, b : LStr) -> u64 [{ { leanrt::fs::rename_file(a.utf8(), b.utf8()); leanrt::rc_release(a); leanrt::rc_release(b); 0 } }];
 #[ffi(import)]
-fn l2r_fs_hard_link(a : LStr, b : LStr) -> u64 [{ { leanrt::fs::hard_link(&a, &b); leanrt::rc_release(a); leanrt::rc_release(b); 0 } }];
+fn l2r_fs_hard_link(a : LStr, b : LStr) -> u64 [{ { leanrt::fs::hard_link(a.utf8(), b.utf8()); leanrt::rc_release(a); leanrt::rc_release(b); 0 } }];
 #[ffi(import)]
-fn l2r_fs_set_access_rights(p : LStr, mode : u32) -> u64 [{ { leanrt::fs::set_access_rights(&p, mode); leanrt::rc_release(p); 0 } }];
+fn l2r_fs_set_access_rights(p : LStr, mode : u32) -> u64 [{ { leanrt::fs::set_access_rights(p.utf8(), mode); leanrt::rc_release(p); 0 } }];
 #[ffi(import)]
-fn l2r_fs_real_path(p : LStr) -> LStr [{ { let r = leanrt::fs::real_path(&p); leanrt::rc_release(p); r } }];
+fn l2r_fs_real_path(p : LStr) -> LStr [{ { let r = leanrt::fs::real_path(p.utf8()); leanrt::rc_release(p); r } }];
 // Entry names in `readdir` order, without `.` and `..` (lean2rr builds the
 // `IO.FS.DirEntry`s with `root := p`).
 #[ffi(import)]
 fn l2r_fs_read_dir(p : LStr) -> RVec<LStr> [{
-    { let v = leanrt::fs::read_dir(&p); leanrt::rc_release(p); leanrt::array::from_rc(Rc::new(v)) }
+    { let v = leanrt::fs::read_dir(p.utf8()); leanrt::rc_release(p); leanrt::array::from_rc(Rc::new(v)) }
 }];
 // `System.FilePath.metadata` (`follow`) / `symlinkMetadata`: [accessed sec
 // (i64 bits), accessed nsec, modified sec (i64 bits), modified nsec,
@@ -3095,7 +3098,7 @@ fn l2r_fs_read_dir(p : LStr) -> RVec<LStr> [{
 // (dir, file, symlink, other).
 #[ffi(import)]
 fn l2r_fs_metadata(p : LStr, follow : bool) -> RVec<u64> [{
-    { let v = leanrt::fs::metadata(&p, follow); leanrt::rc_release(p); leanrt::array::from_rc(Rc::new(v.to_vec())) }
+    { let v = leanrt::fs::metadata(p.utf8(), follow); leanrt::rc_release(p); leanrt::array::from_rc(Rc::new(v.to_vec())) }
 }];
 // `Handle.isEof` / `Handle.isTty` are `BaseIO` (they cannot fail): payload
 // primitives named after the extern symbols.
@@ -3112,7 +3115,7 @@ fn l2r_fs_app_path() -> LStr [{ leanrt::fs::app_path() }];
 #[ffi(import)]
 fn l2r_fs_process_get_current_dir() -> LStr [{ leanrt::fs::process_current_dir() }];
 #[ffi(import)]
-fn l2r_fs_process_set_current_dir(p : LStr) -> u64 [{ { leanrt::fs::set_current_dir(&p); leanrt::rc_release(p); 0 } }];
+fn l2r_fs_process_set_current_dir(p : LStr) -> u64 [{ { leanrt::fs::set_current_dir(p.utf8()); leanrt::rc_release(p); 0 } }];
 // `IO.FS.createTempFile : IO (Handle × FilePath)`: the handle, then (on
 // success) `l2r_fs_temp_file_path()` is the new file's path.
 // `IO.FS.createTempDir : IO FilePath`.
@@ -3137,14 +3140,14 @@ fn l2r_fs_create_tempdir() -> LStr [{ leanrt::fs::create_temp_dir() }];
 #[ffi(import)]
 fn l2r_proc_spawn(cmd : LStr, args : RVec<LStr>, cwd : LStr, has_cwd : bool, env_names : RVec<LStr>, env_values : RVec<LStr>, env_set : RVec<bool>, modes : u32, inherit_env : bool, setsid : bool) -> u32 [{
     {
-        let argv: ::std::vec::Vec<&[u8]> = leanrt::array::as_slice(&args).iter().map(|a| &a[..]).collect();
+        let argv: ::std::vec::Vec<&[u8]> = leanrt::array::as_slice(&args).iter().map(|a| a.utf8()).collect();
         let names = leanrt::array::as_slice(&env_names);
         let values = leanrt::array::as_slice(&env_values);
         let set = leanrt::array::as_slice(&env_set);
         let env: ::std::vec::Vec<(&[u8], Option<&[u8]>)> = (0..names.len())
-            .map(|i| (&names[i][..], if set.get(i).copied().unwrap_or(false) { values.get(i).map(|v| &v[..]) } else { None }))
+            .map(|i| (names[i].utf8(), if set.get(i).copied().unwrap_or(false) { values.get(i).map(|v| v.utf8()) } else { None }))
             .collect();
-        let pid = leanrt::proc::spawn(&cmd, &argv, if has_cwd { Some(&cwd[..]) } else { None }, &env, modes, inherit_env, setsid);
+        let pid = leanrt::proc::spawn(cmd.utf8(), &argv, if has_cwd { Some(cwd.utf8()) } else { None }, &env, modes, inherit_env, setsid);
         drop(argv);
         drop(env);
         leanrt::rc_release(cmd);
@@ -3176,11 +3179,11 @@ fn l2r_proc_drain(out : LHandle, err : LHandle) -> RVec<u8> [{
         let v = leanrt::proc::drain(&out, &err);
         leanrt::rc_release(out);
         leanrt::rc_release(err);
-        leanrt::array::bytes_of_string(Rc::new(v))
+        leanrt::array::bytes_of_vec(v)
     }
 }];
 #[ffi(import)]
-fn l2r_proc_drained_err() -> RVec<u8> [{ leanrt::array::bytes_of_string(Rc::new(leanrt::proc::take_drained_err())) }];
+fn l2r_proc_drained_err() -> RVec<u8> [{ leanrt::array::bytes_of_vec(leanrt::proc::take_drained_err()) }];
 // `Child.kill`: SIGKILL (to the process group after `setsid`); fallible.
 #[ffi(import)]
 fn l2r_proc_kill(pid : u32, setsid : bool) -> u64 [{ { leanrt::proc::kill_child(pid, setsid); 0 } }];
@@ -3210,8 +3213,8 @@ fn l2r_timeit_text(msg : LStr, start : u64) -> LStr [{
         let mut buf = [0u8; 64];
         let n = unsafe { snprintf(buf.as_mut_ptr(), 64, b"%.3g\0".as_ptr(), v) };
         // Native prints `string_cstr(msg)`: up to the first NUL.
-        let cut = msg.iter().position(|&b| b == 0).unwrap_or(msg.len());
-        let mut line = msg[..cut].to_vec();
+        let cut = msg.utf8().iter().position(|&b| b == 0).unwrap_or(msg.utf8().len());
+        let mut line = msg.utf8()[..cut].to_vec();
         line.push(b' ');
         line.extend_from_slice(&buf[..(n.max(0) as usize).min(63)]);
         line.extend_from_slice(unit.as_bytes());
@@ -3244,8 +3247,8 @@ fn l2r_io_allocprof_with<R>(msg : LStr, act : L2RUnit -> R) -> R {
 #[ffi(import)]
 fn l2r_allocprof_text(msg : LStr) -> LStr [{
     {
-        let cut = msg.iter().position(|&b| b == 0).unwrap_or(msg.len());
-        let mut out = msg[..cut].to_vec();
+        let cut = msg.utf8().iter().position(|&b| b == 0).unwrap_or(msg.utf8().len());
+        let mut out = msg.utf8()[..cut].to_vec();
         out.extend_from_slice(b"\nAllocation profiling data is not available, compile lean using `-D RUNTIME_STATS=ON`\n\n");
         leanrt::rc_release(msg);
         leanrt::string::from_bytes(&out)
@@ -3255,12 +3258,12 @@ fn l2r_allocprof_text(msg : LStr) -> LStr [{
 // `IO.getEnv name : BaseIO (Option String)`.
 #[ffi(import)]
 fn l2r_getenv_has(name : LStr) -> bool [{
-    std::env::var_os(std::ffi::OsStr::new(std::str::from_utf8(&name).unwrap_or("\0"))).is_some()
+    std::env::var_os(std::ffi::OsStr::new(std::str::from_utf8(name.utf8()).unwrap_or("\0"))).is_some()
 }];
 #[ffi(import)]
 fn l2r_getenv_value(name : LStr) -> LStr [{
     {
-        let v = std::env::var_os(std::ffi::OsStr::new(std::str::from_utf8(&name).unwrap_or("\0"))).unwrap_or_default();
+        let v = std::env::var_os(std::ffi::OsStr::new(std::str::from_utf8(name.utf8()).unwrap_or("\0"))).unwrap_or_default();
         leanrt::string::from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(v.as_os_str()))
     }
 }];

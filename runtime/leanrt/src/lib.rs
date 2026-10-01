@@ -88,7 +88,8 @@ extern "C" fn rc_drop_last<T>(r: reussir_rt::rc::Rc<T>) {
 /// `std::cerr`, which is tied to `std::cout` and so flushes stdout first,
 /// and the process then aborts.
 #[inline(never)]
-pub fn panic_msg(msg: &[u8]) {
+pub fn panic_msg<M: string::Utf8 + ?Sized>(msg: &M) {
+    let msg = msg.utf8();
     let abort = std::env::var_os("LEAN_ABORT_ON_PANIC").is_some();
     if abort {
         io::flush_stdout();
@@ -120,7 +121,8 @@ pub fn internal_panic(msg: &str) -> ! {
 /// An uncaught `IO` exception at the top level: printed with `std::cerr`
 /// (which flushes stdout first), exit status 1.
 #[inline(never)]
-pub fn uncaught_exception(msg: &[u8]) -> ! {
+pub fn uncaught_exception<M: string::Utf8 + ?Sized>(msg: &M) -> ! {
+    let msg = msg.utf8();
     io::flush_stdout();
     let mut line = b"uncaught exception: ".to_vec();
     // `string_cstr`: up to the first NUL.

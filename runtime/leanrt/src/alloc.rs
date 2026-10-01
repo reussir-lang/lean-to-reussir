@@ -25,6 +25,7 @@ extern "C" {
     fn mi_malloc(size: usize) -> *mut c_void;
     fn mi_zalloc(size: usize) -> *mut c_void;
     fn mi_realloc(p: *mut c_void, size: usize) -> *mut c_void;
+    fn mi_free(p: *mut c_void);
 }
 
 #[cold]
@@ -60,6 +61,21 @@ pub fn rc_new<T>(v: T) -> Rc<T> {
         // `Rc<T>` is a `#[repr(transparent)]` pointer to its box.
         std::mem::transmute::<*mut RcBoxMirror<T>, Rc<T>>(p)
     }
+}
+
+/// The value of a uniquely referenced `Rc`, moved out; its box is freed
+/// without dropping the value. Boxes from `rc_new` and from `Rc::new` (the
+/// global allocator) are both mimalloc blocks.
+///
+/// # Safety
+/// `r` must be unique (count 1).
+#[inline(always)]
+pub unsafe fn rc_into_inner<T>(r: Rc<T>) -> T {
+    debug_assert!(r.is_unique());
+    let p = std::mem::transmute::<Rc<T>, *mut RcBoxMirror<T>>(r);
+    let v = std::ptr::read(&(*p).data);
+    mi_free(p as *mut c_void);
+    v
 }
 
 /// `Box::new(v)` allocated with `mi_malloc`.

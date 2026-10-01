@@ -453,7 +453,7 @@ Stage 4 sees only mono types:
 | `Unit`/`PUnit`, `lcVoid`, `◾` | `L2RUnit` | Reussir's `unit` is result-only, so unit-like values are a one-variant `[value]` enum from the prelude. The IO world is an `L2RUnit` value. |
 | `Nat` | `enum [value] Nat { Small(u64), Big(LBig) }` | `Big` only for values ≥ 2^64; `LBig` is an opaque runtime bignum (GMP) |
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
-| `String` | `LStr`, an opaque copy-on-write handle over UTF-8 bytes (`Rc<Vec<u8>>`) | literals: §5.4 |
+| `String` | `LStr`, an opaque copy-on-write handle over UTF-8 bytes and their character count (`Rc<(Vec<u8>, u64)>`) | literals: §5.4 |
 | `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records), otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
@@ -1323,7 +1323,7 @@ Promises are not translated yet.
 
 The runtime provides what Reussir lacks:
 - `Nat`/`Int`: a small value, or a GMP bignum (`leanrt::big`);
-- Lean's `String` operations over UTF-8 bytes (`Rc<Vec<u8>>`, §5.1);
+- Lean's `String` operations over UTF-8 bytes (`Rc<(Vec<u8>, u64)>` with the character count, §5.1);
 - `Array`/`ByteArray`/`FloatArray` operations over the copy-on-write `Vec`;
 - `Float` math through libm;
 - IO: stdout/stderr/stdin streams, `IO.Error`, argv, exit;
