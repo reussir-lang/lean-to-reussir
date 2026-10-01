@@ -46,12 +46,40 @@ pub struct Stack {
 const GUARDS: usize = 4096;
 pub static GUARD_LO: [AtomicUsize; GUARDS] = [const { AtomicUsize::new(0) }; GUARDS];
 pub static GUARD_HI: [AtomicUsize; GUARDS] = [const { AtomicUsize::new(0) }; GUARDS];
+/// The ends of those stacks (their usable part is `[hi, top)`).
+pub static STACK_TOP: [AtomicUsize; GUARDS] = [const { AtomicUsize::new(0) }; GUARDS];
 
 /// Whether `addr` lies in the guard page of a context's stack.
 pub fn in_guard(addr: usize) -> bool {
     for i in 0..GUARDS {
         let lo = GUARD_LO[i].load(Ordering::Relaxed);
         if lo != 0 && lo <= addr && addr < GUARD_HI[i].load(Ordering::Relaxed) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `sp` lies in the usable part of a context's stack.
+pub fn within_stack(sp: usize) -> bool {
+    for i in 0..GUARDS {
+        let lo = GUARD_LO[i].load(Ordering::Relaxed);
+        if lo != 0 && GUARD_HI[i].load(Ordering::Relaxed) <= sp && sp < STACK_TOP[i].load(Ordering::Relaxed) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a fault at `addr` with the stack pointer at `sp` (in no stack)
+/// is a frame allocated past the end of a context's stack: both below its
+/// guard page, the stack pointer at most `reach` below it (as
+/// `rt::segv_handler` decides for a thread's own stack).
+pub fn past_end(addr: usize, sp: usize, reach: usize) -> bool {
+    for i in 0..GUARDS {
+        let lo = GUARD_LO[i].load(Ordering::Relaxed);
+        let hi = GUARD_HI[i].load(Ordering::Relaxed);
+        if lo != 0 && addr < hi && sp < hi && hi - sp <= reach {
             return true;
         }
     }
@@ -81,6 +109,7 @@ impl Stack {
         for i in 0..GUARDS {
             if GUARD_LO[i].load(Ordering::Relaxed) == 0 {
                 GUARD_HI[i].store(base + page, Ordering::Relaxed);
+                STACK_TOP[i].store(base + len, Ordering::Relaxed);
                 GUARD_LO[i].store(base, Ordering::Relaxed);
                 guard_slot = i;
                 break;
@@ -115,6 +144,7 @@ impl Drop for Stack {
         if self.guard_slot != usize::MAX {
             GUARD_LO[self.guard_slot].store(0, Ordering::Relaxed);
             GUARD_HI[self.guard_slot].store(0, Ordering::Relaxed);
+            STACK_TOP[self.guard_slot].store(0, Ordering::Relaxed);
         }
         unsafe { munmap(self.base as *mut c_void, self.len) };
     }

@@ -684,11 +684,22 @@ extern "C" {
 
 impl Drop for Promise {
     fn drop(&mut self) {
-        let f = unsafe { l2r_promise_drop_c };
-        assert!(!f.is_null(), "leanrt: promise without l2r_promise_drop_c");
-        let f: unsafe extern "C" fn(usize) -> u64 = unsafe { std::mem::transmute(f) };
-        unsafe { f(self.cell) };
+        if crate::drop::active() {
+            // Released while a container is freed: resolved when the free
+            // reaches it, in Lean's order (`crate::drop`).
+            crate::drop::defer(self.cell, drop_promise_now);
+            return;
+        }
+        unsafe { drop_promise_now(self.cell) };
     }
+}
+
+unsafe fn drop_promise_now(cell: usize) -> bool {
+    let f = l2r_promise_drop_c;
+    assert!(!f.is_null(), "leanrt: promise without l2r_promise_drop_c");
+    let f: unsafe extern "C" fn(usize) -> u64 = std::mem::transmute(f);
+    f(cell);
+    true
 }
 
 pub type LPromise = reussir_rt::rc::Rc<Box<dyn std::any::Any>>;
@@ -839,8 +850,9 @@ fn dropped_by_now(i: u32) -> bool {
         return false;
     }
     // (task, its next dependent to look at, its dependents counted as
-    // deleted, whether all of them are)
-    let mut stack: Vec<(u32, u32, u32, bool)> = vec![(i, ent(i).head_dep, 0, true)];
+    // deleted, whether all of them are, a pin found below it: remembered
+    // as in `droppable_in`, so that a long chain is searched once)
+    let mut stack: Vec<(u32, u32, u32, bool, u32)> = vec![(i, ent(i).head_dep, 0, true, NONE)];
     let mut budget = 2 * tasks().slab.len() + 2;
     while let Some(top) = stack.last_mut() {
         if budget == 0 {
@@ -853,20 +865,35 @@ fn dropped_by_now(i: u32) -> bool {
             if !top.3 {
                 continue;
             }
-            if !deletable(d) || pinned(d) {
+            if !deletable(d) {
                 top.3 = false;
+                top.4 = d;
+            } else if pinned(d) {
+                top.3 = false;
+                top.4 = tasks().pins[d as usize].0;
             } else {
-                stack.push((d, ent(d).head_dep, 0, true));
+                stack.push((d, ent(d).head_dep, 0, true, NONE));
             }
         } else {
-            let (x, _, n, all) = stack.pop().unwrap();
-            let gone = all && count(ent(x).cell) as u64 == 1 + n as u64;
+            let (x, _, n, all, mut pin) = stack.pop().unwrap();
+            let e = ent(x);
+            if pin == NONE && e.head_dep == NONE && count(e.cell) >= 2 {
+                // A leaf something else refers to.
+                pin = x;
+            }
+            if pin != NONE {
+                set_pin(x, pin);
+            }
+            let gone = all && pin == NONE && count(e.cell) as u64 == 1 + n as u64;
             match stack.last_mut() {
                 Some(up) => {
                     if gone {
                         up.2 += 1;
                     } else {
                         up.3 = false;
+                        if up.4 == NONE {
+                            up.4 = pin;
+                        }
                     }
                 }
                 None => return gone,

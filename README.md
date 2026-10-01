@@ -18,6 +18,12 @@ Status: early development.
 
 ## Layout
 
-- `lean2rr/` — the translator (a Lake package)
+- `lean2rr/` — the translator (a Lake package); its optional passes live in
+  `lean2rr/LeanToReussir/Opt/`, listed in `Opt/Registry.lean`
+  (`lean2rr --list-opts`)
+- `runtime/` — the runtime: the prelude `prelude.rr` included in every
+  program, and the Rust crate `leanrt` (see [`runtime/README.md`](runtime/README.md))
+- `scripts/` — `l2r.py`, the driver (lean2rr, then rrc, linking the runtime)
+- `reussir-patches/` — local Reussir patches (see [`docs/reussir-bugs.md`](docs/reussir-bugs.md))
 - `docs/` — design documents
 - `tests/` — the classic test corpus and its native-Lean oracle (see [`tests/README.md`](tests/README.md))

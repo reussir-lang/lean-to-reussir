@@ -31,16 +31,21 @@ Generated sections of the prelude (edit the generator, then run it):
 `scripts/l2r.py` does everything:
 
 1. builds `leanrt` with the pinned rustc (`L2R_RUSTC`) into
-   `runtime/leanrt/target/libleanrt.rlib`, cached by a hash of its sources;
+   `runtime/leanrt/target/libleanrt.rlib` (`target/rt-<hash>/` for another
+   Reussir checkout), cached by a hash of its sources;
 2. runs lean2rr (`L2R_LEAN2RR`) with `--prelude runtime/prelude.rr`;
 3. runs rrc (`L2R_REUSSIR`; with `--reuse-across-call` unless `l2r.py` gets
    `--no-reuse-across-call`) with
-   - `--polyffi-rust-path runtime/leanrt/target/rustc-native`: a wrapper that
+   - `--polyffi-rust-path <leanrt dir>/rustc-native`: a wrapper that
      adds `-C target-cpu=native -C target-feature=-outline-atomics`. With the
      plain rustc, textures are not inlined into Reussir code, and calls through
      the packed-argument boundary (float or `str` arguments, four or more
      parameters) leave an escaping stack slot that blocks tail-call
-     elimination: loops that print floats overflow the stack.
+     elimination: loops that print floats overflow the stack. It also adds
+     `--extern leanrt=<rlib>` (and `--edition 2018` when rrc gives no
+     edition): the drop hooks Reussir generates for the prelude's opaque
+     types are textures without the prelude's `extern crate leanrt;`, and
+     the containers' Rust types are `leanrt`'s (below).
    - `--polyffi-libdir runtime/leanrt/target` (so textures find `leanrt`),
    - `--link-lib libleanrt.rlib --link-lib libgmp.a` (GMP from the Lean
      toolchain, `$(lean --print-prefix)/lib/libgmp.a`, or `L2R_GMP`).
@@ -53,11 +58,11 @@ Generated sections of the prelude (edit the generator, then run it):
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | big numbers | `LBig` = `Rc<(bool, Vec<u64>)>` | sign, little-endian limbs, normalized; GMP `mpn`/`mpz` |
 | `String` | `LStr` = `Rc<(Vec<u8>, u64)>` | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write |
-| `Array α` | `RVec<E>` = `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types) |
+| `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a transparent wrapper of `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types); freed without recursion (below) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one tagged word per element (below) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `String.toUTF8`/`fromUTF8` move a unique buffer (natively a copy) |
-| `ST.Ref σ α` / `IO.Ref α` | `LRef<E>` (a shared 0/1-element vector) | mutated through every alias; empty after `take` |
-| `Thunk α`, `Task α` | `LCell<S>` = `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
+| `ST.Ref σ α` / `IO.Ref α` | `LRef<E>` (a shared 0/1-element vector, `leanrt::drop::Vec<E>`) | mutated through every alias; empty after `take` |
+| `Thunk α`, `Task α` | `LCell<S>` = `leanrt::drop::Cell<S>`, a transparent wrapper of `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
 | `IO.FS.Handle` | `LHandle` | shared buffered file, closed with its last reference |
 | `UInt8..64`, `USize` | `u8..u64`, `u64` | |
 | `Int8..64`, `ISize` | `u8..u64`, `u64` (bit patterns) | signed semantics as `lean_int8_*` etc. |
@@ -153,6 +158,23 @@ or `Int` reference is the prelude's `L2RNatRef`/`L2RIntRef` (a tagged word
 and a cell for a big number, `l2r_natref_*`/`l2r_intref_*`). `LRef<T>`
 (`l2r_ref_*`, a runtime cell) backs promises.
 
+**Freeing containers.** Native Lean frees an object iteratively: the
+children whose count drops to zero go on a stack of objects to free, popped
+last first. Reussir's drop glue frees a record's fields recursively (along
+the last chain member being freed it loops: patch 0013), and releases a
+container field through the container's Rust `Drop` (the opaque type's
+drop hook), which releases the elements. The prelude's containers are
+therefore `leanrt::drop`'s wrappers, whose `Drop` frees the last reference
+through one stack of pending work per thread: a container freed while
+another free runs (from an element's release, through any record glue in
+between) is pushed instead, and the outermost free pops the stack until it
+is empty. An array is emptied from its last element, and what an element's
+release pushes is done before the next element, so the order of
+observable releases matches Lean's (file handles closed, and so flushed,
+promises resolved; `fs` and `task` push those too while a free runs). An
+array that a structural conversion built also releases its origin record
+(`origin::release_shared`) when the program drops it.
+
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
 lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),
 conv(L2RUnit -> α, L2RBox, u64), busyconv(u64), convdone(α, L2RBox, u64) }`
@@ -224,7 +246,10 @@ start), else the event loop's timers and sockets or the earliest sleeper.
 Nothing can go on: the program waits forever. A switch saves and restores
 the per-context state: the running tasks, walks and chains of
 `leanrt::task` (`task::CtxState`) and the mutable cells (the current
-standard streams) with their saved contexts (`once::CtxState`). The
+standard streams) with their saved contexts (`once::CtxState`), and the
+container free in progress with its pending work (`drop::CtxState`: a
+context can be suspended inside a free, when a promise released there
+resolves and code waiting for it blocks). The
 context switch (`coro::switch`) saves the callee-saved registers on the
 stack and swaps stack pointers (aarch64 and x86-64 assembly). The program
 exports `l2r_task_run_one_c` (lean2rr's `l2r_task_run_one`), which a new
@@ -408,15 +433,21 @@ and is reported at once.
 **Main thread.** `leanrt::rt::run_main(|| body())` runs the program on a
 thread with a 1 GiB stack and Lean's stack-overflow report (a fault in the
 stack guard page prints `\nStack overflow detected. Aborting.` and aborts,
-exit 134, without flushing stdout — as native).
+exit 134, without flushing stdout — as native; also a fault below the stack
+while the stack pointer is below it, which a frame without stack probes,
+such as GMP's scratch space, causes when it skips the guard page).
 `leanrt::rt::run_main2(|| init(), || body())` first runs `init` (the
-module initializers) on the calling thread, as native `main` does. Both
-put close-on-exec epoll descriptors in place of standard descriptors
-closed at startup (native Lean's libuv descriptors take their place, so
-using them fails with `EINVAL`, and children see them closed), including
-the `/dev/null` Rust's runtime substitutes; an ELF constructor records
-which were closed before Rust's runtime runs, so a `/dev/null` the program
-was given (Python's `subprocess.DEVNULL`) stays.
+module initializers) on the calling thread, as native `main` does. Every
+thread that runs Lean code calls `install_stack_overflow_handler` (its
+guard page is recorded per thread). Before `main`, an ELF constructor
+opens the descriptors native Lean's runtime has open at startup (libuv's
+epoll descriptor, two io_uring rings when the kernel has them, two signal
+pipes and an eventfd, close-on-exec, in that order at the lowest free
+numbers): `/proc/self/fd`, descriptor numbers and `EMFILE` thresholds are
+native's, and a standard descriptor closed at startup is taken by the
+first of them, as natively (using it fails with `EINVAL`, children see it
+closed). Running before Rust's runtime, the constructor also keeps Rust
+from putting `/dev/null` in the place of closed standard descriptors.
 `l2r_set_initializing(b)` sets what `IO.initializing` answers.
 
 ## Requests for lean2rr
@@ -572,13 +603,19 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   `[2^62, 2^63)` for `UInt64`, `Float` and the like, which natively are
   boxed into a new cell at each call (`l2r_addr_fresh`). A `Nat` in
   `[2^63, 2^64)` and an `Int` outside `int32` but inside `i64` (natively
-  big number objects) answer a number computed from their value.
+  big number objects) answer a number computed from their value. A record,
+  list or array that a structural conversion built answers the address of
+  the value it was converted from: lean2rr records it (`l2r_origin_note`,
+  `leanrt::origin`: the table keeps both values alive while the converted
+  one lives, and gives the original back when the value is converted back,
+  `l2r_origin_back`/`l2r_origin_take`), and `l2r_ptr_addr_obj` and
+  `l2r_ptr_addr_rec` look it up once any conversion was recorded.
 - Everything runs on one thread: tasks run when they are first needed,
   when the running code blocks, or when `main` returns (a schedule native
   Lean can produce; translation plan §5.14). Contexts switch only when one
-  blocks (or, at output, to one whose sleep or timer is due): a loop
-  polling shared state that another task sets without sleeping never sees
-  it change, a context that computes without blocking delays the others,
+  blocks or at an effect point (above): a loop polling shared state that
+  another task sets without sleeping or output never sees it change, a
+  context that computes without blocking or output delays the others,
   and `IO.waitAny` does not pick the fastest of several unfinished tasks.
   Blocking system calls (reading a file, pipe or standard input, waiting
   for a child, name resolution) block the whole program: code that reads
@@ -597,10 +634,6 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   stdout open), and a read error on either pipe at once (natively a stdout
   read error after `wait`); the bytes and messages are the same, only when
   it happens differs.
-- Native Lean has libuv's descriptors open (about 8 more than here), so
-  descriptor numbers (those a child inherits, such as the `/dev/null` that
-  `Stdio.null` leaves open, as natively) and the point where a low
-  `ulimit -n` makes `open` or `spawn` fail with `EMFILE` differ.
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
 - The C `errno` reported by a handle's sticky error indicator (see file

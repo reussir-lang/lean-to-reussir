@@ -1,8 +1,9 @@
 import Std.Data.HashSet
 import LeanToReussir.RR
+import LeanToReussir.PassConfig
 
 /-!
-# Field projections sunk into the branches that use them
+# Field projections sunk into the branches that use them (optimization `sink-proj`)
 
 A `cases` on a structure binds the fields the alternative uses at its top
 (`let f = s.0;`, Lower's `lowerCases`). When the alternative then branches,
@@ -119,3 +120,7 @@ def Item.sinkProj : Item → Item
   | it => it
 
 end LeanToReussir.RR
+
+/-- Registry entry point: runs on every generated function. -/
+def LeanToReussir.Opt.SinkProj.install (c : LeanToReussir.PassConfig) : LeanToReussir.PassConfig :=
+  { c with rrPasses := c.rrPasses.push fun _ fns => fns.map (·.sinkProj) }

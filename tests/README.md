@@ -85,6 +85,13 @@ python3 tests/oracle.py check --cmd 'out/{exe} {size}' [--cases A B] [--sizes sm
 python3 tests/oracle.py bench --cmd 'out/{exe} {size}' [--cases A B] [--size bench] [--repeat 5]
 ```
 
+To check lean2rr with some of its optimizations turned off, build with
+`scripts/l2r.py --disable-opt NAME` (repeatable), or set
+`L2R_DISABLE_OPTS=a,b` (and `L2R_ENABLE_OPTS`) in the environment, which
+`scripts/l2r.py` reads and therefore `tests/runtime/run.sh` and
+`tests/reussir-benchmark/run.sh` too. `lean2rr --list-opts` lists the
+optimizations.
+
 The `--cmd` template is run by the shell with the placeholders `{name}`,
 `{exe}`, `{module}`, `{size}` (the size argument) and `{native}` (the path
 of the native executable). `check --cmd '{native} {size}'` checks that the
@@ -135,3 +142,14 @@ native outputs are reproducible.
 | typeclass-generic | 10000000 | 2.15 | 12.1 |
 | strings | 1000000 | 1.80 | 149.9 |
 | hashmap | 4000000 | 1.53 | 233.9 |
+
+## The Reussir benchmark programs
+
+`tests/reussir-benchmark/run.sh BENCHMARK_CHECKOUT [NAME...]` checks the
+Lean programs of the Reussir benchmark suite (a checkout of
+github.com/reussir-lang/benchmark, `lean/*.lean`, used under their own file
+names such as `rbtree-zipper.lean`): it builds each one natively as the
+suite's `compile.py` does (`lean FILE -c`, `leanc -flto -O3`) and through
+lean2rr (`lean -o`, then `scripts/l2r.py FILE.lean`), runs both and compares
+stdout, stderr and the exit code. The programs check their own results. It
+is a correctness check only; the suite itself does the timing.

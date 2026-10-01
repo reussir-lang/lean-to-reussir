@@ -15,6 +15,8 @@
 #
 # Both executables run with LEAN_BACKTRACE=0, so panics print no stack trace.
 # Environment: L2R_REUSSIR, L2R_LEAN2RR, L2R_RUSTC (see scripts/l2r.py);
+# L2R_DISABLE_OPTS / L2R_ENABLE_OPTS (comma-separated lean2rr optimizations
+# to turn off / on, passed on by scripts/l2r.py; `lean2rr --list-opts`);
 # L2R_TEST_BUILD (build directory, default tests/runtime/build).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)

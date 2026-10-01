@@ -57,6 +57,90 @@ with two of them replaced by lean2rr's copies that keep more types (§3).
 Stage 1 adds type specialization and runs Lean's base-phase `simp` on each
 instance; Lean's base `specialize` is not run again (§7).
 
+### Code structure and passes
+
+`lean2rr/Main.lean` reads as the pipeline, with an `--emit` checkpoint
+after the stages: Stage 1 (`monomorphize`, `--emit inst`), Stage 2
+(`runStage2`, `--emit mono` and `externs`), Stage 3 (`retypeMono`, from the
+declarations the entry point calls, `--emit retyped`), the registry's
+passes over mono LCNF, Stage 4 (`lowerProgram`, with the registry's
+lowering hooks), the registry's passes over the generated functions,
+`Outline`, and the program text (`--emit rr`). The modules of
+`lean2rr/LeanToReussir/`:
+- loading: `Env` (importing the program's modules with their extension
+  states), `Collect` (reachability; `--emit base`);
+- Stage 1: `Mono` (instances), `Passes` (running Lean's passes, for Stage
+  1's recompilation and for Stage 2), `Relevance` (relevant type
+  parameters, also used by Stage 4);
+- the `--stats` dry run: `Stats`, `Specialize`, `Retype`;
+- Stage 2: `Pipeline` (the driver), `TypedToMono`,
+  `TypedStructProjCases` and `ExtractClosedK` (lean2rr's copies of three
+  Lean passes), `MonoTypesKeep`, `CompileRecord` (what the `.olean`
+  records of Lean's compilation: its order and its closed terms, also read
+  by `Emit/Startup`);
+- Stage 3: `MonoRetype`;
+- Stage 4: `RR` (the `.rr` syntax tree and its text), `LowerBase` (state,
+  type translation), then `Lower/*.lean`, each importing the previous one:
+  `Ctx` (the code-lowering context), `FnValues`, `LazyForce`, `Conv`,
+  `Decls`, `Externs`, `LazyGlue`, `Process`, `Promises`, `Identity`,
+  `ExternCall`, `Borrow` (release times of borrowed resources, §5.8),
+  `Values`, `JoinPoints`, `StateMachine` (J4), `Hooks`,
+  `Code` (`lowerCode`, `lowerDecl`), `Finish`;
+- the program: `Emit/Startup` (initializer order, the startup chain),
+  `Emit/Entry` (the entry point), `Emit/Program` (`lowerProgram` and the
+  lowered program's steps), `Outline` (deep and long tail paths cut into
+  functions, for rrc);
+- `Dump`: typed LCNF dumps for the `--emit` checkpoints;
+- `PassConfig`: the configurable parts of the pipeline; `Opt/*.lean`: the
+  optional passes, and `Opt/Registry.lean`.
+
+`lean2rr/L2RShim.lean` is a library of its own (built with lean2rr, on the
+driver's `LEAN_PATH`): Lean implementations of `Std.Internal.UV`'s externs
+and of the few Lean definitions lean2rr replaces (§5.8), which `Env`
+imports with the program and Stage 1 calls instead (`Mono.redirectTarget`).
+
+Outside `lean2rr/`: `runtime/` (the prelude `prelude.rr` and the runtime
+crate `leanrt`), `scripts/l2r.py` (the driver: lean2rr, then rrc),
+`reussir-patches/` (the local Reussir patches, docs/reussir-bugs.md),
+`tests/`, `docs/`.
+
+The core translation is the plain one: the rules of this plan without the
+optional passes, and correct on its own (the classic corpus at every size
+and the runtime suite match native Lean with every optional pass off).
+Each optimization is a module of `Opt/` with an `install : PassConfig →
+PassConfig` that plugs it into a hook of `PassConfig`, keeping what was
+installed before: a representation choice of the type translation (record
+field order, `[value]` structs, one-word `Nat`/`Int` arrays,
+placeholders kept in once-cells), a part of Stage 3 (map loops split by
+element representation), a pass over the checked mono declarations
+(`monoPasses`), Lean definitions replaced by prelude functions, a lowering
+hook (`LowerHooks`: the body before lowering, the J1′ choice, the form of
+J4's state machine, constant caching, the binding of a `cases`
+alternative's fields), or a pass over the generated Reussir functions
+(`rrPasses`). Every hook's default is the plain translation. A pass keeps
+its own state in the code-lowering context's extension slot
+(`CodeCtx.ext`), not in the core's.
+
+`Opt/Registry.lean` lists every pass in one place: Stage 2's edits of
+Lean's pass lists (two passes replaced, two not run, each with its
+reason); the optional passes, one line each (name, enabled by default,
+description, `install`), in installation order (it says what the order
+means for each kind of hook); and the parts that look optional but are
+not, with the reason: the startup chain's chunks (rrc's stack), J4's state
+machines (a loop through an outlined join point would use stack per
+iteration), Stage 3's type recovery from call sites (an array left at
+`lcAny` would be copied at every crossing), closed-term chains not cached
+(an array literal would need memory quadratic in its length) and `Outline`
+(rrc's build time and memory, and the size of the `.rr` text).
+`lean2rr --list-opts` prints it, and `lean2rr --disable-opt NAME` turns one
+optimization off for a run (`--enable-opt NAME` one that is off by
+default; `scripts/l2r.py` passes both on, also from `L2R_DISABLE_OPTS=a,b`
+and `L2R_ENABLE_OPTS`). To remove an optimization, delete its line; to add
+one, write `Opt/Name.lean` with the transformation and its `install`,
+import it in the registry and add its line. With all optional passes off,
+and with each one off in turn, the classic corpus and the runtime tests
+match native Lean.
+
 ---
 
 ## 2. Stage 1 — collect and monomorphize
@@ -255,7 +339,9 @@ giving it the representation it assumes:
   `unreachable`. A zero that would allocate (a string, an array, a record,
   a closure) is built once and kept in a once-cell, like a constant
   (§5.12): `modify` stores one per update, and since a placeholder is never
-  inspected, a shared value serves as well as a fresh one.
+  inspected, a shared value serves as well as a fresh one (optional pass
+  `placeholder-cache`; without it each placeholder is built where it is
+  used).
 
 This keeps Lean's in-place update tricks, including `modify`'s unshared
 element. An alternative, redirecting to the safe reference implementations
@@ -321,7 +407,32 @@ exactly the ones Lean's runtime and `lean.h` externs assume.
 - `elimDeadBranches`: remove impossible branches;
 - `cse`: common subexpressions;
 - `extractClosed`: closed subterms become lazily evaluated constants
-  `f._closed_N`.
+  `f._closed_N`. lean2rr runs it last, over all declarations, as Lean ran
+  it (`extractLikeLean`, Pipeline.lean). Lean extracts a module's closed
+  terms in compilation order with a cache of the terms the module made so
+  far: a declaration with a term equal to an earlier one's reads the
+  earlier one's, so the earlier one decides how the shared terms evaluate
+  (Lean evaluates a constructor's closed fields in reverse order), and the
+  later one, making no term of its own, keeps the values the extraction
+  left dead (a call there still runs). `set_option compiler.extract_closed
+  false` turns extraction off for a declaration or a module. The record
+  says what Lean did: each module's IR-only declarations list the closed
+  terms `d._closed_N` each declaration made, in the order Lean made them,
+  and the IR bodies (in the `.olean`, or in the `.ir` file of a `module`
+  file) say which closed terms each declaration reads. So lean2rr extracts
+  the declarations that made closed terms first, in Lean's order, with
+  one cache per module, then those whose IR reads closed terms, and leaves
+  the others as they are (Lean extracted nothing from them: nothing was
+  closed, or extraction was off), instances of polymorphic declarations
+  included (Lean computes at each call what an instance's known types or
+  dictionaries make closed). Only a declaration Lean compiled to no IR
+  (lean2rr translates the reference definition of an `@[extern]` or
+  `@[implemented_by]` declaration) is extracted as usual. lean2rr's copy of
+  the pass (`ExtractClosedK`) checks a callee's attributes and kernel type
+  on the declaration of Lean's compilation the instance was made from, so
+  `@[never_extract]` functions are not extracted and, as natively, a call
+  of a function whose type is not syntactically a function type
+  (`def F := Nat → Nat`) is not extracted on its own.
 
 **Output shape.** Top-level declarations only; there are no local functions
 left. Closures are partial applications of top-level declarations. Join
@@ -435,7 +546,8 @@ precise array from their callers.
 
 When `f` changes the representation (`Nat → Bool`), the loop's array
 parameter stays `Array lcAny` after the fixpoint: it holds `Nat`s and
-`Bool`s. Such a loop is *split*. Its split instance takes two arrays instead
+`Bool`s. Such a loop is *split* (optional pass `split-map-loops`; without it
+the loop runs on an array of `Box`es). Its split instance takes two arrays instead
 of one, the source `src : Array α` and the result `dst : Array β`:
 - a read `uget bs i` of an array derived from the parameter becomes
   `uget@α src i`, a value of `α`'s own representation;
@@ -499,7 +611,7 @@ Stage 4 sees only mono types:
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | `String` | `LStr`, an opaque copy-on-write handle over UTF-8 bytes and their character count (`Rc<(Vec<u8>, u64)>`) | literals: §5.4 |
 | `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records); for an enumeration or `Unit`, its index (`u8`, `u16` or `u32` by the number of constructors; Lean stores a tagged scalar); otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
-| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments |
+| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments (optional pass `nat-arrays`; without it they are arrays like the others) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
 | `ST.Ref σ α` | a generated shared record `L2RRef_N(Cell<⟦α⟧>)` around Reussir's mutable cell | the contents keep their own representation; `Nat`/`Int` (`L2RNatRef`/`L2RIntRef`, a tagged word as in `LNatArr` plus a cell for a big value) and `[value]` structures (in an `ElemBox`) are stored apart, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧), … }` | memoized thunks, deferred tasks (§5.14) |
@@ -541,13 +653,16 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   (`ST.Out`, the result of every `BaseIO` call, once the world is gone) is
   a `[value]` struct instead, as natively Lean represents it by its field,
   unless that field's type is being translated at the same time (no type
-  contains itself by value).
+  contains itself by value). (Optional pass `value-structs`; without it
+  such a structure is a shared record like the others.)
 - **Field order.** lean2rr orders each constructor's fields by decreasing
   alignment (ties in declaration order), so records have no padding; the
   layout maps each Lean field to its record position, and constructions,
   patterns and projections go through it. (Reussir's own member packing is
   off: its in-place reuse of a cell for another variant mishandles fields
-  that packing moves.)
+  that packing moves.) This is the optional pass `field-order`; without it
+  the fields stay in declaration order, and Reussir lays the padding out as
+  bytes.
 - **Recursion.** Recursive, mutual and nested inductives refer to each
   other's instances; `inductive Rose | node : List Rose → Rose` gives
   `Rose` and `List_Rose`, defined together. Whether a type is a shared
@@ -577,15 +692,28 @@ its value is stored as `Box`.
   nominal, array or word type (`Nat`, `Int`, `UInt8/16/32`, `Bool`,
   `UInt64`, floats) is therefore a generated function that matches all
   such variants and converts structurally, element by element for arrays.
-  It also accepts the variants of types that an `unsafeCast` can read this
-  way (below): another inductive with the same layout (the value as it
-  is), words as words, `UInt64`/`Float` by their bits; an existential
-  payload, an `IO.Ref`'s contents or a value in polymorphically recursive
-  code cast to such a type converts like a typed value. Other casts convert
-  only in typed code, where they are written: through a `Box`, every
-  unboxing function would have to match and convert every type its
-  constructors can read (every structure with one function field, the
-  dictionaries of uniform code, reads every other one).
+  It also accepts the variants of types that an `unsafeCast` can read
+  (below), so that an existential payload, an `IO.Ref`'s contents or a
+  value in polymorphically recursive code cast to another type converts
+  like a typed value: another inductive with the same native layout
+  (the value as it is when lean2rr's layouts agree too, otherwise
+  converted constructor by constructor through the target's layout), a
+  `[value]` struct as its field, `UInt64`/`Float` by their bits, and words:
+  a word type (`Nat`, `Int`, `UInt8/16/32`, `Bool`, an enumeration, an
+  inductive with a constructor without fields) reads any word, any
+  constructor (natively the boxed scalar of its index, or an object whose
+  address is read: see the words below) and, if it is only ever a boxed
+  scalar, any other heap object. Two kinds of casts are left out. One
+  whose conversion would need a function value at another representation
+  (a wrapper, §5.3): every unboxing function would then match every other
+  type with function fields at the same slots (the dictionaries of uniform
+  code), each wrapper adding arms to the application functions of its
+  type (programs built from monad transformer towers grew by a fifth).
+  And one between inductives that do not correspond constructor for
+  constructor (another number of constructors), which typed code converts:
+  every unboxing function would convert from every inductive sharing a
+  constructor shape with its own (3 to 5 % more code). Such a cast panics
+  (§10).
   A boxed unit unwraps to the zero of `T`: a unit used at another type is
   Lean's `box(0)` placeholder (§2.7). Any other variant is unreachable.
 - Conversions are inserted wherever a value's Reussir type differs from
@@ -625,11 +753,39 @@ its value is stored as `Box`.
 - When a structure built at a uniform type (for example a `List Box` coming
   out of polymorphically recursive code) meets code expecting the precise
   type (`List Nat`), the conversion is structural, element by element.
-  Programs observe values, not object identity, so this is transparent.
   An array whose elements cannot be converted (`Array Nat` to `Array Int`)
   must be empty when that happens: an empty array that `cse` shared between
   two element types, or the result of mapping nothing. Its element step is
   therefore `unreachable`.
+  - *Loops, not recursion.* A conversion whose recursion goes through one
+    field of each constructor (a list's tail, a snoc list's init) is a
+    directly recursive function that Reussir compiles as a loop (tail
+    recursion modulo constructors). Any other recursion (several recursive
+    fields, as in a tree; through other types, as a rose tree's `List` of
+    trees or mutual inductives; through array elements) is an explicit
+    stack: the generated function is a loop over a stack of pending
+    constructors, each holding the source value and the fields converted
+    so far (`convMachine`). Converting a deep value uses heap, not stack,
+    as native Lean, which converts nothing, uses none.
+  - *Identity.* Natively there is one object, so a conversion keeps the
+    identity: the converted value records the value it was converted from
+    (its first origin, for a value converted from a converted one), which
+    the record keeps alive, and that value's address (the runtime's
+    `origin` table; `l2r_origin_note`). `ptrAddrUnsafe` of a converted value
+    is its origin's address, and converting it back to its origin's
+    representation gives the origin itself (`l2r_origin_back`): an
+    `Array Nat` stored in two existential packages at `Array α` is `ptrEq`
+    to itself, and a fixpoint step that goes from uniform code through a
+    typed function and back returns its argument. The record also holds the
+    converted value, so it stays unchanged (an update copies it) and its
+    address is not reused. A converted array's record goes with the array
+    (when the program drops it, `leanrt::drop`); a record whose converted
+    value only it still holds is dropped, two records being checked at
+    each new one, so a converted record's origin, and a resource it holds,
+    can live until the next conversion (natively, one object, freed with
+    the converted value). Only the
+    outermost value of a conversion is recorded (its parts are new
+    objects).
 - Through `unsafeCast` (mono erases it), a value can meet code expecting
   another type that Lean represents alike. The conversions follow Lean's
   representation:
@@ -641,7 +797,19 @@ its value is stored as `Box`.
     `getCtorLayout`), so fields correspond by slot, not by declaration
     position: `S₁ {a : UInt8, b : Nat}` read as `S₂ {x : Nat, y : UInt8}`
     is `x = b`, `y = a`. Same-size scalars in the scalar area are
-    reinterpreted: a `UInt64` field read as `Float` is its bits.
+    reinterpreted: a `UInt64` field read as `Float` is its bits. The
+    conversion goes constructor by constructor, as Lean's `cases` reads the
+    value: by tag (past the target's last constructor, the last one, as
+    Lean's `switch`), a constructor without fields of the target is
+    selected whatever the source constructor at that tag holds; a source
+    constructor without fields, or one with fewer fields, read as a target
+    constructor with fields has no value (unreachable). Types that
+    correspond constructor for constructor (`isomorphic`) convert wherever
+    their representations meet; others whose constructors with fields read
+    some of the source's (`Sum3 | a | b (x : Nat) | c (y : String)` read
+    as `Option`) only where the program casts (`coerce`), so that
+    asking whether two function types convert (§5.3) does not pair every
+    inductive with every other.
   - *Words*: `Nat`, `Int`, `UInt8/16/32`, `Char`, `Bool`, enumerations and
     constructors without fields are boxed scalars natively, and convert as
     Lean's `lean_unbox` reads them: truncated to the target's width
@@ -651,8 +819,19 @@ its value is stored as `Box`.
     `Nat`, `-5` is `2^32 - 5`), a word read as an `Int` is signed 32 bits.
     `Nat` and `Int` convert by value (natively the same object when big). An
     index selects the nullary constructor at that position (`0` is `[]` or
-    `none`), and back; a constructor with fields read as a word is natively
-    an address: unreachable.
+    `none`), and back. An object read as a word is natively its address
+    shifted, different on every run: lean2rr gives a deterministic word
+    with the properties every address has (nonzero, a multiple of 4, far
+    above any index): `2^44 + 8i` for a constructor with fields of index
+    `i` (constructors stay distinct), `2^44` for a string, an array, a
+    closure, a thunk or a float cell; a big `Nat` or `Int` reads as the low
+    bits of its value. A `USize` (here `u64`, shared with `UInt64`) reads a
+    word as it is. These casts happen only where the program performs a
+    cast (`castFallback`), never when lean2rr merely asks whether two
+    representations convert (function values: every function type over a
+    `String` would otherwise convert to the same one over a `Nat`). A word
+    read as an object with fields is natively a number used as an address
+    (a crash): unreachable.
   - A `[value]` struct is natively its field.
   When the two Reussir types have the same layout (the same constructors
   with fields of the same layouts, position by position, coinductively;
@@ -808,7 +987,9 @@ sharing. Code that stops when `ptrEq` says a step changed nothing (Lean's
 existing node must not copy it.
 
 Two shapes help Reussir's token reuse, which gives a cell freed by a match
-to a later construction:
+to a later construction (the optional passes `nullary-scrutinee`,
+`lazy-fields` and `sink-proj`; without them the matched value itself is
+used and every field is bound at the match):
 - In the arm of a constructor without fields, the matched value is that
   constructor (`leaf{}`), which costs nothing to build.
 - In an arm where the matched value stays live because it is stored whole
@@ -862,7 +1043,7 @@ to a later construction:
   (`let f = s.0`) at the top of the alternative: when the alternative then
   branches and one branch keeps `s` whole while only other branches use
   the field, the projection moves into the branches that use it (a pass
-  over the generated code, `SinkProj`). An association-list update
+  over the generated code, `Opt/SinkProj`). An association-list update
   `if k == k' then (k', f v) :: more else (k', v) :: go k more` keeps the
   pair whole in the second branch; with `v` projected before the `if`, the
   skipping branch allocated a new cons per element and freed the matched
@@ -919,7 +1100,8 @@ before the jump for a construction after it. Duplication is recursive:
 small join points inside a duplicated body are duplicated again. The
 40-node bound covers the whole nest, so growth is bounded, but code size can
 still grow by a large factor (up to about 2^10 copies of an innermost
-body). Behaviour does not change.
+body). Behaviour does not change. (Optional pass `jp-small`; without it
+such join points are outlined, J3.)
 
 **J3, otherwise: outline.** Some paths `return` directly or jump to a
 different join point. Then `j` becomes a separate top-level function over
@@ -940,23 +1122,34 @@ the single `cases` branch that jumps to it, into the continuation or body of
 another join point. Free variables stay in scope (binders are unique), and
 no code is duplicated. A join point declared before a `cases` of which only
 one branch uses it often satisfies J2 once sunk into that branch.
+(Optional pass `jp-sink`.)
 
 **J4, outlined join points that call back: one state machine.** When a
 self-recursive declaration has outlined join points whose bodies call the
 declaration (a loop whose body is a DAG of join points, e.g. a chain of
 `if`s with shared continuations), J3 would make the loop mutually
-recursive. Instead the declaration becomes one function over an enum of
-entry points: one variant for the declaration's own parameters and one per
-outlined join point (its captured variables and parameters). The function
-takes the declaration's parameters followed by the entry point, and matches
-on the entry point. The declaration's own variant is nullary, so calling the
-declaration (through a wrapper) and its self tail calls allocate nothing; a
-jump to an outlined join point passes the parameters on unchanged together
-with that join point's variant. All of these are self tail calls, which
-LLVM turns into a loop. J4 is used only when an outlined join point makes a
-self tail call; other calls back into the declaration are ordinary calls. The enum is a shared (heap) type for now:
-Reussir miscompiles `[value]` enums with fields of mixed layout (§9);
-Reussir's reuse makes the shared cell cheap.
+recursive, and a mutual tail call is a jump only when LLVM can make it a
+sibling call, which Reussir's reference counting after the call can
+prevent: the loop would use stack per iteration (the classic Sieve and
+Strings overflowed a 1 GiB stack that way at their medium size). Instead
+the declaration becomes one function over an enum of entry points: one
+variant `e` for the declaration's own parameters and one per outlined join
+point (its captured variables and parameters). The function matches on the
+entry point; the declaration's wrapper enters it at `e` with its
+parameters, a self tail call enters at `e` with the new arguments, and a
+jump to an outlined join point enters at that join point's variant. All of
+these are self tail calls, which LLVM turns into a loop. Every value a
+jump needs travels in its variant, so nothing is kept alive by being passed
+along. J4 is used only when an outlined join point makes a self tail call;
+other calls back into the declaration are ordinary calls. The enum is a
+shared (heap) type for now: Reussir miscompiles `[value]` enums with fields
+of mixed layout (§9); Reussir's reuse makes the shared cell cheap. The
+optional pass `state-machines` enters without allocation instead: the
+function takes the declaration's parameters followed by the entry point,
+and `e` is nullary. A jump passes placeholders for the parameters beside
+its variant: the variant carries every variable the join point's body
+uses, and passing a parameter itself would keep it alive across the jump
+(an array updated before the jump would be copied at every iteration).
 
 **Choice and nesting.** J1 applies first, then J2, then J1' (small), then
 J3 (J4 when an outlined body tail-calls the declaration).
@@ -1140,14 +1333,32 @@ Rules:
   `lean_dbg_sleep<ElemBox>` with a closure returning a `Nat`. This covers
   `dbgTrace`, `dbgTraceIfShared`, `dbgSleep`, `dbgStackTrace`, `panic`
   and `sorry`; lean2rr finds these functions by reading the prelude.
-- **Borrowing.** Lean's borrow annotations (`@&`) are dropped. Reussir's
-  owned convention plus its Perceus analysis gives the same results, except
-  for when a value is freed: natively a parameter that Lean's IR infers as
-  borrowed is released by the caller after the call returns, while here the
-  callee releases it at its last use, possibly earlier. Only resources can
-  tell: a file handle is closed (and so flushed) earlier, a child sees end
-  of file on a pipe earlier (§10). The process glue keeps a `Child` alive
-  across `wait`, `tryWait` and `kill`, which borrow it by annotation.
+- **Borrowing.** Reussir passes every argument owned and releases a value
+  at its last use. Natively a parameter that Lean borrows (its
+  `inferBorrow`, and `@&` annotations) is released by the caller after the
+  call returns. Only resources can tell: natively a file handle written by
+  a helper that borrows it is still open (its data still buffered) when the
+  helper reads the file again; a child whose stdin pipe a helper borrows
+  does not see end of file while the helper waits for it. So for a program
+  that creates resources (it calls `IO.FS.Handle.mk`, `createTempFile` or
+  `IO.Process.spawn`), lean2rr runs Lean's own borrow inference on its mono
+  declarations (Lower/Borrow: copies go through `toImpure` and the impure
+  passes up to `inferBorrow`, as Lean compiles its own declarations; extern
+  instances get their extern's `@&`) and emulates Lean's reference counting
+  where a value may hold a resource (a handle, which mono types `lcAny`, so
+  any `Box`; a record, array or reference with such a field):
+  - a direct call keeps an argument passed to a borrowed parameter until
+    the call returns (`l2r_release_after`, an effectful FFI call after the
+    call, as Lean's `dec`), when the caller owns it; an argument the caller
+    itself borrows (a borrowed parameter, a field or array element of one,
+    a join point parameter to which every jump passes such a value) is left
+    alone, as natively, so a loop's tail calls stay tail calls;
+  - a function value of such a declaration calls a `_boxed` variant that
+    releases its borrowed arguments after the call, as Lean's `_boxed`
+    functions do for closures.
+  Other values keep Reussir's release times: the same results without the
+  extra reference counting. The process glue keeps a `Child` alive across
+  `wait`, `tryWait` and `kill`, which borrow it by annotation.
 
 ### 5.9 Panics and unreachable code
 
@@ -1204,6 +1415,15 @@ A generated Reussir `#[main]` does what Lean's generated `main` does
 (`EmitC`: `initialize_Main`, then `lean_io_mark_end_initialization` and
 `lean_init_task_manager`, then `lean_run_main`, then
 `lean_finalize_task_manager`):
+0. before any of it (an ELF constructor, so before Rust's runtime starts),
+   the runtime opens the descriptors that native Lean's runtime has open
+   when the program starts: libuv's event loop opens an epoll descriptor,
+   two io_uring rings (when the kernel has them), its two signal pipes and
+   an eventfd, close-on-exec, at the lowest free numbers (3 to 10 when the
+   standard descriptors are open; a standard descriptor closed at startup is
+   taken by the first of them, as natively, so using it fails as natively).
+   `/proc/self/fd`, the numbers of the descriptors the program opens and the
+   point where opening fails with `EMFILE` are native's;
 1. it runs the startup work of §5.12 on the process's main thread (8 MiB
    stack), with `IO.initializing` answering `true`. An error there prints
    `uncaught exception: <message>` and exits with status 1 before `main`;
@@ -1222,7 +1442,14 @@ A generated Reussir `#[main]` does what Lean's generated `main` does
 6. otherwise it exits with the returned `UInt32` (0 for `IO Unit`).
 
 `leanrt::rt::run_main2` implements the two threads and Lean's stack
-overflow report.
+overflow report: a stack overflow in either thread, so also in a task
+(tasks run on them, §5.14), prints `Stack overflow detected. Aborting.` and
+aborts (status 134, stdout not flushed), as Lean's handler does in every
+thread. Each thread records the guard page below its stack and gets an
+alternate signal stack; a fault in the guard page is an overflow, and so is
+a fault below the stack while the stack pointer is below it (a frame
+without stack probes, such as GMP's scratch space, can skip the guard
+page).
 
 The runtime flushes stdout at exit. These behaviours were observed on native
 executables.
@@ -1242,7 +1469,12 @@ Native Lean behaves as follows (observed; `EmitC.emitInitFn`):
 A constant whose code only builds unboxed values from small literals and
 constructors (`Int.ofNat 0`, an enumeration value) is recomputed at every
 use instead of cached. It cannot panic, trace or allocate, so this is
-unobservable, and it is cheaper than a once-cell read.
+unobservable, and it is cheaper than a once-cell read (optional pass
+`cheap-consts`). A closed term referenced exactly once, by another constant
+(the steps of an array literal, `_closed_k := push _closed_(k-1) e_k`), is
+evaluated where it is used instead of cached: it still runs once, and the
+intermediate values are not kept (caching every step of a 10000-element
+literal kept 1 GB of intermediate arrays).
 
 A float literal arrives as a call of a Lean function on literal arguments,
 `Float.ofScientific 15 true 301` for `1.5e-300` (or `Float.ofNat n`,
@@ -1253,20 +1485,48 @@ functions (lean2rr is compiled from the same `Init` code, so the bits are
 Lean's, subnormals and rounding included), and replaces them by
 `Float.ofBits` of the bit pattern, a cheap constant as above. Calls with
 an exponent above 2000 or a mantissa of more than 4096 bits are left to run
-(cached as usual when they are a constant).
+(cached as usual when they are a constant), as are all of them without the
+optional pass `float-lits`.
 
-The initializer follows Lean's compilation order, which is not persisted in
-the `.olean`. Compilation follows the source, command by command. A `def`
+The initializer follows Lean's compilation order: native Lean initializes a
+module's declarations in the order in which it compiled them
+(`EmitC.emitInitFn`). The `.olean` records part of that order. Its
+`extraConstNames` are the module's IR declarations that are not kernel
+constants (closed terms `c._closed_N`, `_boxed` wrappers, lifted lambdas
+`_lam_N`, specializations), newest first, and Lean adds a command's IR when
+it compiles the command. So each declaration that compiled to at least one
+of them gets its place in the compilation order (`compileOrder`): every
+specialization (whose order among themselves depends on how Lean's
+specializer recursed), every `initialize` action, and nearly every constant
+whose value calls a function (Lean extracts the call as a closed term).
+Not recorded are constants whose calls Lean leaves in place: a callee whose
+type is not syntactically a function (`def F := Nat → Nat`), a value equal
+to a closed term an earlier declaration made (Lean's closed-term cache), or
+a module compiled with `set_option compiler.extract_closed false`. A
+hygienic name keeps its
+macro scopes at the end: `zz._closed_0._@.M._hyg.3` is a closed term of
+`zz._@.M._hyg.3`.
+
+lean2rr orders the startup items by the program's structure (below), then
+puts the items that the record places in the recorded order, in the places
+the structural order gave them. The others keep their places, except that a
+constant goes after the constants it reads: evaluating it evaluates them
+(their accessors compute them on demand), and natively they come before it
+(a constant reads only constants declared before it, or its own helpers).
+
+The structure: compilation follows the source, command by command. A `def`
 or `instance` command is compiled after it is elaborated, together with its
 `where`/`let rec` helpers: the elaborator lists the helpers (those of later
-`mutual` members first, outer ones before nested ones, otherwise in source
-order), then the command's own declarations, and compiles the strongly
-connected components of their reference graph one at a time, callees first
-(Tarjan's order over that list). A declaration generated while compiling a
-component, such as a specialization `f._at_.g.spec_N` made while compiling
-`g`, comes right before the component's members; an auxiliary declaration
-made during elaboration (`c.unsafe_1`, `instInhabitedP.default`) comes
-before the whole command. For example
+`mutual` members first, outer ones before nested ones, a member's `where`
+helpers before the `let rec`s of its body, since a `where` clause is a
+`let rec` around the body, otherwise in source order), then the command's
+own declarations, and compiles the strongly connected components of their
+reference graph one at a time, callees first (Tarjan's order over that
+list). A declaration generated while compiling a component, such as a
+specialization `f._at_.g.spec_N` made while compiling `g`, comes right
+before the component's members; an auxiliary declaration made during
+elaboration (`c.unsafe_1`, `instInhabitedP.default`) comes before the whole
+command. For example
 
     def p : Nat := t "p" (h1 + h2)
     where
@@ -1276,27 +1536,50 @@ before the whole command. For example
 
 initializes `p.h1`, `p.h3`, `p.h2`, then the specializations made in `p`,
 then `p`. lean2rr rebuilds this order from declaration ranges (a helper's
-range lies inside its parent's; the kernel's `all` lists a recursive mutual
-block) and from the references in the declarations' kernel values (for a
-`partial` definition, its `_unsafe_rec`). The function of an `initialize`
-declaration belongs to its constant: a specialization made inside the
-action comes right before the action.
+range lies inside its parent's; the `where` helpers are the last direct
+helpers: the last one ends where its parent ends, and each other one starts
+on the line of the next one, after `;`, or at the column of the next one on
+an earlier line, or is shifted by a doc comment or an attribute, which the
+ranges leave out), from the kernel's `all` (a recursive mutual block), from
+the compilation record and from uses (a `mutual` block whose members do not
+call each other is recorded as separate definitions, but a later member's
+code compiled before an earlier member's shows that they share a block,
+with every command in between, and so does a declaration that uses a later
+one, which only a `mutual` block allows), and from the references in the
+declarations' kernel values (for a `partial` definition, its
+`_unsafe_rec`). The function of an `initialize` declaration belongs to its
+constant: a specialization made inside the action comes right before the
+action.
 
-Positions are compared as (line, column). Lean's own record of the order
-(`declOrderExt`, which `EmitC` follows) is not persisted, and neither the
-module's constant list nor the compiler's declaration tables keep the order
-of addition, so declarations with the same range need more. Every
-declaration of one macro expansion has the macro call's range, and the
-instances of one `deriving instance … for A, B` command share one range
-too. A range equal to another one is therefore not "inside" it: `mk foo
-foo.bar` makes two commands, not `foo` and its helper. Such commands are
-ordered by the position of their names (a macro that takes the names from
-its arguments keeps their positions; a hygienic name made by the macro has
-the call's position, so it comes first), then by the order in which the
-module added its instances (the instance extension keeps it), and last by
+Positions are compared as (line, column). Declarations with the same range
+need more. Every declaration of one macro expansion has the macro call's
+range, and the instances of one `deriving instance … for A, B` command
+share one range too. A range equal to another one is therefore not
+"inside" it: `mk foo foo.bar` makes two commands, not `foo` and its helper.
+Such commands are ordered by the position of their names (a macro that
+takes the names from its arguments keeps their positions; a hygienic name
+made by the macro has the call's position, so it comes first), then by the
+order in which the module added its instances (the instance extension keeps
+it), then hygienic names by their macro scopes (which grow as a command
+expands its macros; the names of one quotation share them), and last by
 name, with the numbers in names compared by value: the auxiliary constants
 `c._unsafe_1`, `c._unsafe_4`, …, `c._unsafe_10` of a declaration with
-several `unsafe` parts start in that order.
+several `unsafe` parts start in that order. The compilation record then
+orders those it records, as the macro wrote them. For the others macro
+scopes are only a guess: a macro that defines a name and then expands the
+rest makes increasing scopes in elaboration order, one that expands the
+rest first makes them in the reverse order.
+
+What no rule recovers is the order of unrecorded constants where the
+structure does not fix it: the members of a `mutual` block that do not use
+each other, the made-up names of one quotation, the names a recursive
+macro makes in the reverse of their scopes (§10). The `.olean` of a
+non-recursive `mutual` block of such constants and that of the same text
+without `mutual` differ only in fresh-name counters left in later
+declarations' code (one name fewer used before them); the declarations'
+own records (names, ranges, kernel values, LCNF, IR, extension entries)
+are equal. For the made-up names of one quotation, only the macro's own
+definition (its code) holds the order.
 
 Our translation runs, before `main`, the startup work of Lean's module
 initializers:
@@ -1634,7 +1917,9 @@ its state, cancellation and `sync` thread would differ).
 Each context has what a thread has: its running tasks (`IO.checkCanceled`,
 `IO.getTID`), the walks of dependents it does, its current standard streams
 (saved and restored at a switch: the cells of `l2r_std_*`, which the
-runtime records as mutable). `Task.get` of a task that is `busy` because it
+runtime records as mutable), the free of nested containers it is doing
+(`leanrt::drop`'s pending work, as natively each thread frees with its
+own stack). `Task.get` of a task that is `busy` because it
 runs on another (suspended) context waits until it has finished
 (`l2r_task_wait_running`, then it looks again); on the running context it
 needs itself, and waits forever, as natively. `IO.waitAny` when every task
@@ -1743,6 +2028,10 @@ The lowering keeps Reussir's job easy:
 - it emits structured control flow;
 - it adds no closures, reference counting or reuse of its own.
 
+lean2rr's own optimizations are optional passes, listed with the required
+parts in `lean2rr/LeanToReussir/Opt/Registry.lean` (§1, "Code structure
+and passes").
+
 ---
 
 ## 8. Checking that the rules are right
@@ -1836,13 +2125,15 @@ Answered (Lean):
     cell, which is the cell native boxing made), a function value wrapped for
     another representation (`w`) the wrapped value's, a thunk or task
     converted to another representation (`conv`, `convdone`, §5.14) the
-    original's address, which it records.
+    original's address, which it records; a record, list or array that a
+    structural conversion built (§5.1) the address of the value it was
+    converted from, which the runtime's `origin` table records
+    (`l2r_ptr_addr_rec` and `l2r_ptr_addr_obj` look it up).
   So `ptrEq x x` holds for every representation, a payload returned by its
   own function is `ptrEq` to itself, and fixpoint loops stop where native
   ones do. Values without a native object (a `Nat` from 2^63 to 2^64, an
   `Int` outside `int32` but inside `i64`: natively big number objects) answer
-  a number computed from the value, so equal ones are `ptrEq`; an array
-  converted to another element representation (§5.1) is a new array (§10).
+  a number computed from the value, so equal ones are `ptrEq`.
   `ST.Ref.ptrEq` is real identity: the addresses of the references'
   records (`l2r_ptr_addr_rec`), whatever representation each side is seen
   at.
@@ -1891,34 +2182,30 @@ Each item says what differs and when.
   worker's. A closed term does not wait for tasks held by a reference
   (`IO.Ref`) or a promise in it (Lean's `lean_mark_persistent` does; a
   closed term cannot create either).
-- *Startup order of generated constants*: specializations with every
-  parameter fixed that Lean generated while compiling the same declaration
-  run in the order of their numbers (`spec_0`, `spec_2`, …). Lean's own
-  order among them depends on how its specializer recursed, which the
-  `.olean` does not record, and can differ. Visible only when such
-  constants trace or panic.
-- *Startup order of a macro's made-up names* (§5.12): declarations of one
-  macro expansion that the macro names itself (hygienic names, which all
-  have the macro call's position) and that are not instances start in name
-  order; natively in the order the macro wrote them. Declarations named by
-  the macro's arguments start in the order of those arguments.
-- *Startup order in `mutual` blocks and several `let rec` groups* (§5.12):
-  the members of a `mutual` block that do not call each other are ordered
-  as separate commands, because the block is not recorded in the `.olean`
-  (natively the helpers of all its members run first, those of later
-  members first). Within one declaration, a `let rec` in the body and a
-  `where` clause are ordered by source position (natively the `where`
-  helpers come first). Visible only when such helper constants trace or
-  panic.
-- *Compiler options of the program's modules* (`set_option
-  compiler.extract_closed false`, `compiler.small`, `maxRecInline`, …) are
-  not recorded in the `.olean`, so lean2rr runs Lean's passes with the
-  defaults: a declaration compiled without closed-term extraction natively
-  can have its closed terms extracted (and evaluated once) under lean2rr.
-  The recursion limit (`maxRecDepth`, which large literals need raised)
-  is effectively unlimited in lean2rr, bounded by its stack (4 GiB, set by
-  `scripts/l2r.py` through `LEAN_STACK_SIZE_KB`): a 60000-element list
-  literal needs more than 64 MiB.
+- *Startup order of unrecorded constants* (§5.12): a constant that Lean
+  compiled to no IR-only declaration although its value calls a function
+  (a callee whose type is not syntactically a function, such as
+  `def F := Nat → Nat`; a value whose closed term an earlier declaration
+  made; a module with `set_option compiler.extract_closed false`) is
+  placed by the program's structure alone. It starts in another order than
+  natively when it is a member of a `mutual` block whose members do not use
+  each other (natively the helpers of all members first), one of the
+  made-up names of one macro quotation (here by name), or a name made by a
+  recursive macro that expands the rest before its own definition (here
+  in the order of the macro scopes). The `.olean` does not record these
+  orders. Visible only when such constants trace or panic.
+- *Compiler options of the program's modules* (`compiler.small`,
+  `maxRecInline`, …) are not recorded in the `.olean`, so lean2rr runs
+  Lean's passes with the defaults (`compiler.extract_closed` shows in the
+  record of closed terms and is followed, §3). The recursion limit
+  (`maxRecDepth`, which large literals need raised) is effectively
+  unlimited in lean2rr, bounded by its stack (1 GiB, as for Lean's own
+  compiler, set by `scripts/l2r.py` through `LEAN_STACK_SIZE_KB`): a
+  60000-element list literal needs more than 64 MiB, and a 100000-element
+  array literal translates. Only lean2rr's main thread, which runs
+  everything, has that stack; it gives the other threads Lean's runtime
+  starts (task workers) 64 MiB, so that lean2rr fits an address-space limit
+  (`ulimit -v 16000000`) on such inputs.
 - *Merging after erasure*: natively, two uses of a type-polymorphic
   constant at different type arguments (`(emptyList : List Nat)`,
   `(emptyList : List String)`) are the same call after erasure, and Lean's
@@ -1951,49 +2238,85 @@ Each item says what differs and when.
   the parts is not always a sibling call and would use stack on every
   iteration, so a loop with such a body still builds slowly. A 2000-line
   `main` builds in about three minutes and 2 GB.
-- *Open descriptors*: native Lean starts with libuv's descriptors open (8
-  more), so `/proc/self/fd` listings and the point where opening files
-  fails with `EMFILE` differ.
-- *Casts that natively read an address* (§5.1): `unsafeCast` of a big
-  `Nat` or `Int` to a fixed-width scalar or an enumeration natively reads
-  the bits of its object's address; lean2rr uses the low bits of its value.
-  A constructor with fields read as a word, or a word read as a constructor
-  with fields, is natively an address read as a number or a number used as
-  an address; it panics here. A `Nat` from 2^31 to 2^63 cast to `Int` is
-  natively not a valid small `Int` (results then depend on the operation);
-  lean2rr keeps its value. A `Box` holding a constructor without fields,
-  read as a word (or the reverse), or a value of an inductive whose
-  lean2rr layout differs from the one it is read as, panics (§5.1).
-- *Pointer identity* (§9): a structural conversion (§5.1) builds new
-  objects, so a value converted to another representation is not `ptrEq`
-  to the original; in particular an array converted to another element
-  representation (an `Array Nat` stored in a field of uniform type `Array α`)
-  is a new array each time. A `Nat` from 2^63 to 2^64 and an `Int` outside
-  `int32` (natively a new big number object per computation) answer a
-  number computed from their value, so equal values are `ptrEq` (natively
-  only the same object is); likewise a rebuilt `[value]` struct over the
-  same field. A thunk or task converted to another representation keeps its
-  original alive (§5.14), so that its identity stays unique.
-- *Release time of borrowed parameters* (§5.8): a resource passed to a
-  function that Lean infers to borrow it is released by Lean's caller
-  after the call; here it is released at its last use inside the callee.
-  A handle written and then dropped by a helper that goes on to read the
-  same file, or a pipe to a child that the helper then waits for, is
-  closed earlier than natively (the file is already flushed; the child
-  sees end of file, where natively it may wait forever).
+- *Casts that natively read an address* (§5.1): an object read as a word
+  (`unsafeCast` of a constructor with fields, a string, an array, a closure
+  to `Nat`, `UInt8`, an enumeration, ...) natively gives its address
+  shifted, different on every run; lean2rr gives a deterministic word
+  with the properties every address has (nonzero, a multiple of 4, far
+  above any constructor index: `2^44 + 8i` for constructor `i`, `2^44`
+  otherwise), and a big `Nat` or `Int` the low bits of its value, so only
+  results that depend on the address itself differ. A `Nat` from 2^31 to
+  2^63 cast to `Int` is natively not a valid small `Int` (results then
+  depend on the operation); lean2rr keeps its value. Casts with no native
+  value panic (`INTERNAL PANIC: unreachable code has been reached`, exit
+  1), where native Lean crashes or reads garbage: a word read as a
+  constructor with fields or as a string (a number used as an address), a
+  constructor read as another inductive's constructor that has fields its
+  source does not have, a `UInt64` cell read as `Nat`; and, through a
+  `Box` only, a cast whose conversion would need a function value at
+  another representation, or between inductives whose constructors do not
+  all correspond (another number of constructors), which typed code
+  converts (§5.1).
+- *Pointer identity* (§9): a value converted to another representation
+  answers its original's identity (a thunk or task through its recorded
+  original, §5.14; a record, list or array through the runtime's origin
+  table, §5.1), but the parts of a structurally converted value are new
+  objects: the tail of a converted list is not `ptrEq` to the original's
+  tail. A `Nat` from 2^63 to 2^64 and an `Int` outside `int32` (natively a
+  new big number object per computation) answer a number computed from
+  their value, so equal values are `ptrEq` (natively only the same object
+  is); likewise a rebuilt `[value]` struct over the same field.
+- *Order of releases in one free*: when a value holding several resources
+  is freed at once (handles closed, and so flushed; promises resolved),
+  native Lean releases them last pushed first: an array's last element
+  first, a nested array's elements before the elements before it, a
+  record's last field first. A free that starts at a container (an array,
+  a reference, a thunk or task cell) does the same here (`leanrt::drop`
+  pushes the resources it reaches, through records too). One that starts
+  at a record (a list of handles, a structure of handles, dropped by
+  itself) follows Reussir's drop glue, fields in order: a list's handles
+  are closed first to last, natively last to first.
+- *Release time of borrowed parameters* (§5.8): emulated for values that
+  may hold a resource, with Lean's inference run on lean2rr's monomorphic
+  instances: where Lean infers a polymorphic declaration or one of its own
+  specializations differently from lean2rr's instance of it, the release
+  time follows the instance. A resource captured in a closure or a thunk
+  is not looked into (released at its last use). In a program that
+  creates resources, a value of uniform type (`Box`) passed owned to a
+  borrowed parameter is kept until the call returns: one more increment
+  and release per such call.
 - *Order of panics in pure code*: when several pure computations panic
   (`get!` on a short array, an `assert!`), their messages can come out in
   another order than natively, because Lean's closed-term extraction may
   group them differently in lean2rr's instances. stdout and results are the
   same.
-- *Stack depth* in general: frame sizes differ from native, and lean2rr
-  adds recursion of its own (structural conversions, the `Array.mk` and
-  `String.mk` list folds). Dropping a long list or other deep value
-  recurses in Reussir's drop glue, 16 to 32 bytes of stack per node (a
-  list of pending task cells at the top), where Lean frees iteratively: at
-  an 8 MB stack (`LEAN_STACK_SIZE_KB=8192`) a list of a few 10⁵ elements
-  dropped at once overflows. The depth at which `Stack overflow detected.
-  Aborting.` (exit 134) happens is not native's, in either direction.
+- *Stack depth* in general: frame sizes differ from native. lean2rr adds
+  no recursion of its own: structural conversions are loops (§5.1) and the
+  `Array.mk`, `String.mk` and `String.ofList` list folds are tail-recursive
+  loops, so converting or folding a list of 10⁷ elements works at an 8 MB
+  stack (`LEAN_STACK_SIZE_KB=8192`) as natively. Dropping a deep value:
+  Lean frees iteratively, through a stack of objects to free. The
+  runtime's containers (arrays, references, thunk and task cells:
+  `leanrt::drop`) do the same: a container freed while another is being
+  freed is pushed on a stack of pending work instead, which the outermost
+  free empties; so a value deep through containers, with records in
+  between (a tree whose children are in arrays, a record → array → record
+  chain, a chain of thunks or tasks), is freed at a bounded depth.
+  Records are freed by Reussir's drop glue, which with the local patch 0013
+  releases the last chain member being freed in a loop (a list, a snoc
+  list, a left or right spine whose other children are shared or nullary)
+  but recurses into the others, 16 to 32 bytes of stack per node: a value
+  deep through records alone along a field that is not the last one freed
+  (a binary tree deep along its left child whose right children are fresh
+  nodes; a rose tree in uniform code, whose list cells hold the deep tree
+  in their head and a fresh node in the tail) overflows at an 8 MB stack
+  when dropped (10⁶ levels; test `RtDropGlue`, an expected failure). The
+  runtime cannot reach that recursion: it needs a stack of pending members
+  in Reussir's drop glue (0013 extended). The depth at which
+  `Stack overflow detected. Aborting.` (exit 134) happens is not native's,
+  in either direction (the report itself is, in every thread: §5.11).
+  Tasks run on `main`'s thread (Lean's 1 GiB, or `LEAN_STACK_SIZE_KB`),
+  where native task workers have the same size of stack each.
 - *Stream redirection* (`IO.setStdout`, `setStderr`, `setStdin`,
   `IO.FS.withIsolatedStreams`) is translated: the current streams live in
   cell slots, and panics, `dbgTrace` and `timeit` write through the current
@@ -2009,7 +2332,12 @@ Each item says what differs and when.
   traversal (adv4 RP4-09).
 - *Structural conversions* (§5.1) rebuild a value as a tree: sharing is lost,
   so a DAG costs exponential time and memory, and a conversion on every call
-  costs O(size) per call. Past the instance caps of §2.6 this can happen
+  costs O(size) per call. Each conversion also records its origin (a table
+  entry holding both values until the converted one is dropped), so the
+  converted value is shared and its first update copies it (an array) or
+  allocates a new cell instead of reusing it (a record); a conversion
+  through an explicit stack (a tree, a rose tree) allocates a stack frame
+  per node. Past the instance caps of §2.6 this can happen
   inside loops. Running out of memory changes the exit status. Values of
   types with the same layout are not converted (`l2r_retype`); a cast
   between layouts that differ (an `Array T₁` field read at `Array T₃` whose
@@ -2078,9 +2406,7 @@ Each item says what differs and when.
   `output` reports a non-UTF-8 stderr once both pipes are at end of file
   (natively as soon as stderr is: different timing when a grandchild holds
   stdout open), and a read error on either pipe at once (natively a stdout
-  read error after `wait`). Native Lean has
-  about 8 more descriptors open (libuv's), so descriptor numbers inherited
-  by children and `EMFILE` thresholds differ.
+  read error after `wait`).
 
 **Diagnostics**
 - lean2rr's own impossibilities (a `Box` unwrap of another variant, a cast

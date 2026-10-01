@@ -1,4 +1,6 @@
-//! Arrays: Reussir's copy-on-write `reussir_rt::collections::vec::Vec<T>`.
+//! Arrays: Reussir's copy-on-write `reussir_rt::collections::vec::Vec<T>`,
+//! in the `#[repr(transparent)]` wrapper `crate::drop::Vec` (which frees
+//! them without recursion).
 //!
 //! That type is a `#[repr(transparent)]` wrapper over
 //! `reussir_rt::rc::Rc<std::vec::Vec<T>>` (the FFI contract requires it), so
@@ -9,7 +11,7 @@
 //!
 //! `ByteArray` and `FloatArray` are `RVec<u8>`/`RVec<f64>`.
 
-use reussir_rt::collections::vec::Vec as RVec;
+use crate::drop::Vec as RVec;
 use reussir_rt::rc::Rc;
 use crate::alloc::{rc_new, reserve, vec_from_slice, vec_with_capacity};
 
@@ -34,15 +36,20 @@ pub fn release<T: Clone>(v: RVec<T>) {
     if c == 1 {
         drop_last(r)
     } else {
-        r.count_ref().set(c - 1);
+        // An array a conversion built is also held by the origin table.
+        let p = unsafe { std::mem::transmute_copy::<Rc<Vec<T>>, usize>(&r) };
         std::mem::forget(r);
+        if c == 2 && crate::origin::release_shared(p) {
+            return;
+        }
+        unsafe { *(p as *mut u32) = c - 1 };
     }
 }
 
 #[cold]
 #[inline(never)]
-extern "C" fn drop_last<T>(r: Rc<Vec<T>>) {
-    drop(r)
+extern "C" fn drop_last<T: Clone>(r: Rc<Vec<T>>) {
+    crate::drop::free_vec::<T>(unsafe { std::mem::transmute::<Rc<Vec<T>>, usize>(r) })
 }
 
 #[inline(always)]

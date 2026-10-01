@@ -29,6 +29,12 @@ Recursive functions are not cut (see `outlineFns`).
 A block is outlined only if every variable it uses has a known type: the
 parameters, typed `let`s and the fields of matched variants (from the type
 declarations). Otherwise it stays where it is.
+
+This is part of the core translation, run after the optional passes over
+the generated functions: it does not make the program faster, but without
+it rrc's build time and memory grow superlinearly on long `main`s and big
+literal matches, and so does the `.rr` text, whose indentation follows the
+nesting (a 3000-arm literal match: 126 MB instead of 1 MB).
 -/
 
 namespace LeanToReussir.Outline
@@ -301,5 +307,15 @@ def outlineFns (limits : Limits) (variants : Std.HashMap (String × String) (Arr
       st := st'
     | _ => out := out.push it
   return out
+
+/-- Every function name of the program: the prelude's (`preludeFns`) and
+those of `fns` (including the functions of raw items). -/
+def takenNames (preludeFns : Std.HashSet String) (fns : Array Item) : Std.HashSet String :=
+  fns.foldl (init := preludeFns) fun acc it => match it with
+    | .fn n .. => acc.insert n
+    | .raw t => (t.splitOn "fn ").foldl (init := acc) fun acc chunk =>
+      let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
+      if name.isEmpty then acc else acc.insert name.toString
+    | _ => acc
 
 end LeanToReussir.Outline
