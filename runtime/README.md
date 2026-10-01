@@ -67,7 +67,15 @@ release it through `leanrt::rc_release`/`array::release`, whose last-reference
 drop is out of line; together with `#[inline(always)]` fast paths and
 `#[cold]` slow paths this lets LLVM inline the hot textures (array
 get/set/push/size, string get/next/push, the Nat helpers) into Reussir code
-(checked with `rrc --emit llvm-ir`).
+(checked with `rrc --emit llvm-ir`). Inlined, a read's release meets the
+caller's increment, and LLVM folds the pair (the free check included,
+thanks to the `old count >= 1` that Reussir's `rc.inc` asserts) as long as
+no other store or call lies on a path between them. So indices that are
+in bounds by a proof (`fget`, `fset`, `fswap`, and the checked variants
+after their bounds test) and positions proved valid (`String.Pos.get`,
+`next`) are converted by `l2r_index_of_nat`, whose impossible `Nat::Big`
+arm ends the program instead of rejoining the read with refcount traffic
+on the big number.
 
 **`Array Nat`/`Array Int`.** `Nat`/`Int` are `[value]` enums, which cannot
 cross the FFI boundary, so a generic `RVec` stores them in a heap box per

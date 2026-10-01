@@ -1584,6 +1584,33 @@ Each item says what differs and when.
   `ElemBox` cell, one allocation each, where native stores tagged scalars.
   `ST.Ref` contents are always boxed (§5.1). `UInt64` and `Float` arrays, on
   the other hand, are unboxed, unlike native.
+- *Reads take their container owned* (Reussir has no borrowed FFI
+  parameters, §9): every array or string read is an increment by the caller
+  and a release in the inlined runtime function. LLVM cancels the pair when
+  the increment's store reaches the release with no store or call on any
+  path in between (Reussir's `rc.inc` lets it assume the old count was at
+  least 1; the prelude ends the impossible `Nat::Big` index paths instead of
+  rejoining them for this): index loops and insertion sort on
+  `Array UInt64` run at 1.2x native or better. It does not when a
+  structure field projected at the top of a loop body is released by the
+  iteration's last read, as in Lean's `String.Slice` loops (`String.any`,
+  `contains`, `toNat?`): 1.7x native (Pf4MinStrAny; 1.1x with the projection
+  moved by hand to its first use); insertion sort on `Array Nat` keeps
+  the count's stores and reloads it for the swap's uniqueness check: 2.1x.
+- *`Array Nat`/`Array Int` objects* have a 40-byte header (a Lean array's is 24): six
+  million three-element `Array Nat` rows take 1.3x native memory
+  (Pf4SmallArrs 0).
+- *Strings* are two allocations, the counted box (with the character
+  count, 40 bytes) and the byte buffer, where a Lean string is one object:
+  five million short live strings take 306 MB (native 352 MB; 270 MB
+  before the count was cached; Pf4ManyStrs).
+- *Dropping a large array of records* releases each element through
+  Reussir's out-of-line `<record>_ffi_release` (natively an inline
+  decrement in `lean_del`'s loop): freeing 6,000 hash-map versions (300
+  million bucket references) at the end of Pf4HashPersist takes about half
+  of its 0.8 s CPU time (native 0.4 s).
+- *Constants read in a loop* (a top-level `Array` or `String` table)
+  check their once-cell on every read: Pf4BigLit 1.16x native.
 
 **Runtime** (details in `runtime/README.md`, "Known divergences")
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`.
