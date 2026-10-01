@@ -599,6 +599,63 @@ def castFieldMap (sc dc : Name) (sl dl : CtorLayout) : LowerM (Option (Array (Op
       | none => return none
   return some out
 
+/-- See `retypable`; `assumed`: pairs of types under comparison. -/
+partial def retypableAux (a b : RR.Ty) (assumed : Array (String × String)) :
+    LowerM (Option (Array (String × String))) := do
+  if a == b then return some assumed
+  match a, b with
+  | .named an, .named bn =>
+    if assumed.contains (an, bn) then return some assumed
+    let infos := (← get).typeInfos
+    let (some ai, some bi) := (infos[an]?, infos[bn]?) | return none
+    if ai.value != bi.value || ai.shape != bi.shape || ai.ctorOrder.size != bi.ctorOrder.size then return none
+    let sameHead := (← nominalHead an) == (← nominalHead bn)
+    let mut asm := assumed.push (an, bn)
+    for (ca, cb) in ai.ctorOrder.zip bi.ctorOrder do
+      let (some la, some lb) := (ai.ctors.find? ca, bi.ctors.find? cb) | return none
+      let pa := la.posTys
+      let pb := lb.posTys
+      if pa.size != pb.size then return none
+      -- The fields a conversion pairs are at the same record positions.
+      if sameHead then
+        if la.fields.map (·.map (·.1)) != lb.fields.map (·.map (·.1)) then return none
+      else
+        let some fm ← castFieldMap ca cb la lb | return none
+        for h : j in [:lb.fields.size] do
+          let some (p, _) := lb.fields[j] | continue
+          let some (some k) := fm[j]?.join | return none
+          if (la.fields[k]?.join.map (·.1)) != some p then return none
+      for (x, y) in pa.zip pb do
+        let some asm' ← retypableAux x y asm | return none
+        asm := asm'
+    return some asm
+  | .app "RVec" #[x], .app "RVec" #[y] =>
+    -- Element storage: the same wrapping, wrapped values retypable.
+    let (ex, bx) ← storageElem x
+    let (ey, by_) ← storageElem y
+    if bx != by_ then return none
+    retypableAux (if bx then ex else x) (if bx then ey else y) assumed
+  | _, _ => return none
+
+/-- Whether a value of Reussir type `a` can be used as a value of type `b`
+as it is, the same object reinterpreted (`l2r_retype`): both cross the FFI
+boundary (shared records, arrays), and their layouts are the same: records
+with the same constructors whose fields, position by position, have the
+same layouts (coinductively, for recursive types), arrays of such
+elements; the conversion between them (`structConv`, `vecConv`) would pair
+exactly those fields. Instantiations of an inductive that differ only in
+phantom positions, and isomorphic inductives read through `unsafeCast` (a
+user list as `List`), are then not converted at all: no time, no copy, and
+the value keeps its identity. -/
+def retypable (a b : RR.Ty) : LowerM Bool := do
+  if a == b then return false
+  if !(← isBoundaryTy a) || !(← isBoundaryTy b) then return false
+  match a with
+  | .named n => if n == boxName || !(← get).typeInfos.contains n then return false
+  | .app "RVec" _ => pure ()
+  | _ => return false
+  return (← retypableAux a b #[]).isSome
+
 mutual
   /-- Convert `e` from representation `src` to `dst`. Besides `Box`
   conversions and closure wrappers, two instantiations of the same inductive
@@ -633,8 +690,10 @@ mutual
       | .fn .. => return some (.call (← unboxFnFn dst) #[] #[e])
       | _ =>
         if let .named tn := dst then
-          if (← get).typeInfos.contains tn then
-            -- Any instantiation of the same inductive may have been boxed.
+          if (← get).typeInfos.contains tn || tn ∈ ["Nat", "Int", "u8", "u16", "u32", "bool", "u64", "f64", "f32"] then
+            -- Any instantiation of the same inductive may have been boxed,
+            -- and (through `unsafeCast`) values of types Lean represents
+            -- alike (`boxCastCompatible`).
             return some (.call (← unboxFn tn) #[] #[e])
         if (← arrayRepr? dst).isSome || dst matches .app "LCell" _ then
           -- Any representation of the same array (or thunk, task) type may
@@ -685,7 +744,9 @@ mutual
       -- Instantiations of one inductive, or (through `unsafeCast`) another
       -- inductive that Lean represents alike: structurally.
       if let (some sh, some dh) := (← nominalHead sn, ← nominalHead dn) then
-        if sh == dh || (← isomorphic sn dn) then return some (.call (← structConv sn dn) #[] #[e])
+        if sh == dh || (← isomorphic sn dn) then
+          if ← retypable src dst then return some (.call "l2r_retype" #[src, dst] #[e])
+          return some (.call (← structConv sn dn) #[] #[e])
       -- The rest is only reachable through `unsafeCast`, between values that
       -- Lean represents by the same word; the conversions follow Lean's
       -- `lean_box`/`lean_unbox`. Scalars of the same size in a constructor's
@@ -735,6 +796,7 @@ mutual
   partial def vecCoerce (e : RR.Expr) (src dst : RR.Ty) : LowerM (Option RR.Expr) := do
     let some sr ← arrayRepr? src | return none
     let some dr ← arrayRepr? dst | return none
+    if ← retypable src dst then return some (.call "l2r_retype" #[src, dst] #[e])
     match ← vecConv src dst sr dr with
     | some f => return some (.call f #[] #[e])
     | none => return none
@@ -3502,6 +3564,31 @@ partial def reprCompatible (a b : RR.Ty) : LowerM Bool := do
       | _, _ => return false
     | _, _ => return false
 
+/-- Whether a `Box` holding a value of type `vt` may be read at type `t`
+(itself, or through `unsafeCast` a type that Lean represents alike), so that
+the unboxing function to `t` converts it: words (`Nat`, `Int`,
+`UInt8/16/32`, `Bool`, enumerations) as words (`wordOf`/`ofWord`), values
+of another inductive with the same layout (`isomorphic` and `retypableAux`:
+the value as it is), `UInt64` and `Float` (`UInt32` and `Float32`) by their
+bits. Other casts convert in typed code, where they are written, but not
+through a `Box`: every unboxing function would match (and convert from)
+every type its constructors can read, e.g. every structure with one
+function field (the dictionaries of uniform code), building wrappers between
+unrelated function types. -/
+def boxCastCompatible (vt t : RR.Ty) : LowerM Bool := do
+  let .named a := vt | return false
+  let .named b := t | return false
+  if a == b then return true
+  let word (n : String) : LowerM Bool := do
+    if n ∈ ["Nat", "Int", "u8", "u16", "u32", "bool"] then return true
+    return ((← get).typeInfos[n]?.map (·.shape == .enumLike)).getD false
+  if (← word a) && (← word b) then return true
+  if [("u64", "f64"), ("f64", "u64"), ("u32", "f32"), ("f32", "u32")].contains (a, b) then return true
+  let infos := (← get).typeInfos
+  if infos.contains a && infos.contains b then
+    return (← isomorphic a b) && (← retypableAux vt t #[]).isSome
+  return false
+
 /-- Generate the bodies of all `Box → nominal` and `Box → array` converters.
 A converter matches every `Box` variant that can hold a value of the
 target's Lean type and converts it: for a nominal type, any instantiation of
@@ -3543,6 +3630,7 @@ partial def finishUnboxFns : LowerM Unit := do
             | some (_, k1, a), some (_, k2, b) => pure (k1 == k2 && (← reprCompatible a b))
             | _, _ => pure false
           | none, _ => pure (tArr && (← arrayRepr? vt).isSome && (← reprCompatible vt t))
+        let accept := accept || (vt != .unit && (← boxCastCompatible vt t))
         if !accept then continue
         let x ← fresh "bx"
         -- Arrays of another representation go through `RVec<Box>` (boxing,
@@ -3550,9 +3638,8 @@ partial def finishUnboxFns : LowerM Unit := do
         -- stay linear in the number of array types, not quadratic (nested
         -- arrays under polymorphic recursion have many representations).
         let boxArr := RR.Ty.app "RVec" #[RR.Ty.box]
-        let body ← if th?.isSome || vt == t || vt == boxArr || t == boxArr || t matches .fn ..
-            || t matches .app "LCell" _ then
-            tryCoerce (.var x) vt t
+        let viaBoxArr := tArr && vt != t && vt != boxArr && t != boxArr && (← arrayRepr? vt).isSome
+        let body ← if !viaBoxArr then tryCoerce (.var x) vt t
           else match ← tryCoerce (.var x) vt boxArr with
             | some b => tryCoerce b boxArr t
             | none => pure none

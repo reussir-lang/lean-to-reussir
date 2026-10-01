@@ -2975,6 +2975,13 @@ fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
     }
 }];
 
+// A shared record or array used at another Reussir type with the same
+// layout (lean2rr's `retypable`: instantiations differing only in phantom
+// positions, isomorphic inductives read through `unsafeCast`): the same
+// object, reinterpreted. Their drop and copy glue do the same.
+#[ffi(import)]
+fn l2r_retype<S, D>(x : S) -> D [{ unsafe { ::std::mem::transmute::<[:S:], [:D:]>(x) } }];
+
 // Sharing is not observable here: answering "shared" / "not a scalar" only
 // makes such code take its general path.
 fn lean_is_exclusive_obj<T>(a : T) -> bool { false }

@@ -203,9 +203,14 @@ unavailable, the uniform `Box` representation (§5.1) takes its place:
   dictionaries dropped). The path covers growth through other declarations
   of the cycle, a `where` helper (`nestI` → `nestI.helper` → `nestI` at
   `StateT Nat m`) or a mutual partner. It stops at the nearest uniform
-  instance of `d`, so the uniform instance's own recursive request gets one
-  typed instance at `F lcAny`, whose request at `F (F lcAny)` then goes back
-  to the uniform one. Growth that no path shows is cut by bounds: a type
+  instance of `d`, whose own recursive request at a type built from its
+  `lcAny` (`List lcAny`, `lcAny × lcAny`) goes to the uniform instance as
+  well: a typed instance there would convert whatever the uniform code
+  passes on every call, and could not hold a value only `unsafeCast` to that
+  type (natively any object). Growth through a type function (`m` →
+  `OptionT m`) gets one typed instance at `F lcAny`, which adapts the
+  dictionary the uniform instance passes, and whose request at
+  `F (F lcAny)` goes back to the uniform one. Growth that no path shows is cut by bounds: a type
   argument deeper than 64 or larger than 256 nodes becomes `lcAny`, and
   past 1024 instances of one declaration every further instance is the
   uniform one. So the set of instances stays finite. This is
@@ -530,9 +535,19 @@ its value is stored as `Box`.
   representations: the instantiations of an inductive (`List Nat` and a
   uniform `List Box`), or the representations of an array (`LNatArr`, and
   `RVec<Box>` for an `Array Nat` built by the code of §2.7). Unboxing to a
-  nominal or array type is therefore a generated function that matches all
-  such variants and converts structurally, element by element for arrays. A
-  boxed unit unwraps to the zero of `T`: a unit used at another type is
+  nominal, array or word type (`Nat`, `Int`, `UInt8/16/32`, `Bool`,
+  `UInt64`, floats) is therefore a generated function that matches all
+  such variants and converts structurally, element by element for arrays.
+  It also accepts the variants of types that an `unsafeCast` can read this
+  way (below): another inductive with the same layout (the value as it
+  is), words as words, `UInt64`/`Float` by their bits; an existential
+  payload, an `IO.Ref`'s contents or a value in polymorphically recursive
+  code cast to such a type converts like a typed value. Other casts convert
+  only in typed code, where they are written: through a `Box`, every
+  unboxing function would have to match and convert every type its
+  constructors can read (every structure with one function field, the
+  dictionaries of uniform code, reads every other one).
+  A boxed unit unwraps to the zero of `T`: a unit used at another type is
   Lean's `box(0)` placeholder (§2.7). Any other variant is unreachable.
 - Conversions are inserted wherever a value's Reussir type differs from
   the type expected where it is used: call arguments, return values,
@@ -565,11 +580,38 @@ its value is stored as `Box`.
   must be empty when that happens: an empty array that `cse` shared between
   two element types, or the result of mapping nothing. Its element step is
   therefore `unreachable`.
-- Between two different inductives with the same constructor shapes, or
-  between an enumeration and `Nat`, a fixed-width integer, `Bool` or
-  another enumeration (only reachable through `unsafeCast`, where Lean's
-  representations coincide), values convert constructor by constructor, or
-  by index. Where no conversion exists at all, lean2rr
+- Through `unsafeCast` (mono erases it), a value can meet code expecting
+  another type that Lean represents alike. The conversions follow Lean's
+  representation:
+  - *Another inductive* whose constructors read the value's fields: the
+    same number of constructors, and each field of a target constructor
+    at a native layout slot the source constructor has. Lean lays a
+    constructor out as its object fields in declaration order, then its
+    `usize` fields, then the other scalars by decreasing size (Lean's own
+    `getCtorLayout`), so fields correspond by slot, not by declaration
+    position: `S₁ {a : UInt8, b : Nat}` read as `S₂ {x : Nat, y : UInt8}`
+    is `x = b`, `y = a`. Same-size scalars in the scalar area are
+    reinterpreted: a `UInt64` field read as `Float` is its bits.
+  - *Words*: `Nat`, `Int`, `UInt8/16/32`, `Char`, `Bool`, enumerations and
+    constructors without fields are boxed scalars natively, and convert as
+    Lean's `lean_unbox` reads them: truncated to the target's width
+    (`unsafeCast (300 : Nat) : UInt8` is 44, `Bool` is the low byte being
+    nonzero), an index past an enumeration's last constructor selects the
+    last one (Lean's `switch`), a small `Int` is its 32 bits (read as a
+    `Nat`, `-5` is `2^32 - 5`), a word read as an `Int` is signed 32 bits.
+    `Nat` and `Int` convert by value (natively the same object when big). An
+    index selects the nullary constructor at that position (`0` is `[]` or
+    `none`), and back; a constructor with fields read as a word is natively
+    an address: unreachable.
+  - A `[value]` struct is natively its field.
+  When the two Reussir types have the same layout (the same constructors
+  with fields of the same layouts, position by position, coinductively;
+  arrays of such elements) and the conversion would pair exactly those
+  fields, the value is used as it is (`l2r_retype`, the same object
+  reinterpreted): a user list read as another user list, or an `Array T₁`
+  field read at `Array T₂`, costs nothing and keeps its identity. This
+  applies to instantiations of one inductive as well (`structConv`,
+  `vecConv` otherwise rebuild). Where no conversion exists at all, lean2rr
   warns and emits a run-time panic for that cast: the program is still
   translated.
 - `Box` costs one allocation per boxing, and appears only on the rare paths
@@ -691,21 +733,23 @@ trailing comma after the last arm, and there is no `else if` (use
 
 **Cast values.** Mono erases `unsafeCast`, so a `cases` (or a projection)
 can meet a value of another type that Lean represents alike. A value of an
-inductive with the same constructor shapes (§5.1) is matched through its
-own constructors, position by position, and the relevant fields are bound
-by position at their own types (converted only where they are used), so
-the value is not converted as a whole:
+inductive whose constructors the matched type's read (§5.1) is matched
+through its own constructors, position by position, and each field is
+bound from the source field at the same native layout slot, at its own
+type (converted only where it is used), so the value is not converted as a
+whole:
 
 ```
 match (unsafeCast x : L2) with | .cons h _ => h | .nil => 0     -- x : L1
     ↦  match x { T_L1::cons(h, _) => h, T_L1::nil => 0 }
 ```
 
-A `Nat`, a fixed-width integer or `Bool` matched as an enumeration (and an
-enumeration matched as another one with a different number of
-constructors, or as `Bool`) is converted by index first. A value in `Box`
-is converted to the inductive's uniform instance first. Where no
-conversion exists, lean2rr warns and the match panics when it runs.
+A word matched as an enumeration or as an inductive with nullary
+constructors (and an enumeration matched as another one with a different
+number of constructors, or as `Bool`) is converted first (§5.1). A value
+in `Box` is converted to the inductive's uniform instance first, which
+accepts values boxed from those other types too. Where no conversion
+exists, lean2rr warns and the match panics when it runs.
 
 An arm that returns the matched value (`simp` turns `node l k r` back
 into `t`) returns that value itself, as natively: the same object, with its
@@ -1561,6 +1605,16 @@ Each item says what differs and when.
 - *Open descriptors*: native Lean starts with libuv's descriptors open (8
   more), so `/proc/self/fd` listings and the point where opening files
   fails with `EMFILE` differ.
+- *Casts that natively read an address* (§5.1): `unsafeCast` of a big
+  `Nat` or `Int` to a fixed-width scalar or an enumeration natively reads
+  the bits of its object's address; lean2rr uses the low bits of its value.
+  A constructor with fields read as a word, or a word read as a constructor
+  with fields, is natively an address read as a number or a number used as
+  an address; it panics here. A `Nat` from 2^31 to 2^63 cast to `Int` is
+  natively not a valid small `Int` (results then depend on the operation);
+  lean2rr keeps its value. A `Box` holding a constructor without fields,
+  read as a word (or the reverse), or a value of an inductive whose
+  lean2rr layout differs from the one it is read as, panics (§5.1).
 - *Pointer identity* (§9): a structural conversion (§5.1) builds new
   objects, so a value converted to another representation is not `ptrEq`
   to the original; in particular an array converted to another element
@@ -1598,7 +1652,11 @@ Each item says what differs and when.
 - *Structural conversions* (§5.1) rebuild a value as a tree: sharing is lost,
   so a DAG costs exponential time and memory, and a conversion on every call
   costs O(size) per call. Past the instance caps of §2.6 this can happen
-  inside loops. Running out of memory changes the exit status.
+  inside loops. Running out of memory changes the exit status. Values of
+  types with the same layout are not converted (`l2r_retype`); a cast
+  between layouts that differ (an `Array T₁` field read at `Array T₃` whose
+  elements hold an `Int` where `T₁`'s hold a `Nat`) converts the field at
+  each use, where natively the cast is free.
 - *A match with an arm that returns the matched value* (a BST insert of a
   key already present, whose `simp`ed code returns `t` itself) keeps the
   value live across the match, and Reussir's token reuse then offers the
