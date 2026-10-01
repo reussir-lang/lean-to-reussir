@@ -2,9 +2,10 @@ import Std.Data.HashMap
 import Std.Data.HashSet
 import Lean.Util.SCC
 import LeanToReussir.RR
+import LeanToReussir.PassConfig
 
 /-!
-# Outlining deep and long function bodies
+# Outlining deep and long function bodies (workaround `outline`)
 
 rrc's per-function analyses grow faster than linearly in two shapes of
 code that Lean programs produce routinely (docs/reussir-bugs.md, bugs 16
@@ -29,6 +30,10 @@ Recursive functions are not cut (see `outlineFns`).
 A block is outlined only if every variable it uses has a known type: the
 parameters, typed `let`s and the fields of matched variants (from the type
 declarations). Otherwise it stays where it is.
+
+This works around rrc's limits; it does not make the program faster.
+Without it the output is the same program, but rrc's build time and memory
+grow superlinearly on long `main`s and big literal matches.
 -/
 
 namespace LeanToReussir.Outline
@@ -301,5 +306,21 @@ def outlineFns (limits : Limits) (variants : Std.HashMap (String × String) (Arr
       st := st'
     | _ => out := out.push it
   return out
+
+/-- Every function name of the program: the prelude's (`preludeFns`) and
+those of `fns` (including the functions of raw items). -/
+def takenNames (preludeFns : Std.HashSet String) (fns : Array Item) : Std.HashSet String :=
+  fns.foldl (init := preludeFns) fun acc it => match it with
+    | .fn n .. => acc.insert n
+    | .raw t => (t.splitOn "fn ").foldl (init := acc) fun acc chunk =>
+      let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
+      if name.isEmpty then acc else acc.insert name.toString
+    | _ => acc
+
+/-- Registry entry point: runs on the generated functions, after the
+passes registered before it. -/
+def install (c : PassConfig) : PassConfig :=
+  { c with rrPasses := c.rrPasses.push fun p fns =>
+      outlineFns {} (variantTable p.types p.prelude) (takenNames p.preludeFns fns) fns }
 
 end LeanToReussir.Outline

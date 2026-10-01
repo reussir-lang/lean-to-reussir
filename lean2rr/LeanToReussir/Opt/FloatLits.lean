@@ -1,8 +1,8 @@
 import Lean
-import LeanToReussir.Mono
+import LeanToReussir.PassConfig
 
 /-!
-# Float literals
+# Float literals (optimization `float-lits`)
 
 A `Float` or `Float32` literal reaches the mono code as a call
 `Float.ofScientific m s e` (or `Float.ofNat n`, `Float32.…`) on literal
@@ -14,6 +14,10 @@ functions (compiled into lean2rr from the same `Init` code), and replaces it
 by `Float.ofBits` of the resulting bit pattern, which Stage 4 treats as a
 cheap constant (translation plan §5.12). The functions are pure, total and
 do not trace, so evaluating them early is unobservable.
+
+Without this pass the calls run when the constant holding the literal is
+evaluated, which gives the same bits (the runtime evaluates the same
+functions); the constant is then cached rather than recomputed.
 -/
 
 namespace LeanToReussir
@@ -84,5 +88,10 @@ def foldFloatLitsDecls (keys : NameMap InstKey) (decls : Array (Decl .pure)) : A
   decls.map fun d => match d.value with
     | .code c => { d with value := .code (foldFloatLits keys c) }
     | _ => d
+
+/-- Registry entry point: the fold runs on the checked mono program, before
+lowering. -/
+def Opt.FloatLits.install (c : PassConfig) : PassConfig :=
+  { c with monoPasses := c.monoPasses.push foldFloatLitsDecls }
 
 end LeanToReussir

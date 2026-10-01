@@ -2,6 +2,9 @@ import Lean
 import LeanToReussir.PassConfig
 import LeanToReussir.TypedToMono
 import LeanToReussir.TypedStructProjCases
+import LeanToReussir.Opt.FloatLits
+import LeanToReussir.Opt.SinkProj
+import LeanToReussir.Opt.Outline
 
 /-!
 # The pass registry
@@ -43,7 +46,10 @@ def stage2 : Stage2Config := #[
     "boxing, reference counting and reset/reuse belong to Reussir (Stage 2 ends at mono, plus extractClosed)"]
 
 /-- The optional passes, in installation order. -/
-def optimizations : Array OptPass := #[]
+def optimizations : Array OptPass := #[
+  ⟨"float-lits", true, "Float literals (Float.ofScientific/ofNat on literals) folded to their bits at compile time", FloatLits.install⟩,
+  ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩,
+  ⟨"outline", true, "deep and long tail paths cut into chains of functions (bounds rrc's build time and memory)", Outline.install⟩]
 
 /-- Parts of the translation that are not optional. -/
 def required : Array RequiredPass := #[]

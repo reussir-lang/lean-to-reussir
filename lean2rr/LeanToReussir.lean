@@ -11,13 +11,10 @@ import LeanToReussir.RR
 import LeanToReussir.LowerBase
 import LeanToReussir.Lower
 import LeanToReussir.Emit
-import LeanToReussir.Outline
-import LeanToReussir.FloatLits
 import LeanToReussir.MonoRetype
 import LeanToReussir.Passes
 import LeanToReussir.MonoTypesKeep
 import LeanToReussir.TypedToMono
 import LeanToReussir.TypedStructProjCases
-import LeanToReussir.SinkProj
 import LeanToReussir.PassConfig
 import LeanToReussir.Opt.Registry

@@ -1,10 +1,7 @@
 import Lean
 import LeanToReussir.Emit.Entry
 import LeanToReussir.PassConfig
-import LeanToReussir.SinkProj
 import LeanToReussir.MonoRetype
-import LeanToReussir.FloatLits
-import LeanToReussir.Outline
 
 /-!
 # Program assembly
@@ -91,8 +88,9 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
   let roots := #[mainInst, errStr] ++ startup.map fun
     | .caf i | .ioUnit i | .init _ i => i
   let (decls, keys) ← retypeMono cfg.stage2 table decls keys roots
-  -- Float literals become bit patterns (translation plan §5.12).
-  let decls := foldFloatLitsDecls keys decls
+  -- The registry's passes over mono LCNF (`Opt/FloatLits`: float literals
+  -- become bit patterns).
+  let decls := cfg.monoPasses.foldl (fun ds p => p keys ds) decls
   -- Function names the prelude defines (`fn NAME`).
   let preludeFns := (prelude.splitOn "fn ").foldl (init := ({} : Std.HashSet String)) fun acc chunk =>
     let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
@@ -184,18 +182,11 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) 
     return ← fnTypeItems
   let (fnItems, st) ← (act.run ctx).run {}
   let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))
-  -- Deep and long tail paths become chains of functions (rrc's analyses
-  -- are superlinear in them; see `Outline`).
-  let variants := Outline.variantTable (st.typeItems ++ fnItems |>.push boxItem) prelude
-  let taken := st.fns.foldl (init := preludeFns) fun acc it => match it with
-    | .fn n .. => acc.insert n
-    | .raw t => (t.splitOn "fn ").foldl (init := acc) fun acc chunk =>
-      let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
-      if name.isEmpty then acc else acc.insert name.toString
-    | _ => acc
-  -- Projections sunk into the branches that use them (`SinkProj`), then
-  -- oversized tail paths outlined (`Outline`).
-  let fns := Outline.outlineFns {} variants taken (st.fns.map (·.sinkProj))
+  -- The registry's passes over the generated functions (`Opt/SinkProj`:
+  -- projections sunk into the branches that use them; `Opt/Outline`: deep
+  -- and long tail paths cut into chains of functions, for rrc).
+  let rrProg : RRProgram := { prelude, preludeFns, types := st.typeItems ++ fnItems |>.push boxItem }
+  let fns := cfg.rrPasses.foldl (fun fns p => p rrProg fns) st.fns
   let mut out := prelude ++ "\n// ---- generated types ----\n\n"
   for it in st.typeItems do out := out ++ it.render ++ "\n"
   for it in fnItems do out := out ++ it.render ++ "\n"
