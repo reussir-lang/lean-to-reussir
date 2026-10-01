@@ -1,5 +1,6 @@
 import Lean
 import LeanToReussir.Emit.Entry
+import LeanToReussir.PassConfig
 import LeanToReussir.SinkProj
 import LeanToReussir.MonoRetype
 import LeanToReussir.FloatLits
@@ -84,12 +85,12 @@ def valueGenericClosureParams (prelude : String) : Std.HashMap String (Array Boo
   return out
 
 /-- Lower a whole program. -/
-def lowerProgram (prelude : String) (mainInst errStr : Name) (startup : Array StartupStep) (decls : Array (Decl .pure))
-    (keys : NameMap InstKey) : CoreM String := do
+def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name) (startup : Array StartupStep)
+    (decls : Array (Decl .pure)) (keys : NameMap InstKey) : CoreM String := do
   let table ← programRelevance decls
   let roots := #[mainInst, errStr] ++ startup.map fun
     | .caf i | .ioUnit i | .init _ i => i
-  let (decls, keys) ← retypeMono table decls keys roots
+  let (decls, keys) ← retypeMono cfg.stage2 table decls keys roots
   -- Float literals become bit patterns (translation plan §5.12).
   let decls := foldFloatLitsDecls keys decls
   -- Function names the prelude defines (`fn NAME`).

@@ -1,6 +1,4 @@
 import Lean
-import LeanToReussir.TypedToMono
-import LeanToReussir.TypedStructProjCases
 import LeanToReussir.Collect
 import LeanToReussir.Mono
 import LeanToReussir.Passes
@@ -11,7 +9,9 @@ import LeanToReussir.Passes
 Runs the passes Lean runs between `saveBase` and `saveMono`, plus
 `extractClosed`, on the closed monomorphic program produced by Stage 1
 (translation plan §3). The passes are taken from Lean's pass manager, so
-their order and configuration are exactly Lean's. Like
+their order and configuration are exactly Lean's, except for the edits of
+`Stage2Config` (two passes replaced by lean2rr's copies, two not run; see
+Opt/Registry.lean). Like
 `PassManager.run`, the driver:
 
 * processes strongly connected groups bottom-up (callees first), so that
@@ -36,19 +36,32 @@ structure Stage2Passes where
   /-- Lean's `monoPassesNoLambda` up to `saveMono`, plus `extractClosed`. -/
   monoNoLambda : Array Pass
 
-def stage2Passes : CoreM Stage2Passes := do
+/-- An edit of Lean's pass lists for Stage 2, with its reason (the edits
+are listed in Opt/Registry.lean). -/
+inductive Stage2Edit where
+  /-- Lean's pass `pass` is replaced by lean2rr's `by_`. -/
+  | replace (pass : Name) (by_ : Pass) (why : String)
+  /-- Lean's pass `pass` is not run. -/
+  | skip (pass : Name) (why : String)
+
+/-- lean2rr's edits of Lean's pass lists for Stage 2. -/
+abbrev Stage2Config := Array Stage2Edit
+
+/-- The three pass sequences of Stage 2: Lean's, edited by `cfg`. -/
+def stage2Passes (cfg : Stage2Config) : CoreM Stage2Passes := do
   let m ← getPassManager
-  let skip (p : Pass) := p.name == `inferVisibility || p.name == `toImpure
+  let skipped (p : Pass) : Bool := cfg.any fun | .skip n _ => n == p.name | _ => false
+  let replacement (p : Pass) : Option Pass := cfg.findSome? fun
+    | .replace n q _ => if n == p.name then some q else none
+    | _ => none
+  let edit (ps : Array Pass) : Array Pass :=
+    ps.filter (!skipped ·) |>.map fun p => (replacement p).getD p
   let some i := m.basePasses.findIdx? (·.name == `saveBase)
     | throwError "lean2rr: Lean's pass manager has no saveBase pass"
   return {
-    -- Lean's `toMono`, with types that keep constant type families.
-    toMono := m.basePasses[i:].toArray.filter (!skip ·) |>.map fun p =>
-      if p.name == `toMono then Lean.Compiler.LCNF.toMonoK else p
-    mono := m.monoPasses.filter (!skip ·) |>.map fun p =>
-      if p.name == `structProjCases then Lean.Compiler.LCNF.structProjCasesK else p
-    monoNoLambda := m.monoPassesNoLambda.filter (!skip ·) |>.map fun p =>
-      if p.name == `structProjCases then Lean.Compiler.LCNF.structProjCasesK else p
+    toMono := edit m.basePasses[i:].toArray
+    mono := edit m.monoPasses
+    monoNoLambda := edit m.monoPassesNoLambda
   }
 
 /-- Names of instance declarations called from `decl`. -/
@@ -70,9 +83,9 @@ def sccsBottomUp (decls : Array (Decl .pure)) : Array (Array (Decl .pure)) :=
 /-- Stage 2 on the output of Stage 1. Returns the mono declarations
 (instances plus the declarations passes created: `_redArg`, `_lam_N`,
 `_closed_N`, …). -/
-def runStage2 (decls : Array (Decl .pure)) (externs : Array (Decl .pure)) (check := true) :
+def runStage2 (cfg : Stage2Config) (decls : Array (Decl .pure)) (externs : Array (Decl .pure)) (check := true) :
     CoreM (Array (Decl .pure)) := do
-  let passes ← stage2Passes
+  let passes ← stage2Passes cfg
   CompilerM.run (phase := .base) do
     let mut out := #[]
     -- Extern instances only need their signatures converted.

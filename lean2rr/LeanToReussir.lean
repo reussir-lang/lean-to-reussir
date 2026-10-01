@@ -19,3 +19,5 @@ import LeanToReussir.MonoTypesKeep
 import LeanToReussir.TypedToMono
 import LeanToReussir.TypedStructProjCases
 import LeanToReussir.SinkProj
+import LeanToReussir.PassConfig
+import LeanToReussir.Opt.Registry

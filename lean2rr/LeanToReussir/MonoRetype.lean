@@ -199,6 +199,8 @@ def withSig (d : Decl .pure) (params : Array (Param .pure)) (ret : Expr) : Decl 
 
 structure MRetypeCtx where
   table : RelevanceTable
+  /-- Stage 2's pass lists (extern instances are built as Stage 2 builds them). -/
+  stage2 : Stage2Config
 
 structure MRetypeState where
   /-- Current signatures of the program's declarations and extern instances. -/
@@ -251,7 +253,7 @@ def externInstance (orig : Name) (base : Decl .pure) (typeArgs : Array Expr) : M
   if let some n := (← get).instances[(orig, typeArgs)]? then return n
   let k := (← get).nextInst
   let name := Name.num (orig ++ `_l2r_re) k
-  let passes ← stage2Passes
+  let passes ← stage2Passes (← read).stage2
   let decl ← CompilerM.run (phase := .base) do
     let d ← instantiateExtern base name typeArgs
     let out ← runPasses passes.toMono #[uniformDecl d] false
@@ -1379,7 +1381,7 @@ def typeMkRef (d : Decl .pure) : MRetypeM (Decl .pure) := do
 the declarations the entry point calls (`main`, startup work). Returns the
 declarations, including extern instances created by re-instantiation, and
 the instance keys extended with theirs. -/
-def retypeMono (table : RelevanceTable) (decls : Array (Decl .pure)) (keys : NameMap InstKey)
+def retypeMono (stage2 : Stage2Config) (table : RelevanceTable) (decls : Array (Decl .pure)) (keys : NameMap InstKey)
     (roots : Array Name) : CoreM (Array (Decl .pure) × NameMap InstKey) := do
   let mut st : MRetypeState := { keys }
   let mut bodies : NameMap (Code .pure) := {}
@@ -1436,7 +1438,7 @@ def retypeMono (table : RelevanceTable) (decls : Array (Decl .pure)) (keys : Nam
       types := split.map fun d => (decls.findIdx? (·.name == d.name)).map (types[·]!) |>.getD {}
       decls := split
     return decls ++ (← get).newExterns
-  let (decls, st') ← (act.run { table }).run st
+  let (decls, st') ← (act.run { table, stage2 }).run st
   return (decls, st'.keys)
 
 end LeanToReussir

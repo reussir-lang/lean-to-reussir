@@ -1,0 +1,78 @@
+import Lean
+import LeanToReussir.PassConfig
+import LeanToReussir.TypedToMono
+import LeanToReussir.TypedStructProjCases
+
+/-!
+# The pass registry
+
+Every pass lean2rr adds to or changes in the pipeline, in one place:
+
+* `stage2`: the edits of Lean's own Stage 2 pass lists (required);
+* `optimizations`: the optional passes, one line each (name, enabled by
+  default, description, the module's `install`). The core translation needs
+  none of them: removing a line removes the optimization, and
+  `lean2rr --disable-opt NAME` turns one off for a run;
+* `required`: parts of the translation that look like optimizations but are
+  not optional, with the reason.
+
+Stage 1 recompiles some declarations with Lean's base passes before
+`saveBase`, edited for type-unsafe code (`Mono.recompilePasses`); those
+edits depend on Stage 1's analysis and stay there.
+
+Adding a pass: write `Opt/Name.lean` with the transformation and an
+`install : PassConfig → PassConfig` that plugs it into a hook of
+`PassConfig` (passes over mono LCNF or over the generated Reussir functions,
+or a lowering hook of `LowerHooks`), import it here and add its line to
+`optimizations`. The order of the lines is the order of installation, so
+passes of the same kind run in this order.
+-/
+
+namespace LeanToReussir.Opt
+open Lean Compiler LCNF
+
+/-- lean2rr's edits of Lean's Stage 2 pass lists (translation plan §3). -/
+def stage2 : Stage2Config := #[
+  .replace `toMono toMonoK
+    "Lean's toMono erases type-former arguments (HashMap values become lcAny); lean2rr's copy keeps constant type families, so Stage 3 and the lowering see exact types",
+  .replace `structProjCases structProjCasesK
+    "the other pass that converts types: its result types must agree with toMonoK's",
+  .skip `inferVisibility
+    "module-visibility bookkeeping; it transforms no code",
+  .skip `toImpure
+    "boxing, reference counting and reset/reuse belong to Reussir (Stage 2 ends at mono, plus extractClosed)"]
+
+/-- The optional passes, in installation order. -/
+def optimizations : Array OptPass := #[]
+
+/-- Parts of the translation that are not optional. -/
+def required : Array RequiredPass := #[]
+
+/-- The configuration with the enabled optimizations, after turning off
+those named in `disabled` and on those named in `enabled`. An unknown name,
+or the name of a required part, is an error. -/
+def config (disabled enabled : Array String := #[]) : Except String PassConfig := do
+  for n in disabled ++ enabled do
+    if let some r := required.find? (·.name == n) then
+      throw s!"'{n}' is required, not an optimization: {r.reason}"
+    unless optimizations.any (·.name == n) do
+      throw s!"unknown optimization '{n}' (see --list-opts)"
+  let on (o : OptPass) : Bool := (o.enabled || enabled.contains o.name) && !disabled.contains o.name
+  return optimizations.foldl (init := { stage2 }) fun c o => if on o then o.install c else c
+
+/-- The registry as text (`lean2rr --list-opts`). -/
+def listing : String := Id.run do
+  let mut out := "Optimizations (in order; --disable-opt NAME turns one off):\n"
+  for o in optimizations do
+    out := out ++ s!"  {o.name}{if o.enabled then "" else " (off by default)"}: {o.description}\n"
+  out := out ++ "\nRequired (not optional):\n"
+  for r in required do
+    out := out ++ s!"  {r.name}: {r.description}\n    why: {r.reason}\n"
+  out := out ++ "\nStage 2 edits of Lean's passes (required):\n"
+  for e in stage2 do
+    match e with
+    | .replace n _ why => out := out ++ s!"  {n} replaced by lean2rr's copy: {why}\n"
+    | .skip n why => out := out ++ s!"  {n} not run: {why}\n"
+  return out
+
+end LeanToReussir.Opt
