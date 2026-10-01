@@ -2664,24 +2664,50 @@ fn l2r_ref_is_empty<T>(r : LRef<T>) -> bool [{
     { let c = leanrt::array::into_rc(r); let e = c.is_empty(); leanrt::rc_release(c); e }
 }];
 
-// ---- IO.Promise (`IO.Promise α` as `LRef<E>`, empty until resolved) ----
+// ---- IO.Promise ----
 //
-// Tasks run eagerly (translation plan §6), so reading a promise's result
-// happens after every resolution that can precede it; an unresolved promise
-// reads as dropped (`none`).
+// A promise is an `LPromise`: a runtime object holding the cell of its
+// task (`Promise.result?`, a task whose value is an `Option`, lean2rr's
+// `Option Box` so that typed and uniform code share it), which stays
+// unresolved until `Promise.resolve` (translation plan §5.14). Dropping the
+// last reference to an unresolved promise resolves it with `none`, as
+// natively (`leanrt::task::Promise`, through the program's
+// `l2r_promise_drop_c`).
+#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+pub struct LPromise;
 
-fn l2r_promise_new<T>() -> LRef<T> { l2r_ref_empty<T>() }
+// A new promise for the unresolved task `c`. Before `main` (no task manager)
+// Lean's internal panic.
+#[ffi(import)]
+fn l2r_promise_new<S>(c : LCell<S>) -> LPromise [{
+    {
+        let c = ::std::mem::ManuallyDrop::new(c);
+        let p: usize = unsafe { ::std::mem::transmute_copy(&*c) };
+        leanrt::task::promise_new(p)
+    }
+}];
 
-// `Promise.resolve v p`: only the first resolution counts.
-fn l2r_promise_resolve<T>(v : T, p : LRef<T>) -> L2RUnit {
-    let r = if l2r_ref_is_empty(p) { l2r_ref_set(p, v) } else { 0 };
-    L2RUnit::u{}
-}
+// The task of promise `p` (a new reference).
+#[ffi(import)]
+fn l2r_promise_cell<S>(p : LPromise) -> LCell<S> [{
+    {
+        let a = leanrt::task::promise_cell(&p);
+        let c: Rc<[:S:]> = unsafe { ::std::mem::transmute_copy(&a) };
+        let r = c.clone();
+        ::std::mem::forget(c);
+        leanrt::rc_release(p);
+        r
+    }
+}];
 
-// `Promise.result?` (the task's value; lean2rr wraps it in its `Task`).
-fn l2r_promise_result_with<T, O>(p : LRef<T>, none : O, some : T -> O) -> O {
-    if l2r_ref_is_empty(p) { none } else { some(l2r_ref_get(p)) }
-}
+// Release a promise (after an operation that borrows it).
+#[ffi(import)]
+fn l2r_promise_release(p : LPromise) -> u64 [{ { drop(p); 0 } }];
+
+// Promise `a` was resolved (its cell is `done`): 1 if its dependents must be
+// walked now (`l2r_task_walk`).
+#[ffi(import)]
+fn l2r_task_resolve_at(a : u64) -> u64 [{ leanrt::task::resolve(a as usize) }];
 
 // `Option.getOrBlock!` on `none`: Lean's forced panic message, then block
 // forever (as natively).
@@ -2785,13 +2811,22 @@ fn l2r_std_pop(base : u64) -> u64 [{ { leanrt::once::pop_context(base, 3); 0 } }
 // task converted from another representation: its computation, the original
 // cell, and for a task the original's identity). lean2rr also generates the functions that force the
 // state (`l2r_thunk_get_S`, `l2r_task_get_S`, ...): a thunk runs its closure
-// on first `get` and keeps the value; a task stays pending until it is
-// needed or `main` returns, except a pure task created while no task is
-// pending or running, which is computed at once. `leanrt::task` keeps the
-// queue of pending tasks and answers questions about their state.
+// on first `get` and keeps the value; a task created after `main` has
+// started stays pending until it is needed or `main` returns (during module
+// initialization it is computed at once). `leanrt::task` keeps the queues
+// of pending tasks and answers questions about their state.
 
+// A new cell; its padding (after the count) is the runtime's index slot for
+// tasks (`leanrt::task`), set to "none" here.
 #[ffi(import)]
-fn l2r_lcell_new<T>(v : T) -> LCell<T> [{ Rc::new(v) }];
+fn l2r_lcell_new<T>(v : T) -> LCell<T> [{
+    {
+        assert!(::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>());
+        let c = Rc::new(v);
+        leanrt::task::init_cell(unsafe { ::std::mem::transmute_copy::<Rc<[:T:]>, usize>(&c) });
+        c
+    }
+}];
 
 #[ffi(import)]
 fn l2r_lcell_get<T>(c : LCell<T>) -> T [{ c.data_ref().clone() }];
@@ -2815,21 +2850,22 @@ fn l2r_lcell_swap<T>(c : LCell<T>, v : T) -> T [{
     }
 }];
 
-// Queue a pending task at priority `prio` (the queue keeps a reference
-// until it runs).
+// A new deferred task at priority `prio` (`kind`: 1 a pure task, 2 a
+// dependent, see `leanrt::task::register`); the runtime keeps a reference
+// while it is pending. 1: the caller runs it now (priority 2^32-1).
 #[ffi(import)]
-fn l2r_task_register<S>(c : LCell<S>, tag : u64, prio : u64) -> u64 [{
+fn l2r_task_register<S>(c : LCell<S>, tag : u64, prio : u64, kind : u64) -> u64 [{
     {
         let c = ::std::mem::ManuallyDrop::new(c);
         let p: usize = unsafe { ::std::mem::transmute_copy(&*c) };
-        leanrt::task::register(p, tag, prio);
-        0
+        leanrt::task::register(p, tag, prio, kind)
     }
 }];
 
 // The walk of a finished task's dependents: the tag of the next `sync`
 // dependent to run (`u64::MAX`: the walk is over), which
-// `l2r_task_handed<S>()` then gives (with the queue's reference).
+// `l2r_task_handed<S>()` then gives (with the runtime's reference; to be
+// dropped instead when `l2r_task_deleting()`).
 #[ffi(import)]
 fn l2r_task_walk_next() -> u64 [{ leanrt::task::walk_next() }];
 
@@ -2841,44 +2877,52 @@ fn l2r_task_source_next_at(a : u64) -> u64 [{ leanrt::task::source_next(a as usi
 #[ffi(import)]
 fn l2r_task_handed<S>() -> LCell<S> [{ unsafe { ::std::mem::transmute_copy(&leanrt::task::handed()) } }];
 
-// Added to the thread id inside tasks (`IO.getTID`): the depth of running
-// tasks, as if each ran on a worker thread of its own.
+#[ffi(import)]
+fn l2r_task_deleting() -> bool [{ leanrt::task::deleting() }];
+
+// Added to the thread id inside tasks (`IO.getTID`): a number for the
+// worker thread the innermost running task runs on (0: main's).
 #[ffi(import)]
 fn l2r_task_tid_offset() -> u64 [{ leanrt::task::tid_offset() }];
 
-// A task starts / stops running (for `IO.checkCanceled` and the task's
-// state); `begin` removes it from the queue and drops the queue's reference.
+// A task starts running (for `IO.checkCanceled`, its state, its thread);
+// it leaves the queue, and the runtime's reference is dropped. 1: it runs
+// as on a worker thread, with stream cells of its own (`l2r_std_enter`);
+// 0: on the current thread (a `sync` dependent, priority 2^32-1).
 #[ffi(import)]
 fn l2r_task_begin<S>(c : LCell<S>) -> u64 [{
     {
         let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
-        if leanrt::task::begin(p) {
+        let r = leanrt::task::begin(p);
+        if r & leanrt::task::B_RELEASE != 0 {
             drop(unsafe { ::std::ptr::read(&c) });
         }
         drop(c);
-        0
+        r & leanrt::task::B_ENTER
     }
 }];
 
-// A running task stops without finishing (a `bind` task that now waits for
-// the task it continues as).
+// A running `bind` task now waits for the unfinished task `src` it
+// continues as (the runtime keeps the reference passed).
 #[ffi(import)]
-fn l2r_task_suspend<S>(c : LCell<S>) -> u64 [{
+fn l2r_task_bind_wait<S>(c : LCell<S>, src : u64) -> u64 [{
     {
-        let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
-        leanrt::task::suspend(p);
-        drop(c);
+        let c = ::std::mem::ManuallyDrop::new(c);
+        let p: usize = unsafe { ::std::mem::transmute_copy(&*c) };
+        leanrt::task::bind_wait(p, src as usize);
         0
     }
 }];
 
+// The running task has finished. 1: the caller walks its dependents now
+// (`l2r_task_walk`); 0: the walk that handed it over continues with them.
 #[ffi(import)]
 fn l2r_task_end<S>(c : LCell<S>) -> u64 [{
     {
         let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
-        leanrt::task::end(p);
+        let r = leanrt::task::end(p);
         drop(c);
-        0
+        r
     }
 }];
 
@@ -2897,16 +2941,23 @@ fn l2r_lcell_addr<S>(c : LCell<S>) -> u64 [{
 #[ffi(import)]
 fn l2r_task_cancel_at(a : u64) -> u64 [{ { leanrt::task::cancel(a as usize); 0 } }];
 
-// Task `dep` was created depending on task `src`, with `sync := true` or
-// not (for its start and its cancellation).
+// Task `dep` (registered as a dependent) was created depending on task
+// `src`, with `sync := true` or not (for its start and its cancellation).
+// 1: the caller runs it now (`src` finished, priority 2^32-1).
 #[ffi(import)]
-fn l2r_task_depend_at(src : u64, dep : u64, sync : bool) -> u64 [{ { leanrt::task::depend(src as usize, dep as usize, sync); 0 } }];
+fn l2r_task_depend_at(src : u64, dep : u64, sync : bool) -> u64 [{ leanrt::task::depend(src as usize, dep as usize, sync) }];
 
-// 0 waiting, 1 running, 2 finished.
+// 0 waiting, 1 running (or an unresolved promise), 2 finished.
 #[ffi(import)]
 fn l2r_task_status_at(a : u64) -> u8 [{ leanrt::task::status(a as usize) }];
 
-// `IO.getTaskState`: as `l2r_task_status_at`, or 3: run the task first.
+// For `IO.waitAny`: as `l2r_task_status_at`, or 3 for a pending task that
+// waits for an unresolved promise.
+#[ffi(import)]
+fn l2r_task_wait_status_at(a : u64) -> u8 [{ leanrt::task::wait_status(a as usize) }];
+
+// `IO.getTaskState`: as `l2r_task_status_at`, or 3: run the task first, or
+// 4: run queued tasks until the promise is resolved or none is left.
 #[ffi(import)]
 fn l2r_task_query_at(a : u64) -> u8 [{ leanrt::task::query(a as usize) }];
 
@@ -2914,21 +2965,19 @@ fn l2r_task_query_at(a : u64) -> u8 [{ leanrt::task::query(a as usize) }];
 fn l2r_task_deferring() -> bool [{ leanrt::task::deferring() }];
 
 #[ffi(import)]
-fn l2r_task_eager_pure() -> bool [{ leanrt::task::eager_pure() }];
-
-#[ffi(import)]
 fn l2r_task_manager_start() -> u64 [{ { leanrt::task::start(); 0 } }];
 
 #[ffi(import)]
 fn l2r_task_shutdown() -> u64 [{ { leanrt::task::shutdown(); 0 } }];
 
-// The next queued task when `main` has returned: its tag (`u64::MAX` if
-// none), then the cell itself (with the queue's reference).
+// The next queued task to run (when `main` has returned, or for a waiting
+// `main`): its tag (`u64::MAX` if none), then the cell itself (with the
+// runtime's reference; to be dropped instead when `l2r_task_deleting()`).
 #[ffi(import)]
 fn l2r_task_next_tag() -> u64 [{ leanrt::task::next_tag() }];
 
 #[ffi(import)]
-fn l2r_task_take<S>() -> LCell<S> [{ unsafe { ::std::mem::transmute_copy(&leanrt::task::take()) } }];
+fn l2r_task_take<S>() -> LCell<S> [{ unsafe { ::std::mem::transmute_copy(&leanrt::task::handed()) } }];
 
 #[ffi(import)]
 fn l2r_task_check_canceled() -> bool [{ leanrt::task::check_canceled() }];
@@ -3420,11 +3469,6 @@ fn l2r_io_timeit_with<R>(msg : LStr, act : L2RUnit -> R) -> R {
     let ignored = l2r_stderr_put(l2r_timeit_text(msg, t));
     r
 }
-
-// Tasks run eagerly, so every task has finished: `IO.getTaskState t`
-// (`TaskState` constructors passed in) and `IO.cancel t`.
-fn l2r_io_get_task_state_with<T, S>(t : T, waiting : S, running : S, finished : S) -> S { finished }
-fn l2r_io_cancel<T>(t : T) -> L2RUnit { L2RUnit::u{} }
 
 // `allocprof msg act`: runs the action, then prints what a Lean runtime
 // built without `RUNTIME_STATS` prints.

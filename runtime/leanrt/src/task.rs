@@ -1,70 +1,152 @@
 //! Bookkeeping for deferred tasks.
 //!
 //! The runtime is single-threaded. A task is a runtime cell (`LCell`) whose
-//! state lean2rr generates: `pending(action)`, `busy` or `done(value)`. IO
-//! tasks (`IO.asTask`, `IO.mapTask`, `IO.bindTask`) stay pending until the
-//! program first needs them, and otherwise run when `main` returns, like
-//! Lean's task manager, which finishes every queued task before the process
-//! exits. Pure tasks are computed when they are created, except while some
-//! task is pending or running: then they are deferred too, since their code
-//! might need such a task (which may be waiting for `main`). Each of these
-//! schedules is one a native thread pool can produce (a worker may start a
-//! task at any time after it is created). See translation plan §5.14.
+//! state lean2rr generates: `pending(action)`, `busy` or `done(value)` (and
+//! a few more). After `main` has started, every new task is deferred: it
+//! stays pending until the program first needs it, and otherwise runs when
+//! `main` returns, like Lean's task manager, which finishes every queued
+//! task before the process exits. Each such schedule is one a native thread
+//! pool can produce (a worker may start a task at any time after it is
+//! created). See translation plan §5.14.
 //!
-//! This module holds what the generated code cannot: the queues of pending
-//! tasks (one per priority, in the order Lean's task manager enqueues them;
-//! they own one reference to each cell), the walk of a finished task's
-//! dependents, the stack of running tasks, cancellation flags and their
-//! propagation to dependent tasks, and the phase of the program. A task is identified by the address
-//! of its cell, which is stable while the queue or a running computation
-//! holds it: every pending task cell is queued, and entries about a task are
-//! dropped when it finishes. (A task converted to another representation is
-//! a new cell that records the address of the task it stands for, and keeps
-//! that task alive; questions about it are asked about that address.)
+//! This module holds what the generated code cannot: an entry per
+//! unfinished task (in a slab), the queues of pending tasks (one per
+//! priority, in the order Lean's task manager enqueues them), each task's
+//! dependents (an intrusive list, newest first, like Lean's `m_head_dep`),
+//! the walk of a finished task's dependents, the stack of running tasks,
+//! cancellation, the single native worker's state (which task it would
+//! have started), and the phase of the program.
+//!
+//! A task is identified by the address of its cell. Its entry's index is
+//! kept in the cell itself: an `LCell<S>` is a `reussir_rt::rc::Rc` of a
+//! pointer-sized state, whose box is a 4-byte count, 4 bytes of padding and
+//! the state, and the padding holds the index (`l2r_lcell_new` initializes
+//! it to `NONE`; an index is valid when its entry records the same cell).
+//! An entry lives until its task finishes (or is deleted): the address of a
+//! finished task has no entry.
+//!
+//! References: the runtime holds one reference to the cell of every
+//! deferred task that is pending (queued or waiting for another task), as
+//! Lean's queue does for an IO task (`keep_alive`). A pure task (`Task.spawn`,
+//! `Task.map`, `Task.bind`: `keep_alive = false`) is not kept alive natively:
+//! when the program drops it before it has started, Lean deletes it. Here,
+//! a pure task the runtime is about to start whose only reference is the
+//! runtime's is deleted instead (handed to the generated code, which drops
+//! it), also when the only other references come from pure dependents that
+//! are dropped themselves (`dropped`).
 
 use std::cell::UnsafeCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 struct Global<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Global<T> {}
+
+/// No entry / end of a list.
+pub const NONE: u32 = u32::MAX;
 
 /// Priorities: Lean's 0..=8 (`Task.Priority.max`), and 9 for dedicated
 /// tasks (a thread of their own natively, so started first here).
 const PRIOS: usize = 10;
 
+/// `kind` bits of `register`: a pure task (`keep_alive = false`), and a
+/// dependent (`depend` follows and decides where it goes).
+pub const K_PURE: u64 = 1;
+pub const K_DEP: u64 = 2;
+
+/// `begin` result bits: run with a stream context of its own (a worker
+/// thread), and release the runtime's reference.
+pub const B_ENTER: u64 = 1;
+pub const B_RELEASE: u64 = 2;
+
+// Entry flags.
+/// `Task.spawn`/`map`/`bind`: deleted when dropped before it starts.
+const PURE: u16 = 1 << 0;
+/// Runs on the thread that finishes the task it waits for, as soon as that
+/// one finishes (`sync := true`, or priority `LEAN_SYNC_PRIO`).
+const SYNC: u16 = 1 << 1;
+/// In its priority's queue.
+const QUEUED: u16 = 1 << 2;
+/// Waits for `source` (a dependent, or a bind task waiting for the task it
+/// continues as); in that task's list of dependents.
+const WAITING: u16 = 1 << 3;
+const RUNNING: u16 = 1 << 4;
+const CANCELED: u16 = 1 << 5;
+/// Natively it could have started before `main` returned (see
+/// `check_canceled`).
+const EARLY: u16 = 1 << 6;
+/// An unresolved promise: no computation, no reference held.
+const PROMISE: u16 = 1 << 7;
+/// The runtime holds one reference to the cell.
+const HELD: u16 = 1 << 8;
+/// Runs on the current thread when it begins (a `sync` dependent handed by
+/// a walk, a task at priority `LEAN_SYNC_PRIO`): `thread` is set.
+const INLINE: u16 = 1 << 9;
+/// `IO.checkCanceled` was called in the current run.
+const CHECKED: u16 = 1 << 10;
+/// Priority `LEAN_SYNC_PRIO` (2^32-1): runs as soon as it is enqueued.
+const SYNCPRIO: u16 = 1 << 11;
+/// Handed to a walk's dispatcher: its own walk is left to that dispatcher.
+const FROM_WALK: u16 = 1 << 12;
+/// Running on the thread of whoever ran it (it began `INLINE`).
+const ON_THREAD: u16 = 1 << 13;
+
 struct Entry {
-    /// Position in its priority's queue (while not waiting).
-    seq: i64,
-    /// Which generated state type the cell has (lean2rr's tag).
-    tag: u64,
-    /// `IO.getTaskState` reported this task as waiting: the sleep count at
-    /// the first such answer, and the number of answers.
-    observed: Option<u64>,
-    queries: u32,
-    /// Waits for the task it depends on (`mapTask`, `bindTask`, `Task.map`,
-    /// `Task.bind` of a task unfinished at its creation): off the queue until
-    /// that task finishes.
-    waiting: bool,
-}
-
-/// What stays known about an unfinished task (pending, running, or a bind
-/// task waiting for its continuation), until it finishes.
-struct Info {
-    prio: usize,
-    /// Created with `sync := true`: Lean runs it on the thread that finishes
-    /// the task it waits for, as soon as that one finishes (`LEAN_SYNC_PRIO`
-    /// in `enqueue_core`), also when it waits again (a bind task).
-    sync: bool,
-    /// The task it was created depending on, while that is unfinished.
-    source: Option<usize>,
-}
-
-struct Running {
+    /// The cell's address; 0 for a free slot.
     cell: usize,
-    /// `IO.checkCanceled` was called in this run.
-    checked: bool,
-    /// The sleep count when the run started.
-    epoch: u64,
+    /// Which generated state type the cell has (lean2rr's tag).
+    tag: u32,
+    flags: u16,
+    prio: u8,
+    /// Its dependents, newest first; its siblings in its source's list.
+    head_dep: u32,
+    next_dep: u32,
+    prev_dep: u32,
+    /// `QUEUED`: the sequence number of its queue item (stale items are
+    /// skipped); `WAITING`: the task it waits for (its source).
+    link: u32,
+    /// Pending: `IO.getTaskState` reported it waiting (see `query`): the
+    /// sleep count + 1 at the first such answer (0: never), and the number
+    /// of answers. Running (or about to run `INLINE`): its thread number
+    /// (0 is `main`'s), and the sleep count when the run started.
+    aux: [u32; 2],
+}
+
+impl Entry {
+    #[inline]
+    fn source(&self) -> u32 {
+        self.link
+    }
+    #[inline]
+    fn thread(&self) -> u32 {
+        self.aux[0]
+    }
+    #[inline]
+    fn start(&self) -> u32 {
+        self.aux[1]
+    }
+}
+
+const FREE: Entry = Entry {
+    cell: 0, tag: 0, flags: 0, prio: 0, head_dep: NONE, next_dep: NONE, prev_dep: NONE, link: NONE, aux: [0, 0],
+};
+
+/// The dependents of a finished task still to be walked.
+struct Walk {
+    /// The finished task's entry, kept (without its cell) until the walk is
+    /// over: its list of dependents is the walk's, newest first, as Lean's
+    /// `handle_finished` walks them.
+    owner: u32,
+    /// The thread that finished the task (its `sync` dependents run there).
+    thread: u32,
+    /// The task finished before Lean's shutdown flag was set (natively).
+    early: bool,
+    canceled: bool,
+    /// The worker is free once the walk is over (see `Tasks::worker`).
+    worker: bool,
+    /// The walk's own dispatcher stops at its end (otherwise the walk of a
+    /// `sync` dependent, continued by the dispatcher of the enclosing walk).
+    base: bool,
 }
 
 struct Tasks {
@@ -74,56 +156,65 @@ struct Tasks {
     /// `main` has returned; the remaining tasks run as during Lean's
     /// task-manager shutdown.
     shutting_down: bool,
-    next_seq: i64,
     /// Sleeps so far (`IO.sleep`, `dbgSleep`): time passing, for the
     /// heuristics below.
-    epoch: u64,
+    epoch: u32,
+    slab: Vec<Entry>,
+    free: Vec<u32>,
     /// Pending tasks that do not wait for another task, one queue per
     /// priority as in Lean's task manager (the highest non-empty one is
-    /// taken first), in the order they were enqueued: seq -> cell address.
-    queues: [BTreeMap<i64, usize>; PRIOS],
-    /// Pending tasks by cell address.
-    pending: BTreeMap<usize, Entry>,
-    /// Unfinished tasks.
-    info: BTreeMap<usize, Info>,
-    /// Unfinished tasks for which `IO.cancel` was called.
-    canceled: BTreeSet<usize>,
-    /// Unfinished task -> the tasks created while it was unfinished that
-    /// depend on it, oldest first.
-    deps: BTreeMap<usize, Vec<usize>>,
-    /// The dependents of finished tasks still being walked (innermost
-    /// last), newest dependent first, as Lean's `handle_finished` walks
-    /// them: a `sync` one runs there and then, the others are enqueued.
-    walks: Vec<(usize, VecDeque<usize>)>,
-    /// A task handed to the generated code (`walk_next`, `source_next`)
-    /// with the queue's reference, for `handed`.
-    handed: Option<usize>,
-    /// The task a native worker would be running: with one worker thread
-    /// (`LEAN_NUM_THREADS=1`), an idle worker starts the first task queued
-    /// and, when that finishes, the first of the highest non-empty queue at
-    /// that moment. Such a started task runs first in the final run of
-    /// queued tasks, whatever tasks are queued after it.
-    worker: Option<usize>,
-    /// For `source_next`: a task being forced and the pending tasks it waits
-    /// for, still to run (deepest last), innermost last.
-    chains: Vec<(usize, Vec<usize>)>,
-    /// Running tasks, innermost last.
-    running: Vec<Running>,
+    /// taken first), in the order they were enqueued: (entry, sequence
+    /// number).
+    queues: [VecDeque<(u32, u32)>; PRIOS],
+    /// The number of valid items of each queue.
+    queued: [u32; PRIOS],
+    next_q: u32,
+    /// Walks in progress, innermost last.
+    walks: Vec<Walk>,
+    /// A task handed to the generated code (`walk_next`, `source_next`,
+    /// `next_tag`), with the runtime's reference, to be run or, when
+    /// `deleting`, dropped.
+    handed: usize,
+    deleting: bool,
+    /// The task the single native worker (`LEAN_NUM_THREADS=1`) has started,
+    /// still pending here: it runs first in the final run of queued tasks.
+    /// An idle worker is woken by an enqueue (`wake`: when) and picks the
+    /// first task of the highest non-empty queue once it has woken (a
+    /// thread start, `LATENCY_COLD`, the first time, `LATENCY_WARM` later):
+    /// tasks queued back to back compete by priority. When a task it ran
+    /// finishes, it picks the next one right away.
+    worker: u32,
+    wake: Option<Instant>,
+    worker_exists: bool,
+    /// For `source_next`: a task being forced (its cell) and the pending
+    /// tasks it waits for, still to run (entry and cell, deepest last),
+    /// innermost last.
+    chains: Vec<(usize, Vec<(u32, usize)>)>,
+    /// Running tasks (entries), innermost last.
+    running: Vec<u32>,
 }
+
+/// How long a native worker takes to pick up a task after the enqueue that
+/// woke it: measured with `LEAN_NUM_THREADS=1` (a new thread: 80-100 µs;
+/// an idle one: 15-20 µs).
+const LATENCY_COLD: Duration = Duration::from_micros(90);
+const LATENCY_WARM: Duration = Duration::from_micros(20);
 
 static TASKS: Global<Tasks> = Global(UnsafeCell::new(Tasks {
     started: false,
     shutting_down: false,
-    next_seq: 0,
     epoch: 0,
-    queues: [const { BTreeMap::new() }; PRIOS],
-    pending: BTreeMap::new(),
-    info: BTreeMap::new(),
-    canceled: BTreeSet::new(),
-    deps: BTreeMap::new(),
+    slab: Vec::new(),
+    free: Vec::new(),
+    queues: [const { VecDeque::new() }; PRIOS],
+    queued: [0; PRIOS],
+    next_q: 0,
     walks: Vec::new(),
-    handed: None,
-    worker: None,
+    handed: 0,
+    deleting: false,
+    worker: NONE,
+    wake: None,
+    worker_exists: false,
     chains: Vec::new(),
     running: Vec::new(),
 }));
@@ -133,188 +224,609 @@ fn tasks() -> &'static mut Tasks {
     unsafe { &mut *TASKS.0.get() }
 }
 
+/// The index slot in a cell (the box's padding, see the module comment).
+#[inline]
+fn slot(cell: usize) -> *mut u32 {
+    (cell + 4) as *mut u32
+}
+
+/// The count of a cell (the box's first word).
+#[inline]
+fn count(cell: usize) -> u32 {
+    unsafe { *(cell as *const u32) }
+}
+
+/// Initialize a new cell's index slot (`l2r_lcell_new`).
+#[inline]
+pub fn init_cell(cell: usize) {
+    unsafe { *slot(cell) = NONE }
+}
+
+/// The entry of the task at `cell`, `NONE` if it has none (finished, or not
+/// a deferred task).
+#[inline]
+fn find(cell: usize) -> u32 {
+    let t = tasks();
+    let i = unsafe { *slot(cell) };
+    if (i as usize) < t.slab.len() && t.slab[i as usize].cell == cell { i } else { NONE }
+}
+
+#[inline]
+fn ent(i: u32) -> &'static mut Entry {
+    unsafe { tasks().slab.get_unchecked_mut(i as usize) }
+}
+
+fn alloc(cell: usize, tag: u32, flags: u16, prio: u8) -> u32 {
+    let t = tasks();
+    let e = Entry { cell, tag, flags, prio, ..FREE };
+    let i = match t.free.pop() {
+        Some(i) => {
+            t.slab[i as usize] = e;
+            i
+        }
+        None => {
+            t.slab.push(e);
+            (t.slab.len() - 1) as u32
+        }
+    };
+    unsafe { *slot(cell) = i };
+    i
+}
+
+/// Remove entry `i` (unqueued, not waiting, no dependents left).
+fn release(i: u32) {
+    let e = ent(i);
+    e.cell = 0;
+    e.flags = 0;
+    tasks().free.push(i);
+}
+
+/// The thread of the innermost running task (0: `main`).
+#[inline]
+fn cur_thread() -> u32 {
+    match tasks().running.last() {
+        Some(&r) => ent(r).thread(),
+        None => 0,
+    }
+}
+
 /// The entry point calls this right before `main`
 /// (`lean_io_mark_end_initialization` + `lean_init_task_manager`).
 pub fn start() {
     tasks().started = true;
 }
 
-/// Whether new IO tasks are deferred (otherwise they run at once).
+/// Whether new tasks are deferred (otherwise they run at once).
 #[inline]
 pub fn deferring() -> bool {
     tasks().started
 }
 
-/// Whether a new pure task is computed at once: during initialization, or
-/// when no task is pending or running (so its code cannot need one).
-#[inline]
-pub fn eager_pure() -> bool {
-    let t = tasks();
-    !t.started || (t.pending.is_empty() && t.running.is_empty())
-}
-
-/// `main` has returned; the remaining tasks are about to run.
+/// `main` has returned; the remaining tasks are about to run. The tasks
+/// queued now could have been started by native workers before Lean's
+/// shutdown flag was set (`EARLY`).
 pub fn shutdown() {
-    tasks().shutting_down = true;
+    settle_worker();
+    let t = tasks();
+    t.shutting_down = true;
+    for p in 0..PRIOS {
+        for k in 0..t.queues[p].len() {
+            let (i, q) = t.queues[p][k];
+            let e = ent(i);
+            if e.cell != 0 && e.flags & QUEUED != 0 && e.link == q {
+                e.flags |= EARLY;
+            }
+        }
+    }
 }
 
 /// `IO.sleep` / `dbgSleep`.
 #[inline(never)]
 pub fn sleep_ms(ms: u32) {
+    settle_worker();
     tasks().epoch += 1;
-    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    std::thread::sleep(Duration::from_millis(ms as u64));
+    settle_worker();
 }
 
-/// Queue a pending task at priority `prio` (Lean's `Task.Priority`; above
-/// 8 is dedicated). The queue takes over one reference to the cell at
-/// `cell`. A bind task queued again keeps its priority.
-#[inline(never)]
-pub fn register(cell: usize, tag: u64, prio: u64) {
+/// Lean passes `lean_unbox(prio)` as an `unsigned`: the priority modulo
+/// 2^32, where 2^32-1 is `LEAN_SYNC_PRIO` and above 8 is dedicated.
+fn priority(prio: u64) -> (u8, bool) {
+    let p = prio as u32;
+    if p == u32::MAX { (0, true) } else { ((p as u64).min(PRIOS as u64 - 1) as u8, false) }
+}
+
+/// Whether running task `i` could still be running before Lean's shutdown
+/// flag was set: it started early and no time has passed in it.
+fn early_now(i: u32) -> bool {
     let t = tasks();
-    let prio = t.info.entry(cell).or_insert(Info { prio: prio.min(PRIOS as u64 - 1) as usize, sync: false, source: None }).prio;
-    let seq = t.next_seq;
-    t.next_seq += 1;
-    t.queues[prio].insert(seq, cell);
-    t.pending.insert(cell, Entry { seq, tag, observed: None, queries: 0, waiting: false });
-    if t.worker.is_none() && t.started && !t.shutting_down {
-        t.worker = Some(cell);
+    let e = ent(i);
+    t.shutting_down && e.flags & EARLY != 0 && e.flags & CHECKED == 0 && e.start() == t.epoch
+}
+
+/// A new deferred task at priority `prio` (Lean's `Task.Priority`, as
+/// passed); the runtime takes over one reference to the cell. Returns 1 if
+/// the caller must run it now, on the current thread (priority
+/// `LEAN_SYNC_PRIO`, not a dependent: `enqueue_core` runs it at once).
+#[inline(never)]
+pub fn register(cell: usize, tag: u64, prio: u64, kind: u64) -> u64 {
+    settle_worker();
+    let (p, sp) = priority(prio);
+    let mut flags = HELD;
+    if kind & K_PURE != 0 {
+        flags |= PURE;
+    }
+    if sp {
+        flags |= SYNC | SYNCPRIO;
+    }
+    if let Some(&r) = tasks().running.last() {
+        if early_now(r) {
+            flags |= EARLY;
+        }
+    }
+    let i = alloc(cell, tag as u32, flags, p);
+    if kind & K_DEP != 0 {
+        return 0;
+    }
+    if sp {
+        run_here(i);
+        return 1;
+    }
+    enqueue(i);
+    0
+}
+
+/// Task `i` is to run on the current thread when it begins.
+fn run_here(i: u32) {
+    let th = cur_thread();
+    let e = ent(i);
+    e.flags |= INLINE;
+    e.aux[0] = th;
+}
+
+/// Put pending task `i` at the end of its priority's queue.
+fn enqueue(i: u32) {
+    let t = tasks();
+    let e = ent(i);
+    e.flags |= QUEUED;
+    t.next_q = t.next_q.wrapping_add(1);
+    e.link = t.next_q;
+    t.queues[e.prio as usize].push_back((i, e.link));
+    t.queued[e.prio as usize] += 1;
+    // An enqueue by `main` wakes the idle worker.
+    if t.started && !t.shutting_down && t.worker == NONE && t.wake.is_none() && t.running.is_empty() {
+        t.wake = Some(Instant::now());
     }
 }
 
-/// The worker is idle: it starts the next queued task (see `Tasks::worker`).
-fn worker_idle() {
-    let t = tasks();
-    t.worker = next_queued();
-}
-
-/// `dep` was created depending on `src` (`sync`: with `sync := true`): if
-/// `src` is unfinished, `dep` waits for it (in the final run of queued
-/// tasks), runs or is enqueued when it finishes, and will be canceled if
-/// `src` finishes canceled, as Lean's `add_dep` and `handle_finished` do.
-#[inline(never)]
-pub fn depend(src: usize, dep: usize, sync: bool) {
-    if status(src) != 2 {
+/// Take task `i` off its queue: its item is removed if it is at an end of
+/// the queue (a task forced right after it was created), and becomes stale
+/// otherwise (skipped later; the queue is compacted when they pile up).
+fn unqueue(i: u32) {
+    let e = ent(i);
+    if e.flags & QUEUED != 0 {
+        e.flags &= !QUEUED;
         let t = tasks();
-        t.deps.entry(src).or_default().push(dep);
-        if let Some(i) = t.info.get_mut(&dep) {
-            i.sync |= sync;
-            i.source = Some(src);
-        }
-        if let Some(e) = t.pending.get_mut(&dep) {
-            if !e.waiting {
-                e.waiting = true;
-                let prio = t.info.get(&dep).map_or(0, |i| i.prio);
-                t.queues[prio].remove(&e.seq);
-            }
-        }
-        if t.worker == Some(dep) {
-            worker_idle();
+        let p = e.prio as usize;
+        t.queued[p] -= 1;
+        let q = &mut t.queues[p];
+        if q.back() == Some(&(i, e.link)) {
+            q.pop_back();
+        } else if q.front() == Some(&(i, e.link)) {
+            q.pop_front();
+        } else if q.len() > 64 && q.len() > 4 * t.queued[p] as usize {
+            q.retain(|&(j, l)| {
+                let f = ent(j);
+                f.cell != 0 && f.flags & QUEUED != 0 && f.link == l
+            });
         }
     }
 }
 
-/// Remove a pending task from the queues (the caller takes the queue's
-/// reference).
-fn unqueue(cell: usize) -> bool {
-    let t = tasks();
-    match t.pending.remove(&cell) {
-        Some(e) => {
-            if !e.waiting {
-                let prio = t.info.get(&cell).map_or(0, |i| i.prio);
-                t.queues[prio].remove(&e.seq);
-            }
-            true
-        }
-        None => false,
+/// Link task `d` at the head of `s`'s dependents.
+fn link(s: u32, d: u32) {
+    let h = ent(s).head_dep;
+    let e = ent(d);
+    e.link = s;
+    e.next_dep = h;
+    e.prev_dep = NONE;
+    e.flags |= WAITING;
+    if h != NONE {
+        ent(h).prev_dep = d;
     }
+    ent(s).head_dep = d;
 }
 
-fn is_running(cell: usize) -> bool {
-    tasks().running.iter().any(|r| r.cell == cell)
+/// Unlink waiting task `d` from its source's dependents.
+fn unlink(d: u32) {
+    let e = ent(d);
+    if e.flags & WAITING == 0 {
+        return;
+    }
+    let (s, n, p) = (e.source(), e.next_dep, e.prev_dep);
+    if p != NONE {
+        ent(p).next_dep = n;
+    } else if s != NONE {
+        ent(s).head_dep = n;
+    }
+    if n != NONE {
+        ent(n).prev_dep = p;
+    }
+    let e = ent(d);
+    e.link = NONE;
+    e.next_dep = NONE;
+    e.prev_dep = NONE;
+    e.flags &= !WAITING;
 }
 
-/// A task starts running. Returns whether the queue held a reference to the
-/// cell, which the caller must now release.
+/// `dep` (just registered with `K_DEP`) was created depending on `src`
+/// (`sync`: with `sync := true`): if `src` is unfinished, `dep` waits for it
+/// and runs or is enqueued when it finishes, as Lean's `add_dep`; otherwise
+/// it is enqueued now. Returns 1 if the caller must run it now (priority
+/// `LEAN_SYNC_PRIO` and `src` finished).
 #[inline(never)]
-pub fn begin(cell: usize) -> bool {
+pub fn depend(src: usize, dep: usize, sync: bool) -> u64 {
+    let d = find(dep);
+    if d == NONE {
+        return 0;
+    }
+    if sync {
+        ent(d).flags |= SYNC;
+    }
+    let s = find(src);
+    if s != NONE {
+        link(s, d);
+        return 0;
+    }
+    if ent(d).flags & SYNCPRIO != 0 {
+        run_here(d);
+        return 1;
+    }
+    enqueue(d);
+    0
+}
+
+/// The running `bind` task `cell` has run its function, which returned the
+/// unfinished task `src`: it stops running and waits for `src` (keeping
+/// its priority and flags), then continues as it (`task_bind_fn1` and
+/// `run_task` re-adding it as a dependent). The runtime takes over one
+/// reference to the cell.
+#[inline(never)]
+pub fn bind_wait(cell: usize, src: usize) {
     let t = tasks();
-    t.running.push(Running { cell, checked: false, epoch: t.epoch });
-    unqueue(cell)
-}
-
-/// The running task `cell` stops without finishing: it will run again (a
-/// `bind` task waiting for the task it continues as). Its flags, priority
-/// and dependents stay.
-#[inline(never)]
-pub fn suspend(cell: usize) {
-    let top = tasks().running.pop();
-    debug_assert_eq!(top.map(|r| r.cell), Some(cell));
-    if tasks().worker == Some(cell) {
+    let i = find(cell);
+    if t.running.last() == Some(&i) {
+        t.running.pop();
+    }
+    let e = ent(i);
+    e.flags &= !(RUNNING | INLINE | FROM_WALK | ON_THREAD);
+    e.flags |= HELD;
+    e.aux = [0, 0];
+    let s = find(src);
+    if s != NONE {
+        link(s, i);
+    } else {
+        enqueue(i);
+    }
+    if tasks().worker == i {
         worker_idle();
     }
 }
 
-/// The running task `cell` has finished: its dependents are to be walked
-/// (`walk_next`, which the generated code calls next), and canceled too if
-/// it was.
+/// A task starts running (`B_ENTER`: as a worker would, with streams of
+/// its own; `B_RELEASE`: the caller must release the runtime's reference).
+/// A cell without an entry is a converted task forwarding to its original:
+/// it runs where it is forced.
 #[inline(never)]
-pub fn end(cell: usize) {
+pub fn begin(cell: usize) -> u64 {
     let t = tasks();
-    let top = t.running.pop();
-    debug_assert_eq!(top.map(|r| r.cell), Some(cell));
-    t.info.remove(&cell);
-    let canceled = t.canceled.remove(&cell);
-    let ds = t.deps.remove(&cell).unwrap_or_default();
-    if canceled {
-        for &d in &ds {
-            if is_running(d) || tasks().pending.contains_key(&d) {
-                tasks().canceled.insert(d);
-            }
-        }
+    let mut i = find(cell);
+    if i == NONE {
+        i = alloc(cell, 0, INLINE, 0);
+        ent(i).aux[0] = cur_thread();
     }
+    let mut r = 0;
+    let e = ent(i);
+    if e.flags & HELD != 0 {
+        r |= B_RELEASE;
+    }
+    unqueue(i);
+    unlink(i);
+    let e = ent(i);
+    let mut on = ON_THREAD;
+    if e.flags & INLINE == 0 {
+        r |= B_ENTER;
+        on = 0;
+        e.aux[0] = cur_thread() + 1;
+    }
+    e.flags = (e.flags & !(HELD | INLINE | CHECKED | ON_THREAD)) | RUNNING | on;
+    e.aux[1] = t.epoch;
+    t.running.push(i);
+    r
+}
+
+/// The running task `cell` has finished: its dependents are to be walked
+/// (`walk_next`), and canceled too if it was. Returns 1 if the caller must
+/// walk them now (`l2r_task_walk`), 0 if the dispatcher that handed this
+/// task over continues with them.
+#[inline(never)]
+pub fn end(cell: usize) -> u64 {
     let t = tasks();
-    for &d in &ds {
-        if let Some(i) = t.info.get_mut(&d) {
-            i.source = None;
-        }
+    let Some(i) = t.running.pop() else { return 0 };
+    debug_assert_eq!(ent(i).cell, cell);
+    let early = early_now(i);
+    let e = ent(i);
+    let flags = e.flags;
+    let thread = e.thread();
+    // No longer found by its cell (finished); the entry stays for the walk.
+    e.cell = 0;
+    e.flags = 0;
+    let base = flags & FROM_WALK == 0;
+    // The worker that ran it picks the next task once the walk is over.
+    let worker = t.worker == i
+        || (t.worker == NONE && t.running.is_empty() && t.started && !t.shutting_down && flags & ON_THREAD == 0);
+    if worker {
+        t.worker = NONE;
+        t.wake = None;
     }
-    t.walks.push((cell, ds.into_iter().rev().collect()));
+    t.walks.push(Walk { owner: i, thread, early, canceled: flags & CANCELED != 0, worker, base });
+    if base { 1 } else { 0 }
+}
+
+/// Promise `cell` has been resolved (its state is `done`): its dependents
+/// are to be walked on the resolving thread. Returns 1 if the caller must
+/// walk them (`l2r_task_walk`).
+#[inline(never)]
+pub fn resolve(cell: usize) -> u64 {
+    let t = tasks();
+    let i = find(cell);
+    if i == NONE || ent(i).flags & PROMISE == 0 {
+        return 0;
+    }
+    let early = match t.running.last() {
+        Some(&r) => early_now(r),
+        None => false,
+    };
+    let e = ent(i);
+    let canceled = e.flags & CANCELED != 0;
+    e.cell = 0;
+    e.flags = 0;
+    let thread = cur_thread();
+    t.walks.push(Walk { owner: i, thread, early, canceled, worker: false, base: true });
+    1
+}
+
+/// An `IO.Promise`: the cell of its task, with one reference (natively the
+/// promise holds one token of its task). Dropping the last reference to an
+/// unresolved promise resolves it with `none` (Lean's `deactivate_promise`)
+/// through the program's `l2r_promise_drop_c(cell)`, which also releases
+/// the reference.
+pub struct Promise {
+    cell: usize,
+}
+
+extern "C" {
+    /// lean2rr's `l2r_promise_drop(c : LCell<S>) -> u64` (one pointer
+    /// argument, consumed), exported as `l2r_promise_drop_c` by programs
+    /// that create promises.
+    #[linkage = "extern_weak"]
+    static l2r_promise_drop_c: *const std::ffi::c_void;
+}
+
+impl Drop for Promise {
+    fn drop(&mut self) {
+        let f = unsafe { l2r_promise_drop_c };
+        assert!(!f.is_null(), "leanrt: promise without l2r_promise_drop_c");
+        let f: unsafe extern "C" fn(usize) -> u64 = unsafe { std::mem::transmute(f) };
+        unsafe { f(self.cell) };
+    }
+}
+
+pub type LPromise = reussir_rt::rc::Rc<Box<dyn std::any::Any>>;
+
+/// `IO.Promise.new`: a promise for the new unresolved task `cell` (whose
+/// reference it takes). Before `main` Lean has no task manager, and
+/// `lean_promise_new` reports an internal panic.
+#[inline(never)]
+pub fn promise_new(cell: usize) -> LPromise {
+    if !tasks().started {
+        crate::internal_panic(
+            "`IO.Promise.new` called before the task manager is running; this typically happens when called (directly or transitively, e.g. via `IO.CancelToken.new`) from an `initialize` block. Construct lazily on first use instead.",
+        );
+    }
+    alloc(cell, 0, PROMISE, 0);
+    reussir_rt::rc::Rc::new(Box::new(Promise { cell }) as Box<dyn std::any::Any>)
+}
+
+/// The cell of promise `p`'s task (borrowed).
+#[inline(never)]
+pub fn promise_cell(p: &LPromise) -> usize {
+    p.downcast_ref::<Promise>().expect("leanrt: not a promise").cell
+}
+
+/// Whether pending pure task `i` is to be deleted rather than run: the
+/// runtime holds the only reference, or the other references come from
+/// pure dependents that are themselves dropped (one each), within a small
+/// search. Returns the task to delete now (`i`, or such a dependent, which
+/// goes first: it holds a reference to `i`), or `NONE`.
+fn dropped(i: u32) -> u32 {
+    let mut budget = 32u32;
+    let mut first = NONE;
+    if dropped_rec(i, &mut budget, &mut first) { first } else { NONE }
+}
+
+fn dropped_rec(i: u32, budget: &mut u32, first: &mut u32) -> bool {
+    let e = ent(i);
+    if e.flags & (PURE | HELD) != (PURE | HELD) || e.flags & (RUNNING | PROMISE) != 0 || tasks().worker == i {
+        return false;
+    }
+    let c = count(e.cell);
+    if c == 1 {
+        if *first == NONE {
+            *first = i;
+        }
+        return true;
+    }
+    let mut n = 0;
+    let mut d = e.head_dep;
+    while d != NONE {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        if !dropped_rec(d, budget, first) {
+            return false;
+        }
+        n += 1;
+        d = ent(d).next_dep;
+    }
+    n > 0 && c == 1 + n
+}
+
+/// Hand pending task `i` to the generated code (with the runtime's
+/// reference), to run it or (`del`) drop it; returns its tag.
+fn hand(i: u32, del: bool) -> u64 {
+    let t = tasks();
+    unqueue(i);
+    let e = ent(i);
+    let tag = e.tag as u64;
+    t.handed = e.cell;
+    t.deleting = del;
+    if del {
+        unlink(i);
+        // Its own (deleted) dependents went first.
+        debug_assert_eq!(ent(i).head_dep, NONE);
+        release(i);
+    } else {
+        e.flags &= !HELD;
+    }
+    tag
 }
 
 /// The next step of the walk of the dependents of the task that finished
-/// last (`end`): a waiting `sync` dependent is handed to the caller, which
-/// runs it (its tag is returned); the others are enqueued at their
-/// priority. `u64::MAX` when the walk is over.
+/// last (`end`): a `sync` dependent is handed to the caller, which runs it
+/// on the finishing thread (its tag is returned; dropped pure ones are
+/// handed to be dropped); the others are enqueued at their priority.
+/// `u64::MAX` when the walk is over.
 #[inline(never)]
 pub fn walk_next() -> u64 {
     let t = tasks();
     loop {
-        let Some((owner, frame)) = t.walks.last_mut() else { return u64::MAX };
-        let owner = *owner;
-        let Some(d) = frame.pop_front() else {
-            t.walks.pop();
-            // The worker that ran it is free once the walk is over.
-            if t.worker == Some(owner) {
+        let Some(f) = t.walks.last() else { return u64::MAX };
+        let (owner, thread, early, canceled) = (f.owner, f.thread, f.early, f.canceled);
+        let d = ent(owner).head_dep;
+        if d == NONE {
+            let f = t.walks.pop().unwrap();
+            release(owner);
+            if f.worker {
                 worker_idle();
             }
-            return u64::MAX;
-        };
-        let Some(e) = t.pending.get_mut(&d) else { continue };
-        if !e.waiting {
+            if f.base {
+                return u64::MAX;
+            }
             continue;
         }
-        e.waiting = false;
-        let tag = e.tag;
-        let (prio, sync) = t.info.get(&d).map_or((0, false), |i| (i.prio, i.sync));
-        if sync {
-            t.pending.remove(&d);
-            t.handed = Some(d);
-            return tag;
+        let e = ent(d);
+        if e.flags & SYNC != 0 && e.flags & PURE != 0 {
+            let x = dropped(d);
+            if x != NONE {
+                // `d` itself, or first a dependent of `d` holding it.
+                return hand(x, true);
+            }
         }
-        let e = t.pending.get_mut(&d).unwrap();
-        e.seq = t.next_seq;
-        t.next_seq += 1;
-        t.queues[prio].insert(e.seq, d);
+        unlink(d);
+        let e = ent(d);
+        if canceled {
+            e.flags |= CANCELED;
+        }
+        if early {
+            e.flags |= EARLY;
+        }
+        if e.flags & SYNC != 0 {
+            e.flags |= INLINE | FROM_WALK;
+            e.aux[0] = thread;
+            return hand(d, false);
+        }
+        enqueue(d);
+    }
+}
+
+/// The next queued task to run (the worker's started one first, then the
+/// first of the highest non-empty queue), handed over with its tag (or a
+/// dropped pure task to delete); `u64::MAX` if none. When only tasks
+/// waiting for others remain (a cycle), there is none: Lean's workers stop
+/// when the queue is empty and leave such tasks behind.
+#[inline(never)]
+pub fn next_tag() -> u64 {
+    let t = tasks();
+    let w = t.worker;
+    let cand = if w != NONE && ent(w).flags & QUEUED != 0 { w } else { first_queued() };
+    if cand == NONE {
+        return u64::MAX;
+    }
+    if cand != w {
+        let x = dropped(cand);
+        if x != NONE {
+            return hand(x, true);
+        }
+    }
+    hand(cand, false)
+}
+
+/// The first valid item of the highest non-empty queue (stale items in
+/// front are discarded).
+fn first_queued() -> u32 {
+    let t = tasks();
+    for p in (0..PRIOS).rev() {
+        if t.queued[p] == 0 {
+            continue;
+        }
+        while let Some(&(i, q)) = t.queues[p].front() {
+            let e = ent(i);
+            if e.cell != 0 && e.flags & QUEUED != 0 && e.link == q {
+                return i;
+            }
+            t.queues[p].pop_front();
+        }
+    }
+    NONE
+}
+
+/// What the idle worker picks: the first task of the highest non-empty
+/// queue that is not a dropped pure task (natively deleted already).
+fn pick() -> u32 {
+    let t = tasks();
+    for p in (0..PRIOS).rev() {
+        if t.queued[p] == 0 {
+            continue;
+        }
+        for k in 0..t.queues[p].len() {
+            let (i, q) = t.queues[p][k];
+            let e = ent(i);
+            if e.cell != 0 && e.flags & QUEUED != 0 && e.link == q && dropped(i) == NONE {
+                return i;
+            }
+        }
+    }
+    NONE
+}
+
+/// The worker is free: it starts the next queued task, if any.
+fn worker_idle() {
+    let t = tasks();
+    t.wake = None;
+    t.worker = if t.started && !t.shutting_down { pick() } else { NONE };
+}
+
+/// The woken worker has picked its task if enough time has passed.
+fn settle_worker() {
+    let t = tasks();
+    if let Some(w) = t.wake {
+        let lat = if t.worker_exists { LATENCY_WARM } else { LATENCY_COLD };
+        if w.elapsed() >= lat {
+            t.worker_exists = true;
+            worker_idle();
+        }
     }
 }
 
@@ -322,8 +834,10 @@ pub fn walk_next() -> u64 {
 /// another, and so on, the deepest pending one of that chain is handed to
 /// the caller, which runs it first (its tag is returned), so that a long
 /// chain of dependents runs one task after the other instead of each
-/// forcing its source recursively. `u64::MAX` when the task's source is
-/// not pending.
+/// forcing its source recursively. When the chain ends at an unresolved
+/// promise (or the task is one), queued tasks are handed instead, one at a
+/// time, until it is resolved: natively a worker runs them meanwhile, and
+/// one may resolve it. `u64::MAX` when there is nothing (more) to run.
 #[inline(never)]
 pub fn source_next(cell: usize) -> u64 {
     let t = tasks();
@@ -331,15 +845,26 @@ pub fn source_next(cell: usize) -> u64 {
         // A new chain: the pending tasks `cell` waits for, transitively
         // (bounded: a bind task waiting for a task that depends on it is a
         // cycle).
+        let i = find(cell);
+        if i == NONE {
+            return u64::MAX;
+        }
         let mut chain = Vec::new();
-        let mut c = cell;
-        for _ in 0..=t.pending.len() {
-            let Some(src) = t.info.get(&c).and_then(|i| i.source) else { break };
-            if !t.pending.contains_key(&src) || src == cell {
-                break;
+        if ent(i).flags & PROMISE != 0 {
+            chain.push((i, cell));
+        } else {
+            let mut c = i;
+            for _ in 0..=t.slab.len() {
+                let s = ent(c).source();
+                if ent(c).flags & WAITING == 0 || s == NONE || s == i || ent(s).flags & RUNNING != 0 {
+                    break;
+                }
+                chain.push((s, ent(s).cell));
+                if ent(s).flags & PROMISE != 0 {
+                    break;
+                }
+                c = s;
             }
-            chain.push(src);
-            c = src;
         }
         if chain.is_empty() {
             return u64::MAX;
@@ -347,139 +872,158 @@ pub fn source_next(cell: usize) -> u64 {
         t.chains.push((cell, chain));
     }
     loop {
+        let t = tasks();
         let (_, chain) = t.chains.last_mut().unwrap();
-        match chain.pop() {
-            Some(d) => {
-                let Some(e) = t.pending.get(&d) else { continue };
-                let tag = e.tag;
-                unqueue(d);
-                tasks().handed = Some(d);
-                return tag;
-            }
-            None => {
-                t.chains.pop();
-                return u64::MAX;
-            }
+        let Some(&(d, c)) = chain.last() else {
+            t.chains.pop();
+            return u64::MAX;
+        };
+        let e = ent(d);
+        if e.cell != c || e.flags & RUNNING != 0 {
+            // Finished (or started) meanwhile.
+            chain.pop();
+            continue;
         }
+        if e.flags & PROMISE != 0 {
+            let tag = next_tag();
+            if tag == u64::MAX {
+                tasks().chains.pop();
+            }
+            return tag;
+        }
+        chain.pop();
+        return hand(d, false);
     }
 }
 
-/// The task handed over by `walk_next` or `source_next`, with the queue's
-/// reference.
+/// The task handed over by `walk_next`, `source_next` or `next_tag`, with
+/// the runtime's reference.
 #[inline(never)]
 pub fn handed() -> usize {
-    tasks().handed.take().expect("leanrt: no task handed over")
+    let t = tasks();
+    let c = t.handed;
+    assert!(c != 0, "leanrt: no task handed over");
+    t.handed = 0;
+    c
+}
+
+/// Whether the task handed over is to be dropped (a pure task the program
+/// has dropped before it started) rather than run.
+#[inline]
+pub fn deleting() -> bool {
+    tasks().deleting
 }
 
 /// A thread id for `IO.getTID`: natively a task runs on a worker thread, a
-/// task waited for by a running task on another one. The id of the calling
-/// thread plus the depth of nested running tasks.
+/// task waited for by a running task on another one, a `sync` dependent on
+/// the thread that finished its source. The id of the calling thread plus
+/// this number.
 #[inline(never)]
 pub fn tid_offset() -> u64 {
-    tasks().running.len() as u64
+    cur_thread() as u64
 }
 
-/// The state of a task: 0 waiting (pending), 1 running, 2 finished.
+/// The state of a task: 0 waiting (pending), 1 running (or an unresolved
+/// promise, as natively), 2 finished.
 #[inline(never)]
 pub fn status(cell: usize) -> u8 {
-    if is_running(cell) {
-        return 1;
+    let i = find(cell);
+    if i == NONE {
+        return 2;
     }
-    if tasks().pending.contains_key(&cell) { 0 } else { 2 }
+    if ent(i).flags & (RUNNING | PROMISE) != 0 { 1 } else { 0 }
 }
 
-/// `IO.getTaskState`: 0 waiting, 1 running, 2 finished, or 3: the caller
-/// runs the task and reports it finished. A pending task is reported
-/// waiting until the program asks again after some time has passed (a
-/// sleep) or keeps asking (a busy loop): it is then polling for the task,
-/// which a worker would have run meanwhile.
+/// For `IO.waitAny`: as `status`, or 3 for a pending task that waits,
+/// directly or through other pending tasks, for an unresolved promise
+/// (running it would wait for the promise).
+#[inline(never)]
+pub fn wait_status(cell: usize) -> u8 {
+    let t = tasks();
+    let i = find(cell);
+    if i == NONE {
+        return 2;
+    }
+    if ent(i).flags & (RUNNING | PROMISE) != 0 {
+        return 1;
+    }
+    let mut c = i;
+    for _ in 0..t.slab.len() {
+        if ent(c).flags & WAITING == 0 {
+            break;
+        }
+        c = ent(c).source();
+        if ent(c).flags & PROMISE != 0 {
+            return 3;
+        }
+        if ent(c).flags & RUNNING != 0 {
+            break;
+        }
+    }
+    0
+}
+
+/// `IO.getTaskState`: as `status`, or 3: the caller runs the task and
+/// reports it finished, or 4 (an unresolved promise): the caller runs
+/// queued tasks until it is resolved or none is left, and reports its state
+/// then. A pending task is reported waiting until the program asks again
+/// after some time has passed (a sleep) or keeps asking (a busy loop): it
+/// is then polling for the task, which a worker would have run meanwhile.
 #[inline(never)]
 pub fn query(cell: usize) -> u8 {
-    let s = status(cell);
-    if s != 0 {
-        return s;
-    }
     let t = tasks();
-    let epoch = t.epoch;
-    let Some(e) = t.pending.get_mut(&cell) else { return 3 };
-    match e.observed {
-        None => {
-            e.observed = Some(epoch);
-            e.queries = 1;
-            0
-        }
-        Some(first) if epoch > first || e.queries >= 1000 => 3,
-        Some(_) => {
-            e.queries += 1;
-            0
-        }
+    let i = find(cell);
+    if i == NONE {
+        return 2;
     }
+    let e = ent(i);
+    if e.flags & RUNNING != 0 {
+        return 1;
+    }
+    let idle = if e.flags & PROMISE != 0 { 1 } else { 0 };
+    let poll = if e.flags & PROMISE != 0 { 4 } else { 3 };
+    let [observed, queries] = e.aux;
+    if observed == 0 {
+        e.aux = [t.epoch + 1, 1];
+        return idle;
+    }
+    if t.epoch + 1 > observed || queries >= 1000 {
+        // The next question starts over (a promise may stay unresolved).
+        e.aux = [0, 0];
+        return poll;
+    }
+    e.aux[1] += 1;
+    idle
 }
 
 /// `IO.cancel` of a task.
 #[inline(never)]
 pub fn cancel(cell: usize) {
-    if tasks().pending.contains_key(&cell) || is_running(cell) {
-        tasks().canceled.insert(cell);
+    let i = find(cell);
+    if i != NONE {
+        ent(i).flags |= CANCELED;
     }
 }
 
 /// `IO.checkCanceled`: inside a task, whether it was canceled or the program
 /// is shutting down; always false in `main`. At shutdown, Lean sets its flag
-/// while the remaining tasks run: a task sees it once time has passed in it
-/// (a sleep) or from its second check on.
+/// while the remaining tasks run. A task that could have started before
+/// (queued when `main` returned, or created or released by such a task
+/// still in its first moments) sees it once time has passed in it (a sleep)
+/// or from its second check on; any other task (it could only start after
+/// its source finished, or did not exist yet) sees it at once.
 #[inline(never)]
 pub fn check_canceled() -> bool {
     let t = tasks();
-    let epoch = t.epoch;
-    let shutting_down = t.shutting_down;
-    let Some(top) = t.running.last_mut() else { return false };
-    let cell = top.cell;
-    let late = if shutting_down {
-        let seen = top.checked || epoch > top.epoch;
-        top.checked = true;
-        seen
+    let Some(&i) = t.running.last() else { return false };
+    let late = if t.shutting_down {
+        let late = !early_now(i);
+        ent(i).flags |= CHECKED;
+        late
     } else {
         false
     };
-    late || t.canceled.contains(&cell)
-}
-
-/// The next task of the final run of queued tasks: the first of the highest
-/// non-empty priority queue (see `Tasks::queues`). When only tasks waiting
-/// for others remain (a cycle), there is none: Lean's workers stop when the
-/// queue is empty and leave such tasks behind.
-fn next() -> Option<usize> {
-    let t = tasks();
-    if let Some(w) = t.worker {
-        if t.pending.get(&w).is_some_and(|e| !e.waiting) {
-            return Some(w);
-        }
-    }
-    next_queued()
-}
-
-/// The first of the highest non-empty priority queue.
-fn next_queued() -> Option<usize> {
-    tasks().queues.iter().rev().find_map(|q| q.values().next().copied())
-}
-
-/// The tag of the next task (see `next`), `u64::MAX` if there is none.
-#[inline(never)]
-pub fn next_tag() -> u64 {
-    match next() {
-        Some(cell) => tasks().pending[&cell].tag,
-        None => u64::MAX,
-    }
-}
-
-/// Remove the next task (see `next`) from the queue and hand its reference
-/// to the caller.
-#[inline(never)]
-pub fn take() -> usize {
-    let cell = next().expect("leanrt: no pending task");
-    unqueue(cell);
-    cell
+    late || ent(i).flags & CANCELED != 0
 }
 
 /// A thunk forced from its own computation, or tasks waiting for each other:
@@ -487,5 +1031,21 @@ pub fn take() -> usize {
 pub fn hang() -> ! {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::priority;
+
+    #[test]
+    fn priorities() {
+        assert_eq!(priority(0), (0, false));
+        assert_eq!(priority(8), (8, false));
+        assert_eq!(priority(9), (9, false));
+        assert_eq!(priority(1000), (9, false));
+        assert_eq!(priority(4294967295), (0, true));
+        assert_eq!(priority(4294967297), (1, false));
+        assert_eq!(priority(8589934596), (4, false));
     }
 }

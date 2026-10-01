@@ -158,33 +158,59 @@ a shared enum, so any `α` fits). Cell primitives: `l2r_lcell_new<S>(v)`,
 lean2rr generates the forcing functions (run the closure once, store
 `done`); `l2r_lazy_cycle<T>()` waits forever, for a thunk or task needed by
 its own computation, as native Lean does. Tasks are deferred until needed
-(translation plan §5.14); `leanrt::task` keeps the queue of pending tasks
-(one per priority, holding one reference each, in the order Lean's task
-manager with one worker would start them), the walk of a finished task's
+(translation plan §5.14); `leanrt::task` keeps an entry per unfinished task
+(in a slab; the cell's 4 bytes of padding after its count hold the entry's
+index, initialized by `l2r_lcell_new`), the queues of pending tasks (one per
+priority, in the order Lean's task manager with one worker would start
+them; the runtime holds one reference per pending task), each task's
+dependents (an intrusive list, newest first), the walks of finished tasks'
 dependents, the stack of running tasks, cancellation flags and their
-propagation. A task is identified by an address: its cell's, or the one a
-converted task records. `l2r_task_register<S>(c, tag, prio)` queues a
-pending task (`tag` identifies `S` for the generated dispatchers), `l2r_task_depend_at(src, dep, sync)`
-records that `dep` depends on `src`, `l2r_task_begin<S>(c)` / `l2r_task_end<S>(c)`
-bracket a run (`begin` takes the task off the queue; `l2r_task_suspend<S>(c)`
-stops a `bind` task that now waits for its continuation;
-`l2r_task_walk_next()` then gives the `sync` dependents to run, and
-`l2r_task_source_next_at(a)` the pending tasks a task about to run waits
-for, deepest first, both handed over by `l2r_task_handed<S>()`),
-`l2r_task_status_at(a)` (0 waiting, 1 running, 2 finished),
-`l2r_task_query_at(a)` (for `IO.getTaskState`; 3: run it first),
-`l2r_task_cancel_at(a)`, `l2r_task_check_canceled()`, `l2r_task_tid_offset()`
-(added to `IO.getTID` inside tasks),
-`l2r_task_deferring()` (false during initialization, when Lean runs IO
-tasks at once), `l2r_task_eager_pure()` (a pure task may be computed at
-once), `l2r_task_manager_start()` (before `main`), `l2r_task_shutdown()`
-(after `main`), and `l2r_task_next_tag()` / `l2r_task_take<S>()`, with which
-the generated entry runs the tasks still queued when `main` returns.
-`l2r_sleep_ms` goes through `leanrt::task` (sleeps count as time passing for
-its heuristics). Standard streams are per task, as they are per thread
-natively: `l2r_std_push(base)` / `l2r_std_pop(base)` set the stream cells
-aside and put them back (`leanrt::once::push_context`), and
-`l2r_once_take<T>(slot)` empties a cell.
+propagation, and the state of the single worker it models. A task is
+identified by an address: its cell's, or the one a converted task records.
+`l2r_task_register<S>(c, tag, prio, kind)` records a new task (`tag`
+identifies `S` for the generated dispatchers; `prio` as Lean passes it,
+taken modulo 2^32; `kind`: 1 pure, which the runtime deletes rather than
+runs when only it refers to it, 2 a dependent; result 1: run it now, at
+priority 2^32-1), `l2r_task_depend_at(src, dep, sync)` records that `dep`
+depends on `src` (result 1: run it now), `l2r_task_begin<S>(c)` /
+`l2r_task_end<S>(c)` bracket a run (`begin` takes the task off the queue
+and drops the runtime's reference; its result is 1 when the task runs as
+on a worker thread, with stream cells of its own, 0 when it runs on the
+current thread; `end`'s is 1 when the caller must walk the dependents now,
+`l2r_task_walk_if(e)`, 0 when the walk that handed the task over continues
+with them), `l2r_task_bind_wait<S>(c, src)` (a `bind` task that now waits
+for its continuation `src`), `l2r_task_walk_next()` (the `sync` dependents
+to run), `l2r_task_source_next_at(a)` (the pending tasks a task about to
+run waits for, deepest first, or queued tasks while it waits for a promise)
+and `l2r_task_next_tag()` (the next queued task), all handed over by
+`l2r_task_handed<S>()` / `l2r_task_take<S>()`, to be dropped instead of run
+when `l2r_task_deleting()` (a pure task the program has dropped),
+`l2r_task_status_at(a)` (0 waiting, 1 running or an unresolved promise, 2
+finished), `l2r_task_wait_status_at(a)` (for `IO.waitAny`; 3: waits for an
+unresolved promise), `l2r_task_query_at(a)` (for `IO.getTaskState`; 3: run
+it first; 4: run queued tasks until the promise is resolved),
+`l2r_task_cancel_at(a)`, `l2r_task_check_canceled()`,
+`l2r_task_tid_offset()` (added to `IO.getTID` inside tasks: the running
+task's worker number), `l2r_task_deferring()` (false during
+initialization, when Lean runs tasks at once), `l2r_task_manager_start()`
+(before `main`) and `l2r_task_shutdown()` (after `main`, before the final
+run of queued tasks). `l2r_sleep_ms` goes through `leanrt::task` (sleeps
+count as time passing for its heuristics). Standard streams are per task,
+as they are per thread natively: `l2r_std_push(base)` / `l2r_std_pop(base)`
+set the stream cells aside and put them back
+(`leanrt::once::push_context`), and `l2r_once_take<T>(slot)` empties a
+cell.
+
+**Promises.** `LPromise` is a runtime object holding the cell of the
+promise's task (`leanrt::task::Promise`): `l2r_promise_new<S>(c)` (Lean's
+internal panic before `main`), `l2r_promise_cell<S>(p)` (the task, a new
+reference), `l2r_promise_release(p)`, and `l2r_task_resolve_at(a)` after
+the generated code has stored the value (1: walk the dependents now). When
+the last reference to a promise goes, the runtime calls the program's
+`l2r_promise_drop_c(cell)` (a trampoline lean2rr exports), which resolves
+an unresolved promise with `none`. `l2r_option_get_or_block_none<T>()` is
+`Option.getOrBlock!` on `none` (`Promise.result!` of a dropped promise):
+Lean's forced panic message, then it blocks forever.
 
 **Fallible IO** (files, standard streams): primitives record their outcome
 in a global last-error slot; the glue is
@@ -282,8 +308,6 @@ and is reported at once.
 |---|---|
 | `initialize`, closed terms | once-cells `l2r_once_has(slot)`, `l2r_once_get<T>(slot)`, `l2r_once_set<T>(slot, v)` |
 | `IO.setStdout`/`setStderr`/`setStdin` | a cell per stream: `l2r_once_*` plus `l2r_cell_swap<T>(slot, v) -> T` (returns the previous value) |
-| `IO.Promise α` (as `LRef<E>`) | `l2r_promise_new<T>()`, `l2r_promise_resolve<T>(v, p)` (first wins), `l2r_promise_result_with<T, O>(p, none, some)`, `l2r_option_get_or_block_none<T>()` (`Promise.result!` of a dropped promise: Lean's message, then blocks) |
-| `IO.getTaskState`, `IO.cancel` | `l2r_io_get_task_state_with<T, S>(t, waiting, running, finished)`, `l2r_io_cancel<T>(t)` |
 | `timeit`, `allocprof` | `l2r_io_timeit_with<R>(msg, act)`, `l2r_io_allocprof_with<R>(msg, act)` |
 | `Void.mk` | `lean_void_mk<T>(x)` |
 
@@ -456,13 +480,10 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   `[2^63, 2^64)` and an `Int` outside `int32` but inside `i64` (natively
   big number objects) answer a number computed from their value.
 - Everything runs on one thread: tasks run when they are first needed or
-  when `main` returns, pure tasks at once while no task is pending (a
-  schedule native Lean can produce; translation plan §5.14). A task or
-  `main` polling shared state that another task sets never sees it change,
-  and `IO.waitAny` does not pick the fastest of several unfinished tasks.
-  lean2rr does not translate promises yet (the `l2r_promise_*` helpers
-  assume a promise is resolved before it is read, which deferred tasks no
-  longer ensure).
+  when `main` returns (a schedule native Lean can produce; translation plan
+  §5.14). A task or `main` polling shared state that another task sets
+  never sees it change, and `IO.waitAny` does not pick the fastest of
+  several unfinished tasks.
   Sockets, `Std.Sync` and timers are not implemented. Code that reads one
   of a child's pipes in a task while it reads the other itself (as
   `IO.Process.output` does natively, stdout in the task; its glue drains
