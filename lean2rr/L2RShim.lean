@@ -1,5 +1,7 @@
 import Std.Internal.UV
 import Std.Net.Addr
+import Std.Time.DateTime.Timestamp
+import Std.Time.Zoned.Database.Windows
 
 /-!
 # lean2rr's shim for `Std.Internal.UV`
@@ -773,6 +775,51 @@ def constrainedMemory : IO UInt64 := primWord 5
 def availableMemory : IO UInt64 := primWord 6
 
 end Sys
+
+/-! ## Time (`src/runtime/io.cpp`) -/
+
+/-- The system clock in nanoseconds since the Unix epoch
+(`leanrt::io::realtime_nanos`). -/
+@[extern "lean_shim_realtime_nanos"] opaque realtimeNanos : BaseIO Int
+
+/-- `Std.Time.Timestamp.now`: natively the system clock's nanoseconds since
+the epoch, split into seconds and nanoseconds by truncating division, as
+`Duration.ofNanoseconds` splits them. -/
+@[export lean_get_current_time]
+def currentTime : IO Std.Time.Timestamp := do
+  return Std.Time.Timestamp.ofNanosecondsSinceUnixEpoch ⟨← realtimeNanos⟩
+
+/-- `Std.Time.Database.Windows.getNextTransition`: Windows only; elsewhere
+the C function fails with this error. -/
+@[export lean_windows_get_next_transition]
+def windowsNextTransition (_ : String) (_ : Int64) (_ : Bool) :
+    IO (Option (Int64 × Std.Time.TimeZone)) :=
+  throw (IO.Error.mkInvalidArgument 22 "failed to get timezone, its windows only.")
+
+/-- `Std.Time.Database.Windows.getLocalTimeZoneIdentifierAt`: Windows only;
+elsewhere the C function fails with this error. -/
+@[export lean_get_windows_local_timezone_id_at]
+def windowsLocalTimeZoneId (_ : Int64) : IO String :=
+  throw (IO.Error.mkInvalidArgument 22 "timezone retrieval is Windows-only")
+
+/-! ## Sharing (`src/runtime/sharecommon.cpp`)
+
+Natively `ShareCommon.Object.eq` compares two objects' headers and bodies
+byte by byte (the same constructor and the same fields: scalars equal,
+pointers to the same objects) and `hash` hashes them, for the tables of
+`ShareCommon.State`. lean2rr's runtime implements `shareCommon` itself as
+the identity (it shares nothing; translation plan §5.8), and lean2rr's
+objects have no Lean layout to compare, so here an object equals only
+itself: the same answers for the same object, `false` (natively possibly
+`true`) for two distinct objects with the same fields. -/
+
+@[export lean_sharecommon_eq]
+unsafe def shareCommonEq (a b : ShareCommon.Object) : Bool :=
+  ptrAddrUnsafe a == ptrAddrUnsafe b
+
+@[export lean_sharecommon_hash]
+unsafe def shareCommonHash (a : ShareCommon.Object) : UInt64 :=
+  hash (ptrAddrUnsafe a).toUInt64
 
 /-! ## Definitions the shim replaces
 

@@ -197,12 +197,22 @@ mutual
     | .lam x ty body => Block.renderTo d body (out ++ "|" ++ x ++ " : " ++ ty.render ++ "| ")
     | .ite c t e =>
       -- No `else if` in Reussir: an `if` in the else branch stays inside braces.
-      let out := c.renderTo d (out ++ "if ") ++ " "
+      let out := Expr.renderHead d c (out ++ "if ") ++ " "
       Block.renderTo d e (Block.renderTo d t out ++ " else ")
     | .mtch s arms =>
-      let out := s.renderTo d (out ++ "match ") ++ " {\n"
+      let out := Expr.renderHead d s (out ++ "match ") ++ " {\n"
       (joinTo out arms ",\n" (Arm.renderTo (d + 1)) ++ "\n").pushn ' ' (4 * d) ++ "}"
     | .block b => Block.renderTo d b out
+
+  /-- The scrutinee of a `match` or the condition of an `if`, which a `{`
+  follows: in parentheses when it ends with a brace of its own (a
+  constructor, a block, a `match`, an `if`, a lambda), which Reussir's
+  parser would take for the start of the body (`match T::c{x} {` is a parse
+  error, as in Rust). -/
+  partial def Expr.renderHead (d : Nat) (e : Expr) (out : String) : String :=
+    match e with
+    | .ctor .. | .block .. | .mtch .. | .ite .. | .lam .. => e.renderTo d (out ++ "(") ++ ")"
+    | _ => e.renderTo d out
 
   partial def Arm.renderTo (d : Nat) (a : Arm) (out : String) : String :=
     let out := out.pushn ' ' (4 * d)

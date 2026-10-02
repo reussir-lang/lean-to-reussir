@@ -3601,6 +3601,12 @@ fn l2r_io_mono_ms_now_u64() -> u64 [{ leanrt::io::mono_nanos() / 1000000 }];
 #[ffi(import)]
 fn l2r_io_mono_nanos_now_u64() -> u64 [{ leanrt::io::mono_nanos() }];
 
+// The system clock in nanoseconds since the Unix epoch (`lean_shim_realtime_nanos`:
+// lean2rr's shim builds `Std.Time.Timestamp.now` from it).
+fn l2r_shim_realtime_nanos() -> Int { Int::Small{l2r_shim_realtime_nanos_i64()} }
+#[ffi(import)]
+fn l2r_shim_realtime_nanos_i64() -> i64 [{ leanrt::io::realtime_nanos() }];
+
 
 #[ffi(import)]
 fn l2r_io_get_random_bytes(n : u64) -> RVec<u8> [{
