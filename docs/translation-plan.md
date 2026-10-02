@@ -2343,7 +2343,17 @@ Each item says what differs and when.
   `Box` only, a cast whose conversion would need a function value at
   another representation, or between inductives whose constructors do not
   all correspond (another number of constructors), which typed code
-  converts (§5.1).
+  converts (§5.1). Also out of reach: a cast that reads part of a scalar
+  cell (a `Float` or `UInt64` read as `Float32`) or a record of scalars read
+  as a `UInt64` (natively its data; here an address stand-in) or the
+  reverse panic or differ, and a value cast to `Bool` or an enumeration
+  outside its range (a byte 7 read as `Bool`) is normalized (`7 != 0`, the
+  last constructor) where natively the byte survives a cast back. A cast
+  between `Float` and `UInt64` copies the bits, NaN payloads included; the
+  sign of a NaN an operation produces is unspecified, so a NaN computed by
+  constant folding (`-(0.0 / 0.0)` in the source) can have the other sign
+  than natively, visible only through such a cast (`Float.toBits`
+  canonicalizes NaN).
 - *Pointer identity* (§9): a value converted to another representation
   answers its original's identity (a thunk or task through its recorded
   original, §5.14; a record, list or array through the runtime's origin

@@ -759,12 +759,13 @@ mutual
       -- The rest is only reachable through `unsafeCast`, between values that
       -- Lean represents by the same word; the conversions follow Lean's
       -- `lean_box`/`lean_unbox`. Scalars of the same size in a constructor's
-      -- scalar area: the bits.
+      -- scalar area: the bits, copied unchanged (NaN payloads included;
+      -- `Float.ofBits`/`toBits` would make every NaN the canonical one).
       match sn, dn with
-      | "u64", "f64" => return some (.call "lean_float_of_bits" #[] #[e])
-      | "f64", "u64" => return some (.call "lean_float_to_bits" #[] #[e])
-      | "u32", "f32" => return some (.call "lean_float32_of_bits" #[] #[e])
-      | "f32", "u32" => return some (.call "lean_float32_to_bits" #[] #[e])
+      | "u64", "f64" => return some (.call "l2r_f64_of_raw_bits" #[] #[e])
+      | "f64", "u64" => return some (.call "l2r_f64_raw_bits" #[] #[e])
+      | "u32", "f32" => return some (.call "l2r_f32_of_raw_bits" #[] #[e])
+      | "f32", "u32" => return some (.call "l2r_f32_raw_bits" #[] #[e])
       -- `Nat` and `Int`: the same value (natively the same boxed scalar for
       -- small values, the same big number object otherwise; a `Nat` from
       -- 2^31 to 2^63 is not a valid small `Int` natively).

@@ -1520,6 +1520,17 @@ fn lean_float_of_bits(u : u64) -> f64 [{ leanrt::float::of_bits(u) }];
 fn lean_float_to_bits(a : f64) -> u64 [{ leanrt::float::to_bits(a) }];
 #[ffi(import)]
 fn lean_float32_of_bits(u : u32) -> f32 [{ leanrt::float::of_bits32(u) }];
+// The bits of a float copied unchanged, NaN payloads included: what an
+// `unsafeCast` between `Float` and `UInt64` (`Float32` and `UInt32`) reads
+// natively, unlike `Float.ofBits`/`toBits`, which canonicalize NaN.
+#[ffi(import)]
+fn l2r_f64_of_raw_bits(u : u64) -> f64 [{ f64::from_bits(u) }];
+#[ffi(import)]
+fn l2r_f64_raw_bits(a : f64) -> u64 [{ a.to_bits() }];
+#[ffi(import)]
+fn l2r_f32_of_raw_bits(u : u32) -> f32 [{ f32::from_bits(u) }];
+#[ffi(import)]
+fn l2r_f32_raw_bits(a : f32) -> u32 [{ a.to_bits() }];
 #[ffi(import)]
 fn lean_float32_to_bits(a : f32) -> u32 [{ leanrt::float::to_bits32(a) }];
 #[ffi(import)]
