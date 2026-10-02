@@ -9,7 +9,7 @@ and lowers the result to typed Reussir source. Reussir then takes care of
 ownership, reference counting and memory reuse. The design is described in
 [`docs/translation-plan.md`](docs/translation-plan.md).
 
-Status: early development.
+Status: see [`docs/implementation-status.md`](docs/implementation-status.md) (what is supported, how values are represented, test and benchmark results, known differences from native Lean).
 
 ## Requirements
 
