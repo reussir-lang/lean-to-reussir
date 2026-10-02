@@ -488,7 +488,21 @@ def splitMapLoops (decls : Array (Decl .pure)) (types : Array Types) (roots : Ar
     match d.value with
     | .code c => out := out.push { d with value := .code (← splitEntries types[i]! (usizeZeros c) shapes src c) }
     | _ => out := out.push d
-  let added := (← get).splitDecls
+  -- The split instances are built from the loops as they were, so a map
+  -- loop entered inside another one's body (`a.map (·.map f)`) is still
+  -- entered unsplit there: rewrite their entry calls too, until no new
+  -- instance appears (each one is added to `splitDecls` as it is built).
+  let mut added : Array (Decl .pure) := #[]
+  let mut done := 0
+  repeat
+    let splits := (← get).splitDecls
+    if done ≥ splits.size then break
+    for h : j in [done:splits.size] do
+      let (d, _, ts) ← localRetype splits[j]
+      match d.value with
+      | .code c => added := added.push { d with value := .code (← splitEntries ts (usizeZeros c) shapes src c) }
+      | _ => added := added.push d
+    done := splits.size
   if added.isEmpty then return decls
   let all := out ++ added
   -- Original loops nothing reachable calls any more.

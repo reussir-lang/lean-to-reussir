@@ -564,7 +564,9 @@ precise array from their callers.
 When `f` changes the representation (`Nat → Bool`), the loop's array
 parameter stays `Array lcAny` after the fixpoint: it holds `Nat`s and
 `Bool`s. Such a loop is *split* (optional pass `split-map-loops`; without it
-the loop runs on an array of `Box`es). Its split instance takes two arrays instead
+the loop runs on an array of `Box`es), also where it is entered inside
+another split loop's body (`a.map (·.map f)`: the entry calls of the split
+instances are rewritten too, until no new instance appears). Its split instance takes two arrays instead
 of one, the source `src : Array α` and the result `dst : Array β`:
 - a read `uget bs i` of an array derived from the parameter becomes
   `uget@α src i`, a value of `α`'s own representation;
