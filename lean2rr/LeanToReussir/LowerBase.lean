@@ -113,6 +113,12 @@ structure LowerCtx where
   `programObservesIdentity`): otherwise a value and an equal copy cannot be
   told apart. -/
   observesIdentity : Bool := true
+  /-- Whether the program can read a value as another type than its own
+  (`unsafe` code of its own, or a cast justified by `sorry` or an axiom;
+  `programCasts`): otherwise a `Box` holding a value of one inductive is
+  never read as another, and an unboxing function matches only the
+  instantiations of its own inductive (`boxCastable`, `finishUnboxFns`). -/
+  programCasts : Bool := true
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/

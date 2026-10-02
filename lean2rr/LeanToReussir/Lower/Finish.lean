@@ -44,6 +44,24 @@ partial def reprCompatible (a b : RR.Ty) : LowerM Bool := do
       | _, _ => return false
     | _, _ => return false
 
+/-- Can mono types `a` and `b` (the keys of two generated types) be the
+types of one value? `lcAny` and `◾` stand for any type; otherwise the same
+head (`T` and its implementation `T._impl` alike) with compatible
+arguments. -/
+partial def monoCompatible (a b : Expr) : Bool :=
+  let a := a.consumeMData
+  let b := b.consumeMData
+  if a == b || a == anyExpr || b == anyExpr || a == erasedExpr || b == erasedExpr then true else
+  match a, b with
+  | .forallE _ d1 b1 _, .forallE _ d2 b2 _ => monoCompatible d1 d2 && monoCompatible b1 b2
+  | .lam _ _ b1 _, .lam _ _ b2 _ => monoCompatible b1 b2
+  | _, _ =>
+    match a.getAppFn, b.getAppFn with
+    | .const m _, .const n _ =>
+      (m == n || m == n ++ `_impl || n == m ++ `_impl) && a.getAppNumArgs == b.getAppNumArgs &&
+        (a.getAppArgs.zip b.getAppArgs).all fun (x, y) => monoCompatible x y
+    | _, _ => false
+
 /-- Whether a `Box` holding a value of type `vt` may be read at type `t`
 through `unsafeCast` (`boxCastable`, Lower/Conv). -/
 def boxCastCompatible (vt t : RR.Ty) : LowerM Bool := boxCastable vt t
@@ -100,7 +118,29 @@ partial def finishUnboxFns : LowerM Unit := do
         -- arrays under polymorphic recursion have many representations).
         let boxArr := RR.Ty.app "RVec" #[RR.Ty.box]
         let viaBoxArr := tArr && vt != t && vt != boxArr && t != boxArr && (← arrayRepr? vt).isSome
+        -- Another instantiation of the inductive whose Lean type cannot be
+        -- the target's (`Option Nat` read as `Option String`), in a program
+        -- that does not cast (`programCasts`): only a value that Lean's `cse`
+        -- shared between the two types reaches it (`none`, `some []`), with
+        -- no data where the types differ. It goes through the instantiation
+        -- at the arguments both share, `lcAny` elsewhere (`Prod (Array Sⱼ)
+        -- Nat` read as `Prod (Array Sᵢ) Nat` through `Prod lcAny Nat`), so
+        -- that the conversions generated stay linear in the number of
+        -- instantiations, not quadratic.
+        let viaShared ← do
+          if cast || (← read).programCasts || vt == t then pure none else
+          let (.named vn, .named tn, some th) := (vt, t, th?) | pure none
+          let (some vk, some tk) := ((← get).typeKeys[vn]?, (← get).typeKeys[tn]?) | pure none
+          if monoCompatible vk tk || vk.getAppNumArgs != tk.getAppNumArgs then pure none else
+          let args := (vk.getAppArgs.zip tk.getAppArgs).map fun (a, b) =>
+            if a.consumeMData == b.consumeMData then a else anyExpr
+          let u ← lowerTypeApp th args
+          pure (if u == vt || u == t then none else some u)
         let body ← if cast then boxCastConv (.var x) vt t
+          else if let some u := viaShared then
+            match ← tryCoerce (.var x) vt u with
+            | some b => tryCoerce b u t
+            | none => pure none
           else if !viaBoxArr then tryCoerce (.var x) vt t
           else match ← tryCoerce (.var x) vt boxArr with
             | some b => tryCoerce b boxArr t

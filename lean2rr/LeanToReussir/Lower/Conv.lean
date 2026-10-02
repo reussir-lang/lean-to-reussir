@@ -1269,6 +1269,61 @@ def valueFieldTy? (info : TypeInfo) : Option RR.Ty := do
   let l ← info.ctors.find? c
   l.posTys[0]?
 
+/-- The declarations whose source a declaration of the program (an
+instance, or code Lean derived from one: `f._redArg`, `f._lam_0`,
+`g._at_.f.spec_0`) comes from: its prefixes that are declarations, also
+those of the declaration a specialization was made in. -/
+def sourceDecls (env : Environment) (n : Name) : Array Name := Id.run do
+  let comps := n.components
+  let mut out := #[]
+  let mut pre := Name.anonymous
+  for c in comps do
+    pre := pre ++ c
+    if env.contains pre then out := out.push pre
+  if let some i := comps.idxOf? `_at_ then
+    let mut site := Name.anonymous
+    for c in comps.drop (i + 1) do
+      site := site ++ c
+      if env.contains site then out := out.push site
+  return out
+
+/-- Whether the program can read a value as another type than its own
+(`LowerCtx.programCasts`), and the declaration that shows it: some
+declaration it reaches, outside Lean's own
+library (`Init`, `Std`, `Lean`, `Lake`), is `unsafe` (its code may
+`unsafeCast`, build a `TypeName` for `Dynamic`, or be the `implemented_by`
+target of another type's code; the `_unsafe_rec` code Lean generates for a
+`partial def` does not count), is an axiom, or uses `sorry` (a cast through
+an equality proved by either). The declarations reached are those the
+program's declarations come from (`sourceDecls`), and, transitively, the
+constants their definitions mention (inlined code no longer appears in the
+program) and their `implemented_by` targets. Lean's library casts only
+where lean2rr's representations agree: an `Array α` read as an
+`Array NonScalar` (`Box` elements) and back, `unsafeCast ()` placeholders,
+`Subtype` (`attach`), the world token, `Dynamic` values read at the type
+their `TypeName` names. -/
+def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Option Name := Id.run do
+  let library (n : Name) : Bool := match env.getModuleIdxFor? n with
+    | some i => (env.header.moduleNames[i.toNat]?.map fun m => [`Init, `Std, `Lean, `Lake].contains m.getRoot).getD false
+    | none => false
+  let mut work : Array Name := #[]
+  for d in decls do
+    work := work ++ sourceDecls env ((keys.find? d.name).map (·.decl) |>.getD d.name)
+  let mut seen : NameSet := {}
+  while h : work.size > 0 do
+    let n := work[work.size - 1]
+    work := work.pop
+    if seen.contains n || library n then continue
+    seen := seen.insert n
+    let some ci := env.find? n | continue
+    if ci matches .axiomInfo _ then return some n
+    if ci.isUnsafe && !(n matches .str _ "_unsafe_rec") then return some n
+    if let some impl := Compiler.getImplementedBy? env n then work := work.push impl
+    if let some v := ci.value? (allowOpaque := true) then
+      if v.foldConsts false (fun k b => b || k == ``sorryAx) then return some n
+      work := v.foldConsts work fun k acc => if seen.contains k then acc else acc.push k
+  return none
+
 /-- Whether a `Box` holding a value of type `vt` may be read at type `t`,
 so that the unboxing function to `t` (generated at the end, `Finish`)
 matches `vt`'s variant and converts it as `tryCoerce` does. Besides `t`
@@ -1289,9 +1344,11 @@ read as one whose constructors do not all correspond (another number of
 constructors): typed code converts such casts (`castFallback`), but every
 unboxing function would then convert from every other inductive that
 shares a constructor shape (programs over monad transformers grew by 3 to
-5 %), for casts that hardly ever occur. -/
+5 %), for casts that hardly ever occur. None of these unless the program
+can cast at all (`programCasts`). -/
 partial def boxCastable (vt t : RR.Ty) : LowerM Bool := do
   if vt == t then return true
+  unless (← read).programCasts do return false
   match vt, t with
   | .named a, .named b =>
     if [("u64", "f64"), ("f64", "u64"), ("u32", "f32"), ("f32", "u32")].contains (a, b) then return true
