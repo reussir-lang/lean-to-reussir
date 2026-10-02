@@ -15,9 +15,11 @@ The runtime has two parts:
   prelude's `extern "rust"` block would be duplicated per texture).
 - `lean2rr/L2RShim.lean` (built with lean2rr) — Lean implementations of the
   `Std.Internal.UV` externs (timers, sockets, name resolution, signals,
-  `Std.Net` addresses), exported under their C symbols, which lean2rr
-  compiles with the program over the event loop's `l2r_shim_*`
-  primitives (below).
+  `Std.Net` addresses), `Std.Time.Timestamp.now` (over
+  `l2r_shim_realtime_nanos`), the Windows-only time zone externs (their
+  error elsewhere) and `ShareCommon.Object.eq`/`hash`, exported under their
+  C symbols, which lean2rr compiles with the program over the event loop's
+  `l2r_shim_*` primitives (below).
 
 Semantics follow Lean 4.33's C runtime (`lean.h`, `src/runtime/*.cpp`)
 exactly; comments at each function say which C function it mirrors.
@@ -499,7 +501,7 @@ lean2rr's dev branch (the tests pass with it).
 9. *done* — BaseIO payload primitives above (`IO.monoMsNow`, `IO.getRandomBytes`,
    ...) and the file protocol need `wrapIOResult` glue; `IO.FS.Handle`
    (`lcAny` in mono code) must be represented as `LHandle`.
-10. Externs implemented by `@[export sym]` Lean code (all
+10. *done* — Externs implemented by `@[export sym]` Lean code (all
     `Substring.Raw.Internal.*`, many `String.Internal.*`,
     `lean_array_to_list_impl`, `IO.eprint(ln)`, `lean_stream_of_handle`, the
     `IO.Error` constructors, `Lean.Name.beq` has a reference body) should
