@@ -2333,7 +2333,15 @@ Each item says what differs and when.
   would not always be a sibling call and would use stack per iteration.
   Such a loop allocates a step per iteration, only in functions this long.
   Ordinary functions are below the bounds; the classic corpus only has
-  some `main`s cut. A 2000-line `main` builds in about two minutes and
+  some `main`s cut. rrc also copies a wildcard arm into every constructor
+  it covers and expands, in each copy, the release of every value the arm
+  holds as an in-line match over its variants; a two-scrutinee match on an
+  inductive with N constructors (a derived `BEq`, `DecidableEq` or `Ord`)
+  became N^3 code (40 constructors: a 9-minute build). So such an arm
+  releases the values of wide enums (8 or more constructors) that it holds
+  and does not use through one out-of-line call (`l2r_sink`, kept out of
+  rrc's inliner): the same release at the same point (40 constructors: 27
+  s). A 2000-line `main` builds in about two minutes and
   2 GB, a recursive IO function of 2000 statements in about 70 s and
   1.5 GB, a recursive function with a 3000-arm match in 80 s.
 - *Casts that natively read an address* (§5.1): an object read as a word

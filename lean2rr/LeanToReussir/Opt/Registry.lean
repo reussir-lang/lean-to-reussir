@@ -103,6 +103,8 @@ def required : Array RequiredPass := #[
     "type recovery, not a choice of representation: a value left at lcAny is a Box, and an array whose representation differs is converted, a copy, each time it crosses such a position (a call in a loop, each read of a constant), and the copy is another object than native Lean's"⟩,
   ⟨"outline", "deep and long tail paths and let values of a function cut into functions, recursive functions included (their loops through step values) (Outline)",
     "rrc's analyses are superlinear in nesting depth and straight-line length (Reussir bugs 16, 17), and so is the .rr text, whose indentation follows the nesting: without it a 3000-arm literal match in tail position gives 126 MB of .rr instead of 1 MB"⟩,
+  ⟨"wildcard-sinks", "a wildcard arm covering several constructors releases the wide-enum values it holds and does not use through one out-of-line call (`l2r_sink`; Lower/Code, sinkWildcardHeld)",
+    "rrc copies a wildcard arm into every constructor it covers and expands each release there in line, a match over the variants: a derived BEq/DecidableEq/Ord on an inductive with N constructors became N^3 code, and a 40-constructor one took 9 minutes to build (round-6 PRG6-02; docs/reussir-bugs.md bug 22)"⟩,
   ⟨"inline-anchors", "conversions, unboxings, and the applications of wrapped function values and of those of uniform types, kept out of rrc's MLIR inliner (#[transform_anchor]; Lower/Finish, anchoredFns)",
     "rrc's inliner grows the conversion code of polymorphic recursion through monad transformers exponentially (Reussir bug 20): an 8-line StateT tower used at IO did not build within 30 minutes or 15 GB"⟩]
 
