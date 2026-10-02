@@ -1273,19 +1273,33 @@ def valueFieldTy? (info : TypeInfo) : Option RR.Ty := do
 /-- The declarations whose source a declaration of the program (an
 instance, or code Lean derived from one: `f._redArg`, `f._lam_0`,
 `g._at_.f.spec_0`) comes from: its prefixes that are declarations, also
-those of the declaration a specialization was made in. -/
+those of the declaration a specialization was made in. A hygienic name
+(made by a macro) keeps its macro scopes at the end (`f._lam_0._@.M._hyg.3`
+comes from `f._@.M._hyg.3`): the prefixes are those of the name without
+them, each also tried with them. The prefixes are built component by
+component (`Name.append` panics on a prefix that ends in `_hyg`). -/
 def sourceDecls (env : Environment) (n : Name) : Array Name := Id.run do
-  let comps := n.components
+  let view := extractMacroScopes n
+  let comps := view.name.components
+  let extend (pre c : Name) : Name := match c with
+    | .str _ s => .str pre s
+    | .num _ k => .num pre k
+    | .anonymous => pre
   let mut out := #[]
+  let add (out : Array Name) (p : Name) : Array Name := Id.run do
+    let mut out := out
+    for q in [p, { view with name := p }.review] do
+      if env.contains q && !out.contains q then out := out.push q
+    return out
   let mut pre := Name.anonymous
   for c in comps do
-    pre := pre ++ c
-    if env.contains pre then out := out.push pre
+    pre := extend pre c
+    out := add out pre
   if let some i := comps.idxOf? `_at_ then
     let mut site := Name.anonymous
     for c in comps.drop (i + 1) do
-      site := site ++ c
-      if env.contains site then out := out.push site
+      site := extend site c
+      out := add out site
   return out
 
 /-- Whether the program can read a value as another type than its own
