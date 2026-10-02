@@ -179,9 +179,14 @@ mutual
         let body ← lowerCode bodyCtx outlined retTy d.value
         let bound := pnames.foldl (·.insert ·) ({} : Std.HashSet String)
         let free := (rrFreeVars.blockFreeVars body bound {}).toArray.qsort (· < ·)
-        let varTys : Std.HashMap String RR.Ty := ctx.vars.fold (fun m _ (n, t) => m.insert n t) {}
+        -- The variables in scope: those `vars` names, and those captured
+        -- by the outlined join points in scope, which the body's jumps to
+        -- them pass by name even where `vars` names them differently.
+        let varTys : Std.HashMap String RR.Ty := ctx.vars.fold (fun m _ (n, t) => m.insert n t) ctx.captured
         let captured := free.filter varTys.contains
-        let fparams := captured.map (fun n => (n, varTys.getD n .unit)) ++ pnames.zip ptys
+        let capturedTys := captured.map fun n => (n, varTys.getD n .unit)
+        let fparams := capturedTys ++ pnames.zip ptys
+        let ctx := { ctx with captured := capturedTys.foldl (fun m (n, t) => m.insert n t) ctx.captured }
         if let some sm := ctx.sm then
           -- J4: a variant of the state machine.
           let variant ← fresh "j"

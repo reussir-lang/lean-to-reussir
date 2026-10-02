@@ -1182,6 +1182,14 @@ cases x                         ↦    match x { A => z,
 | C => jmp j v
 ```
 
+The captured variables `fv` are the free variables of the lowered body,
+under the names they have where `j` is declared, and every jump passes
+them under those names. An alternative may name a matched variable anew
+(a constructor without fields uses a fresh nullary value, a boxed value is
+matched after its conversion), but the old name stays in scope there: a
+join point outlined inside such an alternative whose body jumps to `j`
+captures the old name too, not just the variables the alternative names.
+
 **Sinking first.** Before choosing, every join point is moved down to the
 smallest part of its scope that contains all its jumps: past `let`s, into
 the single `cases` branch that jumps to it, into the continuation or body of
