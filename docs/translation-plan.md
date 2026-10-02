@@ -1048,8 +1048,9 @@ used and every field is bound at the match):
 - In the arm of a constructor without fields, the matched value is that
   constructor (`leaf{}`), which costs nothing to build.
 - In an arm where the matched value stays live because it is stored whole
-  in a new constructor or returned whole (`simp` turns `t@(node l k r)`
-  rebuilt into `t`: a BST insert of a key already present), the match binds
+  in a new constructor, returned whole (`simp` turns `t@(node l k r)`
+  rebuilt into `t`: a BST insert of a key already present) or passed whole
+  to a call (merge's `go l₁ ys (y :: acc)`), the match binds
   only the fields used while the value is live; an inner alternative that
   no longer uses the value matches it again and binds the fields it uses
   there. `balance` keeps the recursive result `x` when no rotation is needed
@@ -1089,11 +1090,21 @@ used and every field is bound at the match):
   no match, its fields are projections) that stays live the same way
   projects only the fields used while it is live; an inner alternative
   that no longer uses it projects the others there (the pair `(k', t)` of
-  an association list, kept whole when its key does not match). The rule
-  is limited to values stored in constructors or returned. For a value
-  only passed to calls (merge's `go l₁ ys (y :: acc)`), reusing its cell
-  measured slower on the classic `mergesort`: the result keeps the
-  scattered memory order of the input cells.
+  an association list, kept whole when its key does not match).
+  A merge (`List.mergeSort`'s `mergeTR.go`, the classic `mergesort`'s
+  `merge.go`) then reuses the cell it takes apart, as native Lean does.
+  Without the rule for calls it allocated a cell at every step and freed
+  the matched one, which made the result's memory order a matter of
+  allocator state: when the size class has few free cells (the list just
+  filled its last page: the length modulo the 2048 32-byte cells of a
+  64 KiB page), mimalloc hands back cells freed all over the heap, so the
+  sorted list costs a cache miss per cell to walk (S6-02: `List.mergeSort` on
+  `List Nat` and every later walk of its result 5-9x native at n = 1e6 or
+  2e6, 1.2x at n = 997960; `List UInt64` 3.9x at n = 1000800). When the
+  allocator has long runs of free cells, allocating compacts the list
+  instead, which a sort of random input gains from: the classic
+  `mergesort` runs at about 0.75x native with reuse, 0.4-0.5x when
+  allocating.
 - The same holds for the fields of a structure, which are projected
   (`let f = s.0`) at the top of the alternative: when the alternative then
   branches and one branch keeps `s` whole while only other branches use

@@ -516,13 +516,16 @@ region op. A decrement of a nullary constructor (an immediate) is the same
 kind of phantom donor.
 
 **lean2rr.** A value stored whole in a constructor, a value returned whole
-(an insert that returns the node for an equal key), and a structure stored
-or returned whole have their fields bound only where they are used (plan
-§5.5). The matched value's fields are then not
+(an insert that returns the node for an equal key), a value passed whole
+to a call (merge's `go l₁ ys (y :: acc)`), and a structure stored,
+returned or passed whole have their fields bound only where they are used
+(plan §5.5). The matched value's fields are then not
 retained while it stays live, so there is no phantom donor. With this, the
-Std.TreeMap insert is as fast as native Lean, and BST inserts with `Nat` or
+Std.TreeMap insert is as fast as native Lean, BST inserts with `Nat` or
 `String` keys whose equal arm returns the node run at or below native time,
-even on ef922049. An earlier workaround returned the constructor rebuilt
+even on ef922049, and `List.mergeSort`'s merge reuses the cell it takes
+apart (before values passed to calls were included it allocated a cell at
+every step: round-6 finding S6-02). An earlier workaround returned the constructor rebuilt
 from the arm's fields instead of the matched value; it broke `ptrEq`
 identity and sharing (Lean's `Expr.replace`-style fixpoints never stopped)
 and was removed.

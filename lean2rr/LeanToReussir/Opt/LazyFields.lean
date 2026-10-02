@@ -5,23 +5,28 @@ import LeanToReussir.PassConfig
 # Fields of a live matched value bound where used (optimization `lazy-fields`)
 
 Reussir projects a match's fields at the match. When the matched value stays
-live in the alternative, because it is stored whole in a new constructor or
+live in the alternative, because it is stored whole in a new constructor,
 returned whole (`simp` turns `t@(node l k r)` rebuilt into `t`: a BST insert
-of a key already present), each field projected there is an extra reference
-(inc and dec), and its release looks like a reusable cell to Reussir's
-token reuse, which prefers it to the cell actually freed and then never
-reuses anything (Reussir bug 7: TreeMap's `balance` rebuilt every node of
-the path; a BST insert with `Nat` keys, whose comparison is a call before
-the branch, every node).
+of a key already present) or passed whole to a call (merge's `go l₁ ys (y ::
+acc)`, where `y :: ys` is the matched value), each field projected there is
+an extra reference (inc and dec), and its release looks like a reusable cell
+to Reussir's token reuse, which prefers it to the cell actually freed and
+then never reuses anything (Reussir bug 7: TreeMap's `balance` rebuilt every
+node of the path; a BST insert with `Nat` keys, whose comparison is a call
+before the branch, every node; `List.mergeSort`'s merge allocated a cell at
+every step and freed the matched one).
 
 So such an alternative binds at the match only the fields needed while the
 value is live (`usesWhileLive`); a field used only in inner alternatives
 that do not use the value is bound there, by matching the value again
-(structures: by projecting it) in `lazyLowerAlt`. Values only passed to
-calls are not treated so: there reusing the cell (merge's `go l₁ ys (y ::
-acc)`) measured slower for mergesort, whose lists then keep the scattered
-order of the input cells. The pending fields are this pass's state in the
-context (`LazyFieldsState` in `CodeCtx.ext`).
+(structures: by projecting it) in `lazyLowerAlt`. A merge then reuses the
+cell it takes apart, as native Lean does, and its result keeps the input's
+cells. Allocating instead made the result's memory order depend on the
+allocator: when mimalloc has few free cells of the size, it hands back cells
+freed across the whole heap, and walking the result costs a cache miss per
+cell (a sort and every later walk 5-9x native, at list lengths depending on
+the length modulo a page's capacity). The pending fields are this pass's
+state in the context (`LazyFieldsState` in `CodeCtx.ext`).
 
 Without this pass every field is bound at the match.
 -/
@@ -66,18 +71,21 @@ the bodies of the join points declared outside `c`). -/
 def usesVar (jps : Std.HashMap FVarId (Code .pure)) (x : FVarId) (c : Code .pure) : Bool :=
   (usesVarM jps x c).run' {}
 
-/-- Whether `x` is a field of a constructor application in `c` (or in a join
-point that `c` jumps to). -/
-partial def usedAsField (env : Environment) (jps : Std.HashMap FVarId (Code .pure)) (x : FVarId)
+/-- Whether `x` is an argument of an application in `c` (or in a join point
+that `c` jumps to): a field of a constructor application, or an argument of
+a call (merge's `go l₁ ys (y :: acc)`, where `y :: ys` is the matched
+value). -/
+partial def usedAsArg (jps : Std.HashMap FVarId (Code .pure)) (x : FVarId)
     (c : Code .pure) : Bool :=
   (go c).run' {}
 where
   go (c : Code .pure) : StateM JpMemo Bool := do
     match c with
     | .let d k =>
+      let isX : Arg .pure → Bool := fun a => match a with | .fvar y => y == x | _ => false
       let here := match d.value with
-        | .const f _ args _ =>
-          env.isConstructor f && args.any fun a => match a with | .fvar y => y == x | _ => false
+        | .const _ _ args _ => args.any isX
+        | .fvar _ args => args.any isX
         | _ => false
       if here then return true else go k
     | .fun d k _ | .jp d k => if ← go d.value then return true else go k
@@ -212,15 +220,15 @@ def CodeCtx.withLazyMatches (ctx : CodeCtx) (ms : Array LazyMatch) : CodeCtx :=
 /-! ## The hooks -/
 
 /-- The binding of a structure alternative's fields: when the structure is a
-shared value that stays live because it is stored or returned whole, only
-the fields used while it is live are projected here; the others are
+shared value that stays live because it is stored, returned or passed whole,
+only the fields used while it is live are projected here; the others are
 projected in the inner alternatives that use them (`lazyLowerAlt`), as for
 the constructors of an enum (`lazyEnumFields`). -/
 def lazyStructFields (prev : CodeCtx → CasesArm → LowerM (ArmLets × CodeCtx)) (ctx : CodeCtx) (arm : CasesArm) :
     LowerM (ArmLets × CodeCtx) := do
   let k := arm.code
   let lazyOk := arm.shared &&
-    (usedAsField (← getEnv) ctx.jpBodies arm.discr k || returnedWhole ctx.jpBodies arm.discr k)
+    (usedAsArg ctx.jpBodies arm.discr k || returnedWhole ctx.jpBodies arm.discr k)
   if !lazyOk then return ← prev ctx arm
   let mut ctx' := ctx
   let mut lets := #[]
@@ -245,16 +253,17 @@ def lazyStructFields (prev : CodeCtx → CasesArm → LowerM (ArmLets × CodeCtx
   return (lets, ctx')
 
 /-- The fields of an enum alternative in which the matched value stays live
-because it is stored or returned whole: only the fields needed while it is
-live stay bound by the match; the others are unbound, and recorded to be
-bound by matching the value again where they are used (`lazyLowerAlt`). -/
+because it is stored, returned or passed whole: only the fields needed
+while it is live stay bound by the match; the others are unbound, and
+recorded to be bound by matching the value again where they are used
+(`lazyLowerAlt`). -/
 def lazyEnumFields (prev : CodeCtx → CasesArm → Array (Option String) → LowerM (Array (Option String) × CodeCtx))
     (ctx : CodeCtx) (arm : CasesArm) (binders : Array (Option String)) :
     LowerM (Array (Option String) × CodeCtx) := do
   let (binders, ctx) ← prev ctx arm binders
   let k := arm.code
   unless !binders.isEmpty && arm.shared &&
-      (usedAsField (← getEnv) ctx.jpBodies arm.discr k || returnedWhole ctx.jpBodies arm.discr k) do
+      (usedAsArg ctx.jpBodies arm.discr k || returnedWhole ctx.jpBodies arm.discr k) do
     return (binders, ctx)
   let mut binders := binders
   let mut ctx' := ctx
