@@ -16,6 +16,8 @@ import LeanToReussir.Opt.FieldOrder
 import LeanToReussir.Opt.NatArrays
 import LeanToReussir.Opt.PlaceholderCache
 import LeanToReussir.Opt.SplitMapLoops
+import LeanToReussir.Opt.OriginFreeReads
+import LeanToReussir.Opt.FreshRebuild
 
 /-!
 # The pass registry
@@ -49,7 +51,7 @@ new pass after the earlier ones; the predicates (`duplicateJp`,
 newest first and hand what they do not handle to the earlier ones;
 `armPrelude` places the earlier passes' `let`s first;
 `preludeReplacements` is a map, where a later line wins for the same
-definition; `valueStructs` is a switch. The core's own steps (`Outline`
+definition; `preludePasses` run in line order; `valueStructs` is a switch. The core's own steps (`Outline`
 before the passes over the generated functions) are not listed here.
 -/
 
@@ -84,7 +86,9 @@ def optimizations : Array OptPass := #[
   ⟨"state-machines", true, "a loop's state machine (J4) entered without allocation: parameters passed beside a nullary entry variant (placeholders at jumps)", StateMachines.install⟩,
   ⟨"lazy-fields", true, "fields of a matched value kept live (stored or returned whole) bound where used (Reussir bug 7 workaround)", LazyFields.install⟩,
   ⟨"nullary-scrutinee", true, "in the arm of a constructor without fields, the matched value rebuilt instead of kept", NullaryScrutinee.install⟩,
-  ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩]
+  ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩,
+  ⟨"fresh-rebuild", true, "in a program that never asks for an object's identity, an alternative that only returns a freshly built matched value returns it rebuilt from its fields (Reussir then reuses the cell in every alternative)", FreshRebuild.install⟩,
+  ⟨"origin-free-reads", true, "in a program whose conversions never produce an array, array reads release without checking the origin table (LLVM then cancels a read's increment and release)", OriginFreeReads.install⟩]
 
 /-- Parts of the translation that look like optimizations but are not
 optional. -/

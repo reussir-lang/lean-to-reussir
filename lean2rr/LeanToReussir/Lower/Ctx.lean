@@ -66,6 +66,14 @@ structure CodeCtx where
   value of its own equal to theirs (Opt/NullaryScrutinee): other hooks must
   not bind them again there. -/
   pinned : FVarIdSet := {}
+  /-- Variables bound in the function being lowered to an application of a
+  constant (a declaration or a constructor) to at least one argument: the
+  constant and the number of arguments. -/
+  letCalls : Std.HashMap FVarId (Name × Nat) := {}
+  /-- Matched values that the current alternative returns as an expression
+  of their type instead of themselves (Opt/FreshRebuild: the constructor
+  rebuilt from the alternative's fields). Plain: none. -/
+  rebuild : Std.HashMap FVarId (RR.Expr × RR.Ty) := {}
   /-- The state optional passes keep in the context, by the pass's name
   (`CodeCtx.getExt?`, `CodeCtx.setExt`). -/
   ext : NameMap Dynamic := {}

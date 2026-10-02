@@ -124,6 +124,21 @@ pub fn free_vec<T: Clone>(p: usize) {
         unsafe { drop(std::mem::transmute::<usize, reussir_rt::rc::Rc<std::vec::Vec<T>>>(p)) };
         return;
     }
+    // Outside a free, `run` would release the elements now, from the last
+    // one: those whose release only decrements (shared ones: the old
+    // version of an array that was copied for an update) are released here
+    // first, which is the same. If all are, the box is freed without the
+    // stack; else the stack's work goes on from the first element whose
+    // release frees it. Inside a free the array is only pushed, and its
+    // elements are released when it is popped, after the work pushed before
+    // it (a later field of the record being freed may hold one of them).
+    if !active() {
+        let mut r = ManuallyDrop::new(unsafe { std::mem::transmute::<usize, reussir_rt::rc::Rc<std::vec::Vec<T>>>(p) });
+        if unsafe { T::release_shared_from_end(r.data_mut()) } {
+            unsafe { ManuallyDrop::drop(&mut r) };
+            return;
+        }
+    }
     run(p, step_vec::<T>);
 }
 
@@ -132,23 +147,114 @@ pub fn free_vec<T: Clone>(p: usize) {
 unsafe fn step_vec<T: Clone>(p: usize) -> bool {
     let depth = reussir_rt::drop::depth();
     let mut r = ManuallyDrop::new(std::mem::transmute::<usize, reussir_rt::rc::Rc<std::vec::Vec<T>>>(p));
-    loop {
-        let x = r.data_mut().pop();
-        match x {
-            Some(x) => {
-                drop(x);
-                if r.data_ref().is_empty() {
-                    break;
-                }
-                if reussir_rt::drop::depth() != depth {
-                    return false;
-                }
-            }
-            None => break,
-        }
+    if !T::release_from_end(r.data_mut(), depth) {
+        return false;
     }
     ManuallyDrop::drop(&mut r);
     true
+}
+
+/// Releasing the elements of a vector being freed (`step_vec`).
+trait ReleaseElems: Sized {
+    /// Release elements from the last one until `v` is empty (`true`) or a
+    /// release pushed work, which is done first (`false`; the elements left
+    /// stay in `v`). `depth` is the stack's depth before.
+    unsafe fn release_from_end(v: &mut std::vec::Vec<Self>, depth: usize) -> bool;
+    /// Release elements from the last one while their release frees
+    /// nothing; answers whether `v` is then empty. (For element types
+    /// whose releases cannot be told apart, none: `v` stays as it is.)
+    unsafe fn release_shared_from_end(v: &mut std::vec::Vec<Self>) -> bool;
+}
+
+#[inline(always)]
+unsafe fn release_from_end_each<T>(v: &mut std::vec::Vec<T>, depth: usize) -> bool {
+    while let Some(x) = v.pop() {
+        drop(x);
+        if v.is_empty() {
+            break;
+        }
+        if reussir_rt::drop::depth() != depth {
+            return false;
+        }
+    }
+    true
+}
+
+impl<T> ReleaseElems for T {
+    #[inline(always)]
+    default unsafe fn release_from_end(v: &mut std::vec::Vec<T>, depth: usize) -> bool {
+        release_from_end_each(v, depth)
+    }
+    #[inline(always)]
+    default unsafe fn release_shared_from_end(v: &mut std::vec::Vec<T>) -> bool {
+        v.is_empty()
+    }
+}
+
+/// A Reussir record (`Bridge<Inner>`, see `array::ExtendCloned`): its
+/// `Drop` is the compiler-emitted `<record>_ffi_release`, an out-of-line
+/// call per element, which decrements the 32-bit count at offset 0 (not
+/// stored for an immediate, whose top byte is a tag under the aarch64
+/// encoding of nullary variants) and frees the box when the count was 1.
+/// Here a shared element is decremented inline, as `lean_del` does
+/// natively, and an immediate is skipped (its release changes nothing:
+/// Reussir never frees one, local patch 0006); only an element whose count
+/// is 1 goes through `<record>_ffi_release`, which frees it, so the order
+/// of releases and the stack's work are as with the generic loop.
+impl<X> ReleaseElems for reussir_rt::bridge::Bridge<X> {
+    #[inline(always)]
+    unsafe fn release_from_end(v: &mut std::vec::Vec<Self>, depth: usize) -> bool {
+        if !(cfg!(target_arch = "aarch64") && std::mem::size_of::<Self>() == 8) {
+            return release_from_end_each(v, depth);
+        }
+        let mut n = v.len();
+        while n > 0 {
+            let p = *(v.as_ptr().add(n - 1) as *const usize);
+            if p >> 56 != 0 {
+                n -= 1;
+                v.set_len(n);
+                continue;
+            }
+            let c = *(p as *const u32);
+            if c != 1 {
+                *(p as *mut u32) = c.wrapping_sub(1);
+                n -= 1;
+                v.set_len(n);
+                continue;
+            }
+            n -= 1;
+            let x = std::ptr::read(v.as_ptr().add(n));
+            v.set_len(n);
+            drop(x);
+            if n == 0 {
+                break;
+            }
+            if reussir_rt::drop::depth() != depth {
+                return false;
+            }
+        }
+        true
+    }
+    #[inline(always)]
+    unsafe fn release_shared_from_end(v: &mut std::vec::Vec<Self>) -> bool {
+        if !(cfg!(target_arch = "aarch64") && std::mem::size_of::<Self>() == 8) {
+            return v.is_empty();
+        }
+        let mut n = v.len();
+        while n > 0 {
+            let p = *(v.as_ptr().add(n - 1) as *const usize);
+            if p >> 56 == 0 {
+                let c = *(p as *const u32);
+                if c == 1 {
+                    return false;
+                }
+                *(p as *mut u32) = c.wrapping_sub(1);
+            }
+            n -= 1;
+            v.set_len(n);
+        }
+        true
+    }
 }
 
 /// A thunk or task cell: Reussir's `Rc` around the state.

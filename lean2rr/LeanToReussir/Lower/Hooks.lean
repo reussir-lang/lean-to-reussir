@@ -27,6 +27,9 @@ structure CasesArm where
   /-- A shared (heap) value matched at its own type, whose fields could be
   bound later than at the match. -/
   shared : Bool
+  /-- Matched through the constructors of another type (a cast value,
+  `castCases`): the layout is that type's. -/
+  view : Bool := false
 
 /-- `let`s placed before an alternative's code. -/
 abbrev ArmLets := Array (String × Option RR.Ty × RR.Expr)

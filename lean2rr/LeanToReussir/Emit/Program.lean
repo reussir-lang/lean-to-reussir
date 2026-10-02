@@ -307,6 +307,11 @@ def LoweredProgram.rrProgram (p : LoweredProgram) : RRProgram :=
 def LoweredProgram.runRRPasses (cfg : PassConfig) (p : LoweredProgram) : LoweredProgram :=
   { p with fns := cfg.rrPasses.foldl (fun fns pass => pass p.rrProgram fns) p.fns }
 
+/-- The registry's edits of the prelude, given the final functions
+(`Opt/OriginFreeReads`). -/
+def LoweredProgram.runPreludePasses (cfg : PassConfig) (p : LoweredProgram) : LoweredProgram :=
+  { p with prelude := cfg.preludePasses.foldl (fun pre pass => pass p.fns pre) p.prelude }
+
 /-- Runs of pushed small `Nat` literals (a spliced `Array Nat` literal) as
 tables (`ArrayLits`; core). -/
 def LoweredProgram.literalTables (p : LoweredProgram) : LoweredProgram :=
@@ -396,7 +401,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
                           preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls,
                           uncachedConsts, preludeReplacements := cfg.preludeReplacements,
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
-                          cachePlaceholders := cfg.cachePlaceholders, natArrays := cfg.natArrays }
+                          cachePlaceholders := cfg.cachePlaceholders, natArrays := cfg.natArrays,
+                          observesIdentity := programObservesIdentity (← getEnv) keys decls }
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit variant, `box(0)`): types
     -- may mention it even when nothing is ever boxed.

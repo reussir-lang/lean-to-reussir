@@ -46,6 +46,22 @@ pub fn release<T: Clone>(v: RVec<T>) {
     }
 }
 
+/// `release` for a program that records no conversion origins (lean2rr's
+/// optimization `origin-free-reads`): no array is held by the origin
+/// table, so giving up a shared handle is a plain decrement, which LLVM
+/// cancels against the caller's increment for a read.
+#[inline(always)]
+pub fn release_unrecorded<T: Clone>(v: RVec<T>) {
+    let r = into_rc(v);
+    let c = r.count_ref().get();
+    if c == 1 {
+        drop_last(r)
+    } else {
+        r.count_ref().set(c - 1);
+        std::mem::forget(r);
+    }
+}
+
 #[cold]
 #[inline(never)]
 extern "C" fn drop_last<T: Clone>(r: Rc<Vec<T>>) {
