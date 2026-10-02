@@ -198,3 +198,14 @@ pub fn mono_nanos() -> u64 {
     unsafe { clock_gettime(1, ts.as_mut_ptr()) };
     (ts[0] as u64) * 1000000000 + (ts[1] as u64)
 }
+
+/// The system (real-time) clock in nanoseconds since the Unix epoch, signed
+/// (`std::chrono::system_clock` in `lean_get_current_time`, which
+/// `Std.Time.Timestamp.now` calls; lean2rr's shim builds the timestamp).
+#[inline(never)]
+pub fn realtime_nanos() -> i64 {
+    let mut ts = [0i64; 2];
+    extern "C" { fn clock_gettime(clk: i32, ts: *mut i64) -> i32; }
+    unsafe { clock_gettime(0, ts.as_mut_ptr()) };
+    ts[0].wrapping_mul(1000000000).wrapping_add(ts[1])
+}

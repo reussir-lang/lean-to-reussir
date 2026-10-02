@@ -2501,7 +2501,10 @@ Each item says what differs and when.
   check their once-cell on every read: Pf4BigLit 1.16x native.
 
 **Runtime** (details in `runtime/README.md`, "Known divergences")
-- Sharing is not observable: `isExclusiveUnsafe` answers `false`.
+- Sharing is not observable: `isExclusiveUnsafe` answers `false`;
+  `shareCommon` shares nothing, and `ShareCommon.Object.eq` holds only for
+  the same object (natively also for two objects with the same fields;
+  `L2RShim`).
 - `IO.getNumHeartbeats` is 0; `dbgStackTrace` prints nothing; a panic's
   backtrace line is `(stack trace unavailable)`.
 - `errno` after a sticky handle error can differ.

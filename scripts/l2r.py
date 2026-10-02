@@ -21,7 +21,9 @@ Environment overrides: L2R_REUSSIR (Reussir checkout with build/), L2R_RUSTC
 default: the one shipped with the Lean toolchain), L2R_LEAN2RR (the lean2rr
 binary), L2R_DISABLE_OPTS and L2R_ENABLE_OPTS (comma-separated lean2rr
 optimizations to turn off or on, as --disable-opt/--enable-opt; spaces
-around the names are ignored; `lean2rr --list-opts` lists them).
+around the names are ignored; `lean2rr --list-opts` lists them),
+L2R_RRC_FLAGS (extra rrc flags, split on spaces, for experiments such as
+`--nullary-variant-encoding arch-independent`).
 """
 import argparse, fcntl, hashlib, os, subprocess, sys, tempfile
 from pathlib import Path
@@ -217,7 +219,9 @@ def main():
                # recursion through monad transformers), while it changes no
                # classic benchmark by more than 1% (lean2rr dispatches
                # function values itself).
-               + ["--no-closure-wpd"])
+               + ["--no-closure-wpd"]
+               # Extra rrc flags for experiments (L2R_RRC_FLAGS, split on spaces).
+               + os.environ.get("L2R_RRC_FLAGS", "").split())
         if args.no_reuse_across_call:
             run(rrc, cwd=tmp)
         else:
