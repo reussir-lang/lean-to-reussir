@@ -395,7 +395,8 @@ def isFallibleIOSym (sym : String) : Bool :=
          "lean_io_hard_link", "lean_io_realpath", "lean_io_read_dir", "lean_io_metadata",
          "lean_io_symlink_metadata", "lean_chmod", "lean_io_create_tempfile",
          "lean_io_create_tempdir", "lean_io_current_dir", "lean_io_app_path",
-         "lean_io_process_get_current_dir", "lean_io_process_set_current_dir"] ||
+         "lean_io_process_get_current_dir", "lean_io_process_set_current_dir",
+         "lean_io_get_random_bytes"] ||
   -- The standard streams' operations (their glue is generated with the
   -- `IO.FS.Stream` values) report errors the same way.
   sym ∈ ["lean_get_stdout", "lean_get_stderr", "lean_get_stdin"]

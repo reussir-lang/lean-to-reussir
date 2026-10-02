@@ -145,8 +145,7 @@ single call:
 **IO externs that cannot fail** (BaseIO) have a payload primitive named
 `l2r_` + the symbol without `lean_`, taking the same passed arguments;
 lean2rr wraps its result with `wrapIOResult`: `l2r_io_mono_ms_now()`,
-`l2r_io_mono_nanos_now()`, `l2r_io_get_random_bytes(n)`,
-`l2r_io_process_get_pid()`, `l2r_io_get_num_heartbeats()`,
+`l2r_io_mono_nanos_now()`, `l2r_io_process_get_pid()`, `l2r_io_get_num_heartbeats()`,
 `l2r_io_check_canceled()`, `l2r_io_get_tid()`, `l2r_io_initializing()`,
 `l2r_io_set_heartbeats(n)`, `l2r_runtime_mark_persistent<T>(a)`,
 `l2r_runtime_mark_multi_threaded<T>(a)`, `l2r_runtime_forget<T>(a)`,
@@ -259,7 +258,9 @@ final run after `main`) suspends its *context* (`main`'s thread stack, or a
 stack of a worker thread's size, 1 GiB reserved, with a guard page that the
 stack-overflow handler recognizes) and the scheduler runs: a context that
 can go on, else a queued task on a new context if one of Lean's task
-manager workers is free (`LEAN_NUM_THREADS`, or the number of processors;
+manager workers is free (`LEAN_NUM_THREADS`, or the number of online
+processors, as `std::thread::hardware_concurrency`: not limited by the CPU
+affinity mask or a cgroup quota;
 a context waiting for a task frees its worker; dedicated tasks always
 start), else the event loop's timers and sockets or the earliest sleeper.
 Nothing can go on: the program waits forever. A switch saves and restores
@@ -325,12 +326,18 @@ UDP (`udp_new`, `udp_bind`, `udp_connect`, `udp_send`, `udp_option`,
 (`dns_get_info`, `dns_get_name`), interfaces (`ifaces`), and the pure
 `lean_shim_uv_kind`, `lean_shim_uv_strerror` (libuv's error kinds and
 messages), `lean_shim_pton`, `lean_shim_ntop`; `Std.Internal.UV.System`
-over `leanrt::sys` (`sys_title_get`, `sys_title_set`, `sys_query(which)`
-for the queries with several results, `sys_group`, `sys_getenv`,
-`sys_priority`, `sys_word(which)` for single numbers, `sys_chdir`,
-`sys_setenv`, `sys_setpriority`, `sys_random`), following libuv's Linux
-code (`/proc/uptime`, `/proc/stat`, `/proc/meminfo`, the cgroup's memory
-limit, `getpwuid_r`, ...). Addresses are byte arrays:
+over `leanrt::sys` (`sys_title_set`, `sys_query(which)` for the queries
+with a string or several results, the process title included,
+`sys_group`, `sys_getenv`, `sys_priority`, `sys_word(which)` for single
+numbers, `sys_chdir`, `sys_setenv`, `sys_setpriority`, `sys_random`),
+following libuv's Linux code (`/proc/uptime`, `/proc/stat`,
+`/proc/meminfo`, the cgroup's memory limit, `getpwuid_r`, ...) with the
+buffers Lean passes (`UV_ENOBUFS` for a home or temporary directory of
+`PATH_MAX` bytes or more, a process title of 512 or more) and libuv's
+argument checks (a priority outside [-20, 19], `random` of more than
+`0x7FFFFFFF` bytes, an empty host name or one of 256 bytes or more for
+`getAddrInfo`). An operation's strings are decoded as `lean_mk_string`
+does (invalid UTF-8 becomes U+FFFD). Addresses are byte arrays:
 the family (4 or 6), the port (big-endian, for socket addresses), the
 address bytes. `l2r_uv_event_loop_alive()` is true, as natively. A promise
 the loop gives up unresolved (a timer stopped, reset or re-armed, an
@@ -397,7 +404,10 @@ ns, mtime s, ns, size, `FileType` index, numLinks]; the seconds are `i64`
 bit patterns), `l2r_fs_current_dir()`, `l2r_fs_app_path()`,
 `l2r_fs_process_get_current_dir()`, `l2r_fs_process_set_current_dir(p)`,
 `l2r_fs_create_tempfile() -> LHandle` (then `l2r_fs_temp_file_path()` is
-its path, for the `Handle × FilePath` pair), `l2r_fs_create_tempdir()`.
+its path, for the `Handle × FilePath` pair), `l2r_fs_create_tempdir()`,
+`l2r_fs_get_random_bytes(n)` (`IO.getRandomBytes`, from `/dev/urandom`).
+The current directory (`getcwd`) and `realPath` (`realpath`) use a
+`PATH_MAX` buffer, as natively, so a longer path fails.
 **stdio model.** Handles and the standard streams are models of glibc's
 `FILE` (`leanrt/src/cfile.rs`, following libio's `fileops.c`/`genops.c`
 function by function): one `st_blksize` buffer shared by reading and
@@ -668,8 +678,6 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   has errno `ENOENT` or `EINTR` (e.g. `getLine` on a handle whose error
   indicator is set, after a failed `metadata` left `errno = ENOENT`); the
   runtime reports `no such file or directory` with an empty file name.
-- A direct `read` of a huge count (`Handle.read`, ≥ one buffer) is issued in
-  `read(2)` calls of at most 16 MiB (the same data; natively one call).
 
 ## Testing
 

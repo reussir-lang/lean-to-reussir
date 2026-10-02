@@ -1941,7 +1941,9 @@ order:
    in the order they became able to;
 2. a queued task, on a new context, in the order `next_tag` would start it
    (above), if one of the task manager's workers is free: their number is
-   `LEAN_NUM_THREADS`, or the number of processors, as natively; a context
+   `LEAN_NUM_THREADS`, or the number of online processors, as natively
+   (`std::thread::hardware_concurrency`, not limited by the CPU affinity
+   mask); a context
    running a task at a priority up to `Task.Priority.max` holds one, except
    while it waits for a task or promise (Lean's `wait_for` lets another
    worker start then); a dedicated task (priority above 8) has a thread of

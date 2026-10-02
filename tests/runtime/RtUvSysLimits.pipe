@@ -1,0 +1,6 @@
+HOME= TMPDIR= TMP=/fromTMP $BIN env
+HOME=/ TMPDIR=/a/b/ $BIN env
+env -u HOME -u TMPDIR -u TMP -u TEMP -u TEMPDIR $BIN env
+HOME=/$(printf 'h%.0s' $(seq 4094)) TMPDIR=/$(printf 't%.0s' $(seq 4094)) $BIN env
+HOME=/$(printf 'h%.0s' $(seq 4095)) TMP=/$(printf 't%.0s' $(seq 4095)) env -u TMPDIR $BIN env
+$BIN $ARGS

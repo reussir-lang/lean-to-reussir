@@ -63,6 +63,12 @@ fn errno() -> i32 {
     crate::cfile::errno_now()
 }
 
+const UV_E2BIG: i32 = -7;
+const UV_EINVAL: i32 = -22;
+const UV_ENOBUFS: i32 = -105;
+/// The size of the buffers Lean passes to `uv_os_homedir` and `uv_os_tmpdir`.
+const PATH_MAX: usize = 4096;
+
 fn cstr(p: *const c_char) -> Vec<u8> {
     if p.is_null() {
         Vec::new()
@@ -106,7 +112,7 @@ fn with_title<R>(f: impl FnOnce(&mut Title) -> R) -> R {
     if g.is_none() {
         // The title is `argv[0]`; it can grow over the memory of all the
         // arguments (their lengths, with their NULs).
-        let args: Vec<Vec<u8>> = std::env::args_os().map(|a| std::os::unix::ffi::OsStrExt::as_bytes(a.as_os_str()).to_vec()).collect();
+        let args = crate::rt::args();
         let title = args.first().cloned().unwrap_or_default();
         let cap = args.iter().map(|a| a.len() + 1).sum();
         *g = Some(Title { title, cap });
@@ -114,9 +120,13 @@ fn with_title<R>(f: impl FnOnce(&mut Title) -> R) -> R {
     f(g.as_mut().unwrap())
 }
 
-/// `uv_get_process_title`.
-pub fn title_get() -> Vec<u8> {
-    with_title(|t| t.title.clone())
+/// `uv_get_process_title` into Lean's 512-byte buffer: a title of 512 bytes
+/// or more is `UV_ENOBUFS`.
+pub fn title_get() -> LHandle {
+    let o = done_op();
+    let x = op(&o);
+    with_title(|t| if t.title.len() >= 512 { x.code = UV_ENOBUFS } else { x.strs.push(t.title.clone()) });
+    o
 }
 
 /// `uv_set_process_title`: truncated to the arguments' memory, and the
@@ -163,13 +173,20 @@ pub fn hrtime() -> u64 {
     (ts[0] as u64).wrapping_mul(1_000_000_000).wrapping_add(ts[1] as u64)
 }
 
-/// `uv_cwd` (a trailing slash dropped, except for `/`).
+/// `uv_cwd` into Lean's `PATH_MAX` buffer (a trailing slash dropped, except
+/// for `/`). A path that does not fit is `ERANGE`, or `UV_ENOBUFS` if it
+/// fits libuv's scratch buffer, one byte longer.
 pub fn cwd() -> LHandle {
     let o = done_op();
     let x = op(&o);
-    let mut buf = vec![0 as c_char; 4096];
-    if unsafe { getcwd(buf.as_mut_ptr(), buf.len()) }.is_null() {
-        x.code = -errno();
+    let mut buf = vec![0 as c_char; PATH_MAX + 1];
+    if unsafe { getcwd(buf.as_mut_ptr(), PATH_MAX) }.is_null() {
+        const ERANGE: i32 = 34;
+        x.code = if errno() != ERANGE || unsafe { getcwd(buf.as_mut_ptr(), PATH_MAX + 1) }.is_null() {
+            -errno()
+        } else {
+            UV_ENOBUFS
+        };
         return o;
     }
     let mut s = cbuf(&buf);
@@ -213,44 +230,51 @@ fn pw_entry() -> Result<(Vec<u8>, u32, u32, Vec<u8>, Vec<u8>), i32> {
     }
 }
 
-/// `uv_os_homedir`: `HOME` if it is set and not empty, else the passwd
-/// entry's directory.
+/// `uv_os_homedir` into a `PATH_MAX` buffer: `HOME` if it is set (even
+/// empty), else the passwd entry's directory; one of `PATH_MAX` bytes or
+/// more is `UV_ENOBUFS`.
 pub fn homedir() -> LHandle {
     let o = done_op();
     let x = op(&o);
-    if let Some(h) = std::env::var_os("HOME") {
-        let b = std::os::unix::ffi::OsStrExt::as_bytes(h.as_os_str()).to_vec();
-        if !b.is_empty() {
-            x.strs.push(b);
-            return o;
-        }
-    }
-    match pw_entry() {
-        Ok((_, _, _, _, dir)) => x.strs.push(dir),
+    let dir = match std::env::var_os("HOME") {
+        Some(h) => Ok(std::os::unix::ffi::OsStringExt::into_vec(h)),
+        None => pw_entry().map(|e| e.4),
+    };
+    match dir {
+        Ok(d) if d.len() >= PATH_MAX => x.code = UV_ENOBUFS,
+        Ok(d) => x.strs.push(d),
         Err(e) => x.code = e,
     }
     o
 }
 
-/// `uv_os_tmpdir`: `TMPDIR`, `TMP`, `TEMP` or `TEMPDIR`, else `/tmp`, a
-/// trailing slash dropped.
-pub fn tmpdir() -> LHandle {
-    let o = done_op();
-    let x = op(&o);
-    let mut d = b"/tmp".to_vec();
-    for v in ["TMPDIR", "TMP", "TEMP", "TEMPDIR"] {
-        if let Some(s) = std::env::var_os(v) {
-            let b = std::os::unix::ffi::OsStrExt::as_bytes(s.as_os_str()).to_vec();
-            if !b.is_empty() {
-                d = b;
-                break;
-            }
-        }
+/// libuv's `uv_os_tmpdir` into a `PATH_MAX` buffer: the first of `TMPDIR`,
+/// `TMP`, `TEMP`, `TEMPDIR` that is set (even empty), else `/tmp`; one of
+/// `PATH_MAX` bytes or more is `UV_ENOBUFS`; a trailing slash is dropped
+/// (not from `/`).
+pub(crate) fn uv_tmpdir() -> Result<Vec<u8>, i32> {
+    let mut d = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+        .iter()
+        .find_map(|v| std::env::var_os(v))
+        .map(std::os::unix::ffi::OsStringExt::into_vec)
+        .unwrap_or_else(|| b"/tmp".to_vec());
+    if d.len() >= PATH_MAX {
+        return Err(UV_ENOBUFS);
     }
     if d.len() > 1 && d.last() == Some(&b'/') {
         d.pop();
     }
-    x.strs.push(d);
+    Ok(d)
+}
+
+/// `uv_os_tmpdir`.
+pub fn tmpdir() -> LHandle {
+    let o = done_op();
+    let x = op(&o);
+    match uv_tmpdir() {
+        Ok(d) => x.strs.push(d),
+        Err(e) => x.code = e,
+    }
     o
 }
 
@@ -383,9 +407,14 @@ pub fn get_priority(pid: u64) -> LHandle {
     o
 }
 
-/// `uv_os_setpriority`.
+/// `uv_os_setpriority` (of the priority as an `int`): one outside
+/// [-20, 19] is `UV_EINVAL`.
 pub fn set_priority(pid: u64, prio: u64) -> i32 {
-    if unsafe { setpriority(0, pid as u32, prio as i64 as i32) } != 0 {
+    let prio = prio as i32;
+    if !(-20..=19).contains(&prio) {
+        return UV_EINVAL;
+    }
+    if unsafe { setpriority(0, pid as u32, prio) } != 0 {
         -errno()
     } else {
         0
@@ -630,9 +659,17 @@ pub fn cpu_info() -> LHandle {
 }
 
 /// `uv_random` of `size` bytes (`getrandom`), completing through the event
-/// loop as natively on libuv's thread pool.
+/// loop as natively on libuv's thread pool. Lean allocates the array first;
+/// then libuv refuses more than `0x7FFFFFFF` bytes at once (`UV_E2BIG`, a
+/// `sync_err`).
 pub fn random(size: u64, r: crate::task::LPromise) -> LHandle {
     let o = op_new();
+    crate::array::check_alloc(size, 1);
+    if size > 0x7FFF_FFFF {
+        op(&o).sync_err = UV_E2BIG;
+        crate::net::release(r);
+        return o;
+    }
     let mut buf = vec![0u8; size as usize];
     let mut off = 0;
     let mut code = 0;
