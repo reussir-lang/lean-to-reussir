@@ -186,7 +186,7 @@ fn init(s: &mut Option<Sched>) {
 }
 
 /// The number of worker threads of Lean's task manager:
-/// `LEAN_NUM_THREADS` (C's `atoi`), or the number of processors.
+/// `LEAN_NUM_THREADS` (C's `atoi`), or the number of online processors.
 fn pool_limit() -> u32 {
     if let Some(v) = std::env::var_os("LEAN_NUM_THREADS") {
         let s = std::os::unix::ffi::OsStrExt::as_bytes(v.as_os_str());
@@ -210,7 +210,18 @@ fn pool_limit() -> u32 {
         let n = if neg { -n } else { n }.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
         return n as i32 as u32;
     }
-    std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1)
+    hardware_concurrency()
+}
+
+/// `std::thread::hardware_concurrency()`, as Lean's C++ runtime calls it:
+/// the number of online processors (`sysconf(_SC_NPROCESSORS_ONLN)`, not
+/// limited by the CPU affinity mask or a cgroup quota), 0 if unknown.
+pub fn hardware_concurrency() -> u32 {
+    extern "C" {
+        fn sysconf(name: i32) -> i64;
+    }
+    const SC_NPROCESSORS_ONLN: i32 = 84;
+    unsafe { sysconf(SC_NPROCESSORS_ONLN) }.max(0) as u32
 }
 
 /// The running context.

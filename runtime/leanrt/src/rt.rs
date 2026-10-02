@@ -386,6 +386,12 @@ pub fn reserve_native_descriptors() {
     reserve_libuv_descriptors();
 }
 
+/// The command line (`argv`), read once.
+pub fn args() -> &'static [Vec<u8>] {
+    static ARGS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    ARGS.get_or_init(|| std::env::args_os().map(std::os::unix::ffi::OsStringExt::into_vec).collect())
+}
+
 /// `IO.initializing` (`lean_io_initializing`): true while module
 /// initializers run. lean2rr's entry sets it around them.
 static INITIALIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

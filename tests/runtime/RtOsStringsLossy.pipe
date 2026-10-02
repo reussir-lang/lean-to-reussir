@@ -1,0 +1,3 @@
+L2R_BAD=$'a\xffb\xc3' HOME=$'/h\xfe' TMPDIR=$'/t\xffx/' $BIN
+(exec -a P $BIN title)
+D=$PWD/tmp$'\xff'; rm -rf "$D"; mkdir "$D"; TMPDIR="$D" $BIN temp; rm -rf "$D"

@@ -94,15 +94,10 @@ fn l2r_process_exit(code : u8) -> u64 [{ { leanrt::sched::effect(); leanrt::io::
 fn l2r_process_force_exit(code : u8) -> u64 [{ { extern "C" { fn _exit(code: i32) -> !; } unsafe { _exit(code as i32) } } }];
 
 #[ffi(import)]
-fn l2r_argc() -> u64 [{ (std::env::args_os().count() as u64).saturating_sub(1) }];
+fn l2r_argc() -> u64 [{ (leanrt::rt::args().len() as u64).saturating_sub(1) }];
 
 #[ffi(import)]
-fn l2r_argv(i : u64) -> LStr [{
-    {
-        let a = std::env::args_os().nth(i as usize + 1).unwrap_or_default();
-        leanrt::string::from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(a.as_os_str()))
-    }
-}];
+fn l2r_argv(i : u64) -> LStr [{ leanrt::string::from_bytes_lossy(&leanrt::rt::args()[i as usize + 1]) }];
 
 // Top-level `error e`: `uncaught exception: <e.toString>`, exit 1.
 #[ffi(import)]
@@ -3145,11 +3140,13 @@ fn l2r_shim_op_bytes(o : LHandle) -> RVec<u8> [{
 fn l2r_shim_op_addr(o : LHandle) -> RVec<u8> [{
     { let b = leanrt::net::op(&o).addr.clone(); leanrt::rc_release(o); leanrt::array::bytes_of_vec(b) }
 }];
+// An operation's string `i`, decoded as Lean's `lean_mk_string` does (each
+// invalid UTF-8 sequence becomes U+FFFD).
 #[ffi(import)]
 fn l2r_shim_op_str(o : LHandle, i : u32) -> LStr [{
     {
         let x = leanrt::net::op(&o);
-        let s = leanrt::string::from_bytes(x.strs.get(i as usize).map(|v| v.as_slice()).unwrap_or(b""));
+        let s = leanrt::string::from_bytes_lossy(x.strs.get(i as usize).map(|v| v.as_slice()).unwrap_or(b""));
         leanrt::rc_release(o);
         s
     }
@@ -3311,8 +3308,6 @@ fn l2r_shim_op_str_count(o : LHandle) -> u32 [{ { let r = leanrt::net::op(&o).st
 
 // Std.Internal.UV.System (`leanrt::sys`).
 #[ffi(import)]
-fn l2r_shim_sys_title_get() -> LStr [{ leanrt::string::from_bytes(&leanrt::sys::title_get()) }];
-#[ffi(import)]
 fn l2r_shim_sys_title_set_h(s : LStr) -> u64 [{ { leanrt::sys::title_set(s.utf8()); leanrt::rc_release(s); 0 } }];
 fn l2r_shim_sys_title_set(s : LStr) -> L2RUnit { l2r_unit_of(l2r_shim_sys_title_set_h(s)) }
 #[ffi(import)]
@@ -3320,7 +3315,8 @@ fn l2r_shim_sys_query(which : u8) -> LHandle [{
     match which {
         0 => leanrt::sys::uptime(), 1 => leanrt::sys::cpu_info(), 2 => leanrt::sys::cwd(), 3 => leanrt::sys::homedir(),
         4 => leanrt::sys::tmpdir(), 5 => leanrt::sys::passwd(), 6 => leanrt::sys::environ_all(), 7 => leanrt::sys::hostname(),
-        8 => leanrt::sys::uname_all(), 9 => leanrt::sys::rusage(), _ => leanrt::sys::exepath()
+        8 => leanrt::sys::uname_all(), 9 => leanrt::sys::rusage(), 10 => leanrt::sys::exepath(),
+        _ => leanrt::sys::title_get()
     }
 }];
 #[ffi(import)]
@@ -3594,7 +3590,7 @@ fn lean_version_get_special_desc(u : L2RUnit) -> LStr { lean_mk_string("") }
 fn lean_system_platform_target(u : L2RUnit) -> LStr { lean_mk_string("aarch64-unknown-linux-gnu") }
 
 #[ffi(import)]
-fn l2r_hardware_concurrency() -> u32 [{ std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1) }];
+fn l2r_hardware_concurrency() -> u32 [{ leanrt::sched::hardware_concurrency() }];
 fn lean_internal_get_hardware_concurrency(u : L2RUnit) -> u32 { l2r_hardware_concurrency() }
 
 // ===========================================================================
@@ -3626,16 +3622,6 @@ fn l2r_shim_realtime_nanos() -> Int { Int::Small{l2r_shim_realtime_nanos_i64()} 
 #[ffi(import)]
 fn l2r_shim_realtime_nanos_i64() -> i64 [{ leanrt::io::realtime_nanos() }];
 
-
-#[ffi(import)]
-fn l2r_io_get_random_bytes(n : u64) -> RVec<u8> [{
-    {
-        use std::io::Read;
-        let mut buf = vec![0u8; n as usize];
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") { let _r = f.read_exact(&mut buf); }
-        leanrt::array::bytes_of_vec(buf)
-    }
-}];
 
 #[ffi(import)]
 fn l2r_io_process_get_pid() -> u32 [{ std::process::id() }];
@@ -3672,6 +3658,10 @@ fn l2r_io_error_with<E>(mk : u32 -> (u32 -> (LStr -> (LStr -> E)))) -> E {
 fn l2r_io_finish<T, R>(v : T, ok : T -> R, err : u32 -> (u32 -> (LStr -> (LStr -> R)))) -> R {
     if l2r_io_ok() { ok(v) } else { l2r_io_error_with(err) }
 }
+
+// `IO.getRandomBytes n` (an IO error when `/dev/urandom` cannot be read).
+#[ffi(import)]
+fn l2r_fs_get_random_bytes(n : u64) -> RVec<u8> [{ leanrt::array::bytes_of_vec(leanrt::fs::get_random_bytes(n)) }];
 
 // `IO.FS.Handle.mk path mode` (mode = constructor index of `IO.FS.Mode`:
 // read, write, writeNew, readWrite, append).

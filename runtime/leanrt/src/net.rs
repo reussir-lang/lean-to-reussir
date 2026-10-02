@@ -575,11 +575,13 @@ fn remove_timer(h: &LHandle) {
     reactor().timers.retain(|x| !same(x, h));
 }
 
-/// `reset`: a running timer starts counting again.
+/// `reset`: a running timer starts counting again (`uv_timer_start`, also
+/// after a period-0 timer fired its one tick).
 pub fn timer_reset(h: &LHandle) {
     let t = timer(h);
     if t.state == RUNNING && t.signum == 0 {
         t.due = Instant::now() + Duration::from_millis(t.timeout);
+        add_timer(h);
     }
 }
 
@@ -662,8 +664,15 @@ fn run_timers(now: Instant) {
         if t.state != RUNNING || t.due > now {
             continue;
         }
-        // libuv reschedules a repeating timer from the time it fires.
-        t.due = now + Duration::from_millis(t.timeout);
+        // libuv reschedules a repeating timer from the time it fires
+        // (`uv_timer_again`), unless its repeat is 0: started with timeout 0
+        // and repeat 0, it has fired once, as a one-shot (Lean's state stays
+        // running).
+        if t.repeating && t.timeout == 0 {
+            remove_timer(&h);
+        } else {
+            t.due = now + Duration::from_millis(t.timeout);
+        }
         fire_timer(&h, 0);
     }
 }
@@ -1553,10 +1562,17 @@ fn eai_code(e: i32) -> i32 {
 }
 
 /// `getAddrInfo host service family`: the addresses (`bytes`, 17 each: the
-/// family, then 16 bytes).
+/// family, then 16 bytes). libuv first converts the host (`uv__idna_toascii`)
+/// into a 256-byte buffer: an empty host, or one that does not fit, is
+/// `UV_EINVAL` at once (the names Lean lets through are ASCII, copied as
+/// they are).
 pub fn dns_get_info(host: &[u8], service: &[u8], family: u8, r: LPromise) -> LHandle {
     let o = op_new();
     let mut r = Ready(Some(r));
+    if host.is_empty() || host.len() >= 256 {
+        op(&o).sync_err = UV_EINVAL;
+        return o;
+    }
     let hints = AddrInfo {
         ai_flags: 0,
         ai_family: match family {

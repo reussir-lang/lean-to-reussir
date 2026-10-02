@@ -104,6 +104,10 @@ extern "C" {
     fn mkostemp(template: *mut std::ffi::c_char, flags: i32) -> i32;
     fn mkdtemp(template: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
     fn strerror(e: i32) -> *const std::ffi::c_char;
+    fn getcwd(buf: *mut std::ffi::c_char, size: usize) -> *mut std::ffi::c_char;
+    fn realpath(path: *const std::ffi::c_char, resolved: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
+    fn read(fd: i32, buf: *mut std::ffi::c_void, n: usize) -> isize;
+    fn close(fd: i32) -> i32;
 }
 
 use crate::cfile::{errno_now, set_errno};
@@ -123,6 +127,14 @@ const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 const LOCK_UN: i32 = 8;
 const EWOULDBLOCK: i32 = 11;
+const EINTR: i32 = 4;
+/// The size of the buffers Lean's C code passes to `getcwd` and `realpath`.
+const PATH_MAX: usize = 4096;
+
+/// The C string a call wrote into `buf`.
+fn c_result(buf: &[u8]) -> &[u8] {
+    &buf[..buf.iter().position(|&b| b == 0).unwrap_or(buf.len())]
+}
 
 /// A path as a NUL-terminated C string, or the "embedded NUL" error of
 /// `mk_embedded_nul_error` (invalid argument, EINVAL, own message).
@@ -381,14 +393,24 @@ fn with_errno<T>(f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
     r
 }
 
+/// `getcwd` into a `PATH_MAX` buffer, as Lean's C code calls it (a longer
+/// path is `ERANGE`).
+fn getcwd_max() -> Option<Vec<u8>> {
+    let mut buf = [0u8; PATH_MAX];
+    if unsafe { getcwd(buf.as_mut_ptr() as *mut std::ffi::c_char, PATH_MAX) }.is_null() {
+        return None;
+    }
+    Some(c_result(&buf).to_vec())
+}
+
 /// `IO.currentDir`: `getcwd`; a failure is Lean's user error.
 pub fn current_dir() -> LStr {
-    match with_errno(std::env::current_dir) {
-        Ok(p) => {
+    match getcwd_max() {
+        Some(p) => {
             set_ok();
-            from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))
+            from_bytes_lossy(&p)
         }
-        Err(_) => {
+        None => {
             set_user_error(b"failed to retrieve current working directory");
             from_bytes(b"")
         }
@@ -411,13 +433,13 @@ pub fn app_path() -> LStr {
 
 /// `IO.Process.getCurrentDir`: `getcwd`; errors are decoded without a file.
 pub fn process_current_dir() -> LStr {
-    match with_errno(std::env::current_dir) {
-        Ok(p) => {
+    match getcwd_max() {
+        Some(p) => {
             set_ok();
-            from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))
+            from_bytes_lossy(&p)
         }
-        Err(e) => {
-            set_err(e.raw_os_error().unwrap_or(EINVAL), None);
+        None => {
+            set_err(errno_now(), None);
             from_bytes(b"")
         }
     }
@@ -436,27 +458,18 @@ pub fn set_current_dir(p: &[u8]) {
     }
 }
 
-/// libuv's `uv_os_tmpdir`: the first of `TMPDIR`, `TMP`, `TEMP`, `TEMPDIR`
-/// that is set (even if empty), else `/tmp`, without a trailing slash; Lean
-/// then appends `/tmp.XXXXXXXX`. An empty directory is libuv's `ENOENT`
-/// with file `""` (Lean's `base_len == 0` case), one of `PATH_MAX` bytes or
-/// more `ENOBUFS`.
+/// The template of a new temporary file or directory: libuv's
+/// `uv_os_tmpdir` (`sys::uv_tmpdir`), whose error is reported without a
+/// file; an empty directory is libuv's `ENOENT` with file `""` (Lean's
+/// `base_len == 0` case); then Lean appends `/tmp.XXXXXXXX`.
 fn temp_template() -> Option<Vec<u8>> {
-    use std::os::unix::ffi::OsStrExt;
-    const PATH_MAX: usize = 4096;
-    const ENOBUFS: i32 = 105;
-    let mut dir = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
-        .iter()
-        .find_map(|v| std::env::var_os(v))
-        .map(|d| d.as_bytes().to_vec())
-        .unwrap_or_else(|| b"/tmp".to_vec());
-    if dir.len() >= PATH_MAX {
-        set_err_uv(ENOBUFS, None);
-        return None;
-    }
-    if dir.len() > 1 && dir.last() == Some(&b'/') {
-        dir.pop();
-    }
+    let mut dir = match crate::sys::uv_tmpdir() {
+        Ok(d) => d,
+        Err(e) => {
+            set_err_uv(-e, None);
+            return None;
+        }
+    };
     if dir.is_empty() {
         set_err_uv(2, Some(b""));
         return None;
@@ -492,8 +505,9 @@ pub fn create_temp_file() -> LHandle {
     mk(fd, 0)
 }
 
+/// (Lean's `mk_string`: a name that is not UTF-8 is decoded lossily.)
 pub fn temp_file_path() -> LStr {
-    from_bytes(unsafe { &*TEMP_PATH.0.get() })
+    from_bytes_lossy(unsafe { &*TEMP_PATH.0.get() })
 }
 
 /// `IO.FS.createTempDir` (`mkdtemp`, as libuv).
@@ -507,7 +521,7 @@ pub fn create_temp_dir() -> LStr {
         return from_bytes(b"");
     }
     set_ok();
-    from_bytes(&t)
+    from_bytes_lossy(&t)
 }
 
 pub fn set_access_rights(p: &[u8], mode: u32) {
@@ -547,23 +561,18 @@ fn os_path(p: &[u8]) -> &std::path::Path {
     std::path::Path::new(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(p))
 }
 
-/// `IO.FS.realPath`: any failure of `realpath` is Lean's "file not found"
-/// (`ENOENT`, empty message).
+/// `IO.FS.realPath`: `realpath` into a `PATH_MAX` buffer, as Lean's C code
+/// (a longer result is `ENAMETOOLONG`); any failure is Lean's "file not
+/// found" (`ENOENT`, empty message).
 pub fn real_path(p: &[u8]) -> LStr {
-    if c_path(p).is_none() {
+    let Some(c) = c_path(p) else { return from_bytes(p) };
+    let mut buf = [0u8; PATH_MAX];
+    if unsafe { realpath(c.as_ptr() as *const std::ffi::c_char, buf.as_mut_ptr() as *mut std::ffi::c_char) }.is_null() {
+        set_err_msg(2, Some(p), b"");
         return from_bytes(p);
     }
-    // One `realpath(3)` call (whose errno glibc may change even on success).
-    match std::fs::canonicalize(os_path(p)) {
-        Ok(r) => {
-            set_ok();
-            from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(r.as_os_str()))
-        }
-        Err(_) => {
-            set_err_msg(2, Some(p), b"");
-            from_bytes(p)
-        }
-    }
+    set_ok();
+    from_bytes_lossy(c_result(&buf))
 }
 
 /// Entry names of a directory in `readdir` order, without `.` and `..`.
@@ -618,6 +627,45 @@ pub fn metadata(p: &[u8], follow: bool) -> [u64; 7] {
             [0; 7]
         }
     }
+}
+
+/// `IO.getRandomBytes n` (`lean_io_get_random_bytes`): no bytes need no
+/// `/dev/urandom`; failing to open it names the file; a count whose byte
+/// array would overflow is `ENOMEM` (Lean leaves the descriptor open then);
+/// the array is allocated as Lean's, then filled by `read`s (`EINTR`
+/// retried; another error has no file name).
+pub fn get_random_bytes(n: u64) -> Vec<u8> {
+    set_ok();
+    if n == 0 {
+        return Vec::new();
+    }
+    let fd = unsafe { open(b"/dev/urandom\0".as_ptr() as *const std::ffi::c_char, O_RDONLY | O_CLOEXEC) };
+    if fd < 0 {
+        set_err(errno_now(), Some(b"/dev/urandom"));
+        return Vec::new();
+    }
+    if n > u64::MAX - 24 {
+        set_err(ENOMEM, None);
+        return Vec::new();
+    }
+    crate::array::check_alloc(n, 1);
+    let n = n as usize;
+    let mut buf: Vec<u8> = crate::alloc::vec_with_capacity(n);
+    while buf.len() < n {
+        let got = unsafe { read(fd, buf.as_mut_ptr().add(buf.len()) as *mut std::ffi::c_void, n - buf.len()) };
+        if got < 0 {
+            let e = errno_now();
+            if e != EINTR {
+                unsafe { close(fd) };
+                set_err(e, None);
+                return Vec::new();
+            }
+        } else {
+            unsafe { buf.set_len(buf.len() + got as usize) };
+        }
+    }
+    unsafe { close(fd) };
+    buf
 }
 
 // ---- error decoding (`decode_io_error`/`decode_uv_error` in io.cpp) ----
