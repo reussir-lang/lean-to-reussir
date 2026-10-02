@@ -690,6 +690,25 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   `inductive Tree | node (v : Nat) (cs : Array Tree)` holds `RVec<Tree>`,
   the representation `Array Tree` has everywhere else (also through mutual
   types, whichever is translated first).
+- **Polymorphic recursion in a type.** An `unsafe inductive` may use itself
+  at a larger argument: `Nest α | nil | cons (x : α) (rest : Nest (α × α))`.
+  Translating `Nest Nat` would need `Nest (Nat × Nat)`, whose field needs
+  `Nest ((Nat × Nat) × (Nat × Nat))`, and so on without end. So the rule of
+  §2.6 applies to the instantiations requested while fields are translated,
+  for an inductive whose block uses its types at other arguments than its
+  parameters (only `unsafe` ones can; a safe `Tree | node (kids : List (Nat
+  × Tree))`, whose `List Tree` reaches `List (Nat × Tree)`, is never cut):
+  an instantiation that strictly contains the arguments of an instantiation
+  of the same inductive whose fields are being translated (the path: a
+  mutual partner, `A α` holding `B (α × α)` holding `A (List (α × α))`, or
+  another inductive, `List (Rose (Option α))`, in between), or that is built
+  from the `lcAny` of the uniform instantiation on the path, or that has 256
+  instantiations of its inductive on the path, is the uniform instantiation.
+  `Nest Nat` is `enum Nest_Nat { nil, cons(Nat, Nest_Box) }`, and
+  `Nest_Box`'s own field is `Nest_Box`. A typed `Nest (Nat × Nat)` value
+  stored in that field is converted (boxing its `x`, its own `rest` being a
+  `Nest_Box` already), like any value meeting another representation of its
+  type (below).
 
 **Function types** become generated shared enums, one per (lowered,
 curried) function type, whose variants say what a value is a partial
