@@ -1,20 +1,25 @@
 # Reussir bugs that affect lean2rr
 
-Every Reussir bug lean2rr has run into, including those it works around or
-never triggers, with a repro, the cause where known, what lean2rr does about
-it, and the state of a local patch.
+Every Reussir problem lean2rr has run into, including those it works around
+or never triggers, with a repro, the cause where known, what lean2rr does
+about it, and the state of a local patch. Most are bugs; an audit found a
+few that are intended behaviour, a missed optimization, a missing feature,
+or build costs of a stock pass or an opt-in flag (column *Kind* below).
 
 Reussir revision: `ef922049`. The checkout at `./reussir` is not part of
 this repository. Reussir is patched locally only where a bug breaks
 lean2rr's output and lean2rr has no reasonable way around it. Each patch
 was reviewed adversarially before it was applied: code review,
 differential fuzzing against a reference evaluator, ASan builds and the
-lean2rr test suites, over three rounds (0014 in a fourth). The nine patches
-are in `reussir-patches/` (see its README). They are applied to
+lean2rr test suites, over three rounds (0014 in a fourth, 0015 in a
+fifth). The ten patches are in `reussir-patches/` (see its README). They are applied to
 `./reussir` as local commits on its branch `l2r-local` (ef922049 + the
-nine). They are not submitted upstream. lean2rr's runtime needs 0014 to
+ten). They are not submitted upstream. lean2rr's runtime needs 0014 to
 build (bug 13). lean2rr's workarounds stay in place where they are
-still needed (bugs 1, 2 for variants, 3, 10, 16, 17, 19, 20).
+still needed (bugs 1, 2 for variants, 3, 10, 16, 17, 19, 20), and two
+stay although the bug is patched: the driver's retry without
+`--reuse-across-call` (bug 4, `scripts/l2r.py`) and the optional pass
+`lazy-fields` (bug 7), which Reussir without the patches still needs.
 
 ## Repros
 
@@ -57,36 +62,52 @@ Builds used to check the repros (on the aarch64 test machine):
 - the eight-patch set: ef922049 + 0006, 0004, 0002, 0007, 0009, 0005,
   0013, 0012 as applied to `./reussir` (`l2r-local`) before 0014. The
   third review round checked it.
-- the final set: the eight-patch set + 0014 (`l2r-local`).
+- the nine-patch set: the eight-patch set + 0014.
+- the final set: the nine-patch set + 0015 (`l2r-local`).
+
+**Audit (2026-10-02).** An independent review checked every entry against
+Reussir's own documentation, tests, design notes and source, and against
+upstream `main` (one later commit, unrelated: none of these is fixed
+upstream). Column *Kind*: *bug*, Reussir does something its own rules or
+tests say it should not; *intended*, documented behaviour; *missed
+optimization*, correct output, slower than it could be; *missing feature*,
+something Reussir never promised (here: bounded-depth frees) that Lean's
+semantics need; *cost*, build time or memory of a stock pass or an opt-in
+flag, not a defect; *unclear*, a real slowdown whose cause is not shown.
+Each section starts with the verdict. Patches 0002, 0004, 0005, 0009 and
+0012 fix bugs; 0006 fixes a bug that has a flag workaround (it is a speed
+choice over the flag); 0007 is an optimization (kept because 0009 builds
+on it); 0013 to 0015 implement a missing feature.
 
 ## Status
 
-| Bug | Effect | Affects lean2rr output? | lean2rr workaround | Local patch | Patch review | Applied to `./reussir` |
-|---|---|---|---|---|---|---|
-| 1 | `[value]` enum payload bytes lost when a variant is moved | no, shape avoided | emits only unaffected `[value]` enums | none | - | - |
-| 2 | in-place reuse skips the store of a field that sits elsewhere in the new cell | structures: yes, wrong values; variants: no | variants: `--no-pack-record-members` and fields ordered by alignment; structures: none | 0002 (structures) | passed | yes |
-| 3 | Rust allocations take mimalloc's aligned path | speed only | runtime calls `mi_malloc` itself | none | - | - |
-| 4 | rrc recurses forever on two equal recursive types (SIGSEGV) | yes, rrc crash | driver retries without `--reuse-across-call` | 0004 | passed | yes |
-| 5 | TokenReuse crashes on a one-armed `if` (SIGSEGV) | yes, rrc crash | prelude panics avoid the shape; user code can still hit it | 0005 | passed | yes |
-| 6 | a static cell is freed after 2^32 references | yes, crash | none | 0006 | passed | yes |
-| 7 | token reuse picks decrements that never free | yes, speed | fields bound lazily (plan §5.5) | 0007 | passed (revised after round 2) | yes |
-| 8 | padding "lift" gives LLVM a larger layout than Reussir's | no, shape never emitted | - | none | - | - |
-| 9 | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | 0009 | passed (revised after round 2) | yes |
-| 10 | closure devirtualization prints types exponentially (build time) | yes, build time and memory | `--no-closure-wpd` | none | - | - |
-| 11 | interprocedural SCCP is superlinear (build time) | yes, build time of large programs | none (the towers it was blamed for were mostly bug 20) | none | - | - |
-| 12 | the parser swaps syntax subtrees whose hashes collide | yes, wrong code or bogus errors on very large files | none | 0012 | passed | yes |
-| 13 | releasing a long list or a deep tree recurses once per cell | yes, stack overflow, 2x time and memory | none | 0013, 0014 | 0013 passed (extended after round 2); 0014 passed (round 4, revised twice) | yes |
-| 14 | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | in 0009 | passed | yes |
-| 15 | a `match` on a `Nullable` yielding a counted value does not compile | no, `Nullable` not used | - | none | - | - |
-| 16 | reuse across calls is superlinear in match nesting (build time) | yes, build time and memory | deep tail paths and `let` values outlined, recursive functions included | none | - | - |
-| 17 | rrc memory is quadratic in a straight-line `Nat` function (build time) | yes, build memory | long tail paths and `let` values outlined, recursive functions included; `Array Nat` literals as tables | none | - | - |
-| 18 | the `rrc` build target alone does not link | no, Reussir's build only | build the default target | none | - | - |
-| 19 | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `Nat`/`Int` references in two cells; other `[value]` records boxed | none | - | - |
-| 20 | the MLIR inliner grows lean2rr's conversion code exponentially (build time) | yes, build time and memory (monad transformer towers did not build) | conversion, unboxing and uniform-code application functions marked `#[transform_anchor]` | none | - | - |
+| Bug | Kind | Effect | Affects lean2rr output? | lean2rr workaround | Local patch | Patch review | Applied to `./reussir` |
+|---|---|---|---|---|---|---|---|
+| 1 | bug | `[value]` enum payload bytes lost when a variant is moved | no, shape avoided | emits only unaffected `[value]` enums | none | - | - |
+| 2 | bug | in-place reuse skips the store of a field that sits elsewhere in the new cell | structures: yes, wrong values; variants: no | variants: `--no-pack-record-members` and fields ordered by alignment; structures: none | 0002 (structures) | passed | yes |
+| 3 | intended | Rust allocations take mimalloc's aligned path | speed only | runtime calls `mi_malloc` itself | none | - | - |
+| 4 | bug | rrc recurses forever on two equal recursive types (SIGSEGV) | yes, rrc crash | driver retries without `--reuse-across-call` | 0004 | passed | yes |
+| 5 | bug | TokenReuse crashes on a one-armed `if` (SIGSEGV) | yes, rrc crash | prelude panics avoid the shape; user code can still hit it | 0005 | passed | yes |
+| 6 | bug | a static cell is freed after 2^32 references | yes, crash | `--nullary-variant-encoding arch-independent` or `boxed` (not used: 0006 keeps the default encoding's speed) | 0006 | passed | yes |
+| 7 | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (plan §5.5) | 0007 | passed (revised after round 2) | yes |
+| 8 | bug | padding "lift" gives LLVM a larger layout than Reussir's | no, shape never emitted | - | none | - | - |
+| 9 | bug | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | 0009 | passed (revised after round 2) | yes |
+| 10 | bug (build time) | closure devirtualization prints types exponentially (build time) | yes, build time and memory | `--no-closure-wpd` | none | - | - |
+| 11 | cost (stock MLIR pass) | interprocedural SCCP is superlinear (build time) | yes, build time of large programs | none (the towers it was blamed for were mostly bug 20) | none | - | - |
+| 12 | bug (in cstree) | the parser swaps syntax subtrees whose hashes collide | yes, wrong code or bogus errors on very large files | none | 0012 | passed | yes |
+| 13 | missing feature | releasing a long list or a deep tree recurses once per cell | yes, stack overflow, 2x time and memory | none | 0013, 0014, 0015 | 0013 passed (extended after round 2); 0014 passed (round 4, revised twice); 0015 (speed of 0014's runtime) passed (round 5) | yes |
+| 14 | bug | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | in 0009 | passed | yes |
+| 15 | bug | a `match` on a `Nullable` yielding a counted value does not compile | no, `Nullable` not used | - | none | - | - |
+| 16 | cost (opt-in flag) | reuse across calls is superlinear in match nesting (build time) | yes, build time and memory | deep tail paths and `let` values outlined, recursive functions included | none | - | - |
+| 17 | unclear | rrc memory is quadratic in a straight-line `Nat` function (build time) | yes, build memory | long tail paths and `let` values outlined, recursive functions included; `Array Nat` literals as tables | none | - | - |
+| 18 | bug (build system) | the `rrc` build target alone does not link | no, Reussir's build only | build the default target | none | - | - |
+| 19 | bug | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `Nat`/`Int` references in two cells; other `[value]` records boxed | none | - | - |
+| 20 | unclear | the MLIR inliner grows lean2rr's conversion code exponentially (build time) | yes, build time and memory (monad transformer towers did not build) | conversion, unboxing and uniform-code application functions marked `#[transform_anchor]` | none | - | - |
 
 Patch files (`git format-patch` output; they apply on ef922049 in the
-order 0006, 0004, 0002, 0007, 0009, 0005, 0013, 0012, 0014, and 0012 also
-applies alone):
+order 0006, 0004, 0002, 0007, 0009, 0005, 0013, 0012, 0014, 0015; 0009
+needs 0007 (it uses `consumesFusedMember`, which 0007 adds), 0015 needs
+0014, and 0012 also applies alone):
 
 - `0002-l2r-local-bug-2-compound-skip-a-reused-struct-cell-s-field-store.patch`
 - `0004-l2r-local-bug-4-compare-recursive-record-types-coind.patch`
@@ -97,6 +118,7 @@ applies alone):
 - `0012-l2r-local-bug-12-build-syntax-nodes-without-cstree-s-hash-only-node-cache.patch`
 - `0013-l2r-local-bug-13-release-chains-of-cells-in-a-loop-in-the-drop-glue.patch`
 - `0014-l2r-local-bug-13b-free-cells-deep-through-records-with-a-stack-of-pending-releases.patch`
+- `0015-l2r-local-bug-13b-runtime-cheaper-pending-stack-same.patch`
 
 Status words used below:
 - *worked around*: no patch; lean2rr avoids the construct or works around
@@ -246,6 +268,8 @@ packed layout (not covered; lean2rr's flag avoids it).
 
 **Status.** Worked around (in the runtime).
 
+**Verdict: intended behaviour.** `crates/reussir-rt/src/alloc.rs` forces every Rust allocation to at least 16-byte alignment through the backend's aligned path on purpose, and `.cargo/config.toml` documents `MI_MAX_ALIGN_SIZE=8` as deliberate. Keeping Rust's requested alignment is not a Reussir promise; lean2rr's runtime calling `mi_malloc` itself is the right answer, not a workaround.
+
 **Repro.** `bug03-global-alloc-align.rr`: a Rust texture that keeps 1000
 `Box<u64>` and 1000 `mi_malloc(8)` blocks alive and counts the 16-aligned
 ones, then times allocate/free pairs of 16 bytes through `Box::new` and
@@ -351,7 +375,8 @@ fn f(x : T, y : T) -> T {
 **Expected.** Compiles; prints `3`.
 
 **Actual on ef922049.** rrc dies with SIGSEGV (exit 139), at every -O
-level, with or without `--reuse-across-call`.
+level, with or without `--reuse-across-call` (in some builds it hangs
+instead: the dangling block is undefined behaviour).
 
 **Cause.** `lib/Transformation/TokenReuse/TokenReuse.cpp`,
 `TokenReusePass::oneShotTokenReuse`: a token available before a branch op
@@ -376,6 +401,8 @@ level, so the driver's retry does not help.
 ## 6. Static cells accumulate increments until the 32-bit count wraps
 
 **Status.** Patched locally (0006).
+
+**Verdict: bug, with a flag workaround.** Reussir's lowering states that a nullary dummy's count stays above the shared/unique decision point, but the default (TBI) encoding increments it unguarded with a 32-bit count. The two documented encodings `--nullary-variant-encoding arch-independent` and `boxed` avoid it: the repro prints `4294967300` with either. 0006 keeps the default encoding and its unguarded increment, so it is a speed choice over the flag. Measured on 2026-10-02 (pinned, best of 5, a loaded machine, so only indicative), `arch-independent` against the default with 0006, lean2rr/native time: rbtree 0.44/0.45, deriv 0.75/0.83, cfold 0.79/0.74, binarytrees 0.94/0.85, mergesort 0.52/0.46, monadic-interp 1.03/1.01: a few percent slower on three programs, faster on one. Remeasure on an idle machine before deciding between the flag and the patch.
 
 **Repro.** `bug06-static-count-wrap.rr`:
 
@@ -410,8 +437,11 @@ def main (args : List String) : IO Unit :=
 **Actual on ef922049.** SIGSEGV (exit 139) after about 15 s. With
 `4294967290` it prints `4294967290`.
 
-**Cause.** Static (immortal) cells, such as the static `Nil`, are tagged in
-the pointer's top byte. `ReussirRcIncConversionPattern`
+**Cause.** On aarch64, Reussir encodes nullary constructors as immediates
+using top-byte-ignore (TBI): static cells, such as the static `Nil`, are
+tagged in the pointer's top byte. (Other targets use the immortal encoding,
+which already guards the increment of the shared dummy, so the bug is
+aarch64-only.) `ReussirRcIncConversionPattern`
 (`lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp`) increments the
 32-bit count unconditionally (`load; add 1; store`). The decrement skips
 static pointers but tests "count == 1 → free" first. After 2^32 references
@@ -419,7 +449,7 @@ the count wraps to 1 and the next decrement frees the static cell
 (`mi_free` on a tagged pointer). Also `assume(old >= 1)` after an increment
 becomes false when the count passes 0.
 
-**lean2rr.** Nothing it can do.
+**lean2rr.** It could pass `--nullary-variant-encoding arch-independent` (or `boxed`) to rrc; it uses 0006 instead, which keeps the default encoding (see the verdict above).
 
 **Patch.** 0006 (passed review). The increment stays a plain load, add and
 store, so LLVM can still fold counts on fresh cells. The decrement's unique
@@ -430,10 +460,16 @@ token, so a wrapped count can never free or reuse the static cell. The
 on rbtree and nothing measurable elsewhere, on both core types of the test
 machine (guarding the increment's store instead cost up to 22% on the
 Cortex-A725 cores). On the round-2 stack: FIXED (`4294967300`, 14 s).
+Review round 2 (finding R2-4, still present in round 3) measured one side
+effect: the extra branch makes TokenReuse find slightly fewer reuses, 0.2 to
+1.2% more allocations in 12 of 120 generated test programs; judged
+acceptable against a crash.
 
 ## 7. Token reuse picks decrements that can never free
 
 **Status.** Patched locally (0007); lean2rr also works around it.
+
+**Verdict: missed optimization, not a bug.** The output is correct. `RcDispatchFusion`'s `fuseArm` stops at region-bearing or opaque ops before the release by design (its comment: the release may be conditional or the box may escape), and TokenReuse documents its choice of donor as a heuristic. lean2rr's own workaround (`lazy-fields`) already gives native speed on the shapes found. 0007 is an optimization extension; it stays because 0009 (a real use-after-free fix) uses the helper it adds (`consumesFusedMember`). Whether lean2rr still gains from 0007 with `lazy-fields` on is not measured; if it does not, 0009 should be rebased without it and 0007 dropped.
 
 **Repro.** `bug07-phantom-reuse-donor.rr`:
 
@@ -604,7 +640,10 @@ that.
 each member once and erases only its first retain; further retains of the
 same member are real copies and stay, as in `fuseCompoundConsumption`. The
 revision also covers bug 14. FIXED (`0`) on the round-2 stack and with the
-revised 0007/0009.
+revised 0007/0009. (With the final 0009 this repro is fixed by the bug 14
+rule, a member consumed before the release is not fused, so nothing is fused
+here at all; the first version, with only the duplicate rule, fixed it
+too. The IR before and after is in `reussir-patches/details/0009.md`.)
 
 ## 10. Closure devirtualization prints result types exponentially
 
@@ -660,6 +699,8 @@ the adversarial rounds build in 15 s to 2.5 minutes.
 ## 11. Interprocedural SCCP is superlinear on large call graphs
 
 **Status.** Open (build time only).
+
+**Verdict: cost of a stock MLIR pass, not a Reussir defect.** The pipeline runs MLIR's own `createSCCPPass` (`crates/reussir-backend/src/pipeline.rs`), quadratic in the number of call sites by its algorithm; Reussir promises nothing linear. The towers first blamed on it were bug 20.
 
 **Repro.** `bug11-sccp-call-graph.py N OUT.rr` writes N self-recursive
 functions (so they are not inlined) that each call the same function `g`,
@@ -718,6 +759,8 @@ decrement expansion of the arguments cost more than they save (`Cn3PolyS1`
 
 **Status.** Patched locally (0012).
 
+**Verdict: bug, in Reussir's parser dependency `cstree` (0.14), not in Reussir's code.** `get_cached_node` (`cstree/src/green/builder.rs`) keys its node cache on `{kind, text_len, child_hash: u32}` and never compares the children; cstree's current master has the same code. 0012 works around it in Reussir's sink by not using the cache.
+
 **Repro.** `bug12-node-cache-collision.py OUT.rr` writes a 1.9 MB program
 (about 187,000 comment lines that only move the parser's interner keys,
 then four small functions):
@@ -773,7 +816,9 @@ GB) and no change in rrc's peak memory on full builds. With 0012: FIXED
 
 ## 13. Drop glue recurses once per cell of a long list
 
-**Status.** Patched locally (0013, 0014).
+**Status.** Patched locally (0013, 0014; 0015 makes 0014's runtime cheaper).
+
+**Verdict: missing feature, not a bug.** Reussir's drop glue recurses, as Rust's does, and nothing in Reussir promises bounded-depth frees (it commits to deep tail recursion only, `tests/integration/frontend/deep_value_tail_recursion.rr`). Native Lean frees iteratively, and Lean programs drop long lists and deep trees, so lean2rr needs it: 0013, 0014 and 0015 implement it locally (a new runtime ABI, `reussir_rt::drop`, and Lean's release order). lean2rr's runtime needs 0014, so it does not build against upstream Reussir.
 
 Releasing a chain of cells at once takes one stack frame per cell. Native
 Lean frees iteratively. The program needs no recursion of its own:
@@ -954,6 +999,34 @@ reference, a thunk) runs at once and empties the stack. So a structure
 `A1 A0 L1 L0` (natively `L1 L0 A1 A0`). Running such a `drop_in_place` as
 a drain would take a runtime call more on each one. Not done (plan §10).
 
+**Patch 0015** (bug 13b, runtime only, on top of 0014): 0014's pending
+stack cost allocation-heavy programs about 10% (the classic Deriv 3.70 →
+4.09 s, MonadicInterp 1.73 → 1.89 s, against the same lean2rr on Reussir
+without 0014). The stack's three thread-locals (`RefCell<Vec>`s with
+destructors, so every access checked their registration and borrow flag)
+become one destructor-less state: the stack's raw parts in `Cell`s, the
+release table inline, the top run held in the state outside the vector,
+the slow paths non-unwinding `extern "C"` functions reached by tail calls,
+and a fast path for a drain of one cell. The behaviour is 0014's: the same
+release order, links, `depth()`/`active()` at every event. That recovers
+about 90% of the cost on MonadicInterp and about half on Deriv; the rest is
+deferring itself (a popped cell's header is a cache miss that recursion
+did not have) and calls in the generated glue, which only a change of the
+code generator would remove. Checks: `reussir-rt`'s tests (three new:
+random drops against a model, a full release table, a trace hash), Miri
+(stacked and tree borrows), 400 random scenarios hashed identically
+against 0014. The review (a fifth round) compared old and new event by event on
+31 million events (3000 random programs mixing deferrals, steps, nested
+drains, immediates, a full table), deep step chains, links at the ±2^39
+offset limits, ASan and LSan builds, the runtime suite and adversarial
+lean2rr programs (266 record types in one free, 300k-deep chains with
+handles and tasks): identical. One difference: the buffer of the stack is
+freed by a thread-local guard registered when it is first allocated; frees
+run from a thread-local destructor that runs after that guard (one
+registered earlier) allocate a new buffer that is never freed (at most
+1.5 KB per thread exit; 0014 aborted there instead). lean2rr cannot reach
+it: its thread-locals free nothing, and Lean code runs on one thread.
+
 ## 14. `fuseArm` loses a count when a bound member is consumed before the scrutinee's release
 
 **Status.** Patched locally (in the revised 0009).
@@ -1001,6 +1074,8 @@ with the revised 0007/0009: FIXED (`0`).
 
 **Status.** Does not affect lean2rr.
 
+**Verdict: bug.** `Nullable` matching is a surface feature with tests (`crates/reussir-core/src/semi.rs`). Narrowed further (at `-O none`): `NonNull(b) => x, Null => T::L{}` and `NonNull(b) => T::N{..}, Null => x` fail; `T::L{}` in both arms or `x` in both arms compile, and so does a shared struct in place of the enum.
+
 **Repro.** `bug15-nullable-match-yield.rr`:
 
 ```
@@ -1034,6 +1109,8 @@ fn g(nb : Nullable<B>, x : T) -> T {
 ## 16. Reuse across calls is superlinear in the nesting depth of matches
 
 **Status.** Worked around (build time only).
+
+**Verdict: cost of the opt-in flag `--reuse-across-call`, not a defect.** The flag is off by default, and its documentation says only that it may increase peak heap use (`include/Reussir/Transformation/Passes.td`). TokenReuse keeps tokens pending across non-tail calls and frees, at every exit, each token not used there, so the error arm at depth d frees about d tokens: counted on lean2rr's output (outlining off, `__reussir_dealloc` calls in `--emit mlir-llvm`), 1534 with the flag and 325 without at N = 15, 5119 and 430 at N = 30 (the excess grows 3.9x when the depth doubles).
 
 Each IO bind is a match on the action's result whose ok arm holds the rest
 of the function, so a `main` of N statements nests N matches deep.
@@ -1073,7 +1150,7 @@ and the driver's retry without the flag took 434 s and 14.2 GB; 2000 was
 killed after 1500 s. Without `--reuse-across-call`, 250 statements built in
 16 s and 221 MB. The program is correct whenever the build finishes.
 
-**Cause.** Not narrowed down to one pass. `--reuse-across-call` lets
+**Cause.** TokenReuse's algorithm under `--reuse-across-call` (see the verdict: the frees at every exit grow with the depth). `--reuse-across-call` lets
 TokenReuse (`lib/Transformation/TokenReuse/TokenReuse.cpp`) keep tokens
 alive across calls, and with it the code the lowering pipeline generates
 grows quadratically with the nesting depth: the LLVM IR of the repro has
@@ -1100,6 +1177,8 @@ the cutting off.
 ## 17. rrc memory is quadratic in the length of a straight-line function on `Nat`
 
 **Status.** Worked around (build time only).
+
+**Verdict: unclear.** The quadratic memory is real and also happens at `-O none` (N = 250: 418 MB at `-O aggressive`, 160 MB at `-O none`; N = 500: 1.18 GB, 401 MB, including about 12 s of texture build), so it is neither the inliner nor `--reuse-across-call`. The pass responsible is not found (the MLIR rrc prints for this program does not re-parse in `reussir-opt`, which rejects an `rc<ffi_object>` member inside a value record, so it could not be bisected by pass).
 
 **Repro.** `bug17-long-nat-block.py N OUT.lean [Nat|UInt64]` writes
 
@@ -1157,6 +1236,8 @@ literal, one push per element, becomes a table (plan §5.12): a
 
 **Status.** Worked around (build the default target).
 
+**Verdict: bug in Reussir's build system (minor).** The README lists `cmake --build build --target rrc` as a workflow, and `lib/CAPI/CMakeLists.txt` keeps an archive list so that what `build.rs` links is built first. Four archives are missing from it, not one: `MLIRReussirClosureBetaReduction`, `MLIRReussirDefaultInliner`, `MLIRReussirInstrumentNonlinearFFI`, `MLIRReussirSpecialPointerTag`.
+
 **Repro.** `bug18-rrc-target-deps.sh REUSSIR_CHECKOUT` checks the cause in
 an existing build (read-only). The failure itself needs a fresh build
 directory:
@@ -1172,7 +1253,8 @@ static library MLIRReussirInstrumentNonlinearFFI`. The check script prints
 libMLIRReussirInstrumentNonlinearFFI.a, which build.rs links`.
 
 **Cause.** `crates/reussir-backend-sys/build.rs` links
-`MLIRReussirInstrumentNonlinearFFI`, but the `rrc-build` custom target
+`MLIRReussirInstrumentNonlinearFFI` (and three more archives, see the
+verdict), but the `rrc-build` custom target
 (`crates/reussir-compiler/CMakeLists.txt`) depends only on `ReussirCAPI`
 and `MLIRReussir`, which do not pull that library in. The default target
 builds every library first.
@@ -1237,6 +1319,8 @@ IO results).
 
 **Status.** Worked around (build time only).
 
+**Verdict: unclear.** Keeping lean2rr's conversion functions out of the MLIR inliner cuts build time and memory about five-fold, but the inliner is not shown to misbehave: there are no operation counts before and after inlining, and the growth was never measured as exponential (the inliner's description claims bounded growth: one iteration, callees of at most 256 operations). Reussir does not promise the same build time with and without inlining. `#[transform_anchor]` exists for transform-dialect scripts; codegen adds `no_inline` only so that the anchor survives, so lean2rr relies on a side effect (pinned by Reussir's test `tests/integration/frontend/inline_transform.rr`; LLVM still inlines anchored functions). A plain no-inline attribute would be the clean way (a missing feature).
+
 **Repro.** `bug20-statet-tower.lean`, built through lean2rr with its
 workaround turned off (`L2R_NO_INLINE_ANCHORS=1` in lean2rr's
 environment):
@@ -1260,7 +1344,7 @@ wrapper variants that convert between them, and the unboxing functions of
 **Command.** `scripts/l2r.py` with lean2rr's flags (`run.sh` measures rrc
 alone), with and without `L2R_NO_INLINE_ANCHORS=1`.
 
-**Expected.** About the same build time and memory with and without, as
+**Expected (lean2rr's expectation, not a Reussir promise).** About the same build time and memory with and without, as
 for the same program compiled natively (3 s).
 
 **Actual on 42635042** (rrc to an object file, this machine; times on a

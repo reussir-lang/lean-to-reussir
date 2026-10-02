@@ -1,0 +1,1144 @@
+From ef0235b9d64259e0801e98dc4ee4bf3c514cdba0 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Thu, 1 Oct 2026 21:01:52 -0400
+Subject: [PATCH] l2r-local: bug 13b (runtime): cheaper pending stack, same
+ order
+
+The drop glue calls the pending stack's entry points for every cell it
+frees, and with 0014 deriv and monadic-interp took 17% and 20% more user
+cycles than the same programs built without 0014's codegen. Much of it
+was bookkeeping: PENDING, DRAINING and RELEASES were three thread-locals,
+the two Vecs with destructors (every access checked the destructor's
+registration), every access went through a RefCell borrow flag, every
+drain (even with nothing pending, as after most frees) ran the whole
+function with its prologue, and every deferral and pop loaded the stack's
+length and buffer before the top entry.
+
+Now:
+- One thread-local with no destructor: the stack by raw parts in Cells and
+  the release table inline, so an access is only its address. The buffer,
+  kept between drops, is freed at thread exit by a guard registered with
+  the first buffer.
+- The top entry, when it is a run, lives in the state itself and the
+  entries below it in the vector: a deferral that links, and a pop, touch
+  only the state's first cache line; freeing a cell whose members defer
+  one cell never touches the vector.
+- __reussir_drop_drain returns after a load or two with nothing pending or
+  inside a drain, and releases a single pending cell without the general
+  loop. The slow paths are nounwind extern "C" functions reached by tail
+  calls, so the entry points need no saved registers.
+- The table is emptied by a store, not a Vec::clear.
+
+The entries, their order (last pushed first, a record's last member
+first, host steps interleaved as before), the links through cell headers,
+depth() and the public functions are unchanged. New tests (drop/tests.rs)
+run random drops (deferrals wide and not, immediates, inline releases,
+steps that push work, nested drains, more release functions than the table
+holds) against a model with one entry per pending cell or step, and hash
+every event with the depth() and active() seen then: the hashes are
+identical with the previous implementation. They pass under Miri (strict
+provenance, stacked and tree borrows).
+
+User cycles (perf stat, min of 4 interleaved runs) over the same lean2rr
+without 0014's codegen: deriv +17.5% -> +8.7%, monadic-interp +20.2% ->
++2.2%, cfold +5.3% -> +1.3%; binarytrees and rbtree unchanged.
+---
+ crates/reussir-rt/src/drop.rs       | 484 +++++++++++++++++++-------
+ crates/reussir-rt/src/drop/tests.rs | 517 ++++++++++++++++++++++++++++
+ 2 files changed, 875 insertions(+), 126 deletions(-)
+ create mode 100644 crates/reussir-rt/src/drop/tests.rs
+
+diff --git a/crates/reussir-rt/src/drop.rs b/crates/reussir-rt/src/drop.rs
+index d20c20c5..71822391 100644
+--- a/crates/reussir-rt/src/drop.rs
++++ b/crates/reussir-rt/src/drop.rs
+@@ -32,8 +32,21 @@
+ //! [`active`], [`depth`], [`defer_step`] and [`run_step`] push incremental work, which
+ //! stays on the stack while it runs, so whatever it pushes is done before its
+ //! next step.
++//!
++//! The glue calls these functions for every cell it frees, so they are kept
++//! cheap. The state is one thread-local with no destructor (an access is only
++//! its address, with no lazy registration or borrow flags). The top entry,
++//! when it is a run (the entry every deferral and every pop touches), is kept
++//! in the state itself, and the entries below it in a vector: freeing a cell
++//! whose members defer one cell does not touch the vector. A drain with
++//! nothing pending, or started while one runs, returns after a load or two,
++//! and one with a single cell pending releases it without the general loop.
++//! The vector, kept between drops, is freed at thread exit by a guard
++//! registered when it is first allocated.
+ 
+-use core::cell::{Cell, RefCell};
++use core::cell::Cell;
++use core::mem::ManuallyDrop;
++use core::ptr::NonNull;
+ 
+ /// Releases one pending member, given the pointer it was deferred with.
+ pub type Release = unsafe extern "C" fn(*mut u8);
+@@ -46,7 +59,11 @@ enum Work {
+     /// `n` deferred cells, the last pushed at `head`, to be released with
+     /// `release`; every cell of the run but the first pushed links to the
+     /// cell pushed before it (see the module comment).
+-    Run { release: Release, head: *mut u8, n: u32 },
++    Run {
++        release: Release,
++        head: *mut u8,
++        n: u32,
++    },
+     Step(usize, Step),
+ }
+ 
+@@ -62,18 +79,286 @@ const SAME: u32 = 0xff;
+ /// Offsets (in 8-byte units) a link can hold: 40 bits, signed.
+ const OFFSET_BITS: u32 = 40;
+ 
+-thread_local! {
+-    static PENDING: RefCell<Vec<Work>> = const { RefCell::new(Vec::new()) };
+-    static DRAINING: Cell<bool> = const { Cell::new(false) };
++/// The current thread's pending work: the entries of the vector, then the
++/// run `(n, head, release)` if `n` is not 0. The top entry is a run exactly
++/// when `n` is not 0 (a run on top is always kept here), so the vector's last
++/// entry, when `n` is 0, is a step.
++#[repr(C)]
++struct State {
++    n: Cell<u32>,
++    /// Whether the thread is emptying the stack.
++    draining: Cell<bool>,
++    head: Cell<*mut u8>,
++    release: Cell<Release>,
++    /// The entries below: a `Vec<Work>` by its raw parts.
++    len: Cell<usize>,
++    ptr: Cell<NonNull<Work>>,
++    cap: Cell<usize>,
++    /// The number of entries of `releases` in use.
++    known: Cell<usize>,
+     /// The release functions that links name, by index (at most 255).
+-    static RELEASES: RefCell<Vec<Release>> = const { RefCell::new(Vec::new()) };
++    releases: [Cell<Release>; SAME as usize],
++}
++
++/// No release function (a field or table entry not in use).
++unsafe extern "C" fn unnamed(_: *mut u8) {
++    unreachable!("a link names no release function")
++}
++
++thread_local! {
++    static STATE: State = const {
++        State {
++            n: Cell::new(0),
++            draining: Cell::new(false),
++            head: Cell::new(core::ptr::null_mut()),
++            release: Cell::new(unnamed as Release),
++            len: Cell::new(0),
++            ptr: Cell::new(NonNull::dangling()),
++            cap: Cell::new(0),
++            known: Cell::new(0),
++            releases: [const { Cell::new(unnamed as Release) }; SAME as usize],
++        }
++    };
++    /// Frees the vector at thread exit (registered with its first buffer).
++    static GUARD: Guard = const { Guard };
++}
++
++/// The current thread's state. Only for use within the current call: the
++/// reference does not outlive the thread (`State` is not `Sync`, so it
++/// cannot leave it), and the state has no destructor.
++#[inline(always)]
++fn state() -> &'static State {
++    STATE.with(|state| unsafe { &*(state as *const State) })
++}
++
++struct Guard;
++
++impl Drop for Guard {
++    fn drop(&mut self) {
++        let _ = STATE.try_with(|state| {
++            let cap = state.cap.replace(0);
++            let len = state.len.replace(0);
++            let ptr = state.ptr.replace(NonNull::dangling());
++            if cap != 0 {
++                drop(unsafe { Vec::from_raw_parts(ptr.as_ptr(), len, cap) });
++            }
++        });
++    }
++}
++
++impl State {
++    /// The number of entries.
++    #[inline(always)]
++    fn depth(&self) -> usize {
++        self.len.get() + (self.n.get() != 0) as usize
++    }
++
++    /// Runs `f` on the vector as a `Vec`, and keeps its new parts.
++    fn with_vec(&self, f: impl FnOnce(&mut Vec<Work>)) {
++        let mut stack = ManuallyDrop::new(unsafe {
++            Vec::from_raw_parts(self.ptr.get().as_ptr(), self.len.get(), self.cap.get())
++        });
++        f(&mut stack);
++        self.ptr
++            .set(unsafe { NonNull::new_unchecked(stack.as_mut_ptr()) });
++        self.len.set(stack.len());
++        self.cap.set(stack.capacity());
++    }
++
++    /// Makes room for one more entry in the vector.
++    #[cold]
++    #[inline(never)]
++    fn grow(&self) {
++        if self.cap.get() == 0 {
++            // Past the guard's destruction (a release from another
++            // thread-local's destructor) the buffer is left to the OS.
++            let _ = GUARD.try_with(|_| ());
++        }
++        self.with_vec(|stack| stack.reserve(1));
++    }
++
++    /// Moves the run on top, if any, to the vector (another entry goes on
++    /// top). Answers false, changing nothing, when the vector is full.
++    #[inline(always)]
++    fn try_spill(&self) -> bool {
++        let n = self.n.get();
++        if n == 0 {
++            return true;
++        }
++        let len = self.len.get();
++        if len == self.cap.get() {
++            return false;
++        }
++        unsafe {
++            self.ptr.get().as_ptr().add(len).write(Work::Run {
++                release: self.release.get(),
++                head: self.head.get(),
++                n,
++            })
++        };
++        self.len.set(len + 1);
++        self.n.set(0);
++        true
++    }
++
++    /// After the top entry left: the vector's last entry is the top now,
++    /// kept in the state if it is a run.
++    #[inline(always)]
++    fn unspill(&self) {
++        let len = self.len.get();
++        if len != 0
++            && let Work::Run { release, head, n } =
++                unsafe { self.ptr.get().as_ptr().add(len - 1).read() }
++        {
++            self.release.set(release);
++            self.head.set(head);
++            self.n.set(n);
++            self.len.set(len - 1);
++            return;
++        }
++        self.n.set(0);
++    }
++
++    /// The link's index for `prev_release`, the function of the cell linked
++    /// to, from a cell released with `release`.
++    #[inline(always)]
++    fn release_index(&self, prev_release: Release, release: Release) -> Option<u32> {
++        if prev_release as usize == release as usize {
++            return Some(SAME);
++        }
++        let known = self.known.get().min(SAME as usize);
++        match self.releases[..known]
++            .iter()
++            .rposition(|f| f.get() as usize == prev_release as usize)
++        {
++            Some(index) => Some(index as u32),
++            None if known < SAME as usize => {
++                self.releases[known].set(prev_release);
++                self.known.set(known + 1);
++                Some(known as u32)
++            }
++            None => None,
++        }
++    }
++
++    /// Links `cell`, deferred with `release` and with a wide header, to
++    /// `prev`, the head of the run on top, deferred with `prev_release`;
++    /// answers whether it did (if not, nothing changed).
++    #[inline(always)]
++    unsafe fn link(
++        &self,
++        cell: *mut u8,
++        release: Release,
++        prev: *mut u8,
++        prev_release: Release,
++    ) -> bool {
++        let (at, to) = (cell as usize, prev as usize);
++        // An immediate's dummy box (nonzero top byte) is shared: never written.
++        if at >> 56 != 0 || (at | to) & 7 != 0 {
++            return false;
++        }
++        let units = (to as isize).wrapping_sub(at as isize) >> 3;
++        let limit = 1isize << (OFFSET_BITS - 1);
++        if units == 0 || !(-limit..limit).contains(&units) {
++            return false;
++        }
++        let Some(index) = self.release_index(prev_release, release) else {
++            return false;
++        };
++        let units = units as u64;
++        let words = cell.cast::<u32>();
++        unsafe {
++            words.write(((units as u32 & 0xff_ffff) << 8) | index);
++            let tag = words.add(1).read() & 0xffff;
++            words
++                .add(1)
++                .write((((units >> 24) as u32 & 0xffff) << 16) | tag);
++        }
++        true
++    }
++
++    /// Defers `release(cell)`: links it to the run on top, or starts a run.
++    /// Answers false, changing nothing, when that needs the vector to grow.
++    #[inline(always)]
++    unsafe fn try_defer(&self, cell: *mut u8, release: Release, wide: bool) -> bool {
++        let n = self.n.get();
++        if wide
++            && n != 0
++            && n < u32::MAX
++            && unsafe { self.link(cell, release, self.head.get(), self.release.get()) }
++        {
++            self.head.set(cell);
++            self.release.set(release);
++            self.n.set(n + 1);
++            return true;
++        }
++        if !self.try_spill() {
++            return false;
++        }
++        self.head.set(cell);
++        self.release.set(release);
++        self.n.set(1);
++        true
++    }
++
++    /// The body of [`__reussir_drop_drain`] when work is pending and no drain
++    /// runs.
++    #[inline(always)]
++    unsafe fn drain(&self) {
++        self.draining.set(true);
++        loop {
++            let n = self.n.get();
++            if n != 0 {
++                let (head, release) = (self.head.get(), self.release.get());
++                if n == 1 {
++                    self.unspill();
++                } else {
++                    let (prev, index) = unsafe { unlink(head) };
++                    if index != SAME {
++                        self.release.set(self.releases[index as usize].get());
++                    }
++                    self.head.set(prev);
++                    self.n.set(n - 1);
++                }
++                unsafe { release(head) };
++                continue;
++            }
++            let len = self.len.get();
++            if len == 0 {
++                break;
++            }
++            // The top entry is a step.
++            let index = len - 1;
++            let Work::Step(p, step) = (unsafe { self.ptr.get().as_ptr().add(index).read() }) else {
++                unreachable!("the vector's last entry is a run")
++            };
++            if unsafe { step(p) } {
++                // Whatever the step pushed stays above it.
++                let now = self.len.get();
++                unsafe {
++                    let at = self.ptr.get().as_ptr().add(index);
++                    core::ptr::copy(at.add(1), at, now - index - 1);
++                }
++                self.len.set(now - 1);
++                if now == len && self.n.get() == 0 {
++                    self.unspill();
++                }
++            }
++        }
++        // Nothing is pending, so no link names a table entry.
++        self.known.set(0);
++        if self.cap.get() > KEEP {
++            self.with_vec(|stack| stack.shrink_to(KEEP));
++        }
++        self.draining.set(false);
++    }
+ }
+ 
+ /// Whether the current thread is emptying its pending stack (work started
+ /// now is pushed and done by that drain).
+ #[inline]
+ pub fn active() -> bool {
+-    DRAINING.with(|draining| draining.get())
++    state().draining.get()
+ }
+ 
+ /// The number of entries on the pending stack. Work pushed while a step runs
+@@ -81,13 +366,23 @@ pub fn active() -> bool {
+ /// whether a release it made pushed work.
+ #[inline]
+ pub fn depth() -> usize {
+-    PENDING.with(|pending| pending.borrow().len())
++    state().depth()
+ }
+ 
+ /// Pushes incremental work: `step(p)` runs, while the entry stays on the
+ /// stack, until it answers that it is done.
+ pub fn defer_step(p: usize, step: Step) {
+-    PENDING.with(|pending| pending.borrow_mut().push(Work::Step(p, step)));
++    let state = state();
++    if !state.try_spill() {
++        state.grow();
++        state.try_spill();
++    }
++    if state.len.get() == state.cap.get() {
++        state.grow();
++    }
++    let len = state.len.get();
++    unsafe { state.ptr.get().as_ptr().add(len).write(Work::Step(p, step)) };
++    state.len.set(len + 1);
+ }
+ 
+ /// Runs incremental work and everything it pushes; inside a drain, only
+@@ -97,57 +392,9 @@ pub fn run_step(p: usize, step: Step) {
+     unsafe { __reussir_drop_drain() };
+ }
+ 
+-/// The link's index for `prev_release`, the function of the cell linked to,
+-/// from a cell released with `release`.
+-fn release_index(prev_release: Release, release: Release) -> Option<u32> {
+-    if prev_release as usize == release as usize {
+-        return Some(SAME);
+-    }
+-    RELEASES.with(|releases| {
+-        let mut releases = releases.borrow_mut();
+-        match releases
+-            .iter()
+-            .rposition(|&known| known as usize == prev_release as usize)
+-        {
+-            Some(index) => Some(index as u32),
+-            None if releases.len() < SAME as usize => {
+-                releases.push(prev_release);
+-                Some(releases.len() as u32 - 1)
+-            }
+-            None => None,
+-        }
+-    })
+-}
+-
+-/// Links `cell`, deferred with `release` and with a wide header, to `prev`,
+-/// the head of the run on top, deferred with `prev_release`; answers
+-/// whether it did.
+-unsafe fn link(cell: *mut u8, release: Release, prev: *mut u8, prev_release: Release) -> bool {
+-    let (at, to) = (cell as usize, prev as usize);
+-    // An immediate's dummy box (nonzero top byte) is shared: never written.
+-    if at >> 56 != 0 || (at | to) & 7 != 0 {
+-        return false;
+-    }
+-    let units = (to as isize).wrapping_sub(at as isize) >> 3;
+-    let limit = 1isize << (OFFSET_BITS - 1);
+-    if units == 0 || !(-limit..limit).contains(&units) {
+-        return false;
+-    }
+-    let Some(index) = release_index(prev_release, release) else {
+-        return false;
+-    };
+-    let units = units as u64;
+-    let words = cell.cast::<u32>();
+-    unsafe {
+-        words.write(((units as u32 & 0xff_ffff) << 8) | index);
+-        let tag = words.add(1).read() & 0xffff;
+-        words.add(1).write((((units >> 24) as u32 & 0xffff) << 16) | tag);
+-    }
+-    true
+-}
+-
+ /// The cell that `cell` links to and the index of its release function;
+ /// sets the header back (count 1, the upper half of the tag word 0).
++#[inline(always)]
+ unsafe fn unlink(cell: *mut u8) -> (*mut u8, u32) {
+     let words = cell.cast::<u32>();
+     let (low, high) = unsafe { (words.read(), words.add(1).read()) };
+@@ -160,29 +407,37 @@ unsafe fn unlink(cell: *mut u8) -> (*mut u8, u32) {
+     (cell.wrapping_offset(units as isize * 8), low & 0xff)
+ }
+ 
+-fn defer(cell: *mut u8, release: Release, wide: bool) {
+-    PENDING.with(|pending| {
+-        let mut pending = pending.borrow_mut();
+-        if wide
+-            && let Some(Work::Run {
+-                release: head_release,
+-                head,
+-                n,
+-            }) = pending.last_mut()
+-            && *n < u32::MAX
+-            && unsafe { link(cell, release, *head, *head_release) }
+-        {
+-            *head_release = release;
+-            *head = cell;
+-            *n += 1;
+-            return;
+-        }
+-        pending.push(Work::Run {
+-            release,
+-            head: cell,
+-            n: 1,
+-        });
+-    });
++// The slow paths are `extern "C"` (they cannot unwind), so that the entry
++// points reach them by tail calls and their fast paths need no frame.
++
++/// [`State::try_defer`] when the vector must grow first.
++#[cold]
++#[inline(never)]
++unsafe extern "C" fn defer_slow(cell: *mut u8, release: Release, wide: bool) {
++    let state = state();
++    state.grow();
++    let deferred = unsafe { state.try_defer(cell, release, wide) };
++    debug_assert!(deferred);
++}
++
++#[inline(never)]
++unsafe extern "C" fn drain_slow() {
++    unsafe { state().drain() }
++}
++
++/// [`__reussir_drop_drain`] with one cell pending: releases it, then drains
++/// whatever that pushed.
++#[inline(never)]
++unsafe extern "C" fn drain_one() {
++    let state = state();
++    state.draining.set(true);
++    state.n.set(0);
++    unsafe { state.release.get()(state.head.get()) };
++    if state.n.get() == 0 && state.len.get() == 0 {
++        state.draining.set(false);
++        return;
++    }
++    unsafe { drain_slow() }
+ }
+ 
+ /// Defers `release(cell)` until the current thread drains its pending work.
+@@ -190,7 +445,9 @@ fn defer(cell: *mut u8, release: Release, wide: bool) {
+ /// references (or an immediate's dummy box); the cell is not written.
+ #[unsafe(no_mangle)]
+ pub unsafe extern "C" fn __reussir_drop_defer(cell: *mut u8, release: Release) {
+-    defer(cell, release, false);
++    if !unsafe { state().try_defer(cell, release, false) } {
++        unsafe { defer_slow(cell, release, false) }
++    }
+ }
+ 
+ /// [`__reussir_drop_defer`] for a cell whose first 8 bytes are header: its
+@@ -198,7 +455,9 @@ pub unsafe extern "C" fn __reussir_drop_defer(cell: *mut u8, release: Release) {
+ /// cell may be linked through them.
+ #[unsafe(no_mangle)]
+ pub unsafe extern "C" fn __reussir_drop_defer_wide(cell: *mut u8, release: Release) {
+-    defer(cell, release, true);
++    if !unsafe { state().try_defer(cell, release, true) } {
++        unsafe { defer_slow(cell, release, true) }
++    }
+ }
+ 
+ /// Runs the current thread's pending work, last pushed first, until none is
+@@ -207,51 +466,24 @@ pub unsafe extern "C" fn __reussir_drop_defer_wide(cell: *mut u8, release: Relea
+ /// runs whatever is pushed meanwhile.
+ #[unsafe(no_mangle)]
+ pub unsafe extern "C" fn __reussir_drop_drain() {
+-    if DRAINING.with(|draining| draining.replace(true)) {
++    let state = state();
++    if state.draining.get() {
+         return;
+     }
+-    loop {
+-        let next = PENDING.with(|pending| {
+-            let mut pending = pending.borrow_mut();
+-            let len = pending.len();
+-            match pending.last_mut() {
+-                None => None,
+-                Some(Work::Run { release, head, n }) => {
+-                    let (popped, cell) = (*release, *head);
+-                    if *n == 1 {
+-                        pending.pop();
+-                    } else {
+-                        let (prev, index) = unsafe { unlink(cell) };
+-                        *head = prev;
+-                        if index != SAME {
+-                            *release = RELEASES.with(|releases| releases.borrow()[index as usize]);
+-                        }
+-                        *n -= 1;
+-                    }
+-                    Some(Ok((popped, cell)))
+-                }
+-                Some(&mut Work::Step(p, step)) => Some(Err((len - 1, p, step))),
+-            }
+-        });
+-        match next {
+-            None => break,
+-            Some(Ok((release, cell))) => unsafe { release(cell) },
+-            Some(Err((index, p, step))) => {
+-                if unsafe { step(p) } {
+-                    PENDING.with(|pending| {
+-                        pending.borrow_mut().remove(index);
+-                    });
+-                }
+-            }
++    // Outside a drain nothing is popped, and a drain ends with the table empty
++    // and the vector no longer than KEEP. So with nothing pending there is
++    // nothing to do (the table is empty and the vector short); with one cell
++    // pending (a run of one, so no link was made) the same holds once the
++    // cell is released, unless its release pushed work.
++    if state.len.get() == 0 {
++        match state.n.get() {
++            0 => return,
++            1 => return unsafe { drain_one() },
++            _ => {}
+         }
+     }
+-    // Nothing is pending, so no link names a table entry.
+-    RELEASES.with(|releases| releases.borrow_mut().clear());
+-    PENDING.with(|pending| {
+-        let mut pending = pending.borrow_mut();
+-        if pending.capacity() > KEEP {
+-            pending.shrink_to(KEEP);
+-        }
+-    });
+-    DRAINING.with(|draining| draining.set(false));
++    unsafe { drain_slow() }
+ }
++
++#[cfg(test)]
++mod tests;
+diff --git a/crates/reussir-rt/src/drop/tests.rs b/crates/reussir-rt/src/drop/tests.rs
+new file mode 100644
+index 00000000..ef57a774
+--- /dev/null
++++ b/crates/reussir-rt/src/drop/tests.rs
+@@ -0,0 +1,517 @@
++//! Order tests for the pending stack.
++//!
++//! A scenario is a forest of cells and steps: freeing a cell (its release
++//! function) records it, checks its header, and does its actions in order:
++//! defer a child cell (wide or not), release a child cell at once (as the
++//! glue's tail call does), push a child step ([`defer_step`], [`run_step`]),
++//! or call [`__reussir_drop_drain`]. A step does its actions as
++//! lean2rr's array frees do: one after another until one pushes work (then
++//! it answers "not done") or none is left. Random scenarios are run through
++//! the runtime and through a model with one stack entry per pending cell or
++//! step, last pushed first; the orders must agree. The traces (with the
++//! [`depth`] and [`active`] seen at every event, which show how cells were
++//! grouped into runs) are also hashed, so that two implementations can be
++//! compared exactly (`cargo test -p reussir-rt drop::tests::digest --
++//! --nocapture`).
++
++use super::*;
++use std::cell::RefCell;
++use std::hash::{DefaultHasher, Hash, Hasher};
++
++#[derive(Clone, Copy, Debug)]
++enum Action {
++    Defer { child: usize, wide: bool },
++    Inline { child: usize },
++    Step { child: usize },
++    RunStep { child: usize },
++    Drain,
++}
++
++struct Node {
++    /// The release function (index in [`releases`]); unused for a step.
++    k: usize,
++    /// An immediate: a pointer with a nonzero top byte, never dereferenced.
++    imm: bool,
++    /// The header's second word as initialized (the low half is the tag).
++    word: u32,
++    actions: Vec<Action>,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
++enum Ev {
++    Release { node: usize, k: usize },
++    Step { node: usize, done: usize },
++}
++
++struct World {
++    nodes: Vec<Node>,
++    base: *mut [u64; 2],
++    slot: Vec<usize>,
++    progress: Vec<usize>,
++    released: Vec<bool>,
++    trace: Vec<Ev>,
++    /// Every event with the depth and activity the runtime reported then.
++    seen: Vec<(Ev, usize, bool)>,
++}
++
++thread_local! {
++    static WORLD: RefCell<Option<World>> = const { RefCell::new(None) };
++}
++
++fn with_world<R>(f: impl FnOnce(&mut World) -> R) -> R {
++    WORLD.with(|w| f(w.borrow_mut().as_mut().expect("no scenario")))
++}
++
++unsafe extern "C" fn rel<const K: usize>(p: *mut u8) {
++    on_release(p, K)
++}
++
++macro_rules! tens {
++    ($v:ident; $($h:literal)*) => {
++        $($v.extend_from_slice(&[
++            rel::<{ $h * 10 }> as Release, rel::<{ $h * 10 + 1 }>,
++            rel::<{ $h * 10 + 2 }>, rel::<{ $h * 10 + 3 }>,
++            rel::<{ $h * 10 + 4 }>, rel::<{ $h * 10 + 5 }>,
++            rel::<{ $h * 10 + 6 }>, rel::<{ $h * 10 + 7 }>,
++            rel::<{ $h * 10 + 8 }>, rel::<{ $h * 10 + 9 }>,
++        ]);)*
++    };
++}
++
++/// 300 distinct release functions: more than a run's table holds.
++fn releases() -> Vec<Release> {
++    let mut v = Vec::new();
++    tens!(v; 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29);
++    v
++}
++
++thread_local! {
++    static RELEASES_FNS: Vec<Release> = releases();
++}
++
++fn release_fn(k: usize) -> Release {
++    RELEASES_FNS.with(|r| r[k])
++}
++
++fn ptr_of(w: &World, id: usize) -> *mut u8 {
++    if w.nodes[id].imm {
++        // Never dereferenced: no provenance.
++        core::ptr::without_provenance_mut((1usize << 56) | (id << 3))
++    } else {
++        unsafe { w.base.add(w.slot[id]).cast::<u8>() }
++    }
++}
++
++fn record(w: &mut World, ev: Ev) {
++    w.trace.push(ev);
++    w.seen.push((ev, depth(), active()));
++}
++
++fn on_release(p: *mut u8, k: usize) {
++    let id = if (p as usize) >> 56 != 0 {
++        ((p as usize) & ((1 << 56) - 1)) >> 3
++    } else {
++        let words = p.cast::<u32>();
++        let (count, word) = unsafe { (words.read(), words.add(1).read()) };
++        let id = unsafe { p.cast::<u64>().add(1).read() } as usize;
++        let orig = with_world(|w| w.nodes[id].word);
++        assert_eq!(count, 1, "count of cell {id} not set back");
++        assert_eq!(word & 0xffff, orig & 0xffff, "tag of cell {id} not kept");
++        assert!(
++            word >> 16 == orig >> 16 || word >> 16 == 0,
++            "upper tag word of cell {id}: {word:#x}, was {orig:#x}"
++        );
++        id
++    };
++    let actions = with_world(|w| {
++        assert!(!w.released[id], "cell {id} released twice");
++        w.released[id] = true;
++        record(w, Ev::Release { node: id, k });
++        w.nodes[id].actions.clone()
++    });
++    for a in actions {
++        perform(a);
++    }
++}
++
++fn perform(a: Action) {
++    match a {
++        Action::Defer { child, wide } => {
++            let (p, k) = with_world(|w| (ptr_of(w, child), w.nodes[child].k));
++            unsafe {
++                if wide {
++                    __reussir_drop_defer_wide(p, release_fn(k))
++                } else {
++                    __reussir_drop_defer(p, release_fn(k))
++                }
++            }
++        }
++        Action::Inline { child } => {
++            let (p, k) = with_world(|w| (ptr_of(w, child), w.nodes[child].k));
++            unsafe { release_fn(k)(p) }
++        }
++        Action::Step { child } => defer_step(child, step_fn),
++        Action::RunStep { child } => run_step(child, step_fn),
++        Action::Drain => unsafe { __reussir_drop_drain() },
++    }
++}
++
++unsafe fn step_fn(id: usize) -> bool {
++    let actions = with_world(|w| {
++        let done = w.progress[id];
++        record(w, Ev::Step { node: id, done });
++        w.nodes[id].actions.clone()
++    });
++    let before = depth();
++    loop {
++        let done = with_world(|w| w.progress[id]);
++        if done == actions.len() {
++            return true;
++        }
++        perform(actions[done]);
++        with_world(|w| w.progress[id] = done + 1);
++        if done + 1 == actions.len() {
++            return true;
++        }
++        if depth() != before {
++            return false;
++        }
++    }
++}
++
++/// The reference: one entry per pending cell or step, last pushed first.
++struct Model<'a> {
++    nodes: &'a [Node],
++    stack: Vec<(bool, usize)>,
++    draining: bool,
++    progress: Vec<usize>,
++    trace: Vec<Ev>,
++}
++
++impl Model<'_> {
++    fn release(&mut self, id: usize) {
++        self.trace.push(Ev::Release {
++            node: id,
++            k: self.nodes[id].k,
++        });
++        for &a in &self.nodes[id].actions {
++            self.perform(a);
++        }
++    }
++
++    fn perform(&mut self, a: Action) {
++        match a {
++            Action::Defer { child, .. } => self.stack.push((false, child)),
++            Action::Inline { child } => self.release(child),
++            Action::Step { child } => self.stack.push((true, child)),
++            Action::RunStep { child } => {
++                self.stack.push((true, child));
++                self.drain();
++            }
++            Action::Drain => self.drain(),
++        }
++    }
++
++    fn drain(&mut self) {
++        if self.draining {
++            return;
++        }
++        self.draining = true;
++        while let Some(&(is_step, id)) = self.stack.last() {
++            if !is_step {
++                self.stack.pop();
++                self.release(id);
++            } else {
++                let index = self.stack.len() - 1;
++                if self.step(id) {
++                    self.stack.remove(index);
++                }
++            }
++        }
++        self.draining = false;
++    }
++
++    fn step(&mut self, id: usize) -> bool {
++        self.trace.push(Ev::Step {
++            node: id,
++            done: self.progress[id],
++        });
++        let before = self.stack.len();
++        let n = self.nodes[id].actions.len();
++        loop {
++            let done = self.progress[id];
++            if done == n {
++                return true;
++            }
++            self.perform(self.nodes[id].actions[done]);
++            self.progress[id] = done + 1;
++            if done + 1 == n {
++                return true;
++            }
++            if self.stack.len() != before {
++                return false;
++            }
++        }
++    }
++}
++
++struct Rng(u64);
++
++impl Rng {
++    fn next(&mut self) -> u64 {
++        // xorshift64*
++        self.0 ^= self.0 >> 12;
++        self.0 ^= self.0 << 25;
++        self.0 ^= self.0 >> 27;
++        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
++    }
++    fn below(&mut self, n: usize) -> usize {
++        (self.next() % n as u64) as usize
++    }
++    fn chance(&mut self, percent: usize) -> bool {
++        self.below(100) < percent
++    }
++}
++
++/// A random forest: the roots, then all nodes (index = id).
++fn scenario(seed: u64, budget: usize) -> (Vec<usize>, Vec<Node>) {
++    let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
++    let kinds = [1, 3, 40, 300][rng.below(4)];
++    let imm_pct = [0, 5, 30][rng.below(3)];
++    let wide_pct = [100, 90, 50][rng.below(3)];
++    let mut nodes: Vec<Node> = Vec::new();
++    let mut is_step: Vec<bool> = Vec::new();
++    let mut new_node = |rng: &mut Rng, nodes: &mut Vec<Node>, step: bool| {
++        nodes.push(Node {
++            k: if step { 0 } else { rng.below(kinds) },
++            imm: !step && rng.chance(imm_pct),
++            word: (rng.next() as u32 & 0xffff)
++                | if rng.chance(50) {
++                    (rng.next() as u32) << 16
++                } else {
++                    0
++                },
++            actions: Vec::new(),
++        });
++        is_step.push(step);
++        nodes.len() - 1
++    };
++    let mut roots = Vec::new();
++    let mut queue = std::collections::VecDeque::new();
++    while nodes.len() < budget {
++        let r = new_node(&mut rng, &mut nodes, false);
++        roots.push(r);
++        queue.push_back(r);
++        while let Some(id) = queue.pop_front() {
++            let n = if rng.chance(3) {
++                rng.below(300)
++            } else {
++                rng.below(5)
++            };
++            for _ in 0..n {
++                if nodes.len() >= budget {
++                    break;
++                }
++                let roll = rng.below(100);
++                let action = if roll < 70 {
++                    let c = new_node(&mut rng, &mut nodes, false);
++                    queue.push_back(c);
++                    Action::Defer {
++                        child: c,
++                        wide: rng.chance(wide_pct),
++                    }
++                } else if roll < 80 {
++                    let c = new_node(&mut rng, &mut nodes, false);
++                    queue.push_back(c);
++                    Action::Inline { child: c }
++                } else if roll < 90 {
++                    let c = new_node(&mut rng, &mut nodes, true);
++                    queue.push_back(c);
++                    Action::Step { child: c }
++                } else if roll < 95 {
++                    let c = new_node(&mut rng, &mut nodes, true);
++                    queue.push_back(c);
++                    Action::RunStep { child: c }
++                } else {
++                    Action::Drain
++                };
++                nodes[id].actions.push(action);
++            }
++        }
++    }
++    (roots, nodes)
++}
++
++/// Runs a scenario through the runtime and the model; answers the trace
++/// digest (events with depth and activity).
++fn run(seed: u64, budget: usize) -> u64 {
++    run_stats(seed, budget).0
++}
++
++/// [`run`], and the number of events, of steps, and the largest depth seen.
++fn run_stats(seed: u64, budget: usize) -> (u64, usize, usize, usize) {
++    let (roots, nodes) = scenario(seed, budget);
++    let n = nodes.len();
++    let mut rng = Rng(seed ^ 0x5555);
++    // Cells at random slots of one arena: links in both directions.
++    let mut slot: Vec<usize> = (0..2 * n).collect();
++    for i in (1..slot.len()).rev() {
++        slot.swap(i, rng.below(i + 1));
++    }
++    slot.truncate(n);
++    let mut arena = vec![[0u64; 2]; 2 * n];
++    let base = arena.as_mut_ptr();
++    for (id, node) in nodes.iter().enumerate() {
++        unsafe {
++            let cell = base.add(slot[id]);
++            let words = cell.cast::<u32>();
++            words.write(1);
++            words.add(1).write(node.word);
++            cell.cast::<u64>().add(1).write(id as u64);
++        }
++    }
++    let mut model = Model {
++        nodes: &nodes,
++        stack: Vec::new(),
++        draining: false,
++        progress: vec![0; n],
++        trace: Vec::new(),
++    };
++    for &r in &roots {
++        model.release(r);
++        model.drain();
++    }
++    let expected = model.trace;
++    let ks: Vec<usize> = nodes.iter().map(|node| node.k).collect();
++    WORLD.with(|w| {
++        *w.borrow_mut() = Some(World {
++            nodes,
++            base,
++            slot,
++            progress: vec![0; n],
++            released: vec![false; n],
++            trace: Vec::new(),
++            seen: Vec::new(),
++        })
++    });
++    assert!(!active());
++    assert_eq!(depth(), 0);
++    for &r in &roots {
++        let p = with_world(|w| ptr_of(w, r));
++        unsafe {
++            release_fn(ks[r])(p);
++            __reussir_drop_drain();
++        }
++        assert!(!active());
++        assert_eq!(depth(), 0);
++    }
++    let world = WORLD.with(|w| w.borrow_mut().take().unwrap());
++    drop(arena);
++    assert_eq!(
++        world.trace.len(),
++        expected.len(),
++        "seed {seed}: event count"
++    );
++    for (i, (got, want)) in world.trace.iter().zip(&expected).enumerate() {
++        assert_eq!(got, want, "seed {seed}: event {i}");
++    }
++    let mut h = DefaultHasher::new();
++    world.seen.hash(&mut h);
++    let steps = world
++        .trace
++        .iter()
++        .filter(|e| matches!(e, Ev::Step { .. }))
++        .count();
++    let deepest = world.seen.iter().map(|s| s.1).max().unwrap_or(0);
++    (h.finish(), world.trace.len(), steps, deepest)
++}
++
++fn seeds() -> (u64, usize) {
++    if cfg!(miri) { (4, 60) } else { (400, 3000) }
++}
++
++#[test]
++fn random_drops_match_the_model() {
++    let (count, budget) = seeds();
++    for seed in 0..count {
++        run(seed, budget);
++    }
++}
++
++/// Prints the trace digests (compare two implementations' outputs).
++#[test]
++fn digest() {
++    let (count, budget) = seeds();
++    let mut all = DefaultHasher::new();
++    for seed in 0..count {
++        let (d, events, steps, deepest) = run_stats(seed, budget);
++        d.hash(&mut all);
++        println!(
++            "drop-digest seed {seed}: {d:016x} ({events} events, {steps} steps, depth <= {deepest})"
++        );
++    }
++    println!("drop-digest all: {:016x}", all.finish());
++}
++
++/// More distinct release functions than the table holds, one after another:
++/// the cells that cannot be linked start runs of their own.
++#[test]
++fn table_full() {
++    let n = 300;
++    let nodes: Vec<Node> = (0..=n)
++        .map(|i| Node {
++            k: if i == 0 { 0 } else { i - 1 },
++            imm: false,
++            word: 7,
++            actions: if i == 0 {
++                (1..=n)
++                    .map(|c| Action::Defer {
++                        child: c,
++                        wide: true,
++                    })
++                    .collect()
++            } else {
++                Vec::new()
++            },
++        })
++        .collect();
++    let mut arena = vec![[0u64; 2]; n + 1];
++    let base = arena.as_mut_ptr();
++    for (id, node) in nodes.iter().enumerate() {
++        unsafe {
++            let words = base.add(id).cast::<u32>();
++            words.write(1);
++            words.add(1).write(node.word);
++            base.add(id).cast::<u64>().add(1).write(id as u64);
++        }
++    }
++    WORLD.with(|w| {
++        *w.borrow_mut() = Some(World {
++            nodes,
++            base,
++            slot: (0..=n).collect(),
++            progress: vec![0; n + 1],
++            released: vec![false; n + 1],
++            trace: Vec::new(),
++            seen: Vec::new(),
++        })
++    });
++    // Cells 1..=256 form one run (255 table entries), each later cell its own.
++    let p = with_world(|w| ptr_of(w, 0));
++    unsafe { release_fn(0)(p) };
++    assert_eq!(depth(), 1 + (n - 256));
++    unsafe { __reussir_drop_drain() };
++    assert_eq!(depth(), 0);
++    let world = WORLD.with(|w| w.borrow_mut().take().unwrap());
++    drop(arena);
++    let order: Vec<usize> = world
++        .trace
++        .iter()
++        .map(|e| match *e {
++            Ev::Release { node, .. } => node,
++            Ev::Step { .. } => unreachable!(),
++        })
++        .collect();
++    let want: Vec<usize> = std::iter::once(0).chain((1..=n).rev()).collect();
++    assert_eq!(order, want);
++}
+-- 
+2.43.0
+

@@ -2167,7 +2167,11 @@ Probe results (Reussir at the pinned commit):
   whose padding is explicit.
 - **Candidate Reussir requests.** Guaranteed tail calls; `[value]` types
   across the FFI (for `Nat` array elements without a wrapper); borrowed
-  FFI parameters (an array `get` currently takes ownership and releases).
+  FFI parameters (an array `get` currently takes ownership and releases);
+  a no-inline attribute (lean2rr uses `#[transform_anchor]`, whose
+  `no_inline` is a side effect, docs/reussir-bugs.md bug 20); small
+  integers as immediates (for one-word `Nat` fields); bounded-depth frees
+  (local patches 0013-0015).
 
 Answered (Lean):
 - Startup order: `EmitC.emitInitFn` runs the module's compiled
