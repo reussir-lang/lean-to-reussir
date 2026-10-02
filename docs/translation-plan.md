@@ -742,10 +742,17 @@ its value is stored as `Box`.
   When the program can cast at all, unboxing also accepts the variants of
   types that an `unsafeCast` can read (below). A program can cast when
   some declaration it reaches outside Lean's library (`Init`, `Std`,
-  `Lean`, `Lake`) is `unsafe` (other than the code Lean generates for a
-  `partial def`), is an axiom, or uses `sorry`: `unsafeCast` needs
-  `unsafe` code, and a `cast` between types lean2rr represents differently
-  needs an equality that only `sorry` or an axiom proves. The declarations
+  `Lean`, `Lake`) and lean2rr's shim (`L2RShim`, §5.8) is `unsafe`, is an
+  axiom, uses `sorry`, or is `@[extern]` or `@[export]`: `unsafeCast`
+  needs `unsafe` code, a `cast` between types lean2rr represents
+  differently needs an equality that only `sorry` or an axiom proves, and
+  Lean does not compare the types of an extern and the `@[export]`
+  definition that implements it (which lean2rr calls directly, §5.8,
+  whichever of the two is the program's): `@[extern "s"] opaque asP2 (p :
+  Pkg) : P2` bound to `@[export s] def payload (p : Pkg) : p.α` reads an
+  existential payload as a `P2`. `implemented_by` is type-checked, and the
+  code Lean 4.33 generates for a `partial def` (`f._unsafe_rec`) is
+  `partial`, not `unsafe`, so neither makes a program cast. The declarations
   reached are those the program's code comes from and, transitively, the
   constants their definitions mention (code inlined into others) and their
   `implemented_by` targets (`LowerCtx.programCasts`). Lean's library casts
