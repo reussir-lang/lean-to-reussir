@@ -1,0 +1,13 @@
+// Bug 21: a `[:` without a closing `:]` in a polymorphic FFI texture's body
+// is dropped. `monomorphize` (CompilePolymorphicFFI.cpp) takes `[:` for the
+// start of a `[:Name:]` placeholder and, when the body ends before `:]`,
+// writes only the text after it: the byte string below reaches rustc as
+// b"ab". (lean2rr's string literal table is such a body: a Lean literal
+// "a[:3]" printed as "a3]".)
+// Expected: prints 4. Reussir ef922049: prints 2.
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+#[ffi(import)]
+fn unterminated_len() -> u64 [{ b"a[:b".len() as u64 }];
+#[main]
+fn main() { say(unterminated_len()); }

@@ -355,7 +355,9 @@ bug20() {
     else say_line OTHER 20 "$msg" "l2r.py"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20"
+bug21() { plain_value 21 bug21-unterminated-placeholder 4 2 -O aggressive; }
+
+ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21"
 SLOW=" 06 10 11 16 17 20 "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

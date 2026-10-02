@@ -12,9 +12,9 @@ lean2rr's output and lean2rr has no reasonable way around it. Each patch
 was reviewed adversarially before it was applied: code review,
 differential fuzzing against a reference evaluator, ASan builds and the
 lean2rr test suites, over three rounds (0014 in a fourth, 0015 in a
-fifth). The ten patches are in `reussir-patches/` (see its README). They are applied to
+fifth). The eleven patches are in `reussir-patches/` (see its README). They are applied to
 `./reussir` as local commits on its branch `l2r-local` (ef922049 + the
-ten). They are not submitted upstream. lean2rr's runtime needs 0014 to
+eleven). They are not submitted upstream. lean2rr's runtime needs 0014 to
 build (bug 13). lean2rr's workarounds stay in place where they are
 still needed (bugs 1, 2 for variants, 3, 10, 16, 17, 19, 20), and two
 stay although the bug is patched: the driver's retry without
@@ -63,7 +63,8 @@ Builds used to check the repros (on the aarch64 test machine):
   0013, 0012 as applied to `./reussir` (`l2r-local`) before 0014. The
   third review round checked it.
 - the nine-patch set: the eight-patch set + 0014.
-- the final set: the nine-patch set + 0015 (`l2r-local`).
+- the ten-patch set: the nine-patch set + 0015.
+- the final set: the ten-patch set + 0016 (`l2r-local`).
 
 **Audit (2026-10-02).** An independent review checked every entry against
 Reussir's own documentation, tests, design notes and source, and against
@@ -103,9 +104,10 @@ on it); 0013 to 0015 implement a missing feature.
 | 18 | bug (build system) | the `rrc` build target alone does not link | no, Reussir's build only | build the default target | none | - | - |
 | 19 | bug | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `Nat`/`Int` references in two cells; other `[value]` records boxed | none | - | - |
 | 20 | unclear | the MLIR inliner grows lean2rr's conversion code exponentially (build time) | yes, build time and memory (monad transformer towers did not build) | conversion, unboxing and uniform-code application functions marked `#[transform_anchor]` | none | - | - |
+| 21 | bug | an unterminated `[:` in a polymorphic FFI texture is dropped | yes, wrong output (a string literal containing `[:` printed without it) | none (patched) | 0016 | pending | not yet |
 
 Patch files (`git format-patch` output; they apply on ef922049 in the
-order 0006, 0004, 0002, 0007, 0009, 0005, 0013, 0012, 0014, 0015; 0009
+order 0006, 0004, 0002, 0007, 0009, 0005, 0013, 0012, 0014, 0015, 0016; 0009
 needs 0007 (it uses `consumesFusedMember`, which 0007 adds), 0015 needs
 0014, and 0012 also applies alone):
 
@@ -119,6 +121,7 @@ needs 0007 (it uses `consumesFusedMember`, which 0007 adds), 0015 needs
 - `0013-l2r-local-bug-13-release-chains-of-cells-in-a-loop-in-the-drop-glue.patch`
 - `0014-l2r-local-bug-13b-free-cells-deep-through-records-with-a-stack-of-pending-releases.patch`
 - `0015-l2r-local-bug-13b-runtime-cheaper-pending-stack-same.patch`
+- `0016-l2r-local-bug-21-keep-an-unterminated-in-a-polymorph.patch`
 
 Status words used below:
 - *worked around*: no patch; lean2rr avoids the construct or works around
@@ -1416,3 +1419,52 @@ Not bugs, but each one costs lean2rr measurably:
   need runtime-side representations or wrappers.
 - **Guaranteed tail calls.** Mutual tail calls are sibling calls only when
   all arguments fit in registers.
+
+## 21. An unterminated `[:` in a polymorphic FFI texture is dropped
+
+**Status.** Patched locally (0016).
+
+**Verdict: bug.** Reussir has two implementations of placeholder
+substitution in texture bodies, and they disagree: the Rust one
+(`substitute_placeholders`, `crates/reussir-core/src/full/ffi.rs`) keeps a
+`[:` that has no closing `:]`; the C++ one used to compile textures drops
+it, changing the Rust code handed to rustc.
+
+**Repro.** `bug21-unterminated-placeholder.rr`:
+
+```
+#[ffi(import)]
+fn unterminated_len() -> u64 [{ b"a[:b".len() as u64 }];
+#[main]
+fn main() { say(unterminated_len()); }
+```
+
+In Lean (found by round-6 testing, `adv6/stdlib/M03Bracket.lean`):
+
+```
+def main : IO Unit := IO.println "slice a[:3] and b[:4]"
+```
+
+**Command.** `rrc bug21-unterminated-placeholder.rr -O aggressive`.
+
+**Expected.** `4` (Lean: `slice a[:3] and b[:4]`).
+
+**Actual on ef922049.** `2` (Lean through lean2rr: `slice a3] and b[:4]`:
+the first `[:` with no `:]` anywhere after it loses its two characters).
+
+**Cause.** `monomorphize`
+(`lib/Conversion/CompilePolymorphicFFI/CompilePolymorphicFFI.cpp`) scans
+the body for `[:`; on one it writes the text before it, moves its cursor
+past the `[:` and looks for `:]`. When the body ends first, it writes only
+`text.substr(cursor)`, the text after the `[:`. lean2rr's string literals
+live in one texture body (`l2r_str_lit`'s table, `LowerBase.strLitTable`),
+so any literal could be the one.
+
+**lean2rr.** It could escape `[` in that table (`\x5b`); not needed with
+the patch.
+
+**Patch.** 0016: write the pending `[:` before the rest of the body, as the
+Rust implementation does. Test:
+`tests/integration/frontend/ffi_unterminated_placeholder_e2e` (exit 0
+with the patch, 1 without), the repro (FIXED), and lean2rr's runtime test
+`RtStrLitBracket`.
