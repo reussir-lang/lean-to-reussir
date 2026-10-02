@@ -690,6 +690,25 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   `inductive Tree | node (v : Nat) (cs : Array Tree)` holds `RVec<Tree>`,
   the representation `Array Tree` has everywhere else (also through mutual
   types, whichever is translated first).
+- **Polymorphic recursion in a type.** An `unsafe inductive` may use itself
+  at a larger argument: `Nest α | nil | cons (x : α) (rest : Nest (α × α))`.
+  Translating `Nest Nat` would need `Nest (Nat × Nat)`, whose field needs
+  `Nest ((Nat × Nat) × (Nat × Nat))`, and so on without end. So the rule of
+  §2.6 applies to the instantiations requested while fields are translated,
+  for an inductive whose block uses its types at other arguments than its
+  parameters (only `unsafe` ones can; a safe `Tree | node (kids : List (Nat
+  × Tree))`, whose `List Tree` reaches `List (Nat × Tree)`, is never cut):
+  an instantiation that strictly contains the arguments of an instantiation
+  of the same inductive whose fields are being translated (the path: a
+  mutual partner, `A α` holding `B (α × α)` holding `A (List (α × α))`, or
+  another inductive, `List (Rose (Option α))`, in between), or that is built
+  from the `lcAny` of the uniform instantiation on the path, or that has 256
+  instantiations of its inductive on the path, is the uniform instantiation.
+  `Nest Nat` is `enum Nest_Nat { nil, cons(Nat, Nest_Box) }`, and
+  `Nest_Box`'s own field is `Nest_Box`. A typed `Nest (Nat × Nat)` value
+  stored in that field is converted (boxing its `x`, its own `rest` being a
+  `Nest_Box` already), like any value meeting another representation of its
+  type (below).
 
 **Function types** become generated shared enums, one per (lowered,
 curried) function type, whose variants say what a value is a partial
@@ -711,8 +730,31 @@ its value is stored as `Box`.
   nominal, array or word type (`Nat`, `Int`, `UInt8/16/32`, `Bool`,
   `UInt64`, floats) is therefore a generated function that matches all
   such variants and converts structurally, element by element for arrays.
-  It also accepts the variants of types that an `unsafeCast` can read
-  (below), so that an existential payload, an `IO.Ref`'s contents or a
+  An instantiation whose Lean type cannot be the target's (`Option Nat`
+  read as `Option String`) is reached only by a value that Lean's `cse`
+  shared between the two types (`none`, `some []`: no data where the types
+  differ). In a program that cannot cast (defined next) it converts
+  through the instantiation at the arguments both types share, `lcAny`
+  elsewhere: `Prod (Array S₁) Nat` read as `Prod (Array S₀) Nat` goes
+  through `Prod lcAny Nat`. Converted directly, K structures of one shape
+  going through uniform code made K² conversion functions, each with its
+  own generic runtime calls (build time grew quadratically).
+  When the program can cast at all, unboxing also accepts the variants of
+  types that an `unsafeCast` can read (below). A program can cast when
+  some declaration it reaches outside Lean's library (`Init`, `Std`,
+  `Lean`, `Lake`) is `unsafe` (other than the code Lean generates for a
+  `partial def`), is an axiom, or uses `sorry`: `unsafeCast` needs
+  `unsafe` code, and a `cast` between types lean2rr represents differently
+  needs an equality that only `sorry` or an axiom proves. The declarations
+  reached are those the program's code comes from and, transitively, the
+  constants their definitions mention (code inlined into others) and their
+  `implemented_by` targets (`LowerCtx.programCasts`). Lean's library casts
+  only where lean2rr's representations agree: `Array.mapMUnsafe`'s
+  `NonScalar` elements are `Box`es, `modify`'s `unsafeCast ()` is a
+  placeholder, `attach` adds a `Subtype` (which mono erases), and
+  `Dynamic` reads a value at the type its `TypeName` names. Otherwise no
+  unboxing function matches another inductive or another word type. In a
+  program that casts, an existential payload, an `IO.Ref`'s contents or a
   value in polymorphically recursive code cast to another type converts
   like a typed value: another inductive with the same native layout
   (the value as it is when lean2rr's layouts agree too, otherwise

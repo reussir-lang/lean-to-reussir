@@ -113,6 +113,12 @@ structure LowerCtx where
   `programObservesIdentity`): otherwise a value and an equal copy cannot be
   told apart. -/
   observesIdentity : Bool := true
+  /-- Whether the program can read a value as another type than its own
+  (`unsafe` code of its own, or a cast justified by `sorry` or an axiom;
+  `programCasts`): otherwise a `Box` holding a value of one inductive is
+  never read as another, and an unboxing function matches only the
+  instantiations of its own inductive (`boxCastable`, `finishUnboxFns`). -/
+  programCasts : Bool := true
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/
@@ -219,6 +225,9 @@ structure LowerState where
   /-- Types whose fields are being lowered, and whether they will be
   boundary types (see `nominalType`). -/
   pendingBoundary : Std.HashMap String Bool := {}
+  /-- Whether an inductive's mutual block uses one of its types at other
+  arguments than its parameters (`nonUniformInductive`), once computed. -/
+  nonUniformInds : NameMap Bool := {}
   /-- Structural conversions being generated (for recursive types). -/
   convsInProgress : Std.HashSet String := {}
   /-- Whether the body of a structural conversion is being generated: a
@@ -568,6 +577,96 @@ def nominalKey (ival : InductiveVal) (args : Array Expr) : LowerM Expr := do
     if rel.getD i true then (args[i]?.getD anyExpr).consumeMData else erasedExpr
   return mkAppN (.const ival.name []) keyArgs
 
+/-- Whether `e` mentions one of the inductives `all` applied to other
+arguments than `ps` (see `nonUniformInductive`). -/
+partial def usesOtherArgs (all : List Name) (ps : Array Expr) (e : Expr) : Bool :=
+  let args := e.getAppArgs
+  let go := usesOtherArgs all ps
+  let here := match e.getAppFn with
+    | .const j _ => all.contains j && (args.size < ps.size || args.extract 0 ps.size != ps)
+    | .forallE _ d b _ | .lam _ d b _ => go d || go b
+    | .mdata _ b => go b
+    | .letE _ t v b _ => go t || go v || go b
+    | .proj _ _ x => go x
+    | _ => false
+  here || args.any go
+
+/-- Whether the mutual block of inductive `ival` uses one of its types at
+other arguments than the block's parameters in a constructor field
+(`unsafe inductive Nest α | cons (x : α) (rest : Nest (α × α))`, also nested
+in another type, `List (Rose (Option α))`, or a function type). Lean accepts
+this only for `unsafe` inductives: a safe inductive always uses its
+parameters as they are. -/
+def nonUniformInductive (ival : InductiveVal) : LowerM Bool := do
+  if let some b := (← get).nonUniformInds.find? ival.name then return b
+  let ps := (List.range ival.numParams).toArray.map fun i => Expr.fvar ⟨.num `_l2r_param i⟩
+  let go := usesOtherArgs ival.all ps
+  let mut r := false
+  for ind in ival.all do
+    let some (.inductInfo iv) := (← getEnv).find? ind | continue
+    for c in iv.ctors do
+      let some (.ctorInfo ci) := (← getEnv).find? c | continue
+      let mut ty ← instantiateForall ci.type ps
+      repeat
+        match ty with
+        | .forallE _ d b _ =>
+          if go d then r := true
+          ty := b.instantiate1 anyExpr
+        | .mdata _ b => ty := b
+        | _ => break
+  modify fun s => { s with nonUniformInds := s.nonUniformInds.insert ival.name r }
+  return r
+
+/-- Whether instantiation `key` of inductive `ival`, requested while the
+fields of the types on the path (`pendingBoundary`) are being lowered,
+grows: polymorphic recursion in a type (`unsafe inductive Nest α | cons
+(x : α) (rest : Nest (α × α))`), whose instances `Nest Nat`,
+`Nest (Nat × Nat)`, … would never end. Only an inductive whose block uses
+its types at other arguments (`nonUniformInductive`) can grow: a safe one
+(`inductive Tree | node (kids : List (Nat × Tree))`, whose `List Tree`
+reaches `List (Nat × Tree)`) is never cut. As for instances of declarations
+(Mono's `instanceName`): the key grows if some instantiation of the same
+inductive on the path has a relevant argument that the key's argument at
+that position strictly contains (or, for type functions, is strictly larger
+than), or if that instantiation is the uniform one and the key's arguments
+are built from its `lcAny` (`Nest (lcAny × lcAny)`, the uniform type's own
+field). Growth that no containment shows is cut by a bound: 256
+instantiations of one inductive on the path. Such a key is translated at
+the uniform instantiation instead (see `nominalType`). -/
+def typeGrowsOnPath (ival : InductiveVal) (key : Expr) : LowerM Bool := do
+  let s ← get
+  let head := key.getAppFn
+  let bs := key.getAppArgs
+  unless s.pendingBoundary.toList.any (fun (n, _) =>
+      (s.typeKeys[n]?.map (·.getAppFn == head)).getD false) do return false
+  unless ← nonUniformInductive ival do return false
+  let grows (a b : Expr) : Bool :=
+    a != b && a != anyExpr && a != erasedExpr &&
+      ((b.find? (· == a)).isSome ||
+       ((a.isLambda || b.isLambda) && treeSizeUpTo b 1000 > treeSizeUpTo a 1000))
+  let mut same := 0
+  for (n, _) in s.pendingBoundary do
+    let some k := s.typeKeys[n]? | continue
+    unless k.getAppFn == head && k.getAppNumArgs == bs.size do continue
+    same := same + 1
+    let pairs := (k.getAppArgs.zip bs).filter fun (a, _) => a != erasedExpr
+    if pairs.isEmpty then continue
+    if pairs.all (·.1 == anyExpr) then
+      if pairs.any fun (_, b) => b != anyExpr && !b.isLambda && (b.find? (· == anyExpr)).isSome then
+        return true
+    else if pairs.any fun (a, b) => grows a b then return true
+  return same ≥ 256
+
+/-- The type arguments inductive `ival` is translated at when requested at
+`args`, and the key of that translation: `args` themselves, or every
+argument `lcAny` (the uniform instantiation) when the request grows
+(`typeGrowsOnPath`). -/
+def nominalArgs (ival : InductiveVal) (args : Array Expr) : LowerM (Array Expr × Expr) := do
+  let key ← nominalKey ival args
+  if ival.numParams == 0 || !(← typeGrowsOnPath ival key) then return (args, key)
+  let uargs := Array.replicate ival.numParams anyExpr
+  return (uargs, ← nominalKey ival uargs)
+
 /-- Whether mono type `e` translates to a generated nominal type whose
 fields are being lowered (see `nominalType`). -/
 def inProgressType (e : Expr) : LowerM Bool := do
@@ -579,7 +678,7 @@ def inProgressType (e : Expr) : LowerM Bool := do
     | _, some (.inductInfo iv) => if iv.type.getForallBody.isProp then none else some iv
     | _, _ => none
   let some ival := ival? | return false
-  let some name := (← get).typeNames[← nominalKey ival e.getAppArgs]? | return false
+  let some name := (← get).typeNames[(← nominalArgs ival e.getAppArgs).2]? | return false
   return !(← get).typeInfos.contains name
 
 mutual
@@ -646,7 +745,10 @@ mutual
 
   /-- The generated nominal type for an instantiated inductive. -/
   partial def nominalType (ival : InductiveVal) (args : Array Expr) : LowerM RR.Ty := do
-    let key ← nominalKey ival args
+    -- A field type that grows (polymorphic recursion in a type, `Nest (α × α)`
+    -- in `Nest α`) is the uniform instantiation (`nominalArgs`); values of the
+    -- typed instantiations convert to it where they meet (§5.1).
+    let (args, key) ← nominalArgs ival args
     if let some n := (← get).typeNames[key]? then return .named n
     let name ← fresh s!"T_{nameHint ival.name}_"
     modify fun s => { s with typeNames := s.typeNames.insert key name, typeKeys := s.typeKeys.insert name key }
