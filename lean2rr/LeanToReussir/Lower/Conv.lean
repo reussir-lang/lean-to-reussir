@@ -758,9 +758,12 @@ mutual
           return some (.call (← structConv sn dn) #[] #[e])
       -- The rest is only reachable through `unsafeCast`, between values that
       -- Lean represents by the same word; the conversions follow Lean's
-      -- `lean_box`/`lean_unbox`. Scalars of the same size in a constructor's
-      -- scalar area: the bits, copied unchanged (NaN payloads included;
-      -- `Float.ofBits`/`toBits` would make every NaN the canonical one).
+      -- `lean_box`/`lean_unbox`. `Float` and `UInt64` are both a cell with
+      -- an 8-byte scalar area: the bits, copied unchanged (NaN payloads
+      -- included; `Float.ofBits`/`toBits` would make every NaN the canonical
+      -- one). `Float32` and `UInt32` are not alike natively (a cell and a
+      -- tagged scalar: such a cast crashes there); here their bits are
+      -- copied the same way (plan §10).
       match sn, dn with
       | "u64", "f64" => return some (.call "l2r_f64_of_raw_bits" #[] #[e])
       | "f64", "u64" => return some (.call "l2r_f64_raw_bits" #[] #[e])

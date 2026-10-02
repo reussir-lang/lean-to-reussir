@@ -84,7 +84,7 @@ def optimizations : Array OptPass := #[
   ⟨"jp-sink", true, "join points moved down to the smallest code containing their jumps, before the J1-J4 choice", JpSink.install⟩,
   ⟨"jp-small", true, "small join points (at most 40 nodes, with the small join points they jump to) duplicated at their jumps (J1') instead of outlined", JpSmall.install⟩,
   ⟨"state-machines", true, "a loop's state machine (J4) entered without allocation: parameters passed beside a nullary entry variant (placeholders at jumps)", StateMachines.install⟩,
-  ⟨"lazy-fields", true, "fields of a matched value kept live (stored or returned whole) bound where used (Reussir bug 7 workaround)", LazyFields.install⟩,
+  ⟨"lazy-fields", true, "fields of a matched value kept live (stored, returned or passed to a call whole) bound where used (Reussir bug 7 workaround)", LazyFields.install⟩,
   ⟨"nullary-scrutinee", true, "in the arm of a constructor without fields, the matched value rebuilt instead of kept", NullaryScrutinee.install⟩,
   ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩,
   ⟨"fresh-rebuild", true, "in a program that never asks for an object's identity, an alternative that only returns a freshly built matched value returns it rebuilt from its fields (Reussir then reuses the cell in every alternative)", FreshRebuild.install⟩,

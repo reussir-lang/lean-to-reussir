@@ -2435,7 +2435,9 @@ Each item says what differs and when.
   sign of a NaN an operation produces is unspecified, so a NaN computed by
   constant folding (`-(0.0 / 0.0)` in the source) can have the other sign
   than natively, visible only through such a cast (`Float.toBits`
-  canonicalizes NaN).
+  canonicalizes NaN). A cast between `Float32` and `UInt32` copies the bits
+  too; natively it crashes (a boxed `UInt32` is a tagged scalar, a boxed
+  `Float32` a cell).
 - *Pointer identity* (§9): a value converted to another representation
   answers its original's identity (a thunk or task through its recorded
   original, §5.14; a record, list or array through the runtime's origin

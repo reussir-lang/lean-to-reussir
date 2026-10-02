@@ -104,7 +104,7 @@ on it); 0013 to 0015 implement a missing feature.
 | 18 | bug (build system) | the `rrc` build target alone does not link | no, Reussir's build only | build the default target | none | - | - |
 | 19 | bug | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `Nat`/`Int` references in two cells; other `[value]` records boxed | none | - | - |
 | 20 | unclear | the MLIR inliner grows lean2rr's conversion code exponentially (build time) | yes, build time and memory (monad transformer towers did not build) | conversion, unboxing and uniform-code application functions marked `#[transform_anchor]` | none | - | - |
-| 21 | bug | an unterminated `[:` in a polymorphic FFI texture is dropped | yes, wrong output (a string literal containing `[:` printed without it) | none (patched) | 0016 | pending | not yet |
+| 21 | bug | an unterminated `[:` in a polymorphic FFI texture is dropped | yes, wrong output (a string literal containing `[:` printed without it) | `[` escaped (`\x5b`) in the string literal table | 0016 | pending | not yet |
 | 22 | cost | a wildcard arm over a wide enum costs N^3 code (copied per constructor, releases expanded in line in each copy) | yes, build time (a derived BEq on 40 constructors: 9 minutes) | held wide values released out of line in wildcard arms (`l2r_sink`) | none | - | - |
 
 Patch files (`git format-patch` output; they apply on ef922049 in the
@@ -1438,6 +1438,8 @@ it, changing the Rust code handed to rustc.
 
 ```
 #[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+#[ffi(import)]
 fn unterminated_len() -> u64 [{ b"a[:b".len() as u64 }];
 #[main]
 fn main() { say(unterminated_len()); }
@@ -1464,14 +1466,16 @@ past the `[:` and looks for `:]`. When the body ends first, it writes only
 live in one texture body (`l2r_str_lit`'s table, `LowerBase.strLitTable`),
 so any literal could be the one.
 
-**lean2rr.** It could escape `[` in that table (`\x5b`); not needed with
-the patch.
+**lean2rr.** It escapes `[` in that table (`\x5b`), so no literal can
+contain placeholder syntax, with or without the patch. The patch fixes the
+cause in Reussir (any other texture with such a `[:`).
 
 **Patch.** 0016: write the pending `[:` before the rest of the body, as the
 Rust implementation does. Test:
 `tests/integration/frontend/ffi_unterminated_placeholder_e2e` (exit 0
-with the patch, 1 without), the repro (FIXED), and lean2rr's runtime test
-`RtStrLitBracket`.
+with the patch, 1 without) and the repro (FIXED). lean2rr's runtime test
+`RtStrLitBracket` checks literals with `[:` (it passes with or without the
+patch, thanks to the escape).
 
 ## 22. A wildcard arm over a wide enum costs N^3 code
 
