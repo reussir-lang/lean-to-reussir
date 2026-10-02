@@ -1027,14 +1027,17 @@ every `ExceptT`/`Option`/`EStateM` bind (`| .error _ => r`), so each bind's
 success path would allocate its result and free the matched one. The
 optional pass `fresh-rebuild` returns the constructor rebuilt from the
 arm's fields instead, where nothing can tell the two apart and no copy is
-likely: in a program that never asks for an object's identity (no
-`ptrAddrUnsafe`, nothing that inlines to it such as `ptrEq`, no
-`ST.Ref.ptrEq`), when the matched value is the result of a call or a
-constructor application in the same function (a bind's result, normally
-unique: Reussir reuses its cell, and the rebuilt value is the same cell),
-and the arm binds every field and uses the value only by returning it.
-A parameter or a field (a node that a lookup returns) is still returned
-itself. MonadicInterp: 1.25x native without the pass, 1.10x with it.
+likely: in a program that never asks for an object's identity or sharing
+(no `ptrAddrUnsafe`, nothing that inlines to it such as `ptrEq`, no
+`ST.Ref.ptrEq`, no `dbgTraceIfShared`), when the matched value is freshly
+built (bound in the same function to a constructor application, or to a
+full call of a declaration all of whose results are freshly built, which
+an analysis of the whole program decides: a bind's result, normally
+unique, so Reussir reuses its cell and the rebuilt value is the same
+cell), and the arm binds every field and uses the value only by returning
+it. A parameter, a field, a constant, or the result of a lookup, an
+extern or a function value is still returned itself. MonadicInterp: 1.25x
+native without the pass, 1.08x with it.
 
 Two shapes help Reussir's token reuse, which gives a cell freed by a match
 to a later construction (the optional passes `nullary-scrutinee`,

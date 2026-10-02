@@ -124,15 +124,20 @@ pub fn free_vec<T: Clone>(p: usize) {
         unsafe { drop(std::mem::transmute::<usize, reussir_rt::rc::Rc<std::vec::Vec<T>>>(p)) };
         return;
     }
-    // Elements that the release only decrements (shared ones: the old
-    // version of an array that was copied for an update) are released
-    // here, from the last one; nothing observable happens. If all are,
-    // the box is freed without the stack; else the stack's work goes on
-    // from the first element whose release frees it.
-    let mut r = ManuallyDrop::new(unsafe { std::mem::transmute::<usize, reussir_rt::rc::Rc<std::vec::Vec<T>>>(p) });
-    if unsafe { T::release_shared_from_end(r.data_mut()) } {
-        unsafe { ManuallyDrop::drop(&mut r) };
-        return;
+    // Outside a free, `run` would release the elements now, from the last
+    // one: those whose release only decrements (shared ones: the old
+    // version of an array that was copied for an update) are released here
+    // first, which is the same. If all are, the box is freed without the
+    // stack; else the stack's work goes on from the first element whose
+    // release frees it. Inside a free the array is only pushed, and its
+    // elements are released when it is popped, after the work pushed before
+    // it (a later field of the record being freed may hold one of them).
+    if !active() {
+        let mut r = ManuallyDrop::new(unsafe { std::mem::transmute::<usize, reussir_rt::rc::Rc<std::vec::Vec<T>>>(p) });
+        if unsafe { T::release_shared_from_end(r.data_mut()) } {
+            unsafe { ManuallyDrop::drop(&mut r) };
+            return;
+        }
     }
     run(p, step_vec::<T>);
 }

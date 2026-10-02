@@ -108,8 +108,8 @@ structure LowerCtx where
   permutation (`PassConfig.fieldOrder`). Reussir keeps the given order (the
   driver turns its own member packing off). -/
   fieldOrder : Array Nat → Array Nat := fun aligns => (List.range aligns.size).toArray
-  /-- Whether the program can ask for an object's identity
-  (`ptrAddrUnsafe`, what inlines to it, `ST.Ref.ptrEq`;
+  /-- Whether the program can ask for an object's identity or sharing
+  (`ptrAddrUnsafe`, what inlines to it, `ST.Ref.ptrEq`, `dbgTraceIfShared`;
   `programObservesIdentity`): otherwise a value and an equal copy cannot be
   told apart. -/
   observesIdentity : Bool := true
@@ -164,6 +164,9 @@ inductive RefKind where
   deriving BEq, Inhabited
 
 structure LowerState where
+  /-- The state optional passes keep for the whole program (analyses they
+  compute once), by the pass's name (`LowerState.getExt?`). -/
+  ext : NameMap Dynamic := {}
   /-- Targets of function values, by id. -/
   fnTargets : Std.HashMap String FnTarget := {}
   /-- Variants of each function-value type (an `RR.Ty.fn`), besides `z` and `raw`. -/

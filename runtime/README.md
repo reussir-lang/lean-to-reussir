@@ -181,10 +181,12 @@ that check (`array::release_unrecorded`) in programs where no conversion
 produces an array (lean2rr's optimization `origin-free-reads`). For an
 array of Reussir records (`Bridge` elements), a shared element is
 decremented inline instead of through `<record>_ffi_release` (the
-compiler's glue, an out-of-line call; it decrements the same count), and
-an array none of whose elements is freed is freed without the stack
-(`ReleaseElems`): only an element whose last reference goes takes the
-glue and the stack, so the order of releases is unchanged.
+compiler's glue, an out-of-line call; it decrements the same count), and,
+outside a running free, an array none of whose elements is freed is freed
+without the stack (`ReleaseElems`): only an element whose last reference
+goes takes the glue and the stack, so the order of releases is unchanged.
+(Inside a free the array is pushed as before: a later field of the record
+being freed may hold one of its elements.)
 
 **Constants.** A constant's accessor tests its once-cell inline
 (`once::claim`'s fast path); the slow path, out of line, computes it or
