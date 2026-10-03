@@ -594,6 +594,22 @@ The original loop is dropped when nothing reachable calls it any more, and
 the fixpoint runs once more, so the values the split loop reads can type
 what they flow into.
 
+Lean sometimes runs the first iteration in a specialization of its own.
+When the same function is mapped at two sites (`rows.map (·.map
+Nat.toFloat)` twice), `spec_2` runs one iteration and passes the array, with
+one value written, at index 1 to the actual loop `spec_2.spec_2` (or to
+another specialization of the same map). `spec_2` has no self call, so the
+rule *parameters from callers* gives its parameter the callers' type
+`Array α`, although it stores `β` values. Its array parameter is then the
+only parameter of a precise array type that it reads with `uget`, provided
+the values it stores have another type `β`. It is split like the other
+loops, and its continuation with it (a call with the index plus one after
+the write). The `map` rule gives `spec_2` no result type, since it returns
+its array or its continuation's result. Its split instance returns
+`Array β`: it returns only `dst`, the result of a split instance, or a
+constructor around them. Without this, the loop ran on an array of `Box`es,
+converted on entry and exit (round 6 RV6L-02: 3.5x native memory).
+
 Each rule is exact. A value's type is taken only from its definition or from
 everything that flows into it, so the recovered type is the type the value
 has on every path. Where the program does not determine the type, the
