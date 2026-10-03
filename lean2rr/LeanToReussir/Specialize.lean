@@ -2,6 +2,7 @@ import Lean
 import LeanToReussir.Collect
 import LeanToReussir.Relevance
 import LeanToReussir.Retype
+import LeanToReussir.Mono
 
 /-!
 # Monomorphization (dry run)
@@ -122,7 +123,15 @@ def visitConstApp (ctx : SpecCtx) (f : Name) (args : Array (Arg .pure)) : SpecM 
         if ctx.hasFree e' then
           modify fun s => { s with nonGround := s.nonGround.push s!"{ctx.inst.describe}: type argument of {f} : {e'}" }
           return none
-        typeArgs := typeArgs.push e'
+        -- Mono's bounds (`normTypeArg`): polymorphic recursion at a growing
+        -- type (`α` → `α × α`) would otherwise make ever larger instances,
+        -- each twice the size of the last.
+        let cap := ({} : MonoConfig).maxTypeArgSize
+        if e'.approxDepth.toNat > cap || treeSizeUpTo e' (4 * cap) ≥ 4 * cap then
+          modify fun s => { s with anySites := s.anySites.push s!"{ctx.inst.describe}: type argument of {f} too large, lcAny" }
+          typeArgs := typeArgs.push anyExpr
+        else
+          typeArgs := typeArgs.push e'
       | some _ => typeArgs := typeArgs.push erasedExpr
       | none =>
         modify fun s => { s with nonGround := s.nonGround.push s!"{ctx.inst.describe}: partial application of {f} leaves type parameter {p.binderName} open" }
