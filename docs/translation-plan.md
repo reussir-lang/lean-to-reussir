@@ -757,8 +757,8 @@ at all:
 fn lean_nat_add(a : Nat, b : Nat) -> Nat {
     let x = l2r_nat_raw(a);                 // 2m+1, or a big number's pointer
     let y = l2r_nat_raw(b);
-    if (x & y & 1) == 1 {                   // both small
-        let s = x + (y - 1);                // 2(m+n)+1
+    let s = x + (y - 1);                    // 2(m+n)+1 when both are small
+    if (s & x & 1) == 1 {                   // both small (s odd: same parity)
         if s >= x { l2r_nat_of_raw(s) } else { l2r_nat_add_raw(x, y) }   // no carry: small
     } else { l2r_nat_add_raw(x, y) }        // leanrt::nat, GMP; consumes both words
 }

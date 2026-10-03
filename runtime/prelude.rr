@@ -283,11 +283,17 @@ fn l2r_u64_pow_checked(x : u64, e : u64) -> u64 [{ x.checked_pow(e as u32).unwra
 
 // Words of two small values `2m+1`, `2n+1`: their sum minus one is
 // `2(m+n)+1`, small exactly when it does not carry out of the word.
+// Both words are odd exactly when `s` and `x` are (`s` is odd when `x` and
+// `y` have the same parity). The test is not `x & y & 1`: LLVM then shares
+// `y & 1` with the low-bit test of Reussir's `rc.inc` of `y` (a field just
+// read from a cell, patch 0050's guard) and keeps it in a callee-saved
+// register across the calls in between, which grew cfold's recursive
+// `constFolding` frame from 80 to 96 bytes (+7.4% peak memory).
 fn lean_nat_add(a : Nat, b : Nat) -> Nat {
     let x = l2r_nat_raw(a);
     let y = l2r_nat_raw(b);
-    if (x & y & 1) == 1 {
-        let s = x + (y - 1);
+    let s = x + (y - 1);
+    if (s & x & 1) == 1 {
         if s >= x { l2r_nat_of_raw(s) } else { l2r_nat_add_raw(x, y) }
     } else { l2r_nat_add_raw(x, y) }
 }
@@ -311,11 +317,13 @@ fn lean_nat_pred(a : Nat) -> Nat {
 }
 
 // Both factors below 2^31: the product is below 2^62. Otherwise the high
-// word of the product decides (`umulh`), as natively.
+// word of the product decides (`umulh`), as natively. Both small: the
+// parity test of `lean_nat_add` (not `x & y & 1`, see there).
 fn lean_nat_mul(a : Nat, b : Nat) -> Nat {
     let x = l2r_nat_raw(a);
     let y = l2r_nat_raw(b);
-    if (x & y & 1) == 1 {
+    let s = x + (y - 1);
+    if (s & x & 1) == 1 {
         let m = x >> 1;
         let n = y >> 1;
         let p = m * n;
