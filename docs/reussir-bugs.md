@@ -106,6 +106,7 @@ on it); 0013 to 0015 implement a missing feature.
 | 20 | unclear | the MLIR inliner grows lean2rr's conversion code exponentially (build time) | yes, build time and memory (monad transformer towers did not build) | conversion, unboxing and uniform-code application functions marked `#[transform_anchor]` | none | - | - |
 | 21 | bug | an unterminated `[:` in a polymorphic FFI texture is dropped | yes, wrong output (a string literal containing `[:` printed without it) | `[` escaped (`\x5b`) in the string literal table | 0016 | pending | not yet |
 | 22 | cost | a wildcard arm over a wide enum costs N^3 code (copied per constructor, releases expanded in line in each copy) | yes, build time (a derived BEq on 40 constructors: 9 minutes) | held wide values released out of line in wildcard arms (`l2r_sink`) | none | - | - |
+| 23 | bug (build time) | the compiled polymorphic-FFI modules are linked one call each, quadratic in their number (build time) | yes, build time (a Std.Http program with 8241 instances: 65 minutes of linking) | none | 0017 | pending | not yet |
 
 Patch files (`git format-patch` output; they apply on ef922049 in the
 order 0006, 0004, 0002, 0007, 0009, 0005, 0013, 0012, 0014, 0015, 0016; 0009
@@ -738,6 +739,15 @@ transformer towers in one program (`Cn3PolyM1`, 2140 functions) build in
 936 s and 7.5 GB and give the right output. A single growing `StateT` tower
 used at `IO` (8 lines of Lean) does not build within 30 minutes or 12-15
 GB; the same tower at `Id` builds in 60 s.
+
+A Std.Http program (round 6, `adv6/io/Io6Http.lean`, a local HTTP server
+and TCP clients; lean2rr's output has 17,197 functions and 8241
+polymorphic-FFI instances), built with patch 0017 (bug 23), reaches the
+MLIR lowering pipeline after 12 minutes of texture compiles and a 6 s
+link. perf sampled 31 minutes into the pipeline: all of the time in
+interprocedural SCCP (`DeadCodeAnalysis::visitCallableTerminator`, the
+data-flow solver's state lookups), 7 GB. It was stopped 51 minutes into
+the pipeline, unfinished.
 
 **Cause.** `mlir::createSCCPPass` runs on the whole module twice
 (`crates/reussir-backend/src/pipeline.rs`, through `reussirCreateSCCPPass`
@@ -1518,3 +1528,96 @@ a required part in the registry): BEq N = 40 27 s, DecidableEq N = 30 21 s.
 one region for the constructors a wildcard covers; no releases on paths
 that end in a panic; outlining the release of a wide enum in the first
 expansion phase).
+
+## 23. Linking the compiled polymorphic-FFI modules is quadratic in their number
+
+**Status.** Patched locally (0017).
+
+**Verdict: bug (build time).** rrc links the bitcode of the compiled
+textures one module at a time with the static `llvm::Linker::linkModules`,
+which builds a new linker for every call. LLVM's linker is meant to be
+reused across a sequence of modules: `llvm-link` and LTO link all their
+inputs through one, and `llvm/Linker/IRMover.h` documents the mover's
+metadata map as "a Metadata map to use for all calls to move()". Nothing
+in Reussir needs a fresh linker per module, and its own goals ask for an
+implementation that scales ("Efficient implementation, enabling the
+compiler to tackle complex problems", AGENTS.md).
+
+**Repro.** `bug23-polyffi-link.py K OUT.rr [heavy|light]` writes K shared
+records `S0`..`S(K-1)` and one import, `id<T>`, called once at each, so rrc
+compiles K textures (one rustc process each) and links K modules. With
+`heavy` (the default) the import puts its argument through a `HashMap`, so
+every instance carries its own copy of the hash map code (about 48 KB of
+bitcode, like lean2rr's `l2r_origin_note` instances). The program prints
+K*(K-1)/2.
+
+In Lean (round-6 IO testing, `adv6/io/Io6Http.lean`): a local
+`Std.Http.Server` on 127.0.0.1 and raw TCP clients (GET, POST, chunked
+body, pipelining, a bad request, 404). lean2rr's output has 17,197
+functions and 8241 polymorphic-FFI instances.
+
+**Command.** `rrc OUT.rr -O aggressive` (with `-v` for the phase times).
+
+**Expected.** Time linear in K. The texture compiles are linear (about
+0.1 s per heavy instance on the loaded test machine); the link of the K
+modules that follows should be too.
+
+**Actual on ef922049** (measured on `l2r-local` + 0016, whose patches do not
+touch this code; link = from the exit of the last texture's rustc to the
+start of the MLIR lowering pipeline, timed with a rustc wrapper and
+`rrc -v`):
+
+| K (heavy) | link | with 0017 | whole build | with 0017 |
+|---|---|---|---|---|
+| 300 | 4.0 s | 0.3 s | | |
+| 600 | 22.8 s | 0.5 s | | |
+| 1000 | 56 s | 0.9 s | 260 s | 162 s |
+| 2000 | 339 s | 1.9 s | 706 s | 341 s |
+
+`Io6Http`: rrc's polymorphic-FFI phase took 4669 s, 788 s of texture
+compiles and **3881 s of linking** (6.4 s with 0017). perf over the link:
+97% of the time in `llvm::IRMover::IRMover`, called from
+`Linker::linkModules` (73% building its metadata map, 16% in
+`TypeFinder::run`); the moving of code itself, about 1%. A stand-alone
+program linking `Io6Http`'s modules (parsing excluded): the first 3500, one
+call each, 69-82 s; through one linker 1.0-1.7 s; all 8236 through one
+linker 3.0 s (`llvm-link`, which uses one linker, 10.4 s for all of them
+with parsing and writing).
+
+**Cause.** `gatherCompiledModules` (`lib/IR/ReussirOps.cpp`) makes the
+first compiled module the destination and links every other one into it
+with `llvm::Linker::linkModules(*finalModule, std::move(parsedModule))`.
+That function constructs a `Linker`, so an `IRMover`, whose constructor
+runs `TypeFinder::run` over the whole destination (every global, function,
+instruction, operand and attached metadata node) and enters each metadata
+node it visited into its map. The destination grows with each module, so
+the k-th call costs the size of the k-1 modules linked before it: O(K^2)
+in all.
+
+lean2rr has many instances because each polymorphic prelude import used
+at a new type is one texture. In `Io6Http`: `l2r_origin_take` 2657,
+`l2r_origin_note` 2656, `l2r_origin_back` 262 (conversion origins),
+`l2r_once_get`/`l2r_once_set` 476 each, `l2r_lcell_*` 110 each,
+`l2r_task_*` 67-109 each, `l2r_retype` 37, others below 30. The origin
+calls' textures each carry their own copy of `leanrt::origin`'s table code
+(`note` 48 KB, `take` and `back` 18 KB): 91% of the 197 MB of texture
+bitcode.
+
+**lean2rr.** No workaround. Fewer instances shrink both the linear compile
+and the quadratic link; the conversion-origin calls are two thirds of them.
+With 0017, `Io6Http` goes on to MLIR's interprocedural SCCP (bug 11). The
+texture compiles stay one rustc process per instance, one after another
+(45-100 ms each, about 12 minutes for `Io6Http`): Reussir's documented
+design (`docs/design/polymorphic-ffi.md`), a cost, not part of this bug.
+
+**Patch.** 0017: one `llvm::Linker` for the whole gather, `linkInModule`
+for each module, as `llvm-link` does. The linked module is the same:
+identical IR (`llvm-dis`) for the first 2000 and the first 3500 of
+`Io6Http`'s modules linked both ways; identical code for a smaller Std.Http
+program (`Io6H1`, 281 instances; objects equal up to the texture crate
+names, which differ between any two builds) and for generated programs
+(light, up to K = 2000: byte-identical objects). Tests: Reussir's 26
+polymorphic-FFI lit tests (run with a hand-written lit site config), the
+cargo tests of `reussir-backend` (with the ignored `polyffi_link`) and
+`reussir-compiler`'s driver tests, 37 lean2rr runtime tests (the
+conversion, task and thunk ones included), and the repro (FIXED).

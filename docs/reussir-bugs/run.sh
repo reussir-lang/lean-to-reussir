@@ -22,13 +22,14 @@
 # (`lake build` in lean2rr/, or L2R_LEAN2RR). l2r.py builds the runtime crate
 # leanrt for the checkout once, under runtime/leanrt/target/.
 #
-# Bugs 10, 11, 16, 17 and 20 are build-time bugs: the repros of 10, 11, 16
-# and 17 are generated at two sizes and the line reports the growth; bug
-# 20's is built with and without lean2rr's workaround. They take one to
-# three minutes each, and bugs 16 and 20 need 1.2 to 3 GB; bug 6 runs for
-# about 15 s. Everything else takes seconds (a first .lean build also builds
-# leanrt). lean2rr works around 16, 17 and 20; the repros turn its
-# workarounds off (L2R_NO_OUTLINE, L2R_NO_INLINE_ANCHORS).
+# Bugs 10, 11, 16, 17, 20 and 23 are build-time bugs: the repros of 10, 11,
+# 16, 17 and 23 are generated at two sizes and the line reports the growth
+# (for 23, of the link phase alone, timed through a rustc wrapper and
+# rrc -v); bug 20's is built with and without lean2rr's workaround. They
+# take one to three minutes each, and bugs 16 and 20 need 1.2 to 3 GB; bug
+# 6 runs for about 15 s. Everything else takes seconds (a first .lean build
+# also builds leanrt). lean2rr works around 16, 17 and 20; the repros turn
+# its workarounds off (L2R_NO_OUTLINE, L2R_NO_INLINE_ANCHORS).
 #
 # Environment:
 #   WORK    scratch directory (default: a new one under /tmp); rrc writes
@@ -37,7 +38,7 @@
 #   RUSTC   the rustc that built Reussir's runtime (default: the toolchain
 #           named in RRC_CHECKOUT/rust-toolchain.toml, else the one l2r.py
 #           uses)
-#   QUICK=1 skip the slow repros (6, 10, 11, 16, 17, 20)
+#   QUICK=1 skip the slow repros (6, 10, 11, 16, 17, 20, 23)
 set -u
 
 usage() { sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//; /^set -u/d'; exit 2; }
@@ -357,8 +358,45 @@ bug20() {
 
 bug21() { plain_value 21 bug21-unterminated-placeholder 4 2 -O aggressive; }
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21"
-SLOW=" 06 10 11 16 17 20 "
+bug23() {
+    # K and 2K instances of one polymorphic FFI import. The texture compiles
+    # (one rustc each) are linear and come first; the link phase is timed
+    # alone: from the exit of the last texture rustc (a wrapper logs each
+    # exit) to rrc -v's "running the MLIR lowering pipeline". Twice the
+    # instances: 4x the link time when quadratic, 2x when linear.
+    local k tm tl t secs=() w=$WORK/out/23-rustc
+    printf '#!/bin/sh\n"%s" "$@"\nr=$?\ndate +%%s.%%N >> "$RUSTC_LOG"\nexit $r\n' "$RUSTC" > "$w"
+    chmod +x "$w"
+    for k in 300 600; do
+        python3 "$HERE/bug23-polyffi-link.py" $k "$WORK/out/23-$k.rr"
+        rm -f "$WORK/out/23-$k.rustc"
+        { (cd "$WORK/run" && RUSTC_LOG=$WORK/out/23-$k.rustc "$RRC" "$WORK/out/23-$k.rr" \
+            -o "$WORK/out/23-$k" --emit executable -O aggressive -v --polyffi-rust-path "$w" \
+            --polyffi-libdir "$RT" --polyffi-libdir "$RT/deps" --polyffi-libdir "$TL") \
+            > "$WORK/out/23-$k.log" 2>&1; } 2> /dev/null
+        RC=$?
+        if [ $RC != 0 ]; then say_line OTHER 23 "K = $k: $(build_fail 23-$k)" "-O aggressive"; return; fi
+        exe 23-$k
+        if [ "$OUT_TXT" != $((k * (k - 1) / 2)) ]; then
+            say_line OTHER 23 "K = $k: prints '$OUT_TXT' ($(signame $EXIT)), expected $((k * (k - 1) / 2))" "-O aggressive"; return
+        fi
+        t=$(grep -m1 -o '^[0-9T:.-]*Z.*running the MLIR lowering pipeline' "$WORK/out/23-$k.log" | cut -d' ' -f1)
+        tm=$(date -d "$t" +%s.%N 2> /dev/null)
+        # (the executable's link step runs the wrapper once more, later)
+        tl=$(awk -v t="$tm" '$1 <= t' "$WORK/out/23-$k.rustc" 2> /dev/null | sort -n | tail -1)
+        if [ -z "$tm" ] || [ -z "$tl" ]; then say_line OTHER 23 "K = $k: no phase timestamps (see $WORK/out/23-$k.log)" "-O aggressive"; return; fi
+        secs+=("$(printf '%.1f' "$(echo "$tm - $tl" | bc)")")
+    done
+    local l1=${secs[0]} l2=${secs[1]} r=0 msg
+    ge "$l1" 0.1 && r=$(ratio "$l2" "$l1")
+    msg="link of the gathered modules: K = 300: ${l1} s, K = 600: ${l2} s (${r}x for twice the instances)"
+    if ge "$r" 3 && ge "$l2" 2; then say_line REPRODUCES 23 "$msg" "-O aggressive"
+    elif le "$r" 2.6 || le "$l2" 1; then say_line FIXED 23 "$msg" "-O aggressive"
+    else say_line OTHER 23 "$msg" "-O aggressive"; fi
+}
+
+ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23"
+SLOW=" 06 10 11 16 17 20 23 "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do
     b=$(printf '%02d' "$((10#${b%%[ab]}))")
