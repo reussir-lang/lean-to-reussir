@@ -351,7 +351,7 @@ with examples, is §10 of the translation plan.
   natively.
 - **Stubs:** `IO.getNumHeartbeats` is 0, `isExclusiveUnsafe` answers
   `false`, `shareCommon` shares nothing (and `ShareCommon.Object.eq` holds
-  only for the same object), a panic's backtrace line says the trace is
+  at most for the same object, by address), a panic's backtrace line says the trace is
   unavailable; the Windows-only time zone functions fail as they do
   natively on other systems.
 - **`import Lean` programs** (metaprogramming: the elaborator, the kernel,

@@ -2715,8 +2715,10 @@ Each item says what differs and when.
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`;
   `dbgTraceIfShared` reads lean2rr's own counts (a converted value is a
   new, unshared object, §5.1); `shareCommon` shares nothing, and
-  `ShareCommon.Object.eq` holds only for the same object (natively also
-  for two objects with the same fields; `L2RShim`).
+  `ShareCommon.Object.eq` compares addresses (§9: at most the same cell;
+  natively also two objects with the same fields; `L2RShim`), so an
+  object converted at each call (a value cast to `ShareCommon.Object`) is
+  not even equal to itself, and its hash can change.
 - `IO.getNumHeartbeats` is 0; `dbgStackTrace` prints nothing; a panic's
   backtrace line is `(stack trace unavailable)`.
 - `errno` after a sticky handle error can differ.
