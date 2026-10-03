@@ -823,9 +823,17 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   `inductive Tree | node (v : Nat) (cs : Array Tree)` holds `RVec<Tree>`,
   the representation `Array Tree` has everywhere else (also through mutual
   types, whichever is translated first).
-- **Polymorphic recursion in a type.** An `unsafe inductive` may use itself
-  at a larger argument: `Nest α | nil | cons (x : α) (rest : Nest (α × α))`.
-  Translating `Nest Nat` would need `Nest (Nat × Nat)`, whose field needs
+- **Polymorphic recursion in a type.** Since Lean 4.34 an inductive can use
+  itself at a larger argument only as an *index*: `unsafe inductive Nest :
+  Type → Type 1 | nil {α} : Nest α | cons {α} (x : α) (rest : Nest (α × α)) :
+  Nest α`. Lean's mono phase erases indices, and nominal types are keyed on
+  parameters only, so all its instances are one type whose `x` is a `Box`:
+  nothing to cut (test `RtNestGrowType`). Lean 4.33 also accepted a growing
+  *parameter* in an `unsafe inductive`, `Nest α | nil | cons (x : α) (rest :
+  Nest (α × α))`; Lean 4.34's kernel rejects that (lean4#14582), so the rule
+  below no longer applies to any program lean2rr can load, and stays as a
+  defensive check. For such a parameter, translating `Nest Nat` would need
+  `Nest (Nat × Nat)`, whose field needs
   `Nest ((Nat × Nat) × (Nat × Nat))`, and so on without end. So the rule of
   §2.6 applies to the instantiations requested while fields are translated,
   for an inductive whose block uses its types at other arguments than its

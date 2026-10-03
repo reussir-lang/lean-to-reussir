@@ -574,9 +574,17 @@ partial def usesOtherArgs (all : List Name) (ps : Array Expr) (e : Expr) : Bool 
 /-- Whether the mutual block of inductive `ival` uses one of its types at
 other arguments than the block's parameters in a constructor field
 (`unsafe inductive Nest α | cons (x : α) (rest : Nest (α × α))`, also nested
-in another type, `List (Rose (Option α))`, or a function type). Lean accepts
-this only for `unsafe` inductives: a safe inductive always uses its
-parameters as they are. -/
+in another type, `List (Rose (Option α))`, or a function type). Lean 4.33
+accepted this for `unsafe` inductives; since Lean 4.34 the kernel rejects it
+for every inductive (lean4#14582), so for the programs lean2rr can load
+(compiled by its own toolchain) this is always `false`. It stays as a cheap
+defensive check: one walk of the constructor types per inductive, cached,
+and only for an inductive requested while the fields of the same one are
+lowered (`typeGrowsOnPath`). What 4.34 accepts instead, a growing *index*
+(`unsafe inductive Nest : Type → Type 1 | cons {α} (x : α) (rest : Nest (α
+× α)) : Nest α`), needs no cut: the keys of nominal types hold parameters
+only (`nominalKey`), so all its instances are one type (test
+`RtNestGrowType`). -/
 def nonUniformInductive (ival : InductiveVal) : LowerM Bool := do
   if let some b := (← get).nonUniformInds.find? ival.name then return b
   let ps := (List.range ival.numParams).toArray.map fun i => Expr.fvar ⟨.num `_l2r_param i⟩
@@ -726,8 +734,9 @@ mutual
   /-- The generated nominal type for an instantiated inductive. -/
   partial def nominalType (ival : InductiveVal) (args : Array Expr) : LowerM RR.Ty := do
     -- A field type that grows (polymorphic recursion in a type, `Nest (α × α)`
-    -- in `Nest α`) is the uniform instantiation (`nominalArgs`); values of the
-    -- typed instantiations convert to it where they meet (§5.1).
+    -- in `Nest α`, which only Lean 4.33 accepted) is the uniform
+    -- instantiation (`nominalArgs`); values of the typed instantiations
+    -- convert to it where they meet (§5.1).
     let (args, key) ← nominalArgs ival args
     if let some n := (← get).typeNames[key]? then return .named n
     let name ← fresh s!"T_{nameHint ival.name}_"

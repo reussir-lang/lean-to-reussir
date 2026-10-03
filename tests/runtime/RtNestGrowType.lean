@@ -1,20 +1,52 @@
-/-! Runtime test: inductives whose recursive fields use the type at a larger
-argument (nested datatypes with a non-uniform parameter, accepted by
-`unsafe inductive`). Translating `Nest Nat` would need `Nest (Nat × Nat)`,
-`Nest ((Nat × Nat) × (Nat × Nat))`, … without end: a field type that grows
-is the uniform instantiation (`Nest Box`), and typed values convert to it
-where they meet (plan §5.1, "Recursion").
+/-! Runtime test: nested datatypes whose recursive fields use the type at a
+larger argument: `Nest α` holding `Nest (α × α)`, … Since Lean 4.34 the
+kernel rejects such an argument as a *parameter*, even in an `unsafe
+inductive` ("invalid occurrence of datatype 'Nest' being declared: it must
+be applied to the parameters and universe levels of the mutual
+declaration", lean4#14582), so the growing argument is an *index* here:
+`Nest : Type → Type 1`, its element type a constructor argument (hence
+`Type 1`). Lean's mono phase erases the index: every instance is the one
+nominal type `Nest`, whose element fields are `Box`es (plan §5.1,
+"Polymorphic recursion in a type").
 - `Nest`: growth by a pair, values built and read by polymorphically
-  recursive code, a typed `Nest (Nat × Nat)` built directly.
+  recursive code, a `Nest (Nat × String)` built directly.
 - `Perfect`: perfect trees, growth in the only recursive constructor.
 - `G`: growth inside a function type (`Nat → G (List α)`).
-- `M`: growth through a mutual partner (`A α` holds `B (α × α)`, `B β`
+- `A`/`B`: growth through a mutual partner (`A α` holds `B (α × α)`, `B β`
   holds `A (List β)`).
-- `Rose`: growth through another inductive (`List (Rose (Option α))`). -/
 
-unsafe inductive Nest (α : Type) where
-  | nil
-  | cons (x : α) (rest : Nest (α × α))
+Until Lean 4.33 this test declared them with a parameter, the shapes
+lean2rr's guard against unbounded instantiation of field types was written
+for (`LowerBase.nonUniformInductive`; round 6 TY6-01):
+
+    unsafe inductive Nest (α : Type) where
+      | nil
+      | cons (x : α) (rest : Nest (α × α))
+    unsafe inductive Perfect (α : Type) where
+      | leaf (x : α)
+      | succ (t : Perfect (α × α))
+    unsafe inductive G (α : Type) where
+      | stop (x : α)
+      | next (f : Nat → G (List α))
+    mutual
+      unsafe inductive A (α : Type) where
+        | done (x : α)
+        | more (x : α) (b : B (α × α))
+      unsafe inductive B (α : Type) where
+        | done
+        | more (y : α) (a : A (List α))
+    end
+    unsafe inductive Rose (α : Type) where
+      | node (x : α) (kids : List (Rose (Option α)))
+
+Lean 4.34's kernel rejects all of them. `Rose` (growth through another
+inductive) has no indexed form either: a nested occurrence's arguments may
+not mention the constructor's variables ("nested inductive datatypes
+parameters cannot contain local variables"), so it is gone from the test. -/
+
+unsafe inductive Nest : Type → Type 1 where
+  | nil {α : Type} : Nest α
+  | cons {α : Type} (x : α) (rest : Nest (α × α)) : Nest α
 
 unsafe def Nest.size {α : Type} : Nest α → Nat
   | .nil => 0
@@ -36,9 +68,9 @@ unsafe def Nest.len {α : Type} : Nest α → Nat
   | .nil => 0
   | .cons _ r => 1 + r.len
 
-unsafe inductive Perfect (α : Type) where
-  | leaf (x : α)
-  | succ (t : Perfect (α × α))
+unsafe inductive Perfect : Type → Type 1 where
+  | leaf {α : Type} (x : α) : Perfect α
+  | succ {α : Type} (t : Perfect (α × α)) : Perfect α
 
 unsafe def Perfect.make {α : Type} : Nat → α → Perfect α
   | 0, x => .leaf x
@@ -48,9 +80,9 @@ unsafe def Perfect.sumWith {α : Type} (f : α → Nat) : Perfect α → Nat
   | .leaf x => f x
   | .succ t => t.sumWith (fun p => f p.1 + f p.2)
 
-unsafe inductive G (α : Type) where
-  | stop (x : α)
-  | next (f : Nat → G (List α))
+unsafe inductive G : Type → Type 1 where
+  | stop {α : Type} (x : α) : G α
+  | next {α : Type} (f : Nat → G (List α)) : G α
 
 unsafe def G.depth {α : Type} : G α → Nat
   | .stop _ => 0
@@ -61,12 +93,12 @@ unsafe def G.deep {α : Type} : Nat → α → G α
   | n + 1, x => .next fun k => G.deep n (List.replicate (k + 1) x)
 
 mutual
-  unsafe inductive A (α : Type) where
-    | done (x : α)
-    | more (x : α) (b : B (α × α))
-  unsafe inductive B (α : Type) where
-    | done
-    | more (y : α) (a : A (List α))
+  unsafe inductive A : Type → Type 1 where
+    | done {α : Type} (x : α) : A α
+    | more {α : Type} (x : α) (b : B (α × α)) : A α
+  unsafe inductive B : Type → Type 1 where
+    | done {α : Type} : B α
+    | more {α : Type} (y : α) (a : A (List α)) : B α
 end
 
 mutual
@@ -77,16 +109,6 @@ mutual
     | .done => 0
     | .more _ a => 1 + a.count
 end
-
-unsafe inductive Rose (α : Type) where
-  | node (x : α) (kids : List (Rose (Option α)))
-
-unsafe def Rose.count {α : Type} : Rose α → Nat
-  | .node _ ks => 1 + (ks.map Rose.count).foldl (· + ·) 0
-
-unsafe def Rose.mk {α : Type} : Nat → α → Rose α
-  | 0, x => .node x []
-  | n + 1, x => .node x [Rose.mk n (some x), Rose.mk n none]
 
 unsafe def main (args : List String) : IO Unit := do
   let k := args.length
@@ -103,4 +125,3 @@ unsafe def main (args : List String) : IO Unit := do
   IO.println s!"g {(G.next (fun n => G.stop [n, n]) : G Nat).depth} {(G.deep (k + 6) "s").depth}"
   let a : A Nat := .more 1 (.more (2, 3) (.more [(4, 5)] .done))
   IO.println s!"mutual {a.count}"
-  IO.println s!"rose {(Rose.mk (k + 6) (1 : Nat)).count}"

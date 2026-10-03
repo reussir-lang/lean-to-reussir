@@ -171,8 +171,8 @@ functions are direct calls; tail calls become loops.
 
 Monomorphization makes almost everything concrete. What stays generic
 (polymorphic recursion such as a monad transformer applied to itself, or
-an unsafe inductive holding itself at a larger type, `Nest (α × α)` in
-`Nest α`; existential types; values stored in `Dynamic`) uses a uniform
+an unsafe inductive family holding itself at a larger index, `Nest (α × α)`
+in `Nest α`; existential types; values stored in `Dynamic`) uses a uniform
 type `Box`: an enum with one variant per concrete type the program ever
 boxes.
 Converting between a concrete and the uniform representation is generated
