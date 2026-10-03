@@ -40,13 +40,16 @@ done
 # Lean's library reached through a symbolic link, through hard links, and
 # through hard links with one module replaced by a different file of the
 # same size.
+# (Hard links need the build directory on the toolchain's file system.)
 ln -s "$LIB" "$W/symlink"
-cp -al "$LIB" "$W/hardlinks"
-cp -al "$LIB" "$W/altered"
-f=Init/Data/Repr.olean
-rm "$W/altered/$f"
-python3 -c 'import sys; b = bytearray(open(sys.argv[1], "rb").read()); b[-1] ^= 1; open(sys.argv[2], "wb").write(b)' \
-  "$LIB/$f" "$W/altered/$f"
+links=yes
+cp -al "$LIB" "$W/hardlinks" 2> /dev/null && cp -al "$LIB" "$W/altered" 2> /dev/null || links=no
+if [ $links = yes ]; then
+  f=Init/Data/Repr.olean
+  rm "$W/altered/$f"
+  python3 -c 'import sys; b = bytearray(open(sys.argv[1], "rb").read()); b[-1] ^= 1; open(sys.argv[2], "wb").write(b)' \
+    "$LIB/$f" "$W/altered/$f"
+fi
 # A working directory whose lean-toolchain names another Lean.
 mkdir -p "$W/othertc" && echo "leanprover/lean4:v4.34.0" > "$W/othertc/lean-toolchain"
 
@@ -69,8 +72,12 @@ check lean-named-module  reject "module Lean.L2rFoo .* is named like a module of
 check shim-named-dir     reject "holds program modules named L2RShim" "$W/shimdir" "$W/shimdir" MShimDir
 check shim-named-module  reject "holds program modules named L2RShim" "$W/shimfile" "$W/shimfile" MShimFile
 check lib-symlink        accept "" "$S" "$W/symlink:$S" Plain
-check lib-hardlinks      accept "" "$S" "$W/hardlinks:$S" Plain
-check lib-altered        reject "module Init.Data.Repr .* but is not its file" "$S" "$W/altered:$S" Plain
+if [ $links = yes ]; then
+  check lib-hardlinks    accept "" "$S" "$W/hardlinks:$S" Plain
+  check lib-altered      reject "module Init.Data.Repr .* but is not its file" "$S" "$W/altered:$S" Plain
+else
+  echo "SKIP  lib-hardlinks, lib-altered (no hard links to $LIB from $W)"
+fi
 check other-toolchain    accept "" "$W/othertc" "$LIB:$S" Plain
 check other-toolchain-nolib accept "" "$W/othertc" "$S" Plain
 echo "passed $pass, failed $fail"
