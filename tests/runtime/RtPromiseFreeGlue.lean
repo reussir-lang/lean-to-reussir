@@ -1,11 +1,9 @@
-/-! Runtime test: as `RtPromiseFreeSync`, with the promises freed by
-Reussir's record glue (a structure in an `Option` held by an `IO.Ref`, the
-cells of a `List` after the first, a list of structures): their `sync`
-dependents run before the next statement, as natively. lean2rr's runtime
-sees the end of such a free only through Reussir's
-`__reussir_drop_drained` (local Reussir patch 0040): without it the
-dependents run at the next output, block or question about a task
-(`RtPromiseFreeGlue.xfail`). -/
+/-! Runtime test: as `RtPromiseFreeSync`, with the promises in records
+(a structure in an `Option`, the cells of a `List` after the first, a
+list of structures) held by an `IO.Ref` that is overwritten: their
+`sync` dependents run before the next statement, as natively. The old
+value is freed by the runtime (`leanrt::drop::release`), which sees that
+free end, with or without Reussir's patch 0040. -/
 
 structure Pending where
   id : Nat

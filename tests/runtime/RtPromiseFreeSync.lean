@@ -6,7 +6,7 @@ free: promises in an array, an `Option` and a `HashMap` held by an `IO.Ref`
 that is set to an empty value. A dependent that reads the reference sees
 its new value (the old one is released after the store, as natively), and
 dependents that print inside `IO.FS.withIsolatedStreams` are captured.
-Promises freed by Reussir's record glue: `RtPromiseFreeGlue`. -/
+Promises held by records in a reference: `RtPromiseFreeGlue`. -/
 
 def watch (flag : IO.Ref Nat) (p : IO.Promise Unit) : BaseIO Unit := do
   let _ ← BaseIO.mapTask (sync := true) (t := p.result?) fun r =>
