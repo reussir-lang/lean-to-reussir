@@ -382,11 +382,13 @@ pub fn process_due(now: Instant) {
 /// The scheduler has nothing else to do: wait (at most `timeout`; without
 /// one, until something happens) for the timers, sockets and signals the
 /// event loop watches, and handle what happens. False if it watches
-/// nothing (nothing can happen here).
+/// nothing (nothing can happen here). Completions waiting to be delivered
+/// make the event loop's context able to run, and then nothing is waited
+/// for; while that context waits for something else (inside a `sync`
+/// continuation), they wait for it, and this waits as usual.
 pub fn wait(timeout: Option<Duration>) -> bool {
     let r = reactor();
-    if !r.fired.is_empty() {
-        sched::wake_evloop();
+    if !r.fired.is_empty() && sched::wake_evloop() {
         return true;
     }
     if r.timers.is_empty() && r.sockets.is_empty() && r.signals.is_empty() {

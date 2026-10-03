@@ -614,14 +614,18 @@ fn start_worker(e: u32) {
 }
 
 /// Mark the event loop's context (`net`) able to run: it has events to
-/// deliver.
-pub fn wake_evloop() {
+/// deliver. Not while it waits for something else (blocked inside a `sync`
+/// continuation, natively a libuv callback that blocks): it delivers them
+/// when it is back. Whether it was woken.
+pub fn wake_evloop() -> bool {
     let s = sched();
     if let Some(e) = s.evloop {
         if s.ctxs[e as usize].wait == Wait::Io {
             wake(e);
+            return true;
         }
     }
+    false
 }
 
 /// Start the event loop's context, once (`net` calls this when it starts
