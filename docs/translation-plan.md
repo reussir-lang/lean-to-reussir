@@ -1,6 +1,6 @@
 # lean2rr translation plan
 
-How a Lean 4.33 program becomes a Reussir program: what each stage receives,
+How a Lean 4.34 program becomes a Reussir program: what each stage receives,
 what it does, and what it hands on. The goal is that every rule here is
 *right*: the translated program behaves like the Lean program. Each rule
 states what it does and why it is correct in plain terms. Reviewers check
@@ -21,7 +21,7 @@ example. Where behaviour differs from native Lean, §10 lists it.
 
 ```
 Lean source
-  │  lake build (stock Lean 4.33)
+  │  lake build (stock Lean 4.34)
   ▼
 base LCNF, typed, saved in every .olean ── Stage 1: collect + monomorphize (ours)
   ▼
@@ -911,7 +911,7 @@ its value is stored as `Box`.
   only by its declared type: a program declaration implemented by an
   `unsafe` function, even one of the library's, counts (`@[implemented_by
   TypeName.mk] opaque mkTN` gives two types the same `TypeName`, so
-  `Dynamic.get?` reads one as the other). The code Lean 4.33 generates for
+  `Dynamic.get?` reads one as the other). The code Lean (4.33, 4.34) generates for
   a `partial def` (`f._unsafe_rec`) is `partial`, not `unsafe`, so it does
   not make a program cast. Which modules are Lean's library is decided by
   their names; a program module named `Init.*`, `Std.*`, `Lean.*` or

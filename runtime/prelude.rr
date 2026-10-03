@@ -3140,10 +3140,11 @@ fn lean_get_githash(u : L2RUnit) -> LStr { lean_mk_string("293d5d0c0c3f3dded4688
 
 // The platform queries. leanrt builds only for Linux with glibc on aarch64
 // and x86-64 (`leanrt::rt::PLATFORM_TARGET`), so Windows, macOS and
-// Emscripten are false, Linux (`isLinux`, new in Lean 4.34) true, and `numBits` (`lean_system_platform_nbits`) is 64
-// (`USize` is `u64` here). `System.Platform.target` is natively
-// `LEAN_PLATFORM_TARGET`, the toolchain's target triple: the one the native
-// toolchain for leanrt's target reports.
+// Emscripten are false, Linux (`isLinux`, new in Lean 4.34) is true, and
+// `numBits` (`lean_system_platform_nbits`) is 64 (`USize` is `u64` here).
+// `System.Platform.target` is natively `LEAN_PLATFORM_TARGET`, the
+// toolchain's target triple: the one the native toolchain for leanrt's
+// target reports.
 fn lean_system_platform_windows(u : L2RUnit) -> bool { false }
 fn lean_system_platform_osx(u : L2RUnit) -> bool { false }
 fn lean_system_platform_linux(u : L2RUnit) -> bool { true }

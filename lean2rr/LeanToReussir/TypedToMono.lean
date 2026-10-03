@@ -1,5 +1,5 @@
 /-
-Derived from Lean 4.33's `src/Lean/Compiler/LCNF/ToMono.lean`
+Derived from Lean 4.33's `src/Lean/Compiler/LCNF/ToMono.lean` (unchanged in 4.34)
 Copyright (c) 2022 Microsoft Corporation. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Leonardo de Moura

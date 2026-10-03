@@ -1,13 +1,13 @@
 # lean2rr tests
 
 The classic corpus is the reference for correctness and performance: every
-program is compiled natively by stock Lean 4.33, its outputs are recorded,
+program is compiled natively by stock Lean 4.34, its outputs are recorded,
 and an alternative implementation (lean2rr's output) must reproduce them
 exactly. `oracle.py` does the building, recording, checking and timing.
 
 ## Layout
 
-- `classic/` — a Lake package (Lean v4.33.0, core `Init`/`Std` only), one
+- `classic/` — a Lake package (Lean v4.34.0, core `Init`/`Std` only), one
   executable per case. The executable name is the case name; the root module
   is the CamelCase file of the same name at the package root.
 - `classic/cases.json` — for each case: `name`, `exe`, `module`, `origin`
@@ -62,7 +62,8 @@ Each file's header cites its source and lists every change made to it.
   cfold either; Koka's `cfold.kk` says it is adapted from the Lean
   repository's `const_fold`, so `Cfold.lean` is that Lean program.
 - Lean 4 repository benchmarks: `tests/compile_bench/` at tag `v4.33.0`
-  (commit `d8b18978322de05a8f3dba51ef03cf5461676c17`). `const_fold` is the
+  (commit `d8b18978322de05a8f3dba51ef03cf5461676c17`; the files used are
+  unchanged at `v4.34.0`). `const_fold` is the
   cfold case. `rbmap` is included because it differs from Koka's rbtree
   (polymorphic `fold`, argument order). Changes: an optional size argument;
   qsort, which printed nothing, prints a checksum of every sorted array;

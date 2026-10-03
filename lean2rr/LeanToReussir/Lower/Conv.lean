@@ -1271,7 +1271,7 @@ def sourceDecls (env : Environment) (n : Name) : Array Name := Id.run do
 declaration it reaches, outside Lean's own library (`Init`, `Std`, `Lean`,
 `Lake`) and lean2rr's shim (`L2RShim`), is `unsafe` (its code may
 `unsafeCast`, build a `TypeName` for `Dynamic`, or be the `implemented_by`
-target of another type's code; the `_unsafe_rec` code Lean 4.33 generates
+target of another type's code; the `_unsafe_rec` code Lean (4.33, 4.34) generates
 for a `partial def` is not `unsafe`), is an axiom, uses `sorry` (a cast
 through an equality proved by either), or is `@[extern]` or `@[export]`
 (Lean does not compare the types of an extern and the `@[export]`

@@ -21,7 +21,7 @@ The runtime has two parts:
   C symbols, which lean2rr compiles with the program over the event loop's
   `l2r_shim_*` primitives (below).
 
-Semantics follow Lean 4.33's C runtime (`lean.h`, `src/runtime/*.cpp`)
+Semantics follow Lean 4.34's C runtime (`lean.h`, `src/runtime/*.cpp`)
 exactly; comments at each function say which C function it mirrors.
 
 Generated sections of the prelude (edit the generator, then run it):
@@ -573,7 +573,7 @@ lean2rr's dev branch (the tests pass with it).
    (`RtHashMap`), and the `unsafeCast`-based `Array.mapMUnsafe`/
    `Array.modifyM` implementations (`RtArrayUnsafe`).
 7. *done* — `BaseIO.asTask` (symbol `lean_io_as_task`): the task glue is
-   keyed on `IO.asTask`, which is not the 4.33 extern.
+   keyed on `IO.asTask`, which is not the extern (Lean 4.33, 4.34).
 8. *done* — `dbgTrace` (and `dbgSleep`, `dbgStackTrace`, `Thunk.mk`) at a
    boxed `α`: the `PUnit → α` closure argument must be wrapped to return the
    box (`lean_dbg_trace<ElemBox>(msg, f : L2RUnit -> Nat)` does not

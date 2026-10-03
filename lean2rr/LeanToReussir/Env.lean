@@ -6,9 +6,9 @@ import LeanToReussir.CompileRecord
 lean2rr reads a program the way the Lean compiler left it: base-phase LCNF
 persisted in each module's `.olean` (`Lean.Compiler.LCNF.baseExt`). The
 program must have been compiled by the same Lean toolchain lean2rr is built
-with (v4.33.0). Modules are located through `LEAN_PATH`, then in that
-toolchain's library and in lean2rr's shim, so a Lake project is translated
-with `lake env lean2rr <Module>`.
+with (v4.34.0, `lean2rr/lean-toolchain`). Modules are located through
+`LEAN_PATH`, then in that toolchain's library and in lean2rr's shim, so a
+Lake project is translated with `lake env lean2rr <Module>`.
 -/
 
 namespace LeanToReussir
