@@ -1,0 +1,63 @@
+From 91da4f8061f8c9981eaddf208164fbfc284621ac Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Fri, 2 Oct 2026 19:42:40 -0400
+Subject: [PATCH] l2r-local: bug 23: link the gathered polymorphic-FFI modules
+ through one llvm::Linker
+
+`gatherCompiledModules` linked the bitcode of every compiled texture into
+the gathered module with the static `llvm::Linker::linkModules`, which
+builds a new `Linker`, so a new `IRMover`, for each call. The `IRMover`
+constructor walks every type and metadata node of the destination
+(`TypeFinder::run`, then a self-mapping entry in its metadata map for each
+node visited), so linking N modules one call each took time quadratic in
+N. Use one `Linker` for the whole gather and `linkInModule` per module, as
+`llvm-link` does: the `IRMover` keeps its struct type set and its metadata
+map across calls (LLVM documents the map as "a Metadata map to use for all
+calls to move()").
+
+Found by lean2rr: a program using Std.Http has 8241 instances, two thirds
+of them conversion-origin calls whose textures each carry their own copy
+of the runtime's origin-table code. Its link took 3881 s, 97% of it in
+`IRMover::IRMover` (perf); now 6.4 s. The linked module is the same:
+identical IR for the first 3500 of those modules linked both ways, and
+identical code for a smaller lean2rr program (281 instances) and for
+generated programs with up to 2000 instances.
+---
+ lib/IR/ReussirOps.cpp | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
+index f1ba14d9..76cc5521 100644
+--- a/lib/IR/ReussirOps.cpp
++++ b/lib/IR/ReussirOps.cpp
+@@ -4195,8 +4195,14 @@ gatherCompiledModules(mlir::ModuleOp moduleOp, llvm::LLVMContext &context,
+       module->setTargetTriple(triple);
+     return module;
+   }
+-  // Parse bitcode and link all modules together
++  // Parse bitcode and link all modules together, through one `llvm::Linker`
++  // for the whole gather, as `llvm-link` does. The static
++  // `Linker::linkModules` builds a new linker per call, and the linker's
++  // `IRMover` constructor walks every type and metadata node of the
++  // destination: one call per module made the gather quadratic in the number
++  // of instances (thousands of instances took more than half an hour).
+   std::unique_ptr<llvm::Module> finalModule;
++  std::optional<llvm::Linker> linker;
+   for (auto op : opsWithCompiledModule) {
+     // Extract bitcode from DenseElementsAttr
+     auto compiledModuleOpt = op.getCompiledModule();
+@@ -4231,9 +4237,10 @@ gatherCompiledModules(mlir::ModuleOp moduleOp, llvm::LLVMContext &context,
+     if (!finalModule) {
+       // First module becomes the base
+       finalModule = std::move(parsedModule);
++      linker.emplace(*finalModule);
+     } else {
+       // Link subsequent modules into the final module
+-      if (llvm::Linker::linkModules(*finalModule, std::move(parsedModule))) {
++      if (linker->linkInModule(std::move(parsedModule))) {
+         llvm::errs() << "Failed to link LLVM modules\n";
+         return nullptr;
+       }
+-- 
+2.43.0
+
