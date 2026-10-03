@@ -1,20 +1,19 @@
 /-! Runtime test: small join points that jump to other small join points
 (translation plan §5.6, J1'). lean2rr inlines a small join point at each of
-its jumps; the size bound counts, besides its own body, the bodies of the
-small join points it jumps to, which are inlined with it.
+its jumps when its copy, with the join points inlined into it, stays within
+a budget.
 
 - `run`: a sequence of `match`es on a two-constructor state, each
   alternative setting the next state to a constant. Lean compiles each
   alternative to a join point that jumps to an alternative of the next
   `match` (either one), so the join points form a chain of siblings, each
   jumped to from both join points of the step before (sinking cannot nest
-  them). Every one is small: when the bound counted only a join point's own
-  body, the first ones held 2^n copies of the last ones (20 steps: .rr text
-  in gigabytes; 16 steps: 143 MB).
-- `labelOk`: a loop (`List.all` specialized) whose per-element code is a
-  join point that is outlined because the small join points it jumps to make
-  its copies too large; those, inlined into it, make the self tail call, so
-  the loop is one state machine (J4) and runs in constant stack. -/
+  them). Every one is small: when only a join point's own body was bounded,
+  the first ones held 2^n copies of the last ones (20 steps: out of memory;
+  16 steps: 143 MB of .rr).
+- `skipWs`: a scanner loop whose per-character code is an outlined join
+  point; the join points inlined into it make the self tail call, so the
+  loop is one state machine (J4), not mutually recursive. -/
 
 inductive S where
   | a | b
@@ -86,14 +85,13 @@ inductive S where
   | .a => return x
   | .b => return x + 1000
 
-@[inline] def isAscii (c : Char) : Bool :=
-  c.toNat < 128
-
-@[inline] def isAsciiAlphaNumChar (c : Char) : Bool :=
-  isAscii c && (Char.isDigit c || Char.isAlpha c)
-
-@[noinline] def labelOk (n : Nat) (chars : List Char) : Bool :=
-  decide (n ≤ 63) && chars.all (fun c => isAsciiAlphaNumChar c ∨ c = '-')
+@[noinline] partial def skipWs (s : String) (i : String.Pos.Raw) (n : Nat) : Nat :=
+  if i.byteIdx < s.utf8ByteSize then
+    let c := i.get s
+    if c == ' ' || c == '\t' || c == '\n' || c == '\r' then skipWs s (i.next s) (n + 1)
+    else if c.isAlpha || c.isDigit || c == '_' || c == '\'' then skipWs s (i.next s) n
+    else n
+  else n
 
 def main : IO Unit := do
   for i in [0:16] do
@@ -102,9 +100,8 @@ def main : IO Unit := do
   for i in [0:100000] do
     sum := sum + run i
   IO.println s!"sum = {sum}"
-  let chars := (List.range 1000000).map fun i =>
-    if i % 3 == 0 then 'a' else if i % 3 == 1 then '-' else '7'
-  IO.println s!"labelOk 5 = {labelOk 5 chars}"
-  IO.println s!"labelOk 5 with '?' = {labelOk 5 (chars ++ ['?'])}"
-  IO.println s!"labelOk 99 = {labelOk 99 chars}"
-  IO.println s!"labelOk 5 with 'Z' = {labelOk 5 ('Z' :: chars)}"
+  let s := String.ofList ((List.range 1000000).map fun i =>
+    if i % 5 == 0 then ' ' else if i % 7 == 0 then '_' else Char.ofNat (97 + i % 26))
+  IO.println s!"skipWs = {skipWs s 0 0}"
+  IO.println s!"skipWs stops = {skipWs (s ++ "+" ++ s) 0 0}"
+  IO.println s!"skipWs tabs = {skipWs "\t\n\r x1_'y" 0 0}"
