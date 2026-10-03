@@ -163,9 +163,6 @@ inductive RefKind where
   | direct
   /-- `L2RRef_N(Cell<ElemBox(e)>)`, for `[value]` structures. -/
   | boxed (bn : String)
-  /-- The prelude's `L2RNatRef` / `L2RIntRef`. -/
-  | nat
-  | int
   deriving BEq, Inhabited
 
 structure LowerState where
@@ -293,12 +290,13 @@ def boxName : String := "L2RBox"
 def RR.Ty.box : RR.Ty := .named boxName
 
 /-- Types that may cross Reussir's FFI boundary as parameters: integers,
-floats, `bool`, and RC pointers (opaque runtime types and shared records). -/
+floats, `bool`, and RC pointers (opaque runtime types, `Nat`/`Int` among
+them, and shared records). -/
 def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
   match t with
   | .named n =>
     if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
-            "LStr", "LBig", "LNatArr", "LIntArr", "LHandle", boxName] then return true
+            "Nat", "Int", "LStr", "LNatArr", "LIntArr", "LHandle", boxName] then return true
     -- A reference is a shared record (see `refType`).
     if (← get).refInfos.contains n then return true
     match (← get).typeInfos[n]? with
@@ -418,10 +416,8 @@ def storageElem (st : RR.Ty) : LowerM (RR.Ty × Bool) := do
 /-- The representation of an `ST.Ref` whose contents have Reussir type `e`
 (translation plan §5.1): a shared record holding Reussir's mutable cell, one
 per element type, which stores the element in its own representation (all
-aliases of a reference share the record). A `Nat` or `Int` is stored as in
-`LNatArr` (a tagged word in a `Cell<u64>`, a big value in a second cell:
-the prelude's `L2RNatRef`/`L2RIntRef`), a `[value]` structure in an
-`ElemBox` (Reussir's cells do not hold `[value]` records with counted
+aliases of a reference share the record). A `[value]` structure is stored
+in an `ElemBox` (Reussir's cells do not hold `[value]` records with counted
 members); other values as they are, `L2RRef_N(Cell<e>)`. -/
 def refType (e : RR.Ty) : LowerM RR.Ty := do
   if let some n := (← get).refTypes[e]? then return .named n
@@ -431,8 +427,6 @@ def refType (e : RR.Ty) : LowerM RR.Ty := do
       refInfos := s.refInfos.insert n (e, k)
       typeItems := match item with | some it => s.typeItems.push it | none => s.typeItems }
     return .named n
-  if e == .named "Nat" then return ← register "L2RNatRef" .nat none
-  if e == .named "Int" then return ← register "L2RIntRef" .int none
   let direct ← match e with
     | .named t =>
       if t ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "L2RUnit"] then pure true

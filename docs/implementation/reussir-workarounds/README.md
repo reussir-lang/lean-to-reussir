@@ -37,7 +37,7 @@ either way.
 
 | Bug | lean2rr workaround | Local patch | Needed with the patch? |
 |---|---|---|---|
-| [1](../../../reussir-bugs/01-value-enum-payload.md) | only field-less `[value]` enums (and `Nat`/`Int`) | 0020, applied | no; kept (policy) |
+| [1](../../../reussir-bugs/01-value-enum-payload.md) | only field-less `[value]` enums (`Nat`/`Int` are tagged handles, 0050) | 0020, applied | no; kept (policy) |
 | [2](../../../reussir-bugs/02-reuse-field-store.md) | `--no-pack-record-members`; fields ordered by alignment | 0002 (structures) and 0019 (variants), applied | no; kept (policy) |
 | [3](../../../reussir-bugs/03-global-alloc-align.md) | runtime allocates with `mi_malloc` | none (intended) | needed (intended behaviour) |
 | [4](../../../reussir-bugs/04-recursive-type-compare.md) | driver retries rrc without `--reuse-across-call` | 0004, applied | no; kept as a fallback for unknown crashes |
@@ -53,7 +53,7 @@ either way.
 | [15](../../../reussir-bugs/15-nullable-match-yield.md) | `Nullable` not used | 0022, applied | n/a |
 | [16](../../../reussir-bugs/16-nested-io-matches.md), [17](../../../reussir-bugs/17-long-nat-block.md) | `Outline`; `Array Nat` literal tables | 0035 and 0031, applied | no; kept (policy, and it bounds the `.rr` text) |
 | [18](../../../reussir-bugs/18-rrc-target-deps.md) | build Reussir's default target | 0025, applied | no |
-| [19](../../../reussir-bugs/19-cell-of-value-record.md) | `L2RNatRef`/`L2RIntRef`; `ElemBox` in references | 0023, applied | no; kept (policy) |
+| [19](../../../reussir-bugs/19-cell-of-value-record.md) | `ElemBox` for `[value]` records in references (`Nat`/`Int` are tagged handles, 0050) | 0023, applied | no; kept (policy) |
 | [20](../../../reussir-bugs/20-statet-tower.md) | `#[transform_anchor]` on conversion code | 0034, applied | yes for memory (3.5x without the anchors); kept |
 | [21](../../../reussir-bugs/21-unterminated-placeholder.md) | `[` escaped in the string literal table | 0016, applied | no; kept (policy, and free) |
 | [22](../../../reussir-bugs/22-wildcard-wide-enum.md) | `l2r_sink` in wildcard arms | 0030, applied | no; kept (policy) |

@@ -111,21 +111,22 @@ runtime.
   paths).
 - **Remove only if:** never (speed only).
 
-### Reads take their container owned, and in-bounds indices end on `Nat::Big`
+### Reads take their container owned, and in-bounds indices end on a big index
 
 - **What:** Every FFI call consumes its arguments, so an array or string
   read is an increment by the caller and a release in the inlined texture
   (`leanrt::array::release`, last reference out of line). An index proved
   in bounds, or a position proved valid, converts with
-  `l2r_index_of_nat`, whose `Big` arm ends the program instead of
-  rejoining the read.
+  `l2r_index_of_nat`, whose big case ends the program instead of
+  rejoining the read; an index checked by `get!`/`set!` is taken as its
+  word once (`l2r_word_index_ok`), with no counting on it in bounds.
 - **Why:** LLVM cancels the increment against the release (Reussir's
   `rc.inc` lets it assume the old count was at least 1) only when no store
-  or call lies between them; a rejoining `Big` arm with reference counting
+  or call lies between them; a rejoining big-index path with reference counting
   on the big number broke that (insertion sort on `Array UInt64`:
   0.52 → 0.23 s, native 0.19; adv4 PF4-06, ddb46f1). Natively such an index
   is never big (`lean_unbox` of it would be garbage).
-- **Where:** `runtime/prelude.rr`: `l2r_index_of_nat`, `l2r_index_ok`,
+- **Where:** `runtime/prelude.rr`: `l2r_index_of_nat`, `l2r_word_index_ok`,
   `lean_array_get`; `runtime/leanrt/src/array.rs`: `release` (a
   decrement; `drop_last` out of line).
 - **Remove only if:** Reussir gets borrowed FFI parameters (a feature

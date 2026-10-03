@@ -56,7 +56,9 @@ not the cause (1000 `let`s took 4.1 GB without it too).
 The memory is taken in rrc's MLIR lowering pipeline: a build that stops
 after it (`--emit mlir-llvm`) already reaches the peak (417 MB at N = 250,
 1.19 GB at N = 500), while the IR it emits grows linearly (301k and 565k
-lines). Every `Nat` operation is a match on a two-arm `[value]` enum, so
+lines). Every `Nat` operation was a match on a two-arm `[value]` enum
+(lean2rr's `Nat` then; since patch 0050 it is one tagged word, and each
+operation's inline fast path still branches on small or big), so
 after ConvertToSTD the function is one block of N `scf.if` and
 `scf.index_switch` operations. MLIR's `convert-scf-to-cf`
 (`mlir::createSCFToControlFlowPass`, through `reussirCreateSCFToControlFlowPass`

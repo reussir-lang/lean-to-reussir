@@ -471,7 +471,6 @@ def refCellOp (op : String) (r : RR.Expr) (e : RR.Ty) (k : RefKind) (a : RR.Ty) 
     LowerM (Option RR.Expr) := do
   let cell := RR.Expr.field r 0
   let toA (x : RR.Expr) : LowerM (Option RR.Expr) := tryCoerce x e a
-  let fam := if k == .int then "intref" else "natref"
   let v' ← match v with
     | some v => tryCoerce v a e
     | none => pure none
@@ -485,10 +484,6 @@ def refCellOp (op : String) (r : RR.Expr) (e : RR.Ty) (k : RefKind) (a : RR.Ty) 
   | .boxed bn, "take" => toA (.field (.call "l2r_rc_swap" #[.named bn] #[cell, .ctor bn none #[← zeroValue e]]) 0)
   | .boxed bn, "set" => return some (.call "l2r_rc_set" #[.named bn] #[cell, .ctor bn none #[v'.get!]])
   | .boxed bn, "swap" => toA (.field (.call "l2r_rc_swap" #[.named bn] #[cell, .ctor bn none #[v'.get!]]) 0)
-  | _, "get" => toA (.call s!"l2r_{fam}_get" #[] #[r])
-  | _, "take" => toA (.call s!"l2r_{fam}_swap" #[] #[r, ← zeroValue e])
-  | _, "set" => return some (.call s!"l2r_{fam}_set" #[] #[r, v'.get!])
-  | _, "swap" => toA (.call s!"l2r_{fam}_swap" #[] #[r, v'.get!])
   | _, _ => return none
 
 /-- Glue for `ST.Ref` operations (translation plan §5.1). A reference whose

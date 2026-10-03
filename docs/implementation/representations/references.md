@@ -20,22 +20,17 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **Remove only if:** never. (`LRef<T>` and the prelude's `l2r_ref_*`
   are no longer used by generated code: promises hold an `LCell`.)
 
-### `Nat` and `Int` references keep a tagged word and a big-number cell
+### `[value]` records in references are boxed
 
-- **What:** A reference to a `Nat` or `Int` is the prelude's
-  `L2RNatRef`/`L2RIntRef`: `Cell<u64>` holding a tagged word as in
-  `LNatArr`, and `Cell<L2RBigOpt>` for a big value (a record and two
-  cells). A reference to another
-  `[value]` record keeps the value in an `ElemBox` (one allocation per
-  `set`).
+- **What:** A reference to a `[value]` record keeps the value in an
+  `ElemBox` (one allocation per `set`). A `Nat` or `Int` reference holds
+  the handle in its cell like any other value (one-word handles since
+  mem-nat; they were split into a tagged word and a big-number cell,
+  `L2RNatRef`/`L2RIntRef`, while they were `[value]` enums).
 - **Why:** A Reussir `Cell` of a `[value]` record with counted members does
   not compile ([Reussir bug 19](../../../reussir-bugs/19-cell-of-value-record.md)).
-- **Where:** `LowerBase.lean`: `refType` (`RefKind.nat`, `.boxed`);
-  `runtime/prelude.rr`: `L2RNatRef`, `L2RIntRef`, `l2r_natref_*`,
-  `l2r_intref_*`.
-- **Remove only if:** bug 19 is fixed. Cost meanwhile: a `Nat` reference
-  keeps a big number it held until another big number replaces it or the
-  reference dies.
+- **Where:** `LowerBase.lean`: `refType` (`RefKind.boxed`).
+- **Remove only if:** bug 19 is fixed.
 
 ### Typed references come only from `mkRef` at a precise type
 

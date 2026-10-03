@@ -23,16 +23,17 @@ def u64Lit (k : Nat) : LowerM RR.Expr := do
 
 /-- `ptrAddrUnsafe` of value `e : t`:
 - a heap value (a record, a function value, a `Box`, a string, an array, a
-  big number, a reference, a thunk or task, a runtime handle): its cell's
-  address (a nullary constructor of a shared enum: its immediate);
-- a `Nat` below 2^63, an `Int` in the `int32` range, `UInt8/16/32`,
-  `Char`, `Bool`, an enumeration: the boxed scalar word `2n+1`; `Unit`
-  and erased values in typed code: `1` (in uniform code an erased value is
-  a `Box`, the boxed unit, which answers its cell);
+  reference, a thunk or task, a runtime handle): its cell's address (a
+  nullary constructor of a shared enum: its immediate);
+- a `Nat` or `Int`: its word, which is native Lean's (`l2r_addr_nat`,
+  `l2r_addr_int`): the boxed scalar `2n+1` when small, else the pointer to
+  its big number object;
+- `UInt8/16/32`, `Char`, `Bool`, an enumeration: the boxed scalar word
+  `2n+1`; `Unit` and erased values in typed code: `1` (in uniform code an
+  erased value is a `Box`, the boxed unit, which answers its cell);
 - `UInt64`, `Float`, `Float32`: their bits;
 - a `[value]` struct: its field's;
-- anything else (a `Nat` from 2^63 to 2^64, an `Int` outside `int32`):
-  a number answered only once (`l2r_addr_fresh`). -/
+- anything else: a number answered only once (`l2r_addr_fresh`). -/
 partial def addrOf (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
   let evalThen (k : RR.Expr) : LowerM RR.Expr := do
     let d ← fresh "pd"
@@ -51,7 +52,7 @@ partial def addrOf (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
     if n == boxName then return .call "l2r_ptr_addr_rec" #[t] #[e]
     -- `UInt8/16/32`, `Char`, `Bool`, enumerations.
     if let some i ← scalarWord e n then return .call "l2r_addr_word" #[] #[i]
-    if n ∈ ["LStr", "LBig", "LNatArr", "LIntArr", "LHandle"] then
+    if n ∈ ["LStr", "LNatArr", "LIntArr", "LHandle"] then
       return .call "l2r_ptr_addr_obj" #[t] #[e]
     match (← get).typeInfos[n]? with
     | some info =>

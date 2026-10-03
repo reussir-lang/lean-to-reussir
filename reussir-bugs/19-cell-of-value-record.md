@@ -61,9 +61,11 @@ has materialized the Cell accesses.
 
 ## lean2rr
 
-A reference to a `Nat` or `Int` (`ST.Ref`, `IO.Ref`) is the prelude's
-`L2RNatRef`/`L2RIntRef`: a tagged word in a `Cell<u64>` and the big number
-in a `Cell<L2RBigOpt>`. A reference to any other `[value]` record keeps the
+A reference to a `Nat` or `Int` (`ST.Ref`, `IO.Ref`) was the prelude's
+`L2RNatRef`/`L2RIntRef` (a tagged word in a `Cell<u64>` and the big number
+in a `Cell<L2RBigOpt>`) while they were `[value]` enums; since patch 0050
+([local additions](local-additions.md)) they are counted tagged handles,
+which a cell holds directly. A reference to a `[value]` record keeps the
 element in an `ElemBox` (one allocation per `set`; such references do not
 occur in practice, since lean2rr's `[value]` structs are IO results).
 lean2rr keeps this representation with 0023 applied (README policy:

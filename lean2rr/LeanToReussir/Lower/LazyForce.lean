@@ -181,7 +181,5 @@ def refNew (rt : RR.Ty) (e : RR.Ty) (k : RefKind) (v : RR.Expr) : RR.Expr :=
   match k with
   | .direct => .ctor rn none #[.call "core::intrinsic::cell::alloc" #[] #[v]]
   | .boxed bn => .ctor rn none #[.call "core::intrinsic::cell::alloc" #[] #[.ctor bn none #[v]]]
-  | .nat => .call "l2r_natref_new" #[] #[v]
-  | .int => .call "l2r_intref_new" #[] #[v]
 
 end LeanToReussir

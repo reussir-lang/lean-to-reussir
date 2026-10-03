@@ -11,7 +11,7 @@
 //! that are out of range or not at a character boundary. Functions taking
 //! `LStr` by value consume it and update it in place when it is unique.
 //!
-//! Positions arrive as `u64`; the Reussir side handles `Nat::Big` positions
+//! Positions arrive as `u64`; the Reussir side handles big `Nat` positions
 //! (and the few functions where Lean's "not a scalar" case, `>= 2^63`,
 //! differs from the out-of-range case) before calling in.
 
@@ -931,7 +931,7 @@ pub fn pushn(s: LStr, c: u32, n: u64) -> LStr {
     }
     let mut enc = [0u8; 4];
     let k = encode_scalar(&mut enc, c);
-    // More bytes than memory can hold: out of memory (as a `Nat::Big` count).
+    // More bytes than memory can hold: out of memory (as a big `Nat` count).
     let extra = match (k as u64).checked_mul(n) {
         Some(b) if b <= isize::MAX as u64 => b as usize,
         _ => oom(),

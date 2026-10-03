@@ -8,7 +8,7 @@ runtime or representation needs. They are kept with the bug fixes
 | Patch | What | Needed by | Review |
 |---|---|---|---|
 | [0040](#0040-a-hook-at-the-end-of-a-drain-__reussir_drop_drained) | `reussir_rt::drop` calls a host function when a drain ends | lean2rr's runtime (promise dependents released inside a free) | rv8/reussir: no defect |
-| [0050](#0050-tagged-opaque-handles-one-word-nat-and-int) | `#[ffi(rust = "...", tagged)]`: an odd handle is an immediate, not counted | one-word `Nat`/`Int` (branch `mem-nat`) | rv8/nat and the mem-nat review: no defect |
+| [0050](#0050-tagged-opaque-handles-one-word-nat-and-int) | `#[ffi(rust = "...", tagged)]`: an odd handle is an immediate, not counted | one-word `Nat`/`Int` (lean2rr's prelude) | rv8/nat and the mem-nat review: no defect |
 
 ## 0040: a hook at the end of a drain (`__reussir_drop_drained`)
 
@@ -95,9 +95,8 @@ Patch file
 [`patches/0050-l2r-local-tagged-FFI-objects-an-odd-handle-is-an-imm.patch`](patches/0050-l2r-local-tagged-FFI-objects-an-odd-handle-is-an-imm.patch)
 (`l2r-local` commit `a75ed2cf`, applied in `./reussir`; made as commit
 `b4ea1ae1` in a scratch checkout on top of 0017). Not a bug fix: a small
-feature lean2rr needs to represent `Nat` and `Int` as one word (branch
-`mem-nat`; its own copy of this report is `reussir-patches/details/0050.md`
-there, until it is merged into this layout).
+feature lean2rr needs to represent `Nat` and `Int` as one word (made on
+branch `mem-nat`).
 
 ### What it does
 
@@ -118,13 +117,18 @@ makes the same low-bit test before every count update (`lean_inc`,
 `lean_dec`). Before, `Nat` was a two-word `[value]` enum
 `{ Small(u64), Big(LBig) }`: 16 bytes in every record field (natively 8).
 lean2rr cannot skip the counting of small values itself: Reussir inserts it
-(in records, closures, enums, its drop and acquire glue).
+(in records, closures, enums, its drop and acquire glue). Without the flag,
+Reussir would increment "the count" of a small `Nat` at address `2n+1`, a
+crash. A clone hook would be the same mechanism with a call per copy, and
+lean2rr cannot change the drop glue Reussir generates (plan §5.1, "One-word
+`Nat` and `Int`", weighs the options).
 
 ### Where in Reussir
 
 - Frontend: the attribute is parsed in `crates/reussir-core/src/semi/ctxt.rs`
   (`Record::ffi_tagged`) and travels through the textual HIR
-  (`{ ffi tagged "path" }`), the package interface, monomorphization into
+  (`{ ffi tagged "path" }`; the shared IR lexer's `tagged` keyword is also
+  accepted as a name), the package interface, monomorphization into
   the MIR layout (`RecordLayout::Opaque { tagged }`, printed
   `{ "path", @hook, tagged }`) and codegen
   (`crates/reussir-codegen/src/lower/ty.rs`, through the C API
@@ -143,7 +147,10 @@ lean2rr cannot skip the counting of small values itself: Reussir inserts it
   it cannot fire for an FFI object, which Reussir never creates fresh, but
   is excluded anyway). Nothing else reads through an opaque handle: an
   `ffi_object` produces no reuse token, is not deferred by the drop glue,
-  and reaches foreign code only as its Rust type, which knows the encoding.
+  and reaches foreign code only as its Rust type, which knows the encoding
+  (`leanrt::nat::LNat`'s `Drop` and `Clone` make the same test). Real boxes
+  are at least 4-aligned (the count is a `u32` at offset 0), so the low bit
+  of a real handle is always clear, and an immediate (odd) is never null.
 
 ### Checks and review
 
@@ -151,9 +158,14 @@ Tests: `conversion/tagged_ffi_object.mlir` (guarded `rc.inc`/`rc.dec` for a
 tagged object, unguarded for an untagged one, the textual form),
 `conversion/instrument_nonlinear_ffi_tagged.mlir`, `frontend/ffi_tagged.rr`
 (the attribute through HIR, MIR and MLIR), HIR and MIR round-trip unit
-tests. On lean2rr: the runtime suite, the classic corpus, and tests of
-every `Nat`/`Int` operation at 2^62, 2^63 and 2^64 and of `Nat`s in every
-container.
+tests; all `reussir-core` unit tests (467) and the existing FFI tests
+(`instrument_nonlinear_ffi.mlir`, `ffi_vec.rr`, `rc_delta.mlir`) pass
+unchanged. On lean2rr: the runtime suite, the classic corpus, the Reussir
+benchmark suite, the round-7 big-number repros, and tests of every
+`Nat`/`Int` operation at 2^62, 2^63 and 2^64 and of `Nat`s in every
+container, including counted big-number allocations and frees
+(`tests/runtime/nat-alloc-check.sh`: `RtNatStress`, also through
+`IO.Ref` set/swap/modify, and `RtNatConst`).
 
 Reviews: the mem-nat review (`~/Documents/l2r-scratch/mem/nat/review/FINDINGS.txt`)
 and round RV8 (`~/Documents/l2r-scratch/rv8/nat/FINDINGS.txt`, Q3) found no
@@ -165,7 +177,14 @@ alignment or dereferenceable attributes on FFI handles, so LLVM cannot fold
 the low-bit test away. The first review's optional hardening (exclude
 tagged objects from `rc.assume_unique`) is in the final patch.
 
-**Effect on lean2rr.** With branch `mem-nat`: `Nat` and `Int` fields take 8
-bytes instead of 16, small values are never allocated, copying or dropping
-one is a bit test. Without `mem-nat`, lean2rr declares no tagged type and
-nothing changes.
+**Effect on lean2rr.** `Nat` and `Int` fields take 8 bytes instead of 16,
+small values are never allocated, copying or dropping one is a bit test;
+`Array Nat` without the `nat-arrays` pass is `RVec<Nat>` (one word per
+element), and an `IO.Ref Nat` is a cell holding the handle. lean2rr's
+prelude needs the patch (rrc rejects the `tagged` attribute without it).
+
+**Upstream note.** The feature is general: any foreign type with a
+pointer-or-immediate encoding (Lean objects, OCaml values, small-string
+optimizations) can use it. A fuller version could let the foreign side
+choose the tag bit, or lower the guard to a `select` where branches are
+costly.

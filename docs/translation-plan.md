@@ -675,15 +675,89 @@ Stage 4 sees only mono types:
 | `Float`, `Float32` | `f64`, `f32` | |
 | `Bool` | `bool` | |
 | `Unit`/`PUnit`, `lcVoid`, `◾` | `L2RUnit` | Reussir's `unit` is result-only, so unit-like values are a one-variant `[value]` enum from the prelude. The IO world is an `L2RUnit` value. |
-| `Nat` | `enum [value] Nat { Small(u64), Big(LBig) }` | `Big` only for values ≥ 2^64; `LBig` is an opaque runtime bignum (GMP) |
-| `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
+| `Nat` | `Nat`, a *tagged* opaque handle: one word, `2n+1` for n < 2^63, else a pointer to a counted runtime bignum (GMP) | as natively; see "One-word `Nat` and `Int`" below |
+| `Int` | `Int`, the same with small values in the `int32` range (`lean_box((unsigned)(int)i)`) | |
 | `String` | `LStr`, an opaque copy-on-write handle to one block like Lean's string object: a 32-byte header (count, byte size, capacity, character count) and the UTF-8 bytes | literals: §5.4 |
 | `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records); for an enumeration or `Unit`, its index (`u8`, `u16` or `u32` by the number of constructors; Lean stores a tagged scalar); otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
-| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one word per element like Lean's boxed scalars: small values inline, big ones as bignum handles, in one block with Lean's 24-byte array header (count, size, capacity); the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments (optional pass `nat-arrays`; without it they are arrays like the others) |
+| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | the elements' own words, in one block with Lean's 24-byte array header (count, size, capacity), like Lean's array object; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments (optional pass `nat-arrays`; without it they are `RVec<Nat>`, `RVec<Int>`, also one word per element) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
-| `ST.Ref σ α` | a generated shared record `L2RRef_N(Cell<⟦α⟧>)` around Reussir's mutable cell | the contents keep their own representation; `Nat`/`Int` (`L2RNatRef`/`L2RIntRef`, a tagged word as in `LNatArr` plus a cell for a big value) and `[value]` structures (in an `ElemBox`) are stored apart, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
+| `ST.Ref σ α` | a generated shared record `L2RRef_N(Cell<⟦α⟧>)` around Reussir's mutable cell | the contents keep their own representation; `[value]` structures are stored in an `ElemBox`, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧), … }` | memoized thunks, deferred tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
+
+**One-word `Nat` and `Int`.** A `Nat` is one machine word, with Lean's
+own encoding: an odd word `lean_box(n) = 2n+1` is the small value `n`
+(n < 2^63, `LEAN_MAX_SMALL_NAT`), an even word is a pointer to a
+reference-counted big number (n ≥ 2^63, `leanrt::nat`). Every value has
+exactly one form, so two small words are equal exactly when their values
+are, and every small value is below every big one. An `Int` is the same,
+also in Lean's encoding: a value `i` in the `int32` range is
+`lean_box((unsigned)(int)i)` (its 32 bits, zero-extended, so a `Nat` below
+2^31 and the `Int` of the same value have the same word), any other value
+a big number. A big number is laid out as Lean's `lean_mpz_object`: the
+object header (the 32-bit count Reussir counts, then `m_cs_sz`, `m_other`
+and the tag `LeanMPZ`), then GMP's `mpz_t`, whose limbs GMP allocates; its
+operations are GMP's `mpz` functions, as in Lean's runtime. So C code
+written against `lean.h` can receive and return these words unchanged.
+
+The difficulty is that Reussir, not lean2rr, inserts the reference
+counting: copying a handle increments the count at its address, dropping
+it calls the type's drop code. A small `Nat` has no address. Three ways
+were weighed (2026-10):
+
+1. *An opaque runtime type with user hooks.* Reussir's opaque `#[ffi]`
+   records (`LStr`, `RVec`) already call a Rust drop hook on release, but
+   increment the count inline, at the address. A clone hook would need a
+   new symbol per type and a call on every copy (or reliance on LLVM
+   inlining it).
+2. *A small Reussir feature: tagged opaque handles.* The opaque record is
+   declared `#[ffi(rust = "::leanrt::nat::LNat", tagged)]`; Reussir then
+   increments the count only when the handle's low bit is clear, and calls
+   the drop hook only then (the hook is Rust's `Drop` of `LNat`, which
+   frees the big number). Real handles point to a 4-byte-aligned count, so
+   the low bit is free. Nothing else in Reussir reads through an opaque
+   handle (opaque values never donate their cells for reuse, are never
+   deferred by the drop glue, and are only passed to Rust code, which knows
+   the encoding). The patch (Reussir patch 0050) carries the flag from the
+   attribute to the type (`!reussir.ffi_object<…, tagged = true>`) and adds
+   the two guards in the LLVM lowering of `rc.inc`/`rc.dec`.
+3. *lean2rr alone.* Reussir's only immediates are field-less constructors,
+   encoded as pointers to per-tag dummy cells, not arbitrary numbers. A
+   `u64` field would escape Reussir's counting altogether: lean2rr would
+   have to insert every increment and decrement of `Nat` values itself,
+   including inside the drop code Reussir generates for records, closures
+   and enums that hold them, which it cannot reach.
+
+Option 2 was chosen: it is the smallest change (one flag, two guarded
+lowerings), keeps Reussir's counting and in-place reuse for everything
+else, and gives exactly Lean's representation, with the copy of a small
+value costing one bit test and no call. Option 1 is the same mechanism
+with a call where the bit test suffices; option 3 is not possible.
+
+`Nat` and `Int` are then ordinary handles to lean2rr: they cross the FFI
+boundary (`Array Nat` without the `nat-arrays` pass is `RVec<Nat>`, one
+word per element; an `IO.Ref Nat` is a cell holding the handle), and
+records, constructors, closures and `Box` hold them as one word. The
+prelude's functions work on the words: `l2r_nat_raw(n)` turns a `Nat`
+into its word, which then owns the handle's reference, and each function
+does that once per argument, so the small path has no reference counting
+at all:
+
+```
+fn lean_nat_add(a : Nat, b : Nat) -> Nat {
+    let x = l2r_nat_raw(a);                 // 2m+1, or a big number's pointer
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 {                   // both small
+        let s = x + (y - 1);                // 2(m+n)+1
+        if s >= x { l2r_nat_of_raw(s) } else { l2r_nat_add_raw(x, y) }   // no carry: small
+    } else { l2r_nat_add_raw(x, y) }        // leanrt::nat, GMP; consumes both words
+}
+```
+
+The rule for words: a small word owns nothing; a big word must reach
+exactly one owner on every path (back into a handle, a `_raw` slow path,
+which consumes its words, or `l2r_nat_drop_raw`). The slow paths take
+every combination of small and big words and return normalized handles.
 
 A type with computed fields (`Lean.Name`) is represented by its
 implementation inductive `T._impl`, whose constructors also store the
@@ -880,7 +954,7 @@ its value is stored as `Box`.
   `lcAny` position), each operation goes through a generated dispatch over
   every reference type the program boxes: it acts on that reference's one
   cell, converting the value between the cell's element type and the
-  operation's (`get` at `Box` on an `L2RNatRef` boxes the `Nat`; `set`
+  operation's (`get` at `Box` on a reference to a `Nat` boxes the `Nat`; `set`
   unboxes). Typed references come only from `ST.Prim.mkRef` instances at a
   precise element type, and flow only to binders that Stage 3 types from
   them (§4), so a typed position never receives a reference of another
@@ -1085,10 +1159,10 @@ application appears.
   add bindings of its own: representation conversions, placeholders, and
   the bodies of duplicated join points (one copy per path).
 - Literals:
-  - `Nat` literals below 2^64 become `Nat::Small`; a bigger one is parsed
-    by the runtime from its decimal digits, kept in the string literal
-    table: `l2r_nat_norm(l2r_big_of_decimal_lstr(l2r_str_lit(id)))`
-    (`natLiteral`). One flat call: a nested arithmetic expression per limb
+  - `Nat` literals below 2^63 become `l2r_nat_small(k)` (the word
+    `2k+1`); bigger ones are parsed by the runtime from their decimal
+    digits, kept in the string literal table (`l2r_nat_of_decimal_lstr`,
+    `natLiteral`). One flat call: a nested arithmetic expression per limb
     overflowed rrc's stack for literals of thousands of digits.
   - `UIntN` literals become typed Reussir literals.
   - String literals become `l2r_str_lit(id)`: a runtime function generated
@@ -1737,7 +1811,10 @@ Native Lean behaves as follows (observed; `EmitC.emitInitFn`):
 
 A constant whose code only builds unboxed values from small literals and
 constructors (`Int.ofNat 0`, an enumeration value) is recomputed at every
-use instead of cached. It cannot panic, trace or allocate, so this is
+use instead of cached. Every `Nat` or `Int` it builds must be small (a
+`Nat` below 2^63, an `Int` in `int32`; `def K : Int := 3000000000` is a
+big number, which is cached: recomputed it would be allocated at every
+use, RV8N-01). It cannot panic, trace or allocate, so this is
 unobservable, and it is cheaper than a once-cell read (optional pass
 `cheap-consts`). A closed term referenced exactly once, by another constant
 (the steps of an array literal, `_closed_k := push _closed_(k-1) e_k`), is
@@ -2424,7 +2501,6 @@ tasks are mutable by design).
 **Room kept open.** Each of these can change later without changing when
 work runs or what the program computes:
 - `[value]` for small non-recursive structs;
-- a cheaper `Nat`;
 - borrowed parameters, if Reussir adds them;
 - globals for constants;
 - re-running Lean's `specialize` after monomorphization.
@@ -2495,17 +2571,17 @@ Probe results (Reussir at the pinned commit):
   bytes of another arm that fall on the representative's padding or on a
   `bool` field are lost (`enum [value] M { A(u8), B(bool) }` reads `A(42)`
   back as 0). lean2rr only emits `[value]` enums that are unaffected:
-  enumerations without fields, and `Nat`/`Int`, whose arms each hold one
-  64-bit word. Everything else with several arms is a shared enum (J4
+  enumerations without fields. Everything else with several arms is a shared enum (J4
   entry points, §5.6); multi-field value records are `[value]` structs,
   whose padding is explicit.
 - **Candidate Reussir requests.** Guaranteed tail calls; `[value]` types
-  across the FFI (for `Nat` array elements without a wrapper); borrowed
+  across the FFI (for array elements without a wrapper); borrowed
   FFI parameters (an array `get` currently takes ownership and releases);
   a no-inline attribute (lean2rr uses `#[transform_anchor]`, whose
-  `no_inline` is a side effect, reussir-bugs/20-statet-tower.md); small
-  integers as immediates (for one-word `Nat` fields); bounded-depth frees
-  (local patches 0013-0015).
+  `no_inline` is a side effect, reussir-bugs/20-statet-tower.md); tagged
+  opaque handles (one-word `Nat`/`Int`, §5.1: local patch 0050,
+  reussir-bugs/local-additions.md); bounded-depth frees (local patches
+  0013-0015).
 
 Answered (Lean):
 - Startup order: `EmitC.emitInitFn` runs the module's compiled
@@ -2524,19 +2600,22 @@ Answered (Lean):
   `x` in its own representation (it is not converted for the call) and
   answers:
   - a heap value (a record, a function value, a `Box`, a string, an
-    array, a big number, a reference, a thunk or task, a runtime handle):
+    array, a reference, a thunk or task, a runtime handle):
     the address of its cell, whatever its count (`l2r_ptr_addr_rec`,
     `l2r_ptr_addr_obj`); a nullary constructor of a shared enum: its
     immediate;
-  - a `Nat` below 2^63, an `Int` in the `int32` range, `UInt8/16/32`,
-    `Char`, `Bool`, an enumeration: the boxed scalar's word `2n+1`;
+  - a `Nat` or `Int`: its own word, which is native Lean's (§5.1): the
+    boxed scalar `2n+1` when small (a `Nat` below 2^63, an `Int` in the
+    `int32` range), else the pointer to its big number object;
+  - `UInt8/16/32`, `Char`, `Bool`, an enumeration: the boxed scalar's
+    word `2n+1`;
     `Unit` and erased values in typed code: `1` (in uniform code an erased
     value is a `Box`, the boxed unit, which answers its `Box` cell);
   - `UInt64`, `Float`, `Float32`: their bits;
   - a `[value]` struct: its field's;
-  - a `Nat` from 2^63 to 2^64, an `Int` outside `int32` (no cell, and too
-    wide for a word): a number answered only once (`l2r_addr_fresh`: even,
-    in [2^62, 2^63), so never a word or a pointer).
+  - a value of a type `addrOf` does not know: a number answered only once
+    (`l2r_addr_fresh`: even, in [2^62, 2^63), so never a word or a
+    pointer).
 
   `ptrEq` compares these words (it inlines to `ptrAddrUnsafe`),
   `ptrEqList` applies `ptrEq` element by element (it is recursive and not
@@ -2883,8 +2962,7 @@ Each item says what differs and when.
   `(Array.range n).map (· % 3 == 0)`) reads the input and pushes onto a new
   result array (§4): the two arrays are live together until the map ends,
   where native Lean replaces the elements of one array (peak memory
-  0.7–1.1x native for scalar targets in tests, more for records, whose cells
-  are larger: §7's cheaper `Nat`). Maps that keep the representation run in
+  0.7–1.1x native for scalar targets in tests, more for records). Maps that keep the representation run in
   place. A map loop of another shape (not Lean's), or one whose function
   projects a field of a parametric structure (`(xs.zip ys).map (·.2)`,
   §4), still converts its input to an array of `Box` on entry and back on
@@ -2895,9 +2973,7 @@ Each item says what differs and when.
   enumerations and `Unit` in arrays are stored as indices, but once-cell
   values and other extern arguments of those types are still wrapped.
   `ST.Ref` contents are stored in their own representation (§5.1), except
-  `[value]` structures (an `ElemBox` per `set`); a `Nat` reference keeps a
-  big number it held until it is replaced by another big number or the
-  reference dies. A reference used through a `Box` costs a dispatch on its
+  `[value]` structures (an `ElemBox` per `set`). A reference used through a `Box` costs a dispatch on its
   type at each operation. `UInt64` and `Float` arrays, on
   the other hand, are unboxed, unlike native.
 - *Reads take their container owned* (Reussir has no borrowed FFI
@@ -2905,8 +2981,8 @@ Each item says what differs and when.
   and a release in the inlined runtime function. LLVM cancels the pair when
   the increment's store reaches the release with no store or call on any
   path in between (Reussir's `rc.inc` lets it assume the old count was at
-  least 1; the prelude ends the impossible `Nat::Big` index paths instead of
-  rejoining them for this): index loops and insertion sort on
+  least 1; the prelude ends the impossible big-index paths instead of
+  rejoining them for this, and takes a checked index as its word once): index loops and insertion sort on
   `Array UInt64` run at 1.2x native or better. It does not when a
   structure field projected at the top of a loop body is released by the
   iteration's last read, as in Lean's `String.Slice` loops (`String.any`,

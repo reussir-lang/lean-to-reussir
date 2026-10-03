@@ -10,7 +10,7 @@ element being updated stays unshared (`Array.modifyMUnsafe`,
 ### A placeholder is the zero of its type
 
 - **What:** `zeroValue t` is a generated function `l2r_zero_N`: `0`,
-  `0.0`, `false`, `Nat::Small{0}`, the empty string or array, the first
+  `0.0`, `false`, `l2r_nat_small(0)`, the empty string or array, the first
   constructor whose fields have zeros (preferring one without fields), a
   `done` cell holding a zero, a new reference holding a zero. A type
   without a finite value (every constructor needs a value of a type whose

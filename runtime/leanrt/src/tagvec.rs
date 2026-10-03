@@ -1,12 +1,10 @@
 //! Arrays of `Nat` / `Int` with one word per element, like Lean's arrays of
-//! boxed scalars.
+//! boxed scalars, in one allocation.
 //!
-//! `Nat` and `Int` are Reussir `[value]` enums, which cannot be stored in a
-//! Rust vector; storing them boxed costs an allocation per element update.
-//! A tag vector stores each element as a tagged word instead:
+//! Each element is the `Nat`'s or `Int`'s own word (`crate::nat`):
 //!
-//! - odd words are small values: `(v << 1) | 1` (the Reussir side decides
-//!   the range and the signedness: `Nat` below 2^63, `Int` in [-2^62, 2^62));
+//! - odd words are small values: `lean_box` of a `Nat` below 2^63 or of an
+//!   `Int` in the `int32` range;
 //! - even words are owned `LBig` handles (the raw `Rc` pointer), for all
 //!   other values.
 //!
@@ -273,9 +271,14 @@ pub fn with_capacity(n: u64) -> LTagVec {
     alloc(n as usize)
 }
 
-/// `n` copies of a small (odd) word.
+/// `n` copies of a word that owns its reference (a big word: one reference
+/// per copy, the word's own released when `n` is 0).
 #[inline(never)]
 pub fn replicate_word(n: u64, w: u64) -> LTagVec {
+    if !is_small(w) {
+        let b = unsafe { std::mem::transmute::<usize, LBig>(w as usize) };
+        return replicate_big(n, b);
+    }
     crate::array::check_alloc(n, 8);
     let a = alloc(n as usize);
     let o = obj(&a);
@@ -364,7 +367,7 @@ fn set_raw(mut a: LTagVec, i: u64, w: u64) -> LTagVec {
     a
 }
 
-/// Store a small (odd) word at `i`.
+/// Store a word at `i` (a big word's reference moves into the array).
 #[inline(always)]
 pub fn set_word(a: LTagVec, i: u64, w: u64) -> LTagVec {
     set_raw(a, i, w)
@@ -586,7 +589,7 @@ mod tests {
         assert_eq!(rc(&b), 3);
         let r = set_word(r, 0, 1);
         assert_eq!(rc(&b), 2);
-        assert_eq!(big(&r, 1).1, b.1);
+        assert_eq!(crate::big::limbs(&big(&r, 1)), crate::big::limbs(&b));
         drop(r);
         assert_eq!(rc(&b), 1);
     }

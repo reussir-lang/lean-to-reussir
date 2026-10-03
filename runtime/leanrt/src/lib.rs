@@ -32,6 +32,7 @@ pub mod fs;
 pub mod gmp;
 pub mod hash;
 pub mod io;
+pub mod nat;
 pub mod net;
 pub mod once;
 pub mod persist;
@@ -45,6 +46,7 @@ pub mod tagvec;
 pub mod task;
 
 pub use big::LBig;
+pub use nat::{LInt, LNat};
 pub use string::LStr;
 
 static LAST_SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -58,12 +60,11 @@ pub fn last_shared() -> bool {
     LAST_SHARED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// A fresh "address" for `ptrAddrUnsafe` of a value that has no cell of its
-/// own and is too wide for a scalar word (a `Nat` in `[2^63, 2^64)`, an `Int`
-/// outside `int32`), of a value whose handle is not one word
-/// (`l2r_ptr_addr_obj`), and of a Reussir type lean2rr's `addrOf` does not
-/// know: never repeated, even (so never a boxed scalar, whose "address" is
-/// odd) and in `[2^62, 2^63)` (so never a real pointer).
+/// A fresh "address" for `ptrAddrUnsafe` of a value whose handle is not one
+/// word (`l2r_ptr_addr_obj`) and of a Reussir type lean2rr's `addrOf` does
+/// not know (a `Nat` or `Int` answers its own word, as natively): never
+/// repeated, even (so never a boxed scalar, whose "address" is odd) and in
+/// `[2^62, 2^63)` (so never a real pointer).
 pub fn fresh_addr() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1 << 62);
     NEXT.fetch_add(2, std::sync::atomic::Ordering::Relaxed)

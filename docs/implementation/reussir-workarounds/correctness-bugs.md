@@ -8,8 +8,8 @@ whether the workaround can be dropped. Bug files are in
 ### Bug 1: `[value]` enum payloads are lost when moved
 
 - **What:** lean2rr emits only `[value]` enums that are unaffected:
-  field-less enumerations, and the prelude's `Nat`/`Int`, whose arms each
-  hold one 64-bit word. Everything else with several arms is a shared enum
+  field-less enumerations (`Nat`/`Int` are tagged handles since patch
+  0050, not `[value]` enums). Everything else with several arms is a shared enum
   (J4 entry enums included); multi-field value records are `[value]`
   structs.
 - **Why:** Reussir moves a `[value]` enum as one representative arm's
@@ -150,13 +150,13 @@ whether the workaround can be dropped. Bug files are in
 
 ### Bug 19: a `Cell` of a `[value]` record with counted members
 
-- **What:** `Nat`/`Int` references are the prelude's `L2RNatRef`/
-  `L2RIntRef` (a tagged word and a big-number cell); other `[value]`
-  records are stored in an `ElemBox`.
+- **What:** `[value]` records are stored in an `ElemBox` in references
+  (`Nat`/`Int`, `[value]` enums before patch 0050, are counted handles now,
+  which cells hold directly).
 - **Why:** rrc rejects `cell::get`/`set` on such a cell
   ([19-cell-of-value-record.md](../../../reussir-bugs/19-cell-of-value-record.md);
   patch 0023, applied).
-- **Where:** [../representations/references.md](../representations/references.md#nat-and-int-references-keep-a-tagged-word-and-a-big-number-cell).
+- **Where:** [../representations/references.md](../representations/references.md#value-records-in-references-are-boxed).
 - **Remove only if:** not needed with 0023 (applied), but kept: by the
   policy lean2rr also works with an unpatched Reussir.
 

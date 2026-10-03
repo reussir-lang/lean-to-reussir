@@ -68,7 +68,7 @@ in its file). Column *Review*: the adversarial review round and its result
 | [16](16-nested-io-matches.md) | cost (opt-in flag) | reuse across calls is superlinear in match nesting (build time) | yes, build time and memory | deep tail paths and `let` values outlined | 0035 | rv8/reussir-c: no defect | yes |
 | [17](17-long-nat-block.md) | cost (stock pass's default mode) | rrc memory is quadratic in a straight-line `Nat` function (`convert-scf-to-cf` with pattern rollback) | yes, build memory | long tail paths and `let` values outlined; `Array Nat` literals as tables | 0031 | rv8/reussir-c: no defect | yes |
 | [18](18-rrc-target-deps.md) | bug (build system) | the `rrc` build target alone does not link | no, Reussir's build only | build the default target | 0025 | rv7/p22: no defect | yes |
-| [19](19-cell-of-value-record.md) | bug | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `Nat`/`Int` references in two cells; other `[value]` records boxed | 0023 (with 0033's composition fix) | rv7/p22 rounds 1-2 (RV7P-01 fixed); RV8C-01 fixed in 0033 | yes |
+| [19](19-cell-of-value-record.md) | bug | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `[value]` records in references boxed (`Nat`/`Int` are tagged handles since 0050) | 0023 (with 0033's composition fix) | rv7/p22 rounds 1-2 (RV7P-01 fixed); RV8C-01 fixed in 0033 | yes |
 | [20](20-statet-tower.md) | unclear, then found (MLIR inliner) | the MLIR inliner follows chains of copied calls through recursive functions (build time) | yes, build time and memory | conversion, unboxing and uniform-code application functions marked `#[transform_anchor]` | 0034 | rv8/reussir-c: no defect | yes |
 | [21](21-unterminated-placeholder.md) | bug | an unterminated `[:` in a polymorphic FFI texture is dropped | yes, wrong output (a string literal containing `[:` printed without it) | `[` escaped (`\x5b`) in the string literal table | 0016 | round 6 (RV6L-01) | yes |
 | [22](22-wildcard-wide-enum.md) | cost | a wildcard arm over a wide enum costs N^3 code | yes, build time (a derived BEq on 40 constructors: 9 minutes) | held wide values released out of line in wildcard arms (`l2r_sink`) | 0030 | rv8/reussir-c (RV8C-03 resolved) | yes |
@@ -152,7 +152,8 @@ Order and dependencies:
 - 0012, 0017 and 0060 to 0064 also apply alone.
 - lean2rr's runtime needs 0014 to build (`leanrt::drop` uses
   `reussir_rt::drop`, the pending stack 0014 adds to Reussir's runtime),
-  uses 0040 when present (a weak symbol), and branch `mem-nat` needs 0050.
+  uses 0040 when present (a weak symbol), and its prelude needs 0050
+  (it declares `Nat` and `Int` `tagged`).
   Without the others, lean2rr programs still compile, but the bugs can
   appear.
 
@@ -450,10 +451,11 @@ Not bugs, but each one costs lean2rr measurably:
   take the container owned, so each read retains and releases it.
   Traversals that keep unchanged nodes pay the same on fields (about 1.5x
   native on an `Expr.replace`-style DAG traversal).
-- **A one-word `Nat`.** `Nat` is a two-word `[value]` enum (small or big).
-  Natively it is one tagged word, so nodes with `Nat` fields are larger
-  (`Std.TreeMap Nat Nat` uses about 1.5x native memory).
-- **`[value]` types across the FFI.** Arrays of `Nat`, `Int` or enumerations
-  need runtime-side representations or wrappers.
+- **A one-word `Nat`** (done locally: [0050](local-additions.md), tagged
+  opaque handles; `Nat` and `Int` are one tagged word, as natively; before,
+  `Nat` was a two-word `[value]` enum and `Std.TreeMap Nat Nat` used about
+  1.5x native memory).
+- **`[value]` types across the FFI.** Arrays of enumerations or `[value]`
+  records need runtime-side representations or wrappers.
 - **Guaranteed tail calls.** Mutual tail calls are sibling calls only when
   all arguments fit in registers.

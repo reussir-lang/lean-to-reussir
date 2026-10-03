@@ -11,15 +11,17 @@ start with `runtime/`.
 
 - **What:** `ptrAddrUnsafe x` takes `x` in its own representation (it is
   not converted for the call) and answers: for a heap value (a record, a
-  function value, a `Box`, a string, an array, a big number, a reference,
-  a thunk or task, a runtime handle) its cell's address, whatever its
-  count (a nullary constructor of a shared enum: its immediate); for a
-  small `Nat`, an `int32` `Int`, `UInt8/16/32`, `Char`, `Bool` or an
-  enumeration the boxed scalar's word `2n+1`; for `Unit` and erased values
-  in typed code `1` (in uniform code an erased value is the boxed unit,
-  which answers its `Box` cell); for `UInt64`, `Float`, `Float32` their
-  bits; for a `[value]` struct its field's; otherwise (a `Nat` from 2^63 to
-  2^64, an `Int` outside `int32`) a number answered only once.
+  function value, a `Box`, a string, an array, a reference, a thunk or
+  task, a runtime handle) its cell's address, whatever its count (a
+  nullary constructor of a shared enum: its immediate); for a `Nat` or
+  `Int` its word, which is native Lean's (the boxed scalar `2n+1` when
+  small, else the big number's pointer; [nat-int.md](nat-int.md)); for
+  `UInt8/16/32`, `Char`, `Bool` or an enumeration the boxed scalar's word
+  `2n+1`; for `Unit` and erased values in typed code `1` (in uniform code
+  an erased value is the boxed unit, which answers its `Box` cell); for
+  `UInt64`, `Float`, `Float32` their bits; for a `[value]` struct its
+  field's; for a value of a type `addrOf` does not know, a number
+  answered only once.
 - **Why:** For two values alive at the same time, equal answers then mean
   the same cell or equal values, so `ptrEq` answering `true` still means
   equal values, which code using it as a shortcut for equality needs

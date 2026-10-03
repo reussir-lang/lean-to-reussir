@@ -54,12 +54,13 @@ rest; those bytes are copied.)
 ## lean2rr
 
 lean2rr emits only `[value]` enums that are unaffected: enumerations
-without fields, and `Nat`/`Int`, whose arms each hold one 64-bit word.
+without fields (`Nat`/`Int`, once two-arm `[value]` enums whose arms each
+held one 64-bit word, are tagged handles since patch 0050).
 Other multi-arm types are shared enums, and multi-field value records are
 `[value]` structs, whose padding is explicit (plan §10).
 
 The patch does not change lean2rr's code: the `[value]` enums it emits
-(field-less enumerations, `Nat`, `Int`) keep their LLVM types, and lean2rr
+(field-less enumerations) keep their LLVM types, and lean2rr
 keeps its rule (README policy: workarounds stay, so that lean2rr also works
 with an unpatched Reussir).
 

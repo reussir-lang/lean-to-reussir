@@ -117,9 +117,9 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
       else if n ∈ ["f32", "f64"] then pure (lit "0.0")
       else if n == "bool" then pure (.ofExpr (.atom "false"))
       else if n == "Nat" then
-        pure ⟨#[("z", some (.named "u64"), .atom "0")], .ctor "Nat" (some "Small") #[.var "z"]⟩
+        pure ⟨#[("z", some (.named "u64"), .atom "0")], .call "l2r_nat_small" #[] #[.var "z"]⟩
       else if n == "Int" then
-        pure ⟨#[("z", some (.named "i64"), .atom "0")], .ctor "Int" (some "Small") #[.var "z"]⟩
+        pure ⟨#[("z", some (.named "i64"), .atom "0")], .call "l2r_int_small" #[] #[.var "z"]⟩
       else if n == "LStr" then pure (.ofExpr (← strLit ""))
       else if n == "LNatArr" then pure (.ofExpr (.call "l2r_natarr_empty" #[] #[]))
       else if n == "LIntArr" then pure (.ofExpr (.call "l2r_intarr_empty" #[] #[]))
@@ -386,14 +386,15 @@ def wordOf (e : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
   return none
 
 /-- The value of Reussir type `n` that natively is the boxed scalar of word
-`w : u64` (see `wordOf`): `Nat` `w`; `Int` the signed value of its 32 bits
+`w : u64` (see `wordOf`): `Nat` `w` (`lean_usize_to_nat`); `Int` the signed
+value of its 32 bits
 (`lean_scalar_to_int64`); a fixed-width integer, `Bool` (nonzero) or an
 enumeration the bits of its width (`lean_unbox` then truncation; an index
 past the last constructor gives the last one, as Lean's `switch` does); a
 constructor without fields (`ctorOfWordFn`). `none` for other types. -/
 def ofWord (w : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
   let u64 := RR.Ty.named "u64"
-  if n == "Nat" then return some (.ctor "Nat" (some "Small") #[w])
+  if n == "Nat" then return some (.call "lean_usize_to_nat" #[] #[w])
   if n == "Int" then return some (.call "l2r_int_of_word" #[] #[w])
   if n ∈ ["u8", "u16", "u32"] then return some (.cast w (.named n))
   if n == "bool" then

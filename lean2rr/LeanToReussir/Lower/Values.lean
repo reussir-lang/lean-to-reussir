@@ -5,13 +5,14 @@ import LeanToReussir.Lower.Borrow
 namespace LeanToReussir
 open Lean Compiler LCNF
 
-/-- A `Nat` literal: `Small` below 2^64, otherwise parsed by the runtime
-from its decimal digits in the string literal table (a flat call: a nested
-arithmetic expression per limb overflowed rrc's stack for literals of
-thousands of digits, and cost quadratic time). -/
+/-- A `Nat` literal: a small value below 2^63 (`l2r_nat_small k`, the word
+`2k + 1`), otherwise a big number parsed by the runtime from its decimal
+digits in the string literal table (a flat call: a nested arithmetic
+expression per limb overflowed rrc's stack for literals of thousands of
+digits, and cost quadratic time). -/
 def natLiteral (n : Nat) : LowerM RR.Expr := do
-  if n < 2 ^ 64 then return .ctor "Nat" (some "Small") #[.atom (toString n)]
-  return .call "l2r_nat_norm" #[] #[.call "l2r_big_of_decimal_lstr" #[] #[← strLit (toString n)]]
+  if n < 2 ^ 63 then return .call "l2r_nat_small" #[] #[.atom (toString n)]
+  return .call "l2r_nat_of_decimal_lstr" #[] #[← strLit (toString n)]
 
 /-- Constructor `c` applied to all its arguments `vals` (parameters, then
 fields), building a value of `fullRt`. -/

@@ -22,7 +22,7 @@ and passes").
 | `split-map-loops` | a `map` loop that changes the element representation writes a new array | only loops of Lean's exact shape (`loopShape?`, `splitCode` fails otherwise): derived arrays used only at the loop index, entered at index 0, never captured | [arrays](representations/arrays.md#maps-that-change-the-element-representation-write-a-new-array) |
 | `placeholder-cache` | placeholders that would allocate built once, in a once-cell | only heap placeholders; a placeholder is never inspected | [placeholders](representations/placeholders.md#placeholders-that-allocate-are-built-once) |
 | `float-lits` | float literals folded to their bits at compile time | literal arguments only (the functions are pure and total); work bound: exponent ≤ 2000, mantissa (or `Float.ofNat`'s argument) at most 4096 bits | below |
-| `cheap-consts` | constants of small literals recomputed at each use | `isCheapConst`: unboxed types only, `Nat` literals < 2^63, constructors, total scalar conversions, other cheap constants; no strings | below |
+| `cheap-consts` | constants of small literals recomputed at each use | `isCheapConst`: unboxed types only, every `Nat`/`Int` small (`Nat` literals and `Nat.succ` < 2^63, `Int.ofNat`/`Int.negSucc` of `int32` values), other constructors, total scalar conversions, other cheap constants; no strings | below |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code | none needed: the same strings (unary calls only) | [nat-int](representations/nat-int.md#natrepr-of-0127-shares-one-string-per-number) |
 | `jp-sink` | join points moved to the smallest code containing their jumps | moves only, never duplicates; binders are unique | [join points](control-flow/join-points.md#join-points-are-sunk-before-the-choice-jp-sink) |
 | `jp-small` | small join points duplicated at their jumps (J1′) | none needed for soundness (a copy runs the same code once per path); code-size bounds: own body ≤ 40, a copy ≤ 480 (join points jumped to once counted at full size), extra copies ≤ 2000 (4000 for a loop's continuation); never a J2 join point | [join points](control-flow/join-points.md#small-join-points-are-duplicated-within-three-bounds-jp-small) |
@@ -54,12 +54,18 @@ and passes").
 - **What:** A constant whose code only builds unboxed values from small
   literals, constructors and total scalar conversions (`UInt32.ofNat 0`,
   `Float.ofBits`, or another such constant, up to 8 deep) is recomputed at
-  every use instead of read from a once-cell.
+  every use instead of read from a once-cell. Every `Nat`/`Int` it builds
+  must be small (one word): the pass tracks the known values of the
+  `Nat`/`Int` variables it binds and accepts `Nat.succ` below 2^63 and
+  `Int.ofNat`/`Int.negSucc` of `int32` values only.
 - **Why:** It cannot panic, trace or allocate, so the change is
-  unobservable, and a once-cell read (with its `ElemBox` for `Nat`/`Int`)
-  costs more: deriv 1.20x → 1.11x native (a570011); `instInhabitedUInt32`
-  read on every `get!` of an `Array UInt32`: qsort 1.03x → 0.89x (8c58721).
-- **Where:** `Opt/CheapConsts.lean`: `isCheapConst`, `isUnboxedTy`; hook
+  unobservable, and a once-cell read costs more: deriv 1.20x → 1.11x
+  native (a570011); `instInhabitedUInt32` read on every `get!` of an
+  `Array UInt32`: qsort 1.03x → 0.89x (8c58721). A big `Nat`/`Int` is a
+  heap number: `def K : Int := 3000000000` recomputed was allocated at
+  every use, 7-8x native in a loop (RV8N-01; test `RtNatConst` with
+  `nat-alloc-check.sh`).
+- **Where:** `Opt/CheapConsts.lean`: `isCheapConst` (`smallCtor`), `isUnboxedTy`; hook
   `LowerHooks.recomputeConst`; `Lower/Code.lean`: `lowerDecl`.
 - **Remove only if:** the pass is off (every constant outside closed-term
   chains is then cached).

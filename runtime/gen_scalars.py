@@ -40,14 +40,12 @@ def fl(x):
 def unsigned(name, bits, t):
     out = [f"// ---- {name} ----", ""]
     add = out.append
-    add(f"fn lean_{name}_of_nat(a : Nat) -> {t} {{")
-    add("    match a {")
-    add(f"        Nat::Small(x) => x as {t},")
-    add(f"        Nat::Big(b) => l2r_big_low(b) as {t}")
-    add("    }")
-    add("}")
+    add(f"fn lean_{name}_of_nat(a : Nat) -> {t} {{ l2r_nat_low(a) as {t} }}")
     add(f"fn lean_{name}_of_nat_mk(a : Nat) -> {t} {{ lean_{name}_of_nat(a) }}")
-    add(f"fn lean_{name}_to_nat(a : {t}) -> Nat {{ Nat::Small{{a as u64}} }}")
+    if bits < 64:
+        add(f"fn lean_{name}_to_nat(a : {t}) -> Nat {{ l2r_nat_small(a as u64) }}")
+    else:
+        add(f"fn lean_{name}_to_nat(a : {t}) -> Nat {{ l2r_nat_of_u64(a) }}")
     for op, e in [("add", "a + b"), ("sub", "a - b"), ("mul", "a * b"),
                   ("land", "a & b"), ("lor", "a | b"), ("xor", "a ^ b")]:
         add(f"fn lean_{name}_{op}(a : {t}, b : {t}) -> {t} {{ {e} }}")
@@ -82,20 +80,13 @@ def signed(name, bits, t, s):
     mn, mx = 1 << (bits - 1), (1 << (bits - 1)) - 1  # MIN as a bit pattern, MAX
     out = [f"// ---- {name} ----", ""]
     add = out.append
-    add(f"fn lean_{name}_of_int(a : Int) -> {t} {{")
-    add("    match a {")
-    add(f"        Int::Small(x) => x as {t},")
-    add(f"        Int::Big(b) => l2r_big_low_twos(b) as {t}")
-    add("    }")
-    add("}")
-    add(f"fn lean_{name}_of_nat(a : Nat) -> {t} {{")
-    add("    match a {")
-    add(f"        Nat::Small(x) => x as {t},")
-    add(f"        Nat::Big(b) => l2r_big_low(b) as {t}")
-    add("    }")
-    add("}")
+    add(f"fn lean_{name}_of_int(a : Int) -> {t} {{ l2r_int_low_twos(a) as {t} }}")
+    add(f"fn lean_{name}_of_nat(a : Nat) -> {t} {{ l2r_nat_low(a) as {t} }}")
     to_int = "lean_int64_to_int_sint" if name == "int64" else f"lean_{name}_to_int"
-    add(f"fn {to_int}(a : {t}) -> Int {{ Int::Small{{(a as {s}) as i64}} }}")
+    if bits < 64:
+        add(f"fn {to_int}(a : {t}) -> Int {{ l2r_int_small((a as {s}) as i64) }}")
+    else:
+        add(f"fn {to_int}(a : {t}) -> Int {{ l2r_int_of_i64(a as i64) }}")
     for op, e in [("add", "a + b"), ("sub", "a - b"), ("mul", "a * b"),
                   ("land", "a & b"), ("lor", "a | b"), ("xor", "a ^ b")]:
         add(f"fn lean_{name}_{op}(a : {t}, b : {t}) -> {t} {{ {e} }}")

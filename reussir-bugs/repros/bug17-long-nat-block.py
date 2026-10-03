@@ -4,8 +4,9 @@
     bug17-long-nat-block.py N OUT.lean [Nat|UInt64]
 
 `longDo` computes x1 .. xN, each from the previous one, and calls itself
-three times. `Nat` is a two-arm [value] enum in lean2rr's output (a small
-number or a big one). lean2rr cuts long tail paths (bug 17 workaround, also
+three times. `Nat` was a two-arm [value] enum in lean2rr's output (a small
+number or a big one) when the numbers below were measured; it is now one
+tagged word (patch 0050) whose inline fast paths branch on small or big. lean2rr cuts long tail paths (bug 17 workaround, also
 in recursive functions); build with L2R_NO_OUTLINE=1 in lean2rr's
 environment (as run.sh does) so that this body reaches rrc whole. rrc's
 memory grows about as N^2 on Nat and stays small on UInt64.
