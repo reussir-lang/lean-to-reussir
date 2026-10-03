@@ -7,7 +7,7 @@ import LeanToReussir.PassConfig
 J1′ of the join-point strategy (translation plan §5.6): a join point whose
 body is small (at most 40 bindings, alternatives and exits, nested join
 points included), whose copy, with the join points inlined into it,
-expands to at most 480, whose copies beyond the first add at most 2000,
+expands to at most 480, whose copies beyond the first add at most 4000,
 and that is not J2, is inlined at each of its jumps, like J1, instead of
 outlined (J3). Without this pass such join points are outlined.
 -/
@@ -73,8 +73,12 @@ def copyBudget : Nat := 480
 one copy that inlining a single jump makes: (jumps - 1) × `copySize`. A
 join point jumped to from the many alternatives of a wide `match` (a
 `match` with 800 arms, each going on to an alternative of the next
-`match`) is outlined instead of copied into every arm. -/
-def copiesBudget : Nat := 2000
+`match`: 260 jumps to copies of about 150 nodes) is outlined instead of
+copied into every arm. A loop's continuation after a `match` of up to
+about 100 arms (copies of 30-40 nodes) is still copied: outlined, the loop
+would become a state machine, or, through mutual recursion, use a stack
+frame more per iteration. -/
+def copiesBudget : Nat := 4000
 
 /-- Small join points (nested join points included, since sinking nests
 them) are duplicated at their jumps (like J1) rather than outlined:

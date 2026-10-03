@@ -1249,7 +1249,7 @@ struct, which is destructured afterwards.
 inlined at each of its jumps, like J1, when it is small: its body has at
 most 40 bindings, alternatives and exits (nested join points included), a
 copy of it expands to at most 480, and its copies beyond the first add at
-most 2000 (jumps minus one, times the expansion). The expansion counts, at
+most 4000 (jumps minus one, times the expansion). The expansion counts, at
 each jump, the body of the join point jumped to when that is inlined there
 too: a join point nested in the copy (at every jump to it), another join
 point jumped to once (J1 inlines it whatever its size), or another join
@@ -1259,7 +1259,7 @@ become a state machine or mutually recursive, and Reussir could not reuse a
 cell matched before the jump for a construction after it. Duplication is
 recursive: small join points inside a duplicated body, and those it jumps
 to, are duplicated again. The bounds keep every copy within 480 nodes and
-what the copies of one join point add within 2000, so code grows linearly.
+what the copies of one join point add within 4000, so code grows linearly.
 Each bound closes a blow-up the others allowed:
 - the bound on the body alone: Lean leaves sibling join points that are
   jumped to from two others, which sinking cannot nest. A sequence of
@@ -1279,10 +1279,13 @@ Each bound closes a blow-up the others allowed:
   made (Lean's dead-branch elimination leaves such join points, for
   instance after a `match` on an `Option` that is always `some`).
 The expansion is an upper bound (a J2 or outlined target costs only its
-jump); 480 is generous enough that a loop whose condition is a few
-`&&`/`||` tests, each a join point jumping two or three times to the
-shared continuation (an expansion of 300-350), stays a plain loop and does
-not become a state machine. Behaviour does not change. (Optional pass `jp-small`; without it
+jump). The budgets are generous enough that loops keep their shape: a loop
+whose condition is a few `&&`/`||` tests, each a join point jumping two or
+three times to the shared continuation, expands to 300-350; a loop's
+continuation after a `match` of up to about 100 arms (copies of 30-40
+nodes) is still copied into each arm. Outlined, such a continuation makes
+the loop a state machine, or, in mutual recursion, a stack frame more per
+iteration. Behaviour does not change. (Optional pass `jp-small`; without it
 such join points are outlined, J3.)
 
 **J3, otherwise: outline.** Some paths `return` directly or jump to a

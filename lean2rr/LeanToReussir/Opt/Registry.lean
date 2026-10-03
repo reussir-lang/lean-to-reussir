@@ -82,7 +82,7 @@ def optimizations : Array OptPass := #[
   ⟨"cheap-consts", true, "constants built from small literals and scalar conversions recomputed at each use, not cached", CheapConsts.install⟩,
   ⟨"prelude-repr", true, "Nat.repr/Int.repr calls replaced by the runtime's GMP versions (same strings; the runtime keeps them, unused, without the pass)", PreludeRepr.install⟩,
   ⟨"jp-sink", true, "join points moved down to the smallest code containing their jumps, before the J1-J4 choice", JpSink.install⟩,
-  ⟨"jp-small", true, "small join points (own body at most 40 nodes, a copy expanding to at most 480 with the join points inlined into it, the copies beyond the first adding at most 2000) duplicated at their jumps (J1') instead of outlined", JpSmall.install⟩,
+  ⟨"jp-small", true, "small join points (own body at most 40 nodes, a copy expanding to at most 480 with the join points inlined into it, the copies beyond the first adding at most 4000) duplicated at their jumps (J1') instead of outlined", JpSmall.install⟩,
   ⟨"state-machines", true, "a loop's state machine (J4) entered without allocation: parameters passed beside a nullary entry variant (placeholders at jumps)", StateMachines.install⟩,
   ⟨"lazy-fields", true, "fields of a matched value kept live (stored, returned or passed to a call whole) bound where used (Reussir bug 7 workaround)", LazyFields.install⟩,
   ⟨"nullary-scrutinee", true, "in the arm of a constructor without fields, the matched value rebuilt instead of kept", NullaryScrutinee.install⟩,
