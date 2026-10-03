@@ -596,9 +596,19 @@ has this shape: derived arrays are read and written only at the loop index
 loop with the index plus one after the write (or with the index to the loop
 that a `_redArg` wrapper calls), returned, put in constructors or passed to
 join points, and never captured or used otherwise; the entry passes the
-literal index `0` (possibly through join-point parameters). Otherwise the
+literal index `0` (possibly through join-point parameters). The values it
+stores must all have one type `β` that Stage 3 recovered, neither `lcAny`
+nor `◾`. Otherwise the
 loop keeps the `Box` array: its input is converted once on entry, and its
 result type (`Array β` by the `map` rule) makes it convert once on exit.
+A map whose function projects a field of a parametric structure
+(`(xs.zip ys).map (·.2)`, `rs.map (·.y)` with `structure R (α) where s :
+String; y : α`) is such a loop: the element it reads from `Array lcAny`
+has type `lcAny`, so the fields of the `cases` on it stay `lcAny` (round 7
+RV7D-01: they had been given the constructor's parameter types, `◾` or an
+earlier field's type, and the split loop's result was an `Array ◾` read
+back as zeros, or an `Array String` holding `Nat`s; test
+`RtMapProjFields`).
 The original loop is dropped when nothing reachable calls it any more, and
 the fixpoint runs once more, so the values the split loop reads can type
 what they flow into.
@@ -2621,8 +2631,10 @@ Each item says what differs and when.
   where native Lean replaces the elements of one array (peak memory
   0.7–1.1x native for scalar targets in tests, more for records, whose cells
   are larger: §7's cheaper `Nat`). Maps that keep the representation run in
-  place. A map loop of another shape (not Lean's) still converts its input
-  to an array of `Box` on entry and back on exit.
+  place. A map loop of another shape (not Lean's), or one whose function
+  projects a field of a parametric structure (`(xs.zip ys).map (·.2)`,
+  §4), still converts its input to an array of `Box` on entry and back on
+  exit.
 - *Element storage*: array elements, once-cell values and polymorphic
   extern arguments whose type cannot cross the FFI boundary (`[value]`
   tuples, closures) are wrapped in an `ElemBox` cell, one allocation each;
