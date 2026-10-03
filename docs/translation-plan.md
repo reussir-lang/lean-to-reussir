@@ -105,7 +105,8 @@ imports with the program and Stage 1 calls instead (`Mono.redirectTarget`).
 
 Outside `lean2rr/`: `runtime/` (the prelude `prelude.rr` and the runtime
 crate `leanrt`), `scripts/l2r.py` (the driver: lean2rr, then rrc),
-`reussir-patches/` (the local Reussir patches, docs/reussir-bugs.md),
+`reussir-bugs/` (the Reussir bugs met, their repros and the local Reussir
+patches),
 `tests/`, `docs/`.
 
 The core translation is the plain one: the rules of this plan without the
@@ -1144,11 +1145,12 @@ used and every field is bound at the match):
   instead of the cell actually freed: `TreeMap.insert` rebuilt every node
   of the path, and so did a BST insert whose key comparison is a call
   before the branch (`Nat`, `String`, `compare`), even with the local fix
-  of Reussir bug 7 (docs/reussir-bugs.md). A structure (one constructor:
-  no match, its fields are projections) that stays live the same way
-  projects only the fields used while it is live; an inner alternative
-  that no longer uses it projects the others there (the pair `(k', t)` of
-  an association list, kept whole when its key does not match).
+  of Reussir bug 7 (reussir-bugs/07-phantom-reuse-donor.md). A structure
+  (one constructor: no match, its fields are projections) that stays live
+  the same way projects only the fields used while it is live; an inner
+  alternative that no longer uses it projects the others there (the pair
+  `(k', t)` of an association list, kept whole when its key does not
+  match).
   A merge (`List.mergeSort`'s `mergeTR.go`, the classic `mergesort`'s
   `merge.go`) then reuses the cell it takes apart, as native Lean does.
   Without the rule for calls it allocated a cell at every step and freed
@@ -2265,7 +2267,7 @@ Probe results (Reussir at the pinned commit):
   across the FFI (for `Nat` array elements without a wrapper); borrowed
   FFI parameters (an array `get` currently takes ownership and releases);
   a no-inline attribute (lean2rr uses `#[transform_anchor]`, whose
-  `no_inline` is a side effect, docs/reussir-bugs.md bug 20); small
+  `no_inline` is a side effect, reussir-bugs/20-statet-tower.md); small
   integers as immediates (for one-word `Nat` fields); bounded-depth frees
   (local patches 0013-0015).
 

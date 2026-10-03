@@ -1,10 +1,8 @@
-# Patch 0005: TokenReuse crashes on a one-armed `if` (bug 5)
+# 5. TokenReusePass crashes on a one-armed `if`
 
-Patch file: `../0005-l2r-local-bug-5-free-tokens-on-the-else-path-of-an-s.patch`
-(`l2r-local` commit `e033367b`). Bug section:
-[docs/reussir-bugs.md, bug 5](../../docs/reussir-bugs.md#5-tokenreusepass-crashes-on-a-one-armed-if).
+## Summary
 
-## 1. Summary
+**Kind:** bug. **Status:** patched (0005).
 
 TokenReuse matches cells freed by releases ("tokens") with later
 allocations of the same size. A token that no allocation takes must be
@@ -13,13 +11,14 @@ allocation inside the then-branch takes it, the pass frees it at the end
 of the else-branch instead. When the `if` had no else-branch (MLIR's
 canonical form of a one-armed `scf.if`), the pass looked up the first
 block of an empty region, got a dangling reference, and rrc crashed with
-SIGSEGV (sometimes it hung). The patch creates the missing else block,
+SIGSEGV (sometimes it hung). Patch 0005 creates the missing else block,
 holding only an `scf.yield`, and frees the token there.
 
-## 2. Symptom
+## Symptom and repro
 
-Repro `docs/reussir-bugs/bug05-one-armed-if.rr` (found by differential
-fuzzing in review round 1, finding RV-5, and reduced by hand):
+Repro [`repros/bug05-one-armed-if.rr`](repros/bug05-one-armed-if.rr)
+(found by differential fuzzing in review round 1, finding RV-5, and reduced
+by hand):
 
 ```
 enum T { N(u64, T, T), L }
@@ -42,31 +41,33 @@ fn main() {
 }
 ```
 
-Command: `rrc bug05-one-armed-if.rr -O aggressive`.
+**Command.** `rrc bug05-one-armed-if.rr -O aggressive`.
 
-- Expected: compiles; prints `3`.
-- Actual on ef922049: rrc dies with SIGSEGV (exit 139) at every `-O`
-  level, with or without `--reuse-across-call`. `run.sh` printed
-  `bug 05   REPRODUCES  rrc killed by SIGSEGV   [-O aggressive]`. In gdb
-  the crash is in `ReussirTokenFreeOp::create` → `OperationState` →
-  `StringMapImpl::FindKey`, called from TokenReuse (round 1). The patch
-  message adds that it sometimes hung instead; one fuzz seed made the
-  unpatched rrc spin for more than 3 minutes.
+**Expected.** Compiles; prints `3`.
 
-The first lean2rr case was the prelude's panic path, with
-`--reuse-across-call`. Without that flag, the calls before the `if` flush
+**Actual on ef922049.** rrc dies with SIGSEGV (exit 139), at every `-O`
+level, with or without `--reuse-across-call`. `run.sh` printed
+`bug 05   REPRODUCES  rrc killed by SIGSEGV   [-O aggressive]`. In gdb the
+crash is in `ReussirTokenFreeOp::create` → `OperationState` →
+`StringMapImpl::FindKey`, called from TokenReuse (round 1). In some builds
+it hangs instead (the dangling block is undefined behaviour; the patch
+message says so too): one fuzz seed made the unpatched rrc spin for more
+than 3 minutes.
+
+The first lean2rr case was the prelude's panic path, which needed
+`--reuse-across-call`: without that flag, the calls before the `if` flush
 every token.
 
-## 3. Root cause
+## Cause
 
 `lib/Transformation/TokenReuse/TokenReuse.cpp`,
 `TokenReusePass::oneShotTokenReuse`, walks each region keeping the set of
 available tokens (an immutable `immer::set`). At an op with regions
 (`RegionBranchOpInterface`: `scf.if`, `scf.index_switch`, dispatches), it
 recurses into each region with the current set and intersects the
-results. A token that survives one region but not another (it was taken,
-or freed at a call, inside the other region) must be freed at the end of
-the region where it survived:
+results. A token available before a branch op and consumed in one of its
+regions (taken, or freed at a call) must be freed at the end of every
+other region, where it survived:
 
 ```c++
 for (size_t i = 0; i < branchResults.size(); ++i) {
@@ -114,7 +115,21 @@ only has side effects. In the repro it comes from the
 happens at every `-O` level, because the canonicalizer runs at every
 level.
 
-## 4. The fix
+## lean2rr
+
+Runtime panics reach `l2r_stderr_put` through an `extern "C"` trampoline
+called from Rust (plan §5.12), which removes the shape from the prelude.
+User code can still produce it (a nested match inside a constructor
+argument, with an `if` choosing between fields), at every `-O` level, so
+the driver's retry without `--reuse-across-call` does not help. With the
+patch no lean2rr workaround is needed any more, though the prelude change
+stays.
+
+## Patch
+
+Patch file
+[`patches/0005-l2r-local-bug-5-free-tokens-on-the-else-path-of-an-s.patch`](patches/0005-l2r-local-bug-5-free-tokens-on-the-else-path-of-an-s.patch)
+(`l2r-local` commit `e033367b`).
 
 **New helper `getOrCreateExitBlock(region)`:**
 
@@ -169,34 +184,26 @@ empty else. Ops with non-empty regions take the old code path unchanged.
 No other region-branch op with an empty region was seen, and such an op
 now fails the pass with a diagnostic instead of crashing.
 
-## 5. Verification
+**Verification.**
 
 - Review round 2: the RV-5 repro and the round-1 fuzz seeds that crashed
   TokenReuse (generator seeds 89, 1151, 2161) compile and run correctly. A
-  dedicated test (`onearm.rr`) covers the original one-armed
-  side-effect `if`, nested one-armed ifs with constructions at both levels,
-  a value-yielding `if` containing a one-armed one, a token produced
-  inside the then-branch and consumed after it, and one-armed ifs inside
+  dedicated test (`onearm.rr`) covers the original one-armed side-effect
+  `if`, nested one-armed ifs with constructions at both levels, a
+  value-yielding `if` containing a one-armed one, a token produced inside
+  the then-branch and consumed after it, and one-armed ifs inside
   member-match arms. It ran under six flag sets (reuse across calls on and
   off, `-O none/default/aggressive`, packed layout). The patched plain and
   ASan builds agreed with each other and with the unpatched rrc wherever
   that one compiled.
 - Rounds 3 and 4: no change, included in every combined stack's fuzzing.
-- `run.sh` on the patched build:
+- On the round-2 stack: FIXED (`3`). `run.sh` on the patched build:
   `bug 05   FIXED       compiles, prints 3   [-O aggressive]`.
 
-## 6. Effect on lean2rr
+**Effect on lean2rr.** No rrc crash on a one-armed `if` that has to free a
+token, whatever the user code.
 
-lean2rr had already reshaped its prelude: runtime panics reach
-`l2r_stderr_put` through an `extern "C"` trampoline called from Rust
-(plan §5.12), which removes the shape from the prelude. User code can
-still produce it: a nested match inside a constructor argument, with an
-`if` choosing between fields. It does so at every `-O` level, so the
-driver's retry without `--reuse-across-call` does not help. The patch
-removes the crash. No lean2rr workaround is needed for it any more, though
-the prelude change stays.
-
-## 7. Upstream note
+## Upstream note
 
 `TokenReusePass::oneShotTokenReuse` frees a token that does not survive a
 region branch at `op.getRegion(i).front().getTerminator()` for every other

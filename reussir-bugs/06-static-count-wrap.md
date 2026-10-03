@@ -1,12 +1,21 @@
-# Patch 0006: a static cell is freed after 2^32 references (bug 6)
+# 6. Static cells accumulate increments until the 32-bit count wraps
 
-> **Audit (2026-10-02):** a real bug, but not without a workaround: `--nullary-variant-encoding arch-independent` or `boxed` avoids it (the repro then prints the expected value). This patch is a speed choice over that flag; see bug 6 in `docs/reussir-bugs.md`.
+## Summary
 
-Patch file: `../0006-l2r-local-bug-6-never-free-a-tagged-immediate-whose-wrapped-count.patch`
-(`l2r-local` commit `565f9862`). Bug section:
-[docs/reussir-bugs.md, bug 6](../../docs/reussir-bugs.md#6-static-cells-accumulate-increments-until-the-32-bit-count-wraps).
+**Kind:** bug, with a flag workaround. **Status:** patched (0006).
 
-## 1. Summary
+**Verdict: bug, with a flag workaround.** Reussir's lowering states that a
+nullary dummy's count stays above the shared/unique decision point, but the
+default (TBI) encoding increments it unguarded with a 32-bit count. The two
+documented encodings `--nullary-variant-encoding arch-independent` and
+`boxed` avoid it: the repro prints `4294967300` with either. 0006 keeps the
+default encoding and its unguarded increment, so it is a speed choice over
+the flag. Measured on 2026-10-02 (pinned, best of 5, a loaded machine, so
+only indicative), `arch-independent` against the default with 0006,
+lean2rr/native time: rbtree 0.44/0.45, deriv 0.75/0.83, cfold 0.79/0.74,
+binarytrees 0.94/0.85, mergesort 0.52/0.46, monadic-interp 1.03/1.01: a
+few percent slower on three programs, faster on one. Remeasure on an idle
+machine before deciding between the flag and the patch.
 
 Reussir does not allocate nullary constructors such as `Nil` or `Leaf`.
 Each one is an *immediate*: a tagged pointer to a single static "dummy"
@@ -14,14 +23,14 @@ cell. On aarch64, a retain of an immediate still increments the dummy's
 32-bit reference count, and nothing ever decrements it. After 2^32
 references the count wraps around to 1. The next release then believes it
 holds the last reference, takes the "free the cell" branch, and hands the
-static dummy to the allocator: the program dies with SIGSEGV. The patch
+static dummy to the allocator: the program dies with SIGSEGV. Patch 0006
 makes that branch first check whether the value is one of its type's
 immediates; if it is, the release frees nothing and produces no reuse
 token. Retains stay exactly as cheap as before.
 
-## 2. Symptom
+## Symptom and repro
 
-Repro `docs/reussir-bugs/bug06-static-count-wrap.rr`:
+Repro [`repros/bug06-static-count-wrap.rr`](repros/bug06-static-count-wrap.rr):
 
 ```
 enum L { Nil, Cons(u64, L) }
@@ -39,10 +48,11 @@ fn count() -> u64 [{ std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap
 fn main() { say(loop_(L::Cons{1, L::Nil{}}, count(), 0)); }
 ```
 
-Every call of `len` binds the tail `t`, which is the `Nil` immediate, and
-so retains it once. The matching release takes the "shared" path, which
-skips its store for immediates (see below). Each call therefore adds one
-net increment to the `Nil` dummy's count. In Lean the same program is:
+`count()` is the first argument. Every call of `len` binds the tail `t`,
+which is the `Nil` immediate, and so retains it once. The matching release
+takes the "shared" path, which skips its store for immediates (see below).
+Each call therefore adds one net increment to the `Nil` dummy's count. In
+Lean the same program is:
 
 ```lean
 @[noinline] def len (l : List Nat) : Nat := l.length
@@ -53,17 +63,18 @@ def main (args : List String) : IO Unit :=
   IO.println (loop [args.length] 4294967300 0)
 ```
 
-Command: `rrc bug06-static-count-wrap.rr` with lean2rr's flags (`-O
+**Command.** `rrc bug06-static-count-wrap.rr` with lean2rr's flags (`-O
 aggressive --no-pack-record-members --reuse-across-call`), then `./bug06
 4294967300`.
 
-- Expected: `4294967300`.
-- Actual on ef922049: SIGSEGV (exit 139) after about 15 s. With
-  `4294967290` it prints `4294967290`, because the count has not wrapped
-  yet. `run.sh` printed
-  `bug 06   REPRODUCES  N = 4294967300: SIGSEGV (static Nil freed)`.
+**Expected.** `4294967300`.
 
-## 3. Root cause
+**Actual on ef922049.** SIGSEGV (exit 139) after about 15 s. With
+`4294967290` it prints `4294967290`, because the count has not wrapped yet.
+`run.sh` printed
+`bug 06   REPRODUCES  N = 4294967300: SIGSEGV (static Nil freed)`.
+
+## Cause
 
 **The immediate encoding.** The pass `reussir-special-pointer-tag`
 (`lib/Transformation/SpecialPointerTag/SpecialPointerTag.cpp`) rewrites
@@ -103,9 +114,10 @@ But the count word is 32 bits wide: `ReussirRcIncConversionPattern` uses
 Under TBI the increment is a plain `load i32; add 1; store i32` into the
 dummy, so the "unreachable" wrap takes only 2^32 references. Only the
 immortal encoding steers the increment's store (`steerNarrowImmortal`,
-which despite its name applies to every immortal-encoded taggable type).
-Bug 6 therefore needs TBI, so it happens on aarch64 only. The review
-confirmed that x86-64 never selects TBI.
+which despite its name applies to every immortal-encoded taggable type,
+and so already guards the increment of the shared dummy). Bug 6 therefore
+needs TBI, so it happens on aarch64 only. The review confirmed that x86-64
+never selects TBI.
 
 **The release.** `RcDecrementExpansionPattern`
 (`lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp`) expands
@@ -124,7 +136,8 @@ each `rc.dec` like this (pseudo-IR):
         }
 ```
 
-Nothing on the unique branch looks at the pointer. Once the dummy's count
+The decrement skips static pointers but tests "count == 1 → free" first:
+nothing on the unique branch looks at the pointer. Once the dummy's count
 has wrapped to 1, the release of a `Nil` takes the unique branch, and the
 dummy becomes a token. TokenReuse then either frees it (`token.free` →
 `__reussir_deallocate` → `mi_free` on a tagged pointer, SIGSEGV) or gives
@@ -135,7 +148,28 @@ A second, quieter error: after each increment the lowering emits
 dummy box's count starts at 2 and only ever grows". When the count passes
 through 0, that assumption is false, which is undefined behaviour for LLVM.
 
-## 4. The fix
+## lean2rr
+
+Any Lean program on aarch64 that takes more than about 4·10^9 references
+to the same nullary constructor (`[]`, `none`, a `leaf`), for example a
+long loop over a structure that contains one, crashed. lean2rr cannot
+avoid it in its own output: the retains come from Reussir's own lowering.
+It could pass `--nullary-variant-encoding arch-independent` (or `boxed`)
+to rrc; it uses 0006 instead, which keeps the default encoding (see the
+verdict above).
+
+## Patch
+
+Patch file
+[`patches/0006-l2r-local-bug-6-never-free-a-tagged-immediate-whose-wrapped-count.patch`](patches/0006-l2r-local-bug-6-never-free-a-tagged-immediate-whose-wrapped-count.patch)
+(`l2r-local` commit `565f9862`).
+
+The increment stays a plain load, add and store, so LLVM can still fold
+counts on fresh cells. The decrement's unique branch (count == 1) first
+checks whether the value is one of its type's nullary immediates; if it
+is, the decrement frees nothing and yields no token, so a wrapped count can
+never free or reuse the static cell. The `assume(old >= 1)` becomes
+`old >= 1 || top byte != 0`. Hunk by hunk:
 
 **Hunk 1 (RcDecrementExpansion.cpp, new `immediateTagsToGuard`).** It
 returns the nullary tags a released value may be the immediate of:
@@ -203,8 +237,8 @@ address, so real cells take the old path. The guard is also emitted under
 the immortal encoding (the module attribute is set for both). There it is
 redundant but harmless. The drop glue's member releases go through the
 same pattern (AcquireDropExpansion reuses it), so they are covered too.
-0013's `drop_and_free` returns early for nullary arms for the same
-reason.
+0013's `drop_and_free` returns early for nullary arms for the same reason
+([bug 13](13-long-list-drop.md)).
 
 **Alternative tried first.** The first version guarded the increment's
 store instead (an address `select` that sent an immediate's store to a
@@ -212,10 +246,11 @@ scratch word). Review round 1 (finding RV-2) measured it at +17-34% on a
 retain-heavy microbenchmark and +29% on rbtree on the test machine's
 Cortex-A725 cores. It also hid the count of a freshly allocated cell from
 LLVM, so increments on new cells stopped being folded. The sources quote
-different peak costs for that version: "up to 22%" (docs/reussir-bugs.md),
-"up to 30%" (the patch message) and 34% (the review's microbenchmark).
+different peak costs for that version: "up to 22%" on the Cortex-A725
+cores (this entry's own measurement), "up to 30%" (the patch message) and
+34% (the review's microbenchmark).
 
-## 5. Verification
+**Verification.**
 
 - Review round 1 rejected the store-guard version (above). Round 2
   reviewed this version with forced wraps: an FFI hook reset every dummy's
@@ -228,35 +263,30 @@ different peak costs for that version: "up to 22%" (docs/reussir-bugs.md),
   4294967300 iterations, through lean2rr) passed in 18.5 s.
 - Rounds 3, 4, 4b and 4c repeated the forced-wrap tests and wrap fuzzing
   with 0013 and 0014 applied.
-- `run.sh` on the patched build:
+- On the round-2 stack: FIXED (`4294967300`, 14 s). `run.sh` on the
+  patched build:
   `bug 06   FIXED       N = 4294967300: prints 4294967300   [-O aggressive --no-pack-record-members --reuse-across-call]`.
-- Cost: docs/reussir-bugs.md gives about 4% on rbtree and nothing
-  measurable elsewhere. Round 2 (finding R2-3) measured +11% on the
-  microbenchmark on Cortex-A725 and +2% on Cortex-X925, and rbtree +2.7%.
-  Round 2 (R2-4) also found a few lost token reuses: in 12 of 120
-  generated programs, 0.2-1.2% more allocations. The suspected cause is
-  that the guard nests the unique branch one `scf.if` deeper, which hides
-  some member releases from TokenReuse's search for tokens trapped in
-  branches. Round 3 found both unchanged. docs/reussir-bugs.md does not
-  mention R2-4.
+- **Cost.** About 4% on rbtree and nothing measurable elsewhere, on both
+  core types of the test machine. Review round 2 (finding R2-3) measured
+  +11% on the microbenchmark on Cortex-A725 and +2% on Cortex-X925, and
+  rbtree +2.7%. Round 2 (finding R2-4, still present in round 3) also
+  measured a side effect: the extra branch makes TokenReuse find slightly
+  fewer reuses, 0.2 to 1.2% more allocations in 12 of 120 generated test
+  programs. The suspected cause is that the guard nests the unique branch
+  one `scf.if` deeper, which hides some member releases from TokenReuse's
+  search for tokens trapped in branches. Round 3 found both unchanged;
+  judged acceptable against a crash.
 
-## 6. Effect on lean2rr
-
-Any Lean program on aarch64 that takes more than about 4·10^9 references
-to the same nullary constructor (`[]`, `none`, a `leaf`), for example a
-long loop over a structure that contains one, used to crash. lean2rr
-cannot avoid it: the retains come from Reussir's own lowering. With the
-patch it no longer crashes.
+**Effect on lean2rr.** A static cell is never freed or reused, even after
+2^32 references: the long loops above no longer crash.
 
 A remaining caveat, from review round 1 (RV-6), which cannot be reproduced
 on the test machine: TBI treats any pointer with a nonzero top byte as an
-immediate. An allocator that tags real pointers (memory tagging, HWASan)
-would make real cells look like immediates. Their releases would be
-skipped (a leak). The allocator lean2rr uses returns untagged pointers,
-and the sanitizer modes require the untagged encoding (see "Other
-observations" in docs/reussir-bugs.md).
+immediate. An allocator that tags real pointers would make real cells look
+like immediates (see "Tagged pointers from the allocator" in
+[the index](README.md#other-observations)).
 
-## 7. Upstream note
+## Upstream note
 
 Under the TBI nullary-variant encoding, `rc.inc` increments the static
 dummy box's 32-bit count unguarded, so 2^32 references to one nullary

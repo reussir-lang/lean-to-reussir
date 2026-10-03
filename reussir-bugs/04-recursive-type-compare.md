@@ -1,10 +1,8 @@
-# Patch 0004: equal recursive types crash rrc (bug 4)
+# 4. `structurallySameType` recurses forever on equal recursive types
 
-Patch file: `../0004-l2r-local-bug-4-compare-recursive-record-types-coind.patch`
-(`l2r-local` commit `9736cfe5`). Bug section:
-[docs/reussir-bugs.md, bug 4](../../docs/reussir-bugs.md#4-structurallysametype-recurses-forever-on-equal-recursive-types).
+## Summary
 
-## 1. Summary
+**Kind:** bug. **Status:** patched (0004).
 
 When a construction reuses the cell of a value that was just freed,
 Reussir tries to skip storing fields whose bytes are already in place
@@ -13,15 +11,15 @@ types member by member. The comparison follows member records with no
 memory of what it is already comparing. Two distinct recursive types with
 the same shape, such as a user's `MyList` and `List`, made it recurse
 until rrc's worker thread ran out of stack: rrc died with SIGSEGV and no
-message. The patch compares coinductively: a pair of types met again while
-it is still being compared counts as equal. The patch also compares each
-record's capability (`[value]` or shared) and `fixed` flag. Without those
-two checks, fixing the crash would have turned some of these programs into
+message. Patch 0004 compares coinductively: a pair of types met again while
+it is still being compared counts as equal. It also compares each record's
+capability (`[value]` or shared) and `fixed` flag. Without those two
+checks, fixing the crash would have turned some of these programs into
 silent miscompiles.
 
-## 2. Symptom
+## Symptom and repro
 
-Repro `docs/reussir-bugs/bug04-recursive-type-compare.rr`:
+Repro [`repros/bug04-recursive-type-compare.rr`](repros/bug04-recursive-type-compare.rr):
 
 ```
 enum L1 { Cons(u64, L1), Nil }
@@ -42,17 +40,18 @@ fn get(s : S2) -> u64 { match s { S2::A(d, v) => { v }, S2::Z => { 0 } } }
 fn main() { say(get(conv(S1::A{V::C{1, L1::Nil{}}, num()}))); }
 ```
 
-Command: `rrc bug04-recursive-type-compare.rr -O aggressive`.
+**Command.** `rrc bug04-recursive-type-compare.rr -O aggressive`.
 
-- Expected: compiles; prints `1005`.
-- Actual on ef922049: rrc dies with SIGSEGV (exit 139), no message, at
-  every `-O` level. `run.sh` printed
-  `bug 04   REPRODUCES  rrc killed by SIGSEGV   [-O aggressive]`.
+**Expected.** Compiles; prints `1005`.
 
-In lean2rr this appeared as a user `MyList` next to `List`, with
+**Actual on ef922049.** rrc dies with SIGSEGV (exit 139) and no message, at
+every `-O` level. `run.sh` printed
+`bug 04   REPRODUCES  rrc killed by SIGSEGV   [-O aggressive]`.
+
+In lean2rr this showed up as a user `MyList` next to `List`, with
 `MyList.toList` reusing cons cells under `--reuse-across-call`.
 
-## 3. Root cause
+## Cause
 
 **Copy avoidance.** Token reuse lets a construction write into a freed cell
 of the same size. After that, `RcCreateFusion`
@@ -64,10 +63,10 @@ lowering then skips their stores (`shouldSkipFieldStore` in
 `BasicOpsLowering.cpp`). For variants the test is
 `markVariantAvoidedCopies` → `isLoadFromVariantField` →
 `hasCompatibleFieldPrefix`. Field i may be skipped if, for every index 0..i,
-the two arms have the same `memberIsField` flag and
-`structurallySameType` members. That check stands in for "field i is at
-the same offset". It is only valid under the declaration-order layout,
-which is the variant half of bug 2 (0002.md).
+the two arms have the same `memberIsField` flag and `structurallySameType`
+members. That check stands in for "field i is at the same offset". It is
+only valid under the declaration-order layout, which is the variant half
+of [bug 2](02-reuse-field-store.md).
 
 **The comparison** on ef922049:
 
@@ -95,11 +94,13 @@ bool structurallySameType(mlir::Type lhs, mlir::Type rhs) {
 }
 ```
 
-Named records in the Reussir dialect are uniqued by name, so a recursive
-member such as `L1` inside `L1::Cons` is the complete `L1` type again.
-`lhs == rhs` stops the recursion only when both sides are the very same
-type. In the repro, `conv` reuses the `S1` cell for an `S2`, and `v` (field
-1) is a load of `S1::A`'s field 1, so fields 0..1 are compared:
+It recurses into member records with no set of pairs already being
+compared. Named records in the Reussir dialect are uniqued by name, so a
+recursive member such as `L1` inside `L1::Cons` is the complete `L1` type
+again. `lhs == rhs` stops the recursion only when both sides are the very
+same type. In the repro, `conv` reuses the `S1` cell for an `S2`, and `v`
+(field 1) is a load of `S1::A`'s field 1, so it is a candidate for
+skipping, and the arms' members 0..1 are compared:
 
 ```
 S1::A.0 = V   vs  S2::A.0 = W
@@ -127,9 +128,22 @@ it twice:
   coinductive fix alone turned the crash into the same silent
   miscompile.
 
-## 4. The fix
+## lean2rr
 
-All changes are in `structurallySameType` and a new wrapper.
+`scripts/l2r.py` retries rrc without `--reuse-across-call` when rrc dies
+from a signal (and says so on stderr). That turns off reuse across calls
+for the whole program, and does not help when the crash happens without
+the flag, as in this repro. With the patch the retry stays, only as a
+fallback for unknown crashes; its comment in `scripts/l2r.py` still names
+this bug.
+
+## Patch
+
+Patch file
+[`patches/0004-l2r-local-bug-4-compare-recursive-record-types-coind.patch`](patches/0004-l2r-local-bug-4-compare-recursive-record-types-coind.patch)
+(`l2r-local` commit `9736cfe5`).
+
+**The fix.** All changes are in `structurallySameType` and a new wrapper.
 
 ```c++
 using AssumedEqualTypes = llvm::DenseSet<std::pair<mlir::Type, mlir::Type>>;
@@ -161,6 +175,14 @@ bool structurallySameType(mlir::Type lhs, mlir::Type rhs) {
 }
 ```
 
+The patch adds `rc_create_fusion_recursive_types.mlir`. A `MyList` cons
+cell reused for a `List` cons gets `skipFields = [1]`, which is correct:
+the head keeps its place. An "Other" list whose `Nil` arm differs gets no
+skip. A `[value]` record against a shared one of the same shape (the RV-1
+layout) gets no skip.
+
+**Why it is correct.**
+
 - **Coinduction.** When a pair of record types is met again, it is assumed
   equal. Any mismatch anywhere below makes every caller return `false`
   immediately, up to the top. So the assumption can only "close" a cycle
@@ -178,13 +200,7 @@ bool structurallySameType(mlir::Type lhs, mlir::Type rhs) {
 - Callers are unchanged. After 0002 only the variant prefix check uses the
   function.
 
-The patch adds `rc_create_fusion_recursive_types.mlir`. A `MyList` cons
-cell reused for a `List` cons gets `skipFields = [1]`, which is correct:
-the head keeps its place. An "Other" list whose `Nil` arm differs gets no
-skip. A `[value]` record against a shared one of the same shape (the RV-1
-layout) gets no skip.
-
-## 5. Verification
+**Verification.**
 
 - Review round 1 checked the coinductive rule itself and found it sound
   for the attributes it compares. It found RV-1 and RV-4 (above), which
@@ -200,23 +216,17 @@ layout) gets no skip.
   offsets coincide whenever a token fits.
 - Differential fuzzing in every round, and lean2rr's `MyListP` (user list
   ↔ `List`, rose trees, pair swaps) against native Lean.
-- `run.sh` on the patched build:
+- On the round-2 stack: FIXED (`1005`). `run.sh` on the patched build:
   `bug 04   FIXED       compiles, prints 1005   [-O aggressive]`.
 
-## 6. Effect on lean2rr
+**Effect on lean2rr.** Programs with a user type of the same shape as
+another recursive type, converting one into the other (`MyList.toList`, a
+copy of `List`, `Option` look-alikes), no longer crash rrc, and `[value]`
+and shared records never compare equal. This patch does not change the
+variant half of bug 2: the prefix check still assumes declaration order,
+and lean2rr keeps `--no-pack-record-members` for that.
 
-Programs with a user type of the same shape as another recursive type,
-converting one into the other (`MyList.toList`, a copy of `List`, `Option`
-look-alikes), no longer crash rrc.
-
-`scripts/l2r.py` still retries rrc without `--reuse-across-call` when rrc
-dies from a signal. Its comment still names this bug. The retry is now
-only a fallback for unknown crashes; it never helped when the crash also
-happened without the flag, as in this repro. This patch does not change
-the variant half of bug 2: the prefix check still assumes declaration
-order. lean2rr keeps `--no-pack-record-members` for that.
-
-## 7. Upstream note
+## Upstream note
 
 `RcCreateFusion`'s `structurallySameType` recurses without a visited set,
 so two distinct recursive record types of the same shape (e.g. a user list

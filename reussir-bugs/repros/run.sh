@@ -1,28 +1,32 @@
 #!/usr/bin/env bash
-# Build and run the repros of docs/reussir-bugs.md with one Reussir build.
+# Build and run the repros of the Reussir bugs in reussir-bugs/ (one file
+# per entry, NN-*.md; the index is reussir-bugs/README.md) with one Reussir
+# build.
 #
-#   docs/reussir-bugs/run.sh RRC_CHECKOUT [BUG...]
+#   reussir-bugs/repros/run.sh RRC_CHECKOUT [BUG...]
 #
 # RRC_CHECKOUT is a Reussir checkout with a build: its build/bin/rrc compiles
 # the repros, and plain .rr repros link against its build/target-rt/release.
-# BUG is a bug number (1, 02, 13, ...); the default is every bug. Each repro
-# prints one line:
+# BUG is a bug number (1, 02, 13, ...); the default is every bug that has a
+# line here (all but 22, whose generator is run by hand). Each repro prints
+# one line:
 #
 #   bug NN  REPRODUCES  the documented bad behaviour was seen
 #   bug NN  FIXED       the expected output was seen
 #   bug NN  OTHER       something else (shown)
-#   bug NN  SKIPPED     a tool is missing (shown)
+#   bug NN  SKIPPED     a tool is missing, or a slow repro under QUICK=1 (shown)
 #
 # followed by what was seen and the rrc flags the repro needs.
 #
 # Plain .rr repros are built with rrc alone (--emit executable plus the
-# polymorphic-FFI directories, as scripts/l2r.py passes them). The .lean
-# repros (13, 16, 17) go through scripts/l2r.py with L2R_REUSSIR set to the
-# checkout. They need Lean 4.33 (`lean` on PATH) and a lean2rr build
-# (`lake build` in lean2rr/, or L2R_LEAN2RR). l2r.py builds the runtime crate
-# leanrt for the checkout once, under runtime/leanrt/target/.
+# polymorphic-FFI directories, as scripts/l2r.py passes them). The Lean
+# repros (13 and 20, and the programs generated for 16 and 17) go through
+# scripts/l2r.py with L2R_REUSSIR set to the checkout. They need Lean 4.33
+# (`lean` on PATH) and a lean2rr build (`lake build` in lean2rr/, or
+# L2R_LEAN2RR). l2r.py builds the runtime crate leanrt for the checkout
+# once, under runtime/leanrt/target/.
 #
-# Bugs 10, 11, 16, 17, 20 and 23 are build-time bugs: the repros of 10, 11,
+# Bugs 10, 11, 16, 17, 20 and 23 are build-time entries: the repros of 10, 11,
 # 16, 17 and 23 are generated at two sizes and the line reports the growth
 # (for 23, of the link phase alone, timed through a rustc wrapper and
 # rrc -v); bug 20's is built with and without lean2rr's workaround. They

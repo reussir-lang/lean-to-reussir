@@ -281,7 +281,7 @@ mutually recursive functions. rrc's MLIR inliner follows every path of
 distinct small functions in such a cycle, so the program grows
 exponentially with the number of representations (an 8-line `StateT`
 tower used at `IO` did not build within 30 minutes or 15 GB;
-docs/reussir-bugs.md, bug 20); with the application functions of uniform
+reussir-bugs/20-statet-tower.md); with the application functions of uniform
 types inlinable, four towers in one program (`Cn3PolyScalar`) still took
 4.5 GB, 2 GB without. Out of line, they cost a call each (LLVM, which runs
 after Reussir's passes, still inlines them where it pays): the unboxing of

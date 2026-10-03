@@ -4,7 +4,7 @@ Status as of 2026-10-02 (branch `dev`). This is a plain-language overview
 for someone who knows Rust but not Lean. The full rules are in
 [`translation-plan.md`](translation-plan.md); the runtime is described in
 [`../runtime/README.md`](../runtime/README.md); the Reussir bugs met on the
-way are in [`reussir-bugs.md`](reussir-bugs.md).
+way are in [`../reussir-bugs/`](../reussir-bugs/README.md).
 
 ## In one paragraph
 
@@ -367,7 +367,8 @@ Measured on this machine (aarch64, 20 cores, shared with other jobs: load
 alternately, pinned to the least-loaded fast core; best of 5 (classic) or
 3 (Reussir suite); time ratio = lean2rr time / native time (below 1 =
 faster than native). Every run's output was checked against native.
-`dev` 9f5b642, Reussir `l2r-local` with the ten local patches.
+`dev` 9f5b642, Reussir `l2r-local` at `ef0235b9` (the local patches up to
+0015).
 
 **Classic corpus** (`tests/classic`, largest size):
 
@@ -463,8 +464,9 @@ time).
 
 lean2rr needs Reussir built from source with lean2rr's local patches
 (branch `l2r-local` of the checkout in `./reussir`; the patches are in
-[`../reussir-patches/`](../reussir-patches/), each explained in depth in
-[`../reussir-patches/details/`](../reussir-patches/details/README.md)).
+[`../reussir-bugs/patches/`](../reussir-bugs/patches/), each explained in
+depth in the file of its bug, indexed in
+[`../reussir-bugs/README.md`](../reussir-bugs/README.md)).
 They are local only, never submitted upstream, and each passed adversarial
 review before it was applied. An independent audit then checked whether
 each problem is really a Reussir bug:
@@ -482,9 +484,11 @@ each problem is really a Reussir bug:
   structures without recursion, in Lean's order (13, three patches);
   lean2rr's runtime needs it.
 
-All 20 Reussir problems met so far are documented with a reproducer,
+Every Reussir problem met so far is documented with a reproducer,
 including those lean2rr works around and those the audit classified as
-intended behaviour or build costs, in [`reussir-bugs.md`](reussir-bugs.md).
+intended behaviour or build costs, in
+[`../reussir-bugs/`](../reussir-bugs/README.md), whose status table also
+shows which patches are applied.
 Two parts of Reussir that its author offered (LLVM coroutine bindings,
 dynamic-extent arrays) are not needed: lean2rr's tasks need stackful
 contexts, which its runtime has, and Lean arrays are growable, which

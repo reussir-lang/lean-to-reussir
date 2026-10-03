@@ -1,12 +1,14 @@
-# Patch 0012: the parser swaps syntax subtrees whose hashes collide (bug 12)
+# 12. The parser's node cache swaps subtrees whose hashes collide
 
-> **Audit (2026-10-02):** a real bug, in Reussir's parser dependency `cstree` (0.14; unchanged in cstree's master): the node cache is keyed on a 32-bit hash with no equality check.
+## Summary
 
-Patch file: `../0012-l2r-local-bug-12-build-syntax-nodes-without-cstree-s-hash-only-node-cache.patch`
-(`l2r-local` commit `42635042`). Bug section:
-[docs/reussir-bugs.md, bug 12](../../docs/reussir-bugs.md#12-the-parsers-node-cache-swaps-subtrees-whose-hashes-collide).
+**Kind:** bug (in cstree). **Status:** patched (0012).
 
-## 1. Summary
+**Verdict: bug, in Reussir's parser dependency `cstree` (0.14), not in
+Reussir's code.** `get_cached_node` (`cstree/src/green/builder.rs`) keys its
+node cache on `{kind, text_len, child_hash: u32}` and never compares the
+children; cstree's current master has the same code. 0012 works around it
+in Reussir's sink by not using the cache.
 
 Reussir's parser builds its syntax tree with the `cstree` library.
 cstree's tree builder deduplicates small nodes: when a new node has at most
@@ -17,13 +19,15 @@ subtrees eventually collide, and the later one silently becomes a copy of
 the earlier one. A literal can turn into a variable of an unrelated
 function. That gives a baffling "unknown variable" error, or, if the
 variable happens to be in scope, a program that compiles and computes the
-wrong thing. The patch builds every syntax node directly, with no cache.
+wrong thing. Patch 0012 builds every syntax node directly, with no cache.
 The builder is still used for tokens, whose cache compares whole tokens.
 
-## 2. Symptom
+## Symptom and repro
 
-The repro must be a large file, so `docs/reussir-bugs/` has a generator,
-`bug12-node-cache-collision.py OUT.rr`:
+The repro must be a large file, so it is a generator,
+[`repros/bug12-node-cache-collision.py`](repros/bug12-node-cache-collision.py)
+`OUT.rr`. It writes a 1.9 MB program: about 187,000 comment lines that only
+move the parser's interner keys, then four small functions.
 
 ```python
 import sys
@@ -49,31 +53,33 @@ lines += [
 open(sys.argv[1], "w").write("\n".join(lines))
 ```
 
-The roughly 187,000 comment lines only use up interner keys: each comment
-is a distinct token text, and keys are handed out in order of first
-occurrence. The counts were found by search so that the keys of `vvvvvv`
-and `424242` make the constructor-argument nodes of `T::One{vvvvvv}` and
-`T::One{424242}` hash alike. Per the patch's unit test, the keys are
-149353 and 187378.
+The comment lines only use up interner keys: each comment is a distinct
+token text, and keys are handed out in order of first occurrence. The
+counts were found by search so that the keys of `vvvvvv` and `424242` make
+the constructor-argument nodes of `T::One{vvvvvv}` and `T::One{424242}`
+hash alike. Per the patch's unit test, the keys are 149353 and 187378.
 
-Command: `rrc OUT.rr -O aggressive`.
+**Command.** `rrc OUT.rr -O aggressive`.
 
-- Expected: `424242`.
-- Actual on ef922049: `7`, with no diagnostic, at every `-O` level.
-  `second`'s argument `T::One{424242}` is parsed as `T::One{vvvvvv}`, and
-  `vvvvvv` is `second`'s parameter. `run.sh` printed
-  `bug 12   REPRODUCES  prints 7 (the literal 424242 was parsed as the variable), expected 424242`.
+**Expected.** `424242`.
 
-In lean2rr output (docs/reussir-bugs.md):
+**Actual on ef922049.** `7`, with no diagnostic, at every `-O` level:
+`second`'s argument `T::One{424242}` is parsed as `T::One{vvvvvv}`, and
+`vvvvvv` is `second`'s parameter. `run.sh` printed
+`bug 12   REPRODUCES  prints 7 (the literal 424242 was parsed as the variable), expected 424242`.
 
-- `unknown variable x78617` on a 60,000-element list literal. The error
-  was reported at an integer literal whose node had collided with a node
-  holding a variable of a function 114,000 lines earlier. The patch message
-  gives the literal as `368973` in a 14 MB file.
+In lean2rr output this showed up as rrc errors that seemed to make no
+sense:
+
+- `unknown variable x78617` on a 60,000-element list literal, reported at
+  an integer literal whose node had collided with a node holding a variable
+  of a function 114,000 lines earlier (changing the literal to one that
+  occurs earlier in the file made it pass). The patch message gives the
+  literal as `368973` in a 14 MB file.
 - Earlier adversarial findings: a call swapped for another function's
   call, and a match pattern swapped for another variant (a type mismatch).
 
-## 3. Root cause
+## Cause
 
 `crates/reussir-syntax/src/parser/sink.rs`, `Sink::finish`, replays the
 parser's event stream (`Start`, `Token`, `Finish`) into a cstree
@@ -127,7 +133,7 @@ and returns the stored node on a hit (`entry(head).or_insert_with_key(...)`).
 The key's equality is derived from those three fields, so two nodes with
 equal kind, length and 32-bit child hash are "the same node", whatever
 their children. The new node's children are thrown away and the earlier
-subtree is used in their place.
+node's whole subtree is used in their place.
 
 What enters `child_hash`: a child node contributes its own head (its kind,
 length and child hash), and a child token contributes its kind, length and
@@ -135,17 +141,27 @@ length and child hash), and a child token contributes its kind, length and
 Interner keys are assigned in order of first occurrence in the file, so
 whether two nodes collide depends on everything before them. With a 32-bit
 hash, a file with millions of small nodes of the same kind and length can
-expect a collision; docs/reussir-bugs.md estimates about one per very
-large file. A swapped subtree that contains a local name almost always
-fails to compile, because lean2rr's local names are unique. Subtrees made
-only of global names and literals (zero-argument calls, patterns without
-binders, calls with literal arguments) can be swapped silently whenever
-their types agree.
+expect a collision: about one per very large file.
 
-## 4. The fix
+A swapped subtree that contains a local name almost always fails to
+compile, because lean2rr's local names are unique. Subtrees made only of
+global names and literals (zero-argument calls, patterns without binders,
+calls with literal arguments) can be swapped silently whenever their types
+agree.
 
-The sink no longer uses the builder for nodes (`sink.rs`, plus a test in
-`lib.rs`).
+## lean2rr
+
+Cannot avoid it: any shape, name or literal can collide, and its outputs
+are large (tens of MB for big programs).
+
+## Patch
+
+Patch file
+[`patches/0012-l2r-local-bug-12-build-syntax-nodes-without-cstree-s-hash-only-node-cache.patch`](patches/0012-l2r-local-bug-12-build-syntax-nodes-without-cstree-s-hash-only-node-cache.patch)
+(`l2r-local` commit `42635042`). It also applies alone on ef922049.
+
+**The fix.** The sink no longer uses the builder for nodes (`sink.rs`, plus
+a test in `lib.rs`).
 
 - **State.** `Sink<'s, 'i, I>` with its `builder` and `depth` becomes
   `Sink<'s>` with `green_tokens: Vec<GreenToken>` (one per lexed token),
@@ -185,18 +201,18 @@ ever changes, the test no longer forces a collision, but it still checks
 that the tree reproduces the source.
 
 **Cost.** Without node sharing the parser uses somewhat more memory. The
-sources measure different things:
+measurements differ in what they measure:
 
 - the patch message: a 14 MB file's HIR build uses about 40 MB (3.5%)
   more, in the same time;
-- docs/reussir-bugs.md: 7-18% more parse memory (a 101 MB file: 2.1 → 2.5
-  GB), and no change in rrc's peak memory on full builds;
+- this entry's own measurement: 7-18% more parse memory (a 101 MB file:
+  2.1 → 2.5 GB), and no change in rrc's peak memory on full builds;
 - review round 3 (`rrc -t hir` peak RSS): +2.3% on a 127 MB file and +1.1%
   on a 178 MB one, with identical HIR. A 101 MB file (`PrgPolyM1.rr`)
   stopped with three bug-12 errors at 3.0 GB unpatched, and completed at
   5.3 GB patched.
 
-## 5. Verification
+**Verification.**
 
 - Review round 3 found that the sink is the only place a green tree is
   built. `parse`, `parse_with_interner` and `parse_repl` (REPL and LSP)
@@ -209,16 +225,16 @@ sources measure different things:
   HIR is silently wrong.
 - Corpus, runtime suite and lean2rr programs with the combined stack:
   passed (round 3).
-- `run.sh` on the patched build: `bug 12   FIXED       prints 424242   [-O aggressive]`.
+- With 0012 (ef922049 + 0012 alone, and the patched build): FIXED
+  (`424242`). `run.sh` on the patched build:
+  `bug 12   FIXED       prints 424242   [-O aggressive]`.
 
-## 6. Effect on lean2rr
+**Effect on lean2rr.** Syntax nodes are never swapped for an earlier node
+with a colliding hash: both the "impossible" rrc errors on large outputs
+and the risk of silently wrong code are gone. The only cost is parse
+memory, as above.
 
-lean2rr cannot avoid this bug: any shape, name or literal can collide, and
-its outputs are large (tens of MB for big programs). The patch removes both
-the "impossible" rrc errors on large outputs and the risk of silently wrong
-code. The only cost is parse memory, as above.
-
-## 7. Upstream note
+## Upstream note
 
 reussir-syntax builds its green tree with cstree 0.14's `GreenNodeBuilder`,
 whose node cache keys nodes of up to three children on (kind, text length,

@@ -1,12 +1,20 @@
-# Patch 0007: token reuse picks decrements that can never free (bug 7)
+# 7. Token reuse picks decrements that can never free
 
-> **Audit (2026-10-02):** an optimization, not a bug fix. The output is correct without it; `fuseArm` stops at branches by design and TokenReuse's choice of donor is a heuristic. It stays because 0009 uses `consumesFusedMember`, which this patch adds; see bug 7 in `docs/reussir-bugs.md`.
+## Summary
 
-Patch file: `../0007-l2r-local-bug-7-sink-bound-retains-into-the-branch-t.patch`
-(`l2r-local` commit `fd860cbf`). Bug section:
-[docs/reussir-bugs.md, bug 7](../../docs/reussir-bugs.md#7-token-reuse-picks-decrements-that-can-never-free).
+**Kind:** missed optimization. **Status:** patched (0007); lean2rr also
+works around it.
 
-## 1. Summary
+**Verdict: missed optimization, not a bug.** The output is correct.
+`RcDispatchFusion`'s `fuseArm` stops at region-bearing or opaque ops before
+the release by design (its comment: the release may be conditional or the
+box may escape), and TokenReuse documents its choice of donor as a
+heuristic. lean2rr's own workaround (`lazy-fields`) already gives native
+speed on the shapes found. 0007 is an optimization extension; it stays
+because 0009 (a real use-after-free fix, [bug 9](09-duplicate-bound-member.md))
+uses the helper it adds (`consumesFusedMember`). Whether lean2rr still
+gains from 0007 with `lazy-fields` on is not measured; if it does not, 0009
+should be rebased without it and 0007 dropped.
 
 A binary-search-tree insert that returns the matched node unchanged for an
 equal key, `t` instead of `Node{l, x, r}`, ran about 6x slower than the
@@ -16,15 +24,16 @@ node at every level and freed the old one. Because `t` stays alive on the
 equal-key path, Reussir retains `t`'s children before the branch. On the
 rebuilding paths, releasing `t` releases those children again. Those
 releases can never free anything, yet token reuse offers them as donor
-cells and prefers them to `t`'s own cell. The patch moves the children's
+cells and prefers them to `t`'s own cell. Patch 0007 moves the children's
 retains into the branch. The paths that release `t` then get Reussir's
 efficient "destructuring" release: the children move to the arm, and `t`'s
 cell becomes the reuse token. The paths that keep `t` get a retain and
 release side by side, which a later pass cancels.
 
-## 2. Symptom
+## Symptom and repro
 
-Repro `docs/reussir-bugs/bug07-phantom-reuse-donor.rr` (the main part):
+Repro [`repros/bug07-phantom-reuse-donor.rr`](repros/bug07-phantom-reuse-donor.rr)
+(the main part):
 
 ```
 enum Tr { Leaf, Node(Tr, u64, Tr) }
@@ -42,20 +51,21 @@ fn ins_b(t : Tr, k : u64) -> Tr {      // the same, but the equal arm rebuilds
 }
 ```
 
-`main` builds a 100,003-key tree with each, then inserts 3,000,000 keys
-that are all present, and prints both sizes and the time ratio
-`t(ins) / t(ins_b)`.
+The program builds a 100,003-key tree with each insert, then
+inserts 3,000,000 keys that are all present, and prints both sizes and the
+time ratio `t(ins) / t(ins_b)`.
 
-Command: `rrc bug07-phantom-reuse-donor.rr` with lean2rr's flags (`-O
+**Command.** `rrc bug07-phantom-reuse-donor.rr` with lean2rr's flags (`-O
 aggressive --no-pack-record-members --reuse-across-call`).
 
-- Expected: `100003 100003 ratio ...` with the ratio near 1: both inserts
-  reuse the cells on the path.
-- Actual on ef922049: a ratio of 6.12 (5.8-7.9 over runs); `ins` allocates
-  a new node at every level of every insertion. `run.sh` printed
-  `bug 07   REPRODUCES  insert returning t is 6.65x the rebuilding insert`.
+**Expected.** `100003 100003 ratio` near 1: both inserts reuse the cells on
+the path.
 
-## 3. Root cause
+**Actual on ef922049.** `100003 100003 ratio 6.12` (5.8-7.9 over runs):
+`ins` allocates a new node at every level of every insertion. `run.sh`
+printed `bug 07   REPRODUCES  insert returning t is 6.65x the rebuilding insert`.
+
+## Cause
 
 **Background: dispatch fusion.** The frontend lowers
 `match v { C(a, b) => ... }` into a borrowing dispatch whose arm loads each
@@ -74,8 +84,10 @@ and the bound member indices. `RcDecrementExpansion` expands that into:
 This is Koka's `dropn_reuse`. It is what lets a rebuild reuse the
 scrutinee's cell cheaply.
 
-**Why `ins` misses it.** `fuseArm` scans the arm's top level for the
-release of the scrutinee and gives up at the first op with regions:
+**Why `ins` misses it.** In `ins`, `t` stays live on the equal-key path, so
+Reussir projects `l` and `r` before the branch and retains them. `fuseArm`
+scans the arm's top level for the release of the scrutinee and gives up at
+the first op with regions:
 
 ```c++
 // Region-bearing or opaque ops before the release: bail (the release
@@ -118,20 +130,54 @@ arm), because `scf.if` comes before any `rc.dec %arg0`.
 a plain release. If `t`'s count is 1, its expansion drops `t`'s contents,
 which releases `l` and `r` again. Those member releases are themselves
 expanded as "count == 1 → drop and keep the token". But `l` and `r` were
-retained above, so their counts are at least 2 there, and they never free.
-They still produce (always null) tokens of the exact size of a `Node`. The
-same happens on the equal-key path with `rc.dec(%3)` and `rc.dec(%7)`,
-while `t` still holds the children. TokenReuse's `heuristic` gives every
-exact-size token the same score. On a tie, `oneShotTokenReuse` prefers the
-token whose producer comes later in its pre-order walk (`tokenOrderKey`),
-"prefer the most recent producer". So the construction is given a token
-from a member release that is null at run time, and allocates, while `t`'s
-real cell is freed. docs/reussir-bugs.md adds that a decrement of a
-nullary constructor (an immediate) is the same kind of phantom donor.
+retained above, so their counts are at least 2 there (`t` still holds
+them), and they never free. They still produce (always null) tokens of the
+exact size of a `Node`. The same happens on the equal-key path with
+`rc.dec(%3)` and `rc.dec(%7)`, while `t` still holds the children.
+TokenReuse's `heuristic` gives every exact-size token the same score as the
+real donor, `t`'s own cell. On a tie, `oneShotTokenReuse` prefers the token
+whose producer comes later in its pre-order walk (`tokenOrderKey`, "prefer
+the most recent producer"). So the construction is given a token from a
+member release that is null at run time, and allocates, while `t`'s real
+cell is freed. A decrement of a nullary constructor (an immediate) is the
+same kind of phantom donor.
 
-## 4. The fix
+## lean2rr
 
-When `fuseArm`'s scan reaches an op with regions, it now calls
+lean2rr works around it with the optional passes `nullary-scrutinee`,
+`lazy-fields` and `sink-proj` (plan §5.5). A value stored whole in a
+constructor, a value returned whole (an insert that returns the node for an
+equal key), a value passed whole to a call (merge's `go l₁ ys (y :: acc)`),
+and a structure stored, returned or passed whole have their fields bound
+only where they are used, and the value is matched again where it dies.
+The matched value's fields are then not retained while it stays live, so
+there is no phantom donor, even on unpatched Reussir. With this, the
+Std.TreeMap insert is as fast as native Lean, BST inserts with `Nat` or
+`String` keys whose equal arm returns the node run at or below native time,
+even on ef922049, and `List.mergeSort`'s merge reuses the cell it takes
+apart (before values passed to calls were included it allocated a cell at
+every step: round-6 finding S6-02). That covers the `Nat`/`String`-keyed
+case that 0007 does not reach (a call before the branch); 0007 covers
+shapes the passes do not rewrite, such as `UInt64` keys.
+
+An earlier workaround returned the constructor rebuilt from the arm's
+fields instead of the matched value; it broke `ptrEq` identity and sharing
+(Lean's `Expr.replace`-style fixpoints never stopped) and was removed.
+
+## Patch
+
+Patch file
+[`patches/0007-l2r-local-bug-7-sink-bound-retains-into-the-branch-t.patch`](patches/0007-l2r-local-bug-7-sink-bound-retains-into-the-branch-t.patch)
+(`l2r-local` commit `fd860cbf`). In short: when the release of the
+scrutinee sits inside a branch that runs exactly one of its regions once
+(`if` with an else, `index_switch`, record or nullable dispatch), the arm's
+retains of the bound members move into every region of that branch. Paths
+that release the scrutinee then get the usual destructuring decrement;
+paths that release a member get an adjacent retain and release, which
+cancel. The move is allowed only if nothing between the old and new
+positions releases a value, calls a function or has a region.
+
+**The fix.** When `fuseArm`'s scan reaches an op with regions, it now calls
 `sinkBoundRetainsIntoBranch` instead of giving up.
 
 ```c++
@@ -177,7 +223,8 @@ fusion inside a region if an op before the scrutinee's release uses a
 bound member other than by a borrow or a retain. Such a use (building the
 member into a cell that is then released, for example) gives away the
 reference the retain provided. The release's transferred reference would
-then replace a reference that no longer exists (see 0009.md, bug 14).
+then replace a reference that no longer exists (the flaw of
+[bug 14](14-member-consumed-before-release.md)).
 
 The same `ins` arm after the patched pass (dumped with a build that has
 the final 0007):
@@ -218,10 +265,18 @@ pairs cancel, so no phantom donors remain.
 
 **What it leaves alone.** The scan still stops at a call before the
 branch. In lean2rr output a `Nat` or `String` key comparison is a call
-(`lean_nat_dec_lt`), so 0007 rarely fires there; review round 1 noted this.
-Else-less ifs and loops are left alone.
+(`lean_nat_dec_lt`), so 0007 rarely fires there; review round 1 noted
+this. lean2rr binds such a value's fields where they are used instead
+(plan §5.5). Else-less ifs and loops are left alone.
 
-## 5. Verification
+**Not fixed.** The remaining 0.33 extra allocations per insertion (on the
+TreeMap-shaped insert below) come from decrements of values that may be
+nullary immediates. They still count as exact-size donors and can win the
+most-recent tie-break. Ranking a matched cell above such donors fixed it in
+a trial (rbtree 1.48 → 0.98 s) but cost monadic-interp 1.7%, so it was left
+out.
+
+**Verification.**
 
 - Review round 1 passed 0007. It covered the window whitelist (every pure
   Reussir op was checked to neither release nor free), nested matches,
@@ -231,40 +286,29 @@ Else-less ifs and loops are left alone.
   against native Lean.
 - Round 2 found a use after free (R2-1): `fuseSunkRetains` fused even when
   a sunk member was built into a cell released before the scrutinee's
-  release, with the scrutinee shared. A generator built for this shape hit
-  it in 5 of 248 programs. The revision added `consumesFusedMember`.
+  release, with the scrutinee shared (as for bug 14). A generator built
+  for this shape hit it in 5 of 248 programs. The revision added
+  `consumesFusedMember`.
 - Round 3 reviewed the revision ("I could not break the author's
   argument"). It ran targeted attacks (the scrutinee also passed as a
   second argument and released first, a member passed separately, a
   borrowed inner scrutinee whose parent is released, containers built from
   members in both orders) and fuzzed 712 + 195 programs with ASan. It
   found no failure.
-- Measured (docs/reussir-bugs.md): the BST above allocates exactly like
-  the rebuilding version (0.74 s → 0.16 s). A TreeMap-shaped insert
-  without lean2rr's workaround drops from 12.35 to 1.33 allocations per
-  insertion. The repro's ratio is 0.86-1.36 on the round-2 stack and
-  0.95-1.13 with the revision.
-- `run.sh` on the current build (a timing ratio, on a loaded machine):
-  `bug 07   FIXED       insert returning t is 1.04x the rebuilding insert`.
+- Measured: the BST above allocates exactly like the rebuilding version
+  (0.74 s → 0.16 s). A TreeMap-shaped insert without lean2rr's workaround
+  drops from 12.35 to 1.33 allocations per insertion. The repro's ratio is
+  0.86-1.36 on the round-2 stack and 0.95-1.13 with the revised 0007/0009:
+  FIXED.
+- `run.sh` on `l2r-local` (a timing ratio, on a loaded machine; 1.14x in
+  the run recorded in the index):
+  `bug 07   FIXED       insert returning t is 1.04x the rebuilding insert   [lean2rr's flags]`.
 
-## 6. Effect on lean2rr
+**Effect on lean2rr.** An arm returning the matched value no longer blocks
+reuse in the other arms, for the shapes lean2rr's own passes do not
+rewrite.
 
-lean2rr keeps its own workaround (plan §5.5, the optional passes
-`nullary-scrutinee`, `lazy-fields` and `sink-proj`). In an arm where the
-matched value stays live because it is stored or returned whole, lean2rr
-binds only the fields used while the value is live, and matches again
-where it dies. No phantom retains are produced, even on unpatched
-Reussir. That workaround covers the `Nat`/`String`-keyed case that 0007
-does not reach (a call before the branch). 0007 covers shapes the passes
-do not rewrite, such as `UInt64` keys.
-
-Not fixed (docs/reussir-bugs.md): about 0.33 extra allocations per
-insertion remain from decrements of values that may be nullary immediates.
-They still count as exact-size donors and can win the tie-break. Ranking
-the matched cell above them fixed it in a trial (rbtree 1.48 → 0.98 s),
-but cost monadic-interp 1.7%, so it was left out.
-
-## 7. Upstream note
+## Upstream note
 
 When a match's scrutinee stays alive on some path, its arm retains the
 bound members before a branch, and `fuseArm` gives up at that branch. The
