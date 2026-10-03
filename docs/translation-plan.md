@@ -2127,7 +2127,14 @@ running code blocks (*Blocking*, below).
   that replaces the task a reference next to it holds has run by then, as
   natively. Only collected tasks run early: other pending tasks of the
   program, which a native worker would run first too, are not run (one
-  could wait for something the program does later). The walk
+  could wait for something the program does later). The walk does not keep
+  the tasks it collects alive (it records their runtime entries), and the
+  second pass does not keep what the first read, so a task the program
+  drops meanwhile (a task replaced in a reference by one the walk ran) is
+  deleted and never runs, as natively (test `RtPersistDropped`). A task
+  held at another representation is a converted copy (§5.1); the walk
+  knows it by its original's identity, so it is collected, not forced, in
+  the first pass (test `RtPersistConv`). The walk
   keeps what it reads out of thunks, tasks and references until it ends, so that no
   cell it has visited is freed meanwhile (a task it runs could force a
   thunk, which drops its computation) and its address given to a new

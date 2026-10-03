@@ -10,11 +10,13 @@
 //! workers in the order they were queued (by priority, then first in first
 //! out), whatever order the walk waits for them in. Here a pending task
 //! runs when it is waited for, so the walk has two passes. The first only
-//! collects the unfinished tasks it reaches (`collect`; it does not look
-//! into them, their values do not exist yet). The second walks the value
-//! again (`rewalk`) and, before it waits for a task, runs the collected
-//! tasks that come before it in the workers' order (`before`), so that they
-//! run in that order, as on the lone worker of `LEAN_NUM_THREADS=1`.
+//! collects the unfinished tasks it reaches (`collect`, by their runtime
+//! entries, without holding them; it does not look into them, their values
+//! do not exist yet). The second walks the value again (`rewalk`) and,
+//! before it waits for a task, runs the collected tasks that come before it
+//! in the workers' order (`before`), so that they run in that order, as on
+//! the lone worker of `LEAN_NUM_THREADS=1`. A collected task the program
+//! drops meanwhile is deleted, not run, as natively.
 //!
 //! A walk is a handle (`begin`) to its state. Walks can nest (waiting for a
 //! task can evaluate another constant) and interleave (a context of the
@@ -55,9 +57,10 @@ struct Walk {
     /// The first pass, which collects unfinished tasks.
     collecting: bool,
     /// The unfinished tasks the first pass reached: their place in the
-    /// workers' order (`task::persist_key`), a reference to each, and its
-    /// address; after the first pass sorted with the first to run last.
-    pending: Vec<(u64, Box<dyn Any>, usize)>,
+    /// workers' order, their entry and serial (`task::persist_key`); after
+    /// the first pass sorted with the first to run last. No reference is
+    /// held: a task the program drops meanwhile is deleted, as natively.
+    pending: Vec<(u64, u32, u32)>,
     /// `task::serial_base` when the walk began.
     base: u32,
 }
@@ -96,19 +99,18 @@ pub fn keep<T: 'static>(h: u64, v: T) -> u64 {
     0
 }
 
-/// In walk `h`'s first pass, whether task `v` (a task cell) is unfinished:
-/// then it is collected, and the walk does not look into it. Always false
-/// in the second pass.
+/// In walk `h`'s first pass, whether the task with address `a` (its
+/// identity for the runtime) is unfinished: then it is collected, and the
+/// walk does not look into it. Always false in the second pass.
 #[inline(never)]
-pub fn collect<T: 'static>(h: u64, v: T) -> bool {
+pub fn collect(h: u64, a: usize) -> bool {
     let w = unsafe { &mut *(h as *mut Walk) };
-    if !w.collecting || size_of::<T>() != size_of::<usize>() {
+    if !w.collecting {
         return false;
     }
-    let p = unsafe { *(&v as *const T as *const usize) };
-    match crate::task::persist_key(p, w.base) {
-        Some(k) => {
-            w.pending.push((k, Box::new(v), p));
+    match crate::task::persist_key(a, w.base) {
+        Some(e) => {
+            w.pending.push(e);
             true
         }
         None => false,
@@ -116,34 +118,39 @@ pub fn collect<T: 'static>(h: u64, v: T) -> bool {
 }
 
 /// The end of walk `h`'s first pass: whether a second is needed (a task was
-/// collected). The second pass sees every cell again.
+/// collected). The second pass sees every cell again and keeps what it
+/// reads itself, so what the first kept is released (a task the program
+/// drops during the second pass must not be kept alive by the walk).
 #[inline(never)]
 pub fn rewalk(h: u64) -> bool {
     let w = unsafe { &mut *(h as *mut Walk) };
     w.collecting = false;
     w.seen.clear();
+    w.kept.clear();
     w.pending.sort_by(|a, b| b.0.cmp(&a.0));
     !w.pending.is_empty()
 }
 
-/// In walk `h`'s second pass, before it waits for task `cell`: the next
-/// collected task that comes before it in the workers' order and is still
-/// queued, handed over to be run (its tag, `task::persist_hand`), or
-/// `u64::MAX` when there is none (left).
+/// In walk `h`'s second pass, before it waits for the task with address
+/// `a`: the next collected task that comes before it in the workers' order
+/// and is still queued, handed over to be run (its tag,
+/// `task::persist_hand`; one the program has dropped is handed to be
+/// deleted), or `u64::MAX` when there is none (left).
 #[inline(never)]
-pub fn before(h: u64, cell: usize) -> u64 {
+pub fn before(h: u64, a: usize) -> u64 {
     let w = unsafe { &mut *(h as *mut Walk) };
     if w.collecting {
         return u64::MAX;
     }
-    let Some(kt) = crate::task::persist_key(cell, w.base) else { return u64::MAX };
-    while let Some(&(k, _, c)) = w.pending.last() {
+    let Some((kt, _, _)) = crate::task::persist_key(a, w.base) else { return u64::MAX };
+    while let Some(&(k, i, sr)) = w.pending.last() {
         if k >= kt {
             break;
         }
-        let (tag, itself) = crate::task::persist_hand(c);
+        let (tag, itself) = crate::task::persist_hand(i, sr);
         if tag != u64::MAX && !itself {
-            // A dropped task handed to be deleted first: `c` again next.
+            // A task handed to be deleted: the same entry is looked at
+            // again next (it is gone if that was it).
             return tag;
         }
         w.pending.pop();

@@ -381,33 +381,40 @@ pub fn serial_base() -> u32 {
     tasks().serial.wrapping_sub(1 << 31)
 }
 
-/// Where unfinished task `cell` comes in the order the lone native worker
-/// takes queued tasks in: a higher priority first, then the earlier
-/// created (its `serial`, counted from `base`). `None` if it has finished.
-/// For the walk of a closed term (`persist`): natively the term's tasks run
-/// in that order, whatever order `lean_mark_persistent` waits for them in
-/// (`wait_for` only blocks).
-pub fn persist_key(cell: usize, base: u32) -> Option<u64> {
+/// Where unfinished task `cell` (a task's address for the runtime: a
+/// converted copy's is its original's) comes in the order the lone native
+/// worker takes queued tasks in: a higher priority first, then the earlier
+/// created (its `serial`, counted from `base`); with its entry and serial,
+/// which identify it later without looking at its cell. `None` if it has
+/// finished. For the walk of a closed term (`persist`): natively the term's
+/// tasks run in that order, whatever order `lean_mark_persistent` waits for
+/// them in (`wait_for` only blocks).
+pub fn persist_key(cell: usize, base: u32) -> Option<(u64, u32, u32)> {
     let i = find(cell);
     if i == NONE {
         return None;
     }
     let e = ent(i);
-    Some((((PRIOS - 1 - e.prio as usize) as u64) << 32) | e.serial.wrapping_sub(base) as u64)
+    Some(((((PRIOS - 1 - e.prio as usize) as u64) << 32) | e.serial.wrapping_sub(base) as u64, i, e.serial))
 }
 
-/// Hand queued task `cell` over to be run now (`persist::before`): its tag,
-/// and whether it was handed itself (a dropped pure task can be handed to
-/// be deleted first). `(u64::MAX, false)` if it is not queued (finished,
-/// running, or waiting for another task).
-pub fn persist_hand(cell: usize) -> (u64, bool) {
+/// Hand the task of entry `i` over to be run now (`persist::before`) if it
+/// is still the task with that `serial` and queued: its tag, and whether it
+/// was handed itself (one the program has dropped is handed to be deleted,
+/// as is a dropped pure task it stands for). `(u64::MAX, false)` if it has
+/// finished or been deleted, runs, or waits for another task.
+pub fn persist_hand(i: u32, serial: u32) -> (u64, bool) {
     run_later_walks();
-    let i = find(cell);
-    if i == NONE || ent(i).flags & QUEUED == 0 {
+    let t = tasks();
+    if i as usize >= t.slab.len() {
         return (u64::MAX, false);
     }
+    let e = ent(i);
+    if e.cell == 0 || e.serial != serial || e.flags & QUEUED == 0 {
+        return (u64::MAX, false);
+    }
+    let cell = e.cell;
     let tag = hand_candidate(i);
-    let t = tasks();
     (tag, tag != u64::MAX && t.handed == cell && !t.deleting)
 }
 

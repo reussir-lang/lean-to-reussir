@@ -384,7 +384,7 @@ elements) in order on its stack and pops the last one first, so the
 fields are pushed in Lean's order, the last on top, and an array is looked
 at from its last element down. The walk has two passes
 (`leanrt::persist`): the first collects the unfinished tasks
-(`l2r_persist_collect`) and does not look into them; the second, before it
+(`l2r_persist_collect_at`) and does not look into them; the second, before it
 waits for a task, runs the collected tasks that natively come before it in
 the workers' queue (`l2r_task_run_before`): natively waiting only blocks,
 and the workers run the term's tasks in queue order (round 7 RV7L-06).
@@ -435,12 +435,15 @@ partial def genPersist (t : RR.Ty) (gen : IO.Ref PersistGen) : LowerM (Option St
         -- A task: in the first pass, collected if it is unfinished (its
         -- value does not exist yet); otherwise wait for it, after the
         -- collected tasks that natively run before it, then its value.
+        -- A task is known to the runtime by its address, a converted
+        -- copy by its original's (`taskAddrFn`).
         let get ← lazyGetFn z
+        let addr ← taskAddrFn z
         let rest ← each #[("x", vt)] (keep := true)
-        let wait : RR.Block := ⟨#[("a", some u64, .call "l2r_lcell_addr" #[.named z] #[.var "v"]),
-            ("rb", some u64, .call "l2r_task_run_before" #[] #[.var "h", .var "a"]),
+        let wait : RR.Block := ⟨#[("rb", some u64, .call "l2r_task_run_before" #[] #[.var "h", .var "a"]),
             ("x", some vt, .call get #[] #[.var "v"])] ++ rest.lets, rest.result⟩
-        pure (.ofExpr (.ite (.call "l2r_persist_collect" #[t] #[.var "h", .var "v"]) unchanged wait))
+        pure ⟨#[("a", some u64, .call addr #[] #[.var "v"])],
+          .ite (.call "l2r_persist_collect_at" #[] #[.var "h", .var "a"]) unchanged wait⟩
       else
         -- A thunk: its computation or its value, without forcing it.
         let ft := RR.Ty.fn .unit vt

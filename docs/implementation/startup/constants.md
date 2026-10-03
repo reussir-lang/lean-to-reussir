@@ -102,13 +102,19 @@ runtime. Plan
   native's order: an object's fields are pushed in Lean's declaration
   order (`leanOrder`, whatever the record layout), the last on top, and an
   array is walked from its last element down. It has two passes: the
-  first collects the unfinished tasks it reaches (`l2r_persist_collect`,
+  first collects the unfinished tasks it reaches (`l2r_persist_collect_at`,
   not looking into them); the second walks again and, before it waits for
   a task, runs the collected tasks that come before it in the native
   workers' queue order (`l2r_task_run_before` over
   `leanrt::persist::before`: a higher priority first, then the earlier
   created). Only collected tasks run early, not other pending tasks of the
-  program. It visits each cell
+  program. The collected tasks are recorded by runtime entry and serial,
+  without a reference, and `l2r_persist_rewalk` releases what the first
+  pass kept, so a task the program drops during the second pass is
+  deleted, not run (RV7L-07, test `RtPersistDropped`). A task is known by
+  its identity for the runtime (`taskAddrFn`: a converted copy's is its
+  original's), so a copy is collected rather than forced in the first
+  pass (test `RtPersistConv`). It visits each cell
   (record, array, thunk or task, function value, `Box`, reference) once:
   the runtime keeps the set of addresses seen and, until the walk ends,
   what it read out of thunks, tasks and references, so no seen cell is
@@ -141,7 +147,7 @@ runtime. Plan
   `persistListName`, `persistCell`, `PersistGen`, `genPersist`,
   `finishPersistFns`, `variantCount`; `runtime/prelude.rr`:
   `l2r_persist_begin`, `l2r_persist_seen`, `l2r_persist_keep`,
-  `l2r_persist_collect`, `l2r_persist_rewalk`, `l2r_persist_before_at`,
+  `l2r_persist_collect_at`, `l2r_persist_rewalk`, `l2r_persist_before_at`,
   `l2r_persist_end`, `l2r_task_settled`; `Lower/Promises.lean`:
   `taskDispatchFns` (`l2r_task_run_before`);
   `runtime/leanrt/src/persist.rs`; `runtime/leanrt/src/task.rs`:
