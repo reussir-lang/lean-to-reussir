@@ -226,6 +226,46 @@ set to `lcAny`, Lean's own "unknown type". Values of that type use the
 uniform `Box` representation (§5.1). Lean itself treats every value this
 way, so this is always correct, only slower.
 
+Natively a declaration is one function at every type, and Lean's mono-phase
+`cse` compares mono values, with type arguments erased: a call merges into
+an earlier call of the same declaration with the same value arguments even
+at other type arguments (`gp xs none` used as an `Option String`, then as an
+`Option (Nat → Nat)`), and runs once; the merged variable keeps the first
+call's type. Instances at the two types would be two calls, and a panic or
+trace in them would print twice. So Stage 1 finds these calls in each
+instance as `cse` does, on the values `toMono` makes (type arguments
+erased, merged variables identified, a trivial structure such as `Subtype`
+or `Fin` taken for its field, `Decidable` for `Bool`; one scope per `cases`
+alternative, join points in the enclosing scope, a local function's body in
+a scope of its own, since Lean's `cse` runs after lambda lifting;
+`@[never_extract]` calls apart), and gives the later call the earlier
+call's arguments, type and value ones (`Mono.alignErasedMerges`). Both then
+call one instance with the same arguments, and Stage 2's `cse` merges them
+as natively. A use of the merged value at the later call's type converts
+it (§5.1). A value that exists at two types holds nothing where the types
+differ (`none`, `[]`; nothing is both a `String` and a function), so the
+conversion meets no part it cannot convert, except where both types make
+room for something it cannot reach: a function, one closure at two
+function types natively (`List.take k` as `List Nat → List Nat` and as
+`List String → List String`, a structure with a field `run : α → α`), for
+which lean2rr has no conversion, or the contents of a runtime object (a
+thunk, a task, a reference). So a call is aligned only if its two result
+types, compared as `toMono` sees them (a trivial structure, such as a
+one-field structure around a function, is its field's type, `Decidable` is
+`Bool`) and followed into the field types of their inductives, differ only
+at positions that no value has at both types (two different inductive
+types, a function and a value of an inductive type) or that hold
+first-order data; two function types, two instantiations of a runtime
+object, a type-former argument, an index, a type that is not an inductive
+or anything else unclassified prevent it (`Mono.alignable`; §10). Constructors are not renamed by Stage 1 and merge in Stage 2
+as they are; extern instances and instances (dictionary builders) compute
+nothing observable and keep their per-type instances. Lean's closed-term
+cache compares types, so closed calls at two types in two declarations stay
+two closed terms, natively too; after the merge, one declaration's call
+reads the other's closed term as natively (XT-6, leanrs A482; review XT6-01,
+XT6-02, XT6-03, XT6-04; tests `RtCseAcrossTypes`, `RtCseFnValues`,
+`RtCseResidual`, `RtCseFnField`, `RtCseFnTrivial`).
+
 ### 2.4 Type classes
 
 After substitution, a dictionary falls into one of two cases:
@@ -2781,11 +2821,17 @@ Each item says what differs and when.
   everything, has that stack; it gives the other threads Lean's runtime
   starts (task workers) 64 MiB, so that lean2rr fits an address-space limit
   (`ulimit -v 16000000`) on such inputs.
-- *Merging after erasure*: natively, two uses of a type-polymorphic
-  constant at different type arguments (`(emptyList : List Nat)`,
-  `(emptyList : List String)`) are the same call after erasure, and Lean's
-  CSE merges them; lean2rr's instances are different calls. Visible only
-  when such a value traces or panics.
+- *Merging after erasure* (§2.3): Lean's mono `cse` merges calls of one
+  declaration at different type arguments whose value arguments agree after
+  erasure, and runs them once; lean2rr does too, except in two shapes, where
+  both calls run and a trace or panic in them prints twice: a call whose
+  results at the two types differ where a function, a runtime object or
+  something unclassified can be (an `Option (α → α)` or a structure with a
+  field `run : α → α` at `Nat` and at `String`, a one-field structure around
+  a `Nat → Nat` and a `String → String`: lean2rr converts no function
+  between two function types; test `RtCseFnResult`, expected to fail), and
+  a call inside a local function merged with one outside it, which Lean
+  merges only where it inlined the local function first.
 - *Build time*: rrc compiles about 80 small functions per second; a program
   with thousands of constants (each an initializer and an accessor, plus its
   closed terms) takes minutes to build where native takes seconds.

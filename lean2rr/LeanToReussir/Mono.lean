@@ -779,6 +779,268 @@ def uniformDecl (d : Decl .pure) : Decl .pure :=
     | v => v
   { d with type := uniformTy d.type, params := d.params.map uniformParamTy, value }
 
+/-! ## Calls that Lean's CSE merges after erasure
+
+Lean's mono-phase `cse` (`Code.cse`) keys a `let` on its mono value, in
+which type arguments are erased, so a call of a declaration is merged into
+an earlier call of it whose value arguments agree, even at other type
+arguments (`gp xs none` used as an `Option String` and later as an
+`Option (Nat → Nat)`): the call runs once, and the merged variable keeps the
+first call's type. Stage 1 gives the two calls instances at different types,
+under different names, so both would run, and a panic or trace in them
+would come out twice. So the later call is made with the first call's type
+and value arguments: both call the same instance with the same arguments,
+and Stage 2's `cse` (Lean's) merges them as natively. Where the later call's
+result is used at its own type, the first call's value is converted to it
+(§5.1). The two values agree after erasure: a value that exists at two
+types holds nothing at the positions where the types differ (`none`, `[]`;
+nothing is both a `String` and a function), except where both types make
+room for something a conversion cannot reach: a function, one closure at
+two function types natively (`List.take k`, a structure with a field
+`run : α → α`), for which lean2rr has no conversion, or the contents of a
+runtime object (a thunk, a task, a reference). A call is aligned only when
+`alignable` shows that its two result types differ nowhere else (plan
+§10). Calls without such a partner are left as they are. -/
+
+/-- Runtime objects whose type arguments classify contents that the
+conversions of §5.1 do not reach: two instantiations of one of them are
+never converted into each other. -/
+def opaqueTypes : List Name := [``Task, ``Thunk, ``ST.Ref, ``IO.Promise]
+
+/-- Builtin types without parameters whose representation is a scalar or
+plain data, although a field is opaque to Lean (`Float`'s
+`floatSpec.float`). -/
+def atomicDataTypes : List Name := [``Float, ``Float32]
+
+/-- The field types of the constructors of inductive `iv` at arguments
+`args`, as in base LCNF (dependent fields at `lcAny`). -/
+def ctorFieldTypesAt (iv : InductiveVal) (args : Array Expr) : CoreM (Array (Array Expr)) := do
+  iv.ctors.toArray.mapM fun ctor => do
+    let mut ty ← instantiateForall (← getOtherDeclBaseType ctor []) args[:iv.numParams].toArray
+    let mut out := #[]
+    repeat
+      match ty.headBeta with
+      | .forallE _ d b _ => out := out.push d; ty := b.instantiate1 anyExpr
+      | _ => break
+    return out
+
+/-- `t` with the identifications of `toMono` (`toMonoType`, `toMonoTypeKeep`)
+applied at its head, until none applies: a trivial structure (`Subtype`,
+`Fin`, a one-field structure, a one-method class) is its field's type,
+`Decidable` is `Bool`, `NonScalar` and `PNonScalar` are `lcAny`. `none`
+when the field's type depends on another field (unclassified). -/
+partial def monoHead (t : Expr) (fuel : Nat := 32) : CoreM (Option Expr) := do
+  let t := t.consumeMData.headBeta
+  let .const n _ := t.getAppFn | return some t
+  if n == ``Decidable then return some (mkConst ``Bool)
+  if n == ``NonScalar || n == ``PNonScalar then return some anyExpr
+  let some info ← hasTrivialStructure? n | return some t
+  if fuel == 0 then return none
+  let ctorType ← getOtherDeclBaseType info.ctorName []
+  let some field := (getParamTypes (← instantiateForall ctorType t.getAppArgs[:info.numParams].toArray))[info.fieldIdx]?
+    | return none
+  if field.hasLooseBVars then return none
+  monoHead field (fuel - 1)
+
+/-- Is the head of `t` (after `monoHead`) an inductive type? -/
+def inductiveHead (t : Expr) : CoreM Bool := do
+  let .const n _ := t.getAppFn | return false
+  return (← getEnv).find? n matches some (.inductInfo _)
+
+mutual
+/-- Is everything a value of type `t` can hold first-order data, so that a
+`Box` converts to it and back: no function (also behind a trivial
+structure), no runtime object, nothing unclassified? Inductives are followed
+into their fields (`seen` stops at types already followed). -/
+partial def firstOrderData (t : Expr) : StateT (Std.HashSet (Expr × Expr)) CoreM Bool := do
+  let some t ← monoHead t | return false
+  if t == anyExpr || t.isErased then return true
+  if (← get).contains (t, t) then return true
+  modify (·.insert (t, t))
+  let .const n _ := t.getAppFn | return false
+  let args := t.getAppArgs
+  if opaqueTypes.contains n then return false
+  if atomicDataTypes.contains n then return true
+  match (← getEnv).find? n with
+  | some (.inductInfo iv) =>
+    if args.any (·.isLambda) then return false
+    for fs in ← ctorFieldTypesAt iv args do
+      for f in fs do
+        unless ← firstOrderData f do return false
+    return true
+  | _ => return false
+
+/-- Can a value that has, after erasure, both type `a` and type `b` (the
+results of one call at two instantiations) be converted from `a` to `b`
+without meeting a part that has no conversion? Both types are compared as
+`toMono` sees them (`monoHead` at every level), since the values were found
+equal on mono values. Where the types differ, either no value has both
+(two different inductive types, a function and a value of an inductive
+type), or everything there must be first-order data. Two function types
+that differ, two instantiations of a runtime object, a type-former argument,
+an index, a type that is not an inductive or anything unclassified: no.
+Inductives are compared field by field at their arguments (`seen` stops at
+pairs already compared). -/
+partial def alignable (a b : Expr) : StateT (Std.HashSet (Expr × Expr)) CoreM Bool := do
+  let some a ← monoHead a | return false
+  let some b ← monoHead b | return false
+  if a == b then return true
+  if (← get).contains (a, b) then return true
+  modify (·.insert (a, b))
+  if a.isErased || b.isErased then return true
+  if a == anyExpr then return ← firstOrderData b
+  if b == anyExpr then return ← firstOrderData a
+  match a, b with
+  | .forallE .., .forallE .. => return false
+  -- Nothing is both a closure and a value of an inductive type.
+  | .forallE .., _ => inductiveHead b
+  | _, .forallE .. => inductiveHead a
+  | _, _ =>
+    let (.const n _, .const m _) := (a.getAppFn, b.getAppFn) | return false
+    let some (.inductInfo iv) := (← getEnv).find? n | return false
+    unless ← inductiveHead b do return false
+    -- Values of two different inductive types: nothing has both types (the
+    -- values were compared with constructor names).
+    if n != m then return true
+    let as := a.getAppArgs
+    let bs := b.getAppArgs
+    if as.size != bs.size || opaqueTypes.contains n then return false
+    for i in [:as.size] do
+      if as[i]! != bs[i]! && (i ≥ iv.numParams || as[i]!.isLambda || bs[i]!.isLambda) then
+        return false
+    let fas ← ctorFieldTypesAt iv as
+    let fbs ← ctorFieldTypesAt iv bs
+    for (fa, fb) in fas.zip fbs do
+      for (x, y) in fa.zip fb do
+        unless ← alignable x y do return false
+    -- A parameter that differs but shows in no field classifies contents the
+    -- fields do not hold (a runtime object): unclassified.
+    for i in [:iv.numParams] do
+      if as[i]! != bs[i]! then
+        let fis ← ctorFieldTypesAt iv (as.set! i bs[i]!)
+        if fis == fas then return false
+    return true
+end
+
+/-- The calls of `code` that Lean's mono-phase `cse` merges into an earlier
+call of the same declaration at other type arguments, each with the
+earlier call's universe levels and arguments. The grouping follows
+`Code.cse` on mono code: values are compared with type arguments erased,
+variables replaced by the variable they were merged into, and a trivial
+structure (`Subtype`, `Fin`) taken for its field and `Decidable` for `Bool`,
+as `toMono` does; a `let` is merged into one in scope (`cases` alternatives
+start a nested scope, join points see the enclosing scope, and a local
+function's body only its own: Lean's `cse` runs after lambda lifting), and
+`@[never_extract]` calls are not merged. Only calls of definitions count:
+Stage 1 does not rename constructors (Stage 2's `cse` merges them as
+natively), and extern instances and instances (dictionary builders) compute
+nothing observable. -/
+partial def erasedMerges (code : Code .pure) :
+    CoreM (Std.HashMap FVarId (List Level × Array (Arg .pure))) := do
+  let ((_, _, groups), calls) ← ((go code {}).run ({}, {})).run {}
+  let mut out := {}
+  for (r, members) in groups.toList do
+    let some (f, us, args₀, ty₀) := calls[r]? | continue
+    for m in members do
+      if let some (g, _, args, ty) := calls[m]? then
+        let typeArgs (as : Array (Arg .pure)) := as.filterMap fun
+          | .type t _ => some t
+          | _ => none
+        if g == f && args.size == args₀.size && typeArgs args != typeArgs args₀ then
+          if (← (alignable ty₀ ty).run' {}) then
+            out := out.insert m (us, args₀)
+  return out
+where
+  /-- State: the variable each merged variable stands for and the
+  variables merged into each representative; the calls of definitions,
+  with their binder types. -/
+  go (code : Code .pure) (map : Std.HashMap Expr FVarId) :
+      StateT (Std.HashMap FVarId FVarId × Std.HashMap FVarId (Array FVarId))
+        (StateT (Std.HashMap FVarId (Name × List Level × Array (Arg .pure) × Expr)) CoreM) Unit := do
+    match code with
+    | .let d k =>
+      let env ← getEnv
+      let (reps, groups) ← get
+      let rep (x : FVarId) : FVarId := reps.getD x x
+      -- A value that is another variable in mono: a trivial structure's
+      -- constructor or projection, `Decidable.decide`.
+      let alias? : Option FVarId ← match d.value with
+        | .const c _ args _ =>
+          if c == ``Decidable.decide then
+            pure (match (args[1]? : Option (Arg .pure)) with | some (.fvar x) => some x | _ => none)
+          else match env.find? c with
+            | some (.ctorInfo ci) =>
+              match ← hasTrivialStructure? ci.induct with
+              | some info => pure (match (args[info.numParams + info.fieldIdx]? : Option (Arg .pure)) with
+                  | some (.fvar x) => some x
+                  | _ => none)
+              | none => pure none
+            | _ => pure none
+        | .proj s i x =>
+          match ← hasTrivialStructure? s with
+          | some info => pure (if info.fieldIdx == i then some x else none)
+          | none => pure none
+        | _ => pure none
+      if let some x := alias? then
+        set (reps.insert d.fvarId (rep x), groups)
+        return ← go k map
+      let arg (a : Arg .pure) : Expr := match a with
+        | .fvar x => .fvar (rep x)
+        | _ => erasedExpr
+      let key : Expr := match d.value with
+        | .const ``Decidable.isTrue .. => .const ``Bool.true []
+        | .const ``Decidable.isFalse .. => .const ``Bool.false []
+        | .const f _ args _ => mkAppN (.const f []) (args.map arg)
+        | .fvar g args => mkAppN (.fvar (rep g)) (args.map arg)
+        | .proj s i x => .proj s i (.fvar (rep x))
+        | .lit l => l.toExpr
+        | .erased => erasedExpr
+      if let .const f us args _ := d.value then
+        unless env.isConstructor f || isExtern env f || (← isInstanceReducible f) do
+          modifyThe (Std.HashMap FVarId (Name × List Level × Array (Arg .pure) × Expr))
+            (·.insert d.fvarId (f, us, args, d.type))
+      let neverExtract := match d.value with
+        | .const f .. => hasNeverExtractAttribute env f
+        | _ => false
+      if neverExtract then go k map
+      else match map[key]? with
+        | some r =>
+          set (reps.insert d.fvarId r, groups.insert r ((groups.getD r #[]).push d.fvarId))
+          go k map
+        | none => go k (map.insert key d.fvarId)
+    | .fun d k _ => go d.value {}; go k map
+    | .jp d k => go d.value map; go k map
+    | .cases cs => for alt in cs.alts do go alt.getCode map
+    | _ => pure ()
+
+/-- Make the calls `erasedMerges` finds with the arguments of the call they
+are merged into; their binders get the type of the new call. -/
+partial def alignErasedMerges (code : Code .pure) : CompilerM (Code .pure) := do
+  let marked ← erasedMerges code
+  if marked.isEmpty then return code
+  go marked code
+where
+  go (marked : Std.HashMap FVarId (List Level × Array (Arg .pure))) (code : Code .pure) :
+      CompilerM (Code .pure) := do
+    match code with
+    | .let d k =>
+      let d ← match marked[d.fvarId]?, d.value with
+        | some (us, args₀), .const f _ _ _ =>
+          let value : LetValue .pure := .const f us args₀
+          d.update (← value.inferType) value
+        | _, _ => pure d
+      return code.updateLet! d (← go marked k)
+    | .fun d k _ =>
+      let d ← d.update d.type d.params (← go marked d.value)
+      return code.updateFun! d (← go marked k)
+    | .jp d k =>
+      let d ← d.update d.type d.params (← go marked d.value)
+      return code.updateFun! d (← go marked k)
+    | .cases cs =>
+      let alts ← cs.alts.mapM fun alt => return alt.updateCode (← go marked alt.getCode)
+      return code.updateAlts! alts
+    | c => return c
+
 /-- Process one instance: instantiate, simplify, rename, record. -/
 def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
   modify fun s => { s with current := some key, currentInst := some name }
@@ -798,7 +1060,10 @@ def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
         -- type-unsafe code. Dictionary projections are still folded
         -- (`inlineProjInst?` is not gated by `inlineDefs`); general
         -- inlining happens in Stage 2 over lean2rr's own instances.
-        if doSimp then inst.simp { inlineDefs := false } else pure inst : CompilerM _).run (phase := .base)
+        let inst ← if doSimp then inst.simp { inlineDefs := false } else pure inst
+        -- Calls that Lean's CSE merges after erasure call one instance.
+        inst.value.mapCodeM alignErasedMerges >>= fun value => pure { inst with value }
+        : CompilerM _).run (phase := .base)
     let inst := uniformDecl inst
     let .code code := inst.value | unreachable!
     let code ← renameCode {} code
