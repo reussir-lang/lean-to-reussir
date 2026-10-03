@@ -779,6 +779,114 @@ def uniformDecl (d : Decl .pure) : Decl .pure :=
     | v => v
   { d with type := uniformTy d.type, params := d.params.map uniformParamTy, value }
 
+/-! ## Calls that Lean's CSE merges after erasure
+
+Lean's mono-phase `cse` (`Code.cse`) keys a `let` on its value, in which
+type arguments are erased, so a call of a declaration is merged into an
+earlier call of it whose value arguments agree, even at other type
+arguments (`gp xs none` used as an `Option String` and later as an
+`Option (Nat → Nat)`): the call runs once, and the merged variable keeps the
+first call's type. Stage 1 gives the two calls instances at different types,
+under different names, so both would run, and a panic or trace in them
+would come out twice. So the later call is made at the first call's type
+arguments: both call the same instance with the same arguments, and Stage
+2's `cse` (Lean's) merges them as natively. Where the later call's result is
+used at its own type, the first call's value is converted to it (§5.1); the
+two values agree after erasure, so no part that the conversion cannot
+handle is reached. Calls without such a partner are left as they are. -/
+
+/-- The calls of `code` that Lean's mono-phase `cse` merges into an earlier
+call of the same declaration at other type arguments, each with the
+earlier call's universe levels and arguments. The grouping follows
+`Code.cse`: values are compared with type arguments erased and variables
+replaced by the variable they were merged into, a `let` is merged into one
+in scope (`cases` alternatives and local function bodies start a nested
+scope), and `@[never_extract]` calls are not merged. Only calls of
+definitions count: Stage 1 does not rename constructors (Stage 2's `cse`
+merges them as natively), and extern instances and instances (dictionary
+builders) compute nothing observable. -/
+partial def erasedMerges (code : Code .pure) :
+    CoreM (Std.HashMap FVarId (List Level × Array (Arg .pure))) := do
+  let ((_, _, groups), calls) ← ((go code {}).run ({}, {})).run {}
+  let mut out := {}
+  for (r, members) in groups.toList do
+    let some (f, us, args₀) := calls[r]? | continue
+    for m in members do
+      if let some (g, _, args) := calls[m]? then
+        let typeArgs (as : Array (Arg .pure)) := as.filterMap fun
+          | .type t _ => some t
+          | _ => none
+        if g == f && args.size == args₀.size && typeArgs args != typeArgs args₀ then
+          out := out.insert m (us, args₀)
+  return out
+where
+  /-- State: the variable each merged variable stands for and the
+  variables merged into each representative; the calls of definitions. -/
+  go (code : Code .pure) (map : Std.HashMap Expr FVarId) :
+      StateT (Std.HashMap FVarId FVarId × Std.HashMap FVarId (Array FVarId))
+        (StateT (Std.HashMap FVarId (Name × List Level × Array (Arg .pure))) CoreM) Unit := do
+    match code with
+    | .let d k =>
+      let env ← getEnv
+      let (reps, groups) ← get
+      let rep (x : FVarId) : FVarId := reps.getD x x
+      let arg (a : Arg .pure) : Expr := match a with
+        | .fvar x => .fvar (rep x)
+        | _ => erasedExpr
+      let key : Expr := match d.value with
+        | .const f _ args _ => mkAppN (.const f []) (args.map arg)
+        | .fvar g args => mkAppN (.fvar (rep g)) (args.map arg)
+        | .proj s i x => .proj s i (.fvar (rep x))
+        | .lit l => l.toExpr
+        | .erased => erasedExpr
+      if let .const f us args _ := d.value then
+        unless env.isConstructor f || isExtern env f || (← isInstanceReducible f) do
+          modifyThe (Std.HashMap FVarId (Name × List Level × Array (Arg .pure)))
+            (·.insert d.fvarId (f, us, args))
+      let neverExtract := match d.value with
+        | .const f .. => hasNeverExtractAttribute env f
+        | _ => false
+      if neverExtract then go k map
+      else match map[key]? with
+        | some r =>
+          set (reps.insert d.fvarId r, groups.insert r ((groups.getD r #[]).push d.fvarId))
+          go k map
+        | none => go k (map.insert key d.fvarId)
+    | .fun d k _ | .jp d k => go d.value map; go k map
+    | .cases cs => for alt in cs.alts do go alt.getCode map
+    | _ => pure ()
+
+/-- Make the calls `erasedMerges` finds at the type arguments of the call
+they are merged into; their binders get the type of the new call. -/
+partial def alignErasedMerges (code : Code .pure) : CompilerM (Code .pure) := do
+  let marked ← erasedMerges code
+  if marked.isEmpty then return code
+  go marked code
+where
+  go (marked : Std.HashMap FVarId (List Level × Array (Arg .pure))) (code : Code .pure) :
+      CompilerM (Code .pure) := do
+    match code with
+    | .let d k =>
+      let d ← match marked[d.fvarId]?, d.value with
+        | some (us, args₀), .const f _ args _ =>
+          let args := args.mapIdx fun i a => match a, args₀[i]? with
+            | .type _ _, some t@(.type ..) => t
+            | a, _ => a
+          let value : LetValue .pure := .const f us args
+          d.update (← value.inferType) value
+        | _, _ => pure d
+      return code.updateLet! d (← go marked k)
+    | .fun d k _ =>
+      let d ← d.update d.type d.params (← go marked d.value)
+      return code.updateFun! d (← go marked k)
+    | .jp d k =>
+      let d ← d.update d.type d.params (← go marked d.value)
+      return code.updateFun! d (← go marked k)
+    | .cases cs =>
+      let alts ← cs.alts.mapM fun alt => return alt.updateCode (← go marked alt.getCode)
+      return code.updateAlts! alts
+    | c => return c
+
 /-- Process one instance: instantiate, simplify, rename, record. -/
 def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
   modify fun s => { s with current := some key, currentInst := some name }
@@ -798,7 +906,10 @@ def monoInstance (key : InstKey) (name : Name) : MonoM Unit := do
         -- type-unsafe code. Dictionary projections are still folded
         -- (`inlineProjInst?` is not gated by `inlineDefs`); general
         -- inlining happens in Stage 2 over lean2rr's own instances.
-        if doSimp then inst.simp { inlineDefs := false } else pure inst : CompilerM _).run (phase := .base)
+        let inst ← if doSimp then inst.simp { inlineDefs := false } else pure inst
+        -- Calls that Lean's CSE merges after erasure call one instance.
+        inst.value.mapCodeM alignErasedMerges >>= fun value => pure { inst with value }
+        : CompilerM _).run (phase := .base)
     let inst := uniformDecl inst
     let .code code := inst.value | unreachable!
     let code ← renameCode {} code

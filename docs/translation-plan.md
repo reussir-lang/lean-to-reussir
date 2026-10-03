@@ -226,6 +226,28 @@ set to `lcAny`, Lean's own "unknown type". Values of that type use the
 uniform `Box` representation (§5.1). Lean itself treats every value this
 way, so this is always correct, only slower.
 
+Natively a declaration is one function at every type, and Lean's mono-phase
+`cse` compares values with type arguments erased: a call merges into an
+earlier call of the same declaration with the same value arguments even at
+other type arguments (`gp xs none` used as an `Option String`, then as an
+`Option (Nat → Nat)`), and runs once; the merged variable keeps the first
+call's type. Instances at the two types would be two calls, and a panic or
+trace in them would print twice. So Stage 1 finds these calls in each
+instance, as `cse` does (values compared with type arguments erased and
+merged variables identified, within a scope: `cases` alternatives and local
+functions open nested ones; `@[never_extract]` calls apart), and makes the
+later call at the earlier call's type arguments (`Mono.alignErasedMerges`).
+Both then call one instance with the same arguments, and Stage 2's `cse`
+merges them as natively. A use of the merged value at the later call's type
+converts it (§5.1); the two values agree after erasure (the call received
+the same values), so the conversion never meets a part it cannot convert.
+Constructors are not renamed by Stage 1 and merge in Stage 2 as they are;
+extern instances and instances (dictionary builders) compute nothing
+observable and keep their per-type instances. Lean's closed-term cache
+compares types, so closed calls at two types in two declarations stay two
+closed terms, natively too; after the merge, one declaration's call reads
+the other's closed term as natively (XT-6, leanrs A482; test `RtCseAcrossTypes`).
+
 ### 2.4 Type classes
 
 After substitution, a dictionary falls into one of two cases:
@@ -2781,11 +2803,6 @@ Each item says what differs and when.
   everything, has that stack; it gives the other threads Lean's runtime
   starts (task workers) 64 MiB, so that lean2rr fits an address-space limit
   (`ulimit -v 16000000`) on such inputs.
-- *Merging after erasure*: natively, two uses of a type-polymorphic
-  constant at different type arguments (`(emptyList : List Nat)`,
-  `(emptyList : List String)`) are the same call after erasure, and Lean's
-  CSE merges them; lean2rr's instances are different calls. Visible only
-  when such a value traces or panics.
 - *Build time*: rrc compiles about 80 small functions per second; a program
   with thousands of constants (each an initializer and an accessor, plus its
   closed terms) takes minutes to build where native takes seconds.

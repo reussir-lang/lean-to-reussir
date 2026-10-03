@@ -31,6 +31,28 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   [§5.13](../../translation-plan.md#513-names).
 - **Remove only if:** never.
 
+### Calls that Lean's CSE merges across types call one instance
+
+- **What:** In each instance, after Stage 1's `simp`, a call of a
+  definition that Lean's mono-phase `cse` would merge into an earlier call
+  of the same definition at other type arguments is made at the earlier
+  call's type arguments (and universe levels), and its binder gets the type
+  of the new call. The grouping copies `Code.cse`: values compared with type
+  arguments erased and merged variables identified, one scope per `cases`
+  alternative and local function, `@[never_extract]` calls apart.
+  Constructors, extern instances and instances (dictionary builders) are not
+  aligned. Nothing changes in an instance without such a pair.
+- **Why:** Natively the two calls are one after erasure and run once; two
+  instances ran twice, so a panic or trace in them printed twice (XT-6,
+  leanrs A482). Aligning to the earlier call (not to `lcAny`) keeps its type,
+  as the merged variable has natively, so Lean's type-sensitive closed-term
+  cache shares terms with other declarations as natively.
+- **Where:** `Mono.lean`: `erasedMerges`, `alignErasedMerges`,
+  `monoInstance`; plan [§2.3](../../translation-plan.md#23-instances); test
+  `RtCseAcrossTypes`.
+- **Remove only if:** Stage 1 stops making an instance per type, or Lean's
+  `cse` starts comparing type arguments.
+
 ### `Decidable.decide` keeps its name
 
 - **What:** Calls of `Decidable.decide` are not redirected to an instance.
