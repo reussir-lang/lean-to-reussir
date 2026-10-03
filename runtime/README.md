@@ -157,7 +157,15 @@ lean2rr-generated record (`L2RRef_N(Cell<T>)`; translation plan §5.1), read
 and written by the plain-Reussir helpers `l2r_rc_get/set/swap<T>`; a `Nat`
 or `Int` reference is the prelude's `L2RNatRef`/`L2RIntRef` (a tagged word
 and a cell for a big number, `l2r_natref_*`/`l2r_intref_*`). `LRef<T>`
-(`l2r_ref_*`, a runtime cell) backs promises.
+(`l2r_ref_*`, a runtime cell) backs promises. A `set` (`l2r_rc_set`,
+`l2r_ref_set`, and `l2r_lcell_set` for task and thunk cells) stores the new
+value first and then releases the old one as `lean_dec` does
+(`leanrt::drop::release`, through `l2r_release_value`): a shared value is
+decremented; the last reference to a record is freed inside a free the
+runtime starts (`drop::run`), so its fields go last first and the `sync`
+dependents of the promises it drops run when that free ends. A unit or
+enumeration value cannot cross the FFI boundary and its release runs
+nothing: lean2rr stores it with `l2r_rc_put` (`refSetFn`).
 
 **Freeing containers.** Native Lean frees an object iteratively: the
 children whose count drops to zero go on a stack of objects to free, popped
