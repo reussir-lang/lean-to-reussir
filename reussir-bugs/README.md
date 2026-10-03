@@ -77,19 +77,19 @@ in its file). Column *Review*: the adversarial review round and its result
 | [25](25-value-record-dag.md) | cost (deliberate design) | the first acquire/drop expansion writes a `[value]` record's copy out in line, exponential for records shared in a DAG | no, lean2rr's `[value]` records are shallow | - | none | rv7/p22 round 2: agrees to leave it | - |
 | [26](26-launder-assume.md) | bug (miscompile) | `assume(launder(p) == p)` undoes the launder, so LICM hoists the stores of a cell rebuilt in place | yes, wrong output (a Lean loop prints 2, natively 25009648) | none | 0021 | rv8/reussir: no defect | yes |
 | [27](27-nullable-member-drop.md) | missing feature (a gap in bug 13's bounded-depth frees) | drop glue does not defer a `Nullable` member: a long chain through `Nullable` overflows the stack when freed | no, `Nullable` not used | - | 0027 (amended for RV8R-01) | rv7/p22 round 2 (RV7P-05); rv8/reussir: RV8R-01 fixed | yes |
-| [28](28-unique-carrying-join.md) | bug (miscompile) | `-O aggressive` proves a value unique that is shared on one path; the shared cell is updated in place | possible: not seen in lean2rr's corpus | none | 0060 | rv8/reussir/e: no correctness defect; RV8RE-01 (lost clones) fixed | yes |
+| [28](28-unique-carrying-join.md) | bug (miscompile) | `-O aggressive` proves a value unique that is shared on one path; the shared cell is updated in place | possible: not seen in lean2rr's corpus | none | 0060 | rv8/reussir/e (+ round 2): no correctness defect; RV8RE-01 (lost clones) fixed | yes |
 | [29](29-ffi-member-mlir.md) | bug (tooling) | the `--emit mlir` dump of a record with an `#[ffi]` member does not parse back | no, builds unaffected; every lean2rr dump fails to parse | - | 0061 | rv8/reussir/e: no defect | yes |
 | [30](30-call-lowering-lookup.md) | cost (build time) | the call lowering scans the module once per call | yes, build time of large programs | none | 0062 | rv8/reussir/e: no defect (a latent hazard noted) | yes |
-| [31](31-deep-expression-stack.md) | bug | rrc overflows its stack on deeply nested expressions | no, lean2rr bounds nesting | - | 0063 | rv8/reussir/e: no correctness defect; RV8RE-02 (`ulimit -v`) fixed | yes |
+| [31](31-deep-expression-stack.md) | bug | rrc overflows its stack on deeply nested expressions | no, lean2rr bounds nesting | - | 0063 | rv8/reussir/e (+ round 2): no correctness defect; RV8RE-02 (`ulimit -v`) fixed | yes |
 | [32](32-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected; large programs cannot be dumped | dump smaller programs | none | - | - |
-| [33](33-rc-trailing-text.md) | bug (tooling) | the rc and ref type parser drops the text after a comma (`!reussir.rc<i64 rigid, atomic>` reads as `!reussir.rc<i64 rigid>`) | no, hand-written MLIR only | - | 0064 | pending | yes |
+| [33](33-rc-trailing-text.md) | bug (tooling) | the rc and ref type parser drops the text after a comma (`!reussir.rc<i64 rigid, atomic>` reads as `!reussir.rc<i64 rigid>`) | no, hand-written MLIR only | - | 0064 | rv8/reussir/e/round2: no defect | yes |
 
 In numbers: 33 entries. 30 are patched by 33 patches (0013 to 0015 for
 bug 13, 0002 and 0019 for bug 2, 0032 and 0033 for bug 11; 0009 fixes
 bugs 9 and 14), all applied; 3 stay documented only: 3 (intended), 25
 and 32 (costs). The two other patches, 0040 and 0050, fix no bug
 ([local additions](local-additions.md)). Reviews: every patch passed its
-round except 0064, whose review is pending.
+round.
 
 Status words used in the entries' summaries:
 
@@ -323,7 +323,7 @@ finding X" or by finding IDs are scratch files outside this repository, in
 | 0030-0035 | RV8C | `rv8/reussir-c/FINDINGS.txt` | RV8C-01 (0033 with 0023, medium), -02 (conflicts), -03 (0030, lost exact-size reuse), -04 (0032, declarations counted) resolved in the final stack |
 | 0050 | mem-nat review, RV8 | `mem/nat/review/FINDINGS.txt`, `rv8/nat/FINDINGS.txt` | no defect (the optional hardening is in) |
 | 0060-0063 | RV8 (e) | `rv8/reussir/e/FINDINGS.txt` (its RV8E-NN cited as RV8RE-NN) | no correctness defect; RV8RE-01 (0060: poison and tagged immediates blocked sound clones, low) and RV8RE-02 (0063: panic under `ulimit -v`, low) fixed in the amended patches; a latent hazard of 0062 noted in bug 30 |
-| 0064 | - | - | pending (written after RV8 (e), which found bug 33) |
+| 0060, 0063 (amended), 0064 | RV8 (e) round 2 | `rv8/reussir/e/round2/FINDINGS.txt` | no defect: RV8RE-01/02 fixed; returning bottom for poison and tagged immediates checked sound in every position; 0064 rejects nothing rrc prints (four lean2rr dumps, about 5.3M rc types, re-read and re-printed byte-identically); the 0063 fallback keeps exit codes and messages under `ulimit -v` |
 
 The integration of the first 34 patches
 (`~/Documents/l2r-scratch/reussir-final`, then at `5c0514e3`) was checked

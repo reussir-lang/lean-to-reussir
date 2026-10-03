@@ -482,7 +482,7 @@ Reussir `ef922049` plus 35 patches; the patches are in
 depth in the file of its bug, indexed in
 [`../reussir-bugs/README.md`](../reussir-bugs/README.md)).
 They are local only, never submitted upstream, and each is reviewed
-adversarially (the last one, 0064, was applied with its review pending).
+adversarially.
 An independent audit checked whether each problem is really a Reussir
 bug. Of the 33 documented problems, 30 are patched (33 patches) and 3 are
 documented only; two more patches add features lean2rr needs:

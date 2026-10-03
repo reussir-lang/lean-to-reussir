@@ -101,8 +101,11 @@ none failed (every test that prints and reparses rc or ref types passes).
 `run.sh`: `bug 33   FIXED       rrc -x mlir rejects !reussir.rc<i64 rigid,
 atomic>: expected '>'`.
 
-**Review.** Pending: it was written after the review of 0060-0063 (which
-found the bug) and is applied meanwhile.
+**Review.** RV8 (e) round 2 (`rv8/reussir/e/round2/FINDINGS.txt`): no
+defect. The rc and ref types both go through the changed function, and
+rrc's printer always writes the closing `>`; four lean2rr MLIR dumps
+(LeanBoolLoop, Rbmap, RtStateMachines, TypeclassGeneric: about 5.3M rc
+types) read back and re-print byte-identically.
 
 **Effect on lean2rr.** None.
 
