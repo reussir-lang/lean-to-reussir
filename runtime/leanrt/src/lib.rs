@@ -34,7 +34,7 @@ pub mod hash;
 pub mod io;
 pub mod net;
 pub mod once;
-pub mod origin;
+pub mod persist;
 pub mod proc;
 pub mod rt;
 pub mod sched;
@@ -58,10 +58,12 @@ pub fn last_shared() -> bool {
     LAST_SHARED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// A fresh "address" for `ptrAddrUnsafe` of a value that natively is a new
-/// object at every boxing (`UInt64`, `Float`, ...): never repeated, even (so
-/// never a boxed scalar, whose "address" is odd) and in `[2^62, 2^63)` (so
-/// never a real pointer).
+/// A fresh "address" for `ptrAddrUnsafe` of a value that has no cell of its
+/// own and is too wide for a scalar word (a `Nat` in `[2^63, 2^64)`, an `Int`
+/// outside `int32`), of a value whose handle is not one word
+/// (`l2r_ptr_addr_obj`), and of a Reussir type lean2rr's `addrOf` does not
+/// know: never repeated, even (so never a boxed scalar, whose "address" is
+/// odd) and in `[2^62, 2^63)` (so never a real pointer).
 pub fn fresh_addr() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1 << 62);
     NEXT.fetch_add(2, std::sync::atomic::Ordering::Relaxed)
@@ -72,13 +74,26 @@ pub fn fresh_addr() -> u64 {
 /// freeing the last reference is out of line, which keeps textures small
 /// enough for LLVM to inline them into Reussir code.
 #[inline(always)]
-pub fn rc_release<T>(r: reussir_rt::rc::Rc<T>) {
-    let c = r.count_ref().get();
-    if c == 1 {
-        rc_drop_last(r)
-    } else {
-        r.count_ref().set(c - 1);
-        std::mem::forget(r);
+pub fn rc_release<R: Release>(r: R) {
+    r.release()
+}
+
+/// A counted handle that `rc_release` gives up: Reussir's `Rc` and the
+/// runtime's own one-block objects (`string::LStr`, `tagvec::TagVec`).
+pub trait Release {
+    fn release(self);
+}
+
+impl<T> Release for reussir_rt::rc::Rc<T> {
+    #[inline(always)]
+    fn release(self) {
+        let c = self.count_ref().get();
+        if c == 1 {
+            rc_drop_last(self)
+        } else {
+            self.count_ref().set(c - 1);
+            std::mem::forget(self);
+        }
     }
 }
 
@@ -145,7 +160,8 @@ pub fn uncaught_exception<M: string::Utf8 + ?Sized>(msg: &M) -> ! {
 
 /// `Option.getOrBlock!` on `none` (`Promise.result!` of a dropped promise):
 /// a forced panic message (to `std::cerr`, so stdout is flushed first), then
-/// block forever, as natively.
+/// the running context blocks forever, as natively the calling thread does
+/// (the other tasks and `main` go on).
 #[inline(never)]
 pub fn promise_dropped() -> ! {
     io::flush_stdout();
@@ -157,7 +173,5 @@ pub fn promise_dropped() -> ! {
     if std::env::var_os("LEAN_ABORT_ON_PANIC").is_some() {
         std::process::abort();
     }
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
-    }
+    task::hang()
 }

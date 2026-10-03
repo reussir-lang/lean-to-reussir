@@ -72,7 +72,11 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
   -- reported or the process exits; they see Lean's shutdown flag (§5.14).
   -- (`l2r_run_pending_tasks` is generated at the end, `taskDispatchFns`.)
   let drain := "let sd : u64 = l2r_task_shutdown();\nlet pt : u64 = l2r_run_pending_tasks();\n"
-  let mainCode := s!"let tm : u64 = l2r_task_manager_start();\nlet se : u64 = l2r_std_enter();\nlet r = {fnName mainInst}({argExpr}L2RUnit::u\{});\nlet sl : u64 = l2r_std_leave();\n{drain}match r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
+  -- `main` gets standard streams of its own (a fresh stream context,
+  -- `l2r_std_enter`) only when it runs on a thread of its own: with
+  -- `LEAN_MAIN_USE_THREAD=0` it runs on the initializers' thread and keeps
+  -- the streams they left (§5.11).
+  let mainCode := s!"let tm : u64 = l2r_task_manager_start();\nlet mt : u64 = l2r_main_on_thread();\nlet se : u64 = l2r_std_enter_if(mt);\nlet r = {fnName mainInst}({argExpr}L2RUnit::u\{});\nlet sl : u64 = l2r_std_leave_if(mt);\n{drain}match r \{\n{outTy}::{okV}(v) => \{ {exitCode} },\n{outTy}::{errV}(e) => \{ {uncaught "e"} }\n}"
   -- The startup chain (`startupChain`), then `main`.
   let body := (← startupChain errStr startup) ++
     s!"fn l2r_main_body() \{\n{mainCode}\n}\n"
@@ -89,6 +93,7 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
     "extern \"C\" trampoline \"l2r_main_body\" = l2r_main_body;\n\n" ++
     "#[ffi(import)]\nfn l2r_init_done() -> unit [{ leanrt::rt::set_initializing(false) }];\n\n" ++
     "#[ffi(import)]\nfn l2r_init_failed(msg : LStr) -> u64 [{ leanrt::uncaught_exception(&msg) }];\n\n" ++
+    "#[ffi(import)]\nfn l2r_main_on_thread() -> u64 [{ leanrt::rt::main_on_thread() as u64 }];\n\n" ++
     "#[ffi(import)]\nfn l2r_run_main() [{ {\n" ++
     "    extern \"C\" { fn l2r_init_body(); fn l2r_main_body(); }\n" ++
     "    leanrt::rt::run_main2(|| unsafe { l2r_init_body() }, || unsafe { l2r_main_body() })\n} }];\n\n" ++

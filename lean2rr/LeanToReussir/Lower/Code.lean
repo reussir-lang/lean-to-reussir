@@ -195,28 +195,32 @@ mutual
         let fn ← fresh "jp_"
         modify fun s => { s with fns := s.fns.push (.fn fn fparams retTy body) }
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.call fn captured) } outlined retTy k
-      else if (countJumps k {}).getD d.fvarId 0 ≤ 1 ||
-          (H.duplicateJp ctx.jpBodies d && !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined) then
-        -- J1, or a small join point that is not J2: its body at each jump.
-        lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.inline d.params d.value) } outlined retTy k
       else
-        -- J2: the scope computes the join point's arguments.
-        let resTy ← match ptys.size with
-          | 0 => pure RR.Ty.unit
-          | 1 => pure ptys[0]!
-          | _ => pure (RR.Ty.named (← tupleType ptys))
-        let scope ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.yield ptys) } outlined resTy k
-        let r ← fresh "jv"
-        let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[(r, some resTy, .block scope)]
-        let mut ctx' := ctx
-        for h : i in [:d.params.size] do
-          let p := d.params[i]
-          let x ← fresh "y"
-          let e := if ptys.size == 1 then RR.Expr.var r else .field (.var r) i
-          lets := lets.push (x, some ptys[i]!, e)
-          ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ptys[i]!) }
-        let b ← lowerCode ctx' outlined retTy d.value
-        return { b with lets := lets ++ b.lets }
+        let jumps := (countJumps k {}).getD d.fvarId 0
+        if jumps ≤ 1 || (H.duplicateJp { bodies := ctx.jpBodies, single := ctx.jpSingle, loop := ctx.loop } d jumps &&
+            !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined) then
+          -- J1, or a small join point that is not J2: its body at each jump.
+          let jpSingle := if jumps ≤ 1 then ctx.jpSingle.insert d.fvarId else ctx.jpSingle
+          lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.inline d.params d.value), jpSingle }
+            outlined retTy k
+        else
+          -- J2: the scope computes the join point's arguments.
+          let resTy ← match ptys.size with
+            | 0 => pure RR.Ty.unit
+            | 1 => pure ptys[0]!
+            | _ => pure (RR.Ty.named (← tupleType ptys))
+          let scope ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.yield ptys) } outlined resTy k
+          let r ← fresh "jv"
+          let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[(r, some resTy, .block scope)]
+          let mut ctx' := ctx
+          for h : i in [:d.params.size] do
+            let p := d.params[i]
+            let x ← fresh "y"
+            let e := if ptys.size == 1 then RR.Expr.var r else .field (.var r) i
+            lets := lets.push (x, some ptys[i]!, e)
+            ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ptys[i]!) }
+          let b ← lowerCode ctx' outlined retTy d.value
+          return { b with lets := lets ++ b.lets }
     | .fun d k _ =>
       -- Lambda lifting normally removes local functions; lower defensively.
       let ptys ← d.params.mapM (lowerType ·.type)
@@ -366,12 +370,13 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
     let block ← processOutputBody (pnames.zip ptys) ret
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
     return
-  let outlined := chooseOutlined H.duplicateJp body
+  let loop := ((← read).callCycles.find? d.name).getD {}
+  let outlined := chooseOutlined H.duplicateJp loop body
   -- J4: the declaration as one state machine when an outlined join point
   -- calls it back in tail position (`LowerHooks.stateMachine`).
   let sm? := H.stateMachine.plan d body outlined pnames
   modify fun s => { s with smArms := #[] }
-  let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm? }
+  let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm?, loop }
   let block ← try lowerCode H ctx outlined ret body
     catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
   if let some sm := sm? then

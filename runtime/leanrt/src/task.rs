@@ -364,6 +364,16 @@ pub fn deferring() -> bool {
     tasks().started
 }
 
+/// Whether every task has finished: no task has an entry (an unfinished
+/// one, a promise included, always has one). Then waiting for any task
+/// returns at once, and a constant's walk for tasks (`persist`) can be
+/// skipped.
+#[inline(never)]
+pub fn settled() -> bool {
+    let t = tasks();
+    t.slab.len() == t.free.len()
+}
+
 /// `main` has returned; the remaining tasks are about to run. The tasks
 /// queued now could have been started by native workers before Lean's
 /// shutdown flag was set (`EARLY`).
@@ -671,13 +681,39 @@ pub fn resolve(cell: usize) -> u64 {
         // run Lean code, which may block, and a context must not be
         // suspended inside a free (the free is the thread's, in
         // `reussir_rt::drop`: the other contexts' frees would wait for it).
-        // They are walked once the free is over, at the context's next
-        // point that may run Lean code (`run_later_walks`).
+        // They are walked as soon as the free is over (`run_later_walks`):
+        // by the drain itself when it ends (`drained`), else by
+        // `drop::run` (a free that a container started) or at the
+        // context's next point that may run Lean code.
         ctx().later.push(w);
+        hook_drained();
         return 0;
     }
     ctx().walks.push(w);
     1
+}
+
+extern "C" {
+    /// `reussir_rt::drop::__reussir_drop_drained` (local Reussir patch
+    /// 0040): the function every drain that released something calls once
+    /// it is over. Null with a Reussir without that patch.
+    #[linkage = "extern_weak"]
+    static __reussir_drop_drained: *const std::sync::atomic::AtomicPtr<()>;
+}
+
+/// Have Reussir's drains call `drained` when they end (`resolve`).
+fn hook_drained() {
+    let h = unsafe { __reussir_drop_drained };
+    if !h.is_null() {
+        let f: extern "C" fn() = drained;
+        unsafe { (*h).store(f as *mut (), std::sync::atomic::Ordering::Relaxed) };
+    }
+}
+
+/// A drain is over (`__reussir_drop_drained`): walk the dependents of the
+/// promises resolved inside it.
+extern "C" fn drained() {
+    run_later_walks();
 }
 
 extern "C" {
@@ -688,21 +724,26 @@ extern "C" {
 }
 
 /// Walk the dependents of the promises resolved inside a free on this
-/// context (`resolve`). Natively their `sync` dependents run at once on the
-/// resolving thread; here at the next point after the free where the
-/// running context may run Lean code: an effect point, blocking, a
-/// question about a task, the end of a task or of `main`.
+/// context (`resolve`); whether there were any. Natively their `sync`
+/// dependents run at once on the resolving thread, in the middle of the
+/// free; here once the free is over: when the drain ends (`drained`, with
+/// Reussir's patch 0040), when a free a container started ends
+/// (`drop::run`), and at the points where the running context may run
+/// Lean code (an effect point, blocking, a Std.Sync wait, a question about
+/// a task, the end of a task or of `main`), for frees whose end the
+/// runtime does not see (Reussir's record glue, without that patch).
 #[inline]
-pub fn run_later_walks() {
+pub fn run_later_walks() -> bool {
     if !ctx().later.is_empty() {
-        run_later_walks_slow()
+        return run_later_walks_slow();
     }
+    false
 }
 
 #[inline(never)]
-fn run_later_walks_slow() {
+fn run_later_walks_slow() -> bool {
     if crate::drop::active() {
-        return;
+        return false;
     }
     let f = unsafe { l2r_task_walk_c };
     assert!(!f.is_null(), "leanrt: no l2r_task_walk_c");
@@ -715,6 +756,7 @@ fn run_later_walks_slow() {
             unsafe { f() };
         }
     }
+    true
 }
 
 /// An `IO.Promise`: the cell of its task, with one reference (natively the

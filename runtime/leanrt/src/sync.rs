@@ -46,6 +46,16 @@ fn wait_on(addr: usize) {
     sched::block(Wait::Sync(addr));
 }
 
+/// At the start of a primitive that may wait, before it looks at its
+/// object: the walks a free left to this context (`task::run_later_walks`)
+/// run first, as natively they ran during the free, before this. Run once
+/// the context is among the object's waiters (by `sched::block`), they
+/// could release the object to it, waking nobody (it is running), and it
+/// would then wait forever.
+fn settle() {
+    crate::task::run_later_walks();
+}
+
 // ---------------------------------------------------------------------------
 // BaseMutex
 
@@ -81,6 +91,7 @@ fn unlock_core(m: &mut Mutex) {
 }
 
 pub fn mutex_lock(h: &LHandle) {
+    settle();
     let (m, a) = get::<Mutex>(h);
     lock_core(m, a, me());
 }
@@ -115,6 +126,7 @@ pub fn condvar_new() -> LHandle {
 /// `wait`: release the mutex, wait to be notified, then take the mutex
 /// again (natively `condition_variable::wait` on the adopted lock).
 pub fn condvar_wait(cv: &LHandle, mh: &LHandle) {
+    settle();
     let who = me();
     let (c, ca) = get::<Condvar>(cv);
     let (m, ma) = get::<Mutex>(mh);
@@ -153,6 +165,7 @@ pub fn recmutex_new() -> LHandle {
 }
 
 pub fn recmutex_lock(h: &LHandle) {
+    settle();
     let who = me();
     let (m, a) = get::<RecMutex>(h);
     match m.owner {
@@ -243,6 +256,7 @@ fn gate1_notify_one(m: &mut SharedMutex) {
 }
 
 pub fn sharedmutex_write(h: &LHandle) {
+    settle();
     let (m, a) = get::<SharedMutex>(h);
     while m.write_entered {
         gate1_wait(m, a);
@@ -272,6 +286,7 @@ pub fn sharedmutex_unlock_write(h: &LHandle) {
 }
 
 pub fn sharedmutex_read(h: &LHandle) {
+    settle();
     let (m, a) = get::<SharedMutex>(h);
     while m.write_entered || m.readers == u32::MAX {
         gate1_wait(m, a);

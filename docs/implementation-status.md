@@ -4,7 +4,10 @@ Status as of 2026-10-02 (branch `dev`). This is a plain-language overview
 for someone who knows Rust but not Lean. The full rules are in
 [`translation-plan.md`](translation-plan.md); the runtime is described in
 [`../runtime/README.md`](../runtime/README.md); the Reussir bugs met on the
-way are in [`../reussir-bugs/`](../reussir-bugs/README.md).
+way are in [`../reussir-bugs/`](../reussir-bugs/README.md). The implementation's
+tricks and special cases, each with its reason, its place in the code and
+what would break without it, are cataloged in
+[`implementation/`](implementation/README.md).
 
 ## In one paragraph
 
@@ -124,7 +127,7 @@ feature request for Reussir, not a bug fix).
 
 | Lean | Representation | Notes |
 |---|---|---|
-| `String` | runtime `LStr`: reference-counted UTF-8 bytes plus the character count | copy-on-write: modified in place when unique, like Lean |
+| `String` | runtime `LStr`: one block like Lean's string object (reference count, byte size, capacity, character count, then the UTF-8 bytes) | copy-on-write: modified in place when unique, like Lean |
 | `Array α` | runtime vector of `α`'s storage type | in place when unique; enumerations stored as small indices; non-shareable values wrapped in a one-field box (Lean boxes elements too) |
 | `ByteArray`, `FloatArray` | `Vec<u8>`, `Vec<f64>` | |
 | `IO.Ref α` / `ST.Ref` | a shared mutable cell | mutations seen through every alias, as in Lean |
@@ -271,7 +274,9 @@ exceptions listed further down:
 - **All of the language** (it arrives already compiled by Lean).
 - **Program structure:** `main` with or without arguments and exit code,
   module initializers and `initialize` declarations (run in Lean's order,
-  taken from what the `.olean` records), `IO.initializing`, top-level
+  taken from what the `.olean` records; under the module system, `meta`
+  declarations and `meta import`s run only where natively they do),
+  `IO.initializing`, top-level
   constants computed once on first use, `@[extern]`/`@[export]` functions
   implemented in Lean, `@[implemented_by]`.
 - **Numbers and data:** `Nat`/`Int` of any size, fixed-width integers,
@@ -317,8 +322,12 @@ structure (a long list, a deep tree, nested arrays) uses a stack of
 pending work instead of recursion, as Lean does, so it never overflows the
 stack; resources inside (file handles) are closed in Lean's order. Memory
 use is usually at or below native (Reussir's records and reuse are
-tighter), except for the `Nat` field size above and some string and array
-headers.
+tighter), except for the `Nat` field size above and generic arrays: an
+`Array α` other than `Array Nat`/`Int`, `ByteArray` or `FloatArray` is a
+counted box plus a separate element buffer (8 bytes and one allocation more
+than Lean's single array object). Strings and `Array Nat`/`Array Int` are
+single blocks with Lean's own header sizes (six million three-element
+`Array Nat` rows: 328 MB, native 330 MB).
 
 ## What is not supported, or differs from native
 
@@ -329,10 +338,15 @@ with examples, is §10 of the translation plan.
 
 - **No parallelism** (see "How tasks run"). Output that depends on timing
   races between tasks can come out in another order (natively a race).
-- **Raw addresses:** casting an object to a number (`unsafeCast` to read an
-  address) gives a deterministic stand-in instead of a real address; the
-  parts of a value converted between representations are new objects for
-  `ptrEq`.
+- **Pointer identity and raw addresses** are not preserved: `ptrAddrUnsafe`
+  answers the address of the value's own cell, or a word computed from a
+  scalar value (`UInt64` and `Float` their bits), so `ptrEq`,
+  `ptrEqList` and `withPtrAddr` may answer otherwise than natively (a
+  value converted between representations is a new object, not `ptrEq` to
+  its original), but `ptrEq` answering `true` still means equal values,
+  and `IO.Ref.ptrEq` is exact. Casting an object to a number
+  (`unsafeCast` to read an address) gives a deterministic stand-in
+  instead of a real address.
 - **Startup order** of a few constants Lean compiled without recording an
   order (members of one `mutual` block that do not use each other, some
   macro-generated names) is chosen by lean2rr; visible only if their
@@ -344,7 +358,7 @@ with examples, is §10 of the translation plan.
   natively.
 - **Stubs:** `IO.getNumHeartbeats` is 0, `isExclusiveUnsafe` answers
   `false`, `shareCommon` shares nothing (and `ShareCommon.Object.eq` holds
-  only for the same object), a panic's backtrace line says the trace is
+  at most for the same object, by address), a panic's backtrace line says the trace is
   unavailable; the Windows-only time zone functions fail as they do
   natively on other systems.
 - **`import Lean` programs** (metaprogramming: the elaborator, the kernel,
@@ -449,10 +463,9 @@ soundness.
 | `cheap-consts` | constants made of small literals recomputed instead of cached |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code |
 | `jp-sink`, `jp-small` | join points moved to where they are used; small ones duplicated |
-| `state-machines` | loops through join points entered without allocation |
+| `state-machines` | loops through join points: entering the loop and every jump inside it allocate nothing |
 | `lazy-fields`, `nullary-scrutinee`, `sink-proj` | shapes that let Reussir reuse memory cells |
-| `fresh-rebuild` | in programs that never compare objects by address, the error arm of a monadic bind rebuilds its result, so Reussir reuses the cell on the success path |
-| `origin-free-reads` | in programs that never convert an array between representations, array reads skip a bookkeeping check |
+| `fresh-rebuild` | the error arm of a monadic bind rebuilds its freshly built result, so Reussir reuses the cell on the success path |
 
 Parts that look like optimizations but are required (each with its reason
 in the registry): the startup chain cut into chunks, loop state machines,

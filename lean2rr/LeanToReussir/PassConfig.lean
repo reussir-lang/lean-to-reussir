@@ -55,9 +55,6 @@ structure PassConfig where
   /-- Passes over the generated Reussir functions (before the program text is
   assembled), in order. -/
   rrPasses : Array (RRProgram → Array RR.Item → Array RR.Item) := #[]
-  /-- Edits of the prelude text given the final generated functions (after
-  `rrPasses`), in order. Plain: the prelude as it is. -/
-  preludePasses : Array (Array RR.Item → String → String) := #[]
 
 /-- An optional pass, registered by one line of Opt/Registry.lean: removing
 the line removes the pass. `install` adds it to a configuration. -/

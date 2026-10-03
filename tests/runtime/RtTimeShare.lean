@@ -3,7 +3,9 @@ import Std.Sync.Mutex
 
 /-! Externs that lean2rr's shim implements in Lean (`L2RShim`):
 `Std.Time.Timestamp.now`, the Windows-only time zone functions (an error
-elsewhere), `ShareCommon.Object.eq`/`hash`; and an extern applied to a value
+elsewhere), `ShareCommon.Object.eq`/`hash` (run, but their answers are
+identity, which lean2rr does not preserve: translation plan §9, so they are
+not printed); and an extern applied to a value
 cast from `()` (`unsafeCast ()` becomes a match on a constructor, which the
 printer must parenthesize: `match (L2RBox::b0{x}) {`), built but not run. -/
 
@@ -28,10 +30,11 @@ unsafe def main : IO Unit := do
     let id ← Database.Windows.getLocalTimeZoneIdentifierAt 0
     IO.println s!"zone: {id}"
   catch e => IO.println s!"getLocalTimeZoneIdentifierAt: {e}"
-  -- ShareCommon's object comparison, on one object.
+  -- ShareCommon's object comparison and hash, on one object.
   let xs : Array Nat := #[1, 2, 3]
   let o : ShareCommon.Object := unsafeCast xs
-  IO.println s!"eq self: {ShareCommon.Object.eq o o}"
-  IO.println s!"hash stable: {ShareCommon.Object.hash o == ShareCommon.Object.hash o}"
+  let e := ShareCommon.Object.eq o o
+  let h := ShareCommon.Object.hash o
+  IO.println s!"eq and hash ran: {e == e} {h == h}"
   if (← IO.getEnv "L2R_TEST_NEVER_SET_RTTIMESHARE").isSome then conjuredLock
   IO.println "done"

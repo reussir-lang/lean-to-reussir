@@ -108,11 +108,6 @@ structure LowerCtx where
   permutation (`PassConfig.fieldOrder`). Reussir keeps the given order (the
   driver turns its own member packing off). -/
   fieldOrder : Array Nat → Array Nat := fun aligns => (List.range aligns.size).toArray
-  /-- Whether the program can ask for an object's identity or sharing
-  (`ptrAddrUnsafe`, what inlines to it, `ST.Ref.ptrEq`, `dbgTraceIfShared`;
-  `programObservesIdentity`): otherwise a value and an equal copy cannot be
-  told apart. -/
-  observesIdentity : Bool := true
   /-- Whether the program can read a value as another type than its own
   (`unsafe` code of its own, or a cast justified by `sorry` or an axiom;
   `programCasts`): otherwise a `Box` holding a value of one inductive is
@@ -123,6 +118,10 @@ structure LowerCtx where
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/
   keys : NameMap InstKey
+  /-- The declarations that are in a cycle of direct calls, each with the
+  declarations of its cycle (its strongly connected component of the call
+  graph, itself included): a tail call of one of them closes a loop. -/
+  callCycles : NameMap NameSet := {}
 
 /-- How the target of a function value is called with all its arguments
 (data, so that the lowering state can hold it; see Lower's
@@ -230,10 +229,6 @@ structure LowerState where
   nonUniformInds : NameMap Bool := {}
   /-- Structural conversions being generated (for recursive types). -/
   convsInProgress : Std.HashSet String := {}
-  /-- Whether the body of a structural conversion is being generated: a
-  conversion it needs is the bare one (`_w`), not the one that records and
-  looks up origins (`l2r_origin_note`, see `structConv`). -/
-  convNested : Bool := false
   /-- Lean's borrowed parameters of the program's declarations, and the
   variables they lend (`Lower/Borrow`), once computed. -/
   borrowInfo : Option (NameMap (Array Bool) × FVarIdSet) := none
@@ -256,14 +251,6 @@ structure LowerState where
   taskTags : Array String := #[]
   /-- Names of generated thunk/task helper functions (see `lazyFn`). -/
   lazyFnNames : Std.HashSet String := {}
-  /-- Function types whose identity function (`l2r_fn_addr_T`, see `addrOf`)
-  is requested, and the variant count its body was generated for. -/
-  fnAddrTargets : Array RR.Ty := #[]
-  fnAddrDone : Std.HashMap RR.Ty Nat := {}
-  /-- Whether `l2r_box_addr` is requested, and the `Box` variant count its
-  body was generated for. -/
-  boxAddrWanted : Bool := false
-  boxAddrDone : Nat := 0
   /-- Reference types (see `refType`): element type ↦ name, and back (with
   how the cell stores the element). -/
   refTypes : Std.HashMap RR.Ty String := {}
@@ -327,8 +314,8 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
 
 /-- The state type of a thunk (`task = false`) or task over values of type
 `t`: a generated shared enum `{ pending(L2RUnit -> t), busy, done(t),
-conv(L2RUnit -> t, Box, u64), convdone(t, Box, u64) }`
-(tasks also `bind(L2RUnit -> LCell<S>)`)
+conv(L2RUnit -> t, Box) }` (tasks: `conv(L2RUnit -> t, Box, u64)`, and
+`bind(L2RUnit -> LCell<S>)`)
 held in a runtime cell `LCell<S>` (translation plan §5.14). A thunk
 starts `pending` (or `done`, for `Thunk.pure`) and is `busy` while its
 closure runs; a task is `done` from the start unless it is a deferred IO
@@ -337,19 +324,16 @@ def lazyState (task : Bool) (t : RR.Ty) : LowerM String := do
   if let some n := (← get).lazyStates[(task, t)]? then return n
   let n ← fresh (if task then "L2RTask" else "L2RThunk")
   -- `conv`: converted from another representation (see `lazyConv`): the
-  -- computation, the original cell (boxed), the original's identity. It
-  -- stays `conv` while it is forced (its computation forces the original,
-  -- whose state is the copy's, see `lazyGetFn`).
+  -- computation, the original cell (boxed) and, for a task, the original's
+  -- address (its identity for the runtime). It stays `conv` while it is
+  -- forced (its computation forces the original, whose state is the
+  -- copy's, see `lazyGetFn`).
   let cellTy := RR.Ty.app "LCell" #[.named n]
   modify fun s => { s with
     lazyStates := s.lazyStates.insert (task, t) n
     lazyInfos := s.lazyInfos.insert n (task, t)
     typeItems := s.typeItems.push (.enum n false (#[("pending", #[.fn .unit t]), ("busy", #[]), ("done", #[t]),
-      ("conv", #[.fn .unit t, RR.Ty.box, .named "u64"]),
-      -- `convdone`: a converted cell with its value: the value, the
-      -- original (kept, so that its address stays this cell's identity),
-      -- the original's identity.
-      ("convdone", #[t, RR.Ty.box, .named "u64"])] ++
+      ("conv", #[.fn .unit t, RR.Ty.box] ++ (if task then #[.named "u64"] else #[]))] ++
       -- `bind`: an `IO.bindTask` task before it has run `f` (its computation
       -- yields the task it continues as, see `taskStepFn`).
       (if task then #[("bind", #[.fn .unit cellTy])] else #[])))

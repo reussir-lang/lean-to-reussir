@@ -9,9 +9,11 @@ buckets are `AssocList Nat (fun _ => Nat)`, and mono makes that
 `AssocList Nat lcAny`, so the map's values lose their type. `toMonoTypeKeep`
 is `toMonoType` except that a *closed* type-former argument is kept when it
 does not make the type dependent: a constant family `fun _ … _ => T` (kept
-with `T` converted), or a type constructor such as `List`. A genuinely
-dependent family (`fun n => Fin n`) still becomes `lcAny`, as in Lean: its
-values have no single representation.
+with `T` converted), or a type constructor such as `List` (also after eta
+reduction: `fun n => Fin n` is `Fin`). A family whose body mentions its
+variable (`fun n => Fin (n + 1)`, `fun b => cond b Nat String`) still
+becomes `lcAny`, as in Lean: its values need not have a single
+representation.
 
 Everywhere lean2rr computes mono types itself (Stage 2's `toMono`,
 constructor fields, Stage 3) it uses this function, so the types agree.
