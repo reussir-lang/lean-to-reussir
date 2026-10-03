@@ -243,12 +243,17 @@ dictionary that arrives as a *parameter* (`Array.mapM` receives `Monad Id`
 from `Array.map`) would stay a runtime value. So, like Lean's specializer,
 lean2rr also specializes callees on **static dictionaries**: a dictionary
 built only from instance constants and types (and projections of such). A
-constant whose evaluation computes something (calls a function other than
-to build a constructor or a closure: `instance : Inhabited Grid := ⟨mkGrid
-300⟩`) does not count: natively it is evaluated once, at startup, and a
-callee reads its fields, while `simp` in a callee specialized on it would
-copy its body to the projections, to run at every call (round 7 RV7F-02,
-test `RtDictConst`). The instance key then includes the dictionary. The callee's instance binds that
+constant counts only if it is a dictionary of functions: its evaluation
+builds the class's structure (and its parents'), closures, constructors
+without fields and small numbers, and nothing else. One that calls a
+function (`instance : Inhabited Grid := ⟨mkGrid 300⟩`) or allocates data (a
+list or record literal, a `Thunk.mk`, a string or big number literal) does
+not count: natively it is evaluated once, at startup, and a callee reads its
+fields, while `simp` in a callee specialized on it would copy its body to
+the projections, to run at every call: the call again, the literal rebuilt,
+a new thunk forced again (round 7 RV7F-02, RV7F-04; test `RtDictConst`).
+Only a dictionary's functions gain from the copy: they become direct calls.
+The instance key then includes the dictionary. The callee's instance binds that
 parameter to the dictionary itself, rebuilt as `let`s at its start, and
 `simp` folds its projections into direct calls. The parameter stays, unused,
 so the arity is unchanged.
@@ -2562,10 +2567,11 @@ Each item says what differs and when.
   cost, a dictionary built by an instance function applied to static
   arguments (`instance [Inhabited α] : Inhabited (Wrap α) := ⟨expensive
   default⟩`), natively a value the caller computes once, can be recomputed
-  at each call of the callee. A constant whose evaluation computes
-  something is not part of a static dictionary, so it is computed once, as
-  natively (test `RtDictConst`). Visible through traces or panics in
-  instance code or in such calls, or as extra time.
+  at each call of the callee. A constant that is more than a dictionary of
+  functions (one that calls a function or allocates data: a literal, a
+  record, a thunk) is not part of a static dictionary, so it is evaluated
+  once, as natively (test `RtDictConst`). Visible through traces or panics
+  in instance code or in such calls, or as extra time.
 - *Tasks* run on one thread, when they are needed, when the running code
   blocks (a sleep, a lock, a condition variable, a promise, a socket) or
   when `main` returns (§5.14). Contexts never run in parallel and switch
