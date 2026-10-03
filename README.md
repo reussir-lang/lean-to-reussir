@@ -15,7 +15,12 @@ Implementation notes: [`docs/implementation/`](docs/implementation/README.md) ca
 
 ## Requirements
 
-- Lean v4.33.0 (via elan)
+- Lean v4.34.0 (via elan; `lean2rr/lean-toolchain`). lean2rr reads only
+  `.olean` files of the toolchain it is built with, so programs are compiled
+  with that toolchain too. The test runners and `scripts/l2r.py` take it
+  from `L2R_LEAN_TOOLCHAIN` (a toolchain directory), by default the elan
+  toolchain the pin names, whatever elan's default is
+  (`scripts/toolchain.sh`).
 - Reussir built from source (LLVM/MLIR 23), checked out into `reussir/`
 
 ## Layout

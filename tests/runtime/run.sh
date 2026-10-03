@@ -18,10 +18,13 @@
 # Environment: L2R_REUSSIR, L2R_LEAN2RR, L2R_RUSTC (see scripts/l2r.py);
 # L2R_DISABLE_OPTS / L2R_ENABLE_OPTS (comma-separated lean2rr optimizations
 # to turn off / on, passed on by scripts/l2r.py; `lean2rr --list-opts`);
-# L2R_TEST_BUILD (build directory, default tests/runtime/build).
+# L2R_TEST_BUILD (build directory, default tests/runtime/build);
+# L2R_LEAN_TOOLCHAIN (the Lean toolchain of the native builds, default the
+# one lean2rr/lean-toolchain pins; scripts/toolchain.sh).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
+. "$ROOT/scripts/toolchain.sh"
 BUILD=${L2R_TEST_BUILD:-$HERE/build}
 mkdir -p "$BUILD"
 

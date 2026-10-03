@@ -9,10 +9,12 @@
 #   loop is made once, not at every use).
 # Both must print what the native build prints.
 #   tests/runtime/nat-alloc-check.sh [SMALL LARGE]   (default 300 3000)
-# Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD).
+# Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
+# L2R_LEAN_TOOLCHAIN).
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
+. "$ROOT/scripts/toolchain.sh"
 SMALL=${1:-300}
 LARGE=${2:-3000}
 OUT=${L2R_TEST_BUILD:-$HERE/build}/nat-alloc-check

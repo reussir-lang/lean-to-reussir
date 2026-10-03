@@ -85,6 +85,15 @@ python3 tests/oracle.py check --cmd 'out/{exe} {size}' [--cases A B] [--sizes sm
 python3 tests/oracle.py bench --cmd 'out/{exe} {size}' [--cases A B] [--size bench] [--repeat 5]
 ```
 
+The native builds (`oracle.py build`, `tests/runtime/run.sh`,
+`tests/env/run.sh`, `tests/runtime/nat-alloc-check.sh`,
+`tests/reussir-benchmark/run.sh`, `reussir-bugs/repros/run.sh`) and
+`scripts/l2r.py`'s GMP use the Lean toolchain lean2rr is pinned to
+(`lean2rr/lean-toolchain`, the elan toolchain
+`~/.elan/toolchains/leanprover--lean4---v4.34.0`), not elan's default:
+`scripts/toolchain.sh` puts its `bin/` first on `PATH`. Set
+`L2R_LEAN_TOOLCHAIN` to a toolchain directory to use another.
+
 To check lean2rr with some of its optimizations turned off, build with
 `scripts/l2r.py --disable-opt NAME` (repeatable), or set
 `L2R_DISABLE_OPTS=a,b` (and `L2R_ENABLE_OPTS`) in the environment, which

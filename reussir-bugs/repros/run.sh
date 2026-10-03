@@ -21,9 +21,10 @@
 # Plain .rr repros are built with rrc alone (--emit executable plus the
 # polymorphic-FFI directories, as scripts/l2r.py passes them). The Lean
 # repros (13 and 20, and the programs generated for 16 and 17) go through
-# scripts/l2r.py with L2R_REUSSIR set to the checkout. They need Lean 4.33
-# (`lean` on PATH) and a lean2rr build (`lake build` in lean2rr/, or
-# L2R_LEAN2RR). l2r.py builds the runtime crate leanrt for the checkout
+# scripts/l2r.py with L2R_REUSSIR set to the checkout. They need the Lean
+# toolchain lean2rr/lean-toolchain pins (or L2R_LEAN_TOOLCHAIN; put first on
+# PATH by scripts/toolchain.sh) and a lean2rr build (`lake build` in lean2rr/,
+# or L2R_LEAN2RR). l2r.py builds the runtime crate leanrt for the checkout
 # once, under runtime/leanrt/target/.
 #
 # Bugs 10, 11, 16, 17, 20 and 23 are build-time entries: the repros of 10, 11,
@@ -56,6 +57,7 @@ case "$1" in -h|--help) usage ;; esac
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
+. "$ROOT/scripts/toolchain.sh"
 CK=$(cd "$1" && pwd) || exit 2
 shift
 RRC=$CK/build/bin/rrc

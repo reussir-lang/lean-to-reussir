@@ -5,8 +5,8 @@
            [--disable-opt NAME]... [--enable-opt NAME]...
     l2r.py path/to/File.lean -o EXE [...]
 
-MODULE must already be compiled by Lean 4.33 (its .olean on LEAN_PATH, or in
---lean-path). A module name may contain characters that are not identifier
+MODULE must already be compiled by the Lean toolchain lean2rr is built with
+(lean2rr/lean-toolchain: v4.34.0; its .olean on LEAN_PATH, or in --lean-path). A module name may contain characters that are not identifier
 characters (`rbtree-zipper`, or Lean's escaped `«rbtree-zipper»`). Given a
 .lean file instead, the module is the file's name without `.lean`, compiled
 in the file's directory (`lean -o File.olean File.lean` there), and its
@@ -17,8 +17,10 @@ Steps: lean2rr (Lean LCNF -> .rr, with the runtime prelude), then rrc
 rebuilt here when its sources change) and GMP.
 
 Environment overrides: L2R_REUSSIR (Reussir checkout with build/), L2R_RUSTC
-(the rustc that built Reussir's runtime rlibs), L2R_GMP (path of libgmp.a;
-default: the one shipped with the Lean toolchain), L2R_LEAN2RR (the lean2rr
+(the rustc that built Reussir's runtime rlibs), L2R_LEAN_TOOLCHAIN (the Lean
+toolchain directory; default: the elan toolchain lean2rr/lean-toolchain
+names), L2R_GMP (path of libgmp.a; default: the one shipped with that
+toolchain), L2R_LEAN2RR (the lean2rr
 binary), L2R_DISABLE_OPTS and L2R_ENABLE_OPTS (comma-separated lean2rr
 optimizations to turn off or on, as --disable-opt/--enable-opt; spaces
 around the names are ignored; `lean2rr --list-opts` lists them),
@@ -133,11 +135,24 @@ def build_leanrt():
         return rlib
 
 
+def lean_toolchain():
+    """The Lean toolchain directory: L2R_LEAN_TOOLCHAIN, else the elan
+    toolchain that lean2rr/lean-toolchain pins (as scripts/toolchain.sh)."""
+    if os.environ.get("L2R_LEAN_TOOLCHAIN"):
+        return Path(os.environ["L2R_LEAN_TOOLCHAIN"])
+    pin = "".join((ROOT / "lean2rr" / "lean-toolchain").read_text().split())
+    elan = Path(os.environ.get("ELAN_HOME", Path.home() / ".elan"))
+    return elan / "toolchains" / pin.replace("/", "--").replace(":", "---")
+
+
 def gmp_archive():
+    """The GMP that native Lean links: the one shipped with the toolchain."""
     if os.environ.get("L2R_GMP"):
         return Path(os.environ["L2R_GMP"]).resolve()
-    prefix = subprocess.run(["lean", "--print-prefix"], capture_output=True, text=True).stdout.strip()
-    return Path(prefix) / "lib" / "libgmp.a"
+    gmp = lean_toolchain() / "lib" / "libgmp.a"
+    if not gmp.exists():
+        sys.exit(f"l2r: no {gmp}: set L2R_LEAN_TOOLCHAIN (or L2R_GMP)")
+    return gmp
 
 
 def module_and_path(arg, lean_path):
