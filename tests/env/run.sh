@@ -4,7 +4,8 @@
 # named Init.*, Std.*, Lean.*, Lake.* for Lean's library and L2RShim.* for
 # its own shim, so it must reject a program module named like them, and
 # accept Lean's library however it is reached (a symbolic link, hard links,
-# from a working directory whose lean-toolchain names another Lean).
+# from a working directory whose lean-toolchain names another Lean). It must
+# also stop when its shim directory has no shim.
 # Translation only (`lean2rr --emit mono`): a few seconds per case.
 #
 #   tests/env/run.sh
@@ -38,26 +39,36 @@ for f in src/Plain src/Lean/L2rFoo src/MLean shimdir/L2RShim/Evil shimdir/MShimD
 done
 
 # Lean's library reached through a symbolic link, through hard links, and
-# through hard links with one module replaced by a different file of the
+# through hard links with one file of a module (its `.olean`, or the
+# `.olean.private` part lean2rr reads) replaced by a different file of the
 # same size.
 # (Hard links need the build directory on the toolchain's file system.)
 ln -s "$LIB" "$W/symlink"
 links=yes
-cp -al "$LIB" "$W/hardlinks" 2> /dev/null && cp -al "$LIB" "$W/altered" 2> /dev/null || links=no
+for d in hardlinks altered altered-private; do
+  cp -al "$LIB" "$W/$d" 2> /dev/null || links=no
+done
 if [ $links = yes ]; then
-  f=Init/Data/Repr.olean
-  rm "$W/altered/$f"
-  python3 -c 'import sys; b = bytearray(open(sys.argv[1], "rb").read()); b[-1] ^= 1; open(sys.argv[2], "wb").write(b)' \
-    "$LIB/$f" "$W/altered/$f"
+  for f in altered/Init/Data/Repr.olean altered-private/Init/Data/Repr.olean.private; do
+    rm "$W/$f"
+    python3 -c 'import sys; b = bytearray(open(sys.argv[1], "rb").read()); b[-1] ^= 1; open(sys.argv[2], "wb").write(b)' \
+      "$LIB/${f#*/}" "$W/$f"
+  done
 fi
+# lean2rr moved away from its build directory (a link, else a copy).
+mkdir -p "$W/moved/bin"
+ln "$LEAN2RR" "$W/moved/bin/lean2rr" 2> /dev/null || cp "$LEAN2RR" "$W/moved/bin/lean2rr"
 # A working directory whose lean-toolchain names another Lean.
 mkdir -p "$W/othertc" && echo "leanprover/lean4:v4.34.0" > "$W/othertc/lean-toolchain"
 
 pass=0; fail=0
-# check NAME accept|reject PATTERN DIR LEAN_PATH MODULE
+# [CHECK_BIN=lean2rr] check NAME accept|reject PATTERN DIR LEAN_PATH MODULE [ENV-ARGS...]
+# (ENV-ARGS: for env, e.g. VAR=VALUE or -u VAR)
 check() {
   local name=$1 want=$2 pat=$3 dir=$4 lp=$5 mod=$6 out code
-  out=$(cd "$dir" && LEAN_PATH=$lp timeout 600 "$LEAN2RR" "$mod" --emit mono -o /dev/null 2>&1)
+  shift 6
+  out=$(cd "$dir" && env "$@" LEAN_PATH="$lp" timeout 600 "${CHECK_BIN:-$LEAN2RR}" "$mod" --emit mono \
+          -o /dev/null 2>&1)
   code=$?
   if { [ "$want" = accept ] && [ $code -eq 0 ]; } ||
      { [ "$want" = reject ] && [ $code -ne 0 ] && grep -q -- "$pat" <<< "$out"; }; then
@@ -74,11 +85,22 @@ check shim-named-module  reject "holds program modules named L2RShim" "$W/shimfi
 check lib-symlink        accept "" "$S" "$W/symlink:$S" Plain
 if [ $links = yes ]; then
   check lib-hardlinks    accept "" "$S" "$W/hardlinks:$S" Plain
-  check lib-altered      reject "module Init.Data.Repr .* but is not its file" "$S" "$W/altered:$S" Plain
+  check lib-altered      reject "module Init.Data.Repr .* but differs from it in .*/Init/Data/Repr.olean:" \
+    "$S" "$W/altered:$S" Plain
+  check lib-altered-private reject "module Init.Data.Repr .* but differs from it in .*/Repr.olean.private" \
+    "$S" "$W/altered-private:$S" Plain
 else
-  echo "SKIP  lib-hardlinks, lib-altered (no hard links to $LIB from $W)"
+  echo "SKIP  lib-hardlinks, lib-altered, lib-altered-private (no hard links to $LIB from $W)"
 fi
 check other-toolchain    accept "" "$W/othertc" "$LIB:$S" Plain
 check other-toolchain-nolib accept "" "$W/othertc" "$S" Plain
+check shim-default       accept "" "$S" "$S" Plain -u L2R_SHIM_DIR
+check shim-dir-missing   reject "shim library (L2RShim.olean) is not in $W/nosuchdir (L2R_SHIM_DIR=" "$S" "$S" Plain \
+  L2R_SHIM_DIR="$W/nosuchdir"
+check shim-dir-empty     reject "shim library (L2RShim.olean) is not in  (L2R_SHIM_DIR=''" "$S" "$S" Plain L2R_SHIM_DIR=
+CHECK_BIN=$W/moved/bin/lean2rr check shim-moved-binary reject \
+  "shim library (L2RShim.olean) is not in .*moved/lib/lean (L2R_SHIM_DIR is unset" "$S" "$S" Plain \
+  -u L2R_SHIM_DIR
+CHECK_BIN=$W/moved/bin/lean2rr check shim-moved-binary-dir accept "" "$S" "$S" Plain
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]

@@ -1477,8 +1477,8 @@ Rules:
   extern's C symbol, so it is the extern's implementation (above), and
   lean2rr imports the shim with the program (`LeanToReussir.Env`, from
   `L2R_SHIM_DIR`, which the driver sets to lean2rr's build directory, last
-  on the search path) and treats it as a toolchain module (no startup
-  work). The shim follows the C functions
+  on the search path; lean2rr stops if that directory has no shim) and
+  treats it as a toolchain module (no startup work). The shim follows the C functions
   (`uv/*.cpp`) check by check, over primitives of the runtime's event loop
   (`leanrt::net`, §5.14) on plain values (numbers, strings, byte arrays,
   handles, promises); errors are built in Lean as `lean_decode_uv_error`
@@ -2429,10 +2429,11 @@ Each item says what differs and when.
   directory `L2RShim` on the search path: lean2rr takes such modules for
   Lean's library or its own shim (constants evaluated lazily,
   initializers run by the runtime, `unsafe` code trusted, §5.1, §5.12). A
-  module of those names is the library's when it is the same file as the
-  module of that name in the library of the toolchain lean2rr is built
-  with (or in the shim directory), reached by any path: a symbolic link,
-  hard links or a copy are accepted. lean2rr reads that toolchain's
+  module of those names is the library's when its files (`.olean`, and
+  the `.olean.server` and `.olean.private` parts) are the same files as
+  those of the module of that name in the library of the toolchain
+  lean2rr is built with (or in the shim directory), reached by any path: a
+  symbolic link, hard links or a copy are accepted. lean2rr reads that toolchain's
   library (last on the search path, after `LEAN_PATH`), whatever
   toolchain the working directory's `lean-toolchain` names.
 
