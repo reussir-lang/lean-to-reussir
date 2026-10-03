@@ -127,7 +127,7 @@ feature request for Reussir, not a bug fix).
 
 | Lean | Representation | Notes |
 |---|---|---|
-| `String` | runtime `LStr`: reference-counted UTF-8 bytes plus the character count | copy-on-write: modified in place when unique, like Lean |
+| `String` | runtime `LStr`: one block like Lean's string object (reference count, byte size, capacity, character count, then the UTF-8 bytes) | copy-on-write: modified in place when unique, like Lean |
 | `Array α` | runtime vector of `α`'s storage type | in place when unique; enumerations stored as small indices; non-shareable values wrapped in a one-field box (Lean boxes elements too) |
 | `ByteArray`, `FloatArray` | `Vec<u8>`, `Vec<f64>` | |
 | `IO.Ref α` / `ST.Ref` | a shared mutable cell | mutations seen through every alias, as in Lean |
@@ -322,8 +322,12 @@ structure (a long list, a deep tree, nested arrays) uses a stack of
 pending work instead of recursion, as Lean does, so it never overflows the
 stack; resources inside (file handles) are closed in Lean's order. Memory
 use is usually at or below native (Reussir's records and reuse are
-tighter), except for the `Nat` field size above and some string and array
-headers.
+tighter), except for the `Nat` field size above and generic arrays: an
+`Array α` other than `Array Nat`/`Int`, `ByteArray` or `FloatArray` is a
+counted box plus a separate element buffer (8 bytes and one allocation more
+than Lean's single array object). Strings and `Array Nat`/`Array Int` are
+single blocks with Lean's own header sizes (six million three-element
+`Array Nat` rows: 328 MB, native 330 MB).
 
 ## What is not supported, or differs from native
 

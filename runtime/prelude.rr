@@ -32,8 +32,9 @@ enum [value] L2RUnit {
 }
 
 // A Lean `String`: valid UTF-8 bytes and the number of characters (Lean's
-// `m_length`, kept by every operation), copy-on-write.
-#[ffi(rust = "::reussir_rt::rc::Rc<(::std::vec::Vec<u8>, u64)>")]
+// `m_length`, kept by every operation), copy-on-write; one block like
+// Lean's string object (`leanrt::string`).
+#[ffi(rust = "::leanrt::string::LStr")]
 pub struct LStr;
 
 // A big number: (negative?, magnitude limbs), little-endian 64-bit limbs,
@@ -1796,9 +1797,8 @@ fn l2r_string_compare(a : LStr, b : LStr) -> u8 [{ { let r = leanrt::string::com
 #[ffi(import)]
 fn lean_string_hash(s : LStr) -> u64 [{ { let r = leanrt::string::hash(s.utf8()); leanrt::rc_release(s); r } }];
 
-// `String.toUTF8` / `String.ofByteArray` / `String.fromUTF8`: the buffer of
-// a unique value moves (natively these copy); from bytes, the characters are
-// counted.
+// `String.toUTF8` / `String.ofByteArray` / `String.fromUTF8`: copies, as
+// natively; from bytes, the characters are counted.
 #[ffi(import)]
 fn lean_string_to_utf8(s : LStr) -> RVec<u8> [{ leanrt::array::bytes_of_string(s) }];
 #[ffi(import)]
@@ -2104,10 +2104,10 @@ fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> {
 // `LIntArr`, and calls `lean_natarr_xxx` / `l2r_natarr_xxx` (`intarr`) in
 // place of `lean_array_xxx<E>` / `l2r_array_xxx<E>`.
 
-#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+#[ffi(rust = "::leanrt::tagvec::TagVec")]
 pub struct LNatArr;
 
-#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+#[ffi(rust = "::leanrt::tagvec::TagVec")]
 pub struct LIntArr;
 
 // The big value of an (even) word returned by `l2r_natarr_word_owned` /
@@ -3396,7 +3396,7 @@ fn lean_dbg_trace<T>(msg : LStr, f : L2RUnit -> T) -> T {
 fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
     {
         let name = ::std::any::type_name::<[:T:]>();
-        let boxed = name.starts_with("reussir_rt::") && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
+        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::tagvec::") || name.starts_with("leanrt::string::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
         let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
         let shared = boxed && (p >> 56) == 0 && {
             let c = unsafe { *(p as *const u32) };
@@ -3417,7 +3417,7 @@ fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
 fn l2r_shared_check<T>(a : T) -> T [{
     {
         let name = ::std::any::type_name::<[:T:]>();
-        let boxed = name.starts_with("reussir_rt::") && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
+        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::tagvec::") || name.starts_with("leanrt::string::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
         let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
         let shared = boxed && (p >> 56) == 0 && {
             let c = unsafe { *(p as *const u32) };

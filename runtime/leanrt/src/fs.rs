@@ -867,7 +867,7 @@ pub mod owned {
     use crate::drop::Vec as RVec;
 
     #[inline(never)]
-    pub fn put_str(h: LHandle, s: LStr) { super::put_str(&h, &s.0); rc_release(s); rc_release(h); }
+    pub fn put_str(h: LHandle, s: LStr) { super::put_str(&h, crate::string::bytes(&s)); rc_release(s); rc_release(h); }
     #[inline(never)]
     pub fn write(h: LHandle, b: RVec<u8>) { super::put_str(&h, array::as_slice(&b)); array::release(b); rc_release(h); }
     #[inline(never)]

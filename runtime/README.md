@@ -59,10 +59,10 @@ Generated sections of the prelude (edit the generator, then run it):
 | `Nat` | `enum [value] Nat { Small(u64), Big(LBig) }` | `Big` only for values `>= 2^64` |
 | `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
 | big numbers | `LBig` = `Rc<(bool, Vec<u64>)>` | sign, little-endian limbs, normalized; GMP `mpn`/`mpz` |
-| `String` | `LStr` = `Rc<(Vec<u8>, u64)>` | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write |
-| `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a transparent wrapper of `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types); freed without recursion (below) |
-| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one tagged word per element (below) |
-| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `String.toUTF8`/`fromUTF8` move a unique buffer (natively a copy) |
+| `String` | `LStr` = `leanrt::string::LStr`, a pointer to one block: count, byte size, capacity, character count (32 bytes, as Lean's header), bytes | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write; grows by `realloc` (below) |
+| `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a transparent wrapper of `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types); freed without recursion (below); two allocations, a 32-byte counted box and the buffer (Lean: one block, 24-byte header) |
+| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` = `leanrt::tagvec::TagVec` | one tagged word per element, one block with Lean's 24-byte header (below) |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `String.toUTF8`/`fromUTF8` copy the bytes, as natively |
 | `ST.Ref σ α` / `IO.Ref α` | a lean2rr-generated shared record `L2RRefN(Cell<E>)` around a Reussir cell (two allocations: the record and the cell); `Nat`/`Int`: the prelude's `L2RNatRef`/`L2RIntRef` | mutated through every alias; `take` leaves the placeholder |
 | `Thunk α`, `Task α` | `LCell<S>` = `leanrt::drop::Cell<S>`, a transparent wrapper of `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
 | `IO.FS.Handle` | `LHandle` | shared buffered file, closed with its last reference |
@@ -75,8 +75,9 @@ Generated sections of the prelude (edit the generator, then run it):
 
 Every function consumes its arguments (Reussir's convention). Strings,
 arrays and big numbers are updated in place when uniquely referenced
-(`Rc::is_unique`), otherwise copied once. Textures that only read a handle
-release it through `leanrt::rc_release`/`array::release`, whose last-reference
+(count 1), otherwise copied once. Textures that only read a handle
+release it through `leanrt::rc_release` (any `leanrt::Release` handle:
+Reussir's `Rc`, `LStr`, `TagVec`)/`array::release`, whose last-reference
 drop is out of line; together with `#[inline(always)]` fast paths and
 `#[cold]` slow paths this lets LLVM inline the hot textures (array
 get/set/push/size, string get/next/push, the Nat helpers) into Reussir code
@@ -101,11 +102,24 @@ handles inline, so a tagged scalar cannot be an opaque value). Every
 `l2r_natarr_xxx` (and `intarr`) with the same arguments and element type
 `Nat` (`Int`); `lean_mk_array`/`lean_mk_empty_array_with_capacity` become
 `lean_mk_natarr`/`lean_mk_empty_natarr_with_capacity`. A tag vector is one
-allocation, like Lean's array object (header, size, capacity, words; see
-`tagvec.rs` for how it is spelled as `Rc<Box<dyn Any>>`), and a copy of a
-shared one keeps its capacity (`lean_copy_expand_array`), so a literal
-`#[a, b, c]`, which pushes onto a shared empty array of capacity 3, allocates
-once.
+allocation laid out like Lean's array object: the count (a `u32`, padded
+to a word), the size, the capacity, then the words, so a three-element
+array takes 48 bytes as natively. A copy of a shared one keeps its
+capacity (`lean_copy_expand_array`), so a literal `#[a, b, c]`, which
+pushes onto a shared empty array of capacity 3, allocates once.
+
+**Runtime-owned objects.** `LStr` and `TagVec` are `leanrt` types: a
+`#[repr(transparent)]` pointer to a block allocated with `mi_malloc`, whose
+first word is the `u32` count. That is all Reussir needs of an opaque type
+(its `rc.inc` increments the count inline; `rc.dec` calls the type's drop
+hook, a texture that drops the Rust value), so their `Clone` and `Drop` do
+the counting, the drop's last reference out of line. A unique block grows
+in place with `mi_realloc` (at least doubling; the capacity is the whole
+block: mimalloc's size class, `mi_good_size`, for small blocks, a power of
+two above 4 KiB); a shared one is copied with room to spare (a string:
+at least doubled, as `lean_string_push`; an array: its capacity kept).
+`dbgTraceIfShared` recognizes them by their Rust type names
+(`leanrt::string::`, `leanrt::tagvec::`) besides `reussir_rt::`.
 
 ## Calling convention
 
