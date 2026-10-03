@@ -256,7 +256,9 @@ cell.
 task running on another context or a promise not resolved yet, a sleep, the
 final run after `main`) suspends its *context* (`main`'s thread stack, or a
 stack of a worker thread's size, 1 GiB reserved, with a guard page that the
-stack-overflow handler recognizes) and the scheduler runs: a context that
+stack-overflow handler recognizes: the scheduler records the running
+context's stack at each switch, `coro::set_running`) and the scheduler
+runs: a context that
 can go on, else a queued task on a new context if one of Lean's task
 manager workers is free (`LEAN_NUM_THREADS`, or the number of online
 processors, as `std::thread::hardware_concurrency`: not limited by the CPU

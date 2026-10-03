@@ -623,6 +623,7 @@ pub fn ensure_evloop() {
 }
 
 extern "C" fn evloop_entry(_: usize) -> ! {
+    note_running_stack();
     loop {
         crate::net::deliver();
         block(Wait::Io);
@@ -637,6 +638,7 @@ extern "C" {
 }
 
 extern "C" fn worker_entry(_: usize) -> ! {
+    note_running_stack();
     let f = unsafe { l2r_task_run_one_c };
     assert!(!f.is_null(), "leanrt: no l2r_task_run_one_c");
     let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(f) };
@@ -781,7 +783,16 @@ fn switch_to(n: CtxId) {
         s.free.push(c);
     }
     unsafe { crate::coro::switch(save, to) };
+    note_running_stack();
     free_zombie();
+}
+
+/// A context starts running (back from a switch, or at its entry): its
+/// stack is the one the stack-overflow handler looks at
+/// (`coro::set_running`).
+fn note_running_stack() {
+    let s = sched();
+    crate::coro::set_running(s.ctxs[s.cur as usize].stack.as_ref());
 }
 
 /// Free the stack of the context that ended last (keeping a few for reuse).
