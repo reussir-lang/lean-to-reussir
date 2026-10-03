@@ -62,6 +62,8 @@ structure CodeCtx where
   sm : Option StateMachine := none
   /-- Bodies of the join points in scope. -/
   jpBodies : Std.HashMap FVarId (Code .pure) := {}
+  /-- The join points in scope jumped to once (J1, inlined at their jump). -/
+  jpSingle : FVarIdSet := {}
   /-- Variables that a hook bound again, in the current alternative, to a
   value of its own equal to theirs (Opt/NullaryScrutinee): other hooks must
   not bind them again there. -/

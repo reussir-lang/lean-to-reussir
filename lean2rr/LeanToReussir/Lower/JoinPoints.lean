@@ -58,12 +58,22 @@ partial def jpBodiesOf (c : Code .pure) (acc : Std.HashMap FVarId (Code .pure) :
   | .cases cs => cs.alts.foldl (fun acc alt => jpBodiesOf alt.getCode acc) acc
   | _ => acc
 
+/-- What the choice of a join point's strategy may look at besides the join
+point (`LowerHooks.duplicateJp`): the join points in scope, at least those it
+can jump to. -/
+structure JpScope where
+  /-- Their bodies. -/
+  bodies : Std.HashMap FVarId (Code .pure) := {}
+  /-- Those jumped to once: inlined at their one jump (J1), whatever their
+  size. -/
+  single : FVarIdSet := {}
+
 /-- Choose a strategy for every join point of a declaration body: the set
 of outlined (J3) join points; others are J1 (single jump), J2, or
 duplicated at their jumps (J1′, those `duplicate` selects: the lowering hook
-`LowerHooks.duplicateJp`, given the bodies of all join points and the
-number of jumps). -/
-partial def chooseOutlined (duplicate : Std.HashMap FVarId (Code .pure) → FunDecl .pure → Nat → Bool)
+`LowerHooks.duplicateJp`, given all join points and the number of
+jumps). -/
+partial def chooseOutlined (duplicate : JpScope → FunDecl .pure → Nat → Bool)
     (body : Code .pure) : FVarIdSet := Id.run do
   let counts := countJumps body {}
   -- All join points with their scope.
@@ -76,7 +86,9 @@ partial def chooseOutlined (duplicate : Std.HashMap FVarId (Code .pure) → FunD
     | .cases cs => cs.alts.foldl (fun acc alt => gather alt.getCode acc) acc
     | _ => acc
   jps := gather body #[]
-  let bodies := jpBodiesOf body
+  let once := jps.foldl (init := ({} : FVarIdSet)) fun s (d, _) =>
+    if counts.getD d.fvarId 0 ≤ 1 then s.insert d.fvarId else s
+  let scope : JpScope := { bodies := jpBodiesOf body, single := once }
   let mut outlined : FVarIdSet := {}
   let mut changed := true
   while changed do
@@ -87,7 +99,7 @@ partial def chooseOutlined (duplicate : Std.HashMap FVarId (Code .pure) → FunD
       -- A J2 join point cannot be the target of a jump from inside an outlined body.
       let jumpedFromOutlined := jps.any fun (d', _) =>
         outlined.contains d'.fvarId && (jumpsIn d'.value {}).contains d.fvarId
-      let ok := single || duplicate bodies d (counts.getD d.fvarId 0) ||
+      let ok := single || duplicate scope d (counts.getD d.fvarId 0) ||
         (endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined && !jumpedFromOutlined)
       if !ok then
         outlined := outlined.insert d.fvarId

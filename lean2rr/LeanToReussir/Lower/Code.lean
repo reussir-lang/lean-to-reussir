@@ -195,28 +195,32 @@ mutual
         let fn ← fresh "jp_"
         modify fun s => { s with fns := s.fns.push (.fn fn fparams retTy body) }
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.call fn captured) } outlined retTy k
-      else if (let jumps := (countJumps k {}).getD d.fvarId 0
-          jumps ≤ 1 || (H.duplicateJp ctx.jpBodies d jumps && !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined)) then
-        -- J1, or a small join point that is not J2: its body at each jump.
-        lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.inline d.params d.value) } outlined retTy k
       else
-        -- J2: the scope computes the join point's arguments.
-        let resTy ← match ptys.size with
-          | 0 => pure RR.Ty.unit
-          | 1 => pure ptys[0]!
-          | _ => pure (RR.Ty.named (← tupleType ptys))
-        let scope ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.yield ptys) } outlined resTy k
-        let r ← fresh "jv"
-        let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[(r, some resTy, .block scope)]
-        let mut ctx' := ctx
-        for h : i in [:d.params.size] do
-          let p := d.params[i]
-          let x ← fresh "y"
-          let e := if ptys.size == 1 then RR.Expr.var r else .field (.var r) i
-          lets := lets.push (x, some ptys[i]!, e)
-          ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ptys[i]!) }
-        let b ← lowerCode ctx' outlined retTy d.value
-        return { b with lets := lets ++ b.lets }
+        let jumps := (countJumps k {}).getD d.fvarId 0
+        if jumps ≤ 1 || (H.duplicateJp { bodies := ctx.jpBodies, single := ctx.jpSingle } d jumps &&
+            !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined) then
+          -- J1, or a small join point that is not J2: its body at each jump.
+          let jpSingle := if jumps ≤ 1 then ctx.jpSingle.insert d.fvarId else ctx.jpSingle
+          lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.inline d.params d.value), jpSingle }
+            outlined retTy k
+        else
+          -- J2: the scope computes the join point's arguments.
+          let resTy ← match ptys.size with
+            | 0 => pure RR.Ty.unit
+            | 1 => pure ptys[0]!
+            | _ => pure (RR.Ty.named (← tupleType ptys))
+          let scope ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.yield ptys) } outlined resTy k
+          let r ← fresh "jv"
+          let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[(r, some resTy, .block scope)]
+          let mut ctx' := ctx
+          for h : i in [:d.params.size] do
+            let p := d.params[i]
+            let x ← fresh "y"
+            let e := if ptys.size == 1 then RR.Expr.var r else .field (.var r) i
+            lets := lets.push (x, some ptys[i]!, e)
+            ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ptys[i]!) }
+          let b ← lowerCode ctx' outlined retTy d.value
+          return { b with lets := lets ++ b.lets }
     | .fun d k _ =>
       -- Lambda lifting normally removes local functions; lower defensively.
       let ptys ← d.params.mapM (lowerType ·.type)
