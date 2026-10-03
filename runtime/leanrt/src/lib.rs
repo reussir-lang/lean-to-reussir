@@ -77,7 +77,7 @@ pub fn rc_release<R: Release>(r: R) {
 }
 
 /// A counted handle that `rc_release` gives up: Reussir's `Rc` and the
-/// runtime's own one-block objects (`tagvec::TagVec`).
+/// runtime's own one-block objects (`string::LStr`, `tagvec::TagVec`).
 pub trait Release {
     fn release(self);
 }
