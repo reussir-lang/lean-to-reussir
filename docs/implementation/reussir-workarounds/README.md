@@ -14,7 +14,8 @@ whose patch 0014 the runtime needs to build.
   program rather than its build time: wrong values, rrc crashes or
   rejected programs, use after free, a missed optimization (7) and a
   missing feature (13) (1, 2, 4, 5, 6, 7, 8, 9/14, 12, 13, 15, 19, 21), and
-  the drain-end hook (patch 0040).
+  the drain-end hook (patch 0040). Entries 24 to 32 need nothing from
+  lean2rr (table below).
 - [build-time.md](build-time.md): build-time costs and bugs (10, 11, 16,
   17, 18, 20, 22, 23).
 - [limitations.md](limitations.md): Reussir behaviour that is not a bug
@@ -24,12 +25,11 @@ whose patch 0014 the runtime needs to build.
 ## Summary
 
 `l2r-local` is the branch of `./reussir` with the applied local patches:
-0006, 0004, 0002, 0007, 0009, 0005, 0013, 0012, 0014, 0015. Patches 0016
-and 0017 are in `reussir-bugs/patches/` but not applied. Patch 0040 is not
-applied either; at b299aab it is
-`reussir-patches/0040-l2r-local-drop-call-the-host-s-function-when-a-drain.patch`
-(report: `reussir-patches/details/0040.md`), and it moves with the other
-patches when the `reussir-bugs/` reorganization is merged.
+since 2026-10-03 all 34 of them (head `5c0514e3`; the apply list is in
+[`reussir-bugs/README.md`](../../../reussir-bugs/README.md#applying-the-patches)),
+including 0040 (the drain-end hook) and 0050 (tagged opaque handles, for
+branch `mem-nat`), which fix no bug
+([`reussir-bugs/local-additions.md`](../../../reussir-bugs/local-additions.md)).
 
 Column "Needed with the patch?": whether lean2rr's workaround is still
 needed once the patch is applied. By the policy above, workarounds stay
@@ -37,24 +37,33 @@ either way.
 
 | Bug | lean2rr workaround | Local patch | Needed with the patch? |
 |---|---|---|---|
-| [1](../../../reussir-bugs/01-value-enum-payload.md) | only field-less `[value]` enums (and `Nat`/`Int`) | none yet | no patch; needed |
-| [2](../../../reussir-bugs/02-reuse-field-store.md) | `--no-pack-record-members`; fields ordered by alignment | 0002 (structures only), applied | yes (variants unpatched) |
+| [1](../../../reussir-bugs/01-value-enum-payload.md) | only field-less `[value]` enums (`Nat`/`Int` are tagged handles, 0050) | 0020, applied | no; kept (policy) |
+| [2](../../../reussir-bugs/02-reuse-field-store.md) | `--no-pack-record-members`; fields ordered by alignment | 0002 (structures) and 0019 (variants), applied | no; kept (policy) |
 | [3](../../../reussir-bugs/03-global-alloc-align.md) | runtime allocates with `mi_malloc` | none (intended) | needed (intended behaviour) |
 | [4](../../../reussir-bugs/04-recursive-type-compare.md) | driver retries rrc without `--reuse-across-call` | 0004, applied | no; kept as a fallback for unknown crashes |
 | [5](../../../reussir-bugs/05-one-armed-if.md) | runtime diagnostics through a C trampoline | 0005, applied | no; kept (policy) |
 | [6](../../../reussir-bugs/06-static-count-wrap.md) | none (flag alternative not used) | 0006, applied | n/a |
 | [7](../../../reussir-bugs/07-phantom-reuse-donor.md) | `lazy-fields`, `nullary-scrutinee`, `sink-proj` | 0007, applied | yes (0007 misses call-before-branch) |
-| [8](../../../reussir-bugs/08-padding-lift.md) | shape never emitted | none yet | n/a |
+| [8](../../../reussir-bugs/08-padding-lift.md) | shape never emitted | 0018, applied | n/a |
 | [9](../../../reussir-bugs/09-duplicate-bound-member.md), [14](../../../reussir-bugs/14-member-consumed-before-release.md) | none possible | 0009, applied | n/a |
-| [10](../../../reussir-bugs/10-closure-type-print.md) | `--no-closure-wpd` | none yet | no patch; needed |
-| [11](../../../reussir-bugs/11-sccp-call-graph.md) | none | none (cost) | n/a |
+| [10](../../../reussir-bugs/10-closure-type-print.md) | `--no-closure-wpd` | 0024, applied | no; kept (policy) |
+| [11](../../../reussir-bugs/11-sccp-call-graph.md) | none | 0032 (and 0033 for 11b), applied | n/a |
 | [12](../../../reussir-bugs/12-node-cache-collision.md) | none possible | 0012, applied | n/a |
 | [13](../../../reussir-bugs/13-long-list-drop.md) | runtime frees through 0014's stack | 0013-0015, applied | yes (the runtime needs 0014) |
-| [15](../../../reussir-bugs/15-nullable-match-yield.md) | `Nullable` not used | none yet | n/a |
-| [16](../../../reussir-bugs/16-nested-io-matches.md), [17](../../../reussir-bugs/17-long-nat-block.md) | `Outline`; `Array Nat` literal tables | none (cost / unclear) | no patch; needed |
-| [18](../../../reussir-bugs/18-rrc-target-deps.md) | build Reussir's default target | none yet | n/a |
-| [19](../../../reussir-bugs/19-cell-of-value-record.md) | `ElemBox` for `[value]` records in references | none yet | no patch; needed |
-| [20](../../../reussir-bugs/20-statet-tower.md) | `#[transform_anchor]` on conversion code | none (unclear) | no patch; needed |
-| [21](../../../reussir-bugs/21-unterminated-placeholder.md) | `[` escaped in the string literal table | 0016, not applied | no; kept (policy, and free) |
-| [22](../../../reussir-bugs/22-wildcard-wide-enum.md) | `l2r_sink` in wildcard arms | none (cost) | no patch; needed |
-| [23](../../../reussir-bugs/23-polyffi-link.md) | none | 0017, not applied | n/a |
+| [15](../../../reussir-bugs/15-nullable-match-yield.md) | `Nullable` not used | 0022, applied | n/a |
+| [16](../../../reussir-bugs/16-nested-io-matches.md), [17](../../../reussir-bugs/17-long-nat-block.md) | `Outline`; `Array Nat` literal tables | 0035 and 0031, applied | no; kept (policy, and it bounds the `.rr` text) |
+| [18](../../../reussir-bugs/18-rrc-target-deps.md) | build Reussir's default target | 0025, applied | no |
+| [19](../../../reussir-bugs/19-cell-of-value-record.md) | `ElemBox` for `[value]` records in references (`Nat`/`Int` are tagged handles, 0050) | 0023, applied | no; kept (policy) |
+| [20](../../../reussir-bugs/20-statet-tower.md) | `#[transform_anchor]` on conversion code | 0034, applied | yes for memory (3.5x without the anchors); kept |
+| [21](../../../reussir-bugs/21-unterminated-placeholder.md) | `[` escaped in the string literal table | 0016, applied | no; kept (policy, and free) |
+| [22](../../../reussir-bugs/22-wildcard-wide-enum.md) | `l2r_sink` in wildcard arms | 0030, applied | no; kept (policy) |
+| [23](../../../reussir-bugs/23-polyffi-link.md) | none | 0017, applied | n/a |
+| [24](../../../reussir-bugs/24-matexp-state-order.md) | none (no difference seen in lean2rr output) | 0026, applied | n/a |
+| [25](../../../reussir-bugs/25-value-record-dag.md) | none (lean2rr's `[value]` records are shallow) | none (cost) | n/a |
+| [26](../../../reussir-bugs/26-launder-assume.md) | none possible | 0021, applied | n/a |
+| [27](../../../reussir-bugs/27-nullable-member-drop.md) | `Nullable` not used | 0027, applied | n/a |
+| [28](../../../reussir-bugs/28-unique-carrying-join.md) | none possible | 0060, applied (review pending) | n/a |
+| [29](../../../reussir-bugs/29-ffi-member-mlir.md) | none (affects MLIR dumps only) | 0061, applied (review pending) | n/a |
+| [30](../../../reussir-bugs/30-call-lowering-lookup.md) | none | 0062, applied (review pending) | n/a |
+| [31](../../../reussir-bugs/31-deep-expression-stack.md) | `Outline` bounds nesting | 0063, applied (review pending) | n/a |
+| [32](../../../reussir-bugs/32-emit-mlir-size.md) | none (affects `--emit mlir` only) | none (cost) | n/a |

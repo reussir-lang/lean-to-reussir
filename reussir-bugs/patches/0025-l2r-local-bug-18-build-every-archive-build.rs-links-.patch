@@ -1,0 +1,67 @@
+From a365832049709954fab0bfd5448a99f98f78bdea Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Fri, 2 Oct 2026 21:05:27 -0400
+Subject: [PATCH] l2r-local: bug 18: build every archive build.rs links before
+ the cargo targets
+
+The README lists `cmake --build build --target rrc` as a workflow, but in
+a fresh build directory it failed: cargo could not find the native
+static library MLIRReussirInstrumentNonlinearFFI. The cargo targets
+(`rrc-build` and the other crates' build targets) depend on ReussirCAPI
+and MLIRReussir, and ReussirCAPI depends on the archives listed in
+REUSSIR_BACKEND_ARCHIVES (lib/CAPI/CMakeLists.txt) so that they are built
+first. `reussir-backend-sys/build.rs` links four archives that are in
+neither that list nor ReussirCAPI's link dependencies:
+MLIRReussirInstrumentNonlinearFFI, MLIRReussirClosureBetaReduction,
+MLIRReussirDefaultInliner and MLIRReussirSpecialPointerTag. The default
+target built them anyway, as part of everything.
+
+Add the four to the list (in build.rs's order) and say in its comment
+which archives it must cover.
+
+Checked with a fresh build directory and `--target rrc` alone: before,
+cargo failed as above; now rrc builds and links, and the ninja edge of
+rrc-build depends on all four archives.
+---
+ lib/CAPI/CMakeLists.txt | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/lib/CAPI/CMakeLists.txt b/lib/CAPI/CMakeLists.txt
+index f537d3bc..e48f8336 100644
+--- a/lib/CAPI/CMakeLists.txt
++++ b/lib/CAPI/CMakeLists.txt
+@@ -25,7 +25,11 @@ endif()
+ # factories plus the standalone helpers (compilePolymorphicFFI via the
+ # CompilePolymorphicFFI pass + ReussirRustCompiler, gatherCompiledModules via
+ # MLIRReussir). reussir-backend-sys links these into the final Rust binary; here
+-# we only ensure they are built first.
++# we only ensure they are built first. Every archive in REUSSIR_ARCHIVES of
++# crates/reussir-backend-sys/build.rs must be listed here unless it is a link
++# dependency of ReussirCAPI (the LLVM passes above; the sync archives, through
++# MLIRReussir): otherwise building only a cargo target in a fresh build
++# directory (`--target rrc`) does not build it, and cargo cannot link.
+ set(REUSSIR_BACKEND_ARCHIVES
+   MLIRReussir
+   MLIRReussirAnalysis
+@@ -40,14 +44,18 @@ set(REUSSIR_BACKEND_ARCHIVES
+   MLIRReussirTokenInstantiation
+   MLIRReussirClosureOutlining
+   MLIRReussirCompilePolymorphicFFI
++  MLIRReussirInstrumentNonlinearFFI
+   MLIRReussirAttachNativeTarget
+   # transformations
++  MLIRReussirClosureBetaReduction
++  MLIRReussirDefaultInliner
+   MLIRReussirRcCreateSink
+   MLIRReussirRcCreateFusion
+   MLIRReussirRcDispatchFusion
+   MLIRReussirInferVariantTag
+   MLIRReussirIncDecCancellation
+   MLIRReussirTokenReuse
++  MLIRReussirSpecialPointerTag
+   MLIRReussirInvariantGroupAnalysis
+   MLIRReussirUniqueCarryingRecursionAnalysis
+   MLIRReussirTRMCRecursionAnalysis)
+-- 
+2.43.0
+

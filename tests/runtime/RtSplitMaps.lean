@@ -9,10 +9,9 @@ maps, List.map inside, values ≥ 2^63 and ≥ 2^64, branching functions,
 mapFinIdx, zip).
 From the round-7 review, area O (rv7/opts, split-map-loops check O7Map), and
 the round-6 review, area lower (rv6/lower, check 5, SMapA). SMapA's shape 6
-prints the tuple components with pattern lambdas (`fun (f, _, _) => f`) where
-the original used `(·.1)`/`(·.2.1)`/`(·.2.2)`: projection maps over a
-parametric structure are finding RV7D-01, being fixed on another branch (see
-RtLcAnyProj). -/
+prints the tuple components with `(·.1)`/`(·.2.1)`/`(·.2.2)`: projection maps
+over a parametric structure, which printed empty rows and zeros before the
+fix of finding RV7D-01 (e318fbd, a9b89e6). -/
 
 namespace O7Map
 -- from rv7/opts/O7Map.lean
@@ -80,7 +79,7 @@ def main : IO Unit := do
 end O7Map
 
 namespace SMapA
--- from rv6/lower/SMapA.lean (shape 6 edited, see the header)
+-- from rv6/lower/SMapA.lean
 /-! Nested map loops (split-map-loops, fd6cf01): representation-changing
 maps inside maps, closures capturing loop variables, mapIdx, three levels. -/
 
@@ -107,7 +106,7 @@ def main : IO Unit := do
   IO.println s!"5 {tf}"
   -- 6: inner array shared (row used after map)
   let rows := a.map fun row => (row.map (·.toFloat), row.size, row)
-  IO.println s!"6 {rows.map (fun (f, _, _) => f)} {rows.map (fun (_, n, _) => n)} {rows.map (fun (_, _, r) => r)}"
+  IO.println s!"6 {rows.map (·.1)} {rows.map (·.2.1)} {rows.map (·.2.2)}"
   -- 7: outer array shared
   let b2 : Array (Array Int) := a.map (·.map fun (x : Nat) => (x : Int) - 2500)
   IO.println s!"7 {b2} {a}"

@@ -1,0 +1,57 @@
+From 54cdf05456879abc8753cf7b1195a6a454a46110 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Fri, 2 Oct 2026 22:59:44 -0400
+Subject: [PATCH] l2r-local: bug 17: lower SCF to ControlFlow without pattern
+ rollback
+
+rrc's memory grew with the square of the length of a straight-line
+function on lean2rr's `Nat` (a value enum: every operation is a match, so
+after ConvertToSTD a block of N `scf.if`/`scf.index_switch`): 0.43 GB for
+250 `let`s, 1.17 GB for 500, 4.1 GB for 1000, out of memory at 14 GB for
+2500. The peak was reached in `convert-scf-to-cf`.
+
+MLIR's stock pass runs its patterns through the dialect conversion driver,
+which records every operation a pattern moves so that it can roll the
+conversion back. Lowering an `scf.if` (a switch, a loop) moves the rest of
+its block into a new block, so a block of N of them records N^2/2 moves:
+16000 `scf.if` in one block take 8.4 s and 9.3 GB in reussir-opt
+`--convert-scf-to-cf`.
+
+Create the pass with `allowPatternRollback = false`, the option upstream
+offers for this pass: the same patterns, applied without the record. The
+same block takes 1.0 s and 142 MB, and the output is identical.
+
+Measured on lean2rr's output for reussir-bugs/repros/bug17-long-nat-block.py
+(L2R_NO_OUTLINE=1, rrc time and peak memory): 250 lets: 19 s, 427 MB ->
+19 s, 318 MB; 500: 30 s, 1.17 GB -> 27 s, 610 MB; 1000: 57 s, 4.1 GB ->
+53 s, 0.95 GB; 2000 (did not build before): 134 s, 1.7 GB. The LLVM IR
+rrc emits is identical (up to the random names of texture modules) for
+the 18 programs of lean2rr's classic corpus and four lean2rr repros; the
+lit suite passes.
+---
+ lib/CAPI/Passes.cpp | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/lib/CAPI/Passes.cpp b/lib/CAPI/Passes.cpp
+index 776a2938..9f7dc73d 100644
+--- a/lib/CAPI/Passes.cpp
++++ b/lib/CAPI/Passes.cpp
+@@ -198,7 +198,14 @@ MlirPass reussirCreateControlFlowSinkPass(void) {
+   return wrapOwned(mlir::createControlFlowSinkPass());
+ }
+ MlirPass reussirCreateSCFToControlFlowPass(void) {
+-  return wrapOwned(mlir::createSCFToControlFlowPass());
++  // Without rollback: the conversion driver otherwise records every operation
++  // a pattern moves, and lowering an `scf.if` (or a switch, or a loop) moves
++  // the rest of its block, so a block of N of them took time and memory
++  // quadratic in N. Upstream offers the mode for this pass; its patterns
++  // check what they need before they change the IR.
++  mlir::SCFToControlFlowPassOptions options;
++  options.allowPatternRollback = false;
++  return wrapOwned(mlir::createSCFToControlFlowPass(options));
+ }
+ MlirPass reussirCreateExpandStridedMetadataPass(void) {
+   return wrapOwned(mlir::memref::createExpandStridedMetadataPass());
+-- 
+2.43.0
+

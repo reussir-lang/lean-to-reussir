@@ -56,7 +56,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   one of the runtime's containers started ends (`drop::run`), and, for a
   free Reussir's record glue started, through `__reussir_drop_drained`, a
   hook every outermost drain that released something calls when it ends
-  (local Reussir patch 0040, not applied yet;
+  (local Reussir patch 0040, applied to `l2r-local` since 2026-10-03;
   `task::resolve` stores `task::drained` there). The symbol is linked
   weakly: without the patch, those walks run at the context's next effect
   point, block, `Std.Sync` wait or question about a task. The `Std.Sync`

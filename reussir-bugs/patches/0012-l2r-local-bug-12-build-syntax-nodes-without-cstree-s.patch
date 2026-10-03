@@ -1,0 +1,259 @@
+From fe717f85518c9d85367cc684592027229ca0018d Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Wed, 30 Sep 2026 21:57:39 -0400
+Subject: [PATCH] l2r-local: bug 12: build syntax nodes without cstree's
+ hash-only node cache
+
+reussir-syntax built its green tree with cstree's GreenNodeBuilder. In
+cstree 0.14 its node cache hands out an earlier node for a new node of at
+most three children whenever kind, text length and a 32-bit FxHash of the
+children agree; the children themselves are never compared. Token texts
+enter that hash through their interner keys, so in large files two
+different subtrees collide and the later one is replaced by a copy of the
+earlier one. In a 14 MB .rr from lean2rr, the constructor argument
+`368973` became `x78617`, a variable of a function 114,000 lines earlier
+("unknown variable"). When the names in the cached subtree are in scope,
+the substitution compiles silently, e.g. a literal argument becomes a
+parameter of the same length.
+
+The sink now builds every node with GreenNode::new, which consults no
+cache. The builder still interns token text and creates the tokens; its
+token cache compares whole tokens, so sharing them is sound. Token keys are
+assigned in the same order as before. Without node sharing, a 14 MB file's
+HIR build uses about 40 MB (3.5%) more memory, in the same time.
+---
+ crates/reussir-syntax/src/lib.rs         |  50 ++++++++++++
+ crates/reussir-syntax/src/parser/sink.rs | 100 +++++++++++++++++------
+ 2 files changed, 123 insertions(+), 27 deletions(-)
+
+diff --git a/crates/reussir-syntax/src/lib.rs b/crates/reussir-syntax/src/lib.rs
+index e2a8f6e6..5f2647ae 100644
+--- a/crates/reussir-syntax/src/lib.rs
++++ b/crates/reussir-syntax/src/lib.rs
+@@ -978,6 +978,56 @@ mod tests {
+         );
+     }
+ 
++    /// Different small nodes stay distinct even when their hashes agree.
++    /// cstree's builder cache took a new node of up to three children to be
++    /// an earlier one when kind, text length and a 32-bit hash of the
++    /// children agreed, and each token text's interner key enters that hash.
++    /// Here the variable `vvvvvv` gets key 149353 and the literal `424242`
++    /// key 187378 (the comments only use up keys), and the `CtorArg` nodes
++    /// of `T::One{vvvvvv}` and `T::One{424242}` hash alike: the literal was
++    /// parsed as the variable, which is in scope in `second`, so `second`
++    /// returned its argument with no diagnostic. If cstree's hash changes,
++    /// the test no longer forces a collision but still checks that the tree
++    /// reproduces the source.
++    #[test]
++    fn small_nodes_with_equal_hashes_stay_distinct() {
++        let mut lines = vec![
++            "enum T {".to_owned(),
++            "    One(u64)".to_owned(),
++            "}".to_owned(),
++            String::new(),
++            "fn get(t: T) -> u64 {".to_owned(),
++            "    match t {".to_owned(),
++            "        T::One(a) => a".to_owned(),
++            "    }".to_owned(),
++            "}".to_owned(),
++            String::new(),
++        ];
++        lines.extend((0..149_330).map(|i| format!("// a{i}")));
++        lines.push("fn first(vvvvvv: u64) -> u64 { get(T::One{vvvvvv}) }".to_owned());
++        lines.push(String::new());
++        lines.extend((0..38_022).map(|i| format!("// b{i}")));
++        lines.push("// second(n) returns 424242; with the bug it returns n.".to_owned());
++        lines.push("fn second(vvvvvv: u64) -> u64 { get(T::One{424242}) }".to_owned());
++        let source = lines.join("\n");
++        let parse = parse(&source);
++        assert!(parse.ok(), "errors: {:#?}", parse.errors);
++        // The source has one integer literal, in `second`.
++        let literal = parse
++            .root
++            .descendants_with_tokens()
++            .filter_map(|e| e.into_token())
++            .find(|t| t.kind() == SyntaxKind::IntLit)
++            .expect("the literal of `second` is in the tree");
++        assert_eq!(literal.text(), "424242");
++        assert_eq!(literal.parent().kind(), SyntaxKind::LiteralExpr);
++        // Kept short: a failing `assert_eq!` would print 2 MB of source.
++        assert!(
++            parse.root.text() == source.as_str(),
++            "the tree differs from the source"
++        );
++    }
++
+     #[test]
+     fn deep_recursion_is_survivable() {
+         // Deeply nested parens would overflow the fixed test-thread stack
+diff --git a/crates/reussir-syntax/src/parser/sink.rs b/crates/reussir-syntax/src/parser/sink.rs
+index 4bc27a90..c4a9d57c 100644
+--- a/crates/reussir-syntax/src/parser/sink.rs
++++ b/crates/reussir-syntax/src/parser/sink.rs
+@@ -1,44 +1,61 @@
+ //! Translates the flat event stream into a lossless `cstree` green tree,
+ //! re-attaching trivia (whitespace and comments) between the meaningful
+ //! tokens.
++//!
++//! Nodes are built with [`GreenNode::new`], not with
++//! [`GreenNodeBuilder::finish_node`]. The builder's node cache hands out an
++//! earlier node for any new node of at most three children that has the same
++//! kind, text length and 32-bit hash of its children; it never compares the
++//! children themselves. Two different subtrees can meet that condition, and
++//! the later one then became a copy of the earlier one. In large files a
++//! literal was replaced by a variable of an unrelated function (an "unknown
++//! variable" error), or by a variable in scope, with no diagnostic. The
++//! builder is still used to intern token text and create the tokens: its
++//! token cache compares whole tokens (kind, text key and length), so sharing
++//! tokens is sound.
+ 
++use cstree::Syntax;
+ use cstree::build::GreenNodeBuilder;
+-use cstree::green::GreenNode;
++use cstree::green::{GreenNode, GreenToken};
+ use cstree::interning::Interner;
++use cstree::util::NodeOrToken;
+ 
+ use super::Event;
+ use crate::kind::SyntaxKind;
+ use crate::lexer::Token;
+ 
+-pub(crate) struct Sink<'s, 'i, I> {
+-    source: &'s str,
++pub(crate) struct Sink<'s> {
+     /// All tokens, trivia included.
+     tokens: &'s [Token],
++    /// The green token of each entry of `tokens`, at the same index.
++    green_tokens: Vec<GreenToken>,
+     cursor: usize,
+     events: Vec<Event>,
+-    builder: GreenNodeBuilder<'i, 'i, SyntaxKind, I>,
+-    /// Number of currently open nodes. Trivia may only be attached while a
+-    /// node is open, and the root must stay the single top-level element.
+-    depth: usize,
++    /// The open nodes, innermost last: each node's kind and the index in
++    /// `children` of its first child.
++    parents: Vec<(SyntaxKind, usize)>,
++    /// The children of the open nodes, in order; a node's children are the
++    /// tail of this list that starts at its index in `parents`.
++    children: Vec<NodeOrToken<GreenNode, GreenToken>>,
+ }
+ 
+-impl<'s, 'i, I> Sink<'s, 'i, I>
+-where
+-    I: Interner<cstree::interning::TokenKey>,
+-{
+-    pub(crate) fn new(
++impl<'s> Sink<'s> {
++    pub(crate) fn new<I>(
+         source: &'s str,
+         tokens: &'s [Token],
+         events: Vec<Event>,
+-        interner: &'i mut I,
+-    ) -> Self {
++        interner: &mut I,
++    ) -> Self
++    where
++        I: Interner<cstree::interning::TokenKey>,
++    {
+         Sink {
+-            source,
+             tokens,
++            green_tokens: green_tokens(source, tokens, interner),
+             cursor: 0,
+             events,
+-            builder: GreenNodeBuilder::with_interner(interner),
+-            depth: 0,
++            parents: Vec::new(),
++            children: Vec::new(),
+         }
+     }
+ 
+@@ -79,18 +96,18 @@ where
+                         // Outermost first: each `precede` parent wraps
+                         // everything started after it.
+                         self.attach_trivia();
+-                        self.builder.start_node(kind);
+-                        self.depth += 1;
++                        self.parents.push((kind, self.children.len()));
+                     }
+                 }
+                 Event::Finish => {
+-                    if self.depth == 1 {
++                    if self.parents.len() == 1 {
+                         // The root is about to close: pull in any trailing
+                         // trivia so the tree stays lossless.
+                         self.attach_trivia();
+                     }
+-                    self.builder.finish_node();
+-                    self.depth -= 1;
++                    let (kind, first_child) = self.parents.pop().unwrap();
++                    let node = GreenNode::new(kind.into_raw(), self.children.drain(first_child..));
++                    self.children.push(NodeOrToken::Node(node));
+                 }
+                 Event::Token => {
+                     self.attach_trivia();
+@@ -98,8 +115,11 @@ where
+                 }
+             }
+         }
+-        let (green, _cache) = self.builder.finish();
+-        green
++        assert!(self.parents.is_empty() && self.children.len() == 1);
++        match self.children.pop() {
++            Some(NodeOrToken::Node(root)) => root,
++            _ => unreachable!("the root must be a node"),
++        }
+     }
+ 
+     /// Trivia (and lexer error tokens, which the parser never consumes)
+@@ -107,7 +127,7 @@ where
+     /// enclosing node, so leading whitespace does not become part of the
+     /// new node. Nothing can be attached before the root is open.
+     fn attach_trivia(&mut self) {
+-        if self.depth == 0 {
++        if self.parents.is_empty() {
+             return;
+         }
+         while let Some(token) = self.tokens.get(self.cursor) {
+@@ -119,8 +139,34 @@ where
+     }
+ 
+     fn token(&mut self) {
+-        let token = self.tokens[self.cursor];
+-        self.builder.token(token.kind, token.text(self.source));
++        let token = self.green_tokens[self.cursor].clone();
++        self.children.push(NodeOrToken::Token(token));
+         self.cursor += 1;
+     }
+ }
++
++/// Create the green token of every lexed token, in order, interning its text
++/// into `interner`. The builder only offers tokens as children of a node, so
++/// they are collected under a scratch node that is then dropped.
++fn green_tokens<I>(source: &str, tokens: &[Token], interner: &mut I) -> Vec<GreenToken>
++where
++    I: Interner<cstree::interning::TokenKey>,
++{
++    let mut builder: GreenNodeBuilder<'_, '_, SyntaxKind, I> =
++        GreenNodeBuilder::with_interner(interner);
++    builder.start_node(SyntaxKind::SourceFile);
++    for token in tokens {
++        builder.token(token.kind, token.text(source));
++    }
++    builder.finish_node();
++    let (scratch, _cache) = builder.finish();
++    scratch
++        .children()
++        .map(|child| {
++            child
++                .into_token()
++                .expect("the scratch node holds only tokens")
++                .clone()
++        })
++        .collect()
++}
+-- 
+2.43.0
+

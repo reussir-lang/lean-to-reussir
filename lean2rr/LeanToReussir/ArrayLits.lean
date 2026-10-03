@@ -14,7 +14,7 @@ let r : LNatArr = lean_natarr_push(a, x);
 ```
 
 rrc costs time and memory for each of them (about 0.3 MB per `Nat`
-operation, docs/reussir-bugs.md bug 17), so a run of such pairs, each `x`
+operation, reussir-bugs/17-long-nat-block.md), so a run of such pairs, each `x`
 and each intermediate `r` used only there, becomes one call
 `l2r_natarr_lits(a, id)` that pushes the words of table `id` (generated with
 the program: `natLitTable`), the same elements in the same order. The

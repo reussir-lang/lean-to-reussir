@@ -1,0 +1,528 @@
+From d76ffba3b1465bef25bc17090e682c19c8399141 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Wed, 30 Sep 2026 20:38:56 -0400
+Subject: [PATCH] l2r-local: bug 13: release chains of cells in a loop in the
+ drop glue
+
+A member release in drop glue expanded to "count == 1 -> call the member's
+drop_in_place, then deallocate the member". The deallocation follows the
+call, so it is not a tail call: releasing a long list at once took a stack
+frame per cell and overflowed the stack (lean2rr: about 33M cells on its
+1 GiB thread; 2x time and memory vs native at 10M).
+
+No token produced inside drop glue can be reused, so there (functions
+marked reussir.drop_glue) a release of a plain shared box of a named record
+that can form a chain now expands to "count == 1 -> drop_and_free::<T>,
+else count - 1". drop_and_free, called only on a cell whose count was read
+as 1, dispatches on the arm and per arm drops the members other than its
+chain members, frees the cell (its arm's size), and then releases the chain
+members: the boxes whose type can hold the cell's type again (its recursive
+group), wherever they sit; without one, the last managed member if it is
+such a box. Chain members whose count is not 1 are only decremented; of the
+others, the last is released as the final operation (a tail call), the rest
+before it. So a chain is freed in a loop whichever member carries it (list
+tail, left or right spine, snoc lists, mutually recursive types); a tree
+recurses along its other children only. Nullary arms of taggable types are
+immediates under the special-pointer-tag scheme and free nothing.
+
+Releases outside drop glue, whose tokens may be reused, are unchanged;
+atomic and regional boxes keep the old path.
+---
+ include/Reussir/IR/ReussirOps.h               |   3 +
+ .../AcquireDropExpansion.cpp                  | 352 ++++++++++++++++++
+ lib/IR/ReussirOps.cpp                         |   1 +
+ tests/integration/frontend/drop_long_list.c   |  15 +
+ tests/integration/frontend/drop_long_list.rr  |  42 +++
+ 5 files changed, 413 insertions(+)
+ create mode 100644 tests/integration/frontend/drop_long_list.c
+ create mode 100644 tests/integration/frontend/drop_long_list.rr
+
+diff --git a/include/Reussir/IR/ReussirOps.h b/include/Reussir/IR/ReussirOps.h
+index b2740f71..a60afc49 100644
+--- a/include/Reussir/IR/ReussirOps.h
++++ b/include/Reussir/IR/ReussirOps.h
+@@ -124,6 +124,9 @@ mlir::LogicalResult emitArrayElementTraversal(
+ // `kind` is the atomic context the glue is dropped from: the glue's argument
+ // reference carries it, and the expanded body derives member links from it
+ // (whole-subtree rule), so each kind gets its own outlined symbol.
++// Outlined drop glue functions carry `kDropGlueAttr`: no token produced in
++// them can be reused, so their member releases free cells directly.
++constexpr llvm::StringLiteral kDropGlueAttr = "reussir.drop_glue";
+ mlir::func::FuncOp
+ createDtorIfNotExists(mlir::ModuleOp moduleOp, RecordType type,
+                       mlir::OpBuilder &builder,
+diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+index 5308f5fd..0de140da 100644
+--- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
++++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include <algorithm>
+ #include <llvm/ADT/ArrayRef.h>
++#include <llvm/ADT/DenseSet.h>
+ #include <llvm/ADT/MapVector.h>
+ #include <llvm/ADT/SmallVector.h>
+ #include <llvm/ADT/Twine.h>
+@@ -26,6 +27,8 @@
+ #include <llvm/Support/LogicalResult.h>
+ #include <mlir/Dialect/Arith/IR/Arith.h>
+ #include <mlir/Dialect/Func/IR/FuncOps.h>
++#include <mlir/Dialect/LLVMIR/LLVMAttrs.h>
++#include <mlir/Dialect/SCF/IR/SCF.h>
+ #include <mlir/IR/Attributes.h>
+ #include <mlir/IR/Block.h>
+ #include <mlir/IR/Builders.h>
+@@ -41,6 +44,7 @@
+ #include "Reussir/IR/ReussirEnumAttrs.h"
+ #include "Reussir/IR/ReussirOps.h"
+ #include "Reussir/IR/ReussirTypes.h"
++#include "Reussir/Transformation/SpecialPointerTag.h"
+ #include "Sync/IR/SyncOps.h"
+ 
+ namespace reussir {
+@@ -48,6 +52,344 @@ namespace reussir {
+ #define GEN_PASS_DEF_REUSSIRACQUIREDROPEXPANSIONPASS
+ #include "Reussir/Conversion/Passes.h.inc"
+ 
++//===----------------------------------------------------------------------===//
++// Releases inside drop glue
++//===----------------------------------------------------------------------===//
++// A member release in drop glue used to expand to "count == 1 -> call the
++// member's drop_in_place, then deallocate the member": the deallocation
++// follows the call, so releasing a long chain of cells (a list) recursed
++// once per cell and could overflow the stack. No token produced inside drop
++// glue can be reused, so there a release of a plain shared box whose type
++// can form a chain calls the type's `drop_and_free` instead (only once its
++// count was read as 1). Per arm, it drops the cell's other managed members,
++// deallocates the cell, and then releases its chain members: the boxes of
++// its own recursive group (else its last managed member, if that is such a
++// box). Of those, the last one that is about to be freed (count 1) is
++// released last, as a tail call, so a chain is freed in a loop whichever
++// member carries it; the others are released first. Releases outside drop
++// glue (whose tokens may be reused) are unchanged.
++
++namespace {
++
++// A shared, non-atomic, non-regional box of a named record.
++bool isPlainSharedRecordBox(RcType rcType) {
++  if (rcType.getCapability() != Capability::shared ||
++      rcType.getAtomicKind() != AtomicKind::normal || rcType.isRegional())
++    return false;
++  auto record = llvm::dyn_cast<RecordType>(rcType.getElementType());
++  return record && record.getName() && record.getComplete();
++}
++
++// Whether a value of type `from` can hold (through records, boxes and
++// nullable links) a value of the record type `target`.
++bool reaches(mlir::Type from, RecordType target,
++             llvm::DenseSet<mlir::Type> &visited) {
++  if (auto nullable = llvm::dyn_cast<NullableType>(from))
++    from = nullable.getPtrTy();
++  if (auto rcType = llvm::dyn_cast<RcType>(from))
++    from = rcType.getElementType();
++  auto record = llvm::dyn_cast<RecordType>(from);
++  if (!record)
++    return false;
++  if (record == target)
++    return true;
++  if (!record.getComplete() || !visited.insert(record).second)
++    return false;
++  for (mlir::Type member : record.getMembers())
++    if (member && reaches(member, target, visited))
++      return true;
++  return false;
++}
++
++// The members of `payload` (an arm of `self`, or `self`) released after the
++// cell is freed: the plain shared record boxes that can hold a `self` again
++// (the cell's recursive group); without one, the last managed member if it
++// is a plain shared record box.
++llvm::SmallVector<size_t> chainMembers(RecordType payload, RecordType self) {
++  llvm::SmallVector<size_t> chain;
++  std::optional<size_t> lastManaged;
++  for (auto [idx, memberTy, memberIsField] : llvm::enumerate(
++           payload.getMembers(), payload.getMemberIsField())) {
++    if (memberIsField)
++      continue;
++    mlir::Type projected = getProjectedType(
++        memberTy, false, Capability::unspecified, AtomicKind::normal);
++    if (isTriviallyCopyable(projected))
++      continue;
++    lastManaged = idx;
++    auto rcType = llvm::dyn_cast<RcType>(projected);
++    if (!rcType || !isPlainSharedRecordBox(rcType))
++      continue;
++    llvm::DenseSet<mlir::Type> visited;
++    if (reaches(rcType, self, visited))
++      chain.push_back(idx);
++  }
++  if (chain.empty() && lastManaged) {
++    auto rcType = llvm::dyn_cast<RcType>(
++        getProjectedType(payload.getMembers()[*lastManaged], false,
++                         Capability::unspecified, AtomicKind::normal));
++    if (rcType && isPlainSharedRecordBox(rcType))
++      chain.push_back(*lastManaged);
++  }
++  return chain;
++}
++
++// The compound payload of arm `tag` of a variant (or the compound itself).
++RecordType compoundPayload(RecordType record, std::optional<size_t> tag) {
++  if (!tag)
++    return record.isCompound() ? record : RecordType{};
++  if (record.getMemberIsField()[*tag])
++    return RecordType{};
++  auto payload = llvm::dyn_cast<RecordType>(record.getMembers()[*tag]);
++  if (!payload || !payload.isCompound() || !payload.getComplete())
++    return RecordType{};
++  return payload;
++}
++
++bool releasesThroughDropAndFree(RcType rcType) {
++  if (!isPlainSharedRecordBox(rcType))
++    return false;
++  auto record = llvm::cast<RecordType>(rcType.getElementType());
++  if (record.isCompound())
++    return !chainMembers(record, record).empty();
++  for (size_t tag = 0, n = record.getMembers().size(); tag < n; ++tag)
++    if (RecordType payload = compoundPayload(record, tag))
++      if (!chainMembers(payload, record).empty())
++        return true;
++  return false;
++}
++
++mlir::func::FuncOp getOrCreateDropAndFree(mlir::ModuleOp moduleOp,
++                                          RcType rcType,
++                                          mlir::PatternRewriter &rewriter);
++
++// "count == 1 -> drop_and_free(rc), else count - 1" for a plain shared box.
++void emitGlueRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
++                     mlir::ModuleOp moduleOp, mlir::Value rc) {
++  mlir::func::FuncOp dropAndFree = getOrCreateDropAndFree(
++      moduleOp, llvm::cast<RcType>(rc.getType()), rewriter);
++  mlir::Value count =
++      ReussirRcFetchOp::create(rewriter, loc, rc).getRefCount();
++  mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
++  mlir::Value isOne = mlir::arith::CmpIOp::create(
++      rewriter, loc, mlir::arith::CmpIPredicate::eq, count, one);
++  auto ifOp = mlir::scf::IfOp::create(
++      rewriter, loc,
++      ReussirExpectOp::create(rewriter, loc, isOne, true).getLikely(),
++      /*withElseRegion=*/true);
++  rewriter.setInsertionPoint(ifOp.thenBlock()->getTerminator());
++  mlir::func::CallOp::create(rewriter, loc, dropAndFree, mlir::ValueRange{rc});
++  rewriter.setInsertionPoint(ifOp.elseBlock()->getTerminator());
++  mlir::Value decremented =
++      mlir::arith::SubIOp::create(rewriter, loc, count, one);
++  ReussirRcSetOp::create(rewriter, loc, rc, decremented);
++  rewriter.setInsertionPointAfter(ifOp);
++}
++
++// Releases the chain members `links` of a freed cell. A link whose count is
++// not 1 is only decremented. Of the links whose count is 1 (no one else
++// holds them, so releasing one cannot reach another), all but the last are
++// released first and the last one is released as the final operation.
++void emitChainRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
++                      mlir::ModuleOp moduleOp,
++                      llvm::ArrayRef<mlir::Value> links) {
++  if (links.size() == 1)
++    emitGlueRelease(rewriter, loc, moduleOp, links.front());
++  if (links.size() <= 1)
++    return;
++  mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
++  llvm::SmallVector<mlir::Value> unique;
++  for (mlir::Value link : links) {
++    mlir::Value count =
++        ReussirRcFetchOp::create(rewriter, loc, link).getRefCount();
++    unique.push_back(mlir::arith::CmpIOp::create(
++        rewriter, loc, mlir::arith::CmpIPredicate::eq, count, one));
++    mlir::Value shared = mlir::arith::CmpIOp::create(
++        rewriter, loc, mlir::arith::CmpIPredicate::ne, count, one);
++    auto ifOp = mlir::scf::IfOp::create(rewriter, loc, shared,
++                                        /*withElseRegion=*/false);
++    rewriter.setInsertionPoint(ifOp.thenBlock()->getTerminator());
++    ReussirRcSetOp::create(
++        rewriter, loc, link,
++        mlir::arith::SubIOp::create(rewriter, loc, count, one));
++    rewriter.setInsertionPointAfter(ifOp);
++  }
++  auto callDropAndFree = [&](size_t i) {
++    mlir::func::CallOp::create(
++        rewriter, loc,
++        getOrCreateDropAndFree(moduleOp, llvm::cast<RcType>(links[i].getType()),
++                               rewriter),
++        mlir::ValueRange{links[i]});
++  };
++  for (size_t i = 0; i + 1 < links.size(); ++i) {
++    mlir::Value later = unique[i + 1];
++    for (size_t j = i + 2; j < links.size(); ++j)
++      later = mlir::arith::OrIOp::create(rewriter, loc, later, unique[j]);
++    mlir::Value notLast =
++        mlir::arith::AndIOp::create(rewriter, loc, unique[i], later);
++    auto ifOp = mlir::scf::IfOp::create(rewriter, loc, notLast,
++                                        /*withElseRegion=*/false);
++    rewriter.setInsertionPoint(ifOp.thenBlock()->getTerminator());
++    callDropAndFree(i);
++    rewriter.setInsertionPointAfter(ifOp);
++  }
++  // if (unique[m-1]) release links[m-1] else if (unique[m-2]) ... .
++  mlir::Operation *outermost = nullptr;
++  for (size_t i = links.size(); i-- > 0;) {
++    auto ifOp = mlir::scf::IfOp::create(rewriter, loc, unique[i],
++                                        /*withElseRegion=*/i > 0);
++    if (!outermost)
++      outermost = ifOp;
++    rewriter.setInsertionPoint(ifOp.thenBlock()->getTerminator());
++    callDropAndFree(i);
++    if (i > 0)
++      rewriter.setInsertionPoint(ifOp.elseBlock()->getTerminator());
++  }
++  rewriter.setInsertionPointAfter(outermost);
++}
++
++// rc.dec of `rc` and the free of its token.
++void emitCellDecAndFree(mlir::PatternRewriter &rewriter, mlir::Location loc,
++                        mlir::Value rc) {
++  auto rcType = llvm::cast<RcType>(rc.getType());
++  auto layout =
++      mlir::DataLayout::closest(rewriter.getInsertionBlock()->getParentOp());
++  RcBoxType rcBoxType = rcType.getInnerBoxType();
++  TokenType tokenType = TokenType::get(
++      rewriter.getContext(), layout.getTypeABIAlignment(rcBoxType),
++      layout.getTypeSize(rcBoxType).getFixedValue());
++  auto dec = ReussirRcDecOp::create(
++      rewriter, loc, NullableType::get(rewriter.getContext(), tokenType), rc,
++      mlir::IntegerAttr{}, mlir::DenseI64ArrayAttr{});
++  TokenType correct = dec.getTokenType();
++  if (correct != tokenType)
++    dec->getResult(0).setType(NullableType::get(rewriter.getContext(), correct));
++  ReussirTokenFreeOp::create(rewriter, loc, dec.getNullableToken());
++}
++
++// Releases the cell `rc`, whose count was read as 1, with `payloadRef`
++// referencing arm `tag`'s payload (or the compound).
++void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
++                     mlir::ModuleOp moduleOp, mlir::Value rc,
++                     RecordType record, std::optional<size_t> tag,
++                     mlir::Value payloadRef) {
++  RecordType payload = compoundPayload(record, tag);
++  if (!payload) {
++    emitCellDecAndFree(rewriter, loc, rc);
++    return;
++  }
++  auto rcType = llvm::cast<RcType>(rc.getType());
++  // Under the special-pointer-tag scheme a nullary arm is an immediate (a
++  // static dummy whose wrapped count may read 1): nothing to free.
++  if (tag && record.isNullaryArm(*tag) &&
++      moduleOp->hasAttr(kSpecialPtrTagAttr) &&
++      rcType.mayCarrySpecialPointerTag())
++    return;
++  llvm::SmallVector<size_t> chain = chainMembers(payload, record);
++  llvm::SmallVector<mlir::Value> links;
++  auto project = [&](size_t idx) {
++    mlir::Type memberTy = getProjectedType(payload.getMembers()[idx], false,
++                                           Capability::unspecified,
++                                           AtomicKind::normal);
++    auto memberRefTy = RefType::get(rewriter.getContext(), memberTy,
++                                    Capability::unspecified,
++                                    AtomicKind::normal);
++    return std::pair{ReussirRefProjectOp::create(rewriter, loc, memberRefTy,
++                                                 payloadRef,
++                                                 rewriter.getIndexAttr(idx))
++                         .getResult(),
++                     memberTy};
++  };
++  for (size_t idx : chain) {
++    auto [slot, memberTy] = project(idx);
++    links.push_back(ReussirRefLoadOp::create(rewriter, loc, memberTy, slot));
++  }
++  for (auto [idx, memberTy, memberIsField] : llvm::enumerate(
++           payload.getMembers(), payload.getMemberIsField())) {
++    if (memberIsField || llvm::is_contained(chain, idx) ||
++        isTriviallyCopyable(getProjectedType(memberTy, false,
++                                             Capability::unspecified,
++                                             AtomicKind::normal)))
++      continue;
++    ReussirRefDropOp::create(rewriter, loc, project(idx).first);
++  }
++  // Free the cell: a variant cell has its arm's size.
++  auto layout =
++      mlir::DataLayout::closest(rewriter.getInsertionBlock()->getParentOp());
++  RcBoxType rcBoxType = rcType.getInnerBoxType();
++  uint64_t size = layout.getTypeSize(rcBoxType).getFixedValue();
++  if (tag && rcBoxType.isHeaderFused() && !record.getFixed())
++    size = record.getVariantArmAllocSize(layout, *tag).getFixedValue();
++  auto tokenType = TokenType::get(rewriter.getContext(),
++                                  layout.getTypeABIAlignment(rcBoxType), size);
++  mlir::Value token =
++      ReussirRcReinterpretOp::create(rewriter, loc, tokenType, rc);
++  ReussirTokenFreeOp::create(rewriter, loc, token);
++  emitChainRelease(rewriter, loc, moduleOp, links);
++}
++
++mlir::func::FuncOp getOrCreateDropAndFree(mlir::ModuleOp moduleOp,
++                                          RcType rcType,
++                                          mlir::PatternRewriter &rewriter) {
++  auto record = llvm::cast<RecordType>(rcType.getElementType());
++  std::string name = ("_RINvNvC4core9intrinsic13drop_and_free" +
++                      record.getName().getValue().ltrim("_R") + "E")
++                         .str();
++  if (auto existing = moduleOp.lookupSymbol<mlir::func::FuncOp>(name))
++    return existing;
++  mlir::OpBuilder::InsertionGuard guard(rewriter);
++  mlir::Location loc = rewriter.getUnknownLoc();
++  rewriter.setInsertionPointToStart(moduleOp.getBody());
++  auto func = mlir::func::FuncOp::create(
++      rewriter, loc, name, rewriter.getFunctionType({rcType}, {}));
++  func.setPrivate();
++  func->setAttr(kDropGlueAttr, rewriter.getUnitAttr());
++  func->setAttr("llvm.linkage", rewriter.getAttr<mlir::LLVM::LinkageAttr>(
++                                    mlir::LLVM::linkage::Linkage::LinkonceODR));
++  func->setAttr("llvm.passthrough",
++                rewriter.getStrArrayAttr(
++                    {"mustprogress", "nounwind", "willreturn", "nocallback"}));
++  inheritSanitizerPassthrough(moduleOp, func);
++  func.setArgAttr(0, "llvm.nonnull", rewriter.getUnitAttr());
++  func.setArgAttr(0, "llvm.noundef", rewriter.getUnitAttr());
++  mlir::Block *entry = func.addEntryBlock();
++  rewriter.setInsertionPointToStart(entry);
++  mlir::Value rc = entry->getArgument(0);
++  auto refType = RefType::get(rewriter.getContext(), record,
++                              Capability::unspecified, AtomicKind::normal);
++  mlir::Value ref = ReussirRcBorrowOp::create(rewriter, loc, refType, rc);
++  if (record.isCompound()) {
++    emitCellRelease(rewriter, loc, moduleOp, rc, record, std::nullopt, ref);
++  } else {
++    llvm::SmallVector<mlir::Attribute> tagSets;
++    for (auto idx : llvm::seq<int64_t>(0, record.getMembers().size()))
++      tagSets.push_back(rewriter.getDenseI64ArrayAttr({idx}));
++    auto dispatcher = ReussirRecordDispatchOp::create(
++        rewriter, loc, mlir::Type{}, ref, rewriter.getArrayAttr(tagSets),
++        tagSets.size());
++    for (auto [idx, memberTy, memberIsField] :
++         llvm::enumerate(record.getMembers(), record.getMemberIsField())) {
++      auto armRefTy = RefType::get(
++          rewriter.getContext(),
++          getProjectedType(memberTy, memberIsField, Capability::unspecified,
++                           AtomicKind::normal),
++          Capability::unspecified, AtomicKind::normal);
++      mlir::Block *block = rewriter.createBlock(
++          &dispatcher.getRegions()[idx], dispatcher.getRegions()[idx].begin(),
++          {armRefTy}, {loc});
++      rewriter.setInsertionPointToStart(block);
++      emitCellRelease(rewriter, loc, moduleOp, rc, record, idx,
++                      block->getArgument(0));
++      ReussirScfYieldOp::create(rewriter, loc, nullptr);
++    }
++    rewriter.setInsertionPointAfter(dispatcher);
++  }
++  mlir::func::ReturnOp::create(rewriter, loc);
++  return func;
++}
++
++} // namespace
++
+ //===----------------------------------------------------------------------===//
+ // Drop expansion pattern
+ //===----------------------------------------------------------------------===//
+@@ -145,6 +487,16 @@ private:
+ 
+   mlir::LogicalResult rewriteDropRc(RcType rcType, ReussirRefDropOp op,
+                                     mlir::PatternRewriter &rewriter) const {
++    if (auto func = op->getParentOfType<mlir::func::FuncOp>();
++        func && func->hasAttr(kDropGlueAttr) &&
++        releasesThroughDropAndFree(rcType)) {
++      mlir::Value loaded =
++          ReussirRefLoadOp::create(rewriter, op.getLoc(), rcType, op.getRef());
++      emitGlueRelease(rewriter, op.getLoc(),
++                      op->getParentOfType<mlir::ModuleOp>(), loaded);
++      rewriter.eraseOp(op);
++      return mlir::success();
++    }
+     // Replace drop of ref rc with load then dec
+     NullableType nullableType = nullptr;
+     if (decMayProduceToken(rcType)) {
+diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
+index 0ffa6e11..77a58c9b 100644
+--- a/lib/IR/ReussirOps.cpp
++++ b/lib/IR/ReussirOps.cpp
+@@ -3940,6 +3940,7 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+       mlir::func::FuncOp::create(builder, builder.getUnknownLoc(), funcName,
+                                  builder.getFunctionType({refType}, {}));
+   dtor.setPrivate();
++  dtor->setAttr(kDropGlueAttr, builder.getUnitAttr());
+   dtor->setAttr("llvm.linkage", builder.getAttr<mlir::LLVM::LinkageAttr>(
+                                     mlir::LLVM::linkage::Linkage::LinkonceODR));
+   dtor->setAttr("llvm.passthrough",
+diff --git a/tests/integration/frontend/drop_long_list.c b/tests/integration/frontend/drop_long_list.c
+new file mode 100644
+index 00000000..b7545fad
+--- /dev/null
++++ b/tests/integration/frontend/drop_long_list.c
+@@ -0,0 +1,15 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for drop_long_list.rr: four independent properties, one decimal
++// digit each.
++
++extern long long reussir_main(void);
++
++int main(void) { return reussir_main() == 1111 ? 0 : 1; }
+diff --git a/tests/integration/frontend/drop_long_list.rr b/tests/integration/frontend/drop_long_list.rr
+new file mode 100644
+index 00000000..5b72f7db
+--- /dev/null
++++ b/tests/integration/frontend/drop_long_list.rr
+@@ -0,0 +1,42 @@
++// Releasing a long chain of cells at once must not recurse once per cell. A
++// member release inside drop glue calls the member type's drop_and_free,
++// which deallocates the cell before releasing the members that continue the
++// chain (boxes of the same recursive group), the last one about to be freed
++// as a tail call, so the release of a chain is a loop wherever the chain
++// member sits. Two million cells would need about 64 MB of stack the old
++// way, far beyond the driver's 8 MB main thread. Checked: a list, a right
++// and a left tree spine, and a snoc list whose last member is another box.
++
++// RUN: %rrc %s -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/drop_long_list.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++// RUN: %rrc %s -o %t.opt.o --relocation-mode pic -Oaggressive
++// RUN: %cc %t.opt.o %S/drop_long_list.c -o %t.opt.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.opt.exe
++// RUN: %rrc %s --emit llvm-ir -o %t.ll
++// RUN: %FileCheck %s < %t.ll
++
++enum L { Cons(u64, L), Nil }
++enum T { Node(T, u64, T), Leaf }
++struct Box(u64)
++enum S { Snoc(S, Box), Lin }
++
++fn build(n : u64, acc : L) -> L { if n == 0 { acc } else { build(n - 1, L::Cons { n, acc }) } }
++fn head(l : L) -> u64 { match l { L::Cons(x, t) => x, L::Nil => 0 } }
++fn spine(n : u64, acc : T) -> T { if n == 0 { acc } else { spine(n - 1, T::Node { T::Leaf {}, n, acc }) } }
++fn lspine(n : u64, acc : T) -> T { if n == 0 { acc } else { lspine(n - 1, T::Node { acc, n, T::Leaf {} }) } }
++fn root(t : T) -> u64 { match t { T::Node(l, x, r) => x, T::Leaf => 0 } }
++fn snocs(n : u64, acc : S) -> S { if n == 0 { acc } else { snocs(n - 1, S::Snoc { acc, Box { n } }) } }
++fn last(s : S) -> u64 { match s { S::Snoc(t, b) => b.0, S::Lin => 0 } }
++
++pub fn main() -> i64 {
++    let list_ok = if head(build(2000000, L::Nil {})) == 1 { 1 } else { 0 };
++    let tree_ok = if root(spine(2000000, T::Leaf {})) == 1 { 1 } else { 0 };
++    let left_ok = if root(lspine(2000000, T::Leaf {})) == 1 { 1 } else { 0 };
++    let snoc_ok = if last(snocs(2000000, S::Lin {})) == 1 { 1 } else { 0 };
++    list_ok + tree_ok * 10 + left_ok * 100 + snoc_ok * 1000
++}
++
++extern "C" trampoline "reussir_main" = main;
++
++// CHECK: define {{.*}}@_RINvNvC4core9intrinsic13drop_and_freeC1TE(
+-- 
+2.43.0
+

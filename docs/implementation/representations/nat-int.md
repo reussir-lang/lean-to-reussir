@@ -37,8 +37,8 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   hook would cost a call per copy; lean2rr cannot count `Nat`s itself
   because it cannot change the drop glue Reussir generates for records,
   closures and enums.
-- **Where:** `reussir-patches/0050-*.patch` and
-  [details/0050.md](../../../reussir-patches/details/0050.md)
+- **Where:** `reussir-bugs/patches/0050-*.patch` and
+  [local-additions.md](../../../reussir-bugs/local-additions.md#0050-tagged-opaque-handles-one-word-nat-and-int)
   (`BasicOpsLowering.cpp`: `beginRealBoxGuard`); `prelude.rr`: `struct
   Nat`, `struct Int`.
 - **Remove only if:** upstream Reussir supports immediates in opaque types

@@ -105,7 +105,8 @@ imports with the program and Stage 1 calls instead (`Mono.redirectTarget`).
 
 Outside `lean2rr/`: `runtime/` (the prelude `prelude.rr` and the runtime
 crate `leanrt`), `scripts/l2r.py` (the driver: lean2rr, then rrc),
-`reussir-patches/` (the local Reussir patches, docs/reussir-bugs.md),
+`reussir-bugs/` (the Reussir bugs met, their repros and the local Reussir
+patches),
 `tests/`, `docs/`.
 
 The core translation is the plain one: the rules of this plan without the
@@ -1141,9 +1142,10 @@ application appears.
   where that pays. These functions call each other through the wrapper
   variants and through what a `Box` can hold, and polymorphic recursion
   through monad transformers makes hundreds of representations of a few
-  Lean types: with these functions inlinable, rrc's inliner grew such
-  programs exponentially (an 8-line `StateT` tower used at `IO` did not
-  build within 30 minutes or 15 GB; Reussir bug 20). Out of line, a
+  Lean types: with these functions inlinable, rrc's build time and memory
+  on such programs grew far faster than the programs (superlinearly; an
+  8-line `StateT` tower used at `IO` did not build within 30 minutes or
+  15 GB; Reussir bug 20, whose cause is not narrowed down). Out of line, a
   conversion, an unboxing, or the application of a wrapped value or of a
   value of uniform type costs a call (until LLVM inlines it); all are rare
   outside uniform code, and typed function values are unaffected.
@@ -1269,11 +1271,12 @@ used and every field is bound at the match):
   instead of the cell actually freed: `TreeMap.insert` rebuilt every node
   of the path, and so did a BST insert whose key comparison is a call
   before the branch (`Nat`, `String`, `compare`), even with the local fix
-  of Reussir bug 7 (docs/reussir-bugs.md). A structure (one constructor:
-  no match, its fields are projections) that stays live the same way
-  projects only the fields used while it is live; an inner alternative
-  that no longer uses it projects the others there (the pair `(k', t)` of
-  an association list, kept whole when its key does not match).
+  of Reussir bug 7 (reussir-bugs/07-phantom-reuse-donor.md). A structure
+  (one constructor: no match, its fields are projections) that stays live
+  the same way projects only the fields used while it is live; an inner
+  alternative that no longer uses it projects the others there (the pair
+  `(k', t)` of an association list, kept whole when its key does not
+  match).
   A merge (`List.mergeSort`'s `mergeTR.go`, the classic `mergesort`'s
   `merge.go`) then reuses the cell it takes apart, as native Lean does.
   Without the rule for calls it allocated a cell at every step and freed
@@ -2549,9 +2552,10 @@ Probe results (Reussir at the pinned commit):
   across the FFI (for array elements without a wrapper); borrowed
   FFI parameters (an array `get` currently takes ownership and releases);
   a no-inline attribute (lean2rr uses `#[transform_anchor]`, whose
-  `no_inline` is a side effect, docs/reussir-bugs.md bug 20); tagged
-  opaque handles (one-word `Nat`/`Int`, §5.1: local patch 0050);
-  bounded-depth frees (local patches 0013-0015).
+  `no_inline` is a side effect, reussir-bugs/20-statet-tower.md); tagged
+  opaque handles (one-word `Nat`/`Int`, §5.1: local patch 0050,
+  reussir-bugs/local-additions.md); bounded-depth frees (local patches
+  0013-0015).
 
 Answered (Lean):
 - Startup order: `EmitC.emitInitFn` runs the module's compiled

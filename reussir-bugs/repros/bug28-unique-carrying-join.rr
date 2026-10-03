@@ -1,0 +1,36 @@
+// Bug 28: at -O aggressive, the uniqueness-carrying analysis proves unique a
+// value that is fresh on one path and shared on another, and the cell that
+// value shares is then updated in place. `f` returns its argument `x` on the
+// base path (it "carries" argument 0) and calls itself on `pick(..)`: a
+// fresh cell, or `p.0`, a field of `p` that `p` still holds (count 2). The
+// analysis (UniqueCarryingRecursionAnalysis.cpp) joined the unknown
+// provenance of `p.0` away, called a `.unique` clone of `f` whose entry
+// asserts count == 1 (`llvm.assume`), and the clone's `bump` rebuilt the
+// shared cell in place: `p.0` changed.
+// Expected: prints 101 then 1. Reussir ef922049: prints 101 then 101 at
+// -O aggressive (101 then 1 at -O none and -O default).
+struct B(u64)
+struct P(B)
+
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+#[ffi(import)]
+fn three() -> u64 [{ std::hint::black_box(3u64) }];
+
+// Rebuilds b: in place when b's cell is unique.
+fn bump(b : B) -> B { B { b.0 + 100 } }
+
+// a (unique here) or p.0 (shared with p).
+fn pick(a : B, p : P, n : u64) -> B { if n == 2 { p.0 } else { a } }
+
+fn f(x : B, p : P, n : u64) -> B {
+    if n == 0 { x } else { f(pick(bump(x), p, n), p, n - 1) }
+}
+
+#[main]
+fn main() {
+    let p = P { B { 1 } };
+    let r = f(B { 5 }, p, three());
+    say(r.0);
+    say(p.0.0);
+}

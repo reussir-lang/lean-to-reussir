@@ -25,8 +25,8 @@ Every inductive instantiation becomes one generated Reussir type
   `enum [value]` (no allocation); one constructor is a `struct`; anything
   else is a shared `enum`. An inductive with no constructors gets a single
   variant `c_impossible`. The only `[value]` enums lean2rr emits are these
-  field-less enumerations and the prelude's `Nat`/`Int`, whose arms each
-  hold one 64-bit word; multi-field value records are `[value]` structs
+  field-less enumerations (`Nat`/`Int` are one-word tagged handles,
+  [nat-int.md](nat-int.md)); multi-field value records are `[value]` structs
   (join-point tuples), whose padding is explicit.
 - **Why:** Reussir moves a `[value]` enum as its tag plus one
   representative arm, so bytes of another arm that fall on padding or on a

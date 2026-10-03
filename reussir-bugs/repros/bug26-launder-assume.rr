@@ -1,0 +1,40 @@
+// Bug 26: a cell rebuilt in place in a loop reads back wrong values at
+// -O aggressive. When a unique cell is reused for a new record, the
+// lowering launders the cell pointer (llvm.launder.invariant.group, so the
+// new record's !invariant.group stores are not mistaken for the old
+// record's) and then emitted llvm.assume(launder(p) == p)
+// (BasicOpsLowering.cpp, token.launder and token.realloc lowerings). GVN
+// uses the equality to put the stores back on p, which undoes the launder:
+// LLVM takes the cell's tag and fields for constants, and LICM hoists the
+// tag stores out of the loop.
+// `iter` rebuilds one S cell six times (A -> B -> A ...); the result is
+// A{250, 9648}. (The inputs are constants: with an opaque seed, LLVM does
+// not reach the wrong fold on this program.)
+// Expected: prints 25009648. Reussir ef922049: prints 2 (B(false)) at
+// -O aggressive, with or without lean2rr's flags; 25009648 at -O none and
+// -O default.
+enum S { A(u8, u16), B(bool), C(u64) }
+
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+
+fn step(x : S, s : u64) -> S {
+    match x {
+        S::A(a, b) => { S::B{s % 2 == 1} },
+        S::B(f) => { S::A{(s % 251) as u8, (s % 65521) as u16} },
+        S::C(w) => { S::C{w + s} }
+    }
+}
+fn iter(x : S, n : u64, s : u64) -> S {
+    if n == 0 { x } else { iter(step(x, s), n - 1, (s * 33 + 10) % 1000003) }
+}
+fn sum(x : S) -> u64 {
+    match x {
+        S::A(a, b) => { (a as u64) * 100000 + (b as u64) },
+        S::B(f) => { if f { 1 } else { 2 } },
+        S::C(w) => { w }
+    }
+}
+
+#[main]
+fn main() { say(sum(iter(S::A{1, 2}, 6, 153))); }
