@@ -68,8 +68,11 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   `IO.FS.withIsolatedStreams` (round 7 RV7C-01). A walk run after a
   `Std.Sync` caller had put the context in the object's waiter list woke
   the running context (a no-op) and it waited forever (RV7C-02; d5169c4;
-  tests `RtPromiseFreeSync`, `RtSyncLostWake`, and `RtPromiseFreeGlue`,
-  an expected failure until 0040 is applied).
+  tests `RtPromiseFreeSync`, `RtSyncLostWake`). A reference's `set` frees
+  the old value inside a free the runtime starts, so its walks run when
+  that free ends, with or without 0040 (round 8 RV8T-01, 8af8f1a; test
+  `RtPromiseFreeGlue`, see
+  [../ownership.md](../ownership.md#reference-sets-store-the-new-value-before-releasing-the-old-one)).
 - **Where:** `runtime/leanrt/src/task.rs`: `resolve`, `run_later_walks`,
   `hook_drained`; `runtime/leanrt/src/drop.rs`: `run`;
   `runtime/leanrt/src/sync.rs`: `settle`; `runtime/leanrt/src/once.rs`:

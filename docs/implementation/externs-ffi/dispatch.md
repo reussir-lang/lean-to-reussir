@@ -52,7 +52,7 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   of file).
 - **Remove only if:** no definition needs replacing.
 
-### The order at b299aab
+### The order an extern call takes
 
 - **What:** For a call of `f`, in this order: (1) Stage 1 redirects `f` to
   a shim override, else, for an extern, to an `@[export]` Lean
@@ -75,10 +75,12 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **Where:** `Mono.lean`: `redirectTarget`; `Lower/Values.lean`:
   `lowerConstApp`, `preludeReplacement?`; `Lower/Decls.lean`: `calleeOf`;
   `Lower/ExternCall.lean`: `customExtern`, `lowerExternCall`.
-- **Remove only if:** n/a (a description). With the C FFI the planned
-  order is: lean2rr's own implementation, then C code linked with the
-  program, then the extern's Lean body, then a link error
-  ([c-ffi.md](c-ffi.md#extern-precedence-with-c-code)).
+- **Remove only if:** n/a (a description). Step (10) is also what a
+  program's own `@[extern]` C code gets: lean2rr links no C code of the
+  program, so such a program fails at the rrc build. The C FFI work that
+  would put the program's C after lean2rr's own implementation, then the
+  extern's Lean body, then a lean2rr error naming the extern, is parked
+  ([c-ffi.md](c-ffi.md)).
 
 ### Every `Init`/`Std` extern is available; `Lean`'s C++ parts are not
 

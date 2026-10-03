@@ -39,20 +39,35 @@ runtime.
 
 - **What:** `l2r_rc_set` (references) reads the old value, stores the new
   one with Reussir's `cell::set`, and releases the old one through
-  `l2r_release_after`, an FFI call Reussir keeps after the store.
-  `l2r_lcell_set` (thunk, task and promise cells) does the same in Rust. A
-  value that cannot cross the FFI boundary (a unit or enumeration value,
-  whose release runs nothing) is stored with `l2r_rc_put`.
+  `l2r_release_value`, an FFI call Reussir keeps after the store.
+  `l2r_lcell_set` (thunk, task and promise cells) does the same in Rust.
+  Both release with `leanrt::drop::release`, as `lean_dec`: a shared value
+  (or an immediate) is only decremented, in line; the last reference to a
+  record is freed inside a free the runtime starts (`drop::run`), so its
+  members go on the pending stack and are released last field first, and
+  the `sync` dependents of the promises it drops run when that free ends,
+  before the caller goes on. Other values are dropped (the runtime's
+  containers free themselves that way). A value that cannot cross the FFI
+  boundary (a unit or enumeration value, whose release runs nothing) is
+  stored with `l2r_rc_put` (`refSetFn` chooses).
 - **Why:** As `lean_st_ref_set`: code the release runs (the `sync`
   dependents of a promise it drops) must see the new value. Reussir's
   `cell::set` and Rust's assignment release first (round 7 RV7C-01,
-  d5169c4).
-- **Where:** `runtime/prelude.rr`: `l2r_rc_set`, `l2r_rc_put`,
-  `l2r_lcell_set` (`l2r_ref_set` too, but `LRef` is no longer used);
-  `Lower/Externs.lean`: `refSetFn`.
-- **Remove only if:** the `l2r_release_after` detour in `l2r_rc_set` can go
-  if Reussir's `cell::set` stores before it releases; the order inside
-  `l2r_lcell_set` (plain Rust) must stay.
+  d5169c4). Releasing through the record's `_ffi_release` let Reussir's
+  glue free the old value first field first: the dependents of the
+  promises it held ran, and the file handles it held were closed, in the
+  reverse of native's order (round 8 RV8T-02); and without patch 0040 the
+  end of that free was not seen, so the dependents ran late and a
+  condition-variable loop reading its flag first waited forever (RV8T-01;
+  both 8af8f1a; tests `RtRefSetOrder`, `RtRefSetFiles`,
+  `RtSyncLostWakeLoop`, `RtPromiseFreeGlue`).
+- **Where:** `runtime/prelude.rr`: `l2r_rc_set`, `l2r_release_value`,
+  `l2r_rc_put`, `l2r_lcell_set` (`l2r_ref_set` too, but `LRef` is no
+  longer used); `runtime/leanrt/src/drop.rs`: `release`, `ReleaseValue`,
+  `free_record`, `step_record`; `Lower/Externs.lean`: `refSetFn`.
+- **Remove only if:** the `l2r_release_value` detour in `l2r_rc_set` can go
+  if Reussir's `cell::set` stores before it releases and frees in Lean's
+  order; the order inside `l2r_lcell_set` (plain Rust) must stay.
 
 ### Containers free through the thread's pending stack, in Lean's order
 

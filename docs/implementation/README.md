@@ -13,8 +13,8 @@ the Reussir bug number, or start from the area list below. Every change
 that adds, removes or changes a trick updates its entry here **in the same
 commit**: add an entry for a new special case, delete the entry of one that
 is removed, and keep "Where" pointing at functions that exist. Entries
-marked *in progress* describe work on other branches; update them when
-that work is merged.
+marked *in progress* or *parked* describe work on other branches; update
+them when that work is merged.
 
 Each entry has a one-line title and four parts:
 
@@ -57,6 +57,6 @@ on the branches merged into it. Reussir bugs link to
 9. [optional-passes.md](optional-passes.md): one line per optional pass
    with its soundness guard, and the required parts.
 10. [externs-ffi/](externs-ffi/README.md): extern dispatch and its order,
-    glue, the `L2RShim` library, the C FFI (in progress).
+    glue, the `L2RShim` library, the C FFI (parked).
 11. [translator.md](translator.md): lean2rr itself: loading the program,
     its stack and limits, its switches.

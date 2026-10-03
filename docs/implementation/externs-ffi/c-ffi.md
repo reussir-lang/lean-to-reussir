@@ -1,81 +1,70 @@
-# Calling the program's C code (in progress)
+# Calling the program's C code (parked)
 
-**Status:** in progress on branch `ffi-c` (latest commit 1133472, not
-merged; only the single-block layouts of strings and `Array Nat`/`Int`,
-7a784e1, are merged, with branch `mem-layout`). A Lean program may
-implement some of its `@[extern "sym"]` declarations in C (written against
-`<lean/lean.h>`, built by Lake). The goal is that lean2rr links that C code
-and calls it, so the program behaves as its native build does, its C
-included. On the branch the design is plan §5.15. When the work is merged,
-replace "in progress" with the code locations at that commit and move the
-entries that change `dev`'s behaviour into the other files.
+**Status: parked, not supported.** A Lean program may implement some of
+its own `@[extern "sym"]` declarations in C (written against
+`<lean/lean.h>`, built by Lake). lean2rr links no C code of the program
+and does not compile such an extern's Lean body in its place: the
+generated code calls a function named after the symbol that the prelude
+does not define, so the build fails in rrc with an unknown function
+([dispatch.md](dispatch.md#the-order-an-extern-call-takes), step 10; plan
+[§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
+"Not supported"). The targets for now are programs that use only `Init`
+and `Std`, and where lean2rr's own layouts and Lean's object layouts
+conflict, lean2rr's win. The work is kept on two unmerged branches,
+described below so it can be resumed; nothing on them is in the
+translator. The one piece merged is the single-block layout of strings
+and `Array Nat`/`Int` with Lean's header sizes (mem-layout, 7a784e1),
+which lean2rr uses for its own sake
+([strings](../representations/strings.md#a-string-keeps-its-character-count),
+[arrays](../representations/arrays.md#array-nat-and-array-int-store-one-word-per-element)).
 
-### Extern precedence with C code
+### Branch `ffi-c`: linking and calling the program's C (parked at ffac4f1)
 
-- **What (planned):** An extern call gets, in this order: lean2rr's own
-  implementation (a prelude function, a runtime primitive, glue, the shim,
-  or an `@[export]` Lean definition of the symbol); else the C code linked
-  with the program, when it defines the symbol; else the extern's Lean
-  body, compiled, when it has one; else an error. **On the branch now:**
-  the first two steps; a program extern with no implementation at all is a
-  lean2rr build-time error (the Lean-body fallback is not there yet).
-- **Why:** lean2rr's implementations follow Lean's runtime on lean2rr's own
-  representations, so they win; the program's C comes next because the
-  native build calls it; a Lean body is the reference semantics when
-  neither exists.
-- **Where:** in progress: `Lower/CFFI.lean` (`isCExtern`, `cExternCall`),
-  `Lower/ExternCall.lean`, `scripts/l2r.py` (`--link-c`,
-  `--lake-project`, `--link-arg`; it passes the libraries' symbols to
-  lean2rr as `--external-symbols`). The order at b299aab:
-  [dispatch.md](dispatch.md#the-order-at-b299aab).
-- **Remove only if:** n/a.
+- **What:** `scripts/l2r.py --link-c LIB|OBJ`, `--lake-project DIR`
+  (Lake `extern_lib` archives) and `--link-arg` link the program's C,
+  whose symbols lean2rr receives as `--external-symbols`. An extern call
+  gets lean2rr's own implementation, else the program's C, else the Lean
+  body (branch `lean-externs`), else Lean's C/C++ in `libleanshared`,
+  else a build error. A program with C links Lean's runtime
+  (`libleanshared.so`, one mimalloc) and initializes it. Calls use Lean's
+  impure signature, one generated texture per symbol and argument
+  representation (`l2r_cffi_call_<sym>_<hash>`). Values cross in three
+  tiers: as they are (`String`, `ByteArray`/`FloatArray`, `Array Nat` of
+  small elements, with Lean's tags and a NUL terminator in the string
+  block); converted to Lean objects and back (`Nat`/`Int`, structures and
+  inductives laid out by `getCtorLayout`, other arrays, IO results); or
+  through bridges (foreign objects, closures both ways, file handles).
+  Thunks, tasks, references and other runtime objects crossing are build
+  errors. Tests `tests/ffi/run.sh` (9 programs) pass on the branch.
+- **Why parked:** The current targets have no C of their own. The branch
+  also changes lean2rr's own layouts for every program (the string
+  block's tag and NUL, `ByteArray`/`FloatArray` as one block whose
+  `ByteArray.mk`/`data` copy), to be re-evaluated or reverted since
+  lean2rr's layouts win; it predates mem-nat's one-word `Nat` and has not
+  been reviewed since 406fd6c. Notes:
+  `/home/queclr/Documents/l2r-scratch/ffi-c-work/PARKED.md` (what is
+  left and how to resume); design: plan §5.15 on the branch.
+- **Where (on the branch):** `Lower/CFFI.lean` (`isCExtern`,
+  `cExternCall`, `toObj`/`ofObj`), `Lower/ExternCall.lean`,
+  `runtime/leanrt/src/cffi.rs`, `sarray.rs`, `scripts/l2r.py`,
+  `tests/ffi/`.
+- **Remove only if:** n/a (not merged).
 
-### Tier 1: values C sees as they are (zero copy)
+### Branch `lean-externs`: the Lean body as a fallback (parked at fb3bb77)
 
-- **What (in progress):** The runtime gives some objects exactly Lean's
-  layout, so the glue passes the pointer. On the branch: `String` (`LStr`
-  is Lean's string object: tag 249, NUL-terminated, `m_size` counting the
-  NUL), `ByteArray` and `FloatArray` (`LSArr`, Lean's scalar array object,
-  replacing `RVec<u8>`/`RVec<f64>`), and `Array Nat`/`Array Int` blocks
-  with Lean's header and tag (the single blocks with Lean's header sizes
-  are merged: [strings](../representations/strings.md#a-string-keeps-its-character-count),
-  [arrays](../representations/arrays.md#array-nat-and-array-int-store-one-word-per-element);
-  the tags and the NUL terminator are the branch's). Planned: `Array Nat`/`Int` and `Nat` passed without
-  conversion (the branch still converts `Nat`).
-- **Why:** No copy per call for the data C code typically reads (byte
-  buffers); Reussir's count is the `u32` at offset 0, where Lean's `m_rc`
-  is, and both allocate with mimalloc. The single blocks also save memory
-  (Pf4SmallArrs 431 → 336 MB, native 338).
-- **Where:** in progress: `runtime/leanrt/src/string.rs`, `sarray.rs`,
-  `tagvec.rs`, `runtime/prelude.rr`.
-- **Remove only if:** n/a.
-
-### Tier 2: values converted at the boundary
-
-- **What (in progress, implemented on the branch):** Other values are
-  converted to Lean objects for the call and read back: `Nat`/`Int` (a
-  small value as `lean_box`, a big one as a GMP object), structures and
-  inductives laid out by Lean's `getCtorLayout` (`Option`, `Except`,
-  `Prod`, `List`, the program's own types), arrays of other elements, IO
-  results. The call goes through a generated texture with the extern's
-  impure signature (`getImpureSignature?`), numbers unboxed, and arguments
-  Lean borrows released after the call. `leanrt::cffi` exports `lean.h`'s
-  runtime functions under their C names, with Lean's semantics.
-- **Why:** lean2rr's typed representations differ from Lean's uniform
-  objects; converting at the boundary keeps typed code fast. A copy is
-  O(size) per call.
-- **Where:** in progress: `Lower/CFFI.lean` (`toObj`/`ofObj`),
-  `runtime/leanrt/src/cffi.rs`.
-- **Remove only if:** n/a.
-
-### Tier 3: bridges for what cannot be copied
-
-- **What (in progress):** Bridges for opaque foreign objects (Lean's
-  external objects with their class's finalizer: `lean_external_class`
-  exists on the branch), for closures in both directions, and for handles.
-  On the branch, `Thunk`, `Task`, `IO.FS.Handle` and references crossing to
-  C are still "not supported yet" (a build-time error).
-- **Why:** Such values have identity or behaviour that a copy would lose.
-- **Where:** in progress: `runtime/leanrt/src/cffi.rs`
-  (`lean_register_external_class`), `Lower/CFFI.lean`.
-- **Remove only if:** n/a.
+- **What:** An `@[extern "sym"]` definition of the program whose symbol
+  nothing implements (prelude, `@[export]` definition, glue, linked C) is
+  compiled from its Lean body (the definition, or its `_unsafe_rec`
+  version); an opaque without one stays an extern. lean2rr then rejects a
+  program that still calls an extern nothing implements and lists each
+  one with its declaration, instead of leaving them to rrc
+  (`L2R_ALLOW_MISSING_EXTERNS=1` only warns). Reviewed through round 3
+  (RV8E-01..11 fixed); test `RtExternBody`.
+- **Why parked:** It is the third step of `ffi-c`'s precedence and goes
+  with it: the two branches overlap (`--external-symbols`, the
+  missing-extern error) and are to be merged together, if the C FFI is
+  resumed.
+- **Where (on the branch):** `Mono.lean`: `externBodyFallback`,
+  `externBodyDecl`; `Emit/Program.lean`: `lowerProgram` (the
+  missing-extern report).
+- **Remove only if:** n/a (not merged).

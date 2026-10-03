@@ -30,7 +30,8 @@ runtime. Plan
 ### Cheap constants are recomputed, float literals folded
 
 - **What:** A constant that only builds unboxed values from small
-  literals, constructors and total scalar conversions is recomputed at
+  literals, constructors and total scalar conversions, every `Nat`/`Int`
+  among them small (a big one is a heap number, RV8N-01), is recomputed at
   each use (`cheap-consts`); a float literal (`Float.ofScientific` on
   literals) is evaluated by lean2rr and becomes `Float.ofBits` of its bit
   pattern (`float-lits`).

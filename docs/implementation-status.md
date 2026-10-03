@@ -102,11 +102,12 @@ dropping a small `Nat` is a bit test; it is never allocated.
 `Int` works the same way, with Lean's encoding too: a value in the 32-bit
 range is stored in the word, any other is a big number.
 
-The encoding is exactly Lean's, so the words can be handed to C code
-written against `lean.h` as they are: a small value is `lean_box(n)`, and
-a big number is laid out like Lean's own (`lean_mpz_object`: the object
-header with its reference count, tagged `LeanMPZ`, then GMP's `mpz_t`,
-whose limbs GMP allocates).
+The encoding is exactly Lean's: a small value is `lean_box(n)`, and a big
+number is laid out like Lean's own (`lean_mpz_object`: the object header
+with its reference count, tagged `LeanMPZ`, then GMP's `mpz_t`, whose
+limbs GMP allocates). C code written against `lean.h` could take these
+words as they are, but calling a program's own C code is not supported
+(below).
 
 Compared with native Lean:
 - a `Nat` or `Int` field in a record takes 8 bytes, as natively;
@@ -360,6 +361,13 @@ with examples, is §10 of the translation plan.
   at most for the same object, by address), a panic's backtrace line says the trace is
   unavailable; the Windows-only time zone functions fail as they do
   natively on other systems.
+- **A program's own C code is not supported.** A program that implements
+  some of its own `@[extern]` declarations in C (built by Lake) fails at
+  the rrc build with an unknown function: lean2rr links no C code of the
+  program. The targets for now are programs that use only `Init` and
+  `Std`. The work on calling a program's C (branches `ffi-c` and
+  `lean-externs`) is parked, not merged; where lean2rr's own layouts and
+  Lean's object layouts conflict, lean2rr's win.
 - **`import Lean` programs** (metaprogramming: the elaborator, the kernel,
   the code generator): the `Lean` library declares 196 more C functions,
   and those implemented in Lean's C++ are not available: expression and
@@ -539,3 +547,5 @@ dynamic-extent arrays are not.
 - Real parallelism for tasks (the scheduler is single-threaded by design).
 - The C++-implemented parts of the `Lean` library, for metaprogramming
   programs.
+- Calling a program's own C code (the parked branches `ffi-c` and
+  `lean-externs`).

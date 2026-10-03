@@ -698,7 +698,8 @@ a big number. A big number is laid out as Lean's `lean_mpz_object`: the
 object header (the 32-bit count Reussir counts, then `m_cs_sz`, `m_other`
 and the tag `LeanMPZ`), then GMP's `mpz_t`, whose limbs GMP allocates; its
 operations are GMP's `mpz` functions, as in Lean's runtime. So C code
-written against `lean.h` can receive and return these words unchanged.
+written against `lean.h` could receive and return these words unchanged
+(calling a program's own C code is not supported for now, §10).
 
 The difficulty is that Reussir, not lean2rr, inserts the reference
 counting: copying a handle increments the count at its address, dropping
@@ -3090,3 +3091,15 @@ Each item says what differs and when.
   that reaches an unsupported extern makes the whole program fail to link.
   A program is therefore translated by lean2rr, but links only if the
   runtime implements every extern it reaches.
+- A program with its own `@[extern]` C code (an extern of the program
+  implemented in C, built by Lake) fails at the rrc build with an unknown
+  function: lean2rr links no C code of the program and does not compile
+  the extern's Lean body instead. The targets are programs that use only
+  `Init` and `Std`. Work on linking and calling the program's C (branch
+  `ffi-c`) and on compiling an extern's Lean body when nothing implements
+  it (branch `lean-externs`) is parked, not merged; where lean2rr's own
+  layouts and Lean's object layouts conflict, lean2rr's win.
+- The `Lean` library's externs implemented in C++ (`Expr.mkData`,
+  `evalConst`, `Dynlib`, the LLVM bindings, …): a program that reaches one
+  fails the same way; a program that only uses data structures from
+  `Lean` builds.

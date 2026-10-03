@@ -96,6 +96,36 @@ unless they say otherwise. Plan
   [../externs-ffi/shim.md](../externs-ffi/shim.md).
 - **Remove only if:** never.
 
+### Stopping a timer or canceling a socket operation releases on the caller's context
+
+- **What:** A timer's or signal watcher's `stop` and `cancel`, and a
+  socket's `cancelAccept` and `cancelRecv` (TCP and UDP, also of a
+  `waitReadable`), do not give the promises up through the event loop:
+  the primitive marks the pending operation canceled and returns its
+  promise, with the program's promise for a timer
+  (`Pending::cancel_here`, `GivenUp`), and the extern's glue drops them
+  once the primitive has returned, on the caller's context. A timer
+  re-armed (given a new promise while one is pending:
+  `timer_set_promise`) or an operation whose start failed still releases
+  on the loop's context, at its next turn.
+- **Why:** Natively the C function releases the promise on the calling
+  thread, so its `sync` dependents have run when the call returns. Through
+  the loop they ran later: after `cancelAccept`, `#[]` where native prints
+  `#[accept dropped]`; and since a `Promise.result!` of a dropped promise
+  blocks only its reader (7a265db), a dependent doing that after
+  `Timer.stop` blocked the loop's context, so no later completion arrived
+  (round 8 RV8T-03, f828b67; RV8T-04, c7698d9; tests
+  `RtTimerStopDropped`, `RtSockCancel`). Natively these calls hold the
+  event loop's lock while they release, so such a dependent stalls every
+  timer and socket; here only the calling context blocks (plan
+  [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
+  "Event loop details").
+- **Where:** `net.rs`: `Pending::cancel_here`, `GivenUp`, `timer_stop`,
+  `timer_cancel`, `sock_cancel_recv`, `tcp_cancel_accept`;
+  `runtime/prelude.rr`: `l2r_shim_timer_ctl_h`,
+  `l2r_shim_sock_cancel_recv_h`, `l2r_shim_tcp_cancel_accept_h`.
+- **Remove only if:** never.
+
 ### No busy wait while the event loop's context is blocked
 
 - **What:** `wake_evloop` answers whether it woke the event loop's

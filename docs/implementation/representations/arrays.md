@@ -9,9 +9,10 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
 
 - **What:** `S`, the storage type of `α`, is `α`'s own representation when
   that can cross Reussir's FFI boundary (integers, floats, `bool`, runtime
-  handles, shared records, function values); otherwise a generated
-  one-field shared struct `ElemBox` around it (`Nat`, `Int` without
-  `nat-arrays`, `[value]` structs, Reussir closures). The same storage
+  handles, `Nat` and `Int` among them, shared records, function values);
+  otherwise a generated one-field shared struct `ElemBox` around it
+  (`[value]` structs, Reussir closures; `Nat` and `Int` too before
+  mem-nat). The same storage
   wraps once-cell values and the type-parameter arguments of extern
   instances.
 - **Why:** Reussir's FFI passes only integers, floats, `bool`, opaque

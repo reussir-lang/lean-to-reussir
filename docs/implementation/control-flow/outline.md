@@ -65,7 +65,8 @@ text, from growing superlinearly. It is a required part (`outline` in
 
 - **What:** A block is outlined only if every variable it uses has a
   known Reussir type (parameters, typed `let`s, fields of matched variants
-  from the type declarations and from the prelude's enums such as `Nat`);
+  from the type declarations and from the prelude's enums such as
+  `L2RUnit`);
   otherwise it stays where it is.
 - **Why:** An outlined part's parameters need types; the printer's `let`s
   may omit them.

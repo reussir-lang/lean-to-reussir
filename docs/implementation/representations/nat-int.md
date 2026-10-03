@@ -15,14 +15,17 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 - **Why:** The earlier two-word `[value] enum { Small, Big(LBig) }` made
   every `Nat` field 16 bytes (native: 8; rbmap and records of `Nat`s now
   0.84x and 0.80x native peak memory, were 1.00x and 1.26x; mem-nat
-  a8fc2e2). Lean's exact encoding lets C code written against `lean.h`
-  take and return the words unchanged (ffi-c).
+  a8fc2e2). Lean's exact encoding would also let C code written against
+  `lean.h` take and return the words unchanged, but calling a program's C
+  is not supported (the C FFI is parked: [../externs-ffi/c-ffi.md](../externs-ffi/c-ffi.md)).
 - **Where:** `runtime/prelude.rr` (`struct Nat`, `struct Int`, the Nat and
   Int sections); `runtime/leanrt/src/nat.rs`; plan
   [§5.1](../../translation-plan.md#51-type-translation) ("One-word `Nat`
   and `Int`", which also weighs the alternatives).
-- **Remove only if:** lean2rr gives up `lean.h` compatibility and Reussir
-  gains a native tagged-integer type.
+- **Remove only if:** never for the one word; the exact encoding may
+  change if a lean2rr encoding serves better (Lean-layout compatibility
+  does not constrain lean2rr's layouts while the C FFI is parked) or
+  Reussir gains a native tagged-integer type.
 
 ### Reussir counts only the even words (tagged opaque handles, patch 0050)
 
@@ -109,14 +112,18 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   are padding to Reussir, then GMP's `mpz_t`, whose limbs GMP allocates.
   The operations are GMP's `mpz_*` functions, in place when the first
   operand is unique.
-- **Why:** C code can receive a big `Nat` with no conversion (ffi-c), and
-  memory behaves as natively (bignum about 1.1x native, was 1.2-1.3x).
+- **Why:** Memory behaves as natively (bignum about 1.1x native, was
+  1.2-1.3x), and the tag goes into padding. C code could receive a big
+  `Nat` with no conversion, if calling a program's C were supported (it
+  is parked).
 - **Where:** `leanrt/src/big.rs`: `BigObj`, `wrap`, `binop`, `op_ui`;
   `gmp.rs`.
-- **Remove only if:** C interop is not needed. Differences from native:
-  counts follow Reussir's convention (only Lean's single-threaded
-  `m_rc > 0`), and the object comes from `mi_malloc`, so a C-side
-  `lean_dec_ref_cold`/`lean_free_object` must go through lean2rr's shim.
+- **Remove only if:** another layout serves lean2rr better (Lean-layout
+  compatibility is not a requirement while the C FFI is parked).
+  Differences from native: counts follow Reussir's convention (only
+  Lean's single-threaded `m_rc > 0`), and the object comes from
+  `mi_malloc`, so a C-side `lean_dec_ref_cold`/`lean_free_object` would
+  have to go through lean2rr.
 
 ### Literals: small below 2^63, big ones parsed from their decimal text
 
