@@ -270,9 +270,16 @@ standard streams) with their saved contexts (`once::CtxState`). A free's
 pending work is the thread's (`reussir_rt::drop`), so no context is
 suspended inside a free (`sched::switch_to` checks): a promise dropped
 there is resolved in its turn, but its dependents, which run Lean code that
-may block, are walked after the free, at the context's next effect point,
-block or question about a task (`task::run_later_walks`, through the
-program's `l2r_task_walk_c`). The
+may block, are walked as soon as the free is over (`task::run_later_walks`,
+through the program's `l2r_task_walk_c`): when the drain ends, through
+Reussir's `__reussir_drop_drained` (local patch 0040; `task::resolve`
+stores `task::drained` there, linking the symbol weakly, so the runtime
+also builds against a Reussir without it), when a free that one of the
+runtime's containers started ends (`drop::run`), and otherwise (the record
+glue's frees, without patch 0040) at the context's next effect point,
+block, Std.Sync wait (`sync::settle`, before the object is looked at) or
+question about a task. A wait that registers in `sched::block` returns at
+once when those walks ran (its caller looks again). The
 context switch (`coro::switch`) saves the callee-saved registers on the
 stack and swaps stack pointers (aarch64 and x86-64 assembly). The program
 exports `l2r_task_run_one_c` (lean2rr's `l2r_task_run_one`), which a new

@@ -301,8 +301,17 @@ pub fn cur_wait() -> Wait {
 
 /// Block the running context until it is woken (`wake`) for `w`; other
 /// contexts run meanwhile. Returns once it runs again.
+///
+/// The walks a free left to this context (`task::run_later_walks`) run
+/// first. Callers that put the context in a waiter list before calling
+/// this (`sync`, `once::claim`) have run them already: a wake-up by them
+/// would be lost. For the other waits the context is registered here, and
+/// what the walks did may be what it waits for (a promise they resolved):
+/// then it does not wait, and its caller looks again.
 pub fn block(w: Wait) {
-    crate::task::run_later_walks();
+    if crate::task::run_later_walks() && matches!(w, Wait::Cell(_) | Wait::Progress | Wait::FinalRun) {
+        return;
+    }
     let s = sched();
     let c = s.cur;
     {

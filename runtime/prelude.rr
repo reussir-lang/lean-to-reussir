@@ -2512,7 +2512,23 @@ fn l2r_diag_println(s : LStr) -> u64 { l2r_stderr_put(lean_string_push(s, 10)) }
 
 fn l2r_rc_get<T>(c : Cell<T>) -> T { core::intrinsic::cell::get(c) }
 
+// As natively (`lean_st_ref_set`), the new value is stored before the old
+// one is released, so code that the release runs (the `sync` dependents of
+// a promise it drops, `leanrt::task::resolve`) sees the new value. Reussir's
+// `cell::set` releases the old value before the store: the old value is
+// taken (a second reference) and released after the store, by an FFI call
+// (`l2r_release_after`), which Reussir keeps there. For a type that cannot
+// cross the FFI boundary lean2rr calls `l2r_rc_put` (`refSetFn`).
 fn l2r_rc_set<T>(c : Cell<T>, v : T) -> u64 {
+    let old = core::intrinsic::cell::get(c);
+    core::intrinsic::cell::set(c, v);
+    l2r_release_after<T>(old)
+}
+
+// `l2r_rc_set` for a cell whose value's release runs nothing: a scalar, a
+// unit or enumeration value (a `[value]` type, which cannot cross the FFI
+// boundary).
+fn l2r_rc_put<T>(c : Cell<T>, v : T) -> u64 {
     core::intrinsic::cell::set(c, v);
     0
 }
@@ -2571,7 +2587,7 @@ fn l2r_natref_get(r : L2RNatRef) -> Nat {
 
 fn l2r_natref_set(r : L2RNatRef, x : Nat) -> u64 {
     match x {
-        Nat::Small(v) => if (v >> 63) == 0 { l2r_rc_set<u64>(r.0, (v << 1) | 1) } else { l2r_bigref_put_big(r.0, r.1, l2r_big_of_u64(v)) },
+        Nat::Small(v) => if (v >> 63) == 0 { l2r_rc_put<u64>(r.0, (v << 1) | 1) } else { l2r_bigref_put_big(r.0, r.1, l2r_big_of_u64(v)) },
         Nat::Big(b) => l2r_bigref_put_big(r.0, r.1, b)
     }
 }
@@ -2610,7 +2626,7 @@ fn l2r_intref_get(r : L2RIntRef) -> Int {
 
 fn l2r_intref_set(r : L2RIntRef, x : Int) -> u64 {
     match x {
-        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_rc_set<u64>(r.0, ((v << 1) | 1) as u64) } else { l2r_bigref_put_big(r.0, r.1, l2r_big_of_i64(v)) },
+        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_rc_put<u64>(r.0, ((v << 1) | 1) as u64) } else { l2r_bigref_put_big(r.0, r.1, l2r_big_of_i64(v)) },
         Int::Big(b) => l2r_bigref_put_big(r.0, r.1, b)
     }
 }
@@ -2646,13 +2662,15 @@ fn l2r_ref_get<T>(r : LRef<T>) -> T [{
     }
 }];
 
+// The old value is released after the new one is stored (`l2r_rc_set`).
 #[ffi(import)]
 fn l2r_ref_set<T>(r : LRef<T>, v : T) -> u64 [{
     {
         let mut c = leanrt::array::into_rc(r);
         let cell = unsafe { c.data_mut() };
-        cell.clear();
+        let old = cell.pop();
         cell.push(v);
+        drop(old);
         0
     }
 }];
@@ -2869,11 +2887,13 @@ fn l2r_lcell_new<T>(v : T) -> LCell<T> [{
 #[ffi(import)]
 fn l2r_lcell_get<T>(c : LCell<T>) -> T [{ c.data_ref().clone() }];
 
+// The old state is released after the new one is stored (`l2r_rc_set`).
 #[ffi(import)]
 fn l2r_lcell_set<T>(c : LCell<T>, v : T) -> u64 [{
     {
         let mut c = c;
-        unsafe { *c.data_mut() = v };
+        let old = unsafe { ::std::mem::replace(c.data_mut(), v) };
+        drop(old);
         0
     }
 }];

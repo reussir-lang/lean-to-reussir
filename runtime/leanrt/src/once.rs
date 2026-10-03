@@ -44,6 +44,8 @@ pub fn claim(slot: u64) -> bool {
 #[cold]
 #[inline(never)]
 fn claim_cold(slot: u64) -> bool {
+    // Before it may wait (as `sync::settle`).
+    crate::task::run_later_walks();
     loop {
         if has(slot) {
             return true;
