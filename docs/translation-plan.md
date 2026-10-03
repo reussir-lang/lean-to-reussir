@@ -738,7 +738,23 @@ its value is stored as `Box`.
   elsewhere: `Prod (Array S₁) Nat` read as `Prod (Array S₀) Nat` goes
   through `Prod lcAny Nat`. Converted directly, K structures of one shape
   going through uniform code made K² conversion functions, each with its
-  own generic runtime calls (build time grew quadratically).
+  own generic runtime calls (build time grew quadratically). The arms
+  stay quadratic (each of the K unboxing functions has an arm per
+  instantiation), but they are no longer the main cost, and sending them
+  through one function per inductive would not make the matches smaller:
+  rrc gives every `match` on `Box` one region per variant, a wildcard arm
+  being copied into each variant it covers (Reussir bug 22). Measured
+  (shared machine) on 80 structures of one shape through one
+  polymorphically recursive function (`Prod (Array Sᵢ) Nat`; round 6
+  Ty6QS80) and on the program of the round-6 report (Ty6RT1): the build
+  takes 200 s and 334 s (native: 3 s and 1 s; lean2rr's translation 1 s);
+  without the 6,320 and 7,287 arms that convert through the shared
+  instantiation, 157 s and 270 s. The largest part is rrc compiling each
+  generic runtime function instantiated at a type with a separate rustc
+  run (`l2r_once_get<T>`/`l2r_once_set<T>` for every type's cached zero
+  value and constants, `l2r_origin_note<S, D>`/`l2r_origin_take` for
+  every conversion): 1,970 and 1,992 runs, 100 s and 128 s (a small
+  program: 368 runs, about 30 s).
   When the program can cast at all, unboxing also accepts the variants of
   types that an `unsafeCast` can read (below). A program can cast when
   some declaration it reaches outside Lean's library (`Init`, `Std`,
@@ -2413,7 +2429,12 @@ Each item says what differs and when.
   rrc's inliner): the same release at the same point (40 constructors: 27
   s). A 2000-line `main` builds in about two minutes and
   2 GB, a recursive IO function of 2000 statements in about 70 s and
-  1.5 GB, a recursive function with a 3000-arm match in 80 s.
+  1.5 GB, a recursive function with a 3000-arm match in 80 s. Many
+  instantiations of one inductive in `Box`es (K structures of one shape
+  through polymorphically recursive code) make K unboxing functions of K
+  arms each, and rrc compiles each generic runtime function instantiated
+  at a type with its own rustc run: 80 such structures build in about
+  3 minutes (§5.1).
 - *Casts that natively read an address* (§5.1): an object read as a word
   (`unsafeCast` of a constructor with fields, a string, an array, a closure
   to `Nat`, `UInt8`, an enumeration, ...) natively gives its address
