@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (build time). **Status:** patched (0017), applied in `./reussir` (`l2r-local` 5c0514e3).
+**Kind:** bug (build time). **Status:** patched (0017), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug (build time).** rrc links the bitcode of the compiled
 textures one module at a time with the static `llvm::Linker::linkModules`,
@@ -141,7 +141,7 @@ design (`docs/design/polymorphic-ffi.md`), a cost, not part of this bug.
 
 Patch file
 [`patches/0017-l2r-local-bug-23-link-the-gathered-polymorphic-FFI-m.patch`](patches/0017-l2r-local-bug-23-link-the-gathered-polymorphic-FFI-m.patch)
-(`l2r-local` commit `91da4f80`, applied in `./reussir`; `l2r-local` head 5c0514e3; made on top of 0016, it
+(`l2r-local` commit `91da4f80`, applied in `./reussir`; `l2r-local` head cc8e5aa5; made on top of 0016, it
 also applies without it). One `llvm::Linker` for the whole gather,
 `linkInModule` for each module, as `llvm-link` does:
 

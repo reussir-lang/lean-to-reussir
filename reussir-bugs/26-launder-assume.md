@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** bug (miscompile). **Status:** patched (0021), applied in
-`./reussir` (`l2r-local` 5c0514e3).
+`./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug.** When a unique cell is reused for a new record, Reussir
 launders the cell's pointer (`llvm.launder.invariant.group`) so that LLVM
@@ -112,7 +112,7 @@ fields) is enough. No lean2rr workaround.
 Patch file
 [`patches/0021-l2r-local-bug-26-no-llvm.assume-launder-p-p-after-an.patch`](patches/0021-l2r-local-bug-26-no-llvm.assume-launder-p-p-after-an.patch)
 (`l2r-local` commit `9a171995`; applied in `./reussir`, `l2r-local`
-5c0514e3). No assume after the launder, in both lowerings:
+cc8e5aa5). No assume after the launder, in both lowerings:
 
 ```c++
    mlir::Value laundered =

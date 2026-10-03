@@ -4,7 +4,7 @@
 
 **Kind:** cost (a stock MLIR pass's default mode), with a small local fix.
 **Status:** patched (0031), applied in `./reussir` (`l2r-local`
-5c0514e3); lean2rr also works around it (it cuts long functions into parts
+cc8e5aa5); lean2rr also works around it (it cuts long functions into parts
 and turns `Array Nat` literals into tables), and keeps doing so.
 
 **Verdict (first: unclear; now found).** The quadratic memory is real and
@@ -86,7 +86,7 @@ becomes a table (plan §5.12): a 100000-element literal is one call.
 Patch file
 [`patches/0031-l2r-local-bug-17-lower-SCF-to-ControlFlow-without-pa.patch`](patches/0031-l2r-local-bug-17-lower-SCF-to-ControlFlow-without-pa.patch)
 (`l2r-local` commit `54cdf054`, applied in `./reussir`; `l2r-local` head
-5c0514e3). The pass is created with `allowPatternRollback = false`, the
+cc8e5aa5). The pass is created with `allowPatternRollback = false`, the
 option upstream offers for it: the same patterns, applied without the
 record.
 

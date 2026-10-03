@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0005), applied in `./reussir` (`l2r-local` 5c0514e3).
+**Kind:** bug. **Status:** patched (0005), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 TokenReuse matches cells freed by releases ("tokens") with later
 allocations of the same size. A token that no allocation takes must be
@@ -129,7 +129,7 @@ stays.
 
 Patch file
 [`patches/0005-l2r-local-bug-5-free-tokens-on-the-else-path-of-an-s.patch`](patches/0005-l2r-local-bug-5-free-tokens-on-the-else-path-of-an-s.patch)
-(`l2r-local` commit `0f02db2c`, applied in `./reussir`; `l2r-local` head 5c0514e3).
+(`l2r-local` commit `0f02db2c`, applied in `./reussir`; `l2r-local` head cc8e5aa5).
 
 **New helper `getOrCreateExitBlock(region)`:**
 

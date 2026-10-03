@@ -1,4 +1,4 @@
-From c5ea9a179fa9e8f35d976007e9a8c039186edc38 Mon Sep 17 00:00:00 2001
+From 83a49c661e180d863f2fa13ba1142592ecbaf71e Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 03:28:05 -0400
 Subject: [PATCH] l2r-local: bug 29: accept a record member linking to an

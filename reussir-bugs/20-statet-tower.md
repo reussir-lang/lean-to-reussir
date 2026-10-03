@@ -4,7 +4,7 @@
 
 **Kind:** unclear at first; found later to be a growth of the MLIR
 inliner's chains of copied calls, with a small local fix. **Status:**
-patched (0034), applied in `./reussir` (`l2r-local` 5c0514e3); lean2rr
+patched (0034), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr
 also works around it (it keeps its conversion, unboxing and uniform-code
 application functions out of rrc's inliner), and keeps doing so.
 
@@ -111,7 +111,7 @@ to 2.5 minutes and at most 3 GB, the whole build (`St4PolyP1a`: 21 s,
 Patch file
 [`patches/0034-l2r-local-bug-20-do-not-inline-a-copied-call-into-a-.patch`](patches/0034-l2r-local-bug-20-do-not-inline-a-copied-call-into-a-.patch)
 (`l2r-local` commit `ac5d1d85`, applied in `./reussir`; `l2r-local` head
-5c0514e3).
+cc8e5aa5).
 
 **What was found.** The default inliner runs MLIR's SCC inliner for one
 iteration with a cap of 256 operations on callees, and its description

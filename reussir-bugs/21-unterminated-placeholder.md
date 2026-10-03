@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0016), applied in `./reussir` (`l2r-local` 5c0514e3); lean2rr also works around it
+**Kind:** bug. **Status:** patched (0016), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also works around it
 (it escapes `[` in its string literal table).
 
 **Verdict: bug.** Reussir has two implementations of placeholder
@@ -119,7 +119,7 @@ so lean2rr itself no longer depends on it.
 
 Patch file
 [`patches/0016-l2r-local-bug-21-keep-an-unterminated-in-a-polymorph.patch`](patches/0016-l2r-local-bug-21-keep-an-unterminated-in-a-polymorph.patch)
-(`l2r-local` commit `17657841`, applied in `./reussir`; `l2r-local` head 5c0514e3). Write the pending `[:`
+(`l2r-local` commit `17657841`, applied in `./reussir`; `l2r-local` head cc8e5aa5). Write the pending `[:`
 before the rest of the body, as the Rust implementation does:
 
 ```c++

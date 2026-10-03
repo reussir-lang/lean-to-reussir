@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (crash on valid input). **Status:** patched (0063), applied in `./reussir` (`l2r-local` 5c0514e3); review pending.
+**Kind:** bug (crash on valid input). **Status:** patched (0063), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug.** rrc aborts with "thread 'main' has overflowed its stack"
 on a sum of 8000 terms, or a literal in 100000 parentheses. Reussir's
@@ -61,13 +61,16 @@ Not expected to be hit: lean2rr emits let-bound code (Lean's IR is in
 A-normal form) and cuts tail paths and `let` values deeper than 8 levels
 into functions ([bug 16](16-nested-io-matches.md)). The patch costs
 lean2rr nothing; its 1 GiB stack is virtual address space and counts
-against a `ulimit -v` (like rrc's other threads).
+against a `ulimit -v` (like rrc's other threads): rrc's peak virtual size
+on a lean2rr program goes from 1.9 to 3.1 GB, its resident size is
+unchanged, and under a limit too tight for the stack rrc falls back to the
+main thread.
 
 ## Patch
 
 Patch file
 [`patches/0063-l2r-local-bug-31-run-rrc-s-driver-on-a-thread-with-a.patch`](patches/0063-l2r-local-bug-31-run-rrc-s-driver-on-a-thread-with-a.patch)
-(`l2r-local` commit `5c0514e3`, applied in `./reussir`; `l2r-local` head 5c0514e3; made as commit `b2e0bfd3`
+(`l2r-local` commit `f8afea34`, applied in `./reussir`; `l2r-local` head cc8e5aa5; made as commit `b2e0bfd3`
 in a scratch checkout; it depends on no other patch). `main` runs the driver on a thread with a 1 GiB
 stack:
 
@@ -76,22 +79,29 @@ const DRIVER_STACK_SIZE: usize = 1024 * 1024 * 1024;
 
 fn main() -> ExitCode {
     // Named `main` so diagnostics (a panic, a stack overflow) read as before.
-    let driver = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("main".into())
         .stack_size(DRIVER_STACK_SIZE)
-        .spawn(reussir_compiler::driver::main)
-        .expect("failed to spawn the driver thread");
-    match driver.join() {
-        Ok(code) => code,
-        // The panic was reported on the driver thread; exit as a panicking
-        // main thread would.
-        Err(panic) => std::panic::resume_unwind(panic),
+        .spawn(reussir_compiler::driver::main);
+    match spawned {
+        Ok(driver) => match driver.join() {
+            Ok(code) => code,
+            // The panic was reported on the driver thread; exit as a
+            // panicking main thread would.
+            Err(panic) => std::panic::resume_unwind(panic),
+        },
+        // The stack is reserved address space, so a tight address-space
+        // limit (`ulimit -v`) can refuse it: run the driver here, on the
+        // main thread's stack, as rrc did before.
+        Err(_) => reussir_compiler::driver::main(),
     }
 }
 ```
 
 One change covers every recursive stage, instead of a `stacker` call in
-each walk.
+each walk. If the thread cannot be created (an address-space limit,
+review RV8RE-02), `main` calls the driver itself, on the main thread, as
+before.
 
 **Why it is correct.** The driver does the same work on another thread;
 the main thread only waits. Its exit code is returned unchanged. A panic is
@@ -100,7 +110,8 @@ the message reads as before) and re-raised on the main thread with
 `resume_unwind`, which does not run the hook again, so the process exits as
 a panicking main thread does (101). Only the stack pages the driver touches
 are committed, so normal builds use the memory they used before. 1 GiB is
-about a million nesting levels at the measured 1 KiB per level.
+about a million nesting levels at the measured 1 KiB per level. The
+fallback runs exactly the old code path.
 
 **Verification.**
 
@@ -116,10 +127,19 @@ about a million nesting levels at the measured 1 KiB per level.
   the new thread).
 - `run.sh`: `bug 31   FIXED       compiles, prints 32004007`.
 
-**Review.** Pending: the adversarial review of 0060-0063 runs in
-`~/Documents/l2r-scratch/rv8/reussir/e/`. The patch is applied in
-`./reussir` meanwhile (applied; review pending). Reussir's lit suite and
-`run.sh` on the final stack: as above.
+**Review.** Round RV8 (e)
+(`~/Documents/l2r-scratch/rv8/reussir/e/FINDINGS.txt`): no correctness
+defect. Exit codes (success, compile error, `--help`, a bad flag, a
+closed or piped stdout), stdout and stderr are the same as before; a
+panic prints once and exits 101, a stack overflow still aborts (134), and
+`process::exit` codes pass through. **RV8RE-02** (low): the 1 GiB stack is
+reserved address space, which `ulimit -v` counts, so under a limit between
+about 0.4 and 1.5 GB rrc panicked at startup ("failed to spawn the driver
+thread", exit 101) where it used to compile. Fixed in the final 0063: if
+the thread cannot be created, the driver runs on the main thread as
+before (test `frontend/driver_stack_address_limit.rr`, a build under
+`ulimit -v 1000000`). lean2rr's `bin/l2r` limit (16 GB) and the memory cap
+of `cg` (resident memory) are not affected either way.
 
 **Effect on lean2rr.** None.
 

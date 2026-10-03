@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** missed optimization. **Status:** patched (0007), applied in `./reussir` (`l2r-local` 5c0514e3); lean2rr also
+**Kind:** missed optimization. **Status:** patched (0007), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also
 works around it.
 
 **Verdict: missed optimization, not a bug.** The output is correct.
@@ -176,7 +176,7 @@ fields instead of the matched value; it broke `ptrEq` identity and sharing
 
 Patch file
 [`patches/0007-l2r-local-bug-7-sink-bound-retains-into-the-branch-t.patch`](patches/0007-l2r-local-bug-7-sink-bound-retains-into-the-branch-t.patch)
-(`l2r-local` commit `5f6d37d5`, applied in `./reussir`; `l2r-local` head 5c0514e3). In short: when the release of the
+(`l2r-local` commit `5f6d37d5`, applied in `./reussir`; `l2r-local` head cc8e5aa5). In short: when the release of the
 scrutinee sits inside a branch that runs exactly one of its regions once
 (`if` with an else, `index_switch`, record or nullable dispatch), the arm's
 retains of the bound members move into every region of that branch. Paths

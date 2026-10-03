@@ -28,7 +28,7 @@ module, before LLVM).
 
 **Expected.** A module and a build time about linear in K (the program is).
 
-**Actual** (the same on 91da4f80 and on the final `l2r-local` 5c0514e3):
+**Actual** (the same on 91da4f80 and on the final `l2r-local` cc8e5aa5):
 
 | K | lines of the LLVM-dialect module | rrc |
 |---|---|---|

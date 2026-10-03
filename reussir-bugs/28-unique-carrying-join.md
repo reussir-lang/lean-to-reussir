@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (miscompile). **Status:** patched (0060), applied in `./reussir` (`l2r-local` 5c0514e3); review pending.
+**Kind:** bug (miscompile). **Status:** patched (0060), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug.** At `-O aggressive`, Reussir's uniqueness-carrying
 analysis can prove a value unique when it is fresh on one path but shared on
@@ -101,11 +101,14 @@ overwritten with `101`.
 ## lean2rr
 
 lean2rr builds with `-O aggressive`, so its output goes through this pass.
-No lean2rr miscompile was seen: on three lean2rr programs (MapMIO, DepRet,
-PickDep, under `~/Documents/l2r-scratch/examples/`) the clones made before
-and after the patch are the same (4, 3 and 3: `List.reverseAux`,
-`List.range.loop`, `l2r_mk_args`, `l2r_array_to_list`), so lean2rr also
-loses no specialization. A Lean function that returns an argument on one
+No lean2rr miscompile was seen. On the classic corpus (17 programs) and
+LeanBoolLoop, the final patch keeps every `.unique` clone made without it
+but one: TypeclassGeneric loses `foldl` at `mconcat` (17 -> 16 clones),
+whose argument is a value loaded from a field, the shape the bug is about
+(review RV8RE-01, below). On MapMIO, DepRet and PickDep
+(`~/Documents/l2r-scratch/examples/`) the clones are the same (4, 3 and
+3: `List.reverseAux`, `List.range.loop`, `l2r_mk_args`,
+`l2r_array_to_list`). A Lean function that returns an argument on one
 path and passes its self call a value that is fresh on one path and a
 field (or an unknown call's result) on another would be miscompiled. For
 enum types the assume is `tagged || count == 1`, and in the list variants
@@ -116,7 +119,7 @@ get a plain `count == 1`. No workaround.
 
 Patch file
 [`patches/0060-l2r-local-bug-28-make-Unknown-absorb-the-uniqueness-.patch`](patches/0060-l2r-local-bug-28-make-Unknown-absorb-the-uniqueness-.patch)
-(`l2r-local` commit `0510c7d4`, applied in `./reussir`; `l2r-local` head 5c0514e3; made as commit `b8aedd37`
+(`l2r-local` commit `5239371f`, applied in `./reussir`; `l2r-local` head cc8e5aa5; made as commit `b8aedd37`
 in a scratch checkout on `91da4f80`).
 
 The two meanings are split. Bottom is the empty provenance set (no fresh
@@ -145,6 +148,18 @@ arms, and the optimistic start of a function summary in the fixpoint.
 -      return lhs;
 +    if (lhs.unknown || rhs.unknown)
 +      return getUnknown();
+```
+
+Two producers that are never a heap cell another reference can see are
+bottom as well, at the top of `evaluateResult`: the `ub.poison` of an
+unreachable arm (after a panic; lean2rr's `l2r_unreachable<T>`) and a
+nullary constructor's `reussir.rc.tagged` immediate (`rc.assume_unique`
+drops its assumption for immediates, and every uniqueness test reads an
+immediate as shared):
+
+```c++
++    if (llvm::isa<mlir::ub::PoisonOp, ReussirRcTaggedOp>(op))
++      return UniqueCarryingValue::getBottom();
 ```
 
 The places that used `Unknown` as a starting point now start from bottom:
@@ -177,18 +192,39 @@ pass unchanged.
   with a C driver, at `-O aggressive` and `-O default`). Both fail on the
   unpatched build.
 - Reussir's lit suite: 546 passed, 81 unsupported, none failed, with the
-  four patches 0060 to 0063 (the unpatched build: 540 passed).
+  first versions of 0060 to 0063 on 91da4f80 (the unpatched build: 540
+  passed); on the final stack with the amended patches and 0064: 647
+  tests, 566 passed, 81 unsupported, none failed.
 - lean2rr's runtime tests (14, among them RtFuzzReuse, RtShareMutators,
   RtFreshRebuildShared, RtReprShare, RtHashMap, RtPersistWalk): all pass.
 - `run.sh`: `bug 28   FIXED       prints 101 1   [-O aggressive]`.
 
-**Review.** Pending: the adversarial review of 0060-0063 runs in
-`~/Documents/l2r-scratch/rv8/reussir/e/`. The patch is applied in
-`./reussir` meanwhile (applied; review pending). Reussir's lit suite and
-`run.sh` on the final stack: as above.
+**Review.** Round RV8 (e)
+(`~/Documents/l2r-scratch/rv8/reussir/e/FINDINGS.txt`; its IDs are cited
+here as RV8RE-NN): no correctness defect. The reviewer checked that the
+join is commutative, associative and idempotent with bottom as identity
+and `Unknown` absorbing, that the map from summaries to summaries is
+monotone and the fixpoint terminates, and probed five other ways a shared
+value could reach a clone (through a closure, mutually recursive helpers,
+a `Nullable` match, a shared enum's field, a field of a live cell); three
+printed wrong values without the patch, all are right with it.
+**RV8RE-01** (low, performance only): the first version of the patch made
+the poison of an unreachable arm and a nullary constructor's immediate
+`Unknown`, so they absorbed joins and blocked sound clones: lean2rr's
+Mergesort lost one (13 -> 12), Rbmap and Rbtree `mkMapAux.unique`
+(5 -> 4). Fixed in the final 0060 (bottom for both, the hunk above): with
+it Mergesort, Rbmap and Rbtree have 13, 5 and 5 clones again and
+TypeclassGeneric 16 (checked on the final stack with the reviewer's
+`clones.sh`), and the reviewer's soundness probes still print the right
+values (101001, 202002, 103003, 104004, 106006, and 101001 for the
+patch's own repro, at `-O aggressive` and with lean2rr's flags). New lit
+cases: a self call on a poison-or-fresh and a tagged-or-fresh value still
+goes to the clone.
 
-**Effect on lean2rr.** None measured: the same specializations on the
-programs above; the informational attribute `reussir.carrying_uniqueness`
+**Effect on lean2rr.** The same specializations as without the patch on
+the classic corpus and the example programs, except TypeclassGeneric's
+`foldl` at `mconcat` (its argument is a field load: the clone was unsound
+in principle). The informational attribute `reussir.carrying_uniqueness`
 is on fewer operations (MapMIO: 179 before, 60 after), and nothing else
 reads it.
 

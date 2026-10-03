@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** bug. **Status:** patched (0020), applied in `./reussir`
-(`l2r-local` 5c0514e3). lean2rr's output was never affected: it emits only
+(`l2r-local` cc8e5aa5). lean2rr's output was never affected: it emits only
 unaffected `[value]` enums.
 
 A `[value]` enum is moved as the LLVM struct of one "representative" arm,
@@ -68,7 +68,7 @@ with an unpatched Reussir).
 Patch file
 [`patches/0020-l2r-local-bug-1-keep-every-arm-s-bytes-when-a-value-.patch`](patches/0020-l2r-local-bug-1-keep-every-arm-s-bytes-when-a-value-.patch)
 (`l2r-local` commit `d1fbe33b`, applied in `./reussir`; `l2r-local` head
-`5c0514e3`). It needs 0018 ([bug 8](08-padding-lift.md)), applied before
+`cc8e5aa5`). It needs 0018 ([bug 8](08-padding-lift.md)), applied before
 it.
 
 **The change.** `convertRecordType`

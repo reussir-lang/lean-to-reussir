@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** bug (build time). **Status:** patched (0024), applied in
-`./reussir` (`l2r-local` 5c0514e3); lean2rr also works around it (it
+`./reussir` (`l2r-local` cc8e5aa5); lean2rr also works around it (it
 passes `--no-closure-wpd`).
 
 With `-O aggressive`, rrc's closure devirtualization computes a type id for
@@ -85,7 +85,7 @@ also works with an unpatched Reussir); it costs nothing measurable.
 Patch file
 [`patches/0024-l2r-local-bug-10-compute-closure-WPD-type-ids-from-a.patch`](patches/0024-l2r-local-bug-10-compute-closure-WPD-type-ids-from-a.patch)
 (`l2r-local` commit `362d6a21`, applied in `./reussir`; `l2r-local` head
-`5c0514e3`).
+`cc8e5aa5`).
 
 **The change.** A new printer entry point,
 `printTypeWithRecordBodiesOnce` (`include/Reussir/IR/ReussirTypes.h`,

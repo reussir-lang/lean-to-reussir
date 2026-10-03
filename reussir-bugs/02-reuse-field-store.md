@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** bug. **Status:** patched: structures by 0002, variants by 0019,
-both applied in `./reussir` (`l2r-local` 5c0514e3). lean2rr also works
+both applied in `./reussir` (`l2r-local` cc8e5aa5). lean2rr also works
 around the variant half (it turns member packing off).
 
 When a function consumes a record and builds another of the same size,
@@ -192,7 +192,7 @@ Two patches, one per half.
 Patch file
 [`patches/0002-l2r-local-bug-2-compound-skip-a-reused-struct-cell-s.patch`](patches/0002-l2r-local-bug-2-compound-skip-a-reused-struct-cell-s.patch)
 (`l2r-local` commit `ae5345cf`, applied in `./reussir`; `l2r-local` head
-`5c0514e3`). Structures only.
+`cc8e5aa5`). Structures only.
 
 **The fix.** One hunk in `markCompoundAvoidedCopies`, right after the
 reused cell is found:
@@ -252,7 +252,7 @@ sit elsewhere in the new type: the wrong-field results above are gone.
 Patch file
 [`patches/0019-l2r-local-bug-2-variant-skip-a-reused-variant-cell-s.patch`](patches/0019-l2r-local-bug-2-variant-skip-a-reused-variant-cell-s.patch)
 (`l2r-local` commit `0218538c`, applied in `./reussir`; `l2r-local` head
-`5c0514e3`).
+`cc8e5aa5`).
 
 **The change.** `isLoadFromVariantField` (`RcCreateFusion.cpp`) keeps the
 prefix rule and, once it holds, also requires field i to sit at the same

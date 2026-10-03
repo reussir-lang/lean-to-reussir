@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** bug. **Status:** patched (0023, with 0033's composition fix),
-applied in `./reussir` (`l2r-local` 5c0514e3); lean2rr also works around it
+applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also works around it
 (it stores `Nat`/`Int` references in two cells and boxes other `[value]`
 records).
 
@@ -74,7 +74,7 @@ workarounds stay, so that lean2rr also works with an unpatched Reussir).
 Patch file
 [`patches/0023-l2r-local-bug-19-give-a-cell-s-value-record-its-own-.patch`](patches/0023-l2r-local-bug-19-give-a-cell-s-value-record-its-own-.patch)
 (`l2r-local` commit `c9e640b3`, applied in `./reussir`; `l2r-local` head
-`5c0514e3`), as amended after review round 7 (RV7P-01). Its composition
+`cc8e5aa5`), as amended after review round 7 (RV7P-01). Its composition
 with 0033 ([bug 11](11-sccp-call-graph.md)'s symbol table collection) is
 fixed in 0033 (RV8C-01, below).
 

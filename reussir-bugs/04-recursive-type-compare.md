@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0004), applied in `./reussir` (`l2r-local` 5c0514e3).
+**Kind:** bug. **Status:** patched (0004), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 When a construction reuses the cell of a value that was just freed,
 Reussir tries to skip storing fields whose bytes are already in place
@@ -141,7 +141,7 @@ this bug.
 
 Patch file
 [`patches/0004-l2r-local-bug-4-compare-recursive-record-types-coind.patch`](patches/0004-l2r-local-bug-4-compare-recursive-record-types-coind.patch)
-(`l2r-local` commit `60267ac3`, applied in `./reussir`; `l2r-local` head 5c0514e3).
+(`l2r-local` commit `60267ac3`, applied in `./reussir`; `l2r-local` head cc8e5aa5).
 
 **The fix.** All changes are in `structurallySameType` and a new wrapper.
 

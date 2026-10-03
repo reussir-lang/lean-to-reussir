@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** missing feature. **Status:** patched (0013 and 0014; 0015 makes
-0014's runtime cheaper), applied in `./reussir` (`l2r-local` 5c0514e3). lean2rr's runtime needs 0014 to build, so it does
+0014's runtime cheaper), applied in `./reussir` (`l2r-local` cc8e5aa5). lean2rr's runtime needs 0014 to build, so it does
 not build against upstream Reussir.
 
 **Verdict: missing feature, not a bug.** Reussir's drop glue recurses, as
@@ -174,7 +174,7 @@ the [apply list](README.md#applying-the-patches).
 
 Patch file
 [`patches/0013-l2r-local-bug-13-release-chains-of-cells-in-a-loop-i.patch`](patches/0013-l2r-local-bug-13-release-chains-of-cells-in-a-loop-i.patch)
-(`l2r-local` commit `d76ffba3`, applied in `./reussir`; `l2r-local` head 5c0514e3). The file holds the *extended* version,
+(`l2r-local` commit `d76ffba3`, applied in `./reussir`; `l2r-local` head cc8e5aa5). The file holds the *extended* version,
 which review round 3 checked.
 
 **Mark the glue** (`ReussirOps.h`, `ReussirOps.cpp`). The new attribute
@@ -328,7 +328,7 @@ better (table above).
 
 Patch file
 [`patches/0014-l2r-local-bug-13b-free-cells-deep-through-records-wi.patch`](patches/0014-l2r-local-bug-13b-free-cells-deep-through-records-wi.patch)
-(`l2r-local` commit `c66d301a`, applied in `./reussir`; `l2r-local` head 5c0514e3; it applies on top of 0013 and the patches
+(`l2r-local` commit `c66d301a`, applied in `./reussir`; `l2r-local` head cc8e5aa5; it applies on top of 0013 and the patches
 before it in the apply list).
 
 **What 0013 leaves recursive.** A cell with two chain members being freed
@@ -644,7 +644,7 @@ a drain would take a runtime call more on each one. Not done (plan §10).
 
 Patch file
 [`patches/0015-l2r-local-bug-13b-runtime-cheaper-pending-stack-same.patch`](patches/0015-l2r-local-bug-13b-runtime-cheaper-pending-stack-same.patch)
-(`l2r-local` commit `53a8e8de`, applied in `./reussir`; `l2r-local` head 5c0514e3; it applies on top of 0014). No compiler
+(`l2r-local` commit `53a8e8de`, applied in `./reussir`; `l2r-local` head cc8e5aa5; it applies on top of 0014). No compiler
 code changes.
 
 **Symptom: speed only.** 0014's drop glue calls the runtime's pending-stack

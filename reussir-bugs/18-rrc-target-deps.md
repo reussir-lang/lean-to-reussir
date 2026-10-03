@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** bug (build system). **Status:** patched (0025), applied in
-`./reussir` (`l2r-local` 5c0514e3). It affects only Reussir's own build.
+`./reussir` (`l2r-local` cc8e5aa5). It affects only Reussir's own build.
 
 **Verdict: bug in Reussir's build system (minor).** The README lists
 `cmake --build build --target rrc` as a workflow, and
@@ -51,7 +51,7 @@ Not affected: lean2rr's tools build Reussir's default target.
 Patch file
 [`patches/0025-l2r-local-bug-18-build-every-archive-build.rs-links-.patch`](patches/0025-l2r-local-bug-18-build-every-archive-build.rs-links-.patch)
 (`l2r-local` commit `a3658320`, applied in `./reussir`; `l2r-local` head
-`5c0514e3`).
+`cc8e5aa5`).
 
 **The change.** The four archives join `REUSSIR_BACKEND_ARCHIVES` in
 `lib/CAPI/CMakeLists.txt`, in `build.rs`'s order, and the list's comment

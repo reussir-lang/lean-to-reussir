@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** bug. **Status:** patched (0018), applied in `./reussir`
-(`l2r-local` 5c0514e3). It does not affect lean2rr (it never emits the
+(`l2r-local` cc8e5aa5). It does not affect lean2rr (it never emits the
 shape).
 
 Under `--no-pack-record-members`, a member followed by padding is widened
@@ -71,7 +71,7 @@ field whose size is a power of two.
 Patch file
 [`patches/0018-l2r-local-bug-8-widen-a-member-over-its-padding-only.patch`](patches/0018-l2r-local-bug-8-widen-a-member-over-its-padding-only.patch)
 (`l2r-local` commit `599064fb`, applied in `./reussir`; `l2r-local` head
-`5c0514e3`).
+`cc8e5aa5`).
 
 **The change.** One condition in the lift of `convertRecordType`
 (`lib/Conversion/TypeConverter/TypeConverter.cpp`, compound branch): the

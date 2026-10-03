@@ -4,7 +4,7 @@
 
 **Kind:** cost (stock MLIR pass), with a small local fix; plus a bug of
 its own (11b, build time). **Status:** patched (0032 for SCCP, 0033 for
-11b), applied in `./reussir` (`l2r-local` 5c0514e3).
+11b), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: cost of a stock MLIR pass, not a Reussir defect.** The pipeline
 runs MLIR's own `createSCCPPass` (`crates/reussir-backend/src/pipeline.rs`),
@@ -99,7 +99,7 @@ expansion of the arguments cost more than they save (`Cn3PolyS1` 649 s and
 Patch file
 [`patches/0032-l2r-local-bug-11-run-SCCP-across-calls-only-within-a.patch`](patches/0032-l2r-local-bug-11-run-SCCP-across-calls-only-within-a.patch)
 (`l2r-local` commit `ac70115a`, applied in `./reussir`; `l2r-local` head
-5c0514e3).
+cc8e5aa5).
 
 Where the cost comes from: each time MLIR's data-flow framework finds one
 more call site of a function, or the arguments at one change, it visits

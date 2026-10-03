@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** cost (opt-in flag), with a small local fix. **Status:** patched
-(0035), applied in `./reussir` (`l2r-local` 5c0514e3); lean2rr also works
+(0035), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also works
 around it (it cuts deep tail paths and deep `let` values into functions),
 and keeps doing so.
 
@@ -98,7 +98,7 @@ cutting off.
 Patch file
 [`patches/0035-l2r-local-bug-16-free-a-token-taken-from-a-nested-sc.patch`](patches/0035-l2r-local-bug-16-free-a-token-taken-from-a-nested-sc.patch)
 (`l2r-local` commit `a639ae44`, applied in `./reussir`; `l2r-local` head
-5c0514e3).
+cc8e5aa5).
 
 **What it fixes.** With `--reuse-across-call`, TokenReuse keeps every
 available token across non-tail calls and frees a token that no allocation

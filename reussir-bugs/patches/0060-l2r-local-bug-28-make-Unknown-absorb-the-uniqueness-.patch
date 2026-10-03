@@ -1,4 +1,4 @@
-From 0510c7d4f6b21ffd24b6a67caa29e09acaadea80 Mon Sep 17 00:00:00 2001
+From 5239371f6e742c7a170b725c04f17eac6f9f67fa Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 03:22:04 -0400
 Subject: [PATCH] l2r-local: bug 28: make Unknown absorb the
@@ -22,7 +22,14 @@ argument), the identity of the join, the start of a join over arms and
 the optimistic start of a function summary in the fixpoint; `Unknown` is
 top and absorbs the join. A declaration's summary is `Unknown` from the
 start; every defined function's starts at bottom, so the Kleene iteration
-is unchanged for code without unknown contributors.
+is unchanged for code without unknown contributors. Two producers that are
+never a heap cell another reference can see are bottom as well: the
+`ub.poison` of an unreachable arm (after a panic, as in lean2rr's
+`l2r_unreachable<T>`) and the `reussir.rc.tagged` immediate of a nullary
+constructor (`rc.assume_unique` drops its assumption for immediates, and
+an immediate always reads as shared). As `Unknown` they blocked sound
+specializations (review RV8RE-01: lean2rr's Mergesort, Rbmap and Rbtree
+each lost one `.unique` clone, e.g. `mkMapAux.unique`).
 
 Repro (tests/integration/frontend/unique_carrying_shared_field.rr): `f`
 returns its argument on the base path and calls itself on `pick(..)`, a
@@ -30,22 +37,34 @@ fresh cell or `p.0`, a field of `p` that `p` still holds; at -O aggressive
 `p.0` read 101 instead of 1 after the call (the clone's `bump` rebuilt it
 in place). Now 1 at every level. The lit test
 unique_carrying_soundness.mlir gains an opaque-call-or-fresh self call
-(no clone, function not carrying) and a field-or-fresh result (not
-carrying).
+(no clone, function not carrying), a field-or-fresh result (not
+carrying), and self calls on poison-or-fresh and tagged-or-fresh values
+(still specialized).
 ---
- .../UniqueCarryingRecursionAnalysis.cpp       | 64 ++++++++++++++-----
- .../conversion/unique_carrying_soundness.mlir | 60 ++++++++++++++++-
- .../frontend/unique_carrying_shared_field.c   | 26 ++++++++
- .../frontend/unique_carrying_shared_field.rr  | 37 +++++++++++
- 4 files changed, 170 insertions(+), 17 deletions(-)
+ .../CMakeLists.txt                            |   1 +
+ .../UniqueCarryingRecursionAnalysis.cpp       |  76 ++++++++---
+ .../conversion/unique_carrying_soundness.mlir | 120 +++++++++++++++++-
+ .../frontend/unique_carrying_shared_field.c   |  26 ++++
+ .../frontend/unique_carrying_shared_field.rr  |  37 ++++++
+ 5 files changed, 243 insertions(+), 17 deletions(-)
  create mode 100644 tests/integration/frontend/unique_carrying_shared_field.c
  create mode 100644 tests/integration/frontend/unique_carrying_shared_field.rr
 
+diff --git a/lib/Transformation/UniqueCarryingRecursionAnalysis/CMakeLists.txt b/lib/Transformation/UniqueCarryingRecursionAnalysis/CMakeLists.txt
+index 9718b06b..5680796e 100644
+--- a/lib/Transformation/UniqueCarryingRecursionAnalysis/CMakeLists.txt
++++ b/lib/Transformation/UniqueCarryingRecursionAnalysis/CMakeLists.txt
+@@ -13,4 +13,5 @@ add_mlir_library(MLIRReussirUniqueCarryingRecursionAnalysis
+   MLIRReussir
+   MLIRSCFDialect
+   MLIRTransforms
++  MLIRUBDialect
+ )
 diff --git a/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp b/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
-index f1551ef8..269fea8b 100644
+index f1551ef8..e00ecdab 100644
 --- a/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
 +++ b/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
-@@ -26,12 +26,17 @@
+@@ -26,12 +26,19 @@
  ///
  /// # Provenance lattice
  ///
@@ -62,11 +81,13 @@ index f1551ef8..269fea8b 100644
 +/// unknown on one path and fresh on another is not unique. The empty pair
 +/// (no fresh bit, no argument) is bottom, the identity of the join: no value
 +/// reaches this point (yet) — the start of a join over arms, and the
-+/// optimistic start of a function summary in the fixpoint below.
++/// optimistic start of a function summary in the fixpoint below. A value
++/// that is never a shared heap cell is bottom too: the poison of an
++/// unreachable arm and a nullary constructor's tagged immediate.
  ///
  /// # Sharing discipline (the part provenance alone cannot see)
  ///
-@@ -64,8 +69,9 @@
+@@ -64,8 +71,9 @@
  ///
  /// # Fixpoint
  ///
@@ -78,7 +99,15 @@ index f1551ef8..269fea8b 100644
  /// accumulate bits, bounded by the argument count), so it terminates at the
  /// least fixpoint. Optimism about recursion is sound coinductively: any
  /// value a terminating execution actually returns is produced by a finite
-@@ -112,11 +118,19 @@ static constexpr llvm::StringLiteral kCarryingUniquenessAttr =
+@@ -96,6 +104,7 @@
+ #include <mlir/Dialect/Func/IR/FuncOps.h>
+ #include <mlir/Dialect/LLVMIR/LLVMDialect.h>
+ #include <mlir/Dialect/SCF/IR/SCF.h>
++#include <mlir/Dialect/UB/IR/UBOps.h>
+ #include <mlir/IR/Location.h>
+ #include <mlir/IR/SymbolTable.h>
+ #include <mlir/Pass/Pass.h>
+@@ -112,11 +121,19 @@ static constexpr llvm::StringLiteral kCarryingUniquenessAttr =
  static constexpr llvm::StringLiteral kUniqueCloneAttr = "reussir.unique_clone";
  
  struct UniqueCarryingValue {
@@ -100,7 +129,7 @@ index f1551ef8..269fea8b 100644
  
    static UniqueCarryingValue getArgument(unsigned index) {
      UniqueCarryingValue value;
-@@ -140,10 +154,8 @@ struct UniqueCarryingValue {
+@@ -140,10 +157,8 @@ struct UniqueCarryingValue {
  
    static UniqueCarryingValue join(const UniqueCarryingValue &lhs,
                                    const UniqueCarryingValue &rhs) {
@@ -113,7 +142,7 @@ index f1551ef8..269fea8b 100644
  
      UniqueCarryingValue joined;
      joined.unknown = false;
-@@ -174,6 +186,10 @@ struct UniqueCarryingValue {
+@@ -174,6 +189,10 @@ struct UniqueCarryingValue {
        os << "Unknown";
        return;
      }
@@ -124,7 +153,23 @@ index f1551ef8..269fea8b 100644
      os << "{fresh=" << (fresh ? "true" : "false") << ", args=[";
      bool first = true;
      for (int bit = carriedArgs.find_first(); bit >= 0;
-@@ -318,8 +334,7 @@ private:
+@@ -293,6 +312,15 @@ public:
+ private:
+   UniqueCarryingValue evaluateResult(mlir::Operation *op,
+                                      unsigned resultIndex) {
++    // Values that are never a live heap cell another reference can see
++    // contribute nothing (bottom): the poison of an unreachable arm (after
++    // a panic; it is never produced) and a nullary constructor's tagged
++    // immediate (`rc.assume_unique` drops its assumption for immediates,
++    // and every uniqueness test reads an immediate as shared, so it is
++    // never rebuilt in place). As `Unknown` they would absorb the join and
++    // block sound specializations.
++    if (llvm::isa<mlir::ub::PoisonOp, ReussirRcTaggedOp>(op))
++      return UniqueCarryingValue::getBottom();
+     // A create initializes its count to 1 — unless `skip_rc` elides that
+     // initialization (reuse/TRMC machinery), in which case the box keeps
+     // whatever count it already had.
+@@ -318,8 +346,7 @@ private:
        const UniqueCarryingValue &summary = it->second[resultIndex];
        if (summary.unknown)
          return summary;
@@ -134,7 +179,7 @@ index f1551ef8..269fea8b 100644
        mapped.fresh = summary.fresh;
        for (int argIndex = summary.carriedArgs.find_first(); argIndex >= 0;
             argIndex = summary.carriedArgs.find_next(argIndex)) {
-@@ -367,7 +382,7 @@ private:
+@@ -367,7 +394,7 @@ private:
    template <typename YieldOpT>
    UniqueCarryingValue joinRegionYields(mlir::Operation *op,
                                         unsigned resultIndex) {
@@ -143,7 +188,7 @@ index f1551ef8..269fea8b 100644
      for (mlir::Region &region : op->getRegions()) {
        if (region.empty())
          continue;
-@@ -417,12 +432,25 @@ static bool areEqualSummaries(const FunctionSummaryMap &lhs,
+@@ -417,12 +444,25 @@ static bool areEqualSummaries(const FunctionSummaryMap &lhs,
    return true;
  }
  
@@ -171,7 +216,7 @@ index f1551ef8..269fea8b 100644
    funcOp.walk([&](mlir::func::ReturnOp returnOp) {
      for (auto [index, operand] : llvm::enumerate(returnOp.getOperands())) {
        if (!isRcType(operand.getType()))
-@@ -696,7 +724,11 @@ struct UniqueCarryingRecursionAnalysisPass
+@@ -696,7 +736,11 @@ struct UniqueCarryingRecursionAnalysisPass
          op->removeAttr(kCarryingUniquenessAttr);
      });
  
@@ -184,10 +229,10 @@ index f1551ef8..269fea8b 100644
      while (true) {
        FunctionSummaryMap nextSummaries;
 diff --git a/tests/integration/conversion/unique_carrying_soundness.mlir b/tests/integration/conversion/unique_carrying_soundness.mlir
-index 3661ab13..59bea40b 100644
+index 3661ab13..40a9d6b9 100644
 --- a/tests/integration/conversion/unique_carrying_soundness.mlir
 +++ b/tests/integration/conversion/unique_carrying_soundness.mlir
-@@ -8,7 +8,10 @@
+@@ -8,7 +8,13 @@
  //     recursion, the dominant frontend shape);
  //   - loop-carrying scf ops stay Unknown (their results may be the init
  //     operands on a zero-trip count);
@@ -195,11 +240,14 @@ index 3661ab13..59bea40b 100644
 +//   - `skip_rc` creates are not fresh (their count is not initialized here);
 +//   - a contributor of unknown provenance (an opaque call's result, a value
 +//     loaded from a field) absorbs the join: a value that is unknown on one
-+//     path and fresh on another is not unique.
++//     path and fresh on another is not unique;
++//   - the poison of an unreachable arm and a nullary constructor's tagged
++//     immediate are never shared heap cells: they do not block a
++//     specialization.
  
  !nilty = !reussir.record<compound "list.nil" [value] {}>
  !consty = !reussir.record<compound "list.cons" [value] {i64, !reussir.record<variant "list" incomplete>}>
-@@ -109,4 +112,59 @@ module @test attributes {dlti.dl_spec = #dlti.dl_spec<#dlti.dl_entry<i64, dense<
+@@ -109,4 +115,116 @@ module @test attributes {dlti.dl_spec = #dlti.dl_spec<#dlti.dl_entry<i64, dense<
      }
      return %r : !rclist
    }
@@ -255,6 +303,63 @@ index 3661ab13..59bea40b 100644
 +      %v = reussir.record.variant [1] (%tag : !nilty) : !listty
 +      %fresh = reussir.rc.create value(%v : !listty) : !rclist
 +      scf.yield %fresh : !rclist
++    }
++    return %r : !rclist
++  }
++  // Completeness: the self call's argument is fresh on one path and, on the
++  // other, the poison of an unreachable arm (what follows a panic) or a
++  // nullary constructor's tagged immediate. Neither is a heap cell another
++  // reference can see, so the call still goes to the `.unique` clone.
++  // CHECK-LABEL: func.func private @poison_or_fresh(
++  // CHECK: func.call @poison_or_fresh.unique(
++  func.func private @poison_or_fresh(%l: !rclist, %n: i64) -> !rclist attributes {llvm.linkage = #llvm.linkage<internal>} {
++    %c0 = arith.constant 0 : i64
++    %c1 = arith.constant 1 : i64
++    %cond = arith.cmpi eq, %n, %c0 : i64
++    %r = scf.if %cond -> (!rclist) {
++      scf.yield %l : !rclist
++    } else {
++      reussir.rc.dec(%l : !rclist) : !reussir.nullable<!tk>
++      %odd = arith.cmpi eq, %n, %c1 : i64
++      %y = scf.if %odd -> (!rclist) {
++        %p = ub.poison : !rclist
++        scf.yield %p : !rclist
++      } else {
++        %tag = reussir.record.compound : !nilty
++        %v = reussir.record.variant [1] (%tag : !nilty) : !listty
++        %fresh = reussir.rc.create value(%v : !listty) : !rclist
++        scf.yield %fresh : !rclist
++      }
++      %n1 = arith.subi %n, %c1 : i64
++      %rec = func.call @poison_or_fresh(%y, %n1) : (!rclist, i64) -> !rclist
++      scf.yield %rec : !rclist
++    }
++    return %r : !rclist
++  }
++
++  // CHECK-LABEL: func.func private @tagged_or_fresh(
++  // CHECK: func.call @tagged_or_fresh.unique(
++  func.func private @tagged_or_fresh(%l: !rclist, %n: i64) -> !rclist attributes {llvm.linkage = #llvm.linkage<internal>} {
++    %c0 = arith.constant 0 : i64
++    %c1 = arith.constant 1 : i64
++    %cond = arith.cmpi eq, %n, %c0 : i64
++    %r = scf.if %cond -> (!rclist) {
++      scf.yield %l : !rclist
++    } else {
++      reussir.rc.dec(%l : !rclist) : !reussir.nullable<!tk>
++      %odd = arith.cmpi eq, %n, %c1 : i64
++      %y = scf.if %odd -> (!rclist) {
++        %t = reussir.rc.tagged tag(1) : !rclist
++        scf.yield %t : !rclist
++      } else {
++        %tag = reussir.record.compound : !nilty
++        %v = reussir.record.variant [1] (%tag : !nilty) : !listty
++        %fresh = reussir.rc.create value(%v : !listty) : !rclist
++        scf.yield %fresh : !rclist
++      }
++      %n1 = arith.subi %n, %c1 : i64
++      %rec = func.call @tagged_or_fresh(%y, %n1) : (!rclist, i64) -> !rclist
++      scf.yield %rec : !rclist
 +    }
 +    return %r : !rclist
 +  }

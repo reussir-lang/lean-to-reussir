@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** bug. **Status:** patched (by 0009, the patch of
-[bug 9](09-duplicate-bound-member.md)), applied in `./reussir` (`l2r-local` 5c0514e3).
+[bug 9](09-duplicate-bound-member.md)), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 `RcDispatchFusion`'s `fuseArm` fuses a match arm's member retains into the
 release of the scrutinee (a "destructuring" release that transfers the

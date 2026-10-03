@@ -14,7 +14,7 @@ whose patch 0014 the runtime needs to build.
   program rather than its build time: wrong values, rrc crashes or
   rejected programs, use after free, a missed optimization (7) and a
   missing feature (13) (1, 2, 4, 5, 6, 7, 8, 9/14, 12, 13, 15, 19, 21), and
-  the drain-end hook (patch 0040). Entries 24 to 32 need nothing from
+  the drain-end hook (patch 0040). Entries 24 to 33 need nothing from
   lean2rr (table below).
 - [build-time.md](build-time.md): build-time costs and bugs (10, 11, 16,
   17, 18, 20, 22, 23).
@@ -25,7 +25,7 @@ whose patch 0014 the runtime needs to build.
 ## Summary
 
 `l2r-local` is the branch of `./reussir` with the applied local patches:
-since 2026-10-03 all 34 of them (head `5c0514e3`; the apply list is in
+since 2026-10-03 all 35 of them (head `cc8e5aa5`; the apply list is in
 [`reussir-bugs/README.md`](../../../reussir-bugs/README.md#applying-the-patches)),
 including 0040 (the drain-end hook) and 0050 (tagged opaque handles, for
 branch `mem-nat`), which fix no bug
@@ -62,8 +62,9 @@ either way.
 | [25](../../../reussir-bugs/25-value-record-dag.md) | none (lean2rr's `[value]` records are shallow) | none (cost) | n/a |
 | [26](../../../reussir-bugs/26-launder-assume.md) | none possible | 0021, applied | n/a |
 | [27](../../../reussir-bugs/27-nullable-member-drop.md) | `Nullable` not used | 0027, applied | n/a |
-| [28](../../../reussir-bugs/28-unique-carrying-join.md) | none possible | 0060, applied (review pending) | n/a |
-| [29](../../../reussir-bugs/29-ffi-member-mlir.md) | none (affects MLIR dumps only) | 0061, applied (review pending) | n/a |
-| [30](../../../reussir-bugs/30-call-lowering-lookup.md) | none | 0062, applied (review pending) | n/a |
-| [31](../../../reussir-bugs/31-deep-expression-stack.md) | `Outline` bounds nesting | 0063, applied (review pending) | n/a |
+| [28](../../../reussir-bugs/28-unique-carrying-join.md) | none possible | 0060, applied | n/a |
+| [29](../../../reussir-bugs/29-ffi-member-mlir.md) | none (affects MLIR dumps only) | 0061, applied | n/a |
+| [30](../../../reussir-bugs/30-call-lowering-lookup.md) | none | 0062, applied | n/a |
+| [31](../../../reussir-bugs/31-deep-expression-stack.md) | `Outline` bounds nesting | 0063, applied | n/a |
 | [32](../../../reussir-bugs/32-emit-mlir-size.md) | none (affects `--emit mlir` only) | none (cost) | n/a |
+| [33](../../../reussir-bugs/33-rc-trailing-text.md) | none (hand-written MLIR only) | 0064, applied | n/a |

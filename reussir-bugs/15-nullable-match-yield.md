@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** bug. **Status:** patched (0022), applied in `./reussir`
-(`l2r-local` 5c0514e3). It does not affect lean2rr (it does not use
+(`l2r-local` cc8e5aa5). It does not affect lean2rr (it does not use
 `Nullable`).
 
 **Verdict: bug.** `Nullable` matching is a surface feature with tests
@@ -101,7 +101,7 @@ Does not use `Nullable`.
 Patch file
 [`patches/0022-l2r-local-bug-15-check-a-reussir.scf.yield-against-i.patch`](patches/0022-l2r-local-bug-15-check-a-reussir.scf.yield-against-i.patch)
 (`l2r-local` commit `0f02c434`, applied in `./reussir`; `l2r-local` head
-`5c0514e3`).
+`cc8e5aa5`).
 
 **The change.** `ReussirScfYieldOp::verify` (`lib/IR/ReussirOps.cpp`) now
 checks every kind of parent the way it already checked

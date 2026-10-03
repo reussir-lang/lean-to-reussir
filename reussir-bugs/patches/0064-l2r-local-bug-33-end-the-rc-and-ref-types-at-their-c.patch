@@ -1,0 +1,79 @@
+From cc8e5aa5e76c035ba4938ccb6de011488ea50f72 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 3 Oct 2026 05:32:58 -0400
+Subject: [PATCH] l2r-local: bug 33: end the rc and ref types at their closing
+ '>'
+
+`parseTypeWithCapabilityAndAtomicKind` (lib/IR/ReussirTypes.cpp), the
+parser of `!reussir.rc<...>` and `!reussir.ref<...>`, reads `<`, the
+element type and any capability or atomic-kind keywords, and returns at
+the first token that is not a keyword, without reading the closing `>`.
+MLIR hands a dialect type's parser the text between the brackets and does
+not check that it was all consumed, so whatever followed was silently
+dropped: `!reussir.rc<i64, bogus words here>` parsed as
+`!reussir.rc<i64>`, `!reussir.rc<i64 rigid, atomic>` as
+`!reussir.rc<i64 rigid>` and `!reussir.ref<i64, field>` as
+`!reussir.ref<i64>`, different types. Every other Reussir type parser
+ends with `parseGreater`.
+
+Read the `>`: anything else there is now "expected '>'". The printer never
+writes anything after the keywords, so every printed type parses as
+before.
+
+Found by the review of patch 0061 (a side note); it matters for
+hand-written MLIR only.
+Test: basic/failure/rc_trailing_text.mlir.
+---
+ lib/IR/ReussirTypes.cpp                       |  4 ++++
+ .../basic/failure/rc_trailing_text.mlir       | 24 +++++++++++++++++++
+ 2 files changed, 28 insertions(+)
+ create mode 100644 tests/integration/basic/failure/rc_trailing_text.mlir
+
+diff --git a/lib/IR/ReussirTypes.cpp b/lib/IR/ReussirTypes.cpp
+index 1dc2c789..f2998782 100644
+--- a/lib/IR/ReussirTypes.cpp
++++ b/lib/IR/ReussirTypes.cpp
+@@ -120,6 +120,10 @@ mlir::Type parseTypeWithCapabilityAndAtomicKind(mlir::AsmParser &parser) {
+       return {};
+     }
+   }
++  // The type ends here: anything else (`!reussir.rc<i64, rigid>`) is an
++  // error, not text to drop.
++  if (parser.parseGreater().failed())
++    return {};
+   Capability capValue = capability ? *capability : DefaultCap;
+   AtomicKind atomicValue =
+       atomicKind ? *atomicKind : reussir::AtomicKind::normal;
+diff --git a/tests/integration/basic/failure/rc_trailing_text.mlir b/tests/integration/basic/failure/rc_trailing_text.mlir
+new file mode 100644
+index 00000000..a6d33ba1
+--- /dev/null
++++ b/tests/integration/basic/failure/rc_trailing_text.mlir
+@@ -0,0 +1,24 @@
++// RUN: %reussir-opt %s -split-input-file -verify-diagnostics
++// The rc and ref types end at `>`: text after the element type and its
++// keywords is an error. The parser used to stop at the first token that is
++// not a keyword and drop the rest, so `!reussir.rc<i64 rigid, atomic>` read
++// as `!reussir.rc<i64 rigid>`, a different type.
++
++module @test {
++  // expected-error @+1 {{expected '>'}}
++  func.func private @f() -> !reussir.rc<i64, bogus words here>
++}
++
++// -----
++
++module @test {
++  // expected-error @+1 {{expected '>'}}
++  func.func private @f() -> !reussir.rc<i64 rigid, atomic>
++}
++
++// -----
++
++module @test {
++  // expected-error @+1 {{expected '>'}}
++  func.func private @f() -> !reussir.ref<i64, field>
++}
+-- 
+2.43.0
+

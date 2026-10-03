@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** cost (build time). **Status:** patched (0062), applied in `./reussir` (`l2r-local` 5c0514e3); review pending.
+**Kind:** cost (build time). **Status:** patched (0062), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: cost, with a small fix.** `reussir-convert-to-llvm` lowers every
 `func.call` with the func dialect's stock pattern, which looks the callee
@@ -83,7 +83,7 @@ workaround.
 
 Patch file
 [`patches/0062-l2r-local-bug-30-look-up-call-lowering-s-callees-in-.patch`](patches/0062-l2r-local-bug-30-look-up-call-lowering-s-callees-in-.patch)
-(`l2r-local` commit `94562ad3`, applied in `./reussir`; `l2r-local` head 5c0514e3; made as commit `33bf4710`
+(`l2r-local` commit `cdc1102d`, applied in `./reussir`; `l2r-local` head cc8e5aa5; made as commit `33bf4710`
 in a scratch checkout; it depends on no other patch). The func dialect's interface is skipped and its
 patterns are added with a collection, as `convert-func-to-llvm` does:
 
@@ -122,10 +122,28 @@ the conversion has finished.
 - `run.sh`: `bug 30   FIXED       reussir-opt --reussir-convert-to-llvm:
   N = 5000: 0.7 s, N = 10000: 0.4 s`.
 
-**Review.** Pending: the adversarial review of 0060-0063 runs in
-`~/Documents/l2r-scratch/rv8/reussir/e/`. The patch is applied in
-`./reussir` meanwhile (applied; review pending). Reussir's lit suite and
-`run.sh` on the final stack: as above.
+**Review.** Round RV8 (e)
+(`~/Documents/l2r-scratch/rv8/reussir/e/FINDINGS.txt`): no defect.
+`FuncOpConversion` keeps the collection current (it removes each
+`func.func` and inserts its `llvm.func`). Reussir's own patterns add
+symbols without updating it (runtime declarations, `memcmp`,
+`__reussir_drop_defer*`), and the import trampoline replaces its target
+(it erases the declaration and creates an `llvm.func` of the same name).
+Neither breaks anything: lookups are made only for `func.call` callees,
+only to test `llvm.bareptr` (which Reussir never emits), a missing entry
+gives the default convention, and a stale entry still points at a live
+operation, because the conversion runs with pattern rollback (the LLVM 23
+default), which keeps erased operations until it ends. Callers of a
+trampoline's target before and after the trampoline lower identically
+with and without the patch, and the LLVM dialect of LeanBoolLoop and
+Rbmap is identical.
+
+**Latent hazard.** If this conversion ever runs without pattern rollback
+(`allowPatternRollback = false`, as 0031 does for `convert-scf-to-cf`),
+the trampoline's erase-and-recreate would free the operation the table
+still names, and a later call to it would read freed memory. Before such
+a change, the trampoline pattern must update the collection (or the
+lookup must not be cached).
 
 **Effect on lean2rr.** Build time only: large programs convert in linear
 time; the generated code is unchanged.

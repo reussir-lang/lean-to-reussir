@@ -9,8 +9,8 @@ optimization, a missing feature, or build costs of a stock pass or an
 opt-in flag (column *Kind*).
 
 Reussir revision: `ef922049`. The checkout at `./reussir` is not part of
-this repository; its branch `l2r-local` (head `5c0514e3`) is ef922049 plus
-the 34 local patches, in the [apply list](#applying-the-patches)'s order.
+this repository; its branch `l2r-local` (head `cc8e5aa5`) is ef922049 plus
+the 35 local patches, in the [apply list](#applying-the-patches)'s order.
 (The `l2r-local` before 2026-10-03, the first twelve patches, is kept as
 branch `l2r-local-pre-final`.)
 
@@ -46,8 +46,7 @@ branch `l2r-local-pre-final`.)
 Column *Patch*: "none" marks an entry that stays unpatched (the reason is
 in its file). Column *Review*: the adversarial review round and its result
 ([Review](#review)). Column *Applied*: whether the patch is on
-`./reussir`'s `l2r-local` (all 34 are, since 2026-10-03; 0060 to 0063 were
-applied with their review still pending).
+`./reussir`'s `l2r-local` (all 35 are, since 2026-10-03).
 
 | # | Kind | Effect | Affects lean2rr output? | lean2rr workaround | Patch | Review | Applied |
 |---|---|---|---|---|---|---|---|
@@ -78,18 +77,19 @@ applied with their review still pending).
 | [25](25-value-record-dag.md) | cost (deliberate design) | the first acquire/drop expansion writes a `[value]` record's copy out in line, exponential for records shared in a DAG | no, lean2rr's `[value]` records are shallow | - | none | rv7/p22 round 2: agrees to leave it | - |
 | [26](26-launder-assume.md) | bug (miscompile) | `assume(launder(p) == p)` undoes the launder, so LICM hoists the stores of a cell rebuilt in place | yes, wrong output (a Lean loop prints 2, natively 25009648) | none | 0021 | rv8/reussir: no defect | yes |
 | [27](27-nullable-member-drop.md) | missing feature (a gap in bug 13's bounded-depth frees) | drop glue does not defer a `Nullable` member: a long chain through `Nullable` overflows the stack when freed | no, `Nullable` not used | - | 0027 (amended for RV8R-01) | rv7/p22 round 2 (RV7P-05); rv8/reussir: RV8R-01 fixed | yes |
-| [28](28-unique-carrying-join.md) | bug (miscompile) | `-O aggressive` proves a value unique that is shared on one path; the shared cell is updated in place | possible: not seen in three programs | none | 0060 | pending | yes |
-| [29](29-ffi-member-mlir.md) | bug (tooling) | the `--emit mlir` dump of a record with an `#[ffi]` member does not parse back | no, builds unaffected; every lean2rr dump fails to parse | - | 0061 | pending | yes |
-| [30](30-call-lowering-lookup.md) | cost (build time) | the call lowering scans the module once per call | yes, build time of large programs | none | 0062 | pending | yes |
-| [31](31-deep-expression-stack.md) | bug | rrc overflows its stack on deeply nested expressions | no, lean2rr bounds nesting | - | 0063 | pending | yes |
+| [28](28-unique-carrying-join.md) | bug (miscompile) | `-O aggressive` proves a value unique that is shared on one path; the shared cell is updated in place | possible: not seen in lean2rr's corpus | none | 0060 | rv8/reussir/e: no correctness defect; RV8RE-01 (lost clones) fixed | yes |
+| [29](29-ffi-member-mlir.md) | bug (tooling) | the `--emit mlir` dump of a record with an `#[ffi]` member does not parse back | no, builds unaffected; every lean2rr dump fails to parse | - | 0061 | rv8/reussir/e: no defect | yes |
+| [30](30-call-lowering-lookup.md) | cost (build time) | the call lowering scans the module once per call | yes, build time of large programs | none | 0062 | rv8/reussir/e: no defect (a latent hazard noted) | yes |
+| [31](31-deep-expression-stack.md) | bug | rrc overflows its stack on deeply nested expressions | no, lean2rr bounds nesting | - | 0063 | rv8/reussir/e: no correctness defect; RV8RE-02 (`ulimit -v`) fixed | yes |
 | [32](32-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected; large programs cannot be dumped | dump smaller programs | none | - | - |
+| [33](33-rc-trailing-text.md) | bug (tooling) | the rc and ref type parser drops the text after a comma (`!reussir.rc<i64 rigid, atomic>` reads as `!reussir.rc<i64 rigid>`) | no, hand-written MLIR only | - | 0064 | pending | yes |
 
-In numbers: 32 entries. 29 are patched by 32 patches (0013 to 0015 for
+In numbers: 33 entries. 30 are patched by 33 patches (0013 to 0015 for
 bug 13, 0002 and 0019 for bug 2, 0032 and 0033 for bug 11; 0009 fixes
 bugs 9 and 14), all applied; 3 stay documented only: 3 (intended), 25
 and 32 (costs). The two other patches, 0040 and 0050, fix no bug
 ([local additions](local-additions.md)). Reviews: every patch passed its
-round except 0060 to 0063, whose review is pending.
+round except 0064, whose review is pending.
 
 Status words used in the entries' summaries:
 
@@ -115,14 +115,14 @@ fix no bug:
 ## Applying the patches
 
 `./reussir`'s local branch `l2r-local` (never pushed) is ef922049 plus the
-34 patches, as local commits, applied in the order of the `for` list below
+35 patches, as local commits, applied in the order of the `for` list below
 (the apply list). To recreate it, from the repository root:
 
 ```sh
 git -C reussir checkout -b l2r-local ef922049
 for p in 0006 0004 0002 0007 0009 0005 0013 0012 0014 0015 0016 0017 \
          0018 0019 0020 0021 0022 0023 0024 0025 0026 0027 0040 \
-         0030 0031 0032 0033 0034 0035 0050 0060 0061 0062 0063; do
+         0030 0031 0032 0033 0034 0035 0050 0060 0061 0062 0063 0064; do
     git -C reussir am "$PWD/reussir-bugs/patches/$p-"*.patch || break
 done
 cmake --build reussir/build
@@ -131,7 +131,7 @@ cmake --build reussir/build
 `git am` records them as local commits; `git apply` works as well, if you
 would rather keep them as uncommitted changes. Applied this way to
 ef922049 (in a scratch worktree, 2026-10-03), the list gives exactly the
-tree of `./reussir`'s `l2r-local` (`5c0514e3`). The `From <sha>` line of
+tree of `./reussir`'s `l2r-local` (`cc8e5aa5`). The `From <sha>` line of
 each patch file names the commit of the integration checkout
 (`~/Documents/l2r-scratch/reussir-final`); `l2r-local`'s commits have the
 same contents and messages (their hashes are in each entry's *Patch*
@@ -149,7 +149,7 @@ Order and dependencies:
   RV8C-01). 0030 to 0035 were rebased onto 0018-0027 and 0040 (RV8C-02):
   0032 and 0034 edit the archive list of `lib/CAPI/CMakeLists.txt` after
   0025.
-- 0012, 0017 and 0060 to 0063 also apply alone.
+- 0012, 0017 and 0060 to 0064 also apply alone.
 - lean2rr's runtime needs 0014 to build (`leanrt::drop` uses
   `reussir_rt::drop`, the pending stack 0014 adds to Reussir's runtime),
   uses 0040 when present (a weak symbol), and branch `mem-nat` needs 0050.
@@ -222,10 +222,14 @@ The repros were checked on these builds (on the aarch64 test machine):
   2026-10-03, now `l2r-local-pre-final`).
 - `91da4f80`: the ten-patch set + 0016 + 0017
   (`~/Documents/l2r-scratch/reussir-dev2`), the base every later patch
-  (0018 to 0063) was made on, and the "without the patch" build of bugs
-  17 and 24 to 31.
-- "the final stack": ef922049 + the 34 patches, `l2r-local` `5c0514e3`
-  (`~/Documents/l2r-scratch/reussir-final`, the same tree).
+  (0018 to 0063, in their first versions) was made on, and the "without
+  the patch" build of bugs 17 and 24 to 33. The amended 0060 and 0063 and
+  0064 were made on the final stack (`a75ed2cf`, then each other).
+- "the final stack": ef922049 + the 35 patches, `l2r-local` `cc8e5aa5`
+  (`~/Documents/l2r-scratch/reussir-final`, the same tree). Before the
+  review of 0060 to 0063 was folded in, it was 34 patches with the first
+  versions of 0060 and 0063 (`5c0514e3`, kept in that checkout as
+  branch `l2r-final-pre-e2`).
 
 The unpatched `run.sh` lines quoted in the entries come from a recorded run
 of the same script on unpatched ef922049, or, for entries 24 to 32, on
@@ -236,7 +240,11 @@ of the same script on unpatched ef922049, or, for entries 24 to 32, on
 On the final stack, 2026-10-03, with a lean2rr build, from a scratch
 directory (`run.sh` on the integration checkout, which has the same tree
 as `./reussir`): every repro, then bug 17 again with its new measure
-(below), and 24 to 27 once their repros were added.
+(below), and 24 to 27 once their repros were added. After 0060 and
+0063 were amended and 0064 added (`cc8e5aa5`), every repro but the slow
+ones (10, 11, 16, 17, 20, 23) was run again on that stack, with the same
+statuses (03, 25 and 32 REPRODUCES, all others FIXED; the timing lines of
+03 and 07 move within their noise); lines 28 to 33 are from that run.
 
     bug 01   FIXED       prints 42   [-O default]
     bug 02a  FIXED       prints 7005009   [-O aggressive --no-pack-record-members]
@@ -271,9 +279,10 @@ as `./reussir`): every repro, then bug 17 again with its new measure
     bug 27   FIXED       1M links through Nullable, 8 MB stack: prints 1   [-O default]
     bug 28   FIXED       prints 101 1   [-O aggressive]
     bug 29   FIXED       the --emit mlir dump parses back and prints identically
-    bug 30   FIXED       reussir-opt --reussir-convert-to-llvm: N = 5000: 0.3 s, N = 10000: 0.7 s (2.33x for twice the calls)
+    bug 30   FIXED       reussir-opt --reussir-convert-to-llvm: N = 5000: 0.5 s, N = 10000: 0.3 s (.60x for twice the calls)
     bug 31   FIXED       compiles, prints 32004007   [-O aggressive]
     bug 32   REPRODUCES  --emit mlir: K = 10: 2133 KB, K = 12: 8532 KB (3.99x for two more levels)
+    bug 33   FIXED       rrc -x mlir rejects !reussir.rc<i64 rigid, atomic>: expected '>'
 
 (`run.sh` prints lean2rr's flags in full; they are abbreviated here.) Every
 patched entry shows FIXED. `03` (intended), `25` and `32` (costs, not
@@ -313,13 +322,23 @@ finding X" or by finding IDs are scratch files outside this repository, in
 | 0022-0026 | RV7-P22, rounds 1 and 2 | `rv7/p22/FINDINGS.txt`, `rv7/p22/round2/FINDINGS.txt` | RV7P-01 (0023, exponential cell glue) and RV7P-02/04 (0024, claims and docs) fixed; RV7P-03 became bug 24 (0026), RV7P-05 bug 27 (0027) |
 | 0030-0035 | RV8C | `rv8/reussir-c/FINDINGS.txt` | RV8C-01 (0033 with 0023, medium), -02 (conflicts), -03 (0030, lost exact-size reuse), -04 (0032, declarations counted) resolved in the final stack |
 | 0050 | mem-nat review, RV8 | `mem/nat/review/FINDINGS.txt`, `rv8/nat/FINDINGS.txt` | no defect (the optional hardening is in) |
-| 0060-0063 | RV8 (e) | `rv8/reussir/e/` | pending |
+| 0060-0063 | RV8 (e) | `rv8/reussir/e/FINDINGS.txt` (its RV8E-NN cited as RV8RE-NN) | no correctness defect; RV8RE-01 (0060: poison and tagged immediates blocked sound clones, low) and RV8RE-02 (0063: panic under `ulimit -v`, low) fixed in the amended patches; a latent hazard of 0062 noted in bug 30 |
+| 0064 | - | - | pending (written after RV8 (e), which found bug 33) |
 
-The integration of the 34 patches (`~/Documents/l2r-scratch/reussir-final`,
-the same tree as `l2r-local` 5c0514e3) was checked with Reussir's lit
-suite (645 tests: 564 passed, 81 unsupported, none failed), the classic
-corpus (18 programs, oracle checks all passed), lean2rr's runtime tests and
-`run.sh` (above).
+The integration of the first 34 patches
+(`~/Documents/l2r-scratch/reussir-final`, then at `5c0514e3`) was checked
+with Reussir's lit suite (645 tests: 564 passed, 81 unsupported, none
+failed), the classic corpus (18 programs, oracle checks all passed),
+lean2rr's runtime tests and `run.sh` (above). The stack with the amended
+0060 and 0063 and with 0064 (`cc8e5aa5`, the same tree as `l2r-local`):
+lit 647 tests, 566 passed, 81 unsupported, none failed; LeanBoolLoop
+through lean2rr prints 25009648 (as native); the `.unique` clones of the
+classic corpus are those the review expects (Mergesort 13, Rbmap 5, Rbtree
+5, TypeclassGeneric 16, the other 13 programs unchanged); the review's
+six soundness probes print the right values; 10 lean2rr runtime tests
+pass (RtFuzzReuse, RtFreshRebuildShared, RtShareMutators, RtHashMap,
+RtDropDeep, RtNat, RtStack, RtJpShapes, RtPersistWalk, RtStateMachines);
+`run.sh` as above.
 
 **Audit (2026-10-02).** An independent review checked every entry then
 known (1 to 20) against Reussir's own documentation, tests, design notes
@@ -342,7 +361,7 @@ where it gave one. Of the patches, by their entries' kinds:
 - bugs: 0002 and 0019 (2), 0004, 0005, 0009 (9 and 14), 0012 (in Reussir's
   parser dependency `cstree`), 0016 (21), 0017 (23), 0018 (8), 0020 (1),
   0021 (26), 0022 (15), 0023 (19), 0024 (10), 0025 (18), 0026 (24), 0033
-  (11b), 0060 (28), 0061 (29), 0063 (31);
+  (11b), 0060 (28), 0061 (29), 0063 (31), 0064 (33);
 - a bug with a flag workaround: 0006 (a speed choice over the flag; to be
   remeasured on an idle machine);
 - build-time costs with a small fix: 0030 (22), 0031 (17), 0032 (11), 0034

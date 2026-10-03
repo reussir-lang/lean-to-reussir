@@ -4,7 +4,7 @@
 
 **Kind:** missing feature (the bounded-depth frees of
 [bug 13](13-long-list-drop.md) did not cover `Nullable` links). **Status:**
-patched (0027), applied in `./reussir` (`l2r-local` 5c0514e3); does not
+patched (0027), applied in `./reussir` (`l2r-local` cc8e5aa5); does not
 affect lean2rr (it does not use `Nullable`).
 
 **Verdict: a gap in bug 13's patches, not caused by them.** With patches
@@ -79,7 +79,7 @@ the patch. No workaround needed.
 Patch file
 [`patches/0027-l2r-local-bug-27-defer-a-nullable-member-s-release-i.patch`](patches/0027-l2r-local-bug-27-defer-a-nullable-member-s-release-i.patch)
 (`l2r-local` commit `9ea68905`, the version amended after review finding
-RV8R-01; applied in `./reussir`, `l2r-local` 5c0514e3). Two changes in
+RV8R-01; applied in `./reussir`, `l2r-local` cc8e5aa5). Two changes in
 `AcquireDropExpansion.cpp`:
 
 1. `rewriteDropNullable`, non-null arm: inside drop glue, release the

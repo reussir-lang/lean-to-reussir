@@ -476,18 +476,18 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches
-(branch `l2r-local` of the checkout in `./reussir`, head `5c0514e3`:
-Reussir `ef922049` plus 34 patches; the patches are in
+(branch `l2r-local` of the checkout in `./reussir`, head `cc8e5aa5`:
+Reussir `ef922049` plus 35 patches; the patches are in
 [`../reussir-bugs/patches/`](../reussir-bugs/patches/), each explained in
 depth in the file of its bug, indexed in
 [`../reussir-bugs/README.md`](../reussir-bugs/README.md)).
 They are local only, never submitted upstream, and each is reviewed
-adversarially (the last four, 0060 to 0063, were applied with their review
-pending). An independent audit checked whether each problem is really a
-Reussir bug. Of the 32 documented problems, 29 are patched (32 patches)
-and 3 are documented only; two more patches add features lean2rr needs:
+adversarially (the last one, 0064, was applied with its review pending).
+An independent audit checked whether each problem is really a Reussir
+bug. Of the 33 documented problems, 30 are patched (33 patches) and 3 are
+documented only; two more patches add features lean2rr needs:
 
-- **Real bugs fixed (20 patches):** wrong values after in-place reuse of a
+- **Real bugs fixed (21 patches):** wrong values after in-place reuse of a
   structure or variant cell (bug 2), `[value]` enum bytes lost (1), a
   layout mismatch that overflowed cells (8), compiler crashes (4, 5, 31),
   use-after-free (9, 14), the parser mixing up subtrees on very large
@@ -495,8 +495,9 @@ and 3 are documented only; two more patches add features lean2rr needs:
   compile (15, 19), wrong code after an LLVM assumption undid a pointer
   launder (26) and from a uniqueness analysis that proved a shared value
   unique (28), a texture placeholder dropped (21), non-reproducible builds
-  (24), MLIR dumps that did not parse back (29), Reussir's own build
-  (18), and build time made quadratic by Reussir's own code (10, 11b, 23).
+  (24), MLIR dumps that did not parse back (29), MLIR types whose trailing
+  text was silently dropped (33), Reussir's own build (18), and build time
+  made quadratic by Reussir's own code (10, 11b, 23).
 - **A real bug with a flag workaround:** a static cell freed after 2^32
   references (6). Another nullary-constructor encoding avoids it; the patch
   keeps the default encoding for speed.

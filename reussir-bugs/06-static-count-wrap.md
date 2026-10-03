@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug, with a flag workaround. **Status:** patched (0006), applied in `./reussir` (`l2r-local` 5c0514e3).
+**Kind:** bug, with a flag workaround. **Status:** patched (0006), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug, with a flag workaround.** Reussir's lowering states that a
 nullary dummy's count stays above the shared/unique decision point, but the
@@ -168,7 +168,7 @@ verdict above).
 
 Patch file
 [`patches/0006-l2r-local-bug-6-never-free-a-tagged-immediate-whose-.patch`](patches/0006-l2r-local-bug-6-never-free-a-tagged-immediate-whose-.patch)
-(`l2r-local` commit `4d27dc85`, applied in `./reussir`; `l2r-local` head 5c0514e3).
+(`l2r-local` commit `4d27dc85`, applied in `./reussir`; `l2r-local` head cc8e5aa5).
 
 The increment stays a plain load, add and store, so LLVM can still fold
 counts on fresh cells. The decrement's unique branch (count == 1) first

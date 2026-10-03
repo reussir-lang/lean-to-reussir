@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** cost. **Status:** patched (0030, a build-time fix), applied in
-`./reussir` (`l2r-local` 5c0514e3); lean2rr also works around it (it
+`./reussir` (`l2r-local` cc8e5aa5); lean2rr also works around it (it
 releases held wide values out of line in wildcard arms).
 
 **Verdict: cost, not a bug.** Three documented Reussir design choices
@@ -73,7 +73,7 @@ a wide enum in the first expansion phase), 0030 does the first.
 Patch file
 [`patches/0030-l2r-local-bug-22-merge-the-copies-of-a-wildcard-arm-.patch`](patches/0030-l2r-local-bug-22-merge-the-copies-of-a-wildcard-arm-.patch)
 (`l2r-local` commit `bc4aca4b`, applied in `./reussir`; `l2r-local` head
-`5c0514e3`), rebased onto 0018-0027 and 0040 for the final stack, with the
+`cc8e5aa5`), rebased onto 0018-0027 and 0040 for the final stack, with the
 change of review finding RV8C-03 (below).
 
 **The change.** A canonicalization pattern on `reussir.record.dispatch`,

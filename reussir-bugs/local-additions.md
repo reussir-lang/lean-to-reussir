@@ -3,7 +3,7 @@
 Two of the local patches fix no Reussir bug: they add something lean2rr's
 runtime or representation needs. They are kept with the bug fixes
 ([`README.md`](README.md#applying-the-patches)), applied in `./reussir`
-(`l2r-local` 5c0514e3), and reviewed like them.
+(`l2r-local` cc8e5aa5), and reviewed like them.
 
 | Patch | What | Needed by | Review |
 |---|---|---|---|

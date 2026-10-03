@@ -524,7 +524,19 @@ bug32() {
     else say_line OTHER 32 "$msg"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32"
+bug33() {
+    # A type with text after its keywords, read back through rrc.
+    local o=$WORK/out/33
+    { (cd "$WORK/run" && "$RRC" "$HERE/bug33-rc-trailing-text.mlir" -x mlir --emit mlir -o "$o.mlir") > "$o.log" 2>&1; } 2> /dev/null
+    RC=$?
+    if [ $RC = 0 ] && grep -q 'func.func private @f() -> !reussir.rc<i64 rigid>' "$o.mlir"; then
+        say_line REPRODUCES 33 "rrc -x mlir reads !reussir.rc<i64 rigid, atomic> as !reussir.rc<i64 rigid>"
+    elif [ $RC != 0 ] && grep -q "expected '>'" "$o.log"; then
+        say_line FIXED 33 "rrc -x mlir rejects !reussir.rc<i64 rigid, atomic>: expected '>'"
+    else say_line OTHER 33 "rrc exit $RC: $(grep -m1 -o "error.\{0,120\}" "$o.log")"; fi
+}
+
+ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33"
 SLOW=" 06 10 11 16 17 20 23 "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do
