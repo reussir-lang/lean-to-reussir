@@ -1157,26 +1157,29 @@ loop(tail, x8)
 A join point with several parameters yields a small generated `[value]`
 struct, which is destructured afterwards.
 
-**J1', small join point: duplicate.** A join point whose copy is small (at
-most 40 nodes) and that is not J2 is inlined at each of its jumps, like J1.
-A copy's size counts the bindings, alternatives and exits of the body, the
-join points nested in it once, and at each jump to another join point whose
-own body is small, that body, counted the same way: it is inlined into the
-copy too. Outlining the join point would put a function boundary on the
-path: a loop through it would become a state machine or mutually recursive,
-and Reussir could not reuse a cell matched before the jump for a
-construction after it. Duplication is recursive: small join points inside a
-duplicated body, and those it jumps to, are duplicated again. The 40-node
-bound covers a nest (sinking puts a join point jumped to from one other
-join point inside it) and the join points a copy jumps to, so growth is
-bounded, but code size can still grow by a large factor (up to about 2^10
-copies of an innermost body). Counting the body alone would not bound it:
-Lean leaves sibling join points that are jumped to from two others, which
+**J1', small join point: duplicate.** A join point that is not J2 is
+inlined at each of its jumps, like J1, when it is small: its body has at
+most 40 bindings, alternatives and exits (nested join points included), and
+a copy of it expands to at most 480. The expansion counts, at each jump,
+the body of the join point jumped to when that is inlined there too: a join
+point nested in the copy (at every jump to it), or another join point whose
+own body is small, counted the same way. Outlining the join point would put
+a function boundary on the path: a loop through it would become a state
+machine or mutually recursive, and Reussir could not reuse a cell matched
+before the jump for a construction after it. Duplication is recursive:
+small join points inside a duplicated body, and those it jumps to, are
+duplicated again, and the expansion bound keeps every copy within 480
+nodes, so code grows linearly. The bound on the body alone did not: Lean
+leaves sibling join points that are jumped to from two others, which
 sinking cannot nest. A sequence of `match`es on a two-constructor state,
 each alternative setting the next state to a constant, gives one join point
 per alternative, jumping to either alternative of the next `match`; each is
 small, and the first ones held 2^n copies of the last (20 `match`es: out of
-memory; tests/runtime/RtJpChain). Behaviour does not change. (Optional pass
+memory; tests/runtime/RtJpChain). The expansion is an upper bound (a J2 or
+outlined target costs only its jump); 480 is generous enough that a loop
+whose condition is a few `&&`/`||` tests, each a join point jumping to the
+shared continuation (an expansion of 300-350), stays a plain loop and does
+not become a state machine. Behaviour does not change. (Optional pass
 `jp-small`; without it such join points are outlined, J3.)
 
 **J3, otherwise: outline.** Some paths `return` directly or jump to a
