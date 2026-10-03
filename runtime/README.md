@@ -739,8 +739,9 @@ through lean2rr, runs both (`LEAN_BACKTRACE=0`, optional `NAME.args` and
 the program, for redirections and pipes), and compares stdout, stderr and
 the exit code byte for byte. `NAME.xfail` marks tests blocked by a lean2rr
 request. The Rust unit tests of `leanrt` (bignums, one-word `Nat`/`Int`
-at the boundaries, tagged arrays, hashes, and a differential test of the
-`FILE` model against glibc's own `FILE` over random operation sequences)
+at the boundaries, tagged arrays, hashes, the lookup of glibc's `cbrt`,
+and a differential test of the `FILE` model against glibc's own `FILE`
+over random operation sequences)
 run with `tests/runtime/leanrt-unit.sh`. `tests/runtime/nat-alloc-check.sh`
 builds `RtNatStress` with leanrt's big-number counters and checks that
 every big number made is freed exactly once.

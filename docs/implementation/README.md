@@ -57,6 +57,7 @@ on the branches merged into it. Reussir bugs link to
 9. [optional-passes.md](optional-passes.md): one line per optional pass
    with its soundness guard, and the required parts.
 10. [externs-ffi/](externs-ffi/README.md): extern dispatch and its order,
-    glue, the `L2RShim` library, the C FFI (parked).
+    glue, the `L2RShim` library, special cases of single runtime externs,
+    the C FFI (parked).
 11. [translator.md](translator.md): lean2rr itself: loading the program,
     its stack and limits, its switches.

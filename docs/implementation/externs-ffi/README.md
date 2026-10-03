@@ -14,5 +14,7 @@ runtime's conventions are in [`runtime/README.md`](../../../runtime/README.md)
   streams, processes and the other generated glue.
 - [shim.md](shim.md): `L2RShim`, lean2rr's Lean library for
   `Std.Internal.UV`, time, `ShareCommon`, and definitions it replaces.
+- [runtime.md](runtime.md): special cases inside the runtime's own
+  implementation of single externs (`Float.cbrt`, `System.Platform.target`).
 - [c-ffi.md](c-ffi.md): calling the program's C code (parked, branches
   `ffi-c` and `lean-externs`).

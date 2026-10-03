@@ -488,3 +488,22 @@ fn run_body<F: FnOnce() + Send + 'static>(body: F) {
         std::process::exit(101);
     }
 }
+
+/// `System.Platform.target` (`lean_system_platform_target`). Natively it is
+/// `LEAN_PLATFORM_TARGET` (`version.h`), the target triple the Lean
+/// toolchain was built for: `clang --print-target-triple` on Lean's CI, the
+/// triple `lean --version` shows. Here, the triple the native toolchain for
+/// leanrt's own target reports. leanrt builds only for Linux with glibc on
+/// aarch64 and x86-64 (its signal structures, the glibc `FILE` model, the
+/// stack switching in `coro`); the prelude's other platform answers
+/// (Windows, macOS and Emscripten false, `numBits` 64) rely on that too.
+#[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"))]
+pub const PLATFORM_TARGET: &str = "aarch64-unknown-linux-gnu";
+#[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"))]
+pub const PLATFORM_TARGET: &str = "x86_64-unknown-linux-gnu";
+#[cfg(not(all(target_os = "linux", target_env = "gnu", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+compile_error!(
+    "leanrt supports Linux with glibc on aarch64 and x86-64 only: for another target, add the triple \
+     the native Lean toolchain reports (`lean --version`) to `PLATFORM_TARGET` and review the \
+     prelude's platform queries (`lean_system_platform_*`)"
+);
