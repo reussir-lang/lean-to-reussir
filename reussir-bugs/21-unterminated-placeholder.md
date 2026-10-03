@@ -51,6 +51,18 @@ survives only because the scan never looked at it. `run.sh` prints
 
 ## Cause
 
+Where it runs: in rrc, `LlvmLowering::prepare`
+(`crates/reussir-backend/src/llvm.rs`, called by `backend_module` in
+`crates/reussir-compiler/src/driver/backend.rs` before the MLIR lowering
+pipeline) calls `compilePolymorphicFFI`, which renders each texture with
+`monomorphize` and compiles it with rustc; the pipeline's
+`CompilePolymorphicFFI` pass later finds nothing left to compile. The Rust
+frontend has already substituted the `[:T:]` placeholders
+(`substitute_placeholders`, `crates/reussir-core/src/full/ffi.rs`), and
+codegen emits `reussir.polyffi` with the texture only, never a
+`substitutions` attribute. So the C++ scan re-reads text that is already
+final, and its only possible effect is to drop an unterminated `[:`.
+
 `monomorphize`
 (`lib/Conversion/CompilePolymorphicFFI/CompilePolymorphicFFI.cpp`) scans
 the body with a cursor and a flag:

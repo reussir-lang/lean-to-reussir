@@ -56,6 +56,11 @@ deeply in polymorphic recursion, so the text grows exponentially.
 
 ## lean2rr
 
+Reussir closures occur in lean2rr's output in the `raw(A -> B)` arm of
+every generated function enum `L2RFn_…` (plan §5.3: a Reussir closure,
+for values built by glue code); their result types, often `L2RBox` or
+another function enum, are what the devirtualization prints in full.
+
 The driver (`scripts/l2r.py`) passes `--no-closure-wpd`. The classic
 benchmarks measured the same with and without it, within noise (lean2rr
 dispatches its function values itself), so it costs nothing measurable.

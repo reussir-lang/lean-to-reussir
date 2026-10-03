@@ -68,6 +68,15 @@ compiles and **3881 s of linking** (6.4 s with 0017).
 
 ## Cause
 
+Where it runs: in rrc, both the texture compiles and this link happen in
+`LlvmLowering::prepare` (`crates/reussir-backend/src/llvm.rs`), which
+`backend_module` (`crates/reussir-compiler/src/driver/backend.rs`) calls
+before the MLIR lowering pipeline: it calls `compilePolymorphicFFI` (one
+rustc process per texture), then `gatherCompiledModules`. The pipeline's
+`CompilePolymorphicFFI` pass then finds every texture compiled, and
+`LlvmLowering::finish` links the gathered module into the program after
+the pipeline.
+
 `gatherCompiledModules` (`lib/IR/ReussirOps.cpp`) parses each compiled
 module, makes the first one the destination and links every other one into
 it:

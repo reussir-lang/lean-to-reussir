@@ -1016,9 +1016,10 @@ application appears.
   where that pays. These functions call each other through the wrapper
   variants and through what a `Box` can hold, and polymorphic recursion
   through monad transformers makes hundreds of representations of a few
-  Lean types: with these functions inlinable, rrc's inliner grew such
-  programs exponentially (an 8-line `StateT` tower used at `IO` did not
-  build within 30 minutes or 15 GB; Reussir bug 20). Out of line, a
+  Lean types: with these functions inlinable, rrc's build time and memory
+  on such programs grew far faster than the programs (superlinearly; an
+  8-line `StateT` tower used at `IO` did not build within 30 minutes or
+  15 GB; Reussir bug 20, whose cause is not narrowed down). Out of line, a
   conversion, an unboxing, or the application of a wrapped value or of a
   value of uniform type costs a call (until LLVM inlines it); all are rare
   outside uniform code, and typed function values are unaffected.

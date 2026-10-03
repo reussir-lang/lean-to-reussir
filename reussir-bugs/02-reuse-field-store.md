@@ -136,6 +136,14 @@ not need the same type. For `f` the IR is, in effect:
              { skipFields = array<i64: 1> }          // B.1 at offset 4: not stored
 ```
 
+This shape comes from the second `ConvertToSTD` run, which expands
+TokenReuse's reuse-or-allocate step (`token.ensure`) into a
+`nullable.dispatch` whose non-null arm launders `rc.reinterpret` of the
+released cell and whose null arm allocates
+(`ReussirTokenEnsureOpRewritePattern`), and from `RcCreateSink`, which
+moves the construction into that reuse arm. That is why
+`getReusedRcFromToken` can follow the token back to `%a`.
+
 This happens under any layout, packed or not. Under the packed layout `B`
 becomes `u64, u32, u32`, `B.1` sits at offset 12, and the skipped store
 leaves the old cell's padding there.

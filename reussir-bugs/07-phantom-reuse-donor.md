@@ -61,7 +61,8 @@ aggressive --no-pack-record-members --reuse-across-call`).
 **Expected.** `100003 100003 ratio` near 1: both inserts reuse the cells on
 the path.
 
-**Actual on ef922049.** `100003 100003 ratio 6.12` (5.8-7.9 over runs):
+**Actual on ef922049.** `100003 100003 ratio 6.12` (5.8-7.9 over runs; the
+message of patch 0007 says "5x slower", an earlier measurement):
 `ins` allocates a new node at every level of every insertion. `run.sh`
 printed `bug 07   REPRODUCES  insert returning t is 6.65x the rebuilding insert`.
 
@@ -134,8 +135,15 @@ retained above, so their counts are at least 2 there (`t` still holds
 them), and they never free. They still produce (always null) tokens of the
 exact size of a `Node`. The same happens on the equal-key path with
 `rc.dec(%3)` and `rc.dec(%7)`, while `t` still holds the children.
-TokenReuse's `heuristic` gives every exact-size token the same score as the
-real donor, `t`'s own cell. On a tie, `oneShotTokenReuse` prefers the token
+TokenReuse's `heuristic` (`lib/Transformation/TokenReuse/TokenReuse.cpp`)
+scores an exact-size token `kReallocEnsureCutoff` (2), plus 1 for each
+field of the new cell that is loaded, through projections, from a borrow
+of the donor's cell (a coarse copy-avoidance bonus). That bonus does not
+apply here: at TokenReuse time the rebuilt `Node`'s fields are read
+through a `record.coerce` of the matched cell, which the bonus's walk does
+not look through (the token-reuse remarks show score 2). So every
+exact-size token, the phantom ones and the real donor, `t`'s own cell,
+scores 2. On a tie, `oneShotTokenReuse` prefers the token
 whose producer comes later in its pre-order walk (`tokenOrderKey`, "prefer
 the most recent producer"). So the construction is given a token from a
 member release that is null at run time, and allocates, while `t`'s real
@@ -307,6 +315,44 @@ out.
 **Effect on lean2rr.** An arm returning the matched value no longer blocks
 reuse in the other arms, for the shapes lean2rr's own passes do not
 rewrite.
+
+**On `l2r-local`, the phantom donors lose even without 0007 (observed
+2026-10-02).** Patch 0006 ([bug 6](06-static-count-wrap.md)) wraps the
+unique path of every release of a type with nullary immediates in one more
+`scf.if` (the immediate guard). The member releases of `l` and `r` then sit
+one level deeper, and TokenReuse frees their (null) tokens inside instead
+of offering them at the construction: the other side of 0006's finding
+R2-4. So on `l2r-local` the phantom donors no longer win even where 0007
+cannot fire. The repro
+[`repros/bug07b-call-before-branch.rr`](repros/bug07b-call-before-branch.rr)
+is this entry's repro with the key comparisons made FFI calls, so that the
+call before the branch stops 0007's fusion. Commands (from a scratch
+directory, with the polymorphic-FFI flags of the
+[index](README.md#running-the-repros)):
+
+    rrc bug07b-call-before-branch.rr -o b7 --emit executable -O aggressive \
+        --no-pack-record-members --reuse-across-call --token-reuse-remarks b7.json
+    rrc bug07b-call-before-branch.rr -o b7-boxed --emit executable -O aggressive \
+        --no-pack-record-members --reuse-across-call \
+        --nullary-variant-encoding boxed --token-reuse-remarks b7-boxed.json
+    ./b7; ./b7-boxed
+
+Results on `l2r-local` (a loaded machine; the original repro gave
+0.81-1.47 in the same runs):
+
+| encoding | ratio | TokenReuse at `ins`'s two rebuilds |
+|---|---|---|
+| default (TBI) | 1.34-2.08 | 1 token available (`t`'s cell), reused (`ensure`, score 2) |
+| `arch-independent` | 1.40-1.48 | the same |
+| `boxed` (no immediates, so no 0006 guard) | 5.61-11.37 | 3 tokens available, a phantom donor taken (`realloc`, score 0) |
+
+The guard is emitted for both immediate encodings and not for `boxed`, and
+ef922049 (no 0006) showed the mechanism with the default encoding, so the
+difference follows 0006's guard (the IR shows the member releases nested
+one level deeper). This bears on whether lean2rr still needs 0007 and
+`lazy-fields`: it suggests that, with 0006 applied and an immediate
+encoding, this shape is reused without either. Not yet measured on
+lean2rr's own programs (with `lazy-fields` off).
 
 ## Upstream note
 

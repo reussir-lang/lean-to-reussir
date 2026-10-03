@@ -51,7 +51,9 @@ parameter is a `ref<T>` of unspecified capability
 (`createDtorIfNotExists`, `emitOwnershipAcquisitionFuncIfNotExists`), and
 calls them with the `field` reference unchanged. Cells of scalars, of
 trivially copyable value records and of rc values take other paths and
-work.
+work. `rrc -v` shows the failure in the second `AcquireDropExpansion` run
+(the one that outlines record drops), after the first `ConvertToSTD` run
+has materialized the Cell accesses.
 
 ## lean2rr
 

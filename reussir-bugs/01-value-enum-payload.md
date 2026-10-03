@@ -43,8 +43,10 @@ is `{ i1 }`. The whole variant is moved as a first-class aggregate of that
 type: by the `record.variant` lowering (store into an alloca, then load the
 whole struct, `lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp`), by
 passing arguments by value, and by `ref.spilled`. Bytes of another arm that
-fall on the representative's padding or on an `i1` field do not survive
-the move.
+fall on padding inside the representative arm's struct, or on an `i1`
+field, do not survive the move. (If the representative is shorter than
+the largest arm, `convertRecordType` adds an explicit `i8` array for the
+rest; those bytes are copied.)
 
 ## lean2rr
 

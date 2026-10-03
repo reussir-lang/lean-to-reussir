@@ -44,7 +44,11 @@ to `GLOBAL_MAX_ALIGN = 16` (`max_align_t`, on purpose: other code sharing
 the heap may assume it). Reussir builds mimalloc with
 `MI_MAX_ALIGN_SIZE=8`, so every Rust `Box`/`Vec` allocation goes to
 `mi_malloc_aligned`, and later frees in pages holding aligned blocks take
-mimalloc's generic path.
+mimalloc's generic path. Checked in the mimalloc Reussir pins
+(`libmimalloc-sys` 0.1.44, its default v2 sources): an aligned allocation
+that had to be shifted marks its page (`mi_page_set_has_aligned(page,
+true)` in `alloc-aligned.c`), and `mi_free` takes the generic path for
+such a page (`page->flags.full_aligned != 0` in `free.c`).
 
 ## lean2rr
 

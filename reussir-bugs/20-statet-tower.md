@@ -1,10 +1,15 @@
-# 20. The MLIR inliner grows lean2rr's conversion code exponentially
+# 20. The MLIR inliner grows lean2rr's conversion code superlinearly (build time)
 
 ## Summary
 
 **Kind:** unclear. **Status:** worked around (build time only; lean2rr
 keeps its conversion, unboxing and uniform-code application functions out
 of rrc's inliner). No patch.
+
+With lean2rr's conversion, unboxing and application functions inlinable,
+rrc's build time and memory on polymorphic recursion through monad
+transformers grow far faster than the program (superlinearly; the shape of
+the growth was not measured).
 
 **Verdict: unclear.** Keeping lean2rr's conversion functions out of the
 MLIR inliner cuts build time and memory about five-fold, but the inliner is

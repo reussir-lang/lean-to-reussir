@@ -10,8 +10,8 @@ multiply here; none is wrong by Reussir's rules: the pattern compiler and
 codegen give an enum match one region per variant, so a wildcard arm is
 copied into every constructor it covers (`semi/pattern.rs`, "Closed: one
 subtree per variant"; `codegen/lower/expr.rs`, `ctor_switch`); the
-ownership pass releases every held value in each copy, also on paths that
-end in a panic; and `RcDecrementExpansion` with the first
+ownership pass releases, in each copy, every held value that copy does not
+use, also on paths that end in a panic; and `RcDecrementExpansion` with the first
 `AcquireDropExpansion` expands the release of a value of unknown variant in
 line, one level deep, as a match over its variants.
 

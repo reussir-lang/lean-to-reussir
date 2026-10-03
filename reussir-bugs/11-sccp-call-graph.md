@@ -7,8 +7,11 @@ patch.
 
 **Verdict: cost of a stock MLIR pass, not a Reussir defect.** The pipeline
 runs MLIR's own `createSCCPPass` (`crates/reussir-backend/src/pipeline.rs`),
-quadratic in the number of call sites by its algorithm; Reussir promises
-nothing linear. The towers first blamed on it were
+whose time is superlinear in the number of call sites (measured, below:
+doubling N costs 2.9-4.8x; [bug 22](22-wildcard-wide-enum.md) measures
+about size^2.4 on one large function; no bound from MLIR's documentation
+is known here); Reussir promises nothing linear. The towers first blamed
+on it were
 [bug 20](20-statet-tower.md).
 
 MLIR's interprocedural SCCP takes superlinear time on large call graphs.

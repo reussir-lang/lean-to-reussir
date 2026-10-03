@@ -35,7 +35,10 @@ libMLIRReussirInstrumentNonlinearFFI.a, which build.rs links`.
 verdict), but the `rrc-build` custom target
 (`crates/reussir-compiler/CMakeLists.txt`) depends only on `ReussirCAPI`
 and `MLIRReussir`, which do not pull that library in. The default target
-builds every library first.
+builds every library first. The error names
+`MLIRReussirInstrumentNonlinearFFI` only because it is the first of the
+four missing archives in `build.rs`'s list; the `rrc-build` edge of
+`./reussir/build/build.ninja` depends on none of the four.
 
 ## lean2rr
 

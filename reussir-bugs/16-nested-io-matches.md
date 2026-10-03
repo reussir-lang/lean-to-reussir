@@ -10,11 +10,15 @@ patch.
 The flag is off by default, and its documentation says only that it may
 increase peak heap use (`include/Reussir/Transformation/Passes.td`).
 TokenReuse keeps tokens pending across non-tail calls and frees, at every
-exit, each token not used there, so the error arm at depth d frees about d
-tokens: counted on lean2rr's output (outlining off, `__reussir_dealloc`
-calls in `--emit mlir-llvm`), 1534 with the flag and 325 without at
-N = 15, 5119 and 430 at N = 30 (the excess grows 3.9x when the depth
-doubles).
+exit, each token not used there, so the exits deep in the nesting each
+free many tokens. Counted on lean2rr's output (outlining off; calls whose
+name starts with `__reussir_dealloc` in `--emit mlir-llvm`, that is
+`__reussir_deallocate` and `__reussir_dealloc_unsized`, the two functions
+`token.free` lowers to in `ReussirTokenFreeConversionPattern`): 1534 with
+the flag and 325 without at N = 15, 5119 and 430 at N = 30. The excess,
+1209 and 4689, is about 5·N² and grows 3.9x when the depth doubles. One
+token per nesting level would give about N²/2, so each level seems to
+leave several tokens pending, not one (an inference from these counts).
 
 With `--reuse-across-call`, the generated code grows quadratically with
 match nesting depth (build time and memory). Each IO bind is a match on the

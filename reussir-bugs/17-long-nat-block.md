@@ -57,7 +57,11 @@ build that stops after it (`--emit mlir-llvm`) already reaches the peak
 linearly (301k and 565k lines). Probably a per-function analysis over
 reference-counted values (`Nat` is a two-arm `[value]` enum whose `Big` arm
 holds a box) keeps a set of live values per program point; with `UInt64`
-there are no such values.
+there are no such values. Note: a set of *live* values alone cannot explain
+the N² growth, because only a few values are live at once in the repro
+(`x0`, the constants 3 and 1000003, the current `x`), so such a set stays
+small. A quadratic cost must grow with the values *defined* so far, for
+example a per-point set or map that keeps every earlier value.
 
 ## lean2rr
 

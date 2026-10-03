@@ -20,8 +20,9 @@ machine before deciding between the flag and the patch.
 Reussir does not allocate nullary constructors such as `Nil` or `Leaf`.
 Each one is an *immediate*: a tagged pointer to a single static "dummy"
 cell. On aarch64, a retain of an immediate still increments the dummy's
-32-bit reference count, and nothing ever decrements it. After 2^32
-references the count wraps around to 1. The next release then believes it
+32-bit reference count, and nothing ever decrements it. The count starts
+at 2, so after 2^32 − 1 net increments (about 2^32 references) it wraps
+around to 1. The next release then believes it
 holds the last reference, takes the "free the cell" branch, and hands the
 static dummy to the allocator: the program dies with SIGSEGV. Patch 0006
 makes that branch first check whether the value is one of its type's
@@ -99,7 +100,11 @@ encodings, chosen in `crates/reussir-compiler/src/driver/stage.rs`
 invariant: the dummy's count is "pinned above the shared/unique decision
 point". `rc.set`, the only store that lowers a count (the shared path of a
 release), skips immediates (`ReussirRcSetConversionPattern`, behind
-`emitGuardedStore`). Increments are left unguarded:
+`emitGuardedStore`, which skips the store behind an unlikely branch; the
+comment block itself still says `rc.set` "steers a recognized-immediate
+access to a separate scratch word (an address select ...)", which is stale:
+the code branches around the store, and 0006 leaves that comment line as
+it is). Increments are left unguarded:
 
 ```
 //   In the immortal encoding on targets narrower than 64 bits,
@@ -112,7 +117,8 @@ release), skips immediates (`ReussirRcSetConversionPattern`, behind
 But the count word is 32 bits wide: `ReussirRcIncConversionPattern` uses
 `auto countType = rewriter.getI32Type();`, and the dummy is two `i32`s.
 Under TBI the increment is a plain `load i32; add 1; store i32` into the
-dummy, so the "unreachable" wrap takes only 2^32 references. Only the
+dummy, so the "unreachable" wrap takes only 2^32 − 1 net increments from
+the starting count of 2. Only the
 immortal encoding steers the increment's store (`steerNarrowImmortal`,
 which despite its name applies to every immortal-encoded taggable type,
 and so already guards the increment of the shared dummy). Bug 6 therefore
@@ -275,7 +281,14 @@ cores (this entry's own measurement), "up to 30%" (the patch message) and
   programs. The suspected cause is that the guard nests the unique branch
   one `scf.if` deeper, which hides some member releases from TokenReuse's
   search for tokens trapped in branches. Round 3 found both unchanged;
-  judged acceptable against a crash.
+  judged acceptable against a crash. The same nesting has the opposite
+  effect on [bug 7](07-phantom-reuse-donor.md)'s phantom donors: on
+  `l2r-local` the member releases of a matched node sit one `scf.if`
+  deeper, TokenReuse frees their tokens inside, and the node's own cell is
+  reused even where 0007 cannot fire (observed 2026-10-02 with
+  `repros/bug07b-call-before-branch.rr`: ratio 1.34-2.08 with the default
+  encoding, 5.61-11.37 with `--nullary-variant-encoding boxed`, which emits
+  no guard; commands and the remarks in bug 7's entry).
 
 **Effect on lean2rr.** A static cell is never freed or reused, even after
 2^32 references: the long loops above no longer crash.
@@ -289,7 +302,7 @@ like immediates (see "Tagged pointers from the allocator" in
 ## Upstream note
 
 Under the TBI nullary-variant encoding, `rc.inc` increments the static
-dummy box's 32-bit count unguarded, so 2^32 references to one nullary
+dummy box's 32-bit count unguarded, so about 2^32 references to one nullary
 constructor wrap it to 1. A release then frees or reuses the static dummy
 (SIGSEGV in `mi_free`), and the `assume(old >= 1)` after `rc.inc` becomes
 false. Repro: a loop that passes a one-element list to a function matching

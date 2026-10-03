@@ -48,7 +48,7 @@ is, in the [apply list](#applying-the-patches).
 | [3](03-global-alloc-align.md) | intended | Rust allocations take mimalloc's aligned path | speed only | runtime calls `mi_malloc` itself | none | - | - |
 | [4](04-recursive-type-compare.md) | bug | rrc recurses forever on two equal recursive types (SIGSEGV) | yes, rrc crash | driver retries without `--reuse-across-call` | 0004 | passed | yes |
 | [5](05-one-armed-if.md) | bug | TokenReuse crashes on a one-armed `if` (SIGSEGV) | yes, rrc crash | prelude panics avoid the shape; user code can still hit it | 0005 | passed | yes |
-| [6](06-static-count-wrap.md) | bug, with a flag workaround | a static cell is freed after 2^32 references | yes, crash | `--nullary-variant-encoding arch-independent` or `boxed` (not used: 0006 keeps the default encoding's speed) | 0006 | passed | yes |
+| [6](06-static-count-wrap.md) | bug, with a flag workaround | a static cell is freed after about 2^32 references | yes, crash | `--nullary-variant-encoding arch-independent` or `boxed` (not used: 0006 keeps the default encoding's speed) | 0006 | passed | yes |
 | [7](07-phantom-reuse-donor.md) | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (plan §5.5) | 0007 | passed (revised after round 2) | yes |
 | [8](08-padding-lift.md) | bug | padding "lift" gives LLVM a larger layout than Reussir's | no, shape never emitted | - | none yet | - | - |
 | [9](09-duplicate-bound-member.md) | bug | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | 0009 | passed (revised after round 2) | yes |
@@ -62,7 +62,7 @@ is, in the [apply list](#applying-the-patches).
 | [17](17-long-nat-block.md) | unclear | rrc memory is quadratic in a straight-line `Nat` function (build time) | yes, build memory | long tail paths and `let` values outlined, recursive functions included; `Array Nat` literals as tables | none | - | - |
 | [18](18-rrc-target-deps.md) | bug (build system) | the `rrc` build target alone does not link | no, Reussir's build only | build the default target | none yet | - | - |
 | [19](19-cell-of-value-record.md) | bug | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `Nat`/`Int` references in two cells; other `[value]` records boxed | none yet | - | - |
-| [20](20-statet-tower.md) | unclear | the MLIR inliner grows lean2rr's conversion code exponentially (build time) | yes, build time and memory (monad transformer towers did not build) | conversion, unboxing and uniform-code application functions marked `#[transform_anchor]` | none | - | - |
+| [20](20-statet-tower.md) | unclear | the MLIR inliner grows lean2rr's conversion code superlinearly (build time) | yes, build time and memory (monad transformer towers did not build) | conversion, unboxing and uniform-code application functions marked `#[transform_anchor]` | none | - | - |
 | [21](21-unterminated-placeholder.md) | bug | an unterminated `[:` in a polymorphic FFI texture is dropped | yes, wrong output (a string literal containing `[:` printed without it) | `[` escaped (`\x5b`) in the string literal table | 0016 | checked by the round-6 review (RV6L-01) | no |
 | [22](22-wildcard-wide-enum.md) | cost | a wildcard arm over a wide enum costs N^3 code (copied per constructor, releases expanded in line in each copy) | yes, build time (a derived BEq on 40 constructors: 9 minutes) | held wide values released out of line in wildcard arms (`l2r_sink`) | none | - | - |
 | [23](23-polyffi-link.md) | bug (build time) | the compiled polymorphic-FFI modules are linked one call each, quadratic in their number | yes, build time (a Std.Http program with 8241 instances: 65 minutes of linking) | none | 0017 | under review | no |
@@ -121,7 +121,8 @@ list.
 [`repros/`](repros/) has one repro per entry: a plain Reussir program
 (`bugNN-name.rr`), a Lean program built through lean2rr (`bugNN-name.lean`)
 where the bug needs lean2rr's output, a small generator (`bugNN-name.py`)
-where the program must be large, or a check script (bug 18). Each file
+where the program must be large, or a check script (bug 18), plus
+`bug07b-call-before-branch.rr`, a variant used in bug 7's entry. Each file
 starts with what it shows, the expected output and what Reussir ef922049
 does.
 
