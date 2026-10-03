@@ -560,7 +560,7 @@ elements; the conversion between them (`structConv`, `vecConv`) would pair
 exactly those fields. Instantiations of an inductive that differ only in
 phantom positions, and isomorphic inductives read through `unsafeCast` (a
 user list as `List`), are then not converted at all: no time, no copy, and
-the value keeps its identity. -/
+the value keeps its sharing. -/
 def retypable (a b : RR.Ty) : LowerM Bool := do
   if a == b then return false
   if !(← isBoundaryTy a) || !(← isBoundaryTy b) then return false
@@ -569,27 +569,6 @@ def retypable (a b : RR.Ty) : LowerM Bool := do
   | .app "RVec" _ => pure ()
   | _ => return false
   return (← retypableAux a b #[]).isSome
-
-/-- A number naming Reussir type `t` at run time (FNV-1a of its text), for
-`l2r_origin_back`. -/
-def typeCode (t : RR.Ty) : Nat := Id.run do
-  let mut h : UInt64 := 14695981039346656037
-  for c in t.render.toList do
-    h := (h ^^^ c.toNat.toUInt64) * 1099511628211
-  return h.toNat
-
-/-- The body of a structural conversion's entry function from `src` to
-`dst` (parameter `x`), around the conversion proper `worker`: a value
-converted from a `dst` (and unchanged since: the record holds it, so an
-update copies) is converted back to that very value; otherwise the new
-value records its origin (`leanrt::origin`). Natively there is one object:
-so `ptrAddrUnsafe` of the converted value is the original's, and a value
-that goes into uniform code and back is the same object (plan §9). -/
-def originWrap (src dst : RR.Ty) (worker x : String) : RR.Block :=
-  let v := RR.Expr.var x
-  .ofExpr (.ite (.call "l2r_origin_back" #[src] #[v, .atom (toString (typeCode dst))])
-    (.ofExpr (.call "l2r_origin_take" #[src, dst] #[v]))
-    (.ofExpr (.call "l2r_origin_note" #[src, dst] #[v, .call worker #[] #[v], .atom (toString (typeCode src))])))
 
 /-- How `structConv` converts one constructor of the source type: the
 target constructor's layout (`none`: no native value reads it, so the arm is
@@ -841,11 +820,9 @@ mutual
     | none => return none
 
   /-- The generated function converting an array with element storage `se`
-  to one with element storage `de` (cached), recording the origin of the
-  new array (`originWrap`). -/
+  to one with element storage `de` (cached): a new array. -/
   partial def vecConv (src dst : RR.Ty) (sr dr : ArrayRepr) : LowerM (Option String) := do
-    let nested := (← get).convNested
-    if let some f := (← get).vecConvs[(src, dst)]? then return some (if nested then f ++ "_w" else f)
+    if let some f := (← get).vecConvs[(src, dst)]? then return some f
     let f ← fresh "l2r_vconv_"
     modify fun s => { s with vecConvs := s.vecConvs.insert (src, dst) f }
     let x := sr.load (sr.call "get" #[.var "src", .var "i"])
@@ -853,11 +830,9 @@ mutual
     -- that the array is empty whenever this runs: an empty array that `cse`
     -- shared between two element types, or the array `Array.map` returns
     -- when it had nothing to map (Stage 3).
-    modify fun s => { s with convNested := true }
     let y ← match ← tryCoerce x sr.value dr.value with
       | some y => pure y
       | none => pure (.call "l2r_unreachable" #[dr.value] #[])
-    modify fun s => { s with convNested := nested }
     let go := f ++ "_go"
     let u64 := RR.Ty.named "u64"
     let loop : RR.Block := .ofExpr <| .ite (.atom "i < n")
@@ -869,9 +844,8 @@ mutual
         .call go #[] #[.var "src", .var "zero", .var "n", dr.call "empty" #[]]⟩
     modify fun s => { s with fns := s.fns ++ #[
       .fn go #[("src", src), ("i", u64), ("n", u64), ("acc", dst)] dst loop,
-      .fn (f ++ "_w") #[("src", src)] dst entry,
-      .fn f #[("src", src)] dst (originWrap src dst (f ++ "_w") "src")] }
-    return some (if nested then f ++ "_w" else f)
+      .fn f #[("src", src)] dst entry] }
+    return some f
 
   /-- Whether values of generated type `sn` can be read as values of `dn`
   (through `unsafeCast`, where Lean's representations coincide): the same
@@ -888,18 +862,17 @@ mutual
 
   /-- The generated function converting a thunk or task with state type `sz`
   to one with state type `dz` (same kind, value types differing only in
-  representation, as for `structConv`). The result is a new cell that
-  records the cell it was converted from, boxed, and that cell's address:
-  converting it back gives that very cell (a thunk crossing between typed
-  and uniform code in a loop does not build a chain of cells), its identity
-  is the original's (`ptrAddrUnsafe`, see `addrOf`; for a task also the
-  runtime's, `l2r_task_addr_S`), and keeping the original keeps that
-  address from being reused. A computed value is converted now (state
-  `convdone`). Otherwise the new cell is in state `conv`: its computation
-  forces the original and converts the value (so the original's
-  computation still runs at most once). A cell converted from a converted
-  one records the first original. `none` if the values are not
-  convertible. -/
+  representation, as for `structConv`): a new cell. A computed value is
+  converted now (state `done`). Otherwise the new cell is in state `conv`:
+  its computation forces the original and converts the value (so the
+  original's computation still runs at most once). It records the
+  original, boxed, so that converting it back gives that very cell (a
+  thunk crossing between typed and uniform code in a loop does not build a
+  chain of cells), and, for a task, the original's address: the copy's
+  identity for the runtime (`l2r_task_addr_S`), so its state, its
+  cancellation and its dependents are the original's. A cell converted
+  from a converted one records the first original. `none` if the values
+  are not convertible. -/
   partial def lazyConv (sz dz : String) : LowerM (Option String) := do
     let some (sk, st) := (← get).lazyInfos[sz]? | return none
     let some (dk, dt) := (← get).lazyInfos[dz]? | return none
@@ -918,14 +891,12 @@ mutual
     let srcBox ← boxVariant srcCell
     let dstBox ← boxVariant dstCell
     let u ← fresh "u"
-    let mkConv (o a : RR.Expr) : RR.Expr := .call "l2r_lcell_new" #[.named dz]
-      #[.ctor dz (some "conv") #[rawFnValue (.fn .unit dt) u (.ofExpr later), o, a]]
-    let ident : RR.Expr := .call "l2r_lcell_addr" #[.named sz] #[.var "c"]
-    let fresh' : RR.Block := ⟨#[("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"]),
-      ("a", some (.named "u64"), ident)], mkConv (.var "o") (.var "a")⟩
-    let doneConv : RR.Block := ⟨#[("w", some dt, now), ("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"]),
-      ("a", some (.named "u64"), ident)],
-      .call "l2r_lcell_new" #[.named dz] #[.ctor dz (some "convdone") #[.var "w", .var "o", .var "a"]]⟩
+    let g := rawFnValue (.fn .unit dt) u (.ofExpr later)
+    let addr : Array (String × Option RR.Ty × RR.Expr) :=
+      if sk then #[("a", some (.named "u64"), .call "l2r_lcell_addr" #[.named sz] #[.var "c"])] else #[]
+    let fresh' : RR.Block := ⟨#[("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"])] ++ addr,
+      .call "l2r_lcell_new" #[.named dz]
+        #[.ctor dz (some "conv") (#[g, .var "o"] ++ (if sk then #[.var "a"] else #[]))]⟩
     -- From a converted cell: its original if that has the target type,
     -- otherwise the original converted directly (through the `Box`
     -- converter, which knows every representation), so chains through
@@ -934,9 +905,8 @@ mutual
       { ty := boxName, ctor := some dstBox, binders := #[some "x"], body := .ofExpr (.var "x") },
       { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call (← unboxArrFn dstCell) #[] #[.var "o"]) }]
     let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[.named sz] #[.var "c"]) #[
-      lazyArm sz "done" #[some "v"] doneConv,
-      lazyArm sz "conv" #[none, some "o", some "a"] (.ofExpr back),
-      lazyArm sz "convdone" #[none, some "o", some "a"] (.ofExpr back),
+      lazyArm sz "done" #[some "v"] (.ofExpr (lazyDone dz now)),
+      lazyArm sz "conv" (#[none] ++ convTail sk (some "o")) (.ofExpr back),
       { ty := sz, ctor := none, binders := #[], body := fresh' }])
     modify fun s => { s with fns := s.fns.push (.fn name #[("c", srcCell)] dstCell body) }
     return some name
@@ -1219,24 +1189,15 @@ mutual
   modulo constructors); any other recursion is an explicit-stack loop
   (`convMachine`). -/
   partial def structConv (sn dn : String) : LowerM String := do
-    let entry := s!"l2r_conv_{sn}_{dn}"
-    -- Shared records have an identity: the entry records the origin.
-    let noted := (← isBoundaryTy (.named sn)) && (← isBoundaryTy (.named dn))
-    let fname := if noted then entry ++ "_w" else entry
-    let nested := (← get).convNested
-    let result := if nested then fname else entry
+    let fname := s!"l2r_conv_{sn}_{dn}"
     if (← get).fns.any (fun | .fn n .. => n == fname | _ => false) ||
-       (← get).convsInProgress.contains fname then return result
-    modify fun s => { s with convsInProgress := s.convsInProgress.insert fname, convNested := true }
-    if noted then
-      modify fun s => { s with fns := s.fns.push (.fn entry #[("x", .named sn)] (.named dn)
-        (originWrap (.named sn) (.named dn) fname "x")) }
-    let r ← structConvBody sn dn fname
-    modify fun s => { s with convNested := nested }
-    return if r then result else result
+       (← get).convsInProgress.contains fname then return fname
+    modify fun s => { s with convsInProgress := s.convsInProgress.insert fname }
+    structConvBody sn dn fname
+    return fname
 
-  /-- The body of `structConv`'s function `fname`; `true`. -/
-  partial def structConvBody (sn dn fname : String) : LowerM Bool := do
+  /-- The body of `structConv`'s function `fname`. -/
+  partial def structConvBody (sn dn fname : String) : LowerM Unit := do
     let some si := (← get).typeInfos[sn]? | throwError "lean2rr: no type {sn}"
     let group ← convGroup (sn, dn)
     let plans ← convSlots group
@@ -1244,7 +1205,7 @@ mutual
       slots.size ≤ 1 && slots.all fun sl => !sl.arr)
     if !selfOnly then
       convMachine fname group plans
-      return true
+      return
     let mut arms := #[]
     let mut structBody : Option RR.Block := none
     for (arm, _) in plans[0]! do
@@ -1260,7 +1221,6 @@ mutual
       | some b => b
       | none => .ofExpr (.mtch (.var "x") arms)
     modify fun s => { s with fns := s.fns.push (.fn fname #[("x", .named sn)] (.named dn) body) }
-    return true
 end
 
 /-- The field type of `[value]` struct `info` (natively the struct is its

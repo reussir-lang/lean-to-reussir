@@ -2,14 +2,11 @@
 returns the string held by the closed term `Nat.reprArray` (the same object
 every time, so it is shared: `dbgTraceIfShared` reports it); larger values
 build a fresh string. Checks the digits around the boundaries (127/128,
-2^63, 2^64), that updates of a shared result copy it, pointer equality of
-results computed twice, and `dbgTraceIfShared`. -/
+2^63, 2^64), that updates of a shared result copy it, and
+`dbgTraceIfShared`. -/
 
 @[noinline] def rep (n : Nat) : String := toString n
 @[noinline] def irep (n : Int) : String := toString n
-
-unsafe def peqImpl (a b : String) : Bool := ptrEq a b
-@[implemented_by peqImpl] opaque peq (a b : String) : Bool
 
 def main (args : List String) : IO Unit := do
   let k := args.length
@@ -30,9 +27,6 @@ def main (args : List String) : IO Unit := do
   for i in [0:2000] do
     acc := acc ++ rep ((i + k) % 10)
   IO.println s!"acc {acc.length} {acc.take 25 |>.copy}"
-  -- identity of results computed twice (written differently so that they
-  -- are not one value): natively the same object below 128
-  IO.println s!"ptrEq {peq (rep (7 + k)) (rep (k + 7))} {peq (rep (200 + k)) (rep (k + 200))}"
   -- dbgTraceIfShared: the table's string is shared, a fresh result is exclusive
   let e := dbgTraceIfShared "small" (rep (3 + k))
   let f := dbgTraceIfShared "large" (rep (300 + k))

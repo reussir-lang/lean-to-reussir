@@ -810,9 +810,10 @@ byte by byte (the same constructor and the same fields: scalars equal,
 pointers to the same objects) and `hash` hashes them, for the tables of
 `ShareCommon.State`. lean2rr's runtime implements `shareCommon` itself as
 the identity (it shares nothing; translation plan §5.8), and lean2rr's
-objects have no Lean layout to compare, so here an object equals only
-itself: the same answers for the same object, `false` (natively possibly
-`true`) for two distinct objects with the same fields. -/
+objects have no Lean layout to compare, so here objects are compared and
+hashed by `ptrAddrUnsafe`, which does not emulate identity (plan §9): at
+most the same cell is equal, `false` (natively possibly `true`) for two
+distinct objects with the same fields. -/
 
 @[export lean_sharecommon_eq]
 unsafe def shareCommonEq (a b : ShareCommon.Object) : Bool :=

@@ -338,10 +338,15 @@ with examples, is §10 of the translation plan.
 
 - **No parallelism** (see "How tasks run"). Output that depends on timing
   races between tasks can come out in another order (natively a race).
-- **Raw addresses:** casting an object to a number (`unsafeCast` to read an
-  address) gives a deterministic stand-in instead of a real address; the
-  parts of a value converted between representations are new objects for
-  `ptrEq`.
+- **Pointer identity and raw addresses** are not preserved: `ptrAddrUnsafe`
+  answers the address of the value's own cell, or a word computed from a
+  scalar value (`UInt64` and `Float` their bits), so `ptrEq`,
+  `ptrEqList` and `withPtrAddr` may answer otherwise than natively (a
+  value converted between representations is a new object, not `ptrEq` to
+  its original), but `ptrEq` answering `true` still means equal values,
+  and `IO.Ref.ptrEq` is exact. Casting an object to a number
+  (`unsafeCast` to read an address) gives a deterministic stand-in
+  instead of a real address.
 - **Startup order** of a few constants Lean compiled without recording an
   order (members of one `mutual` block that do not use each other, some
   macro-generated names) is chosen by lean2rr; visible only if their
@@ -353,7 +358,7 @@ with examples, is §10 of the translation plan.
   natively.
 - **Stubs:** `IO.getNumHeartbeats` is 0, `isExclusiveUnsafe` answers
   `false`, `shareCommon` shares nothing (and `ShareCommon.Object.eq` holds
-  only for the same object), a panic's backtrace line says the trace is
+  at most for the same object, by address), a panic's backtrace line says the trace is
   unavailable; the Windows-only time zone functions fail as they do
   natively on other systems.
 - **`import Lean` programs** (metaprogramming: the elaborator, the kernel,
@@ -459,8 +464,7 @@ soundness.
 | `jp-sink`, `jp-small` | join points moved to where they are used; small ones duplicated |
 | `state-machines` | loops through join points: entering the loop and every jump inside it allocate nothing |
 | `lazy-fields`, `nullary-scrutinee`, `sink-proj` | shapes that let Reussir reuse memory cells |
-| `fresh-rebuild` | in programs that never compare objects by address, the error arm of a monadic bind rebuilds its result, so Reussir reuses the cell on the success path |
-| `origin-free-reads` | in programs that never convert an array between representations, array reads skip a bookkeeping check |
+| `fresh-rebuild` | the error arm of a monadic bind rebuilds its freshly built result, so Reussir reuses the cell on the success path |
 
 Parts that look like optimizations but are required (each with its reason
 in the registry): the startup chain cut into chunks, loop state machines,
