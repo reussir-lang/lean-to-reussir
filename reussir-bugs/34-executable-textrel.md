@@ -4,7 +4,7 @@
 
 **Kind:** bug (link). **Status:** patched (0065), not applied yet (branch
 `l2r-final-0065` of `~/Documents/l2r-scratch/reussir-final`, on
-`l2r-final` cc8e5aa5); review pending. lean2rr works around it: its
+`l2r-final` cc8e5aa5); reviewed, no defect. lean2rr works around it: its
 driver passes `--relocation-mode pic` (below).
 
 **Verdict: bug.** `rrc --emit executable` (and `--emit dynlib`) links
@@ -142,7 +142,21 @@ no relocations.
   949,404 bytes; PIC code reaches some symbols through the GOT). Run time
   was not measured (a benchmark needs the user's go-ahead).
 
-**Review.** Pending.
+**Review.** RV8 bug34 (`rv8/reussir/bug34/FINDINGS.txt`): no defect, in
+0065 or in lean2rr's workaround. Static vs PIC builds of LeanBoolLoop,
+Binarytrees and Rbmap give instruction-identical functions once addresses
+are normalized (68k instructions, no new GOT load in any loop). The GOT is
+the same size, and the textures' TLS accesses are relaxed to the same
+local-exec sequences. The 92 relocations into read-only segments move into
+RELRO, and the outputs are identical. Two notes:
+- N1 (scope): `--emit obj` and `--emit staticlib` keep LLVM's static
+  default, so an object compiled without a mode and linked into a PIE by
+  hand still gets text relocations (28 lit RUN lines do this silently).
+  lean2rr does not use these outputs. The alternative is PIC by default for
+  every ELF output, as gcc, clang and rustc do.
+- N2: the `.text` size change (+0.9% to -0.4%) is GNU ld's Cortex-A53
+  erratum-843419 veneer padding moving with the layout, not code; the real
+  code change is 80 bytes of texture code.
 
 **Effect on lean2rr.** Its programs link without text relocations, with
 GNU ld or lld; x86-64 builds become possible. The code is
