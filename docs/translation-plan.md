@@ -694,12 +694,20 @@ are, and every small value is below every big one. An `Int` is the same,
 also in Lean's encoding: a value `i` in the `int32` range is
 `lean_box((unsigned)(int)i)` (its 32 bits, zero-extended, so a `Nat` below
 2^31 and the `Int` of the same value have the same word), any other value
-a big number. A big number is laid out as Lean's `lean_mpz_object`: the
-object header (the 32-bit count Reussir counts, then `m_cs_sz`, `m_other`
-and the tag `LeanMPZ`), then GMP's `mpz_t`, whose limbs GMP allocates; its
-operations are GMP's `mpz` functions, as in Lean's runtime. So C code
-written against `lean.h` could receive and return these words unchanged
-(calling a program's own C code is not supported for now, §10).
+a big number. A big number is lean2rr's own: one block holding the 32-bit
+count Reussir counts, 4 reserved bytes, the signed size (GMP's convention:
+the limbs in use, negated for a negative `Int`), the capacity, and then
+the limbs. Its operations are GMP's: `mpn` functions on the limbs, writing
+into an operand's block when it is unique (grown in place when it lacks
+room) or into a fresh block, and `mpz` functions on read-only views for
+the rare ones (`pow`, `gcd`, parsing, printing). Native Lean's
+`lean_mpz_object` is a header and an `mpz_t` whose limbs GMP allocates
+separately: one block saves an allocation, a free and a dependent load
+per big number, and a two-limb number takes 32 bytes instead of 56. The
+small words are exactly Lean's, so C code written against `lean.h` could
+receive and return them unchanged; a big number would be converted at
+that boundary (calling a program's own C code is not supported for now,
+§10).
 
 The difficulty is that Reussir, not lean2rr, inserts the reference
 counting: copying a handle increments the count at its address, dropping

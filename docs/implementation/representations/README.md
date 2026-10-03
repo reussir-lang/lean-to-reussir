@@ -6,8 +6,8 @@ the special cases behind those choices. The type table is in plan
 is in [`runtime/README.md`](../../../runtime/README.md).
 
 - [nat-int.md](nat-int.md): `Nat` and `Int` as one word in Lean's encoding
-  (tagged handles, Reussir patch 0050), fast paths, big numbers as
-  `lean_mpz_object`, literals, printing.
+  (tagged handles, Reussir patch 0050), fast paths, big numbers in one
+  block (header and limbs), literals, printing.
 - [records.md](records.md): generated types for inductives: unit, value
   enums and structs, field order, hidden fields, names.
 - [arrays.md](arrays.md): storage types, `ElemBox`, enumerations as

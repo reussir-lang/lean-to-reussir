@@ -58,7 +58,7 @@ Generated sections of the prelude (edit the generator, then run it):
 |---|---|---|
 | `Nat` | `Nat` = `leanrt::nat::LNat`, one word, declared `tagged` (Reussir patch 0050) | odd: the small value `(n << 1) \| 1`, n < 2^63; even: an owned `LBig` pointer (below) |
 | `Int` | `Int` = `leanrt::nat::LInt`, likewise | odd: `lean_box((unsigned)(int)i)` for i in the `int32` range; even: an owned `LBig` pointer |
-| big numbers | `LBig` = `Rc<BigZ>`, laid out as Lean's `lean_mpz_object` (count, `m_cs_sz`, `m_other`, tag `LeanMPZ`, then GMP's `mpz_t`) | GMP `mpz` operations, limbs allocated by GMP; normalized (only values outside the small ranges); only behind a `Nat`/`Int` word |
+| big numbers | `LBig`, one `mi_malloc` block: count `u32`, flags `u32`, signed size `i32` (limbs in use, negative for a negative value), capacity `u32`, then the limbs | GMP `mpn` operations on the limbs, in a unique operand's block (grown with `mi_realloc`) or a fresh one; `mpz` operations on read-only views for `pow`, `gcd`, parsing and printing; normalized (only values outside the small ranges); only behind a `Nat`/`Int` word |
 | `String` | `LStr` = `leanrt::string::LStr`, a pointer to one block: count, byte size, capacity, character count (32 bytes, as Lean's header), bytes | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write; grows by `realloc` (below) |
 | `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a transparent wrapper of `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types); freed without recursion (below); two allocations, a 32-byte counted box and the buffer (Lean: one block, 24-byte header) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` = `leanrt::tagvec::TagVec` | the elements' own words, one block with Lean's 24-byte header (below) |
@@ -96,9 +96,11 @@ all.
 **`Nat`/`Int`.** One word each, with Lean's exact encoding
 (`leanrt::nat`): an odd word is a small value, `lean_box(n)` for a `Nat`
 below 2^63 and `lean_box((unsigned)(int)i)` for an `Int` in the `int32`
-range; an even word is an owned reference to a big number laid out as
-Lean's `lean_mpz_object` (`leanrt::big`). C code written against `lean.h`
-could take and return these words unchanged. Reussir copies and drops them as handles of an opaque type declared
+range; an even word is an owned reference to a big number, one block
+with a 16-byte header and the limbs inline (`leanrt::big`; native Lean's
+`lean_mpz_object` keeps the limbs in a second allocation). C code written
+against `lean.h` could take and return the small words unchanged; a big
+number would be converted. Reussir copies and drops them as handles of an opaque type declared
 `#[ffi(rust = "::leanrt::nat::LNat", tagged)]`: with Reussir patch 0050 it
 counts only even words (`rc.inc` and the drop hook, `LNat`'s `Drop`, run
 only when the low bit is clear). The prelude's functions take each `Nat`

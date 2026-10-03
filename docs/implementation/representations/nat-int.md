@@ -15,9 +15,11 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 - **Why:** The earlier two-word `[value] enum { Small, Big(LBig) }` made
   every `Nat` field 16 bytes (native: 8; rbmap and records of `Nat`s now
   0.84x and 0.80x native peak memory, were 1.00x and 1.26x; mem-nat
-  a8fc2e2). Lean's exact encoding would also let C code written against
-  `lean.h` take and return the words unchanged, but calling a program's C
-  is not supported (the C FFI is parked: [../externs-ffi/c-ffi.md](../externs-ffi/c-ffi.md)).
+  a8fc2e2). Lean's encoding of the small values would also let C code
+  written against `lean.h` take and return them unchanged (a big number,
+  in lean2rr's own layout below, would be converted), but calling a
+  program's C is not supported (the C FFI is parked:
+  [../externs-ffi/c-ffi.md](../externs-ffi/c-ffi.md)).
 - **Where:** `runtime/prelude.rr` (`struct Nat`, `struct Int`, the Nat and
   Int sections); `runtime/leanrt/src/nat.rs`; plan
   [§5.1](../../translation-plan.md#51-type-translation) ("One-word `Nat`
@@ -104,26 +106,53 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `nat_pow`.
 - **Remove only if:** never.
 
-### Big numbers are laid out as Lean's `lean_mpz_object`
+### Big numbers are one block: a 16-byte header, then the limbs
 
-- **What:** `LBig = reussir_rt::rc::Rc<BigZ>`, allocated as a 24-byte
-  `BigObj`: the 32-bit count (Reussir's, at offset 0), `m_cs_sz = 24`,
-  `m_other = 0`, `m_tag = LeanMPZ` (250), written into the four bytes that
-  are padding to Reussir, then GMP's `mpz_t`, whose limbs GMP allocates.
-  The operations are GMP's `mpz_*` functions, in place when the first
-  operand is unique.
-- **Why:** Memory behaves as natively (bignum about 1.1x native, was
-  1.2-1.3x), and the tag goes into padding. C code could receive a big
-  `Nat` with no conversion, if calling a program's C were supported (it
-  is parked).
-- **Where:** `leanrt/src/big.rs`: `BigObj`, `wrap`, `binop`, `op_ui`;
-  `gmp.rs`.
-- **Remove only if:** another layout serves lean2rr better (Lean-layout
-  compatibility is not a requirement while the C FFI is parked).
-  Differences from native: counts follow Reussir's convention (only
-  Lean's single-threaded `m_rc > 0`), and the object comes from
-  `mi_malloc`, so a C-side `lean_dec_ref_cold`/`lean_free_object` would
-  have to go through lean2rr.
+- **What:** `LBig` is a pointer to one `mi_malloc` block: the 32-bit
+  count (Reussir's, at offset 0), 4 reserved bytes (`flags`, 0), the signed
+  size (GMP's convention: the limbs in use, negated for a negative value;
+  no zero top limb), the capacity, then the limbs inline (`mi_good_size`
+  rounds the capacity up to the allocator's size class). The frequent
+  operations (add, sub, mul, div/mod in the four Lean flavours, shifts,
+  bitwise, compare) call GMP's `mpn_*` functions on the limbs. A result
+  goes into a unique operand whose block has room for it (computed in
+  place where GMP allows, else in scratch limbs, on the stack up to 32,
+  and copied), else into a fresh block; a block grows (`mi_realloc`) only
+  when a result computed in place outgrows it (a carry). The rare
+  operations (`pow` of a big base, `gcd`, parsing, printing) give GMP's
+  `mpz_*` functions read-only views (`MPZ_ROINIT_N`) and copy the result
+  out of a temporary `mpz_t`. A power of two raised to `e` is one shifted
+  block (`big::pow2`), and `x ^ e` of a word base reads `x` through a
+  view of a stack limb (`big::u64_pow`).
+- **Why:** Native Lean's `lean_mpz_object` is a header and an `mpz_t`
+  whose limbs GMP allocates separately (glibc's `malloc`): two allocations
+  and two frees per big number, two dependent loads to reach the limbs,
+  and 56 bytes for a two-limb number (24 + glibc's 32-byte minimum chunk)
+  where one block takes 32. lean2rr's layouts serve its own programs
+  first; a big number handed to C code would be converted at that boundary
+  (the C FFI is parked). Measured on branch perf-big (allocation counts,
+  and peak RSS without transparent huge pages): a fresh big number is one
+  `mi_malloc` (was an object and one or two glibc calls); a million live
+  two-limb numbers peak at 49.5 MB (was 65.2; native 74.3); `fib 20000`
+  grows its numbers with 22 `mi_realloc`s (was 443 `realloc`s of GMP's
+  limbs). The classic Liasolver makes 21.3M blocks, 0.2M grows and no
+  glibc calls (was 16.8M objects, 17.8M `malloc`s and 12.6M `realloc`s);
+  its peak RSS and Bignum's stay within a few hundred KB of before (freed
+  pages mimalloc purges after a delay), below native's. Reusing an
+  operand without room would copy limbs that are about to be overwritten
+  (the capacity is the block's usable size, so `mi_realloc` moves it).
+  The `mpn` aliasing rules relied on (a result over a source exactly for
+  `add`/`sub`/`add_1`/`sub_1`/`mul_1`/`divrem_1`, shifts toward their
+  direction, separate memory for `mul`, `sqr`, `tdiv_qr`) are GMP's
+  documented ones, also used by its `mpz` code.
+- **Where:** `leanrt/src/big.rs`: `Obj`, `alloc`, `reserve`/`grow`,
+  `either`, `add_mag`, `sub_mag`, `mul`, `div`, `bitwise`, `view`,
+  `of_mpz`; `gmp.rs`; unit tests `big::tests` (`against_mpz` checks every
+  operation on unique and shared operands against GMP's `mpz` functions).
+- **Remove only if:** another layout serves lean2rr better. Differences
+  from native: counts follow Reussir's convention, the block comes from
+  `mi_malloc`, and C code reading a big number through `lean.h` would need
+  a converted `lean_mpz_object`.
 
 ### Literals: small below 2^63, big ones parsed from their decimal text
 
@@ -166,7 +195,7 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 
 - **What:** Built with `--cfg leanrt_count_bigs` (set through
   `L2R_LEANRT_RUSTFLAGS`, which gives leanrt its own build directory), a
-  program prints the big numbers made and freed at exit.
+  program prints the big numbers made, freed and grown in place at exit.
   `tests/runtime/nat-alloc-check.sh` checks with them that every big
   number `RtNatStress` makes is freed exactly once and that `RtNatConst`'s
   big constants are made once, at two sizes.
