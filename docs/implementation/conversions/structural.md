@@ -71,9 +71,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   element-wise loop (`vecConv`). When the elements cannot be converted
   (`Array String` to `Array Nat`), the element step is `unreachable`: only
   an empty array (shared by `cse`, or the result of mapping nothing)
-  reaches such a conversion. (The comment in `vecConv` and plan §5.1 still
-  give `Array Nat` to `Array Int` as the example; since ca9b64d `Nat`
-  converts to `Int`.)
+  reaches such a conversion. (`Array Nat` to `Array Int` converts element
+  by element: a `Nat` converts to an `Int`, since ca9b64d.)
 - **Why:** Lean's uniform-representation library code reinterprets
   `Array α` as `Array NonScalar` and back (011966c).
 - **Where:** `Lower/Conv.lean`: `vecCoerce`, `vecConv`;

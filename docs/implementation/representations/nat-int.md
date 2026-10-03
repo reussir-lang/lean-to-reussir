@@ -37,10 +37,8 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 - **Where:** `Lower/Values.lean`: `natLiteral`; `prelude.rr`:
   `l2r_big_of_decimal_lstr`; `leanrt/src/big.rs`: `of_decimal`.
 - **Remove only if:** rrc handles deep expressions; the flat call is
-  cheaper anyway. (Plan
-  [§5.4](../../translation-plan.md#54-let-return-literals) still describes
-  base-2^32 digits combined by runtime arithmetic; the code above is what
-  runs.)
+  cheaper anyway. Plan
+  [§5.4](../../translation-plan.md#54-let-return-literals).
 
 ### `Nat.repr` of 0..127 shares one string per number
 

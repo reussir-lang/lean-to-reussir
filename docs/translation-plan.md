@@ -131,11 +131,13 @@ its own state in the code-lowering context's extension slot
 (`CodeCtx.ext`), not in the core's.
 
 `Opt/Registry.lean` lists every pass in one place: Stage 2's edits of
-Lean's pass lists (two passes replaced, two not run, each with its
-reason); the optional passes, one line each (name, enabled by default,
-description, `install`), in installation order (it says what the order
-means for each kind of hook); and the parts that look optional but are
-not, with the reason: the startup chain's chunks (rrc's stack), J4's state
+Lean's pass lists (two passes replaced; three skipped in their place:
+`inferVisibility` and `toImpure`, which are not run, and `extractClosed`,
+which runs at the end; each with its reason); the optional passes, one
+line each (name, enabled by default, description, `install`), in
+installation order (it says what the order means for each kind of
+hook); and the parts that look optional but are not, with the reason:
+the startup chain's chunks (rrc's stack), J4's state
 machines (a loop through an outlined join point would use stack per
 iteration), Stage 3's type recovery from call sites (an array left at
 `lcAny` would be copied at every crossing), closed-term chains not cached
@@ -344,11 +346,12 @@ giving it the representation it assumes:
 - A `box(0)` placeholder is a value that is never inspected. It arrives as
   a unit-like value used at another type, or as `◾` at a relevant type.
   Stage 4 materializes it as the *zero* of the expected type: `0`, `false`,
-  the first constructor whose fields have zeros, a closure returning a zero,
-  an empty array. For `Nat`, `Bool` and enumerations this is exactly what
-  `box(0)` denotes in Lean. Only a type without a finite value gets
-  `unreachable`. A zero that would allocate (a string, an array, a record,
-  a closure) is built once and kept in a once-cell, like a constant
+  the first constructor whose fields have zeros, a function value returning
+  a zero (the nullary `z` variant, §5.3), an empty array. For `Nat`, `Bool`
+  and enumerations this is exactly what `box(0)` denotes in Lean. Only a
+  type without a finite value gets `unreachable`. A zero that would
+  allocate (a string, an array, a record, a reference, a boxed unit) is
+  built once and kept in a once-cell, like a constant
   (§5.12): `modify` stores one per update, and since a placeholder is never
   inspected, a shared value serves as well as a fresh one (optional pass
   `placeholder-cache`; without it each placeholder is built where it is
@@ -616,10 +619,15 @@ has on every path. Where the program does not determine the type, the
 binder keeps `lcAny` and uses `Box`, with conversions where it meets a
 precise type.
 
-Stage 3 also checks the structural facts Stage 4 relies on:
+Stage 4 relies on structural facts of Stage 2's output:
 - join points are not recursive, and jumps are in tail position;
 - no local functions remain;
 - every `cases` covers all constructors or has a default.
+Stage 3 does not check them. Lean's LCNF checker runs after every Stage 2
+pass (§3), and Stage 4 copes where a fact fails: a `cases` that misses
+constructors gets an `unreachable` arm (§5.5), a local function left over
+is lowered as a closure, and a jump to an unknown join point is an internal
+error of lean2rr.
 
 ---
 
@@ -860,10 +868,11 @@ its value is stored as `Box`.
 - When a structure built at a uniform type (for example a `List Box` coming
   out of polymorphically recursive code) meets code expecting the precise
   type (`List Nat`), the conversion is structural, element by element.
-  An array whose elements cannot be converted (`Array Nat` to `Array Int`)
-  must be empty when that happens: an empty array that `cse` shared between
-  two element types, or the result of mapping nothing. Its element step is
-  therefore `unreachable`.
+  An array whose elements cannot be converted (`Array String` to
+  `Array Nat`) must be empty when that happens: an empty array that `cse`
+  shared between two element types, or the result of mapping nothing. Its
+  element step is therefore `unreachable`. (`Array Nat` to `Array Int`
+  converts element by element: a `Nat` converts to an `Int`.)
   - *Loops, not recursion.* A conversion whose recursion goes through one
     field of each constructor (a list's tail, a snoc list's init) is a
     directly recursive function that Reussir compiles as a loop (tail
@@ -1061,8 +1070,11 @@ application appears.
   add bindings of its own: representation conversions, placeholders, and
   the bodies of duplicated join points (one copy per path).
 - Literals:
-  - `Nat` literals below 2^64 become `Nat::Small`; bigger ones are built
-    from base-2^32 digits with runtime multiplication and addition.
+  - `Nat` literals below 2^64 become `Nat::Small`; a bigger one is parsed
+    by the runtime from its decimal digits, kept in the string literal
+    table: `l2r_nat_norm(l2r_big_of_decimal_lstr(l2r_str_lit(id)))`
+    (`natLiteral`). One flat call: a nested arithmetic expression per limb
+    overflowed rrc's stack for literals of thousands of digits.
   - `UIntN` literals become typed Reussir literals.
   - String literals become `l2r_str_lit(id)`: a runtime function generated
     with the program, which builds the string from a table of Rust byte
@@ -1366,9 +1378,12 @@ J3 (J4 when an outlined body tail-calls the declaration).
 
 ### 5.8 Externs and runtime calls
 
-Every extern the program reaches must have an entry in the extern table, and
-all missing ones are reported at once. An entry gives the Reussir
-implementation:
+An extern call becomes a call of the prelude function named after the
+extern's C symbol (or generated glue, below). lean2rr keeps no table of
+the externs it supports and does not check that the prelude defines the
+function: when it does not, rrc reports an unknown function (§10, "Not
+supported"); `lean2rr --emit externs` lists the externs a program calls.
+The prelude function is:
 - inline Reussir code, for fast paths such as small-`Nat` addition with an
   overflow check;
 - or a call into the runtime crate (§6).
@@ -1400,10 +1415,14 @@ Rules:
   helper as arguments. That keeps the runtime independent of generated type
   names. `Array.mk` and `Array.toList` are generated loops.
 - **Externs implemented in Lean.** Many externs' C symbols are provided
-  by an `@[export sym]` Lean definition (`String.Internal.*`, the `IO.Error`
-  constructors, `lean_string_intercalate`, …): Lean's runtime calls back
-  into compiled Lean code. lean2rr calls that definition directly and
-  compiles it like any other, so its semantics are exactly Lean's.
+  by an `@[export sym]` Lean definition (`String.Internal.*`,
+  `Substring.Raw.Internal.*`, `lean_string_intercalate`, …): Lean's runtime
+  calls back into compiled Lean code. lean2rr calls that definition
+  directly (`Mono.redirectTarget`) and compiles it like any other, so its
+  semantics are exactly Lean's. Lean's other exports are not externs of the
+  program: the `IO.Error` builders `lean_mk_io_error_*`, which Lean's C
+  runtime calls, are reached through lean2rr's own glue
+  (`ensureIOErrorBuilders`, `ioErrorFn`; fallible IO, below).
 - **Fallible IO** (files and the file system): the runtime primitive
   records its outcome in a last-error slot; `l2r_io_finish` turns it into
   `EST.Out.ok` with the payload (converted: unit, handle, `Metadata`, an

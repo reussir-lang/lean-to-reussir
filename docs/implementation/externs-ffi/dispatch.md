@@ -18,10 +18,9 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `Lower/Externs.lean`: `externSymbol`, `externParamPassed`;
   `runtime/prelude.rr`. `lean2rr --emit externs` lists the externs a
   program calls (`Emit/Program.lean`: `externReport`).
-- **Remove only if:** never. (Plan
-  [§5.8](../../translation-plan.md#58-externs-and-runtime-calls) says
-  missing externs are reported by lean2rr, all at once; the code leaves
-  that to rrc, as §10's "Not supported" says.)
+- **Remove only if:** never. Plan
+  [§5.8](../../translation-plan.md#58-externs-and-runtime-calls) and §10
+  ("Not supported").
 
 ### Externs that Lean implements in Lean are compiled from Lean
 

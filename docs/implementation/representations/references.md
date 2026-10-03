@@ -17,9 +17,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `Lower/LazyForce.lean`: `refNew`; `Lower/Externs.lean`: `refGlue`,
   `refCellOp`; `runtime/prelude.rr`: `l2r_rc_get`, `l2r_rc_set`,
   `l2r_rc_swap`.
-- **Remove only if:** never. (`runtime/README.md`'s type table still
-  lists `LRef<E>` for `ST.Ref`, and says `LRef` backs promises; generated
-  code no longer uses `LRef` at all: promises hold an `LCell`.)
+- **Remove only if:** never. (`LRef<T>` and the prelude's `l2r_ref_*`
+  are no longer used by generated code: promises hold an `LCell`.)
 
 ### `Nat` and `Int` references keep a tagged word and a big-number cell
 
