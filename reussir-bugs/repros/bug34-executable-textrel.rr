@@ -1,0 +1,23 @@
+// Bug 34: `rrc --emit executable` without `--relocation-mode` (as lean2rr's
+// scripts/l2r.py calls it) compiles static code but links it as a
+// position-independent executable (rustc's default product). A closure's
+// vtable, a constant table of code addresses, then sits in read-only
+// `.rodata` with absolute relocations, and the PIE needs text relocations:
+// GNU ld adds DT_TEXTREL (the loader writes into the text segment at
+// start-up), lld refuses ("relocation R_AARCH64_ABS64 cannot be used against
+// local symbol; recompile with -fPIC"). On x86-64 the static code's 32-bit
+// absolute addresses do not link into a PIE at all.
+// Command: rrc THIS -o OUT --emit executable -O aggressive; readelf -d OUT
+// Expected: no TEXTREL; prints 6.
+// Reussir ef922049 (aarch64, GNU ld): TEXTREL in the dynamic section; prints 6.
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+#[ffi(import)]
+fn seed() -> u64 [{ std::hint::black_box(3u64) }];
+// One of two closures, chosen at run time: an indirect call through a vtable.
+fn pick(i : u64) -> u64 -> u64 {
+    if i == 0 { |x : u64| x + 1 } else { |x : u64| x * 2 }
+}
+fn ap(f : u64 -> u64, x : u64) -> u64 { f(x) }
+#[main]
+fn main() { say(ap(pick(seed() % 2), seed())); }

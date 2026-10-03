@@ -1,0 +1,118 @@
+From 315216bad8acd4e43fb494c7ca3526cdaa990067 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 3 Oct 2026 17:30:45 -0400
+Subject: [PATCH] l2r-local: bug 34: compile link products position-independent
+ by default
+
+`rrc --emit executable` (and `dynlib`) links through rustc, whose default
+products are a position-independent executable and a shared object. The
+code it links was compiled with `--relocation-mode default`, LLVM's
+default relocation model, which on ELF is static. Static code addresses
+data absolutely: a closure vtable, a constant table of code addresses,
+goes to `.rodata` with R_AARCH64_ABS64 relocations, which a PIE can only
+honour by patching the read-only segment at load time. GNU ld does so
+silently on aarch64: the executable gets DT_TEXTREL (the loader makes the
+text segment writable to relocate it; lean2rr's programs all had it), and
+lld refuses ("relocation R_AARCH64_ABS64 cannot be used against local
+symbol; recompile with -fPIC"). On x86-64, static code also holds 32-bit
+absolute addresses (R_X86_64_32) that no linker accepts in a PIE. Reussir's
+own tests pass `--relocation-mode pic` to every executable build, and
+`rene` passes `pic` unless a profile says otherwise ("shared objects and
+position-independent executables need it"); rrc's own default did not.
+
+When the mode is left at `default` and the product is an executable or a
+dynlib, compile position-independent code. The vtable then sits in
+`.data.rel.ro`, relocated at load time like any PIE's, and the text has
+no relocations. An explicit mode, and every non-linked output, keep their
+meaning.
+
+Test: codegen/executable_pic_default.rr (a closure vtable at -O none,
+built without `--relocation-mode`: no TEXTREL in the dynamic section).
+---
+ crates/reussir-compiler/src/driver.rs         | 16 +++++++++++--
+ crates/reussir-compiler/src/driver/cli.rs     |  3 +++
+ .../codegen/executable_pic_default.rr         | 24 +++++++++++++++++++
+ 3 files changed, 41 insertions(+), 2 deletions(-)
+ create mode 100644 tests/integration/codegen/executable_pic_default.rr
+
+diff --git a/crates/reussir-compiler/src/driver.rs b/crates/reussir-compiler/src/driver.rs
+index 3e01b77f..a18712c9 100644
+--- a/crates/reussir-compiler/src/driver.rs
++++ b/crates/reussir-compiler/src/driver.rs
+@@ -20,7 +20,7 @@ use std::process::ExitCode;
+ use palc::Parser;
+ 
+ use crate::package;
+-use crate::{TargetMachine, TargetSpec, emit_to_file, parse_llvm_ir};
++use crate::{RelocMode, TargetMachine, TargetSpec, emit_to_file, parse_llvm_ir};
+ use reussir_backend::melior::ir::Module;
+ use reussir_codegen::source::FileId;
+ use reussir_core::in_arena;
+@@ -222,7 +222,19 @@ fn run(cli: &Cli) -> Result<bool, String> {
+         );
+     }
+     let opt = parse_opt(&cli.opt)?;
+-    let reloc = parse_reloc(&cli.relocation_mode)?;
++    let reloc = match parse_reloc(&cli.relocation_mode)? {
++        // The link step builds what rustc builds by default: a
++        // position-independent executable, or a shared object. Their code
++        // must be position-independent too: LLVM's default for ELF is static
++        // code, whose absolute addresses (a closure vtable in `.rodata`, or on
++        // x86-64 a 32-bit address in the code) need text relocations in a PIE
++        // or do not link at all. As `rene` does, link products default to
++        // PIC; an explicit mode is kept.
++        RelocMode::Default if matches!(target, Stage::Executable | Stage::Dynlib) => {
++            RelocMode::Pic
++        }
++        mode => mode,
++    };
+     let spec = TargetSpec {
+         triple: cli.target_triple.clone(),
+         cpu: cli.target_cpu.clone(),
+diff --git a/crates/reussir-compiler/src/driver/cli.rs b/crates/reussir-compiler/src/driver/cli.rs
+index 053b3fac..b3f6689c 100644
+--- a/crates/reussir-compiler/src/driver/cli.rs
++++ b/crates/reussir-compiler/src/driver/cli.rs
+@@ -127,6 +127,9 @@ pub(crate) struct Cli {
+     pub(crate) opt: String,
+ 
+     /// Relocation model: `default`, `pic`, `static`, or `dynamic-no-pic`.
++    /// `default` is the target's default, except for `executable` and
++    /// `dynlib`, which are linked as position-independent products and so
++    /// default to `pic`.
+     #[arg(long = "relocation-mode", default_value = "default")]
+     pub(crate) relocation_mode: String,
+ 
+diff --git a/tests/integration/codegen/executable_pic_default.rr b/tests/integration/codegen/executable_pic_default.rr
+new file mode 100644
+index 00000000..6fb38642
+--- /dev/null
++++ b/tests/integration/codegen/executable_pic_default.rr
+@@ -0,0 +1,24 @@
++// REQUIRES: linux
++// `rrc --emit executable` links a position-independent executable (rustc's
++// default product), so without `--relocation-mode` it compiles the program
++// position-independent too. LLVM's own default on ELF is static code: a
++// closure vtable, a table of code addresses, then sat in `.rodata`, and the
++// PIE needed text relocations (DT_TEXTREL: GNU ld wrote them on aarch64, lld
++// refused with "relocation R_AARCH64_ABS64 cannot be used against local
++// symbol"); on x86-64 the code's 32-bit absolute addresses did not link at
++// all. An explicit `--relocation-mode` is kept as given.
++
++// RUN: %rrc %s -o %t.exe --emit executable -O none %rrc_linker
++// RUN: %t.exe
++// RUN: %llvm-readobj --dynamic-table %t.exe | %FileCheck %s
++
++// CHECK: DynamicSection [
++// CHECK-NOT: TEXTREL
++
++fn pick(i : u64) -> u64 -> u64 {
++    if i == 0 { |x : u64| x + 1 } else { |x : u64| x * 2 }
++}
++fn ap(f : u64 -> u64, x : u64) -> u64 { f(x) }
++
++#[main]
++fn main() { let r = ap(pick(1), 3); }
+-- 
+2.43.0
+

@@ -15,7 +15,8 @@ whose patch 0014 the runtime needs to build.
   rejected programs, use after free, a missed optimization (7) and a
   missing feature (13) (1, 2, 4, 5, 6, 7, 8, 9/14, 12, 13, 15, 19, 21), and
   the drain-end hook (patch 0040). Entries 24 to 33 need nothing from
-  lean2rr (table below).
+  lean2rr; 34 needs `--relocation-mode pic` in `scripts/l2r.py` until
+  patch 0065 is applied (not done yet; table below).
 - [build-time.md](build-time.md): build-time costs and bugs (10, 11, 16,
   17, 18, 20, 22, 23).
 - [limitations.md](limitations.md): Reussir behaviour that is not a bug
@@ -68,3 +69,4 @@ either way.
 | [31](../../../reussir-bugs/31-deep-expression-stack.md) | `Outline` bounds nesting | 0063, applied | n/a |
 | [32](../../../reussir-bugs/32-emit-mlir-size.md) | none (affects `--emit mlir` only) | none (cost) | n/a |
 | [33](../../../reussir-bugs/33-rc-trailing-text.md) | none (hand-written MLIR only) | 0064, applied | n/a |
+| [34](../../../reussir-bugs/34-executable-textrel.md) | none yet (`scripts/l2r.py` could pass `--relocation-mode pic`) | 0065, not applied yet | needed until 0065 is applied |

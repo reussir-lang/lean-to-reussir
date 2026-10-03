@@ -536,7 +536,20 @@ bug33() {
     else say_line OTHER 33 "rrc exit $RC: $(grep -m1 -o "error.\{0,120\}" "$o.log")"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33"
+bug34() {
+    # Built as lean2rr builds: --emit executable, no --relocation-mode.
+    rr bug34-executable-textrel.rr 34 -O aggressive
+    if [ $RC != 0 ]; then say_line OTHER 34 "$(build_fail 34)" "-O aggressive"; return; fi
+    if ! command -v readelf > /dev/null; then say_line SKIPPED 34 "no readelf"; return; fi
+    exe 34
+    local tr
+    tr=$(readelf -d "$WORK/out/34" 2> /dev/null | grep -c TEXTREL)
+    if [ "$OUT_TXT" != 6 ]; then say_line OTHER 34 "prints '$OUT_TXT' ($(signame $EXIT)), expected 6" "-O aggressive"
+    elif [ "$tr" -gt 0 ]; then say_line REPRODUCES 34 "the executable needs text relocations (DT_TEXTREL); prints 6" "-O aggressive"
+    else say_line FIXED 34 "no text relocations; prints 6" "-O aggressive"; fi
+}
+
+ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33 34"
 SLOW=" 06 10 11 16 17 20 23 "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

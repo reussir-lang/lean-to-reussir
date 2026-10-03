@@ -46,7 +46,8 @@ branch `l2r-local-pre-final`.)
 Column *Patch*: "none" marks an entry that stays unpatched (the reason is
 in its file). Column *Review*: the adversarial review round and its result
 ([Review](#review)). Column *Applied*: whether the patch is on
-`./reussir`'s `l2r-local` (all 35 are, since 2026-10-03).
+`./reussir`'s `l2r-local` (all 35 of the apply list are, since
+2026-10-03; 0065 is not yet).
 
 | # | Kind | Effect | Affects lean2rr output? | lean2rr workaround | Patch | Review | Applied |
 |---|---|---|---|---|---|---|---|
@@ -83,11 +84,12 @@ in its file). Column *Review*: the adversarial review round and its result
 | [31](31-deep-expression-stack.md) | bug | rrc overflows its stack on deeply nested expressions | no, lean2rr bounds nesting | - | 0063 | rv8/reussir/e (+ round 2): no correctness defect; RV8RE-02 (`ulimit -v`) fixed | yes |
 | [32](32-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected; large programs cannot be dumped | dump smaller programs | none | - | - |
 | [33](33-rc-trailing-text.md) | bug (tooling) | the rc and ref type parser drops the text after a comma (`!reussir.rc<i64 rigid, atomic>` reads as `!reussir.rc<i64 rigid>`) | no, hand-written MLIR only | - | 0064 | rv8/reussir/e/round2: no defect | yes |
+| [34](34-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes: every lean2rr binary has `DT_TEXTREL` on aarch64; with lld or on x86-64 it would not link | none yet (`l2r.py` could pass `--relocation-mode pic`) | 0065 | pending | no |
 
-In numbers: 33 entries. 30 are patched by 33 patches (0013 to 0015 for
+In numbers: 34 entries. 31 are patched by 34 patches (0013 to 0015 for
 bug 13, 0002 and 0019 for bug 2, 0032 and 0033 for bug 11; 0009 fixes
-bugs 9 and 14), all applied; 3 stay documented only: 3 (intended), 25
-and 32 (costs). The two other patches, 0040 and 0050, fix no bug
+bugs 9 and 14), all applied but 0065 (bug 34, not yet applied); 3 stay
+documented only: 3 (intended), 25 and 32 (costs). The two other patches, 0040 and 0050, fix no bug
 ([local additions](local-additions.md)). Reviews: every patch passed its
 round.
 
@@ -150,6 +152,9 @@ Order and dependencies:
   0032 and 0034 edit the archive list of `lib/CAPI/CMakeLists.txt` after
   0025.
 - 0012, 0017 and 0060 to 0064 also apply alone.
+- 0065 (bug 34) is not on the list yet: it was made on `l2r-final`
+  cc8e5aa5 (the list above) and is on branch `l2r-final-0065` of
+  `~/Documents/l2r-scratch/reussir-final`; it applies after 0064.
 - lean2rr's runtime needs 0014 to build (`leanrt::drop` uses
   `reussir_rt::drop`, the pending stack 0014 adds to Reussir's runtime),
   uses 0040 when present (a weak symbol), and its prelude needs 0050
@@ -284,10 +289,13 @@ statuses (03, 25 and 32 REPRODUCES, all others FIXED; the timing lines of
     bug 31   FIXED       compiles, prints 32004007   [-O aggressive]
     bug 32   REPRODUCES  --emit mlir: K = 10: 2133 KB, K = 12: 8532 KB (3.99x for two more levels)
     bug 33   FIXED       rrc -x mlir rejects !reussir.rc<i64 rigid, atomic>: expected '>'
+    bug 34   REPRODUCES  the executable needs text relocations (DT_TEXTREL); prints 6   [-O aggressive]
 
 (`run.sh` prints lean2rr's flags in full; they are abbreviated here.) Every
 patched entry shows FIXED. `03` (intended), `25` and `32` (costs, not
-patched) show REPRODUCES. Two lines changed with this run's script:
+patched) show REPRODUCES, and `34`, whose patch 0065 is not applied yet
+(on `l2r-final-0065` the line reads `bug 34   FIXED       no text
+relocations; prints 6`). Two lines changed with this run's script:
 
 - **17.** The first version of the measure compared rrc's memory at
   N = 500 and N = 250 and called at most 1.6x linear; with 0031 it printed
@@ -325,6 +333,7 @@ finding X" or by finding IDs are scratch files outside this repository, in
 | 0050 | mem-nat review, RV8 | `mem/nat/review/FINDINGS.txt`, `rv8/nat/FINDINGS.txt` | no defect (the optional hardening is in) |
 | 0060-0063 | RV8 (e) | `rv8/reussir/e/FINDINGS.txt` (its RV8E-NN cited as RV8RE-NN) | no correctness defect; RV8RE-01 (0060: poison and tagged immediates blocked sound clones, low) and RV8RE-02 (0063: panic under `ulimit -v`, low) fixed in the amended patches; a latent hazard of 0062 noted in bug 30 |
 | 0060, 0063 (amended), 0064 | RV8 (e) round 2 | `rv8/reussir/e/round2/FINDINGS.txt` | no defect: RV8RE-01/02 fixed; returning bottom for poison and tagged immediates checked sound in every position; 0064 rejects nothing rrc prints (four lean2rr dumps, about 5.3M rc types, re-read and re-printed byte-identically); the 0063 fallback keeps exit codes and messages under `ulimit -v` |
+| 0065 | - | - | pending |
 
 The integration of the first 34 patches
 (`~/Documents/l2r-scratch/reussir-final`, then at `5c0514e3`) was checked
