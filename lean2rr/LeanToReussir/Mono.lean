@@ -793,27 +793,100 @@ and value arguments: both call the same instance with the same arguments,
 and Stage 2's `cse` (Lean's) merges them as natively. Where the later call's
 result is used at its own type, the first call's value is converted to it
 (§5.1). The two values agree after erasure: a value that exists at two
-types holds nothing at the positions where the types differ (`none`, `[]`),
-except a function, which can be one closure at two function types
-(`List.take k`); lean2rr has no conversion between two function types, so
-a call whose result types differ inside function types on both sides is
-not aligned (plan §10). Calls without such a partner are left as they
-are. -/
+types holds nothing at the positions where the types differ (`none`, `[]`;
+nothing is both a `String` and a function), except where both types make
+room for something a conversion cannot reach: a function, one closure at
+two function types natively (`List.take k`, a structure with a field
+`run : α → α`), for which lean2rr has no conversion, or the contents of a
+runtime object (a thunk, a task, a reference). A call is aligned only when
+`alignable` shows that its two result types differ nowhere else (plan
+§10). Calls without such a partner are left as they are. -/
 
-/-- Do `a` and `b`, the types of one value at two instantiations, differ
-inside function types on both sides (`Nat → Nat` and `String → String`,
-`Option (Nat → Nat)` and `Option (String → String)`)? Elsewhere a difference
-holds no value (nothing is both a `String` and a function). -/
-partial def differInFunctions (a b : Expr) : Bool :=
-  let a := a.consumeMData
-  let b := b.consumeMData
-  if a == b then false
-  else match a, b with
-    | .forallE .., .forallE .. => true
-    | .app .., .app .. =>
-      a.getAppFn == b.getAppFn && a.getAppNumArgs == b.getAppNumArgs &&
-        (a.getAppArgs.zip b.getAppArgs).any fun (x, y) => differInFunctions x y
-    | _, _ => false
+/-- Runtime objects whose type arguments classify contents that the
+conversions of §5.1 do not reach: two instantiations of one of them are
+never converted into each other. -/
+def opaqueTypes : List Name := [``Task, ``Thunk, ``ST.Ref, ``IO.Promise]
+
+/-- The field types of the constructors of inductive `iv` at arguments
+`args`, as in base LCNF (dependent fields at `lcAny`). -/
+def ctorFieldTypesAt (iv : InductiveVal) (args : Array Expr) : CoreM (Array (Array Expr)) := do
+  iv.ctors.toArray.mapM fun ctor => do
+    let mut ty ← instantiateForall (← getOtherDeclBaseType ctor []) args[:iv.numParams].toArray
+    let mut out := #[]
+    repeat
+      match ty.headBeta with
+      | .forallE _ d b _ => out := out.push d; ty := b.instantiate1 anyExpr
+      | _ => break
+    return out
+
+mutual
+/-- Is everything a value of type `t` can hold first-order data, so that a
+`Box` converts to it and back: no function, no runtime object, nothing
+unclassified? Inductives are followed into their fields (`seen` stops at
+types already followed). -/
+partial def firstOrderData (t : Expr) : StateT (Std.HashSet (Expr × Expr)) CoreM Bool := do
+  let t := t.consumeMData.headBeta
+  if t == anyExpr || t.isErased then return true
+  if (← get).contains (t, t) then return true
+  modify (·.insert (t, t))
+  let .const n _ := t.getAppFn | return false
+  let args := t.getAppArgs
+  if opaqueTypes.contains n then return false
+  match (← getEnv).find? n with
+  | some (.inductInfo iv) =>
+    if args.any (·.isLambda) then return false
+    for fs in ← ctorFieldTypesAt iv args do
+      for f in fs do
+        unless ← firstOrderData f do return false
+    return true
+  -- A constant type without arguments (`floatSpec.float`) has nothing to vary.
+  | _ => return args.isEmpty
+
+/-- Can a value that has, after erasure, both type `a` and type `b` (the
+results of one call at two instantiations) be converted from `a` to `b`
+without meeting a part that has no conversion? Where the types differ, either
+no value has both (different type constructors, a function and data), or
+everything there must be first-order data. Two function types that differ,
+two instantiations of a runtime object, a type-former argument, an index or
+anything unclassified: no. Inductives are compared field by field at their
+arguments (`seen` stops at pairs already compared). -/
+partial def alignable (a b : Expr) : StateT (Std.HashSet (Expr × Expr)) CoreM Bool := do
+  let a := a.consumeMData.headBeta
+  let b := b.consumeMData.headBeta
+  if a == b then return true
+  if (← get).contains (a, b) then return true
+  modify (·.insert (a, b))
+  if a.isErased || b.isErased then return true
+  if a == anyExpr then return ← firstOrderData b
+  if b == anyExpr then return ← firstOrderData a
+  match a, b with
+  | .forallE .., .forallE .. => return false
+  -- Nothing is both a function and a value of another type.
+  | .forallE .., _ | _, .forallE .. => return true
+  | _, _ =>
+    let (.const n _, .const m _) := (a.getAppFn, b.getAppFn) | return false
+    -- Values of different type constructors: nothing has both types.
+    if n != m then return true
+    let as := a.getAppArgs
+    let bs := b.getAppArgs
+    if as.size != bs.size || opaqueTypes.contains n then return false
+    let some (.inductInfo iv) := (← getEnv).find? n | return false
+    for i in [:as.size] do
+      if as[i]! != bs[i]! && (i ≥ iv.numParams || as[i]!.isLambda || bs[i]!.isLambda) then
+        return false
+    let fas ← ctorFieldTypesAt iv as
+    let fbs ← ctorFieldTypesAt iv bs
+    for (fa, fb) in fas.zip fbs do
+      for (x, y) in fa.zip fb do
+        unless ← alignable x y do return false
+    -- A parameter that differs but shows in no field classifies contents the
+    -- fields do not hold (a runtime object): unclassified.
+    for i in [:iv.numParams] do
+      if as[i]! != bs[i]! then
+        let fis ← ctorFieldTypesAt iv (as.set! i bs[i]!)
+        if fis == fas then return false
+    return true
+end
 
 /-- The calls of `code` that Lean's mono-phase `cse` merges into an earlier
 call of the same declaration at other type arguments, each with the
@@ -839,9 +912,9 @@ partial def erasedMerges (code : Code .pure) :
         let typeArgs (as : Array (Arg .pure)) := as.filterMap fun
           | .type t _ => some t
           | _ => none
-        if g == f && args.size == args₀.size && typeArgs args != typeArgs args₀ &&
-            !differInFunctions ty₀ ty then
-          out := out.insert m (us, args₀)
+        if g == f && args.size == args₀.size && typeArgs args != typeArgs args₀ then
+          if (← (alignable ty₀ ty).run' {}) then
+            out := out.insert m (us, args₀)
   return out
 where
   /-- State: the variable each merged variable stands for and the
