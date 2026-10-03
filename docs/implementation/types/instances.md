@@ -44,14 +44,17 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   scope, a local function's body in its own (Lean's `cse` runs after lambda
   lifting); `@[never_extract]` calls apart. Not aligned: constructors,
   extern instances, instances (dictionary builders), and a call whose two
-  result types are not `alignable`: followed into the field types of their
-  inductives (instantiated, with a visited set), they must differ only at
-  positions no value has at both types (different type constructors, a
-  function and data) or that hold first-order data; two differing function
-  types, two instantiations of `Task`, `Thunk`, `ST.Ref` or `IO.Promise`, a
-  differing type-former (`fun`) argument or index, a parameter that shows in
-  no field, or anything unclassified refuse. Nothing changes in an instance
-  without such a pair.
+  result types are not `alignable`: compared as `toMono` sees them
+  (`monoHead` at every level: a trivial structure is its field's type,
+  `Decidable` is `Bool`, `NonScalar` is `lcAny`) and followed into the field
+  types of their inductives (instantiated, with a visited set), they must
+  differ only at positions no value has at both types (two different
+  inductive types, a function and a value of an inductive type) or that hold
+  first-order data; two differing function types, two instantiations of
+  `Task`, `Thunk`, `ST.Ref` or `IO.Promise`, a differing type-former (`fun`)
+  argument or index, a parameter that shows in no field, a type that is not
+  an inductive (`Quot`, an opaque type), or anything unclassified refuse.
+  Nothing changes in an instance without such a pair.
 - **Why:** Natively the two calls are one after erasure and run once; two
   instances ran twice, so a panic or trace in them printed twice (XT-6,
   leanrs A482; the dictionary and `Subtype` shapes: review XT6-02).
@@ -61,13 +64,15 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   closure at two function types natively, and lean2rr has no conversion
   between two function types: aligning such a call made the closure
   unusable at the other type (review XT6-01: an unreachable panic; XT6-03:
-  the same through a structure field). A wrong alignment crashes, a missed
-  one only runs a call twice (plan §10), so anything unclassified refuses.
-- **Where:** `Mono.lean`: `alignable`, `firstOrderData`, `erasedMerges`,
+  the same through a structure field; XT6-04: through a one-field structure,
+  which mono identifies with its field, so the merge matches it with a bare
+  function). A wrong alignment crashes, a missed one only runs a call twice
+  (plan §10), so anything unclassified refuses.
+- **Where:** `Mono.lean`: `monoHead`, `alignable`, `firstOrderData`, `erasedMerges`,
   `alignErasedMerges`, `monoInstance`; plan
   [§2.3](../../translation-plan.md#23-instances), §10 "Merging after
   erasure"; tests `RtCseAcrossTypes`, `RtCseFnValues`, `RtCseResidual`,
-  `RtCseFnField`, `RtCseFnResult` (expected to fail).
+  `RtCseFnField`, `RtCseFnTrivial`, `RtCseFnResult` (expected to fail).
 - **Remove only if:** Stage 1 stops making an instance per type, or Lean's
   `cse` starts comparing type arguments.
 

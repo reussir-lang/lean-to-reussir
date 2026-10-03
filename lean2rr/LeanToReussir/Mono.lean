@@ -807,6 +807,11 @@ conversions of §5.1 do not reach: two instantiations of one of them are
 never converted into each other. -/
 def opaqueTypes : List Name := [``Task, ``Thunk, ``ST.Ref, ``IO.Promise]
 
+/-- Builtin types without parameters whose representation is a scalar or
+plain data, although a field is opaque to Lean (`Float`'s
+`floatSpec.float`). -/
+def atomicDataTypes : List Name := [``Float, ``Float32]
+
 /-- The field types of the constructors of inductive `iv` at arguments
 `args`, as in base LCNF (dependent fields at `lcAny`). -/
 def ctorFieldTypesAt (iv : InductiveVal) (args : Array Expr) : CoreM (Array (Array Expr)) := do
@@ -819,19 +824,43 @@ def ctorFieldTypesAt (iv : InductiveVal) (args : Array Expr) : CoreM (Array (Arr
       | _ => break
     return out
 
+/-- `t` with the identifications of `toMono` (`toMonoType`, `toMonoTypeKeep`)
+applied at its head, until none applies: a trivial structure (`Subtype`,
+`Fin`, a one-field structure, a one-method class) is its field's type,
+`Decidable` is `Bool`, `NonScalar` and `PNonScalar` are `lcAny`. `none`
+when the field's type depends on another field (unclassified). -/
+partial def monoHead (t : Expr) (fuel : Nat := 32) : CoreM (Option Expr) := do
+  let t := t.consumeMData.headBeta
+  let .const n _ := t.getAppFn | return some t
+  if n == ``Decidable then return some (mkConst ``Bool)
+  if n == ``NonScalar || n == ``PNonScalar then return some anyExpr
+  let some info ← hasTrivialStructure? n | return some t
+  if fuel == 0 then return none
+  let ctorType ← getOtherDeclBaseType info.ctorName []
+  let some field := (getParamTypes (← instantiateForall ctorType t.getAppArgs[:info.numParams].toArray))[info.fieldIdx]?
+    | return none
+  if field.hasLooseBVars then return none
+  monoHead field (fuel - 1)
+
+/-- Is the head of `t` (after `monoHead`) an inductive type? -/
+def inductiveHead (t : Expr) : CoreM Bool := do
+  let .const n _ := t.getAppFn | return false
+  return (← getEnv).find? n matches some (.inductInfo _)
+
 mutual
 /-- Is everything a value of type `t` can hold first-order data, so that a
-`Box` converts to it and back: no function, no runtime object, nothing
-unclassified? Inductives are followed into their fields (`seen` stops at
-types already followed). -/
+`Box` converts to it and back: no function (also behind a trivial
+structure), no runtime object, nothing unclassified? Inductives are followed
+into their fields (`seen` stops at types already followed). -/
 partial def firstOrderData (t : Expr) : StateT (Std.HashSet (Expr × Expr)) CoreM Bool := do
-  let t := t.consumeMData.headBeta
+  let some t ← monoHead t | return false
   if t == anyExpr || t.isErased then return true
   if (← get).contains (t, t) then return true
   modify (·.insert (t, t))
   let .const n _ := t.getAppFn | return false
   let args := t.getAppArgs
   if opaqueTypes.contains n then return false
+  if atomicDataTypes.contains n then return true
   match (← getEnv).find? n with
   | some (.inductInfo iv) =>
     if args.any (·.isLambda) then return false
@@ -839,20 +868,22 @@ partial def firstOrderData (t : Expr) : StateT (Std.HashSet (Expr × Expr)) Core
       for f in fs do
         unless ← firstOrderData f do return false
     return true
-  -- A constant type without arguments (`floatSpec.float`) has nothing to vary.
-  | _ => return args.isEmpty
+  | _ => return false
 
 /-- Can a value that has, after erasure, both type `a` and type `b` (the
 results of one call at two instantiations) be converted from `a` to `b`
-without meeting a part that has no conversion? Where the types differ, either
-no value has both (different type constructors, a function and data), or
-everything there must be first-order data. Two function types that differ,
-two instantiations of a runtime object, a type-former argument, an index or
-anything unclassified: no. Inductives are compared field by field at their
-arguments (`seen` stops at pairs already compared). -/
+without meeting a part that has no conversion? Both types are compared as
+`toMono` sees them (`monoHead` at every level), since the values were found
+equal on mono values. Where the types differ, either no value has both
+(two different inductive types, a function and a value of an inductive
+type), or everything there must be first-order data. Two function types
+that differ, two instantiations of a runtime object, a type-former argument,
+an index, a type that is not an inductive or anything unclassified: no.
+Inductives are compared field by field at their arguments (`seen` stops at
+pairs already compared). -/
 partial def alignable (a b : Expr) : StateT (Std.HashSet (Expr × Expr)) CoreM Bool := do
-  let a := a.consumeMData.headBeta
-  let b := b.consumeMData.headBeta
+  let some a ← monoHead a | return false
+  let some b ← monoHead b | return false
   if a == b then return true
   if (← get).contains (a, b) then return true
   modify (·.insert (a, b))
@@ -861,16 +892,19 @@ partial def alignable (a b : Expr) : StateT (Std.HashSet (Expr × Expr)) CoreM B
   if b == anyExpr then return ← firstOrderData a
   match a, b with
   | .forallE .., .forallE .. => return false
-  -- Nothing is both a function and a value of another type.
-  | .forallE .., _ | _, .forallE .. => return true
+  -- Nothing is both a closure and a value of an inductive type.
+  | .forallE .., _ => inductiveHead b
+  | _, .forallE .. => inductiveHead a
   | _, _ =>
     let (.const n _, .const m _) := (a.getAppFn, b.getAppFn) | return false
-    -- Values of different type constructors: nothing has both types.
+    let some (.inductInfo iv) := (← getEnv).find? n | return false
+    unless ← inductiveHead b do return false
+    -- Values of two different inductive types: nothing has both types (the
+    -- values were compared with constructor names).
     if n != m then return true
     let as := a.getAppArgs
     let bs := b.getAppArgs
     if as.size != bs.size || opaqueTypes.contains n then return false
-    let some (.inductInfo iv) := (← getEnv).find? n | return false
     for i in [:as.size] do
       if as[i]! != bs[i]! && (i ≥ iv.numParams || as[i]!.isLambda || bs[i]!.isLambda) then
         return false

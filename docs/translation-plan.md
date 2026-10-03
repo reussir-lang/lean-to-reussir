@@ -250,18 +250,21 @@ function types natively (`List.take k` as `List Nat → List Nat` and as
 `List String → List String`, a structure with a field `run : α → α`), for
 which lean2rr has no conversion, or the contents of a runtime object (a
 thunk, a task, a reference). So a call is aligned only if its two result
-types, followed into the field types of their inductives, differ only at
-positions that no value has at both types or that hold first-order data;
-two function types, two instantiations of a runtime object, a type-former
-argument, an index or anything else unclassified prevent it
-(`Mono.alignable`; §10). Constructors are not renamed by Stage 1 and merge in Stage 2
+types, compared as `toMono` sees them (a trivial structure, such as a
+one-field structure around a function, is its field's type, `Decidable` is
+`Bool`) and followed into the field types of their inductives, differ only
+at positions that no value has at both types (two different inductive
+types, a function and a value of an inductive type) or that hold
+first-order data; two function types, two instantiations of a runtime
+object, a type-former argument, an index, a type that is not an inductive
+or anything else unclassified prevent it (`Mono.alignable`; §10). Constructors are not renamed by Stage 1 and merge in Stage 2
 as they are; extern instances and instances (dictionary builders) compute
 nothing observable and keep their per-type instances. Lean's closed-term
 cache compares types, so closed calls at two types in two declarations stay
 two closed terms, natively too; after the merge, one declaration's call
 reads the other's closed term as natively (XT-6, leanrs A482; review XT6-01,
-XT6-02, XT6-03; tests `RtCseAcrossTypes`, `RtCseFnValues`, `RtCseResidual`,
-`RtCseFnField`).
+XT6-02, XT6-03, XT6-04; tests `RtCseAcrossTypes`, `RtCseFnValues`,
+`RtCseResidual`, `RtCseFnField`, `RtCseFnTrivial`).
 
 ### 2.4 Type classes
 
@@ -2824,7 +2827,8 @@ Each item says what differs and when.
   both calls run and a trace or panic in them prints twice: a call whose
   results at the two types differ where a function, a runtime object or
   something unclassified can be (an `Option (α → α)` or a structure with a
-  field `run : α → α` at `Nat` and at `String`: lean2rr converts no function
+  field `run : α → α` at `Nat` and at `String`, a one-field structure around
+  a `Nat → Nat` and a `String → String`: lean2rr converts no function
   between two function types; test `RtCseFnResult`, expected to fail), and
   a call inside a local function merged with one outside it, which Lean
   merges only where it inlined the local function first.
