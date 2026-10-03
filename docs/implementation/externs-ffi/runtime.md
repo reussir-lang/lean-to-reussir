@@ -30,7 +30,10 @@ Paths are relative to the repository root.
   apart, plus 2000 random bit patterns) fails on 40 of its 103 lines when
   the fallback runs; leanrt's unit test `float::libm::tests::cbrt_is_the_c_librarys`
   (`tests/runtime/leanrt-unit.sh`, a binary without libm imports) fails
-  with the old lookup.
+  with the old lookup. lean2rr executables are dynamic PIEs, and libm.so.6
+  is one of their load-time dependencies. A fully static build would have
+  no libm.so.6 to open and would silently fall back to Rust's `cbrt`, so if
+  static linking is ever added, it must link glibc's `cbrt` some other way.
 - **Where:** `runtime/leanrt/src/float.rs`: `libm::resolve`, `libm::cbrt`,
   `libm::cbrtf`; `runtime/prelude.rr`: `cbrt`, `cbrtf`.
 - **Remove only if:** `compiler_builtins` stops defining `cbrt`/`cbrtf` on
