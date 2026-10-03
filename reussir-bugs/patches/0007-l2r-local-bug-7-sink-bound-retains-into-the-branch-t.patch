@@ -1,0 +1,390 @@
+From 5f6d37d5d358fa6f6dedf3ca1673706ba4446611 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Wed, 30 Sep 2026 16:17:33 -0400
+Subject: [PATCH] l2r-local: bug 7: sink bound retains into the branch that
+ releases the scrutinee
+
+A match whose scrutinee stays live on some path (returned or stored whole)
+retains its bound members where the arm binds them, before any branch, and
+releases the scrutinee inside the branch. `fuseArm` gives up at the branch,
+so the paths that release the scrutinee drop it through the transitive glue
+(member decrements with rc >= 2, since the members were retained), and the
+paths that keep it release the members it still holds. None of those member
+decrements can ever free a cell, yet they are offered as exact-size reuse
+tokens and win the most-recent tie-break over the scrutinee's own cell: the
+construction allocates and the real free cell is deallocated (a BST insert
+whose equal arm returns the node: 5x slower; Std.TreeMap insert: ~13
+allocations per insertion instead of 1).
+
+When the scan of an arm reaches a single-shot branch (scf.if with else,
+scf.index_switch, record/nullable dispatch) that releases the scrutinee or a
+bound member, sink the bound retains into every region and continue the
+scan there. Paths that release the scrutinee get the destructuring
+decrement; paths that release a member get an adjacent retain/release pair
+that inc-dec cancellation removes. Sound because only retains, reads and
+pure ops may sit between the retains and the branch (no release of any
+value, no call, no other region), so whatever held a member at the retain's
+old position (the scrutinee, or the enclosing cell a borrowed scrutinee
+belongs to) still holds it at the new one; the retained values have no use
+there but borrows; and the branch runs exactly one region once. Inside a
+region the retains are fused into the scrutinee's release only if nothing
+before that release consumes a member (a use other than a borrow or a
+retain): the transferred reference only replaces the retain if the
+retained reference is still unused at the release.
+---
+ .../RcDispatchFusion/RcDispatchFusion.cpp     | 178 +++++++++++++++++-
+ .../conversion/rc_dispatch_fusion.mlir        | 136 +++++++++++++
+ 2 files changed, 312 insertions(+), 2 deletions(-)
+
+diff --git a/lib/Transformation/RcDispatchFusion/RcDispatchFusion.cpp b/lib/Transformation/RcDispatchFusion/RcDispatchFusion.cpp
+index 62a74e31..010e3d3c 100644
+--- a/lib/Transformation/RcDispatchFusion/RcDispatchFusion.cpp
++++ b/lib/Transformation/RcDispatchFusion/RcDispatchFusion.cpp
+@@ -71,6 +71,7 @@
+ #include <llvm/Support/ErrorHandling.h>
+ #include <mlir/Analysis/AliasAnalysis.h>
+ #include <mlir/Dialect/Func/IR/FuncOps.h>
++#include <mlir/Dialect/SCF/IR/SCF.h>
+ #include <mlir/IR/Builders.h>
+ #include <mlir/Interfaces/CallInterfaces.h>
+ #include <mlir/Interfaces/ControlFlowInterfaces.h>
+@@ -99,6 +100,177 @@ std::optional<int64_t> extractedMemberIndex(mlir::Value value,
+   return project.getIndex().getSExtValue();
+ }
+ 
++// Whether `op` runs exactly one of its regions, exactly once. A retain moved
++// from just before such an op to the start of every region still executes
++// once on every path. Loops are excluded, as is an `scf.if` without an else
++// (its implicit empty path would lose the retain).
++bool isSingleShotBranch(mlir::Operation *op) {
++  if (auto ifOp = llvm::dyn_cast<mlir::scf::IfOp>(op)) {
++    if (ifOp.getElseRegion().empty())
++      return false;
++  } else if (!llvm::isa<mlir::scf::IndexSwitchOp, ReussirRecordDispatchOp,
++                        ReussirNullableDispatchOp>(op)) {
++    return false;
++  }
++  return llvm::all_of(op->getRegions(), [](mlir::Region &region) {
++    return region.hasOneBlock();
++  });
++}
++
++bool sinkBoundRetainsIntoBranch(mlir::Operation *branch,
++                                llvm::ArrayRef<ReussirRcIncOp> boundIncs,
++                                int64_t tag,
++                                mlir::TypedValue<RcType> scrutinee,
++                                mlir::Value payloadRef);
++
++// Whether `op`, between the retains of `members` and the scrutinee's release,
++// consumes a member (any use but a borrow or a retain). The fused retains'
++// references are replaced by the ones the scrutinee's box transfers at its
++// release, so a member consumed before that (e.g. built into a cell that is
++// then released) would give away a reference that no longer exists and drop
++// the member's count below its holders, the scrutinee's box among them.
++// Releases of other values are harmless: each drops a reference its holder
++// owns, and the scrutinee's box keeps every member alive until its release.
++bool consumesFusedMember(mlir::Operation &op,
++                         llvm::ArrayRef<ReussirRcIncOp> members) {
++  if (llvm::isa<ReussirRcBorrowOp, ReussirRcIncOp>(op))
++    return false;
++  return llvm::any_of(members, [&](ReussirRcIncOp inc) {
++    return llvm::is_contained(op.getOperands(), inc.getRcPtr());
++  });
++}
++
++// Continue an arm's scan in one region of a single-shot branch whose first
++// ops are the bound retains sunk into it. This mirrors `fuseArm`: the first
++// release of the scrutinee in the block becomes a destructuring decrement
++// over the sunk members (unless an op before it consumes one, see
++// `consumesFusedMember`), a nested single-shot branch receives the retains in
++// turn, and anything else stops the scan. Stopping leaves the retains at the
++// block's start, which is equivalent to their original position (see
++// `sinkBoundRetainsIntoBranch`).
++void fuseSunkRetains(mlir::Block &block, llvm::ArrayRef<ReussirRcIncOp> sunk,
++                     int64_t tag, mlir::TypedValue<RcType> scrutinee,
++                     mlir::Value payloadRef) {
++  for (mlir::Operation &op : block) {
++    if (auto candidate = llvm::dyn_cast<ReussirRcDecOp>(op)) {
++      if (candidate.getRcPtr() == scrutinee) {
++        if (candidate.isDestructuring() ||
++            (candidate.getNullableToken() &&
++             !candidate.getNullableToken().use_empty()))
++          return;
++        for (mlir::Operation &prev : block) {
++          if (&prev == candidate.getOperation())
++            break;
++          if (consumesFusedMember(prev, sunk))
++            return;
++        }
++        llvm::SmallVector<int64_t> bound;
++        for (ReussirRcIncOp inc : sunk)
++          bound.push_back(*extractedMemberIndex(inc.getRcPtr(), payloadRef));
++        mlir::OpBuilder builder(candidate);
++        candidate.setDestructureTagAttr(builder.getIndexAttr(tag));
++        candidate.setBoundMembersAttr(builder.getDenseI64ArrayAttr(bound));
++        for (ReussirRcIncOp inc : sunk)
++          inc.erase();
++        return;
++      }
++      if (extractedMemberIndex(candidate.getRcPtr(), payloadRef))
++        return;
++      continue;
++    }
++    if (llvm::is_contained(op.getOperands(), mlir::Value(scrutinee)) &&
++        !llvm::isa<ReussirRcBorrowOp>(op))
++      return;
++    if (op.getNumRegions() > 0 || llvm::isa<mlir::CallOpInterface>(op)) {
++      sinkBoundRetainsIntoBranch(&op, sunk, tag, scrutinee, payloadRef);
++      return;
++    }
++  }
++}
++
++// The frontend retains a match's bound members where the arm binds them,
++// before any branch in the arm. When the scrutinee stays live on some path
++// (stored whole, returned), its release sits inside such a branch, out of
++// `fuseArm`'s reach, and the paths that keep the scrutinee release the
++// members they do not use while the scrutinee still holds them. Both are
++// pure count traffic, and the member releases, which can never free
++// anything, are offered to token reuse as donors and outrank the
++// scrutinee's own cell. Sinking the retains into every region of the branch
++// recovers the destructuring shape on the paths that release the scrutinee
++// and leaves an adjacent retain/release pair (cancelled by
++// `reussir-inc-dec-cancellation`) on the paths that release the member.
++//
++// The move is sound because nothing between a retain's old and new position
++// can free a box or observe a count: only retains, reads and pure operations
++// may sit between the first retain and `branch` (no release of any value,
++// no call, no other region), so the scrutinee — or, when it is a member
++// borrowed from an enclosing match, the box that owns it — still holds each
++// member when its retain runs, and the retained values have no use before
++// `branch` other than borrows (a match on a member reads it through the
++// scrutinee's reference). The branch runs exactly one region once, so every
++// path still performs each retain exactly once, before the region's first
++// operation. Returns whether the IR changed.
++bool sinkBoundRetainsIntoBranch(mlir::Operation *branch,
++                                llvm::ArrayRef<ReussirRcIncOp> boundIncs,
++                                int64_t tag,
++                                mlir::TypedValue<RcType> scrutinee,
++                                mlir::Value payloadRef) {
++  if (boundIncs.empty() || !isSingleShotBranch(branch))
++    return false;
++  mlir::Operation *first = branch;
++  for (ReussirRcIncOp inc : boundIncs)
++    if (inc->getBlock() == branch->getBlock() && inc->isBeforeInBlock(first))
++      first = inc;
++  // A release in the window could drop the last owner of the scrutinee (a
++  // borrowed member of an enclosing match dies with its parent) and free
++  // the members before their delayed retains.
++  for (mlir::Operation *op = first; op != branch; op = op->getNextNode())
++    if (!llvm::isa<ReussirRcIncOp, ReussirRefAcquireOp, ReussirRcBorrowOp,
++                   ReussirRefProjectOp, ReussirRefLoadOp,
++                   ReussirRecordCoerceOp, ReussirRecordTagOp>(op) &&
++        (op->getNumRegions() > 0 || !mlir::isMemoryEffectFree(op)))
++      return false;
++  llvm::SmallDenseSet<int64_t> indices;
++  for (ReussirRcIncOp inc : boundIncs) {
++    if (inc->getBlock() != branch->getBlock() ||
++        !indices.insert(*extractedMemberIndex(inc.getRcPtr(), payloadRef))
++             .second)
++      return false;
++    for (mlir::Operation *user : inc.getRcPtr().getUsers())
++      if (user != inc && !llvm::isa<ReussirRcBorrowOp>(user) &&
++          user->getBlock() == branch->getBlock() &&
++          inc->isBeforeInBlock(user) && user->isBeforeInBlock(branch))
++        return false;
++  }
++  // Only move retains into a branch that releases the scrutinee or a bound
++  // member on some path; elsewhere the move gains nothing.
++  bool releases =
++      branch
++          ->walk([&](ReussirRcDecOp dec) {
++            if (dec.getRcPtr() == scrutinee ||
++                llvm::any_of(boundIncs, [&](ReussirRcIncOp inc) {
++                  return inc.getRcPtr() == dec.getRcPtr();
++                }))
++              return mlir::WalkResult::interrupt();
++            return mlir::WalkResult::advance();
++          })
++          .wasInterrupted();
++  if (!releases)
++    return false;
++
++  for (mlir::Region &region : branch->getRegions()) {
++    mlir::Block &block = region.front();
++    mlir::OpBuilder builder = mlir::OpBuilder::atBlockBegin(&block);
++    llvm::SmallVector<ReussirRcIncOp> sunk;
++    for (ReussirRcIncOp inc : boundIncs)
++      sunk.push_back(llvm::cast<ReussirRcIncOp>(builder.clone(*inc)));
++    fuseSunkRetains(block, sunk, tag, scrutinee, payloadRef);
++  }
++  for (ReussirRcIncOp inc : boundIncs)
++    inc.erase();
++  return true;
++}
++
+ // Fuse one arm: find the scrutinee's release, collect the bound retains
+ // before it, and rewrite. Returns whether the arm was fused.
+ bool fuseArm(mlir::Region &region, int64_t tag,
+@@ -137,9 +309,11 @@ bool fuseArm(mlir::Region &region, int64_t tag,
+         !llvm::isa<ReussirRcBorrowOp>(op))
+       return false;
+     // Region-bearing or opaque ops before the release: bail (the release
+-    // may be conditional or the box may escape).
++    // may be conditional or the box may escape), unless the release is in a
++    // single-shot branch the bound retains can sink into.
+     if (op.getNumRegions() > 0 || llvm::isa<mlir::CallOpInterface>(op))
+-      return false;
++      return sinkBoundRetainsIntoBranch(&op, boundIncs, tag, scrutinee,
++                                        payloadRef);
+   }
+   if (!dec || dec.isDestructuring())
+     return false;
+diff --git a/tests/integration/conversion/rc_dispatch_fusion.mlir b/tests/integration/conversion/rc_dispatch_fusion.mlir
+index 9784c600..6a94702d 100644
+--- a/tests/integration/conversion/rc_dispatch_fusion.mlir
++++ b/tests/integration/conversion/rc_dispatch_fusion.mlir
+@@ -85,4 +85,140 @@ module @test attributes {dlti.dl_spec = #dlti.dl_spec<#dlti.dl_entry<i64, dense<
+     }
+     return %r : !rclist
+   }
++
++  // The scrutinee stays live on one path (returned), so its release sits in
++  // a branch. The bound retain sinks into both regions: the releasing path
++  // destructures, and on the keeping path the retain meets the member's
++  // release (a decrement that could never free: the box still holds the
++  // member) and cancels.
++  // FUSE-LABEL: func.func @take_or_keep
++  // FUSE: reussir.ref.load
++  // FUSE-NOT: reussir.rc.inc
++  // FUSE: scf.if
++  // FUSE-NEXT: reussir.rc.dec(%arg0 : {{.+}}) : {{.+}}boundMembers = array<i64: 1>, destructureTag = 0 : index}
++  // FUSE: } else {
++  // FUSE-NEXT: reussir.rc.inc(%[[TAIL:[0-9]+]] :
++  // FUSE-NEXT: reussir.rc.dec(%[[TAIL]] :
++  // CANCEL-LABEL: func.func @take_or_keep
++  // CANCEL-NOT: reussir.rc.inc
++  // CANCEL: boundMembers = array<i64: 1>, destructureTag = 0 : index
++  // CANCEL-NOT: reussir.rc.inc
++  // CANCEL-NOT: reussir.rc.dec
++  // CANCEL: return
++  func.func @take_or_keep(%l: !rclist, %c: i1) -> !rclist {
++    %ref = reussir.rc.borrow (%l : !rclist) : !reussir.ref<!listty>
++    %r = reussir.record.dispatch (%ref : !reussir.ref<!listty>) -> !rclist {
++      [0] -> {
++        ^bb0(%cons: !reussir.ref<!consty>):
++        %slot = reussir.ref.project (%cons : !reussir.ref<!consty>) [1] : !reussir.ref<!rclist>
++        %tail = reussir.ref.load (%slot : !reussir.ref<!rclist>) : !rclist
++        reussir.rc.inc (%tail : !rclist)
++        %x = scf.if %c -> !rclist {
++          %t = reussir.rc.dec (%l : !rclist) : !reussir.nullable<!tk>
++          scf.yield %tail : !rclist
++        } else {
++          %t = reussir.rc.dec (%tail : !rclist) : !reussir.nullable<!tk>
++          scf.yield %l : !rclist
++        }
++        reussir.scf.yield %x : !rclist
++      }
++      [1] -> {
++        ^bb1(%nil: !reussir.ref<!nilty>):
++        reussir.scf.yield %l : !rclist
++      }
++    }
++    return %r : !rclist
++  }
++
++  // The inner match's scrutinee is the outer cell's tail, which is only
++  // borrowed: the outer cell's release before the branch may free it, and
++  // `rest` with it. The retain of `rest` must stay ahead of that release, so
++  // nothing sinks into the branch.
++  // FUSE-LABEL: func.func @nested_parent_release
++  // FUSE: reussir.rc.inc(%[[REST:[0-9]+]] :
++  // FUSE-NEXT: reussir.rc.dec(%arg0 :
++  // FUSE: scf.if
++  // FUSE-NOT: reussir.rc.inc
++  // FUSE: return
++  func.func private @consume(!rclist) -> i1
++  func.func @nested_parent_release(%l: !rclist, %c: i1) -> i1 {
++    %ref = reussir.rc.borrow (%l : !rclist) : !reussir.ref<!listty>
++    %r = reussir.record.dispatch (%ref : !reussir.ref<!listty>) -> i1 {
++      [0] -> {
++        ^bb0(%cons: !reussir.ref<!consty>):
++        %slot = reussir.ref.project (%cons : !reussir.ref<!consty>) [1] : !reussir.ref<!rclist>
++        %tail = reussir.ref.load (%slot : !reussir.ref<!rclist>) : !rclist
++        %tref = reussir.rc.borrow (%tail : !rclist) : !reussir.ref<!listty>
++        %r2 = reussir.record.dispatch (%tref : !reussir.ref<!listty>) -> i1 {
++          [0] -> {
++            ^bb0(%cons2: !reussir.ref<!consty>):
++            %slot2 = reussir.ref.project (%cons2 : !reussir.ref<!consty>) [1] : !reussir.ref<!rclist>
++            %rest = reussir.ref.load (%slot2 : !reussir.ref<!rclist>) : !rclist
++            reussir.rc.inc (%rest : !rclist)
++            %t = reussir.rc.dec (%l : !rclist) : !reussir.nullable<!tk>
++            %x = scf.if %c -> i1 {
++              %y = func.call @consume(%rest) : (!rclist) -> i1
++              scf.yield %y : i1
++            } else {
++              %t2 = reussir.rc.dec (%rest : !rclist) : !reussir.nullable<!tk>
++              scf.yield %c : i1
++            }
++            reussir.scf.yield %x : i1
++          }
++          [1] -> {
++            ^bb1(%nil2: !reussir.ref<!nilty>):
++            %t = reussir.rc.dec (%l : !rclist) : !reussir.nullable<!tk>
++            reussir.scf.yield %c : i1
++          }
++        }
++        reussir.scf.yield %r2 : i1
++      }
++      [1] -> {
++        ^bb1(%nil: !reussir.ref<!nilty>):
++        %t = reussir.rc.dec (%l : !rclist) : !reussir.nullable<!tk>
++        reussir.scf.yield %c : i1
++      }
++    }
++    return %r : i1
++  }
++
++  // The sunk retain's value is consumed (built into a cell that is then
++  // released) before the scrutinee's release: fusing would let that release
++  // drop `tail` below its holders (the scrutinee still points at it), so the
++  // keeping path cancels and the releasing path keeps its retain.
++  // FUSE-LABEL: func.func @consume_before_release
++  // FUSE-NOT: boundMembers
++  // FUSE: return
++  func.func @consume_before_release(%l: !rclist, %c: i1) -> !rclist {
++    %ref = reussir.rc.borrow (%l : !rclist) : !reussir.ref<!listty>
++    %r = reussir.record.dispatch (%ref : !reussir.ref<!listty>) -> !rclist {
++      [0] -> {
++        ^bb0(%cons: !reussir.ref<!consty>):
++        %slot = reussir.ref.project (%cons : !reussir.ref<!consty>) [1] : !reussir.ref<!rclist>
++        %tail = reussir.ref.load (%slot : !reussir.ref<!rclist>) : !rclist
++        reussir.rc.inc (%tail : !rclist)
++        %x = scf.if %c -> !rclist {
++          %k = arith.constant 0 : i64
++          %v = reussir.record.compound (%k, %tail : i64, !rclist) : !consty
++          %vv = reussir.record.variant [0] (%v : !consty) : !listty
++          %z = reussir.rc.create value(%vv : !listty) : !rclist
++          %tz = reussir.rc.dec (%z : !rclist) : !reussir.nullable<!tk>
++          %t = reussir.rc.dec (%l : !rclist) : !reussir.nullable<!tk>
++          %n = reussir.record.compound : !nilty
++          %nv = reussir.record.variant [1] (%n : !nilty) : !listty
++          %nil = reussir.rc.create value(%nv : !listty) : !rclist
++          scf.yield %nil : !rclist
++        } else {
++          %t = reussir.rc.dec (%tail : !rclist) : !reussir.nullable<!tk>
++          scf.yield %l : !rclist
++        }
++        reussir.scf.yield %x : !rclist
++      }
++      [1] -> {
++        ^bb1(%nil: !reussir.ref<!nilty>):
++        reussir.scf.yield %l : !rclist
++      }
++    }
++    return %r : !rclist
++  }
+ }
+-- 
+2.43.0
+

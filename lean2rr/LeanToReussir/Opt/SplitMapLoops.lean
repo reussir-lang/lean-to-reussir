@@ -32,16 +32,17 @@ The loop must have the shape Lean gives it: the arrays derived from the
 parameter (by `uset`, and through join points) are only read with `uget` at
 the loop index (before any value is written), written with `uset` at the
 loop index (the placeholder, then the mapped value, once), measured
-(`usize`, `size`), passed to the loop again with the index plus one after
-the value was written, or with the index to the loop a `_redArg` wrapper
-calls, returned, put in a constructor or passed to a join point; and the
-entry call passes the index `0`. Then `dst` holds exactly the values mapped
+(`usize`, `size`), passed to the loop again (or to the loop that continues
+a first iteration specialized apart, see `loopShape?`) with the index plus
+one after the value was written, or with the index to the loop a `_redArg`
+wrapper calls, returned, put in a constructor or passed to a join point; and
+the entry call passes the index `0`. Then `dst` holds exactly the values mapped
 so far whenever the loop runs at index `i` (it has `i` elements), so the
 value written at index `i` is the next one pushed. Any other shape keeps the
 uniform loop. -/
 
-/-- The shape of a `map` loop: its array parameter (the only one of type
-`Array lcAny`), its index parameter, and the type of the values it stores. -/
+/-- The shape of a `map` loop: its array parameter (see `loopShape?`), its
+index parameter, and the type of the values it stores. -/
 structure LoopShape where
   arrPos : Nat
   idxPos : Nat
@@ -57,17 +58,30 @@ def isPlaceholderArg (erased : FVarIdSet) : Arg .pure → Bool
   | _ => true
 
 /-- The shape of map loop `d` (see `LoopShape`), given the shapes of the
-other map loops. -/
+other map loops.
+
+The array parameter is the only one of type `Array lcAny`, or else the only
+parameter of a precise type `Array α` that the loop reads with `uget`,
+provided the loop stores values of another type `β` into it. The latter is a
+first iteration that Lean specialized apart: `spec_2` runs one iteration and
+passes the array, with one value written, to `spec_2.spec_2`, the actual
+loop. Having no self call, it takes its parameter type from its callers
+(`paramsFromCallers`). -/
 def loopShape? (d : Decl .pure) (types : Types) (shapes : NameMap LoopShape) : MRetypeM (Option LoopShape) := do
   let .code c := d.value | return none
   let keys := (← get).keys
-  let arrs := d.params.zipIdx.filter fun (p, _) => isArrayAny p.type.consumeMData
+  let apps := constApps c #[]
+  let anyArrs := d.params.zipIdx.filter fun (p, _) => isArrayAny p.type.consumeMData
+  let arrs ← if !anyArrs.isEmpty then pure anyArrs else
+    d.params.zipIdx.filterM fun (p, _) => do
+      let t := p.type.consumeMData
+      return t.isAppOfArity ``Array 1 && !(← unknown t) && apps.any fun (f, args, _) =>
+        (keys.find? f).map (·.decl) == some ``Array.uget && args[1]? == some (.fvar p.fvarId)
   let #[(arr, arrPos)] := arrs | return none
   let erased := erasedVars c {}
   let paramIdx (a : Arg .pure) : Option Nat := match a with
     | .fvar x => d.params.findIdx? (·.fvarId == x)
     | _ => none
-  let apps := constApps c #[]
   let mut idx : Option Nat := none
   let mut elems : Array Expr := #[]
   for (f, args, _) in apps do
@@ -88,9 +102,14 @@ def loopShape? (d : Decl .pure) (types : Types) (shapes : NameMap LoopShape) : M
   let some idxPos := idx | return none
   unless d.params[idxPos]!.type.consumeMData.isConstOf ``USize do return none
   let some β := elems[0]? | return none
-  if ← unknown β then return none
+  -- `◾` is no element type: a value Stage 3 typed `◾` was not recovered
+  -- (round 7 RV7D-01: fields of an element read from `Array lcAny`).
+  if (← unknown β) || β.consumeMData.isErased then return none
   for t in elems do
     if (← norm t) != (← norm β) then return none
+  -- A precise array parameter: only if the element type changes.
+  let pt := arr.type.consumeMData
+  if !isArrayAny pt && (← norm pt.appArg!) == (← norm β) then return none
   return some { arrPos, idxPos, elem := β }
 
 /-- `c` without the placeholders (`let x := ◾`) it does not use (the
@@ -187,7 +206,14 @@ mutual
   partial def buildSplit (d : Decl .pure) (shape : LoopShape) (types : Types) (name : Name) (α β : Expr)
       (shapes : NameMap LoopShape) (src : NameMap (Decl .pure × Types)) : MRetypeM (Decl .pure) := do
     let .code c := d.value | throwError "lean2rr: no code"
+    -- The split instance returns `dst` or the result of a split instance
+    -- (possibly in a constructor): an `Array β`, by the `map` rule. The
+    -- rule gives the loop itself no result type when it passes its array
+    -- to another loop (a first iteration `spec_2`, see `loopShape?`).
     let ret := (splitArrows d.type d.params.size).2
+    let ret := if countArrayAny ret == 1 then
+      ret.replace fun e => if isArrayAny e then some (mkApp (mkConst ``Array) β) else none
+      else ret
     if ← unknown ret then throwError "lean2rr: map loop result unknown"
     let p := d.params[shape.arrPos]!
     let s ← mkFreshFVarId
@@ -488,7 +514,21 @@ def splitMapLoops (decls : Array (Decl .pure)) (types : Array Types) (roots : Ar
     match d.value with
     | .code c => out := out.push { d with value := .code (← splitEntries types[i]! (usizeZeros c) shapes src c) }
     | _ => out := out.push d
-  let added := (← get).splitDecls
+  -- The split instances are built from the loops as they were, so a map
+  -- loop entered inside another one's body (`a.map (·.map f)`) is still
+  -- entered unsplit there: rewrite their entry calls too, until no new
+  -- instance appears (each one is added to `splitDecls` as it is built).
+  let mut added : Array (Decl .pure) := #[]
+  let mut done := 0
+  repeat
+    let splits := (← get).splitDecls
+    if done ≥ splits.size then break
+    for h : j in [done:splits.size] do
+      let (d, _, ts) ← localRetype splits[j]
+      match d.value with
+      | .code c => added := added.push { d with value := .code (← splitEntries ts (usizeZeros c) shapes src c) }
+      | _ => added := added.push d
+    done := splits.size
   if added.isEmpty then return decls
   let all := out ++ added
   -- Original loops nothing reachable calls any more.

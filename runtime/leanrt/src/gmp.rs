@@ -1,10 +1,9 @@
 //! Raw bindings to the parts of GMP the bignum code uses.
 //!
 //! GMP is linked statically (Lean's toolchain ships `libgmp.a`; Lean's own
-//! runtime uses the same library for its big numbers). The `mpn` layer works
-//! on little-endian limb slices owned by Rust; the `mpz` layer is used for
-//! the rarer operations, with inputs viewed through `mpz_roinit_n` (no copy)
-//! and outputs copied back into Rust vectors.
+//! runtime uses the same library for its big numbers). Big numbers are
+//! `mpz_t`s (`crate::big`), whose limbs GMP allocates with its default
+//! memory functions, as in Lean's runtime.
 
 #![allow(non_camel_case_types, dead_code)]
 
@@ -59,6 +58,26 @@ extern "C" {
     pub fn __gmpz_mul_2exp(r: *mut Mpz, a: *const Mpz, k: u64);
     pub fn __gmpz_tdiv_q_2exp(r: *mut Mpz, a: *const Mpz, k: u64);
     pub fn __gmpz_fdiv_q_2exp(r: *mut Mpz, a: *const Mpz, k: u64);
+    pub fn __gmpz_init_set_ui(x: *mut Mpz, v: u64);
+    pub fn __gmpz_init_set_si(x: *mut Mpz, v: i64);
+    pub fn __gmpz_init_set_str(x: *mut Mpz, s: *const u8, base: i32) -> i32;
+    pub fn __gmpz_get_str(s: *mut u8, base: i32, x: *const Mpz) -> *mut u8;
+    pub fn __gmpz_sizeinbase(x: *const Mpz, base: i32) -> usize;
+    pub fn __gmpz_cmp(a: *const Mpz, b: *const Mpz) -> i32;
+    pub fn __gmpz_set(r: *mut Mpz, a: *const Mpz);
+    pub fn __gmpz_add_ui(r: *mut Mpz, a: *const Mpz, b: u64);
+    pub fn __gmpz_sub_ui(r: *mut Mpz, a: *const Mpz, b: u64);
+    pub fn __gmpz_mul_ui(r: *mut Mpz, a: *const Mpz, b: u64);
+    pub fn __gmpz_tdiv_q_ui(q: *mut Mpz, n: *const Mpz, d: u64) -> u64;
+    pub fn __gmpz_tdiv_ui(n: *const Mpz, d: u64) -> u64;
+    pub fn __gmpz_fdiv_q(q: *mut Mpz, n: *const Mpz, d: *const Mpz);
+    pub fn __gmpz_cdiv_q(q: *mut Mpz, n: *const Mpz, d: *const Mpz);
+    pub fn __gmpz_mod(r: *mut Mpz, n: *const Mpz, d: *const Mpz);
+    pub fn __gmpz_abs(r: *mut Mpz, a: *const Mpz);
+    pub fn __gmpz_fits_slong_p(a: *const Mpz) -> i32;
+    pub fn __gmpz_limbs_write(x: *mut Mpz, n: i64) -> *mut u64;
+    pub fn __gmpz_limbs_modify(x: *mut Mpz, n: i64) -> *mut u64;
+    pub fn __gmpz_limbs_finish(x: *mut Mpz, n: i64);
 }
 
 /// An owned `mpz_t` (cleared on drop).

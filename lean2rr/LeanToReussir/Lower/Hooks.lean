@@ -69,8 +69,9 @@ structure LowerHooks where
   the same behaviour). Plain: none (Opt/JpSink). -/
   prepareBody : Code .pure → Code .pure := id
   /-- Whether a join point that is neither J1 nor J2 is duplicated at its
-  jumps (J1′) instead of outlined (J3). Plain: outlined (Opt/JpSmall). -/
-  duplicateJp : FunDecl .pure → Bool := fun _ => false
+  jumps (J1′) instead of outlined (J3), given the join points in scope and
+  its number of jumps. Plain: outlined (Opt/JpSmall). -/
+  duplicateJp : JpScope → FunDecl .pure → Nat → Bool := fun _ _ _ => false
   /-- Declarations lowered as state machines (J4): when an outlined join
   point calls the declaration back in tail position. Plain: the entry
   variant carries the parameters (`Lower/StateMachine`; Opt/StateMachines

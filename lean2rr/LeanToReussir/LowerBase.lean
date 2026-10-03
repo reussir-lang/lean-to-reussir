@@ -108,15 +108,20 @@ structure LowerCtx where
   permutation (`PassConfig.fieldOrder`). Reussir keeps the given order (the
   driver turns its own member packing off). -/
   fieldOrder : Array Nat → Array Nat := fun aligns => (List.range aligns.size).toArray
-  /-- Whether the program can ask for an object's identity or sharing
-  (`ptrAddrUnsafe`, what inlines to it, `ST.Ref.ptrEq`, `dbgTraceIfShared`;
-  `programObservesIdentity`): otherwise a value and an equal copy cannot be
-  told apart. -/
-  observesIdentity : Bool := true
+  /-- Whether the program can read a value as another type than its own
+  (`unsafe` code of its own, or a cast justified by `sorry` or an axiom;
+  `programCasts`): otherwise a `Box` holding a value of one inductive is
+  never read as another, and an unboxing function matches only the
+  instantiations of its own inductive (`boxCastable`, `finishUnboxFns`). -/
+  programCasts : Bool := true
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/
   keys : NameMap InstKey
+  /-- The declarations that are in a cycle of direct calls, each with the
+  declarations of its cycle (its strongly connected component of the call
+  graph, itself included): a tail call of one of them closes a loop. -/
+  callCycles : NameMap NameSet := {}
 
 /-- How the target of a function value is called with all its arguments
 (data, so that the lowering state can hold it; see Lower's
@@ -158,9 +163,6 @@ inductive RefKind where
   | direct
   /-- `L2RRef_N(Cell<ElemBox(e)>)`, for `[value]` structures. -/
   | boxed (bn : String)
-  /-- The prelude's `L2RNatRef` / `L2RIntRef`. -/
-  | nat
-  | int
   deriving BEq, Inhabited
 
 structure LowerState where
@@ -219,12 +221,11 @@ structure LowerState where
   /-- Types whose fields are being lowered, and whether they will be
   boundary types (see `nominalType`). -/
   pendingBoundary : Std.HashMap String Bool := {}
+  /-- Whether an inductive's mutual block uses one of its types at other
+  arguments than its parameters (`nonUniformInductive`), once computed. -/
+  nonUniformInds : NameMap Bool := {}
   /-- Structural conversions being generated (for recursive types). -/
   convsInProgress : Std.HashSet String := {}
-  /-- Whether the body of a structural conversion is being generated: a
-  conversion it needs is the bare one (`_w`), not the one that records and
-  looks up origins (`l2r_origin_note`, see `structConv`). -/
-  convNested : Bool := false
   /-- Lean's borrowed parameters of the program's declarations, and the
   variables they lend (`Lower/Borrow`), once computed. -/
   borrowInfo : Option (NameMap (Array Bool) × FVarIdSet) := none
@@ -247,14 +248,6 @@ structure LowerState where
   taskTags : Array String := #[]
   /-- Names of generated thunk/task helper functions (see `lazyFn`). -/
   lazyFnNames : Std.HashSet String := {}
-  /-- Function types whose identity function (`l2r_fn_addr_T`, see `addrOf`)
-  is requested, and the variant count its body was generated for. -/
-  fnAddrTargets : Array RR.Ty := #[]
-  fnAddrDone : Std.HashMap RR.Ty Nat := {}
-  /-- Whether `l2r_box_addr` is requested, and the `Box` variant count its
-  body was generated for. -/
-  boxAddrWanted : Bool := false
-  boxAddrDone : Nat := 0
   /-- Reference types (see `refType`): element type ↦ name, and back (with
   how the cell stores the element). -/
   refTypes : Std.HashMap RR.Ty String := {}
@@ -297,12 +290,13 @@ def boxName : String := "L2RBox"
 def RR.Ty.box : RR.Ty := .named boxName
 
 /-- Types that may cross Reussir's FFI boundary as parameters: integers,
-floats, `bool`, and RC pointers (opaque runtime types and shared records). -/
+floats, `bool`, and RC pointers (opaque runtime types, `Nat`/`Int` among
+them, and shared records). -/
 def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
   match t with
   | .named n =>
     if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
-            "LStr", "LBig", "LNatArr", "LIntArr", "LHandle", boxName] then return true
+            "Nat", "Int", "LStr", "LNatArr", "LIntArr", "LHandle", boxName] then return true
     -- A reference is a shared record (see `refType`).
     if (← get).refInfos.contains n then return true
     match (← get).typeInfos[n]? with
@@ -318,8 +312,8 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
 
 /-- The state type of a thunk (`task = false`) or task over values of type
 `t`: a generated shared enum `{ pending(L2RUnit -> t), busy, done(t),
-conv(L2RUnit -> t, Box, u64), busyconv(u64), convdone(t, Box, u64) }`
-(tasks also `bind(L2RUnit -> LCell<S>)`)
+conv(L2RUnit -> t, Box) }` (tasks: `conv(L2RUnit -> t, Box, u64)`, and
+`bind(L2RUnit -> LCell<S>)`)
 held in a runtime cell `LCell<S>` (translation plan §5.14). A thunk
 starts `pending` (or `done`, for `Thunk.pure`) and is `busy` while its
 closure runs; a task is `done` from the start unless it is a deferred IO
@@ -328,19 +322,16 @@ def lazyState (task : Bool) (t : RR.Ty) : LowerM String := do
   if let some n := (← get).lazyStates[(task, t)]? then return n
   let n ← fresh (if task then "L2RTask" else "L2RThunk")
   -- `conv`: converted from another representation (see `lazyConv`): the
-  -- computation, the original cell (boxed), the original's identity.
+  -- computation, the original cell (boxed) and, for a task, the original's
+  -- address (its identity for the runtime). It stays `conv` while it is
+  -- forced (its computation forces the original, whose state is the
+  -- copy's, see `lazyGetFn`).
   let cellTy := RR.Ty.app "LCell" #[.named n]
   modify fun s => { s with
     lazyStates := s.lazyStates.insert (task, t) n
     lazyInfos := s.lazyInfos.insert n (task, t)
     typeItems := s.typeItems.push (.enum n false (#[("pending", #[.fn .unit t]), ("busy", #[]), ("done", #[t]),
-      ("conv", #[.fn .unit t, RR.Ty.box, .named "u64"]),
-      -- `busyconv`: a `conv` cell being forced (it keeps the identity).
-      ("busyconv", #[.named "u64"]),
-      -- `convdone`: a converted cell with its value: the value, the
-      -- original (kept, so that its address stays this cell's identity),
-      -- the original's identity.
-      ("convdone", #[t, RR.Ty.box, .named "u64"])] ++
+      ("conv", #[.fn .unit t, RR.Ty.box] ++ (if task then #[.named "u64"] else #[]))] ++
       -- `bind`: an `IO.bindTask` task before it has run `f` (its computation
       -- yields the task it continues as, see `taskStepFn`).
       (if task then #[("bind", #[.fn .unit cellTy])] else #[])))
@@ -425,10 +416,8 @@ def storageElem (st : RR.Ty) : LowerM (RR.Ty × Bool) := do
 /-- The representation of an `ST.Ref` whose contents have Reussir type `e`
 (translation plan §5.1): a shared record holding Reussir's mutable cell, one
 per element type, which stores the element in its own representation (all
-aliases of a reference share the record). A `Nat` or `Int` is stored as in
-`LNatArr` (a tagged word in a `Cell<u64>`, a big value in a second cell:
-the prelude's `L2RNatRef`/`L2RIntRef`), a `[value]` structure in an
-`ElemBox` (Reussir's cells do not hold `[value]` records with counted
+aliases of a reference share the record). A `[value]` structure is stored
+in an `ElemBox` (Reussir's cells do not hold `[value]` records with counted
 members); other values as they are, `L2RRef_N(Cell<e>)`. -/
 def refType (e : RR.Ty) : LowerM RR.Ty := do
   if let some n := (← get).refTypes[e]? then return .named n
@@ -438,8 +427,6 @@ def refType (e : RR.Ty) : LowerM RR.Ty := do
       refInfos := s.refInfos.insert n (e, k)
       typeItems := match item with | some it => s.typeItems.push it | none => s.typeItems }
     return .named n
-  if e == .named "Nat" then return ← register "L2RNatRef" .nat none
-  if e == .named "Int" then return ← register "L2RIntRef" .int none
   let direct ← match e with
     | .named t =>
       if t ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "L2RUnit"] then pure true
@@ -473,11 +460,13 @@ def strLit (s : String) : LowerM RR.Expr := do
       pure id
   return .call "l2r_str_lit" #[] #[.atom (toString id)]
 
-/-- The runtime function behind `strLit`: the literals as Rust byte strings. -/
+/-- The runtime function behind `strLit`: the literals as Rust byte strings.
+`[` is escaped too, so that no `[:` in a literal can be taken for a texture
+placeholder `[:Name:]` (Reussir bug 21 dropped an unterminated one). -/
 def strLitTable (lits : Array String) : String :=
   let hex := "0123456789abcdef".toList.toArray
   let esc (s : String) : String := s.toUTF8.foldl (init := "") fun acc b =>
-    if b ≥ 0x20 && b < 0x7f && b != 0x22 && b != 0x5c then acc.push (Char.ofNat b.toNat)
+    if b ≥ 0x20 && b < 0x7f && b != 0x22 && b != 0x5c && b != 0x5b then acc.push (Char.ofNat b.toNat)
     else acc ++ "\\x" |>.push hex[(b / 16).toNat]! |>.push hex[(b % 16).toNat]!
   let items := lits.toList.map fun s => s!"b\"{esc s}\""
   "#[ffi(import)]\nfn l2r_str_lit(id : u64) -> LStr [{ {\n" ++
@@ -568,6 +557,96 @@ def nominalKey (ival : InductiveVal) (args : Array Expr) : LowerM Expr := do
     if rel.getD i true then (args[i]?.getD anyExpr).consumeMData else erasedExpr
   return mkAppN (.const ival.name []) keyArgs
 
+/-- Whether `e` mentions one of the inductives `all` applied to other
+arguments than `ps` (see `nonUniformInductive`). -/
+partial def usesOtherArgs (all : List Name) (ps : Array Expr) (e : Expr) : Bool :=
+  let args := e.getAppArgs
+  let go := usesOtherArgs all ps
+  let here := match e.getAppFn with
+    | .const j _ => all.contains j && (args.size < ps.size || args.extract 0 ps.size != ps)
+    | .forallE _ d b _ | .lam _ d b _ => go d || go b
+    | .mdata _ b => go b
+    | .letE _ t v b _ => go t || go v || go b
+    | .proj _ _ x => go x
+    | _ => false
+  here || args.any go
+
+/-- Whether the mutual block of inductive `ival` uses one of its types at
+other arguments than the block's parameters in a constructor field
+(`unsafe inductive Nest α | cons (x : α) (rest : Nest (α × α))`, also nested
+in another type, `List (Rose (Option α))`, or a function type). Lean accepts
+this only for `unsafe` inductives: a safe inductive always uses its
+parameters as they are. -/
+def nonUniformInductive (ival : InductiveVal) : LowerM Bool := do
+  if let some b := (← get).nonUniformInds.find? ival.name then return b
+  let ps := (List.range ival.numParams).toArray.map fun i => Expr.fvar ⟨.num `_l2r_param i⟩
+  let go := usesOtherArgs ival.all ps
+  let mut r := false
+  for ind in ival.all do
+    let some (.inductInfo iv) := (← getEnv).find? ind | continue
+    for c in iv.ctors do
+      let some (.ctorInfo ci) := (← getEnv).find? c | continue
+      let mut ty ← instantiateForall ci.type ps
+      repeat
+        match ty with
+        | .forallE _ d b _ =>
+          if go d then r := true
+          ty := b.instantiate1 anyExpr
+        | .mdata _ b => ty := b
+        | _ => break
+  modify fun s => { s with nonUniformInds := s.nonUniformInds.insert ival.name r }
+  return r
+
+/-- Whether instantiation `key` of inductive `ival`, requested while the
+fields of the types on the path (`pendingBoundary`) are being lowered,
+grows: polymorphic recursion in a type (`unsafe inductive Nest α | cons
+(x : α) (rest : Nest (α × α))`), whose instances `Nest Nat`,
+`Nest (Nat × Nat)`, … would never end. Only an inductive whose block uses
+its types at other arguments (`nonUniformInductive`) can grow: a safe one
+(`inductive Tree | node (kids : List (Nat × Tree))`, whose `List Tree`
+reaches `List (Nat × Tree)`) is never cut. As for instances of declarations
+(Mono's `instanceName`): the key grows if some instantiation of the same
+inductive on the path has a relevant argument that the key's argument at
+that position strictly contains (or, for type functions, is strictly larger
+than), or if that instantiation is the uniform one and the key's arguments
+are built from its `lcAny` (`Nest (lcAny × lcAny)`, the uniform type's own
+field). Growth that no containment shows is cut by a bound: 256
+instantiations of one inductive on the path. Such a key is translated at
+the uniform instantiation instead (see `nominalType`). -/
+def typeGrowsOnPath (ival : InductiveVal) (key : Expr) : LowerM Bool := do
+  let s ← get
+  let head := key.getAppFn
+  let bs := key.getAppArgs
+  unless s.pendingBoundary.toList.any (fun (n, _) =>
+      (s.typeKeys[n]?.map (·.getAppFn == head)).getD false) do return false
+  unless ← nonUniformInductive ival do return false
+  let grows (a b : Expr) : Bool :=
+    a != b && a != anyExpr && a != erasedExpr &&
+      ((b.find? (· == a)).isSome ||
+       ((a.isLambda || b.isLambda) && treeSizeUpTo b 1000 > treeSizeUpTo a 1000))
+  let mut same := 0
+  for (n, _) in s.pendingBoundary do
+    let some k := s.typeKeys[n]? | continue
+    unless k.getAppFn == head && k.getAppNumArgs == bs.size do continue
+    same := same + 1
+    let pairs := (k.getAppArgs.zip bs).filter fun (a, _) => a != erasedExpr
+    if pairs.isEmpty then continue
+    if pairs.all (·.1 == anyExpr) then
+      if pairs.any fun (_, b) => b != anyExpr && !b.isLambda && (b.find? (· == anyExpr)).isSome then
+        return true
+    else if pairs.any fun (a, b) => grows a b then return true
+  return same ≥ 256
+
+/-- The type arguments inductive `ival` is translated at when requested at
+`args`, and the key of that translation: `args` themselves, or every
+argument `lcAny` (the uniform instantiation) when the request grows
+(`typeGrowsOnPath`). -/
+def nominalArgs (ival : InductiveVal) (args : Array Expr) : LowerM (Array Expr × Expr) := do
+  let key ← nominalKey ival args
+  if ival.numParams == 0 || !(← typeGrowsOnPath ival key) then return (args, key)
+  let uargs := Array.replicate ival.numParams anyExpr
+  return (uargs, ← nominalKey ival uargs)
+
 /-- Whether mono type `e` translates to a generated nominal type whose
 fields are being lowered (see `nominalType`). -/
 def inProgressType (e : Expr) : LowerM Bool := do
@@ -579,7 +658,7 @@ def inProgressType (e : Expr) : LowerM Bool := do
     | _, some (.inductInfo iv) => if iv.type.getForallBody.isProp then none else some iv
     | _, _ => none
   let some ival := ival? | return false
-  let some name := (← get).typeNames[← nominalKey ival e.getAppArgs]? | return false
+  let some name := (← get).typeNames[(← nominalArgs ival e.getAppArgs).2]? | return false
   return !(← get).typeInfos.contains name
 
 mutual
@@ -646,7 +725,10 @@ mutual
 
   /-- The generated nominal type for an instantiated inductive. -/
   partial def nominalType (ival : InductiveVal) (args : Array Expr) : LowerM RR.Ty := do
-    let key ← nominalKey ival args
+    -- A field type that grows (polymorphic recursion in a type, `Nest (α × α)`
+    -- in `Nest α`) is the uniform instantiation (`nominalArgs`); values of the
+    -- typed instantiations convert to it where they meet (§5.1).
+    let (args, key) ← nominalArgs ival args
     if let some n := (← get).typeNames[key]? then return .named n
     let name ← fresh s!"T_{nameHint ival.name}_"
     modify fun s => { s with typeNames := s.typeNames.insert key name, typeKeys := s.typeKeys.insert name key }

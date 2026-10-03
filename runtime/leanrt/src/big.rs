@@ -1,45 +1,171 @@
 //! Big natural numbers and integers: the slow paths of `Nat` and `Int`.
 //!
-//! A big number is `Rc<(neg, limbs)>`: sign and magnitude, little-endian
-//! 64-bit limbs without high zero limbs (zero is the empty vector, never
-//! negative). The Reussir side keeps small values unboxed (`Nat::Small(u64)`,
-//! `Int::Small(i64)`) and only stores values outside the machine-word range
-//! here (`Nat::Big` holds values `>= 2^64`, `Int::Big` values outside the
-//! `i64` range). Functions whose result may fall back into the word range
-//! return an `LBig` anyway; the caller normalizes with `is_u64`/`fits_i64`.
+//! A big number is laid out exactly as Lean's `lean_mpz_object`: Lean's
+//! object header (the 32-bit reference count, `m_cs_sz`, `m_other` and
+//! `m_tag = LeanMPZ`) followed by GMP's `mpz_t` (`_mp_alloc`, `_mp_size`,
+//! the limb pointer; the limbs allocated by GMP). Here it is a
+//! `reussir_rt::rc::Rc<BigZ>`: Reussir's box is its 32-bit count, then the
+//! payload at offset 8; the four header bytes in between, padding to
+//! Reussir, are written at creation. So a `Nat`/`Int` word that points to a
+//! big number is what native Lean's would be (see `crate::nat`), and the
+//! values are normalized like Lean's: `crate::nat` keeps a `Nat` below 2^63
+//! and an `Int` in the `int32` range in the word itself, so a big number is
+//! always outside those ranges. Functions whose result may fall back into
+//! them return an `LBig` anyway; `LNat::of_big`/`LInt::of_big` normalize.
 //!
-//! Semantics follow Lean's runtime (`src/runtime/object.cpp`), which uses
-//! the same GMP operations: truncating subtraction, `x / 0 = 0`,
-//! `x % 0 = x`, `Int.div`/`Int.mod` truncate (`mpz_tdiv_*`), `Int.ediv`/
-//! `Int.emod` are Euclidean.
+//! The operations are GMP's `mpz` functions, as Lean's runtime uses
+//! (`src/runtime/mpz.cpp`, `object.cpp`), with Lean's semantics: truncating
+//! subtraction, `x / 0 = 0`, `x % 0 = x`, `Int.div`/`Int.mod` truncate,
+//! `Int.ediv`/`Int.emod` are Euclidean.
 //!
-//! All functions consume their `LBig` arguments. When an argument is
-//! uniquely referenced its buffer is reused in place.
+//! All functions consume their `LBig` arguments. When the first argument
+//! is uniquely referenced, the result is computed into it (GMP allows the
+//! output to alias an input).
 
 use crate::gmp::*;
 use reussir_rt::rc::Rc;
-use crate::alloc::{rc_new, reserve, vec_from_slice, vec_zeroed_u64};
+use std::ffi::c_void;
 
-pub type LBig = Rc<(bool, Vec<u64>)>;
+/// Lean's object tag of a big number (`LeanMPZ` in `lean.h`).
+pub const LEAN_MPZ_TAG: u8 = 250;
 
+/// A big number's payload: GMP's `mpz_t`, cleared (limbs freed) on drop.
+#[repr(transparent)]
+pub struct BigZ(pub Mpz);
+
+pub type LBig = Rc<BigZ>;
+
+/// The whole object, as `lean_mpz_object`.
+#[repr(C)]
+struct BigObj {
+    count: u32,
+    cs_sz: u16,
+    other: u8,
+    tag: u8,
+    z: Mpz,
+}
+
+const _: () = assert!(std::mem::size_of::<BigObj>() == 24);
+
+extern "C" {
+    fn mi_malloc(size: usize) -> *mut c_void;
+}
+
+impl Drop for BigZ {
+    fn drop(&mut self) {
+        #[cfg(leanrt_count_bigs)]
+        count::freed();
+        unsafe { __gmpz_clear(&mut self.0) }
+    }
+}
+
+/// Counts of the big numbers made and freed, for tests: built with
+/// `--cfg leanrt_count_bigs` (`L2R_LEANRT_RUSTFLAGS`, see
+/// `tests/runtime/nat-alloc-check.sh`), a program prints them to stderr at
+/// exit. Not compiled otherwise.
+#[cfg(leanrt_count_bigs)]
+mod count {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    static MADE: AtomicU64 = AtomicU64::new(0);
+    static FREED: AtomicU64 = AtomicU64::new(0);
+    static REPORT: std::sync::Once = std::sync::Once::new();
+
+    extern "C" {
+        fn atexit(f: extern "C" fn()) -> i32;
+    }
+
+    extern "C" fn report() {
+        let (m, f) = (MADE.load(Relaxed), FREED.load(Relaxed));
+        eprintln!("leanrt: big numbers made {} freed {} live {}", m, f, m as i64 - f as i64);
+    }
+
+    pub fn made() {
+        REPORT.call_once(|| unsafe {
+            atexit(report);
+        });
+        MADE.fetch_add(1, Relaxed);
+    }
+
+    pub fn freed() {
+        FREED.fetch_add(1, Relaxed);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn oom() -> ! {
+    crate::internal_panic("out of memory")
+}
+
+/// A new object (count 1) owning the initialized `z`.
 #[inline]
-fn norm(v: &mut Vec<u64>) {
-    while let Some(&0) = v.last() {
-        v.pop();
+fn wrap(z: Mpz) -> LBig {
+    #[cfg(leanrt_count_bigs)]
+    count::made();
+    unsafe {
+        let p = mi_malloc(std::mem::size_of::<BigObj>()) as *mut BigObj;
+        if p.is_null() {
+            oom();
+        }
+        std::ptr::write(p, BigObj { count: 1, cs_sz: std::mem::size_of::<BigObj>() as u16, other: 0, tag: LEAN_MPZ_TAG, z });
+        std::mem::transmute::<*mut BigObj, LBig>(p)
     }
 }
 
 #[inline]
-fn mk(neg: bool, mut v: Vec<u64>) -> LBig {
-    norm(&mut v);
-    let neg = neg && !v.is_empty();
-    rc_new((neg, v))
+fn empty() -> Mpz {
+    Mpz { alloc: 0, size: 0, d: std::ptr::null_mut() }
 }
 
-/// A vector of `n` uninitialized-then-zeroed limbs (GMP writes all of them).
+/// A new big number computed by `f` into a fresh `mpz_t`.
 #[inline]
-fn zeroed(n: usize) -> Vec<u64> {
-    vec_zeroed_u64(n)
+fn make(f: impl FnOnce(*mut Mpz)) -> LBig {
+    let mut z = empty();
+    unsafe { __gmpz_init(&mut z) };
+    f(&mut z);
+    wrap(z)
+}
+
+#[inline]
+fn z(b: &LBig) -> *const Mpz {
+    &b.0
+}
+
+/// `r = f(a, b)`, into `a` when it is unique (and so not `b` itself).
+#[inline]
+fn binop(a: LBig, b: LBig, f: unsafe extern "C" fn(*mut Mpz, *const Mpz, *const Mpz)) -> LBig {
+    let mut a = a;
+    if a.is_unique() {
+        let r = unsafe { &mut a.data_mut().0 } as *mut Mpz;
+        unsafe { f(r, r, z(&b)) };
+        return a;
+    }
+    make(|r| unsafe { f(r, z(&a), z(&b)) })
+}
+
+/// `r = f(a, y)` for a word `y`, into `a` when it is unique.
+#[inline]
+fn op_ui(a: LBig, y: u64, f: unsafe extern "C" fn(*mut Mpz, *const Mpz, u64)) -> LBig {
+    let mut a = a;
+    if a.is_unique() {
+        let r = unsafe { &mut a.data_mut().0 } as *mut Mpz;
+        unsafe { f(r, r, y) };
+        return a;
+    }
+    make(|r| unsafe { f(r, z(&a), y) })
+}
+
+/// `r = f(a)`, into `a` when it is unique.
+#[inline]
+fn unop(a: LBig, f: unsafe extern "C" fn(*mut Mpz, *const Mpz)) -> LBig {
+    let mut a = a;
+    if a.is_unique() {
+        let r = unsafe { &mut a.data_mut().0 } as *mut Mpz;
+        unsafe { f(r, r) };
+        return a;
+    }
+    make(|r| unsafe { f(r, z(&a)) })
 }
 
 // ---------------------------------------------------------------------------
@@ -47,44 +173,58 @@ fn zeroed(n: usize) -> Vec<u64> {
 
 #[inline(never)]
 pub fn of_u64(x: u64) -> LBig {
-    rc_new((false, if x == 0 { Vec::new() } else { vec_from_slice(&[x], 1) }))
+    let mut z = empty();
+    unsafe { __gmpz_init_set_ui(&mut z, x) };
+    wrap(z)
 }
 
 /// `hi * 2^64 + lo`.
 #[inline(never)]
 pub fn of_limbs2(lo: u64, hi: u64) -> LBig {
-    mk(false, vec_from_slice(&[lo, hi], 1))
+    make(|r| unsafe {
+        let d = __gmpz_limbs_write(r, 2);
+        *d = lo;
+        *d.add(1) = hi;
+        __gmpz_limbs_finish(r, 2);
+    })
 }
 
 #[inline(never)]
 pub fn of_i64(x: i64) -> LBig {
-    let m = x.unsigned_abs();
-    rc_new((x < 0, if m == 0 { Vec::new() } else { vec_from_slice(&[m], 1) }))
+    let mut z = empty();
+    unsafe { __gmpz_init_set_si(&mut z, x) };
+    wrap(z)
+}
+
+/// The magnitude's limbs, little-endian, without high zero limbs (empty
+/// for zero).
+#[inline]
+pub fn limbs(b: &LBig) -> &[u64] {
+    let n = b.0.size.unsigned_abs() as usize;
+    if n == 0 { &[] } else { unsafe { std::slice::from_raw_parts(b.0.d, n) } }
+}
+
+#[inline]
+pub fn is_neg(b: &LBig) -> bool {
+    b.0.size < 0
 }
 
 /// Whether a non-negative value fits in a `u64`.
 #[inline]
 pub fn is_u64(b: &LBig) -> bool {
-    !b.0 && b.1.len() <= 1
+    !is_neg(b) && limbs(b).len() <= 1
 }
 
 /// The lowest limb of the magnitude (`0` for zero).
 #[inline]
 pub fn low_limb(b: &LBig) -> u64 {
-    b.1.first().copied().unwrap_or(0)
+    limbs(b).first().copied().unwrap_or(0)
 }
 
 /// Whether the value is in the `i64` range.
 #[inline]
 pub fn fits_i64(b: &LBig) -> bool {
-    match b.1.len() {
-        0 => true,
-        1 => {
-            let m = b.1[0];
-            if b.0 { m <= 1u64 << 63 } else { m < 1u64 << 63 }
-        }
-        _ => false,
-    }
+    unsafe { __gmpz_fits_slong_p(z(b)) != 0 }
 }
 
 /// The value modulo 2^64 in two's complement (for `Int64.ofInt`,
@@ -92,252 +232,81 @@ pub fn fits_i64(b: &LBig) -> bool {
 #[inline]
 pub fn low_u64_twos(b: &LBig) -> u64 {
     let m = low_limb(b);
-    if b.0 { m.wrapping_neg() } else { m }
+    if is_neg(b) { m.wrapping_neg() } else { m }
 }
 
+/// The value as an `i64` (requires `fits_i64`).
 #[inline]
-pub fn is_neg(b: &LBig) -> bool {
-    b.0
+pub fn to_i64(b: &LBig) -> i64 {
+    low_u64_twos(b) as i64
 }
 
 /// Parse a decimal digit string (as produced by lean2rr for big literals).
 #[inline(never)]
 pub fn of_decimal(s: &str) -> LBig {
-    let digits: Vec<u8> = s.bytes().filter(|c| c.is_ascii_digit()).map(|c| c - b'0').collect();
-    let start = digits.iter().position(|&d| d != 0).unwrap_or(digits.len());
-    let digits = &digits[start..];
+    let mut digits: Vec<u8> = s.bytes().filter(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
-        return of_u64(0);
+        digits.push(b'0');
     }
-    // 10^19 < 2^64: at most one limb per 19 digits, plus one.
-    let mut r = zeroed(digits.len() / 19 + 2);
-    let n = unsafe { __gmpn_set_str(r.as_mut_ptr(), digits.as_ptr(), digits.len(), 10) };
-    r.truncate(n as usize);
-    mk(false, r)
-}
-
-/// Decimal digits of a magnitude.
-fn mag_to_decimal(m: &[u64], out: &mut Vec<u8>) {
-    if m.is_empty() {
-        out.push(b'0');
-        return;
-    }
-    let mut tmp = vec_from_slice(m, 0); // mpn_get_str clobbers its input
-    // Allocate one extra limb as mpn_get_str requires s1p to have n+1 limbs available.
-    tmp.push(0);
-    let cap = unsafe { __gmpn_sizeinbase(m.as_ptr(), m.len() as i64, 10) } + 1;
-    let start = out.len();
-    out.resize(start + cap, 0);
-    let n = unsafe { __gmpn_get_str(out.as_mut_ptr().add(start), 10, tmp.as_mut_ptr(), m.len() as i64) };
-    out.truncate(start + n);
-    // Leading zeros are possible only for the value 0, which is handled above.
-    for d in &mut out[start..] {
-        *d += b'0';
-    }
+    digits.push(0);
+    let mut z = empty();
+    unsafe { __gmpz_init_set_str(&mut z, digits.as_ptr(), 10) };
+    wrap(z)
 }
 
 /// The decimal representation (with a leading `-` for negative values).
 #[inline(never)]
 pub fn to_decimal(b: &LBig) -> Vec<u8> {
-    let mut out = Vec::new();
-    if b.0 {
-        out.push(b'-');
-    }
-    mag_to_decimal(&b.1, &mut out);
+    // `mpz_sizeinbase` may overestimate by one; one more for the sign and
+    // one for the terminating NUL.
+    let cap = unsafe { __gmpz_sizeinbase(z(b), 10) } + 2;
+    let mut out = vec![0u8; cap];
+    unsafe { __gmpz_get_str(out.as_mut_ptr(), 10, z(b)) };
+    let n = out.iter().position(|&c| c == 0).unwrap_or(out.len());
+    out.truncate(n);
     out
 }
 
 // ---------------------------------------------------------------------------
-// Magnitude arithmetic (slices, no signs)
-
-fn mag_cmp(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    if a.len() != b.len() {
-        return a.len().cmp(&b.len());
-    }
-    if a.is_empty() {
-        return Ordering::Equal;
-    }
-    let c = unsafe { __gmpn_cmp(a.as_ptr(), b.as_ptr(), a.len() as i64) };
-    c.cmp(&0)
-}
-
-fn mag_add(a: &[u64], b: &[u64]) -> Vec<u64> {
-    let (x, y) = if a.len() >= b.len() { (a, b) } else { (b, a) };
-    if y.is_empty() {
-        return vec_from_slice(x, 0);
-    }
-    let mut r = zeroed(x.len() + 1);
-    let c = unsafe { __gmpn_add(r.as_mut_ptr(), x.as_ptr(), x.len() as i64, y.as_ptr(), y.len() as i64) };
-    r[x.len()] = c;
-    norm(&mut r);
-    r
-}
-
-/// `a - b`, requires `a >= b`.
-fn mag_sub(a: &[u64], b: &[u64]) -> Vec<u64> {
-    if b.is_empty() {
-        return vec_from_slice(a, 0);
-    }
-    let mut r = zeroed(a.len());
-    unsafe { __gmpn_sub(r.as_mut_ptr(), a.as_ptr(), a.len() as i64, b.as_ptr(), b.len() as i64) };
-    norm(&mut r);
-    r
-}
-
-fn mag_mul(a: &[u64], b: &[u64]) -> Vec<u64> {
-    if a.is_empty() || b.is_empty() {
-        return Vec::new();
-    }
-    let (x, y) = if a.len() >= b.len() { (a, b) } else { (b, a) };
-    let mut r = zeroed(x.len() + y.len());
-    unsafe {
-        if x.as_ptr() == y.as_ptr() && x.len() == y.len() {
-            __gmpn_sqr(r.as_mut_ptr(), x.as_ptr(), x.len() as i64);
-        } else {
-            __gmpn_mul(r.as_mut_ptr(), x.as_ptr(), x.len() as i64, y.as_ptr(), y.len() as i64);
-        }
-    }
-    norm(&mut r);
-    r
-}
-
-/// Truncating division of magnitudes, `b` nonzero: `(q, r)`.
-fn mag_divmod(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
-    debug_assert!(!b.is_empty());
-    if mag_cmp(a, b) == std::cmp::Ordering::Less {
-        return (Vec::new(), vec_from_slice(a, 0));
-    }
-    if b.len() == 1 {
-        let mut q = zeroed(a.len());
-        let r = unsafe { __gmpn_divrem_1(q.as_mut_ptr(), 0, a.as_ptr(), a.len() as i64, b[0]) };
-        norm(&mut q);
-        return (q, if r == 0 { Vec::new() } else { vec_from_slice(&[r], 0) });
-    }
-    let mut q = zeroed(a.len() - b.len() + 1);
-    let mut r = zeroed(b.len());
-    unsafe {
-        __gmpn_tdiv_qr(q.as_mut_ptr(), r.as_mut_ptr(), 0, a.as_ptr(), a.len() as i64, b.as_ptr(), b.len() as i64)
-    };
-    norm(&mut q);
-    norm(&mut r);
-    (q, r)
-}
-
-// ---------------------------------------------------------------------------
-// Nat (non-negative) operations. Arguments are `Nat::Big` handles (>= 2^64)
+// Nat (non-negative) operations. Arguments are big `Nat`s (>= 2^63)
 // unless stated otherwise.
 
-/// `a + b`; reuses `a`'s buffer when it is unique.
+/// `a + b`.
 #[inline(never)]
 pub fn nat_add(a: LBig, b: LBig) -> LBig {
-    let (mut x, y) = if a.1.len() >= b.1.len() { (a, b) } else { (b, a) };
-    if x.is_unique() {
-        let v = unsafe { &mut x.data_mut().1 };
-        let n = v.len();
-        reserve(v, 1);
-        v.push(0);
-        let c = unsafe { __gmpn_add(v.as_mut_ptr(), v.as_ptr(), n as i64, y.1.as_ptr(), y.1.len() as i64) };
-        if c == 0 {
-            v.pop();
-        } else {
-            v[n] = c;
-        }
-        x
-    } else {
-        rc_new((false, mag_add(&x.1, &y.1)))
-    }
+    binop(a, b, __gmpz_add)
 }
 
 /// `a + y` for a big `a` and any `y`.
 #[inline(never)]
 pub fn nat_add_u64(a: LBig, y: u64) -> LBig {
-    let mut a = a;
-    if a.is_unique() {
-        let v = unsafe { &mut a.data_mut().1 };
-        let n = v.len();
-        reserve(v, 1);
-        v.push(0);
-        let c = unsafe { __gmpn_add_1(v.as_mut_ptr(), v.as_ptr(), n as i64, y) };
-        if c == 0 {
-            v.pop();
-        } else {
-            v[n] = c;
-        }
-        a
-    } else {
-        rc_new((false, mag_add(&a.1, &[y])))
-    }
-}
-
-/// `x + y` when the sum overflows 64 bits.
-#[inline(never)]
-pub fn u64_add_overflow(x: u64, y: u64) -> LBig {
-    of_limbs2(x.wrapping_add(y), 1)
+    op_ui(a, y, __gmpz_add_ui)
 }
 
 /// Truncated subtraction `a - b` (0 when `a < b`).
 #[inline(never)]
 pub fn nat_sub(a: LBig, b: LBig) -> LBig {
-    if mag_cmp(&a.1, &b.1) != std::cmp::Ordering::Greater {
+    if unsafe { __gmpz_cmp(z(&a), z(&b)) } <= 0 {
         return of_u64(0);
     }
-    let mut a = a;
-    if a.is_unique() {
-        let v = unsafe { &mut a.data_mut().1 };
-        unsafe { __gmpn_sub(v.as_mut_ptr(), v.as_ptr(), v.len() as i64, b.1.as_ptr(), b.1.len() as i64) };
-        norm(v);
-        a
-    } else {
-        rc_new((false, mag_sub(&a.1, &b.1)))
-    }
+    binop(a, b, __gmpz_sub)
 }
 
-/// `a - y` for a big `a` (never truncates).
+/// `a - y` for a big `a` (never truncates: `y < 2^63 <= a`).
 #[inline(never)]
 pub fn nat_sub_u64(a: LBig, y: u64) -> LBig {
-    let mut a = a;
-    if a.is_unique() {
-        let v = unsafe { &mut a.data_mut().1 };
-        unsafe { __gmpn_sub_1(v.as_mut_ptr(), v.as_ptr(), v.len() as i64, y) };
-        norm(v);
-        a
-    } else {
-        rc_new((false, mag_sub(&a.1, &[y])))
-    }
+    op_ui(a, y, __gmpz_sub_ui)
 }
 
 #[inline(never)]
 pub fn nat_mul(a: LBig, b: LBig) -> LBig {
-    rc_new((false, mag_mul(&a.1, &b.1)))
+    binop(a, b, __gmpz_mul)
 }
 
-/// `a * y` for `y != 0`; reuses `a`'s buffer when it is unique.
+/// `a * y`.
 #[inline(never)]
 pub fn nat_mul_u64(a: LBig, y: u64) -> LBig {
-    if y == 0 {
-        return of_u64(0);
-    }
-    let mut a = a;
-    if a.is_unique() {
-        let v = unsafe { &mut a.data_mut().1 };
-        let n = v.len();
-        reserve(v, 1);
-        v.push(0);
-        let c = unsafe { __gmpn_mul_1(v.as_mut_ptr(), v.as_ptr(), n as i64, y) };
-        if c == 0 {
-            v.pop();
-        } else {
-            v[n] = c;
-        }
-        a
-    } else {
-        let mut r = zeroed(a.1.len() + 1);
-        let n = a.1.len();
-        let c = unsafe { __gmpn_mul_1(r.as_mut_ptr(), a.1.as_ptr(), n as i64, y) };
-        r[n] = c;
-        mk(false, r)
-    }
+    op_ui(a, y, __gmpz_mul_ui)
 }
 
 /// The full product of two words.
@@ -353,77 +322,49 @@ pub fn u64_mul_hi(x: u64, y: u64) -> u64 {
     (((x as u128) * (y as u128)) >> 64) as u64
 }
 
-/// `a / b` for a nonzero big `b` (any `a`, as a handle).
+/// `a / b` for a nonzero `b`.
 #[inline(never)]
 pub fn nat_div(a: LBig, b: LBig) -> LBig {
-    rc_new((false, mag_divmod(&a.1, &b.1).0))
+    binop(a, b, __gmpz_tdiv_q)
+}
+
+unsafe extern "C" fn tdiv_q_ui(r: *mut Mpz, a: *const Mpz, y: u64) {
+    __gmpz_tdiv_q_ui(r, a, y);
 }
 
 /// `a / y` for `y != 0`.
 #[inline(never)]
 pub fn nat_div_u64(a: LBig, y: u64) -> LBig {
-    let mut a = a;
-    if a.is_unique() {
-        let v = unsafe { &mut a.data_mut().1 };
-        unsafe { __gmpn_divrem_1(v.as_mut_ptr(), 0, v.as_ptr(), v.len() as i64, y) };
-        norm(v);
-        a
-    } else {
-        let mut q = zeroed(a.1.len());
-        unsafe { __gmpn_divrem_1(q.as_mut_ptr(), 0, a.1.as_ptr(), a.1.len() as i64, y) };
-        mk(false, q)
-    }
+    op_ui(a, y, tdiv_q_ui)
 }
 
+/// `a % b` for a nonzero `b`.
 #[inline(never)]
 pub fn nat_mod(a: LBig, b: LBig) -> LBig {
-    rc_new((false, mag_divmod(&a.1, &b.1).1))
+    binop(a, b, __gmpz_tdiv_r)
 }
 
 /// `a % y` for `y != 0`.
 #[inline(never)]
 pub fn nat_mod_u64(a: LBig, y: u64) -> u64 {
-    unsafe { __gmpn_mod_1(a.1.as_ptr(), a.1.len() as i64, y) }
+    unsafe { __gmpz_tdiv_ui(z(&a), y) }
 }
 
-/// Three-way comparison of two non-negative values: -1, 0, 1.
+/// Three-way comparison: -1, 0, 1 (any signs).
 #[inline(never)]
 pub fn nat_cmp(a: LBig, b: LBig) -> i64 {
-    match mag_cmp(&a.1, &b.1) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }
+    let c = unsafe { __gmpz_cmp(z(&a), z(&b)) };
+    (c > 0) as i64 - (c < 0) as i64
 }
 
 #[inline(never)]
 pub fn nat_eq(a: LBig, b: LBig) -> bool {
-    a.1 == b.1
-}
-
-fn mag_bitop(a: &[u64], b: &[u64], op: u8) -> Vec<u64> {
-    let (x, y) = if a.len() >= b.len() { (a, b) } else { (b, a) };
-    let n = y.len();
-    let mut r: Vec<u64> = match op {
-        0 => zeroed(n), // and
-        _ => vec_from_slice(x, 0), // or, xor: high limbs of the longer operand
-    };
-    if n > 0 {
-        unsafe {
-            match op {
-                0 => __gmpn_and_n(r.as_mut_ptr(), x.as_ptr(), y.as_ptr(), n as i64),
-                1 => __gmpn_ior_n(r.as_mut_ptr(), x.as_ptr(), y.as_ptr(), n as i64),
-                _ => __gmpn_xor_n(r.as_mut_ptr(), x.as_ptr(), y.as_ptr(), n as i64),
-            }
-        }
-    }
-    norm(&mut r);
-    r
+    unsafe { __gmpz_cmp(z(&a), z(&b)) == 0 }
 }
 
 #[inline(never)]
 pub fn nat_land(a: LBig, b: LBig) -> LBig {
-    rc_new((false, mag_bitop(&a.1, &b.1, 0)))
+    binop(a, b, __gmpz_and)
 }
 
 #[inline(never)]
@@ -433,237 +374,141 @@ pub fn nat_land_u64(a: LBig, y: u64) -> u64 {
 
 #[inline(never)]
 pub fn nat_lor(a: LBig, b: LBig) -> LBig {
-    rc_new((false, mag_bitop(&a.1, &b.1, 1)))
+    binop(a, b, __gmpz_ior)
 }
 
+/// Apply `f` to the lowest limb of a positive `a` (into `a` when unique).
+#[inline]
+fn with_low_limb(a: LBig, f: impl FnOnce(u64) -> u64) -> LBig {
+    let mut a = if a.is_unique() { a } else { make(|r| unsafe { __gmpz_set(r, z(&a)) }) };
+    unsafe {
+        let r: *mut Mpz = &mut a.data_mut().0;
+        let n = (*r).size as i64;
+        let d = __gmpz_limbs_modify(r, n);
+        *d = f(*d);
+        __gmpz_limbs_finish(r, n);
+    }
+    a
+}
+
+/// `a ||| y` for a big `a` (>= 2^63, at least one limb).
 #[inline(never)]
 pub fn nat_lor_u64(a: LBig, y: u64) -> LBig {
-    let mut v = a.1.clone();
-    v[0] |= y;
-    rc_new((false, v))
+    with_low_limb(a, |l| l | y)
 }
 
 #[inline(never)]
 pub fn nat_xor(a: LBig, b: LBig) -> LBig {
-    rc_new((false, mag_bitop(&a.1, &b.1, 2)))
+    binop(a, b, __gmpz_xor)
 }
 
+/// `a ^^^ y` for a big `a` (>= 2^63, at least one limb).
 #[inline(never)]
 pub fn nat_xor_u64(a: LBig, y: u64) -> LBig {
-    let mut v = a.1.clone();
-    v[0] ^= y;
-    rc_new((false, v))
+    with_low_limb(a, |l| l ^ y)
 }
 
-fn mag_shl(a: &[u64], s: u64) -> Vec<u64> {
-    if a.is_empty() {
-        return Vec::new();
-    }
-    let limbs = (s / 64) as usize;
-    let bits = (s % 64) as u32;
-    let mut r = zeroed(limbs + a.len() + 1);
-    if bits == 0 {
-        r[limbs..limbs + a.len()].copy_from_slice(a);
-    } else {
-        let c = unsafe { __gmpn_lshift(r.as_mut_ptr().add(limbs), a.as_ptr(), a.len() as i64, bits) };
-        r[limbs + a.len()] = c;
-    }
-    norm(&mut r);
-    r
-}
-
-fn mag_shr(a: &[u64], s: u64) -> Vec<u64> {
-    let limbs = s / 64;
-    if limbs >= a.len() as u64 {
-        return Vec::new();
-    }
-    let limbs = limbs as usize;
-    let bits = (s % 64) as u32;
-    let src = &a[limbs..];
-    let mut r = zeroed(src.len());
-    if bits == 0 {
-        r.copy_from_slice(src);
-    } else {
-        unsafe { __gmpn_rshift(r.as_mut_ptr(), src.as_ptr(), src.len() as i64, bits) };
-    }
-    norm(&mut r);
-    r
-}
-
-/// `a <<< s` for any `a` (as a handle); `s <= 2^32 - 1` (checked by the caller).
+/// `a <<< s`; `s <= 2^32 - 1` (checked by the caller).
 #[inline(never)]
 pub fn nat_shl(a: LBig, s: u64) -> LBig {
-    rc_new((false, mag_shl(&a.1, s)))
+    op_ui(a, s, __gmpz_mul_2exp)
 }
 
-/// `a >>> s`.
+/// `a >>> s` (a non-negative).
 #[inline(never)]
 pub fn nat_shr(a: LBig, s: u64) -> LBig {
-    rc_new((false, mag_shr(&a.1, s)))
+    op_ui(a, s, __gmpz_tdiv_q_2exp)
 }
 
-/// Bit length minus one (`Nat.log2`) of a nonzero magnitude.
+/// Bit length minus one (`Nat.log2`) of a positive value.
 #[inline(never)]
 pub fn nat_log2(a: LBig) -> u64 {
-    match a.1.last() {
-        None => 0,
-        Some(&top) => (a.1.len() as u64 - 1) * 64 + (63 - top.leading_zeros() as u64),
+    if limbs(&a).is_empty() {
+        return 0;
     }
+    (unsafe { __gmpz_sizeinbase(z(&a), 2) } - 1) as u64
 }
 
-/// `a ^ e` for any `a` (as a handle).
+/// `a ^ e`.
 #[inline(never)]
 pub fn nat_pow(a: LBig, e: u64) -> LBig {
-    let mut r = OwnedMpz::new();
-    let v = View::new(false, &a.1);
-    unsafe { __gmpz_pow_ui(r.ptr(), v.ptr(), e) };
-    let (_, limbs) = r.to_parts();
-    rc_new((false, limbs))
+    make(|r| unsafe { __gmpz_pow_ui(r, z(&a), e) })
 }
 
 #[inline(never)]
 pub fn nat_gcd(a: LBig, b: LBig) -> LBig {
-    let mut r = OwnedMpz::new();
-    let (va, vb) = (View::new(false, &a.1), View::new(false, &b.1));
-    unsafe { __gmpz_gcd(r.ptr(), va.ptr(), vb.ptr()) };
-    let (_, limbs) = r.to_parts();
-    rc_new((false, limbs))
-}
-
-/// The magnitude as a Nat handle (for `Int.natAbs`/`Int.toNat`).
-#[inline(never)]
-pub fn int_abs(a: LBig) -> LBig {
-    if !a.0 {
-        return a;
-    }
-    let mut a = a;
-    if a.is_unique() {
-        unsafe { a.data_mut().0 = false };
-        a
-    } else {
-        rc_new((false, a.1.clone()))
-    }
+    binop(a, b, __gmpz_gcd)
 }
 
 // ---------------------------------------------------------------------------
-// Int (signed) operations on handles. Small operands are converted by the
-// caller with `of_i64`.
+// Int (signed) operations. Small operands are converted by the caller with
+// `of_i64`.
 
-fn signed(neg: bool, m: Vec<u64>) -> LBig {
-    mk(neg, m)
-}
-
-fn signed_add(an: bool, a: &[u64], bn: bool, b: &[u64]) -> LBig {
-    if an == bn {
-        return signed(an, mag_add(a, b));
+/// The magnitude (for `Int.natAbs`/`Int.toNat`).
+#[inline(never)]
+pub fn int_abs(a: LBig) -> LBig {
+    if !is_neg(&a) {
+        return a;
     }
-    match mag_cmp(a, b) {
-        std::cmp::Ordering::Equal => of_u64(0),
-        std::cmp::Ordering::Greater => signed(an, mag_sub(a, b)),
-        std::cmp::Ordering::Less => signed(bn, mag_sub(b, a)),
-    }
+    unop(a, __gmpz_abs)
 }
 
 #[inline(never)]
 pub fn int_add(a: LBig, b: LBig) -> LBig {
-    signed_add(a.0, &a.1, b.0, &b.1)
+    binop(a, b, __gmpz_add)
 }
 
 #[inline(never)]
 pub fn int_sub(a: LBig, b: LBig) -> LBig {
-    signed_add(a.0, &a.1, !b.0 && !b.1.is_empty(), &b.1)
+    binop(a, b, __gmpz_sub)
 }
 
 #[inline(never)]
 pub fn int_mul(a: LBig, b: LBig) -> LBig {
-    signed(a.0 != b.0, mag_mul(&a.1, &b.1))
+    binop(a, b, __gmpz_mul)
 }
 
 #[inline(never)]
 pub fn int_neg(a: LBig) -> LBig {
-    if a.1.is_empty() {
+    if limbs(&a).is_empty() {
         return a;
     }
-    let mut a = a;
-    if a.is_unique() {
-        let d = unsafe { a.data_mut() };
-        d.0 = !d.0;
-        a
-    } else {
-        rc_new((!a.0, a.1.clone()))
-    }
+    unop(a, __gmpz_neg)
 }
 
 /// Truncating quotient (`Int.tdiv`, C `/`); `b` must be nonzero.
 #[inline(never)]
 pub fn int_tdiv(a: LBig, b: LBig) -> LBig {
-    let (q, _) = mag_divmod(&a.1, &b.1);
-    signed(a.0 != b.0, q)
+    binop(a, b, __gmpz_tdiv_q)
 }
 
 /// Truncating remainder (`Int.tmod`, C `%`, sign of the dividend); `b` nonzero.
 #[inline(never)]
 pub fn int_tmod(a: LBig, b: LBig) -> LBig {
-    let (_, r) = mag_divmod(&a.1, &b.1);
-    signed(a.0, r)
+    binop(a, b, __gmpz_tdiv_r)
 }
 
-/// Euclidean quotient (`Int.ediv`); `b` nonzero. As `mpz::ediv`:
-/// `q = tdiv(a, b)`, adjusted by one away from zero-remainder when the
-/// truncated remainder is negative.
+/// Euclidean quotient (`Int.ediv`); `b` nonzero: the floor of `a / b` for
+/// `b > 0`, the ceiling for `b < 0` (so that `a - b * q` is in `[0, |b|)`).
 #[inline(never)]
 pub fn int_ediv(a: LBig, b: LBig) -> LBig {
-    let (q, r) = mag_divmod(&a.1, &b.1);
-    let q = signed(a.0 != b.0, q);
-    let r_neg = a.0 && !r.is_empty();
-    if r_neg {
-        if !b.0 {
-            int_sub(q, of_u64(1))
-        } else {
-            int_add(q, of_u64(1))
-        }
-    } else {
-        q
-    }
+    if is_neg(&b) { binop(a, b, __gmpz_cdiv_q) } else { binop(a, b, __gmpz_fdiv_q) }
 }
 
 /// Euclidean remainder (`Int.emod`, always `>= 0`); `b` nonzero.
 #[inline(never)]
 pub fn int_emod(a: LBig, b: LBig) -> LBig {
-    let (_, r) = mag_divmod(&a.1, &b.1);
-    if a.0 && !r.is_empty() {
-        // r < 0: r + |b|
-        rc_new((false, mag_sub(&b.1, &r)))
-    } else {
-        rc_new((false, r))
-    }
+    binop(a, b, __gmpz_mod)
 }
 
 #[inline(never)]
 pub fn int_cmp(a: LBig, b: LBig) -> i64 {
-    use std::cmp::Ordering;
-    let o = match (a.0, b.0) {
-        (false, true) => Ordering::Greater,
-        (true, false) => Ordering::Less,
-        (false, false) => mag_cmp(&a.1, &b.1),
-        (true, true) => mag_cmp(&b.1, &a.1),
-    };
-    match o {
-        Ordering::Less => -1,
-        Ordering::Equal => 0,
-        Ordering::Greater => 1,
-    }
+    nat_cmp(a, b)
 }
 
 #[inline(never)]
 pub fn int_eq(a: LBig, b: LBig) -> bool {
-    a.0 == b.0 && a.1 == b.1
-}
-
-/// The value as an `i64` (requires `fits_i64`).
-#[inline]
-pub fn to_i64(b: &LBig) -> i64 {
-    low_u64_twos(b) as i64
+    nat_eq(a, b)
 }
 
 #[cfg(test)]
@@ -675,10 +520,26 @@ mod tests {
     }
 
     #[test]
+    fn layout() {
+        // Lean's `lean_mpz_object`: the count at 0, the tag at 7, the mpz_t at 8.
+        let b = of_decimal("123456789012345678901234567890");
+        let p = unsafe { std::mem::transmute_copy::<LBig, *const u8>(&b) };
+        unsafe {
+            assert_eq!(*(p as *const u32), 1);
+            assert_eq!(*p.add(7), LEAN_MPZ_TAG);
+            assert_eq!(*(p.add(12) as *const i32), 2); // _mp_size: two limbs
+        }
+        let c = b.clone();
+        unsafe { assert_eq!(*(p as *const u32), 2) };
+        drop(c);
+    }
+
+    #[test]
     fn decimal_roundtrip() {
         for s in ["0", "1", "18446744073709551616", "123456789012345678901234567890123456789"] {
             assert_eq!(dec(&of_decimal(s)), s);
         }
+        assert_eq!(dec(&int_neg(of_decimal("18446744073709551616"))), "-18446744073709551616");
     }
 
     #[test]
@@ -692,5 +553,17 @@ mod tests {
         assert_eq!(dec(&int_ediv(int_neg(b.clone()), of_u64(7))), "-48611766702991209066196372490252601637");
         assert_eq!(dec(&int_emod(int_neg(b.clone()), of_u64(7))), "3");
         assert_eq!(dec(&int_tmod(int_neg(b.clone()), of_u64(7))), "-4");
+        assert_eq!(dec(&int_ediv(of_u64(7), int_neg(of_u64(2)))), "-3");
+        assert_eq!(dec(&int_ediv(int_neg(of_u64(7)), int_neg(of_u64(2)))), "4");
+        assert_eq!(dec(&int_emod(int_neg(of_u64(7)), int_neg(of_u64(2)))), "1");
+        assert_eq!(dec(&nat_lor_u64(a.clone(), 5)), "18446744073709551621");
+        assert_eq!(dec(&nat_xor_u64(nat_lor_u64(a.clone(), 5), 4)), "18446744073709551617");
+        assert_eq!(nat_log2(a.clone()), 64);
+        assert_eq!(dec(&nat_shr(nat_shl(a.clone(), 100), 99)), "36893488147419103232");
+        // in place on a unique value, a copy for a shared one
+        let s = a.clone();
+        let t = nat_add_u64(s, 1);
+        assert_eq!(dec(&a), "18446744073709551616");
+        assert_eq!(dec(&t), "18446744073709551617");
     }
 }

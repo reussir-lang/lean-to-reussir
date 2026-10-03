@@ -395,7 +395,8 @@ def isFallibleIOSym (sym : String) : Bool :=
          "lean_io_hard_link", "lean_io_realpath", "lean_io_read_dir", "lean_io_metadata",
          "lean_io_symlink_metadata", "lean_chmod", "lean_io_create_tempfile",
          "lean_io_create_tempdir", "lean_io_current_dir", "lean_io_app_path",
-         "lean_io_process_get_current_dir", "lean_io_process_set_current_dir"] ||
+         "lean_io_process_get_current_dir", "lean_io_process_set_current_dir",
+         "lean_io_get_random_bytes"] ||
   -- The standard streams' operations (their glue is generated with the
   -- `IO.FS.Stream` values) report errors the same way.
   sym ∈ ["lean_get_stdout", "lean_get_stderr", "lean_get_stdin"]
@@ -455,12 +456,62 @@ where a type argument `t` is `L2R.tyArg t` and an erased one is `◾`, or
 
 def tyArgMarker : Expr := .const `L2R.tyArg []
 
+/-- Does evaluating the constant `c` (a declaration without parameters) do
+more than build a dictionary of functions? That is: call a function
+(`instance : Inhabited Grid := ⟨mkGrid 300⟩`), or allocate data: a
+constructor of a type that is not a class, with a relevant field (a list
+or a record literal, a `Thunk.mk`), a string literal, a number past the
+small ones. A class's own constructor (the dictionary and its parent
+dictionaries), a closure, a constructor without relevant fields (`[]`,
+`none`) and a small number are values. Natively such a constant is
+evaluated once, at startup, and a callee that receives it reads its
+fields; in a callee specialized on it, `simp` copies the body to the
+projections (`inlineProjInst?`), to run at every call: a call runs again, a
+literal is rebuilt, a thunk is made and forced again (round 7 RV7F-02,
+RV7F-04). Only a dictionary of functions gains from being copied: its
+methods become direct calls. `fuel` bounds the constants followed. -/
+partial def constComputes (c : Name) (fuel : Nat := 8) : MonoM Bool := do
+  if fuel == 0 then return true
+  let some decl ← baseDeclFor? c | return false
+  unless decl.params.isEmpty do return false
+  let .code code := decl.value | return false
+  go code fuel
+where
+  go (code : Code .pure) (fuel : Nat) : MonoM Bool := do
+    match code with
+    | .let d k =>
+      let computes ← match d.value with
+        | .erased | .proj .. => pure false
+        | .lit (.str _) => pure true
+        | .lit (.nat n) => pure (n ≥ 2 ^ 63)
+        | .lit _ => pure false
+        | .fvar _ args => pure !args.isEmpty
+        | .const f _ args _ =>
+          if let some (.ctorInfo ci) := (← getEnv).find? f then
+            pure (!isClass (← getEnv) ci.induct &&
+              args[ci.numParams:].any (· matches .fvar _))
+          else if args.isEmpty then constComputes f (fuel - 1)
+          else match ← baseDeclFor? f with
+            -- A partial application: a closure.
+            | some kd => pure (args.size ≥ kd.params.size)
+            | none => pure true
+      if computes then return true
+      go k fuel
+    -- A local function is a value: its body runs when it is called.
+    | .fun _ k _ => go k fuel
+    | .return _ => return false
+    | _ => return true
+
 /-- The static dictionary a `let` value denotes, given the static
-dictionaries of variables in scope. -/
+dictionaries of variables in scope. A constant that is more than a
+dictionary of functions (`constComputes`) is not part of a static
+dictionary: the callee reads it at run time, as natively. -/
 def staticDict? (statics : Std.HashMap FVarId Expr) (v : LetValue .pure) (ty : Expr) : MonoM (Option Expr) := do
   unless (← isClass? ty).isSome do return none
   match v with
   | .const c _ args _ =>
+    if args.isEmpty then
+      if ← constComputes c then return none
     let mut out := #[]
     for a in args do
       match a with

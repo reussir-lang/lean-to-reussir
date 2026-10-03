@@ -565,11 +565,11 @@ def interfaceAddresses : IO (Array InterfaceAddress) := do
 namespace Sys
 open Std.Internal.UV.System
 
-@[extern "lean_shim_sys_title_get"] opaque primTitleGet : BaseIO String
 @[extern "lean_shim_sys_title_set"] opaque primTitleSet (s : @& String) : BaseIO Unit
 /-- 0 `uptime`, 1 `cpuInfo`, 2 `cwd`, 3 `osHomedir`, 4 `osTmpdir`,
 5 `osGetPasswd`, 6 `osEnviron`, 7 `osGetHostname`, 8 `osUname`,
-9 `getrusage`, 10 `exePath`: an operation with the result. -/
+9 `getrusage`, 10 `exePath`, 11 `getProcessTitle`: an operation with the
+result. -/
 @[extern "lean_shim_sys_query"] opaque primQuery (which : UInt8) : BaseIO Op
 @[extern "lean_shim_sys_group"] opaque primGroup (gid : UInt64) : BaseIO Op
 @[extern "lean_shim_sys_getenv"] opaque primGetenv (name : @& String) : BaseIO Op
@@ -598,7 +598,7 @@ def str0 (o : Op) : IO String := do
   opStr o 0
 
 @[export lean_uv_get_process_title]
-def getProcessTitle : IO String := primTitleGet
+def getProcessTitle : IO String := do str0 (← primQuery 11)
 
 @[export lean_uv_set_process_title]
 def setProcessTitle (t : String) : IO Unit := do
@@ -742,6 +742,7 @@ def hrtime : IO UInt64 := primWord 2
 def random (size : UInt64) : IO (IO.Promise (Except IO.Error ByteArray)) := do
   let r ← IO.Promise.new
   let o ← primRandom size r
+  checkStart o
   let p ← IO.Promise.new
   whenDone r o do
     let c ← opCode o
@@ -809,9 +810,10 @@ byte by byte (the same constructor and the same fields: scalars equal,
 pointers to the same objects) and `hash` hashes them, for the tables of
 `ShareCommon.State`. lean2rr's runtime implements `shareCommon` itself as
 the identity (it shares nothing; translation plan §5.8), and lean2rr's
-objects have no Lean layout to compare, so here an object equals only
-itself: the same answers for the same object, `false` (natively possibly
-`true`) for two distinct objects with the same fields. -/
+objects have no Lean layout to compare, so here objects are compared and
+hashed by `ptrAddrUnsafe`, which does not emulate identity (plan §9): at
+most the same cell is equal, `false` (natively possibly `true`) for two
+distinct objects with the same fields. -/
 
 @[export lean_sharecommon_eq]
 unsafe def shareCommonEq (a b : ShareCommon.Object) : Bool :=

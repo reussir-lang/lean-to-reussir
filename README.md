@@ -11,6 +11,8 @@ ownership, reference counting and memory reuse. The design is described in
 
 Status: see [`docs/implementation-status.md`](docs/implementation-status.md) (what is supported, how values are represented, test and benchmark results, known differences from native Lean).
 
+Implementation notes: [`docs/implementation/`](docs/implementation/README.md) catalogs the implementation's tricks and special cases (why lean2rr does something, where, and what breaks without it).
+
 ## Requirements
 
 - Lean v4.33.0 (via elan)
@@ -24,6 +26,7 @@ Status: see [`docs/implementation-status.md`](docs/implementation-status.md) (wh
 - `runtime/` — the runtime: the prelude `prelude.rr` included in every
   program, and the Rust crate `leanrt` (see [`runtime/README.md`](runtime/README.md))
 - `scripts/` — `l2r.py`, the driver (lean2rr, then rrc, linking the runtime)
-- `reussir-patches/` — local Reussir patches (see [`docs/reussir-bugs.md`](docs/reussir-bugs.md))
+- `reussir-bugs/` — every Reussir bug lean2rr has met (one file per entry), the local
+  Reussir patches and the repros (see [`reussir-bugs/README.md`](reussir-bugs/README.md))
 - `docs/` — design documents
 - `tests/` — the classic test corpus and its native-Lean oracle (see [`tests/README.md`](tests/README.md))

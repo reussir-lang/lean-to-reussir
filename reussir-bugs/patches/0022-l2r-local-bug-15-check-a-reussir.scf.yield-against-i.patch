@@ -1,0 +1,248 @@
+From 0f02c434dd0d96e9daf2549de2cc2da49e055309 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Fri, 2 Oct 2026 20:49:04 -0400
+Subject: [PATCH] l2r-local: bug 15: check a reussir.scf.yield against its
+ immediate parent
+
+`ReussirScfYieldOp::verify` found the op a yield terminates with
+`getParentOfType<ReussirNullableDispatchOp>()`, the nearest
+`nullable.dispatch` around the yield, before trying `record.dispatch`.
+A yield that terminates an arm of a `record.dispatch` nested in a
+`nullable.dispatch` was therefore checked against the outer op's result.
+AcquireDropExpansion builds exactly that when a `match` on a `Nullable`
+yields a counted value and one arm drops the other arm's value: the
+variant drop becomes a `record.dispatch` without results inside the
+`nullable.dispatch`, and rrc failed with "'reussir.scf.yield' op parent
+operation expected a value, but nothing is yielded".
+
+The yield belongs to the op whose single-block body it terminates, which
+`ParentOneOf` already requires to be its immediate parent, and the cell
+rdlock and array checks already look there. Check the nullable and record
+dispatches the same way (the nearest-ancestor fallback for
+`array.with_unique_view` is then unreachable and goes too). The verifier
+only accepts more IR; no generated code changes.
+
+Documented in lean2rr's docs/reussir-bugs.md, bug 15 (lean2rr does not use
+Nullable).
+Tests: tests/integration/basic/success/scf_yield.mlir (nested dispatches
+with different results), tests/integration/frontend/
+nullable_match_counted_yield (both arm orders, run end to end).
+---
+ lib/IR/ReussirOps.cpp                         | 34 +++++++--------
+ .../integration/basic/success/scf_yield.mlir  | 40 ++++++++++++++++++
+ .../frontend/nullable_match_counted_yield.c   | 36 ++++++++++++++++
+ .../frontend/nullable_match_counted_yield.rr  | 41 +++++++++++++++++++
+ 4 files changed, 132 insertions(+), 19 deletions(-)
+ create mode 100644 tests/integration/frontend/nullable_match_counted_yield.c
+ create mode 100644 tests/integration/frontend/nullable_match_counted_yield.rr
+
+diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
+index 76cc5521..d2100bf6 100644
+--- a/lib/IR/ReussirOps.cpp
++++ b/lib/IR/ReussirOps.cpp
+@@ -2932,43 +2932,39 @@ mlir::LogicalResult ReussirScfYieldOp::verify() {
+   mlir::Type yieldedType = getValue() ? getValue().getType() : mlir::Type{};
+   mlir::Type expectedType = mlir::Type{};
+   bool allowImplicitArrayResult = false;
+-  // The rdlock and with-unique-view checks look at the immediate parent
+-  // (not the nearest ancestor of a type): either body may itself sit inside
+-  // a dispatch region — a `set` in a match arm is the everyday case — and
+-  // this yield belongs to the op whose single-block body it terminates.
+-  if (auto create =
+-          llvm::dyn_cast<ReussirArrayCreateOp>(getOperation()->getParentOp()))
++  // Every check looks at the immediate parent (not the nearest ancestor of a
++  // type): a body may itself sit inside another region op — a `set` in a
++  // match arm is the everyday case, and so is a variant drop, expanded into
++  // a `record.dispatch` without results, in an arm of a `nullable.dispatch`
++  // that yields a value — and this yield belongs to the op whose
++  // single-block body it terminates (`ParentOneOf` guarantees it is one of
++  // the five below).
++  mlir::Operation *parent = getOperation()->getParentOp();
++  if (auto create = llvm::dyn_cast_if_present<ReussirArrayCreateOp>(parent))
+     expectedType =
+         llvm::cast<ArrayType>(create.getRcPtr().getType().getElementType())
+             .getElementType();
+-  else if (auto rdlockParent = llvm::dyn_cast_if_present<ReussirCellRdlockOp>(
+-               getOperation()->getParentOp()))
++  else if (auto rdlockParent =
++               llvm::dyn_cast_if_present<ReussirCellRdlockOp>(parent))
+     expectedType = rdlockParent.getOutput() ? rdlockParent.getOutput().getType()
+                                             : mlir::Type{};
+   else if (auto arrayParent =
+                llvm::dyn_cast_if_present<ReussirArrayWithUniqueViewOp>(
+-                   getOperation()->getParentOp())) {
++                   parent)) {
+     expectedType = arrayParent.getResult() ? arrayParent.getResult().getType()
+                                            : mlir::Type{};
+     allowImplicitArrayResult =
+         expectedType && expectedType == arrayParent.getArray().getType();
+   } else if (auto nullableParent =
+-          getOperation()->getParentOfType<ReussirNullableDispatchOp>())
++                 llvm::dyn_cast_if_present<ReussirNullableDispatchOp>(parent))
+     expectedType = nullableParent.getValue()
+                        ? nullableParent.getValue().getType()
+                        : mlir::Type{};
+   else if (auto recordParent =
+-               getOperation()->getParentOfType<ReussirRecordDispatchOp>())
++               llvm::dyn_cast_if_present<ReussirRecordDispatchOp>(parent))
+     expectedType = recordParent.getValue() ? recordParent.getValue().getType()
+                                            : mlir::Type{};
+-  else if (auto arrayParent =
+-               getOperation()
+-                   ->getParentOfType<ReussirArrayWithUniqueViewOp>()) {
+-    expectedType = arrayParent.getResult() ? arrayParent.getResult().getType()
+-                                           : mlir::Type{};
+-    allowImplicitArrayResult =
+-        expectedType && expectedType == arrayParent.getArray().getType();
+-  } else
++  else
+     llvm_unreachable("unexpected parent operation");
+ 
+   if (expectedType && !yieldedType && !allowImplicitArrayResult)
+diff --git a/tests/integration/basic/success/scf_yield.mlir b/tests/integration/basic/success/scf_yield.mlir
+index ae1ef1fe..ada0ad67 100644
+--- a/tests/integration/basic/success/scf_yield.mlir
++++ b/tests/integration/basic/success/scf_yield.mlir
+@@ -1,5 +1,9 @@
+ // RUN: %reussir-opt %s | %reussir-opt
+ 
++!opt_some = !reussir.record<compound "Opt::Some" [value] {i32}>
++!opt_none = !reussir.record<compound "Opt::None" [value] {}>
++!opt = !reussir.record<variant "Opt" {!opt_some, !opt_none}>
++
+ module {
+   func.func @test_nullable_dispatch_with_yield(%nullable : !reussir.nullable<!reussir.ref<i32>>) -> i32 {
+     %result = reussir.nullable.dispatch(%nullable : !reussir.nullable<!reussir.ref<i32>>) -> i32 {
+@@ -30,4 +34,40 @@ module {
+     }
+     func.return
+   }
++
++  // A yield belongs to its immediate parent, not to the nearest dispatch
++  // around it: a dispatch without results nested in an arm of one that
++  // yields a value (a variant drop expanded inside a match arm), and a
++  // dispatch yielding another type.
++  func.func @test_nested_dispatch_yields(%nullable : !reussir.nullable<!reussir.ref<i32>>, %opt_ref : !reussir.ref<!opt>) -> i32 {
++    %result = reussir.nullable.dispatch(%nullable : !reussir.nullable<!reussir.ref<i32>>) -> i32 {
++      nonnull -> {
++        ^bb0(%nonnull_ptr : !reussir.ref<i32>):
++          reussir.record.dispatch(%opt_ref : !reussir.ref<!opt>) {
++            [0] -> {
++              ^bb0(%arg : !reussir.ref<!opt_some>):
++                reussir.scf.yield
++            }
++            [1] -> {
++              ^bb0(%arg : !reussir.ref<!opt_none>):
++                reussir.scf.yield
++            }
++          }
++          %value = reussir.ref.load(%nonnull_ptr : !reussir.ref<i32>) : i32
++          reussir.scf.yield %value : i32
++      }
++      null -> {
++        ^bb0:
++          %wide = reussir.record.dispatch(%opt_ref : !reussir.ref<!opt>) -> i64 {
++            [0, 1] -> {
++              %c7 = arith.constant 7 : i64
++              reussir.scf.yield %c7 : i64
++            }
++          }
++          %narrow = arith.trunci %wide : i64 to i32
++          reussir.scf.yield %narrow : i32
++      }
++    }
++    func.return %result : i32
++  }
+ }
+diff --git a/tests/integration/frontend/nullable_match_counted_yield.c b/tests/integration/frontend/nullable_match_counted_yield.c
+new file mode 100644
+index 00000000..d81af0bd
+--- /dev/null
++++ b/tests/integration/frontend/nullable_match_counted_yield.c
+@@ -0,0 +1,36 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for nullable_match_counted_yield.rr.
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++extern uint64_t null_drops_ffi(uint64_t);
++extern uint64_t nonnull_keeps_ffi(uint64_t);
++extern uint64_t flipped_null_ffi(uint64_t);
++extern uint64_t flipped_nonnull_ffi(uint64_t);
++
++#define EXPECT(what, got, want)                                                \
++  do {                                                                         \
++    unsigned long long g = (got), w = (want);                                  \
++    if (g != w) {                                                              \
++      fprintf(stderr, "FAIL %s: got %llu want %llu\n", what, g, w);            \
++      abort();                                                                 \
++    }                                                                          \
++  } while (0)
++
++int main(void) {
++  EXPECT("null_drops", null_drops_ffi(5), 1);           /* T::L */
++  EXPECT("nonnull_keeps", nonnull_keeps_ffi(5), 15);    /* the tree's head */
++  EXPECT("flipped_null", flipped_null_ffi(5), 5);       /* the tree's head */
++  EXPECT("flipped_nonnull", flipped_nonnull_ffi(5), 5); /* b.v */
++  return 0;
++}
+diff --git a/tests/integration/frontend/nullable_match_counted_yield.rr b/tests/integration/frontend/nullable_match_counted_yield.rr
+new file mode 100644
+index 00000000..bbeaf81c
+--- /dev/null
++++ b/tests/integration/frontend/nullable_match_counted_yield.rr
+@@ -0,0 +1,41 @@
++// A `match` on a `Nullable` whose arms yield a counted value: an arm that
++// drops the other arm's value expands the variant drop into a
++// `record.dispatch` without results inside the `nullable.dispatch`, whose
++// yields belong to the inner dispatch.
++
++// RUN: %rrc %s -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/nullable_match_counted_yield.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++
++struct [shared] B { v: u64 }
++enum T { N(u64, T, T), L }
++
++fn pick(nb : Nullable<B>, x : T) -> T {
++    match nb {
++        Nullable::NonNull(b) => { x },
++        Nullable::Null => { T::L{} }
++    }
++}
++
++fn pick_flipped(nb : Nullable<B>, x : T) -> T {
++    match nb {
++        Nullable::NonNull(b) => { T::N{b.v, T::L{}, T::L{}} },
++        Nullable::Null => { x }
++    }
++}
++
++fn head(t : T) -> u64 {
++    match t { T::L => 1, T::N(a, l, r) => a }
++}
++
++fn tree(v : u64) -> T { T::N{v, T::N{v + 1, T::L{}, T::L{}}, T::L{}} }
++
++pub fn null_drops(v : u64) -> u64 { head(pick(Nullable::Null, tree(v))) }
++pub fn nonnull_keeps(v : u64) -> u64 { head(pick(Nullable::NonNull{B{v}}, tree(v + 10))) }
++pub fn flipped_null(v : u64) -> u64 { head(pick_flipped(Nullable::Null, tree(v))) }
++pub fn flipped_nonnull(v : u64) -> u64 { head(pick_flipped(Nullable::NonNull{B{v}}, tree(v + 10))) }
++
++extern "C" trampoline "null_drops_ffi" = null_drops;
++extern "C" trampoline "nonnull_keeps_ffi" = nonnull_keeps;
++extern "C" trampoline "flipped_null_ffi" = flipped_null;
++extern "C" trampoline "flipped_nonnull_ffi" = flipped_nonnull;
+-- 
+2.43.0
+

@@ -1,0 +1,88 @@
+From d3d6688becfea6956919fc9e709400500f8958e8 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Fri, 2 Oct 2026 22:56:33 -0400
+Subject: [PATCH] l2r-local: bug 24: order the matrix-exponentiation state by
+ the loop header's PHIs
+
+LinearRecurrenceMatExpPass collected a loop's state PHIs by iterating
+`AffineExpr::coeffs`, a `DenseMap<PHINode *, APInt>`, for each live-out
+and update expression. The map is keyed by pointer, so its order follows
+heap addresses, and the state order is the row and column order of the
+companion matrix and the order of the emitted exponentiation code. The
+output was equivalent but differed from run to run: rrc printed two
+different LLVM IR modules for tests/integration/frontend/
+per_ctor_box_sizing_mixed_arms.rr in 8 runs, reussir-llvm-opt two
+different modules in 16 runs on linear_recurrence_matexp.ll, and ten in
+12 runs on the order-6 recurrence (linear_recurrence_order6_e2e.ll).
+
+Add the PHIs an expression uses in the order of the header's PHIs. The
+set of state PHIs is the same; only its order is now fixed.
+
+Found while comparing rrc builds for the bug 10/19 patches (and pinned
+down by the adversarial review of those patches).
+Test: tests/integration/llvmpass/linear_recurrence_matexp_deterministic.ll
+(the order-6 recurrence six times and the fib loop eight times through
+the pass, every output identical; the old pass fails it).
+---
+ .../LinearRecurrence/LinearRecurrenceMatExp.cpp   | 15 +++++++++++----
+ .../linear_recurrence_matexp_deterministic.ll     | 11 +++++++++++
+ 2 files changed, 22 insertions(+), 4 deletions(-)
+ create mode 100644 tests/integration/llvmpass/linear_recurrence_matexp_deterministic.ll
+
+diff --git a/lib/LLVMPass/LinearRecurrence/LinearRecurrenceMatExp.cpp b/lib/LLVMPass/LinearRecurrence/LinearRecurrenceMatExp.cpp
+index 03946cde..56cb4a80 100644
+--- a/lib/LLVMPass/LinearRecurrence/LinearRecurrenceMatExp.cpp
++++ b/lib/LLVMPass/LinearRecurrence/LinearRecurrenceMatExp.cpp
+@@ -262,12 +262,20 @@ std::optional<LoopCandidate> analyzeLoop(Loop *loop, ScalarEvolution &se) {
+   AffineDecomposer decomposer(header, type);
+ 
+   SetVector<PHINode *> statePhis;
++  // Adds the PHIs `expr` uses in the header's order. The order of the state
++  // is the order of the companion matrix and of the emitted code, and
++  // `coeffs` is keyed by pointer, so iterating it would make the output
++  // depend on heap addresses.
++  auto addUsedPhis = [&](const AffineExpr &expr) {
++    for (PHINode &phi : header->phis())
++      if (expr.coeffs.contains(&phi))
++        statePhis.insert(&phi);
++  };
+   for (Instruction *liveOut : liveOuts) {
+     auto expr = decomposer.decompose(liveOut);
+     if (!expr)
+       return std::nullopt;
+-    for (const auto &[phi, coeff] : expr->coeffs)
+-      statePhis.insert(phi);
++    addUsedPhis(*expr);
+   }
+   // Close the state set under the update expressions.
+   SmallVector<AffineExpr, 4> updates;
+@@ -276,8 +284,7 @@ std::optional<LoopCandidate> analyzeLoop(Loop *loop, ScalarEvolution &se) {
+     auto update = decomposer.decompose(phi->getIncomingValueForBlock(header));
+     if (!update)
+       return std::nullopt;
+-    for (const auto &[usedPhi, coeff] : update->coeffs)
+-      statePhis.insert(usedPhi);
++    addUsedPhis(*update);
+     updates.push_back(std::move(*update));
+   }
+   if (statePhis.size() > kMaxStateSize)
+diff --git a/tests/integration/llvmpass/linear_recurrence_matexp_deterministic.ll b/tests/integration/llvmpass/linear_recurrence_matexp_deterministic.ll
+new file mode 100644
+index 00000000..6e788b8a
+--- /dev/null
++++ b/tests/integration/llvmpass/linear_recurrence_matexp_deterministic.ll
+@@ -0,0 +1,11 @@
++; RUN: %reussir-llvm-opt --linear-recurrence-pipeline=O2 %S/linear_recurrence_order6_e2e.ll -o %t.0.ll
++; RUN: for i in 1 2 3 4 5; do %reussir-llvm-opt --linear-recurrence-pipeline=O2 %S/linear_recurrence_order6_e2e.ll -o %t.$i.ll && cmp %t.0.ll %t.$i.ll || exit 1; done
++; RUN: %reussir-llvm-opt --passes='function(loop-simplify,reussir-linear-recurrence-matexp)' %S/linear_recurrence_matexp.ll -o %t.fib0.ll
++; RUN: for i in 1 2 3 4 5 6 7; do %reussir-llvm-opt --passes='function(loop-simplify,reussir-linear-recurrence-matexp)' %S/linear_recurrence_matexp.ll -o %t.fib$i.ll && cmp %t.fib0.ll %t.fib$i.ll || exit 1; done
++
++; The matrix exponentiation's output must not depend on heap addresses. The
++; order of the recurrence state (the rows and columns of the companion matrix,
++; and so the emitted code) followed a DenseMap keyed by PHINode pointers:
++; repeated runs on the same input printed different, equivalent modules (ten
++; distinct ones in twelve runs of the order-6 recurrence). The state now
++; follows the order of the loop header's PHIs.
+-- 
+2.43.0
+

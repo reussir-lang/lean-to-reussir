@@ -1,0 +1,35 @@
+// Bug 29: the MLIR that `rrc --emit mlir` prints for a record with an
+// opaque #[ffi] member does not parse back. The frontend stores the member
+// as an explicit shared rc link, `!reussir.rc<!reussir.ffi_object<..>>`,
+// but RecordType::verify (lib/IR/ReussirTypes.cpp) accepts only atomic rc
+// members; types built in memory are not verified, so only re-reading the
+// dump fails.
+// Commands: rrc THIS --emit mlir -o A.mlir; rrc A.mlir -x mlir --emit mlir -o B.mlir
+// Expected: B.mlir is A.mlir (and the program prints 7).
+// Reussir ef922049: the second command fails with "rc members must be
+// atomic shared links; a normal link is derived from the member's
+// capability instead".
+extern "rust" [{
+    use reussir_rt::collections::vec::Vec as RVec;
+}];
+
+#[ffi(rust = "::reussir_rt::collections::vec::Vec")]
+pub struct Vec<T>;
+
+#[ffi(import)]
+pub fn new<T>() -> Vec<T> [{ RVec::new() }];
+
+#[ffi(import)]
+pub fn len<T>(v: Vec<T>) -> u64 [{ v.len() as u64 }];
+
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+
+// A struct holding an opaque FFI object.
+pub struct Holder(Vec<u64>, u64)
+
+#[main]
+fn main() {
+    let h = Holder { new<u64>(), 7 };
+    say(len(h.0) + h.1);
+}

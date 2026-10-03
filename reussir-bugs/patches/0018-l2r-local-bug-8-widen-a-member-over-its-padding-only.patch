@@ -1,0 +1,147 @@
+From 599064fb3bfa855758b98adf47f0302c65b8d130 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Fri, 2 Oct 2026 21:22:29 -0400
+Subject: [PATCH] l2r-local: bug 8: widen a member over its padding only to an
+ integer no more aligned than the next member
+
+Under the declaration-order layout (--no-pack-record-members), the type
+converter (convertRecordType, compound branch) widens a member that is
+followed by padding to an integer covering the padding (i16/i32/i64 when
+member + padding has that size). It did not check that the integer is no
+more aligned than the next member. `struct [value] S3(u8, u8, u8)`,
+`struct [value] Q(S3, u16)`: S3 plus one byte of padding was widened to
+i32, so LLVM's Q was { i32, i16 }, 8 bytes with alignment 4, while
+Reussir's own layout of Q (used for allocation sizes, token sizes and
+member offsets) is 6 bytes with alignment 2. A record of six Qs and a u16
+was allocated as 38 bytes and written as LLVM's 52, so building a list of
+them overflowed every cell (SIGSEGV); a 6-byte record before a u32 was
+widened to i64 the same way. The packed layout (the default) sorts members
+by alignment and never pads between members, so it was not affected.
+
+Widen only to an integer whose ABI alignment is at most the next member's
+alignment. Such an integer starts at the previous member's offset (the
+next member's offset and the integer's size are multiples of its
+alignment) and does not raise the record's alignment, so every offset and
+the size stay Reussir's. Otherwise the member is padded explicitly
+({ member, [pad x i8] }), as when no integer has the right size. Records
+whose widening already satisfied this (a u8 before a u16 or an i64) are
+converted as before.
+
+Found by the review of the first patches for bugs 1 and 2 (variants),
+which compute offsets from Reussir's layout and so need it to agree with
+LLVM's. Test: tests/integration/frontend/record_lift_alignment.
+---
+ .../TypeConverter/TypeConverter.cpp           |  9 +++-
+ .../frontend/record_lift_alignment.c          | 14 +++++
+ .../frontend/record_lift_alignment.rr         | 54 +++++++++++++++++++
+ 3 files changed, 76 insertions(+), 1 deletion(-)
+ create mode 100644 tests/integration/frontend/record_lift_alignment.c
+ create mode 100644 tests/integration/frontend/record_lift_alignment.rr
+
+diff --git a/lib/Conversion/TypeConverter/TypeConverter.cpp b/lib/Conversion/TypeConverter/TypeConverter.cpp
+index 57a155bf..8b6cd7e6 100644
+--- a/lib/Conversion/TypeConverter/TypeConverter.cpp
++++ b/lib/Conversion/TypeConverter/TypeConverter.cpp
+@@ -144,11 +144,18 @@ convertRecordType(mlir::LLVMTypeConverter &converter,
+             mlir::IntegerType::get(type.getContext(), 16),
+             mlir::IntegerType::get(type.getContext(), 8),
+         };
++        // Widen the previous member over the padding only to an integer no
++        // more aligned than the next member: that integer then starts where
++        // the previous member does and does not raise the record's
++        // alignment. A more aligned one (a 3-byte record followed by a u16,
++        // lifted to i32) would move members and make the LLVM struct larger
++        // than the layout Reussir allocates; use explicit padding instead.
+         bool lift = false;
+         for (auto liftCandidate : liftCandidates) {
+           auto liftCandidateSize = dataLayout.getTypeSize(liftCandidate);
+           if (lastMemberSize < liftCandidateSize &&
+-              lastMemberSize + lastMemberNeedToPad == liftCandidateSize) {
++              lastMemberSize + lastMemberNeedToPad == liftCandidateSize &&
++              dataLayout.getTypeABIAlignment(liftCandidate) <= align) {
+             members.back() = liftCandidate;
+             lift = true;
+             break;
+diff --git a/tests/integration/frontend/record_lift_alignment.c b/tests/integration/frontend/record_lift_alignment.c
+new file mode 100644
+index 00000000..20ee0bf6
+--- /dev/null
++++ b/tests/integration/frontend/record_lift_alignment.c
+@@ -0,0 +1,14 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for record_lift_alignment.rr: the sum over 20000 list cells.
++
++extern unsigned long long reussir_main(void);
++
++int main(void) { return reussir_main() == 212089998ULL ? 0 : 1; }
+diff --git a/tests/integration/frontend/record_lift_alignment.rr b/tests/integration/frontend/record_lift_alignment.rr
+new file mode 100644
+index 00000000..c9fd95b6
+--- /dev/null
++++ b/tests/integration/frontend/record_lift_alignment.rr
+@@ -0,0 +1,54 @@
++// Under the declaration-order layout (`--no-pack-record-members`) the type
++// converter widens a member followed by padding to an integer that covers
++// the padding. It may do so only if that integer is no more aligned than the
++// next member; otherwise the member is padded explicitly. S3 (3 bytes,
++// align 1) before a u16 was widened to i32, so LLVM's Q was 8 bytes with
++// alignment 4 while Reussir lays Q out (and allocates it) as 6 bytes with
++// alignment 2: every R cell (38 bytes allocated) was written as 52 bytes.
++
++// RUN: %rrc %s -o %t.ll --emit llvm-ir -O none --no-pack-record-members
++// RUN: %FileCheck %s < %t.ll
++// RUN: %rrc %s -o %t.o --relocation-mode pic --no-pack-record-members
++// RUN: %cc %t.o %S/record_lift_alignment.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++// RUN: %rrc %s -o %t.opt.o --relocation-mode pic -Oaggressive --no-pack-record-members
++// RUN: %cc %t.opt.o %S/record_lift_alignment.c -o %t.opt.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.opt.exe
++
++// A 3-byte and a 6-byte record keep their size and alignment; widening a u8
++// to i16 before a u16 is still fine.
++// CHECK-DAG: %_RC1Q = type { { %_RC2S3, [1 x i8] }, i16 }
++// CHECK-DAG: %_RC1W = type { { %_RC2S6, [2 x i8] }, i32 }
++// CHECK-DAG: %_RC1P = type { i16, i16 }
++
++struct [value] S3(u8, u8, u8)
++struct [value] Q(S3, u16)
++struct [value] S6(u16, u16, u16)
++struct [value] W(S6, u32)
++struct [value] P(u8, u16)
++struct R(Q, Q, Q, Q, Q, Q, W, P, u16)
++enum L { Nil, Cons(R, L) }
++
++fn mkq(i : u64) -> Q { Q{S3{1, 2, (i % 200) as u8}, (i % 1000) as u16} }
++
++fn build(n : u64, acc : L) -> L {
++    if n == 0 { acc } else {
++        build(n - 1, L::Cons{R{mkq(n), mkq(n), mkq(n), mkq(n), mkq(n), mkq(n),
++                               W{S6{1, 2, 3}, (n % 7) as u32}, P{1, 2},
++                               (n % 50000) as u16}, acc})
++    }
++}
++
++fn sum(l : L, acc : u64) -> u64 {
++    match l {
++        L::Nil => { acc },
++        L::Cons(r, t) => {
++            sum(t, acc + (r.8 as u64) + (r.5.1 as u64) + (r.0.0.2 as u64)
++                   + (r.6.1 as u64) + (r.7.1 as u64))
++        }
++    }
++}
++
++pub fn main() -> u64 { sum(build(20000, L::Nil{}), 0) }
++
++extern "C" trampoline "reussir_main" = main;
+-- 
+2.43.0
+

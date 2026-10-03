@@ -48,11 +48,36 @@ partial def jumpsIn : Code .pure → FVarIdSet → FVarIdSet
   | .cases c, s => c.alts.foldl (fun s alt => jumpsIn alt.getCode s) s
   | _, s => s
 
+/-- The bodies of the join points of `c` (binders are unique). -/
+partial def jpBodiesOf (c : Code .pure) (acc : Std.HashMap FVarId (Code .pure) := {}) :
+    Std.HashMap FVarId (Code .pure) :=
+  match c with
+  | .let _ k => jpBodiesOf k acc
+  | .fun d k _ => jpBodiesOf k (jpBodiesOf d.value acc)
+  | .jp d k => jpBodiesOf k (jpBodiesOf d.value (acc.insert d.fvarId d.value))
+  | .cases cs => cs.alts.foldl (fun acc alt => jpBodiesOf alt.getCode acc) acc
+  | _ => acc
+
+/-- What the choice of a join point's strategy may look at besides the join
+point (`LowerHooks.duplicateJp`): the join points in scope, at least those it
+can jump to. -/
+structure JpScope where
+  /-- Their bodies. -/
+  bodies : Std.HashMap FVarId (Code .pure) := {}
+  /-- Those jumped to once: inlined at their one jump (J1), whatever their
+  size. -/
+  single : FVarIdSet := {}
+  /-- The declarations of the declaration's call cycle (`LowerCtx.callCycles`):
+  a tail call of one of them closes a loop. -/
+  loop : NameSet := {}
+
 /-- Choose a strategy for every join point of a declaration body: the set
 of outlined (J3) join points; others are J1 (single jump), J2, or
 duplicated at their jumps (J1′, those `duplicate` selects: the lowering hook
-`LowerHooks.duplicateJp`). -/
-partial def chooseOutlined (duplicate : FunDecl .pure → Bool) (body : Code .pure) : FVarIdSet := Id.run do
+`LowerHooks.duplicateJp`, given all join points and the number of
+jumps). -/
+partial def chooseOutlined (duplicate : JpScope → FunDecl .pure → Nat → Bool) (loop : NameSet)
+    (body : Code .pure) : FVarIdSet := Id.run do
   let counts := countJumps body {}
   -- All join points with their scope.
   let mut jps : Array (FunDecl .pure × Code .pure) := #[]
@@ -64,6 +89,9 @@ partial def chooseOutlined (duplicate : FunDecl .pure → Bool) (body : Code .pu
     | .cases cs => cs.alts.foldl (fun acc alt => gather alt.getCode acc) acc
     | _ => acc
   jps := gather body #[]
+  let once := jps.foldl (init := ({} : FVarIdSet)) fun s (d, _) =>
+    if counts.getD d.fvarId 0 ≤ 1 then s.insert d.fvarId else s
+  let scope : JpScope := { bodies := jpBodiesOf body, single := once, loop }
   let mut outlined : FVarIdSet := {}
   let mut changed := true
   while changed do
@@ -74,7 +102,7 @@ partial def chooseOutlined (duplicate : FunDecl .pure → Bool) (body : Code .pu
       -- A J2 join point cannot be the target of a jump from inside an outlined body.
       let jumpedFromOutlined := jps.any fun (d', _) =>
         outlined.contains d'.fvarId && (jumpsIn d'.value {}).contains d.fvarId
-      let ok := single || duplicate d ||
+      let ok := single || duplicate scope d (counts.getD d.fvarId 0) ||
         (endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined && !jumpedFromOutlined)
       if !ok then
         outlined := outlined.insert d.fvarId

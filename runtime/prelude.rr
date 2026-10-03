@@ -32,14 +32,23 @@ enum [value] L2RUnit {
 }
 
 // A Lean `String`: valid UTF-8 bytes and the number of characters (Lean's
-// `m_length`, kept by every operation), copy-on-write.
-#[ffi(rust = "::reussir_rt::rc::Rc<(::std::vec::Vec<u8>, u64)>")]
+// `m_length`, kept by every operation), copy-on-write; one block like
+// Lean's string object (`leanrt::string`).
+#[ffi(rust = "::leanrt::string::LStr")]
 pub struct LStr;
 
-// A big number: (negative?, magnitude limbs), little-endian 64-bit limbs,
-// normalized. Shared by `Nat` (never negative) and `Int`.
-#[ffi(rust = "::reussir_rt::rc::Rc<(bool, ::std::vec::Vec<u64>)>")]
-pub struct LBig;
+// A Lean `Nat` / `Int`: one word, Lean's own encoding (leanrt::nat). An odd
+// word is a small value: `lean_box(n)` for a `Nat` below 2^63,
+// `lean_box((unsigned)(int)i)` for an `Int` in the `int32` range. An even
+// word is a reference to a big number laid out as Lean's `lean_mpz_object`
+// (`leanrt::big`). `tagged` (local Reussir patch 0050): Reussir copies and
+// drops them like any shared handle but counts only the even words, so a
+// small value costs no allocation and its copy or drop is a bit test.
+#[ffi(rust = "::leanrt::nat::LNat", tagged)]
+pub struct Nat;
+
+#[ffi(rust = "::leanrt::nat::LInt", tagged)]
+pub struct Int;
 
 // A Lean `Array` (and `ByteArray` = RVec<u8>, `FloatArray` = RVec<f64>):
 // a copy-on-write vector, updated in place when unique. The Rust type wraps
@@ -48,8 +57,10 @@ pub struct LBig;
 #[ffi(rust = "::leanrt::drop::Vec")]
 pub struct RVec<T>;
 
-// A mutable reference cell (`ST.Ref`/`IO.Ref`): a shared 0-or-1 element
-// vector, mutated in place through every alias (empty after `take`).
+// A shared runtime cell: a 0-or-1 element vector, mutated in place through
+// every alias (empty after `take`). No longer used by generated code:
+// references are lean2rr-generated records around a Reussir `Cell`
+// (`l2r_rc_*` below), and promises hold an `LCell`.
 #[ffi(rust = "::leanrt::drop::Vec")]
 pub struct LRef<T>;
 
@@ -65,18 +76,6 @@ pub struct LCell<T>;
 // the event loop (all `lcAny` in mono code).
 #[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
 pub struct LHandle;
-
-// A Lean `Nat`. Invariant: `Big` only holds values >= 2^64.
-enum [value] Nat {
-    Small(u64),
-    Big(LBig)
-}
-
-// A Lean `Int`. Invariant: `Big` only holds values outside the i64 range.
-enum [value] Int {
-    Small(i64),
-    Big(LBig)
-}
 
 // ===========================================================================
 // Process, panics, unreachable code
@@ -94,15 +93,10 @@ fn l2r_process_exit(code : u8) -> u64 [{ { leanrt::sched::effect(); leanrt::io::
 fn l2r_process_force_exit(code : u8) -> u64 [{ { extern "C" { fn _exit(code: i32) -> !; } unsafe { _exit(code as i32) } } }];
 
 #[ffi(import)]
-fn l2r_argc() -> u64 [{ (std::env::args_os().count() as u64).saturating_sub(1) }];
+fn l2r_argc() -> u64 [{ (leanrt::rt::args().len() as u64).saturating_sub(1) }];
 
 #[ffi(import)]
-fn l2r_argv(i : u64) -> LStr [{
-    {
-        let a = std::env::args_os().nth(i as usize + 1).unwrap_or_default();
-        leanrt::string::from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(a.as_os_str()))
-    }
-}];
+fn l2r_argv(i : u64) -> LStr [{ leanrt::string::from_bytes_lossy(&leanrt::rt::args()[i as usize + 1]) }];
 
 // Top-level `error e`: `uncaught exception: <e.toString>`, exit 1.
 #[ffi(import)]
@@ -127,6 +121,14 @@ fn l2r_unreachable<T>() -> T {
     let ignored = l2r_internal_panic(0);
     core::intrinsic::panic::panic<T>()
 }
+
+// Releases `x` out of line. A wildcard arm that rrc copies into several
+// constructors releases the values of wide enums it holds with it
+// (Lower/Code, sinkWildcardHeld), where rrc would expand each release in
+// line, a match over the variants, in every copy. Kept out of rrc's
+// inliner, which would put the expansion back.
+#[transform_anchor]
+fn l2r_sink<T>(x : T) -> u64 { 0 }
 
 fn l2r_internal_panic_at<T>(code : u64) -> T {
     let ignored = l2r_internal_panic(code);
@@ -201,710 +203,476 @@ fn lean_sorry<T>(b : bool) -> T { l2r_internal_panic_at<T>(5) }
 // ===========================================================================
 // Nat
 //
-// Small values are unboxed words; arithmetic checks for overflow and falls
-// back to the bignum routines in leanrt::big (GMP). Results that may fall
-// back into the word range are normalized by `l2r_nat_norm`.
+// A `Nat` is one word (leanrt::nat), as natively: an odd word is a small
+// value `(n << 1) | 1` (n < 2^63), an even word a reference to a big number
+// (n >= 2^63). Every value has exactly one form, so two small words are
+// equal exactly when the values are, and a small value is below every big
+// one. Fast paths work on the words inline; everything that involves a big
+// number is a call to leanrt::nat (GMP).
+//
+// Ownership of words: `l2r_nat_raw(n)` turns `n` into its word, which then
+// owns `n`'s reference (Reussir no longer counts it). A small word owns
+// nothing and may be used freely; a big word must reach exactly one owner
+// on every path: back into a handle (`l2r_nat_of_raw`), a `_raw` slow path
+// (which consumes its words), or `l2r_nat_drop_raw`. A function that takes
+// a `Nat` turns it into its word once: no reference counting at all on its
+// small path.
 
 #[ffi(import)]
-fn l2r_big_of_u64(x : u64) -> LBig [{ leanrt::big::of_u64(x) }];
+fn l2r_nat_raw(n : Nat) -> u64 [{ n.into_raw() }];
 #[ffi(import)]
-fn l2r_big_of_limbs2(lo : u64, hi : u64) -> LBig [{ leanrt::big::of_limbs2(lo, hi) }];
+fn l2r_nat_of_raw(w : u64) -> Nat [{ unsafe { leanrt::nat::LNat::from_raw(w) } }];
+// Release the big number a word owns (nothing for a small word); 0.
 #[ffi(import)]
-fn l2r_big_is_u64(a : LBig) -> bool [{ { let r = leanrt::big::is_u64(&a); leanrt::rc_release(a); r } }];
+fn l2r_nat_drop_raw(w : u64) -> u64 [{ { drop(unsafe { leanrt::nat::LNat::from_raw(w) }); 0 } }];
+
+// A value below 2^63.
+fn l2r_nat_small(x : u64) -> Nat { l2r_nat_of_raw((x << 1) | 1) }
+
 #[ffi(import)]
-fn l2r_big_low(a : LBig) -> u64 [{ { let r = leanrt::big::low_limb(&a); leanrt::rc_release(a); r } }];
+fn l2r_nat_big_of_u64(x : u64) -> Nat [{ leanrt::nat::nat_big_of_u64(x) }];
+
+// `lean_usize_to_nat`: any word.
+fn l2r_nat_of_u64(x : u64) -> Nat {
+    if (x >> 63) == 0 { l2r_nat_small(x) } else { l2r_nat_big_of_u64(x) }
+}
+
+// Big literals (lean2rr emits them for values >= 2^63, see `natLiteral`).
 #[ffi(import)]
-fn l2r_big_of_decimal(s : str) -> LBig [{ leanrt::big::of_decimal(&*s) }];
+fn lean_cstr_to_nat(s : str) -> Nat [{ leanrt::nat::nat_of_decimal((*s).as_bytes()) }];
 // A big `Nat` literal: its decimal digits (from the string literal table).
 #[ffi(import)]
-fn l2r_big_of_decimal_lstr(s : LStr) -> LBig [{ { let r = leanrt::big::of_decimal(unsafe { ::std::str::from_utf8_unchecked(&s.utf8()[..]) }); leanrt::rc_release(s); r } }];
+fn l2r_nat_of_decimal_lstr(s : LStr) -> Nat [{ { let r = leanrt::nat::nat_of_decimal(&s.utf8()[..]); leanrt::rc_release(s); r } }];
+
+fn lean_unsigned_to_nat(x : u32) -> Nat { l2r_nat_small(x as u64) }
+
+// Slow paths: raw words in (consumed), a normalized `Nat` out.
 #[ffi(import)]
-fn l2r_big_to_lstr(a : LBig) -> LStr [{ leanrt::string::from_vec(leanrt::big::to_decimal(&a)) }];
+fn l2r_nat_add_raw(a : u64, b : u64) -> Nat [{ leanrt::nat::nat_add(a, b) }];
 #[ffi(import)]
-fn l2r_big_add(a : LBig, b : LBig) -> LBig [{ leanrt::big::nat_add(a, b) }];
+fn l2r_nat_sub_raw(a : u64, b : u64) -> Nat [{ leanrt::nat::nat_sub(a, b) }];
 #[ffi(import)]
-fn l2r_big_add_u64(a : LBig, y : u64) -> LBig [{ leanrt::big::nat_add_u64(a, y) }];
+fn l2r_nat_mul_raw(a : u64, b : u64) -> Nat [{ leanrt::nat::nat_mul(a, b) }];
 #[ffi(import)]
-fn l2r_u64_add_overflow(x : u64, y : u64) -> LBig [{ leanrt::big::u64_add_overflow(x, y) }];
+fn l2r_nat_div_raw(a : u64, b : u64) -> Nat [{ leanrt::nat::nat_div(a, b) }];
 #[ffi(import)]
-fn l2r_big_sub(a : LBig, b : LBig) -> LBig [{ leanrt::big::nat_sub(a, b) }];
+fn l2r_nat_mod_raw(a : u64, b : u64) -> Nat [{ leanrt::nat::nat_mod(a, b) }];
 #[ffi(import)]
-fn l2r_big_sub_u64(a : LBig, y : u64) -> LBig [{ leanrt::big::nat_sub_u64(a, y) }];
+fn l2r_nat_cmp_raw(a : u64, b : u64) -> i64 [{ leanrt::nat::nat_cmp(a, b) }];
 #[ffi(import)]
-fn l2r_big_mul(a : LBig, b : LBig) -> LBig [{ leanrt::big::nat_mul(a, b) }];
+fn l2r_nat_eq_raw(a : u64, b : u64) -> bool [{ leanrt::nat::nat_eq(a, b) }];
 #[ffi(import)]
-fn l2r_big_mul_u64(a : LBig, y : u64) -> LBig [{ leanrt::big::nat_mul_u64(a, y) }];
+fn l2r_nat_land_raw(a : u64, b : u64) -> Nat [{ leanrt::nat::nat_land(a, b) }];
 #[ffi(import)]
-fn l2r_u64_mul_wide(x : u64, y : u64) -> LBig [{ leanrt::big::u64_mul_wide(x, y) }];
+fn l2r_nat_lor_raw(a : u64, b : u64) -> Nat [{ leanrt::nat::nat_lor(a, b) }];
+#[ffi(import)]
+fn l2r_nat_xor_raw(a : u64, b : u64) -> Nat [{ leanrt::nat::nat_xor(a, b) }];
+#[ffi(import)]
+fn l2r_nat_shiftl_raw(a : u64, b : u64) -> Nat [{ leanrt::nat::nat_shiftl(a, b) }];
+#[ffi(import)]
+fn l2r_nat_shiftr_raw(a : u64, b : u64) -> Nat [{ leanrt::nat::nat_shiftr(a, b) }];
+#[ffi(import)]
+fn l2r_nat_pow_raw(a : u64, b : u64) -> Nat [{ leanrt::nat::nat_pow(a, b) }];
+#[ffi(import)]
+fn l2r_nat_low_raw(a : u64) -> u64 [{ leanrt::nat::nat_low_u64(a) }];
 #[ffi(import)]
 fn l2r_u64_mul_hi(x : u64, y : u64) -> u64 [{ leanrt::big::u64_mul_hi(x, y) }];
-#[ffi(import)]
-fn l2r_big_div(a : LBig, b : LBig) -> LBig [{ leanrt::big::nat_div(a, b) }];
-#[ffi(import)]
-fn l2r_big_div_u64(a : LBig, y : u64) -> LBig [{ leanrt::big::nat_div_u64(a, y) }];
-#[ffi(import)]
-fn l2r_big_mod(a : LBig, b : LBig) -> LBig [{ leanrt::big::nat_mod(a, b) }];
-#[ffi(import)]
-fn l2r_big_mod_u64(a : LBig, y : u64) -> u64 [{ leanrt::big::nat_mod_u64(a, y) }];
-#[ffi(import)]
-fn l2r_big_cmp(a : LBig, b : LBig) -> i64 [{ leanrt::big::nat_cmp(a, b) }];
-#[ffi(import)]
-fn l2r_big_eq(a : LBig, b : LBig) -> bool [{ leanrt::big::nat_eq(a, b) }];
-#[ffi(import)]
-fn l2r_big_land(a : LBig, b : LBig) -> LBig [{ leanrt::big::nat_land(a, b) }];
-#[ffi(import)]
-fn l2r_big_land_u64(a : LBig, y : u64) -> u64 [{ leanrt::big::nat_land_u64(a, y) }];
-#[ffi(import)]
-fn l2r_big_lor(a : LBig, b : LBig) -> LBig [{ leanrt::big::nat_lor(a, b) }];
-#[ffi(import)]
-fn l2r_big_lor_u64(a : LBig, y : u64) -> LBig [{ leanrt::big::nat_lor_u64(a, y) }];
-#[ffi(import)]
-fn l2r_big_xor(a : LBig, b : LBig) -> LBig [{ leanrt::big::nat_xor(a, b) }];
-#[ffi(import)]
-fn l2r_big_xor_u64(a : LBig, y : u64) -> LBig [{ leanrt::big::nat_xor_u64(a, y) }];
-#[ffi(import)]
-fn l2r_big_shl(a : LBig, s : u64) -> LBig [{ leanrt::big::nat_shl(a, s) }];
-#[ffi(import)]
-fn l2r_big_shr(a : LBig, s : u64) -> LBig [{ leanrt::big::nat_shr(a, s) }];
-#[ffi(import)]
-fn l2r_big_log2(a : LBig) -> u64 [{ leanrt::big::nat_log2(a) }];
-#[ffi(import)]
-fn l2r_big_pow(a : LBig, e : u64) -> LBig [{ leanrt::big::nat_pow(a, e) }];
-#[ffi(import)]
-fn l2r_big_gcd(a : LBig, b : LBig) -> LBig [{ leanrt::big::nat_gcd(a, b) }];
-// `x ^ e` for x >= 2 and e < 64, or 0 when it overflows.
+// `x ^ e` for x >= 2 and e < 64, or 0 when it overflows a word.
 #[ffi(import)]
 fn l2r_u64_pow_checked(x : u64, e : u64) -> u64 [{ x.checked_pow(e as u32).unwrap_or(0) }];
 
-fn l2r_nat_norm(b : LBig) -> Nat {
-    if l2r_big_is_u64(b) { Nat::Small{l2r_big_low(b)} } else { Nat::Big{b} }
-}
-
-fn l2r_nat_to_big(n : Nat) -> LBig {
-    match n {
-        Nat::Small(x) => l2r_big_of_u64(x),
-        Nat::Big(b) => b
-    }
-}
-
-// Big literals (lean2rr emits them for values >= 2^63).
-fn lean_cstr_to_nat(s : str) -> Nat { l2r_nat_norm(l2r_big_of_decimal(s)) }
-
-fn lean_unsigned_to_nat(x : u32) -> Nat { Nat::Small{x as u64} }
-
+// Words of two small values `2m+1`, `2n+1`: their sum minus one is
+// `2(m+n)+1`, small exactly when it does not carry out of the word.
 fn lean_nat_add(a : Nat, b : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => {
-                    let s = x + y;
-                    if s < x { Nat::Big{l2r_u64_add_overflow(x, y)} } else { Nat::Small{s} }
-                },
-                Nat::Big(bb) => Nat::Big{l2r_big_add_u64(bb, x)}
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(y) => Nat::Big{l2r_big_add_u64(ba, y)},
-                Nat::Big(bb) => Nat::Big{l2r_big_add(ba, bb)}
-            }
-        }
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 {
+        let s = x + (y - 1);
+        if s >= x { l2r_nat_of_raw(s) } else { l2r_nat_add_raw(x, y) }
+    } else { l2r_nat_add_raw(x, y) }
 }
 
-fn lean_nat_succ(a : Nat) -> Nat { lean_nat_add(a, Nat::Small{1}) }
+fn lean_nat_succ(a : Nat) -> Nat { lean_nat_add(a, l2r_nat_small(1)) }
 
+// Truncated: `m - n = 0` for m < n.
 fn lean_nat_sub(a : Nat, b : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => if x < y { Nat::Small{0} } else { Nat::Small{x - y} },
-                Nat::Big(_) => Nat::Small{0}
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(y) => l2r_nat_norm(l2r_big_sub_u64(ba, y)),
-                Nat::Big(bb) => l2r_nat_norm(l2r_big_sub(ba, bb))
-            }
-        }
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 {
+        if x < y { l2r_nat_small(0) } else { l2r_nat_of_raw((x - y) + 1) }
+    } else { l2r_nat_sub_raw(x, y) }
 }
 
 fn lean_nat_pred(a : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => if x == 0 { Nat::Small{0} } else { Nat::Small{x - 1} },
-        Nat::Big(ba) => l2r_nat_norm(l2r_big_sub_u64(ba, 1))
-    }
+    let x = l2r_nat_raw(a);
+    if (x & 1) == 1 {
+        if x == 1 { l2r_nat_small(0) } else { l2r_nat_of_raw(x - 2) }
+    } else { l2r_nat_sub_raw(x, 3) }
 }
 
-fn l2r_u64_mul(x : u64, y : u64) -> Nat {
-    if (x | y) < 4294967296 { Nat::Small{x * y} } else {
-        let hi = l2r_u64_mul_hi(x, y);
-        if hi == 0 { Nat::Small{x * y} } else { Nat::Big{l2r_big_of_limbs2(x * y, hi)} }
-    }
-}
-
+// Both factors below 2^31: the product is below 2^62. Otherwise the high
+// word of the product decides (`umulh`), as natively.
 fn lean_nat_mul(a : Nat, b : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => l2r_u64_mul(x, y),
-                Nat::Big(bb) => if x == 0 { Nat::Small{0} } else { Nat::Big{l2r_big_mul_u64(bb, x)} }
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(y) => if y == 0 { Nat::Small{0} } else { Nat::Big{l2r_big_mul_u64(ba, y)} },
-                Nat::Big(bb) => Nat::Big{l2r_big_mul(ba, bb)}
-            }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 {
+        let m = x >> 1;
+        let n = y >> 1;
+        let p = m * n;
+        if (m | n) < 2147483648 { l2r_nat_of_raw((p << 1) | 1) } else {
+            if l2r_u64_mul_hi(m, n) == 0 && (p >> 63) == 0 { l2r_nat_of_raw((p << 1) | 1) } else { l2r_nat_mul_raw(x, y) }
         }
-    }
+    } else { l2r_nat_mul_raw(x, y) }
 }
 
+// `m / 0 = 0`.
 fn lean_nat_div(a : Nat, b : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => if y == 0 { Nat::Small{0} } else { Nat::Small{x / y} },
-                Nat::Big(_) => Nat::Small{0}
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(y) => if y == 0 { Nat::Small{0} } else { l2r_nat_norm(l2r_big_div_u64(ba, y)) },
-                Nat::Big(bb) => l2r_nat_norm(l2r_big_div(ba, bb))
-            }
-        }
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 {
+        let n = y >> 1;
+        if n == 0 { l2r_nat_small(0) } else { l2r_nat_small((x >> 1) / n) }
+    } else { l2r_nat_div_raw(x, y) }
 }
 
 fn lean_nat_div_exact(a : Nat, b : Nat) -> Nat { lean_nat_div(a, b) }
 
+// `m % 0 = m`.
 fn lean_nat_mod(a : Nat, b : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => if y == 0 { a } else { Nat::Small{x % y} },
-                Nat::Big(_) => a
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(y) => if y == 0 { a } else { Nat::Small{l2r_big_mod_u64(ba, y)} },
-                Nat::Big(bb) => l2r_nat_norm(l2r_big_mod(ba, bb))
-            }
-        }
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 {
+        let n = y >> 1;
+        if n == 0 { l2r_nat_of_raw(x) } else { l2r_nat_small((x >> 1) % n) }
+    } else { l2r_nat_mod_raw(x, y) }
 }
 
-// Three-way comparison: -1, 0, 1. `Big` values exceed every `Small` one.
+// Three-way comparison: -1, 0, 1.
 fn l2r_nat_cmp(a : Nat, b : Nat) -> i64 {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => if x < y { 0 - 1 } else { if x == y { 0 } else { 1 } },
-                Nat::Big(_) => 0 - 1
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(_) => 1,
-                Nat::Big(bb) => l2r_big_cmp(ba, bb)
-            }
-        }
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 {
+        if x < y { 0 - 1 } else { if x == y { 0 } else { 1 } }
+    } else { l2r_nat_cmp_raw(x, y) }
 }
 
 fn lean_nat_dec_eq(a : Nat, b : Nat) -> bool {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => x == y,
-                Nat::Big(_) => false
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(_) => false,
-                Nat::Big(bb) => l2r_big_eq(ba, bb)
-            }
-        }
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 { x == y } else { l2r_nat_eq_raw(x, y) }
 }
 
 fn lean_nat_eq(a : Nat, b : Nat) -> bool { lean_nat_dec_eq(a, b) }
 fn lean_nat_ne(a : Nat, b : Nat) -> bool { !lean_nat_dec_eq(a, b) }
 
 fn lean_nat_dec_lt(a : Nat, b : Nat) -> bool {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => x < y,
-                Nat::Big(_) => true
-            }
-        },
-        Nat::Big(_) => l2r_nat_cmp(a, b) < 0
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 { x < y } else { l2r_nat_cmp_raw(x, y) < 0 }
 }
 
 fn lean_nat_dec_le(a : Nat, b : Nat) -> bool {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => x <= y,
-                Nat::Big(_) => true
-            }
-        },
-        Nat::Big(_) => l2r_nat_cmp(a, b) <= 0
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 { x <= y } else { l2r_nat_cmp_raw(x, y) <= 0 }
 }
 
 fn lean_nat_lt(a : Nat, b : Nat) -> bool { lean_nat_dec_lt(a, b) }
 fn lean_nat_le(a : Nat, b : Nat) -> bool { lean_nat_dec_le(a, b) }
 
+// Bitwise operations on two small words act on the values (as natively:
+// `(2m+1) & (2n+1) = 2(m & n) + 1`, likewise `|`; `^` clears the tag bit).
 fn lean_nat_land(a : Nat, b : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => Nat::Small{x & y},
-                Nat::Big(bb) => Nat::Small{l2r_big_land_u64(bb, x)}
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(y) => Nat::Small{l2r_big_land_u64(ba, y)},
-                Nat::Big(bb) => l2r_nat_norm(l2r_big_land(ba, bb))
-            }
-        }
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 { l2r_nat_of_raw(x & y) } else { l2r_nat_land_raw(x, y) }
 }
 
 fn lean_nat_lor(a : Nat, b : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => Nat::Small{x | y},
-                Nat::Big(bb) => Nat::Big{l2r_big_lor_u64(bb, x)}
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(y) => Nat::Big{l2r_big_lor_u64(ba, y)},
-                Nat::Big(bb) => Nat::Big{l2r_big_lor(ba, bb)}
-            }
-        }
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 { l2r_nat_of_raw(x | y) } else { l2r_nat_lor_raw(x, y) }
 }
 
 fn lean_nat_lxor(a : Nat, b : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => Nat::Small{x ^ y},
-                Nat::Big(bb) => Nat::Big{l2r_big_xor_u64(bb, x)}
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(y) => Nat::Big{l2r_big_xor_u64(ba, y)},
-                Nat::Big(bb) => l2r_nat_norm(l2r_big_xor(ba, bb))
-            }
-        }
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 { l2r_nat_of_raw((x ^ y) | 1) } else { l2r_nat_xor_raw(x, y) }
 }
 
 // `Nat.shiftLeft`: 0 stays 0; otherwise a shift amount above 2^32 - 1 is an
-// internal panic (as `lean_nat_shiftl`).
+// internal panic (as `lean_nat_shiftl`; leanrt::nat::nat_shiftl).
 fn lean_nat_shiftl(a : Nat, b : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => {
-            if x == 0 { a } else {
-                match b {
-                    Nat::Small(s) => {
-                        if s < 64 {
-                            if ((x >> (63 - s)) >> 1) == 0 { Nat::Small{x << s} } else { Nat::Big{l2r_big_shl(l2r_big_of_u64(x), s)} }
-                        } else {
-                            if s > 4294967295 { l2r_internal_panic_at<Nat>(2) } else { Nat::Big{l2r_big_shl(l2r_big_of_u64(x), s)} }
-                        }
-                    },
-                    Nat::Big(_) => l2r_internal_panic_at<Nat>(2)
-                }
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(s) => if s > 4294967295 { l2r_internal_panic_at<Nat>(2) } else { Nat::Big{l2r_big_shl(ba, s)} },
-                Nat::Big(_) => l2r_internal_panic_at<Nat>(2)
-            }
-        }
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 {
+        let m = x >> 1;
+        let s = y >> 1;
+        if s < 63 {
+            let r = m << s;
+            if (r >> s) == m && (r >> 63) == 0 { l2r_nat_small(r) } else { l2r_nat_shiftl_raw(x, y) }
+        } else { l2r_nat_shiftl_raw(x, y) }
+    } else { l2r_nat_shiftl_raw(x, y) }
 }
 
 // `Nat.shiftRight`: a big shift amount gives 0; a big value shifted by more
 // than 2^32 - 1 panics unless every bit is shifted out.
 fn lean_nat_shiftr(a : Nat, b : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(s) => if s < 64 { Nat::Small{x >> s} } else { Nat::Small{0} },
-                Nat::Big(_) => Nat::Small{0}
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(s) => {
-                    if s > 4294967295 {
-                        if l2r_big_log2(ba) >= s { l2r_internal_panic_at<Nat>(3) } else { Nat::Small{0} }
-                    } else {
-                        l2r_nat_norm(l2r_big_shr(ba, s))
-                    }
-                },
-                Nat::Big(_) => Nat::Small{0}
-            }
-        }
-    }
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 {
+        let s = y >> 1;
+        if s < 63 { l2r_nat_small((x >> 1) >> s) } else { l2r_nat_small(0) }
+    } else { l2r_nat_shiftr_raw(x, y) }
 }
+
+#[ffi(import)]
+fn l2r_nat_log2_big(a : u64) -> Nat [{ leanrt::nat::nat_log2(a) }];
 
 fn lean_nat_log2(a : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => if x == 0 { Nat::Small{0} } else { Nat::Small{63 - core::intrinsic::math::ctlz(x)} },
-        Nat::Big(ba) => Nat::Small{l2r_big_log2(ba)}
-    }
+    let x = l2r_nat_raw(a);
+    if (x & 1) == 1 {
+        let m = x >> 1;
+        if m == 0 { l2r_nat_small(0) } else { l2r_nat_small(63 - core::intrinsic::math::ctlz(m)) }
+    } else { l2r_nat_log2_big(x) }
 }
 
-// `Nat.pow`: an exponent above 2^32 - 1 is an internal panic, whatever the base.
+// `Nat.pow`: an exponent above 2^32 - 1 is an internal panic, whatever the
+// base (leanrt::nat::nat_pow; the fast path takes exponents below 2^32).
 fn lean_nat_pow(a : Nat, b : Nat) -> Nat {
-    match b {
-        Nat::Small(e) => if e > 4294967295 { l2r_internal_panic_at<Nat>(1) } else { l2r_nat_pow_u64(a, e) },
-        Nat::Big(_) => l2r_internal_panic_at<Nat>(1)
-    }
-}
-
-fn l2r_nat_pow_u64(a : Nat, e : u64) -> Nat {
-    if e == 0 { Nat::Small{1} } else {
-        match a {
-            Nat::Small(x) => {
-                if x < 2 { a } else {
-                    if e < 64 {
-                        let r = l2r_u64_pow_checked(x, e);
-                        if r == 0 { Nat::Big{l2r_big_pow(l2r_big_of_u64(x), e)} } else { Nat::Small{r} }
-                    } else {
-                        Nat::Big{l2r_big_pow(l2r_big_of_u64(x), e)}
-                    }
-                }
-            },
-            Nat::Big(ba) => Nat::Big{l2r_big_pow(ba, e)}
-        }
-    }
-}
-
-fn l2r_u64_gcd(x : u64, y : u64) -> u64 {
-    if y == 0 { x } else { l2r_u64_gcd(y, x % y) }
-}
-
-fn lean_nat_gcd(a : Nat, b : Nat) -> Nat {
-    match a {
-        Nat::Small(x) => {
-            match b {
-                Nat::Small(y) => Nat::Small{l2r_u64_gcd(x, y)},
-                Nat::Big(bb) => if x == 0 { b } else { Nat::Small{l2r_u64_gcd(x, l2r_big_mod_u64(bb, x))} }
-            }
-        },
-        Nat::Big(ba) => {
-            match b {
-                Nat::Small(y) => if y == 0 { a } else { Nat::Small{l2r_u64_gcd(y, l2r_big_mod_u64(ba, y))} },
-                Nat::Big(bb) => l2r_nat_norm(l2r_big_gcd(ba, bb))
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 && (y >> 33) == 0 {
+        let m = x >> 1;
+        let e = y >> 1;
+        if e == 0 { l2r_nat_small(1) } else {
+            if m < 2 { l2r_nat_of_raw(x) } else {
+                if e < 64 {
+                    let r = l2r_u64_pow_checked(m, e);
+                    if r != 0 && (r >> 63) == 0 { l2r_nat_small(r) } else { l2r_nat_pow_raw(x, y) }
+                } else { l2r_nat_pow_raw(x, y) }
             }
         }
-    }
+    } else { l2r_nat_pow_raw(x, y) }
 }
 
-// `Nat.repr n` for `n < 128`: as natively (`Nat.reprFast` reads the
-// closed term `Nat.reprArray`), the same shared string every time.
 #[ffi(import)]
-fn l2r_nat_repr_small(x : u64) -> LStr [{ leanrt::string::repr_small(x) }];
+fn lean_nat_gcd(a : Nat, b : Nat) -> Nat [{ leanrt::nat::nat_gcd(a.into_raw(), b.into_raw()) }];
+
+// One shared empty string (a new reference, no allocation): the
+// placeholder of a string parameter that is never read (lean2rr's
+// Opt/StateMachines).
+#[ffi(import)]
+fn l2r_str_shared_empty() -> LStr [{ leanrt::string::shared_empty() }];
 
 // Decimal representation (`Nat.repr`); lean2rr replaces Lean's `Nat.repr`
 // and `Nat.reprFast` with it (the former builds big numbers digit by digit).
-fn l2r_nat_repr(a : Nat) -> LStr {
-    match a {
-        Nat::Small(x) => if x < 128 { l2r_nat_repr_small(x) } else { lean_string_of_usize(x) },
-        Nat::Big(ba) => l2r_big_to_lstr(ba)
-    }
+// Below 128, as natively (`Nat.reprFast` reads the closed term
+// `Nat.reprArray`), the same shared string every time.
+#[ffi(import)]
+fn l2r_nat_repr(a : Nat) -> LStr [{ leanrt::nat::nat_repr(a.into_raw()) }];
+
+#[ffi(import)]
+fn l2r_nat_repr_small(x : u64) -> LStr [{ leanrt::string::repr_small(x) }];
+
+fn lean_system_platform_nbits(u : L2RUnit) -> Nat { l2r_nat_small(64) }
+
+// The value modulo 2^64 (`UInt64.ofNat`, `USize.ofNat`, ...).
+fn l2r_nat_low(a : Nat) -> u64 {
+    let x = l2r_nat_raw(a);
+    if (x & 1) == 1 { x >> 1 } else { l2r_nat_low_raw(x) }
 }
 
-fn lean_system_platform_nbits(u : L2RUnit) -> Nat { Nat::Small{64} }
+// Whether word `w` (of a `Nat`) is an index below `n` (a big word never is).
+fn l2r_word_index_ok(w : u64, n : u64) -> bool { (w & 1) == 1 && (w >> 1) < n }
 
 // ===========================================================================
 // Int
 //
-// Small values are unboxed i64s; overflow falls back to leanrt::big. Mixed
-// operations convert the small operand to a big number (rare in practice).
+// An `Int` is one word as well, Lean's own encoding (leanrt::nat): a value
+// in the `int32` range is the odd word `lean_box((unsigned)(int)i)`, its
+// 32-bit two's complement pattern zero-extended, shifted and tagged (so a
+// `Nat` below 2^31 and the `Int` of the same value have the same word); an
+// even word is a reference to a big number (any value outside `int32`).
+// `l2r_int_val` reads a small word (`lean_scalar_to_int64`). Ownership of
+// words as for `Nat`.
 
 #[ffi(import)]
-fn l2r_big_of_i64(x : i64) -> LBig [{ leanrt::big::of_i64(x) }];
+fn l2r_int_raw(i : Int) -> u64 [{ i.into_raw() }];
 #[ffi(import)]
-fn l2r_big_fits_i64(a : LBig) -> bool [{ { let r = leanrt::big::fits_i64(&a); leanrt::rc_release(a); r } }];
+fn l2r_int_of_raw(w : u64) -> Int [{ unsafe { leanrt::nat::LInt::from_raw(w) } }];
 #[ffi(import)]
-fn l2r_big_to_i64(a : LBig) -> i64 [{ { let r = leanrt::big::to_i64(&a); leanrt::rc_release(a); r } }];
-#[ffi(import)]
-fn l2r_big_low_twos(a : LBig) -> u64 [{ { let r = leanrt::big::low_u64_twos(&a); leanrt::rc_release(a); r } }];
-#[ffi(import)]
-fn l2r_big_is_neg(a : LBig) -> bool [{ { let r = leanrt::big::is_neg(&a); leanrt::rc_release(a); r } }];
-#[ffi(import)]
-fn l2r_bigint_add(a : LBig, b : LBig) -> LBig [{ leanrt::big::int_add(a, b) }];
-#[ffi(import)]
-fn l2r_bigint_sub(a : LBig, b : LBig) -> LBig [{ leanrt::big::int_sub(a, b) }];
-#[ffi(import)]
-fn l2r_bigint_mul(a : LBig, b : LBig) -> LBig [{ leanrt::big::int_mul(a, b) }];
-#[ffi(import)]
-fn l2r_bigint_neg(a : LBig) -> LBig [{ leanrt::big::int_neg(a) }];
-#[ffi(import)]
-fn l2r_bigint_tdiv(a : LBig, b : LBig) -> LBig [{ leanrt::big::int_tdiv(a, b) }];
-#[ffi(import)]
-fn l2r_bigint_tmod(a : LBig, b : LBig) -> LBig [{ leanrt::big::int_tmod(a, b) }];
-#[ffi(import)]
-fn l2r_bigint_ediv(a : LBig, b : LBig) -> LBig [{ leanrt::big::int_ediv(a, b) }];
-#[ffi(import)]
-fn l2r_bigint_emod(a : LBig, b : LBig) -> LBig [{ leanrt::big::int_emod(a, b) }];
-#[ffi(import)]
-fn l2r_bigint_cmp(a : LBig, b : LBig) -> i64 [{ leanrt::big::int_cmp(a, b) }];
-#[ffi(import)]
-fn l2r_bigint_eq(a : LBig, b : LBig) -> bool [{ leanrt::big::int_eq(a, b) }];
-#[ffi(import)]
-fn l2r_bigint_abs(a : LBig) -> LBig [{ leanrt::big::int_abs(a) }];
-#[ffi(import)]
-fn l2r_i64_mul_overflows(x : i64, y : i64) -> bool [{ x.checked_mul(y).is_none() }];
+fn l2r_int_drop_raw(w : u64) -> u64 [{ { drop(unsafe { leanrt::nat::LInt::from_raw(w) }); 0 } }];
 
-fn l2r_int_norm(b : LBig) -> Int {
-    if l2r_big_fits_i64(b) { Int::Small{l2r_big_to_i64(b)} } else { Int::Big{b} }
+// The value of a small word.
+fn l2r_int_val(w : u64) -> i64 { (((w >> 1) as u32) as i32) as i64 }
+
+// Whether `v` is in the small range, `int32`.
+fn l2r_int_is_tag_small(v : i64) -> bool { ((v + 2147483648) as u64) < 4294967296 }
+
+// A value in the `int32` range.
+fn l2r_int_small(v : i64) -> Int { l2r_int_of_raw((((v as u32) as u64) << 1) | 1) }
+
+#[ffi(import)]
+fn l2r_int_big_of_i64(v : i64) -> Int [{ leanrt::nat::int_big_of_i64(v) }];
+
+fn l2r_int_of_i64(v : i64) -> Int {
+    if l2r_int_is_tag_small(v) { l2r_int_small(v) } else { l2r_int_big_of_i64(v) }
 }
 
-fn l2r_int_to_big(i : Int) -> LBig {
-    match i {
-        Int::Small(x) => l2r_big_of_i64(x),
-        Int::Big(b) => b
-    }
-}
+#[ffi(import)]
+fn l2r_int_neg_raw(a : u64) -> Int [{ leanrt::nat::int_neg(a) }];
+#[ffi(import)]
+fn l2r_int_add_raw(a : u64, b : u64) -> Int [{ leanrt::nat::int_add(a, b) }];
+#[ffi(import)]
+fn l2r_int_sub_raw(a : u64, b : u64) -> Int [{ leanrt::nat::int_sub(a, b) }];
+#[ffi(import)]
+fn l2r_int_mul_raw(a : u64, b : u64) -> Int [{ leanrt::nat::int_mul(a, b) }];
+#[ffi(import)]
+fn l2r_int_div_raw(a : u64, b : u64) -> Int [{ leanrt::nat::int_div(a, b) }];
+#[ffi(import)]
+fn l2r_int_mod_raw(a : u64, b : u64) -> Int [{ leanrt::nat::int_mod(a, b) }];
+#[ffi(import)]
+fn l2r_int_ediv_raw(a : u64, b : u64) -> Int [{ leanrt::nat::int_ediv(a, b) }];
+#[ffi(import)]
+fn l2r_int_emod_raw(a : u64, b : u64) -> Int [{ leanrt::nat::int_emod(a, b) }];
+#[ffi(import)]
+fn l2r_int_cmp_raw(a : u64, b : u64) -> i64 [{ leanrt::nat::int_cmp(a, b) }];
+#[ffi(import)]
+fn l2r_int_eq_raw(a : u64, b : u64) -> bool [{ leanrt::nat::int_eq(a, b) }];
+#[ffi(import)]
+fn l2r_int_is_neg_raw(a : u64) -> bool [{ leanrt::nat::int_is_neg(a) }];
+#[ffi(import)]
+fn l2r_int_low_twos_raw(a : u64) -> u64 [{ leanrt::nat::int_low_twos(a) }];
+#[ffi(import)]
+fn l2r_int_nat_abs_raw(a : u64) -> Nat [{ leanrt::nat::int_nat_abs(a) }];
+#[ffi(import)]
+fn l2r_nat_to_int_raw(a : u64) -> Int [{ leanrt::nat::nat_to_int(a) }];
+#[ffi(import)]
+fn l2r_nat_neg_succ_raw(a : u64) -> Int [{ leanrt::nat::nat_neg_succ(a) }];
 
-fn l2r_i64_min() -> i64 { 0 - 9223372036854775807 - 1 }
-
-// `2^63` (the result of negating i64::MIN) as a big number.
-fn l2r_int_two63() -> Int { Int::Big{l2r_big_of_u64(9223372036854775808)} }
-
-fn lean_int64_to_int(x : i64) -> Int { Int::Small{x} }
-fn lean_int_to_int(x : i32) -> Int { Int::Small{x as i64} }
+fn lean_int64_to_int(x : i64) -> Int { l2r_int_of_i64(x) }
+fn lean_int_to_int(x : i32) -> Int { l2r_int_small(x as i64) }
 
 // Literals are unsigned digit strings (negative ones are `Int.neg`).
 fn lean_cstr_to_int(s : str) -> Int { lean_nat_to_int(lean_cstr_to_nat(s)) }
 
-// `Int.ofNat`.
+// `Int.ofNat`: a small `Nat` below 2^31 has the same word as its `Int`
+// (`lean_nat_to_int`); a big `Nat` is the same object.
 fn lean_nat_to_int(n : Nat) -> Int {
-    match n {
-        Nat::Small(x) => if (x >> 63) == 0 { Int::Small{x as i64} } else { Int::Big{l2r_big_of_u64(x)} },
-        Nat::Big(b) => Int::Big{b}
-    }
+    let x = l2r_nat_raw(n);
+    if (x & 1) == 1 && (x >> 32) == 0 { l2r_int_of_raw(x) } else { l2r_nat_to_int_raw(x) }
 }
 
-// `Int.negSucc n = -(n + 1)`.
+// `Int.negSucc n = -(n + 1)`: small for n below 2^31.
 fn lean_int_neg_succ_of_nat(n : Nat) -> Int {
-    match n {
-        Nat::Small(x) => if (x >> 63) == 0 { Int::Small{(0 - (x as i64)) - 1} } else { lean_int_neg(lean_nat_to_int(lean_nat_add(n, Nat::Small{1}))) },
-        Nat::Big(_) => lean_int_neg(lean_nat_to_int(lean_nat_add(n, Nat::Small{1})))
-    }
+    let x = l2r_nat_raw(n);
+    if (x & 1) == 1 && (x >> 32) == 0 { l2r_int_small((0 - ((x >> 1) as i64)) - 1) } else { l2r_nat_neg_succ_raw(x) }
 }
 
 fn lean_int_neg(a : Int) -> Int {
-    match a {
-        Int::Small(x) => if x == l2r_i64_min() { l2r_int_two63() } else { Int::Small{0 - x} },
-        Int::Big(b) => l2r_int_norm(l2r_bigint_neg(b))
-    }
+    let x = l2r_int_raw(a);
+    if (x & 1) == 1 { l2r_int_of_i64(0 - l2r_int_val(x)) } else { l2r_int_neg_raw(x) }
 }
 
+// On two small values the i64 arithmetic cannot overflow (as `lean_int_add`
+// etc.); the result is small when it is in the `int32` range.
 fn lean_int_add(a : Int, b : Int) -> Int {
-    match a {
-        Int::Small(x) => {
-            match b {
-                Int::Small(y) => {
-                    let s = x + y;
-                    if ((x ^ s) & (y ^ s)) < 0 { l2r_int_norm(l2r_bigint_add(l2r_big_of_i64(x), l2r_big_of_i64(y))) } else { Int::Small{s} }
-                },
-                Int::Big(bb) => l2r_int_norm(l2r_bigint_add(l2r_big_of_i64(x), bb))
-            }
-        },
-        Int::Big(ba) => l2r_int_norm(l2r_bigint_add(ba, l2r_int_to_big(b)))
-    }
+    let x = l2r_int_raw(a);
+    let y = l2r_int_raw(b);
+    if (x & y & 1) == 1 { l2r_int_of_i64(l2r_int_val(x) + l2r_int_val(y)) } else { l2r_int_add_raw(x, y) }
 }
 
 fn lean_int_sub(a : Int, b : Int) -> Int {
-    match a {
-        Int::Small(x) => {
-            match b {
-                Int::Small(y) => {
-                    let s = x - y;
-                    if ((x ^ y) & (x ^ s)) < 0 { l2r_int_norm(l2r_bigint_sub(l2r_big_of_i64(x), l2r_big_of_i64(y))) } else { Int::Small{s} }
-                },
-                Int::Big(bb) => l2r_int_norm(l2r_bigint_sub(l2r_big_of_i64(x), bb))
-            }
-        },
-        Int::Big(ba) => l2r_int_norm(l2r_bigint_sub(ba, l2r_int_to_big(b)))
-    }
+    let x = l2r_int_raw(a);
+    let y = l2r_int_raw(b);
+    if (x & y & 1) == 1 { l2r_int_of_i64(l2r_int_val(x) - l2r_int_val(y)) } else { l2r_int_sub_raw(x, y) }
 }
-
-// In (-2^31, 2^31): the product of two such values cannot overflow.
-fn l2r_i64_is_half(x : i64) -> bool { ((x + 2147483647) as u64) < 4294967295 }
 
 fn lean_int_mul(a : Int, b : Int) -> Int {
-    match a {
-        Int::Small(x) => {
-            match b {
-                Int::Small(y) => {
-                    if l2r_i64_is_half(x) && l2r_i64_is_half(y) { Int::Small{x * y} } else {
-                        if l2r_i64_mul_overflows(x, y) { Int::Big{l2r_bigint_mul(l2r_big_of_i64(x), l2r_big_of_i64(y))} } else { Int::Small{x * y} }
-                    }
-                },
-                Int::Big(bb) => l2r_int_norm(l2r_bigint_mul(l2r_big_of_i64(x), bb))
-            }
-        },
-        Int::Big(ba) => l2r_int_norm(l2r_bigint_mul(ba, l2r_int_to_big(b)))
-    }
+    let x = l2r_int_raw(a);
+    let y = l2r_int_raw(b);
+    if (x & y & 1) == 1 { l2r_int_of_i64(l2r_int_val(x) * l2r_int_val(y)) } else { l2r_int_mul_raw(x, y) }
 }
 
-// Whether an Int is zero (`Big` never is).
-fn l2r_int_is_zero(a : Int) -> bool {
-    match a {
-        Int::Small(x) => x == 0,
-        Int::Big(_) => false
-    }
-}
-
-// `Int.tdiv` (C `/`, truncation); `x / 0 = 0`.
+// `Int.div` (T-division, C's `/`); `x / 0 = 0`.
 fn lean_int_div(a : Int, b : Int) -> Int {
-    match a {
-        Int::Small(x) => {
-            match b {
-                Int::Small(y) => if y == 0 { Int::Small{0} } else { if y == 0 - 1 { lean_int_neg(a) } else { Int::Small{x / y} } },
-                Int::Big(bb) => l2r_int_norm(l2r_bigint_tdiv(l2r_big_of_i64(x), bb))
-            }
-        },
-        Int::Big(ba) => if l2r_int_is_zero(b) { Int::Small{0} } else { l2r_int_norm(l2r_bigint_tdiv(ba, l2r_int_to_big(b))) }
-    }
+    let x = l2r_int_raw(a);
+    let y = l2r_int_raw(b);
+    if (x & y & 1) == 1 {
+        let j = l2r_int_val(y);
+        if j == 0 { l2r_int_small(0) } else { l2r_int_of_i64(l2r_int_val(x) / j) }
+    } else { l2r_int_div_raw(x, y) }
 }
 
 fn lean_int_div_exact(a : Int, b : Int) -> Int { lean_int_div(a, b) }
 
-// `Int.tmod` (C `%`, sign of the dividend); `x % 0 = x`.
+// `Int.mod` (T-remainder, C's `%`, sign of the dividend); `x % 0 = x`.
 fn lean_int_mod(a : Int, b : Int) -> Int {
-    match a {
-        Int::Small(x) => {
-            match b {
-                Int::Small(y) => if y == 0 { a } else { if y == 0 - 1 { Int::Small{0} } else { Int::Small{x % y} } },
-                Int::Big(bb) => l2r_int_norm(l2r_bigint_tmod(l2r_big_of_i64(x), bb))
-            }
-        },
-        Int::Big(ba) => if l2r_int_is_zero(b) { a } else { l2r_int_norm(l2r_bigint_tmod(ba, l2r_int_to_big(b))) }
-    }
+    let x = l2r_int_raw(a);
+    let y = l2r_int_raw(b);
+    if (x & y & 1) == 1 {
+        let j = l2r_int_val(y);
+        if j == 0 { l2r_int_of_raw(x) } else { l2r_int_small(l2r_int_val(x) % j) }
+    } else { l2r_int_mod_raw(x, y) }
 }
 
 // `Int.ediv` (Euclidean, as lean.h); `x / 0 = 0`.
 fn lean_int_ediv(a : Int, b : Int) -> Int {
-    match a {
-        Int::Small(n) => {
-            match b {
-                Int::Small(d) => {
-                    if d == 0 { Int::Small{0} } else {
-                        if d == 0 - 1 { lean_int_neg(a) } else {
-                            let q = n / d;
-                            let r = n % d;
-                            if r < 0 { if d > 0 { Int::Small{q - 1} } else { Int::Small{q + 1} } } else { Int::Small{q} }
-                        }
-                    }
-                },
-                Int::Big(bb) => l2r_int_norm(l2r_bigint_ediv(l2r_big_of_i64(n), bb))
-            }
-        },
-        Int::Big(ba) => if l2r_int_is_zero(b) { Int::Small{0} } else { l2r_int_norm(l2r_bigint_ediv(ba, l2r_int_to_big(b))) }
-    }
+    let x = l2r_int_raw(a);
+    let y = l2r_int_raw(b);
+    if (x & y & 1) == 1 {
+        let n = l2r_int_val(x);
+        let d = l2r_int_val(y);
+        if d == 0 { l2r_int_small(0) } else {
+            let q = n / d;
+            let r = n % d;
+            if r < 0 { if d > 0 { l2r_int_of_i64(q - 1) } else { l2r_int_of_i64(q + 1) } } else { l2r_int_of_i64(q) }
+        }
+    } else { l2r_int_ediv_raw(x, y) }
 }
 
 // `Int.emod` (Euclidean, never negative for d != 0); `x % 0 = x`.
 fn lean_int_emod(a : Int, b : Int) -> Int {
-    match a {
-        Int::Small(n) => {
-            match b {
-                Int::Small(d) => {
-                    if d == 0 { a } else {
-                        if d == 0 - 1 { Int::Small{0} } else {
-                            let r = n % d;
-                            if r < 0 { if d > 0 { Int::Small{r + d} } else { Int::Small{r - d} } } else { Int::Small{r} }
-                        }
-                    }
-                },
-                Int::Big(bb) => l2r_int_norm(l2r_bigint_emod(l2r_big_of_i64(n), bb))
-            }
-        },
-        Int::Big(ba) => if l2r_int_is_zero(b) { a } else { l2r_int_norm(l2r_bigint_emod(ba, l2r_int_to_big(b))) }
-    }
+    let x = l2r_int_raw(a);
+    let y = l2r_int_raw(b);
+    if (x & y & 1) == 1 {
+        let n = l2r_int_val(x);
+        let d = l2r_int_val(y);
+        if d == 0 { l2r_int_of_raw(x) } else {
+            let r = n % d;
+            if r < 0 { if d > 0 { l2r_int_of_i64(r + d) } else { l2r_int_of_i64(r - d) } } else { l2r_int_small(r) }
+        }
+    } else { l2r_int_emod_raw(x, y) }
 }
 
 // Three-way comparison: -1, 0, 1.
 fn l2r_int_cmp(a : Int, b : Int) -> i64 {
-    match a {
-        Int::Small(x) => {
-            match b {
-                Int::Small(y) => if x < y { 0 - 1 } else { if x == y { 0 } else { 1 } },
-                Int::Big(bb) => if l2r_big_is_neg(bb) { 1 } else { 0 - 1 }
-            }
-        },
-        Int::Big(ba) => {
-            match b {
-                Int::Small(_) => if l2r_big_is_neg(ba) { 0 - 1 } else { 1 },
-                Int::Big(bb) => l2r_bigint_cmp(ba, bb)
-            }
-        }
-    }
+    let x = l2r_int_raw(a);
+    let y = l2r_int_raw(b);
+    if (x & y & 1) == 1 {
+        let p = l2r_int_val(x);
+        let q = l2r_int_val(y);
+        if p < q { 0 - 1 } else { if p == q { 0 } else { 1 } }
+    } else { l2r_int_cmp_raw(x, y) }
 }
 
 fn lean_int_dec_eq(a : Int, b : Int) -> bool {
-    match a {
-        Int::Small(x) => {
-            match b {
-                Int::Small(y) => x == y,
-                Int::Big(_) => false
-            }
-        },
-        Int::Big(ba) => {
-            match b {
-                Int::Small(_) => false,
-                Int::Big(bb) => l2r_bigint_eq(ba, bb)
-            }
-        }
-    }
+    let x = l2r_int_raw(a);
+    let y = l2r_int_raw(b);
+    if (x & y & 1) == 1 { x == y } else { l2r_int_eq_raw(x, y) }
 }
 
 fn lean_int_dec_lt(a : Int, b : Int) -> bool {
-    match a {
-        Int::Small(x) => {
-            match b {
-                Int::Small(y) => x < y,
-                Int::Big(_) => l2r_int_cmp(a, b) < 0
-            }
-        },
-        Int::Big(_) => l2r_int_cmp(a, b) < 0
-    }
+    let x = l2r_int_raw(a);
+    let y = l2r_int_raw(b);
+    if (x & y & 1) == 1 { l2r_int_val(x) < l2r_int_val(y) } else { l2r_int_cmp_raw(x, y) < 0 }
 }
 
 fn lean_int_dec_le(a : Int, b : Int) -> bool {
-    match a {
-        Int::Small(x) => {
-            match b {
-                Int::Small(y) => x <= y,
-                Int::Big(_) => l2r_int_cmp(a, b) <= 0
-            }
-        },
-        Int::Big(_) => l2r_int_cmp(a, b) <= 0
-    }
+    let x = l2r_int_raw(a);
+    let y = l2r_int_raw(b);
+    if (x & y & 1) == 1 { l2r_int_val(x) <= l2r_int_val(y) } else { l2r_int_cmp_raw(x, y) <= 0 }
 }
 
 fn lean_int_eq(a : Int, b : Int) -> bool { lean_int_dec_eq(a, b) }
@@ -913,47 +681,48 @@ fn lean_int_lt(a : Int, b : Int) -> bool { lean_int_dec_lt(a, b) }
 fn lean_int_le(a : Int, b : Int) -> bool { lean_int_dec_le(a, b) }
 
 fn lean_int_dec_nonneg(a : Int) -> bool {
-    match a {
-        Int::Small(x) => x >= 0,
-        Int::Big(b) => !l2r_big_is_neg(b)
-    }
+    let x = l2r_int_raw(a);
+    if (x & 1) == 1 { l2r_int_val(x) >= 0 } else { !l2r_int_is_neg_raw(x) }
 }
 
-// `unsafeCast` between `Int` and scalars (lean2rr's `wordOf`/`ofWord`):
-// natively a small `Int` is the boxed scalar of its 32 bits, which
-// `lean_unbox` reads; a big one is an object (its "word" an address; here
-// the low bits of its two's complement value).
-fn l2r_int_word(i : Int) -> u64 {
-    match i {
-        Int::Small(x) => if ((x as i32) as i64) == x { (x as u32) as u64 } else { x as u64 },
-        Int::Big(b) => l2r_big_low_twos(b)
-    }
+// The value modulo 2^64 in two's complement (`Int64.ofInt`, ...).
+fn l2r_int_low_twos(a : Int) -> u64 {
+    let x = l2r_int_raw(a);
+    if (x & 1) == 1 { l2r_int_val(x) as u64 } else { l2r_int_low_twos_raw(x) }
+}
+
+// `unsafeCast` between `Int` and scalars (lean2rr's `wordOf`/`ofWord`): a
+// small `Int` is the boxed scalar of its 32 bits, which `lean_unbox` reads;
+// a big one is an object (its "word" an address; here the low bits of its
+// two's complement value).
+fn l2r_int_word(a : Int) -> u64 {
+    let x = l2r_int_raw(a);
+    if (x & 1) == 1 { x >> 1 } else { l2r_int_low_twos_raw(x) }
 }
 
 // The `Int` whose boxed scalar is word `w` (`lean_scalar_to_int64`: its low
 // 32 bits, signed).
-fn l2r_int_of_word(w : u64) -> Int { Int::Small{((w as u32) as i32) as i64} }
-
-// `unsafeCast (i : Int) : Nat`: a small `Int` is read as the `Nat` of its 32
-// bits, a big number object as a `Nat` of its magnitude.
-fn l2r_int_cast_nat(i : Int) -> Nat {
-    match i {
-        Int::Small(x) => if ((x as i32) as i64) == x { Nat::Small{(x as u32) as u64} } else { lean_nat_abs(Int::Small{x}) },
-        Int::Big(b) => lean_nat_abs(Int::Big{b})
-    }
-}
+fn l2r_int_of_word(w : u64) -> Int { l2r_int_small(((w as u32) as i32) as i64) }
 
 // `Int.natAbs`.
 fn lean_nat_abs(a : Int) -> Nat {
-    match a {
-        Int::Small(x) => if x < 0 { Nat::Small{(0 - x) as u64} } else { Nat::Small{x as u64} },
-        Int::Big(b) => l2r_nat_norm(l2r_bigint_abs(b))
-    }
+    let x = l2r_int_raw(a);
+    if (x & 1) == 1 {
+        let i = l2r_int_val(x);
+        if i < 0 { l2r_nat_small((0 - i) as u64) } else { l2r_nat_small(i as u64) }
+    } else { l2r_int_nat_abs_raw(x) }
+}
+
+// `unsafeCast (i : Int) : Nat`: a small `Int` is read as the `Nat` of its
+// 32 bits (the same word), a big number object as a `Nat` of its magnitude.
+fn l2r_int_cast_nat(a : Int) -> Nat {
+    let x = l2r_int_raw(a);
+    if (x & 1) == 1 { l2r_nat_of_raw(x) } else { l2r_int_nat_abs_raw(x) }
 }
 
 // `Int.toNat` (0 for negative values).
 fn lean_int_to_nat(a : Int) -> Nat {
-    if lean_int_dec_nonneg(a) { lean_nat_abs(a) } else { Nat::Small{0} }
+    if lean_int_dec_nonneg(a) { lean_nat_abs(a) } else { l2r_nat_small(0) }
 }
 
 #[ffi(import)]
@@ -961,12 +730,8 @@ fn l2r_string_of_i64(x : i64) -> LStr [{ leanrt::string::of_i64(x) }];
 
 // Decimal representation (`Int.repr`); see `l2r_nat_repr`. Natively
 // `Int.repr (ofNat m) = Nat.repr m`: a shared string below 128.
-fn l2r_int_repr(a : Int) -> LStr {
-    match a {
-        Int::Small(x) => if x >= 0 && x < 128 { l2r_nat_repr_small(x as u64) } else { l2r_string_of_i64(x) },
-        Int::Big(b) => l2r_big_to_lstr(b)
-    }
-}
+#[ffi(import)]
+fn l2r_int_repr(a : Int) -> LStr [{ leanrt::nat::int_repr(a.into_raw()) }];
 
 // ===========================================================================
 // Fixed-width integers (UInt8..64, USize; Int8..64, ISize as bit patterns)
@@ -975,14 +740,9 @@ fn l2r_int_repr(a : Int) -> LStr {
 
 // ---- uint8 ----
 
-fn lean_uint8_of_nat(a : Nat) -> u8 {
-    match a {
-        Nat::Small(x) => x as u8,
-        Nat::Big(b) => l2r_big_low(b) as u8
-    }
-}
+fn lean_uint8_of_nat(a : Nat) -> u8 { l2r_nat_low(a) as u8 }
 fn lean_uint8_of_nat_mk(a : Nat) -> u8 { lean_uint8_of_nat(a) }
-fn lean_uint8_to_nat(a : u8) -> Nat { Nat::Small{a as u64} }
+fn lean_uint8_to_nat(a : u8) -> Nat { l2r_nat_small(a as u64) }
 fn lean_uint8_add(a : u8, b : u8) -> u8 { a + b }
 fn lean_uint8_sub(a : u8, b : u8) -> u8 { a - b }
 fn lean_uint8_mul(a : u8, b : u8) -> u8 { a * b }
@@ -1019,14 +779,9 @@ fn lean_float32_to_uint8(a : f32) -> u8 {
 
 // ---- uint16 ----
 
-fn lean_uint16_of_nat(a : Nat) -> u16 {
-    match a {
-        Nat::Small(x) => x as u16,
-        Nat::Big(b) => l2r_big_low(b) as u16
-    }
-}
+fn lean_uint16_of_nat(a : Nat) -> u16 { l2r_nat_low(a) as u16 }
 fn lean_uint16_of_nat_mk(a : Nat) -> u16 { lean_uint16_of_nat(a) }
-fn lean_uint16_to_nat(a : u16) -> Nat { Nat::Small{a as u64} }
+fn lean_uint16_to_nat(a : u16) -> Nat { l2r_nat_small(a as u64) }
 fn lean_uint16_add(a : u16, b : u16) -> u16 { a + b }
 fn lean_uint16_sub(a : u16, b : u16) -> u16 { a - b }
 fn lean_uint16_mul(a : u16, b : u16) -> u16 { a * b }
@@ -1063,14 +818,9 @@ fn lean_float32_to_uint16(a : f32) -> u16 {
 
 // ---- uint32 ----
 
-fn lean_uint32_of_nat(a : Nat) -> u32 {
-    match a {
-        Nat::Small(x) => x as u32,
-        Nat::Big(b) => l2r_big_low(b) as u32
-    }
-}
+fn lean_uint32_of_nat(a : Nat) -> u32 { l2r_nat_low(a) as u32 }
 fn lean_uint32_of_nat_mk(a : Nat) -> u32 { lean_uint32_of_nat(a) }
-fn lean_uint32_to_nat(a : u32) -> Nat { Nat::Small{a as u64} }
+fn lean_uint32_to_nat(a : u32) -> Nat { l2r_nat_small(a as u64) }
 fn lean_uint32_add(a : u32, b : u32) -> u32 { a + b }
 fn lean_uint32_sub(a : u32, b : u32) -> u32 { a - b }
 fn lean_uint32_mul(a : u32, b : u32) -> u32 { a * b }
@@ -1107,14 +857,9 @@ fn lean_float32_to_uint32(a : f32) -> u32 {
 
 // ---- uint64 ----
 
-fn lean_uint64_of_nat(a : Nat) -> u64 {
-    match a {
-        Nat::Small(x) => x as u64,
-        Nat::Big(b) => l2r_big_low(b) as u64
-    }
-}
+fn lean_uint64_of_nat(a : Nat) -> u64 { l2r_nat_low(a) as u64 }
 fn lean_uint64_of_nat_mk(a : Nat) -> u64 { lean_uint64_of_nat(a) }
-fn lean_uint64_to_nat(a : u64) -> Nat { Nat::Small{a as u64} }
+fn lean_uint64_to_nat(a : u64) -> Nat { l2r_nat_of_u64(a) }
 fn lean_uint64_add(a : u64, b : u64) -> u64 { a + b }
 fn lean_uint64_sub(a : u64, b : u64) -> u64 { a - b }
 fn lean_uint64_mul(a : u64, b : u64) -> u64 { a * b }
@@ -1151,14 +896,9 @@ fn lean_float32_to_uint64(a : f32) -> u64 {
 
 // ---- usize ----
 
-fn lean_usize_of_nat(a : Nat) -> u64 {
-    match a {
-        Nat::Small(x) => x as u64,
-        Nat::Big(b) => l2r_big_low(b) as u64
-    }
-}
+fn lean_usize_of_nat(a : Nat) -> u64 { l2r_nat_low(a) as u64 }
 fn lean_usize_of_nat_mk(a : Nat) -> u64 { lean_usize_of_nat(a) }
-fn lean_usize_to_nat(a : u64) -> Nat { Nat::Small{a as u64} }
+fn lean_usize_to_nat(a : u64) -> Nat { l2r_nat_of_u64(a) }
 fn lean_usize_add(a : u64, b : u64) -> u64 { a + b }
 fn lean_usize_sub(a : u64, b : u64) -> u64 { a - b }
 fn lean_usize_mul(a : u64, b : u64) -> u64 { a * b }
@@ -1195,19 +935,9 @@ fn lean_float32_to_usize(a : f32) -> u64 {
 
 // ---- int8 ----
 
-fn lean_int8_of_int(a : Int) -> u8 {
-    match a {
-        Int::Small(x) => x as u8,
-        Int::Big(b) => l2r_big_low_twos(b) as u8
-    }
-}
-fn lean_int8_of_nat(a : Nat) -> u8 {
-    match a {
-        Nat::Small(x) => x as u8,
-        Nat::Big(b) => l2r_big_low(b) as u8
-    }
-}
-fn lean_int8_to_int(a : u8) -> Int { Int::Small{(a as i8) as i64} }
+fn lean_int8_of_int(a : Int) -> u8 { l2r_int_low_twos(a) as u8 }
+fn lean_int8_of_nat(a : Nat) -> u8 { l2r_nat_low(a) as u8 }
+fn lean_int8_to_int(a : u8) -> Int { l2r_int_small((a as i8) as i64) }
 fn lean_int8_add(a : u8, b : u8) -> u8 { a + b }
 fn lean_int8_sub(a : u8, b : u8) -> u8 { a - b }
 fn lean_int8_mul(a : u8, b : u8) -> u8 { a * b }
@@ -1250,19 +980,9 @@ fn lean_float32_to_int8(a : f32) -> u8 {
 
 // ---- int16 ----
 
-fn lean_int16_of_int(a : Int) -> u16 {
-    match a {
-        Int::Small(x) => x as u16,
-        Int::Big(b) => l2r_big_low_twos(b) as u16
-    }
-}
-fn lean_int16_of_nat(a : Nat) -> u16 {
-    match a {
-        Nat::Small(x) => x as u16,
-        Nat::Big(b) => l2r_big_low(b) as u16
-    }
-}
-fn lean_int16_to_int(a : u16) -> Int { Int::Small{(a as i16) as i64} }
+fn lean_int16_of_int(a : Int) -> u16 { l2r_int_low_twos(a) as u16 }
+fn lean_int16_of_nat(a : Nat) -> u16 { l2r_nat_low(a) as u16 }
+fn lean_int16_to_int(a : u16) -> Int { l2r_int_small((a as i16) as i64) }
 fn lean_int16_add(a : u16, b : u16) -> u16 { a + b }
 fn lean_int16_sub(a : u16, b : u16) -> u16 { a - b }
 fn lean_int16_mul(a : u16, b : u16) -> u16 { a * b }
@@ -1305,19 +1025,9 @@ fn lean_float32_to_int16(a : f32) -> u16 {
 
 // ---- int32 ----
 
-fn lean_int32_of_int(a : Int) -> u32 {
-    match a {
-        Int::Small(x) => x as u32,
-        Int::Big(b) => l2r_big_low_twos(b) as u32
-    }
-}
-fn lean_int32_of_nat(a : Nat) -> u32 {
-    match a {
-        Nat::Small(x) => x as u32,
-        Nat::Big(b) => l2r_big_low(b) as u32
-    }
-}
-fn lean_int32_to_int(a : u32) -> Int { Int::Small{(a as i32) as i64} }
+fn lean_int32_of_int(a : Int) -> u32 { l2r_int_low_twos(a) as u32 }
+fn lean_int32_of_nat(a : Nat) -> u32 { l2r_nat_low(a) as u32 }
+fn lean_int32_to_int(a : u32) -> Int { l2r_int_small((a as i32) as i64) }
 fn lean_int32_add(a : u32, b : u32) -> u32 { a + b }
 fn lean_int32_sub(a : u32, b : u32) -> u32 { a - b }
 fn lean_int32_mul(a : u32, b : u32) -> u32 { a * b }
@@ -1360,19 +1070,9 @@ fn lean_float32_to_int32(a : f32) -> u32 {
 
 // ---- int64 ----
 
-fn lean_int64_of_int(a : Int) -> u64 {
-    match a {
-        Int::Small(x) => x as u64,
-        Int::Big(b) => l2r_big_low_twos(b) as u64
-    }
-}
-fn lean_int64_of_nat(a : Nat) -> u64 {
-    match a {
-        Nat::Small(x) => x as u64,
-        Nat::Big(b) => l2r_big_low(b) as u64
-    }
-}
-fn lean_int64_to_int_sint(a : u64) -> Int { Int::Small{(a as i64) as i64} }
+fn lean_int64_of_int(a : Int) -> u64 { l2r_int_low_twos(a) as u64 }
+fn lean_int64_of_nat(a : Nat) -> u64 { l2r_nat_low(a) as u64 }
+fn lean_int64_to_int_sint(a : u64) -> Int { l2r_int_of_i64(a as i64) }
 fn lean_int64_add(a : u64, b : u64) -> u64 { a + b }
 fn lean_int64_sub(a : u64, b : u64) -> u64 { a - b }
 fn lean_int64_mul(a : u64, b : u64) -> u64 { a * b }
@@ -1415,19 +1115,9 @@ fn lean_float32_to_int64(a : f32) -> u64 {
 
 // ---- isize ----
 
-fn lean_isize_of_int(a : Int) -> u64 {
-    match a {
-        Int::Small(x) => x as u64,
-        Int::Big(b) => l2r_big_low_twos(b) as u64
-    }
-}
-fn lean_isize_of_nat(a : Nat) -> u64 {
-    match a {
-        Nat::Small(x) => x as u64,
-        Nat::Big(b) => l2r_big_low(b) as u64
-    }
-}
-fn lean_isize_to_int(a : u64) -> Int { Int::Small{(a as i64) as i64} }
+fn lean_isize_of_int(a : Int) -> u64 { l2r_int_low_twos(a) as u64 }
+fn lean_isize_of_nat(a : Nat) -> u64 { l2r_nat_low(a) as u64 }
+fn lean_isize_to_int(a : u64) -> Int { l2r_int_of_i64(a as i64) }
 fn lean_isize_add(a : u64, b : u64) -> u64 { a + b }
 fn lean_isize_sub(a : u64, b : u64) -> u64 { a - b }
 fn lean_isize_mul(a : u64, b : u64) -> u64 { a * b }
@@ -1520,6 +1210,17 @@ fn lean_float_of_bits(u : u64) -> f64 [{ leanrt::float::of_bits(u) }];
 fn lean_float_to_bits(a : f64) -> u64 [{ leanrt::float::to_bits(a) }];
 #[ffi(import)]
 fn lean_float32_of_bits(u : u32) -> f32 [{ leanrt::float::of_bits32(u) }];
+// The bits of a float copied unchanged, NaN payloads included: what an
+// `unsafeCast` between `Float` and `UInt64` (`Float32` and `UInt32`) reads
+// natively, unlike `Float.ofBits`/`toBits`, which canonicalize NaN.
+#[ffi(import)]
+fn l2r_f64_of_raw_bits(u : u64) -> f64 [{ f64::from_bits(u) }];
+#[ffi(import)]
+fn l2r_f64_raw_bits(a : f64) -> u64 [{ a.to_bits() }];
+#[ffi(import)]
+fn l2r_f32_of_raw_bits(u : u32) -> f32 [{ f32::from_bits(u) }];
+#[ffi(import)]
+fn l2r_f32_raw_bits(a : f32) -> u32 [{ a.to_bits() }];
 #[ffi(import)]
 fn lean_float32_to_bits(a : f32) -> u32 [{ leanrt::float::to_bits32(a) }];
 #[ffi(import)]
@@ -1535,17 +1236,15 @@ fn l2r_float_frexp_exp_i64(a : f64) -> i64 [{ leanrt::float::frexp_exp(a) }];
 fn l2r_float32_frexp_mant(a : f32) -> f32 [{ leanrt::float::frexp_mant32(a) }];
 #[ffi(import)]
 fn l2r_float32_frexp_exp_i64(a : f32) -> i64 [{ leanrt::float::frexp_exp32(a) }];
-fn l2r_float_frexp_exp(a : f64) -> Int { Int::Small{l2r_float_frexp_exp_i64(a)} }
-fn l2r_float32_frexp_exp(a : f32) -> Int { Int::Small{l2r_float32_frexp_exp_i64(a)} }
+fn l2r_float_frexp_exp(a : f64) -> Int { l2r_int_of_i64(l2r_float_frexp_exp_i64(a)) }
+fn l2r_float32_frexp_exp(a : f32) -> Int { l2r_int_of_i64(l2r_float32_frexp_exp_i64(a)) }
 
-// `Float.scaleB x i`: Lean's small Ints are 32-bit, so `i` outside the i32
-// range takes the big-number branch of `lean_float_scaleb`: 0 when `x == 0`
-// or `i < 0`, else `x * inf`.
+// `Float.scaleB x i`: an `i` outside the `int32` range is a big number and
+// takes the big-number branch of `lean_float_scaleb`: 0 when `x == 0` or
+// `i < 0`, else `x * inf`.
 fn lean_float_scaleb(a : f64, b : Int) -> f64 {
-    match b {
-        Int::Small(n) => if n >= 0 - 2147483648 && n <= 2147483647 { l2r_float_scalbn(a, n as i32) } else { l2r_float_scaleb_big(a, n < 0) },
-        Int::Big(bb) => l2r_float_scaleb_big(a, l2r_big_is_neg(bb))
-    }
+    let x = l2r_int_raw(b);
+    if (x & 1) == 1 { l2r_float_scalbn(a, l2r_int_val(x) as i32) } else { l2r_float_scaleb_big(a, l2r_int_is_neg_raw(x)) }
 }
 
 fn l2r_float_scaleb_big(a : f64, neg : bool) -> f64 {
@@ -1554,10 +1253,8 @@ fn l2r_float_scaleb_big(a : f64, neg : bool) -> f64 {
 }
 
 fn lean_float32_scaleb(a : f32, b : Int) -> f32 {
-    match b {
-        Int::Small(n) => if n >= 0 - 2147483648 && n <= 2147483647 { l2r_float32_scalbn(a, n as i32) } else { l2r_float32_scaleb_big(a, n < 0) },
-        Int::Big(bb) => l2r_float32_scaleb_big(a, l2r_big_is_neg(bb))
-    }
+    let x = l2r_int_raw(b);
+    if (x & 1) == 1 { l2r_float32_scalbn(a, l2r_int_val(x) as i32) } else { l2r_float32_scaleb_big(a, l2r_int_is_neg_raw(x)) }
 }
 
 fn l2r_float32_scaleb_big(a : f32, neg : bool) -> f32 {
@@ -1631,9 +1328,11 @@ fn logf(x : f32) -> f32 [{ leanrt::float::ln32(x) }];
 // ===========================================================================
 // String
 //
-// Positions are `Nat` byte offsets. A `Nat::Big` position is never valid;
-// the functions below reproduce what Lean's C code does with non-scalar
-// positions (Lean's scalars stop at 2^63, which matters for `extract`).
+// Positions are `Nat` byte offsets. A big position (2^63 or more) is never
+// valid; the functions below reproduce what Lean's C code does with
+// non-scalar positions (exactly the big `Nat`s here). Sizes, lengths and
+// valid positions are below 2^63 (memory), so they are made with
+// `l2r_nat_small`.
 
 #[ffi(import)]
 fn lean_mk_string(s : str) -> LStr [{ leanrt::string::from_bytes((*s).as_bytes()) }];
@@ -1653,10 +1352,10 @@ fn l2r_string_size(s : LStr) -> u64 [{ { let r = s.utf8().len() as u64; leanrt::
 #[ffi(import)]
 fn l2r_string_length(s : LStr) -> u64 [{ { let r = leanrt::string::length(&s); leanrt::rc_release(s); r } }];
 
-fn lean_string_utf8_byte_size(s : LStr) -> Nat { Nat::Small{l2r_string_size(s)} }
-fn lean_string_length(s : LStr) -> Nat { Nat::Small{l2r_string_length(s)} }
-fn lean_string_size(s : LStr) -> Nat { Nat::Small{l2r_string_size(s) + 1} }
-fn lean_string_len(s : LStr) -> Nat { Nat::Small{l2r_string_length(s)} }
+fn lean_string_utf8_byte_size(s : LStr) -> Nat { l2r_nat_small(l2r_string_size(s)) }
+fn lean_string_length(s : LStr) -> Nat { l2r_nat_small(l2r_string_length(s)) }
+fn lean_string_size(s : LStr) -> Nat { l2r_nat_small(l2r_string_size(s) + 1) }
+fn lean_string_len(s : LStr) -> Nat { l2r_nat_small(l2r_string_length(s)) }
 
 #[ffi(import)]
 fn l2r_string_get(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get(s.utf8(), i); leanrt::rc_release(s); r } }];
@@ -1681,19 +1380,15 @@ fn l2r_string_get_byte(s : LStr, i : u64) -> u8 [{ { let r = s.utf8().get(i as u
 
 // `String.Pos.Raw.get`: the character at byte `p`, or `'A'`.
 fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 {
-    match p {
-        Nat::Small(i) => l2r_string_get(s, i),
-        Nat::Big(_) => 65
-    }
+    let x = l2r_nat_raw(p);
+    if (x & 1) == 1 { l2r_string_get(s, x >> 1) } else { let d = l2r_nat_drop_raw(x); 65 }
 }
 
 // `String.Pos.Raw.get?`: 0x110000 encodes `none` (lean2rr's glue builds
 // the `Option Char`).
 fn l2r_string_utf8_get_opt(s : LStr, p : Nat) -> u32 {
-    match p {
-        Nat::Small(i) => l2r_string_get_opt(s, i),
-        Nat::Big(_) => 1114112
-    }
+    let x = l2r_nat_raw(p);
+    if (x & 1) == 1 { l2r_string_get_opt(s, x >> 1) } else { let d = l2r_nat_drop_raw(x); 1114112 }
 }
 
 // `String.Pos.Raw.get!`: panics (C message) and returns `'A'`.
@@ -1703,64 +1398,46 @@ fn lean_string_utf8_get_bang(s : LStr, p : Nat) -> u32 {
 }
 
 // `String.Pos.get`/`Pos.Raw.get'` and `next'` take a proof that the
-// position is valid and not the end: never a `Nat::Big` (see
+// position is valid and not the end: never a big `Nat` (see
 // `l2r_index_of_nat`).
 fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 { l2r_string_get_fast(s, l2r_index_of_nat(p)) }
 
 // `String.Pos.Raw.next`: `p + 1` at or past the end.
 fn lean_string_utf8_next(s : LStr, p : Nat) -> Nat {
-    match p {
-        Nat::Small(i) => {
-            let r = l2r_string_next(s, i);
-            if r == 0 { lean_nat_add(p, Nat::Small{1}) } else { Nat::Small{r} }
-        },
-        Nat::Big(_) => lean_nat_add(p, Nat::Small{1})
-    }
+    let x = l2r_nat_raw(p);
+    if (x & 1) == 1 {
+        let r = l2r_string_next(s, x >> 1);
+        if r == 0 { lean_nat_add(l2r_nat_of_raw(x), l2r_nat_small(1)) } else { l2r_nat_small(r) }
+    } else { lean_nat_add(l2r_nat_of_raw(x), l2r_nat_small(1)) }
 }
 
-fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat { Nat::Small{l2r_string_next_fast(s, l2r_index_of_nat(p))} }
+fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat { l2r_nat_small(l2r_string_next_fast(s, l2r_index_of_nat(p))) }
 
 fn lean_string_utf8_prev(s : LStr, p : Nat) -> Nat {
-    match p {
-        Nat::Small(i) => Nat::Small{l2r_string_prev(s, i)},
-        Nat::Big(_) => lean_nat_sub(p, Nat::Small{1})
-    }
+    let x = l2r_nat_raw(p);
+    if (x & 1) == 1 { l2r_nat_small(l2r_string_prev(s, x >> 1)) } else { lean_nat_sub(l2r_nat_of_raw(x), l2r_nat_small(1)) }
 }
 
 fn lean_string_utf8_at_end(s : LStr, p : Nat) -> bool {
-    match p {
-        Nat::Small(i) => i >= l2r_string_size(s),
-        Nat::Big(_) => true
-    }
+    let x = l2r_nat_raw(p);
+    if (x & 1) == 1 { (x >> 1) >= l2r_string_size(s) } else { let d = l2r_nat_drop_raw(x); true }
 }
 
 fn lean_string_is_valid_pos(s : LStr, p : Nat) -> bool {
-    match p {
-        Nat::Small(i) => l2r_string_is_valid_pos(s, i),
-        Nat::Big(_) => false
-    }
+    let x = l2r_nat_raw(p);
+    if (x & 1) == 1 { l2r_string_is_valid_pos(s, x >> 1) } else { let d = l2r_nat_drop_raw(x); false }
 }
 
-// Lean treats positions >= 2^63 as non-scalars, for which `extract`
-// returns the whole string.
-fn l2r_nat_is_lean_scalar(p : Nat) -> bool {
-    match p {
-        Nat::Small(i) => (i >> 63) == 0,
-        Nat::Big(_) => false
-    }
-}
-
+// For non-scalar (big) positions `extract` returns the whole string.
 fn lean_string_utf8_extract(s : LStr, b : Nat, e : Nat) -> LStr {
-    if l2r_nat_is_lean_scalar(b) && l2r_nat_is_lean_scalar(e) {
-        l2r_string_extract(s, lean_usize_of_nat(b), lean_usize_of_nat(e))
-    } else { s }
+    let x = l2r_nat_raw(b);
+    let y = l2r_nat_raw(e);
+    if (x & y & 1) == 1 { l2r_string_extract(s, x >> 1, y >> 1) } else { let d = l2r_nat_drop_raw(x) + l2r_nat_drop_raw(y); s }
 }
 
 fn lean_string_utf8_set(s : LStr, p : Nat, c : u32) -> LStr {
-    match p {
-        Nat::Small(i) => l2r_string_set(s, i, c),
-        Nat::Big(_) => s
-    }
+    let x = l2r_nat_raw(p);
+    if (x & 1) == 1 { l2r_string_set(s, x >> 1, c) } else { let d = l2r_nat_drop_raw(x); s }
 }
 
 fn lean_string_get_byte_fast(s : LStr, i : Nat) -> u8 { l2r_string_get_byte(s, lean_usize_of_nat(i)) }
@@ -1780,9 +1457,8 @@ fn l2r_string_compare(a : LStr, b : LStr) -> u8 [{ { let r = leanrt::string::com
 #[ffi(import)]
 fn lean_string_hash(s : LStr) -> u64 [{ { let r = leanrt::string::hash(s.utf8()); leanrt::rc_release(s); r } }];
 
-// `String.toUTF8` / `String.ofByteArray` / `String.fromUTF8`: the buffer of
-// a unique value moves (natively these copy); from bytes, the characters are
-// counted.
+// `String.toUTF8` / `String.ofByteArray` / `String.fromUTF8`: copies, as
+// natively; from bytes, the characters are counted.
 #[ffi(import)]
 fn lean_string_to_utf8(s : LStr) -> RVec<u8> [{ leanrt::array::bytes_of_string(s) }];
 #[ffi(import)]
@@ -1904,25 +1580,21 @@ fn l2r_string_offset_of_pos(s : LStr, p : u64) -> u64 [{ { let r = leanrt::strin
 
 fn lean_string_drop(s : LStr, n : Nat) -> LStr { l2r_string_drop(s, l2r_nat_sat_u64(n)) }
 fn lean_string_dropright(s : LStr, n : Nat) -> LStr { l2r_string_drop_right(s, l2r_nat_sat_u64(n)) }
-fn lean_string_posof(s : LStr, c : u32) -> Nat { Nat::Small{l2r_string_pos_of(s, c)} }
+fn lean_string_posof(s : LStr, c : u32) -> Nat { l2r_nat_small(l2r_string_pos_of(s, c)) }
 fn lean_string_front(s : LStr) -> u32 { l2r_string_get(s, 0) }
 fn lean_string_isempty(s : LStr) -> bool { l2r_string_size(s) == 0 }
-fn lean_string_offsetofpos(s : LStr, p : Nat) -> Nat { Nat::Small{l2r_string_offset_of_pos(s, l2r_nat_sat_u64(p))} }
+fn lean_string_offsetofpos(s : LStr, p : Nat) -> Nat { l2r_nat_small(l2r_string_offset_of_pos(s, l2r_nat_sat_u64(p))) }
 
 fn lean_string_pushn(s : LStr, c : u32, n : Nat) -> LStr {
-    match n {
-        Nat::Small(k) => l2r_string_pushn(s, c, k),
-        Nat::Big(_) => l2r_internal_panic_at<LStr>(4)
-    }
+    let x = l2r_nat_raw(n);
+    if (x & 1) == 1 { l2r_string_pushn(s, c, x >> 1) } else { l2r_internal_panic_at<LStr>(4) }
 }
 
 // A `Nat` as a `u64`, saturating (for counts and positions where every
 // value beyond the string behaves alike).
 fn l2r_nat_sat_u64(n : Nat) -> u64 {
-    match n {
-        Nat::Small(x) => x,
-        Nat::Big(_) => 18446744073709551615
-    }
+    let x = l2r_nat_raw(n);
+    if (x & 1) == 1 { x >> 1 } else { let d = l2r_nat_drop_raw(x); 18446744073709551615 }
 }
 
 fn lean_string_any(s : LStr, p : u32 -> bool) -> bool { l2r_string_any_from(s, p, 0, l2r_string_size(s)) }
@@ -1947,10 +1619,8 @@ fn l2r_string_foldl_from(f : LStr -> (u32 -> LStr), acc : LStr, s : LStr, i : u6
 
 // `String.Internal.nextWhile s p i`: advance while `p` holds and not at the end.
 fn lean_string_nextwhile(s : LStr, p : u32 -> bool, i : Nat) -> Nat {
-    match i {
-        Nat::Small(k) => Nat::Small{l2r_string_next_while(s, p, k, l2r_string_size(s))},
-        Nat::Big(_) => i
-    }
+    let x = l2r_nat_raw(i);
+    if (x & 1) == 1 { l2r_nat_small(l2r_string_next_while(s, p, x >> 1, l2r_string_size(s))) } else { l2r_nat_of_raw(x) }
 }
 
 fn l2r_string_next_while(s : LStr, p : u32 -> bool, i : u64, n : u64) -> u64 {
@@ -1963,8 +1633,8 @@ fn l2r_string_next_while(s : LStr, p : u32 -> bool, i : u64, n : u64) -> u64 {
 // Array
 //
 // `RVec<E>` where `E` is the element's storage type (lean2rr boxes element
-// types that cannot cross the FFI boundary). Indices are `Nat`; `Nat::Big`
-// indices are always out of bounds.
+// types that cannot cross the FFI boundary). Indices are `Nat`; big ones
+// are always out of bounds.
 
 #[ffi(import)]
 fn l2r_array_empty<T>() -> RVec<T> [{ leanrt::array::empty() }];
@@ -1999,15 +1669,13 @@ fn lean_mk_empty_array<T>() -> RVec<T> { l2r_array_empty<T>() }
 // A capacity that is not a Lean scalar (>= 2^63) is an out-of-memory panic;
 // `elem` is the native element size (for Lean's allocation-size checks).
 fn l2r_mk_empty_with_capacity<T>(n : Nat, elem : u64) -> RVec<T> {
-    match n {
-        Nat::Small(k) => if (k >> 63) == 0 { l2r_array_with_capacity<T>(k, elem) } else { l2r_internal_panic_at<RVec<T>>(4) },
-        Nat::Big(_) => l2r_internal_panic_at<RVec<T>>(4)
-    }
+    let x = l2r_nat_raw(n);
+    if (x & 1) == 1 { l2r_array_with_capacity<T>(x >> 1, elem) } else { l2r_internal_panic_at<RVec<T>>(4) }
 }
 
 fn lean_mk_empty_array_with_capacity<T>(n : Nat) -> RVec<T> { l2r_mk_empty_with_capacity<T>(n, 8) }
 
-fn lean_array_get_size<T>(v : RVec<T>) -> Nat { Nat::Small{l2r_array_size(v)} }
+fn lean_array_get_size<T>(v : RVec<T>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
 fn lean_array_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
 
 fn lean_array_fget<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get(v, l2r_index_of_nat(i)) }
@@ -2015,31 +1683,24 @@ fn lean_array_fget_borrowed<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get(v, l2r
 fn lean_array_uget<T>(v : RVec<T>, i : u64) -> T { l2r_array_get(v, i) }
 fn lean_array_uget_borrowed<T>(v : RVec<T>, i : u64) -> T { l2r_array_get(v, i) }
 
-// Whether `i` is a valid index of an array of size `n`.
-fn l2r_index_ok(i : Nat, n : u64) -> bool {
-    match i {
-        Nat::Small(k) => k < n,
-        Nat::Big(_) => false
-    }
-}
-
 // An index that is in bounds (a `Fin` of the size, or checked by
-// `l2r_index_ok`): never a `Nat::Big` (natively `lean_unbox` of it would be
-// garbage). The `Big` arm ends the program instead of rejoining the read:
-// a rejoining arm with refcount traffic on the big number would make LLVM
+// `l2r_word_index_ok`): never a big `Nat` (natively `lean_unbox` of it would
+// be garbage). The big case ends the program instead of rejoining the read:
+// a rejoining path with refcount traffic on the big number would make LLVM
 // reload the array's count after the caller's increment, and the read's
 // release could then not cancel against it.
 fn l2r_index_of_nat(i : Nat) -> u64 {
-    match i {
-        Nat::Small(k) => k,
-        Nat::Big(_) => l2r_unreachable<u64>()
-    }
+    let x = l2r_nat_raw(i);
+    if (x & 1) == 1 { x >> 1 } else { l2r_unreachable<u64>() }
 }
 
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
-// return the default.
+// return the default. The index is taken once (as its word): no reference
+// counting on it in bounds.
 fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_get(v, l2r_index_of_nat(i)) } else {
+    let x = l2r_nat_raw(i);
+    if l2r_word_index_ok(x, l2r_array_size(v)) { l2r_array_get(v, x >> 1) } else {
+        let d = l2r_nat_drop_raw(x);
         let ignored = l2r_panic_code(0);
         dflt
     }
@@ -2052,7 +1713,9 @@ fn lean_array_uset<T>(v : RVec<T>, i : u64, x : T) -> RVec<T> { l2r_array_set(v,
 
 // `Array.set!`: out of bounds, panic and return the array unchanged.
 fn lean_array_set<T>(v : RVec<T>, i : Nat, x : T) -> RVec<T> {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_set(v, l2r_index_of_nat(i), x) } else {
+    let w = l2r_nat_raw(i);
+    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_set(v, w >> 1, x) } else {
+        let d = l2r_nat_drop_raw(w);
         let ignored = l2r_panic_code(0);
         v
     }
@@ -2070,15 +1733,18 @@ fn lean_array_uswap<T>(v : RVec<T>, i : u64, j : u64) -> RVec<T> { l2r_array_swa
 // `Array.swapIfInBounds`.
 fn lean_array_swap<T>(v : RVec<T>, i : Nat, j : Nat) -> RVec<T> {
     let n = l2r_array_size(v);
-    if l2r_index_ok(i, n) && l2r_index_ok(j, n) { l2r_array_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) } else { v }
+    let x = l2r_nat_raw(i);
+    let y = l2r_nat_raw(j);
+    if l2r_word_index_ok(x, n) && l2r_word_index_ok(y, n) { l2r_array_swap(v, x >> 1, y >> 1) } else {
+        let d = l2r_nat_drop_raw(x) + l2r_nat_drop_raw(y);
+        v
+    }
 }
 
 // `Array.replicate n x`.
 fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> {
-    match n {
-        Nat::Small(k) => l2r_array_replicate(k, x),
-        Nat::Big(_) => l2r_internal_panic_at<RVec<T>>(4)
-    }
+    let w = l2r_nat_raw(n);
+    if (w & 1) == 1 { l2r_array_replicate(w >> 1, x) } else { l2r_internal_panic_at<RVec<T>>(4) }
 }
 
 // ---- Array Nat / Array Int ----
@@ -2088,16 +1754,11 @@ fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> {
 // `LIntArr`, and calls `lean_natarr_xxx` / `l2r_natarr_xxx` (`intarr`) in
 // place of `lean_array_xxx<E>` / `l2r_array_xxx<E>`.
 
-#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+#[ffi(rust = "::leanrt::tagvec::TagVec")]
 pub struct LNatArr;
 
-#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+#[ffi(rust = "::leanrt::tagvec::TagVec")]
 pub struct LIntArr;
-
-// The big value of an (even) word returned by `l2r_natarr_word_owned` /
-// `l2r_intarr_word_owned`, taking over the reference the word owns.
-#[ffi(import)]
-fn l2r_big_of_owned_word(w : u64) -> LBig [{ leanrt::tagvec::big_of_owned_word(w) }];
 
 // BEGIN GENERATED: tagarr (runtime/gen_tagarr.py)
 
@@ -2110,24 +1771,16 @@ fn l2r_natarr_with_capacity(n : u64) -> LNatArr [{ leanrt::tagvec::with_capacity
 #[ffi(import)]
 fn l2r_natarr_replicate_word(n : u64, w : u64) -> LNatArr [{ leanrt::tagvec::replicate_word(n, w) }];
 #[ffi(import)]
-fn l2r_natarr_replicate_big(n : u64, b : LBig) -> LNatArr [{ leanrt::tagvec::replicate_big(n, b) }];
-#[ffi(import)]
 fn l2r_natarr_size(a : LNatArr) -> u64 [{ { let r = leanrt::tagvec::size(&a); leanrt::rc_release(a); r } }];
 #[ffi(import)]
 fn l2r_natarr_word(a : LNatArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word(&a, i); leanrt::rc_release(a); r } }];
-#[ffi(import)]
-fn l2r_natarr_big(a : LNatArr, i : u64) -> LBig [{ { let r = leanrt::tagvec::big(&a, i); leanrt::rc_release(a); r } }];
-// The word at `i`; a big word owns a reference (see `l2r_big_of_owned_word`).
+// The word at `i`; a big word owns a reference.
 #[ffi(import)]
 fn l2r_natarr_word_owned(a : LNatArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word_owned(&a, i); leanrt::rc_release(a); r } }];
 #[ffi(import)]
 fn l2r_natarr_set_word(a : LNatArr, i : u64, w : u64) -> LNatArr [{ leanrt::tagvec::set_word(a, i, w) }];
 #[ffi(import)]
-fn l2r_natarr_set_big(a : LNatArr, i : u64, b : LBig) -> LNatArr [{ leanrt::tagvec::set_big(a, i, b) }];
-#[ffi(import)]
 fn l2r_natarr_push_word(a : LNatArr, w : u64) -> LNatArr [{ leanrt::tagvec::push_word(a, w) }];
-#[ffi(import)]
-fn l2r_natarr_push_big(a : LNatArr, b : LBig) -> LNatArr [{ leanrt::tagvec::push_big(a, b) }];
 #[ffi(import)]
 fn l2r_natarr_pop(a : LNatArr) -> LNatArr [{ leanrt::tagvec::pop(a) }];
 #[ffi(import)]
@@ -2142,48 +1795,25 @@ fn l2r_natarr_truncate(a : LNatArr, n : u64) -> LNatArr [{ leanrt::tagvec::trunc
 fn l2r_natarr_reverse(a : LNatArr) -> LNatArr [{ leanrt::tagvec::reverse(a) }];
 
 
-// Small values below 2^63 are stored as `(v << 1) | 1`; all others as big
-// numbers (normalized back to `Nat::Small` when read, for values below 2^64).
-// The array is consumed once (a second use in one branch would make Reussir
-// release it out of line in the other): a big word comes back owning a
-// reference.
-fn l2r_natarr_get(a : LNatArr, i : u64) -> Nat {
-    let w = l2r_natarr_word_owned(a, i);
-    if (w & 1) == 1 { Nat::Small{w >> 1} } else { l2r_nat_norm(l2r_big_of_owned_word(w)) }
-}
-
-fn l2r_natarr_set(a : LNatArr, i : u64, x : Nat) -> LNatArr {
-    match x {
-        Nat::Small(v) => if (v >> 63) == 0 { l2r_natarr_set_word(a, i, (v << 1) | 1) } else { l2r_natarr_set_big(a, i, l2r_big_of_u64(v)) },
-        Nat::Big(b) => l2r_natarr_set_big(a, i, b)
-    }
-}
-
-fn l2r_natarr_push(a : LNatArr, x : Nat) -> LNatArr {
-    match x {
-        Nat::Small(v) => if (v >> 63) == 0 { l2r_natarr_push_word(a, (v << 1) | 1) } else { l2r_natarr_push_big(a, l2r_big_of_u64(v)) },
-        Nat::Big(b) => l2r_natarr_push_big(a, b)
-    }
-}
-
-fn l2r_natarr_replicate(n : u64, x : Nat) -> LNatArr {
-    match x {
-        Nat::Small(v) => if (v >> 63) == 0 { l2r_natarr_replicate_word(n, (v << 1) | 1) } else { l2r_natarr_replicate_big(n, l2r_big_of_u64(v)) },
-        Nat::Big(b) => l2r_natarr_replicate_big(n, b)
-    }
-}
+// Elements are `Nat` words (see the Nat section): `lean_box` of a small
+// value, an owned reference to a big number otherwise; the handles move in
+// and out as their words. The array is consumed once (a second use in one
+// branch would make Reussir release it out of line in the other): a big
+// word comes back owning a reference.
+fn l2r_natarr_get(a : LNatArr, i : u64) -> Nat { l2r_nat_of_raw(l2r_natarr_word_owned(a, i)) }
+fn l2r_natarr_set(a : LNatArr, i : u64, x : Nat) -> LNatArr { l2r_natarr_set_word(a, i, l2r_nat_raw(x)) }
+fn l2r_natarr_push(a : LNatArr, x : Nat) -> LNatArr { l2r_natarr_push_word(a, l2r_nat_raw(x)) }
+fn l2r_natarr_replicate(n : u64, x : Nat) -> LNatArr { l2r_natarr_replicate_word(n, l2r_nat_raw(x)) }
 
 
 fn lean_mk_empty_natarr() -> LNatArr { l2r_natarr_empty() }
 
 fn lean_mk_empty_natarr_with_capacity(n : Nat) -> LNatArr {
-    match n {
-        Nat::Small(c) => if (c >> 63) == 0 { l2r_natarr_with_capacity(c) } else { l2r_internal_panic_at<LNatArr>(4) },
-        Nat::Big(_) => l2r_internal_panic_at<LNatArr>(4)
-    }
+    let w = l2r_nat_raw(n);
+    if (w & 1) == 1 { l2r_natarr_with_capacity(w >> 1) } else { l2r_internal_panic_at<LNatArr>(4) }
 }
 
-fn lean_natarr_get_size(v : LNatArr) -> Nat { Nat::Small{l2r_natarr_size(v)} }
+fn lean_natarr_get_size(v : LNatArr) -> Nat { l2r_nat_small(l2r_natarr_size(v)) }
 fn lean_natarr_size(v : LNatArr) -> u64 { l2r_natarr_size(v) }
 fn lean_natarr_fget(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get(v, l2r_index_of_nat(i)) }
 fn lean_natarr_fget_borrowed(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get(v, l2r_index_of_nat(i)) }
@@ -2193,7 +1823,9 @@ fn lean_natarr_uget_borrowed(v : LNatArr, i : u64) -> Nat { l2r_natarr_get(v, i)
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
 // return the default.
 fn lean_natarr_get(dflt : Nat, v : LNatArr, i : Nat) -> Nat {
-    if l2r_index_ok(i, l2r_natarr_size(v)) { l2r_natarr_get(v, l2r_index_of_nat(i)) } else {
+    let w = l2r_nat_raw(i);
+    if l2r_word_index_ok(w, l2r_natarr_size(v)) { l2r_natarr_get(v, w >> 1) } else {
+        let d = l2r_nat_drop_raw(w);
         let ignored = l2r_panic_code(0);
         dflt
     }
@@ -2205,7 +1837,9 @@ fn lean_natarr_uset(v : LNatArr, i : u64, x : Nat) -> LNatArr { l2r_natarr_set(v
 
 // `Array.set!`: out of bounds, panic and return the array unchanged.
 fn lean_natarr_set(v : LNatArr, i : Nat, x : Nat) -> LNatArr {
-    if l2r_index_ok(i, l2r_natarr_size(v)) { l2r_natarr_set(v, l2r_index_of_nat(i), x) } else {
+    let w = l2r_nat_raw(i);
+    if l2r_word_index_ok(w, l2r_natarr_size(v)) { l2r_natarr_set(v, w >> 1, x) } else {
+        let d = l2r_nat_drop_raw(w);
         let ignored = l2r_panic_code(0);
         v
     }
@@ -2219,15 +1853,18 @@ fn lean_natarr_uswap(v : LNatArr, i : u64, j : u64) -> LNatArr { l2r_natarr_swap
 // `Array.swapIfInBounds`.
 fn lean_natarr_swap(v : LNatArr, i : Nat, j : Nat) -> LNatArr {
     let n = l2r_natarr_size(v);
-    if l2r_index_ok(i, n) && l2r_index_ok(j, n) { l2r_natarr_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) } else { v }
+    let x = l2r_nat_raw(i);
+    let y = l2r_nat_raw(j);
+    if l2r_word_index_ok(x, n) && l2r_word_index_ok(y, n) { l2r_natarr_swap(v, x >> 1, y >> 1) } else {
+        let d = l2r_nat_drop_raw(x) + l2r_nat_drop_raw(y);
+        v
+    }
 }
 
 // `Array.replicate n x`.
 fn lean_mk_natarr(n : Nat, x : Nat) -> LNatArr {
-    match n {
-        Nat::Small(c) => l2r_natarr_replicate(c, x),
-        Nat::Big(_) => l2r_internal_panic_at<LNatArr>(4)
-    }
+    let w = l2r_nat_raw(n);
+    if (w & 1) == 1 { l2r_natarr_replicate(w >> 1, x) } else { l2r_internal_panic_at<LNatArr>(4) }
 }
 
 // `Array.toList` glue (see `l2r_array_to_list`).
@@ -2249,24 +1886,16 @@ fn l2r_intarr_with_capacity(n : u64) -> LIntArr [{ leanrt::tagvec::with_capacity
 #[ffi(import)]
 fn l2r_intarr_replicate_word(n : u64, w : u64) -> LIntArr [{ leanrt::tagvec::replicate_word(n, w) }];
 #[ffi(import)]
-fn l2r_intarr_replicate_big(n : u64, b : LBig) -> LIntArr [{ leanrt::tagvec::replicate_big(n, b) }];
-#[ffi(import)]
 fn l2r_intarr_size(a : LIntArr) -> u64 [{ { let r = leanrt::tagvec::size(&a); leanrt::rc_release(a); r } }];
 #[ffi(import)]
 fn l2r_intarr_word(a : LIntArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word(&a, i); leanrt::rc_release(a); r } }];
-#[ffi(import)]
-fn l2r_intarr_big(a : LIntArr, i : u64) -> LBig [{ { let r = leanrt::tagvec::big(&a, i); leanrt::rc_release(a); r } }];
-// The word at `i`; a big word owns a reference (see `l2r_big_of_owned_word`).
+// The word at `i`; a big word owns a reference.
 #[ffi(import)]
 fn l2r_intarr_word_owned(a : LIntArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word_owned(&a, i); leanrt::rc_release(a); r } }];
 #[ffi(import)]
 fn l2r_intarr_set_word(a : LIntArr, i : u64, w : u64) -> LIntArr [{ leanrt::tagvec::set_word(a, i, w) }];
 #[ffi(import)]
-fn l2r_intarr_set_big(a : LIntArr, i : u64, b : LBig) -> LIntArr [{ leanrt::tagvec::set_big(a, i, b) }];
-#[ffi(import)]
 fn l2r_intarr_push_word(a : LIntArr, w : u64) -> LIntArr [{ leanrt::tagvec::push_word(a, w) }];
-#[ffi(import)]
-fn l2r_intarr_push_big(a : LIntArr, b : LBig) -> LIntArr [{ leanrt::tagvec::push_big(a, b) }];
 #[ffi(import)]
 fn l2r_intarr_pop(a : LIntArr) -> LIntArr [{ leanrt::tagvec::pop(a) }];
 #[ffi(import)]
@@ -2281,47 +1910,21 @@ fn l2r_intarr_truncate(a : LIntArr, n : u64) -> LIntArr [{ leanrt::tagvec::trunc
 fn l2r_intarr_reverse(a : LIntArr) -> LIntArr [{ leanrt::tagvec::reverse(a) }];
 
 
-// Small values in [-2^62, 2^62) are stored as `(v << 1) | 1`; all others as
-// big numbers (normalized back to `Int::Small` when read).
-fn l2r_int_is_tag_small(v : i64) -> bool { ((v + 4611686018427387904) as u64) < 9223372036854775808 }
-
-fn l2r_intarr_get(a : LIntArr, i : u64) -> Int {
-    let w = l2r_intarr_word_owned(a, i);
-    if (w & 1) == 1 { Int::Small{(w as i64) >> 1} } else { l2r_int_norm(l2r_big_of_owned_word(w)) }
-}
-
-fn l2r_intarr_set(a : LIntArr, i : u64, x : Int) -> LIntArr {
-    match x {
-        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_intarr_set_word(a, i, ((v << 1) | 1) as u64) } else { l2r_intarr_set_big(a, i, l2r_big_of_i64(v)) },
-        Int::Big(b) => l2r_intarr_set_big(a, i, b)
-    }
-}
-
-fn l2r_intarr_push(a : LIntArr, x : Int) -> LIntArr {
-    match x {
-        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_intarr_push_word(a, ((v << 1) | 1) as u64) } else { l2r_intarr_push_big(a, l2r_big_of_i64(v)) },
-        Int::Big(b) => l2r_intarr_push_big(a, b)
-    }
-}
-
-fn l2r_intarr_replicate(n : u64, x : Int) -> LIntArr {
-    match x {
-        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_intarr_replicate_word(n, ((v << 1) | 1) as u64) } else { l2r_intarr_replicate_big(n, l2r_big_of_i64(v)) },
-        Int::Big(b) => l2r_intarr_replicate_big(n, b)
-    }
-}
+// Elements are `Int` words (see the Int section), as for `LNatArr`.
+fn l2r_intarr_get(a : LIntArr, i : u64) -> Int { l2r_int_of_raw(l2r_intarr_word_owned(a, i)) }
+fn l2r_intarr_set(a : LIntArr, i : u64, x : Int) -> LIntArr { l2r_intarr_set_word(a, i, l2r_int_raw(x)) }
+fn l2r_intarr_push(a : LIntArr, x : Int) -> LIntArr { l2r_intarr_push_word(a, l2r_int_raw(x)) }
+fn l2r_intarr_replicate(n : u64, x : Int) -> LIntArr { l2r_intarr_replicate_word(n, l2r_int_raw(x)) }
 
 
 fn lean_mk_empty_intarr() -> LIntArr { l2r_intarr_empty() }
 
 fn lean_mk_empty_intarr_with_capacity(n : Nat) -> LIntArr {
-    match n {
-        Nat::Small(c) => if (c >> 63) == 0 { l2r_intarr_with_capacity(c) } else { l2r_internal_panic_at<LIntArr>(4) },
-        Nat::Big(_) => l2r_internal_panic_at<LIntArr>(4)
-    }
+    let w = l2r_nat_raw(n);
+    if (w & 1) == 1 { l2r_intarr_with_capacity(w >> 1) } else { l2r_internal_panic_at<LIntArr>(4) }
 }
 
-fn lean_intarr_get_size(v : LIntArr) -> Nat { Nat::Small{l2r_intarr_size(v)} }
+fn lean_intarr_get_size(v : LIntArr) -> Nat { l2r_nat_small(l2r_intarr_size(v)) }
 fn lean_intarr_size(v : LIntArr) -> u64 { l2r_intarr_size(v) }
 fn lean_intarr_fget(v : LIntArr, i : Nat) -> Int { l2r_intarr_get(v, l2r_index_of_nat(i)) }
 fn lean_intarr_fget_borrowed(v : LIntArr, i : Nat) -> Int { l2r_intarr_get(v, l2r_index_of_nat(i)) }
@@ -2331,7 +1934,9 @@ fn lean_intarr_uget_borrowed(v : LIntArr, i : u64) -> Int { l2r_intarr_get(v, i)
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
 // return the default.
 fn lean_intarr_get(dflt : Int, v : LIntArr, i : Nat) -> Int {
-    if l2r_index_ok(i, l2r_intarr_size(v)) { l2r_intarr_get(v, l2r_index_of_nat(i)) } else {
+    let w = l2r_nat_raw(i);
+    if l2r_word_index_ok(w, l2r_intarr_size(v)) { l2r_intarr_get(v, w >> 1) } else {
+        let d = l2r_nat_drop_raw(w);
         let ignored = l2r_panic_code(0);
         dflt
     }
@@ -2343,7 +1948,9 @@ fn lean_intarr_uset(v : LIntArr, i : u64, x : Int) -> LIntArr { l2r_intarr_set(v
 
 // `Array.set!`: out of bounds, panic and return the array unchanged.
 fn lean_intarr_set(v : LIntArr, i : Nat, x : Int) -> LIntArr {
-    if l2r_index_ok(i, l2r_intarr_size(v)) { l2r_intarr_set(v, l2r_index_of_nat(i), x) } else {
+    let w = l2r_nat_raw(i);
+    if l2r_word_index_ok(w, l2r_intarr_size(v)) { l2r_intarr_set(v, w >> 1, x) } else {
+        let d = l2r_nat_drop_raw(w);
         let ignored = l2r_panic_code(0);
         v
     }
@@ -2357,15 +1964,18 @@ fn lean_intarr_uswap(v : LIntArr, i : u64, j : u64) -> LIntArr { l2r_intarr_swap
 // `Array.swapIfInBounds`.
 fn lean_intarr_swap(v : LIntArr, i : Nat, j : Nat) -> LIntArr {
     let n = l2r_intarr_size(v);
-    if l2r_index_ok(i, n) && l2r_index_ok(j, n) { l2r_intarr_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) } else { v }
+    let x = l2r_nat_raw(i);
+    let y = l2r_nat_raw(j);
+    if l2r_word_index_ok(x, n) && l2r_word_index_ok(y, n) { l2r_intarr_swap(v, x >> 1, y >> 1) } else {
+        let d = l2r_nat_drop_raw(x) + l2r_nat_drop_raw(y);
+        v
+    }
 }
 
 // `Array.replicate n x`.
 fn lean_mk_intarr(n : Nat, x : Int) -> LIntArr {
-    match n {
-        Nat::Small(c) => l2r_intarr_replicate(c, x),
-        Nat::Big(_) => l2r_internal_panic_at<LIntArr>(4)
-    }
+    let w = l2r_nat_raw(n);
+    if (w & 1) == 1 { l2r_intarr_replicate(w >> 1, x) } else { l2r_internal_panic_at<LIntArr>(4) }
 }
 
 // `Array.toList` glue (see `l2r_array_to_list`).
@@ -2382,20 +1992,22 @@ fn l2r_intarr_to_list_go<L>(a : LIntArr, i : u64, acc : L, cons : Int -> (L -> L
 // ---- ByteArray (RVec<u8>) ----
 
 fn lean_mk_empty_byte_array(n : Nat) -> RVec<u8> { l2r_mk_empty_with_capacity<u8>(n, 1) }
-fn lean_byte_array_size(v : RVec<u8>) -> Nat { Nat::Small{l2r_array_size(v)} }
+fn lean_byte_array_size(v : RVec<u8>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
 fn lean_sarray_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
 fn lean_byte_array_uget(v : RVec<u8>, i : u64) -> u8 { l2r_array_get(v, i) }
 fn lean_byte_array_fget(v : RVec<u8>, i : Nat) -> u8 { l2r_array_get(v, l2r_index_of_nat(i)) }
 // `ByteArray.get!`: 0 out of bounds (no panic, as lean.h).
 fn lean_byte_array_get(v : RVec<u8>, i : Nat) -> u8 {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_get(v, l2r_index_of_nat(i)) } else { 0 }
+    let w = l2r_nat_raw(i);
+    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_get(v, w >> 1) } else { let d = l2r_nat_drop_raw(w); 0 }
 }
 fn lean_byte_array_push(v : RVec<u8>, x : u8) -> RVec<u8> { l2r_array_push(v, x) }
 fn lean_byte_array_uset(v : RVec<u8>, i : u64, x : u8) -> RVec<u8> { l2r_array_set(v, i, x) }
 fn lean_byte_array_fset(v : RVec<u8>, i : Nat, x : u8) -> RVec<u8> { l2r_array_set(v, l2r_index_of_nat(i), x) }
 // `ByteArray.set!`: unchanged out of bounds.
 fn lean_byte_array_set(v : RVec<u8>, i : Nat, x : u8) -> RVec<u8> {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_set(v, l2r_index_of_nat(i), x) } else { v }
+    let w = l2r_nat_raw(i);
+    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_set(v, w >> 1, x) } else { let d = l2r_nat_drop_raw(w); v }
 }
 #[ffi(import)]
 fn lean_byte_array_hash(v : RVec<u8>) -> u64 [{ { let r = leanrt::hash::murmur64a(leanrt::array::as_slice(&v), 11); leanrt::array::release(v); r } }];
@@ -2407,11 +2019,12 @@ fn l2r_byte_array_copy_slice(src : RVec<u8>, so : u64, dest : RVec<u8>, d : u64,
 }];
 // `lean_nat_to_size_t`: values that are not a `size_t` (>= 2^64) are an
 // internal "out of memory" panic.
+#[ffi(import)]
+fn l2r_nat_to_size_t_raw(a : u64) -> u64 [{ leanrt::nat::nat_to_size_t(a) }];
+
 fn l2r_nat_to_size_t(n : Nat) -> u64 {
-    match n {
-        Nat::Small(x) => x,
-        Nat::Big(_) => l2r_internal_panic_at<u64>(4)
-    }
+    let x = l2r_nat_raw(n);
+    if (x & 1) == 1 { x >> 1 } else { l2r_nat_to_size_t_raw(x) }
 }
 
 // `ByteArray.copySlice`, converting the offsets in C's order (a source
@@ -2432,18 +2045,20 @@ fn lean_byte_array_data(a : RVec<u8>) -> RVec<u8> { a }
 // ---- FloatArray (RVec<f64>) ----
 
 fn lean_mk_empty_float_array(n : Nat) -> RVec<f64> { l2r_mk_empty_with_capacity<f64>(n, 8) }
-fn lean_float_array_size(v : RVec<f64>) -> Nat { Nat::Small{l2r_array_size(v)} }
+fn lean_float_array_size(v : RVec<f64>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
 fn lean_float_array_uget(v : RVec<f64>, i : u64) -> f64 { l2r_array_get(v, i) }
 fn lean_float_array_fget(v : RVec<f64>, i : Nat) -> f64 { l2r_array_get(v, l2r_index_of_nat(i)) }
 // `FloatArray.get!`: 0.0 out of bounds.
 fn lean_float_array_get(v : RVec<f64>, i : Nat) -> f64 {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_get(v, l2r_index_of_nat(i)) } else { 0.0 }
+    let w = l2r_nat_raw(i);
+    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_get(v, w >> 1) } else { let d = l2r_nat_drop_raw(w); 0.0 }
 }
 fn lean_float_array_push(v : RVec<f64>, x : f64) -> RVec<f64> { l2r_array_push(v, x) }
 fn lean_float_array_uset(v : RVec<f64>, i : u64, x : f64) -> RVec<f64> { l2r_array_set(v, i, x) }
 fn lean_float_array_fset(v : RVec<f64>, i : Nat, x : f64) -> RVec<f64> { l2r_array_set(v, l2r_index_of_nat(i), x) }
 fn lean_float_array_set(v : RVec<f64>, i : Nat, x : f64) -> RVec<f64> {
-    if l2r_index_ok(i, l2r_array_size(v)) { l2r_array_set(v, l2r_index_of_nat(i), x) } else { v }
+    let w = l2r_nat_raw(i);
+    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_set(v, w >> 1, x) } else { let d = l2r_nat_drop_raw(w); v }
 }
 fn lean_float_array_mk(a : RVec<f64>) -> RVec<f64> { a }
 fn lean_float_array_data(a : RVec<f64>) -> RVec<f64> { a }
@@ -2498,7 +2113,31 @@ fn l2r_diag_println(s : LStr) -> u64 { l2r_stderr_put(lean_string_push(s, 10)) }
 
 fn l2r_rc_get<T>(c : Cell<T>) -> T { core::intrinsic::cell::get(c) }
 
+// As natively (`lean_st_ref_set`), the new value is stored before the old
+// one is released, so code that the release runs (the `sync` dependents of
+// a promise it drops, `leanrt::task::resolve`) sees the new value. Reussir's
+// `cell::set` releases the old value before the store: the old value is
+// taken (a second reference) and released after the store, by an FFI call
+// (`l2r_release_value`), which Reussir keeps there. For a type that cannot
+// cross the FFI boundary lean2rr calls `l2r_rc_put` (`refSetFn`).
 fn l2r_rc_set<T>(c : Cell<T>, v : T) -> u64 {
+    let old = core::intrinsic::cell::get(c);
+    core::intrinsic::cell::set(c, v);
+    l2r_release_value<T>(old)
+}
+
+// The release of a value a reference gave up, as `lean_dec` does natively
+// (`leanrt::drop::release`): the last reference to a record is freed inside
+// a free the runtime starts, so what it holds is released in Lean's order
+// (its last field first) and the `sync` dependents of the promises it drops
+// run when that free ends, before the caller goes on. Returns 0.
+#[ffi(import)]
+fn l2r_release_value<T>(x : T) -> u64 [{ { leanrt::drop::release(x); 0 } }];
+
+// `l2r_rc_set` for a cell whose value's release runs nothing: a scalar, a
+// unit or enumeration value (a `[value]` type, which cannot cross the FFI
+// boundary).
+fn l2r_rc_put<T>(c : Cell<T>, v : T) -> u64 {
     core::intrinsic::cell::set(c, v);
     0
 }
@@ -2509,116 +2148,9 @@ fn l2r_rc_swap<T>(c : Cell<T>, v : T) -> T {
     old
 }
 
-// A reference to a `Nat` / `Int`: Reussir's cells do not hold `[value]`
-// records with counted members, so the value is split as in `LNatArr`: a
-// small value is an odd tagged word in the first cell; any other value has
-// an even word there and its big number in the second cell. Each operation
-// touches only the first cell on the small path (every access of a cell
-// through the record costs its count). A big number replaced by a small
-// value stays in the second cell until the next big value or the end of the
-// reference.
-enum L2RBigOpt {
-    n,
-    s(LBig)
-}
-
-struct L2RNatRef(Cell<u64>, Cell<L2RBigOpt>)
-
-struct L2RIntRef(Cell<u64>, Cell<L2RBigOpt>)
-
-fn l2r_bigref_big(c : Cell<L2RBigOpt>) -> LBig {
-    match core::intrinsic::cell::get(c) {
-        L2RBigOpt::s(b) => b,
-        L2RBigOpt::n => l2r_unreachable<LBig>()
-    }
-}
-
-fn l2r_bigref_put_big(w0 : Cell<u64>, w1 : Cell<L2RBigOpt>, b : LBig) -> u64 {
-    core::intrinsic::cell::set(w1, L2RBigOpt::s{b});
-    core::intrinsic::cell::set(w0, 0);
-    0
-}
-
-fn l2r_natref_new(x : Nat) -> L2RNatRef {
-    match x {
-        Nat::Small(v) => if (v >> 63) == 0 {
-            L2RNatRef{core::intrinsic::cell::alloc((v << 1) | 1), core::intrinsic::cell::alloc(L2RBigOpt::n{})}
-        } else {
-            L2RNatRef{core::intrinsic::cell::alloc(0), core::intrinsic::cell::alloc(L2RBigOpt::s{l2r_big_of_u64(v)})}
-        },
-        Nat::Big(b) => L2RNatRef{core::intrinsic::cell::alloc(0), core::intrinsic::cell::alloc(L2RBigOpt::s{b})}
-    }
-}
-
-fn l2r_natref_get(r : L2RNatRef) -> Nat {
-    let w : u64 = core::intrinsic::cell::get(r.0);
-    if (w & 1) == 1 { Nat::Small{w >> 1} } else { l2r_nat_norm(l2r_bigref_big(r.1)) }
-}
-
-fn l2r_natref_set(r : L2RNatRef, x : Nat) -> u64 {
-    match x {
-        Nat::Small(v) => if (v >> 63) == 0 { l2r_rc_set<u64>(r.0, (v << 1) | 1) } else { l2r_bigref_put_big(r.0, r.1, l2r_big_of_u64(v)) },
-        Nat::Big(b) => l2r_bigref_put_big(r.0, r.1, b)
-    }
-}
-
-fn l2r_natref_swap(r : L2RNatRef, x : Nat) -> Nat {
-    match x {
-        Nat::Small(v) => if (v >> 63) == 0 {
-            let w : u64 = l2r_rc_swap<u64>(r.0, (v << 1) | 1);
-            if (w & 1) == 1 { Nat::Small{w >> 1} } else { l2r_nat_norm(l2r_bigref_big(r.1)) }
-        } else { l2r_natref_swap_big(r, l2r_big_of_u64(v)) },
-        Nat::Big(b) => l2r_natref_swap_big(r, b)
-    }
-}
-
-fn l2r_natref_swap_big(r : L2RNatRef, b : LBig) -> Nat {
-    let old : Nat = l2r_natref_get(r);
-    let z : u64 = l2r_bigref_put_big(r.0, r.1, b);
-    old
-}
-
-fn l2r_intref_new(x : Int) -> L2RIntRef {
-    match x {
-        Int::Small(v) => if l2r_int_is_tag_small(v) {
-            L2RIntRef{core::intrinsic::cell::alloc(((v << 1) | 1) as u64), core::intrinsic::cell::alloc(L2RBigOpt::n{})}
-        } else {
-            L2RIntRef{core::intrinsic::cell::alloc(0), core::intrinsic::cell::alloc(L2RBigOpt::s{l2r_big_of_i64(v)})}
-        },
-        Int::Big(b) => L2RIntRef{core::intrinsic::cell::alloc(0), core::intrinsic::cell::alloc(L2RBigOpt::s{b})}
-    }
-}
-
-fn l2r_intref_get(r : L2RIntRef) -> Int {
-    let w : u64 = core::intrinsic::cell::get(r.0);
-    if (w & 1) == 1 { Int::Small{(w as i64) >> 1} } else { l2r_int_norm(l2r_bigref_big(r.1)) }
-}
-
-fn l2r_intref_set(r : L2RIntRef, x : Int) -> u64 {
-    match x {
-        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_rc_set<u64>(r.0, ((v << 1) | 1) as u64) } else { l2r_bigref_put_big(r.0, r.1, l2r_big_of_i64(v)) },
-        Int::Big(b) => l2r_bigref_put_big(r.0, r.1, b)
-    }
-}
-
-fn l2r_intref_swap(r : L2RIntRef, x : Int) -> Int {
-    match x {
-        Int::Small(v) => if l2r_int_is_tag_small(v) {
-            let w : u64 = l2r_rc_swap<u64>(r.0, ((v << 1) | 1) as u64);
-            if (w & 1) == 1 { Int::Small{(w as i64) >> 1} } else { l2r_int_norm(l2r_bigref_big(r.1)) }
-        } else { l2r_intref_swap_big(r, l2r_big_of_i64(v)) },
-        Int::Big(b) => l2r_intref_swap_big(r, b)
-    }
-}
-
-fn l2r_intref_swap_big(r : L2RIntRef, b : LBig) -> Int {
-    let old : Int = l2r_intref_get(r);
-    let z : u64 = l2r_bigref_put_big(r.0, r.1, b);
-    old
-}
-
-// `LRef<T>`: a shared cell of the runtime (a 0-or-1 element vector), used
-// for promises.
+// `LRef<T>`: a shared cell of the runtime (a 0-or-1 element vector). Not
+// used by generated code any more (promises hold the `LCell` of their
+// task); kept with its functions.
 
 #[ffi(import)]
 fn l2r_ref_new<T>(v : T) -> LRef<T> [{ leanrt::array::from_rc(Rc::new(vec![v])) }];
@@ -2632,13 +2164,18 @@ fn l2r_ref_get<T>(r : LRef<T>) -> T [{
     }
 }];
 
+// The old value is released after the new one is stored, as `lean_dec`
+// does (`l2r_rc_set`).
 #[ffi(import)]
 fn l2r_ref_set<T>(r : LRef<T>, v : T) -> u64 [{
     {
         let mut c = leanrt::array::into_rc(r);
         let cell = unsafe { c.data_mut() };
-        cell.clear();
+        let old = cell.pop();
         cell.push(v);
+        if let Some(old) = old {
+            leanrt::drop::release(old);
+        }
         0
     }
 }];
@@ -2831,10 +2368,12 @@ fn l2r_std_pop(base : u64) -> u64 [{ { leanrt::once::pop_context(base, 3); 0 } }
 //
 // A `Thunk α` or `Task α` is an `LCell<S>` whose state type `S` lean2rr
 // generates per value type: `enum S { pending(L2RUnit -> α), busy, done(α),
-// conv(L2RUnit -> α, L2RBox, u64) }` (a shared enum; `conv` is a thunk or
-// task converted from another representation: its computation, the original
-// cell, and for a task the original's identity). lean2rr also generates the functions that force the
-// state (`l2r_thunk_get_S`, `l2r_task_get_S`, ...): a thunk runs its closure
+// conv(L2RUnit -> α, L2RBox) }` (a shared enum; `conv` is a thunk or task
+// converted from another representation: its computation and the original
+// cell; a task's also holds the original's address, its identity for
+// `leanrt::task`; tasks also have a `bind` state). lean2rr also generates
+// the functions that force the state (`l2r_thunk_get_S`, `l2r_task_get_S`,
+// ...): a thunk runs its closure
 // on first `get` and keeps the value; a task created after `main` has
 // started stays pending until it is needed or `main` returns (during module
 // initialization it is computed at once). `leanrt::task` keeps the queues
@@ -2855,11 +2394,14 @@ fn l2r_lcell_new<T>(v : T) -> LCell<T> [{
 #[ffi(import)]
 fn l2r_lcell_get<T>(c : LCell<T>) -> T [{ c.data_ref().clone() }];
 
+// The old state is released after the new one is stored, as `lean_dec`
+// does (`l2r_rc_set`).
 #[ffi(import)]
 fn l2r_lcell_set<T>(c : LCell<T>, v : T) -> u64 [{
     {
         let mut c = c;
-        unsafe { *c.data_mut() = v };
+        let old = unsafe { ::std::mem::replace(c.data_mut(), v) };
+        leanrt::drop::release(old);
         0
     }
 }];
@@ -2987,6 +2529,42 @@ fn l2r_task_query_at(a : u64) -> u8 [{ leanrt::task::query(a as usize) }];
 
 #[ffi(import)]
 fn l2r_task_deferring() -> bool [{ leanrt::task::deferring() }];
+
+// A constant whose value may hold tasks waits for them when it is first
+// computed (lean2rr's `l2r_persist_T`, as native `lean_mark_persistent`):
+// a walk over its cells, skipped when every task has finished
+// (`l2r_task_settled`). The walk visits each cell once
+// (`l2r_persist_seen`: whether walk `h` has seen it, else it records it)
+// and keeps what it reads out of thunks, tasks and references until it ends
+// (`l2r_persist_keep`), so that no cell it has seen is freed meanwhile.
+// It has two passes (`leanrt::persist`): the first collects the unfinished
+// tasks (`l2r_persist_collect_at`); the second (`l2r_persist_rewalk`) runs,
+// before each task it waits for, the collected ones that natively come
+// before it in the workers' queue (`l2r_task_run_before`, generated, over
+// `l2r_persist_before_at`).
+#[ffi(import)]
+fn l2r_task_settled() -> bool [{ leanrt::task::settled() }];
+
+#[ffi(import)]
+fn l2r_persist_begin() -> u64 [{ leanrt::persist::begin() }];
+
+#[ffi(import)]
+fn l2r_persist_seen<T>(h : u64, v : T) -> bool [{ leanrt::persist::seen::<[:T:]>(h, v) }];
+
+#[ffi(import)]
+fn l2r_persist_keep<T>(h : u64, v : T) -> u64 [{ leanrt::persist::keep::<[:T:]>(h, v) }];
+
+#[ffi(import)]
+fn l2r_persist_collect_at(h : u64, a : u64) -> bool [{ leanrt::persist::collect(h, a as usize) }];
+
+#[ffi(import)]
+fn l2r_persist_rewalk(h : u64) -> bool [{ leanrt::persist::rewalk(h) }];
+
+#[ffi(import)]
+fn l2r_persist_before_at(h : u64, a : u64) -> u64 [{ leanrt::persist::before(h, a as usize) }];
+
+#[ffi(import)]
+fn l2r_persist_end(h : u64) -> u64 [{ leanrt::persist::end(h) }];
 
 #[ffi(import)]
 fn l2r_task_manager_start() -> u64 [{ { leanrt::task::start(); 0 } }];
@@ -3126,11 +2704,13 @@ fn l2r_shim_op_bytes(o : LHandle) -> RVec<u8> [{
 fn l2r_shim_op_addr(o : LHandle) -> RVec<u8> [{
     { let b = leanrt::net::op(&o).addr.clone(); leanrt::rc_release(o); leanrt::array::bytes_of_vec(b) }
 }];
+// An operation's string `i`, decoded as Lean's `lean_mk_string` does (each
+// invalid UTF-8 sequence becomes U+FFFD).
 #[ffi(import)]
 fn l2r_shim_op_str(o : LHandle, i : u32) -> LStr [{
     {
         let x = leanrt::net::op(&o);
-        let s = leanrt::string::from_bytes(x.strs.get(i as usize).map(|v| v.as_slice()).unwrap_or(b""));
+        let s = leanrt::string::from_bytes_lossy(x.strs.get(i as usize).map(|v| v.as_slice()).unwrap_or(b""));
         leanrt::rc_release(o);
         s
     }
@@ -3180,11 +2760,21 @@ fn l2r_shim_timer_promise(t : LHandle) -> LPromise [{ { let p = leanrt::net::tim
 fn l2r_shim_timer_start(t : LHandle, p : LPromise, r : LPromise) -> LHandle [{ { let o = leanrt::net::timer_start(&t, p, r); leanrt::rc_release(t); o } }];
 #[ffi(import)]
 fn l2r_shim_timer_set(t : LHandle, p : LPromise, r : LPromise) -> LHandle [{ { let o = leanrt::net::timer_set(&t, p, r); leanrt::rc_release(t); o } }];
+// `stop` and `cancel` give up the timer's promise: dropped here, once the
+// primitive has returned, so its `sync` dependents run on the caller's
+// context, as natively on the calling thread (`leanrt::net::GivenUp`).
 #[ffi(import)]
 fn l2r_shim_timer_ctl_h(t : LHandle, which : u8) -> u64 [{
     {
-        match which { 0 => leanrt::net::timer_reset(&t), 1 => leanrt::net::timer_stop(&t), _ => leanrt::net::timer_cancel(&t) }
+        let given_up = match which {
+            0 => { leanrt::net::timer_reset(&t); [None, None] }
+            1 => leanrt::net::timer_stop(&t),
+            _ => leanrt::net::timer_cancel(&t),
+        };
         leanrt::rc_release(t);
+        for p in given_up {
+            drop(p);
+        }
         0
     }
 }];
@@ -3215,15 +2805,17 @@ fn l2r_shim_tcp_send(s : LHandle, d : RVec<u8>, r : LPromise) -> LHandle [{
 fn l2r_shim_sock_recv(s : LHandle, size : u64, r : LPromise) -> LHandle [{
     { let o = leanrt::net::sock_recv(&s, size, r); leanrt::rc_release(s); o }
 }];
+// A canceled read or accept's promise is dropped here, once the primitive
+// has returned (as `l2r_shim_timer_ctl_h`).
 #[ffi(import)]
-fn l2r_shim_sock_cancel_recv_h(s : LHandle) -> u64 [{ { leanrt::net::sock_cancel_recv(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_sock_cancel_recv_h(s : LHandle) -> u64 [{ { let r = leanrt::net::sock_cancel_recv(&s); leanrt::rc_release(s); drop(r); 0 } }];
 fn l2r_shim_sock_cancel_recv(s : LHandle) -> L2RUnit { l2r_unit_of(l2r_shim_sock_cancel_recv_h(s)) }
 #[ffi(import)]
 fn l2r_shim_tcp_accept(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_accept(&s, r); leanrt::rc_release(s); o } }];
 #[ffi(import)]
 fn l2r_shim_tcp_try_accept(s : LHandle) -> LHandle [{ { let o = leanrt::net::tcp_try_accept(&s); leanrt::rc_release(s); o } }];
 #[ffi(import)]
-fn l2r_shim_tcp_cancel_accept_h(s : LHandle) -> u64 [{ { leanrt::net::tcp_cancel_accept(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_tcp_cancel_accept_h(s : LHandle) -> u64 [{ { let r = leanrt::net::tcp_cancel_accept(&s); leanrt::rc_release(s); drop(r); 0 } }];
 fn l2r_shim_tcp_cancel_accept(s : LHandle) -> L2RUnit { l2r_unit_of(l2r_shim_tcp_cancel_accept_h(s)) }
 #[ffi(import)]
 fn l2r_shim_tcp_shutdown(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_shutdown(&s, r); leanrt::rc_release(s); o } }];
@@ -3292,8 +2884,6 @@ fn l2r_shim_op_str_count(o : LHandle) -> u32 [{ { let r = leanrt::net::op(&o).st
 
 // Std.Internal.UV.System (`leanrt::sys`).
 #[ffi(import)]
-fn l2r_shim_sys_title_get() -> LStr [{ leanrt::string::from_bytes(&leanrt::sys::title_get()) }];
-#[ffi(import)]
 fn l2r_shim_sys_title_set_h(s : LStr) -> u64 [{ { leanrt::sys::title_set(s.utf8()); leanrt::rc_release(s); 0 } }];
 fn l2r_shim_sys_title_set(s : LStr) -> L2RUnit { l2r_unit_of(l2r_shim_sys_title_set_h(s)) }
 #[ffi(import)]
@@ -3301,7 +2891,8 @@ fn l2r_shim_sys_query(which : u8) -> LHandle [{
     match which {
         0 => leanrt::sys::uptime(), 1 => leanrt::sys::cpu_info(), 2 => leanrt::sys::cwd(), 3 => leanrt::sys::homedir(),
         4 => leanrt::sys::tmpdir(), 5 => leanrt::sys::passwd(), 6 => leanrt::sys::environ_all(), 7 => leanrt::sys::hostname(),
-        8 => leanrt::sys::uname_all(), 9 => leanrt::sys::rusage(), _ => leanrt::sys::exepath()
+        8 => leanrt::sys::uname_all(), 9 => leanrt::sys::rusage(), 10 => leanrt::sys::exepath(),
+        _ => leanrt::sys::title_get()
     }
 }];
 #[ffi(import)]
@@ -3358,7 +2949,7 @@ fn lean_dbg_trace<T>(msg : LStr, f : L2RUnit -> T) -> T {
 fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
     {
         let name = ::std::any::type_name::<[:T:]>();
-        let boxed = name.starts_with("reussir_rt::") && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
+        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::tagvec::") || name.starts_with("leanrt::string::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
         let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
         let shared = boxed && (p >> 56) == 0 && {
             let c = unsafe { *(p as *const u32) };
@@ -3379,7 +2970,7 @@ fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
 fn l2r_shared_check<T>(a : T) -> T [{
     {
         let name = ::std::any::type_name::<[:T:]>();
-        let boxed = name.starts_with("reussir_rt::") && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
+        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::tagvec::") || name.starts_with("leanrt::string::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
         let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
         let shared = boxed && (p >> 56) == 0 && {
             let c = unsafe { *(p as *const u32) };
@@ -3417,99 +3008,76 @@ fn lean_dbg_sleep<T>(ms : u32, f : L2RUnit -> T) -> T {
     f(L2RUnit::u{})
 }
 
-// `ptrAddrUnsafe` (lean2rr's `addrOf`): what native Lean answers. A value
-// natively represented by a boxed scalar answers that word, `lean_box(n) =
-// 2n+1`: a `Nat` below 2^63, an `Int` in the `int32` range (its 32 bits),
-// `UInt8/16/32`, `Char`, `Bool`, enumerations (their index), nullary
-// constructors (their index), `Unit` (`box(0) = 1`). A heap value answers its
-// handle pointer (below). A `[value]` struct answers its field's. `UInt64`,
-// `Float` and the like are natively boxed into a new cell at every call
-// (`ptrEq x x` is only true once Lean's CSE merged the two calls): they
-// answer a fresh number (`l2r_addr_fresh`), and a `Box` holding one answers
-// the `Box` cell (natively the cell that boxing made).
+// `ptrAddrUnsafe` (lean2rr's `addrOf`). Native pointer identity is not
+// emulated: a heap value answers the address of its cell in its own
+// representation (`l2r_ptr_addr_obj`, `l2r_ptr_addr_rec`), a scalar a word
+// computed from its value: `lean_box(n) = 2n+1` for `UInt8/16/32`, `Char`,
+// `Bool` and enumerations (their index), `1` for `Unit`; the bits of a
+// `UInt64` or `Float`. A `Nat` or `Int` answers its word, which is native
+// Lean's: its boxed scalar when small (a `Nat` below 2^63, an `Int` in the
+// `int32` range), else the pointer to its big number object. Equal answers
+// mean the same cell or equal values (`ptrEq` as a shortcut for equality
+// stays right). `l2r_addr_fresh` (a number answered only once: even, in
+// [2^62, 2^63), so never a scalar's word or a pointer) serves values with
+// neither.
 
 fn l2r_addr_word(w : u64) -> u64 { w + w + 1 }
 
 #[ffi(import)]
 fn l2r_addr_fresh() -> u64 [{ leanrt::fresh_addr() }];
 
-// A `Nat` from 2^63 to 2^64 is natively a big number object (one per
-// computation); here it has no object, so it answers a number computed from
-// its value: even (never a boxed scalar), and scrambled, so that the values
-// that land on real pointers (a `Big` handle's address) are unlikely ones.
-// Equal values are therefore `ptrEq` (natively only the same object is).
+// A `Nat` is represented as natively: a small one is its boxed scalar
+// `2n+1`, a big one the pointer to its object; either way, its word.
 fn l2r_addr_nat(n : Nat) -> u64 {
-    match n {
-        Nat::Small(x) => if (x >> 63) == 0 { x + x + 1 } else { (x + x) ^ 6510615555426900570 },
-        Nat::Big(b) => l2r_ptr_addr_obj<LBig>(b)
-    }
+    let x = l2r_nat_raw(n);
+    if (x & 1) == 1 { x } else { let d = l2r_nat_drop_raw(x); x }
 }
 
-// An `Int` in the `int32` range is natively the boxed scalar of its 32 bits
-// (`lean_int64_to_int`); others are big number objects. An `i64` outside
-// that range answers a number computed from its value (as `l2r_addr_nat`):
-// the bits rotated left by one, which is injective, except that the 2^32
-// values landing on a boxed `int32` word are moved to the words the
-// rotation gives the `int32` values themselves (unused otherwise).
+// An `Int` is represented as natively: a small one (the `int32` range) is
+// its boxed scalar, a big one the pointer to its object; either way, its
+// word.
 fn l2r_addr_int(i : Int) -> u64 {
-    match i {
-        Int::Small(x) => if ((x as i32) as i64) == x { l2r_addr_word((x as u32) as u64) } else { l2r_addr_int_wide(x) },
-        Int::Big(b) => l2r_ptr_addr_obj<LBig>(b)
-    }
+    let w = l2r_int_raw(i);
+    if (w & 1) == 1 { w } else { let d = l2r_int_drop_raw(w); w }
 }
 
-fn l2r_addr_int_wide(x : i64) -> u64 {
-    let u : u64 = x as u64;
-    let r : u64 = (u << 1) | (u >> 63);
-    let lim : u64 = 8589934592;
-    if (r & 1) == 1 {
-        if r < lim {
-            let w : u64 = r >> 1;
-            if w < 2147483648 { w + w } else { (w + w + 1) - lim }
-        } else { r }
-    } else { r }
-}
-
-// `ptrAddrUnsafe` of a heap value that lean2rr passes as it is (not a
-// wrapper built for the call): its handle pointer, whatever its count. The
-// value is the Lean object itself, so its address is its identity even when
-// this call holds its last reference (`ptrEq a b` where `a`'s own call
-// released the other reference to the same object).
-//
-// A value lean2rr converted to another representation answers the address
-// of the value it was converted from (`leanrt::origin`).
+// A heap value's handle pointer, whatever its count: the address is the
+// identity even when this call holds the last reference (`ptrEq a b`
+// where `a`'s own call released the other reference to the same cell:
+// both were live when the comparison started, so their cells differ
+// unless they are the same).
 #[ffi(import)]
 fn l2r_ptr_addr_obj<T>(a : T) -> u64 [{
     {
         let size = ::std::mem::size_of::<[:T:]>();
         if size == ::std::mem::size_of::<usize>() {
             let p = unsafe { *(&a as *const [:T:] as *const usize) };
-            leanrt::origin::addr(p).unwrap_or(p as u64)
+            p as u64
         } else {
             leanrt::fresh_addr()
         }
     }
 }];
 
-// The same for a shared Reussir record (a generated struct or enum). The
-// reference the call received is given back inline when others remain (a
-// record's count is the `u32` at its address; static cells and immediates,
-// tagged in the top byte, and a last reference go through the record's
-// release), so that the call costs no out-of-line release: `ptrEq` in a
-// traversal (`Expr.replace`) spent 40% of its time there.
+// The same for a shared Reussir record (a generated struct or enum, a
+// function value, a `Box`). The reference the call received is given back
+// inline when others remain (a record's count is the `u32` at its address;
+// static cells and immediates, tagged in the top byte or with an immortal
+// count, and a last reference go through the record's release), so that
+// the call costs no out-of-line release: `ptrEq` in a traversal
+// (`Expr.replace`) spent 40% of its time there.
 #[ffi(import)]
 fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
     {
         let p = unsafe { *(&a as *const [:T:] as *const usize) };
-        let id = leanrt::origin::addr(p).unwrap_or(p as u64);
         if (p >> 56) == 0 {
             let c = unsafe { *(p as *const u32) };
-            if c > 1 {
+            if c > 1 && c < 0x8000_0000 {
                 unsafe { *(p as *mut u32) = c - 1 };
                 ::std::mem::forget(a);
             }
         }
-        id
+        p as u64
     }
 }];
 
@@ -3518,18 +3086,6 @@ fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
 // after the call. Returns 0.
 #[ffi(import)]
 fn l2r_release_after<T>(x : T) -> u64 [{ { drop(x); 0 } }];
-
-// Conversion origins (`leanrt::origin`): `l2r_origin_note(src, dst, code)`
-// records that `dst` was converted from `src` (whose representation
-// lean2rr numbers `code`) and returns `dst`; `l2r_origin_back(x, code)`
-// says whether `x` was converted from a value of representation `code`,
-// which `l2r_origin_take(x)` then gives back.
-#[ffi(import)]
-fn l2r_origin_note<S, D>(src : S, dst : D, code : u64) -> D [{ leanrt::origin::note::<[:S:], [:D:]>(src, dst, code) }];
-#[ffi(import)]
-fn l2r_origin_back<S>(x : S, code : u64) -> bool [{ leanrt::origin::back::<[:S:]>(x, code) }];
-#[ffi(import)]
-fn l2r_origin_take<S, D>(x : S) -> D [{ leanrt::origin::take::<[:S:], [:D:]>(x) }];
 
 // A shared record or array used at another Reussir type with the same
 // layout (lean2rr's `retypable`: instantiations differing only in phantom
@@ -3567,15 +3123,15 @@ fn lean_system_platform_osx(u : L2RUnit) -> bool { false }
 fn lean_system_platform_emscripten(u : L2RUnit) -> bool { false }
 fn lean_internal_is_stage0(u : L2RUnit) -> bool { false }
 fn lean_internal_has_llvm_backend(u : L2RUnit) -> bool { false }
-fn lean_version_get_major(u : L2RUnit) -> Nat { Nat::Small{4} }
-fn lean_version_get_minor(u : L2RUnit) -> Nat { Nat::Small{33} }
-fn lean_version_get_patch(u : L2RUnit) -> Nat { Nat::Small{0} }
+fn lean_version_get_major(u : L2RUnit) -> Nat { l2r_nat_small(4) }
+fn lean_version_get_minor(u : L2RUnit) -> Nat { l2r_nat_small(33) }
+fn lean_version_get_patch(u : L2RUnit) -> Nat { l2r_nat_small(0) }
 fn lean_version_get_is_release(u : L2RUnit) -> bool { true }
 fn lean_version_get_special_desc(u : L2RUnit) -> LStr { lean_mk_string("") }
 fn lean_system_platform_target(u : L2RUnit) -> LStr { lean_mk_string("aarch64-unknown-linux-gnu") }
 
 #[ffi(import)]
-fn l2r_hardware_concurrency() -> u32 [{ std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1) }];
+fn l2r_hardware_concurrency() -> u32 [{ leanrt::sched::hardware_concurrency() }];
 fn lean_internal_get_hardware_concurrency(u : L2RUnit) -> u32 { l2r_hardware_concurrency() }
 
 // ===========================================================================
@@ -3586,9 +3142,9 @@ fn lean_internal_get_hardware_concurrency(u : L2RUnit) -> u32 { l2r_hardware_con
 // returning the payload; lean2rr wraps it in `EST.Out.ok`/`ST.Out`
 // (`wrapIOResult`).
 
-fn l2r_io_mono_ms_now() -> Nat { Nat::Small{l2r_io_mono_ms_now_u64()} }
-fn l2r_io_mono_nanos_now() -> Nat { Nat::Small{l2r_io_mono_nanos_now_u64()} }
-fn l2r_io_get_num_heartbeats() -> Nat { Nat::Small{0} }
+fn l2r_io_mono_ms_now() -> Nat { l2r_nat_of_u64(l2r_io_mono_ms_now_u64()) }
+fn l2r_io_mono_nanos_now() -> Nat { l2r_nat_of_u64(l2r_io_mono_nanos_now_u64()) }
+fn l2r_io_get_num_heartbeats() -> Nat { l2r_nat_small(0) }
 fn l2r_io_check_canceled() -> bool { l2r_task_check_canceled() }
 fn l2r_io_get_tid() -> u64 { l2r_io_get_tid_u64() }
 
@@ -3603,20 +3159,10 @@ fn l2r_io_mono_nanos_now_u64() -> u64 [{ leanrt::io::mono_nanos() }];
 
 // The system clock in nanoseconds since the Unix epoch (`lean_shim_realtime_nanos`:
 // lean2rr's shim builds `Std.Time.Timestamp.now` from it).
-fn l2r_shim_realtime_nanos() -> Int { Int::Small{l2r_shim_realtime_nanos_i64()} }
+fn l2r_shim_realtime_nanos() -> Int { l2r_int_of_i64(l2r_shim_realtime_nanos_i64()) }
 #[ffi(import)]
 fn l2r_shim_realtime_nanos_i64() -> i64 [{ leanrt::io::realtime_nanos() }];
 
-
-#[ffi(import)]
-fn l2r_io_get_random_bytes(n : u64) -> RVec<u8> [{
-    {
-        use std::io::Read;
-        let mut buf = vec![0u8; n as usize];
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") { let _r = f.read_exact(&mut buf); }
-        leanrt::array::bytes_of_vec(buf)
-    }
-}];
 
 #[ffi(import)]
 fn l2r_io_process_get_pid() -> u32 [{ std::process::id() }];
@@ -3653,6 +3199,10 @@ fn l2r_io_error_with<E>(mk : u32 -> (u32 -> (LStr -> (LStr -> E)))) -> E {
 fn l2r_io_finish<T, R>(v : T, ok : T -> R, err : u32 -> (u32 -> (LStr -> (LStr -> R)))) -> R {
     if l2r_io_ok() { ok(v) } else { l2r_io_error_with(err) }
 }
+
+// `IO.getRandomBytes n` (an IO error when `/dev/urandom` cannot be read).
+#[ffi(import)]
+fn l2r_fs_get_random_bytes(n : u64) -> RVec<u8> [{ leanrt::array::bytes_of_vec(leanrt::fs::get_random_bytes(n)) }];
 
 // `IO.FS.Handle.mk path mode` (mode = constructor index of `IO.FS.Mode`:
 // read, write, writeNew, readWrite, append).

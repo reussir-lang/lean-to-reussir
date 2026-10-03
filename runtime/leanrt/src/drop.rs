@@ -53,10 +53,81 @@ pub fn defer(p: usize, step: Step) {
 }
 
 /// Run `step` on `p` until it is finished, and everything it pushes; or,
-/// inside a running free, push it.
+/// inside a running free, push it. When the free is over, the dependents of
+/// the promises it resolved are walked (`task::resolve`).
 #[inline(never)]
 pub fn run(p: usize, step: Step) {
     reussir_rt::drop::run_step(p, step);
+    if !active() {
+        crate::task::run_later_walks();
+    }
+}
+
+/// Release `x`, a value a reference or a task cell gave up (the prelude's
+/// `l2r_rc_set`, `l2r_ref_set`, `l2r_lcell_set`), as native `lean_dec`
+/// does. A shared value is only decremented. The last reference to a
+/// record is freed inside a free the runtime starts (`run`): its members go
+/// on the stack of pending work (Reussir's glue releases the first cell of
+/// a free it starts itself in field order), so what it holds is released
+/// in Lean's order, its last field first, and the `sync` dependents of the
+/// promises it drops are walked when that free ends (`task::resolve`),
+/// before the caller goes on, also without Reussir's patch 0040. Other
+/// values are dropped: the runtime's containers free themselves that way,
+/// and the other runtime objects hold no Lean values whose order shows.
+#[inline(always)]
+pub fn release<T>(x: T) {
+    ReleaseValue::release_value(x)
+}
+
+trait ReleaseValue: Sized {
+    fn release_value(self);
+}
+
+impl<T> ReleaseValue for T {
+    #[inline(always)]
+    default fn release_value(self) {
+        drop(self)
+    }
+}
+
+/// A record (`Bridge<Inner>`: a pointer to its cell, whose 32-bit count is
+/// at offset 0, see `ReleaseElems`).
+impl<X> ReleaseValue for reussir_rt::bridge::Bridge<X> {
+    #[inline(always)]
+    fn release_value(self) {
+        if std::mem::size_of::<Self>() != std::mem::size_of::<usize>() {
+            return drop(self);
+        }
+        let p: usize = unsafe { std::mem::transmute_copy(&self) };
+        if cfg!(target_arch = "aarch64") {
+            // An immediate (nonzero top byte, never freed: local patch
+            // 0006) changes nothing; a shared cell is decremented in line.
+            if p >> 56 != 0 {
+                std::mem::forget(self);
+                return;
+            }
+            let c = count(p);
+            if c != 1 {
+                unsafe { *(p as *mut u32) = c.wrapping_sub(1) };
+                std::mem::forget(self);
+                return;
+            }
+        }
+        std::mem::forget(self);
+        free_record::<X>(p);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn free_record<X>(p: usize) {
+    run(p, step_record::<X>);
+}
+
+/// Release the record whose handle is `p` (its `<record>_ffi_release`).
+unsafe fn step_record<X>(p: usize) -> bool {
+    drop(std::mem::transmute_copy::<usize, reussir_rt::bridge::Bridge<X>>(&p));
+    true
 }
 
 #[inline(always)]
@@ -103,11 +174,6 @@ impl<T: Clone> Drop for Vec<T> {
         let p = unsafe { *(self as *const Self as *const usize) };
         let c = count(p);
         if c > 1 {
-            // An array a conversion built is also held by the origin table
-            // (`crate::origin`) until the program drops it.
-            if c == 2 && crate::origin::release_shared(p) {
-                return;
-            }
             unsafe { *(p as *mut u32) = c - 1 };
         } else {
             free_vec::<T>(p);

@@ -83,7 +83,7 @@ def dumpDecls (header : String) (decls : Array (Decl .pure)) : String :=
 def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM String := do
   -- Stage 1: monomorphize from `main`, the entry point's roots and the
   -- startup items (constants, `initialize` actions).
-  let items ← startupItems
+  let items ← startupItems opts.root
   let (rootInsts, st) ← monomorphize (programRoots opts.root items)
   let header := s!"-- root instances: {rootInsts}; instances: {st.decls.size}, extern instances: {st.externs.size}, lcAny type arguments: {st.uniformArgs}\n"
   if stage == "inst" then return dumpDecls header (st.externs ++ st.decls)
@@ -111,11 +111,11 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   -- passes after them see bounded functions), the registry's passes over
   -- the generated functions, and the program text. `L2R_NO_OUTLINE` and
   -- `L2R_NO_INLINE_ANCHORS` turn the two build-time workarounds off, for
-  -- the repros of Reussir bugs 16, 17 and 20 (docs/reussir-bugs/run.sh).
+  -- the repros of Reussir bugs 16, 17 and 20 (reussir-bugs/repros/run.sh).
   let prog := prog.literalTables
   let prog := if (← IO.getEnv "L2R_NO_OUTLINE").isSome then prog else prog.outline
   let prog := if (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome then { prog with anchored := {} } else prog
-  return prog.runRRPasses cfg |>.runPreludePasses cfg |>.render
+  return prog.runRRPasses cfg |>.render
 
 def run (opts : CliOptions) (cfg : PassConfig) (module : Name) : IO UInt32 := do
   let env ← loadEnvironment #[module]

@@ -38,52 +38,50 @@ const SC_PAGESIZE: i32 = 30;
 pub struct Stack {
     base: usize,
     len: usize,
-    guard_slot: usize,
 }
 
-/// Guard pages of the live stacks, `[lo, hi)` pairs (0 when free), read by
-/// the SIGSEGV handler (`rt::segv_handler`), which must not allocate.
-const GUARDS: usize = 4096;
-pub static GUARD_LO: [AtomicUsize; GUARDS] = [const { AtomicUsize::new(0) }; GUARDS];
-pub static GUARD_HI: [AtomicUsize; GUARDS] = [const { AtomicUsize::new(0) }; GUARDS];
-/// The ends of those stacks (their usable part is `[hi, top)`).
-pub static STACK_TOP: [AtomicUsize; GUARDS] = [const { AtomicUsize::new(0) }; GUARDS];
+/// The running context's stack, read by the SIGSEGV handler
+/// (`rt::segv_handler`), which must not allocate: its guard page
+/// `[lo, hi)` and its end (the usable part is `[hi, top)`); all 0 while
+/// the running context is on its thread's own stack (`main`'s). All
+/// contexts run on one thread, so a fault in a context's stack comes from
+/// the running one: the scheduler sets these whenever a context starts
+/// running (`set_running`), however many contexts are alive.
+static RUN_LO: AtomicUsize = AtomicUsize::new(0);
+static RUN_HI: AtomicUsize = AtomicUsize::new(0);
+static RUN_TOP: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether `addr` lies in the guard page of a context's stack.
+/// The running context runs on `stack` (`None`: its thread's own stack).
+pub fn set_running(stack: Option<&Stack>) {
+    let (lo, hi, top) = match stack {
+        Some(st) => (st.base, st.base + page_size(), st.base + st.len),
+        None => (0, 0, 0),
+    };
+    RUN_LO.store(lo, Ordering::Relaxed);
+    RUN_HI.store(hi, Ordering::Relaxed);
+    RUN_TOP.store(top, Ordering::Relaxed);
+}
+
+/// Whether `addr` lies in the guard page of the running context's stack.
 pub fn in_guard(addr: usize) -> bool {
-    for i in 0..GUARDS {
-        let lo = GUARD_LO[i].load(Ordering::Relaxed);
-        if lo != 0 && lo <= addr && addr < GUARD_HI[i].load(Ordering::Relaxed) {
-            return true;
-        }
-    }
-    false
+    let lo = RUN_LO.load(Ordering::Relaxed);
+    lo != 0 && lo <= addr && addr < RUN_HI.load(Ordering::Relaxed)
 }
 
-/// Whether `sp` lies in the usable part of a context's stack.
+/// Whether `sp` lies in the usable part of the running context's stack.
 pub fn within_stack(sp: usize) -> bool {
-    for i in 0..GUARDS {
-        let lo = GUARD_LO[i].load(Ordering::Relaxed);
-        if lo != 0 && GUARD_HI[i].load(Ordering::Relaxed) <= sp && sp < STACK_TOP[i].load(Ordering::Relaxed) {
-            return true;
-        }
-    }
-    false
+    let lo = RUN_LO.load(Ordering::Relaxed);
+    lo != 0 && RUN_HI.load(Ordering::Relaxed) <= sp && sp < RUN_TOP.load(Ordering::Relaxed)
 }
 
 /// Whether a fault at `addr` with the stack pointer at `sp` (in no stack)
-/// is a frame allocated past the end of a context's stack: both below its
-/// guard page, the stack pointer at most `reach` below it (as
+/// is a frame allocated past the end of the running context's stack: both
+/// below its guard page, the stack pointer at most `reach` below it (as
 /// `rt::segv_handler` decides for a thread's own stack).
 pub fn past_end(addr: usize, sp: usize, reach: usize) -> bool {
-    for i in 0..GUARDS {
-        let lo = GUARD_LO[i].load(Ordering::Relaxed);
-        let hi = GUARD_HI[i].load(Ordering::Relaxed);
-        if lo != 0 && addr < hi && sp < hi && hi - sp <= reach {
-            return true;
-        }
-    }
-    false
+    let lo = RUN_LO.load(Ordering::Relaxed);
+    let hi = RUN_HI.load(Ordering::Relaxed);
+    lo != 0 && addr < hi && sp < hi && hi - sp <= reach
 }
 
 fn page_size() -> usize {
@@ -105,17 +103,7 @@ impl Stack {
         }
         let base = p as usize;
         unsafe { mprotect(p, page, PROT_NONE) };
-        let mut guard_slot = usize::MAX;
-        for i in 0..GUARDS {
-            if GUARD_LO[i].load(Ordering::Relaxed) == 0 {
-                GUARD_HI[i].store(base + page, Ordering::Relaxed);
-                STACK_TOP[i].store(base + len, Ordering::Relaxed);
-                GUARD_LO[i].store(base, Ordering::Relaxed);
-                guard_slot = i;
-                break;
-            }
-        }
-        Some(Stack { base, len, guard_slot })
+        Some(Stack { base, len })
     }
 
     /// The initial stack pointer of a context that starts by calling
@@ -141,11 +129,6 @@ impl Stack {
 
 impl Drop for Stack {
     fn drop(&mut self) {
-        if self.guard_slot != usize::MAX {
-            GUARD_LO[self.guard_slot].store(0, Ordering::Relaxed);
-            GUARD_HI[self.guard_slot].store(0, Ordering::Relaxed);
-            STACK_TOP[self.guard_slot].store(0, Ordering::Relaxed);
-        }
         unsafe { munmap(self.base as *mut c_void, self.len) };
     }
 }

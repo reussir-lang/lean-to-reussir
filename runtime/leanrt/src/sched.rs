@@ -149,6 +149,9 @@ struct Sched {
     /// (`effect_slow`): what they do meanwhile happened before it natively,
     /// so their own effect points do not start anything more.
     in_effect: bool,
+    /// When an effect point last polled the event loop's descriptors
+    /// (`effect_slow`).
+    last_poll: Option<Instant>,
 }
 
 static SCHED: Global<Option<Sched>> = Global(UnsafeCell::new(None));
@@ -182,11 +185,12 @@ fn init(s: &mut Option<Sched>) {
         next_thread: 1,
         pool: Vec::new(),
         in_effect: false,
+        last_poll: None,
     });
 }
 
 /// The number of worker threads of Lean's task manager:
-/// `LEAN_NUM_THREADS` (C's `atoi`), or the number of processors.
+/// `LEAN_NUM_THREADS` (C's `atoi`), or the number of online processors.
 fn pool_limit() -> u32 {
     if let Some(v) = std::env::var_os("LEAN_NUM_THREADS") {
         let s = std::os::unix::ffi::OsStrExt::as_bytes(v.as_os_str());
@@ -210,7 +214,18 @@ fn pool_limit() -> u32 {
         let n = if neg { -n } else { n }.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
         return n as i32 as u32;
     }
-    std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1)
+    hardware_concurrency()
+}
+
+/// `std::thread::hardware_concurrency()`, as Lean's C++ runtime calls it:
+/// the number of online processors (`sysconf(_SC_NPROCESSORS_ONLN)`, not
+/// limited by the CPU affinity mask or a cgroup quota), 0 if unknown.
+pub fn hardware_concurrency() -> u32 {
+    extern "C" {
+        fn sysconf(name: i32) -> i64;
+    }
+    const SC_NPROCESSORS_ONLN: i32 = 84;
+    unsafe { sysconf(SC_NPROCESSORS_ONLN) }.max(0) as u32
 }
 
 /// The running context.
@@ -290,8 +305,17 @@ pub fn cur_wait() -> Wait {
 
 /// Block the running context until it is woken (`wake`) for `w`; other
 /// contexts run meanwhile. Returns once it runs again.
+///
+/// The walks a free left to this context (`task::run_later_walks`) run
+/// first. Callers that put the context in a waiter list before calling
+/// this (`sync`, `once::claim`) have run them already: a wake-up by them
+/// would be lost. For the other waits the context is registered here, and
+/// what the walks did may be what it waits for (a promise they resolved):
+/// then it does not wait, and its caller looks again.
 pub fn block(w: Wait) {
-    crate::task::run_later_walks();
+    if crate::task::run_later_walks() && matches!(w, Wait::Cell(_) | Wait::Progress | Wait::FinalRun) {
+        return;
+    }
     let s = sched();
     let c = s.cur;
     {
@@ -436,6 +460,23 @@ pub fn sleeper_due(now: Instant) -> bool {
 /// anything that takes no time (thread wake-ups take microseconds).
 const STALE: Duration = Duration::from_millis(5);
 
+/// How often effect points poll the descriptors and signals the event loop
+/// watches (`effect_slow`): a system call at every output would cost more
+/// than the output, and natively the event loop's thread sees them only
+/// after a wake-up's latency too.
+const POLL_EVERY: Duration = Duration::from_micros(50);
+
+/// Whether an effect point polls the event loop's descriptors now (at most
+/// once per `POLL_EVERY`).
+fn poll_due(now: Instant) -> bool {
+    let s = sched();
+    if s.last_poll.is_some_and(|t| now.saturating_duration_since(t) < POLL_EVERY) {
+        return false;
+    }
+    s.last_poll = Some(now);
+    true
+}
+
 /// An observable effect (output, an exit) of the running context: what
 /// natively would have run by now on other threads goes first: a context
 /// whose sleep has ended, a due timer of the event loop and what its
@@ -482,7 +523,7 @@ fn effect_slow() {
             go = crate::net::has_fired() || go;
         }
         // Descriptors and signals the event loop would have seen by now.
-        if crate::net::poll_now() {
+        if poll_due(now) && crate::net::poll_now() {
             go = true;
         }
         let s = sched();
@@ -573,14 +614,18 @@ fn start_worker(e: u32) {
 }
 
 /// Mark the event loop's context (`net`) able to run: it has events to
-/// deliver.
-pub fn wake_evloop() {
+/// deliver. Not while it waits for something else (blocked inside a `sync`
+/// continuation, natively a libuv callback that blocks): it delivers them
+/// when it is back. Whether it was woken.
+pub fn wake_evloop() -> bool {
     let s = sched();
     if let Some(e) = s.evloop {
         if s.ctxs[e as usize].wait == Wait::Io {
             wake(e);
+            return true;
         }
     }
+    false
 }
 
 /// Start the event loop's context, once (`net` calls this when it starts
@@ -603,6 +648,7 @@ pub fn ensure_evloop() {
 }
 
 extern "C" fn evloop_entry(_: usize) -> ! {
+    note_running_stack();
     loop {
         crate::net::deliver();
         block(Wait::Io);
@@ -617,6 +663,7 @@ extern "C" {
 }
 
 extern "C" fn worker_entry(_: usize) -> ! {
+    note_running_stack();
     let f = unsafe { l2r_task_run_one_c };
     assert!(!f.is_null(), "leanrt: no l2r_task_run_one_c");
     let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(f) };
@@ -761,7 +808,16 @@ fn switch_to(n: CtxId) {
         s.free.push(c);
     }
     unsafe { crate::coro::switch(save, to) };
+    note_running_stack();
     free_zombie();
+}
+
+/// A context starts running (back from a switch, or at its entry): its
+/// stack is the one the stack-overflow handler looks at
+/// (`coro::set_running`).
+fn note_running_stack() {
+    let s = sched();
+    crate::coro::set_running(s.ctxs[s.cur as usize].stack.as_ref());
 }
 
 /// Free the stack of the context that ended last (keeping a few for reuse).

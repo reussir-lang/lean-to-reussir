@@ -62,6 +62,11 @@ structure CodeCtx where
   sm : Option StateMachine := none
   /-- Bodies of the join points in scope. -/
   jpBodies : Std.HashMap FVarId (Code .pure) := {}
+  /-- The join points in scope jumped to once (J1, inlined at their jump). -/
+  jpSingle : FVarIdSet := {}
+  /-- The declarations of the call cycle of the declaration being lowered
+  (`JpScope.loop`). -/
+  loop : NameSet := {}
   /-- Variables that a hook bound again, in the current alternative, to a
   value of its own equal to theirs (Opt/NullaryScrutinee): other hooks must
   not bind them again there. -/
@@ -74,6 +79,13 @@ structure CodeCtx where
   of their type instead of themselves (Opt/FreshRebuild: the constructor
   rebuilt from the alternative's fields). Plain: none. -/
   rebuild : Std.HashMap FVarId (RR.Expr × RR.Ty) := {}
+  /-- The variables that the outlined join points in scope (J3, J4) capture,
+  with their types. A jump to one passes them by these names, also where
+  `vars` names the same LCNF variable differently (a hook or a `cases` bound
+  it again in an alternative: Opt/NullaryScrutinee, a converted scrutinee,
+  Opt/LazyFields); the names stay in scope, so a join point outlined there
+  that jumps to one captures them too. -/
+  captured : Std.HashMap String RR.Ty := {}
   /-- The state optional passes keep in the context, by the pass's name
   (`CodeCtx.getExt?`, `CodeCtx.setExt`). -/
   ext : NameMap Dynamic := {}

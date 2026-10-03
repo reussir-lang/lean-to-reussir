@@ -329,8 +329,9 @@ co. replace the current thread's). A task runs, natively, on a worker thread,
 and `main` on a thread of its own, apart from the module initializers: so a
 task starts with empty stream cells (rebuilt as the process's streams on
 first use) and the caller's are put back when it ends, releasing the task's
-(`leanrt::once::push_context`); `main` starts with empty cells too. Without
-any use of the standard streams they do nothing. -/
+(`leanrt::once::push_context`); `main` starts with empty cells too when it
+runs on a thread of its own (not with `LEAN_MAIN_USE_THREAD=0`, see
+`lowerEntry`). Without any use of the standard streams they do nothing. -/
 def stdContextFns : LowerM (Array RR.Item) := do
   let u64 := RR.Ty.named "u64"
   let zero (x : String) : RR.Block := ⟨#[(x, some u64, .atom "0")], .var x⟩
@@ -447,18 +448,29 @@ def refBoxOpFn (op : String) (a : RR.Ty) : LowerM String := do
     modify fun s => { s with refBoxOps := s.refBoxOps.push (op, a) }
   return if op == "addr" then "l2r_refbox_addr" else s!"l2r_refbox_{op}_{a.enc}"
 
+/-- The prelude function that stores a value in a reference cell holding
+values of Reussir type `e`: `l2r_rc_set`, which releases the old value
+after storing the new one, as `lean_st_ref_set` does (code the release
+runs, the `sync` dependents of a promise it drops, sees the new value),
+through an FFI call that Reussir keeps after the store; `l2r_rc_put`
+(released in place) for a value that cannot cross the FFI boundary, a unit
+or enumeration value, whose release runs nothing. (A `[value]` structure
+with counted members is stored boxed, `.boxed`, in a shared record that
+crosses it.) -/
+def refSetFn (e : RR.Ty) : LowerM String := do
+  return if ← isBoundaryTy e then "l2r_rc_set" else "l2r_rc_put"
+
 /-- Reference operation `op` on a reference `r` whose cell stores elements
 of type `e` as `k`, for an operation at element type `a` (values converted
 between the two; `none` if they cannot be): `get` (a copy: the cell keeps
 its reference), `take` (the value moves out and the cell gets the
 placeholder, as `lean_st_ref_take` stores `box(0)`: Lean's `modify` is
 take-then-set, so a value only the cell holds stays unshared and is updated
-in place), `set` (`u64` result), `swap`. -/
+in place), `set` (`u64` result; `refSetFn`), `swap`. -/
 def refCellOp (op : String) (r : RR.Expr) (e : RR.Ty) (k : RefKind) (a : RR.Ty) (v : Option RR.Expr) :
     LowerM (Option RR.Expr) := do
   let cell := RR.Expr.field r 0
   let toA (x : RR.Expr) : LowerM (Option RR.Expr) := tryCoerce x e a
-  let fam := if k == .int then "intref" else "natref"
   let v' ← match v with
     | some v => tryCoerce v a e
     | none => pure none
@@ -466,24 +478,21 @@ def refCellOp (op : String) (r : RR.Expr) (e : RR.Ty) (k : RefKind) (a : RR.Ty) 
   match k, op with
   | .direct, "get" => toA (.call "l2r_rc_get" #[e] #[cell])
   | .direct, "take" => toA (.call "l2r_rc_swap" #[e] #[cell, ← zeroValue e])
-  | .direct, "set" => return some (.call "l2r_rc_set" #[e] #[cell, v'.get!])
+  | .direct, "set" => return some (.call (← refSetFn e) #[e] #[cell, v'.get!])
   | .direct, "swap" => toA (.call "l2r_rc_swap" #[e] #[cell, v'.get!])
   | .boxed bn, "get" => toA (.field (.call "l2r_rc_get" #[.named bn] #[cell]) 0)
   | .boxed bn, "take" => toA (.field (.call "l2r_rc_swap" #[.named bn] #[cell, .ctor bn none #[← zeroValue e]]) 0)
   | .boxed bn, "set" => return some (.call "l2r_rc_set" #[.named bn] #[cell, .ctor bn none #[v'.get!]])
   | .boxed bn, "swap" => toA (.field (.call "l2r_rc_swap" #[.named bn] #[cell, .ctor bn none #[v'.get!]]) 0)
-  | _, "get" => toA (.call s!"l2r_{fam}_get" #[] #[r])
-  | _, "take" => toA (.call s!"l2r_{fam}_swap" #[] #[r, ← zeroValue e])
-  | _, "set" => return some (.call s!"l2r_{fam}_set" #[] #[r, v'.get!])
-  | _, "swap" => toA (.call s!"l2r_{fam}_swap" #[] #[r, v'.get!])
   | _, _ => return none
 
 /-- Glue for `ST.Ref` operations (translation plan §5.1). A reference whose
 contents have Reussir type `e` is a generated record holding a Reussir
-cell, `L2RRef_N(Cell<e>)` (`refType`): one allocation per reference, the
-value stored in its own representation. `ST.Prim.mkRef` at element type `α`
-creates one at `⟦α⟧` (`Box` for uniform code, at `α = lcAny`). Lean's mono
-phase types every reference `lcAny`, so a reference travels in a `Box`
+cell, `L2RRefN(Cell<e>)` (`refType`): two allocations per reference (the
+record and the cell), the value stored in its own representation.
+`ST.Prim.mkRef` at element type `α` creates one at `⟦α⟧` (`Box` for
+uniform code, at `α = lcAny`). Lean's mono phase types every reference
+`lcAny`, so a reference travels in a `Box`
 except where Stage 3 typed its binders (`typedRef`, §4). An operation on a
 typed handle accesses its cell directly, converting between the cell's
 element type and the operation's (they differ when uniform code works on a

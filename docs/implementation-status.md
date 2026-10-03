@@ -4,7 +4,10 @@ Status as of 2026-10-02 (branch `dev`). This is a plain-language overview
 for someone who knows Rust but not Lean. The full rules are in
 [`translation-plan.md`](translation-plan.md); the runtime is described in
 [`../runtime/README.md`](../runtime/README.md); the Reussir bugs met on the
-way are in [`reussir-bugs.md`](reussir-bugs.md).
+way are in [`../reussir-bugs/`](../reussir-bugs/README.md). The implementation's
+tricks and special cases, each with its reason, its place in the code and
+what would break without it, are cataloged in
+[`implementation/`](implementation/README.md).
 
 ## In one paragraph
 
@@ -69,62 +72,62 @@ Think of each Lean type as becoming a Rust type.
 
 | Lean | Reussir / runtime | Notes |
 |---|---|---|
-| `Nat` (natural numbers, unbounded) | `enum Nat { Small(u64), Big(LBig) }`, a value type (no allocation) | see below |
-| `Int` (unbounded integers) | `enum Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
+| `Nat` (natural numbers, unbounded) | `Nat`, one machine word, as natively | see below |
+| `Int` (unbounded integers) | `Int`, one machine word, as natively | small in the 32-bit range |
 | `UInt8/16/32/64`, `USize` | `u8/u16/u32/u64`, `u64` | 64-bit targets only |
 | `Int8…Int64`, `ISize` | the same unsigned words, signed operations on the bit pattern | as Lean's C runtime does |
 | `Float`, `Float32` | `f64`, `f32` | printing follows Lean's exactly |
 | `Char` | `u32` | |
 | `Bool` | `bool` | |
 
-**How `Nat` works.** A `Nat` is a two-word value: a tag and either a
-machine word (`Small`, any value below 2^64) or a handle to a big number
-(`Big`, only for values ≥ 2^64). Arithmetic on two small values is inline
-code: `a + b` is an add with an overflow check, and only on overflow does
-it call the runtime to build a big number. Big numbers use GMP (the same
-library Lean uses), stored as a reference-counted sign and limb vector,
-updated in place when unique. `Nat.repr` (printing) of big numbers uses
-GMP too. Lean's semantics are kept exactly: subtraction stops at 0,
-division by 0 gives 0, and so on.
+**How `Nat` works.** A `Nat` is one machine word, as in native Lean: a
+small value `n` (below 2^63) is stored in the word itself as `2n+1` (an
+odd number), and a bigger one is a pointer (an even number) to a
+reference-counted big number. Arithmetic on two small values is inline
+code: `a + b` is a test of both low bits, an add and an overflow check;
+only a big operand or an overflow calls the runtime. Big numbers use GMP
+(the same library Lean uses), stored as a reference-counted sign and limb
+vector, updated in place when unique. `Nat.repr` (printing) of big
+numbers uses GMP too. Lean's semantics are kept exactly: subtraction
+stops at 0, division by 0 gives 0, and so on.
+
+Reussir generates the reference counting itself, and normally treats every
+handle as a pointer whose count it increments when the value is copied. A
+small `Nat` is not a pointer, so lean2rr declares `Nat` and `Int` as
+*tagged* opaque handles, a small local Reussir extension (patch 0050):
+Reussir counts such a handle only when its low bit is clear, exactly as
+Lean's C runtime tests the bit before every count update. Copying or
+dropping a small `Nat` is a bit test; it is never allocated.
+
+`Int` works the same way, with Lean's encoding too: a value in the 32-bit
+range is stored in the word, any other is a big number.
+
+The encoding is exactly Lean's: a small value is `lean_box(n)`, and a big
+number is laid out like Lean's own (`lean_mpz_object`: the object header
+with its reference count, tagged `LeanMPZ`, then GMP's `mpz_t`, whose
+limbs GMP allocates). C code written against `lean.h` could take these
+words as they are, but calling a program's own C code is not supported
+(below).
 
 Compared with native Lean:
-- native Lean stores a small `Nat` as one tagged word (`2n+1`) and only up
-  to 2^63; lean2rr keeps the number in a plain register next to its tag (no
-  tagging/untagging per operation) and stays small up to 2^64 (values in
-  [2^63, 2^64) are heap objects natively);
-- `Int` is small in the whole `i64` range here; natively an `Int` outside
-  the 32-bit range is a heap-allocated big number each time it is computed;
-- the cost: a `Nat` field in a record takes 16 bytes (natively 8), and a
-  big number is two allocations (natively one): the bignum benchmark runs
-  at 0.96× native time but 1.33× its memory;
-- `Array Nat` and `Array Int` store one word per element like Lean (small
-  values inline, big ones as handles), not 16 bytes;
+- a `Nat` or `Int` field in a record takes 8 bytes, as natively;
+- a big number has the same layout and the same two allocations (the
+  object and GMP's limbs);
 - in the rare places where a `Nat` has to go through the generic `Box`
   (code whose types cannot be made concrete, below), boxing it allocates;
   natively a small `Nat` is never allocated.
 
-**Why not Lean's own representation?** Native Lean puts a small `Nat` in
-the same machine word as a pointer (`2n+1`, odd = number, even = pointer
-to a heap object), and its C runtime tests that bit before every
-reference-count update. Reussir generates the reference counting itself
-and treats every heap handle as a real pointer: copying one increments the
-count at that address. A tagged number handed to Reussir code would be
-"incremented" as if it were an address. Reussir has such immediates only
-for its own field-less constructors. So Lean's tagged words are used only
-where Reussir code never sees them: inside `Array Nat`/`Array Int`, which
-the runtime manages. More generally, lean2rr translates to typed Reussir
-on purpose instead of copying Lean's uniform "everything is a boxed
-object" model: unboxed record fields, value enums that never allocate,
-unboxed `UInt64`/`Float` arrays and Reussir's in-place reuse (which needs
-exact types and sizes) are where its speed comes from. One-word `Nat`
-fields would need Reussir to support small integers as immediates (a
-feature request for Reussir, not a bug fix).
+Peak memory (max RSS, 2026-10-03, against the native build): `rbmap`
+(a red-black tree with `Nat` keys and values) 0.84× (with the earlier
+two-word `Nat`: 1.00×); an array of 2 million records with four `Nat`
+fields and a list of `Nat` pairs 0.80× (1.26×); `bignum` about 1.1×
+(1.2–1.3×; a few MB, noisy).
 
 ### Text, arrays, references
 
 | Lean | Representation | Notes |
 |---|---|---|
-| `String` | runtime `LStr`: reference-counted UTF-8 bytes plus the character count | copy-on-write: modified in place when unique, like Lean |
+| `String` | runtime `LStr`: one block like Lean's string object (reference count, byte size, capacity, character count, then the UTF-8 bytes) | copy-on-write: modified in place when unique, like Lean |
 | `Array α` | runtime vector of `α`'s storage type | in place when unique; enumerations stored as small indices; non-shareable values wrapped in a one-field box (Lean boxes elements too) |
 | `ByteArray`, `FloatArray` | `Vec<u8>`, `Vec<f64>` | |
 | `IO.Ref α` / `ST.Ref` | a shared mutable cell | mutations seen through every alias, as in Lean |
@@ -162,9 +165,11 @@ functions are direct calls; tail calls become loops.
 ### Polymorphic code that cannot be made concrete
 
 Monomorphization makes almost everything concrete. What stays generic
-(polymorphic recursion such as a monad transformer applied to itself,
-existential types, values stored in `Dynamic`) uses a uniform type `Box`:
-an enum with one variant per concrete type the program ever boxes.
+(polymorphic recursion such as a monad transformer applied to itself, or
+an unsafe inductive holding itself at a larger type, `Nest (α × α)` in
+`Nest α`; existential types; values stored in `Dynamic`) uses a uniform
+type `Box`: an enum with one variant per concrete type the program ever
+boxes.
 Converting between a concrete and the uniform representation is generated
 code, element by element for arrays and lists.
 
@@ -237,7 +242,7 @@ fn l_insert___l2r_0_(a347 : T_Tree_346, a348 : Nat) -> T_Tree_346 {
 
 fn l_sum___l2r_0_(a372 : T_Tree_346) -> Nat {
     match a372 {
-        T_Tree_346::c_leaf => { Nat::Small{0} },
+        T_Tree_346::c_leaf => { l2r_nat_small(0) },
         T_Tree_346::c_node(f374, f375, f376) => {
             let x377 : Nat = l_sum___l2r_0_(f374);
             let x378 : Nat = lean_nat_add(x377, f375);    // inline add, overflow → big number
@@ -269,7 +274,9 @@ exceptions listed further down:
 - **All of the language** (it arrives already compiled by Lean).
 - **Program structure:** `main` with or without arguments and exit code,
   module initializers and `initialize` declarations (run in Lean's order,
-  taken from what the `.olean` records), `IO.initializing`, top-level
+  taken from what the `.olean` records; under the module system, `meta`
+  declarations and `meta import`s run only where natively they do),
+  `IO.initializing`, top-level
   constants computed once on first use, `@[extern]`/`@[export]` functions
   implemented in Lean, `@[implemented_by]`.
 - **Numbers and data:** `Nat`/`Int` of any size, fixed-width integers,
@@ -315,8 +322,12 @@ structure (a long list, a deep tree, nested arrays) uses a stack of
 pending work instead of recursion, as Lean does, so it never overflows the
 stack; resources inside (file handles) are closed in Lean's order. Memory
 use is usually at or below native (Reussir's records and reuse are
-tighter), except for the `Nat` field size above and some string and array
-headers.
+tighter), except for generic arrays: an
+`Array α` other than `Array Nat`/`Int`, `ByteArray` or `FloatArray` is a
+counted box plus a separate element buffer (8 bytes and one allocation more
+than Lean's single array object). Strings and `Array Nat`/`Array Int` are
+single blocks with Lean's own header sizes (six million three-element
+`Array Nat` rows: 328 MB, native 330 MB).
 
 ## What is not supported, or differs from native
 
@@ -327,10 +338,15 @@ with examples, is §10 of the translation plan.
 
 - **No parallelism** (see "How tasks run"). Output that depends on timing
   races between tasks can come out in another order (natively a race).
-- **Raw addresses:** casting an object to a number (`unsafeCast` to read an
-  address) gives a deterministic stand-in instead of a real address; the
-  parts of a value converted between representations are new objects for
-  `ptrEq`.
+- **Pointer identity and raw addresses** are not preserved: `ptrAddrUnsafe`
+  answers the address of the value's own cell, or a word computed from a
+  scalar value (`UInt64` and `Float` their bits), so `ptrEq`,
+  `ptrEqList` and `withPtrAddr` may answer otherwise than natively (a
+  value converted between representations is a new object, not `ptrEq` to
+  its original), but `ptrEq` answering `true` still means equal values,
+  and `IO.Ref.ptrEq` is exact. Casting an object to a number
+  (`unsafeCast` to read an address) gives a deterministic stand-in
+  instead of a real address.
 - **Startup order** of a few constants Lean compiled without recording an
   order (members of one `mutual` block that do not use each other, some
   macro-generated names) is chosen by lean2rr; visible only if their
@@ -342,9 +358,16 @@ with examples, is §10 of the translation plan.
   natively.
 - **Stubs:** `IO.getNumHeartbeats` is 0, `isExclusiveUnsafe` answers
   `false`, `shareCommon` shares nothing (and `ShareCommon.Object.eq` holds
-  only for the same object), a panic's backtrace line says the trace is
+  at most for the same object, by address), a panic's backtrace line says the trace is
   unavailable; the Windows-only time zone functions fail as they do
   natively on other systems.
+- **A program's own C code is not supported.** A program that implements
+  some of its own `@[extern]` declarations in C (built by Lake) fails at
+  the rrc build with an unknown function: lean2rr links no C code of the
+  program. The targets for now are programs that use only `Init` and
+  `Std`. The work on calling a program's C (branches `ffi-c` and
+  `lean-externs`) is parked, not merged; where lean2rr's own layouts and
+  Lean's object layouts conflict, lean2rr's win.
 - **`import Lean` programs** (metaprogramming: the elaborator, the kernel,
   the code generator): the `Lean` library declares 196 more C functions,
   and those implemented in Lean's C++ are not available: expression and
@@ -365,7 +388,8 @@ Measured on this machine (aarch64, 20 cores, shared with other jobs: load
 alternately, pinned to the least-loaded fast core; best of 5 (classic) or
 3 (Reussir suite); time ratio = lean2rr time / native time (below 1 =
 faster than native). Every run's output was checked against native.
-`dev` 9f5b642, Reussir `l2r-local` with the ten local patches.
+`dev` 9f5b642, Reussir `l2r-local` at `ef0235b9` (the local patches up to
+0015).
 
 **Classic corpus** (`tests/classic`, largest size):
 
@@ -443,13 +467,12 @@ soundness.
 | `split-map-loops` | an `Array.map` that changes the element representation writes a new array instead of going through `Box` |
 | `placeholder-cache` | Lean's placeholder values built once |
 | `float-lits` | float literals computed at compile time |
-| `cheap-consts` | constants made of small literals recomputed instead of cached |
+| `cheap-consts` | constants made of small literals (one-word `Nat`/`Int` values only) recomputed instead of cached |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code |
 | `jp-sink`, `jp-small` | join points moved to where they are used; small ones duplicated |
-| `state-machines` | loops through join points entered without allocation |
+| `state-machines` | loops through join points: entering the loop and every jump inside it allocate nothing |
 | `lazy-fields`, `nullary-scrutinee`, `sink-proj` | shapes that let Reussir reuse memory cells |
-| `fresh-rebuild` | in programs that never compare objects by address, the error arm of a monadic bind rebuilds its result, so Reussir reuses the cell on the success path |
-| `origin-free-reads` | in programs that never convert an array between representations, array reads skip a bookkeeping check |
+| `fresh-rebuild` | the error arm of a monadic bind rebuilds its freshly built result, so Reussir reuses the cell on the success path |
 
 Parts that look like optimizations but are required (each with its reason
 in the registry): the startup chain cut into chunks, loop state machines,
@@ -460,29 +483,58 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches
-(branch `l2r-local` of the checkout in `./reussir`; the patches are in
-[`../reussir-patches/`](../reussir-patches/), each explained in depth in
-[`../reussir-patches/details/`](../reussir-patches/details/README.md)).
-They are local only, never submitted upstream, and each passed adversarial
-review before it was applied. An independent audit then checked whether
-each problem is really a Reussir bug:
+(branch `l2r-local` of the checkout in `./reussir`, head `cc8e5aa5`:
+Reussir `ef922049` plus 35 patches; the patches are in
+[`../reussir-bugs/patches/`](../reussir-bugs/patches/), each explained in
+depth in the file of its bug, indexed in
+[`../reussir-bugs/README.md`](../reussir-bugs/README.md)).
+They are local only, never submitted upstream, and each is reviewed
+adversarially.
+An independent audit checked whether each problem is really a Reussir
+bug. Of the 33 documented problems, 30 are patched (33 patches) and 3 are
+documented only; two more patches add features lean2rr needs:
 
-- **Real bugs fixed:** wrong values after in-place reuse of a structure
-  cell (bug 2), compiler crashes (4, 5), use-after-free (9, 14), the
-  parser mixing up subtrees on very large files (12, a bug in Reussir's
-  parser library `cstree`).
+- **Real bugs fixed (21 patches):** wrong values after in-place reuse of a
+  structure or variant cell (bug 2), `[value]` enum bytes lost (1), a
+  layout mismatch that overflowed cells (8), compiler crashes (4, 5, 31),
+  use-after-free (9, 14), the parser mixing up subtrees on very large
+  files (12, in Reussir's parser library `cstree`), programs that did not
+  compile (15, 19), wrong code after an LLVM assumption undid a pointer
+  launder (26) and from a uniqueness analysis that proved a shared value
+  unique (28), a texture placeholder dropped (21), non-reproducible builds
+  (24), MLIR dumps that did not parse back (29), MLIR types whose trailing
+  text was silently dropped (33), Reussir's own build (18), and build time
+  made quadratic by Reussir's own code (10, 11b, 23).
 - **A real bug with a flag workaround:** a static cell freed after 2^32
   references (6). Another nullary-constructor encoding avoids it; the patch
   keeps the default encoding for speed.
+- **Build-time costs with a small fix (6 patches):** interprocedural SCCP
+  (11), reuse across calls in deep matches (16), a straight-line `Nat`
+  function (17), the inliner on lean2rr's conversion code (20), wildcard
+  arms over wide enums (22), the call lowering's symbol lookups (30).
 - **An optimization, not a bug:** token reuse picking a cell that never
   frees (7). It stays because the use-after-free fix (9) builds on it.
 - **A missing feature, implemented locally:** freeing long or deep
-  structures without recursion, in Lean's order (13, three patches);
-  lean2rr's runtime needs it.
+  structures without recursion, in Lean's order (13, three patches;
+  lean2rr's runtime needs it), and the same for a member behind
+  `Nullable` (27).
+- **Local additions (no bug):** a hook at the end of a drain that lean2rr's
+  runtime uses for promises released inside a free (0040), and opaque
+  handles that may be a tagged number instead of a pointer (0050), so that
+  `Nat` and `Int` are one word with no allocation for small values
+  (lean2rr's prelude needs it).
+- **Documented only:** Rust allocations on mimalloc's aligned path
+  (3, intended), and two costs whose fix would be a redesign: the inline
+  expansion of copies of `[value]` records shared in a DAG (25) and the
+  size of `--emit mlir` dumps (32).
 
-All 20 Reussir problems met so far are documented with a reproducer,
+Every Reussir problem met so far is documented with a reproducer,
 including those lean2rr works around and those the audit classified as
-intended behaviour or build costs, in [`reussir-bugs.md`](reussir-bugs.md).
+intended behaviour or build costs, in
+[`../reussir-bugs/`](../reussir-bugs/README.md), whose status table also
+shows which patches are applied. lean2rr keeps its workarounds, so that it
+also works with an unpatched Reussir (except that its runtime needs patch
+0014).
 Two parts of Reussir that its author offered (LLVM coroutine bindings,
 dynamic-extent arrays) are not needed: lean2rr's tasks need stackful
 contexts, which its runtime has, and Lean arrays are growable, which
@@ -490,10 +542,10 @@ dynamic-extent arrays are not.
 
 ## Possible future work
 
-- `Nat` fields as one tagged word (as native Lean) instead of 16 bytes,
-  for memory-heavy programs.
 - Borrowed parameters (needs Reussir support) for code that walks shared
   data.
 - Real parallelism for tasks (the scheduler is single-threaded by design).
 - The C++-implemented parts of the `Lean` library, for metaprogramming
   programs.
+- Calling a program's own C code (the parked branches `ffi-c` and
+  `lean-externs`).

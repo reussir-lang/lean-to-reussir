@@ -1,0 +1,91 @@
+From 1765784110e70f7ad0f77a58eaf64c83c2b1cb10 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Fri, 2 Oct 2026 15:44:37 -0400
+Subject: [PATCH] l2r-local: bug 21: keep an unterminated `[:` in a polymorphic
+ FFI texture as written
+
+`monomorphize` (CompilePolymorphicFFI) substitutes `[:Name:]` placeholders
+in a texture's Rust body. On a `[:` it moves the cursor past it and looks
+for `:]`; when the body ends first, it wrote only the text after the `[:`,
+so the two characters were lost (a Rust byte string `b"a[:b"` became
+`b"ab"`). `substitute_placeholders` (crates/reussir-core/src/full/ffi.rs)
+keeps them. Write the pending `[:` before the rest of the body, as it does.
+
+Found by lean2rr: its string literal table is a texture body, and a Lean
+literal containing `[:` without a later `:]` printed without them.
+Test: tests/integration/frontend/ffi_unterminated_placeholder_e2e.
+---
+ .../CompilePolymorphicFFI.cpp                 |  5 +++++
+ .../ffi_unterminated_placeholder_e2e.c        | 14 ++++++++++++
+ .../ffi_unterminated_placeholder_e2e.rr       | 22 +++++++++++++++++++
+ 3 files changed, 41 insertions(+)
+ create mode 100644 tests/integration/frontend/ffi_unterminated_placeholder_e2e.c
+ create mode 100644 tests/integration/frontend/ffi_unterminated_placeholder_e2e.rr
+
+diff --git a/lib/Conversion/CompilePolymorphicFFI/CompilePolymorphicFFI.cpp b/lib/Conversion/CompilePolymorphicFFI/CompilePolymorphicFFI.cpp
+index 3b5040ae..ca8bdcea 100644
+--- a/lib/Conversion/CompilePolymorphicFFI/CompilePolymorphicFFI.cpp
++++ b/lib/Conversion/CompilePolymorphicFFI/CompilePolymorphicFFI.cpp
+@@ -181,6 +181,11 @@ static std::string monomorphize(mlir::ModuleOp moduleOp, ReussirPolyFFIOp op) {
+       }
+     }
+   }
++  // A `[:` without a closing `:]` is not a placeholder: keep it as written
++  // (as `substitute_placeholders` in crates/reussir-core/src/full/ffi.rs
++  // does), instead of dropping it with the text that follows.
++  if (inSubstitution)
++    os << SUBSTART;
+   os << text.substr(cursor);
+   return buffer;
+ }
+diff --git a/tests/integration/frontend/ffi_unterminated_placeholder_e2e.c b/tests/integration/frontend/ffi_unterminated_placeholder_e2e.c
+new file mode 100644
+index 00000000..916cc64d
+--- /dev/null
++++ b/tests/integration/frontend/ffi_unterminated_placeholder_e2e.c
+@@ -0,0 +1,14 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for ffi_unterminated_placeholder_e2e.rr: 4 * 100 + 43.
++
++extern unsigned long long reussir_main(void);
++
++int main(void) { return reussir_main() == 443 ? 0 : 1; }
+diff --git a/tests/integration/frontend/ffi_unterminated_placeholder_e2e.rr b/tests/integration/frontend/ffi_unterminated_placeholder_e2e.rr
+new file mode 100644
+index 00000000..e276b728
+--- /dev/null
++++ b/tests/integration/frontend/ffi_unterminated_placeholder_e2e.rr
+@@ -0,0 +1,22 @@
++// A texture body may contain `[:` that does not start a placeholder (a Rust
++// byte string such as `b"a[:b"`, or a slice pattern). Without a closing `:]`
++// it must reach rustc as written: `[:` and everything after it.
++
++// UNSUPPORTED: darwin
++
++// RUN: %rrc %s -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/ffi_unterminated_placeholder_e2e.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++
++#[ffi(import)]
++fn unterminated_len() -> u64 [{ b"a[:b".len() as u64 }];
++
++#[ffi(import)]
++fn terminated_later_len() -> u64 [{ { let s: &[u8] = b"x[:y"; let t: &[u8] = b"z:]"; (s.len() * 10 + t.len()) as u64 } }];
++
++pub fn main() -> u64 {
++    // 4, and 4 * 10 + 3 = 43 (an unknown `[:…:]` is kept as written).
++    unterminated_len() * 100 + terminated_later_len()
++}
++
++extern "C" trampoline "reussir_main" = main;
+-- 
+2.43.0
+

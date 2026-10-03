@@ -1,0 +1,414 @@
+From 5e0273b2ab732a9906fbea8ba5c60abe71b5e22c Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 3 Oct 2026 00:34:57 -0400
+Subject: [PATCH] l2r-local: bug 11b: look up drop and acquire glue in symbol
+ tables built once
+
+`createDtorIfNotExists` and `emitOwnershipAcquisitionFuncIfNotExists`
+(lib/IR/ReussirOps.cpp) built a new `mlir::SymbolTable` of the whole
+module on every call, to look up the glue function of a record type, and
+the acquire/drop expansion calls them for every `ref.drop`/`ref.acquire`
+of a named record it outlines: time quadratic in the size of the module.
+Found by building the Std.Http program of bug 11 once its SCCP was fixed:
+the second acquire/drop expansion ran for more than 45 minutes, 90% of the
+time in `SymbolTable::SymbolTable` (perf).
+
+Give both helpers an optional `mlir::SymbolTableCollection`, whose table
+they look up and add the functions they create to (the drop glue, the
+drain declaration, the acquire glue); the acquire/drop expansion pass
+builds one collection per run and passes it through its patterns. The
+outlined acquire glue of a record creates, while its body is built, the
+glue of its named [value] members (bug 19): `emitOwnershipAcquisition`
+passes the collection on to that creation too, or the member's glue would
+be missing from the table and a later lookup would define it a second
+time ("redefinition of symbol"). The other callers keep building a table
+per call. The functions found and created are the same.
+
+With this and the SCCP budget, the Std.Http program builds to an object
+(rrc, loaded machine): 26 minutes of MLIR passes, the second acquire/drop
+expansion 84 s.
+
+Test: tests/integration/frontend/cell_value_record_glue_order (a Cell<Pair>
+read before a Cell<Quad>; by the adversarial review, RV8C-01).
+---
+ .../Reussir/Conversion/AcquireDropExpansion.h |  6 ++-
+ include/Reussir/IR/ReussirOps.h               | 20 ++++++---
+ .../AcquireDropExpansion.cpp                  | 32 ++++++++++-----
+ lib/IR/ReussirOps.cpp                         | 32 ++++++++++-----
+ .../frontend/cell_value_record_glue_order.c   | 21 ++++++++++
+ .../frontend/cell_value_record_glue_order.rr  | 41 +++++++++++++++++++
+ 6 files changed, 126 insertions(+), 26 deletions(-)
+ create mode 100644 tests/integration/frontend/cell_value_record_glue_order.c
+ create mode 100644 tests/integration/frontend/cell_value_record_glue_order.rr
+
+diff --git a/include/Reussir/Conversion/AcquireDropExpansion.h b/include/Reussir/Conversion/AcquireDropExpansion.h
+index bedb882e..0fb50c0c 100644
+--- a/include/Reussir/Conversion/AcquireDropExpansion.h
++++ b/include/Reussir/Conversion/AcquireDropExpansion.h
+@@ -21,6 +21,7 @@
+ 
+ #include <mlir/Dialect/Func/IR/FuncOps.h>
+ #include <mlir/IR/Builders.h>
++#include <mlir/IR/SymbolTable.h>
+ #include <mlir/Pass/Pass.h>
+ #include <mlir/Transforms/DialectConversion.h>
+ 
+@@ -31,8 +32,11 @@ namespace reussir {
+ #define GEN_PASS_DECL_REUSSIRACQUIREDROPEXPANSIONPASS
+ #include "Reussir/Conversion/Passes.h.inc"
+ 
++// `symbols`, if given, holds the symbol tables the outlined glue is looked
++// up in (see `createDtorIfNotExists`); it must outlive the patterns.
+ void populateAcquireDropExpansionConversionPatterns(
+-    mlir::RewritePatternSet &patterns, bool outlineRecord);
++    mlir::RewritePatternSet &patterns, bool outlineRecord,
++    mlir::SymbolTableCollection *symbols = nullptr);
+ 
+ } // namespace reussir
+ 
+diff --git a/include/Reussir/IR/ReussirOps.h b/include/Reussir/IR/ReussirOps.h
+index d5d76223..e73c7fcb 100644
+--- a/include/Reussir/IR/ReussirOps.h
++++ b/include/Reussir/IR/ReussirOps.h
+@@ -89,13 +89,17 @@ void inheritSanitizerPassthrough(mlir::ModuleOp moduleOp,
+ // needed, for the member reference's capability) instead of inline: the
+ // outlined functions call each other, so a record reached along many paths
+ // (`D(i) = {D(i-1), D(i-1)}`) costs code once, like the drop glue.
++// `symbols` as for createDtorIfNotExists, for the member functions it
++// creates.
+ //
+ //===----------------------------------------------------------------------===//
+ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+                                              mlir::OpBuilder &builder,
+                                              mlir::Location loc,
+                                              mlir::Value delta = {},
+-                                             bool callMemberGlue = false);
++                                             bool callMemberGlue = false,
++                                             mlir::SymbolTableCollection
++                                                 *symbols = nullptr);
+ 
+ /// The memref type `reussir.array.view` produces for an array: identity
+ /// layout for a static shape, a fully dynamic strided layout for a
+@@ -135,12 +139,16 @@ mlir::LogicalResult emitArrayElementTraversal(
+ // own symbol.
+ // Outlined drop glue functions carry `kDropGlueAttr`: no token produced in
+ // them can be reused, so their member releases free cells directly.
++// Looking the function up builds the module's symbol table, a walk of the
++// whole module; a caller that creates glue for many operations passes
++// `symbols`, whose tables are built once and kept up to date here.
+ constexpr llvm::StringLiteral kDropGlueAttr = "reussir.drop_glue";
+ mlir::func::FuncOp
+ createDtorIfNotExists(mlir::ModuleOp moduleOp, RecordType type,
+                       mlir::OpBuilder &builder,
+                       AtomicKind kind = AtomicKind::normal,
+-                      Capability cap = Capability::unspecified);
++                      Capability cap = Capability::unspecified,
++                      mlir::SymbolTableCollection *symbols = nullptr);
+ 
+ //===----------------------------------------------------------------------===//
+ // emitOwnershipAcquisitionFuncIfNotExists
+@@ -150,14 +158,16 @@ createDtorIfNotExists(mlir::ModuleOp moduleOp, RecordType type,
+ // record type if it doesn't already exist. The function takes a reference to
+ // the type and an index delta and performs the acquisition operation. Returns
+ // the existing function if one is already present. The RecordType must be a
+-// named type. `kind` and `cap` as for createDtorIfNotExists. Members that are
+-// named records are acquired by calls to their own functions.
++// named type. `kind`, `cap` and `symbols` as for createDtorIfNotExists.
++// Members that are named records are acquired by calls to their own
++// functions.
+ //
+ //===----------------------------------------------------------------------===//
+ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+     mlir::ModuleOp moduleOp, RecordType type, mlir::OpBuilder &builder,
+     AtomicKind kind = AtomicKind::normal,
+-    Capability cap = Capability::unspecified);
++    Capability cap = Capability::unspecified,
++    mlir::SymbolTableCollection *symbols = nullptr);
+ 
+ //===----------------------------------------------------------------------===//
+ 
+diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+index 28bd8b76..ceebc855 100644
+--- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
++++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+@@ -665,6 +665,7 @@ private:
+   }
+ 
+   bool outlineRecord;
++  mlir::SymbolTableCollection *symbols;
+ 
+   bool shouldOutline(ReussirRefDropOp op, RecordType type) const {
+     if (!outlineRecord)
+@@ -686,9 +687,10 @@ private:
+   }
+ 
+ public:
+-  DropExpansionPattern(mlir::MLIRContext *context, bool outlineRecord)
++  DropExpansionPattern(mlir::MLIRContext *context, bool outlineRecord,
++                       mlir::SymbolTableCollection *symbols)
+       : mlir::OpRewritePattern<ReussirRefDropOp>(context),
+-        outlineRecord(outlineRecord) {}
++        outlineRecord(outlineRecord), symbols(symbols) {}
+ 
+   mlir::LogicalResult
+   matchAndRewrite(ReussirRefDropOp op,
+@@ -716,7 +718,8 @@ public:
+             mlir::ModuleOp moduleOp = op->getParentOfType<mlir::ModuleOp>();
+             mlir::func::FuncOp dtor =
+                 createDtorIfNotExists(moduleOp, recordType, rewriter,
+-                                      refType.getAtomicKind(), refCap);
++                                      refType.getAtomicKind(), refCap,
++                                      symbols);
+             mlir::func::CallOp::create(rewriter, op.getLoc(), dtor,
+                                        op.getRef());
+             rewriter.eraseOp(op);
+@@ -748,6 +751,7 @@ class AcquireExpansionPattern
+     : public mlir::OpRewritePattern<ReussirRefAcquireOp> {
+ private:
+   bool outlineRecord;
++  mlir::SymbolTableCollection *symbols;
+ 
+   bool shouldOutline(ReussirRefAcquireOp op, RecordType type) const {
+     if (!outlineRecord)
+@@ -766,9 +770,10 @@ private:
+   }
+ 
+ public:
+-  AcquireExpansionPattern(mlir::MLIRContext *context, bool outlineRecord)
++  AcquireExpansionPattern(mlir::MLIRContext *context, bool outlineRecord,
++                          mlir::SymbolTableCollection *symbols)
+       : mlir::OpRewritePattern<ReussirRefAcquireOp>(context),
+-        outlineRecord(outlineRecord) {}
++        outlineRecord(outlineRecord), symbols(symbols) {}
+ 
+   mlir::LogicalResult
+   matchAndRewrite(ReussirRefAcquireOp op,
+@@ -786,7 +791,7 @@ public:
+         mlir::ModuleOp moduleOp = op->getParentOfType<mlir::ModuleOp>();
+         mlir::func::FuncOp acquireFunc = emitOwnershipAcquisitionFuncIfNotExists(
+             moduleOp, recordType, rewriter, refType.getAtomicKind(),
+-            refType.getCapability());
++            refType.getCapability(), symbols);
+         mlir::Value delta = op.getDelta();
+         if (!delta)
+           delta = rewriter.createOrFold<mlir::arith::ConstantIndexOp>(
+@@ -839,8 +844,12 @@ struct AcquireDropExpansionPass
+   void runOnOperation() override {
+     mlir::ConversionTarget target(getContext());
+     mlir::RewritePatternSet patterns(&getContext());
++    // The symbol tables the outlined glue is looked up in and added to,
++    // built once for the whole pass.
++    mlir::SymbolTableCollection symbols;
+ 
+-    populateAcquireDropExpansionConversionPatterns(patterns, outlineRecord);
++    populateAcquireDropExpansionConversionPatterns(patterns, outlineRecord,
++                                                   &symbols);
+     if (expandDecrement)
+       populateRcDecrementExpansionConversionPatterns(patterns);
+     if (failed(
+@@ -851,9 +860,12 @@ struct AcquireDropExpansionPass
+ } // namespace
+ 
+ void populateAcquireDropExpansionConversionPatterns(
+-    mlir::RewritePatternSet &patterns, bool outlineRecord) {
+-  patterns.add<DropExpansionPattern>(patterns.getContext(), outlineRecord);
+-  patterns.add<AcquireExpansionPattern>(patterns.getContext(), outlineRecord);
++    mlir::RewritePatternSet &patterns, bool outlineRecord,
++    mlir::SymbolTableCollection *symbols) {
++  patterns.add<DropExpansionPattern>(patterns.getContext(), outlineRecord,
++                                     symbols);
++  patterns.add<AcquireExpansionPattern>(patterns.getContext(), outlineRecord,
++                                        symbols);
+ }
+ 
+ } // namespace reussir
+diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
+index d833bcf8..9f11553f 100644
+--- a/lib/IR/ReussirOps.cpp
++++ b/lib/IR/ReussirOps.cpp
+@@ -3762,7 +3762,9 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+                                              mlir::OpBuilder &builder,
+                                              mlir::Location loc,
+                                              mlir::Value delta,
+-                                             bool callMemberGlue) {
++                                             bool callMemberGlue,
++                                             mlir::SymbolTableCollection
++                                                 *symbols) {
+   mlir::OpBuilder::InsertionGuard guard(builder);
+   mlir::Type type = value.getType();
+ 
+@@ -3830,7 +3832,7 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+           mlir::Value slot = ReussirRefProjectOp::create(
+               builder, loc, slotType, value, builder.getIndexAttr(0));
+           return emitOwnershipAcquisition(slot, builder, loc, delta,
+-                                          callMemberGlue);
++                                          callMemberGlue, symbols);
+         }
+ 
+         // If reference points to a record, handle fields directly
+@@ -3868,7 +3870,8 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+                 mlir::func::FuncOp glue =
+                     emitOwnershipAcquisitionFuncIfNotExists(
+                         moduleOp, memberRecord, builder,
+-                        refType.getAtomicKind(), refType.getCapability());
++                        refType.getAtomicKind(), refType.getCapability(),
++                        symbols);
+                 mlir::Value count =
+                     delta ? delta
+                           : builder.createOrFold<mlir::arith::ConstantIndexOp>(
+@@ -3878,7 +3881,7 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+                 continue;
+               }
+               if (emitOwnershipAcquisition(fieldRef, builder, loc, delta,
+-                                           callMemberGlue)
++                                           callMemberGlue, symbols)
+                       .failed())
+                 return mlir::failure();
+             }
+@@ -3925,7 +3928,8 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+               // its members follow `callMemberGlue`.
+               if (!isTriviallyCopyable(projectedType)) {
+                 if (emitOwnershipAcquisition(block->getArgument(0), builder,
+-                                             loc, delta, callMemberGlue)
++                                             loc, delta, callMemberGlue,
++                                             symbols)
+                         .failed())
+                   return mlir::failure();
+               }
+@@ -4086,8 +4090,11 @@ void inheritSanitizerPassthrough(mlir::ModuleOp moduleOp,
+ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+                                          RecordType type,
+                                          mlir::OpBuilder &builder,
+-                                         AtomicKind kind, Capability cap) {
+-  mlir::SymbolTable symTable(moduleOp);
++                                         AtomicKind kind, Capability cap,
++                                         mlir::SymbolTableCollection *symbols) {
++  std::optional<mlir::SymbolTable> ownTable;
++  mlir::SymbolTable &symTable = symbols ? symbols->getSymbolTable(moduleOp)
++                                        : ownTable.emplace(moduleOp);
+   auto dtorName = type.getDtorName(kind, cap);
+   if (!dtorName)
+     llvm::report_fatal_error("only named record types have destructors");
+@@ -4104,6 +4111,7 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+       mlir::func::FuncOp::create(builder, builder.getUnknownLoc(), funcName,
+                                  builder.getFunctionType({refType}, {}));
+   dtor.setPrivate();
++  symTable.insert(dtor);
+   dtor->setAttr(kDropGlueAttr, builder.getUnitAttr());
+   dtor->setAttr("llvm.linkage", builder.getAttr<mlir::LLVM::LinkageAttr>(
+                                     mlir::LLVM::linkage::Linkage::LinkonceODR));
+@@ -4140,6 +4148,7 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+                                          drainName,
+                                          builder.getFunctionType({}, {}));
+       drain.setPrivate();
++      symTable.insert(drain);
+     }
+     mlir::func::CallOp::create(builder, builder.getUnknownLoc(), drain);
+   }
+@@ -4152,8 +4161,10 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+ //===----------------------------------------------------------------------===//
+ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+     mlir::ModuleOp moduleOp, RecordType type, mlir::OpBuilder &builder,
+-    AtomicKind kind, Capability cap) {
+-  mlir::SymbolTable symTable(moduleOp);
++    AtomicKind kind, Capability cap, mlir::SymbolTableCollection *symbols) {
++  std::optional<mlir::SymbolTable> ownTable;
++  mlir::SymbolTable &symTable = symbols ? symbols->getSymbolTable(moduleOp)
++                                        : ownTable.emplace(moduleOp);
+   auto acquireName = type.getAcquireName(kind, cap);
+   if (!acquireName)
+     llvm::report_fatal_error(
+@@ -4174,6 +4185,7 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+       builder, builder.getUnknownLoc(), funcName,
+       builder.getFunctionType({refType, builder.getIndexType()}, {}));
+   funcOp.setPrivate();
++  symTable.insert(funcOp);
+   funcOp->setAttr("llvm.linkage",
+                   builder.getAttr<mlir::LLVM::LinkageAttr>(
+                       mlir::LLVM::linkage::Linkage::LinkonceODR));
+@@ -4185,7 +4197,7 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+ 
+   if (emitOwnershipAcquisition(ref, builder, builder.getUnknownLoc(),
+                                entryBlock->getArgument(1),
+-                               /*callMemberGlue=*/true)
++                               /*callMemberGlue=*/true, symbols)
+           .failed()) {
+     llvm::report_fatal_error("failed to emit ownership acquisition");
+   }
+diff --git a/tests/integration/frontend/cell_value_record_glue_order.c b/tests/integration/frontend/cell_value_record_glue_order.c
+new file mode 100644
+index 00000000..3b6c4ef3
+--- /dev/null
++++ b/tests/integration/frontend/cell_value_record_glue_order.c
+@@ -0,0 +1,21 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for cell_value_record_glue_order.rr: prints glue_order(5), which is
++// (7 + 1 + 70 + 2) + (5 + 2 + 50 + 100 + 4) * 1000 = 161080.
++
++#include <stdint.h>
++#include <stdio.h>
++
++extern uint64_t glue_order_ffi(uint64_t);
++
++int main(void) {
++  printf("%llu\n", (unsigned long long)glue_order_ffi(5));
++  return 0;
++}
+diff --git a/tests/integration/frontend/cell_value_record_glue_order.rr b/tests/integration/frontend/cell_value_record_glue_order.rr
+new file mode 100644
+index 00000000..f7d0643b
+--- /dev/null
++++ b/tests/integration/frontend/cell_value_record_glue_order.rr
+@@ -0,0 +1,41 @@
++// The acquire/drop expansion keeps one table of the module's symbols for a
++// whole run and looks every outlined glue function up in it. The `field`
++// acquire glue of a [value] record creates the glue of its named [value]
++// members while its body is built; those must be added to the same table.
++// Here Pair's glue is created first (for the Pair cell) and then, for the Quad
++// cell, Quad's glue looks it up as its member's: a stale table created it a
++// second time, and rrc failed with "redefinition of symbol".
++
++// RUN: %rrc %s -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/cell_value_record_glue_order.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe | %FileCheck %s
++// RUN: %rrc %s -o %t.opt.o --relocation-mode pic -Oaggressive
++// RUN: %cc %t.opt.o %S/cell_value_record_glue_order.c -o %t.opt.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.opt.exe | %FileCheck %s
++// RUN: %rrc %s -o %t.l2r.o --relocation-mode pic -Oaggressive --reuse-across-call --no-pack-record-members
++// RUN: %cc %t.l2r.o %S/cell_value_record_glue_order.c -o %t.l2r.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.l2r.exe | %FileCheck %s
++
++// CHECK: 161080
++
++import core::intrinsic::cell;
++
++struct [shared] Bg(u64)
++struct [value] Pair { big: Bg, small: u64 }
++struct [value] Quad { x: Pair, y: Pair }
++
++// A Pair cell read before a Quad cell, in one function.
++pub fn glue_order(n : u64) -> u64 {
++    let p = cell::alloc(Pair { big: Bg{n + 2}, small: 1 });
++    let first = cell::get(p);
++    cell::set(p, Pair { big: Bg{(n + 2) * 10}, small: 2 });
++    let second = cell::get(p);
++    let compound = first.big.0 + first.small + second.big.0 + second.small;
++    let q = cell::alloc(Quad { x: Pair { big: Bg{n}, small: 1 }, y: Pair { big: Bg{n + 1}, small: 2 } });
++    let a = cell::get(q);
++    cell::set(q, Quad { x: Pair { big: Bg{n * 10}, small: 3 }, y: Pair { big: Bg{n * 20}, small: 4 } });
++    let b = cell::get(q);
++    let nested = a.x.big.0 + a.y.small + b.x.big.0 + b.y.big.0 + b.y.small;
++    compound + nested * 1000
++}
++extern "C" trampoline "glue_order_ffi" = glue_order;
+-- 
+2.43.0
+

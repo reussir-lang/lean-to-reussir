@@ -9,12 +9,12 @@ A literal `#[e₁, …, eₙ]` of type `Array Nat` reaches the generated code
 `spliceChainConsts`) as `n` pairs
 
 ```
-let x : Nat = Nat::Small{k};
+let x : Nat = l2r_nat_small(k);
 let r : LNatArr = lean_natarr_push(a, x);
 ```
 
 rrc costs time and memory for each of them (about 0.3 MB per `Nat`
-operation, docs/reussir-bugs.md bug 17), so a run of such pairs, each `x`
+operation, reussir-bugs/17-long-nat-block.md), so a run of such pairs, each `x`
 and each intermediate `r` used only there, becomes one call
 `l2r_natarr_lits(a, id)` that pushes the words of table `id` (generated with
 the program: `natLitTable`), the same elements in the same order. The
@@ -57,9 +57,9 @@ mutual
     exprUses b.result (b.lets.foldl (fun a (_, _, e) => exprUses e a) acc)
 end
 
-/-- The word of a small `Nat` literal `let x : Nat = Nat::Small{k}`. -/
+/-- The word of a small `Nat` literal `let x : Nat = l2r_nat_small(k)`. -/
 def smallLit? : Option Ty × Expr → Option UInt64
-  | (some (.named "Nat"), .ctor "Nat" (some "Small") #[.atom k]) =>
+  | (some (.named "Nat"), .call "l2r_nat_small" #[] #[.atom k]) =>
     match k.toNat? with
     | some v => if v < 2 ^ 63 then some (UInt64.ofNat (2 * v + 1)) else none
     | none => none

@@ -1,4 +1,5 @@
 import LeanToReussir.Lower.LazyForce
+import LeanToReussir.CompileRecord
 
 /-! # Conversions -/
 
@@ -13,7 +14,7 @@ def nominalHead (n : String) : LowerM (Option Name) := do
 
 /-- Whether a value of type `t` may contain a task (in fields, array
 elements, a task's value, a thunk, a function value's captured values, a
-`Box`'s payload), as far as can be told before all variants of function
+`Box`'s payload, a reference's value), as far as can be told before all variants of function
 types and `Box` are known: those, and thunks, may. Types already being
 examined count as not containing one (the least fixed point, for recursive
 types): a search of the types reachable from `t`, each looked at once. -/
@@ -35,6 +36,7 @@ where
           for ft in l.posTys do
             if ← go ft seen then return true
         return false
+      if let some (e, _) := (← get).refInfos[n]? then return ← go e seen
       match (← get).tupleTypes.toList.find? (·.2 == n) with
       | some (k, _) =>
         let fields := if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k
@@ -53,7 +55,8 @@ computed, if `t` may contain tasks: native Lean calls `lean_mark_persistent`
 on a closed term when it is first evaluated (`lean_obj_once_cold`), which
 waits for every task it reaches (`lean_task_get`), through fields, arrays,
 the values of tasks, thunks (their computation, or their value: not
-forcing them), closures (their captured values) and boxed values. A
+forcing them), closures (their captured values), references (their
+value) and boxed values. A
 `Task.spawn` extracted as a closed term has finished once the term has
 been evaluated. The traversal is generated at the end
 (`finishPersistFns`). -/
@@ -98,7 +101,7 @@ returning a zero, an empty array (for `Nat`, `Bool` and enumerations this is
 exactly what `box(0)` denotes in Lean). Only a type without a finite value
 gets `l2r_unreachable`. Each placeholder is a generated function
 `l2r_zero_N`. A placeholder that would allocate (a string, an array, a
-record, a closure, a boxed unit) is built once and kept in a once-cell like
+record, a reference, a boxed unit) is built once and kept in a once-cell like
 a constant (`cafAccessor`): `Array.modify` stores one per update, and it is
 never inspected, so a shared value does as well as a fresh one. -/
 partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
@@ -114,9 +117,9 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
       else if n ∈ ["f32", "f64"] then pure (lit "0.0")
       else if n == "bool" then pure (.ofExpr (.atom "false"))
       else if n == "Nat" then
-        pure ⟨#[("z", some (.named "u64"), .atom "0")], .ctor "Nat" (some "Small") #[.var "z"]⟩
+        pure ⟨#[("z", some (.named "u64"), .atom "0")], .call "l2r_nat_small" #[] #[.var "z"]⟩
       else if n == "Int" then
-        pure ⟨#[("z", some (.named "i64"), .atom "0")], .ctor "Int" (some "Small") #[.var "z"]⟩
+        pure ⟨#[("z", some (.named "i64"), .atom "0")], .call "l2r_int_small" #[] #[.var "z"]⟩
       else if n == "LStr" then pure (.ofExpr (← strLit ""))
       else if n == "LNatArr" then pure (.ofExpr (.call "l2r_natarr_empty" #[] #[]))
       else if n == "LIntArr" then pure (.ofExpr (.call "l2r_intarr_empty" #[] #[]))
@@ -383,14 +386,15 @@ def wordOf (e : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
   return none
 
 /-- The value of Reussir type `n` that natively is the boxed scalar of word
-`w : u64` (see `wordOf`): `Nat` `w`; `Int` the signed value of its 32 bits
+`w : u64` (see `wordOf`): `Nat` `w` (`lean_usize_to_nat`); `Int` the signed
+value of its 32 bits
 (`lean_scalar_to_int64`); a fixed-width integer, `Bool` (nonzero) or an
 enumeration the bits of its width (`lean_unbox` then truncation; an index
 past the last constructor gives the last one, as Lean's `switch` does); a
 constructor without fields (`ctorOfWordFn`). `none` for other types. -/
 def ofWord (w : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
   let u64 := RR.Ty.named "u64"
-  if n == "Nat" then return some (.ctor "Nat" (some "Small") #[w])
+  if n == "Nat" then return some (.call "lean_usize_to_nat" #[] #[w])
   if n == "Int" then return some (.call "l2r_int_of_word" #[] #[w])
   if n ∈ ["u8", "u16", "u32"] then return some (.cast w (.named n))
   if n == "bool" then
@@ -559,7 +563,7 @@ elements; the conversion between them (`structConv`, `vecConv`) would pair
 exactly those fields. Instantiations of an inductive that differ only in
 phantom positions, and isomorphic inductives read through `unsafeCast` (a
 user list as `List`), are then not converted at all: no time, no copy, and
-the value keeps its identity. -/
+the value keeps its sharing. -/
 def retypable (a b : RR.Ty) : LowerM Bool := do
   if a == b then return false
   if !(← isBoundaryTy a) || !(← isBoundaryTy b) then return false
@@ -568,27 +572,6 @@ def retypable (a b : RR.Ty) : LowerM Bool := do
   | .app "RVec" _ => pure ()
   | _ => return false
   return (← retypableAux a b #[]).isSome
-
-/-- A number naming Reussir type `t` at run time (FNV-1a of its text), for
-`l2r_origin_back`. -/
-def typeCode (t : RR.Ty) : Nat := Id.run do
-  let mut h : UInt64 := 14695981039346656037
-  for c in t.render.toList do
-    h := (h ^^^ c.toNat.toUInt64) * 1099511628211
-  return h.toNat
-
-/-- The body of a structural conversion's entry function from `src` to
-`dst` (parameter `x`), around the conversion proper `worker`: a value
-converted from a `dst` (and unchanged since: the record holds it, so an
-update copies) is converted back to that very value; otherwise the new
-value records its origin (`leanrt::origin`). Natively there is one object:
-so `ptrAddrUnsafe` of the converted value is the original's, and a value
-that goes into uniform code and back is the same object (plan §9). -/
-def originWrap (src dst : RR.Ty) (worker x : String) : RR.Block :=
-  let v := RR.Expr.var x
-  .ofExpr (.ite (.call "l2r_origin_back" #[src] #[v, .atom (toString (typeCode dst))])
-    (.ofExpr (.call "l2r_origin_take" #[src, dst] #[v]))
-    (.ofExpr (.call "l2r_origin_note" #[src, dst] #[v, .call worker #[] #[v], .atom (toString (typeCode src))])))
 
 /-- How `structConv` converts one constructor of the source type: the
 target constructor's layout (`none`: no native value reads it, so the arm is
@@ -758,13 +741,17 @@ mutual
           return some (.call (← structConv sn dn) #[] #[e])
       -- The rest is only reachable through `unsafeCast`, between values that
       -- Lean represents by the same word; the conversions follow Lean's
-      -- `lean_box`/`lean_unbox`. Scalars of the same size in a constructor's
-      -- scalar area: the bits.
+      -- `lean_box`/`lean_unbox`. `Float` and `UInt64` are both a cell with
+      -- an 8-byte scalar area: the bits, copied unchanged (NaN payloads
+      -- included; `Float.ofBits`/`toBits` would make every NaN the canonical
+      -- one). `Float32` and `UInt32` are not alike natively (a cell and a
+      -- tagged scalar: such a cast crashes there); here their bits are
+      -- copied the same way (plan §10).
       match sn, dn with
-      | "u64", "f64" => return some (.call "lean_float_of_bits" #[] #[e])
-      | "f64", "u64" => return some (.call "lean_float_to_bits" #[] #[e])
-      | "u32", "f32" => return some (.call "lean_float32_of_bits" #[] #[e])
-      | "f32", "u32" => return some (.call "lean_float32_to_bits" #[] #[e])
+      | "u64", "f64" => return some (.call "l2r_f64_of_raw_bits" #[] #[e])
+      | "f64", "u64" => return some (.call "l2r_f64_raw_bits" #[] #[e])
+      | "u32", "f32" => return some (.call "l2r_f32_of_raw_bits" #[] #[e])
+      | "f32", "u32" => return some (.call "l2r_f32_raw_bits" #[] #[e])
       -- `Nat` and `Int`: the same value (natively the same boxed scalar for
       -- small values, the same big number object otherwise; a `Nat` from
       -- 2^31 to 2^63 is not a valid small `Int` natively).
@@ -836,23 +823,19 @@ mutual
     | none => return none
 
   /-- The generated function converting an array with element storage `se`
-  to one with element storage `de` (cached), recording the origin of the
-  new array (`originWrap`). -/
+  to one with element storage `de` (cached): a new array. -/
   partial def vecConv (src dst : RR.Ty) (sr dr : ArrayRepr) : LowerM (Option String) := do
-    let nested := (← get).convNested
-    if let some f := (← get).vecConvs[(src, dst)]? then return some (if nested then f ++ "_w" else f)
+    if let some f := (← get).vecConvs[(src, dst)]? then return some f
     let f ← fresh "l2r_vconv_"
     modify fun s => { s with vecConvs := s.vecConvs.insert (src, dst) f }
     let x := sr.load (sr.call "get" #[.var "src", .var "i"])
-    -- Elements that cannot be converted (`Array Nat` to `Array Int`) mean
+    -- Elements that cannot be converted (`Array String` to `Array Nat`) mean
     -- that the array is empty whenever this runs: an empty array that `cse`
     -- shared between two element types, or the array `Array.map` returns
     -- when it had nothing to map (Stage 3).
-    modify fun s => { s with convNested := true }
     let y ← match ← tryCoerce x sr.value dr.value with
       | some y => pure y
       | none => pure (.call "l2r_unreachable" #[dr.value] #[])
-    modify fun s => { s with convNested := nested }
     let go := f ++ "_go"
     let u64 := RR.Ty.named "u64"
     let loop : RR.Block := .ofExpr <| .ite (.atom "i < n")
@@ -864,9 +847,8 @@ mutual
         .call go #[] #[.var "src", .var "zero", .var "n", dr.call "empty" #[]]⟩
     modify fun s => { s with fns := s.fns ++ #[
       .fn go #[("src", src), ("i", u64), ("n", u64), ("acc", dst)] dst loop,
-      .fn (f ++ "_w") #[("src", src)] dst entry,
-      .fn f #[("src", src)] dst (originWrap src dst (f ++ "_w") "src")] }
-    return some (if nested then f ++ "_w" else f)
+      .fn f #[("src", src)] dst entry] }
+    return some f
 
   /-- Whether values of generated type `sn` can be read as values of `dn`
   (through `unsafeCast`, where Lean's representations coincide): the same
@@ -883,18 +865,17 @@ mutual
 
   /-- The generated function converting a thunk or task with state type `sz`
   to one with state type `dz` (same kind, value types differing only in
-  representation, as for `structConv`). The result is a new cell that
-  records the cell it was converted from, boxed, and that cell's address:
-  converting it back gives that very cell (a thunk crossing between typed
-  and uniform code in a loop does not build a chain of cells), its identity
-  is the original's (`ptrAddrUnsafe`, see `addrOf`; for a task also the
-  runtime's, `l2r_task_addr_S`), and keeping the original keeps that
-  address from being reused. A computed value is converted now (state
-  `convdone`). Otherwise the new cell is in state `conv`: its computation
-  forces the original and converts the value (so the original's
-  computation still runs at most once). A cell converted from a converted
-  one records the first original. `none` if the values are not
-  convertible. -/
+  representation, as for `structConv`): a new cell. A computed value is
+  converted now (state `done`). Otherwise the new cell is in state `conv`:
+  its computation forces the original and converts the value (so the
+  original's computation still runs at most once). It records the
+  original, boxed, so that converting it back gives that very cell (a
+  thunk crossing between typed and uniform code in a loop does not build a
+  chain of cells), and, for a task, the original's address: the copy's
+  identity for the runtime (`l2r_task_addr_S`), so its state, its
+  cancellation and its dependents are the original's. A cell converted
+  from a converted one records the first original. `none` if the values
+  are not convertible. -/
   partial def lazyConv (sz dz : String) : LowerM (Option String) := do
     let some (sk, st) := (← get).lazyInfos[sz]? | return none
     let some (dk, dt) := (← get).lazyInfos[dz]? | return none
@@ -913,14 +894,12 @@ mutual
     let srcBox ← boxVariant srcCell
     let dstBox ← boxVariant dstCell
     let u ← fresh "u"
-    let mkConv (o a : RR.Expr) : RR.Expr := .call "l2r_lcell_new" #[.named dz]
-      #[.ctor dz (some "conv") #[rawFnValue (.fn .unit dt) u (.ofExpr later), o, a]]
-    let ident : RR.Expr := .call "l2r_lcell_addr" #[.named sz] #[.var "c"]
-    let fresh' : RR.Block := ⟨#[("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"]),
-      ("a", some (.named "u64"), ident)], mkConv (.var "o") (.var "a")⟩
-    let doneConv : RR.Block := ⟨#[("w", some dt, now), ("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"]),
-      ("a", some (.named "u64"), ident)],
-      .call "l2r_lcell_new" #[.named dz] #[.ctor dz (some "convdone") #[.var "w", .var "o", .var "a"]]⟩
+    let g := rawFnValue (.fn .unit dt) u (.ofExpr later)
+    let addr : Array (String × Option RR.Ty × RR.Expr) :=
+      if sk then #[("a", some (.named "u64"), .call "l2r_lcell_addr" #[.named sz] #[.var "c"])] else #[]
+    let fresh' : RR.Block := ⟨#[("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"])] ++ addr,
+      .call "l2r_lcell_new" #[.named dz]
+        #[.ctor dz (some "conv") (#[g, .var "o"] ++ (if sk then #[.var "a"] else #[]))]⟩
     -- From a converted cell: its original if that has the target type,
     -- otherwise the original converted directly (through the `Box`
     -- converter, which knows every representation), so chains through
@@ -928,12 +907,9 @@ mutual
     let back : RR.Expr := .mtch (.var "o") #[
       { ty := boxName, ctor := some dstBox, binders := #[some "x"], body := .ofExpr (.var "x") },
       { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call (← unboxArrFn dstCell) #[] #[.var "o"]) }]
-    let busy : RR.Block := ⟨#[("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"])], mkConv (.var "o") (.var "a")⟩
     let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[.named sz] #[.var "c"]) #[
-      lazyArm sz "done" #[some "v"] doneConv,
-      lazyArm sz "conv" #[none, some "o", some "a"] (.ofExpr back),
-      lazyArm sz "convdone" #[none, some "o", some "a"] (.ofExpr back),
-      lazyArm sz "busyconv" #[some "a"] busy,
+      lazyArm sz "done" #[some "v"] (.ofExpr (lazyDone dz now)),
+      lazyArm sz "conv" (#[none] ++ convTail sk (some "o")) (.ofExpr back),
       { ty := sz, ctor := none, binders := #[], body := fresh' }])
     modify fun s => { s with fns := s.fns.push (.fn name #[("c", srcCell)] dstCell body) }
     return some name
@@ -1216,24 +1192,15 @@ mutual
   modulo constructors); any other recursion is an explicit-stack loop
   (`convMachine`). -/
   partial def structConv (sn dn : String) : LowerM String := do
-    let entry := s!"l2r_conv_{sn}_{dn}"
-    -- Shared records have an identity: the entry records the origin.
-    let noted := (← isBoundaryTy (.named sn)) && (← isBoundaryTy (.named dn))
-    let fname := if noted then entry ++ "_w" else entry
-    let nested := (← get).convNested
-    let result := if nested then fname else entry
+    let fname := s!"l2r_conv_{sn}_{dn}"
     if (← get).fns.any (fun | .fn n .. => n == fname | _ => false) ||
-       (← get).convsInProgress.contains fname then return result
-    modify fun s => { s with convsInProgress := s.convsInProgress.insert fname, convNested := true }
-    if noted then
-      modify fun s => { s with fns := s.fns.push (.fn entry #[("x", .named sn)] (.named dn)
-        (originWrap (.named sn) (.named dn) fname "x")) }
-    let r ← structConvBody sn dn fname
-    modify fun s => { s with convNested := nested }
-    return if r then result else result
+       (← get).convsInProgress.contains fname then return fname
+    modify fun s => { s with convsInProgress := s.convsInProgress.insert fname }
+    structConvBody sn dn fname
+    return fname
 
-  /-- The body of `structConv`'s function `fname`; `true`. -/
-  partial def structConvBody (sn dn fname : String) : LowerM Bool := do
+  /-- The body of `structConv`'s function `fname`. -/
+  partial def structConvBody (sn dn fname : String) : LowerM Unit := do
     let some si := (← get).typeInfos[sn]? | throwError "lean2rr: no type {sn}"
     let group ← convGroup (sn, dn)
     let plans ← convSlots group
@@ -1241,7 +1208,7 @@ mutual
       slots.size ≤ 1 && slots.all fun sl => !sl.arr)
     if !selfOnly then
       convMachine fname group plans
-      return true
+      return
     let mut arms := #[]
     let mut structBody : Option RR.Block := none
     for (arm, _) in plans[0]! do
@@ -1257,7 +1224,6 @@ mutual
       | some b => b
       | none => .ofExpr (.mtch (.var "x") arms)
     modify fun s => { s with fns := s.fns.push (.fn fname #[("x", .named sn)] (.named dn) body) }
-    return true
 end
 
 /-- The field type of `[value]` struct `info` (natively the struct is its
@@ -1267,6 +1233,85 @@ def valueFieldTy? (info : TypeInfo) : Option RR.Ty := do
   let c ← info.ctorOrder[0]?
   let l ← info.ctors.find? c
   l.posTys[0]?
+
+/-- The declarations whose source a declaration of the program (an
+instance, or code Lean derived from one: `f._redArg`, `f._lam_0`,
+`g._at_.f.spec_0`) comes from: its prefixes that are declarations, also
+those of the declaration a specialization was made in. A hygienic name
+(made by a macro) keeps its macro scopes at the end (`f._lam_0._@.M._hyg.3`
+comes from `f._@.M._hyg.3`): the prefixes are those of the name without
+them, each also tried with them. The prefixes are built component by
+component (`Name.append` panics on a prefix that ends in `_hyg`). -/
+def sourceDecls (env : Environment) (n : Name) : Array Name := Id.run do
+  let view := extractMacroScopes n
+  let comps := view.name.components
+  let extend (pre c : Name) : Name := match c with
+    | .str _ s => .str pre s
+    | .num _ k => .num pre k
+    | .anonymous => pre
+  let mut out := #[]
+  let add (out : Array Name) (p : Name) : Array Name := Id.run do
+    let mut out := out
+    for q in [p, { view with name := p }.review] do
+      if env.contains q && !out.contains q then out := out.push q
+    return out
+  let mut pre := Name.anonymous
+  for c in comps do
+    pre := extend pre c
+    out := add out pre
+  if let some i := comps.idxOf? `_at_ then
+    let mut site := Name.anonymous
+    for c in comps.drop (i + 1) do
+      site := extend site c
+      out := add out site
+  return out
+
+/-- Whether the program can read a value as another type than its own
+(`LowerCtx.programCasts`), and the declaration that shows it: some
+declaration it reaches, outside Lean's own library (`Init`, `Std`, `Lean`,
+`Lake`) and lean2rr's shim (`L2RShim`), is `unsafe` (its code may
+`unsafeCast`, build a `TypeName` for `Dynamic`, or be the `implemented_by`
+target of another type's code; the `_unsafe_rec` code Lean 4.33 generates
+for a `partial def` is not `unsafe`), is an axiom, uses `sorry` (a cast
+through an equality proved by either), or is `@[extern]` or `@[export]`
+(Lean does not compare the types of an extern and the `@[export]`
+definition implementing it, which lean2rr calls instead: `redirectTarget`,
+Mono; `implemented_by` is type-checked, but an `unsafe` implementation,
+even one of the library's, can be applied to any type: a program declaration
+implemented by one counts too). The declarations reached are those the
+program's declarations come from (`sourceDecls`), and, transitively, the
+constants their definitions mention (inlined code no longer appears in the
+program) and their `implemented_by` targets. Lean's library casts only
+where lean2rr's representations agree: an `Array α` read as an
+`Array NonScalar` (`Box` elements) and back, `unsafeCast ()` placeholders,
+`Subtype` (`attach`), the world token, `Dynamic` values read at the type
+their `TypeName` names. -/
+def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Option Name := Id.run do
+  let library (n : Name) : Bool := match env.getModuleIdxFor? n with
+    | some i => (env.header.moduleNames[i.toNat]?.map isToolchainModule).getD false
+    | none => false
+  let mut work : Array Name := #[]
+  for d in decls do
+    work := work ++ sourceDecls env ((keys.find? d.name).map (·.decl) |>.getD d.name)
+  let mut seen : NameSet := {}
+  while h : work.size > 0 do
+    let n := work[work.size - 1]
+    work := work.pop
+    if seen.contains n || library n then continue
+    seen := seen.insert n
+    let some ci := env.find? n | continue
+    if ci matches .axiomInfo _ then return some n
+    if ci.isUnsafe || isExtern env n || (getExportNameFor? env n).isSome then return some n
+    if let some impl := Compiler.getImplementedBy? env n then
+      -- An `unsafe` implementation counts even from the library: Lean only
+      -- compares the declared types (`TypeName.mk` gives two types the same
+      -- `TypeName`, so `Dynamic.get?` reads one as the other).
+      if (env.find? impl).any (·.isUnsafe) then return some n
+      work := work.push impl
+    if let some v := ci.value? (allowOpaque := true) then
+      if v.foldConsts false (fun k b => b || k == ``sorryAx) then return some n
+      work := v.foldConsts work fun k acc => if seen.contains k then acc else acc.push k
+  return none
 
 /-- Whether a `Box` holding a value of type `vt` may be read at type `t`,
 so that the unboxing function to `t` (generated at the end, `Finish`)
@@ -1288,9 +1333,11 @@ read as one whose constructors do not all correspond (another number of
 constructors): typed code converts such casts (`castFallback`), but every
 unboxing function would then convert from every other inductive that
 shares a constructor shape (programs over monad transformers grew by 3 to
-5 %), for casts that hardly ever occur. -/
+5 %), for casts that hardly ever occur. None of these unless the program
+can cast at all (`programCasts`). -/
 partial def boxCastable (vt t : RR.Ty) : LowerM Bool := do
   if vt == t then return true
+  unless (← read).programCasts do return false
   match vt, t with
   | .named a, .named b =>
     if [("u64", "f64"), ("f64", "u64"), ("u32", "f32"), ("f32", "u32")].contains (a, b) then return true

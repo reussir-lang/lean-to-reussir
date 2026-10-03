@@ -1,47 +1,38 @@
 //! Arrays of `Nat` / `Int` with one word per element, like Lean's arrays of
-//! boxed scalars.
+//! boxed scalars, in one allocation.
 //!
-//! `Nat` and `Int` are Reussir `[value]` enums, which cannot be stored in a
-//! Rust vector; storing them boxed costs an allocation per element update.
-//! A tag vector stores each element as a tagged word instead:
+//! Each element is the `Nat`'s or `Int`'s own word (`crate::nat`):
 //!
-//! - odd words are small values: `(v << 1) | 1` (the Reussir side decides
-//!   the range and the signedness: `Nat` below 2^63, `Int` in [-2^62, 2^62));
+//! - odd words are small values: `lean_box` of a `Nat` below 2^63 or of an
+//!   `Int` in the `int32` range;
 //! - even words are owned `LBig` handles (the raw `Rc` pointer), for all
 //!   other values.
 //!
-//! The Reussir-visible type is `Rc<Box<dyn Any>>` (spellable with std and
-//! reussir_rt only, as opaque FFI types must be), but the object is one
-//! allocation, like Lean's array object: the `Rc` box (count, then the
-//! `Box<dyn Any>`), the size, the capacity and the words.
+//! The Reussir-visible type is `TagVec`, a `#[repr(transparent)]` pointer to
+//! one allocation laid out like Lean's array object (the same 24-byte
+//! header):
 //!
 //! ```text
-//!   0: count: u32, (padding)     the reussir_rt RcBox header
-//!   8: Box<dyn Any>              (data pointer = this object, vtable of `Marker`)
-//!  24: len: usize
-//!  32: cap: usize
-//!  40: words: [u64; cap]
+//!   0: count: u32, (padding)     the reference count Reussir's `rc.inc` bumps
+//!   8: len: usize
+//!  16: cap: usize
+//!  24: words: [u64; cap]
 //! ```
 //!
-//! The box holds a zero-sized `Marker`, so it owns no memory of its own
-//! (dropping a `Box` of a zero-sized type deallocates nothing) and its data
-//! pointer is free to point at the object itself: dropping the last
-//! reference (Reussir's drop hook, or `Rc`'s `Drop` here) runs
-//! `Marker::drop` through the vtable, which releases the big elements, and
-//! then frees the `Rc` box, i.e. the whole block (mimalloc frees by address;
-//! the global allocator ignores the layout). Like every array it is
-//! copy-on-write: updated in place when unique.
+//! The FFI contract for an opaque type (an rc pointer whose `u32` count is
+//! at its address; `rc.dec` calls the type's drop hook, which drops the
+//! Rust value) is all Reussir relies on, so `TagVec`'s own `Clone` and
+//! `Drop` do the counting: the last reference releases the big elements and
+//! frees the block (`mi_free`). Like every array it is copy-on-write:
+//! updated in place when unique.
 
 use crate::big::LBig;
-use reussir_rt::rc::Rc;
-use std::any::Any;
 use std::ffi::c_void;
-
-pub type LTagVec = Rc<Box<dyn Any>>;
 
 extern "C" {
     fn mi_malloc(size: usize) -> *mut c_void;
     fn mi_realloc(p: *mut c_void, size: usize) -> *mut c_void;
+    fn mi_free(p: *mut c_void);
     fn mi_good_size(size: usize) -> usize;
 }
 
@@ -49,27 +40,77 @@ extern "C" {
 struct Obj {
     count: u32,
     _pad: u32,
-    marker: std::mem::ManuallyDrop<Box<dyn Any>>,
     len: usize,
     cap: usize,
 }
 
 const HDR: usize = std::mem::size_of::<Obj>();
 
-/// The zero-sized content of the box; its `Drop` releases the big elements
-/// of the object its box points at.
-struct Marker;
+/// A tag vector handle (`LNatArr`, `LIntArr`): owns one reference.
+///
+/// Safety argument for the raw block: every `TagVec` points at a live block
+/// from `alloc` or `grow` (`mi_malloc`/`mi_realloc`, 8-aligned: Reussir
+/// builds mimalloc with `MI_MAX_ALIGN_SIZE=8`, and `Obj` and the words need
+/// 8) of `HDR + 8 * cap` bytes or more, whose first `len <= cap` words are
+/// initialized; the block is freed only by the reference that finds the
+/// count at 1, and moved (`grow`) only through a unique handle, which is
+/// then replaced by the result.
+#[repr(transparent)]
+pub struct TagVec(*mut Obj);
 
-impl Drop for Marker {
+pub type LTagVec = TagVec;
+
+impl TagVec {
+    #[inline(always)]
+    pub fn is_unique(&self) -> bool {
+        unsafe { (*self.0).count == 1 }
+    }
+}
+
+impl Clone for TagVec {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        unsafe { (*self.0).count += 1 };
+        TagVec(self.0)
+    }
+}
+
+impl Drop for TagVec {
+    /// A shared handle is a decrement; the last reference is freed out of
+    /// line (keeps the textures that read an array small enough to inline).
+    #[inline(always)]
     fn drop(&mut self) {
-        let o = self as *mut Marker as *mut Obj;
+        let o = self.0;
         unsafe {
-            for w in std::slice::from_raw_parts(words(o), (*o).len) {
-                if !is_small(*w) {
-                    drop(std::mem::transmute::<usize, LBig>(*w as usize));
-                }
+            let c = (*o).count;
+            if c == 1 {
+                free(o)
+            } else {
+                (*o).count = c - 1;
             }
         }
+    }
+}
+
+impl crate::Release for TagVec {
+    #[inline(always)]
+    fn release(self) {
+        drop(self)
+    }
+}
+
+/// Free a block whose last reference went: release the big elements, then
+/// the block.
+#[cold]
+#[inline(never)]
+extern "C" fn free(o: *mut Obj) {
+    unsafe {
+        for w in std::slice::from_raw_parts(words(o), (*o).len) {
+            if !is_small(*w) {
+                drop(std::mem::transmute::<usize, LBig>(*w as usize));
+            }
+        }
+        mi_free(o as *mut c_void);
     }
 }
 
@@ -92,8 +133,7 @@ fn word_as_big(w: &u64) -> &LBig {
 
 #[inline(always)]
 fn obj(a: &LTagVec) -> *mut Obj {
-    // `Rc` is a transparent pointer to its box, which is the object.
-    unsafe { std::mem::transmute_copy::<LTagVec, *mut Obj>(a) }
+    a.0
 }
 
 #[inline(always)]
@@ -118,13 +158,6 @@ fn bytes_for(cap: usize) -> usize {
     cap.checked_mul(8).and_then(|b| b.checked_add(HDR)).unwrap_or_else(|| oom())
 }
 
-/// Point the box at the object (after allocation or a move by realloc).
-#[inline(always)]
-unsafe fn set_marker(o: *mut Obj) {
-    let b: Box<dyn Any> = Box::from_raw(o as *mut Marker);
-    std::ptr::write(std::ptr::addr_of_mut!((*o).marker), std::mem::ManuallyDrop::new(b));
-}
-
 /// A fresh unique object with room for `cap` words and no elements.
 #[inline(always)]
 fn alloc(cap: usize) -> LTagVec {
@@ -133,38 +166,37 @@ fn alloc(cap: usize) -> LTagVec {
         if o.is_null() {
             oom();
         }
-        std::ptr::write(std::ptr::addr_of_mut!((*o).count), 1);
-        std::ptr::write(std::ptr::addr_of_mut!((*o)._pad), 0);
-        set_marker(o);
-        std::ptr::write(std::ptr::addr_of_mut!((*o).len), 0);
-        std::ptr::write(std::ptr::addr_of_mut!((*o).cap), cap);
-        std::mem::transmute::<*mut Obj, LTagVec>(o)
+        std::ptr::write(o, Obj { count: 1, _pad: 0, len: 0, cap });
+        TagVec(o)
     }
 }
 
 /// Grow a unique object to room for at least `need` words (at least
 /// doubling). The capacity is all of the block: mimalloc's size classes
 /// for small blocks (`mi_good_size`), and powers of two beyond 4 KiB, as a
-/// vector buffer's would be. With the 40-byte header added to a power of
-/// two, large blocks fell just past mimalloc's size steps, and growing a
+/// vector buffer's would be. With the header added to a power of two,
+/// large blocks fell just past mimalloc's size steps, and growing a
 /// 10M-element array peaked 35 MB higher (realloc copies a block's whole
 /// usable size).
 #[cold]
 #[inline(never)]
 extern "C" fn grow(a: LTagVec, need: usize) -> LTagVec {
+    debug_assert!(a.is_unique());
     let o = obj(&a);
+    // The block moves: the unique handle is given up for the result.
     std::mem::forget(a);
     unsafe {
         let want = need.max((*o).cap.saturating_mul(2)).max(4);
         let b = bytes_for(want);
         let bytes = if b > 4096 { b.checked_next_power_of_two().unwrap_or(b) } else { mi_good_size(b) };
+        // `bytes >= b = HDR + 8 * want`, so the new capacity is at least
+        // `want`; realloc keeps the header and the `len` words.
         let n = mi_realloc(o as *mut c_void, bytes) as *mut Obj;
         if n.is_null() {
             oom();
         }
-        set_marker(n);
         (*n).cap = (bytes - HDR) / 8;
-        std::mem::transmute::<*mut Obj, LTagVec>(n)
+        TagVec(n)
     }
 }
 
@@ -179,7 +211,7 @@ extern "C" fn copy_shared(a: LTagVec, extra: usize) -> LTagVec {
     let c = alloc(cap);
     unsafe { copy_words(src, words(obj(&c))) };
     unsafe { (*obj(&c)).len = src.len() };
-    crate::rc_release(a);
+    drop(a);
     c
 }
 
@@ -239,9 +271,14 @@ pub fn with_capacity(n: u64) -> LTagVec {
     alloc(n as usize)
 }
 
-/// `n` copies of a small (odd) word.
+/// `n` copies of a word that owns its reference (a big word: one reference
+/// per copy, the word's own released when `n` is 0).
 #[inline(never)]
 pub fn replicate_word(n: u64, w: u64) -> LTagVec {
+    if !is_small(w) {
+        let b = unsafe { std::mem::transmute::<usize, LBig>(w as usize) };
+        return replicate_big(n, b);
+    }
     crate::array::check_alloc(n, 8);
     let a = alloc(n as usize);
     let o = obj(&a);
@@ -330,7 +367,7 @@ fn set_raw(mut a: LTagVec, i: u64, w: u64) -> LTagVec {
     a
 }
 
-/// Store a small (odd) word at `i`.
+/// Store a word at `i` (a big word's reference moves into the array).
 #[inline(always)]
 pub fn set_word(a: LTagVec, i: u64, w: u64) -> LTagVec {
     set_raw(a, i, w)
@@ -418,7 +455,7 @@ pub fn swap(mut a: LTagVec, i: u64, j: u64) -> LTagVec {
 pub fn append(a: LTagVec, b: LTagVec) -> LTagVec {
     let k = slice(&b).len();
     if k == 0 {
-        crate::rc_release(b);
+        drop(b);
         return a;
     }
     let mut a = a;
@@ -428,7 +465,7 @@ pub fn append(a: LTagVec, b: LTagVec) -> LTagVec {
         copy_words(slice(&b), words(o).add(n));
         (*o).len = n + k;
     }
-    crate::rc_release(b);
+    drop(b);
     a
 }
 
@@ -445,7 +482,7 @@ pub fn extract(a: LTagVec, start: u64, stop: u64) -> LTagVec {
         copy_words(&v[start..stop], words(obj(&c)));
         (*obj(&c)).len = stop - start;
     }
-    crate::rc_release(a);
+    drop(a);
     c
 }
 
@@ -480,10 +517,46 @@ mod tests {
         b.count_ref().get()
     }
 
+    fn count(a: &LTagVec) -> u32 {
+        unsafe { (*obj(a)).count }
+    }
+
     #[test]
     fn layout() {
-        assert_eq!(HDR, 40);
-        assert_eq!(std::mem::size_of::<Box<dyn Any>>(), 16);
+        // Lean's array header: the count word, the size and the capacity.
+        assert_eq!(HDR, 24);
+        assert_eq!(std::mem::size_of::<TagVec>(), 8);
+        assert_eq!(std::mem::offset_of!(Obj, count), 0);
+    }
+
+    #[test]
+    fn handle_counts() {
+        let a = push_word(empty(), 3);
+        assert_eq!(count(&a), 1);
+        let b = a.clone();
+        assert_eq!(count(&a), 2);
+        assert!(!a.is_unique());
+        crate::rc_release(b);
+        assert_eq!(count(&a), 1);
+        assert!(a.is_unique());
+        // A unique array grows in place (realloc) and keeps its words.
+        let mut a = a;
+        for i in 0..5000u64 {
+            a = push_word(a, (i << 1) | 1);
+        }
+        assert_eq!(size(&a), 5001);
+        assert_eq!(word(&a, 0), 3);
+        assert_eq!(word(&a, 5000), (4999 << 1) | 1);
+        assert!(unsafe { (*obj(&a)).cap } >= 5001);
+        assert_eq!(count(&a), 1);
+        // An update of a shared array copies it; the original keeps its
+        // count and contents.
+        let keep = a.clone();
+        let c = set_word(a, 0, 5);
+        assert_eq!(count(&keep), 1);
+        assert_eq!(count(&c), 1);
+        assert_eq!(word(&keep, 0), 3);
+        assert_eq!(word(&c, 0), 5);
     }
 
     #[test]
@@ -516,7 +589,7 @@ mod tests {
         assert_eq!(rc(&b), 3);
         let r = set_word(r, 0, 1);
         assert_eq!(rc(&b), 2);
-        assert_eq!(big(&r, 1).1, b.1);
+        assert_eq!(crate::big::limbs(&big(&r, 1)), crate::big::limbs(&b));
         drop(r);
         assert_eq!(rc(&b), 1);
     }

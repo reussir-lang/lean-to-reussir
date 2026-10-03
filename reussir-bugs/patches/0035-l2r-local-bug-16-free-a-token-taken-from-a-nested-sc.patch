@@ -1,0 +1,236 @@
+From a639ae44b858da08a62a51dd10b65e2963197e80 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 3 Oct 2026 01:33:54 -0400
+Subject: [PATCH] l2r-local: bug 16: free a token taken from a nested scf.if
+ once, in the unique branch
+
+With `--reuse-across-call`, TokenReuse keeps every available token across
+non-tail calls, and frees a token that no allocation reuses at every exit
+it reaches. A post-pass collapses those frees into one free in the unique
+branch of the token's decrement, but only when that branch yields the
+`nullable.create` of the reinterpreted box itself. When the branch takes
+the token from an `scf.if` nested in it (the guard that skips a tagged
+immediate under the special pointer tags, or a nested decrement whose
+token `escapeTrappedTokens` brought out), the frees stayed at the exits.
+lean2rr's IO code nests one match per statement, so the error arm at
+depth d freed about every token made above it: quadratic code. In the
+`loop` of the repro below at 50 statements: 15,650 free records for 49
+reuses, up to 301 tokens carried across one call.
+
+Sink such a token too: when the unique branch yields the result of an
+`scf.if` in that branch with no other use, and the shared branch yields a
+null, free that nullable once at the end of the unique branch (the free
+checks for null, as the frees at the exits did). The token is used by
+nothing but those frees, so freeing it where it is made is equivalent.
+
+reussir-bugs/repros/bug16-nested-io-matches.py through lean2rr
+(L2R_NO_OUTLINE=1, lean2rr's rrc flags, rrc to MLIR's LLVM dialect):
+50 statements: 13,401 deallocation calls -> 646, 174 MB -> 123 MB;
+100: 51,601 -> 1,096, 463 MB -> 127 MB. Whole build through l2r.py
+(rrc time and peak memory, loaded machine, all of this series):
+50: 44 s, 350 MB -> 36 s, 162 MB; 100: 99 s, 1.64 GB -> 45 s, 189 MB;
+same output.
+
+Test: tests/integration/conversion/token_reuse_sink_escaped_free.mlir.
+mutex_cell_drop.mlir and rwlock_cell_drop.mlir: the payload's box is now
+freed before the cell's (both still after the unlock).
+---
+ lib/Transformation/TokenReuse/TokenReuse.cpp  |  20 +++-
+ .../conversion/mutex_cell_drop.mlir           |   4 +-
+ .../conversion/rwlock_cell_drop.mlir          |   4 +-
+ .../token_reuse_sink_escaped_free.mlir        | 108 ++++++++++++++++++
+ 4 files changed, 131 insertions(+), 5 deletions(-)
+ create mode 100644 tests/integration/conversion/token_reuse_sink_escaped_free.mlir
+
+diff --git a/lib/Transformation/TokenReuse/TokenReuse.cpp b/lib/Transformation/TokenReuse/TokenReuse.cpp
+index 707fb91a..439e5f0d 100644
+--- a/lib/Transformation/TokenReuse/TokenReuse.cpp
++++ b/lib/Transformation/TokenReuse/TokenReuse.cpp
+@@ -853,6 +853,12 @@ struct TokenReusePass : public impl::ReussirTokenReusePassBase<TokenReusePass> {
+     // the allocator entirely and the nullable result dies as a dead phi.
+     // Sibling-exit records of the same token collapse into the single sunk
+     // free — the producer dominates every path the records covered.
++    // A token the unique branch takes from an `scf.if` nested in it (the
++    // guard that skips a tagged immediate, a nested decrement whose token
++    // was escaped) is sunk the same way, as a free of that nullable at the
++    // end of the branch: under `reuse-across-call` tokens stay available
++    // across every later call, and such a token, not reused, was freed at
++    // every exit after it (quadratic code in the nesting of matches).
+     llvm::DenseSet<mlir::Value> sunkTokens;
+     for (const auto &free : frees) {
+       auto scfIf = llvm::dyn_cast_if_present<mlir::scf::IfOp>(
+@@ -865,14 +871,26 @@ struct TokenReusePass : public impl::ReussirTokenReusePassBase<TokenReusePass> {
+             llvm::cast<mlir::OpResult>(free.token).getResultNumber();
+         mlir::Operation *thenYield =
+             scfIf.getThenRegion().back().getTerminator();
++        mlir::Value yielded = thenYield->getOperand(index);
+         auto nonNull = llvm::dyn_cast_if_present<ReussirNullableCreateOp>(
+-            thenYield->getOperand(index).getDefiningOp());
++            yielded.getDefiningOp());
+         if (nonNull && nonNull.getPtr()) {
+           rewriter.setInsertionPoint(thenYield);
+           ReussirTokenFreeOp::create(rewriter, thenYield->getLoc(),
+                                      nonNull.getPtr());
+           continue;
+         }
++        auto elseNull = llvm::dyn_cast_if_present<ReussirNullableCreateOp>(
++            scfIf.getElseRegion().back().getTerminator()->getOperand(index)
++                .getDefiningOp());
++        auto nested =
++            llvm::dyn_cast_if_present<mlir::scf::IfOp>(yielded.getDefiningOp());
++        if (nested && nested->getBlock() == thenYield->getBlock() &&
++            yielded.hasOneUse() && elseNull && !elseNull.getPtr()) {
++          rewriter.setInsertionPoint(thenYield);
++          ReussirTokenFreeOp::create(rewriter, thenYield->getLoc(), yielded);
++          continue;
++        }
+         // Unexpected branch shape: fall back to the guarded top-level free.
+         sunkTokens.erase(free.token);
+       }
+diff --git a/tests/integration/conversion/mutex_cell_drop.mlir b/tests/integration/conversion/mutex_cell_drop.mlir
+index 4b2dfccd..defd3792 100644
+--- a/tests/integration/conversion/mutex_cell_drop.mlir
++++ b/tests/integration/conversion/mutex_cell_drop.mlir
+@@ -37,8 +37,8 @@ module {
+   // LLVM: %[[INNER:.+]] = load ptr, ptr %[[SLOT]]
+   // LLVM: atomicrmw sub ptr %[[INNER]], i32 1
+   // LLVM: atomicrmw xchg ptr %[[STATE]], i32 0
+-  // LLVM: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 24)
+-  // LLVM: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 16)
++  // LLVM-DAG: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 24)
++  // LLVM-DAG: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 16)
+   func.func @mutex_cell_drop(%cell: !mutex_rc) {
+     %t = reussir.rc.dec (%cell : !mutex_rc) : !reussir.nullable<!reussir.token<align: 8, size: 24>>
+     reussir.token.free (%t : !reussir.nullable<!reussir.token<align: 8, size: 24>>)
+diff --git a/tests/integration/conversion/rwlock_cell_drop.mlir b/tests/integration/conversion/rwlock_cell_drop.mlir
+index 5098e45d..8ad82b8f 100644
+--- a/tests/integration/conversion/rwlock_cell_drop.mlir
++++ b/tests/integration/conversion/rwlock_cell_drop.mlir
+@@ -37,8 +37,8 @@ module {
+   // LLVM: %[[INNER:.+]] = load ptr, ptr %[[SLOT]]
+   // LLVM: atomicrmw sub ptr %[[INNER]], i32 1
+   // LLVM: atomicrmw sub ptr %{{.+}}, i32 1073741823 release
+-  // LLVM: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 24)
+-  // LLVM: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 16)
++  // LLVM-DAG: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 24)
++  // LLVM-DAG: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 16)
+   func.func @rwlock_cell_drop(%cell: !rwlock_rc) {
+     %t = reussir.rc.dec (%cell : !rwlock_rc) : !reussir.nullable<!reussir.token<align: 8, size: 24>>
+     reussir.token.free (%t : !reussir.nullable<!reussir.token<align: 8, size: 24>>)
+diff --git a/tests/integration/conversion/token_reuse_sink_escaped_free.mlir b/tests/integration/conversion/token_reuse_sink_escaped_free.mlir
+new file mode 100644
+index 00000000..8711b7cf
+--- /dev/null
++++ b/tests/integration/conversion/token_reuse_sink_escaped_free.mlir
+@@ -0,0 +1,108 @@
++// RUN: %reussir-opt %s -reussir-token-reuse | %FileCheck %s
++// RUN: %reussir-opt %s '-reussir-token-reuse=reuse-across-call=true' | %FileCheck %s
++
++// A token no allocation reuses is freed once, where it is made: in the
++// unique branch of its decrement. That held for a decrement's own token;
++// a token escaped from a decrement nested in another (a member released
++// with its owner) was instead freed after the owner, and under
++// `reuse-across-call`, where tokens stay available across calls, at every
++// exit after it: quadratic code in the nesting of matches. It is now freed
++// at the end of the owner's unique branch, as is a token that branch takes
++// from the guard that skips a tagged immediate (special pointer tags).
++
++!inner = !reussir.record<compound "pair" {i64, i64}>
++!rcInner = !reussir.rc<!inner>
++!outer = !reussir.record<compound "node" {!inner, i64}>
++!rcOuter = !reussir.rc<!outer>
++!tk = !reussir.token<align: 8, size: 24>
++
++module @test attributes {dlti.dl_spec = #dlti.dl_spec<#dlti.dl_entry<i64, dense<64> : vector<2xi64>>, #dlti.dl_entry<i8, dense<8> : vector<2xi64>>, #dlti.dl_entry<!llvm.ptr, dense<64> : vector<4xi64>>, #dlti.dl_entry<"dlti.endianness", "little">>, llvm.data_layout = "e-m:e-i64:64-n8:16:32:64-S128"} {
++    // CHECK-LABEL: func.func @sink_escaped
++    // CHECK: scf.if
++    // CHECK: %[[MT:.+]] = scf.if
++    // CHECK: } {reussir.expanded_decrement}
++    // CHECK: %[[TOK:.+]] = reussir.rc.reinterpret
++    // CHECK-DAG: reussir.token.free(%[[TOK]] : !reussir.token<align : 8, size : 24>)
++    // CHECK-DAG: reussir.token.free(%[[MT]] : !reussir.nullable<!reussir.token<align : 8, size : 24>>)
++    // CHECK: scf.yield
++    // CHECK: } {reussir.expanded_decrement}
++    // CHECK-NOT: reussir.token.free
++    // CHECK: call @work
++    // CHECK-NOT: reussir.token.free
++    // CHECK: return
++    func.func private @work()
++    func.func @sink_escaped(%o: !rcOuter, %flag: i1) {
++        %prev = reussir.rc.fetch (%o : !rcOuter) : index
++        %c1 = arith.constant 1 : index
++        %isOne = arith.cmpi eq, %prev, %c1 : index
++        %unique = reussir.expect (%isOne : i1, true) : i1
++        %t = scf.if %unique -> (!reussir.nullable<!tk>) {
++            %ref = reussir.rc.borrow (%o : !rcOuter) : !reussir.ref<!outer>
++            %slot = reussir.ref.project (%ref : !reussir.ref<!outer>) [0] : !reussir.ref<!rcInner>
++            %m = reussir.ref.load (%slot : !reussir.ref<!rcInner>) : !rcInner
++            %mprev = reussir.rc.fetch (%m : !rcInner) : index
++            %misOne = arith.cmpi eq, %mprev, %c1 : index
++            %munique = reussir.expect (%misOne : i1, true) : i1
++            %mt = scf.if %munique -> (!reussir.nullable<!tk>) {
++                %mtok = reussir.rc.reinterpret (%m : !rcInner) : !tk
++                %mnn = reussir.nullable.create (%mtok : !tk) : !reussir.nullable<!tk>
++                scf.yield %mnn : !reussir.nullable<!tk>
++            } else {
++                %mdec = arith.subi %mprev, %c1 : index
++                reussir.rc.set (%m : !rcInner, %mdec : index)
++                %mnull = reussir.nullable.create : !reussir.nullable<!tk>
++                scf.yield %mnull : !reussir.nullable<!tk>
++            } {reussir.expanded_decrement}
++            %tok = reussir.rc.reinterpret (%o : !rcOuter) : !tk
++            %nn = reussir.nullable.create (%tok : !tk) : !reussir.nullable<!tk>
++            scf.yield %nn : !reussir.nullable<!tk>
++        } else {
++            %dec = arith.subi %prev, %c1 : index
++            reussir.rc.set (%o : !rcOuter, %dec : index)
++            %null = reussir.nullable.create : !reussir.nullable<!tk>
++            scf.yield %null : !reussir.nullable<!tk>
++        } {reussir.expanded_decrement}
++        func.call @work() : () -> ()
++        scf.if %flag {
++            func.call @work() : () -> ()
++        }
++        return
++    }
++
++    // CHECK-LABEL: func.func @sink_guarded
++    // CHECK: %[[G:.+]] = scf.if %arg1
++    // CHECK: reussir.rc.reinterpret
++    // CHECK: scf.yield
++    // CHECK-NEXT: }
++    // CHECK-NEXT: reussir.token.free(%[[G]] : !reussir.nullable<!reussir.token<align : 8, size : 24>>)
++    // CHECK-NEXT: scf.yield %[[G]]
++    // CHECK: } {reussir.expanded_decrement}
++    // CHECK-NOT: reussir.token.free
++    // CHECK: call @work
++    // CHECK-NOT: reussir.token.free
++    // CHECK: return
++    func.func @sink_guarded(%o: !rcOuter, %immediate: i1) {
++        %prev = reussir.rc.fetch (%o : !rcOuter) : index
++        %c1 = arith.constant 1 : index
++        %isOne = arith.cmpi eq, %prev, %c1 : index
++        %unique = reussir.expect (%isOne : i1, true) : i1
++        %t = scf.if %unique -> (!reussir.nullable<!tk>) {
++            %g = scf.if %immediate -> (!reussir.nullable<!tk>) {
++                %none = reussir.nullable.create : !reussir.nullable<!tk>
++                scf.yield %none : !reussir.nullable<!tk>
++            } else {
++                %tok = reussir.rc.reinterpret (%o : !rcOuter) : !tk
++                %nn = reussir.nullable.create (%tok : !tk) : !reussir.nullable<!tk>
++                scf.yield %nn : !reussir.nullable<!tk>
++            }
++            scf.yield %g : !reussir.nullable<!tk>
++        } else {
++            %dec = arith.subi %prev, %c1 : index
++            reussir.rc.set (%o : !rcOuter, %dec : index)
++            %null = reussir.nullable.create : !reussir.nullable<!tk>
++            scf.yield %null : !reussir.nullable<!tk>
++        } {reussir.expanded_decrement}
++        func.call @work() : () -> ()
++        return
++    }
++}
+-- 
+2.43.0
+

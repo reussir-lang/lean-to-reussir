@@ -50,14 +50,34 @@ where
     | .cases cs => cs.alts.foldl (fun acc alt => go alt.getCode acc) acc
     | _ => acc
 
+/-- The code that the function of an outlined join point with body `c`
+contains: `c`, and the bodies (`bodies`) of the join points it jumps to that
+are not outlined, transitively. Those are inlined at the jump (J1 or J1′; a
+J2 join point is never jumped to from an outlined body). -/
+partial def withInlinedJps (bodies : Std.HashMap FVarId (Code .pure)) (outlined : FVarIdSet) (c : Code .pure) :
+    Array (Code .pure) := Id.run do
+  let mut out := #[c]
+  let mut seen : FVarIdSet := {}
+  let mut todo := (jumpsIn c {}).toArray
+  while let some j := todo.back? do
+    todo := todo.pop
+    if seen.contains j || outlined.contains j then continue
+    seen := seen.insert j
+    if let some b := bodies[j]? then
+      out := out.push b
+      todo := todo ++ (jumpsIn b {}).toArray
+  return out
+
 /-- The state machine of declaration `d` (body `body`, outlined join points
 `outlined`, parameter names `pnames`): J4 when an outlined join point
-tail-calls the declaration, so that a loop passes through it. (Other calls
-need no state machine; going through its entry wrapper would only cost an
-allocation per call.) -/
+tail-calls the declaration, so that a loop passes through it, also from a
+join point inlined into it. (Other calls need no state machine; going
+through its entry wrapper would only cost an allocation per call.) -/
 def stateMachinePlan (d : Decl .pure) (body : Code .pure) (outlined : FVarIdSet) (pnames : Array String) :
     Option StateMachine :=
-  let callsBack := outlinedBodies body outlined |>.any (hasSelfTailCall d.name d.params.size)
+  let bodies := jpBodiesOf body
+  let callsBack := outlinedBodies body outlined |>.any fun c =>
+    (withInlinedJps bodies outlined c).any (hasSelfTailCall d.name d.params.size)
   if !callsBack || d.params.isEmpty then none
   else
     let base := fnName d.name

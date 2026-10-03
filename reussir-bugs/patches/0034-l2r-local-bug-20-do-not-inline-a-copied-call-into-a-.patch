@@ -1,0 +1,231 @@
+From ac5d1d85566c8789890d22f61de67529046950cf Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 3 Oct 2026 00:34:58 -0400
+Subject: [PATCH] l2r-local: bug 20: do not inline a copied call into a
+ recursive SCC
+
+The default inliner runs MLIR's SCC inliner for one iteration with a cap
+of 256 operations on callees, and its description says this unrolls
+recursion one level. But within the iteration MLIR's inliner also inlines
+the calls that an inlining copies into the caller, and stops a chain only
+when a callee repeats on it (its inline history). A call into a recursive
+SCC thus got every chain of distinct members of the SCC inlined, a growth
+that multiplies the fan-out of the SCC along each chain. lean2rr's
+conversions between representations of function types, unboxing and
+application functions call each other this way: on its StateT tower
+(reussir-bugs/repros/bug20-statet-tower.lean, built without lean2rr's
+workaround, which keeps these functions out of the inliner) the module grew
+from 16,980 operations to 190,318 in the inliner, through 4792 inlines of
+which 3833 were of copied calls (2326 into recursive callees).
+
+Mark each call with the name of the function it is written in before
+inlining (`reussir.inliner_home`, removed after), and have the
+profitability check refuse a copied call (marked with another function)
+whose callee lies on a cycle of the call graph. Calls the program wrote
+are inlined as before, so recursion unrolls one level, and a copied call
+into a non-recursive callee is inlined as before.
+
+The tower without lean2rr's workaround: 16,980 -> 67,238 operations after
+the inliner. rrc (through l2r.py, back to back, loaded machine): 236 s,
+1.8 GB without this series -> 70 s, 0.98 GB with it. With the workaround,
+peak memory is unchanged (226 MB).
+
+Also register the pass in reussir-opt.
+Test: tests/integration/conversion/default_inliner_recursive_scc.mlir
+(fails without the rule: more copies of the SCC's members).
+---
+ include/Reussir/Transformation/Passes.td      | 10 +++
+ .../DefaultInliner/DefaultInliner.cpp         | 46 ++++++++++++--
+ .../default_inliner_recursive_scc.mlir        | 61 +++++++++++++++++++
+ tool/reussir-opt/main.cpp                     |  3 +
+ 4 files changed, 116 insertions(+), 4 deletions(-)
+ create mode 100644 tests/integration/conversion/default_inliner_recursive_scc.mlir
+
+diff --git a/include/Reussir/Transformation/Passes.td b/include/Reussir/Transformation/Passes.td
+index 12a6f8cb..1928a282 100644
+--- a/include/Reussir/Transformation/Passes.td
++++ b/include/Reussir/Transformation/Passes.td
+@@ -288,6 +288,16 @@ def ReussirDefaultInlinerPass
+     duplicated. The cap lets small helpers inline everywhere (where the
+     rc-pairing passes profit from seeing through the call) while the big
+     already-inlined bodies stay shared.
++
++    The third part bounds the one iteration itself. MLIR's inliner also
++    inlines the calls that an inlining copies into the caller, in the same
++    iteration, and stops a chain only when a callee repeats on it: a call
++    into a recursive SCC got every chain of distinct members of the SCC
++    inlined, a growth that multiplies the SCC's fanout along each chain
++    (lean2rr's conversions between function representations: a module of
++    17k operations became 190k). A call that an inlining copied in is
++    therefore inlined only if its callee is not recursive, which is what
++    makes recursion unroll one level.
+   }];
+   let options =
+       [Option<"maxCalleeOps", "max-callee-ops", "unsigned", "256",
+diff --git a/lib/Transformation/DefaultInliner/DefaultInliner.cpp b/lib/Transformation/DefaultInliner/DefaultInliner.cpp
+index 1ca4efda..05eaa16b 100644
+--- a/lib/Transformation/DefaultInliner/DefaultInliner.cpp
++++ b/lib/Transformation/DefaultInliner/DefaultInliner.cpp
+@@ -22,7 +22,13 @@
+ 
+ #include "Reussir/Transformation/Passes.h"
+ 
++#include <utility>
++
++#include <llvm/ADT/DenseSet.h>
++#include <llvm/ADT/SCCIterator.h>
+ #include <mlir/Analysis/CallGraph.h>
++#include <mlir/IR/SymbolTable.h>
++#include <mlir/Interfaces/CallInterfaces.h>
+ #include <mlir/Pass/Pass.h>
+ #include <mlir/Pass/PassManager.h>
+ #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
+@@ -60,6 +66,17 @@ bool calleeIsSmall(mlir::Region *callable, unsigned limit) {
+   return !result.wasInterrupted();
+ }
+ 
++// Marks a call with the name of the function it is written in, so that a
++// call an inlining copied in (still marked with the function it came from)
++// can be told from the calls of the function itself.
++constexpr llvm::StringLiteral kHomeAttr = "reussir.inliner_home";
++
++bool copiedByInlining(mlir::Operation *call) {
++  auto home = call->getAttrOfType<mlir::StringAttr>(kHomeAttr);
++  auto function = call->getParentOfType<mlir::SymbolOpInterface>();
++  return home && function && home != function.getNameAttr();
++}
++
+ struct DefaultInlinerPass
+     : public impl::ReussirDefaultInlinerPassBase<DefaultInlinerPass> {
+   using Base::Base;
+@@ -72,21 +89,42 @@ struct DefaultInlinerPass
+     const mlir::InlinerConfig config(addCanonicalizerWithoutRegionSimplification,
+                                      /*maxInliningIterations=*/1);
+     mlir::CallGraph &callGraph = getAnalysis<mlir::CallGraph>();
++    // The callables on a cycle of the call graph.
++    llvm::DenseSet<const mlir::CallGraphNode *> recursive;
++    for (auto scc = llvm::scc_begin(&std::as_const(callGraph)); !scc.isAtEnd();
++         ++scc)
++      if (scc.hasCycle())
++        recursive.insert(scc->begin(), scc->end());
++    getOperation()->walk([](mlir::CallOpInterface call) {
++      if (auto function = call->getParentOfType<mlir::SymbolOpInterface>())
++        call->setAttr(kHomeAttr, function.getNameAttr());
++    });
+     // Nested (callable-optimizer) pipelines run through the pass's own
+     // instrumented pipeline runner. Profitability caps the callee's size:
+     // bottom-up processing means an uncapped policy re-copies each level's
+     // fully-inlined bodies into every caller, growing the module
+-    // geometrically in call-tree depth (see the pass description).
++    // geometrically in call-tree depth (see the pass description). Within
++    // its one iteration, the inliner also inlines the calls an inlining
++    // copied in, stopping a chain only when a callee repeats on it: a call
++    // into a recursive SCC then gets every chain of distinct members of the
++    // SCC inlined. Such a copied call is inlined only if its callee is not
++    // recursive, so recursion unrolls one level.
+     mlir::Inliner inliner(
+         getOperation(), callGraph, *this, getAnalysisManager(),
+         [this](mlir::Pass &, mlir::OpPassManager &pipeline,
+                mlir::Operation *op) { return runPipeline(pipeline, op); },
+-        config, [this](const mlir::Inliner::ResolvedCall &call) {
+-          return calleeIsSmall(call.targetNode->getCallableRegion(),
+-                               maxCalleeOps);
++        config, [&](const mlir::Inliner::ResolvedCall &call) {
++          if (!calleeIsSmall(call.targetNode->getCallableRegion(),
++                             maxCalleeOps))
++            return false;
++          mlir::CallOpInterface callOp = call.call;
++          return !recursive.contains(call.targetNode) ||
++                 !copiedByInlining(callOp.getOperation());
+         });
+     if (mlir::failed(inliner.doInlining()))
+       signalPassFailure();
++    getOperation()->walk(
++        [](mlir::CallOpInterface call) { call->removeAttr(kHomeAttr); });
+   }
+ };
+ 
+diff --git a/tests/integration/conversion/default_inliner_recursive_scc.mlir b/tests/integration/conversion/default_inliner_recursive_scc.mlir
+new file mode 100644
+index 00000000..d213daea
+--- /dev/null
++++ b/tests/integration/conversion/default_inliner_recursive_scc.mlir
+@@ -0,0 +1,61 @@
++// The default inliner unrolls recursion one level: a call into a recursive
++// SCC that an inlining copied in is not inlined in turn. Before, the inliner
++// followed the copied calls through every chain of distinct members of the
++// SCC (it only stops a chain when a callee repeats on it).
++
++// RUN: %reussir-opt %s --reussir-default-inliner | %FileCheck %s
++
++module {
++  // @a -> @b -> @c -> @a: one recursive SCC of small functions.
++  func.func private @a(%x: i64) -> i64 {
++    %zero = arith.constant 0 : i64
++    %one = arith.constant 1 : i64
++    %done = arith.cmpi eq, %x, %zero : i64
++    %r = scf.if %done -> (i64) {
++      scf.yield %zero : i64
++    } else {
++      %y = arith.subi %x, %one : i64
++      %z = func.call @b(%y) : (i64) -> i64
++      scf.yield %z : i64
++    }
++    return %r : i64
++  }
++  func.func private @b(%x: i64) -> i64 {
++    %two = arith.constant 2 : i64
++    %y = arith.muli %x, %two : i64
++    %z = func.call @c(%y) : (i64) -> i64
++    return %z : i64
++  }
++  func.func private @c(%x: i64) -> i64 {
++    %three = arith.constant 3 : i64
++    %y = arith.divui %x, %three : i64
++    %z = func.call @a(%y) : (i64) -> i64
++    return %z : i64
++  }
++
++  // Every call the program wrote is inlined once (@c, then @a, have one use
++  // left and move into their caller), and every call that came with an
++  // inlined body stays a call: @b keeps one copy of each member and its
++  // call to itself, and @main one copy of @a and of what @a holds.
++  // CHECK-LABEL: func.func private @b
++  // CHECK: arith.muli
++  // CHECK: arith.divui
++  // CHECK: arith.cmpi
++  // CHECK-NOT: arith.cmpi
++  // CHECK: call @b
++  // CHECK-NOT: call
++  // CHECK: return
++  // CHECK-LABEL: func.func @main
++  // CHECK: arith.cmpi
++  // CHECK: arith.muli
++  // CHECK: arith.divui
++  // CHECK: arith.cmpi
++  // CHECK-NOT: arith.cmpi
++  // CHECK: call @b
++  // CHECK-NOT: call
++  // CHECK: return
++  func.func @main(%x: i64) -> i64 {
++    %r = func.call @a(%x) : (i64) -> i64
++    return %r : i64
++  }
++}
+diff --git a/tool/reussir-opt/main.cpp b/tool/reussir-opt/main.cpp
+index bcf913b2..45bb007c 100644
+--- a/tool/reussir-opt/main.cpp
++++ b/tool/reussir-opt/main.cpp
+@@ -114,6 +114,9 @@ int main(int argc, char **argv) {
+   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+     return reussir::createReussirSCCPPass();
+   });
++  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
++    return reussir::createReussirDefaultInlinerPass();
++  });
+   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+     return reussir::createReussirSpecialPointerTagPass();
+   });
+-- 
+2.43.0
+

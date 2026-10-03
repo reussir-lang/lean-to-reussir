@@ -7,7 +7,7 @@ import LeanToReussir.RR
 # Outlining deep and long function bodies
 
 rrc's per-function analyses grow faster than linearly in two shapes of
-code that Lean programs produce routinely (docs/reussir-bugs.md, bugs 16
+code that Lean programs produce routinely (reussir-bugs/, bugs 16
 and 17):
 - nesting: every IO bind is a `match` on the action's result whose `ok` arm
   holds the rest of the function, so a `main` of N statements nests N
@@ -449,7 +449,7 @@ mutual
 end
 
 /-- Field types of the variants of the enums declared by `items` and by the
-prelude's source (`enum [value] Nat { Small(u64), Big(LBig) }`). -/
+prelude's source (`enum [value] L2RUnit { u }`). -/
 def variantTable (items : Array Item) (prelude : String) : Std.HashMap (String × String) (Array Ty) := Id.run do
   let mut out : Std.HashMap (String × String) (Array Ty) := {}
   for it in items do

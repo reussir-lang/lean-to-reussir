@@ -26,6 +26,60 @@ where
     let (bound, acc) := b.lets.foldl (fun (bound, acc) (x, _, e) => (bound.insert x, rrFreeVars e bound acc)) (bound, acc)
     rrFreeVars b.result bound acc
 
+/-- The number of constructors from which the release of an inductive's
+value is wide: rrc expands every release of an enum in line into a match
+over its variants. -/
+def wideReleaseCtors : Nat := 8
+
+/-- Whether rrc's release of a value of type `t` is wide: `t` is an
+inductive with constructors that hold fields, at least `wideReleaseCtors` of
+them. -/
+def hasWideRelease (t : RR.Ty) : LowerM Bool := do
+  let .named n := t | return false
+  let some info := (← get).typeInfos[n]? | return false
+  return info.shape == .enum && info.ctorOrder.size ≥ wideReleaseCtors
+
+/-- The wildcard arm of a `match` that covers two or more constructors
+releases out of line (`let us = l2r_sink<T>(v);`, `l2r_sink` in the
+prelude, kept out of rrc's inliner) the values of wide release
+(`hasWideRelease`) that the other arms use and it does not.
+
+Why: rrc copies a wildcard arm into every constructor it covers, and in
+each copy releases the values the other arms use, each in line, a match
+over the variants of its type. A derived `BEq`, `DecidableEq` or `Ord` on
+an inductive with N constructors matches `y` inside each of the N arms of a
+match on `x`, with an unreachable wildcard (the constructor indices were
+compared first), while the fields of `x` are held; a hand-written
+two-scrutinee equality has the same shape with a `_, _ => false` arm. That
+is N arms, N - 1 copies each, an N-variant release of each held field of
+the inductive's type in every copy: N^3 code, over which rrc's SCCP then
+takes superlinear time (40 constructors: a 9-minute build, round-6 finding
+PRG6-02). Out of line, a copy makes one call per such value. The value is
+released at the arm's entry as before, only by the call; the other arms are
+unchanged (they use the value as before), and so is the scrutinee, whose
+release in a copy knows its constructor and is small. -/
+def sinkWildcardHeld (ctx : CodeCtx) (scrut : String) (nCtors : Nat) (arms : Array RR.Arm) :
+    LowerM (Array RR.Arm) := do
+  let some w := arms.findIdx? (·.ctor.isNone) | return arms
+  let some wild := arms[w]? | return arms
+  -- Constructors the wildcard covers: rrc's copies of it.
+  if nCtors - (arms.size - 1) < 2 then return arms
+  let varTys : Std.HashMap String RR.Ty := ctx.vars.fold (fun m _ (n, t) => m.insert n t) {}
+  let freeIn (a : RR.Arm) (acc : Std.HashSet String) : Std.HashSet String :=
+    rrFreeVars.blockFreeVars a.body (a.binders.foldl (fun b x => match x with | some x => b.insert x | none => b) {}) acc
+  let own := freeIn wild {}
+  let mut used : Std.HashSet String := {}
+  for h : j in [:arms.size] do
+    if j != w then used := freeIn arms[j] used
+  let mut sinks := #[]
+  for n in used.toArray.qsort (· < ·) do
+    if n == scrut || own.contains n then continue
+    let some t := varTys[n]? | continue
+    unless ← hasWideRelease t do continue
+    sinks := sinks.push (← fresh "us", some (RR.Ty.named "u64"), RR.Expr.call "l2r_sink" #[t] #[.var n])
+  if sinks.isEmpty then return arms
+  return arms.set! w { wild with body := { wild.body with lets := sinks ++ wild.body.lets } }
+
 section
 variable (H : LowerHooks)
 
@@ -125,9 +179,14 @@ mutual
         let body ← lowerCode bodyCtx outlined retTy d.value
         let bound := pnames.foldl (·.insert ·) ({} : Std.HashSet String)
         let free := (rrFreeVars.blockFreeVars body bound {}).toArray.qsort (· < ·)
-        let varTys : Std.HashMap String RR.Ty := ctx.vars.fold (fun m _ (n, t) => m.insert n t) {}
+        -- The variables in scope: those `vars` names, and those captured
+        -- by the outlined join points in scope, which the body's jumps to
+        -- them pass by name even where `vars` names them differently.
+        let varTys : Std.HashMap String RR.Ty := ctx.vars.fold (fun m _ (n, t) => m.insert n t) ctx.captured
         let captured := free.filter varTys.contains
-        let fparams := captured.map (fun n => (n, varTys.getD n .unit)) ++ pnames.zip ptys
+        let capturedTys := captured.map fun n => (n, varTys.getD n .unit)
+        let fparams := capturedTys ++ pnames.zip ptys
+        let ctx := { ctx with captured := capturedTys.foldl (fun m (n, t) => m.insert n t) ctx.captured }
         if let some sm := ctx.sm then
           -- J4: a variant of the state machine.
           let variant ← fresh "j"
@@ -136,28 +195,32 @@ mutual
         let fn ← fresh "jp_"
         modify fun s => { s with fns := s.fns.push (.fn fn fparams retTy body) }
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.call fn captured) } outlined retTy k
-      else if (countJumps k {}).getD d.fvarId 0 ≤ 1 ||
-          (H.duplicateJp d && !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined) then
-        -- J1, or a small join point that is not J2: its body at each jump.
-        lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.inline d.params d.value) } outlined retTy k
       else
-        -- J2: the scope computes the join point's arguments.
-        let resTy ← match ptys.size with
-          | 0 => pure RR.Ty.unit
-          | 1 => pure ptys[0]!
-          | _ => pure (RR.Ty.named (← tupleType ptys))
-        let scope ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.yield ptys) } outlined resTy k
-        let r ← fresh "jv"
-        let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[(r, some resTy, .block scope)]
-        let mut ctx' := ctx
-        for h : i in [:d.params.size] do
-          let p := d.params[i]
-          let x ← fresh "y"
-          let e := if ptys.size == 1 then RR.Expr.var r else .field (.var r) i
-          lets := lets.push (x, some ptys[i]!, e)
-          ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ptys[i]!) }
-        let b ← lowerCode ctx' outlined retTy d.value
-        return { b with lets := lets ++ b.lets }
+        let jumps := (countJumps k {}).getD d.fvarId 0
+        if jumps ≤ 1 || (H.duplicateJp { bodies := ctx.jpBodies, single := ctx.jpSingle, loop := ctx.loop } d jumps &&
+            !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined) then
+          -- J1, or a small join point that is not J2: its body at each jump.
+          let jpSingle := if jumps ≤ 1 then ctx.jpSingle.insert d.fvarId else ctx.jpSingle
+          lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.inline d.params d.value), jpSingle }
+            outlined retTy k
+        else
+          -- J2: the scope computes the join point's arguments.
+          let resTy ← match ptys.size with
+            | 0 => pure RR.Ty.unit
+            | 1 => pure ptys[0]!
+            | _ => pure (RR.Ty.named (← tupleType ptys))
+          let scope ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.yield ptys) } outlined resTy k
+          let r ← fresh "jv"
+          let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[(r, some resTy, .block scope)]
+          let mut ctx' := ctx
+          for h : i in [:d.params.size] do
+            let p := d.params[i]
+            let x ← fresh "y"
+            let e := if ptys.size == 1 then RR.Expr.var r else .field (.var r) i
+            lets := lets.push (x, some ptys[i]!, e)
+            ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ptys[i]!) }
+          let b ← lowerCode ctx' outlined retTy d.value
+          return { b with lets := lets ++ b.lets }
     | .fun d k _ =>
       -- Lambda lifting normally removes local functions; lower defensively.
       let ptys ← d.params.mapM (lowerType ·.type)
@@ -281,7 +344,7 @@ mutual
             | some k => lowerAlt ctx outlined retTy k
             | none => pure (.ofExpr (.call "l2r_unreachable" #[retTy] #[]))
           arms := arms.push { ty := tn, ctor := none, binders := #[], body }
-        return .mtch (.var scrut) arms
+        return .mtch (.var scrut) (← sinkWildcardHeld ctx scrut info.ctorOrder.size arms)
     | t => throwError "lean2rr: cases on value of type {t.render} ({cs.typeName})"
 
   /-- Lower the code of an alternative, after its fields are bound (a hook
@@ -307,12 +370,13 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
     let block ← processOutputBody (pnames.zip ptys) ret
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
     return
-  let outlined := chooseOutlined H.duplicateJp body
+  let loop := ((← read).callCycles.find? d.name).getD {}
+  let outlined := chooseOutlined H.duplicateJp loop body
   -- J4: the declaration as one state machine when an outlined join point
   -- calls it back in tail position (`LowerHooks.stateMachine`).
   let sm? := H.stateMachine.plan d body outlined pnames
   modify fun s => { s with smArms := #[] }
-  let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm? }
+  let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm?, loop }
   let block ← try lowerCode H ctx outlined ret body
     catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
   if let some sm := sm? then

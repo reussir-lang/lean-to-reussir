@@ -263,12 +263,23 @@ impl Pending {
         fire(self.ready);
     }
     fn cancel(self) {
+        fire(self.cancel_here());
+    }
+    /// Cancel, returning the promise for the caller to drop (its
+    /// continuation does nothing).
+    fn cancel_here(self) -> LPromise {
         let o = op(&self.op);
         o.done = true;
         o.canceled = true;
-        fire(self.ready);
+        self.ready
     }
 }
+
+/// Promises a primitive gave up, for its caller to drop once the primitive
+/// has returned (`timer_stop`; one, the canceled operation's, for
+/// `sock_cancel_recv` and `tcp_cancel_accept`): the continuation of a
+/// canceled operation, then the program's promise.
+pub type GivenUp = [Option<LPromise>; 2];
 
 /// Complete operation `o` (its promise `r`) now: the continuation runs on
 /// the event loop's context (as a libuv callback on its next iteration).
@@ -382,11 +393,13 @@ pub fn process_due(now: Instant) {
 /// The scheduler has nothing else to do: wait (at most `timeout`; without
 /// one, until something happens) for the timers, sockets and signals the
 /// event loop watches, and handle what happens. False if it watches
-/// nothing (nothing can happen here).
+/// nothing (nothing can happen here). Completions waiting to be delivered
+/// make the event loop's context able to run, and then nothing is waited
+/// for; while that context waits for something else (inside a `sync`
+/// continuation), they wait for it, and this waits as usual.
 pub fn wait(timeout: Option<Duration>) -> bool {
     let r = reactor();
-    if !r.fired.is_empty() {
-        sched::wake_evloop();
+    if !r.fired.is_empty() && sched::wake_evloop() {
         return true;
     }
     if r.timers.is_empty() && r.sockets.is_empty() && r.signals.is_empty() {
@@ -575,24 +588,26 @@ fn remove_timer(h: &LHandle) {
     reactor().timers.retain(|x| !same(x, h));
 }
 
-/// `reset`: a running timer starts counting again.
+/// `reset`: a running timer starts counting again (`uv_timer_start`, also
+/// after a period-0 timer fired its one tick).
 pub fn timer_reset(h: &LHandle) {
     let t = timer(h);
     if t.state == RUNNING && t.signum == 0 {
         t.due = Instant::now() + Duration::from_millis(t.timeout);
+        add_timer(h);
     }
 }
 
 /// `stop`: the current promise is dropped unresolved, and a running timer
-/// finishes.
-pub fn timer_stop(h: &LHandle) {
+/// finishes. The promise (and the continuation that held it) are returned:
+/// the caller drops them once the primitive has returned
+/// (`l2r_shim_timer_ctl_h`), on its own context, as natively
+/// `lean_uv_timer_stop` releases the promise on the calling thread (its
+/// `sync` dependents run there, before `stop` returns).
+pub fn timer_stop(h: &LHandle) -> GivenUp {
     let t = timer(h);
-    if let Some(old) = t.promise.take() {
-        release(old);
-    }
-    if let Some(p) = t.pending.take() {
-        p.cancel();
-    }
+    let old = t.promise.take();
+    let r = t.pending.take().map(Pending::cancel_here);
     if t.state == RUNNING {
         t.state = FINISHED;
         if t.signum != 0 {
@@ -601,19 +616,17 @@ pub fn timer_stop(h: &LHandle) {
             remove_timer(h);
         }
     }
+    [r, old]
 }
 
 /// `cancel`: a running repeating timer drops its promise and goes on; a
-/// one-shot one stops and can be started again.
-pub fn timer_cancel(h: &LHandle) {
+/// one-shot one stops and can be started again. The promises are returned,
+/// for the caller to drop (as `timer_stop`).
+pub fn timer_cancel(h: &LHandle) -> GivenUp {
     let t = timer(h);
     if t.state == RUNNING && t.promise.is_some() {
-        if let Some(old) = t.promise.take() {
-            release(old);
-        }
-        if let Some(p) = t.pending.take() {
-            p.cancel();
-        }
+        let old = t.promise.take();
+        let r = t.pending.take().map(Pending::cancel_here);
         if !t.repeating {
             t.state = INITIAL;
             if t.signum != 0 {
@@ -622,7 +635,9 @@ pub fn timer_cancel(h: &LHandle) {
                 remove_timer(h);
             }
         }
+        return [r, old];
     }
+    [None, None]
 }
 
 /// A timer or signal watcher fires (`handle_timer_event`,
@@ -662,8 +677,15 @@ fn run_timers(now: Instant) {
         if t.state != RUNNING || t.due > now {
             continue;
         }
-        // libuv reschedules a repeating timer from the time it fires.
-        t.due = now + Duration::from_millis(t.timeout);
+        // libuv reschedules a repeating timer from the time it fires
+        // (`uv_timer_again`), unless its repeat is 0: started with timeout 0
+        // and repeat 0, it has fired once, as a one-shot (Lean's state stays
+        // running).
+        if t.repeating && t.timeout == 0 {
+            remove_timer(&h);
+        } else {
+            t.due = now + Duration::from_millis(t.timeout);
+        }
         fire_timer(&h, 0);
     }
 }
@@ -698,8 +720,12 @@ pub fn signal_new(n: u32, repeating: bool) -> LHandle {
 fn signal_start(h: &LHandle) {
     let r = reactor();
     if r.sig_pipe[0] < 0 {
-        let mut p = [-1i32; 2];
-        unsafe { pipe2(p.as_mut_ptr(), SOCK_NONBLOCK | SOCK_CLOEXEC) };
+        // libuv's loop signal pipe, opened at startup (`rt`), as natively.
+        let p = crate::rt::signal_pipe().unwrap_or_else(|| {
+            let mut p = [-1i32; 2];
+            unsafe { pipe2(p.as_mut_ptr(), SOCK_NONBLOCK | SOCK_CLOEXEC) };
+            p
+        });
         r.sig_pipe = p;
         SIG_WRITE_FD.store(p[1], std::sync::atomic::Ordering::Relaxed);
     }
@@ -1082,11 +1108,14 @@ pub fn sock_recv(h: &LHandle, size: u64, r: LPromise) -> LHandle {
     o
 }
 
-/// `cancelRecv`: a pending read is dropped (its promise stays unresolved).
-pub fn sock_cancel_recv(h: &LHandle) {
-    if let Some((p, _)) = sock(h).read.take() {
-        p.cancel();
-    }
+/// `cancelRecv` (also of a `waitReadable`): a pending read is dropped (its
+/// promise stays unresolved). The canceled operation's promise, whose
+/// continuation holds the program's promise, is returned for the caller to
+/// drop once the primitive has returned (`l2r_shim_sock_cancel_recv_h`): the
+/// program's promise is released on the caller's context, as natively in
+/// the call (its `sync` dependents run before it returns; `timer_stop`).
+pub fn sock_cancel_recv(h: &LHandle) -> Option<LPromise> {
+    sock(h).read.take().map(|(p, _)| p.cancel_here())
 }
 
 /// `uv_accept` at once: the new socket, `None` if no connection waits.
@@ -1156,10 +1185,10 @@ pub fn tcp_try_accept(h: &LHandle) -> LHandle {
     o
 }
 
-pub fn tcp_cancel_accept(h: &LHandle) {
-    if let Some(p) = sock(h).accept.take() {
-        p.cancel();
-    }
+/// `cancelAccept`: a pending accept is dropped; its operation's promise is
+/// returned for the caller to drop (as `sock_cancel_recv`).
+pub fn tcp_cancel_accept(h: &LHandle) -> Option<LPromise> {
+    sock(h).accept.take().map(Pending::cancel_here)
 }
 
 /// `uv_shutdown`: after the pending writes.
@@ -1553,10 +1582,17 @@ fn eai_code(e: i32) -> i32 {
 }
 
 /// `getAddrInfo host service family`: the addresses (`bytes`, 17 each: the
-/// family, then 16 bytes).
+/// family, then 16 bytes). libuv first converts the host (`uv__idna_toascii`)
+/// into a 256-byte buffer: an empty host, or one that does not fit, is
+/// `UV_EINVAL` at once (the names Lean lets through are ASCII, copied as
+/// they are).
 pub fn dns_get_info(host: &[u8], service: &[u8], family: u8, r: LPromise) -> LHandle {
     let o = op_new();
     let mut r = Ready(Some(r));
+    if host.is_empty() || host.len() >= 256 {
+        op(&o).sync_err = UV_EINVAL;
+        return o;
+    }
     let hints = AddrInfo {
         ai_flags: 0,
         ai_family: match family {

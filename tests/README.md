@@ -153,3 +153,126 @@ suite's `compile.py` does (`lean FILE -c`, `leanc -flto -O3`) and through
 lean2rr (`lean -o`, then `scripts/l2r.py FILE.lean`), runs both and compares
 stdout, stderr and the exit code. The programs check their own results. It
 is a correctness check only; the suite itself does the timing.
+
+## Loader checks
+
+`tests/env/run.sh` checks which program modules lean2rr accepts (plan §10,
+"Module names"). For each case it translates a small program (`lean2rr
+--emit mono`, a few seconds) and expects either acceptance or rejection:
+- rejected: program modules named `Lean.*` or `L2RShim`, a directory
+  `L2RShim` of program modules, Lean's library with one module's `.olean`
+  or `.olean.private` replaced by a different file, and a shim directory
+  without the shim (`L2R_SHIM_DIR` missing or empty, or unset with the
+  lean2rr binary moved out of its build directory);
+- accepted: Lean's library reached through a symbolic link or through hard
+  links, a working directory whose `lean-toolchain` names another Lean, and
+  the shim from the build directory or from `L2R_SHIM_DIR`.
+
+It also runs `lean2rr --stats` on polymorphic recursion at a doubling type,
+which must finish (`stats-polyrec`).
+
+## Runtime tests and the findings they cover
+
+`tests/runtime/run.sh` builds each `tests/runtime/Rt*.lean` natively and
+through lean2rr and compares stdout, stderr and the exit code (its header
+lists the per-test `.args`, `.stdin`, `.pipe` and `.xfail` files). Each
+test's header says what it covers. Many come from the adversarial reviews:
+a finding (a bug a reviewer reproduced, fixed since) or a check that held
+up in review.
+
+Tests for findings (the reviews' FINDINGS.txt files are in the scratch
+directories `adv3`..`adv6`, `rv6`, `rv7`, `rv8`):
+
+| finding | test |
+|---|---|
+| RP3-1, RP3-2 | RtPtrEqFix |
+| RP3-3 | RtFnConvChain |
+| RP3-4, RP3-5 | RtCastCases |
+| RP3-6 | RtArraySelf |
+| P3-2..P3-5 | RtTaskPrio, RtTaskSyncBind, RtTaskSyncDep, RtTaskSyncRun |
+| CN3-02, CN3-03 | RtInitSpec, RtStartWhere |
+| PF4-03, PF4-10, RP4-08 | RtLazyReturned |
+| PF4-07 | RtArrayMapRepr |
+| PF4-10 | RtSinkProj |
+| RP4-03..RP4-07 | RtCastRepr |
+| ST4-01 | RtStartLongLine, RtStartMacro |
+| IO6-01, IO6-02, IO6-03 | RtRandomBytes |
+| IO6-04, IO6-05 | RtCwdLong |
+| IO6-06 | RtHardwareConcurrency |
+| IO6-03, IO6-08, IO6-10, IO6-11, IO6-12 | RtUvSysLimits |
+| IO6-09 | RtOsStringsLossy |
+| IO6-13 | RtTimerPeriod0 |
+| IO6-14 | RtJpRebound |
+| S6-01 (Reussir bug 21), RV6L-01 | RtStrLitBracket |
+| PRG6-01 | RtNestedMap |
+| PRG6-02 | RtWildcardSink |
+| TY6-01 | RtNestGrowType |
+| TY6-02 | RtBoxNoCast, RtCastSorry |
+| U1 (adv6 numbers), RV6L-03 | RtFloatCastBits |
+| RV6J-03 | RtJpWide |
+| RV6L-02 | RtMapFirstIteration |
+| RV6L-04 (and the hygienic forms of RV6T-01/02) | RtCastHygienic |
+| RV6T-01 | RtCastExtern |
+| RV6T-02 | RtCastUnsafeRec |
+| RV6T-04 | RtTaskConvSync |
+| RV6T-05 | RtCastImplementedBy |
+| RV6T-06 | tests/env `lean-named-module` |
+| RV7F-01 | RtDepFields, RtLcAnyProj |
+| RV7D-01 | RtMapProjFields, RtLcAnyProj, RtFuzzArr (operation 11), RtSplitMaps (SMapA shape 6) |
+| RV7F-02, RV7F-04 | RtDictConst |
+| RV7F-03, RV7R-03 | tests/env `stats-polyrec` |
+| RV7L-01 | RtPersistWalk, RtTaskConstDeep |
+| RV7L-03 | RtJpSlots |
+| RV7O-01 | RtStartMeta (a `module` main; the multi-module cases have no test) |
+| RV7O-02 | tests/env `lake-named-module` |
+| RV7O-03 | RtInitRedirectNoThread |
+| RV7C-01 | RtPromiseFreeSync, RtPromiseFreeGlue |
+| RV7C-02 | RtSyncLostWake |
+| RV7C-03 | RtPromiseResultDropped |
+| RV7C-04 | RtStackOverflowContexts |
+| RV7C-05 | RtSignalFd |
+| RV7C-06 | RtNetEffectPoll |
+| RV7C-07 | RtTimerSyncSleep |
+| RV8L-01, RV8L-02, RV8L-06, RV8L-07 | tests/env |
+| RV8T-01, RV8T-02 | RtRefSetOrder, RtRefSetFiles, RtSyncLostWakeLoop |
+| RV8T-03 | RtTimerStopDropped |
+| RV8T-04 | RtSockCancel |
+
+Findings without a test here: costs (time, memory, build time or code
+size), Reussir-only bugs (lit tests in their patches), documentation
+findings, documented differences (translation plan §10), and findings whose
+fix is still on another branch, which adds its own test.
+
+Tests made from the programs of checks that held up in review rounds 6 and 7
+(the first curation, c35d7b8; combined programs keep one namespace each):
+
+| test | reviewer check |
+|---|---|
+| RtSweepNat | adv6/numbers NArith, NBits |
+| RtSweepInt | adv6/numbers IArith |
+| RtSweepFixed | adv6/numbers UOps, SOps |
+| RtSweepFloat | adv6/numbers FOps, FSweep |
+| RtFloatLibm | adv6/numbers FBits |
+| RtNumText | adv6/numbers CStr, CChar |
+| RtFuzzScalar | adv6/numbers fz/G1 (gen.py) |
+| RtFuzzReuse | adv6/types Ty6Rnd1 (genreuse.py) |
+| RtExistPayloads | adv6/types Ty6Exist |
+| RtSweepStrPos | rv7/rtdata DStrPos |
+| RtSweepUtf8 | rv7/rtdata DUtf8; adv6/stdlib T30Utf8 |
+| RtSweepStrInternal | rv7/rtdata DInternal, DSlice |
+| RtFuzzStr | rv7/rtdata DFuzzStr, DStrSearch |
+| RtFuzzBig | rv7/rtdata DBig, DAlias |
+| RtFuzzFloatBits | rv7/rtdata DFloat |
+| RtArrEdges | rv7/rtdata DArrEdge, DGrow, DConstMut |
+| RtFuzzArr | rv7/rtdata DFuzzArr |
+| RtShareMutators | rv7/lowering check 2 (LwShare2) |
+| RtExternEdges | rv7/lowering check 16 (LwExtEdge1) |
+| RtJpShapes | rv7/lowering check 7 (LwJp1) |
+| RtOutlineStates | rv7/lowering check 9 (LwOutMut) |
+| RtFnValues | rv7/lowering checks 12, 13 (LwFn1, LwFn2) |
+| RtGenControl | rv7/lowering check 26 (Rcf6, gen/rcf.py) |
+| RtStateMachines | rv7/opts O7SM, O7SM2; rv6/jp check 18 (JpSm3) |
+| RtSplitMaps | rv7/opts O7Map; rv6/lower check 5 (SMapA) |
+| RtConvUniform | rv7/repr R7Conv |
+| RtReprFuzzCtx | rv7/repr fz/Gz5 (gen2.py) |
+| RtReprFuzzTypes | rv7/repr fz/gen.py, seed 7, 6 types |

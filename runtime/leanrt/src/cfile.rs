@@ -57,10 +57,6 @@ const EINVAL: i32 = 22;
 const ESPIPE: i32 = 29;
 /// glibc's `BUFSIZ`.
 const BUFSIZ: usize = 8192;
-/// Direct reads into the caller's memory are issued in pieces of at most
-/// this many bytes (a larger `read(2)` returns the same data in fewer
-/// calls; only the reservation differs).
-const DIRECT_READ_MAX: usize = 1 << 24;
 
 pub struct CFile {
     pub fd: i32,
@@ -449,9 +445,9 @@ impl CFile {
         c as i32
     }
 
-    /// `_IO_file_xsgetn`: up to `n` bytes appended to `out`. Requests of at
-    /// least a buffer are read directly into `out`, in whole blocks,
-    /// discarding the (empty) buffer state.
+    /// `_IO_file_xsgetn`: up to `n` bytes appended to `out` (which has room
+    /// for them). Requests of at least a buffer are read directly into
+    /// `out`, in whole blocks, discarding the (empty) buffer state.
     fn xsgetn(&mut self, out: &mut Vec<u8>, n: usize) -> usize {
         let mut want = n;
         if !self.has_buf {
@@ -482,9 +478,8 @@ impl CFile {
                 if block >= 128 {
                     count -= want % block;
                 }
-                let count = count.min(DIRECT_READ_MAX);
-                out.reserve(count);
                 let len = out.len();
+                debug_assert!(out.capacity() - len >= count);
                 let r = unsafe { read(self.fd, out.as_mut_ptr().add(len) as *mut c_void, count) };
                 if r <= 0 {
                     if r == 0 {
@@ -676,11 +671,11 @@ impl CFile {
         if self.sync() == 0 { Ok(()) } else { Err(errno_now()) }
     }
 
-    /// `Handle.read n`: `fread`; any bytes read are a success; with none,
-    /// end of file clears the indicators (`clearerr`), otherwise it is an
-    /// error.
+    /// `Handle.read n`: `fread` into an array of `n` bytes (allocated at
+    /// once, as Lean's); any bytes read are a success; with none, end of
+    /// file clears the indicators (`clearerr`), otherwise it is an error.
     pub fn read(&mut self, n: usize) -> Result<Vec<u8>, i32> {
-        let mut out = Vec::with_capacity(n.min(DIRECT_READ_MAX));
+        let mut out = crate::alloc::vec_with_capacity(n);
         if n == 0 {
             return Ok(out);
         }

@@ -5,13 +5,14 @@ import LeanToReussir.Lower.Borrow
 namespace LeanToReussir
 open Lean Compiler LCNF
 
-/-- A `Nat` literal: `Small` below 2^64, otherwise parsed by the runtime
-from its decimal digits in the string literal table (a flat call: a nested
-arithmetic expression per limb overflowed rrc's stack for literals of
-thousands of digits, and cost quadratic time). -/
+/-- A `Nat` literal: a small value below 2^63 (`l2r_nat_small k`, the word
+`2k + 1`), otherwise a big number parsed by the runtime from its decimal
+digits in the string literal table (a flat call: a nested arithmetic
+expression per limb overflowed rrc's stack for literals of thousands of
+digits, and cost quadratic time). -/
 def natLiteral (n : Nat) : LowerM RR.Expr := do
-  if n < 2 ^ 64 then return .ctor "Nat" (some "Small") #[.atom (toString n)]
-  return .call "l2r_nat_norm" #[] #[.call "l2r_big_of_decimal_lstr" #[] #[← strLit (toString n)]]
+  if n < 2 ^ 63 then return .call "l2r_nat_small" #[] #[.atom (toString n)]
+  return .call "l2r_nat_of_decimal_lstr" #[] #[← strLit (toString n)]
 
 /-- Constructor `c` applied to all its arguments `vals` (parameters, then
 fields), building a value of `fullRt`. -/
@@ -107,8 +108,11 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     let ptys ← params.mapM lowerType
     let retTy ← lowerType ret
     if args.size == n then
-      -- `ptrAddrUnsafe x`: the identity of `x` in its own representation
-      -- (converted to the parameter's, it would be another object).
+      -- `ptrAddrUnsafe x`: the address of `x` in its own representation
+      -- (converted to the parameter's, it would be a temporary cell, whose
+      -- address the next temporary can get: `ptrEq` would then say `true`
+      -- for different values). Equal answers mean the same cell or equal
+      -- values only for two values alive at the same time (plan §9).
       if (← externSymbol orig) == "lean_ptr_addr" then
         if let some (.fvar x) := args.back? then
           if let some (vn, vt) := ctx.vars[x]? then

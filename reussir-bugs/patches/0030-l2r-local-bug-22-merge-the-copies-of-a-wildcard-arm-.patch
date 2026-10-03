@@ -1,0 +1,503 @@
+From bc4aca4b14387d6443fa1e817f5a73aaa9d9fcb8 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Fri, 2 Oct 2026 22:23:15 -0400
+Subject: [PATCH] l2r-local: bug 22: merge the copies of a wildcard arm into
+ one dispatch region
+
+The pattern compiler gives a match on an enum one subtree per variant
+(semi/pattern.rs, `Family::Variant`), so a wildcard arm is copied into
+every variant it covers, and codegen emits one single-tag
+`reussir.record.dispatch` region per copy (codegen lower/expr.rs,
+`ctor_switch`). Each copy releases the values the arm holds; the
+decrement expansion and the first acquire/drop expansion then expand
+each release of a value of unknown variant in line as a match over all
+its variants. A derived equality over N constructors (an outer match on
+`a` whose arm i matches `b` against constructor i, with `_ => ...`) thus
+becomes N arms x (N - 1) copies x an N-way release: N^3 code. A derived
+BEq on 40 constructors took 9 minutes to build.
+
+The dispatch op already has regions over several tags. Add a
+canonicalization to `reussir.record.dispatch`: regions that do not use
+their payload argument and hold the same operations (attributes and
+locations included, on the same values from outside; candidates grouped
+by a structural hash first) become one region over the union of their
+tags, without the argument. Running the same code for every merged tag
+is what the copies did, so the program is unchanged. The canonicalizer
+runs in the inliner and after the first SCCP, before the decrement
+expansion, so each wildcard arm is expanded once. Passes that need the
+variant of a region (destructuring decrement fusion, variant tag
+inference) already skip regions over several tags; the release of the
+scrutinee there is a plain decrement (its drop dispatches on the tag, and
+its token is a dynamic one that token reuse can still realloc).
+
+Repro reussir-bugs/repros/bug22-wildcard-wide-enum.py (rrc -O aggressive,
+to an executable, this machine under load): N = 10: 1.7 s -> 0.6 s;
+N = 20: 15.0 s -> 1.8 s; N = 30: 136 s -> 3.7 s; N = 40: 444 s (before,
+from the entry) -> 7.8 s. Same output (100).
+
+A region that boxes a value of the scrutinee's own type is not merged:
+in its per-tag copies the release of the scrutinee is a decrement of that
+tag's cell, which the construction reuses in place when the sizes match,
+while a merged region's release has a cell of unknown size, reused through
+a reallocation (`_ => E::b{k, k, k}`: reuse decisions {ensure 1, realloc
+2, allocate 2} became {realloc 1}; found by the adversarial review,
+RV8C-03).
+
+Smaller functions also reach the inliner's size cap sooner: on lean2rr's
+StateT tower built without its inlining workaround (bug 20), rrc's peak
+memory went from 1.8 GB to 2.4 GB with this commit alone; bug 20's commit
+brings the series to 1.0 GB. With the workaround: unchanged.
+
+Tests: tests/integration/conversion/record_dispatch_merge.mlir (the merge,
+what is kept apart, and an executable check that the merged dispatch runs
+the right code for every tag), record_dispatch_merge_boxing.mlir (regions
+boxing the dispatched type stay apart).
+---
+ include/Reussir/IR/ReussirOps.td              |   7 +-
+ lib/IR/ReussirOps.cpp                         | 139 ++++++++++++
+ .../conversion/record_dispatch_merge.mlir     | 204 ++++++++++++++++++
+ .../record_dispatch_merge_boxing.mlir         |  45 ++++
+ 4 files changed, 394 insertions(+), 1 deletion(-)
+ create mode 100644 tests/integration/conversion/record_dispatch_merge.mlir
+ create mode 100644 tests/integration/conversion/record_dispatch_merge_boxing.mlir
+
+diff --git a/include/Reussir/IR/ReussirOps.td b/include/Reussir/IR/ReussirOps.td
+index bda58a9a..040c5faa 100644
+--- a/include/Reussir/IR/ReussirOps.td
++++ b/include/Reussir/IR/ReussirOps.td
+@@ -1036,8 +1036,12 @@ def ReussirRecordDispatchOp
+     If the dispatch operation has separated regions for each tag, this operation
+     will be directly lowered to a scf.index_switch operation. Otherwise, it will
+     be expanded into 2 consecutive scf.index_switch operations, where the first
+-    one dispatches tags to region indices and the second one dispatches the 
++    one dispatches tags to region indices and the second one dispatches the
+     region indices to the actual regions.
++
++    Canonicalization merges regions that do not use their argument and hold
++    the same operations into one region over the union of their tags, unless
++    they box a value of the dispatched record's type.
+   }];
+ 
+   let arguments = (ins Arg<ReussirRefType, "variant record">:$variant,
+@@ -1047,6 +1051,7 @@ def ReussirRecordDispatchOp
+ 
+   let hasCustomAssemblyFormat = 1;
+   let hasVerifier = 1;
++  let hasCanonicalizer = 1;
+ }
+ 
+ def ReussirRecordCoerceOp : ReussirRecordOp<"coerce", [Pure]> {
+diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
+index 1b883ef8..d833bcf8 100644
+--- a/lib/IR/ReussirOps.cpp
++++ b/lib/IR/ReussirOps.cpp
+@@ -2817,6 +2817,145 @@ void ReussirRecordDispatchOp::print(mlir::OpAsmPrinter &p) {
+   p.printOptionalAttrDict(getOperation()->getAttrs(), {"tagSets"});
+ }
+ 
++//===----------------------------------------------------------------------===//
++// RecordDispatchOp canonicalization
++//===----------------------------------------------------------------------===//
++namespace {
++// Regions that ignore their payload and hold the same operations are one
++// region over several tags. The frontend's pattern compiler gives each
++// variant its own subtree, so a wildcard arm arrives as one copy per variant
++// it covers (`_ => unreachable()` inside a derived equality over N
++// constructors: N - 1 copies in each of N arms). Every later pass pays for
++// each copy, and the decrement expansion expands the releases of every copy
++// in line, so merge the copies before those passes run.
++struct MergeEquivalentDispatchRegions
++    : public mlir::OpRewritePattern<ReussirRecordDispatchOp> {
++  using OpRewritePattern::OpRewritePattern;
++
++  static bool ignoresPayload(mlir::Region &region) {
++    return llvm::all_of(
++        region.front().getArguments(),
++        [](mlir::BlockArgument arg) { return arg.use_empty(); });
++  }
++
++  // A region that boxes a value of the scrutinee's type keeps one copy per
++  // tag: there the release of the scrutinee becomes a decrement of that
++  // tag's cell, which the construction reuses in place when the sizes
++  // match, where a region over several tags would release a cell of
++  // unknown size and reuse it through a reallocation.
++  static bool boxesType(mlir::Region &region, mlir::Type type) {
++    return region
++        .walk([&](TokenAcceptor acceptor) {
++          for (mlir::Type result : acceptor->getResultTypes())
++            if (auto rc = llvm::dyn_cast<RcType>(result);
++                rc && rc.getElementType() == type)
++              return mlir::WalkResult::interrupt();
++          return mlir::WalkResult::advance();
++        })
++        .wasInterrupted();
++  }
++
++  // Equal for regions `sameOps` accepts (locations aside), so only regions
++  // with equal hashes are compared.
++  static llvm::hash_code regionHash(mlir::Region &region) {
++    llvm::hash_code hash = 0;
++    region.walk([&](mlir::Operation *op) {
++      hash = llvm::hash_combine(
++          hash, mlir::OperationEquivalence::computeHash(
++                    op, mlir::OperationEquivalence::ignoreHashValue,
++                    mlir::OperationEquivalence::ignoreHashValue,
++                    mlir::OperationEquivalence::IgnoreLocations));
++    });
++    return hash;
++  }
++
++  // The same operations (attributes and locations included) on the same
++  // values from outside; values defined inside correspond by position. The
++  // block arguments are unused, so their types do not matter.
++  static bool sameOps(mlir::Region &lhs, mlir::Region &rhs) {
++    mlir::Block &lhsBlock = lhs.front();
++    mlir::Block &rhsBlock = rhs.front();
++    if (lhsBlock.getOperations().size() != rhsBlock.getOperations().size())
++      return false;
++    llvm::DenseMap<mlir::Value, mlir::Value> corresponding;
++    auto check = [&](mlir::Value l, mlir::Value r) {
++      return mlir::success(l == r || corresponding.lookup(l) == r);
++    };
++    auto mark = [&](mlir::Value l, mlir::Value r) { corresponding[l] = r; };
++    for (auto [l, r] : llvm::zip_equal(lhsBlock, rhsBlock))
++      if (!mlir::OperationEquivalence::isEquivalentTo(
++              &l, &r, check, mark, mlir::OperationEquivalence::None))
++        return false;
++    return true;
++  }
++
++  mlir::LogicalResult
++  matchAndRewrite(ReussirRecordDispatchOp op,
++                  mlir::PatternRewriter &rewriter) const override {
++    unsigned numRegions = op.getRegions().size();
++    // `kept[i]`: the region that region `i` merges into (itself if none).
++    llvm::SmallVector<unsigned> kept(numRegions);
++    llvm::SmallVector<std::pair<llvm::hash_code, unsigned>> candidates;
++    bool changed = false;
++    mlir::Type scrutineeType = op.getVariant().getType().getElementType();
++    for (unsigned i = 0; i < numRegions; ++i) {
++      kept[i] = i;
++      mlir::Region &region = op.getRegions()[i];
++      if (!ignoresPayload(region) || boxesType(region, scrutineeType))
++        continue;
++      llvm::hash_code hash = regionHash(region);
++      for (auto [otherHash, other] : candidates)
++        if (otherHash == hash && sameOps(op.getRegions()[other], region)) {
++          kept[i] = other;
++          changed = true;
++          break;
++        }
++      if (kept[i] == i)
++        candidates.emplace_back(hash, i);
++    }
++    if (!changed)
++      return mlir::failure();
++
++    llvm::SmallVector<llvm::SmallVector<int64_t>> tags(numRegions);
++    for (unsigned i = 0; i < numRegions; ++i)
++      llvm::append_range(
++          tags[kept[i]],
++          llvm::cast<mlir::DenseI64ArrayAttr>(op.getTagSets()[i]).asArrayRef());
++    llvm::SmallVector<unsigned> survivors;
++    llvm::SmallVector<mlir::Attribute> tagSets;
++    for (unsigned i = 0; i < numRegions; ++i) {
++      if (kept[i] != i)
++        continue;
++      llvm::sort(tags[i]);
++      survivors.push_back(i);
++      tagSets.push_back(rewriter.getDenseI64ArrayAttr(tags[i]));
++    }
++
++    auto merged = ReussirRecordDispatchOp::create(
++        rewriter, op.getLoc(), op->getResultTypes(), op.getVariant(),
++        rewriter.getArrayAttr(tagSets), survivors.size());
++    merged->setDiscardableAttrs(op->getDiscardableAttrDictionary());
++    for (auto [index, i] : llvm::enumerate(survivors)) {
++      mlir::Region &region = op.getRegions()[i];
++      // A region over several tags takes no argument.
++      if (tags[i].size() > 1)
++        rewriter.modifyOpInPlace(op, [&] {
++          region.front().eraseArguments(0, region.front().getNumArguments());
++        });
++      mlir::Region &target = merged.getRegions()[index];
++      rewriter.inlineRegionBefore(region, target, target.end());
++    }
++    rewriter.replaceOp(op, merged->getResults());
++    return mlir::success();
++  }
++};
++} // namespace
++
++void ReussirRecordDispatchOp::getCanonicalizationPatterns(
++    mlir::RewritePatternSet &results, mlir::MLIRContext *context) {
++  results.add<MergeEquivalentDispatchRegions>(context);
++}
++
+ //===----------------------------------------------------------------------===//
+ // Reussir Array WithUniqueView Op
+ //===----------------------------------------------------------------------===//
+diff --git a/tests/integration/conversion/record_dispatch_merge.mlir b/tests/integration/conversion/record_dispatch_merge.mlir
+new file mode 100644
+index 00000000..87697dbf
+--- /dev/null
++++ b/tests/integration/conversion/record_dispatch_merge.mlir
+@@ -0,0 +1,204 @@
++// Canonicalization merges the regions of a `reussir.record.dispatch` that do
++// not use their argument and hold the same operations: the frontend gives
++// each variant its own region, so a wildcard arm arrives as one copy per
++// variant it covers. Then the merged dispatch must still pick the right code
++// for every tag.
++
++// RUN: %reussir-opt %s --canonicalize | %FileCheck %s
++// RUN: %reussir-opt %s --pass-pipeline='builtin.module(reussir-attach-native-target,canonicalize,reussir-convert-to-std,convert-scf-to-cf,convert-to-llvm,reconcile-unrealized-casts)' | %reussir-translate --mlir-to-llvmir | %llc -relocation-model=pic -filetype=obj -o %t.o
++// RUN: %cc %t.o -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++
++!variant = !reussir.record<variant "Wide" {i32, i64, i32, i64, i32}>
++!ref = !reussir.ref<!variant field>
++#wild = loc("wild.rr":7:14)
++#other = loc("wild.rr":8:14)
++module {
++  func.func @bump(%counter: memref<i32>) {
++    %one = arith.constant 1 : i32
++    %old = memref.load %counter[] : memref<i32>
++    %next = arith.addi %old, %one : i32
++    memref.store %next, %counter[] : memref<i32>
++    return
++  }
++
++  func.func @bump_twice(%counter: memref<i32>) {
++    func.call @bump(%counter) : (memref<i32>) -> ()
++    func.call @bump(%counter) : (memref<i32>) -> ()
++    return
++  }
++
++  // Region 0 reads its payload and stays. Regions 1, 2 and 4 are copies of
++  // one wildcard arm (same operations, same locations): one region over
++  // their tags, without the argument. Region 3 calls another function.
++  // CHECK-LABEL: func.func @classify
++  // CHECK: reussir.record.dispatch
++  // CHECK-NEXT: [0] -> {
++  // CHECK-NEXT: ^bb0
++  // CHECK: [1, 2, 4] -> {
++  // CHECK-NOT: ^bb0
++  // CHECK: func.call @bump(
++  // CHECK: [3] -> {
++  // CHECK-NEXT: ^bb0
++  // CHECK-NEXT: func.call @bump_twice
++  func.func @classify(%ref: !ref, %counter: memref<i32>, %flag: i1) -> i32 {
++    %seven = arith.constant 7 : i32
++    %result = reussir.record.dispatch(%ref : !ref) -> i32 {
++      [0] -> {
++      ^bb0(%v: !reussir.ref<i32 field>):
++        %x = reussir.ref.load(%v : !reussir.ref<i32 field>) : i32
++        reussir.scf.yield %x : i32
++      }
++      [1] -> {
++      ^bb0(%v: !reussir.ref<i64 field>):
++        %r = scf.if %flag -> (i32) {
++          func.call @bump(%counter) : (memref<i32>) -> () loc(#wild)
++          scf.yield %seven : i32 loc(#wild)
++        } else {
++          %t = arith.addi %seven, %seven : i32 loc(#wild)
++          scf.yield %t : i32 loc(#wild)
++        } loc(#wild)
++        reussir.scf.yield %r : i32 loc(#wild)
++      }
++      [2] -> {
++      ^bb0(%v: !reussir.ref<i32 field>):
++        %r = scf.if %flag -> (i32) {
++          func.call @bump(%counter) : (memref<i32>) -> () loc(#wild)
++          scf.yield %seven : i32 loc(#wild)
++        } else {
++          %t = arith.addi %seven, %seven : i32 loc(#wild)
++          scf.yield %t : i32 loc(#wild)
++        } loc(#wild)
++        reussir.scf.yield %r : i32 loc(#wild)
++      }
++      [3] -> {
++      ^bb0(%v: !reussir.ref<i64 field>):
++        func.call @bump_twice(%counter) : (memref<i32>) -> () loc(#wild)
++        reussir.scf.yield %seven : i32 loc(#wild)
++      }
++      [4] -> {
++      ^bb0(%v: !reussir.ref<i32 field>):
++        %r = scf.if %flag -> (i32) {
++          func.call @bump(%counter) : (memref<i32>) -> () loc(#wild)
++          scf.yield %seven : i32 loc(#wild)
++        } else {
++          %t = arith.addi %seven, %seven : i32 loc(#wild)
++          scf.yield %t : i32 loc(#wild)
++        } loc(#wild)
++        reussir.scf.yield %r : i32 loc(#wild)
++      }
++    }
++    return %result : i32
++  }
++
++  // The same operations at different source locations are different arms:
++  // merging them would lose the location of one.
++  // CHECK-LABEL: func.func @distinct_locations
++  // CHECK: [0, 1] -> {
++  // CHECK: [2] -> {
++  // CHECK: [3, 4] -> {
++  func.func @distinct_locations(%ref: !ref, %counter: memref<i32>) {
++    reussir.record.dispatch(%ref : !ref) {
++      [0, 1] -> {
++        func.call @bump(%counter) : (memref<i32>) -> () loc(#wild)
++        reussir.scf.yield loc(#wild)
++      }
++      [2] -> {
++      ^bb0(%v: !reussir.ref<i32 field>):
++        func.call @bump(%counter) : (memref<i32>) -> () loc(#other)
++        reussir.scf.yield loc(#other)
++      }
++      [3, 4] -> {
++        func.call @bump_twice(%counter) : (memref<i32>) -> () loc(#wild)
++        reussir.scf.yield loc(#wild)
++      }
++    }
++    return
++  }
++
++  // A region that already covers several tags absorbs a copy over another
++  // tag; when all tags end up in one region, the dispatch keeps it.
++  // CHECK-LABEL: func.func @all_tags
++  // CHECK: reussir.record.dispatch
++  // CHECK-NEXT: [0, 1, 2, 3, 4] -> {
++  // CHECK-NEXT: func.call @bump
++  // CHECK-NEXT: reussir.scf.yield
++  // CHECK-NEXT: }
++  // CHECK-NEXT: }
++  func.func @all_tags(%ref: !ref, %counter: memref<i32>) {
++    reussir.record.dispatch(%ref : !ref) {
++      [0, 3] -> {
++        func.call @bump(%counter) : (memref<i32>) -> () loc(#wild)
++        reussir.scf.yield loc(#wild)
++      }
++      [1] -> {
++      ^bb0(%v: !reussir.ref<i64 field>):
++        func.call @bump(%counter) : (memref<i32>) -> () loc(#wild)
++        reussir.scf.yield loc(#wild)
++      }
++      [2, 4] -> {
++        func.call @bump(%counter) : (memref<i32>) -> () loc(#wild)
++        reussir.scf.yield loc(#wild)
++      }
++    }
++    return
++  }
++
++  func.func @check(%ref: !ref, %counter: memref<i32>, %flag: i1,
++                   %value: !variant, %expected: i32, %bumps: i32) {
++    %zero = arith.constant 0 : i32
++    memref.store %zero, %counter[] : memref<i32>
++    reussir.ref.store(%ref : !ref)(%value : !variant)
++    %got = func.call @classify(%ref, %counter, %flag)
++        : (!ref, memref<i32>, i1) -> i32
++    %same = arith.cmpi eq, %got, %expected : i32
++    cf.assert %same, "merged dispatch picked the wrong region"
++    %count = memref.load %counter[] : memref<i32>
++    %counted = arith.cmpi eq, %count, %bumps : i32
++    cf.assert %counted, "merged dispatch ran the wrong code"
++    return
++  }
++
++  func.func @main() -> i32 {
++    %size = arith.constant 32 : i64
++    %slot = llvm.alloca %size x i8 {alignment = 8 : i64} : (i64) -> !llvm.ptr
++    %ref = builtin.unrealized_conversion_cast %slot : !llvm.ptr to !ref
++    %counter = memref.alloca() : memref<i32>
++    %true = arith.constant true
++    %false = arith.constant false
++    %zero = arith.constant 0 : i32
++    %one = arith.constant 1 : i32
++    %two = arith.constant 2 : i32
++    %seven = arith.constant 7 : i32
++    %fourteen = arith.constant 14 : i32
++    %forty_two = arith.constant 42 : i32
++    %wide = arith.constant 5 : i64
++    %v0 = reussir.record.variant [0] (%forty_two : i32) : !variant
++    %v1 = reussir.record.variant [1] (%wide : i64) : !variant
++    %v2 = reussir.record.variant [2] (%forty_two : i32) : !variant
++    %v3 = reussir.record.variant [3] (%wide : i64) : !variant
++    %v4 = reussir.record.variant [4] (%forty_two : i32) : !variant
++    func.call @check(%ref, %counter, %true, %v0, %forty_two, %zero)
++        : (!ref, memref<i32>, i1, !variant, i32, i32) -> ()
++    func.call @check(%ref, %counter, %true, %v1, %seven, %one)
++        : (!ref, memref<i32>, i1, !variant, i32, i32) -> ()
++    func.call @check(%ref, %counter, %false, %v2, %fourteen, %zero)
++        : (!ref, memref<i32>, i1, !variant, i32, i32) -> ()
++    func.call @check(%ref, %counter, %true, %v3, %seven, %two)
++        : (!ref, memref<i32>, i1, !variant, i32, i32) -> ()
++    func.call @check(%ref, %counter, %true, %v4, %seven, %one)
++        : (!ref, memref<i32>, i1, !variant, i32, i32) -> ()
++    // The slot holds variant 4 now.
++    memref.store %zero, %counter[] : memref<i32>
++    func.call @distinct_locations(%ref, %counter) : (!ref, memref<i32>) -> ()
++    %d = memref.load %counter[] : memref<i32>
++    %d_ok = arith.cmpi eq, %d, %two : i32
++    cf.assert %d_ok, "distinct_locations ran the wrong code"
++    memref.store %zero, %counter[] : memref<i32>
++    func.call @all_tags(%ref, %counter) : (!ref, memref<i32>) -> ()
++    %a = memref.load %counter[] : memref<i32>
++    %a_ok = arith.cmpi eq, %a, %one : i32
++    cf.assert %a_ok, "all_tags ran the wrong code"
++    return %zero : i32
++  }
++}
+diff --git a/tests/integration/conversion/record_dispatch_merge_boxing.mlir b/tests/integration/conversion/record_dispatch_merge_boxing.mlir
+new file mode 100644
+index 00000000..531482f8
+--- /dev/null
++++ b/tests/integration/conversion/record_dispatch_merge_boxing.mlir
+@@ -0,0 +1,45 @@
++// Canonicalization does not merge regions of a `reussir.record.dispatch`
++// that box a value of the dispatched record's type: each per-tag copy can
++// then reuse its own tag's cell in place, where a region over several tags
++// would release a cell of unknown size and reuse it through a reallocation.
++// Regions without such a construction are merged as usual.
++
++// RUN: %reussir-opt %s --canonicalize | %FileCheck %s
++
++!variant = !reussir.record<variant "Wide" {i32, i64, i32, i64, i32}>
++!ref = !reussir.ref<!variant field>
++#wild = loc("wild.rr":7:14)
++module {
++  func.func private @bump(%counter: memref<i32>)
++
++  // CHECK-LABEL: func.func @boxes_scrutinee_type
++  // CHECK: [0, 1] -> {
++  // CHECK: reussir.rc.create
++  // CHECK: [2, 3] -> {
++  // CHECK: [4] -> {
++  // CHECK: reussir.rc.create
++  func.func @boxes_scrutinee_type(%ref: !ref, %v: !variant, %counter: memref<i32>) {
++    reussir.record.dispatch(%ref : !ref) {
++      [0, 1] -> {
++        %b = reussir.rc.create value(%v : !variant) : !reussir.rc<!variant> loc(#wild)
++        reussir.scf.yield loc(#wild)
++      }
++      [2] -> {
++      ^bb0(%p: !reussir.ref<i32 field>):
++        func.call @bump(%counter) : (memref<i32>) -> () loc(#wild)
++        reussir.scf.yield loc(#wild)
++      }
++      [3] -> {
++      ^bb0(%p: !reussir.ref<i64 field>):
++        func.call @bump(%counter) : (memref<i32>) -> () loc(#wild)
++        reussir.scf.yield loc(#wild)
++      }
++      [4] -> {
++      ^bb0(%p: !reussir.ref<i32 field>):
++        %b = reussir.rc.create value(%v : !variant) : !reussir.rc<!variant> loc(#wild)
++        reussir.scf.yield loc(#wild)
++      }
++    }
++    return
++  }
++}
+-- 
+2.43.0
+
