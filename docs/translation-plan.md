@@ -1285,32 +1285,55 @@ struct, which is destructured afterwards.
 inlined at each of its jumps, like J1, when it is small: its body has at
 most 40 bindings, alternatives and exits (nested join points included), a
 copy of it expands to at most 480, and its copies beyond the first add at
-most 2000 (jumps minus one, times the expansion). The expansion counts, at
-each jump, the body of the join point jumped to when that is inlined there
-too: a join point nested in the copy (at every jump to it), or another join
-point whose own body is small, counted the same way. Outlining the join
+most 2000 (jumps minus one, times the expansion), or 4000 for a loop's
+continuation: a join point whose own body (not the join points it jumps
+to) tail-calls a function of the declaration's call cycle (its strongly
+connected component in the program's call graph). The
+expansion counts, at each jump, the body of the join point jumped to when
+that is inlined there too: a join point nested in the copy (at every jump
+to it), another join point jumped to once (J1 inlines it whatever its
+size), or another join point whose own body is small, counted the same
+way. Outlining the join
 point would put a function boundary on the path: a loop through it would
 become a state machine or mutually recursive, and Reussir could not reuse a
 cell matched before the jump for a construction after it. Duplication is
 recursive: small join points inside a duplicated body, and those it jumps
 to, are duplicated again. The bounds keep every copy within 480 nodes and
-what the copies of one join point add within 2000, so code grows linearly.
-The bound on the body alone did not: Lean leaves sibling join points that
-are jumped to from two others, which sinking cannot nest. A sequence of
-`match`es on a two-constructor state, each alternative setting the next
-state to a constant, gives one join point per alternative, jumping to
-either alternative of the next `match`; each is small, and the first ones
-held 2^n copies of the last (20 `match`es: out of memory;
-tests/runtime/RtJpChain). Nor did the bound on one copy: after an 800-arm
-`match` whose arms set such a state (with an early return elsewhere), each
-alternative of the next `match` is jumped to from hundreds of arms, and was
-copied into every one (11.7 MB of .rr; rrc ran out of memory;
-tests/runtime/RtJpWide). The expansion is an upper bound (a J2 or outlined
-target costs only its jump); 480 is generous enough that a loop whose
-condition is a few `&&`/`||` tests, each a join point jumping two or three
-times to the shared continuation (an expansion of 300-350), stays a plain
-loop and does not become a state machine. Behaviour does not change.
-(Optional pass `jp-small`; without it such join points are outlined, J3.)
+what the copies of one join point add within 2000 (4000), so code grows
+linearly.
+Each bound closes a blow-up the others allowed:
+- the bound on the body alone: Lean leaves sibling join points that are
+  jumped to from two others, which sinking cannot nest. A sequence of
+  `match`es on a two-constructor state, each alternative setting the next
+  state to a constant, gives one join point per alternative, jumping to
+  either alternative of the next `match`; each is small, and the first
+  ones held 2^n copies of the last (20 `match`es: out of memory;
+  tests/runtime/RtJpChain);
+- the bound on one copy: after an 800-arm `match` whose arms set such a
+  state (with an early return elsewhere), each alternative of the next
+  `match` is jumped to from hundreds of arms, and was copied into every
+  one (11.7 MB of .rr; rrc ran out of memory; tests/runtime/RtJpWide);
+- counting only small join points in a copy: a large join point jumped to
+  once, from inside a small duplicated one, is inlined into every copy.
+  Sinking (`jp-sink`) puts it inside its jumper, where the bound on the
+  body sees it, but without sinking 200 copies of an 80-`let` body were
+  made (Lean's dead-branch elimination leaves such join points, for
+  instance after a `match` on an `Option` that is always `some`).
+The expansion is an upper bound (a J2 or outlined target costs only its
+jump). The budgets are generous enough that loops keep their shape: a loop
+whose condition is a few `&&`/`||` tests, each a join point jumping two or
+three times to the shared continuation, expands to 300-350; a loop's
+continuation after a `match` of up to about 100 arms (copies of 30-40
+nodes) is still copied into each arm. Outlined, such a continuation makes
+the loop a state machine, or, in mutual recursion, a stack frame more per
+iteration. The larger budget is only for loop continuations: given to every
+join point, it let a 35-line function with a wide `match` setting a state
+and a few `match`es on it add 0.5-0.75 MB of .rr (eight such functions: 6.3
+MB, a four-minute build at 5.7 GB); and judged through the join points a
+copy jumps to, one rare guarded self-call in the last of such a chain of
+`match`es gave it to the whole chain (eight functions: 7.3 MB of .rr).
+Behaviour does not change. (Optional pass `jp-small`; without it such join
+points are outlined, J3.)
 
 **J3, otherwise: outline.** Some paths `return` directly or jump to a
 different join point. Then `j` becomes a separate top-level function over

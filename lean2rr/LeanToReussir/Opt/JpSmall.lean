@@ -7,9 +7,10 @@ import LeanToReussir.PassConfig
 J1′ of the join-point strategy (translation plan §5.6): a join point whose
 body is small (at most 40 bindings, alternatives and exits, nested join
 points included), whose copy, with the join points inlined into it,
-expands to at most 480, whose copies beyond the first add at most 2000,
-and that is not J2, is inlined at each of its jumps, like J1, instead of
-outlined (J3). Without this pass such join points are outlined.
+expands to at most 480, whose copies beyond the first add at most 2000
+(4000 for a loop's continuation), and that is not J2, is inlined at each of
+its jumps, like J1, instead of outlined (J3). Without this pass such join
+points are outlined.
 -/
 
 namespace LeanToReussir
@@ -32,14 +33,17 @@ where
 counted up to `cap`: its bindings, alternatives and exits, and at each jump
 the body of the join point jumped to when it may be inlined there (J1,
 J1′): one declared in `c` (counted at each jump to it, not where it is
-declared), or another join point of `bodies` (those in scope) whose own
-body is small. Those bodies are counted the same way. It is an upper bound
-(a J2 or outlined target costs only its jump), and bounding it bounds what
-duplication produces: with the bound on the own body alone, a chain of
-sibling join points each jumping to two others (a sequence of `match`es
-that pass a constructor on: each jump goes to an alternative of the next
-`match`) gave the first one's copies 2^n copies of the last. -/
-partial def copySize (bodies : Std.HashMap FVarId (Code .pure)) (c : Code .pure) (cap : Nat) : Nat :=
+declared), or another join point in `scope` that is jumped to once (J1
+inlines it whatever its size) or whose own body is small. Those bodies are
+counted the same way. It is an upper bound (a J2 or outlined target costs
+only its jump), and bounding it bounds what duplication produces: with the
+bound on the own body alone, a chain of sibling join points each jumping to
+two others (a sequence of `match`es that pass a constructor on: each jump
+goes to an alternative of the next `match`) gave the first one's copies
+2^n copies of the last; and without the join points jumped to once, a
+large one whose jump is in a small duplicated join point was copied with
+it (jp-sink, which puts it inside its jumper, off). -/
+partial def copySize (scope : JpScope) (c : Code .pure) (cap : Nat) : Nat :=
   go c {} 0
 where
   /-- `inner`: the join points declared in the block being counted. -/
@@ -54,10 +58,27 @@ where
       match inner[j]? with
       | some b => go b inner (acc + 1)
       | none =>
-        match bodies[j]? with
-        | some b => if codeSize b 41 ≤ 40 then go b {} (acc + 1) else acc + 1
+        match scope.bodies[j]? with
+        | some b =>
+          if scope.single.contains j || codeSize b 41 ≤ 40 then go b {} (acc + 1) else acc + 1
         | none => acc + 1
     | _ => acc + 1
+
+/-- Does `c`, a join point's own body (the join points nested in it
+included, not those it jumps to), make a tail call of a declaration of
+`loop` (the declaration's call cycle)? Then the join point is a loop's
+continuation. Only its own body counts: through the join points it jumps
+to, one rare guarded tail call in the last of a chain of `match`es would
+make the whole chain loop continuations. -/
+partial def tailCallsInto (loop : NameSet) : Code .pure → Bool
+  | .let d k =>
+    (match d.value, k with
+      | .const f _ _ _, .return x => x == d.fvarId && loop.contains f
+      | _, _ => false) || tailCallsInto loop k
+  | .fun _ k _ => tailCallsInto loop k
+  | .jp d k => tailCallsInto loop d.value || tailCallsInto loop k
+  | .cases cs => cs.alts.any (tailCallsInto loop ·.getCode)
+  | _ => false
 
 /-- The most code a copy of a duplicated join point may expand to
 (`copySize`): twelve times the bound on its own body. Loops whose
@@ -66,11 +87,19 @@ shared continuation) expand to 300-350 and stay plain loops. -/
 def copyBudget : Nat := 480
 
 /-- The most code the copies of a duplicated join point may add, beyond the
-one copy that inlining a single jump makes: (jumps - 1) × `copySize`. A
-join point jumped to from the many alternatives of a wide `match` (a
-`match` with 800 arms, each going on to an alternative of the next
-`match`) is outlined instead of copied into every arm. -/
+one copy that inlining a single jump makes: (jumps - 1) × its size. A join
+point jumped to from the many alternatives of a wide `match` (a `match`
+with 800 arms, each going on to an alternative of the next `match`: 260
+jumps to copies of about 150 nodes) is outlined instead of copied into
+every arm. -/
 def copiesBudget : Nat := 2000
+
+/-- The same for a loop's continuation (a join point whose own body
+tail-calls a declaration of the declaration's call cycle, `tailCallsInto`):
+after a `match` of up to about 100 arms, a continuation of 30-40 nodes is
+still copied into each arm. Outlined, it would make the loop a state
+machine, or, in mutual recursion, use a stack frame more per iteration. -/
+def loopCopiesBudget : Nat := 4000
 
 /-- Small join points (nested join points included, since sinking nests
 them) are duplicated at their jumps (like J1) rather than outlined:
@@ -79,16 +108,18 @@ mutually recursive (J3), and keeps the reuse of cells matched before the
 jump from reaching constructions after it. A copy, with the join points
 inlined into it, must also stay within `copyBudget`, so that duplication
 cannot multiply along a chain of join points, and all the copies within
-`copiesBudget`, so that a join point with many jumps is not copied to each.
-`jumps` is the number of jumps to the join point. -/
-def isSmallJp (bodies : Std.HashMap FVarId (Code .pure)) (d : FunDecl .pure) (jumps : Nat) : Bool :=
+`copiesBudget` (`loopCopiesBudget` for a loop's continuation), so that a
+join point with many jumps is not copied to each. `jumps` is the number of
+jumps to the join point. -/
+def isSmallJp (scope : JpScope) (d : FunDecl .pure) (jumps : Nat) : Bool :=
   codeSize d.value 41 ≤ 40 &&
-    let size := copySize bodies d.value (copyBudget + 1)
-    size ≤ copyBudget && (jumps - 1) * size ≤ copiesBudget
+    let size := copySize scope d.value (copyBudget + 1)
+    size ≤ copyBudget &&
+      (jumps - 1) * size ≤ (if tailCallsInto scope.loop d.value then loopCopiesBudget else copiesBudget)
 
 /-- Registry entry point. -/
 def Opt.JpSmall.install (c : PassConfig) : PassConfig :=
   let prev := c.lower.duplicateJp
-  { c with lower := { c.lower with duplicateJp := fun bodies d n => prev bodies d n || isSmallJp bodies d n } }
+  { c with lower := { c.lower with duplicateJp := fun scope d n => prev scope d n || isSmallJp scope d n } }
 
 end LeanToReussir
