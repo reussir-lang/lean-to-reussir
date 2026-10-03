@@ -588,8 +588,7 @@ pub fn bind_wait(cell: usize, src: usize) {
 
 /// A task starts running (`B_ENTER`: as a worker would, with streams of
 /// its own; `B_RELEASE`: the caller must release the runtime's reference).
-/// A cell without an entry is a converted task forwarding to its original:
-/// it runs where it is forced.
+/// A cell without an entry runs where it is forced, on the current thread.
 #[inline(never)]
 pub fn begin(cell: usize) -> u64 {
     let t = tasks();

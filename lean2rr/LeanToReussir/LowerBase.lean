@@ -327,7 +327,7 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
 
 /-- The state type of a thunk (`task = false`) or task over values of type
 `t`: a generated shared enum `{ pending(L2RUnit -> t), busy, done(t),
-conv(L2RUnit -> t, Box, u64), busyconv(u64), convdone(t, Box, u64) }`
+conv(L2RUnit -> t, Box, u64), convdone(t, Box, u64) }`
 (tasks also `bind(L2RUnit -> LCell<S>)`)
 held in a runtime cell `LCell<S>` (translation plan §5.14). A thunk
 starts `pending` (or `done`, for `Thunk.pure`) and is `busy` while its
@@ -337,15 +337,15 @@ def lazyState (task : Bool) (t : RR.Ty) : LowerM String := do
   if let some n := (← get).lazyStates[(task, t)]? then return n
   let n ← fresh (if task then "L2RTask" else "L2RThunk")
   -- `conv`: converted from another representation (see `lazyConv`): the
-  -- computation, the original cell (boxed), the original's identity.
+  -- computation, the original cell (boxed), the original's identity. It
+  -- stays `conv` while it is forced (its computation forces the original,
+  -- whose state is the copy's, see `lazyGetFn`).
   let cellTy := RR.Ty.app "LCell" #[.named n]
   modify fun s => { s with
     lazyStates := s.lazyStates.insert (task, t) n
     lazyInfos := s.lazyInfos.insert n (task, t)
     typeItems := s.typeItems.push (.enum n false (#[("pending", #[.fn .unit t]), ("busy", #[]), ("done", #[t]),
       ("conv", #[.fn .unit t, RR.Ty.box, .named "u64"]),
-      -- `busyconv`: a `conv` cell being forced (it keeps the identity).
-      ("busyconv", #[.named "u64"]),
       -- `convdone`: a converted cell with its value: the value, the
       -- original (kept, so that its address stays this cell's identity),
       -- the original's identity.

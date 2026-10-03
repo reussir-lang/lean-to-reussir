@@ -195,7 +195,7 @@ waits for the scheduler context computing it.
 
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
 lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),
-conv(L2RUnit -> α, L2RBox, u64), busyconv(u64), convdone(α, L2RBox, u64) }`
+conv(L2RUnit -> α, L2RBox, u64), convdone(α, L2RBox, u64) }`
 (tasks also
 `bind(L2RUnit -> LCell<S>)`;
 a shared enum, so any `α` fits). Cell primitives: `l2r_lcell_new<S>(v)`,
