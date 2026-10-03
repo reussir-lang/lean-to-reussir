@@ -120,13 +120,8 @@ element representation), a pass over the checked mono declarations
 (`monoPasses`), Lean definitions replaced by prelude functions, a lowering
 hook (`LowerHooks`: the body before lowering, the J1′ choice, the form of
 J4's state machine, constant caching, the binding of a `cases`
-alternative's fields), a pass over the generated Reussir functions
-(`rrPasses`), or an edit of the prelude given those functions
-(`preludePasses`: `origin-free-reads` points the array reads at the
-runtime's plain release when no conversion of the program produces an
-array, §5.1). Facts about the whole program that passes consult are
-computed once by the core (`LowerCtx.observesIdentity`, used by
-`fresh-rebuild`, §5.5). Every hook's default is the plain translation. A pass keeps
+alternative's fields), or a pass over the generated Reussir functions
+(`rrPasses`). Every hook's default is the plain translation. A pass keeps
 its own state in the code-lowering context's extension slot
 (`CodeCtx.ext`), not in the core's.
 
@@ -768,9 +763,9 @@ its value is stored as `Box`.
   instantiation, 157 s and 270 s. The largest part is rrc compiling each
   generic runtime function instantiated at a type with a separate rustc
   run (`l2r_once_get<T>`/`l2r_once_set<T>` for every type's cached zero
-  value and constants, `l2r_origin_note<S, D>`/`l2r_origin_take` for
-  every conversion): 1,970 and 1,992 runs, 100 s and 128 s (a small
-  program: 368 runs, about 30 s).
+  value and constants and, when this was measured, the origin records of
+  every conversion, since removed): 1,970 and 1,992 runs, 100 s and 128 s
+  (a small program: 368 runs, about 30 s).
   When the program can cast at all, unboxing also accepts the variants of
   types that an `unsafeCast` can read (below). A program can cast when
   some declaration it reaches outside Lean's library (`Init`, `Std`,
@@ -874,25 +869,14 @@ its value is stored as `Box`.
     constructors, each holding the source value and the fields converted
     so far (`convMachine`). Converting a deep value uses heap, not stack,
     as native Lean, which converts nothing, uses none.
-  - *Identity.* Natively there is one object, so a conversion keeps the
-    identity: the converted value records the value it was converted from
-    (its first origin, for a value converted from a converted one), which
-    the record keeps alive, and that value's address (the runtime's
-    `origin` table; `l2r_origin_note`). `ptrAddrUnsafe` of a converted value
-    is its origin's address, and converting it back to its origin's
-    representation gives the origin itself (`l2r_origin_back`): an
-    `Array Nat` stored in two existential packages at `Array α` is `ptrEq`
-    to itself, and a fixpoint step that goes from uniform code through a
-    typed function and back returns its argument. The record also holds the
-    converted value, so it stays unchanged (an update copies it) and its
-    address is not reused. A converted array's record goes with the array
-    (when the program drops it, `leanrt::drop`); a record whose converted
-    value only it still holds is dropped, two records being checked at
-    each new one, so a converted record's origin, and a resource it holds,
-    can live until the next conversion (natively, one object, freed with
-    the converted value). Only the
-    outermost value of a conversion is recorded (its parts are new
-    objects).
+  - *A new value.* The converted value is a new object, equal to the
+    original and unshared, so it is updated in place; the original is
+    released as soon as nothing else holds it, with any resource it holds.
+    Nothing links the two: converting the value back rebuilds it again (a
+    value that crosses into uniform code and back is converted twice).
+    Natively there is one object; only identity (`ptrAddrUnsafe`, `ptrEq`)
+    and sharing (`dbgTraceIfShared`) can tell the difference, and neither
+    is preserved (§9).
 - Through `unsafeCast` (mono erases it), a value can meet code expecting
   another type that Lean represents alike. The conversions follow Lean's
   representation:
@@ -945,7 +929,7 @@ its value is stored as `Box`.
   arrays of such elements) and the conversion would pair exactly those
   fields, the value is used as it is (`l2r_retype`, the same object
   reinterpreted): a user list read as another user list, or an `Array T₁`
-  field read at `Array T₂`, costs nothing and keeps its identity. This
+  field read at `Array T₂`, costs nothing and keeps its sharing. This
   applies to instantiations of one inductive as well (`structConv`,
   `vecConv` otherwise rebuild). Where no conversion exists at all, lean2rr
   warns and emits a run-time panic for that cast: the program is still
@@ -1036,8 +1020,8 @@ application appears.
 
 - **Kept out of rrc's MLIR inliner.** The conversions between
   representations (`l2r_fconv_S_T`), the unboxing functions (`l2r_unbox_…`,
-  to a nominal type, an array or a function type), the application and
-  identity functions of a type with `w<S>` variants, and the application
+  to a nominal type, an array or a function type), the application
+  functions of a type with `w<S>` variants, and the application
   functions of the function types of uniform code (types that mention
   `Box`) are marked `#[transform_anchor]`: Reussir keeps a transform anchor a function
   through its MLIR pipeline (its inliner skips it; there are no transform
@@ -1107,25 +1091,21 @@ exists, lean2rr warns and the match panics when it runs.
 
 An arm that returns the matched value (`simp` turns `node l k r` back
 into `t`) returns that value itself, as natively: the same object, with its
-sharing. Code that stops when `ptrEq` says a step changed nothing (Lean's
-`Expr.replace`, fixpoint loops) depends on it, and a lookup returning an
-existing node must not copy it.
+sharing, so a lookup returning an existing node does not copy it.
 
 The matched value then stays live across the match, and Reussir cannot
 reuse its cell for what the other arms build. That is the error arm of
 every `ExceptT`/`Option`/`EStateM` bind (`| .error _ => r`), so each bind's
 success path would allocate its result and free the matched one. The
 optional pass `fresh-rebuild` returns the constructor rebuilt from the
-arm's fields instead, where nothing can tell the two apart and no copy is
-likely: in a program that never asks for an object's identity or sharing
-(no `ptrAddrUnsafe`, nothing that inlines to it such as `ptrEq`, no
-`ST.Ref.ptrEq`, no `dbgTraceIfShared`), when the matched value is freshly
-built (bound in the same function to a constructor application, or to a
-full call of a declaration all of whose results are freshly built, which
-an analysis of the whole program decides: a bind's result, normally
-unique, so Reussir reuses its cell and the rebuilt value is the same
-cell), and the arm binds every field and uses the value only by returning
-it. A parameter, a field, a constant, or the result of a lookup, an
+arm's fields instead, an equal value (only identity and sharing, which
+are not preserved, §9, can tell them apart), where no copy is likely:
+when the matched value is freshly built (bound in the same function to a
+constructor application, or to a full call of a declaration all of whose
+results are freshly built, which an analysis of the whole program
+decides: a bind's result, normally unique, so Reussir reuses its cell and
+the rebuilt value is the same cell), and the arm binds every field and
+uses the value only by returning it. A parameter, a field, a constant, or the result of a lookup, an
 extern or a function value is still returned itself. MonadicInterp: 1.25x
 native without the pass, 1.08x with it.
 
@@ -1880,14 +1860,15 @@ generated state, one type per value type `α` (and per kind, thunk or task):
 
 ```
 enum L2RThunk_N { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧),
-                  conv(L2RUnit -> ⟦α⟧, Box, u64), convdone(⟦α⟧, Box, u64) }
-enum L2RTask_N  { …the same…, bind(L2RUnit -> LCell<L2RTask_N>) }
+                  conv(L2RUnit -> ⟦α⟧, Box) }
+enum L2RTask_N  { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧),
+                  conv(L2RUnit -> ⟦α⟧, Box, u64), bind(L2RUnit -> LCell<L2RTask_N>) }
 ```
 
 The state is a shared Reussir enum, so every `α` fits, closures and value
 types included; a closure cannot be stored in a runtime cell directly.
-`conv` is a converted thunk or task (`convdone` once it has its value)
-and `bind` a bind task that has not started (both below).
+`conv` is a converted thunk or task and `bind` a bind task that has not
+started (both below).
 toMono leaves only a few externs to translate: `cases` on a thunk or task
 becomes `Thunk.get`/`Task.get`, and `Thunk.fn` a closure calling
 `Thunk.get`.
@@ -2026,26 +2007,28 @@ running code blocks (*Blocking*, below).
   cannot hold a task. Values captured by a Reussir closure (only lean2rr's
   own glue makes them, not Lean code) are not looked into.
 - A thunk or task stored at another representation (in `Box`, §5.1) is
-  converted to a new cell in state `conv(g, o, a)`: `g` forces the original
-  and converts its value (so it still runs at most once); `o` is the
-  original cell, boxed, so that converting back gives that very cell (a
+  converted to a new cell. One that has its value gives a cell in state
+  `done` with the converted value. Otherwise the new cell is in state
+  `conv(g, o)`, for a task `conv(g, o, a)`: `g` forces the original and
+  converts its value (so it still runs at most once); `o` is the original
+  cell, boxed, so that converting the copy back gives that very cell (a
   thunk crossing between typed and uniform code in a loop stays one cell
-  instead of growing a chain); `a` is the original's address: the copy's
-  identity (`ptrAddrUnsafe`, §9) and, for a task, its identity for the
-  runtime, so the copy's state, `IO.cancel` and cancellation are the
-  original's. The copy has no running state of its own: it stays `conv`
-  while it is forced, and forcing it again meanwhile runs `g` again, which
-  waits for the original if that is running and has the original's value
-  once it has finished. (A copy that went `busy` would be waited for until
-  its own computation ends; but the original's end walks its `sync`
-  dependents inside that computation, and one that forces the copy, as
-  natively it may read the finished original, would wait forever.) A
-  forced copy, and the copy of a thunk or task that already has its value,
-  is `convdone(v, o, a)`: it keeps the original, so that its identity stays
-  the original's (which stays alive, so its address is not reused). A copy
-  of a copy records the first original, and converting it to a third
-  representation converts the original directly, so chains stay one level
-  deep.
+  instead of growing a chain); a task's `a` is the original's address, the
+  copy's identity for the runtime, so the copy's state (`IO.getTaskState`,
+  `IO.hasFinished`), waiting for it, `IO.cancel` and cancellation, its
+  priority and its dependents are the original's. The copy has no running
+  state of its own: it stays `conv` while it is forced, and forcing it
+  again meanwhile runs `g` again, which waits for the original if that is
+  running and has the original's value once it has finished. (A copy that
+  went `busy` would be waited for until its own computation ends; but the
+  original's end walks its `sync` dependents inside that computation, and
+  one that forces the copy, as natively it may read the finished original,
+  would wait forever.) A forced copy stores `done(v)` and lets the original
+  go; the original has finished then, which is what the runtime answers
+  for the copy's own cell from then on. A copy of a copy records the first
+  original, and converting it to a third representation converts the
+  original directly, so chains stay one level deep. The copy is a cell of
+  its own for `ptrAddrUnsafe` (§9).
 - *Promises* (`IO.Promise α`, `lcAny` in mono code) are a runtime object
   (`LPromise`) holding the cell of their task, a task over `Option Box`
   whatever `α` is, so that typed and uniform code share it. The task stays
@@ -2358,39 +2341,56 @@ Answered (Lean):
 - `lean_apply_n` (`apply.cpp`) calls the code directly at exact arity,
   builds a partial application with fewer arguments, and with more calls and
   then applies the rest: one-argument-at-a-time semantics (§5.3).
-- Pointer equality in `Init`: `Array.mapMono`, `List.mapMono`,
-  `withPtrEq` and `ShareCommon` use it only as a shortcut, so "not equal"
-  is safe there. Other code stops when `ptrEq` says a step returned its
-  argument itself (`Expr.replace`, fixpoint loops, over any type), so
-  `ptrAddrUnsafe` answers what native Lean answers (`addrOf`):
-  - a boxed scalar's word, `lean_box(n) = 2n+1`, for what Lean represents
-    so: a `Nat` below 2^63, an `Int` in the `int32` range (`2·u32(i)+1`),
-    `UInt8/16/32`, `Char`, `Bool` and enumerations (their index), a
-    nullary constructor of any inductive (its index: `[]` and `none` are
-    1), `Unit` and erased values (`box(0) = 1`);
-  - a heap value's handle pointer (`l2r_ptr_addr_obj`, `l2r_ptr_addr_rec`),
-    big numbers included;
-  - a `[value]` struct, represented natively by its field: the field's;
-  - `UInt64`, `Float`, `Float32`, `USize`: natively boxed into a new cell at
-    each call (two calls on the same variable give different cells, unless
-    Lean's CSE merged them, which lean2rr keeps): a fresh number;
-  - uniform code holds lean2rr's own wrappers, which answer what they hold:
-    a `Box` its payload's identity (for a `UInt64`/`Float` payload, the `Box`
-    cell, which is the cell native boxing made), a function value wrapped for
-    another representation (`w`) the wrapped value's, a thunk or task
-    converted to another representation (`conv`, `convdone`, §5.14) the
-    original's address, which it records; a record, list or array that a
-    structural conversion built (§5.1) the address of the value it was
-    converted from, which the runtime's `origin` table records
-    (`l2r_ptr_addr_rec` and `l2r_ptr_addr_obj` look it up).
-  So `ptrEq x x` holds for every representation, a payload returned by its
-  own function is `ptrEq` to itself, and fixpoint loops stop where native
-  ones do. Values without a native object (a `Nat` from 2^63 to 2^64, an
-  `Int` outside `int32` but inside `i64`: natively big number objects) answer
-  a number computed from the value, so equal ones are `ptrEq`.
-  `ST.Ref.ptrEq` is real identity: the addresses of the references'
+- Identity is not preserved. Native Lean answers `ptrAddrUnsafe` with an
+  object's address, or a boxed scalar's word (`lean_box(n) = 2n+1`).
+  lean2rr does not emulate it: a translated program must give the same
+  results as natively when they do not depend on pointer identity, raw
+  addresses or sharing, which only unsafe or implementation-level APIs
+  observe (`ptrAddrUnsafe` and what is built on it, `isExclusiveUnsafe`,
+  `dbgTraceIfShared`, `ShareCommon`). `ptrAddrUnsafe x` (`addrOf`) takes
+  `x` in its own representation (it is not converted for the call) and
+  answers:
+  - a heap value (a record, a function value, a `Box`, a string, an
+    array, a big number, a reference, a thunk or task, a runtime handle):
+    the address of its cell, whatever its count (`l2r_ptr_addr_rec`,
+    `l2r_ptr_addr_obj`); a nullary constructor of a shared enum: its
+    immediate;
+  - a `Nat` below 2^63, an `Int` in the `int32` range, `UInt8/16/32`,
+    `Char`, `Bool`, an enumeration: the boxed scalar's word `2n+1`;
+    `Unit` and erased values: `1`;
+  - `UInt64`, `Float`, `Float32`: their bits;
+  - a `[value]` struct: its field's;
+  - a `Nat` from 2^63 to 2^64, an `Int` outside `int32` (no cell, and too
+    wide for a word): a number answered only once (`l2r_addr_fresh`: even,
+    in [2^62, 2^63), so never a word or a pointer).
+
+  `ptrEq` and `ptrEqList` compare these words and `withPtrAddr` passes one
+  on (all inline to `ptrAddrUnsafe`); none of them can crash. Equal words
+  mean the same cell or equal values, so `ptrEq` answering `true` still
+  means equal values, which the code using it as a shortcut for equality
+  needs (`Array.mapMono`, `List.mapMono`, `withPtrEq`, `ShareCommon`'s
+  tables: "not equal" is safe there). (That holds where `ptrAddrUnsafe`
+  is applied to a variable, which is how `ptrEq` and the others reach it.
+  Applied as a function value to a value of another representation, it
+  sees the converted value, a temporary cell whose address a later
+  temporary can get.) Answers differ from native where a
+  value has another representation or another cell here: a value
+  converted to another representation (§5.1) is a new object, so it is not
+  `ptrEq` to its original, nor are two conversions of one value; two
+  boxings of one value are two `Box` cells; a function value wrapped for
+  another representation (§5.3) and a converted thunk or task (§5.14) are
+  cells of their own; an arm rebuilt by `fresh-rebuild` (§5.5) is a new
+  cell; equal `UInt64`s, `Float`s and small numbers are `ptrEq` (natively
+  each boxing of a `UInt64` or `Float` is a new cell). So code that stops
+  only when `ptrEq` says a step returned its argument (a fixpoint over
+  values that cross representations) can take more steps than natively.
+  `ST.Ref.ptrEq` (`IO.Ref.ptrEq`) stays real identity: a reference is never
+  converted (§5.1), and it compares the addresses of the references'
   records (`l2r_ptr_addr_rec`), whatever representation each side is seen
-  at.
+  at. Sharing is not emulated either: `isExclusiveUnsafe` answers `false`,
+  `shareCommon` shares nothing, and `dbgTraceIfShared` reads the cell's
+  count, which conversions and lean2rr's own copies can make differ from
+  native.
 
 ---
 
@@ -2558,15 +2558,17 @@ Each item says what differs and when.
   canonicalizes NaN). A cast between `Float32` and `UInt32` copies the bits
   too; natively it crashes (a boxed `UInt32` is a tagged scalar, a boxed
   `Float32` a cell).
-- *Pointer identity* (§9): a value converted to another representation
-  answers its original's identity (a thunk or task through its recorded
-  original, §5.14; a record, list or array through the runtime's origin
-  table, §5.1), but the parts of a structurally converted value are new
-  objects: the tail of a converted list is not `ptrEq` to the original's
-  tail. A `Nat` from 2^63 to 2^64 and an `Int` outside `int32` (natively a
-  new big number object per computation) answer a number computed from
-  their value, so equal values are `ptrEq` (natively only the same object
-  is); likewise a rebuilt `[value]` struct over the same field.
+- *Pointer identity and sharing* (§9) are not preserved: `ptrAddrUnsafe`
+  answers the address of a value's cell in its own representation, or a
+  word computed from a scalar's value, so `ptrEq`, `ptrEqList` and
+  `withPtrAddr` can answer otherwise than natively wherever a value has
+  another representation or another cell here (a value converted to
+  another representation and its original, two conversions or two
+  boxings of one value, a wrapped function value, a converted thunk or
+  task, an arm rebuilt by `fresh-rebuild`), and equal `UInt64`s, `Float`s
+  and small numbers are `ptrEq`. `ptrEq` answering `true` still means
+  equal values, and `ST.Ref.ptrEq` is exact. `dbgTraceIfShared` reports
+  lean2rr's counts (below, Runtime).
 - *Order of releases in one free*: when a value holding several resources
   is freed at once (handles closed, and so flushed; promises resolved),
   native Lean releases them last pushed first: an array's last element
@@ -2650,13 +2652,11 @@ Each item says what differs and when.
   traversal (adv4 RP4-09).
 - *Structural conversions* (§5.1) rebuild a value as a tree: sharing is lost,
   so a DAG costs exponential time and memory, and a conversion on every call
-  costs O(size) per call. Each conversion also records its origin (a table
-  entry holding both values until the converted one is dropped), so the
-  converted value is shared and its first update copies it (an array) or
-  allocates a new cell instead of reusing it (a record); a conversion
-  through an explicit stack (a tree, a rose tree) allocates a stack frame
-  per node. Past the instance caps of §2.6 this can happen
-  inside loops. Running out of memory changes the exit status. Values of
+  costs O(size) per call, also when the value goes back to the
+  representation it came from (a round trip through uniform code converts
+  twice); a conversion through an explicit stack (a tree, a rose tree)
+  allocates a stack frame per node. Past the instance caps of §2.6 this can
+  happen inside loops. Running out of memory changes the exit status. Values of
   types with the same layout are not converted (`l2r_retype`); a cast
   between layouts that differ (an `Array T₁` field read at `Array T₃` whose
   elements hold an `Int` where `T₁`'s hold a `Nat`) converts the field at
@@ -2693,11 +2693,6 @@ Each item says what differs and when.
   `contains`, `toNat?`): 1.7x native (Pf4MinStrAny; 1.1x with the projection
   moved by hand to its first use); insertion sort on `Array Nat` keeps
   the count's stores and reloads it for the swap's uniqueness check: 2.1x.
-  In a program where a conversion produces an array, the release also
-  checks for the origin table's reference to a converted array (§5.1), and
-  LLVM no longer cancels the pair: the optional pass `origin-free-reads`
-  drops that check from programs with no such conversion (17 of the 18
-  classic programs; Qsort 1.32x native with the check, 0.93x without).
 - *`Array Nat`/`Array Int` objects* have a 40-byte header (a Lean array's is 24): six
   million three-element `Array Nat` rows take 1.3x native memory
   (Pf4SmallArrs 0).
@@ -2718,9 +2713,10 @@ Each item says what differs and when.
 
 **Runtime** (details in `runtime/README.md`, "Known divergences")
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`;
-  `shareCommon` shares nothing, and `ShareCommon.Object.eq` holds only for
-  the same object (natively also for two objects with the same fields;
-  `L2RShim`).
+  `dbgTraceIfShared` reads lean2rr's own counts (a converted value is a
+  new, unshared object, §5.1); `shareCommon` shares nothing, and
+  `ShareCommon.Object.eq` holds only for the same object (natively also
+  for two objects with the same fields; `L2RShim`).
 - `IO.getNumHeartbeats` is 0; `dbgStackTrace` prints nothing; a panic's
   backtrace line is `(stack trace unavailable)`.
 - `errno` after a sticky handle error can differ.
