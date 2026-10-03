@@ -271,7 +271,9 @@ exceptions listed further down:
 - **All of the language** (it arrives already compiled by Lean).
 - **Program structure:** `main` with or without arguments and exit code,
   module initializers and `initialize` declarations (run in Lean's order,
-  taken from what the `.olean` records), `IO.initializing`, top-level
+  taken from what the `.olean` records; under the module system, `meta`
+  declarations and `meta import`s run only where natively they do),
+  `IO.initializing`, top-level
   constants computed once on first use, `@[extern]`/`@[export]` functions
   implemented in Lean, `@[implemented_by]`.
 - **Numbers and data:** `Nat`/`Int` of any size, fixed-width integers,
