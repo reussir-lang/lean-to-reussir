@@ -130,7 +130,8 @@ native outputs are reproducible.
   about 1.3 GB.
 - The sizes were chosen by timing the native executables pinned to an idle
   Cortex-X925 core (3.9 GHz, NVIDIA DGX Spark), taking the minimum of 3 runs.
-  Native bench-size results (`oracle.py bench --repeat 3`):
+  Native bench-size results (`oracle.py bench --repeat 3`; measured with
+  Lean 4.33, not yet re-measured with 4.34, whose runtime uses mimalloc 3):
 
 | case | bench size | time (s) | max RSS (MiB) |
 |---|---:|---:|---:|

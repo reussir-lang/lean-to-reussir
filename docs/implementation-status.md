@@ -394,7 +394,9 @@ alternately, pinned to the least-loaded fast core; best of 5 (classic) or
 3 (Reussir suite); time ratio = lean2rr time / native time (below 1 =
 faster than native). Every run's output was checked against native.
 `dev` 9f5b642, Reussir `l2r-local` at `ef0235b9` (the local patches up to
-0015).
+0015), against native Lean 4.33. Not re-measured with Lean 4.34, whose
+native runtime changed (mimalloc 3, `lean_dec_ref_cold`, sticky reference
+counts, folded `UInt` literals): the timings wait for a measurement window.
 
 **Classic corpus** (`tests/classic`, largest size):
 
