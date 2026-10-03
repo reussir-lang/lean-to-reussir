@@ -2282,19 +2282,28 @@ on the dropping thread, wherever that happens):
   structure, a map, an `Option`, ...) is resolved in its turn, and its
   dependents are walked as soon as the free is over (natively during the
   free, when it reaches the promise), before the code that released the
-  container goes on. The runtime sees the end of a free that one of its own
-  containers started (an array, a reference cell, a task or thunk cell;
-  `leanrt::drop::run`), and of any free through local Reussir patch 0040
+  container goes on. The runtime sees the end of a free that it started
+  itself (`leanrt::drop::run`): one of its containers (an array, a
+  reference cell, a task or thunk cell), or the old value of a reference's
+  `set` (below); and of any free through local Reussir patch 0040
   (`__reussir_drop_drained`, which every drain calls when it ends).
   Without that patch, the end of a free that Reussir's record glue started
-  (a structure, list or `Option` that the program releases) is not seen:
-  those dependents run at the context's next effect point, block, Std.Sync
-  wait (before the object is looked at, so that a release by them is not
-  lost) or question about a task (§10).
+  (a structure, list or `Option` that the program's own code releases) is
+  not seen: those dependents run at the context's next effect point,
+  block, Std.Sync wait (before the object is looked at, so that a release
+  by them is not lost) or question about a task (§10).
 
 A reference's `set` stores the new value before it releases the old one,
 as `lean_st_ref_set` does (Reussir's `cell::set` releases first): code that
-the release runs sees the new value.
+the release runs sees the new value. It releases the old value as
+`lean_dec` does (`leanrt::drop::release`, through the prelude's
+`l2r_release_value`): a shared value is only decremented, and the last
+reference to a record is freed inside a free the runtime starts, so what
+it holds goes in Lean's order (its last field first, as Reussir's glue
+would not do for the first cell of a free it starts) and the dependents of
+the promises it drops run when that free ends, before the next statement,
+with or without patch 0040. The same holds for the old state of a task or
+thunk cell (`l2r_lcell_set`).
 `Task.get` of a task that is `busy` because it
 runs on another (suspended) context waits until it has finished
 (`l2r_task_wait_running`, then it looks again); on the running context it
@@ -2945,11 +2954,19 @@ Each item says what differs and when.
   can tell). Timers count from the monotonic clock when they start
   (libuv from its loop's cached time, which can make a timer fire a little
   earlier). A promise the loop gives up without resolving it (a timer
-  stopped, reset or re-armed, an operation whose start failed) is released
-  on the loop's context, at its next turn, where natively the C function
-  releases it at once: when that was the last reference, the promise is
-  resolved with `none`, and its `sync` dependents run, that much later
-  (generated code does not run inside a runtime primitive).
+  re-armed, an operation whose start failed) is released on the loop's
+  context, at its next turn, where natively the C function releases it at
+  once: when that was the last reference, the promise is resolved with
+  `none`, and its `sync` dependents run, that much later (generated code
+  does not run inside a runtime primitive). A timer's or signal watcher's
+  `stop` and `cancel`, and a socket's `cancelAccept` and `cancelRecv`
+  (also of a `waitReadable`), hand the promise back to the extern's glue,
+  which releases it on the caller's context once the primitive has
+  returned, as natively in the call (tests `RtTimerStopDropped`,
+  `RtSockCancel`). Natively these calls hold the event loop's lock while
+  they release the promise, so a `sync` dependent that blocks there for
+  good (`Promise.result!` of the dropped promise) also stops every timer
+  and socket of the program; here only the calling context blocks.
 - *Promises released inside a free* (§5.14): the `sync` dependents of a
   promise dropped unresolved because a container holding it is freed run
   once the whole free is over, where natively they run when the free
@@ -2957,10 +2974,15 @@ Each item says what differs and when.
   (a file handle held by a later element already closed, another promise
   in it already resolved). Without local Reussir patch 0040, a free that
   Reussir's record glue started (a structure, a list after its first cell,
-  an `Option` the program releases) ends unseen, and its promises'
-  dependents run only at the next output, block, Std.Sync wait or question
-  about a task: code in between (reading a reference the dependent sets,
-  a computation, a blocking system call) runs before them.
+  an `Option` that the program's own code releases; not the old value of a
+  reference's `set`, which the runtime frees) ends unseen, and its
+  promises' dependents run only at the next output, block, Std.Sync wait
+  or question about a task: code in between (reading a reference the
+  dependent sets, a computation, a blocking system call) runs before them.
+  A condition-variable loop that reads its condition before it waits
+  (`while !(← c.get) do cv.wait m`) then waits forever when such a
+  dependent was to set the condition and notify: the dependent runs at the
+  wait, after the condition was read, and notifies no one.
 
 **Not supported** (translation succeeds; `rrc` reports an unknown function)
 - Every constant of the program is translated (§2.2), so an unused constant
