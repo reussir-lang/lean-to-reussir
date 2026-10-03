@@ -113,12 +113,16 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   size (GMP's convention: the limbs in use, negated for a negative value;
   no zero top limb), the capacity, then the limbs inline (`mi_good_size`
   rounds the capacity up to the allocator's size class). The frequent
-  operations (add, sub, mul, div/mod in the four Lean flavours, shifts,
-  bitwise, compare) call GMP's `mpn_*` functions on the limbs. A result
-  goes into a unique operand whose block has room for it (computed in
-  place where GMP allows, else in scratch limbs, on the stack up to 32,
-  and copied), else into a fresh block; a block grows (`mi_realloc`) only
-  when a result computed in place outgrows it (a carry). The rare
+  operations (add, sub, mul, div/mod in the four Lean flavours, shifts)
+  call GMP's `mpn_*` functions on the limbs; bitwise operations and
+  comparisons are loops over them. A result goes into a unique operand
+  whose block has room for it (computed in place where GMP allows, else
+  in scratch limbs, on the stack up to 32, and copied), else into a fresh
+  block; a block grows (`mi_realloc`) only when a result computed in place
+  outgrows it (a carry), and a result that leaves most of its block unused
+  (more than 32 limbs and three quarters) moves to a block of its size
+  (`shrink`; review RVPB-01: `(2^128000 + i) >>> 127872` kept a 2046-limb
+  block for a 3-limb result, 18x native peak memory for 5000 of them). The rare
   operations (`pow` of a big base, `gcd`, parsing, printing) give GMP's
   `mpz_*` functions read-only views (`MPZ_ROINIT_N`) and copy the result
   out of a temporary `mpz_t`. A power of two raised to `e` is one shifted
@@ -146,9 +150,11 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   direction, separate memory for `mul`, `sqr`, `tdiv_qr`) are GMP's
   documented ones, also used by its `mpz` code.
 - **Where:** `leanrt/src/big.rs`: `Obj`, `alloc`, `reserve`/`grow`,
-  `either`, `add_mag`, `sub_mag`, `mul`, `div`, `bitwise`, `view`,
-  `of_mpz`; `gmp.rs`; unit tests `big::tests` (`against_mpz` checks every
-  operation on unique and shared operands against GMP's `mpz` functions).
+  `set`/`shrink`, `either`, `add_mag`, `sub_mag`, `mul`, `div`, `bitwise`,
+  `view`, `of_mpz`; `gmp.rs`; unit tests `big::tests` (`against_mpz`,
+  `mixed_ownership`, `large_mixed` check every operation on unique,
+  shared and roomy operands against GMP's `mpz` functions; `retention`
+  checks the shrink).
 - **Remove only if:** another layout serves lean2rr better. Differences
   from native: counts follow Reussir's convention, the block comes from
   `mi_malloc`, and C code reading a big number through `lean.h` would need
@@ -195,7 +201,8 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 
 - **What:** Built with `--cfg leanrt_count_bigs` (set through
   `L2R_LEANRT_RUSTFLAGS`, which gives leanrt its own build directory), a
-  program prints the big numbers made, freed and grown in place at exit.
+  program prints the big numbers made and freed, and the blocks grown by
+  a carry, at exit.
   `tests/runtime/nat-alloc-check.sh` checks with them that every big
   number `RtNatStress` makes is freed exactly once and that `RtNatConst`'s
   big constants are made once, at two sizes.

@@ -40,7 +40,7 @@ pub struct LStr;
 // A Lean `Nat` / `Int`: one word, Lean's own encoding (leanrt::nat). An odd
 // word is a small value: `lean_box(n)` for a `Nat` below 2^63,
 // `lean_box((unsigned)(int)i)` for an `Int` in the `int32` range. An even
-// word is a reference to a big number laid out as Lean's `lean_mpz_object`
+// word is a reference to a big number, one block with the limbs inline
 // (`leanrt::big`). `tagged` (local Reussir patch 0050): Reussir copies and
 // drops them like any shared handle but counts only the even words, so a
 // small value costs no allocation and its copy or drop is a bit test.

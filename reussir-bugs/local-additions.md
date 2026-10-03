@@ -111,8 +111,9 @@ clear.
 
 lean2rr declares `Nat` and `Int` this way. A small `Nat` `n` (below 2^63) is
 the word `2n+1`, a small `Int` (the `int32` range) `lean_box` of its 32
-bits; a big one is a pointer to a counted big number laid out as Lean's
-`lean_mpz_object`. This is Lean's own representation, and Lean's C runtime
+bits; a big one is a pointer to a counted big number (lean2rr's own
+layout, one block with the limbs inline). The words are Lean's own
+representation, and Lean's C runtime
 makes the same low-bit test before every count update (`lean_inc`,
 `lean_dec`). Before, `Nat` was a two-word `[value]` enum
 `{ Small(u64), Big(LBig) }`: 16 bytes in every record field (natively 8).

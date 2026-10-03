@@ -24,11 +24,14 @@
 //! normalize.
 //!
 //! The arithmetic is GMP's: the frequent operations call its `mpn_*`
-//! functions on the limbs directly, writing the result into an operand
-//! that is uniquely referenced (grown with `mi_realloc` when it lacks room)
-//! or else into a fresh block; the rare ones (`pow`, `gcd`, parsing,
-//! printing) give GMP's `mpz_*` functions read-only `mpz_t` views of the
-//! operands (`MPZ_ROINIT_N`) and copy a result out of a temporary `mpz_t`.
+//! functions on the limbs directly (bitwise operations and comparisons
+//! are loops here), writing the result into an operand that is uniquely
+//! referenced and has room for it, or else into a fresh block; a block
+//! grows (`mi_realloc`) only when a result computed in place carries out
+//! of it, and shrinks when a result leaves most of it unused (`set`). The
+//! rare operations (`pow`, `gcd`, parsing, printing) give GMP's `mpz_*`
+//! functions read-only `mpz_t` views of the operands (`MPZ_ROINIT_N`) and
+//! copy a result out of a temporary `mpz_t`.
 //! Semantics are Lean's (`src/runtime/mpz.cpp`, `object.cpp`): truncating
 //! subtraction, `x / 0 = 0`, `x % 0 = x` (both handled by `crate::nat`),
 //! `Int.div`/`Int.mod` truncate, `Int.ediv`/`Int.emod` are Euclidean.
@@ -127,16 +130,24 @@ impl LBig {
     }
 
     /// The value is the first `n <= cap` limbs (fewer when the top ones are
-    /// zero), negated when `neg` (zero is never negative).
+    /// zero), negated when `neg` (zero is never negative). Only on a unique
+    /// handle, the result of an operation: when it leaves most of the block
+    /// unused (more than 32 limbs and three quarters), the block shrinks to
+    /// fit, so that a small result never keeps a large operand's block
+    /// (natively every result is a new `mpz` of its size).
     #[inline]
     fn set(&mut self, n: usize, neg: bool) {
-        debug_assert!(n <= self.cap());
+        debug_assert!(n <= self.cap() && self.is_unique());
         let p = self.ptr();
         let mut n = n;
         while n > 0 && unsafe { *p.add(n - 1) } == 0 {
             n -= 1;
         }
         unsafe { (*self.0).size = if neg { -(n as i32) } else { n as i32 } };
+        let cap = self.cap();
+        if cap > n + 32 && cap > 4 * n {
+            shrink(self);
+        }
     }
 }
 
@@ -180,7 +191,8 @@ extern "C" fn free(o: *mut Obj) {
     unsafe { mi_free(o as *mut c_void) }
 }
 
-/// Counts of the big numbers made, freed and grown in place, for tests:
+/// Counts of the big numbers made and freed, and of the blocks grown by a
+/// carry (`grow`), for tests:
 /// built with `--cfg leanrt_count_bigs` (`L2R_LEANRT_RUSTFLAGS`, see
 /// `tests/runtime/nat-alloc-check.sh`), a program prints them to stderr at
 /// exit. Not compiled otherwise.
@@ -277,6 +289,21 @@ fn grow(b: &mut LBig, n: usize) {
     }
     #[cfg(leanrt_count_bigs)]
     count::grown();
+}
+
+/// Move a unique number to a block of its size (`set`).
+#[cold]
+#[inline(never)]
+fn shrink(b: &mut LBig) {
+    let bytes = block_bytes(b.len().max(1));
+    unsafe {
+        let o = mi_realloc(b.0 as *mut c_void, bytes) as *mut Obj;
+        // A failed shrink keeps the block as it is.
+        if !o.is_null() {
+            (*o).cap = cap_of(bytes);
+            b.0 = o;
+        }
+    }
 }
 
 /// `b` itself when it is unique, else a copy (and `b` released); with room
@@ -1389,5 +1416,228 @@ mod tests {
         let a = nat_mod(a, of_u64(1 << 40));
         assert_eq!(a.0, q);
         assert_eq!(dec(&a), (340282366920938463463374607431768211454u128 % (1u128 << 40)).to_string());
+    }
+
+    /// A unique copy with `extra` limbs of spare capacity.
+    fn roomy(b: &LBig, extra: usize) -> LBig {
+        let r = alloc(b.len() + extra);
+        unsafe { ptr::copy_nonoverlapping(b.ptr(), r.ptr(), b.len()) };
+        // Garbage in the spare limbs (an uninitialized-read check).
+        for i in b.len()..r.cap() {
+            unsafe { *r.ptr().add(i) = 0xDEAD_BEEF_DEAD_BEEF };
+        }
+        // The size directly: `set` would shrink a block this roomy.
+        unsafe { (*r.0).size = b.size() };
+        r
+    }
+
+    fn samples7() -> Vec<LBig> {
+        let mut s = 0x9E3779B97F4A7C15u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut out = Vec::new();
+        for i in 0..42 {
+            let n = i % 7;
+            let mut l: Vec<u64> = (0..n).map(|_| match next() % 4 { 0 => 0, 1 => u64::MAX, _ => next() }).collect();
+            if let Some(t) = l.last_mut() {
+                if *t == 0 {
+                    *t = 1;
+                }
+            }
+            out.push(of_limbs(l.as_ptr(), n, i % 3 == 1));
+        }
+        out
+    }
+
+    /// Mixed ownership: one operand shared, the other unique with spare
+    /// room (the `y`-unique branches, never taken by `against_mpz`, whose
+    /// operands are both shared or both unique with no spare room).
+    #[test]
+    fn mixed_ownership() {
+        let xs = samples7();
+        for a in &xs {
+            for b in &xs {
+                for mode in 0..4 {
+                    for extra in [0usize, 1, 3, 8] {
+                        // mode 0: a shared, b roomy; 1: a roomy, b shared; 2: both roomy; 3: a shared, b fresh (no room)
+                        let pair = || match mode {
+                            0 => (a.clone(), roomy(b, extra)),
+                            1 => (roomy(a, extra), b.clone()),
+                            2 => (roomy(a, extra), roomy(b, extra)),
+                            _ => (a.clone(), of_limbs(b.ptr(), b.len(), b.neg())),
+                        };
+                        let ctx = format!("a={} b={} mode={} extra={}", dec(a), dec(b), mode, extra);
+                        let (x, y) = pair();
+                        assert_eq!(dec(&int_add(x, y)), reference(__gmpz_add, a, b), "add {ctx}");
+                        let (x, y) = pair();
+                        assert_eq!(dec(&int_sub(x, y)), reference(__gmpz_sub, a, b), "sub {ctx}");
+                        let (x, y) = pair();
+                        assert_eq!(dec(&int_mul(x, y)), reference(__gmpz_mul, a, b), "mul {ctx}");
+                        if b.len() != 0 {
+                            let (x, y) = pair();
+                            assert_eq!(dec(&int_tdiv(x, y)), reference(__gmpz_tdiv_q, a, b), "tdiv {ctx}");
+                            let (x, y) = pair();
+                            assert_eq!(dec(&int_tmod(x, y)), reference(__gmpz_tdiv_r, a, b), "tmod {ctx}");
+                            let (x, y) = pair();
+                            let e = if b.neg() { reference(__gmpz_cdiv_q, a, b) } else { reference(__gmpz_fdiv_q, a, b) };
+                            assert_eq!(dec(&int_ediv(x, y)), e, "ediv {ctx}");
+                            let (x, y) = pair();
+                            assert_eq!(dec(&int_emod(x, y)), reference(__gmpz_mod, a, b), "emod {ctx}");
+                        }
+                        if !a.neg() && !b.neg() {
+                            let (x, y) = pair();
+                            assert_eq!(dec(&nat_land(x, y)), reference(__gmpz_and, a, b), "and {ctx}");
+                            let (x, y) = pair();
+                            assert_eq!(dec(&nat_lor(x, y)), reference(__gmpz_ior, a, b), "or {ctx}");
+                            let (x, y) = pair();
+                            assert_eq!(dec(&nat_xor(x, y)), reference(__gmpz_xor, a, b), "xor {ctx}");
+                            let (x, y) = pair();
+                            let t = if cmp(a, b) <= 0 { "0".to_string() } else { reference(__gmpz_sub, a, b) };
+                            assert_eq!(dec(&nat_sub(x, y)), t, "nsub {ctx}");
+                        }
+                    }
+                }
+            }
+            // In-place shifts with room (the `cap >= need` branch of `nat_shl`).
+            if !a.neg() && a.len() > 0 {
+                for s in [0u64, 1, 63, 64, 65, 127, 128, 129, 191, 192, 200] {
+                    for extra in [0usize, 1, 2, 3, 4, 8] {
+                        let mut t = OwnedMpz::new();
+                        unsafe { __gmpz_mul_2exp(t.ptr(), &view(a), s) };
+                        assert_eq!(dec(&nat_shl(roomy(a, extra), s)), dec(&of_mpz(&t.0)), "shl {} {s} {extra}", dec(a));
+                        unsafe { __gmpz_tdiv_q_2exp(t.ptr(), &view(a), s) };
+                        assert_eq!(dec(&nat_shr(roomy(a, extra), s)), dec(&of_mpz(&t.0)), "shr {} {s} {extra}", dec(a));
+                    }
+                }
+            }
+        }
+        assert!(xs.iter().all(|x| x.count() == 1));
+    }
+
+    /// `x op x` through exactly two handles (count 2, no other reference).
+    #[test]
+    fn aliased_count_two() {
+        for s in ["9223372036854775808", "18446744073709551615", "340282366920938463463374607431768211457",
+                  "115792089237316195423570985008687907853269984665640564039457584007913129639935"] {
+            let v = of_decimal(s);
+            let two = |b: &LBig| {
+                let c = of_limbs(b.ptr(), b.len(), b.neg());
+                let d = c.clone();
+                assert_eq!(c.count(), 2);
+                (c, d)
+            };
+            let (x, y) = two(&v);
+            assert_eq!(dec(&nat_add(x, y)), reference(__gmpz_add, &v, &v));
+            let (x, y) = two(&v);
+            assert_eq!(dec(&nat_mul(x, y)), reference(__gmpz_mul, &v, &v));
+            let (x, y) = two(&v);
+            assert_eq!(dec(&nat_sub(x, y)), "0");
+            let (x, y) = two(&v);
+            assert_eq!(dec(&nat_div(x, y)), "1");
+            let (x, y) = two(&v);
+            assert_eq!(dec(&nat_mod(x, y)), "0");
+            let (x, y) = two(&v);
+            assert_eq!(dec(&nat_land(x, y)), s);
+            let (x, y) = two(&v);
+            assert_eq!(dec(&nat_lor(x, y)), s);
+            let (x, y) = two(&v);
+            assert_eq!(dec(&nat_xor(x, y)), "0");
+            let (x, y) = two(&v);
+            assert_eq!(dec(&nat_gcd(x, y)), s);
+            let n = int_neg(of_decimal(s));
+            let (x, y) = two(&n);
+            assert_eq!(dec(&int_sub(x, y)), "0");
+            let (x, y) = two(&n);
+            assert_eq!(dec(&int_ediv(x, y)), "1");
+            let (x, y) = two(&n);
+            assert_eq!(dec(&int_emod(x, y)), "0");
+            let (x, y) = two(&n);
+            assert_eq!(dec(&int_mul(x, y)), reference(__gmpz_mul, &n, &n));
+        }
+    }
+
+    /// Carry out of the second operand's block when it has exactly `nx`
+    /// limbs of room: grown by `reserve`.
+    #[test]
+    fn carry_into_second() {
+        let x = of_limbs2(u64::MAX, u64::MAX);
+        let xs = x.clone();
+        let y = roomy(&of_u64(1), 1); // cap >= 2
+        println!("y cap {}", y.cap());
+        assert_eq!(dec(&nat_add(xs, y)), "340282366920938463463374607431768211456");
+        drop(x);
+    }
+
+    /// A small result in a large unique operand's block: the block shrinks
+    /// to fit (review RVPB-01).
+    #[test]
+    fn retention() {
+        let big = || nat_add_u64(nat_shl(of_u64(1), 64 * 2000), 7); // 2001 limbs, unique
+        let fits = |r: &LBig| r.cap() <= r.len() + 32 || r.cap() <= 4 * r.len();
+        let r = nat_shr(big(), 64 * 1998);
+        assert_eq!(r.len(), 3);
+        assert!(fits(&r), "shr: cap {}", r.cap());
+        let r = nat_mod(big(), of_limbs2(0, 1 << 40));
+        assert!(fits(&r), "mod: cap {}", r.cap());
+        let r = nat_div(big(), nat_shl(of_u64(1), 64 * 1998));
+        assert!(fits(&r), "div: cap {}", r.cap());
+        let r = nat_land(big(), of_limbs2(5, 5));
+        assert!(fits(&r), "land: cap {}", r.cap());
+        let r = nat_sub(nat_add_u64(big(), (1u64 << 63) + 5), nat_add_u64(nat_shl(of_u64(1), 64 * 2000), 0));
+        assert_eq!(dec(&r), ((1u128 << 63) + 12).to_string());
+        assert!(fits(&r), "sub: cap {}", r.cap());
+        let r = int_sub(big(), big());
+        assert!(fits(&r), "zero: cap {}", r.cap());
+    }
+
+    /// Operands beyond the 32-limb scratch (heap scratch in `div`, the
+    /// fresh-block product in `mul`), mixed ownership, both signs.
+    #[test]
+    fn large_mixed() {
+        let mut s = 0x2545F4914F6CDD1Du64;
+        let mut next = move || { s ^= s << 13; s ^= s >> 7; s ^= s << 17; s };
+        let mut xs = Vec::new();
+        for (i, n) in [1usize, 2, 17, 31, 32, 33, 40, 65, 70].iter().enumerate() {
+            let mut l: Vec<u64> = (0..*n).map(|_| match next() % 4 { 0 => 0, 1 => u64::MAX, _ => next() }).collect();
+            if let Some(t) = l.last_mut() { if *t == 0 { *t = 1; } }
+            xs.push(of_limbs(l.as_ptr(), *n, i % 2 == 1));
+            xs.push(of_limbs(l.as_ptr(), *n, i % 2 == 0));
+        }
+        for a in &xs {
+            for b in &xs {
+                for mode in 0..4 {
+                    let pair = || match mode {
+                        0 => (a.clone(), roomy(b, 40)),
+                        1 => (roomy(a, 40), b.clone()),
+                        2 => (roomy(a, 80), roomy(b, 80)),
+                        _ => (a.clone(), b.clone()),
+                    };
+                    let (x, y) = pair();
+                    assert_eq!(dec(&int_mul(x, y)), reference(__gmpz_mul, a, b));
+                    let (x, y) = pair();
+                    assert_eq!(dec(&int_add(x, y)), reference(__gmpz_add, a, b));
+                    let (x, y) = pair();
+                    assert_eq!(dec(&int_sub(x, y)), reference(__gmpz_sub, a, b));
+                    let (x, y) = pair();
+                    assert_eq!(dec(&int_tdiv(x, y)), reference(__gmpz_tdiv_q, a, b));
+                    let (x, y) = pair();
+                    assert_eq!(dec(&int_tmod(x, y)), reference(__gmpz_tdiv_r, a, b));
+                    let (x, y) = pair();
+                    let e = if b.neg() { reference(__gmpz_cdiv_q, a, b) } else { reference(__gmpz_fdiv_q, a, b) };
+                    assert_eq!(dec(&int_ediv(x, y)), e);
+                    let (x, y) = pair();
+                    assert_eq!(dec(&int_emod(x, y)), reference(__gmpz_mod, a, b));
+                }
+                // a * b computed as (a * b) then divided back
+                let p = int_mul(roomy(a, 0), roomy(b, 0));
+                let q = int_tdiv(p, b.clone());
+                assert_eq!(dec(&q), dec(a));
+            }
+        }
+        assert!(xs.iter().all(|x| x.count() == 1));
     }
 }

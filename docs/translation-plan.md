@@ -698,9 +698,10 @@ a big number. A big number is lean2rr's own: one block holding the 32-bit
 count Reussir counts, 4 reserved bytes, the signed size (GMP's convention:
 the limbs in use, negated for a negative `Int`), the capacity, and then
 the limbs. Its operations are GMP's: `mpn` functions on the limbs, writing
-into an operand's block when it is unique (grown in place when it lacks
-room) or into a fresh block, and `mpz` functions on read-only views for
-the rare ones (`pow`, `gcd`, parsing, printing). Native Lean's
+into an operand's block when it is unique and has room (a carry out of a
+result computed in place grows the block; a result that leaves most of a
+block unused shrinks it) or into a fresh block, and `mpz` functions on
+read-only views for the rare ones (`pow`, `gcd`, parsing, printing). Native Lean's
 `lean_mpz_object` is a header and an `mpz_t` whose limbs GMP allocates
 separately: one block saves an allocation, a free and a dependent load
 per big number, and a two-limb number takes 32 bytes instead of 56. The
