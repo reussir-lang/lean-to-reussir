@@ -195,8 +195,8 @@ mutual
         let fn ← fresh "jp_"
         modify fun s => { s with fns := s.fns.push (.fn fn fparams retTy body) }
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.call fn captured) } outlined retTy k
-      else if (countJumps k {}).getD d.fvarId 0 ≤ 1 ||
-          (H.duplicateJp ctx.jpBodies d && !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined) then
+      else if (let jumps := (countJumps k {}).getD d.fvarId 0
+          jumps ≤ 1 || (H.duplicateJp ctx.jpBodies d jumps && !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined)) then
         -- J1, or a small join point that is not J2: its body at each jump.
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.inline d.params d.value) } outlined retTy k
       else

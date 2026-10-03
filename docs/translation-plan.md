@@ -1247,28 +1247,34 @@ struct, which is destructured afterwards.
 
 **J1', small join point: duplicate.** A join point that is not J2 is
 inlined at each of its jumps, like J1, when it is small: its body has at
-most 40 bindings, alternatives and exits (nested join points included), and
-a copy of it expands to at most 480. The expansion counts, at each jump,
-the body of the join point jumped to when that is inlined there too: a join
-point nested in the copy (at every jump to it), or another join point whose
-own body is small, counted the same way. Outlining the join point would put
-a function boundary on the path: a loop through it would become a state
-machine or mutually recursive, and Reussir could not reuse a cell matched
-before the jump for a construction after it. Duplication is recursive:
-small join points inside a duplicated body, and those it jumps to, are
-duplicated again, and the expansion bound keeps every copy within 480
-nodes, so code grows linearly. The bound on the body alone did not: Lean
-leaves sibling join points that are jumped to from two others, which
-sinking cannot nest. A sequence of `match`es on a two-constructor state,
-each alternative setting the next state to a constant, gives one join point
-per alternative, jumping to either alternative of the next `match`; each is
-small, and the first ones held 2^n copies of the last (20 `match`es: out of
-memory; tests/runtime/RtJpChain). The expansion is an upper bound (a J2 or
-outlined target costs only its jump); 480 is generous enough that a loop
-whose condition is a few `&&`/`||` tests, each a join point jumping to the
-shared continuation (an expansion of 300-350), stays a plain loop and does
-not become a state machine. Behaviour does not change. (Optional pass
-`jp-small`; without it such join points are outlined, J3.)
+most 40 bindings, alternatives and exits (nested join points included), a
+copy of it expands to at most 480, and its copies beyond the first add at
+most 2000 (jumps minus one, times the expansion). The expansion counts, at
+each jump, the body of the join point jumped to when that is inlined there
+too: a join point nested in the copy (at every jump to it), or another join
+point whose own body is small, counted the same way. Outlining the join
+point would put a function boundary on the path: a loop through it would
+become a state machine or mutually recursive, and Reussir could not reuse a
+cell matched before the jump for a construction after it. Duplication is
+recursive: small join points inside a duplicated body, and those it jumps
+to, are duplicated again. The bounds keep every copy within 480 nodes and
+what the copies of one join point add within 2000, so code grows linearly.
+The bound on the body alone did not: Lean leaves sibling join points that
+are jumped to from two others, which sinking cannot nest. A sequence of
+`match`es on a two-constructor state, each alternative setting the next
+state to a constant, gives one join point per alternative, jumping to
+either alternative of the next `match`; each is small, and the first ones
+held 2^n copies of the last (20 `match`es: out of memory;
+tests/runtime/RtJpChain). Nor did the bound on one copy: after an 800-arm
+`match` whose arms set such a state (with an early return elsewhere), each
+alternative of the next `match` is jumped to from hundreds of arms, and was
+copied into every one (11.7 MB of .rr; rrc ran out of memory;
+tests/runtime/RtJpWide). The expansion is an upper bound (a J2 or outlined
+target costs only its jump); 480 is generous enough that a loop whose
+condition is a few `&&`/`||` tests, each a join point jumping two or three
+times to the shared continuation (an expansion of 300-350), stays a plain
+loop and does not become a state machine. Behaviour does not change.
+(Optional pass `jp-small`; without it such join points are outlined, J3.)
 
 **J3, otherwise: outline.** Some paths `return` directly or jump to a
 different join point. Then `j` becomes a separate top-level function over
@@ -2471,7 +2477,13 @@ Each item says what differs and when.
   through polymorphically recursive code) make K unboxing functions of K
   arms each, and rrc compiles each generic runtime function instantiated
   at a type with its own rustc run: 80 such structures build in about
-  3 minutes (§5.1).
+  3 minutes (§5.1). `Outline`
+  itself takes lean2rr time quadratic in the length of a tail path: each
+  cut computes the free variables of the whole rest of the path
+  (`partParams`). A function made of 1600 matches in a row, each holding
+  the next, took 20 s (when duplicated join points made it that long,
+  §5.6 J1'); computing the free variables bottom-up once, during the walk,
+  would make it linear.
 - *Casts that natively read an address* (§5.1): an object read as a word
   (`unsafeCast` of a constructor with fields, a string, an array, a closure
   to `Nat`, `UInt8`, an enumeration, ...) natively gives its address
