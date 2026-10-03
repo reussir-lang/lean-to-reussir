@@ -932,12 +932,10 @@ mutual
     let back : RR.Expr := .mtch (.var "o") #[
       { ty := boxName, ctor := some dstBox, binders := #[some "x"], body := .ofExpr (.var "x") },
       { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call (← unboxArrFn dstCell) #[] #[.var "o"]) }]
-    let busy : RR.Block := ⟨#[("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"])], mkConv (.var "o") (.var "a")⟩
     let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[.named sz] #[.var "c"]) #[
       lazyArm sz "done" #[some "v"] doneConv,
       lazyArm sz "conv" #[none, some "o", some "a"] (.ofExpr back),
       lazyArm sz "convdone" #[none, some "o", some "a"] (.ofExpr back),
-      lazyArm sz "busyconv" #[some "a"] busy,
       { ty := sz, ctor := none, binders := #[], body := fresh' }])
     modify fun s => { s with fns := s.fns.push (.fn name #[("c", srcCell)] dstCell body) }
     return some name

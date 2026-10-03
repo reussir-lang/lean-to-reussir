@@ -1782,16 +1782,14 @@ generated state, one type per value type `α` (and per kind, thunk or task):
 
 ```
 enum L2RThunk_N { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧),
-                  conv(L2RUnit -> ⟦α⟧, Box, u64), busyconv(u64),
-                  convdone(⟦α⟧, Box, u64) }
+                  conv(L2RUnit -> ⟦α⟧, Box, u64), convdone(⟦α⟧, Box, u64) }
 enum L2RTask_N  { …the same…, bind(L2RUnit -> LCell<L2RTask_N>) }
 ```
 
 The state is a shared Reussir enum, so every `α` fits, closures and value
 types included; a closure cannot be stored in a runtime cell directly.
-`conv` is a converted thunk or task (`busyconv` while it is forced,
-`convdone` once it has its value) and `bind` a bind task that has not
-started (both below).
+`conv` is a converted thunk or task (`convdone` once it has its value)
+and `bind` a bind task that has not started (both below).
 toMono leaves only a few externs to translate: `cases` on a thunk or task
 becomes `Thunk.get`/`Task.get`, and `Thunk.fn` a closure calling
 `Thunk.get`.
@@ -1937,9 +1935,15 @@ running code blocks (*Blocking*, below).
   instead of growing a chain); `a` is the original's address: the copy's
   identity (`ptrAddrUnsafe`, §9) and, for a task, its identity for the
   runtime, so the copy's state, `IO.cancel` and cancellation are the
-  original's, also while the copy is being forced (`busyconv`). A forced
-  copy, and the copy of a thunk or task that already has its value, is
-  `convdone(v, o, a)`: it keeps the original, so that its identity stays
+  original's. The copy has no running state of its own: it stays `conv`
+  while it is forced, and forcing it again meanwhile runs `g` again, which
+  waits for the original if that is running and has the original's value
+  once it has finished. (A copy that went `busy` would be waited for until
+  its own computation ends; but the original's end walks its `sync`
+  dependents inside that computation, and one that forces the copy, as
+  natively it may read the finished original, would wait forever.) A
+  forced copy, and the copy of a thunk or task that already has its value,
+  is `convdone(v, o, a)`: it keeps the original, so that its identity stays
   the original's (which stays alive, so its address is not reused). A copy
   of a copy records the first original, and converting it to a third
   representation converts the original directly, so chains stay one level

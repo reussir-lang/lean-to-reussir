@@ -4,8 +4,8 @@ import LeanToReussir.Lower.FnValues
 
 A `Thunk α` or `Task α` is a runtime cell `LCell<S>` holding a generated
 state `S { pending(L2RUnit -> α), busy, done(α), conv(L2RUnit -> α, Box,
-u64), busyconv(u64), convdone(α, Box, u64) }` (`lazyState`, translation plan
-§5.14). The functions below are generated once per state type. -/
+u64), convdone(α, Box, u64) }` (`lazyState`, translation plan §5.14). The
+functions below are generated once per state type. -/
 
 namespace LeanToReussir
 open Lean Compiler LCNF
@@ -30,14 +30,13 @@ def lazyArm (z v : String) (binders : Array (Option String)) (body : RR.Block) :
 
 /-- `l2r_task_addr_S(c)`: a task's identity for the runtime (`leanrt::task`):
 the address of its cell, or the original's that a converted task records
-(`lazyConv`) until it has run itself. -/
+(`lazyConv`) until it has its value. -/
 def taskAddrFn (z : String) : LowerM String := do
   let name := s!"l2r_task_addr_{z}"
   lazyFn name do
     let zt := RR.Ty.named z
     let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
       lazyArm z "conv" #[none, none, some "a"] (.ofExpr (.var "a")),
-      lazyArm z "busyconv" #[some "a"] (.ofExpr (.var "a")),
       { ty := z, ctor := none, binders := #[], body := .ofExpr (.call "l2r_lcell_addr" #[zt] #[.var "c"]) }])
     return #[.fn name #[("c", .app "LCell" #[zt])] (.named "u64") body]
 
@@ -80,9 +79,15 @@ closure out before calling it. Forcing a `busy` thunk means the value is
 needed by its own computation: native Lean then waits forever, and so do
 we; a `busy` task runs on another (blocked) context of the runtime's
 scheduler and is waited for, unless it is the running context's own
-(translation plan §5.14). A `conv` state (see `lazyConv`) is forced like a pending one. A task is
-also registered as running for the duration (`IO.checkCanceled`, and it
-leaves the queue of pending tasks), and runs with its own standard streams,
+(translation plan §5.14). A converted copy (`conv`, see `lazyConv`) has
+no running state of its own: forcing it runs its computation, which forces
+the original (whose state, `busy` included, is the copy's) and converts the
+value, and stores `convdone`. So a copy forced again meanwhile (by the
+original's `sync` dependent, which the original's end runs inside the
+copy's computation, or by another context) has the original's value as
+soon as the original has finished. A pending task is also registered as
+running for the duration (`IO.checkCanceled`, and it leaves the queue of
+pending tasks), and runs with its own standard streams,
 as a native task runs on a worker thread (`l2r_std_enter_if`/`l2r_std_leave_if`),
 unless the runtime runs it on the current thread (a `sync` dependent). When
 it has finished, its dependents are walked on its thread, with its streams
@@ -100,9 +105,7 @@ def lazyGetFn (z : String) : LowerM String := do
     -- A `busy` task runs on another context of the runtime's scheduler (a
     -- task that blocked): wait until it has finished, then look again; on
     -- the current context, it needs itself (`l2r_task_wait_running` waits
-    -- forever then). A converted copy being forced (`busyconv`) runs as a
-    -- task of its own cell (`l2r_task_begin`), so it is waited for by that
-    -- cell's address too. A `busy` thunk is being forced on another context
+    -- forever then). A `busy` thunk is being forced on another context
     -- (natively another thread, which this one waits for) or by its own
     -- computation (natively a wait forever): wait until it has its value
     -- (`l2r_thunk_wait_busy`, woken by `l2r_thunk_done`).
@@ -112,11 +115,15 @@ def lazyGetFn (z : String) : LowerM String := do
       else
         ⟨#[("wb", some u64, .call "l2r_thunk_wait_busy" #[] #[.call "l2r_lcell_addr" #[zt] #[.var "c"]])],
           .call get #[] #[.var "c"]⟩
+    let force ← applyCall (.var "f") (.fn .unit t) #[.unitVal]
+    let conv : RR.Block := ⟨#[("v", some t, force),
+      ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "convdone") #[.var "v", .var "o", .var "a"]])],
+      .var "v"⟩
     let getWith (other : RR.Block) : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
       lazyArm z "done" #[some "v"] (.ofExpr (.var "v")),
       lazyArm z "convdone" #[some "v", none, none] (.ofExpr (.var "v")),
       lazyArm z "busy" #[] busy,
-      lazyArm z "busyconv" #[none] busy,
+      lazyArm z "conv" #[some "f", some "o", some "a"] conv,
       { ty := z, ctor := none, binders := #[], body := other }])
     -- A task first runs the chain of pending tasks it waits for, deepest
     -- first (`l2r_task_force_sources`), then looks again (one of them may
@@ -127,18 +134,14 @@ def lazyGetFn (z : String) : LowerM String := do
       else getWith (.ofExpr (.call run #[] #[.var "c"]))
     let nowBody : RR.Block := getWith (.ofExpr (.call run #[] #[.var "c"]))
     let onCell (f : String) : RR.Expr := .call f #[zt] #[.var "c"]
-    let force ← applyCall (.var "f") (.fn .unit t) #[.unitVal]
-    -- The computed state: `done(v)`, or for a converted cell `convdone`,
-    -- which keeps the original and its identity (see `addrOf`).
-    let lets (final : RR.Expr) : Array (String × Option RR.Ty × RR.Expr) :=
+    let lets : Array (String × Option RR.Ty × RR.Expr) :=
       (if task then #[("b", some u64, onCell "l2r_task_begin"), ("se", some u64, .call "l2r_std_enter_if" #[] #[.var "b"])]
         else #[]) ++
       #[("v", some t, force),
-        ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", final])] ++
+        ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]])] ++
       (if task then #[("e", some u64, onCell "l2r_task_end"), ("wk", some u64, .call "l2r_task_walk_if" #[] #[.var "e"]),
           ("sl", some u64, .call "l2r_std_leave_if" #[] #[.var "b"])]
         else #[("td", some u64, .call "l2r_thunk_done" #[] #[onCell "l2r_lcell_addr"])])
-    let doneV := RR.Expr.ctor z (some "done") #[.var "v"]
     -- A `bind` task runs `f` (`taskBindStepFn`): it has then finished, or
     -- waits for the task it continues as; either way it is needed now.
     let bindArm : Array RR.Arm := if task then
@@ -146,11 +149,7 @@ def lazyGetFn (z : String) : LowerM String := do
           .call get #[] #[.var "c"]⟩]
       else #[]
     let runBody : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_swap" #[zt] #[.var "c", .ctor z (some "busy") #[]]) (#[
-      lazyArm z "pending" #[some "f"] ⟨lets doneV, .var "v"⟩,
-      lazyArm z "conv" #[some "f", some "o", some "a"]
-        ⟨#[("ba", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "busyconv") #[.var "a"]])] ++
-            lets (.ctor z (some "convdone") #[.var "v", .var "o", .var "a"]),
-          .var "v"⟩] ++ bindArm ++ #[
+      lazyArm z "pending" #[some "f"] ⟨lets, .var "v"⟩] ++ bindArm ++ #[
       { ty := z, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) }]))
     return #[.fn run #[("c", cellTy)] t runBody, .fn get #[("c", cellTy)] t getBody] ++
       (if task then #[.fn (get ++ "_now") #[("c", cellTy)] t nowBody] else #[])

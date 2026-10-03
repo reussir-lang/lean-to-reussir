@@ -40,7 +40,6 @@ def lazyAddrFn (z : String) : LowerM String := do
     let zt := RR.Ty.named z
     let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
       lazyArm z "conv" #[none, none, some "a"] (.ofExpr (.var "a")),
-      lazyArm z "busyconv" #[some "a"] (.ofExpr (.var "a")),
       lazyArm z "convdone" #[none, none, some "a"] (.ofExpr (.var "a")),
       { ty := z, ctor := none, binders := #[], body := .ofExpr (.call "l2r_lcell_addr" #[zt] #[.var "c"]) }])
     return #[.fn name #[("c", .app "LCell" #[zt])] (.named "u64") body]
