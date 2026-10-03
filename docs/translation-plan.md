@@ -496,12 +496,19 @@ that depends on a value, `data : Array t.denote` is used as `Array Nat` only
 in the branch where `t = .nat`. A conversion moved from that use to the
 binder would also run, and fail, when `t = .str`. The rules:
 - **From definitions.** A `cases` field gets the constructor's field type,
-  instantiated at the discriminant's type. A constructor application gets
+  instantiated at the discriminant's type, when that type is the
+  constructor's inductive applied to its parameters. A discriminant of type
+  `lcAny` (a value of a type that depends on a value, `d : s.Data`, or an
+  existential payload after `cast`) leaves its fields as they are: the
+  instantiation needs the parameters (the parameters' own types are not
+  the fields', round 7 RV7F-01). A constructor application gets
   the type its argument types determine. Parameters that no field
   determines, such as the error type of `EST.Out.ok`, come from the binder's
   own type. A call, full or partial, gets the type the callee's signature
   gives. A join-point parameter gets the type of its jump arguments when all
-  of them are known and agree.
+  of them are known and agree. No rule gives a binder the type `◾`: mono
+  already types types and proofs `◾`, so an `lcAny` binder holds a value
+  (test `RtDepFields`).
 - **Result types.** A declaration whose result type is unknown gets `T` when
   all its returned values have type `T`. The results of its own self calls
   do not count, and neither do constructors without fields (`none`) of `T`'s
