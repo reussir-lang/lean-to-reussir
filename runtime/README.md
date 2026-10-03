@@ -187,12 +187,20 @@ lean2rr wraps its result with `wrapIOResult`: `l2r_io_mono_ms_now()`,
 `l2r_io_prim_handle_is_tty(h)`. (`l2r_io_app_path()`, `l2r_io_current_dir()`
 and `l2r_io_process_get_current_dir()` are infallible stand-ins for the
 fallible primitives below.) References are Reussir cells in a
-lean2rr-generated record (`L2RRefN(Cell<T>)`, two allocations; translation
-plan §5.1), read and written by the plain-Reussir helpers
+lean2rr-generated record (`L2RRef_N(Cell<T>)`, two allocations;
+translation plan §5.1), read and written by the plain-Reussir helpers
 `l2r_rc_get/set/swap<T>` (a `Nat` or `Int` reference holds the handle
 like any other). Promises hold the `LCell` of their task
 (below). `LRef<T>` and its `l2r_ref_*` functions (a runtime cell, a
-0-or-1 element vector) are no longer used by generated code.
+0-or-1 element vector) are no longer used by generated code. A `set`
+(`l2r_rc_set`, and `l2r_lcell_set` for task and thunk cells) stores the
+new value first and then releases the old one as `lean_dec` does
+(`leanrt::drop::release`, through `l2r_release_value`): a shared value is
+decremented; the last reference to a record is freed inside a free the
+runtime starts (`drop::run`), so its fields go last first and the `sync`
+dependents of the promises it drops run when that free ends. A unit or
+enumeration value cannot cross the FFI boundary and its release runs
+nothing: lean2rr stores it with `l2r_rc_put` (`refSetFn`).
 
 **Freeing containers.** Native Lean frees an object iteratively: the
 children whose count drops to zero go on a stack of objects to free, popped
@@ -352,7 +360,11 @@ handle (`OpSt`: done, canceled, code, a synchronous error, bytes, address,
 strings, a new socket) read by `l2r_shim_op_*`. An operation completing
 later takes a promise `r` from the shim and drops it (on the event loop's
 own context, `sched::ensure_evloop`) when it completes, which runs the
-shim's continuation (a `sync` dependent of `r`). `net::wait` polls the
+shim's continuation (a `sync` dependent of `r`). A timer's `stop` and
+`cancel` (`timer_ctl`) instead hand the program's promise and `r` back
+(`net::GivenUp`), and a socket's `cancel_accept` and `cancel_recv` hand
+`r` back, to the glue, which drops them once the primitive has returned,
+on the caller's context, as natively. `net::wait` polls the
 watched descriptors (and the signal handler's pipe: libuv's loop signal
 pipe, which the runtime opens at startup, `rt::signal_pipe`) with the
 earliest timer as timeout. The primitives (`l2r_shim_*`, the payloads of

@@ -2118,13 +2118,21 @@ fn l2r_rc_get<T>(c : Cell<T>) -> T { core::intrinsic::cell::get(c) }
 // a promise it drops, `leanrt::task::resolve`) sees the new value. Reussir's
 // `cell::set` releases the old value before the store: the old value is
 // taken (a second reference) and released after the store, by an FFI call
-// (`l2r_release_after`), which Reussir keeps there. For a type that cannot
+// (`l2r_release_value`), which Reussir keeps there. For a type that cannot
 // cross the FFI boundary lean2rr calls `l2r_rc_put` (`refSetFn`).
 fn l2r_rc_set<T>(c : Cell<T>, v : T) -> u64 {
     let old = core::intrinsic::cell::get(c);
     core::intrinsic::cell::set(c, v);
-    l2r_release_after<T>(old)
+    l2r_release_value<T>(old)
 }
+
+// The release of a value a reference gave up, as `lean_dec` does natively
+// (`leanrt::drop::release`): the last reference to a record is freed inside
+// a free the runtime starts, so what it holds is released in Lean's order
+// (its last field first) and the `sync` dependents of the promises it drops
+// run when that free ends, before the caller goes on. Returns 0.
+#[ffi(import)]
+fn l2r_release_value<T>(x : T) -> u64 [{ { leanrt::drop::release(x); 0 } }];
 
 // `l2r_rc_set` for a cell whose value's release runs nothing: a scalar, a
 // unit or enumeration value (a `[value]` type, which cannot cross the FFI
@@ -2156,7 +2164,8 @@ fn l2r_ref_get<T>(r : LRef<T>) -> T [{
     }
 }];
 
-// The old value is released after the new one is stored (`l2r_rc_set`).
+// The old value is released after the new one is stored, as `lean_dec`
+// does (`l2r_rc_set`).
 #[ffi(import)]
 fn l2r_ref_set<T>(r : LRef<T>, v : T) -> u64 [{
     {
@@ -2164,7 +2173,9 @@ fn l2r_ref_set<T>(r : LRef<T>, v : T) -> u64 [{
         let cell = unsafe { c.data_mut() };
         let old = cell.pop();
         cell.push(v);
-        drop(old);
+        if let Some(old) = old {
+            leanrt::drop::release(old);
+        }
         0
     }
 }];
@@ -2383,13 +2394,14 @@ fn l2r_lcell_new<T>(v : T) -> LCell<T> [{
 #[ffi(import)]
 fn l2r_lcell_get<T>(c : LCell<T>) -> T [{ c.data_ref().clone() }];
 
-// The old state is released after the new one is stored (`l2r_rc_set`).
+// The old state is released after the new one is stored, as `lean_dec`
+// does (`l2r_rc_set`).
 #[ffi(import)]
 fn l2r_lcell_set<T>(c : LCell<T>, v : T) -> u64 [{
     {
         let mut c = c;
         let old = unsafe { ::std::mem::replace(c.data_mut(), v) };
-        drop(old);
+        leanrt::drop::release(old);
         0
     }
 }];
@@ -2734,11 +2746,21 @@ fn l2r_shim_timer_promise(t : LHandle) -> LPromise [{ { let p = leanrt::net::tim
 fn l2r_shim_timer_start(t : LHandle, p : LPromise, r : LPromise) -> LHandle [{ { let o = leanrt::net::timer_start(&t, p, r); leanrt::rc_release(t); o } }];
 #[ffi(import)]
 fn l2r_shim_timer_set(t : LHandle, p : LPromise, r : LPromise) -> LHandle [{ { let o = leanrt::net::timer_set(&t, p, r); leanrt::rc_release(t); o } }];
+// `stop` and `cancel` give up the timer's promise: dropped here, once the
+// primitive has returned, so its `sync` dependents run on the caller's
+// context, as natively on the calling thread (`leanrt::net::GivenUp`).
 #[ffi(import)]
 fn l2r_shim_timer_ctl_h(t : LHandle, which : u8) -> u64 [{
     {
-        match which { 0 => leanrt::net::timer_reset(&t), 1 => leanrt::net::timer_stop(&t), _ => leanrt::net::timer_cancel(&t) }
+        let given_up = match which {
+            0 => { leanrt::net::timer_reset(&t); [None, None] }
+            1 => leanrt::net::timer_stop(&t),
+            _ => leanrt::net::timer_cancel(&t),
+        };
         leanrt::rc_release(t);
+        for p in given_up {
+            drop(p);
+        }
         0
     }
 }];
@@ -2769,15 +2791,17 @@ fn l2r_shim_tcp_send(s : LHandle, d : RVec<u8>, r : LPromise) -> LHandle [{
 fn l2r_shim_sock_recv(s : LHandle, size : u64, r : LPromise) -> LHandle [{
     { let o = leanrt::net::sock_recv(&s, size, r); leanrt::rc_release(s); o }
 }];
+// A canceled read or accept's promise is dropped here, once the primitive
+// has returned (as `l2r_shim_timer_ctl_h`).
 #[ffi(import)]
-fn l2r_shim_sock_cancel_recv_h(s : LHandle) -> u64 [{ { leanrt::net::sock_cancel_recv(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_sock_cancel_recv_h(s : LHandle) -> u64 [{ { let r = leanrt::net::sock_cancel_recv(&s); leanrt::rc_release(s); drop(r); 0 } }];
 fn l2r_shim_sock_cancel_recv(s : LHandle) -> L2RUnit { l2r_unit_of(l2r_shim_sock_cancel_recv_h(s)) }
 #[ffi(import)]
 fn l2r_shim_tcp_accept(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_accept(&s, r); leanrt::rc_release(s); o } }];
 #[ffi(import)]
 fn l2r_shim_tcp_try_accept(s : LHandle) -> LHandle [{ { let o = leanrt::net::tcp_try_accept(&s); leanrt::rc_release(s); o } }];
 #[ffi(import)]
-fn l2r_shim_tcp_cancel_accept_h(s : LHandle) -> u64 [{ { leanrt::net::tcp_cancel_accept(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_tcp_cancel_accept_h(s : LHandle) -> u64 [{ { let r = leanrt::net::tcp_cancel_accept(&s); leanrt::rc_release(s); drop(r); 0 } }];
 fn l2r_shim_tcp_cancel_accept(s : LHandle) -> L2RUnit { l2r_unit_of(l2r_shim_tcp_cancel_accept_h(s)) }
 #[ffi(import)]
 fn l2r_shim_tcp_shutdown(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_shutdown(&s, r); leanrt::rc_release(s); o } }];
