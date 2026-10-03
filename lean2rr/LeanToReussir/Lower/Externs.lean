@@ -329,8 +329,9 @@ co. replace the current thread's). A task runs, natively, on a worker thread,
 and `main` on a thread of its own, apart from the module initializers: so a
 task starts with empty stream cells (rebuilt as the process's streams on
 first use) and the caller's are put back when it ends, releasing the task's
-(`leanrt::once::push_context`); `main` starts with empty cells too. Without
-any use of the standard streams they do nothing. -/
+(`leanrt::once::push_context`); `main` starts with empty cells too when it
+runs on a thread of its own (not with `LEAN_MAIN_USE_THREAD=0`, see
+`lowerEntry`). Without any use of the standard streams they do nothing. -/
 def stdContextFns : LowerM (Array RR.Item) := do
   let u64 := RR.Ty.named "u64"
   let zero (x : String) : RR.Block := ⟨#[(x, some u64, .atom "0")], .var x⟩

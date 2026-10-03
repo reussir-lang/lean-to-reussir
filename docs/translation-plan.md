@@ -1614,7 +1614,10 @@ A generated Reussir `#[main]` does what Lean's generated `main` does
    stack, as Lean's runtime does for `main` (deep non-tail recursion is
    common in Lean programs); `main` starts there with the process's
    standard streams, as a new thread does natively, whatever the
-   initializers redirected;
+   initializers redirected. With `LEAN_MAIN_USE_THREAD=0`, as natively,
+   there is no new thread: `main` runs on the process's main thread after
+   the initializers and keeps the standard streams they left (an
+   `IO.setStdout` in an `initialize` still applies in `main`);
 3. on that thread it calls the translated `main`, passing the argument list
    (without the program name) if `main` takes one, and the world;
 4. it runs the IO tasks still pending, whatever `main` returned, as
@@ -1781,7 +1784,9 @@ definition (its code) holds the order.
 
 Our translation runs, before `main`, the startup work of Lean's module
 initializers:
-- for each program module, for each declaration in that order:
+- for each program module that natively is initialized, in Lean's module
+  order (below), for each of its declarations that natively runs, in the
+  order above:
   - an `initialize` action (`initialize do …`) is run;
   - for `initialize c : T ← act`, `act` is run and its result stored as
     `c`, which the program reads from a once-cell;
@@ -1794,6 +1799,44 @@ An error from an initializer is reported like an uncaught exception of
 `main` (the message, exit code 1), and later initializers do not run.
 Toolchain constants are evaluated lazily, once: native Lean evaluates all
 of them at startup without any visible effect. Closed terms are lazy, once.
+
+Which modules and declarations run, and in which order, follows `EmitC`
+(`emitMainFn`, `emitInitFn`, `emitLegacyInitFn`; `startupModules`,
+`startupItems`). Native `main` calls the initializer of `main`'s module,
+which first calls those of the module's imports, in import order, each
+module once: the modules are initialized in a depth-first post-order walk
+of the import graph from `main`'s module (a module that `main`'s module
+does not import, directly or not, is not initialized). Under the module
+system a `module` has two initializers, one per phase: the *runtime* one
+calls the runtime initializers of the module's non-`meta` imports, then
+initializes the declarations not marked `meta`; the *compile-time* one
+initializes those marked `meta` (`meta def`, `meta initialize`), which only
+the compiler's own evaluation needs. So:
+- when `main`'s module is a `module`, only runtime initializers run: the
+  walk follows only non-`meta` imports (a module reached only through a
+  `meta import` is not initialized at all), and `meta` declarations are
+  skipped. For example
+
+      module
+      meta import Gen          -- Gen is not initialized (unless also imported
+                               --   without `meta`, directly or not)
+      import Util              -- Util's runtime initializer runs first
+      meta initialize do …     -- skipped: it runs only when the compiler
+                               --   imports this module
+      meta def table : Nat := …   -- skipped
+      initialize do …          -- runs
+      public def main : IO Unit := …
+
+- when `main`'s module is not a `module`, every import is followed, and an
+  imported `module` is initialized as for an importer outside the module
+  system: its imports (`meta` ones included), then its declarations not
+  marked `meta`, then its `meta` ones (each group in the order above).
+
+A declaration counts as `meta` when the one native Lean initializes is
+marked so (`isMarkedMeta`): for `meta initialize c : T ← act`, the constant
+`c`; for `meta initialize do …`, its function. Declarations the compiler
+generates, such as a specialization made while compiling a `meta def`, are
+not marked and run with the runtime phase, as natively.
 
 lean2rr itself never runs the program's initializers: it loads the imported
 extension states without Lean's init step, which would execute the

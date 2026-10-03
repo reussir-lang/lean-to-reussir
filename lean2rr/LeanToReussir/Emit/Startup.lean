@@ -419,17 +419,65 @@ partial def moduleStartupKeys (idx : Nat) (items : Array Name) (comp : Std.HashM
     out := out.insert n key
   return out
 
+/-- The program modules below `idx` (included) in initialization order, added
+to `acc` (the modules visited, the order so far): Lean's module initializer first
+calls those of the module's imports, in import order, each module once, so
+the order is a depth-first post-order walk of the import graph. `meta`
+imports are followed only when `followMeta` (see `startupModules`).
+Toolchain modules are left out (§5.12; they import only toolchain
+modules). -/
+partial def importPostOrder (env : Environment) (followMeta : Bool) (idx : Nat)
+    (acc : Std.HashSet Nat × Array Nat) : Std.HashSet Nat × Array Nat := Id.run do
+  if acc.1.contains idx then return acc
+  let mut acc := (acc.1.insert idx, acc.2)
+  let some md := env.header.moduleData[idx]? | return acc
+  for imp in md.imports do
+    if imp.isMeta && !followMeta then continue
+    if isToolchainModule imp.module then continue
+    let some j := env.getModuleIdx? imp.module | continue
+    acc := importPostOrder env followMeta j.toNat acc
+  return (acc.1, acc.2.push idx)
+
+/-- The program modules whose initializers run before `main`, in order, and
+whether only their runtime phase runs (translation plan §5.12). Native
+`main` runs the initializer of `main`'s module (`EmitC.emitMainFn`). For a
+`module` (module system) that is its runtime-phase initializer
+(`emitInitFn (phases := .runtime)`): it calls the runtime-phase
+initializers of the module's non-`meta` imports only, then initializes the
+module's declarations not marked `meta`. A non-module `main` module runs
+the initializers of all its imports, and an imported `module`'s
+initializer there (`emitLegacyInitFn`) runs its imports' initializers, then
+its runtime-phase declarations, then its `meta` ones. Without `root`'s
+module, every program module, by index. -/
+def startupModules (env : Environment) (root : Name) : Array Nat × Bool :=
+  match env.getModuleIdxFor? root with
+  | some mainIdx =>
+    let runtimeOnly := (env.header.moduleData[mainIdx.toNat]?.map (·.isModule)).getD false
+    ((importPostOrder env (followMeta := !runtimeOnly) mainIdx.toNat ({}, #[])).2, runtimeOnly)
+  | none =>
+    ((Array.range env.header.moduleNames.size).filter fun i =>
+      !isToolchainModule env.header.moduleNames[i]!, false)
+
 /-- The startup items of the program's own (non-toolchain) modules, in
-order. Constants are the module's compiled zero-parameter declarations
-(as native Lean's module initializer), so compiler-generated ones such as
-specializations with every parameter fixed are included. -/
-def startupItems : CoreM (Array StartupItem) := do
+order: those of the modules `startupModules` gives (for `main` = `root`),
+each module's in initialization order (`moduleStartupKeys`,
+`compileOrder`) and for its phases: with `runtimeOnly`, the items not marked
+`meta`; otherwise, in a `module`, the items not marked `meta`, then the
+`meta` ones. An item is marked `meta` when the declaration native Lean
+initializes is (`isMarkedMeta`: for `initialize c : T ← act`, `c`; for
+`initialize do …`, its function); declarations the compiler generates
+(specializations) are not, as natively. Constants are the module's
+compiled zero-parameter declarations (as native Lean's module
+initializer), so compiler-generated ones such as specializations with every
+parameter fixed are included. -/
+def startupItems (root : Name) : CoreM (Array StartupItem) := do
   let env ← getEnv
+  let (modules, runtimeOnly) := startupModules env root
+  let wanted : Std.HashSet Nat := modules.foldl (·.insert ·) {}
   let mut byModule : Std.HashMap Nat (Array (StartupItem × Name)) := {}
   for (n, _) in env.constants.map₁.toList do
     let some idx := env.getModuleIdxFor? n | continue
-    let some modName := env.header.moduleNames[idx.toNat]? | continue
-    if isToolchainModule modName then continue
+    unless wanted.contains idx.toNat do continue
     let item? :=
       if isIOUnitInitFn env n then some (StartupItem.ioUnit n)
       else if let some f := getInitFnNameFor? env n then some (.init n f)
@@ -438,8 +486,7 @@ def startupItems : CoreM (Array StartupItem) := do
     byModule := byModule.insert idx.toNat ((byModule.getD idx.toNat #[]).push (item, n))
   -- The constants each constant reads (see the end).
   let mut reads : Std.HashMap Name (Array Name) := {}
-  for h : idx in [:env.header.moduleNames.size] do
-    if isToolchainModule env.header.moduleNames[idx] then continue
+  for idx in modules do
     for d in baseExt.getModuleEntries env idx (level := .private) do
       let n := d.name
       let .code c := d.value | continue
@@ -452,8 +499,9 @@ def startupItems : CoreM (Array StartupItem) := do
   -- places the sort gave them: they include every specialization and
   -- `initialize` action, and nearly every constant that calls a function.
   let mut out := #[]
-  for idx in (byModule.toArray.map (·.1)).qsort (· < ·) do
+  for idx in modules do
     let its := byModule.getD idx #[]
+    if its.isEmpty then continue
     let comp ← compileOrder idx
     let keys ← moduleStartupKeys idx (its.map (·.2)) comp
     let sorted := its.qsort fun (_, n1) (_, n2) =>
@@ -503,7 +551,15 @@ def startupItems : CoreM (Array StartupItem) := do
     let ordered := refilled.qsort fun (_, a) (_, b) =>
       let (ka, kb) := (place.getD a (0, 0), place.getD b (0, 0))
       lexLtNat #[ka.1, ka.2, idxOf.getD a 0] #[kb.1, kb.2, idxOf.getD b 0]
-    out := out ++ ordered.map (·.1)
+    -- The module's phases (see above), each in that order.
+    let isMeta (n : Name) : Bool := isMarkedMeta env n
+    let runtime := ordered.filter fun (_, n) => !isMeta n
+    let phased :=
+      if runtimeOnly then runtime
+      else if (env.header.moduleData[idx]?.map (·.isModule)).getD false then
+        runtime ++ ordered.filter fun (_, n) => isMeta n
+      else ordered
+    out := out ++ phased.map (·.1)
   return out
 
 /-- A startup step with instance names (see `StartupItem`). -/

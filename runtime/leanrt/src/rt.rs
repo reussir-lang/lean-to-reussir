@@ -426,12 +426,24 @@ pub fn run_main2<I: FnOnce(), F: FnOnce() + Send + 'static>(init: I, body: F) {
     run_body(body)
 }
 
+/// Whether `main` runs on a thread of its own (`run_body`), set before it
+/// starts. With `LEAN_MAIN_USE_THREAD=0` it runs on the initializers'
+/// thread and, as natively, keeps that thread's current standard streams
+/// (lean2rr's entry starts a fresh stream context for `main` only when this
+/// is true).
+static MAIN_ON_THREAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn main_on_thread() -> bool {
+    MAIN_ON_THREAD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn run_body<F: FnOnce() + Send + 'static>(body: F) {
     if std::env::var("LEAN_MAIN_USE_THREAD").map(|v| v == "0").unwrap_or(false) {
         install_stack_overflow_handler();
         body();
         return;
     }
+    MAIN_ON_THREAD.store(true, std::sync::atomic::Ordering::Relaxed);
     let t = match std::thread::Builder::new()
         .name("main".into())
         .stack_size(main_stack_size())

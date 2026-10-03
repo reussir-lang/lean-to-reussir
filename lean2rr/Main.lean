@@ -83,7 +83,7 @@ def dumpDecls (header : String) (decls : Array (Decl .pure)) : String :=
 def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM String := do
   -- Stage 1: monomorphize from `main`, the entry point's roots and the
   -- startup items (constants, `initialize` actions).
-  let items ← startupItems
+  let items ← startupItems opts.root
   let (rootInsts, st) ← monomorphize (programRoots opts.root items)
   let header := s!"-- root instances: {rootInsts}; instances: {st.decls.size}, extern instances: {st.externs.size}, lcAny type arguments: {st.uniformArgs}\n"
   if stage == "inst" then return dumpDecls header (st.externs ++ st.decls)
