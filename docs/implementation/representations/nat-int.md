@@ -94,6 +94,33 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 - **Where:** `prelude.rr`: `lean_nat_*`, `lean_int_*`, `l2r_int_val`.
 - **Remove only if:** the encoding changes.
 
+### Add and mul test "both small" on the parity of the sum
+
+- **What:** `lean_nat_add` and `lean_nat_mul` compute `s = x + (y - 1)`
+  and take the fast path when `s & x & 1` is 1 (both words odd: `s` is
+  odd when `x` and `y` have the same parity), not when `x & y & 1` is.
+- **Why:** With `x & y & 1`, LLVM pairs `y & 1` with the identical
+  low-bit test of Reussir's `rc.inc` of `y` (patch 0050's guard; `y` is
+  often a field just read out of a cell that is then released) and keeps
+  it in a callee-saved register across the release calls in between. In
+  cfold's `constFolding`, which recurses about 2^n deep without a tail
+  call (8M frames at n = 23), that one register made the frame 96 bytes
+  instead of 80. Measured on perf-cfold (max RSS of the program, KB/1024,
+  n = 23): 1074 MB with `x & y & 1`, 946 MB with the parity test, 1000 MB
+  before the one-word `Nat` (a684336), 1268 MB native; the regression was
+  found by the regress-cc0 run (finding 1, bisected to cc0d43c). Each
+  inlined add or mul is 1 to 2 instructions longer (computed before the
+  test, the sum becomes `(x + y) - 1`, so the carry check needs a `cmp`
+  instead of the flags of `adds`), but whole programs execute no more
+  instructions: cfold 0.8% fewer, Bignum, Liasolver and a probe of
+  small-`Nat` loops (collatz, sums, a two-field record) the same within
+  run-to-run noise.
+- **Where:** `prelude.rr`: `lean_nat_add`, `lean_nat_mul`.
+- **Remove only if:** Reussir's guard stops sharing the low-bit test, or
+  measurement shows the frames unaffected. The other binary operations
+  keep `x & y & 1`; the same effect would show there as a larger frame
+  of a recursive function using them.
+
 ### `Nat.pow`'s fast path takes exponents below 2^32 only
 
 - **What:** The inline path runs only when the exponent word is below
