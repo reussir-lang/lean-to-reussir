@@ -1,6 +1,6 @@
 # lean2rr: what is implemented
 
-Status as of 2026-10-02 (branch `dev`). This is a plain-language overview
+Status as of 2026-10-03 (branch `lean-4.34`: Lean v4.34.0). This is a plain-language overview
 for someone who knows Rust but not Lean. The full rules are in
 [`translation-plan.md`](translation-plan.md); the runtime is described in
 [`../runtime/README.md`](../runtime/README.md); the Reussir bugs met on the
@@ -11,7 +11,7 @@ what would break without it, are cataloged in
 
 ## In one paragraph
 
-lean2rr compiles Lean 4.33 programs to native executables through
+lean2rr compiles Lean 4.34 programs to native executables through
 Reussir. It does not parse Lean source: it reads what Lean's own compiler
 already produced for a compiled module (its intermediate code, LCNF, stored
 in the `.olean` files), so every Lean feature that Lean can compile is
@@ -35,13 +35,13 @@ same standard output, standard error and exit code.
 
 | Check | Result |
 |---|---|
-| Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native |
-| Runtime test suite (147 programs, `tests/runtime`) | 147/147 identical to native |
+| Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
+| Runtime test suite (231 programs, `tests/runtime`) | 231/231 identical to native Lean 4.34.0 |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 716 of Lean 4.34 available: 705 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
 | Adversarial testing | 4 rounds (about 1,300 test programs written to break it), every finding fixed or documented |
-| Speed | faster than native Lean on 16 of the 18 classic programs and about equal on the other two (monadic-interp 1.01×, deriv ≈1×), faster on 17 of the 18 Reussir-suite programs (the 18th at 1.07×); tables below |
+| Speed (measured against native Lean 4.33; not re-measured for 4.34) | faster than native Lean on 16 of the 18 classic programs and about equal on the other two (monadic-interp 1.01×, deriv ≈1×), faster on 17 of the 18 Reussir-suite programs (the 18th at 1.07×); tables below |
 
 ## How a program is compiled
 
