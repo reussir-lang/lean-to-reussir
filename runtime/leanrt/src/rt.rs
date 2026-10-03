@@ -310,7 +310,8 @@ fn libuv_ring(entries: u32, flags: u32) {
 /// descriptor closed at startup is taken by the first of them, as natively:
 /// reading or writing that stream then fails as natively (`EINVAL` on the
 /// epoll descriptor), and a child process sees it closed. They stay open,
-/// unused.
+/// unused, but for the signal pipe, which signal watchers use
+/// (`signal_pipe`), as libuv's loop does.
 fn reserve_libuv_descriptors() {
     const CLOEXEC: i32 = 0o2000000; // O_CLOEXEC, EPOLL_CLOEXEC, EFD_CLOEXEC
     const NONBLOCK: i32 = 0o4000; // O_NONBLOCK, EFD_NONBLOCK
@@ -326,9 +327,24 @@ fn reserve_libuv_descriptors() {
         libuv_ring(256, 0);
         let mut p = [0i32; 2];
         pipe2(p.as_mut_ptr(), CLOEXEC);
-        pipe2(p.as_mut_ptr(), CLOEXEC | NONBLOCK);
+        if pipe2(p.as_mut_ptr(), CLOEXEC | NONBLOCK) == 0 {
+            SIGNAL_PIPE[0].store(p[0], std::sync::atomic::Ordering::Relaxed);
+            SIGNAL_PIPE[1].store(p[1], std::sync::atomic::Ordering::Relaxed);
+        }
         eventfd(0, CLOEXEC | NONBLOCK);
     }
+}
+
+/// The loop's non-blocking signal pipe (`reserve_libuv_descriptors`), -1 if
+/// it could not be opened.
+static SIGNAL_PIPE: [std::sync::atomic::AtomicI32; 2] =
+    [std::sync::atomic::AtomicI32::new(-1), std::sync::atomic::AtomicI32::new(-1)];
+
+/// The read and write ends of the loop's signal pipe opened at startup, for
+/// the signal watchers (`net`), if it is open.
+pub fn signal_pipe() -> Option<[i32; 2]> {
+    let p = [SIGNAL_PIPE[0].load(std::sync::atomic::Ordering::Relaxed), SIGNAL_PIPE[1].load(std::sync::atomic::Ordering::Relaxed)];
+    if p[0] >= 0 && p[1] >= 0 { Some(p) } else { None }
 }
 
 /// Whether `fd` is the `/dev/null` Rust's runtime opens (read-write) in

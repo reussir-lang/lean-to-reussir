@@ -707,8 +707,12 @@ pub fn signal_new(n: u32, repeating: bool) -> LHandle {
 fn signal_start(h: &LHandle) {
     let r = reactor();
     if r.sig_pipe[0] < 0 {
-        let mut p = [-1i32; 2];
-        unsafe { pipe2(p.as_mut_ptr(), SOCK_NONBLOCK | SOCK_CLOEXEC) };
+        // libuv's loop signal pipe, opened at startup (`rt`), as natively.
+        let p = crate::rt::signal_pipe().unwrap_or_else(|| {
+            let mut p = [-1i32; 2];
+            unsafe { pipe2(p.as_mut_ptr(), SOCK_NONBLOCK | SOCK_CLOEXEC) };
+            p
+        });
         r.sig_pipe = p;
         SIG_WRITE_FD.store(p[1], std::sync::atomic::Ordering::Relaxed);
     }

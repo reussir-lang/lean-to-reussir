@@ -322,7 +322,8 @@ strings, a new socket) read by `l2r_shim_op_*`. An operation completing
 later takes a promise `r` from the shim and drops it (on the event loop's
 own context, `sched::ensure_evloop`) when it completes, which runs the
 shim's continuation (a `sync` dependent of `r`). `net::wait` polls the
-watched descriptors (and a self-pipe of the signal handler) with the
+watched descriptors (and the signal handler's pipe: libuv's loop signal
+pipe, which the runtime opens at startup, `rt::signal_pipe`) with the
 earliest timer as timeout. The primitives (`l2r_shim_*`, the payloads of
 the shim's `lean_shim_*` externs): timers and signals
 (`timer_new`, `signal_new`, `timer_next_kind`, `timer_promise`,
@@ -486,9 +487,10 @@ guard page is recorded per thread). Before `main`, an ELF constructor
 opens the descriptors native Lean's runtime has open at startup (libuv's
 epoll descriptor, two io_uring rings when the kernel has them, two signal
 pipes and an eventfd, close-on-exec, in that order at the lowest free
-numbers): `/proc/self/fd`, descriptor numbers and `EMFILE` thresholds are
-native's, and a standard descriptor closed at startup is taken by the
-first of them, as natively (using it fails with `EINVAL`, children see it
+numbers; signal watchers use the second pipe, as libuv's loop does):
+`/proc/self/fd`, descriptor numbers and `EMFILE` thresholds are native's,
+and a standard descriptor closed at startup is taken by the first of
+them, as natively (using it fails with `EINVAL`, children see it
 closed). Running before Rust's runtime, the constructor also keeps Rust
 from putting `/dev/null` in the place of closed standard descriptors.
 `l2r_set_initializing(b)` sets what `IO.initializing` answers.
