@@ -550,6 +550,31 @@ extern "C" fn repr_small_init(n: u64) -> LStr {
     s
 }
 
+/// One empty string, kept for the run (as `SMALL_REPR`'s strings).
+static SHARED_EMPTY: Global<usize> = Global(std::cell::UnsafeCell::new(0));
+
+/// The shared empty string: a new reference, no allocation. lean2rr passes
+/// it as the placeholder of a string parameter that is never read (the
+/// slots of a state machine, Opt/StateMachines).
+#[inline(always)]
+pub fn shared_empty() -> LStr {
+    let p = unsafe { *SHARED_EMPTY.0.get() };
+    if p == 0 {
+        return shared_empty_init();
+    }
+    let r = std::mem::ManuallyDrop::new(unsafe { std::mem::transmute::<usize, LStr>(p) });
+    LStr::clone(&r)
+}
+
+#[cold]
+#[inline(never)]
+extern "C" fn shared_empty_init() -> LStr {
+    let s = from_parts(Vec::new(), 0);
+    let p = unsafe { std::mem::transmute::<LStr, usize>(s.clone()) };
+    unsafe { *SHARED_EMPTY.0.get() = p };
+    s
+}
+
 /// `lean_mk_string_from_bytes`: validate, replacing each maximal invalid
 /// sequence start with U+FFFD as `lean_mk_string_lossy_recover` does.
 pub fn from_bytes_lossy(s: &[u8]) -> LStr {

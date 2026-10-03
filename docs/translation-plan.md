@@ -1324,14 +1324,43 @@ jump needs travels in its variant, so nothing is kept alive by being passed
 along. J4 is used only when an outlined join point makes a self tail call,
 in its body or in a join point inlined into it (J1, J1'); other calls back
 into the declaration are ordinary calls. The enum is a
-shared (heap) type for now: Reussir miscompiles `[value]` enums with fields
-of mixed layout (§9); Reussir's reuse makes the shared cell cheap. The
-optional pass `state-machines` enters without allocation instead: the
-function takes the declaration's parameters followed by the entry point,
-and `e` is nullary. A jump passes placeholders for the parameters beside
-its variant: the variant carries every variable the join point's body
-uses, and passing a parameter itself would keep it alive across the jump
-(an array updated before the jump would be copied at every iteration).
+shared (heap) type: Reussir miscompiles `[value]` enums with fields of
+mixed layout (§9), so in this core form every call and every jump
+allocates a variant.
+
+The optional pass `state-machines` makes every variant nullary: the
+values travel as parameters of the function instead, in *slots*, one per
+type and position. A variant puts its `i`-th field of type `T` in the
+`i`-th slot of type `T` (a variable it passes on unchanged under a
+parameter's name keeps that parameter's slot), so the function has as many
+slots of type `T` as the variant with the most fields of type `T`. Each
+arm binds its fields from their slots. Example: a loop
+`fa (i n : Nat) (s : String)` whose join point `j` uses `i`, `n`, `s` and
+a `Nat` parameter `a` becomes
+
+```
+fn fa_sm(s1 : Nat, s2 : Nat, s3 : LStr, s4 : Nat, m : fa_mode) -> R {
+    match m {
+        fa_mode::e  => { let i = s1; let n = s2; let s = s3; … },
+        fa_mode::j1 => { let i = s1; let n = s2; let s = s3; let a = s4; … }
+    }
+}
+```
+
+and a jump to `j` is `fa_sm(i, n, s, a, fa_mode::j1{})`, a self call with
+`fa_sm(i + 1, n, s, zero, fa_mode::e{})`. A jump passes its own values in
+their slots and a placeholder in every other slot, never a live value: a
+value passed twice would be kept alive across the jump (an array updated
+before the jump would be copied at every iteration). Placeholders are
+cheap: a constant (`0`, a constructor without fields), a value built once
+and kept in a once-cell (§5.1), and for a string one shared empty string
+of the runtime. A type whose placeholder is not a finite value (a type
+without one, or a record whose placeholder would hold one, such as
+`inductive W | bad (e : Empty) | ok (n : Nat)`, whose placeholder is built
+from `bad`) gets no slot: such a field stays in its variant, which is then
+allocated as in the core form. The pass checks this on every state
+machine. So a jump costs a jump and the moves of its slots, and no
+allocation (test `RtJpSlots`).
 
 **Choice and nesting.** J1 applies first, then J2, then J1' (small), then
 J3 (J4 when an outlined body tail-calls the declaration).

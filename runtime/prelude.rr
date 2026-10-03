@@ -628,6 +628,12 @@ fn lean_nat_gcd(a : Nat, b : Nat) -> Nat {
 #[ffi(import)]
 fn l2r_nat_repr_small(x : u64) -> LStr [{ leanrt::string::repr_small(x) }];
 
+// One shared empty string (a new reference, no allocation): the
+// placeholder of a string parameter that is never read (lean2rr's
+// Opt/StateMachines).
+#[ffi(import)]
+fn l2r_str_shared_empty() -> LStr [{ leanrt::string::shared_empty() }];
+
 // Decimal representation (`Nat.repr`); lean2rr replaces Lean's `Nat.repr`
 // and `Nat.reprFast` with it (the former builds big numbers digit by digit).
 fn l2r_nat_repr(a : Nat) -> LStr {
