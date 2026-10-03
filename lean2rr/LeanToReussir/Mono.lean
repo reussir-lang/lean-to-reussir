@@ -781,59 +781,108 @@ def uniformDecl (d : Decl .pure) : Decl .pure :=
 
 /-! ## Calls that Lean's CSE merges after erasure
 
-Lean's mono-phase `cse` (`Code.cse`) keys a `let` on its value, in which
-type arguments are erased, so a call of a declaration is merged into an
-earlier call of it whose value arguments agree, even at other type
+Lean's mono-phase `cse` (`Code.cse`) keys a `let` on its mono value, in
+which type arguments are erased, so a call of a declaration is merged into
+an earlier call of it whose value arguments agree, even at other type
 arguments (`gp xs none` used as an `Option String` and later as an
 `Option (Nat → Nat)`): the call runs once, and the merged variable keeps the
 first call's type. Stage 1 gives the two calls instances at different types,
 under different names, so both would run, and a panic or trace in them
-would come out twice. So the later call is made at the first call's type
-arguments: both call the same instance with the same arguments, and Stage
-2's `cse` (Lean's) merges them as natively. Where the later call's result is
-used at its own type, the first call's value is converted to it (§5.1); the
-two values agree after erasure, so no part that the conversion cannot
-handle is reached. Calls without such a partner are left as they are. -/
+would come out twice. So the later call is made with the first call's type
+and value arguments: both call the same instance with the same arguments,
+and Stage 2's `cse` (Lean's) merges them as natively. Where the later call's
+result is used at its own type, the first call's value is converted to it
+(§5.1). The two values agree after erasure: a value that exists at two
+types holds nothing at the positions where the types differ (`none`, `[]`),
+except a function, which can be one closure at two function types
+(`List.take k`); lean2rr has no conversion between two function types, so
+a call whose result types differ inside function types on both sides is
+not aligned (plan §10). Calls without such a partner are left as they
+are. -/
+
+/-- Do `a` and `b`, the types of one value at two instantiations, differ
+inside function types on both sides (`Nat → Nat` and `String → String`,
+`Option (Nat → Nat)` and `Option (String → String)`)? Elsewhere a difference
+holds no value (nothing is both a `String` and a function). -/
+partial def differInFunctions (a b : Expr) : Bool :=
+  let a := a.consumeMData
+  let b := b.consumeMData
+  if a == b then false
+  else match a, b with
+    | .forallE .., .forallE .. => true
+    | .app .., .app .. =>
+      a.getAppFn == b.getAppFn && a.getAppNumArgs == b.getAppNumArgs &&
+        (a.getAppArgs.zip b.getAppArgs).any fun (x, y) => differInFunctions x y
+    | _, _ => false
 
 /-- The calls of `code` that Lean's mono-phase `cse` merges into an earlier
 call of the same declaration at other type arguments, each with the
 earlier call's universe levels and arguments. The grouping follows
-`Code.cse`: values are compared with type arguments erased and variables
-replaced by the variable they were merged into, a `let` is merged into one
-in scope (`cases` alternatives and local function bodies start a nested
-scope), and `@[never_extract]` calls are not merged. Only calls of
-definitions count: Stage 1 does not rename constructors (Stage 2's `cse`
-merges them as natively), and extern instances and instances (dictionary
-builders) compute nothing observable. -/
+`Code.cse` on mono code: values are compared with type arguments erased,
+variables replaced by the variable they were merged into, and a trivial
+structure (`Subtype`, `Fin`) taken for its field and `Decidable` for `Bool`,
+as `toMono` does; a `let` is merged into one in scope (`cases` alternatives
+start a nested scope, join points see the enclosing scope, and a local
+function's body only its own: Lean's `cse` runs after lambda lifting), and
+`@[never_extract]` calls are not merged. Only calls of definitions count:
+Stage 1 does not rename constructors (Stage 2's `cse` merges them as
+natively), and extern instances and instances (dictionary builders) compute
+nothing observable. -/
 partial def erasedMerges (code : Code .pure) :
     CoreM (Std.HashMap FVarId (List Level × Array (Arg .pure))) := do
   let ((_, _, groups), calls) ← ((go code {}).run ({}, {})).run {}
   let mut out := {}
   for (r, members) in groups.toList do
-    let some (f, us, args₀) := calls[r]? | continue
+    let some (f, us, args₀, ty₀) := calls[r]? | continue
     for m in members do
-      if let some (g, _, args) := calls[m]? then
+      if let some (g, _, args, ty) := calls[m]? then
         let typeArgs (as : Array (Arg .pure)) := as.filterMap fun
           | .type t _ => some t
           | _ => none
-        if g == f && args.size == args₀.size && typeArgs args != typeArgs args₀ then
+        if g == f && args.size == args₀.size && typeArgs args != typeArgs args₀ &&
+            !differInFunctions ty₀ ty then
           out := out.insert m (us, args₀)
   return out
 where
   /-- State: the variable each merged variable stands for and the
-  variables merged into each representative; the calls of definitions. -/
+  variables merged into each representative; the calls of definitions,
+  with their binder types. -/
   go (code : Code .pure) (map : Std.HashMap Expr FVarId) :
       StateT (Std.HashMap FVarId FVarId × Std.HashMap FVarId (Array FVarId))
-        (StateT (Std.HashMap FVarId (Name × List Level × Array (Arg .pure))) CoreM) Unit := do
+        (StateT (Std.HashMap FVarId (Name × List Level × Array (Arg .pure) × Expr)) CoreM) Unit := do
     match code with
     | .let d k =>
       let env ← getEnv
       let (reps, groups) ← get
       let rep (x : FVarId) : FVarId := reps.getD x x
+      -- A value that is another variable in mono: a trivial structure's
+      -- constructor or projection, `Decidable.decide`.
+      let alias? : Option FVarId ← match d.value with
+        | .const c _ args _ =>
+          if c == ``Decidable.decide then
+            pure (match (args[1]? : Option (Arg .pure)) with | some (.fvar x) => some x | _ => none)
+          else match env.find? c with
+            | some (.ctorInfo ci) =>
+              match ← hasTrivialStructure? ci.induct with
+              | some info => pure (match (args[info.numParams + info.fieldIdx]? : Option (Arg .pure)) with
+                  | some (.fvar x) => some x
+                  | _ => none)
+              | none => pure none
+            | _ => pure none
+        | .proj s i x =>
+          match ← hasTrivialStructure? s with
+          | some info => pure (if info.fieldIdx == i then some x else none)
+          | none => pure none
+        | _ => pure none
+      if let some x := alias? then
+        set (reps.insert d.fvarId (rep x), groups)
+        return ← go k map
       let arg (a : Arg .pure) : Expr := match a with
         | .fvar x => .fvar (rep x)
         | _ => erasedExpr
       let key : Expr := match d.value with
+        | .const ``Decidable.isTrue .. => .const ``Bool.true []
+        | .const ``Decidable.isFalse .. => .const ``Bool.false []
         | .const f _ args _ => mkAppN (.const f []) (args.map arg)
         | .fvar g args => mkAppN (.fvar (rep g)) (args.map arg)
         | .proj s i x => .proj s i (.fvar (rep x))
@@ -841,8 +890,8 @@ where
         | .erased => erasedExpr
       if let .const f us args _ := d.value then
         unless env.isConstructor f || isExtern env f || (← isInstanceReducible f) do
-          modifyThe (Std.HashMap FVarId (Name × List Level × Array (Arg .pure)))
-            (·.insert d.fvarId (f, us, args))
+          modifyThe (Std.HashMap FVarId (Name × List Level × Array (Arg .pure) × Expr))
+            (·.insert d.fvarId (f, us, args, d.type))
       let neverExtract := match d.value with
         | .const f .. => hasNeverExtractAttribute env f
         | _ => false
@@ -852,12 +901,13 @@ where
           set (reps.insert d.fvarId r, groups.insert r ((groups.getD r #[]).push d.fvarId))
           go k map
         | none => go k (map.insert key d.fvarId)
-    | .fun d k _ | .jp d k => go d.value map; go k map
+    | .fun d k _ => go d.value {}; go k map
+    | .jp d k => go d.value map; go k map
     | .cases cs => for alt in cs.alts do go alt.getCode map
     | _ => pure ()
 
-/-- Make the calls `erasedMerges` finds at the type arguments of the call
-they are merged into; their binders get the type of the new call. -/
+/-- Make the calls `erasedMerges` finds with the arguments of the call they
+are merged into; their binders get the type of the new call. -/
 partial def alignErasedMerges (code : Code .pure) : CompilerM (Code .pure) := do
   let marked ← erasedMerges code
   if marked.isEmpty then return code
@@ -868,11 +918,8 @@ where
     match code with
     | .let d k =>
       let d ← match marked[d.fvarId]?, d.value with
-        | some (us, args₀), .const f _ args _ =>
-          let args := args.mapIdx fun i a => match a, args₀[i]? with
-            | .type _ _, some t@(.type ..) => t
-            | a, _ => a
-          let value : LetValue .pure := .const f us args
+        | some (us, args₀), .const f _ _ _ =>
+          let value : LetValue .pure := .const f us args₀
           d.update (← value.inferType) value
         | _, _ => pure d
       return code.updateLet! d (← go marked k)

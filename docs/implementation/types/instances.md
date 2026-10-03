@@ -35,21 +35,32 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
 
 - **What:** In each instance, after Stage 1's `simp`, a call of a
   definition that Lean's mono-phase `cse` would merge into an earlier call
-  of the same definition at other type arguments is made at the earlier
-  call's type arguments (and universe levels), and its binder gets the type
-  of the new call. The grouping copies `Code.cse`: values compared with type
-  arguments erased and merged variables identified, one scope per `cases`
-  alternative and local function, `@[never_extract]` calls apart.
-  Constructors, extern instances and instances (dictionary builders) are not
-  aligned. Nothing changes in an instance without such a pair.
+  of the same definition at other type arguments gets the earlier call's
+  arguments (type and value ones) and universe levels, and its binder the
+  type of the new call. The grouping copies `Code.cse` on mono values:
+  type arguments erased, merged variables identified, a trivial structure
+  (`Subtype`, `Fin`, `Char`) taken for its field and `Decidable` for
+  `Bool`; one scope per `cases` alternative, join points in the enclosing
+  scope, a local function's body in its own (Lean's `cse` runs after lambda
+  lifting); `@[never_extract]` calls apart. Not aligned: constructors,
+  extern instances, instances (dictionary builders), and a call whose
+  result types differ inside function types on both sides
+  (`differInFunctions`). Nothing changes in an instance without such a
+  pair.
 - **Why:** Natively the two calls are one after erasure and run once; two
   instances ran twice, so a panic or trace in them printed twice (XT-6,
-  leanrs A482). Aligning to the earlier call (not to `lcAny`) keeps its type,
-  as the merged variable has natively, so Lean's type-sensitive closed-term
-  cache shares terms with other declarations as natively.
-- **Where:** `Mono.lean`: `erasedMerges`, `alignErasedMerges`,
-  `monoInstance`; plan [§2.3](../../translation-plan.md#23-instances); test
-  `RtCseAcrossTypes`.
+  leanrs A482; the dictionary and `Subtype` shapes: review XT6-02).
+  Aligning to the earlier call (not to `lcAny`) keeps its type, as the
+  merged variable has natively, so Lean's type-sensitive closed-term cache
+  shares terms with other declarations as natively. A function value is one
+  closure at two function types natively, and lean2rr has no conversion
+  between two function types: aligning such a call made the closure
+  unusable at the other type (review XT6-01: an unreachable panic).
+- **Where:** `Mono.lean`: `differInFunctions`, `erasedMerges`,
+  `alignErasedMerges`, `monoInstance`; plan
+  [§2.3](../../translation-plan.md#23-instances), §10 "Merging after
+  erasure"; tests `RtCseAcrossTypes`, `RtCseFnValues`, `RtCseResidual`,
+  `RtCseFnResult` (expected to fail).
 - **Remove only if:** Stage 1 stops making an instance per type, or Lean's
   `cse` starts comparing type arguments.
 

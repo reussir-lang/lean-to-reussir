@@ -227,26 +227,34 @@ uniform `Box` representation (§5.1). Lean itself treats every value this
 way, so this is always correct, only slower.
 
 Natively a declaration is one function at every type, and Lean's mono-phase
-`cse` compares values with type arguments erased: a call merges into an
-earlier call of the same declaration with the same value arguments even at
-other type arguments (`gp xs none` used as an `Option String`, then as an
+`cse` compares mono values, with type arguments erased: a call merges into
+an earlier call of the same declaration with the same value arguments even
+at other type arguments (`gp xs none` used as an `Option String`, then as an
 `Option (Nat → Nat)`), and runs once; the merged variable keeps the first
 call's type. Instances at the two types would be two calls, and a panic or
 trace in them would print twice. So Stage 1 finds these calls in each
-instance, as `cse` does (values compared with type arguments erased and
-merged variables identified, within a scope: `cases` alternatives and local
-functions open nested ones; `@[never_extract]` calls apart), and makes the
-later call at the earlier call's type arguments (`Mono.alignErasedMerges`).
-Both then call one instance with the same arguments, and Stage 2's `cse`
-merges them as natively. A use of the merged value at the later call's type
-converts it (§5.1); the two values agree after erasure (the call received
-the same values), so the conversion never meets a part it cannot convert.
-Constructors are not renamed by Stage 1 and merge in Stage 2 as they are;
-extern instances and instances (dictionary builders) compute nothing
-observable and keep their per-type instances. Lean's closed-term cache
-compares types, so closed calls at two types in two declarations stay two
-closed terms, natively too; after the merge, one declaration's call reads
-the other's closed term as natively (XT-6, leanrs A482; test `RtCseAcrossTypes`).
+instance as `cse` does, on the values `toMono` makes (type arguments
+erased, merged variables identified, a trivial structure such as `Subtype`
+or `Fin` taken for its field, `Decidable` for `Bool`; one scope per `cases`
+alternative, join points in the enclosing scope, a local function's body in
+a scope of its own, since Lean's `cse` runs after lambda lifting;
+`@[never_extract]` calls apart), and gives the later call the earlier
+call's arguments, type and value ones (`Mono.alignErasedMerges`). Both then
+call one instance with the same arguments, and Stage 2's `cse` merges them
+as natively. A use of the merged value at the later call's type converts
+it (§5.1). A value that exists at two types holds nothing where the types
+differ (`none`, `[]`), so the conversion meets no part it cannot convert,
+except a function, which is one closure at two function types natively
+(`List.take k` as `List Nat → List Nat` and as `List String → List
+String`): lean2rr has no conversion between two function types, so a call
+whose result types differ inside function types on both sides is not
+aligned (§10). Constructors are not renamed by Stage 1 and merge in Stage 2
+as they are; extern instances and instances (dictionary builders) compute
+nothing observable and keep their per-type instances. Lean's closed-term
+cache compares types, so closed calls at two types in two declarations stay
+two closed terms, natively too; after the merge, one declaration's call
+reads the other's closed term as natively (XT-6, leanrs A482; review XT6-01,
+XT6-02; tests `RtCseAcrossTypes`, `RtCseFnValues`, `RtCseResidual`).
 
 ### 2.4 Type classes
 
@@ -2803,6 +2811,15 @@ Each item says what differs and when.
   everything, has that stack; it gives the other threads Lean's runtime
   starts (task workers) 64 MiB, so that lean2rr fits an address-space limit
   (`ulimit -v 16000000`) on such inputs.
+- *Merging after erasure* (§2.3): Lean's mono `cse` merges calls of one
+  declaration at different type arguments whose value arguments agree after
+  erasure, and runs them once; lean2rr does too, except in two shapes, where
+  both calls run and a trace or panic in them prints twice: a call whose
+  results at the two types differ inside function types on both sides (an
+  `Option (α → α)` at `Nat` and at `String`: lean2rr converts no function
+  between two function types; test `RtCseFnResult`, expected to fail), and
+  a call inside a local function merged with one outside it, which Lean
+  merges only where it inlined the local function first.
 - *Build time*: rrc compiles about 80 small functions per second; a program
   with thousands of constants (each an initializer and an accessor, plus its
   closed terms) takes minutes to build where native takes seconds.
