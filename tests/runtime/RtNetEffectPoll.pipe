@@ -1,0 +1,1 @@
+$BIN | grep -v -e "^waiting " -e "^line "

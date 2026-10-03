@@ -2132,7 +2132,9 @@ native one does. A context does not lose the processor otherwise, except at
 first: a context whose sleep is over, a due timer of the event loop and
 what its completion releases (its continuations, the contexts waiting for
 it, the tasks it queues, which a free worker starts at once), descriptors
-and signals that have become ready, a context able to go on for a while
+and signals that have become ready (polled at most every 50 µs: a system
+call at every output would cost more than the output), a context able to
+go on for a while
 (5 ms: a lock handed over, a promise resolved), a task queued a while ago
 (5 ms) with a worker free for it (thread wake-ups take microseconds, so
 these would have got past anything that takes no time); then, round after
@@ -2165,10 +2167,30 @@ Each context has what a thread has: its running tasks (`IO.checkCanceled`,
 `IO.getTID`), the walks of dependents it does, its current standard streams
 (saved and restored at a switch: the cells of `l2r_std_*`, which the
 runtime records as mutable). No context is suspended inside a free (the
-free's pending work is the thread's, Reussir's `reussir_rt::drop`): a
-promise dropped inside a free is resolved in its turn, and its dependents
-(natively run at once, on the dropping thread) are walked when the free is
-over, at the context's next effect point, block or question about a task.
+free's pending work is the thread's, Reussir's `reussir_rt::drop`, and
+the other contexts would push their frees onto it). This decides when the
+`sync` dependents of a promise dropped unresolved run (natively at once,
+on the dropping thread, wherever that happens):
+- a promise whose last reference is released by itself (not inside a
+  free) is resolved with `none`, and its dependents run at once, as
+  natively;
+- a promise held by a container being freed (an array, a list, a
+  structure, a map, an `Option`, ...) is resolved in its turn, and its
+  dependents are walked as soon as the free is over (natively during the
+  free, when it reaches the promise), before the code that released the
+  container goes on. The runtime sees the end of a free that one of its own
+  containers started (an array, a reference cell, a task or thunk cell;
+  `leanrt::drop::run`), and of any free through local Reussir patch 0040
+  (`__reussir_drop_drained`, which every drain calls when it ends).
+  Without that patch, the end of a free that Reussir's record glue started
+  (a structure, list or `Option` that the program releases) is not seen:
+  those dependents run at the context's next effect point, block, Std.Sync
+  wait (before the object is looked at, so that a release by them is not
+  lost) or question about a task (§10).
+
+A reference's `set` stores the new value before it releases the old one,
+as `lean_st_ref_set` does (Reussir's `cell::set` releases first): code that
+the release runs sees the new value.
 `Task.get` of a task that is `busy` because it
 runs on another (suspended) context waits until it has finished
 (`l2r_task_wait_running`, then it looks again); on the running context it
@@ -2761,6 +2783,17 @@ Each item says what differs and when.
   releases it at once: when that was the last reference, the promise is
   resolved with `none`, and its `sync` dependents run, that much later
   (generated code does not run inside a runtime primitive).
+- *Promises released inside a free* (§5.14): the `sync` dependents of a
+  promise dropped unresolved because a container holding it is freed run
+  once the whole free is over, where natively they run when the free
+  reaches the promise: they see the rest of the container released too
+  (a file handle held by a later element already closed, another promise
+  in it already resolved). Without local Reussir patch 0040, a free that
+  Reussir's record glue started (a structure, a list after its first cell,
+  an `Option` the program releases) ends unseen, and its promises'
+  dependents run only at the next output, block, Std.Sync wait or question
+  about a task: code in between (reading a reference the dependent sets,
+  a computation, a blocking system call) runs before them.
 
 **Not supported** (translation succeeds; `rrc` reports an unknown function)
 - Every constant of the program is translated (§2.2), so an unused constant

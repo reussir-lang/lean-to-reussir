@@ -53,10 +53,14 @@ pub fn defer(p: usize, step: Step) {
 }
 
 /// Run `step` on `p` until it is finished, and everything it pushes; or,
-/// inside a running free, push it.
+/// inside a running free, push it. When the free is over, the dependents of
+/// the promises it resolved are walked (`task::resolve`).
 #[inline(never)]
 pub fn run(p: usize, step: Step) {
     reussir_rt::drop::run_step(p, step);
+    if !active() {
+        crate::task::run_later_walks();
+    }
 }
 
 #[inline(always)]

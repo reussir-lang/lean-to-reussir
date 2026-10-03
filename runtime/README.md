@@ -256,7 +256,9 @@ cell.
 task running on another context or a promise not resolved yet, a sleep, the
 final run after `main`) suspends its *context* (`main`'s thread stack, or a
 stack of a worker thread's size, 1 GiB reserved, with a guard page that the
-stack-overflow handler recognizes) and the scheduler runs: a context that
+stack-overflow handler recognizes: the scheduler records the running
+context's stack at each switch, `coro::set_running`) and the scheduler
+runs: a context that
 can go on, else a queued task on a new context if one of Lean's task
 manager workers is free (`LEAN_NUM_THREADS`, or the number of online
 processors, as `std::thread::hardware_concurrency`: not limited by the CPU
@@ -270,16 +272,24 @@ standard streams) with their saved contexts (`once::CtxState`). A free's
 pending work is the thread's (`reussir_rt::drop`), so no context is
 suspended inside a free (`sched::switch_to` checks): a promise dropped
 there is resolved in its turn, but its dependents, which run Lean code that
-may block, are walked after the free, at the context's next effect point,
-block or question about a task (`task::run_later_walks`, through the
-program's `l2r_task_walk_c`). The
+may block, are walked as soon as the free is over (`task::run_later_walks`,
+through the program's `l2r_task_walk_c`): when the drain ends, through
+Reussir's `__reussir_drop_drained` (local patch 0040; `task::resolve`
+stores `task::drained` there, linking the symbol weakly, so the runtime
+also builds against a Reussir without it), when a free that one of the
+runtime's containers started ends (`drop::run`), and otherwise (the record
+glue's frees, without patch 0040) at the context's next effect point,
+block, Std.Sync wait (`sync::settle`, before the object is looked at) or
+question about a task. A wait that registers in `sched::block` returns at
+once when those walks ran (its caller looks again). The
 context switch (`coro::switch`) saves the callee-saved registers on the
 stack and swaps stack pointers (aarch64 and x86-64 assembly). The program
 exports `l2r_task_run_one_c` (lean2rr's `l2r_task_run_one`), which a new
 context calls to run its first queued task. Output (`io::stream_put`,
 `fs::put_str`, `fs::flush`), spawning a process and `IO.Process.exit` are
 effect points (`sched::effect`): a context whose sleep is over, a due timer
-and what its completion releases, ready descriptors (`net::poll_now`), a
+and what its completion releases, ready descriptors (`net::poll_now`, at
+most every 50 µs), a
 context able to run for 5 ms, a task queued 5 ms ago with a worker free run
 first, round after round (up to 64; what runs in those rounds starts no
 tasks at its own effect points); `IO.sleep 0` lets them run whatever
@@ -313,7 +323,8 @@ strings, a new socket) read by `l2r_shim_op_*`. An operation completing
 later takes a promise `r` from the shim and drops it (on the event loop's
 own context, `sched::ensure_evloop`) when it completes, which runs the
 shim's continuation (a `sync` dependent of `r`). `net::wait` polls the
-watched descriptors (and a self-pipe of the signal handler) with the
+watched descriptors (and the signal handler's pipe: libuv's loop signal
+pipe, which the runtime opens at startup, `rt::signal_pipe`) with the
 earliest timer as timeout. The primitives (`l2r_shim_*`, the payloads of
 the shim's `lean_shim_*` externs): timers and signals
 (`timer_new`, `signal_new`, `timer_next_kind`, `timer_promise`,
@@ -358,7 +369,9 @@ the last reference to a promise goes, the runtime calls the program's
 `l2r_promise_drop_c(cell)` (a trampoline lean2rr exports), which resolves
 an unresolved promise with `none`. `l2r_option_get_or_block_none<T>()` is
 `Option.getOrBlock!` on `none` (`Promise.result!` of a dropped promise):
-Lean's forced panic message, then it blocks forever.
+Lean's forced panic message, then the running context blocks forever
+(`task::hang`), as natively the calling thread does: the other tasks and
+`main` go on.
 
 **Fallible IO** (files, standard streams): primitives record their outcome
 in a global last-error slot; the glue is
@@ -475,9 +488,10 @@ guard page is recorded per thread). Before `main`, an ELF constructor
 opens the descriptors native Lean's runtime has open at startup (libuv's
 epoll descriptor, two io_uring rings when the kernel has them, two signal
 pipes and an eventfd, close-on-exec, in that order at the lowest free
-numbers): `/proc/self/fd`, descriptor numbers and `EMFILE` thresholds are
-native's, and a standard descriptor closed at startup is taken by the
-first of them, as natively (using it fails with `EINVAL`, children see it
+numbers; signal watchers use the second pipe, as libuv's loop does):
+`/proc/self/fd`, descriptor numbers and `EMFILE` thresholds are native's,
+and a standard descriptor closed at startup is taken by the first of
+them, as natively (using it fails with `EINVAL`, children see it
 closed). Running before Rust's runtime, the constructor also keeps Rust
 from putting `/dev/null` in the place of closed standard descriptors.
 `l2r_set_initializing(b)` sets what `IO.initializing` answers.

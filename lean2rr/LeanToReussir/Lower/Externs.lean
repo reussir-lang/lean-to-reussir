@@ -448,13 +448,25 @@ def refBoxOpFn (op : String) (a : RR.Ty) : LowerM String := do
     modify fun s => { s with refBoxOps := s.refBoxOps.push (op, a) }
   return if op == "addr" then "l2r_refbox_addr" else s!"l2r_refbox_{op}_{a.enc}"
 
+/-- The prelude function that stores a value in a reference cell holding
+values of Reussir type `e`: `l2r_rc_set`, which releases the old value
+after storing the new one, as `lean_st_ref_set` does (code the release
+runs, the `sync` dependents of a promise it drops, sees the new value),
+through an FFI call that Reussir keeps after the store; `l2r_rc_put`
+(released in place) for a value that cannot cross the FFI boundary, a unit
+or enumeration value, whose release runs nothing. (A `[value]` structure
+with counted members is stored boxed, `.boxed`, in a shared record that
+crosses it.) -/
+def refSetFn (e : RR.Ty) : LowerM String := do
+  return if ← isBoundaryTy e then "l2r_rc_set" else "l2r_rc_put"
+
 /-- Reference operation `op` on a reference `r` whose cell stores elements
 of type `e` as `k`, for an operation at element type `a` (values converted
 between the two; `none` if they cannot be): `get` (a copy: the cell keeps
 its reference), `take` (the value moves out and the cell gets the
 placeholder, as `lean_st_ref_take` stores `box(0)`: Lean's `modify` is
 take-then-set, so a value only the cell holds stays unshared and is updated
-in place), `set` (`u64` result), `swap`. -/
+in place), `set` (`u64` result; `refSetFn`), `swap`. -/
 def refCellOp (op : String) (r : RR.Expr) (e : RR.Ty) (k : RefKind) (a : RR.Ty) (v : Option RR.Expr) :
     LowerM (Option RR.Expr) := do
   let cell := RR.Expr.field r 0
@@ -467,7 +479,7 @@ def refCellOp (op : String) (r : RR.Expr) (e : RR.Ty) (k : RefKind) (a : RR.Ty) 
   match k, op with
   | .direct, "get" => toA (.call "l2r_rc_get" #[e] #[cell])
   | .direct, "take" => toA (.call "l2r_rc_swap" #[e] #[cell, ← zeroValue e])
-  | .direct, "set" => return some (.call "l2r_rc_set" #[e] #[cell, v'.get!])
+  | .direct, "set" => return some (.call (← refSetFn e) #[e] #[cell, v'.get!])
   | .direct, "swap" => toA (.call "l2r_rc_swap" #[e] #[cell, v'.get!])
   | .boxed bn, "get" => toA (.field (.call "l2r_rc_get" #[.named bn] #[cell]) 0)
   | .boxed bn, "take" => toA (.field (.call "l2r_rc_swap" #[.named bn] #[cell, .ctor bn none #[← zeroValue e]]) 0)
