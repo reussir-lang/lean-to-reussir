@@ -3052,6 +3052,11 @@ fn l2r_task_deferring() -> bool [{ leanrt::task::deferring() }];
 // (`l2r_persist_seen`: whether walk `h` has seen it, else it records it)
 // and keeps what it reads out of thunks, tasks and references until it ends
 // (`l2r_persist_keep`), so that no cell it has seen is freed meanwhile.
+// It has two passes (`leanrt::persist`): the first collects the unfinished
+// tasks (`l2r_persist_collect`); the second (`l2r_persist_rewalk`) runs,
+// before each task it waits for, the collected ones that natively come
+// before it in the workers' queue (`l2r_task_run_before`, generated, over
+// `l2r_persist_before_at`).
 #[ffi(import)]
 fn l2r_task_settled() -> bool [{ leanrt::task::settled() }];
 
@@ -3063,6 +3068,15 @@ fn l2r_persist_seen<T>(h : u64, v : T) -> bool [{ leanrt::persist::seen::<[:T:]>
 
 #[ffi(import)]
 fn l2r_persist_keep<T>(h : u64, v : T) -> u64 [{ leanrt::persist::keep::<[:T:]>(h, v) }];
+
+#[ffi(import)]
+fn l2r_persist_collect<T>(h : u64, v : T) -> bool [{ leanrt::persist::collect::<[:T:]>(h, v) }];
+
+#[ffi(import)]
+fn l2r_persist_rewalk(h : u64) -> bool [{ leanrt::persist::rewalk(h) }];
+
+#[ffi(import)]
+fn l2r_persist_before_at(h : u64, a : u64) -> u64 [{ leanrt::persist::before(h, a as usize) }];
 
 #[ffi(import)]
 fn l2r_persist_end(h : u64) -> u64 [{ leanrt::persist::end(h) }];

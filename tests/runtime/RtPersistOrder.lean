@@ -1,9 +1,13 @@
-/-! Runtime test: a closed term's tasks are waited for, when it is first
-evaluated, in the order of native `lean_mark_persistent`, which pushes an
-object's fields (a closure's captured values, an array's elements) in order
-on its stack and looks at the last one first. With one worker thread, busy
-with another task (`RtPersistOrder.pipe`), the tasks run in that order, as
-their traces show (stderr). -/
+/-! Runtime test: the tasks of a closed term, which it waits for when it is
+first evaluated (`lean_mark_persistent`), run in the order the native
+workers take them from their queue (by priority, then first in, first out:
+here the order they were created in), whatever order the walk reaches them
+in. With one worker thread (`RtPersistOrder.pipe`) the traces (stderr)
+show that order: tasks created in field order and in reverse, by
+`List.map` and `Array.map`, in a tree, a closure, a thunk, and a task that
+replaces the task held by a reference next to it (the walk reads the
+reference after waiting for the task, as natively).
+From the round-7 review, area L, findings RV7L-04 and RV7L-06. -/
 @[noinline] def pairRev (_ : Unit) : Task Nat × Task Nat :=
   let t1 := Task.spawn fun _ => dbgTrace "pair: one" fun _ => 1
   let t2 := Task.spawn fun _ => dbgTrace "pair: two" fun _ => 2
@@ -59,6 +63,30 @@ inductive Tree where
   let b := Task.spawn fun _ => dbgTrace "thunk: b" fun _ => 2
   Thunk.mk fun _ => a.get * 10 + b.get
 
+-- Created in element order.
+@[noinline] def listMap (_ : Unit) : List (Task Nat) :=
+  (List.range 4).map fun i => Task.spawn fun _ => dbgTrace s!"listMap: {i}" fun _ => i
+
+@[noinline] def arrMap (_ : Unit) : Array (Task Nat) :=
+  (Array.range 4).map fun i => Task.spawn fun _ => dbgTrace s!"arrMap: {i}" fun _ => i
+
+-- Created in field order inside one initializer (not closed terms of their own).
+unsafe def mkPairU (_ : Unit) : Task Nat × Task Nat := unsafeBaseIO do
+  let k ← IO.mkRef 3
+  let a := Task.spawn fun _ => dbgTrace "fifo: first created" fun _ => unsafeBaseIO k.get
+  let b := Task.spawn fun _ => dbgTrace "fifo: second created" fun _ => unsafeBaseIO k.get
+  pure (a, b)
+@[implemented_by mkPairU] opaque mkPair (u : Unit) : Task Nat × Task Nat
+
+-- A reference holding T1 (created first) and a task t0 that replaces it
+-- with T2: T1 runs first, then t0, then T2.
+unsafe def mkWriteU (_ : Unit) : IO.Ref (Task Nat) × Task Nat := unsafeBaseIO do
+  let r ← IO.mkRef (Task.spawn fun _ => dbgTrace "write: T1 (replaced)" fun _ => 1)
+  let t0 := Task.spawn fun _ => dbgTrace "write: t0 writes" fun _ =>
+    unsafeBaseIO (do r.set (Task.spawn fun _ => dbgTrace "write: T2 (written)" fun _ => 2); pure 0)
+  pure (r, t0)
+@[implemented_by mkWriteU] opaque mkWrite (u : Unit) : IO.Ref (Task Nat) × Task Nat
+
 def main : IO Unit := do
   let busy ← IO.asTask (do IO.sleep 50; return 1)
   IO.eprintln "start"
@@ -78,4 +106,12 @@ def main : IO Unit := do
   IO.eprintln s!"clos {f 1000}"
   let th := thunk ()
   IO.eprintln s!"thunk {th.get}"
+  let lm := listMap ()
+  IO.eprintln s!"listMap {lm.map Task.get}"
+  let am := arrMap ()
+  IO.eprintln s!"arrMap {am.map Task.get}"
+  let (fa, fb) := mkPair ()
+  IO.eprintln s!"fifo {fa.get} {fb.get}"
+  let (wr, wt) := mkWrite ()
+  IO.eprintln s!"write {wt.get} {(← wr.get).get}"
   let _ ← IO.wait busy

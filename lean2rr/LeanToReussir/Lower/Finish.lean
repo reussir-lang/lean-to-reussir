@@ -378,12 +378,17 @@ the expansion of a value of type `t`, `l2r_persist_x_T(h, v, rest)`, which
 returns the work list with what `v` holds pushed on `rest` (a task: waits
 for it, then its value; a reference: its value), and those of the types
 it reaches; it returns `t`'s variant, `none` for a type that cannot hold a
-task (its values are not looked at). The order is native's, whose tasks
-run in it (their traces and panics show it): Lean pushes an object's
-fields (a closure's captured values, an array's elements) in order on its
-stack and pops the last one first, so the fields are pushed in Lean's
-order, the last on top, and an array is looked at from its last element
-down. `gen` collects the variants and the walk's arms. -/
+task (its values are not looked at). The order of the walk is native's:
+Lean pushes an object's fields (a closure's captured values, an array's
+elements) in order on its stack and pops the last one first, so the
+fields are pushed in Lean's order, the last on top, and an array is looked
+at from its last element down. The walk has two passes
+(`leanrt::persist`): the first collects the unfinished tasks
+(`l2r_persist_collect`) and does not look into them; the second, before it
+waits for a task, runs the collected tasks that natively come before it in
+the workers' queue (`l2r_task_run_before`): natively waiting only blocks,
+and the workers run the term's tasks in queue order (round 7 RV7L-06).
+`gen` collects the variants and the walk's arms. -/
 structure PersistGen where
   variants : Array (String × Array RR.Ty) := #[]
   arms : Array RR.Arm := #[]
@@ -427,10 +432,15 @@ partial def genPersist (t : RR.Ty) (gen : IO.Ref PersistGen) : LowerM (Option St
     | .app "LCell" #[.named z] =>
       let some (_, task, vt) ← lazyOf? t | pure unchanged
       if task then
-        -- A task: wait for it (run it), then its value.
+        -- A task: in the first pass, collected if it is unfinished (its
+        -- value does not exist yet); otherwise wait for it, after the
+        -- collected tasks that natively run before it, then its value.
         let get ← lazyGetFn z
         let rest ← each #[("x", vt)] (keep := true)
-        pure ⟨#[("x", some vt, .call get #[] #[.var "v"])] ++ rest.lets, rest.result⟩
+        let wait : RR.Block := ⟨#[("a", some u64, .call "l2r_lcell_addr" #[.named z] #[.var "v"]),
+            ("rb", some u64, .call "l2r_task_run_before" #[] #[.var "h", .var "a"]),
+            ("x", some vt, .call get #[] #[.var "v"])] ++ rest.lets, rest.result⟩
+        pure (.ofExpr (.ite (.call "l2r_persist_collect" #[t] #[.var "h", .var "v"]) unchanged wait))
       else
         -- A thunk: its computation or its value, without forcing it.
         let ft := RR.Ty.fn .unit vt
@@ -521,7 +531,8 @@ def variantCount : LowerM (Nat × Nat) := do
 
 /-- Generate the walks `persistCall` requested (again, replacing the
 earlier ones, when variants were added since): `l2r_persist_T(v)` walks `v`
-(`genPersist`) unless every task has already finished
+twice (`genPersist`; the second pass only if the first collected a task)
+unless every task has already finished
 (`l2r_task_settled`, so that nothing would be waited for). A type that
 cannot hold a task gets a walk that does nothing. Whether anything was
 generated. -/
@@ -541,9 +552,13 @@ def finishPersistFns : LowerM Bool := do
     let body ← match ← genPersist t gen with
       | none => pure zero
       | some v =>
+        let start : RR.Expr := .ctor persistListName (some v) #[.var "v", .ctor persistListName (some "wnil") #[]]
+        -- Two passes (`leanrt::persist`): the first collects the
+        -- unfinished tasks, the second runs them in the workers' order.
         let walk : RR.Block := ⟨#[("h", some u64, .call "l2r_persist_begin" #[] #[]),
-            ("r", some u64, .call "l2r_persist_walk" #[] #[.var "h",
-              .ctor persistListName (some v) #[.var "v", .ctor persistListName (some "wnil") #[]]])],
+            ("r", some u64, .call "l2r_persist_walk" #[] #[.var "h", start]),
+            ("again", some .bool, .call "l2r_persist_rewalk" #[] #[.var "h"]),
+            ("r2", some u64, .ite (.var "again") (.ofExpr (.call "l2r_persist_walk" #[] #[.var "h", start])) zero)],
           .call "l2r_persist_end" #[] #[.var "h"]⟩
         pure (.ofExpr (.ite (.call "l2r_task_settled" #[] #[]) zero walk))
     modify fun s => { s with fns := s.fns.push (.fn (persistFnName t) #[("v", t)] u64 body) }

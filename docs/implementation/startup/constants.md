@@ -101,7 +101,14 @@ runtime. Plan
   can hold a task, and one per array type for the elements left), in
   native's order: an object's fields are pushed in Lean's declaration
   order (`leanOrder`, whatever the record layout), the last on top, and an
-  array is walked from its last element down. It visits each cell
+  array is walked from its last element down. It has two passes: the
+  first collects the unfinished tasks it reaches (`l2r_persist_collect`,
+  not looking into them); the second walks again and, before it waits for
+  a task, runs the collected tasks that come before it in the native
+  workers' queue order (`l2r_task_run_before` over
+  `leanrt::persist::before`: a higher priority first, then the earlier
+  created). Only collected tasks run early, not other pending tasks of the
+  program. It visits each cell
   (record, array, thunk or task, function value, `Box`, reference) once:
   the runtime keeps the set of addresses seen and, until the walk ends,
   what it read out of thunks, tasks and references, so no seen cell is
@@ -118,18 +125,26 @@ runtime. Plan
   (1955043). The walk was a recursive function per type without a visited
   set: a 300000-link chain overflowed the 8 MB startup stack, even for an
   unused constant, and a 41-cell DAG was walked as a tree, 2^40 paths
-  (round 7 RV7L-01, 42517bf; test `RtPersistWalk`). The order shows: a
-  closed term's tasks have not started when the walk reaches them, so they
-  run in its order, with their traces and panics; native pushes fields,
-  captured values and elements in order and pops the last first, so
-  `(t2, t1)` runs `t1` first and `#[a0, a1, a2]` runs `a2` first (RV7L-04,
-  test `RtPersistOrder`). Native pushes a reference's value too (RV7L-05,
-  test `RtPersistRef`).
+  (round 7 RV7L-01, 42517bf; test `RtPersistWalk`). The order shows in
+  the tasks' traces and panics: natively waiting only blocks
+  (`wait_for`), and the workers run the term's tasks in queue order,
+  whatever order the walk waits in, while here a pending task runs when it
+  is waited for; walking first field first, then last field first, each
+  ran some shapes in reverse (`(List.range 4).map (Task.spawn …)` ran 3 2
+  1 0: round 7 RV7L-04, RV7L-06; test `RtPersistOrder`). The second pass
+  keeps native's walk order because it reads references and thunks when
+  it gets to them: a task that replaces the task a reference next to it
+  holds has run by then, as natively. Native pushes a reference's value
+  too (RV7L-05, test `RtPersistRef`).
 - **Where:** `Lower/Conv.lean`: `persistCall`, `mayHoldTask`,
   `persistFnName`, `cafAccessor`; `Lower/Finish.lean`: `holdsTask`,
   `persistListName`, `persistCell`, `PersistGen`, `genPersist`,
   `finishPersistFns`, `variantCount`; `runtime/prelude.rr`:
   `l2r_persist_begin`, `l2r_persist_seen`, `l2r_persist_keep`,
-  `l2r_persist_end`, `l2r_task_settled`;
-  `runtime/leanrt/src/persist.rs`.
+  `l2r_persist_collect`, `l2r_persist_rewalk`, `l2r_persist_before_at`,
+  `l2r_persist_end`, `l2r_task_settled`; `Lower/Promises.lean`:
+  `taskDispatchFns` (`l2r_task_run_before`);
+  `runtime/leanrt/src/persist.rs`; `runtime/leanrt/src/task.rs`:
+  `serial_base`, `persist_key`, `persist_hand`. Plan §5.14 (*Closed
+  terms*), §10 (*Tasks*).
 - **Remove only if:** never.

@@ -374,6 +374,43 @@ pub fn settled() -> bool {
     t.slab.len() == t.free.len()
 }
 
+/// A reference point for `persist_key` (taken when a walk begins): the
+/// serials of the tasks created up to 2^31 before or after it compare
+/// right, whatever wrapped.
+pub fn serial_base() -> u32 {
+    tasks().serial.wrapping_sub(1 << 31)
+}
+
+/// Where unfinished task `cell` comes in the order the lone native worker
+/// takes queued tasks in: a higher priority first, then the earlier
+/// created (its `serial`, counted from `base`). `None` if it has finished.
+/// For the walk of a closed term (`persist`): natively the term's tasks run
+/// in that order, whatever order `lean_mark_persistent` waits for them in
+/// (`wait_for` only blocks).
+pub fn persist_key(cell: usize, base: u32) -> Option<u64> {
+    let i = find(cell);
+    if i == NONE {
+        return None;
+    }
+    let e = ent(i);
+    Some((((PRIOS - 1 - e.prio as usize) as u64) << 32) | e.serial.wrapping_sub(base) as u64)
+}
+
+/// Hand queued task `cell` over to be run now (`persist::before`): its tag,
+/// and whether it was handed itself (a dropped pure task can be handed to
+/// be deleted first). `(u64::MAX, false)` if it is not queued (finished,
+/// running, or waiting for another task).
+pub fn persist_hand(cell: usize) -> (u64, bool) {
+    run_later_walks();
+    let i = find(cell);
+    if i == NONE || ent(i).flags & QUEUED == 0 {
+        return (u64::MAX, false);
+    }
+    let tag = hand_candidate(i);
+    let t = tasks();
+    (tag, tag != u64::MAX && t.handed == cell && !t.deleting)
+}
+
 /// `main` has returned; the remaining tasks are about to run. The tasks
 /// queued now could have been started by native workers before Lean's
 /// shutdown flag was set (`EARLY`).
