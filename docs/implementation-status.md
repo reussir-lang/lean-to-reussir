@@ -1,6 +1,6 @@
 # lean2rr: what is implemented
 
-Status as of 2026-10-02 (branch `dev`). This is a plain-language overview
+Status as of 2026-10-03 (branch `lean-4.34`: Lean v4.34.0). This is a plain-language overview
 for someone who knows Rust but not Lean. The full rules are in
 [`translation-plan.md`](translation-plan.md); the runtime is described in
 [`../runtime/README.md`](../runtime/README.md); the Reussir bugs met on the
@@ -11,7 +11,7 @@ what would break without it, are cataloged in
 
 ## In one paragraph
 
-lean2rr compiles Lean 4.33 programs to native executables through
+lean2rr compiles Lean 4.34 programs to native executables through
 Reussir. It does not parse Lean source: it reads what Lean's own compiler
 already produced for a compiled module (its intermediate code, LCNF, stored
 in the `.olean` files), so every Lean feature that Lean can compile is
@@ -35,13 +35,13 @@ same standard output, standard error and exit code.
 
 | Check | Result |
 |---|---|
-| Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native |
-| Runtime test suite (147 programs, `tests/runtime`) | 147/147 identical to native |
+| Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
+| Runtime test suite (231 programs, `tests/runtime`) | 231/231 identical to native Lean 4.34.0 |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
-| Lean library C functions (externs) of `Init` and `Std` | all 715 available: 704 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
+| Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
 | Adversarial testing | 4 rounds (about 1,300 test programs written to break it), every finding fixed or documented |
-| Speed | faster than native Lean on 16 of the 18 classic programs and about equal on the other two (monadic-interp 1.01×, deriv ≈1×), faster on 17 of the 18 Reussir-suite programs (the 18th at 1.07×); tables below |
+| Speed (measured against native Lean 4.33; not re-measured for 4.34) | faster than native Lean on 16 of the 18 classic programs and about equal on the other two (monadic-interp 1.01×, deriv ≈1×), faster on 17 of the 18 Reussir-suite programs (the 18th at 1.07×); tables below |
 
 ## How a program is compiled
 
@@ -171,8 +171,8 @@ functions are direct calls; tail calls become loops.
 
 Monomorphization makes almost everything concrete. What stays generic
 (polymorphic recursion such as a monad transformer applied to itself, or
-an unsafe inductive holding itself at a larger type, `Nest (α × α)` in
-`Nest α`; existential types; values stored in `Dynamic`) uses a uniform
+an unsafe inductive family holding itself at a larger index, `Nest (α × α)`
+in `Nest α`; existential types; values stored in `Dynamic`) uses a uniform
 type `Box`: an enum with one variant per concrete type the program ever
 boxes.
 Converting between a concrete and the uniform representation is generated
@@ -394,7 +394,9 @@ alternately, pinned to the least-loaded fast core; best of 5 (classic) or
 3 (Reussir suite); time ratio = lean2rr time / native time (below 1 =
 faster than native). Every run's output was checked against native.
 `dev` 9f5b642, Reussir `l2r-local` at `ef0235b9` (the local patches up to
-0015).
+0015), against native Lean 4.33. Not re-measured with Lean 4.34, whose
+native runtime changed (mimalloc 3, `lean_dec_ref_cold`, sticky reference
+counts, folded `UInt` literals): the timings wait for a measurement window.
 
 **Classic corpus** (`tests/classic`, largest size):
 

@@ -3,7 +3,7 @@
 
 The section between `// BEGIN GENERATED: scalars` and `// END GENERATED:
 scalars` is rewritten in place. Each function mirrors the `static inline`
-definition of the same name in lean.h (Lean 4.33):
+definition of the same name in lean.h (Lean 4.34; unchanged since 4.33):
 
 * UIntN/USize: wrapping `+ - *`, `x / 0 = 0`, `x % 0 = x`, shifts by
   `b % N`, `log2 0 = 0`, saturating float conversions (NaN -> 0).

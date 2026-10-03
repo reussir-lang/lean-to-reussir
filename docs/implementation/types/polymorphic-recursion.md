@@ -79,16 +79,29 @@ has the rules. Paths are relative to `lean2rr/LeanToReussir/`.
   inductive on the path already) is translated at the uniform
   instantiation instead: schematically, `Nest Nat` is
   `enum Nest_Nat { nil, cons(Nat, Nest_Box) }`. Only an inductive whose
-  block uses its types at other arguments than its parameters (an `unsafe
-  inductive`) is checked; a safe one is never cut.
+  block uses its types at other arguments than its parameters is checked;
+  a safe one is never cut. **Unreachable since Lean 4.34:** its kernel
+  rejects such an inductive, `unsafe` or not (lean4#14582), so
+  `nonUniformInductive` is always `false` for programs lean2rr can load. It
+  is kept as a cheap defensive check (one cached walk of the constructor
+  types, only for an inductive met again while its own fields are lowered).
+  The form 4.34 accepts, a growing *index* (`unsafe inductive Nest : Type →
+  Type 1 | cons {α} (x : α) (rest : Nest (α × α)) : Nest α`), needs no cut:
+  Lean's mono phase erases indices and nominal types are keyed on
+  parameters only (`nominalKey`), so its instances are one type, `x` a
+  `Box` (test `RtNestGrowType`, rewritten that way; its old parameter
+  shapes are kept in its header).
 - **Why:** `unsafe inductive Nest α | nil | cons (x : α) (rest : Nest (α × α))`
   made lean2rr translate `Nest (Nat × Nat)`, `Nest ((Nat × Nat) × …)`, …
-  until it ran out of memory (round 6 TY6-01, f23fb89).
+  until it ran out of memory (round 6 TY6-01, f23fb89), with Lean 4.33.
 - **Where:** `LowerBase.lean`: `nonUniformInductive`, `usesOtherArgs`,
-  `typeGrowsOnPath`, `nominalArgs`, `nominalType` (`pendingBoundary` is the
-  path); plan [§5.1](../../translation-plan.md#51-type-translation),
-  "Polymorphic recursion in a type".
-- **Remove only if:** never.
+  `typeGrowsOnPath`, `nominalArgs`, `nominalKey`, `nominalType`
+  (`pendingBoundary` is the path); plan
+  [§5.1](../../translation-plan.md#51-type-translation), "Polymorphic
+  recursion in a type".
+- **Remove only if:** lean2rr no longer needs to load programs of a Lean
+  that accepts non-uniform parameters (none since 4.34); it costs nearly
+  nothing.
 
 ### Result types of polymorphically recursive functions
 

@@ -264,8 +264,13 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `l2r_index_of_nat`, whose big case ends the program; a checked index is
   taken as its word once (`l2r_word_index_ok`). Where Lean's C code tells
   "not a scalar" apart from "out of range", the prelude does too: a big
-  `Nat` (`lean_string_utf8_extract`), a big `Int` (`Float.scaleB`).
+  `Nat` (`lean_string_utf8_extract`, where it counts as `SIZE_MAX`, as
+  natively since Lean 4.34), a big `Int` (`Float.scaleB`).
+  `lean_string_utf8_extract_fast` (`String.extract`, new in Lean 4.34)
+  takes its positions, valid by proof, with `l2r_index_of_nat`.
 - **Why:** See
   [../ownership.md](../ownership.md#reads-take-their-container-owned-and-in-bounds-indices-end-on-a-big-index).
-- **Where:** `prelude.rr`: `l2r_index_of_nat`, `l2r_word_index_ok`.
+- **Where:** `prelude.rr`: `l2r_index_of_nat`, `l2r_word_index_ok`,
+  `lean_string_utf8_extract`, `lean_string_utf8_extract_fast`; test
+  `RtString`.
 - **Remove only if:** see the linked entry.

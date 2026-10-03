@@ -12,10 +12,12 @@
 #   tests/env/run.sh
 #
 # Environment: L2R_LEAN2RR (the lean2rr binary; default: this checkout's
-# build), L2R_TEST_BUILD (scratch directory, default tests/env/build).
+# build), L2R_TEST_BUILD (scratch directory, default tests/env/build),
+# L2R_LEAN_TOOLCHAIN (the toolchain of the native builds; scripts/toolchain.sh).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
+. "$ROOT/scripts/toolchain.sh"
 LEAN2RR=${L2R_LEAN2RR:-$ROOT/lean2rr/.lake/build/bin/lean2rr}
 export L2R_SHIM_DIR=$ROOT/lean2rr/.lake/build/lib/lean
 W=${L2R_TEST_BUILD:-$HERE/build}
@@ -76,8 +78,9 @@ fi
 # lean2rr moved away from its build directory (a link, else a copy).
 mkdir -p "$W/moved/bin"
 ln "$LEAN2RR" "$W/moved/bin/lean2rr" 2> /dev/null || cp "$LEAN2RR" "$W/moved/bin/lean2rr"
-# A working directory whose lean-toolchain names another Lean.
-mkdir -p "$W/othertc" && echo "leanprover/lean4:v4.34.0" > "$W/othertc/lean-toolchain"
+# A working directory whose lean-toolchain names another Lean (not the one
+# lean2rr/lean-toolchain pins).
+mkdir -p "$W/othertc" && echo "leanprover/lean4:v4.33.0" > "$W/othertc/lean-toolchain"
 
 pass=0; fail=0
 # [CHECK_BIN=lean2rr] [CHECK_ARGS=lean2rr options] [CHECK_TIMEOUT=seconds]
@@ -114,8 +117,10 @@ if [ $links = yes ]; then
 else
   echo "SKIP  lib-hardlinks, lib-altered, lib-altered-private (no hard links to $LIB from $W)"
 fi
-check other-toolchain    accept "" "$W/othertc" "$LIB:$S" Plain
-check other-toolchain-nolib accept "" "$W/othertc" "$S" Plain
+# (elan's proxies first on PATH there, so that `lean` would be the other Lean)
+ELANBIN=${ELAN_HOME:-$HOME/.elan}/bin
+check other-toolchain    accept "" "$W/othertc" "$LIB:$S" Plain PATH="$ELANBIN:$PATH"
+check other-toolchain-nolib accept "" "$W/othertc" "$S" Plain PATH="$ELANBIN:$PATH"
 check shim-default       accept "" "$S" "$S" Plain -u L2R_SHIM_DIR
 check shim-dir-missing   reject "shim library (L2RShim.olean) is not in $W/nosuchdir (L2R_SHIM_DIR=" "$S" "$S" Plain \
   L2R_SHIM_DIR="$W/nosuchdir"

@@ -3,7 +3,7 @@
 // Prepended to every program lean2rr generates. A Lean extern whose C
 // symbol is `lean_xxx` is implemented here by the function `lean_xxx`, on
 // lean2rr's representation types, with the semantics of Lean's own C
-// runtime (lean.h and src/runtime/*.cpp of Lean 4.33). `l2r_*` functions
+// runtime (lean.h and src/runtime/*.cpp of Lean 4.34). `l2r_*` functions
 // are primitives for lean2rr-generated glue (externs over Lean-defined
 // types) and internal helpers. See runtime/README.md.
 //
@@ -1437,11 +1437,22 @@ fn lean_string_is_valid_pos(s : LStr, p : Nat) -> bool {
     if (x & 1) == 1 { l2r_string_is_valid_pos(s, x >> 1) } else { let d = l2r_nat_drop_raw(x); false }
 }
 
-// For non-scalar (big) positions `extract` returns the whole string.
+// `String.Pos.Raw.extract`. A non-scalar (big) position counts as
+// SIZE_MAX, as natively since Lean 4.34: a big start gives "", a big end
+// extracts to the end of the string.
 fn lean_string_utf8_extract(s : LStr, b : Nat, e : Nat) -> LStr {
     let x = l2r_nat_raw(b);
     let y = l2r_nat_raw(e);
-    if (x & y & 1) == 1 { l2r_string_extract(s, x >> 1, y >> 1) } else { let d = l2r_nat_drop_raw(x) + l2r_nat_drop_raw(y); s }
+    let bi = if (x & 1) == 1 { x >> 1 } else { let d = l2r_nat_drop_raw(x); 18446744073709551615 };
+    let ei = if (y & 1) == 1 { y >> 1 } else { let d = l2r_nat_drop_raw(y); 18446744073709551615 };
+    l2r_string_extract(s, bi, ei)
+}
+
+// `String.extract` (positions of `s`, valid by their proofs: never big).
+// Natively it skips the checks of `lean_string_utf8_extract`, whose result
+// is the same on valid positions.
+fn lean_string_utf8_extract_fast(s : LStr, b : Nat, e : Nat) -> LStr {
+    l2r_string_extract(s, l2r_index_of_nat(b), l2r_index_of_nat(e))
 }
 
 fn lean_string_utf8_set(s : LStr, p : Nat, c : u32) -> LStr {
@@ -3124,22 +3135,24 @@ fn l2r_set_initializing(b : bool) -> u64 [{ { leanrt::rt::set_initializing(b); 0
 fn l2r_io_set_heartbeats(n : Nat) -> L2RUnit { L2RUnit::u{} }
 fn l2r_io_process_get_current_dir() -> LStr { l2r_io_current_dir() }
 
-// `Lean.githash` of the Lean 4.33.0 toolchain.
-fn lean_get_githash(u : L2RUnit) -> LStr { lean_mk_string("d8b18978322de05a8f3dba51ef03cf5461676c17") }
+// `Lean.githash` of the Lean 4.34.0 toolchain.
+fn lean_get_githash(u : L2RUnit) -> LStr { lean_mk_string("293d5d0c0c3f3dded4688b3ccd6a33939ac5102b") }
 
 // The platform queries. leanrt builds only for Linux with glibc on aarch64
 // and x86-64 (`leanrt::rt::PLATFORM_TARGET`), so Windows, macOS and
-// Emscripten are false, and `numBits` (`lean_system_platform_nbits`) is 64
-// (`USize` is `u64` here). `System.Platform.target` is natively
-// `LEAN_PLATFORM_TARGET`, the toolchain's target triple: the one the native
-// toolchain for leanrt's target reports.
+// Emscripten are false, Linux (`isLinux`, new in Lean 4.34) is true, and
+// `numBits` (`lean_system_platform_nbits`) is 64 (`USize` is `u64` here).
+// `System.Platform.target` is natively `LEAN_PLATFORM_TARGET`, the
+// toolchain's target triple: the one the native toolchain for leanrt's
+// target reports.
 fn lean_system_platform_windows(u : L2RUnit) -> bool { false }
 fn lean_system_platform_osx(u : L2RUnit) -> bool { false }
+fn lean_system_platform_linux(u : L2RUnit) -> bool { true }
 fn lean_system_platform_emscripten(u : L2RUnit) -> bool { false }
 fn lean_internal_is_stage0(u : L2RUnit) -> bool { false }
 fn lean_internal_has_llvm_backend(u : L2RUnit) -> bool { false }
 fn lean_version_get_major(u : L2RUnit) -> Nat { l2r_nat_small(4) }
-fn lean_version_get_minor(u : L2RUnit) -> Nat { l2r_nat_small(33) }
+fn lean_version_get_minor(u : L2RUnit) -> Nat { l2r_nat_small(34) }
 fn lean_version_get_patch(u : L2RUnit) -> Nat { l2r_nat_small(0) }
 fn lean_version_get_is_release(u : L2RUnit) -> bool { true }
 fn lean_version_get_special_desc(u : L2RUnit) -> LStr { lean_mk_string("") }

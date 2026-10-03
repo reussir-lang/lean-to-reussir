@@ -1,6 +1,6 @@
 # lean2rr translation plan
 
-How a Lean 4.33 program becomes a Reussir program: what each stage receives,
+How a Lean 4.34 program becomes a Reussir program: what each stage receives,
 what it does, and what it hands on. The goal is that every rule here is
 *right*: the translated program behaves like the Lean program. Each rule
 states what it does and why it is correct in plain terms. Reviewers check
@@ -21,7 +21,7 @@ example. Where behaviour differs from native Lean, §10 lists it.
 
 ```
 Lean source
-  │  lake build (stock Lean 4.33)
+  │  lake build (stock Lean 4.34)
   ▼
 base LCNF, typed, saved in every .olean ── Stage 1: collect + monomorphize (ours)
   ▼
@@ -823,9 +823,17 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   `inductive Tree | node (v : Nat) (cs : Array Tree)` holds `RVec<Tree>`,
   the representation `Array Tree` has everywhere else (also through mutual
   types, whichever is translated first).
-- **Polymorphic recursion in a type.** An `unsafe inductive` may use itself
-  at a larger argument: `Nest α | nil | cons (x : α) (rest : Nest (α × α))`.
-  Translating `Nest Nat` would need `Nest (Nat × Nat)`, whose field needs
+- **Polymorphic recursion in a type.** Since Lean 4.34 an inductive can use
+  itself at a larger argument only as an *index*: `unsafe inductive Nest :
+  Type → Type 1 | nil {α} : Nest α | cons {α} (x : α) (rest : Nest (α × α)) :
+  Nest α`. Lean's mono phase erases indices, and nominal types are keyed on
+  parameters only, so all its instances are one type whose `x` is a `Box`:
+  nothing to cut (test `RtNestGrowType`). Lean 4.33 also accepted a growing
+  *parameter* in an `unsafe inductive`, `Nest α | nil | cons (x : α) (rest :
+  Nest (α × α))`; Lean 4.34's kernel rejects that (lean4#14582), so the rule
+  below no longer applies to any program lean2rr can load, and stays as a
+  defensive check. For such a parameter, translating `Nest Nat` would need
+  `Nest (Nat × Nat)`, whose field needs
   `Nest ((Nat × Nat) × (Nat × Nat))`, and so on without end. So the rule of
   §2.6 applies to the instantiations requested while fields are translated,
   for an inductive whose block uses its types at other arguments than its
@@ -903,7 +911,7 @@ its value is stored as `Box`.
   only by its declared type: a program declaration implemented by an
   `unsafe` function, even one of the library's, counts (`@[implemented_by
   TypeName.mk] opaque mkTN` gives two types the same `TypeName`, so
-  `Dynamic.get?` reads one as the other). The code Lean 4.33 generates for
+  `Dynamic.get?` reads one as the other). The code Lean (4.33, 4.34) generates for
   a `partial def` (`f._unsafe_rec`) is `partial`, not `unsafe`, so it does
   not make a program cast. Which modules are Lean's library is decided by
   their names; a program module named `Init.*`, `Std.*`, `Lean.*` or
@@ -1577,7 +1585,10 @@ Rules:
   array of `DirEntry`) or into `EST.Out.error e`, where `e` is built by
   Lean's own exported `lean_mk_io_error_*` builder for the reported kind,
   as Lean's `decode_io_error` does (the builders are instantiated when a
-  program uses such an extern). `IO.FS.Handle` is the runtime's `LHandle`.
+  program uses such an extern). Since Lean 4.34 the kind and the message
+  come from libuv's code for the errno (`uv_strerror`'s text, not
+  `strerror`'s), and an error of a libuv-based operation stores the
+  positive errno. `IO.FS.Handle` is the runtime's `LHandle`.
 - **Child processes** (`IO.Process`, over the runtime's `l2r_proc_*`
   primitives, which follow Lean's `process.cpp`). Natively a `Child` object
   carries, after its three stream fields, the pid (`uint32`) and whether
@@ -1649,7 +1660,8 @@ Rules:
   (`uv/*.cpp`) check by check, over primitives of the runtime's event loop
   (`leanrt::net`, §5.14) on plain values (numbers, strings, byte arrays,
   handles, promises); errors are built in Lean as `lean_decode_uv_error`
-  builds them (libuv's code as the error number, `uv_strerror`'s text).
+  builds them (classified by libuv's code, `uv_strerror`'s text, and the
+  positive errno as the error number, as since Lean 4.34).
   The shim also replaces Lean definitions whose native behaviour depends
   on Lean's borrow inference: a definition exported as
   `l2r_override_<mangled name>` is called instead of the definition of

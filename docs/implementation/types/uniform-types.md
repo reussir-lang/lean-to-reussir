@@ -65,7 +65,7 @@ to `lean2rr/LeanToReussir/`.
 - **What:** `LowerCtx.programCasts` is true when some declaration the
   program reaches, outside Lean's library (`Init`, `Std`, `Lean`, `Lake`)
   and lean2rr's shim (`L2RShim`), is `unsafe` (whatever its name; the
-  `_unsafe_rec` code Lean 4.33 generates for a `partial def` is not
+  `_unsafe_rec` code Lean (4.33, 4.34) generates for a `partial def` is not
   `unsafe`, so `partial` alone does not count), is an axiom, uses `sorry`,
   is `@[extern]` or `@[export]`, or is
   `implemented_by` an `unsafe` function (even a library one). The

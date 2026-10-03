@@ -21,7 +21,7 @@ The runtime has two parts:
   C symbols, which lean2rr compiles with the program over the event loop's
   `l2r_shim_*` primitives (below).
 
-Semantics follow Lean 4.33's C runtime (`lean.h`, `src/runtime/*.cpp`)
+Semantics follow Lean 4.34's C runtime (`lean.h`, `src/runtime/*.cpp`)
 exactly; comments at each function say which C function it mirrors.
 
 Generated sections of the prelude (edit the generator, then run it):
@@ -159,7 +159,11 @@ As fixed by lean2rr:
 Nat positions and indices: a big `Nat` is never a valid position or
 index. Where Lean's C code distinguishes "not a scalar" (`>= 2^63`, exactly
 the big `Nat`s here) from "out of range", the prelude reproduces that too
-(`lean_string_utf8_extract`, `Float.scaleB` with Ints outside 32 bits).
+(`lean_string_utf8_extract`, where a big position counts as `SIZE_MAX`
+since Lean 4.34: a big start gives `""`, a big end extracts to the end;
+`Float.scaleB` with Ints outside 32 bits). `String.extract`'s positions are
+proved valid: its `lean_string_utf8_extract_fast` (new in Lean 4.34) takes
+them with `l2r_index_of_nat`.
 
 ## Glue helpers
 
@@ -380,7 +384,8 @@ UDP (`udp_new`, `udp_bind`, `udp_connect`, `udp_send`, `udp_option`,
 `udp_membership`, `udp_multicast_interface`), name resolution
 (`dns_get_info`, `dns_get_name`), interfaces (`ifaces`), and the pure
 `lean_shim_uv_kind`, `lean_shim_uv_strerror` (libuv's error kinds and
-messages), `lean_shim_pton`, `lean_shim_ntop`; `Std.Internal.UV.System`
+messages, by libuv code; the shim stores the positive errno, `-code`, in the
+`IO.Error`, as Lean 4.34's `lean_decode_uv_error`), `lean_shim_pton`, `lean_shim_ntop`; `Std.Internal.UV.System`
 over `leanrt::sys` (`sys_title_set`, `sys_query(which)` for the queries
 with a string or several results, the process title included,
 `sys_group`, `sys_getenv`, `sys_priority`, `sys_word(which)` for single
@@ -442,11 +447,20 @@ constructor (exported Lean functions) numbered `kind`, as Lean's
 | 10 | `inappropriate_type_file(fname, errno, details)` | 22 | `unsupported_operation(errno, details)` |
 | 11 | `no_such_thing(errno, details)` | 23 | `IO.userError(details)` |
 
-The operations Lean implements with libuv (`removeFile`, `hardLink`,
-`metadata`, `symlinkMetadata`, `createTempFile`, `createTempDir`) report
-errors as `decode_uv_error`: the errno is libuv's negated errno as a
-`UInt32` (`4294967294` for `ENOENT`), the details are `uv_strerror`'s, and
-errnos libuv does not map are kind 0. Kind 23 is Lean's
+Since Lean 4.34 the kind and the details come from libuv's code for the
+errno (`decode_uv_error_impl` in io.cpp; `leanrt::fs::crt_to_uv`, which
+maps the errnos libuv cannot represent to the closest code it can, e.g.
+`EBADMSG` to `EPROTO`, a protocol error): the details are `uv_strerror`'s
+("illegal operation on a directory" for `EISDIR`, "Unknown system error
+-122" for an errno libuv has no name for), not `strerror`'s; the error code
+stays the errno. The operations Lean implements with libuv (`removeFile`,
+`hardLink`, `metadata`, `symlinkMetadata`, `createTempFile`,
+`createTempDir`) report errors as `decode_uv_error`: classified by libuv's
+code (errnos it has no case for are kind 0), `uv_strerror`'s details, and
+the positive errno as the error code (`2` for `ENOENT`; Lean 4.33 stored
+libuv's negated code, `4294967294`). `leanrt`'s unit test `fs_tests.rs`
+checks both decoders against native Lean for every errno 0..140 (test
+`RtIOErrorDecode` checks reachable cases end to end). Kind 23 is Lean's
 `io_result_mk_error(msg)` (`IO.currentDir`, `IO.appPath`).
 
 File primitives: `l2r_fs_open(path, mode)` (mode = `IO.FS.Mode` constructor
@@ -559,7 +573,7 @@ lean2rr's dev branch (the tests pass with it).
    (`RtHashMap`), and the `unsafeCast`-based `Array.mapMUnsafe`/
    `Array.modifyM` implementations (`RtArrayUnsafe`).
 7. *done* — `BaseIO.asTask` (symbol `lean_io_as_task`): the task glue is
-   keyed on `IO.asTask`, which is not the 4.33 extern.
+   keyed on `IO.asTask`, which is not the extern (Lean 4.33, 4.34).
 8. *done* — `dbgTrace` (and `dbgSleep`, `dbgStackTrace`, `Thunk.mk`) at a
    boxed `α`: the `PUnit → α` closure argument must be wrapped to return the
    box (`lean_dbg_trace<ElemBox>(msg, f : L2RUnit -> Nat)` does not
@@ -676,9 +690,6 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
 
 ## Known divergences from native Lean
 
-- Native `lean_string_utf8_extract` returns its borrowed string without a
-  reference when a position is `>= 2^63`: a use-after-free natively. The
-  prelude returns the string (the intended semantics).
 - Panics print `backtrace:` and `(stack trace unavailable)` instead of a
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`, and

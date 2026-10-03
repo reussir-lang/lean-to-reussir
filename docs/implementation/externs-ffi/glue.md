@@ -89,14 +89,19 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   released at its last use there. `IO.FS.Mode` is passed as its
   constructor index.
 - **Why:** The runtime cannot build `IO.Error`; Lean's own builders give
-  the exact messages (57187b2). Errors of libuv-based operations follow
-  `decode_uv_error` (negated errno, `uv_strerror`).
+  the exact messages (57187b2). The runtime decodes as Lean 4.34's
+  `decode_uv_error_impl`: kind and details from libuv's code for the errno
+  (`leanrt::fs::crt_to_uv`, then `uv_strerror`, not `strerror`), the errno
+  as the code; libuv-based operations (`decode_uv_error`) store the
+  positive errno (4.33: libuv's negated code).
 - **Where:** `Lower/Externs.lean`: `fallibleIOGlue`, `fallibleIOPrim`,
   `ioFinish`, `ioCheck`, `ioErrorFn`, `ioErrorCtor`, `ioUserError`,
   `metadataOf`, `dirEntriesOf`; `Mono.lean`: `isFallibleIOSym`,
   `ioErrorBuilderSyms`, `ensureIOErrorBuilders`;
-  `runtime/leanrt/src/fs.rs`; `runtime/README.md` ("Fallible IO", the
-  table of error kinds).
+  `runtime/leanrt/src/fs.rs` (`errno`, `error_kind`, `error_details`,
+  `crt_to_uv`; unit test `fs_tests.rs`, every errno against native Lean);
+  `runtime/README.md` ("Fallible IO", the table of error kinds); tests
+  `RtIOErrorDecode`, `RtFiles`.
 - **Remove only if:** never.
 
 ### Standard streams live in cells, and diagnostics use the current stderr

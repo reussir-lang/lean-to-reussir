@@ -20,8 +20,9 @@ program. lean2rr loads this module next to the program's when it is built
 (`LEAN_PATH`), and treats it as part of the toolchain (no startup work).
 
 Each definition follows the C function of the same symbol: the same checks
-in the same order, the same errors (`lean_decode_uv_error`: libuv's code as
-the error number, `uv_strerror`'s message), the same promises (resolved at
+in the same order, the same errors (`lean_decode_uv_error`: classified by
+libuv's code, `uv_strerror`'s message, and since Lean 4.34 the positive
+errno, `-code`, as the error number), the same promises (resolved at
 once or later, the same values).
 
 The shim also replaces a few Lean definitions whose native behaviour
@@ -127,27 +128,33 @@ def uvEOF : UInt32 := (0 : UInt32) - 4095
 /-- `UV_ENOBUFS`. -/
 def uvENOBUFS : UInt32 := (0 : UInt32) - 105
 
-/-- `lean_decode_uv_error(code, nullptr)`. -/
+/-- The error number `lean_decode_uv_error` stores for libuv code `code`:
+since Lean 4.34, `-code`, the positive errno (`2` for `UV_ENOENT`). -/
+def uvErrno (code : UInt32) : UInt32 := 0 - code
+
+/-- `lean_decode_uv_error(code, nullptr)`: classified by libuv's code, with
+`uv_strerror`'s message and the errno `uvErrno code`. -/
 def uvError (code : UInt32) : IO.Error :=
   let d := uvStrerror code
+  let e := uvErrno code
   match uvKind code with
-  | 1 => .mkInterrupted "" code d
-  | 2 => .mkInvalidArgument code d
-  | 4 => .mkNoFileOrDirectory "" code d
-  | 5 => .mkPermissionDenied code d
-  | 7 => .mkResourceExhausted code d
-  | 9 => .mkInappropriateType code d
-  | 11 => .mkNoSuchThing code d
-  | 13 => .mkAlreadyExists code d
-  | 15 => .mkHardwareFault code d
-  | 16 => .mkUnsatisfiedConstraints code d
-  | 17 => .mkIllegalOperation code d
-  | 18 => .mkResourceVanished code d
-  | 19 => .mkProtocolError code d
-  | 20 => .mkTimeExpired code d
-  | 21 => .mkResourceBusy code d
-  | 22 => .mkUnsupportedOperation code d
-  | _ => .mkOtherError code d
+  | 1 => .mkInterrupted "" e d
+  | 2 => .mkInvalidArgument e d
+  | 4 => .mkNoFileOrDirectory "" e d
+  | 5 => .mkPermissionDenied e d
+  | 7 => .mkResourceExhausted e d
+  | 9 => .mkInappropriateType e d
+  | 11 => .mkNoSuchThing e d
+  | 13 => .mkAlreadyExists e d
+  | 15 => .mkHardwareFault e d
+  | 16 => .mkUnsatisfiedConstraints e d
+  | 17 => .mkIllegalOperation e d
+  | 18 => .mkResourceVanished e d
+  | 19 => .mkProtocolError e d
+  | 20 => .mkTimeExpired e d
+  | 21 => .mkResourceBusy e d
+  | 22 => .mkUnsupportedOperation e d
+  | _ => .mkOtherError e d
 
 /-- Throw libuv error `code` unless it is 0. -/
 def check (code : UInt32) : IO Unit :=
@@ -643,15 +650,16 @@ def chdir (p : String) : IO Unit := do
   if c != 0 then
     -- `lean_decode_uv_error(result, path)`: the file name variants.
     let d := uvStrerror c
+    let e := uvErrno c
     throw <| match uvKind c with
-      | 1 => .mkInterrupted p c d
-      | 2 => .mkInvalidArgumentFile p c d
-      | 4 => .mkNoFileOrDirectory p c d
-      | 5 => .mkPermissionDeniedFile p c d
-      | 7 => .mkResourceExhaustedFile p c d
-      | 9 => .mkInappropriateTypeFile p c d
-      | 11 => .mkNoSuchThingFile p c d
-      | 13 => .mkAlreadyExistsFile p c d
+      | 1 => .mkInterrupted p e d
+      | 2 => .mkInvalidArgumentFile p e d
+      | 4 => .mkNoFileOrDirectory p e d
+      | 5 => .mkPermissionDeniedFile p e d
+      | 7 => .mkResourceExhaustedFile p e d
+      | 9 => .mkInappropriateTypeFile p e d
+      | 11 => .mkNoSuchThingFile p e d
+      | 13 => .mkAlreadyExistsFile p e d
       | _ => uvError c
 
 @[export lean_uv_os_homedir]
@@ -678,11 +686,12 @@ def osGetGroup (gid : UInt64) : IO (Option GroupInfo) := do
   if c != 0 then
     -- `lean_decode_uv_error(result, "group")`.
     let d := uvStrerror c
+    let e := uvErrno c
     throw <| match uvKind c with
-      | 2 => .mkInvalidArgumentFile "group" c d
-      | 5 => .mkPermissionDeniedFile "group" c d
-      | 7 => .mkResourceExhaustedFile "group" c d
-      | 11 => .mkNoSuchThingFile "group" c d
+      | 2 => .mkInvalidArgumentFile "group" e d
+      | 5 => .mkPermissionDeniedFile "group" e d
+      | 7 => .mkResourceExhaustedFile "group" e d
+      | 11 => .mkNoSuchThingFile "group" e d
       | _ => uvError c
   let n := (← opBytes o)
   let mut members := #[]

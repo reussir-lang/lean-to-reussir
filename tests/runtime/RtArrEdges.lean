@@ -131,14 +131,14 @@ def cEnum : Array Ordering := #[.lt, .gt]
 
 def main : IO Unit := do
   for i in [0:2] do
-    IO.println s!"{bump cNat i} {bumpI cInt i} {bumpS cStr i} {bumpF cFlt i} {bumpU cU8 i} {(bumpB cBytes i).toList} {(bumpFA cFA i).toList} {bumpStr cS i} {bumpN cNest i} {bumpP cPair i} {bumpO cOpt i} {(bumpE cEnum i).map (·.toCtorIdx)}"
+    IO.println s!"{bump cNat i} {bumpI cInt i} {bumpS cStr i} {bumpF cFlt i} {bumpU cU8 i} {(bumpB cBytes i).toList} {(bumpFA cFA i).toList} {bumpStr cS i} {bumpN cNest i} {bumpP cPair i} {bumpO cOpt i} {(bumpE cEnum i).map (·.ctorIdx)}"
     let lit := #[10, 20, 30]
     let x := lit.push 40
     let y := lit.push 50
     let lit2 : Array String := #["p", "q"]
     let z := lit2.set! 0 "P"
     IO.println s!"{x} {y} {lit} {z} {lit2}"
-  IO.println s!"{cNat} {cInt} {cStr} {cFlt} {cU8} {cBytes.toList} {cFA.toList} {cS} {cNest} {cPair} {cOpt} {cEnum.map (·.toCtorIdx)}"
+  IO.println s!"{cNat} {cInt} {cStr} {cFlt} {cU8} {cBytes.toList} {cFA.toList} {cS} {cNest} {cPair} {cOpt} {cEnum.map (·.ctorIdx)}"
   -- a loop that updates a copy of a constant in place many times
   let mut a := cNat
   let mut s := cS

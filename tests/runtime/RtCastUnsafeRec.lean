@@ -1,6 +1,6 @@
 /-! Runtime test: an `unsafe def` whose name ends in `_unsafe_rec` (the
-name of the code Lean generates for a `partial def`, which in Lean 4.33 is
-not `unsafe`) casts an existential payload of one structure to another of
+name of the code Lean generates for a `partial def`, which in Lean 4.33 and 4.34
+is not `unsafe`) casts an existential payload of one structure to another of
 the same layout. Its `unsafe` makes the program one that can cast (plan
 §5.1, `programCasts`), whatever its name; the `partial def` makes no
 difference. -/

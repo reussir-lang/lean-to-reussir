@@ -14,7 +14,8 @@
 # Both executables run with LEAN_BACKTRACE=0. Environment: L2R_REUSSIR,
 # L2R_LEAN2RR, L2R_RUSTC (see scripts/l2r.py); L2R_TEST_BUILD (build
 # directory, default tests/reussir-benchmark/build); L2R_BENCH_TIMEOUT
-# (seconds per run, default 900).
+# (seconds per run, default 900); L2R_LEAN_TOOLCHAIN (the toolchain of the
+# native builds; scripts/toolchain.sh).
 set -u
 if [ $# -lt 1 ] || [ ! -d "$1/lean" ]; then
   echo "usage: $0 BENCHMARK_CHECKOUT [NAME...]  (a checkout of github.com/reussir-lang/benchmark)" >&2
@@ -22,6 +23,7 @@ if [ $# -lt 1 ] || [ ! -d "$1/lean" ]; then
 fi
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
+. "$ROOT/scripts/toolchain.sh"
 SUITE=$(cd "$1" && pwd); shift
 BUILD=${L2R_TEST_BUILD:-$HERE/build}
 TIMEOUT=${L2R_BENCH_TIMEOUT:-900}

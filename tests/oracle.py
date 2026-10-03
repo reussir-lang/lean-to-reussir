@@ -2,7 +2,9 @@
 """Native-Lean oracle for the lean2rr classic corpus (Python 3, stdlib only).
 
     oracle.py build
-        `lake build` in tests/classic.
+        `lake build` in tests/classic, with the Lean toolchain lean2rr is
+        pinned to (L2R_LEAN_TOOLCHAIN, default the elan toolchain that
+        lean2rr/lean-toolchain names; as scripts/toolchain.sh).
     oracle.py record [--cases A B ...] [--sizes small medium bench]
         Run the native executables and write
         tests/classic/expected/<name>.<size>.{stdout,stderr,exitcode}.
@@ -64,8 +66,20 @@ def expected_path(case, size_label, kind):
 
 # ---------------------------------------------------------------- build / record
 
+def lean_toolchain():
+    """The Lean toolchain directory (see scripts/toolchain.sh)."""
+    if os.environ.get("L2R_LEAN_TOOLCHAIN"):
+        return os.environ["L2R_LEAN_TOOLCHAIN"]
+    with open(os.path.join(TESTS, "..", "lean2rr", "lean-toolchain")) as f:
+        pin = "".join(f.read().split())
+    elan = os.environ.get("ELAN_HOME", os.path.join(os.path.expanduser("~"), ".elan"))
+    return os.path.join(elan, "toolchains", pin.replace("/", "--").replace(":", "---"))
+
+
 def cmd_build(args):
-    return subprocess.call(["lake", "build"], cwd=CLASSIC)
+    bindir = os.path.join(lean_toolchain(), "bin")
+    env = dict(os.environ, PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
+    return subprocess.call([os.path.join(bindir, "lake"), "build"], cwd=CLASSIC, env=env)
 
 
 def cmd_record(args):

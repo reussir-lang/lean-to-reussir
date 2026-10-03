@@ -1,13 +1,13 @@
 # lean2rr tests
 
 The classic corpus is the reference for correctness and performance: every
-program is compiled natively by stock Lean 4.33, its outputs are recorded,
+program is compiled natively by stock Lean 4.34, its outputs are recorded,
 and an alternative implementation (lean2rr's output) must reproduce them
 exactly. `oracle.py` does the building, recording, checking and timing.
 
 ## Layout
 
-- `classic/` — a Lake package (Lean v4.33.0, core `Init`/`Std` only), one
+- `classic/` — a Lake package (Lean v4.34.0, core `Init`/`Std` only), one
   executable per case. The executable name is the case name; the root module
   is the CamelCase file of the same name at the package root.
 - `classic/cases.json` — for each case: `name`, `exe`, `module`, `origin`
@@ -62,7 +62,8 @@ Each file's header cites its source and lists every change made to it.
   cfold either; Koka's `cfold.kk` says it is adapted from the Lean
   repository's `const_fold`, so `Cfold.lean` is that Lean program.
 - Lean 4 repository benchmarks: `tests/compile_bench/` at tag `v4.33.0`
-  (commit `d8b18978322de05a8f3dba51ef03cf5461676c17`). `const_fold` is the
+  (commit `d8b18978322de05a8f3dba51ef03cf5461676c17`; the files used are
+  unchanged at `v4.34.0`). `const_fold` is the
   cfold case. `rbmap` is included because it differs from Koka's rbtree
   (polymorphic `fold`, argument order). Changes: an optional size argument;
   qsort, which printed nothing, prints a checksum of every sorted array;
@@ -84,6 +85,15 @@ python3 tests/oracle.py record                  # run natively, write expected/
 python3 tests/oracle.py check --cmd 'out/{exe} {size}' [--cases A B] [--sizes small medium]
 python3 tests/oracle.py bench --cmd 'out/{exe} {size}' [--cases A B] [--size bench] [--repeat 5]
 ```
+
+The native builds (`oracle.py build`, `tests/runtime/run.sh`,
+`tests/env/run.sh`, `tests/runtime/nat-alloc-check.sh`,
+`tests/reussir-benchmark/run.sh`, `reussir-bugs/repros/run.sh`) and
+`scripts/l2r.py`'s GMP use the Lean toolchain lean2rr is pinned to
+(`lean2rr/lean-toolchain`, the elan toolchain
+`~/.elan/toolchains/leanprover--lean4---v4.34.0`), not elan's default:
+`scripts/toolchain.sh` puts its `bin/` first on `PATH`. Set
+`L2R_LEAN_TOOLCHAIN` to a toolchain directory to use another.
 
 To check lean2rr with some of its optimizations turned off, build with
 `scripts/l2r.py --disable-opt NAME` (repeatable), or set
@@ -120,7 +130,8 @@ native outputs are reproducible.
   about 1.3 GB.
 - The sizes were chosen by timing the native executables pinned to an idle
   Cortex-X925 core (3.9 GHz, NVIDIA DGX Spark), taking the minimum of 3 runs.
-  Native bench-size results (`oracle.py bench --repeat 3`):
+  Native bench-size results (`oracle.py bench --repeat 3`; measured with
+  Lean 4.33, not yet re-measured with 4.34, whose runtime uses mimalloc 3):
 
 | case | bench size | time (s) | max RSS (MiB) |
 |---|---:|---:|---:|

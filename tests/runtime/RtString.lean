@@ -17,13 +17,14 @@ def main (args : List String) : IO Unit := do
     for i in [0, 1, 2, 3, 4, 5, 7, n - 1, n, n + 1, 9223372036854775807, 9223372036854775808, 18446744073709551615, 18446744073709551616] do
       let p := rawPos i
       IO.println s!"  pos {i}: get {repr (p.get s)} get? {repr (p.get? s)} next {(p.next s).byteIdx} prev {(p.prev s).byteIdx} valid {p.isValid s} atEnd {p.atEnd s} byte {if h : i < n then s.getUTF8Byte (rawPos i) h else 0}"
-      -- Native `lean_string_utf8_extract` returns its borrowed argument
-      -- without a reference for positions >= 2^63 (a use-after-free), so
-      -- those are not tested.
-      if i < 9223372036854775808 then
-        for j in [0, 2, 4, n, n + 3] do
-          IO.println s!"    extract {i} {j}: {repr ((rawPos i).extract s (rawPos j))}"
+      -- `lean_string_utf8_extract` at positions >= 2^63 (big `Nat`s): since
+      -- Lean 4.34 they count as SIZE_MAX (a big start gives "", a big end
+      -- extracts to the end); before, natively a use after free.
+      for j in [0, 2, 4, n, n + 3, 9223372036854775807, 9223372036854775808, 18446744073709551616] do
+        IO.println s!"    extract {i} {j}: {repr ((rawPos i).extract s (rawPos j))}"
       IO.println s!"    set {repr ((rawPos i).set s 'Z')} set2 {repr ((rawPos i).set s 'é')} modify {repr ((rawPos i).modify s Char.toUpper)}"
+    -- `String.extract` (valid positions; `lean_string_utf8_extract_fast` since Lean 4.34)
+    IO.println s!"  extract all {repr (s.extract s.startPos s.endPos)} to space {repr (s.extract s.startPos (s.find ' '))} from space {repr (s.extract (s.find ' ') s.endPos)} empty {repr (s.extract s.endPos s.startPos)}"
     IO.println s!"  toList {s.toList} ofList {String.ofList s.toList == s} data {s.toList.length}"
     IO.println s!"  upper {s.toUpper} lower {s.toLower} capitalize {s.capitalize} decapitalize {s.decapitalize}"
     IO.println s!"  trim {repr s.trimAscii.copy} trimLeft {repr s.trimAsciiStart.copy} trimRight {repr s.trimAsciiEnd.copy}"

@@ -16,7 +16,9 @@ compiles it with the program. Plan
   event loop (`leanrt::net`, `leanrt::sys`) that take and return plain
   values (numbers, strings, byte arrays, handles, promises). Each follows
   the C function of the same symbol (`src/runtime/uv/*.cpp`) check by
-  check, with libuv's errors built as `lean_decode_uv_error` builds them.
+  check, with libuv's errors built as `lean_decode_uv_error` builds them
+  (classified by libuv's code, `uv_strerror`'s message, and since Lean 4.34
+  the positive errno as the code: `L2RShim.uvErrno`).
 - **Why:** Natively these are C over libuv building Lean values
   (`IO.Promise`, `Except IO.Error …`, `SocketAddress`), which lean2rr's
   runtime cannot build (5021ddf, 470425c).
