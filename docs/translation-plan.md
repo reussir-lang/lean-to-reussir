@@ -247,8 +247,13 @@ After substitution, a dictionary falls into one of two cases:
 dictionary that arrives as a *parameter* (`Array.mapM` receives `Monad Id`
 from `Array.map`) would stay a runtime value. So, like Lean's specializer,
 lean2rr also specializes callees on **static dictionaries**: a dictionary
-built only from instance constants and types (and projections of such). The
-instance key then includes the dictionary. The callee's instance binds that
+built only from instance constants and types (and projections of such). A
+constant whose evaluation computes something (calls a function other than
+to build a constructor or a closure: `instance : Inhabited Grid := ⟨mkGrid
+300⟩`) does not count: natively it is evaluated once, at startup, and a
+callee reads its fields, while `simp` in a callee specialized on it would
+copy its body to the projections, to run at every call (round 7 RV7F-02,
+test `RtDictConst`). The instance key then includes the dictionary. The callee's instance binds that
 parameter to the dictionary itself, rebuilt as `let`s at its start, and
 `simp` folds its projections into direct calls. The parameter stays, unused,
 so the arity is unchanged.
@@ -387,8 +392,10 @@ conversion keeps a closed, non-dependent type-former argument: a constant
 family `fun _ => T` (its body does not mention the bound variable) or a
 type constructor. A family whose body mentions its variable (`fun b => cond
 b Nat String`) stays `lcAny`, as its values need not have a single
-representation. The rule is syntactic: `fun n => Fin n` also stays
-`lcAny`, although every `Fin n` is a `Nat`. Every mono type lean2rr
+representation. The rule is syntactic, after eta reduction: `fun n => Fin
+n` is the type constructor `Fin`, kept (a field type `Fin k` that applies
+it converts to `Nat`), while `fun n => Fin (n + 1)` stays `lcAny`,
+although every `Fin (n + 1)` is a `Nat`. Every mono type lean2rr
 computes itself uses the same conversion.
 
 **`toMono`: semantic lowering done by Lean.**
@@ -499,12 +506,19 @@ that depends on a value, `data : Array t.denote` is used as `Array Nat` only
 in the branch where `t = .nat`. A conversion moved from that use to the
 binder would also run, and fail, when `t = .str`. The rules:
 - **From definitions.** A `cases` field gets the constructor's field type,
-  instantiated at the discriminant's type. A constructor application gets
+  instantiated at the discriminant's type, when that type is the
+  constructor's inductive applied to its parameters. A discriminant of type
+  `lcAny` (a value of a type that depends on a value, `d : s.Data`, or an
+  existential payload after `cast`) leaves its fields as they are: the
+  instantiation needs the parameters (the parameters' own types are not
+  the fields', round 7 RV7F-01). A constructor application gets
   the type its argument types determine. Parameters that no field
   determines, such as the error type of `EST.Out.ok`, come from the binder's
   own type. A call, full or partial, gets the type the callee's signature
   gives. A join-point parameter gets the type of its jump arguments when all
-  of them are known and agree.
+  of them are known and agree. No rule gives a binder the type `◾`: mono
+  already types types and proofs `◾`, so an `lcAny` binder holds a value
+  (test `RtDepFields`).
 - **Result types.** A declaration whose result type is unknown gets `T` when
   all its returned values have type `T`. The results of its own self calls
   do not count, and neither do constructors without fields (`none`) of `T`'s
@@ -590,9 +604,19 @@ has this shape: derived arrays are read and written only at the loop index
 loop with the index plus one after the write (or with the index to the loop
 that a `_redArg` wrapper calls), returned, put in constructors or passed to
 join points, and never captured or used otherwise; the entry passes the
-literal index `0` (possibly through join-point parameters). Otherwise the
+literal index `0` (possibly through join-point parameters). The values it
+stores must all have one type `β` that Stage 3 recovered, neither `lcAny`
+nor `◾`. Otherwise the
 loop keeps the `Box` array: its input is converted once on entry, and its
 result type (`Array β` by the `map` rule) makes it convert once on exit.
+A map whose function projects a field of a parametric structure
+(`(xs.zip ys).map (·.2)`, `rs.map (·.y)` with `structure R (α) where s :
+String; y : α`) is such a loop: the element it reads from `Array lcAny`
+has type `lcAny`, so the fields of the `cases` on it stay `lcAny` (round 7
+RV7D-01: they had been given the constructor's parameter types, `◾` or an
+earlier field's type, so the loop's result became an `Array ◾`, read back
+as zeros, or an `Array String` holding `Nat`s, an unreachable panic with
+the pass off too; test `RtMapProjFields`).
 The original loop is dropped when nothing reachable calls it any more, and
 the fixpoint runs once more, so the values the split loop reads can type
 what they flow into.
@@ -2448,9 +2472,27 @@ Each item says what differs and when.
   runtime, `unsafe` code trusted, §5.1, §5.12).
 
 **Evaluation and effects**
-- *Dictionary rebuilding* (§2.4): an instance function applied to static
-  arguments may run more often than natively. Visible only through traces
-  or panics inside instance code, or as extra time.
+- *Dictionary rebuilding* (§2.4): lean2rr specializes a callee on every
+  static dictionary, also where Lean's specializer does not (an `Inhabited`
+  instance, the class being `weak_specialize`; a `@[nospecialize]`
+  function; an instance argument that a recursive call changes). Instance
+  code, and pure computations that take the dictionary, can then run more
+  or fewer times than natively: the code that builds the dictionary is
+  copied into the callee and runs there, and a call that passes the
+  dictionary on (`traced "A"` with `traced [Inhabited α]`, a `panic!` in a
+  generic `firstOr [Inhabited α]`) can become a closed term of the
+  instance, run once, where natively it runs at each call. Lean allows
+  this: it treats `dbgTrace` and `panic` as pure, and its specializer makes
+  the same closed terms where it specializes (natively, `@[specialize α]`
+  on the two generic helpers of round 7's FClosed2, an annotation that only
+  affects performance, turns its 4 panics into 2, as under lean2rr). As a
+  cost, a dictionary built by an instance function applied to static
+  arguments (`instance [Inhabited α] : Inhabited (Wrap α) := ⟨expensive
+  default⟩`), natively a value the caller computes once, can be recomputed
+  at each call of the callee. A constant whose evaluation computes
+  something is not part of a static dictionary, so it is computed once, as
+  natively (test `RtDictConst`). Visible through traces or panics in
+  instance code or in such calls, or as extra time.
 - *Tasks* run on one thread, when they are needed, when the running code
   blocks (a sleep, a lock, a condition variable, a promise, a socket) or
   when `main` returns (§5.14). Contexts never run in parallel and switch
@@ -2708,8 +2750,10 @@ Each item says what differs and when.
   where native Lean replaces the elements of one array (peak memory
   0.7–1.1x native for scalar targets in tests, more for records, whose cells
   are larger: §7's cheaper `Nat`). Maps that keep the representation run in
-  place. A map loop of another shape (not Lean's) still converts its input
-  to an array of `Box` on entry and back on exit.
+  place. A map loop of another shape (not Lean's), or one whose function
+  projects a field of a parametric structure (`(xs.zip ys).map (·.2)`,
+  §4), still converts its input to an array of `Box` on entry and back on
+  exit.
 - *Element storage*: array elements, once-cell values and polymorphic
   extern arguments whose type cannot cross the FFI boundary (`[value]`
   tuples, closures) are wrapped in an `ElemBox` cell, one allocation each;
