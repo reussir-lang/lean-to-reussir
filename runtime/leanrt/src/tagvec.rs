@@ -5,7 +5,7 @@
 //!
 //! - odd words are small values: `lean_box` of a `Nat` below 2^63 or of an
 //!   `Int` in the `int32` range;
-//! - even words are owned `LBig` handles (the raw `Rc` pointer), for all
+//! - even words are owned `LBig` handles (the raw block pointer), for all
 //!   other values.
 //!
 //! The Reussir-visible type is `TagVec`, a `#[repr(transparent)]` pointer to
@@ -121,7 +121,7 @@ fn is_small(w: u64) -> bool {
 
 #[inline(always)]
 fn big_to_word(b: LBig) -> u64 {
-    // `Rc` is a `#[repr(transparent)]` raw pointer.
+    // `LBig` is a `#[repr(transparent)]` raw pointer.
     unsafe { std::mem::transmute::<LBig, usize>(b) as u64 }
 }
 
@@ -514,7 +514,7 @@ mod tests {
     use super::*;
 
     fn rc(b: &LBig) -> u32 {
-        b.count_ref().get()
+        b.count()
     }
 
     fn count(a: &LTagVec) -> u32 {

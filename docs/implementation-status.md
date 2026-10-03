@@ -102,17 +102,17 @@ dropping a small `Nat` is a bit test; it is never allocated.
 `Int` works the same way, with Lean's encoding too: a value in the 32-bit
 range is stored in the word, any other is a big number.
 
-The encoding is exactly Lean's: a small value is `lean_box(n)`, and a big
-number is laid out like Lean's own (`lean_mpz_object`: the object header
-with its reference count, tagged `LeanMPZ`, then GMP's `mpz_t`, whose
-limbs GMP allocates). C code written against `lean.h` could take these
-words as they are, but calling a program's own C code is not supported
-(below).
+A small value is exactly Lean's `lean_box(n)`. A big number is lean2rr's
+own: one block with the reference count, the sign and size, and the limbs
+(native Lean's `lean_mpz_object` keeps the limbs in a second allocation,
+made by GMP). C code written against `lean.h` could take the small words
+as they are and a big number after a conversion, but calling a program's
+own C code is not supported (below).
 
 Compared with native Lean:
 - a `Nat` or `Int` field in a record takes 8 bytes, as natively;
-- a big number has the same layout and the same two allocations (the
-  object and GMP's limbs);
+- a big number is one allocation (natively two: the object and GMP's
+  limbs), 32 bytes for a two-limb number (natively 56);
 - in the rare places where a `Nat` has to go through the generic `Box`
   (code whose types cannot be made concrete, below), boxing it allocates;
   natively a small `Nat` is never allocated.
@@ -121,7 +121,12 @@ Peak memory (max RSS, 2026-10-03, against the native build): `rbmap`
 (a red-black tree with `Nat` keys and values) 0.84× (with the earlier
 two-word `Nat`: 1.00×); an array of 2 million records with four `Nat`
 fields and a list of `Nat` pairs 0.80× (1.26×); `bignum` about 1.1×
-(1.2–1.3×; a few MB, noisy).
+(1.2–1.3×; a few MB, noisy). With big numbers in one block (perf-big,
+2026-10-03, measured without transparent huge pages, which round RSS to
+2 MiB steps): a million live two-limb numbers 49.5 MB, 0.67× native
+(65.2 MB with the two-allocation layout); the classic Bignum 3.6 MB and
+Liasolver 5.8 MB, within a few hundred KB of the two-allocation layout
+(3.2 and 5.5 MB) and below native (5.8 and 7.4 MB).
 
 ### Text, arrays, references
 

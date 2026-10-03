@@ -1,9 +1,11 @@
 //! Raw bindings to the parts of GMP the bignum code uses.
 //!
 //! GMP is linked statically (Lean's toolchain ships `libgmp.a`; Lean's own
-//! runtime uses the same library for its big numbers). Big numbers are
-//! `mpz_t`s (`crate::big`), whose limbs GMP allocates with its default
-//! memory functions, as in Lean's runtime.
+//! runtime uses the same library for its big numbers). Big numbers keep
+//! their limbs in their own block (`crate::big`): the `mpn_*` functions
+//! work on those limbs, and the `mpz_*` functions get read-only views of
+//! them and write into temporaries (`OwnedMpz`), whose limbs GMP allocates
+//! with its default memory functions.
 
 #![allow(non_camel_case_types, dead_code)]
 

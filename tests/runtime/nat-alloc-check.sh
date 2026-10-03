@@ -2,7 +2,7 @@
 # Big numbers are freed exactly once, and big constants are made once:
 # builds RtNatStress.lean and RtNatConst.lean through lean2rr with leanrt's
 # big-number counters (L2R_LEANRT_RUSTFLAGS="--cfg leanrt_count_bigs", which
-# print "made M freed F live L" at exit) and runs each at two sizes.
+# print "made M freed F live L grown G" at exit) and runs each at two sizes.
 # - RtNatStress: the numbers still alive at exit (constants) must not grow
 #   with the size, and `freed` must never exceed `made` (a double free).
 # - RtNatConst: `made` must not grow with the size (a big constant used in a

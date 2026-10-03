@@ -8,9 +8,9 @@
 //!   `lean_box((unsigned)(int)v)`: its 32-bit two's complement pattern,
 //!   zero-extended, so a small `Nat` below 2^31 and the `Int` of the same
 //!   value have the same word;
-//! - an even word is an owned reference to a big number (`LBig`, the raw
-//!   `Rc` pointer, laid out as Lean's `lean_mpz_object`, see `big`): a
-//!   `Nat` of at least 2^63, an `Int` outside the `int32` range.
+//! - an even word is an owned reference to a big number (`LBig`, a pointer
+//!   to one block holding the count, the sign and size, and the limbs, see
+//!   `big`): a `Nat` of at least 2^63, an `Int` outside the `int32` range.
 //!
 //! Every value has exactly one form (small when in range), so equality of
 //! two small words is equality of the values, and a small value never
@@ -75,7 +75,7 @@ unsafe fn big_ref(w: &u64) -> &LBig {
 
 #[inline(always)]
 fn word_of_big(b: LBig) -> u64 {
-    // `Rc` is a `#[repr(transparent)]` pointer.
+    // `LBig` is a `#[repr(transparent)]` pointer.
     word_of(unsafe { std::mem::transmute::<LBig, *mut u8>(b) })
 }
 
@@ -423,7 +423,12 @@ pub extern "C" fn nat_pow(a: u64, b: u64) -> LNat {
         N::S(x) if x < 2 => LNat::small(x),
         N::S(x) => match x.checked_pow(e.min(64) as u32) {
             Some(r) if e < 64 => LNat::of_u64(r),
-            _ => LNat::of_big(big::nat_pow(big::of_u64(x), e)),
+            // `2^j ^ e = 2^(j e)` (`j e < 2^38`): one block, no temporary;
+            // beyond GMP's size limit GMP's `mpz_pow_ui` fails as natively.
+            _ if x.is_power_of_two() && x.trailing_zeros() as u64 * e / 64 < big::MAX_LIMBS as u64 => {
+                LNat::of_big(big::pow2(x.trailing_zeros() as u64 * e))
+            }
+            _ => LNat::of_big(big::u64_pow(x, e)),
         },
         N::B(x) => LNat::of_big(big::nat_pow(x, e)),
     }
@@ -827,24 +832,37 @@ mod tests {
         }
     }
 
+    /// Powers of a power of two (`big::pow2`) against GMP's `mpz_pow_ui`.
+    #[test]
+    fn pow_of_two() {
+        for x in [2u64, 4, 8, 1 << 31, 1 << 62] {
+            for e in [1u64, 2, 31, 32, 62, 63, 64, 65, 100, 1000] {
+                let p = nat_pow(LNat::small(x).into_raw(), LNat::small(e).into_raw());
+                let r = LNat::of_big(big::u64_pow(x, e));
+                assert!(nat_eq(p.clone().into_raw(), r.clone().into_raw()), "{x} ^ {e}");
+                assert_eq!(is_small(p.word()), is_small(r.word()));
+            }
+        }
+    }
+
     #[test]
     fn counts() {
         let b = big::of_limbs2(3, 3);
         let x = LNat::of_big(b.clone());
-        assert_eq!(b.count_ref().get(), 2);
+        assert_eq!(b.count(), 2);
         let y = x.clone();
-        assert_eq!(b.count_ref().get(), 3);
+        assert_eq!(b.count(), 3);
         drop(x);
         drop(y);
-        assert_eq!(b.count_ref().get(), 1);
+        assert_eq!(b.count(), 1);
         // A slow path consumes its operands.
         let s = nat_add(LNat::of_big(b.clone()).into_raw(), LNat::small(1).into_raw());
         drop(s);
-        assert_eq!(b.count_ref().get(), 1);
+        assert_eq!(b.count(), 1);
         let i = nat_to_int(LNat::of_big(b.clone()).into_raw());
-        assert_eq!(b.count_ref().get(), 2);
+        assert_eq!(b.count(), 2);
         drop(i);
-        assert_eq!(b.count_ref().get(), 1);
+        assert_eq!(b.count(), 1);
     }
 
     #[test]
