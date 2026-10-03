@@ -6,10 +6,10 @@ import LeanToReussir.PassConfig
 
 J1′ of the join-point strategy (translation plan §5.6): a join point whose
 body is small (at most 40 bindings, alternatives and exits, nested join
-points included) and whose copy, with the join points inlined into it,
-expands to at most 480, and that is not J2, is inlined at each of its
-jumps, like J1, instead of outlined (J3). Without this pass such join
-points are outlined.
+points included), whose copy, with the join points inlined into it,
+expands to at most 480, whose copies beyond the first add at most 2000,
+and that is not J2, is inlined at each of its jumps, like J1, instead of
+outlined (J3). Without this pass such join points are outlined.
 -/
 
 namespace LeanToReussir
@@ -65,19 +65,30 @@ conditions are a few `&&`/`||` tests (each test a join point jumping to the
 shared continuation) expand to 300-350 and stay plain loops. -/
 def copyBudget : Nat := 480
 
+/-- The most code the copies of a duplicated join point may add, beyond the
+one copy that inlining a single jump makes: (jumps - 1) × `copySize`. A
+join point jumped to from the many alternatives of a wide `match` (a
+`match` with 800 arms, each going on to an alternative of the next
+`match`) is outlined instead of copied into every arm. -/
+def copiesBudget : Nat := 2000
+
 /-- Small join points (nested join points included, since sinking nests
 them) are duplicated at their jumps (like J1) rather than outlined:
 outlining one on a loop's path makes the loop a state machine (J4) or
 mutually recursive (J3), and keeps the reuse of cells matched before the
 jump from reaching constructions after it. A copy, with the join points
 inlined into it, must also stay within `copyBudget`, so that duplication
-cannot multiply along a chain of join points. -/
-def isSmallJp (bodies : Std.HashMap FVarId (Code .pure)) (d : FunDecl .pure) : Bool :=
-  codeSize d.value 41 ≤ 40 && copySize bodies d.value (copyBudget + 1) ≤ copyBudget
+cannot multiply along a chain of join points, and all the copies within
+`copiesBudget`, so that a join point with many jumps is not copied to each.
+`jumps` is the number of jumps to the join point. -/
+def isSmallJp (bodies : Std.HashMap FVarId (Code .pure)) (d : FunDecl .pure) (jumps : Nat) : Bool :=
+  codeSize d.value 41 ≤ 40 &&
+    let size := copySize bodies d.value (copyBudget + 1)
+    size ≤ copyBudget && (jumps - 1) * size ≤ copiesBudget
 
 /-- Registry entry point. -/
 def Opt.JpSmall.install (c : PassConfig) : PassConfig :=
   let prev := c.lower.duplicateJp
-  { c with lower := { c.lower with duplicateJp := fun bodies d => prev bodies d || isSmallJp bodies d } }
+  { c with lower := { c.lower with duplicateJp := fun bodies d n => prev bodies d n || isSmallJp bodies d n } }
 
 end LeanToReussir

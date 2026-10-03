@@ -61,8 +61,9 @@ partial def jpBodiesOf (c : Code .pure) (acc : Std.HashMap FVarId (Code .pure) :
 /-- Choose a strategy for every join point of a declaration body: the set
 of outlined (J3) join points; others are J1 (single jump), J2, or
 duplicated at their jumps (J1′, those `duplicate` selects: the lowering hook
-`LowerHooks.duplicateJp`, given the bodies of all join points). -/
-partial def chooseOutlined (duplicate : Std.HashMap FVarId (Code .pure) → FunDecl .pure → Bool)
+`LowerHooks.duplicateJp`, given the bodies of all join points and the
+number of jumps). -/
+partial def chooseOutlined (duplicate : Std.HashMap FVarId (Code .pure) → FunDecl .pure → Nat → Bool)
     (body : Code .pure) : FVarIdSet := Id.run do
   let counts := countJumps body {}
   -- All join points with their scope.
@@ -86,7 +87,7 @@ partial def chooseOutlined (duplicate : Std.HashMap FVarId (Code .pure) → FunD
       -- A J2 join point cannot be the target of a jump from inside an outlined body.
       let jumpedFromOutlined := jps.any fun (d', _) =>
         outlined.contains d'.fvarId && (jumpsIn d'.value {}).contains d.fvarId
-      let ok := single || duplicate bodies d ||
+      let ok := single || duplicate bodies d (counts.getD d.fvarId 0) ||
         (endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined && !jumpedFromOutlined)
       if !ok then
         outlined := outlined.insert d.fvarId
