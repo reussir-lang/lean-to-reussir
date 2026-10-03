@@ -2020,11 +2020,23 @@ running code blocks (*Blocking*, below).
   fields, arrays, the values of tasks, the values captured by function
   values (partial applications), thunks (their computation, or their
   value: the thunk is not forced) or boxed values; so `Task.spawn` of a
-  closed function has finished once the term has been used. The
-  traversals are generated at the end of lowering, once every variant of
-  the function types and of `Box` is known, and do nothing for types that
-  cannot hold a task. Values captured by a Reussir closure (only lean2rr's
-  own glue makes them, not Lean code) are not looked into.
+  closed function has finished once the term has been used. The walk
+  works as Lean's does: a loop over a list of the values still to look
+  at (no recursion, so a value deep through any field is walked at a
+  bounded depth), which visits each cell once (the runtime keeps the set
+  of addresses visited: a value whose cells are shared, a DAG, is walked
+  in time linear in its number of cells, not of its paths). Fields are
+  looked at in order, the first first, as a recursive walk would. The walk
+  keeps what it reads out of thunks and tasks until it ends, so that no
+  cell it has visited is freed meanwhile (a task it runs could force a
+  thunk, which drops its computation) and its address given to a new
+  cell. It is skipped when every task of the program has finished
+  (nothing to wait for): always for constants evaluated at startup, where
+  tasks run at once. The walks are generated at the end of lowering, once
+  every variant of the function types and of `Box` is known, and do
+  nothing for types that cannot hold a task. Values captured by a Reussir
+  closure (only lean2rr's own glue makes them, not Lean code) are not
+  looked into.
 - A thunk or task stored at another representation (in `Box`, §5.1) is
   converted to a new cell in state `conv(g, o, a)`: `g` forces the original
   and converts its value (so it still runs at most once); `o` is the
@@ -2635,10 +2647,15 @@ Each item says what differs and when.
   group them differently in lean2rr's instances. stdout and results are the
   same.
 - *Stack depth* in general: frame sizes differ from native. lean2rr adds
-  no recursion of its own: structural conversions are loops (§5.1) and the
+  no recursion of its own: structural conversions are loops (§5.1), the
   `Array.mk`, `String.mk` and `String.ofList` list folds are tail-recursive
-  loops, so converting or folding a list of 10⁷ elements works at an 8 MB
-  stack (`LEAN_STACK_SIZE_KB=8192`) as natively. Dropping a deep value:
+  loops, and the walk of a closed term for its tasks (§5.14) is a loop over
+  a work list, so converting or folding a list of 10⁷ elements, or walking
+  a closed term 300000 cells deep through its first field, works at an 8 MB
+  stack (`LEAN_STACK_SIZE_KB=8192`) as natively (test `RtPersistWalk`).
+  The walk's work list and set of visited cells are heap memory while it
+  runs (natively a stack of pointers): a few tens of bytes per cell of a value
+  walked while a task is unfinished. Dropping a deep value:
   Lean frees iteratively, through a stack of objects to free. The
   runtime's containers (arrays, references, thunk and task cells:
   `leanrt::drop`) do the same: a container freed while another is being

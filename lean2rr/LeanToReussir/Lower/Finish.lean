@@ -355,62 +355,110 @@ where
       | none => return false
     | _ => return false
 
-/-- Generate `l2r_persist_T` (`persistCall`) and the traversals it calls,
-for the current variants (replacing earlier ones); `done` holds the names
-generated in this round. A type that cannot hold a task gets none, and its
-values are not looked at. -/
-partial def genPersist (t : RR.Ty) (done : IO.Ref (Std.HashSet String)) : LowerM (Option String) := do
+/-- The work list of the walks of constants for tasks (`genPersist`). -/
+def persistListName : String := "L2RPersistW"
+
+/-- Whether values of type `t` are cells (records, arrays, thunks and
+tasks, function values, `Box`: shared, with an address), which a walk for
+tasks visits once; other values (`[value]` structs, `Tuple`s) are looked
+into each time they are reached. -/
+def persistCell (t : RR.Ty) : LowerM Bool := do
+  match t with
+  | .app "LCell" _ | .app "RVec" _ | .fn .. => return true
+  | .named n =>
+    if n == boxName then return true
+    if let some info := (← get).typeInfos[n]? then return info.shape != .enumLike && !info.value
+    -- An `ElemBox` is a shared struct, a `Tuple` a `[value]` one.
+    match (← get).tupleTypes.toList.find? (·.2 == n) with
+    | some (k, _) => return k.size == 2 && k[1]! == .named "__elem_box"
+    | none => return false
+  | _ => return false
+
+/-- The walk of a constant's value for tasks (`persistCall`), as native
+`lean_mark_persistent`: a loop (`l2r_persist_walk(h, w)`) over a work list
+`w` (`L2RPersistW`) of the values still to look at, which visits each cell
+once (`l2r_persist_seen`, the runtime's set of the cells walk `h` has
+visited). So a value deep through any of its fields is walked at a bounded
+depth, and a value whose cells are shared (a DAG) in time linear in its
+number of cells. The work list has a variant `w<T>(value, rest)` per type
+that can hold a task, and `a<T>(array, index, size, rest)` per such array
+type (its elements still to look at). `genPersist t` generates the
+expansion of a value of type `t`, `l2r_persist_x_T(h, v, rest)`, which
+returns the work list with what `v` holds pushed on `rest` (a task: waits
+for it, then its value), and those of the types it reaches; it returns
+`t`'s variant, `none` for a type that cannot hold a task (its values are
+not looked at). The first field is pushed last, so it is looked at first:
+the order of a recursive walk, field by field. `gen` collects the
+variants and the walk's arms. -/
+structure PersistGen where
+  variants : Array (String × Array RR.Ty) := #[]
+  arms : Array RR.Arm := #[]
+
+partial def genPersist (t : RR.Ty) (gen : IO.Ref PersistGen) : LowerM (Option String) := do
   unless ← holdsTask t do return none
-  let name := persistFnName t
-  if (← done.get).contains name then return some name
-  done.modify (·.insert name)
+  let wv := s!"w{t.enc}"
+  if (← gen.get).variants.any (·.1 == wv) then return some wv
   let u64 := RR.Ty.named "u64"
-  let zero : RR.Block := ⟨#[("z", some u64, .atom "0")], .var "z"⟩
-  -- Traverse each of the variables `xs`, then 0; the last traversal is a
-  -- tail call (a list is traversed in a loop).
-  let each (xs : Array (String × RR.Ty)) : LowerM RR.Block := do
-    let mut calls : Array (String × RR.Ty × String) := #[]
-    for (x, xt) in xs do
-      if let some f ← genPersist xt done then calls := calls.push (x, xt, f)
-    if calls.isEmpty then return zero
+  let wTy := RR.Ty.named persistListName
+  let name := s!"l2r_persist_x_{t.enc}"
+  let walkArm : RR.Arm := {
+    ty := persistListName, ctor := some wv, binders := #[some "v", some "k"]
+    body := .ofExpr (.call "l2r_persist_walk" #[] #[.var "h", .call name #[] #[.var "h", .var "v", .var "k"]]) }
+  gen.modify fun g => { g with variants := g.variants.push (wv, #[t, wTy]), arms := g.arms.push walkArm }
+  -- Nothing pushed: the work list as it is.
+  let unchanged : RR.Block := .ofExpr (.var "k")
+  -- Push each of the variables `xs` (those whose type can hold a task) on
+  -- the work list `k`, the first on top. Values read out of a thunk or a
+  -- task (`keep`) are kept until the walk ends (`l2r_persist_keep`).
+  let each (xs : Array (String × RR.Ty)) (k : RR.Expr := .var "k") (keep := false) : LowerM RR.Block := do
+    let mut e := k
     let mut lets := #[]
-    for (x, _, f) in calls.pop do
-      lets := lets.push (← fresh "pp", some u64, RR.Expr.call f #[] #[.var x])
-    let (lx, _, lf) := calls.back!
-    return ⟨lets, .call lf #[] #[.var lx]⟩
-  let arm (ty : String) (ctor : String) (xs : Array (Option (String × RR.Ty))) : LowerM RR.Arm := do
-    let body ← each (xs.filterMap id)
+    for (x, xt) in xs.reverse do
+      if let some v ← genPersist xt gen then
+        e := .ctor persistListName (some v) #[.var x, e]
+        if keep then lets := lets.push (← fresh "pk", some u64, RR.Expr.call "l2r_persist_keep" #[xt] #[.var "h", .var x])
+    return ⟨lets, e⟩
+  let arm (ty : String) (ctor : String) (xs : Array (Option (String × RR.Ty))) (keep := false) : LowerM RR.Arm := do
+    let body ← each (xs.filterMap id) (keep := keep)
     return { ty, ctor := some ctor, binders := xs.map (·.map (·.1)), body }
   let body : RR.Block ← match t with
     | .app "LCell" #[.named z] =>
-      let some (_, task, vt) ← lazyOf? t | pure zero
+      let some (_, task, vt) ← lazyOf? t | pure unchanged
       if task then
         -- A task: wait for it (run it), then its value.
         let get ← lazyGetFn z
-        let rest ← each #[("x", vt)]
+        let rest ← each #[("x", vt)] (keep := true)
         pure ⟨#[("x", some vt, .call get #[] #[.var "v"])] ++ rest.lets, rest.result⟩
       else
         -- A thunk: its computation or its value, without forcing it.
         let ft := RR.Ty.fn .unit vt
         let arms := #[
-          ← arm z "pending" #[some ("f", ft)],
-          ← arm z "done" #[some ("x", vt)],
-          ← arm z "conv" #[some ("f", ft), some ("o", RR.Ty.box), none],
-          ← arm z "convdone" #[some ("x", vt), some ("o", RR.Ty.box), none],
-          { ty := z, ctor := none, binders := #[], body := zero }]
+          ← arm z "pending" #[some ("f", ft)] (keep := true),
+          ← arm z "done" #[some ("x", vt)] (keep := true),
+          ← arm z "conv" #[some ("f", ft), some ("o", RR.Ty.box), none] (keep := true),
+          ← arm z "convdone" #[some ("x", vt), some ("o", RR.Ty.box), none] (keep := true),
+          { ty := z, ctor := none, binders := #[], body := unchanged }]
         pure (.ofExpr (.mtch (.call "l2r_lcell_get" #[.named z] #[.var "v"]) arms))
     | .app "RVec" #[_] =>
-      let some r ← arrayRepr? t | pure zero
-      let go := name ++ "_go"
-      let rest ← each #[("x", r.value)]
-      let loop : RR.Block := .ofExpr <| .ite (.atom "i < n")
-        ⟨#[("x", some r.value, r.load (r.call "get" #[.var "v", .var "i"]))] ++ rest.lets ++
-          #[("pl", some u64, rest.result), ("one", some u64, .atom "1")],
-          .call go #[] #[.var "v", .atom "i + one", .var "n"]⟩ zero
-      let goItem := RR.Item.fn go #[("v", t), ("i", u64), ("n", u64)] u64 loop
-      modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != go | _ => true).push goItem }
+      let some r ← arrayRepr? t | pure unchanged
+      -- `a<T>(v, i, n, k)`: the elements from `i` on, one at a time.
+      let avar := s!"a{t.enc}"
+      let step := s!"l2r_persist_a_{t.enc}"
+      let stepArm : RR.Arm := {
+        ty := persistListName, ctor := some avar, binders := #[some "v", some "i", some "n", some "k"]
+        body := .ofExpr (.call "l2r_persist_walk" #[] #[.var "h",
+          .call step #[] #[.var "h", .var "v", .var "i", .var "n", .var "k"]]) }
+      gen.modify fun g => { g with variants := g.variants.push (avar, #[t, u64, u64, wTy]), arms := g.arms.push stepArm }
+      let rest ← each #[("x", r.value)] (.var "k2")
+      let next : RR.Block := ⟨#[("x", some r.value, r.load (r.call "get" #[.var "v", .var "i"])),
+          ("one", some u64, .atom "1"), ("i1", some u64, .atom "i + one"),
+          ("k2", some wTy, .ctor persistListName (some avar) #[.var "v", .var "i1", .var "n", .var "k"])] ++
+          rest.lets, rest.result⟩
+      let stepItem := RR.Item.fn step #[("h", u64), ("v", t), ("i", u64), ("n", u64), ("k", wTy)] wTy
+        (.ofExpr (.ite (.atom "i < n") next unchanged))
+      modify fun s => { s with fns := s.fns.push stepItem }
       pure ⟨#[("n", some u64, r.call "size" #[.var "v"]), ("i0", some u64, .atom "0")],
-        .call go #[] #[.var "v", .var "i0", .var "n"]⟩
+        .ctor persistListName (some avar) #[.var "v", .var "i0", .var "n", .var "k"]⟩
     | .fn .. =>
       -- A function value: the values it captures (a Reussir closure's
       -- cannot be looked at).
@@ -419,7 +467,7 @@ partial def genPersist (t : RR.Ty) (done : IO.Ref (Std.HashSet String)) : LowerM
       for v in (← get).fnVariants.getD t #[] do
         let fs ← fnVariantFields v
         arms := arms.push (← arm tn (fnVariantName v) ((List.range fs.size).toArray.map fun i => some (s!"c{i}", fs[i]!)))
-      arms := arms.push { ty := tn, ctor := none, binders := #[], body := zero }
+      arms := arms.push { ty := tn, ctor := none, binders := #[], body := unchanged }
       pure (.ofExpr (.mtch (.var "v") arms))
     | .named n =>
       if n == boxName then
@@ -429,7 +477,7 @@ partial def genPersist (t : RR.Ty) (done : IO.Ref (Std.HashSet String)) : LowerM
         pure (.ofExpr (.mtch (.var "v") arms))
       else if let some info := (← get).typeInfos[n]? then
         if info.shape == .struct then
-          let some l := info.ctors.find? info.ctorOrder[0]! | pure zero
+          let some l := info.ctors.find? info.ctorOrder[0]! | pure unchanged
           let tys := l.posTys
           let xs := (List.range tys.size).toArray.map fun i => (s!"f{i}", tys[i]!)
           let rest ← each xs
@@ -448,11 +496,14 @@ partial def genPersist (t : RR.Ty) (done : IO.Ref (Std.HashSet String)) : LowerM
           let xs := (List.range fields.size).toArray.map fun i => (s!"f{i}", fields[i]!)
           let rest ← each xs
           pure ⟨xs.mapIdx (fun i (x, xt) => (x, some xt, RR.Expr.field (.var "v") i)) ++ rest.lets, rest.result⟩
-        | none => pure zero
-    | _ => pure zero
-  let item := RR.Item.fn name #[("v", t)] u64 body
-  modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
-  return some name
+        | none => pure unchanged
+    | _ => pure unchanged
+  -- A cell already visited is not looked into again.
+  let body : RR.Block := if ← persistCell t then
+      .ofExpr (.ite (.call "l2r_persist_seen" #[t] #[.var "h", .var "v"]) unchanged body)
+    else body
+  modify fun s => { s with fns := s.fns.push (.fn name #[("h", u64), ("v", t), ("k", wTy)] wTy body) }
+  return some wv
 
 /-- The number of variants of function types and of `Box`: the traversals
 of `persistCall` depend on them. -/
@@ -460,20 +511,40 @@ def variantCount : LowerM (Nat × Nat) := do
   let st ← get
   return (st.fnVariants.fold (fun acc _ vs => acc + vs.size) 0, st.boxVariants.size)
 
-/-- Generate the traversals `persistCall` requested (again when variants
-were added since): a type that cannot hold a task gets a traversal that
-does nothing. Whether anything was generated. -/
+/-- Generate the walks `persistCall` requested (again, replacing the
+earlier ones, when variants were added since): `l2r_persist_T(v)` walks `v`
+(`genPersist`) unless every task has already finished
+(`l2r_task_settled`, so that nothing would be waited for). A type that
+cannot hold a task gets a walk that does nothing. Whether anything was
+generated. -/
 def finishPersistFns : LowerM Bool := do
   let reqs := (← get).persistReqs
   if reqs.isEmpty then return false
   let vc ← variantCount
   if (← get).persistDone == some (reqs.size, vc.1 + vc.2 * 1000003) then return false
-  let done ← IO.mkRef ({} : Std.HashSet String)
+  modify fun s => { s with
+    fns := s.fns.filter fun | .fn n .. => !n.startsWith "l2r_persist_" | _ => true
+    typeItems := s.typeItems.filter fun | .enum n .. => n != persistListName | _ => true }
+  let gen ← IO.mkRef ({} : PersistGen)
+  let u64 := RR.Ty.named "u64"
+  let wTy := RR.Ty.named persistListName
+  let zero : RR.Block := ⟨#[("z", some u64, .atom "0")], .var "z"⟩
   for t in reqs do
-    if (← genPersist t done).isNone then
-      let name := persistFnName t
-      let item := RR.Item.fn name #[("v", t)] (.named "u64") ⟨#[("z", some (.named "u64"), .atom "0")], .var "z"⟩
-      modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
+    let body ← match ← genPersist t gen with
+      | none => pure zero
+      | some v =>
+        let walk : RR.Block := ⟨#[("h", some u64, .call "l2r_persist_begin" #[] #[]),
+            ("r", some u64, .call "l2r_persist_walk" #[] #[.var "h",
+              .ctor persistListName (some v) #[.var "v", .ctor persistListName (some "wnil") #[]]])],
+          .call "l2r_persist_end" #[] #[.var "h"]⟩
+        pure (.ofExpr (.ite (.call "l2r_task_settled" #[] #[]) zero walk))
+    modify fun s => { s with fns := s.fns.push (.fn (persistFnName t) #[("v", t)] u64 body) }
+  let g ← gen.get
+  unless g.variants.isEmpty do
+    let arms := #[{ ty := persistListName, ctor := some "wnil", binders := #[], body := zero : RR.Arm }] ++ g.arms
+    modify fun s => { s with
+      typeItems := s.typeItems.push (.enum persistListName false (#[("wnil", #[])] ++ g.variants))
+      fns := s.fns.push (.fn "l2r_persist_walk" #[("h", u64), ("w", wTy)] u64 (.ofExpr (.mtch (.var "w") arms))) }
   let vc ← variantCount
   let n := (← get).persistReqs.size
   modify fun s => { s with persistDone := some (n, vc.1 + vc.2 * 1000003) }
