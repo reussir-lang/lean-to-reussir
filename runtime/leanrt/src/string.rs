@@ -757,7 +757,7 @@ pub fn shared_empty() -> LStr {
 #[cold]
 #[inline(never)]
 extern "C" fn shared_empty_init() -> LStr {
-    let s = from_parts(Vec::new(), 0);
+    let s = from_bytes(&[]);
     let p = unsafe { std::mem::transmute::<LStr, usize>(s.clone()) };
     unsafe { *SHARED_EMPTY.0.get() = p };
     s
