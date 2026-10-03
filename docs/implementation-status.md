@@ -4,7 +4,10 @@ Status as of 2026-10-02 (branch `dev`). This is a plain-language overview
 for someone who knows Rust but not Lean. The full rules are in
 [`translation-plan.md`](translation-plan.md); the runtime is described in
 [`../runtime/README.md`](../runtime/README.md); the Reussir bugs met on the
-way are in [`reussir-bugs.md`](reussir-bugs.md).
+way are in [`reussir-bugs.md`](reussir-bugs.md). The implementation's tricks
+and special cases, each with its reason, its place in the code and what
+would break without it, are cataloged in
+[`implementation/`](implementation/README.md).
 
 ## In one paragraph
 

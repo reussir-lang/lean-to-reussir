@@ -99,7 +99,7 @@ returning a zero, an empty array (for `Nat`, `Bool` and enumerations this is
 exactly what `box(0)` denotes in Lean). Only a type without a finite value
 gets `l2r_unreachable`. Each placeholder is a generated function
 `l2r_zero_N`. A placeholder that would allocate (a string, an array, a
-record, a closure, a boxed unit) is built once and kept in a once-cell like
+record, a reference, a boxed unit) is built once and kept in a once-cell like
 a constant (`cafAccessor`): `Array.modify` stores one per update, and it is
 never inspected, so a shared value does as well as a fresh one. -/
 partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
@@ -849,7 +849,7 @@ mutual
     let f ← fresh "l2r_vconv_"
     modify fun s => { s with vecConvs := s.vecConvs.insert (src, dst) f }
     let x := sr.load (sr.call "get" #[.var "src", .var "i"])
-    -- Elements that cannot be converted (`Array Nat` to `Array Int`) mean
+    -- Elements that cannot be converted (`Array String` to `Array Nat`) mean
     -- that the array is empty whenever this runs: an empty array that `cse`
     -- shared between two element types, or the array `Array.map` returns
     -- when it had nothing to map (Stage 3).

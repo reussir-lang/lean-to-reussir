@@ -11,6 +11,8 @@ ownership, reference counting and memory reuse. The design is described in
 
 Status: see [`docs/implementation-status.md`](docs/implementation-status.md) (what is supported, how values are represented, test and benchmark results, known differences from native Lean).
 
+Implementation notes: [`docs/implementation/`](docs/implementation/README.md) catalogs the implementation's tricks and special cases (why lean2rr does something, where, and what breaks without it).
+
 ## Requirements
 
 - Lean v4.33.0 (via elan)

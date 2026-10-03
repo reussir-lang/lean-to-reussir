@@ -63,7 +63,7 @@ Generated sections of the prelude (edit the generator, then run it):
 | `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a transparent wrapper of `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types); freed without recursion (below) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one tagged word per element (below) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `String.toUTF8`/`fromUTF8` move a unique buffer (natively a copy) |
-| `ST.Ref σ α` / `IO.Ref α` | `LRef<E>` (a shared 0/1-element vector, `leanrt::drop::Vec<E>`) | mutated through every alias; empty after `take` |
+| `ST.Ref σ α` / `IO.Ref α` | a lean2rr-generated shared record `L2RRefN(Cell<E>)` around a Reussir cell (two allocations: the record and the cell); `Nat`/`Int`: the prelude's `L2RNatRef`/`L2RIntRef` | mutated through every alias; `take` leaves the placeholder |
 | `Thunk α`, `Task α` | `LCell<S>` = `leanrt::drop::Cell<S>`, a transparent wrapper of `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
 | `IO.FS.Handle` | `LHandle` | shared buffered file, closed with its last reference |
 | `UInt8..64`, `USize` | `u8..u64`, `u64` | |
@@ -153,11 +153,13 @@ lean2rr wraps its result with `wrapIOResult`: `l2r_io_mono_ms_now()`,
 `l2r_io_prim_handle_is_tty(h)`. (`l2r_io_app_path()`, `l2r_io_current_dir()`
 and `l2r_io_process_get_current_dir()` are infallible stand-ins for the
 fallible primitives below.) References are Reussir cells in a
-lean2rr-generated record (`L2RRef_N(Cell<T>)`; translation plan §5.1), read
-and written by the plain-Reussir helpers `l2r_rc_get/set/swap<T>`; a `Nat`
-or `Int` reference is the prelude's `L2RNatRef`/`L2RIntRef` (a tagged word
-and a cell for a big number, `l2r_natref_*`/`l2r_intref_*`). `LRef<T>`
-(`l2r_ref_*`, a runtime cell) backs promises.
+lean2rr-generated record (`L2RRefN(Cell<T>)`, two allocations; translation
+plan §5.1), read and written by the plain-Reussir helpers
+`l2r_rc_get/set/swap<T>`; a `Nat` or `Int` reference is the prelude's
+`L2RNatRef`/`L2RIntRef` (a tagged word and a cell for a big number,
+`l2r_natref_*`/`l2r_intref_*`). Promises hold the `LCell` of their task
+(below). `LRef<T>` and its `l2r_ref_*` functions (a runtime cell, a
+0-or-1 element vector) are no longer used by generated code.
 
 **Freeing containers.** Native Lean frees an object iteratively: the
 children whose count drops to zero go on a stack of objects to free, popped

@@ -48,8 +48,10 @@ pub struct LBig;
 #[ffi(rust = "::leanrt::drop::Vec")]
 pub struct RVec<T>;
 
-// A mutable reference cell (`ST.Ref`/`IO.Ref`): a shared 0-or-1 element
-// vector, mutated in place through every alias (empty after `take`).
+// A shared runtime cell: a 0-or-1 element vector, mutated in place through
+// every alias (empty after `take`). No longer used by generated code:
+// references are lean2rr-generated records around a Reussir `Cell`
+// (`l2r_rc_*` below), and promises hold an `LCell`.
 #[ffi(rust = "::leanrt::drop::Vec")]
 pub struct LRef<T>;
 
@@ -2647,8 +2649,9 @@ fn l2r_intref_swap_big(r : L2RIntRef, b : LBig) -> Int {
     old
 }
 
-// `LRef<T>`: a shared cell of the runtime (a 0-or-1 element vector), used
-// for promises.
+// `LRef<T>`: a shared cell of the runtime (a 0-or-1 element vector). Not
+// used by generated code any more (promises hold the `LCell` of their
+// task); kept with its functions.
 
 #[ffi(import)]
 fn l2r_ref_new<T>(v : T) -> LRef<T> [{ leanrt::array::from_rc(Rc::new(vec![v])) }];

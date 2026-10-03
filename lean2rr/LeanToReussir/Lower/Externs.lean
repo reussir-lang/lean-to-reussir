@@ -493,10 +493,11 @@ def refCellOp (op : String) (r : RR.Expr) (e : RR.Ty) (k : RefKind) (a : RR.Ty) 
 
 /-- Glue for `ST.Ref` operations (translation plan §5.1). A reference whose
 contents have Reussir type `e` is a generated record holding a Reussir
-cell, `L2RRef_N(Cell<e>)` (`refType`): one allocation per reference, the
-value stored in its own representation. `ST.Prim.mkRef` at element type `α`
-creates one at `⟦α⟧` (`Box` for uniform code, at `α = lcAny`). Lean's mono
-phase types every reference `lcAny`, so a reference travels in a `Box`
+cell, `L2RRefN(Cell<e>)` (`refType`): two allocations per reference (the
+record and the cell), the value stored in its own representation.
+`ST.Prim.mkRef` at element type `α` creates one at `⟦α⟧` (`Box` for
+uniform code, at `α = lcAny`). Lean's mono phase types every reference
+`lcAny`, so a reference travels in a `Box`
 except where Stage 3 typed its binders (`typedRef`, §4). An operation on a
 typed handle accesses its cell directly, converting between the cell's
 element type and the operation's (they differ when uniform code works on a
