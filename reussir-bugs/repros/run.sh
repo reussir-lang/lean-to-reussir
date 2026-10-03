@@ -32,7 +32,9 @@
 # rrc -v); bug 20's is built with and without lean2rr's workaround. They
 # take one to three minutes each, and bugs 16 and 20 need 1.2 to 3 GB; bug
 # 6 runs for about 15 s. Everything else takes seconds (a first .lean build
-# also builds leanrt). lean2rr works around 16, 17 and 20; the repros turn
+# also builds leanrt). Bugs 30 and 32 are build-time entries too, but quick:
+# 30 times one conversion pass through reussir-opt (SKIPPED when the
+# checkout has not built it), 32 compares the sizes of two --emit mlir dumps. lean2rr works around 16, 17 and 20; the repros turn
 # its workarounds off (L2R_NO_OUTLINE, L2R_NO_INLINE_ANCHORS).
 #
 # Environment:
@@ -399,7 +401,73 @@ bug23() {
     else say_line OTHER 23 "$msg" "-O aggressive"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23"
+bug28() { plain_value 28 bug28-unique-carrying-join "101 1" "101 101" -O aggressive; }
+
+bug29() {
+    # Print the module, then read the dump back (a resumed build).
+    local o=$WORK/out/29
+    { (cd "$WORK/run" && "$RRC" "$HERE/bug29-ffi-member-mlir.rr" --emit mlir -o "$o.a.mlir" \
+        && "$RRC" "$o.a.mlir" -x mlir --emit mlir -o "$o.b.mlir") > "$o.log" 2>&1; } 2> /dev/null
+    RC=$?
+    if [ $RC = 0 ] && cmp -s "$o.a.mlir" "$o.b.mlir"; then say_line FIXED 29 "the --emit mlir dump parses back and prints identically"
+    elif grep -q "rc members must be atomic shared links" "$o.log"; then
+        say_line REPRODUCES 29 "the --emit mlir dump does not parse: rc members must be atomic shared links"
+    else say_line OTHER 29 "$(build_fail 29)"; fi
+}
+
+bug30() {
+    # The conversion alone, through reussir-opt (not built by default:
+    # `ninja -C build reussir-opt`). Twice the functions and calls: 4x the
+    # time when quadratic, 2x when linear.
+    local opt=$CK/build/bin/reussir-opt n secs=()
+    if [ ! -x "$opt" ]; then say_line SKIPPED 30 "no reussir-opt at $opt"; return; fi
+    for n in 5000 10000; do
+        python3 "$HERE/bug30-call-lowering.py" $n "$WORK/out/30-$n.mlir"
+        rm -f "$WORK/out/30-$n.out.mlir"
+        timed "$opt" "$WORK/out/30-$n.mlir" --reussir-convert-to-llvm -o "$WORK/out/30-$n.out.mlir" 2> "$WORK/out/30-$n.log"
+        if [ ! -s "$WORK/out/30-$n.out.mlir" ]; then say_line OTHER 30 "N = $n: reussir-opt failed (see $WORK/out/30-$n.log)"; return; fi
+        secs+=("$SECS")
+    done
+    local t1=${secs[0]} t2=${secs[1]} r=0 msg
+    ge "$t1" 0.1 && r=$(ratio "$t2" "$t1")
+    msg="reussir-opt --reussir-convert-to-llvm: N = 5000: ${t1} s, N = 10000: ${t2} s (${r}x for twice the calls)"
+    if ge "$r" 3 && ge "$t2" 1; then say_line REPRODUCES 30 "$msg"
+    elif le "$r" 2.6 || le "$t2" 0.6; then say_line FIXED 30 "$msg"
+    else say_line OTHER 30 "$msg"; fi
+}
+
+bug31() {
+    python3 "$HERE/bug31-deep-expression.py" 8000 100000 "$WORK/out/31.rr"
+    rr "$WORK/out/31.rr" 31 -O aggressive
+    if [ $RC != 0 ]; then
+        if grep -q "overflowed its stack" "$WORK/out/31.log"; then say_line REPRODUCES 31 "rrc: thread 'main' has overflowed its stack ($(signame $RC))" "-O aggressive"
+        else say_line OTHER 31 "$(build_fail 31)" "-O aggressive"; fi
+        return
+    fi
+    exe 31
+    if [ "$OUT_TXT" = 32004007 ]; then say_line FIXED 31 "compiles, prints 32004007" "-O aggressive"
+    else say_line OTHER 31 "compiles, prints '$OUT_TXT' ($(signame $EXIT)), expected 32004007" "-O aggressive"; fi
+}
+
+bug32() {
+    # The size of the printed module at K and K + 2: 4x when exponential.
+    local k sz=()
+    for k in 10 12; do
+        python3 "$HERE/bug32-emit-mlir-size.py" $k "$WORK/out/32-$k.rr"
+        { (cd "$WORK/run" && "$RRC" "$WORK/out/32-$k.rr" --emit mlir -o "$WORK/out/32-$k.mlir") > "$WORK/out/32-$k.log" 2>&1; } 2> /dev/null
+        RC=$?
+        if [ $RC != 0 ]; then say_line OTHER 32 "K = $k: $(build_fail 32-$k)"; return; fi
+        sz+=("$(stat -c %s "$WORK/out/32-$k.mlir")")
+    done
+    local r msg
+    r=$(ratio "${sz[1]}" "${sz[0]}")
+    msg="--emit mlir: K = 10: $((sz[0] / 1024)) KB, K = 12: $((sz[1] / 1024)) KB (${r}x for two more levels)"
+    if ge "$r" 3; then say_line REPRODUCES 32 "$msg"
+    elif le "$r" 1.5; then say_line FIXED 32 "$msg"
+    else say_line OTHER 32 "$msg"; fi
+}
+
+ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 28 29 30 31 32"
 SLOW=" 06 10 11 16 17 20 23 "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

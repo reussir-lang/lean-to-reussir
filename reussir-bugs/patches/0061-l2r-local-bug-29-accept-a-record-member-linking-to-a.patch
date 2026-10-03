@@ -1,0 +1,159 @@
+From a4fabec427b255f14a5e8540b079443514c117b3 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 3 Oct 2026 03:28:05 -0400
+Subject: [PATCH 61/63] l2r-local: bug 29: accept a record member linking to an
+ ffi_object in the type verifier
+
+The frontend lowers a record member of an opaque `#[ffi]` type to an
+explicit shared rc link, `!reussir.rc<!reussir.ffi_object<..>>` (codegen
+`member_ty`: an `ffi_object` has no capability to derive the link from and
+no inline layout), and the rest of the pipeline handles it like any rc
+member (stored as a pointer). `RecordType::verify` accepted only atomic rc
+members, though. The frontend builds the type without verification, so
+compiling from source works, but the module `rrc --emit mlir` prints does
+not parse back: "rc members must be atomic shared links; a normal link is
+derived from the member's capability instead". Every lean2rr program
+(strings and arrays are FFI objects) hits it, in shared structs and in
+`[value]` variant payloads alike, so a build cannot be resumed from its
+MLIR dump and the dump cannot be fed to reussir-opt.
+
+Accept a shared rc member whose element is an `ffi_object`, normal or
+atomic; every other normal rc member stays an error (message extended).
+
+The dump of a lean2rr program (MapMIO, 11 MB) now parses and prints back
+identically; the LLVM IR built from the dump equals the one built from
+source (up to the polymorphic-FFI crate hashes).
+Tests: basic/success/record_ffi_object_member.mlir (round trip through
+reussir-opt), basic/failure/record_rc_member.mlir (a plain rc member is
+still rejected), frontend/ffi_member_mlir_roundtrip.rr (rrc dump, resume,
+diff, compile).
+---
+ lib/IR/ReussirTypes.cpp                       | 21 +++++++---
+ .../basic/failure/record_rc_member.mlir       |  8 ++++
+ .../success/record_ffi_object_member.mlir     | 15 +++++++
+ .../frontend/ffi_member_mlir_roundtrip.rr     | 41 +++++++++++++++++++
+ 4 files changed, 79 insertions(+), 6 deletions(-)
+ create mode 100644 tests/integration/basic/failure/record_rc_member.mlir
+ create mode 100644 tests/integration/basic/success/record_ffi_object_member.mlir
+ create mode 100644 tests/integration/frontend/ffi_member_mlir_roundtrip.rr
+
+diff --git a/lib/IR/ReussirTypes.cpp b/lib/IR/ReussirTypes.cpp
+index 98cd6670..fd1ad62c 100644
+--- a/lib/IR/ReussirTypes.cpp
++++ b/lib/IR/ReussirTypes.cpp
+@@ -372,15 +372,24 @@ RecordType::verify(llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
+       // derived — the member type carries a different refcount discipline
+       // than its nominal capability implies (an `Arc` member, or the
+       // same-group link of an arc'd recursive record, thread-safety design
+-      // §3.3) — so it is spelled explicitly as the member type.
+-      if (rcMember.getCapability() != Capability::shared ||
+-          rcMember.getAtomicKind() != AtomicKind::atomic) {
+-        emitError() << "rc members must be atomic shared links; a normal "
+-                       "link is derived from the member's capability instead";
++      // §3.3) — so it is spelled explicitly as the member type. Neither can
++      // a link to an opaque foreign object: an `ffi_object` has no
++      // capability and no inline layout, so the frontend spells its member
++      // as an explicit shared rc link (stored as a pointer, like any rc
++      // member).
++      bool ffiObjectLink =
++          rcMember.getCapability() == Capability::shared &&
++          llvm::isa<FFIObjectType>(rcMember.getElementType());
++      if (!ffiObjectLink &&
++          (rcMember.getCapability() != Capability::shared ||
++           rcMember.getAtomicKind() != AtomicKind::atomic)) {
++        emitError() << "rc members must be atomic shared links or shared "
++                       "links to an ffi_object; a normal link is derived "
++                       "from the member's capability instead";
+         return mlir::failure();
+       }
+       if (isField) {
+-        emitError() << "an atomic rc member cannot be a [field] link";
++        emitError() << "an rc member cannot be a [field] link";
+         return mlir::failure();
+       }
+     } else if (llvm::isa<RefType>(member)) {
+diff --git a/tests/integration/basic/failure/record_rc_member.mlir b/tests/integration/basic/failure/record_rc_member.mlir
+new file mode 100644
+index 00000000..ec9cf7bf
+--- /dev/null
++++ b/tests/integration/basic/failure/record_rc_member.mlir
+@@ -0,0 +1,8 @@
++// RUN: %reussir-opt %s -verify-diagnostics
++// A normal shared link to a record is derived from the member's capability;
++// spelling it as an explicit rc member stays an error (only atomic links and
++// links to an `ffi_object` are explicit).
++module @test {
++  // expected-error @+1 {{rc members must be atomic shared links or shared links to an ffi_object; a normal link is derived from the member's capability instead}}
++  func.func private @foo() -> !reussir.record<compound "bad" {!reussir.rc<!reussir.record<compound "inner" {i64}>>}>
++}
+diff --git a/tests/integration/basic/success/record_ffi_object_member.mlir b/tests/integration/basic/success/record_ffi_object_member.mlir
+new file mode 100644
+index 00000000..e81e3e33
+--- /dev/null
++++ b/tests/integration/basic/success/record_ffi_object_member.mlir
+@@ -0,0 +1,15 @@
++// A member linking to an opaque foreign object is spelled as an explicit
++// shared rc: an `ffi_object` has no capability to derive the link from and
++// no inline layout. The frontend emits it for every record with an
++// `#[ffi]` member, so the printed form must parse back.
++// RUN: %reussir-opt %s | %reussir-opt | %FileCheck %s
++!vec = !reussir.rc<!reussir.ffi_object<"::reussir_rt::collections::vec::Vec<u64>", @vec_drop>>
++!holder = !reussir.record<compound "holder" {!vec, i64}>
++!payload = !reussir.record<compound "opt.some" [value] {!vec}>
++module @test {
++  func.func private @vec_drop(!vec)
++  // CHECK: func.func private @holder() -> !reussir.record<compound "holder" {!reussir.rc<!reussir.ffi_object<"::reussir_rt::collections::vec::Vec<u64>", @vec_drop>>, i64}>
++  func.func private @holder() -> !holder
++  // CHECK: func.func private @payload() -> !reussir.record<compound "opt.some" [value] {!reussir.rc<!reussir.ffi_object<"::reussir_rt::collections::vec::Vec<u64>", @vec_drop>>}>
++  func.func private @payload() -> !payload
++}
+diff --git a/tests/integration/frontend/ffi_member_mlir_roundtrip.rr b/tests/integration/frontend/ffi_member_mlir_roundtrip.rr
+new file mode 100644
+index 00000000..c2ce1587
+--- /dev/null
++++ b/tests/integration/frontend/ffi_member_mlir_roundtrip.rr
+@@ -0,0 +1,41 @@
++// UNSUPPORTED: darwin
++// A record with an opaque `#[ffi]` member stores it as an explicit shared
++// rc link to the `ffi_object`. The type verifier used to accept only
++// atomic rc members, so the module rrc prints with `--emit mlir` did not
++// parse back ("rc members must be atomic shared links"): a build resumed
++// from the dump failed. The dump now round-trips.
++
++// RUN: %rrc %s --emit mlir -o %t.a.mlir
++// RUN: %rrc %t.a.mlir -x mlir --emit mlir -o %t.b.mlir
++// RUN: diff %t.a.mlir %t.b.mlir
++// RUN: %FileCheck %s --input-file=%t.a.mlir
++// RUN: %rrc %t.a.mlir -x mlir -o %t.o --relocation-mode pic
++
++extern "rust" [{
++    use reussir_rt::collections::vec::Vec as RVec;
++}];
++
++#[ffi(rust = "::reussir_rt::collections::vec::Vec")]
++pub struct Vec<T>;
++
++#[ffi(import)]
++pub fn new<T>() -> Vec<T> [{ RVec::new() }];
++
++#[ffi(import)]
++pub fn len<T>(v: Vec<T>) -> u64 [{ v.len() as u64 }];
++
++pub struct Holder(Vec<u64>, u64)
++
++pub enum Opt { Some(Vec<u64>), None }
++
++pub fn main() -> u64 {
++    let h = Holder { new<u64>(), 7 };
++    let o = Opt::Some { new<u64>() };
++    let n = match o { Opt::Some(v) => len(v), Opt::None => 0 };
++    len(h.0) + h.1 + n
++}
++
++extern "C" trampoline "reussir_main" = main;
++
++// CHECK: !reussir.record<compound "_RC6Holder" {!reussir.rc<!reussir.ffi_object<"::reussir_rt::collections::vec::Vec<u64>", @{{[A-Za-z0-9_]+}}>>, i64}>
++// CHECK: [value] {!reussir.rc<!reussir.ffi_object<"::reussir_rt::collections::vec::Vec<u64>", @{{[A-Za-z0-9_]+}}>>}>
+-- 
+2.43.0
+

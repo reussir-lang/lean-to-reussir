@@ -1,0 +1,115 @@
+From 33bf4710c741495305fe4fd4b30091f6249e2ae9 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 3 Oct 2026 03:40:44 -0400
+Subject: [PATCH 62/63] l2r-local: bug 30: look up call lowering's callees in a
+ symbol table collection
+
+`reussir-convert-to-llvm` collects the conversion patterns of every loaded
+dialect through `ConvertToLLVMPatternInterface`; the func dialect's
+interface adds `populateFuncToLLVMConversionPatterns` without a
+`SymbolTableCollection`, and its `func.call` lowering then finds each
+callee (to test for `llvm.bareptr`) with
+`SymbolTable::lookupNearestSymbolFrom`, a linear scan of the module's
+operations: time quadratic in a module with many functions and calls.
+
+Skip the func dialect's interface and add its patterns with a collection
+built for the conversion, as the upstream `convert-func-to-llvm` does; the
+function conversion keeps the collection up to date (it replaces each
+`func.func` by its `llvm.func` in the table).
+
+Measured on a generated program of N functions, each calling the previous
+one twice (rrc -O none, perf): at N = 10000 the conversion took about 11e9
+cycles, 88% of them in the call lowering's lookups, now 0.9e9; the LLVM IR
+is identical for N = 5000, 10000 and 20000 (the rest of rrc's time there is
+SCCP, bug 11).
+Test: conversion/convert_to_llvm_call_callee_lookup.mlir (callees defined
+before and after the call, declared, recursive; a bare-pointer callee keeps
+its convention).
+---
+ .../BasicOpsLowering/BasicOpsLowering.cpp     | 15 +++++++-
+ .../convert_to_llvm_call_callee_lookup.mlir   | 35 +++++++++++++++++++
+ 2 files changed, 49 insertions(+), 1 deletion(-)
+ create mode 100644 tests/integration/conversion/convert_to_llvm_call_callee_lookup.mlir
+
+diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+index 9712f280..3b2561b3 100644
+--- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
++++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+@@ -4092,7 +4092,9 @@ struct BasicOpsLoweringPass
+ // `ensureRuntimeFunctions` above, which declares `__reussir_allocate` and
+ // friends at the index type — so driving the actual conversion with a
+ // default (64-bit index) converter breaks 32-bit-pointer targets: the
+-// declarations say `i32` while the emitted call sites say `i64`.
++// declarations say `i32` while the emitted call sites say `i64`. And a
++// second: the func dialect's patterns get a symbol table collection, as in
++// the upstream `convert-func-to-llvm`.
+ struct ConvertToLLVMPass
+     : public impl::ReussirConvertToLLVMPassBase<ConvertToLLVMPass> {
+   using Base::Base;
+@@ -4111,11 +4113,22 @@ struct ConvertToLLVMPass
+     // externalized declarations carry `!reussir.rc` signatures but no
+     // reussir ops would lose the Reussir type conversions.
+     for (mlir::Dialect *dialect : context->getLoadedDialects()) {
++      // The func dialect's interface adds the patterns below without a
++      // symbol table collection: its `func.call` lowering then finds every
++      // callee by a linear scan of the module, quadratic time in a module
++      // with many functions and calls.
++      if (llvm::isa<mlir::func::FuncDialect>(dialect))
++        continue;
+       if (auto *iface =
+               llvm::dyn_cast<mlir::ConvertToLLVMPatternInterface>(dialect))
+         iface->populateConvertToLLVMConversionPatterns(target, converter,
+                                                        patterns);
+     }
++    // The function conversion keeps the collection up to date (it replaces
++    // each `func.func` in the table by its `llvm.func`).
++    mlir::SymbolTableCollection symbolTables;
++    mlir::populateFuncToLLVMConversionPatterns(converter, patterns,
++                                               &symbolTables);
+     if (failed(mlir::applyPartialConversion(moduleOp, target,
+                                             std::move(patterns))))
+       signalPassFailure();
+diff --git a/tests/integration/conversion/convert_to_llvm_call_callee_lookup.mlir b/tests/integration/conversion/convert_to_llvm_call_callee_lookup.mlir
+new file mode 100644
+index 00000000..cbb93fa5
+--- /dev/null
++++ b/tests/integration/conversion/convert_to_llvm_call_callee_lookup.mlir
+@@ -0,0 +1,35 @@
++// RUN: %reussir-opt %s --reussir-convert-to-llvm | %FileCheck %s
++
++// `func.call` lowering looks its callee up (for `llvm.bareptr`) in a symbol
++// table collection that the function conversion keeps up to date, instead
++// of scanning the module once per call (quadratic in a module with many
++// functions and calls). Callees defined before or after the call, declared,
++// recursive, and already converted all resolve: the bare-pointer callee
++// still gets one pointer for its memref, the others the full descriptor.
++
++module {
++  // CHECK-LABEL: llvm.func @user(
++  // CHECK: llvm.call @later(%{{.*}}) : (i64) -> i64
++  // CHECK: llvm.call @decl(%{{.*}}) : (i64) -> i64
++  // CHECK: llvm.call @bare(%{{.*}}) : (!llvm.ptr) -> ()
++  // CHECK: llvm.call @wide(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, i64, i64, i64) -> ()
++  // CHECK: llvm.call @user(
++  func.func @user(%x: i64, %m: memref<4xi64>) -> i64 {
++    %a = func.call @later(%x) : (i64) -> i64
++    %b = func.call @decl(%a) : (i64) -> i64
++    func.call @bare(%m) : (memref<4xi64>) -> ()
++    func.call @wide(%m) : (memref<4xi64>) -> ()
++    %c = func.call @user(%b, %m) : (i64, memref<4xi64>) -> i64
++    return %c : i64
++  }
++  func.func private @decl(i64) -> i64
++  func.func @later(%x: i64) -> i64 { return %x : i64 }
++  // CHECK-LABEL: llvm.func @again(
++  // CHECK: llvm.call @bare(%{{.*}}) : (!llvm.ptr) -> ()
++  func.func @again(%m: memref<4xi64>) {
++    func.call @bare(%m) : (memref<4xi64>) -> ()
++    return
++  }
++  func.func private @bare(memref<4xi64>) attributes {llvm.bareptr}
++  func.func private @wide(memref<4xi64>)
++}
+-- 
+2.43.0
+

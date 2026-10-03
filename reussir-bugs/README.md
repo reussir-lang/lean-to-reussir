@@ -66,6 +66,14 @@ is, in the [apply list](#applying-the-patches).
 | [21](21-unterminated-placeholder.md) | bug | an unterminated `[:` in a polymorphic FFI texture is dropped | yes, wrong output (a string literal containing `[:` printed without it) | `[` escaped (`\x5b`) in the string literal table | 0016 | checked by the round-6 review (RV6L-01) | no |
 | [22](22-wildcard-wide-enum.md) | cost | a wildcard arm over a wide enum costs N^3 code (copied per constructor, releases expanded in line in each copy) | yes, build time (a derived BEq on 40 constructors: 9 minutes) | held wide values released out of line in wildcard arms (`l2r_sink`) | none | - | - |
 | [23](23-polyffi-link.md) | bug (build time) | the compiled polymorphic-FFI modules are linked one call each, quadratic in their number | yes, build time (a Std.Http program with 8241 instances: 65 minutes of linking) | none | 0017 | under review | no |
+| [28](28-unique-carrying-join.md) | bug | `-O aggressive`: a value fresh on one path and shared on another is proven unique, and the shared cell is updated in place | possible: no case seen (same specializations on three programs), any self call on a field-or-fresh value would be miscompiled | none | 0060 | under review | no |
+| [29](29-ffi-member-mlir.md) | bug (tooling) | the `--emit mlir` dump of a record with an `#[ffi]` member does not parse back | no, builds unaffected; every lean2rr dump fails to parse | - | 0061 | under review | no |
+| [30](30-call-lowering-lookup.md) | cost (build time) | the call lowering scans the module once per call: quadratic in functions times calls | yes, build time of large programs | none | 0062 | under review | no |
+| [31](31-deep-expression-stack.md) | bug | rrc overflows its stack on deeply nested expressions (8000 terms of `+`) | no, lean2rr bounds nesting (8 levels) | - | 0063 | under review | no |
+| [32](32-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected; large programs cannot be dumped | dump smaller programs | none | - | - |
+
+Numbers 24 to 27 went to entries written in parallel on other branches;
+their files join this directory when those branches are merged.
 
 Status words used in the entries' summaries:
 
@@ -105,7 +113,9 @@ Order and dependencies:
 - 0012 also applies alone.
 - Patches in `patches/` that are not on the list are not applied yet
   (column *Applied*). Each applies on top of the list: 0017 was made on
-  top of 0016 and also applies without it.
+  top of 0016 and also applies without it. 0060 to 0063 were made in that
+  order on top of 0017; they touch different files and apply in any
+  order.
 - lean2rr's runtime needs 0014 to build (`leanrt::drop` uses
   `reussir_rt::drop`, the pending stack 0014 adds to Reussir's runtime).
   Without the others, lean2rr programs still compile, but the bugs can
@@ -133,7 +143,10 @@ line per repro: `REPRODUCES` (the documented bad behaviour), `FIXED` (the
 expected output), `OTHER` (something else), or `SKIPPED` (a tool is
 missing, or a slow repro under `QUICK=1`), with what it saw and, in
 brackets, the rrc flags. BUG is a number (`1`, `02`, `13`, ...); the
-default is every entry except 22, whose generator is run by hand. The
+default is every entry except 22, whose generator is run by hand (and 24
+to 27, see the status table). Bug 30's repro is an MLIR module timed
+through `reussir-opt` (`ninja -C build reussir-opt`; SKIPPED when the
+checkout has not built it). The
 script's header documents its environment (`WORK`, a scratch directory;
 `RUSTC`; `QUICK=1`, which skips the slow repros 6, 10, 11, 16, 17, 20 and
 23). The Lean repros (13 and 20, and the programs generated for 16 and 17)
@@ -220,7 +233,8 @@ runtime patches), and lean2rr's runtime suite and corpus. The patches of
 the eight-patch set were reviewed in rounds 1 to 3 (one to three rounds
 each). 0014 went through a fourth round and was revised twice (rounds 4,
 4b, 4c). 0015 went through a fifth. The
-round-6 review of lean2rr checked 0016; 0017 is under review. The review
+round-6 review of lean2rr checked 0016; 0017 and 0060 to 0063 are under
+review. The review
 notes cited as "round N, finding X" are scratch files outside this
 repository, in `~/Documents/l2r-scratch/`: `rv-patches/FINDINGS.txt` for
 round 1, `rv-patches/roundN/FINDINGS.txt` for rounds 2 to 4c,
@@ -244,7 +258,8 @@ verdicts. Kinds:
 Each entry's summary starts with its kind, and with the audit's verdict
 where it gave one. Of the patches, by their entries' kinds,
 0002, 0004, 0005, 0009 (bugs 9 and 14), 0012 (a bug in Reussir's parser
-dependency `cstree`), 0016 and 0017 fix bugs; 0006 fixes a bug that has a
+dependency `cstree`), 0016, 0017, 0060, 0061 and 0063 fix bugs; 0062
+removes a build-time cost with a small fix (bug 30); 0006 fixes a bug that has a
 flag workaround (it is a speed choice over the flag; to be remeasured on an
 idle machine); 0007 is an optimization (kept because 0009 builds on it);
 0013 to 0015 implement a missing feature.
@@ -294,6 +309,26 @@ idle machine); 0007 is an optimization (kept because 0009 builds on it);
   mostly below the first cell of a free that starts at a record; a list of
   handles dropped by itself closes `L0 L7 L6 … L1` (see "Order that still
   differs" in [bug 13](13-long-list-drop.md); plan §10).
+
+- **TokenReuse's locality bonus is dead code (not a bug).** A review of
+  0030-0035 pointed at `lib/Transformation/TokenReuse/TokenReuse.cpp`,
+  function `heuristic`: walking from a new cell's field back to the cell it
+  was loaded from, it steps from a dispatch arm's argument to
+  `dispatch.getValue()`, the dispatch's *result*, where the scrutinee
+  (`getVariant()`) is meant; for a dispatch without a result the next step
+  reads a null value. The line never runs: the field list the walk starts
+  from is read from `create.getRcPtr().getDefiningOp()`, the `rc.create`
+  itself (its `getValue()` was meant), so the list is always empty. (Also,
+  in rrc's pipeline the first `ConvertToSTD` lowers every
+  `record.dispatch` before TokenReuse runs.) So the intended bonus for
+  reusing the cell a new cell's fields come from never applies (a missed
+  optimization: a donor scores 2 where the code means 4,
+  `~/Documents/l2r-scratch/morepatches-e/b6/tv2.mlir`), and the crash is
+  latent: with only the first mistake corrected, `reussir-opt
+  --reussir-token-reuse` crashes (SIGSEGV) on a result-less dispatch
+  (`b6/tv3.mlir`, checked on a throwaway build). A fix needs both changes
+  and would change which token is reused, a performance change; not
+  patched.
 
 ## Missing features that cost lean2rr performance
 

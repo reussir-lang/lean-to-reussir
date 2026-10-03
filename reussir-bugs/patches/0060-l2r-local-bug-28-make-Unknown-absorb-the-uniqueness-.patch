@@ -1,0 +1,339 @@
+From b8aedd378c7ec91343d8d483b11215d91a730bdf Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 3 Oct 2026 03:22:04 -0400
+Subject: [PATCH 60/63] l2r-local: bug 28: make Unknown absorb the
+ uniqueness-carrying join
+
+The provenance lattice of the uniqueness-carrying analysis
+(reussir-unique-carrying-recursion-analysis, run at -O aggressive) used
+one value, `Unknown`, both for "no contributing path yet" and for
+"provenance unknown". Its join treated `Unknown` as the identity, so a
+value that is fresh on one path and unknown on another (a field loaded out
+of a cell, an opaque call's result, a value shared by `rc.inc`) joined to
+"fresh" and was proven unique. A self call on such a value went to a
+`.unique` clone, whose `rc.assume_unique` became `llvm.assume(count == 1)`
+on a shared cell, and LLVM then took the unique fast path: the clone
+rebuilt the shared cell in place. A declaration's results (no returns)
+were also `Unknown`, so a call to an external function contributed
+nothing to a join either.
+
+Split the two: bottom is the empty provenance set (no fresh bit, no
+argument), the identity of the join, the start of a join over arms and
+the optimistic start of a function summary in the fixpoint; `Unknown` is
+top and absorbs the join. A declaration's summary is `Unknown` from the
+start; every defined function's starts at bottom, so the Kleene iteration
+is unchanged for code without unknown contributors.
+
+Repro (tests/integration/frontend/unique_carrying_shared_field.rr): `f`
+returns its argument on the base path and calls itself on `pick(..)`, a
+fresh cell or `p.0`, a field of `p` that `p` still holds; at -O aggressive
+`p.0` read 101 instead of 1 after the call (the clone's `bump` rebuilt it
+in place). Now 1 at every level. The lit test
+unique_carrying_soundness.mlir gains an opaque-call-or-fresh self call
+(no clone, function not carrying) and a field-or-fresh result (not
+carrying).
+---
+ .../UniqueCarryingRecursionAnalysis.cpp       | 64 ++++++++++++++-----
+ .../conversion/unique_carrying_soundness.mlir | 60 ++++++++++++++++-
+ .../frontend/unique_carrying_shared_field.c   | 26 ++++++++
+ .../frontend/unique_carrying_shared_field.rr  | 37 +++++++++++
+ 4 files changed, 170 insertions(+), 17 deletions(-)
+ create mode 100644 tests/integration/frontend/unique_carrying_shared_field.c
+ create mode 100644 tests/integration/frontend/unique_carrying_shared_field.rr
+
+diff --git a/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp b/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
+index 6a38323c..d1c85197 100644
+--- a/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
++++ b/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
+@@ -26,12 +26,17 @@
+ ///
+ /// # Provenance lattice
+ ///
+-/// Per rc value: `Unknown` (bottom) or a pair `{fresh, carriedArgs}` meaning
++/// Per rc value: `Unknown` (top) or a pair `{fresh, carriedArgs}` meaning
+ /// "on some path this is a fresh create / argument i". Join is the pointwise
+ /// union: the value is unique iff every contributor is, so a joined value is
+ /// proven unique under an assumption set exactly when *all* its carried bits
+-/// are assumed (freshness needs no assumption). `Unknown` is absorbing in
+-/// proofs (never unique) and the identity of the join.
++/// are assumed (freshness needs no assumption). `Unknown` stands for a
++/// contributor of unknown provenance (a field load, an opaque call, a shared
++/// value): it is never unique and absorbs the join, since a value that is
++/// unknown on one path and fresh on another is not unique. The empty pair
++/// (no fresh bit, no argument) is bottom, the identity of the join: no value
++/// reaches this point (yet) — the start of a join over arms, and the
++/// optimistic start of a function summary in the fixpoint below.
+ ///
+ /// # Sharing discipline (the part provenance alone cannot see)
+ ///
+@@ -64,8 +69,9 @@
+ ///
+ /// # Fixpoint
+ ///
+-/// Function summaries start at bottom and are recomputed from the previous
+-/// round until stable — a Kleene iteration of a monotone map (joins only
++/// Function summaries start at bottom (a declaration's at `Unknown`: its
++/// body is not visible) and are recomputed from the previous round until
++/// stable — a Kleene iteration of a monotone map (joins only
+ /// accumulate bits, bounded by the argument count), so it terminates at the
+ /// least fixpoint. Optimism about recursion is sound coinductively: any
+ /// value a terminating execution actually returns is produced by a finite
+@@ -112,11 +118,19 @@ static constexpr llvm::StringLiteral kCarryingUniquenessAttr =
+ static constexpr llvm::StringLiteral kUniqueCloneAttr = "reussir.unique_clone";
+ 
+ struct UniqueCarryingValue {
+-  bool unknown = true;
++  bool unknown = false;
+   llvm::BitVector carriedArgs;
+   bool fresh = false;
+ 
+-  static UniqueCarryingValue getUnknown() { return {}; }
++  // No contributing path (yet): the identity of the join.
++  static UniqueCarryingValue getBottom() { return {}; }
++
++  // Unknown provenance: absorbing, never unique.
++  static UniqueCarryingValue getUnknown() {
++    UniqueCarryingValue value;
++    value.unknown = true;
++    return value;
++  }
+ 
+   static UniqueCarryingValue getArgument(unsigned index) {
+     UniqueCarryingValue value;
+@@ -140,10 +154,8 @@ struct UniqueCarryingValue {
+ 
+   static UniqueCarryingValue join(const UniqueCarryingValue &lhs,
+                                   const UniqueCarryingValue &rhs) {
+-    if (lhs.unknown)
+-      return rhs;
+-    if (rhs.unknown)
+-      return lhs;
++    if (lhs.unknown || rhs.unknown)
++      return getUnknown();
+ 
+     UniqueCarryingValue joined;
+     joined.unknown = false;
+@@ -174,6 +186,10 @@ struct UniqueCarryingValue {
+       os << "Unknown";
+       return;
+     }
++    if (!fresh && carriedArgs.none()) {
++      os << "Bottom";
++      return;
++    }
+     os << "{fresh=" << (fresh ? "true" : "false") << ", args=[";
+     bool first = true;
+     for (int bit = carriedArgs.find_first(); bit >= 0;
+@@ -313,8 +329,7 @@ private:
+       const UniqueCarryingValue &summary = it->second[resultIndex];
+       if (summary.unknown)
+         return summary;
+-      UniqueCarryingValue mapped = UniqueCarryingValue::getUnknown();
+-      mapped.unknown = false;
++      UniqueCarryingValue mapped = UniqueCarryingValue::getBottom();
+       mapped.fresh = summary.fresh;
+       for (int argIndex = summary.carriedArgs.find_first(); argIndex >= 0;
+            argIndex = summary.carriedArgs.find_next(argIndex)) {
+@@ -362,7 +377,7 @@ private:
+   template <typename YieldOpT>
+   UniqueCarryingValue joinRegionYields(mlir::Operation *op,
+                                        unsigned resultIndex) {
+-    UniqueCarryingValue joined = UniqueCarryingValue::getUnknown();
++    UniqueCarryingValue joined = UniqueCarryingValue::getBottom();
+     for (mlir::Region &region : op->getRegions()) {
+       if (region.empty())
+         continue;
+@@ -412,12 +427,25 @@ static bool areEqualSummaries(const FunctionSummaryMap &lhs,
+   return true;
+ }
+ 
++// The start of the fixpoint: bottom for a function with a body (optimism
++// about recursion), `Unknown` for a declaration, whose results may be
++// anything.
++static llvm::SmallVector<UniqueCarryingValue>
++initialFunctionSummary(mlir::func::FuncOp funcOp) {
++  return llvm::SmallVector<UniqueCarryingValue>(
++      funcOp.getNumResults(), funcOp.isDeclaration()
++                                  ? UniqueCarryingValue::getUnknown()
++                                  : UniqueCarryingValue::getBottom());
++}
++
+ static llvm::SmallVector<UniqueCarryingValue>
+ computeFunctionSummary(mlir::func::FuncOp funcOp,
+                        const FunctionSummaryMap &summaries) {
++  if (funcOp.isDeclaration())
++    return initialFunctionSummary(funcOp);
+   ProvenanceEvaluator evaluator(summaries);
+-  llvm::SmallVector<UniqueCarryingValue> summary(
+-      funcOp.getNumResults(), UniqueCarryingValue::getUnknown());
++  llvm::SmallVector<UniqueCarryingValue> summary =
++      initialFunctionSummary(funcOp);
+   funcOp.walk([&](mlir::func::ReturnOp returnOp) {
+     for (auto [index, operand] : llvm::enumerate(returnOp.getOperands())) {
+       if (!isRcType(operand.getType()))
+@@ -691,7 +719,11 @@ struct UniqueCarryingRecursionAnalysisPass
+         op->removeAttr(kCarryingUniquenessAttr);
+     });
+ 
++    // Calls to a symbol outside this map (not a `func.func`) are Unknown.
+     FunctionSummaryMap summaries;
++    moduleOp.walk([&](mlir::func::FuncOp funcOp) {
++      summaries[funcOp.getName()] = initialFunctionSummary(funcOp);
++    });
+ 
+     while (true) {
+       FunctionSummaryMap nextSummaries;
+diff --git a/tests/integration/conversion/unique_carrying_soundness.mlir b/tests/integration/conversion/unique_carrying_soundness.mlir
+index 3661ab13..59bea40b 100644
+--- a/tests/integration/conversion/unique_carrying_soundness.mlir
++++ b/tests/integration/conversion/unique_carrying_soundness.mlir
+@@ -8,7 +8,10 @@
+ //     recursion, the dominant frontend shape);
+ //   - loop-carrying scf ops stay Unknown (their results may be the init
+ //     operands on a zero-trip count);
+-//   - `skip_rc` creates are not fresh (their count is not initialized here).
++//   - `skip_rc` creates are not fresh (their count is not initialized here);
++//   - a contributor of unknown provenance (an opaque call's result, a value
++//     loaded from a field) absorbs the join: a value that is unknown on one
++//     path and fresh on another is not unique.
+ 
+ !nilty = !reussir.record<compound "list.nil" [value] {}>
+ !consty = !reussir.record<compound "list.cons" [value] {i64, !reussir.record<variant "list" incomplete>}>
+@@ -109,4 +112,59 @@ module @test attributes {dlti.dl_spec = #dlti.dl_spec<#dlti.dl_entry<i64, dense<
+     }
+     return %r : !rclist
+   }
++  // Soundness: the self call's argument is an opaque call's result (possibly
++  // shared) on one path and fresh on the other; the join is Unknown, so no
++  // uniqueness may be assumed and the function, which may return that
++  // argument, does not carry uniqueness either.
++  // CHECK-LABEL: func.func private @opaque_or_fresh_arg(
++  // CHECK-NOT: reussir.carrying_uniqueness
++  // CHECK-NOT: func.call @opaque_or_fresh_arg.unique
++  // CHECK: return
++  func.func private @opaque(i64) -> !rclist
++  func.func private @opaque_or_fresh_arg(%l: !rclist, %n: i64) -> !rclist attributes {llvm.linkage = #llvm.linkage<internal>} {
++    %c0 = arith.constant 0 : i64
++    %c1 = arith.constant 1 : i64
++    %cond = arith.cmpi eq, %n, %c0 : i64
++    %r = scf.if %cond -> (!rclist) {
++      scf.yield %l : !rclist
++    } else {
++      reussir.rc.dec(%l : !rclist) : !reussir.nullable<!tk>
++      %odd = arith.cmpi eq, %n, %c1 : i64
++      %y = scf.if %odd -> (!rclist) {
++        %s = func.call @opaque(%n) : (i64) -> !rclist
++        scf.yield %s : !rclist
++      } else {
++        %tag = reussir.record.compound : !nilty
++        %v = reussir.record.variant [1] (%tag : !nilty) : !listty
++        %fresh = reussir.rc.create value(%v : !listty) : !rclist
++        scf.yield %fresh : !rclist
++      }
++      %n1 = arith.subi %n, %c1 : i64
++      %rec = func.call @opaque_or_fresh_arg(%y, %n1) : (!rclist, i64) -> !rclist
++      scf.yield %rec : !rclist
++    }
++    return %r : !rclist
++  }
++
++  // Soundness: a result that is a field loaded out of a cell (shared with
++  // that cell) on one path and fresh on the other is not carrying.
++  // CHECK-LABEL: func.func private @field_or_fresh(
++  // CHECK-NOT: reussir.carrying_uniqueness
++  // CHECK: return
++  func.func private @field_or_fresh(%c: !reussir.ref<!consty>, %n: i64) -> !rclist attributes {llvm.linkage = #llvm.linkage<internal>} {
++    %c0 = arith.constant 0 : i64
++    %cond = arith.cmpi eq, %n, %c0 : i64
++    %r = scf.if %cond -> (!rclist) {
++      %p = reussir.ref.project (%c : !reussir.ref<!consty>) [1] : !reussir.ref<!rclist>
++      %t = reussir.ref.load (%p : !reussir.ref<!rclist>) : !rclist
++      reussir.rc.inc(%t : !rclist)
++      scf.yield %t : !rclist
++    } else {
++      %tag = reussir.record.compound : !nilty
++      %v = reussir.record.variant [1] (%tag : !nilty) : !listty
++      %fresh = reussir.rc.create value(%v : !listty) : !rclist
++      scf.yield %fresh : !rclist
++    }
++    return %r : !rclist
++  }
+ }
+diff --git a/tests/integration/frontend/unique_carrying_shared_field.c b/tests/integration/frontend/unique_carrying_shared_field.c
+new file mode 100644
+index 00000000..ab031d9f
+--- /dev/null
++++ b/tests/integration/frontend/unique_carrying_shared_field.c
+@@ -0,0 +1,26 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for unique_carrying_shared_field.rr.
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++extern uint64_t unique_carrying_shared_field(uint64_t n);
++
++int main(void) {
++  uint64_t result = unique_carrying_shared_field(3);
++  if (result != 101001) {
++    fprintf(stderr, "FAIL: expected 101001, got %llu\n",
++            (unsigned long long)result);
++    abort();
++  }
++  return 0;
++}
+diff --git a/tests/integration/frontend/unique_carrying_shared_field.rr b/tests/integration/frontend/unique_carrying_shared_field.rr
+new file mode 100644
+index 00000000..260d938f
+--- /dev/null
++++ b/tests/integration/frontend/unique_carrying_shared_field.rr
+@@ -0,0 +1,37 @@
++// A uniqueness-carrying self call must not assume uniqueness of an argument
++// that is unique on one path but shared on another. `f` returns its argument
++// `x` on the base path, so it carries argument 0, and its self call passes
++// `pick(..)`: a fresh cell, or `p.0`, a field of `p` that `p` still holds
++// (count 2). The analysis used to join the unknown provenance of `p.0` away
++// (`Unknown` was the identity of its join), proved the argument unique, and
++// called a `.unique` clone asserting count == 1 at entry; `bump` then rebuilt
++// the shared cell in place, so `p.0` read 101 instead of 1 at -O aggressive.
++
++// RUN: %rrc %s -o %t.o --relocation-mode pic -Oaggressive
++// RUN: %cc %t.o %S/unique_carrying_shared_field.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++// RUN: %rrc %s -o %t.default.o --relocation-mode pic
++// RUN: %cc %t.default.o %S/unique_carrying_shared_field.c -o %t.default.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.default.exe
++
++struct B(u64)
++struct P(B)
++
++// Rebuilds b: in place when b's cell is unique.
++fn bump(b : B) -> B { B { b.0 + 100 } }
++
++// a (unique here) or p.0 (shared with p).
++fn pick(a : B, p : P, n : u64) -> B { if n == 2 { p.0 } else { a } }
++
++fn f(x : B, p : P, n : u64) -> B {
++    if n == 0 { x } else { f(pick(bump(x), p, n), p, n - 1) }
++}
++
++// r.0 * 1000 + p.0.0: 101001 (r is p.0 rebuilt; p.0 is untouched).
++pub fn shared_field(n : u64) -> u64 {
++    let p = P { B { 1 } };
++    let r = f(B { 5 }, p, n);
++    r.0 * 1000 + p.0.0
++}
++
++extern "C" trampoline "unique_carrying_shared_field" = shared_field;
+-- 
+2.43.0
+
