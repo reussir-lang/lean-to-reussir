@@ -103,13 +103,18 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   low-bit test of Reussir's `rc.inc` of `y` (patch 0050's guard; `y` is
   often a field just read out of a cell that is then released) and keeps
   it in a callee-saved register across the release calls in between. In
-  cfold's `constFolding`, which recurses about 2^(n-1) deep without a tail
-  call, that one register made the frame 96 bytes instead of 80: peak RSS
-  1100 MB instead of 969 MB at n = 23 (regress-cc0 finding 1, cc0d43c;
-  native 1298 MB). With the parity test the frame is 80 bytes again. The
-  fast path costs the same: cfold executes 0.8% fewer instructions, and a
-  probe of small-`Nat` loops (collatz, sums, a two-field record) the same
-  number (perf-cfold).
+  cfold's `constFolding`, which recurses about 2^n deep without a tail
+  call (8M frames at n = 23), that one register made the frame 96 bytes
+  instead of 80. Measured on perf-cfold (max RSS of the program, KB/1024,
+  n = 23): 1074 MB with `x & y & 1`, 946 MB with the parity test, 1000 MB
+  before the one-word `Nat` (a684336), 1268 MB native; the regression was
+  found by the regress-cc0 run (finding 1, bisected to cc0d43c). Each
+  inlined add or mul is 1 to 2 instructions longer (computed before the
+  test, the sum becomes `(x + y) - 1`, so the carry check needs a `cmp`
+  instead of the flags of `adds`), but whole programs execute no more
+  instructions: cfold 0.8% fewer, Bignum, Liasolver and a probe of
+  small-`Nat` loops (collatz, sums, a two-field record) the same within
+  run-to-run noise.
 - **Where:** `prelude.rr`: `lean_nat_add`, `lean_nat_mul`.
 - **Remove only if:** Reussir's guard stops sharing the low-bit test, or
   measurement shows the frames unaffected. The other binary operations

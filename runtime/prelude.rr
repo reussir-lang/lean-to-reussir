@@ -288,7 +288,8 @@ fn l2r_u64_pow_checked(x : u64, e : u64) -> u64 [{ x.checked_pow(e as u32).unwra
 // `y & 1` with the low-bit test of Reussir's `rc.inc` of `y` (a field just
 // read from a cell, patch 0050's guard) and keeps it in a callee-saved
 // register across the calls in between, which grew cfold's recursive
-// `constFolding` frame from 80 to 96 bytes (+7.4% peak memory).
+// `constFolding` frame from 80 to 96 bytes (peak memory at n = 23:
+// 1074 MB instead of 946).
 fn lean_nat_add(a : Nat, b : Nat) -> Nat {
     let x = l2r_nat_raw(a);
     let y = l2r_nat_raw(b);
