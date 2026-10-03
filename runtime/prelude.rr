@@ -3273,15 +3273,17 @@ fn l2r_shim_tcp_send(s : LHandle, d : RVec<u8>, r : LPromise) -> LHandle [{
 fn l2r_shim_sock_recv(s : LHandle, size : u64, r : LPromise) -> LHandle [{
     { let o = leanrt::net::sock_recv(&s, size, r); leanrt::rc_release(s); o }
 }];
+// A canceled read or accept's promise is dropped here, once the primitive
+// has returned (as `l2r_shim_timer_ctl_h`).
 #[ffi(import)]
-fn l2r_shim_sock_cancel_recv_h(s : LHandle) -> u64 [{ { leanrt::net::sock_cancel_recv(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_sock_cancel_recv_h(s : LHandle) -> u64 [{ { let r = leanrt::net::sock_cancel_recv(&s); leanrt::rc_release(s); drop(r); 0 } }];
 fn l2r_shim_sock_cancel_recv(s : LHandle) -> L2RUnit { l2r_unit_of(l2r_shim_sock_cancel_recv_h(s)) }
 #[ffi(import)]
 fn l2r_shim_tcp_accept(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_accept(&s, r); leanrt::rc_release(s); o } }];
 #[ffi(import)]
 fn l2r_shim_tcp_try_accept(s : LHandle) -> LHandle [{ { let o = leanrt::net::tcp_try_accept(&s); leanrt::rc_release(s); o } }];
 #[ffi(import)]
-fn l2r_shim_tcp_cancel_accept_h(s : LHandle) -> u64 [{ { leanrt::net::tcp_cancel_accept(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_tcp_cancel_accept_h(s : LHandle) -> u64 [{ { let r = leanrt::net::tcp_cancel_accept(&s); leanrt::rc_release(s); drop(r); 0 } }];
 fn l2r_shim_tcp_cancel_accept(s : LHandle) -> L2RUnit { l2r_unit_of(l2r_shim_tcp_cancel_accept_h(s)) }
 #[ffi(import)]
 fn l2r_shim_tcp_shutdown(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_shutdown(&s, r); leanrt::rc_release(s); o } }];

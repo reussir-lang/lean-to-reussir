@@ -276,8 +276,9 @@ impl Pending {
 }
 
 /// Promises a primitive gave up, for its caller to drop once the primitive
-/// has returned (`timer_stop`): the continuation of a canceled operation,
-/// then the program's promise.
+/// has returned (`timer_stop`; one, the canceled operation's, for
+/// `sock_cancel_recv` and `tcp_cancel_accept`): the continuation of a
+/// canceled operation, then the program's promise.
 pub type GivenUp = [Option<LPromise>; 2];
 
 /// Complete operation `o` (its promise `r`) now: the continuation runs on
@@ -1107,11 +1108,14 @@ pub fn sock_recv(h: &LHandle, size: u64, r: LPromise) -> LHandle {
     o
 }
 
-/// `cancelRecv`: a pending read is dropped (its promise stays unresolved).
-pub fn sock_cancel_recv(h: &LHandle) {
-    if let Some((p, _)) = sock(h).read.take() {
-        p.cancel();
-    }
+/// `cancelRecv` (also of a `waitReadable`): a pending read is dropped (its
+/// promise stays unresolved). The canceled operation's promise, whose
+/// continuation holds the program's promise, is returned for the caller to
+/// drop once the primitive has returned (`l2r_shim_sock_cancel_recv_h`): the
+/// program's promise is released on the caller's context, as natively in
+/// the call (its `sync` dependents run before it returns; `timer_stop`).
+pub fn sock_cancel_recv(h: &LHandle) -> Option<LPromise> {
+    sock(h).read.take().map(|(p, _)| p.cancel_here())
 }
 
 /// `uv_accept` at once: the new socket, `None` if no connection waits.
@@ -1181,10 +1185,10 @@ pub fn tcp_try_accept(h: &LHandle) -> LHandle {
     o
 }
 
-pub fn tcp_cancel_accept(h: &LHandle) {
-    if let Some(p) = sock(h).accept.take() {
-        p.cancel();
-    }
+/// `cancelAccept`: a pending accept is dropped; its operation's promise is
+/// returned for the caller to drop (as `sock_cancel_recv`).
+pub fn tcp_cancel_accept(h: &LHandle) -> Option<LPromise> {
+    sock(h).accept.take().map(Pending::cancel_here)
 }
 
 /// `uv_shutdown`: after the pending writes.

@@ -2792,9 +2792,14 @@ Each item says what differs and when.
   once: when that was the last reference, the promise is resolved with
   `none`, and its `sync` dependents run, that much later (generated code
   does not run inside a runtime primitive). A timer's or signal watcher's
-  `stop` and `cancel` hand their promise back to the extern's glue, which
-  releases it on the caller's context once the primitive has returned, as
-  natively on the calling thread (tests `RtTimerStopDropped`).
+  `stop` and `cancel`, and a socket's `cancelAccept` and `cancelRecv`
+  (also of a `waitReadable`), hand the promise back to the extern's glue,
+  which releases it on the caller's context once the primitive has
+  returned, as natively in the call (tests `RtTimerStopDropped`,
+  `RtSockCancel`). Natively these calls hold the event loop's lock while
+  they release the promise, so a `sync` dependent that blocks there for
+  good (`Promise.result!` of the dropped promise) also stops every timer
+  and socket of the program; here only the calling context blocks.
 - *Promises released inside a free* (§5.14): the `sync` dependents of a
   promise dropped unresolved because a container holding it is freed run
   once the whole free is over, where natively they run when the free
