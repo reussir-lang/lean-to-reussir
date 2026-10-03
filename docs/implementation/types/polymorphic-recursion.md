@@ -67,8 +67,8 @@ has the rules. Paths are relative to `lean2rr/LeanToReussir/`.
   `MonoConfig.maxInstancesPerDecl` (1024), `normTypeArg`, `treeSizeUpTo`,
   `instanceName`; static dictionaries: `staticDict?` (depth 64).
 - **Remove only if:** never. The values can change; the `--stats` dry run
-  (`Specialize.lean`) bounds its type arguments the same way once branch
-  `fix-r7-front` is merged (round 7 RV7F-03).
+  (`Specialize.lean`: `visitConstApp`) bounds its type arguments the same way
+  (round 7 RV7F-03, 4ad6df7).
 
 ### A field type that grows is the uniform instantiation
 

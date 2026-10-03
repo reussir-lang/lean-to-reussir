@@ -102,8 +102,9 @@ lean2rr's files.
 
 - **What:** No workaround. Patch 0017 (not applied) links all texture
   modules through one linker. Fewer generic instances would shrink both
-  the compile and the link; the conversion-origin calls are two thirds of
-  them (they go with the origin table, branch `mem-identity`).
+  the compile and the link (at the time two thirds of them were the
+  conversion-origin calls, which went with the origin table: mem-identity,
+  7869383).
 - **Why:** A `Std.Http` program (8241 instances) spent 65 minutes linking
   ([23-polyffi-link.md](../../../reussir-bugs/23-polyffi-link.md)).
 - **Where:** n/a.

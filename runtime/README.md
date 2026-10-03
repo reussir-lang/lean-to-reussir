@@ -626,16 +626,15 @@ lean2rr's dev branch (the tests pass with it).
 30. *done* — `Lean.Name.beq` (`lean_name_eq`): the prelude cannot define it (`Name`
     is a Lean type); its reference body (structural equality) is what the
     native code computes.
-31. *done* in the runtime — `ptrAddrUnsafe` of a value lean2rr wraps at
-    the call (`ElemBox{x}`, function-value wrappers, rebuilt structures)
-    measured the fresh wrapper, whose memory the next wrapper can reuse:
-    the runtime now answers a fresh number for any object whose count is 1
-    at the call (it dies with the call, so it equals no other live value)
-    (test `RtPtrAddr`). lean2rr passes a heap value's own handle when it has
-    one, to `l2r_ptr_addr_obj`, which answers the pointer whatever the count
-    (the value is the Lean object; `ptrEq a b` may release `a`'s last other
-    reference before `b`'s address is taken), and the field of a `[value]`
-    struct (test `RtPtrEqFix`).
+31. *done* — `ptrAddrUnsafe` of a value lean2rr wrapped at the call
+    (`ElemBox{x}`, function-value wrappers) measured the temporary wrapper,
+    whose memory the next wrapper can reuse. lean2rr now takes the value in
+    its own representation (not converted for the call): a heap value's
+    handle goes to `l2r_ptr_addr_obj`/`l2r_ptr_addr_rec`, which answer the
+    pointer whatever the count (`ptrEq a b` may release `a`'s last other
+    reference before `b`'s address is taken), and a `[value]` struct
+    answers its field's (translation plan §9; tests `RtPtrAddr`,
+    `RtPtrSound`).
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store `Nat`/`Int`/enum-like values directly; and `mi_free` takes mimalloc's
@@ -659,8 +658,9 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   `Unit` (`l2r_addr_word`, `l2r_addr_nat`, `l2r_addr_int`), the bits of a
   `UInt64` or `Float`, and a number answered only once (`l2r_addr_fresh`:
   even, in `[2^62, 2^63)`) for a `Nat` in `[2^63, 2^64)` or an `Int`
-  outside `int32`. Equal answers mean the same cell or equal values; a
-  value lean2rr converted to another representation is a new object.
+  outside `int32`. For two values alive at the same time, equal answers
+  mean the same cell or equal values; a value lean2rr converted to another
+  representation is a new object.
 - Everything runs on one thread: tasks run when they are first needed,
   when the running code blocks, or when `main` returns (a schedule native
   Lean can produce; translation plan §5.14). Contexts switch only when one

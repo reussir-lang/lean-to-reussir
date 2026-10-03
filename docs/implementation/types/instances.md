@@ -48,21 +48,25 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   keyed by the dictionary too (`InstKey.dicts`). That instance rebuilds the
   dictionary as `let`s at its start and binds the parameter to it. The
   parameter itself stays, unused, so the arity is unchanged. A dictionary
-  deeper than 64 is not static.
+  deeper than 64 is not static, nor is one holding a constant whose
+  evaluation computes something (calls a function other than to build a
+  constructor, a closure or another such constant: `constComputes`); the
+  callee reads that constant at run time, as natively.
 - **Why:** Lean's base `simp` folds only dictionaries that are
   `let`-bound in the same function. `Monad Id`, passed as a parameter from
   `Array.map` to `Array.mapM`, would stay a runtime record with polymorphic
   methods, which Reussir cannot type. The depth bound stops polymorphic
-  recursion from building ever larger dictionaries.
-- **Where:** `Mono.lean`: `staticDict?`, `dictLets`, `instantiate`,
-  `renameApp`; plan [§2.4](../../translation-plan.md#24-type-classes).
+  recursion from building ever larger dictionaries. A computing constant
+  in a static dictionary had its body copied into the callee by `simp`, to
+  run at every call (`instance : Inhabited Grid := ⟨mkGrid 300⟩`: 4.3 s vs
+  0.00 s native; round 7 RV7F-02, 4c11605; test `RtDictConst`).
+- **Where:** `Mono.lean`: `staticDict?`, `constComputes`, `dictLets`,
+  `instantiate`, `renameApp`; plan [§2.4](../../translation-plan.md#24-type-classes).
 - **Remove only if:** never: without it, type classes with polymorphic
   methods fall back to `Box`. The rebuilding is a known divergence (an
   instance's code may run more often than natively: plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
-  "Dictionary rebuilding"). In progress on branch `fix-r7-front` (round 7
-  RV7F-02): a constant whose evaluation computes something is not part of
-  a static dictionary.
+  "Dictionary rebuilding").
 
 ### Stage 1's `simp` does not inline definitions
 

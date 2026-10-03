@@ -5,11 +5,13 @@ import LeanToReussir.Lower.Promises
 lean2rr does not emulate native pointer identity (translation plan §9).
 `ptrAddrUnsafe x` answers the address of the cell that holds `x` in its
 own representation, where it has one, and otherwise a word computed from
-the value. Two answers are therefore equal only for the same cell or for
-equal values: `ptrEq` saying `true` still means equal values, which code
-using it as a shortcut for equality needs (`Array.mapMono`). Values that
-are natively one object can answer differently (a value and its
-conversion to another representation, two boxings of one value). -/
+the value. For two values alive at the same time, equal answers therefore
+mean the same cell or equal values: `ptrEq` saying `true` still means equal
+values, which code using it as a shortcut for equality needs
+(`Array.mapMono`; every library caller compares live values). A temporary
+can get the cell of an earlier one that has died (plan §9). Values that are
+natively one object can answer differently (a value and its conversion to
+another representation, two boxings of one value). -/
 
 namespace LeanToReussir
 open Lean Compiler LCNF
@@ -25,7 +27,8 @@ def u64Lit (k : Nat) : LowerM RR.Expr := do
   address (a nullary constructor of a shared enum: its immediate);
 - a `Nat` below 2^63, an `Int` in the `int32` range, `UInt8/16/32`,
   `Char`, `Bool`, an enumeration: the boxed scalar word `2n+1`; `Unit`
-  and erased values: `1`;
+  and erased values in typed code: `1` (in uniform code an erased value is
+  a `Box`, the boxed unit, which answers its cell);
 - `UInt64`, `Float`, `Float32`: their bits;
 - a `[value]` struct: its field's;
 - anything else (a `Nat` from 2^63 to 2^64, an `Int` outside `int32`):

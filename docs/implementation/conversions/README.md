@@ -19,7 +19,6 @@ and [§5.5](../../translation-plan.md#55-cases).
 - [casts.md](casts.md): `unsafeCast` between different types, following
   Lean's native layouts and boxed scalars.
 
-The identity a converted value answers, and the origin table behind it,
-are in [../representations/identity.md](../representations/identity.md)
-and [../ownership.md](../ownership.md#converted-values-record-their-origin-being-removed)
-(both being removed).
+A converted value is a new, unshared value: it is not `ptrEq` to its
+original, and an update of it never shows in the original
+([../representations/identity.md](../representations/identity.md)).

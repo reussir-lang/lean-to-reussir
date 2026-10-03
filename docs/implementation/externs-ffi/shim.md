@@ -28,14 +28,18 @@ compiles it with the program. Plan
 
 ### The shim is loaded with the program and treated as library
 
-- **What:** The driver puts lean2rr's build directory on `LEAN_PATH`, and
-  lean2rr imports `L2RShim` with the program when it is there. It counts as
-  a toolchain module: no startup work, constants evaluated lazily, and its
-  `unsafe`/`@[extern]`/`@[export]` declarations do not make a program one
-  that can cast.
+- **What:** The driver names lean2rr's build library directory in
+  `L2R_SHIM_DIR`; lean2rr puts it last on the search path and always
+  imports `L2RShim` with the program, stopping when the directory does not
+  hold it. It counts as a toolchain module: no startup work, constants
+  evaluated lazily, and its `unsafe`/`@[extern]`/`@[export]` declarations
+  do not make a program one that can cast. A program module named
+  `L2RShim.*` is rejected
+  ([../translator.md](../translator.md#program-modules-named-like-leans-library-are-rejected)).
 - **Why:** The shim is lean2rr's own trusted code, not the program's (RV6T
-  fixes, 0d358d4).
-- **Where:** `Env.lean`: `shimModules`, `loadEnvironment`;
+  fixes, 0d358d4). A wrong shim directory failed only in rrc (round 8
+  RV8L-06, 694f9cf).
+- **Where:** `Env.lean`: `shimDir`, `shimModules`, `loadEnvironment`;
   `CompileRecord.lean`: `isToolchainModule`; `scripts/l2r.py`:
   `SHIM_DIR`.
 - **Remove only if:** never.

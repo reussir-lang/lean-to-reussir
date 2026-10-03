@@ -29,18 +29,37 @@ relative to `lean2rr/` unless they start with `scripts/`.
 
 ### Program modules named like Lean's library are rejected
 
-- **What:** A module named `Init.*`, `Std.*`, `Lean.*` or `Lake.*` whose
-  `.olean` is not under the toolchain's library directory is an error at
-  load ("rename it").
-- **Why:** lean2rr takes such modules for Lean's library (constants
-  evaluated lazily, `initialize` actions run by the runtime, `unsafe` code
-  trusted when deciding whether the program casts); a program module with
-  such a name would silently be translated as a different program (round 6
-  RV6T-06, 177b9be). Natively the name is allowed when the toolchain's
-  module of that name is not imported (plan
-  [§10](../translation-plan.md#10-known-divergences-and-unsupported-features)).
-- **Where:** `LeanToReussir/Env.lean`: `loadEnvironment`;
-  `LeanToReussir/CompileRecord.lean`: `isToolchainModule`.
+- **What:** Every loaded module named `Init.*`, `Std.*`, `Lean.*` or
+  `Lake.*` must be the module of that name in the library of the toolchain
+  lean2rr is built with, and every module named `L2RShim.*` the one in the
+  shim directory; otherwise loading stops ("rename it"). The check is by
+  file identity, not path: the `.olean` and its `.olean.server` and
+  `.olean.private` parts (lean2rr reads the private part) must each be the
+  same file (one path, a symbolic or hard link) or have the same contents.
+  The toolchain is the one lean2rr was built with (its sysroot recorded at
+  build time), not the one `lean` or the working directory's
+  `lean-toolchain` names. The shim directory (`L2R_SHIM_DIR`, set by the
+  driver; else `lib/lean` next to lean2rr's `bin/`) is last on the search
+  path and must hold `L2RShim.olean`, or loading stops naming it.
+- **Why:** lean2rr takes such modules for Lean's library or its shim
+  (constants evaluated lazily, `initialize` actions run by the runtime,
+  `unsafe` code trusted when deciding whether the program casts); a
+  program module with such a name would silently be translated as a
+  different program (round 6 RV6T-06, 177b9be; `L2RShim.*` was not
+  checked: dropped `initialize` actions, an "unreachable" panic, round 8
+  RV8L-01, 782c92b). Comparing paths rejected the real library reached
+  through hard links, or from a directory whose `lean-toolchain` names
+  another Lean (RV8L-02, 782c92b). A missing shim failed only in rrc
+  (RV8L-06), and a module whose private part differed was accepted
+  (RV8L-07; both 694f9cf). Natively the name is allowed when the
+  toolchain's module of that name is not imported (plan
+  [§10](../translation-plan.md#10-known-divergences-and-unsupported-features),
+  "Module names").
+- **Where:** `LeanToReussir/Env.lean`: `toolchainSysroot`
+  (`l2r_build_sysroot%`), `shimDir`, `sameFile`, `moduleDiff`,
+  `reservedNames`, `shimModules`, `loadEnvironment`;
+  `LeanToReussir/CompileRecord.lean`: `isToolchainModule`;
+  `scripts/l2r.py` (`L2R_SHIM_DIR`). Test `tests/env/run.sh`.
 - **Remove only if:** library modules are recognized otherwise than by
   name.
 

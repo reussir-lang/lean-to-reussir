@@ -22,11 +22,13 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
 - **What:** When `simp` turns `node l k r` rebuilt in an arm back into
   the matched `t`, the arm returns `t` itself, with its sharing, not a
   copy.
-- **Why:** A rebuilt copy (863d8ca, a workaround for Reussir's token reuse)
-  broke code that stops when `ptrEq` says a step changed nothing (Lean's
-  `Expr.replace`, fixpoints never stopped), turned a DAG kept by a
-  traversal into a tree (Rp3Dag 25: 1.58 GB), and made a lookup returning
-  an existing node allocate one per call (adv3 RP3-1/RP3-2, d1a507d).
+- **Why:** A rebuilt copy of a value that may be shared (863d8ca, a
+  workaround for Reussir's token reuse) broke code that stops when `ptrEq`
+  says a step changed nothing (Lean's `Expr.replace`: fixpoints never
+  stopped), turned a DAG kept by a traversal into a tree (Rp3Dag 25:
+  1.58 GB), and made a lookup returning an existing node allocate one per
+  call (adv3 RP3-1/RP3-2, d1a507d). Only a freshly built value is rebuilt
+  (below).
 - **Where:** `Lower/Code.lean`: `lowerCode` (the `.return` case).
 - **Remove only if:** never. The cost (Reussir cannot reuse the matched
   cell in the other arms while it stays live) is addressed by
@@ -34,24 +36,25 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
 
 ### Fresh values returned whole are rebuilt (`fresh-rebuild`)
 
-- **What:** In a program that never observes identity or sharing, an arm
-  that binds every field and only returns the matched value returns the
-  constructor rebuilt from its fields, when the matched value is freshly
-  built: bound in the same function to a constructor application, or to a
-  full call of a declaration all of whose results are freshly built (a
-  whole-program analysis).
+- **What:** An arm that binds every field and only returns the matched
+  value returns the constructor rebuilt from its fields, an equal value,
+  when the matched value is freshly built: bound in the same function to a
+  constructor application, or to a full call of a declaration all of whose
+  results are freshly built (a whole-program analysis).
 - **Why:** The error arm of every `ExceptT`/`Option`/`EStateM` bind
   (`| .error _ => r`) kept the matched value live, so each bind's success
   path allocated and freed a cell. Rebuilt, every arm consumes the cell
   and Reussir reuses it (MonadicInterp 1.25x → 1.08x native, cb884c1).
   Parameters, fields, constants and results of lookups, externs or
-  function values are still returned themselves (they may be shared).
+  function values are still returned themselves (they may be shared: a
+  copy would allocate). Identity and sharing, which alone tell a value
+  from an equal copy, are not preserved
+  ([../representations/identity.md](../representations/identity.md)), so
+  the pass has no identity guard any more (it had one until c5eaca5).
 - **Where:** `Opt/FreshRebuild.lean`: `enumFields`, `freshDecls`,
-  `bodyFresh`, `onlyReturned`; `Lower/Ctx.lean`: `CodeCtx.rebuild`,
-  `CodeCtx.letCalls`; guard: `LowerCtx.observesIdentity`
-  ([../representations/identity.md](../representations/identity.md#whether-the-program-observes-identity-is-a-whole-program-fact)).
-- **Remove only if:** the pass is off (correct, slower). Branch
-  `mem-identity` (in progress) drops the identity guard.
+  `bodyFresh`, `onlyReturned`, `freshApp`; `Lower/Ctx.lean`:
+  `CodeCtx.rebuild`, `CodeCtx.letCalls`.
+- **Remove only if:** the pass is off (correct, slower).
 
 ### Fields of a live matched value are bound where they are used (`lazy-fields`)
 
