@@ -1608,7 +1608,10 @@ A generated Reussir `#[main]` does what Lean's generated `main` does
    stack, as Lean's runtime does for `main` (deep non-tail recursion is
    common in Lean programs); `main` starts there with the process's
    standard streams, as a new thread does natively, whatever the
-   initializers redirected;
+   initializers redirected. With `LEAN_MAIN_USE_THREAD=0`, as natively,
+   there is no new thread: `main` runs on the process's main thread after
+   the initializers and keeps the standard streams they left (an
+   `IO.setStdout` in an `initialize` still applies in `main`);
 3. on that thread it calls the translated `main`, passing the argument list
    (without the program name) if `main` takes one, and the world;
 4. it runs the IO tasks still pending, whatever `main` returned, as
