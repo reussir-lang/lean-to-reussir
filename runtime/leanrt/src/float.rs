@@ -132,36 +132,71 @@ pub mod libm {
         pub fn acoshf(x: f32) -> f32;
         pub fn asinhf(x: f32) -> f32;
         pub fn atanhf(x: f32) -> f32;
+        fn dlopen(name: *const std::ffi::c_char, flags: i32) -> *mut std::ffi::c_void;
         fn dlsym(handle: *mut std::ffi::c_void, name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
     }
 
-    /// Rust's `compiler_builtins` defines its own (musl-derived) `cbrt` and
-    /// `cbrtf`, which the static link binds to; they differ from glibc's by
-    /// an ulp. Resolve glibc's through the dynamic symbol table instead.
+    /// `Float.cbrt` and `Float32.cbrt` are glibc's `cbrt` and `cbrtf`
+    /// natively. A direct `extern "C"` declaration cannot reach them:
+    /// Rust's `compiler_builtins`, linked into every executable ahead of
+    /// libm, defines its own `cbrt` (a port of CORE-MATH's correctly rounded
+    /// one) and `cbrtf` (FreeBSD's) on Linux, and the static link binds
+    /// every reference named `cbrt` to those; they differ from glibc's by
+    /// 1-2 ulps on about half the doubles (cbrt 27.0 is 3.0 there,
+    /// 3.0000000000000004 in glibc). So glibc's are looked up by name, in
+    /// libm.so.6 opened explicitly: the global scope (`RTLD_DEFAULT`) holds
+    /// libm only while the executable imports some other libm function (it
+    /// does today, `asinh` & co. above, but nothing guarantees it; a Rust
+    /// program without one finds no `cbrt` there). Without a C library
+    /// `cbrt` at all, Rust's is the fallback.
     fn resolve(cache: &AtomicUsize, name: &[u8]) -> usize {
+        const RTLD_NOW: i32 = 2;
         let p = cache.load(Ordering::Relaxed);
         if p != 0 {
             return p;
         }
-        let p = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr() as *const std::ffi::c_char) } as usize;
+        let name = name.as_ptr() as *const std::ffi::c_char;
+        let libm = unsafe { dlopen(b"libm.so.6\0".as_ptr() as *const std::ffi::c_char, RTLD_NOW) };
+        let mut p = if libm.is_null() { 0 } else { unsafe { dlsym(libm, name) as usize } };
+        if p == 0 {
+            p = unsafe { dlsym(std::ptr::null_mut(), name) as usize };
+        }
+        let p = if p == 0 { MISSING } else { p };
         cache.store(p, Ordering::Relaxed);
         p
     }
 
+    /// `resolve`'s answer when there is no C library function (0: not
+    /// looked up yet).
+    const MISSING: usize = 1;
     static CBRT: AtomicUsize = AtomicUsize::new(0);
     static CBRTF: AtomicUsize = AtomicUsize::new(0);
 
     pub unsafe fn cbrt(x: f64) -> f64 {
         match resolve(&CBRT, b"cbrt\0") {
-            0 => x.cbrt(),
+            MISSING => x.cbrt(),
             p => unsafe { std::mem::transmute::<usize, extern "C" fn(f64) -> f64>(p)(x) },
         }
     }
 
     pub unsafe fn cbrtf(x: f32) -> f32 {
         match resolve(&CBRTF, b"cbrtf\0") {
-            0 => x.cbrt(),
+            MISSING => x.cbrt(),
             p => unsafe { std::mem::transmute::<usize, extern "C" fn(f32) -> f32>(p)(x) },
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// glibc's `cbrt` and `cbrtf` are found in an executable that
+        /// imports no libm function (this test binary), whose global scope
+        /// has no libm (fix-r9-misc).
+        #[test]
+        fn cbrt_is_the_c_librarys() {
+            assert_ne!(resolve(&CBRT, b"cbrt\0"), MISSING);
+            assert_ne!(resolve(&CBRTF, b"cbrtf\0"), MISSING);
         }
     }
 }

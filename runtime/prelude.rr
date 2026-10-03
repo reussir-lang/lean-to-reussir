@@ -3118,6 +3118,12 @@ fn l2r_io_process_get_current_dir() -> LStr { l2r_io_current_dir() }
 // `Lean.githash` of the Lean 4.33.0 toolchain.
 fn lean_get_githash(u : L2RUnit) -> LStr { lean_mk_string("d8b18978322de05a8f3dba51ef03cf5461676c17") }
 
+// The platform queries. leanrt builds only for Linux with glibc on aarch64
+// and x86-64 (`leanrt::rt::PLATFORM_TARGET`), so Windows, macOS and
+// Emscripten are false, and `numBits` (`lean_system_platform_nbits`) is 64
+// (`USize` is `u64` here). `System.Platform.target` is natively
+// `LEAN_PLATFORM_TARGET`, the toolchain's target triple: the one the native
+// toolchain for leanrt's target reports.
 fn lean_system_platform_windows(u : L2RUnit) -> bool { false }
 fn lean_system_platform_osx(u : L2RUnit) -> bool { false }
 fn lean_system_platform_emscripten(u : L2RUnit) -> bool { false }
@@ -3128,7 +3134,9 @@ fn lean_version_get_minor(u : L2RUnit) -> Nat { l2r_nat_small(33) }
 fn lean_version_get_patch(u : L2RUnit) -> Nat { l2r_nat_small(0) }
 fn lean_version_get_is_release(u : L2RUnit) -> bool { true }
 fn lean_version_get_special_desc(u : L2RUnit) -> LStr { lean_mk_string("") }
-fn lean_system_platform_target(u : L2RUnit) -> LStr { lean_mk_string("aarch64-unknown-linux-gnu") }
+#[ffi(import)]
+fn l2r_platform_target() -> LStr [{ leanrt::string::from_bytes(leanrt::rt::PLATFORM_TARGET.as_bytes()) }];
+fn lean_system_platform_target(u : L2RUnit) -> LStr { l2r_platform_target() }
 
 #[ffi(import)]
 fn l2r_hardware_concurrency() -> u32 [{ leanrt::sched::hardware_concurrency() }];
