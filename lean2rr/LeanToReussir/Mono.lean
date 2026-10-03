@@ -456,14 +456,20 @@ where a type argument `t` is `L2R.tyArg t` and an erased one is `◾`, or
 
 def tyArgMarker : Expr := .const `L2R.tyArg []
 
-/-- Does evaluating the constant `c` (a declaration without parameters, such
-as `instance : Inhabited Grid := ⟨mkGrid 300⟩`) compute something: call a
-function, other than to build a constructor, a closure or another such
-constant that computes nothing? Its body is then not a mere value. Natively
-the constant is evaluated once, at startup, and a callee that receives it
-reads its fields; in a callee specialized on it, `simp` would copy the body
-to the projections (`inlineProjInst?`), to run at every call (round 7
-RV7F-02). `fuel` bounds the constants followed. -/
+/-- Does evaluating the constant `c` (a declaration without parameters) do
+more than build a dictionary of functions? That is: call a function
+(`instance : Inhabited Grid := ⟨mkGrid 300⟩`), or allocate data: a
+constructor of a type that is not a class, with a relevant field (a list
+or a record literal, a `Thunk.mk`), a string literal, a number past the
+small ones. A class's own constructor (the dictionary and its parent
+dictionaries), a closure, a constructor without relevant fields (`[]`,
+`none`) and a small number are values. Natively such a constant is
+evaluated once, at startup, and a callee that receives it reads its
+fields; in a callee specialized on it, `simp` copies the body to the
+projections (`inlineProjInst?`), to run at every call: a call runs again, a
+literal is rebuilt, a thunk is made and forced again (round 7 RV7F-02,
+RV7F-04). Only a dictionary of functions gains from being copied: its
+methods become direct calls. `fuel` bounds the constants followed. -/
 partial def constComputes (c : Name) (fuel : Nat := 8) : MonoM Bool := do
   if fuel == 0 then return true
   let some decl ← baseDeclFor? c | return false
@@ -475,10 +481,15 @@ where
     match code with
     | .let d k =>
       let computes ← match d.value with
-        | .lit _ | .erased | .proj .. => pure false
+        | .erased | .proj .. => pure false
+        | .lit (.str _) => pure true
+        | .lit (.nat n) => pure (n ≥ 2 ^ 63)
+        | .lit _ => pure false
         | .fvar _ args => pure !args.isEmpty
         | .const f _ args _ =>
-          if (← getEnv).isConstructor f then pure false
+          if let some (.ctorInfo ci) := (← getEnv).find? f then
+            pure (!isClass (← getEnv) ci.induct &&
+              args[ci.numParams:].any (· matches .fvar _))
           else if args.isEmpty then constComputes f (fuel - 1)
           else match ← baseDeclFor? f with
             -- A partial application: a closure.
@@ -492,9 +503,9 @@ where
     | _ => return true
 
 /-- The static dictionary a `let` value denotes, given the static
-dictionaries of variables in scope. A constant whose evaluation computes
-something (`constComputes`) is not part of a static dictionary: the callee
-reads it at run time, as natively. -/
+dictionaries of variables in scope. A constant that is more than a
+dictionary of functions (`constComputes`) is not part of a static
+dictionary: the callee reads it at run time, as natively. -/
 def staticDict? (statics : Std.HashMap FVarId Expr) (v : LetValue .pure) (ty : Expr) : MonoM (Option Expr) := do
   unless (← isClass? ty).isSome do return none
   match v with

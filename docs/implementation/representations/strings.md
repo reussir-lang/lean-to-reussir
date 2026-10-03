@@ -5,18 +5,21 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/string.rs`, and
 
 ### A string keeps its character count
 
-- **What:** `LStr` is `Rc<(Vec<u8>, u64)>`: valid UTF-8 bytes without a
-  terminator, and the number of characters (Lean's `m_length`), which every
-  function that builds or changes a string keeps up to date. It is
-  copy-on-write: modified in place when unique.
+- **What:** `LStr` (`leanrt::string::LStr`) is one block laid out like
+  Lean's string object, with the same 32-byte header (a `u32` count that
+  Reussir's `rc.inc` bumps, byte size, capacity, and the number of
+  characters, Lean's `m_length`), then valid UTF-8 bytes without a
+  terminator. Every function that builds or changes a string keeps the
+  character count up to date. It is copy-on-write: modified in place when
+  unique; the type does its own counting.
 - **Why:** `String.length` was an out-of-line byte scan; now it is an
   inlined field read, as natively (adv4 PF4-02, 5dfb324).
 - **Where:** `prelude.rr`: `LStr`, `lean_string_length`;
   `leanrt/src/string.rs`.
-- **Remove only if:** never. Cost: two allocations (the counted box and the
-  byte buffer) where Lean has one. In progress on branch `ffi-c`
-  (7a784e1): one block with Lean's 32-byte string header, so C code can
-  read it as it is ([../externs-ffi/c-ffi.md](../externs-ffi/c-ffi.md)).
+- **Remove only if:** never. Until mem-layout (7a784e1) a string was
+  `Rc<(Vec<u8>, u64)>`, two allocations where Lean has one: 5M short
+  strings took 314 MB, now 277 MB (native 360). `String.toUTF8` and
+  `String.fromUTF8` copy the bytes, as natively.
 
 ### `String.set` updates in place without a temporary vector
 

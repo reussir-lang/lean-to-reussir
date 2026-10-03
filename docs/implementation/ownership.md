@@ -126,37 +126,10 @@ runtime.
   0.52 → 0.23 s, native 0.19; adv4 PF4-06, ddb46f1). Natively such an index
   is never big (`lean_unbox` of it would be garbage).
 - **Where:** `runtime/prelude.rr`: `l2r_index_of_nat`, `l2r_index_ok`,
-  `lean_array_get`; `runtime/leanrt/src/array.rs`: `release`,
-  `release_unrecorded`.
+  `lean_array_get`; `runtime/leanrt/src/array.rs`: `release` (a
+  decrement; `drop_last` out of line).
 - **Remove only if:** Reussir gets borrowed FFI parameters (a feature
   request; plan [§9](../translation-plan.md#9-open-items)).
-
-### Converted values record their origin (being removed)
-
-- **What:** A structural conversion between shared records or arrays
-  records the new object in the runtime's origin table with the value it
-  was converted from (its first origin), both kept alive by the record:
-  `ptrAddrUnsafe` of the converted value is the origin's address, and
-  converting it back gives the origin itself. The entry function
-  `l2r_conv_S_D` wraps the bare conversion `l2r_conv_S_D_w` (nested
-  conversions call the bare one). A converted array releases its record
-  when the program drops it; each new record checks two others and drops
-  dead ones. The array release checks for the table's reference; optional
-  pass `origin-free-reads` drops that check from programs whose
-  conversions never produce an array.
-- **Why:** Natively a conversion is the same object: fixpoints through
-  uniform code stop as natively, and an `Array Nat` stored at two
-  existential packages is `ptrEq` to itself (adv4 Rp4PtrLazy, e8feb4a). The
-  check on every read cost Qsort 1.32x vs 0.93x native (d4ae1bf).
-- **Where:** `Lower/Conv.lean`: `originWrap`, `typeCode`, `structConv`,
-  `vecConv`; `LowerState.convNested`; `runtime/leanrt/src/origin.rs`;
-  `runtime/prelude.rr`: `l2r_origin_note`, `l2r_origin_back`,
-  `l2r_origin_take`; `runtime/leanrt/src/array.rs`: `release`;
-  `runtime/leanrt/src/drop.rs`: `Vec::drop`; `Opt/OriginFreeReads.lean`.
-- **Remove only if:** the functional-equivalence contract is adopted:
-  branch `mem-identity` (in progress) removes the table, `l2r_origin_*`,
-  the `_w` split and `origin-free-reads` (7869383); a converted value is
-  then a new, unshared value.
 
 ### A thunk's cell gives up its closure before running it
 

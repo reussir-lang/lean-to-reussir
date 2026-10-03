@@ -1,6 +1,7 @@
 # State machines (J4)
 
-Paths are relative to `lean2rr/LeanToReussir/`. Plan
+Paths are relative to `lean2rr/LeanToReussir/` unless they start with
+`runtime/`. Plan
 [§5.6](../../translation-plan.md#56-join-points), "J4".
 
 ### A loop through outlined join points is one state machine
@@ -32,46 +33,38 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
 - **Remove only if:** Reussir guarantees tail calls, or a multi-arm
   `[value]` enum and a mutual tail call both become free.
 
-### State machines entered and re-entered without allocation (`state-machines`)
+### State machines entered without allocation (`state-machines`)
 
 - **What:** The optional form makes every variant nullary: the
-  declaration's parameters and the outlined join points' values are
-  parameters of the `_sm` function, in slots, one per (type, position); a
-  variable passed on under a parameter's name keeps that parameter's slot.
-  A jump passes its values in their slots and placeholders in the others,
-  never a live value; a String placeholder is one shared empty string
-  (`l2r_str_shared_empty`, no once-cell). Jumps and self calls are lowered
-  as `fn(values…, mode::v)` and put in slots when the machine is emitted
-  (`smCall`).
-- **Why:** The core form allocates a variant per call and per jump; jumps
-  of the earlier form still built a 9-13-field heap variant and read
-  placeholders (round 7 RV7L-03, 69ab202: allocation sites gone from the
-  LLVM IR of LwSmPerf and LwOutSelf). Passing a live value twice would
-  keep it referenced across the jump, so an array updated before the jump
-  would be shared and copied at every iteration (probes J4Arr/J4For; RF-1,
-  5c5f6fc). Test `RtJpSlots`.
-- **Where:** `Opt/StateMachines.lean`: `slotLayout`, `smCall`,
-  `slotPlaceholder`, `emitStateMachineAlongside`, `alongsideSelfCall`,
-  `alongsideJumpCall`, `alongsideForm`; hook `LowerHooks.stateMachine`
-  (`StateMachineHook`), which tags the planned form
-  (`StateMachine.form`); `runtime/leanrt/src/string.rs`: `shared_empty`.
-  Plan §5.6 (J4).
-- **Remove only if:** the pass is off (the core form allocates), or a
-  `[value]` mode enum (Reussir bug 1 fixed) is shown as cheap in the IR.
-
-### No slot for a type whose placeholder is not a finite value
-
-- **What:** `slotLayout` gives a type a slot only if its placeholder's
-  generated code never reaches `l2r_unreachable` (`placeholderFiniteE`);
-  a field of another type stays in its variant, which is then allocated.
-- **Why:** A slot's placeholder is evaluated at every jump that does not
-  fill it. `zeroValue` builds `l2r_unreachable` for a type without a
-  finite value, and inside a record whose first usable constructor holds
-  one (`inductive W | bad (e : Empty) | ok (n : Nat)`); the earlier form
-  passed placeholders for every parameter, so such a loop stopped with
-  "INTERNAL PANIC: unreachable code has been reached" at its first jump
-  (found with RV7L-03, test `RtJpSlots`).
-- **Where:** `Opt/StateMachines.lean`: `slotLayout`,
-  `placeholderFiniteE`/`placeholderFiniteB`.
-- **Remove only if:** `zeroValue` always builds a finite value (and slots
-  never hold an uninhabited type).
+  declaration's parameters and every outlined join point's fields are
+  parameters of the state machine's function, in slots, one per type and
+  position (a variant's `i`-th field of type `T` goes in the `i`-th slot of
+  type `T`; a variable passed on unchanged under a parameter's name keeps
+  that parameter's slot). Each arm binds its fields from their slots. A
+  call, a self tail call or a jump passes its values in their slots and a
+  placeholder in every other slot (`zeroValue`'s, and for a string the
+  runtime's one shared empty string), never a live value. Soundness guard,
+  checked on every state machine: a type whose placeholder would reach
+  `l2r_unreachable` (`inductive W | bad (e : Empty) | ok (n : Nat)`, whose
+  placeholder is built from `bad`) gets no slot, and its fields stay in
+  their variant, allocated as in the core form. Jumps and self calls are
+  lowered before every variant is known, so they are put in slots when the
+  state machine is emitted.
+- **Why:** The core form allocates a variant at every call and jump (104
+  to 232 bytes in round 7's LwOutSelf and LwSmPerf). Passing a live value
+  in a slot would keep it referenced across the jump, so an array updated
+  before the jump was shared and copied at every iteration (probes
+  J4Arr/J4For quadratic; Sieve with only `field-order` and
+  `state-machines` on: 53 s at its small size; RF-1, 5c5f6fc). A
+  placeholder of a type without a finite value stopped the loop with
+  "INTERNAL PANIC: unreachable code has been reached" at its first jump,
+  hence the guard (round 7 RV7L-03, 69ab202; test `RtJpSlots`).
+- **Where:** `Opt/StateMachines.lean`: `slotPlaceholder`,
+  `placeholderFiniteE`/`placeholderFiniteB` (the guard), `SlotLayout`,
+  `slotLayout`, `smCall`, `emitStateMachineAlongside`,
+  `alongsideSelfCall`, `alongsideJumpCall`, `alongsideForm`;
+  `runtime/prelude.rr`: `l2r_str_shared_empty`; hook
+  `LowerHooks.stateMachine` (`StateMachineHook`), which tags the planned
+  form (`StateMachine.form`) so each hook handles its own.
+- **Remove only if:** the pass is off (the core form allocates a variant
+  per call and jump).

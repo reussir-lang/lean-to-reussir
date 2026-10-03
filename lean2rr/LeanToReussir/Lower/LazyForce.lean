@@ -3,9 +3,10 @@ import LeanToReussir.Lower.FnValues
 /-! # Thunks and tasks: forcing
 
 A `Thunk α` or `Task α` is a runtime cell `LCell<S>` holding a generated
-state `S { pending(L2RUnit -> α), busy, done(α), conv(L2RUnit -> α, Box,
-u64), convdone(α, Box, u64) }` (`lazyState`, translation plan §5.14). The
-functions below are generated once per state type. -/
+state `S { pending(L2RUnit -> α), busy, done(α), conv(L2RUnit -> α, Box) }`
+(a task's `conv` also holds a `u64`, and a task has a `bind` state;
+`lazyState`, translation plan §5.14). The functions below are generated
+once per state type. -/
 
 namespace LeanToReussir
 open Lean Compiler LCNF
@@ -28,6 +29,11 @@ def lazyInfo (z : String) : LowerM (Bool × RR.Ty) := do
 def lazyArm (z v : String) (binders : Array (Option String)) (body : RR.Block) : RR.Arm :=
   { ty := z, ctor := some v, binders, body }
 
+/-- The binders of the fields of a `conv` state after its computation: the
+original cell (boxed) and, for a task, the original's address. -/
+def convTail (task : Bool) (o : Option String := none) (a : Option String := none) : Array (Option String) :=
+  if task then #[o, a] else #[o]
+
 /-- `l2r_task_addr_S(c)`: a task's identity for the runtime (`leanrt::task`):
 the address of its cell, or the original's that a converted task records
 (`lazyConv`) until it has its value. -/
@@ -36,7 +42,7 @@ def taskAddrFn (z : String) : LowerM String := do
   lazyFn name do
     let zt := RR.Ty.named z
     let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
-      lazyArm z "conv" #[none, none, some "a"] (.ofExpr (.var "a")),
+      lazyArm z "conv" (#[none] ++ convTail true none (some "a")) (.ofExpr (.var "a")),
       { ty := z, ctor := none, binders := #[], body := .ofExpr (.call "l2r_lcell_addr" #[zt] #[.var "c"]) }])
     return #[.fn name #[("c", .app "LCell" #[zt])] (.named "u64") body]
 
@@ -82,11 +88,11 @@ scheduler and is waited for, unless it is the running context's own
 (translation plan §5.14). A converted copy (`conv`, see `lazyConv`) has
 no running state of its own: forcing it runs its computation, which forces
 the original (whose state, `busy` included, is the copy's) and converts the
-value, and stores `convdone`. So a copy forced again meanwhile (by the
-original's `sync` dependent, which the original's end runs inside the
-copy's computation, or by another context) has the original's value as
-soon as the original has finished. A pending task is also registered as
-running for the duration (`IO.checkCanceled`, and it leaves the queue of
+value, and stores `done` (releasing the original). So a copy forced again
+meanwhile (by the original's `sync` dependent, which the original's end
+runs inside the copy's computation, or by another context) has the
+original's value as soon as the original has finished. A pending task is
+also registered as running for the duration (`IO.checkCanceled`, and it leaves the queue of
 pending tasks), and runs with its own standard streams,
 as a native task runs on a worker thread (`l2r_std_enter_if`/`l2r_std_leave_if`),
 unless the runtime runs it on the current thread (a `sync` dependent). When
@@ -117,13 +123,12 @@ def lazyGetFn (z : String) : LowerM String := do
           .call get #[] #[.var "c"]⟩
     let force ← applyCall (.var "f") (.fn .unit t) #[.unitVal]
     let conv : RR.Block := ⟨#[("v", some t, force),
-      ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "convdone") #[.var "v", .var "o", .var "a"]])],
+      ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]])],
       .var "v"⟩
     let getWith (other : RR.Block) : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
       lazyArm z "done" #[some "v"] (.ofExpr (.var "v")),
-      lazyArm z "convdone" #[some "v", none, none] (.ofExpr (.var "v")),
       lazyArm z "busy" #[] busy,
-      lazyArm z "conv" #[some "f", some "o", some "a"] conv,
+      lazyArm z "conv" (#[some "f"] ++ convTail task) conv,
       { ty := z, ctor := none, binders := #[], body := other }])
     -- A task first runs the chain of pending tasks it waits for, deepest
     -- first (`l2r_task_force_sources`), then looks again (one of them may

@@ -191,11 +191,7 @@ and what an element's release pushes is done before the next element, so
 the order of observable releases matches Lean's (file handles closed, and
 so flushed, promises resolved; `fs` and `task` push those too while a free
 runs), except at the top of a free that starts at a record that user code
-drops by itself (translation plan §10). An array
-that a structural conversion built also releases its origin record
-(`origin::release_shared`) when the program drops it; array reads skip
-that check (`array::release_unrecorded`) in programs where no conversion
-produces an array (lean2rr's optimization `origin-free-reads`). For an
+drops by itself (translation plan §10). For an
 array of Reussir records (`Bridge` elements), a shared element is
 decremented inline instead of through `<record>_ffi_release` (the
 compiler's glue, an out-of-line call; it decrements the same count), and,
@@ -211,10 +207,9 @@ waits for the scheduler context computing it.
 
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
 lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),
-conv(L2RUnit -> α, L2RBox, u64), convdone(α, L2RBox, u64) }`
-(tasks also
-`bind(L2RUnit -> LCell<S>)`;
-a shared enum, so any `α` fits). Cell primitives: `l2r_lcell_new<S>(v)`,
+conv(L2RUnit -> α, L2RBox) }` (a task's `conv` also holds the original's
+address, its identity for `leanrt::task`, and tasks also have
+`bind(L2RUnit -> LCell<S>)`; a shared enum, so any `α` fits). Cell primitives: `l2r_lcell_new<S>(v)`,
 `l2r_lcell_get<S>(c)`, `l2r_lcell_set<S>(c, v)`, `l2r_lcell_swap<S>(c, v)`
 (returns the old state), `l2r_lcell_addr<S>(c)` (the cell's address).
 lean2rr generates the forcing functions (run the closure once, store
@@ -631,16 +626,15 @@ lean2rr's dev branch (the tests pass with it).
 30. *done* — `Lean.Name.beq` (`lean_name_eq`): the prelude cannot define it (`Name`
     is a Lean type); its reference body (structural equality) is what the
     native code computes.
-31. *done* in the runtime — `ptrAddrUnsafe` of a value lean2rr wraps at
-    the call (`ElemBox{x}`, function-value wrappers, rebuilt structures)
-    measured the fresh wrapper, whose memory the next wrapper can reuse:
-    the runtime now answers a fresh number for any object whose count is 1
-    at the call (it dies with the call, so it equals no other live value)
-    (test `RtPtrAddr`). lean2rr passes a heap value's own handle when it has
-    one, to `l2r_ptr_addr_obj`, which answers the pointer whatever the count
-    (the value is the Lean object; `ptrEq a b` may release `a`'s last other
-    reference before `b`'s address is taken), and the field of a `[value]`
-    struct (test `RtPtrEqFix`).
+31. *done* — `ptrAddrUnsafe` of a value lean2rr wrapped at the call
+    (`ElemBox{x}`, function-value wrappers) measured the temporary wrapper,
+    whose memory the next wrapper can reuse. lean2rr now takes the value in
+    its own representation (not converted for the call): a heap value's
+    handle goes to `l2r_ptr_addr_obj`/`l2r_ptr_addr_rec`, which answer the
+    pointer whatever the count (`ptrEq a b` may release `a`'s last other
+    reference before `b`'s address is taken), and a `[value]` struct
+    answers its field's (translation plan §9; tests `RtPtrAddr`,
+    `RtPtrSound`).
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store `Nat`/`Int`/enum-like values directly; and `mi_free` takes mimalloc's
@@ -656,22 +650,17 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`, and
   `dbgTraceIfShared` of values held by value (`Nat`, `[value]` structures)
-  never reports sharing. `ptrAddrUnsafe` answers what native Lean answers
-  (translation plan §9): the boxed scalar `2n+1` for small `Nat`s, `int32`
-  `Int`s, `UInt8/16/32`, `Char`, `Bool`, enumerations, nullary
-  constructors and `Unit` (`l2r_addr_word`, `l2r_addr_nat`,
-  `l2r_addr_int`); the handle pointer for heap values (`l2r_ptr_addr_obj`,
-  `l2r_ptr_addr_rec`); a fresh, never repeated even number in
-  `[2^62, 2^63)` for `UInt64`, `Float` and the like, which natively are
-  boxed into a new cell at each call (`l2r_addr_fresh`). A `Nat` in
-  `[2^63, 2^64)` and an `Int` outside `int32` but inside `i64` (natively
-  big number objects) answer a number computed from their value. A record,
-  list or array that a structural conversion built answers the address of
-  the value it was converted from: lean2rr records it (`l2r_origin_note`,
-  `leanrt::origin`: the table keeps both values alive while the converted
-  one lives, and gives the original back when the value is converted back,
-  `l2r_origin_back`/`l2r_origin_take`), and `l2r_ptr_addr_obj` and
-  `l2r_ptr_addr_rec` look it up once any conversion was recorded.
+  never reports sharing. Pointer identity is not emulated (translation
+  plan §9): `ptrAddrUnsafe` answers the handle pointer of a heap value in
+  its own representation (`l2r_ptr_addr_obj`, `l2r_ptr_addr_rec`, which
+  give the reference back inline), the boxed scalar `2n+1` for small
+  `Nat`s, `int32` `Int`s, `UInt8/16/32`, `Char`, `Bool`, enumerations and
+  `Unit` (`l2r_addr_word`, `l2r_addr_nat`, `l2r_addr_int`), the bits of a
+  `UInt64` or `Float`, and a number answered only once (`l2r_addr_fresh`:
+  even, in `[2^62, 2^63)`) for a `Nat` in `[2^63, 2^64)` or an `Int`
+  outside `int32`. For two values alive at the same time, equal answers
+  mean the same cell or equal values; a value lean2rr converted to another
+  representation is a new object.
 - Everything runs on one thread: tasks run when they are first needed,
   when the running code blocks, or when `main` returns (a schedule native
   Lean can produce; translation plan §5.14). Contexts switch only when one

@@ -96,76 +96,40 @@ runtime. Plan
   `l2r_persist_T` walks its value and waits for every task it reaches:
   through fields, arrays, the values of tasks, the values captured by
   function values, thunks (their computation or value, without forcing
-  them), references (their value) and `Box` payloads. The walks are
-  generated at the end, once every variant of function types and `Box` is
-  known; a type that cannot hold a task gets none.
+  them), references (their value) and `Box` payloads. As natively, the
+  walk is a loop over a work list (`L2RPersistW`: a variant per type that
+  can hold a task, and one per array type for the elements left), in
+  native's order: an object's fields are pushed in Lean's declaration
+  order (`leanOrder`, whatever the record layout), the last on top, and an
+  array is walked from its last element down. It visits each cell
+  (record, array, thunk or task, function value, `Box`, reference) once:
+  the runtime keeps the set of addresses seen and, until the walk ends,
+  what it read out of thunks, tasks and references, so no seen cell is
+  freed and its address reused meanwhile. It is skipped when no task is unfinished
+  (`l2r_task_settled`), always the case for constants evaluated at
+  startup. The walks are generated at the end, once every variant of
+  function types and `Box` is known; a type that cannot hold a task gets
+  none.
 - **Why:** As `lean_mark_persistent` at a closed term's first evaluation:
   a `Task.spawn` extracted as a closed term has finished once the term has
-  been used (adv4 TK4-02, a599e0a; closures, thunks and boxes: 17ab235;
-  references: round 7 RV7L-05, test `RtPersistRef`). The searches for
-  task-holding types look at each type once: following every path took
-  over ten minutes on polymorphic-recursion towers (1955043).
+  been used (adv4 TK4-02, a599e0a; closures, thunks and boxes: 17ab235).
+  The searches for task-holding types look at each type once: following
+  every path took over ten minutes on polymorphic-recursion towers
+  (1955043). The walk was a recursive function per type without a visited
+  set: a 300000-link chain overflowed the 8 MB startup stack, even for an
+  unused constant, and a 41-cell DAG was walked as a tree, 2^40 paths
+  (round 7 RV7L-01, 42517bf; test `RtPersistWalk`). The order shows: a
+  closed term's tasks have not started when the walk reaches them, so they
+  run in its order, with their traces and panics; native pushes fields,
+  captured values and elements in order and pops the last first, so
+  `(t2, t1)` runs `t1` first and `#[a0, a1, a2]` runs `a2` first (RV7L-04,
+  test `RtPersistOrder`). Native pushes a reference's value too (RV7L-05,
+  test `RtPersistRef`).
 - **Where:** `Lower/Conv.lean`: `persistCall`, `mayHoldTask`,
   `persistFnName`, `cafAccessor`; `Lower/Finish.lean`: `holdsTask`,
-  `persistCell`, `genPersist`, `finishPersistFns`, `variantCount`. Plan
-  §5.14 (*Closed terms*).
+  `persistListName`, `persistCell`, `PersistGen`, `genPersist`,
+  `finishPersistFns`, `variantCount`; `runtime/prelude.rr`:
+  `l2r_persist_begin`, `l2r_persist_seen`, `l2r_persist_keep`,
+  `l2r_persist_end`, `l2r_task_settled`;
+  `runtime/leanrt/src/persist.rs`.
 - **Remove only if:** never.
-
-### The walk is a loop over a work list, each cell once
-
-- **What:** `l2r_persist_walk(h, w)` loops over a work list `L2RPersistW`
-  (a variant per type that can hold a task, one per array type for the
-  elements left); `l2r_persist_x_T` pushes what a value holds. A cell
-  (record, array, thunk or task, function value, `Box`, reference) is
-  looked into once: `l2r_persist_seen` keeps the walk's set of addresses
-  (`runtime/leanrt/src/persist.rs`).
-- **Why:** The recursive walk overflowed the stack on a value deep through
-  a non-last field (300000 links at the 8 MB startup stack, even for an
-  unused constant) and walked a shared DAG as a tree (41 cells, 2^40
-  paths): round 7 RV7L-01, 42517bf, tests `RtPersistWalk`,
-  `RtTaskConstDeep`.
-- **Where:** `Lower/Finish.lean`: `genPersist`, `finishPersistFns`,
-  `persistListName`, `persistCell`; `runtime/leanrt/src/persist.rs`;
-  prelude `l2r_persist_begin/seen/keep/end`. Plan §5.14, §10 (stack
-  depth).
-- **Remove only if:** never (any recursion is bounded by the stack).
-
-### The walk's order is native's: last field first
-
-- **What:** Fields are pushed in Lean's declaration order (`leanOrder`,
-  whatever the record layout), the last on top; an array is walked from
-  its last element down (`a<T>(array, index, rest)`).
-- **Why:** The tasks of a freshly evaluated closed term have not started,
-  so they run in the order the walk reaches them, and their traces and
-  panics show it. Native `lean_mark_persistent` pushes fields, captured
-  values and elements in order and pops the last first: `(t2, t1)` runs
-  `t1` first, `#[a0, a1, a2]` runs `a2` first. Round 7 RV7L-04, test
-  `RtPersistOrder`.
-- **Where:** `Lower/Finish.lean`: `genPersist` (`each`, `arm`'s `order`,
-  `leanOrder`, the array step `l2r_persist_a_T`). Plan §5.14.
-- **Remove only if:** native's walk order changes.
-
-### The walk keeps what it reads out of thunks, tasks and references
-
-- **What:** Each value read out of a thunk's or task's state or a
-  reference's cell is kept (`l2r_persist_keep`) until the walk ends.
-- **Why:** Every other path to a visited cell goes through immutable
-  fields of the constant, which its caller holds; these do not (a task the
-  walk runs can force a thunk, which drops its computation). A visited
-  cell freed meanwhile could give its address to a new cell, which the
-  visited set would then skip (RV7L-01 fix).
-- **Where:** `Lower/Finish.lean`: `genPersist` (`each … keep`);
-  `runtime/leanrt/src/persist.rs`: `keep`, `end`.
-- **Remove only if:** the visited set stops using addresses.
-
-### The walk is skipped when every task has finished
-
-- **What:** `l2r_persist_T` returns at once when `l2r_task_settled()`: no
-  task has an entry in the runtime's table.
-- **Why:** Waiting for a finished task does nothing, so the walk would
-  only cost time and memory; at startup tasks run at once, so constants
-  evaluated then are never walked (RV7L-01 fix).
-- **Where:** `Lower/Finish.lean`: `finishPersistFns`;
-  `runtime/leanrt/src/task.rs`: `settled`.
-- **Remove only if:** an unfinished task can exist without an entry (then
-  the skip would be wrong and must go).

@@ -60,9 +60,12 @@ relative to `lean2rr/LeanToReussir/`. Plan
   jumps when (1) its own body is at most 40 bindings, alternatives and
   exits (nested join points included), (2) a copy expands to at most 480
   (`copySize`: at each jump, the body of a join point inlined there too:
-  one nested in the copy, or another one whose own body is small), and
-  (3) the copies beyond the first add at most 2000
-  (`(jumps - 1) × copySize`).
+  one nested in the copy, one jumped to once, whatever its size, or
+  another one whose own body is small), and (3) the copies beyond the
+  first add at most 2000 (`(jumps - 1) × copySize`), or 4000 for a loop's
+  continuation: a join point whose own body (nested join points included,
+  not those it jumps to) tail-calls a declaration of the declaration's
+  call cycle (`tailCallsInto`).
 - **Why:** Outlining puts a function boundary on the path: a loop through
   it becomes a state machine or mutually recursive, and cell reuse cannot
   cross it (a for-loop with `continue`: 7x slower than native before
@@ -75,11 +78,26 @@ relative to `lean2rr/LeanToReussir/`. Plan
   stack, RV6J-02; 38dc337); an 800-arm `match` copied the next `match`'s
   alternatives into every arm (11.7 MB of `.rr`, rrc out of memory; round 6
   RV6J-03, 3dcbdeb, test `RtJpWide`). Loops with compound conditions expand
-  to 300-350 and stay plain loops.
+  to 300-350 and stay plain loops. Round 8 (rv8/lfix): a single-jump join
+  point over 40 counted as one node was copied with every copy of its
+  jumper, since J1 inlines it whatever its size (jp-sink off: 200 copies,
+  4.15 MB of `.rr`, rrc at 12 GB; RV8L-03, 92c5b6a); the 2000 budget
+  outlined a loop's continuation after a 60-arm `match`, making the loop a
+  state machine or, in mutual recursion, a stack frame more per iteration
+  (overflow at 6M; RV8L-04, b7e2a15); 4000 for every join point let
+  state-matching functions add 0.5-0.75 MB of `.rr` each (RV8L-05,
+  912872d, which restricted it to copies tail-calling the call cycle); and
+  a tail call anywhere in the copy, through the join points it jumps to,
+  made a whole `match` chain loop continuations from one guarded self
+  call (7.26 MB, a 378 s build; RV8L-08, 528a352: own body only).
 - **Where:** `Opt/JpSmall.lean`: `isSmallJp`, `codeSize`, `copySize`,
-  `copyBudget` (480), `copiesBudget` (2000); hook
+  `tailCallsInto`, `copyBudget` (480), `copiesBudget` (2000),
+  `loopCopiesBudget` (4000); `Lower/JoinPoints.lean`: `JpScope` (`bodies`,
+  `single`, `loop`); `Pipeline.lean`: `callCycles` (the program's
+  direct-call cycles, `LowerCtx.callCycles`); hook
   `LowerHooks.duplicateJp`, consulted by both `chooseOutlined` and
-  `lowerCode` with the same bodies and jump counts, so they decide alike.
+  `lowerCode` with the same scope and jump counts (`CodeCtx.jpSingle`,
+  `CodeCtx.loop` in the lowering), so they decide alike.
 - **Remove only if:** the pass is off (correct; more outlined join points).
 
 ### Outlined join points capture what their jumps pass by name

@@ -15,7 +15,9 @@ stays `lcAny`). It is required, not optional
 ### Types come from what flows in, never from uses
 
 - **What:** A binder's type is recomputed from its definition: a `cases`
-  field from the constructor at the discriminant's type, a call from the
+  field from the constructor at the discriminant's type, only when that
+  type is the constructor's inductive (or `T._impl` for a type with
+  computed fields) applied to its parameters, never `lcAny`; a call from the
   callee's signature, a join-point parameter from its jump arguments when
   all are known and agree. A use at a precise type does not retype the
   binder. The one exception is a placeholder `let z := ◾`, which has no
@@ -24,13 +26,14 @@ stays `lcAny`). It is required, not optional
   a use as `Array Nat` speaks only for the branch where `t = .nat`. Moving
   the conversion from the use to the binder made it run, and fail
   ("INTERNAL PANIC"), on the other paths (adversarial review, 1c940d5).
-- **Where:** `MonoRetype.lean`: `localRetype`, `collectUses`, `fromUses`
-  (placeholders only), `refineTo?`, `refines`.
-- **Remove only if:** never. Known bug at b299aab: a `cases` field takes
-  the constructor's field type for any discriminant whose type has a
-  constant head, which gives wrong field types (and an "unreachable"
-  panic) for an `lcAny` scrutinee of a dependent or existential type;
-  fixed on branch `fix-r7-front` (round 7 RV7F-01, e318fbd, in progress).
+  Field types taken for any discriminant whose type had a constant head
+  gave an `lcAny` scrutinee of a dependent or existential type the
+  parameters' types: wrong fields, `Array.map (·.1)` placeholders and an
+  "unreachable" panic (round 7 RV7F-01, root of RV7D-01; e318fbd; tests
+  `RtDepFields`, `RtLcAnyProj`).
+- **Where:** `MonoRetype.lean`: `localRetype`, `ctorFieldTypes`,
+  `collectUses`, `fromUses` (placeholders only), `refineTo?`, `refines`.
+- **Remove only if:** never.
 
 ### Constructor applications are typed conservatively
 

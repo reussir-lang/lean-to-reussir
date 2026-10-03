@@ -7,8 +7,8 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
 
 - **What:** `Thunk α` and `Task α` are `LCell<S>`, one runtime cell (a
   count and one value, seen through every alias) holding a generated
-  shared enum `S { pending(L2RUnit -> α), busy, done(α), conv(…),
-  convdone(…) }`, one per value type and kind (tasks also `bind(…)`). A
+  shared enum `S { pending(L2RUnit -> α), busy, done(α), conv(…) }`, one
+  per value type and kind (tasks also `bind(…)`). A
   shared enum fits every `α`, closures and value types included.
   `Thunk.mk f` is `pending(f)`, `Thunk.pure a` is `done(a)`; `Thunk.get`
   swaps in `busy`, runs the closure, stores `done(v)`.

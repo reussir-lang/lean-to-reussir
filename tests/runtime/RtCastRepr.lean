@@ -11,8 +11,8 @@ RP4-03 to RP4-07).
   width, an index past the last constructor selects the last one, an `Int`
   read as a `Nat` is its 32 bits). Only cases where native results do not
   depend on addresses are printed.
-- An array field of a cast value, read at the cast type, is the same array
-  (no conversion per access). -/
+- An array field of a cast value, read at the cast type (no conversion
+  per access). -/
 
 inductive P1 | a | b (x : Nat) (y : P1)
 inductive P2 | a | b (x : Nat) (y : P2)
@@ -92,9 +92,6 @@ instance : Inhabited T2 := ⟨.node 0 #[]⟩
   match (unsafeCast t : T2) with
   | .node _ ds => match ds[i]! with | .node w _ => w
 @[noinline] unsafe def sizeVia (t : T1) : Nat := match (unsafeCast t : T2) with | .node _ ds => ds.size
-@[noinline] unsafe def sameKids (t : T1) : Bool :=
-  match t, (unsafeCast t : T2) with
-  | .node _ cs, .node _ ds => ptrAddrUnsafe cs == ptrAddrUnsafe ds
 
 unsafe def main (args : List String) : IO Unit := do
   let k := args.length
@@ -115,8 +112,8 @@ unsafe def main (args : List String) : IO Unit := do
   IO.println s!"int {natInt (3 + k)} {natInt (2 ^ 70 + k)} {intNat (3 + k)} {intNat (-5 + k)} {intNat (2 ^ 40 + k)} {intNat (-(2 ^ 40) + k)} {intU8 (300 + k)} {intU8 (-1 + k)} {intU32 (-1 + k)}"
   IO.println s!"toint {u8Int (200 + k.toUInt8)} {u32Int (0xFFFFFFFF - k.toUInt32)} {u32Int (2 ^ 31 + k.toUInt32)} {c3Int C3.c} {boolInt true} {u32Nat (0xFFFFFFFF - k.toUInt32)}"
   IO.println s!"nullary {(natL (0 + k)).str} {(natL (1 + k)).str} {lNat L.nil} {lNat L.one} {(c3L C3.b).str} {repr (lC3 L.one)} {natOpt (0 + k)} {noneNat none}"
-  -- An array field read at the cast type: the same array.
+  -- An array field read at the cast type.
   let t := T1.node 0 ((Array.range (1000 + k)).map fun i => .node i #[])
   let mut s := 0
   for i in [0:20000] do s := s + kidVia t (i % 1000)
-  IO.println s!"array {s} {sizeVia t} {sameKids t}"
+  IO.println s!"array {s} {sizeVia t}"

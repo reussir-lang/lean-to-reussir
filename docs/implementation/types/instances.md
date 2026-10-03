@@ -48,21 +48,46 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   keyed by the dictionary too (`InstKey.dicts`). That instance rebuilds the
   dictionary as `let`s at its start and binds the parameter to it. The
   parameter itself stays, unused, so the arity is unchanged. A dictionary
-  deeper than 64 is not static.
+  deeper than 64 is not static, nor is one holding a constant that is
+  more than a dictionary of functions (`constComputes`, next entry); the
+  callee reads that constant at run time, as natively.
 - **Why:** Lean's base `simp` folds only dictionaries that are
   `let`-bound in the same function. `Monad Id`, passed as a parameter from
   `Array.map` to `Array.mapM`, would stay a runtime record with polymorphic
   methods, which Reussir cannot type. The depth bound stops polymorphic
   recursion from building ever larger dictionaries.
-- **Where:** `Mono.lean`: `staticDict?`, `dictLets`, `instantiate`,
-  `renameApp`; plan [§2.4](../../translation-plan.md#24-type-classes).
+- **Where:** `Mono.lean`: `staticDict?`, `constComputes`, `dictLets`,
+  `instantiate`, `renameApp`; plan [§2.4](../../translation-plan.md#24-type-classes).
 - **Remove only if:** never: without it, type classes with polymorphic
   methods fall back to `Box`. The rebuilding is a known divergence (an
   instance's code may run more often than natively: plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
-  "Dictionary rebuilding"). In progress on branch `fix-r7-front` (round 7
-  RV7F-02): a constant whose evaluation computes something is not part of
-  a static dictionary.
+  "Dictionary rebuilding"). Constants that are more than dictionaries of
+  functions are excluded (next entry).
+
+### Only a dictionary of functions is a static constant
+
+- **What:** A zero-parameter constant is part of a static dictionary only
+  if evaluating it builds nothing but the class's structure (and its
+  parents'), closures, constructors without relevant fields and small
+  numbers (`constComputes`). A function call, a constructor of a non-class
+  type with a relevant field (a list or record literal, `Thunk.mk`), a
+  string literal or a number from 2^63 on makes it a runtime value.
+  `cases` and join points count as computing; other constants are followed
+  8 deep.
+- **Why:** Natively such a constant is evaluated once at startup and a
+  callee Lean did not specialize (`Inhabited` is `weak_specialize`) reads
+  its fields. Specialized on it, the callee got the constant's body copied
+  by `simp` (`inlineProjInst?`) and ran it at every call: the call again
+  (round 7 RV7F-02: 4.3 s for 0.00 s), the literal rebuilt, a new thunk
+  forced again (RV7F-04: "forced" 4 times for once). Only methods gain from
+  the copy.
+- **Where:** `Mono.lean`: `constComputes`, `staticDict?`; plan
+  [§2.4](../../translation-plan.md#24-type-classes), §10 "Dictionary
+  rebuilding"; test `RtDictConst`.
+- **Remove only if:** Stage 1 stops specializing on dictionaries Lean
+  passes at run time, or its `simp` stops copying instance bodies into
+  callees.
 
 ### Stage 1's `simp` does not inline definitions
 

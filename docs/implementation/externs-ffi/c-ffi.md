@@ -1,7 +1,8 @@
 # Calling the program's C code (in progress)
 
 **Status:** in progress on branch `ffi-c` (latest commit 1133472, not
-merged into `dev`; nothing here is in b299aab). A Lean program may
+merged; only the single-block layouts of strings and `Array Nat`/`Int`,
+7a784e1, are merged, with branch `mem-layout`). A Lean program may
 implement some of its `@[extern "sym"]` declarations in C (written against
 `<lean/lean.h>`, built by Lake). The goal is that lean2rr links that C code
 and calls it, so the program behaves as its native build does, its C
@@ -36,8 +37,10 @@ entries that change `dev`'s behaviour into the other files.
   is Lean's string object: tag 249, NUL-terminated, `m_size` counting the
   NUL), `ByteArray` and `FloatArray` (`LSArr`, Lean's scalar array object,
   replacing `RVec<u8>`/`RVec<f64>`), and `Array Nat`/`Array Int` blocks
-  with Lean's header and tag (7a784e1 made them single blocks; also on
-  branch `mem-layout`). Planned: `Array Nat`/`Int` and `Nat` passed without
+  with Lean's header and tag (the single blocks with Lean's header sizes
+  are merged: [strings](../representations/strings.md#a-string-keeps-its-character-count),
+  [arrays](../representations/arrays.md#array-nat-and-array-int-store-one-word-per-element);
+  the tags and the NUL terminator are the branch's). Planned: `Array Nat`/`Int` and `Nat` passed without
   conversion (the branch still converts `Nat`).
 - **Why:** No copy per call for the data C code typically reads (byte
   buffers); Reussir's count is the `u32` at offset 0, where Lean's `m_rc`
