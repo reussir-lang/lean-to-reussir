@@ -2,8 +2,9 @@
 
 ## Summary
 
-**Kind:** cost (stock MLIR pass). **Status:** open (build time only). No
-patch.
+**Kind:** cost (stock MLIR pass), with a small local fix; plus a bug of
+its own (11b, build time). **Status:** patched (0032 for SCCP, 0033 for
+11b), applied in `./reussir` (`l2r-local` 5c0514e3).
 
 **Verdict: cost of a stock MLIR pass, not a Reussir defect.** The pipeline
 runs MLIR's own `createSCCPPass` (`crates/reussir-backend/src/pipeline.rs`),
@@ -12,7 +13,12 @@ doubling N costs 2.9-4.8x; [bug 22](22-wildcard-wide-enum.md) measures
 about size^2.4 on one large function; no bound from MLIR's documentation
 is known here); Reussir promises nothing linear. The towers first blamed
 on it were
-[bug 20](20-statet-tower.md).
+[bug 20](20-statet-tower.md). Under the policy's third refinement
+(fixable build-time costs get a small patch), 0032 runs SCCP across calls
+only within a budget of call sites. Building the Std.Http program once
+SCCP was fixed exposed **11b**, a real quadratic in Reussir's own code:
+the acquire/drop expansion built a symbol table of the whole module for
+every glue lookup; 0033 fixes it.
 
 MLIR's interprocedural SCCP takes superlinear time on large call graphs.
 Large lean2rr programs (thousands of functions) spend most of their build
@@ -85,3 +91,128 @@ conversions, but its single application function, an arm for every target
 of the uniform code, is a hub through which SCCP and the decrement
 expansion of the arguments cost more than they save (`Cn3PolyS1` 649 s and
 5.7 GB against 115 s and 2 GB without it).
+
+## Patch
+
+### 0032: SCCP across calls only within a budget
+
+Patch file
+[`patches/0032-l2r-local-bug-11-run-SCCP-across-calls-only-within-a.patch`](patches/0032-l2r-local-bug-11-run-SCCP-across-calls-only-within-a.patch)
+(`l2r-local` commit `ac70115a`, applied in `./reussir`; `l2r-local` head
+5c0514e3).
+
+Where the cost comes from: each time MLIR's data-flow framework finds one
+more call site of a function, or the arguments at one change, it visits
+the function again and walks all its known call sites
+(`DeadCodeAnalysis::visitCallableTerminator` adds the function's returns
+as predecessors of each call,
+`AbstractSparseForwardDataFlowAnalysis::visitCallableOperation` joins each
+call's arguments into the function's), so the cost follows the sum over
+callees of the square of their call sites.
+
+The patch adds a pass `reussir-sccp` (`lib/Transformation/SCCP/SCCP.cpp`),
+which the C API's SCCP factory (`reussirCreateSCCPPass`, used twice by the
+pipeline) now returns. It counts the call sites of every callee that has a
+body and runs the stock `sccp` on the whole module when the sum of their
+squares is at most `max-call-site-pairs` (2^22), and nested on each
+`func.func` otherwise:
+
+```c++
+module.walk([&](mlir::CallOpInterface call) {
+  ...  // skip a callee without a body (an FFI import, a runtime function)
+  uint64_t &count = callSites[callee];
+  pairs += 2 * count + 1;       // the n-th site adds n^2 - (n-1)^2
+  ++count;
+});
+mlir::OpPassManager pipeline(mlir::ModuleOp::getOperationName());
+if (pairs <= maxCallSitePairs)
+  pipeline.addPass(mlir::createSCCPPass());
+else
+  pipeline.addNestedPass<mlir::func::FuncOp>(mlir::createSCCPPass());
+```
+
+**Why it is correct.** SCCP on one function is the same stock pass with a
+smaller scope: a `func.func` as the analysis root makes every callee
+external, so call results and the entry block's arguments start
+overdefined and nothing is assumed about callers. It only finds fewer
+constants; LLVM's IPSCCP still propagates across calls later. Programs
+under the budget are compiled exactly as before (lean2rr's classic corpus
+has at most 1.5M pairs).
+
+**Verification.** Test `conversion/sccp_call_site_budget.mlir`. Repro
+(`run.sh`, final stack): `bug 11   FIXED       N = 2000: 13.7 s, N =
+4000: 23.4 s, N = 10: 1.6 s (1.80x without the fixed cost, for twice the
+call sites)` (unpatched: 2.9-4.8x). The Std.Http program (335M pairs)
+gets SCCP per function: 3 s and 19 s for the two runs.
+
+### 0033 (bug 11b): glue looked up in symbol tables built once
+
+Patch file
+[`patches/0033-l2r-local-bug-11b-look-up-drop-and-acquire-glue-in-s.patch`](patches/0033-l2r-local-bug-11b-look-up-drop-and-acquire-glue-in-s.patch)
+(`l2r-local` commit `5e0273b2`).
+
+**The bug.** `createDtorIfNotExists` and
+`emitOwnershipAcquisitionFuncIfNotExists` (`lib/IR/ReussirOps.cpp`) built
+a new `mlir::SymbolTable` of the whole module on every call, to look up
+the glue function of a record type, and the acquire/drop expansion calls
+them for every `ref.drop`/`ref.acquire` of a named record it outlines:
+time quadratic in the size of the module. Found by building the Std.Http
+program once its SCCP was fixed: the second acquire/drop expansion ran
+for more than 45 minutes, 90% of the time in `SymbolTable::SymbolTable`
+(perf).
+
+**The fix.** Both helpers take an optional `mlir::SymbolTableCollection`,
+look the glue up in it and add the functions they create (the drop glue,
+the drain declaration, the acquire glue). The acquire/drop expansion
+builds one collection per run and passes it through its patterns. The
+outlined acquire glue of a record creates, while its body is built, the
+glue of its named `[value]` members ([bug 19](19-cell-of-value-record.md),
+0023); `emitOwnershipAcquisition` passes the collection on to that
+creation too. Other callers keep building a table per call.
+
+**Why it is correct.** The same functions are found and created; only
+the lookup changes. Functions are never erased during the pass
+(`func.func` is not trivially dead), so the collection holds no dangling
+entries, and every function the pass creates is entered in it.
+
+**Verification.** Test `frontend/cell_value_record_glue_order` (a
+`Cell<Pair>` read before a `Cell<Quad>`, RV8C-01 below). With 0032 and
+0033 the Std.Http program builds to an object: 26 minutes of MLIR passes,
+the second acquire/drop expansion 84 s.
+
+### Review
+
+Round RV8C (`~/Documents/l2r-scratch/rv8/reussir-c/FINDINGS.txt`, patches
+0030-0035):
+
+- 0032 held (Q3): per-function SCCP is sound and safe in parallel, the
+  budget arithmetic is right and deterministic, and under the budget the
+  stock pass runs unchanged (identical IR for four corpus programs).
+  **RV8C-04** (low, optimization loss): the budget counted call sites of
+  declarations, which cost the analysis nothing. Resolved in the final
+  0032: only callees with a body count.
+- 0033 held on its own (Q4). **RV8C-01** (medium): composed with 0023
+  (bug 19), the member glue that 0023's outlined acquire glue creates
+  bypassed the collection, so a later lookup missed it and rrc failed
+  with "redefinition of symbol" (a `Cell<Pair>` read before a
+  `Cell<Quad>`). Resolved in the final 0033: the collection is threaded
+  through `emitOwnershipAcquisition`; the reviewer's repro is the new
+  test. **RV8C-02** (textual conflicts with the 0018-0027 stack):
+  resolved by rebasing 0030-0035 onto it.
+
+**Effect on lean2rr.** Build time only. Programs under the budget are
+compiled exactly as before; very large programs (the Std.Http program,
+17,197 functions) now build.
+
+## Upstream note
+
+The pipeline's interprocedural `sccp` is quadratic in the call sites of a
+callable (the data-flow framework revisits a function and walks all its
+call sites at every change); a module with one function called from 4000
+places spends 7 s there, a 17,000-function program over 50 minutes. A
+budget on the sum of squared call sites, falling back to per-function
+SCCP, avoids it. Separately, `createDtorIfNotExists` and
+`emitOwnershipAcquisitionFuncIfNotExists` build a `SymbolTable` of the
+whole module per call; a `SymbolTableCollection` per pass run removes the
+quadratic.
+

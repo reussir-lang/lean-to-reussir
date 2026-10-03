@@ -1,7 +1,7 @@
-From a4fabec427b255f14a5e8540b079443514c117b3 Mon Sep 17 00:00:00 2001
+From c5ea9a179fa9e8f35d976007e9a8c039186edc38 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 03:28:05 -0400
-Subject: [PATCH 61/63] l2r-local: bug 29: accept a record member linking to an
+Subject: [PATCH] l2r-local: bug 29: accept a record member linking to an
  ffi_object in the type verifier
 
 The frontend lowers a record member of an opaque `#[ffi]` type to an
@@ -38,10 +38,10 @@ diff, compile).
  create mode 100644 tests/integration/frontend/ffi_member_mlir_roundtrip.rr
 
 diff --git a/lib/IR/ReussirTypes.cpp b/lib/IR/ReussirTypes.cpp
-index 98cd6670..fd1ad62c 100644
+index 1e8a1d18..1dc2c789 100644
 --- a/lib/IR/ReussirTypes.cpp
 +++ b/lib/IR/ReussirTypes.cpp
-@@ -372,15 +372,24 @@ RecordType::verify(llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
+@@ -374,15 +374,24 @@ RecordType::verify(llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
        // derived — the member type carries a different refcount discipline
        // than its nominal capability implies (an `Arc` member, or the
        // same-group link of an arc'd recursive record, thread-safety design

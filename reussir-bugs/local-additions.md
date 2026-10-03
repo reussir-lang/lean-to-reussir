@@ -1,12 +1,24 @@
-# Patch 0040: a hook at the end of a drain (`__reussir_drop_drained`)
+# Local additions to Reussir (not bugs)
 
-Patch file: `../0040-l2r-local-drop-call-the-host-s-function-when-a-drain.patch`
-(made as commit `3aad05ae` on 91da4f80 in a scratch checkout; it applies to
-`./reussir`'s `l2r-local` too, whose `crates/reussir-rt/src/drop.rs` is the
-same). Not a Reussir bug: a hook that lean2rr's runtime needs. Review:
-pending. Applied to `./reussir`: not yet.
+Two of the local patches fix no Reussir bug: they add something lean2rr's
+runtime or representation needs. They are kept with the bug fixes
+([`README.md`](README.md#applying-the-patches)), applied in `./reussir`
+(`l2r-local` 5c0514e3), and reviewed like them.
 
-## 1. Why
+| Patch | What | Needed by | Review |
+|---|---|---|---|
+| [0040](#0040-a-hook-at-the-end-of-a-drain-__reussir_drop_drained) | `reussir_rt::drop` calls a host function when a drain ends | lean2rr's runtime (promise dependents released inside a free) | rv8/reussir: no defect |
+| [0050](#0050-tagged-opaque-handles-one-word-nat-and-int) | `#[ffi(rust = "...", tagged)]`: an odd handle is an immediate, not counted | one-word `Nat`/`Int` (branch `mem-nat`) | rv8/nat and the mem-nat review: no defect |
+
+## 0040: a hook at the end of a drain (`__reussir_drop_drained`)
+
+Patch file
+[`patches/0040-l2r-local-drop-call-the-host-s-function-when-a-drain.patch`](patches/0040-l2r-local-drop-call-the-host-s-function-when-a-drain.patch)
+(`l2r-local` commit `e3e267af`, applied in `./reussir`; made as commit
+`3aad05ae` in a scratch checkout on 91da4f80). Not a Reussir bug: a hook
+that lean2rr's runtime needs.
+
+### Why
 
 Natively, dropping the last reference to an unresolved promise resolves it
 with `none` and runs its `sync` dependents at once, on the dropping thread,
@@ -28,7 +40,7 @@ wait or question about a task: code in between sees the old state, output
 they print escapes `IO.FS.withIsolatedStreams`, and a condition-variable
 loop that reads its condition before waiting can wait forever (plan §10).
 
-## 2. The change
+### The change
 
 `crates/reussir-rt/src/drop.rs` exports
 `pub static __reussir_drop_drained: AtomicPtr<()>` (`#[no_mangle]`, null
@@ -45,7 +57,7 @@ stores `leanrt::task::drained` there whenever a promise is resolved inside
 a drain. Against a Reussir without the patch the weak symbol is null
 and nothing is stored: the runtime still builds and works as before.
 
-## 3. Checks
+### Checks
 
 - `cargo test -p reussir-rt --lib drop::` passes: the new test
   `drained_runs_after_the_outermost_drain` (the function runs once per
@@ -59,3 +71,101 @@ and nothing is stored: the runtime still builds and works as before.
   the runtime, round 8; its cases are all references now covered without
   it. A free that the program's own code starts at a record has no test:
   where Lean drops a local is not fixed.)
+
+### Review
+
+Round RV8 (`~/Documents/l2r-scratch/rv8/reussir/FINDINGS.txt`): no defect.
+The hook is called at every drain exit that released something, after
+`draining` is false and with nothing pending, as the last statement, so it
+may start new drains, re-enter or switch coroutines; not for nested drains
+or drains with nothing to do. A panic inside a drain aborts (the steps are
+reached only through `extern "C"` frames), so no drain exits by unwinding.
+A relaxed `AtomicPtr` is enough (it publishes a code pointer). Weak linking
+works both ways: a binary built with 0040 defines the symbol and
+`RtPromiseFreeGlue` passes; one built against a Reussir without it shows a
+weak undefined symbol and runs. The drop unit tests pass, the new one also
+under Miri. Side note (not introduced by 0040): drop glue is marked
+`mustprogress nounwind willreturn`, and with the hook (and already before,
+through `leanrt::drop::run`) it can run Lean continuations that might not
+return; no concrete miscompile was found.
+
+## 0050: tagged opaque handles (one-word `Nat` and `Int`)
+
+Patch file
+[`patches/0050-l2r-local-tagged-FFI-objects-an-odd-handle-is-an-imm.patch`](patches/0050-l2r-local-tagged-FFI-objects-an-odd-handle-is-an-imm.patch)
+(`l2r-local` commit `a75ed2cf`, applied in `./reussir`; made as commit
+`b4ea1ae1` in a scratch checkout on top of 0017). Not a bug fix: a small
+feature lean2rr needs to represent `Nat` and `Int` as one word (branch
+`mem-nat`; its own copy of this report is `reussir-patches/details/0050.md`
+there, until it is merged into this layout).
+
+### What it does
+
+An opaque Reussir record (`#[ffi(rust = "path")] pub struct T;`) is a
+handle to a foreign, reference-counted box. Reussir copies such a handle by
+incrementing the 32-bit count at offset 0 of the box, in line, and releases
+it by calling a generated drop hook (the Rust type's `Drop`). The patch
+adds an opt-in flag, `#[ffi(rust = "path", tagged)]`: a handle of such a
+type may also be an odd word that is not a pointer at all, and Reussir then
+increments the count, or calls the hook, only when the handle's low bit is
+clear.
+
+lean2rr declares `Nat` and `Int` this way. A small `Nat` `n` (below 2^63) is
+the word `2n+1`, a small `Int` (the `int32` range) `lean_box` of its 32
+bits; a big one is a pointer to a counted big number laid out as Lean's
+`lean_mpz_object`. This is Lean's own representation, and Lean's C runtime
+makes the same low-bit test before every count update (`lean_inc`,
+`lean_dec`). Before, `Nat` was a two-word `[value]` enum
+`{ Small(u64), Big(LBig) }`: 16 bytes in every record field (natively 8).
+lean2rr cannot skip the counting of small values itself: Reussir inserts it
+(in records, closures, enums, its drop and acquire glue).
+
+### Where in Reussir
+
+- Frontend: the attribute is parsed in `crates/reussir-core/src/semi/ctxt.rs`
+  (`Record::ffi_tagged`) and travels through the textual HIR
+  (`{ ffi tagged "path" }`), the package interface, monomorphization into
+  the MIR layout (`RecordLayout::Opaque { tagged }`, printed
+  `{ "path", @hook, tagged }`) and codegen
+  (`crates/reussir-codegen/src/lower/ty.rs`, through the C API
+  `reussirFFIObjectTypeGet(..., tagged)`).
+- Dialect: `FFIObjectType` gets a default-valued `bool` parameter, printed
+  `!reussir.ffi_object<"path", @hook, tagged = true>` and omitted when
+  false (existing IR is unchanged).
+- Lowering (`lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp`, the only
+  place where `rc.inc` and `rc.dec` of an `ffi_object` become code):
+  `beginRealBoxGuard` splits the block on `(ptrtoint p) & 1 == 0`; the
+  increment and the call to the cleanup hook go in the guarded block, and
+  nothing is loaded from the handle before the test.
+- The two other places that read the count of an arbitrary rc value skip
+  tagged objects: the optional `--instrument-nonlinear-ffi` check and the
+  uniqueness-carrying analysis (`rc.assume_unique` on a carried argument;
+  it cannot fire for an FFI object, which Reussir never creates fresh, but
+  is excluded anyway). Nothing else reads through an opaque handle: an
+  `ffi_object` produces no reuse token, is not deferred by the drop glue,
+  and reaches foreign code only as its Rust type, which knows the encoding.
+
+### Checks and review
+
+Tests: `conversion/tagged_ffi_object.mlir` (guarded `rc.inc`/`rc.dec` for a
+tagged object, unguarded for an untagged one, the textual form),
+`conversion/instrument_nonlinear_ffi_tagged.mlir`, `frontend/ffi_tagged.rr`
+(the attribute through HIR, MIR and MLIR), HIR and MIR round-trip unit
+tests. On lean2rr: the runtime suite, the classic corpus, and tests of
+every `Nat`/`Int` operation at 2^62, 2^63 and 2^64 and of `Nat`s in every
+container.
+
+Reviews: the mem-nat review (`~/Documents/l2r-scratch/mem/nat/review/FINDINGS.txt`)
+and round RV8 (`~/Documents/l2r-scratch/rv8/nat/FINDINGS.txt`, Q3) found no
+defect in the patch: the guard covers the delta, atomic and
+immortal-steering paths of `rc.inc`; `rc.dec` calls the hook only for an
+even word (and the hook re-tests it); every other reader or writer of a
+count was traced to a guarded path or excludes FFI objects; Reussir puts no
+alignment or dereferenceable attributes on FFI handles, so LLVM cannot fold
+the low-bit test away. The first review's optional hardening (exclude
+tagged objects from `rc.assume_unique`) is in the final patch.
+
+**Effect on lean2rr.** With branch `mem-nat`: `Nat` and `Int` fields take 8
+bytes instead of 16, small values are never allocated, copying or dropping
+one is a bit test. Without `mem-nat`, lean2rr declares no tagged type and
+nothing changes.

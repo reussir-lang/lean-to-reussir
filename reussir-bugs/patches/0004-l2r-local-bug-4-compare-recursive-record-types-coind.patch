@@ -1,4 +1,4 @@
-From bf19f529a9ff05210e10cf5c66f3a7729bdb8954 Mon Sep 17 00:00:00 2001
+From 60267ac3f695da70420c47ab76c181a782df9237 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 30 Sep 2026 18:24:57 -0400
 Subject: [PATCH] l2r-local: bug 4: compare recursive record types

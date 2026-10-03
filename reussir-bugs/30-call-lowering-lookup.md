@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** cost (build time). **Status:** patched (0062).
+**Kind:** cost (build time). **Status:** patched (0062), applied in `./reussir` (`l2r-local` 5c0514e3); review pending.
 
 **Verdict: cost, with a small fix.** `reussir-convert-to-llvm` lowers every
 `func.call` with the func dialect's stock pattern, which looks the callee
@@ -83,8 +83,8 @@ workaround.
 
 Patch file
 [`patches/0062-l2r-local-bug-30-look-up-call-lowering-s-callees-in-.patch`](patches/0062-l2r-local-bug-30-look-up-call-lowering-s-callees-in-.patch)
-(made as commit `33bf4710` in a scratch checkout, after 0060 and 0061; it
-does not depend on them). The func dialect's interface is skipped and its
+(`l2r-local` commit `94562ad3`, applied in `./reussir`; `l2r-local` head 5c0514e3; made as commit `33bf4710`
+in a scratch checkout; it depends on no other patch). The func dialect's interface is skipped and its
 patterns are added with a collection, as `convert-func-to-llvm` does:
 
 ```c++
@@ -121,6 +121,11 @@ the conversion has finished.
   [bug 28](28-unique-carrying-join.md).
 - `run.sh`: `bug 30   FIXED       reussir-opt --reussir-convert-to-llvm:
   N = 5000: 0.7 s, N = 10000: 0.4 s`.
+
+**Review.** Pending: the adversarial review of 0060-0063 runs in
+`~/Documents/l2r-scratch/rv8/reussir/e/`. The patch is applied in
+`./reussir` meanwhile (applied; review pending). Reussir's lit suite and
+`run.sh` on the final stack: as above.
 
 **Effect on lean2rr.** Build time only: large programs convert in linear
 time; the generated code is unchanged.

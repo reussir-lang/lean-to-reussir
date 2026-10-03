@@ -1,7 +1,7 @@
-From 33bf4710c741495305fe4fd4b30091f6249e2ae9 Mon Sep 17 00:00:00 2001
+From 94562ad3debe6b0119f229fdc1cefbcb919d0849 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 03:40:44 -0400
-Subject: [PATCH 62/63] l2r-local: bug 30: look up call lowering's callees in a
+Subject: [PATCH] l2r-local: bug 30: look up call lowering's callees in a
  symbol table collection
 
 `reussir-convert-to-llvm` collects the conversion patterns of every loaded
@@ -32,10 +32,10 @@ its convention).
  create mode 100644 tests/integration/conversion/convert_to_llvm_call_callee_lookup.mlir
 
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 9712f280..3b2561b3 100644
+index 91439cf2..5f94d471 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-@@ -4092,7 +4092,9 @@ struct BasicOpsLoweringPass
+@@ -4065,7 +4065,9 @@ struct BasicOpsLoweringPass
  // `ensureRuntimeFunctions` above, which declares `__reussir_allocate` and
  // friends at the index type — so driving the actual conversion with a
  // default (64-bit index) converter breaks 32-bit-pointer targets: the
@@ -46,7 +46,7 @@ index 9712f280..3b2561b3 100644
  struct ConvertToLLVMPass
      : public impl::ReussirConvertToLLVMPassBase<ConvertToLLVMPass> {
    using Base::Base;
-@@ -4111,11 +4113,22 @@ struct ConvertToLLVMPass
+@@ -4084,11 +4086,22 @@ struct ConvertToLLVMPass
      // externalized declarations carry `!reussir.rc` signatures but no
      // reussir ops would lose the Reussir type conversions.
      for (mlir::Dialect *dialect : context->getLoadedDialects()) {

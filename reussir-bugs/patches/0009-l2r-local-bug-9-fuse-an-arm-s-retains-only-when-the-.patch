@@ -1,4 +1,4 @@
-From b7bff6e2d05e1d1124b1ce15d91a5a1cd3c82e6f Mon Sep 17 00:00:00 2001
+From e13c2e2c7d0fc6f04e227ea558abfd2da17452aa Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 30 Sep 2026 21:38:24 -0400
 Subject: [PATCH] l2r-local: bug 9: fuse an arm's retains only when the release

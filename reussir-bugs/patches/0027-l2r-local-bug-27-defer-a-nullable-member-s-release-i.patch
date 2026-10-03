@@ -1,0 +1,272 @@
+From 9ea689059d44074605140220541a84b0f07ea1e4 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 3 Oct 2026 00:53:33 -0400
+Subject: [PATCH] l2r-local: bug 27: defer a nullable member's release in drop
+ glue like a plain rc member
+
+Inside drop glue (`kDropGlueAttr`: the outlined dtors and the
+drop_and_free functions), `rewriteDropRc` releases a member box of a
+plain shared record through `emitDeferredRelease`: when its count is 1
+it goes onto the thread's pending stack, which the outermost drop glue
+drains, so a long chain is freed in a loop (patches for bugs 13 and
+13b). `rewriteDropNullable` lacked that branch: the non-null arm of a
+`Nullable<shared record>` member always emitted a plain `rc.dec`, which
+expands into a recursive release. Freeing a chain linked through
+`Nullable` therefore took one stack frame (or more) per link: a chain of
+`B { a: A }`, `A [value] { b: Nullable<B>, .. }` crashed with SIGSEGV at
+1,000,000 links on an 8 MB stack, while the same chain linked through a
+plain shared enum frees 3,000,000 links.
+
+In the non-null arm, release the unwrapped box with `emitDeferredRelease`
+under the same condition as `rewriteDropRc` (in drop glue, and a plain
+shared record box). Outside drop glue nothing changes.
+
+`emitCellRelease` (drop_and_free) releases a freed cell's last non-leaf
+record box member after freeing the cell, directly (a tail call when its
+count is 1), and defers the others. It picked that member only among
+plain boxes, so with the deferral above a record `{ s: S, b:
+Nullable<B> }` would release S before B, the opposite of `{ s: S, b: B }`
+(and of the order before this change), and a chain through `Nullable`
+would cost a push and a pop per link instead of a tail call. A
+`Nullable` member whose box is a non-leaf record box can now be that
+last member: loaded before the free, then null-checked and released
+directly, so both kinds of member are released in the same order.
+
+Generated code changes only where a nullable member is released inside
+drop glue: of Reussir's frontend tests, cell_e2e (a Cell<Nullable<..>>
+in a shared record) and the new test; the LLVM IR of 30 lean2rr programs
+(which have no `Nullable`) is unchanged.
+
+As for plain links, the tail call makes a long chain a loop only when
+LLVM eliminates it: at -O none a chain of a million links overflows the
+stack through a plain shared enum as well as through `Nullable`, before
+and after this change.
+
+Found by the adversarial review of the local patches (RV7P-05; the
+release order by RV8R-01); not caused by them (the baseline crashes too).
+Test: tests/integration/frontend/drop_long_nullable_chain (two million
+links: a shared record linking to itself through a nullable member, the
+link inside a [value] member, and the [value] record held in a cell and
+released by `cell::set`; -O default and -O aggressive; all three crash
+before the fix), and the glue of `{ Os, Nullable<Ob> }` checked to defer
+Os and release Ob after the free, like that of `{ Os, Ob }`.
+---
+ .../AcquireDropExpansion.cpp                  | 50 +++++++++-
+ .../frontend/drop_long_nullable_chain.c       | 15 +++
+ .../frontend/drop_long_nullable_chain.rr      | 96 +++++++++++++++++++
+ 3 files changed, 156 insertions(+), 5 deletions(-)
+ create mode 100644 tests/integration/frontend/drop_long_nullable_chain.c
+ create mode 100644 tests/integration/frontend/drop_long_nullable_chain.rr
+
+diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+index 97247a8a..28bd8b76 100644
+--- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
++++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+@@ -66,9 +66,9 @@ namespace reussir {
+ // `drop_in_place` (the glue entry: it drops a record's contents) drains the
+ // stack before returning. `drop_and_free`, which only ever runs from that
+ // drain, frees a cell whose count was read as 1: per arm it releases the
+-// members (deferring the record boxes) but the last non-leaf record box,
+-// frees the cell, and then releases that last box directly, by a tail call
+-// when its count is 1, so a chain is a loop. Releases outside drop glue
++// members (deferring the record boxes) but the last non-leaf record box
++// (plain or in a `Nullable`), frees the cell, and then releases that last
++// box directly, by a tail call when its count is 1, so a chain is a loop. Releases outside drop glue
+ // (whose tokens may be reused) are unchanged.
+ 
+ namespace {
+@@ -251,10 +251,20 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                                        rewriter.getIndexAttr(idx))
+         .getResult();
+   };
++  // The member released last, after the cell is freed: the last non-leaf
++  // record box, plain or `Nullable` (whose box would otherwise be deferred
++  // like a plain one), so the members are released in the same order either
++  // way and a chain through either kind of link is a loop.
++  auto isTail = [&](size_t idx) {
++    mlir::Type type = projected(idx);
++    if (auto nullableType = llvm::dyn_cast<NullableType>(type))
++      type = nullableType.getPtrTy();
++    return isDeferredNonLeaf(type);
++  };
+   std::optional<size_t> last;
+   for (auto [idx, memberTy, memberIsField] : llvm::enumerate(
+            payload.getMembers(), payload.getMemberIsField()))
+-    if (!memberIsField && isDeferredNonLeaf(projected(idx)))
++    if (!memberIsField && isTail(idx))
+       last = idx;
+   mlir::Value lastValue;
+   if (last)
+@@ -283,8 +293,26 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+   mlir::Value token =
+       ReussirRcReinterpretOp::create(rewriter, loc, tokenType, rc);
+   ReussirTokenFreeOp::create(rewriter, loc, token);
+-  if (lastValue)
++  if (!lastValue)
++    return;
++  auto nullableType = llvm::dyn_cast<NullableType>(lastValue.getType());
++  if (!nullableType) {
+     emitLastRelease(rewriter, loc, moduleOp, lastValue);
++    return;
++  }
++  auto dispatcher =
++      ReussirNullableDispatchOp::create(rewriter, loc, mlir::Type{}, lastValue);
++  mlir::Block *nullBlock = rewriter.createBlock(
++      &dispatcher.getNullRegion(), dispatcher.getNullRegion().begin());
++  rewriter.setInsertionPointToStart(nullBlock);
++  ReussirScfYieldOp::create(rewriter, loc, nullptr);
++  mlir::Block *nonNullBlock = rewriter.createBlock(
++      &dispatcher.getNonNullRegion(), dispatcher.getNonNullRegion().begin(),
++      {nullableType.getPtrTy()}, {loc});
++  rewriter.setInsertionPointToStart(nonNullBlock);
++  emitLastRelease(rewriter, loc, moduleOp, nonNullBlock->getArgument(0));
++  ReussirScfYieldOp::create(rewriter, loc, nullptr);
++  rewriter.setInsertionPointAfter(dispatcher);
+ }
+ 
+ mlir::func::FuncOp getOrCreateDropAndFree(mlir::ModuleOp moduleOp,
+@@ -596,6 +624,18 @@ private:
+           &dispatcher.getNonNullRegion(), dispatcher.getNonNullRegion().begin(),
+           {nullableType.getPtrTy()}, {op.getLoc()});
+       rewriter.setInsertionPointToStart(nonNullBlock);
++      // Inside drop glue, release the box as `rewriteDropRc` releases a plain
++      // rc member: deferred to the pending stack, so a chain linked through
++      // `Nullable` is freed in a loop instead of one frame per link.
++      if (auto func = op->getParentOfType<mlir::func::FuncOp>();
++          func && func->hasAttr(kDropGlueAttr) && isDeferrable(rcType)) {
++        emitDeferredRelease(rewriter, op.getLoc(),
++                            op->getParentOfType<mlir::ModuleOp>(),
++                            nonNullBlock->getArgument(0));
++        ReussirScfYieldOp::create(rewriter, op.getLoc(), nullptr);
++        rewriter.eraseOp(op);
++        return mlir::success();
++      }
+       NullableType retNullableTy = nullptr;
+       if (decMayProduceToken(rcType)) {
+         auto layout = mlir::DataLayout::closest(op.getOperation());
+diff --git a/tests/integration/frontend/drop_long_nullable_chain.c b/tests/integration/frontend/drop_long_nullable_chain.c
+new file mode 100644
+index 00000000..ce1255bd
+--- /dev/null
++++ b/tests/integration/frontend/drop_long_nullable_chain.c
+@@ -0,0 +1,15 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for drop_long_nullable_chain.rr: four independent properties, one
++// decimal digit each.
++
++extern long long reussir_main(void);
++
++int main(void) { return reussir_main() == 1111 ? 0 : 1; }
+diff --git a/tests/integration/frontend/drop_long_nullable_chain.rr b/tests/integration/frontend/drop_long_nullable_chain.rr
+new file mode 100644
+index 00000000..49c85c78
+--- /dev/null
++++ b/tests/integration/frontend/drop_long_nullable_chain.rr
+@@ -0,0 +1,96 @@
++// Releasing a long chain linked through `Nullable<shared record>` must not
++// recurse once per link. Inside drop glue a nullable member's box is
++// released like a plain rc member: deferred to the thread's pending stack
++// when its count is 1, so the outermost drop glue frees the chain in a loop.
++// Checked with two million links (about 64 MB of stack if each link took a
++// frame, beyond the driver's 8 MB main thread): a shared record linking to
++// itself through a nullable member, the link held in a [value] record inside
++// the box, and that [value] record held in a cell (released through the
++// cell's `field` glue). A nullable member is also released in the same order
++// as a plain one: the last non-leaf box member, plain or nullable, is released
++// last, after the cell is freed (as a tail call, which makes a chain through
++// it a loop), and the others are deferred before. Checked on the glue of Pn
++// (Os, then a Nullable<Ob>) against Pp (Os, then an Ob): both defer Os and
++// release Ob after freeing the cell.
++
++// RUN: %rrc %s -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/drop_long_nullable_chain.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++// RUN: %rrc %s -o %t.opt.o --relocation-mode pic -Oaggressive
++// RUN: %cc %t.opt.o %S/drop_long_nullable_chain.c -o %t.opt.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.opt.exe
++// RUN: %rrc %s --emit mlir-llvm -o - | %FileCheck %s --check-prefix=ORDER
++
++import core::intrinsic::cell;
++
++struct N { next: Nullable<N>, v: u64 }
++struct [shared] S(u64)
++struct [value] A { b: Nullable<B>, s: S, n: u64 }
++struct B { a: A, k: u64 }
++struct [value] CA { b: Nullable<CB>, n: u64 }
++struct CB { c: Cell<CA>, k: u64 }
++struct [shared] Lf(u64)
++struct Os { n: Lf, k: u64 }
++struct Ob { n: Lf, k: u64 }
++struct Pn { s: Os, b: Nullable<Ob> }
++struct Pp { s: Os, b: Ob }
++struct Qn { p: Pn, k: u64 }
++struct Qp { p: Pp, k: u64 }
++struct Rr { qn: Qn, qp: Qp, k: u64 }
++
++fn direct(n : u64, acc : Nullable<N>) -> Nullable<N> {
++    if n == 0 { acc } else { direct(n - 1, Nullable::NonNull{N { next: acc, v: n }}) }
++}
++fn first(l : Nullable<N>) -> u64 {
++    match l { Nullable::NonNull(x) => x.v, Nullable::Null => 0 }
++}
++
++fn through_value(n : u64, acc : Nullable<B>) -> Nullable<B> {
++    if n == 0 { acc } else {
++        through_value(n - 1, Nullable::NonNull{B { a: A { b: acc, s: S{n}, n: n * 2 }, k: n }})
++    }
++}
++fn first_k(l : Nullable<B>) -> u64 {
++    match l { Nullable::NonNull(x) => x.k, Nullable::Null => 0 }
++}
++
++fn through_cell(n : u64, acc : Nullable<CB>) -> Nullable<CB> {
++    if n == 0 { acc } else {
++        through_cell(n - 1, Nullable::NonNull{CB { c: cell::alloc(CA { b: acc, n: n }), k: n }})
++    }
++}
++fn cell_chain(n : u64) -> u64 {
++    let c = cell::alloc(CA { b: through_cell(n, Nullable::Null), n: 0 });
++    // The set releases the whole chain through CA's `field` drop glue.
++    cell::set(c, CA { b: Nullable::Null, n: 1 });
++    cell::get(c).n
++}
++
++fn mk_rr(x : u64) -> Rr {
++    Rr { qn: Qn { p: Pn { s: Os { n: Lf{x}, k: 1 }, b: Nullable::NonNull{Ob { n: Lf{x + 1}, k: 2 }} }, k: 0 },
++         qp: Qp { p: Pp { s: Os { n: Lf{x}, k: 1 }, b: Ob { n: Lf{x + 1}, k: 2 } }, k: 0 }, k: 3 }
++}
++fn rr_k(r : Rr) -> u64 { r.k }
++
++pub fn main() -> i64 {
++    let direct_ok = if first(direct(2000000, Nullable::Null)) == 1 { 1 } else { 0 };
++    let value_ok = if first_k(through_value(2000000, Nullable::Null)) == 1 { 1 } else { 0 };
++    let cell_ok = if cell_chain(2000000) == 1 { 1 } else { 0 };
++    let order_ok = if rr_k(mk_rr(5)) == 3 { 1 } else { 0 };
++    direct_ok + value_ok * 10 + cell_ok * 100 + order_ok * 1000
++}
++
++extern "C" trampoline "reussir_main" = main;
++
++// ORDER-LABEL: llvm.func {{.*}}@_RINvNvC4core9intrinsic22drop_and_free_in_drainC2PnE(
++// ORDER: llvm.mlir.addressof @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2OsE
++// ORDER: llvm.call @__reussir_drop_defer
++// ORDER: llvm.call @__reussir_deallocate
++// ORDER: llvm.call @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2ObE(
++// ORDER: llvm.return
++// ORDER-LABEL: llvm.func {{.*}}@_RINvNvC4core9intrinsic22drop_and_free_in_drainC2PpE(
++// ORDER: llvm.mlir.addressof @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2OsE
++// ORDER: llvm.call @__reussir_drop_defer
++// ORDER: llvm.call @__reussir_deallocate
++// ORDER: llvm.call @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2ObE(
++// ORDER: llvm.return
+-- 
+2.43.0
+

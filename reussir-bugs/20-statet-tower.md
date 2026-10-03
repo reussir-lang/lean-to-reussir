@@ -2,16 +2,18 @@
 
 ## Summary
 
-**Kind:** unclear. **Status:** worked around (build time only; lean2rr
-keeps its conversion, unboxing and uniform-code application functions out
-of rrc's inliner). No patch.
+**Kind:** unclear at first; found later to be a growth of the MLIR
+inliner's chains of copied calls, with a small local fix. **Status:**
+patched (0034), applied in `./reussir` (`l2r-local` 5c0514e3); lean2rr
+also works around it (it keeps its conversion, unboxing and uniform-code
+application functions out of rrc's inliner), and keeps doing so.
 
 With lean2rr's conversion, unboxing and application functions inlinable,
 rrc's build time and memory on polymorphic recursion through monad
 transformers grow far faster than the program (superlinearly; the shape of
 the growth was not measured).
 
-**Verdict: unclear.** Keeping lean2rr's conversion functions out of the
+**Verdict (first): unclear.** Keeping lean2rr's conversion functions out of the
 MLIR inliner cuts build time and memory about five-fold, but the inliner is
 not shown to misbehave: there are no operation counts before and after
 inlining, and the growth was never measured as exponential (the inliner's
@@ -22,7 +24,10 @@ codegen adds `no_inline` only so that the anchor survives, so lean2rr
 relies on a side effect (pinned by Reussir's test
 `tests/integration/frontend/inline_transform.rr`; LLVM still inlines
 anchored functions). A plain no-inline attribute would be the clean way (a
-missing feature).
+missing feature). The cause was found later (0034, below): within its one
+iteration, MLIR's inliner also inlines the calls an inlining copies in, so
+a call into a recursive group of functions gets every chain of distinct
+members inlined.
 
 ## Symptom and repro
 
@@ -100,3 +105,92 @@ to 2.5 minutes and at most 3 GB, the whole build (`St4PolyP1a`: 21 s,
 0.4 GB; `Cn3PolyM1`: 70 s, 1.5 GB). `run.sh` builds the repro with
 `L2R_NO_INLINE_ANCHORS=1` and without: 136 s and 2.9 GB against 18 s and
 0.3 GB (rrc, to an executable).
+
+## Patch
+
+Patch file
+[`patches/0034-l2r-local-bug-20-do-not-inline-a-copied-call-into-a-.patch`](patches/0034-l2r-local-bug-20-do-not-inline-a-copied-call-into-a-.patch)
+(`l2r-local` commit `ac5d1d85`, applied in `./reussir`; `l2r-local` head
+5c0514e3).
+
+**What was found.** The default inliner runs MLIR's SCC inliner for one
+iteration with a cap of 256 operations on callees, and its description
+says this unrolls recursion one level. But within the iteration MLIR's
+inliner also inlines the calls that an inlining copies into the caller,
+and stops a chain only when a callee repeats on it (its inline history).
+A call into a recursive SCC thus got every chain of distinct members of
+the SCC inlined, a growth that multiplies the fan-out of the SCC along
+each chain. lean2rr's conversions, unboxing and application functions
+call each other this way: on the repro (without lean2rr's workaround) the
+module grew from 16,980 operations to 190,318 in the inliner, through
+4792 inlines of which 3833 were of copied calls (2326 into recursive
+callees).
+
+**The change** (`lib/Transformation/DefaultInliner/DefaultInliner.cpp`):
+before inlining, every call is marked with the name of the function it is
+written in (`reussir.inliner_home`, removed afterwards), the callables on a
+cycle of the call graph are collected (`llvm::scc_begin` over MLIR's
+`CallGraph`, `hasCycle()`), and the profitability check refuses a copied
+call (marked with another function) whose callee is recursive:
+
+```c++
+config, [&](const mlir::Inliner::ResolvedCall &call) {
+  if (!calleeIsSmall(call.targetNode->getCallableRegion(), maxCalleeOps))
+    return false;
+  mlir::CallOpInterface callOp = call.call;
+  return !recursive.contains(call.targetNode) ||
+         !copiedByInlining(callOp.getOperation());
+});
+```
+
+Calls the program wrote are inlined as before, so recursion unrolls one
+level, and a copied call into a non-recursive callee is inlined as before.
+The pass is also registered in `reussir-opt`.
+
+**Why it is correct.** It only declines some inlinings; a call that is
+not inlined stays a call to the same function, so the program is the
+same. The mark survives cloning (attributes are cloned) and moving, and
+is removed after inlining on both the success and the failure path.
+
+**Verification.** Test `conversion/default_inliner_recursive_scc.mlir`
+(fails without the rule: more copies of the SCC's members). The tower
+without lean2rr's workaround: 16,980 -> 67,238 operations after the
+inliner; rrc 236 s, 1.8 GB -> 70 s, 0.98 GB (through `l2r.py`, back to
+back, loaded machine, the series 0030-0035). With the workaround, peak
+memory is unchanged (226 MB).
+
+`run.sh` on the final stack: `rrc: 78 s, 770 MB; with the conversion
+functions kept out of the inliner: 45 s, 217 MB (3.53x memory)` (before:
+2.9 GB against 0.3 GB, about 10x). What remains is the inliner's ordinary
+one-level inlining of the calls the program writes, which lean2rr's
+anchors still avoid. `run.sh`'s first thresholds (FIXED at most 1.5x)
+expected the anchors to stop mattering; they are now REPRODUCES at least
+6x (the chains of copied calls) and FIXED at most 4.5x, so the line above
+reads `FIXED`. lean2rr keeps its anchors: 3.5x less memory on this program
+is worth keeping.
+
+**Review.** Round RV8C (`~/Documents/l2r-scratch/rv8/reussir-c/FINDINGS.txt`,
+Q5): no defect. Recursion is computed on MLIR's `CallGraph` (every
+top-level callable hangs off the external node, so the SCC walk reaches
+all, and `hasCycle()` includes self-loops). Gaps, performance only:
+recursion through closures or indirect calls is not seen, and calls
+created by canonicalization count as written. Attribution with snapshots:
+the patch changes HigherOrder (LLVM IR 195k -> 165k lines, call sites
+15,762 -> 13,346), TypeclassGeneric (-0.1%) and Binarytrees (+0.3%) of the
+classic corpus, with identical output and the same benchmark times within
+noise.
+
+**Effect on lean2rr.** With its anchors (as lean2rr builds), unchanged
+memory; slightly different inlining on some corpus programs (above),
+same output.
+
+## Upstream note
+
+`reussir-default-inliner` promises one level of recursion unrolling, but
+MLIR's inliner, within one iteration, also inlines calls copied in by an
+inlining until a callee repeats on the chain, so a call into a recursive
+SCC inlines every chain of distinct members (a lean2rr module: 16,980 ->
+190,318 operations). Refusing to inline a copied call whose callee is on
+a cycle (tagging calls with their home function) restores the intent
+(-> 67,238).
+

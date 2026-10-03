@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (miscompile). **Status:** patched (0060).
+**Kind:** bug (miscompile). **Status:** patched (0060), applied in `./reussir` (`l2r-local` 5c0514e3); review pending.
 
 **Verdict: bug.** At `-O aggressive`, Reussir's uniqueness-carrying
 analysis can prove a value unique when it is fresh on one path but shared on
@@ -116,8 +116,8 @@ get a plain `count == 1`. No workaround.
 
 Patch file
 [`patches/0060-l2r-local-bug-28-make-Unknown-absorb-the-uniqueness-.patch`](patches/0060-l2r-local-bug-28-make-Unknown-absorb-the-uniqueness-.patch)
-(made as commit `b8aedd37` in a scratch checkout on `91da4f80`, that is
-the apply list + 0016 + 0017).
+(`l2r-local` commit `0510c7d4`, applied in `./reussir`; `l2r-local` head 5c0514e3; made as commit `b8aedd37`
+in a scratch checkout on `91da4f80`).
 
 The two meanings are split. Bottom is the empty provenance set (no fresh
 bit, no argument): the identity of the join, the start of a join over
@@ -181,6 +181,11 @@ pass unchanged.
 - lean2rr's runtime tests (14, among them RtFuzzReuse, RtShareMutators,
   RtFreshRebuildShared, RtReprShare, RtHashMap, RtPersistWalk): all pass.
 - `run.sh`: `bug 28   FIXED       prints 101 1   [-O aggressive]`.
+
+**Review.** Pending: the adversarial review of 0060-0063 runs in
+`~/Documents/l2r-scratch/rv8/reussir/e/`. The patch is applied in
+`./reussir` meanwhile (applied; review pending). Reussir's lit suite and
+`run.sh` on the final stack: as above.
 
 **Effect on lean2rr.** None measured: the same specializations on the
 programs above; the informational attribute `reussir.carrying_uniqueness`

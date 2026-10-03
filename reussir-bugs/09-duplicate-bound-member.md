@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0009, which also fixes
+**Kind:** bug. **Status:** patched (0009, applied in `./reussir` (`l2r-local` 5c0514e3), which also fixes
 [bug 14](14-member-consumed-before-release.md)).
 
 When a match arm binds a constructor's fields, Reussir retains each bound
@@ -140,7 +140,7 @@ field used twice or stored in a dead value.
 
 Patch file
 [`patches/0009-l2r-local-bug-9-fuse-an-arm-s-retains-only-when-the-.patch`](patches/0009-l2r-local-bug-9-fuse-an-arm-s-retains-only-when-the-.patch)
-(`l2r-local` commit `eb4eb49c`). It needs 0007: its second hunk calls
+(`l2r-local` commit `e13c2e2c`, applied in `./reussir`; `l2r-local` head 5c0514e3). It needs 0007: its second hunk calls
 `consumesFusedMember`, which 0007 adds ([bug 7](07-phantom-reuse-donor.md)).
 (The file applies on ef922049 without 0007, but does not compile there.)
 

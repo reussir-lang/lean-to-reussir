@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (crash on valid input). **Status:** patched (0063).
+**Kind:** bug (crash on valid input). **Status:** patched (0063), applied in `./reussir` (`l2r-local` 5c0514e3); review pending.
 
 **Verdict: bug.** rrc aborts with "thread 'main' has overflowed its stack"
 on a sum of 8000 terms, or a literal in 100000 parentheses. Reussir's
@@ -67,8 +67,8 @@ against a `ulimit -v` (like rrc's other threads).
 
 Patch file
 [`patches/0063-l2r-local-bug-31-run-rrc-s-driver-on-a-thread-with-a.patch`](patches/0063-l2r-local-bug-31-run-rrc-s-driver-on-a-thread-with-a.patch)
-(made as commit `b2e0bfd3` in a scratch checkout, after 0060 to 0062; it
-does not depend on them). `main` runs the driver on a thread with a 1 GiB
+(`l2r-local` commit `5c0514e3`, applied in `./reussir`; `l2r-local` head 5c0514e3; made as commit `b2e0bfd3`
+in a scratch checkout; it depends on no other patch). `main` runs the driver on a thread with a 1 GiB
 stack:
 
 ```rust
@@ -115,6 +115,11 @@ about a million nesting levels at the measured 1 KiB per level.
   [bug 28](28-unique-carrying-join.md) (every rrc run in them goes through
   the new thread).
 - `run.sh`: `bug 31   FIXED       compiles, prints 32004007`.
+
+**Review.** Pending: the adversarial review of 0060-0063 runs in
+`~/Documents/l2r-scratch/rv8/reussir/e/`. The patch is applied in
+`./reussir` meanwhile (applied; review pending). Reussir's lit suite and
+`run.sh` on the final stack: as above.
 
 **Effect on lean2rr.** None.
 

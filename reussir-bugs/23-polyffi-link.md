@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (build time). **Status:** patched (0017).
+**Kind:** bug (build time). **Status:** patched (0017), applied in `./reussir` (`l2r-local` 5c0514e3).
 
 **Verdict: bug (build time).** rrc links the bitcode of the compiled
 textures one module at a time with the static `llvm::Linker::linkModules`,
@@ -141,8 +141,8 @@ design (`docs/design/polymorphic-ffi.md`), a cost, not part of this bug.
 
 Patch file
 [`patches/0017-l2r-local-bug-23-link-the-gathered-polymorphic-FFI-m.patch`](patches/0017-l2r-local-bug-23-link-the-gathered-polymorphic-FFI-m.patch)
-(made as commit `91da4f80` in a scratch checkout, on top of 0016; it also
-applies without 0016). One `llvm::Linker` for the whole gather,
+(`l2r-local` commit `91da4f80`, applied in `./reussir`; `l2r-local` head 5c0514e3; made on top of 0016, it
+also applies without it). One `llvm::Linker` for the whole gather,
 `linkInModule` for each module, as `llvm-link` does:
 
 ```c++
@@ -215,6 +215,16 @@ been moved to the caller, which keeps the module alive).
 - lean2rr's runtime tests, 37 of them, with the patched build (arrays,
   casts and conversions, conversion origins and pointer identity, tasks,
   thunks, promises, files, processes, sockets): all pass.
+
+**Review.** Round RV6 (`~/Documents/l2r-scratch/rv6/p17/FINDINGS.txt`):
+no defects. In LLVM 23 `Linker::linkModules(Dest, Src)` is literally
+`Linker L(Dest); return L.linkInModule(Src)`, so the only change is that
+one mover's state (struct types, metadata map, named-metadata cache)
+outlives a link, the use `llvm-link` and regular LTO make of it. Every
+differential test behaved the same with both rrcs; for lean2rr's textures
+the linked IR is identical. Note N1: for arbitrary bitcode the linked
+module is the same only up to cosmetics (a struct type kept alive by the
+mover can give a different but equivalent representative name).
 
 **Effect on lean2rr.** Build time only: lean2rr's output is linked the
 same way, faster. Large programs (thousands of instances, as with

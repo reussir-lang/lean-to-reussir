@@ -17,8 +17,9 @@ whether the workaround can be dropped. Bug files are in
   ([01-value-enum-payload.md](../../../reussir-bugs/01-value-enum-payload.md)).
 - **Where:** `LowerBase.lean`: `nominalType`, `tupleType`;
   `Lower/StateMachine.lean`: `emitStateMachine`.
-- **Remove only if:** the bug is fixed (no patch yet). Then J4 entry
-  enums and multi-arm value types could be `[value]`.
+- **Remove only if:** not needed with patch 0020 (applied), but kept: by
+  the policy lean2rr also works with an unpatched Reussir. Without the
+  workaround, J4 entry enums and multi-arm value types could be `[value]`.
 
 ### Bug 2: in-place reuse skips a field store
 
@@ -28,12 +29,14 @@ whether the workaround can be dropped. Bug files are in
   indices 0..i put member i at the same offset.
 - **Why:** Reussir's copy avoidance skips storing a field it believes is
   in place; with packed layouts the variant check is wrong (a wrong value,
-  no error). Patch 0002 fixes the structure half only
+  no error). Patch 0002 fixes the structure half and 0019 the variant
+  half (both applied)
   ([02-reuse-field-store.md](../../../reussir-bugs/02-reuse-field-store.md);
   444a70a, 7860807).
 - **Where:** `scripts/l2r.py` (`--no-pack-record-members`);
   `Opt/FieldOrder.lean`; `LowerBase.lean`: `nominalType`, `fieldAlign`.
-- **Remove only if:** the variant half is fixed too. `field-order` itself
+- **Remove only if:** not needed with 0019 (applied), but kept: by the
+  policy lean2rr also works with an unpatched Reussir. `field-order` itself
   is optional; the flag is not.
 
 ### Bug 4: rrc recurses forever on two equal recursive types
@@ -103,7 +106,8 @@ whether the workaround can be dropped. Bug files are in
 
 - **What:** Nothing to do: lean2rr never emits the shape (records have no
   padding between members; one-field `[value]` structs).
-- **Why:** [08-padding-lift.md](../../../reussir-bugs/08-padding-lift.md).
+- **Why:** [08-padding-lift.md](../../../reussir-bugs/08-padding-lift.md)
+  (patch 0018, applied).
   With `field-order` off, Reussir pads with bytes, which does not trigger
   it either (5830b1c).
 - **Where:** `LowerBase.lean`: `nominalType`.
@@ -139,7 +143,8 @@ whether the workaround can be dropped. Bug files are in
 ### Bug 15: a `match` on a `Nullable` yielding a counted value
 
 - **What:** Nothing to do: lean2rr does not use `Nullable`.
-- **Why:** [15-nullable-match-yield.md](../../../reussir-bugs/15-nullable-match-yield.md).
+- **Why:** [15-nullable-match-yield.md](../../../reussir-bugs/15-nullable-match-yield.md)
+  (patch 0022, applied).
 - **Where:** n/a.
 - **Remove only if:** n/a.
 
@@ -149,9 +154,11 @@ whether the workaround can be dropped. Bug files are in
   `L2RIntRef` (a tagged word and a big-number cell); other `[value]`
   records are stored in an `ElemBox`.
 - **Why:** rrc rejects `cell::get`/`set` on such a cell
-  ([19-cell-of-value-record.md](../../../reussir-bugs/19-cell-of-value-record.md)).
+  ([19-cell-of-value-record.md](../../../reussir-bugs/19-cell-of-value-record.md);
+  patch 0023, applied).
 - **Where:** [../representations/references.md](../representations/references.md#nat-and-int-references-keep-a-tagged-word-and-a-big-number-cell).
-- **Remove only if:** the bug is fixed (no patch yet).
+- **Remove only if:** not needed with 0023 (applied), but kept: by the
+  policy lean2rr also works with an unpatched Reussir.
 
 ### Bug 21: an unterminated `[:` in a texture is dropped
 
@@ -159,8 +166,8 @@ whether the workaround can be dropped. Bug files are in
 - **Why:** [21-unterminated-placeholder.md](../../../reussir-bugs/21-unterminated-placeholder.md);
   round 6 RV6L-01.
 - **Where:** [../representations/strings.md](../representations/strings.md#-is-escaped-in-the-string-literal-table).
-- **Remove only if:** not needed once patch 0016 is applied (it is not),
-  but kept: by the policy lean2rr also works with an unpatched Reussir,
+- **Remove only if:** not needed with patch 0016 (applied since
+  2026-10-03), but kept: by the policy lean2rr also works with an unpatched Reussir,
   and the escape is free.
 
 ### The drain-end hook (local patch 0040)
@@ -169,11 +176,11 @@ whether the workaround can be dropped. Bug files are in
   `__reussir_drop_drained`, linked weakly, which local patch 0040 makes
   every outermost drain that released something call when it ends; without
   the patch the runtime still builds and falls back to walking later. The
-  patch is `reussir-patches/0040-l2r-local-drop-call-the-host-s-function-when-a-drain.patch`
-  at b299aab (see [README.md](README.md#summary)).
+  patch is [`reussir-bugs/patches/0040-l2r-local-drop-call-the-host-s-function-when-a-drain.patch`](../../../reussir-bugs/patches/0040-l2r-local-drop-call-the-host-s-function-when-a-drain.patch),
+  described in [`reussir-bugs/local-additions.md`](../../../reussir-bugs/local-additions.md).
 - **Why:** Not a bug: Reussir has no hook at the end of a free, and the
   `sync` dependents of promises dropped inside a free must run when it is
   over (round 7 RV7C-01). No bug entry exists for it.
 - **Where:** [../tasks/dependents.md](../tasks/dependents.md#dependents-of-a-promise-dropped-inside-a-free-run-when-the-free-is-over).
 - **Remove only if:** n/a (the fallback is for Reussir builds without
-  0040; 0040 is not applied to `l2r-local` yet).
+  0040; 0040 is applied to `l2r-local` since 2026-10-03).

@@ -1,8 +1,8 @@
-From b2e0bfd34f55c8b86c710b3a4192cb0bba90ac4a Mon Sep 17 00:00:00 2001
+From 5c0514e313c73a6e6f67f94507ac918ede96f893 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 03:45:46 -0400
-Subject: [PATCH 63/63] l2r-local: bug 31: run rrc's driver on a thread with a
- 1 GiB stack
+Subject: [PATCH] l2r-local: bug 31: run rrc's driver on a thread with a 1 GiB
+ stack
 
 The parser grows its own stack (`stacker`), but the stages after it walk
 expression trees recursively too, at about a kilobyte per nesting level,

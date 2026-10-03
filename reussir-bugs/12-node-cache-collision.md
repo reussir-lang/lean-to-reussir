@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (in cstree). **Status:** patched (0012).
+**Kind:** bug (in cstree). **Status:** patched (0012), applied in `./reussir` (`l2r-local` 5c0514e3).
 
 **Verdict: bug, in Reussir's parser dependency `cstree` (0.14), not in
 Reussir's code.** `get_cached_node` (`cstree/src/green/builder.rs`) keys its
@@ -157,8 +157,8 @@ are large (tens of MB for big programs).
 ## Patch
 
 Patch file
-[`patches/0012-l2r-local-bug-12-build-syntax-nodes-without-cstree-s-hash-only-node-cache.patch`](patches/0012-l2r-local-bug-12-build-syntax-nodes-without-cstree-s-hash-only-node-cache.patch)
-(`l2r-local` commit `42635042`). It also applies alone on ef922049.
+[`patches/0012-l2r-local-bug-12-build-syntax-nodes-without-cstree-s.patch`](patches/0012-l2r-local-bug-12-build-syntax-nodes-without-cstree-s.patch)
+(`l2r-local` commit `fe717f85`, applied in `./reussir`; `l2r-local` head 5c0514e3). It also applies alone on ef922049.
 
 **The fix.** The sink no longer uses the builder for nodes (`sink.rs`, plus
 a test in `lib.rs`).

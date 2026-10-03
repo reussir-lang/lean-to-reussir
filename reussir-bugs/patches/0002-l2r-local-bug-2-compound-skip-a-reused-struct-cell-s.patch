@@ -1,4 +1,4 @@
-From f8a907d434488fdb03562a3141cd2170b07ee499 Mon Sep 17 00:00:00 2001
+From ae5345cfffffa3d45870fa2df54a2c3c59dc4395 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 30 Sep 2026 16:32:26 -0400
 Subject: [PATCH] l2r-local: bug 2 (compound): skip a reused struct cell's

@@ -2,9 +2,10 @@
 
 ## Summary
 
-**Kind:** cost (opt-in flag). **Status:** worked around (build time only;
-lean2rr cuts deep tail paths and deep `let` values into functions). No
-patch.
+**Kind:** cost (opt-in flag), with a small local fix. **Status:** patched
+(0035), applied in `./reussir` (`l2r-local` 5c0514e3); lean2rr also works
+around it (it cuts deep tail paths and deep `let` values into functions),
+and keeps doing so.
 
 **Verdict: cost of the opt-in flag `--reuse-across-call`, not a defect.**
 The flag is off by default, and its documentation says only that it may
@@ -18,7 +19,9 @@ name starts with `__reussir_dealloc` in `--emit mlir-llvm`, that is
 the flag and 325 without at N = 15, 5119 and 430 at N = 30. The excess,
 1209 and 4689, is about 5·N² and grows 3.9x when the depth doubles. One
 token per nesting level would give about N²/2, so each level seems to
-leave several tokens pending, not one (an inference from these counts).
+leave several tokens pending, not one (an inference from these counts). The patch found why (below):
+a token that a decrement's unique branch takes from an `scf.if` nested in
+it was not collapsed into one free, so it was freed at every later exit.
 
 With `--reuse-across-call`, the generated code grows quadratically with
 match nesting depth (build time and memory). Each IO bind is a match on the
@@ -89,3 +92,82 @@ statements: 27 s, 343 MB; a 2000-statement `main`: about two minutes and
 statements: 23 s and 0.5 GB for the whole build, with 2000: 72 s and
 1.5 GB. `run.sh` builds the repro with `L2R_NO_OUTLINE=1`, which turns the
 cutting off.
+
+## Patch
+
+Patch file
+[`patches/0035-l2r-local-bug-16-free-a-token-taken-from-a-nested-sc.patch`](patches/0035-l2r-local-bug-16-free-a-token-taken-from-a-nested-sc.patch)
+(`l2r-local` commit `a639ae44`, applied in `./reussir`; `l2r-local` head
+5c0514e3).
+
+**What it fixes.** With `--reuse-across-call`, TokenReuse keeps every
+available token across non-tail calls and frees a token that no allocation
+reuses at every exit it reaches. A post-pass collapses those frees into
+one free in the unique branch of the token's decrement, but only when that
+branch yields the `nullable.create` of the reinterpreted box itself. When
+the branch takes the token from an `scf.if` nested in it (the guard that
+skips a tagged immediate under the special pointer tags, or a nested
+decrement whose token `escapeTrappedTokens` brought out), the frees stayed
+at the exits. lean2rr's IO code nests one match per statement, so the
+error arm at depth d freed about every token made above it: quadratic
+code. In the repro's `loop` at 50 statements: 15,650 free records for 49
+reuses, up to 301 tokens carried across one call.
+
+**The change** (`lib/Transformation/TokenReuse/TokenReuse.cpp`, the
+post-pass that sinks frees): when the unique branch yields the result of
+an `scf.if` in that branch with no other use, and the shared branch yields
+a null, free that nullable once at the end of the unique branch:
+
+```c++
++        auto elseNull = llvm::dyn_cast_if_present<ReussirNullableCreateOp>(
++            scfIf.getElseRegion().back().getTerminator()->getOperand(index)
++                .getDefiningOp());
++        auto nested =
++            llvm::dyn_cast_if_present<mlir::scf::IfOp>(yielded.getDefiningOp());
++        if (nested && nested->getBlock() == thenYield->getBlock() &&
++            yielded.hasOneUse() && elseNull && !elseNull.getPtr()) {
++          rewriter.setInsertionPoint(thenYield);
++          ReussirTokenFreeOp::create(rewriter, thenYield->getLoc(), yielded);
++          continue;
++        }
+```
+
+**Why it is correct.** A token reaches this post-pass only if nothing
+reuses it on any path, so it is used by nothing but its frees, and the
+original records free it once on every exit path. Freeing it once where it
+is made, at the end of the unique branch, is equivalent: the free checks
+for null, as the frees at the exits did, and the shared branch yields
+null. The freed cell is dead and never reused, so moving its free earlier
+reads nothing. A shape that does not match falls back to the frees at the
+exits, as before.
+
+**Verification.** Test `conversion/token_reuse_sink_escaped_free.mlir`;
+`mutex_cell_drop.mlir` and `rwlock_cell_drop.mlir` now free the payload's
+box before the cell's (both still after the unlock). On the repro through
+lean2rr (`L2R_NO_OUTLINE=1`, rrc to the LLVM dialect): 50 statements,
+13,401 deallocation calls -> 646 and 174 MB -> 123 MB; 100 statements,
+51,601 -> 1,096 and 463 MB -> 127 MB. `run.sh` on the final stack:
+`bug 16   FIXED       rrc: N = 50: 35 s, 159 MB; N = 100: 39 s, 190 MB
+(1.18x memory); N = 100 without reuse across calls: 38 s, 183 MB`
+(unpatched: 261 MB and 1.15 GB).
+
+**Review.** Round RV8C (`~/Documents/l2r-scratch/rv8/reussir-c/FINDINGS.txt`,
+Q6): no defect. The reviewer checked that a token is sunk only when its
+decrement's token result has no other use, that later records of the same
+token are skipped (no double free), that loops and calls keep their frees,
+the changed order of a cell drop's two frees (both after the unlock), and
+a program with nested matches and calls before and after over six flag
+sets under an allocation-tracking shim (allocations equal frees).
+
+**Effect on lean2rr.** Build time and memory without lean2rr's outlining.
+lean2rr keeps its outlining (`Outline.lean`), which also bounds other
+costs ([bug 17](17-long-nat-block.md)).
+
+## Upstream note
+
+With `--reuse-across-call`, a token that a decrement's unique branch takes
+from a nested `scf.if` and that nothing reuses is freed at every later
+exit (TokenReuse's sinking post-pass handles only a branch that yields the
+`nullable.create` itself), so code grows quadratically with match nesting
+(lean2rr's IO code: 50 nested matches, 15,650 free records for 49 reuses).
+Fix: sink such a nullable's free to the end of the unique branch too.

@@ -32,10 +32,13 @@
 # rrc -v); bug 20's is built with and without lean2rr's workaround. They
 # take one to three minutes each, and bugs 16 and 20 need 1.2 to 3 GB; bug
 # 6 runs for about 15 s. Everything else takes seconds (a first .lean build
-# also builds leanrt). Bugs 30 and 32 are build-time entries too, but quick:
-# 30 times one conversion pass through reussir-opt (SKIPPED when the
-# checkout has not built it), 32 compares the sizes of two --emit mlir dumps. lean2rr works around 16, 17 and 20; the repros turn
-# its workarounds off (L2R_NO_OUTLINE, L2R_NO_INLINE_ANCHORS).
+# also builds leanrt). Bugs 25, 30 and 32 are build-time entries too, but
+# quick: 25 and 32 compare the sizes of two outputs (--emit mlir-llvm,
+# --emit mlir), 30 times one conversion pass through reussir-opt (SKIPPED
+# when the checkout has not built it). Bug 24 runs reussir-llvm-opt 12
+# times on one of the checkout's tests. lean2rr works around 16, 17 and
+# 20; the repros turn its workarounds off (L2R_NO_OUTLINE,
+# L2R_NO_INLINE_ANCHORS).
 #
 # Environment:
 #   WORK    scratch directory (default: a new one under /tmp); rrc writes
@@ -323,19 +326,30 @@ bug16() {
 bug17() {
     local why
     if ! why=$(have_lean); then say_line SKIPPED 17 "$why"; return; fi
-    python3 "$HERE/bug17-long-nat-block.py" 250 "$WORK/out/Lets250.lean"
-    python3 "$HERE/bug17-long-nat-block.py" 500 "$WORK/out/Lets500.lean"
+    # Three sizes. N = 10 measures the fixed part of rrc's memory (the
+    # prelude, the runtime glue, the FFI textures: about 140 MB), which is
+    # a third of the total at N = 250, so the plain ratio of two sizes is
+    # 1.7-1.9x even when the cost is linear. The line compares the memory
+    # each further `let` costs from 10 to 250 and from 250 to 500: 1.1-1.2x
+    # with 0031 (linear), 2.3-2.4x without it (quadratic).
+    local n
+    for n in 10 250 500; do python3 "$HERE/bug17-long-nat-block.py" $n "$WORK/out/Lets$n.lean"; done
     # Without lean2rr's workaround (Outline), so that rrc sees the long block.
     export L2R_NO_OUTLINE=1
+    lean_build "$WORK/out/Lets10.lean" Lets10 17z; local m0=$RKB r0=$RC
     lean_build "$WORK/out/Lets250.lean" Lets250 17a; local s1=$RSECS m1=$RKB r1=$RC
     lean_build "$WORK/out/Lets500.lean" Lets500 17b; local s2=$RSECS m2=$RKB r2=$RC
     unset L2R_NO_OUTLINE
-    if [ $r1 != 0 ] || [ $r2 != 0 ] || [ -z "$m1" ] || [ -z "$m2" ]; then say_line OTHER 17 "build failed (see $WORK/out/17?.log)" "l2r.py"; return; fi
-    local r msg
-    r=$(ratio "$m2" "$m1")
-    msg="rrc: N = 250: ${s1} s, $((m1 / 1024)) MB; N = 500: ${s2} s, $((m2 / 1024)) MB (${r}x memory for twice the lets)"
-    if ge "$r" 2.3; then say_line REPRODUCES 17 "$msg" "l2r.py"
-    elif le "$r" 1.6; then say_line FIXED 17 "$msg" "l2r.py"
+    if [ $r0 != 0 ] || [ $r1 != 0 ] || [ $r2 != 0 ] || [ -z "$m0" ] || [ -z "$m1" ] || [ -z "$m2" ]; then
+        say_line OTHER 17 "build failed (see $WORK/out/17?.log)" "l2r.py"; return
+    fi
+    local a b r msg
+    a=$(printf '%.2f' "$(echo "scale=4; ($m1 - $m0) / 240 / 1024" | bc)")
+    b=$(printf '%.2f' "$(echo "scale=4; ($m2 - $m1) / 250 / 1024" | bc)")
+    if ge "$a" 0.01; then r=$(ratio "$b" "$a"); else r=0; fi
+    msg="rrc: N = 10: $((m0 / 1024)) MB; N = 250: ${s1} s, $((m1 / 1024)) MB; N = 500: ${s2} s, $((m2 / 1024)) MB (each let: ${a} MB up to 250, ${b} MB from 250 to 500, ${r}x)"
+    if ge "$r" 1.9; then say_line REPRODUCES 17 "$msg" "l2r.py"
+    elif le "$r" 1.5; then say_line FIXED 17 "$msg" "l2r.py"
     else say_line OTHER 17 "$msg" "l2r.py"; fi
 }
 bug18() {
@@ -348,7 +362,12 @@ bug20() {
     local why
     if ! why=$(have_lean); then say_line SKIPPED 20 "$why"; return; fi
     # Without lean2rr's workaround (#[transform_anchor] on its conversion
-    # and unboxing functions), then with it.
+    # and unboxing functions), then with it. Without 0034 the first build
+    # takes about 10x the memory of the second (2.9 GB against 0.3 GB): the
+    # inliner follows chains of copied calls through recursive functions.
+    # With 0034 about 3.5x remains (0.77 GB against 0.22 GB): the inliner's
+    # ordinary one-level inlining of the calls the program writes, which
+    # lean2rr's anchors still avoid (lean2rr keeps them).
     export L2R_NO_INLINE_ANCHORS=1
     lean_build "$HERE/bug20-statet-tower.lean" Tower 20a; local s1=$RSECS m1=$RKB r1=$RC
     unset L2R_NO_INLINE_ANCHORS
@@ -357,8 +376,8 @@ bug20() {
     local r msg
     r=$(ratio "$m1" "$m2")
     msg="rrc: ${s1} s, $((m1 / 1024)) MB; with the conversion functions kept out of the inliner: ${s2} s, $((m2 / 1024)) MB (${r}x memory)"
-    if ge "$r" 2.5; then say_line REPRODUCES 20 "$msg" "l2r.py"
-    elif le "$r" 1.5; then say_line FIXED 20 "$msg" "l2r.py"
+    if ge "$r" 6; then say_line REPRODUCES 20 "$msg" "l2r.py"
+    elif le "$r" 4.5; then say_line FIXED 20 "$msg" "l2r.py"
     else say_line OTHER 20 "$msg" "l2r.py"; fi
 }
 
@@ -399,6 +418,44 @@ bug23() {
     if ge "$r" 3 && ge "$l2" 2; then say_line REPRODUCES 23 "$msg" "-O aggressive"
     elif le "$r" 2.6 || le "$l2" 1; then say_line FIXED 23 "$msg" "-O aggressive"
     else say_line OTHER 23 "$msg" "-O aggressive"; fi
+}
+
+bug24() {
+    local r
+    r=$("$HERE/bug24-matexp-state-order.sh" "$CK")
+    say_line "${r%% *}" 24 "${r#* }"
+}
+
+bug25() {
+    # The size of the LLVM-dialect module at K and K + 2: 4x when the copy
+    # of the [value] record is expanded exponentially.
+    local k lines=()
+    for k in 8 10; do
+        python3 "$HERE/bug25-value-record-dag.py" $k "$WORK/out/25-$k.rr"
+        { (cd "$WORK/run" && "$RRC" "$WORK/out/25-$k.rr" -o "$WORK/out/25-$k.mlir" --emit mlir-llvm -O default \
+            --polyffi-rust-path "$RUSTC" --polyffi-libdir "$RT" --polyffi-libdir "$RT/deps" \
+            --polyffi-libdir "$TL") > "$WORK/out/25-$k.log" 2>&1; } 2> /dev/null
+        RC=$?
+        if [ $RC != 0 ]; then say_line OTHER 25 "K = $k: $(build_fail 25-$k)" "-O default"; return; fi
+        lines+=("$(wc -l < "$WORK/out/25-$k.mlir")")
+    done
+    local r msg
+    r=$(ratio "${lines[1]}" "${lines[0]}")
+    msg="--emit mlir-llvm: K = 8: ${lines[0]} lines, K = 10: ${lines[1]} lines (${r}x for two more levels)"
+    if ge "$r" 3; then say_line REPRODUCES 25 "$msg" "-O default"
+    elif le "$r" 1.6; then say_line FIXED 25 "$msg" "-O default"
+    else say_line OTHER 25 "$msg" "-O default"; fi
+}
+
+bug26() { plain_value 26 bug26-launder-assume 25009648 2 -O aggressive; }
+
+bug27() {
+    rr bug27-nullable-member-drop.rr 27 -O default
+    if [ $RC != 0 ]; then say_line OTHER 27 "$(build_fail 27)" "-O default"; return; fi
+    exe 27
+    if [ "$OUT_TXT" = 1 ] && [ $EXIT = 0 ]; then say_line FIXED 27 "1M links through Nullable, 8 MB stack: prints 1" "-O default"
+    elif [ -n "$ERR_TXT" ] || [ $EXIT -ge 128 ]; then say_line REPRODUCES 27 "1M links through Nullable, 8 MB stack: ${ERR_TXT:-stack overflow} ($(signame $EXIT))" "-O default"
+    else say_line OTHER 27 "prints '$OUT_TXT' ($(signame $EXIT)), expected 1" "-O default"; fi
 }
 
 bug28() { plain_value 28 bug28-unique-carrying-join "101 1" "101 101" -O aggressive; }
@@ -467,7 +524,7 @@ bug32() {
     else say_line OTHER 32 "$msg"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 28 29 30 31 32"
+ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32"
 SLOW=" 06 10 11 16 17 20 23 "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

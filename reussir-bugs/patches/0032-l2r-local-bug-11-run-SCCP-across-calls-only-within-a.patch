@@ -1,0 +1,319 @@
+From ac70115a66ec396d804ad282737194702b22afeb Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 3 Oct 2026 00:34:49 -0400
+Subject: [PATCH] l2r-local: bug 11: run SCCP across calls only within a budget
+ of call sites
+
+The pipeline runs MLIR's `sccp` twice on the whole module, which makes it
+interprocedural, and its cost is quadratic in the call sites of a
+callable: each time the analysis finds one more call site of a function,
+or the arguments at one change, MLIR's data-flow framework visits the
+function again and walks all its known call sites
+(`DeadCodeAnalysis::visitCallableTerminator` adds the function's returns
+as predecessors of each call, `AbstractSparseForwardDataFlowAnalysis::
+visitCallableOperation` joins each call's arguments into the function's).
+One function called from 4000 places took 7 s in `sccp` alone; a lean2rr
+program using Std.Http (17,197 functions) was still in the first `sccp`
+after 50 minutes.
+
+Add `reussir-sccp`, which the C API's SCCP factory now returns: it counts
+the call sites of each callee and runs the stock `sccp` on the module when
+the sum over callees of the square of their call sites is at most
+`max-call-site-pairs` (2^22), and nested on each `func.func` otherwise
+(stock SCCP on one function treats arguments and call results as
+unknown; LLVM's IPSCCP still propagates across calls later). Only callees
+with a body count: the analysis treats a declaration (an FFI import, a
+runtime function) as external and never walks its call sites (review
+RV8C-04). Programs under the budget are compiled exactly as before:
+lean2rr's classic corpus has at most 1.5M pairs.
+
+reussir-bugs/repros/bug11-sccp-call-graph.py (rrc -O aggressive, to an
+executable, loaded machine): N = 2000 (4.0M pairs, still across calls):
+2.9-3.2 s before, 2.8-3.9 s after; N = 4000 (16M pairs): 8.9 s -> 4.2 s.
+The Std.Http program (335M pairs) gets SCCP per function: 3 s and 19 s
+for the two runs.
+
+Test: tests/integration/conversion/sccp_call_site_budget.mlir.
+---
+ crates/reussir-backend-sys/build.rs           |  1 +
+ include/Reussir/Transformation/Passes.td      | 28 ++++++++
+ lib/CAPI/CMakeLists.txt                       |  1 +
+ lib/CAPI/Passes.cpp                           |  3 +-
+ lib/Transformation/CMakeLists.txt             |  2 +
+ lib/Transformation/SCCP/CMakeLists.txt        | 13 ++++
+ lib/Transformation/SCCP/SCCP.cpp              | 72 +++++++++++++++++++
+ .../conversion/sccp_call_site_budget.mlir     | 54 ++++++++++++++
+ tool/reussir-opt/main.cpp                     |  3 +
+ 9 files changed, 176 insertions(+), 1 deletion(-)
+ create mode 100644 lib/Transformation/SCCP/CMakeLists.txt
+ create mode 100644 lib/Transformation/SCCP/SCCP.cpp
+ create mode 100644 tests/integration/conversion/sccp_call_site_budget.mlir
+
+diff --git a/crates/reussir-backend-sys/build.rs b/crates/reussir-backend-sys/build.rs
+index 88923998..652156a0 100644
+--- a/crates/reussir-backend-sys/build.rs
++++ b/crates/reussir-backend-sys/build.rs
+@@ -39,6 +39,7 @@ const REUSSIR_ARCHIVES: &[&str] = &[
+     "MLIRReussirAttachNativeTarget",
+     "MLIRReussirClosureBetaReduction",
+     "MLIRReussirDefaultInliner",
++    "MLIRReussirSCCP",
+     "MLIRReussirRcCreateSink",
+     "MLIRReussirRcCreateFusion",
+     "MLIRReussirRcDispatchFusion",
+diff --git a/include/Reussir/Transformation/Passes.td b/include/Reussir/Transformation/Passes.td
+index b8a213da..12a6f8cb 100644
+--- a/include/Reussir/Transformation/Passes.td
++++ b/include/Reussir/Transformation/Passes.td
+@@ -295,4 +295,32 @@ def ReussirDefaultInlinerPass
+               "(counted recursively through nested regions).">];
+ }
+ 
++def ReussirSCCPPass : Pass<"reussir-sccp", "::mlir::ModuleOp"> {
++  let summary = "MLIR's SCCP, interprocedural while the call sites allow";
++  let description = [{
++    `reussir-sccp` runs MLIR's `sccp` on the whole module, across calls,
++    when the module's call sites are within a budget, and on each function
++    alone otherwise.
++
++    The interprocedural analysis is quadratic in the call sites of a
++    callable: each time it finds one more call site of a function, or the
++    arguments of one change, MLIR's data-flow framework visits the function
++    again and walks all of its known call sites (`DeadCodeAnalysis` adding
++    the function's returns as predecessors of each call,
++    `AbstractSparseForwardDataFlowAnalysis` joining each call's arguments
++    into the function's). One function called from 4000 places took 7 s;
++    a lean2rr program with 17,000 functions was still in SCCP after 50
++    minutes. The budget is the sum over callees with a body of the square
++    of their call sites (`max-call-site-pairs`), which is what that cost
++    follows (a declaration is external to the analysis). On
++    each function alone SCCP knows nothing about arguments and results
++    across calls (LLVM's IPSCCP propagates those later) and is linear.
++  }];
++  let options =
++      [Option<"maxCallSitePairs", "max-call-site-pairs", "uint64_t",
++              "uint64_t(1) << 22",
++              "Run SCCP across calls only while the sum over callees of the "
++              "square of their number of call sites is at most this.">];
++}
++
+ #endif // REUSSIR_TRANSFORMATION_PASSES_TD
+diff --git a/lib/CAPI/CMakeLists.txt b/lib/CAPI/CMakeLists.txt
+index e48f8336..8b13918e 100644
+--- a/lib/CAPI/CMakeLists.txt
++++ b/lib/CAPI/CMakeLists.txt
+@@ -49,6 +49,7 @@ set(REUSSIR_BACKEND_ARCHIVES
+   # transformations
+   MLIRReussirClosureBetaReduction
+   MLIRReussirDefaultInliner
++  MLIRReussirSCCP
+   MLIRReussirRcCreateSink
+   MLIRReussirRcCreateFusion
+   MLIRReussirRcDispatchFusion
+diff --git a/lib/CAPI/Passes.cpp b/lib/CAPI/Passes.cpp
+index 9f7dc73d..20bc9a0c 100644
+--- a/lib/CAPI/Passes.cpp
++++ b/lib/CAPI/Passes.cpp
+@@ -188,7 +188,8 @@ MlirPass reussirCreateCanonicalizerPass(void) {
+   return wrapOwned(mlir::createCanonicalizerPass());
+ }
+ MlirPass reussirCreateSCCPPass(void) {
+-  return wrapOwned(mlir::createSCCPPass());
++  // Across calls only within a budget of call sites (see the pass).
++  return wrapOwned(reussir::createReussirSCCPPass());
+ }
+ MlirPass reussirCreateLoopInvariantCodeMotionPass(void) {
+   return wrapOwned(mlir::createLoopInvariantCodeMotionPass());
+diff --git a/lib/Transformation/CMakeLists.txt b/lib/Transformation/CMakeLists.txt
+index ef0cef2e..52b58db7 100644
+--- a/lib/Transformation/CMakeLists.txt
++++ b/lib/Transformation/CMakeLists.txt
+@@ -1,5 +1,6 @@
+ add_subdirectory(ClosureBetaReduction)
+ add_subdirectory(DefaultInliner)
++add_subdirectory(SCCP)
+ add_subdirectory(RcCreateSink)
+ add_subdirectory(RcCreateFusion)
+ add_subdirectory(RcDispatchFusion)
+@@ -14,6 +15,7 @@ add_subdirectory(TRMCRecursionAnalysis)
+ set(REUSSIR_TRANSFORMATION_AGGREGATE_LIBS
+   MLIRReussirClosureBetaReduction
+   MLIRReussirDefaultInliner
++  MLIRReussirSCCP
+   MLIRReussirRcCreateSink
+   MLIRReussirRcCreateFusion
+   MLIRReussirRcDispatchFusion
+diff --git a/lib/Transformation/SCCP/CMakeLists.txt b/lib/Transformation/SCCP/CMakeLists.txt
+new file mode 100644
+index 00000000..54ffe8f2
+--- /dev/null
++++ b/lib/Transformation/SCCP/CMakeLists.txt
+@@ -0,0 +1,13 @@
++add_mlir_library(MLIRReussirSCCP
++  SCCP.cpp
++
++  DEPENDS
++  MLIRReussirTransformationPassIncGen
++
++  LINK_COMPONENTS
++  Core
++
++  LINK_LIBS PUBLIC
++  MLIRAnalysis
++  MLIRTransforms
++)
+diff --git a/lib/Transformation/SCCP/SCCP.cpp b/lib/Transformation/SCCP/SCCP.cpp
+new file mode 100644
+index 00000000..4d92a5ba
+--- /dev/null
++++ b/lib/Transformation/SCCP/SCCP.cpp
+@@ -0,0 +1,72 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++///
++/// \file
++/// This file implements the pipeline's SCCP: MLIR's `sccp` on the whole
++/// module while its call sites are within a budget, on each function alone
++/// otherwise (see `reussir-sccp` in Passes.td).
++///
++//===----------------------------------------------------------------------===//
++
++#include "Reussir/Transformation/Passes.h"
++
++#include <llvm/ADT/DenseMap.h>
++#include <mlir/Dialect/Func/IR/FuncOps.h>
++#include <mlir/IR/SymbolTable.h>
++#include <mlir/Interfaces/CallInterfaces.h>
++#include <mlir/Pass/Pass.h>
++#include <mlir/Pass/PassManager.h>
++#include <mlir/Transforms/Passes.h>
++
++namespace reussir {
++
++#define GEN_PASS_DEF_REUSSIRSCCPPASS
++#include "Reussir/Transformation/Passes.h.inc"
++
++namespace {
++
++struct ReussirSCCPPass : public impl::ReussirSCCPPassBase<ReussirSCCPPass> {
++  using Base::Base;
++  void runOnOperation() override {
++    mlir::ModuleOp module = getOperation();
++    // The sum over callees of the square of their call sites, counted
++    // incrementally: the n-th call site of a callee adds n^2 - (n-1)^2.
++    // Only callees with a body count: the analysis treats a declaration as
++    // external and never walks its call sites.
++    mlir::SymbolTable symbols(module);
++    llvm::DenseMap<mlir::SymbolRefAttr, uint64_t> callSites;
++    uint64_t pairs = 0;
++    module.walk([&](mlir::CallOpInterface call) {
++      auto callee = llvm::dyn_cast_if_present<mlir::SymbolRefAttr>(
++          call.getCallableForCallee());
++      if (!callee)
++        return;
++      auto callable = llvm::dyn_cast_if_present<mlir::CallableOpInterface>(
++          symbols.lookup(callee.getRootReference()));
++      if (!callable || !callable.getCallableRegion() ||
++          callable.getCallableRegion()->empty())
++        return;
++      uint64_t &count = callSites[callee];
++      pairs += 2 * count + 1;
++      ++count;
++    });
++
++    mlir::OpPassManager pipeline(mlir::ModuleOp::getOperationName());
++    if (pairs <= maxCallSitePairs)
++      pipeline.addPass(mlir::createSCCPPass());
++    else
++      pipeline.addNestedPass<mlir::func::FuncOp>(mlir::createSCCPPass());
++    if (mlir::failed(runPipeline(pipeline, module)))
++      signalPassFailure();
++  }
++};
++
++} // namespace
++} // namespace reussir
+diff --git a/tests/integration/conversion/sccp_call_site_budget.mlir b/tests/integration/conversion/sccp_call_site_budget.mlir
+new file mode 100644
+index 00000000..c8d88fed
+--- /dev/null
++++ b/tests/integration/conversion/sccp_call_site_budget.mlir
+@@ -0,0 +1,54 @@
++// `reussir-sccp` runs SCCP across calls while the sum over callees of the
++// square of their call sites is within `max-call-site-pairs`, and on each
++// function alone otherwise. @callee has two call sites (4 pairs); the three
++// calls of the declaration @log do not count.
++
++// RUN: %reussir-opt %s --reussir-sccp | %FileCheck %s --check-prefix=MODULE
++// RUN: %reussir-opt %s '--reussir-sccp=max-call-site-pairs=4' | %FileCheck %s --check-prefix=MODULE
++// RUN: %reussir-opt %s '--reussir-sccp=max-call-site-pairs=3' | %FileCheck %s --check-prefix=FUNCTION
++
++module {
++  // Across calls, the argument is 41 at both call sites and the result 42.
++  // MODULE-LABEL: func.func private @callee
++  // MODULE: %[[C42:.*]] = arith.constant 42 : i64
++  // MODULE: return %[[C42]]
++  // FUNCTION-LABEL: func.func private @callee
++  // FUNCTION: arith.addi
++  func.func private @callee(%x: i64) -> i64 {
++    %one = arith.constant 1 : i64
++    %r = arith.addi %x, %one : i64
++    return %r : i64
++  }
++
++  // MODULE-LABEL: func.func @first
++  // MODULE: %[[C42:.*]] = arith.constant 42 : i64
++  // MODULE: return %[[C42]]
++  // FUNCTION-LABEL: func.func @first
++  // FUNCTION: %[[R:.*]] = call @callee
++  // FUNCTION: return %[[R]]
++  func.func private @log(i64)
++
++  func.func @first() -> i64 {
++    %c = arith.constant 41 : i64
++    func.call @log(%c) : (i64) -> ()
++    func.call @log(%c) : (i64) -> ()
++    func.call @log(%c) : (i64) -> ()
++    %r = func.call @callee(%c) : (i64) -> i64
++    return %r : i64
++  }
++
++  // Within a function the folding happens either way.
++  // MODULE-LABEL: func.func @second
++  // FUNCTION-LABEL: func.func @second
++  // FUNCTION: %[[C43:.*]] = arith.constant 43 : i64
++  // FUNCTION: call @callee(%{{.*}})
++  // FUNCTION: return
++  func.func @second() -> i64 {
++    %c = arith.constant 41 : i64
++    %two = arith.constant 2 : i64
++    %d = arith.addi %c, %two : i64
++    %r = func.call @callee(%c) : (i64) -> i64
++    %s = arith.addi %r, %d : i64
++    return %s : i64
++  }
++}
+diff --git a/tool/reussir-opt/main.cpp b/tool/reussir-opt/main.cpp
+index b1e09c4c..bcf913b2 100644
+--- a/tool/reussir-opt/main.cpp
++++ b/tool/reussir-opt/main.cpp
+@@ -111,6 +111,9 @@ int main(int argc, char **argv) {
+   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+     return reussir::createReussirTokenReusePass();
+   });
++  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
++    return reussir::createReussirSCCPPass();
++  });
+   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+     return reussir::createReussirSpecialPointerTagPass();
+   });
+-- 
+2.43.0
+

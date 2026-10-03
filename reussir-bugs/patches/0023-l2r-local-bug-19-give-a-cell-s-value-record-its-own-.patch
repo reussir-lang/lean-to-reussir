@@ -1,0 +1,578 @@
+From c9e640b3609e0ef3268e7aa8732d915afef58c75 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Fri, 2 Oct 2026 20:56:18 -0400
+Subject: [PATCH] l2r-local: bug 19: give a cell's [value] record its own
+ field-reference acquire and drop glue
+
+`cell::get` and `cell::set` (ConvertToSTD) and a cell's drop glue reach
+the cell's slot through a `field`-capability reference (a cell slot
+projection must have it) and emit `ref.acquire` or `ref.drop` on it. For
+a named record element that is not trivially copyable (a `[value]` enum
+or struct with a counted member), AcquireDropExpansion outlined these
+into calls of the record's acquire or drop function, whose parameter is
+a reference of unspecified capability, so the call did not verify:
+"'func.call' op operand type mismatch ... ref<...> field".
+
+Make the capability part of the outlined glue, as the atomic kind
+already is: `createDtorIfNotExists` and
+`emitOwnershipAcquisitionFuncIfNotExists` take the argument reference's
+capability, and a `field` reference gets its own symbols
+(`drop_in_place_field`, `acquire_in_place_field`, and the `_atomic_field`
+pair; RecordType::getDtorName/getAcquireName). AcquireDropExpansion
+outlines `unspecified` and `field` references; any other capability is
+expanded inline, as before.
+
+The field glue exposed two places in `emitOwnershipAcquisition` that only
+worked for a reference of unspecified capability: a compound's members
+were projected as unspecified references (`ref.project` requires the
+parent's capability), and a variant's dispatch arms took unspecified
+references while the dispatch lowering coerces with the scrutinee's
+capability (an unresolved materialization in ConvertToSTD). Both now take
+the parent reference's capability, as the drop expansion does.
+
+Inside a field glue body every nested `[value]` member is a `field`
+reference too. The drop glue body already calls the members' glue (its
+`ref.drop`s are expanded by the pattern). The acquire glue body expanded
+every nested record inline (`emitOwnershipAcquisition`), which is
+exponential in the depth of records shared in a DAG (`D(i) = {D(i-1),
+D(i-1)}`) and would be paid at each record's glue. With the new
+`callMemberGlue` argument, set by the glue builder, a compound member
+that is a named record is acquired by a call to its own glue instead, so
+the acquire glue calls each other like the drop glue. (The first,
+inline, expansion phase before ConvertToSTD is still exponential for
+such records; that is pre-existing and separate.)
+
+For references of unspecified capability, the only kind that reached
+these paths in programs that compiled before, the inline expansion is
+unchanged. The outlined acquire glue of a record with named record
+members now calls their glue instead of inlining it. The MLIR and LLVM
+IR of Reussir's frontend tests (except the new test) and the LLVM IR of
+30 lean2rr programs are the same before and after.
+
+Compile cost: the cell part of the review's DAG repro (D(K) =
+{D(K-1), D(K-1)}, get/set/get of a Cell<D(K)>) is now a call per site to
+glue whose size is linear in K; at K = 10, `rrc --emit mlir-llvm -O
+default` takes 4.6 s and 2.4 GB against 11.7 s and 4.6 GB with inline
+expansion. The rest is the pre-existing first phase, which costs about
+the same for the program without a cell (57713 lines of output against
+83546 with the cell, whose free adds one inline value drop).
+
+Found by lean2rr: an `ST.Ref`/`IO.Ref` of a `Nat` held in a `Cell` of a
+`[value]` enum with a big-number arm did not compile (lean2rr now uses
+two cells, docs/reussir-bugs.md, bug 19).
+Test: tests/integration/frontend/cell_value_record (get and set of a
+variant, of a compound and of a nested compound, a cell freed holding a
+counted arm, -O default and -O aggressive; the field glue of the nested
+record calls the inner record's field glue).
+---
+ include/Reussir/IR/ReussirOps.h               | 22 ++++--
+ include/Reussir/IR/ReussirTypes.td            | 11 ++-
+ .../AcquireDropExpansion.cpp                  | 25 +++++-
+ lib/IR/ReussirOps.cpp                         | 69 ++++++++++++-----
+ lib/IR/ReussirTypes.cpp                       | 36 ++++++---
+ .../integration/frontend/cell_value_record.c  | 39 ++++++++++
+ .../integration/frontend/cell_value_record.rr | 77 +++++++++++++++++++
+ 7 files changed, 236 insertions(+), 43 deletions(-)
+ create mode 100644 tests/integration/frontend/cell_value_record.c
+ create mode 100644 tests/integration/frontend/cell_value_record.rr
+
+diff --git a/include/Reussir/IR/ReussirOps.h b/include/Reussir/IR/ReussirOps.h
+index a60afc49..d5d76223 100644
+--- a/include/Reussir/IR/ReussirOps.h
++++ b/include/Reussir/IR/ReussirOps.h
+@@ -84,12 +84,18 @@ void inheritSanitizerPassthrough(mlir::ModuleOp moduleOp,
+ //     for each variant by recursively calling emitOwnershipAcquisition in
+ //     corresponding regions.
+ //   + otherwise, the function is a no-op.
++// With `callMemberGlue`, a compound's member that is a named record is
++// acquired by a call to that record's outlined acquire function (created if
++// needed, for the member reference's capability) instead of inline: the
++// outlined functions call each other, so a record reached along many paths
++// (`D(i) = {D(i-1), D(i-1)}`) costs code once, like the drop glue.
+ //
+ //===----------------------------------------------------------------------===//
+ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+                                              mlir::OpBuilder &builder,
+                                              mlir::Location loc,
+-                                             mlir::Value delta = {});
++                                             mlir::Value delta = {},
++                                             bool callMemberGlue = false);
+ 
+ /// The memref type `reussir.array.view` produces for an array: identity
+ /// layout for a static shape, a fully dynamic strided layout for a
+@@ -123,14 +129,18 @@ mlir::LogicalResult emitArrayElementTraversal(
+ //===----------------------------------------------------------------------===//
+ // `kind` is the atomic context the glue is dropped from: the glue's argument
+ // reference carries it, and the expanded body derives member links from it
+-// (whole-subtree rule), so each kind gets its own outlined symbol.
++// (whole-subtree rule), so each kind gets its own outlined symbol. `cap` is
++// the argument reference's capability, `unspecified` or `field` (a cell's
++// slot, whose members are projected as `field` references), each with its
++// own symbol.
+ // Outlined drop glue functions carry `kDropGlueAttr`: no token produced in
+ // them can be reused, so their member releases free cells directly.
+ constexpr llvm::StringLiteral kDropGlueAttr = "reussir.drop_glue";
+ mlir::func::FuncOp
+ createDtorIfNotExists(mlir::ModuleOp moduleOp, RecordType type,
+                       mlir::OpBuilder &builder,
+-                      AtomicKind kind = AtomicKind::normal);
++                      AtomicKind kind = AtomicKind::normal,
++                      Capability cap = Capability::unspecified);
+ 
+ //===----------------------------------------------------------------------===//
+ // emitOwnershipAcquisitionFuncIfNotExists
+@@ -140,12 +150,14 @@ createDtorIfNotExists(mlir::ModuleOp moduleOp, RecordType type,
+ // record type if it doesn't already exist. The function takes a reference to
+ // the type and an index delta and performs the acquisition operation. Returns
+ // the existing function if one is already present. The RecordType must be a
+-// named type.
++// named type. `kind` and `cap` as for createDtorIfNotExists. Members that are
++// named records are acquired by calls to their own functions.
+ //
+ //===----------------------------------------------------------------------===//
+ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+     mlir::ModuleOp moduleOp, RecordType type, mlir::OpBuilder &builder,
+-    AtomicKind kind = AtomicKind::normal);
++    AtomicKind kind = AtomicKind::normal,
++    Capability cap = Capability::unspecified);
+ 
+ //===----------------------------------------------------------------------===//
+ 
+diff --git a/include/Reussir/IR/ReussirTypes.td b/include/Reussir/IR/ReussirTypes.td
+index ae1eecb8..938fc8ec 100644
+--- a/include/Reussir/IR/ReussirTypes.td
++++ b/include/Reussir/IR/ReussirTypes.td
+@@ -204,11 +204,16 @@ def ReussirRecordType
+       // Outlined drop/acquire glue symbols. The glue's body derives member
+       // links from its argument reference's atomic kind (the whole-subtree
+       // rule), so each kind gets its own symbol and the atomic variant names
+-      // a distinct intrinsic path.
++      // a distinct intrinsic path. The argument reference's capability is
++      // part of the glue's type, so the glue taking a `field` reference (a
++      // cell's slot) is another symbol too; only `unspecified` and `field`
++      // have glue.
+       ::mlir::FlatSymbolRefAttr
+-      getDtorName(AtomicKind kind = AtomicKind::normal) const;
++      getDtorName(AtomicKind kind = AtomicKind::normal,
++                  Capability cap = Capability::unspecified) const;
+       ::mlir::FlatSymbolRefAttr
+-      getAcquireName(AtomicKind kind = AtomicKind::normal) const;
++      getAcquireName(AtomicKind kind = AtomicKind::normal,
++                     Capability cap = Capability::unspecified) const;
+       size_t emitScannerInstructions(
+         llvm::SmallVectorImpl<int32_t> &buffer,
+         const mlir::DataLayout &dataLayout, const scanner::EmitState &EmitState) const;
+diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+index d6569ad9..97247a8a 100644
+--- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
++++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+@@ -359,6 +359,17 @@ mlir::func::FuncOp getOrCreateDropAndFree(mlir::ModuleOp moduleOp,
+ //===----------------------------------------------------------------------===//
+ 
+ namespace {
++// A record's outlined drop and acquire functions take a reference of the
++// capability they are created for (`createDtorIfNotExists`,
++// `emitOwnershipAcquisitionFuncIfNotExists`): `unspecified`, or `field` for a
++// cell's slot (cell get/set and the cell's own drop glue), whose members are
++// projected as `field` references too. A reference of any other capability is
++// expanded inline.
++bool hasOutlinedGlue(RefType refType) {
++  return refType.getCapability() == Capability::unspecified ||
++         refType.getCapability() == Capability::field;
++}
++
+ class DropExpansionPattern : public mlir::OpRewritePattern<ReussirRefDropOp> {
+ private:
+   mlir::LogicalResult rewriteDropCell(CellType cellType, ReussirRefDropOp op,
+@@ -625,6 +636,9 @@ private:
+     if (op.getInlined())
+       return false;
+ 
++    if (!hasOutlinedGlue(op.getRef().getType()))
++      return false;
++
+     if (type.isVariant())
+       return !op.getVariant();
+ 
+@@ -660,8 +674,9 @@ public:
+         .Case<RecordType>([&](RecordType recordType) {
+           if (shouldOutline(op, recordType)) {
+             mlir::ModuleOp moduleOp = op->getParentOfType<mlir::ModuleOp>();
+-            mlir::func::FuncOp dtor = createDtorIfNotExists(
+-                moduleOp, recordType, rewriter, refType.getAtomicKind());
++            mlir::func::FuncOp dtor =
++                createDtorIfNotExists(moduleOp, recordType, rewriter,
++                                      refType.getAtomicKind(), refCap);
+             mlir::func::CallOp::create(rewriter, op.getLoc(), dtor,
+                                        op.getRef());
+             rewriter.eraseOp(op);
+@@ -704,6 +719,9 @@ private:
+     if (op.getInlined())
+       return false;
+ 
++    if (!hasOutlinedGlue(op.getRef().getType()))
++      return false;
++
+     return type.getName() != nullptr;
+   }
+ 
+@@ -727,7 +745,8 @@ public:
+       if (shouldOutline(op, recordType)) {
+         mlir::ModuleOp moduleOp = op->getParentOfType<mlir::ModuleOp>();
+         mlir::func::FuncOp acquireFunc = emitOwnershipAcquisitionFuncIfNotExists(
+-            moduleOp, recordType, rewriter, refType.getAtomicKind());
++            moduleOp, recordType, rewriter, refType.getAtomicKind(),
++            refType.getCapability());
+         mlir::Value delta = op.getDelta();
+         if (!delta)
+           delta = rewriter.createOrFold<mlir::arith::ConstantIndexOp>(
+diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
+index d2100bf6..1b883ef8 100644
+--- a/lib/IR/ReussirOps.cpp
++++ b/lib/IR/ReussirOps.cpp
+@@ -3622,7 +3622,8 @@ emitArrayOwnershipAcquisition(mlir::Value view, mlir::OpBuilder &builder,
+ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+                                              mlir::OpBuilder &builder,
+                                              mlir::Location loc,
+-                                             mlir::Value delta) {
++                                             mlir::Value delta,
++                                             bool callMemberGlue) {
+   mlir::OpBuilder::InsertionGuard guard(builder);
+   mlir::Type type = value.getType();
+ 
+@@ -3689,7 +3690,8 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+                            Capability::field, refType.getAtomicKind());
+           mlir::Value slot = ReussirRefProjectOp::create(
+               builder, loc, slotType, value, builder.getIndexAttr(0));
+-          return emitOwnershipAcquisition(slot, builder, loc, delta);
++          return emitOwnershipAcquisition(slot, builder, loc, delta,
++                                          callMemberGlue);
+         }
+ 
+         // If reference points to a record, handle fields directly
+@@ -3699,7 +3701,9 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+           if (recordType.getKind() == RecordKind::compound) {
+             // For compound types, recursively apply to each field. Member
+             // links and the projected references inherit the parent
+-            // reference's atomic kind (whole-subtree rule).
++            // reference's capability (`ref.project` requires it; a cell
++            // slot's `field` reference keeps `field`) and atomic kind
++            // (whole-subtree rule).
+             for (auto [i, actualMemberType, actualMemberCap] : llvm::enumerate(
+                      recordType.getMembers(), recordType.getMemberIsField())) {
+               auto projectedType = getProjectedType(
+@@ -3710,11 +3714,32 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+               auto fieldRef = ReussirRefProjectOp::create(
+                   builder, loc,
+                   RefType::get(builder.getContext(), projectedType,
+-                               Capability::unspecified,
++                               refType.getCapability(),
+                                refType.getAtomicKind()),
+                   value, builder.getIndexAttr(i));
+ 
+-              if (emitOwnershipAcquisition(fieldRef, builder, loc, delta)
++              // A named record member: a call to its own acquire function.
++              auto memberRecord = llvm::dyn_cast<RecordType>(projectedType);
++              if (callMemberGlue && memberRecord && memberRecord.getName() &&
++                  (refType.getCapability() == Capability::unspecified ||
++                   refType.getCapability() == Capability::field)) {
++                auto moduleOp = builder.getInsertionBlock()
++                                    ->getParentOp()
++                                    ->getParentOfType<mlir::ModuleOp>();
++                mlir::func::FuncOp glue =
++                    emitOwnershipAcquisitionFuncIfNotExists(
++                        moduleOp, memberRecord, builder,
++                        refType.getAtomicKind(), refType.getCapability());
++                mlir::Value count =
++                    delta ? delta
++                          : builder.createOrFold<mlir::arith::ConstantIndexOp>(
++                                loc, 1);
++                mlir::func::CallOp::create(builder, loc, glue,
++                                           mlir::ValueRange{fieldRef, count});
++                continue;
++              }
++              if (emitOwnershipAcquisition(fieldRef, builder, loc, delta,
++                                           callMemberGlue)
+                       .failed())
+                 return mlir::failure();
+             }
+@@ -3744,10 +3769,12 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+                   refType.getAtomicKind());
+ 
+               // Create a block for this variant region; the arm reference
+-              // inherits the scrutinee's atomic kind.
++              // inherits the scrutinee's capability and atomic kind, as the
++              // dispatch lowering coerces it (a cell slot's `field`
++              // reference keeps `field`).
+               RefType projectedRefTy =
+                   RefType::get(builder.getContext(), projectedType,
+-                               Capability::unspecified,
++                               refType.getCapability(),
+                                refType.getAtomicKind());
+               auto *block = builder.createBlock(
+                   &dispatchOp.getRegions()[i],
+@@ -3755,9 +3782,11 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+ 
+               // Set insertion point to the block
+               builder.setInsertionPointToStart(block);
++              // An arm's payload is expanded here (as the drop glue does);
++              // its members follow `callMemberGlue`.
+               if (!isTriviallyCopyable(projectedType)) {
+                 if (emitOwnershipAcquisition(block->getArgument(0), builder,
+-                                             loc, delta)
++                                             loc, delta, callMemberGlue)
+                         .failed())
+                   return mlir::failure();
+               }
+@@ -3918,9 +3947,9 @@ void inheritSanitizerPassthrough(mlir::ModuleOp moduleOp,
+ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+                                          RecordType type,
+                                          mlir::OpBuilder &builder,
+-                                         AtomicKind kind) {
++                                         AtomicKind kind, Capability cap) {
+   mlir::SymbolTable symTable(moduleOp);
+-  auto dtorName = type.getDtorName(kind);
++  auto dtorName = type.getDtorName(kind, cap);
+   if (!dtorName)
+     llvm::report_fatal_error("only named record types have destructors");
+   std::string funcName = dtorName.getValue().str();
+@@ -3928,10 +3957,10 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+     return funcOp;
+   mlir::OpBuilder::InsertionGuard guard(builder);
+   builder.setInsertionPointToStart(moduleOp.getBody());
+-  // The argument reference carries the atomic context; the `ref.drop` below
+-  // re-enters the expansion, which derives member links from it.
+-  RefType refType =
+-      builder.getType<RefType>(type, Capability::unspecified, kind);
++  // The argument reference carries the atomic context and the capability;
++  // the `ref.drop` below re-enters the expansion, which derives member links
++  // from them.
++  RefType refType = builder.getType<RefType>(type, cap, kind);
+   auto dtor =
+       mlir::func::FuncOp::create(builder, builder.getUnknownLoc(), funcName,
+                                  builder.getFunctionType({refType}, {}));
+@@ -3984,9 +4013,9 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+ //===----------------------------------------------------------------------===//
+ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+     mlir::ModuleOp moduleOp, RecordType type, mlir::OpBuilder &builder,
+-    AtomicKind kind) {
++    AtomicKind kind, Capability cap) {
+   mlir::SymbolTable symTable(moduleOp);
+-  auto acquireName = type.getAcquireName(kind);
++  auto acquireName = type.getAcquireName(kind, cap);
+   if (!acquireName)
+     llvm::report_fatal_error(
+         "only named record types have ownership acquisition functions");
+@@ -3999,9 +4028,8 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+   builder.setInsertionPointToStart(moduleOp.getBody());
+ 
+   // Construct RefType from RecordType; the argument reference carries the
+-  // atomic context the member walk derives links from.
+-  RefType refType =
+-      builder.getType<RefType>(type, Capability::unspecified, kind);
++  // atomic context and the capability the member walk derives links from.
++  RefType refType = builder.getType<RefType>(type, cap, kind);
+ 
+   auto funcOp = mlir::func::FuncOp::create(
+       builder, builder.getUnknownLoc(), funcName,
+@@ -4017,7 +4045,8 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+   auto ref = entryBlock->getArgument(0);
+ 
+   if (emitOwnershipAcquisition(ref, builder, builder.getUnknownLoc(),
+-                               entryBlock->getArgument(1))
++                               entryBlock->getArgument(1),
++                               /*callMemberGlue=*/true)
+           .failed()) {
+     llvm::report_fatal_error("failed to emit ownership acquisition");
+   }
+diff --git a/lib/IR/ReussirTypes.cpp b/lib/IR/ReussirTypes.cpp
+index 508817ba..018fa528 100644
+--- a/lib/IR/ReussirTypes.cpp
++++ b/lib/IR/ReussirTypes.cpp
+@@ -615,31 +615,43 @@ reussir::Capability RecordType::getDefaultCapability() const {
+ }
+ bool RecordType::getFixed() const { return getImpl()->fixed; }
+ 
+-::mlir::FlatSymbolRefAttr RecordType::getDtorName(AtomicKind kind) const {
++::mlir::FlatSymbolRefAttr RecordType::getDtorName(AtomicKind kind,
++                                                 Capability cap) const {
+   auto name = getName();
+   if (!name)
+     return nullptr;
++  assert((cap == Capability::unspecified || cap == Capability::field) &&
++         "only unspecified and field references have drop glue");
+   // The glue derives member links from its argument reference's atomic kind,
+-  // so each kind is a distinct intrinsic (the length prefix is the v0 length
+-  // of the path segment).
+-  auto prefix =
+-      llvm::Twine(kind == AtomicKind::atomic
+-                      ? "_RINvNvC4core9intrinsic20drop_in_place_atomic"
+-                      : "_RINvNvC4core9intrinsic13drop_in_place");
++  // so each kind is a distinct intrinsic, and so is each argument capability
++  // (the length prefix is the v0 length of the path segment).
++  bool field = cap == Capability::field;
++  auto prefix = llvm::Twine(
++      kind == AtomicKind::atomic
++          ? (field ? "_RINvNvC4core9intrinsic26drop_in_place_atomic_field"
++                   : "_RINvNvC4core9intrinsic20drop_in_place_atomic")
++          : (field ? "_RINvNvC4core9intrinsic19drop_in_place_field"
++                   : "_RINvNvC4core9intrinsic13drop_in_place"));
+   auto suffix = llvm::Twine("E");
+   auto recordName = name.getValue();
+   auto dtorName = (prefix + recordName.ltrim("_R") + suffix).str();
+   return ::mlir::FlatSymbolRefAttr::get(getContext(), dtorName);
+ }
+ 
+-::mlir::FlatSymbolRefAttr RecordType::getAcquireName(AtomicKind kind) const {
++::mlir::FlatSymbolRefAttr RecordType::getAcquireName(AtomicKind kind,
++                                                    Capability cap) const {
+   auto name = getName();
+   if (!name)
+     return nullptr;
+-  auto prefix =
+-      llvm::Twine(kind == AtomicKind::atomic
+-                      ? "_RINvNvC4core9intrinsic23acquire_in_place_atomic"
+-                      : "_RINvNvC4core9intrinsic16acquire_in_place");
++  assert((cap == Capability::unspecified || cap == Capability::field) &&
++         "only unspecified and field references have acquire glue");
++  bool field = cap == Capability::field;
++  auto prefix = llvm::Twine(
++      kind == AtomicKind::atomic
++          ? (field ? "_RINvNvC4core9intrinsic29acquire_in_place_atomic_field"
++                   : "_RINvNvC4core9intrinsic23acquire_in_place_atomic")
++          : (field ? "_RINvNvC4core9intrinsic22acquire_in_place_field"
++                   : "_RINvNvC4core9intrinsic16acquire_in_place"));
+   auto suffix = llvm::Twine("E");
+   auto recordName = name.getValue();
+   auto acquireName = (prefix + recordName.ltrim("_R") + suffix).str();
+diff --git a/tests/integration/frontend/cell_value_record.c b/tests/integration/frontend/cell_value_record.c
+new file mode 100644
+index 00000000..ce989921
+--- /dev/null
++++ b/tests/integration/frontend/cell_value_record.c
+@@ -0,0 +1,39 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for cell_value_record.rr.
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++extern uint64_t test_variant_ffi(uint64_t);
++extern uint64_t test_drop_with_big_ffi(uint64_t);
++extern uint64_t test_compound_ffi(uint64_t);
++extern uint64_t test_nested_ffi(uint64_t);
++
++#define EXPECT(what, got, want)                                                \
++  do {                                                                         \
++    unsigned long long g = (got), w = (want);                                  \
++    if (g != w) {                                                              \
++      fprintf(stderr, "FAIL %s: got %llu want %llu\n", what, g, w);            \
++      abort();                                                                 \
++    }                                                                          \
++  } while (0)
++
++int main(void) {
++  /* Repeat to surface use-after-free and double-free in the count paths. */
++  for (uint64_t i = 0; i < 3; ++i) {
++    EXPECT("variant", test_variant_ffi(10 + i), 3 * (10 + i) + 3);
++    EXPECT("drop_with_big", test_drop_with_big_ffi(7 + i), 7 + i);
++    EXPECT("compound", test_compound_ffi(4 + i), 11 * (4 + i) + 3);
++    EXPECT("nested", test_nested_ffi(2 + i), 31 * (2 + i) + 6);
++  }
++  return 0;
++}
+diff --git a/tests/integration/frontend/cell_value_record.rr b/tests/integration/frontend/cell_value_record.rr
+new file mode 100644
+index 00000000..240b7523
+--- /dev/null
++++ b/tests/integration/frontend/cell_value_record.rr
+@@ -0,0 +1,77 @@
++// A Cell of a [value] record with counted members: get acquires the slot's
++// record and set releases it, both through the slot's `field` reference. The
++// record's outlined acquire and drop functions for a reference of unspecified
++// capability do not accept it: get and set call the `field` variants
++// (acquire_in_place_field, drop_in_place_field), which call the `field`
++// variants of nested [value] records, so a record nested along many paths
++// costs its glue once.
++
++// RUN: %rrc %s -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/cell_value_record.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++// RUN: %rrc %s -o %t.opt.o --relocation-mode pic -Oaggressive
++// RUN: %cc %t.opt.o %S/cell_value_record.c -o %t.opt.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.opt.exe
++// RUN: %rrc %s --emit mlir-llvm -o - | %FileCheck %s --check-prefix=GLUE
++
++import core::intrinsic::cell;
++
++struct [shared] Bg(u64)
++enum [value] Num { Small(u64), Big(Bg) }
++struct [value] Pair { big: Bg, small: u64 }
++struct [value] Quad { x: Pair, y: Pair }
++struct NumRef(Cell<Num>)
++
++fn mk(v : Num) -> NumRef { NumRef{cell::alloc(v)} }
++
++fn value(x : Num) -> u64 {
++    match x { Num::Small(y) => y, Num::Big(b) => b.0 }
++}
++
++// get of a variant record (acquire), then set over a counted arm (release).
++pub fn test_variant(n : u64) -> u64 {
++    let r = mk(Num::Small{n});
++    let a = value(cell::get(r.0));
++    cell::set(r.0, Num::Big{Bg{n + 1}});
++    let b = value(cell::get(r.0));
++    cell::set(r.0, Num::Small{n + 2});
++    let c = value(cell::get(r.0));
++    a + b + c
++}
++extern "C" trampoline "test_variant_ffi" = test_variant;
++
++// The cell is freed holding a counted arm; the value read from it outlives
++// the cell.
++pub fn test_drop_with_big(n : u64) -> u64 {
++    let kept = {
++        let r = mk(Num::Big{Bg{n}});
++        cell::get(r.0)
++    };
++    value(kept)
++}
++extern "C" trampoline "test_drop_with_big_ffi" = test_drop_with_big;
++
++// A compound [value] record with a counted member.
++pub fn test_compound(n : u64) -> u64 {
++    let c = cell::alloc(Pair { big: Bg{n}, small: 1 });
++    let first = cell::get(c);
++    cell::set(c, Pair { big: Bg{n * 10}, small: 2 });
++    let second = cell::get(c);
++    first.big.0 + first.small + second.big.0 + second.small
++}
++extern "C" trampoline "test_compound_ffi" = test_compound;
++
++// Nested [value] records: Quad's `field` glue calls Pair's.
++pub fn test_nested(n : u64) -> u64 {
++    let c = cell::alloc(Quad { x: Pair { big: Bg{n}, small: 1 }, y: Pair { big: Bg{n + 1}, small: 2 } });
++    let a = cell::get(c);
++    cell::set(c, Quad { x: Pair { big: Bg{n * 10}, small: 3 }, y: Pair { big: Bg{n * 20}, small: 4 } });
++    let b = cell::get(c);
++    a.x.big.0 + a.y.small + b.x.big.0 + b.y.big.0 + b.y.small
++}
++extern "C" trampoline "test_nested_ffi" = test_nested;
++
++// GLUE-DAG: llvm.func {{.*}}@_RINvNvC4core9intrinsic22acquire_in_place_fieldC4QuadE(
++// GLUE-DAG: llvm.call @_RINvNvC4core9intrinsic22acquire_in_place_fieldC4PairE(
++// GLUE-DAG: llvm.func {{.*}}@_RINvNvC4core9intrinsic19drop_in_place_fieldC4QuadE(
++// GLUE-DAG: llvm.call @_RINvNvC4core9intrinsic19drop_in_place_fieldC4PairE(
+-- 
+2.43.0
+

@@ -1,7 +1,7 @@
-From b8aedd378c7ec91343d8d483b11215d91a730bdf Mon Sep 17 00:00:00 2001
+From 0510c7d4f6b21ffd24b6a67caa29e09acaadea80 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 03:22:04 -0400
-Subject: [PATCH 60/63] l2r-local: bug 28: make Unknown absorb the
+Subject: [PATCH] l2r-local: bug 28: make Unknown absorb the
  uniqueness-carrying join
 
 The provenance lattice of the uniqueness-carrying analysis
@@ -42,7 +42,7 @@ carrying).
  create mode 100644 tests/integration/frontend/unique_carrying_shared_field.rr
 
 diff --git a/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp b/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
-index 6a38323c..d1c85197 100644
+index f1551ef8..269fea8b 100644
 --- a/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
 +++ b/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
 @@ -26,12 +26,17 @@
@@ -124,7 +124,7 @@ index 6a38323c..d1c85197 100644
      os << "{fresh=" << (fresh ? "true" : "false") << ", args=[";
      bool first = true;
      for (int bit = carriedArgs.find_first(); bit >= 0;
-@@ -313,8 +329,7 @@ private:
+@@ -318,8 +334,7 @@ private:
        const UniqueCarryingValue &summary = it->second[resultIndex];
        if (summary.unknown)
          return summary;
@@ -134,7 +134,7 @@ index 6a38323c..d1c85197 100644
        mapped.fresh = summary.fresh;
        for (int argIndex = summary.carriedArgs.find_first(); argIndex >= 0;
             argIndex = summary.carriedArgs.find_next(argIndex)) {
-@@ -362,7 +377,7 @@ private:
+@@ -367,7 +382,7 @@ private:
    template <typename YieldOpT>
    UniqueCarryingValue joinRegionYields(mlir::Operation *op,
                                         unsigned resultIndex) {
@@ -143,7 +143,7 @@ index 6a38323c..d1c85197 100644
      for (mlir::Region &region : op->getRegions()) {
        if (region.empty())
          continue;
-@@ -412,12 +427,25 @@ static bool areEqualSummaries(const FunctionSummaryMap &lhs,
+@@ -417,12 +432,25 @@ static bool areEqualSummaries(const FunctionSummaryMap &lhs,
    return true;
  }
  
@@ -171,7 +171,7 @@ index 6a38323c..d1c85197 100644
    funcOp.walk([&](mlir::func::ReturnOp returnOp) {
      for (auto [index, operand] : llvm::enumerate(returnOp.getOperands())) {
        if (!isRcType(operand.getType()))
-@@ -691,7 +719,11 @@ struct UniqueCarryingRecursionAnalysisPass
+@@ -696,7 +724,11 @@ struct UniqueCarryingRecursionAnalysisPass
          op->removeAttr(kCarryingUniquenessAttr);
      });
  

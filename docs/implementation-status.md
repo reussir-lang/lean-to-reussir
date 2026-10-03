@@ -476,32 +476,55 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches
-(branch `l2r-local` of the checkout in `./reussir`; the patches are in
+(branch `l2r-local` of the checkout in `./reussir`, head `5c0514e3`:
+Reussir `ef922049` plus 34 patches; the patches are in
 [`../reussir-bugs/patches/`](../reussir-bugs/patches/), each explained in
 depth in the file of its bug, indexed in
 [`../reussir-bugs/README.md`](../reussir-bugs/README.md)).
-They are local only, never submitted upstream, and each passed adversarial
-review before it was applied. An independent audit then checked whether
-each problem is really a Reussir bug:
+They are local only, never submitted upstream, and each is reviewed
+adversarially (the last four, 0060 to 0063, were applied with their review
+pending). An independent audit checked whether each problem is really a
+Reussir bug. Of the 32 documented problems, 29 are patched (32 patches)
+and 3 are documented only; two more patches add features lean2rr needs:
 
-- **Real bugs fixed:** wrong values after in-place reuse of a structure
-  cell (bug 2), compiler crashes (4, 5), use-after-free (9, 14), the
-  parser mixing up subtrees on very large files (12, a bug in Reussir's
-  parser library `cstree`).
+- **Real bugs fixed (20 patches):** wrong values after in-place reuse of a
+  structure or variant cell (bug 2), `[value]` enum bytes lost (1), a
+  layout mismatch that overflowed cells (8), compiler crashes (4, 5, 31),
+  use-after-free (9, 14), the parser mixing up subtrees on very large
+  files (12, in Reussir's parser library `cstree`), programs that did not
+  compile (15, 19), wrong code after an LLVM assumption undid a pointer
+  launder (26) and from a uniqueness analysis that proved a shared value
+  unique (28), a texture placeholder dropped (21), non-reproducible builds
+  (24), MLIR dumps that did not parse back (29), Reussir's own build
+  (18), and build time made quadratic by Reussir's own code (10, 11b, 23).
 - **A real bug with a flag workaround:** a static cell freed after 2^32
   references (6). Another nullary-constructor encoding avoids it; the patch
   keeps the default encoding for speed.
+- **Build-time costs with a small fix (6 patches):** interprocedural SCCP
+  (11), reuse across calls in deep matches (16), a straight-line `Nat`
+  function (17), the inliner on lean2rr's conversion code (20), wildcard
+  arms over wide enums (22), the call lowering's symbol lookups (30).
 - **An optimization, not a bug:** token reuse picking a cell that never
   frees (7). It stays because the use-after-free fix (9) builds on it.
 - **A missing feature, implemented locally:** freeing long or deep
-  structures without recursion, in Lean's order (13, three patches);
-  lean2rr's runtime needs it.
+  structures without recursion, in Lean's order (13, three patches;
+  lean2rr's runtime needs it), and the same for a member behind
+  `Nullable` (27).
+- **Local additions (no bug):** a hook at the end of a drain that lean2rr's
+  runtime uses for promises released inside a free (0040), and tagged
+  opaque handles for one-word `Nat`/`Int` (0050, branch `mem-nat`).
+- **Documented only:** Rust allocations on mimalloc's aligned path
+  (3, intended), and two costs whose fix would be a redesign: the inline
+  expansion of copies of `[value]` records shared in a DAG (25) and the
+  size of `--emit mlir` dumps (32).
 
 Every Reussir problem met so far is documented with a reproducer,
 including those lean2rr works around and those the audit classified as
 intended behaviour or build costs, in
 [`../reussir-bugs/`](../reussir-bugs/README.md), whose status table also
-shows which patches are applied.
+shows which patches are applied. lean2rr keeps its workarounds, so that it
+also works with an unpatched Reussir (except that its runtime needs patch
+0014).
 Two parts of Reussir that its author offered (LLVM coroutine bindings,
 dynamic-extent arrays) are not needed: lean2rr's tasks need stackful
 contexts, which its runtime has, and Lean arrays are growable, which

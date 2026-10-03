@@ -1,4 +1,4 @@
-From d86e62a01234139234dfffc1fa38d36fee3ec428 Mon Sep 17 00:00:00 2001
+From fe717f85518c9d85367cc684592027229ca0018d Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 30 Sep 2026 21:57:39 -0400
 Subject: [PATCH] l2r-local: bug 12: build syntax nodes without cstree's

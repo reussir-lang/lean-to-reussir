@@ -1,0 +1,349 @@
+From 0218538c0710472ba96ad1619257203cae1d25f0 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Fri, 2 Oct 2026 21:27:16 -0400
+Subject: [PATCH] l2r-local: bug 2 (variant): skip a reused variant cell's
+ field store only if the field keeps its offset
+
+Copy avoidance for rc.create_variant (RcCreateFusion,
+markVariantAvoidedCopies) skips storing field i of an arm built in a
+reused cell when the value is a load of field i of the cell's old arm and
+the two arms' member types agree for indices 0..i in declaration order
+(hasCompatibleFieldPrefix). That places field i at the same offset only
+under the declaration-order layout. The packed record layout, the
+default, sorts an arm's members by alignment, so a member's offset depends
+on every member of the arm: in `enum M { A(u32, u64), B(u32, u32, u32) }`
+A.0 is at offset 8 of the payload and B.0 at offset 0, so building M::B in
+a reused M::A cell skipped B.0's store and B.0 read the low half of A.1
+(11001 instead of 5001).
+
+Keep the prefix rule and also require field i to sit at the same byte
+offset from the box in both: the element starts at the same offset (same
+box header shape and element alignment), the arm payload starts at the
+same offset within the variant (after the header, at the alignment of the
+most aligned arm) and member i at the same offset within the payload.
+RecordType::getMemberOffset exposes the packed member offsets from the
+derivation the type sizes already use (getElementRegionLayoutInfo now
+shares it), which the type converter's LLVM structs follow. The check only
+removes skips: reusing a cell for the same arm, arms of the same variant
+under --no-pack-record-members, and cells of another variant whose payload
+and member offsets agree skip as before.
+
+lean2rr passes --no-pack-record-members because of this bug; its code is
+the same with and without this patch (identical LLVM IR for the classic
+corpus and a sample of the runtime tests). The structure half of bug 2 is
+the earlier local patch (same box type). Test:
+tests/integration/conversion/rc_create_fusion_variant_layout.mlir.
+---
+ include/Reussir/IR/ReussirTypes.td            |   4 +
+ lib/IR/ReussirTypes.cpp                       |  45 +++++---
+ .../RcCreateFusion/RcCreateFusion.cpp         |  70 ++++++++++--
+ .../rc_create_fusion_variant_layout.mlir      | 102 ++++++++++++++++++
+ 4 files changed, 200 insertions(+), 21 deletions(-)
+ create mode 100644 tests/integration/conversion/rc_create_fusion_variant_layout.mlir
+
+diff --git a/include/Reussir/IR/ReussirTypes.td b/include/Reussir/IR/ReussirTypes.td
+index a404a512..ae1eecb8 100644
+--- a/include/Reussir/IR/ReussirTypes.td
++++ b/include/Reussir/IR/ReussirTypes.td
+@@ -197,6 +197,10 @@ def ReussirRecordType
+       // Position of logical member `index` in the packed physical order —
+       // i.e. the GEP field index of that member in the converted LLVM struct.
+       uint32_t getPhysicalMemberIndex(const mlir::DataLayout &dataLayout, uint32_t index) const;
++      // Byte offset of logical member `index` of a compound record within
++      // the record, in the packed physical order (the offset of that member
++      // in the converted LLVM struct).
++      uint64_t getMemberOffset(const mlir::DataLayout &dataLayout, uint32_t index) const;
+       // Outlined drop/acquire glue symbols. The glue's body derives member
+       // links from its argument reference's atomic kind (the whole-subtree
+       // rule), so each kind gets its own symbol and the atomic variant names
+diff --git a/lib/IR/ReussirTypes.cpp b/lib/IR/ReussirTypes.cpp
+index 98cd6670..508817ba 100644
+--- a/lib/IR/ReussirTypes.cpp
++++ b/lib/IR/ReussirTypes.cpp
+@@ -766,24 +766,39 @@ uint32_t RecordType::getPhysicalMemberIndex(const mlir::DataLayout &dataLayout,
+   return static_cast<uint32_t>(it - order.begin());
+ }
+ 
++namespace {
++// The layout of a compound record's members in packed physical order, so
++// offsets (and the total size) match the converted LLVM struct.
++CompoundLayout derivePhysicalCompoundLayout(RecordType type,
++                                            const mlir::DataLayout &dataLayout) {
++  llvm::SmallVector<uint32_t> order = type.getPackedOrder(dataLayout);
++  llvm::SmallVector<mlir::Type> members(order.size());
++  llvm::SmallVector<bool> memberIsField(order.size());
++  for (auto [physical, logical] : llvm::enumerate(order)) {
++    members[physical] = type.getMembers()[logical];
++    memberIsField[physical] = type.getMemberIsField()[logical];
++  }
++  auto derived = deriveCompoundLayout(type.getContext(), members,
++                                      memberIsField, dataLayout);
++  if (!derived)
++    llvm_unreachable("RecordType must have a fixed size");
++  return std::move(*derived);
++}
++} // namespace
++
++uint64_t RecordType::getMemberOffset(const mlir::DataLayout &dataLayout,
++                                     uint32_t index) const {
++  assert(isCompound() && "member offsets are a compound-layout query");
++  CompoundLayout layout = derivePhysicalCompoundLayout(*this, dataLayout);
++  return layout.memberOffsets[getPhysicalMemberIndex(dataLayout, index)];
++}
++
+ RecordType::LayoutInfo RecordType::getElementRegionLayoutInfo(
+     const mlir::DataLayout &dataLayout) const {
+   if (isCompound()) {
+-    // Iterate members in packed physical order so offsets (and the total
+-    // size) match the converted LLVM struct.
+-    llvm::SmallVector<uint32_t> order = getPackedOrder(dataLayout);
+-    llvm::SmallVector<mlir::Type> members(order.size());
+-    llvm::SmallVector<bool> memberIsField(order.size());
+-    for (auto [physical, logical] : llvm::enumerate(order)) {
+-      members[physical] = getMembers()[logical];
+-      memberIsField[physical] = getMemberIsField()[logical];
+-    }
+-    auto derived =
+-        deriveCompoundLayout(getContext(), members, memberIsField, dataLayout);
+-    if (!derived)
+-      llvm_unreachable("RecordType must have a fixed size");
+-    return {derived->size, derived->alignment,
+-            derived->memberWithLargestAlignment};
++    CompoundLayout derived = derivePhysicalCompoundLayout(*this, dataLayout);
++    return {derived.size, derived.alignment,
++            derived.memberWithLargestAlignment};
+   }
+   llvm::TypeSize largestSize = llvm::TypeSize::getZero();
+   llvm::Align largestAlignment = llvm::Align(1);
+diff --git a/lib/Transformation/RcCreateFusion/RcCreateFusion.cpp b/lib/Transformation/RcCreateFusion/RcCreateFusion.cpp
+index 2c7f0298..757410a7 100644
+--- a/lib/Transformation/RcCreateFusion/RcCreateFusion.cpp
++++ b/lib/Transformation/RcCreateFusion/RcCreateFusion.cpp
+@@ -19,9 +19,11 @@
+ 
+ #include <llvm/ADT/DenseSet.h>
+ #include <llvm/ADT/SmallVector.h>
++#include <llvm/Support/Alignment.h>
+ #include <mlir/Dialect/Func/IR/FuncOps.h>
+ #include <mlir/IR/BuiltinAttributes.h>
+ #include <mlir/IR/PatternMatch.h>
++#include <mlir/Interfaces/DataLayoutInterfaces.h>
+ #include <mlir/Pass/Pass.h>
+ #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
+ 
+@@ -156,9 +158,57 @@ bool hasCompatibleFieldPrefix(RecordType sourcePayloadType,
+   return true;
+ }
+ 
++// Offset of the arm payloads within a variant record: they follow the
++// header (the fused 8-byte {count slot, tag} word, or the bare tag) at the
++// alignment of the most aligned arm, as RecordType::getTypeSizeInBits lays
++// the variant out.
++uint64_t getVariantPayloadOffset(RecordType variant,
++                                 const mlir::DataLayout &dataLayout) {
++  uint64_t headerSize = variant.hasFusedHeader()
++                            ? 8
++                            : dataLayout.getTypeSize(variant.getTagType());
++  return llvm::alignTo(
++      headerSize, variant.getElementRegionLayoutInfo(dataLayout).alignment);
++}
++
++// The prefix rule above places member i at the same offset only under the
++// declaration-order layout. The packed layout (the default) sorts an arm's
++// members by alignment, so member i's offset depends on every member of the
++// arm. A reused cell already holds field i where the new arm expects it only
++// if the field sits at the same byte offset from the box: the element starts
++// at the same offset (same box header, element alignment), the arm payload
++// at the same offset within the variant, and member i at the same offset
++// within the payload.
++bool sameVariantFieldOffset(RcType sourceRc, RcType targetRc,
++                            RecordType sourcePayloadType,
++                            RecordType targetPayloadType, int64_t fieldIndex,
++                            const mlir::DataLayout &dataLayout) {
++  RcBoxType sourceBox = sourceRc.getInnerBoxType();
++  RcBoxType targetBox = targetRc.getInnerBoxType();
++  if (sourceBox.isHeaderFused() != targetBox.isHeaderFused() ||
++      sourceBox.getHeaderTypes() != targetBox.getHeaderTypes() ||
++      dataLayout.getTypeABIAlignment(sourceBox.getElementType()) !=
++          dataLayout.getTypeABIAlignment(targetBox.getElementType()))
++    return false;
++
++  auto sourceVariant = llvm::dyn_cast<RecordType>(sourceBox.getElementType());
++  auto targetVariant = llvm::dyn_cast<RecordType>(targetBox.getElementType());
++  if (!sourceVariant || !targetVariant || !sourceVariant.isVariant() ||
++      !targetVariant.isVariant())
++    return false;
++  if (getVariantPayloadOffset(sourceVariant, dataLayout) !=
++      getVariantPayloadOffset(targetVariant, dataLayout))
++    return false;
++
++  return sourcePayloadType.getMemberOffset(dataLayout, fieldIndex) ==
++         targetPayloadType.getMemberOffset(dataLayout, fieldIndex);
++}
++
+ bool isLoadFromVariantField(mlir::Value value,
+                             mlir::TypedValue<RcType> sourceRc,
+-                            mlir::Type targetPayloadType, int64_t fieldIndex) {
++                            mlir::TypedValue<RcType> targetRc,
++                            mlir::Type targetPayloadType, int64_t fieldIndex,
++                            const mlir::DataLayout &dataLayout) {
+   auto load =
+       llvm::dyn_cast_if_present<ReussirRefLoadOp>(value.getDefiningOp());
+   if (!load)
+@@ -183,7 +233,11 @@ bool isLoadFromVariantField(mlir::Value value,
+ 
+   auto borrow = llvm::dyn_cast_if_present<ReussirRcBorrowOp>(
+       coerce.getVariant().getDefiningOp());
+-  return borrow && borrow.getRcPtr() == sourceRc;
++  if (!borrow || borrow.getRcPtr() != sourceRc)
++    return false;
++  return sameVariantFieldOffset(sourceRc.getType(), targetRc.getType(),
++                                sourcePayloadType, targetPayloadRecord,
++                                fieldIndex, dataLayout);
+ }
+ 
+ void markCompoundAvoidedCopies(ReussirRcCreateCompoundOp op) {
+@@ -209,7 +263,8 @@ void markCompoundAvoidedCopies(ReussirRcCreateCompoundOp op) {
+                 mlir::DenseI64ArrayAttr::get(op.getContext(), skippedFields));
+ }
+ 
+-void markVariantAvoidedCopies(ReussirRcCreateVariantOp op) {
++void markVariantAvoidedCopies(ReussirRcCreateVariantOp op,
++                              const mlir::DataLayout &dataLayout) {
+   if (op.getValue())
+     return;
+ 
+@@ -222,7 +277,8 @@ void markVariantAvoidedCopies(ReussirRcCreateVariantOp op) {
+       op.getRecordType().getMembers()[op.getTag().getZExtValue()];
+   llvm::SmallVector<int64_t> skippedFields;
+   for (auto [index, field] : llvm::enumerate(op.getFields()))
+-    if (isLoadFromVariantField(field, sourceRc, payloadType, index))
++    if (isLoadFromVariantField(field, sourceRc, op.getRcPtr(), payloadType,
++                               index, dataLayout))
+       skippedFields.push_back(static_cast<int64_t>(index));
+ 
+   if (!skippedFields.empty())
+@@ -282,8 +338,10 @@ struct RcCreateFusionPass
+       signalPassFailure();
+     getOperation().walk(
+         [](ReussirRcCreateCompoundOp op) { markCompoundAvoidedCopies(op); });
+-    getOperation().walk(
+-        [](ReussirRcCreateVariantOp op) { markVariantAvoidedCopies(op); });
++    mlir::DataLayout dataLayout = mlir::DataLayout::closest(getOperation());
++    getOperation().walk([&](ReussirRcCreateVariantOp op) {
++      markVariantAvoidedCopies(op, dataLayout);
++    });
+   }
+ };
+ 
+diff --git a/tests/integration/conversion/rc_create_fusion_variant_layout.mlir b/tests/integration/conversion/rc_create_fusion_variant_layout.mlir
+new file mode 100644
+index 00000000..d9266660
+--- /dev/null
++++ b/tests/integration/conversion/rc_create_fusion_variant_layout.mlir
+@@ -0,0 +1,102 @@
++// RUN: %reussir-opt %s --reussir-rc-create-fusion | %FileCheck %s
++
++// Copy avoidance for a variant built in a reused cell: field i's store may be
++// skipped when its value is a load of field i of the old arm and the arms'
++// member types agree for indices 0..i, but only if field i also sits at the
++// same byte offset. The packed record layout (the default) sorts an arm's
++// members by alignment: M::A = (i32, i64) puts A.0 at offset 8 of its
++// payload, M::B = (i32, i32, i32) puts B.0 at offset 0.
++
++!a = !reussir.record<compound "M::A" [value] {i32, i64}>
++!b = !reussir.record<compound "M::B" [value] {i32, i32, i32}>
++!m = !reussir.record<variant "M" {!a, !b}>
++!c = !reussir.record<compound "N::C" [value] {i64, i32}>
++!d = !reussir.record<compound "N::D" [value] {i64, i32, i32}>
++!n = !reussir.record<variant "N" {!c, !d}>
++!some = !reussir.record<compound "O::Some" [value] {i8}>
++!none = !reussir.record<compound "O::None" [value] {}>
++!o = !reussir.record<variant "O" {!some, !none}>
++!ok = !reussir.record<compound "R::Ok" [value] {i8}>
++!err = !reussir.record<compound "R::Err" [value] {i64}>
++!r = !reussir.record<variant "R" {!ok, !err}>
++
++module attributes { dlti.dl_spec = #dlti.dl_spec<#dlti.dl_entry<i64, dense<64> : vector<2xi64>>, #dlti.dl_entry<i32, dense<32> : vector<2xi64>>> } {
++  func.func @field_moves(%rc: !reussir.rc<!m>) -> !reussir.rc<!m> {
++    %borrow = reussir.rc.borrow (%rc : !reussir.rc<!m>) : !reussir.ref<!m>
++    %a_ref = reussir.record.coerce [0] (%borrow : !reussir.ref<!m>) : !reussir.ref<!a>
++    %f0_ref = reussir.ref.project (%a_ref : !reussir.ref<!a>) [0] : !reussir.ref<i32>
++    %f0 = reussir.ref.load (%f0_ref : !reussir.ref<i32>) : i32
++    %one = arith.constant 1 : i32
++    %zero = arith.constant 0 : i32
++    %p = reussir.record.compound(%f0, %one, %zero : i32, i32, i32) : !b
++    %v = reussir.record.variant [1] (%p : !b) : !m
++    %token0 = reussir.rc.reinterpret (%rc : !reussir.rc<!m>) : !reussir.token<align: 8, size: 24>
++    %token = reussir.token.launder (%token0 : !reussir.token<align: 8, size: 24>) : !reussir.token<align: 8, size: 24>
++    %new = reussir.rc.create value(%v : !m) token(%token : !reussir.token<align: 8, size: 24>) skip_rc : !reussir.rc<!m>
++    return %new : !reussir.rc<!m>
++  }
++
++  // N::C = (i64, i32) and N::D = (i64, i32, i32) agree on offsets 0 and 8.
++  func.func @fields_stay(%rc: !reussir.rc<!n>) -> !reussir.rc<!n> {
++    %borrow = reussir.rc.borrow (%rc : !reussir.rc<!n>) : !reussir.ref<!n>
++    %c_ref = reussir.record.coerce [0] (%borrow : !reussir.ref<!n>) : !reussir.ref<!c>
++    %f0_ref = reussir.ref.project (%c_ref : !reussir.ref<!c>) [0] : !reussir.ref<i64>
++    %f0 = reussir.ref.load (%f0_ref : !reussir.ref<i64>) : i64
++    %f1_ref = reussir.ref.project (%c_ref : !reussir.ref<!c>) [1] : !reussir.ref<i32>
++    %f1 = reussir.ref.load (%f1_ref : !reussir.ref<i32>) : i32
++    %seven = arith.constant 7 : i32
++    %p = reussir.record.compound(%f0, %f1, %seven : i64, i32, i32) : !d
++    %v = reussir.record.variant [1] (%p : !d) : !n
++    %token0 = reussir.rc.reinterpret (%rc : !reussir.rc<!n>) : !reussir.token<align: 8, size: 24>
++    %token = reussir.token.launder (%token0 : !reussir.token<align: 8, size: 24>) : !reussir.token<align: 8, size: 24>
++    %new = reussir.rc.create value(%v : !n) token(%token : !reussir.token<align: 8, size: 24>) skip_rc : !reussir.rc<!n>
++    return %new : !reussir.rc<!n>
++  }
++
++  // A cell of another variant: O's arms are byte-aligned and R's are 8-byte
++  // aligned, but both payloads start right after the 8-byte fused header.
++  func.func @other_variant_same_offset(%rc: !reussir.rc<!o>) -> !reussir.rc<!r> {
++    %borrow = reussir.rc.borrow (%rc : !reussir.rc<!o>) : !reussir.ref<!o>
++    %s_ref = reussir.record.coerce [0] (%borrow : !reussir.ref<!o>) : !reussir.ref<!some>
++    %f0_ref = reussir.ref.project (%s_ref : !reussir.ref<!some>) [0] : !reussir.ref<i8>
++    %f0 = reussir.ref.load (%f0_ref : !reussir.ref<i8>) : i8
++    %p = reussir.record.compound(%f0 : i8) : !ok
++    %v = reussir.record.variant [0] (%p : !ok) : !r
++    %token0 = reussir.rc.reinterpret (%rc : !reussir.rc<!o>) : !reussir.token<align: 8, size: 16>
++    %token = reussir.token.launder (%token0 : !reussir.token<align: 8, size: 16>) : !reussir.token<align: 8, size: 16>
++    %new = reussir.rc.create value(%v : !r) token(%token : !reussir.token<align: 8, size: 16>) skip_rc : !reussir.rc<!r>
++    return %new : !reussir.rc<!r>
++  }
++
++  // The same arm keeps every member where it was.
++  func.func @same_arm(%rc: !reussir.rc<!m>) -> !reussir.rc<!m> {
++    %borrow = reussir.rc.borrow (%rc : !reussir.rc<!m>) : !reussir.ref<!m>
++    %a_ref = reussir.record.coerce [0] (%borrow : !reussir.ref<!m>) : !reussir.ref<!a>
++    %f0_ref = reussir.ref.project (%a_ref : !reussir.ref<!a>) [0] : !reussir.ref<i32>
++    %f0 = reussir.ref.load (%f0_ref : !reussir.ref<i32>) : i32
++    %nine = arith.constant 9 : i64
++    %p = reussir.record.compound(%f0, %nine : i32, i64) : !a
++    %v = reussir.record.variant [0] (%p : !a) : !m
++    %token0 = reussir.rc.reinterpret (%rc : !reussir.rc<!m>) : !reussir.token<align: 8, size: 24>
++    %token = reussir.token.launder (%token0 : !reussir.token<align: 8, size: 24>) : !reussir.token<align: 8, size: 24>
++    %new = reussir.rc.create value(%v : !m) token(%token : !reussir.token<align: 8, size: 24>) skip_rc : !reussir.rc<!m>
++    return %new : !reussir.rc<!m>
++  }
++}
++
++// CHECK-LABEL: func.func @field_moves
++// CHECK: "reussir.rc.create_variant"
++// CHECK-NOT: skipFields
++// CHECK: return
++
++// CHECK-LABEL: func.func @fields_stay
++// CHECK: "reussir.rc.create_variant"
++// CHECK-SAME: skipFields = array<i64: 0, 1>
++
++// CHECK-LABEL: func.func @other_variant_same_offset
++// CHECK: "reussir.rc.create_variant"
++// CHECK-SAME: skipFields = array<i64: 0>
++
++// CHECK-LABEL: func.func @same_arm
++// CHECK: "reussir.rc.create_variant"
++// CHECK-SAME: skipFields = array<i64: 0>
+-- 
+2.43.0
+

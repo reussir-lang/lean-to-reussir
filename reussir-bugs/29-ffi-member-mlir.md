@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (tooling). **Status:** patched (0061).
+**Kind:** bug (tooling). **Status:** patched (0061), applied in `./reussir` (`l2r-local` 5c0514e3); review pending.
 
 **Verdict: bug.** The frontend writes a record member of an opaque
 `#[ffi]` type as an explicit shared rc link, `!reussir.rc<!reussir.ffi_object<..>>`,
@@ -94,8 +94,8 @@ problem by hand.
 
 Patch file
 [`patches/0061-l2r-local-bug-29-accept-a-record-member-linking-to-a.patch`](patches/0061-l2r-local-bug-29-accept-a-record-member-linking-to-a.patch)
-(made as commit `a4fabec4` in a scratch checkout, after 0060; it does not
-depend on it). The verifier also accepts a shared rc member whose element
+(`l2r-local` commit `c5ea9a17`, applied in `./reussir`; `l2r-local` head 5c0514e3; made as commit `a4fabec4`
+in a scratch checkout, after 0060, on which it does not depend). The verifier also accepts a shared rc member whose element
 is an `ffi_object`:
 
 ```c++
@@ -133,6 +133,11 @@ member with the `[field]` capability.
   [bug 28](28-unique-carrying-join.md).
 - `run.sh`: `bug 29   FIXED       the --emit mlir dump parses back and
   prints identically`.
+
+**Review.** Pending: the adversarial review of 0060-0063 runs in
+`~/Documents/l2r-scratch/rv8/reussir/e/`. The patch is applied in
+`./reussir` meanwhile (applied; review pending). Reussir's lit suite and
+`run.sh` on the final stack: as above.
 
 **Effect on lean2rr.** None on builds; lean2rr's MLIR dumps become usable.
 
