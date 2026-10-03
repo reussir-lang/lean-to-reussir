@@ -3,10 +3,11 @@ shared versions, for 8 element representations (tagged `Nat`/`Int` words,
 `String`, `Float`, `UInt8`, `Array Nat`, `Nat × String`, `Option UInt64`):
 push/pop/set!/swapIfInBounds/extract/++/reverse/insertIdxIfInBounds/
 eraseIdxIfInBounds/modify/take/zip-then-map/filter/replicate.
-From the round-7 review, area D (rv7/rtdata), check DFuzzArr. Operation 11
-maps the zipped pairs with `fun (y, _) => y` where the original used `(·.1)`:
-a projection map over a parametric structure is finding RV7D-01, being fixed
-on another branch (see RtLcAnyProj). -/
+From the round-7 review, area D (rv7/rtdata), check DFuzzArr. Operation 11,
+`(a.zip b).map (·.1)`, a projection map over a parametric structure, is
+where every divergence of finding RV7D-01 showed (zeros, empty strings or
+"INTERNAL PANIC: unreachable code has been reached"; fixed by e318fbd and
+a9b89e6). -/
 
 -- Random sequences of array operations over pools of shared versions, for
 -- several element representations (tagged Nat/Int words, strings, floats,
@@ -57,7 +58,7 @@ def run (α : Type) [Gen α] [Inhabited α] (lbl : String) (seed0 : UInt64) : IO
       | 8 => a.eraseIdxIfInBounds i
       | 9 => a.modify i (fun _ => x)
       | 10 => a.take i
-      | 11 => (a.zip b).map (fun (y, _) => y)
+      | 11 => (a.zip b).map (·.1)
       | 12 => a.filter (fun y => Gen.dig y % 2 == 0)
       | 13 => (Array.replicate (i % 4) x) ++ a
       | _ => a.extract (r[5]! % 9) i
