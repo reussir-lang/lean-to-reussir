@@ -1250,8 +1250,9 @@ inlined at each of its jumps, like J1, when it is small: its body has at
 most 40 bindings, alternatives and exits (nested join points included), a
 copy of it expands to at most 480, and its copies beyond the first add at
 most 2000 (jumps minus one, times the expansion), or 4000 for a loop's
-continuation: a copy that tail-calls a function of the declaration's call
-cycle (its strongly connected component in the program's call graph). The
+continuation: a join point whose own body (not the join points it jumps
+to) tail-calls a function of the declaration's call cycle (its strongly
+connected component in the program's call graph). The
 expansion counts, at each jump, the body of the join point jumped to when
 that is inlined there too: a join point nested in the copy (at every jump
 to it), another join point jumped to once (J1 inlines it whatever its
@@ -1292,8 +1293,11 @@ the loop a state machine, or, in mutual recursion, a stack frame more per
 iteration. The larger budget is only for loop continuations: given to every
 join point, it let a 35-line function with a wide `match` setting a state
 and a few `match`es on it add 0.5-0.75 MB of .rr (eight such functions: 6.3
-MB, a four-minute build at 5.7 GB). Behaviour does not change. (Optional
-pass `jp-small`; without it such join points are outlined, J3.)
+MB, a four-minute build at 5.7 GB); and judged through the join points a
+copy jumps to, one rare guarded self-call in the last of such a chain of
+`match`es gave it to the whole chain (eight functions: 7.3 MB of .rr).
+Behaviour does not change. (Optional pass `jp-small`; without it such join
+points are outlined, J3.)
 
 **J3, otherwise: outline.** Some paths `return` directly or jump to a
 different join point. Then `j` becomes a separate top-level function over

@@ -30,13 +30,9 @@ where
     | _ => acc + 1
 
 /-- Size of the code a copy of the join-point body `c` can expand to,
-counted up to `cap`, and whether the copy makes a tail call of a
-declaration of `scope.loop` (the declaration's call cycle), that is,
-whether it is a loop's continuation (exact when the size is below `cap`).
-
-The size counts the bindings, alternatives and exits, and at each jump the
-body of the join point jumped to when it may be inlined there (J1, J1′):
-one declared in `c` (counted at each jump to it, not where it is
+counted up to `cap`: its bindings, alternatives and exits, and at each jump
+the body of the join point jumped to when it may be inlined there (J1,
+J1′): one declared in `c` (counted at each jump to it, not where it is
 declared), or another join point in `scope` that is jumped to once (J1
 inlines it whatever its size) or whose own body is small. Those bodies are
 counted the same way. It is an upper bound (a J2 or outlined target costs
@@ -47,35 +43,45 @@ goes to an alternative of the next `match`) gave the first one's copies
 2^n copies of the last; and without the join points jumped to once, a
 large one whose jump is in a small duplicated join point was copied with
 it (jp-sink, which puts it inside its jumper, off). -/
-partial def copyInfo (scope : JpScope) (c : Code .pure) (cap : Nat) : Nat × Bool :=
-  go c {} (0, false)
+partial def copySize (scope : JpScope) (c : Code .pure) (cap : Nat) : Nat :=
+  go c {} 0
 where
   /-- `inner`: the join points declared in the block being counted. -/
-  go (c : Code .pure) (inner : Std.HashMap FVarId (Code .pure)) (st : Nat × Bool) : Nat × Bool :=
-    let (acc, loops) := st
-    if acc ≥ cap then st else
+  go (c : Code .pure) (inner : Std.HashMap FVarId (Code .pure)) (acc : Nat) : Nat :=
+    if acc ≥ cap then acc else
     match c with
-    | .let d k =>
-      let loops := loops || match d.value, k with
-        | .const f _ _ _, .return x => x == d.fvarId && scope.loop.contains f
-        | _, _ => false
-      go k inner (acc + 1, loops)
-    | .fun d k _ => go k inner (go d.value inner (acc + 1, loops))
-    | .jp d k => go k (inner.insert d.fvarId d.value) (acc + 1, loops)
-    | .cases cs => cs.alts.foldl (fun st alt => go alt.getCode inner (st.1 + 1, st.2)) (acc + 1, loops)
+    | .let _ k => go k inner (acc + 1)
+    | .fun d k _ => go k inner (go d.value inner (acc + 1))
+    | .jp d k => go k (inner.insert d.fvarId d.value) (acc + 1)
+    | .cases cs => cs.alts.foldl (fun acc alt => go alt.getCode inner (acc + 1)) (acc + 1)
     | .jmp j _ =>
       match inner[j]? with
-      | some b => go b inner (acc + 1, loops)
+      | some b => go b inner (acc + 1)
       | none =>
         match scope.bodies[j]? with
         | some b =>
-          if scope.single.contains j || codeSize b 41 ≤ 40 then go b {} (acc + 1, loops)
-          else (acc + 1, loops)
-        | none => (acc + 1, loops)
-    | _ => (acc + 1, loops)
+          if scope.single.contains j || codeSize b 41 ≤ 40 then go b {} (acc + 1) else acc + 1
+        | none => acc + 1
+    | _ => acc + 1
+
+/-- Does `c`, a join point's own body (the join points nested in it
+included, not those it jumps to), make a tail call of a declaration of
+`loop` (the declaration's call cycle)? Then the join point is a loop's
+continuation. Only its own body counts: through the join points it jumps
+to, one rare guarded tail call in the last of a chain of `match`es would
+make the whole chain loop continuations. -/
+partial def tailCallsInto (loop : NameSet) : Code .pure → Bool
+  | .let d k =>
+    (match d.value, k with
+      | .const f _ _ _, .return x => x == d.fvarId && loop.contains f
+      | _, _ => false) || tailCallsInto loop k
+  | .fun _ k _ => tailCallsInto loop k
+  | .jp d k => tailCallsInto loop d.value || tailCallsInto loop k
+  | .cases cs => cs.alts.any (tailCallsInto loop ·.getCode)
+  | _ => false
 
 /-- The most code a copy of a duplicated join point may expand to
-(`copyInfo`): twelve times the bound on its own body. Loops whose
+(`copySize`): twelve times the bound on its own body. Loops whose
 conditions are a few `&&`/`||` tests (each test a join point jumping to the
 shared continuation) expand to 300-350 and stay plain loops. -/
 def copyBudget : Nat := 480
@@ -88,11 +94,11 @@ jumps to copies of about 150 nodes) is outlined instead of copied into
 every arm. -/
 def copiesBudget : Nat := 2000
 
-/-- The same for a loop's continuation (a copy that tail-calls a
-declaration of the declaration's call cycle): after a `match` of up to
-about 100 arms, a continuation of 30-40 nodes is still copied into each
-arm. Outlined, it would make the loop a state machine, or, in mutual
-recursion, use a stack frame more per iteration. -/
+/-- The same for a loop's continuation (a join point whose own body
+tail-calls a declaration of the declaration's call cycle, `tailCallsInto`):
+after a `match` of up to about 100 arms, a continuation of 30-40 nodes is
+still copied into each arm. Outlined, it would make the loop a state
+machine, or, in mutual recursion, use a stack frame more per iteration. -/
 def loopCopiesBudget : Nat := 4000
 
 /-- Small join points (nested join points included, since sinking nests
@@ -107,8 +113,9 @@ join point with many jumps is not copied to each. `jumps` is the number of
 jumps to the join point. -/
 def isSmallJp (scope : JpScope) (d : FunDecl .pure) (jumps : Nat) : Bool :=
   codeSize d.value 41 ≤ 40 &&
-    let (size, loops) := copyInfo scope d.value (copyBudget + 1)
-    size ≤ copyBudget && (jumps - 1) * size ≤ (if loops then loopCopiesBudget else copiesBudget)
+    let size := copySize scope d.value (copyBudget + 1)
+    size ≤ copyBudget &&
+      (jumps - 1) * size ≤ (if tailCallsInto scope.loop d.value then loopCopiesBudget else copiesBudget)
 
 /-- Registry entry point. -/
 def Opt.JpSmall.install (c : PassConfig) : PassConfig :=
