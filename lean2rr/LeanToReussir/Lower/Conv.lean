@@ -1,4 +1,5 @@
 import LeanToReussir.Lower.LazyForce
+import LeanToReussir.CompileRecord
 
 /-! # Conversions -/
 
@@ -1273,29 +1274,46 @@ def valueFieldTy? (info : TypeInfo) : Option RR.Ty := do
 /-- The declarations whose source a declaration of the program (an
 instance, or code Lean derived from one: `f._redArg`, `f._lam_0`,
 `g._at_.f.spec_0`) comes from: its prefixes that are declarations, also
-those of the declaration a specialization was made in. -/
+those of the declaration a specialization was made in. A hygienic name
+(made by a macro) keeps its macro scopes at the end (`f._lam_0._@.M._hyg.3`
+comes from `f._@.M._hyg.3`): the prefixes are those of the name without
+them, each also tried with them. The prefixes are built component by
+component (`Name.append` panics on a prefix that ends in `_hyg`). -/
 def sourceDecls (env : Environment) (n : Name) : Array Name := Id.run do
-  let comps := n.components
+  let view := extractMacroScopes n
+  let comps := view.name.components
+  let extend (pre c : Name) : Name := match c with
+    | .str _ s => .str pre s
+    | .num _ k => .num pre k
+    | .anonymous => pre
   let mut out := #[]
+  let add (out : Array Name) (p : Name) : Array Name := Id.run do
+    let mut out := out
+    for q in [p, { view with name := p }.review] do
+      if env.contains q && !out.contains q then out := out.push q
+    return out
   let mut pre := Name.anonymous
   for c in comps do
-    pre := pre ++ c
-    if env.contains pre then out := out.push pre
+    pre := extend pre c
+    out := add out pre
   if let some i := comps.idxOf? `_at_ then
     let mut site := Name.anonymous
     for c in comps.drop (i + 1) do
-      site := site ++ c
-      if env.contains site then out := out.push site
+      site := extend site c
+      out := add out site
   return out
 
 /-- Whether the program can read a value as another type than its own
 (`LowerCtx.programCasts`), and the declaration that shows it: some
-declaration it reaches, outside Lean's own
-library (`Init`, `Std`, `Lean`, `Lake`), is `unsafe` (its code may
+declaration it reaches, outside Lean's own library (`Init`, `Std`, `Lean`,
+`Lake`) and lean2rr's shim (`L2RShim`), is `unsafe` (its code may
 `unsafeCast`, build a `TypeName` for `Dynamic`, or be the `implemented_by`
-target of another type's code; the `_unsafe_rec` code Lean generates for a
-`partial def` does not count), is an axiom, or uses `sorry` (a cast through
-an equality proved by either). The declarations reached are those the
+target of another type's code; the `_unsafe_rec` code Lean 4.33 generates
+for a `partial def` is not `unsafe`), is an axiom, uses `sorry` (a cast
+through an equality proved by either), or is `@[extern]` or `@[export]`
+(Lean does not compare the types of an extern and the `@[export]`
+definition implementing it, which lean2rr calls instead: `redirectTarget`,
+Mono; `implemented_by` is type-checked). The declarations reached are those the
 program's declarations come from (`sourceDecls`), and, transitively, the
 constants their definitions mention (inlined code no longer appears in the
 program) and their `implemented_by` targets. Lean's library casts only
@@ -1305,7 +1323,7 @@ where lean2rr's representations agree: an `Array α` read as an
 their `TypeName` names. -/
 def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Option Name := Id.run do
   let library (n : Name) : Bool := match env.getModuleIdxFor? n with
-    | some i => (env.header.moduleNames[i.toNat]?.map fun m => [`Init, `Std, `Lean, `Lake].contains m.getRoot).getD false
+    | some i => (env.header.moduleNames[i.toNat]?.map isToolchainModule).getD false
     | none => false
   let mut work : Array Name := #[]
   for d in decls do
@@ -1318,7 +1336,7 @@ def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (De
     seen := seen.insert n
     let some ci := env.find? n | continue
     if ci matches .axiomInfo _ then return some n
-    if ci.isUnsafe && !(n matches .str _ "_unsafe_rec") then return some n
+    if ci.isUnsafe || isExtern env n || (getExportNameFor? env n).isSome then return some n
     if let some impl := Compiler.getImplementedBy? env n then work := work.push impl
     if let some v := ci.value? (allowOpaque := true) then
       if v.foldConsts false (fun k b => b || k == ``sorryAx) then return some n
