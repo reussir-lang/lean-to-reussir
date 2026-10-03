@@ -8,20 +8,18 @@ Lean's `simp` replaces a constructor rebuilt from a match's fields by the
 matched value itself: `match r with | .error e => .error e | .ok a => …`
 becomes `| .error _ => r`. That is the error arm of every `ExceptT`,
 `Option` and `EStateM` bind. lean2rr returns the value itself, as native
-Lean does (translation plan §5.5): a copy would be another object for
-`ptrAddrUnsafe`, and a shared value rebuilt is a copy (allocated; a value
-that a lookup returns would be copied at every call). But the matched
-value then stays live across the match, so Reussir cannot reuse its cell
-for what the other arms build: each bind's success path allocates the new
-result and frees the old one (the classic MonadicInterp: 12% of its time).
+Lean does (translation plan §5.5): a shared value rebuilt is a copy
+(allocated; a value that a lookup returns would be copied at every call).
+But the matched value then stays live across the match, so Reussir cannot
+reuse its cell for what the other arms build: each bind's success path
+allocates the new result and frees the old one (the classic
+MonadicInterp: 12% of its time).
 
-Where neither matters, the arm returns the constructor rebuilt from its
-fields, so every arm consumes the matched cell and Reussir reuses it (for
-the rebuilt one too: the same cell comes back when it was unique). Only:
-- in a program that never asks for an object's identity or sharing
-  (`LowerCtx.observesIdentity`: no `ptrAddrUnsafe`, nothing that inlines
-  to it such as `ptrEq`, no `ST.Ref.ptrEq`, no `dbgTraceIfShared`), where
-  a value and an equal copy cannot be told apart;
+Where no copy is likely, the arm returns the constructor rebuilt from its
+fields, an equal value (identity and sharing, which alone tell the two
+apart, are not preserved: plan §9), so every arm consumes the matched
+cell and Reussir reuses it (for the rebuilt one too: the same cell comes
+back when it was unique). Only:
 - when the matched value is freshly built: bound in the same function to a
   constructor application, or to a full call of a declaration all of whose
   results are freshly built (`freshDecls`: each return is such a value,
@@ -170,7 +168,7 @@ def enumFields (prev : CodeCtx → CasesArm → Array (Option String) →
       LowerM (Array (Option String) × CodeCtx))
     (ctx : CodeCtx) (arm : CasesArm) (binders : Array (Option String)) :
     LowerM (Array (Option String) × CodeCtx) := do
-  if !(← read).observesIdentity && !arm.view && arm.shared &&
+  if !arm.view && arm.shared &&
       !binders.isEmpty && binders.all Option.isSome then
     if let some (g, n) := ctx.letCalls[arm.discr]? then
       if onlyReturned arm.discr arm.code then

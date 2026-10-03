@@ -91,8 +91,8 @@ the original (whose state, `busy` included, is the copy's) and converts the
 value, and stores `done` (releasing the original). So a copy forced again
 meanwhile (by the original's `sync` dependent, which the original's end
 runs inside the copy's computation, or by another context) has the
-original's value as soon as the original has finished. A pending task is also registered as
-running for the duration (`IO.checkCanceled`, and it leaves the queue of
+original's value as soon as the original has finished. A pending task is
+also registered as running for the duration (`IO.checkCanceled`, and it leaves the queue of
 pending tasks), and runs with its own standard streams,
 as a native task runs on a worker thread (`l2r_std_enter_if`/`l2r_std_leave_if`),
 unless the runtime runs it on the current thread (a `sync` dependent). When

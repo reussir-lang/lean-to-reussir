@@ -86,7 +86,7 @@ def optimizations : Array OptPass := #[
   ⟨"lazy-fields", true, "fields of a matched value kept live (stored, returned or passed to a call whole) bound where used (Reussir bug 7 workaround)", LazyFields.install⟩,
   ⟨"nullary-scrutinee", true, "in the arm of a constructor without fields, the matched value rebuilt instead of kept", NullaryScrutinee.install⟩,
   ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩,
-  ⟨"fresh-rebuild", true, "in a program that never asks for an object's identity, an alternative that only returns a freshly built matched value returns it rebuilt from its fields (Reussir then reuses the cell in every alternative)", FreshRebuild.install⟩]
+  ⟨"fresh-rebuild", true, "an alternative that only returns a freshly built matched value returns it rebuilt from its fields (Reussir then reuses the cell in every alternative)", FreshRebuild.install⟩]
 
 /-- Parts of the translation that look like optimizations but are not
 optional. -/

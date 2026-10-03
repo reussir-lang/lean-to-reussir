@@ -107,8 +107,10 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     let ptys ← params.mapM lowerType
     let retTy ← lowerType ret
     if args.size == n then
-      -- `ptrAddrUnsafe x`: the identity of `x` in its own representation
-      -- (converted to the parameter's, it would be another object).
+      -- `ptrAddrUnsafe x`: the address of `x` in its own representation
+      -- (converted to the parameter's, it would be a temporary cell, whose
+      -- address the next temporary can get: `ptrEq` would then say `true`
+      -- for different values).
       if (← externSymbol orig) == "lean_ptr_addr" then
         if let some (.fvar x) := args.back? then
           if let some (vn, vt) := ctx.vars[x]? then

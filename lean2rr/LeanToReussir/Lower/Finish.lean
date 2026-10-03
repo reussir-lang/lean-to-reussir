@@ -257,9 +257,9 @@ line (`#[transform_anchor]`, see `Emit/Program`): the conversions between
 representations of a function type (`l2r_fconv_S_T`), the unboxing
 functions (`l2r_unbox_…`: to a nominal type, an array, a function type),
 the application functions of a function type with wrapped values of other
-representations (their `w<S>` arms apply the wrapped value at `S`), and the application functions of the function types
-of uniform code (types that mention `Box`), whose arms call the targets of
-the uniform code.
+representations (their `w<S>` arms apply the wrapped value at `S`), and
+the application functions of the function types of uniform code (types
+that mention `Box`), whose arms call the targets of the uniform code.
 
 These functions call each other: an unboxing function converts what a
 `Box` holds from every representation it can hold, a conversion of a
