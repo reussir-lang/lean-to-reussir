@@ -1,4 +1,4 @@
-import Lean
+import LeanToReussir.CompileRecord
 
 /-!
 # Loading a compiled program
@@ -6,8 +6,9 @@ import Lean
 lean2rr reads a program the way the Lean compiler left it: base-phase LCNF
 persisted in each module's `.olean` (`Lean.Compiler.LCNF.baseExt`). The
 program must have been compiled by the same Lean toolchain lean2rr is built
-with (v4.33.0). Modules are located through `LEAN_PATH`, so a Lake project is
-translated with `lake env lean2rr <Module>`.
+with (v4.33.0). Modules are located through `LEAN_PATH`, then in that
+toolchain's library and in lean2rr's shim, so a Lake project is translated
+with `lake env lean2rr <Module>`.
 -/
 
 namespace LeanToReussir
@@ -27,37 +28,87 @@ unsafe def loadExtensionStates (env : Environment) : IO Environment := do
     env := extDescr.toEnvExtension.setState (asyncMode := .sync) env { s with state := newState }
   return env
 
-/-- lean2rr's shim library (`L2RShim`, built with lean2rr): Lean
-implementations of `Std.Internal.UV`'s externs, exported under their C
-symbols, so that the program's calls of those externs compile them (see
-`Mono.redirectTarget`). Imported with the program when it is on the search
-path (`scripts/l2r.py` adds lean2rr's build directory to `LEAN_PATH`). -/
-def shimModules : IO (Array Name) := do
-  match ← (← searchPathRef.get).findWithExt "olean" `L2RShim with
-  | some _ => return #[`L2RShim]
-  | none => return #[]
+/-- The system root of the Lean toolchain whose `lean` elaborates this
+file: the toolchain lean2rr is built with. -/
+elab "l2r_build_sysroot%" : term => return mkStrLit (← getBuildDir).toString
+
+/-- The system root of the toolchain lean2rr is built with, whose `.olean`
+files it reads (not the toolchain that `lean` or `LEAN_SYSROOT` names,
+which can depend on the working directory's `lean-toolchain`); the one
+`findSysroot` gives only if that toolchain has been removed. -/
+def toolchainSysroot : IO System.FilePath := do
+  let root : System.FilePath := ⟨l2r_build_sysroot%⟩
+  if ← (← getLibDir root).isDir then return root
+  findSysroot
+
+/-- The directory of lean2rr's shim library (`L2RShim`, built with
+lean2rr): Lean implementations of `Std.Internal.UV`'s externs, exported
+under their C symbols, so that the program's calls of those externs compile
+them (see `Mono.redirectTarget`). `L2R_SHIM_DIR` (`scripts/l2r.py` sets it),
+else the library directory of lean2rr's own build (`lib/lean` next to
+`bin/lean2rr`). -/
+def shimDir : IO System.FilePath := do
+  if let some d ← IO.getEnv "L2R_SHIM_DIR" then return d
+  return ((← IO.appDir).parent.getD ".") / "lib" / "lean"
+
+/-- Whether `a` and `b` are the same file: one path, another path to it (a
+symbolic or a hard link), or a copy of it (the same contents). -/
+def sameFile (a b : System.FilePath) : IO Bool := do
+  unless (← a.pathExists) && (← b.pathExists) do return false
+  if (← IO.FS.realPath a) == (← IO.FS.realPath b) then return true
+  if (← a.metadata).byteSize != (← b.metadata).byteSize then return false
+  return (← IO.FS.readBinFile a) == (← IO.FS.readBinFile b)
+
+/-- Why a program module must not be named like a module of Lean's library
+or of lean2rr's shim. -/
+def reservedNames : String :=
+  "lean2rr takes the modules named Init.*, Std.*, Lean.* and Lake.* for Lean's library and \
+    L2RShim.* for its own shim, so a program module must not be named like them; rename it"
+
+/-- A program module `m` (found at `found`) named like a module of `what`,
+whose module of that name is `expected` (if it has one). -/
+def reservedNameError (m : Name) (found expected : System.FilePath) (what : String) : IO IO.Error := do
+  let differs := if ← expected.pathExists then s!" but is not its file {expected}"
+    else s!", which has no module of that name ({expected})"
+  return IO.userError s!"module {m} ({found}) is named like a module of {what}{differs}: {reservedNames}"
+
+/-- The shim module to import with the program: `L2RShim` when the shim
+directory has it. It must also be the module of that name on the search
+path (a program module named `L2RShim`, or a directory `L2RShim` of
+program modules, earlier on the path would replace it). -/
+def shimModules (dir : System.FilePath) : IO (Array Name) := do
+  let shim := dir / "L2RShim.olean"
+  unless ← shim.pathExists do return #[]
+  if let some found ← (← searchPathRef.get).findWithExt "olean" `L2RShim then
+    unless ← sameFile found shim do
+      throw <| IO.userError s!"{found.parent.getD "."} holds program modules named L2RShim or \
+        L2RShim.*, like lean2rr's shim ({shim}): {reservedNames}"
+  return #[`L2RShim]
 
 /-- Import `modules` and their transitive closure at `private` level. Only
 this level exposes every module's complete base-LCNF bodies; the default
 `exported` level replaces non-public bodies with opaque stubs.
 
 lean2rr takes modules named `Init.*`, `Std.*`, `Lean.*` or `Lake.*` for Lean's
-library (`isToolchainModule`: their constants are evaluated lazily, their
-`initialize` actions run by the runtime, their `unsafe` code trusted), so a
-program module named like one that is not the toolchain's own is an error
-here rather than a silently different program. -/
+library, and `L2RShim.*` for its shim (`isToolchainModule`: their constants
+are evaluated lazily, their `initialize` actions run by the runtime, their
+`unsafe` code trusted), so a program module named like one is an error here
+rather than a silently different program: each such module must be the file
+of that name in the library of lean2rr's toolchain (or in the shim
+directory), reached by any path (a link, a copy). -/
 def loadEnvironment (modules : Array Name) : IO Environment := do
-  let sysroot ← findSysroot
+  let sysroot ← toolchainSysroot
+  let shim ← shimDir
   initSearchPath sysroot
-  let env ← importModules ((modules ++ (← shimModules)).map ({ module := · })) {} (level := .private)
-  let libDir ← IO.FS.realPath (← getLibDir sysroot)
+  searchPathRef.modify (· ++ [shim])
+  let env ← importModules ((modules ++ (← shimModules shim)).map ({ module := · })) {} (level := .private)
+  let libDir ← getLibDir sysroot
   for m in env.header.moduleNames do
-    unless m.getRoot ∈ [`Init, `Std, `Lean, `Lake] do continue
-    let olean ← IO.FS.realPath (← findOLean m)
-    unless olean.toString.startsWith (libDir.toString ++ System.FilePath.pathSeparator.toString) do
-      throw <| IO.userError s!"module {m} ({olean}) is named like a module of Lean's library but is not \
-        the toolchain's ({libDir}): lean2rr treats Init.*, Std.*, Lean.* and Lake.* modules as \
-        Lean's library, so rename it"
+    unless isToolchainModule m do continue
+    let (dir, what) := if m.getRoot == `L2RShim then (shim, "lean2rr's shim") else (libDir, "Lean's library")
+    let found ← findOLean m
+    let expected := modToFilePath dir m "olean"
+    unless ← sameFile found expected do throw (← reservedNameError m found expected what)
   unsafe loadExtensionStates env
 
 /-- Run a `CoreM` action against `env` without a heartbeat limit and,

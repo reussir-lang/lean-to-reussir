@@ -98,8 +98,8 @@ registry's passes over the generated functions, and the program text
 - `PassConfig`: the configurable parts of the pipeline; `Opt/*.lean`: the
   optional passes, and `Opt/Registry.lean`.
 
-`lean2rr/L2RShim.lean` is a library of its own (built with lean2rr, on the
-driver's `LEAN_PATH`): Lean implementations of `Std.Internal.UV`'s externs
+`lean2rr/L2RShim.lean` is a library of its own (built with lean2rr, in its
+build directory, which the driver passes as `L2R_SHIM_DIR`): Lean implementations of `Std.Internal.UV`'s externs
 and of the few Lean definitions lean2rr replaces (§5.8), which `Env`
 imports with the program and Stage 1 calls instead (`Mono.redirectTarget`).
 
@@ -1475,9 +1475,10 @@ Rules:
   Lean values) is implemented in Lean by lean2rr's shim library
   `L2RShim` (`lean2rr/L2RShim.lean`): each definition is exported under an
   extern's C symbol, so it is the extern's implementation (above), and
-  lean2rr imports the shim with the program (`LeanToReussir.Env`; the
-  driver puts lean2rr's build directory on `LEAN_PATH`) and treats it as a
-  toolchain module (no startup work). The shim follows the C functions
+  lean2rr imports the shim with the program (`LeanToReussir.Env`, from
+  `L2R_SHIM_DIR`, which the driver sets to lean2rr's build directory, last
+  on the search path) and treats it as a toolchain module (no startup
+  work). The shim follows the C functions
   (`uv/*.cpp`) check by check, over primitives of the runtime's event loop
   (`leanrt::net`, §5.14) on plain values (numbers, strings, byte arrays,
   handles, promises); errors are built in Lean as `lean_decode_uv_error`
@@ -2422,11 +2423,18 @@ Where a translated program can behave differently from its native build.
 Each item says what differs and when.
 
 **Unsupported programs**
-- *Module names*: a program module named `Init.*`, `Std.*`, `Lean.*` or
-  `Lake.*` (natively allowed when the program does not import the
-  toolchain's module of that name) is rejected: lean2rr takes such modules
-  for Lean's library (constants evaluated lazily, initializers run by the
-  runtime, `unsafe` code trusted, §5.1, §5.12).
+- *Module names*: a program module named `Init.*`, `Std.*`, `Lean.*`,
+  `Lake.*` or `L2RShim.*` (natively allowed when the program does not
+  import the toolchain's module of that name) is rejected, as is a
+  directory `L2RShim` on the search path: lean2rr takes such modules for
+  Lean's library or its own shim (constants evaluated lazily,
+  initializers run by the runtime, `unsafe` code trusted, §5.1, §5.12). A
+  module of those names is the library's when it is the same file as the
+  module of that name in the library of the toolchain lean2rr is built
+  with (or in the shim directory), reached by any path: a symbolic link,
+  hard links or a copy are accepted. lean2rr reads that toolchain's
+  library (last on the search path, after `LEAN_PATH`), whatever
+  toolchain the working directory's `lean-toolchain` names.
 
 **Evaluation and effects**
 - *Dictionary rebuilding* (§2.4): an instance function applied to static
