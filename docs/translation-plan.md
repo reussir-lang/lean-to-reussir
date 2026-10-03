@@ -2083,7 +2083,9 @@ native one does. A context does not lose the processor otherwise, except at
 first: a context whose sleep is over, a due timer of the event loop and
 what its completion releases (its continuations, the contexts waiting for
 it, the tasks it queues, which a free worker starts at once), descriptors
-and signals that have become ready, a context able to go on for a while
+and signals that have become ready (polled at most every 50 µs: a system
+call at every output would cost more than the output), a context able to
+go on for a while
 (5 ms: a lock handed over, a promise resolved), a task queued a while ago
 (5 ms) with a worker free for it (thread wake-ups take microseconds, so
 these would have got past anything that takes no time); then, round after

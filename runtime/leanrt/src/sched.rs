@@ -149,6 +149,9 @@ struct Sched {
     /// (`effect_slow`): what they do meanwhile happened before it natively,
     /// so their own effect points do not start anything more.
     in_effect: bool,
+    /// When an effect point last polled the event loop's descriptors
+    /// (`effect_slow`).
+    last_poll: Option<Instant>,
 }
 
 static SCHED: Global<Option<Sched>> = Global(UnsafeCell::new(None));
@@ -182,6 +185,7 @@ fn init(s: &mut Option<Sched>) {
         next_thread: 1,
         pool: Vec::new(),
         in_effect: false,
+        last_poll: None,
     });
 }
 
@@ -456,6 +460,23 @@ pub fn sleeper_due(now: Instant) -> bool {
 /// anything that takes no time (thread wake-ups take microseconds).
 const STALE: Duration = Duration::from_millis(5);
 
+/// How often effect points poll the descriptors and signals the event loop
+/// watches (`effect_slow`): a system call at every output would cost more
+/// than the output, and natively the event loop's thread sees them only
+/// after a wake-up's latency too.
+const POLL_EVERY: Duration = Duration::from_micros(50);
+
+/// Whether an effect point polls the event loop's descriptors now (at most
+/// once per `POLL_EVERY`).
+fn poll_due(now: Instant) -> bool {
+    let s = sched();
+    if s.last_poll.is_some_and(|t| now.saturating_duration_since(t) < POLL_EVERY) {
+        return false;
+    }
+    s.last_poll = Some(now);
+    true
+}
+
 /// An observable effect (output, an exit) of the running context: what
 /// natively would have run by now on other threads goes first: a context
 /// whose sleep has ended, a due timer of the event loop and what its
@@ -502,7 +523,7 @@ fn effect_slow() {
             go = crate::net::has_fired() || go;
         }
         // Descriptors and signals the event loop would have seen by now.
-        if crate::net::poll_now() {
+        if poll_due(now) && crate::net::poll_now() {
             go = true;
         }
         let s = sched();

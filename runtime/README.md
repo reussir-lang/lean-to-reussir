@@ -288,7 +288,8 @@ exports `l2r_task_run_one_c` (lean2rr's `l2r_task_run_one`), which a new
 context calls to run its first queued task. Output (`io::stream_put`,
 `fs::put_str`, `fs::flush`), spawning a process and `IO.Process.exit` are
 effect points (`sched::effect`): a context whose sleep is over, a due timer
-and what its completion releases, ready descriptors (`net::poll_now`), a
+and what its completion releases, ready descriptors (`net::poll_now`, at
+most every 50 µs), a
 context able to run for 5 ms, a task queued 5 ms ago with a worker free run
 first, round after round (up to 64; what runs in those rounds starts no
 tasks at its own effect points); `IO.sleep 0` lets them run whatever
