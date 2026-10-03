@@ -4,8 +4,8 @@
 
 **Kind:** bug (link). **Status:** patched (0065), not applied yet (branch
 `l2r-final-0065` of `~/Documents/l2r-scratch/reussir-final`, on
-`l2r-final` cc8e5aa5); review pending. lean2rr has no workaround yet (its
-driver could pass `--relocation-mode pic`, below).
+`l2r-final` cc8e5aa5); review pending. lean2rr works around it: its
+driver passes `--relocation-mode pic` (below).
 
 **Verdict: bug.** `rrc --emit executable` (and `--emit dynlib`) links
 through rustc, whose products are a position-independent executable (PIE)
@@ -89,12 +89,12 @@ choices: the relocation mode is not derived from the product.
 
 ## lean2rr
 
-lean2rr's driver (`scripts/l2r.py`) calls `rrc --emit executable` without
-`--relocation-mode`, so every lean2rr program is affected: on this
-machine every binary carries `DT_TEXTREL` (it still runs); with lld, or on
-x86-64, lean2rr's programs would not link. A one-line lean2rr workaround,
-independent of the patch: pass `--relocation-mode pic` in `l2r.py` (not
-made yet).
+lean2rr's driver (`scripts/l2r.py`) called `rrc --emit executable` without
+`--relocation-mode`, so every lean2rr program was affected: on this
+machine every binary carried `DT_TEXTREL` (it still ran); with lld, or on
+x86-64, lean2rr's programs would not link. The driver now passes
+`--relocation-mode pic` (branch fix-pic), independent of the patch: the
+executables are PIEs without text relocations, as native Lean's are.
 
 ## Patch
 

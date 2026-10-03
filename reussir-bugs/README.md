@@ -84,7 +84,7 @@ in its file). Column *Review*: the adversarial review round and its result
 | [31](31-deep-expression-stack.md) | bug | rrc overflows its stack on deeply nested expressions | no, lean2rr bounds nesting | - | 0063 | rv8/reussir/e (+ round 2): no correctness defect; RV8RE-02 (`ulimit -v`) fixed | yes |
 | [32](32-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected; large programs cannot be dumped | dump smaller programs | none | - | - |
 | [33](33-rc-trailing-text.md) | bug (tooling) | the rc and ref type parser drops the text after a comma (`!reussir.rc<i64 rigid, atomic>` reads as `!reussir.rc<i64 rigid>`) | no, hand-written MLIR only | - | 0064 | rv8/reussir/e/round2: no defect | yes |
-| [34](34-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes: every lean2rr binary has `DT_TEXTREL` on aarch64; with lld or on x86-64 it would not link | none yet (`l2r.py` could pass `--relocation-mode pic`) | 0065 | pending | no |
+| [34](34-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes: every lean2rr binary has `DT_TEXTREL` on aarch64; with lld or on x86-64 it would not link | `l2r.py` passes `--relocation-mode pic` | 0065 | pending | no |
 
 In numbers: 34 entries. 31 are patched by 34 patches (0013 to 0015 for
 bug 13, 0002 and 0019 for bug 2, 0032 and 0033 for bug 11; 0009 fixes

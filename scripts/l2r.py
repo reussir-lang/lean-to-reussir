@@ -229,6 +229,13 @@ def main():
                # classic benchmark by more than 1% (lean2rr dispatches
                # function values itself).
                + ["--no-closure-wpd"]
+               # rrc compiles with LLVM's static relocation model unless told
+               # otherwise, but links a position-independent executable, so
+               # read-only data with absolute addresses (closure vtables) needs
+               # text relocations (DT_TEXTREL) with GNU ld and fails with lld
+               # (Reussir bug 34, patch 0065). Native Lean executables are PIEs
+               # without text relocations.
+               + ["--relocation-mode", "pic"]
                # Extra rrc flags for experiments (L2R_RRC_FLAGS, split on spaces).
                + os.environ.get("L2R_RRC_FLAGS", "").split())
         if args.no_reuse_across_call:
