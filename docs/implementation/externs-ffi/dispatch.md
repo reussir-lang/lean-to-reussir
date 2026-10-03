@@ -84,14 +84,32 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 
 ### Every `Init`/`Std` extern is available; `Lean`'s C++ parts are not
 
-- **What:** All 715 externs of `Init` and `Std` have an implementation
-  (704 checked by programs that call each one, 11 internal ones by direct
-  tests). The `Lean` library's C++-implemented externs (`Expr.mkData`,
-  `evalConst`, `Dynlib`, the LLVM bindings, …) are not: for a program that
-  reaches one, rrc reports an unknown function.
+- **What:** All 716 externs of Lean 4.34's `Init` and `Std` have an
+  implementation (705 checked by programs that call each one, 11 internal
+  ones by direct tests). Lean 4.34 added one, `System.Platform.getIsLinux`
+  (`lean_system_platform_linux`, test `RtPlatform`), and moved
+  `String.extract` to a new symbol, `lean_string_utf8_extract_fast`. The
+  `Lean` library's C++-implemented externs (`Expr.mkData`, `evalConst`,
+  `Dynlib`, the LLVM bindings, …) are not: for a program that reaches one,
+  rrc reports an unknown function.
 - **Why:** Every constant is a root, so even an unused one that reaches
   such an extern fails the build
   ([../startup/order.md](../startup/order.md#every-constant-of-the-program-is-a-root)).
 - **Where:** `runtime/prelude.rr`, `lean2rr/L2RShim.lean`;
   [`docs/implementation-status.md`](../../implementation-status.md).
 - **Remove only if:** n/a.
+
+### Toolchain queries answer the pinned toolchain's constants
+
+- **What:** `Lean.githash`, `Lean.version.*` (so `Lean.versionString`),
+  `System.Platform.isWindows/isOSX/isLinux/isEmscripten`, `target` and
+  `Lean.Internal.isStage0/hasLLVMBackend` are prelude constants:
+  `lean_get_githash` (the toolchain's commit), `lean_version_get_minor`
+  (34), …, `lean_system_platform_linux` (`true`).
+- **Why:** Natively they are compile-time constants of the toolchain's
+  runtime; a program built by lean2rr must answer what the same program
+  built natively answers.
+- **Where:** `runtime/prelude.rr` (`lean_get_githash` to
+  `lean_system_platform_target`); test `RtPlatform`.
+- **Remove only if:** never. Update them with every toolchain change
+  (`lean2rr/lean-toolchain`); `RtPlatform` fails otherwise.

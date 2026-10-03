@@ -159,7 +159,11 @@ As fixed by lean2rr:
 Nat positions and indices: a big `Nat` is never a valid position or
 index. Where Lean's C code distinguishes "not a scalar" (`>= 2^63`, exactly
 the big `Nat`s here) from "out of range", the prelude reproduces that too
-(`lean_string_utf8_extract`, `Float.scaleB` with Ints outside 32 bits).
+(`lean_string_utf8_extract`, where a big position counts as `SIZE_MAX`
+since Lean 4.34: a big start gives `""`, a big end extracts to the end;
+`Float.scaleB` with Ints outside 32 bits). `String.extract`'s positions are
+proved valid: its `lean_string_utf8_extract_fast` (new in Lean 4.34) takes
+them with `l2r_index_of_nat`.
 
 ## Glue helpers
 
@@ -676,9 +680,6 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
 
 ## Known divergences from native Lean
 
-- Native `lean_string_utf8_extract` returns its borrowed string without a
-  reference when a position is `>= 2^63`: a use-after-free natively. The
-  prelude returns the string (the intended semantics).
 - Panics print `backtrace:` and `(stack trace unavailable)` instead of a
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`, and
