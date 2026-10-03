@@ -365,7 +365,9 @@ the last reference to a promise goes, the runtime calls the program's
 `l2r_promise_drop_c(cell)` (a trampoline lean2rr exports), which resolves
 an unresolved promise with `none`. `l2r_option_get_or_block_none<T>()` is
 `Option.getOrBlock!` on `none` (`Promise.result!` of a dropped promise):
-Lean's forced panic message, then it blocks forever.
+Lean's forced panic message, then the running context blocks forever
+(`task::hang`), as natively the calling thread does: the other tasks and
+`main` go on.
 
 **Fallible IO** (files, standard streams): primitives record their outcome
 in a global last-error slot; the glue is

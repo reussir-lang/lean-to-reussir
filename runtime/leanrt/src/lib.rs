@@ -145,7 +145,8 @@ pub fn uncaught_exception<M: string::Utf8 + ?Sized>(msg: &M) -> ! {
 
 /// `Option.getOrBlock!` on `none` (`Promise.result!` of a dropped promise):
 /// a forced panic message (to `std::cerr`, so stdout is flushed first), then
-/// block forever, as natively.
+/// the running context blocks forever, as natively the calling thread does
+/// (the other tasks and `main` go on).
 #[inline(never)]
 pub fn promise_dropped() -> ! {
     io::flush_stdout();
@@ -157,7 +158,5 @@ pub fn promise_dropped() -> ! {
     if std::env::var_os("LEAN_ABORT_ON_PANIC").is_some() {
         std::process::abort();
     }
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
-    }
+    task::hang()
 }
