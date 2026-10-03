@@ -35,6 +35,7 @@ pub mod io;
 pub mod net;
 pub mod once;
 pub mod origin;
+pub mod persist;
 pub mod proc;
 pub mod rt;
 pub mod sched;

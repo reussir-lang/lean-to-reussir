@@ -364,6 +364,16 @@ pub fn deferring() -> bool {
     tasks().started
 }
 
+/// Whether every task has finished: no task has an entry (an unfinished
+/// one, a promise included, always has one). Then waiting for any task
+/// returns at once, and a constant's walk for tasks (`persist`) can be
+/// skipped.
+#[inline(never)]
+pub fn settled() -> bool {
+    let t = tasks();
+    t.slab.len() == t.free.len()
+}
+
 /// `main` has returned; the remaining tasks are about to run. The tasks
 /// queued now could have been started by native workers before Lean's
 /// shutdown flag was set (`EARLY`).

@@ -1360,14 +1360,43 @@ jump needs travels in its variant, so nothing is kept alive by being passed
 along. J4 is used only when an outlined join point makes a self tail call,
 in its body or in a join point inlined into it (J1, J1'); other calls back
 into the declaration are ordinary calls. The enum is a
-shared (heap) type for now: Reussir miscompiles `[value]` enums with fields
-of mixed layout (§9); Reussir's reuse makes the shared cell cheap. The
-optional pass `state-machines` enters without allocation instead: the
-function takes the declaration's parameters followed by the entry point,
-and `e` is nullary. A jump passes placeholders for the parameters beside
-its variant: the variant carries every variable the join point's body
-uses, and passing a parameter itself would keep it alive across the jump
-(an array updated before the jump would be copied at every iteration).
+shared (heap) type: Reussir miscompiles `[value]` enums with fields of
+mixed layout (§9), so in this core form every call and every jump
+allocates a variant.
+
+The optional pass `state-machines` makes every variant nullary: the
+values travel as parameters of the function instead, in *slots*, one per
+type and position. A variant puts its `i`-th field of type `T` in the
+`i`-th slot of type `T` (a variable it passes on unchanged under a
+parameter's name keeps that parameter's slot), so the function has as many
+slots of type `T` as the variant with the most fields of type `T`. Each
+arm binds its fields from their slots. Example: a loop
+`fa (i n : Nat) (s : String)` whose join point `j` uses `i`, `n`, `s` and
+a `Nat` parameter `a` becomes
+
+```
+fn fa_sm(s1 : Nat, s2 : Nat, s3 : LStr, s4 : Nat, m : fa_mode) -> R {
+    match m {
+        fa_mode::e  => { let i = s1; let n = s2; let s = s3; … },
+        fa_mode::j1 => { let i = s1; let n = s2; let s = s3; let a = s4; … }
+    }
+}
+```
+
+and a jump to `j` is `fa_sm(i, n, s, a, fa_mode::j1{})`, a self call with
+`fa_sm(i + 1, n, s, zero, fa_mode::e{})`. A jump passes its own values in
+their slots and a placeholder in every other slot, never a live value: a
+value passed twice would be kept alive across the jump (an array updated
+before the jump would be copied at every iteration). Placeholders are
+cheap: a constant (`0`, a constructor without fields), a value built once
+and kept in a once-cell (§5.1), and for a string one shared empty string
+of the runtime. A type whose placeholder is not a finite value (a type
+without one, or a record whose placeholder would hold one, such as
+`inductive W | bad (e : Empty) | ok (n : Nat)`, whose placeholder is built
+from `bad`) gets no slot: such a field stays in its variant, which is then
+allocated as in the core form. The pass checks this on every state
+machine. So a jump costs a jump and the moves of its slots, and no
+allocation (test `RtJpSlots`).
 
 **Choice and nesting.** J1 applies first, then J2, then J1' (small), then
 J3 (J4 when an outlined body tail-calls the declaration).
@@ -2064,11 +2093,23 @@ running code blocks (*Blocking*, below).
   fields, arrays, the values of tasks, the values captured by function
   values (partial applications), thunks (their computation, or their
   value: the thunk is not forced) or boxed values; so `Task.spawn` of a
-  closed function has finished once the term has been used. The
-  traversals are generated at the end of lowering, once every variant of
-  the function types and of `Box` is known, and do nothing for types that
-  cannot hold a task. Values captured by a Reussir closure (only lean2rr's
-  own glue makes them, not Lean code) are not looked into.
+  closed function has finished once the term has been used. The walk
+  works as Lean's does: a loop over a list of the values still to look
+  at (no recursion, so a value deep through any field is walked at a
+  bounded depth), which visits each cell once (the runtime keeps the set
+  of addresses visited: a value whose cells are shared, a DAG, is walked
+  in time linear in its number of cells, not of its paths). Fields are
+  looked at in order, the first first, as a recursive walk would. The walk
+  keeps what it reads out of thunks and tasks until it ends, so that no
+  cell it has visited is freed meanwhile (a task it runs could force a
+  thunk, which drops its computation) and its address given to a new
+  cell. It is skipped when every task of the program has finished
+  (nothing to wait for): always for constants evaluated at startup, where
+  tasks run at once. The walks are generated at the end of lowering, once
+  every variant of the function types and of `Box` is known, and do
+  nothing for types that cannot hold a task. Values captured by a Reussir
+  closure (only lean2rr's own glue makes them, not Lean code) are not
+  looked into.
 - A thunk or task stored at another representation (in `Box`, §5.1) is
   converted to a new cell in state `conv(g, o, a)`: `g` forces the original
   and converts its value (so it still runs at most once); `o` is the
@@ -2705,10 +2746,15 @@ Each item says what differs and when.
   group them differently in lean2rr's instances. stdout and results are the
   same.
 - *Stack depth* in general: frame sizes differ from native. lean2rr adds
-  no recursion of its own: structural conversions are loops (§5.1) and the
+  no recursion of its own: structural conversions are loops (§5.1), the
   `Array.mk`, `String.mk` and `String.ofList` list folds are tail-recursive
-  loops, so converting or folding a list of 10⁷ elements works at an 8 MB
-  stack (`LEAN_STACK_SIZE_KB=8192`) as natively. Dropping a deep value:
+  loops, and the walk of a closed term for its tasks (§5.14) is a loop over
+  a work list, so converting or folding a list of 10⁷ elements, or walking
+  a closed term 300000 cells deep through its first field, works at an 8 MB
+  stack (`LEAN_STACK_SIZE_KB=8192`) as natively (test `RtPersistWalk`).
+  The walk's work list and set of visited cells are heap memory while it
+  runs (natively a stack of pointers): a few tens of bytes per cell of a value
+  walked while a task is unfinished. Dropping a deep value:
   Lean frees iteratively, through a stack of objects to free. The
   runtime's containers (arrays, references, thunk and task cells:
   `leanrt::drop`) do the same: a container freed while another is being

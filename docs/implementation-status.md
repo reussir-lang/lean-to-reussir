@@ -457,7 +457,7 @@ soundness.
 | `cheap-consts` | constants made of small literals recomputed instead of cached |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code |
 | `jp-sink`, `jp-small` | join points moved to where they are used; small ones duplicated |
-| `state-machines` | loops through join points entered without allocation |
+| `state-machines` | loops through join points: entering the loop and every jump inside it allocate nothing |
 | `lazy-fields`, `nullary-scrutinee`, `sink-proj` | shapes that let Reussir reuse memory cells |
 | `fresh-rebuild` | in programs that never compare objects by address, the error arm of a monadic bind rebuilds its result, so Reussir reuses the cell on the success path |
 | `origin-free-reads` | in programs that never convert an array between representations, array reads skip a bookkeeping check |

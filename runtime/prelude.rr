@@ -631,6 +631,12 @@ fn lean_nat_gcd(a : Nat, b : Nat) -> Nat {
 #[ffi(import)]
 fn l2r_nat_repr_small(x : u64) -> LStr [{ leanrt::string::repr_small(x) }];
 
+// One shared empty string (a new reference, no allocation): the
+// placeholder of a string parameter that is never read (lean2rr's
+// Opt/StateMachines).
+#[ffi(import)]
+fn l2r_str_shared_empty() -> LStr [{ leanrt::string::shared_empty() }];
+
 // Decimal representation (`Nat.repr`); lean2rr replaces Lean's `Nat.repr`
 // and `Nat.reprFast` with it (the former builds big numbers digit by digit).
 fn l2r_nat_repr(a : Nat) -> LStr {
@@ -3024,6 +3030,28 @@ fn l2r_task_query_at(a : u64) -> u8 [{ leanrt::task::query(a as usize) }];
 
 #[ffi(import)]
 fn l2r_task_deferring() -> bool [{ leanrt::task::deferring() }];
+
+// A constant whose value may hold tasks waits for them when it is first
+// computed (lean2rr's `l2r_persist_T`, as native `lean_mark_persistent`):
+// a walk over its cells, skipped when every task has finished
+// (`l2r_task_settled`). The walk visits each cell once
+// (`l2r_persist_seen`: whether walk `h` has seen it, else it records it)
+// and keeps what it reads out of thunks and tasks until it ends
+// (`l2r_persist_keep`), so that no cell it has seen is freed meanwhile.
+#[ffi(import)]
+fn l2r_task_settled() -> bool [{ leanrt::task::settled() }];
+
+#[ffi(import)]
+fn l2r_persist_begin() -> u64 [{ leanrt::persist::begin() }];
+
+#[ffi(import)]
+fn l2r_persist_seen<T>(h : u64, v : T) -> bool [{ leanrt::persist::seen::<[:T:]>(h, v) }];
+
+#[ffi(import)]
+fn l2r_persist_keep<T>(h : u64, v : T) -> u64 [{ leanrt::persist::keep::<[:T:]>(h, v) }];
+
+#[ffi(import)]
+fn l2r_persist_end(h : u64) -> u64 [{ leanrt::persist::end(h) }];
 
 #[ffi(import)]
 fn l2r_task_manager_start() -> u64 [{ { leanrt::task::start(); 0 } }];
