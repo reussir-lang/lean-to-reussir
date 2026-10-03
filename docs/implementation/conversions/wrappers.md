@@ -32,24 +32,25 @@ thunks and tasks).
 ### Thunks and tasks convert lazily and convert back to the original
 
 - **What:** A thunk or task converted to another representation is a new
-  cell in state `conv(g, o, a)`: `g` forces the original and converts its
-  value (so the original's computation still runs at most once), `o` is
-  the original cell (boxed), `a` its address. Converting it back gives `o`
-  itself; converting a copy to a third representation converts the
-  original directly. A computed value is converted at once
-  (`convdone(v, o, a)`, which keeps the original so its address stays this
-  cell's identity). For a task, `a` is also its identity for the runtime:
-  the copy's state, `IO.cancel` and cancellation are the original's.
+  cell in state `conv(g, o)` (a task's `conv(g, o, a)`): `g` forces the
+  original and converts its value (so the original's computation still
+  runs at most once), `o` is the original cell (boxed), and for a task `a`
+  is the original's address, its identity for the runtime: the copy's
+  state, `IO.cancel`, waiting and dependents are the original's. While a
+  copy is `conv`, converting it back gives `o` itself, and converting it to
+  a third representation converts the original directly. A forced copy
+  stores `done(v)` and releases the original; a cell that has its value is
+  converted at once, to a new `done` cell.
 - **Why:** A thunk crossing between typed and uniform code in a loop built
   a chain of cells (DatThunkWrap 1e7: a stack overflow, then 6.6 MB; adv2
   D1, f9e06af). Asking a running task's state through a converted handle
-  hung (787b48c).
+  hung (787b48c). The copy's own identity is not the original's
+  (identity is not preserved; a4a04e8 removed the `convdone` state and the
+  thunk's recorded address).
 - **Where:** `Lower/Conv.lean`: `lazyConv`; `LowerBase.lean`: `lazyState`
-  (the `conv`/`convdone` variants); `Lower/LazyForce.lean`: `lazyGetFn`,
-  `taskAddrFn`; `Lower/Identity.lean`: `lazyAddrFn`.
-- **Remove only if:** never. Branch `mem-identity` (in progress) drops
-  `convdone` and the thunk's recorded address (a task keeps the original's
-  runtime identity).
+  (the `conv` variant); `Lower/LazyForce.lean`: `lazyGetFn`, `convTail`,
+  `taskAddrFn`.
+- **Remove only if:** never.
 
 ### A converted thunk or task has no running state of its own
 

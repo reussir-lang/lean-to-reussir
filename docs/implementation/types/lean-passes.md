@@ -25,10 +25,10 @@ Paths are relative to `lean2rr/LeanToReussir/`.
   (`structProjCasesK`); `Opt/Registry.lean`: `stage2`.
 - **Remove only if:** Lean's own `toMonoType` keeps such arguments. The
   rule is syntactic, after eta reduction: `fun n => Fin n` is `Fin`, kept;
-  `fun n => Fin (n + 1)` stays `lcAny` although every value is a `Nat`.
-  (Plan §3 and the comment in `MonoTypesKeep.lean` still say
-  `fun n => Fin n` stays `lcAny`; branch `fix-r7-front` corrects the
-  plan.)
+  `fun n => Fin (n + 1)` stays `lcAny` although every value is a `Nat`
+  (plan
+  [§3](../../translation-plan.md#3-stage-2--leans-mono-pipeline-leans-passes-driven-by-us),
+  corrected by 4ad6df7).
 
 ### Closed terms are extracted last, as Lean ran it
 

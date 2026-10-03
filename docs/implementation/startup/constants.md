@@ -96,19 +96,31 @@ runtime. Plan
   `l2r_persist_T` walks its value and waits for every task it reaches:
   through fields, arrays, the values of tasks, the values captured by
   function values, thunks (their computation or value, without forcing
-  them) and `Box` payloads. The traversals are generated at the end, once
-  every variant of function types and `Box` is known; a type that cannot
-  hold a task gets none.
+  them) and `Box` payloads. As natively, the walk is a loop over a work
+  list (`L2RPersistW`: a variant per type that can hold a task, and one per
+  array type for the elements left), first field first, and visits each
+  cell (record, array, thunk or task, function value, `Box`) once: the
+  runtime keeps the set of addresses seen and, until the walk ends, what
+  it read out of thunks and tasks, so no seen cell is freed and its address
+  reused meanwhile. It is skipped when no task is unfinished
+  (`l2r_task_settled`), always the case for constants evaluated at
+  startup. The walks are generated at the end, once every variant of
+  function types and `Box` is known; a type that cannot hold a task gets
+  none.
 - **Why:** As `lean_mark_persistent` at a closed term's first evaluation:
   a `Task.spawn` extracted as a closed term has finished once the term has
   been used (adv4 TK4-02, a599e0a; closures, thunks and boxes: 17ab235).
   The searches for task-holding types look at each type once: following
   every path took over ten minutes on polymorphic-recursion towers
-  (1955043).
+  (1955043). The walk was a recursive function per type without a visited
+  set: a 300000-link chain overflowed the 8 MB startup stack, even for an
+  unused constant, and a 41-cell DAG was walked as a tree, 2^40 paths
+  (round 7 RV7L-01, 42517bf; test `RtPersistWalk`).
 - **Where:** `Lower/Conv.lean`: `persistCall`, `mayHoldTask`,
   `persistFnName`, `cafAccessor`; `Lower/Finish.lean`: `holdsTask`,
-  `genPersist`, `finishPersistFns`, `variantCount`.
-- **Remove only if:** never. In progress on branch `fix-r7-low` (round 7
-  RV7L-01): the walk is a loop over a work list visiting each cell once
-  (`leanrt::persist`), skipped when every task has finished; the recursive
-  walk overflowed the stack on deep values and walked shared DAGs as trees.
+  `persistListName`, `persistCell`, `PersistGen`, `genPersist`,
+  `finishPersistFns`, `variantCount`; `runtime/prelude.rr`:
+  `l2r_persist_begin`, `l2r_persist_seen`, `l2r_persist_keep`,
+  `l2r_persist_end`, `l2r_task_settled`;
+  `runtime/leanrt/src/persist.rs`.
+- **Remove only if:** never.

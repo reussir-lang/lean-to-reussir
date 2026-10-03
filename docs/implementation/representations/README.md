@@ -21,8 +21,8 @@ is in [`runtime/README.md`](../../../runtime/README.md).
   enums applied by generated functions.
 - [references.md](references.md): `ST.Ref` as a record around a Reussir
   cell; `Nat`/`Int` references.
-- [identity.md](identity.md): what `ptrAddrUnsafe` answers for each
-  representation (being removed).
+- [identity.md](identity.md): what `ptrAddrUnsafe` and `ptrEq` answer
+  (identity and sharing are not preserved).
 
 Thunk and task cells are in [../tasks/cells.md](../tasks/cells.md).
 Conversions between representations are in

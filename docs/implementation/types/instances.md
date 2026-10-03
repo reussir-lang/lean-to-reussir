@@ -48,14 +48,16 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   keyed by the dictionary too (`InstKey.dicts`). That instance rebuilds the
   dictionary as `let`s at its start and binds the parameter to it. The
   parameter itself stays, unused, so the arity is unchanged. A dictionary
-  deeper than 64 is not static.
+  deeper than 64 is not static, nor is one holding a constant that is
+  more than a dictionary of functions (`constComputes`, next entry); the
+  callee reads that constant at run time, as natively.
 - **Why:** Lean's base `simp` folds only dictionaries that are
   `let`-bound in the same function. `Monad Id`, passed as a parameter from
   `Array.map` to `Array.mapM`, would stay a runtime record with polymorphic
   methods, which Reussir cannot type. The depth bound stops polymorphic
   recursion from building ever larger dictionaries.
-- **Where:** `Mono.lean`: `staticDict?`, `dictLets`, `instantiate`,
-  `renameApp`; plan [§2.4](../../translation-plan.md#24-type-classes).
+- **Where:** `Mono.lean`: `staticDict?`, `constComputes`, `dictLets`,
+  `instantiate`, `renameApp`; plan [§2.4](../../translation-plan.md#24-type-classes).
 - **Remove only if:** never: without it, type classes with polymorphic
   methods fall back to `Box`. The rebuilding is a known divergence (an
   instance's code may run more often than natively: plan

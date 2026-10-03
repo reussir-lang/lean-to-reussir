@@ -110,7 +110,8 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       -- `ptrAddrUnsafe x`: the address of `x` in its own representation
       -- (converted to the parameter's, it would be a temporary cell, whose
       -- address the next temporary can get: `ptrEq` would then say `true`
-      -- for different values).
+      -- for different values). Equal answers mean the same cell or equal
+      -- values only for two values alive at the same time (plan §9).
       if (← externSymbol orig) == "lean_ptr_addr" then
         if let some (.fvar x) := args.back? then
           if let some (vn, vt) := ctx.vars[x]? then

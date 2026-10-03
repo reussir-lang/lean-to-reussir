@@ -1,86 +1,66 @@
-# Identity: what `ptrAddrUnsafe` answers
+# Identity: what `ptrAddrUnsafe` and `ptrEq` answer
 
-**Status:** being removed. The project's contract is moving to functional
-equivalence (same results, not the same object identities). Branch
-`mem-identity` (not merged at b299aab) removes the identity emulation
-below: `ptrAddrUnsafe` there answers the value's own cell (a word computed
-from a scalar), the origin table goes
-([../ownership.md](../ownership.md#converted-values-record-their-origin-being-removed)),
-converted thunks and tasks no longer stand for their original, and
-`fresh-rebuild` loses its identity guard. Update or delete these entries
-when that branch is merged.
+lean2rr does not emulate native pointer identity or sharing: a translated
+program gives the same results as natively when they do not depend on
+them (the functional-equivalence contract, plan
+[§9](../../translation-plan.md#9-open-items), "Identity is not
+preserved"). Paths are relative to `lean2rr/LeanToReussir/` unless they
+start with `runtime/`.
 
-Paths are relative to `lean2rr/LeanToReussir/` unless they start with
-`runtime/`. Plan [§9](../../translation-plan.md#9-open-items) ("Pointer
-equality in `Init`").
+### `ptrAddrUnsafe` answers a cell address or a word computed from the value
 
-### `ptrAddrUnsafe` maps each representation back to Lean's
+- **What:** `ptrAddrUnsafe x` takes `x` in its own representation (it is
+  not converted for the call) and answers: for a heap value (a record, a
+  function value, a `Box`, a string, an array, a big number, a reference,
+  a thunk or task, a runtime handle) its cell's address, whatever its
+  count (a nullary constructor of a shared enum: its immediate); for a
+  small `Nat`, an `int32` `Int`, `UInt8/16/32`, `Char`, `Bool` or an
+  enumeration the boxed scalar's word `2n+1`; for `Unit` and erased values
+  in typed code `1` (in uniform code an erased value is the boxed unit,
+  which answers its `Box` cell); for `UInt64`, `Float`, `Float32` their
+  bits; for a `[value]` struct its field's; otherwise (a `Nat` from 2^63 to
+  2^64, an `Int` outside `int32`) a number answered only once.
+- **Why:** For two values alive at the same time, equal answers then mean
+  the same cell or equal values, so `ptrEq` answering `true` still means
+  equal values, which code using it as a shortcut for equality needs
+  (`Array.mapMono`, `List.mapMono`, `withPtrEq`, `ShareCommon`). Every
+  caller in `Init` and `Std` compares live variables. Taking `x` as it is
+  matters: converted for the call, it would be a temporary cell whose
+  address the next temporary can get (499073c; adv3 RP3-1, 90b29df). The
+  identity emulation that answered native's identity (origin table,
+  address stand-ins, identity guards) was removed (mem-identity: 7869383,
+  a4a04e8, 0f2f1e7, c5eaca5).
+- **Where:** `Lower/Identity.lean`: `addrOf`; `Lower/Values.lean`:
+  `lowerConstApp` (the `lean_ptr_addr` case); `runtime/prelude.rr`:
+  `l2r_ptr_addr_obj`, `l2r_ptr_addr_rec` (which gives the reference it
+  received back inline: 66edbfb), `l2r_addr_word`, `l2r_addr_nat`,
+  `l2r_addr_int`, `l2r_addr_fresh`; `runtime/leanrt/src/lib.rs`:
+  `fresh_addr`. Tests `RtPtrSound`, `RtPtrAddr`.
+- **Remove only if:** never. Answers that differ from native (a converted
+  value is a new object; two boxings are two cells; equal `UInt64`s and
+  small numbers are `ptrEq`) are plan §9's list. A temporary can reuse the
+  cell of one that has died: `ptrAddrUnsafe` as a function value applied
+  at another representation, the parameter of a non-inlined function given
+  a converted argument, a polymorphic function value that boxes its
+  argument.
 
-- **What:** `addrOf` answers per representation: `lean_box(n) = 2n+1`
-  for what Lean represents as a boxed scalar (a small `Nat`, an `Int` in
-  `int32`, `UInt8/16/32`, `Char`, `Bool`, enumerations, nullary
-  constructors, `Unit` as 1); the handle pointer for heap values; a
-  `[value]` struct its field's answer; a fresh number for `UInt64`,
-  `Float` and the like, which natively are boxed into a new cell at each
-  call; a `Box` its payload's identity; a function value wrapped for
-  another representation the wrapped value's; a converted thunk or task
-  its original's; a structurally converted record, list or array its
-  origin's (through the origin table). A `Nat` in [2^63, 2^64) or an `Int`
-  outside `int32` (natively a big-number object) answers a number computed
-  from its value.
-- **Why:** Lean code stops when `ptrEq` says a step changed nothing
-  (`Expr.replace`, fixpoint loops), so `ptrEq x x` must hold for every
-  representation, and a payload returned by its own function must be
-  `ptrEq` to itself (adv3 RP3-1, 90b29df; adv4 RP4-01/02, fad7e6b).
-- **Where:** `Lower/Identity.lean`: `addrOf`, `cellScalar`, `nativeLeaf`,
-  `lazyAddrFn`, `fnAddrFn`, `boxAddrFn`, `recAddrFn`, `genFnAddr`,
-  `genBoxAddr`; `runtime/prelude.rr`: `l2r_addr_word`, `l2r_addr_nat`,
-  `l2r_addr_int`, `l2r_addr_fresh`, `l2r_ptr_addr_obj`,
-  `l2r_ptr_addr_rec`; `runtime/leanrt/src/lib.rs`: `fresh_addr`.
-- **Remove only if:** the functional-equivalence contract is adopted
-  (branch `mem-identity`).
+### `ST.Ref.ptrEq` stays real identity
 
-### A heap value's address is its handle, whatever its count
-
-- **What:** A heap value passed as it is goes to `l2r_ptr_addr_obj`,
-  which answers the handle pointer whatever the reference count. For a
-  shared record, `l2r_ptr_addr_rec` gives the reference it received back
-  inline (a decrement) when others remain, instead of the record's
-  out-of-line release.
-- **Why:** A "count 1 means the value dies with the call, so give a fresh
-  number" rule also fired for `ptrEq d d'` where `d`'s call had released
-  the other reference (Rp3Dag printed `false`; adv3 RP3-1, 90b29df). The
-  out-of-line release cost about a quarter of a `ptrEq` traversal (Rp3Dag
-  25: 0.40 s → 0.29 s, 66edbfb).
-- **Where:** `runtime/prelude.rr`: `l2r_ptr_addr_obj`,
-  `l2r_ptr_addr_rec`; `Lower/Identity.lean`: `addrOf`.
-- **Remove only if:** identity emulation goes (branch `mem-identity`
-  keeps `l2r_ptr_addr_rec` but no longer looks up origins).
-
-### Whether the program observes identity is a whole-program fact
-
-- **What:** `LowerCtx.observesIdentity` is true when some declaration
-  calls `ptrAddrUnsafe` (`lean_ptr_addr`, to which `ptrEq` and
-  `withPtrAddrUnsafe` inline), `ST.Prim.Ref.ptrEq` or `dbgTraceIfShared`,
-  also as a function value.
-- **Why:** Only in a program that never observes identity or sharing can
-  `fresh-rebuild` return an equal copy instead of the matched value
-  ([../control-flow/cases.md](../control-flow/cases.md#an-arm-that-returns-the-matched-value-returns-that-value)).
-- **Where:** `Lower/Identity.lean`: `codeObservesIdentity`,
-  `programObservesIdentity`; `Emit/Program.lean`: `lowerProgram`.
-- **Remove only if:** `fresh-rebuild` no longer needs the guard (branch
-  `mem-identity` removes both).
+- **What/Why/Where:** see
+  [references.md](references.md#strefptreq-is-real-identity).
+- **Remove only if:** never.
 
 ### Sharing is not observable
 
 - **What:** `isExclusiveUnsafe` answers `false`, `lean_is_scalar` answers
-  `false`, `shareCommon` is the identity, and `ShareCommon.Object.eq`
-  holds only for the same object.
+  `false`, `shareCommon` is the identity, `ShareCommon.Object.eq`/`hash`
+  compare addresses, and `dbgTraceIfShared` reads the cell's count, which
+  conversions and lean2rr's own copies can make differ from native.
 - **Why:** lean2rr's objects have no Lean layout to compare byte by byte;
   answering "shared" only makes such code take its general path.
 - **Where:** `runtime/prelude.rr`: `lean_is_exclusive_obj`,
   `lean_is_scalar`, `lean_sharecommon_quick`; `Lower/ExternCall.lean`:
   `customExtern` (`ShareCommon.State.shareCommon`);
   `lean2rr/L2RShim.lean` (`lean_sharecommon_eq`/`hash`).
-- **Remove only if:** never (a documented divergence, plan
+- **Remove only if:** never (plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features)).

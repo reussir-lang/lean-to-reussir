@@ -2492,24 +2492,32 @@ Answered (Lean):
     immediate;
   - a `Nat` below 2^63, an `Int` in the `int32` range, `UInt8/16/32`,
     `Char`, `Bool`, an enumeration: the boxed scalar's word `2n+1`;
-    `Unit` and erased values: `1`;
+    `Unit` and erased values in typed code: `1` (in uniform code an erased
+    value is a `Box`, the boxed unit, which answers its `Box` cell);
   - `UInt64`, `Float`, `Float32`: their bits;
   - a `[value]` struct: its field's;
   - a `Nat` from 2^63 to 2^64, an `Int` outside `int32` (no cell, and too
     wide for a word): a number answered only once (`l2r_addr_fresh`: even,
     in [2^62, 2^63), so never a word or a pointer).
 
-  `ptrEq` and `ptrEqList` compare these words and `withPtrAddr` passes one
-  on (all inline to `ptrAddrUnsafe`); none of them can crash. Equal words
-  mean the same cell or equal values, so `ptrEq` answering `true` still
-  means equal values, which the code using it as a shortcut for equality
-  needs (`Array.mapMono`, `List.mapMono`, `withPtrEq`, `ShareCommon`'s
-  tables: "not equal" is safe there). (That holds where `ptrAddrUnsafe`
-  is applied to a variable, which is how `ptrEq` and the others reach it.
-  Applied as a function value to a value of another representation, it
-  sees the converted value, a temporary cell whose address a later
-  temporary can get.) Answers differ from native where a
-  value has another representation or another cell here: a value
+  `ptrEq` compares these words (it inlines to `ptrAddrUnsafe`),
+  `ptrEqList` applies `ptrEq` element by element (it is recursive and not
+  inlined; `ptrEq` is), and `withPtrAddr` passes one on; none of them can
+  crash. For two values alive at the same time, equal words mean the same
+  cell or equal values, so `ptrEq` answering `true` still means equal
+  values, which the code using it as a shortcut for equality needs
+  (`Array.mapMono`, `List.mapMono`, `withPtrEq`, `ShareCommon`'s tables:
+  "not equal" is safe there). Every caller in `Init` and `Std`
+  (`Array.mapMonoM`, `List.mapMonoM`, `ptrEqList`, `withPtrEqUnsafe`,
+  `withPtrAddrUnsafe`, `ShareCommon`) compares live variables. The
+  condition fails for a temporary, whose cell a later temporary can get
+  once it has died: `ptrAddrUnsafe` applied as a function value to a value
+  of another representation (it sees the converted value), the parameter
+  of a function that is not inlined given a converted argument
+  (`addrL (convert p)`), and a polymorphic function value such as
+  `{β} → β → USize`, which boxes its argument at each call. Answers
+  differ from native where a value has another representation or another
+  cell here: a value
   converted to another representation (§5.1) is a new object, so it is not
   `ptrEq` to its original, nor are two conversions of one value; two
   boxings of one value are two `Box` cells; a function value wrapped for

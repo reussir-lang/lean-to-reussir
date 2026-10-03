@@ -88,8 +88,7 @@ to `lean2rr/LeanToReussir/`.
   declaration); plan [§5.1](../../translation-plan.md#51-type-translation).
 - **Remove only if:** never. It relies on library modules being the
   toolchain's: a program module named `Init.*`, `Std.*`, `Lean.*` or
-  `Lake.*` is rejected at load (RV6T-06). The root `L2RShim` is trusted too
-  (`isToolchainModule`) but not checked at load: a program module named
-  `L2RShim.*` would have its unsafe code ignored (see
+  `Lake.*`, or `L2RShim.*` (trusted too, `isToolchainModule`), that is not
+  the toolchain's or the shim's is rejected at load (RV6T-06, RV8L-01; see
   [../translator.md](../translator.md#program-modules-named-like-leans-library-are-rejected)).
   How each cast converts: [../conversions/casts.md](../conversions/casts.md).
