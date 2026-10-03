@@ -13,7 +13,7 @@
 
 use crate::drop::Vec as RVec;
 use reussir_rt::rc::Rc;
-use crate::alloc::{rc_new, reserve, vec_from_slice, vec_with_capacity};
+use crate::alloc::{rc_new, reserve, vec_with_capacity};
 
 #[inline(always)]
 pub fn into_rc<T: Clone>(v: RVec<T>) -> Rc<Vec<T>> {
@@ -398,25 +398,20 @@ pub fn bytes_of_vec(v: Vec<u8>) -> RVec<u8> {
     from_rc(rc_new(v))
 }
 
-/// `String.toUTF8`: the buffer of a unique string moves (natively a copy).
+/// `String.toUTF8`: a copy of the bytes, as natively.
 #[inline(never)]
 pub fn bytes_of_string(s: crate::string::LStr) -> RVec<u8> {
     bytes_of_vec(crate::string::into_vec(s))
 }
 
-/// `String.fromUTF8` of valid UTF-8 (counting the characters): the buffer
-/// of a unique array moves (natively a copy).
+/// `String.fromUTF8` of valid UTF-8 (counting the characters): a copy of
+/// the bytes, as natively.
 #[inline(never)]
 pub fn string_of_bytes(b: RVec<u8>) -> crate::string::LStr {
     let r = into_rc(b);
-    let v = if r.is_unique() {
-        unsafe { crate::alloc::rc_into_inner(r) }
-    } else {
-        let v = vec_from_slice(&r, 0);
-        drop(r);
-        v
-    };
-    crate::string::from_vec(v)
+    let s = crate::string::from_bytes(&r);
+    drop(r);
+    s
 }
 
 /// `ByteArray.copySlice src srcOff dest destOff len exact`.

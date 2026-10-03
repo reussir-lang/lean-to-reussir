@@ -72,13 +72,26 @@ pub fn fresh_addr() -> u64 {
 /// freeing the last reference is out of line, which keeps textures small
 /// enough for LLVM to inline them into Reussir code.
 #[inline(always)]
-pub fn rc_release<T>(r: reussir_rt::rc::Rc<T>) {
-    let c = r.count_ref().get();
-    if c == 1 {
-        rc_drop_last(r)
-    } else {
-        r.count_ref().set(c - 1);
-        std::mem::forget(r);
+pub fn rc_release<R: Release>(r: R) {
+    r.release()
+}
+
+/// A counted handle that `rc_release` gives up: Reussir's `Rc` and the
+/// runtime's own one-block objects (`tagvec::TagVec`).
+pub trait Release {
+    fn release(self);
+}
+
+impl<T> Release for reussir_rt::rc::Rc<T> {
+    #[inline(always)]
+    fn release(self) {
+        let c = self.count_ref().get();
+        if c == 1 {
+            rc_drop_last(self)
+        } else {
+            self.count_ref().set(c - 1);
+            std::mem::forget(self);
+        }
     }
 }
 
