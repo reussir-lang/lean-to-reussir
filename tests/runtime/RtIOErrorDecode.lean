@@ -77,7 +77,7 @@ def main : IO Unit := do
   tryIO "hardLink onto an existing file" (IO.FS.hardLink (dir / "file") (dir / "sub" / "inner"))
   tryIO "UV.System.chdir to a missing directory" (Std.Internal.UV.System.chdir (dir / "missing").toString)
   tryIO "TCP connect refused" do
-    -- a port that was just free: bound, then closed without listening
+    -- a port bound by a socket that does not listen: connecting is refused
     let s ← TCP.Socket.new
     s.bind (.v4 ⟨IPv4Addr.ofParts 127 0 0 1, 0⟩)
     let port := (← s.getSockName).port
