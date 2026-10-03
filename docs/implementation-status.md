@@ -496,8 +496,12 @@ depth in the file of its bug, indexed in
 They are local only, never submitted upstream, and each is reviewed
 adversarially.
 An independent audit checked whether each problem is really a Reussir
-bug. Of the 33 documented problems, 30 are patched (33 patches) and 3 are
-documented only; two more patches add features lean2rr needs:
+bug. Of the 34 documented problems, 30 are patched in `l2r-local` (33
+patches), 1 has a patch not applied yet (bug 34, patch 0065: `rrc --emit
+executable` compiled static code into a PIE, so lean2rr's binaries carried
+text relocations; lean2rr's driver now passes `--relocation-mode pic`), and
+3 are documented only; two more patches add
+features lean2rr needs:
 
 - **Real bugs fixed (21 patches):** wrong values after in-place reuse of a
   structure or variant cell (bug 2), `[value]` enum bytes lost (1), a
