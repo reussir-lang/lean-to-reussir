@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate the `Array Nat` / `Array Int` section of runtime/prelude.rr.
 
-`LNatArr` and `LIntArr` store one tagged word per element
-(leanrt::tagvec): small values inline, other values as big-number handles.
+`LNatArr` and `LIntArr` store one word per element (leanrt::tagvec): the
+element's own word (a small value inline, a big number as its handle).
 For each generic array extern `lean_array_xxx<E>` / primitive
 `l2r_array_xxx<E>` the section defines `lean_natarr_xxx` / `l2r_natarr_xxx`
 (and `intarr`) with the same arguments, the element type being `Nat`
@@ -20,67 +20,22 @@ END = "// END GENERATED: tagarr"
 # kind, array type, element type, codec functions (Reussir source)
 CODECS = {
     "nat": ("LNatArr", "Nat", """
-// Small values below 2^63 are stored as `(v << 1) | 1`; all others as big
-// numbers (normalized back to `Nat::Small` when read, for values below 2^64).
-// The array is consumed once (a second use in one branch would make Reussir
-// release it out of line in the other): a big word comes back owning a
-// reference.
-fn l2r_natarr_get(a : LNatArr, i : u64) -> Nat {
-    let w = l2r_natarr_word_owned(a, i);
-    if (w & 1) == 1 { Nat::Small{w >> 1} } else { l2r_nat_norm(l2r_big_of_owned_word(w)) }
-}
-
-fn l2r_natarr_set(a : LNatArr, i : u64, x : Nat) -> LNatArr {
-    match x {
-        Nat::Small(v) => if (v >> 63) == 0 { l2r_natarr_set_word(a, i, (v << 1) | 1) } else { l2r_natarr_set_big(a, i, l2r_big_of_u64(v)) },
-        Nat::Big(b) => l2r_natarr_set_big(a, i, b)
-    }
-}
-
-fn l2r_natarr_push(a : LNatArr, x : Nat) -> LNatArr {
-    match x {
-        Nat::Small(v) => if (v >> 63) == 0 { l2r_natarr_push_word(a, (v << 1) | 1) } else { l2r_natarr_push_big(a, l2r_big_of_u64(v)) },
-        Nat::Big(b) => l2r_natarr_push_big(a, b)
-    }
-}
-
-fn l2r_natarr_replicate(n : u64, x : Nat) -> LNatArr {
-    match x {
-        Nat::Small(v) => if (v >> 63) == 0 { l2r_natarr_replicate_word(n, (v << 1) | 1) } else { l2r_natarr_replicate_big(n, l2r_big_of_u64(v)) },
-        Nat::Big(b) => l2r_natarr_replicate_big(n, b)
-    }
-}
+// Elements are `Nat` words (see the Nat section): `(v << 1) | 1` for a small
+// value, an owned reference to a big number otherwise; the handles move in
+// and out as their words. The array is consumed once (a second use in one
+// branch would make Reussir release it out of line in the other): a big
+// word comes back owning a reference.
+fn l2r_natarr_get(a : LNatArr, i : u64) -> Nat { l2r_nat_of_raw(l2r_natarr_word_owned(a, i)) }
+fn l2r_natarr_set(a : LNatArr, i : u64, x : Nat) -> LNatArr { l2r_natarr_set_word(a, i, l2r_nat_raw(x)) }
+fn l2r_natarr_push(a : LNatArr, x : Nat) -> LNatArr { l2r_natarr_push_word(a, l2r_nat_raw(x)) }
+fn l2r_natarr_replicate(n : u64, x : Nat) -> LNatArr { l2r_natarr_replicate_word(n, l2r_nat_raw(x)) }
 """),
     "int": ("LIntArr", "Int", """
-// Small values in [-2^62, 2^62) are stored as `(v << 1) | 1`; all others as
-// big numbers (normalized back to `Int::Small` when read).
-fn l2r_int_is_tag_small(v : i64) -> bool { ((v + 4611686018427387904) as u64) < 9223372036854775808 }
-
-fn l2r_intarr_get(a : LIntArr, i : u64) -> Int {
-    let w = l2r_intarr_word_owned(a, i);
-    if (w & 1) == 1 { Int::Small{(w as i64) >> 1} } else { l2r_int_norm(l2r_big_of_owned_word(w)) }
-}
-
-fn l2r_intarr_set(a : LIntArr, i : u64, x : Int) -> LIntArr {
-    match x {
-        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_intarr_set_word(a, i, ((v << 1) | 1) as u64) } else { l2r_intarr_set_big(a, i, l2r_big_of_i64(v)) },
-        Int::Big(b) => l2r_intarr_set_big(a, i, b)
-    }
-}
-
-fn l2r_intarr_push(a : LIntArr, x : Int) -> LIntArr {
-    match x {
-        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_intarr_push_word(a, ((v << 1) | 1) as u64) } else { l2r_intarr_push_big(a, l2r_big_of_i64(v)) },
-        Int::Big(b) => l2r_intarr_push_big(a, b)
-    }
-}
-
-fn l2r_intarr_replicate(n : u64, x : Int) -> LIntArr {
-    match x {
-        Int::Small(v) => if l2r_int_is_tag_small(v) { l2r_intarr_replicate_word(n, ((v << 1) | 1) as u64) } else { l2r_intarr_replicate_big(n, l2r_big_of_i64(v)) },
-        Int::Big(b) => l2r_intarr_replicate_big(n, b)
-    }
-}
+// Elements are `Int` words (see the Int section), as for `LNatArr`.
+fn l2r_intarr_get(a : LIntArr, i : u64) -> Int { l2r_int_of_raw(l2r_intarr_word_owned(a, i)) }
+fn l2r_intarr_set(a : LIntArr, i : u64, x : Int) -> LIntArr { l2r_intarr_set_word(a, i, l2r_int_raw(x)) }
+fn l2r_intarr_push(a : LIntArr, x : Int) -> LIntArr { l2r_intarr_push_word(a, l2r_int_raw(x)) }
+fn l2r_intarr_replicate(n : u64, x : Int) -> LIntArr { l2r_intarr_replicate_word(n, l2r_int_raw(x)) }
 """),
 }
 
@@ -92,24 +47,16 @@ fn l2r_{k}arr_with_capacity(n : u64) -> {T} [{{ leanrt::tagvec::with_capacity(n)
 #[ffi(import)]
 fn l2r_{k}arr_replicate_word(n : u64, w : u64) -> {T} [{{ leanrt::tagvec::replicate_word(n, w) }}];
 #[ffi(import)]
-fn l2r_{k}arr_replicate_big(n : u64, b : LBig) -> {T} [{{ leanrt::tagvec::replicate_big(n, b) }}];
-#[ffi(import)]
 fn l2r_{k}arr_size(a : {T}) -> u64 [{{ {{ let r = leanrt::tagvec::size(&a); leanrt::rc_release(a); r }} }}];
 #[ffi(import)]
 fn l2r_{k}arr_word(a : {T}, i : u64) -> u64 [{{ {{ let r = leanrt::tagvec::word(&a, i); leanrt::rc_release(a); r }} }}];
-#[ffi(import)]
-fn l2r_{k}arr_big(a : {T}, i : u64) -> LBig [{{ {{ let r = leanrt::tagvec::big(&a, i); leanrt::rc_release(a); r }} }}];
-// The word at `i`; a big word owns a reference (see `l2r_big_of_owned_word`).
+// The word at `i`; a big word owns a reference.
 #[ffi(import)]
 fn l2r_{k}arr_word_owned(a : {T}, i : u64) -> u64 [{{ {{ let r = leanrt::tagvec::word_owned(&a, i); leanrt::rc_release(a); r }} }}];
 #[ffi(import)]
 fn l2r_{k}arr_set_word(a : {T}, i : u64, w : u64) -> {T} [{{ leanrt::tagvec::set_word(a, i, w) }}];
 #[ffi(import)]
-fn l2r_{k}arr_set_big(a : {T}, i : u64, b : LBig) -> {T} [{{ leanrt::tagvec::set_big(a, i, b) }}];
-#[ffi(import)]
 fn l2r_{k}arr_push_word(a : {T}, w : u64) -> {T} [{{ leanrt::tagvec::push_word(a, w) }}];
-#[ffi(import)]
-fn l2r_{k}arr_push_big(a : {T}, b : LBig) -> {T} [{{ leanrt::tagvec::push_big(a, b) }}];
 #[ffi(import)]
 fn l2r_{k}arr_pop(a : {T}) -> {T} [{{ leanrt::tagvec::pop(a) }}];
 #[ffi(import)]
@@ -128,13 +75,11 @@ EXTERNS = """
 fn lean_mk_empty_{k}arr() -> {T} {{ l2r_{k}arr_empty() }}
 
 fn lean_mk_empty_{k}arr_with_capacity(n : Nat) -> {T} {{
-    match n {{
-        Nat::Small(c) => if (c >> 63) == 0 {{ l2r_{k}arr_with_capacity(c) }} else {{ l2r_internal_panic_at<{T}>(4) }},
-        Nat::Big(_) => l2r_internal_panic_at<{T}>(4)
-    }}
+    let w = l2r_nat_raw(n);
+    if (w & 1) == 1 {{ l2r_{k}arr_with_capacity(w >> 1) }} else {{ l2r_internal_panic_at<{T}>(4) }}
 }}
 
-fn lean_{k}arr_get_size(v : {T}) -> Nat {{ Nat::Small{{l2r_{k}arr_size(v)}} }}
+fn lean_{k}arr_get_size(v : {T}) -> Nat {{ l2r_nat_small(l2r_{k}arr_size(v)) }}
 fn lean_{k}arr_size(v : {T}) -> u64 {{ l2r_{k}arr_size(v) }}
 fn lean_{k}arr_fget(v : {T}, i : Nat) -> {E} {{ l2r_{k}arr_get(v, l2r_index_of_nat(i)) }}
 fn lean_{k}arr_fget_borrowed(v : {T}, i : Nat) -> {E} {{ l2r_{k}arr_get(v, l2r_index_of_nat(i)) }}
@@ -144,7 +89,9 @@ fn lean_{k}arr_uget_borrowed(v : {T}, i : u64) -> {E} {{ l2r_{k}arr_get(v, i) }}
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
 // return the default.
 fn lean_{k}arr_get(dflt : {E}, v : {T}, i : Nat) -> {E} {{
-    if l2r_index_ok(i, l2r_{k}arr_size(v)) {{ l2r_{k}arr_get(v, l2r_index_of_nat(i)) }} else {{
+    let w = l2r_nat_raw(i);
+    if l2r_word_index_ok(w, l2r_{k}arr_size(v)) {{ l2r_{k}arr_get(v, w >> 1) }} else {{
+        let d = l2r_nat_drop_raw(w);
         let ignored = l2r_panic_code(0);
         dflt
     }}
@@ -156,7 +103,9 @@ fn lean_{k}arr_uset(v : {T}, i : u64, x : {E}) -> {T} {{ l2r_{k}arr_set(v, i, x)
 
 // `Array.set!`: out of bounds, panic and return the array unchanged.
 fn lean_{k}arr_set(v : {T}, i : Nat, x : {E}) -> {T} {{
-    if l2r_index_ok(i, l2r_{k}arr_size(v)) {{ l2r_{k}arr_set(v, l2r_index_of_nat(i), x) }} else {{
+    let w = l2r_nat_raw(i);
+    if l2r_word_index_ok(w, l2r_{k}arr_size(v)) {{ l2r_{k}arr_set(v, w >> 1, x) }} else {{
+        let d = l2r_nat_drop_raw(w);
         let ignored = l2r_panic_code(0);
         v
     }}
@@ -170,15 +119,18 @@ fn lean_{k}arr_uswap(v : {T}, i : u64, j : u64) -> {T} {{ l2r_{k}arr_swap(v, i, 
 // `Array.swapIfInBounds`.
 fn lean_{k}arr_swap(v : {T}, i : Nat, j : Nat) -> {T} {{
     let n = l2r_{k}arr_size(v);
-    if l2r_index_ok(i, n) && l2r_index_ok(j, n) {{ l2r_{k}arr_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) }} else {{ v }}
+    let x = l2r_nat_raw(i);
+    let y = l2r_nat_raw(j);
+    if l2r_word_index_ok(x, n) && l2r_word_index_ok(y, n) {{ l2r_{k}arr_swap(v, x >> 1, y >> 1) }} else {{
+        let d = l2r_nat_drop_raw(x) + l2r_nat_drop_raw(y);
+        v
+    }}
 }}
 
 // `Array.replicate n x`.
 fn lean_mk_{k}arr(n : Nat, x : {E}) -> {T} {{
-    match n {{
-        Nat::Small(c) => l2r_{k}arr_replicate(c, x),
-        Nat::Big(_) => l2r_internal_panic_at<{T}>(4)
-    }}
+    let w = l2r_nat_raw(n);
+    if (w & 1) == 1 {{ l2r_{k}arr_replicate(w >> 1, x) }} else {{ l2r_internal_panic_at<{T}>(4) }}
 }}
 
 // `Array.toList` glue (see `l2r_array_to_list`).

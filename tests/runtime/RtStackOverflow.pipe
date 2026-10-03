@@ -2,6 +2,6 @@ ulimit -c 0
 for m in main spin task spawn dedicated pure; do r=$(LEAN_STACK_SIZE_KB=65536 $BIN $m 2>&1); echo "$m (64 MiB): exit $? [$r]"; done
 r=$($BIN main 2>&1); echo "main (1 GiB): exit $? [$r]"
 r=$(LEAN_MAIN_USE_THREAD=0 $BIN main 2>&1); echo "main on the process thread: exit $? [$r]"
-r=$(LEAN_STACK_SIZE_KB=8192 $BIN big 100000000 2>&1); echo "GMP at depth (8 MiB): exit $? [$r]"
+r=$(LEAN_STACK_SIZE_KB=4096 $BIN big 100000000 2>&1); echo "GMP at depth (4 MiB): exit $? [$r]"
 for w in init caf inittask; do r=$(RT_OVERFLOW=$w $BIN 2>&1); echo "startup $w: exit $? [$r]"; done
 $BIN none

@@ -95,7 +95,7 @@ partial def addrOf (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
     if n == boxName then return .call (← boxAddrFn) #[] #[e]
     -- `UInt8/16/32`, `Char`, `Bool`, enumerations.
     if let some i ← scalarWord e n then return .call "l2r_addr_word" #[] #[i]
-    if n ∈ ["LStr", "LBig", "LNatArr", "LIntArr", "LHandle"] then
+    if n ∈ ["LStr", "LNatArr", "LIntArr", "LHandle"] then
       return .call "l2r_ptr_addr_obj" #[t] #[e]
     match (← get).typeInfos[n]? with
     | some info =>

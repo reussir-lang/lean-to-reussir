@@ -32,6 +32,7 @@ pub mod fs;
 pub mod gmp;
 pub mod hash;
 pub mod io;
+pub mod nat;
 pub mod net;
 pub mod once;
 pub mod origin;
@@ -45,6 +46,7 @@ pub mod tagvec;
 pub mod task;
 
 pub use big::LBig;
+pub use nat::{LInt, LNat};
 pub use string::LStr;
 
 static LAST_SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

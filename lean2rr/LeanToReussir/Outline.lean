@@ -449,7 +449,7 @@ mutual
 end
 
 /-- Field types of the variants of the enums declared by `items` and by the
-prelude's source (`enum [value] Nat { Small(u64), Big(LBig) }`). -/
+prelude's source (`enum [value] L2RUnit { u }`). -/
 def variantTable (items : Array Item) (prelude : String) : Std.HashMap (String × String) (Array Ty) := Id.run do
   let mut out : Std.HashMap (String × String) (Array Ty) := {}
   for it in items do

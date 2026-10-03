@@ -9,7 +9,7 @@
 //! that are out of range or not at a character boundary. Functions taking
 //! `LStr` by value consume it and update it in place when it is unique.
 //!
-//! Positions arrive as `u64`; the Reussir side handles `Nat::Big` positions
+//! Positions arrive as `u64`; the Reussir side handles big `Nat` positions
 //! (and the few functions where Lean's "not a scalar" case, `>= 2^63`,
 //! differs from the out-of-range case) before calling in.
 

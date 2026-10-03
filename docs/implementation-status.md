@@ -69,56 +69,49 @@ Think of each Lean type as becoming a Rust type.
 
 | Lean | Reussir / runtime | Notes |
 |---|---|---|
-| `Nat` (natural numbers, unbounded) | `enum Nat { Small(u64), Big(LBig) }`, a value type (no allocation) | see below |
-| `Int` (unbounded integers) | `enum Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
+| `Nat` (natural numbers, unbounded) | `Nat`, one machine word, as natively | see below |
+| `Int` (unbounded integers) | `Int`, one machine word, as natively | small in the 32-bit range |
 | `UInt8/16/32/64`, `USize` | `u8/u16/u32/u64`, `u64` | 64-bit targets only |
 | `Int8…Int64`, `ISize` | the same unsigned words, signed operations on the bit pattern | as Lean's C runtime does |
 | `Float`, `Float32` | `f64`, `f32` | printing follows Lean's exactly |
 | `Char` | `u32` | |
 | `Bool` | `bool` | |
 
-**How `Nat` works.** A `Nat` is a two-word value: a tag and either a
-machine word (`Small`, any value below 2^64) or a handle to a big number
-(`Big`, only for values ≥ 2^64). Arithmetic on two small values is inline
-code: `a + b` is an add with an overflow check, and only on overflow does
-it call the runtime to build a big number. Big numbers use GMP (the same
-library Lean uses), stored as a reference-counted sign and limb vector,
-updated in place when unique. `Nat.repr` (printing) of big numbers uses
-GMP too. Lean's semantics are kept exactly: subtraction stops at 0,
-division by 0 gives 0, and so on.
+**How `Nat` works.** A `Nat` is one machine word, as in native Lean: a
+small value `n` (below 2^63) is stored in the word itself as `2n+1` (an
+odd number), and a bigger one is a pointer (an even number) to a
+reference-counted big number. Arithmetic on two small values is inline
+code: `a + b` is a test of both low bits, an add and an overflow check;
+only a big operand or an overflow calls the runtime. Big numbers use GMP
+(the same library Lean uses), stored as a reference-counted sign and limb
+vector, updated in place when unique. `Nat.repr` (printing) of big
+numbers uses GMP too. Lean's semantics are kept exactly: subtraction
+stops at 0, division by 0 gives 0, and so on.
+
+Reussir generates the reference counting itself, and normally treats every
+handle as a pointer whose count it increments when the value is copied. A
+small `Nat` is not a pointer, so lean2rr declares `Nat` and `Int` as
+*tagged* opaque handles, a small local Reussir extension (patch 0050):
+Reussir counts such a handle only when its low bit is clear, exactly as
+Lean's C runtime tests the bit before every count update. Copying or
+dropping a small `Nat` is a bit test; it is never allocated.
+
+`Int` works the same way, with Lean's encoding too: a value in the 32-bit
+range is stored in the word, any other is a big number.
+
+The encoding is exactly Lean's, so the words can be handed to C code
+written against `lean.h` as they are: a small value is `lean_box(n)`, and
+a big number is laid out like Lean's own (`lean_mpz_object`: the object
+header with its reference count, tagged `LeanMPZ`, then GMP's `mpz_t`,
+whose limbs GMP allocates).
 
 Compared with native Lean:
-- native Lean stores a small `Nat` as one tagged word (`2n+1`) and only up
-  to 2^63; lean2rr keeps the number in a plain register next to its tag (no
-  tagging/untagging per operation) and stays small up to 2^64 (values in
-  [2^63, 2^64) are heap objects natively);
-- `Int` is small in the whole `i64` range here; natively an `Int` outside
-  the 32-bit range is a heap-allocated big number each time it is computed;
-- the cost: a `Nat` field in a record takes 16 bytes (natively 8), and a
-  big number is two allocations (natively one): the bignum benchmark runs
-  at 0.96× native time but 1.33× its memory;
-- `Array Nat` and `Array Int` store one word per element like Lean (small
-  values inline, big ones as handles), not 16 bytes;
+- a `Nat` or `Int` field in a record takes 8 bytes, as natively;
+- a big number has the same layout and the same two allocations (the
+  object and GMP's limbs);
 - in the rare places where a `Nat` has to go through the generic `Box`
   (code whose types cannot be made concrete, below), boxing it allocates;
   natively a small `Nat` is never allocated.
-
-**Why not Lean's own representation?** Native Lean puts a small `Nat` in
-the same machine word as a pointer (`2n+1`, odd = number, even = pointer
-to a heap object), and its C runtime tests that bit before every
-reference-count update. Reussir generates the reference counting itself
-and treats every heap handle as a real pointer: copying one increments the
-count at that address. A tagged number handed to Reussir code would be
-"incremented" as if it were an address. Reussir has such immediates only
-for its own field-less constructors. So Lean's tagged words are used only
-where Reussir code never sees them: inside `Array Nat`/`Array Int`, which
-the runtime manages. More generally, lean2rr translates to typed Reussir
-on purpose instead of copying Lean's uniform "everything is a boxed
-object" model: unboxed record fields, value enums that never allocate,
-unboxed `UInt64`/`Float` arrays and Reussir's in-place reuse (which needs
-exact types and sizes) are where its speed comes from. One-word `Nat`
-fields would need Reussir to support small integers as immediates (a
-feature request for Reussir, not a bug fix).
 
 ### Text, arrays, references
 
@@ -239,7 +232,7 @@ fn l_insert___l2r_0_(a347 : T_Tree_346, a348 : Nat) -> T_Tree_346 {
 
 fn l_sum___l2r_0_(a372 : T_Tree_346) -> Nat {
     match a372 {
-        T_Tree_346::c_leaf => { Nat::Small{0} },
+        T_Tree_346::c_leaf => { l2r_nat_small(0) },
         T_Tree_346::c_node(f374, f375, f376) => {
             let x377 : Nat = l_sum___l2r_0_(f374);
             let x378 : Nat = lean_nat_add(x377, f375);    // inline add, overflow → big number
@@ -319,8 +312,7 @@ structure (a long list, a deep tree, nested arrays) uses a stack of
 pending work instead of recursion, as Lean does, so it never overflows the
 stack; resources inside (file handles) are closed in Lean's order. Memory
 use is usually at or below native (Reussir's records and reuse are
-tighter), except for the `Nat` field size above and some string and array
-headers.
+tighter), except for some string and array headers.
 
 ## What is not supported, or differs from native
 
@@ -483,6 +475,9 @@ each problem is really a Reussir bug:
 - **A missing feature, implemented locally:** freeing long or deep
   structures without recursion, in Lean's order (13, three patches);
   lean2rr's runtime needs it.
+- **A small extension, implemented locally:** opaque handles that may be
+  a tagged number instead of a pointer (patch 0050), so that `Nat` and
+  `Int` are one word with no allocation for small values.
 
 All 20 Reussir problems met so far are documented with a reproducer,
 including those lean2rr works around and those the audit classified as
@@ -494,8 +489,6 @@ dynamic-extent arrays are not.
 
 ## Possible future work
 
-- `Nat` fields as one tagged word (as native Lean) instead of 16 bytes,
-  for memory-heavy programs.
 - Borrowed parameters (needs Reussir support) for code that walks shared
   data.
 - Real parallelism for tasks (the scheduler is single-threaded by design).

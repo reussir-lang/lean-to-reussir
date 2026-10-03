@@ -9,7 +9,7 @@ A literal `#[e₁, …, eₙ]` of type `Array Nat` reaches the generated code
 `spliceChainConsts`) as `n` pairs
 
 ```
-let x : Nat = Nat::Small{k};
+let x : Nat = l2r_nat_small(k);
 let r : LNatArr = lean_natarr_push(a, x);
 ```
 
@@ -57,9 +57,9 @@ mutual
     exprUses b.result (b.lets.foldl (fun a (_, _, e) => exprUses e a) acc)
 end
 
-/-- The word of a small `Nat` literal `let x : Nat = Nat::Small{k}`. -/
+/-- The word of a small `Nat` literal `let x : Nat = l2r_nat_small(k)`. -/
 def smallLit? : Option Ty × Expr → Option UInt64
-  | (some (.named "Nat"), .ctor "Nat" (some "Small") #[.atom k]) =>
+  | (some (.named "Nat"), .call "l2r_nat_small" #[] #[.atom k]) =>
     match k.toNat? with
     | some v => if v < 2 ^ 63 then some (UInt64.ofNat (2 * v + 1)) else none
     | none => none

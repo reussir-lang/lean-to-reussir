@@ -22,7 +22,8 @@ default: the one shipped with the Lean toolchain), L2R_LEAN2RR (the lean2rr
 binary), L2R_DISABLE_OPTS and L2R_ENABLE_OPTS (comma-separated lean2rr
 optimizations to turn off or on, as --disable-opt/--enable-opt; spaces
 around the names are ignored; `lean2rr --list-opts` lists them),
-L2R_RRC_FLAGS (extra rrc flags, split on spaces, for experiments such as
+L2R_LEANRT_RUSTFLAGS (extra rustc flags for leanrt, split on spaces; e.g.
+`--cfg leanrt_count_bigs`), L2R_RRC_FLAGS (extra rrc flags, split on spaces, for experiments such as
 `--nullary-variant-encoding arch-independent`).
 """
 import argparse, fcntl, hashlib, os, subprocess, sys, tempfile
@@ -84,13 +85,21 @@ def rustc_wrapper(rlib):
     return w
 
 
+# Extra rustc flags for leanrt (L2R_LEANRT_RUSTFLAGS, split on spaces), for
+# test builds such as `--cfg leanrt_count_bigs` (tests/runtime/nat-alloc-check.sh).
+LEANRT_FLAGS = os.environ.get("L2R_LEANRT_RUSTFLAGS", "").split()
+
+
 def leanrt_out():
     """Where leanrt is built: it links against the Reussir checkout's runtime
     crates, so another checkout (L2R_REUSSIR, e.g. a patched Reussir) gets
-    its own directory."""
-    if REUSSIR.resolve() == (ROOT / "reussir").resolve():
-        return LEANRT_OUT
-    return LEANRT_OUT / ("rt-" + hashlib.sha256(str(REUSSIR.resolve()).encode()).hexdigest()[:12])
+    its own directory, and so do extra flags (L2R_LEANRT_RUSTFLAGS)."""
+    out = LEANRT_OUT
+    if REUSSIR.resolve() != (ROOT / "reussir").resolve():
+        out = out / ("rt-" + hashlib.sha256(str(REUSSIR.resolve()).encode()).hexdigest()[:12])
+    if LEANRT_FLAGS:
+        out = out / ("flags-" + hashlib.sha256(" ".join(LEANRT_FLAGS).encode()).hexdigest()[:12])
+    return out
 
 
 def build_leanrt():
@@ -103,7 +112,7 @@ def build_leanrt():
         h.update(f.name.encode())
         h.update(f.read_bytes())
     h.update(str(RUSTC).encode())
-    h.update(" ".join(NATIVE_FLAGS).encode())
+    h.update(" ".join(NATIVE_FLAGS + LEANRT_FLAGS).encode())
     for f in sorted(deps.glob("libreussir_rt*.rlib")):
         h.update(f.name.encode())
         h.update(str(f.stat().st_mtime_ns).encode())
@@ -118,7 +127,7 @@ def build_leanrt():
         if rlib.exists() and stamp.exists() and stamp.read_text() == digest:
             return rlib
         run([str(RUSTC), "--edition", "2021", "--crate-type", "rlib", "--crate-name", "leanrt",
-             "-C", "opt-level=3", *NATIVE_FLAGS, "-L", str(rt), "-L", str(deps),
+             "-C", "opt-level=3", *NATIVE_FLAGS, *LEANRT_FLAGS, "-L", str(rt), "-L", str(deps),
              str(LEANRT_SRC / "lib.rs"), "-o", str(rlib)])
         stamp.write_text(digest)
         return rlib

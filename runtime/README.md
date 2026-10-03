@@ -56,12 +56,12 @@ Generated sections of the prelude (edit the generator, then run it):
 
 | Lean (mono) | Reussir | Notes |
 |---|---|---|
-| `Nat` | `enum [value] Nat { Small(u64), Big(LBig) }` | `Big` only for values `>= 2^64` |
-| `Int` | `enum [value] Int { Small(i64), Big(LBig) }` | `Big` only outside the `i64` range |
-| big numbers | `LBig` = `Rc<(bool, Vec<u64>)>` | sign, little-endian limbs, normalized; GMP `mpn`/`mpz` |
+| `Nat` | `Nat` = `leanrt::nat::LNat`, one word, declared `tagged` (Reussir patch 0050) | odd: the small value `(n << 1) \| 1`, n < 2^63; even: an owned `LBig` pointer (below) |
+| `Int` | `Int` = `leanrt::nat::LInt`, likewise | odd: `lean_box((unsigned)(int)i)` for i in the `int32` range; even: an owned `LBig` pointer |
+| big numbers | `LBig` = `Rc<BigZ>`, laid out as Lean's `lean_mpz_object` (count, `m_cs_sz`, `m_other`, tag `LeanMPZ`, then GMP's `mpz_t`) | GMP `mpz` operations, limbs allocated by GMP; normalized (only values outside the small ranges); only behind a `Nat`/`Int` word |
 | `String` | `LStr` = `Rc<(Vec<u8>, u64)>` | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write |
 | `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a transparent wrapper of `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types); freed without recursion (below) |
-| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | one tagged word per element (below) |
+| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | the elements' words in one allocation (below) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `String.toUTF8`/`fromUTF8` move a unique buffer (natively a copy) |
 | `ST.Ref σ α` / `IO.Ref α` | `LRef<E>` (a shared 0/1-element vector, `leanrt::drop::Vec<E>`) | mutated through every alias; empty after `take` |
 | `Thunk α`, `Task α` | `LCell<S>` = `leanrt::drop::Cell<S>`, a transparent wrapper of `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
@@ -86,17 +86,37 @@ thanks to the `old count >= 1` that Reussir's `rc.inc` asserts) as long as
 no other store or call lies on a path between them. So indices that are
 in bounds by a proof (`fget`, `fset`, `fswap`, and the checked variants
 after their bounds test) and positions proved valid (`String.Pos.get`,
-`next`) are converted by `l2r_index_of_nat`, whose impossible `Nat::Big`
-arm ends the program instead of rejoining the read with refcount traffic
-on the big number.
+`next`) are converted by `l2r_index_of_nat`, whose impossible big case
+ends the program instead of rejoining the read with refcount traffic on
+the big number; a checked index (`get!`, `set!`) is taken as its word once
+(`l2r_word_index_ok`), so in bounds there is no refcount traffic on it at
+all.
 
-**`Array Nat`/`Array Int`.** `Nat`/`Int` are `[value]` enums, which cannot
-cross the FFI boundary, so a generic `RVec` stores them in a heap box per
-element (an allocation per update). `LNatArr`/`LIntArr` (`leanrt::tagvec`)
-store one word per element instead, like Lean: `(v << 1) | 1` for small
-values (`Nat` below 2^63, `Int` in [-2^62, 2^62)), a big-number handle
-otherwise. Tagged words never reach Reussir code (Reussir increments opaque
-handles inline, so a tagged scalar cannot be an opaque value). Every
+**`Nat`/`Int`.** One word each, with Lean's exact encoding
+(`leanrt::nat`): an odd word is a small value, `lean_box(n)` for a `Nat`
+below 2^63 and `lean_box((unsigned)(int)i)` for an `Int` in the `int32`
+range; an even word is an owned reference to a big number laid out as
+Lean's `lean_mpz_object` (`leanrt::big`). C code written against `lean.h`
+could take and return these words unchanged. Reussir copies and drops them as handles of an opaque type declared
+`#[ffi(rust = "::leanrt::nat::LNat", tagged)]`: with Reussir patch 0050 it
+counts only even words (`rc.inc` and the drop hook, `LNat`'s `Drop`, run
+only when the low bit is clear). The prelude's functions take each `Nat`
+argument as its word once (`l2r_nat_raw`, which then owns the reference),
+compute small results inline, and call `leanrt::nat`'s slow paths
+(`nat_add`, ... taking owned words, every small/big combination) for the
+rest; `l2r_nat_of_raw` makes a handle of a word, `l2r_nat_drop_raw`
+releases one. The slow paths normalize: a `Nat` below 2^63 (an `Int` in
+`int32`) is always small, so two small words are equal exactly when the
+values are. A build with `L2R_LEANRT_RUSTFLAGS="--cfg leanrt_count_bigs"`
+counts the big numbers made and freed and prints the counts at exit
+(`tests/runtime/nat-alloc-check.sh`).
+
+**`Array Nat`/`Array Int`.** `LNatArr`/`LIntArr` (`leanrt::tagvec`, the
+`nat-arrays` pass) store the elements' words, like Lean's array object:
+the handles move in and out as their words (`l2r_natarr_get` wraps the
+owned word it reads, `l2r_natarr_set` stores `l2r_nat_raw(x)`). Without
+the pass an `Array Nat` is an `RVec<Nat>`, one word per element too, in
+two allocations (the `Rc` box and the buffer). Every
 `lean_array_xxx<E>` / `l2r_array_xxx<E>` has `lean_natarr_xxx` /
 `l2r_natarr_xxx` (and `intarr`) with the same arguments and element type
 `Nat` (`Int`); `lean_mk_array`/`lean_mk_empty_array_with_capacity` become
@@ -120,9 +140,9 @@ As fixed by lean2rr:
   `Option`, `Prod`, `Ordering`, `EST.Out`, ...) cannot be written here: the
   prelude offers primitives and generic helpers for lean2rr's glue (below).
 
-Nat positions and indices: a `Nat::Big` value is never a valid position or
-index. Where Lean's C code distinguishes "not a scalar" (`>= 2^63` in Lean)
-from "out of range", the prelude reproduces that too
+Nat positions and indices: a big `Nat` is never a valid position or
+index. Where Lean's C code distinguishes "not a scalar" (`>= 2^63`, exactly
+the big `Nat`s here) from "out of range", the prelude reproduces that too
 (`lean_string_utf8_extract`, `Float.scaleB` with Ints outside 32 bits).
 
 ## Glue helpers
@@ -154,9 +174,8 @@ lean2rr wraps its result with `wrapIOResult`: `l2r_io_mono_ms_now()`,
 and `l2r_io_process_get_current_dir()` are infallible stand-ins for the
 fallible primitives below.) References are Reussir cells in a
 lean2rr-generated record (`L2RRef_N(Cell<T>)`; translation plan §5.1), read
-and written by the plain-Reussir helpers `l2r_rc_get/set/swap<T>`; a `Nat`
-or `Int` reference is the prelude's `L2RNatRef`/`L2RIntRef` (a tagged word
-and a cell for a big number, `l2r_natref_*`/`l2r_intref_*`). `LRef<T>`
+and written by the plain-Reussir helpers `l2r_rc_get/set/swap<T>` (a
+`Nat` or `Int` reference holds the handle like any other). `LRef<T>`
 (`l2r_ref_*`, a runtime cell) backs promises.
 
 **Freeing containers.** Native Lean frees an object iteratively: the
@@ -613,7 +632,7 @@ lean2rr's dev branch (the tests pass with it).
     struct (test `RtPtrEqFix`).
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
-store `Nat`/`Int`/enum-like values directly; and `mi_free` takes mimalloc's
+store enum-like values directly; and `mi_free` takes mimalloc's
 generic path (`mi_free_generic_local`, `_mi_page_ptr_unalign`) for most
 frees in allocation-heavy loops (30% of an array-update benchmark).
 
@@ -625,17 +644,17 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
 - Panics print `backtrace:` and `(stack trace unavailable)` instead of a
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`, and
-  `dbgTraceIfShared` of values held by value (`Nat`, `[value]` structures)
-  never reports sharing. `ptrAddrUnsafe` answers what native Lean answers
+  `dbgTraceIfShared` of values held by value (`[value]` structures, small
+  `Nat`s) never reports sharing. `ptrAddrUnsafe` answers what native Lean answers
   (translation plan §9): the boxed scalar `2n+1` for small `Nat`s, `int32`
   `Int`s, `UInt8/16/32`, `Char`, `Bool`, enumerations, nullary
   constructors and `Unit` (`l2r_addr_word`, `l2r_addr_nat`,
   `l2r_addr_int`); the handle pointer for heap values (`l2r_ptr_addr_obj`,
   `l2r_ptr_addr_rec`); a fresh, never repeated even number in
   `[2^62, 2^63)` for `UInt64`, `Float` and the like, which natively are
-  boxed into a new cell at each call (`l2r_addr_fresh`). A `Nat` in
-  `[2^63, 2^64)` and an `Int` outside `int32` but inside `i64` (natively
-  big number objects) answer a number computed from their value. A record,
+  boxed into a new cell at each call (`l2r_addr_fresh`). A `Nat` or `Int`
+  answers its word, as natively (a boxed scalar or its object's pointer).
+  A record,
   list or array that a structural conversion built answers the address of
   the value it was converted from: lean2rr records it (`l2r_origin_note`,
   `leanrt::origin`: the table keeps both values alive while the converted
@@ -687,6 +706,9 @@ through lean2rr, runs both (`LEAN_BACKTRACE=0`, optional `NAME.args` and
 `NAME.stdin`; `NAME.pipe` is a shell command line run instead, with `$BIN`
 the program, for redirections and pipes), and compares stdout, stderr and
 the exit code byte for byte. `NAME.xfail` marks tests blocked by a lean2rr
-request. The Rust unit tests of `leanrt` (bignums, tagged arrays, hashes,
-and a differential test of the `FILE` model against glibc's own `FILE`
-over random operation sequences) run with `tests/runtime/leanrt-unit.sh`.
+request. The Rust unit tests of `leanrt` (bignums, one-word `Nat`/`Int`
+at the boundaries, tagged arrays, hashes, and a differential test of the
+`FILE` model against glibc's own `FILE` over random operation sequences)
+run with `tests/runtime/leanrt-unit.sh`. `tests/runtime/nat-alloc-check.sh`
+builds `RtNatStress` with leanrt's big-number counters and checks that
+every big number made is freed exactly once.

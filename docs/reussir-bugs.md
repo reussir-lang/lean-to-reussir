@@ -102,7 +102,7 @@ on it); 0013 to 0015 implement a missing feature.
 | 16 | cost (opt-in flag) | reuse across calls is superlinear in match nesting (build time) | yes, build time and memory | deep tail paths and `let` values outlined, recursive functions included | none | - | - |
 | 17 | unclear | rrc memory is quadratic in a straight-line `Nat` function (build time) | yes, build memory | long tail paths and `let` values outlined, recursive functions included; `Array Nat` literals as tables | none | - | - |
 | 18 | bug (build system) | the `rrc` build target alone does not link | no, Reussir's build only | build the default target | none | - | - |
-| 19 | bug | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `Nat`/`Int` references in two cells; other `[value]` records boxed | none | - | - |
+| 19 | bug | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `[value]` records in references boxed (`Nat`/`Int` are no longer `[value]` records) | none | - | - |
 | 20 | unclear | the MLIR inliner grows lean2rr's conversion code exponentially (build time) | yes, build time and memory (monad transformer towers did not build) | conversion, unboxing and uniform-code application functions marked `#[transform_anchor]` | none | - | - |
 | 21 | bug | an unterminated `[:` in a polymorphic FFI texture is dropped | yes, wrong output (a string literal containing `[:` printed without it) | `[` escaped (`\x5b`) in the string literal table | 0016 | pending | not yet |
 | 22 | cost | a wildcard arm over a wide enum costs N^3 code (copied per constructor, releases expanded in line in each copy) | yes, build time (a derived BEq on 40 constructors: 9 minutes) | held wide values released out of line in wildcard arms (`l2r_sink`) | none | - | - |
@@ -170,8 +170,8 @@ fall on the representative's padding or on an `i1` field do not survive
 the move.
 
 **lean2rr.** Emits only `[value]` enums that are unaffected: enumerations
-without fields, and `Nat`/`Int`, whose arms each hold one 64-bit word.
-Other multi-arm types are shared enums, and multi-field value records are
+without fields (`Nat`/`Int`, once two-arm `[value]` enums, are one-word
+tagged handles since patch 0050). Other multi-arm types are shared enums, and multi-field value records are
 `[value]` structs, whose padding is explicit (plan §10).
 
 **Patch.** None.
@@ -1233,9 +1233,9 @@ not the cause (1000 `let`s took 4.1 GB without it too).
 pipeline: a build that stops after it (`--emit mlir-llvm`) already reaches
 the peak (417 MB at N = 250, 1.19 GB at N = 500), while the IR it emits
 grows linearly (301k and 565k lines). Probably a per-function analysis
-over reference-counted values (`Nat` is a two-arm `[value]` enum whose
-`Big` arm holds a box) keeps a set of live values per program point; with
-`UInt64` there are no such values.
+over reference-counted values (`Nat` was then a two-arm `[value]` enum
+whose `Big` arm holds a box; it is now a counted handle) keeps a set of
+live values per program point; with `UInt64` there are no such values.
 
 **lean2rr.** As for bug 16, a function with a tail path (or a `let` value)
 of 256 `let`s is cut into parts of at most 64 `let`s on a path, recursive
@@ -1323,10 +1323,11 @@ calls them with the `field` reference unchanged. Cells of scalars, of
 trivially copyable value records and of rc values take other paths and
 work.
 
-**lean2rr.** A reference to a `Nat` or `Int` (`ST.Ref`, `IO.Ref`) is the
-prelude's `L2RNatRef`/`L2RIntRef`: a tagged word in a `Cell<u64>` and the
-big number in a `Cell<L2RBigOpt>`. A reference to any other `[value]`
-record keeps the element in an `ElemBox` (one allocation per `set`; such
+**lean2rr.** A reference to a `Nat` or `Int` (`ST.Ref`, `IO.Ref`) was the
+prelude's `L2RNatRef`/`L2RIntRef` (a tagged word in a `Cell<u64>` and the
+big number in a second cell) while they were `[value]` enums; since patch
+0050 they are counted handles, which a cell holds directly. A reference to
+a `[value]` record keeps the element in an `ElemBox` (one allocation per `set`; such
 references do not occur in practice, since lean2rr's `[value]` structs are
 IO results).
 
@@ -1426,11 +1427,10 @@ Not bugs, but each one costs lean2rr measurably:
   take the container owned, so each read retains and releases it.
   Traversals that keep unchanged nodes pay the same on fields (about 1.5x
   native on an `Expr.replace`-style DAG traversal).
-- **A one-word `Nat`.** `Nat` is a two-word `[value]` enum (small or big).
-  Natively it is one tagged word, so nodes with `Nat` fields are larger
-  (`Std.TreeMap Nat Nat` uses about 1.5x native memory).
-- **`[value]` types across the FFI.** Arrays of `Nat`, `Int` or enumerations
-  need runtime-side representations or wrappers.
+- **A one-word `Nat`** (done locally: patch 0050, tagged opaque handles;
+  `Nat` and `Int` are one tagged word, as natively).
+- **`[value]` types across the FFI.** Arrays of enumerations or `[value]`
+  records need runtime-side representations or wrappers.
 - **Guaranteed tail calls.** Mutual tail calls are sibling calls only when
   all arguments fit in registers.
 
