@@ -39,10 +39,25 @@ def shimModules : IO (Array Name) := do
 
 /-- Import `modules` and their transitive closure at `private` level. Only
 this level exposes every module's complete base-LCNF bodies; the default
-`exported` level replaces non-public bodies with opaque stubs. -/
+`exported` level replaces non-public bodies with opaque stubs.
+
+lean2rr takes modules named `Init.*`, `Std.*`, `Lean.*` or `Lake.*` for Lean's
+library (`isToolchainModule`: their constants are evaluated lazily, their
+`initialize` actions run by the runtime, their `unsafe` code trusted), so a
+program module named like one that is not the toolchain's own is an error
+here rather than a silently different program. -/
 def loadEnvironment (modules : Array Name) : IO Environment := do
-  initSearchPath (← findSysroot)
+  let sysroot ← findSysroot
+  initSearchPath sysroot
   let env ← importModules ((modules ++ (← shimModules)).map ({ module := · })) {} (level := .private)
+  let libDir ← IO.FS.realPath (← getLibDir sysroot)
+  for m in env.header.moduleNames do
+    unless m.getRoot ∈ [`Init, `Std, `Lean, `Lake] do continue
+    let olean ← IO.FS.realPath (← findOLean m)
+    unless olean.toString.startsWith (libDir.toString ++ System.FilePath.pathSeparator.toString) do
+      throw <| IO.userError s!"module {m} ({olean}) is named like a module of Lean's library but is not \
+        the toolchain's ({libDir}): lean2rr treats Init.*, Std.*, Lean.* and Lake.* modules as \
+        Lean's library, so rename it"
   unsafe loadExtensionStates env
 
 /-- Run a `CoreM` action against `env` without a heartbeat limit and,

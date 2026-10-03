@@ -782,9 +782,16 @@ its value is stored as `Box`.
   definition that implements it (which lean2rr calls directly, §5.8,
   whichever of the two is the program's): `@[extern "s"] opaque asP2 (p :
   Pkg) : P2` bound to `@[export s] def payload (p : Pkg) : p.α` reads an
-  existential payload as a `P2`. `implemented_by` is type-checked, and the
-  code Lean 4.33 generates for a `partial def` (`f._unsafe_rec`) is
-  `partial`, not `unsafe`, so neither makes a program cast. The declarations
+  existential payload as a `P2`. `implemented_by` is type-checked, but
+  only by its declared type: a program declaration implemented by an
+  `unsafe` function, even one of the library's, counts (`@[implemented_by
+  TypeName.mk] opaque mkTN` gives two types the same `TypeName`, so
+  `Dynamic.get?` reads one as the other). The code Lean 4.33 generates for
+  a `partial def` (`f._unsafe_rec`) is `partial`, not `unsafe`, so it does
+  not make a program cast. Which modules are Lean's library is decided by
+  their names; a program module named `Init.*`, `Std.*`, `Lean.*` or
+  `Lake.*` that is not the toolchain's is rejected when the program is
+  loaded (§10). The declarations
   reached are those the program's code comes from and, transitively, the
   constants their definitions mention (code inlined into others) and their
   `implemented_by` targets (`LowerCtx.programCasts`). Lean's library casts
@@ -2342,6 +2349,13 @@ Answered (Lean):
 
 Where a translated program can behave differently from its native build.
 Each item says what differs and when.
+
+**Unsupported programs**
+- *Module names*: a program module named `Init.*`, `Std.*`, `Lean.*` or
+  `Lake.*` (natively allowed when the program does not import the
+  toolchain's module of that name) is rejected: lean2rr takes such modules
+  for Lean's library (constants evaluated lazily, initializers run by the
+  runtime, `unsafe` code trusted, §5.1, §5.12).
 
 **Evaluation and effects**
 - *Dictionary rebuilding* (§2.4): an instance function applied to static

@@ -1313,7 +1313,9 @@ for a `partial def` is not `unsafe`), is an axiom, uses `sorry` (a cast
 through an equality proved by either), or is `@[extern]` or `@[export]`
 (Lean does not compare the types of an extern and the `@[export]`
 definition implementing it, which lean2rr calls instead: `redirectTarget`,
-Mono; `implemented_by` is type-checked). The declarations reached are those the
+Mono; `implemented_by` is type-checked, but an `unsafe` implementation,
+even one of the library's, can be applied to any type: a program declaration
+implemented by one counts too). The declarations reached are those the
 program's declarations come from (`sourceDecls`), and, transitively, the
 constants their definitions mention (inlined code no longer appears in the
 program) and their `implemented_by` targets. Lean's library casts only
@@ -1337,7 +1339,12 @@ def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (De
     let some ci := env.find? n | continue
     if ci matches .axiomInfo _ then return some n
     if ci.isUnsafe || isExtern env n || (getExportNameFor? env n).isSome then return some n
-    if let some impl := Compiler.getImplementedBy? env n then work := work.push impl
+    if let some impl := Compiler.getImplementedBy? env n then
+      -- An `unsafe` implementation counts even from the library: Lean only
+      -- compares the declared types (`TypeName.mk` gives two types the same
+      -- `TypeName`, so `Dynamic.get?` reads one as the other).
+      if (env.find? impl).any (·.isUnsafe) then return some n
+      work := work.push impl
     if let some v := ci.value? (allowOpaque := true) then
       if v.foldConsts false (fun k b => b || k == ``sorryAx) then return some n
       work := v.foldConsts work fun k acc => if seen.contains k then acc else acc.push k
