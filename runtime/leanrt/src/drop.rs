@@ -103,11 +103,6 @@ impl<T: Clone> Drop for Vec<T> {
         let p = unsafe { *(self as *const Self as *const usize) };
         let c = count(p);
         if c > 1 {
-            // An array a conversion built is also held by the origin table
-            // (`crate::origin`) until the program drops it.
-            if c == 2 && crate::origin::release_shared(p) {
-                return;
-            }
             unsafe { *(p as *mut u32) = c - 1 };
         } else {
             free_vec::<T>(p);

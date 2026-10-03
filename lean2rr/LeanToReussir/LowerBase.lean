@@ -230,10 +230,6 @@ structure LowerState where
   nonUniformInds : NameMap Bool := {}
   /-- Structural conversions being generated (for recursive types). -/
   convsInProgress : Std.HashSet String := {}
-  /-- Whether the body of a structural conversion is being generated: a
-  conversion it needs is the bare one (`_w`), not the one that records and
-  looks up origins (`l2r_origin_note`, see `structConv`). -/
-  convNested : Bool := false
   /-- Lean's borrowed parameters of the program's declarations, and the
   variables they lend (`Lower/Borrow`), once computed. -/
   borrowInfo : Option (NameMap (Array Bool) × FVarIdSet) := none

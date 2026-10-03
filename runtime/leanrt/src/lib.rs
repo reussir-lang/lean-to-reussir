@@ -34,7 +34,6 @@ pub mod hash;
 pub mod io;
 pub mod net;
 pub mod once;
-pub mod origin;
 pub mod proc;
 pub mod rt;
 pub mod sched;

@@ -115,7 +115,7 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let prog := prog.literalTables
   let prog := if (← IO.getEnv "L2R_NO_OUTLINE").isSome then prog else prog.outline
   let prog := if (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome then { prog with anchored := {} } else prog
-  return prog.runRRPasses cfg |>.runPreludePasses cfg |>.render
+  return prog.runRRPasses cfg |>.render
 
 def run (opts : CliOptions) (cfg : PassConfig) (module : Name) : IO UInt32 := do
   let env ← loadEnvironment #[module]
