@@ -245,8 +245,13 @@ After substitution, a dictionary falls into one of two cases:
 dictionary that arrives as a *parameter* (`Array.mapM` receives `Monad Id`
 from `Array.map`) would stay a runtime value. So, like Lean's specializer,
 lean2rr also specializes callees on **static dictionaries**: a dictionary
-built only from instance constants and types (and projections of such). The
-instance key then includes the dictionary. The callee's instance binds that
+built only from instance constants and types (and projections of such). A
+constant whose evaluation computes something (calls a function other than
+to build a constructor or a closure: `instance : Inhabited Grid := ⟨mkGrid
+300⟩`) does not count: natively it is evaluated once, at startup, and a
+callee reads its fields, while `simp` in a callee specialized on it would
+copy its body to the projections, to run at every call (round 7 RV7F-02,
+test `RtDictConst`). The instance key then includes the dictionary. The callee's instance binds that
 parameter to the dictionary itself, rebuilt as `let`s at its start, and
 `simp` folds its projections into direct calls. The parameter stays, unused,
 so the arity is unchanged.
@@ -606,9 +611,9 @@ A map whose function projects a field of a parametric structure
 String; y : α`) is such a loop: the element it reads from `Array lcAny`
 has type `lcAny`, so the fields of the `cases` on it stay `lcAny` (round 7
 RV7D-01: they had been given the constructor's parameter types, `◾` or an
-earlier field's type, and the split loop's result was an `Array ◾` read
-back as zeros, or an `Array String` holding `Nat`s; test
-`RtMapProjFields`).
+earlier field's type, so the loop's result became an `Array ◾`, read back
+as zeros, or an `Array String` holding `Nat`s, an unreachable panic with
+the pass off too; test `RtMapProjFields`).
 The original loop is dropped when nothing reachable calls it any more, and
 the fixpoint runs once more, so the values the split loop reads can type
 what they flow into.
@@ -2377,9 +2382,27 @@ Each item says what differs and when.
   runtime, `unsafe` code trusted, §5.1, §5.12).
 
 **Evaluation and effects**
-- *Dictionary rebuilding* (§2.4): an instance function applied to static
-  arguments may run more often than natively. Visible only through traces
-  or panics inside instance code, or as extra time.
+- *Dictionary rebuilding* (§2.4): lean2rr specializes a callee on every
+  static dictionary, also where Lean's specializer does not (an `Inhabited`
+  instance, the class being `weak_specialize`; a `@[nospecialize]`
+  function; an instance argument that a recursive call changes). Instance
+  code, and pure computations that take the dictionary, can then run more
+  or fewer times than natively: the code that builds the dictionary is
+  copied into the callee and runs there, and a call that passes the
+  dictionary on (`traced "A"` with `traced [Inhabited α]`, a `panic!` in a
+  generic `firstOr [Inhabited α]`) can become a closed term of the
+  instance, run once, where natively it runs at each call. Lean allows
+  this: it treats `dbgTrace` and `panic` as pure, and its specializer makes
+  the same closed terms where it specializes (natively, `@[specialize α]`
+  on the two generic helpers of round 7's FClosed2, an annotation that only
+  affects performance, turns its 4 panics into 2, as under lean2rr). As a
+  cost, a dictionary built by an instance function applied to static
+  arguments (`instance [Inhabited α] : Inhabited (Wrap α) := ⟨expensive
+  default⟩`), natively a value the caller computes once, can be recomputed
+  at each call of the callee. A constant whose evaluation computes
+  something is not part of a static dictionary, so it is computed once, as
+  natively (test `RtDictConst`). Visible through traces or panics in
+  instance code or in such calls, or as extra time.
 - *Tasks* run on one thread, when they are needed, when the running code
   blocks (a sleep, a lock, a condition variable, a promise, a socket) or
   when `main` returns (§5.14). Contexts never run in parallel and switch

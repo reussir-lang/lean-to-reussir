@@ -456,12 +456,51 @@ where a type argument `t` is `L2R.tyArg t` and an erased one is `◾`, or
 
 def tyArgMarker : Expr := .const `L2R.tyArg []
 
+/-- Does evaluating the constant `c` (a declaration without parameters, such
+as `instance : Inhabited Grid := ⟨mkGrid 300⟩`) compute something: call a
+function, other than to build a constructor, a closure or another such
+constant that computes nothing? Its body is then not a mere value. Natively
+the constant is evaluated once, at startup, and a callee that receives it
+reads its fields; in a callee specialized on it, `simp` would copy the body
+to the projections (`inlineProjInst?`), to run at every call (round 7
+RV7F-02). `fuel` bounds the constants followed. -/
+partial def constComputes (c : Name) (fuel : Nat := 8) : MonoM Bool := do
+  if fuel == 0 then return true
+  let some decl ← baseDeclFor? c | return false
+  unless decl.params.isEmpty do return false
+  let .code code := decl.value | return false
+  go code fuel
+where
+  go (code : Code .pure) (fuel : Nat) : MonoM Bool := do
+    match code with
+    | .let d k =>
+      let computes ← match d.value with
+        | .lit _ | .erased | .proj .. => pure false
+        | .fvar _ args => pure !args.isEmpty
+        | .const f _ args _ =>
+          if (← getEnv).isConstructor f then pure false
+          else if args.isEmpty then constComputes f (fuel - 1)
+          else match ← baseDeclFor? f with
+            -- A partial application: a closure.
+            | some kd => pure (args.size ≥ kd.params.size)
+            | none => pure true
+      if computes then return true
+      go k fuel
+    -- A local function is a value: its body runs when it is called.
+    | .fun _ k _ => go k fuel
+    | .return _ => return false
+    | _ => return true
+
 /-- The static dictionary a `let` value denotes, given the static
-dictionaries of variables in scope. -/
+dictionaries of variables in scope. A constant whose evaluation computes
+something (`constComputes`) is not part of a static dictionary: the callee
+reads it at run time, as natively. -/
 def staticDict? (statics : Std.HashMap FVarId Expr) (v : LetValue .pure) (ty : Expr) : MonoM (Option Expr) := do
   unless (← isClass? ty).isSome do return none
   match v with
   | .const c _ args _ =>
+    if args.isEmpty then
+      if ← constComputes c then return none
     let mut out := #[]
     for a in args do
       match a with
