@@ -8,7 +8,11 @@ ran at every call: a trace per call, and a cost per call of the constant's
 computation (unbounded: 4.3 s for 0.00 s natively with a larger grid). A
 constant that computes something is therefore not part of a static
 dictionary, also inside one built from it (`Inhabited (Grid × Nat)`); a
-constant that is a mere value still is (`Inhabited Nat`). -/
+constant that is a mere value still is (`Inhabited Nat`). Allocating data
+counts as computing (round 7 RV7F-04): a constant holding a `Thunk.mk` made
+a new thunk at every call, forced again each time ("forced" 4 times for
+once), and a list literal was rebuilt at every call (not visible here
+except as time). -/
 
 structure Grid where
   cells : Array Nat
@@ -20,6 +24,18 @@ structure Grid where
 instance : Inhabited Grid := ⟨mkGrid 3⟩
 
 @[noinline] def getOr [Inhabited α] (xs : Array α) (i : Nat) : α := xs.getD i default
+
+structure Table where
+  data : Thunk (Array Nat)
+
+instance : Inhabited Table :=
+  ⟨⟨Thunk.mk fun _ => dbgTrace "forced" fun _ => (Array.range 100).map (· * 3)⟩⟩
+
+structure Config where
+  keywords : List String
+  limit : Nat
+
+instance : Inhabited Config := ⟨{ keywords := ["a", "bb", "ccc"], limit := 7 }⟩
 
 def main : IO Unit := do
   let gs : Array Grid := #[mkGrid 1, mkGrid 2]
@@ -39,3 +55,14 @@ def main : IO Unit := do
   for i in [0:4] do
     acc3 := acc3 + getOr ns i
   IO.println s!"nats {acc3}"
+  let ts : Array Table := #[⟨Thunk.pure #[1, 2]⟩]
+  let mut acc4 := 0
+  for i in [0:6] do
+    acc4 := acc4 + (getOr ts (i % 3)).data.get.size
+  IO.println s!"tables {acc4}"
+  let cs : Array Config := #[{ keywords := ["x"], limit := 1 }]
+  let mut acc5 := 0
+  for i in [0:4] do
+    let c := getOr cs i
+    acc5 := acc5 + c.keywords.length + c.limit
+  IO.println s!"configs {acc5}"
