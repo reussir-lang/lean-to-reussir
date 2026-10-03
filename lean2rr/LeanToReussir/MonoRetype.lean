@@ -133,9 +133,19 @@ partial def refines (old new : Expr) : Bool :=
         (old.getAppArgs.zip new.getAppArgs).all fun (a, b) => refines a b
     | _, _ => old == new
 
-/-- Field types (mono) of constructor `ctor` at inductive arguments `args`. -/
-def ctorFieldTypes (ctor : Name) (args : Array Expr) : CoreM (Array Expr) := do
+/-- Field types (mono) of constructor `ctor` for a value of type `valTy`.
+Nothing (`#[]`) unless `valTy` is the constructor's inductive applied to
+(at least) its parameters: for a value whose type is `lcAny` (a type that
+depends on a value, an existential payload) the field types are unknown.
+A constructor of a type with computed fields, `T.c._impl`, belongs to
+`T._impl` and matches values of type `T`. -/
+def ctorFieldTypes (ctor : Name) (valTy : Expr) : CoreM (Array Expr) := do
   let some (.ctorInfo c) := (← getEnv).find? ctor | return #[]
+  let valTy := valTy.consumeMData.headBeta
+  let .const ind _ := valTy.getAppFn | return #[]
+  unless ind == c.induct || ind ++ `_impl == c.induct do return #[]
+  let args := valTy.getAppArgs
+  unless args.size ≥ c.numParams do return #[]
   let mut ty ← instantiateForall (← getOtherDeclBaseType ctor []) args[:c.numParams].toArray
   let mut out := #[]
   repeat
@@ -319,9 +329,13 @@ def reinstantiate? (sc : Scope) (f : Name) (args : Array (Arg .pure)) (resTy : E
 
 /-! ## Retyping from definitions -/
 
-/-- Refine `old` to `new` if `new` is precise and refines it. -/
+/-- Refine `old` to `new` if `new` is precise and refines it. Never to `◾`:
+a binder Lean's mono code types `lcAny` holds a value of some type it
+could not name (a type that depends on a value, an existential payload),
+not a type or a proof, which mono already types `◾`. -/
 def refineTo? (old : Expr) (new : Option Expr) : MRetypeM (Option Expr) := do
   let some new := new | return none
+  if new.consumeMData.isErased then return none
   if !(← unknown old) || (← unknown new) then return none
   if refines (← norm old) (← norm new) then return some new else return none
 
@@ -357,9 +371,8 @@ partial def fwdCode (sc : Scope) : Code .pure → StateT Bool MRetypeM (Code .pu
         | .proj s i x _ =>
           match sc.types[x]? with
           | some st =>
-            let st := st.consumeMData.headBeta
             let some (.inductInfo iv) := (← getEnv).find? s | pure none
-            let fs ← ctorFieldTypes iv.ctors[0]! st.getAppArgs
+            let fs ← ctorFieldTypes iv.ctors[0]! st
             pure fs[i]?
           | none => pure none
         | .fvar g args => pure ((sc.types[g]?).bind (applyType? · args.size))
@@ -409,8 +422,8 @@ partial def fwdCode (sc : Scope) : Code .pure → StateT Bool MRetypeM (Code .pu
         let mut anyUnknown := false
         for p in ps do
           if ← unknown p.type then anyUnknown := true
-        if anyUnknown && discrTy.getAppFn.isConst then
-          let fs ← ctorFieldTypes ctor discrTy.getAppArgs
+        if anyUnknown then
+          let fs ← ctorFieldTypes ctor discrTy
           for i in [:ps.size] do
             let p := ps[i]!
             if let some t ← refineTo? p.type fs[i]? then
@@ -471,12 +484,10 @@ partial def collectUses (types : Types) (jps : Std.HashMap FVarId (Array Expr))
     match d.value with
     | .const f _ args _ =>
       if let some (.ctorInfo ci) := (← getEnv).find? f then
-        let ty := d.type.consumeMData.headBeta
-        if sameHead ty.getAppFn (.const ci.induct []) then
-          let fs ← ctorFieldTypes f ty.getAppArgs
-          for h : i in [:args.size] do
-            if i ≥ ci.numParams then
-              if let some t := fs[i - ci.numParams]? then acc ← add acc args[i] t
+        let fs ← ctorFieldTypes f d.type
+        for h : i in [:args.size] do
+          if i ≥ ci.numParams then
+            if let some t := fs[i - ci.numParams]? then acc ← add acc args[i] t
       else if let some sig := (← get).sigs[f]? then
         for i in [:min args.size sig.params.size] do
           unless f == self && skip.contains i do

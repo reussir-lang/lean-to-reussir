@@ -1,0 +1,1 @@
+needs local Reussir patch 0040 (reussir-patches/0040-*: `__reussir_drop_drained`, the end of a drain); without it the sync dependents of a promise that Reussir's record glue frees run at the next output (plan §5.14)

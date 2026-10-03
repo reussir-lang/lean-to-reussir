@@ -102,7 +102,9 @@ def loopShape? (d : Decl .pure) (types : Types) (shapes : NameMap LoopShape) : M
   let some idxPos := idx | return none
   unless d.params[idxPos]!.type.consumeMData.isConstOf ``USize do return none
   let some β := elems[0]? | return none
-  if ← unknown β then return none
+  -- `◾` is no element type: a value Stage 3 typed `◾` was not recovered
+  -- (round 7 RV7D-01: fields of an element read from `Array lcAny`).
+  if (← unknown β) || β.consumeMData.isErased then return none
   for t in elems do
     if (← norm t) != (← norm β) then return none
   -- A precise array parameter: only if the element type changes.

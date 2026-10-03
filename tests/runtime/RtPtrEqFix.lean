@@ -1,10 +1,10 @@
-/-! Runtime test: identity where native Lean returns a value itself (adv3
-RP3-1/RP3-2). A match arm returning the matched value returns that object,
-not a copy, so code that stops when `ptrEq` says a step changed nothing (the
-`Expr.replace` idiom, fixpoint loops) stops as natively, a traversal keeping
-unchanged nodes keeps a DAG's sharing, and a lookup returns the node itself.
-`ptrEq` on a `[value]` one-field structure compares its field, as natively
-(Lean represents such structures by their field). -/
+/-! Runtime test: code that stops when `ptrEq` says a step changed nothing
+(the `Expr.replace` idiom, fixpoint loops) over values a match arm returns
+whole (adv3 RP3-1/RP3-2), a traversal keeping unchanged nodes of a DAG, a
+lookup returning a node, and `ptrEq` on `[value]` one-field structures.
+lean2rr does not emulate native pointer identity (translation plan §9), so
+only results that do not depend on it are printed: the values the
+fixpoints reach, not their number of steps or `ptrEq` itself. -/
 
 inductive L where
   | nil
@@ -22,10 +22,10 @@ def L.len : L → Nat
   | .cons 0 t => dropZeros t
   | l => l
 
-unsafe def fixDrop (l : L) (n : Nat) : Nat :=
-  if n > 50 then 999 else
+unsafe def fixDrop (l : L) (n : Nat) : L :=
+  if n > 50 then l else
   let l' := dropZeros l
-  if ptrEq l l' then n else fixDrop l' (n + 1)
+  if ptrEq l l' then l else fixDrop l' (n + 1)
 
 inductive Tr where
   | leaf
@@ -75,10 +75,15 @@ unsafe def E.simp1 (e : E) : E :=
     if ptrEq a a' then e else .neg a'
   | .num _ => e
 
-unsafe def E.fix (e : E) (n : Nat) : Nat × E :=
-  if n > 50 then (999, e) else
+unsafe def E.fix (e : E) (n : Nat) : E :=
+  if n > 50 then e else
   let e' := e.simp1
-  if ptrEq e e' then (n, e) else E.fix e' (n + 1)
+  if ptrEq e e' then e else E.fix e' (n + 1)
+
+def E.count : E → Nat
+  | .num _ => 1
+  | .add a b => a.count + b.count + 1
+  | .neg a => a.count + 1
 
 def E.dag : Nat → E
   | 0 => .num 1
@@ -91,10 +96,13 @@ inductive R where
 @[noinline] def keepR (r : R) : R := match r with
   | .mk xs => if xs.size > 100 then .mk #[] else r
 
-unsafe def fixR (r : R) (n : Nat) : Nat :=
-  if n > 20 then 999 else
+def R.size : R → Nat
+  | .mk xs => xs.attach.foldl (fun n ⟨x, _⟩ => n + x.size) 1
+
+unsafe def fixR (r : R) (n : Nat) : R :=
+  if n > 20 then r else
   let r' := keepR r
-  if ptrEq r r' then n else fixR r' (n + 1)
+  if ptrEq r r' then r else fixR r' (n + 1)
 
 structure W where
   s : String
@@ -103,19 +111,18 @@ structure W where
 
 unsafe def main (args : List String) : IO Unit := do
   let k := args.length
-  IO.println s!"fixDrop: {fixDrop (L.ofList [0, 0, 5, 6, k]) 0}"
+  IO.println s!"fixDrop: {(fixDrop (L.ofList [0, 0, 5, 6, k]) 0).len}"
   let l := L.ofList [3, 4 + k]
-  IO.println s!"dropZeros same: {ptrEq l (dropZeros l)}"
+  IO.println s!"dropZeros: {(dropZeros l).len}"
   let t := mkTree (100 + k)
   let t2 := t.ins (rootKey t)
-  IO.println s!"ins present key same: {ptrEq t t2} {t2.size}"
+  IO.println s!"ins present key: {t2.size}"
   let t3 := t.sub (rootKey (rightOf t))
-  IO.println s!"sub is the node: {ptrEq t3 (rightOf t)} {t3.size}"
+  IO.println s!"sub: {t3.size} {(rightOf t).size}"
   let e := E.add (.neg (.neg (.num 1))) (.add (.num (2 + k)) (.neg (.num 3)))
-  let (n, e') := E.fix e 0
-  IO.println s!"simp fix: {n} {e'.toStr}"
+  IO.println s!"simp fix: {(E.fix e 0).toStr}"
   let d := E.dag (18 + k)
-  IO.println s!"dag kept: {ptrEq d d.simp1}"
-  IO.println s!"value struct: {fixR (.mk #[.mk #[]]) 0}"
+  IO.println s!"dag: {d.simp1.count}"
+  IO.println s!"value struct: {(fixR (.mk #[.mk #[]]) 0).size}"
   let w : W := ⟨s!"w{k}"⟩
-  IO.println s!"value struct over String: {ptrEq w (keepW w)}"
+  IO.println s!"value struct over String: {(keepW w).s} {!ptrEq w (keepW w) || (keepW w).s == w.s}"

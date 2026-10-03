@@ -1,0 +1,2 @@
+ulimit -c 0
+for w in last first; do r=$($BIN 4100 $w 2>&1); echo "4100 contexts, $w overflows: exit $? [$r]"; done

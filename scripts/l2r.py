@@ -190,10 +190,10 @@ def main():
         env["LEAN_PATH"] = lean_path + (":" + env["LEAN_PATH"] if env.get("LEAN_PATH") else "")
     # lean2rr's shim library (lean2rr/L2RShim.lean, built with lean2rr):
     # Lean implementations of Std.Internal.UV's externs, which lean2rr
-    # compiles with the program. Last, so that the program's modules come
-    # first.
-    if SHIM_DIR.joinpath("L2RShim.olean").exists():
-        env["LEAN_PATH"] = (env["LEAN_PATH"] + ":" if env.get("LEAN_PATH") else "") + str(SHIM_DIR)
+    # compiles with the program. lean2rr looks for it there only (after the
+    # program's modules and Lean's library), also when L2R_LEAN2RR is a copy
+    # of the binary elsewhere.
+    env["L2R_SHIM_DIR"] = str(SHIM_DIR)
 
     rlib = build_leanrt()
     with tempfile.TemporaryDirectory() as tmp:

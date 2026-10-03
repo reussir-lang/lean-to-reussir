@@ -1,0 +1,122 @@
+# What runs at startup, and in which order
+
+Paths are relative to `lean2rr/LeanToReussir/`. Plan
+[§2.2](../../translation-plan.md#22-reachability) and
+[§5.12](../../translation-plan.md#512-constants-cafs-and-closed-terms).
+
+### Every constant of the program is a root
+
+- **What:** Stage 1 starts from `main`, `IO.Error.toString` (the entry
+  point prints uncaught exceptions with it), and every startup item of the
+  program's modules: each zero-parameter declaration of the module's
+  compiled code (instances and compiler-generated specializations
+  included), each `initialize` action and each init function of an
+  `initialize` constant.
+- **Why:** Natively a module's initializer evaluates all of these, used or
+  not (fc23313). Consequence: an unused constant that reaches an extern
+  the runtime lacks makes the program fail to link (plan
+  [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
+  "Not supported").
+- **Where:** `Emit/Startup.lean`: `startupItems`, `StartupItem`;
+  `Emit/Entry.lean`: `entryRoots`, `programRoots`.
+- **Remove only if:** never.
+
+### Modules follow the module system's phases
+
+- **What:** Modules are initialized in a depth-first post-order walk of
+  the import graph from `main`'s module. When `main`'s module is a
+  `module`, only runtime phases run: the walk follows only non-`meta`
+  imports, and declarations marked `meta` are skipped. Otherwise every
+  import is followed, and an imported `module` runs its runtime-phase
+  items, then its `meta` ones. An item counts as `meta` when the
+  declaration native Lean initializes is marked so (for
+  `initialize c : T ← act`, `c`; for `initialize do …`, its function);
+  compiler-generated declarations are not.
+- **Why:** As `EmitC.emitMainFn`/`emitInitFn`/`emitLegacyInitFn`. lean2rr
+  ran every item of every program module: `meta initialize`, `meta def`
+  constants and meta-imported modules ran, and a failing compile-time-only
+  initializer aborted the program (round 7 RV7O-01, 8727838; test
+  `RtStartMeta`).
+- **Where:** `Emit/Startup.lean`: `startupModules`, `importPostOrder`,
+  `startupItems`.
+- **Remove only if:** never.
+
+### Declarations follow Lean's compilation order
+
+- **What:** Within a module, items are first ordered by the program's
+  structure (a `def`/`instance` command with its `where`/`let rec`
+  helpers, compiled by strongly connected component, callees first; a
+  specialization right before the component it was made in; elaboration
+  auxiliaries before the whole command), rebuilt from declaration ranges,
+  the kernel's `all`, macro scopes and names (numbers compared by value).
+  Then the items that the `.olean` records an order for are put in
+  compilation order, in the places the structure gave them: the module's
+  `extraConstNames` (closed terms, `_boxed` wrappers, lifted lambdas,
+  specializations) are listed newest first, and `compileOrder` reverses
+  them. Every item the record does not place keeps its place, except that
+  it goes after the constants it reads.
+- **Why:** Native Lean initializes a module's declarations in the order it
+  compiled them, and an initializer that traces or panics shows it. Each
+  rule fixed an observed order: helpers by component and specializations
+  in `initialize` actions (adv3 CN3-02/03, 448f92d), specializations before
+  their block (adv2 PRG-10, af32ffd), equal ranges (adv4 ST4-01..04,
+  e08b1d0), the recorded order (1042bed), `@[init f]` with an ordinary `f`
+  and constants without a record (036d007).
+- **Where:** `Emit/Startup.lean`: `moduleStartupKeys`, `declOrder`,
+  `rangeKey`, `posLt`, `natStrLt`, `natNameLt`, `startupNameLt`,
+  `specTarget?`, `isGeneratedInitFn`, `nameOfComponents`;
+  `CompileRecord.lean`: `compileOrder`, `compiledOwner`.
+- **Remove only if:** never. What no rule recovers (members of a `mutual`
+  block that do not use each other, made-up names of one quotation) is a
+  known divergence (plan
+  [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
+  "Startup order of unrecorded constants").
+
+### Hygienic names keep their macro scopes at the end
+
+- **What:** Name prefixes are rebuilt component by component, and a
+  hygienic name's macro scopes stay at its end (`zz._closed_0._@.M._hyg.3`
+  is a closed term of `zz._@.M._hyg.3`).
+- **Why:** `Name.append` reinterprets the macro scopes of a hygienic
+  component and panicked on a prefix ending in `_hyg`: lean2rr printed
+  "unreachable @ extractMainModule" for any macro-made declaration (round
+  6 RV6L-04, 40ebf2c).
+- **Where:** `Emit/Startup.lean`: `nameOfComponents`;
+  `CompileRecord.lean`: `compiledOwner`, `closedTermOwner?`;
+  `Lower/Conv.lean`: `sourceDecls`.
+- **Remove only if:** never.
+
+### The toolchain's `initialize` constants come first
+
+- **What:** Before the program's own items, the startup runs the
+  `initialize` constants of toolchain modules that the program uses
+  (`IO.stdGenRef`), in module order. Other toolchain constants are
+  evaluated lazily, once.
+- **Why:** Natively the toolchain's initializers run first. Native Lean
+  also evaluates every toolchain constant at startup, with no visible
+  effect, so evaluating only the ones the program uses, on first use, is
+  indistinguishable, and only those are translated.
+- **Where:** `Emit/Entry.lean`: `startupSteps`; `CompileRecord.lean`:
+  `isToolchainModule`.
+- **Remove only if:** never.
+
+### The startup chain is cut into chunks of 128 steps
+
+- **What:** The startup steps are emitted as functions of at most 128
+  steps each (`l2r_init_chunk_N`), called in order, with a further level
+  of grouping when there are more than 128 chunks; `l2r_init_body` runs
+  them. An initializer's error is reported like an uncaught exception of
+  `main` (exit 1), and later initializers do not run.
+- **Why:** One chain of nested matches would be as deep as the program has
+  initializers, and rrc's recursive lowering overflows its stack on a few
+  thousand (5000 initializers; adv3 CN3-07, 96a1ef7).
+- **Where:** `Emit/Startup.lean`: `startupChunk`, `startupChain`;
+  required part `startup-chunks` in `Opt/Registry.lean`.
+- **Remove only if:** rrc lowers deep nests without recursion.
+
+### lean2rr never runs the program's initializers
+
+- **What:** lean2rr loads extension states without Lean's init step.
+- **Why/Where:** see
+  [../translator.md](../translator.md#extension-states-are-loaded-without-running-initializers).
+- **Remove only if:** never.

@@ -53,10 +53,14 @@ pub fn defer(p: usize, step: Step) {
 }
 
 /// Run `step` on `p` until it is finished, and everything it pushes; or,
-/// inside a running free, push it.
+/// inside a running free, push it. When the free is over, the dependents of
+/// the promises it resolved are walked (`task::resolve`).
 #[inline(never)]
 pub fn run(p: usize, step: Step) {
     reussir_rt::drop::run_step(p, step);
+    if !active() {
+        crate::task::run_later_walks();
+    }
 }
 
 #[inline(always)]
@@ -103,11 +107,6 @@ impl<T: Clone> Drop for Vec<T> {
         let p = unsafe { *(self as *const Self as *const usize) };
         let c = count(p);
         if c > 1 {
-            // An array a conversion built is also held by the origin table
-            // (`crate::origin`) until the program drops it.
-            if c == 2 && crate::origin::release_shared(p) {
-                return;
-            }
             unsafe { *(p as *mut u32) = c - 1 };
         } else {
             free_vec::<T>(p);

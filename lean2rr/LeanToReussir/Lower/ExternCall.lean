@@ -29,7 +29,7 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     return some (.block ⟨#[(e, some (.named "u64"), .call prim #[] #[args[0]!])],
       .call "l2r_unreachable" #[rt] #[]⟩)
   | _ => pure ()
-  -- `ptrAddrUnsafe`: what native Lean answers (see `addrOf`).
+  -- `ptrAddrUnsafe` (see `addrOf`).
   if (← externSymbol orig) == "lean_ptr_addr" then
     let some p := params[0]? | return none
     return some (← addrOf args[0]! (← lowerType p))

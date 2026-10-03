@@ -20,7 +20,7 @@ END = "// END GENERATED: tagarr"
 # kind, array type, element type, codec functions (Reussir source)
 CODECS = {
     "nat": ("LNatArr", "Nat", """
-// Elements are `Nat` words (see the Nat section): `(v << 1) | 1` for a small
+// Elements are `Nat` words (see the Nat section): `lean_box` of a small
 // value, an owned reference to a big number otherwise; the handles move in
 // and out as their words. The array is consumed once (a second use in one
 // branch would make Reussir release it out of line in the other): a big

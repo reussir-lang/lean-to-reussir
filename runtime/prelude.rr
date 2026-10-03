@@ -32,8 +32,9 @@ enum [value] L2RUnit {
 }
 
 // A Lean `String`: valid UTF-8 bytes and the number of characters (Lean's
-// `m_length`, kept by every operation), copy-on-write.
-#[ffi(rust = "::reussir_rt::rc::Rc<(::std::vec::Vec<u8>, u64)>")]
+// `m_length`, kept by every operation), copy-on-write; one block like
+// Lean's string object (`leanrt::string`).
+#[ffi(rust = "::leanrt::string::LStr")]
 pub struct LStr;
 
 // A Lean `Nat` / `Int`: one word, Lean's own encoding (leanrt::nat). An odd
@@ -56,8 +57,10 @@ pub struct Int;
 #[ffi(rust = "::leanrt::drop::Vec")]
 pub struct RVec<T>;
 
-// A mutable reference cell (`ST.Ref`/`IO.Ref`): a shared 0-or-1 element
-// vector, mutated in place through every alias (empty after `take`).
+// A shared runtime cell: a 0-or-1 element vector, mutated in place through
+// every alias (empty after `take`). No longer used by generated code:
+// references are lean2rr-generated records around a Reussir `Cell`
+// (`l2r_rc_*` below), and promises hold an `LCell`.
 #[ffi(rust = "::leanrt::drop::Vec")]
 pub struct LRef<T>;
 
@@ -455,6 +458,12 @@ fn lean_nat_pow(a : Nat, b : Nat) -> Nat {
 
 #[ffi(import)]
 fn lean_nat_gcd(a : Nat, b : Nat) -> Nat [{ leanrt::nat::nat_gcd(a.into_raw(), b.into_raw()) }];
+
+// One shared empty string (a new reference, no allocation): the
+// placeholder of a string parameter that is never read (lean2rr's
+// Opt/StateMachines).
+#[ffi(import)]
+fn l2r_str_shared_empty() -> LStr [{ leanrt::string::shared_empty() }];
 
 // Decimal representation (`Nat.repr`); lean2rr replaces Lean's `Nat.repr`
 // and `Nat.reprFast` with it (the former builds big numbers digit by digit).
@@ -1448,9 +1457,8 @@ fn l2r_string_compare(a : LStr, b : LStr) -> u8 [{ { let r = leanrt::string::com
 #[ffi(import)]
 fn lean_string_hash(s : LStr) -> u64 [{ { let r = leanrt::string::hash(s.utf8()); leanrt::rc_release(s); r } }];
 
-// `String.toUTF8` / `String.ofByteArray` / `String.fromUTF8`: the buffer of
-// a unique value moves (natively these copy); from bytes, the characters are
-// counted.
+// `String.toUTF8` / `String.ofByteArray` / `String.fromUTF8`: copies, as
+// natively; from bytes, the characters are counted.
 #[ffi(import)]
 fn lean_string_to_utf8(s : LStr) -> RVec<u8> [{ leanrt::array::bytes_of_string(s) }];
 #[ffi(import)]
@@ -1746,10 +1754,10 @@ fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> {
 // `LIntArr`, and calls `lean_natarr_xxx` / `l2r_natarr_xxx` (`intarr`) in
 // place of `lean_array_xxx<E>` / `l2r_array_xxx<E>`.
 
-#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+#[ffi(rust = "::leanrt::tagvec::TagVec")]
 pub struct LNatArr;
 
-#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+#[ffi(rust = "::leanrt::tagvec::TagVec")]
 pub struct LIntArr;
 
 // BEGIN GENERATED: tagarr (runtime/gen_tagarr.py)
@@ -1787,7 +1795,7 @@ fn l2r_natarr_truncate(a : LNatArr, n : u64) -> LNatArr [{ leanrt::tagvec::trunc
 fn l2r_natarr_reverse(a : LNatArr) -> LNatArr [{ leanrt::tagvec::reverse(a) }];
 
 
-// Elements are `Nat` words (see the Nat section): `(v << 1) | 1` for a small
+// Elements are `Nat` words (see the Nat section): `lean_box` of a small
 // value, an owned reference to a big number otherwise; the handles move in
 // and out as their words. The array is consumed once (a second use in one
 // branch would make Reussir release it out of line in the other): a big
@@ -2105,7 +2113,23 @@ fn l2r_diag_println(s : LStr) -> u64 { l2r_stderr_put(lean_string_push(s, 10)) }
 
 fn l2r_rc_get<T>(c : Cell<T>) -> T { core::intrinsic::cell::get(c) }
 
+// As natively (`lean_st_ref_set`), the new value is stored before the old
+// one is released, so code that the release runs (the `sync` dependents of
+// a promise it drops, `leanrt::task::resolve`) sees the new value. Reussir's
+// `cell::set` releases the old value before the store: the old value is
+// taken (a second reference) and released after the store, by an FFI call
+// (`l2r_release_after`), which Reussir keeps there. For a type that cannot
+// cross the FFI boundary lean2rr calls `l2r_rc_put` (`refSetFn`).
 fn l2r_rc_set<T>(c : Cell<T>, v : T) -> u64 {
+    let old = core::intrinsic::cell::get(c);
+    core::intrinsic::cell::set(c, v);
+    l2r_release_after<T>(old)
+}
+
+// `l2r_rc_set` for a cell whose value's release runs nothing: a scalar, a
+// unit or enumeration value (a `[value]` type, which cannot cross the FFI
+// boundary).
+fn l2r_rc_put<T>(c : Cell<T>, v : T) -> u64 {
     core::intrinsic::cell::set(c, v);
     0
 }
@@ -2116,8 +2140,9 @@ fn l2r_rc_swap<T>(c : Cell<T>, v : T) -> T {
     old
 }
 
-// `LRef<T>`: a shared cell of the runtime (a 0-or-1 element vector), used
-// for promises.
+// `LRef<T>`: a shared cell of the runtime (a 0-or-1 element vector). Not
+// used by generated code any more (promises hold the `LCell` of their
+// task); kept with its functions.
 
 #[ffi(import)]
 fn l2r_ref_new<T>(v : T) -> LRef<T> [{ leanrt::array::from_rc(Rc::new(vec![v])) }];
@@ -2131,13 +2156,15 @@ fn l2r_ref_get<T>(r : LRef<T>) -> T [{
     }
 }];
 
+// The old value is released after the new one is stored (`l2r_rc_set`).
 #[ffi(import)]
 fn l2r_ref_set<T>(r : LRef<T>, v : T) -> u64 [{
     {
         let mut c = leanrt::array::into_rc(r);
         let cell = unsafe { c.data_mut() };
-        cell.clear();
+        let old = cell.pop();
         cell.push(v);
+        drop(old);
         0
     }
 }];
@@ -2330,10 +2357,12 @@ fn l2r_std_pop(base : u64) -> u64 [{ { leanrt::once::pop_context(base, 3); 0 } }
 //
 // A `Thunk α` or `Task α` is an `LCell<S>` whose state type `S` lean2rr
 // generates per value type: `enum S { pending(L2RUnit -> α), busy, done(α),
-// conv(L2RUnit -> α, L2RBox, u64) }` (a shared enum; `conv` is a thunk or
-// task converted from another representation: its computation, the original
-// cell, and for a task the original's identity). lean2rr also generates the functions that force the
-// state (`l2r_thunk_get_S`, `l2r_task_get_S`, ...): a thunk runs its closure
+// conv(L2RUnit -> α, L2RBox) }` (a shared enum; `conv` is a thunk or task
+// converted from another representation: its computation and the original
+// cell; a task's also holds the original's address, its identity for
+// `leanrt::task`; tasks also have a `bind` state). lean2rr also generates
+// the functions that force the state (`l2r_thunk_get_S`, `l2r_task_get_S`,
+// ...): a thunk runs its closure
 // on first `get` and keeps the value; a task created after `main` has
 // started stays pending until it is needed or `main` returns (during module
 // initialization it is computed at once). `leanrt::task` keeps the queues
@@ -2354,11 +2383,13 @@ fn l2r_lcell_new<T>(v : T) -> LCell<T> [{
 #[ffi(import)]
 fn l2r_lcell_get<T>(c : LCell<T>) -> T [{ c.data_ref().clone() }];
 
+// The old state is released after the new one is stored (`l2r_rc_set`).
 #[ffi(import)]
 fn l2r_lcell_set<T>(c : LCell<T>, v : T) -> u64 [{
     {
         let mut c = c;
-        unsafe { *c.data_mut() = v };
+        let old = unsafe { ::std::mem::replace(c.data_mut(), v) };
+        drop(old);
         0
     }
 }];
@@ -2486,6 +2517,28 @@ fn l2r_task_query_at(a : u64) -> u8 [{ leanrt::task::query(a as usize) }];
 
 #[ffi(import)]
 fn l2r_task_deferring() -> bool [{ leanrt::task::deferring() }];
+
+// A constant whose value may hold tasks waits for them when it is first
+// computed (lean2rr's `l2r_persist_T`, as native `lean_mark_persistent`):
+// a walk over its cells, skipped when every task has finished
+// (`l2r_task_settled`). The walk visits each cell once
+// (`l2r_persist_seen`: whether walk `h` has seen it, else it records it)
+// and keeps what it reads out of thunks and tasks until it ends
+// (`l2r_persist_keep`), so that no cell it has seen is freed meanwhile.
+#[ffi(import)]
+fn l2r_task_settled() -> bool [{ leanrt::task::settled() }];
+
+#[ffi(import)]
+fn l2r_persist_begin() -> u64 [{ leanrt::persist::begin() }];
+
+#[ffi(import)]
+fn l2r_persist_seen<T>(h : u64, v : T) -> bool [{ leanrt::persist::seen::<[:T:]>(h, v) }];
+
+#[ffi(import)]
+fn l2r_persist_keep<T>(h : u64, v : T) -> u64 [{ leanrt::persist::keep::<[:T:]>(h, v) }];
+
+#[ffi(import)]
+fn l2r_persist_end(h : u64) -> u64 [{ leanrt::persist::end(h) }];
 
 #[ffi(import)]
 fn l2r_task_manager_start() -> u64 [{ { leanrt::task::start(); 0 } }];
@@ -2858,7 +2911,7 @@ fn lean_dbg_trace<T>(msg : LStr, f : L2RUnit -> T) -> T {
 fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
     {
         let name = ::std::any::type_name::<[:T:]>();
-        let boxed = name.starts_with("reussir_rt::") && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
+        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::tagvec::") || name.starts_with("leanrt::string::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
         let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
         let shared = boxed && (p >> 56) == 0 && {
             let c = unsafe { *(p as *const u32) };
@@ -2879,7 +2932,7 @@ fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
 fn l2r_shared_check<T>(a : T) -> T [{
     {
         let name = ::std::any::type_name::<[:T:]>();
-        let boxed = name.starts_with("reussir_rt::") && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
+        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::tagvec::") || name.starts_with("leanrt::string::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
         let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
         let shared = boxed && (p >> 56) == 0 && {
             let c = unsafe { *(p as *const u32) };
@@ -2917,16 +2970,18 @@ fn lean_dbg_sleep<T>(ms : u32, f : L2RUnit -> T) -> T {
     f(L2RUnit::u{})
 }
 
-// `ptrAddrUnsafe` (lean2rr's `addrOf`): what native Lean answers. A value
-// natively represented by a boxed scalar answers that word, `lean_box(n) =
-// 2n+1`: a `Nat` below 2^63, an `Int` in the `int32` range (its 32 bits),
-// `UInt8/16/32`, `Char`, `Bool`, enumerations (their index), nullary
-// constructors (their index), `Unit` (`box(0) = 1`). A heap value answers its
-// handle pointer (below). A `[value]` struct answers its field's. `UInt64`,
-// `Float` and the like are natively boxed into a new cell at every call
-// (`ptrEq x x` is only true once Lean's CSE merged the two calls): they
-// answer a fresh number (`l2r_addr_fresh`), and a `Box` holding one answers
-// the `Box` cell (natively the cell that boxing made).
+// `ptrAddrUnsafe` (lean2rr's `addrOf`). Native pointer identity is not
+// emulated: a heap value answers the address of its cell in its own
+// representation (`l2r_ptr_addr_obj`, `l2r_ptr_addr_rec`), a scalar a word
+// computed from its value: `lean_box(n) = 2n+1` for `UInt8/16/32`, `Char`,
+// `Bool` and enumerations (their index), `1` for `Unit`; the bits of a
+// `UInt64` or `Float`. A `Nat` or `Int` answers its word, which is native
+// Lean's: its boxed scalar when small (a `Nat` below 2^63, an `Int` in the
+// `int32` range), else the pointer to its big number object. Equal answers
+// mean the same cell or equal values (`ptrEq` as a shortcut for equality
+// stays right). `l2r_addr_fresh` (a number answered only once: even, in
+// [2^62, 2^63), so never a scalar's word or a pointer) serves values with
+// neither.
 
 fn l2r_addr_word(w : u64) -> u64 { w + w + 1 }
 
@@ -2948,46 +3003,43 @@ fn l2r_addr_int(i : Int) -> u64 {
     if (w & 1) == 1 { w } else { let d = l2r_int_drop_raw(w); w }
 }
 
-// `ptrAddrUnsafe` of a heap value that lean2rr passes as it is (not a
-// wrapper built for the call): its handle pointer, whatever its count. The
-// value is the Lean object itself, so its address is its identity even when
-// this call holds its last reference (`ptrEq a b` where `a`'s own call
-// released the other reference to the same object).
-//
-// A value lean2rr converted to another representation answers the address
-// of the value it was converted from (`leanrt::origin`).
+// A heap value's handle pointer, whatever its count: the address is the
+// identity even when this call holds the last reference (`ptrEq a b`
+// where `a`'s own call released the other reference to the same cell:
+// both were live when the comparison started, so their cells differ
+// unless they are the same).
 #[ffi(import)]
 fn l2r_ptr_addr_obj<T>(a : T) -> u64 [{
     {
         let size = ::std::mem::size_of::<[:T:]>();
         if size == ::std::mem::size_of::<usize>() {
             let p = unsafe { *(&a as *const [:T:] as *const usize) };
-            leanrt::origin::addr(p).unwrap_or(p as u64)
+            p as u64
         } else {
             leanrt::fresh_addr()
         }
     }
 }];
 
-// The same for a shared Reussir record (a generated struct or enum). The
-// reference the call received is given back inline when others remain (a
-// record's count is the `u32` at its address; static cells and immediates,
-// tagged in the top byte, and a last reference go through the record's
-// release), so that the call costs no out-of-line release: `ptrEq` in a
-// traversal (`Expr.replace`) spent 40% of its time there.
+// The same for a shared Reussir record (a generated struct or enum, a
+// function value, a `Box`). The reference the call received is given back
+// inline when others remain (a record's count is the `u32` at its address;
+// static cells and immediates, tagged in the top byte or with an immortal
+// count, and a last reference go through the record's release), so that
+// the call costs no out-of-line release: `ptrEq` in a traversal
+// (`Expr.replace`) spent 40% of its time there.
 #[ffi(import)]
 fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
     {
         let p = unsafe { *(&a as *const [:T:] as *const usize) };
-        let id = leanrt::origin::addr(p).unwrap_or(p as u64);
         if (p >> 56) == 0 {
             let c = unsafe { *(p as *const u32) };
-            if c > 1 {
+            if c > 1 && c < 0x8000_0000 {
                 unsafe { *(p as *mut u32) = c - 1 };
                 ::std::mem::forget(a);
             }
         }
-        id
+        p as u64
     }
 }];
 
@@ -2996,18 +3048,6 @@ fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
 // after the call. Returns 0.
 #[ffi(import)]
 fn l2r_release_after<T>(x : T) -> u64 [{ { drop(x); 0 } }];
-
-// Conversion origins (`leanrt::origin`): `l2r_origin_note(src, dst, code)`
-// records that `dst` was converted from `src` (whose representation
-// lean2rr numbers `code`) and returns `dst`; `l2r_origin_back(x, code)`
-// says whether `x` was converted from a value of representation `code`,
-// which `l2r_origin_take(x)` then gives back.
-#[ffi(import)]
-fn l2r_origin_note<S, D>(src : S, dst : D, code : u64) -> D [{ leanrt::origin::note::<[:S:], [:D:]>(src, dst, code) }];
-#[ffi(import)]
-fn l2r_origin_back<S>(x : S, code : u64) -> bool [{ leanrt::origin::back::<[:S:]>(x, code) }];
-#[ffi(import)]
-fn l2r_origin_take<S, D>(x : S) -> D [{ leanrt::origin::take::<[:S:], [:D:]>(x) }];
 
 // A shared record or array used at another Reussir type with the same
 // layout (lean2rr's `retypable`: instantiations differing only in phantom
