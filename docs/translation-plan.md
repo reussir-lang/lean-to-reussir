@@ -2787,11 +2787,14 @@ Each item says what differs and when.
   can tell). Timers count from the monotonic clock when they start
   (libuv from its loop's cached time, which can make a timer fire a little
   earlier). A promise the loop gives up without resolving it (a timer
-  stopped, reset or re-armed, an operation whose start failed) is released
-  on the loop's context, at its next turn, where natively the C function
-  releases it at once: when that was the last reference, the promise is
-  resolved with `none`, and its `sync` dependents run, that much later
-  (generated code does not run inside a runtime primitive).
+  re-armed, an operation whose start failed) is released on the loop's
+  context, at its next turn, where natively the C function releases it at
+  once: when that was the last reference, the promise is resolved with
+  `none`, and its `sync` dependents run, that much later (generated code
+  does not run inside a runtime primitive). A timer's or signal watcher's
+  `stop` and `cancel` hand their promise back to the extern's glue, which
+  releases it on the caller's context once the primitive has returned, as
+  natively on the calling thread (tests `RtTimerStopDropped`).
 - *Promises released inside a free* (§5.14): the `sync` dependents of a
   promise dropped unresolved because a container holding it is freed run
   once the whole free is over, where natively they run when the free

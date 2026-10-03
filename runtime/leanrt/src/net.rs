@@ -263,12 +263,22 @@ impl Pending {
         fire(self.ready);
     }
     fn cancel(self) {
+        fire(self.cancel_here());
+    }
+    /// Cancel, returning the promise for the caller to drop (its
+    /// continuation does nothing).
+    fn cancel_here(self) -> LPromise {
         let o = op(&self.op);
         o.done = true;
         o.canceled = true;
-        fire(self.ready);
+        self.ready
     }
 }
+
+/// Promises a primitive gave up, for its caller to drop once the primitive
+/// has returned (`timer_stop`): the continuation of a canceled operation,
+/// then the program's promise.
+pub type GivenUp = [Option<LPromise>; 2];
 
 /// Complete operation `o` (its promise `r`) now: the continuation runs on
 /// the event loop's context (as a libuv callback on its next iteration).
@@ -588,15 +598,15 @@ pub fn timer_reset(h: &LHandle) {
 }
 
 /// `stop`: the current promise is dropped unresolved, and a running timer
-/// finishes.
-pub fn timer_stop(h: &LHandle) {
+/// finishes. The promise (and the continuation that held it) are returned:
+/// the caller drops them once the primitive has returned
+/// (`l2r_shim_timer_ctl_h`), on its own context, as natively
+/// `lean_uv_timer_stop` releases the promise on the calling thread (its
+/// `sync` dependents run there, before `stop` returns).
+pub fn timer_stop(h: &LHandle) -> GivenUp {
     let t = timer(h);
-    if let Some(old) = t.promise.take() {
-        release(old);
-    }
-    if let Some(p) = t.pending.take() {
-        p.cancel();
-    }
+    let old = t.promise.take();
+    let r = t.pending.take().map(Pending::cancel_here);
     if t.state == RUNNING {
         t.state = FINISHED;
         if t.signum != 0 {
@@ -605,19 +615,17 @@ pub fn timer_stop(h: &LHandle) {
             remove_timer(h);
         }
     }
+    [r, old]
 }
 
 /// `cancel`: a running repeating timer drops its promise and goes on; a
-/// one-shot one stops and can be started again.
-pub fn timer_cancel(h: &LHandle) {
+/// one-shot one stops and can be started again. The promises are returned,
+/// for the caller to drop (as `timer_stop`).
+pub fn timer_cancel(h: &LHandle) -> GivenUp {
     let t = timer(h);
     if t.state == RUNNING && t.promise.is_some() {
-        if let Some(old) = t.promise.take() {
-            release(old);
-        }
-        if let Some(p) = t.pending.take() {
-            p.cancel();
-        }
+        let old = t.promise.take();
+        let r = t.pending.take().map(Pending::cancel_here);
         if !t.repeating {
             t.state = INITIAL;
             if t.signum != 0 {
@@ -626,7 +634,9 @@ pub fn timer_cancel(h: &LHandle) {
                 remove_timer(h);
             }
         }
+        return [r, old];
     }
+    [None, None]
 }
 
 /// A timer or signal watcher fires (`handle_timer_event`,

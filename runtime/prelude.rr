@@ -3228,11 +3228,21 @@ fn l2r_shim_timer_promise(t : LHandle) -> LPromise [{ { let p = leanrt::net::tim
 fn l2r_shim_timer_start(t : LHandle, p : LPromise, r : LPromise) -> LHandle [{ { let o = leanrt::net::timer_start(&t, p, r); leanrt::rc_release(t); o } }];
 #[ffi(import)]
 fn l2r_shim_timer_set(t : LHandle, p : LPromise, r : LPromise) -> LHandle [{ { let o = leanrt::net::timer_set(&t, p, r); leanrt::rc_release(t); o } }];
+// `stop` and `cancel` give up the timer's promise: dropped here, once the
+// primitive has returned, so its `sync` dependents run on the caller's
+// context, as natively on the calling thread (`leanrt::net::GivenUp`).
 #[ffi(import)]
 fn l2r_shim_timer_ctl_h(t : LHandle, which : u8) -> u64 [{
     {
-        match which { 0 => leanrt::net::timer_reset(&t), 1 => leanrt::net::timer_stop(&t), _ => leanrt::net::timer_cancel(&t) }
+        let given_up = match which {
+            0 => { leanrt::net::timer_reset(&t); [None, None] }
+            1 => leanrt::net::timer_stop(&t),
+            _ => leanrt::net::timer_cancel(&t),
+        };
         leanrt::rc_release(t);
+        for p in given_up {
+            drop(p);
+        }
         0
     }
 }];

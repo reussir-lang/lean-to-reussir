@@ -330,7 +330,10 @@ handle (`OpSt`: done, canceled, code, a synchronous error, bytes, address,
 strings, a new socket) read by `l2r_shim_op_*`. An operation completing
 later takes a promise `r` from the shim and drops it (on the event loop's
 own context, `sched::ensure_evloop`) when it completes, which runs the
-shim's continuation (a `sync` dependent of `r`). `net::wait` polls the
+shim's continuation (a `sync` dependent of `r`). A timer's `stop` and
+`cancel` (`timer_ctl`) instead hand the program's promise and `r` back
+(`net::GivenUp`) to the glue, which drops them once the primitive has
+returned, on the caller's context, as natively. `net::wait` polls the
 watched descriptors (and the signal handler's pipe: libuv's loop signal
 pipe, which the runtime opens at startup, `rt::signal_pipe`) with the
 earliest timer as timeout. The primitives (`l2r_shim_*`, the payloads of
