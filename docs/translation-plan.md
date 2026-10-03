@@ -1728,7 +1728,10 @@ Native Lean behaves as follows (observed; `EmitC.emitInitFn`):
 
 A constant whose code only builds unboxed values from small literals and
 constructors (`Int.ofNat 0`, an enumeration value) is recomputed at every
-use instead of cached. It cannot panic, trace or allocate, so this is
+use instead of cached. Every `Nat` or `Int` it builds must be small (a
+`Nat` below 2^63, an `Int` in `int32`; `def K : Int := 3000000000` is a
+big number, which is cached: recomputed it would be allocated at every
+use, RV8N-01). It cannot panic, trace or allocate, so this is
 unobservable, and it is cheaper than a once-cell read (optional pass
 `cheap-consts`). A closed term referenced exactly once, by another constant
 (the steps of an array literal, `_closed_k := push _closed_(k-1) e_k`), is

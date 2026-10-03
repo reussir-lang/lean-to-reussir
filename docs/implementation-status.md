@@ -445,7 +445,7 @@ soundness.
 | `split-map-loops` | an `Array.map` that changes the element representation writes a new array instead of going through `Box` |
 | `placeholder-cache` | Lean's placeholder values built once |
 | `float-lits` | float literals computed at compile time |
-| `cheap-consts` | constants made of small literals recomputed instead of cached |
+| `cheap-consts` | constants made of small literals (one-word `Nat`/`Int` values only) recomputed instead of cached |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code |
 | `jp-sink`, `jp-small` | join points moved to where they are used; small ones duplicated |
 | `state-machines` | loops through join points entered without allocation |
