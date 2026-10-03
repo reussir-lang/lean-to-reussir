@@ -86,10 +86,7 @@ partial def finishUnboxFns : LowerM Unit := do
     let arrays := (← get).unboxArrTargets.map fun (t, f) => (f, t)
     let fns := (← get).fnUnboxTargets.map fun t => (s!"l2r_unbox_fn_{t.enc}", t)
     let pending := (nominal ++ arrays ++ fns).filter fun (f, _) => done.getD f 0 != nvars + 1
-    -- The identity of a `Box` (`genBoxAddr`) matches every variant too.
-    let boxAddrPending := (← get).boxAddrWanted && (← get).boxAddrDone != nvars
-    if pending.isEmpty && !boxAddrPending then break
-    if boxAddrPending then genBoxAddr
+    if pending.isEmpty then break
     for (fname, t) in pending do
       let th? ← match t with
         | .named tn => nominalHead tn
@@ -251,12 +248,6 @@ partial def finishFnValues : LowerM Bool := do
       genApply t j
       modify fun s => { s with fnApplyDone := s.fnApplyDone.insert (t, j) nv }
       progress := true
-    for t in (← get).fnAddrTargets do
-      let nv := ((← get).fnVariants.getD t #[]).size
-      if (← get).fnAddrDone[t]? == some nv then continue
-      genFnAddr t
-      modify fun s => { s with fnAddrDone := s.fnAddrDone.insert t nv }
-      progress := true
     if !progress then break
     any := true
   return any
@@ -265,9 +256,8 @@ partial def finishFnValues : LowerM Bool := do
 line (`#[transform_anchor]`, see `Emit/Program`): the conversions between
 representations of a function type (`l2r_fconv_S_T`), the unboxing
 functions (`l2r_unbox_…`: to a nominal type, an array, a function type),
-the application and identity functions of a function type with wrapped
-values of other representations (their `w<S>` arms apply or inspect the
-wrapped value at `S`), and the application functions of the function types
+the application functions of a function type with wrapped values of other
+representations (their `w<S>` arms apply the wrapped value at `S`), and the application functions of the function types
 of uniform code (types that mention `Box`), whose arms call the targets of
 the uniform code.
 
@@ -298,8 +288,6 @@ def anchoredFns : LowerM (Std.HashSet String) := do
   for (_, f) in st.unboxArrTargets do out := out.insert f
   for (t, j) in st.fnApplies do
     if wraps t || (t.subterms).contains RR.Ty.box then out := out.insert (applyFnName t j)
-  for t in st.fnAddrTargets do
-    if wraps t then out := out.insert s!"l2r_fn_addr_{t.enc}"
   return out
 
 /-- The fields of the variants of function type `t`, besides `z`/`raw`. -/

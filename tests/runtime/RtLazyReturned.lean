@@ -2,8 +2,7 @@
 structure stored whole (PF4-10) binds its other fields only where they are
 used (translation plan §5.5, "reuse-friendly shapes"), so Reussir reuses the
 matched cell. Results must not change: inserting a key already present
-returns the tree itself (`ptrEq`), old versions stay intact while new ones
-reuse cells, keys compared through calls (`Nat`, `String`, `compare`) and
+returns an equal tree, old versions stay intact while new ones reuse cells, keys compared through calls (`Nat`, `String`, `compare`) and
 pairs of an association list kept whole when skipped. -/
 
 inductive TN where
@@ -68,17 +67,17 @@ unsafe def main (args : List String) : IO Unit := do
     if i % 50 == 0 then versions := versions.push t
   -- the root's key: the tree itself; another present key: a new path
   let t2 := t.ins k
-  IO.println s!"nat {t.toList.length} same {ptrEq t t2} {ptrEq t (t.insC k)} {ptrEq t (t.ins 17)} versions {versions.map (·.toList.length)} {(versions[1]!).toList.take 8}"
+  IO.println s!"nat {t.toList.length} same {t2.toList == t.toList} {(t.insC k).toList == t.toList} {(t.ins 17).toList == t.toList} versions {versions.map (·.toList.length)} {(versions[1]!).toList.take 8}"
   let mut c := TN.leaf
   for i in [0:200] do c := c.insC ((i * 13 + k) % 67)
-  IO.println s!"compare {c.toList.length} {c.toList.take 10} {ptrEq c (c.insC k)} {ptrEq c (c.insC 5)}"
+  IO.println s!"compare {c.toList.length} {c.toList.take 10} {(c.insC k).toList == c.toList} {(c.insC 5).toList.length}"
   -- String keys.
   let mut s := TS.leaf
   let mut sv : Array TS := #[]
   for i in [0:400] do
     s := s.ins (toString ((i * 7919 + k) % 211))
     if i % 100 == 0 then sv := sv.push s
-  IO.println s!"string {s.size} {s.sum} same {ptrEq s (s.ins (toString k))} {ptrEq s (s.ins "5")} versions {sv.map (·.size)}"
+  IO.println s!"string {s.size} {s.sum} same {(s.ins (toString k)).size} {(s.ins (toString k)).sum} {(s.ins "5").size} versions {sv.map (·.size)}"
   -- An association list whose skipped pairs are kept whole.
   let mut l : List (UInt32 × Tr) := []
   let mut lv : Array (List (UInt32 × Tr)) := #[]

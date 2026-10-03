@@ -252,14 +252,6 @@ structure LowerState where
   taskTags : Array String := #[]
   /-- Names of generated thunk/task helper functions (see `lazyFn`). -/
   lazyFnNames : Std.HashSet String := {}
-  /-- Function types whose identity function (`l2r_fn_addr_T`, see `addrOf`)
-  is requested, and the variant count its body was generated for. -/
-  fnAddrTargets : Array RR.Ty := #[]
-  fnAddrDone : Std.HashMap RR.Ty Nat := {}
-  /-- Whether `l2r_box_addr` is requested, and the `Box` variant count its
-  body was generated for. -/
-  boxAddrWanted : Bool := false
-  boxAddrDone : Nat := 0
   /-- Reference types (see `refType`): element type ↦ name, and back (with
   how the cell stores the element). -/
   refTypes : Std.HashMap RR.Ty String := {}

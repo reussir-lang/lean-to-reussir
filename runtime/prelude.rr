@@ -3434,64 +3434,42 @@ fn lean_dbg_sleep<T>(ms : u32, f : L2RUnit -> T) -> T {
     f(L2RUnit::u{})
 }
 
-// `ptrAddrUnsafe` (lean2rr's `addrOf`): what native Lean answers. A value
-// natively represented by a boxed scalar answers that word, `lean_box(n) =
-// 2n+1`: a `Nat` below 2^63, an `Int` in the `int32` range (its 32 bits),
-// `UInt8/16/32`, `Char`, `Bool`, enumerations (their index), nullary
-// constructors (their index), `Unit` (`box(0) = 1`). A heap value answers its
-// handle pointer (below). A `[value]` struct answers its field's. `UInt64`,
-// `Float` and the like are natively boxed into a new cell at every call
-// (`ptrEq x x` is only true once Lean's CSE merged the two calls): they
-// answer a fresh number (`l2r_addr_fresh`), and a `Box` holding one answers
-// the `Box` cell (natively the cell that boxing made).
+// `ptrAddrUnsafe` (lean2rr's `addrOf`). Native pointer identity is not
+// emulated: a heap value answers the address of its cell in its own
+// representation (`l2r_ptr_addr_obj`, `l2r_ptr_addr_rec`), a scalar a word
+// computed from its value: `lean_box(n) = 2n+1` for a `Nat` below 2^63, an
+// `Int` in the `int32` range (its 32 bits), `UInt8/16/32`, `Char`, `Bool`
+// and enumerations (their index), `1` for `Unit`; the bits of a `UInt64`
+// or `Float`. Equal answers mean the same cell or equal values (`ptrEq`
+// as a shortcut for equality stays right); values without either (a `Nat`
+// from 2^63 to 2^64, an `Int` outside `int32`) answer a number answered
+// only once (`l2r_addr_fresh`: even, in [2^62, 2^63), so never a scalar's
+// word or a pointer).
 
 fn l2r_addr_word(w : u64) -> u64 { w + w + 1 }
 
 #[ffi(import)]
 fn l2r_addr_fresh() -> u64 [{ leanrt::fresh_addr() }];
 
-// A `Nat` from 2^63 to 2^64 is natively a big number object (one per
-// computation); here it has no object, so it answers a number computed from
-// its value: even (never a boxed scalar), and scrambled, so that the values
-// that land on real pointers (a `Big` handle's address) are unlikely ones.
-// Equal values are therefore `ptrEq` (natively only the same object is).
 fn l2r_addr_nat(n : Nat) -> u64 {
     match n {
-        Nat::Small(x) => if (x >> 63) == 0 { x + x + 1 } else { (x + x) ^ 6510615555426900570 },
+        Nat::Small(x) => if (x >> 63) == 0 { x + x + 1 } else { l2r_addr_fresh() },
         Nat::Big(b) => l2r_ptr_addr_obj<LBig>(b)
     }
 }
 
-// An `Int` in the `int32` range is natively the boxed scalar of its 32 bits
-// (`lean_int64_to_int`); others are big number objects. An `i64` outside
-// that range answers a number computed from its value (as `l2r_addr_nat`):
-// the bits rotated left by one, which is injective, except that the 2^32
-// values landing on a boxed `int32` word are moved to the words the
-// rotation gives the `int32` values themselves (unused otherwise).
 fn l2r_addr_int(i : Int) -> u64 {
     match i {
-        Int::Small(x) => if ((x as i32) as i64) == x { l2r_addr_word((x as u32) as u64) } else { l2r_addr_int_wide(x) },
+        Int::Small(x) => if ((x as i32) as i64) == x { l2r_addr_word((x as u32) as u64) } else { l2r_addr_fresh() },
         Int::Big(b) => l2r_ptr_addr_obj<LBig>(b)
     }
 }
 
-fn l2r_addr_int_wide(x : i64) -> u64 {
-    let u : u64 = x as u64;
-    let r : u64 = (u << 1) | (u >> 63);
-    let lim : u64 = 8589934592;
-    if (r & 1) == 1 {
-        if r < lim {
-            let w : u64 = r >> 1;
-            if w < 2147483648 { w + w } else { (w + w + 1) - lim }
-        } else { r }
-    } else { r }
-}
-
-// `ptrAddrUnsafe` of a heap value that lean2rr passes as it is (not a
-// wrapper built for the call): its handle pointer, whatever its count. The
-// value is the Lean object itself, so its address is its identity even when
-// this call holds its last reference (`ptrEq a b` where `a`'s own call
-// released the other reference to the same object).
+// A heap value's handle pointer, whatever its count: the address is the
+// identity even when this call holds the last reference (`ptrEq a b`
+// where `a`'s own call released the other reference to the same cell:
+// both were live when the comparison started, so their cells differ
+// unless they are the same).
 #[ffi(import)]
 fn l2r_ptr_addr_obj<T>(a : T) -> u64 [{
     {
@@ -3505,25 +3483,25 @@ fn l2r_ptr_addr_obj<T>(a : T) -> u64 [{
     }
 }];
 
-// The same for a shared Reussir record (a generated struct or enum). The
-// reference the call received is given back inline when others remain (a
-// record's count is the `u32` at its address; static cells and immediates,
-// tagged in the top byte, and a last reference go through the record's
-// release), so that the call costs no out-of-line release: `ptrEq` in a
-// traversal (`Expr.replace`) spent 40% of its time there.
+// The same for a shared Reussir record (a generated struct or enum, a
+// function value, a `Box`). The reference the call received is given back
+// inline when others remain (a record's count is the `u32` at its address;
+// static cells and immediates, tagged in the top byte or with an immortal
+// count, and a last reference go through the record's release), so that
+// the call costs no out-of-line release: `ptrEq` in a traversal
+// (`Expr.replace`) spent 40% of its time there.
 #[ffi(import)]
 fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
     {
         let p = unsafe { *(&a as *const [:T:] as *const usize) };
-        let id = p as u64;
         if (p >> 56) == 0 {
             let c = unsafe { *(p as *const u32) };
-            if c > 1 {
+            if c > 1 && c < 0x8000_0000 {
                 unsafe { *(p as *mut u32) = c - 1 };
                 ::std::mem::forget(a);
             }
         }
-        id
+        p as u64
     }
 }];
 
