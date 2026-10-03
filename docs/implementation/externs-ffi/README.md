@@ -9,7 +9,7 @@ runtime's conventions are in [`runtime/README.md`](../../../runtime/README.md)
 ("Calling convention", "Glue helpers").
 
 - [dispatch.md](dispatch.md): which implementation an extern call gets, in
-  which order; the toolchain constants (`Lean.githash`, platform queries).
+  which order.
 - [glue.md](glue.md): storage types, payload primitives, fallible IO,
   streams, processes and the other generated glue.
 - [shim.md](shim.md): `L2RShim`, lean2rr's Lean library for

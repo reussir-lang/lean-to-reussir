@@ -49,7 +49,8 @@ Paths are relative to the repository root.
   (`lean --version`). Any other target is a `compile_error!` naming what
   to do. The prelude's other platform answers are constants that rely on
   the same restriction: `isWindows`, `isOSX` and `isEmscripten` are false,
-  and `numBits` is 64 (`USize` is `u64` in the prelude).
+  `isLinux` (`lean_system_platform_linux`, new in Lean 4.34) is true, and
+  `numBits` is 64 (`USize` is `u64` in the prelude).
 - **Why:** Natively the triple is `LEAN_PLATFORM_TARGET` from the
   toolchain's `version.h` (`lean.h` inlines `lean_system_platform_target`;
   Lean's CMake takes it from `clang --print-target-triple`), so it is the
@@ -62,7 +63,22 @@ Paths are relative to the repository root.
   three flags and the version strings with native.
 - **Where:** `runtime/leanrt/src/rt.rs`: `PLATFORM_TARGET`;
   `runtime/prelude.rr`: `lean_system_platform_target`,
-  `l2r_platform_target`, `lean_system_platform_windows`/`osx`/`emscripten`,
-  `lean_system_platform_nbits`.
+  `l2r_platform_target`, `lean_system_platform_windows`/`osx`/`linux`/
+  `emscripten`, `lean_system_platform_nbits`.
 - **Remove only if:** never; extend `PLATFORM_TARGET` (and review the
   constants) when leanrt gains a target.
+
+### The version and git hash are the pinned toolchain's constants
+
+- **What:** `Lean.githash` (`lean_get_githash`: the toolchain's commit),
+  `Lean.version.major/minor/patch/isRelease/specialDesc` (so
+  `Lean.versionString` and `Lean.toolchain`) and
+  `Lean.Internal.isStage0/hasLLVMBackend` are prelude constants of the
+  toolchain lean2rr is built with, v4.34.0 (`lean2rr/lean-toolchain`).
+- **Why:** Natively they are compile-time constants of the toolchain's
+  runtime (`version.h`); a program built by lean2rr must answer what the
+  same program built natively answers.
+- **Where:** `runtime/prelude.rr`: `lean_get_githash`,
+  `lean_version_get_*`, `lean_internal_*`; test `RtPlatform`.
+- **Remove only if:** never. Update them with every toolchain change;
+  `RtPlatform` fails otherwise.
