@@ -197,7 +197,7 @@ mutual
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.call fn captured) } outlined retTy k
       else
         let jumps := (countJumps k {}).getD d.fvarId 0
-        if jumps ≤ 1 || (H.duplicateJp { bodies := ctx.jpBodies, single := ctx.jpSingle } d jumps &&
+        if jumps ≤ 1 || (H.duplicateJp { bodies := ctx.jpBodies, single := ctx.jpSingle, loop := ctx.loop } d jumps &&
             !endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined) then
           -- J1, or a small join point that is not J2: its body at each jump.
           let jpSingle := if jumps ≤ 1 then ctx.jpSingle.insert d.fvarId else ctx.jpSingle
@@ -370,12 +370,13 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
     let block ← processOutputBody (pnames.zip ptys) ret
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
     return
-  let outlined := chooseOutlined H.duplicateJp body
+  let loop := ((← read).callCycles.find? d.name).getD {}
+  let outlined := chooseOutlined H.duplicateJp loop body
   -- J4: the declaration as one state machine when an outlined join point
   -- calls it back in tail position (`LowerHooks.stateMachine`).
   let sm? := H.stateMachine.plan d body outlined pnames
   modify fun s => { s with smArms := #[] }
-  let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm? }
+  let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm?, loop }
   let block ← try lowerCode H ctx outlined ret body
     catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
   if let some sm := sm? then

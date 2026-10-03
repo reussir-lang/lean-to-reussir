@@ -123,6 +123,10 @@ structure LowerCtx where
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/
   keys : NameMap InstKey
+  /-- The declarations that are in a cycle of direct calls, each with the
+  declarations of its cycle (its strongly connected component of the call
+  graph, itself included): a tail call of one of them closes a loop. -/
+  callCycles : NameMap NameSet := {}
 
 /-- How the target of a function value is called with all its arguments
 (data, so that the lowering state can hold it; see Lower's

@@ -86,6 +86,19 @@ def sccsBottomUp (decls : Array (Decl .pure)) : Array (Array (Decl .pure)) :=
     | none => []
   groups.toArray.map fun g => g.toArray.filterMap byName.find?
 
+/-- The declarations in a cycle of direct calls (a strongly connected group
+of more than one, or one that calls itself), each with the names of its
+group. -/
+def callCycles (decls : Array (Decl .pure)) : NameMap NameSet := Id.run do
+  let names := decls.foldl (fun s d => s.insert d.name) ({} : NameSet)
+  let mut out : NameMap NameSet := {}
+  for g in sccsBottomUp decls do
+    let loops := g.size > 1 || g.any fun d => (calledDecls names d).contains d.name
+    if loops then
+      let members := g.foldl (fun s d => s.insert d.name) ({} : NameSet)
+      for d in g do out := out.insert d.name members
+  return out
+
 /-- The name in Lean's own compilation of the declaration a Stage 2
 declaration comes from, and the key of its instance: an instance `f._l2r.k`
 comes from `f` (`keys`), and a declaration a pass made from an instance

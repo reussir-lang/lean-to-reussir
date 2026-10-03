@@ -1249,17 +1249,21 @@ struct, which is destructured afterwards.
 inlined at each of its jumps, like J1, when it is small: its body has at
 most 40 bindings, alternatives and exits (nested join points included), a
 copy of it expands to at most 480, and its copies beyond the first add at
-most 4000 (jumps minus one, times the expansion). The expansion counts, at
-each jump, the body of the join point jumped to when that is inlined there
-too: a join point nested in the copy (at every jump to it), another join
-point jumped to once (J1 inlines it whatever its size), or another join
-point whose own body is small, counted the same way. Outlining the join
+most 2000 (jumps minus one, times the expansion), or 4000 for a loop's
+continuation: a copy that tail-calls a function of the declaration's call
+cycle (its strongly connected component in the program's call graph). The
+expansion counts, at each jump, the body of the join point jumped to when
+that is inlined there too: a join point nested in the copy (at every jump
+to it), another join point jumped to once (J1 inlines it whatever its
+size), or another join point whose own body is small, counted the same
+way. Outlining the join
 point would put a function boundary on the path: a loop through it would
 become a state machine or mutually recursive, and Reussir could not reuse a
 cell matched before the jump for a construction after it. Duplication is
 recursive: small join points inside a duplicated body, and those it jumps
 to, are duplicated again. The bounds keep every copy within 480 nodes and
-what the copies of one join point add within 4000, so code grows linearly.
+what the copies of one join point add within 2000 (4000), so code grows
+linearly.
 Each bound closes a blow-up the others allowed:
 - the bound on the body alone: Lean leaves sibling join points that are
   jumped to from two others, which sinking cannot nest. A sequence of
@@ -1285,8 +1289,11 @@ three times to the shared continuation, expands to 300-350; a loop's
 continuation after a `match` of up to about 100 arms (copies of 30-40
 nodes) is still copied into each arm. Outlined, such a continuation makes
 the loop a state machine, or, in mutual recursion, a stack frame more per
-iteration. Behaviour does not change. (Optional pass `jp-small`; without it
-such join points are outlined, J3.)
+iteration. The larger budget is only for loop continuations: given to every
+join point, it let a 35-line function with a wide `match` setting a state
+and a few `match`es on it add 0.5-0.75 MB of .rr (eight such functions: 6.3
+MB, a four-minute build at 5.7 GB). Behaviour does not change. (Optional
+pass `jp-small`; without it such join points are outlined, J3.)
 
 **J3, otherwise: outline.** Some paths `return` directly or jump to a
 different join point. Then `j` becomes a separate top-level function over

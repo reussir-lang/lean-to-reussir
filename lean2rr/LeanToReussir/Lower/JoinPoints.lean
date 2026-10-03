@@ -67,13 +67,16 @@ structure JpScope where
   /-- Those jumped to once: inlined at their one jump (J1), whatever their
   size. -/
   single : FVarIdSet := {}
+  /-- The declarations of the declaration's call cycle (`LowerCtx.callCycles`):
+  a tail call of one of them closes a loop. -/
+  loop : NameSet := {}
 
 /-- Choose a strategy for every join point of a declaration body: the set
 of outlined (J3) join points; others are J1 (single jump), J2, or
 duplicated at their jumps (J1′, those `duplicate` selects: the lowering hook
 `LowerHooks.duplicateJp`, given all join points and the number of
 jumps). -/
-partial def chooseOutlined (duplicate : JpScope → FunDecl .pure → Nat → Bool)
+partial def chooseOutlined (duplicate : JpScope → FunDecl .pure → Nat → Bool) (loop : NameSet)
     (body : Code .pure) : FVarIdSet := Id.run do
   let counts := countJumps body {}
   -- All join points with their scope.
@@ -88,7 +91,7 @@ partial def chooseOutlined (duplicate : JpScope → FunDecl .pure → Nat → Bo
   jps := gather body #[]
   let once := jps.foldl (init := ({} : FVarIdSet)) fun s (d, _) =>
     if counts.getD d.fvarId 0 ≤ 1 then s.insert d.fvarId else s
-  let scope : JpScope := { bodies := jpBodiesOf body, single := once }
+  let scope : JpScope := { bodies := jpBodiesOf body, single := once, loop }
   let mut outlined : FVarIdSet := {}
   let mut changed := true
   while changed do
