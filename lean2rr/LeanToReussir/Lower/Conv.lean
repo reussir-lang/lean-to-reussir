@@ -14,7 +14,7 @@ def nominalHead (n : String) : LowerM (Option Name) := do
 
 /-- Whether a value of type `t` may contain a task (in fields, array
 elements, a task's value, a thunk, a function value's captured values, a
-`Box`'s payload), as far as can be told before all variants of function
+`Box`'s payload, a reference's value), as far as can be told before all variants of function
 types and `Box` are known: those, and thunks, may. Types already being
 examined count as not containing one (the least fixed point, for recursive
 types): a search of the types reachable from `t`, each looked at once. -/
@@ -36,6 +36,7 @@ where
           for ft in l.posTys do
             if ← go ft seen then return true
         return false
+      if let some (e, _) := (← get).refInfos[n]? then return ← go e seen
       match (← get).tupleTypes.toList.find? (·.2 == n) with
       | some (k, _) =>
         let fields := if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k
@@ -54,7 +55,8 @@ computed, if `t` may contain tasks: native Lean calls `lean_mark_persistent`
 on a closed term when it is first evaluated (`lean_obj_once_cold`), which
 waits for every task it reaches (`lean_task_get`), through fields, arrays,
 the values of tasks, thunks (their computation, or their value: not
-forcing them), closures (their captured values) and boxed values. A
+forcing them), closures (their captured values), references (their
+value) and boxed values. A
 `Task.spawn` extracted as a closed term has finished once the term has
 been evaluated. The traversal is generated at the end
 (`finishPersistFns`). -/

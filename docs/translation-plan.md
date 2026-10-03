@@ -2104,15 +2104,41 @@ running code blocks (*Blocking*, below).
   right after it is evaluated (`l2r_persist_T`), whether they are in
   fields, arrays, the values of tasks, the values captured by function
   values (partial applications), thunks (their computation, or their
-  value: the thunk is not forced) or boxed values; so `Task.spawn` of a
-  closed function has finished once the term has been used. The walk
+  value: the thunk is not forced), references (their value) or boxed
+  values; so `Task.spawn` of a closed function has finished once the term
+  has been used. The walk
   works as Lean's does: a loop over a list of the values still to look
   at (no recursion, so a value deep through any field is walked at a
   bounded depth), which visits each cell once (the runtime keeps the set
   of addresses visited: a value whose cells are shared, a DAG, is walked
-  in time linear in its number of cells, not of its paths). Fields are
-  looked at in order, the first first, as a recursive walk would. The walk
-  keeps what it reads out of thunks and tasks until it ends, so that no
+  in time linear in its number of cells, not of its paths). Natively,
+  waiting for a task only blocks (`wait_for`): the term's tasks, which have
+  usually not started yet, are run by the workers in their queue's order
+  (a higher priority first, then first in, first out), whatever order the
+  walk waits in, and their traces and panics come in that order. Here a
+  pending task runs when it is waited for, so the walk has two passes. The
+  first collects the unfinished tasks it reaches (without looking into
+  them: their values do not exist yet). The second walks the value again
+  in Lean's order (it pushes an object's fields, a closure's captured
+  values and an array's elements in order and pops the last one first;
+  fields in Lean's declaration order, whatever the record layout) and,
+  before it waits for a task, runs the collected tasks that come before it
+  in the workers' order: by priority, then in the order they were created.
+  So `(List.range 4).map (Task.spawn …)` runs its tasks 0, 1, 2, 3 (test
+  `RtPersistOrder`). The order of the second pass still matters: what it
+  reads out of a reference or a thunk is read when it gets there, so a task
+  that replaces the task a reference next to it holds has run by then, as
+  natively. Only collected tasks run early: other pending tasks of the
+  program, which a native worker would run first too, are not run (one
+  could wait for something the program does later). The walk does not keep
+  the tasks it collects alive (it records their runtime entries), and the
+  second pass does not keep what the first read, so a task the program
+  drops meanwhile (a task replaced in a reference by one the walk ran) is
+  deleted and never runs, as natively (test `RtPersistDropped`). A task
+  held at another representation is a converted copy (§5.1); the walk
+  knows it by its original's identity, so it is collected, not forced, in
+  the first pass (test `RtPersistConv`). The walk
+  keeps what it reads out of thunks, tasks and references until it ends, so that no
   cell it has visited is freed meanwhile (a task it runs could force a
   thunk, which drops its computation) and its address given to a new
   cell. It is skipped when every task of the program has finished
@@ -2622,9 +2648,14 @@ Each item says what differs and when.
   never reaches another task (natively it can, on the same worker);
   `IO.getTID` inside a task is main's thread id plus a worker number (a
   `sync` dependent's is its source's), as distinct from main's as a
-  worker's. A closed term does not wait for tasks held by a reference
-  (`IO.Ref`) or a promise in it (Lean's `lean_mark_persistent` does; a
-  closed term cannot create either).
+  worker's. A task needed before tasks queued earlier runs before them
+  (`y.get` before `x.get`, `x` created first, runs `y` first; natively a
+  worker takes `x` first, always with one worker), except the tasks a
+  closed term waits for when it is first evaluated, which run in queue
+  order (§5.14). A closed term does not wait for the task of a promise in it
+  (Lean's `lean_mark_persistent` does, and waits forever for an
+  unresolved one; a closed term can hold a promise only through unsafe
+  code).
 - *Startup order of unrecorded constants* (§5.12): a constant that Lean
   compiled to no IR-only declaration although its value calls a function
   (a callee whose type is not syntactically a function, such as
