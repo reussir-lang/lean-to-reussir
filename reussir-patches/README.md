@@ -20,6 +20,7 @@ local and are not submitted upstream.
 | `0015-*` | 13 | `reussir-rt` (`drop`) | 0014's stack is cheaper (one destructor-less thread-local state, fast paths); the same order and behaviour |
 | `0016-*` | 21 | `CompilePolymorphicFFI` | an unterminated `[:` in a texture body is kept as written |
 | `0017-*` | 23 | `CompilePolymorphicFFI` (gather) | the texture modules are linked through one `llvm::Linker` (linear, not quadratic) |
+| `0040-*` | - (a hook) | `reussir-rt` (`drop`) | `reussir_rt::drop` exports `__reussir_drop_drained`, called when a drain that released something ends: lean2rr's runtime runs a released promise's `sync` dependents there (RV7C-01) |
 | `0050-*` | (feature) | frontend, `FFIObjectType`, `BasicOpsLowering` | `#[ffi(rust = "...", tagged)]`: a handle may be an odd immediate, which `rc.inc`/`rc.dec` skip; lean2rr's `Nat` and `Int` are one word (lean2rr needs it) |
 
 Apply them in this order and rebuild:
@@ -32,15 +33,15 @@ git -C reussir am ../reussir-patches/0006-*.patch ../reussir-patches/0004-*.patc
     ../reussir-patches/0013-*.patch ../reussir-patches/0012-*.patch \
     ../reussir-patches/0014-*.patch ../reussir-patches/0015-*.patch \
     ../reussir-patches/0016-*.patch ../reussir-patches/0017-*.patch \
-    ../reussir-patches/0050-*.patch
+    ../reussir-patches/0040-*.patch ../reussir-patches/0050-*.patch
 cmake --build reussir/build
 ```
 
 `git am` records them as local commits. `git apply` works as well, if you
 would rather keep them as uncommitted changes. lean2rr's runtime needs 0014
 (it uses `reussir_rt::drop`, the pending stack 0014 adds to Reussir's
-runtime), and lean2rr's prelude needs 0050 (it declares `Nat` and `Int`
-`tagged`). Without the others, lean2rr programs still compile, but the
+runtime) and 0040 (it sets `__reussir_drop_drained`), and lean2rr's
+prelude needs 0050 (it declares `Nat` and `Int` `tagged`). Without the others, lean2rr programs still compile, but the
 bugs above can appear.
 
 On the development machine they are applied to `./reussir` as the local
