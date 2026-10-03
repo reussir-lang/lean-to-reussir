@@ -113,6 +113,12 @@ Compared with native Lean:
   (code whose types cannot be made concrete, below), boxing it allocates;
   natively a small `Nat` is never allocated.
 
+Peak memory (max RSS, 2026-10-03, against the native build): `rbmap`
+(a red-black tree with `Nat` keys and values) 0.84× (with the earlier
+two-word `Nat`: 1.00×); an array of 2 million records with four `Nat`
+fields and a list of `Nat` pairs 0.80× (1.26×); `bignum` about 1.1×
+(1.2–1.3×; a few MB, noisy).
+
 ### Text, arrays, references
 
 | Lean | Representation | Notes |
