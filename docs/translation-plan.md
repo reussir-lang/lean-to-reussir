@@ -2092,15 +2092,23 @@ running code blocks (*Blocking*, below).
   right after it is evaluated (`l2r_persist_T`), whether they are in
   fields, arrays, the values of tasks, the values captured by function
   values (partial applications), thunks (their computation, or their
-  value: the thunk is not forced) or boxed values; so `Task.spawn` of a
-  closed function has finished once the term has been used. The walk
+  value: the thunk is not forced), references (their value) or boxed
+  values; so `Task.spawn` of a closed function has finished once the term
+  has been used. The walk
   works as Lean's does: a loop over a list of the values still to look
   at (no recursion, so a value deep through any field is walked at a
   bounded depth), which visits each cell once (the runtime keeps the set
   of addresses visited: a value whose cells are shared, a DAG, is walked
-  in time linear in its number of cells, not of its paths). Fields are
-  looked at in order, the first first, as a recursive walk would. The walk
-  keeps what it reads out of thunks and tasks until it ends, so that no
+  in time linear in its number of cells, not of its paths). Its order is
+  Lean's, which shows: the tasks of a freshly evaluated closed term have
+  not started yet, so they run in the order the walk reaches them (their
+  traces and panics come in it). Lean pushes an object's fields, a
+  closure's captured values and an array's elements in order on its stack
+  and pops the last one first; so does the walk (fields in Lean's
+  declaration order, whatever the record layout): `(t1, t2)` runs `t2`
+  first, `#[a, b, c]` runs `c`, `b`, `a`, and a list `[a, b, c]` runs `c`
+  first too (its tail is the cell's last field). The walk
+  keeps what it reads out of thunks, tasks and references until it ends, so that no
   cell it has visited is freed meanwhile (a task it runs could force a
   thunk, which drops its computation) and its address given to a new
   cell. It is skipped when every task of the program has finished
@@ -2573,9 +2581,10 @@ Each item says what differs and when.
   never reaches another task (natively it can, on the same worker);
   `IO.getTID` inside a task is main's thread id plus a worker number (a
   `sync` dependent's is its source's), as distinct from main's as a
-  worker's. A closed term does not wait for tasks held by a reference
-  (`IO.Ref`) or a promise in it (Lean's `lean_mark_persistent` does; a
-  closed term cannot create either).
+  worker's. A closed term does not wait for the task of a promise in it
+  (Lean's `lean_mark_persistent` does, and waits forever for an
+  unresolved one; a closed term can hold a promise only through unsafe
+  code).
 - *Startup order of unrecorded constants* (§5.12): a constant that Lean
   compiled to no IR-only declaration although its value calls a function
   (a callee whose type is not syntactically a function, such as

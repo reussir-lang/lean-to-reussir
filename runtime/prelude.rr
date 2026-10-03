@@ -3036,7 +3036,7 @@ fn l2r_task_deferring() -> bool [{ leanrt::task::deferring() }];
 // a walk over its cells, skipped when every task has finished
 // (`l2r_task_settled`). The walk visits each cell once
 // (`l2r_persist_seen`: whether walk `h` has seen it, else it records it)
-// and keeps what it reads out of thunks and tasks until it ends
+// and keeps what it reads out of thunks, tasks and references until it ends
 // (`l2r_persist_keep`), so that no cell it has seen is freed meanwhile.
 #[ffi(import)]
 fn l2r_task_settled() -> bool [{ leanrt::task::settled() }];

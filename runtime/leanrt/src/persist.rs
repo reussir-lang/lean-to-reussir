@@ -33,14 +33,14 @@ impl Hasher for AddrHasher {
 
 struct Walk {
     seen: HashSet<usize, BuildHasherDefault<AddrHasher>>,
-    /// A reference to each value the walk read out of a thunk or a task,
-    /// released when the walk ends. The cells the walk has seen stay alive
-    /// meanwhile: they are reached from the constant (held by its caller)
-    /// through fields, array elements and captured values, which do not
-    /// change, and through the states of thunks and tasks, which do (a
-    /// thunk forced by a task the walk ran drops its computation): a cell
-    /// freed meanwhile could give its address to a new cell, which the walk
-    /// would then skip.
+    /// A reference to each value the walk read out of a thunk, a task or an
+    /// `IO.Ref`, released when the walk ends. The cells the walk has seen
+    /// stay alive meanwhile: they are reached from the constant (held by its
+    /// caller) through fields, array elements and captured values, which do
+    /// not change, and through the states of thunks and tasks and the values
+    /// of references, which do (a thunk forced by a task the walk ran drops
+    /// its computation): a cell freed meanwhile could give its address to a
+    /// new cell, which the walk would then skip.
     kept: Vec<Box<dyn Any>>,
 }
 
@@ -51,7 +51,8 @@ pub fn begin() -> u64 {
 }
 
 /// Whether walk `h` has already seen cell `v` (a shared value: a record,
-/// an array, a thunk or task, a function value); otherwise it records it.
+/// an array, a thunk or task, a function value, a reference); otherwise it
+/// records it.
 #[inline(never)]
 pub fn seen<T>(h: u64, v: T) -> bool {
     if size_of::<T>() != size_of::<usize>() {
@@ -62,8 +63,8 @@ pub fn seen<T>(h: u64, v: T) -> bool {
     !w.seen.insert(p)
 }
 
-/// Walk `h` keeps `v` (a value read out of a thunk or task) until it ends.
-/// Returns 0.
+/// Walk `h` keeps `v` (a value read out of a thunk, a task or a reference)
+/// until it ends. Returns 0.
 #[inline(never)]
 pub fn keep<T: 'static>(h: u64, v: T) -> u64 {
     let w = unsafe { &mut *(h as *mut Walk) };
