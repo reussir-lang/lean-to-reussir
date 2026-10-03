@@ -84,11 +84,13 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 
 ### Every `Init`/`Std` extern is available; `Lean`'s C++ parts are not
 
-- **What:** All 716 externs of Lean 4.34's `Init` and `Std` have an
-  implementation (705 checked by programs that call each one, 11 internal
-  ones by direct tests). Lean 4.34 added one, `System.Platform.getIsLinux`
-  (`lean_system_platform_linux`, test `RtPlatform`), and moved
-  `String.extract` to a new symbol, `lean_string_utf8_extract_fast`. The
+- **What:** All 717 extern symbols of Lean 4.34's `Init` and `Std` (767
+  declarations) have an implementation (706 checked by programs that call
+  each one, 11 internal ones by direct tests). Lean 4.34 added two:
+  `lean_system_platform_linux` (`System.Platform.getIsLinux`, test
+  `RtPlatform`) and `lean_string_utf8_extract_fast` for `String.extract`
+  (`lean_string_utf8_extract` remains, for `String.Pos.Raw.extract` and
+  `String.Internal.extract`; tests `RtString`, `RtStringExtractBig`). The
   `Lean` library's C++-implemented externs (`Expr.mkData`, `evalConst`,
   `Dynlib`, the LLVM bindings, …) are not: for a program that reaches one,
   rrc reports an unknown function.

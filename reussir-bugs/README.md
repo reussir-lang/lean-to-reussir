@@ -189,7 +189,8 @@ reussir-opt`; SKIPPED when the checkout has not built it). The script's
 header documents its environment (`WORK`, a scratch directory; `RUSTC`;
 `QUICK=1`, which skips the slow repros 6, 10, 11, 16, 17, 20 and 23). The
 Lean repros (13 and 20, and the programs generated for 16 and 17) need
-Lean 4.33 and a lean2rr build (`lake build` in `lean2rr/`). The
+the toolchain `lean2rr/lean-toolchain` pins (`scripts/toolchain.sh`; or
+`L2R_LEAN_TOOLCHAIN`) and a lean2rr build (`lake build` in `lean2rr/`). The
 build-time repros (10, 11, 16, 17, 20, 23) take one to three minutes each,
 and 16 and 20 need 1.2 to 3 GB (bug 20 without its patch); bug 6 runs for
 about 15 s.

@@ -39,7 +39,7 @@ same standard output, standard error and exit code.
 | Runtime test suite (231 programs, `tests/runtime`) | 231/231 identical to native Lean 4.34.0 |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
-| Lean library C functions (externs) of `Init` and `Std` | all 716 of Lean 4.34 available: 705 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
+| Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
 | Adversarial testing | 4 rounds (about 1,300 test programs written to break it), every finding fixed or documented |
 | Speed (measured against native Lean 4.33; not re-measured for 4.34) | faster than native Lean on 16 of the 18 classic programs and about equal on the other two (monadic-interp 1.01×, deriv ≈1×), faster on 17 of the 18 Reussir-suite programs (the 18th at 1.07×); tables below |
 
