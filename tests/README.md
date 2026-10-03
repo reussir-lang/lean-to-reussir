@@ -153,3 +153,17 @@ suite's `compile.py` does (`lean FILE -c`, `leanc -flto -O3`) and through
 lean2rr (`lean -o`, then `scripts/l2r.py FILE.lean`), runs both and compares
 stdout, stderr and the exit code. The programs check their own results. It
 is a correctness check only; the suite itself does the timing.
+
+## Loader checks
+
+`tests/env/run.sh` checks which program modules lean2rr accepts (plan §10,
+"Module names"). For each case it translates a small program (`lean2rr
+--emit mono`, a few seconds) and expects either acceptance or rejection:
+- rejected: program modules named `Lean.*` or `L2RShim`, a directory
+  `L2RShim` of program modules, Lean's library with one module's `.olean`
+  or `.olean.private` replaced by a different file, and a shim directory
+  without the shim (`L2R_SHIM_DIR` missing or empty, or unset with the
+  lean2rr binary moved out of its build directory);
+- accepted: Lean's library reached through a symbolic link or through hard
+  links, a working directory whose `lean-toolchain` names another Lean, and
+  the shim from the build directory or from `L2R_SHIM_DIR`.
