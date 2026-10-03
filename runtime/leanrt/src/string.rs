@@ -739,7 +739,7 @@ extern "C" fn repr_small_init(n: u64) -> LStr {
 }
 
 /// One empty string, kept for the run (as `SMALL_REPR`'s strings).
-static SHARED_EMPTY: Global<usize> = Global(std::cell::UnsafeCell::new(0));
+static SHARED_EMPTY: Global<*mut Obj> = Global(std::cell::UnsafeCell::new(std::ptr::null_mut()));
 
 /// The shared empty string: a new reference, no allocation. lean2rr passes
 /// it as the placeholder of a string parameter that is never read (the
@@ -747,18 +747,19 @@ static SHARED_EMPTY: Global<usize> = Global(std::cell::UnsafeCell::new(0));
 #[inline(always)]
 pub fn shared_empty() -> LStr {
     let p = unsafe { *SHARED_EMPTY.0.get() };
-    if p == 0 {
+    if p.is_null() {
         return shared_empty_init();
     }
-    let r = std::mem::ManuallyDrop::new(unsafe { std::mem::transmute::<usize, LStr>(p) });
-    LStr::clone(&r)
+    // A new reference to the kept string.
+    LStr::clone(&std::mem::ManuallyDrop::new(LStr(p)))
 }
 
 #[cold]
 #[inline(never)]
 extern "C" fn shared_empty_init() -> LStr {
-    let s = from_parts(Vec::new(), 0);
-    let p = unsafe { std::mem::transmute::<LStr, usize>(s.clone()) };
+    let s = from_bytes(b"");
+    // The kept reference.
+    let p = std::mem::ManuallyDrop::new(s.clone()).0;
     unsafe { *SHARED_EMPTY.0.get() = p };
     s
 }
