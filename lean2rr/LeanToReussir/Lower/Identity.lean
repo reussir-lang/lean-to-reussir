@@ -7,8 +7,7 @@ the word of a boxed scalar (`lean_box(n) = 2n+1`) for values Lean
 represents so, the address of the Lean object otherwise. lean2rr's
 representations are mapped back to Lean's: a `Box` answers its payload's
 identity, a function value wrapped for another representation the wrapped
-value's, a thunk or task converted to another representation the
-original's, a `[value]` struct its field's. -/
+value's, a `[value]` struct its field's. -/
 
 namespace LeanToReussir
 open Lean Compiler LCNF
@@ -30,19 +29,6 @@ partial def nativeLeaf (t : RR.Ty) : LowerM RR.Ty := do
   let some layout := info.ctors.find? info.ctorOrder[0]! | return t
   let some ft := layout.posTys[0]? | return t
   nativeLeaf ft
-
-/-- `l2r_lazy_addr_S(c)`: the identity of a thunk or task: its cell's
-address, or the original's that a converted cell records (see
-`lazyConv`). -/
-def lazyAddrFn (z : String) : LowerM String := do
-  let name := s!"l2r_lazy_addr_{z}"
-  lazyFn name do
-    let zt := RR.Ty.named z
-    let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
-      lazyArm z "conv" #[none, none, some "a"] (.ofExpr (.var "a")),
-      lazyArm z "convdone" #[none, none, some "a"] (.ofExpr (.var "a")),
-      { ty := z, ctor := none, binders := #[], body := .ofExpr (.call "l2r_lcell_addr" #[zt] #[.var "c"]) }])
-    return #[.fn name #[("c", .app "LCell" #[zt])] (.named "u64") body]
 
 /-- `l2r_fn_addr_T(f)`, the identity of a function value of type `t`
 (generated at the end, when its variants are known: `genFnAddr`). -/
@@ -108,8 +94,7 @@ partial def addrOf (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
     | none =>
       if ← isBoundaryTy t then return .call "l2r_ptr_addr_obj" #[t] #[e]
       evalThen (.call "l2r_addr_fresh" #[] #[])
-  | .app "RVec" _ | .app "LRef" _ => return .call "l2r_ptr_addr_obj" #[t] #[e]
-  | .app "LCell" #[.named z] => return .call (← lazyAddrFn z) #[] #[e]
+  | .app "RVec" _ | .app "LRef" _ | .app "LCell" _ => return .call "l2r_ptr_addr_obj" #[t] #[e]
   | .fn .. => return .call (← fnAddrFn t) #[] #[e]
   | _ => evalThen (.call "l2r_addr_fresh" #[] #[])
 

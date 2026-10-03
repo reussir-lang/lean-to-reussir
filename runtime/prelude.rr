@@ -2845,10 +2845,12 @@ fn l2r_std_pop(base : u64) -> u64 [{ { leanrt::once::pop_context(base, 3); 0 } }
 //
 // A `Thunk α` or `Task α` is an `LCell<S>` whose state type `S` lean2rr
 // generates per value type: `enum S { pending(L2RUnit -> α), busy, done(α),
-// conv(L2RUnit -> α, L2RBox, u64) }` (a shared enum; `conv` is a thunk or
-// task converted from another representation: its computation, the original
-// cell, and for a task the original's identity). lean2rr also generates the functions that force the
-// state (`l2r_thunk_get_S`, `l2r_task_get_S`, ...): a thunk runs its closure
+// conv(L2RUnit -> α, L2RBox) }` (a shared enum; `conv` is a thunk or task
+// converted from another representation: its computation and the original
+// cell; a task's also holds the original's address, its identity for
+// `leanrt::task`; tasks also have a `bind` state). lean2rr also generates
+// the functions that force the state (`l2r_thunk_get_S`, `l2r_task_get_S`,
+// ...): a thunk runs its closure
 // on first `get` and keeps the value; a task created after `main` has
 // started stays pending until it is needed or `main` returns (during module
 // initialization it is computed at once). `leanrt::task` keeps the queues

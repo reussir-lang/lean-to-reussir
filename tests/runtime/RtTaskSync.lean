@@ -1,8 +1,9 @@
 /-! Runtime test: `Task.map (sync := true)` of a finished task applies `f`
 at once in the calling thread (its `dbgTrace` goes into `main`'s redirected
 stderr, where an ordinary pure task's goes to the process's); a task
-converted to another representation keeps its identity while it is forced
-through that handle (`IO.cancel` through it reaches the running task); a
+converted to another representation is the original task for the runtime
+while it is forced through that handle (`IO.cancel` through it reaches the
+running task); a
 bind task whose `f` returns a finished task finishes at once, so its
 dependents are enqueued then, before later tasks. -/
 

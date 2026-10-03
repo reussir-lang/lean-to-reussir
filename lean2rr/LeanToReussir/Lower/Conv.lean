@@ -862,18 +862,17 @@ mutual
 
   /-- The generated function converting a thunk or task with state type `sz`
   to one with state type `dz` (same kind, value types differing only in
-  representation, as for `structConv`). The result is a new cell that
-  records the cell it was converted from, boxed, and that cell's address:
-  converting it back gives that very cell (a thunk crossing between typed
-  and uniform code in a loop does not build a chain of cells), its identity
-  is the original's (`ptrAddrUnsafe`, see `addrOf`; for a task also the
-  runtime's, `l2r_task_addr_S`), and keeping the original keeps that
-  address from being reused. A computed value is converted now (state
-  `convdone`). Otherwise the new cell is in state `conv`: its computation
-  forces the original and converts the value (so the original's
-  computation still runs at most once). A cell converted from a converted
-  one records the first original. `none` if the values are not
-  convertible. -/
+  representation, as for `structConv`): a new cell. A computed value is
+  converted now (state `done`). Otherwise the new cell is in state `conv`:
+  its computation forces the original and converts the value (so the
+  original's computation still runs at most once). It records the
+  original, boxed, so that converting it back gives that very cell (a
+  thunk crossing between typed and uniform code in a loop does not build a
+  chain of cells), and, for a task, the original's address: the copy's
+  identity for the runtime (`l2r_task_addr_S`), so its state, its
+  cancellation and its dependents are the original's. A cell converted
+  from a converted one records the first original. `none` if the values
+  are not convertible. -/
   partial def lazyConv (sz dz : String) : LowerM (Option String) := do
     let some (sk, st) := (← get).lazyInfos[sz]? | return none
     let some (dk, dt) := (← get).lazyInfos[dz]? | return none
@@ -892,14 +891,12 @@ mutual
     let srcBox ← boxVariant srcCell
     let dstBox ← boxVariant dstCell
     let u ← fresh "u"
-    let mkConv (o a : RR.Expr) : RR.Expr := .call "l2r_lcell_new" #[.named dz]
-      #[.ctor dz (some "conv") #[rawFnValue (.fn .unit dt) u (.ofExpr later), o, a]]
-    let ident : RR.Expr := .call "l2r_lcell_addr" #[.named sz] #[.var "c"]
-    let fresh' : RR.Block := ⟨#[("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"]),
-      ("a", some (.named "u64"), ident)], mkConv (.var "o") (.var "a")⟩
-    let doneConv : RR.Block := ⟨#[("w", some dt, now), ("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"]),
-      ("a", some (.named "u64"), ident)],
-      .call "l2r_lcell_new" #[.named dz] #[.ctor dz (some "convdone") #[.var "w", .var "o", .var "a"]]⟩
+    let g := rawFnValue (.fn .unit dt) u (.ofExpr later)
+    let addr : Array (String × Option RR.Ty × RR.Expr) :=
+      if sk then #[("a", some (.named "u64"), .call "l2r_lcell_addr" #[.named sz] #[.var "c"])] else #[]
+    let fresh' : RR.Block := ⟨#[("o", some RR.Ty.box, .ctor boxName (some srcBox) #[.var "c"])] ++ addr,
+      .call "l2r_lcell_new" #[.named dz]
+        #[.ctor dz (some "conv") (#[g, .var "o"] ++ (if sk then #[.var "a"] else #[]))]⟩
     -- From a converted cell: its original if that has the target type,
     -- otherwise the original converted directly (through the `Box`
     -- converter, which knows every representation), so chains through
@@ -908,9 +905,8 @@ mutual
       { ty := boxName, ctor := some dstBox, binders := #[some "x"], body := .ofExpr (.var "x") },
       { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call (← unboxArrFn dstCell) #[] #[.var "o"]) }]
     let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[.named sz] #[.var "c"]) #[
-      lazyArm sz "done" #[some "v"] doneConv,
-      lazyArm sz "conv" #[none, some "o", some "a"] (.ofExpr back),
-      lazyArm sz "convdone" #[none, some "o", some "a"] (.ofExpr back),
+      lazyArm sz "done" #[some "v"] (.ofExpr (lazyDone dz now)),
+      lazyArm sz "conv" (#[none] ++ convTail sk (some "o")) (.ofExpr back),
       { ty := sz, ctor := none, binders := #[], body := fresh' }])
     modify fun s => { s with fns := s.fns.push (.fn name #[("c", srcCell)] dstCell body) }
     return some name

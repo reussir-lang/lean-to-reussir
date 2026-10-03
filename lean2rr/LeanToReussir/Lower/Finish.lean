@@ -395,8 +395,7 @@ partial def genPersist (t : RR.Ty) (done : IO.Ref (Std.HashSet String)) : LowerM
         let arms := #[
           ← arm z "pending" #[some ("f", ft)],
           ← arm z "done" #[some ("x", vt)],
-          ← arm z "conv" #[some ("f", ft), some ("o", RR.Ty.box), none],
-          ← arm z "convdone" #[some ("x", vt), some ("o", RR.Ty.box), none],
+          ← arm z "conv" #[some ("f", ft), some ("o", RR.Ty.box)],
           { ty := z, ctor := none, binders := #[], body := zero }]
         pure (.ofExpr (.mtch (.call "l2r_lcell_get" #[.named z] #[.var "v"]) arms))
     | .app "RVec" #[_] =>
