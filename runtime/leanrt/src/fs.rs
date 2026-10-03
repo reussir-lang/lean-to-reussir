@@ -11,13 +11,18 @@
 //! glue checks `ok()` after the call and otherwise builds the `IO.Error`
 //! from `error_kind()` (which `lean_mk_io_error_*` constructor
 //! `decode_io_error` would use), `errno()`, `error_fname()` and
-//! `error_details()` (`strerror`, or Lean's own message).
+//! `error_details()` (libuv's message, or Lean's own message).
 //!
-//! The operations Lean implements with libuv (`metadata`, `symlinkMetadata`,
-//! `removeFile`, `hardLink`, `createTempFile`, `createTempDir`) report their
-//! errors as `decode_uv_error` does: the error code is libuv's negated errno
-//! (so `4294967294` for `ENOENT` as a `UInt32`), the message is
-//! `uv_strerror`'s, and errnos libuv does not map are `otherError`s.
+//! Since Lean 4.34 both of Lean's decoders are one (`decode_uv_error_impl`
+//! in io.cpp): `decode_io_error(errno)` first maps the errno to libuv's
+//! code (`crt_to_uv`, approximating the errnos libuv cannot represent),
+//! classifies that code and takes `uv_strerror`'s message for it, and keeps
+//! the errno as the error code. The operations Lean implements with libuv
+//! (`metadata`, `symlinkMetadata`, `removeFile`, `hardLink`,
+//! `createTempFile`, `createTempDir`) report their errors as
+//! `decode_uv_error` does: classified by libuv's code (errnos libuv does not
+//! map are `otherError`s), `uv_strerror`'s message, and the positive errno
+//! as the error code (`2` for `ENOENT`; before 4.34 the negated one).
 //!
 //! A handle is a model of the glibc `FILE` native Lean uses (`cfile`), so
 //! buffering, file positions and the end-of-file/error indicators behave as
@@ -76,7 +81,7 @@ fn set_err_uv(errno: i32, fname: Option<&[u8]>) {
     last().uv = true;
 }
 
-/// An error with Lean's own message instead of `strerror`'s.
+/// An error with Lean's own message instead of libuv's.
 fn set_err_msg(errno: i32, fname: Option<&[u8]>, details: &[u8]) {
     set_err(errno, fname);
     last().details = Some(details.to_vec());
@@ -103,7 +108,6 @@ extern "C" {
     fn chdir(path: *const std::ffi::c_char) -> i32;
     fn mkostemp(template: *mut std::ffi::c_char, flags: i32) -> i32;
     fn mkdtemp(template: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
-    fn strerror(e: i32) -> *const std::ffi::c_char;
     fn getcwd(buf: *mut std::ffi::c_char, size: usize) -> *mut std::ffi::c_char;
     fn realpath(path: *const std::ffi::c_char, resolved: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
     fn read(fd: i32, buf: *mut std::ffi::c_void, n: usize) -> isize;
@@ -674,14 +678,12 @@ pub fn ok() -> bool {
     !last().failed
 }
 
-/// The error code of the last error: the errno, or libuv's negated errno
-/// (as a `UInt32` bit pattern) for libuv-based operations.
+/// The error code of the last error: the errno, for libuv-based operations
+/// too (Lean 4.34's `decode_uv_error` stores `-code`, the positive errno).
 pub fn errno() -> u32 {
     let l = last();
     if l.errno == USER_ERROR {
         0
-    } else if l.uv {
-        l.errno.wrapping_neg() as u32
     } else {
         l.errno as u32
     }
@@ -691,45 +693,71 @@ pub fn error_fname() -> LStr {
     from_bytes(last().fname.as_deref().unwrap_or(b""))
 }
 
+/// The message of the last error: Lean's own, or `uv_strerror`'s for its
+/// libuv code (`decode_io_error` maps an errno to that code first,
+/// `crt_to_uv`; libuv names an unknown code "Unknown system error -e").
 pub fn error_details() -> LStr {
     let l = last();
     match &l.details {
         Some(d) => from_bytes(d),
-        None if l.uv => match uv_strerror(l.errno) {
-            Some(m) => from_bytes(m.as_bytes()),
-            None => from_bytes(format!("Unknown system error {}", -l.errno).as_bytes()),
-        },
         None => {
-            let p = unsafe { strerror(l.errno) };
-            let c = unsafe { std::ffi::CStr::from_ptr(p) };
-            from_bytes_lossy(c.to_bytes())
+            let code = if l.uv { l.errno } else { crt_to_uv(l.errno) };
+            from_bytes(&uv_strerror_bytes(code))
         }
     }
 }
 
 /// Which `lean_mk_io_error_*` constructor Lean's `decode_io_error` (or
 /// `decode_uv_error`) uses for the last error (see the table in
-/// runtime/README.md).
+/// runtime/README.md): the class of its libuv code.
 pub fn error_kind() -> u32 {
     let l = last();
     if l.errno == USER_ERROR {
         return 23;
     }
-    if l.uv && !uv_maps(l.errno) {
-        return 0;
+    if l.uv {
+        return uv_kind_file(l.errno, l.fname.is_some());
     }
-    decode_kind(l.errno, l.fname.is_some())
+    decode_kind(crt_to_uv(l.errno), l.fname.is_some())
 }
 
-/// Whether `decode_uv_error` has a case for this errno: libuv (1.48) does
-/// not map EDOM, ENOEXEC, ENOSTR, ENOLCK, ENOSR, EBADMSG, ECHILD, ENOMSG,
-/// EINPROGRESS, EIDRM, ENETRESET, ENOLINK, ETIME or EDEADLK, which are
-/// therefore `otherError`s.
+/// Lean 4.34's `lean_crt_to_uv_err` (io.cpp) on Linux, as positive errnos
+/// (libuv's code for errno `e` is `-e` there): an errno libuv maps is
+/// itself; the ones it cannot represent are approximated by the closest one
+/// it can; any other errno is itself, an unknown libuv code (`otherError`,
+/// "Unknown system error -e"). ENOEXEC stays itself (`UV_ENOEXEC`: see
+/// `uv_maps`); its message is "Unknown system error -8", as natively.
+pub fn crt_to_uv(e: i32) -> i32 {
+    match e {
+        74 => 71,   // EBADMSG -> EPROTO
+        10 => 3,    // ECHILD -> ESRCH
+        35 => 16,   // EDEADLK -> EBUSY
+        33 => 22,   // EDOM -> EINVAL
+        43 => 32,   // EIDRM -> EPIPE
+        115 => 106, // EINPROGRESS -> EISCONN
+        102 => 104, // ENETRESET -> ECONNRESET
+        37 => 11,   // ENOLCK -> EAGAIN
+        67 => 104,  // ENOLINK -> ECONNRESET
+        63 => 105,  // ENOSR -> ENOBUFS
+        60 => 22,   // ENOSTR -> EINVAL
+        62 => 110,  // ETIME -> ETIMEDOUT
+        42 => 61,   // ENOMSG -> ENODATA (libuv >= 1.45)
+        _ => e,
+    }
+}
+
+/// Whether `decode_uv_error` has a case for this errno: it has none for
+/// EDOM, ENOSTR, ENOLCK, ENOSR, EBADMSG, ECHILD, ENOMSG, EINPROGRESS, EIDRM,
+/// ENETRESET, ENOLINK, ETIME or EDEADLK, which are therefore `otherError`s.
+/// ENOEXEC has one since Lean 4.34 (invalid argument): Lean is compiled with
+/// libuv headers that define `UV_ENOEXEC` (1.50 or later), although the
+/// libuv it links names no message for it (test `fs_tests.rs`).
 fn uv_maps(e: i32) -> bool {
-    !matches!(e, 33 | 8 | 60 | 37 | 63 | 74 | 10 | 42 | 115 | 43 | 102 | 67 | 62 | 35)
+    !matches!(e, 33 | 60 | 37 | 63 | 74 | 10 | 42 | 115 | 43 | 102 | 67 | 62 | 35)
 }
 
-/// libuv's `uv_strerror` for a (positive) errno, as linked into Lean 4.33;
+/// libuv's `uv_strerror` for a (positive) errno, as linked into Lean 4.34
+/// (libuv 1.48, unchanged since 4.33);
 /// `None` for errnos libuv has no name for.
 fn uv_strerror(e: i32) -> Option<&'static str> {
     Some(match e {
@@ -815,10 +843,16 @@ pub fn uv_strerror_bytes(e: i32) -> Vec<u8> {
 /// The error kind `decode_uv_error` gives a (positive) errno without a file
 /// name, for `net`.
 pub fn uv_kind(e: i32) -> u32 {
+    uv_kind_file(e, false)
+}
+
+/// The error kind `decode_uv_error` gives a (positive) errno: unmapped
+/// errnos are `otherError`s.
+fn uv_kind_file(e: i32, has_fname: bool) -> u32 {
     if !uv_maps(e) {
         return 0;
     }
-    decode_kind(e, false)
+    decode_kind(e, has_fname)
 }
 
 /// `write(2)`, for the signal handler (`net`).
@@ -891,3 +925,7 @@ pub mod owned {
     #[inline(never)]
     pub fn unlock(h: LHandle) { super::unlock(&h); rc_release(h); }
 }
+
+#[cfg(test)]
+#[path = "fs_tests.rs"]
+mod tests;

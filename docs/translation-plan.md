@@ -1577,7 +1577,10 @@ Rules:
   array of `DirEntry`) or into `EST.Out.error e`, where `e` is built by
   Lean's own exported `lean_mk_io_error_*` builder for the reported kind,
   as Lean's `decode_io_error` does (the builders are instantiated when a
-  program uses such an extern). `IO.FS.Handle` is the runtime's `LHandle`.
+  program uses such an extern). Since Lean 4.34 the kind and the message
+  come from libuv's code for the errno (`uv_strerror`'s text, not
+  `strerror`'s), and an error of a libuv-based operation stores the
+  positive errno. `IO.FS.Handle` is the runtime's `LHandle`.
 - **Child processes** (`IO.Process`, over the runtime's `l2r_proc_*`
   primitives, which follow Lean's `process.cpp`). Natively a `Child` object
   carries, after its three stream fields, the pid (`uint32`) and whether
@@ -1649,7 +1652,8 @@ Rules:
   (`uv/*.cpp`) check by check, over primitives of the runtime's event loop
   (`leanrt::net`, §5.14) on plain values (numbers, strings, byte arrays,
   handles, promises); errors are built in Lean as `lean_decode_uv_error`
-  builds them (libuv's code as the error number, `uv_strerror`'s text).
+  builds them (classified by libuv's code, `uv_strerror`'s text, and the
+  positive errno as the error number, as since Lean 4.34).
   The shim also replaces Lean definitions whose native behaviour depends
   on Lean's borrow inference: a definition exported as
   `l2r_override_<mangled name>` is called instead of the definition of
