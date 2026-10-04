@@ -137,7 +137,7 @@ problem.
 ## The shared runtime crate (plan)
 
 lean2rr will use the shared crate **`lean-runtime`**
-(github.com/QueClr/lean-runtime, public). The crate implements Lean's
+(github.com/QueClr/lean-runtime-rs, public). The crate implements Lean's
 runtime behaviour once, as a library that a translator from Lean to Rust
 can use. lean2rr's `leanrt` moves into it step by step.
 

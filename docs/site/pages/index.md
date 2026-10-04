@@ -101,7 +101,7 @@ affected: the runtime implements all of them.
 ## The shared runtime crate
 
 lean2rr will use the shared crate `lean-runtime`
-(github.com/QueClr/lean-runtime, public). The crate holds Lean's runtime
+(github.com/QueClr/lean-runtime-rs, public). The crate holds Lean's runtime
 semantics, implemented once, in safe Rust. lean2rr keeps only the glue to
 its own representations. See [Runtime](runtime.html#the-shared-runtime-crate-plan).
 
