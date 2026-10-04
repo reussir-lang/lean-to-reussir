@@ -208,11 +208,20 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   (`Array lcAny`) calls the extern's instance at `lcAny` instead. The
   single element is boxed going in, or unboxed when the binder stays
   precise (`get`, `size`). When the result is itself a container, its binder
-  becomes `Array lcAny`; that needs every use of it to expect exactly that
-  type, and a chain of such calls counts (greatest fixpoint), as does a
-  join point's parameter of a precise container type that every jump passes
-  a uniform value (or a planned uniform result) and whose uses all expect
-  one uniform type. A constructor
+  becomes `Array lcAny`; that needs one use of it to expect exactly that
+  type and every other use to expect it or a precise type it converts to (a
+  read, converted at that use: review C02R-02), and a chain of such calls
+  counts (greatest fixpoint), as does a join point's parameter of a precise
+  container type that a jump passes a uniform value (or a planned uniform
+  result), every other jump that or a precise array (converted at that
+  jump), and whose uses fit as above (candidate parameters are made until
+  none is added, since one join point's planned parameter can be the jump
+  argument another needs). Then `uniformParams`: a declaration's
+  parameter of a precise array type that every call site (partial
+  applications included; `callSites`) passes a uniform array becomes uniform
+  when, with that type, the body after the pass uses it only where a uniform
+  array is expected and its recursive calls pass a uniform array (a lifted
+  closure capturing the column, a fold loop). A constructor
   application whose uses all expect one uniform type (`i :: d` at
   `List lcAny`) is built at that type, if its fields then need at most a box.
   A call is changed only if it receives a uniform value that the current
@@ -230,13 +239,22 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   `MonoRetype.lean`: `Stage3Config.uniformUpdates`, called at the end of
   `retypeMono`; plan [§4](../../translation-plan.md#4-stage-3--check-and-recover-lost-types)
   and §10 "Structural conversions". Tests `RtUniformUpdates`,
-  `RtUniformUpdatesJp`, `tests/runtime/conv-count-check.sh` (the elements
+  `RtUniformUpdatesJp`, `RtUniformUpdatesMixed`, `RtUniformUpdatesNested` (review C02R-02: a rare
+  `foldl`, a closure capture, a fresh array on a rare path kept the chain
+  precise: 20000 steps 4.2 s for 0.09 s), `tests/runtime/conv-count-check.sh` (the elements
   conversions rebuild, counted at two sizes: `L2R_COUNT_CONVERSIONS` makes
   every generated conversion count the array elements or constructor
   cells it rebuilds, `Lower/Conv.lean`: `countConversion`; off by default,
   so ordinary builds are unchanged).
 - **Remove only if:** the pass is off (correct, quadratic on such loops).
   Cost when on: none where no uniform container meets a precise use.
+  Not covered (plan §10): a function taking `Array Nat` that another call
+  site keeps typed (a typed argument, a use as a function value, a recursive
+  call with a precise array) is not retyped, so a column passed to it at
+  every step is converted at every call (review C03R-01, test
+  `RtUniformUpdatesShared`). The fix would be a copy of the function with
+  the parameter uniform for the uniform call sites (cloning, as Stage 1
+  makes instances), not a retyping of the function itself.
 
 ### `Array Nat` literals of small numbers are built from tables
 

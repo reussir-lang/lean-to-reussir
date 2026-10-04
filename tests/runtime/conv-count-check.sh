@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Updates of a container whose element type depends on a value convert no
-# container per update: builds RtUniformUpdates.lean and RtUniformUpdatesJp.lean
-# through lean2rr with the conversion counter (L2R_COUNT_CONVERSIONS=1: every
-# generated conversion counts the elements it rebuilds, array elements and
-# constructor cells, and the program prints "leanrt: conversions N" to stderr
-# at exit) and runs each at two sizes, LARGE = 4 x SMALL.
+# container per update: builds RtUniformUpdates.lean, RtUniformUpdatesJp.lean,
+# RtUniformUpdatesMixed.lean and RtUniformUpdatesNested.lean through lean2rr
+# with the conversion counter (L2R_COUNT_CONVERSIONS=1: every generated
+# conversion counts the elements it rebuilds, array elements and constructor
+# cells, and the program prints "leanrt: conversions N" to stderr at exit) and
+# runs each at two sizes, LARGE = 4 x SMALL.
 # - The elements converted must grow at most linearly with the size (at most
-#   5x for 4x the size; a whole-container round trip per update, RV9C-02 and
-#   C02R-01, makes them grow about 16x).
+#   5x for 4x the size; a whole-container round trip per update, RV9C-02,
+#   C02R-01 and C02R-02, makes them grow about 16x).
 # - Both runs must print what the native build prints.
 #   tests/runtime/conv-count-check.sh [SMALL]   (default 300)
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
@@ -36,7 +37,7 @@ count() {
   echo "$t size $n: elements converted $CONV"
 }
 
-for t in RtUniformUpdates RtUniformUpdatesJp; do
+for t in RtUniformUpdates RtUniformUpdatesJp RtUniformUpdatesMixed RtUniformUpdatesNested; do
   cp "$HERE/$t.lean" .
   lean -o "$t.olean" "$t.lean"
   lean "$t.lean" -c "$t.c"
