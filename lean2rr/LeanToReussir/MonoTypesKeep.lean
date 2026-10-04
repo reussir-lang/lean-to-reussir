@@ -11,9 +11,10 @@ is `toMonoType` except that a *closed* type-former argument is kept when it
 does not make the type dependent: a constant family `fun _ … _ => T` (kept
 with `T` converted), or a type constructor such as `List` (also after eta
 reduction: `fun n => Fin n` is `Fin`). A family whose body mentions its
-variable (`fun n => Fin (n + 1)`, `fun b => cond b Nat String`) still
-becomes `lcAny`, as in Lean: its values need not have a single
-representation.
+variable (`fun b => cond b Nat String`) still becomes `lcAny`, as in Lean:
+its values need not have a single representation. A value index does not
+count: Lean's base code already writes `Fin (n + 1)` as `Fin lcAny`, so
+`fun n => Fin (n + 1)` is a constant family and is kept.
 
 Everywhere lean2rr computes mono types itself (Stage 2's `toMono`,
 constructor fields, Stage 3) it uses this function, so the types agree.

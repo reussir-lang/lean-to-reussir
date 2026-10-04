@@ -447,8 +447,10 @@ type constructor. A family whose body mentions its variable (`fun b => cond
 b Nat String`) stays `lcAny`, as its values need not have a single
 representation. The rule is syntactic, after eta reduction: `fun n => Fin
 n` is the type constructor `Fin`, kept (a field type `Fin k` that applies
-it converts to `Nat`), while `fun n => Fin (n + 1)` stays `lcAny`,
-although every `Fin (n + 1)` is a `Nat`. Every mono type lean2rr
+it converts to `Nat`). A value index is no obstacle: in Lean's base code
+`Fin (n + 1)` is already `Fin lcAny`, so `fun n => Fin (n + 1)` is a
+constant family and is kept too (`(n : Nat) × Fin (n + 1)` is stored as a
+pair of `Nat`s). Every mono type lean2rr
 computes itself uses the same conversion.
 
 **`toMono`: semantic lowering done by Lean.**
