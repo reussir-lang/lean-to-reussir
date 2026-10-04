@@ -19,7 +19,6 @@ extern "rust" [{
     extern crate leanrt;
     use leanrt::string::Utf8;
     use reussir_rt::rc::Rc;
-    use reussir_rt::collections::vec::Vec as RVecImpl;
 }];
 
 // ===========================================================================
@@ -51,9 +50,9 @@ pub struct Nat;
 pub struct Int;
 
 // A Lean `Array` (and `ByteArray` = RVec<u8>, `FloatArray` = RVec<f64>):
-// a copy-on-write vector, updated in place when unique. The Rust type wraps
-// Reussir's vector so that freeing nested containers does not recurse
-// (`leanrt::drop`).
+// a copy-on-write vector, updated in place when unique. One block: the
+// count, the size, the capacity and the elements (`leanrt::drop::Vec`,
+// `leanrt::array`), freed without recursion (`leanrt::drop`).
 #[ffi(rust = "::leanrt::drop::Vec")]
 pub struct RVec<T>;
 
@@ -67,7 +66,7 @@ pub struct LRef<T>;
 // A mutable cell holding one value, mutated in place through every alias:
 // the state of a `Thunk` or `Task` (lean2rr generates the state type).
 // One allocation: the count and the value. (`leanrt::drop::Cell` wraps
-// Reussir's `Rc`, as `RVec` does.)
+// Reussir's `Rc`.)
 #[ffi(rust = "::leanrt::drop::Cell")]
 pub struct LCell<T>;
 
@@ -2105,7 +2104,7 @@ fn l2r_stream_write(fd : u64, b : RVec<u8>) -> u64 [{ { leanrt::io::stream_put(f
 fn l2r_stream_flush(fd : u64) -> u64 [{ { leanrt::io::stream_flush(fd); 0 } }];
 
 #[ffi(import)]
-fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{ leanrt::array::bytes_of_vec(leanrt::io::stream_read(fd, n)) }];
+fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{ leanrt::io::stream_read(fd, n) }];
 
 #[ffi(import)]
 fn l2r_stream_getLine(fd : u64) -> LStr [{ leanrt::string::from_bytes_lossy(&leanrt::io::stream_get_line(fd)) }];
@@ -2173,63 +2172,30 @@ fn l2r_rc_swap<T>(c : Cell<T>, v : T) -> T {
 // task); kept with its functions.
 
 #[ffi(import)]
-fn l2r_ref_new<T>(v : T) -> LRef<T> [{ leanrt::array::from_rc(Rc::new(vec![v])) }];
+fn l2r_ref_new<T>(v : T) -> LRef<T> [{ leanrt::array::ref_new(v) }];
 
 #[ffi(import)]
-fn l2r_ref_get<T>(r : LRef<T>) -> T [{
-    {
-        let c = leanrt::array::into_rc(r);
-        let v = c.first().cloned().expect("leanrt: read of an empty ST.Ref (after take)");
-        v
-    }
-}];
+fn l2r_ref_get<T>(r : LRef<T>) -> T [{ leanrt::array::ref_get(r) }];
 
 // The old value is released after the new one is stored, as `lean_dec`
 // does (`l2r_rc_set`).
 #[ffi(import)]
-fn l2r_ref_set<T>(r : LRef<T>, v : T) -> u64 [{
-    {
-        let mut c = leanrt::array::into_rc(r);
-        let cell = unsafe { c.data_mut() };
-        let old = cell.pop();
-        cell.push(v);
-        if let Some(old) = old {
-            leanrt::drop::release(old);
-        }
-        0
-    }
-}];
+fn l2r_ref_set<T>(r : LRef<T>, v : T) -> u64 [{ { leanrt::array::ref_set(r, v); 0 } }];
 
 #[ffi(import)]
-fn l2r_ref_swap<T>(r : LRef<T>, v : T) -> T [{
-    {
-        let mut c = leanrt::array::into_rc(r);
-        let cell = unsafe { c.data_mut() };
-        let old = cell.pop().expect("leanrt: swap of an empty ST.Ref (after take)");
-        cell.push(v);
-        old
-    }
-}];
+fn l2r_ref_swap<T>(r : LRef<T>, v : T) -> T [{ leanrt::array::ref_swap(r, v) }];
 
 // `ST.Prim.Ref.take`: move the value out, leaving the cell empty until the
 // next `set` (so the value stays uniquely referenced, as in Lean).
 #[ffi(import)]
-fn l2r_ref_take<T>(r : LRef<T>) -> T [{
-    {
-        let mut c = leanrt::array::into_rc(r);
-        let cell = unsafe { c.data_mut() };
-        cell.pop().expect("leanrt: take of an empty ST.Ref")
-    }
-}];
+fn l2r_ref_take<T>(r : LRef<T>) -> T [{ leanrt::array::ref_take(r) }];
 
 // An empty cell, and whether a cell is empty.
 #[ffi(import)]
-fn l2r_ref_empty<T>() -> LRef<T> [{ leanrt::array::from_rc(leanrt::alloc::rc_new(leanrt::alloc::vec_with_capacity(1))) }];
+fn l2r_ref_empty<T>() -> LRef<T> [{ leanrt::array::ref_empty() }];
 
 #[ffi(import)]
-fn l2r_ref_is_empty<T>(r : LRef<T>) -> bool [{
-    { let c = leanrt::array::into_rc(r); let e = c.is_empty(); leanrt::rc_release(c); e }
-}];
+fn l2r_ref_is_empty<T>(r : LRef<T>) -> bool [{ leanrt::array::ref_is_empty(r) }];
 
 // ---- IO.Promise ----
 //
@@ -2287,12 +2253,7 @@ fn l2r_option_get_or_block_none<T>() -> T {
 }
 
 #[ffi(import)]
-fn l2r_ref_ptr_eq<T>(a : LRef<T>, b : LRef<T>) -> bool [{
-    {
-        let (x, y) = (leanrt::array::into_rc(a), leanrt::array::into_rc(b));
-        std::ptr::eq(&*x as *const std::vec::Vec<[:T:]>, &*y as *const std::vec::Vec<[:T:]>)
-    }
-}];
+fn l2r_ref_ptr_eq<T>(a : LRef<T>, b : LRef<T>) -> bool [{ leanrt::array::ref_ptr_eq(a, b) }];
 
 // ===========================================================================
 // Once-cells (constants and closed terms)
@@ -3232,7 +3193,7 @@ fn l2r_io_finish<T, R>(v : T, ok : T -> R, err : u32 -> (u32 -> (LStr -> (LStr -
 
 // `IO.getRandomBytes n` (an IO error when `/dev/urandom` cannot be read).
 #[ffi(import)]
-fn l2r_fs_get_random_bytes(n : u64) -> RVec<u8> [{ leanrt::array::bytes_of_vec(leanrt::fs::get_random_bytes(n)) }];
+fn l2r_fs_get_random_bytes(n : u64) -> RVec<u8> [{ leanrt::fs::get_random_bytes(n) }];
 
 // `IO.FS.Handle.mk path mode` (mode = constructor index of `IO.FS.Mode`:
 // read, write, writeNew, readWrite, append).
@@ -3278,7 +3239,7 @@ fn l2r_fs_real_path(p : LStr) -> LStr [{ { let r = leanrt::fs::real_path(p.utf8(
 // `IO.FS.DirEntry`s with `root := p`).
 #[ffi(import)]
 fn l2r_fs_read_dir(p : LStr) -> RVec<LStr> [{
-    { let v = leanrt::fs::read_dir(p.utf8()); leanrt::rc_release(p); leanrt::array::from_rc(Rc::new(v)) }
+    { let v = leanrt::fs::read_dir(p.utf8()); leanrt::rc_release(p); leanrt::array::from_vec(v) }
 }];
 // `System.FilePath.metadata` (`follow`) / `symlinkMetadata`: [accessed sec
 // (i64 bits), accessed nsec, modified sec (i64 bits), modified nsec,
@@ -3286,7 +3247,7 @@ fn l2r_fs_read_dir(p : LStr) -> RVec<LStr> [{
 // (dir, file, symlink, other).
 #[ffi(import)]
 fn l2r_fs_metadata(p : LStr, follow : bool) -> RVec<u64> [{
-    { let v = leanrt::fs::metadata(p.utf8(), follow); leanrt::rc_release(p); leanrt::array::from_rc(Rc::new(v.to_vec())) }
+    { let v = leanrt::fs::metadata(p.utf8(), follow); leanrt::rc_release(p); leanrt::array::from_slice(&v[..]) }
 }];
 // `Handle.isEof` / `Handle.isTty` are `BaseIO` (they cannot fail): payload
 // primitives named after the extern symbols.

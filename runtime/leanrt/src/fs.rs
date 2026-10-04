@@ -278,16 +278,18 @@ pub fn flush(h: &LHandle) {
 /// `ENOMEM`; the array allocation itself has Lean's checks; then `fread`.
 /// (The checks run before `f` is borrowed: an out-of-memory panic exits,
 /// and the exit processing takes every `FILE`.)
-pub(crate) fn lean_read<'a>(f: impl FnOnce() -> &'a mut CFile, n: u64) -> Result<Vec<u8>, i32> {
+pub(crate) fn lean_read<'a>(f: impl FnOnce() -> &'a mut CFile, n: u64) -> Result<crate::array::RVec<u8>, i32> {
     if n > u64::MAX - 24 {
         return Err(ENOMEM);
     }
     crate::array::check_alloc(n, 1);
-    f().read(n as usize)
+    // Into the array's own block (as `lean_io_prim_handle_read`, which
+    // keeps the capacity asked for): no second copy of the bytes.
+    crate::array::bytes_filled(n as usize, |p, room| unsafe { f().read_into(p, room) })
 }
 
 /// `Handle.read n`.
-pub fn read_bytes(h: &LHandle, n: u64) -> Vec<u8> {
+pub fn read_bytes(h: &LHandle, n: u64) -> crate::array::RVec<u8> {
     match lean_read(|| fh(h), n) {
         Ok(v) => {
             set_ok();
@@ -295,7 +297,7 @@ pub fn read_bytes(h: &LHandle, n: u64) -> Vec<u8> {
         }
         Err(e) => {
             set_err(e, None);
-            Vec::new()
+            crate::array::empty()
         }
     }
 }
@@ -638,38 +640,45 @@ pub fn metadata(p: &[u8], follow: bool) -> [u64; 7] {
 /// array would overflow is `ENOMEM` (Lean leaves the descriptor open then);
 /// the array is allocated as Lean's, then filled by `read`s (`EINTR`
 /// retried; another error has no file name).
-pub fn get_random_bytes(n: u64) -> Vec<u8> {
+pub fn get_random_bytes(n: u64) -> crate::array::RVec<u8> {
     set_ok();
     if n == 0 {
-        return Vec::new();
+        return crate::array::empty();
     }
     let fd = unsafe { open(b"/dev/urandom\0".as_ptr() as *const std::ffi::c_char, O_RDONLY | O_CLOEXEC) };
     if fd < 0 {
         set_err(errno_now(), Some(b"/dev/urandom"));
-        return Vec::new();
+        return crate::array::empty();
     }
     if n > u64::MAX - 24 {
         set_err(ENOMEM, None);
-        return Vec::new();
+        return crate::array::empty();
     }
     crate::array::check_alloc(n, 1);
-    let n = n as usize;
-    let mut buf: Vec<u8> = crate::alloc::vec_with_capacity(n);
-    while buf.len() < n {
-        let got = unsafe { read(fd, buf.as_mut_ptr().add(buf.len()) as *mut std::ffi::c_void, n - buf.len()) };
-        if got < 0 {
-            let e = errno_now();
-            if e != EINTR {
-                unsafe { close(fd) };
-                set_err(e, None);
-                return Vec::new();
+    // Into the array's own block: no second copy of the bytes.
+    let filled = crate::array::bytes_filled(n as usize, |p, n| {
+        let mut have = 0;
+        while have < n {
+            let got = unsafe { read(fd, p.add(have) as *mut std::ffi::c_void, n - have) };
+            if got < 0 {
+                let e = errno_now();
+                if e != EINTR {
+                    return Err(e);
+                }
+            } else {
+                have += got as usize;
             }
-        } else {
-            unsafe { buf.set_len(buf.len() + got as usize) };
+        }
+        Ok(have)
+    });
+    unsafe { close(fd) };
+    match filled {
+        Ok(a) => a,
+        Err(e) => {
+            set_err(e, None);
+            crate::array::empty()
         }
     }
-    unsafe { close(fd) };
-    buf
 }
 
 // ---- error decoding (`decode_io_error`/`decode_uv_error` in io.cpp) ----
@@ -907,7 +916,7 @@ pub mod owned {
     #[inline(never)]
     pub fn flush(h: LHandle) { super::flush(&h); rc_release(h); }
     #[inline(never)]
-    pub fn read(h: LHandle, n: u64) -> RVec<u8> { let v = read_bytes(&h, n); rc_release(h); array::bytes_of_vec(v) }
+    pub fn read(h: LHandle, n: u64) -> RVec<u8> { let v = read_bytes(&h, n); rc_release(h); v }
     #[inline(never)]
     pub fn get_line(h: LHandle) -> LStr { let s = super::get_line(&h); rc_release(h); s }
     #[inline(never)]

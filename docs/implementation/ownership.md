@@ -71,9 +71,10 @@ runtime.
 
 ### Containers free through the thread's pending stack, in Lean's order
 
-- **What:** The prelude's containers (`RVec`, `LRef`: `leanrt::drop::Vec`;
-  `LCell`: `leanrt::drop::Cell`) are transparent wrappers of Reussir's
-  types whose `Drop` frees a last reference through Reussir's per-thread
+- **What:** The prelude's containers (`RVec`, `LRef`: `leanrt::drop::Vec`,
+  the runtime's one-block array; `LCell`: `leanrt::drop::Cell`, a
+  transparent wrapper of Reussir's `Rc`) have a `Drop` that frees a last
+  reference through Reussir's per-thread
   stack of pending work (`reussir_rt::drop`, local patch 0014), shared with
   the record drop glue. A container freed while a free runs is pushed
   instead; the outermost free pops until empty. An array is emptied from

@@ -755,9 +755,9 @@ Stage 4 sees only mono types:
 | `Nat` | `Nat`, a *tagged* opaque handle: one word, `2n+1` for n < 2^63, else a pointer to a counted runtime bignum (GMP) | as natively; see "One-word `Nat` and `Int`" below |
 | `Int` | `Int`, the same with small values in the `int32` range (`lean_box((unsigned)(int)i)`) | |
 | `String` | `LStr`, an opaque copy-on-write handle to one block like Lean's string object: a 32-byte header (count, byte size, capacity, character count) and the UTF-8 bytes | literals: §5.4 |
-| `Array α` | `RVec<S>`, the runtime's copy-on-write vector | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records); for an enumeration or `Unit`, its index (`u8`, `u16` or `u32` by the number of constructors; Lean stores a tagged scalar); otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
+| `Array α` | `RVec<S>`, the runtime's copy-on-write vector: one block, a 24-byte header (count, size, capacity) and the elements | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records); for an enumeration or `Unit`, its index (`u8`, `u16` or `u32` by the number of constructors; Lean stores a tagged scalar); otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | the elements' own words, in one block with Lean's 24-byte array header (count, size, capacity), like Lean's array object; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments (optional pass `nat-arrays`; without it they are `RVec<Nat>`, `RVec<Int>`, also one word per element) |
-| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` are the identity (`Array UInt8` is `RVec<u8>` too) |
 | `ST.Ref σ α` | a generated shared record `L2RRef_N(Cell<⟦α⟧>)` around Reussir's mutable cell | the contents keep their own representation; `[value]` structures are stored in an `ElemBox`, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧), … }` | memoized thunks, deferred tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
@@ -2553,7 +2553,7 @@ Tasks that wait for each other in a cycle wait forever, as natively.
 The runtime provides what Reussir lacks:
 - `Nat`/`Int`: a small value, or a GMP bignum (`leanrt::big`);
 - Lean's `String` operations over UTF-8 bytes (one block with the character count, §5.1);
-- `Array`/`ByteArray`/`FloatArray` operations over the copy-on-write `Vec`;
+- `Array`/`ByteArray`/`FloatArray` operations over the copy-on-write one-block vector;
 - `Float` math through libm;
 - IO: stdout/stderr/stdin streams, `IO.Error`, argv, exit;
 - the mutable cells of thunks and tasks, the queues of deferred tasks, and
@@ -3101,18 +3101,22 @@ Each item says what differs and when.
   `contains`, `toNat?`): 1.7x native (Pf4MinStrAny; 1.1x with the projection
   moved by hand to its first use); insertion sort on `Array Nat` keeps
   the count's stores and reloads it for the swap's uniqueness check: 2.1x.
-- *Generic arrays* (`RVec`) are two allocations, a 32-byte counted box
-  (Rust's vector: capacity, pointer, length) and the element buffer, where
-  a Lean array is one object with a 24-byte header: a small array costs 8
-  bytes and one allocation more than natively (an `Array String` of three
-  elements: 32 + 24 bytes, natively 48). `Array Nat`/`Array Int` (one block
-  with Lean's header) and strings (one block with Lean's 32-byte header)
-  are laid out like Lean's objects: six million three-element `Array Nat`
-  rows take native memory (Pf4SmallArrs 0: 328 MB, native 330 MB; 421 MB
-  with the earlier 40-byte header), and five million short live strings
-  take 270 MB (Pf4ManyStrs; native 352 MB; 306 MB as two allocations, a
-  counted box and a byte buffer).
-  `String.toUTF8` and `String.fromUTF8` copy the bytes, as natively.
+- *Arrays and strings are one block each*, with headers of Lean's sizes
+  (24 bytes for an array, `Array Nat`/`Array Int` included, 32 for a
+  string). Until perf-rvec a generic array (`RVec`) was two allocations, a
+  32-byte counted box and the element buffer: three million three-element
+  `Array UInt64` rows took 186 MB, now 163 MB (native 303 MB, which boxes
+  each `UInt64`), with one allocation per array instead of two. The cost
+  of the single block: an array asked for with a payload of exactly
+  16 MiB (a hash table's 2^21 buckets) is, with its header, past
+  mimalloc's large-object limit and becomes a huge segment, which mimalloc
+  purges only 100 ms after it is freed: `Std.HashMap` with 0.8M to 2M keys
+  peaks up to 24% higher than with the buffer apart (hashmap 1M: 60 MB,
+  51 MB before, native 64 MB; Lean's array has the same header). Six
+  million three-element `Array Nat` rows take native memory
+  (Pf4SmallArrs 0: 328 MB, native 330 MB), five million short live
+  strings 270 MB (Pf4ManyStrs; native 352 MB). `String.toUTF8` and
+  `String.fromUTF8` copy the bytes, as natively.
 - *Dropping a large array of records*: the runtime decrements shared
   elements inline (as `lean_del` does natively) and frees the array
   without the stack of pending work when no element is freed; an element

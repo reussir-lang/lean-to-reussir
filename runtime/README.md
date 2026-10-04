@@ -60,9 +60,9 @@ Generated sections of the prelude (edit the generator, then run it):
 | `Int` | `Int` = `leanrt::nat::LInt`, likewise | odd: `lean_box((unsigned)(int)i)` for i in the `int32` range; even: an owned `LBig` pointer |
 | big numbers | `LBig`, one `mi_malloc` block: count `u32`, flags `u32`, signed size `i32` (limbs in use, negative for a negative value), capacity `u32`, then the limbs | GMP `mpn` operations on the limbs, in a unique operand's block with room (grown by a carry, shrunk when a result leaves most of it unused) or a fresh one; `mpz` operations on read-only views for `pow`, `gcd`, parsing and printing; normalized (only values outside the small ranges); only behind a `Nat`/`Int` word |
 | `String` | `LStr` = `leanrt::string::LStr`, a pointer to one block: count, byte size, capacity, character count (32 bytes, as Lean's header), bytes | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write; grows by `realloc` (below) |
-| `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a transparent wrapper of `reussir_rt::collections::vec::Vec<E>` | `E` = storage type of `α` (lean2rr boxes non-boundary types); freed without recursion (below); two allocations, a 32-byte counted box and the buffer (Lean: one block, 24-byte header) |
+| `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a pointer to one block: count `u32` (padded), size, capacity (24 bytes), then the elements | `E` = storage type of `α` (lean2rr boxes non-boundary types); copy-on-write, grows by `realloc`; freed without recursion (below) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` = `leanrt::tagvec::TagVec` | the elements' own words, one block with Lean's 24-byte header (below) |
-| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `String.toUTF8`/`fromUTF8` copy the bytes, as natively |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` (and `FloatArray`'s) are the identity (`Array UInt8` is `RVec<u8>` too); `String.toUTF8`/`fromUTF8` copy the bytes, as natively |
 | `ST.Ref σ α` / `IO.Ref α` | a lean2rr-generated shared record `L2RRefN(Cell<E>)` around a Reussir cell (two allocations: the record and the cell); a `Nat`/`Int` reference holds the handle like any other | mutated through every alias; `take` leaves the placeholder |
 | `Thunk α`, `Task α` | `LCell<S>` = `leanrt::drop::Cell<S>`, a transparent wrapper of `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
 | `IO.FS.Handle` | `LHandle` | shared buffered file, closed with its last reference |
@@ -118,8 +118,8 @@ counts the big numbers made and freed and prints the counts at exit
 `nat-arrays` pass) store the elements' words, like Lean's array object:
 the handles move in and out as their words (`l2r_natarr_get` wraps the
 owned word it reads, `l2r_natarr_set` stores `l2r_nat_raw(x)`). Without
-the pass an `Array Nat` is an `RVec<Nat>`, one word per element too, in
-two allocations (the `Rc` box and the buffer). Every
+the pass an `Array Nat` is an `RVec<Nat>`, one word per element in the
+same layout (the generic array's block). Every
 `lean_array_xxx<E>` / `l2r_array_xxx<E>` has `lean_natarr_xxx` /
 `l2r_natarr_xxx` (and `intarr`) with the same arguments and element type
 `Nat` (`Int`); `lean_mk_array`/`lean_mk_empty_array_with_capacity` become
@@ -130,18 +130,37 @@ array takes 48 bytes as natively. A copy of a shared one keeps its
 capacity (`lean_copy_expand_array`), so a literal `#[a, b, c]`, which
 pushes onto a shared empty array of capacity 3, allocates once.
 
-**Runtime-owned objects.** `LStr` and `TagVec` are `leanrt` types: a
-`#[repr(transparent)]` pointer to a block allocated with `mi_malloc`, whose
-first word is the `u32` count. That is all Reussir needs of an opaque type
-(its `rc.inc` increments the count inline; `rc.dec` calls the type's drop
-hook, a texture that drops the Rust value), so their `Clone` and `Drop` do
-the counting, the drop's last reference out of line. A unique block grows
-in place with `mi_realloc` (at least doubling; the capacity is the whole
-block: mimalloc's size class, `mi_good_size`, for small blocks, a power of
-two above 4 KiB); a shared one is copied with room to spare (a string:
-at least doubled, as `lean_string_push`; an array: its capacity kept).
-`dbgTraceIfShared` recognizes them by their Rust type names
-(`leanrt::string::`, `leanrt::tagvec::`) besides `reussir_rt::`.
+**Runtime-owned objects.** `LStr`, `TagVec` and the arrays (`RVec`,
+`LRef`: `leanrt::drop::Vec`) are `leanrt` types: a `#[repr(transparent)]`
+pointer to a block allocated with `mi_malloc`, whose first word is the
+`u32` count. That is all Reussir needs of an opaque type (its `rc.inc`
+increments the count inline, its uniqueness analysis reads it; `rc.dec`
+calls the type's drop hook, a texture that drops the Rust value), so their
+`Clone` and `Drop` do the counting, the drop's last reference out of line.
+A unique block grows in place with `mi_realloc` (at least doubling; the
+capacity is the whole block: mimalloc's size class, `mi_good_size`, for
+small blocks, a power of two above 4 KiB); a fresh block's size is
+rounded up to 8 bytes, the rest becoming capacity; a shared one is copied
+with room for the update (a string: at least doubled, as
+`lean_string_push`; an array, for a push: `lean_array_push`'s capacity;
+otherwise a generic array is copied to its size and a tag vector keeps its
+capacity, `lean_copy_expand_array`). An array's elements
+start at offset 24 (every storage type is at most 8 bytes, 8-aligned), so
+a read is the handle plus an offset, with no load of a buffer pointer.
+Bytes read from a file, standard input or `/dev/urandom` are read into
+the array's block (`array::bytes_filled`, `CFile::read_into`); arrays
+built from a Rust `Vec` (`array::from_vec`, `bytes_of_vec`: directory
+entries, a process's output, a socket's data) copy its elements once. A release
+tests `count == 1` (never `count > 1`): after Reussir's `rc.inc`, which
+asserts that the old count was neither 0 nor `u32::MAX`, LLVM then cancels
+a read's increment and release. The cost of one block: an array whose
+payload is exactly 16 MiB (a hash table's 2^21 buckets) is, with the
+header, past mimalloc's large-object limit, a huge segment that mimalloc
+purges only 100 ms after it is freed (plan §10, "Arrays and strings are
+one block each").
+`dbgTraceIfShared` recognizes strings and tag vectors by their Rust type
+names (`leanrt::string::`, `leanrt::tagvec::`) besides `reussir_rt::`; it
+reports no generic array (sharing is not observable, plan §10).
 
 ## Calling convention
 
@@ -215,7 +234,7 @@ patches 0013 and 0014: the record members it frees go on a stack of
 pending work per thread (`reussir_rt::drop`), and it releases a container
 field through the container's Rust `Drop` (the opaque type's drop hook),
 which releases the elements. The prelude's containers are therefore
-`leanrt::drop`'s wrappers, whose `Drop` frees the last reference through
+`leanrt::drop`'s types, whose `Drop` frees the last reference through
 that same stack (so the runtime needs Reussir with 0014): a container
 freed while another free runs (from an element's release, or from record
 glue) is pushed instead, and the outermost free, glue or container, pops

@@ -445,10 +445,14 @@ impl CFile {
         c as i32
     }
 
-    /// `_IO_file_xsgetn`: up to `n` bytes appended to `out` (which has room
-    /// for them). Requests of at least a buffer are read directly into
-    /// `out`, in whole blocks, discarding the (empty) buffer state.
-    fn xsgetn(&mut self, out: &mut Vec<u8>, n: usize) -> usize {
+    /// `_IO_file_xsgetn`: up to `n` bytes written to `out` (room for `n`),
+    /// their number returned. Requests of at least a buffer are read
+    /// directly into `out`, in whole blocks, discarding the (empty) buffer
+    /// state.
+    ///
+    /// # Safety
+    /// `out` must be valid for writes of `n` bytes.
+    unsafe fn xsgetn(&mut self, out: *mut u8, n: usize) -> usize {
         let mut want = n;
         if !self.has_buf {
             self.doallocbuf();
@@ -456,12 +460,12 @@ impl CFile {
         while want > 0 {
             let have = self.re - self.rp;
             if want <= have {
-                out.extend_from_slice(&self.buf[self.rp..self.rp + want]);
+                std::ptr::copy_nonoverlapping(self.buf[self.rp..].as_ptr(), out.add(n - want), want);
                 self.rp += want;
                 want = 0;
             } else {
                 if have > 0 {
-                    out.extend_from_slice(&self.buf[self.rp..self.re]);
+                    std::ptr::copy_nonoverlapping(self.buf[self.rp..].as_ptr(), out.add(n - want), have);
                     want -= have;
                     self.rp += have;
                 }
@@ -478,9 +482,8 @@ impl CFile {
                 if block >= 128 {
                     count -= want % block;
                 }
-                let len = out.len();
-                debug_assert!(out.capacity() - len >= count);
-                let r = unsafe { read(self.fd, out.as_mut_ptr().add(len) as *mut c_void, count) };
+                debug_assert!(count <= want);
+                let r = read(self.fd, out.add(n - want) as *mut c_void, count);
                 if r <= 0 {
                     if r == 0 {
                         self.flags |= EOF_SEEN;
@@ -489,7 +492,6 @@ impl CFile {
                     }
                     break;
                 }
-                unsafe { out.set_len(len + r as usize) };
                 want -= r as usize;
                 if self.offset != POS_BAD {
                     self.offset += r as i64;
@@ -675,17 +677,28 @@ impl CFile {
     /// once, as Lean's); any bytes read are a success; with none, end of
     /// file clears the indicators (`clearerr`), otherwise it is an error.
     pub fn read(&mut self, n: usize) -> Result<Vec<u8>, i32> {
-        let mut out = crate::alloc::vec_with_capacity(n);
+        let mut out: Vec<u8> = crate::alloc::vec_with_capacity(n);
+        let got = unsafe { self.read_into(out.as_mut_ptr(), n)? };
+        unsafe { out.set_len(got) };
+        Ok(out)
+    }
+
+    /// `read` into `out` (room for `n` bytes, the caller's: a byte array's
+    /// block, so that the bytes are not copied again): how many were read.
+    ///
+    /// # Safety
+    /// `out` must be valid for writes of `n` bytes.
+    pub unsafe fn read_into(&mut self, out: *mut u8, n: usize) -> Result<usize, i32> {
         if n == 0 {
-            return Ok(out);
+            return Ok(0);
         }
         self.used = true;
-        let got = self.xsgetn(&mut out, n);
+        let got = self.xsgetn(out, n);
         if got > 0 {
-            Ok(out)
+            Ok(got)
         } else if self.is_eof() {
             self.clearerr();
-            Ok(out)
+            Ok(0)
         } else {
             Err(errno_now())
         }

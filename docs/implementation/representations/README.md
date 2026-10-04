@@ -10,8 +10,9 @@ is in [`runtime/README.md`](../../../runtime/README.md).
   block (header and limbs), literals, printing.
 - [records.md](records.md): generated types for inductives: unit, value
   enums and structs, field order, hidden fields, names.
-- [arrays.md](arrays.md): storage types, `ElemBox`, enumerations as
-  indices, one-word `Nat`/`Int` arrays, capacities, indices.
+- [arrays.md](arrays.md): the one-block array and its `count == 1`
+  release, storage types, `ElemBox`, enumerations as indices, one-word
+  `Nat`/`Int` arrays, capacities, indices.
 - [strings.md](strings.md): the counted string, the string literal table
   and its `[` escape.
 - [box-and-uniform.md](box-and-uniform.md): the uniform `Box` type and its

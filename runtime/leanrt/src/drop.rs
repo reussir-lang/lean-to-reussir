@@ -29,10 +29,10 @@
 //! handle is closed first. Natively that depends on where the value is
 //! dropped (plan §10).
 //!
-//! The types are `#[repr(transparent)]` over Reussir's own
-//! (`reussir_rt::collections::vec::Vec`, `reussir_rt::rc::Rc`), so the FFI
-//! contract (an rc pointer whose count is the `u32` at its address) and
-//! every other use are unchanged; they dereference to them.
+//! The types are `#[repr(transparent)]` pointers whose block starts with
+//! the `u32` reference count, all Reussir relies on for an opaque type (the
+//! FFI contract): `Vec` is the runtime's own one-block array (`Hdr`, then
+//! the elements), `Cell` wraps Reussir's `Rc`.
 
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
@@ -135,108 +135,202 @@ fn count(p: usize) -> u32 {
     unsafe { *(p as *const u32) }
 }
 
-/// An array or reference cell: Reussir's copy-on-write vector.
+/// The header of an array block (`Vec`): the reference count (the `u32`
+/// at the handle's address, which Reussir's `rc.inc` bumps and its
+/// uniqueness analysis reads), the number of elements and the room for
+/// them. The elements follow at `HDR`.
+///
+/// ```text
+///   0: count: u32, (padding)
+///   8: len: usize
+///  16: cap: usize
+///  24: elements: [T; cap], the first `len` initialized
+/// ```
+///
+/// One block per array, elements inline: a read is the handle plus an
+/// offset. The cost: an array asked for with a payload of exactly 16 MiB
+/// (a hash table's 2^21 buckets) is, with the header, past mimalloc's
+/// large-object limit, so a huge segment of its own, which mimalloc purges
+/// only 100 ms after it is freed (`arena_purge_mult`): `Std.HashMap` with
+/// 0.8M to 2M keys peaks up to 24% higher than with the elements in a
+/// buffer apart (as natively: Lean's array has the same header). Keeping
+/// large elements apart (a test on the capacity in every access) cost 7-19%
+/// more instructions in array loops.
+#[repr(C)]
+pub struct Hdr {
+    pub count: u32,
+    _pad: u32,
+    pub len: usize,
+    pub cap: usize,
+}
+
+impl Hdr {
+    /// The header of a fresh unique block with room for `cap` elements.
+    #[inline(always)]
+    pub fn new(cap: usize) -> Hdr {
+        Hdr { count: 1, _pad: 0, len: 0, cap }
+    }
+}
+
+pub const HDR: usize = std::mem::size_of::<Hdr>();
+
+/// The elements of the block `o`. Element types are at most 8-aligned
+/// (integers, floats, `bool`, handles): `HDR` keeps them aligned, and
+/// mimalloc's blocks are 8-aligned (Reussir builds it with
+/// `MI_MAX_ALIGN_SIZE=8`).
+#[inline(always)]
+pub unsafe fn elems<T>(o: *mut Hdr) -> *mut T {
+    const { assert!(std::mem::align_of::<T>() <= 8 && std::mem::size_of::<T>() > 0) };
+    (o as *mut u8).add(HDR) as *mut T
+}
+
+extern "C" {
+    fn mi_free(p: *mut std::ffi::c_void);
+}
+
+/// An array (`RVec`) or reference cell (`LRef`): a `#[repr(transparent)]`
+/// pointer to one block (`Hdr`, then the elements), owning one reference.
+/// Reussir treats it as an opaque rc pointer: `rc.inc` increments the
+/// count inline and `rc.dec` calls the drop hook, which drops the value;
+/// so `Clone` and `Drop` here do the counting. `crate::array` allocates,
+/// grows (`mi_realloc`) and copies the blocks.
+///
+/// Safety argument: a `Vec` points at a live block from `array::alloc` or
+/// `array::grow` (`mi_malloc`/`mi_realloc`) of `HDR + cap * size_of::<T>()`
+/// bytes or more, whose first `len <= cap` elements are initialized; it is
+/// written or moved only through a unique handle (count 1), and freed only
+/// by the reference that finds the count at 1.
 #[repr(transparent)]
-pub struct Vec<T: Clone>(ManuallyDrop<reussir_rt::collections::vec::Vec<T>>);
+pub struct Vec<T: Clone>(*mut Hdr, std::marker::PhantomData<T>);
 
 impl<T: Clone> Vec<T> {
+    /// The handle of a block whose reference the caller gives up.
     #[inline(always)]
-    pub fn from_inner(v: reussir_rt::collections::vec::Vec<T>) -> Self {
-        Vec(ManuallyDrop::new(v))
+    pub unsafe fn from_raw(o: *mut Hdr) -> Self {
+        Vec(o, std::marker::PhantomData)
+    }
+
+    /// The block, the handle's reference given up to the caller.
+    #[inline(always)]
+    pub fn into_raw(self) -> *mut Hdr {
+        let o = self.0;
+        std::mem::forget(self);
+        o
+    }
+
+    #[inline(always)]
+    pub fn hdr(&self) -> *mut Hdr {
+        self.0
+    }
+
+    #[inline(always)]
+    pub fn is_unique(&self) -> bool {
+        unsafe { (*self.0).count == 1 }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        unsafe { (*self.0).len }
+    }
+
+    #[inline(always)]
+    pub fn as_slice(&self) -> &[T] {
+        unsafe { std::slice::from_raw_parts(elems::<T>(self.0), (*self.0).len) }
     }
 }
 
 impl<T: Clone> Clone for Vec<T> {
     #[inline(always)]
     fn clone(&self) -> Self {
-        Vec(ManuallyDrop::new((*self.0).clone()))
-    }
-}
-
-impl<T: Clone> Deref for Vec<T> {
-    type Target = reussir_rt::collections::vec::Vec<T>;
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T: Clone> DerefMut for Vec<T> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        unsafe { (*self.0).count += 1 };
+        Vec(self.0, std::marker::PhantomData)
     }
 }
 
 impl<T: Clone> Drop for Vec<T> {
+    /// A shared handle is a decrement; the last reference is freed out of
+    /// line (keeps the textures that read an array small enough to inline).
+    /// The test is `count == 1` (a live count is never 0): after Reussir's
+    /// `rc.inc`, which asserts that the old count was neither 0 nor
+    /// `u32::MAX`, LLVM then knows that a read's release only decrements,
+    /// and cancels the pair; with `count > 1` the free check, and with it
+    /// the bounds check, stayed in every read (1.6x the instructions of an
+    /// in-place quicksort).
     #[inline(always)]
     fn drop(&mut self) {
-        let p = unsafe { *(self as *const Self as *const usize) };
-        let c = count(p);
-        if c > 1 {
-            unsafe { *(p as *mut u32) = c - 1 };
-        } else {
-            free_vec::<T>(p);
+        let o = self.0;
+        unsafe {
+            let c = (*o).count;
+            if c == 1 {
+                free_vec::<T>(o);
+            } else {
+                (*o).count = c - 1;
+            }
         }
     }
 }
 
-/// Free the box of a vector whose last reference the caller gives up (the
-/// `Rc<std::vec::Vec<T>>` at `p`, count 1).
+/// Free the block `o` of a vector whose last reference the caller gives up
+/// (count 1). `extern "C"`: it cannot unwind, so the textures that release
+/// an array need no landing pad for it.
 #[cold]
 #[inline(never)]
-pub fn free_vec<T: Clone>(p: usize) {
+pub extern "C" fn free_vec<T: Clone>(o: *mut Hdr) {
     if !std::mem::needs_drop::<T>() {
-        unsafe { drop(std::mem::transmute::<usize, reussir_rt::rc::Rc<std::vec::Vec<T>>>(p)) };
+        unsafe { mi_free(o as *mut std::ffi::c_void) };
         return;
     }
     // Outside a free, `run` would release the elements now, from the last
     // one: those whose release only decrements (shared ones: the old
     // version of an array that was copied for an update) are released here
-    // first, which is the same. If all are, the box is freed without the
+    // first, which is the same. If all are, the block is freed without the
     // stack; else the stack's work goes on from the first element whose
     // release frees it. Inside a free the array is only pushed, and its
     // elements are released when it is popped, after the work pushed before
     // it (a later field of the record being freed may hold one of them).
-    if !active() {
-        let mut r = ManuallyDrop::new(unsafe { std::mem::transmute::<usize, reussir_rt::rc::Rc<std::vec::Vec<T>>>(p) });
-        if unsafe { T::release_shared_from_end(r.data_mut()) } {
-            unsafe { ManuallyDrop::drop(&mut r) };
-            return;
-        }
+    if !active() && unsafe { T::release_shared_from_end(o) } {
+        unsafe { mi_free(o as *mut std::ffi::c_void) };
+        return;
     }
-    run(p, step_vec::<T>);
+    run(o as usize, step_vec::<T>);
 }
 
-/// Release the elements of the vector at `p` from the last one, until one
-/// of them pushes work (done first) or none is left (then free the box).
+/// Release the elements of the block at `p` from the last one, until one
+/// of them pushes work (done first) or none is left (then free the block).
 unsafe fn step_vec<T: Clone>(p: usize) -> bool {
     let depth = reussir_rt::drop::depth();
-    let mut r = ManuallyDrop::new(std::mem::transmute::<usize, reussir_rt::rc::Rc<std::vec::Vec<T>>>(p));
-    if !T::release_from_end(r.data_mut(), depth) {
+    let o = p as *mut Hdr;
+    if !T::release_from_end(o, depth) {
         return false;
     }
-    ManuallyDrop::drop(&mut r);
+    mi_free(o as *mut std::ffi::c_void);
     true
 }
 
-/// Releasing the elements of a vector being freed (`step_vec`).
+/// Releasing the elements of a block being freed (`step_vec`). Each
+/// element leaves the block (`len` decremented) before it is released, so
+/// the block always holds exactly the elements still to release.
 trait ReleaseElems: Sized {
-    /// Release elements from the last one until `v` is empty (`true`) or a
-    /// release pushed work, which is done first (`false`; the elements left
-    /// stay in `v`). `depth` is the stack's depth before.
-    unsafe fn release_from_end(v: &mut std::vec::Vec<Self>, depth: usize) -> bool;
+    /// Release elements from the last one until the block is empty
+    /// (`true`) or a release pushed work, which is done first (`false`;
+    /// the elements left stay in the block). `depth` is the stack's depth
+    /// before.
+    unsafe fn release_from_end(o: *mut Hdr, depth: usize) -> bool;
     /// Release elements from the last one while their release frees
-    /// nothing; answers whether `v` is then empty. (For element types
-    /// whose releases cannot be told apart, none: `v` stays as it is.)
-    unsafe fn release_shared_from_end(v: &mut std::vec::Vec<Self>) -> bool;
+    /// nothing; answers whether the block is then empty. (For element types
+    /// whose releases cannot be told apart, none: the block stays as it is.)
+    unsafe fn release_shared_from_end(o: *mut Hdr) -> bool;
 }
 
 #[inline(always)]
-unsafe fn release_from_end_each<T>(v: &mut std::vec::Vec<T>, depth: usize) -> bool {
-    while let Some(x) = v.pop() {
-        drop(x);
-        if v.is_empty() {
+unsafe fn release_from_end_each<T>(o: *mut Hdr, depth: usize) -> bool {
+    let e = elems::<T>(o);
+    let mut n = (*o).len;
+    while n > 0 {
+        n -= 1;
+        (*o).len = n;
+        drop(std::ptr::read(e.add(n)));
+        if n == 0 {
             break;
         }
         if reussir_rt::drop::depth() != depth {
@@ -248,16 +342,16 @@ unsafe fn release_from_end_each<T>(v: &mut std::vec::Vec<T>, depth: usize) -> bo
 
 impl<T> ReleaseElems for T {
     #[inline(always)]
-    default unsafe fn release_from_end(v: &mut std::vec::Vec<T>, depth: usize) -> bool {
-        release_from_end_each(v, depth)
+    default unsafe fn release_from_end(o: *mut Hdr, depth: usize) -> bool {
+        release_from_end_each::<T>(o, depth)
     }
     #[inline(always)]
-    default unsafe fn release_shared_from_end(v: &mut std::vec::Vec<T>) -> bool {
-        v.is_empty()
+    default unsafe fn release_shared_from_end(o: *mut Hdr) -> bool {
+        (*o).len == 0
     }
 }
 
-/// A Reussir record (`Bridge<Inner>`, see `array::ExtendCloned`): its
+/// A Reussir record (`Bridge<Inner>`, see `array::CloneInto`): its
 /// `Drop` is the compiler-emitted `<record>_ffi_release`, an out-of-line
 /// call per element, which decrements the 32-bit count at offset 0 (not
 /// stored for an immediate, whose top byte is a tag under the aarch64
@@ -269,29 +363,29 @@ impl<T> ReleaseElems for T {
 /// of releases and the stack's work are as with the generic loop.
 impl<X> ReleaseElems for reussir_rt::bridge::Bridge<X> {
     #[inline(always)]
-    unsafe fn release_from_end(v: &mut std::vec::Vec<Self>, depth: usize) -> bool {
+    unsafe fn release_from_end(o: *mut Hdr, depth: usize) -> bool {
         if !(cfg!(target_arch = "aarch64") && std::mem::size_of::<Self>() == 8) {
-            return release_from_end_each(v, depth);
+            return release_from_end_each::<Self>(o, depth);
         }
-        let mut n = v.len();
+        let e = elems::<Self>(o);
+        let mut n = (*o).len;
         while n > 0 {
-            let p = *(v.as_ptr().add(n - 1) as *const usize);
+            let p = *(e.add(n - 1) as *const usize);
             if p >> 56 != 0 {
                 n -= 1;
-                v.set_len(n);
+                (*o).len = n;
                 continue;
             }
             let c = *(p as *const u32);
             if c != 1 {
                 *(p as *mut u32) = c.wrapping_sub(1);
                 n -= 1;
-                v.set_len(n);
+                (*o).len = n;
                 continue;
             }
             n -= 1;
-            let x = std::ptr::read(v.as_ptr().add(n));
-            v.set_len(n);
-            drop(x);
+            (*o).len = n;
+            drop(std::ptr::read(e.add(n)));
             if n == 0 {
                 break;
             }
@@ -302,13 +396,14 @@ impl<X> ReleaseElems for reussir_rt::bridge::Bridge<X> {
         true
     }
     #[inline(always)]
-    unsafe fn release_shared_from_end(v: &mut std::vec::Vec<Self>) -> bool {
+    unsafe fn release_shared_from_end(o: *mut Hdr) -> bool {
         if !(cfg!(target_arch = "aarch64") && std::mem::size_of::<Self>() == 8) {
-            return v.is_empty();
+            return (*o).len == 0;
         }
-        let mut n = v.len();
+        let e = elems::<Self>(o);
+        let mut n = (*o).len;
         while n > 0 {
-            let p = *(v.as_ptr().add(n - 1) as *const usize);
+            let p = *(e.add(n - 1) as *const usize);
             if p >> 56 == 0 {
                 let c = *(p as *const u32);
                 if c == 1 {
@@ -317,7 +412,7 @@ impl<X> ReleaseElems for reussir_rt::bridge::Bridge<X> {
                 *(p as *mut u32) = c.wrapping_sub(1);
             }
             n -= 1;
-            v.set_len(n);
+            (*o).len = n;
         }
         true
     }

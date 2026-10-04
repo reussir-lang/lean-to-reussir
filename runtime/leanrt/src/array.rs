@@ -1,90 +1,108 @@
-//! Arrays: Reussir's copy-on-write `reussir_rt::collections::vec::Vec<T>`,
-//! in the `#[repr(transparent)]` wrapper `crate::drop::Vec` (which frees
-//! them without recursion).
+//! Arrays: `crate::drop::Vec<T>` (`RVec`), one block holding the reference
+//! count, the size, the capacity and the elements (`drop::Hdr`), freed
+//! without recursion (`crate::drop`).
 //!
-//! That type is a `#[repr(transparent)]` wrapper over
-//! `reussir_rt::rc::Rc<std::vec::Vec<T>>` (the FFI contract requires it), so
-//! the runtime views it as the `Rc` directly to get slice access, `reserve`,
-//! `truncate`, ... Every mutation goes through `make_mut`, which copies a
-//! shared buffer first: arrays are values, updated in place only when
-//! uniquely referenced, like Lean's.
+//! Arrays are values: every mutation goes through `make_mut`, which copies
+//! a shared block first, so an array is updated in place only when it is
+//! uniquely referenced, like Lean's. A unique block grows in place with
+//! `mi_realloc` (at least doubling).
 //!
-//! `ByteArray` and `FloatArray` are `RVec<u8>`/`RVec<f64>`.
+//! `ByteArray` and `FloatArray` are `RVec<u8>`/`RVec<f64>`; an `LRef`
+//! (`ref_*` below) is a 0/1-element `RVec` mutated through every alias.
 
-use crate::drop::Vec as RVec;
-use reussir_rt::rc::Rc;
-use crate::alloc::{rc_new, reserve, vec_with_capacity};
+pub use crate::drop::Vec as RVec;
+use crate::drop::{elems, Hdr, HDR};
+use std::ffi::c_void;
+use std::mem::size_of;
 
-#[inline(always)]
-pub fn into_rc<T: Clone>(v: RVec<T>) -> Rc<Vec<T>> {
-    unsafe { std::mem::transmute::<RVec<T>, Rc<Vec<T>>>(v) }
-}
-
-#[inline(always)]
-pub fn from_rc<T: Clone>(v: Rc<Vec<T>>) -> RVec<T> {
-    unsafe { std::mem::transmute::<Rc<Vec<T>>, RVec<T>>(v) }
-}
-
-/// Give up an array handle that a texture received (every FFI call
-/// consumes its arguments). The common case, a shared handle, is a
-/// decrement; freeing the last reference is kept out of line so textures
-/// stay small enough for LLVM to inline into Reussir code.
-#[inline(always)]
-pub fn release<T: Clone>(v: RVec<T>) {
-    let r = into_rc(v);
-    let c = r.count_ref().get();
-    if c == 1 {
-        drop_last(r)
-    } else {
-        r.count_ref().set(c - 1);
-        std::mem::forget(r);
-    }
+extern "C" {
+    fn mi_malloc(size: usize) -> *mut c_void;
+    fn mi_realloc(p: *mut c_void, size: usize) -> *mut c_void;
+    fn mi_good_size(size: usize) -> usize;
 }
 
 #[cold]
 #[inline(never)]
-extern "C" fn drop_last<T: Clone>(r: Rc<Vec<T>>) {
-    crate::drop::free_vec::<T>(unsafe { std::mem::transmute::<Rc<Vec<T>>, usize>(r) })
+fn oom() -> ! {
+    crate::internal_panic("out of memory")
 }
 
+/// The size of a block with room for `cap` elements, rounded up to a
+/// multiple of 8 (mimalloc's blocks are: the rounding costs nothing and
+/// becomes capacity).
 #[inline(always)]
-pub fn as_slice<T: Clone>(v: &RVec<T>) -> &[T] {
-    let r: &Rc<Vec<T>> = unsafe { &*(v as *const RVec<T> as *const Rc<Vec<T>>) };
-    r.as_slice()
-}
-
-/// Mutable access, copying a shared buffer first (reserving `extra`).
-#[inline(always)]
-pub fn make_mut<T: Clone>(v: &mut Rc<Vec<T>>, extra: usize) -> &mut Vec<T> {
-    if !v.is_unique() {
-        // By value: the address of `v` (often a local of the Reussir caller
-        // once this is inlined) must not escape, or tail calls are lost.
-        unsafe { std::ptr::write(v, copy_shared(std::ptr::read(v), extra)) };
+fn bytes_for<T>(cap: usize) -> usize {
+    match cap.checked_mul(size_of::<T>()).and_then(|b| b.checked_add(HDR + 7)) {
+        Some(b) => b & !7,
+        None => oom(),
     }
-    let vec = unsafe { v.data_mut() };
-    reserve(vec, extra);
-    vec
 }
 
-/// A private copy of a shared array (with room for `extra` more), releasing
-/// the shared one.
+/// The room in a block of `bytes` bytes.
+#[inline(always)]
+fn cap_of<T>(bytes: usize) -> usize {
+    (bytes - HDR) / size_of::<T>()
+}
+
+/// A fresh unique block with room for (at least) `cap` elements, empty.
+#[inline(always)]
+fn alloc<T: Clone>(cap: usize) -> RVec<T> {
+    let bytes = bytes_for::<T>(cap);
+    unsafe {
+        let o = mi_malloc(bytes) as *mut Hdr;
+        if o.is_null() {
+            oom();
+        }
+        std::ptr::write(o, Hdr::new(cap_of::<T>(bytes)));
+        RVec::from_raw(o)
+    }
+}
+
+/// Grow a unique block to room for at least `need` elements, at least
+/// doubling (`max(need, 2 * cap, 8)`, so pushes are amortized O(1)). The
+/// capacity is the whole block: mimalloc's size class for small blocks
+/// (`mi_good_size`), a power of two beyond 4 KiB (as `tagvec::grow`: with
+/// the header added to a power of two, large blocks would fall just past
+/// mimalloc's size steps, and realloc copies a block's whole usable size).
 #[cold]
 #[inline(never)]
-extern "C" fn copy_shared<T: Clone>(v: Rc<Vec<T>>, extra: usize) -> Rc<Vec<T>> {
-    let c = rc_new(copy_from_slice(&v, extra));
-    drop(v);
-    c
+extern "C" fn grow<T: Clone>(v: RVec<T>, need: usize) -> RVec<T> {
+    debug_assert!(v.is_unique());
+    // The block moves: the unique handle is given up for the result.
+    let o = v.into_raw();
+    unsafe {
+        let want = need.max((*o).cap.saturating_mul(2)).max(8);
+        let b = bytes_for::<T>(want);
+        let bytes = if b > 4096 { b.checked_next_power_of_two().unwrap_or(b) } else { mi_good_size(b) };
+        // `bytes >= b >= HDR + want * size`: the capacity is at least
+        // `want`; realloc keeps the header and the `len` elements.
+        let n = mi_realloc(o as *mut c_void, bytes) as *mut Hdr;
+        if n.is_null() {
+            oom();
+        }
+        (*n).cap = cap_of::<T>(bytes);
+        RVec::from_raw(n)
+    }
 }
 
-/// Append clones of `src` to `v` (which has room for them).
-trait ExtendCloned: Sized {
-    fn extend_cloned(v: &mut Vec<Self>, src: &[Self]);
+/// Clones of `src` written to `dst` (uninitialized room for them).
+trait CloneInto: Sized {
+    unsafe fn clone_to(src: &[Self], dst: *mut Self);
 }
 
-impl<T: Clone> ExtendCloned for T {
+impl<T: Clone> CloneInto for T {
     #[inline(always)]
-    default fn extend_cloned(v: &mut Vec<T>, src: &[T]) {
-        v.extend_from_slice(src)
+    default unsafe fn clone_to(src: &[T], dst: *mut T) {
+        if !std::mem::needs_drop::<T>() {
+            // The element types without drop glue are plain data
+            // (integers, floats, `bool`, enumeration indices): a clone is
+            // the bits. Every counted type (handles, records) has a `Drop`.
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+        } else {
+            for (i, x) in src.iter().enumerate() {
+                std::ptr::write(dst.add(i), x.clone());
+            }
+        }
     }
 }
 
@@ -100,36 +118,84 @@ impl<T: Clone> ExtendCloned for T {
 /// increments are skipped here; real boxes are incremented as `rc.inc` does
 /// (the 32-bit count at offset 0; these records are not atomic). Other
 /// targets use the immortal encoding: the generic clone there.
-impl<X: Clone> ExtendCloned for reussir_rt::bridge::Bridge<X> {
+impl<X: Clone> CloneInto for reussir_rt::bridge::Bridge<X> {
     #[inline(always)]
-    fn extend_cloned(v: &mut Vec<Self>, src: &[Self]) {
-        if cfg!(target_arch = "aarch64") && std::mem::size_of::<Self>() == 8 && v.capacity() - v.len() >= src.len() {
+    unsafe fn clone_to(src: &[Self], dst: *mut Self) {
+        if cfg!(target_arch = "aarch64") && size_of::<Self>() == 8 {
             let mut scratch: u32 = 0;
             for x in src {
-                unsafe {
-                    let p = std::mem::transmute_copy::<Self, *mut u32>(x);
-                    let q = if (p as usize) >> 56 == 0 { p } else { &mut scratch as *mut u32 };
-                    *q = (*q).wrapping_add(1);
-                }
+                let p = std::mem::transmute_copy::<Self, *mut u32>(x);
+                let q = if (p as usize) >> 56 == 0 { p } else { &mut scratch as *mut u32 };
+                *q = (*q).wrapping_add(1);
             }
             std::hint::black_box(scratch);
-            unsafe {
-                let n = v.len();
-                std::ptr::copy_nonoverlapping(src.as_ptr(), v.as_mut_ptr().add(n), src.len());
-                v.set_len(n + src.len());
-            }
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
         } else {
-            v.extend_from_slice(src)
+            for (i, x) in src.iter().enumerate() {
+                std::ptr::write(dst.add(i), x.clone());
+            }
         }
     }
 }
 
-/// A copy of a slice with room for `extra` more elements.
+/// A fresh unique block holding clones of `s`, with room for `extra` more.
 #[inline(always)]
-fn copy_from_slice<T: Clone>(s: &[T], extra: usize) -> Vec<T> {
-    let mut v = vec_with_capacity(s.len() + extra);
-    T::extend_cloned(&mut v, s);
-    v
+fn clone_of_slice<T: Clone>(s: &[T], extra: usize) -> RVec<T> {
+    let cap = match s.len().checked_add(extra) {
+        Some(c) => c,
+        None => oom(),
+    };
+    let c = alloc::<T>(cap);
+    unsafe {
+        <T as CloneInto>::clone_to(s, elems::<T>(c.hdr()));
+        (*c.hdr()).len = s.len();
+    }
+    c
+}
+
+/// A private copy of a shared array (with room for `extra` more), releasing
+/// the shared one.
+#[cold]
+#[inline(never)]
+extern "C" fn copy_shared<T: Clone>(v: RVec<T>, extra: usize) -> RVec<T> {
+    let c = clone_of_slice(v.as_slice(), extra);
+    drop(v);
+    c
+}
+
+/// Unique access with room for `extra` more elements: a shared array is
+/// copied first, a full one grown.
+#[inline(always)]
+pub fn make_mut<T: Clone>(v: &mut RVec<T>, extra: usize) -> *mut Hdr {
+    // By value: the address of `v` (often a local of the Reussir caller once
+    // this is inlined) must not escape, or tail calls are lost.
+    if !v.is_unique() {
+        unsafe { std::ptr::write(v, copy_shared(std::ptr::read(v), extra)) };
+    } else if extra > 0 {
+        let o = v.hdr();
+        let need = match unsafe { (*o).len }.checked_add(extra) {
+            Some(n) => n,
+            None => oom(),
+        };
+        if need > unsafe { (*o).cap } {
+            unsafe { std::ptr::write(v, grow(std::ptr::read(v), need)) };
+        }
+    }
+    v.hdr()
+}
+
+/// Give up an array handle that a texture received (every FFI call
+/// consumes its arguments): a decrement, the last reference freed out of
+/// line (`RVec`'s `Drop`), so textures stay small enough for LLVM to inline
+/// into Reussir code.
+#[inline(always)]
+pub fn release<T: Clone>(v: RVec<T>) {
+    drop(v)
+}
+
+#[inline(always)]
+pub fn as_slice<T: Clone>(v: &RVec<T>) -> &[T] {
+    v.as_slice()
 }
 
 /// An index that the Lean-level proof (or the prelude's bounds check)
@@ -142,7 +208,7 @@ extern "C" fn index_bug(i: u64, n: usize) -> ! {
 
 #[inline]
 pub fn with_capacity<T: Clone>(n: usize) -> RVec<T> {
-    from_rc(rc_new(vec_with_capacity(n)))
+    alloc(n)
 }
 
 /// Allocations of more elements than this are checked against what the
@@ -189,23 +255,23 @@ extern "C" fn check_alloc_slow(n: u64, elem: u64) {
 #[inline(never)]
 pub fn with_capacity_checked<T: Clone>(n: u64, elem: u64) -> RVec<T> {
     check_alloc(n, elem);
-    with_capacity(n as usize)
+    alloc(n as usize)
 }
 
 #[inline]
 pub fn empty<T: Clone>() -> RVec<T> {
-    from_rc(rc_new(Vec::new()))
+    alloc(0)
 }
 
 #[inline(always)]
 pub fn size<T: Clone>(v: &RVec<T>) -> u64 {
-    as_slice(v).len() as u64
+    v.len() as u64
 }
 
 /// Element `i`, which must be in bounds.
 #[inline(always)]
 pub fn get<T: Clone>(v: &RVec<T>, i: u64) -> T {
-    let s = as_slice(v);
+    let s = v.as_slice();
     match s.get(i as usize) {
         Some(x) => x.clone(),
         None => index_bug(i, s.len()),
@@ -216,203 +282,521 @@ pub fn get<T: Clone>(v: &RVec<T>, i: u64) -> T {
 /// out of line.
 #[inline(always)]
 pub fn push<T: Clone>(v: RVec<T>, x: T) -> RVec<T> {
-    let mut r = into_rc(v);
-    if r.is_unique() {
-        let vec = unsafe { r.data_mut() };
-        if vec.len() < vec.capacity() {
-            vec.push(x);
-            return from_rc(r);
+    if v.is_unique() {
+        let o = v.hdr();
+        unsafe {
+            let n = (*o).len;
+            if n < (*o).cap {
+                std::ptr::write(elems::<T>(o).add(n), x);
+                (*o).len = n + 1;
+                return v;
+            }
         }
     }
-    push_slow(r, x)
+    push_slow(v, x)
 }
 
 /// `push` when shared or full. A shared array is copied with the capacity
 /// `lean_array_push` gives it (its own, unless that is below `2 * size + 1`:
 /// then `(capacity + 1) * 2`), so a literal pushing onto a shared empty
-/// array of capacity `k` allocates a buffer of `k` elements once.
+/// array of capacity `k` allocates a block of `k` elements once.
 #[cold]
 #[inline(never)]
-extern "C" fn push_slow<T: Clone>(mut r: Rc<Vec<T>>, x: T) -> RVec<T> {
-    let n = r.len();
-    let extra = if r.is_unique() {
+extern "C" fn push_slow<T: Clone>(mut v: RVec<T>, x: T) -> RVec<T> {
+    let n = v.len();
+    let extra = if v.is_unique() {
         n.max(4)
     } else {
-        let cap = r.capacity();
+        let cap = unsafe { (*v.hdr()).cap };
         let want = if cap < 2 * n + 1 { (cap + 1) * 2 } else { cap };
         want.max(n + 1) - n
     };
-    make_mut(&mut r, extra).push(x);
-    from_rc(r)
+    let o = make_mut(&mut v, extra);
+    unsafe {
+        std::ptr::write(elems::<T>(o).add(n), x);
+        (*o).len = n + 1;
+    }
+    v
+}
+
+/// Replace element `i` of the unique block `o` (in bounds: else a runtime
+/// bug), releasing the old one first, as `lean_array_uset`.
+#[inline(always)]
+unsafe fn set_in<T>(o: *mut Hdr, i: u64, x: T) {
+    let n = (*o).len;
+    if (i as usize) >= n {
+        index_bug(i, n);
+    }
+    *elems::<T>(o).add(i as usize) = x;
 }
 
 /// Replace element `i` (in bounds): in place when unique.
 #[inline(always)]
 pub fn set<T: Clone>(v: RVec<T>, i: u64, x: T) -> RVec<T> {
-    let mut r = into_rc(v);
-    if r.is_unique() {
-        let vec = unsafe { r.data_mut() };
-        match vec.get_mut(i as usize) {
-            Some(slot) => *slot = x,
-            None => index_bug(i, vec.len()),
-        }
-        return from_rc(r);
+    if v.is_unique() {
+        unsafe { set_in(v.hdr(), i, x) };
+        return v;
     }
-    set_slow(r, i, x)
+    set_slow(v, i, x)
 }
 
 #[cold]
 #[inline(never)]
-extern "C" fn set_slow<T: Clone>(mut r: Rc<Vec<T>>, i: u64, x: T) -> RVec<T> {
-    let vec = make_mut(&mut r, 0);
-    match vec.get_mut(i as usize) {
-        Some(slot) => *slot = x,
-        None => index_bug(i, vec.len()),
-    }
-    from_rc(r)
+extern "C" fn set_slow<T: Clone>(mut v: RVec<T>, i: u64, x: T) -> RVec<T> {
+    let o = make_mut(&mut v, 0);
+    unsafe { set_in(o, i, x) };
+    v
+}
+
+/// Remove the last element of the unique block `o` (non-empty) and release
+/// it.
+#[inline(always)]
+unsafe fn pop_in<T>(o: *mut Hdr) {
+    let n = (*o).len - 1;
+    (*o).len = n;
+    drop(std::ptr::read(elems::<T>(o).add(n)));
 }
 
 /// Drop the last element (no-op when empty).
 #[inline(always)]
 pub fn pop<T: Clone>(v: RVec<T>) -> RVec<T> {
-    let mut r = into_rc(v);
-    if r.is_empty() {
-        return from_rc(r);
+    if v.len() == 0 {
+        return v;
     }
-    if r.is_unique() {
-        unsafe { r.data_mut() }.pop();
-        return from_rc(r);
+    if v.is_unique() {
+        unsafe { pop_in::<T>(v.hdr()) };
+        return v;
     }
-    pop_slow(r)
+    pop_slow(v)
 }
 
 #[cold]
 #[inline(never)]
-extern "C" fn pop_slow<T: Clone>(mut r: Rc<Vec<T>>) -> RVec<T> {
-    make_mut(&mut r, 0).pop();
-    from_rc(r)
+extern "C" fn pop_slow<T: Clone>(mut v: RVec<T>) -> RVec<T> {
+    let o = make_mut(&mut v, 0);
+    unsafe { pop_in::<T>(o) };
+    v
 }
 
 /// Swap elements `i` and `j` (both in bounds).
 #[inline(always)]
 pub fn swap<T: Clone>(v: RVec<T>, i: u64, j: u64) -> RVec<T> {
-    let mut r = into_rc(v);
-    let n = r.len();
+    let n = v.len();
     if (i as usize) >= n || (j as usize) >= n {
         index_bug(i.max(j), n);
     }
-    if r.is_unique() {
-        unsafe { r.data_mut() }.swap(i as usize, j as usize);
-        return from_rc(r);
+    if v.is_unique() {
+        let e = unsafe { elems::<T>(v.hdr()) };
+        unsafe { std::ptr::swap(e.add(i as usize), e.add(j as usize)) };
+        return v;
     }
-    swap_slow(r, i, j)
+    swap_slow(v, i, j)
 }
 
 #[cold]
 #[inline(never)]
-extern "C" fn swap_slow<T: Clone>(mut r: Rc<Vec<T>>, i: u64, j: u64) -> RVec<T> {
-    make_mut(&mut r, 0).swap(i as usize, j as usize);
-    from_rc(r)
+extern "C" fn swap_slow<T: Clone>(mut v: RVec<T>, i: u64, j: u64) -> RVec<T> {
+    let o = make_mut(&mut v, 0);
+    unsafe {
+        let e = elems::<T>(o);
+        std::ptr::swap(e.add(i as usize), e.add(j as usize));
+    }
+    v
 }
 
-/// `Array.replicate n x`.
+/// `Array.replicate n x`: `n - 1` clones of `x`, then `x` itself.
 #[inline(never)]
 pub fn replicate<T: Clone>(n: u64, x: T) -> RVec<T> {
-    {
     check_alloc(n, 8);
-    let mut v = vec_with_capacity(n as usize);
-    v.resize(n as usize, x);
-    from_rc(rc_new(v))
-}
-}
-
-/// Drop elements from index `n` on.
-#[inline]
-pub fn truncate<T: Clone>(v: RVec<T>, n: u64) -> RVec<T> {
-    if (n as usize) >= as_slice(&v).len() {
+    let v = alloc::<T>(n as usize);
+    if n == 0 {
+        drop(x);
         return v;
     }
-    let mut r = into_rc(v);
-    make_mut(&mut r, 0).truncate(n as usize);
-    from_rc(r)
+    let o = v.hdr();
+    unsafe {
+        let e = elems::<T>(o);
+        for i in 0..n as usize - 1 {
+            std::ptr::write(e.add(i), x.clone());
+            (*o).len = i + 1;
+        }
+        std::ptr::write(e.add(n as usize - 1), x);
+        (*o).len = n as usize;
+    }
+    v
+}
+
+/// Drop elements from index `n` on (the size is set first, then the
+/// removed elements are released in order, as `Vec::truncate`).
+#[inline]
+pub fn truncate<T: Clone>(v: RVec<T>, n: u64) -> RVec<T> {
+    let len = v.len();
+    if (n as usize) >= len {
+        return v;
+    }
+    let mut v = v;
+    let o = make_mut(&mut v, 0);
+    unsafe {
+        (*o).len = n as usize;
+        std::ptr::drop_in_place(std::slice::from_raw_parts_mut(elems::<T>(o).add(n as usize), len - n as usize));
+    }
+    v
 }
 
 /// `a ++ b`.
 #[inline(never)]
 pub fn append<T: Clone>(a: RVec<T>, b: RVec<T>) -> RVec<T> {
-    let bs = as_slice(&b);
-    if bs.is_empty() {
+    let k = b.len();
+    if k == 0 {
         return a;
     }
-    let mut r = into_rc(a);
-    T::extend_cloned(make_mut(&mut r, bs.len()), bs);
-    from_rc(r)
+    let mut a = a;
+    // When `a` and `b` are the same array its count is at least 2, so
+    // `make_mut` copies it: `b`'s block is never the one written.
+    let o = make_mut(&mut a, k);
+    unsafe {
+        let n = (*o).len;
+        <T as CloneInto>::clone_to(b.as_slice(), elems::<T>(o).add(n));
+        (*o).len = n + k;
+    }
+    a
 }
 
 /// Elements `[start, stop)` (clamped), for `Array.extract`-like primitives.
 #[inline(never)]
 pub fn extract<T: Clone>(v: RVec<T>, start: u64, stop: u64) -> RVec<T> {
-    let s = as_slice(&v);
+    let s = v.as_slice();
     let stop = (stop as usize).min(s.len());
     let start = (start as usize).min(stop);
     if start == 0 && stop == s.len() {
         return v;
     }
-    from_rc(rc_new(copy_from_slice(&s[start..stop], 0)))
+    clone_of_slice(&s[start..stop], 0)
 }
 
 /// Reverse in place.
 #[inline(never)]
 pub fn reverse<T: Clone>(v: RVec<T>) -> RVec<T> {
-    let mut r = into_rc(v);
-    make_mut(&mut r, 0).reverse();
-    from_rc(r)
+    let mut v = v;
+    let o = make_mut(&mut v, 0);
+    unsafe { std::slice::from_raw_parts_mut(elems::<T>(o), (*o).len).reverse() };
+    v
+}
+
+/// An array of the elements of `v`, moved (one copy of the bits).
+#[inline]
+pub fn from_vec<T: Clone>(v: Vec<T>) -> RVec<T> {
+    let mut v = std::mem::ManuallyDrop::new(v);
+    let n = v.len();
+    let a = alloc::<T>(n);
+    unsafe {
+        std::ptr::copy_nonoverlapping(v.as_ptr(), elems::<T>(a.hdr()), n);
+        (*a.hdr()).len = n;
+        // The elements moved: free `v`'s buffer only.
+        v.set_len(0);
+        std::mem::ManuallyDrop::drop(&mut v);
+    }
+    a
+}
+
+/// An array of clones of `s`.
+#[inline]
+pub fn from_slice<T: Clone>(s: &[T]) -> RVec<T> {
+    clone_of_slice(s, 0)
+}
+
+/// A byte array of room `n` whose bytes `fill(p, n)` writes at `p`,
+/// answering how many (at most `n`; an error frees the block). For
+/// readers (`Handle.read`, `IO.getRandomBytes`): the bytes land in the
+/// array itself, as natively, instead of a buffer copied afterwards (which
+/// doubled the peak of reading a file, RVA-01).
+#[inline]
+pub fn bytes_filled<E>(n: usize, fill: impl FnOnce(*mut u8, usize) -> Result<usize, E>) -> Result<RVec<u8>, E> {
+    let a = alloc::<u8>(n);
+    let got = fill(unsafe { elems::<u8>(a.hdr()) }, n)?;
+    if got > n {
+        crate::internal_panic("byte array filled past its room (runtime invariant)");
+    }
+    unsafe { (*a.hdr()).len = got };
+    Ok(a)
 }
 
 // ---- byte arrays and strings -----------------------------------------------
 
-/// A byte vector as a `ByteArray`.
+/// A byte vector as a `ByteArray` (a copy).
 #[inline]
 pub fn bytes_of_vec(v: Vec<u8>) -> RVec<u8> {
-    from_rc(rc_new(v))
+    from_slice(&v)
 }
 
 /// `String.toUTF8`: a copy of the bytes, as natively.
 #[inline(never)]
 pub fn bytes_of_string(s: crate::string::LStr) -> RVec<u8> {
-    bytes_of_vec(crate::string::into_vec(s))
+    use crate::string::Utf8;
+    let b = from_slice(s.utf8());
+    crate::rc_release(s);
+    b
 }
 
 /// `String.fromUTF8` of valid UTF-8 (counting the characters): a copy of
 /// the bytes, as natively.
 #[inline(never)]
 pub fn string_of_bytes(b: RVec<u8>) -> crate::string::LStr {
-    let r = into_rc(b);
-    let s = crate::string::from_bytes(&r);
-    drop(r);
+    let s = crate::string::from_bytes(b.as_slice());
+    drop(b);
     s
 }
 
 /// `ByteArray.copySlice src srcOff dest destOff len exact`.
 #[inline(never)]
 pub fn copy_slice(src: RVec<u8>, src_off: u64, dest: RVec<u8>, dest_off: u64, len: u64, exact: bool) -> RVec<u8> {
-    let s = as_slice(&src);
-    let ssz = s.len();
+    let ssz = src.len();
     if src_off > ssz as u64 {
         return dest;
     }
     let src_off = src_off as usize;
     let len = (len.min(u64::MAX / 2) as usize).min(ssz - src_off);
-    let dsz = as_slice(&dest).len();
+    let dsz = dest.len();
     let dest_off = (dest_off as usize).min(dsz);
     let new_size = (dest_off + len).max(dsz);
     let _ = exact;
-    let chunk: Vec<u8> = s[src_off..src_off + len].to_vec();
-    let mut r = into_rc(dest);
-    let d = make_mut(&mut r, new_size.saturating_sub(dsz));
-    if d.len() < new_size {
-        d.resize(new_size, 0);
+    let mut dest = dest;
+    // When `src` and `dest` are the same array its count is at least 2, so
+    // `make_mut` copies it: the bytes are read from `src`'s own block.
+    let o = make_mut(&mut dest, new_size - dsz);
+    unsafe {
+        let d = elems::<u8>(o);
+        std::ptr::write_bytes(d.add(dsz), 0, new_size - dsz);
+        std::ptr::copy(elems::<u8>(src.hdr()).add(src_off), d.add(dest_off), len);
+        (*o).len = new_size;
     }
-    d[dest_off..dest_off + len].copy_from_slice(&chunk);
-    from_rc(r)
+    dest
+}
+
+// ---- reference cells (`LRef`) -----------------------------------------------
+//
+// A 0-or-1 element array of capacity 1 or more, mutated in place through
+// every alias (not copy-on-write). Not used by generated code any more.
+
+/// A cell holding `v`.
+#[inline(never)]
+pub fn ref_new<T: Clone>(v: T) -> RVec<T> {
+    push(alloc(1), v)
+}
+
+/// An empty cell.
+#[inline(never)]
+pub fn ref_empty<T: Clone>() -> RVec<T> {
+    alloc(1)
+}
+
+/// The value of a cell (a new reference).
+#[inline(never)]
+pub fn ref_get<T: Clone>(r: RVec<T>) -> T {
+    r.as_slice().first().cloned().expect("leanrt: read of an empty ST.Ref (after take)")
+}
+
+/// Whether a cell is empty.
+#[inline(never)]
+pub fn ref_is_empty<T: Clone>(r: RVec<T>) -> bool {
+    r.len() == 0
+}
+
+/// Store `v` in a cell and give back its old value (if any), in place.
+#[inline(always)]
+unsafe fn ref_replace<T: Clone>(r: &RVec<T>, v: T) -> Option<T> {
+    let o = r.hdr();
+    let e = elems::<T>(o);
+    let old = if (*o).len == 1 { Some(std::ptr::read(e)) } else { None };
+    std::ptr::write(e, v);
+    (*o).len = 1;
+    old
+}
+
+/// `ST.Ref.set`: the old value is released after the new one is stored, as
+/// `lean_dec` does (`crate::drop::release`).
+#[inline(never)]
+pub fn ref_set<T: Clone>(r: RVec<T>, v: T) {
+    if let Some(old) = unsafe { ref_replace(&r, v) } {
+        crate::drop::release(old);
+    }
+}
+
+/// `ST.Ref.swap`: store `v`, give back the old value.
+#[inline(never)]
+pub fn ref_swap<T: Clone>(r: RVec<T>, v: T) -> T {
+    unsafe { ref_replace(&r, v) }.expect("leanrt: swap of an empty ST.Ref (after take)")
+}
+
+/// `ST.Prim.Ref.take`: move the value out, leaving the cell empty until the
+/// next `set` (so the value stays uniquely referenced, as in Lean).
+#[inline(never)]
+pub fn ref_take<T: Clone>(r: RVec<T>) -> T {
+    let o = r.hdr();
+    unsafe {
+        if (*o).len == 0 {
+            panic!("leanrt: take of an empty ST.Ref");
+        }
+        (*o).len = 0;
+        std::ptr::read(elems::<T>(o))
+    }
+}
+
+/// Whether two cells are the same.
+#[inline(never)]
+pub fn ref_ptr_eq<T: Clone>(a: RVec<T>, b: RVec<T>) -> bool {
+    a.hdr() == b.hdr()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LOG: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+    }
+
+    /// An element that logs its releases.
+    #[derive(Clone)]
+    struct E(u32);
+
+    impl Drop for E {
+        fn drop(&mut self) {
+            LOG.with(|l| l.borrow_mut().push(self.0));
+        }
+    }
+
+    fn take_log() -> Vec<u32> {
+        LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
+    }
+
+    fn count<T: Clone>(v: &RVec<T>) -> u32 {
+        unsafe { (*v.hdr()).count }
+    }
+
+    fn cap<T: Clone>(v: &RVec<T>) -> usize {
+        unsafe { (*v.hdr()).cap }
+    }
+
+    #[test]
+    fn layout() {
+        assert_eq!(HDR, 24);
+        assert_eq!(size_of::<RVec<u8>>(), 8);
+        assert_eq!(std::mem::offset_of!(Hdr, count), 0);
+        // Rounding to 8 bytes becomes capacity.
+        assert_eq!(cap(&with_capacity::<u8>(3)), 8);
+        assert_eq!(cap(&with_capacity::<u64>(3)), 3);
+        assert_eq!(cap(&empty::<u64>()), 0);
+        assert_eq!(cap(&with_capacity::<u32>(1)), 2);
+    }
+
+    #[test]
+    fn copy_on_write_and_growth() {
+        let mut a: RVec<u64> = empty();
+        for i in 0..10000 {
+            a = push(a, i);
+        }
+        assert_eq!(size(&a), 10000);
+        assert!(cap(&a) >= 10000);
+        assert_eq!(get(&a, 9999), 9999);
+        let b = a.clone();
+        assert_eq!(count(&a), 2);
+        let c = set(b, 5, 77); // shared: copied
+        assert_eq!(get(&a, 5), 5);
+        assert_eq!(get(&c, 5), 77);
+        assert_eq!(count(&a), 1);
+        assert_eq!(count(&c), 1);
+        let c = swap(pop(c), 0, 1);
+        assert_eq!(size(&c), 9999);
+        assert_eq!(get(&c, 0), 1);
+        let d = append(a.clone(), a.clone()); // the same array twice
+        assert_eq!(size(&d), 20000);
+        assert_eq!(get(&d, 10003), 3);
+        assert_eq!(count(&a), 1);
+        let e = extract(d, 9998, 10002);
+        assert_eq!(e.as_slice(), &[9998, 9999, 0, 1]);
+        let e = reverse(truncate(e, 3));
+        assert_eq!(e.as_slice(), &[0, 9999, 9998]);
+        // A literal: a shared empty array of capacity 3, copied once.
+        let lit: RVec<u64> = with_capacity(3);
+        let x = push(push(push(lit.clone(), 1), 2), 3);
+        assert_eq!(cap(&x), 3);
+        assert_eq!(size(&lit), 0);
+        let r = replicate(5, 9u64);
+        assert_eq!(r.as_slice(), &[9; 5]);
+        let r0: RVec<u64> = replicate(0, 9);
+        assert_eq!(size(&r0), 0);
+        // Bytes: growth by pushes from empty.
+        let mut b: RVec<u8> = empty();
+        for i in 0..100000u32 {
+            b = push(b, i as u8);
+        }
+        assert_eq!(get(&b, 99999), 99999u32 as u8);
+    }
+
+    #[test]
+    fn element_releases() {
+        let a = from_vec(vec![E(1), E(2), E(3)]);
+        assert_eq!(take_log(), Vec::<u32>::new());
+        // Copy-on-write clones every element; the set releases the copy's
+        // element 1.
+        let b = set(a.clone(), 1, E(9));
+        assert_eq!(take_log(), vec![2]);
+        // Freed from the last element.
+        drop(a);
+        assert_eq!(take_log(), vec![3, 2, 1]);
+        let b = pop(b);
+        assert_eq!(take_log(), vec![3]);
+        let b = truncate(push(push(b, E(4)), E(5)), 1);
+        assert_eq!(take_log(), vec![9, 4, 5]);
+        drop(replicate(3, E(7)));
+        assert_eq!(take_log(), vec![7, 7, 7]);
+        drop(b);
+        assert_eq!(take_log(), vec![1]);
+        let c: RVec<E> = replicate(0, E(8));
+        assert_eq!(take_log(), vec![8]);
+        drop(c);
+    }
+
+    #[test]
+    fn nested_free_order() {
+        // An array of arrays is freed through the stack of pending work:
+        // the last inner array, its elements from the last, first.
+        let inner1 = from_vec(vec![E(1), E(2)]);
+        let inner2 = from_vec(vec![E(3), E(4)]);
+        let outer = from_vec(vec![inner1, inner2]);
+        drop(outer);
+        assert_eq!(take_log(), vec![4, 3, 2, 1]);
+        // A shared inner array is only decremented.
+        let inner = from_vec(vec![E(5)]);
+        let outer = from_vec(vec![inner.clone(), inner.clone()]);
+        drop(outer);
+        assert_eq!(take_log(), Vec::<u32>::new());
+        assert_eq!(count(&inner), 1);
+        drop(inner);
+        assert_eq!(take_log(), vec![5]);
+    }
+
+    #[test]
+    fn bytes_and_refs() {
+        let b = bytes_of_vec(vec![1, 2, 3, 4]);
+        let d = copy_slice(b.clone(), 1, b.clone(), 3, 10, false);
+        assert_eq!(d.as_slice(), &[1, 2, 3, 2, 3, 4]);
+        assert_eq!(b.as_slice(), &[1, 2, 3, 4]);
+        let e = copy_slice(b.clone(), 9, b.clone(), 0, 1, true);
+        assert_eq!(e.as_slice(), &[1, 2, 3, 4]);
+        let r = ref_new(E(1));
+        ref_set(r.clone(), E(2));
+        assert_eq!(take_log(), vec![1]);
+        assert_eq!(ref_get(r.clone()).0, 2);
+        take_log();
+        let t = ref_take(r.clone());
+        assert!(ref_is_empty(r.clone()));
+        ref_set(r.clone(), E(3));
+        assert_eq!(ref_swap(r.clone(), E(4)).0, 3);
+        assert!(ref_ptr_eq(r.clone(), r.clone()));
+        drop((t, r));
+        take_log();
+    }
 }

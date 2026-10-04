@@ -1,0 +1,1 @@
+head -c 67108864 /dev/zero > rtread64.bin && $BIN rtread64.bin; r=$?; rm -f rtread64.bin; exit $r
