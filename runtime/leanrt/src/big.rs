@@ -199,7 +199,10 @@ extern "C" fn free(o: *mut Obj) {
 /// carry (`grow`), for tests:
 /// built with `--cfg leanrt_count_bigs` (`L2R_LEANRT_RUSTFLAGS`, see
 /// `tests/runtime/nat-alloc-check.sh`), a program prints them to stderr at
-/// exit. Not compiled otherwise.
+/// exit. They count from the end of the startup (`mark_main`, called when
+/// the initializers are done): the startup's own big numbers would make
+/// the counts vary between runs, since `IO.stdGenRef`'s random seed is a
+/// big number about half the time. Not compiled otherwise.
 #[cfg(leanrt_count_bigs)]
 mod count {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -207,6 +210,8 @@ mod count {
     static MADE: AtomicU64 = AtomicU64::new(0);
     static FREED: AtomicU64 = AtomicU64::new(0);
     static GROWN: AtomicU64 = AtomicU64::new(0);
+    // The counts at the end of the startup, subtracted at exit.
+    static BASE: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
     static REPORT: std::sync::Once = std::sync::Once::new();
 
     extern "C" {
@@ -214,15 +219,29 @@ mod count {
     }
 
     extern "C" fn report() {
-        let (m, f, g) = (MADE.load(Relaxed), FREED.load(Relaxed), GROWN.load(Relaxed));
+        let m = MADE.load(Relaxed) - BASE[0].load(Relaxed);
+        let f = FREED.load(Relaxed) - BASE[1].load(Relaxed);
+        let g = GROWN.load(Relaxed) - BASE[2].load(Relaxed);
         eprintln!("leanrt: big numbers made {} freed {} live {} grown {}", m, f, m as i64 - f as i64, g);
     }
 
-    pub fn made() {
+    fn register() {
         REPORT.call_once(|| unsafe {
             atexit(report);
         });
+    }
+
+    pub fn made() {
+        register();
         MADE.fetch_add(1, Relaxed);
+    }
+
+    /// Start counting the program's own big numbers: the initializers are done.
+    pub fn mark_main() {
+        register();
+        BASE[0].store(MADE.load(Relaxed), Relaxed);
+        BASE[1].store(FREED.load(Relaxed), Relaxed);
+        BASE[2].store(GROWN.load(Relaxed), Relaxed);
     }
 
     pub fn freed() {
@@ -232,6 +251,12 @@ mod count {
     pub fn grown() {
         GROWN.fetch_add(1, Relaxed);
     }
+}
+
+/// See `count`: called by `rt::set_initializing(false)`.
+#[cfg(leanrt_count_bigs)]
+pub(crate) fn count_mark_main() {
+    count::mark_main()
 }
 
 #[cold]

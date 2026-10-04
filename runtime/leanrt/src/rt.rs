@@ -335,6 +335,8 @@ pub fn initializing() -> bool {
 /// (`lean_io_mark_end_initialization`, `io::startup::mark_end_initialization`).
 pub fn set_initializing(b: bool) {
     if !b {
+        #[cfg(leanrt_count_bigs)]
+        crate::big::count_mark_main();
         lean_runtime::io::startup::mark_end_initialization()
     }
 }
