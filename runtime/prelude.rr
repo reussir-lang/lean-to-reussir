@@ -2372,8 +2372,11 @@ fn l2r_lcell_new<T>(v : T) -> LCell<T> [{
     }
 }];
 
+// The state (a new reference); the cell's reference is released first
+// (`leanrt::drop::cell_get`), so that LLVM cancels it with the caller's
+// increment.
 #[ffi(import)]
-fn l2r_lcell_get<T>(c : LCell<T>) -> T [{ c.data_ref().clone() }];
+fn l2r_lcell_get<T>(c : LCell<T>) -> T [{ leanrt::drop::cell_get(c) }];
 
 // The old state is released after the new one is stored, as `lean_dec`
 // does (`l2r_rc_set`).

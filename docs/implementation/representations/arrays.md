@@ -80,17 +80,25 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
 ### A release tests `count == 1`
 
 - **What:** The `Drop` of an array (`leanrt::drop::Vec`, also
-  `tagvec::TagVec`, `string::LStr`, `array::release`) frees when the
-  count is 1 and otherwise decrements; never `count > 1`. Its free path is
-  an `extern "C"` function (no unwinding, no landing pads in the
-  textures).
+  `tagvec::TagVec`, `string::LStr`, `array::release`) and of a thunk or
+  task cell (`drop::Cell`) frees when the count is 1 and otherwise
+  decrements; never `count > 1`. Its free path is an `extern "C"` function
+  (no unwinding, no landing pads in the textures). A cell's read
+  (`l2r_lcell_get`, `drop::cell_get`) releases the cell before it copies
+  the state.
 - **Why:** Reussir's `rc.inc` asserts that the old count was neither 0 nor
   `u32::MAX`; a read's texture, inlined, releases right after the
   caller's increment, and with `== 1` LLVM sees that the free cannot
   happen and cancels the pair (and the bounds check behind it). With
   `> 1` it cannot exclude a wrapped count: an in-place quicksort ran 1.6x
-  the instructions (perf-rvec).
-- **Where:** `runtime/leanrt/src/drop.rs`: `Vec::drop`, `free_vec`.
+  the instructions (perf-rvec). For a cell, copying the state first
+  increments the state record, which LLVM cannot tell from the cell, so
+  the cell's count was reloaded and tested; deciding the release first
+  (the last reference moves the state out) lets the pair fold: reading a
+  finished thunk in a loop runs 0.81x the instructions (perf-cell).
+- **Where:** `runtime/leanrt/src/drop.rs`: `Vec::drop`, `free_vec`,
+  `Cell::drop`, `free_cell`, `cell_get`; `runtime/prelude.rr`:
+  `l2r_lcell_get`.
 - **Remove only if:** never.
 
 ### Enumerations and `Unit` in arrays are indices

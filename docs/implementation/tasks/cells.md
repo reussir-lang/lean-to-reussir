@@ -20,7 +20,10 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
   `Lower/LazyForce.lean`: `lazyGetFn`, `lazyDone`, `lazyFn`;
   `Lower/LazyGlue.lean`: `lazyExtern`, `lazyExternGlue`;
   `runtime/prelude.rr`: `LCell`, `l2r_lcell_new`, `l2r_lcell_swap`;
-  `runtime/leanrt/src/drop.rs`: `Cell`.
+  `runtime/leanrt/src/drop.rs`: `Cell` (its release and `l2r_lcell_get`'s
+  `cell_get` test `count == 1`, the read releasing the cell before it
+  copies the state, so that LLVM cancels the caller's increment:
+  [../representations/arrays.md](../representations/arrays.md#a-release-tests-count--1)).
 - **Remove only if:** never.
 
 ### A thunk needed by its own computation waits forever
