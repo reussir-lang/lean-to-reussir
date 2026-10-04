@@ -1,694 +1,135 @@
-//! Files (`IO.FS.Handle`) and file-system operations, following
-//! `src/runtime/io.cpp`.
+//! Glue between lean2rr's values and lean-runtime's io (`lean_runtime::io`):
+//! `IO.FS.Handle`s, the file system, temporary files, random bytes, and the
+//! last-error slot through which lean2rr's generated code builds `IO.Error`s.
 //!
-//! A handle is a shared, mutable, buffered file (`FILE*` in Lean). The
-//! Reussir-visible type is `Rc<Box<dyn Any>>` (spellable with std and
-//! reussir_rt only); the box holds a [`FileHandle`]. Handles are closed when
-//! the last reference goes away (Lean's handle finalizer `fclose`s).
+//! The rules are lean-runtime's: glibc's `FILE` model (`io::cfile`) behind
+//! every handle, the open-handle list and its exit sequence (`io::handle`,
+//! `io::exit`), the file-system primitives (`io::fs`), `createTempFile` and
+//! `createTempDir` (`io::temp`), `IO.getRandomBytes` (`io::env`) and the
+//! decoding of `errno`s and libuv codes into `IO.Error` (`io::error`). This
+//! module only converts: Lean strings to byte views and results to
+//! lean2rr's `LStr`, `RVec` and `LHandle`, and it records each outcome.
 //!
-//! Errors: every primitive records its outcome in a global "last error"
-//! (errno 0 = success, plus the file name Lean's C code attaches). lean2rr's
-//! glue checks `ok()` after the call and otherwise builds the `IO.Error`
-//! from `error_kind()` (which `lean_mk_io_error_*` constructor
-//! `decode_io_error` would use), `errno()`, `error_fname()` and
-//! `error_details()` (libuv's message, or Lean's own message).
+//! **Handles.** The Reussir-visible type is `Rc<Box<dyn Any>>` (spellable
+//! with std and reussir_rt only); the box holds a [`FileHandle`], which holds
+//! lean-runtime's `Handle` (`None`: a handle that is not open, the result of
+//! a failed open or a child's stream that is not piped). The crate closes the
+//! file (`fclose`) when the last clone of its `Handle` goes away, as Lean's
+//! handle finalizer does; a handle released while a container is being freed
+//! closes when the free reaches it, in Lean's order (`crate::drop`).
 //!
-//! Since Lean 4.34 both of Lean's decoders are one (`decode_uv_error_impl`
-//! in io.cpp): `decode_io_error(errno)` first maps the errno to libuv's
-//! code (`crt_to_uv`, approximating the errnos libuv cannot represent),
-//! classifies that code and takes `uv_strerror`'s message for it, and keeps
-//! the errno as the error code. The operations Lean implements with libuv
-//! (`metadata`, `symlinkMetadata`, `removeFile`, `hardLink`,
-//! `createTempFile`, `createTempDir`) report their errors as
-//! `decode_uv_error` does: classified by libuv's code (errnos libuv does not
-//! map are `otherError`s), `uv_strerror`'s message, and the positive errno
-//! as the error code (`2` for `ENOENT`; before 4.34 the negated one).
+//! **Errors.** Every fallible primitive records its outcome in a global
+//! last-error slot: nothing, or lean-runtime's [`IoError`]. lean2rr's glue
+//! checks [`ok`] after the call and otherwise builds the `IO.Error` from
+//! [`error_kind`] (which `lean_mk_io_error_*` builder, numbered as in
+//! runtime/README.md), [`errno`], [`error_fname`] and [`error_details`].
 //!
-//! A handle is a model of the glibc `FILE` native Lean uses (`cfile`), so
-//! buffering, file positions and the end-of-file/error indicators behave as
-//! natively. Open handles are finished at exit as C's `exit` does.
+//! **Sinks.** Results of unbounded size go into a `Vec<u8>`, infallible as
+//! lean-runtime's contract asks (a failed allocation aborts, never exits:
+//! `getLine` appends under the stream's lock), except a child's output,
+//! which goes into a [`Sink`] that stops instead (`ByteSink::stopped`, see
+//! "sinks" below).
 
-use crate::cfile::{CFile, IS_APPENDING, NO_READS, NO_WRITES};
 use crate::string::{from_bytes, from_bytes_lossy, LStr};
+use lean_runtime::io::{self as lio, ByteSink, FsMode, Handle, IoError};
 use reussir_rt::rc::Rc;
 use std::any::Any;
 use std::cell::UnsafeCell;
+use std::mem::MaybeUninit;
 
 pub type LHandle = Rc<Box<dyn Any>>;
 
 struct Global<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Global<T> {}
 
+// ---- the last-error slot ----
+
+/// The outcome of the last fallible primitive: lean-runtime's `IoError`
+/// taken apart into what lean2rr's glue reads. `failed` is read after every
+/// IO primitive (`l2r_io_ok`, inline in the program), `errno` on every
+/// error path (inline too), so both stay plain fields of the shape they had
+/// before lean-runtime's io (the program's code is unchanged).
 struct LastError {
-    /// The last primitive failed (its errno may be 0: Lean reports whatever
-    /// `errno` holds, e.g. a sticky `ferror` after a libuv call reset it).
     failed: bool,
+    /// The error's code; `USER_ERROR` for a user error, which has none.
     errno: i32,
-    /// Reported by a libuv-based operation (`decode_uv_error`).
-    uv: bool,
+    /// The `lean_mk_io_error_*` builder (`kind_of`).
+    kind: u8,
     fname: Option<Vec<u8>>,
     details: Option<Vec<u8>>,
-}
-
-static LAST: Global<LastError> =
-    Global(UnsafeCell::new(LastError { failed: false, errno: 0, uv: false, fname: None, details: None }));
-
-fn last() -> &'static mut LastError {
-    unsafe { &mut *LAST.0.get() }
-}
-
-pub(crate) fn set_ok() {
-    let l = last();
-    l.failed = false;
-    l.errno = 0;
-    l.uv = false;
-    l.fname = None;
-    l.details = None;
-}
-
-pub(crate) fn set_err(errno: i32, fname: Option<&[u8]>) {
-    let l = last();
-    l.failed = true;
-    l.errno = errno;
-    l.uv = false;
-    l.fname = fname.map(|f| f.to_vec());
-    l.details = None;
-}
-
-/// An error of a libuv-based operation (`errno` is the positive errno).
-fn set_err_uv(errno: i32, fname: Option<&[u8]>) {
-    set_err(errno, fname);
-    last().uv = true;
-}
-
-/// An error with Lean's own message instead of libuv's.
-fn set_err_msg(errno: i32, fname: Option<&[u8]>, details: &[u8]) {
-    set_err(errno, fname);
-    last().details = Some(details.to_vec());
 }
 
 /// The errno slot value of a user error (`io_result_mk_error(msg)`).
 const USER_ERROR: i32 = -1;
 
-/// Lean's `IO.userError msg` (error kind 23; `msg` is `error_details()`).
-fn set_user_error(msg: &[u8]) {
-    set_err_msg(USER_ERROR, None, msg)
-}
-
-extern "C" {
-    fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
-    fn flock(fd: i32, op: i32) -> i32;
-    fn isatty(fd: i32) -> i32;
-    fn unlink(path: *const std::ffi::c_char) -> i32;
-    fn rename(from: *const std::ffi::c_char, to: *const std::ffi::c_char) -> i32;
-    fn mkdir(path: *const std::ffi::c_char, mode: u32) -> i32;
-    fn rmdir(path: *const std::ffi::c_char) -> i32;
-    fn chmod(path: *const std::ffi::c_char, mode: u32) -> i32;
-    fn link(from: *const std::ffi::c_char, to: *const std::ffi::c_char) -> i32;
-    fn chdir(path: *const std::ffi::c_char) -> i32;
-    fn mkostemp(template: *mut std::ffi::c_char, flags: i32) -> i32;
-    fn mkdtemp(template: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
-    fn getcwd(buf: *mut std::ffi::c_char, size: usize) -> *mut std::ffi::c_char;
-    fn realpath(path: *const std::ffi::c_char, resolved: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
-    fn read(fd: i32, buf: *mut std::ffi::c_void, n: usize) -> isize;
-    fn close(fd: i32) -> i32;
-}
-
-use crate::cfile::{errno_now, set_errno};
-
-const O_RDONLY: i32 = 0;
-const O_WRONLY: i32 = 1;
-const O_RDWR: i32 = 2;
-const O_CREAT: i32 = 0o100;
-const O_EXCL: i32 = 0o200;
-const O_TRUNC: i32 = 0o1000;
-const O_APPEND: i32 = 0o2000;
-const O_CLOEXEC: i32 = 0o2000000;
-const EINVAL: i32 = 22;
-const ENOMEM: i32 = 12;
-const LOCK_SH: i32 = 1;
-const LOCK_EX: i32 = 2;
-const LOCK_NB: i32 = 4;
-const LOCK_UN: i32 = 8;
-const EWOULDBLOCK: i32 = 11;
-const EINTR: i32 = 4;
-/// The size of the buffers Lean's C code passes to `getcwd` and `realpath`.
-const PATH_MAX: usize = 4096;
-
-/// The C string a call wrote into `buf`.
-fn c_result(buf: &[u8]) -> &[u8] {
-    &buf[..buf.iter().position(|&b| b == 0).unwrap_or(buf.len())]
-}
-
-/// A path as a NUL-terminated C string, or the "embedded NUL" error of
-/// `mk_embedded_nul_error` (invalid argument, EINVAL, own message).
-fn c_path(p: &[u8]) -> Option<Vec<u8>> {
-    if p.contains(&0) {
-        set_err_msg(EINVAL, Some(p), b"string contains NUL bytes");
-        return None;
-    }
-    let mut v = p.to_vec();
-    v.push(0);
-    Some(v)
-}
-
-/// A handle: a glibc `FILE` model over the descriptor (see `cfile`).
-pub struct FileHandle {
-    f: CFile,
-}
-
-/// The open handles, oldest first (glibc's `_IO_list_all`, reversed).
-static OPEN: Global<Vec<usize>> = Global(UnsafeCell::new(Vec::new()));
-
-/// Apply `op` to every open handle, most recently opened first (the order
-/// of glibc's `_IO_flush_all`/`_IO_unbuffer_all` at exit).
-pub(crate) fn for_each_open(mut op: impl FnMut(&mut CFile)) {
-    let open = unsafe { &*OPEN.0.get() };
-    for &p in open.iter().rev() {
-        op(&mut unsafe { &mut *(p as *mut FileHandle) }.f);
-    }
-}
-
-impl FileHandle {
-    fn close_now(&mut self) {
-        if self.f.fd >= 0 {
-            let open = unsafe { &mut *OPEN.0.get() };
-            let me = self as *mut FileHandle as usize;
-            if let Some(i) = open.iter().rposition(|&p| p == me) {
-                open.remove(i);
-            }
-            self.f.close();
-        }
-    }
-}
-
-impl Drop for FileHandle {
-    fn drop(&mut self) {
-        if self.f.fd < 0 {
-            return;
-        }
-        if crate::drop::active() {
-            // Released while a container is freed: closed when the free
-            // reaches it, in Lean's order (`crate::drop`). The handle moves
-            // to a box of its own, which the open list now names.
-            let moved = Box::new(UnsafeCell::new(FileHandle { f: std::mem::replace(&mut self.f, CFile::new(-1, 0)) }));
-            let open = unsafe { &mut *OPEN.0.get() };
-            let me = self as *mut FileHandle as usize;
-            if let Some(i) = open.iter().rposition(|&p| p == me) {
-                open[i] = moved.get() as usize;
-            }
-            crate::drop::defer(Box::into_raw(moved) as usize, close_deferred);
-            return;
-        }
-        self.close_now();
-    }
-}
-
-unsafe fn close_deferred(p: usize) -> bool {
-    let mut b = Box::from_raw(p as *mut UnsafeCell<FileHandle>);
-    b.get_mut().close_now();
-    drop(b);
-    true
-}
+static LAST: Global<LastError> =
+    Global(UnsafeCell::new(LastError { failed: false, errno: 0, kind: 0, fname: None, details: None }));
 
 #[inline(always)]
-pub(crate) fn fh(h: &LHandle) -> &mut CFile {
-    // Handles are shared and mutable (like `FILE*`); only this module
-    // creates them, always holding a `FileHandle`.
-    let b: &Box<dyn Any> = h;
-    unsafe { &mut (*(*(&**b as *const dyn Any as *const UnsafeCell<FileHandle>)).get()).f }
+fn last() -> &'static mut LastError {
+    unsafe { &mut *LAST.0.get() }
 }
 
-/// A handle over an open descriptor (`fdopen`; `flags` as `CFile::new`),
-/// or a closed one for `fd = -1`.
-pub(crate) fn handle_from_fd(fd: i32, flags: u32) -> LHandle {
-    mk(fd, flags)
+#[inline]
+pub(crate) fn set_ok() {
+    let l = last();
+    l.failed = false;
+    l.errno = 0;
+    l.kind = 0;
+    l.fname = None;
+    l.details = None;
 }
 
-fn mk(fd: i32, flags: u32) -> LHandle {
-    let b = Box::new(UnsafeCell::new(FileHandle { f: CFile::new(fd, flags) }));
-    if fd >= 0 {
-        crate::io::flush_at_exit_registered();
-        unsafe { &mut *OPEN.0.get() }.push(b.get() as usize);
-    }
-    Rc::new(b as Box<dyn Any>)
-}
-
-/// `IO.FS.Handle.mk path mode` (`read`, `write`, `writeNew`, `readWrite`,
-/// `append` = 0..4): `open` and `fdopen` with `r`, `w`, `w`, `r+`, `a`. On
-/// failure the result is a closed handle.
-pub fn open_file(path: &[u8], mode: u8) -> LHandle {
-    let Some(c) = c_path(path) else { return mk(-1, 0) };
-    let (flags, fflags) = match mode {
-        0 => (O_RDONLY, NO_WRITES),
-        1 => (O_WRONLY | O_CREAT | O_TRUNC, NO_READS),
-        2 => (O_WRONLY | O_CREAT | O_TRUNC | O_EXCL, NO_READS),
-        3 => (O_RDWR, 0),
-        _ => (O_WRONLY | O_CREAT | O_APPEND, NO_READS | IS_APPENDING),
+pub(crate) fn set_err(e: IoError) {
+    use IoError::*;
+    let l = last();
+    l.failed = true;
+    l.kind = kind_of(&e) as u8;
+    l.errno = if matches!(e, UserError(_)) { USER_ERROR } else { error_code(&e) as i32 };
+    let (fname, details) = match e {
+        Interrupted(f, _, d) | NoFileOrDirectory(f, _, d) => (Some(f), d),
+        AlreadyExists(f, _, d)
+        | InvalidArgument(f, _, d)
+        | PermissionDenied(f, _, d)
+        | ResourceExhausted(f, _, d)
+        | InappropriateType(f, _, d)
+        | NoSuchThing(f, _, d) => (f, d),
+        OtherError(_, d)
+        | ResourceBusy(_, d)
+        | ResourceVanished(_, d)
+        | UnsupportedOperation(_, d)
+        | HardwareFault(_, d)
+        | UnsatisfiedConstraints(_, d)
+        | IllegalOperation(_, d)
+        | ProtocolError(_, d)
+        | TimeExpired(_, d)
+        | UserError(d) => (None, d),
+        UnexpectedEof => (None, String::new()),
     };
-    let fd = unsafe { open(c.as_ptr() as *const std::ffi::c_char, flags | O_CLOEXEC, 0o666 as std::ffi::c_uint) };
-    if fd < 0 {
-        set_err(errno_now(), Some(path));
-    } else {
-        set_ok();
-    }
-    mk(fd, fflags)
+    l.fname = fname.map(String::into_bytes);
+    l.details = Some(details.into_bytes());
 }
 
-fn outcome(r: Result<(), i32>) {
-    match r {
-        Ok(()) => set_ok(),
-        Err(e) => set_err(e, None),
-    }
-}
-
-/// `Handle.putStr` / `Handle.write` (`fwrite`).
-pub fn put_str(h: &LHandle, s: &[u8]) {
-    crate::sched::effect();
-    outcome(fh(h).put(s))
-}
-
-/// `Handle.flush` (`fflush`): output, an effect point.
-pub fn flush(h: &LHandle) {
-    crate::sched::effect();
-    outcome(fh(h).flush())
-}
-
-/// `lean_io_prim_handle_read`: a count whose byte array would overflow is
-/// `ENOMEM`; the array allocation itself has Lean's checks; then `fread`.
-/// (The checks run before `f` is borrowed: an out-of-memory panic exits,
-/// and the exit processing takes every `FILE`.)
-pub(crate) fn lean_read<'a>(f: impl FnOnce() -> &'a mut CFile, n: u64) -> Result<crate::array::RVec<u8>, i32> {
-    if n > u64::MAX - 24 {
-        return Err(ENOMEM);
-    }
-    crate::array::check_alloc(n, 1);
-    // Into the array's own block (as `lean_io_prim_handle_read`, which
-    // keeps the capacity asked for): no second copy of the bytes.
-    crate::array::bytes_filled(n as usize, |p, room| unsafe { f().read_into(p, room) })
-}
-
-/// `Handle.read n`.
-pub fn read_bytes(h: &LHandle, n: u64) -> crate::array::RVec<u8> {
-    match lean_read(|| fh(h), n) {
-        Ok(v) => {
-            set_ok();
-            v
-        }
-        Err(e) => {
-            set_err(e, None);
-            crate::array::empty()
-        }
-    }
-}
-
-/// `Handle.isEof` (`feof`; cannot fail).
-pub fn is_eof(h: &LHandle) -> bool {
-    set_ok();
-    fh(h).is_eof()
-}
-
-/// `Handle.getLine`.
-pub fn get_line(h: &LHandle) -> LStr {
-    match fh(h).get_line() {
-        Ok(l) => {
-            set_ok();
-            from_bytes_lossy(&l)
-        }
-        Err(e) => {
-            set_err(e, None);
-            from_bytes(b"")
-        }
-    }
-}
-
-/// `Handle.isTty` (cannot fail; records success so a fallible-glue caller
-/// sees no stale error).
-pub fn is_tty(h: &LHandle) -> bool {
-    set_ok();
-    unsafe { isatty(fh(h).fd) == 1 }
-}
-
-/// `Handle.rewind` (`fseek(fp, 0, SEEK_SET)`).
-pub fn rewind(h: &LHandle) {
-    outcome(fh(h).rewind())
-}
-
-/// `Handle.truncate` (`ftruncate(fileno(fp), ftello(fp))`).
-pub fn truncate(h: &LHandle) {
-    outcome(fh(h).truncate())
-}
-
-pub fn lock(h: &LHandle, exclusive: bool) {
-    let op = if exclusive { LOCK_EX } else { LOCK_SH };
-    if unsafe { flock(fh(h).fd, op) } != 0 { set_err(errno_now(), None) } else { set_ok() }
-}
-
-/// `Handle.tryLock`: `false` when the lock is held elsewhere.
-pub fn try_lock(h: &LHandle, exclusive: bool) -> bool {
-    let op = (if exclusive { LOCK_EX } else { LOCK_SH }) | LOCK_NB;
-    if unsafe { flock(fh(h).fd, op) } == 0 {
-        set_ok();
-        true
-    } else {
-        let e = errno_now();
-        if e == EWOULDBLOCK { set_ok() } else { set_err(e, None) }
-        false
-    }
-}
-
-pub fn unlock(h: &LHandle) {
-    if unsafe { flock(fh(h).fd, LOCK_UN) } != 0 { set_err(errno_now(), None) } else { set_ok() }
-}
-
-fn path_op(p: &[u8], f: impl FnOnce(*const std::ffi::c_char) -> i32) {
-    let Some(c) = c_path(p) else { return };
-    if f(c.as_ptr() as *const std::ffi::c_char) != 0 { set_err(errno_now(), Some(p)) } else { set_ok() }
-}
-
-/// `IO.FS.removeFile` (libuv's `uv_fs_unlink` natively).
-pub fn remove_file(p: &[u8]) {
-    let Some(c) = c_path(p) else { return };
-    set_errno(0); // libuv (`uv__fs_work`) clears errno first
-    if unsafe { unlink(c.as_ptr() as *const std::ffi::c_char) } != 0 {
-        set_err_uv(errno_now(), Some(p))
-    } else {
-        set_ok()
-    }
-}
-
-pub fn create_dir(p: &[u8]) {
-    path_op(p, |c| unsafe { mkdir(c, 0o777) })
-}
-
-pub fn remove_dir(p: &[u8]) {
-    path_op(p, |c| unsafe { rmdir(c) })
-}
-
-/// Run a Rust std call and leave C's `errno` as the single libc call native
-/// Lean makes would: unchanged on success (Rust may retry or probe, and
-/// `ReadDir` clears `errno`), the error's code on failure. (`errno` is
-/// observable through a handle's sticky error indicator.)
-fn with_errno<T>(f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
-    let saved = errno_now();
-    let r = f();
-    match &r {
-        Ok(_) => set_errno(saved),
-        Err(e) => set_errno(e.raw_os_error().unwrap_or(EINVAL)),
-    }
-    r
-}
-
-/// `getcwd` into a `PATH_MAX` buffer, as Lean's C code calls it (a longer
-/// path is `ERANGE`).
-fn getcwd_max() -> Option<Vec<u8>> {
-    let mut buf = [0u8; PATH_MAX];
-    if unsafe { getcwd(buf.as_mut_ptr() as *mut std::ffi::c_char, PATH_MAX) }.is_null() {
-        return None;
-    }
-    Some(c_result(&buf).to_vec())
-}
-
-/// `IO.currentDir`: `getcwd`; a failure is Lean's user error.
-pub fn current_dir() -> LStr {
-    match getcwd_max() {
-        Some(p) => {
-            set_ok();
-            from_bytes_lossy(&p)
-        }
-        None => {
-            set_user_error(b"failed to retrieve current working directory");
-            from_bytes(b"")
-        }
-    }
-}
-
-/// `IO.appPath`: `/proc/self/exe`; a failure is Lean's user error.
-pub fn app_path() -> LStr {
-    match with_errno(|| std::fs::read_link("/proc/self/exe")) {
-        Ok(p) => {
-            set_ok();
-            from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))
-        }
-        Err(_) => {
-            set_user_error(b"failed to locate application");
-            from_bytes(b"")
-        }
-    }
-}
-
-/// `IO.Process.getCurrentDir`: `getcwd`; errors are decoded without a file.
-pub fn process_current_dir() -> LStr {
-    match getcwd_max() {
-        Some(p) => {
-            set_ok();
-            from_bytes_lossy(&p)
-        }
-        None => {
-            set_err(errno_now(), None);
-            from_bytes(b"")
-        }
-    }
-}
-
-/// `IO.Process.setCurrentDir`: `chdir` of the path up to its first NUL
-/// (Lean passes `string_cstr` unchecked); the error names the whole path.
-pub fn set_current_dir(p: &[u8]) {
-    let cut = p.iter().position(|&b| b == 0).unwrap_or(p.len());
-    let mut c = p[..cut].to_vec();
-    c.push(0);
-    if unsafe { chdir(c.as_ptr() as *const std::ffi::c_char) } != 0 {
-        set_err(errno_now(), Some(p))
-    } else {
-        set_ok()
-    }
-}
-
-/// The template of a new temporary file or directory: libuv's
-/// `uv_os_tmpdir` (`sys::uv_tmpdir`), whose error is reported without a
-/// file; an empty directory is libuv's `ENOENT` with file `""` (Lean's
-/// `base_len == 0` case); then Lean appends `/tmp.XXXXXXXX`.
-fn temp_template() -> Option<Vec<u8>> {
-    let mut dir = match crate::sys::uv_tmpdir() {
-        Ok(d) => d,
-        Err(e) => {
-            set_err_uv(-e, None);
-            return None;
-        }
-    };
-    if dir.is_empty() {
-        set_err_uv(2, Some(b""));
-        return None;
-    }
-    if dir.last() != Some(&b'/') {
-        dir.push(b'/');
-    }
-    dir.extend_from_slice(b"tmp.XXXXXXXX\0");
-    Some(dir)
-}
-
-/// The path of the file the last `create_temp_file` created.
-static TEMP_PATH: Global<Vec<u8>> = Global(UnsafeCell::new(Vec::new()));
-
-/// `IO.FS.createTempFile`: a new file (`mkostemp`, as libuv) opened for
-/// reading and writing; its path is `temp_file_path()`. Errors are libuv's,
-/// without a file name.
-pub fn create_temp_file() -> LHandle {
-    let Some(mut t) = temp_template() else {
-        unsafe { *TEMP_PATH.0.get() = Vec::new() };
-        return mk(-1, 0);
-    };
-    set_errno(0);
-    let fd = unsafe { mkostemp(t.as_mut_ptr() as *mut std::ffi::c_char, O_CLOEXEC) };
-    t.pop();
-    if fd < 0 {
-        set_err_uv(errno_now(), None);
-        unsafe { *TEMP_PATH.0.get() = Vec::new() };
-        return mk(-1, 0);
-    }
-    set_ok();
-    unsafe { *TEMP_PATH.0.get() = t };
-    mk(fd, 0)
-}
-
-/// (Lean's `mk_string`: a name that is not UTF-8 is decoded lossily.)
-pub fn temp_file_path() -> LStr {
-    from_bytes_lossy(unsafe { &*TEMP_PATH.0.get() })
-}
-
-/// `IO.FS.createTempDir` (`mkdtemp`, as libuv).
-pub fn create_temp_dir() -> LStr {
-    let Some(mut t) = temp_template() else { return from_bytes(b"") };
-    set_errno(0);
-    let r = unsafe { mkdtemp(t.as_mut_ptr() as *mut std::ffi::c_char) };
-    t.pop();
-    if r.is_null() {
-        set_err_uv(errno_now(), None);
-        return from_bytes(b"");
-    }
-    set_ok();
-    from_bytes_lossy(&t)
-}
-
-pub fn set_access_rights(p: &[u8], mode: u32) {
-    path_op(p, |c| unsafe { chmod(c, mode) })
-}
-
-/// `IO.FS.rename`; the error names both files as Lean does.
-pub fn rename_file(from: &[u8], to: &[u8]) {
-    let Some(a) = c_path(from) else { return };
-    let Some(b) = c_path(to) else { return };
-    if unsafe { rename(a.as_ptr() as *const std::ffi::c_char, b.as_ptr() as *const std::ffi::c_char) } != 0 {
-        let mut both = from.to_vec();
-        both.extend_from_slice(b" and/or ");
-        both.extend_from_slice(to);
-        set_err(errno_now(), Some(&both));
-    } else {
-        set_ok()
-    }
-}
-
-/// `IO.FS.hardLink` (libuv's `uv_fs_link` natively; the error names the
-/// original).
-pub fn hard_link(from: &[u8], to: &[u8]) {
-    let Some(a) = c_path(from) else { return };
-    let Some(b) = c_path(to) else { return };
-    set_errno(0);
-    if unsafe { link(a.as_ptr() as *const std::ffi::c_char, b.as_ptr() as *const std::ffi::c_char) } != 0 {
-        set_err_uv(errno_now(), Some(from))
-    } else {
-        set_ok()
-    }
-}
-
-/// A path as an `OsStr` (Lean strings are valid UTF-8; NULs are rejected
-/// first by `c_path`).
-fn os_path(p: &[u8]) -> &std::path::Path {
-    std::path::Path::new(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(p))
-}
-
-/// `IO.FS.realPath`: `realpath` into a `PATH_MAX` buffer, as Lean's C code
-/// (a longer result is `ENAMETOOLONG`); any failure is Lean's "file not
-/// found" (`ENOENT`, empty message).
-pub fn real_path(p: &[u8]) -> LStr {
-    let Some(c) = c_path(p) else { return from_bytes(p) };
-    let mut buf = [0u8; PATH_MAX];
-    if unsafe { realpath(c.as_ptr() as *const std::ffi::c_char, buf.as_mut_ptr() as *mut std::ffi::c_char) }.is_null() {
-        set_err_msg(2, Some(p), b"");
-        return from_bytes(p);
-    }
-    set_ok();
-    from_bytes_lossy(c_result(&buf))
-}
-
-/// Entry names of a directory in `readdir` order, without `.` and `..`.
-pub fn read_dir(p: &[u8]) -> Vec<LStr> {
-    if c_path(p).is_none() {
-        return Vec::new();
-    }
-    let r = with_errno(|| {
-        std::fs::read_dir(os_path(p)).map(|it| {
-            it.filter_map(|e| e.ok())
-                .map(|e| from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(e.file_name().as_os_str())))
-                .collect::<Vec<LStr>>()
-        })
-    });
+/// Records `r`'s outcome; its value on success.
+#[inline]
+pub(crate) fn record<T>(r: Result<T, IoError>) -> Option<T> {
     match r {
         Ok(v) => {
             set_ok();
-            v
+            Some(v)
         }
         Err(e) => {
-            set_err(e.raw_os_error().unwrap_or(EINVAL), Some(p));
-            Vec::new()
+            set_err(e);
+            None
         }
     }
 }
-
-/// `System.FilePath.metadata` fields: accessed (sec as an i64 bit pattern,
-/// nsec), modified (sec, nsec), byte size, file type (0 dir, 1 file,
-/// 2 symlink, 3 other), number of hard links. Errors are libuv's
-/// (`uv_fs_stat`/`uv_fs_lstat` natively).
-pub fn metadata(p: &[u8], follow: bool) -> [u64; 7] {
-    use std::os::unix::fs::MetadataExt;
-    if c_path(p).is_none() {
-        return [0; 7];
-    }
-    let s = os_path(p);
-    let m = if follow { std::fs::metadata(s) } else { std::fs::symlink_metadata(s) };
-    // libuv (`uv__fs_work`) clears errno before the call.
-    set_errno(match &m {
-        Ok(_) => 0,
-        Err(e) => e.raw_os_error().unwrap_or(EINVAL),
-    });
-    match m {
-        Ok(m) => {
-            set_ok();
-            let ft = m.file_type();
-            let t = if ft.is_dir() { 0 } else if ft.is_file() { 1 } else if ft.is_symlink() { 2 } else { 3 };
-            [m.atime() as u64, m.atime_nsec() as u64, m.mtime() as u64, m.mtime_nsec() as u64, m.size(), t, m.nlink()]
-        }
-        Err(e) => {
-            set_err_uv(e.raw_os_error().unwrap_or(EINVAL), Some(p));
-            [0; 7]
-        }
-    }
-}
-
-/// `IO.getRandomBytes n` (`lean_io_get_random_bytes`): no bytes need no
-/// `/dev/urandom`; failing to open it names the file; a count whose byte
-/// array would overflow is `ENOMEM` (Lean leaves the descriptor open then);
-/// the array is allocated as Lean's, then filled by `read`s (`EINTR`
-/// retried; another error has no file name).
-pub fn get_random_bytes(n: u64) -> crate::array::RVec<u8> {
-    set_ok();
-    if n == 0 {
-        return crate::array::empty();
-    }
-    let fd = unsafe { open(b"/dev/urandom\0".as_ptr() as *const std::ffi::c_char, O_RDONLY | O_CLOEXEC) };
-    if fd < 0 {
-        set_err(errno_now(), Some(b"/dev/urandom"));
-        return crate::array::empty();
-    }
-    if n > u64::MAX - 24 {
-        set_err(ENOMEM, None);
-        return crate::array::empty();
-    }
-    crate::array::check_alloc(n, 1);
-    // Into the array's own block: no second copy of the bytes.
-    let filled = crate::array::bytes_filled(n as usize, |p, n| {
-        let mut have = 0;
-        while have < n {
-            let got = unsafe { read(fd, p.add(have) as *mut std::ffi::c_void, n - have) };
-            if got < 0 {
-                let e = errno_now();
-                if e != EINTR {
-                    return Err(e);
-                }
-            } else {
-                have += got as usize;
-            }
-        }
-        Ok(have)
-    });
-    unsafe { close(fd) };
-    match filled {
-        Ok(a) => a,
-        Err(e) => {
-            set_err(e, None);
-            crate::array::empty()
-        }
-    }
-}
-
-// ---- error decoding (`decode_io_error`/`decode_uv_error` in io.cpp) ----
 
 pub fn ok() -> bool {
     !last().failed
 }
 
-/// The error code of the last error: the errno, for libuv-based operations
-/// too (Lean 4.34's `decode_uv_error` stores `-code`, the positive errno).
+/// The last error's code (`osCode`); 0 for a user error, which has none.
 pub fn errno() -> u32 {
     let l = last();
     if l.errno == USER_ERROR {
@@ -698,205 +139,307 @@ pub fn errno() -> u32 {
     }
 }
 
+/// The last error's file name (`""` when it has none).
 pub fn error_fname() -> LStr {
     from_bytes(last().fname.as_deref().unwrap_or(b""))
 }
 
-/// The message of the last error: Lean's own, or `uv_strerror`'s for its
-/// libuv code (`decode_io_error` maps an errno to that code first,
-/// `crt_to_uv`; libuv names an unknown code "Unknown system error -e").
+/// The last error's details (libuv's message, or Lean's own), or a user
+/// error's message.
 pub fn error_details() -> LStr {
-    let l = last();
-    match &l.details {
-        Some(d) => from_bytes(d),
-        None => {
-            let code = if l.uv { l.errno } else { crt_to_uv(l.errno) };
-            from_bytes(&uv_strerror_bytes(code))
+    from_bytes(last().details.as_deref().unwrap_or(b""))
+}
+
+/// Which `lean_mk_io_error_*` builder makes the last error (lean2rr's
+/// `ioErrorBuilderSyms`, runtime/README.md). Out of line, as before
+/// lean-runtime's io (when it computed the kind): the error paths of the
+/// program's IO calls keep their code.
+#[inline(never)]
+pub fn error_kind() -> u32 {
+    last().kind as u32
+}
+
+/// The code an `IO.Error` holds (0 when its constructor has none).
+pub(crate) fn error_code(e: &IoError) -> u32 {
+    use IoError::*;
+    match e {
+        AlreadyExists(_, c, _)
+        | Interrupted(_, c, _)
+        | NoFileOrDirectory(_, c, _)
+        | InvalidArgument(_, c, _)
+        | PermissionDenied(_, c, _)
+        | ResourceExhausted(_, c, _)
+        | InappropriateType(_, c, _)
+        | NoSuchThing(_, c, _)
+        | OtherError(c, _)
+        | ResourceBusy(c, _)
+        | ResourceVanished(c, _)
+        | UnsupportedOperation(c, _)
+        | HardwareFault(c, _)
+        | UnsatisfiedConstraints(c, _)
+        | IllegalOperation(c, _)
+        | ProtocolError(c, _)
+        | TimeExpired(c, _) => *c,
+        UnexpectedEof | UserError(_) => 0,
+    }
+}
+
+/// The builder of an `IO.Error`: its constructor, and for the constructors
+/// with an optional file name whether it has one.
+pub(crate) fn kind_of(e: &IoError) -> u32 {
+    use IoError::*;
+    let file = |f: &Option<String>, no: u32| if f.is_some() { no + 1 } else { no };
+    match e {
+        OtherError(..) => 0,
+        Interrupted(..) => 1,
+        InvalidArgument(f, ..) => file(f, 2),
+        NoFileOrDirectory(..) => 4,
+        PermissionDenied(f, ..) => file(f, 5),
+        ResourceExhausted(f, ..) => file(f, 7),
+        InappropriateType(f, ..) => file(f, 9),
+        NoSuchThing(f, ..) => file(f, 11),
+        AlreadyExists(f, ..) => file(f, 13),
+        HardwareFault(..) => 15,
+        UnsatisfiedConstraints(..) => 16,
+        IllegalOperation(..) => 17,
+        ResourceVanished(..) => 18,
+        ProtocolError(..) => 19,
+        TimeExpired(..) => 20,
+        ResourceBusy(..) => 21,
+        UnsupportedOperation(..) => 22,
+        UserError(..) => 23,
+        // No io primitive of lean-runtime reports it, and Lean's runtime has
+        // no builder for it.
+        UnexpectedEof => crate::internal_panic("an IO primitive reported unexpectedEof (runtime invariant)"),
+    }
+}
+
+// ---- sinks ----
+
+/// The sinks lean2rr gives lean-runtime for its results of unbounded size.
+///
+/// A line, a path, a name, an environment value go into a plain `Vec<u8>`
+/// (lean-runtime's `ByteSink` for `Vec`), infallible as lean-runtime's
+/// contract asks of `getLine`'s sink: an allocation that fails aborts the
+/// process (Rust's `memory allocation of N bytes failed`, status 134),
+/// where native Lean's `std::bad_alloc` aborts it too (134). It never
+/// returns into lean-runtime and never exits, so the exit cannot wait for
+/// the stream lock `getLine` holds while it appends (review RST3-02: a
+/// fallible sink there made a line without end spin forever, since
+/// lean-runtime's `get_line` reads on).
+///
+/// A child's output (`IO.Process.output`, which reads another process
+/// without bound) goes into a [`Sink`]: it grows with `try_reserve` (the
+/// growth of `extend_from_slice`), and when that fails it drops the bytes
+/// and says it has stopped (`ByteSink::stopped`), so that lean-runtime stops
+/// reading at once; [`Sink::finish`], called once the crate has returned,
+/// then ends the process as Lean's failed allocation of the growing
+/// `ByteArray` does (`INTERNAL PANIC: out of memory`, exit 1; AR-5).
+#[derive(Default)]
+pub(crate) struct Sink {
+    v: Vec<u8>,
+    stopped: bool,
+}
+
+impl ByteSink for Sink {
+    #[inline]
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        if self.stopped {
+            return;
+        }
+        if self.v.try_reserve(bytes.len()).is_err() {
+            self.stopped = true;
+            self.v = Vec::new();
+            return;
+        }
+        self.v.extend_from_slice(bytes)
+    }
+
+    fn stopped(&self) -> bool {
+        self.stopped
+    }
+}
+
+impl Sink {
+    /// The bytes, or the end of the process if the sink stopped.
+    pub(crate) fn finish(self) -> Vec<u8> {
+        if self.stopped {
+            out_of_memory()
+        }
+        self.v
+    }
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn out_of_memory() -> ! {
+    crate::lean_internal_panic(lean_runtime::semantics::panic::InternalPanic::OutOfMemory)
+}
+
+/// A path-like result as a Lean string (`mk_string`: lossy), its outcome
+/// recorded; the empty string on failure.
+fn sink_string(r: Result<(), IoError>, v: Vec<u8>) -> LStr {
+    match record(r) {
+        Some(()) => from_bytes_lossy(&v),
+        None => from_bytes(b""),
+    }
+}
+
+// ---- handles ----
+
+/// A handle: lean-runtime's, or none (a handle that is not open).
+pub struct FileHandle {
+    h: Option<Handle>,
+}
+
+impl Drop for FileHandle {
+    fn drop(&mut self) {
+        if self.h.is_some() && crate::drop::active() {
+            // Released while a container is freed: closed when the free
+            // reaches it, in Lean's order (`crate::drop`).
+            let moved = Box::new(self.h.take());
+            crate::drop::defer(Box::into_raw(moved) as usize, close_deferred);
         }
     }
 }
 
-/// Which `lean_mk_io_error_*` constructor Lean's `decode_io_error` (or
-/// `decode_uv_error`) uses for the last error (see the table in
-/// runtime/README.md): the class of its libuv code.
-pub fn error_kind() -> u32 {
-    let l = last();
-    if l.errno == USER_ERROR {
-        return 23;
+unsafe fn close_deferred(p: usize) -> bool {
+    drop(Box::from_raw(p as *mut Option<Handle>));
+    true
+}
+
+#[inline(always)]
+pub(crate) fn fh(h: &LHandle) -> &FileHandle {
+    // Only this module creates handles, always holding a `FileHandle`.
+    let b: &Box<dyn Any> = h;
+    unsafe { &*(&**b as *const dyn Any as *const FileHandle) }
+}
+
+/// The open handle, or `EBADF` recorded (`fileno` of no file).
+fn open_of(h: &LHandle) -> Option<&Handle> {
+    let r = fh(h).h.as_ref();
+    if r.is_none() {
+        set_err(IoError::decode_io_error(lio::error::EBADF, None));
     }
-    if l.uv {
-        return uv_kind_file(l.errno, l.fname.is_some());
-    }
-    decode_kind(crt_to_uv(l.errno), l.fname.is_some())
+    r
 }
 
-/// Lean 4.34's `lean_crt_to_uv_err` (io.cpp) on Linux, as positive errnos
-/// (libuv's code for errno `e` is `-e` there): an errno libuv maps is
-/// itself; the ones it cannot represent are approximated by the closest one
-/// it can; any other errno is itself, an unknown libuv code (`otherError`,
-/// "Unknown system error -e"). ENOEXEC stays itself (`UV_ENOEXEC`: see
-/// `uv_maps`); its message is "Unknown system error -8", as natively.
-pub fn crt_to_uv(e: i32) -> i32 {
-    match e {
-        74 => 71,   // EBADMSG -> EPROTO
-        10 => 3,    // ECHILD -> ESRCH
-        35 => 16,   // EDEADLK -> EBUSY
-        33 => 22,   // EDOM -> EINVAL
-        43 => 32,   // EIDRM -> EPIPE
-        115 => 106, // EINPROGRESS -> EISCONN
-        102 => 104, // ENETRESET -> ECONNRESET
-        37 => 11,   // ENOLCK -> EAGAIN
-        67 => 104,  // ENOLINK -> ECONNRESET
-        63 => 105,  // ENOSR -> ENOBUFS
-        60 => 22,   // ENOSTR -> EINVAL
-        62 => 110,  // ETIME -> ETIMEDOUT
-        42 => 61,   // ENOMSG -> ENODATA (libuv >= 1.45)
-        _ => e,
-    }
+/// An `LHandle` over lean-runtime's handle (`None`: not open).
+pub(crate) fn wrap(h: Option<Handle>) -> LHandle {
+    Rc::new(Box::new(FileHandle { h }) as Box<dyn Any>)
 }
 
-/// Whether `decode_uv_error` has a case for this errno: it has none for
-/// EDOM, ENOSTR, ENOLCK, ENOSR, EBADMSG, ECHILD, ENOMSG, EINPROGRESS, EIDRM,
-/// ENETRESET, ENOLINK, ETIME or EDEADLK, which are therefore `otherError`s.
-/// ENOEXEC has one since Lean 4.34 (invalid argument): Lean is compiled with
-/// libuv headers that define `UV_ENOEXEC` (1.50 or later), although the
-/// libuv it links names no message for it (test `fs_tests.rs`).
-fn uv_maps(e: i32) -> bool {
-    !matches!(e, 33 | 60 | 37 | 63 | 74 | 10 | 42 | 115 | 43 | 102 | 67 | 62 | 35)
+/// `IO.FS.Handle.mk path mode` (`read`, `write`, `writeNew`, `readWrite`,
+/// `append` = 0..4). On failure the result is a handle that is not open.
+pub fn open_file(path: &[u8], mode: u8) -> LHandle {
+    let mode = FsMode::from_index(mode).unwrap_or(FsMode::Append);
+    wrap(record(Handle::open(path, mode)))
 }
 
-/// libuv's `uv_strerror` for a (positive) errno, as linked into Lean 4.34
-/// (libuv 1.48, unchanged since 4.33);
-/// `None` for errnos libuv has no name for.
-fn uv_strerror(e: i32) -> Option<&'static str> {
-    Some(match e {
-        1 => "operation not permitted",
-        2 => "no such file or directory",
-        3 => "no such process",
-        4 => "interrupted system call",
-        5 => "i/o error",
-        6 => "no such device or address",
-        7 => "argument list too long",
-        9 => "bad file descriptor",
-        11 => "resource temporarily unavailable",
-        12 => "not enough memory",
-        13 => "permission denied",
-        14 => "bad address in system call argument",
-        16 => "resource busy or locked",
-        17 => "file already exists",
-        18 => "cross-device link not permitted",
-        19 => "no such device",
-        20 => "not a directory",
-        21 => "illegal operation on a directory",
-        22 => "invalid argument",
-        23 => "file table overflow",
-        24 => "too many open files",
-        25 => "inappropriate ioctl for device",
-        26 => "text file is busy",
-        27 => "file too large",
-        28 => "no space left on device",
-        29 => "invalid seek",
-        30 => "read-only file system",
-        31 => "too many links",
-        32 => "broken pipe",
-        34 => "result too large",
-        36 => "name too long",
-        38 => "function not implemented",
-        39 => "directory not empty",
-        40 => "too many symbolic links encountered",
-        49 => "protocol driver not attached",
-        61 => "no data available",
-        64 => "machine is not on the network",
-        71 => "protocol error",
-        75 => "value too large for defined data type",
-        84 => "illegal byte sequence",
-        88 => "socket operation on non-socket",
-        89 => "destination address required",
-        90 => "message too long",
-        91 => "protocol wrong type for socket",
-        92 => "protocol not available",
-        93 => "protocol not supported",
-        94 => "socket type not supported",
-        95 => "operation not supported on socket",
-        97 => "address family not supported",
-        98 => "address already in use",
-        99 => "address not available",
-        100 => "network is down",
-        101 => "network is unreachable",
-        103 => "software caused connection abort",
-        104 => "connection reset by peer",
-        105 => "no buffer space available",
-        106 => "socket is already connected",
-        107 => "socket is not connected",
-        108 => "cannot send after transport endpoint shutdown",
-        110 => "connection timed out",
-        111 => "connection refused",
-        112 => "host is down",
-        113 => "host is unreachable",
-        114 => "connection already in progress",
-        121 => "remote I/O error",
-        125 => "operation canceled",
-        _ => return None,
-    })
-}
-
-/// `uv_strerror` of a (positive) errno, for `net`: libuv's message, or
-/// `Unknown system error -e`.
-pub fn uv_strerror_bytes(e: i32) -> Vec<u8> {
-    match uv_strerror(e) {
-        Some(m) => m.as_bytes().to_vec(),
-        None => format!("Unknown system error {}", -e).into_bytes(),
+/// `Handle.putStr` / `Handle.write` (`fwrite`): output, an effect point.
+pub fn put_str(h: &LHandle, s: &[u8]) {
+    crate::sched::effect();
+    if let Some(f) = open_of(h) {
+        record(f.put_str(s));
     }
 }
 
-/// The error kind `decode_uv_error` gives a (positive) errno without a file
-/// name, for `net`.
-pub fn uv_kind(e: i32) -> u32 {
-    uv_kind_file(e, false)
-}
-
-/// The error kind `decode_uv_error` gives a (positive) errno: unmapped
-/// errnos are `otherError`s.
-fn uv_kind_file(e: i32, has_fname: bool) -> u32 {
-    if !uv_maps(e) {
-        return 0;
-    }
-    decode_kind(e, has_fname)
-}
-
-/// `write(2)`, for the signal handler (`net`).
-pub fn raw_write(fd: i32, buf: *const std::ffi::c_void, n: usize) -> isize {
-    extern "C" {
-        fn write(fd: i32, buf: *const std::ffi::c_void, n: usize) -> isize;
-    }
-    unsafe { write(fd, buf, n) }
-}
-
-pub fn decode_kind(e: i32, has_fname: bool) -> u32 {
-    let file = |no: u32, yes: u32| if has_fname { yes } else { no };
-    match e {
-        4 => 1,                                                          // EINTR: interrupted
-        40 | 36 | 89 | 9 | 33 | 22 | 84 | 8 | 60 | 107 | 88 => file(2, 3), // invalid argument
-        2 => 4,                                                          // ENOENT
-        13 | 30 | 103 | 27 | 1 => file(5, 6),                            // permission denied
-        24 | 23 | 28 | 7 | 11 | 31 | 90 | 105 | 37 | 12 | 63 => file(7, 8), // resource exhausted
-        21 | 74 | 20 => file(9, 10),                                     // inappropriate type
-        6 | 113 | 101 | 10 | 111 | 61 | 42 | 3 => file(11, 12),          // no such thing
-        17 | 115 | 106 => file(13, 14),                                  // already exists
-        5 => 15,                                                         // EIO: hardware fault
-        39 => 16,                                                        // ENOTEMPTY
-        25 => 17,                                                        // ENOTTY
-        104 | 43 | 100 | 102 | 67 | 32 => 18,                            // resource vanished
-        71 | 93 | 91 => 19,                                              // protocol error
-        62 | 110 => 20,                                                  // time expired
-        98 | 16 | 35 | 26 => 21,                                         // resource busy
-        99 | 97 | 19 | 92 | 38 | 95 | 34 | 29 | 18 => 22,                // unsupported operation
-        _ => 0,                                                          // other error
+/// `Handle.flush` (`fflush`): output, an effect point.
+pub fn flush(h: &LHandle) {
+    crate::sched::effect();
+    if let Some(f) = open_of(h) {
+        record(f.flush());
     }
 }
 
-pub fn is_open(h: &LHandle) -> bool {
-    fh(h).fd >= 0
+/// `lean_io_prim_handle_read` on `h`: a count whose byte array would
+/// overflow is `ENOMEM`; the array allocation has Lean's checks; then
+/// `fread` into the array's own block (Lean keeps the capacity asked for),
+/// with no zero pass and no second copy. (The checks run before the stream
+/// is locked: an out-of-memory panic exits, and the exit takes every
+/// stream.)
+pub(crate) fn lean_read(h: &Handle, n: u64) -> crate::array::RVec<u8> {
+    let r = lio::handle::check_read_size(n as usize).and_then(|()| {
+        crate::array::check_alloc(n, 1);
+        crate::array::bytes_filled(n as usize, |p, room| {
+            let out = unsafe { std::slice::from_raw_parts_mut(p as *mut MaybeUninit<u8>, room) };
+            h.read_uninit(out)
+        })
+    });
+    record(r).unwrap_or_else(crate::array::empty)
+}
+
+/// `Handle.read n`.
+pub fn read_bytes(h: &LHandle, n: u64) -> crate::array::RVec<u8> {
+    match open_of(h) {
+        Some(f) => lean_read(f, n),
+        None => crate::array::empty(),
+    }
+}
+
+/// `Handle.isEof` (`feof`; cannot fail).
+pub fn is_eof(h: &LHandle) -> bool {
+    set_ok();
+    fh(h).h.as_ref().is_some_and(Handle::is_eof)
+}
+
+/// `getLine` on `h` (`lean_io_prim_handle_get_line`): the line decoded as
+/// `mk_string` does (lossily); the empty string on failure.
+pub(crate) fn lean_get_line(h: &Handle) -> LStr {
+    let mut s = Vec::new();
+    let r = h.get_line(&mut s);
+    sink_string(r, s)
+}
+
+/// `Handle.getLine`.
+pub fn get_line(h: &LHandle) -> LStr {
+    match open_of(h) {
+        Some(f) => lean_get_line(f),
+        None => from_bytes(b""),
+    }
+}
+
+/// `Handle.isTty` (cannot fail; records success so a fallible-glue caller
+/// sees no stale error).
+pub fn is_tty(h: &LHandle) -> bool {
+    set_ok();
+    fh(h).h.as_ref().is_some_and(Handle::is_tty)
+}
+
+/// `Handle.rewind` (`fseek(fp, 0, SEEK_SET)`).
+pub fn rewind(h: &LHandle) {
+    if let Some(f) = open_of(h) {
+        record(f.rewind());
+    }
+}
+
+/// `Handle.truncate` (`ftruncate(fileno(fp), ftello(fp))`).
+pub fn truncate(h: &LHandle) {
+    if let Some(f) = open_of(h) {
+        record(f.truncate());
+    }
+}
+
+/// `Handle.lock` (`flock`).
+pub fn lock(h: &LHandle, exclusive: bool) {
+    if let Some(f) = open_of(h) {
+        record(f.lock(exclusive));
+    }
+}
+
+/// `Handle.tryLock`: `false` when the lock is held elsewhere.
+pub fn try_lock(h: &LHandle, exclusive: bool) -> bool {
+    match open_of(h) {
+        Some(f) => record(f.try_lock(exclusive)).unwrap_or(false),
+        None => false,
+    }
+}
+
+/// `Handle.unlock`.
+pub fn unlock(h: &LHandle) {
+    if let Some(f) = open_of(h) {
+        record(f.unlock());
+    }
 }
 
 /// Handle operations taking their arguments by value, out of line. The
@@ -906,8 +449,8 @@ pub fn is_open(h: &LHandle) -> bool {
 /// calls (an IO loop over `getLine` or `flush` ran out of stack).
 pub mod owned {
     use super::*;
-    use crate::{array, rc_release};
     use crate::drop::Vec as RVec;
+    use crate::{array, rc_release};
 
     #[inline(never)]
     pub fn put_str(h: LHandle, s: LStr) { super::put_str(&h, crate::string::bytes(&s)); rc_release(s); rc_release(h); }
@@ -933,6 +476,166 @@ pub mod owned {
     pub fn try_lock(h: LHandle, exclusive: bool) -> bool { let r = super::try_lock(&h, exclusive); rc_release(h); r }
     #[inline(never)]
     pub fn unlock(h: LHandle) { super::unlock(&h); rc_release(h); }
+}
+
+// ---- the file system ----
+
+/// `IO.FS.removeFile`.
+pub fn remove_file(p: &[u8]) {
+    record(lio::fs::remove_file(p));
+}
+
+/// `IO.FS.createDir`.
+pub fn create_dir(p: &[u8]) {
+    record(lio::fs::create_dir(p));
+}
+
+/// `IO.FS.removeDir`.
+pub fn remove_dir(p: &[u8]) {
+    record(lio::fs::remove_dir(p));
+}
+
+/// `IO.FS.rename`.
+pub fn rename_file(from: &[u8], to: &[u8]) {
+    record(lio::fs::rename(from, to));
+}
+
+/// `IO.FS.hardLink`.
+pub fn hard_link(from: &[u8], to: &[u8]) {
+    record(lio::fs::hard_link(from, to));
+}
+
+/// `IO.setAccessRights` (`lean_chmod`).
+pub fn set_access_rights(p: &[u8], mode: u32) {
+    record(lio::fs::set_access_rights(p, mode));
+}
+
+/// `IO.FS.realPath`.
+pub fn real_path(p: &[u8]) -> LStr {
+    let mut s = Vec::new();
+    let r = lio::fs::real_path(p, &mut s);
+    sink_string(r, s)
+}
+
+/// Entry names of a directory in `readdir` order, without `.` and `..`.
+pub fn read_dir(p: &[u8]) -> Vec<LStr> {
+    let mut names = Vec::new();
+    let r = lio::fs::read_dir(p, |n| names.push(from_bytes_lossy(n)));
+    match record(r) {
+        Some(()) => names,
+        None => Vec::new(),
+    }
+}
+
+/// `System.FilePath.metadata` (`follow`) / `symlinkMetadata` fields:
+/// accessed (sec as an i64 bit pattern, nsec), modified (sec, nsec), byte
+/// size, file type (0 dir, 1 file, 2 symlink, 3 other), number of hard
+/// links.
+pub fn metadata(p: &[u8], follow: bool) -> [u64; 7] {
+    let r = if follow { lio::fs::metadata(p) } else { lio::fs::symlink_metadata(p) };
+    match record(r) {
+        Some(m) => [
+            m.accessed.sec as u64,
+            m.accessed.nsec as u64,
+            m.modified.sec as u64,
+            m.modified.nsec as u64,
+            m.byte_size,
+            m.file_type as u64,
+            m.num_links,
+        ],
+        None => [0; 7],
+    }
+}
+
+/// `IO.currentDir` (a failure is Lean's user error).
+pub fn current_dir() -> LStr {
+    let mut s = Vec::new();
+    let r = lio::fs::current_dir(&mut s);
+    sink_string(r, s)
+}
+
+/// `IO.appPath` (a failure is Lean's user error).
+pub fn app_path() -> LStr {
+    let mut s = Vec::new();
+    let r = lio::env::app_path(&mut s);
+    sink_string(r, s)
+}
+
+/// `IO.Process.getCurrentDir`.
+pub fn process_current_dir() -> LStr {
+    let mut s = Vec::new();
+    let r = lio::fs::process_current_dir(&mut s);
+    sink_string(r, s)
+}
+
+/// `IO.Process.setCurrentDir`.
+pub fn set_current_dir(p: &[u8]) {
+    record(lio::fs::set_current_dir(p));
+}
+
+/// The path of the file the last `create_temp_file` created.
+static TEMP_PATH: Global<Vec<u8>> = Global(UnsafeCell::new(Vec::new()));
+
+/// `IO.FS.createTempFile`: the handle; its path is then `temp_file_path()`.
+pub fn create_temp_file() -> LHandle {
+    let mut s = Vec::new();
+    let r = lio::temp::create_temp_file(&mut s);
+    let path = s;
+    let h = record(r);
+    unsafe { *TEMP_PATH.0.get() = if h.is_some() { path } else { Vec::new() } };
+    wrap(h)
+}
+
+/// (Lean's `mk_string`: a name that is not UTF-8 is decoded lossily.)
+pub fn temp_file_path() -> LStr {
+    from_bytes_lossy(unsafe { &*TEMP_PATH.0.get() })
+}
+
+/// `IO.FS.createTempDir`.
+pub fn create_temp_dir() -> LStr {
+    let mut s = Vec::new();
+    let r = lio::temp::create_temp_dir(&mut s);
+    sink_string(r, s)
+}
+
+/// A sink that keeps nothing (`IO.getEnv`'s test for a value).
+struct Discard;
+
+impl ByteSink for Discard {
+    #[inline]
+    fn extend_from_slice(&mut self, _: &[u8]) {}
+}
+
+/// `IO.getEnv name` (lean-runtime's `io::env::get_env`): whether `name` has
+/// a value.
+pub fn getenv_has(name: LStr) -> bool {
+    lio::env::get_env(crate::string::bytes(&name), &mut Discard)
+}
+
+/// `IO.getEnv name`'s value (`mk_string`: lossy), `""` if it has none.
+pub fn getenv_value(name: LStr) -> LStr {
+    let mut s = Vec::new();
+    lio::env::get_env(crate::string::bytes(&name), &mut s);
+    from_bytes_lossy(&s)
+}
+
+/// `IO.getRandomBytes n` (`lean_io_get_random_bytes`): `/dev/urandom`
+/// opened first, with Lean's checks (lean-runtime's `open_random`), then the
+/// array allocated as Lean's and filled in its own block. No bytes need no
+/// `/dev/urandom`.
+pub fn get_random_bytes(n: u64) -> crate::array::RVec<u8> {
+    if n == 0 {
+        set_ok();
+        return crate::array::empty();
+    }
+    let r = lio::env::open_random(n as usize).and_then(|src| {
+        crate::array::check_alloc(n, 1);
+        crate::array::bytes_filled(n as usize, |p, room| {
+            let out = unsafe { std::slice::from_raw_parts_mut(p as *mut MaybeUninit<u8>, room) };
+            src.fill_uninit(out).map(|()| room)
+        })
+    });
+    record(r).unwrap_or_else(crate::array::empty)
 }
 
 #[cfg(test)]

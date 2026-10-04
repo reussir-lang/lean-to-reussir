@@ -161,87 +161,169 @@ Paths are relative to the repository root.
   `l2r_panic_text`, `l2r_panic_code_text`.
 - **Remove only if:** never.
 
+### IO is lean-runtime's, through glue (switch step 3)
+
+- **What:** Every IO extern of Lean's library goes to lean-runtime's `io`
+  module (features `io` and `proc-title`), through glue that only converts
+  lean2rr's values: `leanrt::fs` (handles: an `LHandle` box holding
+  lean-runtime's `Handle`, or none for a handle that is not open; the file
+  system, temporary files, `IO.getEnv`, random bytes; the last-error slot),
+  `leanrt::io` (the standard streams, the exit, the clocks, `timeit`'s and
+  `allocprof`'s text), `leanrt::proc` (processes), `leanrt::sys`
+  (`Std.Internal.UV.System` for the shim), `leanrt::rt` (the startup glue).
+  leanrt's own implementations (`cfile.rs`, the old `fs.rs`, `io.rs`,
+  `proc.rs`, `sys.rs`, the startup descriptors of `rt.rs`) are gone; the
+  prelude's textures keep their names and signatures (but
+  `l2r_stream_getLine`, which gets the string from leanrt, and the
+  process and title primitives below), so programs' code is unchanged.
+  - The last-error slot keeps the shape it had before (a `failed` flag read
+    inline after every IO primitive, `l2r_io_ok`, and the code, read inline
+    on every error path): `fs::set_err` takes lean-runtime's `IoError`
+    apart into the `lean_mk_io_error_*` builder (`fs::kind_of`: its
+    constructor, with or without a file name), the code (`error_code`), the
+    file name and the details, which `fs::errno`, `error_kind`,
+    `error_fname` and `error_details` give back.
+  - Unbounded results go into a `Vec<u8>`, infallible as lean-runtime's
+    contract asks of `getLine`'s sink (which appends under the stream's
+    lock): a failed allocation aborts with Rust's message (status 134; native
+    aborts with `std::bad_alloc`, 134), never exits (review RST3-02: a
+    fallible sink there made a line without end spin forever; test
+    `RtLineNoEnd`). Only a child's output (`IO.Process.output`) goes into
+    `fs::Sink`, which stops (`ByteSink::stopped`, so lean-runtime stops
+    reading) and ends the process with `INTERNAL PANIC: out of memory` once
+    the crate has returned (AR-5).
+  - `IO.Process.output` is one primitive, `l2r_proc_output` (lean-runtime's
+    `io::process::output`), with `l2r_proc_output_str`; lean2rr's
+    generated drain, UTF-8 checks and `wait` are gone (`Lower/Process.lean`,
+    `processOutputBody`). The `Child` operations find lean-runtime's
+    process object by pid (`proc::CHILDREN`) until the child is reaped
+    (`wait`, or a `tryWait` that sees it exit); a reaped child's pid gets
+    the system call itself, as natively: `waitpid` (`ECHILD`), `kill` or
+    `killpg` (`ESRCH`) (review RST3-04; test `RtProcessReaped`). A child
+    lean-runtime models because no stand-in could be started keeps its
+    standard input's read end until it is reaped (lean-runtime's model of a
+    stdin that takes a pipe's capacity, then fails with `EPIPE`); natively
+    the failed child closes it when it exits.
+  - The shim's `Std.Internal.UV.System` functions get lean-runtime's
+    errors as libuv codes (`sys::uv_code`: lean-runtime decodes them with
+    `decode_uv_error(code, name)`, which keeps `-code`), and build the same
+    `IO.Error` as before; `setProcessTitle` now reports a libuv error
+    (`lean_shim_sys_title_set` returns it).
+  - Startup: `rt`'s ELF constructor calls `io::startup::open_native_descriptors`
+    (on failure `fail_as_native`: LB-30, LB-31); `l2r_set_initializing(false)`
+    is `mark_end_initialization`; `main`'s return (`l2r_exit`,
+    `io::main_exit`) and an uncaught error call `io::exit::after_main`
+    first; every normal end calls `io::exit::exit`; an uncaught error's
+    text is `io::exit::show_error` (three writes, as natively).
+- **Why:** One runtime for both translators (owner decision); lean-runtime's
+  io was built from leanrt's own `FILE` model, file-system code and
+  fork-based processes and the other translator's runtime, and fixes Lean bugs (LB-02, LB-03,
+  LB-14, LB-15, LB-16, LB-17, LB-29, LB-30, LB-31). What stays lean2rr's,
+  and why:
+  - the current standard streams (`IO.setStdout` & co.): representation
+    glue on the hot path (owner's decision, 2026-10-04). They are lean2rr's
+    `IO.FS.Stream` records of closures, kept in generated cells
+    (`stdStreamFns`) and set aside per task (`once::push_context`, as
+    lean-runtime's `streams::swap_context` does); lean-runtime's `streams`
+    stores a translator's Rust values, and `IO.println` reads the current
+    stdout at every call, inline, where lean-runtime's slots would add a
+    call through the FFI boundary to every print. The cells follow
+    `io::streams`' semantics exactly: a thread (`main`, each task) starts
+    with the process's streams, built on first use; `setStdout` & co.
+    replace the current one and return the previous one; a task's streams
+    are its own and the caller's come back when it ends; the runtime's own
+    standard-error lines go through the current stderr's `putStr`
+    (`l2r_stderr_put`), and to descriptor 2 while none has been set. They
+    only store and swap values: lean2rr has no stream logic of its own, and
+    every operation on a stream is lean-runtime's (the `l2r_stream_*`
+    primitives over its standard-stream handles);
+  - the scheduler's effect points before output and spawns, and
+    `IO.sleep`/`dbgSleep` (the scheduler's sleep lets the other contexts
+    run; lean-runtime's `env::sleep` is the thread's). No other wait of
+    leanrt's IO cooperated with its scheduler: a read of a pipe, a
+    `flock`, a `waitpid`, `output`'s `poll` blocked the thread before, as
+    lean-runtime's no-`sched` path does;
+  - `IO.Process.forceExit` stays `_exit`: lean-runtime's `force_exit` is
+    `std::process::exit`, which runs linked C code's exit handlers, and
+    its documentation asks a glue that needs `_Exit` to call `_exit`;
+  - `IO.getTID` (`gettid`; lean-runtime has none);
+  - the signal watchers (leanrt's event loop): they use libuv's loop
+    signal pipe, which lean-runtime opens at startup and `rt::signal_pipe`
+    claims at the first watcher (`startup::claim_signal_pipe`, AR-17, which
+    replaced a search of `/proc/self/fd`); test `RtSignalFd`;
+  - the Windows time-zone errors stay the shim's Lean code (the same
+    errors as lean-runtime's `time::windows_*`).
+- **Tests:** the runtime suite's IO tests unchanged; `RtFdStartupNoUring`
+  (no longer an expected failure), `RtTitleCmdline` (the title in
+  `/proc/self/cmdline`: lean-runtime's constructor is linked),
+  `RtStartupFdExhausted` (LB-30, LB-31, expectation files); lean-runtime's
+  program cases through lean2rr's builds (`scripts/cases.py check
+  --exe-dir`).
+- **Where:** `runtime/leanrt/src/fs.rs`, `io.rs`, `proc.rs`, `sys.rs`,
+  `rt.rs` (`startup_descriptors`, `signal_pipe`, `set_initializing`);
+  `runtime/leanrt/src/lib.rs`: `uncaught_exception`; `runtime/prelude.rr`:
+  the standard streams, files, processes, `timeit`, `allocprof`,
+  `IO.getEnv`, `Std.Internal.UV.System`; `lean2rr/LeanToReussir/Lower/Process.lean`:
+  `spawnCall` (`output?`), `processOutputBody`; `lean2rr/L2RShim.lean`:
+  `setProcessTitle`; `scripts/l2r.py`: `LEAN_RUNTIME_FEATURES`.
+- **Remove only if:** lean2rr adopts lean-runtime's `sched` (step 4):
+  then the effect points, the sleep and the signal pipe become
+  lean-runtime's too.
+
 ### A large read right after output writes the pending output first
 
-- **What:** In the `FILE` model, a read of at least one buffer (the direct
-  path of `xsgetn`) right after output on the same handle first writes the
-  pending output, as `fflush` would; if that write fails, the read fails
-  with its error. A failed seek back over read-ahead before the write
-  (`ESPIPE`: a FIFO opened `readWrite` and read ahead) is no failed write:
-  then, as glibc's direct read does, the pending output and the read-ahead
-  are dropped and the read goes on (`new_do_write` sets `seek_failed`), with
-  `errno` restored to its value before the attempt, since native's direct
-  read makes no seek and a later error report (`getLine` on a handle with
-  its error indicator set) reads `errno` (review RXT-06).
-  Then it reads from the cursor (a write-only handle then fails with EBADF,
-  as natively). Everything else follows glibc.
+- **What:** In lean-runtime's `FILE` model (`io::cfile`), a read of at
+  least one buffer (the direct path of `xsgetn`) right after output on the
+  same handle first writes the pending output, as `fflush` would; if that
+  write fails, the read fails with its error. A failed seek back over
+  read-ahead before the write (`ESPIPE`: a FIFO opened `readWrite` and read
+  ahead) is no failed write: then, as glibc's direct read does, the pending
+  output and the read-ahead are dropped and the read goes on, with `errno`
+  restored to its value before the attempt (review RXT-06). Everything
+  else follows glibc.
 - **Why:** glibc's `_IO_file_xsgetn` resets the put area there and drops
   the pending output (C11 7.21.5.3p7 makes output directly followed by
   input undefined): written data never reaches the file. Judged a Lean
   runtime bug, LB-02 in lean-runtime's
   [docs/lean-bugs.md](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md); the owner's ruling is not
-  to reproduce it. A first version treated every failure of the write-out
-  as a failed write, so on a FIFO opened `readWrite` the read, the next
-  read and the flush all failed with `invalid seek` where native reads on
-  (review RXT-01, the same fix as lean-runtime io-1's af6ecf2). Tests
-  `RtReadAfterWrite`, `RtStdioStdoutRead` (expectation files
+  to reproduce it (review RXT-01 fixed the FIFO case, the same fix as
+  lean-runtime io-1's af6ecf2; the model was leanrt's until switch step 3).
+  Tests `RtReadAfterWrite`, `RtStdioStdoutRead` (expectation files
   `NAME.native.out`/`NAME.l2r.out`), `RtFifoReadAfterWrite` (the FIFO, the
-  same as native), `RtFifoErrnoRestore` (the `errno` a later report sees); leanrt's differential test of the model against glibc
-  (`Glibc::read_lb02`) flushes glibc's `FILE` before a read that takes the
-  direct path with output pending, which makes glibc's behaviour defined
-  and the model's (a failed `fflush` with `ESPIPE` reads on, any other
-  ends the read), and has a FIFO case
-  (`differential_against_glibc_fifo_read_write`).
-- **Where:** `runtime/leanrt/src/cfile.rs`: `xsgetn`, `new_do_write`
-  (`seek_failed`); `runtime/leanrt/src/cfile_tests.rs`: `Glibc::read_lb02`,
-  `run_case`, `fifo_case`; plan §10, "Runtime: Lean bugs we do not
-  reproduce".
+  same as native), `RtFifoErrnoRestore` (the `errno` a later report sees);
+  lean-runtime's differential test of the model against glibc
+  (`tests/cfile_glibc.rs`).
+- **Where:** lean-runtime's `src/io/cfile.rs`: `xsgetn`, `new_do_write`;
+  plan §10, "Runtime: Lean bugs we do not reproduce".
 - **Remove only if:** the owner rules to follow native here after all.
 
 ### A child's `null` stream is `/dev/null` opened by the parent
 
 - **What:** For each `null` stream of `IO.Process.spawn` (so also
-  `IO.Process.output`'s stdin without input), `proc::spawn` opens
-  `/dev/null` in the parent (read-only for stdin, write-only otherwise)
-  with `O_CLOEXEC`, after the pipes and before `fork`; the child `dup2`s
-  it onto 0, 1 or 2 (where it got that very number, because the
-  descriptor was closed in the parent, the child clears close-on-exec with
-  `fcntl` instead), and the parent closes its copies after the fork. A
-  failed open (`EMFILE`) is the spawn's error, recorded as
-  `decode_io_error(errno, nullptr)` like a failed `pipe2`, and the pipes
-  and `/dev/null` descriptors made so far are closed. Everything else
-  follows `process.cpp`, including its leak of the pipes when a later
-  `pipe2` or the `fork` fails.
+  `IO.Process.output`'s stdin without input), lean-runtime's
+  `io::process` opens `/dev/null` in the parent (read-only for stdin,
+  write-only otherwise) with `O_CLOEXEC`, after the pipes, and the child
+  gets it as its stream; a failed open (`EMFILE`) is the spawn's error,
+  `decode_io_error(errno, nullptr)` like a failed `pipe2`, and the
+  descriptors made so far are closed.
 - **Why:** Natively the forked child opens `/dev/null` without
   close-on-exec and never closes it after `dup2`, so the program inherits
   one more descriptor per `null` stream (LB-15), and it ignores a failed
   open, so `dup2(-1, n)` fails and the program runs on the parent's own
-  descriptor n: a `null` stdout writes on the parent's standard output, a
-  `null` stdin reads the parent's input (LB-17). Both are judged Lean
-  runtime bugs in lean-runtime's
+  descriptor n (LB-17). Both are judged Lean runtime bugs in lean-runtime's
   [docs/lean-bugs.md](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md),
-  not reproduced (plan §10). The open has to be the parent's for its
-  failure to be the spawn's error. Opening after the pipes keeps the
-  pipes' descriptor numbers native's, and the parent's descriptors after
-  the spawn are native's. One consequence: a spawn in which some `null`
-  stream follows a piped one needs exactly one more free descriptor than
-  natively (one in all, however many such streams), since the forked
-  child has closed that pipe's other end by the time it opens `/dev/null`,
-  where the parent holds both ends (stdout piped and stderr `null` with two
-  free descriptors: natively the spawn succeeds, here it fails with
-  `EMFILE`); any other spawn needs as many as natively. Deferring the
-  open to the child after an `EMFILE` would close the gap at the cost of a
-  second path (lean-runtime has the same property); not worth it for a
-  process out of descriptors (review RLB-01). Nothing natively corresponds
-  to the failed open, so it leaks nothing. Tests `RtProcessNullFd` (the
-  child lists its descriptors; numbers dropped, 0-2 by kind and access
-  mode, those above 2 compared with a child that has no `null` stream) and
-  `RtProcessNullOpenFails` (under `ulimit -n 64`, the handles kept open to
-  the end; then two, three and again two free descriptors, counted before
-  and after each spawn), with expectation files
+  not reproduced (plan §10). leanrt had the same fix in its fork-based
+  `proc.rs` (fix-lb15-17) until switch step 3. Opening after the pipes
+  keeps the pipes' descriptor numbers native's. One consequence: a spawn in
+  which some `null` stream follows a piped one needs exactly one more free
+  descriptor than natively (one in all, however many such streams), since
+  the forked child has closed that pipe's other end by the time it opens
+  `/dev/null` (lean-runtime's case `process/pipe_null_two_free` accepts
+  both outcomes; review RLB-01). Tests `RtProcessNullFd`,
+  `RtProcessNullOpenFails`, with expectation files
   `NAME.native.out`/`NAME.l2r.out`.
-- **Where:** `runtime/leanrt/src/proc.rs`: `spawn` (`nulls`), `close_all`;
-  plan §10, "Runtime: Lean bugs we do not reproduce".
+- **Where:** lean-runtime's `src/io/process.rs` (`setup_stdio`); plan §10,
+  "Runtime: Lean bugs we do not reproduce".
 - **Remove only if:** the owner rules to follow native here after all.
 
 ### `System.Platform.target` follows leanrt's target
@@ -295,59 +377,48 @@ Paths are relative to the repository root.
 - **What:** `scripts/l2r.py` builds lean-runtime (the git submodule
   `third_party/lean-runtime`, pinned by commit; `L2R_LEAN_RUNTIME` names
   another checkout, `L2R_LEAN_RUNTIME_FEATURES` adds features) next to
-  leanrt, with leanrt's rustc and flags. When the features lean2rr enables
-  need no dependency (none enabled now; lean-runtime's `io` and `sched`
-  have optional ones): plain rustc, run in the checkout's directory (the
-  rlib's bytes then do not depend on the caller's directory, for rrc's
-  texture cache), `liblean_runtime.rlib`, the enabled features as `--cfg`,
-  cached by a hash of the manifest and of the files its dep-info lists.
-  With a required dependency, an enabled feature that needs one, or a
-  build script: the pinned toolchain's cargo, `--offline --locked
-  --release` from inside the checkout, against cargo's registry cache at
-  the versions of its committed `Cargo.lock` (`cargo fetch --locked` fills
-  the cache once; `l2r.py` says so when a crate is missing), rlibs and the
-  `.rmeta` of its own stub rlib from cargo's JSON messages. leanrt
-  is built with `--extern lean_runtime=...` and `-L dependency=` for each
-  rlib directory; the `rustc-native` wrapper that rrc compiles textures
-  with adds the same, and its text names lean-runtime's build (its digest:
-  rrc's texture cache keys on the script's text, and cargo's rlibs are in
-  no `--polyffi-libdir` directory; Reussir bug 35); the link passes lean-runtime's rlibs after
+  leanrt, with leanrt's rustc and flags and the features `io` and
+  `proc-title` (`LEAN_RUNTIME_FEATURES`): the pinned toolchain's cargo,
+  `--offline --locked --release` from inside the checkout, against cargo's
+  registry cache at the versions of its committed `Cargo.lock` (`cargo
+  fetch --locked` fills the cache once; `l2r.py` says so when a crate is
+  missing), rlibs and the `.rmeta` of its own stub rlib from cargo's JSON
+  messages. leanrt is built with `--extern lean_runtime=...` and `-L
+  dependency=` for each rlib directory; the `rustc-native` wrapper that
+  rrc compiles textures with adds the same, and its text names
+  lean-runtime's build (its digest: rrc's texture cache keys on the
+  script's text, and cargo's rlibs are in no `--polyffi-libdir`
+  directory; Reussir bug 35); the link passes lean-runtime's rlibs after
   `libleanrt.rlib` and before GMP, those of the packages its normal
   dependencies reach, in the order of its dependency graph (`cargo
   metadata`: dependents first; build-script dependencies left out; review
-  RULR-04). `l2r.py` stops when
-  the submodule's checked-out commit is not the staged gitlink (`git
-  ls-files -s`), and refuses what plain rustc would get wrong (a `[lints]`
-  table, a workspace edition) and a build script that links native
-  libraries.
+  RULR-04). `l2r.py` stops when the submodule's checked-out commit is not
+  the staged gitlink (`git ls-files -s`), and refuses a build script that
+  links native libraries.
 - **Why:** the two translators share Lean's runtime behaviour in one crate
   (shared-runtime decisions O6/O7: lean2rr vendors it as a submodule built
   by its driver; Q3: it builds on both projects' nightlies without nightly
-  features; O2: `#![forbid(unsafe_code)]` in the default build). Not capping
-  its lints keeps `forbid(unsafe_code)` an error. Every crate that calls
-  another is linked before it, since GNU ld reads each archive once. Git
-  leaves a submodule's checkout alone when a checkout or pull moves its
-  gitlink, so without the pin check the suite would silently test an old
-  lean-runtime (review URL-01); the index, not HEAD, so that a staged new
-  pin can be tested before it is committed. Dependencies' build scripts set
-  cfgs that cannot be reproduced by hand safely (rustix picks its backend,
-  nix needs `cfg_aliases`), so cargo builds lean-runtime once it has any
-  (review URL-08); its rlibs carry only a metadata stub, hence the `.rmeta`.
-  lean-runtime keeps no `vendor/` and no `.cargo/config.toml`, only its
-  `Cargo.lock` (lean-runtime's decision "io-1 packaging").
-  Checked with lean-runtime's io-1 branch at a43b009 (rustix and nix,
-  Cargo.lock, no vendor/) and feature `io`: built offline from the registry
-  cache, nothing written in the checkout, seven dependency rlibs linked, the
-  leanrt unit tests and seven runtime tests pass; with an empty cargo home
-  the build stops with the `cargo fetch --locked` hint.
-- **Where:** `scripts/l2r.py`: `build_lean_runtime`,
-  `build_lean_runtime_rustc`, `build_lean_runtime_cargo`, `check_pin`,
-  `lean_runtime_manifest`, `needs_cargo`, `lean_runtime_features`,
-  `LeanRuntime`, `build_leanrt`, `rustc_wrapper`, `leanrt_out`, and the rrc
-  command line in `main`; `tests/runtime/leanrt-unit.sh`;
-  `tests/runtime/run.sh` (stops at once without lean-runtime);
-  `runtime/leanrt/src/lib.rs`: `LEAN_VERSION` and its test;
-  `runtime/README.md` ("The shared crate lean-runtime": the pin, worktrees,
-  the two builds, how to move the pin).
-- **Remove only if:** lean2rr stops using lean-runtime. The plain rustc
-  build can go when lean2rr enables a feature with dependencies.
+  features). Every crate that calls another is linked before it, since GNU
+  ld reads each archive once. Git leaves a submodule's checkout alone when
+  a checkout or pull moves its gitlink, so without the pin check the suite
+  would silently test an old lean-runtime (review URL-01); the index, not
+  HEAD, so that a staged new pin can be tested before it is committed.
+  Dependencies' build scripts set cfgs that cannot be reproduced by hand
+  safely (rustix picks its backend, nix needs `cfg_aliases`), so cargo
+  builds lean-runtime (review URL-08); its rlibs carry only a metadata
+  stub, hence the `.rmeta`. lean-runtime keeps no `vendor/` and no
+  `.cargo/config.toml`, only its `Cargo.lock` (lean-runtime's decision
+  "io-1 packaging"). The plain-rustc build of the default features (steps
+  1 and 2) went with step 3, which enables `io`. `proc-title`'s ELF
+  constructor is lean-runtime's: its title functions refer to it, so the
+  linker keeps its object whenever they are linked (checked by the title
+  tests).
+- **Where:** `scripts/l2r.py`: `LEAN_RUNTIME_FEATURES`, `build_lean_runtime`,
+  `build_lean_runtime_cargo`, `cargo_link_order`, `check_pin`,
+  `lean_runtime_manifest`, `LeanRuntime`, `build_leanrt`, `rustc_wrapper`,
+  `leanrt_out`, and the rrc command line in `main`;
+  `tests/runtime/leanrt-unit.sh`; `tests/runtime/run.sh` (stops at once
+  without lean-runtime); `runtime/leanrt/src/lib.rs`: `LEAN_VERSION` and its
+  test; `runtime/README.md` ("The shared crate lean-runtime": the pin,
+  worktrees, the build, how to move the pin).
+- **Remove only if:** lean2rr stops using lean-runtime.

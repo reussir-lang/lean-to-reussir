@@ -1,9 +1,10 @@
-//! Unit test of the error decoding (`errno`, `error_kind`, `error_details`)
-//! against native Lean 4.34.0: for every errno 0..=140, what
-//! `lean_decode_io_error(e, "f")` and `lean_decode_uv_error(-e, "f")` of
-//! Lean's runtime build (the constructor number of runtime/README.md's
-//! table, the stored code, the details). The table was printed by a native
-//! Lean program calling the two C functions (aarch64 Linux, libuv 1.48).
+//! Unit test of the last-error slot (`errno`, `error_kind`, `error_details`)
+//! over lean-runtime's decoding, against native Lean 4.34.0: for every errno
+//! 0..=140, what `lean_decode_io_error(e, "f")` and
+//! `lean_decode_uv_error(-e, "f")` of Lean's runtime build give (the
+//! builder number of runtime/README.md's table, the stored code, the
+//! details). The table was printed by a native Lean program calling the two
+//! C functions (aarch64 Linux, libuv 1.48).
 use super::*;
 
 /// (errno, io kind, io code, io details, uv kind, uv code, uv details)
@@ -163,13 +164,13 @@ fn last_error() -> (u32, u32, Vec<u8>) {
 fn decode_matches_native() {
     let mut bad = Vec::new();
     for &(e, k, c, d, uk, uc, ud) in NATIVE {
-        set_err(e, Some(b"f"));
+        set_err(IoError::decode_io_error(e, Some(b"f")));
         let (k1, c1, d1) = last_error();
         let d1 = String::from_utf8_lossy(&d1).into_owned();
         if (k1, c1, d1.as_str()) != (k, c, d) {
             bad.push(format!("decode_io_error({e}): ({k1}, {c1}, {d1:?}), native ({k}, {c}, {d:?})"));
         }
-        set_err_uv(e, Some(b"f"));
+        set_err(IoError::decode_uv_error(-e, Some(b"f")));
         let (k1, c1, d1) = last_error();
         let d1 = String::from_utf8_lossy(&d1).into_owned();
         if (k1, c1, d1.as_str()) != (uk, uc, ud) {

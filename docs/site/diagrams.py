@@ -496,8 +496,8 @@ def ref_cells():
 
 def layers():
     s = SVG("layers", 940, 400, "The layers of a lean2rr build",
-            "Every lean2rr build has these layers. The planned shared crate "
-            "<code>lean-runtime</code> takes over the semantics of leanrt; the "
+            "Every lean2rr build has these layers. The shared crate "
+            "<code>lean-runtime</code> has the semantics and the IO of leanrt; the "
             "glue to lean2rr's representations stays in lean2rr.")
     W = 640
     s.box(10, 10, 420, 66, ["Generated program (lean2rr output)",
@@ -510,14 +510,14 @@ def layers():
                          "fast paths inline (small Nat), l2r_* primitives for the glue"], "b-rt")
     s.box(10, 170, W, 84, ["leanrt (Rust crate, linked into every program)",
                           "big numbers (GMP) for lean-runtime's Nat/Int, strings, arrays,",
-                          "float text, glibc FILE model, files, processes, once-cells,",
+                          "float text, glue for lean-runtime's IO, once-cells,",
                           "tasks and the scheduler (contexts), Std.Sync, the event loop"], "b-rt")
     s.box(10, 268, W, 50, ["reussir_rt (Reussir's runtime)",
                           "Rc, the pending stack for frees (local patches 0013-0015), mimalloc"], "b-rr")
     s.box(10, 332, W, 50, ["System", "libc, libm, GMP, the kernel"], "b-lean")
     s.box(680, 170, 250, 120, ["lean-runtime (submodule)", "a shared crate: Lean's",
                               "runtime rules in safe Rust", "(hashes, strings, floats, libm,",
-                              "Nat/Int, arrays, panics so far);", "leanrt keeps glue, hot paths"], "b-plan")
+                              "Nat/Int, arrays, panics, IO);", "leanrt keeps glue, hot paths"], "b-plan")
     s.path("M 680 212 L 652 212", "ard")
     return s.render()
 

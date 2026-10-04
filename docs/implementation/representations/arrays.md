@@ -63,7 +63,8 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
 
 - **What:** `Handle.read` (so `IO.FS.readBinFile`), reads of standard input
   and `IO.getRandomBytes` allocate the byte array first and read into its
-  block (`array::bytes_filled` over `CFile::read_into`), keeping the
+  block (`array::bytes_filled` over lean-runtime's `Handle::read_uninit`
+  and `RandomSource::fill_uninit`), keeping the
   capacity asked for, as `lean_io_prim_handle_read`.
 - **Why:** With the elements inline, a buffer read and then turned into an
   array is a second copy: reading a 256 MiB file peaked at twice its size
@@ -72,7 +73,7 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
 - **Where:** `runtime/leanrt/src/array.rs`: `bytes_filled`;
   `runtime/leanrt/src/fs.rs`: `lean_read`, `read_bytes`,
   `get_random_bytes`; `runtime/leanrt/src/io.rs`: `stream_read`;
-  `runtime/leanrt/src/cfile.rs`: `read_into`, `xsgetn`.
+  lean-runtime's `src/io/cfile.rs`: `read_uninit`, `xsgetn`.
 - **Remove only if:** never (the other byte arrays the runtime builds from
   a `Vec`, a process's output or a socket's data, are copied once; a
   process's output is copied into a string afterwards anyway).

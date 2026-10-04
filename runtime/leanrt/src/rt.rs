@@ -1,5 +1,7 @@
-//! Process-level runtime: running `main` on a large stack, and Lean's stack
-//! overflow report.
+//! Process-level runtime: running `main` on a large stack, Lean's stack
+//! overflow report, and the startup glue lean-runtime's io asks of a
+//! translator (`io::startup`): the ELF constructor that opens native Lean's
+//! startup descriptors, and `IO.initializing`'s end.
 //!
 //! Lean's runtime (`src/runtime/stack_overflow.cpp`) installs a SIGSEGV /
 //! SIGBUS handler on an alternate signal stack, in every thread; a fault
@@ -225,129 +227,45 @@ fn strtoull10(s: &[u8]) -> u64 {
 
 extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-    fn epoll_create1(flags: i32) -> i32;
     fn close(fd: i32) -> i32;
-    fn pipe2(fds: *mut i32, flags: i32) -> i32;
-    fn eventfd(initval: u32, flags: i32) -> i32;
-    fn syscall(num: i64, ...) -> i64;
-    fn uname(buf: *mut [u8; 6 * 65]) -> i32;
-    fn getenv(name: *const u8) -> *const u8;
-    fn atoi(s: *const u8) -> i32;
 }
 
-/// The release of the running kernel as `major * 65536 + minor * 256 +
-/// patch`, read as libuv's `uv__kernel_version` does (Debian's kernels give
-/// it in `version`); 0 if unknown.
-fn kernel_version() -> u32 {
-    let mut u = [0u8; 6 * 65];
-    if unsafe { uname(&mut u) } != 0 {
-        return 0;
-    }
-    let field = |i: usize| -> &[u8] {
-        let f = &u[i * 65..(i + 1) * 65];
-        &f[..f.iter().position(|&b| b == 0).unwrap_or(65)]
-    };
-    let (release, version) = (field(2), field(3));
-    let text = match version.strip_prefix(b"#1 SMP Debian ") {
-        Some(rest) => rest,
-        None => release,
-    };
-    let mut parts = [0u32; 3];
-    let mut i = 0;
-    for (k, part) in parts.iter_mut().enumerate() {
-        let start = i;
-        while i < text.len() && text[i].is_ascii_digit() {
-            *part = part.saturating_mul(10).saturating_add((text[i] - b'0') as u32);
-            i += 1;
-        }
-        if i == start {
-            return 0;
-        }
-        if k < 2 {
-            if i >= text.len() || text[i] != b'.' {
-                return 0;
-            }
-            i += 1;
-        }
-    }
-    parts[0] * 65536 + parts[1] * 256 + parts[2]
-}
+/// Whether native Lean's startup descriptors are open (`startup_descriptors`
+/// or `reserve_native_descriptors` ran).
+static DESCRIPTORS_RESERVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// One of libuv's io_uring rings (`uv__iou_init`): `io_uring_setup`, kept
-/// only if the kernel has the features libuv requires (else libuv closes it).
-fn libuv_ring(entries: u32, flags: u32) {
-    const SYS_IO_URING_SETUP: i64 = 425; // the same on every architecture
-    const IORING_SETUP_SQPOLL: u32 = 2;
-    const FEAT_SINGLE_MMAP: u32 = 1 << 0;
-    const FEAT_NODROP: u32 = 1 << 1;
-    const FEAT_RSRC_TAGS: u32 = 1 << 10;
-    // `struct io_uring_params`: sq_entries, cq_entries, flags, sq_thread_cpu,
-    // sq_thread_idle, features, ... (120 bytes).
-    let mut params = [0u32; 30];
-    params[2] = flags;
-    if flags & IORING_SETUP_SQPOLL != 0 {
-        params[4] = 10; // milliseconds
-    }
-    let fd = unsafe { syscall(SYS_IO_URING_SETUP, entries as i64, params.as_mut_ptr()) } as i32;
-    if fd < 0 {
-        return;
-    }
-    let need = FEAT_SINGLE_MMAP | FEAT_NODROP | FEAT_RSRC_TAGS;
-    if params[5] & need != need {
-        unsafe { close(fd) };
+/// lean-runtime's startup descriptors (`io::startup`): native Lean's runtime
+/// starts libuv's event loop at startup, which opens (close-on-exec, at the
+/// lowest free numbers) an epoll descriptor, two io_uring rings when the
+/// kernel has them, the pipe that locks signal handling, the loop's signal
+/// pipe and an eventfd: numbers 3 to 10 when the standard ones are open, so
+/// that `/proc/self/fd`, the numbers of the descriptors the program opens and
+/// the point where opening fails with `EMFILE` are native's, and a standard
+/// descriptor closed at startup is taken by the first of them. When they
+/// cannot be made, the program does not reach `main`: lean-runtime ends it
+/// with `INTERNAL PANIC: Failed to initialize event loop: ...` and exit status
+/// 1, where native crashes (LB-30) or aborts (LB-31).
+fn open_startup_descriptors() {
+    if let Err(f) = lean_runtime::io::startup::open_native_descriptors() {
+        lean_runtime::io::startup::fail_as_native(f)
     }
 }
 
-/// The descriptors native Lean has open before any Lean code runs: its
-/// runtime starts libuv's event loop at startup, which opens (all
-/// close-on-exec, at the lowest free numbers, in this order) an epoll
-/// descriptor, an io_uring ring polled by a kernel thread (64 entries, on
-/// kernels from 5.10.186, or as `UV_USE_IO_URING` says) and one for epoll
-/// control (256 entries), when the kernel supports them, the blocking pipe
-/// that locks signal handling, the loop's non-blocking signal pipe, and an
-/// eventfd for wake-ups: 8 descriptors here, numbers 3 to 10 when the
-/// standard ones are open. lean2rr opens the same ones in the same order, so
-/// that `/proc/self/fd`, the numbers of descriptors the program opens and
-/// the point where opening fails with `EMFILE` are native's. A standard
-/// descriptor closed at startup is taken by the first of them, as natively:
-/// reading or writing that stream then fails as natively (`EINVAL` on the
-/// epoll descriptor), and a child process sees it closed. They stay open,
-/// unused, but for the signal pipe, which signal watchers use
-/// (`signal_pipe`), as libuv's loop does.
-fn reserve_libuv_descriptors() {
-    const CLOEXEC: i32 = 0o2000000; // O_CLOEXEC, EPOLL_CLOEXEC, EFD_CLOEXEC
-    const NONBLOCK: i32 = 0o4000; // O_NONBLOCK, EFD_NONBLOCK
-    unsafe {
-        if epoll_create1(CLOEXEC) < 0 {
-            return;
-        }
-        let env = getenv(b"UV_USE_IO_URING\0".as_ptr());
-        let sqpoll = if env.is_null() { kernel_version() >= 0x050ABA } else { atoi(env) != 0 };
-        if sqpoll {
-            libuv_ring(64, 2);
-        }
-        libuv_ring(256, 0);
-        let mut p = [0i32; 2];
-        pipe2(p.as_mut_ptr(), CLOEXEC);
-        if pipe2(p.as_mut_ptr(), CLOEXEC | NONBLOCK) == 0 {
-            SIGNAL_PIPE[0].store(p[0], std::sync::atomic::Ordering::Relaxed);
-            SIGNAL_PIPE[1].store(p[1], std::sync::atomic::Ordering::Relaxed);
-        }
-        eventfd(0, CLOEXEC | NONBLOCK);
-    }
+/// An ELF constructor (lean-runtime's glue duty, `io::startup`): it runs
+/// before `main`, and so before Rust's runtime puts `/dev/null` in the place
+/// of closed standard descriptors (`sanitize_standard_fds`), which could not
+/// be told apart afterwards from a `/dev/null` the program was given
+/// (Python's `subprocess.DEVNULL`, `<>/dev/null`). It opens native Lean's
+/// startup descriptors, which take the places of closed standard
+/// descriptors, as natively.
+extern "C" fn startup_descriptors() {
+    open_startup_descriptors();
+    DESCRIPTORS_RESERVED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The loop's non-blocking signal pipe (`reserve_libuv_descriptors`), -1 if
-/// it could not be opened.
-static SIGNAL_PIPE: [std::sync::atomic::AtomicI32; 2] =
-    [std::sync::atomic::AtomicI32::new(-1), std::sync::atomic::AtomicI32::new(-1)];
-
-/// The read and write ends of the loop's signal pipe opened at startup, for
-/// the signal watchers (`net`), if it is open.
-pub fn signal_pipe() -> Option<[i32; 2]> {
-    let p = [SIGNAL_PIPE[0].load(std::sync::atomic::Ordering::Relaxed), SIGNAL_PIPE[1].load(std::sync::atomic::Ordering::Relaxed)];
-    if p[0] >= 0 && p[1] >= 0 { Some(p) } else { None }
-}
+#[used]
+#[link_section = ".init_array"]
+static STARTUP_DESCRIPTORS: extern "C" fn() = startup_descriptors;
 
 /// Whether `fd` is the `/dev/null` Rust's runtime opens (read-write) in
 /// place of a standard descriptor that was closed at startup
@@ -364,31 +282,11 @@ fn is_rust_dev_null(fd: i32) -> bool {
     m.file_type().is_char_device() && m.rdev() == DEV_NULL && unsafe { fcntl(fd, F_GETFL) } & O_ACCMODE == O_RDWR
 }
 
-/// Whether `startup_descriptors` ran.
-static DESCRIPTORS_RESERVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// An ELF constructor: it runs before `main`, and so before Rust's runtime
-/// puts `/dev/null` in the place of closed standard descriptors
-/// (`sanitize_standard_fds`), which could not be told apart afterwards from
-/// a `/dev/null` the program was given (Python's `subprocess.DEVNULL`,
-/// `<>/dev/null`). It opens libuv's descriptors
-/// (`reserve_libuv_descriptors`), which take the places of closed standard
-/// descriptors, as natively.
-extern "C" fn startup_descriptors() {
-    reserve_libuv_descriptors();
-    DESCRIPTORS_RESERVED.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[used]
-#[link_section = ".init_array"]
-static STARTUP_DESCRIPTORS: extern "C" fn() = startup_descriptors;
-
-/// Open native Lean's startup descriptors (`reserve_libuv_descriptors`),
-/// if the constructor has not. Without it, Rust's runtime has already put a
-/// read-write `/dev/null` in the place of each closed standard descriptor:
-/// those are closed again first, so that libuv's descriptors take their
-/// places (a standard descriptor that is `/dev/null` opened read-write is
-/// then taken for a closed one).
+/// Open native Lean's startup descriptors if the constructor has not.
+/// Without it, Rust's runtime has already put a read-write `/dev/null` in the
+/// place of each closed standard descriptor: those are closed again first,
+/// so that the startup descriptors take their places (a standard descriptor
+/// that is `/dev/null` opened read-write is then taken for a closed one).
 pub fn reserve_native_descriptors() {
     // Refer to the constructor, so that the linker keeps the object that
     // holds it.
@@ -401,7 +299,22 @@ pub fn reserve_native_descriptors() {
             unsafe { close(fd) };
         }
     }
-    reserve_libuv_descriptors();
+    open_startup_descriptors();
+}
+
+/// The read and write ends of libuv's loop signal pipe, which lean-runtime
+/// opened at startup (`io::startup`), for the signal watchers (`net`), as
+/// libuv's loop uses it: so starting a watcher opens no descriptor, as
+/// natively (test RtSignalFd). lean-runtime hands it to its first claimer
+/// (`io::startup::claim_signal_pipe`, AR-17); leanrt's event loop claims it
+/// once, at its first watcher, and keeps the claimer's duty: the numbers stay
+/// the signal pipe for good (the loop never closes or `dup2`s over them) and
+/// both ends stay non-blocking. `None` if there is none (the descriptors
+/// could not be opened, or it was claimed already): the loop then makes a
+/// pipe of its own.
+pub fn signal_pipe() -> Option<[i32; 2]> {
+    use std::os::fd::AsRawFd;
+    lean_runtime::io::startup::claim_signal_pipe().map(|(r, w)| [r.as_raw_fd(), w.as_raw_fd()])
 }
 
 /// The command line (`argv`), read once.
@@ -410,16 +323,20 @@ pub fn args() -> &'static [Vec<u8>] {
     ARGS.get_or_init(|| std::env::args_os().map(std::os::unix::ffi::OsStringExt::into_vec).collect())
 }
 
-/// `IO.initializing` (`lean_io_initializing`): true while module
-/// initializers run. lean2rr's entry sets it around them.
-static INITIALIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub fn set_initializing(b: bool) {
-    INITIALIZING.store(b, std::sync::atomic::Ordering::Relaxed)
+/// `IO.initializing` (`lean_io_initializing`), lean-runtime's flag: true from
+/// the start of the process until the module initializers have run.
+pub fn initializing() -> bool {
+    lean_runtime::io::startup::initializing()
 }
 
-pub fn initializing() -> bool {
-    INITIALIZING.load(std::sync::atomic::Ordering::Relaxed)
+/// lean2rr's entry calls `set_initializing(true)` before the module
+/// initializers (lean-runtime's flag is true from the start, so that does
+/// nothing) and `set_initializing(false)` after them
+/// (`lean_io_mark_end_initialization`, `io::startup::mark_end_initialization`).
+pub fn set_initializing(b: bool) {
+    if !b {
+        lean_runtime::io::startup::mark_end_initialization()
+    }
 }
 
 /// Run the program's main body as Lean does (`lean_run_main`): on a thread
@@ -470,24 +387,14 @@ fn run_body<F: FnOnce() + Send + 'static>(body: F) {
             body()
         }) {
         Ok(t) => t,
-        Err(_) => {
-            // Native `lean_run_main` throws `lean::exception("failed to
-            // create thread")`, which nothing catches: libc++ reports it
-            // and aborts (nothing is flushed).
-            extern "C" {
-                fn write(fd: i32, buf: *const u8, n: usize) -> isize;
-                fn abort() -> !;
-            }
-            let msg = b"libc++abi: terminating due to uncaught exception of type lean::exception: failed to create thread\n";
-            unsafe {
-                write(2, msg.as_ptr(), msg.len());
-                abort()
-            }
-        }
+        // Native `lean_run_main` throws `lean::exception("failed to create
+        // thread")`, which nothing catches.
+        Err(_) => thread_create_failed(),
     };
     if t.join().is_err() {
-        crate::io::flush_stdout();
-        std::process::exit(101);
+        // A Rust panic of `main`'s thread (a runtime bug): exit as a Rust
+        // program does, with the streams written.
+        crate::io::exit(101);
     }
 }
 

@@ -104,8 +104,8 @@ lean2rr uses the shared crate `lean-runtime`
 (github.com/QueClr/lean-runtime-rs, public). The crate holds Lean's runtime
 semantics, implemented once, in safe Rust; lean2rr takes the hash, string,
 float, fixed-width integer, libm, `Nat`/`Int`, array, panic and number-text
-rules from it so far, and keeps only its hot paths and the glue to its own
-representations. See [Runtime](runtime.html#the-shared-runtime-crate-plan).
+rules and the IO from it so far, and keeps only its hot paths and the glue
+to its own representations. See [Runtime](runtime.html#the-shared-runtime-crate-plan).
 
 ## Status
 
@@ -136,7 +136,8 @@ line yet:
   overflow message of `Array.replicate`;
 - plan §10's list of Lean runtime bugs that lean2rr does not reproduce
   (see [Known differences](differences.html#lean-bugs-we-do-not-reproduce));
-- the move of the runtime's IO and scheduler into `lean-runtime`.
+- the move of the runtime's scheduler into `lean-runtime` (its IO moved
+  in switch step 3).
 
 ## The pages
 

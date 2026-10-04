@@ -1,0 +1,1 @@
+ulimit -c 0; for n in 6 9 10; do (ulimit -n $n; $BIN $ARGS 2>&1; echo "exit $?") 2>/dev/null; done; for n in 5 7; do (ulimit -n $n; UV_USE_IO_URING=0 $BIN $ARGS 2>&1; echo "exit $?") 2>/dev/null; done

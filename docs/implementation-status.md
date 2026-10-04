@@ -37,7 +37,7 @@ same standard output, standard error and exit code.
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (301 programs, `tests/runtime`) | at its last full run (branch `extern-bodies`, 2026-10-04), 292 of 296 identical to native Lean 4.34.0, five of them through expectation files where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`; plan §10, "Runtime: Lean bugs we do not reproduce"); 4 expected failures: `RtCseFnResult` (plan §10, "Merging after erasure"), `RtTaskRunawayPureStarted` and `RtFdStartupNoUring` (until lean2rr adopts lean-runtime's scheduler and startup), `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve; `RtLiftedLimits` and `RtInternalPanic` compare each side with its own expectation files where lean2rr lifts a limit of Lean's runtime (plan §10, LB-04 to LB-12; full run of branch `lean-runtime-step2`: 276 of 279 identical, 3 expected failures) |
+| Runtime test suite (305 programs, `tests/runtime`) | at its last full run (branch `lean-runtime-step3` on dev 74bedc4, 2026-10-04), 302 of 305 identical to native Lean 4.34.0, six of them through expectation files where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`, `RtStartupFdExhausted`; plan §10, "Runtime: Lean bugs we do not reproduce"); 3 expected failures: `RtCseFnResult` (plan §10, "Merging after erasure"), `RtTaskRunawayPureStarted` (until lean2rr adopts lean-runtime's scheduler), `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve; `RtLiftedLimits` and `RtInternalPanic` compare each side with its own expectation files where lean2rr lifts a limit of Lean's runtime (plan §10, LB-04 to LB-12). lean-runtime's own program cases of its IO areas (io, process, streams, temp, uvsys, time) through lean2rr's builds: 85 of 89 as expected (`startup_fd_limit` since lean2rr's startup runs Init's `IO.stdGenRef` initializer, as natively), the other 4 as before the switch: `lock_blocked`, `lock_exit`, `exit_while_reading`, `exit_while_writing_stalled` need IO that waits beside running tasks, fixed by step 4 (lean2rr adopting lean-runtime's `sched`) |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
@@ -383,7 +383,14 @@ with examples, is §10 of the translation plan.
   extra descriptor on `/dev/null` (natively one per `null` stream, LB-15),
   and when `/dev/null` cannot be opened the spawn fails with `EMFILE`,
   where natively the program silently gets the parent's own stream
-  (LB-17). Limits of Lean's runtime are lifted where the
+  (LB-17); after `takeStdin`, `kill` still reaches a `setsid` child's
+  process group (LB-14); an over-long temporary directory is an `IO.Error`
+  (natively an assertion abort, LB-16); startup without room for the event
+  loop's descriptors ends with an `INTERNAL PANIC` (natively a crash or an
+  abort, LB-30, LB-31); an exit never waits for a stream held by a blocked
+  reader (LB-29). These IO behaviours, and all of lean2rr's IO, are the
+  shared crate lean-runtime's (its `io` module), which lean2rr calls
+  through glue over its own values. Limits of Lean's runtime are lifted where the
   result can be computed: `Nat.pow` with an exponent of 2^32 or more
   (`1 ^ e`, `0 ^ e`, and any power that fits, LB-11), `Nat.shiftLeft` and
   `Nat.shiftRight` by 2^32 or more (LB-12, LB-04), `ByteArray.copySlice`

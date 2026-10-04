@@ -102,8 +102,18 @@ extern "C" {
     fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
 }
 
+extern "C" {
+    fn __errno_location() -> *mut i32;
+    fn write(fd: i32, buf: *const c_void, n: usize) -> isize;
+}
+
+/// C's `errno`, which the socket calls here set.
 fn errno() -> i32 {
-    crate::cfile::errno_now()
+    unsafe { *__errno_location() }
+}
+
+fn set_errno(e: i32) {
+    unsafe { *__errno_location() = e }
 }
 
 const AF_INET: i32 = 2;
@@ -699,8 +709,8 @@ extern "C" fn on_signal(signum: i32) {
     if fd >= 0 {
         let b = signum as u8;
         let saved = errno();
-        crate::fs::raw_write(fd, &b as *const u8 as *const c_void, 1);
-        crate::cfile::set_errno(saved);
+        unsafe { write(fd, &b as *const u8 as *const c_void, 1) };
+        set_errno(saved);
     }
 }
 
@@ -720,7 +730,8 @@ pub fn signal_new(n: u32, repeating: bool) -> LHandle {
 fn signal_start(h: &LHandle) {
     let r = reactor();
     if r.sig_pipe[0] < 0 {
-        // libuv's loop signal pipe, opened at startup (`rt`), as natively.
+        // libuv's loop signal pipe, opened at startup (lean-runtime's
+        // `io::startup`; `rt::signal_pipe`), as natively.
         let p = crate::rt::signal_pipe().unwrap_or_else(|| {
             let mut p = [-1i32; 2];
             unsafe { pipe2(p.as_mut_ptr(), SOCK_NONBLOCK | SOCK_CLOEXEC) };
@@ -1691,7 +1702,7 @@ pub fn uv_strerror(code: i32) -> Vec<u8> {
         -3011 => "socket type not supported",
         -3013 => "invalid value for hints",
         -3014 => "resolved protocol is unknown",
-        _ => return crate::fs::uv_strerror_bytes(-code),
+        _ => return lean_runtime::io::error::uv_strerror(code).into_owned().into_bytes(),
     };
     m.as_bytes().to_vec()
 }
@@ -1702,7 +1713,7 @@ pub fn uv_error_kind(code: i32) -> u32 {
     if code >= 0 || code <= -3000 {
         return 0;
     }
-    crate::fs::uv_kind(-code)
+    crate::fs::kind_of(&lean_runtime::io::IoError::decode_uv_error(code, None))
 }
 
 // ---------------------------------------------------------------------------

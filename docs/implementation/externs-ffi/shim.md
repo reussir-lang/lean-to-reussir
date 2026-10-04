@@ -85,21 +85,33 @@ compiles it with the program. Plan
 - **Where:** `lean2rr/L2RShim.lean` (`lean_get_current_time`,
   `lean_windows_get_next_transition`,
   `lean_get_windows_local_timezone_id_at`, `lean_sharecommon_eq`,
-  `lean_sharecommon_hash`); `runtime/leanrt/src/io.rs`: `realtime_nanos`.
+  `lean_sharecommon_hash`); `runtime/leanrt/src/io.rs`: `realtime_nanos`
+  (lean-runtime's `io::time::current_time`).
 - **Remove only if:** never.
 
 ### System queries follow libuv's Linux code, with Lean's buffers
 
-- **What:** `Std.Internal.UV.System` queries read what libuv reads
+- **What:** `Std.Internal.UV.System` queries are lean-runtime's
+  (`io::uvsys`, through `leanrt::sys`): they read what libuv reads
   (`/proc/uptime`, `/proc/stat` without its totals line, `/proc/meminfo`,
-  cgroup v1/v2 memory limits, `getpwuid_r`, …) with the buffers Lean passes
+  cgroup v1/v2 memory limits, the password and group databases, …) with
+  the buffers Lean passes
   (`UV_ENOBUFS` for a home or temporary directory of `PATH_MAX` bytes or
   more, a process title of 512 or more) and libuv's argument checks (a
   priority outside [-20, 19], `random` of more than `0x7FFFFFFF` bytes).
-  Name resolution checks the host as libuv does (an empty host name or one
-  of 256 bytes or more is `EINVAL`, at once). Strings are decoded as
+  `setProcessTitle` writes the title into the arguments' memory, so
+  `/proc/self/cmdline` shows it (lean-runtime's feature `proc-title`), and
+  reports libuv's error. A lean-runtime error reaches the shim as its libuv
+  code (`sys::uv_code`: lean-runtime decodes with `decode_uv_error(code,
+  name)`, which keeps `-code`), and the shim builds the same `IO.Error`
+  (`uvError`, and the named variants of `chdir` and `osGetGroup`). Name
+  resolution checks the host as libuv does (an empty host name or one of
+  256 bytes or more is `EINVAL`, at once). Strings are decoded as
   `lean_mk_string`.
-- **Why:** Round 6 IO findings (IO6-01..13, 15; 1362da1) and 024c024.
-- **Where:** `runtime/leanrt/src/sys.rs`; `runtime/leanrt/src/net.rs`:
+- **Why:** Round 6 IO findings (IO6-01..13, 15; 1362da1) and 024c024;
+  one implementation for both translators (switch step 3; leanrt's own
+  ports moved into lean-runtime).
+- **Where:** `runtime/leanrt/src/sys.rs`; lean-runtime's
+  `src/io/uvsys.rs`, `argv_title.rs`; `runtime/leanrt/src/net.rs`:
   `dns_get_info`; `lean2rr/L2RShim.lean` (the System section).
 - **Remove only if:** never.

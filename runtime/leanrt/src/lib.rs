@@ -5,7 +5,11 @@
 //! textures that call into this crate. Keeping the code here (rather than in
 //! the prelude's `extern "rust"` block, which is copied into every texture)
 //! keeps texture compilation cheap and gives the runtime one copy of its
-//! global state: the stdout buffer, once-cells, and panic settings.
+//! global state: the last-error slot, once-cells, and panic settings.
+//! Lean's runtime behaviour itself is the shared crate lean-runtime's
+//! (`lean_runtime`): its `semantics` (hashes, strings, floats, numbers,
+//! panics) and its `io` (files, streams, processes, the system, the exit);
+//! the modules here convert lean2rr's values to its views and back.
 //!
 //! Small hot functions are `#[inline]` so they are instantiated into the
 //! textures (and can be inlined into Reussir code); slow paths are
@@ -24,7 +28,6 @@ extern crate reussir_rt;
 pub mod alloc;
 pub mod array;
 pub mod big;
-pub mod cfile;
 pub mod coro;
 pub mod drop;
 pub mod float;
@@ -203,18 +206,18 @@ pub fn internal_panic(msg: &str) -> ! {
     }
 }
 
-/// An uncaught `IO` exception at the top level
-/// (`lean_io_result_show_error`): `uncaught exception: ` and the error's
-/// text up to its first NUL (`string_cstr`), with `std::cerr` (which
-/// flushes stdout first), exit status 1.
+/// An uncaught `IO` exception at the top level, of `main` or of an
+/// initializer: as a native program's C `main`, the io layer's dedicated
+/// tasks are waited for (`lean_finalize_task_manager`,
+/// `io::exit::after_main`), then `lean_io_result_show_error` prints
+/// `uncaught exception: ` and the error's text up to its first NUL
+/// (`string_cstr`) with `std::cerr` (which flushes stdout first;
+/// lean-runtime's `io::exit::show_error`), and the process exits with
+/// status 1.
 #[inline(never)]
 pub fn uncaught_exception<M: string::Utf8 + ?Sized>(msg: &M) -> ! {
-    let msg = msg.utf8();
-    io::flush_stdout();
-    let mut line = sem_panic::UNCAUGHT_EXCEPTION_PREFIX.as_bytes().to_vec();
-    line.extend_from_slice(&msg[..msg.iter().position(|&b| b == 0).unwrap_or(msg.len())]);
-    line.push(b'\n');
-    io::eprint(&line);
+    lean_runtime::io::exit::after_main();
+    lean_runtime::io::exit::show_error(msg.utf8());
     io::exit(sem_panic::PANIC_EXIT_STATUS)
 }
 

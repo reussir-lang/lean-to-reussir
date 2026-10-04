@@ -572,7 +572,7 @@ def interfaceAddresses : IO (Array InterfaceAddress) := do
 namespace Sys
 open Std.Internal.UV.System
 
-@[extern "lean_shim_sys_title_set"] opaque primTitleSet (s : @& String) : BaseIO Unit
+@[extern "lean_shim_sys_title_set"] opaque primTitleSet (s : @& String) : BaseIO UInt32
 /-- 0 `uptime`, 1 `cpuInfo`, 2 `cwd`, 3 `osHomedir`, 4 `osTmpdir`,
 5 `osGetPasswd`, 6 `osEnviron`, 7 `osGetHostname`, 8 `osUname`,
 9 `getrusage`, 10 `exePath`, 11 `getProcessTitle`: an operation with the
@@ -610,7 +610,7 @@ def getProcessTitle : IO String := do str0 (← primQuery 11)
 @[export lean_uv_set_process_title]
 def setProcessTitle (t : String) : IO Unit := do
   if hasNul t then throw (nulError t)
-  primTitleSet t
+  check (← primTitleSet t)
 
 @[export lean_uv_uptime]
 def uptime : IO UInt64 := do

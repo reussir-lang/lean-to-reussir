@@ -75,8 +75,12 @@ the stdio modes as `stdin | stdout << 8 | stderr << 16` in
 `IO.Process.Stdio` constructor indices (`modes`, or else `sa`'s),
 `inheritEnv` and `setsid`. Returns the bindings (the last one binds the
 pid), the pid, the `setsid` flag, and the three mode indices (`u64`; none
-when `modes` is given). -/
-def spawnCall (sa : RR.Expr) (saTy : RR.Ty) (modes : Option Nat) :
+when `modes` is given). With `output? := some (input, hasInput)`, the call
+is `l2r_proc_output`'s instead (`IO.Process.output`: no modes; the input
+string and whether there is one after `setsid`), and the last binding is
+its exit code. -/
+def spawnCall (sa : RR.Expr) (saTy : RR.Ty) (modes : Option Nat)
+    (output? : Option (RR.Expr × RR.Expr) := none) :
     LowerM (Array (String × Option RR.Ty × RR.Expr) × RR.Expr × RR.Expr × Array RR.Expr) := do
   let u64 := RR.Ty.named "u64"
   let str := RR.Ty.named "LStr"
@@ -92,12 +96,13 @@ def spawnCall (sa : RR.Expr) (saTy : RR.Ty) (modes : Option Nat) :
   let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[]
   let mut idx : Array RR.Expr := #[]
   let mut modesE : RR.Expr := .atom "0"
-  match modes with
-  | some m =>
+  match modes, output? with
+  | _, some _ => pure ()
+  | some m, none =>
     let v ← fresh "pm"
     lets := lets.push (v, some (.named "u32"), .atom (toString m))
     modesE := .var v
-  | none =>
+  | none, none =>
     let (cfg, cfgTy, cfgE) ← field 0 none "pc"
     lets := lets.push (cfg, some cfgTy, cfgE)
     for k in [0:3] do
@@ -147,8 +152,11 @@ def spawnCall (sa : RR.Expr) (saTy : RR.Ty) (modes : Option Nat) :
     (values, some strs, .call valuesFn #[] #[.var en]),
     (set, some (.app "RVec" #[.bool]), .call setFn #[] #[.var en]),
     (inh, some inhT, inhE), (ss, some ssT, ssE),
-    (pid, some (.named "u32"), .call "l2r_proc_spawn" #[] #[.var cmd, .var argv, .var cd, .var ch,
-      .var names, .var values, .var set, modesE, .var inh, .var ss])]
+    (pid, some (.named "u32"), match output? with
+      | some (input, has) => .call "l2r_proc_output" #[] #[.var cmd, .var argv, .var cd, .var ch,
+          .var names, .var values, .var set, .var inh, .var ss, input, has]
+      | none => .call "l2r_proc_spawn" #[] #[.var cmd, .var argv, .var cd, .var ch,
+          .var names, .var values, .var set, modesE, .var inh, .var ss])]
   return (lets, .var pid, .var ss, idx)
 
 /-- The `Child` (of generated type `childTy`) of the child just spawned: its
@@ -258,63 +266,31 @@ def processExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array
 `ps`, result `ret`), in place of Lean's: that one reads stdout in a
 dedicated task while it reads stderr, and lean2rr's tasks are deferred, so
 a child writing more than a pipe holds to stdout before closing stderr would
-block forever.
-The glue follows native order: spawn with stdout and stderr piped, stdin
-null, or piped when `input?` is `some s` (then `s` is written and flushed,
-and the handle released and so closed, as `takeStdin`, `putStr` and
-`flush` do natively); read both pipes to end of file together
-(`l2r_proc_drain`); `readToEnd`'s UTF-8 check of stderr; `wait`; the same
-check of stdout. Errors are native's, in the same order, but a non-UTF-8
-stderr is reported once both pipes are at end of file (natively as soon as
-stderr is), and a read error on either pipe at once (natively a stdout read
-error after `wait`). -/
+block forever. The runtime's `l2r_proc_output` (lean-runtime's
+`io::process::output`) does what Lean's definition does: spawn with stdout
+and stderr piped, stdin null, or piped when `input?` is `some s` (then `s`
+is written and flushed, and the handle closed); read both pipes to end of
+file together; `readToEnd`'s UTF-8 check of stderr; `wait`; the same check
+of stdout; errors in that order. On success the outputs are
+`l2r_proc_output_str(1)` and `(2)`. -/
 def processOutputBody (ps : Array (String × RR.Ty)) (ret : RR.Ty) : LowerM RR.Block := do
   let some (sa, saTy) := ps[0]? | throwError "lean2rr: bad IO.Process.output signature"
   let some (inp, inTy) := ps[1]? | throwError "lean2rr: bad IO.Process.output signature"
   let u32 := RR.Ty.named "u32"
-  let u64 := RR.Ty.named "u64"
   let str := RR.Ty.named "LStr"
-  let hTy := RR.Ty.named "LHandle"
-  let bytes := RR.Ty.app "RVec" #[.named "u8"]
   let outTy ← ioPayloadTy ret
   let (_, oc, _) ← structLayoutOf outTy
   let outFs ← ctorFieldTys outTy oc
   unless outFs.size == 3 do throwError "lean2rr: bad IO.Process.Output type {outTy.render}"
-  let utf8Err ← ioUserError ret "Tried to read from handle containing non UTF-8 data."
-  -- Once the child runs: `rest(pid, stdout, stderr)`.
-  let rest ← fresh "l2r_proc_output_rest_"
-  let output ← ctorValue outTy oc #[← coerce (.var "code") u32 outFs[0]!,
-    ← coerce (.var "os") str outFs[1]!, ← coerce (.var "es") str outFs[2]!]
-  let afterWait : RR.Block := .ofExpr (.ite (.call "lean_string_validate_utf8" #[] #[.var "ob"])
-    ⟨#[("os", some str, .call "lean_string_from_utf8_unchecked" #[] #[.var "ob"])], ← wrapIOResult ret output⟩
-    (.ofExpr utf8Err))
-  let afterDrain : RR.Block := ⟨#[("eb", some bytes, .call "l2r_proc_drained_err" #[] #[])],
-    .ite (.call "lean_string_validate_utf8" #[] #[.var "eb"])
-      ⟨#[("es", some str, .call "lean_string_from_utf8_unchecked" #[] #[.var "eb"]),
-         ("code", some u32, .call "l2r_proc_wait" #[] #[.var "pid"])], ← ioCheck ret afterWait⟩
-      (.ofExpr utf8Err)⟩
-  let restBody : RR.Block :=
-    ⟨#[("ob", some bytes, .call "l2r_proc_drain" #[] #[.var "ho", .var "he"])], ← ioCheck ret afterDrain⟩
-  modify fun s => { s with fns := s.fns.push (.fn rest #[("pid", u32), ("ho", hTy), ("he", hTy)] ret restBody) }
-  let pipeEnd (k : Nat) : RR.Expr := .call "l2r_proc_end" #[] #[.atom (toString k)]
-  let spawnWith (modes : Nat) (k : RR.Expr → LowerM RR.Block) : LowerM RR.Expr := do
-    let (lets, pid, _, _) ← spawnCall (.var sa) saTy (some modes)
-    return .block ⟨lets, ← ioCheck ret (← k pid)⟩
-  -- Stream modes: `piped` = 0, `null` = 2 (stdin's is the low byte).
-  let noInput ← spawnWith 2 fun pid => do
-    let ho ← fresh "ho"
-    let he ← fresh "he"
-    return ⟨#[(ho, some hTy, pipeEnd 1), (he, some hTy, pipeEnd 2)], .call rest #[] #[pid, .var ho, .var he]⟩
-  let withInput (s : RR.Expr) (st : RR.Ty) : LowerM RR.Expr := spawnWith 0 fun pid => do
-    let hi ← fresh "hi"
-    let ho ← fresh "ho"
-    let he ← fresh "he"
-    let r1 ← fresh "pr"
-    let r2 ← fresh "pr"
-    let afterPut : RR.Block := ⟨#[(r2, some u64, .call "l2r_fs_flush" #[] #[.var hi])],
-      ← ioCheck ret (.ofExpr (.call rest #[] #[pid, .var ho, .var he]))⟩
-    return ⟨#[(hi, some hTy, pipeEnd 0), (ho, some hTy, pipeEnd 1), (he, some hTy, pipeEnd 2),
-        (r1, some u64, .call "l2r_fs_put_str" #[] #[.var hi, ← coerce s st str])], ← ioCheck ret afterPut⟩
-  return .ofExpr (← optionCases (.var inp) inTy withInput noInput)
+  let pin ← fresh "pin"
+  let phas ← fresh "phas"
+  let inLets : Array (String × Option RR.Ty × RR.Expr) := #[
+    (pin, some str, ← optionCases (.var inp) inTy (fun v vt => coerce v vt str) (← strLit "")),
+    (phas, some .bool, ← optionCases (.var inp) inTy (fun _ _ => pure (.atom "true")) (.atom "false"))]
+  let (lets, code, _, _) ← spawnCall (.var sa) saTy none (output? := some (.var pin, .var phas))
+  let outStr (k : Nat) : RR.Expr := .call "l2r_proc_output_str" #[] #[.atom (toString k)]
+  let output ← ctorValue outTy oc #[← coerce code u32 outFs[0]!,
+    ← coerce (outStr 1) str outFs[1]!, ← coerce (outStr 2) str outFs[2]!]
+  return ⟨inLets ++ lets, ← ioCheck ret (.ofExpr (← wrapIOResult ret output))⟩
 
 end LeanToReussir

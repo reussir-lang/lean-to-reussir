@@ -89,17 +89,21 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   released at its last use there. `IO.FS.Mode` is passed as its
   constructor index.
 - **Why:** The runtime cannot build `IO.Error`; Lean's own builders give
-  the exact messages (57187b2). The runtime decodes as Lean 4.34's
-  `decode_uv_error_impl`: kind and details from libuv's code for the errno
-  (`leanrt::fs::crt_to_uv`, then `uv_strerror`, not `strerror`), the errno
-  as the code; libuv-based operations (`decode_uv_error`) store the
-  positive errno (4.33: libuv's negated code).
+  the exact messages (57187b2). The decoding is lean-runtime's
+  (`io::error`), as Lean 4.34's `decode_uv_error_impl`: kind and details
+  from libuv's code for the errno (`crt_to_uv`, then `uv_strerror`, not
+  `strerror`), the errno as the code; libuv-based operations
+  (`decode_uv_error`) store the positive errno (4.33: libuv's negated
+  code). leanrt's slot takes lean-runtime's `IoError` apart into the
+  builder number (`fs::kind_of`), the code, the file name and the details
+  (switch step 3).
 - **Where:** `Lower/Externs.lean`: `fallibleIOGlue`, `fallibleIOPrim`,
   `ioFinish`, `ioCheck`, `ioErrorFn`, `ioErrorCtor`, `ioUserError`,
   `metadataOf`, `dirEntriesOf`; `Mono.lean`: `isFallibleIOSym`,
   `ioErrorBuilderSyms`, `ensureIOErrorBuilders`;
-  `runtime/leanrt/src/fs.rs` (`errno`, `error_kind`, `error_details`,
-  `crt_to_uv`; unit test `fs_tests.rs`, every errno against native Lean);
+  `runtime/leanrt/src/fs.rs` (`set_err`, `kind_of`, `errno`, `error_kind`,
+  `error_details`; unit test `fs_tests.rs`, every errno through the slot
+  against native Lean);
   `runtime/README.md` ("Fallible IO", the table of error kinds); tests
   `RtIOErrorDecode`, `RtFiles`.
 - **Remove only if:** never.
@@ -112,14 +116,18 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   the previous one. Every program defines `l2r_stderr_put`, which writes
   with the current stderr's `putStr`, for panics, `dbgTrace`, `timeit`
   and the runtime's own messages. Handles and the standard streams are
-  models of glibc's `FILE`.
+  lean-runtime's models of glibc's `FILE` (`io::cfile`).
 - **Why:** Natively the current streams are per thread, and diagnostics go
   through `io_eprintln` to the current stderr (runtime request 21,
   7d41e36). The `FILE` model makes buffering, positions and `errno`s
-  native's (d2ae23d).
+  native's (d2ae23d). The cells stay lean2rr's, not lean-runtime's
+  `io::streams` (which keeps a translator's Rust values): the streams are
+  lean2rr's own records of closures, and `IO.println` reads the current
+  stdout at each call, inline (switch step 3).
 - **Where:** `Lower/Externs.lean`: `stdStreamFns`, `streamValue`,
   `streamField`, `streamFieldCall`, `stdContextFns`, `stderrPutFn`;
-  `runtime/leanrt/src/io.rs`, `cfile.rs`. Per-task streams:
+  `runtime/leanrt/src/io.rs`; lean-runtime's `src/io/handle.rs`,
+  `cfile.rs`. Per-task streams:
   [../tasks/scheduler.md](../tasks/scheduler.md#each-task-starts-with-the-processs-standard-streams).
 - **Remove only if:** never.
 
@@ -131,16 +139,20 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   (pid, `setsid`); `wait`, `tryWait` and `kill` read them, holding the
   child until the result is built (they borrow it natively); `takeStdin`
   returns the stdin field and a new `Child` with a boxed unit there.
-  `IO.Process.output`'s own body is replaced by glue that reads stdout and
-  stderr together to end of file (`l2r_proc_drain`), then applies
-  `readToEnd`'s UTF-8 checks and `wait` in native order.
+  `IO.Process.output`'s own body is replaced by one primitive,
+  `l2r_proc_output` (lean-runtime's `io::process::output`: stdout and
+  stderr read together to end of file, `readToEnd`'s UTF-8 checks and
+  `wait` in native order), and `l2r_proc_output_str` for the two outputs.
+  The runtime keeps lean-runtime's process object of each child by pid
+  until the child is reaped (`runtime/leanrt/src/proc.rs`).
 - **Why:** As `process.cpp` (runtime request 29, ef971b7). Lean's
   `output` reads stdout in a dedicated task while it reads stderr; tasks
   are deferred here, so a child filling the stdout pipe before closing
   stderr would block forever.
 - **Where:** `Lower/Process.lean`: `processExtern`, `spawnCall`,
   `spawnedChild`, `structField`, `processOutputBody`; `Lower/Code.lean`:
-  `lowerDecl` (the `IO.Process.output` case); `runtime/leanrt/src/proc.rs`.
+  `lowerDecl` (the `IO.Process.output` case); `runtime/leanrt/src/proc.rs`;
+  lean-runtime's `src/io/process.rs`.
 - **Remove only if:** the runtime gets real threads (for `output`); the
   rest never.
 

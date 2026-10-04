@@ -1,1 +1,0 @@
-leanrt opens the ctl ring regardless of uv__use_io_uring; fixed when lean2rr adopts lean-runtime io::startup (A821 option C)

@@ -1,0 +1,1 @@
+ulimit -c 0; (ulimit -v 4000000; $BIN $ARGS < /dev/zero 2> /dev/null; echo "exit $?") 2> /dev/null

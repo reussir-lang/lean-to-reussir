@@ -1820,14 +1820,14 @@ Rules:
     while it reads stderr. lean2rr's tasks are deferred (§5.14), so a child
     writing more than a pipe holds (64 KiB) to stdout before closing stderr
     would block forever. Its
-    declaration is lowered to generated glue instead of its body, in
-    native order (only the stderr check waits for stdout's end of file
-    too, §10): spawn with stdout and stderr piped and stdin null, or
-    piped when `input?` is `some s` (then `putStr s`, `flush`, and the
-    handle's release closes it, like `takeStdin` and the handle's last use
-    natively); `l2r_proc_drain` reads both pipes to end of file together;
-    `readToEnd`'s UTF-8 check of stderr (`IO.userError "Tried to read from
-    handle containing non UTF-8 data."`); `wait`; the same check of stdout.
+    declaration is lowered to one runtime primitive instead of its body,
+    `l2r_proc_output` (lean-runtime's `io::process::output`), which does
+    what Lean's definition does in its order: spawn with stdout and stderr
+    piped and stdin null, or piped when `input?` is `some s` (then `s` is
+    written and flushed, and the handle closed); both pipes read to end of
+    file together; `readToEnd`'s UTF-8 check of stderr (`IO.userError
+    "Tried to read from handle containing non UTF-8 data."`); `wait`; the
+    same check of stdout. `l2r_proc_output_str` gives the two outputs.
     `IO.Process.run` is Lean code over `output` and needs nothing more.
     Each fallible step's error becomes the `IO.Error` Lean's
     `decode_io_error(errno, nullptr)` builds, as for files.
@@ -2739,9 +2739,13 @@ and comparisons, float formatting, bits, `frExp`, `scaleB` and conversions,
 the fixed-width integer rules, libm, the `Nat` and `Int` rules (zero
 divisors, truncation, rounding, shift and exponent limits, the size of a
 big result), the array edge rules (out-of-bounds indices, allocation
-sizes, `copySlice`'s ranges), the panics' texts and endings, and the
-decimal text of numbers (`runtime/README.md`, "The shared crate
-lean-runtime"). `leanrt` and the prelude hold lean2rr's representations and
+sizes, `copySlice`'s ranges), the panics' texts and endings, the decimal
+text of numbers, and the OS-level IO (lean-runtime's `io`: glibc's `FILE`
+model behind handles and the standard streams, `IO.Error`'s decoding, the
+file system, temporary files, the environment, the clocks, child
+processes, `Std.Internal.UV.System`, the startup descriptors,
+`IO.initializing` and the exit sequence; `runtime/README.md`, "The shared
+crate lean-runtime"). `leanrt` and the prelude hold lean2rr's representations and
 hot paths (the inline small-`Nat`/`Int` arithmetic, the one-block big
 numbers with GMP's kernels behind lean-runtime's `BigNat`/`BigInt`
 traits, the one-block arrays' reads, writes and pushes) and convert
@@ -2756,7 +2760,10 @@ what Reussir lacks:
   or rewritten values (`f32` functions in double precision, `exp2` through
   `pow`, `pow(x, 0.5)` as `sqrt`, …) differ from glibc's in the last bit on
   some inputs;
-- IO: stdout/stderr/stdin streams, `IO.Error`, argv, exit;
+- IO: the glue of lean-runtime's `io` (handles in `LHandle` boxes, the
+  last-error slot from which the generated code builds `IO.Error`s, the
+  current standard streams as lean2rr's own cells, effect points of the
+  scheduler before output), argv;
 - the mutable cells of thunks and tasks, the queues of deferred tasks, and
   promises (§5.14);
 - panic, trace;
@@ -3367,21 +3374,29 @@ Each item says what differs and when.
   other one, since the task runs only when its value is needed. Natively `Child.pid` leaks the child, so its pipes stay open
   forever (a child waiting for end of file on stdin then hangs); here they
   are closed as usual. Natively the `Child` from `takeStdin` loses the
-  `setsid` flag (`kill` reads uninitialized memory); here it keeps it.
-  `output` reports a non-UTF-8 stderr once both pipes are at end of file
-  (natively as soon as stderr is: different timing when a grandchild holds
-  stdout open), and a read error on either pipe at once (natively a stdout
-  read error after `wait`).
+  `setsid` flag (LB-14, below); here it keeps it. `output` is
+  lean-runtime's: its errors come in Lean's order (stderr's read or UTF-8
+  error as soon as stderr is at end of file, stdout's after `wait`), and
+  after a stderr failure stdout is read to its end on a thread until
+  `main` returns, as Lean's task reads it. A child is started with
+  `posix_spawn`, with what Lean's forked child does before `execvp`
+  reproduced by lean-runtime (`io::process` lists what remains
+  different).
 
 **Runtime: Lean bugs we do not reproduce** (each judged a bug in Lean
 4.34.0's runtime, listed in lean-runtime's
 [docs/lean-bugs.md](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md); both translators and
 lean-runtime do the right thing instead; where a runtime test shows the
 difference, it pins native's output and lean2rr's in expectation files,
-`NAME.native.*` and `NAME.l2r.*`. The lean-runtime cases:
+`NAME.native.*` and `NAME.l2r.*`. The IO ones are lean-runtime's `io`
+module's behaviour, which lean2rr calls. The lean-runtime cases:
 `refs/lost_update` (LB-01), `io/read_after_write` (LB-02),
 `io/error_without_file_name` and `io/temp_file_error` (LB-03),
-`process/null_fd_leak` (LB-15), `process/null_open_fails` (LB-17))
+`process/take_stdin_setsid` (LB-14), `process/null_fd_leak` (LB-15),
+`temp/temp_long_dir`, `temp_long_file`, `temp_long_dir_4095` (LB-16),
+`process/null_open_fails` (LB-17), `process/exit_while_reading`,
+`process/output_oom_both_pipes`, `process/output_drain_exit_exit` and
+`_panic` (LB-29), `io/startup_fd_exhausted` (LB-30, LB-31))
 - *LB-01, a concurrent `IO.Ref.set` can be lost*
   ([LB-01](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-01-a-concurrent-iorefset-can-be-lost);
   fixed upstream in Lean 4.35): natively `lean_st_ref_get` takes the value
@@ -3450,6 +3465,35 @@ difference, it pins native's output and lean2rr's in expectation files,
   the spawn succeeds natively and fails with `EMFILE` here. Any other
   spawn needs as many free descriptors as natively. Test
   `RtProcessNullOpenFails`.
+- *LB-14, after `takeStdin`, `kill` no longer reaches a `setsid` child's
+  group*
+  ([LB-14](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-14-after-takestdin-kill-no-longer-reaches-a-setsid-childs-group)):
+  natively the child `takeStdin` returns loses its `setsid` flag, so
+  `kill` signals the pid alone and the group survives. lean2rr's `Child`
+  keeps the flag (`Lower/Process.lean`), and lean-runtime's process object
+  too: `kill` uses `killpg`.
+- *LB-16, an over-long temporary directory aborts `createTempFile` and
+  `createTempDir`*
+  ([LB-16](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-16-an-over-long-temporary-directory-aborts-createtempfile-and-createtempdir)):
+  natively a temporary directory of 4083 to 4095 bytes fails an assertion
+  (status 134). lean2rr tries the creation and raises the system's
+  `ENAMETOOLONG` (`invalid argument (error code: 36, name too long)`).
+- *LB-29, `exit` waits for a stream held by a blocked reader*
+  ([LB-29](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-29-exit-waits-for-a-stream-held-by-a-blocked-reader-so-an-internal-panic-or-ioprocessexit-can-hang)):
+  natively an internal panic or `IO.Process.exit` while another thread is
+  blocked reading a handle waits for that read, forever if it never
+  returns. lean-runtime's exit skips a stream whose holder is blocked
+  reading it. In lean2rr no context holds a stream across a switch (its
+  tasks share one thread), so the exit never waits for a reader.
+- *LB-30, LB-31, startup when the event loop's descriptors cannot be made*
+  ([LB-30](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-30-when-libuv-cannot-create-the-event-loop-startup-dereferences-a-null-loop),
+  [LB-31](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-31-when-libuv-cannot-create-its-global-signal-lock-pipe-startup-aborts)):
+  natively a descriptor limit that leaves no room for libuv's loop crashes
+  every program before `main` (SIGSEGV, 139, at `ulimit -n` 8 to 10) or
+  aborts it (SIGABRT, 134, at 4 to 7). lean2rr's startup glue
+  (`rt::startup_descriptors`) ends it with lean-runtime's `INTERNAL PANIC:
+  Failed to initialize event loop: too many open files`, status 1. Test
+  `RtStartupFdExhausted`.
 - *LB-11, `Nat.pow` with an exponent of 2^32 or more*
   ([LB-11](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#limits);
   this and the next four are lean-bugs.md's "Limits", implementation caps
@@ -3495,7 +3539,9 @@ difference, it pins native's output and lean2rr's in expectation files,
   waiting for a child process) block the whole program, where natively
   only the calling thread waits: a task reading a pipe that another task
   of the program writes, or that a child writes only after the program has
-  done something else, waits forever. Name resolution
+  done something else, waits forever. (lean-runtime's io makes these
+  calls cooperate with its own scheduler, `sched`, which lean2rr does not
+  use yet: without it they are the same plain blocking calls.) Name resolution
   (`Std.Async.DNS`) runs `getaddrinfo` at once, so a slow lookup holds up
   the other tasks and timers meanwhile (natively it runs on libuv's thread
   pool).

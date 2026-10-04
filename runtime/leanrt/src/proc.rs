@@ -1,362 +1,207 @@
-//! Child processes (`IO.Process.spawn` & co.), following the POSIX part of
-//! Lean's `src/runtime/process.cpp`: `fork` + `execvp`, pipes created with
-//! `O_CLOEXEC`, the parent's ends wrapped as handles (`fdopen` "w" for the
-//! child's stdin, "r" for its stdout/stderr), `waitpid` with bash's
-//! `128 + signal` convention, `kill`/`killpg` with `SIGKILL`.
+//! Glue for child processes (`IO.Process.spawn`, the `Child` operations,
+//! `IO.Process.output`) over lean-runtime's `io::process`, which spawns as
+//! Lean's `process.cpp` does (through `posix_spawn`, with the forked child's
+//! steps reproduced: see that module).
 //!
-//! One deliberate difference: a `null` stream's `/dev/null` is opened by the
-//! parent, close-on-exec, before the fork, where Lean's forked child opens
-//! it, keeps the descriptor (the program inherits it, LB-15) and ignores a
-//! failed open (the program then runs on the parent's own stream, LB-17);
-//! both are bugs in Lean's runtime (lean-runtime's docs/lean-bugs.md) that
-//! lean2rr does not reproduce.
+//! lean2rr's `Child` is a structure of its three stream fields (an `LHandle`
+//! for a piped stream) and two hidden fields, the pid and the `setsid` flag
+//! (lean2rr/LeanToReussir/Lower/Process.lean). lean-runtime's process object
+//! (`ChildProcess`: the pid, the flag, and the state of a child it models
+//! when no stand-in process can be started) is kept here by pid, for
+//! `wait`, `tryWait` and `kill`, until the child is reaped; a pid with no
+//! entry (a reaped child's) gets the system call itself, as natively.
 //!
-//! Errors are recorded in the last-error slot as `decode_io_error(errno,
-//! nullptr)` (no file name).
+//! Errors are recorded in the last-error slot (`fs::record`).
 
-use crate::cfile::{errno_now, NO_READS, NO_WRITES};
-use crate::fs::{handle_from_fd, set_err, set_ok, LHandle};
+use crate::fs::{record, wrap, LHandle, Sink};
+use crate::string::{from_bytes, LStr};
+use lean_runtime::io::process::{self as lproc, ChildProcess, SpawnArgs, Stdio, StdioConfig};
+use lean_runtime::io::Handle;
 use std::cell::UnsafeCell;
-use std::ffi::{c_char, c_int};
-
-extern "C" {
-    fn pipe2(fds: *mut c_int, flags: c_int) -> c_int;
-    fn fork() -> c_int;
-    fn execvp(file: *const c_char, argv: *const *const c_char) -> c_int;
-    fn dup2(old: c_int, new: c_int) -> c_int;
-    fn close(fd: c_int) -> c_int;
-    fn open(path: *const c_char, flags: c_int, ...) -> c_int;
-    fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
-    fn chdir(path: *const c_char) -> c_int;
-    fn setsid() -> c_int;
-    fn clearenv() -> c_int;
-    fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;
-    fn unsetenv(name: *const c_char) -> c_int;
-    fn write(fd: c_int, buf: *const std::ffi::c_void, n: usize) -> isize;
-    fn _exit(code: c_int) -> !;
-    fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
-    fn kill(pid: c_int, sig: c_int) -> c_int;
-    fn killpg(pgrp: c_int, sig: c_int) -> c_int;
-    fn abort() -> !;
-}
-
-const O_RDONLY: c_int = 0;
-const O_WRONLY: c_int = 1;
-const O_CLOEXEC: c_int = 0o2000000;
-const F_SETFD: c_int = 2;
-const WNOHANG: c_int = 1;
-const SIGKILL: c_int = 9;
-
-/// `IO.Process.Stdio` constructor indices.
-const PIPED: u8 = 0;
-const NUL: u8 = 2;
+use std::collections::HashMap;
 
 struct Global<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Global<T> {}
 
 /// The parent's ends of the last spawned child's piped streams.
-static ENDS: Global<[Option<LHandle>; 3]> = Global(UnsafeCell::new([None, None, None]));
+static ENDS: Global<[Option<Handle>; 3]> = Global(UnsafeCell::new([None, None, None]));
 
-/// A C string of the bytes up to the first NUL (as `string_cstr` is read).
-fn cstr(s: &[u8]) -> Vec<u8> {
-    let n = s.iter().position(|&b| b == 0).unwrap_or(s.len());
-    let mut v = s[..n].to_vec();
-    v.push(0);
-    v
+/// The spawned children's process objects, by pid.
+static CHILDREN: Global<Option<HashMap<u32, ChildProcess>>> = Global(UnsafeCell::new(None));
+
+fn children() -> &'static mut HashMap<u32, ChildProcess> {
+    unsafe { (*CHILDREN.0.get()).get_or_insert_with(HashMap::new) }
 }
 
-/// What the child process writes to stderr on a failure before `exec`
-/// (`std::cerr << ... << std::endl`), then `_exit(-1)`. `std::cerr` is tied
-/// to `std::cout`, so the first `<<` flushes C `stdout` first: the parent's
-/// pending stdout bytes, inherited by `fork`, go to the child's descriptor 1
-/// (a pipe that `IO.Process.output` captures, or the parent's own stdout,
-/// where the parent writes them again later).
-fn child_fail(parts: &[&[u8]]) -> ! {
-    crate::io::flush_stdout();
-    for p in parts {
-        unsafe { write(2, p.as_ptr() as *const std::ffi::c_void, p.len()) };
-    }
-    unsafe { _exit(-1) }
+/// `IO.Process.Stdio` of a constructor index.
+fn stdio(i: u32) -> Stdio {
+    Stdio::from_index(i as u8).unwrap_or(Stdio::Null)
 }
 
-/// `IO.Process.spawn`: start `cmd args` with the stdio modes
-/// (`modes` = stdin | stdout << 8 | stderr << 16, `IO.Process.Stdio`
-/// indices), working directory `cwd` (if `has_cwd`), the environment
-/// changes `env` (name, `Some` value to set or `None` to unset; applied in
-/// order after clearing the environment unless `inherit_env`), in a new
-/// session if `new_session`. Returns the pid (0 on failure, with the error
-/// recorded); the parent's pipe ends are then `take_end(0..3)`.
-pub fn spawn(
-    cmd: &[u8],
-    args: &[&[u8]],
-    cwd: Option<&[u8]>,
-    env: &[(&[u8], Option<&[u8]>)],
-    modes: u32,
-    inherit_env: bool,
-    new_session: bool,
-) -> u32 {
-    let mode = [(modes & 0xff) as u8, ((modes >> 8) & 0xff) as u8, ((modes >> 16) & 0xff) as u8];
+/// `IO.Process.spawn`: start `args` with the stdio modes (`modes` = stdin |
+/// stdout << 8 | stderr << 16, `IO.Process.Stdio` indices). Returns the pid
+/// (0 on failure, with the error recorded); the parent's pipe ends are then
+/// `take_end(0..3)`.
+pub fn spawn(args: &SpawnArgs, modes: u32) -> u32 {
     // A child is an effect: what other threads would have done by now
     // (their output) comes first (`sched::effect`).
     crate::sched::effect();
-    // `lean_io_process_spawn`: `std::cout.flush()` before a child inherits stdin.
-    if mode[0] == 1 {
-        crate::io::flush_stdout();
-    }
     let ends = unsafe { &mut *ENDS.0.get() };
     *ends = [None, None, None];
-    // Pipes, in order, before anything else (`setup_stdio`).
-    let mut pipes: [Option<[c_int; 2]>; 3] = [None, None, None];
-    for i in 0..3 {
-        if mode[i] == PIPED {
-            let mut fds = [0 as c_int; 2];
-            if unsafe { pipe2(fds.as_mut_ptr(), O_CLOEXEC) } == -1 {
-                // Native leaks the pipes already made; so do we.
-                set_err(errno_now(), None);
-                return 0;
-            }
-            pipes[i] = Some(fds);
+    let cfg = StdioConfig { stdin: stdio(modes & 0xff), stdout: stdio((modes >> 8) & 0xff), stderr: stdio((modes >> 16) & 0xff) };
+    match record(lproc::spawn(cfg, args)) {
+        Some(c) => {
+            *ends = [c.stdin, c.stdout, c.stderr];
+            let pid = c.process.pid();
+            children().insert(pid, c.process);
+            pid
         }
-    }
-    // `null` streams: `/dev/null` (read-only for stdin, write-only
-    // otherwise), opened here, close-on-exec, after the pipes, so that the
-    // pipes get native's descriptor numbers; the parent closes them again
-    // after the fork. Natively the forked child opens it without
-    // close-on-exec and never closes it after `dup2`, so the program inherits
-    // an extra descriptor (LB-15), and ignores a failed open, so the program
-    // runs on the parent's own descriptor (LB-17). Here a failed open (EMFILE
-    // in a parent out of descriptors) is the spawn's error, as a failed pipe
-    // is; nothing natively corresponds to it, so the pipes and `/dev/null`
-    // descriptors made so far are closed (a failed `pipe2` leaks the earlier
-    // pipes, as natively). A spawn in which some `null` stream follows a
-    // piped one therefore needs exactly one more free descriptor than
-    // natively (one in all, however many such streams), where the child has
-    // closed the pipe's other end before its open; any other spawn needs as
-    // many (review RLB-01).
-    let mut nulls: [c_int; 3] = [-1; 3];
-    let dev_null = b"/dev/null\0";
-    for i in 0..3 {
-        if mode[i] == NUL {
-            let flags = if i == 0 { O_RDONLY } else { O_WRONLY };
-            let fd = unsafe { open(dev_null.as_ptr() as *const c_char, flags | O_CLOEXEC) };
-            if fd == -1 {
-                let errno = errno_now();
-                close_all(&nulls, &pipes);
-                set_err(errno, None);
-                return 0;
-            }
-            nulls[i] = fd;
-        }
-    }
-    // Everything the child needs, allocated before `fork`.
-    let cmd_c = cstr(cmd);
-    let args_c: Vec<Vec<u8>> = args.iter().map(|a| cstr(a)).collect();
-    let mut argv: Vec<*const c_char> = vec![cmd_c.as_ptr() as *const c_char];
-    argv.extend(args_c.iter().map(|a| a.as_ptr() as *const c_char));
-    argv.push(std::ptr::null());
-    let env_c: Vec<(Vec<u8>, Option<Vec<u8>>)> = env.iter().map(|(k, v)| (cstr(k), v.map(cstr))).collect();
-    let cwd_c = cwd.map(cstr);
-    let pid = unsafe { fork() };
-    if pid == 0 {
-        unsafe {
-            if !inherit_env {
-                clearenv();
-            }
-            for (k, v) in &env_c {
-                match v {
-                    Some(v) => setenv(k.as_ptr() as *const c_char, v.as_ptr() as *const c_char, 1),
-                    None => unsetenv(k.as_ptr() as *const c_char),
-                };
-            }
-            for i in 0..3 {
-                let target = i as c_int;
-                if let Some([r, w]) = pipes[i] {
-                    if i == 0 {
-                        dup2(r, target);
-                        close(w);
-                    } else {
-                        dup2(w, target);
-                        close(r);
-                    }
-                } else if mode[i] == NUL {
-                    // `dup2`'s copy is not close-on-exec; where `/dev/null`
-                    // got number i itself (descriptor i was closed in the
-                    // parent), the flag is cleared in place.
-                    let fd = nulls[i];
-                    if fd == target {
-                        fcntl(fd, F_SETFD, 0 as c_int);
-                    } else {
-                        dup2(fd, target);
-                    }
-                }
-            }
-            if let Some(d) = &cwd_c {
-                if chdir(d.as_ptr() as *const c_char) < 0 {
-                    child_fail(&[b"could not change directory to ", &d[..d.len() - 1], b"\n"]);
-                }
-            }
-            if new_session && setsid() < 0 {
-                abort();
-            }
-            execvp(argv[0], argv.as_ptr());
-            child_fail(&[b"could not execute external process '", &cmd_c[..cmd_c.len() - 1], b"'\n"]);
-        }
-    } else if pid == -1 {
-        // Native leaks the pipes; the `/dev/null` descriptors are ours.
-        let errno = errno_now();
-        close_all(&nulls, &[None, None, None]);
-        set_err(errno, None);
-        return 0;
-    }
-    close_all(&nulls, &[None, None, None]);
-    for i in 0..3 {
-        if let Some([r, w]) = pipes[i] {
-            let (keep, other, flags) = if i == 0 { (w, r, NO_READS) } else { (r, w, NO_WRITES) };
-            unsafe { close(other) };
-            ends[i] = Some(handle_from_fd(keep, flags));
-        }
-    }
-    set_ok();
-    pid as u32
-}
-
-/// Closes the open descriptors among `nulls` (-1: none) and `pipes`.
-fn close_all(nulls: &[c_int; 3], pipes: &[Option<[c_int; 2]>; 3]) {
-    for &fd in nulls {
-        if fd != -1 {
-            unsafe { close(fd) };
-        }
-    }
-    for [r, w] in pipes.iter().flatten() {
-        unsafe {
-            close(*r);
-            close(*w);
-        }
+        None => 0,
     }
 }
 
 /// The parent's end of stream `i` (0 stdin, 1 stdout, 2 stderr) of the last
-/// spawned child, or a closed handle when that stream was not piped.
+/// spawned child, or a handle that is not open when that stream was not
+/// piped.
 pub fn take_end(i: u64) -> LHandle {
     let ends = unsafe { &mut *ENDS.0.get() };
-    ends.get_mut(i as usize).and_then(|e| e.take()).unwrap_or_else(|| handle_from_fd(-1, 0))
+    wrap(ends.get_mut(i as usize).and_then(|e| e.take()))
 }
 
-/// stderr's bytes from the last `drain`.
-static DRAINED_ERR: Global<Vec<u8>> = Global(UnsafeCell::new(Vec::new()));
+/// The process object of a child spawned here and not yet reaped (a clone:
+/// the pid, the flag and a shared modelled state).
+fn child(pid: u32) -> Option<ChildProcess> {
+    children().get(&pid).cloned()
+}
 
-#[repr(C)]
-struct PollFd {
-    fd: c_int,
-    events: i16,
-    revents: i16,
+/// The child has been reaped: its entry goes (review RST3-04). Natively the
+/// pid then names no child of the program, and a later `wait`, `tryWait` or
+/// `kill` of it is a plain system call on the pid (`os_wait`, `os_kill`).
+fn reaped(pid: u32) {
+    children().remove(&pid);
 }
 
 extern "C" {
-    fn poll(fds: *mut PollFd, n: u64, timeout: c_int) -> c_int;
+    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn kill(pid: i32, sig: i32) -> i32;
+    fn killpg(pgrp: i32, sig: i32) -> i32;
+    fn __errno_location() -> *mut i32;
 }
 
-const POLLIN: i16 = 1;
-const EINTR: i32 = 4;
-
-/// `IO.Process.output`'s reads of a child's piped stdout and stderr to end
-/// of file. Natively stdout is read by a dedicated task while the main
-/// thread reads stderr, so a child writing much to either never blocks;
-/// here both are read in turn as data arrives (`poll`). Returns stdout's
-/// bytes; stderr's are then `take_drained_err()`. A read error is recorded
-/// (the first one; natively stderr's is raised before the child is waited
-/// for, stdout's after), and reading stops.
-pub fn drain(out: &LHandle, err: &LHandle) -> Vec<u8> {
-    let (mut o, mut e) = (Vec::new(), Vec::new());
-    let mut done = [false, false];
-    let mut failure: Option<i32> = None;
-    let files = [crate::fs::fh(out) as *mut crate::cfile::CFile, crate::fs::fh(err) as *mut crate::cfile::CFile];
-    // Closed handles (streams that were not piped) have nothing to read.
-    for i in 0..2 {
-        if unsafe { (*files[i]).fd } < 0 {
-            done[i] = true;
-        }
-    }
-    while failure.is_none() && !(done[0] && done[1]) {
-        let mut fds: Vec<PollFd> = Vec::new();
-        let mut which = Vec::new();
-        for i in 0..2 {
-            if !done[i] {
-                fds.push(PollFd { fd: unsafe { (*files[i]).fd }, events: POLLIN, revents: 0 });
-                which.push(i);
-            }
-        }
-        let r = unsafe { poll(fds.as_mut_ptr(), fds.len() as u64, -1) };
-        if r < 0 {
-            if errno_now() == EINTR {
-                continue;
-            }
-            failure = Some(errno_now());
-            break;
-        }
-        for (k, pfd) in fds.iter().enumerate() {
-            if pfd.revents == 0 {
-                continue;
-            }
-            let i = which[k];
-            match unsafe { (*files[i]).read_some() } {
-                Ok(bytes) if bytes.is_empty() => done[i] = true,
-                Ok(bytes) => (if i == 0 { &mut o } else { &mut e }).extend_from_slice(&bytes),
-                Err(errno) => {
-                    failure = Some(errno);
-                    break;
-                }
-            }
-        }
-    }
-    unsafe { *DRAINED_ERR.0.get() = e };
-    match failure {
-        Some(errno) => set_err(errno, None),
-        None => set_ok(),
-    }
-    o
+/// `decode_io_error(errno, nullptr)` of the system call that just failed,
+/// with lean-runtime's model of `errno` set as the call set C's.
+fn os_error() -> lean_runtime::io::IoError {
+    let e = unsafe { *__errno_location() };
+    lean_runtime::io::error::set_errno(e);
+    lean_runtime::io::IoError::decode_io_error(e, None)
 }
 
-/// stderr's bytes from the last `drain`.
-pub fn take_drained_err() -> Vec<u8> {
-    std::mem::take(unsafe { &mut *DRAINED_ERR.0.get() })
-}
-
-fn decode_status(status: c_int) -> u32 {
-    if status & 0x7f == 0 {
-        ((status >> 8) & 0xff) as u32
-    } else {
-        128 + (status & 0x7f) as u32
+/// `lean_io_process_child_wait`/`try_wait` of a pid that names no child this
+/// runtime holds (one already reaped): `waitpid` itself, as natively (it
+/// fails with `ECHILD`). The status as Lean reports it (128 + signal when
+/// killed), `None` while running.
+fn os_wait(pid: u32, nohang: bool) -> Result<Option<u32>, lean_runtime::io::IoError> {
+    let mut st = 0i32;
+    match unsafe { waitpid(pid as i32, &mut st, if nohang { 1 } else { 0 }) } {
+        -1 => Err(os_error()),
+        0 => Ok(None),
+        _ => Ok(Some(if st & 0x7f == 0 { ((st >> 8) & 0xff) as u32 } else { 128 + (st & 0x7f) as u32 })),
     }
 }
 
 /// `Child.wait`: the exit code (`128 + signal` if killed).
 pub fn wait(pid: u32) -> u32 {
-    let mut status: c_int = 0;
-    if unsafe { waitpid(pid as c_int, &mut status, 0) } == -1 {
-        set_err(errno_now(), None);
-        return 0;
+    let r = match child(pid) {
+        Some(c) => c.wait(),
+        None => os_wait(pid, false).map(|s| s.unwrap_or(0)),
+    };
+    if r.is_ok() {
+        reaped(pid);
     }
-    set_ok();
-    decode_status(status)
+    record(r).unwrap_or(0)
 }
 
 /// `Child.tryWait`: `(1 << 32) | code` once the child has exited, 0 while it
 /// runs.
 pub fn try_wait(pid: u32) -> u64 {
-    let mut status: c_int = 0;
-    let r = unsafe { waitpid(pid as c_int, &mut status, WNOHANG) };
-    if r == -1 {
-        set_err(errno_now(), None);
-        return 0;
+    let r = match child(pid) {
+        Some(c) => c.try_wait(),
+        None => os_wait(pid, true),
+    };
+    if let Ok(Some(_)) = r {
+        reaped(pid);
     }
-    set_ok();
-    if r == 0 { 0 } else { (1u64 << 32) | decode_status(status) as u64 }
+    match record(r) {
+        Some(Some(code)) => (1u64 << 32) | code as u64,
+        _ => 0,
+    }
 }
 
 /// `Child.kill`: `SIGKILL` to the child (to its process group if it was
-/// spawned with `setsid`).
+/// spawned with `setsid`, which lean2rr's `Child` keeps through `takeStdin`,
+/// as lean-runtime does: LB-14). A reaped child's pid is signalled as
+/// natively, `kill`/`killpg` itself (`ESRCH` unless the pid was reused).
 pub fn kill_child(pid: u32, new_session: bool) {
-    let r = unsafe { if new_session { killpg(pid as c_int, SIGKILL) } else { kill(pid as c_int, SIGKILL) } };
-    if r == -1 { set_err(errno_now(), None) } else { set_ok() }
+    match child(pid) {
+        Some(c) => {
+            record(c.kill());
+        }
+        None => {
+            const SIGKILL: i32 = 9;
+            let r = unsafe { if new_session { killpg(pid as i32, SIGKILL) } else { kill(pid as i32, SIGKILL) } };
+            record(if r == -1 { Err(os_error()) } else { Ok(()) });
+        }
+    }
+}
+
+/// The standard output and standard error of the last `output`.
+static OUTPUT: Global<(Vec<u8>, Vec<u8>)> = Global(UnsafeCell::new((Vec::new(), Vec::new())));
+
+/// `IO.Process.output args input?` (lean-runtime's `io::process::output`):
+/// the exit code, its two outputs then `take_output(1)` and `(2)` (valid
+/// UTF-8); failures recorded. A sink that could not grow ends the process
+/// once lean-runtime has returned (`INTERNAL PANIC: out of memory`; AR-5).
+pub fn output(args: &SpawnArgs, input: Option<&[u8]>) -> u32 {
+    crate::sched::effect();
+    let (mut o, mut e) = (Sink::default(), Sink::default());
+    let r = lproc::output(args, input, &mut o, &mut e);
+    let (o, e) = (o.finish(), e.finish());
+    let code = record(r);
+    unsafe { *OUTPUT.0.get() = if code.is_some() { (o, e) } else { (Vec::new(), Vec::new()) } };
+    code.unwrap_or(0)
+}
+
+/// The last `output`'s standard output (1) or standard error (2).
+pub fn take_output(which: u64) -> LStr {
+    let out = unsafe { &mut *OUTPUT.0.get() };
+    from_bytes(&std::mem::take(if which == 1 { &mut out.0 } else { &mut out.1 }))
+}
+
+/// The arguments of a spawn as lean-runtime's views of lean2rr's values,
+/// for `f`: the command, the arguments, the working directory (if
+/// `has_cwd`), the environment changes as parallel arrays (names, values,
+/// whether the value is `some`: set, else unset), `inheritEnv` and
+/// `setsid`.
+#[allow(clippy::too_many_arguments)]
+pub fn with_args<R>(
+    cmd: &LStr,
+    args: &crate::array::RVec<LStr>,
+    cwd: &LStr,
+    has_cwd: bool,
+    env_names: &crate::array::RVec<LStr>,
+    env_values: &crate::array::RVec<LStr>,
+    env_set: &crate::array::RVec<bool>,
+    inherit_env: bool,
+    setsid: bool,
+    f: impl FnOnce(&SpawnArgs) -> R,
+) -> R {
+    use crate::string::Utf8;
+    let argv: Vec<&[u8]> = crate::array::as_slice(args).iter().map(|a| a.utf8()).collect();
+    let names = crate::array::as_slice(env_names);
+    let values = crate::array::as_slice(env_values);
+    let set = crate::array::as_slice(env_set);
+    let env: Vec<(&[u8], Option<&[u8]>)> = (0..names.len())
+        .map(|i| (names[i].utf8(), if set.get(i).copied().unwrap_or(false) { values.get(i).map(|v| v.utf8()) } else { None }))
+        .collect();
+    f(&SpawnArgs { cmd: cmd.utf8(), args: &argv, cwd: if has_cwd { Some(cwd.utf8()) } else { None }, env: &env, inherit_env, setsid })
 }

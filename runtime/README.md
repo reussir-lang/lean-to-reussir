@@ -9,11 +9,13 @@ The runtime has these parts:
 - `leanrt/` — a Rust crate (rlib) linked into every program. The prelude's
   `#[ffi(import)]` textures call into it. It holds lean2rr's
   representations (strings, arrays, tagged arrays, cells) and the glue
-  around lean-runtime's rules, the bignum code (GMP), buffered stdio, files, once-cells,
-  panics and the main-thread setup, the task scheduler and its contexts,
-  `Std.Sync`'s locks and the event loop of timers and sockets — and, being
-  a single crate, the one copy of all global state (statics in the
-  prelude's `extern "rust"` block would be duplicated per texture).
+  around lean-runtime's rules and IO (files, standard streams, the file
+  system, processes, `Std.Internal.UV.System`, the startup descriptors and
+  the exit: `fs`, `io`, `proc`, `sys`, `rt`), the bignum code (GMP),
+  once-cells, panics and the main-thread setup, the task scheduler and its
+  contexts, `Std.Sync`'s locks and the event loop of timers and sockets —
+  and, being a single crate, the one copy of all global state (statics in
+  the prelude's `extern "rust"` block would be duplicated per texture).
 - `lean2rr/L2RShim.lean` (built with lean2rr) — Lean implementations of the
   `Std.Internal.UV` externs (timers, sockets, name resolution, signals,
   `Std.Net` addresses), `Std.Time.Timestamp.now` (over
@@ -22,10 +24,11 @@ The runtime has these parts:
   C symbols, which lean2rr compiles with the program over the event loop's
   `l2r_shim_*` primitives (below).
 - `third_party/lean-runtime` (a git submodule) — the crate `lean_runtime`,
-  Lean's runtime behaviour shared with another Lean translator. The
-  rules it has are its alone: the prelude's textures (as `sem::...`) and
-  `leanrt` call it and only convert lean2rr's values to its views and back
-  ("The shared crate lean-runtime", below).
+  Lean's runtime behaviour shared with another Lean translator: its
+  `semantics` and, with its features `io` and `proc-title`, its OS-level IO.
+  The rules it has are its alone: the prelude's textures (as `sem::...`)
+  and `leanrt` call it and only convert lean2rr's values to its views and
+  back ("The shared crate lean-runtime", below).
 
 Semantics follow Lean 4.34's C runtime (`lean.h`, `src/runtime/*.cpp`)
 exactly; comments at each function say which C function it mirrors. Inline
@@ -99,7 +102,7 @@ and hot paths in `leanrt` and the prelude, which call lean-runtime for the
 rest.
 
 - **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
-  pinned at a commit of its `main` (now `1c36a58`). Clone lean2rr with
+  pinned at a commit of its `main` (now `e95ca47`). Clone lean2rr with
   `git clone --recurse-submodules`, or run `git submodule update --init
   third_party/lean-runtime` in a checkout, and again after a checkout,
   merge or pull that moves the pin: git does not update a submodule on its
@@ -116,44 +119,41 @@ rest.
   print nothing, then `git worktree remove --force WT`. Never run `git
   submodule deinit` in a worktree: it deletes the submodule's entries from
   the shared `.git/config`, for the main checkout and every worktree.
-- **The build without dependencies.** While the features lean2rr enables
-  need no dependency (none are enabled; lean-runtime's optional `io` and
-  `sched` features have dependencies, which a build without them never
-  compiles): plain rustc, no cargo, nothing
-  downloaded: `--crate-type rlib`, the edition from lean-runtime's
-  `Cargo.toml`, the features lean2rr enables (none yet; `default` and
-  `L2R_LEAN_RUNTIME_FEATURES` are added, as `--cfg feature="..."`), so its
-  `#![forbid(unsafe_code)]` holds (lints are not capped), and leanrt's
-  rustc and flags (`-C opt-level=3`, the native-CPU flags above,
-  `L2R_LEANRT_RUSTFLAGS`). Cached by a hash of the manifest and of every
-  file rustc read (its dep-info, so `include_str!` of a file outside `src/`
-  counts). `l2r.py` refuses what a plain rustc build would get wrong: a
-  `[lints]` table, an edition inherited from a workspace.
-- **The build with dependencies.** Once lean-runtime has a dependency
-  that is not optional or a build script, or lean2rr enables a feature
-  that needs a dependency (`L2R_LEAN_RUNTIME_FEATURES=io`, say), the pinned
-  toolchain's cargo builds it: `cargo build --offline --locked --release --lib [--features
-  ...]` from inside the checkout, from the crates in cargo's registry cache
+- **The build.** lean2rr enables lean-runtime's features `io` (its
+  OS-level IO, over rustix, nix and io-uring) and `proc-title` (the process
+  title in the arguments' memory: a native quirk written with `unsafe`,
+  `UNSAFE.md` in the submodule), not `sched` (leanrt keeps its own task
+  scheduler for now). The dependencies' build scripts need cargo, so the
+  pinned toolchain's cargo builds it: `cargo build --offline --locked
+  --release --lib --features io,proc-title[,...]` from inside the
+  checkout, from the crates in cargo's registry cache
   (`~/.cargo/registry`) at the versions its committed `Cargo.lock` names
   (so nothing is written in the checkout; lean-runtime has no `vendor/`),
-  with `RUSTC` and `RUSTFLAGS` set to leanrt's rustc and flags, and a
-  target directory under leanrt's. Fill the cache once with `cargo fetch
-  --locked` in the lean-runtime checkout (the pinned toolchain's cargo);
-  `l2r.py` says so when a crate is missing, and every build after it is
-  offline. The rlibs come from cargo's JSON messages; linked are those of
-  the packages lean-runtime's normal dependencies reach on this host
-  (`cargo metadata --filter-platform`; a build script's own dependencies,
-  such as `cfg_aliases`, are not), each before the packages it depends on;
-  the environment's `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and
+  with `RUSTC` and `RUSTFLAGS` set to leanrt's rustc and flags (`-C
+  opt-level=3` comes from cargo's release profile; the native-CPU flags
+  above, `L2R_LEANRT_RUSTFLAGS`), and a target directory under leanrt's.
+  Fill the cache once with `cargo fetch --locked` in the lean-runtime
+  checkout (the pinned toolchain's cargo); `l2r.py` says so when a crate is
+  missing, and every build after it is offline. The rlibs come from
+  cargo's JSON messages; linked are those of the packages lean-runtime's
+  normal dependencies reach on this host (`cargo metadata
+  --filter-platform`; a build script's own dependencies, such as
+  `cfg_aliases`, are not), each before the packages it depends on; the
+  environment's `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and
   `CARGO_TARGET_*_RUSTFLAGS` are removed, since they would override
-  `RUSTFLAGS`. Cargo's fingerprints are the cache. Build scripts run as cargo runs them;
-  one that links native libraries is refused (`l2r.py` does not pass those
-  on yet). leanrt itself stays a plain rustc build.
+  `RUSTFLAGS`. Cargo's fingerprints are the cache. Build scripts run as
+  cargo runs them; one that links native libraries is refused (`l2r.py`
+  does not pass those on yet). leanrt itself stays a plain rustc build.
+  `proc-title`'s ELF constructor is lean-runtime's own: the title
+  functions refer to it, so the linker keeps its object in every program
+  that calls them (checked by the title tests, `RtSystem` and
+  lean-runtime's `uvsys/process_title`, `title_cmdline`).
 - **Trying another lean-runtime.** `L2R_LEAN_RUNTIME=<checkout>` builds
   that checkout instead of the submodule (its checked-out commit is not
   compared with the pin), in its own directory (`target/.../lr-<hash>/`),
   e.g. a lean-runtime branch whose merge waits for lean2rr's suite;
-  `L2R_LEAN_RUNTIME_FEATURES=io,...` adds features. `tests/runtime/leanrt-unit.sh`
+  `L2R_LEAN_RUNTIME_FEATURES=sched,...` adds features to `io` and
+  `proc-title`. `tests/runtime/leanrt-unit.sh`
   and the test runners (through `l2r.py`) follow both.
 - **Moving the pin.** Each project moves its pin only after its own suite
   passes on the new commit:
@@ -217,6 +217,48 @@ rest.
   - `repr`: the decimal digits of a word (`decimal_u64_bytes`:
     `USize.repr`, `Nat.repr`, `Int.repr`; a big number's are its
     `write_decimal`, GMP's `mpz_get_str`).
+
+  and, from its `io` module (features `io`, `proc-title`):
+  - `handle`, `cfile`: `IO.FS.Handle` and the three standard streams,
+    glibc's `FILE` model behind each (buffering, read-ahead, positions, the
+    sticky indicators, LB-02), the open-handle list; `leanrt::fs` keeps a
+    `Handle` in an `LHandle` box (closed with the box's last reference, in
+    Lean's order inside a container's free), `leanrt::io` calls the
+    standard streams' handles. A read goes straight into the `ByteArray`'s
+    own block (`Handle::read_uninit` through `array::bytes_filled`);
+    `getLine` appends to a `Vec<u8>` (below, "Sinks");
+  - `error`: `IO.Error` as data (`IoError`), decoded from `errno`s and
+    libuv codes; `leanrt::fs` keeps the last one in its slot and gives its
+    builder number, code, file name and details to the generated glue
+    (below);
+  - `fs`, `temp`, `env`: the file system, temporary files, `IO.getEnv`,
+    `IO.appPath`, the pid, random bytes, the monotonic clock;
+  - `process`: `IO.Process.spawn` (over `posix_spawn`, the forked child's
+    steps reproduced; LB-15, LB-17), `wait`, `tryWait`, `kill` (LB-14),
+    `IO.Process.output` (`leanrt::proc` keeps each child's process object
+    by pid until it is reaped);
+  - `uvsys`: `Std.Internal.UV.System`'s queries (`leanrt::sys`, for the
+    shim), the process title written into the arguments' memory
+    (`proc-title`);
+  - `time`, `debug`: `timeit`'s line, `Std.Time.Timestamp.now`'s clock,
+    `allocprof`'s note;
+  - `startup`: native Lean's startup descriptors, which `leanrt::rt`'s ELF
+    constructor opens (a failure ends the program with lean-runtime's
+    message: LB-30, LB-31), and `IO.initializing`;
+  - `exit`: the exit sequence (every normal end of the process, through
+    `leanrt::io::exit`), `after_main` (`main`'s return and an uncaught
+    error), `show_error` (an uncaught error's text).
+
+  What stays lean2rr's: the current standard streams of `IO.setStdout` &
+  co. (lean2rr's cells of its own `IO.FS.Stream` records, generated with
+  the program and set aside per task: `IO.println` reads the current
+  stdout at every call, inline), the effect points of its scheduler before
+  each output and spawn (`sched::effect`), `IO.sleep` and `dbgSleep` (its
+  scheduler's sleep, which lets the other contexts run), `IO.getTID`,
+  `forceExit` (`_exit`, below) and the event loop (`leanrt::net`).
+  lean-runtime's no-`sched` path is plain blocking system calls, as
+  leanrt's own IO was: no wait of leanrt's IO cooperated with its
+  scheduler.
 
 ## Representations
 
@@ -315,7 +357,8 @@ capacity, `lean_copy_expand_array`). An array's elements
 start at offset 24 (every storage type is at most 8 bytes, 8-aligned), so
 a read is the handle plus an offset, with no load of a buffer pointer.
 Bytes read from a file, standard input or `/dev/urandom` are read into
-the array's block (`array::bytes_filled`, `CFile::read_into`); arrays
+the array's block (`array::bytes_filled`, lean-runtime's
+`Handle::read_uninit` and `RandomSource::fill_uninit`); arrays
 built from a Rust `Vec` (`array::from_vec`, `bytes_of_vec`: directory
 entries, a process's output, a socket's data) copy its elements once. A release
 (of an array, a string, a tag vector or a thunk/task cell)
@@ -583,17 +626,21 @@ UDP (`udp_new`, `udp_bind`, `udp_connect`, `udp_send`, `udp_option`,
 `lean_shim_uv_kind`, `lean_shim_uv_strerror` (libuv's error kinds and
 messages, by libuv code; the shim stores the positive errno, `-code`, in the
 `IO.Error`, as Lean 4.34's `lean_decode_uv_error`), `lean_shim_pton`, `lean_shim_ntop`; `Std.Internal.UV.System`
-over `leanrt::sys` (`sys_title_set`, `sys_query(which)` for the queries
+over `leanrt::sys`, the glue of lean-runtime's `io::uvsys`
+(`sys_title_set` (0 or a libuv error), `sys_query(which)` for the queries
 with a string or several results, the process title included,
 `sys_group`, `sys_getenv`, `sys_priority`, `sys_word(which)` for single
-numbers, `sys_chdir`, `sys_setenv`, `sys_setpriority`, `sys_random`),
-following libuv's Linux code (`/proc/uptime`, `/proc/stat`,
-`/proc/meminfo`, the cgroup's memory limit, `getpwuid_r`, ...) with the
-buffers Lean passes (`UV_ENOBUFS` for a home or temporary directory of
-`PATH_MAX` bytes or more, a process title of 512 or more) and libuv's
-argument checks (a priority outside [-20, 19], `random` of more than
-`0x7FFFFFFF` bytes, an empty host name or one of 256 bytes or more for
-`getAddrInfo`). An operation's strings are decoded as `lean_mk_string`
+numbers, `sys_chdir`, `sys_setenv`, `sys_setpriority`, `sys_random`):
+lean-runtime's ports of libuv's Linux code with the buffers Lean passes
+(`UV_ENOBUFS` for a home or temporary directory of `PATH_MAX` bytes or
+more, a process title of 512 or more) and libuv's argument checks (a
+priority outside [-20, 19], `random` of more than `0x7FFFFFFF` bytes);
+`setProcessTitle` writes the title into the arguments' memory, so
+`/proc/self/cmdline` shows it, as natively (feature `proc-title`). A
+lean-runtime error (`decode_uv_error(code, name)`) reaches the shim as its
+libuv code (`sys::uv_code`), from which the shim builds the same
+`IO.Error`. The event loop's own checks: an empty host name or one of 256
+bytes or more for `getAddrInfo`. An operation's strings are decoded as `lean_mk_string`
 does (invalid UTF-8 becomes U+FFFD). Addresses are byte arrays:
 the family (4 or 6), the port (big-endian, for socket addresses), the
 address bytes. `l2r_uv_event_loop_alive()` is true, as natively. A promise
@@ -619,15 +666,17 @@ Lean's forced panic message, then the running context blocks forever
 (`task::hang`), as natively the calling thread does: the other tasks and
 `main` go on.
 
-**Fallible IO** (files, standard streams): primitives record their outcome
-in a global last-error slot; the glue is
+**Fallible IO** (files, standard streams, processes): primitives record
+their outcome in a global last-error slot (`leanrt::fs`: nothing, or
+lean-runtime's `IoError`); the glue is
 
     let v = l2r_fs_open(path, modeIndex);
     l2r_io_finish(v, |v| EST.Out.ok(v), |kind| |errno| |fname| |details| mkError)
 
 where `mkError` builds the `IO.Error` with the `lean_mk_io_error_*`
-constructor (exported Lean functions) numbered `kind`, as Lean's
-`decode_io_error`:
+constructor (exported Lean functions) numbered `kind` (`fs::kind_of`: the
+`IoError`'s constructor, and for those with an optional file name whether
+it has one):
 
 | kind | constructor (`lean_mk_io_error_…`) | kind | constructor |
 |---|---|---|---|
@@ -644,21 +693,22 @@ constructor (exported Lean functions) numbered `kind`, as Lean's
 | 10 | `inappropriate_type_file(fname, errno, details)` | 22 | `unsupported_operation(errno, details)` |
 | 11 | `no_such_thing(errno, details)` | 23 | `IO.userError(details)` |
 
-Since Lean 4.34 the kind and the details come from libuv's code for the
-errno (`decode_uv_error_impl` in io.cpp; `leanrt::fs::crt_to_uv`, which
-maps the errnos libuv cannot represent to the closest code it can, e.g.
-`EBADMSG` to `EPROTO`, a protocol error): the details are `uv_strerror`'s
-("illegal operation on a directory" for `EISDIR`, "Unknown system error
--122" for an errno libuv has no name for), not `strerror`'s; the error code
-stays the errno. The operations Lean implements with libuv (`removeFile`,
-`hardLink`, `metadata`, `symlinkMetadata`, `createTempFile`,
-`createTempDir`) report errors as `decode_uv_error`: classified by libuv's
-code (errnos it has no case for are kind 0), `uv_strerror`'s details, and
-the positive errno as the error code (`2` for `ENOENT`; Lean 4.33 stored
-libuv's negated code, `4294967294`). `leanrt`'s unit test `fs_tests.rs`
-checks both decoders against native Lean for every errno 0..140 (test
-`RtIOErrorDecode` checks reachable cases end to end). Kind 23 is Lean's
-`io_result_mk_error(msg)` (`IO.currentDir`, `IO.appPath`).
+The decoding is lean-runtime's (`io::error`): since Lean 4.34 the kind and
+the details come from libuv's code for the errno (`decode_uv_error_impl`
+in io.cpp; `crt_to_uv` maps the errnos libuv cannot represent to the
+closest code it can, e.g. `EBADMSG` to `EPROTO`, a protocol error): the
+details are `uv_strerror`'s ("illegal operation on a directory" for
+`EISDIR`, "Unknown system error -122" for an errno libuv has no name for),
+not `strerror`'s; the error code stays the errno. The operations Lean
+implements with libuv (`removeFile`, `hardLink`, `metadata`,
+`symlinkMetadata`, `createTempFile`, `createTempDir`) report errors as
+`decode_uv_error`: classified by libuv's code (errnos it has no case for
+are kind 0), `uv_strerror`'s details, and the positive errno as the error
+code (`2` for `ENOENT`). `leanrt`'s unit test `fs_tests.rs` checks both
+decoders, through the slot, against native Lean for every errno 0..140
+(test `RtIOErrorDecode` checks reachable cases end to end). Kind 23 is
+Lean's `io_result_mk_error(msg)` (`IO.currentDir`, `IO.appPath`, a child's
+output that is not UTF-8).
 
 File primitives: `l2r_fs_open(path, mode)` (mode = `IO.FS.Mode` constructor
 index), `l2r_fs_put_str`, `l2r_fs_write`, `l2r_fs_flush`, `l2r_fs_read(h, n)`,
@@ -674,22 +724,40 @@ bit patterns), `l2r_fs_current_dir()`, `l2r_fs_app_path()`,
 `l2r_fs_create_tempfile() -> LHandle` (then `l2r_fs_temp_file_path()` is
 its path, for the `Handle × FilePath` pair), `l2r_fs_create_tempdir()`,
 `l2r_fs_get_random_bytes(n)` (`IO.getRandomBytes`, from `/dev/urandom`).
-The current directory (`getcwd`) and `realPath` (`realpath`) use a
-`PATH_MAX` buffer, as natively, so a longer path fails.
-**stdio model.** Handles and the standard streams are models of glibc's
-`FILE` (`leanrt/src/cfile.rs`, following libio's `fileops.c`/`genops.c`
-function by function): one `st_blksize` buffer shared by reading and
-writing with libio's get/put areas and cached offset; `fwrite`
-(`_IO_new_file_xsputn`, line-buffered tails flushed at each newline),
-`fread` (`_IO_file_xsgetn`, including direct reads of whole blocks),
-`getc`, `fflush`, `fseek` (in-buffer seeks), `ftello`; `EBADF` for the
-wrong direction after the same mode switch; sticky end-of-file and error
-indicators (after any failed operation on a handle, `getLine` fails, as
-natively); reading a terminal first flushes a line-buffered stdout. The
-same system calls happen in the same order, so the `errno`s are native's.
-At exit, stdout is flushed first (libc++'s `ios_base::Init`), then every
-`FILE`'s pending output, newest first, then used streams are synced (a
-seekable stdin is left at the position the program read up to).
+Each is a `leanrt::fs` function over lean-runtime's (`Handle`, `io::fs`,
+`io::temp`, `io::env`).
+
+**Sinks.** lean-runtime appends its results of unbounded size (a line, a
+path, a child's output) to a `ByteSink` the glue gives it; `getLine`
+appends while it holds the stream's lock. A line, a path, a name or an
+environment value goes into a plain `Vec<u8>`, infallible as
+lean-runtime's contract asks: a failed allocation aborts (Rust's `memory
+allocation of N bytes failed`, status 134; native's `std::bad_alloc` aborts
+with 134 too), so the process never exits under the lock (its exit would
+wait for it) and `getLine` of a line without end ends (test
+`RtLineNoEnd`). A child's output (`IO.Process.output`) goes into
+leanrt's `fs::Sink`, which grows with `try_reserve` and, when that fails,
+drops the bytes and says it has stopped (`ByteSink::stopped`;
+lean-runtime then stops reading); `Sink::finish`, once lean-runtime has
+returned, ends the process with `INTERNAL PANIC: out of memory`, as Lean's
+failed allocation of the growing `ByteArray` does (AR-5).
+
+**stdio model.** Handles and the standard streams are lean-runtime's
+models of glibc's `FILE` (`io::cfile`, following libio's
+`fileops.c`/`genops.c` function by function; leanrt's own model moved
+there): one `st_blksize` buffer shared by reading and writing with libio's
+get/put areas and cached offset; `fwrite` (`_IO_new_file_xsputn`,
+line-buffered tails flushed at each newline), `fread` (`_IO_file_xsgetn`,
+including direct reads of whole blocks), `getc`, `fflush`, `fseek`
+(in-buffer seeks), `ftello`; `EBADF` for the wrong direction after the
+same mode switch; sticky end-of-file and error indicators (after any
+failed operation on a handle, `getLine` fails, as natively); reading a
+terminal first flushes a line-buffered stdout. The same system calls
+happen in the same order, so the `errno`s are native's (lean-runtime keeps
+its own model of `errno`, `io::error::errno`). At exit (`io::exit`),
+stdout is flushed first (libc++'s `ios_base::Init`), then every `FILE`'s
+pending output, newest first, then used streams are synced (a seekable
+stdin is left at the position the program read up to).
 
 Standard-stream primitives (`fd` = 0 stdin, 1 stdout, 2 stderr; the fields
 of `IO.FS.Stream`): `l2r_stream_putStr(fd, s)`, `l2r_stream_write(fd, b)`,
@@ -698,30 +766,31 @@ of `IO.FS.Stream`): `l2r_stream_putStr(fd, s)`, `l2r_stream_write(fd, b)`,
 (`EPIPE`, `EBADF` for the wrong direction, `EINVAL` on streams that were
 closed at startup); `l2r_stream_isTty(fd)` cannot fail.
 
-**Child processes** (`src/runtime/process.cpp`: `fork` + `execvp`, pipes
-with `O_CLOEXEC`, stdout flushed first when the child inherits stdin; a
-`null` stream's `/dev/null` is opened by the parent with `O_CLOEXEC`, see
-"Known divergences from native Lean"):
+**Child processes** (lean-runtime's `io::process`: `IO.Process.spawn` over
+`posix_spawn`, with what Lean's forked child does before `execvp`
+reproduced, pipes with `O_CLOEXEC`, stdout flushed first when the child
+inherits stdin; a `null` stream's `/dev/null` is opened by the parent with
+`O_CLOEXEC`, see "Known divergences from native Lean"):
 `l2r_proc_spawn(cmd, args, cwd, has_cwd, env_names, env_values, env_set,
 modes, inherit_env, setsid) -> u32` (the pid; fallible; `modes` = stdin |
 stdout << 8 | stderr << 16 as `IO.Process.Stdio` indices; `env` as parallel
 arrays, `env_set[i]` for `some`), then `l2r_proc_end(0/1/2) -> LHandle` (the
-parent's end of a piped stream, a closed handle otherwise);
+parent's end of a piped stream, a handle that is not open otherwise);
 `l2r_proc_wait(pid) -> u32` (128 + signal when killed),
 `l2r_proc_try_wait(pid) -> u64` (`1 << 32 | code` once exited, 0 while
-running), `l2r_proc_kill(pid, setsid)` — all fallible. A child that cannot
-change directory or execute prints Lean's message and exits with 255; as
-natively (`std::cerr` is tied to `std::cout`), it first flushes the stdout
-bytes the parent had pending, into its own descriptor 1.
-`IO.Process.output` reads stdout in a dedicated task while it reads
-stderr; without threads, `l2r_proc_drain(out, err) -> RVec<u8>` reads both
-pipes to end of file together (`poll`), returning stdout's bytes, then
-`l2r_proc_drained_err() -> RVec<u8>` gives stderr's (fallible: the first
-read error). The glue applies `readToEnd`'s UTF-8 check (`Tried to read
-from handle containing non UTF-8 data.`) to stderr before `wait` and to
-stdout after, as natively (but stderr's check comes once both pipes are at
-end of file; natively as soon as stderr is). A read error stops the drain
-and is reported at once.
+running), `l2r_proc_kill(pid, setsid)` — all fallible; `leanrt::proc` keeps
+each child's process object by pid for them until the child is reaped, and
+then makes the system call on the pid itself, as natively (`ECHILD`,
+`ESRCH`). A child that cannot change
+directory or execute prints Lean's message and exits with 255, its stdout
+first getting the bytes the parent had pending, as natively (lean-runtime
+starts a stand-in process for it). `IO.Process.output` reads stdout in a
+dedicated task while it reads stderr; lean2rr's tasks are deferred, so
+lean2rr replaces its body with `l2r_proc_output(cmd, args, cwd, has_cwd,
+env_names, env_values, env_set, inherit_env, setsid, input, has_input) ->
+u32` (lean-runtime's `io::process::output`: both pipes read to end of file
+together with `poll`; `readToEnd`'s UTF-8 checks and the errors in Lean's
+order; fallible) and `l2r_proc_output_str(1/2) -> LStr` (stdout, stderr).
 
 **Other glue primitives.**
 
@@ -729,7 +798,7 @@ and is reported at once.
 |---|---|
 | `initialize`, closed terms | once-cells `l2r_once_claim(slot)` (`l2r_once_has` for the mutable cells), `l2r_once_get<T>(slot)`, `l2r_once_set<T>(slot, v)` |
 | `IO.setStdout`/`setStderr`/`setStdin` | a cell per stream: `l2r_once_*` plus `l2r_cell_swap<T>(slot, v) -> T` (returns the previous value) |
-| `timeit`, `allocprof` | `l2r_io_timeit_with<R>(msg, act)`, `l2r_io_allocprof_with<R>(msg, act)` |
+| `timeit`, `allocprof` | `l2r_io_timeit_with<R>(msg, act)`, `l2r_io_allocprof_with<R>(msg, act)` (their lines are lean-runtime's: `io::time::timeit_line`, `io::debug::ALLOCPROF_NOTE`) |
 | `Void.mk` | `lean_void_mk<T>(x)` |
 
 **Main thread.** `leanrt::rt::run_main(|| body())` runs the program on a
@@ -742,16 +811,31 @@ such as GMP's scratch space, causes when it skips the guard page).
 module initializers) on the calling thread, as native `main` does. Every
 thread that runs Lean code calls `install_stack_overflow_handler` (its
 guard page is recorded per thread). Before `main`, an ELF constructor
-opens the descriptors native Lean's runtime has open at startup (libuv's
-epoll descriptor, two io_uring rings when the kernel has them, two signal
-pipes and an eventfd, close-on-exec, in that order at the lowest free
-numbers; signal watchers use the second pipe, as libuv's loop does):
-`/proc/self/fd`, descriptor numbers and `EMFILE` thresholds are native's,
-and a standard descriptor closed at startup is taken by the first of
-them, as natively (using it fails with `EINVAL`, children see it
-closed). Running before Rust's runtime, the constructor also keeps Rust
+(`rt::startup_descriptors`, lean-runtime's glue duty) has lean-runtime
+open the descriptors native Lean's runtime has open at startup
+(`io::startup`: libuv's epoll descriptor, two io_uring rings when the
+kernel has them, real rings mapped as libuv maps them, the signal lock
+pipe with its byte, the loop's signal pipe and an eventfd, close-on-exec,
+in that order at the lowest free numbers): `/proc/self/fd`, descriptor
+numbers and `EMFILE` thresholds are native's, and a standard descriptor
+closed at startup is taken by the first of them, as natively (using it
+fails with `EINVAL`, children see it closed). When they cannot be made,
+the program ends before `main` with `INTERNAL PANIC: Failed to initialize
+event loop: ...` and status 1 (natively a crash or an abort: LB-30,
+LB-31). Running before Rust's runtime, the constructor also keeps Rust
 from putting `/dev/null` in the place of closed standard descriptors.
-`l2r_set_initializing(b)` sets what `IO.initializing` answers.
+Signal watchers use the loop's signal pipe, as libuv's loop does:
+`rt::signal_pipe` claims it from lean-runtime at the first watcher
+(`io::startup::claim_signal_pipe`, AR-17: the first caller gets it).
+`IO.initializing` is lean-runtime's flag (`io::startup`), true until the
+entry's `l2r_set_initializing(false)` after the module initializers
+(`mark_end_initialization`). `main`'s return (`l2r_exit`) and an uncaught
+error first wait for lean-runtime's dedicated tasks (`io::exit::after_main`:
+the stdout readers `IO.Process.output` leaves running when stderr fails),
+as `lean_finalize_task_manager` does; `IO.Process.exit` and panics do not.
+`IO.Process.forceExit` is `_exit` (lean-runtime's `force_exit` is
+`std::process::exit`, which runs the handlers of linked C code; its
+documentation asks a glue that needs `_Exit` to call `_exit`).
 
 ## Requests for lean2rr
 
@@ -869,7 +953,8 @@ lean2rr's dev branch (the tests pass with it).
     was spawned with `setsid` (`uint8`) after its three Lean fields, so
     lean2rr's `Child` record needs those two extra fields, set by the spawn
     glue and kept by `takeStdin` (test `RtProcess`). `IO.Process.output`
-    should use `l2r_proc_drain` (above) instead of its task-based reads.
+    should use a runtime primitive (now `l2r_proc_output`, above) instead
+    of its task-based reads.
 30. *done* — `Lean.Name.beq` (`lean_name_eq`): the prelude cannot define it (`Name`
     is a Lean type); its reference body (structural equality) is what the
     native code computes.
@@ -896,25 +981,33 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
 
 ## Known divergences from native Lean
 
-- A read of at least one buffer right after output on the same handle
-  writes the pending output first and then reads from the cursor
-  (`cfile::xsgetn`; where the output cannot be written because seeking
-  back over read-ahead fails, on a FIFO, it is dropped as natively);
-  natively glibc drops the pending bytes (LB-02 in
-  lean-runtime's docs/lean-bugs.md; plan §10, "Runtime: Lean bugs we do
-  not reproduce").
-- A child's `null` stream is `/dev/null` opened by the parent,
-  close-on-exec, before the fork (`proc::spawn`), so the program inherits
-  no extra descriptor, and a failed open (`EMFILE`) is the spawn's error,
-  as a failed pipe is (the pipes made so far are closed). Natively the
-  forked child opens it, keeps the descriptor open across `execvp` (LB-15),
-  and ignores a failed open, so the program then runs on the parent's own
-  stream (LB-17; both in lean-runtime's docs/lean-bugs.md; plan §10).
-  So a spawn in which some `null` stream follows a piped one needs exactly
-  one more free descriptor than natively (one in all, however many such
-  streams), where the child has closed the pipe's other end before its
-  open; any other spawn needs as many. Tests `RtProcessNullFd`,
-  `RtProcessNullOpenFails`.
+- lean-runtime does not reproduce the Lean runtime bugs of its IO
+  (lean-runtime's docs/lean-bugs.md; plan §10, "Runtime: Lean bugs we do not
+  reproduce"), so neither does lean2rr:
+  - a read of at least one buffer right after output on the same handle
+    writes the pending output first and then reads from the cursor
+    (`io::cfile`'s `xsgetn`; where the output cannot be written because
+    seeking back over read-ahead fails, on a FIFO, it is dropped as
+    natively); natively glibc drops the pending bytes (LB-02);
+  - a child's `null` stream is `/dev/null` opened by the parent,
+    close-on-exec, so the program inherits no extra descriptor, and a
+    failed open (`EMFILE`) is the spawn's error (the descriptors made so far
+    are closed). Natively the forked child opens it, keeps the descriptor
+    open across `execvp` (LB-15), and ignores a failed open, so the program
+    then runs on the parent's own stream (LB-17). So a spawn in which some
+    `null` stream follows a piped one needs exactly one more free
+    descriptor than natively (one in all, however many such streams), where
+    the child has closed the pipe's other end before its open; any other
+    spawn needs as many. Tests `RtProcessNullFd`, `RtProcessNullOpenFails`;
+  - the `Child` that `takeStdin` returns keeps the `setsid` flag, so `kill`
+    still signals the group (natively the flag is lost: LB-14);
+  - a temporary directory of 4083 to 4095 bytes is tried (natively an
+    assertion aborts: LB-16), and a nameless `ENOENT` or `EINTR` error gets
+    the file name `""` (below; LB-03);
+  - startup descriptors that cannot be made end the program with lean-runtime's
+    `INTERNAL PANIC` (natively a crash or an abort: LB-30, LB-31; test
+    `RtStartupFdExhausted`); an exit does not wait for a stream whose holder
+    is blocked reading it (LB-29).
 - Panics print `backtrace:` and `(stack trace unavailable)` instead of a
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`, and
@@ -948,18 +1041,17 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   the child owned, the C function treats it as borrowed), so the child's
   pipes are never closed after a `pid` call, and a child waiting for end of
   file on its stdin after `takeStdin` waits forever; lean2rr releases it
-  as usual. Natively the `Child` that `takeStdin` returns does not copy the
-  `setsid` flag (its byte is uninitialized memory, read by `kill`); here it
-  is kept. `IO.Process.output` reports a non-UTF-8 stderr once both pipes
-  are at end of file (natively as soon as stderr is; a grandchild can hold
-  stdout open), and a read error on either pipe at once (natively a stdout
-  read error after `wait`); the bytes and messages are the same, only when
-  it happens differs.
+  as usual. A child is started with `posix_spawn` (lean-runtime: safe Rust
+  cannot fork), its working directory entered by lean-runtime's spawner
+  thread, a child that cannot start being a stand-in `/bin/sh` that prints
+  Lean's message (lean-runtime's `io::process` documents each step and
+  what remains different).
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
-- The C `errno` reported by a handle's sticky error indicator (see file
-  primitives) is the current `errno`, which may differ from native after
-  unrelated failing calls (the runtime's own calls are not libc++'s).
+- The `errno` reported by a handle's sticky error indicator (see file
+  primitives) is lean-runtime's model of it, set by every failing call it
+  models as the C call would; it may differ from native after unrelated
+  failing calls (the runtime's own calls are not libc++'s).
 - `IO.FS.createTempFile`/`createTempDir` with `TMPDIR` naming a missing
   directory report `no such file or directory` with an empty file name;
   natively `decode_uv_error` dereferences a null file name and crashes.
@@ -1002,8 +1094,8 @@ checks that each `@[export]` definition of lean2rr's shim (`L2RShim`) has
 the type of the `@[extern]` declaration of its C symbol (Lean pairs them by
 name only). The Rust unit tests of `leanrt`
 (bignums, one-word `Nat`/`Int` at the boundaries, tagged arrays, string
-layout and counts, and a differential test of the `FILE` model against
-glibc's own `FILE` over random operation sequences) run with
+layout and counts, the last-error slot over lean-runtime's decoding) run
+with
 `tests/runtime/leanrt-unit.sh`; `tests/runtime/rows-check.sh` checks
 lean-runtime's rows through a lean2rr build of its row oracle (an `LB-nn`
 row, a Lean bug or limit lean2rr does not reproduce, against the

@@ -89,8 +89,10 @@ pub struct LHandle;
 // ===========================================================================
 // Process, panics, unreachable code
 
+// The end of the process after `main` has returned (lean-runtime's exit
+// sequence, after the io layer's dedicated tasks).
 #[ffi(import)]
-fn l2r_exit(code : u32) -> unit [{ leanrt::io::exit(code as i32) }];
+fn l2r_exit(code : u32) -> unit [{ leanrt::io::main_exit(code as i32) }];
 
 // `IO.Process.exit` (the status is a `UInt8`): what other threads would
 // have done by now goes first (`sched::effect`).
@@ -98,6 +100,9 @@ fn l2r_exit(code : u32) -> unit [{ leanrt::io::exit(code as i32) }];
 fn l2r_process_exit(code : u8) -> u64 [{ { leanrt::sched::effect(); leanrt::io::exit(code as i32) } }];
 
 // `IO.Process.forceExit` (`std::_Exit`): no flushing, no exit handlers.
+// (lean-runtime's `io::exit::force_exit` is `std::process::exit`, which
+// runs the handlers of linked C code such as mimalloc's; its documentation
+// asks a glue that needs `_Exit` exactly to call `_exit`.)
 #[ffi(import)]
 fn l2r_process_force_exit(code : u8) -> u64 [{ { extern "C" { fn _exit(code: i32) -> !; } unsafe { _exit(code as i32) } } }];
 
@@ -2024,9 +2029,9 @@ fn lean_float_array_data(a : RVec<f64>) -> RVec<f64> { a }
 //
 // lean2rr builds each `IO.FS.Stream` field as a closure over these
 // primitives (fd 0 = stdin, 1 = stdout, 2 = stderr). They are the handle
-// operations on models of glibc's stdin/stdout/stderr `FILE`s
-// (leanrt::cfile): stdout buffered, stderr unbuffered, all finished at exit
-// as natively. putStr/write/flush/read/getLine record their outcome in the
+// operations on lean-runtime's models of glibc's stdin/stdout/stderr
+// `FILE`s (`lean_runtime::io`, through leanrt::io): stdout buffered, stderr
+// unbuffered, all finished at exit as natively. putStr/write/flush/read/getLine record their outcome in the
 // last-error slot (use `l2r_io_finish`, as for files): EPIPE, EBADF (also
 // for the wrong direction), EINVAL on streams closed at startup; isTty
 // cannot fail.
@@ -2044,7 +2049,7 @@ fn l2r_stream_flush(fd : u64) -> u64 [{ { leanrt::io::stream_flush(fd); 0 } }];
 fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{ leanrt::io::stream_read(fd, n) }];
 
 #[ffi(import)]
-fn l2r_stream_getLine(fd : u64) -> LStr [{ leanrt::string::from_bytes_lossy(&leanrt::io::stream_get_line(fd)) }];
+fn l2r_stream_getLine(fd : u64) -> LStr [{ leanrt::io::stream_get_line(fd) }];
 
 #[ffi(import)]
 fn l2r_stream_isTty(fd : u64) -> bool [{ leanrt::io::is_tty(fd) }];
@@ -2803,10 +2808,9 @@ fn l2r_uv_event_loop_alive() -> bool { true }
 #[ffi(import)]
 fn l2r_shim_op_str_count(o : LHandle) -> u32 [{ { let r = leanrt::net::op(&o).strs.len() as u32; leanrt::rc_release(o); r } }];
 
-// Std.Internal.UV.System (`leanrt::sys`).
+// Std.Internal.UV.System (`leanrt::sys`, over lean-runtime's `io::uvsys`).
 #[ffi(import)]
-fn l2r_shim_sys_title_set_h(s : LStr) -> u64 [{ { leanrt::sys::title_set(s.utf8()); leanrt::rc_release(s); 0 } }];
-fn l2r_shim_sys_title_set(s : LStr) -> L2RUnit { l2r_unit_of(l2r_shim_sys_title_set_h(s)) }
+fn l2r_shim_sys_title_set(s : LStr) -> u32 [{ { let r = leanrt::sys::title_set(s.utf8()) as u32; leanrt::rc_release(s); r } }];
 #[ffi(import)]
 fn l2r_shim_sys_query(which : u8) -> LHandle [{
     match which {
@@ -3027,14 +3031,14 @@ fn l2r_runtime_mark_persistent<T>(a : T) -> T { a }
 fn l2r_runtime_mark_multi_threaded<T>(a : T) -> T { a }
 fn l2r_runtime_forget<T>(a : T) -> L2RUnit { L2RUnit::u{} }
 fn l2r_runtime_hold<T>(a : T) -> L2RUnit { L2RUnit::u{} }
-// `IO.initializing`: true while the module initializers run; lean2rr's entry
-// calls `l2r_set_initializing(true)` before them and `(false)` after.
+// `IO.initializing` (lean-runtime's flag): true while the module
+// initializers run; lean2rr's entry calls `l2r_set_initializing(true)`
+// before them and `(false)` after (`lean_io_mark_end_initialization`).
 #[ffi(import)]
 fn l2r_io_initializing() -> bool [{ leanrt::rt::initializing() }];
 #[ffi(import)]
 fn l2r_set_initializing(b : bool) -> u64 [{ { leanrt::rt::set_initializing(b); 0 } }];
 fn l2r_io_set_heartbeats(n : Nat) -> L2RUnit { L2RUnit::u{} }
-fn l2r_io_process_get_current_dir() -> LStr { l2r_io_current_dir() }
 
 // `Lean.githash` of the Lean 4.34.0 toolchain.
 fn lean_get_githash(u : L2RUnit) -> LStr { lean_mk_string("293d5d0c0c3f3dded4688b3ccd6a33939ac5102b") }
@@ -3096,7 +3100,7 @@ fn l2r_shim_realtime_nanos_i64() -> i64 [{ leanrt::io::realtime_nanos() }];
 
 
 #[ffi(import)]
-fn l2r_io_process_get_pid() -> u32 [{ std::process::id() }];
+fn l2r_io_process_get_pid() -> u32 [{ lean_runtime::io::env::get_pid() }];
 
 // ===========================================================================
 // Files and the file system (IO.FS)
@@ -3229,16 +3233,7 @@ fn l2r_fs_create_tempdir() -> LStr [{ leanrt::fs::create_temp_dir() }];
 #[ffi(import)]
 fn l2r_proc_spawn(cmd : LStr, args : RVec<LStr>, cwd : LStr, has_cwd : bool, env_names : RVec<LStr>, env_values : RVec<LStr>, env_set : RVec<bool>, modes : u32, inherit_env : bool, setsid : bool) -> u32 [{
     {
-        let argv: ::std::vec::Vec<&[u8]> = leanrt::array::as_slice(&args).iter().map(|a| a.utf8()).collect();
-        let names = leanrt::array::as_slice(&env_names);
-        let values = leanrt::array::as_slice(&env_values);
-        let set = leanrt::array::as_slice(&env_set);
-        let env: ::std::vec::Vec<(&[u8], Option<&[u8]>)> = (0..names.len())
-            .map(|i| (names[i].utf8(), if set.get(i).copied().unwrap_or(false) { values.get(i).map(|v| v.utf8()) } else { None }))
-            .collect();
-        let pid = leanrt::proc::spawn(cmd.utf8(), &argv, if has_cwd { Some(cwd.utf8()) } else { None }, &env, modes, inherit_env, setsid);
-        drop(argv);
-        drop(env);
+        let pid = leanrt::proc::with_args(&cmd, &args, &cwd, has_cwd, &env_names, &env_values, &env_set, inherit_env, setsid, |a| leanrt::proc::spawn(a, modes));
         leanrt::rc_release(cmd);
         leanrt::rc_release(cwd);
         leanrt::array::release(args);
@@ -3256,23 +3251,30 @@ fn l2r_proc_wait(pid : u32) -> u32 [{ leanrt::proc::wait(pid) }];
 // `Child.tryWait`: `(1 << 32) | code` once exited, 0 while running; fallible.
 #[ffi(import)]
 fn l2r_proc_try_wait(pid : u32) -> u64 [{ leanrt::proc::try_wait(pid) }];
-// `IO.Process.output`: the child's piped stdout and stderr handles read to
-// end of file together (natively a dedicated task reads stdout while stderr
-// is read; without threads, `poll`). Returns stdout's bytes; stderr's are
-// then `l2r_proc_drained_err()`. Fallible (the first read error). The glue
-// then applies `readToEnd`'s UTF-8 check (`Tried to read from handle
-// containing non UTF-8 data.`): stderr's before `wait`, stdout's after.
+// `IO.Process.output args input?` (lean-runtime's `io::process::output`):
+// the `SpawnArgs` fields but the stdio modes (stdin is `null`, or `piped`
+// when `has_input`: `input` is then written, flushed and closed; stdout and
+// stderr are `piped` and read to end of file together), then the exit
+// code; fallible, with Lean's errors in Lean's order (stderr's read or
+// UTF-8 error before `wait`, stdout's after). On success the outputs are
+// `l2r_proc_output_str(1)` and `(2)`, valid UTF-8.
 #[ffi(import)]
-fn l2r_proc_drain(out : LHandle, err : LHandle) -> RVec<u8> [{
+fn l2r_proc_output(cmd : LStr, args : RVec<LStr>, cwd : LStr, has_cwd : bool, env_names : RVec<LStr>, env_values : RVec<LStr>, env_set : RVec<bool>, inherit_env : bool, setsid : bool, input : LStr, has_input : bool) -> u32 [{
     {
-        let v = leanrt::proc::drain(&out, &err);
-        leanrt::rc_release(out);
-        leanrt::rc_release(err);
-        leanrt::array::bytes_of_vec(v)
+        let code = leanrt::proc::with_args(&cmd, &args, &cwd, has_cwd, &env_names, &env_values, &env_set, inherit_env, setsid,
+            |a| leanrt::proc::output(a, if has_input { Some(input.utf8()) } else { None }));
+        leanrt::rc_release(cmd);
+        leanrt::rc_release(cwd);
+        leanrt::rc_release(input);
+        leanrt::array::release(args);
+        leanrt::array::release(env_names);
+        leanrt::array::release(env_values);
+        leanrt::array::release(env_set);
+        code
     }
 }];
 #[ffi(import)]
-fn l2r_proc_drained_err() -> RVec<u8> [{ leanrt::array::bytes_of_vec(leanrt::proc::take_drained_err()) }];
+fn l2r_proc_output_str(which : u64) -> LStr [{ leanrt::proc::take_output(which) }];
 // `Child.kill`: SIGKILL (to the process group after `setsid`); fallible.
 #[ffi(import)]
 fn l2r_proc_kill(pid : u32, setsid : bool) -> u64 [{ { leanrt::proc::kill_child(pid, setsid); 0 } }];
@@ -3281,37 +3283,12 @@ fn l2r_proc_kill(pid : u32, setsid : bool) -> u64 [{ { leanrt::proc::kill_child(
 // the world), then print `msg <t>ms` (or `<t>s` from one second on, 3
 // significant digits as C++'s `setprecision(3)`) to stderr.
 #[ffi(import)]
-fn l2r_timeit_start() -> u64 [{
-    {
-        let mut ts = [0i64; 2];
-        extern "C" { fn clock_gettime(clk: i32, ts: *mut i64) -> i32; }
-        unsafe { clock_gettime(1, ts.as_mut_ptr()) };
-        (ts[0] as u64) * 1000000000 + (ts[1] as u64)
-    }
-}];
+fn l2r_timeit_start() -> u64 [{ leanrt::io::mono_nanos() }];
 
+// `msg <t>ms` (or `<t>s` from one second on, 3 significant digits as C++'s
+// `setprecision(3)`) and a newline: lean-runtime's `io::time::timeit_line`.
 #[ffi(import)]
-fn l2r_timeit_text(msg : LStr, start : u64) -> LStr [{
-    {
-        let mut ts = [0i64; 2];
-        extern "C" { fn clock_gettime(clk: i32, ts: *mut i64) -> i32; fn snprintf(b: *mut u8, n: usize, f: *const u8, ...) -> i32; }
-        unsafe { clock_gettime(1, ts.as_mut_ptr()) };
-        let now = (ts[0] as u64) * 1000000000 + (ts[1] as u64);
-        let secs = (now.saturating_sub(start)) as f64 / 1e9;
-        let (v, unit) = if secs < 1.0 { (secs * 1000.0, "ms") } else { (secs, "s") };
-        let mut buf = [0u8; 64];
-        let n = unsafe { snprintf(buf.as_mut_ptr(), 64, b"%.3g\0".as_ptr(), v) };
-        // Native prints `string_cstr(msg)`: up to the first NUL.
-        let cut = msg.utf8().iter().position(|&b| b == 0).unwrap_or(msg.utf8().len());
-        let mut line = msg.utf8()[..cut].to_vec();
-        line.push(b' ');
-        line.extend_from_slice(&buf[..(n.max(0) as usize).min(63)]);
-        line.extend_from_slice(unit.as_bytes());
-        line.push(b'\n');
-        leanrt::rc_release(msg);
-        leanrt::string::from_bytes(&line)
-    }
-}];
+fn l2r_timeit_text(msg : LStr, start : u64) -> LStr [{ leanrt::io::timeit_text(msg, start) }];
 
 fn l2r_io_timeit_with<R>(msg : LStr, act : L2RUnit -> R) -> R {
     let t = l2r_timeit_start();
@@ -3328,45 +3305,16 @@ fn l2r_io_allocprof_with<R>(msg : LStr, act : L2RUnit -> R) -> R {
     r
 }
 
+// lean-runtime's `io::debug::ALLOCPROF_NOTE` after the message.
 #[ffi(import)]
-fn l2r_allocprof_text(msg : LStr) -> LStr [{
-    {
-        let cut = msg.utf8().iter().position(|&b| b == 0).unwrap_or(msg.utf8().len());
-        let mut out = msg.utf8()[..cut].to_vec();
-        out.extend_from_slice(b"\nAllocation profiling data is not available, compile lean using `-D RUNTIME_STATS=ON`\n\n");
-        leanrt::rc_release(msg);
-        leanrt::string::from_bytes(&out)
-    }
-}];
+fn l2r_allocprof_text(msg : LStr) -> LStr [{ leanrt::io::allocprof_text(msg) }];
 
-// `IO.getEnv name : BaseIO (Option String)`.
+// `IO.getEnv name : BaseIO (Option String)` (lean-runtime's
+// `io::env::get_env`).
 #[ffi(import)]
-fn l2r_getenv_has(name : LStr) -> bool [{
-    std::env::var_os(std::ffi::OsStr::new(std::str::from_utf8(name.utf8()).unwrap_or("\0"))).is_some()
-}];
+fn l2r_getenv_has(name : LStr) -> bool [{ leanrt::fs::getenv_has(name) }];
 #[ffi(import)]
-fn l2r_getenv_value(name : LStr) -> LStr [{
-    {
-        let v = std::env::var_os(std::ffi::OsStr::new(std::str::from_utf8(name.utf8()).unwrap_or("\0"))).unwrap_or_default();
-        leanrt::string::from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(v.as_os_str()))
-    }
-}];
+fn l2r_getenv_value(name : LStr) -> LStr [{ leanrt::fs::getenv_value(name) }];
 fn l2r_io_getenv_with<O>(name : LStr, none : O, some : LStr -> O) -> O {
     if l2r_getenv_has(name) { some(l2r_getenv_value(name)) } else { none }
 }
-
-// `IO.appPath`, `IO.currentDir` (these cannot fail in practice here).
-#[ffi(import)]
-fn l2r_io_app_path() -> LStr [{
-    {
-        let p = std::env::current_exe().unwrap_or_default();
-        leanrt::string::from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))
-    }
-}];
-#[ffi(import)]
-fn l2r_io_current_dir() -> LStr [{
-    {
-        let p = std::env::current_dir().unwrap_or_default();
-        leanrt::string::from_bytes_lossy(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))
-    }
-}];

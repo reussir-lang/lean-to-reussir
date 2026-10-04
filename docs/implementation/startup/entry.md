@@ -58,21 +58,36 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
 ### Native Lean's startup descriptors are opened by an ELF constructor
 
 - **What:** Before Rust's runtime starts, an `.init_array` constructor
-  opens the descriptors native Lean's libuv loop has open at startup
-  (epoll, two io_uring rings when the kernel has them, two signal pipes, an
-  eventfd), close-on-exec, in that order, at the lowest free numbers. A
-  standard descriptor closed at startup is taken by the first of them, as
-  natively. Signal watchers use the second pipe.
+  has lean-runtime open the descriptors native Lean's libuv loop has open
+  at startup (`io::startup::open_native_descriptors`: epoll, two io_uring
+  rings when libuv would make them, mapped as libuv maps them, the signal
+  lock pipe with its byte, the loop's signal pipe, an eventfd),
+  close-on-exec, in that order, at the lowest free numbers. A standard
+  descriptor closed at startup is taken by the first of them, as natively.
+  When they cannot be made, the program ends there with lean-runtime's
+  `INTERNAL PANIC: Failed to initialize event loop: ...` (`fail_as_native`;
+  LB-30, LB-31). Signal watchers use the loop's signal pipe, which
+  `rt::signal_pipe` claims from lean-runtime
+  (`io::startup::claim_signal_pipe`, AR-17). The constructor is in the
+  plain `.init_array` section, so it runs after the prioritized ones:
+  Rust std's (`.init_array.00099`, the arguments) and lean-runtime's
+  `proc-title` constructor (`.init_array.00100`, AR-20), which keeps the
+  arguments' memory before any startup descriptor exists, as native's
+  `lean_setup_args` runs before libuv's loop (review RST3-01: after it, at
+  one free descriptor the title could not be written).
 - **Why:** `/proc/self/fd`, the numbers of the descriptors the program
   opens and the point where opening fails with `EMFILE` are then native's
   (84a4c08, test `RtFdLimit`). Running before Rust's runtime also keeps it
   from putting `/dev/null` in the place of closed standard descriptors,
   which could not be told apart later from a `/dev/null` the program was
   given (a94fafd). Watchers made a new pipe of their own, two descriptors
-  native Lean does not open (round 7 RV7C-05, 10b7568).
+  native Lean does not open (round 7 RV7C-05, 10b7568). lean-runtime has
+  no constructor of its own for them (its glue duty, `io::startup`); its
+  rings are real and made only when libuv would make them, so
+  `RtFdStartupNoUring` passes (switch step 3).
 - **Where:** `runtime/leanrt/src/rt.rs`: `startup_descriptors`,
-  `reserve_libuv_descriptors`, `reserve_native_descriptors`,
-  `signal_pipe`, `is_rust_dev_null`.
+  `open_startup_descriptors`, `reserve_native_descriptors`,
+  `signal_pipe`, `is_rust_dev_null`; lean-runtime's `src/io/startup.rs`.
 - **Remove only if:** never.
 
 ### Exit finishes the streams as a native program does
@@ -80,12 +95,17 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
 - **What:** At exit (also `IO.Process.exit` and internal panics), stdout
   is flushed first, then the pending output of every `FILE` newest first,
   then used buffered streams are synced (a seekable stdin is left where the
-  program stopped reading).
+  program stopped reading): lean-runtime's `io::exit::exit`, which every
+  normal end of the process calls (`leanrt::io::exit`). `main`'s return
+  (`l2r_exit`, `io::main_exit`) and an uncaught error first wait for
+  lean-runtime's dedicated tasks (`io::exit::after_main`), as
+  `lean_finalize_task_manager` does.
 - **Why:** libc++'s `ios_base::Init` destructor, then glibc's
   `_IO_cleanup`: the bytes and their order on the descriptors match
   (d2ae23d).
-- **Where:** `runtime/leanrt/src/io.rs`, `cfile.rs`;
-  `runtime/prelude.rr`: `l2r_exit`.
+- **Where:** `runtime/leanrt/src/io.rs`: `exit`, `main_exit`;
+  `runtime/leanrt/src/lib.rs`: `uncaught_exception`; lean-runtime's
+  `src/io/exit.rs`; `runtime/prelude.rr`: `l2r_exit`.
 - **Remove only if:** never.
 
 ### The program exports C trampolines the runtime calls back

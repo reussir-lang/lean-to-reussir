@@ -14,7 +14,7 @@ translation plan §5.8 to §5.14 and §6, and the implementation notes'
 | Part | Language | Role |
 |---|---|---|
 | `runtime/prelude.rr` | Reussir | Prepended to every program. Defines the runtime types and one function per Lean extern, named after the extern's C symbol (`lean_nat_add`). Fast paths are inline Reussir code; the rest calls `leanrt`. |
-| `runtime/leanrt/` | Rust | Linked into every program. Big numbers (GMP), strings, arrays, float printing, the stdio model, files, processes, once-cells, tasks and the scheduler, `Std.Sync`, the event loop. One crate, so one copy of all global state. |
+| `runtime/leanrt/` | Rust | Linked into every program. Big numbers (GMP), strings, arrays, float printing, the glue to lean-runtime's IO (handles, the last-error slot, startup and exit), once-cells, tasks and the scheduler, `Std.Sync`, the event loop. One crate, so one copy of all global state. |
 | `lean2rr/L2RShim.lean` | Lean | lean2rr's own Lean library: the `Std.Internal.UV` externs (timers, sockets, name resolution, signals), `Std.Time.Timestamp.now`, `ShareCommon.Object.eq`/`hash`. Exported under the C symbols and compiled with the program. |
 | generated glue | Reussir | Made by lean2rr for externs over Lean-defined types: `IO.Error`, `Option`, `List`, processes, references, tasks. |
 
@@ -97,16 +97,22 @@ handles; a thread that waits blocks its context.
 
 ## Input and output
 
+- **IO is lean-runtime's.** Files, the standard streams, the file system,
+  processes, the system queries, the startup descriptors and the exit come
+  from the shared crate's `io` module. `leanrt` only converts lean2rr's
+  values (strings, byte arrays, handles) to the crate's views and back.
 - **The stdio model.** Files and the standard streams follow glibc's `FILE`
-  function by function (`leanrt/src/cfile.rs`): one buffer per handle,
+  function by function (lean-runtime's `io::cfile`): one buffer per handle,
   line-buffered terminals, the same system calls in the same order. So the
   `errno` values are native's. At exit, stdout is flushed first, as natively.
 - **Fallible IO.** A runtime primitive records its outcome in a last-error
-  slot. The glue turns it into `ok` or into the `IO.Error` that Lean's own
-  exported builder makes, with libuv's kind and message (Lean 4.34).
-- **Processes.** `IO.Process` follows `process.cpp`: `fork` and `execvp`,
-  pipes with `O_CLOEXEC`. `IO.Process.output` reads both pipes together,
-  because a deferred task cannot read one pipe while `main` reads the other.
+  slot: nothing, or the crate's `IO.Error`. The glue turns it into `ok` or
+  into the `IO.Error` that Lean's own exported builder makes, with libuv's
+  kind and message (Lean 4.34).
+- **Processes.** `IO.Process` follows `process.cpp`. The crate starts a
+  child with `posix_spawn` and does what Lean's forked child does before
+  `execvp`. `IO.Process.output` reads both pipes together, because a
+  deferred task cannot read one pipe while `main` reads the other.
 - **The event loop** (`leanrt::net`) for timers, sockets, name resolution and
   signals. It works, but it is not a target now.
 - **Standard streams per thread.** A task starts with the process's streams,
@@ -163,10 +169,13 @@ can use. lean2rr's `leanrt` moves into it step by step.
 
 Status (2026-10-04): lean-runtime has Lean's semantics (hashes, floats,
 fixed-width integers, strings, `libm`, `Nat` and `Int`, the array edge
-rules, panics, the text of numbers), and lean2rr uses it for all of them:
-the submodule `third_party/lean-runtime`, which `scripts/l2r.py` builds and
-links with `leanrt` ([runtime README](repo:runtime/README.md), "The
-shared crate lean-runtime"). lean2rr keeps its hot paths: the inline
-small-`Nat`/`Int` arithmetic, the one-block big numbers with GMP (behind
-lean-runtime's big-number traits) and the one-block arrays' reads, writes
-and pushes. IO and the scheduler follow.
+rules, panics, the text of numbers) and its IO (files, the standard
+streams, the file system, processes, the system queries, the startup
+descriptors, the exit). lean2rr uses it for all of them: the submodule
+`third_party/lean-runtime`, which `scripts/l2r.py` builds with cargo (the
+features `io` and `proc-title`) and links with `leanrt` ([runtime
+README](repo:runtime/README.md), "The shared crate lean-runtime"). lean2rr
+keeps its hot paths: the inline small-`Nat`/`Int` arithmetic, the
+one-block big numbers with GMP (behind lean-runtime's big-number traits),
+the one-block arrays' reads, writes and pushes, and the current standard
+streams, which `IO.println` reads at each call. The scheduler follows.

@@ -60,7 +60,8 @@ unless they say otherwise. Plan
   (7edc0f5, 6f14a9e). A context otherwise never loses the processor.
 - **Where:** `sched.rs`: `effect`, `effect_slow`, `STALE`, `zero_sleep`,
   `sleeper_due`; `task.rs`: `stale_startable`, `WORKER_LATENCY`; `io.rs`, `fs.rs`, `proc.rs` (the calls to
-  `sched::effect`); `runtime/prelude.rr`: `l2r_process_exit`.
+  `sched::effect`, before lean-runtime's output and spawn calls);
+  `runtime/prelude.rr`: `l2r_process_exit`.
 - **Remove only if:** the runtime gets real threads.
 
 ### Effect points poll the event loop at most every 50 µs
@@ -142,16 +143,23 @@ unless they say otherwise. Plan
 
 ### Signal watchers use the loop's signal pipe opened at startup
 
-- **What:** The signal handler writes to the non-blocking pipe the
-  runtime opened at startup in the place libuv's loop opens its signal
-  pipe (`rt::signal_pipe`); `net::wait` watches it. A new pipe is made only
-  if that one could not be opened. Stopping the last watcher of a signal
-  restores its default action, as libuv does.
+- **What:** The signal handler writes to the non-blocking pipe
+  lean-runtime opened at startup in the place libuv's loop opens its signal
+  pipe (`io::startup`); `net::wait` watches it. `rt::signal_pipe` claims
+  it from lean-runtime when the first watcher starts
+  (`io::startup::claim_signal_pipe`, AR-17: the first caller gets both
+  ends); the loop keeps the claimer's duty (it never closes the ends or
+  `dup2`s over them, and both stay non-blocking). A new pipe is made only
+  if there is none.
+  Stopping the last watcher of a signal restores its default action, as
+  libuv does.
 - **Why:** The first watcher used to make a new self-pipe: two
   descriptors native Lean does not open, so later descriptors were
   numbered two higher and `EMFILE` came two opens earlier (round 7
-  RV7C-05, 10b7568; test `RtSignalFd`).
-- **Where:** `rt.rs`: `signal_pipe`, `reserve_libuv_descriptors`;
+  RV7C-05, 10b7568; test `RtSignalFd`). Since switch step 3 lean-runtime
+  opens the startup descriptors, and the claim replaces the number leanrt
+  kept when it opened them itself.
+- **Where:** `rt.rs`: `signal_pipe`, `startup_descriptors`;
   `net.rs`: `signal_start`, `signal_stop`, `read_signals`, `wait`.
   Startup descriptors:
   [../startup/entry.md](../startup/entry.md#native-leans-startup-descriptors-are-opened-by-an-elf-constructor).
