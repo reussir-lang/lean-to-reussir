@@ -7,7 +7,8 @@ for someone who knows Rust but not Lean. The full rules are in
 way are in [`../reussir-bugs/`](../reussir-bugs/README.md). The implementation's
 tricks and special cases, each with its reason, its place in the code and
 what would break without it, are cataloged in
-[`implementation/`](implementation/README.md).
+[`implementation/`](implementation/README.md). An illustrated overview of
+the design, with diagrams, is [`site/index.html`](site/index.html).
 
 ## In one paragraph
 

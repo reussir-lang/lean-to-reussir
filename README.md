@@ -13,6 +13,8 @@ Status: see [`docs/implementation-status.md`](docs/implementation-status.md) (wh
 
 Implementation notes: [`docs/implementation/`](docs/implementation/README.md) catalogs the implementation's tricks and special cases (why lean2rr does something, where, and what breaks without it).
 
+Design site: [`docs/site/index.html`](docs/site/index.html) is an illustrated overview of the architecture and design (static HTML; open it from a clone).
+
 ## Requirements
 
 - Lean v4.34.0 (via elan; `lean2rr/lean-toolchain`). lean2rr reads only

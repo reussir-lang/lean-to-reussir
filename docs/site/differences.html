@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Known differences · lean2rr design</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
+  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html">Representations</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html" class="here">Known differences</a><a href="glossary.html">Glossary</a></nav>
+</header>
+<div class="layout">
+  <aside class="toc"><div class="tochead">On this page</div><div class="toc">
+<ul>
+<li><a href="#not-supported">Not supported</a></li>
+<li><a href="#identity-and-sharing">Identity and sharing</a></li>
+<li><a href="#tasks-and-concurrency">Tasks and concurrency</a></li>
+<li><a href="#startup-and-evaluation">Startup and evaluation</a></li>
+<li><a href="#resources-and-releases">Resources and releases</a></li>
+<li><a href="#casts-that-read-addresses">Casts that read addresses</a></li>
+<li><a href="#limits">Limits</a></li>
+<li><a href="#runtime-details">Runtime details</a></li>
+<li><a href="#costs-time-and-memory-not-results">Costs (time and memory, not results)</a></li>
+<li><a href="#lean-bugs-we-do-not-reproduce">Lean bugs we do not reproduce</a></li>
+<li><a href="#index-of-plan-10">Index of plan §10</a></li>
+</ul>
+</div>
+</aside>
+  <main>
+<h1 id="known-differences">Known differences</h1>
+<p class="lead">Where a lean2rr build can behave differently from the native
+build of the same program. This is a readable summary of
+<a href="../../docs/translation-plan.md">translation plan</a> §10, which has every
+item with its examples and tests. An index of all §10 items is at the end of
+this page.</p>
+
+<div class="note">
+<p><strong>How to read this page.</strong> Most items show only through unsafe functions,
+timing, or errors. A program that uses <code>Init</code> and <code>Std</code> in the usual way
+gives the same output. Each item says what differs and when you can see it.</p>
+</div>
+<h2 id="not-supported">Not supported</h2>
+<table>
+<thead>
+<tr>
+<th>What</th>
+<th>What happens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A program with its own <code>@[extern]</code> C code</td>
+<td>Today the build fails in rrc with an unknown function. The rule (implemented, in review): the extern is compiled from its Lean definition and its C code is ignored; an extern with no Lean definition is refused at translation with a clear message. See <a href="index.html#the-extern-rule">the extern rule</a>. Support for calling C is parked.</td>
+</tr>
+<tr>
+<td><code>Lean</code>'s externs implemented in C++ (<code>Expr.mkData</code>, <code>evalConst</code>, <code>Dynlib</code>, the LLVM bindings)</td>
+<td>The same: an unknown function at the rrc build. Data structures from <code>Lean</code> work.</td>
+</tr>
+<tr>
+<td>A constant that <code>main</code> never uses but that reaches an unsupported extern</td>
+<td>The whole program fails to link, because every constant is translated (native Lean evaluates every constant at startup).</td>
+</tr>
+<tr>
+<td>A program module named <code>Init.*</code>, <code>Std.*</code>, <code>Lean.*</code>, <code>Lake.*</code> or <code>L2RShim.*</code> that is not the toolchain's</td>
+<td>Rejected at load. lean2rr trusts modules with these names.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="identity-and-sharing">Identity and sharing</h2>
+<p>lean2rr does not copy native pointer identity or sharing.</p>
+<ul>
+<li><code>ptrAddrUnsafe</code> answers the address of a value's cell in its own
+  representation, or a word computed from a scalar. So <code>ptrEq</code>, <code>ptrEqList</code>
+  and <code>withPtrAddr</code> can answer otherwise than natively: for a value and its
+  conversion to another representation, two boxings of one value, a wrapped
+  function value, a converted thunk or task.</li>
+<li>Equal <code>UInt64</code>s, <code>Float</code>s and small numbers are <code>ptrEq</code> (natively each
+  boxing of a <code>UInt64</code> is a new cell).</li>
+<li><code>ptrEq</code> answering <code>true</code> still means equal values. <code>ST.Ref.ptrEq</code> is exact.</li>
+<li><code>isExclusiveUnsafe</code> answers <code>false</code>. <code>shareCommon</code> shares nothing.
+  <code>dbgTraceIfShared</code> reads lean2rr's own counts.</li>
+<li><strong>When you can see it:</strong> only through these unsafe or debug functions.</li>
+</ul>
+<h2 id="tasks-and-concurrency">Tasks and concurrency</h2>
+<p>All tasks run on one thread, as one of the schedules native Lean can
+produce. See <a href="runtime.html#tasks-and-the-scheduler">Runtime</a>.</p>
+<ul>
+<li>A loop that polls a reference set by another task, with no sleep and no
+  output, never sees the change. With a sleep in the loop, it does.</li>
+<li>A context that computes without output or blocking delays the others.
+  Output ordered by sleeps comes in time order only when the code between
+  outputs is shorter than the sleeps.</li>
+<li><code>IO.waitAny</code> does not pick the fastest of several unfinished tasks.</li>
+<li>A task needed by <code>main</code> runs at once, before tasks queued earlier.</li>
+<li>A blocking system call (reading a pipe, waiting for a child) blocks every
+  task. Name resolution (<code>getaddrinfo</code>) runs at once.</li>
+<li><code>IO.getTID</code> inside a task is main's id plus a worker number.</li>
+<li><strong>When you can see it:</strong> in programs whose output depends on timing races
+  between tasks. Natively such output is a race too.</li>
+</ul>
+<h2 id="startup-and-evaluation">Startup and evaluation</h2>
+<ul>
+<li><strong>Startup order of unrecorded constants.</strong> The <code>.olean</code> does not record
+  the order of some constants: members of a <code>mutual</code> block that do not use
+  each other, some names that macros make. lean2rr chooses an order. You can
+  see it only when such constants trace or panic.</li>
+<li><strong>Dictionary rebuilding.</strong> lean2rr specializes a callee on every static
+  dictionary, also where Lean's specializer does not. Instance code can then
+  run more or fewer times than natively. You can see it through traces or
+  panics in instance code, or as extra time.</li>
+<li><strong>Merging after erasure.</strong> Lean's mono <code>cse</code> can merge two calls at
+  different types into one. lean2rr does that too, except in two shapes
+  (results that differ at a function type; a call inside a local function
+  merged with one outside). There both calls run, and a trace or panic in
+  them prints twice. Test <code>RtCseFnResult</code> is marked <code>.xfail</code> for this.</li>
+<li><strong>Compiler options</strong> of the program's modules (<code>set_option compiler.…</code>)
+  are not in the <code>.olean</code>. lean2rr runs Lean's passes with the defaults.</li>
+<li><strong>Order of panics in pure code.</strong> When several pure computations panic,
+  their messages can come in another order: closed-term extraction can group
+  them differently in lean2rr's instances.</li>
+</ul>
+<h2 id="resources-and-releases">Resources and releases</h2>
+<ul>
+<li><strong>Order of releases in one free.</strong> Natively a freed value releases what it
+  holds last pushed, first released. lean2rr does the same inside every free
+  that starts at a container. When user code drops a record of handles by
+  itself, Reussir's inline release goes in field order: a list of handles
+  <code>L0 … L7</code> closes <code>L0 L7 L6 … L1</code> (natively <code>L7 … L0</code>).</li>
+<li><strong>Release time of borrowed parameters.</strong> lean2rr emulates Lean's borrowing
+  for values that can hold a resource, with Lean's inference run on
+  lean2rr's instances. Where Lean infers its own specializations
+  differently, the release time follows lean2rr's instance. Resources inside
+  closures and thunks are released at their last use.</li>
+<li><strong>Promises released inside a free.</strong> Their <code>sync</code> dependents run when the
+  whole free is over, not when the free reaches the promise. Without Reussir
+  patch 0040, a free that Reussir's glue started ends unseen, and the
+  dependents run at the next output, block or task question.</li>
+<li><strong>Child processes.</strong> <code>IO.Process.output</code> reads both pipes together.
+  Natively <code>Child.pid</code> leaks the child's pipes; lean2rr closes them.</li>
+</ul>
+<h2 id="casts-that-read-addresses">Casts that read addresses</h2>
+<p><code>unsafeCast</code> of an object to a number natively gives its address, which
+changes on every run. lean2rr gives a deterministic word with the
+properties of an address: <code>2^44 + 8i</code> for constructor <code>i</code>, <code>2^44</code> for other
+objects, the low bits of the value for a big number. A cast with no native
+meaning (a number read as a constructor with fields) panics with <code>INTERNAL
+PANIC: unreachable code has been reached</code>, where native Lean crashes or reads
+garbage.</p>
+<h2 id="limits">Limits</h2>
+<ul>
+<li><strong>Out of memory.</strong> lean2rr ends every failed allocation with <code>INTERNAL
+  PANIC: out of memory</code> and exit 1. Natively the end depends on where it
+  happens (GMP and <code>getLine</code> abort with 134). The two builds use different
+  amounts of memory, so they run out at different points.</li>
+<li><strong>Stack depth.</strong> Frame sizes differ, so the depth of a stack overflow
+  differs. The report itself is native's (<code>Stack overflow detected.
+  Aborting.</code>, exit 134). lean2rr adds no recursion of its own: conversions,
+  list folds and the constant walk are loops, and frees use a stack of
+  pending work.</li>
+<li><strong>Build time.</strong> rrc compiles about 80 small functions per second. A
+  program with thousands of constants takes minutes (natively seconds).</li>
+</ul>
+<h2 id="runtime-details">Runtime details</h2>
+<ul>
+<li><code>IO.getNumHeartbeats</code> is 0. <code>dbgStackTrace</code> prints nothing. A panic's
+  backtrace line is <code>(stack trace unavailable)</code>.</li>
+<li>The <code>errno</code> after a sticky handle error can differ.</li>
+<li><code>ShareCommon.Object.eq</code> holds at most for the same cell.</li>
+<li>The Windows-only time zone functions fail, as natively on other systems.</li>
+</ul>
+<h2 id="costs-time-and-memory-not-results">Costs (time and memory, not results)</h2>
+<table>
+<thead>
+<tr>
+<th>Cost</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Structural conversions rebuild a value as a tree</td>
+<td>sharing is lost; a value converted at each call costs O(size) per call</td>
+</tr>
+<tr>
+<td><code>Array.map</code> that changes the representation</td>
+<td>the input and the new result live together until the map ends</td>
+</tr>
+<tr>
+<td><code>ElemBox</code> for array elements that cannot cross the FFI</td>
+<td>one allocation per element</td>
+</tr>
+<tr>
+<td>Reads take their container owned</td>
+<td>an increment and a release per read, unless LLVM cancels them</td>
+</tr>
+<tr>
+<td>One-block arrays</td>
+<td>a 16 MiB payload (a hash table's 2^21 buckets) becomes a huge mimalloc segment, freed late</td>
+</tr>
+<tr>
+<td>Constants read in a loop</td>
+<td>a once-cell check at each read</td>
+</tr>
+<tr>
+<td>No borrowed parameters</td>
+<td>a traversal that keeps the nodes it visits writes counts native Lean only reads (about 1.5×)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="lean-bugs-we-do-not-reproduce">Lean bugs we do not reproduce</h2>
+<div class="rule">
+<p>lean2rr does not copy bugs of Lean's own runtime. A suspected bug becomes
+an intended difference only after a judge confirms it: the C source lines,
+why it is wrong (the C standard, POSIX, Lean's documentation, data loss or a
+crash), and a minimal native repro. lean-runtime's <code>docs/lean-bugs.md</code>
+lists the confirmed ones (entries <code>LB-nn</code>).</p>
+</div>
+<div class="note"><p><strong>In progress.</strong> The list of Lean runtime bugs that lean2rr does not reproduce is not in plan §10 yet. This section shows its items once it is.</p></div>
+<h2 id="index-of-plan-10">Index of plan §10</h2>
+<p>Generated from the translation plan: every group and item of §10, so that
+this page can be checked against it.</p>
+<div class="idx"><div class="idxgrp"><h4>Unsupported programs</h4><ul><li>Module names</li></ul></div><div class="idxgrp"><h4>Evaluation and effects</h4><ul><li>Dictionary rebuilding</li><li>Tasks</li><li>Startup order of unrecorded constants</li><li>Compiler options of the program&#x27;s modules</li><li>Merging after erasure</li><li>Running out of memory</li><li>Build time</li><li>Casts that natively read an address</li><li>Pointer identity and sharing</li><li>Order of releases in one free</li><li>Release time of borrowed parameters</li><li>Order of panics in pure code</li><li>Stack depth</li><li>Stream redirection</li></ul></div><div class="idxgrp"><h4>Cost</h4><ul><li>No borrowed parameters</li><li>Structural conversions</li><li><code>Array.map</code> that changes the representation</li><li>Element storage</li><li>Reads take their container owned</li><li>Arrays and strings are one block each</li><li>Dropping a large array of records</li><li>Constants read in a loop</li></ul></div><div class="idxgrp"><h4>Runtime</h4><ul><li>Sharing is not observable: isExclusiveUnsafe answers false; …</li><li>IO.getNumHeartbeats is 0; dbgStackTrace prints nothing; a panic&#x27;s …</li><li>errno after a sticky handle error can differ. …</li><li>Child processes (§5.8): code that reads one of …</li></ul></div><div class="idxgrp"><h4>Diagnostics</h4><ul><li>lean2rr&#x27;s own impossibilities (a Box unwrap of another …</li></ul></div><div class="idxgrp"><h4>Blocking, the event loop and promises</h4><ul><li>Blocking system calls</li><li>Event loop details</li><li>Promises released inside a free</li></ul></div><div class="idxgrp"><h4>Not supported</h4><ul><li>Every constant of the program is translated (§2.2), …</li><li>A program with its own @[extern] C code …</li><li>The Lean library&#x27;s externs implemented in C++ (Expr.mkData, …</li></ul></div></div>
+  </main>
+</div>
+<footer>Generated by <code>docs/site/build.py</code> from the repository's files (Lean v4.34.0).
+This site summarizes; the markdown documents in the repository are the authority.</footer>
+</body>
+</html>

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runtime · lean2rr design</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
+  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html">Representations</a><a href="runtime.html" class="here">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
+</header>
+<div class="layout">
+  <aside class="toc"><div class="tochead">On this page</div><div class="toc">
+<ul>
+<li><a href="#layers">Layers</a><ul>
+<li><a href="#calling-convention">Calling convention</a></li>
+</ul>
+</li>
+<li><a href="#memory-management">Memory management</a></li>
+<li><a href="#tasks-and-the-scheduler">Tasks and the scheduler</a></li>
+<li><a href="#input-and-output">Input and output</a></li>
+<li><a href="#startup">Startup</a><ul>
+<li><a href="#the-walk-of-a-closed-term-for-its-tasks">The walk of a closed term for its tasks</a></li>
+</ul>
+</li>
+<li><a href="#the-shared-runtime-crate-plan">The shared runtime crate (plan)</a></li>
+</ul>
+</div>
+</aside>
+  <main>
+<h1 id="runtime">Runtime</h1>
+<p class="lead">What every lean2rr build contains besides the program's own code.
+Sources: the <a href="../../runtime/README.md">runtime README</a>,
+translation plan §5.8 to §5.14 and §6, and the implementation notes'
+<a href="../../docs/implementation/tasks/README.md">tasks</a>,
+<a href="../../docs/implementation/startup/README.md">startup</a> and
+<a href="../../docs/implementation/ownership.md">ownership</a> areas.</p>
+
+<h2 id="layers">Layers</h2>
+<figure class="fig" id="fig-layers"><svg class="diagram" viewBox="0 0 940 400" width="940" role="img" aria-labelledby="layers-title"><title id="layers-title">The layers of a lean2rr build</title><defs><marker id="layers-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="10" width="420" height="66" rx="6" class="b-l2r"/><text x="220.0" y="33.5" text-anchor="middle" class="tb">Generated program (lean2rr output)</text><text x="220.0" y="49.5" text-anchor="middle" class="ts">the program&#x27;s functions and types, glue for externs,</text><text x="220.0" y="64.5" text-anchor="middle" class="ts">startup chain, entry point</text><rect x="440" y="10" width="210" height="66" rx="6" class="b-l2r"/><text x="545.0" y="33.5" text-anchor="middle" class="tb">L2RShim (Lean)</text><text x="545.0" y="49.5" text-anchor="middle" class="ts">UV externs, time, ShareCommon;</text><text x="545.0" y="64.5" text-anchor="middle" class="ts">compiled with the program</text><rect x="10" y="90" width="640" height="66" rx="6" class="b-rt"/><text x="330.0" y="113.5" text-anchor="middle" class="tb">prelude.rr (Reussir source, prepended)</text><text x="330.0" y="129.5" text-anchor="middle" class="ts">runtime types, one function per Lean extern (lean_xxx),</text><text x="330.0" y="144.5" text-anchor="middle" class="ts">fast paths inline (small Nat), l2r_* primitives for the glue</text><rect x="10" y="170" width="640" height="84" rx="6" class="b-rt"/><text x="330.0" y="195.5" text-anchor="middle" class="tb">leanrt (Rust crate, linked into every program)</text><text x="330.0" y="211.5" text-anchor="middle" class="ts">Nat/Int slow paths and big numbers (GMP), strings, arrays, hashes,</text><text x="330.0" y="226.5" text-anchor="middle" class="ts">float printing, glibc FILE model, files, processes, once-cells,</text><text x="330.0" y="241.5" text-anchor="middle" class="ts">tasks and the scheduler (contexts), Std.Sync, the event loop</text><rect x="10" y="268" width="640" height="50" rx="6" class="b-rr"/><text x="330.0" y="290.5" text-anchor="middle" class="tb">reussir_rt (Reussir&#x27;s runtime)</text><text x="330.0" y="306.5" text-anchor="middle" class="ts">Rc, the pending stack for frees (local patches 0013-0015), mimalloc</text><rect x="10" y="332" width="640" height="50" rx="6" class="b-lean"/><text x="330.0" y="354.5" text-anchor="middle" class="tb">System</text><text x="330.0" y="370.5" text-anchor="middle" class="ts">libc, libm (glibc&#x27;s cbrt), GMP, the kernel</text><rect x="680" y="170" width="250" height="120" rx="6" class="b-plan"/><text x="805.0" y="199.5" text-anchor="middle" class="tb">lean-runtime (planned)</text><text x="805.0" y="215.5" text-anchor="middle" class="ts">a shared crate: Lean&#x27;s</text><text x="805.0" y="230.5" text-anchor="middle" class="ts">runtime semantics in</text><text x="805.0" y="245.5" text-anchor="middle" class="ts">safe Rust; lean2rr keeps</text><text x="805.0" y="260.5" text-anchor="middle" class="ts">only the glue to its</text><text x="805.0" y="275.5" text-anchor="middle" class="ts">own representations</text><path d="M 680 212 L 652 212" class="ard" fill="none" marker-end="url(#layers-ah)"/></svg><figcaption>Every lean2rr build has these layers. The planned shared crate <code>lean-runtime</code> takes over the semantics of leanrt; the glue to lean2rr's representations stays in lean2rr.</figcaption></figure>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>Language</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>runtime/prelude.rr</code></td>
+<td>Reussir</td>
+<td>Prepended to every program. Defines the runtime types and one function per Lean extern, named after the extern's C symbol (<code>lean_nat_add</code>). Fast paths are inline Reussir code; the rest calls <code>leanrt</code>.</td>
+</tr>
+<tr>
+<td><code>runtime/leanrt/</code></td>
+<td>Rust</td>
+<td>Linked into every program. Big numbers (GMP), strings, arrays, float printing, the stdio model, files, processes, once-cells, tasks and the scheduler, <code>Std.Sync</code>, the event loop. One crate, so one copy of all global state.</td>
+</tr>
+<tr>
+<td><code>lean2rr/L2RShim.lean</code></td>
+<td>Lean</td>
+<td>lean2rr's own Lean library: the <code>Std.Internal.UV</code> externs (timers, sockets, name resolution, signals), <code>Std.Time.Timestamp.now</code>, <code>ShareCommon.Object.eq</code>/<code>hash</code>. Exported under the C symbols and compiled with the program.</td>
+</tr>
+<tr>
+<td>generated glue</td>
+<td>Reussir</td>
+<td>Made by lean2rr for externs over Lean-defined types: <code>IO.Error</code>, <code>Option</code>, <code>List</code>, processes, references, tasks.</td>
+</tr>
+</tbody>
+</table>
+<p>Semantics follow Lean 4.34's C runtime (<code>lean.h</code>, <code>src/runtime/*.cpp</code>).
+A comment at each function names the C function it follows.</p>
+<h3 id="calling-convention">Calling convention</h3>
+<ul>
+<li>The extern <code>lean_xxx</code> is the prelude function <code>lean_xxx</code>. Its parameters
+  are the extern's mono parameters without the erased ones and without the
+  IO world.</li>
+<li>Every function consumes its arguments (Reussir's rule). A function that
+  only reads a handle releases it at the end.</li>
+<li>A function never changes a value in place unless the value is unique
+  (count 1). The cells of references, thunks and tasks are mutable by design.</li>
+<li>A polymorphic extern takes explicit storage type arguments:
+  <code>lean_array_push&lt;E&gt;(arr, x)</code>.</li>
+<li>A runtime function cannot build a Lean-defined type (it does not know the
+  generated names). So generic helpers take the result type's constructors
+  as arguments, and lean2rr's glue makes a single call.</li>
+</ul>
+<h2 id="memory-management">Memory management</h2>
+<p><strong>Reference counting and reuse are Reussir's job.</strong> Reussir inserts every
+increment and release (Perceus), and its token reuse builds a new cell in
+the memory of a cell that dies at the same point. lean2rr only arranges the
+code so that this works: it keeps "take apart" and "build" in one function,
+and several optional passes help token reuse (see
+<a href="passes.html">Optional passes</a>).</p>
+<figure class="fig" id="fig-free"><svg class="diagram" viewBox="0 0 940 190" width="940" role="img" aria-labelledby="free-title"><title id="free-title">Freeing without recursion</title><defs><marker id="free-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="50" width="170" height="70" rx="6" class="b-l2r"/><text x="95.0" y="75.5" text-anchor="middle" class="tb">last reference</text><text x="95.0" y="91.5" text-anchor="middle" class="ts">released</text><text x="95.0" y="106.5" text-anchor="middle" class="ts">(count was 1)</text><line x1="180" y1="85" x2="230" y2="85" class="ar" marker-end="url(#free-ah)"/><rect x="235" y="30" width="260" height="110" rx="6" class="b-rr"/><text x="365.0" y="61.5" text-anchor="middle" class="tb">the cell&#x27;s release function</text><text x="365.0" y="77.5" text-anchor="middle" class="ts">releases its members:</text><text x="365.0" y="92.5" text-anchor="middle" class="ts">a member whose count ends</text><text x="365.0" y="107.5" text-anchor="middle" class="ts">goes on the pending stack</text><text x="365.0" y="122.5" text-anchor="middle" class="ts">(no recursion)</text><line x1="495" y1="85" x2="545" y2="85" class="ar" marker-end="url(#free-ah)"/><rect x="550" y="30" width="170" height="110" rx="6" class="b-rt"/><text x="635.0" y="68.5" text-anchor="middle" class="tb">pending stack</text><text x="635.0" y="84.5" text-anchor="middle" class="ts">(per thread)</text><text x="635.0" y="99.5" text-anchor="middle" class="ts">last pushed,</text><text x="635.0" y="114.5" text-anchor="middle" class="ts">first popped</text><line x1="720" y1="85" x2="770" y2="85" class="ar" marker-end="url(#free-ah)"/><rect x="775" y="50" width="155" height="70" rx="6" class="b-rt"/><text x="852.5" y="82.5" text-anchor="middle" class="tb">outermost free</text><text x="852.5" y="98.5" text-anchor="middle" class="ts">pops until empty</text><text x="10" y="170" text-anchor="start" class="ts">Order: an array from its last element, a record from its last field, as Lean&#x27;s lean_dec (one difference: the first cell of a free that user code starts at a record).</text></svg><figcaption>Native Lean frees iteratively. Here the runtime's containers and Reussir's drop glue (local patches 0013-0015) share one stack of pending work per thread, popped last first.</figcaption></figure>
+<ul>
+<li><strong>Containers of the runtime</strong> (arrays, string blocks, task and thunk cells)
+  are <code>leanrt</code> types. Their <code>Drop</code> frees the last reference through the same
+  per-thread stack that Reussir's drop glue uses (local patch 0014). So a
+  value deep through records and containers is freed at a bounded depth.</li>
+<li><strong>Order of releases.</strong> File handles close (and flush) and promises resolve
+  in Lean's order: last pushed, first freed. One difference stays: the first
+  cell of a free that user code starts at a record (plan §10).</li>
+<li><strong>Reference <code>set</code>.</strong> <code>l2r_rc_set</code> stores the new value first, then releases
+  the old one as <code>lean_dec</code> does. So code that the release runs (the <code>sync</code>
+  dependents of a promise it drops) sees the new value.</li>
+<li><strong>Borrowed parameters.</strong> Reussir has none. Natively a parameter that Lean
+  borrows is released by the caller after the call. Only resources can show
+  the difference (a file handle still open, a pipe not yet at end of file).
+  So for a program that creates resources, lean2rr runs Lean's own borrow
+  inference and keeps such arguments alive until the call returns.</li>
+</ul>
+<h2 id="tasks-and-the-scheduler">Tasks and the scheduler</h2>
+<p>All tasks run on one thread. A task is <em>deferred</em>: it runs when its value is
+needed, when the running code blocks, or when <code>main</code> returns. This is one of
+the schedules that native Lean can produce. Why not run a task at once? A
+task can wait for something that <code>main</code> does later: run at creation, it
+would never finish.</p>
+<p>A pending task runs at the first of these events:</p>
+<ol>
+<li><code>IO.wait</code> or <code>Task.get</code> of it, or a task that needs it runs;</li>
+<li><code>IO.waitAny</code> on a list where no task has finished;</li>
+<li>the program polls it (<code>IO.hasFinished</code>) after time has passed;</li>
+<li>the running code blocks and a worker is free;</li>
+<li><code>main</code> returns: the queued tasks run in the order of Lean's task manager.</li>
+</ol>
+<p><strong>Contexts.</strong> A thread that blocks natively lets other threads go on. The
+runtime copies that with <em>contexts</em>: <code>main</code>'s stack, and one stack per task
+the scheduler starts (1 GiB reserved, with a guard page). When the running
+context blocks, the scheduler chooses:</p>
+<figure class="fig" id="fig-sched"><svg class="diagram" viewBox="0 0 940 330" width="940" role="img" aria-labelledby="sched-title"><title id="sched-title">Contexts on one thread</title><defs><marker id="sched-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="20" width="200" height="64" rx="6" class="b-l2r"/><text x="110.0" y="42.5" text-anchor="middle" class="tb">running context blocks</text><text x="110.0" y="58.5" text-anchor="middle" class="ts">a lock, a promise, IO.wait,</text><text x="110.0" y="73.5" text-anchor="middle" class="ts">a sleep</text><line x1="210" y1="52" x2="250" y2="52" class="ar" marker-end="url(#sched-ah)"/><rect x="255" y="20" width="300" height="64" rx="6" class="b-rt"/><text x="405.0" y="41.5" text-anchor="middle" class="t">1. a suspended context that</text><text x="405.0" y="57.5" text-anchor="middle" class="t">can go on now (in the order</text><text x="405.0" y="73.5" text-anchor="middle" class="t">they became ready)?</text><line x1="555" y1="52" x2="615" y2="52" class="ar" marker-end="url(#sched-ah)"/><text x="568" y="45" text-anchor="start" class="ts">yes</text><rect x="620" y="27" width="300" height="50" rx="6" class="b-ok"/><text x="770.0" y="56.5" text-anchor="middle" class="t">switch to it</text><rect x="255" y="104" width="300" height="64" rx="6" class="b-rt"/><text x="405.0" y="125.5" text-anchor="middle" class="t">2. a queued task, and a</text><text x="405.0" y="141.5" text-anchor="middle" class="t">worker free for it</text><text x="405.0" y="157.5" text-anchor="middle" class="t">(LEAN_NUM_THREADS, or the CPUs)?</text><line x1="555" y1="136" x2="615" y2="136" class="ar" marker-end="url(#sched-ah)"/><text x="568" y="129" text-anchor="start" class="ts">yes</text><rect x="620" y="111" width="300" height="50" rx="6" class="b-ok"/><text x="770.0" y="140.5" text-anchor="middle" class="t">start it on a new context</text><rect x="255" y="188" width="300" height="64" rx="6" class="b-rt"/><text x="405.0" y="217.0" text-anchor="middle" class="t">3. a timer, socket or sleeper</text><text x="405.0" y="233.0" text-anchor="middle" class="t">still pending?</text><line x1="555" y1="220" x2="615" y2="220" class="ar" marker-end="url(#sched-ah)"/><text x="568" y="213" text-anchor="start" class="ts">yes</text><rect x="620" y="195" width="300" height="50" rx="6" class="b-ok"/><text x="770.0" y="217.0" text-anchor="middle" class="t">wait for the first one,</text><text x="770.0" y="233.0" text-anchor="middle" class="t">then look again</text><line x1="405" y1="84" x2="405" y2="102" class="ar" marker-end="url(#sched-ah)"/><text x="412" y="97" text-anchor="start" class="ts">no</text><line x1="405" y1="168" x2="405" y2="186" class="ar" marker-end="url(#sched-ah)"/><text x="412" y="181" text-anchor="start" class="ts">no</text><line x1="405" y1="252" x2="405" y2="270" class="ar" marker-end="url(#sched-ah)"/><text x="412" y="265" text-anchor="start" class="ts">no</text><rect x="255" y="272" width="300" height="44" rx="6" class="b-rr"/><text x="405.0" y="291.0" text-anchor="middle" class="t">nothing can go on: wait forever,</text><text x="405.0" y="307.0" text-anchor="middle" class="t">as a deadlocked native program</text><text x="10" y="120" text-anchor="start" class="ts">Effect points (output, exit,</text><text x="10" y="136" text-anchor="start" class="ts">IO.sleep 0) also let due timers,</text><text x="10" y="152" text-anchor="start" class="ts">ready contexts and old queued</text><text x="10" y="168" text-anchor="start" class="ts">tasks run first, as other</text><text x="10" y="184" text-anchor="start" class="ts">threads would have.</text></svg><figcaption>When the running context blocks, the scheduler looks for work in this order. Contexts never run in parallel.</figcaption></figure>
+<p>What one thread cannot do: a loop that polls a reference that another task
+sets, with no sleep and no output, never sees the change. A blocking system
+call (reading a pipe) blocks every task.</p>
+<p><strong>Promises</strong> are runtime objects that hold their task's cell. Dropping the
+last reference to an unresolved promise resolves it with <code>none</code>, as
+natively. <strong><code>Std.Sync</code></strong> mutexes and condition variables are runtime
+handles; a thread that waits blocks its context.</p>
+<h2 id="input-and-output">Input and output</h2>
+<ul>
+<li><strong>The stdio model.</strong> Files and the standard streams follow glibc's <code>FILE</code>
+  function by function (<code>leanrt/src/cfile.rs</code>): one buffer per handle,
+  line-buffered terminals, the same system calls in the same order. So the
+  <code>errno</code> values are native's. At exit, stdout is flushed first, as natively.</li>
+<li><strong>Fallible IO.</strong> A runtime primitive records its outcome in a last-error
+  slot. The glue turns it into <code>ok</code> or into the <code>IO.Error</code> that Lean's own
+  exported builder makes, with libuv's kind and message (Lean 4.34).</li>
+<li><strong>Processes.</strong> <code>IO.Process</code> follows <code>process.cpp</code>: <code>fork</code> and <code>execvp</code>,
+  pipes with <code>O_CLOEXEC</code>. <code>IO.Process.output</code> reads both pipes together,
+  because a deferred task cannot read one pipe while <code>main</code> reads the other.</li>
+<li><strong>The event loop</strong> (<code>leanrt::net</code>) for timers, sockets, name resolution and
+  signals. It works, but it is not a target now.</li>
+<li><strong>Standard streams per thread.</strong> A task starts with the process's streams,
+  as a new native thread does.</li>
+</ul>
+<h2 id="startup">Startup</h2>
+<figure class="fig" id="fig-start"><svg class="diagram" viewBox="0 0 940 200" width="940" role="img" aria-labelledby="start-title"><title id="start-title">What the entry point does</title><defs><marker id="start-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="80.0" y="63.5" text-anchor="middle" class="tb">0.</text><text x="80.0" y="79.5" text-anchor="middle" class="ts">open libuv&#x27;s</text><text x="80.0" y="94.5" text-anchor="middle" class="ts">descriptors</text><text x="80.0" y="109.5" text-anchor="middle" class="ts">(ELF constructor)</text><rect x="165" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="235.0" y="63.5" text-anchor="middle" class="tb">1.</text><text x="235.0" y="79.5" text-anchor="middle" class="ts">run the</text><text x="235.0" y="94.5" text-anchor="middle" class="ts">initializers</text><text x="235.0" y="109.5" text-anchor="middle" class="ts">(main thread, 8 MiB)</text><line x1="147" y1="80" x2="163" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="320" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="390.0" y="63.5" text-anchor="middle" class="tb">2.</text><text x="390.0" y="79.5" text-anchor="middle" class="ts">start the</text><text x="390.0" y="94.5" text-anchor="middle" class="ts">task manager;</text><text x="390.0" y="109.5" text-anchor="middle" class="ts">1 GiB thread</text><line x1="302" y1="80" x2="318" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="475" y="40" width="140" height="80" rx="6" class="b-l2r"/><text x="545.0" y="63.5" text-anchor="middle" class="tb">3.</text><text x="545.0" y="79.5" text-anchor="middle" class="ts">call main</text><text x="545.0" y="94.5" text-anchor="middle" class="ts">with the args</text><text x="545.0" y="109.5" text-anchor="middle" class="ts">and the world</text><line x1="457" y1="80" x2="473" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="630" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="700.0" y="63.5" text-anchor="middle" class="tb">4.</text><text x="700.0" y="79.5" text-anchor="middle" class="ts">run the IO tasks</text><text x="700.0" y="94.5" text-anchor="middle" class="ts">still pending</text><text x="700.0" y="109.5" text-anchor="middle" class="ts">(final run)</text><line x1="612" y1="80" x2="628" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="785" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="855.0" y="63.5" text-anchor="middle" class="tb">5-6.</text><text x="855.0" y="79.5" text-anchor="middle" class="ts">error: print it,</text><text x="855.0" y="94.5" text-anchor="middle" class="ts">exit 1; else exit</text><text x="855.0" y="109.5" text-anchor="middle" class="ts">with main&#x27;s code</text><line x1="767" y1="80" x2="783" y2="80" class="ar" marker-end="url(#start-ah)"/><text x="10" y="160" text-anchor="start" class="ts">Stack overflow in any thread or task prints &quot;Stack overflow detected. Aborting.&quot; and exits 134, as natively.</text></svg><figcaption>As Lean's generated <code>main</code> (EmitC), step by step. An error in an initializer prints <code>uncaught exception</code> and exits 1 before <code>main</code>.</figcaption></figure>
+<ul>
+<li><strong>Constants.</strong> Every zero-parameter declaration of the program's modules
+  runs at startup, in Lean's initialization order. Each constant is a
+  once-cell. A context that needs a constant that another context is
+  computing waits for it, as a native thread waits for a lock.</li>
+<li><strong>Toolchain constants and closed terms</strong> are evaluated lazily, once.</li>
+<li><strong>Order.</strong> The <code>.olean</code> records part of Lean's compilation order. lean2rr
+  rebuilds the rest from the source structure (declaration ranges, <code>where</code>
+  helpers, <code>mutual</code> blocks). A few orders are not recorded; see
+  <a href="differences.html#startup-and-evaluation">Known differences</a>.</li>
+</ul>
+<h3 id="the-walk-of-a-closed-term-for-its-tasks">The walk of a closed term for its tasks</h3>
+<figure class="fig" id="fig-persist"><svg class="diagram" viewBox="0 0 940 170" width="940" role="img" aria-labelledby="persist-title"><title id="persist-title">The walk of a closed term for its tasks</title><defs><marker id="persist-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="40" width="170" height="80" rx="6" class="b-l2r"/><text x="95.0" y="70.5" text-anchor="middle" class="tb">closed term</text><text x="95.0" y="86.5" text-anchor="middle" class="ts">evaluated once,</text><text x="95.0" y="101.5" text-anchor="middle" class="ts">at first use</text><line x1="180" y1="80" x2="225" y2="80" class="ar" marker-end="url(#persist-ah)"/><rect x="230" y="30" width="290" height="100" rx="6" class="b-rt"/><text x="375.0" y="63.5" text-anchor="middle" class="tb">pass 1: collect</text><text x="375.0" y="79.5" text-anchor="middle" class="ts">walk the value (a loop, each cell once)</text><text x="375.0" y="94.5" text-anchor="middle" class="ts">note the unfinished tasks</text><text x="375.0" y="109.5" text-anchor="middle" class="ts">do not look into them</text><line x1="520" y1="80" x2="565" y2="80" class="ar" marker-end="url(#persist-ah)"/><rect x="570" y="30" width="360" height="100" rx="6" class="b-rt"/><text x="750.0" y="56.5" text-anchor="middle" class="tb">pass 2: wait</text><text x="750.0" y="72.5" text-anchor="middle" class="ts">walk again in Lean&#x27;s order;</text><text x="750.0" y="87.5" text-anchor="middle" class="ts">before waiting for a task, run the collected</text><text x="750.0" y="102.5" text-anchor="middle" class="ts">tasks that natively come first (priority,</text><text x="750.0" y="117.5" text-anchor="middle" class="ts">then creation order)</text><text x="10" y="160" text-anchor="start" class="ts">Skipped when every task has finished (always at startup). A task the program drops meanwhile is deleted, not run.</text></svg><figcaption>Native Lean marks a closed term persistent at its first use and waits for every task in it. lean2rr's walk does that in two passes, so the tasks run in the workers' queue order.</figcaption></figure>
+<p>The walk is a loop over a work list, not a recursion, and it visits each
+cell once. So a value 300000 cells deep, or a DAG with 2^40 paths, is no
+problem.</p>
+<h2 id="the-shared-runtime-crate-plan">The shared runtime crate (plan)</h2>
+<p>lean2rr will use the shared crate <strong><code>lean-runtime</code></strong>
+(github.com/QueClr/lean-runtime, public). The crate implements Lean's
+runtime behaviour once, as a library that a translator from Lean to Rust
+can use. lean2rr's <code>leanrt</code> moves into it step by step.</p>
+<table>
+<thead>
+<tr>
+<th>Point</th>
+<th>Decision</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What is shared</td>
+<td>Lean's runtime semantics: hashes, floats, strings, numbers, arrays, IO, the scheduler.</td>
+</tr>
+<tr>
+<td>What stays in lean2rr</td>
+<td>The representation of values and the memory protocol: lean2rr keeps thin glue over its own layouts.</td>
+</tr>
+<tr>
+<td>One runtime</td>
+<td>Every runtime function is implemented once, in the crate. lean2rr keeps no copies and no fallbacks.</td>
+</tr>
+<tr>
+<td>Safety</td>
+<td><code>#![forbid(unsafe_code)]</code> by default. Unsafe code comes only through vetted crates (nix/rustix, mimalloc, corosensei). A faster unsafe path can come later behind an opt-in <code>unsafe-fast</code> feature, with a written proof.</td>
+</tr>
+<tr>
+<td>Speed</td>
+<td>The safe default must be at least as fast as Lean 4.34.0's native runtime.</td>
+</tr>
+<tr>
+<td>Big numbers</td>
+<td>Behind a trait; lean2rr keeps GMP.</td>
+</tr>
+<tr>
+<td>Tasks</td>
+<td>Deferred tasks, polling yield points, Lean's exit behaviour; the stack switch through corosensei.</td>
+</tr>
+<tr>
+<td>Order</td>
+<td>Semantics first, then IO, then the scheduler. Each step must pass lean2rr's test suites.</td>
+</tr>
+<tr>
+<td>Reuse</td>
+<td>Existing runtime code moves into the crate; it is rewritten only where it does not fit.</td>
+</tr>
+<tr>
+<td>Bugs</td>
+<td>Every bug found becomes a test. Bugs of Lean's own runtime are not copied; lean-runtime's <code>docs/lean-bugs.md</code> lists them.</td>
+</tr>
+</tbody>
+</table>
+<p>Status (2026-10-04): lean-runtime has its first part of the semantics
+(hashes, floats, integers, strings, <code>libm</code>). lean2rr's switch to it is in
+progress.</p>
+  </main>
+</div>
+<footer>Generated by <code>docs/site/build.py</code> from the repository's files (Lean v4.34.0).
+This site summarizes; the markdown documents in the repository are the authority.</footer>
+</body>
+</html>

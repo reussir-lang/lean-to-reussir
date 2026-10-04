@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glossary · lean2rr design</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
+  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html">Representations</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html" class="here">Glossary</a></nav>
+</header>
+<div class="layout">
+  <aside class="toc"><div class="tochead">On this page</div><div class="toc">
+<ul>
+<li><a href="#lean2rr-and-its-builds">lean2rr and its builds</a></li>
+<li><a href="#leans-compiler">Lean's compiler</a></li>
+<li><a href="#stages-and-types">Stages and types</a></li>
+<li><a href="#representations">Representations</a></li>
+<li><a href="#runtime">Runtime</a></li>
+<li><a href="#reussir">Reussir</a></li>
+<li><a href="#testing-and-review">Testing and review</a></li>
+</ul>
+</div>
+</aside>
+  <main>
+<h1 id="glossary">Glossary</h1>
+<p class="lead">The terms that these pages use. Each term has one meaning, and
+each concept has one term.</p>
+
+<h2 id="lean2rr-and-its-builds">lean2rr and its builds</h2>
+<dl>
+<dt>lean2rr</dt>
+<dd>The translator: it reads a compiled Lean program and writes a Reussir program.</dd>
+<dt>native build</dt>
+<dd>The executable that Lean's own compiler makes from a program (C code, <code>leanc</code>, Lean's C runtime). It is the reference for every test.</dd>
+<dt>lean2rr build</dt>
+<dd>The executable that lean2rr, rrc and the runtime make from the same program.</dd>
+<dt>driver</dt>
+<dd><code>scripts/l2r.py</code>: it builds the runtime crate, runs lean2rr, runs rrc, and links the result.</dd>
+<dt>functional equivalence</dt>
+<dd>The contract: the lean2rr build gives the same standard output, standard error and exit code as the native build, except for the known differences.</dd>
+<dt>known difference</dt>
+<dd>A documented way in which a lean2rr build can behave differently from the native build (plan §10).</dd>
+</dl>
+<h2 id="leans-compiler">Lean's compiler</h2>
+<dl>
+<dt>LCNF</dt>
+<dd>Lean's intermediate code for compiled declarations: <code>let</code>, <code>cases</code>, join points, <code>return</code>. The <code>.olean</code> files store it.</dd>
+<dt>base, mono, impure</dt>
+<dd>The three phases of Lean's compiler. Base code is typed and polymorphic. Mono code has type variables erased to <code>lcAny</code>. Impure code adds boxing and reference counting. lean2rr uses base and mono, never impure.</dd>
+<dt><code>lcAny</code></dt>
+<dd>Lean's "unknown type" in mono code. lean2rr stores a value of this type as an <code>L2RBox</code>.</dd>
+<dt>erased value (<code>◾</code>)</dt>
+<dd>A type, a proof or another value with no run-time meaning. lean2rr stores it as <code>L2RUnit</code>.</dd>
+<dt>arity</dt>
+<dd>The number of parameters of a declaration after Lean's optimizations. A call with exactly that many arguments runs the function.</dd>
+<dt>join point</dt>
+<dd>Lean's local continuation: code that several branches jump to (<code>jp</code>, <code>jmp</code>).</dd>
+<dt>closed term</dt>
+<dd>A subexpression without free variables that Lean's <code>extractClosed</code> makes into a constant <code>f._closed_N</code>, evaluated once at first use.</dd>
+<dt>extern</dt>
+<dd>A declaration with <code>@[extern "sym"]</code>: Lean's C runtime implements it under the C symbol <code>sym</code>.</dd>
+<dt><code>.olean</code> file</dt>
+<dd>A compiled Lean module, with its LCNF code and its environment data.</dd>
+</dl>
+<h2 id="stages-and-types">Stages and types</h2>
+<dl>
+<dt>Stage 1 to Stage 4</dt>
+<dd>lean2rr's stages: collect and monomorphize; Lean's mono pipeline; check and recover types; lowering to Reussir.</dd>
+<dt>monomorphization</dt>
+<dd>Making one copy of a polymorphic declaration per list of type arguments, as <code>rustc</code> does with generics.</dd>
+<dt>instance</dt>
+<dd>One such copy, with a fresh name (<code>d._l2r.k</code>).</dd>
+<dt>uniform instance</dt>
+<dd>The instance with every type argument <code>lcAny</code>. Polymorphic recursion and the instance bounds lead to it.</dd>
+<dt>dictionary</dt>
+<dd>The record of functions that a type class instance passes at run time.</dd>
+<dt>static dictionary</dt>
+<dd>A dictionary built only from instance constants and types. lean2rr specializes a callee on it.</dd>
+<dt>precise type</dt>
+<dd>A type that lean2rr knows exactly, as opposed to <code>lcAny</code>.</dd>
+<dt>relevant parameter</dt>
+<dd>A type parameter that appears in a data field. Only relevant parameters make different generated types.</dd>
+</dl>
+<h2 id="representations">Representations</h2>
+<dl>
+<dt>representation</dt>
+<dd>The Reussir type that stores a value. One Lean type can have several representations (<code>List Nat</code> and <code>List L2RBox</code>).</dd>
+<dt>shared type</dt>
+<dd>A Reussir record or enum stored in a counted heap cell.</dd>
+<dt><code>[value]</code> type</dt>
+<dd>A Reussir record or enum stored inline, never allocated.</dd>
+<dt>cell</dt>
+<dd>A heap object with a 32-bit reference count in its header.</dd>
+<dt>immediate</dt>
+<dd>A constructor without fields of a shared enum: a tagged pointer to a static cell, never allocated.</dd>
+<dt>tagged handle</dt>
+<dd>An opaque Reussir handle that may be a number instead of a pointer (local patch 0050). Reussir counts it only when its low bit is 0. <code>Nat</code> and <code>Int</code> are tagged handles.</dd>
+<dt><code>L2RBox</code></dt>
+<dd>The uniform type: a generated enum with one variant per type the program boxes. It stores a value whose type is not statically known.</dd>
+<dt>storage type</dt>
+<dd>The type in which an array stores its elements: the element's own type when it can cross Reussir's FFI boundary, an index for an enumeration, otherwise an <code>ElemBox</code>.</dd>
+<dt><code>ElemBox</code></dt>
+<dd>A generated one-field shared struct that wraps a value that cannot cross the FFI boundary.</dd>
+<dt>conversion</dt>
+<dd>Generated code that rebuilds a value from one representation into another. The result is a new, unshared value.</dd>
+<dt>placeholder</dt>
+<dd>Lean's <code>box(0)</code>, a value that is never read. lean2rr gives it the <em>zero</em> of the expected type.</dd>
+<dt>function value</dt>
+<dd>A Lean closure or partial application. lean2rr stores it as a variant of a generated enum per function type.</dd>
+</dl>
+<h2 id="runtime">Runtime</h2>
+<dl>
+<dt>runtime</dt>
+<dd>Everything a lean2rr build contains besides the program: the prelude, <code>leanrt</code>, and the shim.</dd>
+<dt>prelude</dt>
+<dd><code>runtime/prelude.rr</code>: Reussir source prepended to every program, with one function per Lean extern.</dd>
+<dt><code>leanrt</code></dt>
+<dd>The Rust crate linked into every lean2rr build.</dd>
+<dt>shim</dt>
+<dd><code>L2RShim</code>: lean2rr's Lean library for the <code>Std.Internal.UV</code> externs and a few others, compiled with the program.</dd>
+<dt>glue</dt>
+<dd>Code that lean2rr generates for an extern over Lean-defined types.</dd>
+<dt>texture</dt>
+<dd>The Rust body of a Reussir <code>#[ffi(import)]</code> function. rustc compiles it; LLVM can inline it.</dd>
+<dt>once-cell</dt>
+<dd>A runtime slot that holds a constant. The value is computed once and never freed.</dd>
+<dt>deferred task</dt>
+<dd>A task that runs only when needed, when the running code blocks, or when <code>main</code> returns.</dd>
+<dt>context</dt>
+<dd>A stack on which the scheduler runs <code>main</code> or a task. Contexts take turns on one thread.</dd>
+<dt>effect point</dt>
+<dd>A point (output, exit, <code>IO.sleep 0</code>) where the scheduler lets due timers, ready contexts and old queued tasks run first.</dd>
+<dt><code>sync</code> dependent</dt>
+<dd>A task created with <code>sync := true</code>: it runs on the thread that finishes its source, before anything else.</dd>
+<dt>pending stack</dt>
+<dd>The per-thread stack of cells to free. Frees use it instead of recursion (local patches 0013 to 0015).</dd>
+</dl>
+<h2 id="reussir">Reussir</h2>
+<dl>
+<dt>Reussir</dt>
+<dd>The compiler framework that lean2rr targets: reference counting and memory reuse for functional programs, over MLIR and LLVM.</dd>
+<dt>rrc</dt>
+<dd>Reussir's compiler driver.</dd>
+<dt>token reuse</dt>
+<dd>Reussir's way to build a new cell in the memory of a cell that dies (Lean's reset/reuse).</dd>
+<dt>local patch</dt>
+<dd>A change to Reussir that lean2rr's builds use, on branch <code>l2r-local</code> of <code>./reussir</code>. Never pushed upstream.</dd>
+</dl>
+<h2 id="testing-and-review">Testing and review</h2>
+<dl>
+<dt>oracle</dt>
+<dd>The native build's output, against which a lean2rr build is compared.</dd>
+<dt>classic corpus</dt>
+<dd>The 18 benchmark programs of <code>tests/classic</code>, each at three sizes.</dd>
+<dt>runtime test</dt>
+<dd>A program <code>tests/runtime/Rt*.lean</code> that checks one feature or one finding.</dd>
+<dt><code>.xfail</code></dt>
+<dd>A file that marks a runtime test as known to fail, with the reason.</dd>
+<dt>review round</dt>
+<dd>A period in which reviewers try to break lean2rr and write their findings.</dd>
+<dt>finding</dt>
+<dd>A defect that a reviewer reports, with an id (<code>RV9C-02</code>), a repro, and the expected and actual output.</dd>
+<dt>judge</dt>
+<dd>The step that decides whether a finding is real before anyone fixes it.</dd>
+<dt>lean-runtime</dt>
+<dd>The shared runtime crate (github.com/QueClr/lean-runtime) that lean2rr will use: Lean's runtime semantics in safe Rust.</dd>
+</dl>
+  </main>
+</div>
+<footer>Generated by <code>docs/site/build.py</code> from the repository's files (Lean v4.34.0).
+This site summarizes; the markdown documents in the repository are the authority.</footer>
+</body>
+</html>

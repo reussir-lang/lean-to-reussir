@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overview · lean2rr design</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
+  <nav class="main"><a href="index.html" class="here">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html">Representations</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
+</header>
+<div class="layout">
+  <aside class="toc"><div class="tochead">On this page</div><div class="toc">
+<ul>
+<li><a href="#what-lean2rr-does">What lean2rr does</a></li>
+<li><a href="#the-contract">The contract</a></li>
+<li><a href="#targets">Targets</a></li>
+<li><a href="#the-extern-rule">The extern rule</a></li>
+<li><a href="#the-shared-runtime-crate">The shared runtime crate</a></li>
+<li><a href="#status">Status</a></li>
+<li><a href="#work-in-progress">Work in progress</a></li>
+<li><a href="#the-pages">The pages</a></li>
+</ul>
+</div>
+</aside>
+  <main>
+<h1 id="lean2rr-architecture-and-design">lean2rr: architecture and design</h1>
+<p class="lead">lean2rr compiles Lean 4 programs to native executables through
+Reussir. This site explains the design with diagrams and short text. It
+describes the repository that it is built from: Lean v4.34.0, and Reussir
+with lean2rr's local patches (<code>l2r-local</code> at cc8e5aa5).</p>
+
+<div class="note">
+<p><strong>How to read this site.</strong> Each page is a summary. The markdown documents
+in the repository are the authority, and each page links to them:</p>
+<ul>
+<li><a href="../../docs/translation-plan.md">translation plan</a>: every rule, with its reason;</li>
+<li><a href="../../docs/implementation-status.md">implementation status</a>: what works, results, performance;</li>
+<li><a href="../../docs/implementation/README.md">implementation notes</a>: every trick and special case;</li>
+<li><a href="../../runtime/README.md">runtime README</a>: the runtime's types and functions;</li>
+<li><a href="../../reussir-bugs/README.md">Reussir bugs</a>: every Reussir problem, with its patch;</li>
+<li><a href="../../tests/README.md">tests README</a>: the test sets and the findings they cover.</li>
+</ul>
+<p>The <a href="glossary.html">glossary</a> defines the terms that these pages use.</p>
+</div>
+<h2 id="what-lean2rr-does">What lean2rr does</h2>
+<p>A Lean program is first compiled by Lean's own build (<code>lake build</code>). That
+build writes <code>.olean</code> files. These files contain Lean's intermediate code
+(LCNF) for every compiled declaration. lean2rr reads this code. It does not
+parse Lean source.</p>
+<p>lean2rr makes a typed Reussir program from the code. Reussir's compiler
+<code>rrc</code> then compiles that program with LLVM. Reussir adds the reference
+counting and reuses memory cells in place. A small runtime supplies what
+Lean's C runtime supplies natively: big numbers, strings, files, processes,
+tasks and more.</p>
+<figure class="fig" id="fig-flow"><svg class="diagram" viewBox="0 0 940 270" width="940" role="img" aria-labelledby="flow-title"><title id="flow-title">From a Lean program to two executables</title><defs><marker id="flow-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="100" width="110" height="60" rx="6" class="b-lean"/><text x="65.0" y="127.5" text-anchor="middle" class="tb">Lean program</text><text x="65.0" y="143.5" text-anchor="middle" class="ts">.lean files</text><line x1="120" y1="130" x2="175" y2="130" class="ar" marker-end="url(#flow-ah)"/><text x="149" y="150" text-anchor="middle" class="ts">lake build</text><rect x="180" y="92" width="150" height="76" rx="6" class="b-lean"/><text x="255.0" y="120.5" text-anchor="middle" class="tb">Compiled modules</text><text x="255.0" y="136.5" text-anchor="middle" class="ts">.olean files</text><text x="255.0" y="151.5" text-anchor="middle" class="ts">(LCNF code inside)</text><path d="M 330 115 C 360 115 360 45 390 45" class="ar" fill="none" marker-end="url(#flow-ah)"/><rect x="395" y="18" width="240" height="56" rx="6" class="b-lean"/><text x="515.0" y="43.5" text-anchor="middle" class="tb">Lean&#x27;s own back end</text><text x="515.0" y="59.5" text-anchor="middle" class="ts">C code, leanc, Lean&#x27;s C runtime</text><line x1="635" y1="46" x2="690" y2="46" class="ar" marker-end="url(#flow-ah)"/><rect x="695" y="18" width="150" height="56" rx="6" class="b-lean"/><text x="770.0" y="43.5" text-anchor="middle" class="tb">native build</text><text x="770.0" y="59.5" text-anchor="middle" class="ts">executable</text><path d="M 330 145 C 360 145 360 205 390 205" class="ar" fill="none" marker-end="url(#flow-ah)"/><rect x="395" y="175" width="110" height="60" rx="6" class="b-l2r"/><text x="450.0" y="202.5" text-anchor="middle" class="tb">lean2rr</text><text x="450.0" y="218.5" text-anchor="middle" class="ts">translator</text><line x1="505" y1="205" x2="540" y2="205" class="ar" marker-end="url(#flow-ah)"/><rect x="545" y="175" width="110" height="60" rx="6" class="b-l2r"/><text x="600.0" y="202.5" text-anchor="middle" class="tb">prog.rr</text><text x="600.0" y="218.5" text-anchor="middle" class="ts">Reussir source</text><line x1="655" y1="205" x2="690" y2="205" class="ar" marker-end="url(#flow-ah)"/><rect x="695" y="175" width="150" height="60" rx="6" class="b-rr"/><text x="770.0" y="202.5" text-anchor="middle" class="tb">rrc (Reussir)</text><text x="770.0" y="218.5" text-anchor="middle" class="ts">+ leanrt, GMP</text><line x1="770" y1="175" x2="770" y2="136" class="ar" marker-end="url(#flow-ah)"/><rect x="695" y="96" width="150" height="40" rx="6" class="b-rr"/><text x="770.0" y="120.5" text-anchor="middle" class="tb">lean2rr build</text><rect x="865" y="60" width="66" height="100" rx="6" class="b-test"/><text x="898.0" y="93.5" text-anchor="middle" class="tb">same</text><text x="898.0" y="109.5" text-anchor="middle" class="ts">stdout</text><text x="898.0" y="124.5" text-anchor="middle" class="ts">stderr</text><text x="898.0" y="139.5" text-anchor="middle" class="ts">exit</text><line x1="845" y1="46" x2="865" y2="80" class="ln"/><line x1="845" y1="116" x2="865" y2="120" class="ln"/></svg><figcaption>Both builds start from the same <code>.olean</code> files. The native build is the reference: tests compare the two executables' standard output, standard error and exit code.</figcaption></figure>
+<p>The driver <code>scripts/l2r.py</code> runs all the steps:</p>
+<pre><code>scripts/l2r.py Main.lean -o main
+scripts/l2r.py ModuleName -o main --lean-path DIR
+</code></pre>
+<h2 id="the-contract">The contract</h2>
+<div class="rule">
+<p><strong>Functional equivalence.</strong> The lean2rr build of a program gives the same
+standard output, standard error and exit code as its native build.</p>
+</div>
+<p>The contract has limits. It applies when the output does not depend on these
+things:</p>
+<ul>
+<li><strong>Pointer identity, raw addresses and sharing.</strong> Only unsafe or
+  implementation-level functions can see them (<code>ptrAddrUnsafe</code>,
+  <code>isExclusiveUnsafe</code>, <code>dbgTraceIfShared</code>). lean2rr does not copy native
+  addresses.</li>
+<li><strong>Timing races between tasks.</strong> lean2rr runs all tasks on one thread. It
+  picks one schedule that native Lean can also produce.</li>
+<li><strong>The other known differences.</strong> <a href="differences.html">Known differences</a>
+  lists them, grouped. Plan §10 has the full list.</li>
+</ul>
+<p>lean2rr also does not copy bugs of Lean's own runtime. A suspected bug
+becomes an intended difference only after review confirms it with the C
+source, a reason and a native repro.</p>
+<h2 id="targets">Targets</h2>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Decision</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Programs</td>
+<td>Lean code that uses only <code>Init</code> and <code>Std</code>: computation, data structures, basic IO (standard streams, files).</td>
+</tr>
+<tr>
+<td>Layouts</td>
+<td>lean2rr's own layouts come first. A Lean-compatible layout stays only where it costs nothing.</td>
+</tr>
+<tr>
+<td>Network and async</td>
+<td><code>Std.Async</code>, sockets, timers and <code>Std.Internal.UV</code> work, but they are not targets now.</td>
+</tr>
+<tr>
+<td>Parallelism</td>
+<td>Not now. Tasks run on one thread. Real threads come later, and the design must not block them.</td>
+</tr>
+<tr>
+<td>C code of the program</td>
+<td>Never built, linked or called (see the extern rule below). Support for calling C is parked.</td>
+</tr>
+<tr>
+<td>Externs of the program</td>
+<td>See "The extern rule" below.</td>
+</tr>
+<tr>
+<td><code>import Lean</code></td>
+<td>Programs that only use data structures from <code>Lean</code> build. Lean's C++ externs (<code>Expr.mkData</code>, <code>evalConst</code>, ...) are not available.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-extern-rule">The extern rule</h2>
+<div class="rule">
+<p><strong>Lean code only.</strong> The project's rule for externs:</p>
+<ol>
+<li>An <code>@[extern]</code> of the program or of a package it uses is compiled from
+   its Lean definition. Its C code (Lake's <code>extern_lib</code>) is never built or
+   linked. This route has no data conversion: the Lean definition works on
+   lean2rr's own representations.</li>
+<li>An extern with no Lean definition (<code>@[extern] opaque</code>) is refused at
+   translation, with a clear message.</li>
+<li>The only native code is Lean's runtime library: <code>leanrt</code> today, moving
+   into the shared crate <code>lean-runtime</code>. A program extern that re-declares
+   one of these runtime functions with a matching signature uses lean2rr's
+   runtime version.</li>
+</ol>
+</div>
+<p><strong>Current state.</strong> The rule is implemented and in review, not merged yet.
+Until it is merged, lean2rr fails such a program at the rrc build with an
+unknown function. The externs of Lean's own library (<code>Init</code>, <code>Std</code>) are not
+affected: the runtime implements all of them.</p>
+<h2 id="the-shared-runtime-crate">The shared runtime crate</h2>
+<p>lean2rr will use the shared crate <code>lean-runtime</code>
+(github.com/QueClr/lean-runtime, public). The crate holds Lean's runtime
+semantics, implemented once, in safe Rust. lean2rr keeps only the glue to
+its own representations. See <a href="runtime.html#the-shared-runtime-crate-plan">Runtime</a>.</p>
+<h2 id="status">Status</h2>
+<p>Counts with a † are taken from the repository when the site is built. The
+other results are the last recorded runs.</p>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Runtime test suite</td>
+<td>258 programs† (1 marked <code>.xfail</code>†); 231 of 231 identical to native Lean 4.34.0 at the last full regression (2026-10-03)</td>
+</tr>
+<tr>
+<td>Classic corpus</td>
+<td>18 programs × 3 sizes, identical to native, with all optional passes on and with all off</td>
+</tr>
+<tr>
+<td>Reussir benchmark suite</td>
+<td>18 of 18 programs identical to native</td>
+</tr>
+<tr>
+<td>Loader checks</td>
+<td>17 cases†, all as expected</td>
+</tr>
+<tr>
+<td>Lean's own compile tests</td>
+<td>72 programs of Lean's <code>tests/compile</code> and <code>tests/compile_bench</code>: all match native (checked with Lean 4.33)</td>
+</tr>
+<tr>
+<td>Externs of <code>Init</code> and <code>Std</code></td>
+<td>all 717 of Lean 4.34 available; 706 checked by programs that call each one</td>
+</tr>
+<tr>
+<td>Speed</td>
+<td>faster than native on 16 of 18 classic programs, about equal on 2 (measured with Lean 4.33; not measured again for 4.34)</td>
+</tr>
+<tr>
+<td>Reussir</td>
+<td>35 local patches applied†; patch 0065 reviewed, not applied yet</td>
+</tr>
+</tbody>
+</table>
+<p><a href="testing.html">Testing</a> explains each test set and the review process.</p>
+<h2 id="work-in-progress">Work in progress</h2>
+<p>As of 2026-10-04, this work is under way and not in the repository's main
+line yet:</p>
+<ul>
+<li>the extern rule (above): implemented, in review;</li>
+<li>fixes found by testing other programs through lean2rr: the release order
+  of handles lent to a call, <code>libm</code> calls that LLVM must not fold, and the
+  overflow message of <code>Array.replicate</code>;</li>
+<li>plan §10's list of Lean runtime bugs that lean2rr does not reproduce
+  (see <a href="differences.html#lean-bugs-we-do-not-reproduce">Known differences</a>);</li>
+<li>the move of the runtime's semantics into <code>lean-runtime</code>.</li>
+</ul>
+<h2 id="the-pages">The pages</h2>
+<div class="cards">
+<div class="card">
+<h4 id="pipeline"><a href="pipeline.html">Pipeline</a></h4>
+<p>The stages from <code>.olean</code> to executable: what goes in, what comes out, and the key decisions.</p>
+</div>
+<div class="card">
+<h4 id="representations"><a href="representations.html">Representations</a></h4>
+<p>How each Lean type is stored, with memory layouts.</p>
+</div>
+<div class="card">
+<h4 id="runtime"><a href="runtime.html">Runtime</a></h4>
+<p>The runtime layers, memory management, the scheduler, IO, startup, and the shared runtime plan.</p>
+</div>
+<div class="card">
+<h4 id="optional-passes"><a href="passes.html">Optional passes</a></h4>
+<p>Each optimization, what it does and what guards it. Generated from the registry.</p>
+</div>
+<div class="card">
+<h4 id="testing"><a href="testing.html">Testing</a></h4>
+<p>Native builds as the oracle, the test sets, the review rounds.</p>
+</div>
+<div class="card">
+<h4 id="reussir"><a href="reussir.html">Reussir</a></h4>
+<p>What Reussir is, how lean2rr calls it, and the local patches.</p>
+</div>
+<div class="card">
+<h4 id="known-differences"><a href="differences.html">Known differences</a></h4>
+<p>Where a lean2rr build can behave differently from the native build.</p>
+</div>
+<div class="card">
+<h4 id="glossary"><a href="glossary.html">Glossary</a></h4>
+<p>The terms these pages use, one meaning each.</p>
+</div>
+</div>
+  </main>
+</div>
+<footer>Generated by <code>docs/site/build.py</code> from the repository's files (Lean v4.34.0).
+This site summarizes; the markdown documents in the repository are the authority.</footer>
+</body>
+</html>

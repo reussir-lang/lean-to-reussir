@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline · lean2rr design</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
+  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html" class="here">Pipeline</a><a href="representations.html">Representations</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
+</header>
+<div class="layout">
+  <aside class="toc"><div class="tochead">On this page</div><div class="toc">
+<ul>
+<li><a href="#why-lean2rr-starts-from-leans-base-code">Why lean2rr starts from Lean's base code</a></li>
+<li><a href="#loading">Loading</a></li>
+<li><a href="#stage-1-collect-and-monomorphize">Stage 1: collect and monomorphize</a></li>
+<li><a href="#stage-2-leans-mono-pipeline">Stage 2: Lean's mono pipeline</a></li>
+<li><a href="#stage-3-check-and-recover-lost-types">Stage 3: check and recover lost types</a></li>
+<li><a href="#stage-4-lowering-to-reussir">Stage 4: lowering to Reussir</a><ul>
+<li><a href="#types">Types</a></li>
+<li><a href="#declarations-and-arity">Declarations and arity</a></li>
+<li><a href="#function-values">Function values</a></li>
+<li><a href="#join-points">Join points</a></li>
+<li><a href="#externs-and-glue">Externs and glue</a></li>
+<li><a href="#constants-and-startup">Constants and startup</a></li>
+</ul>
+</li>
+<li><a href="#after-lowering">After lowering</a></li>
+<li><a href="#rrc">rrc</a></li>
+<li><a href="#key-decisions">Key decisions</a></li>
+</ul>
+</div>
+</aside>
+  <main>
+<h1 id="pipeline">Pipeline</h1>
+<p class="lead">How a compiled Lean program becomes a Reussir program and then an
+executable. Source: <a href="../../docs/translation-plan.md">translation plan</a>
+§1 to §5.</p>
+
+<figure class="fig" id="fig-pipe"><svg class="diagram" viewBox="0 0 940 1005" width="940" role="img" aria-labelledby="pipe-title"><title id="pipe-title">The lean2rr pipeline, stage by stage</title><defs><marker id="pipe-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="160" y="10" width="470" height="50" rx="6" class="b-lean"/><text x="170" y="32.5" text-anchor="start" class="tb">.olean files of the program and of Lean&#x27;s library</text><text x="170" y="48.5" text-anchor="start" class="ts">base LCNF: typed, polymorphic, A-normal form</text><text x="148" y="28" text-anchor="end" class="ts">input</text><line x1="395.0" y1="60" x2="395.0" y2="80" class="ar" marker-end="url(#pipe-ah)"/><rect x="160" y="84" width="470" height="64" rx="6" class="b-l2r"/><text x="170" y="106.5" text-anchor="start" class="tb">Loading (Env)</text><text x="170" y="122.5" text-anchor="start" class="ts">import every module with its extension states</text><text x="170" y="137.5" text-anchor="start" class="ts">check that Init/Std/Lean/Lake/L2RShim modules are the real ones</text><text x="148" y="102" text-anchor="end" class="ts">Env.lean</text><line x1="395.0" y1="148" x2="395.0" y2="168" class="ar" marker-end="url(#pipe-ah)"/><text x="405.0" y="162.0" text-anchor="start" class="ts">every declaration reachable from main and the startup work</text><rect x="160" y="172" width="470" height="96" rx="6" class="b-l2r"/><text x="170" y="196.5" text-anchor="start" class="tb">Stage 1: collect and monomorphize</text><text x="170" y="212.5" text-anchor="start" class="ts">one instance per list of type arguments, with a fresh name</text><text x="170" y="227.5" text-anchor="start" class="ts">static dictionaries specialize their callee</text><text x="170" y="242.5" text-anchor="start" class="ts">calls that Lean&#x27;s cse merges across types are aligned</text><text x="170" y="257.5" text-anchor="start" class="ts">polymorphic recursion goes to the uniform instance (lcAny)</text><text x="650" y="224.0" text-anchor="start" class="tcode">--emit base, inst</text><text x="148" y="190" text-anchor="end" class="ts">Collect.lean</text><text x="148" y="205" text-anchor="end" class="ts">Mono.lean</text><line x1="395.0" y1="268" x2="395.0" y2="288" class="ar" marker-end="url(#pipe-ah)"/><text x="405.0" y="282.0" text-anchor="start" class="ts">monomorphic base LCNF, a closed program</text><rect x="160" y="292" width="470" height="96" rx="6" class="b-lean"/><text x="170" y="316.5" text-anchor="start" class="tb">Stage 2: Lean&#x27;s own mono pipeline</text><text x="170" y="332.5" text-anchor="start" class="ts">Lean&#x27;s passes in Lean&#x27;s order: simp, cse, lambda lifting, ...</text><text x="170" y="347.5" text-anchor="start" class="ts">toMono, structProjCases: lean2rr copies that keep more types</text><text x="170" y="362.5" text-anchor="start" class="ts">inferVisibility, toImpure: not run</text><text x="170" y="377.5" text-anchor="start" class="ts">extractClosed: run last, as Lean ran it</text><text x="650" y="344.0" text-anchor="start" class="tcode">--emit mono, externs</text><text x="148" y="310" text-anchor="end" class="ts">Pipeline.lean</text><text x="148" y="325" text-anchor="end" class="ts">Passes.lean</text><line x1="395.0" y1="388" x2="395.0" y2="408" class="ar" marker-end="url(#pipe-ah)"/><text x="405.0" y="402.0" text-anchor="start" class="ts">mono LCNF with exact types (a few lcAny left)</text><rect x="160" y="412" width="470" height="80" rx="6" class="b-l2r"/><text x="170" y="435.5" text-anchor="start" class="tb">Stage 3: check and recover lost types</text><text x="170" y="451.5" text-anchor="start" class="ts">types flow from definitions, never from uses</text><text x="170" y="466.5" text-anchor="start" class="ts">split-map-loops, uniform-updates (optional passes)</text><text x="170" y="481.5" text-anchor="start" class="ts">typed references (typedRef)</text><text x="650" y="456.0" text-anchor="start" class="tcode">--emit retyped</text><text x="148" y="430" text-anchor="end" class="ts">MonoRetype.lean</text><text x="148" y="445" text-anchor="end" class="ts">Opt/*</text><line x1="395.0" y1="492" x2="395.0" y2="512" class="ar" marker-end="url(#pipe-ah)"/><text x="405.0" y="506.0" text-anchor="start" class="ts">checked mono LCNF</text><rect x="160" y="516" width="470" height="40" rx="6" class="b-opt"/><text x="170" y="540.5" text-anchor="start" class="tb">passes over mono LCNF (float-lits)</text><text x="148" y="534" text-anchor="end" class="ts">Opt/FloatLits</text><line x1="395.0" y1="556" x2="395.0" y2="576" class="ar" marker-end="url(#pipe-ah)"/><rect x="160" y="580" width="470" height="112" rx="6" class="b-l2r"/><text x="170" y="605.5" text-anchor="start" class="tb">Stage 4: lower to Reussir</text><text x="170" y="621.5" text-anchor="start" class="ts">types: records, enums, Box, function-value enums</text><text x="170" y="636.5" text-anchor="start" class="ts">declarations with Lean&#x27;s arities; join points J1 to J4</text><text x="170" y="651.5" text-anchor="start" class="ts">externs: prelude functions and generated glue</text><text x="170" y="666.5" text-anchor="start" class="ts">startup chain, constants in once-cells, the entry point</text><text x="170" y="681.5" text-anchor="start" class="ts">lowering hooks of the optional passes</text><text x="148" y="598" text-anchor="end" class="ts">Lower/*.lean</text><text x="148" y="613" text-anchor="end" class="ts">Emit/*.lean</text><line x1="395.0" y1="692" x2="395.0" y2="712" class="ar" marker-end="url(#pipe-ah)"/><text x="405.0" y="706.0" text-anchor="start" class="ts">Reussir functions and types</text><rect x="160" y="716" width="470" height="64" rx="6" class="b-l2r"/><text x="170" y="738.5" text-anchor="start" class="tb">After lowering</text><text x="170" y="754.5" text-anchor="start" class="ts">Array Nat literal tables, Outline (long code cut for rrc)</text><text x="170" y="769.5" text-anchor="start" class="ts">passes over the generated functions (sink-proj)</text><text x="650" y="752.0" text-anchor="start" class="tcode">--emit rr</text><text x="148" y="734" text-anchor="end" class="ts">ArrayLits</text><text x="148" y="749" text-anchor="end" class="ts">Outline</text><text x="148" y="764" text-anchor="end" class="ts">Opt/SinkProj</text><line x1="395.0" y1="780" x2="395.0" y2="800" class="ar" marker-end="url(#pipe-ah)"/><text x="405.0" y="794.0" text-anchor="start" class="ts">prog.rr: the program text, prelude.rr prepended</text><rect x="160" y="804" width="470" height="80" rx="6" class="b-rr"/><text x="170" y="827.5" text-anchor="start" class="tb">rrc: Reussir</text><text x="170" y="843.5" text-anchor="start" class="ts">Reussir front end, then MLIR passes:</text><text x="170" y="858.5" text-anchor="start" class="ts">reference counting (Perceus), token reuse, drop glue</text><text x="170" y="873.5" text-anchor="start" class="ts">LLVM: optimization and code generation</text><text x="148" y="822" text-anchor="end" class="ts">scripts/l2r.py</text><text x="148" y="837" text-anchor="end" class="ts">runs rrc</text><line x1="395.0" y1="884" x2="395.0" y2="904" class="ar" marker-end="url(#pipe-ah)"/><text x="405.0" y="898.0" text-anchor="start" class="ts">object code, linked with the leanrt rlib and GMP</text><rect x="160" y="908" width="470" height="44" rx="6" class="b-rr"/><text x="170" y="934.5" text-anchor="start" class="tb">executable (position-independent, as native)</text><text x="160" y="990" text-anchor="start" class="ts">Colours: blue = Lean&#x27;s code or Lean&#x27;s passes; green = lean2rr; yellow = optional pass; orange = Reussir.</text></svg><figcaption>The pipeline as <code>lean2rr/Main.lean</code> runs it. The right column names the <code>--emit</code> option that stops after a step and prints its output.</figcaption></figure>
+<h2 id="why-lean2rr-starts-from-leans-base-code">Why lean2rr starts from Lean's base code</h2>
+<p>Lean's compiler has three phases:</p>
+<table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>What the code looks like</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>base</td>
+<td>typed and polymorphic: type parameters and type arguments are explicit</td>
+</tr>
+<tr>
+<td>mono</td>
+<td>type variables erased to <code>lcAny</code>; concrete types such as <code>List Nat</code> stay</td>
+</tr>
+<tr>
+<td>impure</td>
+<td>boxing, reference counting and reset/reuse added</td>
+</tr>
+</tbody>
+</table>
+<p>Reussir must do all memory management itself, so lean2rr stops before the
+impure phase. The saved mono code of a polymorphic function is not usable:
+its type variables are <code>lcAny</code>, and the link to the real types is gone. So
+lean2rr makes a monomorphic copy of the base code first (Stage 1). Then it
+runs Lean's own mono passes on that copy (Stage 2). The result is optimized
+mono code that still has exact types.</p>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Input</th>
+<th>Output</th>
+<th>Owner of the code</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Loading</td>
+<td><code>.olean</code> files</td>
+<td>an environment with every module and its extension states</td>
+<td>lean2rr (<code>Env.lean</code>)</td>
+</tr>
+<tr>
+<td>1. Collect and monomorphize</td>
+<td>base LCNF of the reachable declarations</td>
+<td>one monomorphic copy per type instantiation</td>
+<td>lean2rr (<code>Collect</code>, <code>Mono</code>)</td>
+</tr>
+<tr>
+<td>2. Mono pipeline</td>
+<td>the monomorphic program</td>
+<td>optimized mono LCNF with exact types</td>
+<td>Lean's passes, driven by lean2rr (<code>Pipeline</code>)</td>
+</tr>
+<tr>
+<td>3. Check and recover types</td>
+<td>mono LCNF</td>
+<td>the same code, fewer <code>lcAny</code></td>
+<td>lean2rr (<code>MonoRetype</code>)</td>
+</tr>
+<tr>
+<td>4. Lowering</td>
+<td>checked mono LCNF</td>
+<td>Reussir functions and types</td>
+<td>lean2rr (<code>Lower/*</code>, <code>Emit/*</code>)</td>
+</tr>
+<tr>
+<td>After lowering</td>
+<td>Reussir functions</td>
+<td>the program text <code>prog.rr</code></td>
+<td>lean2rr (<code>ArrayLits</code>, <code>Outline</code>)</td>
+</tr>
+<tr>
+<td>rrc</td>
+<td><code>prog.rr</code> with the prelude</td>
+<td>an executable</td>
+<td>Reussir</td>
+</tr>
+</tbody>
+</table>
+<p><code>lean2rr --emit STAGE</code> stops after a stage and prints its output:
+<code>base</code>, <code>inst</code>, <code>mono</code>, <code>externs</code>, <code>retyped</code> or <code>rr</code>.</p>
+<h2 id="loading">Loading</h2>
+<ul>
+<li>lean2rr imports the program's modules and Lean's library at the
+  <code>private</code> level. Only this level gives the complete base LCNF of every
+  declaration.</li>
+<li>lean2rr loads each extension's imported state. Without this, queries
+  such as "is this a class" answer "no", and Lean's passes do less.</li>
+<li>lean2rr never runs the program's <code>initialize</code> actions. It loads the
+  extension states without Lean's init step.</li>
+<li>lean2rr checks module names. A module named <code>Init.*</code>, <code>Std.*</code>, <code>Lean.*</code>,
+  <code>Lake.*</code> or <code>L2RShim.*</code> must be the real file of Lean's toolchain or of
+  lean2rr's shim. lean2rr compares files, not paths. Other modules with these
+  names are rejected, because lean2rr trusts such modules.</li>
+</ul>
+<h2 id="stage-1-collect-and-monomorphize">Stage 1: collect and monomorphize</h2>
+<p><strong>Roots.</strong> The roots are <code>main</code>, every zero-parameter declaration of the
+program's modules, the <code>initialize</code> actions, <code>IO.Error.toString</code>, and the
+<code>IO.Error</code> builders when the program uses fallible IO. Everything these
+reach is collected: declarations with code, <code>@[extern]</code> declarations and
+constructors. A constant that <code>main</code> never uses is still a root, because
+native Lean evaluates it at startup.</p>
+<p><strong>Instances.</strong> A polymorphic declaration becomes one <em>instance</em> per list of
+type arguments. Each instance gets a fresh name (<code>d._l2r.k</code>), so Lean's
+passes in Stage 2 see only lean2rr's copies.</p>
+<ul>
+<li>lean2rr substitutes the type arguments and simplifies the types. This is
+  what Lean's own specializer does.</li>
+<li>lean2rr keeps the type parameters as erased parameters. So each instance
+  has exactly Lean's arity. Arity decides when work runs (see Stage 4).</li>
+<li>A higher-kinded argument is a type-level function. Substitution and beta
+  reduction turn <code>m (β × σ)</code> into an ordinary type.</li>
+</ul>
+<div class="note">
+<p><strong>Rust analogy.</strong> This is what <code>rustc</code> does with generic functions: one
+copy per set of type arguments. Lean itself does not do this: natively
+every value is a pointer to a boxed object, so one copy serves all types.</p>
+</div>
+<p><strong>Static dictionaries.</strong> A type class instance arrives as a <em>dictionary</em>: a
+record of functions. Lean's <code>simp</code> folds a dictionary only when it is
+<code>let</code>-bound in the same function. So lean2rr also specializes a callee on a
+<em>static dictionary</em>: one built only from instance constants and types. For
+example, <code>Array.map</code> passes <code>Monad Id</code> to <code>Array.mapM</code>. Without the
+specialization, <code>Monad Id</code> stays a runtime record with polymorphic methods,
+which Reussir cannot type. A constant that calls a function or allocates
+data is not part of a static dictionary. Natively it is evaluated once, and
+the callee only reads it.</p>
+<p><strong>Calls that Lean's <code>cse</code> merges across types.</strong> Lean's mono <code>cse</code> compares
+code after type erasure. So it can merge two calls of one function at two
+different types into one call, which runs once. lean2rr's two instances
+would be two calls, and a panic in them would print twice. So Stage 1 finds
+these calls as <code>cse</code> does and gives the later call the earlier call's
+arguments (<code>Mono.alignErasedMerges</code>). It refuses when the two result types
+differ at a function, a runtime object or something it cannot classify,
+because no conversion exists there.</p>
+<p><strong>When a type is not statically known.</strong> Then the uniform type <code>L2RBox</code>
+takes its place (see <a href="representations.html#the-uniform-type-l2rbox">Representations</a>):</p>
+<ul>
+<li>a type argument that is not fully known: the instance is made at <code>lcAny</code>;</li>
+<li>polymorphic recursion: a request at a type that strictly contains the
+  type of an instance on the same path goes to the <em>uniform instance</em>
+  (every type argument <code>lcAny</code>);</li>
+<li>bounds: a type argument deeper than 64 or larger than 256 nodes becomes
+  <code>lcAny</code>; past 1024 instances of one declaration, every new one is the
+  uniform instance;</li>
+<li>existential values and dictionaries stored in data.</li>
+</ul>
+<p><strong>Library code that relies on Lean's uniform objects.</strong> <code>Array.map</code> and
+<code>Array.modify</code> use unsafe code that is correct only because every Lean
+value is a pointer. lean2rr translates that code as it is: <code>NonScalar</code>
+becomes <code>lcAny</code>, the casts become conversions, and the <code>box(0)</code>
+placeholder becomes the <em>zero</em> of the expected type.</p>
+<h2 id="stage-2-leans-mono-pipeline">Stage 2: Lean's mono pipeline</h2>
+<p>lean2rr runs Lean's own passes in Lean's order. Mutually recursive groups go
+bottom-up, callees first. Lean's checker runs after every pass. This stage
+has no new translation logic. Its job is to leave the code in the shape that
+Stage 4 expects: no local functions, explicit join points, every binder with
+its mono type.</p>
+<div class="tblwrap"><table class="tbl"><thead><tr><th>Lean&#x27;s pass</th><th>In lean2rr</th><th>Why</th></tr></thead><tbody><tr><td><code>toMono</code></td><td>replaced by <code>toMonoK</code></td><td>Lean&#x27;s toMono erases type-former arguments (HashMap values become lcAny); lean2rr&#x27;s copy keeps constant type families, so Stage 3 and the lowering see exact types</td></tr><tr><td><code>structProjCases</code></td><td>replaced by <code>structProjCasesK</code></td><td>the other pass that converts types: its result types must agree with toMonoK&#x27;s</td></tr><tr><td><code>inferVisibility</code></td><td>not run here</td><td>module-visibility bookkeeping; it transforms no code</td></tr><tr><td><code>extractClosed</code></td><td>not run here</td><td>run last, over all declarations, as Lean ran it (Pipeline.extractLikeLean, ExtractClosedK): module by module in Lean&#x27;s order, following what the .olean records of each declaration&#x27;s closed terms</td></tr><tr><td><code>toImpure</code></td><td>not run here</td><td>boxing, reference counting and reset/reuse belong to Reussir (Stage 2 ends at mono, plus extractClosed)</td></tr></tbody></table></div>
+<p>Main mono passes (Lean's): <code>simp</code> (inlining, constant folding, dead code),
+<code>reduceJpArity</code>, <code>structProjCases</code>, <code>extendJoinPointContext</code>,
+<code>floatLetIn</code>, <code>reduceArity</code>, <code>commonJoinPointArgs</code>, <code>lambdaLifting</code>,
+<code>elimDeadBranches</code>, <code>cse</code>, <code>extractClosed</code>.</p>
+<p><code>toMono</code> also does semantic lowering for lean2rr: <code>Decidable</code> becomes
+<code>Bool</code>, <code>Nat</code> constructors become <code>Nat.add x 1</code> and tests on 0, single-field
+structures become their field (<code>Char</code> → <code>UInt32</code>, <code>Fin n</code> → <code>Nat</code>), and
+<code>cases</code> on builtin types become accessor externs.</p>
+<h2 id="stage-3-check-and-recover-lost-types">Stage 3: check and recover lost types</h2>
+<p>Mono code can still have <code>lcAny</code> where the type is known: types inferred
+during the passes go through erased signatures, and the casts of the library
+code above are erased. A binder at <code>lcAny</code> is a <code>L2RBox</code>, and every use at a
+precise type converts it. For an array that is a copy of every element.</p>
+<div class="rule">
+<p><strong>The rule.</strong> A binder's type comes from what flows <em>into</em> it, never from
+how it is used. A use at a precise type speaks only for its own branch.</p>
+</div>
+<p>The sources of a type:</p>
+<ul>
+<li><strong>definitions</strong>: a <code>cases</code> field gets the constructor's field type, when
+  the matched value's type is that constructor's inductive; a call gets the
+  callee's result type; a join point parameter gets the type that all its
+  jumps agree on;</li>
+<li><strong>result types</strong>: a declaration gets <code>T</code> when all its returned values have
+  type <code>T</code>;</li>
+<li><strong>parameters from callers</strong>: an array parameter gets <code>T</code> when every call
+  site passes <code>T</code> (lean2rr then checks the body under that assumption);</li>
+<li><strong>the <code>map</code> loops</strong> of <code>Array.map</code>: the result is <code>Array β</code> when every
+  stored value is a <code>β</code>;</li>
+<li><strong>references</strong>: an <code>ST.Prim.mkRef</code> at a precise type gives a typed
+  reference, which flows to its binders.</li>
+</ul>
+<p>The fixpoint runs over the whole program until nothing changes. Two
+optional passes work here: <code>split-map-loops</code> (a <code>map</code> that changes the
+element representation reads one array and writes a new one) and
+<code>uniform-updates</code> (an update of a container whose element type depends on a
+value runs on the uniform container, so it boxes one element, not the whole
+array). See <a href="passes.html">Optional passes</a>.</p>
+<h2 id="stage-4-lowering-to-reussir">Stage 4: lowering to Reussir</h2>
+<h3 id="types">Types</h3>
+<p>Each Lean type becomes a Reussir type. The rules are on the
+<a href="representations.html">Representations</a> page.</p>
+<h3 id="declarations-and-arity">Declarations and arity</h3>
+<p>A declaration becomes a Reussir function over its relevant parameters, with
+Lean's <em>arity</em>: the number of parameters after Lean's optimizations.</p>
+<ul>
+<li>a call with exactly the arity runs the function;</li>
+<li>a call with fewer arguments builds a function value, and nothing runs;</li>
+<li>a call with more arguments runs the function and applies its result to
+  the rest.</li>
+</ul>
+<div class="note">
+<p><strong>Why arity matters: an example.</strong></p>
+<pre><code class="language-lean">def mkAdder (n : Nat) : Nat → Nat :=
+  let k := dbgTrace s!&quot;prefix {n}&quot; fun _ =&gt; n * n
+  fun x =&gt; x + k
+</code></pre>
+<ul>
+<li>Line 1: <code>mkAdder</code> takes a <code>Nat</code> and returns a function from <code>Nat</code> to <code>Nat</code>.
+  In Rust terms: <code>fn mk_adder(n: Nat) -&gt; impl Fn(Nat) -&gt; Nat</code>.</li>
+<li>Line 2: <code>k</code> is <code>n * n</code>. <code>dbgTrace</code> prints <code>prefix n</code> to standard error
+  before it computes the value.</li>
+<li>Line 3: the result is the function <code>x ↦ x + k</code>.</li>
+</ul>
+<p>Lean's optimizer gives <code>mkAdder</code> arity 2. So natively <code>mkAdder 3 x</code> prints
+<code>prefix 3</code> at every call. A translation with arity 1 would print it once.
+lean2rr keeps Lean's arity, so it prints at every call too.</p>
+</div>
+<h3 id="function-values">Function values</h3>
+<p>lean2rr does not use Reussir closures. Each function type gets a generated
+enum. A variant <code>p&lt;m&gt;_f</code> is a partial application of the target <code>f</code> with <code>m</code>
+captured arguments. A generated function <code>l2r_ap&lt;j&gt;_T</code> applies a value: it
+calls the target when its last argument arrives, as Lean's <code>lean_apply_n</code>
+does. This is <em>defunctionalization</em>. A known target is a direct call.</p>
+<h3 id="join-points">Join points</h3>
+<p>A join point is Lean's local continuation: code that several branches jump
+to. Reussir has no join points, so lean2rr turns each one into structured
+code.</p>
+<figure class="fig" id="fig-jp"><svg class="diagram" viewBox="0 0 900 250" width="900" role="img" aria-labelledby="jp-title"><title id="jp-title">How a join point is lowered</title><defs><marker id="jp-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="30" width="150" height="70" rx="6" class="b-lean"/><text x="85.0" y="55.5" text-anchor="middle" class="tb">Join point j</text><text x="85.0" y="71.5" text-anchor="middle" class="ts">Lean&#x27;s local</text><text x="85.0" y="86.5" text-anchor="middle" class="ts">continuation</text><line x1="160" y1="65" x2="200" y2="65" class="ar" marker-end="url(#jp-ah)"/><rect x="200" y="30" width="140" height="70" rx="6" class="b-l2r"/><text x="270.0" y="55.5" text-anchor="middle" class="tb">J1: one jump?</text><text x="270.0" y="71.5" text-anchor="middle" class="ts">inline the body</text><text x="270.0" y="86.5" text-anchor="middle" class="ts">at the jump</text><line x1="270" y1="100" x2="270" y2="160" class="ar" marker-end="url(#jp-ah)"/><text x="276" y="134.0" text-anchor="start" class="ts">yes</text><rect x="200" y="162" width="140" height="34" rx="6" class="b-ok"/><text x="270.0" y="183.5" text-anchor="middle" class="tb">structured code</text><line x1="340" y1="65" x2="370" y2="65" class="ar" marker-end="url(#jp-ah)"/><text x="346" y="58" text-anchor="start" class="ts">no</text><rect x="370" y="30" width="140" height="70" rx="6" class="b-l2r"/><text x="440.0" y="55.5" text-anchor="middle" class="tb">J2: every path</text><text x="440.0" y="71.5" text-anchor="middle" class="ts">ends in jmp j?</text><text x="440.0" y="86.5" text-anchor="middle" class="ts">let + body after</text><line x1="440" y1="100" x2="440" y2="160" class="ar" marker-end="url(#jp-ah)"/><text x="446" y="134.0" text-anchor="start" class="ts">yes</text><rect x="370" y="162" width="140" height="34" rx="6" class="b-ok"/><text x="440.0" y="183.5" text-anchor="middle" class="tb">structured code</text><line x1="510" y1="65" x2="540" y2="65" class="ar" marker-end="url(#jp-ah)"/><text x="516" y="58" text-anchor="start" class="ts">no</text><rect x="540" y="30" width="140" height="70" rx="6" class="b-l2r"/><text x="610.0" y="55.5" text-anchor="middle" class="tb">J1&#x27;: small?</text><text x="610.0" y="71.5" text-anchor="middle" class="ts">copy the body</text><text x="610.0" y="86.5" text-anchor="middle" class="ts">at each jump</text><line x1="610" y1="100" x2="610" y2="160" class="ar" marker-end="url(#jp-ah)"/><text x="616" y="134.0" text-anchor="start" class="ts">yes</text><rect x="540" y="162" width="140" height="34" rx="6" class="b-ok"/><text x="610.0" y="183.5" text-anchor="middle" class="tb">structured code</text><line x1="680" y1="65" x2="710" y2="65" class="ar" marker-end="url(#jp-ah)"/><text x="686" y="58" text-anchor="start" class="ts">no</text><rect x="710" y="30" width="180" height="70" rx="6" class="b-rr"/><text x="800.0" y="55.5" text-anchor="middle" class="tb">J3: outline</text><text x="800.0" y="71.5" text-anchor="middle" class="ts">a function, called</text><text x="800.0" y="86.5" text-anchor="middle" class="ts">in tail position</text><line x1="800" y1="100" x2="800" y2="160" class="ar" marker-end="url(#jp-ah)"/><text x="806" y="134.0" text-anchor="start" class="ts">body tail-calls f?</text><rect x="710" y="162" width="180" height="52" rx="6" class="b-rr"/><text x="800.0" y="185.5" text-anchor="middle" class="tb">J4: one state machine</text><text x="800.0" y="201.5" text-anchor="middle" class="ts">for f and its join points</text><text x="10" y="238" text-anchor="start" class="ts">J1&#x27; (jp-small) and the J4 slots (state-machines) are optional passes; jp-sink moves join points down first.</text></svg><figcaption>The strategies are tried in this order. Every strategy runs the join point's body once on each path that jumps to it.</figcaption></figure>
+<p>The choice matters for two reasons:</p>
+<ul>
+<li><strong>Stack use.</strong> Lean runs self tail calls as loops. Under J1 and J2 the tail
+  call stays in its own function, and LLVM turns it into a loop. Under J3 the
+  loop becomes mutually recursive and can use stack per iteration. J4 makes
+  such a loop one function again.</li>
+<li><strong>Memory reuse.</strong> J1 and J2 keep "take the old value apart" and "build the
+  new value" in one function. Reussir's token reuse needs that to update in
+  place.</li>
+</ul>
+<h3 id="externs-and-glue">Externs and glue</h3>
+<p>An extern call becomes a call of the prelude function with the extern's C
+symbol as its name (<code>lean_nat_add</code>). The prelude function is either inline
+Reussir code (a fast path) or a call into the Rust runtime <code>leanrt</code>. For
+externs over Lean-defined types (<code>Option</code>, <code>List</code>, <code>IO.Error</code>, processes,
+references) lean2rr generates <em>glue</em>. An extern whose C symbol is an
+<code>@[export]</code> Lean definition calls that definition directly, so its
+semantics are exactly Lean's. lean2rr keeps no list of supported externs:
+when the prelude lacks one, rrc reports an unknown function.</p>
+<h3 id="constants-and-startup">Constants and startup</h3>
+<ul>
+<li>Every zero-parameter declaration of the program's modules runs at startup,
+  in Lean's initialization order, as natively. lean2rr rebuilds that order
+  from the <code>.olean</code> record and the source structure.</li>
+<li>A constant is a <em>once-cell</em> with an accessor. The value is computed once
+  and never freed.</li>
+<li>Closed terms (<code>extractClosed</code>) are evaluated lazily, once.</li>
+<li>The startup work is cut into functions of at most 128 steps, because one
+  long chain overflows rrc's stack.</li>
+</ul>
+<p>See <a href="runtime.html#startup">Runtime</a> for the entry point.</p>
+<h2 id="after-lowering">After lowering</h2>
+<ul>
+<li><strong>Literal tables.</strong> A run of 32 or more small <code>Nat</code> literals pushed onto
+  an <code>Array Nat</code> becomes one call that reads a generated table.</li>
+<li><strong>Outline.</strong> rrc's analyses grow faster than linearly with nesting depth
+  and with straight-line length (Reussir bugs 16 and 17). So a tail path 32
+  matches deep or 256 <code>let</code>s long is cut into functions. A recursive function
+  keeps its loops: the cut part returns a step value, and the function makes
+  the tail call itself.</li>
+<li><strong>Passes over the generated functions</strong>: <code>sink-proj</code>.</li>
+<li>The text: <code>prog.rr</code>, with <code>prelude.rr</code> prepended.</li>
+</ul>
+<h2 id="rrc">rrc</h2>
+<figure class="fig" id="fig-rrc"><svg class="diagram" viewBox="0 0 900 170" width="900" role="img" aria-labelledby="rrc-title"><title id="rrc-title">What rrc does with prog.rr</title><defs><marker id="rrc-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="40" width="120" height="60" rx="6" class="b-l2r"/><text x="70.0" y="67.5" text-anchor="middle" class="tb">prog.rr</text><text x="70.0" y="83.5" text-anchor="middle" class="ts">with prelude</text><line x1="130" y1="70" x2="160" y2="70" class="ar" marker-end="url(#rrc-ah)"/><rect x="165" y="30" width="150" height="80" rx="6" class="b-rr"/><text x="240.0" y="60.5" text-anchor="middle" class="tb">Reussir front end</text><text x="240.0" y="76.5" text-anchor="middle" class="ts">parse, types,</text><text x="240.0" y="91.5" text-anchor="middle" class="ts">textures (Rust FFI)</text><line x1="315" y1="70" x2="345" y2="70" class="ar" marker-end="url(#rrc-ah)"/><rect x="350" y="20" width="220" height="100" rx="6" class="b-rr"/><text x="460.0" y="46.5" text-anchor="middle" class="tb">MLIR passes</text><text x="460.0" y="62.5" text-anchor="middle" class="ts">ownership: rc.inc / rc.dec</text><text x="460.0" y="77.5" text-anchor="middle" class="ts">token reuse (cells used</text><text x="460.0" y="92.5" text-anchor="middle" class="ts">again in place)</text><text x="460.0" y="107.5" text-anchor="middle" class="ts">drop glue</text><line x1="570" y1="70" x2="600" y2="70" class="ar" marker-end="url(#rrc-ah)"/><rect x="605" y="30" width="130" height="80" rx="6" class="b-rr"/><text x="670.0" y="60.5" text-anchor="middle" class="tb">LLVM</text><text x="670.0" y="76.5" text-anchor="middle" class="ts">optimization,</text><text x="670.0" y="91.5" text-anchor="middle" class="ts">code generation</text><line x1="735" y1="70" x2="765" y2="70" class="ar" marker-end="url(#rrc-ah)"/><rect x="770" y="30" width="120" height="80" rx="6" class="b-rt"/><text x="830.0" y="60.5" text-anchor="middle" class="tb">link</text><text x="830.0" y="76.5" text-anchor="middle" class="ts">leanrt.rlib</text><text x="830.0" y="91.5" text-anchor="middle" class="ts">libgmp.a</text><text x="10" y="150" text-anchor="start" class="ts">Textures (the Rust bodies of #[ffi(import)] functions) are compiled by rustc and can be inlined into Reussir code.</text></svg><figcaption><code>scripts/l2r.py</code> runs <code>rrc</code> with <code>-O aggressive --no-pack-record-members --reuse-across-call --no-closure-wpd --relocation-mode pic</code>.</figcaption></figure>
+<p>The driver builds the runtime crate <code>leanrt</code> once (cached by a hash of its
+sources), runs lean2rr, then runs rrc, and links <code>libleanrt.rlib</code> and GMP.
+If rrc crashes, the driver tries once more without <code>--reuse-across-call</code>
+(a workaround for Reussir bug 4). See <a href="reussir.html">Reussir</a>.</p>
+<h2 id="key-decisions">Key decisions</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Read <code>.olean</code> files, not source</td>
+<td>Every Lean feature arrives as ordinary functions and data.</td>
+</tr>
+<tr>
+<td>Monomorphize base code, then run Lean's mono passes</td>
+<td>Lean's optimizations stay; exact types stay too.</td>
+</tr>
+<tr>
+<td>Keep Lean's arities exactly</td>
+<td>When work runs is observable (traces, panics).</td>
+</tr>
+<tr>
+<td>Types from definitions only (Stage 3)</td>
+<td>A use at a type speaks only for its branch; a guessed type can panic on another path.</td>
+</tr>
+<tr>
+<td>Function values as generated enums</td>
+<td>Applying a shared Reussir closure copies it; enums and a <code>match</code> do not allocate.</td>
+</tr>
+<tr>
+<td>Join points J1/J2 first</td>
+<td>Loops stay loops, and Reussir can reuse cells in place.</td>
+</tr>
+<tr>
+<td>Uniform <code>L2RBox</code> only where needed</td>
+<td>Typed code never pays for boxing.</td>
+</tr>
+<tr>
+<td>Every optimization optional</td>
+<td>The core translation is correct alone; each pass can be turned off for a test.</td>
+</tr>
+</tbody>
+</table>
+  </main>
+</div>
+<footer>Generated by <code>docs/site/build.py</code> from the repository's files (Lean v4.34.0).
+This site summarizes; the markdown documents in the repository are the authority.</footer>
+</body>
+</html>
