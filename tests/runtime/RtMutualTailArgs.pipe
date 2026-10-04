@@ -1,0 +1,1 @@
+if [ "${BIN##*/}" = l2r ]; then export LEAN_STACK_SIZE_KB=2048; fi; $BIN $ARGS
