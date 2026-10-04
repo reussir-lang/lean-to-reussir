@@ -896,6 +896,11 @@ structure Stage3Config where
   `Box`es. -/
   splitMapLoops : Array (Decl .pure) → Array Types → Array Name → MRetypeM (Array (Decl .pure)) :=
     fun decls _ _ => pure decls
+  /-- Updates of containers whose element type depends on a value
+  (`Array lcAny`) run on the uniform representation instead of converting
+  the whole container there and back (Opt/UniformUpdates), after the
+  fixpoint. Plain: none; each such use at a precise type converts. -/
+  uniformUpdates : Array (Decl .pure) → MRetypeM (Array (Decl .pure)) := pure
 
 /-- An instance of `ST.Prim.mkRef` at a precise element type `α` returns a
 `typedRef α` (Lean's mono type of a reference is `lcAny`): the references
@@ -975,6 +980,7 @@ def retypeMono (stage2 : Stage2Config) (stage3 : Stage3Config) (table : Relevanc
         codeDecls := added.foldl (fun l d => l.insert d.name) s.codeDecls }
       types := split.map fun d => (decls.findIdx? (·.name == d.name)).map (types[·]!) |>.getD {}
       decls := split
+    decls ← stage3.uniformUpdates decls
     return decls ++ (← get).newExterns
   let (decls, st') ← (act.run { table, stage2 }).run st
   return (decls, st'.keys)

@@ -129,6 +129,43 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   two arrays live together until the map ends (0.7-1.1x native peak
   memory for scalar targets).
 
+### Updates of a uniform container run on it (`uniform-updates`)
+
+- **What:** After Stage 3's fixpoint, in each declaration: a call of an
+  `Array` extern at a precise type whose array argument is uniform
+  (`Array lcAny`) calls the extern's instance at `lcAny` instead. The
+  single element is boxed going in, or unboxed when the binder stays
+  precise (`get`, `size`). When the result is itself a container, its binder
+  becomes `Array lcAny`; that needs every use of it to expect exactly that
+  type, and a chain of such calls counts (greatest fixpoint), as does a
+  join point's parameter of a precise container type that every jump passes
+  a uniform value (or a planned uniform result) and whose uses all expect
+  one uniform type. A constructor
+  application whose uses all expect one uniform type (`i :: d` at
+  `List lcAny`) is built at that type, if its fields then need at most a box.
+  A call is changed only if it receives a uniform value that the current
+  call would convert.
+- **Why:** A column `data : Array ty.denote` (the element type depends on a
+  value) is `Array lcAny`. Each `push` at `Array Nat` converted the whole
+  array there and the result back into the field: two O(n) copies per
+  update, quadratic in a loop (review RV9C-02: C9DepPush 40000 pushes 7.7 s
+  for 0.00 s natively; C9Columns 29 s for 0.07 s; through a join point
+  typed at `Array Nat`, review C02R-01: 20000 `modify` steps 3.84 s for
+  0.00 s). Natively the cast is free
+  and the update is in place. Externs do not depend on their type
+  arguments, so the `lcAny` instance computes the same thing.
+- **Where:** `Opt/UniformUpdates.lean`: `uniformUpdatesDecl`;
+  `MonoRetype.lean`: `Stage3Config.uniformUpdates`, called at the end of
+  `retypeMono`; plan [§4](../../translation-plan.md#4-stage-3--check-and-recover-lost-types)
+  and §10 "Structural conversions". Tests `RtUniformUpdates`,
+  `RtUniformUpdatesJp`, `tests/runtime/conv-count-check.sh` (the elements
+  conversions rebuild, counted at two sizes: `L2R_COUNT_CONVERSIONS` makes
+  every generated conversion count the array elements or constructor
+  cells it rebuilds, `Lower/Conv.lean`: `countConversion`; off by default,
+  so ordinary builds are unchanged).
+- **Remove only if:** the pass is off (correct, quadratic on such loops).
+  Cost when on: none where no uniform container meets a precise use.
+
 ### `Array Nat` literals of small numbers are built from tables
 
 - **What:** With `nat-arrays`, a run of 32 or more small `Nat` literals

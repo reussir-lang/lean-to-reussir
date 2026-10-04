@@ -88,7 +88,7 @@ python3 tests/oracle.py bench --cmd 'out/{exe} {size}' [--cases A B] [--size ben
 
 The native builds (`oracle.py build`, `tests/runtime/run.sh`,
 `tests/env/run.sh`, `tests/runtime/nat-alloc-check.sh`,
-`tests/reussir-benchmark/run.sh`, `reussir-bugs/repros/run.sh`) and
+`tests/runtime/conv-count-check.sh`, `tests/reussir-benchmark/run.sh`, `reussir-bugs/repros/run.sh`) and
 `scripts/l2r.py`'s GMP use the Lean toolchain lean2rr is pinned to
 (`lean2rr/lean-toolchain`, the elan toolchain
 `~/.elan/toolchains/leanprover--lean4---v4.34.0`), not elan's default:
