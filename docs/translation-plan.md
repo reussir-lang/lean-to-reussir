@@ -770,7 +770,7 @@ Stage 4 sees only mono types:
 | `Array α` | `RVec<S>`, the runtime's copy-on-write vector: one block, a 24-byte header (count, size, capacity) and the elements | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records); for an enumeration or `Unit`, its index (`u8`, `u16` or `u32` by the number of constructors; Lean stores a tagged scalar); otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | the elements' own words, in one block with Lean's 24-byte array header (count, size, capacity), like Lean's array object; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments (optional pass `nat-arrays`; without it they are `RVec<Nat>`, `RVec<Int>`, also one word per element) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` are the identity (`Array UInt8` is `RVec<u8>` too) |
-| `ST.Ref σ α` | a generated shared record `L2RRef_N(Cell<⟦α⟧>)` around Reussir's mutable cell | the contents keep their own representation; `[value]` structures are stored in an `ElemBox`, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
+| `ST.Ref σ α` | a generated shared record `L2RRefN(Cell<⟦α⟧>)` (N a counter) around Reussir's mutable cell | the contents keep their own representation; `[value]` structures are stored in an `ElemBox`, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧), … }` | memoized thunks, deferred tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
 
@@ -3077,7 +3077,9 @@ Each item says what differs and when.
   every node it keeps, and every `ptrEq` operand: 1.5x native on such a
   traversal (adv4 RP4-09).
 - *Structural conversions* (§5.1) rebuild a value as a tree: sharing is lost,
-  so a DAG costs exponential time and memory, and a conversion on every call
+  so a DAG costs exponential time and memory (a program that runs out of
+  memory this way also ends with another exit status, *Running out of
+  memory* above), and a conversion on every call
   costs O(size) per call, also when the value goes back to the
   representation it came from (a round trip through uniform code converts
   twice); a conversion through an explicit stack (a tree, a rose tree)
@@ -3095,7 +3097,7 @@ Each item says what differs and when.
   uniform, for the call sites that pass a uniform array, as Stage 1 makes
   instances, would remove it); a function that passes its parameter on at a
   precise type; and an update whose result is used only at precise types
-  (never stored back uniformly). Running out of memory changes the exit status. Values of
+  (never stored back uniformly). Values of
   types with the same layout are not converted (`l2r_retype`); a cast
   between layouts that differ (an `Array T₁` field read at `Array T₃` whose
   elements hold an `Int` where `T₁`'s hold a `Nat`) converts the field at
@@ -3187,6 +3189,7 @@ Each item says what differs and when.
   with no conversion) print Lean's `INTERNAL PANIC: unreachable code has
   been reached` and exit 1, like a real unreachable.
 
+**Blocking, the event loop and promises**
 - *Blocking system calls* (reading a file, a pipe or standard input,
   waiting for a child process) block the whole program, where natively
   only the calling thread waits: a task reading a pipe that another task

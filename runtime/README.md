@@ -213,7 +213,7 @@ lean2rr wraps its result with `wrapIOResult`: `l2r_io_mono_ms_now()`,
 `l2r_io_prim_handle_is_tty(h)`. (`l2r_io_app_path()`, `l2r_io_current_dir()`
 and `l2r_io_process_get_current_dir()` are infallible stand-ins for the
 fallible primitives below.) References are Reussir cells in a
-lean2rr-generated record (`L2RRef_N(Cell<T>)`, two allocations;
+lean2rr-generated record (`L2RRefN(Cell<T>)`, two allocations;
 translation plan §5.1), read and written by the plain-Reussir helpers
 `l2r_rc_get/set/swap<T>` (a `Nat` or `Int` reference holds the handle
 like any other). Promises hold the `LCell` of their task

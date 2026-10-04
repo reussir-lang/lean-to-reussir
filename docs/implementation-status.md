@@ -1,6 +1,6 @@
 # lean2rr: what is implemented
 
-Status as of 2026-10-03 (branch `lean-4.34`: Lean v4.34.0). This is a plain-language overview
+Status as of 2026-10-04 (`dev`, Lean v4.34.0). This is a plain-language overview
 for someone who knows Rust but not Lean. The full rules are in
 [`translation-plan.md`](translation-plan.md); the runtime is described in
 [`../runtime/README.md`](../runtime/README.md); the Reussir bugs met on the
@@ -36,11 +36,11 @@ same standard output, standard error and exit code.
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (231 programs, `tests/runtime`) | 231/231 identical to native Lean 4.34.0 |
+| Runtime test suite (258 programs, `tests/runtime`) | at the last full regression (branch `lean-4.34`, 2026-10-03), 231/231 identical to native Lean 4.34.0; the tests added since passed on the branches that added them, except `RtCseFnResult`, an expected failure (plan §10, "Merging after erasure") |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
-| Adversarial testing | 4 rounds (about 1,300 test programs written to break it), every finding fixed or documented |
+| Adversarial testing | 9 review rounds (the first 4 wrote about 1,300 test programs to break it; the later ones work by inspection with targeted programs), Lean's own compile tests (72 programs of `tests/compile` and `compile_bench`, Lean 4.33: all identical), and cross-tests with leanrs (550 of its fixtures: 542 identical; the 6 causes of the 8 differences are XT-1 to XT-6, XT-6 fixed, XT-1 to XT-5 fixed on branch `fix-xt`); every other finding fixed or documented |
 | Speed (measured against native Lean 4.33; not re-measured for 4.34) | faster than native Lean on 16 of the 18 classic programs and about equal on the other two (monadic-interp 1.01×, deriv ≈1×), faster on 17 of the 18 Reussir-suite programs (the 18th at 1.07×); tables below |
 
 ## How a program is compiled
@@ -472,6 +472,7 @@ soundness.
 | `value-structs` | a structure with one field is represented by the field |
 | `nat-arrays` | `Array Nat`/`Array Int` with one word per element |
 | `split-map-loops` | an `Array.map` that changes the element representation writes a new array instead of going through `Box` |
+| `uniform-updates` | an update of a container whose element type depends on a value (`Array lcAny`) runs on the uniform array, boxing one element, instead of converting the whole array there and back at each step |
 | `placeholder-cache` | Lean's placeholder values built once |
 | `float-lits` | float literals computed at compile time |
 | `cheap-consts` | constants made of small literals (one-word `Nat`/`Int` values only) recomputed instead of cached |

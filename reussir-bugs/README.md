@@ -112,7 +112,7 @@ fix no bug:
   (it links the symbol weakly, so it also builds without the patch).
 - **0050**, tagged opaque handles: `#[ffi(rust = "...", tagged)]` makes an
   odd handle an immediate that is not counted. lean2rr's one-word `Nat` and
-  `Int` (branch `mem-nat`) need it.
+  `Int` (merged from branch `mem-nat`) need it.
 
 ## Applying the patches
 
