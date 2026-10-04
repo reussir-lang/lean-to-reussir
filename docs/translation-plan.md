@@ -2883,6 +2883,16 @@ Each item says what differs and when.
   between two function types; test `RtCseFnResult`, expected to fail), and
   a call inside a local function merged with one outside it, which Lean
   merges only where it inlined the local function first.
+- *Running out of memory*: lean2rr ends every failed allocation, including
+  a big number's limbs (one block allocated by leanrt since the one-block
+  layout; only `pow`, `gcd` and decimal conversion go through GMP's own
+  allocator), with `INTERNAL PANIC: out of memory` and exit status 1 after
+  flushing standard output. Natively the end depends on the site: a Lean
+  object gives the same `INTERNAL PANIC: out of memory`, exit 1; GMP's
+  limbs give `GNU MP: Cannot allocate memory (size=N)` and an abort (status
+  134, buffered standard output lost); `IO.FS.Stream.getLine` gives a C++
+  `bad_alloc` (134). Since the two builds use different amounts of memory,
+  they also run out at different points.
 - *Build time*: rrc compiles about 80 small functions per second; a program
   with thousands of constants (each an initializer and an accessor, plus its
   closed terms) takes minutes to build where native takes seconds.
