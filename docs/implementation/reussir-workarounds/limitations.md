@@ -130,12 +130,17 @@ files, `runtime/` and `scripts/` from the repository root.
 - **What:** `-O aggressive` by default; `--reuse-across-call` on unless
   `--no-reuse-across-call` (with the bug-4 retry); `--no-pack-record-members`
   (bug 2); `--no-closure-wpd` (bug 10); `L2R_RRC_FLAGS` appends flags for
-  experiments. `leanrt` is built per Reussir checkout (`L2R_REUSSIR`)
-  and cached by a hash of its sources, under a file lock for concurrent
-  drivers.
+  experiments. rrc runs with `REUSSIR_FFI_CACHE_DIR` set, for patch
+  0066's texture cache (bug 35,
+  [build-time.md](build-time.md#bug-35-every-texture-is-compiled-again-on-every-build)).
+  `leanrt` is built per Reussir checkout (`L2R_REUSSIR`) and cached by a
+  hash of its sources, under a file lock for concurrent drivers; rustc
+  runs in the crate's directory, so a rebuild gives the same bytes from
+  any caller's directory (the texture cache hashes the rlibs).
 - **Why:** `-O aggressive` made every classic benchmark faster than native
   (`-O default` left sieve 7% slower; e238a98). Reuse across calls is
   Lean's reset/reuse across calls (444a70a). The runtime rlib links against
   the checkout's runtime crates (e238a98, c3e9d99).
-- **Where:** `scripts/l2r.py`: `main`, `leanrt_out`, `build_leanrt`.
+- **Where:** `scripts/l2r.py`: `main`, `leanrt_out`, `build_leanrt`,
+  `build_locked`.
 - **Remove only if:** n/a (configuration).

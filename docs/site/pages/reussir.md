@@ -56,6 +56,16 @@ text relocations. The patch is reviewed (no defect) but not applied yet. The
 driver's workaround: it passes `--relocation-mode pic`, and every runtime
 test checks that the executable has no text relocations.
 
+**Patch 0066 (bug 35) is pending.** rrc compiles each Rust FFI snippet with
+its own rustc run, on every build. Every lean2rr program has about 470 of
+them, so this step takes most of rrc's time (about 13 s of 16 s for a small
+program). The patch keeps the compiled snippets in a cache directory, keyed
+by a digest of everything the output depends on, except the documented
+cases (3 s for the same program). The driver gives rrc the directory; an
+rrc without the patch ignores it. The review found a race (a library
+replaced during a build); it is fixed, and a second look checked the
+fix.
+
 ## All entries
 
 {{v:bug_entries}} entries. Generated from the status table of

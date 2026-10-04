@@ -128,7 +128,7 @@ fallback runs exactly the old code path.
 - `run.sh`: `bug 31   FIXED       compiles, prints 32004007`.
 
 **Review.** Round RV8 (e)
-(`~/Documents/l2r-scratch/rv8/reussir/e/FINDINGS.txt`): no correctness
+(local review notes): no correctness
 defect. Exit codes (success, compile error, `--help`, a bad flag, a
 closed or piped stdout), stdout and stderr are the same as before; a
 panic prints once and exits 101, a stack overflow still aborts (134), and

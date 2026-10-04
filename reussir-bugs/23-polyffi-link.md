@@ -216,7 +216,7 @@ been moved to the caller, which keeps the module alive).
   casts and conversions, conversion origins and pointer identity, tasks,
   thunks, promises, files, processes, sockets): all pass.
 
-**Review.** Round RV6 (`~/Documents/l2r-scratch/rv6/p17/FINDINGS.txt`):
+**Review.** Round RV6 (local review notes):
 no defects. In LLVM 23 `Linker::linkModules(Dest, Src)` is literally
 `Linker L(Dest); return L.linkInModule(Src)`, so the only change is that
 one mover's state (struct types, metadata map, named-metadata cache)

@@ -46,7 +46,11 @@ and `runtime/gen_tagarr.py` (`Array Nat`/`Array Int`).
    it, both with the pinned rustc (`L2R_RUSTC`) and the same flags, into
    `runtime/leanrt/target/` (`liblean_runtime.rlib`, `libleanrt.rlib`;
    `target/rt-<hash>/` for another Reussir checkout), each cached (leanrt
-   by a hash of its sources and of lean-runtime's build);
+   by a hash of its sources and of lean-runtime's build). rustc runs in
+   the crate's directory, whatever the caller's: rustc records its working
+   directory in the rlib, and rrc's texture cache (step 3) hashes the
+   rlibs, so a rebuild from another directory would miss on every texture;
+   built this way, a rebuild gives the same bytes;
 2. runs lean2rr (`L2R_LEAN2RR`) with `--prelude runtime/prelude.rr`;
 3. runs rrc (`L2R_REUSSIR`; with `--reuse-across-call` unless `l2r.py` gets
    `--no-reuse-across-call`) with
@@ -70,7 +74,19 @@ and `runtime/gen_tagarr.py` (`Array Nat`/`Array Int`).
      lean-runtime's dependencies, dependents first) `--link-lib libgmp.a`,
      in this order: GNU ld reads each archive once, so a library comes after
      the ones that call it (GMP from the Lean toolchain,
-     `$(lean --print-prefix)/lib/libgmp.a`, or `L2R_GMP`).
+     `$(lean --print-prefix)/lib/libgmp.a`, or `L2R_GMP`),
+   - and the environment variable `REUSSIR_FFI_CACHE_DIR`
+     (`runtime/leanrt/target/polyffi-cache`, unless the caller sets it;
+     empty turns it off): rrc compiles each of the prelude's textures with
+     its own rustc run, about 470 per program and most of rrc's time, and
+     with Reussir patch 0066 it keeps their bitcode there and reuses it
+     (Reussir bug 35; an rrc without the patch ignores the variable). Its
+     key covers the texture, the `rustc-native` script (whose text also
+     names lean-runtime's build), rustc's options and every library in the
+     `--polyffi-libdir` directories, so a change to leanrt or lean-runtime
+     only makes new entries. Old entries are never removed: delete the
+     directory to reclaim the space. rrc checks entries for damage, not
+     for tampering: the directory must be one only you can write.
 
 ### The shared crate lean-runtime
 

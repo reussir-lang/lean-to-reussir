@@ -137,7 +137,7 @@ scrutinee's type, hence the boxing exception.
   passes the oracle.
 
 **Review.** Round 8, `reussir-c`
-(`~/Documents/l2r-scratch/rv8/reussir-c/FINDINGS.txt`, Q1): the equality is
+(local review notes, Q1): the equality is
 sound (`OperationEquivalence::isEquivalentTo` with flags `None` compares
 names, attributes, properties, result types, operands, locations, nested
 regions and successors; probes kept apart ops with different attributes,

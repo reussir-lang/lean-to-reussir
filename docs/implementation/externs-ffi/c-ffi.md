@@ -41,9 +41,8 @@ which lean2rr uses for its own sake
   block's tag and NUL, `ByteArray`/`FloatArray` as one block whose
   `ByteArray.mk`/`data` copy), to be re-evaluated or reverted since
   lean2rr's layouts win; it predates mem-nat's one-word `Nat` and has not
-  been reviewed since 406fd6c. Notes:
-  `/home/queclr/Documents/l2r-scratch/ffi-c-work/PARKED.md` (what is
-  left and how to resume); design: plan §5.15 on the branch.
+  been reviewed since 406fd6c. Notes: local notes (what is left and how
+  to resume); design: plan §5.15 on the branch.
 - **Where (on the branch):** `Lower/CFFI.lean` (`isCExtern`,
   `cExternCall`, `toObj`/`ofObj`), `Lower/ExternCall.lean`,
   `runtime/leanrt/src/cffi.rs`, `sarray.rs`, `scripts/l2r.py`,

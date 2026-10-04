@@ -106,7 +106,7 @@ LeanBoolLoop, the final patch keeps every `.unique` clone made without it
 but one: TypeclassGeneric loses `foldl` at `mconcat` (17 -> 16 clones),
 whose argument is a value loaded from a field, the shape the bug is about
 (review RV8RE-01, below). On MapMIO, DepRet and PickDep
-(`~/Documents/l2r-scratch/examples/`) the clones are the same (4, 3 and
+(local example programs) the clones are the same (4, 3 and
 3: `List.reverseAux`, `List.range.loop`, `l2r_mk_args`,
 `l2r_array_to_list`). A Lean function that returns an argument on one
 path and passes its self call a value that is fresh on one path and a
@@ -200,7 +200,7 @@ pass unchanged.
 - `run.sh`: `bug 28   FIXED       prints 101 1   [-O aggressive]`.
 
 **Review.** Round RV8 (e)
-(`~/Documents/l2r-scratch/rv8/reussir/e/FINDINGS.txt`; its IDs are cited
+(local review notes; its IDs are cited
 here as RV8RE-NN): no correctness defect. The reviewer checked that the
 join is commutative, associative and idempotent with bottom as identity
 and `Unknown` absorbing, that the map from summaries to summaries is

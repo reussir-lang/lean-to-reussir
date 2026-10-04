@@ -161,7 +161,7 @@ the order of the accesses. The final 0033 passes the collection on through
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed.
 
-**Review.** Round 7, `p22` (`~/Documents/l2r-scratch/rv7/p22/FINDINGS.txt`),
+**Review.** Round 7, `p22` (local review notes),
 round 1: no miscompile and no regression; only references whose capability
 is not unspecified take the new paths (every frontend and pass creator of
 `ref.acquire`/`ref.drop` uses unspecified references, except cell slots);
@@ -176,7 +176,7 @@ amendment fixes it (glue per capability, each function created once with
 the right name, linear glue); a second fuzz (65 seeds, 260 builds, deeper
 types and mutually recursive records through cells) and the "IR unchanged"
 claim (147 frontend tests, 10 lean2rr programs) held. Round 8, `reussir-c`
-(`~/Documents/l2r-scratch/rv8/reussir-c/FINDINGS.txt`): RV8C-01 (medium)
+(local review notes): RV8C-01 (medium)
 in the composition with 0033, fixed in the final 0033 as above; with that
 fix the full lit suite passes on the composed stack.
 

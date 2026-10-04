@@ -29,7 +29,7 @@ branch `l2r-local-pre-final`.)
   small local patch, reviewed adversarially, even if lean2rr never
   triggers it or works around it.
 - A build-time cost that comes from a fixable inefficiency gets a small
-  patch too (bugs 11, 16, 17, 20, 22, 30). Entries that are intended
+  patch too (bugs 11, 16, 17, 20, 22, 30, 35). Entries that are intended
   behaviour (3), costs whose fix would be a redesign (25, 32), or missed
   optimizations stay unpatched, with the reason in their file. Patches 0007
   (bug 7, an optimization that 0009 builds on) and 0013 to 0015 (bug 13, a
@@ -47,7 +47,7 @@ Column *Patch*: "none" marks an entry that stays unpatched (the reason is
 in its file). Column *Review*: the adversarial review round and its result
 ([Review](#review)). Column *Applied*: whether the patch is on
 `./reussir`'s `l2r-local` (all 35 of the apply list are, since
-2026-10-03; 0065 is not yet).
+2026-10-03; 0065 and 0066 are not yet).
 
 | # | Kind | Effect | Affects lean2rr output? | lean2rr workaround | Patch | Review | Applied |
 |---|---|---|---|---|---|---|---|
@@ -85,13 +85,15 @@ in its file). Column *Review*: the adversarial review round and its result
 | [32](32-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected; large programs cannot be dumped | dump smaller programs | none | - | - |
 | [33](33-rc-trailing-text.md) | bug (tooling) | the rc and ref type parser drops the text after a comma (`!reussir.rc<i64 rigid, atomic>` reads as `!reussir.rc<i64 rigid>`) | no, hand-written MLIR only | - | 0064 | rv8/reussir/e/round2: no defect | yes |
 | [34](34-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes: every lean2rr binary has `DT_TEXTREL` on aarch64; with lld or on x86-64 it would not link | `l2r.py` passes `--relocation-mode pic` | 0065 | rv8/reussir/bug34: no defect | no |
+| [35](35-texture-rustc-runs.md) | cost (build time) | rrc compiles every polymorphic-FFI texture with rustc again on every build (about 470 per lean2rr program, 13 s of a small program's 16 s of rrc) | yes, build time | none needed: `l2r.py` sets `REUSSIR_FFI_CACHE_DIR` for 0066's cache (ignored without the patch) | 0066 | FCR (+ second look): FCR-01 (medium, a race) and the small findings fixed | no |
 
-In numbers: 34 entries. 31 are patched by 34 patches (0013 to 0015 for
+In numbers: 35 entries. 32 are patched by 35 patches (0013 to 0015 for
 bug 13, 0002 and 0019 for bug 2, 0032 and 0033 for bug 11; 0009 fixes
-bugs 9 and 14), all applied but 0065 (bug 34, not yet applied); 3 stay
+bugs 9 and 14), all applied but 0065 (bug 34) and 0066 (bug 35), not yet
+applied; 3 stay
 documented only: 3 (intended), 25 and 32 (costs). The two other patches, 0040 and 0050, fix no bug
 ([local additions](local-additions.md)). Reviews: every patch passed its
-round.
+round; 0066's round (FCR) found a race, fixed and checked by a second look.
 
 Status words used in the entries' summaries:
 
@@ -135,7 +137,7 @@ would rather keep them as uncommitted changes. Applied this way to
 ef922049 (in a scratch worktree, 2026-10-03), the list gives exactly the
 tree of `./reussir`'s `l2r-local` (`cc8e5aa5`). The `From <sha>` line of
 each patch file names the commit of the integration checkout
-(`~/Documents/l2r-scratch/reussir-final`); `l2r-local`'s commits have the
+(a local integration checkout); `l2r-local`'s commits have the
 same contents and messages (their hashes are in each entry's *Patch*
 section).
 
@@ -153,8 +155,12 @@ Order and dependencies:
   0025.
 - 0012, 0017 and 0060 to 0064 also apply alone.
 - 0065 (bug 34) is not on the list yet: it was made on `l2r-final`
-  cc8e5aa5 (the list above) and is on branch `l2r-final-0065` of
-  `~/Documents/l2r-scratch/reussir-final`; it applies after 0064.
+  cc8e5aa5 (the list above) and is on branch `l2r-final-0065` of the
+  local integration checkout; it applies after 0064.
+- 0066 (bug 35) is not on the list yet: it was made on 0065 (branch
+  `l2r-polyffi-cache` of a local Reussir build with the l2r-local patches
+  applied) and
+  touches none of 0065's files, so it applies after 0064 or after 0065.
 - lean2rr's runtime needs 0014 to build (`leanrt::drop` uses
   `reussir_rt::drop`, the pending stack 0014 adds to Reussir's runtime),
   uses 0040 when present (a weak symbol), and its prelude needs 0050
@@ -228,12 +234,12 @@ The repros were checked on these builds (on the aarch64 test machine):
 - "the ten-patch set": the nine-patch set + 0015 (`l2r-local` until
   2026-10-03, now `l2r-local-pre-final`).
 - `91da4f80`: the ten-patch set + 0016 + 0017
-  (`~/Documents/l2r-scratch/reussir-dev2`), the base every later patch
+  (a local checkout), the base every later patch
   (0018 to 0063, in their first versions) was made on, and the "without
   the patch" build of bugs 17 and 24 to 33. The amended 0060 and 0063 and
   0064 were made on the final stack (`a75ed2cf`, then each other).
 - "the final stack": ef922049 + the 35 patches, `l2r-local` `cc8e5aa5`
-  (`~/Documents/l2r-scratch/reussir-final`, the same tree). Before the
+  (the local integration checkout, the same tree). Before the
   review of 0060 to 0063 was folded in, it was 34 patches with the first
   versions of 0060 and 0063 (`5c0514e3`, kept in that checkout as
   branch `l2r-final-pre-e2`).
@@ -296,7 +302,11 @@ statuses (03, 25 and 32 REPRODUCES, all others FIXED; the timing lines of
 patched entry shows FIXED. `03` (intended), `25` and `32` (costs, not
 patched) show REPRODUCES, and `34`, whose patch 0065 is not applied yet
 (on `l2r-final-0065` the line reads `bug 34   FIXED       no text
-relocations; prints 6`). Two lines changed with this run's script:
+relocations; prints 6`). Bug 35's repro came later (2026-10-04): on
+`l2r-local` cc8e5aa5 `bug 35   REPRODUCES  second build: 3 of 3 textures
+compiled again; both print 42`, on `l2r-polyffi-cache` (0065 and 0066)
+`bug 35   FIXED       second build: 0 of 3 textures compiled again; both
+print 42`. Two lines changed with this run's script:
 
 - **17.** The first version of the measure compared rrc's memory at
   N = 500 and N = 250 and called at most 1.6x linear; with 0031 it printed
@@ -318,8 +328,8 @@ Each patch is reviewed adversarially: code review, differential fuzzing
 against an independent reference evaluator, ASan builds (Miri for the
 runtime patches), and lean2rr's runtime suite and corpus, in rounds
 repeated until one finds nothing. The review notes cited as "round N,
-finding X" or by finding IDs are scratch files outside this repository, in
-`~/Documents/l2r-scratch/`:
+finding X" or by finding IDs are local notes, outside this repository
+(column *Notes*: their names):
 
 | Patches | Round | Notes | Result |
 |---|---|---|---|
@@ -335,9 +345,10 @@ finding X" or by finding IDs are scratch files outside this repository, in
 | 0060-0063 | RV8 (e) | `rv8/reussir/e/FINDINGS.txt` (its RV8E-NN cited as RV8RE-NN) | no correctness defect; RV8RE-01 (0060: poison and tagged immediates blocked sound clones, low) and RV8RE-02 (0063: panic under `ulimit -v`, low) fixed in the amended patches; a latent hazard of 0062 noted in bug 30 |
 | 0060, 0063 (amended), 0064 | RV8 (e) round 2 | `rv8/reussir/e/round2/FINDINGS.txt` | no defect: RV8RE-01/02 fixed; returning bottom for poison and tagged immediates checked sound in every position; 0064 rejects nothing rrc prints (four lean2rr dumps, about 5.3M rc types, re-read and re-printed byte-identically); the 0063 fallback keeps exit codes and messages under `ulimit -v` |
 | 0065 | RV8 bug34 | `rv8/reussir/bug34/FINDINGS.txt` | no defect; N1: obj and staticlib outputs keep the static default (scope note); N2: the .text change is linker veneer padding |
+| 0066 | FCR | `ffi-cache-review/` (repros) | no defect in single-build use; FCR-01 (medium: a library replaced during a run filed entries under the old key) fixed by stamping the hashed files; FCR-02 (`-L` kinds), FCR-03 (`%` in the directory), FCR-04 (say when caching is off), FCR-05 (bitcode magic) fixed; FCR-06/07 documentation; FCR-08 to FCR-10 lean2rr's documents; second look: the fixes sound, FCR2-01 (a package directory's stamp changed by unrelated entries) and FCR2-02 (in-place rewrite with the time put back: status-change time added) fixed |
 
 The integration of the first 34 patches
-(`~/Documents/l2r-scratch/reussir-final`, then at `5c0514e3`) was checked
+(the local integration checkout, then at `5c0514e3`) was checked
 with Reussir's lit suite (645 tests: 564 passed, 81 unsupported, none
 failed), the classic corpus (18 programs, oracle checks all passed),
 lean2rr's runtime tests and `run.sh` (above). The stack with the amended
@@ -376,7 +387,7 @@ where it gave one. Of the patches, by their entries' kinds:
 - a bug with a flag workaround: 0006 (a speed choice over the flag; to be
   remeasured on an idle machine);
 - build-time costs with a small fix: 0030 (22), 0031 (17), 0032 (11), 0034
-  (20), 0035 (16), 0062 (30);
+  (20), 0035 (16), 0062 (30), 0066 (35);
 - an optimization: 0007 (kept because 0009 builds on it);
 - a missing feature: 0013 to 0015, and 0027 (bug 27, the same bounded-depth
   frees for a member behind `Nullable`);
@@ -445,11 +456,12 @@ where it gave one. Of the patches, by their entries' kinds:
   in rrc's pipeline the first `ConvertToSTD` lowers every
   `record.dispatch` before TokenReuse runs.) So the intended bonus for
   reusing the cell a new cell's fields come from never applies (a missed
-  optimization: a donor scores 2 where the code means 4,
-  `~/Documents/l2r-scratch/morepatches-e/b6/tv2.mlir`), and the crash is
+  optimization: a donor scores 2 where the code means 4, a local probe
+  `tv2.mlir`), and the crash is
   latent: with only the first mistake corrected, `reussir-opt
   --reussir-token-reuse` crashes (SIGSEGV) on a result-less dispatch
-  (`b6/tv3.mlir`, checked on a throwaway build). A fix needs both changes
+  (a local probe `tv3.mlir`, checked on a throwaway build). A fix needs
+  both changes
   and would change which token is reused, a performance change; not
   patched.
 

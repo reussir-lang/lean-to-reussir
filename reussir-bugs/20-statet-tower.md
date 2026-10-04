@@ -169,7 +169,7 @@ expected the anchors to stop mattering; they are now REPRODUCES at least
 reads `FIXED`. lean2rr keeps its anchors: 3.5x less memory on this program
 is worth keeping.
 
-**Review.** Round RV8C (`~/Documents/l2r-scratch/rv8/reussir-c/FINDINGS.txt`,
+**Review.** Round RV8C (local review notes,
 Q5): no defect. Recursion is computed on MLIR's `CallGraph` (every
 top-level callable hangs off the external node, so the SCC walk reaches
 all, and `hasCycle()` includes self-loops). Gaps, performance only:

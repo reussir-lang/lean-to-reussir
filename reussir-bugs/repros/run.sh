@@ -33,10 +33,12 @@
 # rrc -v); bug 20's is built with and without lean2rr's workaround. They
 # take one to three minutes each, and bugs 16 and 20 need 1.2 to 3 GB; bug
 # 6 runs for about 15 s. Everything else takes seconds (a first .lean build
-# also builds leanrt). Bugs 25, 30 and 32 are build-time entries too, but
-# quick: 25 and 32 compare the sizes of two outputs (--emit mlir-llvm,
+# also builds leanrt). Bugs 25, 30, 32 and 35 are build-time entries too,
+# but quick: 25 and 32 compare the sizes of two outputs (--emit mlir-llvm,
 # --emit mlir), 30 times one conversion pass through reussir-opt (SKIPPED
-# when the checkout has not built it). Bug 24 runs reussir-llvm-opt 12
+# when the checkout has not built it), 35 builds one program twice with one
+# REUSSIR_FFI_CACHE_DIR and counts the textures the second build compiles
+# (through a rustc wrapper). Bug 24 runs reussir-llvm-opt 12
 # times on one of the checkout's tests. lean2rr works around 16, 17 and
 # 20; the repros turn its workarounds off (L2R_NO_OUTLINE,
 # L2R_NO_INLINE_ANCHORS).
@@ -50,6 +52,11 @@
 #           uses)
 #   QUICK=1 skip the slow repros (6, 10, 11, 16, 17, 20, 23)
 set -u
+# rrc's texture cache (bug 35) off: with it, rrc's time and memory would
+# depend on what the caller's cache holds (the timed repros 16, 17 and 20
+# build through l2r.py, which turns the cache on unless the variable is set;
+# empty is off). Bug 35's repro sets its own directory.
+export REUSSIR_FFI_CACHE_DIR=
 
 usage() { sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//; /^set -u/d'; exit 2; }
 [ $# -ge 1 ] || usage
@@ -551,7 +558,33 @@ bug34() {
     else say_line FIXED 34 "no text relocations; prints 6" "-O aggressive"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33 34"
+bug35() {
+    # Two builds with one REUSSIR_FFI_CACHE_DIR, through a rustc wrapper
+    # that counts texture compiles (a reussir_rust_module_*.rs source; the
+    # final link through rustc is not one).
+    local d=$WORK/out/35 i n=()
+    rm -rf "$d"; mkdir -p "$d/cache"
+    printf '#!/bin/sh\ncase " $* " in *reussir_rust_module_*) echo x >> "%s/compiles" ;; esac\nexec "%s" "$@"\n' \
+        "$d" "$RUSTC" > "$d/rustc"
+    chmod +x "$d/rustc"
+    for i in 1 2; do
+        : > "$d/compiles"
+        { (cd "$WORK/run" && REUSSIR_FFI_CACHE_DIR=$d/cache "$RRC" "$HERE/bug35-texture-cache.rr" \
+            -o "$d/exe$i" --emit executable -O aggressive --polyffi-rust-path "$d/rustc" \
+            --polyffi-libdir "$RT" --polyffi-libdir "$RT/deps" --polyffi-libdir "$TL") > "$d/$i.log" 2>&1; } 2> /dev/null
+        RC=$?
+        if [ $RC != 0 ]; then say_line OTHER 35 "build $i: rrc $(signame "$RC"): $(grep -m1 -o "error[:=].\{0,160\}" "$d/$i.log")" "-O aggressive"; return; fi
+        n+=("$(wc -l < "$d/compiles")")
+        { (cd "$WORK/run" && timeout 60 "$d/exe$i") > "$d/exe$i.stdout" 2> /dev/null; } 2> /dev/null
+        if [ "$(cat "$d/exe$i.stdout")" != 42 ]; then say_line OTHER 35 "build $i prints '$(head -c 100 "$d/exe$i.stdout")', expected 42" "-O aggressive"; return; fi
+    done
+    local msg="second build: ${n[1]} of ${n[0]} textures compiled again; both print 42"
+    if [ "${n[0]}" -gt 0 ] && [ "${n[1]}" = 0 ]; then say_line FIXED 35 "$msg" "-O aggressive"
+    elif [ "${n[0]}" -gt 0 ] && [ "${n[1]}" = "${n[0]}" ]; then say_line REPRODUCES 35 "$msg" "-O aggressive"
+    else say_line OTHER 35 "$msg" "-O aggressive"; fi
+}
+
+ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33 34 35"
 SLOW=" 06 10 11 16 17 20 23 "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

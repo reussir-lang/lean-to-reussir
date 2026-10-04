@@ -152,7 +152,7 @@ with another message). No generated code changes.
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed.
 
-**Review.** Round 7, `p22` (`~/Documents/l2r-scratch/rv7/p22/FINDINGS.txt`):
+**Review.** Round 7, `p22` (local review notes):
 no defect; the reviewer confirmed the trait argument above and that
 "accepts only more IR" holds in effect (the two hand-written mismatched
 modules under `v22/` are rejected by the patched and the unpatched rrc, with

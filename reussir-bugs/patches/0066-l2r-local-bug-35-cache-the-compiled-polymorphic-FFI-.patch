@@ -1,0 +1,683 @@
+From 968c4b7dd3ac1c7eebf69f876496cdff6cf42cd8 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 4 Oct 2026 07:58:33 -0400
+Subject: [PATCH] l2r-local: bug 35: cache the compiled polymorphic-FFI
+ textures
+
+`compilePolymorphicFFI` (lib/Conversion/CompilePolymorphicFFI) compiles
+every texture instance with its own rustc run
+(`compileRustSourceToBitcode`, lib/RustCompiler), one after another, and
+programs built against the same packages compile the same textures again
+on every build. With large packages the runs take most of a build: a
+small lean2rr program has 474 textures, and rrc spends 16 s on it, all
+but about 2 s in rustc.
+
+When REUSSIR_FFI_CACHE_DIR names a directory, keep the bitcode rustc
+produces there, one file per key, and read it back instead of running
+rustc. The key is a BLAKE3 digest of the source, rustc's options (all but
+the temporary source and output files), rustc's resolved path, content
+and `-vV` report (a wrapper script and the toolchain a rustup proxy runs
+are told apart), the host CPU and its features (`-C target-cpu=native`),
+and the content of every .rlib, .rmeta and shared library in the package
+directories (an `-L` kind such as `crate=DIR` stripped).
+
+That toolchain part is computed once per process. Every file it read is
+stamped (device, inode, size, modification time and, on POSIX systems,
+status-change time) and checked again before each lookup and each store,
+so a library replaced while rrc runs, by rename or in place, gets a new
+digest, and a texture compiled meanwhile is not stored. A package
+directory's own stamp changes with any entry added or removed (rrc's
+temporary files when it runs there, a cache directory made there); a
+changed directory stamp counts only if the libraries listed in it
+changed, and is refreshed otherwise. When something cannot be read or
+run, caching is off for the run, with one warning on stderr.
+
+An entry is the digest of the bitcode followed by the bitcode, written to
+a temporary file in the directory (named by process and a random number
+in the file name only) and renamed into place; an entry that cannot be
+read, does not match its digest or does not start with a bitcode magic is
+a miss. Without the variable nothing changes, except that rustc gets the
+source and `-o OUT` first on its command line (the options keep their
+relative order).
+
+Tests: frontend/polyffi_cache.rr (a second build takes its textures from
+the cache with compilation disabled; other options and a truncated entry
+are misses) and frontend/polyffi_cache_swap.rr (a library replaced during
+the first texture compile, by rename or in place with its size and
+modification time kept, then restored: the next build sees the restored
+library; a `crate=DIR` package directory is hashed; rrc running in a
+package directory stores its entries).
+---
+ docs/design/polymorphic-ffi.md                |  11 +-
+ lib/RustCompiler/CMakeLists.txt               |   1 +
+ lib/RustCompiler/RustCompiler.cpp             | 387 +++++++++++++++++-
+ tests/integration/frontend/polyffi_cache.rr   |  44 ++
+ .../frontend/polyffi_cache_swap.rr            |  94 +++++
+ 5 files changed, 526 insertions(+), 11 deletions(-)
+ create mode 100644 tests/integration/frontend/polyffi_cache.rr
+ create mode 100644 tests/integration/frontend/polyffi_cache_swap.rr
+
+diff --git a/docs/design/polymorphic-ffi.md b/docs/design/polymorphic-ffi.md
+index a731dfa5..a9ef111a 100644
+--- a/docs/design/polymorphic-ffi.md
++++ b/docs/design/polymorphic-ffi.md
+@@ -295,7 +295,16 @@ toolchain explicitly; they take precedence over the `REUSSIR_RUSTC` /
+ by the platform's environment path separator), which in turn beat the
+ built-in probe list. The flags are the first step toward
+ building against a host `cargo`/`rustc` toolchain instead of shipping a
+-full Rust sysroot alongside the compiler. `translateToModule` links the
++full Rust sysroot alongside the compiler. With the `REUSSIR_FFI_CACHE_DIR`
++environment variable set, each texture's bitcode is kept in that
++directory and reused instead of running `rustc` again; the key is a digest
++of the texture, the `rustc` options, the compiler (path, content and `-vV`
++report), the host CPU and the libraries in the package directories
++(`lib/RustCompiler/RustCompiler.cpp`); files and environment variables
++read at compile time (`include!`, `env!`, procedural macros) are not part
++of it. Entries are checked for damage, not authenticated, so the directory
++must be trusted. Nothing is ever evicted: delete the directory to reclaim
++the space. `translateToModule` links the
+ gathered bitcode into the final LLVM module. The JIT/REPL path does not
+ gather polyffi modules yet and rejects programs containing them.
+ 
+diff --git a/lib/RustCompiler/CMakeLists.txt b/lib/RustCompiler/CMakeLists.txt
+index ff5748a0..5dca9ee8 100644
+--- a/lib/RustCompiler/CMakeLists.txt
++++ b/lib/RustCompiler/CMakeLists.txt
+@@ -4,5 +4,6 @@ add_mlir_library(ReussirRustCompiler
+     Core
+     Support
+     BitReader
++    TargetParser
+ )
+ 
+diff --git a/lib/RustCompiler/RustCompiler.cpp b/lib/RustCompiler/RustCompiler.cpp
+index de38cdc5..cca314fb 100644
+--- a/lib/RustCompiler/RustCompiler.cpp
++++ b/lib/RustCompiler/RustCompiler.cpp
+@@ -15,18 +15,31 @@
+ 
+ #include "Reussir/RustCompiler.h"
+ #include <array>
++#include <cstdint>
+ #include <llvm/ADT/STLExtras.h>
+ #include <llvm/ADT/SmallString.h>
+ #include <llvm/ADT/SmallVector.h>
++#include <llvm/ADT/StringExtras.h>
+ #include <llvm/ADT/StringRef.h>
+ #include <llvm/Bitcode/BitcodeReader.h>
+ #include <llvm/IR/Module.h>
++#include <llvm/Support/BLAKE3.h>
+ #include <llvm/Support/FileSystem.h>
+ #include <llvm/Support/FileUtilities.h>
+ #include <llvm/Support/MemoryBuffer.h>
++#include <llvm/Support/Error.h>
+ #include <llvm/Support/Path.h>
++#include <llvm/Support/Process.h>
+ #include <llvm/Support/Program.h>
++#include <llvm/TargetParser/Host.h>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <optional>
+ #include <system_error>
++#if defined(__unix__) || defined(__APPLE__)
++#include <sys/stat.h>
++#endif
+ 
+ #ifdef _WIN32
+ #define EXEC_SUFFIX ".exe"
+@@ -68,6 +81,345 @@ constexpr std::array<llvm::StringRef, 14> RUSTC_DEPS_HINTS = {
+     "/usr/local/lib/" LIB_NAME,
+     "/opt/reussir/lib/" LIB_NAME,
+ };
++
++//===----------------------------------------------------------------------===//
++// Texture bitcode cache
++//===----------------------------------------------------------------------===//
++//
++// Every polymorphic-FFI texture is compiled by its own rustc run, one after
++// another, and programs built against the same packages compile the same
++// textures again and again: with large packages, these runs can take most of
++// a build. When the REUSSIR_FFI_CACHE_DIR environment variable names a
++// directory, the bitcode rustc produces is kept there, one file per key, and
++// later compilations of the same texture read it instead of running rustc.
++// Unset (the default), nothing changes. Entries are never removed. The
++// directory must be trusted: entries are checked for damage, not
++// authenticated, and whoever can write there chooses the code rrc links.
++//
++// The key is a BLAKE3 digest of what rustc's output depends on: the source,
++// rustc's options, rustc itself (its resolved path, the file's content, which
++// tells wrapper scripts apart, and its `-vV` report, which names the
++// toolchain a rustup proxy runs), the host CPU (for `-C target-cpu=native`)
++// and the content of every library in the package directories (the crates
++// `-L` lets rustc load). Files or environment variables read at compile time
++// by a texture or by the macros of the crates it uses (`include!`, `env!`,
++// procedural macros) are not part of it.
++//
++// The files that part of the key was computed from are stamped (device,
++// inode, size, modification time and, on POSIX systems, status-change time)
++// when they are hashed, and checked again before each lookup and before each
++// store: a library replaced while rrc runs (another build writing the package
++// directories) gets a new digest, and a texture compiled while it changed is
++// not stored, so that no entry is filed under a key that does not describe
++// what rustc read. Elsewhere, a library rewritten in place with the same size
++// and its old modification time restored goes unseen.
++//
++// An entry is the BLAKE3 digest of the bitcode followed by the bitcode. It is
++// written to a temporary file in the cache directory and renamed into place,
++// so concurrent compilers never see a partial entry; an entry that cannot be
++// read, does not match its digest or holds no bitcode is a miss.
++
++constexpr llvm::StringLiteral CACHE_FORMAT = "reussir-polyffi-cache-v1";
++using Digest = llvm::BLAKE3Result<>;
++
++/// Hashes a length-prefixed field, so that consecutive fields cannot run
++/// into each other.
++void hashField(llvm::BLAKE3 &hasher, llvm::StringRef field) {
++  uint64_t size = field.size();
++  hasher.update(llvm::ArrayRef<uint8_t>(
++      reinterpret_cast<const uint8_t *>(&size), sizeof(size)));
++  hasher.update(field);
++}
++
++/// A file or directory as it was when the toolchain digest read it.
++struct FileStamp {
++  std::string path;
++  llvm::sys::fs::UniqueID id;
++  uint64_t size = 0;
++  llvm::sys::TimePoint<> modified;
++  // The status-change time (seconds, nanoseconds), which no one can set
++  // back: it catches a rewrite that restores the modification time.
++  std::array<int64_t, 2> changed = {};
++
++  bool operator==(const FileStamp &) const = default;
++};
++
++std::optional<FileStamp> stampFile(llvm::StringRef path) {
++  llvm::sys::fs::file_status status;
++  if (llvm::sys::fs::status(path, status))
++    return std::nullopt;
++  FileStamp stamp{path.str(), status.getUniqueID(), status.getSize(),
++                  status.getLastModificationTime()};
++#if defined(__unix__) || defined(__APPLE__)
++  struct stat st;
++  if (::stat(stamp.path.c_str(), &st) != 0)
++    return std::nullopt;
++#if defined(__APPLE__)
++  stamp.changed = {st.st_ctimespec.tv_sec, st.st_ctimespec.tv_nsec};
++#else
++  stamp.changed = {st.st_ctim.tv_sec, st.st_ctim.tv_nsec};
++#endif
++#endif
++  return stamp;
++}
++
++/// The files of `dir` rustc can load crates from, sorted.
++std::error_code listLibraries(llvm::StringRef dir,
++                              llvm::SmallVectorImpl<std::string> &libraries) {
++  std::error_code code;
++  for (llvm::sys::fs::directory_iterator file(dir, code), end;
++       file != end && !code; file.increment(code)) {
++    llvm::StringRef extension = llvm::sys::path::extension(file->path());
++    if (extension == ".rlib" || extension == ".rmeta" || extension == ".so" ||
++        extension == ".dylib" || extension == ".dll")
++      libraries.push_back(file->path());
++  }
++  llvm::sort(libraries);
++  return code;
++}
++
++/// A package directory as the toolchain digest listed it.
++struct DirStamp {
++  FileStamp stamp;
++  llvm::SmallVector<std::string> libraries;
++};
++
++/// Guards the toolchains computed so far, including their directory stamps.
++std::mutex toolchainMutex;
++
++/// The part of the key that does not depend on the texture, and the files
++/// it was computed from.
++struct Toolchain {
++  Digest digest;
++  /// rustc and every library.
++  llvm::SmallVector<FileStamp> files;
++  /// The package directories. A directory's stamp changes whenever an entry
++  /// is added or removed, also one rustc does not read (rrc's temporary
++  /// files when it runs there, a cache directory made there): a changed
++  /// stamp counts only if the libraries listed there changed, and is
++  /// refreshed otherwise.
++  mutable llvm::SmallVector<DirStamp> dirs;
++
++  /// Whether every file is still the one that was hashed. Call with
++  /// `toolchainMutex` held.
++  bool unchanged() const {
++    if (!llvm::all_of(files, [](const FileStamp &file) {
++          return stampFile(file.path) == file;
++        }))
++      return false;
++    for (DirStamp &dir : dirs) {
++      std::optional<FileStamp> now = stampFile(dir.stamp.path);
++      if (!now)
++        return false;
++      if (*now == dir.stamp)
++        continue;
++      llvm::SmallVector<std::string> libraries;
++      if (listLibraries(dir.stamp.path, libraries) ||
++          libraries != dir.libraries)
++        return false;
++      dir.stamp = std::move(*now);
++    }
++    return true;
++  }
++};
++
++/// rustc's `-vV` report; none when rustc cannot be run or fails.
++std::optional<std::string> rustcVersion(llvm::StringRef rustcPath) {
++  llvm::SmallString<128> outPath;
++  if (llvm::sys::fs::createTemporaryFile("reussir_rustc_version", "txt",
++                                         outPath))
++    return std::nullopt;
++  llvm::FileRemover outRemover(outPath);
++  llvm::StringRef args[] = {"rustc", "-vV"};
++  std::optional<llvm::StringRef> redirects[] = {llvm::StringRef(),
++                                                llvm::StringRef(outPath),
++                                                llvm::StringRef()};
++  if (llvm::sys::ExecuteAndWait(rustcPath, args, std::nullopt, redirects) != 0)
++    return std::nullopt;
++  auto out = llvm::MemoryBuffer::getFile(outPath);
++  if (!out)
++    return std::nullopt;
++  return (*out)->getBuffer().str();
++}
++
++/// The directory of a `-L` argument, which may start with a search kind.
++llvm::StringRef searchDirectory(llvm::StringRef path) {
++  for (llvm::StringRef kind :
++       {"dependency=", "crate=", "native=", "framework=", "all="})
++    if (path.consume_front(kind))
++      break;
++  return path;
++}
++
++/// Hashes rustc, the host CPU and the libraries in `depsPaths`, stamping
++/// every file it reads; the reason when something cannot be read or run.
++llvm::Expected<Toolchain>
++computeToolchain(llvm::StringRef rustcPath,
++                 llvm::ArrayRef<std::string> depsPaths) {
++  auto failure = [](const llvm::Twine &reason) {
++    return llvm::createStringError(reason);
++  };
++  Toolchain toolchain;
++  llvm::BLAKE3 hasher;
++  // Stamps `path`, then hashes its name and content.
++  auto hashFile = [&](llvm::StringRef path,
++                      llvm::StringRef name) -> llvm::Error {
++    std::optional<FileStamp> stamp = stampFile(path);
++    auto content = llvm::MemoryBuffer::getFile(
++        path, /*IsText=*/false, /*RequiresNullTerminator=*/false);
++    if (!stamp || !content)
++      return failure("cannot read " + path);
++    toolchain.files.push_back(std::move(*stamp));
++    hashField(hasher, name);
++    hashField(hasher, (*content)->getBuffer());
++    return llvm::Error::success();
++  };
++  if (llvm::Error error = hashFile(rustcPath, rustcPath))
++    return std::move(error);
++  std::optional<std::string> version = rustcVersion(rustcPath);
++  if (!version)
++    return failure("`" + rustcPath + " -vV` failed");
++  hashField(hasher, *version);
++  hashField(hasher, llvm::sys::getHostCPUName());
++  llvm::SmallVector<std::string> features;
++  for (const auto &feature : llvm::sys::getHostCPUFeatures())
++    features.push_back((feature.second ? "+" : "-") + feature.first().str());
++  llvm::sort(features);
++  for (const std::string &feature : features)
++    hashField(hasher, feature);
++  for (const std::string &depsPath : depsPaths) {
++    llvm::StringRef dir = searchDirectory(depsPath);
++    hashField(hasher, depsPath);
++    std::optional<FileStamp> dirStamp = stampFile(dir);
++    if (!dirStamp)
++      return failure("cannot read the directory " + dir);
++    DirStamp &listed = toolchain.dirs.emplace_back();
++    listed.stamp = std::move(*dirStamp);
++    if (std::error_code code = listLibraries(dir, listed.libraries))
++      return failure("cannot list the directory " + dir + ": " +
++                     code.message());
++    for (const std::string &library : listed.libraries)
++      if (llvm::Error error =
++              hashFile(library, llvm::sys::path::filename(library)))
++        return std::move(error);
++  }
++  if (!toolchain.unchanged())
++    return failure("a file changed while it was hashed");
++  toolchain.digest = hasher.final();
++  return toolchain;
++}
++
++/// The toolchain part of the key for `rustcPath` and `depsPaths`, computed
++/// once per process (one rrc run), since hashing the libraries reads them all
++/// (about 220 MB for lean2rr's directories, most of it the toolchain's
++/// standard library), and again when one of its files has changed. Null when
++/// caching is off for the rest of the run: something could not be read or
++/// run, or files changed while they were hashed (said once, on stderr).
++std::shared_ptr<const Toolchain>
++toolchainFor(llvm::StringRef rustcPath, llvm::ArrayRef<std::string> depsPaths) {
++  static std::map<std::string, std::shared_ptr<const Toolchain>> computed;
++  std::string id = rustcPath.str();
++  for (const std::string &depsPath : depsPaths)
++    id += '\0' + depsPath;
++  std::lock_guard<std::mutex> lock(toolchainMutex);
++  auto [it, inserted] = computed.try_emplace(id);
++  if (!inserted && (!it->second || it->second->unchanged()))
++    return it->second;
++  llvm::Expected<Toolchain> toolchain = computeToolchain(rustcPath, depsPaths);
++  if (!toolchain) {
++    llvm::errs() << "warning: REUSSIR_FFI_CACHE_DIR: no polymorphic-FFI "
++                    "caching in this run: "
++                 << llvm::toString(toolchain.takeError()) << "\n";
++    it->second = nullptr;
++    return nullptr;
++  }
++  it->second = std::make_shared<const Toolchain>(std::move(*toolchain));
++  return it->second;
++}
++
++/// Where a texture's bitcode is cached, and the toolchain the key describes.
++struct CacheEntry {
++  std::string path;
++  std::shared_ptr<const Toolchain> toolchain;
++
++  /// Whether the files the key describes are still those rustc may read.
++  bool current() const {
++    std::lock_guard<std::mutex> lock(toolchainMutex);
++    return toolchain->unchanged();
++  }
++};
++
++/// The cache entry for a texture compiled by `rustcPath` with `options`
++/// (rustc's arguments but the source and output files); none when the cache
++/// is off.
++std::optional<CacheEntry> cacheEntryFor(llvm::StringRef sourceCode,
++                                        llvm::ArrayRef<llvm::StringRef> options,
++                                        llvm::StringRef rustcPath,
++                                        llvm::ArrayRef<std::string> depsPaths) {
++  const char *cacheDir = std::getenv("REUSSIR_FFI_CACHE_DIR");
++  if (!cacheDir || !*cacheDir)
++    return std::nullopt;
++  std::shared_ptr<const Toolchain> toolchain =
++      toolchainFor(rustcPath, depsPaths);
++  if (!toolchain)
++    return std::nullopt;
++  llvm::BLAKE3 hasher;
++  hashField(hasher, CACHE_FORMAT);
++  hasher.update(toolchain->digest);
++  for (llvm::StringRef option : options)
++    hashField(hasher, option);
++  hashField(hasher, sourceCode);
++  llvm::SmallString<128> path(cacheDir);
++  llvm::sys::path::append(path, llvm::toHex(hasher.final(),
++                                            /*LowerCase=*/true) +
++                                    ".bc");
++  return CacheEntry{std::string(path), std::move(toolchain)};
++}
++
++/// The bitcode of a cache entry; none when it is missing or damaged.
++std::unique_ptr<llvm::MemoryBuffer> readCacheEntry(llvm::StringRef path) {
++  auto entry = llvm::MemoryBuffer::getFile(path, /*IsText=*/false,
++                                           /*RequiresNullTerminator=*/false);
++  if (!entry || (*entry)->getBufferSize() < sizeof(Digest))
++    return nullptr;
++  llvm::StringRef stored = (*entry)->getBuffer().take_front(sizeof(Digest));
++  llvm::StringRef bitcode = (*entry)->getBuffer().drop_front(sizeof(Digest));
++  Digest digest = llvm::BLAKE3::hash(llvm::arrayRefFromStringRef(bitcode));
++  if (stored != llvm::toStringRef(digest) ||
++      !llvm::isBitcode(bitcode.bytes_begin(), bitcode.bytes_end()))
++    return nullptr;
++  return llvm::MemoryBuffer::getMemBufferCopy(bitcode, path);
++}
++
++/// Stores `bitcode` as the entry `path`. A failure only loses the entry.
++void writeCacheEntry(llvm::StringRef path, llvm::StringRef bitcode) {
++  if (llvm::sys::fs::create_directories(llvm::sys::path::parent_path(path)))
++    return;
++  // Unique by process and a random number, in the file name only: a model
++  // for `createUniqueFile` would also substitute any `%` in the directory.
++  std::string tempPath =
++      (path + ".tmp-" + llvm::Twine(llvm::sys::Process::getProcessId()) + "-" +
++       llvm::utohexstr(llvm::sys::Process::GetRandomNumber()))
++          .str();
++  int fd = -1;
++  if (llvm::sys::fs::openFileForWrite(tempPath, fd,
++                                      llvm::sys::fs::CD_CreateNew))
++    return;
++  llvm::FileRemover tempRemover(tempPath);
++  {
++    llvm::raw_fd_ostream out(fd, /*shouldClose=*/true);
++    out << llvm::toStringRef(
++               llvm::BLAKE3::hash(llvm::arrayRefFromStringRef(bitcode)))
++        << bitcode;
++    out.close();
++    if (out.has_error()) {
++      out.clear_error();
++      return;
++    }
++  }
++  if (!llvm::sys::fs::rename(tempPath, path))
++    tempRemover.releaseFile();
++}
+ } // namespace
+ 
+ llvm::StringRef findRustCompiler(llvm::StringRef preferred) {
+@@ -150,6 +502,24 @@ std::unique_ptr<llvm::MemoryBuffer> compileRustSourceToBitcode(
+                  << cwd << "\n";
+     return nullptr;
+   }
++  // rustc's options, without the source and output files: the cache key
++  // leaves out these temporary files, whose random names reach the output
++  // only as the crate's name, the module's source file name and the file
++  // names of panic locations, random anyway
++  llvm::SmallVector<llvm::StringRef, 24> options = {
++      "-A", "warnings", "--crate-type", "cdylib", "--emit=llvm-bc"};
++  for (const std::string &depsPath : rustcDepsPaths) {
++    options.push_back("-L");
++    options.push_back(depsPath);
++  }
++  for (auto arg : additionalArgs)
++    options.push_back(arg);
++  std::optional<CacheEntry> cacheEntry =
++      cacheEntryFor(sourceCode, options, rustcPath, rustcDepsPaths);
++  if (cacheEntry)
++    if (std::unique_ptr<llvm::MemoryBuffer> cached =
++            readCacheEntry(cacheEntry->path))
++      return cached;
+   // Create a temporary file for the source code
+   llvm::SmallString<32> srcFilePath;
+   llvm::SmallString<32> resultBitcodeFilePath;
+@@ -180,16 +550,9 @@ std::unique_ptr<llvm::MemoryBuffer> compileRustSourceToBitcode(
+     srcStream.flush();
+   }
+   // Prepare rustc command
+-  llvm::SmallVector<llvm::StringRef, 24> args = {
+-      "rustc",          "-A",           "warnings",
+-      srcFilePath,      "--crate-type", "cdylib",
+-      "--emit=llvm-bc", "-o",           resultBitcodeFilePath};
+-  for (const std::string &depsPath : rustcDepsPaths) {
+-    args.push_back("-L");
+-    args.push_back(depsPath);
+-  }
+-  for (auto arg : additionalArgs)
+-    args.push_back(arg);
++  llvm::SmallVector<llvm::StringRef, 24> args = {"rustc", srcFilePath, "-o",
++                                                 resultBitcodeFilePath};
++  llvm::append_range(args, options);
+   // Execute rustc
+   std::string executionError;
+   int code =
+@@ -221,6 +584,10 @@ std::unique_ptr<llvm::MemoryBuffer> compileRustSourceToBitcode(
+     buffer = std::move(*bufferOrErr);
+ #endif
+   }
++  // Not stored if a file the key was computed from changed meanwhile: rustc
++  // may have read the new one.
++  if (cacheEntry && cacheEntry->current())
++    writeCacheEntry(cacheEntry->path, buffer->getBuffer());
+   return buffer;
+ }
+ 
+diff --git a/tests/integration/frontend/polyffi_cache.rr b/tests/integration/frontend/polyffi_cache.rr
+new file mode 100644
+index 00000000..c9621186
+--- /dev/null
++++ b/tests/integration/frontend/polyffi_cache.rr
+@@ -0,0 +1,44 @@
++// UNSUPPORTED: windows
++// The texture bitcode cache (REUSSIR_FFI_CACHE_DIR; lib/RustCompiler): a
++// build stores the bitcode of each texture there, a second build takes every
++// texture from the cache, and an entry that does not match its digest, or a
++// build with other rustc options, is a miss. %t/rustc runs the real rustc,
++// but fails every compilation while NO_COMPILE is set; it still answers
++// `-vV`, and the environment is not part of the key.
++
++// RUN: rm -rf %t && mkdir -p %t
++// RUN: printf '#!/bin/sh\n' > %t/rustc
++// RUN: printf 'if [ -n "$NO_COMPILE" ] && [ "$1" != -vV ]; then exit 1; fi\n' \
++// RUN:   >> %t/rustc
++// RUN: printf 'exec "$REAL_RUSTC" "$@"\n' >> %t/rustc
++// RUN: chmod +x %t/rustc
++// RUN: env REAL_RUSTC=%rustc_path REUSSIR_FFI_CACHE_DIR=%t/cache %rrc %s \
++// RUN:   --polyffi-rust-path %t/rustc --emit llvm-ir -o %t/cold.ll
++// RUN: ls %t/cache | %FileCheck %s --check-prefix=ENTRIES \
++// RUN:   --implicit-check-not=tmp
++// RUN: env REAL_RUSTC=%rustc_path REUSSIR_FFI_CACHE_DIR=%t/cache NO_COMPILE=1 \
++// RUN:   %rrc %s --polyffi-rust-path %t/rustc --emit llvm-ir -o %t/warm.ll
++// RUN: diff %t/cold.ll %t/warm.ll
++// RUN: %not env REAL_RUSTC=%rustc_path REUSSIR_FFI_CACHE_DIR=%t/cache \
++// RUN:   NO_COMPILE=1 %rrc %s -O none --polyffi-rust-path %t/rustc \
++// RUN:   --emit llvm-ir -o %t/none.ll 2>&1 | %FileCheck %s --check-prefix=MISS
++// RUN: for f in %t/cache/*.bc; do \
++// RUN:   head -c 100 "$f" > "$f.cut" && mv "$f.cut" "$f"; done
++// RUN: %not env REAL_RUSTC=%rustc_path REUSSIR_FFI_CACHE_DIR=%t/cache \
++// RUN:   NO_COMPILE=1 %rrc %s --polyffi-rust-path %t/rustc --emit llvm-ir \
++// RUN:   -o %t/cut.ll 2>&1 | %FileCheck %s --check-prefix=MISS
++// RUN: env REAL_RUSTC=%rustc_path REUSSIR_FFI_CACHE_DIR=%t/cache %rrc %s \
++// RUN:   --polyffi-rust-path %t/rustc --emit llvm-ir -o %t/rebuilt.ll
++// RUN: env REAL_RUSTC=%rustc_path REUSSIR_FFI_CACHE_DIR=%t/cache NO_COMPILE=1 \
++// RUN:   %rrc %s --polyffi-rust-path %t/rustc --emit llvm-ir -o %t/warm2.ll
++// RUN: diff %t/rebuilt.ll %t/warm2.ll
++
++// ENTRIES: {{^[0-9a-f]{64}\.bc$}}
++// MISS: Rust compilation failed
++
++#[ffi(import)]
++pub fn add_one(x: u64) -> u64 [{ x + 1 }];
++
++pub fn main() -> u64 {
++    add_one(41)
++}
+diff --git a/tests/integration/frontend/polyffi_cache_swap.rr b/tests/integration/frontend/polyffi_cache_swap.rr
+new file mode 100644
+index 00000000..5b908931
+--- /dev/null
++++ b/tests/integration/frontend/polyffi_cache_swap.rr
+@@ -0,0 +1,94 @@
++// UNSUPPORTED: windows
++// The texture bitcode cache (polyffi_cache.rr) when a library changes. A
++// library replaced while rrc compiles textures (another build writing a
++// package directory) must not leave entries filed under the old library's
++// key: %t/rustc replaces libfcrdep.rlib by v2 before the first texture
++// compile (by a rename, or with INPLACE set in place, with the same size and
++// its old modification time put back), and once v1 is back, a build must
++// see v1 again. A package directory given with an `-L` kind (`crate=DIR`) is
++// hashed like any other, and one that rrc runs in (where it writes its
++// temporary files) does not keep the entries out.
++
++// RUN: rm -rf %t && mkdir -p %t/L
++// RUN: printf '#[inline] pub fn k() -> u64 { 1111 }\n' > %t/v1.rs
++// RUN: printf '#[inline] pub fn k() -> u64 { 2222 }\n' > %t/v2.rs
++// RUN: %rustc_path --crate-type rlib --crate-name fcrdep %t/v1.rs -o %t/v1.rlib
++// RUN: %rustc_path --crate-type rlib --crate-name fcrdep %t/v2.rs -o %t/v2.rlib
++// RUN: printf '#!/bin/sh\ncase " $* " in *reussir_rust_module_*)\n' > %t/rustc
++// RUN: printf '  if [ -e "$D/armed" ]; then rm "$D/armed"\n' >> %t/rustc
++// RUN: printf '    if [ -n "$INPLACE" ]; then\n' >> %t/rustc
++// RUN: printf '      cp "$D/v2.rlib" "$D/L/libfcrdep.rlib"\n' >> %t/rustc
++// RUN: printf '      touch -r "$D/mtime" "$D/L/libfcrdep.rlib"\n' >> %t/rustc
++// RUN: printf '    else cp "$D/v2.rlib" "$D/L/new"\n' >> %t/rustc
++// RUN: printf '      mv "$D/L/new" "$D/L/libfcrdep.rlib"; fi\n' >> %t/rustc
++// RUN: printf '  fi ;;\nesac\nexec "$REAL_RUSTC" "$@"\n' >> %t/rustc
++// RUN: chmod +x %t/rustc
++
++// RUN: cp %t/v1.rlib %t/L/libfcrdep.rlib && touch %t/armed
++// RUN: env D=%t REAL_RUSTC=%rustc_path REUSSIR_FFI_CACHE_DIR=%t/cache \
++// RUN:   %rrc %s --polyffi-rust-path %t/rustc --polyffi-libdir %library_path \
++// RUN:   --polyffi-libdir %t/L --emit llvm-ir -O aggressive -o %t/swapped.ll
++// RUN: %FileCheck %s --check-prefix=V2 < %t/swapped.ll
++// RUN: cp %t/v1.rlib %t/L/new && mv %t/L/new %t/L/libfcrdep.rlib
++// RUN: env D=%t REAL_RUSTC=%rustc_path REUSSIR_FFI_CACHE_DIR=%t/cache \
++// RUN:   %rrc %s --polyffi-rust-path %t/rustc --polyffi-libdir %library_path \
++// RUN:   --polyffi-libdir %t/L --emit llvm-ir -O aggressive -o %t/v1.ll
++// RUN: %FileCheck %s --check-prefix=V1 < %t/v1.ll
++
++// RUN: env D=%t REAL_RUSTC=%rustc_path REUSSIR_FFI_CACHE_DIR=%t/kind \
++// RUN:   REUSSIR_RUSTC_DEPS=%library_path:crate=%t/L %rrc %s \
++// RUN:   --polyffi-rust-path %t/rustc --emit llvm-ir -O aggressive \
++// RUN:   -o %t/kind-v1.ll
++// RUN: %FileCheck %s --check-prefix=V1 < %t/kind-v1.ll
++// RUN: cp %t/v2.rlib %t/L/new && mv %t/L/new %t/L/libfcrdep.rlib
++// RUN: env D=%t REAL_RUSTC=%rustc_path REUSSIR_FFI_CACHE_DIR=%t/kind \
++// RUN:   REUSSIR_RUSTC_DEPS=%library_path:crate=%t/L %rrc %s \
++// RUN:   --polyffi-rust-path %t/rustc --emit llvm-ir -O aggressive \
++// RUN:   -o %t/kind-v2.ll
++// RUN: %FileCheck %s --check-prefix=V2 < %t/kind-v2.ll
++
++// In place: the same inode, size and modification time; only the
++// status-change time tells.
++// RUN: test "$(wc -c < %t/v1.rlib)" = "$(wc -c < %t/v2.rlib)"
++// RUN: cp %t/v1.rlib %t/L/libfcrdep.rlib
++// RUN: touch -r %t/L/libfcrdep.rlib %t/mtime
++// RUN: touch %t/armed
++// RUN: env D=%t INPLACE=1 REAL_RUSTC=%rustc_path \
++// RUN:   REUSSIR_FFI_CACHE_DIR=%t/inplace %rrc %s \
++// RUN:   --polyffi-rust-path %t/rustc --polyffi-libdir %library_path \
++// RUN:   --polyffi-libdir %t/L --emit llvm-ir -O aggressive \
++// RUN:   -o %t/inplace-swapped.ll
++// RUN: %FileCheck %s --check-prefix=V2 < %t/inplace-swapped.ll
++// RUN: cp %t/v1.rlib %t/L/libfcrdep.rlib
++// RUN: touch -r %t/mtime %t/L/libfcrdep.rlib
++// RUN: env D=%t REAL_RUSTC=%rustc_path REUSSIR_FFI_CACHE_DIR=%t/inplace \
++// RUN:   %rrc %s --polyffi-rust-path %t/rustc --polyffi-libdir %library_path \
++// RUN:   --polyffi-libdir %t/L --emit llvm-ir -O aggressive -o %t/inplace-v1.ll
++// RUN: %FileCheck %s --check-prefix=V1 < %t/inplace-v1.ll
++
++// rrc running in a package directory still stores both entries.
++// RUN: mkdir -p %t/Lc && cp %t/v1.rlib %t/Lc/libfcrdep.rlib
++// RUN: cd %t/Lc && env D=%t REAL_RUSTC=%rustc_path \
++// RUN:   REUSSIR_FFI_CACHE_DIR=%t/cwd %rrc %s --polyffi-rust-path %t/rustc \
++// RUN:   --polyffi-libdir %library_path --polyffi-libdir . --emit llvm-ir \
++// RUN:   -O aggressive -o %t/cwd.ll
++// RUN: ls %t/cwd | %FileCheck %s --check-prefix=TWO
++
++// TWO-COUNT-2: {{^[0-9a-f]{64}\.bc$}}
++// TWO-NOT: .bc
++// V1-DAG: add i64 %x, 1111
++// V1-DAG: add i64 %x, 1113
++// V2-DAG: add i64 %x, 2222
++// V2-DAG: add i64 %x, 2224
++
++extern "rust" [{
++    extern crate fcrdep;
++}];
++
++#[ffi(import)]
++pub fn kplus(x: u64) -> u64 [{ fcrdep::k() + x }];
++#[ffi(import)]
++pub fn kplus2(x: u64) -> u64 [{ fcrdep::k() + x + 2 }];
++pub fn main() -> u64 {
++    kplus2(kplus(1))
++}
+-- 
+2.43.0
+

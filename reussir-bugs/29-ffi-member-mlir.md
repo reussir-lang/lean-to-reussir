@@ -43,7 +43,7 @@ be atomic shared links`.
 
 Every lean2rr program hits it: strings and arrays are FFI objects, and they
 sit in lists, structures and constructor payloads. MapMIO
-(`~/Documents/l2r-scratch/examples/mapm/`), for example, fails on line 5,
+(a local example program), for example, fails on line 5,
 a `[value]` payload `T_List.cons` holding an `LStr`.
 
 ## Cause
@@ -135,7 +135,7 @@ member with the `[field]` capability.
   prints identically`.
 
 **Review.** Round RV8 (e)
-(`~/Documents/l2r-scratch/rv8/reussir/e/FINDINGS.txt`): no defect. A
+(local review notes): no defect. A
 lean2rr dump (LeanBoolLoop, 9.2 MB, 5244 `ffi_object` occurrences) parses
 back and prints identically; without 0061 it is rejected. The verifier
 now accepts shared `rc<ffi_object>` members, normal or atomic, in

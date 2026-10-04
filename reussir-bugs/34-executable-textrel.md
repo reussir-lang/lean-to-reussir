@@ -3,7 +3,7 @@
 ## Summary
 
 **Kind:** bug (link). **Status:** patched (0065), not applied yet (branch
-`l2r-final-0065` of `~/Documents/l2r-scratch/reussir-final`, on
+`l2r-final-0065` of a local Reussir integration checkout, on
 `l2r-final` cc8e5aa5); reviewed, no defect. lean2rr works around it: its
 driver passes `--relocation-mode pic` (below).
 
@@ -100,8 +100,8 @@ executables are PIEs without text relocations, as native Lean's are.
 
 Patch file
 [`patches/0065-l2r-local-bug-34-compile-link-products-position-inde.patch`](patches/0065-l2r-local-bug-34-compile-link-products-position-inde.patch)
-(commit `c8a524e7` on branch `l2r-final-0065` of
-`~/Documents/l2r-scratch/reussir-final`, on cc8e5aa5; not in `./reussir`
+(commit `c8a524e7` on branch `l2r-final-0065` of the local
+integration checkout, on cc8e5aa5; not in `./reussir`
 yet). When the mode is left at `default` and the product is an executable
 or a dynlib, rrc compiles position-independent code
 (`crates/reussir-compiler/src/driver.rs`):

@@ -151,7 +151,7 @@ lean2rr (`L2R_NO_OUTLINE=1`, rrc to the LLVM dialect): 50 statements,
 (1.18x memory); N = 100 without reuse across calls: 38 s, 183 MB`
 (unpatched: 261 MB and 1.15 GB).
 
-**Review.** Round RV8C (`~/Documents/l2r-scratch/rv8/reussir-c/FINDINGS.txt`,
+**Review.** Round RV8C (local review notes,
 Q6): no defect. The reviewer checked that a token is sunk only when its
 decrement's token result has no other use, that later records of the same
 token are skipped (no double free), that loops and calls keep their frees,

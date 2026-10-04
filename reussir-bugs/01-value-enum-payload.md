@@ -139,7 +139,7 @@ which needs the declaration-order layout to agree with Reussir's: that is
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed.
 
-**Review.** Round 8 (`~/Documents/l2r-scratch/rv8/reussir/FINDINGS.txt`):
+**Review.** Round 8 (local review notes):
 no correctness defect in 0018-0021. Checked: every access to an arm goes
 through a GEP to the payload member and then the arm's type, and no
 lowering does `extractvalue`/`insertvalue` into a variant payload; `[value]`

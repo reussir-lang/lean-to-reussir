@@ -123,7 +123,7 @@ the conversion has finished.
   N = 5000: 0.7 s, N = 10000: 0.4 s`.
 
 **Review.** Round RV8 (e)
-(`~/Documents/l2r-scratch/rv8/reussir/e/FINDINGS.txt`): no defect.
+(local review notes): no defect.
 `FuncOpConversion` keeps the collection current (it removes each
 `func.func` and inserts its `llvm.func`). Reussir's own patterns add
 symbols without updating it (runtime declarations, `memcmp`,

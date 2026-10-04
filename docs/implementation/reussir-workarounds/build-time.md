@@ -122,3 +122,28 @@ lean2rr's files.
   ([23-polyffi-link.md](../../../reussir-bugs/23-polyffi-link.md)).
 - **Where:** n/a.
 - **Remove only if:** n/a.
+
+### Bug 35: every texture is compiled again on every build
+
+- **What:** `scripts/l2r.py` sets `REUSSIR_FFI_CACHE_DIR` for rrc to
+  `runtime/leanrt/target/polyffi-cache` unless the caller sets it (empty:
+  off), so that rrc with patch 0066 (not applied yet) takes the bitcode of
+  textures it compiled before from there. The `rustc-native` script's
+  text names lean-runtime's build (`# lean-runtime build <digest>`):
+  rrc's key hashes the script and the `--polyffi-libdir` directories, and
+  cargo's build of lean-runtime (once it has dependencies) puts its rlibs
+  in none of them. Nothing removes old entries (about 8 KB each, a new set
+  of about 470 per change of leanrt, lean-runtime, Reussir's runtime or
+  the toolchain); delete the directory to reclaim the space. The key
+  hashes the rlibs' bytes, so `build_locked` runs rustc for leanrt and
+  lean-runtime in the crate's directory: rustc records its working
+  directory in an rlib, and a rebuild from another directory would
+  otherwise change every key (the recorded source paths, which panic
+  messages show, stay absolute and unchanged).
+- **Why:** rrc runs rustc once per texture, and lean2rr writes the whole
+  prelude into every program: about 470 rustc runs, 13 s of a small
+  program's 16 s of rrc; with the cache full, 3 s
+  ([35-texture-rustc-runs.md](../../../reussir-bugs/35-texture-rustc-runs.md)).
+- **Where:** `scripts/l2r.py`: `main`, `rustc_wrapper`, `build_locked`.
+- **Remove only if:** n/a (not a workaround: it turns the patch's cache
+  on; an rrc without the patch ignores the variable).

@@ -306,7 +306,7 @@ layout, so they are the offsets the stores and loads use.
   `--no-pack-record-members`, where the prefix rule was already sound.
 - `run.sh` on the final stack: `bug 02b  FIXED       prints 5001   [-O aggressive]`.
 
-**Review.** Round 8 (`~/Documents/l2r-scratch/rv8/reussir/FINDINGS.txt`):
+**Review.** Round 8 (local review notes):
 no correctness defect. Checked: `getVariantPayloadOffset` is the header
 formula of `getTypeSizeInBits` and the offset LLVM gives the payload
 member; `getMemberOffset` and `deriveCompoundLayout` use

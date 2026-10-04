@@ -74,7 +74,7 @@ and nothing is stored: the runtime still builds and works as before.
 
 ### Review
 
-Round RV8 (`~/Documents/l2r-scratch/rv8/reussir/FINDINGS.txt`): no defect.
+Round RV8 (local review notes): no defect.
 The hook is called at every drain exit that released something, after
 `draining` is false and with nothing pending, as the last statement, so it
 may start new drains, re-enter or switch coroutines; not for nested drains
@@ -168,8 +168,8 @@ container, including counted big-number allocations and frees
 (`tests/runtime/nat-alloc-check.sh`: `RtNatStress`, also through
 `IO.Ref` set/swap/modify, and `RtNatConst`).
 
-Reviews: the mem-nat review (`~/Documents/l2r-scratch/mem/nat/review/FINDINGS.txt`)
-and round RV8 (`~/Documents/l2r-scratch/rv8/nat/FINDINGS.txt`, Q3) found no
+Reviews: the mem-nat review (local review notes)
+and round RV8 (local review notes, Q3) found no
 defect in the patch: the guard covers the delta, atomic and
 immortal-steering paths of `rc.inc`; `rc.dec` calls the hook only for an
 even word (and the hook re-tests it); every other reader or writer of a

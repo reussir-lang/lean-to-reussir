@@ -112,7 +112,7 @@ never pads between them, so it is untouched.
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed.
 
-**Review.** Round 8 (`~/Documents/l2r-scratch/rv8/reussir/FINDINGS.txt`):
+**Review.** Round 8 (local review notes):
 no correctness defect. The reviewer proved the invariant above (the next
 offset and the lifted size are multiples of the integer's alignment, so it
 starts at Reussir's offset), checked that the lift never lowers the

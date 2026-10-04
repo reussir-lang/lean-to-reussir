@@ -513,10 +513,13 @@ depth in the file of its bug, indexed in
 They are local only, never submitted upstream, and each is reviewed
 adversarially.
 An independent audit checked whether each problem is really a Reussir
-bug. Of the 34 documented problems, 30 are patched in `l2r-local` (33
-patches), 1 has a patch not applied yet (bug 34, patch 0065: `rrc --emit
+bug. Of the 35 documented problems, 30 are patched in `l2r-local` (33
+patches), 2 have a patch not applied yet (bug 34, patch 0065: `rrc --emit
 executable` compiled static code into a PIE, so lean2rr's binaries carried
-text relocations; lean2rr's driver now passes `--relocation-mode pic`), and
+text relocations; lean2rr's driver now passes `--relocation-mode pic`; and
+bug 35, patch 0066: rrc compiled every FFI texture with rustc again on every
+build, about 13 s of a small program's 16 s; the patch caches the bitcode,
+and lean2rr's driver gives rrc the cache directory), and
 3 are documented only; two more patches add
 features lean2rr needs:
 

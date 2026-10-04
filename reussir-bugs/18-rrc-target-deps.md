@@ -83,12 +83,12 @@ the same list, as this rule requires (review RV8C-02).
 
 **Verification.** With a fresh build directory and `--target rrc` alone:
 before, cargo failed as above; with the patch rrc builds and links, and the
-ninja edge of `rrc-build` depends on all four archives (the author's logs,
-`~/Documents/l2r-scratch/morepatches-b/build18.build-{before,after}.log`).
+ninja edge of `rrc-build` depends on all four archives (the author's build
+logs, before and after, local notes).
 `run.sh` on the final stack: `bug 18   FIXED`. No lit test (a build-system
 change).
 
-**Review.** Round 7, `p22` (`~/Documents/l2r-scratch/rv7/p22/FINDINGS.txt`):
+**Review.** Round 7, `p22` (local review notes):
 no defect. All 32 archives in `reussir-backend-sys/build.rs` are direct
 dependencies of both the `rrc-build` and `rrepl-build` ninja edges; the
 other cargo targets (`reussir-syntax`, `reussir-lsp`, `rene`) do not link

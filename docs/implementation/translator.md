@@ -110,7 +110,9 @@ relative to `lean2rr/` unless they start with `scripts/`.
   recompile from source, with the error. The driver reads `L2R_REUSSIR`,
   `L2R_RUSTC`,
   `L2R_GMP`, `L2R_LEAN2RR`, `L2R_DISABLE_OPTS`, `L2R_ENABLE_OPTS`,
-  `L2R_RRC_FLAGS`.
+  `L2R_RRC_FLAGS`, and `REUSSIR_FFI_CACHE_DIR`, which it sets for rrc
+  unless given (rrc's texture cache, Reussir bug 35:
+  [reussir-workarounds/build-time.md](reussir-workarounds/build-time.md#bug-35-every-texture-is-compiled-again-on-every-build)).
 - **Why:** Debugging aids; the switches keep the repros meaningful while
   the workarounds stay on by default.
 - **Where:** `Main.lean`: `pipeline`, `parseArgs`, `usage`;

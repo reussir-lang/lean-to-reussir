@@ -247,8 +247,10 @@ Paths are relative to the repository root.
   `third_party/lean-runtime`, pinned by commit; `L2R_LEAN_RUNTIME` names
   another checkout, `L2R_LEAN_RUNTIME_FEATURES` adds features) next to
   leanrt, with leanrt's rustc and flags. Without dependencies: plain rustc,
-  `liblean_runtime.rlib`, the enabled features as `--cfg`, cached by a hash
-  of the manifest and of the files its dep-info lists. With dependencies or
+  run in the checkout's directory (the rlib's bytes then do not depend on
+  the caller's directory, for rrc's texture cache), `liblean_runtime.rlib`,
+  the enabled features as `--cfg`, cached by a hash of the manifest and of
+  the files its dep-info lists. With dependencies or
   a build script: the pinned toolchain's cargo, `--offline --locked
   --release` from inside the checkout, against cargo's registry cache at
   the versions of its committed `Cargo.lock` (`cargo fetch --locked` fills
@@ -256,7 +258,9 @@ Paths are relative to the repository root.
   `.rmeta` of its own stub rlib from cargo's JSON messages. leanrt
   is built with `--extern lean_runtime=...` and `-L dependency=` for each
   rlib directory; the `rustc-native` wrapper that rrc compiles textures
-  with adds the same; the link passes lean-runtime's rlibs after
+  with adds the same, and its text names lean-runtime's build (its digest:
+  rrc's texture cache keys on the script's text, and cargo's rlibs are in
+  no `--polyffi-libdir` directory; Reussir bug 35); the link passes lean-runtime's rlibs after
   `libleanrt.rlib` and before GMP, those of the packages its normal
   dependencies reach, in the order of its dependency graph (`cargo
   metadata`: dependents first; build-script dependencies left out; review

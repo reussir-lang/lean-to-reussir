@@ -31,7 +31,9 @@ lean-runtime checkout, e.g. a branch under review; default: the submodule
 third_party/lean-runtime, whose checked-out commit must be the pinned one),
 L2R_LEAN_RUNTIME_FEATURES (comma-separated lean-runtime features to add, to
 try a branch), L2R_RRC_FLAGS (extra rrc flags, split on spaces, for experiments such as
-`--nullary-variant-encoding arch-independent`).
+`--nullary-variant-encoding arch-independent`), REUSSIR_FFI_CACHE_DIR
+(where rrc keeps the compiled textures; default
+runtime/leanrt/target/polyffi-cache, empty to turn the cache off).
 """
 import argparse, fcntl, hashlib, json, os, subprocess, sys, tempfile, tomllib
 from pathlib import Path
@@ -88,13 +90,19 @@ def rustc_wrapper(rlib, lr):
     extern crate (the prelude's textures call it as `sem`) and the
     directories of its rlibs as dependency search paths (where rustc finds
     it, and its own dependencies, when it loads leanrt). One per `leanrt`
-    build directory (per Reussir checkout)."""
+    build directory (per Reussir checkout).
+
+    The script's text names lean-runtime's build (`lr.digest`): rrc's
+    texture cache (`REUSSIR_FFI_CACHE_DIR`, Reussir bug 35) hashes the
+    script's text and the libraries in the `--polyffi-libdir` directories,
+    and cargo's build of lean-runtime puts its rlibs in none of them."""
     w = rlib.parent / "rustc-native"
     flags = "%s --extern leanrt='%s'%s%s" % (
         " ".join(NATIVE_FLAGS), rlib, "".join(" --extern '%s'" % e for e in lr.externs),
         "".join(" -L dependency='%s'" % d for d in lr.dirs))
-    text = ("#!/bin/sh\ncase \" $* \" in *--edition*) exec '%s' \"$@\" %s ;; esac\n"
-            "exec '%s' \"$@\" %s --edition 2018\n" % (RUSTC, flags, RUSTC, flags))
+    text = ("#!/bin/sh\n# lean-runtime build %s\n"
+            "case \" $* \" in *--edition*) exec '%s' \"$@\" %s ;; esac\n"
+            "exec '%s' \"$@\" %s --edition 2018\n" % (lr.digest, RUSTC, flags, RUSTC, flags))
     if not w.exists() or w.read_text() != text:
         tmp = w.with_name(w.name + ".%d" % os.getpid())
         tmp.write_text(text)
@@ -107,7 +115,8 @@ def rustc_wrapper(rlib, lr):
 # on spaces), for test builds such as `--cfg leanrt_count_bigs`
 # (tests/runtime/nat-alloc-check.sh). lean-runtime gets them too so that both
 # crates are always compiled alike (a `-C` flag such as `panic=abort` must
-# agree between them).
+# agree between them). rustc runs in the crate's directory (`build_locked`):
+# a relative path in these flags is relative to it.
 LEANRT_FLAGS = os.environ.get("L2R_LEANRT_RUSTFLAGS", "").split()
 
 # The features of lean-runtime lean2rr builds: none yet (add "io" when
@@ -137,18 +146,25 @@ def leanrt_out():
     return out
 
 
-def build_locked(out, stamp, outputs, digest, cmd, digest_after=None):
-    """Run `cmd` (a rustc command building `outputs`) unless `stamp` records
-    `digest`; then record `digest_after()` (default: `digest`), for a digest
-    that depends on what the build found (its dep-info). Concurrent drivers
-    share the output directory: one builds, the others wait for it and then
-    find the stamp up to date."""
+def build_locked(out, stamp, outputs, digest, cmd, cwd, digest_after=None):
+    """Run `cmd` (a rustc command building `outputs`) in `cwd` unless `stamp`
+    records `digest`; then record `digest_after()` (default: `digest`), for a
+    digest that depends on what the build found (its dep-info). Concurrent
+    drivers share the output directory: one builds, the others wait for it
+    and then find the stamp up to date.
+
+    `cwd` is the crate's directory, not the caller's: rustc records its
+    working directory in the rlib's metadata, so a rebuild from another
+    directory would give an rlib with other bytes, and rrc's texture cache
+    (Reussir bug 35), which hashes the rlibs, would miss on every texture.
+    The paths in `cmd` are absolute (so are the source paths rustc records,
+    which panic messages show)."""
     out.mkdir(parents=True, exist_ok=True)
     with open(out / "libleanrt.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if all(o.exists() for o in outputs) and stamp.exists() and stamp.read_text() == digest:
             return
-        run(cmd)
+        run(cmd, cwd=cwd)
         stamp.write_text(digest_after() if digest_after else digest)
 
 
@@ -284,7 +300,7 @@ def build_lean_runtime_rustc(out, cargo):
                   "-C", "opt-level=3", *NATIVE_FLAGS, *LEANRT_FLAGS,
                   *[a for f in features for a in ("--cfg", f'feature="{f}"')],
                   f"--emit=dep-info={depfile},link={rlib}", str(root)],
-                 digest_after=digest)
+                 LEAN_RUNTIME, digest_after=digest)
     return LeanRuntime(rlib, [rlib], digest())
 
 
@@ -424,7 +440,8 @@ def build_leanrt():
                   "-C", "opt-level=3", *NATIVE_FLAGS, *LEANRT_FLAGS, "-L", str(rt), "-L", str(deps),
                   *[a for e in lr.externs for a in ("--extern", e)],
                   *[a for d in lr.dirs for a in ("-L", f"dependency={d}")],
-                  str(LEANRT_SRC / "lib.rs"), "-o", str(rlib)])
+                  str(LEANRT_SRC / "lib.rs"), "-o", str(rlib)],
+                 LEANRT_SRC.parent)
     return rlib, lr
 
 
@@ -506,6 +523,16 @@ def main():
     # program's modules and Lean's library), also when L2R_LEAN2RR is a copy
     # of the binary elsewhere.
     env["L2R_SHIM_DIR"] = str(SHIM_DIR)
+    # rrc compiles each of the prelude's textures with its own rustc run,
+    # most of its time on a small program; this directory keeps the bitcode
+    # (Reussir bug 35, patch 0066; an rrc without the patch ignores the
+    # variable). rrc keys each entry by everything the bitcode depends on,
+    # the texture, rustc (here the rustc-native script, whose text names the
+    # rlibs and the flags), its options and the libraries in the
+    # --polyffi-libdir directories (leanrt's build directory among them), so
+    # all builds share one directory. Nothing removes old entries: delete the
+    # directory to reclaim the space. An empty value turns the cache off.
+    env.setdefault("REUSSIR_FFI_CACHE_DIR", str(LEANRT_OUT / "polyffi-cache"))
 
     rlib, lr = build_leanrt()
     with tempfile.TemporaryDirectory() as tmp:
@@ -556,7 +583,7 @@ def main():
                # Extra rrc flags for experiments (L2R_RRC_FLAGS, split on spaces).
                + os.environ.get("L2R_RRC_FLAGS", "").split())
         if args.no_reuse_across_call:
-            run(rrc, cwd=tmp)
+            run(rrc, env=env, cwd=tmp)
         else:
             res = subprocess.run(rrc + ["--reuse-across-call"], env=env, cwd=tmp, capture_output=True, text=True)
             if res.returncode < 0:
@@ -564,7 +591,7 @@ def main():
                 # recurses forever on two structurally equal recursive types,
                 # e.g. a user list and `List`): retry without reuse across calls.
                 sys.stderr.write(f"l2r: rrc crashed (signal {-res.returncode}); retrying without --reuse-across-call\n")
-                run(rrc, cwd=tmp)
+                run(rrc, env=env, cwd=tmp)
             elif res.returncode != 0:
                 sys.stderr.write(res.stdout + res.stderr)
                 sys.exit(res.returncode)

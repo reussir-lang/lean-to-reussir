@@ -182,7 +182,7 @@ the second acquire/drop expansion 84 s.
 
 ### Review
 
-Round RV8C (`~/Documents/l2r-scratch/rv8/reussir-c/FINDINGS.txt`, patches
+Round RV8C (local review notes, patches
 0030-0035):
 
 - 0032 held (Q3): per-function SCCP is sound and safe in parallel, the

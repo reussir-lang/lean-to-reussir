@@ -18,7 +18,7 @@ whose patch 0014 the runtime needs to build.
   lean2rr; for 34, `scripts/l2r.py` passes `--relocation-mode pic` (patch
   0065 makes it rrc's default for linked products; table below).
 - [build-time.md](build-time.md): build-time costs and bugs (10, 11, 16,
-  17, 18, 20, 22, 23).
+  17, 18, 20, 22, 23, 35).
 - [limitations.md](limitations.md): Reussir behaviour that is not a bug
   but shapes lean2rr's output (the FFI boundary, `unit`, tail calls,
   `str` arguments, syntax, the driver's flags).
@@ -70,3 +70,4 @@ either way.
 | [32](../../../reussir-bugs/32-emit-mlir-size.md) | none (affects `--emit mlir` only) | none (cost) | n/a |
 | [33](../../../reussir-bugs/33-rc-trailing-text.md) | none (hand-written MLIR only) | 0064, applied | n/a |
 | [34](../../../reussir-bugs/34-executable-textrel.md) | `scripts/l2r.py` passes `--relocation-mode pic` (as native Lean, a PIE without text relocations) | 0065 | keep: harmless with 0065, and needed without it |
+| [35](../../../reussir-bugs/35-texture-rustc-runs.md) | none; `scripts/l2r.py` sets `REUSSIR_FFI_CACHE_DIR` (`runtime/leanrt/target/polyffi-cache`) for the patch's cache, and the `rustc-native` script names lean-runtime's build | 0066, not applied yet | n/a: uses the patch, ignored without it |

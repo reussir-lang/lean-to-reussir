@@ -134,7 +134,7 @@ to 500: about 1x when linear. Two runs each:
 (`without 0031`: 91da4f80, the apply list + 0016 + 0017.) The thresholds
 are now FIXED at most 1.5x, REPRODUCES at least 1.9x.
 
-**Review.** Round RV8C (`~/Documents/l2r-scratch/rv8/reussir-c/FINDINGS.txt`,
+**Review.** Round RV8C (local review notes,
 Q2): no defect. The reviewer checked the mode's contract in LLVM 23, that
 every SCF lowering pattern fails before modifying IR, and ran
 `reussir-opt --convert-scf-to-cf` with and without rollback over every lit

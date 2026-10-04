@@ -138,8 +138,8 @@ devirtualization too; the comments state this limit.
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed.
 
-**Review.** Round 7, `p22` (`~/Documents/l2r-scratch/rv7/p22/FINDINGS.txt`
-and `round2/FINDINGS.txt`): the id is still injective and deterministic
+**Review.** Round 7, `p22` (local review notes, rounds 1 and 2): the id is
+still injective and deterministic
 (checks above, records in different modules get path-qualified names, a
 12-closure, 11-family program with same-shaped records under different
 names: identical IR and id grouping; lean2rr's RtFnConvChain, RtThunk and
