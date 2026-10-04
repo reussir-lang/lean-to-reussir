@@ -248,6 +248,13 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   so ordinary builds are unchanged).
 - **Remove only if:** the pass is off (correct, quadratic on such loops).
   Cost when on: none where no uniform container meets a precise use.
+  Not covered (plan §10): a function taking `Array Nat` that another call
+  site keeps typed (a typed argument, a use as a function value, a recursive
+  call with a precise array) is not retyped, so a column passed to it at
+  every step is converted at every call (review C03R-01, test
+  `RtUniformUpdatesShared`). The fix would be a copy of the function with
+  the parameter uniform for the uniform call sites (cloning, as Stage 1
+  makes instances), not a retyping of the function itself.
 
 ### `Array Nat` literals of small numbers are built from tables
 

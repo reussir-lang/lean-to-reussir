@@ -3076,10 +3076,16 @@ Each item says what differs and when.
   loop without a cap: a container whose element type depends on a value is
   updated and read on its uniform representation (§4, `uniform-updates`),
   but a use at a precise type that the pass cannot make uniform still
-  converts it there, at each execution: a function that also receives
-  precise arrays, or that passes its parameter on at a precise type, called
-  on the column at each step; and an update whose result is used only at
-  precise types (never stored back uniformly). Running out of memory changes the exit status. Values of
+  converts it there, at each execution: a function taking `Array Nat` that
+  something else keeps typed (another call site passes it a typed array, it
+  is used as a function value, or it calls itself with a precise array; its
+  parameter is retyped only when every call site passes a uniform array),
+  called on the column at each step (review C03R-01, test
+  `RtUniformUpdatesShared`; a copy of such a function with the parameter
+  uniform, for the call sites that pass a uniform array, as Stage 1 makes
+  instances, would remove it); a function that passes its parameter on at a
+  precise type; and an update whose result is used only at precise types
+  (never stored back uniformly). Running out of memory changes the exit status. Values of
   types with the same layout are not converted (`l2r_retype`); a cast
   between layouts that differ (an `Array T₁` field read at `Array T₃` whose
   elements hold an `Int` where `T₁`'s hold a `Nat`) converts the field at
