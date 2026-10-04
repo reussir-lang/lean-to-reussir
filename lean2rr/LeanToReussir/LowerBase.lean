@@ -798,7 +798,12 @@ mutual
       -- The constructor's name relative to its type (`T.c._impl` for the
       -- constructors of a computed-field implementation `T._impl`).
       let base := match ival.name with | .str p "_impl" => p | n => n
-      let rel := (ctorName.replacePrefix base .anonymous).toString (escape := false)
+      -- Printed with Lean's escaping (`«a.b»` for one component holding a
+      -- dot, `a.b` for two components), so that `identEscape`, which never
+      -- maps two strings to one, gives distinct constructors distinct
+      -- variants; without it the two printed alike (review RV9L-01).
+      -- Ordinary names print the same either way.
+      let rel := (ctorName.replacePrefix base .anonymous).toString (escape := true)
       let variant := "c_" ++ identEscape rel
       -- The record's field order (`fieldOrder`; Opt/FieldOrder sorts by
       -- decreasing alignment, so the record has no padding): Reussir keeps
