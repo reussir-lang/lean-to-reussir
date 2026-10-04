@@ -406,10 +406,11 @@ giving it the representation it assumes:
   gets `ok 0` (test `RtZeroFinite`). Only a type without a finite value
   (`Empty`, a type each of whose constructors needs itself) gets
   `unreachable`, which is never evaluated where a value of the type
-  exists. A zero that
+  exists. A zero that would
   allocate (a string, an array, a record, a reference, a boxed unit) is
-  built once and kept in a once-cell, like a constant
-  (§5.12): `modify` stores one per update, and since a placeholder is never
+  built once and kept in a once-cell, like a constant (§5.12), but not
+  walked for tasks as a constant is (natively it is `box(0)`, never marked
+  persistent): `modify` stores one per update, and since a placeholder is never
   inspected, a shared value serves as well as a fresh one (optional pass
   `placeholder-cache`; without it each placeholder is built where it is
   used).

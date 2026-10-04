@@ -17,8 +17,10 @@ element being updated stays unshared (`Array.modifyMUnsafe`,
   holding a zero. The search (`zeroTry`) is depth first: a type whose zero
   is being built (`zeroBusy`, with its depth) is not used for a field, and
   a constructor whose field has no zero is passed over for the next one.
-  A result that avoided an enclosing type holds only there and is not
-  kept; others are kept (`zeroFns`, `zeroNone`). Only a type without a
+  Every placeholder found is kept (`zeroFns`): it is a finite value of its
+  type, built from finished functions, whatever was avoided to find it.
+  That there is none is kept (`zeroNone`) only if the search avoided no
+  enclosing type. Only a type without a
   finite value (`Empty`, a type each of whose constructors needs itself)
   gets `l2r_unreachable` (`zeroFinite` says so, also for the
   state-machines pass's slots).
@@ -30,7 +32,9 @@ element being updated stays unshared (`Array.modifyMUnsafe`,
   first constructor whose fields were not being built, without looking
   further, gave `inductive Term | app (p : Term × Term) | var (n : Nat)`
   the zero `app (l2r_unreachable)` and crashed those operations (round 9
-  RV9C-01, tests `RtZeroFinite`, `RtZeroLazyCycle`).
+  RV9C-01, tests `RtZeroFinite`, `RtZeroLazyCycle`). Keeping only the
+  results that avoided no enclosing type rebuilt a nested shape's
+  placeholders per occurrence, exponentially (C01R-02).
 - **Where:** `Lower/Conv.lean`: `zeroTry`, `zeroValue`, `zeroFinite`;
   `LowerState.zeroFns`, `zeroNone`, `zeroBusy`; `Opt/StateMachines.lean`:
   `slotPlaceholder?`. Plan §5.1.
@@ -59,14 +63,19 @@ element being updated stays unshared (`Array.modifyMUnsafe`,
 
 - **What:** With the optional pass `placeholder-cache`, a placeholder
   that would allocate (a string, an array, a record, a reference, a boxed
-  unit) is kept in a once-cell like a constant; nullary values (a nullary
-  constructor, a function value's `z`) are not cached: they do not
-  allocate.
+  unit) is kept in a once-cell like a constant, but without the
+  constant's walk for tasks (`cafAccessor`'s `walk := false`); nullary
+  values (a nullary constructor, a function value's `z`) are not cached:
+  they do not allocate.
 - **Why:** `Array.modify` stores one placeholder per update: on
   `Array (Array Nat)` that allocated an empty array per update (F07,
   829f20a). A placeholder is never inspected, so a shared value does as
-  well as a fresh one.
-- **Where:** `Lower/Conv.lean`: `zeroValue`, `cafAccessor`;
+  well as a fresh one. Natively a placeholder is `box(0)`, which
+  `lean_mark_persistent` never sees; walking it ran the never-forced
+  `pending` task cell a placeholder can hold, whose `z` function asked for
+  the placeholder being built, and hung the program (C01R-01, test
+  `RtZeroTaskCycle`).
+- **Where:** `Lower/Conv.lean`: `zeroTry`, `cafAccessor`;
   `Opt/PlaceholderCache.lean`; `LowerCtx.cachePlaceholders`.
 - **Remove only if:** the pass is off; then each placeholder is built
   where it is used.

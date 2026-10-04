@@ -70,8 +70,11 @@ def persistCall (t : RR.Ty) (v : RR.Expr) : LowerM (Option RR.Expr) := do
 is computed once, by `<name>_init`, and kept in a runtime once-cell for the
 rest of the run, like native Lean's CAFs and closed terms (translation plan
 §5.12). The cell stores a boundary type; other values are boxed. A value
-that may contain tasks first waits for them (`persistCall`). -/
-def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
+that may contain tasks first waits for them (`persistCall`), unless `walk`
+is false: a placeholder (`zeroTry`) is natively `box(0)`, which
+`lean_mark_persistent` never sees, and the never-forced `pending` cell one
+can hold must not be run. -/
+def cafAccessor (name : String) (ret : RR.Ty) (walk := true) : LowerM RR.Item := do
   let slot := (← get).cafSlots
   modify fun s => { s with cafSlots := slot + 1 }
   let (st, boxed) ← arrayElemTy ret
@@ -81,7 +84,7 @@ def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
   let unwrap (e : RR.Expr) : RR.Expr := if boxed then .field e 0 else e
   let k := RR.Expr.atom (toString slot)
   let init := RR.Expr.call (name ++ "_init") #[] #[]
-  let init := match ← persistCall ret (.var "v") with
+  let init := match ← (if walk then persistCall ret (.var "v") else pure none) with
     | some p => RR.Expr.block ⟨#[("v", some ret, init), ("p", some (.named "u64"), p)], .var "v"⟩
     | none => init
   -- `l2r_once_claim`: a context of the runtime's scheduler that needs the
@@ -99,16 +102,18 @@ value that is never applied, so that any such cell has one). A type whose
 placeholder is being built (an enclosing call: `zeroBusy`) cannot be used
 for a field, which keeps the placeholders finite; a constructor that needs
 one is skipped, and so is one whose field turns out to have no placeholder
-(the search goes on with the next). The result, a call of a generated
-function `l2r_zero_N`, or `none` when there is no placeholder avoiding
-those types, comes with the smallest depth of an enclosing type the search
-avoided (`low`). Only a result that avoided no type enclosing `t` holds
-wherever `t` is asked for: it is kept (`zeroFns`; `zeroNone` when there is
-none); another is only used where it was asked for. A placeholder that
+(the search goes on with the next). The result is a call of a generated
+function `l2r_zero_N`, kept for every later use (`zeroFns`): it is a finite
+value of `t` whatever types were avoided to find it. Or it is `none` when
+there is no placeholder avoiding those types, with the smallest depth of
+an enclosing type the search avoided (`low`); only a `none` that avoided no
+type enclosing `t` holds wherever `t` is asked for, and is kept
+(`zeroNone`). A placeholder that
 would allocate (a string, an array, a record, a reference, a boxed unit)
-is built once and kept in a once-cell like a constant (`cafAccessor`):
-`Array.modify` stores one per update, and it is never inspected, so a
-shared value does as well as a fresh one. -/
+is built once and kept in a once-cell like a constant (`cafAccessor`, but
+without the walk for tasks: see there): `Array.modify` stores one per
+update, and it is never inspected, so a shared value does as well as a
+fresh one. -/
 partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
   let inf := 1000000000
   if t == .unit then return (some .unitVal, inf)
@@ -197,7 +202,8 @@ partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
     | .fn .. => pure (some (.ofExpr (.ctor (RR.fnTypeName t) (some "z") #[])), inf)
     | _ => pure (none, inf)
   modify fun s => { s with zeroBusy := s.zeroBusy.erase t }
-  -- Whether the result holds wherever `t` is asked for.
+  -- No placeholder: that holds wherever `t` is asked for only if the search
+  -- avoided no type enclosing `t`.
   let kept := low ≥ depth
   let low := if kept then inf else low
   let some body := body? | do
@@ -207,7 +213,9 @@ partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
       modify fun s => { s with zeroFns := s.zeroFns.insert t f }
       modify fun s => { s with fns := s.fns.push item }
     return (none, low)
-  if kept then modify fun s => { s with zeroFns := s.zeroFns.insert t f }
+  -- A placeholder holds everywhere (a finite value of `t`, built from
+  -- functions that are finished).
+  modify fun s => { s with zeroFns := s.zeroFns.insert t f }
   -- Heap values are shared (a nullary constructor of a shared enum does not
   -- allocate).
   let heap ← match t with
@@ -222,11 +230,11 @@ partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
     | ⟨#[], .ctor _ _ #[]⟩ => true
     | _ => false
   if heap && !nullary && (← read).cachePlaceholders then
-    let acc ← cafAccessor f t
+    let acc ← cafAccessor f t (walk := false)
     modify fun s => { s with fns := s.fns.push (.fn (f ++ "_init") #[] t body) |>.push acc }
   else
     modify fun s => { s with fns := s.fns.push (.fn f #[] t body) }
-  return (some (.call f #[] #[]), low)
+  return (some (.call f #[] #[]), inf)
 
 /-- A placeholder of Reussir type `t`. Lean passes `box(0)` for values that
 are never inspected: erased arguments (`◾`) at relevant types, and the
