@@ -505,6 +505,22 @@ pub fn from_slice<T: Clone>(s: &[T]) -> RVec<T> {
     clone_of_slice(s, 0)
 }
 
+/// A byte array of room `n` whose bytes `fill(p, n)` writes at `p`,
+/// answering how many (at most `n`; an error frees the block). For
+/// readers (`Handle.read`, `IO.getRandomBytes`): the bytes land in the
+/// array itself, as natively, instead of a buffer copied afterwards (which
+/// doubled the peak of reading a file, RVA-01).
+#[inline]
+pub fn bytes_filled<E>(n: usize, fill: impl FnOnce(*mut u8, usize) -> Result<usize, E>) -> Result<RVec<u8>, E> {
+    let a = alloc::<u8>(n);
+    let got = fill(unsafe { elems::<u8>(a.hdr()) }, n)?;
+    if got > n {
+        crate::internal_panic("byte array filled past its room (runtime invariant)");
+    }
+    unsafe { (*a.hdr()).len = got };
+    Ok(a)
+}
+
 // ---- byte arrays and strings -----------------------------------------------
 
 /// A byte vector as a `ByteArray` (a copy).

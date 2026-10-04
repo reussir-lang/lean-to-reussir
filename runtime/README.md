@@ -141,12 +141,16 @@ A unique block grows in place with `mi_realloc` (at least doubling; the
 capacity is the whole block: mimalloc's size class, `mi_good_size`, for
 small blocks, a power of two above 4 KiB); a fresh block's size is
 rounded up to 8 bytes, the rest becoming capacity; a shared one is copied
-with room to spare (a string: at least doubled, as `lean_string_push`; an
-array: its capacity kept, `lean_copy_expand_array`). An array's elements
+with room for the update (a string: at least doubled, as
+`lean_string_push`; an array, for a push: `lean_array_push`'s capacity;
+otherwise a generic array is copied to its size and a tag vector keeps its
+capacity, `lean_copy_expand_array`). An array's elements
 start at offset 24 (every storage type is at most 8 bytes, 8-aligned), so
 a read is the handle plus an offset, with no load of a buffer pointer.
-Arrays built from a Rust `Vec` (`array::from_vec`: directory entries,
-bytes read from a file or a process) copy its elements once. A release
+Bytes read from a file, standard input or `/dev/urandom` are read into
+the array's block (`array::bytes_filled`, `CFile::read_into`); arrays
+built from a Rust `Vec` (`array::from_vec`, `bytes_of_vec`: directory
+entries, a process's output, a socket's data) copy its elements once. A release
 tests `count == 1` (never `count > 1`): after Reussir's `rc.inc`, which
 asserts that the old count was neither 0 nor `u32::MAX`, LLVM then cancels
 a read's increment and release. The cost of one block: an array whose

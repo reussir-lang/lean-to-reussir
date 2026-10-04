@@ -52,8 +52,27 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   reuses huge memory (needs a timing session).
 - **Where:** `runtime/leanrt/src/drop.rs`: `Hdr`, `elems`, `Vec`,
   `free_vec`, `step_vec`, `ReleaseElems`; `runtime/leanrt/src/array.rs`:
-  `alloc`, `grow`, `make_mut`, `copy_shared`, `CloneInto`, `from_vec`;
-  `runtime/prelude.rr`: `RVec`, `LRef`, the `l2r_ref_*` textures.
+  `alloc`, `grow`, `make_mut`, `copy_shared`, `CloneInto`, `from_vec`,
+  `bytes_filled`; `runtime/prelude.rr`: `RVec`, `LRef`, the `l2r_ref_*`
+  textures.
+
+### Bytes read go straight into the array
+
+- **What:** `Handle.read` (so `IO.FS.readBinFile`), reads of standard input
+  and `IO.getRandomBytes` allocate the byte array first and read into its
+  block (`array::bytes_filled` over `CFile::read_into`), keeping the
+  capacity asked for, as `lean_io_prim_handle_read`.
+- **Why:** With the elements inline, a buffer read and then turned into an
+  array is a second copy: reading a 256 MiB file peaked at twice its size
+  (review RVA-01; test `RtReadIntoArray`). The old two-allocation array
+  adopted the buffer.
+- **Where:** `runtime/leanrt/src/array.rs`: `bytes_filled`;
+  `runtime/leanrt/src/fs.rs`: `lean_read`, `read_bytes`,
+  `get_random_bytes`; `runtime/leanrt/src/io.rs`: `stream_read`;
+  `runtime/leanrt/src/cfile.rs`: `read_into`, `xsgetn`.
+- **Remove only if:** never (the other byte arrays the runtime builds from
+  a `Vec`, a process's output or a socket's data, are copied once; a
+  process's output is copied into a string afterwards anyway).
 - **Remove only if:** never (a storage type above 8 bytes or 8-aligned
   would need the element offset and allocation alignment generalized:
   `elems` rejects one at compile time).
@@ -116,12 +135,15 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   header was 40 bytes (with a `Box<dyn Any>` marker) until mem-layout
   (7a784e1): 6M small rows took 431 MB, now 336 MB (native 338).
 
-### Shared copies keep their capacity
+### Shared copies keep their capacity for a push
 
-- **What:** Copying a shared array (copy-on-write) reserves the capacity
-  `lean_copy_expand_array` would; `Array.mkEmpty` and
-  `ByteArray.emptyWithCapacity` reserve what is asked, after Lean's
-  allocation checks; tag vectors grow to whole mimalloc blocks.
+- **What:** A push onto a shared array copies it with the capacity
+  `lean_array_push` gives (its own, unless below `2 * size + 1`); other
+  updates of a shared generic array copy it to its size (rounded up to 8
+  bytes), while a tag vector keeps its capacity (`lean_copy_expand_array`);
+  `Array.mkEmpty` and `ByteArray.emptyWithCapacity` reserve what is asked,
+  after Lean's allocation checks; growing blocks take whole mimalloc
+  blocks.
 - **Why:** A literal `#[a, b, c]` pushes onto a shared empty closed term of
   capacity 3: copied with capacity 0, it grew three times (PF4-08,
   a74072b). Capacities were capped at 2^24 elements, so large buffers grew

@@ -2104,7 +2104,7 @@ fn l2r_stream_write(fd : u64, b : RVec<u8>) -> u64 [{ { leanrt::io::stream_put(f
 fn l2r_stream_flush(fd : u64) -> u64 [{ { leanrt::io::stream_flush(fd); 0 } }];
 
 #[ffi(import)]
-fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{ leanrt::array::bytes_of_vec(leanrt::io::stream_read(fd, n)) }];
+fn l2r_stream_read(fd : u64, n : u64) -> RVec<u8> [{ leanrt::io::stream_read(fd, n) }];
 
 #[ffi(import)]
 fn l2r_stream_getLine(fd : u64) -> LStr [{ leanrt::string::from_bytes_lossy(&leanrt::io::stream_get_line(fd)) }];
@@ -3193,7 +3193,7 @@ fn l2r_io_finish<T, R>(v : T, ok : T -> R, err : u32 -> (u32 -> (LStr -> (LStr -
 
 // `IO.getRandomBytes n` (an IO error when `/dev/urandom` cannot be read).
 #[ffi(import)]
-fn l2r_fs_get_random_bytes(n : u64) -> RVec<u8> [{ leanrt::array::bytes_of_vec(leanrt::fs::get_random_bytes(n)) }];
+fn l2r_fs_get_random_bytes(n : u64) -> RVec<u8> [{ leanrt::fs::get_random_bytes(n) }];
 
 // `IO.FS.Handle.mk path mode` (mode = constructor index of `IO.FS.Mode`:
 // read, write, writeNew, readWrite, append).
