@@ -11,6 +11,9 @@
 #   NAME.stdin  standard input
 #   NAME.pipe   a bash command line to run instead ($BIN = executable,
 #               $ARGS = arguments; pipefail), e.g. `$BIN | head -1`
+#   NAME.opts   lean2rr optimizations to turn off for this test (one line,
+#               comma-separated, added to L2R_DISABLE_OPTS), e.g. to check a
+#               shape the default passes hide
 #   NAME.xfail  the test is known to fail through lean2rr; the file says why
 #               (a "Requests for lean2rr" item in runtime/README.md)
 #
@@ -68,11 +71,13 @@ for t in "${TESTS[@]}"; do
   cp "$src" "$d/"
   args=""; [ -f "$HERE/$t.args" ] && args=$(cat "$HERE/$t.args")
   stdin=/dev/null; [ -f "$HERE/$t.stdin" ] && stdin="$HERE/$t.stdin"
+  opts=${L2R_DISABLE_OPTS:-}
+  [ -f "$HERE/$t.opts" ] && opts="$opts${opts:+,}$(tr -d ' \n' < "$HERE/$t.opts")"
   status=ok; why=""
   if ! (cd "$d" && lean -o "$t.olean" -c "$t.c" "$t.lean" > build-native.log 2>&1 \
         && leanc -O3 -DNDEBUG "$t.c" -o native >> build-native.log 2>&1); then
     status=fail; why="native build failed (see $d/build-native.log)"
-  elif ! python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" --keep-rr "$d/$t.rr" \
+  elif ! L2R_DISABLE_OPTS=$opts python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" --keep-rr "$d/$t.rr" \
         > "$d/build-l2r.log" 2>&1; then
     status=fail; why="lean2rr build failed (see $d/build-l2r.log)"
   else

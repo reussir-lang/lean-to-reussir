@@ -74,7 +74,10 @@ element being updated stays unshared (`Array.modifyMUnsafe`,
   `lean_mark_persistent` never sees; walking it ran the never-forced
   `pending` task cell a placeholder can hold, whose `z` function asked for
   the placeholder being built, and hung the program (C01R-01, test
-  `RtZeroTaskCycle`).
+  `RtZeroTaskCycle`). The walk of a constant also skips such a cell
+  wherever it meets it (`pending` with the `z` function value: a
+  reference `ST.Ref.take` left holding a placeholder), as native skips
+  `box(0)` (C01R-03, tests `RtZeroWalkRef`, `RtZeroWalkRefNoCache`).
 - **Where:** `Lower/Conv.lean`: `zeroTry`, `cafAccessor`;
   `Opt/PlaceholderCache.lean`; `LowerCtx.cachePlaceholders`.
 - **Remove only if:** the pass is off; then each placeholder is built

@@ -123,7 +123,9 @@ runtime. Plan
   (`l2r_task_settled`), always the case for constants evaluated at
   startup. The walks are generated at the end, once every variant of
   function types and `Box` is known; a type that cannot hold a task gets
-  none.
+  none. A placeholder's never-forced task cell (`pending` with the `z`
+  function value) is not a task (`l2r_persist_ph_T`): natively it is
+  `box(0)`, which the walk skips (C01R-03).
 - **Why:** As `lean_mark_persistent` at a closed term's first evaluation:
   a `Task.spawn` extracted as a closed term has finished once the term has
   been used (adv4 TK4-02, a599e0a; closures, thunks and boxes: 17ab235).

@@ -2286,7 +2286,11 @@ running code blocks (*Blocking*, below).
   deleted and never runs, as natively (test `RtPersistDropped`). A task
   held at another representation is a converted copy (§5.1); the walk
   knows it by its original's identity, so it is collected, not forced, in
-  the first pass (test `RtPersistConv`). The walk
+  the first pass (test `RtPersistConv`). A placeholder's never-forced
+  task cell (`pending` with the function value `z`, §5.1), which a
+  reference can hold while `ST.Ref.take` has left the placeholder in it,
+  is not a task: natively it is `box(0)`, which the walk skips (test
+  `RtZeroWalkRef`). The walk
   keeps what it reads out of thunks, tasks and references until it ends, so that no
   cell it has visited is freed meanwhile (a task it runs could force a
   thunk, which drops its computation) and its address given to a new
