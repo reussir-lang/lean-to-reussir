@@ -198,4 +198,4 @@ judge
 :   The step that decides whether a finding is real before anyone fixes it.
 
 lean-runtime
-:   The shared runtime crate (github.com/QueClr/lean-runtime-rs) that lean2rr will use: Lean's runtime semantics in safe Rust.
+:   The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule `third_party/lean-runtime`): Lean's runtime semantics in safe Rust; lean2rr uses its hash, string, float, fixed-width integer and libm rules so far.

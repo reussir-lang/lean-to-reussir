@@ -12,7 +12,8 @@
 #
 # NAME is a program's file name without .lean (default: every lean/*.lean).
 # Both executables run with LEAN_BACKTRACE=0. Environment: L2R_REUSSIR,
-# L2R_LEAN2RR, L2R_RUSTC (see scripts/l2r.py); L2R_TEST_BUILD (build
+# L2R_LEAN2RR, L2R_RUSTC, L2R_LEAN_RUNTIME, L2R_LEAN_RUNTIME_FEATURES (see
+# scripts/l2r.py); L2R_TEST_BUILD (build
 # directory, default tests/reussir-benchmark/build); L2R_BENCH_TIMEOUT
 # (seconds per run, default 900); L2R_LEAN_TOOLCHAIN (the toolchain of the
 # native builds; scripts/toolchain.sh).

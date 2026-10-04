@@ -24,6 +24,13 @@ Design site: [`docs/site/index.html`](docs/site/index.html) is an illustrated ov
   toolchain the pin names, whatever elan's default is
   (`scripts/toolchain.sh`).
 - Reussir built from source (LLVM/MLIR 23), checked out into `reussir/`
+- The shared runtime crate lean-runtime, a git submodule
+  (`third_party/lean-runtime`): clone with `git clone --recurse-submodules`,
+  or run `git submodule update --init` in a checkout, and again after a
+  pull that moves its pin (see [`runtime/README.md`](runtime/README.md),
+  "The shared crate lean-runtime"). `scripts/l2r.py` builds it offline.
+- Python 3.11 or later (`scripts/l2r.py` reads lean-runtime's `Cargo.toml`
+  with `tomllib`)
 
 ## Layout
 
@@ -33,6 +40,9 @@ Design site: [`docs/site/index.html`](docs/site/index.html) is an illustrated ov
 - `runtime/` — the runtime: the prelude `prelude.rr` included in every
   program, and the Rust crate `leanrt` (see [`runtime/README.md`](runtime/README.md))
 - `scripts/` — `l2r.py`, the driver (lean2rr, then rrc, linking the runtime)
+- `third_party/lean-runtime` — the shared runtime crate (Lean's runtime
+  rules, shared with another Lean translator), a submodule pinned by commit; `leanrt` and the
+  prelude call it
 - `reussir-bugs/` — every Reussir bug lean2rr has met (one file per entry), the local
   Reussir patches and the repros (see [`reussir-bugs/README.md`](reussir-bugs/README.md))
 - `docs/` — design documents

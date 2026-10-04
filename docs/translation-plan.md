@@ -1636,9 +1636,9 @@ The prelude function is:
 | Lean extern | Implementation |
 |---|---|
 | `Nat.add`, `Nat.decLt`, … | `leanrt` `Nat` operations: small fast path, bignum slow path |
-| `UInt32.add`, `UInt8.div`, `Float.add`, … | `+ - *` map to native Reussir arithmetic, since both wrap. Division, remainder, shifts and float→int always go through wrappers with `lean.h` semantics (e.g. `x / 0 = 0`, `x % 0 = x`, shift by `b % bits`, saturating casts): Reussir lowers them straight to LLVM operations that are undefined at those edge cases. |
+| `UInt32.add`, `UInt8.div`, `Float.add`, … | `+ - *` map to native Reussir arithmetic, since both wrap. Division, remainder, shifts and float→int always go through wrappers with `lean.h` semantics (e.g. `x / 0 = 0`, `x % 0 = x`, shift by `b % bits`, saturating casts), the shared crate lean-runtime's: Reussir lowers them straight to LLVM operations that are undefined at those edge cases. |
 | `Array.push@Nat`, `Array.get!@Nat`, … | `Vec` operations; out-of-bounds follows Lean (panic message plus default value) |
-| `String.append`, `String.get`, … | `leanrt` string functions with Lean's UTF-8 byte-position semantics |
+| `String.append`, `String.get`, … | `leanrt` string functions; the UTF-8 byte-position rules are the shared crate lean-runtime's (`runtime/README.md`) |
 | `IO.getStdout`, `IO.FS.Stream.putStr`, … | runtime IO |
 
 Rules:
@@ -2575,16 +2575,23 @@ Tasks that wait for each other in a cycle wait forever, as natively.
 
 ## 6. Runtime (`leanrt`)
 
-The runtime provides what Reussir lacks:
+The rules of Lean's runtime that do not depend on how values are
+represented come from the shared crate lean-runtime (the submodule
+`third_party/lean-runtime`, shared with another Lean translator): hashes, string positions
+and comparisons, float formatting, bits, `frExp`, `scaleB` and conversions,
+the fixed-width integer rules, libm (`runtime/README.md`, "The shared crate
+lean-runtime"). `leanrt` and the prelude hold lean2rr's representations and
+convert them to lean-runtime's views and back. The runtime provides what
+Reussir lacks:
 - `Nat`/`Int`: a small value, or a GMP bignum (`leanrt::big`);
 - Lean's `String` operations over UTF-8 bytes (one block with the character count, §5.1);
 - `Array`/`ByteArray`/`FloatArray` operations over the copy-on-write one-block vector;
-- `Float` and `Float32` math through glibc's libm, called through pointers
-  looked up at run time, so that LLVM can neither fold nor rewrite a call
-  on a known operand: natively every call runs glibc's function at run
-  time, and LLVM's folded or rewritten values (`f32` functions in double
-  precision, `exp2` through `pow`, `pow(x, 0.5)` as `sqrt`, …) differ from
-  glibc's in the last bit on some inputs;
+- `Float` and `Float32` math: lean-runtime's `semantics::libm`, glibc's
+  results, with the operands LLVM would fold or rewrite hidden from it:
+  natively every call runs glibc's function at run time, and LLVM's folded
+  or rewritten values (`f32` functions in double precision, `exp2` through
+  `pow`, `pow(x, 0.5)` as `sqrt`, …) differ from glibc's in the last bit on
+  some inputs;
 - IO: stdout/stderr/stdin streams, `IO.Error`, argv, exit;
 - the mutable cells of thunks and tasks, the queues of deferred tasks, and
   promises (§5.14);

@@ -136,7 +136,7 @@ problem.
 
 ## The shared runtime crate (plan)
 
-lean2rr will use the shared crate **`lean-runtime`**
+lean2rr uses the shared crate **`lean-runtime`**
 (github.com/QueClr/lean-runtime-rs, public). The crate implements Lean's
 runtime behaviour once, as a library that a translator from Lean to Rust
 can use. lean2rr's `leanrt` moves into it step by step.
@@ -155,5 +155,7 @@ can use. lean2rr's `leanrt` moves into it step by step.
 | Bugs | Every bug found becomes a test. Bugs of Lean's own runtime are not copied; lean-runtime's `docs/lean-bugs.md` lists them. |
 
 Status (2026-10-04): lean-runtime has its first part of the semantics
-(hashes, floats, integers, strings, `libm`). lean2rr's switch to it is in
-progress.
+(hashes, floats, integers, strings, `libm`), and lean2rr uses it for them:
+the submodule `third_party/lean-runtime`, which `scripts/l2r.py` builds and
+links with `leanrt` ([runtime README](repo:runtime/README.md), "The
+shared crate lean-runtime"). The rest (`Nat`/`Int`, arrays, IO, the scheduler) follows.

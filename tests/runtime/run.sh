@@ -31,7 +31,8 @@
 # stderr is not searched instead: a panic message has no fixed prefix (the
 # panic under `Name.append` prints `Error: unreachable @ extractMainModule`;
 # round 9 RV9S-01, test RtHygSpecName).
-# Environment: L2R_REUSSIR, L2R_LEAN2RR, L2R_RUSTC (see scripts/l2r.py);
+# Environment: L2R_REUSSIR, L2R_LEAN2RR, L2R_RUSTC, L2R_LEAN_RUNTIME,
+# L2R_LEAN_RUNTIME_FEATURES (see scripts/l2r.py);
 # L2R_DISABLE_OPTS / L2R_ENABLE_OPTS (comma-separated lean2rr optimizations
 # to turn off / on, passed on by scripts/l2r.py; `lean2rr --list-opts`);
 # L2R_TEST_BUILD (build directory, default tests/runtime/build);
@@ -43,6 +44,12 @@ ROOT=$(cd "$HERE/../.." && pwd)
 . "$ROOT/scripts/toolchain.sh"
 BUILD=${L2R_TEST_BUILD:-$HERE/build}
 mkdir -p "$BUILD"
+# Every lean2rr build needs lean-runtime: say so once instead of failing each test.
+LR=${L2R_LEAN_RUNTIME:-$ROOT/third_party/lean-runtime}
+if [ ! -f "$LR/Cargo.toml" ]; then
+  echo "no lean-runtime at $LR: run \`git submodule update --init third_party/lean-runtime\` (or set L2R_LEAN_RUNTIME)" >&2
+  exit 2
+fi
 
 if [ $# -gt 0 ]; then
   TESTS=("$@")

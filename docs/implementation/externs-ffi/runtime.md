@@ -3,69 +3,85 @@
 Special cases inside the runtime's implementation of particular externs.
 Paths are relative to the repository root.
 
-### libm functions call glibc's, looked up in libm.so.6, opaquely
+### libm externs are lean-runtime's; some are called out of line
 
-- **What:** The prelude's libm functions (the extern symbols of `Float`'s
-  and `Float32`'s `sin` … `atanh`, `exp`, `exp2`, `log`, `log2`, `log10`,
-  `pow`, `atan2`, `cbrt`, and their `f` versions) call
-  `leanrt::float::libm::<name>`, which calls the C library's function
-  through a pointer: `dlsym` on libm.so.6 opened explicitly, looked up once
-  per function and cached (`resolve`). If libm.so.6 cannot be opened, the
-  global scope (`dlsym(RTLD_DEFAULT, ..)`) is tried; with no C library
-  function at all, the same name declared `extern "C"` is called with its
-  operands passed through `black_box`. The exact operations (`sqrt`,
-  `ceil`, `floor`, `round`, `fabs`) stay LLVM intrinsics.
-- **Why:** Natively these externs are glibc's functions, run at run time
-  even on a literal operand (a closed term is in a once-cell that clang
-  cannot see into, and `lean_float_of_bits` is a runtime function).
-  - Opacity. LLVM evaluates a libm call whose operand it knows (a literal,
-    or a value forwarded through an inlined reference) and rewrites `pow`
-    with a constant operand, and glibc's results differ in the last bit
-    from what LLVM puts there: an `f32` function is folded by evaluating
-    the `f64` one and rounding (`cosf`, `sinf`, `logf`, … , cross-test
-    XT-4, the `float32` fixture's literal rows); `exp2` is folded through the host's
-    `pow(2, x)` (`exp2(35.74477454358792)`, found by another Lean translator's review); `pow(x, 0.5)`
-    becomes `sqrt`, `pow(x, 2.0)` `x * x`, `pow(x, -1.0)` `1 / x`,
-    `pow(2.0, y)` `exp2`, `pow(10.0, y)` `exp10`, for `pow` and `powf`
-    (cross-test XT-3, fixture A720). The prelude used LLVM's intrinsics
-    (`llvm.pow`, `llvm.cos.f32`, …) for most of them, and plain `extern
-    "C"` calls for the others, which LLVM recognizes and folds by name
-    too (`logf`). An indirect call through a pointer read at run time
-    cannot be folded or rewritten. Folding an `f64` function other than
-    `exp2` with the host's libm gives glibc's result on the build machine
-    (a sweep of 100 random literal operands per function found differences
-    only in `f32` functions; another translator's sweep of 800 found only `exp2`), but
-    a build machine with another C library would not.
-  - glibc's function. A direct `extern "C"` declaration does not reliably
-    reach glibc: Rust's `compiler_builtins`, linked into every executable
-    ahead of libm, defines its own `cbrt` (a port of CORE-MATH's correctly
-    rounded one) and `cbrtf` (FreeBSD's) on Linux, and the static link
-    binds every reference named `cbrt` to those. They differ from glibc's
-    by 1-2 ulps on about half the doubles (cbrt 27.0 is 3.0 there and
-    3.0000000000000004 in glibc) and on about one float in ten.
-    `compiler_builtins` defines no other function of this list today
-    (checked with `nm` on the pinned toolchain), but Rust keeps moving
-    float functions into `core`. The global scope holds libm only while the
-    executable imports some libm function; a Rust program without one finds
-    no `cbrt` there (fix-r9-misc).
-  - Tests: `tests/runtime/RtFloatLibmFold.lean` (each function on a
-    literal operand and on the same operand from the command line, inputs
-    where the folded or rewritten value differs from glibc's; 31 of its 42
-    lines differed before), `RtFloatCbrt.lean`; leanrt's unit tests
-    `float::libm::tests` (`tests/runtime/leanrt-unit.sh`, a binary without
-    libm imports).
-  - lean2rr executables are dynamic PIEs, and libm.so.6 is one of their
-    load-time dependencies. A fully static build would have no libm.so.6
-    to open: the fallback then calls the `extern "C"` names, which bind to
-    Rust's `cbrt`/`cbrtf`, so if static linking is ever added, it must link
-    glibc's `cbrt` some other way.
-- **Where:** `runtime/leanrt/src/float.rs`: `libm` (`resolve`, the
-  `glibc!` functions, the fallback declarations in `libm::c`);
-  `runtime/prelude.rr`: the libm functions after `l2r_float32_scaleb_big`.
-- **Remove only if:** LLVM stops folding and rewriting libm calls (it will
-  not: it assumes the C standard's functions), or the native oracle starts
-  folding them too. The `dlsym` lookup in particular is needed while
-  `compiler_builtins` defines `cbrt`/`cbrtf` on Linux.
+- **What:** Every `Float`/`Float32` libm extern (the prelude's `sin`, ...,
+  `cbrt`, `atanhf`, under their C names) is a texture calling
+  lean-runtime's `sem::libm::<name>`. Two groups are called through
+  `leanrt::float::libm_call::<name>`, an `#[inline(never)]` wrapper of the
+  same function: those whose operands lean-runtime hides with `black_box`
+  (`exp2`, `pow`, the inexact `Float32` functions, `atan2f`, `powf`), and
+  lean-runtime's ports of glibc's `cbrt`, `cbrtf`, `atanh`, `atanhf`
+  (aarch64 Linux, glibc 2.39). Those ports exist only on aarch64 Linux with
+  glibc; on any other target their wrappers end the program with
+  `INTERNAL PANIC: no lean-runtime port of <name> for this target yet`
+  when called, so every other program builds and runs there (the prelude's
+  textures are all compiled for every program).
+- **Why:** One runtime for both translators (owner decision): lean2rr has
+  no libm code of its own. Before, the prelude used LLVM's intrinsics,
+  which LLVM folds or rewrites on a known operand, one ulp away from glibc
+  (cross-tests XT-3/XT-4; fixed first by calling glibc's functions through
+  pointers looked up with `dlsym`, which this replaces; its test
+  `RtFloatLibmFold` passes with lean-runtime's functions), and leanrt
+  found glibc's `cbrt` with `dlopen`, because Rust's `compiler_builtins`
+  defines its own `cbrt` ahead of libm. Out of line, because a Lean loop
+  (a self-tail-calling Reussir function) that calls one of them otherwise
+  keeps its tail call and grows the stack at every iteration: inlined,
+  `black_box`'s stack slot escapes into the loop (100 million iterations
+  of `Float.pow` overflowed the 1 GiB main stack); the ports are too big
+  for a texture LLVM inlines, and a texture that is not inlined is a call
+  through the packed-argument FFI boundary, whose argument slots have the
+  same effect (2 million iterations of `Float.cbrt` overflowed a 1 MiB
+  stack; review RULR-01). The run-time panic elsewhere keeps x86-64 and
+  other targets building until lean-runtime adds their ports (its next libm
+  batch, x86-64 glibc first; review RULR-02). Cost: one more call than
+  native Lean's direct call into libm (the wrapper, then lean-runtime's
+  function; review RULR-05), to be measured in the owner-approved timing
+  session. Tests: `RtFloatLibm`, `RtFloatCbrt` (glibc's `cbrt` against
+  Rust's), `RtFloatLoopStack` (every libm function in loops on a 1 MiB
+  stack), `tests/runtime/ffi-inline-check.sh` (no call through the FFI
+  boundary and no `black_box` barrier in Reussir functions in those loops'
+  IR), the libm rows of `rows-check.sh`.
+- **Where:** `runtime/prelude.rr`: the libm section of `Float`;
+  `runtime/leanrt/src/float.rs`: `libm_call`.
+- **Remove only if:** lean-runtime marks these functions
+  `#[inline(never)]` itself (agreed by lean-runtime's users): then the textures call
+  `sem::libm` directly; the fallback panics go when lean-runtime has ports
+  for every target lean2rr builds for. Check `RtFloatLoopStack` and
+  `ffi-inline-check.sh`.
+
+### Strings, floats and fixed-width rules are lean-runtime's, through glue
+
+- **What:** The prelude's textures call lean-runtime's `semantics` for
+  hashes, string positions and comparisons, float formatting, bits,
+  `frExp`, `scaleB`, classification and conversions, and the fixed-width
+  rules with logic (`gen_scalars.py` makes those textures; single
+  operations stay inline Reussir). The glue only converts: a big `Nat`
+  position becomes `u64::MAX` (`l2r_pos_of_nat`), except for `next` and
+  `prev`, which take a position below 2^63 (a big one stays the caller's
+  `Nat` arithmetic, as in C), and `next`'s 2^63 becomes a big `Nat`
+  (`l2r_nat_of_u64`); `get?`/`get!` give `0x110000` for `none`; a big
+  `Int` for `scaleB` is `i64::MIN`/`MAX` by its sign (`l2r_int_sat_i64`);
+  `leanrt::string::extract`/`extract_fast` make the string of
+  lean-runtime's byte range (the string itself when the range is all of
+  it); `leanrt::float::to_string` writes lean-runtime's text into a 320-byte
+  stack buffer (the longest `%f` of a double is 317 bytes; a longer text
+  would go to the heap); `leanrt::string::utf8_count`, the count cached
+  when a string is made, is lean-runtime's `utf8_strlen`, out of line for
+  more than 16 bytes so that the textures that make strings stay small.
+- **Why:** One runtime for both translators. Checked: lean-runtime's 1666
+  rows through a lean2rr build of its row oracle (`rows-check.sh`), the
+  runtime tests, and `rrc --emit llvm-ir` on loops over `String.get`/`next`,
+  hashes, floats and fixed-width rules: these textures are inlined into the
+  Reussir code (no call through the FFI boundary: `ffi-inline-check.sh`);
+  lean-runtime's cold paths (`get_core_cold`, `next_step_cold`,
+  `frexp_i32`'s subnormal case, `scaleb_big`) are calls, as designed.
+- **Where:** `runtime/prelude.rr`: the `sem::` textures, `l2r_pos_of_nat`,
+  `l2r_int_sat_i64`, `lean_string_utf8_next`; `runtime/gen_scalars.py`;
+  `runtime/leanrt/src/string.rs`: `extract`, `extract_fast`, `of_range`,
+  `utf8_count`; `runtime/leanrt/src/float.rs`: `to_string`, `StackText`.
+- **Remove only if:** lean2rr's representations change (the conversions
+  follow them).
 
 ### Huge array sizes panic with Lean's message for each allocator and size
 
@@ -172,6 +188,65 @@ Paths are relative to the repository root.
   runtime (`version.h`); a program built by lean2rr must answer what the
   same program built natively answers.
 - **Where:** `runtime/prelude.rr`: `lean_get_githash`,
-  `lean_version_get_*`, `lean_internal_*`; test `RtPlatform`.
+  `lean_version_get_*`, `lean_internal_*`; test `RtPlatform`; leanrt's
+  unit test `tests::lean_runtime_version_is_the_preludes` (`runtime/leanrt/src/lib.rs`)
+  checks that `lean_version_get_major/minor/patch` spell the version the
+  pinned lean-runtime mirrors (`lean_runtime::LEAN_VERSION`).
 - **Remove only if:** never. Update them with every toolchain change;
   `RtPlatform` fails otherwise.
+
+### leanrt is built and linked with the shared crate lean-runtime
+
+- **What:** `scripts/l2r.py` builds lean-runtime (the git submodule
+  `third_party/lean-runtime`, pinned by commit; `L2R_LEAN_RUNTIME` names
+  another checkout, `L2R_LEAN_RUNTIME_FEATURES` adds features) next to
+  leanrt, with leanrt's rustc and flags. Without dependencies: plain rustc,
+  `liblean_runtime.rlib`, the enabled features as `--cfg`, cached by a hash
+  of the manifest and of the files its dep-info lists. With dependencies or
+  a build script: the pinned toolchain's cargo, `--offline --locked
+  --release` from inside the checkout, against cargo's registry cache at
+  the versions of its committed `Cargo.lock` (`cargo fetch --locked` fills
+  the cache once; `l2r.py` says so when a crate is missing), rlibs and the
+  `.rmeta` of its own stub rlib from cargo's JSON messages. leanrt
+  is built with `--extern lean_runtime=...` and `-L dependency=` for each
+  rlib directory; the `rustc-native` wrapper that rrc compiles textures
+  with adds the same; the link passes lean-runtime's rlibs after
+  `libleanrt.rlib` and before GMP, those of the packages its normal
+  dependencies reach, in the order of its dependency graph (`cargo
+  metadata`: dependents first; build-script dependencies left out; review
+  RULR-04). `l2r.py` stops when
+  the submodule's checked-out commit is not the staged gitlink (`git
+  ls-files -s`), and refuses what plain rustc would get wrong (a `[lints]`
+  table, a workspace edition) and a build script that links native
+  libraries.
+- **Why:** the two translators share Lean's runtime behaviour in one crate
+  (shared-runtime decisions O6/O7: lean2rr vendors it as a submodule built
+  by its driver; Q3: it builds on both projects' nightlies without nightly
+  features; O2: `#![forbid(unsafe_code)]` in the default build). Not capping
+  its lints keeps `forbid(unsafe_code)` an error. Every crate that calls
+  another is linked before it, since GNU ld reads each archive once. Git
+  leaves a submodule's checkout alone when a checkout or pull moves its
+  gitlink, so without the pin check the suite would silently test an old
+  lean-runtime (review URL-01); the index, not HEAD, so that a staged new
+  pin can be tested before it is committed. Dependencies' build scripts set
+  cfgs that cannot be reproduced by hand safely (rustix picks its backend,
+  nix needs `cfg_aliases`), so cargo builds lean-runtime once it has any
+  (review URL-08); its rlibs carry only a metadata stub, hence the `.rmeta`.
+  lean-runtime keeps no `vendor/` and no `.cargo/config.toml`, only its
+  `Cargo.lock` (lean-runtime's decision "io-1 packaging").
+  Checked with lean-runtime's io-1 branch at a43b009 (rustix and nix,
+  Cargo.lock, no vendor/) and feature `io`: built offline from the registry
+  cache, nothing written in the checkout, seven dependency rlibs linked, the
+  leanrt unit tests and seven runtime tests pass; with an empty cargo home
+  the build stops with the `cargo fetch --locked` hint.
+- **Where:** `scripts/l2r.py`: `build_lean_runtime`,
+  `build_lean_runtime_rustc`, `build_lean_runtime_cargo`, `check_pin`,
+  `lean_runtime_manifest`, `needs_cargo`, `lean_runtime_features`,
+  `LeanRuntime`, `build_leanrt`, `rustc_wrapper`, `leanrt_out`, and the rrc
+  command line in `main`; `tests/runtime/leanrt-unit.sh`;
+  `tests/runtime/run.sh` (stops at once without lean-runtime);
+  `runtime/leanrt/src/lib.rs`: `LEAN_VERSION` and its test;
+  `runtime/README.md` ("The shared crate lean-runtime": the pin, worktrees,
+  the two builds, how to move the pin).
+- **Remove only if:** lean2rr stops using lean-runtime. The plain rustc
+  build can go when lean-runtime always has dependencies.

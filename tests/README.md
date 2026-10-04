@@ -191,6 +191,20 @@ test's header says what it covers. Many come from the adversarial reviews:
 a finding (a bug a reviewer reproduced, fixed since) or a check that held
 up in review.
 
+`tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests.
+`tests/runtime/ffi-inline-check.sh` builds runtime tests that call the libm,
+string, hash, float and fixed-width rules to LLVM IR (`scripts/l2r.py --emit
+llvm-ir`) and fails on a call through the packed-argument FFI boundary (a
+texture LLVM did not inline; review RULR-01) or a `black_box` barrier inside
+a Reussir function (an inlined `black_box`ed libm function; RULR-07): either
+would keep a Lean loop's tail call.
+`tests/runtime/rows-check.sh` builds lean-runtime's row oracle
+(`scripts/oracle/Oracle.lean` of the lean-runtime checkout, which evaluates
+the functions of its `tests/cases/<area>/<area>.rows.toml`) with lean2rr and
+checks every row's expected value, recorded from native Lean 4.34.0, with
+lean-runtime's `scripts/gen_rows.py --check`: the prelude's own inline code
+and its glue around lean-runtime meet lean-runtime's rows.
+
 Tests for findings (the reviews' FINDINGS.txt files are in the scratch
 directories `adv3`..`adv6`, `rv6`..`rv9`). The rows marked "none" are
 coverage tests, not findings: round 9's area crane re-expressed shapes from

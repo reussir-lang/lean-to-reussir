@@ -1,14 +1,15 @@
 # lean2rr runtime
 
-The runtime has two parts:
+The runtime has these parts:
 
 - `prelude.rr` — Reussir source that lean2rr prepends to every generated
   program. It defines the runtime types and one function per Lean extern
   (`lean_xxx` for the extern whose C symbol is `lean_xxx`), plus `l2r_*`
   primitives for lean2rr-generated glue.
 - `leanrt/` — a Rust crate (rlib) linked into every program. The prelude's
-  `#[ffi(import)]` textures call into it. It holds the bignum code (GMP),
-  string algorithms, float formatting, buffered stdio, files, once-cells,
+  `#[ffi(import)]` textures call into it. It holds lean2rr's
+  representations (strings, arrays, tagged arrays, cells) and the glue
+  around lean-runtime's rules, the bignum code (GMP), buffered stdio, files, once-cells,
   panics and the main-thread setup, the task scheduler and its contexts,
   `Std.Sync`'s locks and the event loop of timers and sockets — and, being
   a single crate, the one copy of all global state (statics in the
@@ -20,21 +21,32 @@ The runtime has two parts:
   error elsewhere) and `ShareCommon.Object.eq`/`hash`, exported under their
   C symbols, which lean2rr compiles with the program over the event loop's
   `l2r_shim_*` primitives (below).
+- `third_party/lean-runtime` (a git submodule) — the crate `lean_runtime`,
+  Lean's runtime behaviour shared with another Lean translator. The
+  rules it has are its alone: the prelude's textures (as `sem::...`) and
+  `leanrt` call it and only convert lean2rr's values to its views and back
+  ("The shared crate lean-runtime", below).
 
 Semantics follow Lean 4.34's C runtime (`lean.h`, `src/runtime/*.cpp`)
-exactly; comments at each function say which C function it mirrors.
+exactly; comments at each function say which C function it mirrors. Inline
+Reussir code is kept for single operations (wrapping arithmetic, bitwise
+operations, comparisons, casts, bit copies); every rule with logic that
+lean-runtime has is lean-runtime's.
 
 Generated sections of the prelude (edit the generator, then run it):
-`runtime/gen_scalars.py` (UIntN/IntN/USize/ISize) and
-`runtime/gen_tagarr.py` (`Array Nat`/`Array Int`).
+`runtime/gen_scalars.py` (UIntN/IntN/USize/ISize: the single operations
+inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`)
+and `runtime/gen_tagarr.py` (`Array Nat`/`Array Int`).
 
 ## Building and linking
 
 `scripts/l2r.py` does everything:
 
-1. builds `leanrt` with the pinned rustc (`L2R_RUSTC`) into
-   `runtime/leanrt/target/libleanrt.rlib` (`target/rt-<hash>/` for another
-   Reussir checkout), cached by a hash of its sources;
+1. builds the shared crate `lean_runtime` (below), then `leanrt` against
+   it, both with the pinned rustc (`L2R_RUSTC`) and the same flags, into
+   `runtime/leanrt/target/` (`liblean_runtime.rlib`, `libleanrt.rlib`;
+   `target/rt-<hash>/` for another Reussir checkout), each cached (leanrt
+   by a hash of its sources and of lean-runtime's build);
 2. runs lean2rr (`L2R_LEAN2RR`) with `--prelude runtime/prelude.rr`;
 3. runs rrc (`L2R_REUSSIR`; with `--reuse-across-call` unless `l2r.py` gets
    `--no-reuse-across-call`) with
@@ -47,10 +59,127 @@ Generated sections of the prelude (edit the generator, then run it):
      `--extern leanrt=<rlib>` (and `--edition 2018` when rrc gives no
      edition): the drop hooks Reussir generates for the prelude's opaque
      types are textures without the prelude's `extern crate leanrt;`, and
-     the containers' Rust types are `leanrt`'s (below).
-   - `--polyffi-libdir runtime/leanrt/target` (so textures find `leanrt`),
-   - `--link-lib libleanrt.rlib --link-lib libgmp.a` (GMP from the Lean
-     toolchain, `$(lean --print-prefix)/lib/libgmp.a`, or `L2R_GMP`).
+     the containers' Rust types are `leanrt`'s (below). And it adds
+     `--extern lean_runtime=<rlib>` (and `=<rmeta>` for cargo's rlib, which
+     holds only a metadata stub) with `-L dependency=<dir>` for each
+     directory of lean-runtime's rlibs: rustc needs `lean_runtime` whenever
+     it loads `leanrt`, and the prelude's textures call it (as `sem`).
+   - `--polyffi-libdir runtime/leanrt/target` (so textures find `leanrt`
+     and `lean_runtime`),
+   - `--link-lib libleanrt.rlib --link-lib liblean_runtime.rlib` (then
+     lean-runtime's dependencies, dependents first) `--link-lib libgmp.a`,
+     in this order: GNU ld reads each archive once, so a library comes after
+     the ones that call it (GMP from the Lean toolchain,
+     `$(lean --print-prefix)/lib/libgmp.a`, or `L2R_GMP`).
+
+### The shared crate lean-runtime
+
+The lean-runtime crate (repo [lean-runtime-rs](https://github.com/QueClr/lean-runtime-rs)) is Lean 4.34.0's
+runtime behaviour as one Rust crate, shared with another translator (of
+Lean to safe Rust): the parts that do not depend on how a translator
+represents values (semantics on byte views and plain data, then OS-level IO
+and the task scheduler). lean2rr keeps its representations, memory protocol
+and hot paths in `leanrt` and the prelude, which call lean-runtime for the
+rest.
+
+- **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
+  pinned at a commit of its `main` (now `8823ad0`). Clone lean2rr with
+  `git clone --recurse-submodules`, or run `git submodule update --init
+  third_party/lean-runtime` in a checkout, and again after a checkout,
+  merge or pull that moves the pin: git does not update a submodule on its
+  own (`git config submodule.recurse true` makes it). `l2r.py` stops with
+  the hint when the submodule is empty, and when its checked-out commit is
+  not the pinned one (the gitlink in the index, `git ls-files -s
+  third_party/lean-runtime`).
+- **Worktrees.** Each `git worktree add` gets its own copy of the
+  submodule: run `git submodule update --init` in the new worktree (a clone
+  from GitHub; `--reference <main checkout>/.git/modules/third_party/lean-runtime`
+  avoids the network once the main checkout has it). Git refuses to remove
+  a worktree that contains a submodule: check that `git -C WT status
+  --porcelain` and `git -C WT/third_party/lean-runtime status --porcelain`
+  print nothing, then `git worktree remove --force WT`. Never run `git
+  submodule deinit` in a worktree: it deletes the submodule's entries from
+  the shared `.git/config`, for the main checkout and every worktree.
+- **The build without dependencies.** Plain rustc, no cargo, nothing
+  downloaded: `--crate-type rlib`, the edition from lean-runtime's
+  `Cargo.toml`, the features lean2rr enables (none yet; `default` and
+  `L2R_LEAN_RUNTIME_FEATURES` are added, as `--cfg feature="..."`), so its
+  `#![forbid(unsafe_code)]` holds (lints are not capped), and leanrt's
+  rustc and flags (`-C opt-level=3`, the native-CPU flags above,
+  `L2R_LEANRT_RUSTFLAGS`). Cached by a hash of the manifest and of every
+  file rustc read (its dep-info, so `include_str!` of a file outside `src/`
+  counts). `l2r.py` refuses what a plain rustc build would get wrong: a
+  `[lints]` table, an edition inherited from a workspace.
+- **The build with dependencies.** Once lean-runtime has dependencies
+  (optional ones included) or a build script, the pinned toolchain's cargo
+  builds it: `cargo build --offline --locked --release --lib [--features
+  ...]` from inside the checkout, from the crates in cargo's registry cache
+  (`~/.cargo/registry`) at the versions its committed `Cargo.lock` names
+  (so nothing is written in the checkout; lean-runtime has no `vendor/`),
+  with `RUSTC` and `RUSTFLAGS` set to leanrt's rustc and flags, and a
+  target directory under leanrt's. Fill the cache once with `cargo fetch
+  --locked` in the lean-runtime checkout (the pinned toolchain's cargo);
+  `l2r.py` says so when a crate is missing, and every build after it is
+  offline. The rlibs come from cargo's JSON messages; linked are those of
+  the packages lean-runtime's normal dependencies reach on this host
+  (`cargo metadata --filter-platform`; a build script's own dependencies,
+  such as `cfg_aliases`, are not), each before the packages it depends on;
+  the environment's `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and
+  `CARGO_TARGET_*_RUSTFLAGS` are removed, since they would override
+  `RUSTFLAGS`. Cargo's fingerprints are the cache. Build scripts run as cargo runs them;
+  one that links native libraries is refused (`l2r.py` does not pass those
+  on yet). leanrt itself stays a plain rustc build.
+- **Trying another lean-runtime.** `L2R_LEAN_RUNTIME=<checkout>` builds
+  that checkout instead of the submodule (its checked-out commit is not
+  compared with the pin), in its own directory (`target/.../lr-<hash>/`),
+  e.g. a lean-runtime branch whose merge waits for lean2rr's suite;
+  `L2R_LEAN_RUNTIME_FEATURES=io,...` adds features. `tests/runtime/leanrt-unit.sh`
+  and the test runners (through `l2r.py`) follow both.
+- **Moving the pin.** Each project moves its pin only after its own suite
+  passes on the new commit:
+  1. `git -C third_party/lean-runtime fetch origin` and `git -C
+     third_party/lean-runtime checkout <commit>` (a commit on lean-runtime's
+     `main`), then stage it: `git add third_party/lean-runtime` (`l2r.py`
+     builds the staged pin);
+  2. run lean2rr's suite on it: `tests/runtime/leanrt-unit.sh`,
+     `tests/runtime/rows-check.sh` (lean-runtime's own rows through
+     lean2rr), `tests/runtime/ffi-inline-check.sh` (lean-runtime's
+     functions leave no stack slot in Reussir code), the runtime tests
+     (`tests/runtime/run.sh`),
+     `tests/runtime/nat-alloc-check.sh`, `tests/env/run.sh`, the classic
+     corpus (`tests/oracle.py check`, with the optional passes on and off)
+     and `tests/reussir-benchmark/run.sh`;
+  3. commit the new pin on its own, naming the old and new commits and the
+     suite's results.
+- **What lean2rr uses.** `LEAN_VERSION` (re-exported as
+  `leanrt::LEAN_VERSION`; the unit test
+  `tests::lean_runtime_version_is_the_preludes` checks it is the version
+  the prelude's `lean_version_get_*` give) and, from its `semantics`
+  module:
+  - `hash`: `String.hash`, `ByteArray.hash`, `String.Slice.hash`, `mixHash`;
+  - `string`: `get`, `get?`, `get!` (with its panic text), `get'`, `next`,
+    `next'`, `prev`, `atEnd`, `isValid`, `extract` and `extract_fast`
+    (lean-runtime gives the byte range, `leanrt::string` makes the string),
+    `getUTF8Byte`, `memcmp`, `decLt`, `compare`, the default character, and
+    the character count a string caches when it is made (`utf8_strlen`;
+    `String.length` reads the cached count). A big `Nat` position is
+    passed as `u64::MAX` (`l2r_pos_of_nat`); `next` takes a position below
+    2^63 and may answer 2^63, which becomes a big `Nat`;
+  - `float`, `float32`: `toString` (written into a stack buffer by
+    `leanrt::float`), `ofBits`/`toBits`, `frExp`, `scaleB` (a big `Int` is
+    passed as `i64::MIN`/`MAX` by its sign, `l2r_int_sat_i64`), `isNaN`,
+    `isInf`, `isFinite`, the saturating conversions to `UIntN`/`IntN`;
+  - `uint`, `sint`: `div`, `mod`, `shiftLeft`, `shiftRight`, `log2`,
+    `IntN.abs`;
+  - `libm`: every `Float`/`Float32` libm extern, `cbrt`, `cbrtf`, `atanh`,
+    `atanhf` included (lean-runtime's ports of glibc's, defined on aarch64
+    Linux with glibc only: elsewhere a program that calls one ends with
+    `INTERNAL PANIC: no lean-runtime port of <name> for this target yet`,
+    and every other program builds and runs, until lean-runtime has ports
+    for that target). Those four and the ones that hide their operands with
+    `black_box` are called out of line (`leanrt::float::libm_call`, one call
+    more than native Lean's direct libm call), so that a Lean loop calling
+    them stays a loop.
 
 ## Representations
 
@@ -610,8 +739,9 @@ lean2rr's dev branch (the tests pass with it).
     `Substring.Raw.Internal.*`, many `String.Internal.*`,
     `lean_array_to_list_impl`, `IO.eprint(ln)`, `lean_stream_of_handle`, the
     `IO.Error` constructors, `Lean.Name.beq` has a reference body) should
-    compile and call that code; the prelude has hand-written versions of the
-    `String.Internal.*` ones.
+    compile and call that code (`Mono.redirectTarget`). The prelude's
+    hand-written versions of the `String.Internal.*` ones, never called
+    since, are deleted.
 11. *done* — `Array Nat`/`Array Int` as `LNatArr`/`LIntArr` (names above).
 12. *done* — `Nat.repr`/`Int.repr` of big numbers are Lean code dividing by 10 digit
     by digit (quadratic); `l2r_nat_repr`/`l2r_int_repr` are exact
@@ -793,11 +923,17 @@ request. `NAME.l2r.out` (`.err`, `.code`) marks an intended difference from
 native, a Lean runtime bug that lean2rr does not reproduce (plan §10,
 "Runtime: Lean bugs we do not reproduce"): that stream of lean2rr's run is
 compared with the file, and native's with `NAME.native.out` (`.err`,
-`.code`), so both sides stay pinned. The Rust unit tests of `leanrt` (bignums, one-word `Nat`/`Int`
-at the boundaries, tagged arrays, hashes, the lookup of glibc's `cbrt`,
-and a differential test of the `FILE` model against glibc's own `FILE`
-over random operation sequences)
-run with `tests/runtime/leanrt-unit.sh`. `tests/runtime/nat-alloc-check.sh`
+`.code`), so both sides stay pinned. The Rust unit tests of `leanrt`
+(bignums, one-word `Nat`/`Int` at the boundaries, tagged arrays, string
+layout and counts, and a differential test of the `FILE` model against
+glibc's own `FILE` over random operation sequences) run with
+`tests/runtime/leanrt-unit.sh`; `tests/runtime/rows-check.sh` checks
+lean-runtime's rows through a lean2rr build of its row oracle.
+`tests/runtime/ffi-inline-check.sh` builds runtime tests to LLVM IR and
+fails on a call through the FFI boundary (a texture not inlined) or a
+`black_box` barrier inside Reussir code (an inlined `black_box`ed libm
+function): either would keep a Lean loop's tail call.
+`tests/runtime/nat-alloc-check.sh`
 builds `RtNatStress` with leanrt's big-number counters and checks that
 every big number made is freed exactly once. `tests/runtime/conv-count-check.sh`
 builds the `RtUniformUpdates*` tests with lean2rr's

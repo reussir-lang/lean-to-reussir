@@ -140,10 +140,11 @@ Until it is merged, lean2rr fails such a program at the rrc build with an
 unknown function. The externs of Lean's own library (<code>Init</code>, <code>Std</code>) are not
 affected: the runtime implements all of them.</p>
 <h2 id="the-shared-runtime-crate">The shared runtime crate</h2>
-<p>lean2rr will use the shared crate <code>lean-runtime</code>
+<p>lean2rr uses the shared crate <code>lean-runtime</code>
 (github.com/QueClr/lean-runtime-rs, public). The crate holds Lean's runtime
-semantics, implemented once, in safe Rust. lean2rr keeps only the glue to
-its own representations. See <a href="runtime.html#the-shared-runtime-crate-plan">Runtime</a>.</p>
+semantics, implemented once, in safe Rust; lean2rr takes the hash, string,
+float, fixed-width integer and libm rules from it so far, and keeps only
+the glue to its own representations. See <a href="runtime.html#the-shared-runtime-crate-plan">Runtime</a>.</p>
 <h2 id="status">Status</h2>
 <p>Counts with a † are taken from the repository when the site is built. The
 other results are the last recorded runs.</p>
@@ -157,7 +158,7 @@ other results are the last recorded runs.</p>
 <tbody>
 <tr>
 <td>Runtime test suite</td>
-<td>274 programs† (3 marked <code>.xfail</code>†); 231 of 231 identical to native Lean 4.34.0 at the last full regression (2026-10-03)</td>
+<td>275 programs† (3 marked <code>.xfail</code>†); 231 of 231 identical to native Lean 4.34.0 at the last full regression (2026-10-03)</td>
 </tr>
 <tr>
 <td>Classic corpus</td>
@@ -200,7 +201,7 @@ line yet:</p>
   overflow message of <code>Array.replicate</code>;</li>
 <li>plan §10's list of Lean runtime bugs that lean2rr does not reproduce
   (see <a href="differences.html#lean-bugs-we-do-not-reproduce">Known differences</a>);</li>
-<li>the move of the runtime's semantics into <code>lean-runtime</code>.</li>
+<li>the move of the rest of the runtime's semantics into <code>lean-runtime</code>.</li>
 </ul>
 <h2 id="the-pages">The pages</h2>
 <div class="cards">

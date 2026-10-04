@@ -30,7 +30,6 @@ pub mod drop;
 pub mod float;
 pub mod fs;
 pub mod gmp;
-pub mod hash;
 pub mod io;
 pub mod nat;
 pub mod net;
@@ -48,6 +47,13 @@ pub mod task;
 pub use big::LBig;
 pub use nat::{LInt, LNat};
 pub use string::LStr;
+
+/// The Lean version whose runtime the shared crate `lean_runtime` mirrors
+/// (lean-runtime, the submodule `third_party/lean-runtime`, which
+/// `scripts/l2r.py` builds and links with leanrt). It must be the version
+/// lean2rr is pinned to, which the prelude's `lean_version_get_*` give: the
+/// test `tests::lean_runtime_version_is_the_preludes` checks it.
+pub use lean_runtime::LEAN_VERSION;
 
 static LAST_SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -175,4 +181,24 @@ pub fn promise_dropped() -> ! {
         std::process::abort();
     }
     task::hang()
+}
+
+#[cfg(test)]
+mod tests {
+    /// lean-runtime mirrors the Lean version lean2rr is pinned to: the
+    /// prelude's `lean_version_get_major`/`minor`/`patch` (`l2r_nat_small(N)`)
+    /// spell `lean_runtime::LEAN_VERSION`. Fails when the submodule's pin and
+    /// lean2rr's toolchain disagree.
+    #[test]
+    fn lean_runtime_version_is_the_preludes() {
+        let prelude = include_str!("../../prelude.rr");
+        let part = |name: &str| -> String {
+            let head = format!("fn lean_version_get_{name}(");
+            let line = prelude.lines().find(|l| l.starts_with(&head)).expect(&head);
+            let n = line.split("l2r_nat_small(").nth(1).expect(line);
+            n[..n.find(')').expect(line)].to_string()
+        };
+        let prelude_version = format!("{}.{}.{}", part("major"), part("minor"), part("patch"));
+        assert_eq!(prelude_version, lean_runtime::LEAN_VERSION);
+    }
 }

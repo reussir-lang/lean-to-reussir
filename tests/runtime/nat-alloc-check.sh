@@ -10,7 +10,7 @@
 # Both must print what the native build prints.
 #   tests/runtime/nat-alloc-check.sh [SMALL LARGE]   (default 300 3000)
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
-# L2R_LEAN_TOOLCHAIN).
+# L2R_LEAN_TOOLCHAIN, L2R_LEAN_RUNTIME).
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)

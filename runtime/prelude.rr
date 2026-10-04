@@ -9,7 +9,13 @@
 //
 // Fast paths are plain Reussir code (inlined into the program); slow paths
 // call small `#[ffi(import)]` textures, which call into the `leanrt` Rust
-// crate (runtime/leanrt). Every call consumes its arguments.
+// crate (runtime/leanrt). Every call consumes its arguments. Lean's runtime
+// rules on plain data and byte views (hashes, string positions, float and
+// fixed-width integer rules, libm) are the shared crate lean-runtime's
+// (`sem::...`, `lean_runtime::semantics`), which lean2rr shares with
+// another Lean translator: the prelude and leanrt only convert lean2rr's values to its views and
+// back. Inline Reussir code is kept for single operations (an add, a cast,
+// a comparison, a bit copy).
 //
 // Conventions for FFI imports: only integers, floats, bool, opaque types and
 // shared records cross the boundary; functions without a result return a
@@ -17,6 +23,8 @@
 
 extern "rust" [{
     extern crate leanrt;
+    extern crate lean_runtime;
+    use lean_runtime::semantics as sem;
     use leanrt::string::Utf8;
     use reussir_rt::rc::Rc;
 }];
@@ -169,7 +177,7 @@ fn l2r_panic_str(msg : LStr) -> u64 { l2r_stderr_put(l2r_panic_text(msg)) }
 fn l2r_panic_code_text(code : u64) -> LStr [{
     leanrt::string::from_bytes(match code {
         0 => "Error: index out of bounds".as_bytes(),
-        1 => "Error: invalid `String.Pos` at `String.get!`".as_bytes(),
+        1 => sem::string::GET_BANG_PANIC.as_bytes(),
         _ => "Error".as_bytes(),
     })
 }];
@@ -757,13 +765,18 @@ fn lean_uint8_mul(a : u8, b : u8) -> u8 { a * b }
 fn lean_uint8_land(a : u8, b : u8) -> u8 { a & b }
 fn lean_uint8_lor(a : u8, b : u8) -> u8 { a | b }
 fn lean_uint8_xor(a : u8, b : u8) -> u8 { a ^ b }
-fn lean_uint8_div(a : u8, b : u8) -> u8 { if b == 0 { 0 } else { a / b } }
-fn lean_uint8_mod(a : u8, b : u8) -> u8 { if b == 0 { a } else { a % b } }
-fn lean_uint8_shift_left(a : u8, b : u8) -> u8 { a << (b % 8) }
-fn lean_uint8_shift_right(a : u8, b : u8) -> u8 { a >> (b % 8) }
+#[ffi(import)]
+fn lean_uint8_div(a : u8, b : u8) -> u8 [{ sem::uint::uint8_div(a, b) }];
+#[ffi(import)]
+fn lean_uint8_mod(a : u8, b : u8) -> u8 [{ sem::uint::uint8_mod(a, b) }];
+#[ffi(import)]
+fn lean_uint8_shift_left(a : u8, b : u8) -> u8 [{ sem::uint::uint8_shift_left(a, b) }];
+#[ffi(import)]
+fn lean_uint8_shift_right(a : u8, b : u8) -> u8 [{ sem::uint::uint8_shift_right(a, b) }];
 fn lean_uint8_complement(a : u8) -> u8 { a ^ 255 }
 fn lean_uint8_neg(a : u8) -> u8 { 0 - a }
-fn lean_uint8_log2(a : u8) -> u8 { if a == 0 { 0 } else { 7 - core::intrinsic::math::ctlz(a) } }
+#[ffi(import)]
+fn lean_uint8_log2(a : u8) -> u8 [{ sem::uint::uint8_log2(a) }];
 fn lean_uint8_dec_eq(a : u8, b : u8) -> bool { a == b }
 fn lean_uint8_dec_lt(a : u8, b : u8) -> bool { a < b }
 fn lean_uint8_dec_le(a : u8, b : u8) -> bool { a <= b }
@@ -774,16 +787,10 @@ fn lean_uint8_to_usize(a : u8) -> u64 { a as u64 }
 fn lean_uint8_to_float(a : u8) -> f64 { a as f64 }
 fn lean_uint8_to_float32(a : u8) -> f32 { a as f32 }
 fn lean_bool_to_uint8(b : bool) -> u8 { if b { 1 } else { 0 } }
-fn lean_float_to_uint8(a : f64) -> u8 {
-    let d : f64 = a;
-    let hi : f64 = 256.0;
-    if 0.0 <= d { if d < hi { d as u8 } else { 255 } } else { 0 }
-}
-fn lean_float32_to_uint8(a : f32) -> u8 {
-    let d : f64 = (a as f64);
-    let hi : f64 = 256.0;
-    if 0.0 <= d { if d < hi { d as u8 } else { 255 } } else { 0 }
-}
+#[ffi(import)]
+fn lean_float_to_uint8(a : f64) -> u8 [{ sem::float::to_uint8(a) }];
+#[ffi(import)]
+fn lean_float32_to_uint8(a : f32) -> u8 [{ sem::float32::to_uint8(a) }];
 
 // ---- uint16 ----
 
@@ -796,13 +803,18 @@ fn lean_uint16_mul(a : u16, b : u16) -> u16 { a * b }
 fn lean_uint16_land(a : u16, b : u16) -> u16 { a & b }
 fn lean_uint16_lor(a : u16, b : u16) -> u16 { a | b }
 fn lean_uint16_xor(a : u16, b : u16) -> u16 { a ^ b }
-fn lean_uint16_div(a : u16, b : u16) -> u16 { if b == 0 { 0 } else { a / b } }
-fn lean_uint16_mod(a : u16, b : u16) -> u16 { if b == 0 { a } else { a % b } }
-fn lean_uint16_shift_left(a : u16, b : u16) -> u16 { a << (b % 16) }
-fn lean_uint16_shift_right(a : u16, b : u16) -> u16 { a >> (b % 16) }
+#[ffi(import)]
+fn lean_uint16_div(a : u16, b : u16) -> u16 [{ sem::uint::uint16_div(a, b) }];
+#[ffi(import)]
+fn lean_uint16_mod(a : u16, b : u16) -> u16 [{ sem::uint::uint16_mod(a, b) }];
+#[ffi(import)]
+fn lean_uint16_shift_left(a : u16, b : u16) -> u16 [{ sem::uint::uint16_shift_left(a, b) }];
+#[ffi(import)]
+fn lean_uint16_shift_right(a : u16, b : u16) -> u16 [{ sem::uint::uint16_shift_right(a, b) }];
 fn lean_uint16_complement(a : u16) -> u16 { a ^ 65535 }
 fn lean_uint16_neg(a : u16) -> u16 { 0 - a }
-fn lean_uint16_log2(a : u16) -> u16 { if a == 0 { 0 } else { 15 - core::intrinsic::math::ctlz(a) } }
+#[ffi(import)]
+fn lean_uint16_log2(a : u16) -> u16 [{ sem::uint::uint16_log2(a) }];
 fn lean_uint16_dec_eq(a : u16, b : u16) -> bool { a == b }
 fn lean_uint16_dec_lt(a : u16, b : u16) -> bool { a < b }
 fn lean_uint16_dec_le(a : u16, b : u16) -> bool { a <= b }
@@ -813,16 +825,10 @@ fn lean_uint16_to_usize(a : u16) -> u64 { a as u64 }
 fn lean_uint16_to_float(a : u16) -> f64 { a as f64 }
 fn lean_uint16_to_float32(a : u16) -> f32 { a as f32 }
 fn lean_bool_to_uint16(b : bool) -> u16 { if b { 1 } else { 0 } }
-fn lean_float_to_uint16(a : f64) -> u16 {
-    let d : f64 = a;
-    let hi : f64 = 65536.0;
-    if 0.0 <= d { if d < hi { d as u16 } else { 65535 } } else { 0 }
-}
-fn lean_float32_to_uint16(a : f32) -> u16 {
-    let d : f64 = (a as f64);
-    let hi : f64 = 65536.0;
-    if 0.0 <= d { if d < hi { d as u16 } else { 65535 } } else { 0 }
-}
+#[ffi(import)]
+fn lean_float_to_uint16(a : f64) -> u16 [{ sem::float::to_uint16(a) }];
+#[ffi(import)]
+fn lean_float32_to_uint16(a : f32) -> u16 [{ sem::float32::to_uint16(a) }];
 
 // ---- uint32 ----
 
@@ -835,13 +841,18 @@ fn lean_uint32_mul(a : u32, b : u32) -> u32 { a * b }
 fn lean_uint32_land(a : u32, b : u32) -> u32 { a & b }
 fn lean_uint32_lor(a : u32, b : u32) -> u32 { a | b }
 fn lean_uint32_xor(a : u32, b : u32) -> u32 { a ^ b }
-fn lean_uint32_div(a : u32, b : u32) -> u32 { if b == 0 { 0 } else { a / b } }
-fn lean_uint32_mod(a : u32, b : u32) -> u32 { if b == 0 { a } else { a % b } }
-fn lean_uint32_shift_left(a : u32, b : u32) -> u32 { a << (b % 32) }
-fn lean_uint32_shift_right(a : u32, b : u32) -> u32 { a >> (b % 32) }
+#[ffi(import)]
+fn lean_uint32_div(a : u32, b : u32) -> u32 [{ sem::uint::uint32_div(a, b) }];
+#[ffi(import)]
+fn lean_uint32_mod(a : u32, b : u32) -> u32 [{ sem::uint::uint32_mod(a, b) }];
+#[ffi(import)]
+fn lean_uint32_shift_left(a : u32, b : u32) -> u32 [{ sem::uint::uint32_shift_left(a, b) }];
+#[ffi(import)]
+fn lean_uint32_shift_right(a : u32, b : u32) -> u32 [{ sem::uint::uint32_shift_right(a, b) }];
 fn lean_uint32_complement(a : u32) -> u32 { a ^ 4294967295 }
 fn lean_uint32_neg(a : u32) -> u32 { 0 - a }
-fn lean_uint32_log2(a : u32) -> u32 { if a == 0 { 0 } else { 31 - core::intrinsic::math::ctlz(a) } }
+#[ffi(import)]
+fn lean_uint32_log2(a : u32) -> u32 [{ sem::uint::uint32_log2(a) }];
 fn lean_uint32_dec_eq(a : u32, b : u32) -> bool { a == b }
 fn lean_uint32_dec_lt(a : u32, b : u32) -> bool { a < b }
 fn lean_uint32_dec_le(a : u32, b : u32) -> bool { a <= b }
@@ -852,16 +863,10 @@ fn lean_uint32_to_usize(a : u32) -> u64 { a as u64 }
 fn lean_uint32_to_float(a : u32) -> f64 { a as f64 }
 fn lean_uint32_to_float32(a : u32) -> f32 { a as f32 }
 fn lean_bool_to_uint32(b : bool) -> u32 { if b { 1 } else { 0 } }
-fn lean_float_to_uint32(a : f64) -> u32 {
-    let d : f64 = a;
-    let hi : f64 = 4294967296.0;
-    if 0.0 <= d { if d < hi { d as u32 } else { 4294967295 } } else { 0 }
-}
-fn lean_float32_to_uint32(a : f32) -> u32 {
-    let d : f64 = (a as f64);
-    let hi : f64 = 4294967296.0;
-    if 0.0 <= d { if d < hi { d as u32 } else { 4294967295 } } else { 0 }
-}
+#[ffi(import)]
+fn lean_float_to_uint32(a : f64) -> u32 [{ sem::float::to_uint32(a) }];
+#[ffi(import)]
+fn lean_float32_to_uint32(a : f32) -> u32 [{ sem::float32::to_uint32(a) }];
 
 // ---- uint64 ----
 
@@ -874,13 +879,18 @@ fn lean_uint64_mul(a : u64, b : u64) -> u64 { a * b }
 fn lean_uint64_land(a : u64, b : u64) -> u64 { a & b }
 fn lean_uint64_lor(a : u64, b : u64) -> u64 { a | b }
 fn lean_uint64_xor(a : u64, b : u64) -> u64 { a ^ b }
-fn lean_uint64_div(a : u64, b : u64) -> u64 { if b == 0 { 0 } else { a / b } }
-fn lean_uint64_mod(a : u64, b : u64) -> u64 { if b == 0 { a } else { a % b } }
-fn lean_uint64_shift_left(a : u64, b : u64) -> u64 { a << (b % 64) }
-fn lean_uint64_shift_right(a : u64, b : u64) -> u64 { a >> (b % 64) }
+#[ffi(import)]
+fn lean_uint64_div(a : u64, b : u64) -> u64 [{ sem::uint::uint64_div(a, b) }];
+#[ffi(import)]
+fn lean_uint64_mod(a : u64, b : u64) -> u64 [{ sem::uint::uint64_mod(a, b) }];
+#[ffi(import)]
+fn lean_uint64_shift_left(a : u64, b : u64) -> u64 [{ sem::uint::uint64_shift_left(a, b) }];
+#[ffi(import)]
+fn lean_uint64_shift_right(a : u64, b : u64) -> u64 [{ sem::uint::uint64_shift_right(a, b) }];
 fn lean_uint64_complement(a : u64) -> u64 { a ^ 18446744073709551615 }
 fn lean_uint64_neg(a : u64) -> u64 { 0 - a }
-fn lean_uint64_log2(a : u64) -> u64 { if a == 0 { 0 } else { 63 - core::intrinsic::math::ctlz(a) } }
+#[ffi(import)]
+fn lean_uint64_log2(a : u64) -> u64 [{ sem::uint::uint64_log2(a) }];
 fn lean_uint64_dec_eq(a : u64, b : u64) -> bool { a == b }
 fn lean_uint64_dec_lt(a : u64, b : u64) -> bool { a < b }
 fn lean_uint64_dec_le(a : u64, b : u64) -> bool { a <= b }
@@ -891,16 +901,10 @@ fn lean_uint64_to_usize(a : u64) -> u64 { a as u64 }
 fn lean_uint64_to_float(a : u64) -> f64 { a as f64 }
 fn lean_uint64_to_float32(a : u64) -> f32 { a as f32 }
 fn lean_bool_to_uint64(b : bool) -> u64 { if b { 1 } else { 0 } }
-fn lean_float_to_uint64(a : f64) -> u64 {
-    let d : f64 = a;
-    let hi : f64 = 18446744073709551616.0;
-    if 0.0 <= d { if d < hi { d as u64 } else { 18446744073709551615 } } else { 0 }
-}
-fn lean_float32_to_uint64(a : f32) -> u64 {
-    let d : f64 = (a as f64);
-    let hi : f64 = 18446744073709551616.0;
-    if 0.0 <= d { if d < hi { d as u64 } else { 18446744073709551615 } } else { 0 }
-}
+#[ffi(import)]
+fn lean_float_to_uint64(a : f64) -> u64 [{ sem::float::to_uint64(a) }];
+#[ffi(import)]
+fn lean_float32_to_uint64(a : f32) -> u64 [{ sem::float32::to_uint64(a) }];
 
 // ---- usize ----
 
@@ -913,13 +917,18 @@ fn lean_usize_mul(a : u64, b : u64) -> u64 { a * b }
 fn lean_usize_land(a : u64, b : u64) -> u64 { a & b }
 fn lean_usize_lor(a : u64, b : u64) -> u64 { a | b }
 fn lean_usize_xor(a : u64, b : u64) -> u64 { a ^ b }
-fn lean_usize_div(a : u64, b : u64) -> u64 { if b == 0 { 0 } else { a / b } }
-fn lean_usize_mod(a : u64, b : u64) -> u64 { if b == 0 { a } else { a % b } }
-fn lean_usize_shift_left(a : u64, b : u64) -> u64 { a << (b % 64) }
-fn lean_usize_shift_right(a : u64, b : u64) -> u64 { a >> (b % 64) }
+#[ffi(import)]
+fn lean_usize_div(a : u64, b : u64) -> u64 [{ sem::uint::usize_div(a as usize, b as usize) as u64 }];
+#[ffi(import)]
+fn lean_usize_mod(a : u64, b : u64) -> u64 [{ sem::uint::usize_mod(a as usize, b as usize) as u64 }];
+#[ffi(import)]
+fn lean_usize_shift_left(a : u64, b : u64) -> u64 [{ sem::uint::usize_shift_left(a as usize, b as usize) as u64 }];
+#[ffi(import)]
+fn lean_usize_shift_right(a : u64, b : u64) -> u64 [{ sem::uint::usize_shift_right(a as usize, b as usize) as u64 }];
 fn lean_usize_complement(a : u64) -> u64 { a ^ 18446744073709551615 }
 fn lean_usize_neg(a : u64) -> u64 { 0 - a }
-fn lean_usize_log2(a : u64) -> u64 { if a == 0 { 0 } else { 63 - core::intrinsic::math::ctlz(a) } }
+#[ffi(import)]
+fn lean_usize_log2(a : u64) -> u64 [{ sem::uint::usize_log2(a as usize) as u64 }];
 fn lean_usize_dec_eq(a : u64, b : u64) -> bool { a == b }
 fn lean_usize_dec_lt(a : u64, b : u64) -> bool { a < b }
 fn lean_usize_dec_le(a : u64, b : u64) -> bool { a <= b }
@@ -930,16 +939,10 @@ fn lean_usize_to_uint64(a : u64) -> u64 { a as u64 }
 fn lean_usize_to_float(a : u64) -> f64 { a as f64 }
 fn lean_usize_to_float32(a : u64) -> f32 { a as f32 }
 fn lean_bool_to_usize(b : bool) -> u64 { if b { 1 } else { 0 } }
-fn lean_float_to_usize(a : f64) -> u64 {
-    let d : f64 = a;
-    let hi : f64 = 18446744073709551616.0;
-    if 0.0 <= d { if d < hi { d as u64 } else { 18446744073709551615 } } else { 0 }
-}
-fn lean_float32_to_usize(a : f32) -> u64 {
-    let d : f64 = (a as f64);
-    let hi : f64 = 18446744073709551616.0;
-    if 0.0 <= d { if d < hi { d as u64 } else { 18446744073709551615 } } else { 0 }
-}
+#[ffi(import)]
+fn lean_float_to_usize(a : f64) -> u64 [{ sem::float::to_usize(a) as u64 }];
+#[ffi(import)]
+fn lean_float32_to_usize(a : f32) -> u64 [{ sem::float32::to_usize(a) as u64 }];
 
 // ---- int8 ----
 
@@ -953,16 +956,17 @@ fn lean_int8_land(a : u8, b : u8) -> u8 { a & b }
 fn lean_int8_lor(a : u8, b : u8) -> u8 { a | b }
 fn lean_int8_xor(a : u8, b : u8) -> u8 { a ^ b }
 fn lean_int8_neg(a : u8) -> u8 { 0 - a }
-fn lean_int8_div(a : u8, b : u8) -> u8 {
-    if b == 0 { 0 } else { if b == 255 { 0 - a } else { ((a as i8) / (b as i8)) as u8 } }
-}
-fn lean_int8_mod(a : u8, b : u8) -> u8 {
-    if b == 0 { a } else { if b == 255 { 0 } else { ((a as i8) % (b as i8)) as u8 } }
-}
-fn lean_int8_shift_left(a : u8, b : u8) -> u8 { a << (b & 7) }
-fn lean_int8_shift_right(a : u8, b : u8) -> u8 { ((a as i8) >> ((b & 7) as i8)) as u8 }
+#[ffi(import)]
+fn lean_int8_div(a : u8, b : u8) -> u8 [{ sem::sint::int8_div(a, b) }];
+#[ffi(import)]
+fn lean_int8_mod(a : u8, b : u8) -> u8 [{ sem::sint::int8_mod(a, b) }];
+#[ffi(import)]
+fn lean_int8_shift_left(a : u8, b : u8) -> u8 [{ sem::sint::int8_shift_left(a, b) }];
+#[ffi(import)]
+fn lean_int8_shift_right(a : u8, b : u8) -> u8 [{ sem::sint::int8_shift_right(a, b) }];
 fn lean_int8_complement(a : u8) -> u8 { a ^ 255 }
-fn lean_int8_abs(a : u8) -> u8 { if (a as i8) < 0 { 0 - a } else { a } }
+#[ffi(import)]
+fn lean_int8_abs(a : u8) -> u8 [{ sem::sint::int8_abs(a) }];
 fn lean_int8_dec_eq(a : u8, b : u8) -> bool { a == b }
 fn lean_int8_dec_lt(a : u8, b : u8) -> bool { (a as i8) < (b as i8) }
 fn lean_int8_dec_le(a : u8, b : u8) -> bool { (a as i8) <= (b as i8) }
@@ -973,18 +977,10 @@ fn lean_int8_to_isize(a : u8) -> u64 { ((a as i8) as i64) as u64 }
 fn lean_int8_to_float(a : u8) -> f64 { (a as i8) as f64 }
 fn lean_int8_to_float32(a : u8) -> f32 { (a as i8) as f32 }
 fn lean_bool_to_int8(b : bool) -> u8 { if b { 1 } else { 0 } }
-fn lean_float_to_int8(a : f64) -> u8 {
-    let d : f64 = a;
-    let lo : f64 = (0.0 - 129.0);
-    let hi : f64 = 128.0;
-    if d != d { 0 } else { if lo < d { if d < hi { (d as i8) as u8 } else { 127 } } else { 128 } }
-}
-fn lean_float32_to_int8(a : f32) -> u8 {
-    let d : f64 = (a as f64);
-    let lo : f64 = (0.0 - 129.0);
-    let hi : f64 = 128.0;
-    if d != d { 0 } else { if lo < d { if d < hi { (d as i8) as u8 } else { 127 } } else { 128 } }
-}
+#[ffi(import)]
+fn lean_float_to_int8(a : f64) -> u8 [{ sem::float::to_int8(a) }];
+#[ffi(import)]
+fn lean_float32_to_int8(a : f32) -> u8 [{ sem::float32::to_int8(a) }];
 
 // ---- int16 ----
 
@@ -998,16 +994,17 @@ fn lean_int16_land(a : u16, b : u16) -> u16 { a & b }
 fn lean_int16_lor(a : u16, b : u16) -> u16 { a | b }
 fn lean_int16_xor(a : u16, b : u16) -> u16 { a ^ b }
 fn lean_int16_neg(a : u16) -> u16 { 0 - a }
-fn lean_int16_div(a : u16, b : u16) -> u16 {
-    if b == 0 { 0 } else { if b == 65535 { 0 - a } else { ((a as i16) / (b as i16)) as u16 } }
-}
-fn lean_int16_mod(a : u16, b : u16) -> u16 {
-    if b == 0 { a } else { if b == 65535 { 0 } else { ((a as i16) % (b as i16)) as u16 } }
-}
-fn lean_int16_shift_left(a : u16, b : u16) -> u16 { a << (b & 15) }
-fn lean_int16_shift_right(a : u16, b : u16) -> u16 { ((a as i16) >> ((b & 15) as i16)) as u16 }
+#[ffi(import)]
+fn lean_int16_div(a : u16, b : u16) -> u16 [{ sem::sint::int16_div(a, b) }];
+#[ffi(import)]
+fn lean_int16_mod(a : u16, b : u16) -> u16 [{ sem::sint::int16_mod(a, b) }];
+#[ffi(import)]
+fn lean_int16_shift_left(a : u16, b : u16) -> u16 [{ sem::sint::int16_shift_left(a, b) }];
+#[ffi(import)]
+fn lean_int16_shift_right(a : u16, b : u16) -> u16 [{ sem::sint::int16_shift_right(a, b) }];
 fn lean_int16_complement(a : u16) -> u16 { a ^ 65535 }
-fn lean_int16_abs(a : u16) -> u16 { if (a as i16) < 0 { 0 - a } else { a } }
+#[ffi(import)]
+fn lean_int16_abs(a : u16) -> u16 [{ sem::sint::int16_abs(a) }];
 fn lean_int16_dec_eq(a : u16, b : u16) -> bool { a == b }
 fn lean_int16_dec_lt(a : u16, b : u16) -> bool { (a as i16) < (b as i16) }
 fn lean_int16_dec_le(a : u16, b : u16) -> bool { (a as i16) <= (b as i16) }
@@ -1018,18 +1015,10 @@ fn lean_int16_to_isize(a : u16) -> u64 { ((a as i16) as i64) as u64 }
 fn lean_int16_to_float(a : u16) -> f64 { (a as i16) as f64 }
 fn lean_int16_to_float32(a : u16) -> f32 { (a as i16) as f32 }
 fn lean_bool_to_int16(b : bool) -> u16 { if b { 1 } else { 0 } }
-fn lean_float_to_int16(a : f64) -> u16 {
-    let d : f64 = a;
-    let lo : f64 = (0.0 - 32769.0);
-    let hi : f64 = 32768.0;
-    if d != d { 0 } else { if lo < d { if d < hi { (d as i16) as u16 } else { 32767 } } else { 32768 } }
-}
-fn lean_float32_to_int16(a : f32) -> u16 {
-    let d : f64 = (a as f64);
-    let lo : f64 = (0.0 - 32769.0);
-    let hi : f64 = 32768.0;
-    if d != d { 0 } else { if lo < d { if d < hi { (d as i16) as u16 } else { 32767 } } else { 32768 } }
-}
+#[ffi(import)]
+fn lean_float_to_int16(a : f64) -> u16 [{ sem::float::to_int16(a) }];
+#[ffi(import)]
+fn lean_float32_to_int16(a : f32) -> u16 [{ sem::float32::to_int16(a) }];
 
 // ---- int32 ----
 
@@ -1043,16 +1032,17 @@ fn lean_int32_land(a : u32, b : u32) -> u32 { a & b }
 fn lean_int32_lor(a : u32, b : u32) -> u32 { a | b }
 fn lean_int32_xor(a : u32, b : u32) -> u32 { a ^ b }
 fn lean_int32_neg(a : u32) -> u32 { 0 - a }
-fn lean_int32_div(a : u32, b : u32) -> u32 {
-    if b == 0 { 0 } else { if b == 4294967295 { 0 - a } else { ((a as i32) / (b as i32)) as u32 } }
-}
-fn lean_int32_mod(a : u32, b : u32) -> u32 {
-    if b == 0 { a } else { if b == 4294967295 { 0 } else { ((a as i32) % (b as i32)) as u32 } }
-}
-fn lean_int32_shift_left(a : u32, b : u32) -> u32 { a << (b & 31) }
-fn lean_int32_shift_right(a : u32, b : u32) -> u32 { ((a as i32) >> ((b & 31) as i32)) as u32 }
+#[ffi(import)]
+fn lean_int32_div(a : u32, b : u32) -> u32 [{ sem::sint::int32_div(a, b) }];
+#[ffi(import)]
+fn lean_int32_mod(a : u32, b : u32) -> u32 [{ sem::sint::int32_mod(a, b) }];
+#[ffi(import)]
+fn lean_int32_shift_left(a : u32, b : u32) -> u32 [{ sem::sint::int32_shift_left(a, b) }];
+#[ffi(import)]
+fn lean_int32_shift_right(a : u32, b : u32) -> u32 [{ sem::sint::int32_shift_right(a, b) }];
 fn lean_int32_complement(a : u32) -> u32 { a ^ 4294967295 }
-fn lean_int32_abs(a : u32) -> u32 { if (a as i32) < 0 { 0 - a } else { a } }
+#[ffi(import)]
+fn lean_int32_abs(a : u32) -> u32 [{ sem::sint::int32_abs(a) }];
 fn lean_int32_dec_eq(a : u32, b : u32) -> bool { a == b }
 fn lean_int32_dec_lt(a : u32, b : u32) -> bool { (a as i32) < (b as i32) }
 fn lean_int32_dec_le(a : u32, b : u32) -> bool { (a as i32) <= (b as i32) }
@@ -1063,18 +1053,10 @@ fn lean_int32_to_isize(a : u32) -> u64 { ((a as i32) as i64) as u64 }
 fn lean_int32_to_float(a : u32) -> f64 { (a as i32) as f64 }
 fn lean_int32_to_float32(a : u32) -> f32 { (a as i32) as f32 }
 fn lean_bool_to_int32(b : bool) -> u32 { if b { 1 } else { 0 } }
-fn lean_float_to_int32(a : f64) -> u32 {
-    let d : f64 = a;
-    let lo : f64 = (0.0 - 2147483649.0);
-    let hi : f64 = 2147483648.0;
-    if d != d { 0 } else { if lo < d { if d < hi { (d as i32) as u32 } else { 2147483647 } } else { 2147483648 } }
-}
-fn lean_float32_to_int32(a : f32) -> u32 {
-    let d : f64 = (a as f64);
-    let lo : f64 = (0.0 - 2147483649.0);
-    let hi : f64 = 2147483648.0;
-    if d != d { 0 } else { if lo < d { if d < hi { (d as i32) as u32 } else { 2147483647 } } else { 2147483648 } }
-}
+#[ffi(import)]
+fn lean_float_to_int32(a : f64) -> u32 [{ sem::float::to_int32(a) }];
+#[ffi(import)]
+fn lean_float32_to_int32(a : f32) -> u32 [{ sem::float32::to_int32(a) }];
 
 // ---- int64 ----
 
@@ -1088,16 +1070,17 @@ fn lean_int64_land(a : u64, b : u64) -> u64 { a & b }
 fn lean_int64_lor(a : u64, b : u64) -> u64 { a | b }
 fn lean_int64_xor(a : u64, b : u64) -> u64 { a ^ b }
 fn lean_int64_neg(a : u64) -> u64 { 0 - a }
-fn lean_int64_div(a : u64, b : u64) -> u64 {
-    if b == 0 { 0 } else { if b == 18446744073709551615 { 0 - a } else { ((a as i64) / (b as i64)) as u64 } }
-}
-fn lean_int64_mod(a : u64, b : u64) -> u64 {
-    if b == 0 { a } else { if b == 18446744073709551615 { 0 } else { ((a as i64) % (b as i64)) as u64 } }
-}
-fn lean_int64_shift_left(a : u64, b : u64) -> u64 { a << (b & 63) }
-fn lean_int64_shift_right(a : u64, b : u64) -> u64 { ((a as i64) >> ((b & 63) as i64)) as u64 }
+#[ffi(import)]
+fn lean_int64_div(a : u64, b : u64) -> u64 [{ sem::sint::int64_div(a, b) }];
+#[ffi(import)]
+fn lean_int64_mod(a : u64, b : u64) -> u64 [{ sem::sint::int64_mod(a, b) }];
+#[ffi(import)]
+fn lean_int64_shift_left(a : u64, b : u64) -> u64 [{ sem::sint::int64_shift_left(a, b) }];
+#[ffi(import)]
+fn lean_int64_shift_right(a : u64, b : u64) -> u64 [{ sem::sint::int64_shift_right(a, b) }];
 fn lean_int64_complement(a : u64) -> u64 { a ^ 18446744073709551615 }
-fn lean_int64_abs(a : u64) -> u64 { if (a as i64) < 0 { 0 - a } else { a } }
+#[ffi(import)]
+fn lean_int64_abs(a : u64) -> u64 [{ sem::sint::int64_abs(a) }];
 fn lean_int64_dec_eq(a : u64, b : u64) -> bool { a == b }
 fn lean_int64_dec_lt(a : u64, b : u64) -> bool { (a as i64) < (b as i64) }
 fn lean_int64_dec_le(a : u64, b : u64) -> bool { (a as i64) <= (b as i64) }
@@ -1108,18 +1091,10 @@ fn lean_int64_to_isize(a : u64) -> u64 { ((a as i64) as i64) as u64 }
 fn lean_int64_to_float(a : u64) -> f64 { (a as i64) as f64 }
 fn lean_int64_to_float32(a : u64) -> f32 { (a as i64) as f32 }
 fn lean_bool_to_int64(b : bool) -> u64 { if b { 1 } else { 0 } }
-fn lean_float_to_int64(a : f64) -> u64 {
-    let d : f64 = a;
-    let lo : f64 = (0.0 - 9223372036854775809.0);
-    let hi : f64 = 9223372036854775808.0;
-    if d != d { 0 } else { if lo < d { if d < hi { (d as i64) as u64 } else { 9223372036854775807 } } else { 9223372036854775808 } }
-}
-fn lean_float32_to_int64(a : f32) -> u64 {
-    let d : f64 = (a as f64);
-    let lo : f64 = (0.0 - 9223372036854775809.0);
-    let hi : f64 = 9223372036854775808.0;
-    if d != d { 0 } else { if lo < d { if d < hi { (d as i64) as u64 } else { 9223372036854775807 } } else { 9223372036854775808 } }
-}
+#[ffi(import)]
+fn lean_float_to_int64(a : f64) -> u64 [{ sem::float::to_int64(a) }];
+#[ffi(import)]
+fn lean_float32_to_int64(a : f32) -> u64 [{ sem::float32::to_int64(a) }];
 
 // ---- isize ----
 
@@ -1133,16 +1108,17 @@ fn lean_isize_land(a : u64, b : u64) -> u64 { a & b }
 fn lean_isize_lor(a : u64, b : u64) -> u64 { a | b }
 fn lean_isize_xor(a : u64, b : u64) -> u64 { a ^ b }
 fn lean_isize_neg(a : u64) -> u64 { 0 - a }
-fn lean_isize_div(a : u64, b : u64) -> u64 {
-    if b == 0 { 0 } else { if b == 18446744073709551615 { 0 - a } else { ((a as i64) / (b as i64)) as u64 } }
-}
-fn lean_isize_mod(a : u64, b : u64) -> u64 {
-    if b == 0 { a } else { if b == 18446744073709551615 { 0 } else { ((a as i64) % (b as i64)) as u64 } }
-}
-fn lean_isize_shift_left(a : u64, b : u64) -> u64 { a << (b & 63) }
-fn lean_isize_shift_right(a : u64, b : u64) -> u64 { ((a as i64) >> ((b & 63) as i64)) as u64 }
+#[ffi(import)]
+fn lean_isize_div(a : u64, b : u64) -> u64 [{ sem::sint::isize_div(a as usize, b as usize) as u64 }];
+#[ffi(import)]
+fn lean_isize_mod(a : u64, b : u64) -> u64 [{ sem::sint::isize_mod(a as usize, b as usize) as u64 }];
+#[ffi(import)]
+fn lean_isize_shift_left(a : u64, b : u64) -> u64 [{ sem::sint::isize_shift_left(a as usize, b as usize) as u64 }];
+#[ffi(import)]
+fn lean_isize_shift_right(a : u64, b : u64) -> u64 [{ sem::sint::isize_shift_right(a as usize, b as usize) as u64 }];
 fn lean_isize_complement(a : u64) -> u64 { a ^ 18446744073709551615 }
-fn lean_isize_abs(a : u64) -> u64 { if (a as i64) < 0 { 0 - a } else { a } }
+#[ffi(import)]
+fn lean_isize_abs(a : u64) -> u64 [{ sem::sint::isize_abs(a as usize) as u64 }];
 fn lean_isize_dec_eq(a : u64, b : u64) -> bool { a == b }
 fn lean_isize_dec_lt(a : u64, b : u64) -> bool { (a as i64) < (b as i64) }
 fn lean_isize_dec_le(a : u64, b : u64) -> bool { (a as i64) <= (b as i64) }
@@ -1153,25 +1129,17 @@ fn lean_isize_to_int64(a : u64) -> u64 { ((a as i64) as i64) as u64 }
 fn lean_isize_to_float(a : u64) -> f64 { (a as i64) as f64 }
 fn lean_isize_to_float32(a : u64) -> f32 { (a as i64) as f32 }
 fn lean_bool_to_isize(b : bool) -> u64 { if b { 1 } else { 0 } }
-fn lean_float_to_isize(a : f64) -> u64 {
-    let d : f64 = a;
-    let lo : f64 = (0.0 - 9223372036854775809.0);
-    let hi : f64 = 9223372036854775808.0;
-    if d != d { 0 } else { if lo < d { if d < hi { (d as i64) as u64 } else { 9223372036854775807 } } else { 9223372036854775808 } }
-}
-fn lean_float32_to_isize(a : f32) -> u64 {
-    let d : f64 = (a as f64);
-    let lo : f64 = (0.0 - 9223372036854775809.0);
-    let hi : f64 = 9223372036854775808.0;
-    if d != d { 0 } else { if lo < d { if d < hi { (d as i64) as u64 } else { 9223372036854775807 } } else { 9223372036854775808 } }
-}
+#[ffi(import)]
+fn lean_float_to_isize(a : f64) -> u64 [{ sem::float::to_isize(a) as u64 }];
+#[ffi(import)]
+fn lean_float32_to_isize(a : f32) -> u64 [{ sem::float32::to_isize(a) as u64 }];
 
 // END GENERATED: scalars
 
 fn lean_uint64_mix_hash(a : u64, b : u64) -> u64 { l2r_mix_hash(a, b) }
 
 #[ffi(import)]
-fn l2r_mix_hash(a : u64, b : u64) -> u64 [{ leanrt::hash::mix(a, b) }];
+fn l2r_mix_hash(a : u64, b : u64) -> u64 [{ sem::hash::uint64_mix_hash(a, b) }];
 
 fn lean_strict_and(a : bool, b : bool) -> bool { a && b }
 fn lean_strict_or(a : bool, b : bool) -> bool { a || b }
@@ -1180,7 +1148,8 @@ fn lean_strict_or(a : bool, b : bool) -> bool { a || b }
 // Float (f64) and Float32 (f32)
 //
 // Arithmetic and comparisons are IEEE operations (ordered comparisons, as
-// C); math functions are the C library's (see the libm functions below).
+// C). Everything else is lean-runtime's (`sem::float`, `sem::float32`,
+// `sem::libm`).
 
 fn lean_float_add(a : f64, b : f64) -> f64 { a + b }
 fn lean_float_sub(a : f64, b : f64) -> f64 { a - b }
@@ -1190,9 +1159,12 @@ fn lean_float_negate(a : f64) -> f64 { -a }
 fn lean_float_beq(a : f64, b : f64) -> bool { a == b }
 fn lean_float_decLe(a : f64, b : f64) -> bool { a <= b }
 fn lean_float_decLt(a : f64, b : f64) -> bool { a < b }
-fn lean_float_isnan(a : f64) -> bool { a != a }
-fn lean_float_isfinite(a : f64) -> bool { let inf : f64 = 1.0 / 0.0; core::intrinsic::math::absf(a, 0) < inf }
-fn lean_float_isinf(a : f64) -> bool { let inf : f64 = 1.0 / 0.0; core::intrinsic::math::absf(a, 0) == inf }
+#[ffi(import)]
+fn lean_float_isnan(a : f64) -> bool [{ sem::float::isnan(a) }];
+#[ffi(import)]
+fn lean_float_isfinite(a : f64) -> bool [{ sem::float::isfinite(a) }];
+#[ffi(import)]
+fn lean_float_isinf(a : f64) -> bool [{ sem::float::isinf(a) }];
 fn lean_float_to_float32(a : f64) -> f32 { a as f32 }
 fn lean_float32_to_float(a : f32) -> f64 { a as f64 }
 
@@ -1204,20 +1176,23 @@ fn lean_float32_negate(a : f32) -> f32 { -a }
 fn lean_float32_beq(a : f32, b : f32) -> bool { a == b }
 fn lean_float32_decLe(a : f32, b : f32) -> bool { a <= b }
 fn lean_float32_decLt(a : f32, b : f32) -> bool { a < b }
-fn lean_float32_isnan(a : f32) -> bool { a != a }
-fn lean_float32_isfinite(a : f32) -> bool { let inf : f32 = 1.0 / 0.0; core::intrinsic::math::absf(a, 0) < inf }
-fn lean_float32_isinf(a : f32) -> bool { let inf : f32 = 1.0 / 0.0; core::intrinsic::math::absf(a, 0) == inf }
+#[ffi(import)]
+fn lean_float32_isnan(a : f32) -> bool [{ sem::float32::isnan(a) }];
+#[ffi(import)]
+fn lean_float32_isfinite(a : f32) -> bool [{ sem::float32::isfinite(a) }];
+#[ffi(import)]
+fn lean_float32_isinf(a : f32) -> bool [{ sem::float32::isinf(a) }];
 
 #[ffi(import)]
 fn lean_float_to_string(a : f64) -> LStr [{ leanrt::float::to_string(a) }];
 #[ffi(import)]
 fn lean_float32_to_string(a : f32) -> LStr [{ leanrt::float::to_string32(a) }];
 #[ffi(import)]
-fn lean_float_of_bits(u : u64) -> f64 [{ leanrt::float::of_bits(u) }];
+fn lean_float_of_bits(u : u64) -> f64 [{ sem::float::of_bits(u) }];
 #[ffi(import)]
-fn lean_float_to_bits(a : f64) -> u64 [{ leanrt::float::to_bits(a) }];
+fn lean_float_to_bits(a : f64) -> u64 [{ sem::float::to_bits(a) }];
 #[ffi(import)]
-fn lean_float32_of_bits(u : u32) -> f32 [{ leanrt::float::of_bits32(u) }];
+fn lean_float32_of_bits(u : u32) -> f32 [{ sem::float32::of_bits(u) }];
 // The bits of a float copied unchanged, NaN payloads included: what an
 // `unsafeCast` between `Float` and `UInt64` (`Float32` and `UInt32`) reads
 // natively, unlike `Float.ofBits`/`toBits`, which canonicalize NaN.
@@ -1230,146 +1205,148 @@ fn l2r_f32_of_raw_bits(u : u32) -> f32 [{ f32::from_bits(u) }];
 #[ffi(import)]
 fn l2r_f32_raw_bits(a : f32) -> u32 [{ a.to_bits() }];
 #[ffi(import)]
-fn lean_float32_to_bits(a : f32) -> u32 [{ leanrt::float::to_bits32(a) }];
-#[ffi(import)]
-fn l2r_float_scalbn(a : f64, n : i32) -> f64 [{ leanrt::float::scalb(a, n) }];
-#[ffi(import)]
-fn l2r_float32_scalbn(a : f32, n : i32) -> f32 [{ leanrt::float::scalb32(a, n) }];
+fn lean_float32_to_bits(a : f32) -> u32 [{ sem::float32::to_bits(a) }];
 // `Float.frExp` returns a `Float × Int`: lean2rr's glue pairs these.
 #[ffi(import)]
-fn l2r_float_frexp_mant(a : f64) -> f64 [{ leanrt::float::frexp_mant(a) }];
+fn l2r_float_frexp_mant(a : f64) -> f64 [{ sem::float::frexp(a).0 }];
 #[ffi(import)]
-fn l2r_float_frexp_exp_i64(a : f64) -> i64 [{ leanrt::float::frexp_exp(a) }];
+fn l2r_float_frexp_exp_i64(a : f64) -> i64 [{ sem::float::frexp(a).1 as i64 }];
 #[ffi(import)]
-fn l2r_float32_frexp_mant(a : f32) -> f32 [{ leanrt::float::frexp_mant32(a) }];
+fn l2r_float32_frexp_mant(a : f32) -> f32 [{ sem::float32::frexp(a).0 }];
 #[ffi(import)]
-fn l2r_float32_frexp_exp_i64(a : f32) -> i64 [{ leanrt::float::frexp_exp32(a) }];
+fn l2r_float32_frexp_exp_i64(a : f32) -> i64 [{ sem::float32::frexp(a).1 as i64 }];
 fn l2r_float_frexp_exp(a : f64) -> Int { l2r_int_of_i64(l2r_float_frexp_exp_i64(a)) }
 fn l2r_float32_frexp_exp(a : f32) -> Int { l2r_int_of_i64(l2r_float32_frexp_exp_i64(a)) }
 
-// `Float.scaleB x i`: an `i` outside the `int32` range is a big number and
-// takes the big-number branch of `lean_float_scaleb`: 0 when `x == 0` or
-// `i < 0`, else `x * inf`.
-fn lean_float_scaleb(a : f64, b : Int) -> f64 {
+// `Float.scaleB x i`: lean-runtime's `scaleb` takes the `Int` saturated to
+// `i64`; a big `Int` (outside `int32`) by its sign.
+#[ffi(import)]
+fn l2r_float_scaleb(a : f64, i : i64) -> f64 [{ sem::float::scaleb(a, i) }];
+#[ffi(import)]
+fn l2r_float32_scaleb(a : f32, i : i64) -> f32 [{ sem::float32::scaleb(a, i) }];
+
+fn lean_float_scaleb(a : f64, b : Int) -> f64 { l2r_float_scaleb(a, l2r_int_sat_i64(b)) }
+fn lean_float32_scaleb(a : f32, b : Int) -> f32 { l2r_float32_scaleb(a, l2r_int_sat_i64(b)) }
+
+// An `Int` saturated to `i64`: a small one's value, a big one `i64::MIN` or
+// `i64::MAX` by its sign.
+fn l2r_int_sat_i64(b : Int) -> i64 {
     let x = l2r_int_raw(b);
-    if (x & 1) == 1 { l2r_float_scalbn(a, l2r_int_val(x) as i32) } else { l2r_float_scaleb_big(a, l2r_int_is_neg_raw(x)) }
-}
-
-fn l2r_float_scaleb_big(a : f64, neg : bool) -> f64 {
-    let inf : f64 = 1.0 / 0.0;
-    if a == 0.0 || neg { 0.0 } else { a * inf }
-}
-
-fn lean_float32_scaleb(a : f32, b : Int) -> f32 {
-    let x = l2r_int_raw(b);
-    if (x & 1) == 1 { l2r_float32_scalbn(a, l2r_int_val(x) as i32) } else { l2r_float32_scaleb_big(a, l2r_int_is_neg_raw(x)) }
-}
-
-fn l2r_float32_scaleb_big(a : f32, neg : bool) -> f32 {
-    let inf : f64 = 1.0 / 0.0;
-    if a == 0.0 || neg { 0.0 } else { ((a as f64) * inf) as f32 }
+    if (x & 1) == 1 { l2r_int_val(x) } else { if l2r_int_is_neg_raw(x) { 0 - 9223372036854775807 - 1 } else { 9223372036854775807 } }
 }
 
 // libm functions under their C names (the extern symbols of `Float.sin`,
-// `Float32.pow`, ...). The exact operations (sqrt, ceil, floor, round, fabs)
-// are LLVM intrinsics. The others call the C library's function through
-// `leanrt::float::libm`, opaquely: LLVM would fold a call whose operand it
-// knows (an `f32` one in double precision, `exp2` through `pow`) and rewrite
-// `pow` with a constant operand (`pow(x, 0.5)` into `sqrt`, `pow(2.0, y)`
-// into `exp2`, ...), and glibc's results differ from those in the last bit
-// on some inputs (cross-tests XT-3, XT-4). Natively they are glibc's, run
-// at run time even on literal operands.
+// ...): lean-runtime's `sem::libm`, glibc's results. Its inexact `Float32`
+// functions, `exp2` and `pow` take their operands through `black_box`, so
+// LLVM neither folds nor rewrites them (`pow x 0.5` as `sqrt`, an `f32` call
+// in double precision); the others fold to glibc's own results. The
+// `black_box` ones and lean-runtime's ports of glibc's `cbrt`, `cbrtf`,
+// `atanh`, `atanhf` are called out of line (`leanrt::float::libm_call`):
+// inlined, a `black_box` slot, and not inlined, a texture's packed
+// arguments, would stop LLVM from making a Lean loop that calls them a loop.
+// The ports exist on aarch64 Linux with glibc only; elsewhere a call ends
+// the program with an internal panic (other programs are unaffected).
 #[ffi(import)]
-fn sin(x : f64) -> f64 [{ leanrt::float::libm::sin(x) }];
+fn sin(x : f64) -> f64 [{ sem::libm::sin(x) }];
 #[ffi(import)]
-fn cos(x : f64) -> f64 [{ leanrt::float::libm::cos(x) }];
+fn cos(x : f64) -> f64 [{ sem::libm::cos(x) }];
 #[ffi(import)]
-fn tan(x : f64) -> f64 [{ leanrt::float::libm::tan(x) }];
+fn tan(x : f64) -> f64 [{ sem::libm::tan(x) }];
 #[ffi(import)]
-fn asin(x : f64) -> f64 [{ leanrt::float::libm::asin(x) }];
+fn asin(x : f64) -> f64 [{ sem::libm::asin(x) }];
 #[ffi(import)]
-fn acos(x : f64) -> f64 [{ leanrt::float::libm::acos(x) }];
+fn acos(x : f64) -> f64 [{ sem::libm::acos(x) }];
 #[ffi(import)]
-fn atan(x : f64) -> f64 [{ leanrt::float::libm::atan(x) }];
+fn atan(x : f64) -> f64 [{ sem::libm::atan(x) }];
 #[ffi(import)]
-fn sinh(x : f64) -> f64 [{ leanrt::float::libm::sinh(x) }];
+fn sinh(x : f64) -> f64 [{ sem::libm::sinh(x) }];
 #[ffi(import)]
-fn cosh(x : f64) -> f64 [{ leanrt::float::libm::cosh(x) }];
+fn cosh(x : f64) -> f64 [{ sem::libm::cosh(x) }];
 #[ffi(import)]
-fn tanh(x : f64) -> f64 [{ leanrt::float::libm::tanh(x) }];
+fn tanh(x : f64) -> f64 [{ sem::libm::tanh(x) }];
 #[ffi(import)]
-fn asinh(x : f64) -> f64 [{ leanrt::float::libm::asinh(x) }];
+fn asinh(x : f64) -> f64 [{ sem::libm::asinh(x) }];
 #[ffi(import)]
-fn acosh(x : f64) -> f64 [{ leanrt::float::libm::acosh(x) }];
+fn acosh(x : f64) -> f64 [{ sem::libm::acosh(x) }];
 #[ffi(import)]
-fn atanh(x : f64) -> f64 [{ leanrt::float::libm::atanh(x) }];
+fn atanh(x : f64) -> f64 [{ leanrt::float::libm_call::atanh(x) }];
 #[ffi(import)]
-fn exp(x : f64) -> f64 [{ leanrt::float::libm::exp(x) }];
+fn exp(x : f64) -> f64 [{ sem::libm::exp(x) }];
 #[ffi(import)]
-fn exp2(x : f64) -> f64 [{ leanrt::float::libm::exp2(x) }];
+fn exp2(x : f64) -> f64 [{ leanrt::float::libm_call::exp2(x) }];
 #[ffi(import)]
-fn log(x : f64) -> f64 [{ leanrt::float::libm::log(x) }];
+fn log(x : f64) -> f64 [{ sem::libm::log(x) }];
 #[ffi(import)]
-fn log2(x : f64) -> f64 [{ leanrt::float::libm::log2(x) }];
+fn log2(x : f64) -> f64 [{ sem::libm::log2(x) }];
 #[ffi(import)]
-fn log10(x : f64) -> f64 [{ leanrt::float::libm::log10(x) }];
+fn log10(x : f64) -> f64 [{ sem::libm::log10(x) }];
 #[ffi(import)]
-fn cbrt(x : f64) -> f64 [{ leanrt::float::libm::cbrt(x) }];
+fn sqrt(x : f64) -> f64 [{ sem::libm::sqrt(x) }];
 #[ffi(import)]
-fn atan2(y : f64, x : f64) -> f64 [{ leanrt::float::libm::atan2(y, x) }];
+fn cbrt(x : f64) -> f64 [{ leanrt::float::libm_call::cbrt(x) }];
 #[ffi(import)]
-fn pow(x : f64, y : f64) -> f64 [{ leanrt::float::libm::pow(x, y) }];
-fn sqrt(x : f64) -> f64 { core::intrinsic::math::sqrt(x, 0) }
-fn ceil(x : f64) -> f64 { core::intrinsic::math::ceil(x, 0) }
-fn floor(x : f64) -> f64 { core::intrinsic::math::floor(x, 0) }
-fn round(x : f64) -> f64 { core::intrinsic::math::round(x, 0) }
-fn fabs(x : f64) -> f64 { core::intrinsic::math::absf(x, 0) }
+fn ceil(x : f64) -> f64 [{ sem::libm::ceil(x) }];
+#[ffi(import)]
+fn floor(x : f64) -> f64 [{ sem::libm::floor(x) }];
+#[ffi(import)]
+fn round(x : f64) -> f64 [{ sem::libm::round(x) }];
+#[ffi(import)]
+fn fabs(x : f64) -> f64 [{ sem::libm::fabs(x) }];
+#[ffi(import)]
+fn atan2(y : f64, x : f64) -> f64 [{ sem::libm::atan2(y, x) }];
+#[ffi(import)]
+fn pow(x : f64, y : f64) -> f64 [{ leanrt::float::libm_call::pow(x, y) }];
 
 #[ffi(import)]
-fn sinf(x : f32) -> f32 [{ leanrt::float::libm::sinf(x) }];
+fn sinf(x : f32) -> f32 [{ leanrt::float::libm_call::sinf(x) }];
 #[ffi(import)]
-fn cosf(x : f32) -> f32 [{ leanrt::float::libm::cosf(x) }];
+fn cosf(x : f32) -> f32 [{ leanrt::float::libm_call::cosf(x) }];
 #[ffi(import)]
-fn tanf(x : f32) -> f32 [{ leanrt::float::libm::tanf(x) }];
+fn tanf(x : f32) -> f32 [{ leanrt::float::libm_call::tanf(x) }];
 #[ffi(import)]
-fn asinf(x : f32) -> f32 [{ leanrt::float::libm::asinf(x) }];
+fn asinf(x : f32) -> f32 [{ leanrt::float::libm_call::asinf(x) }];
 #[ffi(import)]
-fn acosf(x : f32) -> f32 [{ leanrt::float::libm::acosf(x) }];
+fn acosf(x : f32) -> f32 [{ leanrt::float::libm_call::acosf(x) }];
 #[ffi(import)]
-fn atanf(x : f32) -> f32 [{ leanrt::float::libm::atanf(x) }];
+fn atanf(x : f32) -> f32 [{ leanrt::float::libm_call::atanf(x) }];
 #[ffi(import)]
-fn sinhf(x : f32) -> f32 [{ leanrt::float::libm::sinhf(x) }];
+fn sinhf(x : f32) -> f32 [{ leanrt::float::libm_call::sinhf(x) }];
 #[ffi(import)]
-fn coshf(x : f32) -> f32 [{ leanrt::float::libm::coshf(x) }];
+fn coshf(x : f32) -> f32 [{ leanrt::float::libm_call::coshf(x) }];
 #[ffi(import)]
-fn tanhf(x : f32) -> f32 [{ leanrt::float::libm::tanhf(x) }];
+fn tanhf(x : f32) -> f32 [{ leanrt::float::libm_call::tanhf(x) }];
 #[ffi(import)]
-fn asinhf(x : f32) -> f32 [{ leanrt::float::libm::asinhf(x) }];
+fn asinhf(x : f32) -> f32 [{ leanrt::float::libm_call::asinhf(x) }];
 #[ffi(import)]
-fn acoshf(x : f32) -> f32 [{ leanrt::float::libm::acoshf(x) }];
+fn acoshf(x : f32) -> f32 [{ leanrt::float::libm_call::acoshf(x) }];
 #[ffi(import)]
-fn atanhf(x : f32) -> f32 [{ leanrt::float::libm::atanhf(x) }];
+fn atanhf(x : f32) -> f32 [{ leanrt::float::libm_call::atanhf(x) }];
 #[ffi(import)]
-fn expf(x : f32) -> f32 [{ leanrt::float::libm::expf(x) }];
+fn expf(x : f32) -> f32 [{ leanrt::float::libm_call::expf(x) }];
 #[ffi(import)]
-fn exp2f(x : f32) -> f32 [{ leanrt::float::libm::exp2f(x) }];
+fn exp2f(x : f32) -> f32 [{ leanrt::float::libm_call::exp2f(x) }];
 #[ffi(import)]
-fn logf(x : f32) -> f32 [{ leanrt::float::libm::logf(x) }];
+fn logf(x : f32) -> f32 [{ leanrt::float::libm_call::logf(x) }];
 #[ffi(import)]
-fn log2f(x : f32) -> f32 [{ leanrt::float::libm::log2f(x) }];
+fn log2f(x : f32) -> f32 [{ leanrt::float::libm_call::log2f(x) }];
 #[ffi(import)]
-fn log10f(x : f32) -> f32 [{ leanrt::float::libm::log10f(x) }];
+fn log10f(x : f32) -> f32 [{ leanrt::float::libm_call::log10f(x) }];
 #[ffi(import)]
-fn cbrtf(x : f32) -> f32 [{ leanrt::float::libm::cbrtf(x) }];
+fn sqrtf(x : f32) -> f32 [{ sem::libm::sqrtf(x) }];
 #[ffi(import)]
-fn atan2f(y : f32, x : f32) -> f32 [{ leanrt::float::libm::atan2f(y, x) }];
+fn cbrtf(x : f32) -> f32 [{ leanrt::float::libm_call::cbrtf(x) }];
 #[ffi(import)]
-fn powf(x : f32, y : f32) -> f32 [{ leanrt::float::libm::powf(x, y) }];
-fn sqrtf(x : f32) -> f32 { core::intrinsic::math::sqrt(x, 0) }
-fn ceilf(x : f32) -> f32 { core::intrinsic::math::ceil(x, 0) }
-fn floorf(x : f32) -> f32 { core::intrinsic::math::floor(x, 0) }
-fn roundf(x : f32) -> f32 { core::intrinsic::math::round(x, 0) }
-fn fabsf(x : f32) -> f32 { core::intrinsic::math::absf(x, 0) }
+fn ceilf(x : f32) -> f32 [{ sem::libm::ceilf(x) }];
+#[ffi(import)]
+fn floorf(x : f32) -> f32 [{ sem::libm::floorf(x) }];
+#[ffi(import)]
+fn roundf(x : f32) -> f32 [{ sem::libm::roundf(x) }];
+#[ffi(import)]
+fn fabsf(x : f32) -> f32 [{ sem::libm::fabsf(x) }];
+#[ffi(import)]
+fn atan2f(y : f32, x : f32) -> f32 [{ leanrt::float::libm_call::atan2f(y, x) }];
+#[ffi(import)]
+fn powf(x : f32, y : f32) -> f32 [{ leanrt::float::libm_call::powf(x, y) }];
 
 // ===========================================================================
 // String
@@ -1400,47 +1377,58 @@ fn l2r_string_length(s : LStr) -> u64 [{ { let r = leanrt::string::length(&s); l
 
 fn lean_string_utf8_byte_size(s : LStr) -> Nat { l2r_nat_small(l2r_string_size(s)) }
 fn lean_string_length(s : LStr) -> Nat { l2r_nat_small(l2r_string_length(s)) }
-fn lean_string_size(s : LStr) -> Nat { l2r_nat_small(l2r_string_size(s) + 1) }
-fn lean_string_len(s : LStr) -> Nat { l2r_nat_small(l2r_string_length(s)) }
 
+// The string rules are lean-runtime's (`sem::string`, on the bytes and
+// `u64` positions); a big `Nat` position is passed as `u64::MAX`
+// (`l2r_pos_of_nat`), which every rule but `next`/`prev` treats as Lean's C
+// treats a non-scalar position. `get?`/`get!` answer `0x110000` for `none`
+// (lean2rr's glue builds the `Option Char`; `get!` panics).
 #[ffi(import)]
-fn l2r_string_get(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get(s.utf8(), i); leanrt::rc_release(s); r } }];
+fn l2r_string_get(s : LStr, i : u64) -> u32 [{ { let r = sem::string::utf8_get(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_get_opt(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get_opt(s.utf8(), i); leanrt::rc_release(s); r } }];
+fn l2r_string_get_opt(s : LStr, i : u64) -> u32 [{ { let r = sem::string::utf8_get_opt(s.utf8(), i).unwrap_or(0x110000); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_get_fast(s : LStr, i : u64) -> u32 [{ { let r = leanrt::string::get_fast(s.utf8(), i); leanrt::rc_release(s); r } }];
+fn l2r_string_get_bang(s : LStr, i : u64) -> u32 [{ { let r = sem::string::utf8_get_bang(s.utf8(), i).unwrap_or(0x110000); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_next(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::next(s.utf8(), i); leanrt::rc_release(s); r } }];
+fn l2r_char_default() -> u32 [{ sem::string::CHAR_DEFAULT }];
 #[ffi(import)]
-fn l2r_string_next_fast(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::next_fast(s.utf8(), i); leanrt::rc_release(s); r } }];
+fn l2r_string_get_fast(s : LStr, i : u64) -> u32 [{ { let r = sem::string::utf8_get_fast(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_prev(s : LStr, i : u64) -> u64 [{ { let r = leanrt::string::prev(s.utf8(), i); leanrt::rc_release(s); r } }];
+fn l2r_string_next(s : LStr, i : u64) -> u64 [{ { let r = sem::string::utf8_next(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
-fn l2r_string_is_valid_pos(s : LStr, i : u64) -> bool [{ { let r = leanrt::string::is_valid_pos(s.utf8(), i); leanrt::rc_release(s); r } }];
+fn l2r_string_next_fast(s : LStr, i : u64) -> u64 [{ { let r = sem::string::utf8_next_fast(s.utf8(), i); leanrt::rc_release(s); r } }];
+#[ffi(import)]
+fn l2r_string_prev(s : LStr, i : u64) -> u64 [{ { let r = sem::string::utf8_prev(s.utf8(), i); leanrt::rc_release(s); r } }];
+#[ffi(import)]
+fn l2r_string_at_end(s : LStr, i : u64) -> bool [{ { let r = sem::string::utf8_at_end(s.utf8(), i); leanrt::rc_release(s); r } }];
+#[ffi(import)]
+fn l2r_string_is_valid_pos(s : LStr, i : u64) -> bool [{ { let r = sem::string::is_valid_pos(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
 fn l2r_string_extract(s : LStr, b : u64, e : u64) -> LStr [{ leanrt::string::extract(s, b, e) }];
 #[ffi(import)]
+fn l2r_string_extract_fast(s : LStr, b : u64, e : u64) -> LStr [{ leanrt::string::extract_fast(s, b, e) }];
+#[ffi(import)]
 fn l2r_string_set(s : LStr, i : u64, c : u32) -> LStr [{ leanrt::string::set(s, i, c) }];
 #[ffi(import)]
-fn l2r_string_get_byte(s : LStr, i : u64) -> u8 [{ { let r = s.utf8().get(i as usize).copied().unwrap_or(0); leanrt::rc_release(s); r } }];
+fn l2r_string_get_byte(s : LStr, i : u64) -> u8 [{ { let r = sem::string::get_byte_fast(s.utf8(), i); leanrt::rc_release(s); r } }];
+
+// A `Nat` position as lean-runtime's string rules take it: its value, or
+// `u64::MAX` for a big one (past the end of every string).
+fn l2r_pos_of_nat(p : Nat) -> u64 {
+    let x = l2r_nat_raw(p);
+    if (x & 1) == 1 { x >> 1 } else { let d = l2r_nat_drop_raw(x); 18446744073709551615 }
+}
 
 // `String.Pos.Raw.get`: the character at byte `p`, or `'A'`.
-fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 {
-    let x = l2r_nat_raw(p);
-    if (x & 1) == 1 { l2r_string_get(s, x >> 1) } else { let d = l2r_nat_drop_raw(x); 65 }
-}
+fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 { l2r_string_get(s, l2r_pos_of_nat(p)) }
 
-// `String.Pos.Raw.get?`: 0x110000 encodes `none` (lean2rr's glue builds
-// the `Option Char`).
-fn l2r_string_utf8_get_opt(s : LStr, p : Nat) -> u32 {
-    let x = l2r_nat_raw(p);
-    if (x & 1) == 1 { l2r_string_get_opt(s, x >> 1) } else { let d = l2r_nat_drop_raw(x); 1114112 }
-}
+// `String.Pos.Raw.get?`.
+fn l2r_string_utf8_get_opt(s : LStr, p : Nat) -> u32 { l2r_string_get_opt(s, l2r_pos_of_nat(p)) }
 
 // `String.Pos.Raw.get!`: panics (C message) and returns `'A'`.
 fn lean_string_utf8_get_bang(s : LStr, p : Nat) -> u32 {
-    let c = l2r_string_utf8_get_opt(s, p);
-    if c == 1114112 { let ignored = l2r_panic_code(1); 65 } else { c }
+    let c = l2r_string_get_bang(s, l2r_pos_of_nat(p));
+    if c == 1114112 { let ignored = l2r_panic_code(1); l2r_char_default() } else { c }
 }
 
 // `String.Pos.get`/`Pos.Raw.get'` and `next'` take a proof that the
@@ -1448,13 +1436,12 @@ fn lean_string_utf8_get_bang(s : LStr, p : Nat) -> u32 {
 // `l2r_index_of_nat`).
 fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 { l2r_string_get_fast(s, l2r_index_of_nat(p)) }
 
-// `String.Pos.Raw.next`: `p + 1` at or past the end.
+// `String.Pos.Raw.next`: `p + 1` at or past the end. lean-runtime's `next`
+// takes a position below 2^63 (a small `Nat`) and may answer 2^63, a big
+// `Nat`; for a big position C computes `p + 1` on the `Nat`, as here.
 fn lean_string_utf8_next(s : LStr, p : Nat) -> Nat {
     let x = l2r_nat_raw(p);
-    if (x & 1) == 1 {
-        let r = l2r_string_next(s, x >> 1);
-        if r == 0 { lean_nat_add(l2r_nat_of_raw(x), l2r_nat_small(1)) } else { l2r_nat_small(r) }
-    } else { lean_nat_add(l2r_nat_of_raw(x), l2r_nat_small(1)) }
+    if (x & 1) == 1 { l2r_nat_of_u64(l2r_string_next(s, x >> 1)) } else { lean_nat_add(l2r_nat_of_raw(x), l2r_nat_small(1)) }
 }
 
 fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat { l2r_nat_small(l2r_string_next_fast(s, l2r_index_of_nat(p))) }
@@ -1464,32 +1451,21 @@ fn lean_string_utf8_prev(s : LStr, p : Nat) -> Nat {
     if (x & 1) == 1 { l2r_nat_small(l2r_string_prev(s, x >> 1)) } else { lean_nat_sub(l2r_nat_of_raw(x), l2r_nat_small(1)) }
 }
 
-fn lean_string_utf8_at_end(s : LStr, p : Nat) -> bool {
-    let x = l2r_nat_raw(p);
-    if (x & 1) == 1 { (x >> 1) >= l2r_string_size(s) } else { let d = l2r_nat_drop_raw(x); true }
-}
+fn lean_string_utf8_at_end(s : LStr, p : Nat) -> bool { l2r_string_at_end(s, l2r_pos_of_nat(p)) }
 
-fn lean_string_is_valid_pos(s : LStr, p : Nat) -> bool {
-    let x = l2r_nat_raw(p);
-    if (x & 1) == 1 { l2r_string_is_valid_pos(s, x >> 1) } else { let d = l2r_nat_drop_raw(x); false }
-}
+fn lean_string_is_valid_pos(s : LStr, p : Nat) -> bool { l2r_string_is_valid_pos(s, l2r_pos_of_nat(p)) }
 
 // `String.Pos.Raw.extract`. A non-scalar (big) position counts as
 // SIZE_MAX, as natively since Lean 4.34: a big start gives "", a big end
 // extracts to the end of the string.
 fn lean_string_utf8_extract(s : LStr, b : Nat, e : Nat) -> LStr {
-    let x = l2r_nat_raw(b);
-    let y = l2r_nat_raw(e);
-    let bi = if (x & 1) == 1 { x >> 1 } else { let d = l2r_nat_drop_raw(x); 18446744073709551615 };
-    let ei = if (y & 1) == 1 { y >> 1 } else { let d = l2r_nat_drop_raw(y); 18446744073709551615 };
-    l2r_string_extract(s, bi, ei)
+    let bi = l2r_pos_of_nat(b);
+    l2r_string_extract(s, bi, l2r_pos_of_nat(e))
 }
 
 // `String.extract` (positions of `s`, valid by their proofs: never big).
-// Natively it skips the checks of `lean_string_utf8_extract`, whose result
-// is the same on valid positions.
 fn lean_string_utf8_extract_fast(s : LStr, b : Nat, e : Nat) -> LStr {
-    l2r_string_extract(s, l2r_index_of_nat(b), l2r_index_of_nat(e))
+    l2r_string_extract_fast(s, l2r_index_of_nat(b), l2r_index_of_nat(e))
 }
 
 fn lean_string_utf8_set(s : LStr, p : Nat, c : u32) -> LStr {
@@ -1503,16 +1479,12 @@ fn lean_string_uget_byte_fast(s : LStr, i : u64) -> u8 { l2r_string_get_byte(s, 
 #[ffi(import)]
 fn lean_string_dec_eq(a : LStr, b : LStr) -> bool [{ { let r = a.utf8() == b.utf8(); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 #[ffi(import)]
-fn lean_string_dec_lt(a : LStr, b : LStr) -> bool [{ { let r = leanrt::string::dec_lt(a.utf8(), b.utf8()); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
-#[ffi(import)]
-fn lean_string_lt(a : LStr, b : LStr) -> bool [{ { let r = leanrt::string::dec_lt(a.utf8(), b.utf8()); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
-fn lean_string_eq(a : LStr, b : LStr) -> bool { lean_string_dec_eq(a, b) }
-fn lean_string_ne(a : LStr, b : LStr) -> bool { !lean_string_dec_eq(a, b) }
+fn lean_string_dec_lt(a : LStr, b : LStr) -> bool [{ { let r = sem::string::lt(a.utf8(), b.utf8()); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 // `String.compare`: 0 = lt, 1 = eq, 2 = gt (lean2rr maps it to `Ordering`).
 #[ffi(import)]
-fn l2r_string_compare(a : LStr, b : LStr) -> u8 [{ { let r = leanrt::string::compare(a.utf8(), b.utf8()); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
+fn l2r_string_compare(a : LStr, b : LStr) -> u8 [{ { let r = (sem::string::compare(a.utf8(), b.utf8()) as i8 + 1) as u8; leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 #[ffi(import)]
-fn lean_string_hash(s : LStr) -> u64 [{ { let r = leanrt::string::hash(s.utf8()); leanrt::rc_release(s); r } }];
+fn lean_string_hash(s : LStr) -> u64 [{ { let r = sem::hash::string_hash(s.utf8()); leanrt::rc_release(s); r } }];
 
 // `String.toUTF8` / `String.ofByteArray` / `String.fromUTF8`: copies, as
 // natively; from bytes, the characters are counted.
@@ -1527,7 +1499,7 @@ fn lean_string_validate_utf8(b : RVec<u8>) -> bool [{ { let r = leanrt::string::
 fn lean_decode_lossy_utf8(b : RVec<u8>) -> LStr [{ leanrt::string::from_bytes_lossy(leanrt::array::as_slice(&b)) }];
 
 #[ffi(import)]
-fn l2r_string_memcmp(a : LStr, b : LStr, ls : u64, rs : u64, len : u64) -> bool [{ { let r = leanrt::string::memcmp(a.utf8(), b.utf8(), ls, rs, len); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
+fn l2r_string_memcmp(a : LStr, b : LStr, ls : u64, rs : u64, len : u64) -> bool [{ { let r = sem::string::memcmp(a.utf8(), b.utf8(), ls, rs, len); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 
 fn lean_string_memcmp(a : LStr, b : LStr, ls : Nat, rs : Nat, len : Nat) -> bool {
     l2r_string_memcmp(a, b, lean_usize_of_nat(ls), lean_usize_of_nat(rs), lean_usize_of_nat(len))
@@ -1537,11 +1509,11 @@ fn lean_string_memcmp(a : LStr, b : LStr, ls : Nat, rs : Nat, len : Nat) -> bool
 // string and byte bounds).
 #[ffi(import)]
 fn l2r_slice_hash(s : LStr, b : u64, e : u64) -> u64 [{
-    leanrt::string::hash(s.utf8().get(b as usize..e as usize).unwrap_or(&[]))
+    sem::hash::slice_hash(s.utf8().get(b as usize..e as usize).unwrap_or(&[]))
 }];
 #[ffi(import)]
 fn l2r_slice_dec_lt(s1 : LStr, b1 : u64, e1 : u64, s2 : LStr, b2 : u64, e2 : u64) -> bool [{
-    s1.utf8().get(b1 as usize..e1 as usize).unwrap_or(&[]) < s2.utf8().get(b2 as usize..e2 as usize).unwrap_or(&[])
+    sem::string::lt(s1.utf8().get(b1 as usize..e1 as usize).unwrap_or(&[]), s2.utf8().get(b2 as usize..e2 as usize).unwrap_or(&[]))
 }];
 // `ByteSlice.beq` (`lean_byteslice_beq`) on the fields `byteArray`,
 // `start`, `stop` of both slices (`start ≤ stop ≤ size` by the structure's
@@ -1609,81 +1581,6 @@ fn l2r_float_frexp_with<P>(x : f64, mk : f64 -> (Int -> P)) -> P {
 
 fn l2r_float32_frexp_with<P>(x : f32, mk : f32 -> (Int -> P)) -> P {
     mk(l2r_float32_frexp_mant(x))(l2r_float32_frexp_exp(x))
-}
-
-fn lean_string_pos_sub(a : Nat, b : Nat) -> Nat { lean_nat_sub(a, b) }
-fn lean_string_pos_min(a : Nat, b : Nat) -> Nat { if lean_nat_dec_le(a, b) { a } else { b } }
-
-// ---- `String.Internal.*` (implemented by exported Lean definitions) ----
-
-#[ffi(import)]
-fn l2r_string_drop(s : LStr, n : u64) -> LStr [{ leanrt::string::drop(s, n) }];
-#[ffi(import)]
-fn l2r_string_drop_right(s : LStr, n : u64) -> LStr [{ leanrt::string::drop_right(s, n) }];
-#[ffi(import)]
-fn lean_string_isprefixof(p : LStr, s : LStr) -> bool [{ { let r = leanrt::string::is_prefix_of(p.utf8(), s.utf8()); leanrt::rc_release(p); leanrt::rc_release(s); r } }];
-#[ffi(import)]
-fn l2r_string_pos_of(s : LStr, c : u32) -> u64 [{ { let r = leanrt::string::pos_of(s.utf8(), c); leanrt::rc_release(s); r } }];
-#[ffi(import)]
-fn lean_string_contains(s : LStr, c : u32) -> bool [{ { let r = leanrt::string::contains(s.utf8(), c); leanrt::rc_release(s); r } }];
-#[ffi(import)]
-fn l2r_string_pushn(s : LStr, c : u32, n : u64) -> LStr [{ leanrt::string::pushn(s, c, n) }];
-#[ffi(import)]
-fn lean_string_trim(s : LStr) -> LStr [{ leanrt::string::trim(s) }];
-#[ffi(import)]
-fn lean_string_capitalize(s : LStr) -> LStr [{ leanrt::string::capitalize(s) }];
-#[ffi(import)]
-fn l2r_string_offset_of_pos(s : LStr, p : u64) -> u64 [{ { let r = leanrt::string::offset_of_pos(s.utf8(), p); leanrt::rc_release(s); r } }];
-
-fn lean_string_drop(s : LStr, n : Nat) -> LStr { l2r_string_drop(s, l2r_nat_sat_u64(n)) }
-fn lean_string_dropright(s : LStr, n : Nat) -> LStr { l2r_string_drop_right(s, l2r_nat_sat_u64(n)) }
-fn lean_string_posof(s : LStr, c : u32) -> Nat { l2r_nat_small(l2r_string_pos_of(s, c)) }
-fn lean_string_front(s : LStr) -> u32 { l2r_string_get(s, 0) }
-fn lean_string_isempty(s : LStr) -> bool { l2r_string_size(s) == 0 }
-fn lean_string_offsetofpos(s : LStr, p : Nat) -> Nat { l2r_nat_small(l2r_string_offset_of_pos(s, l2r_nat_sat_u64(p))) }
-
-fn lean_string_pushn(s : LStr, c : u32, n : Nat) -> LStr {
-    let x = l2r_nat_raw(n);
-    if (x & 1) == 1 { l2r_string_pushn(s, c, x >> 1) } else { l2r_internal_panic_at<LStr>(4) }
-}
-
-// A `Nat` as a `u64`, saturating (for counts and positions where every
-// value beyond the string behaves alike).
-fn l2r_nat_sat_u64(n : Nat) -> u64 {
-    let x = l2r_nat_raw(n);
-    if (x & 1) == 1 { x >> 1 } else { let d = l2r_nat_drop_raw(x); 18446744073709551615 }
-}
-
-fn lean_string_any(s : LStr, p : u32 -> bool) -> bool { l2r_string_any_from(s, p, 0, l2r_string_size(s)) }
-
-fn l2r_string_any_from(s : LStr, p : u32 -> bool, i : u64, n : u64) -> bool {
-    if i >= n { false } else {
-        if p(l2r_string_get_fast(s, i)) { true } else { l2r_string_any_from(s, p, l2r_string_next_fast(s, i), n) }
-    }
-}
-
-// `String.Internal.foldl (f : String → Char → String) (init : String) (s : String)`.
-fn lean_string_foldl(f : LStr -> (u32 -> LStr), init : LStr, s : LStr) -> LStr {
-    l2r_string_foldl_from(f, init, s, 0, l2r_string_size(s))
-}
-
-fn l2r_string_foldl_from(f : LStr -> (u32 -> LStr), acc : LStr, s : LStr, i : u64, n : u64) -> LStr {
-    if i >= n { acc } else {
-        let acc2 = f(acc)(l2r_string_get_fast(s, i));
-        l2r_string_foldl_from(f, acc2, s, l2r_string_next_fast(s, i), n)
-    }
-}
-
-// `String.Internal.nextWhile s p i`: advance while `p` holds and not at the end.
-fn lean_string_nextwhile(s : LStr, p : u32 -> bool, i : Nat) -> Nat {
-    let x = l2r_nat_raw(i);
-    if (x & 1) == 1 { l2r_nat_small(l2r_string_next_while(s, p, x >> 1, l2r_string_size(s))) } else { l2r_nat_of_raw(x) }
-}
-
-fn l2r_string_next_while(s : LStr, p : u32 -> bool, i : u64, n : u64) -> u64 {
-    if i >= n { i } else {
-        if p(l2r_string_get(s, i)) { l2r_string_next_while(s, p, l2r_string_next(s, i), n) } else { i }
-    }
 }
 
 // ===========================================================================
@@ -2063,7 +1960,7 @@ fn lean_byte_array_set(v : RVec<u8>, i : Nat, x : u8) -> RVec<u8> {
     if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_set(v, w >> 1, x) } else { let d = l2r_nat_drop_raw(w); v }
 }
 #[ffi(import)]
-fn lean_byte_array_hash(v : RVec<u8>) -> u64 [{ { let r = leanrt::hash::murmur64a(leanrt::array::as_slice(&v), 11); leanrt::array::release(v); r } }];
+fn lean_byte_array_hash(v : RVec<u8>) -> u64 [{ { let r = sem::hash::byte_array_hash(leanrt::array::as_slice(&v)); leanrt::array::release(v); r } }];
 #[ffi(import)]
 fn lean_sarray_dec_eq(a : RVec<u8>, b : RVec<u8>) -> bool [{ { let r = leanrt::array::as_slice(&a) == leanrt::array::as_slice(&b); leanrt::array::release(a); leanrt::array::release(b); r } }];
 #[ffi(import)]
