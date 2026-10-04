@@ -196,7 +196,12 @@ directories `adv3`..`adv6`, `rv6`..`rv9`). The rows marked "none" are
 coverage tests, not findings: round 9's area crane re-expressed shapes from
 the regression tests of Crane (Bloomberg's Rocq-to-C++ extractor, another
 typed, reference-counted code generator) in Lean; they held up, and each
-test's header lists the Crane tests it covers:
+test's header lists the Crane tests it covers. Round 9's area cslib
+extracted the computational code of CSLib (github.com/leanprover/cslib,
+990e65a) into programs that import only Init (proofs dropped; CSLib itself
+imports Mathlib, which is not a target, plan §10); they gave the same
+output as native, and each test's header lists the CSLib and Mathlib files
+it draws on, with their copyright notices (Apache 2.0):
 
 | finding | test |
 |---|---|
@@ -267,6 +272,11 @@ test's header lists the Crane tests it covers:
 | none: coverage from the Crane corpus (rv9/crane CrPoly) | RtUniformFnTypes |
 | none: coverage from the Crane corpus (rv9/crane CrLoop) | RtMutualTailArgs |
 | none: coverage from the Crane corpus (rv9/crane CrTask) | RtTaskCaptureUpdate |
+| none: coverage from CSLib (rv9/cslib CslxInsertion: `TimeM`, monadic insertion sort) | RtCslInsertion |
+| none: coverage from CSLib (rv9/cslib CslxMergeSort: monadic merge sort, comparison counts) | RtCslMergeSort |
+| none: coverage from CSLib (rv9/cslib CslxTuring: single- and multi-tape Turing machines) | RtCslTuring |
+| none: coverage from CSLib (rv9/cslib CslxURM: unlimited register machine) | RtCslURM |
+| none: coverage from CSLib (rv9/cslib CslxVending: CCS terms, Milner's vending machine) | RtCslVending |
 
 Findings without a test here: costs (time, memory, build time or code
 size), Reussir-only bugs (lit tests in their patches), documentation

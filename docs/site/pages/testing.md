@@ -86,6 +86,18 @@ runtime tests (`RtGrammarActions`, `RtComputedFnTypes`, `RtSharedOnOnePath`,
 `RtDropMediated`, `RtConvMediated`, `RtReuseAlias`, `RtUniformFnTypes`,
 `RtMutualTailArgs`, `RtTaskCaptureUpdate`).
 
+### Tests derived from CSLib
+
+CSLib is a library of computer science in Lean. It imports Mathlib, and
+lean2rr does not support Mathlib (translation plan §10). Review round 9
+copied the computational code of CSLib into programs that import only
+`Init`, without the proofs: a cost-counting monad, insertion sort and merge
+sort in any monad, Turing machines, register machines and CCS processes.
+All programs gave the same output as native, and five of them became
+runtime tests (`RtCslInsertion`, `RtCslMergeSort`, `RtCslTuring`,
+`RtCslURM`, `RtCslVending`). Each test keeps the copyright notices of the
+CSLib and Mathlib files that it copies.
+
 ## Checking the rules
 
 Plan §8 lists the points reviewers check against Lean's compiler sources,
