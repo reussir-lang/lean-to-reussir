@@ -35,6 +35,57 @@ runtime.
   replaced for the same reason
   ([externs-ffi/shim.md](externs-ffi/shim.md#iopromiseisresolved-is-replaced-borrow-dependent-behaviour)).
 
+### Lent arguments are released last first, by first occurrence
+
+- **What:** After a call, the kept arguments (`borrowKeeps`) are released
+  in the reverse order of their first occurrence among the call's
+  arguments: `put3 a b c` releases `c`, `b`, `a`; `put4 w h1 h2 h1`
+  releases `h2`, `h1`, `w`; in `own3 x y x` with the first parameter owned,
+  `x` counts from its first (owned) position, so `y` goes first. A variable
+  is kept when it is passed to a borrowed parameter at any position. The
+  `_boxed` wrappers (`boxedTarget`) release last parameter first.
+- **Why:** Lean's `ExplicitRC.addDecAfterFullApp` visits the arguments in
+  order, takes each variable at its first occurrence (`isFirstOcc`) when
+  some occurrence is borrowed (`isBorrowParam`), and *prepends* its `dec`
+  to the code after the call, so the `dec`s run last first; `_boxed`
+  functions go through the same pass. Handles show the order: each closes
+  and flushes its buffer when released, so several handles on one file
+  write their texts last first natively (`CBA`). lean2rr released them in
+  argument order (`ABC`), and by first *borrowed* occurrence (cross-test
+  XT-1, fixtures A545, A612, A613, A621; test
+  `RtBorrowReleaseOrder`).
+- **Where:** `Lower/Borrow.lean`: `borrowKeeps` (first occurrences, in
+  order), `releaseAfter` (reverses them), `boxedTarget`; plan
+  [§5.8](../translation-plan.md#58-externs-and-runtime-calls)
+  ("Borrowing").
+- **Remove only if:** the borrow emulation goes (see above).
+
+### Lean's borrow inference sees lean2rr's typed references as opaque types; a failure is an error
+
+- **What:** `inferBorrowedParams` declares `_l2r.TypedRef` (lean2rr's mono
+  type of a reference created at a precise type, `typedRefName`) as an
+  opaque type, an axiom `Type → Type`, in the environment it restores
+  afterwards, so Lean's `toImpureType` represents it as `tobject`, as the
+  `lcAny` that Lean's own mono phase gives every reference. Any failure of
+  Lean's passes there is an error (`lean2rr: Lean's borrow inference
+  failed on this program (...)`), as is a pass manager without `toImpure`
+  or `inferBorrow`.
+- **Why:** `_l2r.TypedRef` is not a Lean constant, so `toImpureType`
+  failed on it (`Unknown constant`) in every program that has both a
+  resource and an `IO.Ref` created at a precise type (`IO.Ref Nat`,
+  `IO.Ref HB` with a handle inside, ...). The failure was caught and turned
+  into "no borrowed parameters", which switched the emulation off for the
+  whole program, silently: a helper's handle was then closed inside the
+  helper (cross-test XT-2, fixture A621; test `RtBorrowTypedRef`).
+  The emulation is all or nothing, so a failure cannot be skipped without
+  changing when resources are released.
+- **Where:** `Lower/Borrow.lean`: `inferBorrowedParams`;
+  `MonoTypesKeep.lean`: `typedRefName`; plan
+  [§5.8](../translation-plan.md#58-externs-and-runtime-calls)
+  ("Borrowing").
+- **Remove only if:** typed references stop using a constant of their own
+  in mono types, or the borrow emulation goes.
+
 ### Reference sets store the new value before releasing the old one
 
 - **What:** `l2r_rc_set` (references) reads the old value, stores the new

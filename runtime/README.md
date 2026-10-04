@@ -713,6 +713,13 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
 
 ## Known divergences from native Lean
 
+- A read of at least one buffer right after output on the same handle
+  writes the pending output first and then reads from the cursor
+  (`cfile::xsgetn`; where the output cannot be written because seeking
+  back over read-ahead fails, on a FIFO, it is dropped as natively);
+  natively glibc drops the pending bytes (LB-02 in
+  lean-runtime's docs/lean-bugs.md; plan §10, "Runtime: Lean bugs we do
+  not reproduce").
 - Panics print `backtrace:` and `(stack trace unavailable)` instead of a
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`, and
@@ -762,9 +769,15 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   directory report `no such file or directory` with an empty file name;
   natively `decode_uv_error` dereferences a null file name and crashes.
   The same crash happens natively whenever an error without a file name
-  has errno `ENOENT` or `EINTR` (e.g. `getLine` on a handle whose error
-  indicator is set, after a failed `metadata` left `errno = ENOENT`); the
-  runtime reports `no such file or directory` with an empty file name.
+  has errno `ENOENT` or `EINTR` (`getCurrentDir` after its directory was
+  removed; `getLine` on a handle whose error indicator is set, after a
+  failed `metadata` left `errno = ENOENT`); the runtime raises the class's
+  error with an empty file name (`noFileOrDirectory "" 2 "no such file or
+  directory"`, `interrupted "" 4 ...`) for every call that passes no name:
+  `getcwd`, `waitpid`, `kill`, `flock`, and the handle primitives (`fflush`,
+  `fseek`, `ftruncate`, `fread`, `fwrite`, getline, `fputs`). LB-03 in
+  lean-runtime's docs/lean-bugs.md; plan §10, "Runtime: Lean bugs we do not
+  reproduce"; test `RtErrorNoFileName`.
 
 ## Testing
 
@@ -774,7 +787,11 @@ through lean2rr, runs both (`LEAN_BACKTRACE=0`, optional `NAME.args` and
 `NAME.stdin`; `NAME.pipe` is a shell command line run instead, with `$BIN`
 the program, for redirections and pipes), and compares stdout, stderr and
 the exit code byte for byte. `NAME.xfail` marks tests blocked by a lean2rr
-request. The Rust unit tests of `leanrt` (bignums, one-word `Nat`/`Int`
+request. `NAME.l2r.out` (`.err`, `.code`) marks an intended difference from
+native, a Lean runtime bug that lean2rr does not reproduce (plan §10,
+"Runtime: Lean bugs we do not reproduce"): that stream of lean2rr's run is
+compared with the file, and native's with `NAME.native.out` (`.err`,
+`.code`), so both sides stay pinned. The Rust unit tests of `leanrt` (bignums, one-word `Nat`/`Int`
 at the boundaries, tagged arrays, hashes, the lookup of glibc's `cbrt`,
 and a differential test of the `FILE` model against glibc's own `FILE`
 over random operation sequences)

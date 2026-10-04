@@ -16,6 +16,14 @@
 #               shape the default passes hide
 #   NAME.xfail  the test is known to fail through lean2rr; the file says why
 #               (a "Requests for lean2rr" item in runtime/README.md)
+#   NAME.l2r.out, NAME.l2r.err, NAME.l2r.code
+#               a documented, intended difference from native (a Lean
+#               runtime bug lean2rr does not reproduce, plan §10 "Runtime:
+#               Lean bugs we do not reproduce"): that stream of lean2rr's run
+#               is compared with this file, and the same stream of native's
+#               run with NAME.native.out/.err/.code, instead of with each
+#               other; the two files of a stream go together (one without
+#               the other fails the test: unpaired expectation file)
 #
 # Both executables run with LEAN_BACKTRACE=0, so panics print no stack trace.
 # Environment: L2R_REUSSIR, L2R_LEAN2RR, L2R_RUSTC (see scripts/l2r.py);
@@ -84,7 +92,21 @@ for t in "${TESTS[@]}"; do
     run_one ./native native
     run_one ./l2r l2r
     for k in out err code; do
-      if ! cmp -s "$d/native.$k" "$d/l2r.$k"; then
+      el=0; en=0
+      [ -f "$HERE/$t.l2r.$k" ] && el=1
+      [ -f "$HERE/$t.native.$k" ] && en=1
+      if [ $el != $en ]; then
+        # One side's expectation without the other's: a mistake in the test.
+        status=fail; why="$why unpaired expectation file ($t.l2r.$k and $t.native.$k go together);"
+      elif [ $el = 1 ]; then
+        # An intended difference: each side against its own expectation.
+        if ! cmp -s "$HERE/$t.native.$k" "$d/native.$k"; then
+          status=fail; why="$why native $k differs from $t.native.$k (diff $HERE/$t.native.$k $d/native.$k);"
+        fi
+        if ! cmp -s "$HERE/$t.l2r.$k" "$d/l2r.$k"; then
+          status=fail; why="$why $k differs from $t.l2r.$k (diff $HERE/$t.l2r.$k $d/l2r.$k);"
+        fi
+      elif ! cmp -s "$d/native.$k" "$d/l2r.$k"; then
         status=fail; why="$why $k differs (diff $d/native.$k $d/l2r.$k);"
       fi
     done

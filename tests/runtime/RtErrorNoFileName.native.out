@@ -1,0 +1,8 @@
+cwd: exit 139
+temp: exit 139
+wait: start
+first wait 0
+other class: no such thing (error code: 10, no such process)
+other class: no such thing (error code: 3, no such process)
+wait: end
+wait: exit 0

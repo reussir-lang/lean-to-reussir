@@ -14,6 +14,10 @@
 //! `get_line`, `flush`, `rewind`, `truncate`) are those of
 //! `lean_io_prim_handle_*` in Lean's `io.cpp`.
 //!
+//! One deliberate difference: a large read right after output writes the
+//! pending output first (`xsgetn`), where glibc drops it (lean-runtime's
+//! docs/lean-bugs.md, LB-02).
+//!
 //! Buffer "pointers" are indices into `buf`; `has_buf` is false while the
 //! buffer is NULL. Wide orientation, backup areas and markers are not used
 //! by Lean and are not modelled.
@@ -73,6 +77,10 @@ pub struct CFile {
     offset: i64,
     /// The stream has been used (`_mode != 0`).
     used: bool,
+    /// The last `new_do_write` returned at its seek back over read-ahead
+    /// (`ESPIPE` on a FIFO opened `readWrite`), writing nothing and setting
+    /// no error indicator (not glibc state: for the LB-02 path of `xsgetn`).
+    seek_failed: bool,
 }
 
 impl CFile {
@@ -90,6 +98,7 @@ impl CFile {
             we: 0,
             offset: POS_BAD,
             used: false,
+            seek_failed: false,
         }
     }
 
@@ -207,13 +216,17 @@ impl CFile {
 
     /// `new_do_write`: write `to_do` bytes, from the buffer at `from` (or
     /// from `user` when given), after moving the descriptor back over
-    /// read-ahead; then empty the buffer.
+    /// read-ahead; then empty the buffer. A failed seek returns before the
+    /// reset, so the bytes stay buffered (and no error indicator is set);
+    /// `seek_failed` records it.
     fn new_do_write(&mut self, from: usize, user: Option<&[u8]>, to_do: usize) -> usize {
+        self.seek_failed = false;
         if self.flags & IS_APPENDING != 0 {
             self.offset = POS_BAD;
         } else if self.re != self.wb {
             let np = self.sysseek(self.wb as i64 - self.re as i64, SEEK_CUR);
             if np == POS_BAD {
+                self.seek_failed = true;
                 return 0;
             }
             self.offset = np;
@@ -448,7 +461,8 @@ impl CFile {
     /// `_IO_file_xsgetn`: up to `n` bytes written to `out` (room for `n`),
     /// their number returned. Requests of at least a buffer are read
     /// directly into `out`, in whole blocks, discarding the (empty) buffer
-    /// state.
+    /// state, after writing any pending output (where glibc drops it:
+    /// LB-02).
     ///
     /// # Safety
     /// `out` must be valid for writes of `n` bytes.
@@ -474,6 +488,32 @@ impl CFile {
                         break;
                     }
                     continue;
+                }
+                // Not glibc (LB-02 in lean-runtime's docs/lean-bugs.md):
+                // glibc resets the put area here, so output written just
+                // before is dropped (C11 leaves output directly followed by
+                // input undefined). The pending bytes are written first, as
+                // `fflush` does (a small read writes them too, through
+                // `underflow_generic`); if that write fails, so does the
+                // read. A failed seek back over read-ahead (`ESPIPE`: a FIFO
+                // opened `readWrite`, `new_do_write` returning before it
+                // writes) is no failed write: the bytes are dropped below
+                // with the read-ahead and the read goes on, as glibc's direct
+                // read does (review RXT-01; lean-runtime io-1 af6ecf2); the
+                // failed seek's ESPIPE is then forgotten (`errno` as before),
+                // since native's direct read makes no seek, and a later error
+                // report that reads `errno` (`getLine` on a handle with its
+                // error indicator set) must see native's (review RXT-06).
+                // Then the read starts at the cursor (and fails with EBADF on
+                // a write-only stream, as natively).
+                if self.wp > self.wb {
+                    let saved = errno_now();
+                    if self.do_flush() == EOF {
+                        if !self.seek_failed {
+                            break;
+                        }
+                        set_errno(saved);
+                    }
                 }
                 self.setg(0, 0, 0);
                 self.setp(0, 0);

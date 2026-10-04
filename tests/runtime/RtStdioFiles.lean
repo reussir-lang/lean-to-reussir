@@ -66,21 +66,8 @@ def main : IO Unit := do
   w.putStr "hello"
   let r ← showErr w.getLine fun l => s!"line {repr l}"
   IO.println s!"E2: {r}; size {← size f}"
-  -- F: a failed large read on a write-only handle drops pending output
-  let f := dir / "f.txt"
-  let w ← IO.FS.Handle.mk f .write
-  w.putStr "hello"
-  let r ← showErr (w.read 5000) fun b => s!"read {b.size}"
-  w.flush
-  IO.println s!"F: {r}; contents {repr (← IO.FS.readFile f)}"
-  -- G: readWrite, write then a large read
-  let f := dir / "g.txt"
-  IO.FS.writeFile f "0123456789"
-  let h ← IO.FS.Handle.mk f .readWrite
-  h.putStr "abc"
-  let b ← h.read 5000
-  h.flush
-  IO.println s!"G: read {repr (String.fromUTF8! b)}; contents {repr (← IO.FS.readFile f)}"
+  -- F and G (a large read right after output, which glibc lets drop the
+  -- pending bytes and lean2rr does not: LB-02) are in RtReadAfterWrite.
   -- H: sticky end of file and large reads
   let f := dir / "h.txt"
   IO.FS.writeFile f (rep 'a' 10)

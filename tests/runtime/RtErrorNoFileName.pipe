@@ -1,0 +1,1 @@
+for k in cwd temp wait; do { TMPDIR=/nonexistent-rterrnoname $BIN $k 2>&1; } 2>/dev/null; echo "$k: exit $?"; done

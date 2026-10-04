@@ -1180,7 +1180,7 @@ fn lean_strict_or(a : bool, b : bool) -> bool { a || b }
 // Float (f64) and Float32 (f32)
 //
 // Arithmetic and comparisons are IEEE operations (ordered comparisons, as
-// C); math functions are LLVM intrinsics (libm), `log` goes through libm.
+// C); math functions are the C library's (see the libm functions below).
 
 fn lean_float_add(a : f64, b : f64) -> f64 { a + b }
 fn lean_float_sub(a : f64, b : f64) -> f64 { a - b }
@@ -1270,68 +1270,106 @@ fn l2r_float32_scaleb_big(a : f32, neg : bool) -> f32 {
     if a == 0.0 || neg { 0.0 } else { ((a as f64) * inf) as f32 }
 }
 
-// libm functions under their C names (the extern symbols of `Float.sin`, ...).
-fn sin(x : f64) -> f64 { core::intrinsic::math::sin(x, 0) }
-fn cos(x : f64) -> f64 { core::intrinsic::math::cos(x, 0) }
-fn tan(x : f64) -> f64 { core::intrinsic::math::tan(x, 0) }
-fn asin(x : f64) -> f64 { core::intrinsic::math::asin(x, 0) }
-fn acos(x : f64) -> f64 { core::intrinsic::math::acos(x, 0) }
-fn atan(x : f64) -> f64 { core::intrinsic::math::atan(x, 0) }
-fn atan2(y : f64, x : f64) -> f64 { core::intrinsic::math::atan2(y, x, 0) }
-fn sinh(x : f64) -> f64 { core::intrinsic::math::sinh(x, 0) }
-fn cosh(x : f64) -> f64 { core::intrinsic::math::cosh(x, 0) }
-fn tanh(x : f64) -> f64 { core::intrinsic::math::tanh(x, 0) }
+// libm functions under their C names (the extern symbols of `Float.sin`,
+// `Float32.pow`, ...). The exact operations (sqrt, ceil, floor, round, fabs)
+// are LLVM intrinsics. The others call the C library's function through
+// `leanrt::float::libm`, opaquely: LLVM would fold a call whose operand it
+// knows (an `f32` one in double precision, `exp2` through `pow`) and rewrite
+// `pow` with a constant operand (`pow(x, 0.5)` into `sqrt`, `pow(2.0, y)`
+// into `exp2`, ...), and glibc's results differ from those in the last bit
+// on some inputs (cross-tests XT-3, XT-4). Natively they are glibc's, run
+// at run time even on literal operands.
 #[ffi(import)]
-fn asinh(x : f64) -> f64 [{ unsafe { leanrt::float::libm::asinh(x) } }];
+fn sin(x : f64) -> f64 [{ leanrt::float::libm::sin(x) }];
 #[ffi(import)]
-fn acosh(x : f64) -> f64 [{ unsafe { leanrt::float::libm::acosh(x) } }];
+fn cos(x : f64) -> f64 [{ leanrt::float::libm::cos(x) }];
 #[ffi(import)]
-fn atanh(x : f64) -> f64 [{ unsafe { leanrt::float::libm::atanh(x) } }];
-fn exp(x : f64) -> f64 { core::intrinsic::math::exp(x, 0) }
-fn exp2(x : f64) -> f64 { core::intrinsic::math::exp2(x, 0) }
-fn log2(x : f64) -> f64 { core::intrinsic::math::log2(x, 0) }
-fn log10(x : f64) -> f64 { core::intrinsic::math::log10(x, 0) }
-fn pow(x : f64, y : f64) -> f64 { core::intrinsic::math::powf(x, y, 0) }
+fn tan(x : f64) -> f64 [{ leanrt::float::libm::tan(x) }];
+#[ffi(import)]
+fn asin(x : f64) -> f64 [{ leanrt::float::libm::asin(x) }];
+#[ffi(import)]
+fn acos(x : f64) -> f64 [{ leanrt::float::libm::acos(x) }];
+#[ffi(import)]
+fn atan(x : f64) -> f64 [{ leanrt::float::libm::atan(x) }];
+#[ffi(import)]
+fn sinh(x : f64) -> f64 [{ leanrt::float::libm::sinh(x) }];
+#[ffi(import)]
+fn cosh(x : f64) -> f64 [{ leanrt::float::libm::cosh(x) }];
+#[ffi(import)]
+fn tanh(x : f64) -> f64 [{ leanrt::float::libm::tanh(x) }];
+#[ffi(import)]
+fn asinh(x : f64) -> f64 [{ leanrt::float::libm::asinh(x) }];
+#[ffi(import)]
+fn acosh(x : f64) -> f64 [{ leanrt::float::libm::acosh(x) }];
+#[ffi(import)]
+fn atanh(x : f64) -> f64 [{ leanrt::float::libm::atanh(x) }];
+#[ffi(import)]
+fn exp(x : f64) -> f64 [{ leanrt::float::libm::exp(x) }];
+#[ffi(import)]
+fn exp2(x : f64) -> f64 [{ leanrt::float::libm::exp2(x) }];
+#[ffi(import)]
+fn log(x : f64) -> f64 [{ leanrt::float::libm::log(x) }];
+#[ffi(import)]
+fn log2(x : f64) -> f64 [{ leanrt::float::libm::log2(x) }];
+#[ffi(import)]
+fn log10(x : f64) -> f64 [{ leanrt::float::libm::log10(x) }];
+#[ffi(import)]
+fn cbrt(x : f64) -> f64 [{ leanrt::float::libm::cbrt(x) }];
+#[ffi(import)]
+fn atan2(y : f64, x : f64) -> f64 [{ leanrt::float::libm::atan2(y, x) }];
+#[ffi(import)]
+fn pow(x : f64, y : f64) -> f64 [{ leanrt::float::libm::pow(x, y) }];
 fn sqrt(x : f64) -> f64 { core::intrinsic::math::sqrt(x, 0) }
-#[ffi(import)]
-fn cbrt(x : f64) -> f64 [{ unsafe { leanrt::float::libm::cbrt(x) } }];
 fn ceil(x : f64) -> f64 { core::intrinsic::math::ceil(x, 0) }
 fn floor(x : f64) -> f64 { core::intrinsic::math::floor(x, 0) }
 fn round(x : f64) -> f64 { core::intrinsic::math::round(x, 0) }
 fn fabs(x : f64) -> f64 { core::intrinsic::math::absf(x, 0) }
-#[ffi(import)]
-fn log(x : f64) -> f64 [{ leanrt::float::ln(x) }];
 
-fn sinf(x : f32) -> f32 { core::intrinsic::math::sin(x, 0) }
-fn cosf(x : f32) -> f32 { core::intrinsic::math::cos(x, 0) }
-fn tanf(x : f32) -> f32 { core::intrinsic::math::tan(x, 0) }
-fn asinf(x : f32) -> f32 { core::intrinsic::math::asin(x, 0) }
-fn acosf(x : f32) -> f32 { core::intrinsic::math::acos(x, 0) }
-fn atanf(x : f32) -> f32 { core::intrinsic::math::atan(x, 0) }
-fn atan2f(y : f32, x : f32) -> f32 { core::intrinsic::math::atan2(y, x, 0) }
-fn sinhf(x : f32) -> f32 { core::intrinsic::math::sinh(x, 0) }
-fn coshf(x : f32) -> f32 { core::intrinsic::math::cosh(x, 0) }
-fn tanhf(x : f32) -> f32 { core::intrinsic::math::tanh(x, 0) }
 #[ffi(import)]
-fn asinhf(x : f32) -> f32 [{ unsafe { leanrt::float::libm::asinhf(x) } }];
+fn sinf(x : f32) -> f32 [{ leanrt::float::libm::sinf(x) }];
 #[ffi(import)]
-fn acoshf(x : f32) -> f32 [{ unsafe { leanrt::float::libm::acoshf(x) } }];
+fn cosf(x : f32) -> f32 [{ leanrt::float::libm::cosf(x) }];
 #[ffi(import)]
-fn atanhf(x : f32) -> f32 [{ unsafe { leanrt::float::libm::atanhf(x) } }];
-fn expf(x : f32) -> f32 { core::intrinsic::math::exp(x, 0) }
-fn exp2f(x : f32) -> f32 { core::intrinsic::math::exp2(x, 0) }
-fn log2f(x : f32) -> f32 { core::intrinsic::math::log2(x, 0) }
-fn log10f(x : f32) -> f32 { core::intrinsic::math::log10(x, 0) }
-fn powf(x : f32, y : f32) -> f32 { core::intrinsic::math::powf(x, y, 0) }
+fn tanf(x : f32) -> f32 [{ leanrt::float::libm::tanf(x) }];
+#[ffi(import)]
+fn asinf(x : f32) -> f32 [{ leanrt::float::libm::asinf(x) }];
+#[ffi(import)]
+fn acosf(x : f32) -> f32 [{ leanrt::float::libm::acosf(x) }];
+#[ffi(import)]
+fn atanf(x : f32) -> f32 [{ leanrt::float::libm::atanf(x) }];
+#[ffi(import)]
+fn sinhf(x : f32) -> f32 [{ leanrt::float::libm::sinhf(x) }];
+#[ffi(import)]
+fn coshf(x : f32) -> f32 [{ leanrt::float::libm::coshf(x) }];
+#[ffi(import)]
+fn tanhf(x : f32) -> f32 [{ leanrt::float::libm::tanhf(x) }];
+#[ffi(import)]
+fn asinhf(x : f32) -> f32 [{ leanrt::float::libm::asinhf(x) }];
+#[ffi(import)]
+fn acoshf(x : f32) -> f32 [{ leanrt::float::libm::acoshf(x) }];
+#[ffi(import)]
+fn atanhf(x : f32) -> f32 [{ leanrt::float::libm::atanhf(x) }];
+#[ffi(import)]
+fn expf(x : f32) -> f32 [{ leanrt::float::libm::expf(x) }];
+#[ffi(import)]
+fn exp2f(x : f32) -> f32 [{ leanrt::float::libm::exp2f(x) }];
+#[ffi(import)]
+fn logf(x : f32) -> f32 [{ leanrt::float::libm::logf(x) }];
+#[ffi(import)]
+fn log2f(x : f32) -> f32 [{ leanrt::float::libm::log2f(x) }];
+#[ffi(import)]
+fn log10f(x : f32) -> f32 [{ leanrt::float::libm::log10f(x) }];
+#[ffi(import)]
+fn cbrtf(x : f32) -> f32 [{ leanrt::float::libm::cbrtf(x) }];
+#[ffi(import)]
+fn atan2f(y : f32, x : f32) -> f32 [{ leanrt::float::libm::atan2f(y, x) }];
+#[ffi(import)]
+fn powf(x : f32, y : f32) -> f32 [{ leanrt::float::libm::powf(x, y) }];
 fn sqrtf(x : f32) -> f32 { core::intrinsic::math::sqrt(x, 0) }
-#[ffi(import)]
-fn cbrtf(x : f32) -> f32 [{ unsafe { leanrt::float::libm::cbrtf(x) } }];
 fn ceilf(x : f32) -> f32 { core::intrinsic::math::ceil(x, 0) }
 fn floorf(x : f32) -> f32 { core::intrinsic::math::floor(x, 0) }
 fn roundf(x : f32) -> f32 { core::intrinsic::math::round(x, 0) }
 fn fabsf(x : f32) -> f32 { core::intrinsic::math::absf(x, 0) }
-#[ffi(import)]
-fn logf(x : f32) -> f32 [{ leanrt::float::ln32(x) }];
 
 // ===========================================================================
 // String
@@ -1760,11 +1798,13 @@ fn lean_array_swap<T>(v : RVec<T>, i : Nat, j : Nat) -> RVec<T> {
     }
 }
 
-// `Array.replicate n x`.
-fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> {
-    let w = l2r_nat_raw(n);
-    if (w & 1) == 1 { l2r_array_replicate(w >> 1, x) } else { l2r_internal_panic_at<RVec<T>>(4) }
-}
+// `Array.replicate n x`. As `lean_mk_array`: a big `n` that is a `size_t`
+// (2^63 <= n < 2^64) is the size asked for, and the byte size `24 + 8n`
+// then overflows (`integer overflow in runtime computation`, from
+// `check_alloc`); 2^64 or more is `out of memory` (`l2r_nat_to_size_t`).
+// Unlike `Array.mkEmpty`, whose `lean_mk_empty_array_with_capacity` is
+// `out of memory` for every big capacity (cross-test XT-5).
+fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> { l2r_array_replicate(l2r_nat_to_size_t(n), x) }
 
 // ---- Array Nat / Array Int ----
 //
@@ -1880,11 +1920,8 @@ fn lean_natarr_swap(v : LNatArr, i : Nat, j : Nat) -> LNatArr {
     }
 }
 
-// `Array.replicate n x`.
-fn lean_mk_natarr(n : Nat, x : Nat) -> LNatArr {
-    let w = l2r_nat_raw(n);
-    if (w & 1) == 1 { l2r_natarr_replicate(w >> 1, x) } else { l2r_internal_panic_at<LNatArr>(4) }
-}
+// `Array.replicate n x` (big sizes as `lean_mk_array`).
+fn lean_mk_natarr(n : Nat, x : Nat) -> LNatArr { l2r_natarr_replicate(l2r_nat_to_size_t(n), x) }
 
 // `Array.toList` glue (see `l2r_array_to_list`).
 fn l2r_natarr_to_list<L>(a : LNatArr, nil : L, cons : Nat -> (L -> L)) -> L {
@@ -1991,11 +2028,8 @@ fn lean_intarr_swap(v : LIntArr, i : Nat, j : Nat) -> LIntArr {
     }
 }
 
-// `Array.replicate n x`.
-fn lean_mk_intarr(n : Nat, x : Int) -> LIntArr {
-    let w = l2r_nat_raw(n);
-    if (w & 1) == 1 { l2r_intarr_replicate(w >> 1, x) } else { l2r_internal_panic_at<LIntArr>(4) }
-}
+// `Array.replicate n x` (big sizes as `lean_mk_array`).
+fn lean_mk_intarr(n : Nat, x : Int) -> LIntArr { l2r_intarr_replicate(l2r_nat_to_size_t(n), x) }
 
 // `Array.toList` glue (see `l2r_array_to_list`).
 fn l2r_intarr_to_list<L>(a : LIntArr, nil : L, cons : Int -> (L -> L)) -> L {

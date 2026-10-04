@@ -1,0 +1,5 @@
+# A FIFO in a fresh directory; if it cannot be made, print a line that
+# differs between the two runs (the shell's pid), so the test fails.
+D=$(mktemp -d) && mkfifo "$D/f" || echo "setup failed: mktemp or mkfifo (shell $$)"
+( trap '' XFSZ; ulimit -f 1; timeout 10 $BIN "$D/f" ); echo "exit $?"
+rm -rf "$D"

@@ -75,16 +75,28 @@ pipeline up to `inferBorrow`, as Lean compiles its own declarations after
 (projections pushed into branches, reset/reuse inserted: a value reused in
 place is owned). Extern instances get the borrow annotations (`@&`) of
 their extern; a callee with no known signature takes its arguments owned.
-The environment is restored afterwards. `{}` if a pass fails (then nothing
-is kept: Reussir's own release times). -/
+lean2rr's own mono type of a typed reference, `_l2r.TypedRef α`
+(`typedRefName`, Stage 3), is not a Lean constant: Lean's `toImpureType`
+would fail on it (`Unknown constant`), so it is declared for the run as an
+opaque type, which Lean represents as `tobject`, as the `lcAny` its own mono
+phase gives a reference (cross-test XT-2: a program with an `IO.Ref` of a
+structure lost the emulation). The environment is restored afterwards.
+A failure is an error: the emulation is all or nothing, and the program
+would silently get Reussir's release times. -/
 def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
     CoreM (NameMap (Array Bool)) := do
   withoutModifyingEnv do
+    let fail (why : MessageData) : CoreM (NameMap (Array Bool)) :=
+      throwError m!"lean2rr: Lean's borrow inference failed on this program ({why}), so the release \
+        times of borrowed resources (files, child processes) cannot be emulated (Lower/Borrow, \
+        translation plan §5.8); internal error"
+    let m ← getPassManager
+    let some toImp := m.monoPassesNoLambda.find? (·.name == `toImpure) | fail "no `toImpure` pass"
+    let some bi := m.impurePasses.findIdx? (·.name == `inferBorrow) | fail "no `inferBorrow` pass"
+    let impure := m.impurePasses.extract 0 (bi + 1)
     try
-      let m ← getPassManager
-      let some toImp := m.monoPassesNoLambda.find? (·.name == `toImpure) | return {}
-      let some bi := m.impurePasses.findIdx? (·.name == `inferBorrow) | return {}
-      let impure := m.impurePasses.extract 0 (bi + 1)
+      let typeToType : Expr := .forallE `α (.sort 1) (.sort 1) .default
+      addDecl (.axiomDecl { name := typedRefName, levelParams := [], type := typeToType, isUnsafe := true })
       CompilerM.run (phase := .mono) do
         let names := decls.foldl (fun s d => s.insert d.name) ({} : NameSet)
         let mut ds := #[]
@@ -127,7 +139,7 @@ def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
           match d.value with
           | .code _ => m.insert d.name (d.params.map (·.borrow))
           | _ => m
-    catch _ => return {}
+    catch e => fail (← e.toMessageData.toString)
 
 /-- The variables of declaration `d` that it only borrows (given which of
 its parameters are borrowed): its borrowed parameters, the fields and array
@@ -238,17 +250,24 @@ partial def mayHoldResource (t : RR.Ty) (seen : List RR.Ty := []) : LowerM Bool 
   | _ => return false
 
 /-- The arguments of a call of declaration `f` (arguments `args`, the
-first `params.size` passed to `f`) that the caller keeps until the call
-returns: the variables (name, type) passed to a parameter Lean borrows that
-the caller owns, of a type that may hold a resource. -/
+first `n` passed to `f`) that the caller keeps until the call returns: the
+variables (name, type) the caller owns that are passed to a parameter Lean
+borrows (at any position: `f x x` with the second parameter borrowed keeps
+`x`), of a type that may hold a resource. In the order of their first
+occurrence in `args`, as Lean's `addDecAfterFullApp` visits them
+(`releaseAfter` releases them in reverse). -/
 def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) :
     LowerM (Array (String × RR.Ty)) := do
   let (flags, lent) ← borrowInfo
   let some bs := flags.find? f | return #[]
+  let args := args.extract 0 n
   let mut out := #[]
-  for i in [:min n args.size] do
-    unless bs[i]?.getD false do continue
-    let .fvar x := args[i]! | continue
+  for h : i in [:args.size] do
+    let .fvar x := args[i] | continue
+    -- Its first occurrence only (Lean's `isFirstOcc`).
+    if (args.extract 0 i).contains (.fvar x) then continue
+    -- Passed to a borrowed parameter somewhere (Lean's `isBorrowParam`).
+    unless args.zipIdx.any (fun (a, j) => a == .fvar x && bs[j]?.getD false) do continue
     if lent.contains x then continue
     let some (v, t) := ctx.vars[x]? | continue
     if out.any (·.1 == v) then continue
@@ -256,12 +275,18 @@ def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) 
   return out
 
 /-- `call` (of type `ret`) followed by the release of `keeps`: the value of
-the call, with the kept variables released once it returns. -/
+the call, with the kept variables released once it returns, **last first**.
+Lean's `addDecAfterFullApp` visits the arguments in order and *prepends*
+each `dec` to the code after the call, so the `dec`s run in the reverse
+order of the arguments' first occurrences: `put3 a b c` with three dead
+borrowed handles closes `c`, then `b`, then `a` (cross-test XT-1). Lean's
+`_boxed` functions get the same treatment (`explicitRc` runs on them), so
+`boxedTarget`'s wrappers release last parameter first too. -/
 def releaseAfter (call : RR.Expr) (ret : RR.Ty) (keeps : Array (String × RR.Ty)) : LowerM RR.Expr := do
   if keeps.isEmpty then return call
   let r ← fresh "bw"
   let mut lets := #[(r, some ret, call)]
-  for (v, t) in keeps do
+  for (v, t) in keeps.reverse do
     lets := lets.push (← fresh "bk", some (.named "u64"), .call "l2r_release_after" #[t] #[.var v])
   return .block ⟨lets, .var r⟩
 

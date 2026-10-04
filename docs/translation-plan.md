@@ -1806,7 +1806,14 @@ Rules:
     alone, as natively, so a loop's tail calls stay tail calls;
   - a function value of such a declaration calls a `_boxed` variant that
     releases its borrowed arguments after the call, as Lean's `_boxed`
-    functions do for closures.
+    functions do for closures;
+  - the kept arguments are released last first, in the reverse order of
+    their first occurrences among the arguments, as Lean's `explicitRc`
+    prepends each `dec` after the call: `put3 a b c` with three dead
+    handles closes `c`, then `b`, then `a`.
+  Lean's passes see lean2rr's typed references (`_l2r.TypedRef α`) as an
+  opaque type, as they see their own `lcAny` references, and a failure of
+  the inference is a translation error: the emulation is all or nothing.
   Other values keep Reussir's release times: the same results without the
   extra reference counting. The process glue keeps a `Child` alive across
   `wait`, `tryWait` and `kill`, which borrow it by annotation.
@@ -2568,7 +2575,12 @@ The runtime provides what Reussir lacks:
 - `Nat`/`Int`: a small value, or a GMP bignum (`leanrt::big`);
 - Lean's `String` operations over UTF-8 bytes (one block with the character count, §5.1);
 - `Array`/`ByteArray`/`FloatArray` operations over the copy-on-write one-block vector;
-- `Float` math through libm;
+- `Float` and `Float32` math through glibc's libm, called through pointers
+  looked up at run time, so that LLVM can neither fold nor rewrite a call
+  on a known operand: natively every call runs glibc's function at run
+  time, and LLVM's folded or rewritten values (`f32` functions in double
+  precision, `exp2` through `pow`, `pow(x, 0.5)` as `sqrt`, …) differ from
+  glibc's in the last bit on some inputs;
 - IO: stdout/stderr/stdin streams, `IO.Error`, argv, exit;
 - the mutable cells of thunks and tasks, the queues of deferred tasks, and
   promises (§5.14);
@@ -3185,6 +3197,55 @@ Each item says what differs and when.
   (natively as soon as stderr is: different timing when a grandchild holds
   stdout open), and a read error on either pipe at once (natively a stdout
   read error after `wait`).
+
+**Runtime: Lean bugs we do not reproduce** (each judged a bug in Lean
+4.34.0's runtime, listed in lean-runtime's
+[docs/lean-bugs.md](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md); both translators and
+lean-runtime do the right thing instead; where a runtime test shows the
+difference, it pins native's output and lean2rr's in expectation files,
+`NAME.native.*` and `NAME.l2r.*`. The lean-runtime cases, on its branch
+`cases-xt` (merging into lean-runtime main): `refs/lost_update` (LB-01),
+`io/read_after_write` (LB-02), `io/error_without_file_name` and
+`io/temp_file_error` (LB-03))
+- *LB-01, a concurrent `IO.Ref.set` can be lost*
+  ([LB-01](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-01-a-concurrent-ioref-set-can-be-lost);
+  fixed upstream in Lean 4.35): natively `lean_st_ref_get` takes the value
+  out of a reference shared between threads and puts it back with an
+  unconditional exchange, so a `set` from another thread that lands in
+  between is undone (a task's `r.set 1`, then `IO.wait` on it, and `r`
+  reads 0 again; a spin on a flag can hang). In lean2rr tasks run on one
+  thread (§5.14), so every reference operation is atomic: a completed
+  `set` is seen by every later `get`.
+- *LB-02, output followed by a large read on one handle*
+  ([LB-02](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-02-output-followed-by-a-large-read-on-one-handle-is-lost)):
+  natively a read of at least one buffer (`read 5000`)
+  right after output on the same handle drops the pending output, as glibc
+  resets the buffer (C11 leaves output directly followed by input
+  undefined): `putStr "x"` on a write-only handle and then `read 5000`
+  fails, and `x` never reaches the file; on a read-write handle the read
+  returns the old contents from the start. lean2rr writes the pending
+  bytes first, then reads from the cursor (and fails with native's EBADF
+  on a write-only handle); if that write fails, so does the read. A failed
+  seek back over read-ahead is no failed write: on a FIFO opened
+  `readWrite` and read ahead, the output cannot be written, and the read
+  drops it with the read-ahead and goes on, as natively, leaving `errno`
+  as it was (native's direct read makes no seek). `read 0` reads
+  nothing, and small reads, `getLine` and `readToEnd` already wrote the
+  bytes natively. Tests `RtReadAfterWrite`, `RtStdioStdoutRead`,
+  `RtFifoReadAfterWrite`, `RtFifoErrnoRestore`.
+- *LB-03, an error without a file name*
+  ([LB-03](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-03-an-error-without-a-file-name-can-crash)):
+  natively an error of the classes `noFileOrDirectory`
+  (ENOENT) and `interrupted` (EINTR) from a call that passes no file name
+  crashes (SIGSEGV, exit 139, buffered stdout lost): `decode_io_error`
+  dereferences the null name, for `getCurrentDir` after its directory was
+  removed, for example. lean2rr raises the class's error with an empty
+  file name (`noFileOrDirectory "" 2 "no such file or directory"`) for
+  every such call: `getcwd`, `waitpid`, `kill`, `flock` and the handle
+  primitives (`fflush`, `fseek`, `ftruncate`, `fread`, `fwrite`, getline,
+  `fputs`), reading `/dev/urandom` (`IO.getRandomBytes`), and the
+  libuv-based ones (`createTempFile`, `createTempDir` with `TMPDIR` naming
+  a missing directory). Test `RtErrorNoFileName`.
 
 **Diagnostics**
 - lean2rr's own impossibilities (a `Box` unwrap of another variant, a cast

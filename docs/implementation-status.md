@@ -37,7 +37,7 @@ same standard output, standard error and exit code.
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (258 programs, `tests/runtime`) | at the last full regression (branch `lean-4.34`, 2026-10-03), 231/231 identical to native Lean 4.34.0; the tests added since passed on the branches that added them, except `RtCseFnResult`, an expected failure (plan §10, "Merging after erasure") |
+| Runtime test suite (268 programs, `tests/runtime`) | at its last full run (branch `fix-xt`, 2026-10-04, before `RtFifoErrnoRestore` was added, which passes), 264 of 267 identical to native Lean 4.34.0, three of them through expectation files where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`; plan §10, "Runtime: Lean bugs we do not reproduce"); 3 expected failures: `RtCseFnResult` (plan §10, "Merging after erasure"), `RtTaskRunawayPureStarted` and `RtFdStartupNoUring` (until lean2rr adopts lean-runtime's scheduler and startup) |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
@@ -367,6 +367,15 @@ with examples, is §10 of the translation plan.
   at most for the same object, by address), a panic's backtrace line says the trace is
   unavailable; the Windows-only time zone functions fail as they do
   natively on other systems.
+- **Lean runtime bugs not reproduced** (plan §10, "Runtime: Lean bugs we
+  do not reproduce", from lean-runtime's docs/lean-bugs.md): an
+  `IO.Ref.set` from a task is never undone by a concurrent `get` (natively
+  it can be, LB-01, fixed in Lean 4.35); a read of at
+  least one buffer right after output on the same handle writes the
+  pending output first, where natively glibc drops it (LB-02); an error
+  without a file name (`getCurrentDir` after its directory was removed) is
+  the class's `IO.Error` with an empty file name, where natively the
+  program crashes (LB-03).
 - **A program's own C code is not supported.** A program that implements
   some of its own `@[extern]` declarations in C (built by Lake) fails at
   the rrc build with an unknown function: lean2rr links no C code of the

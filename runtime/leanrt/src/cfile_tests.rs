@@ -1,7 +1,10 @@
 //! Differential tests of the `FILE` model: random sequences of Lean's
 //! handle operations run on a real glibc `FILE` and on a `CFile`, each on
 //! its own copy of a file; after every step the results, `errno`s, `feof`,
-//! and the bytes on disk must agree.
+//! and the bytes on disk must agree. Where the model deliberately differs
+//! from glibc (LB-02: a direct read right after output writes the output
+//! first), the glibc side gets an `fflush` first (`Glibc::read_lb02`), which
+//! makes glibc's behaviour defined and the model's.
 
 use super::*;
 use std::ffi::{c_char, c_int, c_long, CString};
@@ -22,6 +25,8 @@ extern "C" {
     fn ferror(f: *mut FILE) -> c_int;
     fn clearerr(f: *mut FILE);
     fn fileno(f: *mut FILE) -> c_int;
+    fn __fpending(f: *mut FILE) -> usize;
+    fn __fbufsize(f: *mut FILE) -> usize;
     fn open(path: *const c_char, flags: c_int, ...) -> c_int;
 }
 
@@ -51,6 +56,22 @@ impl Glibc {
         } else {
             Err(errno_now())
         }
+    }
+    /// `read` as the model does it where it deliberately differs from glibc
+    /// (LB-02): a read that takes glibc's direct path (at least a buffer,
+    /// `n >= __fbufsize`: in put mode nothing is read ahead) right after
+    /// output writes the pending output first, as `fflush` does. A failed
+    /// write ends the read with its error; a failed seek back over read-ahead
+    /// (`ESPIPE`, a FIFO opened `readWrite`, which no write gives) does not:
+    /// glibc's direct read then drops the bytes and reads on, and so does the
+    /// model (review RXT-01). Other reads are glibc's own.
+    fn read_lb02(&mut self, n: usize) -> Result<Vec<u8>, i32> {
+        if n > 0 && unsafe { __fpending(self.0) } > 0 && n >= unsafe { __fbufsize(self.0) } {
+            if unsafe { fflush(self.0) } != 0 && errno_now() != 29 {
+                return Err(errno_now());
+            }
+        }
+        self.read(n)
     }
     fn get_line(&mut self) -> Result<Vec<u8>, i32> {
         let mut l = Vec::new();
@@ -185,7 +206,7 @@ fn run_case(seed: u64, mode: u8, steps: usize) {
                     1 => rng.below(5000),
                     _ => rng.below(20000),
                 } as usize;
-                (g.read(n), m.read(n))
+                (g.read_lb02(n), m.read(n))
             }
             2 => (g.get_line(), m.get_line()),
             3 => (g.flush().map(|_| Vec::new()), m.flush().map(|_| Vec::new())),
@@ -211,22 +232,62 @@ fn run_case(seed: u64, mode: u8, steps: usize) {
 
 extern "C" {
     fn pipe(fds: *mut c_int) -> c_int;
+    fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
 }
 
-/// A read-only `FILE` on a pipe holding `data` (at most 64 KiB, so the
-/// writes cannot block), write end closed: stdin from a pipe.
+/// Linux's `F_SETPIPE_SZ`.
+const F_SETPIPE_SZ: c_int = 1031;
+
+/// A read-only `FILE`'s descriptor on a pipe that a writer thread fills with
+/// `data`, then closes: stdin from a pipe. A pipe's capacity is not to be
+/// relied on: a user over `fs.pipe-user-pages-soft` gets pipes of one page,
+/// and writing more than that before reading blocks forever. So the pipe is
+/// shrunk to one page and written concurrently (never more than a page
+/// without a concurrent reader). If the reader closes first, the writer's
+/// `write` fails with `EPIPE` (Rust ignores SIGPIPE) and the thread ends.
 fn pipe_with(data: &[u8]) -> c_int {
     let mut fds = [0 as c_int; 2];
     assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
-    let mut done = 0;
-    while done < data.len() {
-        let n = unsafe { write(fds[1], data[done..].as_ptr() as *const c_void, data.len() - done) };
-        assert!(n > 0);
-        done += n as usize;
-    }
-    unsafe { close(fds[1]) };
+    let _ = unsafe { fcntl(fds[1], F_SETPIPE_SZ, 4096 as c_int) };
+    let (w, data) = (fds[1], data.to_vec());
+    std::thread::spawn(move || {
+        let mut done = 0;
+        while done < data.len() {
+            let n = unsafe { write(w, data[done..].as_ptr() as *const c_void, data.len() - done) };
+            if n < 0 && errno_now() == 4 {
+                continue; // EINTR
+            }
+            if n <= 0 {
+                break;
+            }
+            done += n as usize;
+        }
+        unsafe { close(w) };
+    });
     fds[0]
 }
+
+/// Runs `body` on a thread of its own and fails if it runs longer than
+/// `secs` seconds, so that a pipe test that blocks (a write nobody reads)
+/// fails instead of hanging.
+fn with_deadline(secs: u64, body: impl FnOnce() + Send + 'static) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let h = std::thread::spawn(move || {
+        body();
+        let _ = tx.send(());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+        Ok(()) => h.join().unwrap(),
+        Err(RecvTimeoutError::Disconnected) => std::panic::resume_unwind(h.join().unwrap_err()),
+        Err(RecvTimeoutError::Timeout) => {
+            panic!("blocked for more than {secs} s: a pipe write that nobody reads?")
+        }
+    }
+}
+
+/// The deadline of the pipe test (it takes well under a second).
+const PIPE_DEADLINE: u64 = 120;
 
 fn run_pipe_case(seed: u64, steps: usize) {
     let mut rng = Rng(seed * 40503 + 977);
@@ -262,9 +323,100 @@ fn run_pipe_case(seed: u64, steps: usize) {
 
 #[test]
 fn differential_against_glibc_pipes() {
-    for seed in 1..=300u64 {
-        run_pipe_case(seed, 60);
+    with_deadline(PIPE_DEADLINE, || {
+        for seed in 1..=300u64 {
+            run_pipe_case(seed, 60);
+        }
+    });
+}
+
+extern "C" {
+    fn mkfifo(path: *const c_char, mode: std::ffi::c_uint) -> c_int;
+}
+
+/// `write` of all of `d` to `fd`.
+fn write_all(fd: c_int, d: &[u8]) {
+    let mut done = 0;
+    while done < d.len() {
+        let n = unsafe { write(fd, d[done..].as_ptr() as *const c_void, d.len() - done) };
+        assert!(n > 0, "write to a FIFO");
+        done += n as usize;
     }
+}
+
+/// An unseekable file opened `readWrite` (review RXT-01, RXT-04): a FIFO
+/// read ahead by `getLine`, then output, then a direct read. Seeking back over
+/// the read-ahead fails (`ESPIPE`), so neither glibc nor the model can write
+/// the output: glibc's direct read drops it with the read-ahead and reads on,
+/// and so does the model (it is no failed write: the read must not fail).
+/// Then a small read, a flush, and output that a small read writes into the
+/// FIFO and reads back. The FIFOs are fed by this thread only while empty,
+/// at most one page at a time, so no write blocks; every read asks for no
+/// more than is in the FIFO. Expected values: native Lean's
+/// (the review's FIFO repro, RXT-01).
+fn fifo_case() {
+    let dir = std::env::temp_dir().join(format!("leanrt-cfile-fifo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let mk = |name: &str| {
+        let p = dir.join(name).to_string_lossy().into_owned();
+        let c = CString::new(p.clone()).unwrap();
+        assert_eq!(unsafe { mkfifo(c.as_ptr(), 0o600) }, 0);
+        p
+    };
+    let (pa, pb) = (mk("a"), mk("b"));
+    // Lean's `readWrite` (an `O_RDWR` open does not wait for a writer).
+    let fa = open_mode(&pa, 3);
+    let fb = open_mode(&pb, 3);
+    assert!(fa >= 0 && fb >= 0);
+    let wa = open_mode(&pa, 1);
+    let wb = open_mode(&pb, 1);
+    assert!(wa >= 0 && wb >= 0);
+    let feed = |d: &[u8]| {
+        write_all(wa, d);
+        write_all(wb, d);
+    };
+    let cm = CString::new("r+").unwrap();
+    let mut g = Glibc(unsafe { fdopen(fa, cm.as_ptr()) });
+    assert!(!g.0.is_null());
+    let mut m = CFile::new(fb, 0);
+    let check = |what: &str, ra: Result<Vec<u8>, i32>, rb: Result<Vec<u8>, i32>, g: &Glibc, m: &CFile| {
+        assert_eq!(ra, rb, "result differs: fifo {}", what);
+        assert_eq!(g.is_eof(), m.is_eof(), "feof differs: fifo {}", what);
+        rb
+    };
+    let unit = |r: Result<(), i32>| r.map(|_| Vec::new());
+    feed(b"abc\ndef\n");
+    let r = check("getLine", g.get_line(), m.get_line(), &g, &m);
+    assert_eq!(r, Ok(b"abc\n".to_vec()));
+    let mut page = b"jkl\n".to_vec();
+    page.resize(4096, b'x');
+    feed(&page);
+    let r = check("putStr", unit(g.put(b"ghi\n")), unit(m.put(b"ghi\n")), &g, &m);
+    assert_eq!(r, Ok(Vec::new()));
+    let r = check("read 4096", g.read_lb02(4096), m.read(4096), &g, &m);
+    assert_eq!(r, Ok(page.clone()), "read 4096: the pending output and the read-ahead dropped");
+    feed(b"mnop");
+    let r = check("read 4", g.read_lb02(4), m.read(4), &g, &m);
+    assert_eq!(r, Ok(b"mnop".to_vec()));
+    let r = check("flush", unit(g.flush()), unit(m.flush()), &g, &m);
+    assert_eq!(r, Ok(Vec::new()));
+    let r = check("putStr q", unit(g.put(b"q")), unit(m.put(b"q")), &g, &m);
+    assert_eq!(r, Ok(Vec::new()));
+    let r = check("read 1", g.read_lb02(1), m.read(1), &g, &m);
+    assert_eq!(r, Ok(b"q".to_vec()), "read 1: the output written into the FIFO and read back");
+    unsafe {
+        fclose(g.0);
+        close(wa);
+        close(wb);
+    }
+    m.close();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differential_against_glibc_fifo_read_write() {
+    with_deadline(PIPE_DEADLINE, fifo_case);
 }
 
 #[test]

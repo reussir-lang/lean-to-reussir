@@ -1,0 +1,10 @@
+# 2^61-4: 24 + 8n fits, the allocation fails; 2^61-3: 24 + 8n overflows;
+# 2^63-1: the largest small Nat; 2^63, 2^64-1: big, but a size_t; 2^64.
+for k in replicate replicateNat replicateInt replicateFloat mkEmpty mkEmptyNat floatArray; do
+  for n in 2305843009213693948 2305843009213693949 9223372036854775807 9223372036854775808 18446744073709551615 18446744073709551616; do
+    $BIN $k $n 2>&1; echo "$k $n: exit $?"
+  done
+done
+for n in 9223372036854775807 9223372036854775808 18446744073709551616; do
+  $BIN byteArray $n 2>&1; echo "byteArray $n: exit $?"
+done

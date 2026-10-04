@@ -1,0 +1,5 @@
+F: error: invalid argument (error code: 9, bad file descriptor); contents ""
+A: error: invalid argument (error code: 9, bad file descriptor); contents "0123"
+G: read "0123456789"; contents "0123456789"
+S: read "3456"; contents "abc3456789"
+error: invalid argument (error code: 9, bad file descriptor)

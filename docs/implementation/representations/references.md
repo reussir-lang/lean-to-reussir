@@ -37,7 +37,11 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **What:** Mono types every reference `lcAny`. Stage 3 gives an
   `ST.Prim.mkRef` instance at a precise `α` the type `typedRef α` and
   carries it to the binders the reference flows into; elsewhere a
-  reference travels in a `Box`.
+  reference travels in a `Box`. `typedRef` is the constant
+  `_l2r.TypedRef`, which is not a Lean declaration: where lean2rr hands
+  its mono declarations back to Lean's passes (borrow inference), it
+  declares it for the run
+  ([../ownership.md](../ownership.md#leans-borrow-inference-sees-lean2rrs-typed-references-as-opaque-types-a-failure-is-an-error)).
 - **Why/Where:** see
   [../types/type-recovery.md](../types/type-recovery.md#references-created-at-a-precise-type-are-typed).
 - **Remove only if:** never.

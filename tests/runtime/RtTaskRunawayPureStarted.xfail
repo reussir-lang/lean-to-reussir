@@ -1,0 +1,1 @@
+fixed when lean2rr adopts lean-runtime's sched (sched-1 rule: a pure task no IO task waits for is marked started and runs only when needed, polled, waited on, idle or at exit)

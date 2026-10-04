@@ -1,0 +1,15 @@
+cwd: start
+noFileOrDirectory "" 2 "no such file or directory"
+cwd: end
+cwd: exit 0
+temp: start
+noFileOrDirectory "" 2 "no such file or directory"
+noFileOrDirectory "" 2 "no such file or directory"
+temp: end
+temp: exit 0
+wait: start
+first wait 0
+other class: no such thing (error code: 10, no such process)
+other class: no such thing (error code: 3, no such process)
+wait: end
+wait: exit 0
