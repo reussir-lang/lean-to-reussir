@@ -1,0 +1,7 @@
+rc_even  (extern of isEven)
+rc_digits  (extern of digits)
+rc_search  (extern of search)
+rc_sumto  (extern of sumTo)
+rc_gsum  (extern of gsum)
+rc_chain  (extern of chain)
+rc_ack  (extern of ack)

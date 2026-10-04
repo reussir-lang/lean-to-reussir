@@ -1,0 +1,6 @@
+rt_bytes_uget_u32le  (extern of ByteArray.ugetU32LE)
+rt_bytes_uset_u8x2  (extern of ByteArray.usetU8x2)
+rt_bytes_copy_within  (extern of ByteArray.copyWithin)
+rt_bytes_mk_p  (extern of mkP)
+rt_bytes_dec_eq  (extern of myDecEq)
+rt_bytes_fail  (extern of failIf)

@@ -1,0 +1,6 @@
+inline C  (extern of addInline)
+inline C  (extern of orSeven)
+inline C  (extern of dblNat)
+rt_forms_c  (extern of perBackend)
+rt_forms_target  (extern of target)
+! (extern of slow)

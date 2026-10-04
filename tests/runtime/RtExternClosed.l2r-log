@@ -1,0 +1,4 @@
+rt_closed_table  (extern of mkTable)
+rt_closed_seed  (extern of seed)
+rt_closed_greet  (extern of greeting)
+rt_closed_scale  (extern of scale)

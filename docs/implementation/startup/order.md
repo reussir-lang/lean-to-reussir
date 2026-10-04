@@ -14,7 +14,8 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   `initialize` constant.
 - **Why:** Natively a module's initializer evaluates all of these, used or
   not (fc23313). Consequence: an unused constant that reaches an extern
-  the runtime lacks makes the program fail to link (plan
+  the runtime lacks (or an extern of the program that lean2rr refuses)
+  makes lean2rr reject the program (plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
   "Not supported").
 - **Where:** `Emit/Startup.lean`: `startupItems`, `StartupItem`;

@@ -1382,8 +1382,11 @@ target of another type's code; the `_unsafe_rec` code Lean (4.33, 4.34) generate
 for a `partial def` is not `unsafe`), is an axiom, uses `sorry` (a cast
 through an equality proved by either), or is `@[extern]` or `@[export]`
 (Lean does not compare the types of an extern and the `@[export]`
-definition implementing it, which lean2rr calls instead: `redirectTarget`,
-Mono; `implemented_by` is type-checked, but an `unsafe` implementation,
+definition implementing it; lean2rr calls the definition instead of an
+extern of Lean's library unchecked, `Mono.redirectTarget`, and binds an
+extern of the program to it only when the binding's tests pass,
+`Mono.bindingFailure?`, so the condition is conservative there;
+`implemented_by` is type-checked, but an `unsafe` implementation,
 even one of the library's, can be applied to any type: a program declaration
 implemented by one counts too). The declarations reached are those the
 program's declarations come from (`sourceDecls`), and, transitively, the

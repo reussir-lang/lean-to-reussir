@@ -2,6 +2,8 @@ import Lean
 import LeanToReussir.Collect
 import LeanToReussir.Relevance
 import LeanToReussir.Passes
+import LeanToReussir.CompileRecord
+import LeanToReussir.Env
 
 /-!
 # Stage 1: monomorphization
@@ -57,6 +59,56 @@ structure MonoConfig where
   represents Lean's uniform-representation code with `Box` (see
   `uniformCode`) and placeholders. -/
   safeSources : Bool := false
+  /-- The functions the prelude (`runtime/prelude.rr`) declares
+  (`preludeFnDecls`): which symbols lean2rr's runtime implements
+  (`computeExternRoute`'s hint). -/
+  preludeFns : Std.HashSet String := {}
+
+/-- The functions a prelude declares: the names of its lines that start
+with `fn NAME` or `pub fn NAME`, outside the Rust code of its textures
+(`[{ … }]`, which declares C functions such as `gettid` for itself). Both
+Stage 1 (`computeExternRoute`'s hint) and the lowering (`LowerCtx.preludeFns`)
+decide from this set whether lean2rr implements a symbol. -/
+def preludeFnDecls (prelude : String) : Except String (Std.HashSet String) := do
+  let mut out : Std.HashSet String := {}
+  let mut depth : Int := 0
+  let mut lineNo := 0
+  for line in prelude.splitOn "\n" do
+    lineNo := lineNo + 1
+    if depth == 0 then
+      let rest := if line.startsWith "pub fn " then some (line.drop 7).toString
+        else if line.startsWith "fn " then some (line.drop 3).toString else none
+      if let some rest := rest then
+        let name := (rest.takeWhile fun c => c.isAlphanum || c == '_').toString
+        unless name.isEmpty do out := out.insert name
+    -- Texture delimiters outside `//` comments.
+    let code := (line.splitOn "//").head!
+    depth := depth + ((code.splitOn "[{").length - 1 : Nat) - ((code.splitOn "}]").length - 1 : Nat)
+    if depth < 0 then throw ("prelude line " ++ toString lineNo ++ ": `}]` without a texture to close")
+  if depth != 0 then throw ("prelude: " ++ toString depth ++ " texture(s) (`[{`) not closed by `}]`")
+  return out
+
+/-- `preludeFnDecls` in `CoreM`: a prelude whose textures do not balance is
+an error. -/
+def preludeFnDeclsM (prelude : String) : CoreM (Std.HashSet String) := do
+  match preludeFnDecls prelude with
+  | .ok s => return s
+  | .error e => throwError "cannot read the prelude's functions: {e}"
+
+/-- How lean2rr implements an extern that is not of Lean's library (an
+extern of the program or of a package it uses; `externRoute`). -/
+inductive ExternRoute where
+  /-- `@[implemented_by g]`: calls of the extern call `g`, as natively. -/
+  | implementedBy (g : Name)
+  /-- Its C symbol is the `@[export]` of `g`, which passes the binding
+  tests: the extern is a `noinline` declaration calling `g`
+  (`exportForwardDecl`). -/
+  | «export» (g : Name)
+  /-- Its Lean definition, compiled by lean2rr (`MonoState.extraBase`). -/
+  | body
+  /-- None of the above: refused, with the reason (`LowerCtx.externRefusals`). -/
+  | refused (why : String)
+  deriving Inhabited
 
 structure MonoState where
   config : MonoConfig
@@ -95,6 +147,27 @@ structure MonoState where
   extraBase : NameMap (Decl .pure) := {}
   /-- Safe definitions that could not be compiled (the unsafe version stays). -/
   uncompilable : NameSet := {}
+  /-- The externs of Lean's library by C symbol (lazily computed). -/
+  toolchainExterns : Option (Std.HashMap String (Array Name)) := none
+  /-- The C symbols of the externs in the source of Lean's whole library,
+  imported or not, with the module declaring each (lazily read,
+  `librarySourceExternSyms`). -/
+  librarySourceExterns : Option (Std.HashMap String Name) := none
+  /-- How each extern of the program met so far is implemented
+  (`externRoute`). -/
+  externRoutes : NameMap ExternRoute := {}
+  /-- Externs of the program compiled from their Lean definition, with
+  their symbols (`externLabel`), in the order met. -/
+  externBodies : Array (String × Name) := #[]
+  /-- Those of `externBodies` whose C symbol natively runs a function of
+  Lean's library (`nativeLibraryFunction?`: "Lean's runtime function" or
+  "Lean's library function"), for lean2rr's note. -/
+  externBodiesOfRuntime : NameMap String := {}
+  /-- Externs of the program that run their Lean definition although their
+  C symbol is the `@[export]` of another declaration of the program whose
+  binding's tests fail: the reasons, for lean2rr's warning (natively the
+  call runs that definition). -/
+  externBindingWarnings : Array (Name × Array String) := #[]
 
 abbrev MonoM := StateRefT MonoState CoreM
 
@@ -356,9 +429,458 @@ def recompile (n : Name) : MonoM Bool := do
     modify fun s => { s with uncompilable := s.uncompilable.insert n }
     return false
 
+/-- One identification of `toMono` (`toMonoType`, `toMonoTypeKeep`) at the
+head of `t` (`monoHead`): `.ok (some u)` when `t` is identified with `u` (a
+trivial structure, such as `Subtype`, `Fin`, a one-field structure or a
+one-method class, with its field's type; `Decidable` with `Bool`;
+`NonScalar` and `PNonScalar` with `lcAny`), `.ok none` when none applies,
+`.error ()` when the field's type depends on another field (unclassified). -/
+def monoHeadStep (t : Expr) : CoreM (Except Unit (Option Expr)) := do
+  let .const n _ := t.getAppFn | return .ok none
+  if n == ``Decidable then return .ok (some (mkConst ``Bool))
+  if n == ``NonScalar || n == ``PNonScalar then return .ok (some anyExpr)
+  let some info ← hasTrivialStructure? n | return .ok none
+  let ctorType ← getOtherDeclBaseType info.ctorName []
+  let some field := (getParamTypes (← instantiateForall ctorType t.getAppArgs[:info.numParams].toArray))[info.fieldIdx]?
+    | return .error ()
+  if field.hasLooseBVars then return .error ()
+  return .ok (some field)
+
+/-- `t` with the identifications of `toMono` (`toMonoType`, `toMonoTypeKeep`)
+applied at its head, until none applies: a trivial structure (`Subtype`,
+`Fin`, a one-field structure, a one-method class) is its field's type,
+`Decidable` is `Bool`, `NonScalar` and `PNonScalar` are `lcAny`. `none`
+when the field's type depends on another field (unclassified). -/
+partial def monoHead (t : Expr) (fuel : Nat := 32) : CoreM (Option Expr) := do
+  let t := t.consumeMData.headBeta
+  match ← monoHeadStep t with
+  | .error _ => return none
+  | .ok none => return some t
+  | .ok (some u) =>
+    if (t.getAppFn.constName? |>.any fun n => n == ``Decidable || n == ``NonScalar || n == ``PNonScalar) then
+      return some u
+    if fuel == 0 then return none
+    monoHead u (fuel - 1)
+
+/-! ## Externs: Lean's runtime library, else Lean code
+
+lean2rr compiles Lean code, and Lean's runtime library is the only native
+code it uses (the owner's decision of 2026-10-03; translation plan §5.8,
+"Lean-only target"). An extern of Lean's library, declared in a module of
+the toolchain (`isToolchainDecl`), is served by lean2rr's runtime: one the
+runtime lacks is reported by the lowering, never replaced by its Lean
+body, which is often a slow reference definition (the gap is the
+runtime's). Any other extern, of the program or of a package it uses,
+takes the first of these routes that applies (`externRoute`); its C code
+is never called, compiled or linked:
+1. `@[implemented_by g]`: `g`, as natively.
+2. A binding of its C symbol to the `@[export]` of another declaration `g`
+   of the program (not of Lean's library, review REB-14), the function
+   native Lean's call is linked to (the extern becomes a
+   `noinline` declaration calling `g`, `exportForwardDecl`). The binding
+   holds when two tests pass (`bindingFailure?`): its type is an instance
+   of `g`'s, and one compiled signature. A Lean body the extern has is
+   then not used: natively the linked function runs.
+3. Its Lean definition, compiled as if the attribute were not there
+   (`externBodyDecl`), also when its C symbol is that of an extern of
+   Lean's runtime library: an extern of the program is never bound to
+   Lean's runtime (the owner's decision of 2026-10-04).
+4. Otherwise it is refused: the lowering reports it with the reason
+   (`LowerCtx.externRefusals`), naming any binding test that failed and,
+   for a symbol of Lean's runtime library, the declaration to call
+   instead. -/
+
+/-- The externs declared by Lean's library (`Init`, `Std`, `Lean`, `Lake`),
+by C symbol. -/
+def toolchainExternSyms : MonoM (Std.HashMap String (Array Name)) := do
+  if let some s := (← get).toolchainExterns then return s
+  let env ← getEnv
+  let mut s : Std.HashMap String (Array Name) := {}
+  for i in [:env.header.moduleNames.size] do
+    unless isToolchainModule env.header.moduleNames[i]! do continue
+    for (n, _) in externAttr.ext.getModuleEntries env i do
+      if let some sym := getExternNameFor env `c n then s := s.insert sym ((s.getD sym #[]).push n)
+  modify fun st => { st with toolchainExterns := some s }
+  return s
+
+/-- The string literals of the `@[extern …]` (or `attribute [extern …]`)
+attributes on a line of Lean source: those after the word `extern`, up to
+the attribute's `]`. -/
+def externAttrStrings (line : String) : List String :=
+  match line.splitOn "extern" with
+  | [] | [_] => []
+  | _ :: rest => rest.flatMap fun part =>
+    let attr := (part.splitOn "]").head!
+    (attr.splitOn "\"").zipIdx.filterMap fun (t, i) => if i % 2 == 1 then some t else none
+
+/-- The C symbols of the `@[extern]` declarations in the source of Lean's
+library, each with the module that declares it, (`src/lean/{Init,Std,Lean}` and `src/lean/lake/Lake` of the
+toolchain lean2rr is built with), whether or not the program imports their
+modules: read from the source text (`externAttrStrings`), since an `.olean`
+the program does not import is not loaded. Symbolic links to directories
+are not followed (a cycle would recurse without end, review REB-09). Empty
+when the toolchain ships no source. Used only for the message of a refused
+extern whose symbol is a prelude function (`computeExternRoute`). -/
+def librarySourceExternSyms : MonoM (Std.HashMap String Name) := do
+  if let some s := (← get).librarySourceExterns then return s
+  let mut out : Std.HashMap String Name := {}
+  try
+    let src := (← toolchainSysroot) / "src" / "lean"
+    let notLink (d : System.FilePath) : IO Bool := do
+      return (← d.symlinkMetadata).type != .symlink
+    -- (directory, the directory module names are relative to)
+    for (dir, base) in [(src / "Init", src), (src / "Std", src), (src / "Lean", src),
+        (src / "lake" / "Lake", src / "lake")] do
+      unless ← dir.isDir do continue
+      for f in ← dir.walkDir notLink do
+        unless f.extension == some "lean" do continue
+        let rel := (f.withExtension "").toString.drop (base.toString.length + 1)
+        let mod := (rel.toString.splitOn "/").foldl (fun n c => Name.mkStr n c) .anonymous
+        let text ← try IO.FS.readFile f catch _ => pure ""
+        for line in text.splitOn "\n" do
+          for sym in externAttrStrings line do
+            unless out.contains sym do out := out.insert sym mod
+  catch _ => pure ()
+  modify fun st => { st with librarySourceExterns := some out }
+  return out
+
+/-- Whether `n` is declared in Lean's library or in lean2rr's shim: in a
+module named `Init.*`, `Std.*`, `Lean.*`, `Lake.*` or `L2RShim.*`
+(`isToolchainModule`). `Env.loadEnvironment` checks that each module so
+named is the file of that name in the library of lean2rr's toolchain (or in
+the shim directory), so the name decides it. -/
+def isToolchainDecl (n : Name) : CoreM Bool := do
+  let env ← getEnv
+  match env.getModuleIdxFor? n with
+  | some i => return isToolchainModule env.header.moduleNames[i.toNat]!
+  | none => return false
+
+/-- `e` without metadata, such as the borrow marks `@&`. -/
+partial def stripMData (e : Expr) : Expr :=
+  e.replace fun
+    | .mdata _ b => some (stripMData b)
+    | _ => none
+
+/-- What a C function of declaration `n` takes and returns, from Lean's
+compiled (impure-phase) signature of `n`: its parameters that are not void
+(the IO world), each with its borrow mark, and its result type. An extern's
+C call passes no erased argument either (`keepErased := false`); an
+`@[export]` function takes its erased parameters (`keepErased := true`). -/
+def compiledSig? (n : Name) (keepErased : Bool) : CoreM (Option (Array (Expr × Bool) × Expr)) := do
+  let some s ← getImpureSignature? n | return none
+  let ps := s.params.filter fun p => !p.type.isVoid && (keepErased || !p.type.isErased)
+  return some (ps.map fun p => (p.type, p.borrow), s.type)
+
+/-- A compiled signature, for messages: `(@& obj, tobj) → tobj`. -/
+def renderCompiledSig (ps : Array (Expr × Bool)) (r : Expr) : String :=
+  let p := ps.toList.map fun (t, b) => (if b then "@& " else "") ++ toString t
+  s!"({", ".intercalate p}) → {r}"
+
+/-- Is the result type `fr` of the extern `g`'s result type `gr`, with the
+identifications of `toMono` that make `g`'s value one of `fr`'s (applied to
+`gr`, at its head, one after the other): a trivial structure is its single
+relevant field (`{n : Nat // n = 32 ∨ n = 64}` is a `Nat`), `Decidable p` is
+`Bool`. -/
+partial def resultInstance (fr gr : Expr) (fuel : Nat := 8) : MetaM Bool := do
+  if ← Meta.isDefEq fr gr then return true
+  if fuel == 0 then return false
+  let gr ← Meta.whnf gr
+  if gr.getAppFn.constName? |>.any fun n => n == ``NonScalar || n == ``PNonScalar then return false
+  match ← monoHeadStep gr.headBeta with
+  | .ok (some u) => resultInstance fr u (fuel - 1)
+  | _ => return false
+
+/-- Is `fr` `gr`, parameter by parameter (definitionally), with `g`'s result
+type identified as `resultInstance` allows? Identifications apply to the
+result only: on a parameter they would let the extern pass a value that
+breaks `g`'s invariant (`UInt32` is not `Char`: `0xD800` is no character). -/
+partial def typeMatches (fr gr : Expr) : MetaM Bool := do
+  if ← Meta.isDefEq fr gr then return true
+  match ← Meta.whnf fr, ← Meta.whnf gr with
+  | .forallE n d b bi, .forallE _ d' b' _ =>
+    unless ← Meta.isDefEq d d' do return false
+    Meta.withLocalDecl n bi d fun x => typeMatches (b.instantiate1 x) (b'.instantiate1 x)
+  | .forallE .., _ | _, .forallE .. => return false
+  | f', g' => resultInstance f' g'
+
+/-- Test 1 of `bindingFailure?`: is `fty` an instance of `gty` (universe
+parameters `gus`), at transparency `all`: `gty` with `g`'s universe
+parameters instantiated as needed (`{α : Type}` is `{α : Type u}`), and its
+result type identified as `toMono` does (`resultInstance`), its parameter
+types not (`typeMatches`)? `g`'s implicit type parameters need no
+instantiating: they would be erased parameters of `g`'s `@[export]`
+function, which no extern's call passes, so test 2 would fail. Borrow marks
+(metadata) are ignored. `.error` names why not. -/
+def typeInstance (fty gty : Expr) (gus : List Name) : MetaM (Except String Unit) :=
+    Meta.withTransparency .all do
+  let fty := stripMData fty
+  let gty := stripMData gty
+  let same ← try
+      (do
+        let us ← gus.mapM fun _ => Meta.mkFreshLevelMVar
+        typeMatches fty (gty.instantiateLevelParams gus us))
+    catch _ => pure false
+  if same then return .ok ()
+  return .error s!"the type: `{fty}` is not an instance of `{gty}`"
+
+/-- Why the binding of extern `f` of the program to the `@[export]`
+definition `g` of its C symbol fails, or `.ok ()` if it holds. The binding
+holds when two tests pass (a rule shared with another Lean translator built
+on the same runtime):
+1. One type: `f`'s type is an instance of `g`'s (`typeInstance`): `g`'s with
+   its universe parameters instantiated is `f`'s, definitionally
+   (transparency `all`), the borrow marks aside; `g`'s result type (only)
+   may be identified as `toMono` does: a trivial structure is its single
+   relevant field (`Nat → Nat` binds to an `@[export]` returning a
+   `{m : Nat // m > 0}`), `Decidable p` is `Bool` (`resultInstance`).
+2. One compiled signature, the condition under which native Lean's linked
+   call is defined: the arguments `f`'s C call passes (not the IO world,
+   not erased ones) are the parameters `g`'s C function takes (all but the
+   IO world, erased ones included; `compiledSig?`), with equal types, and
+   the two results have one type. Borrow marks must be equal too, except
+   that an argument `f` passes owned may meet a parameter `g` borrows
+   (natively a leak, no other effect); an `@&` on `f` where `g` takes the
+   argument owned fails (natively `g` releases a reference the caller
+   still holds). -/
+def bindingFailure? (f g : Name) : CoreM (Except String Unit) := do
+  let env ← getEnv
+  let (some fi, some gi) := (env.find? f, env.find? g) | return .error s!"{g} is not a declaration"
+  if let .error why ← (typeInstance fi.type gi.type gi.levelParams).run' {} {} then return .error why
+  let some (fps, fr) ← compiledSig? f false | return .error s!"the compiled signature: Lean compiled no signature for {f}"
+  let some (gps, gr) ← compiledSig? g true | return .error s!"the compiled signature: Lean compiled no signature for {g}"
+  if fps.size != gps.size || fr != gr || (fps.zip gps).any (fun ((a, _), (b, _)) => a != b) then
+    return .error s!"the compiled signature: {g}'s C function is `{renderCompiledSig gps gr}`, its call `{renderCompiledSig fps fr}`"
+  for h : i in [:fps.size] do
+    if fps[i].2 && !gps[i]!.2 then
+      return .error s!"borrowed on the extern, owned on the target: it borrows (@&) argument {i + 1}, which {g} takes owned"
+  return .ok ()
+
+/-- `toDecl` for the Lean definition of extern `declName` (which `toDecl`
+turns into an extern declaration): its definition, or its `_unsafe_rec`
+version (recursive and `partial` definitions), as Lean's compiler compiles
+it without the attribute (`ToDecl.toDecl`: `_unsafe_rec` names and
+`@[csimp]` replacements, `macro_inline`, matchers). It is `noinline`: Lean's
+passes in Stage 2 would otherwise evaluate calls of it on literals, which
+natively, a C call, they never are (`Nat.shiftLeft 1 (2^64)` stopped
+lean2rr, RV8E-11). An `opaque` declaration has no Lean definition (its
+value only shows that its type is inhabited), nor has an axiom. -/
+def externBodyDecl (declName : Name) : CompilerM (Decl .pure) := do
+  let some info ← getDeclInfo? declName | throwError "it is not a declaration"
+  match info with
+  | .defnInfo _ => pure ()
+  | .opaqueInfo _ =>
+    throwError "it has no Lean definition (an `opaque` declaration, whose value only shows that its type is inhabited)"
+  | .axiomInfo _ => throwError "it has no Lean definition (an axiom)"
+  | _ => throwError "it has no Lean definition"
+  let safe ← declIsNotUnsafe declName
+  let some value := info.value? (allowOpaque := true) | throwError "it has no Lean definition"
+  let (type, value) ← Meta.MetaM.run' do
+    let type ← toLCNFType info.type
+    let value ← Meta.lambdaTelescope value fun xs body => do Meta.mkLambdaFVars xs (← Meta.etaExpand body)
+    -- `f._unsafe_rec` calls itself: calls of `f`; `@[csimp]` replacements.
+    let value ← Core.transform value fun e => match e with
+      | .const c us => return .done (← CSimp.replaceConstant (← getEnv) (.const ((isUnsafeRecName? c).getD c) us))
+      | _ => return .continue
+    let value ← macroInline value
+    let value ← inlineMatchers value
+    let value ← macroInline value
+    return (type, value)
+  let code ← toLCNF value type
+  let decl ← if let .fun decl (.return _) := code then
+      eraseFunDecl decl (recursive := false)
+      pure ({ name := declName, params := decl.params, type, value := .code decl.value,
+              levelParams := info.levelParams, safe, inlineAttr? := some .noinline } : Decl .pure)
+    else
+      pure { name := declName, params := #[], type, value := .code code, levelParams := info.levelParams,
+             safe, inlineAttr? := some .noinline }
+  decl.etaExpand
+
+/-- How an extern names its C code, for messages: its symbol, or the kind
+of its entry (`@[extern c inline "…"]`, `@[extern]`). -/
+def externLabel (env : Environment) (n : Name) : String :=
+  match getExternNameFor env `c n with
+  | some sym => sym
+  | none => match getExternAttrData? env n with
+    | some d => if d.entries.any (· matches .inline ..) then "inline C" else "adhoc C"
+    | none => "C"
+
+/-- Compile extern `n`'s Lean definition (`externBodyDecl`) with
+`recompilePasses`, as `recompile` does. `none` on success, otherwise why
+not. -/
+def compileExternBody (n : Name) : MonoM (Option String) := do
+  if (← get).extraBase.contains n then return none
+  let passes ← recompilePasses
+  try
+    let decls ← (do
+        let d ← externBodyDecl n
+        runPasses passes (markRecDecls #[d]) false : CompilerM _).run (phase := .base)
+    let sym := externLabel (← getEnv) n
+    modify fun s => { s with
+      extraBase := decls.foldl (fun m d => m.insert d.name d) s.extraBase
+      externBodies := s.externBodies.push (sym, n) }
+    return none
+  catch e =>
+    let why ← e.toMessageData.toString
+    -- `externBodyDecl`'s own reasons are complete sentences; Lean's
+    -- compilation errors are not.
+    return some (if why.startsWith "it " then why else s!"its Lean definition could not be compiled: {why}")
+
+/-- The forwarding declaration of extern `f` of the program bound to the
+`@[export]` definition `g` (`ExternRoute.export`): `f`'s parameters (from its
+LCNF type, as `toDecl` takes an extern's), a call of `g` on them, and
+`noinline`, as an extern's Lean definition (`externBodyDecl`). Calls of `f`
+are not renamed to `g` in Stage 1: Stage 2's passes would then inline and
+fold `g` on literal arguments, which natively, a C call, they never are
+(review REB-01, the export form of RV8E-11). Test 1 leaves `g` no type
+parameters, and test 2 none of `f`'s parameters erased. -/
+def exportForwardDecl (f g : Name) : CompilerM (Decl .pure) := do
+  let some info := (← getEnv).find? f | throwError "{f} is not a declaration"
+  let some gi := (← getEnv).find? g | throwError "{g} is not a declaration"
+  let type ← Meta.MetaM.run' (toLCNFType info.type)
+  let mut params := #[]
+  let mut ty := type
+  repeat
+    match ty with
+    | .forallE n d b _ =>
+      params := params.push (← mkParam n d false)
+      ty := b
+    | _ => break
+  let args : Array (Arg .pure) := params.map fun p => if p.type.isErased then .erased else .fvar p.fvarId
+  let r ← mkLetDecl `_r ty (.const g (gi.levelParams.map fun _ => Level.zero) args)
+  return { name := f, levelParams := info.levelParams, type, params, value := .code (.let r (.return r.fvarId)),
+           safe := true, inlineAttr? := some .noinline }
+
+/-- Compile the forwarding declaration of extern `f` bound to `@[export]`
+definition `g` (`exportForwardDecl`) with `recompilePasses`. `none` on
+success, otherwise why not. -/
+def compileExportForward (f g : Name) : MonoM (Option String) := do
+  if (← get).extraBase.contains f then return none
+  let passes ← recompilePasses
+  try
+    let decls ← (do runPasses passes #[← exportForwardDecl f g] false : CompilerM _).run (phase := .base)
+    modify fun s => { s with extraBase := decls.foldl (fun m d => m.insert d.name d) s.extraBase }
+    return none
+  catch e => return some (← e.toMessageData.toString)
+
+/-- How a refusal describes declaration `g` of Lean's library that the
+refused extern's C symbol names (`what`: "that of" an extern, "the
+`@[export]` of" a definition): a public one is to be called instead; a
+private one (module system) is named by its user-facing name, with how a
+program can call it (reviews REB-10, REB-12, REB-18). -/
+def libraryDeclAdvice (g : Name) (what : String) : CoreM String := do
+  let env ← getEnv
+  if isPrivateName g then
+    let m := match env.getModuleIdxFor? g with
+      | some i => toString env.header.moduleNames[i.toNat]!
+      | none => "?"
+    return s!"{what} {(privateToUserName? g).getD g}, a private declaration of module {m} of \
+      Lean's library, which a program can call only from a `module` file that imports it with \
+      `import all {m}`, and to which lean2rr does not bind an extern of the program"
+  return s!"{what} {g} of Lean's library, to which lean2rr does not bind an extern of the program: \
+    call {g} instead"
+
+/-- What native Lean runs for C symbol `sym` when it is a function of Lean's
+library, for the note on an extern of the program that runs its Lean
+definition instead: "Lean's library function" for the `@[export]` of a Lean
+definition of Lean's library (`lean_string_drop`, `String.Internal.dropImpl`),
+"Lean's runtime function" for the symbol of an extern of Lean's library,
+imported or not (the source scan, `librarySourceExternSyms`, only for a
+symbol the prelude defines: it is cached but reads Lean's whole source, so
+it does not run for the program's own symbols; reviews REB-08, REB-13). -/
+def nativeLibraryFunction? (sym : String) : MonoM (Option String) := do
+  if let some g := (← exportMap).get? sym then
+    if ← isToolchainDecl g then return some "Lean's library function"
+  if (← toolchainExternSyms).contains sym then return some "Lean's runtime function"
+  if (← get).config.preludeFns.contains sym then
+    if (← librarySourceExternSyms).contains sym then return some "Lean's runtime function"
+  return none
+
+/-- The route of extern `n`, which is not of Lean's library (see the
+section's introduction); its Lean definition, or its forwarding declaration
+to an `@[export]` definition, is compiled here when that is the route.
+Cached by `externRoute`. Where the route is its Lean definition although
+its C symbol is another declaration's `@[export]` whose binding fails, the
+failed tests are recorded for lean2rr's warning
+(`MonoState.externBindingWarnings`; review REB-02). A refused extern whose
+symbol is that of an extern of Lean's library gets the declaration to call
+instead; when no imported module declares one but the runtime implements
+the symbol, the module of Lean's library that does, to import
+(`librarySourceExternSyms`; reviews REB-03, REB-07). -/
+def computeExternRoute (n : Name) : MonoM ExternRoute := do
+  let env ← getEnv
+  if let some g := Compiler.getImplementedBy? env n then return .implementedBy g
+  let sym? := getExternNameFor env `c n
+  let mut failed : Array String := #[]
+  if let some sym := sym? then
+    -- Another declaration's `@[export]`, of the program's own (not of Lean's
+    -- library, whose `@[export]`s an extern of the program is not bound to,
+    -- as to Lean's runtime; review REB-14).
+    if let some g := (← exportMap).get? sym then
+      if g != n && !(← isToolchainDecl g) then
+        match ← bindingFailure? n g with
+        | .ok () =>
+          match ← compileExportForward n g with
+          | none => return .export g
+          | some why => failed := failed.push s!"its C symbol {sym} is the @[export] of {g}, but the call of {g} could not be compiled: {why}"
+        | .error why => failed := failed.push s!"its C symbol {sym} is the @[export] of {g}, but the binding fails {why}"
+  match ← compileExternBody n with
+  | none =>
+    unless failed.isEmpty do
+      modify fun s => { s with externBindingWarnings := s.externBindingWarnings.push (n, failed) }
+    if let some sym := sym? then
+      if let some what ← nativeLibraryFunction? sym then
+        modify fun s => { s with externBodiesOfRuntime := s.externBodiesOfRuntime.insert n what }
+    return .body
+  | some why =>
+    let some sym := sym? | return .refused ("; ".intercalate (why :: failed.toList))
+    -- The symbol of an extern of Lean's library: lean2rr does not bind the
+    -- program's extern to it, but says what to call.
+    let lib := (← toolchainExternSyms).getD sym #[]
+    if !lib.isEmpty then
+      -- A private declaration (module system) is named by its user-facing
+      -- name, with how a program can call it (`libraryDeclAdvice`).
+      let (priv, pub) := lib.partition isPrivateName
+      let mut parts := #[]
+      unless pub.isEmpty do
+        let names := " or ".intercalate (pub.toList.map toString)
+        parts := parts.push s!"that of {names} of Lean's library, to which lean2rr does not bind an \
+          extern of the program: call {names} instead"
+      for g in priv do
+        parts := parts.push (← libraryDeclAdvice g "that of")
+      failed := failed.push s!"its C symbol {sym} is {" and ".intercalate parts.toList}"
+    -- The `@[export]` of a Lean definition of Lean's library (natively the
+    -- call runs it; an extern of the program is not bound to it, review
+    -- REB-14).
+    else if let some g ← (do
+        match (← exportMap).get? sym with
+        | some g => if ← isToolchainDecl g then pure (some g) else pure none
+        | none => pure none : MonoM (Option Name)) then
+      failed := failed.push s!"its C symbol {sym} is {← libraryDeclAdvice g "the @[export] of"}"
+    -- A function of lean2rr's runtime whose declaration in Lean's library
+    -- the program does not import (not a helper of lean2rr's prelude, such
+    -- as `l2r_nat_repr` or `lean_natarr_push`, which no Lean module
+    -- declares; review REB-07). `do` runs every `(← …)` of a condition
+    -- before it, without `&&`'s short circuit, so the scan of Lean's source
+    -- (`librarySourceExternSyms`) is nested: it runs only for such a
+    -- refused extern (review REB-08).
+    else if failed.isEmpty && (← get).config.preludeFns.contains sym && !(← exportMap).contains sym then
+      if let some m := (← librarySourceExternSyms).get? sym then
+        failed := failed.push s!"its C symbol {sym} is that of an extern of Lean's library declared in \
+          module {m}, which the program does not import; if that declaration is public, import {m} \
+          and call it instead"
+    return .refused ("; ".intercalate (why :: failed.toList))
+
+/-- `computeExternRoute`, once per extern. -/
+def externRoute (n : Name) : MonoM ExternRoute := do
+  if let some r := (← get).externRoutes.find? n then return r
+  let r ← computeExternRoute n
+  modify fun s => { s with externRoutes := s.externRoutes.insert n r }
+  return r
+
 /-- The base declaration to instantiate for `n`: one compiled by lean2rr,
 or Lean's persisted one — unless that one is tainted by type-unsafe code, in
-which case `n` is recompiled from source. -/
+which case `n` is recompiled from source, or is an extern that is not of
+Lean's library and runs its Lean definition (`externRoute`). -/
 def baseDeclFor? (n : Name) : MonoM (Option (Decl .pure)) := do
   if let some d := (← get).extraBase.find? n then return some d
   let some d ← getBaseDecl? n | do
@@ -366,6 +888,12 @@ def baseDeclFor? (n : Name) : MonoM (Option (Decl .pure)) := do
     if (← unsafeImplMap).toList.any (·.2 == n) then
       if ← recompile n then return (← get).extraBase.find? n
     return none
+  if let .extern _ := d.value then
+    unless ← isToolchainDecl n do
+      match ← externRoute n with
+      | .body | .export _ => return (← get).extraBase.find? n
+      | .implementedBy _ | .refused _ => pure ()
+    return some d
   if (← get).config.safeSources && (specOrigin? n).isNone then
     if ← isTainted d then
       if ← recompile n then return (← get).extraBase.find? n
@@ -426,12 +954,19 @@ def redirectTarget (f : Name) : MonoM Name := do
   -- `l2r_override_<f mangled>`) is that definition.
   if let some d := (← exportMap).get? (f.mangle "l2r_override_") then
     if d != f then return d
-  -- An extern whose C symbol is provided by an `@[export]` Lean definition
-  -- is that definition (Lean's runtime calls it; we compile it).
+  -- An extern of Lean's library whose C symbol is provided by an
+  -- `@[export]` Lean definition is that definition (Lean's runtime calls
+  -- it; we compile it). An extern of the program follows its route: its
+  -- `@[implemented_by]` target, or the `@[export]` definition its C symbol
+  -- binds to (`externRoute`).
   if isExtern (← getEnv) f then
-    if let some sym := getExternNameFor (← getEnv) `c f then
-      if let some d := (← exportMap).get? sym then
-        if d != f then return d
+    if ← isToolchainDecl f then
+      if let some sym := getExternNameFor (← getEnv) `c f then
+        if let some d := (← exportMap).get? sym then
+          if d != f then return d
+    else match ← externRoute f with
+      | .implementedBy g => return g
+      | _ => pure ()
   if !(← get).config.safeSources then return f
   if ← isTypeUnsafeImpl f then
     if let some safe := (← unsafeImplMap).find? f then
@@ -581,6 +1116,7 @@ def renameApp (statics : Std.HashMap FVarId Expr) (f : Name) (args : Array (Arg 
   -- `if` on it and so the closed terms (an instance under a new name
   -- survives as a call).
   if f == ``Decidable.decide then return none
+  let f0 := f
   let f ← redirectTarget f
   if isExtern (← getEnv) f then ensureIOErrorBuilders f
   let some callee ← baseDeclFor? f | return none
@@ -588,7 +1124,10 @@ def renameApp (statics : Std.HashMap FVarId Expr) (f : Name) (args : Array (Arg 
   if let .extern _ := callee.value then
     if positions.isEmpty then
       modify fun s => { s with monoExterns := s.monoExterns.insert f }
-      return none
+      -- A redirected call (an extern of the program whose
+      -- `@[implemented_by]` target is an extern) calls that extern under
+      -- its own name.
+      return if f != f0 then some (f, args) else none
   let mut typeArgs := #[]
   for i in positions do
     match args[i]? with
@@ -617,9 +1156,12 @@ partial def renameCode (statics : Std.HashMap FVarId Expr) : Code .pure → Mono
       | some e => statics.insert d.fvarId e
       | none => statics
     let d ← match d.value with
-      | .const f _ args _ =>
+      | .const f us args _ =>
         match ← renameApp statics f args with
-        | some (n, args') => pure { d with value := .const n [] args' }
+        | some (n, args') =>
+          -- A monomorphic extern keeps its own name, and so its universes.
+          let us := if (← get).monoExterns.contains n then us else []
+          pure { d with value := .const n us args' }
         | none => pure d
       | _ => pure d
     return .let d (← renameCode statics k)
@@ -825,24 +1367,6 @@ def ctorFieldTypesAt (iv : InductiveVal) (args : Array Expr) : CoreM (Array (Arr
       | .forallE _ d b _ => out := out.push d; ty := b.instantiate1 anyExpr
       | _ => break
     return out
-
-/-- `t` with the identifications of `toMono` (`toMonoType`, `toMonoTypeKeep`)
-applied at its head, until none applies: a trivial structure (`Subtype`,
-`Fin`, a one-field structure, a one-method class) is its field's type,
-`Decidable` is `Bool`, `NonScalar` and `PNonScalar` are `lcAny`. `none`
-when the field's type depends on another field (unclassified). -/
-partial def monoHead (t : Expr) (fuel : Nat := 32) : CoreM (Option Expr) := do
-  let t := t.consumeMData.headBeta
-  let .const n _ := t.getAppFn | return some t
-  if n == ``Decidable then return some (mkConst ``Bool)
-  if n == ``NonScalar || n == ``PNonScalar then return some anyExpr
-  let some info ← hasTrivialStructure? n | return some t
-  if fuel == 0 then return none
-  let ctorType ← getOtherDeclBaseType info.ctorName []
-  let some field := (getParamTypes (← instantiateForall ctorType t.getAppArgs[:info.numParams].toArray))[info.fieldIdx]?
-    | return none
-  if field.hasLooseBVars then return none
-  monoHead field (fuel - 1)
 
 /-- Is the head of `t` (after `monoHead`) an inductive type? -/
 def inductiveHead (t : Expr) : CoreM Bool := do

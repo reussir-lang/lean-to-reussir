@@ -1,0 +1,1 @@
+The Lean package's C++ functions (kernel, evalConst, .olean files, Dynlib, Expr internals) are not in lean2rr's runtime (runtime/README.md, Requests for lean2rr 32): lean2rr rejects the program and lists them.

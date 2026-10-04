@@ -74,6 +74,10 @@ structure LowerCtx where
   table : RelevanceTable
   /-- Functions the runtime prelude defines. -/
   preludeFns : Std.HashSet String := {}
+  /-- Externs of the program (not of Lean's library) that lean2rr refuses,
+  with the reason (`Mono.ExternRoute.refused`): a call of one is reported
+  (`calleeOf`), and the program rejected (`lowerProgram`). -/
+  externRefusals : NameMap String := {}
   /-- Result types of the prelude's functions (from their signatures). -/
   preludeRets : Std.HashMap String RR.Ty := {}
   /-- Parameter types of the prelude's non-generic functions. -/
@@ -246,6 +250,10 @@ structure LowerState where
   builds only); kept in the state so that `boxCastConv`'s rollback restores
   it together with `fns`. -/
   convTickEmitted : Bool := false
+  /-- Externs called by their C symbol that the prelude does not define, and
+  externs of the program that lean2rr refuses: the symbol and the extern's
+  declaration (`lowerExternCall`, `calleeOf`; reported by `lowerProgram`). -/
+  missingExterns : Array (String × Name) := #[]
   /-- Nominal types that some `Box` value is unboxed to (converter bodies
   are generated at the end, once all `Box` variants are known). -/
   unboxTargets : Array String := #[]

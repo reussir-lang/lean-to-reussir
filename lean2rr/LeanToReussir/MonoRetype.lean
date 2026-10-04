@@ -286,6 +286,9 @@ def reinstantiate? (sc : Scope) (f : Name) (args : Array (Arg .pure)) (resTy : E
     MRetypeM (Option Name) := do
   let some key := (← get).keys.find? f | return none
   unless key.dicts.isEmpty && key.typeArgs.any (· == anyExpr) do return none
+  -- An instance with code (the Lean definition of an extern of the program,
+  -- `Mono.ExternRoute.body`) is not an extern instance.
+  if (← get).codeDecls.contains f then return none
   let some base ← getBaseDecl? key.decl | return none
   let positions := typeParamPositions base
   -- Saturated, or over-applied (the element read of an `Array.map` over

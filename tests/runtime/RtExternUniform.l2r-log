@@ -1,0 +1,3 @@
+rt_uniform_push_twice  (extern of Array.pushTwice)
+rt_uniform_restart  (extern of Array.restart)
+lean_array_push  (extern of Array.push0)

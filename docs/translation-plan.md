@@ -189,7 +189,9 @@ The roots are:
 
 Everything referenced from reachable code is collected:
 - declarations with code;
-- `@[extern]` declarations (provided by the runtime);
+- `@[extern]` declarations: those of Lean's library are provided by the
+  runtime; any other runs its Lean definition, or the function its C
+  symbol binds to (§5.8, "Externs of the program");
 - constructors.
 
 Nothing else can occur in a program Lean compiled: Lean refuses to compile
@@ -331,8 +333,9 @@ Statically known dictionaries, the common case, take the fast path above.
 
 ### 2.6 When a type is not statically known
 
-Every program Lean compiles is translated (it links only if the runtime
-implements every extern it reaches, §10). Where a static type is
+Every program Lean compiles is translated (unless it reaches an extern
+that neither the runtime implements nor Lean code can replace, §5.8 and
+§10). Where a static type is
 unavailable, the uniform `Box` representation (§5.1) takes its place:
 - **A type argument that is not fully known.** The instance is built at
   `lcAny` (§2.3).
@@ -995,10 +998,13 @@ its value is stored as `Box`.
   needs `unsafe` code, a `cast` between types lean2rr represents
   differently needs an equality that only `sorry` or an axiom proves, and
   Lean does not compare the types of an extern and the `@[export]`
-  definition that implements it (which lean2rr calls directly, §5.8,
-  whichever of the two is the program's): `@[extern "s"] opaque asP2 (p :
+  definition that implements it: natively `@[extern "s"] opaque asP2 (p :
   Pkg) : P2` bound to `@[export s] def payload (p : Pkg) : p.α` reads an
-  existential payload as a `P2`. `implemented_by` is type-checked, but
+  existential payload as a `P2`. (lean2rr binds an extern of the program to
+  an `@[export]` only when their types and compiled signatures agree, so it
+  now refuses that program, test `RtCastExtern`, §5.8; an extern of Lean's
+  library goes to the `@[export]` of its symbol unchecked, so the fact
+  stays conservative.) `implemented_by` is type-checked, but
   only by its declared type: a program declaration implemented by an
   `unsafe` function, even one of the library's, counts (`@[implemented_by
   TypeName.mk] opaque mkTN` gives two types the same `TypeName`, so
@@ -1623,10 +1629,12 @@ J3 (J4 when an outlined body tail-calls the declaration).
 
 ### 5.8 Externs and runtime calls
 
-An extern call becomes a call of the prelude function named after the
-extern's C symbol (or generated glue, below). lean2rr keeps no table of
-the externs it supports and does not check that the prelude defines the
-function: when it does not, rrc reports an unknown function (§10, "Not
+A call of an extern of Lean's library becomes a call of the prelude
+function named after the extern's C symbol (or generated glue, below);
+the externs of the program follow the rule of "Externs of the program"
+below. lean2rr keeps no table of the externs it supports: it checks that
+the prelude defines each function it calls, and when it does not, rejects
+the program at translation, naming each such extern (§10, "Not
 supported"); `lean2rr --emit externs` lists the externs a program calls.
 The prelude function is:
 - inline Reussir code, for fast paths such as small-`Nat` addition with an
@@ -1668,6 +1676,113 @@ Rules:
   program: the `IO.Error` builders `lean_mk_io_error_*`, which Lean's C
   runtime calls, are reached through lean2rr's own glue
   (`ensureIOErrorBuilders`, `ioErrorFn`; fallible IO, below).
+- **Lean-only target.** The owner's decision (2026-10-03): "let's just
+  target lean only code for now, with runtime library as the only
+  exception". lean2rr compiles Lean code, and Lean's runtime library is
+  the only native code it uses: the C code of a program or of a package it
+  requires (Lake's `extern_lib`) is never compiled, linked or called. The
+  Lean definition of an `@[extern]` is its specification, so running it
+  is not an ad-hoc port of the C code.
+- **Externs of Lean's library** (declared in a module of the toolchain's
+  library: `Init`, `Std`, `Lean`, `Lake`, and lean2rr's shim `L2RShim`;
+  `Mono.isToolchainDecl`, which decides by the module's name: the loader
+  has checked that a module so named is the toolchain's own file, §10
+  "Module names") are served by the runtime, as above. One the runtime
+  lacks is a gap of the runtime: lean2rr rejects the program, naming each
+  such extern, and never runs the extern's Lean body in its place (often
+  a slow reference definition: `Nat.add`'s is unary recursion).
+- **Externs of the program** (any other: of the program's modules or of a
+  package it requires) take the first of these routes that applies
+  (`Mono.computeExternRoute`):
+  1. `@[implemented_by g]`: `g`, as natively.
+  2. *A binding to the program's own `@[export]`.* When the extern's C
+     symbol is the `@[export]` of another declaration of the program (not
+     of Lean's library: the `@[export]`s of Init, such as
+     `String.Internal.dropImpl`'s `lean_string_drop`, count as Lean's
+     runtime library, REB-14), native Lean's call is
+     linked to that definition, and lean2rr calls it too, provided two
+     tests pass (`Mono.bindingFailure?`, a rule shared with another Lean
+     translator built on the same runtime). *One type*: the extern's type
+     is an instance of the definition's: the definition's type with its
+     universe parameters instantiated is the extern's, definitionally at
+     transparency `all`, borrow marks aside (`{α : Type}` binds to
+     `{α : Type u}`). On the definition's *result* type, and only there,
+     Lean's two mono identifications apply: a trivial structure is its
+     single relevant field and `Decidable p` is `Bool`, so `mk1 : Nat → Nat`
+     binds to an `@[export]` returning a `{m : Nat // m > 0}` (its value
+     meets the stronger invariant). On a parameter they would be unsound: a
+     `Nat` passed where the definition takes a `{n : Nat // n > 0}` could be
+     `0` (a `UInt32` for a `Char` could be `0xD800`). *One compiled
+     signature*, the condition under which the native call is defined, read
+     from Lean's compiled (impure-phase) signatures: the arguments the
+     extern's C call passes (not the IO world, not erased ones) are the
+     definition's C parameters (erased ones included, so a definition with
+     type parameters never binds, and their instantiation is not needed),
+     with equal types, the results have one type, and the borrow marks are
+     equal, except that an owned argument may meet a parameter the
+     definition borrows (natively a leaked reference), never the reverse
+     (natively the definition releases a reference the caller still
+     holds). The extern becomes a `noinline` declaration calling the
+     definition (`Mono.exportForwardDecl`): renamed to the definition in
+     Stage 1, its calls on literals would be folded by Stage 2's passes,
+     which natively never happens to a C call (`Nat.shiftLeft 1 (2^64)`
+     stopped lean2rr, reviews RV8E-11, REB-01). A body the extern has is
+     not used, as natively.
+  3. *Its Lean definition*, whenever it has one, also when its C symbol is
+     that of an extern of Lean's runtime library: an extern of the program
+     is never bound to Lean's runtime (the owner's decision of
+     2026-10-04, shared with the other translator), so where its
+     definition and the runtime's function differ, the definition is what
+     runs. It is compiled as Lean compiles a definition without the
+     attribute (`Mono.externBodyDecl`: the `_unsafe_rec` copy of a
+     recursive or `partial` one, `@[csimp]` replacements, `macro_inline`,
+     matchers), `noinline` (RV8E-11). Its callees follow the same rules.
+     Lean's compiled callers of a function that a `@[csimp]` theorem
+     replaces by an extern call the extern (lean-zip's `UInt64.ctz` →
+     `UInt64.ctzFast`), so they get its definition too. `@&` marks need
+     nothing (Reussir decides ownership).
+  4. Otherwise it is *refused*: lean2rr stops at translation and names
+     each such extern the program reaches, with its module, its C symbol
+     and why: no Lean definition (an `opaque`, an axiom) or Lean's error
+     compiling it, each binding test that failed, and, for a symbol of an
+     extern of Lean's library, that declaration to call instead ("call
+     `Array.size` instead"), or, for a private one (module system), that a
+     program can call it only from a `module` file that imports it with
+     `import all M` (`Lean.decodeLossyUTF8` of `Lean.Shell`, REB-10,
+     REB-12). When the program does not import a module
+     declaring the symbol but the runtime implements it, the message names
+     the module of Lean's library that does, to import if that declaration
+     is public (read from the toolchain's library source, imported or not;
+     REB-03); a helper of
+     lean2rr's own prelude (`l2r_nat_repr`, `lean_natarr_push`) gets no
+     such hint (REB-07). It says that lean2rr supports Lean code plus
+     Lean's runtime library only.
+
+  ```lean
+  @[export my_triple] def tripleImpl (n : Nat) : Nat := 3 * n
+  -- binds to tripleImpl's @[export] (one type, one compiled signature)
+  @[extern "my_triple"] opaque triple : Nat → Nat
+  -- borrows what tripleImpl takes owned: the binding fails, the body runs (lean2rr warns)
+  @[extern "my_triple"] def tripleB (n : @& Nat) : Nat := 3 * n
+  -- the symbol of Array.size: not bound to the runtime, the definition runs
+  @[extern "lean_array_get_size"] def sizeNat (a : @& Array Nat) : Nat := a.size
+  -- the symbol of Nat.add, no definition: refused ("call Nat.add instead")
+  @[extern "lean_nat_add"] opaque myAdd : Nat → Nat → Nat
+  -- a symbol of the program: the body runs (natively the program's C)
+  @[extern "my_custom_double"] def myDouble (n : Nat) : Nat := n + n
+  ```
+
+  The route order and the binding's two tests are shared with another
+  Lean translator built on the same runtime. lean2rr's build note marks
+  an extern whose definition runs where natively a function of Lean's
+  library runs: "(natively Lean's runtime function)" for the symbol of an
+  extern of Lean's library, imported or not, "(natively Lean's library
+  function)" for an `@[export]` of Lean's library (REB-13). When the route is the
+  extern's Lean definition although its C symbol is another declaration's
+  `@[export]` whose binding fails, lean2rr warns on its own stderr, naming
+  the definition and each failed test (review REB-02, test
+  `RtExternStub`). Tests `RtExternBody`, `RtExternBind`, `RtExternRefused`
+  and the other `RtExtern*`; plan §10 ("Not supported").
 - **Fallible IO** (files and the file system): the runtime primitive
   records its outcome in a last-error slot; `l2r_io_finish` turns it into
   `EST.Out.ok` with the payload (converted: unit, handle, `Metadata`, an
@@ -3337,22 +3452,44 @@ difference, it pins native's output and lean2rr's in expectation files,
   dependent was to set the condition and notify: the dependent runs at the
   wait, after the condition was read, and notifies no one.
 
-**Not supported** (translation succeeds; `rrc` reports an unknown function)
+**Not supported** (lean2rr rejects the program at translation, naming each
+extern)
 - Every constant of the program is translated (§2.2), so an unused constant
-  that reaches an unsupported extern makes the whole program fail to link.
-  A program is therefore translated by lean2rr, but links only if the
-  runtime implements every extern it reaches.
-- A program with its own `@[extern]` C code (an extern of the program
-  implemented in C, built by Lake) fails at the rrc build with an unknown
-  function: lean2rr links no C code of the program and does not compile
-  the extern's Lean body instead. The targets are programs that use only
-  `Init` and `Std`. Work on linking and calling the program's C (branch
-  `ffi-c`) and on compiling an extern's Lean body when nothing implements
-  it (branch `lean-externs`) is parked, not merged; where lean2rr's own
-  layouts and Lean's object layouts conflict, lean2rr's win.
+  that reaches an unsupported extern makes lean2rr reject the whole
+  program.
+- *Lean-only target* (the owner's decision, 2026-10-03, §5.8): the C code
+  of a program or of a package it requires is never compiled, linked or
+  called. An `@[extern]` of the program runs the `@[export]` definition its
+  C symbol binds to (whose type it is an instance of, with one compiled
+  signature), else its Lean definition, also when its symbol is one of
+  Lean's runtime library (never bound to the runtime);
+  one with neither (an `opaque`, an axiom, a definition Lean cannot
+  compile, a binding that fails its tests) is rejected (§5.8, "Externs of
+  the program"). Where the package's C and the extern's Lean definition
+  differ (a stub body, lean-zip's on offsets and lengths past what its
+  codecs pass), the translation does what the Lean definition says. The C
+  FFI work (branch `ffi-c`) stays parked: it is not a goal for now.
+- *Lean definitions where native Lean runs other code:* an `@[extern]` of
+  the program runs its own Lean definition where natively its C symbol
+  links to Lean's runtime (an extern of the program is never bound to the
+  runtime, the owner's decision of 2026-10-04: `@[extern
+  "lean_array_get_size"] def mySize (a : @& Array Nat) : Nat := …`), or to
+  an `@[export]` definition whose binding's tests fail (lean2rr warns,
+  naming the definition and the failed test, §5.8). Where the definition
+  is a stub, the result differs from native (test `RtExternStub`).
+- *Re-declared runtime functions:* an `opaque` re-declaration of a
+  function of Lean's runtime has no definition and is refused, the message
+  naming Lean's declaration to call instead (and, when no imported module
+  declares the symbol, the module of Lean's library to import). Before
+  this rule, lean2rr called the prelude's function of any symbol, so
+  `@[extern "lean_decode_lossy_utf8"] opaque decodeLossy` worked, though
+  Lean's own declaration of that function (`Lean.decodeLossyUTF8`) is
+  private to `Lean.Shell`: no program reaches the function now, and test
+  `RtSweepUtf8` no longer prints its results.
 - The `Lean` library's externs implemented in C++ (`Expr.mkData`,
-  `evalConst`, `Dynlib`, the LLVM bindings, …): a program that reaches one
-  fails the same way; a program that only uses data structures from
+  `evalConst`, `Dynlib`, the LLVM bindings, …): not in lean2rr's runtime
+  yet, so a program that reaches one is rejected (their Lean bodies are not
+  used in their place); a program that only uses data structures from
   `Lean` builds.
 - Mathlib, and programs that import it: Mathlib's module initializers
   reach the `Lean` library's C++ externs (CSLib's reach 32), so such a

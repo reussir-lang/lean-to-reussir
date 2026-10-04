@@ -1,0 +1,18 @@
+lean_nat_add  (extern of myAddBody) (natively Lean's runtime function)
+lean_string_push  (extern of pushB)
+lean_string_push  (extern of pushCode)
+rt_bind_triple  (extern of tripleB)
+! (extern of tripleB) (natively
+lean_array_get_size  (extern of sizeNat)
+lean_array_get  (extern of getNat)
+lean_array_push  (extern of pushNat2)
+lean_array_get_size  (extern of sizeList)
+lean_nat_add  (extern of addT)
+lean_array_push  (extern of pushStr)
+lean_array_get_size  (extern of sizeWrap)
+lean_array_get_size  (extern of sizeTwo)
+rt_bind_pos  (extern of pos1)
+! (extern of triple)
+! (extern of mk1)
+! warning: myAddBody
+! warning: sizeNat

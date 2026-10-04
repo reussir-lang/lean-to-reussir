@@ -310,6 +310,13 @@ reports no generic array (sharing is not observable, plan §10).
 
 ## Calling convention
 
+The runtime serves the externs of Lean's library (`Init`, `Std`, the
+`Lean` package's functions the prelude defines, and lean2rr's shim) under
+their C symbols. An `@[extern]` of the program is never bound to it, even
+when its symbol is one of these: it runs its own Lean definition, or
+lean2rr refuses it, naming Lean's declaration to call instead (translation
+plan §5.8, "Externs of the program").
+
 As fixed by lean2rr:
 
 - The extern `lean_xxx` is called as the prelude function `lean_xxx`, with
@@ -853,6 +860,12 @@ lean2rr's dev branch (the tests pass with it).
     reference before `b`'s address is taken), and a `[value]` struct
     answers its field's (translation plan §9; tests `RtPtrAddr`,
     `RtPtrSound`).
+32. The `Lean` package's C++ externs (`Expr`/`Level` internals, the
+    kernel, `evalConst`, `Dynlib`, `.olean` files, configuration queries):
+    not in the runtime. They are Lean's library, so lean2rr does not run
+    their Lean bodies in their place (translation plan §5.8): it rejects a
+    program that reaches one, naming each (test `RtLeanUnsupported`,
+    expected to fail).
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store enum-like values directly; and `mi_free` takes mimalloc's
@@ -953,7 +966,16 @@ request. `NAME.l2r.out` (`.err`, `.code`) marks an intended difference from
 native, a Lean runtime bug that lean2rr does not reproduce (plan §10,
 "Runtime: Lean bugs we do not reproduce"): that stream of lean2rr's run is
 compared with the file, and native's with `NAME.native.out` (`.err`,
-`.code`), so both sides stay pinned. The Rust unit tests of `leanrt`
+`.code`), so both sides stay pinned. A test's `NAME.ffi.c` is C code linked into its native build
+only: the C side of the test's own `@[extern]` declarations, which lean2rr
+never uses (it runs their Lean definitions, translation plan §5.8);
+`NAME.refused` makes a refusal by lean2rr the expected outcome (each
+line of the file in its output, or after `! ` not in it), and `NAME.l2r-log` lists lines lean2rr's
+build output must (or, after `! `, must not) contain, such as its note on
+which externs run their Lean definition. `tests/runtime/shim-types.sh`
+checks that each `@[export]` definition of lean2rr's shim (`L2RShim`) has
+the type of the `@[extern]` declaration of its C symbol (Lean pairs them by
+name only). The Rust unit tests of `leanrt`
 (bignums, one-word `Nat`/`Int` at the boundaries, tagged arrays, string
 layout and counts, and a differential test of the `FILE` model against
 glibc's own `FILE` over random operation sequences) run with

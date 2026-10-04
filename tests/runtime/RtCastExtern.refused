@@ -1,0 +1,3 @@
+payloadAsP2 (module RtCastExtern, C symbol l2rtest_payload): it has no Lean definition (an `opaque` declaration
+its C symbol l2rtest_payload is the @[export] of payload, but the binding fails the type
+lean2rr supports Lean code plus Lean's runtime library only

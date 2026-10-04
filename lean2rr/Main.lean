@@ -81,10 +81,34 @@ def dumpDecls (header : String) (decls : Array (Decl .pure)) : String :=
 /-- The pipeline (translation plan §1), stopping after the stage that
 `--emit stage` prints. -/
 def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM String := do
+  let prelude ← match opts.prelude with
+    | some p => IO.FS.readFile p
+    | none => pure ""
   -- Stage 1: monomorphize from `main`, the entry point's roots and the
-  -- startup items (constants, `initialize` actions).
+  -- startup items (constants, `initialize` actions). The prelude's
+  -- functions tell which symbols lean2rr's runtime implements (the message
+  -- of a refused extern, `Mono.computeExternRoute`).
   let items ← startupItems opts.root
   let (rootInsts, st) ← monomorphize (programRoots opts.root items)
+    { preludeFns := ← preludeFnDeclsM prelude }
+  -- The externs of the program that run their Lean definition (natively
+  -- their C code runs): a note of the build, on lean2rr's stderr (the
+  -- program's output is not affected).
+  unless st.externBodies.isEmpty do
+    let lines := st.externBodies.map fun (sym, d) =>
+      let native := match st.externBodiesOfRuntime.find? d with
+        | some what => s!" (natively {what})"
+        | none => ""
+      s!"  {sym}  (extern of {d}){native}"
+    IO.eprintln s!"lean2rr: note: {st.externBodies.size} extern(s) of the program run their Lean \
+      definition, not their C code (lean2rr compiles Lean code, plus Lean's runtime library):\n\
+      {"\n".intercalate lines.toList}"
+  -- Of those, the ones whose C symbol natively runs a function lean2rr has
+  -- (an `@[export]` definition, a function of Lean's runtime), but whose
+  -- binding fails: a stub definition then differs from native.
+  for (d, whys) in st.externBindingWarnings do
+    IO.eprintln s!"lean2rr: warning: {d} runs its Lean definition, where native Lean calls the \
+      function its C symbol is linked to: {"; ".intercalate whys.toList}"
   let header := s!"-- root instances: {rootInsts}; instances: {st.decls.size}, extern instances: {st.externs.size}, lcAny type arguments: {st.uniformArgs}\n"
   if stage == "inst" then return dumpDecls header (st.externs ++ st.decls)
   -- Stage 2: Lean's own mono pipeline, with the registry's edits.
@@ -103,10 +127,10 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   -- The registry's passes over mono LCNF (`Opt/FloatLits`).
   let decls := cfg.monoPasses.foldl (fun ds pass => pass keys ds) decls
   -- Stage 4: lowering, with the registry's lowering hooks.
-  let prelude ← match opts.prelude with
-    | some p => IO.FS.readFile p
-    | none => pure ""
   let prog ← lowerProgram cfg prelude table mainInst errStr startup roots decls keys
+    (st.externRoutes.foldl (init := {}) fun m f r => match r with
+      | .refused why => m.insert f why
+      | _ => m)
   -- `Array Nat` literal tables and `Outline` (core; first, so that the
   -- passes after them see bounded functions), the registry's passes over
   -- the generated functions, and the program text. `L2R_NO_OUTLINE` and

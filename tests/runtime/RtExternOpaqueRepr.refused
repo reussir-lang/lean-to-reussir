@@ -1,0 +1,3 @@
+pushCode (module RtExternOpaqueRepr, C symbol lean_string_push): it has no Lean definition (an `opaque` declaration
+its C symbol lean_string_push is that of String.push of Lean's library, to which lean2rr does not bind an extern of the program: call String.push instead
+lean2rr supports Lean code plus Lean's runtime library only

@@ -145,9 +145,12 @@ record of each declaration's module (`closedRecord`):
   Lean made no closed term at all is left as it is.
 Extracted as usual, as nothing in the record applies: a declaration Lean
 compiled to no IR (lean2rr translates the reference definition of an
-`@[extern]` or `@[implemented_by]` declaration). A declaration Lean's
-compilation does not have (one a pass made only here) follows the one it
-comes from. -/
+`@[implemented_by]` declaration), and the Lean definition of an extern of
+the program (`Mono.ExternRoute.body`), which Lean compiled to an extern
+declaration without a body: lean2rr compiles it as if it were not an
+extern, so its closed terms are extracted as Lean would extract them. A
+declaration Lean's compilation does not have (one a pass made only here)
+follows the one it comes from. -/
 def extractLikeLean (keys : NameMap InstKey) (sccs : Array (Array (Decl .pure))) :
     CompilerM (Array (Decl .pure)) := do
   unless (← getConfig).extractClosed do return sccs.flatten
@@ -175,6 +178,8 @@ def extractLikeLean (keys : NameMap InstKey) (sccs : Array (Array (Decl .pure)))
     let extract :=
       if record.makers.contains src then true
       else if !record.known.contains src then true
+      -- Code of an extern: the Lean definition of an extern of the program.
+      else if isExtern env src then true
       else match record.readers with
         | some rs => rs.contains src
         | none => !record.makers.isEmpty

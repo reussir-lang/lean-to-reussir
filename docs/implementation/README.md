@@ -61,6 +61,8 @@ into it. Reussir bugs link to
    with its soundness guard, and the required parts.
 10. [externs-ffi/](externs-ffi/README.md): extern dispatch and its order,
     glue, the `L2RShim` library, special cases of single runtime externs,
-    the shared crate lean-runtime, the C FFI (parked).
+    the shared crate lean-runtime, externs of the program (Lean code plus
+    Lean's runtime library: the binding of their C symbol, their Lean
+    definitions, refusals), the C FFI (parked).
 11. [translator.md](translator.md): lean2rr itself: loading the program,
     its stack and limits, its switches.

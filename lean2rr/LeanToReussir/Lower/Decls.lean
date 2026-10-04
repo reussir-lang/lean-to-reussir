@@ -27,6 +27,16 @@ inductive Callee where
   /-- A constant defined by `initialize`: read from its once-cell. -/
   | initConst (slot : Nat) (type : Expr)
 
+/-- Record a call of extern `orig` if lean2rr refuses it (an extern of the
+program without a Lean definition or binding, `LowerCtx.externRefusals`):
+`lowerProgram` rejects the program, naming it. Every call of an extern,
+direct, partial or as a function value, gets its target here. -/
+def noteRefusedExtern (orig : Name) : LowerM Unit := do
+  unless (← read).externRefusals.contains orig do return
+  unless (← get).missingExterns.any (·.2 == orig) do
+    let sym := (getExternNameFor (← getEnv) `c orig).getD ""
+    modify fun s => { s with missingExterns := s.missingExterns.push (sym, orig) }
+
 def calleeOf (f : Name) : LowerM Callee := do
   if let some slot := (← get).initSlots.find? f then
     return .initConst slot (← toMonoTypeKeep (← getOtherDeclBaseType f []))
@@ -40,9 +50,12 @@ def calleeOf (f : Name) : LowerM Callee := do
     | .code _ => return .code (fnName f) (← ps.mapM lowerType) (← lowerType r)
     | .extern _ =>
       let key := (← read).keys.find? f
-      return .extern (key.map (·.decl) |>.getD f) (key.map (·.typeArgs) |>.getD #[]) ps r
+      let orig := key.map (·.decl) |>.getD f
+      noteRefusedExtern orig
+      return .extern orig (key.map (·.typeArgs) |>.getD #[]) ps r
   -- A monomorphic extern kept under its own name: take Lean's persisted mono signature.
   if let some d ← getMonoDecl? f then
+    noteRefusedExtern f
     let (ps, r) := splitFnType d.type d.params.size
     return .extern f #[] ps r
   if let some (.ctorInfo c) := (← getEnv).find? f then

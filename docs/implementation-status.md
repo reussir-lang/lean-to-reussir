@@ -37,7 +37,7 @@ same standard output, standard error and exit code.
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (278 programs, `tests/runtime`) | at its last full run (branch `fix-lb15-17`, 2026-10-04), 274 of 277 identical to native Lean 4.34.0, five of them through expectation files where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`; plan §10, "Runtime: Lean bugs we do not reproduce"); 3 expected failures: `RtCseFnResult` (plan §10, "Merging after erasure"), `RtTaskRunawayPureStarted` and `RtFdStartupNoUring` (until lean2rr adopts lean-runtime's scheduler and startup); `RtConvProbeRollback`, added since (branch `fix-rv9s02`), identical |
+| Runtime test suite (296 programs, `tests/runtime`) | at its last full run (branch `extern-bodies`, 2026-10-04), 292 of 296 identical to native Lean 4.34.0, five of them through expectation files where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`; plan §10, "Runtime: Lean bugs we do not reproduce"); 4 expected failures: `RtCseFnResult` (plan §10, "Merging after erasure"), `RtTaskRunawayPureStarted` and `RtFdStartupNoUring` (until lean2rr adopts lean-runtime's scheduler and startup), `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
@@ -380,21 +380,30 @@ with examples, is §10 of the translation plan.
   and when `/dev/null` cannot be opened the spawn fails with `EMFILE`,
   where natively the program silently gets the parent's own stream
   (LB-17).
-- **A program's own C code is not supported.** A program that implements
-  some of its own `@[extern]` declarations in C (built by Lake) fails at
-  the rrc build with an unknown function: lean2rr links no C code of the
-  program. The targets for now are programs that use only `Init` and
-  `Std`. The work on calling a program's C (branches `ffi-c` and
-  `lean-externs`) is parked, not merged; where lean2rr's own layouts and
-  Lean's object layouts conflict, lean2rr's win.
+- **Lean code only, plus Lean's runtime library** (the owner's decision,
+  2026-10-03). The C code of a program or of a package it requires
+  (Lake's `extern_lib`) is never compiled, linked or called: an
+  `@[extern]` of the program runs the program's own `@[export]` definition
+  its C symbol binds to (same type, one compiled signature), else its Lean
+  definition (lean2rr's build prints a note listing them); one with
+  neither (an `opaque`) is rejected at translation, with the reason
+  (translation plan §5.8, "Externs of the program"). An extern of the
+  program is never bound to Lean's runtime (the owner's decision,
+  2026-10-04): one naming a runtime symbol runs its own definition, or is
+  rejected with the name of Lean's declaration to call instead (and the
+  module to import, if the program does not). Where the package's C and
+  the Lean definition differ, the translation follows the Lean
+  definition; where the extern's C symbol is an `@[export]` whose
+  binding's tests fail, lean2rr warns. The C FFI work (branch `ffi-c`)
+  stays parked.
 - **`import Lean` programs** (metaprogramming: the elaborator, the kernel,
   the code generator): the `Lean` library declares 196 more C functions,
   and those implemented in Lean's C++ are not available: expression and
   universe-level internals (`Expr.mkData`, `Expr.equal`, `Level.mkData`),
   `evalConst`, loading shared libraries (`Dynlib`), the LLVM bindings,
-  `profileit`, `maxSmallNat`. A program that reaches one of them does not
-  link (rrc reports the unknown function); one that only uses data
-  structures from `Lean` builds.
+  `profileit`, `maxSmallNat`. lean2rr rejects a program that reaches one
+  of them, naming each (their Lean bodies are not used in their place);
+  one that only uses data structures from `Lean` builds.
 - **Build time:** rrc compiles about 80 small functions per second, so a
   program with thousands of constants takes minutes to build (native:
   seconds). Very large literals and monad-transformer towers build, in
@@ -576,5 +585,5 @@ dynamic-extent arrays are not.
 - Real parallelism for tasks (the scheduler is single-threaded by design).
 - The C++-implemented parts of the `Lean` library, for metaprogramming
   programs.
-- Calling a program's own C code (the parked branches `ffi-c` and
-  `lean-externs`).
+- Calling a program's own C code (the parked branch `ffi-c`; not a goal
+  for now: lean2rr targets Lean code plus Lean's runtime library).

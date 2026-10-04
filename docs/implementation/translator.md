@@ -105,7 +105,13 @@ relative to `lean2rr/` unless they start with `scripts/`.
   need `Box`; `--no-check` turns off Lean's checker between Stage 2's
   passes. Environment switches: `L2R_NO_OUTLINE` and
   `L2R_NO_INLINE_ANCHORS` turn off two build-time workarounds (for the
-  repros of Reussir bugs 16, 17 and 20), `L2R_DEBUG` prints whether the
+  repros of Reussir bugs 16, 17 and 20), `L2R_ALLOW_MISSING_EXTERNS`
+  turns the rejection of a program that reaches an extern lean2rr cannot
+  serve into a warning (the generated program then does not build: a
+  refused extern of the program is called as `l2r_refused_<declaration>`,
+  checked by `tests/runtime/allow-missing-check.sh`;
+  [externs-ffi/program-externs.md](externs-ffi/program-externs.md#refusals-are-reported-at-translation-with-the-reason)),
+  `L2R_DEBUG` prints whether the
   program can cast and why, and each declaration Stage 1 could not
   recompile from source, with the error. The driver reads `L2R_REUSSIR`,
   `L2R_RUSTC`,

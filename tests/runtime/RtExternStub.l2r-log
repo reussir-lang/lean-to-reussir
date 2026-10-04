@@ -1,0 +1,8 @@
+rt_stub_add  (extern of addM)
+lean_nat_dec_eq  (extern of myDecEq) (natively Lean's runtime function)
+lean_decode_lossy_utf8  (extern of dec) (natively Lean's runtime function)
+lean_string_drop  (extern of myDrop2) (natively Lean's library function)
+warning: addM runs its Lean definition, where native Lean calls the function its C symbol is linked to: its C symbol rt_stub_add is the @[export] of addImpl, but the binding fails the type
+! (extern of addM) (natively
+! warning: myDecEq
+! warning: myDrop2

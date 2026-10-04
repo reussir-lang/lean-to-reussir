@@ -78,7 +78,11 @@ to `lean2rr/LeanToReussir/`.
   quadratic in the number of same-shape boxed types (round 6 TY6-02,
   5be764c). The individual conditions each come from a review finding:
   an extern's type is not compared with the `@[export]` definition
-  lean2rr calls instead (RV6T-01); an unsafe declaration with any name
+  lean2rr calls instead (RV6T-01; an extern of the program is now bound
+  to an `@[export]` only when their types and compiled signatures agree,
+  so RV6T-01's program is refused, test `RtCastExtern`,
+  [../externs-ffi/program-externs.md](../externs-ffi/program-externs.md);
+  the condition stays, conservatively); an unsafe declaration with any name
   can cast (RV6T-02); `@[implemented_by TypeName.mk]` gives two types one
   `TypeName`, so `Dynamic.get?` reads one as the other (RV6T-05).
   Lean's own library casts only where lean2rr's representations agree.

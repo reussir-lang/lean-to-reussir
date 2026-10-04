@@ -1,0 +1,7 @@
+decodeLossy (module RtExternPrivate, C symbol lean_decode_lossy_utf8): it has no Lean definition (an `opaque` declaration
+its C symbol lean_decode_lossy_utf8 is that of Lean.decodeLossyUTF8, a private declaration of module Lean.Shell of Lean's library, which a program can call only from a `module` file that imports it with `import all Lean.Shell`, and to which lean2rr does not bind an extern of the program
+myEp (module RtExternPrivate, C symbol lean_io_eprintln): it has no Lean definition (an `opaque` declaration
+its C symbol lean_io_eprintln is the @[export] of IO.eprintlnAux, a private declaration of module Init.System.IO of Lean's library, which a program can call only from a `module` file that imports it with `import all Init.System.IO`, and to which lean2rr does not bind an extern of the program
+! _private
+! instead
+lean2rr supports Lean code plus Lean's runtime library only

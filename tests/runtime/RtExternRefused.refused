@@ -1,0 +1,39 @@
+@[extern] declaration(s) of the program that it reaches have no Lean definition that lean2rr can use
+myOpaque (module RtExternRefused, C symbol rt_refused_opaque): it has no Lean definition (an `opaque` declaration
+myAx (module RtExternRefused, C symbol rt_refused_axiom): it has no Lean definition (an axiom)
+nc (module RtExternRefused, C symbol rt_refused_nc): its Lean definition could not be compiled
+inl (module RtExternRefused, inline C): it has no Lean definition
+tripleS (module RtExternRefused, C symbol rt_refused_triple): it has no Lean definition
+its C symbol rt_refused_triple is the @[export] of tripleImpl, but the binding fails the type
+myPos (module RtExternRefused, C symbol rt_refused_pos): it has no Lean definition
+its C symbol rt_refused_pos is the @[export] of posImpl, but the binding fails the compiled signature
+pushB (module RtExternRefused, C symbol lean_string_push): it has no Lean definition
+its C symbol lean_string_push is that of String.push of Lean's library, to which lean2rr does not bind an extern of the program: call String.push instead
+sizeListO (module RtExternRefused, C symbol lean_array_get_size): it has no Lean definition
+its C symbol lean_array_get_size is that of Array.size of Lean's library, to which lean2rr does not bind an extern of the program: call Array.size instead
+pushExtraO (module RtExternRefused, C symbol lean_array_push): it has no Lean definition
+its C symbol lean_array_push is that of Array.push of Lean's library, to which lean2rr does not bind an extern of the program: call Array.push instead
+addTO (module RtExternRefused, C symbol lean_nat_add): it has no Lean definition
+its C symbol lean_nat_add is that of Nat.add of Lean's library, to which lean2rr does not bind an extern of the program: call Nat.add instead
+sizeTwoO (module RtExternRefused, C symbol lean_array_get_size): it has no Lean definition
+sizeWrapO (module RtExternRefused, C symbol lean_array_get_size): it has no Lean definition
+pushU (module RtExternRefused, C symbol lean_string_push): it has no Lean definition
+myAddO (module RtExternRefused, C symbol lean_nat_add): it has no Lean definition
+sizeNatO (module RtExternRefused, C symbol lean_array_get_size): it has no Lean definition
+pushListO (module RtExternRefused, C symbol lean_array_push): it has no Lean definition
+nbO (module RtExternRefused, C symbol lean_system_platform_nbits): it has no Lean definition
+call System.Platform.getNumBits instead
+ltBO (module RtExternRefused, C symbol lean_nat_dec_lt): it has no Lean definition
+call Nat.decLt instead
+decodeLossy (module RtExternRefused, C symbol lean_decode_lossy_utf8): it has no Lean definition
+its C symbol lean_decode_lossy_utf8 is that of an extern of Lean's library declared in module Lean.Shell, which the program does not import; if that declaration is public, import Lean.Shell and call it instead
+myRepr (module RtExternRefused, C symbol l2r_nat_repr): it has no Lean definition
+! its C symbol l2r_nat_repr
+np (module RtExternRefused, C symbol lean_natarr_push): it has no Lean definition
+! its C symbol lean_natarr_push
+! of Lean's runtime library, but the binding fails
+! binds
+myDropO (module RtExternRefused, C symbol lean_string_drop): it has no Lean definition
+its C symbol lean_string_drop is that of String.Internal.drop of Lean's library, to which lean2rr does not bind an extern of the program: call String.Internal.drop instead
+! the @[export] of String.Internal.dropImpl, but
+lean2rr supports Lean code plus Lean's runtime library only

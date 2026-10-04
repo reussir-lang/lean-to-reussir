@@ -139,6 +139,13 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     return some (← wrapIOResult resTy (.call getFn #[] #[]))
   return none
 
+/-- The call of an extern of the program that lean2rr refuses
+(`LowerCtx.externRefusals`): a function no prelude defines,
+`l2r_refused_<declaration>`, so the program, generated only under
+`L2R_ALLOW_MISSING_EXTERNS`, does not build. -/
+def refusedExternCall (orig : Name) (args : Array RR.Expr) : RR.Expr :=
+  .call ("l2r_refused_" ++ fnName orig) #[] args
+
 /-- Emit a saturated extern call. Default: call the prelude function named
 after the C symbol with the passed arguments.
 
@@ -150,6 +157,12 @@ struct, so arguments of that type are wrapped and a result of that type is
 unwrapped here. -/
 def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
     (args : Array RR.Expr) : LowerM RR.Expr := do
+  -- An extern of the program that lean2rr refuses: `calleeOf` reported it,
+  -- and the program is rejected; no glue, and a call that resolves to
+  -- nothing (under `L2R_ALLOW_MISSING_EXTERNS` the program is generated,
+  -- and must not call the runtime's function of the symbol; review REB-11).
+  if (← read).externRefusals.contains orig then
+    return refusedExternCall orig args
   -- Glue sees only relevant parameters: erased ones (type arguments,
   -- proofs) are dropped; the world is kept (IO glue applies actions to it).
   let relevant := (params.zip args).filter fun (p, _) =>
@@ -220,6 +233,9 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
       | _ => none
     if let some fam := fam? then
       if let some sym' := natArrSym? sym fam then
+        unless (← read).preludeFns.contains sym' do
+          unless (← get).missingExterns.any (·.1 == sym') do
+            modify fun s => { s with missingExterns := s.missingExterns.push (sym', orig) }
         return .call sym' #[] passedArgs
   -- Storage for each type argument: the storage type, and the conversions
   -- of a value to and from it (`ArrayRepr.store`/`load`). An extern over
@@ -245,6 +261,12 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
       match reprOf (uses[i]?.join) with
       | some r => passed := passed.push (r.store a)
       | none => passed := passed.push a
+  -- The prelude's function of that name (and through it the runtime):
+  -- one that does not exist is reported, with the extern, by
+  -- `lowerProgram` (translation plan §5.8).
+  unless (← read).preludeFns.contains sym do
+    unless (← get).missingExterns.any (·.1 == sym) do
+      modify fun s => { s with missingExterns := s.missingExterns.push (sym, orig) }
   let call := RR.Expr.call sym (storage.map (·.storage)) passed
   match reprOf retUse with
   | some r => return r.load call

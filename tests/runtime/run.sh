@@ -24,6 +24,20 @@
 #               run with NAME.native.out/.err/.code, instead of with each
 #               other; the two files of a stream go together (one without
 #               the other fails the test: unpaired expectation file)
+#   NAME.ffi.c  C code linked into the native build only: the C side of the
+#               test's own `@[extern]` declarations (lean2rr never uses C
+#               code other than Lean's runtime library: it compiles their
+#               Lean definitions instead; translation plan §5.8)
+#   NAME.refused  the lean2rr build must fail, its output containing each
+#               line of this file, and not a line's text after `! `
+#               (as NAME.l2r-log); natively only `lean -c` runs and must
+#               succeed (the program is valid Lean; its C may need code
+#               the test does not give to link); nothing runs, so files
+#               describing a run (NAME.args, .stdin, .pipe, .ffi.c,
+#               .l2r-log, NAME.native.*, NAME.l2r.*) are an error with it
+#   NAME.l2r-log  lean2rr's build output must contain each line of this
+#               file, and must not contain a line's text after `! ` (e.g.
+#               which externs run their Lean definition, lean2rr's note)
 #
 # Both executables run with LEAN_BACKTRACE=0, so panics print no stack trace.
 # lean2rr runs with LEAN_ABORT_ON_PANIC=1: a panic of lean2rr itself is a
@@ -93,14 +107,44 @@ for t in "${TESTS[@]}"; do
   stdin=/dev/null; [ -f "$HERE/$t.stdin" ] && stdin="$HERE/$t.stdin"
   opts=${L2R_DISABLE_OPTS:-}
   [ -f "$HERE/$t.opts" ] && opts="$opts${opts:+,}$(tr -d ' \n' < "$HERE/$t.opts")"
+  ffi=(); [ -f "$HERE/$t.ffi.c" ] && ffi=("$HERE/$t.ffi.c")
   status=ok; why=""
+  # A translation lean2rr must refuse is only compiled by Lean, not linked.
+  link=1; [ -f "$HERE/$t.refused" ] && link=""
   if ! (cd "$d" && lean -o "$t.olean" -c "$t.c" "$t.lean" > build-native.log 2>&1 \
-        && leanc -O3 -DNDEBUG "$t.c" -o native >> build-native.log 2>&1); then
+        && { [ -z "$link" ] || leanc -O3 -DNDEBUG "$t.c" ${ffi[@]+"${ffi[@]}"} -o native >> build-native.log 2>&1; }); then
     status=fail; why="native build failed (see $d/build-native.log)"
+  elif [ -f "$HERE/$t.refused" ] && runfiles=$(cd "$HERE" && ls -d "$t".args "$t".stdin "$t".pipe "$t".ffi.c \
+          "$t".l2r-log "$t".native.* "$t".l2r.* 2> /dev/null || true) && [ -n "$runfiles" ]; then
+    status=fail; why="$t.refused expects lean2rr to refuse, but these files describe a run: $(echo $runfiles)"
+  elif [ -f "$HERE/$t.refused" ]; then
+    # A translation lean2rr refuses, with the expected message.
+    if L2R_DISABLE_OPTS=$opts LEAN_ABORT_ON_PANIC=1 python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" > "$d/build-l2r.log" 2>&1; then
+      status=fail; why="lean2rr built it, expected an error"
+    else
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        case $line in
+          "! "*) if grep -qF -- "${line#! }" "$d/build-l2r.log"; then
+                   status=fail; why="$why '${line#! }' in $d/build-l2r.log;"; fi ;;
+          *) grep -qF -- "$line" "$d/build-l2r.log" || { status=fail; why="$why no '$line' in $d/build-l2r.log;"; } ;;
+        esac
+      done < "$HERE/$t.refused"
+    fi
   elif ! L2R_DISABLE_OPTS=$opts LEAN_ABORT_ON_PANIC=1 python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" --keep-rr "$d/$t.rr" \
         > "$d/build-l2r.log" 2>&1; then
     status=fail; why="lean2rr build failed (see $d/build-l2r.log)"
   else
+    if [ -f "$HERE/$t.l2r-log" ]; then
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        case $line in
+          "! "*) if grep -qF -- "${line#! }" "$d/build-l2r.log"; then
+                   status=fail; why="$why '${line#! }' in $d/build-l2r.log;"; fi ;;
+          *) grep -qF -- "$line" "$d/build-l2r.log" || { status=fail; why="$why no '$line' in $d/build-l2r.log;"; } ;;
+        esac
+      done < "$HERE/$t.l2r-log"
+    fi
     run_one ./native native
     run_one ./l2r l2r
     for k in out err code; do

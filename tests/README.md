@@ -186,12 +186,21 @@ which must finish (`stats-polyrec`).
 
 `tests/runtime/run.sh` builds each `tests/runtime/Rt*.lean` natively and
 through lean2rr and compares stdout, stderr and the exit code (its header
-lists the per-test `.args`, `.stdin`, `.pipe`, `.opts` and `.xfail` files). Each
+lists the per-test `.args`, `.stdin`, `.pipe`, `.opts`, `.xfail`, `.ffi.c`,
+`.refused` and `.l2r-log` files: `.ffi.c` is C code for the native build
+only, `.refused` an expected refusal by lean2rr, `.l2r-log` lines
+expected in lean2rr's build output). Each
 test's header says what it covers. Many come from the adversarial reviews:
 a finding (a bug a reviewer reproduced, fixed since) or a check that held
 up in review.
 
 `tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests.
+`tests/runtime/allow-missing-check.sh` builds `tests/runtime/AllowMissing.lean`
+(refused externs of the program used directly, partially applied, as a
+closure, through an instance and through the `ptrAddrUnsafe` shortcut) with
+`L2R_ALLOW_MISSING_EXTERNS=1` and checks that lean2rr warns, that rrc fails
+on an unknown `l2r_refused_…` function, and that the generated code calls
+no runtime function of those symbols (review REB-15, of REB-11).
 `tests/runtime/ffi-inline-check.sh` builds runtime tests that call the libm,
 string, hash, float and fixed-width rules to LLVM IR (`scripts/l2r.py --emit
 llvm-ir`) and fails on a call through the packed-argument FFI boundary (a
@@ -246,7 +255,7 @@ it draws on, with their copyright notices (Apache 2.0):
 | RV6J-03 | RtJpWide |
 | RV6L-02 | RtMapFirstIteration |
 | RV6L-04 (and the hygienic forms of RV6T-01/02) | RtCastHygienic |
-| RV6T-01 | RtCastExtern |
+| RV6T-01 | RtCastExtern (now refused: the binding's type test, plan §5.8) |
 | RV6T-02 | RtCastUnsafeRec |
 | RV6T-04 | RtTaskConvSync |
 | RV6T-05 | RtCastImplementedBy |
@@ -278,6 +287,20 @@ it draws on, with their copyright notices (Apache 2.0):
 | XT-6 (cross-test), XT6-01..XT6-04 | RtCseAcrossTypes, RtCseFnValues, RtCseResidual, RtCseFnField, RtCseFnTrivial, RtCseFnResult (expected failure) |
 | RVA-01 (review of perf-rvec) | RtReadIntoArray |
 | LR1-01 (lean-runtime's oracle rows) | RtStringExtractBig |
+| RV8E-01, RV8E-02, RV8E-05, RV8E-06 (rv8/ext, branch lean-externs) | RtExternNames, RtExternLeanPkg |
+| RV8E-03 | the `.l2r-log` files of the `RtExtern*` tests |
+| RV8E-04 | RtExternRefused |
+| RV8E-09 (now refused: no binding to Lean's runtime) | RtExternOpaqueRedecl |
+| RV8E-10 (now refused: no binding to Lean's runtime) | RtExternOpaqueRepr |
+| RV8E-11 | RtExternFold |
+| none: checks of rv8/ext round 1 (ExtImpl, ExtRec, ExtMisc, ExtZip) | RtExternForms, RtExternRec, RtExternBytes |
+| REB-01 (review of extern-bodies) | RtExternFold (`exportShl`) |
+| REB-02 | RtExternStub |
+| REB-03 | RtExternRefused (`decodeLossy`) |
+| REB-07 | RtExternRefused (`myRepr`, `np`) |
+| REB-10, REB-12, REB-18 | RtExternPrivate, RtExternRefused (`decodeLossy`) |
+| REB-11, REB-15 | `tests/runtime/allow-missing-check.sh` |
+| REB-13, REB-14 | RtExternStub (`dec`, `myDrop2`), RtExternRefused (`myDropO`) |
 | none: coverage from the Crane corpus (rv9/crane CrGram) | RtGrammarActions |
 | none: coverage from the Crane corpus (rv9/crane CrPrintf) | RtComputedFnTypes |
 | none: coverage from the Crane corpus (rv9/crane CrUniq; the Lean form of Reussir bug 28's shape) | RtSharedOnOnePath |

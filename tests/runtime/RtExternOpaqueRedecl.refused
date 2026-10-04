@@ -1,0 +1,5 @@
+push0 (module RtExternOpaqueRedecl, C symbol lean_array_push): it has no Lean definition (an `opaque` declaration
+call Array.push instead
+sizeAny (module RtExternOpaqueRedecl, C symbol lean_array_get_size): it has no Lean definition (an `opaque` declaration
+call Array.size instead
+lean2rr supports Lean code plus Lean's runtime library only

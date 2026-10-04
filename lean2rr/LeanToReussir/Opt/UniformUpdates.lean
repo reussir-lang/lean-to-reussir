@@ -158,6 +158,10 @@ partial def uniformUpdatesDecl (d : Decl .pure) : MRetypeM (Decl .pure) := do
     let some k := keys.find? f | continue
     unless k.dicts.isEmpty && k.decl.getPrefix == `Array && !k.typeArgs.isEmpty do continue
     if k.typeArgs.all (· == anyExpr) then continue
+    -- An instance with code is no extern instance, even where the persisted
+    -- declaration is an extern: the Lean definition of an extern of the
+    -- program (`Mono.ExternRoute.body`), whose C code lean2rr never calls.
+    if (← get).codeDecls.contains f then continue
     let some base ← getBaseDecl? k.decl | continue
     unless base.value matches .extern _ do continue
     let some cur := (← get).sigs[f]? | continue

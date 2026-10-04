@@ -347,12 +347,12 @@ def LoweredProgram.render (p : LoweredProgram) : String := Id.run do
 entry point and what they need (translation plan §5), with the relevance
 `table` Stage 3 used and the entry point's callees `roots`. -/
 def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) (mainInst errStr : Name)
-    (startup : Array StartupStep) (roots : Array Name) (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
+    (startup : Array StartupStep) (roots : Array Name) (decls : Array (Decl .pure)) (keys : NameMap InstKey)
+    (externRefusals : NameMap String := {}) :
     CoreM LoweredProgram := do
-  -- Function names the prelude defines (`fn NAME`).
-  let preludeFns := (prelude.splitOn "fn ").foldl (init := ({} : Std.HashSet String)) fun acc chunk =>
-    let name := chunk.takeWhile fun c => c.isAlphanum || c == '_'
-    if name.isEmpty then acc else acc.insert name.toString
+  -- The functions the prelude declares (not the C functions its textures
+  -- declare for themselves).
+  let preludeFns ← preludeFnDeclsM prelude
   -- Result types from the prelude's one-line signatures (`fn f(…) -> T …`).
   let preludeRets := prelude.splitOn "\n" |>.foldl (init := ({} : Std.HashMap String RR.Ty)) fun acc line =>
     let line := line.trimLeft
@@ -396,6 +396,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
   if (← IO.getEnv "L2R_DEBUG").isSome then
     IO.eprintln s!"lean2rr: program casts: {match casts with | some n => s!"yes ({n})" | none => "no"}"
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
+                          externRefusals,
                           preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls,
                           uncachedConsts, preludeReplacements := cfg.preludeReplacements,
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
@@ -436,6 +437,59 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
       unless (← finishFnValues) || (← finishPersistFns) do break
     return (← fnTypeItems, ← anchoredFns)
   let ((fnItems, anchored), st) ← (act.run ctx).run {}
+  -- Externs the program reaches that lean2rr cannot use, reported here,
+  -- all at once, naming each one, rather than by rrc as unknown functions
+  -- of the generated code (translation plan §5.8 and §10, "Not supported"):
+  -- * externs of Lean's library that the runtime does not implement (no
+  --   prelude function of their symbol): a gap of the runtime;
+  -- * externs of the program (or of a package it uses) that lean2rr
+  --   refuses (`Mono.ExternRoute.refused`): without a Lean definition and
+  --   a binding of their symbol.
+  -- `L2R_ALLOW_MISSING_EXTERNS` only warns (the generated program then does
+  -- not compile).
+  let generated : Std.HashSet String := st.fns.foldl (init := {}) fun acc it => match it with
+    | .fn n .. => acc.insert n
+    | _ => acc
+  let refused := st.missingExterns.filter fun (_, d) => externRefusals.contains d
+  let missing := st.missingExterns.filter fun (sym, d) => !externRefusals.contains d && !generated.contains sym
+  -- Each symbol once (a lowering that is retried can record it again).
+  let missing := missing.foldl (init := (#[] : Array (String × Name))) fun acc m =>
+    if acc.any (·.1 == m.1) then acc else acc.push m
+  unless missing.isEmpty && refused.isEmpty do
+    let env ← getEnv
+    let moduleOf (d : Name) : String :=
+      match env.getModuleIdxFor? d with
+      | some i => toString env.header.moduleNames[i.toNat]!
+      | none => "?"
+    let mut parts := #[]
+    unless refused.isEmpty do
+      let symOf (d : Name) : String := match getExternNameFor env `c d with
+        | some sym => s!"C symbol {sym}"
+        | none => externLabel env d
+      let lines := refused.map fun (_, d) =>
+        s!"  {d} (module {moduleOf d}, {symOf d}): {(externRefusals.find? d).getD ""}"
+      parts := parts.push s!"{refused.size} @[extern] declaration(s) of the program that it reaches \
+        have no Lean definition that lean2rr can use:\n{"\n".intercalate lines.toList}\n\
+        lean2rr supports Lean code plus Lean's runtime library only: an @[extern] that is not \
+        Lean's runtime library's runs its Lean definition (or the function its C symbol is \
+        bound to, an @[export] definition of the program whose type it is an instance of, with one \
+        compiled signature), and its C code is never compiled, linked or called; an extern of the \
+        program is never bound to Lean's runtime"
+    unless missing.isEmpty do
+      let lines ← missing.mapM fun (sym, d) => do
+        -- An extern of the program reaches this list only through a bug of
+        -- lean2rr (it runs its Lean definition, or is bound or refused).
+        let note := if ← isToolchainDecl d then "" else
+          "; not of Lean's library: lean2rr internal error, it should run its Lean definition"
+        pure s!"  {sym}  (extern of {d}, module {moduleOf d}{note})"
+      let ofLean := missing.any fun (_, d) =>
+        (env.getModuleIdxFor? d).any fun i => (env.header.moduleNames[i.toNat]!).getRoot == `Lean
+      parts := parts.push (s!"{missing.size} extern(s) of Lean's library that the program reaches \
+        are not implemented by lean2rr's runtime:\n{"\n".intercalate lines.toList}" ++
+        (if ofLean then "\n(the `Lean` package's C++ functions are not in lean2rr's runtime yet)" else ""))
+    let msg := "\n".intercalate parts.toList
+    if (← IO.getEnv "L2R_ALLOW_MISSING_EXTERNS").isSome then IO.eprintln s!"lean2rr: warning: {msg}"
+    else throwError msg
   let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))
   return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := liveFns st.fns, strLits := st.strLits, anchored }
 

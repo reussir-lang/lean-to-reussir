@@ -108,6 +108,10 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     let ptys ← params.mapM lowerType
     let retTy ← lowerType ret
     if args.size == n then
+      -- A refused extern of the program: no shortcut either (review REB-11).
+      if (← read).externRefusals.contains orig then
+        let as ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
+        return ← coerce (refusedExternCall orig as) retTy (← lowerType resTy)
       -- `ptrAddrUnsafe x`: the address of `x` in its own representation
       -- (converted to the parameter's, it would be a temporary cell, whose
       -- address the next temporary can get: `ptrEq` would then say `true`

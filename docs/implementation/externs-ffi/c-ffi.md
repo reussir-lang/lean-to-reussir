@@ -1,20 +1,17 @@
 # Calling the program's C code (parked)
 
-**Status: parked, not supported.** A Lean program may implement some of
-its own `@[extern "sym"]` declarations in C (written against
-`<lean/lean.h>`, built by Lake). lean2rr links no C code of the program
-and does not compile such an extern's Lean body in its place: the
-generated code calls a function named after the symbol that the prelude
-does not define, so the build fails in rrc with an unknown function
-([dispatch.md](dispatch.md#the-order-an-extern-call-takes), step 10; plan
-[§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
-"Not supported"). The targets for now are programs that use only `Init`
-and `Std`, and where lean2rr's own layouts and Lean's object layouts
-conflict, lean2rr's win. The work is kept on two unmerged branches,
-described below so it can be resumed; nothing on them is in the
-translator. The one piece merged is the single-block layout of strings
-and `Array Nat`/`Int` with Lean's header sizes (mem-layout, 7a784e1),
-which lean2rr uses for its own sake
+**Status: parked, not supported, not a goal for now.** A Lean program may
+implement some of its own `@[extern "sym"]` declarations in C (written
+against `<lean/lean.h>`, built by Lake). The owner's decision of
+2026-10-03 is to target Lean code with Lean's runtime library as the only
+native code, so lean2rr never compiles, links or calls such C: the extern
+runs the function its C symbol binds to, else its Lean definition, else
+lean2rr rejects the program ([program-externs.md](program-externs.md)).
+Where lean2rr's own layouts and Lean's object layouts conflict, lean2rr's
+win. The C FFI work is kept on an unmerged branch, described below so it
+can be resumed; nothing of it is in the translator. The one piece merged
+is the single-block layout of strings and `Array Nat`/`Int` with Lean's
+header sizes (mem-layout, 7a784e1), which lean2rr uses for its own sake
 ([strings](../representations/strings.md#a-string-keeps-its-character-count),
 [arrays](../representations/arrays.md#array-nat-and-array-int-store-one-word-per-element)).
 
@@ -49,21 +46,10 @@ which lean2rr uses for its own sake
   `tests/ffi/`.
 - **Remove only if:** n/a (not merged).
 
-### Branch `lean-externs`: the Lean body as a fallback (parked at fb3bb77)
+### Branch `lean-externs`: merged into the Lean-only rule
 
-- **What:** An `@[extern "sym"]` definition of the program whose symbol
-  nothing implements (prelude, `@[export]` definition, glue, linked C) is
-  compiled from its Lean body (the definition, or its `_unsafe_rec`
-  version); an opaque without one stays an extern. lean2rr then rejects a
-  program that still calls an extern nothing implements and lists each
-  one with its declaration, instead of leaving them to rrc
-  (`L2R_ALLOW_MISSING_EXTERNS=1` only warns). Reviewed through round 3
-  (RV8E-01..11 fixed); test `RtExternBody`.
-- **Why parked:** It is the third step of `ffi-c`'s precedence and goes
-  with it: the two branches overlap (`--external-symbols`, the
-  missing-extern error) and are to be merged together, if the C FFI is
-  resumed.
-- **Where (on the branch):** `Mono.lean`: `externBodyFallback`,
-  `externBodyDecl`; `Emit/Program.lean`: `lowerProgram` (the
-  missing-extern report).
-- **Remove only if:** n/a (not merged).
+- **What:** Its Lean-body fallback, missing-extern report, prelude
+  function set and library-symbol redirect were ported to Lean 4.34 and
+  changed to the Lean-only rule (branch `extern-bodies`):
+  [program-externs.md](program-externs.md).
+- **Remove only if:** n/a.

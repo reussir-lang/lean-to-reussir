@@ -1,18 +1,23 @@
 /-! Runtime test: UTF-8 sweep. DUtf8: 4000 byte arrays from a fixed LCG,
 biased to lead/continuation/invalid bytes, through `validateUTF8`,
-`String.fromUTF8?`, the lossy decoder `lean_decode_lossy_utf8`,
+`String.fromUTF8?`,
 `ByteArray.hash`, `String.hash` and lengths; well-formed boundary code points;
 the `fromUTF8!` panic. T30Utf8: 32 hand-picked sequences (overlong forms,
 surrogates, > U+10FFFF, truncated, stray continuation bytes, NUL), raw
 positions inside multi-byte characters, `Substring.Raw` and
 `String.Legacy.Iterator` with mid-character bounds.
 From the round-7 review, area D (rv7/rtdata, check DUtf8), and the round-6
-adversarial reviewers, area stdlib (adv6/stdlib, T30Utf8). -/
+adversarial reviewers, area stdlib (adv6/stdlib, T30Utf8).
+The review's program also ran the lossy decoder `lean_decode_lossy_utf8`
+through an `@[extern "lean_decode_lossy_utf8"] opaque` of its own. An
+extern of the program is never bound to Lean's runtime (translation plan
+§5.8, "Externs of the program"), so that declaration is refused, and Lean's
+own declaration of it (`Lean.decodeLossyUTF8`) is private to `Lean.Shell`:
+no program reaches the function, and this test no longer prints it. -/
 
 namespace DUtf8
 -- from rv7/rtdata/DUtf8.lean
--- UTF-8 validation, decoding (strict and lossy), hashing of random byte arrays.
-@[extern "lean_decode_lossy_utf8"] opaque decodeLossy : @& ByteArray → String
+-- UTF-8 validation, strict decoding, hashing of random byte arrays.
 
 def lcg (s : UInt64) : UInt64 := s * 6364136223846793005 + 1442695040888963407
 
@@ -33,8 +38,7 @@ def main : IO Unit := do
   for k in [0:4000] do
     let b := mkBytes (k.toUInt64 * 7919 + 1) (k % 13)
     let v := b.validateUTF8
-    let l := decodeLossy b
-    let line := s!"{k} {b.toList} v={v} h={b.hash} lossy={l.toUTF8.toList} ll={l.length} lh={hash l}"
+    let line := s!"{k} {b.toList} v={v} h={b.hash}"
     match String.fromUTF8? b with
     | some s =>
       valid := valid + 1
@@ -44,7 +48,7 @@ def main : IO Unit := do
   -- some well-formed multi-byte sequences built from code points
   for c in [0x7F, 0x80, 0x7FF, 0x800, 0xFFFF, 0x10000, 0x10FFFF, 0xD7FF, 0xE000] do
     let s := String.singleton (Char.ofNat c)
-    IO.println s!"{c} {s.toUTF8.toList} {s.toUTF8.validateUTF8} {(decodeLossy s.toUTF8).toList.map Char.toNat}"
+    IO.println s!"{c} {s.toUTF8.toList} {s.toUTF8.validateUTF8} {(String.fromUTF8? s.toUTF8).map (·.toList.map Char.toNat)}"
   let bad := ByteArray.mk #[0x61, 0xC0, 0x80, 0x62]
   IO.println s!"bang {(String.fromUTF8! bad).length}"
 end DUtf8
