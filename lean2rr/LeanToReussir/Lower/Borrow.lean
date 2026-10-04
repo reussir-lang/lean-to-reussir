@@ -303,7 +303,7 @@ def boxedTarget (f : Name) (fn : String) (params : Array RR.Ty) (ret : RR.Ty) : 
       if ← mayHoldResource params[i] then kept := kept.push i
   if kept.isEmpty then return fn
   let name := fn ++ "_boxed"
-  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+  unless (← hasFn name) do
     let ps := params.mapIdx fun i t => (s!"a{i}", t)
     let body ← releaseAfter (.call fn #[] (ps.map (.var ·.1))) ret (kept.map fun i => (s!"a{i}", params[i]!))
     modify fun s => { s with fns := s.fns.push (.fn name ps ret (.ofExpr body)) }

@@ -100,7 +100,7 @@ variants (`LowerState.smArms`); the declaration's function, which enters at
 its own variant with its parameters `params`; and the entry-point enum. -/
 def emitStateMachine (d : Decl .pure) (sm : StateMachine) (params : Array (String × RR.Ty)) (ret : RR.Ty)
     (block : RR.Block) : LowerM Unit := do
-  let arms := (← get).smArms
+  let arms ← getPart (·.smArms)
   -- A shared enum: Reussir miscompiles `[value]` enums whose arms have
   -- different layouts (translation plan §9); Reussir reuses the cell of
   -- the matched value.

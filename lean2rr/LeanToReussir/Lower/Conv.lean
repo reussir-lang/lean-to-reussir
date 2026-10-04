@@ -37,7 +37,7 @@ where
             if ← go ft seen then return true
         return false
       if let some (e, _) := (← get).refInfos[n]? then return ← go e seen
-      match (← get).tupleTypes.toList.find? (·.2 == n) with
+      match ((← get).tupleKeys[n]?.map fun k => (k, n)) with
       | some (k, _) =>
         let fields := if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k
         for ft in fields do
@@ -75,7 +75,7 @@ is false: a placeholder (`zeroTry`) is natively `box(0)`, which
 `lean_mark_persistent` never sees, and the never-forced `pending` cell one
 can hold must not be run. -/
 def cafAccessor (name : String) (ret : RR.Ty) (walk := true) : LowerM RR.Item := do
-  let slot := (← get).cafSlots
+  let slot ← getPart (·.cafSlots)
   modify fun s => { s with cafSlots := slot + 1 }
   let (st, boxed) ← arrayElemTy ret
   let wrap (e : RR.Expr) : RR.Expr := match st with
@@ -120,14 +120,14 @@ partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
   if (← get).zeroNone.contains t then return (none, inf)
   if let some f := (← get).zeroFns[t]? then return (some (.call f #[] #[]), inf)
   if let some d := (← get).zeroBusy[t]? then return (none, d)
-  let depth := (← get).zeroBusy.size
+  let depth ← getPart (·.zeroBusy.size)
   let f ← fresh "l2r_zero_"
   modify fun s => { s with zeroBusy := s.zeroBusy.insert t depth }
   let lit (text : String) : RR.Block := ⟨#[("z", some t, .atom text)], .var "z"⟩
   -- The placeholders of `tys`, unless one of them is being built or has
   -- none (`low`: the smallest depth avoided).
   let fieldsZero (tys : Array RR.Ty) : LowerM (Option (Array RR.Expr) × Nat) := do
-    let busy := (← get).zeroBusy
+    let busy ← getPart (·.zeroBusy)
     let hit := tys.foldl (fun m ft => match busy[ft]? with | some d => min m d | none => m) inf
     if hit < inf then return (none, hit)
     let mut vals := #[]
@@ -179,7 +179,7 @@ partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
           pure (found, low)
       else
         -- Generated positional structs (`Tuple…`, `ElemBox…`).
-        match (← get).tupleTypes.toList.find? (·.2 == n) with
+        match ((← get).tupleKeys[n]?.map fun k => (k, n)) with
         | some (k, _) =>
           let fields := if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k
           let (vs?, l) ← fieldsZero fields
@@ -264,7 +264,7 @@ def zeroFinite (t : RR.Ty) : LowerM Bool := do
 enum without fields), as `u64`: a generated `match`. -/
 def enumIndexFn (tn : String) : LowerM String := do
   let name := s!"l2r_enum_index_{tn}"
-  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+  unless (← hasFn name) do
     let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no enumeration {tn}"
     let arms := info.ctorOrder.zipIdx.filterMap fun (c, i) => (info.ctors.find? c).map fun l =>
       { ty := tn, ctor := some l.variant, binders := #[], body := ⟨#[("i", some (.named "u64"), .atom (toString i))], .var "i"⟩ : RR.Arm }
@@ -277,7 +277,7 @@ def enumIndexFn (tn : String) : LowerM String := do
 chain of comparisons). -/
 def enumOfIndexFn (tn : String) : LowerM String := do
   let name := s!"l2r_enum_of_index_{tn}"
-  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+  unless (← hasFn name) do
     let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no enumeration {tn}"
     let ls := info.ctorOrder.filterMap info.ctors.find?
     let some last := ls.back? | do
@@ -384,7 +384,7 @@ scalar of its index, so it reads as that index. A constructor with fields
 is natively an object (`objectWordBase`). -/
 def ctorWordFn (tn : String) (info : TypeInfo) : LowerM String := do
   let name := s!"l2r_ctor_word_{tn}"
-  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+  unless (← hasFn name) do
     let u64 := RR.Ty.named "u64"
     let mut arms : Array RR.Arm := #[]
     let mut complete := true
@@ -408,7 +408,7 @@ word past the last constructor selects the last one, as Lean's `switch`
 does); otherwise unreachable (natively an object read from a scalar). -/
 def ctorOfWordFn (tn : String) (info : TypeInfo) : LowerM String := do
   let name := s!"l2r_ctor_of_word_{tn}"
-  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+  unless (← hasFn name) do
     let u64 := RR.Ty.named "u64"
     let t := RR.Ty.named tn
     let ls := info.ctorOrder.filterMap info.ctors.find?
@@ -601,7 +601,7 @@ partial def retypableAux (a b : RR.Ty) (assumed : Array (String × String)) :
   match a, b with
   | .named an, .named bn =>
     if assumed.contains (an, bn) then return some assumed
-    let infos := (← get).typeInfos
+    let infos ← getPart (·.typeInfos)
     let (some ai, some bi) := (infos[an]?, infos[bn]?) | return none
     if ai.value != bi.value || ai.shape != bi.shape || ai.ctorOrder.size != bi.ctorOrder.size then return none
     let sameHead := (← nominalHead an) == (← nominalHead bn)
@@ -731,8 +731,8 @@ with a call counting the `amount` elements it converts (an expression over
 `b`'s bindings) before its result. Otherwise `b`. -/
 def countConversion (b : RR.Block) (amount : RR.Expr := .atom "1") : LowerM RR.Block := do
   unless (← IO.getEnv "L2R_COUNT_CONVERSIONS").isSome do return b
-  unless (← get).fns.any (fun | .raw t => t == convTickFn | _ => false) do
-    modify fun s => { s with fns := s.fns.push (.raw convTickFn) }
+  unless ← getPart (·.convTickEmitted) do
+    modify fun s => { s with fns := s.fns.push (.raw convTickFn), convTickEmitted := true }
   let one := if amount matches .atom "1" then #[("one", some (RR.Ty.named "u64"), amount)] else #[]
   let arg := if amount matches .atom "1" then RR.Expr.var "one" else amount
   return ⟨b.lets ++ one ++ #[("tick", none, .call "l2r_conv_tick" #[] #[arg])], b.result⟩
@@ -859,7 +859,7 @@ mutual
       | "Int", "Nat" => return some (.call "l2r_int_cast_nat" #[] #[e])
       | _, _ => pure ()
       -- A `[value]` struct is natively its field.
-      let infos := (← get).typeInfos
+      let infos ← getPart (·.typeInfos)
       if let some si := infos[sn]? then
         if si.value && (← nominalHead sn) != (← nominalHead dn) then
           if let some ft := (si.ctors.find? si.ctorOrder[0]!).bind (·.posTys[0]?) then
@@ -1023,7 +1023,7 @@ mutual
     if st == dt then return none
     let (.named a, .named b) := (st, dt) | return none
     if a == boxName || b == boxName then return none
-    let infos := (← get).typeInfos
+    let infos ← getPart (·.typeInfos)
     unless infos.contains a && infos.contains b do return none
     let (some sh, some dh) := (← nominalHead a, ← nominalHead b) | return none
     unless sh == dh || (← isomorphic a b) do return none
@@ -1292,13 +1292,17 @@ mutual
   recurses only through one field of each constructor (a list's tail) is a
   directly recursive function, which Reussir runs as a loop (tail recursion
   modulo constructors); any other recursion is an explicit-stack loop
-  (`convMachine`). -/
+  (`convMachine`). A conversion whose function is being generated is in
+  `convsInProgress` (a recursive use gets its name); once the function is
+  emitted it leaves the set (`hasFn` finds it), which stays small: a probe
+  that `boxCastConv` may undo shares it, and an update copies it. -/
   partial def structConv (sn dn : String) : LowerM String := do
     let fname := s!"l2r_conv_{sn}_{dn}"
-    if (← get).fns.any (fun | .fn n .. => n == fname | _ => false) ||
+    if (← hasFn fname) ||
        (← get).convsInProgress.contains fname then return fname
     modify fun s => { s with convsInProgress := s.convsInProgress.insert fname }
     structConvBody sn dn fname
+    modify fun s => { s with convsInProgress := s.convsInProgress.erase fname }
     return fname
 
   /-- The body of `structConv`'s function `fname`. -/
@@ -1444,7 +1448,7 @@ partial def boxCastable (vt t : RR.Ty) : LowerM Bool := do
   match vt, t with
   | .named a, .named b =>
     if [("u64", "f64"), ("f64", "u64"), ("u32", "f32"), ("f32", "u32")].contains (a, b) then return true
-    let infos := (← get).typeInfos
+    let infos ← getPart (·.typeInfos)
     if let some ft := infos[a]?.bind valueFieldTy? then return ← boxCastable ft t
     if let some ft := infos[b]?.bind valueFieldTy? then return ← boxCastable vt ft
     if ← wordCastable a b (objects := true) then return true
@@ -1462,18 +1466,50 @@ every other type with function fields at the same native slots (the
 dictionaries of uniform code), each wrapper adding arms to the application
 functions of its type: the generated program grew by a fifth on monad
 transformer towers. Such a cast stays unreachable (plan §10); the probe's
-generated functions are dropped with it. -/
+generated functions are dropped with it.
+
+The state is saved for that without the functions and types emitted
+(`fns` and its index, `typeItems`): they only grow during the probe, and
+are cut back to their sizes on a rollback. A saved state that held them
+would share the arrays, which the probe's first push would then copy
+whole: one probe per unboxing function and `Box` variant, each copying
+every item emitted so far, is quadratic (round 9 RV9S-02). The other
+fields stay shared with the saved state, and the probe's first update of
+each copies it; they do not grow with every emitted item. A probe that
+edits `fns` or `typeItems` other than by appending (`fnEdits`,
+`typeEdits`) cannot be cut back: an internal error. -/
 def boxCastConv (x : RR.Expr) (vt t : RR.Ty) : LowerM (Option RR.Expr) := do
-  let saved ← get
-  let nfn (st : LowerState) : Nat := st.fnVariants.fold (fun n _ vs => n + vs.size) 0
+  -- `getPart`, not `(← get).…`: a projection is computed where it is used,
+  -- which would keep the whole state alive (shared) during the probe.
+  let n ← getPart (·.fns.size)
+  let nt ← getPart (·.typeItems.size)
+  let saved ← getPart fun s => { s with fns := #[], fnPos := {}, typeItems := #[] }
+  let nfn (st : LowerState) : Nat := st.fnVariantCount
   let r ← match ← tryCoerce x vt t with
     | some r => pure (some r)
     | none => castFallback x vt t
   let after ← get
-  if nfn after != nfn saved || after.fnConvs.size != saved.fnConvs.size ||
-     after.fnUnboxTargets.size != saved.fnUnboxTargets.size then
-    set saved
-    return none
-  return r
+  let undo := nfn after != nfn saved || after.fnConvs.size != saved.fnConvs.size ||
+     after.fnUnboxTargets.size != saved.fnUnboxTargets.size
+  let edits := after.fnEdits
+  let typeEdits := after.typeEdits
+  if !undo then return r
+  if edits != saved.fnEdits || typeEdits != saved.typeEdits then
+    throwError "lean2rr: a probed cast replaced or removed an emitted function or type (internal error)"
+  -- Cut the functions back to `n`, their names out of the index (a name
+  -- indexed at an earlier position stays), and the types back to `nt`.
+  let (fns, pos, ix, tys) ← modifyGet fun s =>
+    ((s.fns, s.fnPos, s.fnIndexed, s.typeItems), { s with fns := #[], fnPos := {}, typeItems := #[] })
+  let mut fns := fns
+  let mut pos := pos
+  let mut tys := tys
+  while fns.size > n do
+    if let some (.fn nm ..) := fns.back? then
+      if pos[nm]? == some (fns.size - 1) then pos := pos.erase nm
+    fns := fns.pop
+  while tys.size > nt do
+    tys := tys.pop
+  set { saved with fns, fnPos := pos, fnIndexed := min ix n, typeItems := tys }
+  return none
 
 end LeanToReussir

@@ -44,16 +44,16 @@ def fnVariantName : FnVariant → String
 def applyFnName (t : RR.Ty) (j : Nat) : String := s!"l2r_ap{j}_{t.enc}"
 
 def addFnVariant (t : RR.Ty) (v : FnVariant) : LowerM Unit := do
-  let vs := (← get).fnVariants.getD t #[]
+  let vs ← getPart (·.fnVariants.getD t #[])
   unless vs.contains v do
-    modify fun s => { s with fnVariants := s.fnVariants.insert t (vs.push v) }
+    modify fun s => { s with fnVariants := s.fnVariants.insert t (vs.push v), fnVariantCount := s.fnVariantCount + 1 }
 
 /-- `f`, of function type `t`, applied to `args` (at `t`'s parameter types;
 at most the chain length). -/
 def applyCall (f : RR.Expr) (t : RR.Ty) (args : Array RR.Expr) : LowerM RR.Expr := do
   let j := args.size
-  unless (← get).fnApplies.contains (t, j) do
-    modify fun s => { s with fnApplies := s.fnApplies.push (t, j) }
+  unless ← getPart (·.fnApplySet.contains (t, j)) do
+    modify fun s => { s with fnApplies := s.fnApplies.push (t, j), fnApplySet := s.fnApplySet.insert (t, j) }
   return .call (applyFnName t j) #[] (#[f] ++ args)
 
 /-- A function value of type `t = A → B` from a Reussir lambda
@@ -84,15 +84,15 @@ that a value converted back and forth (a structure field crossing uniform
 code in a loop) is not wrapped again each time; otherwise it is wrapped
 (`w<S>`). The body is generated at the end (`genFnConv`). -/
 def fnConvFn (src dst : RR.Ty) : LowerM String := do
-  unless (← get).fnConvs.contains (src, dst) do
-    modify fun s => { s with fnConvs := s.fnConvs.push (src, dst) }
+  unless ← getPart (·.fnConvSet.contains (src, dst)) do
+    modify fun s => { s with fnConvs := s.fnConvs.push (src, dst), fnConvSet := s.fnConvSet.insert (src, dst) }
   return s!"l2r_fconv_{src.enc}_{dst.enc}"
 
 /-- The generated function unboxing a `Box` to function type `t` (its body
 is generated at the end, with the other unboxing functions). -/
 def unboxFnFn (t : RR.Ty) : LowerM String := do
-  unless (← get).fnUnboxTargets.contains t do
-    modify fun s => { s with fnUnboxTargets := s.fnUnboxTargets.push t }
+  unless ← getPart (·.fnUnboxTargetSet.contains t) do
+    modify fun s => { s with fnUnboxTargets := s.fnUnboxTargets.push t, fnUnboxTargetSet := s.fnUnboxTargetSet.insert t }
   return s!"l2r_unbox_fn_{t.enc}"
 
 end LeanToReussir

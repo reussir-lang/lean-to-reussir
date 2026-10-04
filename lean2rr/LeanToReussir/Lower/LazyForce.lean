@@ -165,7 +165,7 @@ def taskTag (z : String) : LowerM Nat := do
   match (← get).taskTags.idxOf? z with
   | some i => return i
   | none =>
-    let i := (← get).taskTags.size
+    let i ← getPart (·.taskTags.size)
     modify fun s => { s with taskTags := s.taskTags.push z }
     return i
 

@@ -81,10 +81,10 @@ partial def finishUnboxFns : LowerM Unit := do
   repeat
     -- Reference dispatch over the boxed reference types (it can box more).
     finishRefFns
-    let nvars := (← get).boxVariants.size
-    let nominal := (← get).unboxTargets.map fun t => (s!"l2r_unbox_{t}", RR.Ty.named t)
-    let arrays := (← get).unboxArrTargets.map fun (t, f) => (f, t)
-    let fns := (← get).fnUnboxTargets.map fun t => (s!"l2r_unbox_fn_{t.enc}", t)
+    let nvars ← getPart (·.boxVariants.size)
+    let nominal ← getPart (·.unboxTargets.map fun t => (s!"l2r_unbox_{t}", RR.Ty.named t))
+    let arrays ← getPart (·.unboxArrTargets.map fun (t, f) => (f, t))
+    let fns ← getPart (·.fnUnboxTargets.map fun t => (s!"l2r_unbox_fn_{t.enc}", t))
     let pending := (nominal ++ arrays ++ fns).filter fun (f, _) => done.getD f 0 != nvars + 1
     if pending.isEmpty then break
     for (fname, t) in pending do
@@ -93,7 +93,7 @@ partial def finishUnboxFns : LowerM Unit := do
         | _ => pure none
       let tArr := (← arrayRepr? t).isSome
       let mut arms : Array RR.Arm := #[]
-      for (vt, vname) in (← get).boxVariants do
+      for (vt, vname) in (← getPart (·.boxVariants)) do
         let accept ← match th?, vt with
           | some th, .named vn => pure ((← nominalHead vn) == some th)
           | some _, _ => pure false
@@ -151,7 +151,7 @@ partial def finishUnboxFns : LowerM Unit := do
       arms := arms.push { ty := boxName, ctor := none, binders := #[],
                           body := ⟨#[boxSink (.var "b")], .call "l2r_unreachable" #[t] #[]⟩ }
       let item := RR.Item.fn fname #[("b", RR.Ty.box)] t (.ofExpr (.mtch (.var "b") arms))
-      modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != fname | _ => true).push item }
+      replaceFn fname item
       -- Record the variant count this body was generated against; a later
       -- growth of the variant set makes it pending again.
       done := done.insert fname (nvars + 1)
@@ -182,7 +182,7 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
     #[{ ty := tn, ctor := some "z", binders := #[], body := .ofExpr (← zeroValue resJ) }]
   let rawBody ← rest (.apply (.var "l2rc") (.var as[0]!)) 1
   arms := arms.push { ty := tn, ctor := some "raw", binders := #[some "l2rc"], body := .ofExpr rawBody }
-  for v in (← get).fnVariants.getD t #[] do
+  for v in (← getPart (·.fnVariants)).getD t #[] do
     let (binders, body) ← match v with
       | .wrap src =>
         let k := min (fnChain src).1.size j
@@ -207,7 +207,7 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
   let name := applyFnName t j
   let params := #[("l2rf", t)] ++ as.zip (doms.extract 0 j)
   let item := RR.Item.fn name params resJ (.ofExpr (.mtch (.var "l2rf") arms))
-  modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
+  replaceFn name item
 
 /-- Generate `l2r_fconv_S_T` (see `fnConvFn`). A value that is a wrapped
 value `g` of a representation `R` (`w<R>(g)`) is converted from `R`
@@ -221,14 +221,14 @@ def genFnConv (src dst : RR.Ty) : LowerM Unit := do
   let name := s!"l2r_fconv_{src.enc}_{dst.enc}"
   let wrapped := RR.Expr.ctor (RR.fnTypeName dst) (some (fnVariantName (.wrap src))) #[.var "l2rf"]
   let mut arms : Array RR.Arm := #[]
-  for v in (← get).fnVariants.getD src #[] do
+  for v in (← getPart (·.fnVariants)).getD src #[] do
     let .wrap r := v | continue
     let some e ← tryCoerce (.var "l2rg") r dst | continue
     arms := arms.push { ty := RR.fnTypeName src, ctor := some (fnVariantName v), binders := #[some "l2rg"], body := .ofExpr e }
   let body : RR.Expr := if arms.isEmpty then wrapped
     else .mtch (.var "l2rf") (arms.push { ty := RR.fnTypeName src, ctor := none, binders := #[], body := .ofExpr wrapped })
   let item := RR.Item.fn name #[("l2rf", src)] dst (.ofExpr body)
-  modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != name | _ => true).push item }
+  replaceFn name item
 
 /-- Generate the application functions requested so far, again for those
 whose type gained variants. Whether anything was generated. -/
@@ -236,13 +236,13 @@ partial def finishFnValues : LowerM Bool := do
   let mut any := false
   repeat
     let mut progress := false
-    for (src, dst) in (← get).fnConvs do
+    for (src, dst) in (← getPart (·.fnConvs)) do
       let nv := ((← get).fnVariants.getD src #[]).size
       if (← get).fnConvDone[(src, dst)]? == some nv then continue
       genFnConv src dst
       modify fun s => { s with fnConvDone := s.fnConvDone.insert (src, dst) nv }
       progress := true
-    for (t, j) in (← get).fnApplies do
+    for (t, j) in (← getPart (·.fnApplies)) do
       let nv := ((← get).fnVariants.getD t #[]).size
       if (← get).fnApplyDone[(t, j)]? == some nv then continue
       genApply t j
@@ -320,13 +320,13 @@ where
       | none => return false
     | .app "RVec" #[st] => go st seen
     | .fn .. =>
-      for v in (← get).fnVariants.getD t #[] do
+      for v in (← getPart (·.fnVariants)).getD t #[] do
         for f in ← fnVariantFields v do
           if ← go f seen then return true
       return false
     | .named n =>
       if n == boxName then
-        for (vt, _) in (← get).boxVariants do
+        for (vt, _) in (← getPart (·.boxVariants)) do
           if ← go vt seen then return true
         return false
       if let some info := (← get).typeInfos[n]? then
@@ -337,7 +337,7 @@ where
         return false
       -- A reference, through its value.
       if let some (e, _) := (← get).refInfos[n]? then return ← go e seen
-      match (← get).tupleTypes.toList.find? (·.2 == n) with
+      match ((← get).tupleKeys[n]?.map fun k => (k, n)) with
       | some (k, _) =>
         let fields := if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k
         for ft in fields do
@@ -361,7 +361,7 @@ def persistCell (t : RR.Ty) : LowerM Bool := do
     if let some info := (← get).typeInfos[n]? then return info.shape != .enumLike && !info.value
     if (← get).refInfos.contains n then return true
     -- An `ElemBox` is a shared struct, a `Tuple` a `[value]` one.
-    match (← get).tupleTypes.toList.find? (·.2 == n) with
+    match ((← get).tupleKeys[n]?.map fun k => (k, n)) with
     | some (k, _) => return k.size == 2 && k[1]! == .named "__elem_box"
     | none => return false
   | _ => return false
@@ -495,7 +495,7 @@ partial def genPersist (t : RR.Ty) (gen : IO.Ref PersistGen) : LowerM (Option St
       -- cannot be looked at).
       let tn := RR.fnTypeName t
       let mut arms : Array RR.Arm := #[]
-      for v in (← get).fnVariants.getD t #[] do
+      for v in (← getPart (·.fnVariants)).getD t #[] do
         let fs ← fnVariantFields v
         arms := arms.push (← arm tn (fnVariantName v) ((List.range fs.size).toArray.map fun i => some (s!"c{i}", fs[i]!)))
       arms := arms.push { ty := tn, ctor := none, binders := #[], body := unchanged }
@@ -503,7 +503,7 @@ partial def genPersist (t : RR.Ty) (gen : IO.Ref PersistGen) : LowerM (Option St
     | .named n =>
       if n == boxName then
         let mut arms : Array RR.Arm := #[]
-        for (vt, bv) in (← get).boxVariants do
+        for (vt, bv) in (← getPart (·.boxVariants)) do
           arms := arms.push (← arm boxName bv #[some ("x", vt)])
         pure (.ofExpr (.mtch (.var "v") arms))
       else if let some info := (← get).typeInfos[n]? then
@@ -528,7 +528,7 @@ partial def genPersist (t : RR.Ty) (gen : IO.Ref PersistGen) : LowerM (Option St
         let rest ← each #[("x", e)] (keep := true)
         pure ⟨#[("x", some e, get)] ++ rest.lets, rest.result⟩
       else
-        match (← get).tupleTypes.toList.find? (·.2 == n) with
+        match ((← get).tupleKeys[n]?.map fun k => (k, n)) with
         | some (k, _) =>
           let fields := if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k
           let xs := (List.range fields.size).toArray.map fun i => (s!"f{i}", fields[i]!)
@@ -557,13 +557,16 @@ unless every task has already finished
 cannot hold a task gets a walk that does nothing. Whether anything was
 generated. -/
 def finishPersistFns : LowerM Bool := do
-  let reqs := (← get).persistReqs
+  let reqs ← getPart (·.persistReqs)
   if reqs.isEmpty then return false
   let vc ← variantCount
   if (← get).persistDone == some (reqs.size, vc.1 + vc.2 * 1000003) then return false
+  dropFns (·.startsWith "l2r_persist_")
+  -- Not an append: counted (`typeEdits`), as `boxCastConv`'s rollback
+  -- cuts `typeItems` back to its size and needs no other edit in a probe.
   modify fun s => { s with
-    fns := s.fns.filter fun | .fn n .. => !n.startsWith "l2r_persist_" | _ => true
-    typeItems := s.typeItems.filter fun | .enum n .. => n != persistListName | _ => true }
+    typeItems := s.typeItems.filter fun | .enum n .. => n != persistListName | _ => true
+    typeEdits := s.typeEdits + 1 }
   let gen ← IO.mkRef ({} : PersistGen)
   let u64 := RR.Ty.named "u64"
   let wTy := RR.Ty.named persistListName
@@ -589,7 +592,7 @@ def finishPersistFns : LowerM Bool := do
       typeItems := s.typeItems.push (.enum persistListName false (#[("wnil", #[])] ++ g.variants))
       fns := s.fns.push (.fn "l2r_persist_walk" #[("h", u64), ("w", wTy)] u64 (.ofExpr (.mtch (.var "w") arms))) }
   let vc ← variantCount
-  let n := (← get).persistReqs.size
+  let n ← getPart (·.persistReqs.size)
   modify fun s => { s with persistDone := some (n, vc.1 + vc.2 * 1000003) }
   return true
 
@@ -612,7 +615,7 @@ def fnTypeItems : LowerM (Array RR.Item) := do
     seen := seen.insert t
     let mut variants : Array (String × Array RR.Ty) := #[("z", #[]), ("raw", #[.cls d c])]
     work := (RR.Ty.cls d c).subterms work
-    for v in (← get).fnVariants.getD t #[] do
+    for v in (← getPart (·.fnVariants)).getD t #[] do
       let fs ← fnVariantFields v
       for f in fs do work := f.subterms work
       variants := variants.push (fnVariantName v, fs)

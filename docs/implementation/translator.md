@@ -130,3 +130,53 @@ relative to `lean2rr/` unless they start with `scripts/`.
 - **Where:** `LeanToReussir/RR.lean`: `joinTo`, `Expr.renderHead` and the
   `renderTo` functions.
 - **Remove only if:** never.
+
+### Stage 4 finds emitted functions by name and keeps its emitted items unshared
+
+- **What:** Stage 4's state (`LowerState`) keeps the position of each
+  emitted function by name (`fnPos`, brought up to date lazily by
+  `syncFnIndex`), and every "is helper X already emitted" check asks it
+  (`hasFn`); a test build's conversion counter has a flag
+  (`convTickEmitted`), generated `[value]` structs a reverse map
+  (`tupleKeys`), and function-value variants a count (`fnVariantCount`).
+  The other lists that grow with the program and are searched before
+  each addition have a set or map beside them: `Box` variants
+  (`boxVariantOf`), unboxing targets (`unboxTargetSet`,
+  `unboxArrTargetOf`, `fnUnboxTargetSet`), application functions
+  (`fnApplySet`) and function-value conversions (`fnConvSet`); the lists
+  keep the order the output follows.
+  A function replaced by another of the same name leaves a tombstone
+  (`fnTombstone`, `.raw ""`) where it was and the new one goes at the end
+  (`replaceFn`); the tombstones are dropped when the program is assembled
+  (`liveFns`), so the items come out in the order that removing the old
+  function and appending the new one gave. The state is read with
+  `getPart f` (`modifyGet fun s => (f s, s)`), not `(← get).f`, wherever
+  the read is followed by an update. `boxCastConv` saves the state for its
+  rollback without `fns`, its index and `typeItems`, and cuts those back
+  to their sizes instead; it stops with an internal error if the probe
+  replaced or removed a function or a type (`fnEdits`, `typeEdits`). The
+  other fields stay shared with the saved state (the probe's first update
+  of each copies it; none of them grows with every emitted item).
+  `structConv` takes a function out of `convsInProgress` once it is
+  emitted. Each function name appears at most once among the functions
+  in `fns` (tombstones aside): every generator asks `hasFn` or a cache of
+  its own first, or uses a fresh name; `syncFnIndex` stops with an
+  internal error on a second function of a name (review R9S2R-01).
+- **Why:** Each lookup scanned the whole list and each addition copied
+  it: quadratic in the number of items. A program that imports a large
+  library emits over 100000 items (`import Batteries` and one `println`:
+  about 160000; round 9 RV9S-02). The arrays were copied because the
+  state was shared: Lean's compiler computes a pure projection of
+  `(← get)` where it is used, and keeps the state alive (shared) until
+  then, across later `modify`s; a state saved for a rollback shares every
+  field likewise, so the probe's first update of each copied it. The
+  output is byte-identical.
+- **Where:** `LeanToReussir/LowerBase.lean`: `LowerState`, `getPart`,
+  `fnTombstone`, `liveFns`, `syncFnIndex`, `hasFn`, `replaceFn`,
+  `dropFns`, `lazyState`, `boxVariant`, `unboxFn`, `unboxArrFn`;
+  `Lower/Conv.lean`:
+  `boxCastConv`, `structConv`, `countConversion`; `Lower/FnValues.lean`:
+  `applyCall`, `fnConvFn`, `unboxFnFn`; `Lower/Finish.lean`:
+  `finishPersistFns`; `Emit/Program.lean`: `lowerProgram`. Test
+  `RtConvProbeRollback` (an undone probe, then a kept one).
+- **Remove only if:** never.

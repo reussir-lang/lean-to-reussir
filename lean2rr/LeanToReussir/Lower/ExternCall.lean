@@ -97,7 +97,7 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
     let some cons := info.ctors.find? ``List.cons | throwError "lean2rr: bad list type"
     let valTy? := (cons.fields[0]?.join).map (·.2)
     let name := s!"l2r_array_to_list_{ltn}_{repr.family}"
-    unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+    unless (← hasFn name) do
       let u64 := RR.Ty.named "u64"
       -- Elements without a representation (types, proofs) are not stored.
       let (xLet, fieldVals) ← match valTy? with

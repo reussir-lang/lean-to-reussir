@@ -147,7 +147,7 @@ points' variants (`LowerState.smArms`), the declaration's function, which
 enters at its own variant, and the entry-point enum. -/
 def emitStateMachineAlongside (d : Decl .pure) (sm : StateMachine) (params : Array (String × RR.Ty)) (ret : RR.Ty)
     (block : RR.Block) : LowerM Unit := do
-  let arms := (← get).smArms
+  let arms ← getPart (·.smArms)
   let variants := #[(sm.entry, params)] ++ arms.map fun (v, fps, _) => (v, fps)
   let lay ← slotLayout variants
   let fieldsOf : Std.HashMap String (Array (String × RR.Ty)) := variants.foldl (fun m (v, fs) => m.insert v fs) {}

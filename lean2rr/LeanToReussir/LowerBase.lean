@@ -173,16 +173,25 @@ structure LowerState where
   fnTargets : Std.HashMap String FnTarget := {}
   /-- Variants of each function-value type (an `RR.Ty.fn`), besides `z` and `raw`. -/
   fnVariants : Std.HashMap RR.Ty (Array FnVariant) := {}
+  /-- The number of variants in `fnVariants` (`boxCastConv` compares it
+  before and after every probe). -/
+  fnVariantCount : Nat := 0
   /-- Requested application functions: function type and number of arguments. -/
   fnApplies : Array (RR.Ty × Nat) := #[]
+  /-- The elements of `fnApplies` (a scan was linear: round 9 RV9S-02). -/
+  fnApplySet : Std.HashSet (RR.Ty × Nat) := {}
   /-- Function types that some `Box` value is unboxed to. -/
   fnUnboxTargets : Array RR.Ty := #[]
+  /-- The elements of `fnUnboxTargets` (a scan was linear: round 9 RV9S-02). -/
+  fnUnboxTargetSet : Std.HashSet RR.Ty := {}
   /-- Generated application functions, with the number of variants of their
   type they were generated for. -/
   fnApplyDone : Std.HashMap (RR.Ty × Nat) Nat := {}
   /-- Conversions between two representations of a function type (source,
   target), and the source variant count their body was generated for. -/
   fnConvs : Array (RR.Ty × RR.Ty) := #[]
+  /-- The elements of `fnConvs` (a scan was linear: round 9 RV9S-02). -/
+  fnConvSet : Std.HashSet (RR.Ty × RR.Ty) := {}
   fnConvDone : Std.HashMap (RR.Ty × RR.Ty) Nat := {}
   /-- Mono type (keyed by relevant arguments) ↦ generated type name. -/
   typeNames : Std.HashMap Expr String := {}
@@ -193,6 +202,8 @@ structure LowerState where
   typeItems : Array RR.Item := #[]
   /-- Variants of the uniform `Box` type: boxed Reussir type ↦ variant name. -/
   boxVariants : Array (RR.Ty × String) := #[]
+  /-- `boxVariants` by type (a scan was linear: round 9 RV9S-02). -/
+  boxVariantOf : Std.HashMap RR.Ty String := {}
   /-- Types of constants whose value is traversed for tasks when it is
   first computed (`persistCall`); the traversals are generated at the end,
   once all variants of function types and `Box` are known
@@ -202,14 +213,49 @@ structure LowerState where
   persistDone : Option (Nat × Nat) := none
   /-- Generated `[value]` structs carrying several join-point arguments. -/
   tupleTypes : Std.HashMap (Array RR.Ty) String := {}
-  /-- Generated functions (declarations and outlined join points). -/
+  /-- The key of each of `tupleTypes`, by name (finding it by scanning
+  `tupleTypes` was linear: round 9 RV9S-02). -/
+  tupleKeys : Std.HashMap String (Array RR.Ty) := {}
+  /-- Generated functions (declarations and outlined join points). A
+  function replaced by another of the same name leaves a tombstone
+  (`fnTombstone`, dropped at the end) where it was, so that positions stay
+  valid. -/
   fns : Array RR.Item := #[]
+  /-- The position in `fns` of each generated function, by name, for the
+  items `fns[0:fnIndexed]` (`syncFnIndex`, `hasFn`): looking a helper up by
+  scanning every item was quadratic (a program that imports a large
+  library emits over 100000 items: round 9 RV9S-02).
+  Invariant: each function name appears at most once among the functions
+  in `fns` (tombstones aside). Every generator asks `hasFn` (or its own
+  cache) before it emits, or uses a fresh name, and `replaceFn` turns the
+  earlier function into a tombstone; so the index keeps one position per
+  name, and `boxCastConv`'s rollback erases the names of the functions it
+  removes. `syncFnIndex` stops with an internal error on a second function
+  of a name (review R9S2R-01). -/
+  fnPos : Std.HashMap String Nat := {}
+  fnIndexed : Nat := 0
+  /-- How many times an emitted function was replaced or removed
+  (`replaceFn`, `dropFns`): `boxCastConv` rolls `fns` back by cutting it to
+  its size, which needs none during its probe. -/
+  fnEdits : Nat := 0
+  /-- How many times `typeItems` was edited other than by appending
+  (`finishPersistFns`' filter): `boxCastConv` rolls `typeItems` back by
+  cutting it to its size, which needs none during its probe. -/
+  typeEdits : Nat := 0
+  /-- Whether `fns` holds the conversion counter (`convTickFn`, test
+  builds only); kept in the state so that `boxCastConv`'s rollback restores
+  it together with `fns`. -/
+  convTickEmitted : Bool := false
   /-- Nominal types that some `Box` value is unboxed to (converter bodies
   are generated at the end, once all `Box` variants are known). -/
   unboxTargets : Array String := #[]
+  /-- The elements of `unboxTargets` (a scan was linear: round 9 RV9S-02). -/
+  unboxTargetSet : Std.HashSet String := {}
   /-- Array types that some `Box` value is unboxed to, with the name of
   their converter (bodies generated at the end, like `unboxTargets`). -/
   unboxArrTargets : Array (RR.Ty × String) := #[]
+  /-- `unboxArrTargets` by type (a scan was linear: round 9 RV9S-02). -/
+  unboxArrTargetOf : Std.HashMap RR.Ty String := {}
   /-- Next once-cell slot for constants. -/
   cafSlots : Nat := 0
   /-- First of the three cell slots holding the current standard streams
@@ -263,8 +309,73 @@ structure LowerState where
 
 abbrev LowerM := ReaderT LowerCtx (StateRefT LowerState CoreM)
 
+/-- A part of the state, computed now, as a value of its own. Lean's
+compiler moves a pure computation to where its result is used: with
+`(← get).fns.size` used only after a probe, the state (or its `fns`) is
+kept alive until then, so that every update meanwhile copies the struct
+and every push onto `fns` copies the array (round 9 RV9S-02). A call that
+is not inlined computes `f` before it returns. -/
+@[noinline] def getPart {α : Type} (f : LowerState → α) : LowerM α :=
+  modifyGet fun s => (f s, s)
+
+/-- What a function replaced by another of the same name leaves in `fns`
+(`replaceFn`), dropped at the end (`liveFns`). -/
+def fnTombstone : RR.Item := .raw ""
+
+/-- `fns` without the tombstones of replaced functions. -/
+def liveFns (fns : Array RR.Item) : Array RR.Item :=
+  fns.filter fun | .raw "" => false | _ => true
+
+/-- Index the functions emitted since the last call (`fnPos`). Done inside
+one `modifyGet`, with the map taken out of the state, so that neither the
+map nor `fns` is shared when it is updated (a shared array is copied at
+every push). A name indexed at another position that still holds its
+function (not a tombstone) breaks the invariant of `fnPos`: an internal
+error. -/
+def syncFnIndex : LowerM Unit := do
+  let dup ← modifyGet fun (s : LowerState) => Id.run do
+    if s.fnIndexed == s.fns.size then return (none, s)
+    -- Fewer items than indexed: `fns` was filtered (`dropFns`); start over.
+    let start := if s.fnIndexed > s.fns.size then 0 else s.fnIndexed
+    let pos := if start == 0 then {} else s.fnPos
+    let s := { s with fnPos := {} }
+    let mut pos := pos
+    let mut dup : Option String := none
+    for i in [start:s.fns.size] do
+      if let some (RR.Item.fn n ..) := s.fns[i]? then
+        if let some j := pos[n]? then
+          let live := match s.fns[j]? with
+            | some (RR.Item.fn m ..) => m == n
+            | _ => false
+          if j != i && live then dup := some n
+        pos := pos.insert n i
+    return (dup, { s with fnPos := pos, fnIndexed := s.fns.size })
+  if let some n := dup then
+    throwError "lean2rr: function {n} emitted twice (internal error)"
+
+/-- Whether a function named `name` has been emitted. -/
+def hasFn (name : String) : LowerM Bool := do
+  syncFnIndex
+  return (← get).fnPos.contains name
+
+/-- Emit `item`, function `name`, replacing an earlier one of that name: the
+earlier one's place becomes a tombstone, and `item` goes at the end (where
+removing the earlier one and appending `item` would put it). -/
+def replaceFn (name : String) (item : RR.Item) : LowerM Unit := do
+  syncFnIndex
+  modify fun (s : LowerState) =>
+    match s.fnPos[name]? with
+    | some i => { s with fns := (s.fns.setIfInBounds i fnTombstone).push item, fnEdits := s.fnEdits + 1 }
+    | none => { s with fns := s.fns.push item }
+
+/-- Remove the functions whose names satisfy `p` (the index starts over). -/
+def dropFns (p : String → Bool) : LowerM Unit :=
+  modify fun (s : LowerState) => { s with
+    fns := s.fns.filter fun | .fn n .. => !p n | _ => true
+    fnPos := {}, fnIndexed := 0, fnEdits := s.fnEdits + 1 }
+
 def fresh (pre : String) : LowerM String := do
-  let n := (← get).counter
+  let n ← getPart (·.counter)
   modify fun s => { s with counter := n + 1 }
   return s!"{pre}{n}"
 
@@ -339,8 +450,10 @@ def lazyState (task : Bool) (t : RR.Ty) : LowerM String := do
       -- `bind`: an `IO.bindTask` task before it has run `f` (its computation
       -- yields the task it continues as, see `taskStepFn`).
       (if task then #[("bind", #[.fn .unit cellTy])] else #[])))
-    boxVariants := if s.boxVariants.any (·.1 == cellTy) then s.boxVariants
-      else s.boxVariants.push (cellTy, s!"b{s.boxVariants.size}") }
+    boxVariants := if s.boxVariantOf.contains cellTy then s.boxVariants
+      else s.boxVariants.push (cellTy, s!"b{s.boxVariants.size}")
+    boxVariantOf := if s.boxVariantOf.contains cellTy then s.boxVariantOf
+      else s.boxVariantOf.insert cellTy s!"b{s.boxVariants.size}" }
   return n
 
 /-- The state type and value type of a thunk or task representation
@@ -359,6 +472,7 @@ def arrayElemTy (t : RR.Ty) : LowerM (RR.Ty × Bool) := do
   let n ← fresh "ElemBox"
   modify fun s => { s with
     tupleTypes := s.tupleTypes.insert key n
+    tupleKeys := s.tupleKeys.insert n key
     typeItems := s.typeItems.push (.struct n false #[t]) }
   return (.named n, true)
 
@@ -379,7 +493,7 @@ def ixStorage? (t : RR.Ty) : LowerM (Option (RR.Ty × String × String)) := do
   let w := RR.Ty.named (if ctors.size ≤ 256 then "u8" else if ctors.size ≤ 65536 then "u16" else "u32")
   let ofFn := s!"l2r_ix_of_{tn}"
   let toFn := s!"l2r_ix_to_{tn}"
-  unless (← get).fns.any (fun | .fn n .. => n == ofFn | _ => false) do
+  unless ← hasFn ofFn do
     let lit (i : Nat) : RR.Block := ⟨#[("i", some w, .atom (toString i))], .var "i"⟩
     let ofBody : RR.Block :=
       if ctors.isEmpty then .ofExpr (.call "l2r_unreachable" #[w] #[])
@@ -413,8 +527,8 @@ is a one-field wrapper (see `arrayElemTy`). -/
 def storageElem (st : RR.Ty) : LowerM (RR.Ty × Bool) := do
   if let .app "L2RIx" #[_, v] := st then return (v, false)
   let .named n := st | return (st, false)
-  for (k, v) in (← get).tupleTypes.toList do
-    if v == n && k.size == 2 && k[1]! == .named "__elem_box" then return (k[0]!, true)
+  if let some k := (← get).tupleKeys[n]? then
+    if k.size == 2 && k[1]! == .named "__elem_box" then return (k[0]!, true)
   return (st, false)
 
 /-- The representation of an `ST.Ref` whose contents have Reussir type `e`
@@ -459,7 +573,7 @@ def strLit (s : String) : LowerM RR.Expr := do
   let id ← match (← get).strLitIds[s]? with
     | some id => pure id
     | none =>
-      let id := (← get).strLits.size
+      let id ← getPart (·.strLits.size)
       modify fun st => { st with strLits := st.strLits.push s, strLitIds := st.strLitIds.insert s id }
       pure id
   return .call "l2r_str_lit" #[] #[.atom (toString id)]
@@ -853,9 +967,9 @@ end
 
 /-- The variant of `Box` holding values of type `t`. -/
 def boxVariant (t : RR.Ty) : LowerM String := do
-  if let some (_, v) := (← get).boxVariants.find? (·.1 == t) then return v
-  let v := s!"b{(← get).boxVariants.size}"
-  modify fun s => { s with boxVariants := s.boxVariants.push (t, v) }
+  if let some v ← getPart (·.boxVariantOf[t]?) then return v
+  let v := s!"b{← getPart (·.boxVariants.size)}"
+  modify fun s => { s with boxVariants := s.boxVariants.push (t, v), boxVariantOf := s.boxVariantOf.insert t v }
   return v
 
 /-- The uniform instance of an inductive: every relevant type argument is
@@ -867,8 +981,8 @@ def uniformType (ind : Name) : LowerM RR.Ty := do
 /-- Name of the generated function converting a `Box` to nominal type `t`
 (its body is generated at the end). -/
 def unboxFn (t : String) : LowerM String := do
-  unless (← get).unboxTargets.contains t do
-    modify fun s => { s with unboxTargets := s.unboxTargets.push t }
+  unless ← getPart (·.unboxTargetSet.contains t) do
+    modify fun s => { s with unboxTargets := s.unboxTargets.push t, unboxTargetSet := s.unboxTargetSet.insert t }
   return s!"l2r_unbox_{t}"
 
 /-- Name of the generated function converting a `Box` to array type `t`
@@ -876,9 +990,9 @@ def unboxFn (t : String) : LowerM String := do
 variant of any array representation of the same Lean type, e.g. as
 `RVec<Box>` when it was built by uniform-representation code. -/
 def unboxArrFn (t : RR.Ty) : LowerM String := do
-  if let some (_, f) := (← get).unboxArrTargets.find? (·.1 == t) then return f
-  let f := s!"l2r_unbox_arr_{(← get).unboxArrTargets.size}"
-  modify fun s => { s with unboxArrTargets := s.unboxArrTargets.push (t, f) }
+  if let some f ← getPart (·.unboxArrTargetOf[t]?) then return f
+  let f := s!"l2r_unbox_arr_{← getPart (·.unboxArrTargets.size)}"
+  modify fun s => { s with unboxArrTargets := s.unboxArrTargets.push (t, f), unboxArrTargetOf := s.unboxArrTargetOf.insert t f }
   return f
 
 /-- A `[value]` struct type carrying several join-point arguments. -/
@@ -887,6 +1001,7 @@ def tupleType (tys : Array RR.Ty) : LowerM String := do
   let n ← fresh "Tuple"
   modify fun s => { s with
     tupleTypes := s.tupleTypes.insert tys n
+    tupleKeys := s.tupleKeys.insert n tys
     typeItems := s.typeItems.push (.struct n true tys) }
   return n
 

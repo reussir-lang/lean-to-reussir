@@ -109,7 +109,7 @@ of a constant collected that natively run before task `a`). Each runs its task a
 task the program has dropped), then asks again. Generated once every task
 type is known. -/
 def taskDispatchFns : LowerM (Array RR.Item) := do
-  let tags := (← get).taskTags
+  let tags ← getPart (·.taskTags)
   let u64 := RR.Ty.named "u64"
   let mk (name : String) (params : Array (String × RR.Ty)) (first : RR.Expr) (take : String) (again : RR.Expr) :
       LowerM RR.Item := do

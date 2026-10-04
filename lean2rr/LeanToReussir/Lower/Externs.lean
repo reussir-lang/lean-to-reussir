@@ -120,7 +120,7 @@ def dirEntriesOf (arrTy : RR.Ty) (root names : RR.Expr) : LowerM RR.Expr := do
   let some repr ← arrayRepr? arrTy | throwError "lean2rr: bad directory entry array {arrTy.render}"
   let .named en := repr.value | throwError "lean2rr: bad directory entry type"
   let name := s!"l2r_dir_entries_{en}"
-  unless (← get).fns.any (fun | .fn n .. => n == name | _ => false) do
+  unless (← hasFn name) do
     let u64 := RR.Ty.named "u64"
     let entry ← ctorValue repr.value ``IO.FS.DirEntry.mk
       #[.var "root", .call "l2r_array_get" #[.named "LStr"] #[.var "names", .var "i"]]
@@ -306,11 +306,11 @@ previous stream. -/
 def stdStreamFns (fd : Nat) (streamTy : RR.Ty) : LowerM (String × String) := do
   let getFn := s!"l2r_get_std_{fd}"
   let setFn := s!"l2r_set_std_{fd}"
-  if (← get).fns.any (fun | .fn n .. => n == getFn | _ => false) then return (getFn, setFn)
+  if (← hasFn getFn) then return (getFn, setFn)
   let base ← match (← get).stdSlots with
     | some b => pure b
     | none => do
-      let b := (← get).cafSlots
+      let b ← getPart (·.cafSlots)
       modify fun s => { s with cafSlots := b + 3, stdSlots := some b, stdStreamTy := some streamTy }
       pure b
   let slot := RR.Expr.atom (toString (base + fd))
@@ -379,7 +379,7 @@ fields are `tn` itself, strings, `Nat`s or scalars (`Lean.Name.beq`,
 is compared first). `none` for other field types. -/
 partial def structEqFn (tn : String) : LowerM (Option String) := do
   let name := s!"l2r_eq_{tn}"
-  if (← get).fns.any (fun | .fn n .. => n == name | _ => false) then return some name
+  if (← hasFn name) then return some name
   let some info := (← get).typeInfos[tn]? | return none
   let fieldEq (t : RR.Ty) (x y : String) : Option RR.Expr :=
     match t with
@@ -420,7 +420,7 @@ partial def structEqFn (tn : String) : LowerM (Option String) := do
 by name. -/
 def listFold (name : String) (listTy accTy elemTy : RR.Ty) (step : RR.Expr → RR.Expr → RR.Expr) :
     LowerM String := do
-  if (← get).fns.any fun | .fn n .. => n == name | _ => false then return name
+  if (← hasFn name) then return name
   let .named lt := listTy | throwError "lean2rr: bad list type"
   let some info := (← get).typeInfos[lt]? | throwError "lean2rr: bad list type"
   let some nil := info.ctors.find? ``List.nil | throwError "lean2rr: bad list type"
@@ -560,11 +560,11 @@ def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : E
 per reference type that is boxed. A `Box` that holds no reference is
 unreachable there. -/
 def finishRefFns : LowerM Unit := do
-  for (op, a) in (← get).refBoxOps do
+  for (op, a) in (← getPart (·.refBoxOps)) do
     let fname := if op == "addr" then "l2r_refbox_addr" else s!"l2r_refbox_{op}_{a.enc}"
     let resT := if op == "set" || op == "addr" then RR.Ty.named "u64" else a
     let mut arms : Array RR.Arm := #[]
-    for (vt, vname) in (← get).boxVariants do
+    for (vt, vname) in (← getPart (·.boxVariants)) do
       let some (e, k) ← refElem? vt | continue
       let body ← if op == "addr" then pure (some (RR.Expr.call "l2r_ptr_addr_rec" #[vt] #[.var "r"]))
         else refCellOp op (.var "r") e k a (if op == "set" || op == "swap" then some (.var "v") else none)
@@ -573,7 +573,7 @@ def finishRefFns : LowerM Unit := do
     arms := arms.push { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[resT] #[]) }
     let params := #[("b", RR.Ty.box)] ++ (if op == "set" || op == "swap" then #[("v", a)] else #[])
     let item := RR.Item.fn fname params resT (.ofExpr (.mtch (.var "b") arms))
-    modify fun s => { s with fns := (s.fns.filter fun | .fn n .. => n != fname | _ => true).push item }
+    replaceFn fname item
 
 /-- Externs over Lean-defined types: the runtime's generic helpers receive
 the generated constructors as arguments. -/

@@ -263,7 +263,7 @@ def gen_testsets():
         ["Big-number counters", "<code>tests/runtime/nat-alloc-check.sh</code>", "2 sizes",
          "every big number made is freed exactly once; big constants made once"],
         ["Conversion counter", "<code>tests/runtime/conv-count-check.sh</code>", "2 sizes",
-         "uniform-updates: conversions grow at most linearly"],
+         "uniform-updates: conversions grow at most linearly; a counter emitted in an undone cast probe is emitted again"],
         ["Reussir repros", "<code>reussir-bugs/repros/run.sh</code>", "one per Reussir bug",
          "REPRODUCES or FIXED for each bug, on a given rrc"],
     ]

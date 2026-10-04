@@ -176,7 +176,7 @@ inductive CastCases where
 def castCases (sty : RR.Ty) (typeName : Name) : LowerM CastCases := do
   let sameHead (h : Name) := h == typeName || h == typeName ++ `_impl || typeName == h ++ `_impl
   let tn := match sty with | .named n => n | _ => ""
-  let infos := (← get).typeInfos
+  let infos ← getPart (·.typeInfos)
   let nominal := infos.contains tn
   if nominal then
     let some h ← nominalHead tn | return .same
@@ -227,8 +227,8 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
       -- A projection of a cast value: as a `cases` (see `castCases`).
       let (e, tn, layout?) ← match ← castCases st sn with
         | .view src dst =>
-          let si := (← get).typeInfos[src]?
-          let di := (← get).typeInfos[dst]?
+          let si ← getPart (·.typeInfos[src]?)
+          let di ← getPart (·.typeInfos[dst]?)
           let sc := si.bind (·.ctorOrder[0]?)
           let dc := di.bind (·.ctorOrder[0]?)
           let sl := si.bind fun i => i.ctorOrder[0]?.bind i.ctors.find?
@@ -239,7 +239,7 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
           pure (RR.Expr.var n, src, layout)
         | .convert dty =>
           let .named dn := dty | return ← zeroValue rty
-          let di := (← get).typeInfos[dn]?
+          let di ← getPart (·.typeInfos[dn]?)
           pure (← coerce (.var n) st dty, dn, di.bind fun i => i.ctorOrder[0]?.bind i.ctors.find?)
         | .unit => return ← zeroValue rty
         | .same =>

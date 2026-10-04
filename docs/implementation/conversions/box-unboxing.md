@@ -44,7 +44,9 @@ to `lean2rr/LeanToReussir/`. Plan
   for casts that hardly ever occur (18fb171). Outside casting programs,
   same-shape boxed types made unboxing quadratic (TY6-02, 5be764c).
 - **Where:** `Lower/Conv.lean`: `boxCastable`, `boxCastConv` (probes and
-  rolls back), `programCasts`; `Lower/Finish.lean`: `boxCastCompatible`,
+  rolls back, cutting the emitted functions and types back to their sizes:
+  [../translator.md](../translator.md#stage-4-finds-emitted-functions-by-name-and-keeps-its-emitted-items-unshared)),
+  `programCasts`; `Lower/Finish.lean`: `boxCastCompatible`,
   `finishUnboxFns`. The fact itself:
   [../types/uniform-types.md](../types/uniform-types.md#whether-the-program-can-cast-at-all-is-a-whole-program-fact).
 - **Remove only if:** never. The casts left out panic (plan

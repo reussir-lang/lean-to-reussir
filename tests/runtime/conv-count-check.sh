@@ -10,6 +10,10 @@
 #   5x for 4x the size; a whole-container round trip per update, RV9C-02,
 #   C02R-01 and C02R-02, makes them grow about 16x).
 # - Both runs must print what the native build prints.
+# It also builds RtConvProbeRollback.lean with the counter and runs it once:
+# the counter's function is first emitted inside a cast probe that lean2rr
+# undoes, and must be emitted again by the kept one (review R9S2R-04); the
+# run must print what native prints and count some conversions.
 #   tests/runtime/conv-count-check.sh [SMALL]   (default 300)
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN).
@@ -51,5 +55,16 @@ for t in RtUniformUpdates RtUniformUpdatesJp RtUniformUpdatesMixed RtUniformUpda
     status=1
   fi
 done
+t=RtConvProbeRollback
+cp "$HERE/$t.lean" .
+lean -o "$t.olean" "$t.lean"
+lean "$t.lean" -c "$t.c"
+leanc "$t.c" -o "$t-native" -O3 2> /dev/null || leanc "$t.c" -o "$t-native"
+L2R_COUNT_CONVERSIONS=1 python3 "$ROOT/scripts/l2r.py" "$t" \
+  -o "$OUT/$t-counted" --lean-path "$OUT" > "$t.build.log" 2>&1 || { cat "$t.build.log"; exit 1; }
+count "$t" "$SMALL"
+if [ "$CONV" -eq 0 ]; then
+  echo "FAIL $t: no conversion counted"; status=1
+fi
 [ $status -eq 0 ] && echo "PASS  conv-count-check"
 exit $status

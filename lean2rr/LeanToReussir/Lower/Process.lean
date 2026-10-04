@@ -48,7 +48,7 @@ def optionCases (o : RR.Expr) (ot : RR.Ty) (onSome : RR.Expr → RR.Ty → Lower
 element `x` of array `src` to `f x` (`dstElem` is stored as it is: a string
 or `bool`). Cached by name. -/
 def arrayMapFn (name : String) (srcTy dstElem : RR.Ty) (f : RR.Expr → LowerM RR.Expr) : LowerM String := do
-  if (← get).fns.any (fun | .fn n .. => n == name | _ => false) then return name
+  if (← hasFn name) then return name
   let some sr ← arrayRepr? srcTy | throwError "lean2rr: bad array type {srcTy.render}"
   let dstTy := RR.Ty.app "RVec" #[dstElem]
   let u64 := RR.Ty.named "u64"

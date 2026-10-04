@@ -274,6 +274,7 @@ it draws on, with their copyright notices (Apache 2.0):
 | RV9C-01, C01R-01, C01R-03 | RtZeroFinite, RtZeroLazyCycle, RtZeroTaskCycle, RtZeroWalkRef, RtZeroWalkRefNoCache |
 | RV9C-02, C02R-01, C02R-02, C03R-01 | RtUniformUpdates, RtUniformUpdatesJp, RtUniformUpdatesMixed, RtUniformUpdatesNested, RtUniformUpdatesShared (and `conv-count-check.sh`) |
 | RV9L-01, RV9L-01a | RtCtorNameClash |
+| R9S2R-04 (review of RV9S-02: no test took `boxCastConv`'s rollback) | RtConvProbeRollback (and `conv-count-check.sh`) |
 | XT-6 (cross-test), XT6-01..XT6-04 | RtCseAcrossTypes, RtCseFnValues, RtCseResidual, RtCseFnField, RtCseFnTrivial, RtCseFnResult (expected failure) |
 | RVA-01 (review of perf-rvec) | RtReadIntoArray |
 | LR1-01 (lean-runtime's oracle rows) | RtStringExtractBig |

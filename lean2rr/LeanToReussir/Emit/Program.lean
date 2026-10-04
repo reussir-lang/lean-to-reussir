@@ -437,6 +437,6 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
     return (← fnTypeItems, ← anchoredFns)
   let ((fnItems, anchored), st) ← (act.run ctx).run {}
   let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))
-  return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := st.fns, strLits := st.strLits, anchored }
+  return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := liveFns st.fns, strLits := st.strLits, anchored }
 
 end LeanToReussir
