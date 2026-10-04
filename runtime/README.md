@@ -757,4 +757,8 @@ and a differential test of the `FILE` model against glibc's own `FILE`
 over random operation sequences)
 run with `tests/runtime/leanrt-unit.sh`. `tests/runtime/nat-alloc-check.sh`
 builds `RtNatStress` with leanrt's big-number counters and checks that
-every big number made is freed exactly once.
+every big number made is freed exactly once. `tests/runtime/conv-count-check.sh`
+builds `RtUniformUpdates` with lean2rr's conversion counter
+(`L2R_COUNT_CONVERSIONS`: each generated conversion function counts its
+calls, printed at exit) and checks that the conversions grow at most
+linearly with the size (no container converted per update).

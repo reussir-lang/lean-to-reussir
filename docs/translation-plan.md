@@ -684,6 +684,28 @@ has on every path. Where the program does not determine the type, the
 binder keeps `lcAny` and uses `Box`, with conversions where it meets a
 precise type.
 
+A container whose element type depends on a value (`data : Array ty.denote`
+in a structure with a field `ty`) keeps `Array lcAny` (`Box` elements). Where
+Lean updates it at a precise type (`d.push i` in the branch where `ty =
+.nat`) and stores the result back in an `Array lcAny` position, the rules
+above would convert the whole array to `Array Nat`, push, and convert the
+result back: two copies per update, so a loop of updates is quadratic, where
+natively the cast is free and the push in place (review RV9C-02: 40000
+pushes 7.7 s for 0.00 s natively). So, after the fixpoint, such an update
+runs on the uniform array (optional pass `uniform-updates`): a call of an
+`Array` extern (`push`, `set!`, `pop`, `swap`, `get`, `size`, …, which do not
+depend on their type arguments) whose array is uniform is made at its
+instance at `lcAny`, so only the single element is boxed or unboxed; its
+result binder becomes the uniform type when it is a container, provided
+every use of it expects exactly that type (a chain of such calls counts);
+and a constructor application whose uses all expect one uniform type
+(`i :: d` stored in a `List lcAny` field) is built at that type. A call is
+changed only if it receives a uniform value it would otherwise convert and
+its other arguments then need at most a box; code that never meets a
+uniform container is unchanged. Test `RtUniformUpdates`, and
+`tests/runtime/conv-count-check.sh`, which counts the conversions a run
+makes (`L2R_COUNT_CONVERSIONS`) at two sizes.
+
 Stage 4 relies on structural facts of Stage 2's output:
 - join points are not recursive, and jumps are in tail position;
 - no local functions remain;
@@ -3021,7 +3043,12 @@ Each item says what differs and when.
   representation it came from (a round trip through uniform code converts
   twice); a conversion through an explicit stack (a tree, a rose tree)
   allocates a stack frame per node. Past the instance caps of §2.6 this can
-  happen inside loops. Running out of memory changes the exit status. Values of
+  happen inside loops, and also where uniform values meet precise uses in a
+  loop without a cap: a container whose element type depends on a value is
+  updated on its uniform representation (§4, `uniform-updates`), but a loop
+  that passes it to a function taking it at a precise type, or reads it
+  with code other than an `Array` extern (a `foldl` at `Array Nat`), still
+  converts it there once per call. Running out of memory changes the exit status. Values of
   types with the same layout are not converted (`l2r_retype`); a cast
   between layouts that differ (an `Array T₁` field read at `Array T₃` whose
   elements hold an `Int` where `T₁`'s hold a `Nat`) converts the field at

@@ -16,6 +16,7 @@ import LeanToReussir.Opt.FieldOrder
 import LeanToReussir.Opt.NatArrays
 import LeanToReussir.Opt.PlaceholderCache
 import LeanToReussir.Opt.SplitMapLoops
+import LeanToReussir.Opt.UniformUpdates
 import LeanToReussir.Opt.FreshRebuild
 
 /-!
@@ -76,6 +77,7 @@ def optimizations : Array OptPass := #[
   ⟨"value-structs", true, "a structure with one relevant field (ST.Out of every BaseIO call) is a [value] struct, not a heap record", ValueStructs.install⟩,
   ⟨"nat-arrays", true, "Array Nat/Int as the runtime's one-word-per-element LNatArr/LIntArr", NatArrays.install⟩,
   ⟨"split-map-loops", true, "an Array.map loop whose element representation changes split into source and result arrays, instead of running on Boxes (Stage 3)", SplitMapLoops.install⟩,
+  ⟨"uniform-updates", true, "an update of a container whose element type depends on a value (Array lcAny) runs on its uniform representation, boxing one element, instead of converting the whole container to the precise type and back (Stage 3)", UniformUpdates.install⟩,
   ⟨"placeholder-cache", true, "placeholders (box(0) at a type) that would allocate built once, in a once-cell", PlaceholderCache.install⟩,
   ⟨"float-lits", true, "Float literals (Float.ofScientific/ofNat on literals) folded to their bits at compile time", FloatLits.install⟩,
   ⟨"cheap-consts", true, "constants built from small literals and scalar conversions recomputed at each use, not cached", CheapConsts.install⟩,

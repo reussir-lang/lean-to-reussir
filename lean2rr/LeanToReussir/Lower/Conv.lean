@@ -637,6 +637,24 @@ structure ConvSlot where
   q : Nat
   deriving Inhabited
 
+/-- The function `countConversion` calls: a counter of conversion functions
+entered, printed to stderr at exit (`leanrt: conversions N`). -/
+def convTickFn : String :=
+  "#[ffi(import)]\nfn l2r_conv_tick() -> unit [{ { use std::sync::atomic::{AtomicU64, Ordering::Relaxed}; " ++
+  "static N: AtomicU64 = AtomicU64::new(0); static R: std::sync::Once = std::sync::Once::new(); " ++
+  "extern \"C\" { fn atexit(f: extern \"C\" fn()) -> i32; } " ++
+  "extern \"C\" fn report() { eprintln!(\"leanrt: conversions {}\", N.load(Relaxed)); } " ++
+  "R.call_once(|| unsafe { atexit(report); }); N.fetch_add(1, Relaxed); } }];\n"
+
+/-- In a test build (`L2R_COUNT_CONVERSIONS` set, tests/runtime/conv-count-check.sh):
+the body `b` of a generated conversion function, preceded by a call that
+counts it. Otherwise `b`. -/
+def countConversion (b : RR.Block) : LowerM RR.Block := do
+  unless (← IO.getEnv "L2R_COUNT_CONVERSIONS").isSome do return b
+  unless (← get).fns.any (fun | .raw t => t == convTickFn | _ => false) do
+    modify fun s => { s with fns := s.fns.push (.raw convTickFn) }
+  return ⟨#[("tick", none, .call "l2r_conv_tick" #[] #[])] ++ b.lets, b.result⟩
+
 mutual
   /-- Convert `e` from representation `src` to `dst`. Besides `Box`
   conversions and closure wrappers, two instantiations of the same inductive
@@ -845,6 +863,7 @@ mutual
     let entry : RR.Block :=
       ⟨#[("n", some u64, sr.call "size" #[.var "src"]), ("zero", some u64, .atom "0")],
         .call go #[] #[.var "src", .var "zero", .var "n", dr.call "empty" #[]]⟩
+    let entry ← countConversion entry
     modify fun s => { s with fns := s.fns ++ #[
       .fn go #[("src", src), ("i", u64), ("n", u64), ("acc", dst)] dst loop,
       .fn f #[("src", src)] dst entry] }
@@ -1181,8 +1200,8 @@ mutual
         kArms := kArms.push { ty := kName, ctor := none, binders := #[], body := .ofExpr unreachable }
       goArms := goArms.push { ty := mName, ctor := some s!"u{q}", binders := #[some "d"], body := .ofExpr (.mtch (.var "k") kArms) }
     modify fun s => { s with fns := s.fns.push (.fn go #[("m", mTy), ("k", kTy)] rootTy (.ofExpr (.mtch (.var "m") goArms))) }
-    modify fun s => { s with fns := s.fns.push (.fn fname #[("x", srcTy 0)] rootTy
-      (.ofExpr (goCall (down 0 (.var "x")) (.ctor kName (some "kdone") #[])))) }
+    let body ← countConversion (.ofExpr (goCall (down 0 (.var "x")) (.ctor kName (some "kdone") #[])))
+    modify fun s => { s with fns := s.fns.push (.fn fname #[("x", srcTy 0)] rootTy body) }
 
   /-- The generated function converting generated type `sn` to `dn`: two
   instantiations of one inductive, or (through `unsafeCast`) two inductives
@@ -1223,6 +1242,7 @@ mutual
     let body := match structBody with
       | some b => b
       | none => .ofExpr (.mtch (.var "x") arms)
+    let body ← countConversion body
     modify fun s => { s with fns := s.fns.push (.fn fname #[("x", .named sn)] (.named dn) body) }
 end
 
