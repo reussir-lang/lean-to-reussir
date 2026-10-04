@@ -192,7 +192,11 @@ a finding (a bug a reviewer reproduced, fixed since) or a check that held
 up in review.
 
 Tests for findings (the reviews' FINDINGS.txt files are in the scratch
-directories `adv3`..`adv6`, `rv6`, `rv7`, `rv8`):
+directories `adv3`..`adv6`, `rv6`..`rv9`). The rows marked "none" are
+coverage tests, not findings: round 9's area crane re-expressed shapes from
+the regression tests of Crane (Bloomberg's Rocq-to-C++ extractor, another
+typed, reference-counted code generator) in Lean; they held up, and each
+test's header lists the Crane tests it covers:
 
 | finding | test |
 |---|---|
@@ -248,6 +252,15 @@ directories `adv3`..`adv6`, `rv6`, `rv7`, `rv8`):
 | RV8T-01, RV8T-02 | RtRefSetOrder, RtRefSetFiles, RtSyncLostWakeLoop |
 | RV8T-03 | RtTimerStopDropped |
 | RV8T-04 | RtSockCancel |
+| none: coverage from the Crane corpus (rv9/crane CrGram) | RtGrammarActions |
+| none: coverage from the Crane corpus (rv9/crane CrPrintf) | RtComputedFnTypes |
+| none: coverage from the Crane corpus (rv9/crane CrUniq; the Lean form of Reussir bug 28's shape) | RtSharedOnOnePath |
+| none: coverage from the Crane corpus (rv9/crane CrDrain, CrInd) | RtDropMediated |
+| none: coverage from the Crane corpus (rv9/crane CrConv) | RtConvMediated |
+| none: coverage from the Crane corpus (rv9/crane CrReuse) | RtReuseAlias |
+| none: coverage from the Crane corpus (rv9/crane CrPoly) | RtUniformFnTypes |
+| none: coverage from the Crane corpus (rv9/crane CrLoop) | RtMutualTailArgs |
+| none: coverage from the Crane corpus (rv9/crane CrTask) | RtTaskCaptureUpdate |
 
 Findings without a test here: costs (time, memory, build time or code
 size), Reussir-only bugs (lit tests in their patches), documentation
