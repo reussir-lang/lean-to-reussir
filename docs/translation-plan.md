@@ -392,10 +392,21 @@ giving it the representation it assumes:
 - A `box(0)` placeholder is a value that is never inspected. It arrives as
   a unit-like value used at another type, or as `◾` at a relevant type.
   Stage 4 materializes it as the *zero* of the expected type: `0`, `false`,
-  the first constructor whose fields have zeros, a function value returning
-  a zero (the nullary `z` variant, §5.3), an empty array. For `Nat`, `Bool`
-  and enumerations this is exactly what `box(0)` denotes in Lean. Only a
-  type without a finite value gets `unreachable`. A zero that would
+  a constructor without fields, else the first constructor whose fields
+  have zeros, a function value returning a zero (the nullary `z` variant,
+  §5.3), an empty array, a reference or a `done` thunk or task cell
+  holding a zero (a `pending` cell that is never forced when the value has
+  none: `structure S where h : Nat; t : Thunk S`). For `Nat`, `Bool` and
+  enumerations this is exactly what `box(0)` denotes in Lean. The zeros are
+  found depth first; a type whose zero is being built is not used for a
+  field (which keeps zeros finite), and a constructor whose field turns out
+  to have no zero is passed over for the next one: `inductive Term | app (p
+  : Term × Term) | var (n : Nat)` gets `var 0` (`app` would need `Term ×
+  Term`, whose zero needs `Term`'s), `W | bad (e : Empty) | ok (n : Nat)`
+  gets `ok 0` (test `RtZeroFinite`). Only a type without a finite value
+  (`Empty`, a type each of whose constructors needs itself) gets
+  `unreachable`, which is never evaluated where a value of the type
+  exists. A zero that
   allocate (a string, an array, a record, a reference, a boxed unit) is
   built once and kept in a once-cell, like a constant
   (§5.12): `modify` stores one per update, and since a placeholder is never
@@ -1533,12 +1544,10 @@ value passed twice would be kept alive across the jump (an array updated
 before the jump would be copied at every iteration). Placeholders are
 cheap: a constant (`0`, a constructor without fields), a value built once
 and kept in a once-cell (§5.1), and for a string one shared empty string
-of the runtime. A type whose placeholder is not a finite value (a type
-without one, or a record whose placeholder would hold one, such as
-`inductive W | bad (e : Empty) | ok (n : Nat)`, whose placeholder is built
-from `bad`) gets no slot: such a field stays in its variant, which is then
-allocated as in the core form. The pass checks this on every state
-machine. So a jump costs a jump and the moves of its slots, and no
+of the runtime. A type without a finite placeholder (a type without a
+finite value, such as `Empty`, §5.1) gets no slot: such a field stays in
+its variant, which is then allocated as in the core form. The pass checks
+this on every state machine. So a jump costs a jump and the moves of its slots, and no
 allocation (test `RtJpSlots`).
 
 **Choice and nesting.** J1 applies first, then J2, then J1' (small), then

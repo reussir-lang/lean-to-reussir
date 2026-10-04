@@ -3,8 +3,8 @@ whose join points carry values of many types: with the optional pass
 `state-machines`, the values a jump carries go in parameter slots of the
 state machine's function and the other slots get placeholders. An array
 updated in place stays unshared across the jumps (`dbgTraceIfShared` prints
-nothing); a type whose placeholder would not be a finite value (`W`, whose
-first constructor holds an `Empty`) is still carried correctly; strings,
+nothing); a type whose first constructor holds an `Empty` (`W`, whose
+placeholder is built from its second) is carried correctly; strings,
 structures, closures, floats, characters and options travel through the
 loop. -/
 

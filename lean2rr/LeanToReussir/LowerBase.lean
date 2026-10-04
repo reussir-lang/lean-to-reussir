@@ -231,8 +231,12 @@ structure LowerState where
   borrowInfo : Option (NameMap (Array Bool) × FVarIdSet) := none
   /-- Generated placeholder (`box(0)`) functions, per type. -/
   zeroFns : Std.HashMap RR.Ty String := {}
-  /-- Placeholder functions whose body is being generated. -/
-  zeroBusy : Std.HashSet RR.Ty := {}
+  /-- Types without a finite placeholder (their function in `zeroFns` is
+  `l2r_unreachable`). -/
+  zeroNone : Std.HashSet RR.Ty := {}
+  /-- Types whose placeholder is being built, with their depth in that
+  search (`zeroTry`). -/
+  zeroBusy : Std.HashMap RR.Ty Nat := {}
   /-- Variants of the state machine being built (J4): name, fields, body. -/
   smArms : Array (String × Array (String × RR.Ty) × RR.Block) := #[]
   /-- String literals of the program, by id (see `strLit`). -/

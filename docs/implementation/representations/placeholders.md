@@ -10,17 +10,30 @@ element being updated stays unshared (`Array.modifyMUnsafe`,
 ### A placeholder is the zero of its type
 
 - **What:** `zeroValue t` is a generated function `l2r_zero_N`: `0`,
-  `0.0`, `false`, `l2r_nat_small(0)`, the empty string or array, the first
-  constructor whose fields have zeros (preferring one without fields), a
-  `done` cell holding a zero, a new reference holding a zero. A type
-  without a finite value (every constructor needs a value of a type whose
-  zero is being built) gets `l2r_unreachable`.
+  `0.0`, `false`, `l2r_nat_small(0)`, the empty string or array, a
+  constructor without fields, else the first constructor whose fields
+  have zeros, a `done` cell holding a zero (a `pending` cell with the `z`
+  function value, never forced, when the value has none), a new reference
+  holding a zero. The search (`zeroTry`) is depth first: a type whose zero
+  is being built (`zeroBusy`, with its depth) is not used for a field, and
+  a constructor whose field has no zero is passed over for the next one.
+  A result that avoided an enclosing type holds only there and is not
+  kept; others are kept (`zeroFns`, `zeroNone`). Only a type without a
+  finite value (`Empty`, a type each of whose constructors needs itself)
+  gets `l2r_unreachable` (`zeroFinite` says so, also for the
+  state-machines pass's slots).
 - **Why:** For `Nat`, `Bool` and enumerations this is exactly what
   `box(0)` denotes natively; for other types the value is never inspected,
-  so any value of the type will do. The recursion guard (`zeroBusy`) keeps
-  recursive types finite.
-- **Where:** `Lower/Conv.lean`: `zeroValue`; `LowerState.zeroFns`,
-  `zeroBusy`.
+  so any value of the type will do, but it must be one: Lean's
+  `Array.map`/`mapM`/`mapIdx`/`modify` store one in the slot they update,
+  `IO.Ref.modify` (`ST.Ref.take`) leaves one in the reference. Taking the
+  first constructor whose fields were not being built, without looking
+  further, gave `inductive Term | app (p : Term × Term) | var (n : Nat)`
+  the zero `app (l2r_unreachable)` and crashed those operations (round 9
+  RV9C-01, tests `RtZeroFinite`, `RtZeroLazyCycle`).
+- **Where:** `Lower/Conv.lean`: `zeroTry`, `zeroValue`, `zeroFinite`;
+  `LowerState.zeroFns`, `zeroNone`, `zeroBusy`; `Opt/StateMachines.lean`:
+  `slotPlaceholder?`. Plan §5.1.
 - **Remove only if:** never.
 
 ### A function-typed placeholder is the `z` variant

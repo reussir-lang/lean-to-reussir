@@ -44,10 +44,10 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   call, a self tail call or a jump passes its values in their slots and a
   placeholder in every other slot (`zeroValue`'s, and for a string the
   runtime's one shared empty string), never a live value. Soundness guard,
-  checked on every state machine: a type whose placeholder would reach
-  `l2r_unreachable` (`inductive W | bad (e : Empty) | ok (n : Nat)`, whose
-  placeholder is built from `bad`) gets no slot, and its fields stay in
-  their variant, allocated as in the core form. Jumps and self calls are
+  checked on every state machine: a type without a finite placeholder
+  (`zeroFinite`: a type without a finite value, such as `Empty`) gets no
+  slot, and its fields stay in their variant, allocated as in the core
+  form. Jumps and self calls are
   lowered before every variant is known, so they are put in slots when the
   state machine is emitted.
 - **Why:** The core form allocates a variant at every call and jump (104
@@ -56,11 +56,13 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   before the jump was shared and copied at every iteration (probes
   J4Arr/J4For quadratic; Sieve with only `field-order` and
   `state-machines` on: 53 s at its small size; RF-1, 5c5f6fc). A
-  placeholder of a type without a finite value stopped the loop with
-  "INTERNAL PANIC: unreachable code has been reached" at its first jump,
-  hence the guard (round 7 RV7L-03, 69ab202; test `RtJpSlots`).
-- **Where:** `Opt/StateMachines.lean`: `slotPlaceholder`,
-  `placeholderFiniteE`/`placeholderFiniteB` (the guard), `SlotLayout`,
+  placeholder without a finite value stopped the loop with "INTERNAL
+  PANIC: unreachable code has been reached" at its first jump, hence the
+  guard (round 7 RV7L-03, 69ab202; test `RtJpSlots`); since round 9
+  (RV9C-01) only types without a value have no finite placeholder, and the
+  guard asks `zeroValue`'s own search (`zeroFinite`), so the two agree.
+- **Where:** `Opt/StateMachines.lean`: `slotPlaceholder?` (the guard,
+  over `Lower/Conv.lean`'s `zeroFinite`), `SlotLayout`,
   `slotLayout`, `smCall`, `emitStateMachineAlongside`,
   `alongsideSelfCall`, `alongsideJumpCall`, `alongsideForm`;
   `runtime/prelude.rr`: `l2r_str_shared_empty`; hook
