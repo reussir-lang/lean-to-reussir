@@ -798,8 +798,14 @@ mutual
       -- The constructor's name relative to its type (`T.c._impl` for the
       -- constructors of a computed-field implementation `T._impl`).
       let base := match ival.name with | .str p "_impl" => p | n => n
-      let rel := (ctorName.replacePrefix base .anonymous).toString (escape := false)
-      let variant := "c_" ++ identEscape rel
+      -- Lean's name mangling (as for declarations, `fnName`) has a
+      -- demangler, so distinct constructor names give distinct variants:
+      -- `«a.b»` (one component) and `a.b` (two) printed alike (review
+      -- RV9L-01), and printing with Lean's escapes still merged pseudo-syntax
+      -- roots (`«?a.b»`), inaccessible names (`✝`) and macro scopes, which
+      -- Lean prints unescaped (RV9L-01a). Plain ASCII names keep their
+      -- spelling (`c_node`, `c_a_b`).
+      let variant := (ctorName.replacePrefix base .anonymous).mangle "c_"
       -- The record's field order (`fieldOrder`; Opt/FieldOrder sorts by
       -- decreasing alignment, so the record has no padding): Reussir keeps
       -- the given order (the driver turns its own member packing off, see
