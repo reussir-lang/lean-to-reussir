@@ -55,6 +55,9 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   `alloc`, `grow`, `make_mut`, `copy_shared`, `CloneInto`, `from_vec`,
   `bytes_filled`; `runtime/prelude.rr`: `RVec`, `LRef`, the `l2r_ref_*`
   textures.
+- **Remove only if:** never (a storage type above 8 bytes or 8-aligned
+  would need the element offset and allocation alignment generalized:
+  `elems` rejects one at compile time).
 
 ### Bytes read go straight into the array
 
@@ -73,9 +76,6 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
 - **Remove only if:** never (the other byte arrays the runtime builds from
   a `Vec`, a process's output or a socket's data, are copied once; a
   process's output is copied into a string afterwards anyway).
-- **Remove only if:** never (a storage type above 8 bytes or 8-aligned
-  would need the element offset and allocation alignment generalized:
-  `elems` rejects one at compile time).
 
 ### A release tests `count == 1`
 
