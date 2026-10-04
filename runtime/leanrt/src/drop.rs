@@ -452,21 +452,56 @@ impl<T> DerefMut for Cell<T> {
 }
 
 impl<T> Drop for Cell<T> {
+    /// A shared handle is a decrement; the last reference is freed out of
+    /// line. The test is `count == 1`, as `Vec`'s: after Reussir's `rc.inc`
+    /// LLVM then cancels a read's increment and release (forcing a finished
+    /// thunk, reading a task's state).
     #[inline(always)]
     fn drop(&mut self) {
         let p = unsafe { *(self as *const Self as *const usize) };
         let c = count(p);
-        if c > 1 {
-            unsafe { *(p as *mut u32) = c - 1 };
-        } else {
+        if c == 1 {
             free_cell::<T>(p);
+        } else {
+            unsafe { *(p as *mut u32) = c - 1 };
         }
     }
 }
 
+/// The value of a cell (a new reference), the cell's own reference given
+/// up (`l2r_lcell_get`: forcing a finished thunk, reading a task's state).
+/// The release is decided before the value is copied: a shared cell is
+/// decremented first, right after the caller's `rc.inc`, so LLVM cancels
+/// the pair (copying the value first increments the state record, which
+/// LLVM cannot tell from the cell, and the cell's count was reloaded and
+/// tested). The last reference moves the value out and frees the cell's
+/// block, which releases nothing, as the copy and the free did.
+#[inline(always)]
+pub fn cell_get<T: Clone>(c: Cell<T>) -> T {
+    let p = unsafe { *(&c as *const Cell<T> as *const usize) };
+    std::mem::forget(c);
+    let n = count(p);
+    if n == 1 {
+        return cell_take_last::<T>(p);
+    }
+    unsafe { *(p as *mut u32) = n - 1 };
+    // Others still hold the cell, so it outlives the copy.
+    let r = std::mem::ManuallyDrop::new(unsafe { std::mem::transmute::<usize, reussir_rt::rc::Rc<T>>(p) });
+    r.data_ref().clone()
+}
+
+/// The value of the cell at `p` (count 1), moved out; its block is freed.
 #[cold]
 #[inline(never)]
-fn free_cell<T>(p: usize) {
+fn cell_take_last<T>(p: usize) -> T {
+    unsafe { crate::alloc::rc_into_inner(std::mem::transmute::<usize, reussir_rt::rc::Rc<T>>(p)) }
+}
+
+/// `extern "C"`: it cannot unwind, so the textures that release a cell
+/// need no landing pad for it.
+#[cold]
+#[inline(never)]
+extern "C" fn free_cell<T>(p: usize) {
     run(p, step_cell::<T>);
 }
 
@@ -475,4 +510,52 @@ unsafe fn step_cell<T>(p: usize) -> bool {
     let v = crate::alloc::rc_into_inner(std::mem::transmute::<usize, reussir_rt::rc::Rc<T>>(p));
     drop(v);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LOG: RefCell<std::vec::Vec<u32>> = RefCell::new(std::vec::Vec::new());
+    }
+
+    /// A value that logs its releases.
+    #[derive(Clone)]
+    struct E(u32);
+
+    impl Drop for E {
+        fn drop(&mut self) {
+            LOG.with(|l| l.borrow_mut().push(self.0));
+        }
+    }
+
+    fn take_log() -> std::vec::Vec<u32> {
+        LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
+    }
+
+    fn cell_count<T>(c: &Cell<T>) -> u32 {
+        count(unsafe { *(c as *const Cell<T> as *const usize) })
+    }
+
+    #[test]
+    fn cell_get_shared_and_last() {
+        let c = Cell::from_inner(reussir_rt::rc::Rc::new(E(7)));
+        let d = c.clone();
+        assert_eq!(cell_count(&c), 2);
+        // Shared: decremented, the value copied; nothing released.
+        let v = cell_get(d);
+        assert_eq!(v.0, 7);
+        assert_eq!(cell_count(&c), 1);
+        assert_eq!(take_log(), std::vec::Vec::<u32>::new());
+        drop(v);
+        assert_eq!(take_log(), vec![7]);
+        // The last reference: the value moves out, nothing released.
+        let w = cell_get(c);
+        assert_eq!(w.0, 7);
+        assert_eq!(take_log(), std::vec::Vec::<u32>::new());
+        drop(w);
+        assert_eq!(take_log(), vec![7]);
+    }
 }

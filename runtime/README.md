@@ -151,6 +151,7 @@ Bytes read from a file, standard input or `/dev/urandom` are read into
 the array's block (`array::bytes_filled`, `CFile::read_into`); arrays
 built from a Rust `Vec` (`array::from_vec`, `bytes_of_vec`: directory
 entries, a process's output, a socket's data) copy its elements once. A release
+(of an array, a string, a tag vector or a thunk/task cell)
 tests `count == 1` (never `count > 1`): after Reussir's `rc.inc`, which
 asserts that the old count was neither 0 nor `u32::MAX`, LLVM then cancels
 a read's increment and release. The cost of one block: an array whose
@@ -262,8 +263,11 @@ lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),
 conv(L2RUnit -> α, L2RBox) }` (a task's `conv` also holds the original's
 address, its identity for `leanrt::task`, and tasks also have
 `bind(L2RUnit -> LCell<S>)`; a shared enum, so any `α` fits). Cell primitives: `l2r_lcell_new<S>(v)`,
-`l2r_lcell_get<S>(c)`, `l2r_lcell_set<S>(c, v)`, `l2r_lcell_swap<S>(c, v)`
-(returns the old state), `l2r_lcell_addr<S>(c)` (the cell's address).
+`l2r_lcell_get<S>(c)` (a new reference to the state; the cell's own
+reference is released first, `drop::cell_get`, so that LLVM cancels it
+with the caller's increment), `l2r_lcell_set<S>(c, v)`,
+`l2r_lcell_swap<S>(c, v)` (returns the old state), `l2r_lcell_addr<S>(c)`
+(the cell's address).
 lean2rr generates the forcing functions (run the closure once, store
 `done`); `l2r_lazy_cycle<T>()` waits forever, for a thunk or task needed by
 its own computation, as native Lean does. Tasks are deferred until needed
