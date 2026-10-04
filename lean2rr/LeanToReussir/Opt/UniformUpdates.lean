@@ -47,6 +47,10 @@ structure Body where
   values : Std.HashMap FVarId (LetValue .pure) := {}
   uses : Std.HashMap FVarId (Array Use) := {}
   jpParams : Std.HashMap FVarId (Array Expr) := {}
+  /-- The parameters of each join point. -/
+  jpParamIds : Std.HashMap FVarId (Array FVarId) := {}
+  /-- The arguments of each jump, per join point. -/
+  jumps : Std.HashMap FVarId (Array (Array (Arg .pure))) := {}
 
 def Body.use (b : Body) (x : FVarId) (u : Use) : Body :=
   { b with uses := b.uses.insert x ((b.uses.getD x #[]).push u) }
@@ -68,7 +72,8 @@ partial def scan (c : Code .pure) (b : Body) : Body :=
   | .jp d k | .fun d k _ =>
     let b := { b with
       types := d.params.foldl (fun m p => m.insert p.fvarId p.type) (b.types.insert d.fvarId d.type)
-      jpParams := b.jpParams.insert d.fvarId (d.params.map (·.type)) }
+      jpParams := b.jpParams.insert d.fvarId (d.params.map (·.type))
+      jpParamIds := b.jpParamIds.insert d.fvarId (d.params.map (·.fvarId)) }
     scan k (scan d.value b)
   | .cases cs =>
     let b := b.use cs.discr .other
@@ -76,15 +81,18 @@ partial def scan (c : Code .pure) (b : Body) : Body :=
       let b := alt.getParams.foldl (fun b p => { b with types := b.types.insert p.fvarId p.type }) b
       scan alt.getCode b) b
   | .return x => b.use x .ret
-  | .jmp j args => args.zipIdx.foldl (fun b (a, i) => match a with
+  | .jmp j args =>
+    let b := { b with jumps := b.jumps.insert j ((b.jumps.getD j #[]).push args) }
+    args.zipIdx.foldl (fun b (a, i) => match a with
       | .fvar x => b.use x (.jmp j i)
       | _ => b) b
   | .unreach _ => b
 
-/-- The change planned for a `let`: the callee it calls instead (an extern's
-instance at `lcAny`; `none` for a constructor), the parameter types of what
-it then calls (for a constructor: its field types, after the parameters),
-and the binder's new type, if it changes. -/
+/-- The change planned for a `let` or a join point's parameter: the callee it
+calls instead (an extern's instance at `lcAny`; `none` for a constructor or
+a parameter), the parameter types of what it then calls (for a constructor:
+its field types, after the parameters), and the binder's new type, if it
+changes. -/
 structure Plan where
   callee : Option Name
   params : Array Expr
@@ -141,7 +149,10 @@ partial def uniformUpdatesDecl (d : Decl .pure) : MRetypeM (Decl .pure) := do
   let expected (plans : Std.HashMap FVarId Plan) (u : Use) : MRetypeM (Option Expr) := do
     match u with
     | .ret => return some declRet
-    | .jmp j i => return (b.jpParams[j]?).bind (·[i]?)
+    | .jmp j i =>
+      if let some x := (b.jpParamIds[j]?).bind (·[i]?) then
+        if let some nt := (plans[x]?).bind (·.newTy) then return some nt
+      return (b.jpParams[j]?).bind (·[i]?)
     | .other => return none
     | .arg y i =>
       if let some p := plans[y]? then return p.params[i]?
@@ -170,12 +181,49 @@ partial def uniformUpdatesDecl (d : Decl .pure) : MRetypeM (Decl .pure) := do
         if (← unknown (tyOf y)) && !(← same (tyOf y) cp) then gain := true
     let _ := x
     return gain
-  -- Greatest fixpoint over the extern plans: drop a plan whose arguments do
-  -- not fit or whose uniform result has a use that expects another type.
+  -- Join points' parameters of a precise container type that a jump passes a
+  -- uniform value (or a planned uniform result) to, and whose uses expect a
+  -- uniform type: that type.
+  for (j, ps) in b.jpParamIds.toList do
+    for h : i in [:ps.size] do
+      let x := ps[i]
+      let ty := tyOf x
+      if ← unknown ty then continue
+      let some use0 := (b.uses.getD x #[])[0]? | continue
+      let some u ← expected plans use0 | continue
+      unless (← unknown u) && refines (← norm u) (← norm ty) do continue
+      let mut gain := false
+      for args in b.jumps.getD j #[] do
+        if let some (.fvar y) := (args[i]? : Option (Arg .pure)) then
+          if (plans[y]?.bind (·.newTy)).isSome || (← unknown (tyOf y)) then gain := true
+      if gain then plans := plans.insert x { callee := none, params := #[], newTy := some u }
+  -- Greatest fixpoint over the extern and join point plans: drop a plan whose
+  -- arguments (a join point's: the jumps' arguments) do not fit or whose
+  -- uniform result has a use that expects another type.
   let mut changed := true
   while changed do
     changed := false
     for (x, p) in plans.toList do
+      if p.callee.isNone then
+        -- A join point's parameter.
+        let some nt := p.newTy | continue
+        let some (j, i) := b.jpParamIds.toList.findSome? fun (j, ps) => (ps.idxOf? x).map (j, ·) | continue
+        let mut ok := true
+        for args in b.jumps.getD j #[] do
+          match (args[i]? : Option (Arg .pure)) with
+          | some a@(.fvar y) =>
+            unless isPlaceholder b a do
+              let ty := (plans[y]?.bind (·.newTy)).getD (tyOf y)
+              unless ← same ty nt do ok := false
+          | _ => pure ()
+        for u in b.uses.getD x #[] do
+          match ← expected plans u with
+          | some e => unless ← same e nt do ok := false
+          | none => ok := false
+        unless ok do
+          plans := plans.erase x
+          changed := true
+        continue
       let some (.const f _ args _) := b.values[x]? | continue
       let curParams := ((← get).sigs[f]?).map (·.params) |>.getD #[]
       let mut ok ← argsFit plans x args curParams p
@@ -224,7 +272,11 @@ where
           { dl with value := .const (p.callee.getD f) us args, type := p.newTy.getD dl.type }
         | _, _ => dl
       .let dl (rewrite plans k)
-    | .jp dj k => .jp (FunDecl.mk dj.fvarId dj.binderName dj.params dj.type (rewrite plans dj.value)) (rewrite plans k)
+    | .jp dj k =>
+      let params := dj.params.map fun p => match (plans[p.fvarId]?).bind (·.newTy) with
+        | some t => { p with type := t }
+        | none => p
+      .jp (FunDecl.mk dj.fvarId dj.binderName params dj.type (rewrite plans dj.value)) (rewrite plans k)
     | .fun dj k _ => .fun (FunDecl.mk dj.fvarId dj.binderName dj.params dj.type (rewrite plans dj.value)) (rewrite plans k)
     | .cases cs => .cases ⟨cs.typeName, cs.resultType, cs.discr, cs.alts.map fun
         | .alt ctor ps code _ => .alt ctor ps (rewrite plans code)

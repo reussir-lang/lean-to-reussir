@@ -697,14 +697,17 @@ runs on the uniform array (optional pass `uniform-updates`): a call of an
 depend on their type arguments) whose array is uniform is made at its
 instance at `lcAny`, so only the single element is boxed or unboxed; its
 result binder becomes the uniform type when it is a container, provided
-every use of it expects exactly that type (a chain of such calls counts);
-and a constructor application whose uses all expect one uniform type
-(`i :: d` stored in a `List lcAny` field) is built at that type. A call is
-changed only if it receives a uniform value it would otherwise convert and
-its other arguments then need at most a box; code that never meets a
-uniform container is unchanged. Test `RtUniformUpdates`, and
-`tests/runtime/conv-count-check.sh`, which counts the conversions a run
-makes (`L2R_COUNT_CONVERSIONS`) at two sizes.
+every use of it expects exactly that type (a chain of such calls counts, and
+so does a join point's parameter that every jump passes a uniform value and
+whose uses expect one: the join point several match arms share, or an `if`
+choosing between two arrays; review C02R-01); and a constructor application
+whose uses all expect one uniform type (`i :: d` stored in a `List lcAny`
+field) is built at that type. A call is changed only if it receives a
+uniform value it would otherwise convert and its other arguments then need
+at most a box; code that never meets a uniform container is unchanged.
+Tests `RtUniformUpdates`, `RtUniformUpdatesJp`, and
+`tests/runtime/conv-count-check.sh`, which counts the elements conversions
+rebuild in a run (`L2R_COUNT_CONVERSIONS`) at two sizes.
 
 Stage 4 relies on structural facts of Stage 2's output:
 - join points are not recursive, and jumps are in tail position;
