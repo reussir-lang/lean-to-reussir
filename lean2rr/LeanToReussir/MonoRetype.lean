@@ -978,7 +978,14 @@ def retypeMono (stage2 : Stage2Config) (stage3 : Stage3Config) (table : Relevanc
       modify fun s => { s with
         live := added.foldl (fun l d => l.insert d.name) s.live
         codeDecls := added.foldl (fun l d => l.insert d.name) s.codeDecls }
-      types := split.map fun d => (decls.findIdx? (·.name == d.name)).map (types[·]!) |>.getD {}
+      -- Each declaration kept takes its binder types by name, through a
+      -- name ↦ index map built once (a `findIdx?` per declaration was
+      -- quadratic: about half of Stage 3 on a program with many
+      -- declarations). The first index of a name, as `findIdx?` gave.
+      let mut index : Std.HashMap Name Nat := {}
+      for h : i in [:decls.size] do
+        index := index.insertIfNew decls[i].name i
+      types := split.map fun d => (index[d.name]?).map (types[·]!) |>.getD {}
       decls := split
     decls ← stage3.uniformUpdates decls
     return decls ++ (← get).newExterns

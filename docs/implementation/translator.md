@@ -182,3 +182,18 @@ relative to `lean2rr/` unless they start with `scripts/`.
   `finishPersistFns`; `Emit/Program.lean`: `lowerProgram`. Test
   `RtConvProbeRollback` (an undone probe, then a kept one).
 - **Remove only if:** never.
+
+### Stage 3 finds a declaration's binder types by name through a map
+
+- **What:** After the split of `map` loops, each declaration of the new
+  list takes the binder types of the declaration of the same name in the
+  old list. Stage 3 builds a map from each name to its position in the old
+  list once (the first position of a name, as a search from the start
+  gives) and looks every name up in it.
+- **Why:** A search of the old list for each declaration (`findIdx?`) was
+  quadratic in the number of declarations: about half of Stage 3's time on
+  a program that imports `Cslib.Init` and prints one line (Stage 3 67 s
+  before, 36 s after, single indicative runs). The output is
+  byte-identical.
+- **Where:** `LeanToReussir/MonoRetype.lean`: `retypeMono`.
+- **Remove only if:** never.
