@@ -129,11 +129,15 @@ Every inductive instantiation becomes one generated Reussir type
 
 - **What:** A generated type is `T_<hint>_<counter>`, its variants
   `c_<constructor>` with the constructor's name relative to the type,
-  escaped injectively (`_` → `__`, other non-alphanumerics → `_<hex>_`);
-  declarations use Lean's own mangling (`l_…`).
+  printed with Lean's escaping (`«a.b»` for one component holding a dot,
+  `a.b` for two components) and then escaped injectively (`_` → `__`,
+  other non-alphanumerics → `_<hex>_`); declarations use Lean's own
+  mangling (`l_…`).
 - **Why:** Names must be valid Reussir identifiers that never clash with
   runtime or `std` names; uniqueness comes from the counter (constructor
-  names once clashed: adv round 1, 3f59239).
+  names once clashed: adv round 1, 3f59239). Printed without Lean's
+  escaping, `«a.b»` and `a.b` became the same variant and rrc rejected the
+  program (review RV9L-01, test `RtCtorNameClash`).
 - **Where:** `LowerBase.lean`: `identEscape`, `nameHint`, `fnName`,
   `nominalType`; plan [§5.13](../../translation-plan.md#513-names).
 - **Remove only if:** never.
