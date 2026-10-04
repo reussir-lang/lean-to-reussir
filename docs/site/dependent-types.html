@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dependent types · lean2rr design</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
+  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html">Representations</a><a href="dependent-types.html" class="here">Dependent types</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
+</header>
+<div class="layout">
+  <aside class="toc"><div class="tochead">On this page</div><div class="toc">
+<ul>
+<li><a href="#the-mechanism">The mechanism</a></li>
+<li><a href="#examples">Examples</a><ul>
+<li><a href="#a-column-whose-element-type-is-a-field">A column whose element type is a field</a></li>
+<li><a href="#a-type-chosen-by-a-boolean">A type chosen by a Boolean</a></li>
+<li><a href="#sigma-types">Sigma types</a></li>
+<li><a href="#at-run-time">At run time</a></li>
+</ul>
+</li>
+<li><a href="#other-types-known-only-at-run-time">Other types known only at run time</a><ul>
+<li><a href="#a-type-unpacked-from-an-existential">A type unpacked from an existential</a></li>
+<li><a href="#polymorphic-recursion">Polymorphic recursion</a></li>
+<li><a href="#a-partial-application-that-leaves-a-type-open">A partial application that leaves a type open</a></li>
+</ul>
+</li>
+<li><a href="#costs">Costs</a></li>
+<li><a href="#possible-future-work">Possible future work</a></li>
+</ul>
+</div>
+</aside>
+  <main>
+<h1 id="dependent-types">Dependent types</h1>
+<p class="lead">How lean2rr compiles a type that depends on a run-time value.
+Sources: translation plan
+<a href="../../docs/translation-plan.md#26-when-a-type-is-not-statically-known">§2.6</a>,
+<a href="../../docs/translation-plan.md#3-stage-2--leans-mono-pipeline-leans-passes-driven-by-us">§3</a>,
+<a href="../../docs/translation-plan.md#4-stage-3--check-and-recover-lost-types">§4</a> and
+<a href="../../docs/translation-plan.md#10-known-divergences-and-unsupported-features">§10</a>,
+and the implementation notes on
+<a href="../../docs/implementation/types/uniform-types.md">unknown types</a>,
+<a href="../../docs/implementation/types/type-recovery.md">type recovery</a>,
+<a href="../../docs/implementation/types/polymorphic-recursion.md">polymorphic recursion</a> and
+<a href="../../docs/implementation/representations/box-and-uniform.md">the uniform type</a>.</p>
+
+<div class="rule">
+<p><strong>Nothing is rejected.</strong> lean2rr compiles every program with dependent
+types that Lean compiles, and the program gives the same results as its
+native build. Where a type is known only at run time, lean2rr uses a uniform
+representation. That is always correct. It can be slower.</p>
+</div>
+<p>A <em>dependent type</em> is a type that mentions a value. Often the value is a
+proof or a length, such as the <code>n</code> in <code>Vector String n</code>. Lean's compiler
+erases such values, so these types need nothing special. This page is about
+the other case: the type itself changes with a value that is known only at
+run time.</p>
+<h2 id="the-mechanism">The mechanism</h2>
+<ol>
+<li><strong>Lean marks the position.</strong> Lean's compiler cannot compute a type such
+   as <code>t.denote</code> when <code>t</code> is a variable. In the base code that lean2rr
+   reads, it writes <code>lcAny</code> there: Lean's "unknown type". For example, a
+   field <code>data : Array t.denote</code> has the type <code>Array lcAny</code>.</li>
+<li><strong>lean2rr keeps the mark.</strong><ul>
+<li>Stage 1 also makes a type argument <code>lcAny</code> when the argument is not
+  statically known.</li>
+<li>Stage 2 keeps a <em>type family</em> (a function that gives a type) only
+  when it is a constant function (<code>fun _ =&gt; Nat</code>) or a type
+  constructor (<code>Vector String</code>). A family whose body uses its variable
+  (<code>fun t =&gt; t.denote</code>) becomes <code>lcAny</code>.</li>
+<li>Stage 3 never takes a type from a use. A use of <code>data</code> as
+  <code>Array Nat</code> is correct only in the branch where <code>t = .nat</code>.</li>
+</ul>
+</li>
+<li><strong>Stage 4 boxes the value.</strong> It stores each value of type <code>lcAny</code> in
+   <code>L2RBox</code>.</li>
+</ol>
+<p><code>L2RBox</code> is a closed tagged union that lean2rr generates for each program:</p>
+<ul>
+<li>It has one variant per concrete type that the program boxes, plus a unit
+  variant (Lean's <code>box(0)</code> placeholder).</li>
+<li>Stage 4 adds the variants as it needs them. At the end of Stage 4, the
+  set is complete.</li>
+<li>Code that needs the concrete type checks the tag with a <code>match</code>.</li>
+</ul>
+<p>For the examples on this page, lean2rr generates this <code>L2RBox</code> (checked
+with <code>lean2rr --emit rr</code>):</p>
+<pre><code class="language-rust">enum L2RBox {
+    b0(L2RUnit),   // the unit variant: Lean's box(0)
+    b1(LStr),      // a boxed String
+    b2(Nat)        // a boxed Nat
+}
+</code></pre>
+<p>In Rust terms, this is <code>enum L2RBox { Unit, Str(LStr), Nat(Nat) }</code>. The
+variants have numbers, in the order in which Stage 4 needed them.</p>
+<p>Native Lean stores every value in a uniform way: a pointer to an object
+(<code>lean_object*</code>), or a small number inside the pointer. lean2rr uses the
+uniform <code>L2RBox</code> only where the type is truly unknown. Everywhere else, a
+value has its precise type.</p>
+<h2 id="examples">Examples</h2>
+<h3 id="a-column-whose-element-type-is-a-field">A column whose element type is a field</h3>
+<pre><code class="language-lean">inductive Ty | nat | str
+
+@[reducible] def Ty.denote : Ty → Type
+  | .nat =&gt; Nat
+  | .str =&gt; String
+
+structure Column where
+  ty : Ty
+  data : Array ty.denote
+</code></pre>
+<ul>
+<li>Line 1: <code>Ty</code> is an enumeration with two values, <code>nat</code> and <code>str</code>.</li>
+<li>Line 3: <code>Ty.denote</code> is a function from a <code>Ty</code> to a type. <code>@[reducible]</code>
+  lets Lean's type checker unfold it.</li>
+<li>Lines 4 and 5: <code>.nat</code> gives the type <code>Nat</code>, and <code>.str</code> gives the type
+  <code>String</code>.</li>
+<li>Line 7: <code>Column</code> is a structure.</li>
+<li>Line 8: the field <code>ty</code> is a <code>Ty</code>.</li>
+<li>Line 9: the field <code>data</code> is an array. Its element type is <code>ty.denote</code>, so
+  it depends on the value of the field <code>ty</code>.</li>
+</ul>
+<p>Rust has no direct equivalent: a field's type cannot depend on another
+field's value. The nearest Rust type is an enum with one variant per tag:
+<code>enum Column { Nat(Vec&lt;Nat&gt;), Str(Vec&lt;String&gt;) }</code>.</p>
+<p>Code that uses a column matches on <code>ty</code> first:</p>
+<pre><code class="language-lean">def Column.push (c : Column) (i : Nat) : Column :=
+  match c with
+  | ⟨.nat, d⟩ =&gt; ⟨.nat, d.push i⟩
+  | ⟨.str, d⟩ =&gt; ⟨.str, d.push (toString i)⟩
+</code></pre>
+<ul>
+<li>Line 1: <code>push</code> takes a column <code>c</code> and a number <code>i</code>, and returns a column.</li>
+<li>Line 2: it looks at the two fields of <code>c</code>.</li>
+<li>Line 3: if <code>ty</code> is <code>.nat</code>, then <code>d</code> is an <code>Array Nat</code>. <code>push</code> adds <code>i</code>
+  and builds a new column.</li>
+<li>Line 4: if <code>ty</code> is <code>.str</code>, then <code>d</code> is an <code>Array String</code>. <code>push</code> adds
+  <code>i</code> as a string.</li>
+</ul>
+<p>In Rust, with the enum above:</p>
+<pre><code class="language-rust">match c {
+    Column::Nat(mut d) =&gt; { d.push(i); Column::Nat(d) }
+    Column::Str(mut d) =&gt; { d.push(i.to_string()); Column::Str(d) }
+}
+</code></pre>
+<p>lean2rr generates this code (abridged, names shortened):</p>
+<pre><code class="language-rust">struct T_Column(RVec&lt;L2RBox&gt;, T_Ty)   // data, then ty
+enum [value] T_Ty { c_nat, c_str }    // stored inline, never allocated
+
+fn Column_push(c : T_Column, i : Nat) -&gt; T_Column {
+    let ty : T_Ty = c.1;
+    let d : RVec&lt;L2RBox&gt; = c.0;
+    match ty {
+        T_Ty::c_nat =&gt; {
+            let d2 : RVec&lt;L2RBox&gt; = lean_array_push&lt;L2RBox&gt;(d, L2RBox::b2{i});
+            T_Column{d2, T_Ty::c_nat{}}
+        },
+        T_Ty::c_str =&gt; {
+            let s : LStr = l2r_nat_repr(i);
+            let d2 : RVec&lt;L2RBox&gt; = lean_array_push&lt;L2RBox&gt;(d, L2RBox::b1{s});
+            T_Column{d2, T_Ty::c_str{}}
+        }
+    }
+}
+</code></pre>
+<ul>
+<li><code>data</code> is an <code>RVec&lt;L2RBox&gt;</code>: an array of boxes.</li>
+<li><code>push</code> boxes only the new element (<code>L2RBox::b2{i}</code>). It updates the array
+  in place when the array is unique. The optional pass <code>uniform-updates</code>
+  makes this possible (see <a href="#costs">Costs</a>).</li>
+<li><code>ty</code> is a <code>[value]</code> enum. So a <code>Column</code> is one cell, plus its array.</li>
+</ul>
+<p>A read checks the tag. This is a read of one element of a <code>.str</code> column
+(abridged):</p>
+<pre><code class="language-rust">let s : LStr = match lean_array_uget&lt;L2RBox&gt;(d, i) {
+    L2RBox::b1(s) =&gt; { s },                // the String variant
+    L2RBox::b0(_) =&gt; { l2r_zero_LStr() },  // Lean's box(0): the zero String
+    _ =&gt; { l2r_unreachable&lt;LStr&gt;() }       // no other variant holds a String
+};
+</code></pre>
+<h3 id="a-type-chosen-by-a-boolean">A type chosen by a Boolean</h3>
+<pre><code class="language-lean">def pick (b : Bool) : if b then Nat else String :=
+  match b with
+  | true =&gt; (42 : Nat)
+  | false =&gt; &quot;hello&quot;
+
+def describe : (b : Bool) → (if b then Nat else String) → String
+  | true, n =&gt; let m : Nat := n; s!&quot;nat {m + 1}&quot;
+  | false, s =&gt; let t : String := s; s!&quot;str {t}&quot;
+</code></pre>
+<ul>
+<li>Line 1: <code>pick</code> takes a Boolean <code>b</code>. Its result type is <code>Nat</code> if <code>b</code> is
+  true, else <code>String</code>.</li>
+<li>Lines 2 to 4: it returns the number 42 or the string <code>"hello"</code>.</li>
+<li>Line 6: <code>describe</code> takes a Boolean and a value whose type depends on that
+  Boolean. It returns a string.</li>
+<li>Line 7: if the Boolean is true, the value is a <code>Nat</code>. <code>let m : Nat := n</code>
+  names it at the type <code>Nat</code>. <code>s!"…"</code> builds a string.</li>
+<li>Line 8: if the Boolean is false, the value is a <code>String</code>.</li>
+</ul>
+<p>A Rust function cannot return two different types. The Rust version returns
+an enum: <code>fn pick(b: bool) -&gt; NatOrStr</code>.</p>
+<p>lean2rr gives that position the uniform type in both functions:</p>
+<pre><code class="language-rust">fn pick(b : bool) -&gt; L2RBox                 // L2RBox::b2{42} or L2RBox::b1{&quot;hello&quot;}
+fn describe(b : bool, v : L2RBox) -&gt; LStr   // each branch checks the tag of v
+</code></pre>
+<h3 id="sigma-types">Sigma types</h3>
+<p>A Sigma type <code>(x : A) × B x</code> is a pair. The type of its second component
+depends on the value of its first component. Rust has no direct equivalent.
+The nearest Rust type is a pair whose second part is an enum:
+<code>(Ty, NatOrStr)</code>.</p>
+<pre><code class="language-lean">def entries : List ((t : Ty) × t.denote) :=
+  [⟨.nat, (5 : Nat)⟩, ⟨.str, &quot;five&quot;⟩]
+
+def vecs : List ((n : Nat) × Vector String n) :=
+  [⟨2, ⟨#[&quot;a&quot;, &quot;b&quot;], rfl⟩⟩, ⟨0, ⟨#[], rfl⟩⟩]
+</code></pre>
+<ul>
+<li>Line 1: <code>entries</code> is a list of pairs. In each pair, the first component
+  <code>t</code> is a <code>Ty</code>, and the second component has the type <code>t.denote</code>.</li>
+<li>Line 2: the first pair holds <code>.nat</code> and the <code>Nat</code> 5. The second pair
+  holds <code>.str</code> and the <code>String</code> <code>"five"</code>. <code>⟨…⟩</code> builds a pair.</li>
+<li>Line 4: <code>vecs</code> is a list of pairs. The first component <code>n</code> is a <code>Nat</code>.
+  The second is a <code>Vector String n</code>: an array of exactly <code>n</code> strings.</li>
+<li>Line 5: <code>⟨#["a", "b"], rfl⟩</code> builds a vector from an array and a proof
+  (<code>rfl</code>) that the size of the array is 2.</li>
+</ul>
+<p><code>Vector String n</code> is a structure with two fields: <code>toArray : Array String</code>,
+and a proof that <code>toArray.size = n</code>. In Rust terms, it is
+<code>struct Vector { to_array: Vec&lt;String&gt; }</code>, plus a fact that the compiler
+checks and then forgets.</p>
+<table>
+<thead>
+<tr>
+<th>Lean type</th>
+<th>lean2rr build (checked with <code>--emit rr</code>)</th>
+<th>Boxed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>(t : Ty) × t.denote</code></td>
+<td><code>struct T_Sigma(L2RBox, T_Ty)</code>: the second component, then the first</td>
+<td>the second component</td>
+</tr>
+<tr>
+<td><code>(n : Nat) × Vector String n</code></td>
+<td><code>struct T_Sigma(Nat, RVec&lt;LStr&gt;)</code></td>
+<td>nothing</td>
+</tr>
+</tbody>
+</table>
+<p>Why the two pairs differ:</p>
+<ul>
+<li><code>t.denote</code> is a different type for each <code>t</code>, so no single representation
+  fits. The second component is <code>lcAny</code>, so it is an <code>L2RBox</code>.</li>
+<li><code>Vector String n</code> has the same data for every <code>n</code>: an <code>Array String</code>.
+  <code>n</code> occurs only in the type and in the proof field. The family
+  <code>fun n =&gt; Vector String n</code> is the type constructor <code>Vector String</code>, so
+  Stage 2 keeps it. Lean's compiler erases the proof, and it stores a
+  structure with one data field as that field. So the second component is
+  an <code>RVec&lt;LStr&gt;</code>, and nothing is boxed.</li>
+<li>The same holds for <code>Vector String (n + 1)</code> and <code>Fin (n + 1)</code>. In the base
+  code, Lean has already replaced the value <code>n + 1</code> by <code>lcAny</code>, so the
+  family is a constant function. lean2rr stores those pairs as
+  <code>(Nat, RVec&lt;LStr&gt;)</code> and <code>(Nat, Nat)</code>.</li>
+</ul>
+<h3 id="at-run-time">At run time</h3>
+<figure class="fig" id="fig-dep"><svg class="diagram" viewBox="0 0 900 415" width="900" role="img" aria-labelledby="dep-title"><title id="dep-title">Values with dependent types at run time</title><defs><marker id="dep-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><text x="10" y="24" text-anchor="start" class="t">Column ⟨.nat, #[3, 7]⟩  →  T_Column(RVec&lt;L2RBox&gt;, T_Ty): a shared struct</text><rect x="10" y="40" width="64" height="34" rx="0" class="c-hdr"/><text x="42.0" y="62.0" text-anchor="middle" class="tc">count</text><rect x="74" y="40" width="64" height="34" rx="0" class="c-pad"/><text x="106.0" y="62.0" text-anchor="middle" class="tc"></text><rect x="138" y="40" width="128" height="34" rx="0" class="c-ptr"/><text x="202.0" y="62.0" text-anchor="middle" class="tc">data</text><rect x="266" y="40" width="64" height="34" rx="0" class="c-tag"/><text x="298.0" y="62.0" text-anchor="middle" class="tc">ty = nat</text><path d="M 202 74 C 202 127 205 127 228 127" class="ar" fill="none" marker-end="url(#dep-ah)"/><rect x="230" y="110" width="40" height="34" rx="0" class="c-hdr"/><text x="250.0" y="132.0" text-anchor="middle" class="tc">count</text><rect x="270" y="110" width="40" height="34" rx="0" class="c-pad"/><text x="290.0" y="132.0" text-anchor="middle" class="tc">pad</text><rect x="310" y="110" width="80" height="34" rx="0" class="c-hdr"/><text x="350.0" y="132.0" text-anchor="middle" class="tc">size</text><rect x="390" y="110" width="80" height="34" rx="0" class="c-hdr"/><text x="430.0" y="132.0" text-anchor="middle" class="tc">cap</text><rect x="470" y="110" width="80" height="34" rx="0" class="c-ptr"/><text x="510.0" y="132.0" text-anchor="middle" class="tc">elem 0</text><rect x="550" y="110" width="80" height="34" rx="0" class="c-ptr"/><text x="590.0" y="132.0" text-anchor="middle" class="tc">elem 1</text><text x="230" y="162" text-anchor="start" class="ts">RVec&lt;L2RBox&gt;: each element points to one L2RBox cell</text><rect x="420" y="40" width="40" height="34" rx="0" class="c-hdr"/><text x="440.0" y="62.0" text-anchor="middle" class="tc">count</text><rect x="460" y="40" width="40" height="34" rx="0" class="c-tag"/><text x="480.0" y="62.0" text-anchor="middle" class="tc">b2</text><rect x="500" y="40" width="80" height="34" rx="0" class="c-data"/><text x="540.0" y="62.0" text-anchor="middle" class="tc">Nat 3</text><rect x="610" y="40" width="40" height="34" rx="0" class="c-hdr"/><text x="630.0" y="62.0" text-anchor="middle" class="tc">count</text><rect x="650" y="40" width="40" height="34" rx="0" class="c-tag"/><text x="670.0" y="62.0" text-anchor="middle" class="tc">b2</text><rect x="690" y="40" width="80" height="34" rx="0" class="c-data"/><text x="730.0" y="62.0" text-anchor="middle" class="tc">Nat 7</text><line x1="510" y1="110" x2="442" y2="76" class="ar" marker-end="url(#dep-ah)"/><line x1="590" y1="110" x2="632" y2="76" class="ar" marker-end="url(#dep-ah)"/><text x="780" y="54" text-anchor="start" class="ts">L2RBox::b2:</text><text x="780" y="70" text-anchor="start" class="ts">a boxed Nat</text><text x="10" y="196" text-anchor="start" class="t">⟨.str, &quot;five&quot;⟩ : (t : Ty) × t.denote  →  T_Sigma(L2RBox, T_Ty): the second component is boxed</text><rect x="10" y="210" width="64" height="34" rx="0" class="c-hdr"/><text x="42.0" y="232.0" text-anchor="middle" class="tc">count</text><rect x="74" y="210" width="64" height="34" rx="0" class="c-pad"/><text x="106.0" y="232.0" text-anchor="middle" class="tc"></text><rect x="138" y="210" width="128" height="34" rx="0" class="c-ptr"/><text x="202.0" y="232.0" text-anchor="middle" class="tc">snd</text><rect x="266" y="210" width="64" height="34" rx="0" class="c-tag"/><text x="298.0" y="232.0" text-anchor="middle" class="tc">fst = str</text><path d="M 202 244 L 202 262 L 400 262 L 400 246" class="ar" fill="none" marker-end="url(#dep-ah)"/><rect x="380" y="210" width="40" height="34" rx="0" class="c-hdr"/><text x="400.0" y="232.0" text-anchor="middle" class="tc">count</text><rect x="420" y="210" width="40" height="34" rx="0" class="c-tag"/><text x="440.0" y="232.0" text-anchor="middle" class="tc">b1</text><rect x="460" y="210" width="80" height="34" rx="0" class="c-ptr"/><text x="500.0" y="232.0" text-anchor="middle" class="tc">LStr</text><line x1="540" y1="227" x2="588" y2="227" class="ar" marker-end="url(#dep-ah)"/><rect x="590" y="210" width="150" height="34" rx="6" class="b-rt"/><text x="665.0" y="231.5" text-anchor="middle" class="t">LStr &quot;five&quot;</text><text x="10" y="300" text-anchor="start" class="t">⟨2, ⟨#[&quot;a&quot;, &quot;b&quot;], rfl⟩⟩ : (n : Nat) × Vector String n  →  T_Sigma(Nat, RVec&lt;LStr&gt;): nothing boxed</text><rect x="10" y="316" width="64" height="34" rx="0" class="c-hdr"/><text x="42.0" y="338.0" text-anchor="middle" class="tc">count</text><rect x="74" y="316" width="64" height="34" rx="0" class="c-pad"/><text x="106.0" y="338.0" text-anchor="middle" class="tc"></text><rect x="138" y="316" width="128" height="34" rx="0" class="c-data"/><text x="202.0" y="338.0" text-anchor="middle" class="tc">fst = 2</text><rect x="266" y="316" width="128" height="34" rx="0" class="c-ptr"/><text x="330.0" y="338.0" text-anchor="middle" class="tc">snd</text><line x1="394" y1="333" x2="438" y2="333" class="ar" marker-end="url(#dep-ah)"/><rect x="440" y="316" width="40" height="34" rx="0" class="c-hdr"/><text x="460.0" y="338.0" text-anchor="middle" class="tc">count</text><rect x="480" y="316" width="40" height="34" rx="0" class="c-pad"/><text x="500.0" y="338.0" text-anchor="middle" class="tc">pad</text><rect x="520" y="316" width="80" height="34" rx="0" class="c-hdr"/><text x="560.0" y="338.0" text-anchor="middle" class="tc">size</text><rect x="600" y="316" width="80" height="34" rx="0" class="c-hdr"/><text x="640.0" y="338.0" text-anchor="middle" class="tc">cap</text><rect x="680" y="316" width="80" height="34" rx="0" class="c-ptr"/><text x="720.0" y="338.0" text-anchor="middle" class="tc">&quot;a&quot;</text><rect x="760" y="316" width="80" height="34" rx="0" class="c-ptr"/><text x="800.0" y="338.0" text-anchor="middle" class="tc">&quot;b&quot;</text><text x="440" y="368" text-anchor="start" class="ts">RVec&lt;LStr&gt;: the vector is its array; the size proof is erased</text><text x="10" y="400" text-anchor="start" class="ts">The widths are schematic: Reussir computes the real layout. A shared enum cell has one 8-byte header word: the count and the tag.</text></svg><figcaption>The values of the examples, as lean2rr stores them (checked with <code>lean2rr --emit rr</code>). Fields are in the generated order: by decreasing alignment. A position whose type changes with a value holds <code>L2RBox</code> cells. The <code>Vector</code> pair holds none.</figcaption></figure>
+<h2 id="other-types-known-only-at-run-time">Other types known only at run time</h2>
+<p>Three more cases give a type that is known only at run time. lean2rr uses
+<code>lcAny</code> for them too: a value of that type is an <code>L2RBox</code>, and a generic
+function called at that type runs its instance at <code>lcAny</code>. When every type
+argument is <code>lcAny</code>, that instance is the <em>uniform instance</em>. Native Lean
+treats every value in this way, so this is always correct, only slower.</p>
+<h3 id="a-type-unpacked-from-an-existential">A type unpacked from an existential</h3>
+<pre><code class="language-lean">structure Pkg where
+  α : Type
+  val : α
+  fmt : α → String
+</code></pre>
+<ul>
+<li>Line 1: <code>Pkg</code> is a structure: a package of a type and a value.</li>
+<li>Line 2: the field <code>α</code> is a type. A type has no run-time value, so the
+  compiler erases this field.</li>
+<li>Line 3: the field <code>val</code> is a value of the type <code>α</code>.</li>
+<li>Line 4: the field <code>fmt</code> is a function that turns an <code>α</code> into a string.</li>
+</ul>
+<p>In Rust terms, a <code>Pkg</code> is like a <code>Box&lt;dyn Display&gt;</code>: a value of a hidden
+type, with a function for it. lean2rr generates <code>struct T_Pkg(L2RBox, …)</code>:
+<code>val</code> is an <code>L2RBox</code>, and <code>fmt</code> is a function value from <code>L2RBox</code> to <code>LStr</code>.
+A generic function called on <code>p.val</code>, such as <code>List.replicate 2 p.val</code>,
+runs its instance at <code>lcAny</code>.</p>
+<h3 id="polymorphic-recursion">Polymorphic recursion</h3>
+<pre><code class="language-lean">def nest {α : Type} [ToString α] : Nat → α → String
+  | 0, x =&gt; toString x
+  | n + 1, x =&gt; nest n (x, x)
+</code></pre>
+<ul>
+<li>Line 1: <code>nest</code> is generic over a type <code>α</code> that can be printed:
+  <code>[ToString α]</code> is a type class, like a Rust trait bound. <code>nest</code> takes a
+  count and an <code>α</code>.</li>
+<li>Line 2: at count 0, it prints <code>x</code>.</li>
+<li>Line 3: otherwise, it calls itself with the pair <code>(x, x)</code>. That call is at
+  the type <code>α × α</code>.</li>
+</ul>
+<p>Rust rejects this function: monomorphization would need <code>nest::&lt;Nat&gt;</code>,
+<code>nest::&lt;(Nat, Nat)&gt;</code>, and so on without end. lean2rr makes the instance at
+<code>Nat</code>. The next request, at <code>Nat × Nat</code>, strictly contains the type
+argument of an instance of <code>nest</code> on the same path (<code>Nat</code>). So lean2rr
+sends that call to the uniform instance. In that one copy, <code>x</code> is an <code>L2RBox</code>, and the <code>ToString</code> dictionary is a
+run-time value. Bounds stop growth that no path shows: a type argument
+deeper than 64 or larger than 256 nodes becomes <code>lcAny</code>, and past 1024
+instances of one declaration, every new instance is the uniform instance.</p>
+<h3 id="a-partial-application-that-leaves-a-type-open">A partial application that leaves a type open</h3>
+<pre><code class="language-lean">structure Op where
+  run : {α : Type} → List α → Nat
+
+def ops : List Op := [⟨List.length⟩, ⟨fun xs =&gt; xs.length * 2⟩]
+</code></pre>
+<ul>
+<li>Line 1: <code>Op</code> is a structure.</li>
+<li>Line 2: its one field, <code>run</code>, is a generic function: it takes a list of
+  any element type <code>α</code> and returns a <code>Nat</code>.</li>
+<li>Line 4: <code>ops</code> holds two such functions: <code>List.length</code>, and a function
+  that doubles the length.</li>
+</ul>
+<p>Rust cannot store a generic function in a field. The nearest form takes a
+type-erased list: <code>fn(&amp;[Box&lt;dyn Any&gt;]) -&gt; usize</code>. lean2rr does the same.
+<code>List.length</code> is used here without its type argument, so its instance is at
+<code>lcAny</code>: it takes a list of <code>L2RBox</code>es. A call <code>o.run [1, 2, 3]</code> first
+converts the <code>List Nat</code> to that representation.</p>
+<h2 id="costs">Costs</h2>
+<p>These costs are time and memory, never results. Plan
+<a href="../../docs/translation-plan.md#26-when-a-type-is-not-statically-known">§2.6</a>,
+<a href="../../docs/translation-plan.md#4-stage-3--check-and-recover-lost-types">§4</a>
+and <a href="../../docs/translation-plan.md#10-known-divergences-and-unsupported-features">§10</a>
+("Structural conversions") give the details.</p>
+<p><strong>Boxing allocates.</strong> Each boxed value is one <code>L2RBox</code> cell. Natively, a
+small number in a uniform position costs nothing, because it is inside the
+pointer. A read of a boxed value checks one tag.</p>
+<p><strong>Typed code converts a boxed container.</strong> Suppose that a function takes an
+<code>Array Nat</code>, and the <code>.nat</code> branch passes it the column's <code>data</code>. If the
+parameter stays typed (see below), lean2rr converts the <code>RVec&lt;L2RBox&gt;</code> into
+a new <code>Array Nat</code> (an <code>LNatArr</code>), element by element. That costs O(n) per
+call. Natively, the cast is free. A conversion also loses sharing.</p>
+<p><strong><code>uniform-updates</code> keeps update loops linear.</strong> In the <code>.nat</code> branch of
+<code>Column.push</code>, Lean pushes onto <code>d</code> at the type <code>Array Nat</code>. Without the
+optional pass <code>uniform-updates</code>, each update converts the whole array to
+<code>Array Nat</code>, pushes, and converts the result back to store it in the
+column: two copies per update. A loop of updates is then quadratic (review
+RV9C-02, before the pass: 40 000 pushes took 7.7 s, natively 0.00 s). The
+pass runs such an update on the uniform array instead (plan §4):</p>
+<ul>
+<li>An <code>Array</code> extern (<code>push</code>, <code>set!</code>, <code>pop</code>, <code>swap</code>, <code>get</code>, <code>size</code>, …) does
+  not depend on its type argument. So the pass calls its instance at
+  <code>lcAny</code>, and only the one element is boxed or unboxed.</li>
+<li>A cons that goes back into a <code>List lcAny</code> field is built at that type.</li>
+<li>A parameter becomes uniform when every call site passes a uniform array
+  and the body uses it only uniformly.</li>
+</ul>
+<p>The <code>Column.push</code> code above shows the result. The tests are
+<code>RtUniformUpdates</code> and its variants, and <code>tests/runtime/conv-count-check.sh</code>,
+which counts the converted elements at two sizes.</p>
+<p><strong>A helper that stays typed converts at each call (review C03R-01).</strong> A
+helper takes an <code>Array Nat</code>, and another caller passes it a typed array:</p>
+<pre><code class="language-lean">@[noinline] def firstPlusSize (a : Array Nat) : Nat := a.size + a[0]!
+
+def Column.step (c : Column) (i : Nat) : Column × Nat :=
+  match c with
+  | ⟨.nat, d⟩ =&gt;
+    let d' := d.push i
+    (⟨.nat, d'⟩, firstPlusSize d')
+  | c =&gt; (c, 0)
+</code></pre>
+<ul>
+<li>Line 1: <code>firstPlusSize</code> takes an <code>Array Nat</code> and returns its size plus
+  its first element. <code>@[noinline]</code> keeps it a separate function. <code>main</code>
+  also calls it with a typed array.</li>
+<li>Line 3: <code>step</code> takes a column and a number. It returns a new column and a
+  number.</li>
+<li>Lines 5 to 7: for a <code>.nat</code> column, it pushes <code>i</code> onto the array, and calls
+  <code>firstPlusSize</code> on the new array.</li>
+<li>Line 8: for another column, it returns the column and 0.</li>
+</ul>
+<p>The pass makes a parameter uniform only when every call site passes a
+uniform array. Here <code>main</code> passes a typed array, so the parameter stays
+<code>Array Nat</code>. lean2rr generates <code>firstPlusSize(l2r_vconv(d2))</code>: each <code>step</code>
+converts the whole column. In a loop, that is quadratic (in the review,
+20 000 steps took 0.79 s, natively 0.00 s). The test is
+<code>RtUniformUpdatesShared</code>. The helper also stays typed when it is used as a
+function value, or when it calls itself with a typed array. A possible fix: a copy of the helper with a
+uniform parameter, for the call sites that pass a uniform array, as Stage 1
+makes instances.</p>
+<p>Plan §10 lists two more shapes that convert at each execution:</p>
+<ul>
+<li>a function that passes its parameter on at a precise type;</li>
+<li>an update whose result is used only at precise types, and never goes
+  back to a uniform position.</li>
+</ul>
+<h2 id="possible-future-work">Possible future work</h2>
+<p><strong>A typed union per dependent position.</strong> Today one <code>L2RBox</code> per program
+holds every boxed value, and each element of a dependent array is boxed by
+itself. lean2rr could instead generate one union for each dependent
+position, with one variant per type that the position can have. For
+<code>Column.data</code>, a possible design (not implemented):</p>
+<pre><code class="language-rust">enum Column_data {
+    nat(LNatArr),       // ty = .nat: an Array Nat
+    str(RVec&lt;LStr&gt;)     // ty = .str: an Array String
+}
+</code></pre>
+<ul>
+<li>The whole array is in one variant, so its elements are not boxed one by
+  one.</li>
+<li>A use at <code>Array Nat</code> checks one tag and takes the array. No conversion is
+  necessary, so the C03R-01 shape would cost nothing.</li>
+<li>A <code>match</code> has only the variants of its position, not every boxed type of
+  the program.</li>
+</ul>
+<p>This needs the set of types that a family can give: <code>Ty.denote</code> gives
+<code>Nat</code> or <code>String</code>. A family with an unbounded set of types (a type built by
+recursion on a <code>Nat</code>) would keep <code>L2RBox</code>.</p>
+  </main>
+</div>
+<footer>Generated by <code>docs/site/build.py</code> from the repository's files (Lean v4.34.0).
+This site summarizes; the markdown documents in the repository are the authority.</footer>
+</body>
+</html>

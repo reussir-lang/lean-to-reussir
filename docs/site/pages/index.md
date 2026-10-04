@@ -148,6 +148,10 @@ The stages from `.olean` to executable: what goes in, what comes out, and the ke
 How each Lean type is stored, with memory layouts.
 </div>
 <div class="card" markdown="1">
+#### [Dependent types](dependent-types.html)
+Types known only at run time: the uniform type `L2RBox`, examples, costs.
+</div>
+<div class="card" markdown="1">
 #### [Runtime](runtime.html)
 The runtime layers, memory management, the scheduler, IO, startup, and the shared runtime plan.
 </div>

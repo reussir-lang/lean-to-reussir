@@ -36,7 +36,7 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 | handles, processes, mutexes, sockets | `LHandle`, a runtime object | closed with the last reference |
 | inductive types, structures | one generated Reussir type per instantiation | rules below |
 | function types | one generated enum per function type | [function values](#function-values) |
-| a type not statically known (`lcAny`) | `L2RBox` | [the uniform type](#the-uniform-type-l2rbox) |
+| a type not statically known (`lcAny`) | `L2RBox` | [the uniform type](#the-uniform-type-l2rbox); [dependent types](dependent-types.html) |
 
 ## Numbers
 
@@ -131,6 +131,9 @@ enum T_Tree_346 {                 // shared: one counted cell per node
 ## The uniform type `L2RBox`
 
 {{svg:box}}
+
+[Dependent types](dependent-types.html) shows where `L2RBox` comes from,
+with examples, and what it costs.
 
 - `L2RBox` has one variant per concrete type that the program boxes, plus a
   unit variant. Stage 4 adds variants as it needs them.

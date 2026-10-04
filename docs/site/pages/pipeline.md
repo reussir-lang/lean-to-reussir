@@ -98,6 +98,8 @@ because no conversion exists there.
 **When a type is not statically known.** Then the uniform type `L2RBox`
 takes its place (see [Representations](representations.html#the-uniform-type-l2rbox)):
 
+- a type that depends on a run-time value: Lean's base code already has
+  `lcAny` there (see [Dependent types](dependent-types.html));
 - a type argument that is not fully known: the instance is made at `lcAny`;
 - polymorphic recursion: a request at a type that strictly contains the
   type of an instance on the same path goes to the *uniform instance*

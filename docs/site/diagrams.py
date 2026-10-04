@@ -387,7 +387,56 @@ def box_uniform():
     s.arrow(555, 115, 690, 115, "unbox", lx=622, ly=105, anchor="middle")
     s.text(622, 135, "(generated)", "ts", "middle")
     s.box(695, 70, 195, 90, ["precise use", "matches every variant", "that can hold the type;", "converts if needed"], "b-l2r")
-    s.text(10, 228, "Typed code never pays for Box. It appears only on the rare paths: polymorphic recursion, existentials, Dynamic.", "ts")
+    s.text(10, 228, "Typed code never pays for Box. It appears only where a type is unknown: a type that "
+           "depends on a value, polymorphic recursion, existentials, Dynamic.", "ts")
+    return s.render()
+
+
+def dep_values():
+    s = SVG("dep", 900, 415, "Values with dependent types at run time",
+            "The values of the examples, as lean2rr stores them (checked with "
+            "<code>lean2rr --emit rr</code>). Fields are in the generated order: by "
+            "decreasing alignment. A position whose type changes with a value holds "
+            "<code>L2RBox</code> cells. The <code>Vector</code> pair holds none.")
+    # A Column whose data is an array of boxes.
+    s.text(10, 24, "Column ⟨.nat, #[3, 7]⟩  →  T_Column(RVec<L2RBox>, T_Ty): a shared struct", "t")
+    bar(s, 10, 40, [("count", 4, "c-hdr"), ("", 4, "c-pad"), ("data", 8, "c-ptr"),
+                    ("ty = nat", 4, "c-tag")], unit=16, offsets=False)
+    s.path("M 202 74 C 202 127 205 127 228 127")
+    bar(s, 230, 110, [("count", 4, "c-hdr"), ("pad", 4, "c-pad"), ("size", 8, "c-hdr"),
+                      ("cap", 8, "c-hdr"), ("elem 0", 8, "c-ptr"), ("elem 1", 8, "c-ptr")],
+        unit=10, offsets=False)
+    s.text(230, 162, "RVec<L2RBox>: each element points to one L2RBox cell", "ts")
+    bar(s, 420, 40, [("count", 4, "c-hdr"), ("b2", 4, "c-tag"), ("Nat 3", 8, "c-data")],
+        unit=10, offsets=False)
+    bar(s, 610, 40, [("count", 4, "c-hdr"), ("b2", 4, "c-tag"), ("Nat 7", 8, "c-data")],
+        unit=10, offsets=False)
+    s.arrow(510, 110, 442, 76)
+    s.arrow(590, 110, 632, 76)
+    s.text(780, 54, "L2RBox::b2:", "ts")
+    s.text(780, 70, "a boxed Nat", "ts")
+    # Sigma 1: the second component is boxed.
+    s.text(10, 196, "⟨.str, \"five\"⟩ : (t : Ty) × t.denote  →  T_Sigma(L2RBox, T_Ty): "
+           "the second component is boxed", "t")
+    bar(s, 10, 210, [("count", 4, "c-hdr"), ("", 4, "c-pad"), ("snd", 8, "c-ptr"),
+                     ("fst = str", 4, "c-tag")], unit=16, offsets=False)
+    s.path("M 202 244 L 202 262 L 400 262 L 400 246")
+    bar(s, 380, 210, [("count", 4, "c-hdr"), ("b1", 4, "c-tag"), ("LStr", 8, "c-ptr")],
+        unit=10, offsets=False)
+    s.arrow(540, 227, 588, 227)
+    s.box(590, 210, 150, 34, ["LStr \"five\""], "b-rt", head=False)
+    # Sigma 2: nothing boxed.
+    s.text(10, 300, "⟨2, ⟨#[\"a\", \"b\"], rfl⟩⟩ : (n : Nat) × Vector String n  →  "
+           "T_Sigma(Nat, RVec<LStr>): nothing boxed", "t")
+    bar(s, 10, 316, [("count", 4, "c-hdr"), ("", 4, "c-pad"), ("fst = 2", 8, "c-data"),
+                     ("snd", 8, "c-ptr")], unit=16, offsets=False)
+    s.arrow(394, 333, 438, 333)
+    bar(s, 440, 316, [("count", 4, "c-hdr"), ("pad", 4, "c-pad"), ("size", 8, "c-hdr"),
+                      ("cap", 8, "c-hdr"), ("\"a\"", 8, "c-ptr"), ("\"b\"", 8, "c-ptr")],
+        unit=10, offsets=False)
+    s.text(440, 368, "RVec<LStr>: the vector is its array; the size proof is erased", "ts")
+    s.text(10, 400, "The widths are schematic: Reussir computes the real layout. "
+           "A shared enum cell has one 8-byte header word: the count and the tag.", "ts")
     return s.render()
 
 
@@ -614,6 +663,7 @@ DIAGRAMS = {
     "rvec": rvec_block,
     "records": record_cells,
     "box": box_uniform,
+    "depvalues": dep_values,
     "lazy": lazy_cells,
     "fnvalues": fn_values,
     "refs": ref_cells,

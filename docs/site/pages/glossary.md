@@ -32,7 +32,7 @@ base, mono, impure
 :   The three phases of Lean's compiler. Base code is typed and polymorphic. Mono code has type variables erased to `lcAny`. Impure code adds boxing and reference counting. lean2rr uses base and mono, never impure.
 
 `lcAny`
-:   Lean's "unknown type" in mono code. lean2rr stores a value of this type as an `L2RBox`.
+:   Lean's "unknown type" in compiled code. Base code has it where the compiler cannot compute a type (`t.denote` for a variable `t`); mono code also has it for erased type variables. lean2rr stores a value of this type as an `L2RBox`.
 
 erased value (`◾`)
 :   A type, a proof or another value with no run-time meaning. lean2rr stores it as `L2RUnit`.
@@ -64,7 +64,7 @@ instance
 :   One such copy, with a fresh name (`d._l2r.k`).
 
 uniform instance
-:   The instance with every type argument `lcAny`. Polymorphic recursion and the instance bounds lead to it.
+:   The instance with every type argument `lcAny`; its values of those types are `L2RBox`es. Polymorphic recursion and the instance bounds lead to it. A call whose type arguments are not statically known (a type unpacked from an existential, a partial application that leaves a type open) goes to an instance at `lcAny`: the uniform instance when no type argument is known.
 
 dictionary
 :   The record of functions that a type class instance passes at run time.
@@ -77,6 +77,12 @@ precise type
 
 relevant parameter
 :   A type parameter that appears in a data field. Only relevant parameters make different generated types.
+
+dependent type
+:   A type that mentions a value (`Array t.denote`, `Vector α n`). A value that occurs only in a proof or an index is erased. When the type changes with a run-time value, the base code has `lcAny` there, and lean2rr stores the value as an `L2RBox`. See [Dependent types](dependent-types.html).
+
+type family
+:   A function that gives a type (`Ty.denote`, `fun n => Vector String n`). Stage 2 keeps a constant family or a type constructor. Any other family becomes `lcAny`.
 
 ## Representations
 
@@ -99,7 +105,7 @@ tagged handle
 :   An opaque Reussir handle that may be a number instead of a pointer (local patch 0050). Reussir counts it only when its low bit is 0. `Nat` and `Int` are tagged handles.
 
 `L2RBox`
-:   The uniform type: a generated enum with one variant per type the program boxes. It stores a value whose type is not statically known.
+:   The uniform type: a closed tagged union that lean2rr generates for each program (a shared enum), with one variant per concrete type that the program boxes, plus a unit variant. It stores a value whose type is not statically known. Code that needs the concrete type checks the tag.
 
 storage type
 :   The type in which an array stores its elements: the element's own type when it can cross Reussir's FFI boundary, an index for an enumeration, otherwise an `ElemBox`.

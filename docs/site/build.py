@@ -46,6 +46,7 @@ PAGES = [
     ("index", "Overview"),
     ("pipeline", "Pipeline"),
     ("representations", "Representations"),
+    ("dependent-types", "Dependent types"),
     ("runtime", "Runtime"),
     ("passes", "Optional passes"),
     ("testing", "Testing"),

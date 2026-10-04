@@ -9,7 +9,7 @@
 <body>
 <header class="top">
   <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
-  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html">Representations</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html" class="here">Glossary</a></nav>
+  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html">Representations</a><a href="dependent-types.html">Dependent types</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html" class="here">Glossary</a></nav>
 </header>
 <div class="layout">
   <aside class="toc"><div class="tochead">On this page</div><div class="toc">
@@ -51,7 +51,7 @@ each concept has one term.</p>
 <dt>base, mono, impure</dt>
 <dd>The three phases of Lean's compiler. Base code is typed and polymorphic. Mono code has type variables erased to <code>lcAny</code>. Impure code adds boxing and reference counting. lean2rr uses base and mono, never impure.</dd>
 <dt><code>lcAny</code></dt>
-<dd>Lean's "unknown type" in mono code. lean2rr stores a value of this type as an <code>L2RBox</code>.</dd>
+<dd>Lean's "unknown type" in compiled code. Base code has it where the compiler cannot compute a type (<code>t.denote</code> for a variable <code>t</code>); mono code also has it for erased type variables. lean2rr stores a value of this type as an <code>L2RBox</code>.</dd>
 <dt>erased value (<code>◾</code>)</dt>
 <dd>A type, a proof or another value with no run-time meaning. lean2rr stores it as <code>L2RUnit</code>.</dd>
 <dt>arity</dt>
@@ -74,7 +74,7 @@ each concept has one term.</p>
 <dt>instance</dt>
 <dd>One such copy, with a fresh name (<code>d._l2r.k</code>).</dd>
 <dt>uniform instance</dt>
-<dd>The instance with every type argument <code>lcAny</code>. Polymorphic recursion and the instance bounds lead to it.</dd>
+<dd>The instance with every type argument <code>lcAny</code>; its values of those types are <code>L2RBox</code>es. Polymorphic recursion and the instance bounds lead to it. A call whose type arguments are not statically known (a type unpacked from an existential, a partial application that leaves a type open) goes to an instance at <code>lcAny</code>: the uniform instance when no type argument is known.</dd>
 <dt>dictionary</dt>
 <dd>The record of functions that a type class instance passes at run time.</dd>
 <dt>static dictionary</dt>
@@ -83,6 +83,10 @@ each concept has one term.</p>
 <dd>A type that lean2rr knows exactly, as opposed to <code>lcAny</code>.</dd>
 <dt>relevant parameter</dt>
 <dd>A type parameter that appears in a data field. Only relevant parameters make different generated types.</dd>
+<dt>dependent type</dt>
+<dd>A type that mentions a value (<code>Array t.denote</code>, <code>Vector α n</code>). A value that occurs only in a proof or an index is erased. When the type changes with a run-time value, the base code has <code>lcAny</code> there, and lean2rr stores the value as an <code>L2RBox</code>. See <a href="dependent-types.html">Dependent types</a>.</dd>
+<dt>type family</dt>
+<dd>A function that gives a type (<code>Ty.denote</code>, <code>fun n =&gt; Vector String n</code>). Stage 2 keeps a constant family or a type constructor. Any other family becomes <code>lcAny</code>.</dd>
 </dl>
 <h2 id="representations">Representations</h2>
 <dl>
@@ -99,7 +103,7 @@ each concept has one term.</p>
 <dt>tagged handle</dt>
 <dd>An opaque Reussir handle that may be a number instead of a pointer (local patch 0050). Reussir counts it only when its low bit is 0. <code>Nat</code> and <code>Int</code> are tagged handles.</dd>
 <dt><code>L2RBox</code></dt>
-<dd>The uniform type: a generated enum with one variant per type the program boxes. It stores a value whose type is not statically known.</dd>
+<dd>The uniform type: a closed tagged union that lean2rr generates for each program (a shared enum), with one variant per concrete type that the program boxes, plus a unit variant. It stores a value whose type is not statically known. Code that needs the concrete type checks the tag.</dd>
 <dt>storage type</dt>
 <dd>The type in which an array stores its elements: the element's own type when it can cross Reussir's FFI boundary, an index for an enumeration, otherwise an <code>ElemBox</code>.</dd>
 <dt><code>ElemBox</code></dt>

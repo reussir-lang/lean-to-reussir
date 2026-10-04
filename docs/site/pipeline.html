@@ -9,7 +9,7 @@
 <body>
 <header class="top">
   <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
-  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html" class="here">Pipeline</a><a href="representations.html">Representations</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
+  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html" class="here">Pipeline</a><a href="representations.html">Representations</a><a href="dependent-types.html">Dependent types</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
 </header>
 <div class="layout">
   <aside class="toc"><div class="tochead">On this page</div><div class="toc">
@@ -184,6 +184,8 @@ because no conversion exists there.</p>
 <p><strong>When a type is not statically known.</strong> Then the uniform type <code>L2RBox</code>
 takes its place (see <a href="representations.html#the-uniform-type-l2rbox">Representations</a>):</p>
 <ul>
+<li>a type that depends on a run-time value: Lean's base code already has
+  <code>lcAny</code> there (see <a href="dependent-types.html">Dependent types</a>);</li>
 <li>a type argument that is not fully known: the instance is made at <code>lcAny</code>;</li>
 <li>polymorphic recursion: a request at a type that strictly contains the
   type of an instance on the same path goes to the <em>uniform instance</em>
