@@ -1,5 +1,5 @@
-/-! Runtime test: a call that Lean's CSE merges across types (XT-6, leanrs
-A482). Lean's mono-phase `cse` compares values with type arguments erased,
+/-! Runtime test: a call that Lean's CSE merges across types (cross-test XT-6,
+fixture A482). Lean's mono-phase `cse` compares values with type arguments erased,
 so `gp xs none` used as an `Option String` and later as an
 `Option (Nat → Nat)` is one call: its panic prints once. Stage 1 made an
 instance per type, so the call ran twice and the panic printed twice. The

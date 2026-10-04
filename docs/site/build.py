@@ -56,8 +56,14 @@ PAGES = [
 ]
 
 # Strings that must not appear in the site (its sources or its pages):
-# local paths, private notes, private projects.
-FORBIDDEN = ["/home/", "l2r-scratch", "leanrs", "lean-program-extraction", "docs/local"]
+# local paths and private notes. More strings, one per line, can be listed
+# in docs/local/site-forbidden.txt (not in git), so that the list itself
+# names nothing private.
+FORBIDDEN = ["/home/", "l2r-scratch", "docs/local"]
+_LOCAL_FORBIDDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "local", "site-forbidden.txt")
+if os.path.exists(_LOCAL_FORBIDDEN):
+    with open(_LOCAL_FORBIDDEN, encoding="utf-8") as _f:
+        FORBIDDEN += [line.strip() for line in _f if line.strip() and not line.startswith("#")]
 
 WARNINGS = []
 

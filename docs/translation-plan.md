@@ -262,7 +262,7 @@ as they are; extern instances and instances (dictionary builders) compute
 nothing observable and keep their per-type instances. Lean's closed-term
 cache compares types, so closed calls at two types in two declarations stay
 two closed terms, natively too; after the merge, one declaration's call
-reads the other's closed term as natively (XT-6, leanrs A482; review XT6-01,
+reads the other's closed term as natively (cross-test XT-6, fixture A482; review XT6-01,
 XT6-02, XT6-03, XT6-04; tests `RtCseAcrossTypes`, `RtCseFnValues`,
 `RtCseResidual`, `RtCseFnField`, `RtCseFnTrivial`).
 
@@ -3318,3 +3318,10 @@ difference, it pins native's output and lean2rr's in expectation files,
   `evalConst`, `Dynlib`, the LLVM bindings, …): a program that reaches one
   fails the same way; a program that only uses data structures from
   `Lean` builds.
+- Mathlib, and programs that import it: Mathlib's module initializers
+  reach the `Lean` library's C++ externs (CSLib's reach 32), so such a
+  program fails the same way. Mathlib is not a target. Computational code
+  from such a library is: written as a program that imports only `Init`
+  and `Std`, it translates like any other (CSLib's algorithms, such as
+  insertion sort and merge sort, run identical to native; round 9
+  RV9S-03).

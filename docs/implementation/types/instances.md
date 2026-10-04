@@ -56,8 +56,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   an inductive (`Quot`, an opaque type), or anything unclassified refuse.
   Nothing changes in an instance without such a pair.
 - **Why:** Natively the two calls are one after erasure and run once; two
-  instances ran twice, so a panic or trace in them printed twice (XT-6,
-  leanrs A482; the dictionary and `Subtype` shapes: review XT6-02).
+  instances ran twice, so a panic or trace in them printed twice (cross-test
+  XT-6, fixture A482; the dictionary and `Subtype` shapes: review XT6-02).
   Aligning to the earlier call (not to `lcAny`) keeps its type, as the
   merged variable has natively, so Lean's type-sensitive closed-term cache
   shares terms with other declarations as natively. A function value is one

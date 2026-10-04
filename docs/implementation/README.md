@@ -29,7 +29,7 @@ Paths in "Where" are relative to `lean2rr/LeanToReussir/` unless a file
 says otherwise; runtime paths start with `runtime/`. Finding ids name
 adversarial review rounds (adv2-adv5, round 6 `RV6…`/`IO6…`/`TY6…`,
 round 7 `RV7…`, round 8 `RV8…`, round 9 `RV9…` with the reviews of its
-fixes `C01R…`-`C03R…`), the cross-tests with leanrs (`XT-…`, their reviews
+fixes `C01R…`-`C03R…`), the cross-tests on external fixtures (`XT-…`, their reviews
 `XT6-…`) and the reviews of merged branches (`RVPB-…`, `RVA-…`,
 `L434-…`); short hashes are commits on `dev` or on the branches merged
 into it. Reussir bugs link to
