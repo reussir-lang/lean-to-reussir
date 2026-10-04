@@ -133,8 +133,8 @@ Liasolver 5.8 MB, within a few hundred KB of the two-allocation layout
 | Lean | Representation | Notes |
 |---|---|---|
 | `String` | runtime `LStr`: one block like Lean's string object (reference count, byte size, capacity, character count, then the UTF-8 bytes) | copy-on-write: modified in place when unique, like Lean |
-| `Array α` | runtime vector of `α`'s storage type | in place when unique; enumerations stored as small indices; non-shareable values wrapped in a one-field box (Lean boxes elements too) |
-| `ByteArray`, `FloatArray` | `Vec<u8>`, `Vec<f64>` | |
+| `Array α` | runtime vector of `α`'s storage type: one block, header (count, size, capacity) then the elements | in place when unique; enumerations stored as small indices; non-shareable values wrapped in a one-field box (Lean boxes elements too) |
+| `ByteArray`, `FloatArray` | arrays of `u8`, `f64` | `ByteArray.mk`/`data` cost nothing |
 | `IO.Ref α` / `ST.Ref` | a shared mutable cell | mutations seen through every alias, as in Lean |
 | `Thunk α`, `Task α` | a shared cell holding a state machine (pending / running / done) | lazy, computed once |
 | file handles, processes, sockets, timers | runtime handles | closed when the last reference goes, as in Lean |
@@ -327,12 +327,12 @@ structure (a long list, a deep tree, nested arrays) uses a stack of
 pending work instead of recursion, as Lean does, so it never overflows the
 stack; resources inside (file handles) are closed in Lean's order. Memory
 use is usually at or below native (Reussir's records and reuse are
-tighter), except for generic arrays: an
-`Array α` other than `Array Nat`/`Int`, `ByteArray` or `FloatArray` is a
-counted box plus a separate element buffer (8 bytes and one allocation more
-than Lean's single array object). Strings and `Array Nat`/`Array Int` are
-single blocks with Lean's own header sizes (six million three-element
-`Array Nat` rows: 328 MB, native 330 MB).
+tighter). Strings and arrays are single blocks with Lean's own header
+sizes (six million three-element `Array Nat` rows: 328 MB, native
+330 MB). Like natively, a hash table of 2^21 buckets (`Std.HashMap` with
+about a million keys) needs a block just past mimalloc's large-object
+limit, which is returned to the system late: such programs peak up to a
+quarter higher than they did when arrays kept their elements apart.
 
 ## What is not supported, or differs from native
 
