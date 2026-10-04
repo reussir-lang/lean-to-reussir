@@ -37,7 +37,7 @@ same standard output, standard error and exit code.
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (275 programs, `tests/runtime`) | at its last full run (branch `use-lean-runtime`, 2026-10-04, before `RtHygSpecName` and the five CSLib tests `RtCsl*` were added), 266 of 269 identical to native Lean 4.34.0, three of them through expectation files where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`; plan §10, "Runtime: Lean bugs we do not reproduce"); 3 expected failures: `RtCseFnResult` (plan §10, "Merging after erasure"), `RtTaskRunawayPureStarted` and `RtFdStartupNoUring` (until lean2rr adopts lean-runtime's scheduler and startup) |
+| Runtime test suite (277 programs, `tests/runtime`) | at its last full run (branch `fix-lb15-17`, 2026-10-04), 274 of 277 identical to native Lean 4.34.0, five of them through expectation files where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`; plan §10, "Runtime: Lean bugs we do not reproduce"); 3 expected failures: `RtCseFnResult` (plan §10, "Merging after erasure"), `RtTaskRunawayPureStarted` and `RtFdStartupNoUring` (until lean2rr adopts lean-runtime's scheduler and startup) |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
@@ -375,7 +375,11 @@ with examples, is §10 of the translation plan.
   pending output first, where natively glibc drops it (LB-02); an error
   without a file name (`getCurrentDir` after its directory was removed) is
   the class's `IO.Error` with an empty file name, where natively the
-  program crashes (LB-03).
+  program crashes (LB-03); a child's `null` stream leaves the program no
+  extra descriptor on `/dev/null` (natively one per `null` stream, LB-15),
+  and when `/dev/null` cannot be opened the spawn fails with `EMFILE`,
+  where natively the program silently gets the parent's own stream
+  (LB-17).
 - **A program's own C code is not supported.** A program that implements
   some of its own `@[extern]` declarations in C (built by Lake) fails at
   the rrc build with an unknown function: lean2rr links no C code of the

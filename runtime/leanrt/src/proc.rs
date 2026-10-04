@@ -4,6 +4,13 @@
 //! child's stdin, "r" for its stdout/stderr), `waitpid` with bash's
 //! `128 + signal` convention, `kill`/`killpg` with `SIGKILL`.
 //!
+//! One deliberate difference: a `null` stream's `/dev/null` is opened by the
+//! parent, close-on-exec, before the fork, where Lean's forked child opens
+//! it, keeps the descriptor (the program inherits it, LB-15) and ignores a
+//! failed open (the program then runs on the parent's own stream, LB-17);
+//! both are bugs in Lean's runtime (lean-runtime's docs/lean-bugs.md) that
+//! lean2rr does not reproduce.
+//!
 //! Errors are recorded in the last-error slot as `decode_io_error(errno,
 //! nullptr)` (no file name).
 
@@ -19,6 +26,7 @@ extern "C" {
     fn dup2(old: c_int, new: c_int) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+    fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     fn chdir(path: *const c_char) -> c_int;
     fn setsid() -> c_int;
     fn clearenv() -> c_int;
@@ -32,7 +40,10 @@ extern "C" {
     fn abort() -> !;
 }
 
+const O_RDONLY: c_int = 0;
+const O_WRONLY: c_int = 1;
 const O_CLOEXEC: c_int = 0o2000000;
+const F_SETFD: c_int = 2;
 const WNOHANG: c_int = 1;
 const SIGKILL: c_int = 9;
 
@@ -107,6 +118,36 @@ pub fn spawn(
             pipes[i] = Some(fds);
         }
     }
+    // `null` streams: `/dev/null` (read-only for stdin, write-only
+    // otherwise), opened here, close-on-exec, after the pipes, so that the
+    // pipes get native's descriptor numbers; the parent closes them again
+    // after the fork. Natively the forked child opens it without
+    // close-on-exec and never closes it after `dup2`, so the program inherits
+    // an extra descriptor (LB-15), and ignores a failed open, so the program
+    // runs on the parent's own descriptor (LB-17). Here a failed open (EMFILE
+    // in a parent out of descriptors) is the spawn's error, as a failed pipe
+    // is; nothing natively corresponds to it, so the pipes and `/dev/null`
+    // descriptors made so far are closed (a failed `pipe2` leaks the earlier
+    // pipes, as natively). A spawn in which some `null` stream follows a
+    // piped one therefore needs exactly one more free descriptor than
+    // natively (one in all, however many such streams), where the child has
+    // closed the pipe's other end before its open; any other spawn needs as
+    // many (review RLB-01).
+    let mut nulls: [c_int; 3] = [-1; 3];
+    let dev_null = b"/dev/null\0";
+    for i in 0..3 {
+        if mode[i] == NUL {
+            let flags = if i == 0 { O_RDONLY } else { O_WRONLY };
+            let fd = unsafe { open(dev_null.as_ptr() as *const c_char, flags | O_CLOEXEC) };
+            if fd == -1 {
+                let errno = errno_now();
+                close_all(&nulls, &pipes);
+                set_err(errno, None);
+                return 0;
+            }
+            nulls[i] = fd;
+        }
+    }
     // Everything the child needs, allocated before `fork`.
     let cmd_c = cstr(cmd);
     let args_c: Vec<Vec<u8>> = args.iter().map(|a| cstr(a)).collect();
@@ -115,7 +156,6 @@ pub fn spawn(
     argv.push(std::ptr::null());
     let env_c: Vec<(Vec<u8>, Option<Vec<u8>>)> = env.iter().map(|(k, v)| (cstr(k), v.map(cstr))).collect();
     let cwd_c = cwd.map(cstr);
-    let dev_null = b"/dev/null\0";
     let pid = unsafe { fork() };
     if pid == 0 {
         unsafe {
@@ -139,8 +179,15 @@ pub fn spawn(
                         close(r);
                     }
                 } else if mode[i] == NUL {
-                    let fd = open(dev_null.as_ptr() as *const c_char, if i == 0 { 0 } else { 1 });
-                    dup2(fd, target);
+                    // `dup2`'s copy is not close-on-exec; where `/dev/null`
+                    // got number i itself (descriptor i was closed in the
+                    // parent), the flag is cleared in place.
+                    let fd = nulls[i];
+                    if fd == target {
+                        fcntl(fd, F_SETFD, 0 as c_int);
+                    } else {
+                        dup2(fd, target);
+                    }
                 }
             }
             if let Some(d) = &cwd_c {
@@ -155,9 +202,13 @@ pub fn spawn(
             child_fail(&[b"could not execute external process '", &cmd_c[..cmd_c.len() - 1], b"'\n"]);
         }
     } else if pid == -1 {
-        set_err(errno_now(), None);
+        // Native leaks the pipes; the `/dev/null` descriptors are ours.
+        let errno = errno_now();
+        close_all(&nulls, &[None, None, None]);
+        set_err(errno, None);
         return 0;
     }
+    close_all(&nulls, &[None, None, None]);
     for i in 0..3 {
         if let Some([r, w]) = pipes[i] {
             let (keep, other, flags) = if i == 0 { (w, r, NO_READS) } else { (r, w, NO_WRITES) };
@@ -167,6 +218,21 @@ pub fn spawn(
     }
     set_ok();
     pid as u32
+}
+
+/// Closes the open descriptors among `nulls` (-1: none) and `pipes`.
+fn close_all(nulls: &[c_int; 3], pipes: &[Option<[c_int; 2]>; 3]) {
+    for &fd in nulls {
+        if fd != -1 {
+            unsafe { close(fd) };
+        }
+    }
+    for [r, w] in pipes.iter().flatten() {
+        unsafe {
+            close(*r);
+            close(*w);
+        }
+    }
 }
 
 /// The parent's end of stream `i` (0 stdin, 1 stdout, 2 stderr) of the last

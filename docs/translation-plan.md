@@ -3214,12 +3214,12 @@ Each item says what differs and when.
 [docs/lean-bugs.md](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md); both translators and
 lean-runtime do the right thing instead; where a runtime test shows the
 difference, it pins native's output and lean2rr's in expectation files,
-`NAME.native.*` and `NAME.l2r.*`. The lean-runtime cases, on its branch
-`cases-xt` (merging into lean-runtime main): `refs/lost_update` (LB-01),
-`io/read_after_write` (LB-02), `io/error_without_file_name` and
-`io/temp_file_error` (LB-03))
+`NAME.native.*` and `NAME.l2r.*`. The lean-runtime cases:
+`refs/lost_update` (LB-01), `io/read_after_write` (LB-02),
+`io/error_without_file_name` and `io/temp_file_error` (LB-03),
+`process/null_fd_leak` (LB-15), `process/null_open_fails` (LB-17))
 - *LB-01, a concurrent `IO.Ref.set` can be lost*
-  ([LB-01](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-01-a-concurrent-ioref-set-can-be-lost);
+  ([LB-01](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-01-a-concurrent-iorefset-can-be-lost);
   fixed upstream in Lean 4.35): natively `lean_st_ref_get` takes the value
   out of a reference shared between threads and puts it back with an
   unconditional exchange, so a `set` from another thread that lands in
@@ -3257,6 +3257,35 @@ difference, it pins native's output and lean2rr's in expectation files,
   `fputs`), reading `/dev/urandom` (`IO.getRandomBytes`), and the
   libuv-based ones (`createTempFile`, `createTempDir` with `TMPDIR` naming
   a missing directory). Test `RtErrorNoFileName`.
+- *LB-15, a `null` stream leaks a `/dev/null` descriptor*
+  ([LB-15](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-15-a-null-stream-leaks-a-devnull-descriptor-into-the-program)):
+  natively the forked child opens `/dev/null` for each `null` stream
+  without close-on-exec and never closes it after `dup2`, so the program
+  (and every program it starts) has one more descriptor on `/dev/null` per
+  `null` stream, at the lowest number free in the child; a program that
+  audits its descriptors reports it. `IO.Process.output` without input
+  spawns with `stdin := .null`, so every program it runs gets one. lean2rr
+  opens `/dev/null` in the parent, close-on-exec, before the fork, and the
+  child `dup2`s it: the program starts with its standard streams and what
+  the parent inherited, as with `piped`. Test `RtProcessNullFd`.
+- *LB-17, a `null` stream falls back to the parent's stream*
+  ([LB-17](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-17-a-null-stream-falls-back-to-the-parents-stream-when-devnull-cannot-be-opened)):
+  natively a failed `open("/dev/null")` in the forked child (the parent's
+  descriptors exhausted: `EMFILE`) is ignored, the `dup2` fails, and the
+  program runs on the parent's own descriptor: a `null` stdout writes on
+  the parent's standard output, a `null` stdin reads the parent's input
+  (`IO.Process.Stdio.null`: "The stream should be empty"). In lean2rr the
+  parent's failed open is the spawn's error, as a failed pipe is
+  (`resource exhausted (error code: 24, too many open files)`), and the
+  pipes the spawn made are closed again (a failed `pipe2` leaks the
+  earlier ones, as natively). Because the parent opens `/dev/null`, a
+  spawn in which some `null` stream follows a piped one needs exactly one
+  more free descriptor than natively (one in all, however many such
+  streams), where the child has closed the pipe's other end before its
+  open: with a piped stdout, `stderr := .null` and two free descriptors,
+  the spawn succeeds natively and fails with `EMFILE` here. Any other
+  spawn needs as many free descriptors as natively. Test
+  `RtProcessNullOpenFails`.
 
 **Diagnostics**
 - lean2rr's own impossibilities (a `Box` unwrap of another variant, a cast

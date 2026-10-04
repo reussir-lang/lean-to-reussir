@@ -1,0 +1,5 @@
+stdin piped: 0-2 pipe-r pipe-w other; above 2: extra [], missing []
+stdin null: 0-2 null-r pipe-w other; above 2: extra [/dev/null], missing []
+stdin null, stderr null: 0-2 null-r pipe-w null-w; above 2: extra [/dev/null, /dev/null], missing []
+stdout null: 0-2 pipe-r null-w pipe-w; above 2: extra [/dev/null], missing []
+IO.Process.output: 0-2 null-r pipe-w pipe-w; above 2: extra [/dev/null], missing []

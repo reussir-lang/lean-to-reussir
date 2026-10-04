@@ -149,6 +149,52 @@ Paths are relative to the repository root.
   reproduce".
 - **Remove only if:** the owner rules to follow native here after all.
 
+### A child's `null` stream is `/dev/null` opened by the parent
+
+- **What:** For each `null` stream of `IO.Process.spawn` (so also
+  `IO.Process.output`'s stdin without input), `proc::spawn` opens
+  `/dev/null` in the parent (read-only for stdin, write-only otherwise)
+  with `O_CLOEXEC`, after the pipes and before `fork`; the child `dup2`s
+  it onto 0, 1 or 2 (where it got that very number, because the
+  descriptor was closed in the parent, the child clears close-on-exec with
+  `fcntl` instead), and the parent closes its copies after the fork. A
+  failed open (`EMFILE`) is the spawn's error, recorded as
+  `decode_io_error(errno, nullptr)` like a failed `pipe2`, and the pipes
+  and `/dev/null` descriptors made so far are closed. Everything else
+  follows `process.cpp`, including its leak of the pipes when a later
+  `pipe2` or the `fork` fails.
+- **Why:** Natively the forked child opens `/dev/null` without
+  close-on-exec and never closes it after `dup2`, so the program inherits
+  one more descriptor per `null` stream (LB-15), and it ignores a failed
+  open, so `dup2(-1, n)` fails and the program runs on the parent's own
+  descriptor n: a `null` stdout writes on the parent's standard output, a
+  `null` stdin reads the parent's input (LB-17). Both are judged Lean
+  runtime bugs in lean-runtime's
+  [docs/lean-bugs.md](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md),
+  not reproduced (plan §10). The open has to be the parent's for its
+  failure to be the spawn's error. Opening after the pipes keeps the
+  pipes' descriptor numbers native's, and the parent's descriptors after
+  the spawn are native's. One consequence: a spawn in which some `null`
+  stream follows a piped one needs exactly one more free descriptor than
+  natively (one in all, however many such streams), since the forked
+  child has closed that pipe's other end by the time it opens `/dev/null`,
+  where the parent holds both ends (stdout piped and stderr `null` with two
+  free descriptors: natively the spawn succeeds, here it fails with
+  `EMFILE`); any other spawn needs as many as natively. Deferring the
+  open to the child after an `EMFILE` would close the gap at the cost of a
+  second path (lean-runtime has the same property); not worth it for a
+  process out of descriptors (review RLB-01). Nothing natively corresponds
+  to the failed open, so it leaks nothing. Tests `RtProcessNullFd` (the
+  child lists its descriptors; numbers dropped, 0-2 by kind and access
+  mode, those above 2 compared with a child that has no `null` stream) and
+  `RtProcessNullOpenFails` (under `ulimit -n 64`, the handles kept open to
+  the end; then two, three and again two free descriptors, counted before
+  and after each spawn), with expectation files
+  `NAME.native.out`/`NAME.l2r.out`.
+- **Where:** `runtime/leanrt/src/proc.rs`: `spawn` (`nulls`), `close_all`;
+  plan §10, "Runtime: Lean bugs we do not reproduce".
+- **Remove only if:** the owner rules to follow native here after all.
+
 ### `System.Platform.target` follows leanrt's target
 
 - **What:** `lean_system_platform_target` returns

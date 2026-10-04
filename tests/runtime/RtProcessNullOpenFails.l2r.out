@@ -1,0 +1,16 @@
+stdout null:
+  spawn failed: resource exhausted (error code: 24, too many open files)
+stdin null:
+  spawn failed: resource exhausted (error code: 24, too many open files)
+parent reads: line1
+stdin null, stdout piped, 2 descriptors free:
+  spawn failed: resource exhausted (error code: 24, too many open files)
+  descriptors free afterwards: 2
+stdin null, stdout piped, 3 descriptors free:
+  child: no input
+  exit 0
+  descriptors free afterwards: 3
+stdout piped, stderr null, 2 descriptors free:
+  spawn failed: resource exhausted (error code: 24, too many open files)
+  descriptors free afterwards: 2
+handles kept open: true

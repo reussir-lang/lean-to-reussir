@@ -654,7 +654,9 @@ of `IO.FS.Stream`): `l2r_stream_putStr(fd, s)`, `l2r_stream_write(fd, b)`,
 closed at startup); `l2r_stream_isTty(fd)` cannot fail.
 
 **Child processes** (`src/runtime/process.cpp`: `fork` + `execvp`, pipes
-with `O_CLOEXEC`, stdout flushed first when the child inherits stdin):
+with `O_CLOEXEC`, stdout flushed first when the child inherits stdin; a
+`null` stream's `/dev/null` is opened by the parent with `O_CLOEXEC`, see
+"Known divergences from native Lean"):
 `l2r_proc_spawn(cmd, args, cwd, has_cwd, env_names, env_values, env_set,
 modes, inherit_env, setsid) -> u32` (the pid; fallible; `modes` = stdin |
 stdout << 8 | stderr << 16 as `IO.Process.Stdio` indices; `env` as parallel
@@ -850,6 +852,18 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   natively glibc drops the pending bytes (LB-02 in
   lean-runtime's docs/lean-bugs.md; plan §10, "Runtime: Lean bugs we do
   not reproduce").
+- A child's `null` stream is `/dev/null` opened by the parent,
+  close-on-exec, before the fork (`proc::spawn`), so the program inherits
+  no extra descriptor, and a failed open (`EMFILE`) is the spawn's error,
+  as a failed pipe is (the pipes made so far are closed). Natively the
+  forked child opens it, keeps the descriptor open across `execvp` (LB-15),
+  and ignores a failed open, so the program then runs on the parent's own
+  stream (LB-17; both in lean-runtime's docs/lean-bugs.md; plan §10).
+  So a spawn in which some `null` stream follows a piped one needs exactly
+  one more free descriptor than natively (one in all, however many such
+  streams), where the child has closed the pipe's other end before its
+  open; any other spawn needs as many. Tests `RtProcessNullFd`,
+  `RtProcessNullOpenFails`.
 - Panics print `backtrace:` and `(stack trace unavailable)` instead of a
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`, and

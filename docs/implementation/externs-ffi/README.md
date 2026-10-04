@@ -15,8 +15,9 @@ runtime's conventions are in [`runtime/README.md`](../../../runtime/README.md)
 - [shim.md](shim.md): `L2RShim`, lean2rr's Lean library for
   `Std.Internal.UV`, time, `ShareCommon`, and definitions it replaces.
 - [runtime.md](runtime.md): special cases inside the runtime's own
-  implementation of single externs (libm, huge array sizes,
-  `System.Platform.target`), the glue around lean-runtime's rules, and how
-  leanrt is built with the shared crate lean-runtime.
+  implementation of single externs (libm, huge array sizes, a read right
+  after output, a child's `null` streams, `System.Platform.target`), the
+  glue around lean-runtime's rules, and how leanrt is built with the shared
+  crate lean-runtime.
 - [c-ffi.md](c-ffi.md): calling the program's C code (parked, branches
   `ffi-c` and `lean-externs`).

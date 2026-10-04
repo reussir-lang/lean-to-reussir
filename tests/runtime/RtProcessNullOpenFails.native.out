@@ -1,0 +1,19 @@
+stdout null:
+  child: written to the parent
+  exit 0
+stdin null:
+  child: read line1
+  exit 0
+parent reads: line2
+stdin null, stdout piped, 2 descriptors free:
+  exit 0
+  descriptors free afterwards: 2
+stdin null, stdout piped, 3 descriptors free:
+  child: no input
+  exit 0
+  descriptors free afterwards: 3
+stdout piped, stderr null, 2 descriptors free:
+  child: stdout
+  exit 0
+  descriptors free afterwards: 2
+handles kept open: true

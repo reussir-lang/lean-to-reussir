@@ -1,0 +1,1 @@
+printf 'line1\nline2\n' | (ulimit -n 64; exec $BIN)
