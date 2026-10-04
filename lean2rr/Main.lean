@@ -85,11 +85,12 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
     | some p => IO.FS.readFile p
     | none => pure ""
   -- Stage 1: monomorphize from `main`, the entry point's roots and the
-  -- startup items (constants, `initialize` actions). The prelude's
-  -- functions tell which symbols lean2rr's runtime implements (the message
-  -- of a refused extern, `Mono.computeExternRoute`).
-  let items ← startupItems opts.root
-  let (rootInsts, st) ← monomorphize (programRoots opts.root items)
+  -- startup items (the program's constants and `initialize` actions, and
+  -- the `initialize` declarations of Lean's library, in Lean's module
+  -- order). The prelude's functions tell which symbols lean2rr's runtime
+  -- implements (the message of a refused extern, `Mono.computeExternRoute`).
+  let (leanInit, items) ← startupItems opts.root
+  let (rootInsts, st) ← monomorphize (programRoots opts.root leanInit items)
     { preludeFns := ← preludeFnDeclsM prelude }
   -- The externs of the program that run their Lean definition (natively
   -- their C code runs): a note of the build, on lean2rr's stderr (the
@@ -119,7 +120,7 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   -- reaches (`main`, the error printer, the startup steps).
   let mainInst := rootInsts[0]!
   let errStr := rootInsts[1]!
-  let startup ← startupSteps items rootInsts st
+  let startup ← startupSteps leanInit items rootInsts st
   let roots := entryCallees mainInst errStr startup
   let table ← programRelevance decls
   let (decls, keys) ← retypeMono cfg.stage2 cfg.stage3 table decls st.keys roots

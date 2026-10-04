@@ -181,7 +181,8 @@ The roots are:
 - `main`;
 - everything that runs at startup (§5.12): every zero-parameter
   declaration of the program's modules, and the `initialize` actions and
-  the init functions of `initialize` constants;
+  the init functions of `initialize` constants, of the program's modules
+  and of the `Init` and `Std` modules that natively are initialized;
 - `IO.Error.toString`, which the entry point uses to report an uncaught
   exception (§5.11);
 - the `IO.Error` builders, once the program reaches a fallible IO extern
@@ -2181,22 +2182,63 @@ are equal. For the made-up names of one quotation, only the macro's own
 definition (its code) holds the order.
 
 Our translation runs, before `main`, the startup work of Lean's module
-initializers:
-- for each program module that natively is initialized, in Lean's module
-  order (below), for each of its declarations that natively runs, in the
-  order above:
+initializers, for each module that natively is initialized, in Lean's
+module order (below; the toolchain's modules included):
+- for a program module, for each of its declarations that natively runs,
+  in the order above:
   - an `initialize` action (`initialize do …`) is run;
   - for `initialize c : T ← act`, `act` is run and its result stored as
     `c`, which the program reads from a once-cell;
   - any other zero-parameter declaration of the module's base-phase code
     (the persisted base LCNF, so generated declarations are included),
     instances included, is evaluated;
-- before those, the `initialize` constants of toolchain modules that the
-  program uses (`IO.stdGenRef`), in module order.
+- for a module of `Init` or `Std`, its `initialize` declarations, in
+  source order, used or not;
+- for any other toolchain module (the `Lean` package's), nothing.
+In a program that uses the `Lean` package (a module of it is among the
+modules initialized), the initializer of `main`'s module natively calls
+`lean_initialize()` first (`emitInitFn`), so before anything else all of
+`Init`, then all of `Std`, then all of `Lean` are initialized
+(`initialize_Init`, `initialize_Std`, `initialize_Lean`), whatever the
+program imports: lean2rr runs the `initialize` declarations of `Init` and
+`Std` first (loading the modules `Init` and `Std` when the program's
+imports do not reach them), then the `Lean` package's `initialize`
+constants that the program uses (§10), then the rest of the walk.
 An error from an initializer is reported like an uncaught exception of
-`main` (the message, exit code 1), and later initializers do not run.
-Toolchain constants are evaluated lazily, once: native Lean evaluates all
-of them at startup without any visible effect. Closed terms are lazy, once.
+`main` (the message, exit code 1), and later initializers do not run
+(natively, in a program that uses the `Lean` package, an error in
+`lean_initialize()` aborts instead; §10).
+
+The other toolchain constants are evaluated lazily, once, on first use:
+native Lean evaluates all of them at startup, but they are pure, so the
+time of their evaluation does not show. An initializer is an action, and
+its effects show whether or not the program uses its constant. Lean
+4.34.0's `Init` and `Std` have one, `IO.stdGenRef` (`Init/Data/Random.lean`:
+`IO.getRandomBytes 8` seeds `IO.rand`'s generator), which every program
+that imports `Init` runs, as does a program that uses the `Lean` package
+(`lean_initialize()`); a `prelude` program runs it only when its imports
+reach `Init.Data.Random`, at that module's place. It opens and reads
+`/dev/urandom`, and when no descriptor is left (`ulimit -n 11`, libuv's 8
+descriptors taking 3 to 10) the program stops before the initializers
+after it with
+
+    uncaught exception: resource exhausted (error code: 24, too many open files)
+      file: /dev/urandom
+
+and exit code 1. lean2rr ran it only when the program used `IO.rand`, so a
+program that did not ran `main` there (test `RtStartupInitUrandom`). It
+then ran it before every program initializer, where natively a `prelude`
+program's module that its imports list before `Init.Data.Random` is
+initialized first (review RSG-01, test `RtStartupInitOrder`), and not at
+all in a `prelude` program that imports a module of the `Lean` package
+but not `Init.Data.Random` (RSG-02, test `RtStartupInitLeanPkg`). `IO.rand`
+reads the generator from its once-cell and never seeds it again (test
+`RtStartupInitRand`). Running these initializers costs a few functions per
+program (the initializer, `IO.mkRef`, `mkStdGen`, `ByteArray.toUInt64LE!`
+and its panic message). The search covered every constant of `Init` and
+`Std` with an `[init]` or `[builtin_init]` attribute; `Std`'s other modules
+add no system call at startup (`strace` of a native `import Std` program).
+Closed terms are lazy, once.
 
 Which modules and declarations run, and in which order, follows `EmitC`
 (`emitMainFn`, `emitInitFn`, `emitLegacyInitFn`; `startupModules`,
@@ -2924,10 +2966,10 @@ Each item says what differs and when.
   `Lake.*` or `L2RShim.*` (natively allowed when the program does not
   import the toolchain's module of that name) is rejected, as is a
   directory `L2RShim` on the search path: lean2rr takes such modules for
-  Lean's library or its own shim (constants evaluated lazily,
-  initializers run by the runtime, `unsafe` code trusted, §5.1, §5.12). A
-  module of those names is the library's when its files (`.olean`, and
-  the `.olean.server` and `.olean.private` parts) are the same files as
+  Lean's library or its own shim (constants evaluated lazily, only
+  `initialize` declarations run at startup, `unsafe` code trusted, §5.1,
+  §5.12). A module of those names is the library's when its files
+  (`.olean`, and the `.olean.server` and `.olean.private` parts) are the same files as
   those of the module of that name in the library of the toolchain
   lean2rr is built with (or in the shim directory), reached by any path: a
   symbolic link, hard links or a copy are accepted. lean2rr reads that toolchain's
@@ -3532,6 +3574,42 @@ extern)
   yet, so a program that reaches one is rejected (their Lean bodies are not
   used in their place); a program that only uses data structures from
   `Lean` builds.
+- The `Lean` package's initializers (thousands of `builtin_initialize`
+  declarations that register extensions, attributes and options; 19
+  `initialize` ones in Lean 4.34.0), which natively all run
+  (`lean_initialize()`) when a program imports a module of `Lean`: lean2rr
+  runs only the `initialize` constants that the program reads, at startup
+  after those of `Init` and `Std` (§5.12). Their effects are registrations
+  in the state of Lean's compiler and elaborator, which a program that only
+  uses data structures from `Lean` does not read; natively such a program
+  also queries the stack limit and the number of CPUs once more at startup
+  (`strace`).
+- An error in an initializer of `Init` or `Std` in a program that uses the
+  `Lean` package: natively `lean_initialize()` runs those initializers
+  through `consume_io_result`, which turns the error into a C++ exception
+  that nothing catches, and the program aborts (status 134):
+
+      libc++abi: terminating due to uncaught exception of type lean::exception: resource exhausted (error code: 24, too many open files)
+        file: /dev/urandom
+
+  lean2rr reports it as for any other program, `uncaught exception:
+  resource exhausted …` and exit code 1 (review RSG-03; test
+  `RtStartupInitLeanPkg`, with expectation files). Such programs are not a
+  target, and an abort is not behaviour to copy.
+- Where `lean_initialize()` runs, in a program that uses the `Lean`
+  package: natively each module whose own imports use `Lean` calls it at
+  the start of its own initializer; lean2rr runs `Init`'s and `Std`'s
+  initializers first whenever any module of the program uses `Lean`. The
+  order differs only in a `prelude` program that reaches `Lean` through a
+  private import of a `module` file imported after another program module
+  with an initializer: natively that module's initializer runs before
+  `IO.stdGenRef`, in lean2rr after it (review RSG2-01; visible only when
+  that initializer prints or fails, or `IO.stdGenRef` fails).
+- Loading a program that imports part of the `Lean` package but not `Init`
+  or `Std` whole: lean2rr loads `Init` and `Std` as well, to find their
+  initializers, which doubles its peak memory for such a program (about
+  0.5 GB to 1.2 GB) and can change the advice in its build notes (review
+  RSG2-02). The translated program does not change.
 - Mathlib, and programs that import it: Mathlib's module initializers
   reach the `Lean` library's C++ externs (CSLib's reach 32), so such a
   program fails the same way. Mathlib is not a target. Computational code

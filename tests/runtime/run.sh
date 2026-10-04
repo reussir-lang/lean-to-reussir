@@ -19,11 +19,18 @@
 #   NAME.l2r.out, NAME.l2r.err, NAME.l2r.code
 #               a documented, intended difference from native (a Lean
 #               runtime bug lean2rr does not reproduce, plan §10 "Runtime:
-#               Lean bugs we do not reproduce"): that stream of lean2rr's run
+#               Lean bugs we do not reproduce", or another item of plan
+#               §10): that stream of lean2rr's run
 #               is compared with this file, and the same stream of native's
 #               run with NAME.native.out/.err/.code, instead of with each
 #               other; the two files of a stream go together (one without
 #               the other fails the test: unpaired expectation file)
+#   NAME.deps   companion modules of the program, one name per line, each
+#               tests/runtime/<name>.lean (not named Rt*, so not a test):
+#               compiled in that order before NAME (the test's build
+#               directory first on LEAN_PATH), linked into the native build,
+#               found there by lean2rr; e.g. a module whose initializer must
+#               run first
 #   NAME.ffi.c  C code linked into the native build only: the C side of the
 #               test's own `@[extern]` declarations (lean2rr never uses C
 #               code other than Lean's runtime library: it compiles their
@@ -108,10 +115,14 @@ for t in "${TESTS[@]}"; do
   opts=${L2R_DISABLE_OPTS:-}
   [ -f "$HERE/$t.opts" ] && opts="$opts${opts:+,}$(tr -d ' \n' < "$HERE/$t.opts")"
   ffi=(); [ -f "$HERE/$t.ffi.c" ] && ffi=("$HERE/$t.ffi.c")
+  deps=(); [ -f "$HERE/$t.deps" ] && read -r -d '' -a deps < "$HERE/$t.deps"
+  for m in ${deps[@]+"${deps[@]}"}; do cp "$HERE/$m.lean" "$d/"; ffi+=("$m.c"); done
   status=ok; why=""
   # A translation lean2rr must refuse is only compiled by Lean, not linked.
   link=1; [ -f "$HERE/$t.refused" ] && link=""
-  if ! (cd "$d" && lean -o "$t.olean" -c "$t.c" "$t.lean" > build-native.log 2>&1 \
+  if ! (cd "$d" && { [ ${#deps[@]} -eq 0 ] || export LEAN_PATH=$d${LEAN_PATH:+:$LEAN_PATH}; } \
+        && for m in ${deps[@]+"${deps[@]}"}; do lean -o "$m.olean" -c "$m.c" "$m.lean" >> build-native.log 2>&1 || exit 1; done \
+        && lean -o "$t.olean" -c "$t.c" "$t.lean" >> build-native.log 2>&1 \
         && { [ -z "$link" ] || leanc -O3 -DNDEBUG "$t.c" ${ffi[@]+"${ffi[@]}"} -o native >> build-native.log 2>&1; }); then
     status=fail; why="native build failed (see $d/build-native.log)"
   elif [ -f "$HERE/$t.refused" ] && runfiles=$(cd "$HERE" && ls -d "$t".args "$t".stdin "$t".pipe "$t".ffi.c \

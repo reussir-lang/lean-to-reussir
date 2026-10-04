@@ -293,6 +293,9 @@ it draws on, with their copyright notices (Apache 2.0):
 | XT-6 (cross-test), XT6-01..XT6-04 | RtCseAcrossTypes, RtCseFnValues, RtCseResidual, RtCseFnField, RtCseFnTrivial, RtCseFnResult (expected failure) |
 | RVA-01 (review of perf-rvec) | RtReadIntoArray |
 | LR1-01 (lean-runtime's oracle rows) | RtStringExtractBig |
+| lean-runtime's case io/startup_fd_limit (`IO.stdGenRef`, the library's initializer, ran only when the program used it) | RtStartupInitUrandom, RtStartupInitRand |
+| RSG-01 (review of fix-stdgen: the library's initializers ran before the program's, not at their module's place) | RtStartupInitOrder (companion module `StartupInitOrderDep`, `RtStartupInitOrder.deps`) |
+| RSG-02, RSG-03 (a program that uses the `Lean` package: `lean_initialize()` runs `Init`'s initializers first; natively an error there aborts) | RtStartupInitLeanPkg (expectation files for RSG-03, plan §10) |
 | RV8E-01, RV8E-02, RV8E-05, RV8E-06 (rv8/ext, branch lean-externs) | RtExternNames, RtExternLeanPkg |
 | RV8E-03 | the `.l2r-log` files of the `RtExtern*` tests |
 | RV8E-04 | RtExternRefused |

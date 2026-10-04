@@ -50,9 +50,9 @@ into it. Reussir bugs link to
    shapes, join points (J1/J1′/J2/J3), state machines (J4), `Outline`.
 5. [ownership.md](ownership.md): borrow emulation, store-then-release
    reference sets, the drop stack, `ReleaseElems`, owned reads.
-6. [startup/](startup/README.md): module phases and initializer order,
-   constants and once-cells, closed-term chains, persist walks, the entry
-   point.
+6. [startup/](startup/README.md): module phases and initializer order
+   (the library's initializers included), constants and once-cells,
+   closed-term chains, persist walks, the entry point.
 7. [tasks/](tasks/README.md): thunk and task cells, deferral, `sync`
    dependents, the scheduler, polling, the stack guard, the event loop.
 8. [reussir-workarounds/](reussir-workarounds/README.md): each Reussir bug

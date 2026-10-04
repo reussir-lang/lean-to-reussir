@@ -17,31 +17,37 @@ open Lean Compiler LCNF
 def entryRoots : Array Name := #[``IO.Error.toString]
 
 /-- The roots Stage 1 starts from: `main`, the entry point's own roots
-(`entryRoots`), then the program's startup items. -/
-def programRoots (main : Name) (items : Array StartupItem) : Array Name :=
-  #[main] ++ entryRoots ++ items.map (·.root)
+(`entryRoots`), then the startup items (`startupItems`): those
+`lean_initialize()` runs first (`leanInit`), then the others. -/
+def programRoots (main : Name) (leanInit items : Array StartupItem) : Array Name :=
+  #[main] ++ entryRoots ++ (leanInit ++ items).map (·.root)
 
-/-- The startup steps, with instance names: the toolchain's `initialize`
-constants that the program uses (in module order: their modules come
-first), then the program's own startup items in order. `rootInsts` are the
-instances of `programRoots main items`, `st` Stage 1's state. -/
-def startupSteps (items : Array StartupItem) (rootInsts : Array Name) (st : MonoState) :
+/-- The startup steps, with instance names: in a program that uses the
+`Lean` package, what `lean_initialize()` runs first (`leanInit`: the
+initializers of `Init` and `Std`), then the `Lean` package's `initialize`
+constants that the program uses (in module order); then the startup items
+in order (`items`: the program's, and the initializers of `Init` and `Std`
+at their modules' places). `rootInsts` are the instances of
+`programRoots main leanInit items`, `st` Stage 1's state. -/
+def startupSteps (leanInit items : Array StartupItem) (rootInsts : Array Name) (st : MonoState) :
     CoreM (Array StartupStep) := do
-  let userInits := items.filterMap fun | .init d _ => some d | _ => none
+  let all := leanInit ++ items
+  let inits := all.filterMap fun | .init d _ => some d | _ => none
   let mut tool := #[]
   for (d, f) in st.initConsts do
-    unless userInits.contains d do
+    unless inits.contains d do
       let some inst := st.names[({ decl := f, typeArgs := #[] } : InstKey)]? | continue
       tool := tool.push (d, inst, ← declOrder d)
   let toolSorted := tool.qsort fun (_, _, k1) (_, _, k2) => lexLtNat k1 k2
   let base := 1 + entryRoots.size
-  let user := items.zipIdx.map fun (it, i) =>
+  let steps := all.zipIdx.map fun (it, i) =>
     let inst := rootInsts[base + i]!
     match it with
     | .caf _ => StartupStep.caf inst
     | .ioUnit _ => .ioUnit inst
     | .init d _ => .init d inst
-  return toolSorted.map (fun (d, inst, _) => StartupStep.init d inst) ++ user
+  return steps.extract 0 leanInit.size ++ toolSorted.map (fun (d, inst, _) => StartupStep.init d inst) ++
+    steps.extract leanInit.size steps.size
 
 /-- The entry point. `mainInst`/`errStr` are instance names; `startup` is
 run first, in order (see `StartupItem`); an error in an initializer is

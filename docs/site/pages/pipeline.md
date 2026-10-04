@@ -53,7 +53,8 @@ mono code that still has exact types.
 ## Stage 1: collect and monomorphize
 
 **Roots.** The roots are `main`, every zero-parameter declaration of the
-program's modules, the `initialize` actions, `IO.Error.toString`, and the
+program's modules, the `initialize` actions, the `initialize` declarations
+of `Init` and `Std` (`IO.stdGenRef`), `IO.Error.toString`, and the
 `IO.Error` builders when the program uses fallible IO. Everything these
 reach is collected: declarations with code, `@[extern]` declarations and
 constructors. A constant that `main` never uses is still a root, because
@@ -248,6 +249,11 @@ when the prelude lacks one, rrc reports an unknown function.
 - Every zero-parameter declaration of the program's modules runs at startup,
   in Lean's initialization order, as natively. lean2rr rebuilds that order
   from the `.olean` record and the source structure.
+- The `initialize` declarations of `Init` and `Std` (`IO.stdGenRef`) run
+  at their module's place in the same order, also when the program does
+  not use them. They open files, and they can fail, so they cannot wait
+  until their first use. The other constants of Lean's library are pure,
+  and lean2rr evaluates them lazily.
 - A constant is a *once-cell* with an accessor. The value is computed once
   and never freed.
 - Closed terms (`extractClosed`) are evaluated lazily, once.

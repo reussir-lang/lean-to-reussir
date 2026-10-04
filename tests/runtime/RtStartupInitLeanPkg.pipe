@@ -1,0 +1,7 @@
+# As RtStartupInitUrandom.pipe: only the standard descriptors are passed on;
+# the program as is, then with descriptors 0 to 10 only. The limited run is
+# waited for in a subshell whose own stderr is dropped, so that the shell's
+# report of the native abort (with a process id) is not in the output.
+for f in /proc/$BASHPID/fd/*; do n=${f##*/}; [ "$n" -gt 2 ] && eval "exec $n>&-"; done
+ulimit -c 0
+$BIN; ( (ulimit -n 11; exec $BIN 2>&3 3>&-) & wait $! ) 3>&2 2>/dev/null

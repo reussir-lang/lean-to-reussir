@@ -143,7 +143,8 @@ mono code that still has exact types.</p>
 </ul>
 <h2 id="stage-1-collect-and-monomorphize">Stage 1: collect and monomorphize</h2>
 <p><strong>Roots.</strong> The roots are <code>main</code>, every zero-parameter declaration of the
-program's modules, the <code>initialize</code> actions, <code>IO.Error.toString</code>, and the
+program's modules, the <code>initialize</code> actions, the <code>initialize</code> declarations
+of <code>Init</code> and <code>Std</code> (<code>IO.stdGenRef</code>), <code>IO.Error.toString</code>, and the
 <code>IO.Error</code> builders when the program uses fallible IO. Everything these
 reach is collected: declarations with code, <code>@[extern]</code> declarations and
 constructors. A constant that <code>main</code> never uses is still a root, because
@@ -310,6 +311,11 @@ when the prelude lacks one, rrc reports an unknown function.</p>
 <li>Every zero-parameter declaration of the program's modules runs at startup,
   in Lean's initialization order, as natively. lean2rr rebuilds that order
   from the <code>.olean</code> record and the source structure.</li>
+<li>The <code>initialize</code> declarations of <code>Init</code> and <code>Std</code> (<code>IO.stdGenRef</code>) run
+  at their module's place in the same order, also when the program does
+  not use them. They open files, and they can fail, so they cannot wait
+  until their first use. The other constants of Lean's library are pure,
+  and lean2rr evaluates them lazily.</li>
 <li>A constant is a <em>once-cell</em> with an accessor. The value is computed once
   and never freed.</li>
 <li>Closed terms (<code>extractClosed</code>) are evaluated lazily, once.</li>

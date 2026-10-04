@@ -986,9 +986,12 @@ the exit code byte for byte. lean2rr itself runs with
 the program's output matches. `NAME.xfail` marks tests blocked by a lean2rr
 request. `NAME.l2r.out` (`.err`, `.code`) marks an intended difference from
 native, a Lean runtime bug that lean2rr does not reproduce (plan §10,
-"Runtime: Lean bugs we do not reproduce"): that stream of lean2rr's run is
-compared with the file, and native's with `NAME.native.out` (`.err`,
-`.code`), so both sides stay pinned. A test's `NAME.ffi.c` is C code linked into its native build
+"Runtime: Lean bugs we do not reproduce") or another item of plan §10:
+that stream of lean2rr's run is compared with the file, and native's with
+`NAME.native.out` (`.err`, `.code`), so both sides stay pinned. `NAME.deps`
+names companion modules (`tests/runtime/<name>.lean`, not named `Rt*`),
+compiled before the test and linked into its native build, for programs of
+several modules. A test's `NAME.ffi.c` is C code linked into its native build
 only: the C side of the test's own `@[extern]` declarations, which lean2rr
 never uses (it runs their Lean definitions, translation plan §5.8);
 `NAME.refused` makes a refusal by lean2rr the expected outcome (each

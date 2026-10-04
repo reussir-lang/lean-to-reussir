@@ -7,11 +7,13 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
 ### Every constant of the program is a root
 
 - **What:** Stage 1 starts from `main`, `IO.Error.toString` (the entry
-  point prints uncaught exceptions with it), and every startup item of the
-  program's modules: each zero-parameter declaration of the module's
-  compiled code (instances and compiler-generated specializations
-  included), each `initialize` action and each init function of an
-  `initialize` constant.
+  point prints uncaught exceptions with it), the library's initializers
+  (below, "The library's initializers run at their module's place,
+  always"), and every
+  startup item of the program's modules: each zero-parameter declaration
+  of the module's compiled code (instances and compiler-generated
+  specializations included), each `initialize` action and each init
+  function of an `initialize` constant.
 - **Why:** Natively a module's initializer evaluates all of these, used or
   not (fc23313). Consequence: an unused constant that reaches an extern
   the runtime lacks (or an extern of the program that lean2rr refuses)
@@ -95,19 +97,57 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   `Lower/Conv.lean`: `sourceDecls`.
 - **Remove only if:** never.
 
-### The toolchain's `initialize` constants come first
+### The library's initializers run at their module's place, always
 
-- **What:** Before the program's own items, the startup runs the
-  `initialize` constants of toolchain modules that the program uses
-  (`IO.stdGenRef`), in module order. Other toolchain constants are
-  evaluated lazily, once.
-- **Why:** Natively the toolchain's initializers run first. Native Lean
-  also evaluates every toolchain constant at startup, with no visible
-  effect, so evaluating only the ones the program uses, on first use, is
-  indistinguishable, and only those are translated.
-- **Where:** `Emit/Entry.lean`: `startupSteps`; `CompileRecord.lean`:
-  `isToolchainModule`.
-- **Remove only if:** never.
+- **What:** The startup walks the imports from `main`'s module with the
+  toolchain's modules included, and runs every `initialize` declaration
+  of each `Init` and `Std` module it reaches, used or not, at that
+  module's place among the program's modules, each module's in source
+  order, for its phases. In Lean 4.34.0 that is one initializer,
+  `IO.stdGenRef`. A `prelude` program whose imports do not reach
+  `Init.Data.Random` does not run it, and one that lists another module
+  first runs that module's initializers first. In a program that uses the
+  `Lean` package (a module of it in the walk), the initializers of all of
+  `Init` and `Std` run before anything else, as `lean_initialize()` runs
+  them (lean2rr loads the modules `Init` and `Std` when the imports do not
+  reach them); then the `Lean` package's `initialize` constants that the
+  program uses, by module and position. Every other toolchain constant is
+  evaluated lazily, once, and only those the program uses are translated.
+- **Why:** Natively every initializer of a module that is initialized
+  runs, at the module's place in the walk (`emitInitFn`). An initializer
+  is an action whose effects show: `IO.stdGenRef` opens and reads
+  `/dev/urandom`, and with no descriptor left (`ulimit -n 11`) the native
+  program stops with `uncaught exception: resource exhausted (error code:
+  24, too many open files)` / `  file: /dev/urandom`, exit 1. lean2rr ran
+  it only for programs that used it, and so ran `main` (lean-runtime case
+  io/startup_fd_limit; test `RtStartupInitUrandom`). Then it ran it before
+  every program initializer, where a `prelude` program's module listed
+  before `Init.Data.Random` initializes first (review RSG-01; test
+  `RtStartupInitOrder`, with the companion module `StartupInitOrderDep`),
+  and not at all in a `prelude` program that imports a `Lean` module but
+  not `Init.Data.Random`, where `lean_initialize()` runs it (RSG-02; test
+  `RtStartupInitLeanPkg`). Natively an error in `lean_initialize()` aborts
+  the program (`libc++abi: terminating due to uncaught exception of type
+  lean::exception: …`, status 134); lean2rr reports it as an uncaught
+  exception, exit 1, as for any program (RSG-03; plan §10; the test's
+  expectation files). `lean_initialize()` is modelled once for the whole
+  program, not per module as natively, and a program that imports part of
+  `Lean` loads `Init` and `Std` too (RSG2-01, RSG2-02: plan §10, known
+  differences of programs that use the `Lean` package, which are not a
+  target). The library's other constants are pure: evaluating
+  them on first use instead of at startup does not show. `IO.rand` reads
+  the seeded generator from its once-cell and never seeds it again (test
+  `RtStartupInitRand`). Cost: a few functions per program (the
+  initializer, `IO.mkRef`, `mkStdGen`, `ByteArray.toUInt64LE!` and its
+  panic message). The `Lean` package's thousands of `builtin_initialize`
+  declarations are not run (plan §10).
+- **Where:** `Emit/Startup.lean`: `startupItems`, `libraryModuleItems`,
+  `usesLeanPackage`, `leanInitModules`, `initItem?`, `startupModules` and
+  `importPostOrder` (`toolchain`); `Emit/Entry.lean`: `programRoots`,
+  `startupSteps`; `Env.lean`: `loadEnvironment`; `CompileRecord.lean`:
+  `isLibraryModule`, `isToolchainModule`; `Main.lean`: `pipeline`.
+- **Remove only if:** never. Check the list when the toolchain changes
+  (an `[init]` or `[builtin_init]` attribute in `Init` or `Std`).
 
 ### The startup chain is cut into chunks of 128 steps
 

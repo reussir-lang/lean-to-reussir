@@ -23,6 +23,12 @@ evaluated lazily; see translation plan §5.12). -/
 def isToolchainModule (m : Name) : Bool :=
   m.getRoot ∈ [`Init, `Std, `Lean, `Lake, `L2RShim]
 
+/-- Whether a toolchain module belongs to the part of Lean's library that
+lean2rr supports, `Init` and `Std`: its `initialize` declarations run at
+startup, used or not, at the module's place (`libraryModuleItems`, §5.12). -/
+def isLibraryModule (m : Name) : Bool :=
+  m.getRoot ∈ [`Init, `Std]
+
 /-- The declaration that compiled to the IR-only declaration `n`: `n`
 without the suffixes the compiler appends (`c._closed_3`, `c._boxed`,
 `c._lam_0`, `f._at_.c.spec_2._redArg`), the nearest prefix that `known`

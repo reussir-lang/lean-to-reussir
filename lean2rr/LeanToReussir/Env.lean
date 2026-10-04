@@ -103,17 +103,26 @@ this level exposes every module's complete base-LCNF bodies; the default
 
 lean2rr takes modules named `Init.*`, `Std.*`, `Lean.*` or `Lake.*` for Lean's
 library, and `L2RShim.*` for its shim (`isToolchainModule`: their constants
-are evaluated lazily, their `initialize` actions run by the runtime, their
-`unsafe` code trusted), so a program module named like one is an error here
-rather than a silently different program: each such module must be the module
-of that name in the library of lean2rr's toolchain (or in the shim
-directory), its files reached by any path (a link, a copy; `moduleDiff`). -/
+are evaluated lazily, only their `initialize` declarations run at startup,
+their `unsafe` code trusted), so a program module named like one is an error
+here rather than a silently different program: each such module must be the
+module of that name in the library of lean2rr's toolchain (or in the shim
+directory), its files reached by any path (a link, a copy; `moduleDiff`).
+
+A program that imports a module of the `Lean` package natively initializes
+all of `Init` and `Std` before anything else (`lean_initialize`;
+`Emit/Startup.lean`: `leanInitModules`): when its imports do not reach the
+modules `Init` and `Std`, they are loaded too. -/
 def loadEnvironment (modules : Array Name) : IO Environment := do
   let sysroot ← toolchainSysroot
   let (shim, shimSrc) ← shimDir
   initSearchPath sysroot
   searchPathRef.modify (· ++ [shim])
-  let env ← importModules ((modules ++ (← shimModules shim shimSrc)).map ({ module := · })) {} (level := .private)
+  let shimMods ← shimModules shim shimSrc
+  let mut env ← importModules ((modules ++ shimMods).map ({ module := · })) {} (level := .private)
+  let missing := #[`Init, `Std].filter (env.getModuleIdx? · |>.isNone)
+  if env.header.moduleNames.any (`Lean).isPrefixOf && !missing.isEmpty then
+    env ← importModules ((modules ++ missing ++ shimMods).map ({ module := · })) {} (level := .private)
   let libDir ← getLibDir sysroot
   for m in env.header.moduleNames do
     unless isToolchainModule m do continue

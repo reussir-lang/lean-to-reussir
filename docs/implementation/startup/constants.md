@@ -12,7 +12,8 @@ runtime. Plan
   the value. The cell stores a boundary type; another value is wrapped in
   an `ElemBox`. The value is never freed. Program constants are forced at
   startup ([order.md](order.md)); toolchain constants and closed terms
-  only on first use.
+  only on first use (the library's `initialize` constants run at
+  startup, at their module's place, used or not; order.md).
 - **Why:** Native CAFs and closed terms live for the whole run, evaluated
   once. `l2r_once_claim` also makes a scheduler context that needs a
   constant another context is computing wait for it, as natively

@@ -1,0 +1,6 @@
+# Only the standard descriptors are passed on (a runner may leave others
+# open, such as a lock), so that the program's descriptors are numbered as
+# when run from a terminal; then the program as is, and with descriptors 0
+# to 10 only.
+for f in /proc/$BASHPID/fd/*; do n=${f##*/}; [ "$n" -gt 2 ] && eval "exec $n>&-"; done
+$BIN; (ulimit -n 11; exec $BIN)

@@ -120,7 +120,14 @@ handles; a thread that waits blocks its context.
   runs at startup, in Lean's initialization order. Each constant is a
   once-cell. A context that needs a constant that another context is
   computing waits for it, as a native thread waits for a lock.
-- **Toolchain constants and closed terms** are evaluated lazily, once.
+- **Library initializers.** The `initialize` declarations of `Init` and
+  `Std` run at their module's place in the import order, as natively. They
+  run also when the program does not use them, because their effects are
+  visible. Lean 4.34.0 has one: `IO.stdGenRef`, which reads 8 bytes from
+  `/dev/urandom` to seed `IO.rand`. If no file descriptor is free, the
+  program stops before `main` with `uncaught exception`, as natively.
+- **Other toolchain constants and closed terms** are evaluated lazily,
+  once. They are pure, so the time of their evaluation is not visible.
 - **Order.** The `.olean` records part of Lean's compilation order. lean2rr
   rebuilds the rest from the source structure (declaration ranges, `where`
   helpers, `mutual` blocks). A few orders are not recorded; see
