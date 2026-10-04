@@ -31,7 +31,7 @@ extern "C" {
 #[cold]
 #[inline(never)]
 fn oom() -> ! {
-    crate::internal_panic("out of memory")
+    crate::lean_internal_panic(lean_runtime::semantics::panic::InternalPanic::OutOfMemory)
 }
 
 /// Mirror of `reussir_rt::rc::RcBox` (`#[repr(C)] { count: Cell<u32>, data }`).

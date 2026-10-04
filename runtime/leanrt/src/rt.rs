@@ -122,7 +122,9 @@ extern "C" fn segv_handler(signum: i32, info: *mut SigInfo, ctx: *mut c_void) {
                     || crate::coro::past_end(addr, sp, OVERFLOW_SP_REACH))
         });
         if in_guard || past_end {
-            let msg = b"\nStack overflow detected. Aborting.\n";
+            // `segv_handler`'s text (lean-runtime's), a static: no
+            // allocation in the handler.
+            let msg = lean_runtime::semantics::panic::STACK_OVERFLOW_MESSAGE.as_bytes();
             write(2, msg.as_ptr() as *const c_void, msg.len());
             abort();
         }

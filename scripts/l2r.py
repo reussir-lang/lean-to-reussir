@@ -229,32 +229,50 @@ def has_build_script(cargo):
     return isinstance(build, str) or (build is not False and (LEAN_RUNTIME / "build.rs").exists())
 
 
+def dependency_tables(cargo):
+    """lean-runtime's [dependencies] tables, its target-specific ones included."""
+    return [cargo.get("dependencies", {})] + [t.get("dependencies", {}) for t in cargo.get("target", {}).values()]
+
+
 def needs_cargo(cargo):
-    """Whether lean-runtime has dependencies (optional ones included) or a
-    build script: then cargo builds it (`build_lean_runtime_cargo`), offline
-    from cargo's registry cache; otherwise plain rustc does."""
-    tables = [cargo.get("dependencies", {})] + [t.get("dependencies", {}) for t in cargo.get("target", {}).values()]
-    return any(tables) or has_build_script(cargo)
+    """Whether the build lean2rr asks for needs cargo (`build_lean_runtime_cargo`,
+    offline from cargo's registry cache): lean-runtime has a build script or
+    a dependency that is not optional, or a feature lean2rr enables
+    (`lean_runtime_features`) enables an optional dependency. Otherwise
+    plain rustc builds it, as when it has no dependencies at all: optional
+    dependencies of features lean2rr does not enable (lean-runtime's `io`
+    and `sched`) are never compiled."""
+    required = any(not (isinstance(spec, dict) and spec.get("optional"))
+                   for t in dependency_tables(cargo) for spec in t.values())
+    return required or has_build_script(cargo) or lean_runtime_features(cargo)[1]
 
 
 def lean_runtime_features(cargo):
     """The features enabled by `LEAN_RUNTIME_FEATURES` and `default`, closed
-    under the features each enables (for the plain rustc build, which has no
-    dependencies a feature could name)."""
+    under the features each enables, and whether any of them enables a
+    dependency (`dep:NAME`, `NAME/FEATURE`, or the implicit feature of an
+    optional dependency NAME)."""
     table = cargo.get("features", {})
-    todo, seen = list(LEAN_RUNTIME_FEATURES) + list(table.get("default", [])), []
+    optional = {name for t in dependency_tables(cargo) for name, spec in t.items()
+                if isinstance(spec, dict) and spec.get("optional")}
+    todo, seen, deps = list(LEAN_RUNTIME_FEATURES) + list(table.get("default", [])), [], False
     while todo:
         f = todo.pop()
         if f in seen:
             continue
         if f not in table:
-            sys.exit(f"l2r: lean-runtime ({LEAN_RUNTIME}) has no feature {f}")
+            if f not in optional:
+                sys.exit(f"l2r: lean-runtime ({LEAN_RUNTIME}) has no feature {f}")
+            seen.append(f)
+            deps = True
+            continue
         seen.append(f)
         for g in table[f]:
             if g.startswith("dep:") or "/" in g:
-                sys.exit(f"l2r: lean-runtime's feature {f} enables {g}, a dependency")
-            todo.append(g)
-    return sorted(seen)
+                deps = True
+            else:
+                todo.append(g)
+    return sorted(seen), deps
 
 
 def dep_info_files(depfile):
@@ -267,7 +285,8 @@ def dep_info_files(depfile):
 
 
 def build_lean_runtime_rustc(out, cargo):
-    """lean-runtime without dependencies: plain rustc, `--crate-type rlib`,
+    """lean-runtime when the features lean2rr enables need no dependency
+    (`needs_cargo`): plain rustc, `--crate-type rlib`,
     the edition from its Cargo.toml, its features as `--cfg feature="..."`
     (none but LEAN_RUNTIME_FEATURES and its defaults), leanrt's rustc and
     flags. Cached by a hash of the files rustc read (its dep-info, so files
@@ -281,7 +300,7 @@ def build_lean_runtime_rustc(out, cargo):
     if not isinstance(edition, str):
         sys.exit(f"l2r: lean-runtime's edition is {edition!r}; plain rustc needs it written out")
     root = LEAN_RUNTIME / cargo.get("lib", {}).get("path", "src/lib.rs")
-    features = lean_runtime_features(cargo)
+    features, _ = lean_runtime_features(cargo)
     rlib = out / "liblean_runtime.rlib"
     depfile = out / "liblean_runtime.d"
 
@@ -305,7 +324,8 @@ def build_lean_runtime_rustc(out, cargo):
 
 
 def build_lean_runtime_cargo(out, cargo):
-    """lean-runtime with dependencies: the pinned toolchain's cargo builds it
+    """lean-runtime when the build needs dependencies (`needs_cargo`): the
+    pinned toolchain's cargo builds it
     offline (`--offline --locked`) from the crates in cargo's registry cache,
     at the versions its committed Cargo.lock names (so nothing is written in
     the checkout); `cargo fetch --locked` in the checkout fills the cache
@@ -408,8 +428,9 @@ def cargo_link_order(cargo_bin, env, features):
 
 def build_lean_runtime(out):
     """Build lean-runtime (LEAN_RUNTIME, default the submodule) into `out`
-    with leanrt's rustc and flags: plain rustc while it has no dependencies,
-    the pinned toolchain's cargo once it has some. Returns a LeanRuntime."""
+    with leanrt's rustc and flags: plain rustc while the features lean2rr
+    enables need no dependency, the pinned toolchain's cargo once they do
+    (`needs_cargo`). Returns a LeanRuntime."""
     cargo = lean_runtime_manifest()
     if needs_cargo(cargo):
         return build_lean_runtime_cargo(out, cargo)

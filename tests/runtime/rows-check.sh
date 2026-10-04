@@ -2,10 +2,19 @@
 # lean-runtime's row cases through lean2rr. lean-runtime's row oracle
 # (scripts/oracle/Oracle.lean: a Lean program that evaluates the functions of
 # tests/cases/<area>/<area>.rows.toml on inputs read from stdin) is built
-# with lean2rr, and lean-runtime's scripts/gen_rows.py --check compares every
-# row's expected value (recorded from native Lean 4.34.0) with its answers.
-# This checks the prelude's inline code and its glue around lean-runtime on
-# lean-runtime's own rows. Nothing in the lean-runtime checkout is written.
+# with lean2rr, and its answers are compared, with lean-runtime's
+# scripts/gen_rows.py (`run_oracle`, `apply`), with every row's expected
+# outcome: native Lean 4.34.0's (a value, a panic's text and default, or the
+# end of the process), except for the rows whose `deviations` name an
+# `LB-nn` of lean-runtime's docs/lean-bugs.md (a Lean runtime bug or limit
+# that neither translator reproduces), whose `expected` is the Lean
+# definition's result (native's own outcome is in `native`, not compared).
+# A row whose `deviations` name a difference of lean2rr's own (`lean2rr =`
+# something other than an `LB-nn`) is listed, not failed. This checks the
+# prelude's inline code and its glue around lean-runtime (hashes, strings,
+# floats, fixed-width integers, libm, Nat and Int, arrays, panics, the text
+# of numbers) on lean-runtime's own rows. Nothing in the lean-runtime
+# checkout is written.
 #
 #   tests/runtime/rows-check.sh [ROWS FILE...]   (default: every rows file)
 #
@@ -39,11 +48,47 @@ sys.path.insert(0, sys.argv[1])
 import gen_rows
 exe = pathlib.Path(sys.argv[2])
 gen_rows.oracle_binary = lambda toolchain: ([], exe)
-sys.argv = ["gen_rows.py", "--check", "--toolchain", "lean2rr", *sys.argv[3:]]
+# Compared: the fields of the outcome. `apply` treats every row as one that
+# expects the toolchain's own outcome: an LB-nn row's `expected` is then
+# compared too (lean2rr gives the definition's result there), and `native`
+# is kept as it is.
+fields = ("expected", "default", "stderr", "bits", "ends")
+gen_rows.shared_deviation = lambda row: False
+def own(row):
+    d = row.get("deviations", {}).get("lean2rr")
+    return d is not None and not str(d).startswith("LB-")
+failed = 0
 try:
-    gen_rows.main()
+    for path in map(pathlib.Path, sys.argv[3:]):
+        header, rows = gen_rows.read_rows(path)
+        results = gen_rows.run_oracle("lean2rr", rows)
+        bad = [(r["id"], res["value"]) for r, res in zip(rows, results) if res.get("value", "").startswith("!")]
+        for rid, res in bad:
+            print(f"rows-check: {path}: {rid}: the oracle has no such function: {res}", file=sys.stderr)
+        if bad:
+            sys.exit(2)
+        lb = listed = 0
+        for row, res in zip(rows, results):
+            new = gen_rows.apply(row, res)
+            same = all(row.get(f) == new.get(f) for f in fields)
+            if own(row):
+                listed += 1
+                print(f"rows-check: {path}: {row['id']}: lean2rr's own difference "
+                      f"{row['deviations']['lean2rr']}: {'agrees' if same else 'differs'} "
+                      f"(lean2rr {[new.get(f) for f in fields]})")
+            elif not same:
+                failed += 1
+                print(f"{path}: {row['id']}: expected {[row.get(f) for f in fields]}, "
+                      f"lean2rr {[new.get(f) for f in fields]}")
+            elif any(str(v).startswith("LB-") for v in row.get("deviations", {}).values()):
+                lb += 1
+        print(f"rows-check: {path}: {len(rows)} rows, {lb} of them LB-nn rows (the definition's "
+              f"result), {listed} listed", file=sys.stderr)
 except gen_rows.RowError as e:
     print(f"rows-check: {e}", file=sys.stderr)
     sys.exit(2)
+if failed:
+    print(f"rows-check: {failed} rows differ")
+    sys.exit(1)
 print("rows-check: every row agrees")
 PY

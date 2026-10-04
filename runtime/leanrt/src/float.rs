@@ -77,10 +77,8 @@ pub fn to_string32(x: f32) -> LStr {
 ///   too big for a texture that LLVM inlines, and a texture that is not
 ///   inlined is a call through the packed-argument FFI boundary, whose stack
 ///   slots in the caller have the same effect (2 million iterations of
-///   `Float.cbrt` overflowed a 1 MiB stack; review RULR-01). They exist only
-///   where lean-runtime has ports (aarch64 Linux with glibc); on any other
-///   target the wrappers end the program with an internal panic when called,
-///   so programs that do not call them still build and run (RULR-02).
+///   `Float.cbrt` overflowed a 1 MiB stack; review RULR-01). lean-runtime
+///   defines them on every target (the same algorithm everywhere).
 ///
 /// Out of line the slots are the callee's; the call costs one more hop than
 /// native Lean's direct call into libm (the wrapper, then lean-runtime's
@@ -124,27 +122,8 @@ pub mod libm_call {
         powf(x, y) -> f32;
     }
 
-    /// lean-runtime's ports of glibc's functions, where it has them.
-    macro_rules! ported {
-        ($($name:ident($a:ident) -> $t:ty;)*) => {
-            $(
-                #[cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"))]
-                #[inline(never)]
-                pub fn $name($a: $t) -> $t {
-                    libm::$name($a)
-                }
-
-                #[cfg(not(all(target_arch = "aarch64", target_os = "linux", target_env = "gnu")))]
-                #[inline(never)]
-                pub fn $name(_: $t) -> $t {
-                    crate::internal_panic(concat!(
-                        "no lean-runtime port of ", stringify!($name), " for this target yet"))
-                }
-            )*
-        };
-    }
-
-    ported! {
+    // lean-runtime's ports of glibc's functions (too big to inline).
+    out_of_line! {
         cbrt(x) -> f64;
         atanh(x) -> f64;
         cbrtf(x) -> f32;

@@ -154,8 +154,12 @@ can use. lean2rr's `leanrt` moves into it step by step.
 | Reuse | Existing runtime code moves into the crate; it is rewritten only where it does not fit. |
 | Bugs | Every bug found becomes a test. Bugs of Lean's own runtime are not copied; lean-runtime's `docs/lean-bugs.md` lists them. |
 
-Status (2026-10-04): lean-runtime has its first part of the semantics
-(hashes, floats, integers, strings, `libm`), and lean2rr uses it for them:
+Status (2026-10-04): lean-runtime has Lean's semantics (hashes, floats,
+fixed-width integers, strings, `libm`, `Nat` and `Int`, the array edge
+rules, panics, the text of numbers), and lean2rr uses it for all of them:
 the submodule `third_party/lean-runtime`, which `scripts/l2r.py` builds and
 links with `leanrt` ([runtime README](repo:runtime/README.md), "The
-shared crate lean-runtime"). The rest (`Nat`/`Int`, arrays, IO, the scheduler) follows.
+shared crate lean-runtime"). lean2rr keeps its hot paths: the inline
+small-`Nat`/`Int` arithmetic, the one-block big numbers with GMP (behind
+lean-runtime's big-number traits) and the one-block arrays' reads, writes
+and pushes. IO and the scheduler follow.

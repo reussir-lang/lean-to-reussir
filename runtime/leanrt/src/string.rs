@@ -151,7 +151,7 @@ pub fn bytes(s: &LStr) -> &[u8] {
 #[cold]
 #[inline(never)]
 fn oom() -> ! {
-    crate::internal_panic("out of memory")
+    crate::lean_internal_panic(lean_runtime::semantics::panic::InternalPanic::OutOfMemory)
 }
 
 /// The block size for room for `cap` bytes: rounded up to a multiple of 8
@@ -504,42 +504,26 @@ fn from_ascii(b: &[u8]) -> LStr {
     from_counted(b, b.len() as u64)
 }
 
-/// `lean_string_of_usize`.
+/// `lean_string_of_usize` (`USize.repr`, and `Nat.repr` below 2^64): the
+/// decimal digits, lean-runtime's (`sem::repr::decimal_u64_bytes`).
 #[inline(never)]
 pub fn of_u64(n: u64) -> LStr {
-    let mut buf = [0u8; 20];
-    let mut i = 20;
-    let mut n = n;
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    from_ascii(&buf[i..])
+    from_ascii(sem::repr::decimal_u64_bytes(n, &mut [0; 20]))
 }
 
-/// Decimal representation of a signed word.
+/// The decimal text of `n`, with a `-` when negative (`Int.repr` of a
+/// small value).
 #[inline(never)]
 pub fn of_i64(n: i64) -> LStr {
     let mut buf = [0u8; 21];
-    let mut i = 21;
-    let mut m = n.unsigned_abs();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (m % 10) as u8;
-        m /= 10;
-        if m == 0 {
-            break;
-        }
-    }
+    let d = sem::repr::decimal_u64_bytes(n.unsigned_abs(), (&mut buf[1..]).try_into().unwrap());
+    let k = d.len();
     if n < 0 {
-        i -= 1;
-        buf[i] = b'-';
+        buf[20 - k] = b'-';
+        from_ascii(&buf[20 - k..])
+    } else {
+        from_ascii(&buf[21 - k..])
     }
-    from_ascii(&buf[i..])
 }
 
 struct Global<T>(std::cell::UnsafeCell<T>);

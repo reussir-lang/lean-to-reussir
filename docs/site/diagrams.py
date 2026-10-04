@@ -509,15 +509,15 @@ def layers():
                          "runtime types, one function per Lean extern (lean_xxx),",
                          "fast paths inline (small Nat), l2r_* primitives for the glue"], "b-rt")
     s.box(10, 170, W, 84, ["leanrt (Rust crate, linked into every program)",
-                          "Nat/Int slow paths and big numbers (GMP), strings, arrays,",
+                          "big numbers (GMP) for lean-runtime's Nat/Int, strings, arrays,",
                           "float text, glibc FILE model, files, processes, once-cells,",
                           "tasks and the scheduler (contexts), Std.Sync, the event loop"], "b-rt")
     s.box(10, 268, W, 50, ["reussir_rt (Reussir's runtime)",
                           "Rc, the pending stack for frees (local patches 0013-0015), mimalloc"], "b-rr")
     s.box(10, 332, W, 50, ["System", "libc, libm, GMP, the kernel"], "b-lean")
     s.box(680, 170, 250, 120, ["lean-runtime (submodule)", "a shared crate: Lean's",
-                              "runtime rules in safe Rust", "(hashes, strings, floats,",
-                              "integers, libm so far);", "leanrt keeps the glue"], "b-plan")
+                              "runtime rules in safe Rust", "(hashes, strings, floats, libm,",
+                              "Nat/Int, arrays, panics so far);", "leanrt keeps glue, hot paths"], "b-plan")
     s.path("M 680 212 L 652 212", "ard")
     return s.render()
 

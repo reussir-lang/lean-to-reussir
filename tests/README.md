@@ -210,9 +210,15 @@ would keep a Lean loop's tail call.
 `tests/runtime/rows-check.sh` builds lean-runtime's row oracle
 (`scripts/oracle/Oracle.lean` of the lean-runtime checkout, which evaluates
 the functions of its `tests/cases/<area>/<area>.rows.toml`) with lean2rr and
-checks every row's expected value, recorded from native Lean 4.34.0, with
-lean-runtime's `scripts/gen_rows.py --check`: the prelude's own inline code
-and its glue around lean-runtime meet lean-runtime's rows.
+checks every row's expected outcome, recorded from native Lean 4.34.0
+(with lean-runtime's `scripts/gen_rows.py`): the prelude's own inline code
+and its glue around lean-runtime meet lean-runtime's rows (hashes, strings,
+floats, fixed-width integers, libm, `Nat` and `Int`, arrays, panics, the
+text of numbers). A row whose `deviations` name an `LB-nn` of lean-runtime's
+docs/lean-bugs.md expects the Lean definition's result, which lean2rr must
+give (native's outcome, in the row's `native`, is not compared); a row
+naming a difference of lean2rr's own (none so far) is listed, not
+failed.
 
 Tests for findings (the reviews' FINDINGS.txt files are in the scratch
 directories `adv3`..`adv6`, `rv6`..`rv9`). The rows marked "none" are

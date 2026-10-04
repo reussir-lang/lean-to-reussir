@@ -10,12 +10,14 @@
 // Fast paths are plain Reussir code (inlined into the program); slow paths
 // call small `#[ffi(import)]` textures, which call into the `leanrt` Rust
 // crate (runtime/leanrt). Every call consumes its arguments. Lean's runtime
-// rules on plain data and byte views (hashes, string positions, float and
-// fixed-width integer rules, libm) are the shared crate lean-runtime's
-// (`sem::...`, `lean_runtime::semantics`), which lean2rr shares with
-// another Lean translator: the prelude and leanrt only convert lean2rr's values to its views and
-// back. Inline Reussir code is kept for single operations (an add, a cast,
-// a comparison, a bit copy).
+// rules (hashes, string positions, float and fixed-width integer rules,
+// libm, the `Nat`/`Int` rules over leanrt's GMP numbers, the array edge
+// rules, panics and the text of numbers) are the shared crate
+// lean-runtime's (`sem::...`, `lean_runtime::semantics`), which lean2rr
+// shares with another Lean translator: the prelude and leanrt only convert
+// lean2rr's values to its views and back. Inline Reussir code is kept for
+// single operations (an add, a cast, a comparison, a bit copy) and the
+// small-`Nat`/`Int` fast paths.
 //
 // Conventions for FFI imports: only integers, floats, bool, opaque types and
 // shared records cross the boundary; functions without a result return a
@@ -109,18 +111,17 @@ fn l2r_argv(i : u64) -> LStr [{ leanrt::string::from_bytes_lossy(&leanrt::rt::ar
 #[ffi(import)]
 fn l2r_uncaught_exception(msg : LStr) -> unit [{ leanrt::uncaught_exception(msg.utf8()) }];
 
-// `lean_internal_panic` messages, by code (no `str` arguments on hot paths).
+// `lean_internal_panic` (lean-runtime's `sem::panic::InternalPanic`), by
+// code (no `str` arguments on hot paths): 0 unreachable code (also
+// lean2rr's `l2r_internal_panic_at<T>(0)`), 4 out of memory (an array
+// capacity that is not a word, as `sem::array::empty_with_capacity` answers
+// for 2^63 or more), 5 `sorry`.
 #[ffi(import)]
 fn l2r_internal_panic(code : u64) -> u64 [{
-    leanrt::internal_panic(match code {
-        0 => "unreachable code has been reached",
-        1 => "Nat.pow exponent is too big",
-        2 => "Nat.shiftl exponent is too big",
-        3 => "Nat.shiftr exponent is too big",
-        4 => "out of memory",
-        5 => "executed 'sorry'",
-        6 => "integer overflow in runtime computation",
-        _ => "internal error",
+    leanrt::lean_internal_panic(match code {
+        4 => sem::panic::InternalPanic::OutOfMemory,
+        5 => sem::panic::InternalPanic::Sorry,
+        _ => sem::panic::InternalPanic::Unreachable,
     })
 }];
 
@@ -149,36 +150,24 @@ fn l2r_internal_panic_at<T>(code : u64) -> T {
 // before the process dies (abort-mode panics, internal panics, uncaught
 // exceptions, stack overflow) go to descriptor 2, as natively.
 
-// `lean_panic_impl`'s lines: the message, then (unless `LEAN_BACKTRACE=0`)
-// `backtrace:` and the frames (none here). Natively one `io_eprintln` per
-// line; written here with one `putStr` (the same bytes). Under
-// `LEAN_ABORT_ON_PANIC` this does not return: `leanrt::panic_msg` flushes
-// stdout, writes the message to descriptor 2 (`std::cerr`) and aborts.
+// `lean_panic_impl`'s lines (lean-runtime's `sem::panic::panic_fn_plan`):
+// the message, then (unless `LEAN_BACKTRACE=0`) `backtrace:` and the frames
+// (none here). Natively one `io_eprintln` per line; written here with one
+// `putStr` (the same bytes). Under `LEAN_ABORT_ON_PANIC` this does not
+// return: `leanrt::panic_text` flushes stdout, writes the lines to
+// descriptor 2 (`std::cerr`) and aborts.
 #[ffi(import)]
-fn l2r_panic_text(msg : LStr) -> LStr [{
-    {
-        if std::env::var_os("LEAN_ABORT_ON_PANIC").is_some() {
-            leanrt::panic_msg(msg.utf8());
-        }
-        let mut t = msg.utf8().to_vec();
-        t.push(b'\n');
-        if std::env::var("LEAN_BACKTRACE").map(|v| v != "0").unwrap_or(true) {
-            t.extend_from_slice(b"backtrace:\n(stack trace unavailable)\n");
-        }
-        leanrt::rc_release(msg);
-        leanrt::string::from_bytes(&t)
-    }
-}];
+fn l2r_panic_text(msg : LStr) -> LStr [{ leanrt::panic_text(msg) }];
 
 fn l2r_panic_str(msg : LStr) -> u64 { l2r_stderr_put(l2r_panic_text(msg)) }
 
-// Messages the C runtime itself panics with, by code.
+// Messages the C runtime itself panics with (lean-runtime's), by code: 0
+// an array index out of bounds, 1 `String.Pos.Raw.get!` past the end.
 #[ffi(import)]
 fn l2r_panic_code_text(code : u64) -> LStr [{
     leanrt::string::from_bytes(match code {
-        0 => "Error: index out of bounds".as_bytes(),
-        1 => sem::string::GET_BANG_PANIC.as_bytes(),
-        _ => "Error".as_bytes(),
+        0 => sem::array::INDEX_OUT_OF_BOUNDS.as_bytes(),
+        _ => sem::string::GET_BANG_PANIC.as_bytes(),
     })
 }];
 
@@ -215,7 +204,8 @@ fn lean_sorry<T>(b : bool) -> T { l2r_internal_panic_at<T>(5) }
 // (n >= 2^63). Every value has exactly one form, so two small words are
 // equal exactly when the values are, and a small value is below every big
 // one. Fast paths work on the words inline; everything that involves a big
-// number is a call to leanrt::nat (GMP).
+// number is a call to leanrt::nat, which runs lean-runtime's rules
+// (`sem::nat`) on leanrt's GMP numbers.
 //
 // Ownership of words: `l2r_nat_raw(n)` turns `n` into its word, which then
 // owns `n`'s reference (Reussir no longer counts it). A small word owns
@@ -416,8 +406,9 @@ fn lean_nat_lxor(a : Nat, b : Nat) -> Nat {
     if (x & y & 1) == 1 { l2r_nat_of_raw((x ^ y) | 1) } else { l2r_nat_xor_raw(x, y) }
 }
 
-// `Nat.shiftLeft`: 0 stays 0; otherwise a shift amount above 2^32 - 1 is an
-// internal panic (as `lean_nat_shiftl`; leanrt::nat::nat_shiftl).
+// `Nat.shiftLeft`: small results inline; the rest is lean-runtime's rule
+// (`sem::nat::shiftl`, leanrt::nat::nat_shiftl): any shift amount (LB-12
+// lifted), a result too big for GMP an internal panic.
 fn lean_nat_shiftl(a : Nat, b : Nat) -> Nat {
     let x = l2r_nat_raw(a);
     let y = l2r_nat_raw(b);
@@ -431,8 +422,9 @@ fn lean_nat_shiftl(a : Nat, b : Nat) -> Nat {
     } else { l2r_nat_shiftl_raw(x, y) }
 }
 
-// `Nat.shiftRight`: a big shift amount gives 0; a big value shifted by more
-// than 2^32 - 1 panics unless every bit is shifted out.
+// `Nat.shiftRight`: small values inline; the rest is lean-runtime's rule
+// (`sem::nat::shiftr`): a big shift amount gives 0, and any shift of a big
+// value is computed (LB-04 lifted).
 fn lean_nat_shiftr(a : Nat, b : Nat) -> Nat {
     let x = l2r_nat_raw(a);
     let y = l2r_nat_raw(b);
@@ -453,8 +445,9 @@ fn lean_nat_log2(a : Nat) -> Nat {
     } else { l2r_nat_log2_big(x) }
 }
 
-// `Nat.pow`: an exponent above 2^32 - 1 is an internal panic, whatever the
-// base (leanrt::nat::nat_pow; the fast path takes exponents below 2^32).
+// `Nat.pow`: small results inline (exponents below 2^32); the rest is
+// lean-runtime's rule (`sem::nat::pow`, leanrt::nat::nat_pow): any exponent
+// (LB-11 lifted), a result too big for GMP an internal panic.
 fn lean_nat_pow(a : Nat, b : Nat) -> Nat {
     let x = l2r_nat_raw(a);
     let y = l2r_nat_raw(b);
@@ -501,6 +494,27 @@ fn l2r_nat_low(a : Nat) -> u64 {
 
 // Whether word `w` (of a `Nat`) is an index below `n` (a big word never is).
 fn l2r_word_index_ok(w : u64, n : u64) -> bool { (w & 1) == 1 && (w >> 1) < n }
+
+// A `Nat` size or offset as lean-runtime's array rules take it: its value,
+// or `u64::MAX` for 2^64 or more (`l2r_nat_sat_raw` releases a big word).
+#[ffi(import)]
+fn l2r_nat_sat_raw(a : u64) -> u64 [{ leanrt::nat::nat_sat_u64(a) }];
+
+fn l2r_nat_sat(n : Nat) -> u64 {
+    let x = l2r_nat_raw(n);
+    if (x & 1) == 1 { x >> 1 } else { l2r_nat_sat_raw(x) }
+}
+
+// `Array.replicate`'s size (`lean_mk_array`): a big `n` is checked by
+// lean-runtime's `sem::array::replicate_len` (a small one by the
+// allocation, `leanrt::array::check_alloc`).
+#[ffi(import)]
+fn l2r_replicate_len_raw(a : u64) -> u64 [{ leanrt::nat::nat_replicate_len(a) }];
+
+fn l2r_replicate_len(n : Nat) -> u64 {
+    let x = l2r_nat_raw(n);
+    if (x & 1) == 1 { x >> 1 } else { l2r_replicate_len_raw(x) }
+}
 
 // ===========================================================================
 // Int
@@ -740,9 +754,6 @@ fn l2r_int_cast_nat(a : Int) -> Nat {
 fn lean_int_to_nat(a : Int) -> Nat {
     if lean_int_dec_nonneg(a) { lean_nat_abs(a) } else { l2r_nat_small(0) }
 }
-
-#[ffi(import)]
-fn l2r_string_of_i64(x : i64) -> LStr [{ leanrt::string::of_i64(x) }];
 
 // Decimal representation (`Int.repr`); see `l2r_nat_repr`. Natively
 // `Int.repr (ofNat m) = Nat.repr m`: a shared string below 128.
@@ -1244,8 +1255,6 @@ fn l2r_int_sat_i64(b : Int) -> i64 {
 // `atanh`, `atanhf` are called out of line (`leanrt::float::libm_call`):
 // inlined, a `black_box` slot, and not inlined, a texture's packed
 // arguments, would stop LLVM from making a Lean loop that calls them a loop.
-// The ports exist on aarch64 Linux with glibc only; elsewhere a call ends
-// the program with an internal panic (other programs are unaffected).
 #[ffi(import)]
 fn sin(x : f64) -> f64 [{ sem::libm::sin(x) }];
 #[ffi(import)]
@@ -1620,8 +1629,11 @@ fn l2r_array_reverse<T>(v : RVec<T>) -> RVec<T> [{ leanrt::array::reverse(v) }];
 
 fn lean_mk_empty_array<T>() -> RVec<T> { l2r_array_empty<T>() }
 
-// A capacity that is not a Lean scalar (>= 2^63) is an out-of-memory panic;
-// `elem` is the native element size (for Lean's allocation-size checks).
+// A capacity's checks are lean-runtime's (`sem::array::empty_with_capacity`):
+// one that is not a Lean scalar (a big `Nat`, >= 2^63) is an out-of-memory
+// panic (code 4), the others are checked by `leanrt::array::
+// with_capacity_checked`; `elem` is the native element size (for Lean's
+// allocation-size checks).
 fn l2r_mk_empty_with_capacity<T>(n : Nat, elem : u64) -> RVec<T> {
     let x = l2r_nat_raw(n);
     if (x & 1) == 1 { l2r_array_with_capacity<T>(x >> 1, elem) } else { l2r_internal_panic_at<RVec<T>>(4) }
@@ -1695,13 +1707,14 @@ fn lean_array_swap<T>(v : RVec<T>, i : Nat, j : Nat) -> RVec<T> {
     }
 }
 
-// `Array.replicate n x`. As `lean_mk_array`: a big `n` that is a `size_t`
-// (2^63 <= n < 2^64) is the size asked for, and the byte size `24 + 8n`
-// then overflows (`integer overflow in runtime computation`, from
-// `check_alloc`); 2^64 or more is `out of memory` (`l2r_nat_to_size_t`).
-// Unlike `Array.mkEmpty`, whose `lean_mk_empty_array_with_capacity` is
-// `out of memory` for every big capacity (cross-test XT-5).
-fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> { l2r_array_replicate(l2r_nat_to_size_t(n), x) }
+// `Array.replicate n x`. As `lean_mk_array` (lean-runtime's
+// `sem::array::replicate_len`, `l2r_replicate_len`): a big `n` that is a
+// `size_t` (2^63 <= n < 2^64) is the size asked for, and the byte size
+// `24 + 8n` then overflows (`integer overflow in runtime computation`);
+// 2^64 or more is `out of memory`. Unlike `Array.mkEmpty`, whose
+// `lean_mk_empty_array_with_capacity` is `out of memory` for every big
+// capacity (cross-test XT-5).
+fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> { l2r_array_replicate(l2r_replicate_len(n), x) }
 
 // ---- Array Nat / Array Int ----
 //
@@ -1818,7 +1831,7 @@ fn lean_natarr_swap(v : LNatArr, i : Nat, j : Nat) -> LNatArr {
 }
 
 // `Array.replicate n x` (big sizes as `lean_mk_array`).
-fn lean_mk_natarr(n : Nat, x : Nat) -> LNatArr { l2r_natarr_replicate(l2r_nat_to_size_t(n), x) }
+fn lean_mk_natarr(n : Nat, x : Nat) -> LNatArr { l2r_natarr_replicate(l2r_replicate_len(n), x) }
 
 // `Array.toList` glue (see `l2r_array_to_list`).
 fn l2r_natarr_to_list<L>(a : LNatArr, nil : L, cons : Nat -> (L -> L)) -> L {
@@ -1926,7 +1939,7 @@ fn lean_intarr_swap(v : LIntArr, i : Nat, j : Nat) -> LIntArr {
 }
 
 // `Array.replicate n x` (big sizes as `lean_mk_array`).
-fn lean_mk_intarr(n : Nat, x : Int) -> LIntArr { l2r_intarr_replicate(l2r_nat_to_size_t(n), x) }
+fn lean_mk_intarr(n : Nat, x : Int) -> LIntArr { l2r_intarr_replicate(l2r_replicate_len(n), x) }
 
 // `Array.toList` glue (see `l2r_array_to_list`).
 fn l2r_intarr_to_list<L>(a : LIntArr, nil : L, cons : Int -> (L -> L)) -> L {
@@ -1967,23 +1980,16 @@ fn lean_sarray_dec_eq(a : RVec<u8>, b : RVec<u8>) -> bool [{ { let r = leanrt::a
 fn l2r_byte_array_copy_slice(src : RVec<u8>, so : u64, dest : RVec<u8>, d : u64, len : u64, exact : bool) -> RVec<u8> [{
     leanrt::array::copy_slice(src, so, dest, d, len, exact)
 }];
-// `lean_nat_to_size_t`: values that are not a `size_t` (>= 2^64) are an
-// internal "out of memory" panic.
-#[ffi(import)]
-fn l2r_nat_to_size_t_raw(a : u64) -> u64 [{ leanrt::nat::nat_to_size_t(a) }];
-
-fn l2r_nat_to_size_t(n : Nat) -> u64 {
-    let x = l2r_nat_raw(n);
-    if (x & 1) == 1 { x >> 1 } else { l2r_nat_to_size_t_raw(x) }
-}
-
-// `ByteArray.copySlice`, converting the offsets in C's order (a source
-// offset past the end returns `dest` before the others are looked at).
+// `ByteArray.copySlice` (lean-runtime's `sem::array::copy_slice`, in the
+// texture; a source offset past the end returns `dest` inline): the offsets
+// and the length are passed saturated (`l2r_nat_sat`), so ones of 2^64 or
+// more give the definition's result (LB-06 lifted; natively
+// `lean_nat_to_size_t` ends with `out of memory`).
 fn lean_byte_array_copy_slice(src : RVec<u8>, so : Nat, dest : RVec<u8>, d : Nat, len : Nat, exact : bool) -> RVec<u8> {
-    let s = l2r_nat_to_size_t(so);
+    let s = l2r_nat_sat(so);
     if s > l2r_array_size(src) { dest } else {
-        let n = l2r_nat_to_size_t(len);
-        let o = l2r_nat_to_size_t(d);
+        let n = l2r_nat_sat(len);
+        let o = l2r_nat_sat(d);
         l2r_byte_array_copy_slice(src, s, dest, o, n, exact)
     }
 }

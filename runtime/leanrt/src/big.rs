@@ -1,4 +1,6 @@
-//! Big natural numbers and integers: the slow paths of `Nat` and `Int`.
+//! Big natural numbers and integers: lean2rr's backend for lean-runtime's
+//! `Nat` and `Int` rules (`GNat`, `GInt` at the end: the `BigNat` and
+//! `BigInt` traits of `lean_runtime::semantics::bignum`).
 //!
 //! A big number is one mimalloc block, a 16-byte header followed by the
 //! limbs:
@@ -32,9 +34,11 @@
 //! rare operations (`pow`, `gcd`, parsing, printing) give GMP's `mpz_*`
 //! functions read-only `mpz_t` views of the operands (`MPZ_ROINIT_N`) and
 //! copy a result out of a temporary `mpz_t`.
-//! Semantics are Lean's (`src/runtime/mpz.cpp`, `object.cpp`): truncating
-//! subtraction, `x / 0 = 0`, `x % 0 = x` (both handled by `crate::nat`),
-//! `Int.div`/`Int.mod` truncate, `Int.ediv`/`Int.emod` are Euclidean.
+//! Lean's rules (`src/runtime/object.cpp`: truncating subtraction, `x / 0 =
+//! 0`, `x % 0 = x`, the shift and exponent limits, the size of a result) are
+//! lean-runtime's (`semantics::nat`, `semantics::int`), which `crate::nat`
+//! calls; here only the arithmetic, with GMP's conventions (`mpz.cpp`):
+//! `Int.tdiv`/`Int.tmod` truncate, `Int.ediv`/`Int.emod` are Euclidean.
 //!
 //! Every function consumes its `LBig` arguments.
 //!
@@ -233,7 +237,7 @@ mod count {
 #[cold]
 #[inline(never)]
 fn oom() -> ! {
-    crate::internal_panic("out of memory")
+    crate::lean_internal_panic(lean_runtime::semantics::panic::InternalPanic::OutOfMemory)
 }
 
 /// The block size for `n` limbs, rounded up to mimalloc's size class (the
@@ -428,19 +432,6 @@ pub fn of_i64(x: i64) -> LBig {
     r
 }
 
-/// `2^k`.
-#[inline(never)]
-pub fn pow2(k: u64) -> LBig {
-    let n = (k / 64) as usize + 1;
-    let mut r = alloc(n);
-    unsafe {
-        ptr::write_bytes(r.ptr(), 0, n - 1);
-        *r.ptr().add(n - 1) = 1 << (k % 64);
-    }
-    r.set(n, false);
-    r
-}
-
 /// The magnitude's limbs, little-endian, without high zero limbs (empty
 /// for zero).
 #[inline]
@@ -451,12 +442,6 @@ pub fn limbs(b: &LBig) -> &[u64] {
 #[inline]
 pub fn is_neg(b: &LBig) -> bool {
     b.neg()
-}
-
-/// Whether a non-negative value fits in a `u64`.
-#[inline]
-pub fn is_u64(b: &LBig) -> bool {
-    !b.neg() && b.len() <= 1
 }
 
 /// The lowest limb of the magnitude (`0` for zero).
@@ -863,16 +848,13 @@ pub fn nat_add_u64(a: LBig, y: u64) -> LBig {
     }
 }
 
-/// Truncated subtraction `a - b` (0 when `a < b`).
+/// `a - b`, where `a >= b` (lean-runtime's `nat::sub` truncates first).
 #[inline(never)]
 pub fn nat_sub(a: LBig, b: LBig) -> LBig {
-    if cmp_mag(&a, &b) <= 0 {
-        return zero(a, b);
-    }
     sub_mag(a, b, false)
 }
 
-/// `a - y` for a big `a` (never truncates: `y < 2^63 <= a`).
+/// `a - y`, where `a >= y`.
 #[inline(never)]
 pub fn nat_sub_u64(a: LBig, y: u64) -> LBig {
     let n = a.len();
@@ -904,13 +886,6 @@ pub fn nat_mul(a: LBig, b: LBig) -> LBig {
 #[inline(never)]
 pub fn nat_mul_u64(a: LBig, y: u64) -> LBig {
     mul_limb(a, y, false)
-}
-
-/// The full product of two words.
-#[inline(never)]
-pub fn u64_mul_wide(x: u64, y: u64) -> LBig {
-    let p = (x as u128) * (y as u128);
-    of_limbs2(p as u64, (p >> 64) as u64)
 }
 
 /// High word of the product of two words (0 when it does not overflow).
@@ -954,22 +929,11 @@ pub fn nat_mod(a: LBig, b: LBig) -> LBig {
     div(a, b, Div::TR)
 }
 
-/// `a % y` for `y != 0`.
+/// `a % y` for `y != 0` (`a` is borrowed).
 #[inline(never)]
-pub fn nat_mod_u64(a: LBig, y: u64) -> u64 {
+pub fn nat_mod_u64(a: &LBig, y: u64) -> u64 {
     let n = a.len();
     if n == 0 { 0 } else { unsafe { __gmpn_mod_1(a.ptr(), n as i64, y) } }
-}
-
-/// Three-way comparison: -1, 0, 1 (any signs).
-#[inline(never)]
-pub fn nat_cmp(a: LBig, b: LBig) -> i64 {
-    cmp(&a, &b) as i64
-}
-
-#[inline(never)]
-pub fn nat_eq(a: LBig, b: LBig) -> bool {
-    a.size() == b.size() && limbs(&a) == limbs(&b)
 }
 
 #[inline(never)]
@@ -978,27 +942,26 @@ pub fn nat_land(a: LBig, b: LBig) -> LBig {
 }
 
 #[inline(never)]
-pub fn nat_land_u64(a: LBig, y: u64) -> u64 {
-    low_limb(&a) & y
-}
-
-#[inline(never)]
 pub fn nat_lor(a: LBig, b: LBig) -> LBig {
     bitwise(a, b, Bit::Or)
 }
 
-/// Apply `f` to the lowest limb of a positive `a` (into `a` when unique).
+/// Apply `f` to the lowest limb of `a` (into `a` when unique; zero is the
+/// word `f(0)`).
 #[inline]
 fn with_low_limb(a: LBig, f: impl FnOnce(u64) -> u64) -> LBig {
     let n = a.len();
-    debug_assert!(n > 0);
+    if n == 0 {
+        drop(a);
+        return of_u64(f(0));
+    }
     let mut r = unique(a, n);
     unsafe { *r.ptr() = f(*r.ptr()) };
     r.set(n, false);
     r
 }
 
-/// `a ||| y` for a big `a` (>= 2^63, at least one limb).
+/// `a ||| y`.
 #[inline(never)]
 pub fn nat_lor_u64(a: LBig, y: u64) -> LBig {
     with_low_limb(a, |l| l | y)
@@ -1009,13 +972,14 @@ pub fn nat_xor(a: LBig, b: LBig) -> LBig {
     bitwise(a, b, Bit::Xor)
 }
 
-/// `a ^^^ y` for a big `a` (>= 2^63, at least one limb).
+/// `a ^^^ y`.
 #[inline(never)]
 pub fn nat_xor_u64(a: LBig, y: u64) -> LBig {
     with_low_limb(a, |l| l ^ y)
 }
 
-/// `a <<< s`; `s <= 2^32 - 1` (checked by the caller).
+/// `a <<< s`, where `bit_len(a) + s <= MAX_BITS` (lean-runtime's
+/// `nat::shiftl` and `nat::pow` test it before they call `GNat::shl`).
 #[inline(never)]
 pub fn nat_shl(a: LBig, s: u64) -> LBig {
     let n = a.len();
@@ -1095,33 +1059,34 @@ pub fn nat_shr(a: LBig, s: u64) -> LBig {
     }
 }
 
-/// Bit length minus one (`Nat.log2`) of a positive value.
-#[inline(never)]
-pub fn nat_log2(a: LBig) -> u64 {
-    let n = a.len();
-    if n == 0 {
-        return 0;
+/// The number of significant bits of the magnitude: 0 for zero,
+/// `log2 |a| + 1` otherwise (`mpz_sizeinbase(a, 2)`).
+#[inline]
+pub fn bit_len(a: &LBig) -> u64 {
+    match limbs(a).last() {
+        None => 0,
+        Some(&top) => 64 * a.len() as u64 - top.leading_zeros() as u64,
     }
-    let top = limbs(&a)[n - 1];
-    64 * (n as u64 - 1) + 63 - top.leading_zeros() as u64
 }
 
-/// `a ^ e`.
+/// The number of trailing zero bits of a nonzero magnitude
+/// (`mpz_scan1(a, 0)`).
+#[inline]
+pub fn trailing_zeros(a: &LBig) -> u64 {
+    let l = limbs(a);
+    let i = l.iter().position(|&x| x != 0).expect("trailing_zeros of zero");
+    64 * i as u64 + l[i].trailing_zeros() as u64
+}
+
+/// `a ^ e` (`mpz_pow_ui`, GMP's limbs, copied into a block), where the
+/// result has at most `MAX_BITS` bits: lean-runtime's `nat::pow` tests
+/// `bit_len(a) * e` first.
 #[inline(never)]
 pub fn nat_pow(a: LBig, e: u64) -> LBig {
     let mut t = OwnedMpz::new();
     let z = view(&a);
     unsafe { __gmpz_pow_ui(t.ptr(), &z, e) };
     drop(a);
-    of_mpz(&t.0)
-}
-
-/// `x ^ e` for a word `x`.
-#[inline(never)]
-pub fn u64_pow(x: u64, e: u64) -> LBig {
-    let mut t = OwnedMpz::new();
-    let z = Mpz { alloc: 0, size: (x != 0) as i32, d: &x as *const u64 as *mut u64 };
-    unsafe { __gmpz_pow_ui(t.ptr(), &z, e) };
     of_mpz(&t.0)
 }
 
@@ -1203,14 +1168,265 @@ pub fn int_emod(a: LBig, b: LBig) -> LBig {
     div(a, b, Div::ER)
 }
 
-#[inline(never)]
-pub fn int_cmp(a: LBig, b: LBig) -> i64 {
-    nat_cmp(a, b)
+// ---------------------------------------------------------------------------
+// lean-runtime's big-number traits
+//
+// `lean_runtime::semantics::nat` and `::int` state Lean's `Nat` and `Int`
+// rules over the traits `BigNat` and `BigInt` (`semantics::bignum`), and
+// `crate::nat` runs them on its words. `GNat` and `GInt` are this file's
+// numbers as those traits: each method is one of the operations above
+// (`mpn` on the blocks, `mpz` views for `pow`, `gcd` and the decimal
+// conversions).
+
+use lean_runtime::semantics::bignum::{BigInt, BigNat};
+use std::cmp::Ordering;
+use std::fmt;
+
+/// A big number as lean-runtime's `BigNat`: its value is never negative,
+/// and may be below 2^63 (`crate::nat` normalizes the rules' results).
+#[repr(transparent)]
+pub struct GNat(pub LBig);
+
+/// A big number as lean-runtime's `BigInt`.
+#[repr(transparent)]
+pub struct GInt(pub LBig);
+
+/// The largest result the rules ask of these numbers, in bits
+/// (`BigNat::MAX_BITS`): lean-runtime's rules refuse a larger `Nat` or `Int`
+/// result before computing it, with `INTERNAL PANIC: out of memory` (or
+/// native's exponent message for an exponent or shift of 2^32 or more;
+/// LB-05). The limit is GMP's: an `mpz_t` holds at most `INT_MAX` limbs
+/// (GMP 6.3.0's `_mpz_realloc` raises `SIGFPE` above it), and so does a
+/// block (`MAX_LIMBS`). The margin is `mpz_pow_ui`'s, the one operation
+/// whose result GMP allocates (`nat_pow`): `mpz_n_pow_ui` asks for
+/// `ralloc + rtwos_limbs` limbs (`mpz/n_pow_ui.c`), where `ralloc` is the
+/// base's odd part's bits times `e`, divided by 64, plus 5 (rounding, the
+/// multiplications' extra limb, two limbs of `rl`, the final shift) and
+/// `rtwos_limbs` the zero limbs of the power of two: at most
+/// `bit_len(a) * e / 64 + 5`, which `INT_MAX` bounds when `bit_len(a) * e`,
+/// the size `nat::pow` tests, is at most `(INT_MAX - 5) * 64`. The
+/// operations on blocks need at most `MAX_BITS / 64 + 2` limbs (a carry,
+/// a shifted limb, two rounded-up factors).
+pub const MAX_BITS: u64 = (MAX_LIMBS as u64 - 5) * 64;
+
+/// The decimal digits of `b`, a sign first when it is negative.
+fn write_decimal<W: fmt::Write + ?Sized>(b: &LBig, out: &mut W) -> fmt::Result {
+    let d = to_decimal(b);
+    // `mpz_get_str` writes ASCII digits and a sign.
+    out.write_str(unsafe { std::str::from_utf8_unchecked(&d) })
 }
 
-#[inline(never)]
-pub fn int_eq(a: LBig, b: LBig) -> bool {
-    nat_eq(a, b)
+impl BigNat for GNat {
+    const MAX_BITS: u64 = MAX_BITS;
+
+    #[inline]
+    fn from_u64(v: u64) -> GNat {
+        GNat(of_u64(v))
+    }
+
+    #[inline]
+    fn from_u128(v: u128) -> GNat {
+        GNat(of_limbs2(v as u64, (v >> 64) as u64))
+    }
+
+    #[inline]
+    fn to_u64(&self) -> Option<u64> {
+        if self.0.len() <= 1 { Some(low_limb(&self.0)) } else { None }
+    }
+
+    #[inline]
+    fn low_u64(&self) -> u64 {
+        low_limb(&self.0)
+    }
+
+    #[inline]
+    fn bit_len(&self) -> u64 {
+        bit_len(&self.0)
+    }
+
+    #[inline]
+    fn trailing_zeros(&self) -> u64 {
+        trailing_zeros(&self.0)
+    }
+
+    #[inline]
+    fn compare(&self, o: &GNat) -> Ordering {
+        cmp_mag(&self.0, &o.0).cmp(&0)
+    }
+
+    fn add(self, o: GNat) -> GNat {
+        GNat(nat_add(self.0, o.0))
+    }
+
+    fn add_u64(self, o: u64) -> GNat {
+        GNat(nat_add_u64(self.0, o))
+    }
+
+    fn sub(self, o: GNat) -> GNat {
+        GNat(nat_sub(self.0, o.0))
+    }
+
+    fn sub_u64(self, o: u64) -> GNat {
+        GNat(nat_sub_u64(self.0, o))
+    }
+
+    fn mul(self, o: GNat) -> GNat {
+        GNat(nat_mul(self.0, o.0))
+    }
+
+    fn mul_u64(self, o: u64) -> GNat {
+        GNat(nat_mul_u64(self.0, o))
+    }
+
+    fn div(self, o: GNat) -> GNat {
+        GNat(nat_div(self.0, o.0))
+    }
+
+    fn rem(self, o: GNat) -> GNat {
+        GNat(nat_mod(self.0, o.0))
+    }
+
+    fn div_u64(self, o: u64) -> GNat {
+        GNat(nat_div_u64(self.0, o))
+    }
+
+    fn rem_u64(&self, o: u64) -> u64 {
+        nat_mod_u64(&self.0, o)
+    }
+
+    fn and(self, o: GNat) -> GNat {
+        GNat(nat_land(self.0, o.0))
+    }
+
+    fn or(self, o: GNat) -> GNat {
+        GNat(nat_lor(self.0, o.0))
+    }
+
+    fn or_u64(self, o: u64) -> GNat {
+        GNat(nat_lor_u64(self.0, o))
+    }
+
+    fn xor(self, o: GNat) -> GNat {
+        GNat(nat_xor(self.0, o.0))
+    }
+
+    fn xor_u64(self, o: u64) -> GNat {
+        GNat(nat_xor_u64(self.0, o))
+    }
+
+    fn shl(self, s: u64) -> GNat {
+        GNat(nat_shl(self.0, s))
+    }
+
+    fn shr(self, s: u64) -> GNat {
+        GNat(nat_shr(self.0, s))
+    }
+
+    fn pow(self, e: u64) -> GNat {
+        GNat(nat_pow(self.0, e))
+    }
+
+    fn gcd(self, o: GNat) -> GNat {
+        GNat(nat_gcd(self.0, o.0))
+    }
+
+    fn write_decimal<W: fmt::Write + ?Sized>(&self, out: &mut W) -> fmt::Result {
+        write_decimal(&self.0, out)
+    }
+}
+
+impl BigInt for GInt {
+    type Nat = GNat;
+
+    #[inline]
+    fn from_i64(v: i64) -> GInt {
+        GInt(of_i64(v))
+    }
+
+    fn from_i128(v: i128) -> GInt {
+        let m = v.unsigned_abs();
+        let b = of_limbs2(m as u64, (m >> 64) as u64);
+        GInt(if v < 0 { int_neg(b) } else { b })
+    }
+
+    /// The same block (a `Nat`'s value is its magnitude, never negative).
+    #[inline]
+    fn from_nat(n: GNat) -> GInt {
+        GInt(n.0)
+    }
+
+    fn nat_abs(self) -> GNat {
+        GNat(int_abs(self.0))
+    }
+
+    #[inline]
+    fn to_i64(&self) -> Option<i64> {
+        if fits_i64(&self.0) { Some(to_i64(&self.0)) } else { None }
+    }
+
+    #[inline]
+    fn low_u64(&self) -> u64 {
+        low_u64_twos(&self.0)
+    }
+
+    #[inline]
+    fn is_neg(&self) -> bool {
+        self.0.neg()
+    }
+
+    #[inline]
+    fn bit_len(&self) -> u64 {
+        bit_len(&self.0)
+    }
+
+    #[inline]
+    fn compare(&self, o: &GInt) -> Ordering {
+        cmp(&self.0, &o.0).cmp(&0)
+    }
+
+    fn neg(self) -> GInt {
+        GInt(int_neg(self.0))
+    }
+
+    fn add(self, o: GInt) -> GInt {
+        GInt(int_add(self.0, o.0))
+    }
+
+    fn sub(self, o: GInt) -> GInt {
+        GInt(int_sub(self.0, o.0))
+    }
+
+    fn mul(self, o: GInt) -> GInt {
+        GInt(int_mul(self.0, o.0))
+    }
+
+    /// Required by the trait but unused: the rules call `tdiv`, `tmod`,
+    /// `ediv`, `emod` and `div_exact`, overridden below with `big::div`,
+    /// which computes only its own result; this one clones and divides twice.
+    fn tdiv_rem(self, o: &GInt) -> (GInt, GInt) {
+        let q = int_tdiv(self.0.clone(), o.0.clone());
+        (GInt(q), GInt(int_tmod(self.0, o.0.clone())))
+    }
+
+    fn tdiv(self, o: GInt) -> GInt {
+        GInt(int_tdiv(self.0, o.0))
+    }
+
+    fn tmod(self, o: GInt) -> GInt {
+        GInt(int_tmod(self.0, o.0))
+    }
+
+    fn ediv(self, o: GInt) -> GInt {
+        GInt(int_ediv(self.0, o.0))
+    }
+
+    fn emod(self, o: GInt) -> GInt {
+        GInt(int_emod(self.0, o.0))
+    }
+
+    fn write_decimal<W: fmt::Write + ?Sized>(&self, out: &mut W) -> fmt::Result {
+        write_decimal(&self.0, out)
+    }
 }
 
 #[cfg(test)]
@@ -1264,10 +1480,10 @@ mod tests {
         assert_eq!(dec(&int_emod(int_neg(of_u64(7)), int_neg(of_u64(2)))), "1");
         assert_eq!(dec(&nat_lor_u64(a.clone(), 5)), "18446744073709551621");
         assert_eq!(dec(&nat_xor_u64(nat_lor_u64(a.clone(), 5), 4)), "18446744073709551617");
-        assert_eq!(nat_log2(a.clone()), 64);
+        assert_eq!((bit_len(&a), trailing_zeros(&a)), (65, 64));
         assert_eq!(dec(&nat_shr(nat_shl(a.clone(), 100), 99)), "36893488147419103232");
-        assert_eq!(dec(&pow2(64)), "18446744073709551616");
-        assert_eq!(dec(&u64_pow(10, 20)), "100000000000000000000");
+        assert_eq!(dec(&nat_pow(of_u64(10), 20)), "100000000000000000000");
+        assert_eq!(dec(&nat_pow(of_u64(3), 41)), "36472996377170786403");
         // in place on a unique value, a copy for a shared one
         let s = a.clone();
         let t = nat_add_u64(s, 1);
@@ -1340,7 +1556,8 @@ mod tests {
                     let (x, y) = pair();
                     assert_eq!(dec(&int_mul(x, y)), reference(__gmpz_mul, a, b));
                     let (x, y) = pair();
-                    assert_eq!(nat_cmp(x, y), unsafe { __gmpz_cmp(&view(a), &view(b)) }.signum() as i64);
+                    assert_eq!(cmp(&x, &y), unsafe { __gmpz_cmp(&view(a), &view(b)) }.signum());
+                    drop((x, y));
                     if b.len() != 0 {
                         let (x, y) = pair();
                         assert_eq!(dec(&int_tdiv(x, y)), reference(__gmpz_tdiv_q, a, b));
@@ -1361,9 +1578,10 @@ mod tests {
                         assert_eq!(dec(&nat_xor(x, y)), reference(__gmpz_xor, a, b));
                         let (x, y) = pair();
                         assert_eq!(dec(&nat_gcd(x, y)), reference(__gmpz_gcd, a, b));
-                        let (x, y) = pair();
-                        let t = if cmp(a, b) <= 0 { "0".to_string() } else { reference(__gmpz_sub, a, b) };
-                        assert_eq!(dec(&nat_sub(x, y)), t);
+                        if cmp(a, b) >= 0 {
+                            let (x, y) = pair();
+                            assert_eq!(dec(&nat_sub(x, y)), reference(__gmpz_sub, a, b));
+                        }
                     }
                 }
             }
@@ -1389,7 +1607,7 @@ mod tests {
                         if y != 0 {
                             unsafe { __gmpz_tdiv_q_ui(t.ptr(), &view(a), y) };
                             assert_eq!(dec(&nat_div_u64(x(), y)), dec(&of_mpz(&t.0)));
-                            assert_eq!(nat_mod_u64(x(), y), unsafe { __gmpz_tdiv_ui(&view(a), y) });
+                            assert_eq!(nat_mod_u64(&x(), y), unsafe { __gmpz_tdiv_ui(&view(a), y) });
                         }
                         if cmp_mag(a, &of_u64(y)) >= 0 {
                             unsafe { __gmpz_sub_ui(t.ptr(), &view(a), y) };
@@ -1495,9 +1713,10 @@ mod tests {
                             assert_eq!(dec(&nat_lor(x, y)), reference(__gmpz_ior, a, b), "or {ctx}");
                             let (x, y) = pair();
                             assert_eq!(dec(&nat_xor(x, y)), reference(__gmpz_xor, a, b), "xor {ctx}");
-                            let (x, y) = pair();
-                            let t = if cmp(a, b) <= 0 { "0".to_string() } else { reference(__gmpz_sub, a, b) };
-                            assert_eq!(dec(&nat_sub(x, y)), t, "nsub {ctx}");
+                            if cmp(a, b) >= 0 {
+                                let (x, y) = pair();
+                                assert_eq!(dec(&nat_sub(x, y)), reference(__gmpz_sub, a, b), "nsub {ctx}");
+                            }
                         }
                     }
                 }
@@ -1570,6 +1789,40 @@ mod tests {
         println!("y cap {}", y.cap());
         assert_eq!(dec(&nat_add(xs, y)), "340282366920938463463374607431768211456");
         drop(x);
+    }
+
+    /// `MAX_BITS` keeps `mpz_pow_ui`'s request (`bit_len * e / 64 + 5`
+    /// limbs) at `INT_MAX`, and the blocks' (`MAX_BITS / 64 + 2`) within
+    /// `MAX_LIMBS`; lean-runtime requires at least 2^33 and below 2^64.
+    #[test]
+    fn max_bits() {
+        assert!(MAX_BITS / 64 + 5 <= i32::MAX as u64);
+        assert!(MAX_BITS / 64 + 2 <= MAX_LIMBS as u64);
+        assert!(MAX_BITS >= 1 << 33);
+        assert_eq!(<GNat as BigNat>::MAX_BITS, MAX_BITS);
+    }
+
+    /// The trait methods that are not one of the operations above.
+    #[test]
+    fn trait_views() {
+        let x = GNat(nat_shl(of_u64(5), 130));
+        assert_eq!((x.bit_len(), x.trailing_zeros(), x.to_u64()), (133, 130, None));
+        let y = GNat(of_u64(1 << 40));
+        assert_eq!((y.bit_len(), y.trailing_zeros(), y.to_u64(), y.low_u64()), (41, 40, Some(1 << 40), 1 << 40));
+        assert_eq!(x.compare(&y), Ordering::Greater);
+        assert_eq!(y.compare_u64(1 << 40), Ordering::Equal);
+        assert_eq!(GNat(of_u64(0)).bit_len(), 0);
+        assert_eq!(dec(&GNat(of_u64(0)).or_u64(7).0), "7");
+        assert_eq!(dec(&GNat(of_u64(0)).xor_u64(7).0), "7");
+        let m = GInt::from_i128(-(1 << 100) - 4);
+        assert_eq!((m.is_neg(), m.bit_len(), m.to_i64(), m.low_u64()), (true, 101, None, (-4i64) as u64));
+        let (q, r) = m.tdiv_rem(&GInt::from_i64(-7));
+        let v = (1i128 << 100) + 4;
+        assert_eq!((dec(&q.0), dec(&r.0)), ((v / 7).to_string(), (-(v % 7)).to_string()));
+        let mut s = String::new();
+        BigInt::write_decimal(&GInt::from_i128(-(1 << 64)), &mut s).unwrap();
+        assert_eq!(s, "-18446744073709551616");
+        assert_eq!(GInt::from_nat(GNat(of_u64(3))).compare(&GInt::from_i64(3)), Ordering::Equal);
     }
 
     /// A small result in a large unique operand's block: the block shrinks

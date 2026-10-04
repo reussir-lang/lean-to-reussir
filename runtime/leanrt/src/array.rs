@@ -12,6 +12,7 @@
 
 pub use crate::drop::Vec as RVec;
 use crate::drop::{elems, Hdr, HDR};
+use lean_runtime::semantics as sem;
 use std::ffi::c_void;
 use std::mem::size_of;
 
@@ -24,7 +25,7 @@ extern "C" {
 #[cold]
 #[inline(never)]
 fn oom() -> ! {
-    crate::internal_panic("out of memory")
+    crate::lean_internal_panic(sem::panic::InternalPanic::OutOfMemory)
 }
 
 /// The size of a block with room for `cap` elements, rounded up to a
@@ -216,19 +217,31 @@ pub fn with_capacity<T: Clone>(n: usize) -> RVec<T> {
 pub const CHECK_THRESHOLD: u64 = 1 << 24;
 
 /// Lean's allocation of an array object of `n` elements of `elem` bytes
-/// (`lean_alloc_array`, `lean_alloc_sarray`): `24 + elem * n` bytes, where
-/// an overflow is the internal panic `integer overflow in runtime
-/// computation` and a failed `malloc` is `out of memory`.
+/// (`lean_alloc_array`, `lean_alloc_sarray`): lean-runtime's size rule
+/// (`sem::array::alloc_bytes`: `24 + elem * n` bytes, an overflow being the
+/// internal panic `integer overflow in runtime computation`), then a failed
+/// `malloc` is `out of memory`.
 #[inline(always)]
 pub fn check_alloc(n: u64, elem: u64) {
     if n > CHECK_THRESHOLD {
-        check_alloc_slow(n, elem)
+        check_alloc_slow(n, elem, false)
+    }
+}
+
+/// `check_alloc` for a capacity (`Array.mkEmpty`, `emptyWithCapacity`):
+/// lean-runtime's rule for it (`sem::array::empty_with_capacity`: a
+/// capacity of 2^63 or more, which is not a Lean scalar, is `out of
+/// memory`), then the allocation.
+#[inline(always)]
+pub fn check_capacity(n: u64, elem: u64) {
+    if n > CHECK_THRESHOLD {
+        check_alloc_slow(n, elem, true)
     }
 }
 
 #[cold]
 #[inline(never)]
-extern "C" fn check_alloc_slow(n: u64, elem: u64) {
+extern "C" fn check_alloc_slow(n: u64, elem: u64, capacity: bool) {
     // Lean allocates big objects with mimalloc too.
     extern "C" {
         #[link_name = "mi_malloc"]
@@ -236,25 +249,33 @@ extern "C" fn check_alloc_slow(n: u64, elem: u64) {
         #[link_name = "mi_free"]
         fn free(p: *mut std::ffi::c_void);
     }
-    let Some(bytes) = n.checked_mul(elem).and_then(|b| b.checked_add(24)) else {
-        crate::internal_panic("integer overflow in runtime computation")
+    let checked = if capacity {
+        sem::array::empty_with_capacity(elem, n).map(|_| ())
+    } else {
+        sem::array::alloc_bytes(elem, n).map(|_| ())
     };
+    if let Err(p) = checked {
+        crate::lean_internal_panic(p)
+    }
+    // Both rules have checked that this does not overflow.
+    let bytes = sem::array::ARRAY_HEADER_BYTES + elem * n;
     // Would the native allocation succeed? (It is only reserved, not
     // touched, so this costs no memory. `black_box` keeps the compiler from
     // eliding the malloc/free pair.)
     let p = std::hint::black_box(unsafe { malloc(std::hint::black_box(bytes as usize)) });
     if p.is_null() {
-        crate::internal_panic("out of memory")
+        crate::lean_internal_panic(sem::panic::InternalPanic::OutOfMemory)
     }
     unsafe { free(p) };
 }
 
 /// `Array.mkEmpty n` (and the scalar-array variants, `elem` bytes per
-/// element): Lean's allocation checks, then the capacity asked for, as
-/// natively (reserved address space: untouched pages cost no memory).
+/// element): Lean's allocation checks (`check_capacity`), then the capacity
+/// asked for, as natively (reserved address space: untouched pages cost no
+/// memory).
 #[inline(never)]
 pub fn with_capacity_checked<T: Clone>(n: u64, elem: u64) -> RVec<T> {
-    check_alloc(n, elem);
+    check_capacity(n, elem);
     alloc(n as usize)
 }
 
@@ -547,28 +568,27 @@ pub fn string_of_bytes(b: RVec<u8>) -> crate::string::LStr {
     s
 }
 
-/// `ByteArray.copySlice src srcOff dest destOff len exact`.
+/// `ByteArray.copySlice src srcOff dest destOff len exact`, as lean-runtime's
+/// plan (`sem::array::copy_slice`); the offsets and the length are taken
+/// saturated (`u64::MAX` for 2^64 or more: LB-06 lifted). `exact` only
+/// chooses the capacity of a grown result natively; here a grown block gets
+/// `make_mut`'s.
 #[inline(never)]
 pub fn copy_slice(src: RVec<u8>, src_off: u64, dest: RVec<u8>, dest_off: u64, len: u64, exact: bool) -> RVec<u8> {
-    let ssz = src.len();
-    if src_off > ssz as u64 {
-        return dest;
-    }
-    let src_off = src_off as usize;
-    let len = (len.min(u64::MAX / 2) as usize).min(ssz - src_off);
-    let dsz = dest.len();
-    let dest_off = (dest_off as usize).min(dsz);
-    let new_size = (dest_off + len).max(dsz);
     let _ = exact;
+    let dsz = dest.len();
+    let Some(plan) = sem::array::copy_slice(src.len(), src_off, dsz, dest_off, len) else {
+        return dest;
+    };
     let mut dest = dest;
     // When `src` and `dest` are the same array its count is at least 2, so
     // `make_mut` copies it: the bytes are read from `src`'s own block.
-    let o = make_mut(&mut dest, new_size - dsz);
+    let o = make_mut(&mut dest, plan.new_len - dsz);
     unsafe {
         let d = elems::<u8>(o);
-        std::ptr::write_bytes(d.add(dsz), 0, new_size - dsz);
-        std::ptr::copy(elems::<u8>(src.hdr()).add(src_off), d.add(dest_off), len);
-        (*o).len = new_size;
+        std::ptr::write_bytes(d.add(dsz), 0, plan.new_len - dsz);
+        std::ptr::copy(elems::<u8>(src.hdr()).add(plan.src_start), d.add(plan.dest_start), plan.len);
+        (*o).len = plan.new_len;
     }
     dest
 }

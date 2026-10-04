@@ -110,7 +110,9 @@ garbage.
 - **Out of memory.** lean2rr ends every failed allocation with `INTERNAL
   PANIC: out of memory` and exit 1. Natively the end depends on where it
   happens (GMP and `getLine` abort with 134). The two builds use different
-  amounts of memory, so they run out at different points.
+  amounts of memory, so they run out at different points. A `Nat` or `Int`
+  result too big for GMP (more than 2^31 limbs) ends at once with `INTERNAL
+  PANIC: out of memory`, where native GMP raises SIGFPE (LB-05, below).
 - **Stack depth.** Frame sizes differ, so the depth of a stack overflow
   differs. The report itself is native's (`Stack overflow detected.
   Aborting.`, exit 134). lean2rr adds no recursion of its own: conversions,

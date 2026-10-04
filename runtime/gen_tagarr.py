@@ -128,7 +128,7 @@ fn lean_{k}arr_swap(v : {T}, i : Nat, j : Nat) -> {T} {{
 }}
 
 // `Array.replicate n x` (big sizes as `lean_mk_array`).
-fn lean_mk_{k}arr(n : Nat, x : {E}) -> {T} {{ l2r_{k}arr_replicate(l2r_nat_to_size_t(n), x) }}
+fn lean_mk_{k}arr(n : Nat, x : {E}) -> {T} {{ l2r_{k}arr_replicate(l2r_replicate_len(n), x) }}
 
 // `Array.toList` glue (see `l2r_array_to_list`).
 fn l2r_{k}arr_to_list<L>(a : {T}, nil : L, cons : {E} -> (L -> L)) -> L {{

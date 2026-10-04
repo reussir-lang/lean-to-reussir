@@ -25,10 +25,17 @@
 //!
 //! The prelude's fast paths work on the raw words (`into_raw`/`from_raw`);
 //! everything else comes here. The slow paths below take raw words they own
-//! (`u64`, as the prelude passes them) and return normalized handles.
-//! Semantics follow Lean's runtime (`lean.h`, `src/runtime/object.cpp`).
+//! (`u64`, as the prelude passes them) and return normalized handles. Their
+//! rules (zero divisors, truncation, rounding, shift and exponent limits,
+//! the size of a big result) are lean-runtime's (`semantics::nat`,
+//! `semantics::int`, Lean 4.34's `lean.h` and `object.cpp`): a slow path
+//! only views its words as the rules' `Nat`/`Int` (a word or a `big::GNat`/
+//! `big::GInt`), calls the rule, normalizes its result into a word, and
+//! ends the process with the rule's internal panic.
 
-use crate::big::{self, LBig};
+use crate::big::{self, GInt, GNat, LBig};
+use lean_runtime::semantics as sem;
+use sem::panic::InternalPanic;
 use std::mem::forget;
 
 /// A Lean `Nat` (see the module comment).
@@ -179,39 +186,28 @@ pub extern "C" fn nat_big_of_u64(v: u64) -> LNat {
     LNat::of_big(big::of_u64(v))
 }
 
-/// A big `Nat` operand or result: small value or big number, owned.
-enum N {
-    S(u64),
-    B(LBig),
-}
-
+/// The rules' view of a `Nat` word: its value, or the big number it owns.
 #[inline(always)]
-unsafe fn take(w: u64) -> N {
-    if is_small(w) { N::S(w >> 1) } else { N::B(big_of_word(w)) }
+unsafe fn nat_view(w: u64) -> sem::nat::Nat<GNat> {
+    if is_small(w) { sem::nat::Nat::Small(w >> 1) } else { sem::nat::Nat::Big(GNat(big_of_word(w))) }
 }
 
-fn to_big(n: N) -> LBig {
+/// A `Nat` the rules computed, as a normalized handle.
+#[inline]
+fn of_nat_view(n: sem::nat::Nat<GNat>) -> LNat {
     match n {
-        N::S(x) => big::of_u64(x),
-        N::B(b) => b,
+        sem::nat::Nat::Small(v) => LNat::of_u64(v),
+        sem::nat::Nat::Big(GNat(b)) => LNat::of_big(b),
     }
 }
 
-/// `x * y` of two words, normalized.
-fn mul_wide(x: u64, y: u64) -> LNat {
-    let p = (x as u128) * (y as u128);
-    if p >> 63 == 0 { LNat::small(p as u64) } else { LNat::of_big(big::of_limbs2(p as u64, (p >> 64) as u64)) }
-}
-
-#[cold]
-#[inline(never)]
-fn panic_code(code: u64) -> ! {
-    crate::internal_panic(match code {
-        1 => "Nat.pow exponent is too big",
-        2 => "Nat.shiftl exponent is too big",
-        3 => "Nat.shiftr exponent is too big",
-        _ => "internal error",
-    })
+/// A rule's result, or the end of the process with its internal panic.
+#[inline(always)]
+fn ok<T>(r: Result<T, InternalPanic>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(p) => crate::lean_internal_panic(p),
+    }
 }
 
 // The slow paths of the prelude's `lean_nat_*`: every one takes the raw
@@ -220,246 +216,118 @@ fn panic_code(code: u64) -> ! {
 
 #[inline(never)]
 pub extern "C" fn nat_add(a: u64, b: u64) -> LNat {
-    match unsafe { (take(a), take(b)) } {
-        // x, y < 2^63: the sum fits a word.
-        (N::S(x), N::S(y)) => LNat::of_u64(x + y),
-        (N::S(x), N::B(y)) | (N::B(y), N::S(x)) => LNat::of_big(big::nat_add_u64(y, x)),
-        (N::B(x), N::B(y)) => LNat::of_big(big::nat_add(x, y)),
-    }
+    of_nat_view(ok(sem::nat::add(unsafe { nat_view(a) }, unsafe { nat_view(b) })))
 }
 
 #[inline(never)]
 pub extern "C" fn nat_sub(a: u64, b: u64) -> LNat {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(x), N::S(y)) => LNat::small(x.saturating_sub(y)),
-        // A small value is below every big one.
-        (N::S(_), N::B(y)) => {
-            drop(y);
-            LNat::small(0)
-        }
-        (N::B(x), N::S(y)) => LNat::of_big(big::nat_sub_u64(x, y)),
-        (N::B(x), N::B(y)) => LNat::of_big(big::nat_sub(x, y)),
-    }
+    of_nat_view(sem::nat::sub(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
 #[inline(never)]
 pub extern "C" fn nat_mul(a: u64, b: u64) -> LNat {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(x), N::S(y)) => mul_wide(x, y),
-        (N::S(x), N::B(y)) | (N::B(y), N::S(x)) => {
-            if x == 0 {
-                drop(y);
-                LNat::small(0)
-            } else {
-                LNat::of_big(big::nat_mul_u64(y, x))
-            }
-        }
-        (N::B(x), N::B(y)) => LNat::of_big(big::nat_mul(x, y)),
-    }
+    of_nat_view(ok(sem::nat::mul(unsafe { nat_view(a) }, unsafe { nat_view(b) })))
 }
 
-/// `a / b`, `a / 0 = 0`.
 #[inline(never)]
 pub extern "C" fn nat_div(a: u64, b: u64) -> LNat {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(x), N::S(y)) => LNat::small(if y == 0 { 0 } else { x / y }),
-        (N::S(_), N::B(y)) => {
-            drop(y);
-            LNat::small(0)
-        }
-        (N::B(x), N::S(y)) => {
-            if y == 0 {
-                drop(x);
-                LNat::small(0)
-            } else {
-                LNat::of_big(big::nat_div_u64(x, y))
-            }
-        }
-        (N::B(x), N::B(y)) => LNat::of_big(big::nat_div(x, y)),
-    }
+    of_nat_view(sem::nat::div(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
-/// `a % b`, `a % 0 = a`.
 #[inline(never)]
 pub extern "C" fn nat_mod(a: u64, b: u64) -> LNat {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(x), N::S(y)) => LNat::small(if y == 0 { x } else { x % y }),
-        (N::S(x), N::B(y)) => {
-            drop(y);
-            LNat::small(x)
-        }
-        (N::B(x), N::S(y)) => {
-            if y == 0 {
-                LNat::of_big(x)
-            } else {
-                let r = big::nat_mod_u64(x, y);
-                LNat::small(r)
-            }
-        }
-        (N::B(x), N::B(y)) => LNat::of_big(big::nat_mod(x, y)),
-    }
+    of_nat_view(sem::nat::rem(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
 /// Three-way comparison: -1, 0, 1.
 #[inline(never)]
 pub extern "C" fn nat_cmp(a: u64, b: u64) -> i64 {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(x), N::S(y)) => (x > y) as i64 - (x < y) as i64,
-        (N::S(_), N::B(y)) => {
-            drop(y);
-            -1
-        }
-        (N::B(x), N::S(_)) => {
-            drop(x);
-            1
-        }
-        (N::B(x), N::B(y)) => big::nat_cmp(x, y),
-    }
+    let (x, y) = unsafe { (nat_view(a), nat_view(b)) };
+    sem::nat::compare(&x, &y) as i64
 }
 
 #[inline(never)]
 pub extern "C" fn nat_eq(a: u64, b: u64) -> bool {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(x), N::S(y)) => x == y,
-        (N::B(x), N::B(y)) => big::nat_eq(x, y),
-        (x, y) => {
-            drop((x, y));
-            false
-        }
-    }
+    let (x, y) = unsafe { (nat_view(a), nat_view(b)) };
+    sem::nat::dec_eq(&x, &y)
 }
 
 #[inline(never)]
 pub extern "C" fn nat_land(a: u64, b: u64) -> LNat {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(x), N::S(y)) => LNat::small(x & y),
-        (N::S(x), N::B(y)) | (N::B(y), N::S(x)) => LNat::small(big::nat_land_u64(y, x)),
-        (N::B(x), N::B(y)) => LNat::of_big(big::nat_land(x, y)),
-    }
+    of_nat_view(sem::nat::land(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
 #[inline(never)]
 pub extern "C" fn nat_lor(a: u64, b: u64) -> LNat {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(x), N::S(y)) => LNat::small(x | y),
-        (N::S(x), N::B(y)) | (N::B(y), N::S(x)) => LNat::of_big(big::nat_lor_u64(y, x)),
-        (N::B(x), N::B(y)) => LNat::of_big(big::nat_lor(x, y)),
-    }
+    of_nat_view(sem::nat::lor(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
 #[inline(never)]
 pub extern "C" fn nat_xor(a: u64, b: u64) -> LNat {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(x), N::S(y)) => LNat::small(x ^ y),
-        (N::S(x), N::B(y)) | (N::B(y), N::S(x)) => LNat::of_big(big::nat_xor_u64(y, x)),
-        (N::B(x), N::B(y)) => LNat::of_big(big::nat_xor(x, y)),
-    }
+    of_nat_view(sem::nat::lxor(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
-/// `Nat.shiftLeft`: 0 stays 0; otherwise a shift amount above 2^32 - 1 (a
-/// big one included) is an internal panic (`lean_nat_shiftl`).
+/// `Nat.shiftLeft`, for any shift (LB-12 lifted); a result above
+/// `big::MAX_BITS` ends the process (`sem::nat::shiftl`).
 #[inline(never)]
 pub extern "C" fn nat_shiftl(a: u64, b: u64) -> LNat {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(0), b) => {
-            drop(b);
-            LNat::small(0)
-        }
-        (_, N::B(_)) => panic_code(2),
-        (a, N::S(s)) => {
-            if s > u32::MAX as u64 {
-                panic_code(2)
-            }
-            match a {
-                N::S(x) if s < 63 && (x << s) >> s == x && (x << s) >> 63 == 0 => LNat::small(x << s),
-                a => LNat::of_big(big::nat_shl(to_big(a), s)),
-            }
-        }
-    }
+    of_nat_view(ok(sem::nat::shiftl(unsafe { nat_view(a) }, unsafe { nat_view(b) })))
 }
 
-/// `Nat.shiftRight`: a big shift amount gives 0; a big value shifted by
-/// more than 2^32 - 1 panics unless every bit is shifted out
-/// (`lean_nat_big_shiftr`).
+/// `Nat.shiftRight`, for any shift (LB-04 lifted).
 #[inline(never)]
 pub extern "C" fn nat_shiftr(a: u64, b: u64) -> LNat {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(x), N::S(s)) => LNat::small(if s < 64 { x >> s } else { 0 }),
-        (a, N::B(s)) => {
-            drop((a, s));
-            LNat::small(0)
-        }
-        (N::B(x), N::S(s)) => {
-            if s > u32::MAX as u64 {
-                if big::nat_log2(x) >= s { panic_code(3) } else { LNat::small(0) }
-            } else {
-                LNat::of_big(big::nat_shr(x, s))
-            }
-        }
-    }
+    of_nat_view(sem::nat::shiftr(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
 #[inline(never)]
 pub extern "C" fn nat_log2(a: u64) -> LNat {
-    match unsafe { take(a) } {
-        N::S(x) => LNat::small(if x == 0 { 0 } else { 63 - x.leading_zeros() as u64 }),
-        N::B(x) => LNat::small(big::nat_log2(x)),
-    }
+    LNat::of_u64(sem::nat::log2(&unsafe { nat_view(a) }))
 }
 
-/// `Nat.pow`: an exponent above 2^32 - 1 is an internal panic, whatever the
-/// base (`lean_nat_pow`).
+/// `Nat.pow`, for any exponent (LB-11 lifted); a result above
+/// `big::MAX_BITS` ends the process (`sem::nat::pow`).
 #[inline(never)]
 pub extern "C" fn nat_pow(a: u64, b: u64) -> LNat {
-    let e = match unsafe { take(b) } {
-        N::S(e) if e <= u32::MAX as u64 => e,
-        _ => panic_code(1),
-    };
-    if e == 0 {
-        unsafe { release_word(a) };
-        return LNat::small(1);
-    }
-    match unsafe { take(a) } {
-        N::S(x) if x < 2 => LNat::small(x),
-        N::S(x) => match x.checked_pow(e.min(64) as u32) {
-            Some(r) if e < 64 => LNat::of_u64(r),
-            // `2^j ^ e = 2^(j e)` (`j e < 2^38`): one block, no temporary;
-            // beyond GMP's size limit GMP's `mpz_pow_ui` fails as natively.
-            _ if x.is_power_of_two() && x.trailing_zeros() as u64 * e / 64 < big::MAX_LIMBS as u64 => {
-                LNat::of_big(big::pow2(x.trailing_zeros() as u64 * e))
-            }
-            _ => LNat::of_big(big::u64_pow(x, e)),
-        },
-        N::B(x) => LNat::of_big(big::nat_pow(x, e)),
-    }
-}
-
-fn gcd_u64(mut x: u64, mut y: u64) -> u64 {
-    while y != 0 {
-        let r = x % y;
-        x = y;
-        y = r;
-    }
-    x
+    of_nat_view(ok(sem::nat::pow(unsafe { nat_view(a) }, unsafe { nat_view(b) })))
 }
 
 #[inline(never)]
 pub extern "C" fn nat_gcd(a: u64, b: u64) -> LNat {
-    match unsafe { (take(a), take(b)) } {
-        (N::S(x), N::S(y)) => LNat::small(gcd_u64(x, y)),
-        (N::S(0), N::B(y)) | (N::B(y), N::S(0)) => LNat::of_big(y),
-        (N::S(x), N::B(y)) | (N::B(y), N::S(x)) => LNat::small(gcd_u64(x, big::nat_mod_u64(y, x))),
-        (N::B(x), N::B(y)) => LNat::of_big(big::nat_gcd(x, y)),
+    of_nat_view(sem::nat::gcd(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
+}
+
+/// Text that a `fmt::Write` produces (lean-runtime's text rules write into
+/// one), collected for a string: ASCII here, the decimal digits of a big
+/// number.
+struct Digits(Vec<u8>);
+
+impl std::fmt::Write for Digits {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.extend_from_slice(s.as_bytes());
+        Ok(())
     }
 }
 
-/// `Nat.repr` (decimal); below 128 the shared strings of `Nat.reprArray`.
+/// The decimal digits (and sign) of a big number as a string
+/// (`sem::nat::write_decimal`, `sem::int::write_decimal`).
+#[inline(never)]
+fn big_decimal(write: impl FnOnce(&mut Digits) -> std::fmt::Result) -> crate::LStr {
+    let mut d = Digits(Vec::new());
+    if write(&mut d).is_err() {
+        crate::lean_internal_panic(InternalPanic::OutOfMemory)
+    }
+    crate::string::from_vec(d.0)
+}
+
+/// `Nat.repr` (decimal); below 128 the shared strings of `Nat.reprArray`,
+/// below 2^63 `string::of_u64` (lean-runtime's digits, on the stack).
 #[inline(never)]
 pub extern "C" fn nat_repr(a: u64) -> crate::LStr {
-    match unsafe { take(a) } {
-        N::S(x) if x < 128 => crate::string::repr_small(x),
-        N::S(x) => crate::string::of_u64(x),
-        N::B(x) => crate::string::from_vec(big::to_decimal(&x)),
+    match unsafe { nat_view(a) } {
+        sem::nat::Nat::Small(x) if x < 128 => crate::string::repr_small(x),
+        sem::nat::Nat::Small(x) => crate::string::of_u64(x),
+        n => big_decimal(|d| sem::nat::write_decimal(&n, d)),
     }
 }
 
@@ -469,44 +337,39 @@ pub fn nat_of_decimal(s: &[u8]) -> LNat {
     LNat::of_big(big::of_decimal(unsafe { std::str::from_utf8_unchecked(s) }))
 }
 
-/// `lean_nat_to_size_t`: the value, or an internal "out of memory" panic
-/// when it does not fit a word (2^64 or more).
+/// A `Nat` size or offset as lean-runtime's array rules take it
+/// (`sem::nat::Nat::to_u64_saturating`): the value, or `u64::MAX` for 2^64
+/// or more. The big number the word owns is released.
 #[inline(never)]
-pub extern "C" fn nat_to_size_t(a: u64) -> u64 {
-    match unsafe { take(a) } {
-        N::S(x) => x,
-        N::B(b) => {
-            if big::limbs(&b).len() > 1 {
-                crate::internal_panic("out of memory")
-            }
-            big::low_limb(&b)
-        }
-    }
+pub extern "C" fn nat_sat_u64(a: u64) -> u64 {
+    unsafe { nat_view(a) }.to_u64_saturating()
+}
+
+/// `Array.replicate`'s size (`lean_mk_array`, `sem::array::replicate_len`):
+/// the element count, or the end of the process for a size that is not a
+/// word or whose array's byte size overflows.
+#[inline(never)]
+pub extern "C" fn nat_replicate_len(a: u64) -> u64 {
+    ok(sem::array::replicate_len(unsafe { nat_view(a) }.to_u64())) as u64
 }
 
 /// The value modulo 2^64 (`UInt64.ofNat`, `USize.ofNat`, ...).
 #[inline(never)]
 pub extern "C" fn nat_low_u64(a: u64) -> u64 {
-    let n = unsafe { LNat::from_raw(a) };
-    n.low_u64()
+    unsafe { nat_view(a) }.low_u64()
 }
 
-/// `Int.ofNat`. A big `Nat` (>= 2^63) is a big `Int` too: the same object.
+/// `Int.ofNat` (`sem::int::of_nat`). A big `Nat` (>= 2^63) is a big `Int`
+/// too: the same object.
 #[inline(never)]
 pub extern "C" fn nat_to_int(a: u64) -> LInt {
-    match unsafe { take(a) } {
-        N::S(x) => LInt::of_i128(x as i128),
-        N::B(b) => LInt(ptr_of(word_of_big(b))),
-    }
+    of_int_view(sem::int::of_nat(unsafe { nat_view(a) }))
 }
 
 /// `Int.negSucc n = -(n + 1)`.
 #[inline(never)]
 pub extern "C" fn nat_neg_succ(a: u64) -> LInt {
-    match unsafe { take(a) } {
-        N::S(x) => LInt::of_i128(-(x as i128) - 1),
-        N::B(b) => LInt::of_big(big::int_neg(big::nat_add_u64(b, 1))),
-    }
+    of_int_view(ok(sem::int::neg_succ_of_nat(unsafe { nat_view(a) })))
 }
 
 // ---------------------------------------------------------------------------
@@ -540,18 +403,6 @@ impl LInt {
     #[inline(always)]
     pub fn of_i64(v: i64) -> LInt {
         if (INT_MIN..=INT_MAX).contains(&v) { LInt::small(v) } else { int_big_of_i64(v) }
-    }
-
-    pub fn of_i128(v: i128) -> LInt {
-        if v >= INT_MIN as i128 && v <= INT_MAX as i128 {
-            LInt::small(v as i64)
-        } else if v >= i64::MIN as i128 && v <= i64::MAX as i128 {
-            int_big_of_i64(v as i64)
-        } else {
-            let m = v.unsigned_abs();
-            let b = big::of_limbs2(m as u64, (m >> 64) as u64);
-            LInt::of_big(if v < 0 { big::int_neg(b) } else { b })
-        }
     }
 
     /// A big number as an `Int` (normalized: small in [INT_MIN, INT_MAX]).
@@ -589,27 +440,24 @@ pub extern "C" fn int_big_of_i64(v: i64) -> LInt {
     LInt::of_big(big::of_i64(v))
 }
 
-/// A big `Int` operand: small value or big number, owned.
-enum I {
-    S(i64),
-    B(LBig),
-}
-
 /// The value of a small `Int` word (`lean_scalar_to_int64`).
 #[inline(always)]
 pub fn int_of_small_word(w: u64) -> i64 {
     (w >> 1) as u32 as i32 as i64
 }
 
+/// The rules' view of an `Int` word: its value, or the big number it owns.
 #[inline(always)]
-unsafe fn take_int(w: u64) -> I {
-    if is_small(w) { I::S(int_of_small_word(w)) } else { I::B(big_of_word(w)) }
+unsafe fn int_view(w: u64) -> sem::int::Int<GInt> {
+    if is_small(w) { sem::int::Int::Small(int_of_small_word(w)) } else { sem::int::Int::Big(GInt(big_of_word(w))) }
 }
 
-fn int_to_big(i: I) -> LBig {
+/// An `Int` the rules computed, as a normalized handle.
+#[inline]
+fn of_int_view(i: sem::int::Int<GInt>) -> LInt {
     match i {
-        I::S(x) => big::of_i64(x),
-        I::B(b) => b,
+        sem::int::Int::Small(v) => LInt::of_i64(v),
+        sem::int::Int::Big(GInt(b)) => LInt::of_big(b),
     }
 }
 
@@ -617,159 +465,87 @@ fn int_to_big(i: I) -> LBig {
 
 #[inline(never)]
 pub extern "C" fn int_neg(a: u64) -> LInt {
-    match unsafe { take_int(a) } {
-        I::S(x) => LInt::of_i128(-(x as i128)),
-        I::B(b) => LInt::of_big(big::int_neg(b)),
-    }
+    of_int_view(sem::int::neg(unsafe { int_view(a) }))
 }
 
 #[inline(never)]
 pub extern "C" fn int_add(a: u64, b: u64) -> LInt {
-    match unsafe { (take_int(a), take_int(b)) } {
-        (I::S(x), I::S(y)) => LInt::of_i128(x as i128 + y as i128),
-        (x, y) => LInt::of_big(big::int_add(int_to_big(x), int_to_big(y))),
-    }
+    of_int_view(ok(sem::int::add(unsafe { int_view(a) }, unsafe { int_view(b) })))
 }
 
 #[inline(never)]
 pub extern "C" fn int_sub(a: u64, b: u64) -> LInt {
-    match unsafe { (take_int(a), take_int(b)) } {
-        (I::S(x), I::S(y)) => LInt::of_i128(x as i128 - y as i128),
-        (x, y) => LInt::of_big(big::int_sub(int_to_big(x), int_to_big(y))),
-    }
+    of_int_view(ok(sem::int::sub(unsafe { int_view(a) }, unsafe { int_view(b) })))
 }
 
 #[inline(never)]
 pub extern "C" fn int_mul(a: u64, b: u64) -> LInt {
-    match unsafe { (take_int(a), take_int(b)) } {
-        (I::S(x), I::S(y)) => LInt::of_i128(x as i128 * y as i128),
-        (x, y) => LInt::of_big(big::int_mul(int_to_big(x), int_to_big(y))),
-    }
+    of_int_view(ok(sem::int::mul(unsafe { int_view(a) }, unsafe { int_view(b) })))
 }
 
-/// `Int.div` (T-division, C's `/`); `x / 0 = 0`.
+/// `Int.div` (T-division, C's `/`).
 #[inline(never)]
 pub extern "C" fn int_div(a: u64, b: u64) -> LInt {
-    match unsafe { (take_int(a), take_int(b)) } {
-        (x, I::S(0)) => {
-            drop(x);
-            LInt::small(0)
-        }
-        (I::S(x), I::S(y)) => LInt::of_i128(x as i128 / y as i128),
-        (x, y) => LInt::of_big(big::int_tdiv(int_to_big(x), int_to_big(y))),
-    }
+    of_int_view(sem::int::tdiv(unsafe { int_view(a) }, unsafe { int_view(b) }))
 }
 
-/// `Int.mod` (T-remainder, C's `%`, sign of the dividend); `x % 0 = x`.
+/// `Int.mod` (T-remainder, C's `%`, sign of the dividend).
 #[inline(never)]
 pub extern "C" fn int_mod(a: u64, b: u64) -> LInt {
-    match unsafe { (take_int(a), take_int(b)) } {
-        (x, I::S(0)) => match x {
-            I::S(x) => LInt::small(x),
-            I::B(x) => LInt::of_big(x),
-        },
-        (I::S(x), I::S(y)) => LInt::of_i128(x as i128 % y as i128),
-        (x, y) => LInt::of_big(big::int_tmod(int_to_big(x), int_to_big(y))),
-    }
+    of_int_view(sem::int::tmod(unsafe { int_view(a) }, unsafe { int_view(b) }))
 }
 
-/// `Int.ediv` (Euclidean); `x / 0 = 0`.
+/// `Int.ediv` (Euclidean).
 #[inline(never)]
 pub extern "C" fn int_ediv(a: u64, b: u64) -> LInt {
-    match unsafe { (take_int(a), take_int(b)) } {
-        (x, I::S(0)) => {
-            drop(x);
-            LInt::small(0)
-        }
-        (I::S(x), I::S(y)) => {
-            let (x, y) = (x as i128, y as i128);
-            let q = x / y;
-            let r = x % y;
-            LInt::of_i128(if r < 0 { if y > 0 { q - 1 } else { q + 1 } } else { q })
-        }
-        (x, y) => LInt::of_big(big::int_ediv(int_to_big(x), int_to_big(y))),
-    }
+    of_int_view(sem::int::ediv(unsafe { int_view(a) }, unsafe { int_view(b) }))
 }
 
-/// `Int.emod` (Euclidean, never negative for `y != 0`); `x % 0 = x`.
+/// `Int.emod` (Euclidean, never negative for `y != 0`).
 #[inline(never)]
 pub extern "C" fn int_emod(a: u64, b: u64) -> LInt {
-    match unsafe { (take_int(a), take_int(b)) } {
-        (x, I::S(0)) => match x {
-            I::S(x) => LInt::small(x),
-            I::B(x) => LInt::of_big(x),
-        },
-        (I::S(x), I::S(y)) => {
-            let (x, y) = (x as i128, y as i128);
-            let r = x % y;
-            LInt::of_i128(if r < 0 { if y > 0 { r + y } else { r - y } } else { r })
-        }
-        (x, y) => LInt::of_big(big::int_emod(int_to_big(x), int_to_big(y))),
-    }
+    of_int_view(sem::int::emod(unsafe { int_view(a) }, unsafe { int_view(b) }))
 }
 
 /// Three-way comparison: -1, 0, 1.
 #[inline(never)]
 pub extern "C" fn int_cmp(a: u64, b: u64) -> i64 {
-    match unsafe { (take_int(a), take_int(b)) } {
-        (I::S(x), I::S(y)) => (x > y) as i64 - (x < y) as i64,
-        // A big value is beyond every small one, on its side of zero.
-        (I::S(_), I::B(y)) => {
-            if big::is_neg(&y) { 1 } else { -1 }
-        }
-        (I::B(x), I::S(_)) => {
-            if big::is_neg(&x) { -1 } else { 1 }
-        }
-        (I::B(x), I::B(y)) => big::int_cmp(x, y),
-    }
+    let (x, y) = unsafe { (int_view(a), int_view(b)) };
+    sem::int::compare(&x, &y) as i64
 }
 
 #[inline(never)]
 pub extern "C" fn int_eq(a: u64, b: u64) -> bool {
-    match unsafe { (take_int(a), take_int(b)) } {
-        (I::S(x), I::S(y)) => x == y,
-        (I::B(x), I::B(y)) => big::int_eq(x, y),
-        (x, y) => {
-            drop((x, y));
-            false
-        }
-    }
+    let (x, y) = unsafe { (int_view(a), int_view(b)) };
+    sem::int::dec_eq(&x, &y)
 }
 
 /// `Int.natAbs`.
 #[inline(never)]
 pub extern "C" fn int_nat_abs(a: u64) -> LNat {
-    match unsafe { take_int(a) } {
-        I::S(x) => LNat::small(x.unsigned_abs()),
-        I::B(b) => LNat::of_big(big::int_abs(b)),
-    }
+    of_nat_view(sem::int::nat_abs(unsafe { int_view(a) }))
 }
 
-/// Whether a big `Int` is negative (a small one: its sign bit).
+/// Whether an `Int` is negative (`!Int.decNonneg`).
 #[inline(never)]
 pub extern "C" fn int_is_neg(a: u64) -> bool {
-    match unsafe { take_int(a) } {
-        I::S(x) => x < 0,
-        I::B(b) => big::is_neg(&b),
-    }
+    !sem::int::dec_nonneg(&unsafe { int_view(a) })
 }
 
 /// The value modulo 2^64 in two's complement (`Int64.ofInt`, ...).
 #[inline(never)]
 pub extern "C" fn int_low_twos(a: u64) -> u64 {
-    match unsafe { take_int(a) } {
-        I::S(x) => x as u64,
-        I::B(b) => big::low_u64_twos(&b),
-    }
+    unsafe { int_view(a) }.low_u64()
 }
 
-/// `Int.repr` (decimal); `Int.repr (ofNat m) = Nat.repr m`, shared below 128.
+/// `Int.repr` (decimal); `Int.repr (ofNat m) = Nat.repr m`, shared below
+/// 128.
 #[inline(never)]
 pub extern "C" fn int_repr(a: u64) -> crate::LStr {
-    match unsafe { take_int(a) } {
-        I::S(x) if (0..128).contains(&x) => crate::string::repr_small(x as u64),
-        I::S(x) => crate::string::of_i64(x),
-        I::B(b) => crate::string::from_vec(big::to_decimal(&b)),
+    match unsafe { int_view(a) } {
+        sem::int::Int::Small(x) if (0..128).contains(&x) => crate::string::repr_small(x as u64),
+        sem::int::Int::Small(x) => crate::string::of_i64(x),
+        i => big_decimal(|d| sem::int::write_decimal(&i, d)),
     }
 }
 
@@ -832,17 +608,60 @@ mod tests {
         }
     }
 
-    /// Powers of a power of two (`big::pow2`) against GMP's `mpz_pow_ui`.
+    /// Powers of a power of two (lean-runtime's `nat::pow` shifts them) and
+    /// of other words against GMP's `mpz_pow_ui`.
     #[test]
     fn pow_of_two() {
-        for x in [2u64, 4, 8, 1 << 31, 1 << 62] {
+        for x in [2u64, 3, 4, 8, 10, 1 << 31, (1 << 31) + 1, 1 << 62] {
             for e in [1u64, 2, 31, 32, 62, 63, 64, 65, 100, 1000] {
                 let p = nat_pow(LNat::small(x).into_raw(), LNat::small(e).into_raw());
-                let r = LNat::of_big(big::u64_pow(x, e));
+                let r = LNat::of_big(big::nat_pow(big::of_u64(x), e));
                 assert!(nat_eq(p.clone().into_raw(), r.clone().into_raw()), "{x} ^ {e}");
                 assert_eq!(is_small(p.word()), is_small(r.word()));
             }
         }
+    }
+
+    /// Lean's limits that lean-runtime's rules lift (LB-04, LB-11, LB-12)
+    /// where the result is small, and the size helpers of the array rules.
+    #[test]
+    fn lifted_limits() {
+        let two64 = || n(1 << 64);
+        let big = |v: u128| n(v).into_raw();
+        let small = |v: u64| LNat::of_u64(v).into_raw();
+        // LB-11: bases 0 and 1 for any exponent
+        assert_eq!(val(&nat_pow(small(1), small(1 << 32))), 1);
+        assert_eq!(val(&nat_pow(small(0), small(1 << 32))), 0);
+        assert_eq!(val(&nat_pow(small(1), two64().into_raw())), 1);
+        assert_eq!(val(&nat_pow(small(0), two64().into_raw())), 0);
+        assert_eq!(val(&nat_pow(two64().into_raw(), small(0))), 1);
+        // LB-12: zero for any shift
+        assert_eq!(val(&nat_shiftl(small(0), two64().into_raw())), 0);
+        assert_eq!(val(&nat_shiftl(small(0), small(1 << 40))), 0);
+        // LB-04: a big shift amount, and a shift past the bits of a big value
+        assert_eq!(val(&nat_shiftr(big((1 << 100) + 3), small(1 << 40))), 0);
+        assert_eq!(val(&nat_shiftr(big((1 << 100) + 3), two64().into_raw())), 0);
+        assert_eq!(val(&nat_shiftr(big((1 << 100) + 3), small(99))), 2);
+        // sizes and offsets for the array rules
+        assert_eq!(nat_sat_u64(small(7)), 7);
+        assert_eq!(nat_sat_u64(big(1 << 63)), 1 << 63);
+        assert_eq!(nat_sat_u64(big((1 << 64) - 1)), u64::MAX);
+        assert_eq!(nat_sat_u64(two64().into_raw()), u64::MAX);
+        assert_eq!(nat_replicate_len(small(5)), 5);
+        // `Nat.log2` and `gcd` of a big and a small value
+        assert_eq!(val(&nat_log2(big(1 << 100))), 100);
+        assert_eq!(val(&nat_gcd(big(3 << 70), small(12))), 12);
+        assert_eq!(val(&nat_gcd(small(0), big(1 << 70))), 1 << 70);
+        // the text of numbers
+        let text = |s: crate::LStr| String::from_utf8(crate::string::bytes(&s).to_vec()).unwrap();
+        assert_eq!(text(nat_repr(small(5))), "5");
+        assert_eq!(text(nat_repr(small(1234567))), "1234567");
+        assert_eq!(text(nat_repr(big(1 << 64))), "18446744073709551616");
+        let int = |v: i128| LInt::of_big(<GInt as lean_runtime::semantics::bignum::BigInt>::from_i128(v).0).into_raw();
+        assert_eq!(text(int_repr(int(-7))), "-7");
+        assert_eq!(text(int_repr(int(i32::MIN as i128))), "-2147483648");
+        assert_eq!(text(int_repr(int(-(1 << 64)))), "-18446744073709551616");
+        assert_eq!(text(int_repr(int(100))), "100");
     }
 
     #[test]
@@ -869,7 +688,7 @@ mod tests {
     fn ints() {
         let edges: [i128; 13] = [0, 1, -1, INT_MAX as i128, INT_MIN as i128, INT_MAX as i128 + 1, INT_MIN as i128 - 1,
             1 << 62, -(1 << 62), i64::MIN as i128, i64::MAX as i128, 46341, -46341];
-        let i = |v: i128| LInt::of_i128(v);
+        let i = |v: i128| LInt::of_big(<GInt as lean_runtime::semantics::bignum::BigInt>::from_i128(v).0);
         let ival = |x: &LInt| -> i128 {
             let w = x.word();
             if is_small(w) {

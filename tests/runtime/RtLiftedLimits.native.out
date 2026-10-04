@@ -1,0 +1,8 @@
+INTERNAL PANIC: out of memory
+copySlice: exit 1
+INTERNAL PANIC: Nat.pow exponent is too big
+pow: exit 1
+powTooBig: exit 136
+INTERNAL PANIC: Nat.pow exponent is too big
+start
+powExponent: exit 1

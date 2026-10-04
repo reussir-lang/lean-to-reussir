@@ -150,7 +150,7 @@ fn slice(a: &LTagVec) -> &[u64] {
 #[cold]
 #[inline(never)]
 fn oom() -> ! {
-    crate::internal_panic("out of memory")
+    crate::lean_internal_panic(lean_runtime::semantics::panic::InternalPanic::OutOfMemory)
 }
 
 #[inline(always)]
@@ -263,11 +263,12 @@ pub fn empty() -> LTagVec {
     alloc(0)
 }
 
-/// `Array.mkEmpty n`: Lean's allocation checks, then the capacity asked
-/// for (natively reserved too; untouched pages cost no memory).
+/// `Array.mkEmpty n`: Lean's allocation checks for a capacity
+/// (`array::check_capacity`), then the capacity asked for (natively
+/// reserved too; untouched pages cost no memory).
 #[inline(never)]
 pub fn with_capacity(n: u64) -> LTagVec {
-    crate::array::check_alloc(n, 8);
+    crate::array::check_capacity(n, 8);
     alloc(n as usize)
 }
 

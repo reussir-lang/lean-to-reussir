@@ -59,8 +59,8 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   words and never look at a big number; native Lean keeps the same
   invariant.
 - **Where:** `leanrt/src/nat.rs`: `of_big`, `of_u64`, `of_i64`,
-  `of_i128`; the prelude fast paths' range checks (`l2r_int_of_i64`,
-  `l2r_nat_of_u64`).
+  `of_nat_view`, `of_int_view` (lean-runtime's results); the prelude fast
+  paths' range checks (`l2r_int_of_i64`, `l2r_nat_of_u64`).
 - **Remove only if:** never (a correctness invariant).
 
 ### Prelude functions take each `Nat` argument as its word once
@@ -88,11 +88,48 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `/`, `%`, shifts and `pow` decode, compute and range-check. `Int`
   decodes its 32 bits, computes in `i64` (no overflow is possible) and
   re-encodes when the result is in `int32`. Anything else calls
-  `leanrt::nat`.
+  `leanrt::nat`, which runs lean-runtime's rules (next entry).
 - **Why:** Native Lean's small arithmetic is a tag test and the operation;
   so is this.
 - **Where:** `prelude.rr`: `lean_nat_*`, `lean_int_*`, `l2r_int_val`.
 - **Remove only if:** the encoding changes.
+
+### The slow paths are lean-runtime's rules on lean2rr's numbers
+
+- **What:** Every `leanrt::nat` slow path (`nat_add`, ..., `int_emod`,
+  `nat_to_int`, `nat_neg_succ`, `nat_repr`, `int_repr`) views its owned
+  words as lean-runtime's `sem::nat::Nat`/`sem::int::Int` (`Small` for an
+  odd word, `Big` of a `big::GNat`/`big::GInt` for an even one:
+  `nat_view`, `int_view`), calls the rule (`sem::nat::add`, ...), turns the
+  result back into a normalized word, and ends the process with the
+  rule's `InternalPanic` (`lean_internal_panic`). `GNat` and `GInt` are
+  `LBig` as lean-runtime's `BigNat`/`BigInt` traits: each method is one of
+  `big.rs`'s operations (the four divisions are `big::div`'s fused `mpn`
+  ones, not the traits' default from `tdiv_rem`). `big::MAX_BITS`, the
+  largest result the rules ask for, is `(INT_MAX - 5) * 64` bits: GMP's
+  `mpz_t` (and a block) holds `INT_MAX` limbs, and `mpz_pow_ui`, the one
+  operation whose result GMP allocates, asks for at most
+  `bit_len(a) * e / 64 + 5` limbs (`mpz/n_pow_ui.c`: the odd part's bits
+  times `e`, 5 limbs of margin, and the zero limbs of the power of two).
+  The inline fast paths, `LBig`'s layout and its GMP kernels are
+  lean2rr's, unchanged.
+- **Why:** One runtime for both translators (owner decision; shared-runtime
+  step 2): the rules (zero divisors, truncation, rounding, the shift and
+  exponent limits and the size of a big result) are written once, in
+  lean-runtime, and checked by its 3306 `Nat`/`Int` rows through lean2rr
+  (`tests/runtime/rows-check.sh`). They lift Lean's limits where the
+  result can be computed (LB-04, LB-11, LB-12; plan §10) and end at once
+  with `INTERNAL PANIC: out of memory` above `MAX_BITS`, where native's GMP
+  raises SIGFPE (LB-05). The step changed no generated code: the classic
+  corpus's `.rr` differs only in the prelude's panic textures and two
+  renamed helpers, and the machine code of every Reussir function of
+  Cfold, Sieve and Bignum is the same but for the targets of those calls.
+- **Where:** `leanrt/src/nat.rs`: `nat_view`, `int_view`, `ok`, the slow
+  paths; `leanrt/src/big.rs`: `GNat`, `GInt`, `MAX_BITS`, `bit_len`,
+  `trailing_zeros`; unit tests `nat::tests::lifted_limits`,
+  `big::tests::max_bits`, `big::tests::trait_views`; runtime tests
+  `RtLiftedLimits`, `RtInternalPanic`.
+- **Remove only if:** lean2rr stops using lean-runtime.
 
 ### Add and mul test "both small" on the parity of the sum
 
@@ -124,14 +161,20 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 ### `Nat.pow`'s fast path takes exponents below 2^32 only
 
 - **What:** The inline path runs only when the exponent word is below
-  2^33 (`y >> 33 == 0`); the slow path panics for a bigger exponent.
-- **Why:** Lean panics ("Nat.pow exponent is too big") for an exponent
-  above 2^32 - 1 whatever the base; a fast path that returned `1 ^ e` or
-  `0 ^ e` first skipped the panic (found by `RtInternalPanic` while
-  writing the change).
+  2^33 (`y >> 33 == 0`); a bigger exponent goes to lean-runtime's rule
+  (`sem::nat::pow`), which computes `0 ^ e` and `1 ^ e` for any exponent
+  and a bigger base's power while it fits `big::MAX_BITS`, and ends with
+  Lean's `Nat.pow exponent is too big` above it.
+- **Why:** Native Lean panics ("Nat.pow exponent is too big") for an
+  exponent above 2^32 - 1 whatever the base, which lean-runtime lifts
+  where the result can be computed (LB-11); the fast path was written
+  when lean2rr reproduced the panic (a fast path returning `1 ^ e` first
+  skipped it, found by `RtInternalPanic`), and the hot path stays as it
+  is.
 - **Where:** `prelude.rr`: `lean_nat_pow`; `leanrt/src/nat.rs`:
   `nat_pow`.
-- **Remove only if:** never.
+- **Remove only if:** the bound may go (the slow path is right for every
+  exponent) once a timing session shows the inline path unaffected.
 
 ### Big numbers are one block: a 16-byte header, then the limbs
 
@@ -153,8 +196,15 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   operations (`pow` of a big base, `gcd`, parsing, printing) give GMP's
   `mpz_*` functions read-only views (`MPZ_ROINIT_N`) and copy the result
   out of a temporary `mpz_t`. A power of two raised to `e` is one shifted
-  block (`big::pow2`), and `x ^ e` of a word base reads `x` through a
-  view of a stack limb (`big::u64_pow`).
+  block (lean-runtime's `nat::pow` asks for `1 << (j e)`, `big::nat_shl`),
+  and `x ^ e` of a word base raises a one-limb block (`big::nat_pow`).
+  Both start from a one-limb block of the base (`BigNat::from_u64`), freed
+  at once: one small block more per big power of a word than before the
+  switch to lean-runtime's rules (`big::pow2` and a stack view of the
+  limb), since its traits have no word-base power (RtNatStress, before its
+  extension in review RST2-01, made 18900 big numbers at size 300, was
+  18600; peak memory unchanged; lean-runtime request AR-3 would let the
+  backend build them directly).
 - **Why:** Native Lean's `lean_mpz_object` is a header and an `mpz_t`
   whose limbs GMP allocates separately (glibc's `malloc`): two allocations
   and two frees per big number, two dependent loads to reach the limbs,
@@ -244,7 +294,10 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 - **What:** The runtime keeps a table of the strings of 0 to 127, built on
   first use, and `l2r_nat_repr` returns a new reference to the shared one.
   With the optional pass `prelude-repr`, `Nat.repr`, `Nat.reprFast` and
-  `Int.repr` call `l2r_nat_repr`/`l2r_int_repr` (GMP for big numbers).
+  `Int.repr` call `l2r_nat_repr`/`l2r_int_repr`: the digits are
+  lean-runtime's (`sem::repr::decimal_u64_bytes` into a stack buffer for a
+  word, as `lean_string_of_usize`; `sem::nat::write_decimal` and
+  `sem::int::write_decimal` for a big number, GMP's `mpz_get_str`).
 - **Why:** Natively `Nat.reprFast` reads the closed term `Nat.reprArray`,
   so printing small numbers allocates nothing (adv4 PF4-04, ce60463). The
   Lean code also divides big numbers digit by digit (quadratic), and

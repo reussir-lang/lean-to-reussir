@@ -37,7 +37,7 @@ same standard output, standard error and exit code.
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (296 programs, `tests/runtime`) | at its last full run (branch `extern-bodies`, 2026-10-04), 292 of 296 identical to native Lean 4.34.0, five of them through expectation files where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`; plan §10, "Runtime: Lean bugs we do not reproduce"); 4 expected failures: `RtCseFnResult` (plan §10, "Merging after erasure"), `RtTaskRunawayPureStarted` and `RtFdStartupNoUring` (until lean2rr adopts lean-runtime's scheduler and startup), `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve |
+| Runtime test suite (297 programs, `tests/runtime`) | at its last full run (branch `extern-bodies`, 2026-10-04), 292 of 296 identical to native Lean 4.34.0, five of them through expectation files where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`; plan §10, "Runtime: Lean bugs we do not reproduce"); 4 expected failures: `RtCseFnResult` (plan §10, "Merging after erasure"), `RtTaskRunawayPureStarted` and `RtFdStartupNoUring` (until lean2rr adopts lean-runtime's scheduler and startup), `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve; `RtLiftedLimits` and `RtInternalPanic` compare each side with its own expectation files where lean2rr lifts a limit of Lean's runtime (plan §10, LB-04 to LB-12; full run of branch `lean-runtime-step2`: 276 of 279 identical, 3 expected failures) |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
@@ -89,8 +89,12 @@ code: `a + b` is a test of both low bits, an add and an overflow check;
 only a big operand or an overflow calls the runtime. Big numbers use GMP
 (the same library Lean uses), stored as a reference-counted sign and limb
 vector, updated in place when unique. `Nat.repr` (printing) of big
-numbers uses GMP too. Lean's semantics are kept exactly: subtraction
-stops at 0, division by 0 gives 0, and so on.
+numbers uses GMP too. Lean's rules (subtraction stops at 0, division by
+0 gives 0, the limits of shifts and exponents, which result is too big)
+are those of the shared crate lean-runtime, written once for both Lean
+translators that use it: the runtime calls them for everything but the
+inline small cases, with its GMP numbers behind lean-runtime's big-number
+traits.
 
 Reussir generates the reference counting itself, and normally treats every
 handle as a pointer whose count it increments when the value is copied. A
@@ -379,7 +383,13 @@ with examples, is §10 of the translation plan.
   extra descriptor on `/dev/null` (natively one per `null` stream, LB-15),
   and when `/dev/null` cannot be opened the spawn fails with `EMFILE`,
   where natively the program silently gets the parent's own stream
-  (LB-17).
+  (LB-17). Limits of Lean's runtime are lifted where the
+  result can be computed: `Nat.pow` with an exponent of 2^32 or more
+  (`1 ^ e`, `0 ^ e`, and any power that fits, LB-11), `Nat.shiftLeft` and
+  `Nat.shiftRight` by 2^32 or more (LB-12, LB-04), `ByteArray.copySlice`
+  with an offset or length of 2^64 or more (LB-06); a power too big for
+  GMP ends at once with `INTERNAL PANIC: out of memory`, where natively
+  GMP kills the program with SIGFPE (LB-05).
 - **Lean code only, plus Lean's runtime library** (the owner's decision,
   2026-10-03). The C code of a program or of a package it requires
   (Lake's `extern_lib`) is never compiled, linked or called: an

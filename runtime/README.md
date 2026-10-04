@@ -99,7 +99,7 @@ and hot paths in `leanrt` and the prelude, which call lean-runtime for the
 rest.
 
 - **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
-  pinned at a commit of its `main` (now `8823ad0`). Clone lean2rr with
+  pinned at a commit of its `main` (now `1c36a58`). Clone lean2rr with
   `git clone --recurse-submodules`, or run `git submodule update --init
   third_party/lean-runtime` in a checkout, and again after a checkout,
   merge or pull that moves the pin: git does not update a submodule on its
@@ -116,7 +116,10 @@ rest.
   print nothing, then `git worktree remove --force WT`. Never run `git
   submodule deinit` in a worktree: it deletes the submodule's entries from
   the shared `.git/config`, for the main checkout and every worktree.
-- **The build without dependencies.** Plain rustc, no cargo, nothing
+- **The build without dependencies.** While the features lean2rr enables
+  need no dependency (none are enabled; lean-runtime's optional `io` and
+  `sched` features have dependencies, which a build without them never
+  compiles): plain rustc, no cargo, nothing
   downloaded: `--crate-type rlib`, the edition from lean-runtime's
   `Cargo.toml`, the features lean2rr enables (none yet; `default` and
   `L2R_LEAN_RUNTIME_FEATURES` are added, as `--cfg feature="..."`), so its
@@ -126,9 +129,10 @@ rest.
   file rustc read (its dep-info, so `include_str!` of a file outside `src/`
   counts). `l2r.py` refuses what a plain rustc build would get wrong: a
   `[lints]` table, an edition inherited from a workspace.
-- **The build with dependencies.** Once lean-runtime has dependencies
-  (optional ones included) or a build script, the pinned toolchain's cargo
-  builds it: `cargo build --offline --locked --release --lib [--features
+- **The build with dependencies.** Once lean-runtime has a dependency
+  that is not optional or a build script, or lean2rr enables a feature
+  that needs a dependency (`L2R_LEAN_RUNTIME_FEATURES=io`, say), the pinned
+  toolchain's cargo builds it: `cargo build --offline --locked --release --lib [--features
   ...]` from inside the checkout, from the crates in cargo's registry cache
   (`~/.cargo/registry`) at the versions its committed `Cargo.lock` names
   (so nothing is written in the checkout; lean-runtime has no `vendor/`),
@@ -188,14 +192,31 @@ rest.
   - `uint`, `sint`: `div`, `mod`, `shiftLeft`, `shiftRight`, `log2`,
     `IntN.abs`;
   - `libm`: every `Float`/`Float32` libm extern, `cbrt`, `cbrtf`, `atanh`,
-    `atanhf` included (lean-runtime's ports of glibc's, defined on aarch64
-    Linux with glibc only: elsewhere a program that calls one ends with
-    `INTERNAL PANIC: no lean-runtime port of <name> for this target yet`,
-    and every other program builds and runs, until lean-runtime has ports
-    for that target). Those four and the ones that hide their operands with
+    `atanhf` included (lean-runtime's ports of glibc's, the same algorithm
+    on every target). Those four and the ones that hide their operands with
     `black_box` are called out of line (`leanrt::float::libm_call`, one call
     more than native Lean's direct libm call), so that a Lean loop calling
-    them stays a loop.
+    them stays a loop;
+  - `nat`, `int`, over `bignum`'s traits: every `Nat`/`Int` slow path
+    (`leanrt::nat`, below: the prelude's inline small cases stay lean2rr's)
+    is lean-runtime's rule on its words, with `leanrt::big`'s numbers as
+    `BigNat`/`BigInt` (`big::GNat`, `big::GInt`; `big::MAX_BITS`, the
+    largest result, is GMP's `INT_MAX` limbs less `mpz_pow_ui`'s margin of
+    5 limbs, (2^31 - 6) × 64 bits: above it the rules end with `INTERNAL
+    PANIC: out of memory`, LB-05). The rules lift Lean's limits where the
+    result fits (`Nat.pow` and `Nat.shiftLeft` by 2^32 or more,
+    `Nat.shiftRight` of a huge value; LB-04, LB-11, LB-12);
+  - `array`: the allocation sizes (`alloc_bytes`, `replicate_len`,
+    `empty_with_capacity`), `copySlice`'s plan (offsets and lengths of 2^64
+    or more passed saturated, `l2r_nat_sat`: LB-06), the index-out-of-bounds
+    message; the bounds tests themselves stay inline comparisons;
+  - `panic`: `lean_panic_fn`'s plan (`panic_fn_plan`: the lines, the
+    stream, abort under `LEAN_ABORT_ON_PANIC`), the internal panics'
+    messages and endings, the `uncaught exception: ` prefix, the
+    stack-overflow text (`leanrt::panic_text`, `lean_internal_panic`);
+  - `repr`: the decimal digits of a word (`decimal_u64_bytes`:
+    `USize.repr`, `Nat.repr`, `Int.repr`; a big number's are its
+    `write_decimal`, GMP's `mpz_get_str`).
 
 ## Representations
 
@@ -251,8 +272,9 @@ counts only even words (`rc.inc` and the drop hook, `LNat`'s `Drop`, run
 only when the low bit is clear). The prelude's functions take each `Nat`
 argument as its word once (`l2r_nat_raw`, which then owns the reference),
 compute small results inline, and call `leanrt::nat`'s slow paths
-(`nat_add`, ... taking owned words, every small/big combination) for the
-rest; `l2r_nat_of_raw` makes a handle of a word, `l2r_nat_drop_raw`
+(`nat_add`, ... taking owned words, every small/big combination: each
+views its words as lean-runtime's `Nat`/`Int`, runs lean-runtime's rule
+and normalizes the result) for the rest; `l2r_nat_of_raw` makes a handle of a word, `l2r_nat_drop_raw`
 releases one. The slow paths normalize: a `Nat` below 2^63 (an `Int` in
 `int32`) is always small, so two small words are equal exactly when the
 values are. A build with `L2R_LEANRT_RUSTFLAGS="--cfg leanrt_count_bigs"`
@@ -980,7 +1002,9 @@ name only). The Rust unit tests of `leanrt`
 layout and counts, and a differential test of the `FILE` model against
 glibc's own `FILE` over random operation sequences) run with
 `tests/runtime/leanrt-unit.sh`; `tests/runtime/rows-check.sh` checks
-lean-runtime's rows through a lean2rr build of its row oracle.
+lean-runtime's rows through a lean2rr build of its row oracle (an `LB-nn`
+row, a Lean bug or limit lean2rr does not reproduce, against the
+definition's result).
 `tests/runtime/ffi-inline-check.sh` builds runtime tests to LLVM IR and
 fails on a call through the FFI boundary (a texture not inlined) or a
 `black_box` barrier inside Reussir code (an inlined `black_box`ed libm

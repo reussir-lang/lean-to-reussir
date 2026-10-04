@@ -2694,10 +2694,17 @@ The rules of Lean's runtime that do not depend on how values are
 represented come from the shared crate lean-runtime (the submodule
 `third_party/lean-runtime`, shared with another Lean translator): hashes, string positions
 and comparisons, float formatting, bits, `frExp`, `scaleB` and conversions,
-the fixed-width integer rules, libm (`runtime/README.md`, "The shared crate
+the fixed-width integer rules, libm, the `Nat` and `Int` rules (zero
+divisors, truncation, rounding, shift and exponent limits, the size of a
+big result), the array edge rules (out-of-bounds indices, allocation
+sizes, `copySlice`'s ranges), the panics' texts and endings, and the
+decimal text of numbers (`runtime/README.md`, "The shared crate
 lean-runtime"). `leanrt` and the prelude hold lean2rr's representations and
-convert them to lean-runtime's views and back. The runtime provides what
-Reussir lacks:
+hot paths (the inline small-`Nat`/`Int` arithmetic, the one-block big
+numbers with GMP's kernels behind lean-runtime's `BigNat`/`BigInt`
+traits, the one-block arrays' reads, writes and pushes) and convert
+lean2rr's values to lean-runtime's views and back. The runtime provides
+what Reussir lacks:
 - `Nat`/`Int`: a small value, or a GMP bignum (`leanrt::big`);
 - Lean's `String` operations over UTF-8 bytes (one block with the character count, §5.1);
 - `Array`/`ByteArray`/`FloatArray` operations over the copy-on-write one-block vector;
@@ -3401,6 +3408,40 @@ difference, it pins native's output and lean2rr's in expectation files,
   the spawn succeeds natively and fails with `EMFILE` here. Any other
   spawn needs as many free descriptors as natively. Test
   `RtProcessNullOpenFails`.
+- *LB-11, `Nat.pow` with an exponent of 2^32 or more*
+  ([LB-11](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#limits);
+  this and the next four are lean-bugs.md's "Limits", implementation caps
+  where Lean's definition has a value, which lean-runtime's rules compute
+  wherever the result fits): natively `INTERNAL PANIC: Nat.pow exponent is
+  too big`, whatever the base. lean2rr gives `0 ^ e = 0` and `1 ^ e = 1`
+  for any `e`, and another base's power while `bit_len(a) * e` (exactly
+  `j e + 1` bits for a base `2^j`) is at most `MAX_BITS` (LB-05), with
+  native's message above it. Tests `RtInternalPanic`, `RtLiftedLimits`.
+- *LB-12, `Nat.shiftLeft` by 2^32 or more*: natively `INTERNAL PANIC:
+  Nat.shiftl exponent is too big` for a nonzero value; lean2rr computes the
+  shift while the result fits `MAX_BITS`, with native's message above it
+  (lean-runtime's rows `nat/shiftl*`, through `rows-check.sh`: the results
+  have 2^32 bits, 512 MiB).
+- *LB-04, `Nat.shiftRight` of a huge value by 2^32 or more*: natively
+  `INTERNAL PANIC: Nat.shiftr exponent is too big` for an operand of 2^32
+  bits or more; lean2rr computes the quotient (lean-runtime's rows
+  `nat/shiftr.2^4294967296+*`).
+- *LB-06, `ByteArray.copySlice` with an offset or length of 2^64 or more*:
+  natively `INTERNAL PANIC: out of memory` (`lean_nat_to_size_t`); lean2rr
+  gives the Lean definition's clamped copy (the offsets and the length
+  passed saturated). Test `RtLiftedLimits`.
+- *LB-05, a result too big for GMP*: natively a `Nat` of more than
+  `INT_MAX` limbs makes GMP raise SIGFPE (status 136, no message, buffered
+  output lost), e.g. `(2^62)^(2^32 - 1)`. Every rule whose result size is
+  known first (`Nat` add, mul, pow, shiftLeft; `Int` add, sub, mul,
+  negSucc) ends at once with `INTERNAL PANIC: out of memory`, exit 1, above
+  `MAX_BITS` = (2^31 - 6) × 64 bits (GMP's cap less `mpz_pow_ui`'s margin
+  of 5 limbs; `leanrt::big::MAX_BITS`), or with native's exponent message
+  when the exponent or shift is 2^32 or more. Below `MAX_BITS`, memory that
+  runs out ends where it is allocated: a block of `leanrt::big` with
+  `INTERNAL PANIC: out of memory` (natively GMP's allocator prints its
+  message and aborts, 134; the one-block numbers' known difference), GMP's
+  own limbs in `pow` as natively. Test `RtLiftedLimits`.
 
 **Diagnostics**
 - lean2rr's own impossibilities (a `Box` unwrap of another variant, a cast

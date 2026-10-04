@@ -110,75 +110,126 @@ extern "C" fn rc_drop_last<T>(r: reussir_rt::rc::Rc<T>) {
     drop(r)
 }
 
-/// `lean_panic_fn`: print the message (Lean has already formatted it as
-/// `PANIC at ...`) to stderr and continue. Native executables also print
-/// `backtrace:` and a stack trace unless `LEAN_BACKTRACE=0`; we print the
-/// header and no frames (tests compare stderr with backtraces removed).
-/// `LEAN_ABORT_ON_PANIC` aborts, as natively.
-///
-/// Output order as `lean_panic_impl`: normally the lines go through Lean's
-/// (unbuffered) stderr stream; with `LEAN_ABORT_ON_PANIC` they go to
-/// `std::cerr`, which is tied to `std::cout` and so flushes stdout first,
-/// and the process then aborts.
-#[inline(never)]
-pub fn panic_msg<M: string::Utf8 + ?Sized>(msg: &M) {
-    let msg = msg.utf8();
-    let abort = std::env::var_os("LEAN_ABORT_ON_PANIC").is_some();
-    if abort {
-        io::flush_stdout();
+use lean_runtime::semantics::panic::{self as sem_panic, InternalPanic, PanicEnd, PanicSettings, PanicStream};
+
+/// The settings Lean's panics read (`sem_panic::PanicSettings`): the
+/// environment variables `LEAN_ABORT_ON_PANIC` and `LEAN_BACKTRACE`, read
+/// at each panic as natively; exit-on-panic and panic messages keep their
+/// defaults (lean2rr has no `Lean.Internal` setters).
+pub fn panic_settings() -> PanicSettings {
+    use std::os::unix::ffi::OsStrExt;
+    let abort = std::env::var_os("LEAN_ABORT_ON_PANIC");
+    let backtrace = std::env::var_os("LEAN_BACKTRACE");
+    PanicSettings::from_env(abort.as_deref().map(|v| v.as_bytes()), backtrace.as_deref().map(|v| v.as_bytes()))
+}
+
+/// The lines `lean_panic_impl` prints for `msg` under `plan`
+/// (`sem_panic::panic_fn_plan`): the message, then, with backtraces on,
+/// `backtrace:` and the frames: none here, but the line of a runtime
+/// without backtrace support (`sem_panic::NO_BACKTRACE`). Natively each
+/// line is one `io_eprintln`; here they are one text.
+fn panic_lines(msg: &[u8], plan: sem_panic::PanicPlan) -> Vec<u8> {
+    let mut t = Vec::new();
+    if plan.print {
+        t.extend_from_slice(msg);
+        t.push(b'\n');
+        if plan.backtrace {
+            t.extend_from_slice(sem_panic::BACKTRACE_HEADER.as_bytes());
+            t.push(b'\n');
+            t.extend_from_slice(sem_panic::NO_BACKTRACE.as_bytes());
+            t.push(b'\n');
+        }
     }
-    let mut line = msg.to_vec();
-    line.push(b'\n');
-    io::eprint(&line);
-    let bt = std::env::var("LEAN_BACKTRACE").map(|v| v != "0").unwrap_or(true);
-    if bt {
-        io::eprint(b"backtrace:\n(stack trace unavailable)\n");
-    }
-    if abort {
-        std::process::abort();
+    t
+}
+
+/// How a panic whose plan ends the process ends it (after its lines).
+fn panic_end(end: PanicEnd) -> ! {
+    match end {
+        PanicEnd::Abort => std::process::abort(),
+        // `std::exit(1)`, which flushes C's streams.
+        _ => io::exit(sem_panic::PANIC_EXIT_STATUS),
     }
 }
 
-/// `lean_internal_panic`: `INTERNAL PANIC: msg` straight to stderr, then
-/// `exit(1)` (which flushes stdout afterwards), or `abort()` without flushing
-/// under `LEAN_ABORT_ON_PANIC`.
+/// `lean_panic_fn`'s output (Lean has already formatted the message as
+/// `PANIC at ...`), by `sem_panic::panic_fn_plan`: when the process goes
+/// on, the lines for Lean's current stderr stream (`IO.setStderr`), which
+/// the prelude writes through the program's `l2r_stderr_put`; when the plan
+/// ends the process (`LEAN_ABORT_ON_PANIC`), this does not return: the
+/// lines go to the process's stderr, `std::cerr`, which is tied to
+/// `std::cout`, so stdout is flushed first, and the process aborts.
+/// `extern "C"` (it cannot unwind): the prelude's texture inlines into the
+/// panicking Reussir code as a plain call, with no landing pad.
+#[inline(never)]
+pub extern "C" fn panic_text(msg: LStr) -> LStr {
+    use string::Utf8;
+    let plan = sem_panic::panic_fn_plan(panic_settings());
+    let t = panic_lines(msg.utf8(), plan);
+    if plan.stream == PanicStream::ProcessStderr {
+        io::flush_stdout();
+        io::eprint(&t);
+    }
+    if plan.end != PanicEnd::Return {
+        panic_end(plan.end)
+    }
+    rc_release(msg);
+    string::from_bytes(&t)
+}
+
+/// `lean_internal_panic` (`sem_panic::InternalPanic`): `INTERNAL PANIC: `
+/// and the message straight to stderr, then `exit(1)` (which flushes stdout
+/// afterwards), or `abort()` without flushing under `LEAN_ABORT_ON_PANIC`
+/// (`sem_panic::internal_panic_end`). `extern "C"`, as `panic_text`.
+#[cold]
+#[inline(never)]
+pub extern "C" fn lean_internal_panic(p: InternalPanic) -> ! {
+    internal_panic(p.message())
+}
+
+/// `lean_internal_panic` with a message of its own: Lean's
+/// (`lean_internal_panic`) for a runtime invariant of lean2rr's that does
+/// not hold.
+#[cold]
 #[inline(never)]
 pub fn internal_panic(msg: &str) -> ! {
-    io::eprint(format!("INTERNAL PANIC: {}\n", msg).as_bytes());
-    if std::env::var_os("LEAN_ABORT_ON_PANIC").is_some() {
-        std::process::abort();
+    let mut line = sem_panic::INTERNAL_PANIC_PREFIX.as_bytes().to_vec();
+    line.extend_from_slice(msg.as_bytes());
+    line.push(b'\n');
+    io::eprint(&line);
+    match sem_panic::internal_panic_end(panic_settings()) {
+        PanicEnd::Abort => std::process::abort(),
+        _ => io::exit(sem_panic::PANIC_EXIT_STATUS),
     }
-    io::exit(1)
 }
 
-/// An uncaught `IO` exception at the top level: printed with `std::cerr`
-/// (which flushes stdout first), exit status 1.
+/// An uncaught `IO` exception at the top level
+/// (`lean_io_result_show_error`): `uncaught exception: ` and the error's
+/// text up to its first NUL (`string_cstr`), with `std::cerr` (which
+/// flushes stdout first), exit status 1.
 #[inline(never)]
 pub fn uncaught_exception<M: string::Utf8 + ?Sized>(msg: &M) -> ! {
     let msg = msg.utf8();
     io::flush_stdout();
-    let mut line = b"uncaught exception: ".to_vec();
-    // `string_cstr`: up to the first NUL.
+    let mut line = sem_panic::UNCAUGHT_EXCEPTION_PREFIX.as_bytes().to_vec();
     line.extend_from_slice(&msg[..msg.iter().position(|&b| b == 0).unwrap_or(msg.len())]);
     line.push(b'\n');
     io::eprint(&line);
-    io::exit(1)
+    io::exit(sem_panic::PANIC_EXIT_STATUS)
 }
 
 /// `Option.getOrBlock!` on `none` (`Promise.result!` of a dropped promise):
-/// a forced panic message (to `std::cerr`, so stdout is flushed first), then
-/// the running context blocks forever, as natively the calling thread does
-/// (the other tasks and `main` go on).
+/// a forced panic message (`lean_panic_impl` with `force_stderr`: to
+/// `std::cerr`, so stdout is flushed first), then the running context
+/// blocks forever, as natively the calling thread does (the other tasks
+/// and `main` go on).
 #[inline(never)]
 pub fn promise_dropped() -> ! {
+    let plan = sem_panic::panic_fn_plan(panic_settings());
     io::flush_stdout();
-    io::eprint(b"PANIC: Promise.result!: promise has been dropped without ever being resolved\n");
-    let bt = std::env::var("LEAN_BACKTRACE").map(|v| v != "0").unwrap_or(true);
-    if bt {
-        io::eprint(b"backtrace:\n(stack trace unavailable)\n");
-    }
-    if std::env::var_os("LEAN_ABORT_ON_PANIC").is_some() {
-        std::process::abort();
+    io::eprint(&panic_lines(b"PANIC: Promise.result!: promise has been dropped without ever being resolved", plan));
+    if plan.end != PanicEnd::Return {
+        panic_end(plan.end)
     }
     task::hang()
 }

@@ -12,11 +12,9 @@ Paths are relative to the repository root.
   same function: those whose operands lean-runtime hides with `black_box`
   (`exp2`, `pow`, the inexact `Float32` functions, `atan2f`, `powf`), and
   lean-runtime's ports of glibc's `cbrt`, `cbrtf`, `atanh`, `atanhf`
-  (aarch64 Linux, glibc 2.39). Those ports exist only on aarch64 Linux with
-  glibc; on any other target their wrappers end the program with
-  `INTERNAL PANIC: no lean-runtime port of <name> for this target yet`
-  when called, so every other program builds and runs there (the prelude's
-  textures are all compiled for every program).
+  (glibc 2.39's aarch64 results; lean-runtime defines them on every target
+  since its 1c36a58, so leanrt's run-time panic for other targets is
+  gone).
 - **Why:** One runtime for both translators (owner decision): lean2rr has
   no libm code of its own. Before, the prelude used LLVM's intrinsics,
   which LLVM folds or rewrites on a known operand, one ulp away from glibc
@@ -32,9 +30,7 @@ Paths are relative to the repository root.
   for a texture LLVM inlines, and a texture that is not inlined is a call
   through the packed-argument FFI boundary, whose argument slots have the
   same effect (2 million iterations of `Float.cbrt` overflowed a 1 MiB
-  stack; review RULR-01). The run-time panic elsewhere keeps x86-64 and
-  other targets building until lean-runtime adds their ports (its next libm
-  batch, x86-64 glibc first; review RULR-02). Cost: one more call than
+  stack; review RULR-01). Cost: one more call than
   native Lean's direct call into libm (the wrapper, then lean-runtime's
   function; review RULR-05), to be measured in the owner-approved timing
   session. Tests: `RtFloatLibm`, `RtFloatCbrt` (glibc's `cbrt` against
@@ -46,8 +42,7 @@ Paths are relative to the repository root.
   `runtime/leanrt/src/float.rs`: `libm_call`.
 - **Remove only if:** lean-runtime marks these functions
   `#[inline(never)]` itself (agreed by lean-runtime's users): then the textures call
-  `sem::libm` directly; the fallback panics go when lean-runtime has ports
-  for every target lean2rr builds for. Check `RtFloatLoopStack` and
+  `sem::libm` directly. Check `RtFloatLoopStack` and
   `ffi-inline-check.sh`.
 
 ### Strings, floats and fixed-width rules are lean-runtime's, through glue
@@ -69,8 +64,8 @@ Paths are relative to the repository root.
   would go to the heap); `leanrt::string::utf8_count`, the count cached
   when a string is made, is lean-runtime's `utf8_strlen`, out of line for
   more than 16 bytes so that the textures that make strings stay small.
-- **Why:** One runtime for both translators. Checked: lean-runtime's 1666
-  rows through a lean2rr build of its row oracle (`rows-check.sh`), the
+- **Why:** One runtime for both translators. Checked: lean-runtime's
+  rows (1666 at the time) through a lean2rr build of its row oracle (`rows-check.sh`), the
   runtime tests, and `rrc --emit llvm-ir` on loops over `String.get`/`next`,
   hashes, floats and fixed-width rules: these textures are inlined into the
   Reussir code (no call through the FFI boundary: `ffi-inline-check.sh`);
@@ -85,32 +80,86 @@ Paths are relative to the repository root.
 
 ### Huge array sizes panic with Lean's message for each allocator and size
 
-- **What:** An allocation whose size is not a small number checks what
-  Lean's allocation would do (`leanrt::array::check_alloc`, for more than
-  2^24 elements): `24 + elem * n` overflowing is `INTERNAL PANIC: integer
-  overflow in runtime computation`, a `mi_malloc` of that size failing is
-  `out of memory`. Where the size is a `Nat`, a big one (2^63 or more)
-  depends on the allocator, as in `lean.h` and `object.cpp`:
+- **What:** The sizes are lean-runtime's rules (`sem::array`): an
+  allocation of more than 2^24 elements checks what Lean's allocation would
+  do (`leanrt::array::check_alloc`: `sem::array::alloc_bytes`, where
+  `24 + elem * n` overflowing is `INTERNAL PANIC: integer overflow in
+  runtime computation` and a size above `isize::MAX` `out of memory`; then
+  a `mi_malloc` of that size failing is `out of memory`). Where the size is
+  a `Nat`, a big one (2^63 or more) depends on the allocator, as in
+  `lean.h` and `object.cpp`:
   - `Array.replicate` (`lean_mk_array`, and lean2rr's `Array Nat`/`Array
     Int` versions `lean_mk_natarr`/`lean_mk_intarr`) takes any `n` below
-    2^64 as the size (`l2r_nat_to_size_t`), so 2^63 … 2^64 − 1 overflow,
-    and 2^64 or more is `out of memory`;
+    2^64 as the size (`l2r_replicate_len`, `sem::array::replicate_len`),
+    so 2^63 … 2^64 − 1 overflow, and 2^64 or more is `out of memory`;
   - `Array.mkEmpty`/`emptyWithCapacity`, `ByteArray.emptyWithCapacity` and
     `FloatArray.emptyWithCapacity` (`lean_mk_empty_*`, inline in `lean.h`)
-    are `out of memory` for every big `Nat`
-    (`l2r_mk_empty_with_capacity`, `lean_mk_empty_natarr_with_capacity`).
+    are `out of memory` for every big `Nat` (`sem::array::
+    empty_with_capacity`: the prelude's tag test, then code 4 of
+    `l2r_internal_panic`, lean-runtime's `InternalPanic::OutOfMemory`; a
+    small capacity is checked by `leanrt::array::check_capacity`).
   For small sizes the two agree: with 8-byte elements, 2^61 − 3 and up
   overflow, 2^61 − 4 is `out of memory`.
 - **Why:** `replicate` took the `out of memory` path for every big `Nat`,
   where Lean overflows below 2^64 (cross-test XT-5, the `panics` fixture's
   row `array_replicate_nonscalar`; test `RtAllocBigNat`, which runs every
-  allocator at the sizes around each boundary; `RtAllocOverflow`).
+  allocator at the sizes around each boundary; `RtAllocOverflow`; and
+  lean-runtime's `array/replicate.*`, `array/mkempty.*` rows through
+  `rows-check.sh`). The capacity's inline tag test and its panic call keep
+  the shape of the inline code at every `mkEmpty` (the panic does not
+  rejoin it).
 - **Where:** `runtime/prelude.rr`: `lean_mk_array`,
-  `l2r_mk_empty_with_capacity`, `l2r_nat_to_size_t`; the generated
-  `lean_mk_{nat,int}arr` (`runtime/gen_tagarr.py`);
-  `runtime/leanrt/src/array.rs`: `check_alloc`, `check_alloc_slow`,
-  `replicate`; `runtime/leanrt/src/nat.rs`: `nat_to_size_t`.
+  `l2r_mk_empty_with_capacity`, `l2r_replicate_len`, `l2r_internal_panic`;
+  the generated `lean_mk_{nat,int}arr` and
+  `lean_mk_empty_{nat,int}arr_with_capacity` (`runtime/gen_tagarr.py`);
+  `runtime/leanrt/src/array.rs`: `check_alloc`, `check_capacity`,
+  `check_alloc_slow`, `with_capacity_checked`, `replicate`;
+  `runtime/leanrt/src/tagvec.rs`: `with_capacity`, `replicate_word`;
+  `runtime/leanrt/src/nat.rs`: `nat_replicate_len`.
 - **Remove only if:** never (the messages are observable).
+
+### `ByteArray.copySlice` takes its offsets saturated (LB-06 lifted)
+
+- **What:** `lean_byte_array_copy_slice` passes the source offset, the
+  destination offset and the length as `u64` (`l2r_nat_sat`: the value, or
+  `u64::MAX` for 2^64 or more), returns `dest` inline for a source offset
+  past the source's end, and the texture does lean-runtime's plan
+  (`sem::array::copy_slice`: the bytes to copy, where, and the new size).
+- **Why:** Natively `lean_nat_to_size_t` ends with `INTERNAL PANIC: out of
+  memory` for an offset or length of 2^64 or more; the Lean definition has
+  a value there, which both translators compute (LB-06, plan §10). Test
+  `RtLiftedLimits` (`copySlice`), lean-runtime's `array/copyslice.*` rows.
+- **Where:** `runtime/prelude.rr`: `lean_byte_array_copy_slice`,
+  `l2r_nat_sat`; `runtime/leanrt/src/nat.rs`: `nat_sat_u64`;
+  `runtime/leanrt/src/array.rs`: `copy_slice`.
+- **Remove only if:** never.
+
+### Panics and their texts are lean-runtime's
+
+- **What:** `lean_panic_fn`'s output follows `sem::panic::panic_fn_plan`
+  (`leanrt::panic_text`: the message, then `backtrace:` and lean-runtime's
+  `NO_BACKTRACE` line unless `LEAN_BACKTRACE=0`, for Lean's current stderr
+  stream; under `LEAN_ABORT_ON_PANIC`, to descriptor 2 after flushing
+  stdout, then `abort`). Internal panics print
+  `sem::panic::INTERNAL_PANIC_PREFIX` and the message of an
+  `InternalPanic` (`leanrt::lean_internal_panic`; lean2rr's own invariant
+  failures keep their own texts, `leanrt::internal_panic`) and end as
+  `sem::panic::internal_panic_end` says; `uncaught exception: ` and the
+  stack-overflow text are lean-runtime's constants; the index-out-of-bounds
+  message is `sem::array::INDEX_OUT_OF_BOUNDS`. `panic_text` and
+  `lean_internal_panic` are `extern "C"`.
+- **Why:** One runtime for both translators; lean-runtime's panic rows
+  (`rows-check.sh`) check them. `extern "C"` (no unwinding): the prelude's
+  texture is now one call, which LLVM inlines into the panicking code; a
+  Rust function there would add a landing pad and change the caller's
+  code (seen in Sieve's `main`: different registers and blocks), where the
+  old texture was a call to it.
+- **Where:** `runtime/leanrt/src/lib.rs`: `panic_settings`, `panic_lines`,
+  `panic_text`, `lean_internal_panic`, `internal_panic`,
+  `uncaught_exception`, `promise_dropped`; `runtime/leanrt/src/rt.rs`: the
+  stack-overflow handler; `runtime/prelude.rr`: `l2r_internal_panic`,
+  `l2r_panic_text`, `l2r_panic_code_text`.
+- **Remove only if:** never.
 
 ### A large read right after output writes the pending output first
 
@@ -246,12 +295,14 @@ Paths are relative to the repository root.
 - **What:** `scripts/l2r.py` builds lean-runtime (the git submodule
   `third_party/lean-runtime`, pinned by commit; `L2R_LEAN_RUNTIME` names
   another checkout, `L2R_LEAN_RUNTIME_FEATURES` adds features) next to
-  leanrt, with leanrt's rustc and flags. Without dependencies: plain rustc,
-  run in the checkout's directory (the rlib's bytes then do not depend on
-  the caller's directory, for rrc's texture cache), `liblean_runtime.rlib`,
-  the enabled features as `--cfg`, cached by a hash of the manifest and of
-  the files its dep-info lists. With dependencies or
-  a build script: the pinned toolchain's cargo, `--offline --locked
+  leanrt, with leanrt's rustc and flags. When the features lean2rr enables
+  need no dependency (none enabled now; lean-runtime's `io` and `sched`
+  have optional ones): plain rustc, run in the checkout's directory (the
+  rlib's bytes then do not depend on the caller's directory, for rrc's
+  texture cache), `liblean_runtime.rlib`, the enabled features as `--cfg`,
+  cached by a hash of the manifest and of the files its dep-info lists.
+  With a required dependency, an enabled feature that needs one, or a
+  build script: the pinned toolchain's cargo, `--offline --locked
   --release` from inside the checkout, against cargo's registry cache at
   the versions of its committed `Cargo.lock` (`cargo fetch --locked` fills
   the cache once; `l2r.py` says so when a crate is missing), rlibs and the
@@ -299,4 +350,4 @@ Paths are relative to the repository root.
   `runtime/README.md` ("The shared crate lean-runtime": the pin, worktrees,
   the two builds, how to move the pin).
 - **Remove only if:** lean2rr stops using lean-runtime. The plain rustc
-  build can go when lean-runtime always has dependencies.
+  build can go when lean2rr enables a feature with dependencies.

@@ -1,0 +1,8 @@
+# One case per process, its stderr merged into stdout. A native process that
+# GMP kills with SIGFPE is reported, with its PID, by the shell that waits
+# for it: that inner shell's own stderr is dropped (the program's goes to
+# fd 3). No core files.
+ulimit -c 0
+for c in copySlice pow powTooBig powExponent; do
+  bash -c '"$BIN" "$1" 2>&3; echo "$1: exit $?"' _ "$c" 3>&1 2>/dev/null
+done

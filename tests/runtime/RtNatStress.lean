@@ -4,7 +4,8 @@ import Std.Data.HashMap
 through every container (structures, constructors, `Array Nat`, arrays of
 structures, `List`, `Option`, `IO.Ref` (set, swap and modify alternating
 small and big values), `Thunk`, `Task`, `HashMap`, a tree, closures),
-shared, updated in place and copied, round after round. Run by
+shared, updated in place and copied, round after round, and through every
+`Nat`/`Int` slow path of the runtime with big operands. Run by
 the suite (outputs compared with native) and by `nat-alloc-check.sh`, which
 builds it with leanrt's big-number counters and checks that every big
 number a round makes is freed exactly once. Size argument: the number of
@@ -69,7 +70,25 @@ def big (i : Nat) : Nat := 2 ^ (64 + i % 70) + i
     ri.modify (· - (if j % 2 == 0 then 1 else (b : Int)))
     s4 := s4 + o1 % 7 + o2.natAbs % 11
   s4 := s4 + (← rn.get) % 13 + (← ri.get).natAbs % 17
-  return (acc + s1 % 1000003 + s2 + s3 + s4) % 1000000007
+  -- Every other slow path with big operands (review RST2-01): the bitwise
+  -- operations, shifts (by a big amount too), gcd, log2, the text of big
+  -- numbers, the four `Int` divisions, comparisons and conversions,
+  -- `Int.negSucc`, and `copySlice` with sizes above 2^63. (A big
+  -- `Array.replicate` size always ends the process: RtAllocBigNat.)
+  let bi : Int := -(b : Int) * 3
+  let w : Nat := 2 ^ 63 + i
+  let s5 := (b &&& (b + 12345)) % 97 + (b ||| (i + 1)) % 89 + (b ^^^ (b * 2)) % 83 + (i ^^^ b) % 61
+    + (b <<< (i % 70 + 1)) % 79 + (b >>> 3) % 73 + (b >>> 200) + (b >>> b)
+    + Nat.gcd (b * 6) (b * 4) % 71 + Nat.gcd b (i + 2) + Nat.log2 (b * b)
+    + (toString (b * b)).length + (toString (bi * bi * bi)).length
+    + (Int.tdiv bi 7).natAbs % 67 + (Int.tmod bi ((b : Int) - 1)).natAbs % 59
+    + (bi / ((b : Int) + 1)).natAbs + (bi % (b : Int)).natAbs % 53
+    + (if bi < (b : Int) then 1 else 0) + (if bi == -(b : Int) * 3 then 2 else 0)
+    + bi.toNat + ((b : Int) * 2).toNat % 43 + bi.toInt64.toInt.natAbs % 47
+    + (Int.negSucc b).natAbs % 41
+    + ((ByteArray.mk #[1, 2, 3]).copySlice 0 (ByteArray.mk #[4, 5]) w w).size
+    + ((ByteArray.mk #[1, 2, 3]).copySlice w (ByteArray.mk #[4, 5]) 0 1).size
+  return (acc + s1 % 1000003 + s2 + s3 + s4 + s5) % 1000000007
 
 def main (args : List String) : IO Unit := do
   let n := (args.head?.bind String.toNat?).getD 1000
