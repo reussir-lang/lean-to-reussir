@@ -443,8 +443,24 @@ partial def genPersist (t : RR.Ty) (gen : IO.Ref PersistGen) : LowerM (Option St
         let rest ← each #[("x", vt)] (keep := true)
         let wait : RR.Block := ⟨#[("rb", some u64, .call "l2r_task_run_before" #[] #[.var "h", .var "a"]),
             ("x", some vt, .call get #[] #[.var "v"])] ++ rest.lets, rest.result⟩
-        pure ⟨#[("a", some u64, .call addr #[] #[.var "v"])],
-          .ite (.call "l2r_persist_collect_at" #[] #[.var "h", .var "a"]) unchanged wait⟩
+        -- A placeholder's never-forced cell (`pending` with the function
+        -- value `z`, `zeroTry`) is not a task: natively it is `box(0)`,
+        -- which the walk skips. (A promise's cell is `pending` with a
+        -- closure of its own.)
+        let zt := RR.Ty.named z
+        let ft := RR.fnTypeName (.fn .unit vt)
+        let ph := s!"l2r_persist_ph_{t.enc}"
+        let falseB : RR.Block := .ofExpr (.atom "false")
+        let phItem := RR.Item.fn ph #[("c", t)] .bool (.ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
+          { ty := z, ctor := some "pending", binders := #[some "f"],
+            body := .ofExpr (.mtch (.var "f") #[
+              { ty := ft, ctor := some "z", binders := #[], body := .ofExpr (.atom "true") },
+              { ty := ft, ctor := none, binders := #[], body := falseB }]) },
+          { ty := z, ctor := none, binders := #[], body := falseB }]))
+        modify fun s => { s with fns := s.fns.push phItem }
+        pure (.ofExpr (.ite (.call ph #[] #[.var "v"]) unchanged
+          ⟨#[("a", some u64, .call addr #[] #[.var "v"])],
+            .ite (.call "l2r_persist_collect_at" #[] #[.var "h", .var "a"]) unchanged wait⟩))
       else
         -- A thunk: its computation or its value, without forcing it.
         let ft := RR.Ty.fn .unit vt

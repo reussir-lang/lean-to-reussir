@@ -70,8 +70,11 @@ def persistCall (t : RR.Ty) (v : RR.Expr) : LowerM (Option RR.Expr) := do
 is computed once, by `<name>_init`, and kept in a runtime once-cell for the
 rest of the run, like native Lean's CAFs and closed terms (translation plan
 §5.12). The cell stores a boundary type; other values are boxed. A value
-that may contain tasks first waits for them (`persistCall`). -/
-def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
+that may contain tasks first waits for them (`persistCall`), unless `walk`
+is false: a placeholder (`zeroTry`) is natively `box(0)`, which
+`lean_mark_persistent` never sees, and the never-forced `pending` cell one
+can hold must not be run. -/
+def cafAccessor (name : String) (ret : RR.Ty) (walk := true) : LowerM RR.Item := do
   let slot := (← get).cafSlots
   modify fun s => { s with cafSlots := slot + 1 }
   let (st, boxed) ← arrayElemTy ret
@@ -81,7 +84,7 @@ def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
   let unwrap (e : RR.Expr) : RR.Expr := if boxed then .field e 0 else e
   let k := RR.Expr.atom (toString slot)
   let init := RR.Expr.call (name ++ "_init") #[] #[]
-  let init := match ← persistCall ret (.var "v") with
+  let init := match ← (if walk then persistCall ret (.var "v") else pure none) with
     | some p => RR.Expr.block ⟨#[("v", some ret, init), ("p", some (.named "u64"), p)], .var "v"⟩
     | none => init
   -- `l2r_once_claim`: a context of the runtime's scheduler that needs the
@@ -91,77 +94,128 @@ def cafAccessor (name : String) (ret : RR.Ty) : LowerM RR.Item := do
     (.ofExpr (unwrap (.call "l2r_once_set" #[st] #[k, wrap init]))))
   return .fn name #[] ret body
 
-/-- A placeholder of Reussir type `t`. Lean passes `box(0)` for values that
-are never inspected: erased arguments (`◾`) at relevant types, and the
-`unsafeCast ()` its library stores into array slots so that the element
-being updated stays unshared (`Array.modifyMUnsafe`, `Array.mapMUnsafe`).
-lean2rr materializes `box(0)` at the expected type as that type's zero:
-`0`, `false`, the first constructor whose fields have zeros, a closure
-returning a zero, an empty array (for `Nat`, `Bool` and enumerations this is
-exactly what `box(0)` denotes in Lean). Only a type without a finite value
-gets `l2r_unreachable`. Each placeholder is a generated function
-`l2r_zero_N`. A placeholder that would allocate (a string, an array, a
-record, a reference, a boxed unit) is built once and kept in a once-cell like
-a constant (`cafAccessor`): `Array.modify` stores one per update, and it is
-never inspected, so a shared value does as well as a fresh one. -/
-partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
-  if t == .unit then return .unitVal
-  if let some f := (← get).zeroFns[t]? then return .call f #[] #[]
+/-- The placeholder of `t` (`zeroValue`), searched for depth first: a
+constructor without fields if there is one, else the first constructor
+whose fields have placeholders (a reference: its element's; a thunk or
+task: a cell `done` with its value's, else a cell `pending` with a function
+value that is never applied, so that any such cell has one). A type whose
+placeholder is being built (an enclosing call: `zeroBusy`) cannot be used
+for a field, which keeps the placeholders finite; a constructor that needs
+one is skipped, and so is one whose field turns out to have no placeholder
+(the search goes on with the next). The result is a call of a generated
+function `l2r_zero_N`, kept for every later use (`zeroFns`): it is a finite
+value of `t` whatever types were avoided to find it. Or it is `none` when
+there is no placeholder avoiding those types, with the smallest depth of
+an enclosing type the search avoided (`low`); only a `none` that avoided no
+type enclosing `t` holds wherever `t` is asked for, and is kept
+(`zeroNone`). A placeholder that
+would allocate (a string, an array, a record, a reference, a boxed unit)
+is built once and kept in a once-cell like a constant (`cafAccessor`, but
+without the walk for tasks: see there): `Array.modify` stores one per
+update, and it is never inspected, so a shared value does as well as a
+fresh one. -/
+partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
+  let inf := 1000000000
+  if t == .unit then return (some .unitVal, inf)
+  if (← get).zeroNone.contains t then return (none, inf)
+  if let some f := (← get).zeroFns[t]? then return (some (.call f #[] #[]), inf)
+  if let some d := (← get).zeroBusy[t]? then return (none, d)
+  let depth := (← get).zeroBusy.size
   let f ← fresh "l2r_zero_"
-  modify fun s => { s with zeroFns := s.zeroFns.insert t f, zeroBusy := s.zeroBusy.insert t }
+  modify fun s => { s with zeroBusy := s.zeroBusy.insert t depth }
   let lit (text : String) : RR.Block := ⟨#[("z", some t, .atom text)], .var "z"⟩
-  let unreachable : RR.Block := .ofExpr (.call "l2r_unreachable" #[t] #[])
-  let body : RR.Block ← match t with
+  -- The placeholders of `tys`, unless one of them is being built or has
+  -- none (`low`: the smallest depth avoided).
+  let fieldsZero (tys : Array RR.Ty) : LowerM (Option (Array RR.Expr) × Nat) := do
+    let busy := (← get).zeroBusy
+    let hit := tys.foldl (fun m ft => match busy[ft]? with | some d => min m d | none => m) inf
+    if hit < inf then return (none, hit)
+    let mut vals := #[]
+    let mut low := inf
+    for ft in tys do
+      let (v?, l) ← zeroTry ft
+      low := min low l
+      let some v := v? | return (none, low)
+      vals := vals.push v
+    return (some vals, low)
+  let (body?, low) : Option RR.Block × Nat ← match t with
     | .named n =>
-      if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"] then pure (lit "0")
-      else if n ∈ ["f32", "f64"] then pure (lit "0.0")
-      else if n == "bool" then pure (.ofExpr (.atom "false"))
+      if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"] then pure (some (lit "0"), inf)
+      else if n ∈ ["f32", "f64"] then pure (some (lit "0.0"), inf)
+      else if n == "bool" then pure (some (.ofExpr (.atom "false")), inf)
       else if n == "Nat" then
-        pure ⟨#[("z", some (.named "u64"), .atom "0")], .call "l2r_nat_small" #[] #[.var "z"]⟩
+        pure (some ⟨#[("z", some (.named "u64"), .atom "0")], .call "l2r_nat_small" #[] #[.var "z"]⟩, inf)
       else if n == "Int" then
-        pure ⟨#[("z", some (.named "i64"), .atom "0")], .call "l2r_int_small" #[] #[.var "z"]⟩
-      else if n == "LStr" then pure (.ofExpr (← strLit ""))
-      else if n == "LNatArr" then pure (.ofExpr (.call "l2r_natarr_empty" #[] #[]))
-      else if n == "LIntArr" then pure (.ofExpr (.call "l2r_intarr_empty" #[] #[]))
+        pure (some ⟨#[("z", some (.named "i64"), .atom "0")], .call "l2r_int_small" #[] #[.var "z"]⟩, inf)
+      else if n == "LStr" then pure (some (.ofExpr (← strLit "")), inf)
+      else if n == "LNatArr" then pure (some (.ofExpr (.call "l2r_natarr_empty" #[] #[])), inf)
+      else if n == "LIntArr" then pure (some (.ofExpr (.call "l2r_intarr_empty" #[] #[])), inf)
       else if n == boxName then
-        pure (.ofExpr (.ctor boxName (some (← boxVariant .unit)) #[.unitVal]))
+        pure (some (.ofExpr (.ctor boxName (some (← boxVariant .unit)) #[.unitVal])), inf)
       else if let some (e, k) := (← get).refInfos[n]? then
         -- A reference (never used: any cell will do).
-        if (← get).zeroBusy.contains e then pure unreachable
-        else pure (.ofExpr (refNew t e k (← zeroValue e)))
+        let (vs?, l) ← fieldsZero #[e]
+        pure (vs?.map fun vs => .ofExpr (refNew t e k vs[0]!), l)
       else if let some info := (← get).typeInfos[n]? then
-        -- The first constructor none of whose fields is a type whose
-        -- placeholder is being built (so the value is finite).
-        let busy := (← get).zeroBusy
-        let ok (tys : Array RR.Ty) := tys.all fun ft => !busy.contains ft
+        -- A constructor without fields, else the first whose fields have
+        -- placeholders.
         let fieldsOf (layout : CtorLayout) := layout.posTys
         let cands := info.ctorOrder.filterMap info.ctors.find?
-        match cands.find? (fieldsOf · |>.isEmpty) <|> cands.find? (ok ∘ fieldsOf) with
-        | some layout =>
-          let vals ← (fieldsOf layout).mapM zeroValue
-          pure <| .ofExpr <| match info.shape with
+        let build (layout : CtorLayout) (vals : Array RR.Expr) : RR.Block :=
+          .ofExpr <| match info.shape with
             | .struct => .ctor n none vals
             | _ => .ctor n (some layout.variant) vals
-        | none => pure unreachable
+        match cands.find? (fieldsOf · |>.isEmpty) with
+        | some layout => pure (some (build layout #[]), inf)
+        | none =>
+          let mut found : Option RR.Block := none
+          let mut low := inf
+          for layout in cands do
+            let (vs?, l) ← fieldsZero (fieldsOf layout)
+            low := min low l
+            if let some vs := vs? then
+              found := some (build layout vs)
+              break
+          pure (found, low)
       else
         -- Generated positional structs (`Tuple…`, `ElemBox…`).
         match (← get).tupleTypes.toList.find? (·.2 == n) with
         | some (k, _) =>
           let fields := if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k
-          if fields.any (← get).zeroBusy.contains then pure unreachable
-          else pure (.ofExpr (.ctor n none (← fields.mapM zeroValue)))
-        | none => pure unreachable
-    | .app "RVec" #[e] => pure (.ofExpr (.call "l2r_array_empty" #[e] #[]))
+          let (vs?, l) ← fieldsZero fields
+          pure (vs?.map fun vs => .ofExpr (.ctor n none vs), l)
+        | none => pure (none, inf)
+    | .app "RVec" #[e] => pure (some (.ofExpr (.call "l2r_array_empty" #[e] #[])), inf)
     | .app "LCell" _ =>
       match ← lazyOf? t with
       | some (z, _, vt) =>
-        if (← get).zeroBusy.contains vt then pure unreachable
-        else pure (.ofExpr (lazyDone z (← zeroValue vt)))
-      | none => pure unreachable
+        match ← fieldsZero #[vt] with
+        | (some vs, l) => pure (some (.ofExpr (lazyDone z vs[0]!)), l)
+        | (none, _) =>
+          -- A cell that is never forced: `pending` with a function value
+          -- that is never applied.
+          let ft := RR.Ty.fn .unit vt
+          pure (some (.ofExpr (.call "l2r_lcell_new" #[.named z]
+            #[.ctor z (some "pending") #[.ctor (RR.fnTypeName ft) (some "z") #[]]])), inf)
+      | none => pure (none, inf)
     -- A function value that is never applied (applying it gives a zero).
-    | .fn .. => pure (.ofExpr (.ctor (RR.fnTypeName t) (some "z") #[]))
-    | _ => pure unreachable
+    | .fn .. => pure (some (.ofExpr (.ctor (RR.fnTypeName t) (some "z") #[])), inf)
+    | _ => pure (none, inf)
   modify fun s => { s with zeroBusy := s.zeroBusy.erase t }
+  -- No placeholder: that holds wherever `t` is asked for only if the search
+  -- avoided no type enclosing `t`.
+  let kept := low ≥ depth
+  let low := if kept then inf else low
+  let some body := body? | do
+    if kept then
+      let item := RR.Item.fn f #[] t (.ofExpr (.call "l2r_unreachable" #[t] #[]))
+      modify fun s => { s with zeroNone := s.zeroNone.insert t }
+      modify fun s => { s with zeroFns := s.zeroFns.insert t f }
+      modify fun s => { s with fns := s.fns.push item }
+    return (none, low)
+  -- A placeholder holds everywhere (a finite value of `t`, built from
+  -- functions that are finished).
+  modify fun s => { s with zeroFns := s.zeroFns.insert t f }
   -- Heap values are shared (a nullary constructor of a shared enum does not
   -- allocate).
   let heap ← match t with
@@ -176,11 +230,35 @@ partial def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
     | ⟨#[], .ctor _ _ #[]⟩ => true
     | _ => false
   if heap && !nullary && (← read).cachePlaceholders then
-    let acc ← cafAccessor f t
+    let acc ← cafAccessor f t (walk := false)
     modify fun s => { s with fns := s.fns.push (.fn (f ++ "_init") #[] t body) |>.push acc }
   else
     modify fun s => { s with fns := s.fns.push (.fn f #[] t body) }
-  return .call f #[] #[]
+  return (some (.call f #[] #[]), inf)
+
+/-- A placeholder of Reussir type `t`. Lean passes `box(0)` for values that
+are never inspected: erased arguments (`◾`) at relevant types, and the
+`unsafeCast ()` its library stores into array slots so that the element
+being updated stays unshared (`Array.modifyMUnsafe`, `Array.mapMUnsafe`).
+lean2rr materializes `box(0)` at the expected type as that type's zero:
+`0`, `false`, a constructor whose fields have zeros, a closure returning a
+zero, an empty array (for `Nat`, `Bool` and enumerations this is exactly
+what `box(0)` denotes in Lean). Each placeholder is a generated function
+`l2r_zero_N` (`zeroTry`). Only a type without a finite value (`Empty`, a
+type whose every constructor needs itself) gets `l2r_unreachable`; such a
+placeholder is evaluated only where no value of the type can exist. -/
+def zeroValue (t : RR.Ty) : LowerM RR.Expr := do
+  if t == .unit then return .unitVal
+  if let (some e, _) ← zeroTry t then return e
+  match (← get).zeroFns[t]? with
+  | some f => return .call f #[] #[]
+  | none => return .call "l2r_unreachable" #[t] #[]
+
+/-- Whether type `t` has a finite placeholder (`zeroValue` builds no
+`l2r_unreachable` into it). -/
+def zeroFinite (t : RR.Ty) : LowerM Bool := do
+  if t == .unit then return true
+  return (← zeroTry t).1.isSome
 
 /-- The index of a value of an enumeration type (a generated `[value]`
 enum without fields), as `u64`: a generated `match`. -/

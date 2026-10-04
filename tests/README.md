@@ -186,7 +186,7 @@ which must finish (`stats-polyrec`).
 
 `tests/runtime/run.sh` builds each `tests/runtime/Rt*.lean` natively and
 through lean2rr and compares stdout, stderr and the exit code (its header
-lists the per-test `.args`, `.stdin`, `.pipe` and `.xfail` files). Each
+lists the per-test `.args`, `.stdin`, `.pipe`, `.opts` and `.xfail` files). Each
 test's header says what it covers. Many come from the adversarial reviews:
 a finding (a bug a reviewer reproduced, fixed since) or a check that held
 up in review.

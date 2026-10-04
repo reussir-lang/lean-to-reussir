@@ -27,10 +27,10 @@ built once and kept in a once-cell), and for a string one shared empty
 string (`l2r_str_shared_empty`, no once-cell).
 
 Soundness guard (checked on every state machine): a slot's placeholder is
-evaluated at every jump that does not fill it, so a type whose placeholder
-would reach `l2r_unreachable` (a type without a finite value, or a record
-whose placeholder holds one) gets no slot: such a field stays in its
-variant, which is then allocated as in the core form.
+evaluated at every jump that does not fill it, so a type without a finite
+placeholder (`zeroFinite`: a type without a finite value, such as `Empty`)
+gets no slot: such a field stays in its variant, which is then allocated as
+in the core form.
 
 Jumps and self tail calls are lowered before every variant is known, so
 they are emitted as `fn(values…, mode::v)` and put in slots when the state
@@ -40,31 +40,12 @@ machine is emitted (`smCall`).
 namespace LeanToReussir
 open Lean Compiler LCNF
 
-/-- The placeholder of a slot of type `t` (see the module comment). -/
-def slotPlaceholder (t : RR.Ty) : LowerM RR.Expr := do
-  if t == .named "LStr" then return .call "l2r_str_shared_empty" #[] #[]
-  zeroValue t
-
-mutual
-  /-- Whether evaluating `e` never reaches `l2r_unreachable`, looking into
-  the generated placeholder functions it calls (`fns`: `l2r_zero_N` and
-  the `_init` of a cached one). -/
-  partial def placeholderFiniteE (fns : Std.HashMap String RR.Block) (seen : List String) : RR.Expr → Bool
-    | .call f _ args =>
-      f != "l2r_unreachable" && args.all (placeholderFiniteE fns seen) &&
-        match fns[f]? with
-        | some b => !seen.contains f && placeholderFiniteB fns (f :: seen) b
-        | none => true
-    | .ctor _ _ args => args.all (placeholderFiniteE fns seen)
-    | .block b => placeholderFiniteB fns seen b
-    | .ite c t e => placeholderFiniteE fns seen c && placeholderFiniteB fns seen t && placeholderFiniteB fns seen e
-    | .field e _ | .cast e _ => placeholderFiniteE fns seen e
-    | .mtch s arms => placeholderFiniteE fns seen s && arms.all (placeholderFiniteB fns seen ·.body)
-    | _ => true
-
-  partial def placeholderFiniteB (fns : Std.HashMap String RR.Block) (seen : List String) (b : RR.Block) : Bool :=
-    b.lets.all (placeholderFiniteE fns seen ·.2.2) && placeholderFiniteE fns seen b.result
-end
+/-- The placeholder of a slot of type `t` (see the module comment), if `t`
+has a finite one (`zeroFinite`, the soundness guard). -/
+def slotPlaceholder? (t : RR.Ty) : LowerM (Option RR.Expr) := do
+  if t == .named "LStr" then return some (.call "l2r_str_shared_empty" #[] #[])
+  if ← zeroFinite t then return some (← zeroValue t)
+  return none
 
 mutual
   /-- `e` with every call `f(args)` replaced by `g f args` where that gives
@@ -117,13 +98,9 @@ def slotLayout (variants : Array (String × Array (String × RR.Ty))) : LowerM S
       let ph? ← match ok[t]? with
         | some r => pure r
         | none => do
-          let ph ← slotPlaceholder t
-          -- The soundness guard: no slot for a type whose placeholder
-          -- reaches `l2r_unreachable` (its functions are generated now).
-          let fns : Std.HashMap String RR.Block := (← get).fns.foldl (init := {}) fun m it => match it with
-            | .fn n _ _ b => if n.startsWith "l2r_zero_" then m.insert n b else m
-            | _ => m
-          let r := if placeholderFiniteE fns [] ph then some ph else none
+          -- The soundness guard: no slot for a type without a finite
+          -- placeholder.
+          let r ← slotPlaceholder? t
           ok := ok.insert t r
           pure r
       let some ph := ph? | continue
