@@ -26,6 +26,11 @@
 #               the other fails the test: unpaired expectation file)
 #
 # Both executables run with LEAN_BACKTRACE=0, so panics print no stack trace.
+# lean2rr runs with LEAN_ABORT_ON_PANIC=1: a panic of lean2rr itself is a
+# lean2rr bug (it goes on with a default value), so it fails the build. Its
+# stderr is not searched instead: a panic message has no fixed prefix (the
+# panic under `Name.append` prints `Error: unreachable @ extractMainModule`;
+# round 9 RV9S-01, test RtHygSpecName).
 # Environment: L2R_REUSSIR, L2R_LEAN2RR, L2R_RUSTC (see scripts/l2r.py);
 # L2R_DISABLE_OPTS / L2R_ENABLE_OPTS (comma-separated lean2rr optimizations
 # to turn off / on, passed on by scripts/l2r.py; `lean2rr --list-opts`);
@@ -85,7 +90,7 @@ for t in "${TESTS[@]}"; do
   if ! (cd "$d" && lean -o "$t.olean" -c "$t.c" "$t.lean" > build-native.log 2>&1 \
         && leanc -O3 -DNDEBUG "$t.c" -o native >> build-native.log 2>&1); then
     status=fail; why="native build failed (see $d/build-native.log)"
-  elif ! L2R_DISABLE_OPTS=$opts python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" --keep-rr "$d/$t.rr" \
+  elif ! L2R_DISABLE_OPTS=$opts LEAN_ABORT_ON_PANIC=1 python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" --keep-rr "$d/$t.rr" \
         > "$d/build-l2r.log" 2>&1; then
     status=fail; why="lean2rr build failed (see $d/build-l2r.log)"
   else

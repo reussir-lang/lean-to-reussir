@@ -786,7 +786,9 @@ natively (`lean` + `leanc -O3 -DNDEBUG`, like Lake's release build) and
 through lean2rr, runs both (`LEAN_BACKTRACE=0`, optional `NAME.args` and
 `NAME.stdin`; `NAME.pipe` is a shell command line run instead, with `$BIN`
 the program, for redirections and pipes), and compares stdout, stderr and
-the exit code byte for byte. `NAME.xfail` marks tests blocked by a lean2rr
+the exit code byte for byte. lean2rr itself runs with
+`LEAN_ABORT_ON_PANIC=1`: a panic while translating fails the test even if
+the program's output matches. `NAME.xfail` marks tests blocked by a lean2rr
 request. `NAME.l2r.out` (`.err`, `.code`) marks an intended difference from
 native, a Lean runtime bug that lean2rr does not reproduce (plan §10,
 "Runtime: Lean bugs we do not reproduce"): that stream of lean2rr's run is

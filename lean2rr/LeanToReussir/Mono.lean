@@ -261,11 +261,13 @@ def isTypeUnsafeCode (c : Name) : MonoM Bool := do
       if ← isTypeUnsafeImpl impl then return true
   return false
 
-/-- The origin of a specialization name `X._at_.Y.spec_N`: `X`. -/
+/-- The origin of a specialization name `X._at_.Y.spec_N`: `X`, rebuilt
+component by component (`X` can be hygienic, `helper._@.M._hyg.3`: Lean puts
+`_at_` after the macro scopes; round 9 RV9S-01). -/
 def specOrigin? (n : Name) : Option Name :=
   let comps := n.components
   match comps.idxOf? `_at_ with
-  | some i => some ((comps.take i).foldl (· ++ ·) .anonymous)
+  | some i => some (nameOfComponents (comps.take i))
   | none => none
 
 /-- A persisted base declaration is *tainted* when its body reaches

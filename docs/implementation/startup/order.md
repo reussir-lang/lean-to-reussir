@@ -64,7 +64,7 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   and constants without a record (036d007).
 - **Where:** `Emit/Startup.lean`: `moduleStartupKeys`, `declOrder`,
   `rangeKey`, `posLt`, `natStrLt`, `natNameLt`, `startupNameLt`,
-  `specTarget?`, `isGeneratedInitFn`, `nameOfComponents`;
+  `specTarget?`, `isGeneratedInitFn`; `Collect.lean`: `nameOfComponents`;
   `CompileRecord.lean`: `compileOrder`, `compiledOwner`.
 - **Remove only if:** never. What no rule recovers (members of a `mutual`
   block that do not use each other, made-up names of one quotation) is a
@@ -76,12 +76,20 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
 
 - **What:** Name prefixes are rebuilt component by component, and a
   hygienic name's macro scopes stay at its end (`zz._closed_0._@.M._hyg.3`
-  is a closed term of `zz._@.M._hyg.3`).
+  is a closed term of `zz._@.M._hyg.3`). A specialization of a hygienic
+  declaration has them in the middle
+  (`helper._@.M._hyg.3._at_.runIt.spec_1`); its origin, the part before
+  `_at_`, is rebuilt the same way (`helper._@.M._hyg.3`).
 - **Why:** `Name.append` reinterprets the macro scopes of a hygienic
   component and panicked on a prefix ending in `_hyg`: lean2rr printed
   "unreachable @ extractMainModule" for any macro-made declaration (round
-  6 RV6L-04, 40ebf2c).
-- **Where:** `Emit/Startup.lean`: `nameOfComponents`;
+  6 RV6L-04, 40ebf2c), and for any specialization of one, from
+  `specOrigin?` via `isMapLoop`, with a wrong origin
+  `helper.«_@».M.3` (round 9 RV9S-01; test `RtHygSpecName`, which
+  `tests/runtime/run.sh` translates with `LEAN_ABORT_ON_PANIC=1`, so any
+  lean2rr panic fails a runtime test).
+- **Where:** `Collect.lean`: `nameOfComponents` (shared);
+  `Mono.lean`: `specOrigin?`; `Emit/Startup.lean`: `specTarget?`;
   `CompileRecord.lean`: `compiledOwner`, `closedTermOwner?`;
   `Lower/Conv.lean`: `sourceDecls`.
 - **Remove only if:** never.

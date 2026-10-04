@@ -1985,7 +1985,11 @@ to a closed term an earlier declaration made (Lean's closed-term cache), or
 a module compiled with `set_option compiler.extract_closed false`. A
 hygienic name keeps its
 macro scopes at the end: `zz._closed_0._@.M._hyg.3` is a closed term of
-`zz._@.M._hyg.3`.
+`zz._@.M._hyg.3`. A specialization's name is the exception: Lean appends
+`_at_.g.spec_N` after them (`helper._@.M._hyg.3._at_.runIt.spec_1`).
+lean2rr rebuilds a name from its components one at a time, not with
+`Name.append`, which reads a part ending in `_hyg` as a hygienic name and
+panics (round 6 RV6L-04, round 9 RV9S-01).
 
 lean2rr orders the startup items by the program's structure (below), then
 puts the items that the record places in the recorded order, in the places

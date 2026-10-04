@@ -133,4 +133,14 @@ def collect (root : Name) : CoreM Program := do
         prog := { prog with missing := prog.missing.push (name, src) }
   return { prog with inductives := closeInductives env inductives }
 
+/-- A name rebuilt from its components (`Name.append` would reinterpret the
+macro scopes of a hygienic component, such as an `initialize` function's
+`_private.M.0.initFn._@.M._hyg.2`, and panics on a prefix that ends in
+`_hyg`). -/
+def nameOfComponents (cs : List Name) : Name :=
+  cs.foldl (init := .anonymous) fun acc c => match c with
+    | .str _ s => .str acc s
+    | .num _ k => .num acc k
+    | .anonymous => acc
+
 end LeanToReussir

@@ -112,15 +112,6 @@ def declOrder (n : Name) : CoreM (Array Nat) := do
     m := m.getPrefix
   return #[idx]
 
-/-- A name rebuilt from its components (`Name.append` would reinterpret the
-macro scopes of a hygienic component, such as an `initialize` function's
-`_private.M.0.initFn._@.M._hyg.2`). -/
-def nameOfComponents (cs : List Name) : Name :=
-  cs.foldl (init := .anonymous) fun acc c => match c with
-    | .str _ s => .str acc s
-    | .num _ k => .num acc k
-    | .anonymous => acc
-
 /-- For a specialization `f._at_.g.spec_N`, the name after the last `_at_`
 (`g.spec_N`): Lean made it while compiling `g`. -/
 def specTarget? (n : Name) : Option Name := Id.run do
