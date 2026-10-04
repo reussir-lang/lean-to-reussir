@@ -708,16 +708,28 @@ runs on the uniform array (optional pass `uniform-updates`): a call of an
 `Array` extern (`push`, `set!`, `pop`, `swap`, `get`, `size`, …, which do not
 depend on their type arguments) whose array is uniform is made at its
 instance at `lcAny`, so only the single element is boxed or unboxed; its
-result binder becomes the uniform type when it is a container, provided
-every use of it expects exactly that type (a chain of such calls counts, and
-so does a join point's parameter that every jump passes a uniform value and
-whose uses expect one: the join point several match arms share, or an `if`
-choosing between two arrays; review C02R-01); and a constructor application
-whose uses all expect one uniform type (`i :: d` stored in a `List lcAny`
-field) is built at that type. A call is changed only if it receives a
+result binder becomes the uniform type when it is a container, provided one
+use of it expects exactly that type (the value goes back to a uniform
+position) and every other use expects that type or a precise one it
+converts to: such a read (a fold at `Array Nat`, a rare path) converts at
+that use, on its own path, instead of the whole update converting there and
+back at every step (review C02R-02). A chain of such calls counts, and so
+does a join point's parameter that a jump passes a uniform value, every
+other jump a uniform value or a precise one (a fresh `#[i]` on a rare path,
+converted at that jump), and whose uses fit as above: the join point several
+match arms share, or an `if` choosing between two arrays (review C02R-01).
+A constructor application whose uses all expect one uniform type (`i :: d`
+stored in a `List lcAny` field) is built at that type. Then a declaration's
+parameter of a precise array type that every call site, partial
+applications included, passes a uniform array (a closure capturing an
+updated column, lifted to `_lam_N d'`; a fold loop called on it) becomes
+uniform when, with that type, its body uses it only where a uniform array is
+expected (its reads planned as above; its own recursive calls passing it on
+uniform), so no call converts. A call is changed only if it receives a
 uniform value it would otherwise convert and its other arguments then need
 at most a box; code that never meets a uniform container is unchanged.
-Tests `RtUniformUpdates`, `RtUniformUpdatesJp`, and
+Tests `RtUniformUpdates`, `RtUniformUpdatesJp`, `RtUniformUpdatesMixed`,
+`RtUniformUpdatesNested`, and
 `tests/runtime/conv-count-check.sh`, which counts the elements conversions
 rebuild in a run (`L2R_COUNT_CONVERSIONS`) at two sizes.
 
@@ -3062,10 +3074,12 @@ Each item says what differs and when.
   allocates a stack frame per node. Past the instance caps of §2.6 this can
   happen inside loops, and also where uniform values meet precise uses in a
   loop without a cap: a container whose element type depends on a value is
-  updated on its uniform representation (§4, `uniform-updates`), but a loop
-  that passes it to a function taking it at a precise type, or reads it
-  with code other than an `Array` extern (a `foldl` at `Array Nat`), still
-  converts it there once per call. Running out of memory changes the exit status. Values of
+  updated and read on its uniform representation (§4, `uniform-updates`),
+  but a use at a precise type that the pass cannot make uniform still
+  converts it there, at each execution: a function that also receives
+  precise arrays, or that passes its parameter on at a precise type, called
+  on the column at each step; and an update whose result is used only at
+  precise types (never stored back uniformly). Running out of memory changes the exit status. Values of
   types with the same layout are not converted (`l2r_retype`); a cast
   between layouts that differ (an `Array T₁` field read at `Array T₃` whose
   elements hold an `Int` where `T₁`'s hold a `Nat`) converts the field at

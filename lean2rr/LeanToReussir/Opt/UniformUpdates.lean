@@ -109,6 +109,31 @@ def isPlaceholder (b : Body) (a : Arg .pure) : Bool :=
     | _ => false
   | _ => true
 
+/-- The type a use expects, in a body `b` of a declaration whose result type
+is `declRet`, given the planned changes. -/
+def expectedType (b : Body) (declRet : Expr) (plans : Std.HashMap FVarId Plan) (u : Use) :
+    MRetypeM (Option Expr) := do
+  match u with
+  | .ret => return some declRet
+  | .jmp j i =>
+    if let some x := (b.jpParamIds[j]?).bind (·[i]?) then
+      if let some nt := (plans[x]?).bind (·.newTy) then return some nt
+    return (b.jpParams[j]?).bind (·[i]?)
+  | .other => return none
+  | .arg y i =>
+    if let some p := plans[y]? then return p.params[i]?
+    let some (.const g _ args _) := b.values[y]? | return none
+    if let some (.ctorInfo ci) := (← getEnv).find? g then
+      if i < ci.numParams then return none
+      return (← ctorFieldTypes g (b.types.getD y anyExpr))[i - ci.numParams]?
+    let some sig := (← get).sigs[g]? | return none
+    if args.size > sig.params.size then return none
+    return sig.params[i]?
+
+/-- The scan of a declaration's body, its parameters included. -/
+def bodyOf (d : Decl .pure) (c : Code .pure) : Body :=
+  scan c (d.params.foldl (fun b p => { b with types := b.types.insert p.fvarId p.type }) {})
+
 end UniformUpdates
 
 open UniformUpdates in
@@ -116,8 +141,7 @@ open UniformUpdates in
 the module comment). -/
 partial def uniformUpdatesDecl (d : Decl .pure) : MRetypeM (Decl .pure) := do
   let .code c := d.value | return d
-  let b := d.params.foldl (fun b p => { b with types := b.types.insert p.fvarId p.type }) ({} : Body)
-  let b := scan c b
+  let b := bodyOf d c
   let env ← getEnv
   let keys := (← get).keys
   let declRet := (splitArrows d.type d.params.size).2
@@ -146,23 +170,7 @@ partial def uniformUpdatesDecl (d : Decl .pure) : MRetypeM (Decl .pure) := do
     if newTy.isNone && sig.ret.consumeMData != anyExpr && !(← same sig.ret (tyOf x)) then continue
     plans := plans.insert x { callee := some u, params := sig.params, newTy, ext := some (k.decl, base, uargs) }
   -- The type a use of `x` expects, given the plans.
-  let expected (plans : Std.HashMap FVarId Plan) (u : Use) : MRetypeM (Option Expr) := do
-    match u with
-    | .ret => return some declRet
-    | .jmp j i =>
-      if let some x := (b.jpParamIds[j]?).bind (·[i]?) then
-        if let some nt := (plans[x]?).bind (·.newTy) then return some nt
-      return (b.jpParams[j]?).bind (·[i]?)
-    | .other => return none
-    | .arg y i =>
-      if let some p := plans[y]? then return p.params[i]?
-      let some (.const g _ args _) := b.values[y]? | return none
-      if let some (.ctorInfo ci) := env.find? g then
-        if i < ci.numParams then return none
-        return (← ctorFieldTypes g (tyOf y))[i - ci.numParams]?
-      let some sig := (← get).sigs[g]? | return none
-      if args.size > sig.params.size then return none
-      return sig.params[i]?
+  let expected := expectedType b declRet
   -- The arguments of a planned `let` fit the new parameters (equal, or a box
   -- at a bare `lcAny`), and one of them is a uniform value that the current
   -- call converts (or a planned uniform result).
@@ -184,19 +192,52 @@ partial def uniformUpdatesDecl (d : Decl .pure) : MRetypeM (Decl .pure) := do
   -- Join points' parameters of a precise container type that a jump passes a
   -- uniform value (or a planned uniform result) to, and whose uses expect a
   -- uniform type: that type.
-  for (j, ps) in b.jpParamIds.toList do
+  -- (Repeated until no parameter is added: a jump's argument can be the
+  -- parameter of another join point planned in an earlier round.)
+  let mut added := true
+  while added do
+   added := false
+   for (j, ps) in b.jpParamIds.toList do
     for h : i in [:ps.size] do
       let x := ps[i]
+      if plans.contains x then continue
       let ty := tyOf x
       if ← unknown ty then continue
-      let some use0 := (b.uses.getD x #[])[0]? | continue
-      let some u ← expected plans use0 | continue
-      unless (← unknown u) && refines (← norm u) (← norm ty) do continue
+      let mut u? : Option Expr := none
+      for use in b.uses.getD x #[] do
+        if u?.isNone then
+          if let some e ← expected plans use then
+            if (← unknown e) && refines (← norm e) (← norm ty) then u? := some e
+      let some u := u? | continue
       let mut gain := false
       for args in b.jumps.getD j #[] do
         if let some (.fvar y) := (args[i]? : Option (Arg .pure)) then
           if (plans[y]?.bind (·.newTy)).isSome || (← unknown (tyOf y)) then gain := true
-      if gain then plans := plans.insert x { callee := none, params := #[], newTy := some u }
+      if gain then
+        plans := plans.insert x { callee := none, params := #[], newTy := some u }
+        added := true
+  -- The uses of a planned uniform value `x` of type `nt`: each expects `nt`,
+  -- or a precise type that `nt` converts to (a read that does not flow back:
+  -- a fold at `Array Nat`, a closure capturing it; the conversion runs there,
+  -- on that use's own path, review C02R-02); and one of them takes it back to
+  -- a uniform position (a field, a uniform parameter, a planned update), the
+  -- round trip being what is avoided. A planned read (`size`, `get`) accepts
+  -- a uniform array but does not take it anywhere.
+  let usesFit (plans : Std.HashMap FVarId Plan) (x : FVarId) (nt : Expr) : MRetypeM Bool := do
+    let mut back := false
+    for u in b.uses.getD x #[] do
+      match ← expected plans u with
+      | some e =>
+        if ← same e nt then
+          let read := match u with
+            | .arg y _ => match plans[y]? with
+              | some q => q.newTy.isNone
+              | none => false
+            | _ => false
+          unless read do back := true
+        else unless refines (← norm nt) (← norm e) do return false
+      | none => return false
+    return back
   -- Greatest fixpoint over the extern and join point plans: drop a plan whose
   -- arguments (a join point's: the jumps' arguments) do not fit or whose
   -- uniform result has a use that expects another type.
@@ -208,18 +249,19 @@ partial def uniformUpdatesDecl (d : Decl .pure) : MRetypeM (Decl .pure) := do
         -- A join point's parameter.
         let some nt := p.newTy | continue
         let some (j, i) := b.jpParamIds.toList.findSome? fun (j, ps) => (ps.idxOf? x).map (j, ·) | continue
+        -- A jump passes a uniform value; another may pass a precise one that
+        -- `nt` refines (a fresh array on a rare path), converted at that jump.
         let mut ok := true
+        let mut gain := false
         for args in b.jumps.getD j #[] do
           match (args[i]? : Option (Arg .pure)) with
           | some a@(.fvar y) =>
             unless isPlaceholder b a do
               let ty := (plans[y]?.bind (·.newTy)).getD (tyOf y)
-              unless ← same ty nt do ok := false
+              if ← same ty nt then gain := true
+              else unless refines (← norm nt) (← norm ty) do ok := false
           | _ => pure ()
-        for u in b.uses.getD x #[] do
-          match ← expected plans u with
-          | some e => unless ← same e nt do ok := false
-          | none => ok := false
+        unless gain && (← usesFit plans x nt) do ok := false
         unless ok do
           plans := plans.erase x
           changed := true
@@ -229,10 +271,7 @@ partial def uniformUpdatesDecl (d : Decl .pure) : MRetypeM (Decl .pure) := do
       let mut ok ← argsFit plans x args curParams p
       if ok then
         if let some nt := p.newTy then
-          for u in b.uses.getD x #[] do
-            match ← expected plans u with
-            | some e => unless ← same e nt do ok := false
-            | none => ok := false
+          unless ← usesFit plans x nt do ok := false
       unless ok do
         plans := plans.erase x
         changed := true
@@ -284,10 +323,81 @@ where
         | a => a⟩
     | c => c
 
+open UniformUpdates in
+/-- A parameter of a precise array type (`Array Nat`) that every call site,
+partial applications included, passes a uniform array (`Array lcAny`):
+typically a closure capturing an updated column (`fun _ => d'.size`, lifted
+to `_lam_N d'`), whose capture would convert the column at every step
+(review C02R-02). It becomes uniform when, with that type, the
+declaration's body (after `uniformUpdatesDecl`) uses it only where a uniform
+array is expected: its reads run on the uniform array, and no call site
+converts. Returns the new declarations, or `none` if nothing changed. -/
+def uniformParams (decls : Array (Decl .pure)) : MRetypeM (Option (Array (Decl .pure))) := do
+  let types := decls.map fun d => match d.value with
+    | .code c => (bodyOf d c).types.fold (fun m k v => m.insert k v) ({} : Types)
+    | _ => {}
+  let cs ← callSites decls types
+  let uniformArr := mkApp (mkConst ``Array) anyExpr
+  let mut out := decls
+  let mut any := false
+  for h : i in [:decls.size] do
+    let d := decls[i]
+    let .code _ := d.value | continue
+    for h' : j in [:d.params.size] do
+      let p := d.params[j]
+      let t := p.type.consumeMData
+      unless t.isAppOfArity ``Array 1 && !(← unknown t) do continue
+      if cs.blocked.contains (d.name, j) then continue
+      let some argTys := cs.args[(d.name, j)]? | continue
+      if argTys.isEmpty then continue
+      let mut ok := true
+      for argTy? in argTys do
+        if let some argTy := argTy? then
+          unless (← norm argTy) == (← norm uniformArr) do ok := false
+      unless ok do continue
+      -- Tentatively: the body with the parameter uniform, its updates and
+      -- reads planned; then every use of the parameter must expect it.
+      let params := d.params.set! j { p with type := uniformArr }
+      let d' := withSig d params (splitArrows d.type d.params.size).2
+      modify fun s => { s with sigs := s.sigs.insert d.name (declSig d') }
+      let d'' ← uniformUpdatesDecl d'
+      let .code c'' := d''.value | continue
+      let b := bodyOf d'' c''
+      let declRet := (splitArrows d''.type d''.params.size).2
+      let mut fits := true
+      for u in b.uses.getD p.fvarId #[] do
+        match ← expectedType b declRet {} u with
+        | some e => unless (← norm e) == (← norm uniformArr) do fits := false
+        | none => fits := false
+      -- Its own recursive calls pass a uniform array there too (call sites in
+      -- the declaration itself are not among `callSites`' arguments).
+      for (_, v) in b.values.toList do
+        if let .const g _ args _ := v then
+          if g == d.name then
+            match (args[j]? : Option (Arg .pure)) with
+            | some (.fvar y) =>
+              unless isPlaceholder b (.fvar y) do
+                unless (← norm (b.types.getD y anyExpr)) == (← norm uniformArr) do fits := false
+            | _ => pure ()
+      if fits then
+        out := out.set! i d''
+        any := true
+        break
+      else
+        modify fun s => { s with sigs := s.sigs.insert d.name (declSig d) }
+  return if any then some out else none
+
 /-- Registry entry point. -/
 def Opt.UniformUpdates.install (c : PassConfig) : PassConfig :=
   let prev := c.stage3.uniformUpdates
   { c with stage3 := { c.stage3 with uniformUpdates := fun decls => do
-      (← prev decls).mapM uniformUpdatesDecl } }
+      let mut decls ← (← prev decls).mapM uniformUpdatesDecl
+      -- Parameters that callers now pass uniform arrays (a few rounds: a
+      -- declaration retyped may pass its parameter on).
+      for _ in [:4] do
+        match ← uniformParams decls with
+        | some ds => decls := ds
+        | none => break
+      return decls } }
 
 end LeanToReussir
