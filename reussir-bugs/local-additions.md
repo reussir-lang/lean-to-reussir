@@ -1,7 +1,8 @@
 # Local additions to Reussir (not bugs)
 
-Two of the local patches fix no Reussir bug: they add something lean2rr's
-runtime or representation needs. They are kept with the bug fixes
+Two of the local patches belong to no entry: they fix no Reussir bug and
+improve no cost, but add something lean2rr's runtime or representation
+needs. They are kept with the other patches
 ([`README.md`](README.md#applying-the-patches)), applied in `./reussir`
 (`l2r-local` cc8e5aa5), and reviewed like them.
 

@@ -83,13 +83,14 @@ and `runtime/gen_tagarr.py` (`Array Nat`/`Array Int`).
      empty turns it off): rrc compiles each of the prelude's textures with
      its own rustc run, about 470 per program and most of rrc's time, and
      with Reussir patch 0066 it keeps their bitcode there and reuses it
-     (Reussir bug 35; an rrc without the patch ignores the variable). Its
-     key covers the texture, the `rustc-native` script (whose text also
-     names lean-runtime's build), rustc's options and every library in the
-     `--polyffi-libdir` directories, so a change to leanrt or lean-runtime
-     only makes new entries. Old entries are never removed: delete the
-     directory to reclaim the space. rrc checks entries for damage, not
-     for tampering: the directory must be one only you can write.
+     (Reussir issue 35, a cost; an rrc without the patch ignores the
+     variable). Its key covers the texture, the `rustc-native` script (whose
+     text also names lean-runtime's build), rustc's options and every
+     library in the `--polyffi-libdir` directories, so a change to leanrt or
+     lean-runtime only makes new entries. Old entries are never removed:
+     delete the directory to reclaim the space. rrc checks entries for
+     damage, not for tampering: the directory must be one only you can
+     write.
 
 ### The shared crate lean-runtime
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Bug 25: write a .rr whose copy of a [value] record expands exponentially.
+"""Issue 25 (cost): write a .rr whose copy of a [value] record expands
+exponentially.
 
     bug25-value-record-dag.py K OUT.rr
 

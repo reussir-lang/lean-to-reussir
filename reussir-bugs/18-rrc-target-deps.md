@@ -27,7 +27,7 @@ failure itself needs a fresh build directory:
 static library MLIRReussirInstrumentNonlinearFFI`. The check script prints
 `REPRODUCES rrc-build does not depend on
 libMLIRReussirInstrumentNonlinearFFI.a, which build.rs links`. On the final
-stack: `bug 18   FIXED       rrc-build depends on
+stack: `issue 18   FIXED       rrc-build depends on
 libMLIRReussirInstrumentNonlinearFFI.a`.
 
 ## Cause
@@ -85,7 +85,7 @@ the same list, as this rule requires (review RV8C-02).
 before, cargo failed as above; with the patch rrc builds and links, and the
 ninja edge of `rrc-build` depends on all four archives (the author's build
 logs, before and after, local notes).
-`run.sh` on the final stack: `bug 18   FIXED`. No lit test (a build-system
+`run.sh` on the final stack: `issue 18   FIXED`. No lit test (a build-system
 change).
 
 **Review.** Round 7, `p22` (local review notes):

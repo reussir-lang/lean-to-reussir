@@ -1,10 +1,16 @@
 # 10. Closure devirtualization prints result types exponentially
 
+**Kind:** cost (build time). Not a bug: rrc's output is correct; the
+exponential type printing can make large builds infeasible (time or
+memory), and patch 0024 is an optimization.
+
 ## Summary
 
-**Kind:** bug (build time). **Status:** patched (0024), applied in
-`./reussir` (`l2r-local` cc8e5aa5); lean2rr also works around it (it
-passes `--no-closure-wpd`).
+**Kind:** cost (build time; the audit's first verdict was bug (build
+time), reclassified on 2026-10-05 because the output is correct).
+**Status:** patched (0024, an optimization), applied in `./reussir`
+(`l2r-local` cc8e5aa5); lean2rr also works around it (it passes
+`--no-closure-wpd`).
 
 With `-O aggressive`, rrc's closure devirtualization computes a type id for
 each closure result type by printing the type to a string, uncached, and
@@ -36,12 +42,12 @@ devirtualization, and growing linearly with K.
 | 20 | 24 s, 250 MB | 0.7-0.8 s |
 | 22 | 89 s, 730 MB | 0.7 s |
 
-`run.sh` on the final stack: `bug 10   FIXED       K = 20: 2.5 s with
+`run.sh` on the final stack: `issue 10   FIXED       K = 20: 2.5 s with
 closure devirtualization, 2.1 s with --no-closure-wpd   [-O aggressive]`
 (loaded machine); K = 22 builds in 0.4 s either way.
 
 The same exponential text appears in `rrc --emit mlir`, which prints every
-type with the same rule ([bug 32](32-emit-mlir-size.md)); 0024 does not
+type with the same rule ([issue 32](32-emit-mlir-size.md)); 0024 does not
 change that printer.
 
 Sizes that hit the limits (lean2rr outputs before the workaround, rrc to an
@@ -75,7 +81,7 @@ benchmarks measured the same with and without it, within noise (lean2rr
 dispatches its function values itself), so it costs nothing measurable.
 Fewer and smaller types would shrink the printed text, but the text is
 exponential in nesting either way, and the towers that hit this also hit
-[bug 20](20-statet-tower.md); with both worked around the towers of the
+[issue 20](20-statet-tower.md); with both worked around the towers of the
 adversarial rounds build in 15 s to 2.5 minutes. lean2rr keeps passing the
 flag with 0024 applied (README policy: workarounds stay, so that lean2rr
 also works with an unpatched Reussir); it costs nothing measurable.
@@ -134,7 +140,7 @@ devirtualization too; the comments state this limit.
 - The object files of the repro at K = 12 are identical with and without
   the patch; the LLVM IR of Reussir's frontend tests is identical after
   renaming the ids in order of appearance.
-- `run.sh` on the final stack: `bug 10   FIXED` (above).
+- `run.sh` on the final stack: `issue 10   FIXED` (above).
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed.
 

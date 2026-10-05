@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bug 11: write a .rr whose call graph makes MLIR's SCCP superlinear.
+"""Issue 11 (cost): write a .rr whose call graph makes MLIR's SCCP superlinear.
 
     bug11-sccp-call-graph.py N OUT.rr
 

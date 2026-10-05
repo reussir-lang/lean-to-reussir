@@ -3,7 +3,7 @@
 
     bug31-deep-expression.py N DEPTH OUT.rr
 
-`chain` adds N calls (a left-nested `+` tree N deep, the shape of bug 11's
+`chain` adds N calls (a left-nested `+` tree N deep, the shape of issue 11's
 generator at large N) and `parens` wraps a literal in DEPTH parentheses.
 The parser grows its own stack, but the elaborator (Elaborator::infer_expr
 and infer_binop, crates/reussir-core/src/semi/check.rs) recursed on the

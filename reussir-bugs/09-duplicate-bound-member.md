@@ -55,7 +55,7 @@ fn f(x : T) -> T { match x { T::N(a, l, r) => second(x, T::N { a, l, l }), T::L 
 prints a wrong checksum in about half of the runs: `882` instead of `2432`
 at `-O aggressive`, garbage at `-O none`; ASan reports a heap use after
 free.) `run.sh` printed
-`bug 09   REPRODUCES  use after free: SIGSEGV, expected 0`.
+`issue 09   REPRODUCES  use after free: SIGSEGV, expected 0`.
 
 ## Cause
 
@@ -141,7 +141,7 @@ field used twice or stored in a dead value.
 Patch file
 [`patches/0009-l2r-local-bug-9-fuse-an-arm-s-retains-only-when-the-.patch`](patches/0009-l2r-local-bug-9-fuse-an-arm-s-retains-only-when-the-.patch)
 (`l2r-local` commit `e13c2e2c`, applied in `./reussir`; `l2r-local` head cc8e5aa5). It needs 0007: its second hunk calls
-`consumesFusedMember`, which 0007 adds ([bug 7](07-phantom-reuse-donor.md)).
+`consumesFusedMember`, which 0007 adds ([issue 7](07-phantom-reuse-donor.md)).
 (The file applies on ef922049 without 0007, but does not compile there.)
 
 **The fix.** Two hunks in `fuseArm`. The first binds each member once and
@@ -221,14 +221,14 @@ the same review, and is fixed the same way.
   generator with inlinable droppers, all correct and ASan-clean. It also
   found bug 14 in unpatched code (R2-2, also generator seed 5077).
 - Round 3 checked the revised 0009 together with the revised 0007: the
-  targeted attacks listed under bug 7's verification and fuzzing with ASan
+  targeted attacks listed under issue 7's verification and fuzzing with ASan
   (712 + 195 programs). It found no failure, and 25 programs that fail
   with unpatched rrc pass.
 - FIXED (`0`) on the round-2 stack and with the revised 0007/0009. `run.sh`
   on the patched build:
 
-      bug 09   FIXED       prints 0 (no wrong result in 1000 runs)   [lean2rr's flags]
-      bug 14   FIXED       prints 0 (no wrong result in 1000 runs)   [lean2rr's flags]
+      issue 09   FIXED       prints 0 (no wrong result in 1000 runs)   [lean2rr's flags]
+      issue 14   FIXED       prints 0 (no wrong result in 1000 runs)   [lean2rr's flags]
 
   On the round-2 stack, with the first 0009, bug 14 still crashed.
 

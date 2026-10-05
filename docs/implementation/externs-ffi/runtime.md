@@ -388,7 +388,7 @@ Paths are relative to the repository root.
   rrc compiles textures with adds the same, and its text names
   lean-runtime's build (its digest: rrc's texture cache keys on the
   script's text, and cargo's rlibs are in no `--polyffi-libdir`
-  directory; Reussir bug 35); the link passes lean-runtime's rlibs after
+  directory; Reussir issue 35, a cost); the link passes lean-runtime's rlibs after
   `libleanrt.rlib` and before GMP, those of the packages its normal
   dependencies reach, in the order of its dependency graph (`cargo
   metadata`: dependents first; build-script dependencies left out; review

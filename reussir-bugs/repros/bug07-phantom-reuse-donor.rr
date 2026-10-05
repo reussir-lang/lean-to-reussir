@@ -1,6 +1,6 @@
-// Bug 7: TokenReuse picks a decrement that can never free as the donor for
-// a new cell, so the construction allocates and the cell that really became
-// free is freed.
+// Issue 7 (missed optimization, not a bug): TokenReuse picks a decrement that
+// can never free as the donor for a new cell, so the construction allocates
+// and the cell that really became free is freed.
 // ins returns the matched node t when the key is present. On the paths that
 // rebuild a node, t's children l and r were retained (t stays live on the
 // equal-key path) and are released again; those releases (count >= 2, they

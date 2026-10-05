@@ -1,7 +1,10 @@
 # Reussir limitations that shape lean2rr's output
 
-Not bugs: documented Reussir behaviour, or properties of its FFI and
-LLVM pipeline, that lean2rr works with. Plan
+Not bugs: documented Reussir behaviour (issue 3, intended), a missed
+optimization (issue 7), a missing feature (issue 13), or properties of its
+FFI and LLVM pipeline, that lean2rr works with. In each case rrc's output
+is correct; a local patch for one of these issues is an optimization or a
+feature, not a fix. Plan
 [§9](../../translation-plan.md#9-open-items) has the probe results and the
 candidate Reussir requests. Paths: `lean2rr/LeanToReussir/` for lean2rr's
 files, `runtime/` and `scripts/` from the repository root.
@@ -86,7 +89,7 @@ files, `runtime/` and `scripts/` from the repository root.
   [../ownership.md](../ownership.md#reference-sets-store-the-new-value-before-releasing-the-old-one).
 - **Remove only if:** see the linked entry.
 
-### Rust allocations are 16-aligned (bug 3, intended)
+### Rust allocations are 16-aligned (issue 3, intended)
 
 - **What:** The runtime allocates strings, arrays and big numbers with
   `mi_malloc`/`mi_realloc` directly, not through Rust's global allocator.
@@ -98,6 +101,35 @@ files, `runtime/` and `scripts/` from the repository root.
   98f27d2).
 - **Where:** `runtime/leanrt/src/alloc.rs`.
 - **Remove only if:** never.
+
+### Token reuse picks decrements that never free (issue 7, missed optimization)
+
+- **What:** The optional passes `lazy-fields` and `sink-proj` bind fields
+  where they are used, so a value that stays live has no retained fields
+  whose releases look like donors; `nullary-scrutinee` rebuilds a matched
+  constructor without fields in its arm, so the scrutinee is not kept
+  alive by a use there.
+- **Why:** A missed optimization, not a bug: rrc's output is correct, only
+  slower (allocations where a cell could be reused). Patch 0007 (an
+  optimization, applied) covers some shapes (`UInt64` keys) but not a call
+  before the branch (`Nat` and `String` comparisons), which the passes do
+  ([07-phantom-reuse-donor.md](../../../reussir-bugs/07-phantom-reuse-donor.md)).
+  0007 stays because 0009 uses its helper.
+- **Where:** [../control-flow/cases.md](../control-flow/cases.md).
+- **Remove only if:** Reussir's token reuse handles the call-before-branch
+  shape; then measure with the passes off.
+
+### Drop glue recursed once per cell (issue 13, missing feature)
+
+- **What:** The runtime frees its containers through the per-thread
+  pending stack that patch 0014 adds (`reussir_rt::drop`), and needs it to
+  build; 0013 and 0015 complete it.
+- **Why:** A missing feature, not a bug: Reussir never promised frees of
+  bounded depth (its drop glue recurses, as Rust's does), and Lean frees
+  iteratively. Patches 0013 to 0015 (applied) add the feature
+  ([13-long-list-drop.md](../../../reussir-bugs/13-long-list-drop.md)).
+- **Where:** [../ownership.md](../ownership.md#containers-free-through-the-threads-pending-stack-in-leans-order).
+- **Remove only if:** never (required).
 
 ### Each texture is its own crate
 
@@ -129,10 +161,10 @@ files, `runtime/` and `scripts/` from the repository root.
 
 - **What:** `-O aggressive` by default; `--reuse-across-call` on unless
   `--no-reuse-across-call` (with the bug-4 retry); `--no-pack-record-members`
-  (bug 2); `--no-closure-wpd` (bug 10); `L2R_RRC_FLAGS` appends flags for
-  experiments. rrc runs with `REUSSIR_FFI_CACHE_DIR` set, for patch
-  0066's texture cache (bug 35,
-  [build-time.md](build-time.md#bug-35-every-texture-is-compiled-again-on-every-build)).
+  (bug 2); `--no-closure-wpd` (issue 10, a cost); `L2R_RRC_FLAGS` appends
+  flags for experiments. rrc runs with `REUSSIR_FFI_CACHE_DIR` set, for
+  patch 0066's texture cache (issue 35, a cost,
+  [build-time.md](build-time.md#issue-35-cost-every-texture-is-compiled-again-on-every-build)).
   `leanrt` is built per Reussir checkout (`L2R_REUSSIR`) and cached by a
   hash of its sources, under a file lock for concurrent drivers; rustc
   runs in the crate's directory, so a rebuild gives the same bytes from

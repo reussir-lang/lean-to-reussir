@@ -3,8 +3,9 @@
 Status as of 2026-10-04 (`dev`, Lean v4.34.0). This is a plain-language overview
 for someone who knows Rust but not Lean. The full rules are in
 [`translation-plan.md`](translation-plan.md); the runtime is described in
-[`../runtime/README.md`](../runtime/README.md); the Reussir bugs met on the
-way are in [`../reussir-bugs/`](../reussir-bugs/README.md). The implementation's
+[`../runtime/README.md`](../runtime/README.md); the Reussir issues met on
+the way (bugs, costs and the others) are in
+[`../reussir-bugs/`](../reussir-bugs/README.md). The implementation's
 tricks and special cases, each with its reason, its place in the code and
 what would break without it, are cataloged in
 [`implementation/`](implementation/README.md). An illustrated overview of
@@ -540,25 +541,23 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches
-(branch `l2r-local` of the checkout in `./reussir`, head `cc8e5aa5`:
-Reussir `ef922049` plus 35 patches; the patches are in
+(branch `l2r-local` of the checkout in `./reussir`, head `d79f8b70`:
+Reussir `ef922049` plus 37 patches; the patches are in
 [`../reussir-bugs/patches/`](../reussir-bugs/patches/), each explained in
-depth in the file of its bug, indexed in
+depth in the file of its issue, indexed in
 [`../reussir-bugs/README.md`](../reussir-bugs/README.md)).
 They are local only, never submitted upstream, and each is reviewed
 adversarially.
 An independent audit checked whether each problem is really a Reussir
-bug. Of the 35 documented problems, 30 are patched in `l2r-local` (33
-patches), 2 have a patch not applied yet (bug 34, patch 0065: `rrc --emit
-executable` compiled static code into a PIE, so lean2rr's binaries carried
-text relocations; lean2rr's driver now passes `--relocation-mode pic`; and
-bug 35, patch 0066: rrc compiled every FFI texture with rustc again on every
-build, about 13 s of a small program's 16 s; the patch caches the bitcode,
-and lean2rr's driver gives rrc the cache directory), and
-3 are documented only; two more patches add
-features lean2rr needs:
+bug. The 35 documented problems are numbered issues; their kind says what
+each is: 20 are bugs (erroneous behaviour), 11 are costs, 1 is a missed
+optimization, 2 are missing features and 1 is intended behaviour. Only
+the bugs are wrong: the others have correct output, and their patches are
+optimizations or features, not fixes. 32 issues are patched in
+`l2r-local` (35 patches, all applied; 0065 and 0066 since 2026-10-04) and
+3 are documented only; two more patches add features lean2rr needs:
 
-- **Real bugs fixed (21 patches):** wrong values after in-place reuse of a
+- **Real bugs fixed (19 patches):** wrong values after in-place reuse of a
   structure or variant cell (bug 2), `[value]` enum bytes lost (1), a
   layout mismatch that overflowed cells (8), compiler crashes (4, 5, 31),
   use-after-free (9, 14), the parser mixing up subtrees on very large
@@ -567,30 +566,39 @@ features lean2rr needs:
   launder (26) and from a uniqueness analysis that proved a shared value
   unique (28), a texture placeholder dropped (21), non-reproducible builds
   (24), MLIR dumps that did not parse back (29), MLIR types whose trailing
-  text was silently dropped (33), Reussir's own build (18), and build time
-  made quadratic by Reussir's own code (10, 11b, 23).
+  text was silently dropped (33), Reussir's own build (18), and executables
+  linked with text relocations (34: lean2rr's driver also passes
+  `--relocation-mode pic`).
 - **A real bug with a flag workaround:** a static cell freed after 2^32
   references (6). Another nullary-constructor encoding avoids it; the patch
   keeps the default encoding for speed.
-- **Build-time costs with a small fix (6 patches):** interprocedural SCCP
-  (11), reuse across calls in deep matches (16), a straight-line `Nat`
+- **Build-time costs, not bugs, with a small optimization (10 patches):**
+  type ids printed exponentially by closure devirtualization (10),
+  interprocedural SCCP (11) and Reussir's own quadratic glue lookups
+  (11b), reuse across calls in deep matches (16), a straight-line `Nat`
   function (17), the inliner on lean2rr's conversion code (20), wildcard
-  arms over wide enums (22), the call lowering's symbol lookups (30).
-- **An optimization, not a bug:** token reuse picking a cell that never
-  frees (7). It stays because the use-after-free fix (9) builds on it.
-- **A missing feature, implemented locally:** freeing long or deep
+  arms over wide enums (22), the polymorphic-FFI modules linked one call
+  each (23), the call lowering's symbol lookups (30), and rustc run again
+  for every FFI texture on every build (35: about 13 s of a small
+  program's 16 s; the patch caches the bitcode, and lean2rr's driver gives
+  rrc the cache directory). The superlinear ones can make large builds
+  infeasible; the output is correct either way.
+- **A missed optimization, not a bug:** token reuse picking a cell that
+  never frees (7). Its optimization patch stays because the use-after-free
+  fix (9) builds on it.
+- **A missing feature, not a bug, implemented locally:** freeing long or deep
   structures without recursion, in Lean's order (13, three patches;
   lean2rr's runtime needs it), and the same for a member behind
   `Nullable` (27).
-- **Local additions (no bug):** a hook at the end of a drain that lean2rr's
+- **Local additions (no entry):** a hook at the end of a drain that lean2rr's
   runtime uses for promises released inside a free (0040), and opaque
   handles that may be a tagged number instead of a pointer (0050), so that
   `Nat` and `Int` are one word with no allocation for small values
   (lean2rr's prelude needs it).
-- **Documented only:** Rust allocations on mimalloc's aligned path
-  (3, intended), and two costs whose fix would be a redesign: the inline
-  expansion of copies of `[value]` records shared in a DAG (25) and the
-  size of `--emit mlir` dumps (32).
+- **Documented only, not bugs:** Rust allocations on mimalloc's aligned
+  path (3, intended), and two costs whose removal would be a redesign: the
+  inline expansion of copies of `[value]` records shared in a DAG (25) and
+  the size of `--emit mlir` dumps (32).
 
 Every Reussir problem met so far is documented with a reproducer,
 including those lean2rr works around and those the audit classified as

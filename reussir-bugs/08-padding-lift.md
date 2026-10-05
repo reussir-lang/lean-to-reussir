@@ -32,9 +32,9 @@ fn main() { say(sum(build(100000, L::Nil{}), 0)); }
 **Expected.** `2550200000`.
 
 **Actual on ef922049.** SIGSEGV (a heap overflow). With the default
-(packed) layout it prints `2550200000`. `run.sh` printed `bug 08
+(packed) layout it prints `2550200000`. `run.sh` printed `issue 08
 REPRODUCES  SIGSEGV (cells overflowed), expected 2550200000`; on the final
-stack it prints `bug 08   FIXED       prints 2550200000   [-O aggressive
+stack it prints `issue 08   FIXED       prints 2550200000   [-O aggressive
 --no-pack-record-members]`.
 
 ## Cause
@@ -108,7 +108,7 @@ never pads between them, so it is untouched.
   `--no-pack-record-members`, the LLVM types checked with FileCheck, built
   and run at `-O default` and `-O aggressive`. It fails without the
   patch.
-- `run.sh` on the final stack: `bug 08   FIXED       prints 2550200000`.
+- `run.sh` on the final stack: `issue 08   FIXED       prints 2550200000`.
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed.
 

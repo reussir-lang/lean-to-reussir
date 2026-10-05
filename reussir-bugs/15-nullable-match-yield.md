@@ -36,9 +36,9 @@ fn g(nb : Nullable<B>, x : T) -> T {
     error: 'reussir.scf.yield' op parent operation expected a value, but nothing is yielded
     error: lowering pipeline failed: RunPass
 
-`run.sh` printed `bug 15   REPRODUCES  rrc error: parent operation expected
+`run.sh` printed `issue 15   REPRODUCES  rrc error: parent operation expected
 a value, but nothing is yielded`; on the final stack it prints
-`bug 15   FIXED       compiles, prints 1   [-O aggressive]`.
+`issue 15   FIXED       compiles, prints 1   [-O aggressive]`.
 
 ## Cause
 
@@ -148,7 +148,7 @@ with another message). No generated code changes.
   dispatches with different results) and
   `tests/integration/frontend/nullable_match_counted_yield` (both arm
   orders, run end to end with a C driver).
-- `run.sh` on the final stack: `bug 15   FIXED       compiles, prints 1`.
+- `run.sh` on the final stack: `issue 15   FIXED       compiles, prints 1`.
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed.
 

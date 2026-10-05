@@ -328,7 +328,7 @@ when the prelude lacks one, rrc reports an unknown function.</p>
 <li><strong>Literal tables.</strong> A run of 32 or more small <code>Nat</code> literals pushed onto
   an <code>Array Nat</code> becomes one call that reads a generated table.</li>
 <li><strong>Outline.</strong> rrc's analyses grow faster than linearly with nesting depth
-  and with straight-line length (Reussir bugs 16 and 17). So a tail path 32
+  and with straight-line length (Reussir issues 16 and 17, costs). So a tail path 32
   matches deep or 256 <code>let</code>s long is cut into functions. A recursive function
   keeps its loops: the cut part returns a step value, and the function makes
   the tail call itself.</li>

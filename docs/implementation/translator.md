@@ -105,7 +105,7 @@ relative to `lean2rr/` unless they start with `scripts/`.
   need `Box`; `--no-check` turns off Lean's checker between Stage 2's
   passes. Environment switches: `L2R_NO_OUTLINE` and
   `L2R_NO_INLINE_ANCHORS` turn off two build-time workarounds (for the
-  repros of Reussir bugs 16, 17 and 20), `L2R_ALLOW_MISSING_EXTERNS`
+  repros of Reussir issues 16, 17 and 20, costs), `L2R_ALLOW_MISSING_EXTERNS`
   turns the rejection of a program that reaches an extern lean2rr cannot
   serve into a warning (the generated program then does not build: a
   refused extern of the program is called as `l2r_refused_<declaration>`,
@@ -117,8 +117,8 @@ relative to `lean2rr/` unless they start with `scripts/`.
   `L2R_RUSTC`,
   `L2R_GMP`, `L2R_LEAN2RR`, `L2R_DISABLE_OPTS`, `L2R_ENABLE_OPTS`,
   `L2R_RRC_FLAGS`, and `REUSSIR_FFI_CACHE_DIR`, which it sets for rrc
-  unless given (rrc's texture cache, Reussir bug 35:
-  [reussir-workarounds/build-time.md](reussir-workarounds/build-time.md#bug-35-every-texture-is-compiled-again-on-every-build)).
+  unless given (rrc's texture cache, Reussir issue 35, a cost:
+  [reussir-workarounds/build-time.md](reussir-workarounds/build-time.md#issue-35-cost-every-texture-is-compiled-again-on-every-build)).
 - **Why:** Debugging aids; the switches keep the repros meaningful while
   the workarounds stay on by default.
 - **Where:** `Main.lean`: `pipeline`, `parseArgs`, `usage`;

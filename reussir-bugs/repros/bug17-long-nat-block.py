@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Bug 17: write a Lean program with a straight-line block of N lets on Nat.
+"""Issue 17 (cost): write a Lean program with a straight-line block of N lets
+on Nat.
 
     bug17-long-nat-block.py N OUT.lean [Nat|UInt64]
 
 `longDo` computes x1 .. xN, each from the previous one, and calls itself
 three times. `Nat` was a two-arm [value] enum in lean2rr's output (a small
 number or a big one) when the numbers below were measured; it is now one
-tagged word (patch 0050) whose inline fast paths branch on small or big. lean2rr cuts long tail paths (bug 17 workaround, also
-in recursive functions); build with L2R_NO_OUTLINE=1 in lean2rr's
-environment (as run.sh does) so that this body reaches rrc whole. rrc's
-memory grows about as N^2 on Nat and stays small on UInt64.
+tagged word (patch 0050) whose inline fast paths branch on small or big.
+lean2rr cuts long tail paths (issue 17 workaround, also in recursive
+functions); build with L2R_NO_OUTLINE=1 in lean2rr's environment (as run.sh
+does) so that this body reaches rrc whole. rrc's memory grows about as N^2 on
+Nat and stays small on UInt64.
 
 Output: one number, the same as native Lean's. Measured on this machine,
 rrc only (Reussir ef922049): N = 250: 21 s, 417 MB; N = 500: 32 s, 1.16 GB;

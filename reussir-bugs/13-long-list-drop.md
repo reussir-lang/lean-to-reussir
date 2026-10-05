@@ -1,5 +1,10 @@
 # 13. Drop glue recurses once per cell of a long list
 
+**Kind:** missing feature. Not a bug: Reussir never promised frees of
+bounded depth (its drop glue recurses by design, as Rust's does). Patches
+0013 to 0015 (0014 and 0015 are part 13b) add the feature; lean2rr's
+runtime needs 0014.
+
 ## Summary
 
 **Kind:** missing feature. **Status:** patched (0013 and 0014; 0015 makes
@@ -26,14 +31,14 @@ Native Lean frees iteratively.
   function, `drop_and_free`. It frees the cell first, then releases the
   member that continues the chain as its very last action, a tail call
   that LLVM turns into a loop.
-- **0014** (bug 13b) handles what 0013 leaves recursive: a value deep along
+- **0014** (issue 13b) handles what 0013 leaves recursive: a value deep along
   a member the loop does not follow (a left-deep tree with fresh right
   children, a rose tree). Like Lean's `lean_del`, it keeps one stack of
   pending releases per thread in Reussir's runtime; inside drop glue, a
   record member whose count is 1 is pushed onto it instead of freed by a
   call. It replaces 0013's choice of chain members; the loop part remains.
   lean2rr's runtime frees its containers through the same stack.
-- **0015** (bug 13b, runtime only) makes 0014's stack cheaper, with the
+- **0015** (issue 13b, runtime only) makes 0014's stack cheaper, with the
   same behaviour.
 
 ## Symptom and repro
@@ -107,9 +112,9 @@ def main (args : List String) : IO Unit := do
   The extra 300 MiB on ef922049 is the stack: 10 million frames of 32
   bytes stay resident.
 - `run.sh` printed, for each plain shape,
-  `bug 13   REPRODUCES  list, 1M cells, 8 MB stack: overflowed its stack (SIGABRT)`
+  `issue 13   REPRODUCES  list, 1M cells, 8 MB stack: overflowed its stack (SIGABRT)`
   (and `snoc`, `lspine`), and for the Lean repro
-  `bug 13   REPRODUCES  lean2rr List.replicate, 40M cells, 1 GiB stack: Stack overflow (SIGABRT)`
+  `issue 13   REPRODUCES  lean2rr List.replicate, 40M cells, 1 GiB stack: Stack overflow (SIGABRT)`
   (and `snoc`).
 
 ## Cause
@@ -316,7 +321,7 @@ Lean cases at 40M.
   passed, and the Lean `LongDrop` cases matched native. Binarytrees was
   within noise (+2% on one core type) and Deriv 5% faster (R3-1).
 - `run.sh` on the patched build: all three plain shapes print
-  `bug 13   FIXED       list, 1M cells, 8 MB stack: prints 1000000` (and
+  `issue 13   FIXED       list, 1M cells, 8 MB stack: prints 1000000` (and
   `snoc`, `lspine`). Both Lean cases are FIXED at 40M cells from 0013
   (extended) on.
 
@@ -324,7 +329,7 @@ Lean cases at 40M.
 in a loop, not one stack frame per cell, at native speed and memory or
 better (table above).
 
-### 0014: a stack of pending releases (bug 13b)
+### 0014: a stack of pending releases (issue 13b)
 
 Patch file
 [`patches/0014-l2r-local-bug-13b-free-cells-deep-through-records-wi.patch`](patches/0014-l2r-local-bug-13b-free-cells-deep-through-records-wi.patch)
@@ -359,7 +364,7 @@ objects to free (`lean_del_core`'s to-do list). lean2rr's runtime cannot
 reach this recursion itself: records release records directly in the
 glue.
 
-The bug 13 repros in `repros/` are chains that 0013 already fixes. The 13b
+The issue 13 repros in `repros/` are chains that 0013 already fixes. The 13b
 case is lean2rr's runtime test `tests/runtime/RtDropGlue.lean`, run with
 `LEAN_STACK_SIZE_KB=8192`:
 
@@ -496,7 +501,7 @@ new run, a 24-byte `Work` entry, instead of linking when:
 - Reussir's lit test `frontend/drop_long_list.rr` gains the left-deep tree
   and the rose tree (above).
 
-Here is `drop_and_free_in_drain::<T>` for the bug 13 repro's
+Here is `drop_and_free_in_drain::<T>` for the issue 13 repro's
 `T = N(u64, T, T)`, from the current build (abbreviated LLVM IR, `-O
 aggressive`). The left child is deferred, and the right child is the
 loop:
@@ -613,7 +618,7 @@ a drain would take a runtime call more on each one. Not done (plan §10).
   bug 6, differential fuzzing, the lean2rr runtime suite (119/119,
   including `RtDropGlue` and `RtDropOrderRec`), the corpus oracle check
   (54/54), and Reussir's benchmark suite.
-- `run.sh` on the patched build prints FIXED for the three plain bug 13
+- `run.sh` on the patched build prints FIXED for the three plain issue 13
   shapes (as with 0013). The 13b shapes are checked by `RtDropGlue` and the
   lit test.
 
@@ -640,7 +645,7 @@ a drain would take a runtime call more on each one. Not done (plan §10).
   or closures, atomic spines (lean2rr emits none), and everything at
   `-O none` (no tail-call optimization).
 
-### 0015: a cheaper pending stack, same behaviour (bug 13b, runtime)
+### 0015: a cheaper pending stack, same behaviour (issue 13b, runtime)
 
 Patch file
 [`patches/0015-l2r-local-bug-13b-runtime-cheaper-pending-stack-same.patch`](patches/0015-l2r-local-bug-13b-runtime-cheaper-pending-stack-same.patch)
@@ -791,7 +796,7 @@ thread.
   offset limits, ASan and LSan builds, the lean2rr runtime suite, and
   adversarial lean2rr programs (266 record types in one free, 300k-deep
   chains with handles and tasks). Everything was identical.
-- `run.sh` has no separate line for this patch. The bug 13 lines are
+- `run.sh` has no separate line for this patch. The issue 13 lines are
   unchanged (FIXED) on the current build, which includes 0015.
 
 **Result**, from the patch message (user cycles over lean2rr without

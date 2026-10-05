@@ -1,19 +1,24 @@
 # 27. Releasing a chain linked through `Nullable` recurses once per link
 
+**Kind:** missing feature (a gap in [issue 13](13-long-list-drop.md)'s
+bounded-depth frees). Not a bug: Reussir never promised frees of bounded
+depth; patch 0027 extends the feature of issue 13's patches to `Nullable`
+members.
+
 ## Summary
 
 **Kind:** missing feature (the bounded-depth frees of
-[bug 13](13-long-list-drop.md) did not cover `Nullable` links). **Status:**
+[issue 13](13-long-list-drop.md) did not cover `Nullable` links). **Status:**
 patched (0027), applied in `./reussir` (`l2r-local` cc8e5aa5); does not
 affect lean2rr (it does not use `Nullable`).
 
-**Verdict: a gap in bug 13's patches, not caused by them.** With patches
+**Verdict: a gap in issue 13's patches, not caused by them.** With patches
 0013-0015, drop glue releases a member box of a shared record through the
 thread's pending stack, so a long chain is freed in a loop. A member of type
 `Nullable<shared record>` was released by a plain decrement, which recurses
 into the next link's glue: a chain linked through `Nullable` takes a stack
 frame (or more) per link and overflows at a million links. Reussir without
-the local patches recurses for every chain ([bug 13](13-long-list-drop.md)),
+the local patches recurses for every chain ([issue 13](13-long-list-drop.md)),
 so the baseline crashes too. Found by the review of agent B's patches
 (rv7/p22, round 2, finding RV7P-05).
 
@@ -52,7 +57,7 @@ released.
 lean2rr's flags. The same chain linked through a plain shared enum
 (`enum C { End, Link(A, u64) }`) frees 3,000,000 links. A chain of
 `Nullable` links held in a `Cell` crashes the same way. `run.sh` prints
-`bug 27   REPRODUCES  1M links through Nullable, 8 MB stack: overflowed
+`issue 27   REPRODUCES  1M links through Nullable, 8 MB stack: overflowed
 its stack (SIGABRT)`.
 
 ## Cause
@@ -131,7 +136,7 @@ adds the `Nullable` case.
   checked to defer `Os` and release `Ob` after the free, like that of
   `{ Os, Ob }`. The generated code of Reussir's other frontend tests changes
   only for `cell_e2e` (a `Cell<Nullable<..>>` in a shared record).
-- `run.sh`: `bug 27   FIXED       1M links through Nullable, 8 MB stack:
+- `run.sh`: `issue 27   FIXED       1M links through Nullable, 8 MB stack:
   prints 1   [-O default]`.
 
 **Review.** The gap was found by review rv7/p22, round 2 (RV7P-05,
@@ -154,4 +159,4 @@ record>` member like a plain one: `rewriteDropNullable`
 (`AcquireDropExpansion.cpp`) releases its box with a plain `rc.dec`, so a
 chain linked through `Nullable` recurses once per link (a million links
 overflow an 8 MB stack). Without bounded-depth frees every chain recurses
-(bug 13).
+(issue 13).

@@ -38,7 +38,7 @@ a structure `Holder(Vec<u64>, u64)` whose first member is an opaque
     error: a.mlir: failed to parse MLIR module
 
 (`reussir-opt a.mlir` fails the same way.) `run.sh` prints
-`bug 29   REPRODUCES  the --emit mlir dump does not parse: rc members must
+`issue 29   REPRODUCES  the --emit mlir dump does not parse: rc members must
 be atomic shared links`.
 
 Every lean2rr program hits it: strings and arrays are FFI objects, and they
@@ -131,7 +131,7 @@ member with the `[field]` capability.
   hashes of the polymorphic-FFI crates (random per build).
 - Reussir's lit suite and lean2rr's runtime tests: as for
   [bug 28](28-unique-carrying-join.md).
-- `run.sh`: `bug 29   FIXED       the --emit mlir dump parses back and
+- `run.sh`: `issue 29   FIXED       the --emit mlir dump parses back and
   prints identically`.
 
 **Review.** Round RV8 (e)

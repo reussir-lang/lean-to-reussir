@@ -29,7 +29,7 @@ What lean2rr uses from Reussir, and how:
 | tagged opaque handles (local patch 0050) | one-word `Nat` and `Int` |
 | textures (`#[ffi(import)]` functions with a Rust body) | the prelude's calls into `leanrt`; inlined when compiled for the same CPU |
 | token reuse, `--reuse-across-call` | in-place updates, as Lean's reset/reuse |
-| `#[transform_anchor]` | keeps conversion functions out of Reussir's MLIR inliner (bug 20) |
+| `#[transform_anchor]` | keeps conversion functions out of Reussir's MLIR inliner (issue 20, a cost) |
 
 ## The local patch stack
 
@@ -44,37 +44,52 @@ Reussir `ef922049` plus {{v:patches_applied}} patches. The patch files are in
 - Every Reussir problem that lean2rr meets is documented, with a repro.
 - A real Reussir bug gets a small local patch, reviewed adversarially, even
   when lean2rr works around it or never triggers it.
-- A build-time cost from a fixable inefficiency gets a small patch too.
+- A build-time cost from an avoidable inefficiency gets a small patch too.
+  This patch is an optimization, not a fix.
 - Patches are local only: never pushed or submitted upstream.
 - lean2rr keeps its workarounds, so that it also works with an unpatched
   Reussir. The exception: the runtime needs patch 0014 to build.
 </div>
 
-**Patch 0065 (bug 34) is pending.** `rrc --emit executable` compiled static
-code into a position-independent executable, so every lean2rr build carried
-text relocations. The patch is reviewed (no defect) but not applied yet. The
-driver's workaround: it passes `--relocation-mode pic`, and every runtime
-test checks that the executable has no text relocations.
+**Patch 0065 (bug 34), applied since 2026-10-04.** `rrc --emit executable`
+compiled static code into a position-independent executable, so every
+lean2rr build carried text relocations. The patch is reviewed (no defect).
+The driver also keeps its workaround: it passes `--relocation-mode pic`,
+and every runtime test checks that the executable has no text relocations.
 
-**Patch 0066 (bug 35) is pending.** rrc compiles each Rust FFI snippet with
-its own rustc run, on every build. Every lean2rr program has about 470 of
-them, so this step takes most of rrc's time (about 13 s of 16 s for a small
-program). The patch keeps the compiled snippets in a cache directory, keyed
-by a digest of everything the output depends on, except the documented
-cases (3 s for the same program). The driver gives rrc the directory; an
-rrc without the patch ignores it. The review found a race (a library
-replaced during a build); it is fixed, and a second look checked the
-fix.
+**Patch 0066 (issue 35, a cost), applied since 2026-10-04.** rrc compiles
+each Rust FFI snippet with its own rustc run, on every build. Every lean2rr
+program has about 470 of them, so this step takes most of rrc's time
+(about 13 s of 16 s for a small program). This is not a bug: the output is
+correct. The patch is an optimization. It keeps the compiled snippets in a
+cache directory, keyed by a digest of everything the output depends on,
+except the documented cases (3 s for the same program). The driver gives
+rrc the directory; an rrc without the patch ignores it. The review found a
+race (a library replaced during a build); it is fixed, and a second look
+checked the fix.
 
 ## All entries
 
-{{v:bug_entries}} entries. Generated from the status table of
+{{v:bug_entries}} entries. Each entry is a numbered *issue*. Its kind (column
+*Kind*) tells what it is:
+
+- A *bug* is wrong behaviour: a crash, a wrong result, valid code that is
+  rejected, or a broken build.
+- A *cost* is correct but slow or big (build time, memory, run time). A
+  *missed optimization* is correct but slower than it can be. A *missing
+  feature* is something that Reussir does not promise but Lean needs. An
+  *intended* entry is documented behaviour.
+- Only a bug is wrong behaviour. For the other kinds the output is correct,
+  and a patch is an optimization or a feature, not a fix.
+
+Older text and commit messages say "bug NN" for every entry; read it as
+"issue NN". The table is generated from the status table of
 `reussir-bugs/README.md`; each number links to the entry's file, which has
 the repro, the cause in Reussir's source, and the patch explained.
 
 {{gen:patches}}
 
-## Two patches that fix no bug
+## Two patches without an entry
 
 [local-additions.md](repo:reussir-bugs/local-additions.md) describes them:
 
@@ -93,7 +108,7 @@ Each patch is reviewed adversarially: code review, differential fuzzing
 against an independent reference evaluator, ASan builds (Miri for the
 runtime patches), and lean2rr's runtime suite and corpus, in rounds until a
 round finds nothing. `reussir-bugs/repros/run.sh RRC_CHECKOUT` builds every
-repro on a given rrc and prints `REPRODUCES` or `FIXED` for each bug.
+repro on a given rrc and prints `REPRODUCES` or `FIXED` for each issue.
 
 ## Missing features that cost performance
 

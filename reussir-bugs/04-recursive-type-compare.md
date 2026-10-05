@@ -46,7 +46,7 @@ fn main() { say(get(conv(S1::A{V::C{1, L1::Nil{}}, num()}))); }
 
 **Actual on ef922049.** rrc dies with SIGSEGV (exit 139) and no message, at
 every `-O` level. `run.sh` printed
-`bug 04   REPRODUCES  rrc killed by SIGSEGV   [-O aggressive]`.
+`issue 04   REPRODUCES  rrc killed by SIGSEGV   [-O aggressive]`.
 
 In lean2rr this showed up as a user `MyList` next to `List`, with
 `MyList.toList` reusing cons cells under `--reuse-across-call`.
@@ -217,7 +217,7 @@ layout) gets no skip.
 - Differential fuzzing in every round, and lean2rr's `MyListP` (user list
   ↔ `List`, rose trees, pair swaps) against native Lean.
 - On the round-2 stack: FIXED (`1005`). `run.sh` on the patched build:
-  `bug 04   FIXED       compiles, prints 1005   [-O aggressive]`.
+  `issue 04   FIXED       compiles, prints 1005   [-O aggressive]`.
 
 **Effect on lean2rr.** Programs with a user type of the same shape as
 another recursive type, converting one into the other (`MyList.toList`, a

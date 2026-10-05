@@ -93,7 +93,7 @@ def rustc_wrapper(rlib, lr):
     build directory (per Reussir checkout).
 
     The script's text names lean-runtime's build (`lr.digest`): rrc's
-    texture cache (`REUSSIR_FFI_CACHE_DIR`, Reussir bug 35) hashes the
+    texture cache (`REUSSIR_FFI_CACHE_DIR`, Reussir issue 35) hashes the
     script's text and the libraries in the `--polyffi-libdir` directories,
     and cargo's build of lean-runtime puts its rlibs in none of them."""
     w = rlib.parent / "rustc-native"
@@ -160,7 +160,7 @@ def build_locked(out, stamp, outputs, digest, cmd, cwd, digest_after=None):
     `cwd` is the crate's directory, not the caller's: rustc records its
     working directory in the rlib's metadata, so a rebuild from another
     directory would give an rlib with other bytes, and rrc's texture cache
-    (Reussir bug 35), which hashes the rlibs, would miss on every texture.
+    (Reussir issue 35), which hashes the rlibs, would miss on every texture.
     The paths in `cmd` are absolute (so are the source paths rustc records,
     which panic messages show)."""
     out.mkdir(parents=True, exist_ok=True)
@@ -448,8 +448,8 @@ def main():
     env["L2R_SHIM_DIR"] = str(SHIM_DIR)
     # rrc compiles each of the prelude's textures with its own rustc run,
     # most of its time on a small program; this directory keeps the bitcode
-    # (Reussir bug 35, patch 0066; an rrc without the patch ignores the
-    # variable). rrc keys each entry by everything the bitcode depends on,
+    # (Reussir issue 35, a cost; patch 0066; an rrc without the patch ignores
+    # the variable). rrc keys each entry by everything the bitcode depends on,
     # the texture, rustc (here the rustc-native script, whose text names the
     # rlibs and the flags), its options and the libraries in the
     # --polyffi-libdir directories (leanrt's build directory among them), so

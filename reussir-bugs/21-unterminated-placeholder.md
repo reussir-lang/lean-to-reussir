@@ -47,7 +47,7 @@ a[:3] and b[:4]`, as native Lean prints.
 lean2rr (before its escape, below): `slice a3] and b[:4]`: the first `[:`,
 with no `:]` anywhere after it, loses its two characters, and the second
 survives only because the scan never looked at it. `run.sh` prints
-`bug 21   REPRODUCES` on the unpatched build.
+`issue 21   REPRODUCES` on the unpatched build.
 
 ## Cause
 
@@ -149,7 +149,7 @@ in which every `[:` is closed take the old path unchanged.
   in a later byte string (`b"x[:y"`, `b"z:]"`: an unknown key, kept as
   written, 4 * 10 + 3 = 43). The driver checks for 443. It exits 0 with
   the patch and 1 without it.
-- `run.sh`: `bug 21 FIXED` on the patched build (prints 4).
+- `run.sh`: `issue 21 FIXED` on the patched build (prints 4).
 - lean2rr's runtime test `tests/runtime/RtStrLitBracket.lean`: literals
   with `[:` and with `[::`, `[:` built by interpolation, `splitOn "[:"`,
   `replace "[:" "<>"`. Its output equals native Lean's (it passes with or

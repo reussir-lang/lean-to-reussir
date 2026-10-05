@@ -1,5 +1,8 @@
 # 25. Copying a `[value]` record of shared sub-records expands exponentially
 
+**Kind:** cost (build time; the expansion is deliberate). Not a bug: rrc's
+output is correct, and there is no patch.
+
 ## Summary
 
 **Kind:** cost (build time; the expansion is deliberate). **Status:** does
@@ -37,12 +40,12 @@ module, before LLVM).
 | 10 | 28,875 | 1.0 s (91da4f80: 1.4 s, 342 MB) |
 | 12 | 114,921 | 11.4 s, 208 MB |
 
-About 2x per level. `run.sh` prints `bug 25   REPRODUCES  --emit
+About 2x per level. `run.sh` prints `issue 25   REPRODUCES  --emit
 mlir-llvm: K = 8: 7341 lines, K = 10: 28875 lines (3.93x for two more
 levels)`. The review measured the same shape without the FFI print
 (`rv7/p22/x/u12.rr`, rv7/p22 round 1, on a build without 0031) at 16 s and
 4.7 GB; the final stack's 208 MB at K = 12 is probably patch 0031
-([bug 17](17-long-nat-block.md)), which removed the quadratic memory of the
+([issue 17](17-long-nat-block.md)), which removed the quadratic memory of the
 SCF lowering: the code is as large as before.
 
 ## Cause

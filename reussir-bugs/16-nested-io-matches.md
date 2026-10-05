@@ -1,11 +1,14 @@
 # 16. Reuse across calls is superlinear in the nesting depth of matches
 
+**Kind:** cost (build time of the opt-in flag `--reuse-across-call`). Not a
+bug: rrc's output is correct; patch 0035 is an optimization.
+
 ## Summary
 
-**Kind:** cost (opt-in flag), with a small local fix. **Status:** patched
-(0035), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also works
-around it (it cuts deep tail paths and deep `let` values into functions),
-and keeps doing so.
+**Kind:** cost (opt-in flag), with a small local optimization.
+**Status:** patched (0035), applied in `./reussir` (`l2r-local`
+cc8e5aa5); lean2rr also works around it (it cuts deep tail paths and deep
+`let` values into functions), and keeps doing so.
 
 **Verdict: cost of the opt-in flag `--reuse-across-call`, not a defect.**
 The flag is off by default, and its documentation says only that it may
@@ -147,7 +150,7 @@ box before the cell's (both still after the unlock). On the repro through
 lean2rr (`L2R_NO_OUTLINE=1`, rrc to the LLVM dialect): 50 statements,
 13,401 deallocation calls -> 646 and 174 MB -> 123 MB; 100 statements,
 51,601 -> 1,096 and 463 MB -> 127 MB. `run.sh` on the final stack:
-`bug 16   FIXED       rrc: N = 50: 35 s, 159 MB; N = 100: 39 s, 190 MB
+`issue 16   FIXED       rrc: N = 50: 35 s, 159 MB; N = 100: 39 s, 190 MB
 (1.18x memory); N = 100 without reuse across calls: 38 s, 183 MB`
 (unpatched: 261 MB and 1.15 GB).
 
@@ -161,7 +164,7 @@ sets under an allocation-tracking shim (allocations equal frees).
 
 **Effect on lean2rr.** Build time and memory without lean2rr's outlining.
 lean2rr keeps its outlining (`Outline.lean`), which also bounds other
-costs ([bug 17](17-long-nat-block.md)).
+costs ([issue 17](17-long-nat-block.md)).
 
 ## Upstream note
 

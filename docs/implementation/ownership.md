@@ -142,7 +142,8 @@ runtime.
   "Order of releases in one free").
 - **Where:** `runtime/leanrt/src/drop.rs`: `Vec`, `Cell`, `free_vec`,
   `step_vec`, `free_cell`, `run`, `defer`, `active`;
-  [Reussir bug 13](../../reussir-bugs/13-long-list-drop.md).
+  [Reussir issue 13](../../reussir-bugs/13-long-list-drop.md) (a missing
+  feature).
 - **Remove only if:** never; the runtime does not build without patch
   0014.
 

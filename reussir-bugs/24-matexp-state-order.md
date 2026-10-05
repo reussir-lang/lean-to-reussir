@@ -30,7 +30,7 @@ linear_recurrence_order6_e2e.ll -o OUT`, repeated.
 
 **Actual on ef922049** (here 91da4f80, which does not touch the pass): 10
 and 11 distinct outputs in two sets of 12 runs. `run.sh` prints
-`bug 24   REPRODUCES  12 runs of the order-6 recurrence: 11 different
+`issue 24   REPRODUCES  12 runs of the order-6 recurrence: 11 different
 outputs`. Other measurements (review rv7/p22, round 1 and 2): rrc `-O
 default --emit llvm-ir` on Reussir's frontend test
 `per_ctor_box_sizing_mixed_arms.rr`, two different modules in 8 runs; the
@@ -40,7 +40,7 @@ the order-6 recurrence through the O2 pipeline, up to 19 outputs in 20
 runs. The difference is a permutation of the state: for the Fibonacci loop,
 two companion-matrix entries swapped (`mul %acc, 1` and `mul %acc, 0`).
 
-Found while comparing rrc builds for the patches of bugs 10 and 19
+Found while comparing rrc builds for the patches of issue 10 and bug 19
 (agent B, `morepatches-b/`), and pinned to its cause by the review of those
 patches (rv7/p22, round 1, finding RV7P-03).
 
@@ -117,7 +117,7 @@ before.
 - New test `tests/integration/llvmpass/linear_recurrence_matexp_deterministic.ll`:
   the order-6 recurrence six times and the Fibonacci loop eight times
   through the pass, every output identical. It fails without the patch.
-- `run.sh`: `bug 24   FIXED       12 runs of the order-6 recurrence: 1
+- `run.sh`: `issue 24   FIXED       12 runs of the order-6 recurrence: 1
   output`.
 
 **Review.** Round 2 of the review of agent B's patches (rv7/p22/round2),

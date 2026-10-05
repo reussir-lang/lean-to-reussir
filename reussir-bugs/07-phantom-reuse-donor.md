@@ -1,5 +1,8 @@
 # 7. Token reuse picks decrements that can never free
 
+**Kind:** missed optimization. Not a bug: rrc's output is correct; patch
+0007 is an optimization.
+
 ## Summary
 
 **Kind:** missed optimization. **Status:** patched (0007), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also
@@ -64,7 +67,7 @@ the path.
 **Actual on ef922049.** `100003 100003 ratio 6.12` (5.8-7.9 over runs; the
 message of patch 0007 says "5x slower", an earlier measurement):
 `ins` allocates a new node at every level of every insertion. `run.sh`
-printed `bug 07   REPRODUCES  insert returning t is 6.65x the rebuilding insert`.
+printed `issue 07   REPRODUCES  insert returning t is 6.65x the rebuilding insert`.
 
 ## Cause
 
@@ -310,7 +313,7 @@ out.
   FIXED.
 - `run.sh` on `l2r-local` (a timing ratio, on a loaded machine; 1.14x in
   the run recorded in the index):
-  `bug 07   FIXED       insert returning t is 1.04x the rebuilding insert   [lean2rr's flags]`.
+  `issue 07   FIXED       insert returning t is 1.04x the rebuilding insert   [lean2rr's flags]`.
 
 **Effect on lean2rr.** An arm returning the matched value no longer blocks
 reuse in the other arms, for the shapes lean2rr's own passes do not

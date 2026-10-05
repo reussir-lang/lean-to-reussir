@@ -107,8 +107,8 @@ imports with the program and Stage 1 calls instead (`Mono.redirectTarget`).
 
 Outside `lean2rr/`: `runtime/` (the prelude `prelude.rr` and the runtime
 crate `leanrt`), `scripts/l2r.py` (the driver: lean2rr, then rrc),
-`reussir-bugs/` (the Reussir bugs met, their repros and the local Reussir
-patches),
+`reussir-bugs/` (the Reussir issues met, bugs and costs and the other
+kinds, their repros and the local Reussir patches),
 `tests/`, `docs/`.
 
 The core translation is the plain one: the rules of this plan without the
@@ -987,8 +987,8 @@ its value is stored as `Box`.
   instantiation), but they are no longer the main cost, and sending them
   through one function per inductive would not make the matches smaller:
   rrc gives every `match` on `Box` one region per variant, a wildcard arm
-  being copied into each variant it covers (Reussir bug 22). Measured
-  (shared machine) on 80 structures of one shape through one
+  being copied into each variant it covers (Reussir issue 22, a cost).
+  Measured (shared machine) on 80 structures of one shape through one
   polymorphically recursive function (`Prod (Array Sᵢ) Nat`; round 6
   Ty6QS80) and on the program of the round-6 report (Ty6RT1): the build
   takes 200 s and 334 s (native: 3 s and 1 s; lean2rr's translation 1 s);
@@ -1298,9 +1298,9 @@ application appears.
   Lean types: with these functions inlinable, rrc's build time and memory
   on such programs grew far faster than the programs (superlinearly; an
   8-line `StateT` tower used at `IO` did not build within 30 minutes or
-  15 GB; Reussir bug 20, whose cause is not narrowed down). Out of line, a
-  conversion, an unboxing, or the application of a wrapped value or of a
-  value of uniform type costs a call (until LLVM inlines it); all are rare
+  15 GB; Reussir issue 20, a cost, whose cause was found later). Out of
+  line, a conversion, an unboxing, or the application of a wrapped value or of
+  a value of uniform type costs a call (until LLVM inlines it); all are rare
   outside uniform code, and typed function values are unaffected.
 
 ### 5.4 `let`, `return`, literals
@@ -1424,7 +1424,8 @@ used and every field is bound at the match):
   instead of the cell actually freed: `TreeMap.insert` rebuilt every node
   of the path, and so did a BST insert whose key comparison is a call
   before the branch (`Nat`, `String`, `compare`), even with the local fix
-  of Reussir bug 7 (reussir-bugs/07-phantom-reuse-donor.md). A structure
+  of Reussir issue 7, a missed optimization
+  (reussir-bugs/07-phantom-reuse-donor.md). A structure
   (one constructor: no match, its fields are projections) that stays live
   the same way projects only the fields used while it is live; an inner
   alternative that no longer uses it projects the others there (the pair
@@ -3137,19 +3138,19 @@ Each item says what differs and when.
   (`--no-closure-wpd`: it prints each closure's result type, every named
   type expanded, at every vtable and indirect call site; no classic
   benchmark changes by more than 1%, since lean2rr dispatches function
-  values itself; Reussir bug 10), and lean2rr keeps the conversions,
-  unboxings and the applications of wrapped and uniform function values
-  out of rrc's MLIR inliner (§5.3; bug 20). The towers of the adversarial
-  rounds then build in 15 s to 2.5 minutes and at most 3 GB, the whole
-  build (a single `StateT` tower used at `IO`: 21 s, 0.4 GB, where it did
-  not build in 30 minutes; five towers in one program: 70 s, 1.5 GB, where
-  they took 15 minutes and 7.5 GB). rrc's costs also grow faster than
-  linearly in the depth of nested matches (reuse across calls; every IO
-  bind nests one) and in the length of straight-line code on `Nat`
-  (Reussir bugs 16 and 17). So after lowering, a function with a tail path
-  32 matches or `if`s deep, or 256 `let`s long (a long `main`, a 3000-arm
-  literal match, a long `do` block), or with a `let` whose value is that
-  deep or long, is cut (`Outline`): once a tail path is 8 levels deep or
+  values itself; Reussir issue 10, a cost), and lean2rr keeps the
+  conversions, unboxings and the applications of wrapped and uniform
+  function values out of rrc's MLIR inliner (§5.3; issue 20, a cost). The
+  towers of the adversarial rounds then build in 15 s to 2.5 minutes and at
+  most 3 GB, the whole build (a single `StateT` tower used at `IO`: 21 s,
+  0.4 GB, where it did not build in 30 minutes; five towers in one program:
+  70 s, 1.5 GB, where they took 15 minutes and 7.5 GB). rrc's costs also
+  grow faster than linearly in the depth of nested matches (reuse across
+  calls; every IO bind nests one) and in the length of straight-line code on
+  `Nat` (Reussir issues 16 and 17, costs). So after lowering, a function with a
+  tail path 32 matches or `if`s deep, or 256 `let`s long (a long `main`, a
+  3000-arm literal match, a long `do` block), or with a `let` whose value is
+  that deep or long, is cut (`Outline`): once a tail path is 8 levels deep or
   64 `let`s long, its rest becomes a function of the variables it uses,
   called in tail position; a value that deep or long comes from a function
   of the variables it uses. A recursive function keeps its loops: a rest

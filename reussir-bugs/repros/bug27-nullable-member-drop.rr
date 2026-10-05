@@ -1,9 +1,9 @@
-// Bug 27: releasing a long chain linked through a Nullable member recurses
-// once per link and overflows the stack. Inside drop glue a plain member box
-// is released through the thread's pending stack (patches 0013-0015), so a
-// chain is freed in a loop; a Nullable<shared record> member was released by
-// a plain rc.dec (AcquireDropExpansion.cpp, rewriteDropNullable), which
-// recurses into the next link's glue.
+// Issue 27 (missing feature): releasing a long chain linked through a Nullable
+// member recurses once per link and overflows the stack. Inside drop glue a
+// plain member box is released through the thread's pending stack (patches
+// 0013-0015), so a chain is freed in a loop; a Nullable<shared record> member
+// was released by a plain rc.dec (AcquireDropExpansion.cpp,
+// rewriteDropNullable), which recurses into the next link's glue.
 // `build(n)` makes a chain of n `B` cells, each linking to the next through
 // `A [value] { b: Nullable<B>, .. }`; `first_k` reads the head, and the
 // chain is released when its last reference goes.

@@ -223,7 +223,7 @@ def gen_patches():
                     for c in (num, kind, effect, affects, workaround, patch, applied)])
     if not out:
         warn("no status table found in reussir-bugs/README.md")
-    return md_table(out, ["Bug", "Kind", "Effect", "Affects lean2rr output?",
+    return md_table(out, ["Issue", "Kind", "Effect", "Affects lean2rr output?",
                           "lean2rr workaround", "Patch", "Applied"], "tbl small")
 
 
@@ -264,8 +264,8 @@ def gen_testsets():
          "every big number made is freed exactly once; big constants made once"],
         ["Conversion counter", "<code>tests/runtime/conv-count-check.sh</code>", "2 sizes",
          "uniform-updates: conversions grow at most linearly; a counter emitted in an undone cast probe is emitted again"],
-        ["Reussir repros", "<code>reussir-bugs/repros/run.sh</code>", "one per Reussir bug",
-         "REPRODUCES or FIXED for each bug, on a given rrc"],
+        ["Reussir repros", "<code>reussir-bugs/repros/run.sh</code>", "one per Reussir issue",
+         "REPRODUCES or FIXED for each issue, on a given rrc"],
     ]
     return md_table(rows, ["Set", "Runner", "Size (counted from the repository)", "What it checks"])
 

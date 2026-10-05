@@ -1,19 +1,26 @@
 # 11. Interprocedural SCCP is superlinear on large call graphs
 
+**Kind:** cost (build time), in both parts: the superlinear SCCP of a stock
+MLIR pass, and 11b, quadratic glue lookups in Reussir's own code. Not a
+bug: rrc's output is correct; the blowup can make large builds infeasible
+(time or memory), and patches 0032 and 0033 are optimizations.
+
 ## Summary
 
-**Kind:** cost (stock MLIR pass), with a small local fix; plus a bug of
-its own (11b, build time). **Status:** patched (0032 for SCCP, 0033 for
-11b), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** cost (stock MLIR pass), with a small local optimization; plus a
+cost in Reussir's own code (11b, build time; first classed as a bug,
+reclassified on 2026-10-05 because the output is correct). **Status:**
+patched (0032 for SCCP, 0033 for 11b), applied in `./reussir` (`l2r-local`
+cc8e5aa5).
 
 **Verdict: cost of a stock MLIR pass, not a Reussir defect.** The pipeline
 runs MLIR's own `createSCCPPass` (`crates/reussir-backend/src/pipeline.rs`),
 whose time is superlinear in the number of call sites (measured, below:
-doubling N costs 2.9-4.8x; [bug 22](22-wildcard-wide-enum.md) measures
+doubling N costs 2.9-4.8x; [issue 22](22-wildcard-wide-enum.md) measures
 about size^2.4 on one large function; no bound from MLIR's documentation
 is known here); Reussir promises nothing linear. The towers first blamed
 on it were
-[bug 20](20-statet-tower.md). Under the policy's third refinement
+[issue 20](20-statet-tower.md). Under the policy's third refinement
 (fixable build-time costs get a small patch), 0032 runs SCCP across calls
 only within a budget of call sites. Building the Std.Http program once
 SCCP was fixed exposed **11b**, a real quadratic in Reussir's own code:
@@ -60,7 +67,7 @@ GB; the same tower at `Id` builds in 60 s.
 A Std.Http program (round 6, `adv6/io/Io6Http.lean`, a local HTTP server
 and TCP clients; lean2rr's output has 17,197 functions and 8241
 polymorphic-FFI instances), built with patch 0017
-([bug 23](23-polyffi-link.md)), reaches the MLIR lowering pipeline after 12
+([issue 23](23-polyffi-link.md)), reaches the MLIR lowering pipeline after 12
 minutes of texture compiles and a 6 s link. perf sampled 31 minutes into
 the pipeline: all of the time in interprocedural SCCP
 (`DeadCodeAnalysis::visitCallableTerminator`, the data-flow solver's state
@@ -78,9 +85,9 @@ application functions of its function and `Box` representations).
 
 ## lean2rr
 
-No workaround of its own. The tower programs above were mostly bug 20:
+No workaround of its own. The tower programs above were mostly issue 20:
 rrc's inliner multiplied lean2rr's conversion code, and SCCP then iterated
-over the result. With bug 20 worked around (lean2rr keeps those functions
+over the result. With issue 20 worked around (lean2rr keeps those functions
 out of the inliner), `Cn3PolyM1` builds in 70 s and 1.5 GB (the whole
 build, lean2rr included) and the `StateT` tower at `IO` in 21 s and 0.4 GB,
 so the programs it was blamed for build in acceptable time. One
@@ -140,18 +147,18 @@ under the budget are compiled exactly as before (lean2rr's classic corpus
 has at most 1.5M pairs).
 
 **Verification.** Test `conversion/sccp_call_site_budget.mlir`. Repro
-(`run.sh`, final stack): `bug 11   FIXED       N = 2000: 13.7 s, N =
+(`run.sh`, final stack): `issue 11   FIXED       N = 2000: 13.7 s, N =
 4000: 23.4 s, N = 10: 1.6 s (1.80x without the fixed cost, for twice the
 call sites)` (unpatched: 2.9-4.8x). The Std.Http program (335M pairs)
 gets SCCP per function: 3 s and 19 s for the two runs.
 
-### 0033 (bug 11b): glue looked up in symbol tables built once
+### 0033 (issue 11b): glue looked up in symbol tables built once
 
 Patch file
 [`patches/0033-l2r-local-bug-11b-look-up-drop-and-acquire-glue-in-s.patch`](patches/0033-l2r-local-bug-11b-look-up-drop-and-acquire-glue-in-s.patch)
 (`l2r-local` commit `5e0273b2`).
 
-**The bug.** `createDtorIfNotExists` and
+**The cost.** `createDtorIfNotExists` and
 `emitOwnershipAcquisitionFuncIfNotExists` (`lib/IR/ReussirOps.cpp`) built
 a new `mlir::SymbolTable` of the whole module on every call, to look up
 the glue function of a record type, and the acquire/drop expansion calls

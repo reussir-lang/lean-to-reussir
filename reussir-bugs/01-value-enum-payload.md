@@ -33,8 +33,8 @@ fn main() {
 **Actual on ef922049.** `0`, at every optimization level: only bit 0 of 42
 survives (43 gives 1). With a nested `[value]` enum on the padding, a
 pointer can lose its upper bytes (SIGSEGV). `run.sh` printed
-`bug 01   REPRODUCES  prints 0, expected 42   [-O default]`; with 0020
-(the final stack) it prints `bug 01   FIXED       prints 42   [-O default]`.
+`issue 01   REPRODUCES  prints 0, expected 42   [-O default]`; with 0020
+(the final stack) it prints `issue 01   FIXED       prints 42   [-O default]`.
 
 ## Cause
 
@@ -132,7 +132,7 @@ which needs the declaration-order layout to agree with Reussir's: that is
   padding, a pointer there; at `-O default`, `-O aggressive` and with
   `--no-pack-record-members`, plus FileCheck of the LLVM type. It fails
   without the patch.
-- `run.sh` on the final stack: `bug 01   FIXED       prints 42   [-O default]`.
+- `run.sh` on the final stack: `issue 01   FIXED       prints 42   [-O default]`.
 - lean2rr: the LLVM type definitions of LeanBoolLoop, RtReprFuzzTypes and
   RtExistPayloads are identical with and without 0018-0021 (95, 207 and 541
   types; review below).

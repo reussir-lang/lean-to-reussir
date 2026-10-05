@@ -1,5 +1,8 @@
 # 3. Rust allocations through Reussir's global allocator are 16-aligned
 
+**Kind:** intended. Not a bug: Reussir's runtime raises Rust allocations to
+16-byte alignment on purpose; programs are correct, and there is no patch.
+
 ## Summary
 
 **Kind:** intended behaviour. **Status:** worked around (in the runtime).

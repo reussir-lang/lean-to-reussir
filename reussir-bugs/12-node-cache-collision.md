@@ -66,7 +66,7 @@ hash alike. Per the patch's unit test, the keys are 149353 and 187378.
 **Actual on ef922049.** `7`, with no diagnostic, at every `-O` level:
 `second`'s argument `T::One{424242}` is parsed as `T::One{vvvvvv}`, and
 `vvvvvv` is `second`'s parameter. `run.sh` printed
-`bug 12   REPRODUCES  prints 7 (the literal 424242 was parsed as the variable), expected 424242`.
+`issue 12   REPRODUCES  prints 7 (the literal 424242 was parsed as the variable), expected 424242`.
 
 In lean2rr output this showed up as rrc errors that seemed to make no
 sense:
@@ -227,7 +227,7 @@ measurements differ in what they measure:
   passed (round 3).
 - With 0012 (ef922049 + 0012 alone, and the patched build): FIXED
   (`424242`). `run.sh` on the patched build:
-  `bug 12   FIXED       prints 424242   [-O aggressive]`.
+  `issue 12   FIXED       prints 424242   [-O aggressive]`.
 
 **Effect on lean2rr.** Syntax nodes are never swapped for an earlier node
 with a colliding hash: both the "impossible" rrc errors on large outputs

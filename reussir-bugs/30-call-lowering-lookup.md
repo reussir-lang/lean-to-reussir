@@ -1,10 +1,13 @@
 # 30. The call lowering scans the module once per call
 
+**Kind:** cost (build time). Not a bug: rrc's output is correct; patch 0062
+is an optimization.
+
 ## Summary
 
 **Kind:** cost (build time). **Status:** patched (0062), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
-**Verdict: cost, with a small fix.** `reussir-convert-to-llvm` lowers every
+**Verdict: cost, with a small optimization.** `reussir-convert-to-llvm` lowers every
 `func.call` with the func dialect's stock pattern, which looks the callee
 up by a linear scan of the module, because the pattern list is collected
 through the func dialect's `ConvertToLLVMPatternInterface`, which passes no
@@ -34,7 +37,7 @@ touch this code; loaded machine):
 | 20000 | 13.2 s | 0.9 s |
 
 The output is identical with and without the patch. `run.sh` prints
-`bug 30   REPRODUCES  reussir-opt --reussir-convert-to-llvm: N = 5000:
+`issue 30   REPRODUCES  reussir-opt --reussir-convert-to-llvm: N = 5000:
 1.3 s, N = 10000: 5.2 s (4.00x for twice the calls)` on the unpatched
 build.
 
@@ -42,7 +45,7 @@ Inside rrc (`-O none`, perf, a `.rr` of the same shape with N = 10000):
 the conversion took about 11e9 cycles, 88% of them in the call lowering's
 lookups (`CallOpLowering::matchAndRewrite` →
 `SymbolTable::lookupNearestSymbolFrom` → `SymbolTable::lookupSymbolIn`);
-with 0062 0.9e9. In that build MLIR's SCCP ([bug 11](11-sccp-call-graph.md))
+with 0062 0.9e9. In that build MLIR's SCCP ([issue 11](11-sccp-call-graph.md))
 takes most of the remaining time.
 
 ## Cause
@@ -75,7 +78,7 @@ one and `SymbolTable::lookupNearestSymbolFrom` otherwise.
 ## lean2rr
 
 Build time only. lean2rr's large outputs have tens of thousands of
-functions and calls (the Std.Http program of [bug 23](23-polyffi-link.md):
+functions and calls (the Std.Http program of [issue 23](23-polyffi-link.md):
 17,197 functions), so the conversion's cost grows with their product. No
 workaround.
 
@@ -119,7 +122,7 @@ the conversion has finished.
   on both builds (the patch changes time only).
 - Reussir's lit suite and lean2rr's runtime tests: as for
   [bug 28](28-unique-carrying-join.md).
-- `run.sh`: `bug 30   FIXED       reussir-opt --reussir-convert-to-llvm:
+- `run.sh`: `issue 30   FIXED       reussir-opt --reussir-convert-to-llvm:
   N = 5000: 0.7 s, N = 10000: 0.4 s`.
 
 **Review.** Round RV8 (e)

@@ -1,6 +1,6 @@
-// Bug 13: the drop glue of a list cell releases the cell's members, recursing
-// into the tail, and frees the cell afterwards. That is not a tail call, so
-// releasing a chain of N cells at once takes N stack frames.
+// Issue 13 (missing feature): the drop glue of a list cell releases the cell's
+// members, recursing into the tail, and frees the cell afterwards. That is not
+// a tail call, so releasing a chain of N cells at once takes N stack frames.
 // Usage: bug13 SHAPE N
 //   SHAPE 0 list:   Cons(u64, L)       recursive member last (Lean's List)
 //   SHAPE 1 snoc:   S(Snoc, Box)       recursive member first, a box last

@@ -47,7 +47,7 @@ the result is `A{250, 9648}`.
 aggressive`, with or without lean2rr's flags; `25009648` at `-O none` and
 `-O default`. With
 an opaque seed instead of the constant 153, LLVM does not reach the wrong
-fold on this program. `run.sh` prints `bug 26   REPRODUCES  prints 2,
+fold on this program. `run.sh` prints `issue 26   REPRODUCES  prints 2,
 expected 25009648`.
 
 Through lean2rr (`morepatches-a/launder-bug/lean-bool-loop.lean`, the same
@@ -143,7 +143,7 @@ unsound folds.
   program with a C driver). `token_ops.mlir` and
   `rc_create_fused_lowering.mlir` checked for the assume; they now check
   that none follows the launder.
-- `run.sh`: `bug 26   FIXED       prints 25009648   [-O aggressive]`.
+- `run.sh`: `issue 26   FIXED       prints 25009648   [-O aggressive]`.
 
 **Review.** Review rv8/reussir (patches 0018-0021, 0027, 0040): no
 correctness defect.

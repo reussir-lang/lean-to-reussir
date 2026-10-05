@@ -1,10 +1,15 @@
 # 35. rrc compiles every texture with rustc again on every build
 
+**Kind:** cost (build time). Not a bug: rrc's output is correct; patch 0066
+is an optimization.
+
 ## Summary
 
-**Kind:** cost (build time), with a small fix. **Status:** patched (0066),
-not applied yet (branch `l2r-polyffi-cache` of a local Reussir build with
-the l2r-local patches applied, on `l2r-local` cc8e5aa5 + 0065); reviewed
+**Kind:** cost (build time), with a small optimization.
+**Status:** patched (0066), applied in `./reussir` since 2026-10-04
+(`l2r-local` commit `d79f8b70`; made on branch `l2r-polyffi-cache` of a
+local Reussir build with the l2r-local patches applied, on `l2r-local`
+cc8e5aa5 + 0065); reviewed
 (round FCR: one medium finding, a race, and small ones; a second look:
 two more small ones; all fixed in the amended patch). lean2rr uses the
 patch when it is there: its driver sets `REUSSIR_FFI_CACHE_DIR` (below).
@@ -12,8 +17,8 @@ patch when it is there: its driver sets `REUSSIR_FFI_CACHE_DIR` (below).
 **Verdict: cost (build time).** rrc compiles the Rust body of every
 `#[ffi(import)]` instance (a "texture") with its own rustc process, one
 after another: Reussir's documented design
-(`docs/design/polymorphic-ffi.md`; [bug 23](23-polyffi-link.md) calls the
-compiles "a cost, not part of this bug"). What is fixable is that nothing
+(`docs/design/polymorphic-ffi.md`; [issue 23](23-polyffi-link.md) calls the
+compiles "a cost, not part of this issue"). What is fixable is that nothing
 is kept between builds: the bitcode of a texture depends only on inputs
 rrc can name (the source, rustc, its options and the libraries rustc
 reads), and these rarely change between two builds, but every build
@@ -36,7 +41,7 @@ aggressive`, twice.
 **Expected.** The second build compiles no texture.
 
 **Actual on ef922049** (and on `l2r-local` cc8e5aa5): the second build
-compiles all three again. `run.sh` prints `bug 35   REPRODUCES  second
+compiles all three again. `run.sh` prints `issue 35   REPRODUCES  second
 build: 3 of 3 textures compiled again; both print 42`.
 
 **lean2rr.** `tests/runtime/RtBorrowReleaseOrder.lean` (a small test)
@@ -114,7 +119,8 @@ Patch file
 [`patches/0066-l2r-local-bug-35-cache-the-compiled-polymorphic-FFI-.patch`](patches/0066-l2r-local-bug-35-cache-the-compiled-polymorphic-FFI-.patch)
 (commit `968c4b7d` on branch `l2r-polyffi-cache` of a local Reussir build
 with the l2r-local patches applied, on 0065; it touches none of 0065's
-files and applies after 0064 as well). In
+files and applies after 0064 as well; in `./reussir` since 2026-10-04 as
+`l2r-local` commit `d79f8b70`). In
 `lib/RustCompiler/RustCompiler.cpp`, `compileRustSourceToBitcode` builds
 rustc's options first (everything but the source and output files), and
 when `REUSSIR_FFI_CACHE_DIR` is set and non-empty:

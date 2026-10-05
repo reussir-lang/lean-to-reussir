@@ -2,7 +2,8 @@
 
 ## Summary
 
-**Kind:** bug (link). **Status:** patched (0065), not applied yet (branch
+**Kind:** bug (link). **Status:** patched (0065), applied in `./reussir`
+since 2026-10-04 (`l2r-local` commit `e0c500b7`; made on branch
 `l2r-final-0065` of a local Reussir integration checkout, on
 `l2r-final` cc8e5aa5); reviewed, no defect. lean2rr works around it: its
 driver passes `--relocation-mode pic` (below).
@@ -58,7 +59,7 @@ prints 6.
 | `--relocation-mode pic`, GNU ld | ok, prints 6 | no |
 | `--relocation-mode pic`, lld | ok, prints 6 | no |
 
-`run.sh` prints `bug 34   REPRODUCES  the executable needs text
+`run.sh` prints `issue 34   REPRODUCES  the executable needs text
 relocations (DT_TEXTREL); prints 6` on the unpatched build.
 
 The object file shows why (`readelf -SW`, `readelf -rW` of `rrc ... -o x.o`):
@@ -101,8 +102,8 @@ executables are PIEs without text relocations, as native Lean's are.
 Patch file
 [`patches/0065-l2r-local-bug-34-compile-link-products-position-inde.patch`](patches/0065-l2r-local-bug-34-compile-link-products-position-inde.patch)
 (commit `c8a524e7` on branch `l2r-final-0065` of the local
-integration checkout, on cc8e5aa5; not in `./reussir`
-yet). When the mode is left at `default` and the product is an executable
+integration checkout, on cc8e5aa5; in `./reussir` since 2026-10-04 as
+`l2r-local` commit `e0c500b7`). When the mode is left at `default` and the product is an executable
 or a dynlib, rrc compiles position-independent code
 (`crates/reussir-compiler/src/driver.rs`):
 
@@ -134,7 +135,7 @@ no relocations.
   567 passed, 81 unsupported, none failed.
 - The repro: without `--relocation-mode`, GNU ld and lld both link it,
   no `TEXTREL`, prints 6; with `--relocation-mode static`, still
-  `TEXTREL` (the explicit mode kept). `run.sh`: `bug 34   FIXED       no
+  `TEXTREL` (the explicit mode kept). `run.sh`: `issue 34   FIXED       no
   text relocations; prints 6`.
 - lean2rr: LeanBoolLoop built through `l2r.py` against the patched rrc
   prints 25009648 (as native) and has no `TEXTREL` (0 relocations into

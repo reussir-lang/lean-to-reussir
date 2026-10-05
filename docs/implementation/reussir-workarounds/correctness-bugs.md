@@ -1,9 +1,12 @@
 # Reussir bugs that affect what a program computes
 
 One entry per bug: what lean2rr does, whether a local patch fixes it, and
-whether the workaround can be dropped. Bug files are in
-[`reussir-bugs/`](../../../reussir-bugs/README.md). Paths:
-`lean2rr/LeanToReussir/` for lean2rr's files.
+whether the workaround can be dropped. Every issue here is a bug
+(erroneous behaviour); the last entry, the drain-end hook, is a local
+addition, not an issue. Issues 7 (a missed optimization) and 13 (a missing
+feature), which are not bugs, are in [limitations.md](limitations.md). The
+issue files are in [`reussir-bugs/`](../../../reussir-bugs/README.md).
+Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
 
 ### Bug 1: `[value]` enum payloads are lost when moved
 
@@ -86,22 +89,6 @@ whether the workaround can be dropped. Bug files are in
 - **Remove only if:** n/a. If the flag replaces 0006, revisit the
   immediate skips ([../ownership.md](../ownership.md#array-copies-skip-the-increments-of-immediates)).
 
-### Bug 7: token reuse picks decrements that never free
-
-- **What:** The optional passes `lazy-fields` and `sink-proj` bind fields
-  where they are used, so a value that stays live has no retained fields
-  whose releases look like donors; `nullary-scrutinee` rebuilds a matched
-  constructor without fields in its arm, so the scrutinee is not kept
-  alive by a use there.
-- **Why:** A missed optimization, not a bug; patch 0007 (applied) covers
-  some shapes (`UInt64` keys) but not a call before the branch (`Nat` and
-  `String` comparisons), which the passes do
-  ([07-phantom-reuse-donor.md](../../../reussir-bugs/07-phantom-reuse-donor.md)).
-  0007 stays because 0009 uses its helper.
-- **Where:** [../control-flow/cases.md](../control-flow/cases.md).
-- **Remove only if:** Reussir's token reuse handles the call-before-branch
-  shape; then measure with the passes off.
-
 ### Bug 8: a padding lift breaks declaration-order layouts
 
 - **What:** Nothing to do: lean2rr never emits the shape (records have no
@@ -129,16 +116,6 @@ whether the workaround can be dropped. Bug files are in
 - **Why:** [12-node-cache-collision.md](../../../reussir-bugs/12-node-cache-collision.md).
 - **Where:** n/a.
 - **Remove only if:** n/a.
-
-### Bug 13: drop glue recursed once per cell
-
-- **What:** The runtime frees its containers through the per-thread
-  pending stack that patch 0014 adds (`reussir_rt::drop`), and needs it to
-  build; 0013 and 0015 complete it.
-- **Why:** A missing feature, not a bug: Lean frees iteratively
-  ([13-long-list-drop.md](../../../reussir-bugs/13-long-list-drop.md)).
-- **Where:** [../ownership.md](../ownership.md#containers-free-through-the-threads-pending-stack-in-leans-order).
-- **Remove only if:** never (required).
 
 ### Bug 15: a `match` on a `Nullable` yielding a counted value
 
@@ -180,7 +157,7 @@ whether the workaround can be dropped. Bug files are in
   described in [`reussir-bugs/local-additions.md`](../../../reussir-bugs/local-additions.md).
 - **Why:** Not a bug: Reussir has no hook at the end of a free, and the
   `sync` dependents of promises dropped inside a free must run when it is
-  over (round 7 RV7C-01). No bug entry exists for it.
+  over (round 7 RV7C-01). No entry exists for it.
 - **Where:** [../tasks/dependents.md](../tasks/dependents.md#dependents-of-a-promise-dropped-inside-a-free-run-when-the-free-is-over).
 - **Remove only if:** n/a (the fallback is for Reussir builds without
   0040; 0040 is applied to `l2r-local` since 2026-10-03).

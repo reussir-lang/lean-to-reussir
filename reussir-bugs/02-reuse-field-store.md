@@ -49,7 +49,7 @@ fn main() { say(g(f(A{123, five()}))); }
 
 **Actual on ef922049.** `7000009`, at every `-O` level, with and without
 `--reuse-across-call` and `--no-pack-record-members`. `run.sh` printed
-`bug 02a  REPRODUCES  prints 7000009, expected 7005009   [-O aggressive --no-pack-record-members]`.
+`issue 02a  REPRODUCES  prints 7000009, expected 7005009   [-O aggressive --no-pack-record-members]`.
 
 With declaration-order layout, `A` has `u64` at payload offset 0 and `u32`
 at 8. `B` has `u32` at 0, `u32` at 4 and `u64` at 8. Both are 16-byte
@@ -95,8 +95,8 @@ fn main() { say(f(M::A{5, 11})); }
 every `-O` level. With `--no-pack-record-members`: `5001`. `run.sh` on the
 final stack (0002 and 0019 applied):
 
-    bug 02a  FIXED       prints 7005009   [-O aggressive --no-pack-record-members]
-    bug 02b  FIXED       prints 5001   [-O aggressive]
+    issue 02a  FIXED       prints 7005009   [-O aggressive --no-pack-record-members]
+    issue 02b  FIXED       prints 5001   [-O aggressive]
 
 ## Cause
 
@@ -236,8 +236,8 @@ that happen to have identical layouts, which is rare.
   with the packed layout (not covered; lean2rr's flag avoids it).
 - `run.sh` on the build with 0002 alone (before 0019):
 
-      bug 02a  FIXED       prints 7005009   [-O aggressive --no-pack-record-members]
-      bug 02b  REPRODUCES  prints 11001, expected 5001   [-O aggressive]
+      issue 02a  FIXED       prints 7005009   [-O aggressive --no-pack-record-members]
+      issue 02b  REPRODUCES  prints 11001, expected 5001   [-O aggressive]
 
   The second line is the variant case, fixed by 0019.
 
@@ -304,7 +304,7 @@ layout, so they are the offsets the stores and loads use.
 - lean2rr's code is the same with and without the patch (identical LLVM IR
   for the classic corpus and a sample of the runtime tests): it uses
   `--no-pack-record-members`, where the prefix rule was already sound.
-- `run.sh` on the final stack: `bug 02b  FIXED       prints 5001   [-O aggressive]`.
+- `run.sh` on the final stack: `issue 02b  FIXED       prints 5001   [-O aggressive]`.
 
 **Review.** Round 8 (local review notes):
 no correctness defect. Checked: `getVariantPayloadOffset` is the header

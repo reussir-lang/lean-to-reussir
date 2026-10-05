@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# Build and run the repros of the Reussir bugs in reussir-bugs/ (one file
-# per entry, NN-*.md; the index is reussir-bugs/README.md) with one Reussir
-# build.
+# Build and run the repros of the Reussir issues in reussir-bugs/ (one file
+# per entry, NN-*.md; the index is reussir-bugs/README.md, whose Kind column
+# says which issues are bugs and which are costs, a missed optimization,
+# missing features or intended behaviour) with one Reussir build.
 #
-#   reussir-bugs/repros/run.sh RRC_CHECKOUT [BUG...]
+#   reussir-bugs/repros/run.sh RRC_CHECKOUT [NN...]
 #
 # RRC_CHECKOUT is a Reussir checkout with a build: its build/bin/rrc compiles
 # the repros, and plain .rr repros link against its build/target-rt/release.
-# BUG is a bug number (1, 02, 13, ...); the default is every bug that has a
-# line here (all but 22, whose generator is run by hand). Each repro prints
-# one line:
+# NN is an entry number (1, 02, 13, ...); the default is every entry that
+# has a line here (all but 22, whose generator is run by hand). Each repro
+# prints one line:
 #
-#   bug NN  REPRODUCES  the documented bad behaviour was seen
-#   bug NN  FIXED       the expected output was seen
-#   bug NN  OTHER       something else (shown)
-#   bug NN  SKIPPED     a tool is missing, or a slow repro under QUICK=1 (shown)
+#   issue NN  REPRODUCES  the documented behaviour (the bug, the cost, ...)
+#                         was seen
+#   issue NN  FIXED       the expected output was seen
+#   issue NN  OTHER       something else (shown)
+#   issue NN  SKIPPED     a tool is missing, or a slow repro under QUICK=1
+#                         (shown)
 #
 # followed by what was seen and the rrc flags the repro needs.
 #
@@ -27,20 +30,20 @@
 # or L2R_LEAN2RR). l2r.py builds the runtime crate leanrt for the checkout
 # once, under runtime/leanrt/target/.
 #
-# Bugs 10, 11, 16, 17, 20 and 23 are build-time entries: the repros of 10, 11,
-# 16, 17 and 23 are generated at two sizes and the line reports the growth
+# Issues 10, 11, 16, 17, 20 and 23 are build-time entries: the repros of 10,
+# 11, 16, 17 and 23 are generated at two sizes and the line reports the growth
 # (for 23, of the link phase alone, timed through a rustc wrapper and
-# rrc -v); bug 20's is built with and without lean2rr's workaround. They
-# take one to three minutes each, and bugs 16 and 20 need 1.2 to 3 GB; bug
-# 6 runs for about 15 s. Everything else takes seconds (a first .lean build
-# also builds leanrt). Bugs 25, 30, 32 and 35 are build-time entries too,
-# but quick: 25 and 32 compare the sizes of two outputs (--emit mlir-llvm,
-# --emit mlir), 30 times one conversion pass through reussir-opt (SKIPPED
-# when the checkout has not built it), 35 builds one program twice with one
-# REUSSIR_FFI_CACHE_DIR and counts the textures the second build compiles
-# (through a rustc wrapper). Bug 24 runs reussir-llvm-opt 12
-# times on one of the checkout's tests. lean2rr works around 16, 17 and
-# 20; the repros turn its workarounds off (L2R_NO_OUTLINE,
+# rrc -v); issue 20's is built with and without lean2rr's workaround. They
+# take one to three minutes each, and issues 16 and 20 need 1.2 to 3 GB;
+# bug 6 runs for about 15 s. Everything else takes seconds (a first .lean
+# build also builds leanrt). Issues 25, 30, 32 and 35 are build-time
+# entries too, but quick: 25 and 32 compare the sizes of two outputs
+# (--emit mlir-llvm, --emit mlir), 30 times one conversion pass through
+# reussir-opt (SKIPPED when the checkout has not built it), 35 builds one
+# program twice with one REUSSIR_FFI_CACHE_DIR and counts the textures the
+# second build compiles (through a rustc wrapper). Bug 24 runs
+# reussir-llvm-opt 12 times on one of the checkout's tests. lean2rr works
+# around 16, 17 and 20; the repros turn its workarounds off (L2R_NO_OUTLINE,
 # L2R_NO_INLINE_ANCHORS).
 #
 # Environment:
@@ -52,10 +55,10 @@
 #           uses)
 #   QUICK=1 skip the slow repros (6, 10, 11, 16, 17, 20, 23)
 set -u
-# rrc's texture cache (bug 35) off: with it, rrc's time and memory would
+# rrc's texture cache (issue 35) off: with it, rrc's time and memory would
 # depend on what the caller's cache holds (the timed repros 16, 17 and 20
 # build through l2r.py, which turns the cache on unless the variable is set;
-# empty is off). Bug 35's repro sets its own directory.
+# empty is off). Issue 35's repro sets its own directory.
 export REUSSIR_FFI_CACHE_DIR=
 
 usage() { sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//; /^set -u/d'; exit 2; }
@@ -89,8 +92,8 @@ ulimit -c 0
 LEAN2RR=${L2R_LEAN2RR:-$ROOT/lean2rr/.lake/build/bin/lean2rr}
 L2R_FLAGS="-O aggressive --no-pack-record-members --reuse-across-call"
 
-say_line() { # STATUS BUG TEXT FLAGS
-    printf 'bug %-4s %-11s %s' "$2" "$1" "$3"
+say_line() { # STATUS NN TEXT FLAGS
+    printf 'issue %-4s %-11s %s' "$2" "$1" "$3"
     [ -n "${4:-}" ] && printf '   [%s]' "$4"
     printf '\n'
 }
@@ -590,5 +593,5 @@ SLOW=" 06 10 11 16 17 20 23 "
 for b in $ALL; do
     b=$(printf '%02d' "$((10#${b%%[ab]}))")
     if [ "${QUICK:-0}" = 1 ] && [[ $SLOW == *" $b "* ]]; then say_line SKIPPED "$b" "slow (QUICK=1)"; continue; fi
-    if declare -f "bug$b" > /dev/null; then "bug$b"; else echo "no repro for bug $b" >&2; fi
+    if declare -f "bug$b" > /dev/null; then "bug$b"; else echo "no repro for issue $b" >&2; fi
 done

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Bug 23: write a .rr with K distinct instances of a polymorphic FFI import.
+"""Issue 23 (cost): write a .rr with K distinct instances of a polymorphic
+FFI import.
 
     bug23-polyffi-link.py K OUT.rr [heavy|light]
 

@@ -1,8 +1,9 @@
-// Bug 35: rrc compiles every polymorphic-FFI texture with its own rustc run
-// (compileRustSourceToBitcode, lib/RustCompiler/RustCompiler.cpp), one after
-// another, on every build. Building the same program again repeats every
-// compile, although nothing the bitcode depends on has changed: lean2rr's
-// programs all compile the same 474 prelude textures, 16 s of rrc's time.
+// Issue 35 (cost): rrc compiles every polymorphic-FFI texture with its own
+// rustc run (compileRustSourceToBitcode, lib/RustCompiler/RustCompiler.cpp),
+// one after another, on every build. Building the same program again repeats
+// every compile, although nothing the bitcode depends on has changed:
+// lean2rr's programs all compile the same 474 prelude textures, 16 s of rrc's
+// time.
 // Command (run.sh bug35): two builds, both with REUSSIR_FFI_CACHE_DIR set to
 // one new directory, through a rustc wrapper that counts texture compiles:
 //   rrc THIS -o OUT --emit executable -O aggressive

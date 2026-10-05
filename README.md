@@ -43,7 +43,7 @@ Design site: [`docs/site/index.html`](docs/site/index.html) is an illustrated ov
 - `third_party/lean-runtime` — the shared runtime crate (Lean's runtime
   rules, shared with another Lean translator), a submodule pinned by commit; `leanrt` and the
   prelude call it
-- `reussir-bugs/` — every Reussir bug lean2rr has met (one file per entry), the local
-  Reussir patches and the repros (see [`reussir-bugs/README.md`](reussir-bugs/README.md))
+- `reussir-bugs/` — every Reussir issue lean2rr has met (one file per entry; bugs, costs and
+  the other kinds), the local Reussir patches and the repros (see [`reussir-bugs/README.md`](reussir-bugs/README.md))
 - `docs/` — design documents
 - `tests/` — the classic test corpus and its native-Lean oracle (see [`tests/README.md`](tests/README.md))

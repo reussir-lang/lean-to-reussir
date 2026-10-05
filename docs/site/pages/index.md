@@ -13,7 +13,7 @@ in the repository are the authority, and each page links to them:
 - [implementation status](repo:docs/implementation-status.md): what works, results, performance;
 - [implementation notes](repo:docs/implementation/README.md): every trick and special case;
 - [runtime README](repo:runtime/README.md): the runtime's types and functions;
-- [Reussir bugs](repo:reussir-bugs/README.md): every Reussir problem, with its patch;
+- [Reussir issues](repo:reussir-bugs/README.md): every Reussir problem (a bug, a cost or another kind), with its patch;
 - [tests README](repo:tests/README.md): the test sets and the findings they cover.
 
 The [glossary](glossary.html) defines the terms that these pages use.
@@ -121,7 +121,7 @@ other results are the last recorded runs.
 | Lean's own compile tests | 72 programs of Lean's `tests/compile` and `tests/compile_bench`: all match native (checked with Lean 4.33) |
 | Externs of `Init` and `Std` | all 717 of Lean 4.34 available; 706 checked by programs that call each one |
 | Speed | faster than native on 16 of 18 classic programs, about equal on 2 (measured with Lean 4.33; not measured again for 4.34) |
-| Reussir | {{v:patches_applied}} local patches applied†; patch 0065 reviewed, not applied yet; patch 0066 (texture cache) reviewed, not applied yet |
+| Reussir | {{v:patches_applied}} local patches applied†, 0065 and 0066 (texture cache) included |
 
 [Testing](testing.html) explains each test set and the review process.
 

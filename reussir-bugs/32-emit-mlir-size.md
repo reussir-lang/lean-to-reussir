@@ -1,5 +1,8 @@
 # 32. `rrc --emit mlir` output grows exponentially with record nesting
 
+**Kind:** cost (debug output). Not a bug: the `--emit mlir` dump is
+correct, only large; builds are not affected, and there is no patch.
+
 ## Summary
 
 **Kind:** cost (debug output). **Status:** open (debug output only). No
@@ -10,8 +13,8 @@ writes a named record's body at every place the record occurs, so a
 record reachable along k paths in a type is written k times, at every use
 of the type. When records share sub-records the dump grows exponentially
 with their nesting, and rrc holds the whole text in memory. This is the
-mechanism of [bug 10](10-closure-type-print.md), in the general printer.
-Patch 0024, written for bug 10, changed only the closure devirtualization's
+mechanism of [issue 10](10-closure-type-print.md), in the general printer.
+Patch 0024, written for issue 10, changed only the closure devirtualization's
 type ids. A fix would change the dialect's textual format, and the output
 is only a debug dump, so it stays unpatched.
 
@@ -26,9 +29,9 @@ builds a `D(K)` and prints `1`.
 **Expected.** A dump about linear in K (the program is).
 
 **Actual on ef922049.** About 2x per level: K = 8: 0.55 MB, K = 10:
-2.2 MB, K = 12: 8.7 MB. `run.sh` prints `bug 32   REPRODUCES  --emit mlir:
+2.2 MB, K = 12: 8.7 MB. `run.sh` prints `issue 32   REPRODUCES  --emit mlir:
 K = 10: 2133 KB, K = 12: 8532 KB (3.99x for two more levels)` (also with
-0060 to 0063). Bug 10's generator, which nests the same records inside
+0060 to 0063). Issue 10's generator, which nests the same records inside
 closure types, gives 16 MB at K = 10 and 1.0 GB at K = 16 (14 s, 1.06 GB of
 rrc memory).
 

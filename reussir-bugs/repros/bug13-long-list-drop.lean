@@ -1,4 +1,5 @@
-/-! Bug 13 through lean2rr: releasing a long chain of cells at once.
+/-! Issue 13 (missing feature) through lean2rr: releasing a long chain of cells
+at once.
 Usage: prog CASE N
   CASE 0: `List.replicate N 7`, Lean's List (the tail is the cell's last field)
   CASE 1: a snoc list `SnocS.snoc : SnocS → String → SnocS` (the chain is the

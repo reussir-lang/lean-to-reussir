@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Bug 22: write a .rr whose wildcard arms over a wide enum cost N^3 code.
+"""Issue 22 (cost): write a .rr whose wildcard arms over a wide enum cost N^3
+code.
 
     bug22-wildcard-wide-enum.py N OUT.rr [wild|sink|false]
 

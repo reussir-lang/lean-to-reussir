@@ -40,9 +40,9 @@ fn run(n : u64) -> u64 {
     error: lowering pipeline failed: RunPass
 
 `cell::set` fails the same way. With `Big(u64)` (no counted member) the
-program compiles and prints `42`. `run.sh` printed `bug 19   REPRODUCES
+program compiles and prints `42`. `run.sh` printed `issue 19   REPRODUCES
 rrc error: operand type mismatch`; on the final stack it prints
-`bug 19   FIXED       compiles, prints 42   [-O aggressive]`.
+`issue 19   FIXED       compiles, prints 42   [-O aggressive]`.
 
 ## Cause
 
@@ -77,7 +77,7 @@ Patch file
 [`patches/0023-l2r-local-bug-19-give-a-cell-s-value-record-its-own-.patch`](patches/0023-l2r-local-bug-19-give-a-cell-s-value-record-its-own-.patch)
 (`l2r-local` commit `c9e640b3`, applied in `./reussir`; `l2r-local` head
 `cc8e5aa5`), as amended after review round 7 (RV7P-01). Its composition
-with 0033 ([bug 11](11-sccp-call-graph.md)'s symbol table collection) is
+with 0033 ([issue 11b](11-sccp-call-graph.md)'s symbol table collection) is
 fixed in 0033 (RV8C-01, below).
 
 **The change.** The capability of the argument reference becomes part of
@@ -156,8 +156,8 @@ the order of the accesses. The final 0033 passes the collection on through
   11.7 s and 4.6 GB with the inline expansion of the first version. The rest
   is the first, inline, acquire/drop expansion phase, which is exponential
   for such records with or without a cell: pre-existing, documented
-  separately as [bug 25](25-value-record-dag.md).
-- `run.sh` on the final stack: `bug 19   FIXED       compiles, prints 42`.
+  separately as [issue 25](25-value-record-dag.md).
+- `run.sh` on the final stack: `issue 19   FIXED       compiles, prints 42`.
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed.
 

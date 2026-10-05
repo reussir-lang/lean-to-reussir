@@ -15,8 +15,8 @@ release never frees anything (`s` still holds the field), but Reussir's
 token reuse offers the field's cells as reuse tokens there, and they can
 win over the cell the branch really frees: the branch then allocates a new
 cell, and frees the matched one after its recursive call, which is no
-longer a tail call (adv4 PF4-10; Reussir bug 7 is the same phantom-donor
-class for match binders).
+longer a tail call (adv4 PF4-10; Reussir issue 7, a missed optimization, is
+the same phantom-donor class for match binders).
 
 This pass moves such a projection into the branches that use it. A
 projection `let x = s.j` of a block that ends in an `if` or `match` moves

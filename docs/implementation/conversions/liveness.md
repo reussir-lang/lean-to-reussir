@@ -92,7 +92,7 @@ are relative to `lean2rr/LeanToReussir/`. Plan
 - **Why:** Reussir rejects a match that is not exhaustive. rrc copies the
   wildcard into every variant it covers and would release each argument
   in line there, a match over its type's variants (`Box` has one per boxed
-  type: bug 22's shape).
+  type: issue 22's shape, a cost).
 - **Where:** `Lower/Finish.lean`: `genApply` (`skipped`).
 - **Remove only if:** the pass is off.
 

@@ -47,7 +47,7 @@ fn main() {
 
 **Actual on ef922049.** rrc dies with SIGSEGV (exit 139), at every `-O`
 level, with or without `--reuse-across-call`. `run.sh` printed
-`bug 05   REPRODUCES  rrc killed by SIGSEGV   [-O aggressive]`. In gdb the
+`issue 05   REPRODUCES  rrc killed by SIGSEGV   [-O aggressive]`. In gdb the
 crash is in `ReussirTokenFreeOp::create` → `OperationState` →
 `StringMapImpl::FindKey`, called from TokenReuse (round 1). In some builds
 it hangs instead (the dangling block is undefined behaviour; the patch
@@ -198,7 +198,7 @@ now fails the pass with a diagnostic instead of crashing.
   that one compiled.
 - Rounds 3 and 4: no change, included in every combined stack's fuzzing.
 - On the round-2 stack: FIXED (`3`). `run.sh` on the patched build:
-  `bug 05   FIXED       compiles, prints 3   [-O aggressive]`.
+  `issue 05   FIXED       compiles, prints 3   [-O aggressive]`.
 
 **Effect on lean2rr.** No rrc crash on a one-armed `if` that has to free a
 token, whatever the user code.

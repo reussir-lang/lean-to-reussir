@@ -84,13 +84,14 @@ runtime. Plan
   pushes the words of table `id`, generated with the program. Only with
   `nat-arrays` (it matches `lean_natarr_push`).
 - **Why:** rrc costs about 0.3 MB per `Nat` operation in a straight-line
-  function ([Reussir bug 17](../../../reussir-bugs/17-long-nat-block.md));
+  function ([Reussir issue 17](../../../reussir-bugs/17-long-nat-block.md),
+  a cost);
   a 100000-element literal is now one call (7c4ab5c, test `RtArrayLit`).
 - **Where:** `ArrayLits.lean`: `natArrLits`, `tableLets`, `smallLit?`,
   `minRun`, `natLitTable`; `Emit/Program.lean`:
   `LoweredProgram.literalTables`.
-- **Remove only if:** bug 17 is gone (and the build stays fast without
-  it).
+- **Remove only if:** the cost of issue 17 is gone (and the build stays
+  fast without it).
 
 ### A constant that may hold tasks waits for them
 

@@ -1,7 +1,8 @@
-// Bug 7, variant: the bug07-phantom-reuse-donor.rr program with its key
-// comparisons made FFI calls (`less`). The call before the branch stops patch
-// 0007's fusion (fuseArm's scan stops at a call), so this shows what token
-// reuse does on a build that has 0006 but where 0007 cannot fire.
+// Issue 7 (missed optimization), variant: the bug07-phantom-reuse-donor.rr
+// program with its key comparisons made FFI calls (`less`). The call before
+// the branch stops patch 0007's fusion (fuseArm's scan stops at a call), so
+// this shows what token reuse does on a build that has 0006 but where 0007
+// cannot fire.
 // Output: "<size> <size> ratio <t(ins) / t(ins_b)>", as in bug07.
 // Measured 2026-10-02 on l2r-local (loaded machine) with
 //   rrc bug07b-call-before-branch.rr -O aggressive --no-pack-record-members

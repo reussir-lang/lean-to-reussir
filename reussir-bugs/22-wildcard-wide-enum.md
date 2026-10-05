@@ -1,10 +1,13 @@
 # 22. A wildcard arm over a wide enum costs N^3 code
 
+**Kind:** cost (build time). Not a bug: rrc's output is correct; patch 0030
+is an optimization.
+
 ## Summary
 
-**Kind:** cost. **Status:** patched (0030, a build-time fix), applied in
-`./reussir` (`l2r-local` cc8e5aa5); lean2rr also works around it (it
-releases held wide values out of line in wildcard arms).
+**Kind:** cost. **Status:** patched (0030, a build-time optimization),
+applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also works around
+it (it releases held wide values out of line in wildcard arms).
 
 **Verdict: cost, not a bug.** Three documented Reussir design choices
 multiply here; none is wrong by Reussir's rules: the pattern compiler and
@@ -40,7 +43,7 @@ about linear in N, as natively (about 1.3 s).
 40: 18, 26, 85, 536 s (BEq); DecidableEq N = 30: 493 s. The pure-Reussir
 analogue: 1.2, 9.3, 65, 444 s. The `beq` function grows from 939 MLIR lines
 at entry to 24k after TokenReuse at N = 10 (3.3k to 155k at N = 20); MLIR's
-SCCP then takes about size^2.4 ([bug 11](11-sccp-call-graph.md)'s class).
+SCCP then takes about size^2.4 ([issue 11](11-sccp-call-graph.md)'s class).
 
 With 0030 (the pure-Reussir analogue, `rrc -O aggressive` to an executable,
 loaded machine): N = 10: 1.7 s -> 0.6 s; N = 20: 15.0 s -> 1.8 s; N = 30:
@@ -129,8 +132,8 @@ scrutinee's type, hence the boxing exception.
 - The repro's times above.
 - Smaller functions reach the inliner's size cap sooner: on lean2rr's
   StateT tower built without its inlining workaround
-  ([bug 20](20-statet-tower.md)), rrc's peak memory went from 1.8 GB to
-  2.4 GB with this patch alone; 0034 (bug 20) brings the series to 1.0 GB.
+  ([issue 20](20-statet-tower.md)), rrc's peak memory went from 1.8 GB to
+  2.4 GB with this patch alone; 0034 (issue 20) brings the series to 1.0 GB.
   With the workaround: unchanged.
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed; lean2rr's classic corpus builds and
@@ -145,7 +148,7 @@ regions using different outside values, a nested use of the payload,
 different op kinds and result types); no pass relies on a multi-tag region
 holding one tag; a 6-variant program exercising wildcard releases,
 construction in a merged arm, nested matches and the scrutinee used whole,
-and bug 22's repro at N = 12, over six flag sets with an allocator shim:
+and issue 22's repro at N = 12, over six flag sets with an allocator shim:
 identical output, as many frees as allocations, no size mismatch. One
 finding, RV8C-03 (low, performance only): a merged arm that rebuilds the
 scrutinee's type lost exact-size reuse (`_ => E::b{k, k, k}`: reuse

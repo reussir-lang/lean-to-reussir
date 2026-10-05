@@ -38,7 +38,7 @@ flags.
 **Actual on ef922049.** A crash at every `-O` level: SIGSEGV, or SIGABRT
 from a stack overflow (a freed cell forms a cycle). ASan reports a heap use
 after free. `run.sh` printed
-`bug 14   REPRODUCES  use after free: SIGABRT (overflowed its stack), expected 0`.
+`issue 14   REPRODUCES  use after free: SIGABRT (overflowed its stack), expected 0`.
 
 ## Cause
 
@@ -85,8 +85,8 @@ Fixed by 0009, the patch of [bug 9](09-duplicate-bound-member.md#patch)
 op before the release uses a bound member other than by a borrow or a
 retain (`consumesFusedMember`, which 0007 adds). 0007 had the same flaw in
 its own scan, found in review (R2-1), and is fixed the same way
-([bug 7](07-phantom-reuse-donor.md#patch)).
+([issue 7](07-phantom-reuse-donor.md#patch)).
 
 The round-2 stack, which has the first 0009 (duplicate rule only), still
 crashes; with the revised 0007/0009: FIXED (`0`). `run.sh` on the patched
-build: `bug 14   FIXED       prints 0 (no wrong result in 1000 runs)   [lean2rr's flags]`.
+build: `issue 14   FIXED       prints 0 (no wrong result in 1000 runs)   [lean2rr's flags]`.

@@ -66,7 +66,8 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
 - **Why:** Reussir projects every bound field at the match with an
   increment; the field's later release looks like a reusable cell to token
   reuse, which prefers it to the cell actually freed
-  ([Reussir bug 7](../../../reussir-bugs/07-phantom-reuse-donor.md)):
+  ([Reussir issue 7](../../../reussir-bugs/07-phantom-reuse-donor.md), a
+  missed optimization):
   `TreeMap.insert` allocated and freed a node per level (13.2 allocations
   per insertion → 2.2, bc951a4); BST inserts with `Nat`/`String` keys
   (9f35c6c); `List.mergeSort`'s merge allocated a cell per step, and the
@@ -94,7 +95,7 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
 - **What:** A projection `let x = s.j` at the top of an alternative moves
   into the branches of the following `if`/`match` that use `x`, when
   another branch keeps `s` whole.
-- **Why:** The same phantom-donor problem as bug 7: an association-list
+- **Why:** The same phantom-donor problem as issue 7: an association-list
   update that keeps the pair whole in one branch allocated a new cons per
   element and freed the matched one after its recursive call, which was
   then no longer a tail call (adv4 PF4-10, 3e3a6aa).
@@ -107,7 +108,7 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   values of wide enums (8 or more constructors) it holds and does not use
   through one out-of-line call, `l2r_sink`.
 - **Why/Where:** see
-  [../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#bug-22-a-wildcard-arm-over-a-wide-enum-costs-n3-code).
+  [../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#issue-22-cost-a-wildcard-arm-over-a-wide-enum-costs-n3-code).
 - **Remove only if:** see the linked entry.
 
 ### A scrutinee that ends with a brace is parenthesized

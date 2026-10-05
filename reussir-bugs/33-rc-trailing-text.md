@@ -38,7 +38,7 @@ module {
 `!reussir.rc<i64, bogus words here>` reads as `!reussir.rc<i64>`, and
 `!reussir.ref<i64, field>` as `!reussir.ref<i64>`. A misspelled keyword
 before any comma is caught (`!reussir.rc<i64 garbage>`: "Unknown attribute
-in RcType"). `run.sh` prints `bug 33   REPRODUCES  rrc -x mlir reads
+in RcType"). `run.sh` prints `issue 33   REPRODUCES  rrc -x mlir reads
 !reussir.rc<i64 rigid, atomic> as !reussir.rc<i64 rigid>` on the unpatched
 build.
 
@@ -98,7 +98,7 @@ text that was dropped before is now an error ("expected '>'").
 malformed types, each "expected '>'"; it fails without the patch). The
 whole lit suite on the final stack: 647 tests, 566 passed, 81 unsupported,
 none failed (every test that prints and reparses rc or ref types passes).
-`run.sh`: `bug 33   FIXED       rrc -x mlir rejects !reussir.rc<i64 rigid,
+`run.sh`: `issue 33   FIXED       rrc -x mlir rejects !reussir.rc<i64 rigid,
 atomic>: expected '>'`.
 
 **Review.** RV8 (e) round 2 (`rv8/reussir/e/round2/FINDINGS.txt`): no

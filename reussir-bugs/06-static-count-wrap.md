@@ -73,7 +73,7 @@ aggressive --no-pack-record-members --reuse-across-call`), then `./bug06
 **Actual on ef922049.** SIGSEGV (exit 139) after about 15 s. With
 `4294967290` it prints `4294967290`, because the count has not wrapped yet.
 `run.sh` printed
-`bug 06   REPRODUCES  N = 4294967300: SIGSEGV (static Nil freed)`.
+`issue 06   REPRODUCES  N = 4294967300: SIGSEGV (static Nil freed)`.
 
 ## Cause
 
@@ -244,7 +244,7 @@ the immortal encoding (the module attribute is set for both). There it is
 redundant but harmless. The drop glue's member releases go through the
 same pattern (AcquireDropExpansion reuses it), so they are covered too.
 0013's `drop_and_free` returns early for nullary arms for the same reason
-([bug 13](13-long-list-drop.md)).
+([issue 13](13-long-list-drop.md)).
 
 **Alternative tried first.** The first version guarded the increment's
 store instead (an address `select` that sent an immediate's store to a
@@ -271,7 +271,7 @@ cores (this entry's own measurement), "up to 30%" (the patch message) and
   with 0013 and 0014 applied.
 - On the round-2 stack: FIXED (`4294967300`, 14 s). `run.sh` on the
   patched build:
-  `bug 06   FIXED       N = 4294967300: prints 4294967300   [-O aggressive --no-pack-record-members --reuse-across-call]`.
+  `issue 06   FIXED       N = 4294967300: prints 4294967300   [-O aggressive --no-pack-record-members --reuse-across-call]`.
 - **Cost.** About 4% on rbtree and nothing measurable elsewhere, on both
   core types of the test machine. Review round 2 (finding R2-3) measured
   +11% on the microbenchmark on Cortex-A725 and +2% on Cortex-X925, and
@@ -282,13 +282,13 @@ cores (this entry's own measurement), "up to 30%" (the patch message) and
   one `scf.if` deeper, which hides some member releases from TokenReuse's
   search for tokens trapped in branches. Round 3 found both unchanged;
   judged acceptable against a crash. The same nesting has the opposite
-  effect on [bug 7](07-phantom-reuse-donor.md)'s phantom donors: on
+  effect on [issue 7](07-phantom-reuse-donor.md)'s phantom donors: on
   `l2r-local` the member releases of a matched node sit one `scf.if`
   deeper, TokenReuse frees their tokens inside, and the node's own cell is
   reused even where 0007 cannot fire (observed 2026-10-02 with
   `repros/bug07b-call-before-branch.rr`: ratio 1.34-2.08 with the default
   encoding, 5.61-11.37 with `--nullary-variant-encoding boxed`, which emits
-  no guard; commands and the remarks in bug 7's entry).
+  no guard; commands and the remarks in issue 7's entry).
 
 **Effect on lean2rr.** A static cell is never freed or reused, even after
 2^32 references: the long loops above no longer crash.

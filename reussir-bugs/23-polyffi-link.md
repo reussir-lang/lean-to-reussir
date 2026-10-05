@@ -1,10 +1,16 @@
 # 23. Linking the compiled polymorphic-FFI modules is quadratic in their number
 
+**Kind:** cost (build time). Not a bug: rrc's output is correct; the
+quadratic link can make large builds infeasible (65 minutes for 8241
+instances), and patch 0017 is an optimization.
+
 ## Summary
 
-**Kind:** bug (build time). **Status:** patched (0017), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** cost (build time). **Status:** patched (0017, an optimization),
+applied in `./reussir` (`l2r-local` cc8e5aa5).
 
-**Verdict: bug (build time).** rrc links the bitcode of the compiled
+**Verdict (audit): bug (build time); reclassified on 2026-10-05 as a cost,
+because the output is correct.** rrc links the bitcode of the compiled
 textures one module at a time with the static `llvm::Linker::linkModules`,
 which builds a new linker for every call. LLVM's linker is meant to be
 reused across a sequence of modules: `llvm-link` and LTO link all their
@@ -59,7 +65,7 @@ the start of the MLIR lowering pipeline, timed with a rustc wrapper and
 | 1000 | 56 s | 0.9 s | 260 s | 162 s |
 | 2000 | 339 s | 1.9 s | 706 s | 341 s |
 
-`run.sh` prints `bug 23   REPRODUCES  link of the gathered modules:
+`run.sh` prints `issue 23   REPRODUCES  link of the gathered modules:
 K = 300: 4.0 s, K = 600: 22.8 s (5.70x for twice the instances)` on the
 unpatched build.
 
@@ -135,7 +141,7 @@ No workaround. Fewer instances shrink both the linear compile and the
 quadratic link; the conversion-origin calls are two thirds of them. The
 texture compiles stay one rustc process per instance, one after another
 (45-100 ms each, about 12 minutes for `Io6Http`): Reussir's documented
-design (`docs/design/polymorphic-ffi.md`), a cost, not part of this bug.
+design (`docs/design/polymorphic-ffi.md`), a cost, not part of this issue.
 
 ## Patch
 
@@ -200,7 +206,7 @@ been moved to the caller, which keeps the module alive).
   any two builds. Generated programs (light, up to K = 2000 small
   instances): byte-identical objects.
 - Times: see the table above; `Io6Http`: 6.4 s instead of 3881 s.
-- `run.sh` on the patched build: `bug 23   FIXED  link of the gathered
+- `run.sh` on the patched build: `issue 23   FIXED  link of the gathered
   modules: K = 300: 0.3 s, K = 600: 0.5 s (1.66x for twice the
   instances)`.
 - Reussir's tests: the 26 lit tests that use polymorphic FFI
@@ -230,7 +236,7 @@ mover can give a different but equivalent representative name).
 same way, faster. Large programs (thousands of instances, as with
 Std.Http) spent most of rrc's time linking: `Io6Http` spent 65 minutes in
 the link alone. With 0017 it goes on to MLIR's interprocedural SCCP
-([bug 11](11-sccp-call-graph.md)), where it was still running after 50
+([issue 11](11-sccp-call-graph.md)), where it was still running after 50
 minutes, so such programs need more than this patch to build in
 reasonable time.
 

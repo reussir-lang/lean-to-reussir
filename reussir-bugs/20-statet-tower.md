@@ -1,12 +1,17 @@
 # 20. The MLIR inliner grows lean2rr's conversion code superlinearly (build time)
 
+**Kind:** cost (build time and memory of the MLIR inliner; first unclear,
+cause found later). Not a bug: rrc's output is correct; patch 0034 is an
+optimization.
+
 ## Summary
 
 **Kind:** unclear at first; found later to be a growth of the MLIR
-inliner's chains of copied calls, with a small local fix. **Status:**
-patched (0034), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr
-also works around it (it keeps its conversion, unboxing and uniform-code
-application functions out of rrc's inliner), and keeps doing so.
+inliner's chains of copied calls (a cost), with a small local
+optimization. **Status:** patched (0034), applied in `./reussir`
+(`l2r-local` cc8e5aa5); lean2rr also works around it (it keeps its
+conversion, unboxing and uniform-code application functions out of rrc's
+inliner), and keeps doing so.
 
 With lean2rr's conversion, unboxing and application functions inlinable,
 rrc's build time and memory on polymorphic recursion through monad

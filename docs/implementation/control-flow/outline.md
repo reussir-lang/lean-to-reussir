@@ -18,9 +18,11 @@ text, from growing superlinearly. It is a required part (`outline` in
   functions are below the triggers and come out unchanged.
 - **Why:** Every IO bind nests one `match`, so a `main` of N statements is
   N levels deep, and reuse across calls costs about depth^2.6
-  ([Reussir bug 16](../../../reussir-bugs/16-nested-io-matches.md));
+  ([Reussir issue 16](../../../reussir-bugs/16-nested-io-matches.md), a
+  cost);
   rrc's memory is quadratic in a straight-line `Nat` function
-  ([Reussir bug 17](../../../reussir-bugs/17-long-nat-block.md)); the
+  ([Reussir issue 17](../../../reussir-bugs/17-long-nat-block.md), a
+  cost); the
   `.rr` indentation follows the nesting (a 3000-arm literal match: 126 MB
   of `.rr`, lean2rr out of memory at 16 GB; 072c620, 3597a31). A
   2000-line `main` now builds in about two minutes and 2 GB.
@@ -28,9 +30,9 @@ text, from growing superlinearly. It is a required part (`outline` in
   `maxDepth`, `maxLets`, `minRest`), `outlineFns`, `walkBlock`,
   `walkTail`, `outlineTail`, `extent`, `heavy`; `Emit/Program.lean`:
   `LoweredProgram.outline`; `lean2rr/Main.lean`: `pipeline` (`L2R_NO_OUTLINE`
-  skips it, for the repros of bugs 16 and 17).
-- **Remove only if:** bugs 16 and 17 are gone and the `.rr` text no
-  longer grows with nesting.
+  skips it, for the repros of issues 16 and 17).
+- **Remove only if:** the costs of issues 16 and 17 are gone and the
+  `.rr` text no longer grows with nesting.
 
 ### Deep `let` values come from a function
 

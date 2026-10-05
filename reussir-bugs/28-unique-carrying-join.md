@@ -48,7 +48,7 @@ That must produce a new cell, because the cell is shared.
 
 **Actual on ef922049.** Prints `101` then `101` at `-O aggressive`
 (`101` then `1` at `-O none` and `-O default`, where the analysis does not
-run). `run.sh` prints `bug 28   REPRODUCES  prints 101 101, expected 101 1`.
+run). `run.sh` prints `issue 28   REPRODUCES  prints 101 101, expected 101 1`.
 The same IR shape with an opaque call in place of the field
 (`func.call @opaque` joined with an `rc.create`) also gets a `.unique` clone.
 
@@ -197,7 +197,7 @@ pass unchanged.
   tests, 566 passed, 81 unsupported, none failed.
 - lean2rr's runtime tests (14, among them RtFuzzReuse, RtShareMutators,
   RtFreshRebuildShared, RtReprShare, RtHashMap, RtPersistWalk): all pass.
-- `run.sh`: `bug 28   FIXED       prints 101 1   [-O aggressive]`.
+- `run.sh`: `issue 28   FIXED       prints 101 1   [-O aggressive]`.
 
 **Review.** Round RV8 (e)
 (local review notes; its IDs are cited

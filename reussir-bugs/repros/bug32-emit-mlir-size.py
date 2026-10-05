@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Bug 32: write a .rr whose `rrc --emit mlir` output is exponential in K.
+"""Issue 32 (cost): write a .rr whose `rrc --emit mlir` output is exponential
+in K.
 
     bug32-emit-mlir-size.py K OUT.rr
 
@@ -9,7 +10,7 @@ RecordType::print (lib/IR/ReussirTypes.cpp) does, and the MLIR printer has
 no type aliases. The program itself is linear in K (it prints 1).
 Command: rrc OUT.rr --emit mlir -o OUT.mlir
 Expected: an output linear in K. Reussir ef922049: about 2x per level
-(K = 8: 0.55 MB, K = 10: 2.2 MB, K = 12: 8.7 MB). Bug 10's generator, which
+(K = 8: 0.55 MB, K = 10: 2.2 MB, K = 12: 8.7 MB). Issue 10's generator, which
 nests the same records in closure types: K = 16 prints 1.0 GB, in 14 s and
 1.06 GB of rrc memory.
 """

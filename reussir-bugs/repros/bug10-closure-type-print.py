@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Bug 10: write a .rr whose closure result type prints exponentially large.
+"""Issue 10 (cost): write a .rr whose closure result type prints
+exponentially large.
 
     bug10-closure-type-print.py K OUT.rr
 

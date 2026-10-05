@@ -11,10 +11,10 @@ of a key already present) or passed whole to a call (merge's `go l₁ ys (y ::
 acc)`, where `y :: ys` is the matched value), each field projected there is
 an extra reference (inc and dec), and its release looks like a reusable cell
 to Reussir's token reuse, which prefers it to the cell actually freed and
-then never reuses anything (Reussir bug 7: TreeMap's `balance` rebuilt every
-node of the path; a BST insert with `Nat` keys, whose comparison is a call
-before the branch, every node; `List.mergeSort`'s merge allocated a cell at
-every step and freed the matched one).
+then never reuses anything (Reussir issue 7, a missed optimization: TreeMap's
+`balance` rebuilt every node of the path; a BST insert with `Nat` keys, whose
+comparison is a call before the branch, every node; `List.mergeSort`'s merge
+allocated a cell at every step and freed the matched one).
 
 So such an alternative binds at the match only the fields needed while the
 value is live (`usesWhileLive`); a field used only in inner alternatives

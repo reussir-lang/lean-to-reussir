@@ -267,7 +267,7 @@ See [Runtime](runtime.html#startup) for the entry point.
 - **Literal tables.** A run of 32 or more small `Nat` literals pushed onto
   an `Array Nat` becomes one call that reads a generated table.
 - **Outline.** rrc's analyses grow faster than linearly with nesting depth
-  and with straight-line length (Reussir bugs 16 and 17). So a tail path 32
+  and with straight-line length (Reussir issues 16 and 17, costs). So a tail path 32
   matches deep or 256 `let`s long is cut into functions. A recursive function
   keeps its loops: the cut part returns a step value, and the function makes
   the tail call itself.

@@ -106,5 +106,5 @@ to `lean2rr/LeanToReussir/`. Plan
   inlined wherever it is called, held such an expansion in its
   `unreachable` arm (ae5104d).
 - **Where:** `Lower/Finish.lean`: `boxSink`, `genUnbox`. Related:
-  [../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#bug-22-a-wildcard-arm-over-a-wide-enum-costs-n3-code).
+  [../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#issue-22-cost-a-wildcard-arm-over-a-wide-enum-costs-n3-code).
 - **Remove only if:** rrc releases wide enums out of line itself.

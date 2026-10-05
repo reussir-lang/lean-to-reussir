@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Bug 30: write an MLIR module whose call lowering scans the module per call.
+"""Issue 30 (cost): write an MLIR module whose call lowering scans the module
+per call.
 
     bug30-call-lowering.py N OUT.mlir
 

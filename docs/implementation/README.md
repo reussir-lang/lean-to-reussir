@@ -9,7 +9,7 @@ repeat: each entry gives the gist and links to the plan's section.
 **How to use and maintain these files.** To find out why lean2rr does
 something, search these files for the function name, the generated name
 (`l2r_sink`, `L2RStep_k`), the review finding (RV6J-03, IO6-14, PF4-10) or
-the Reussir bug number, or start from the area list below. Every change
+the Reussir issue number, or start from the area list below. Every change
 that adds, removes or changes a trick updates its entry here **in the same
 commit**: add an entry for a new special case, delete the entry of one that
 is removed, and keep "Where" pointing at functions that exist. Entries
@@ -32,7 +32,7 @@ round 7 `RV7…`, round 8 `RV8…`, round 9 `RV9…` with the reviews of its
 fixes `C01R…`-`C03R…`), the cross-tests on external fixtures (`XT-…`, their reviews
 `XT6-…`) and the reviews of merged branches (`RVPB-…`, `RVA-…`,
 `L434-…`); short hashes are commits on `dev` or on the branches merged
-into it. Reussir bugs link to
+into it. Reussir issues (bugs, costs and the other kinds) link to
 [`../../reussir-bugs/`](../../reussir-bugs/README.md).
 
 ## Areas
@@ -55,8 +55,9 @@ into it. Reussir bugs link to
    closed-term chains, persist walks, the entry point.
 7. [tasks/](tasks/README.md): thunk and task cells, deferral, `sync`
    dependents, the scheduler, polling, the stack guard, the event loop.
-8. [reussir-workarounds/](reussir-workarounds/README.md): each Reussir bug
-   with lean2rr's workaround and whether it can go; Reussir's limitations.
+8. [reussir-workarounds/](reussir-workarounds/README.md): each Reussir
+   issue (bug or cost) with lean2rr's workaround and whether it can go;
+   Reussir's limitations, its missed optimization and missing feature.
 9. [optional-passes.md](optional-passes.md): one line per optional pass
    with its soundness guard, and the required parts.
 10. [externs-ffi/](externs-ffi/README.md): extern dispatch and its order,

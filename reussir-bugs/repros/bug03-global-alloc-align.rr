@@ -1,8 +1,8 @@
-// Bug 3: Reussir's Rust global allocator (ReussirGlobalAlloc) raises every
-// Rust allocation to 16-byte alignment. Reussir builds mimalloc with
-// MI_MAX_ALIGN_SIZE=8, so every Rust Box/Vec allocation takes mimalloc's
-// aligned path (mi_malloc_aligned), and later frees in those pages take
-// mimalloc's generic path.
+// Issue 3 (intended, not a bug): Reussir's Rust global allocator
+// (ReussirGlobalAlloc) raises every Rust allocation to 16-byte alignment.
+// Reussir builds mimalloc with MI_MAX_ALIGN_SIZE=8, so every Rust Box/Vec
+// allocation takes mimalloc's aligned path (mi_malloc_aligned), and later
+// frees in those pages take mimalloc's generic path.
 // The texture keeps 1000 Box<u64> (size 8, align 8) and 1000 mi_malloc(8)
 // blocks alive and counts how many are 16-aligned. Then it times
 // allocate/free pairs of 16 bytes through Box::new and through mi_malloc

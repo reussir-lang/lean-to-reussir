@@ -7,8 +7,8 @@ import LeanToReussir.RR
 # Outlining deep and long function bodies
 
 rrc's per-function analyses grow faster than linearly in two shapes of
-code that Lean programs produce routinely (reussir-bugs/, bugs 16
-and 17):
+code that Lean programs produce routinely (reussir-bugs/, issues 16
+and 17, costs):
 - nesting: every IO bind is a `match` on the action's result whose `ok` arm
   holds the rest of the function, so a `main` of N statements nests N
   matches deep (a 3000-arm literal match nests 3000 `if`s), and reuse across

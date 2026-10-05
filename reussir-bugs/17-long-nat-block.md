@@ -1,11 +1,15 @@
 # 17. rrc memory is quadratic in the length of a straight-line function on `Nat`
 
+**Kind:** cost (build memory of a stock MLIR pass's default mode). Not a
+bug: rrc's output is correct; patch 0031 is an optimization.
+
 ## Summary
 
-**Kind:** cost (a stock MLIR pass's default mode), with a small local fix.
-**Status:** patched (0031), applied in `./reussir` (`l2r-local`
-cc8e5aa5); lean2rr also works around it (it cuts long functions into parts
-and turns `Array Nat` literals into tables), and keeps doing so.
+**Kind:** cost (a stock MLIR pass's default mode), with a small local
+optimization. **Status:** patched (0031), applied in `./reussir`
+(`l2r-local` cc8e5aa5); lean2rr also works around it (it cuts long
+functions into parts and turns `Array Nat` literals into tables), and keeps
+doing so.
 
 **Verdict (first: unclear; now found).** The quadratic memory is real and
 also happens at `-O none` (N = 250: 418 MB at `-O aggressive`, 160 MB at
@@ -73,7 +77,7 @@ entry could not bisect by pass because the dump did not parse back,
 
 ## lean2rr
 
-As for [bug 16](16-nested-io-matches.md), a function with a tail path (or a
+As for [issue 16](16-nested-io-matches.md), a function with a tail path (or a
 `let` value) of 256 `let`s is cut into parts of at most 64 `let`s on a
 path, recursive functions included (`LeanToReussir/Outline.lean`). rrc on
 the 1000-`let` block: 877 MB (was 4.1 GB; the rest grows linearly, about
@@ -126,9 +130,9 @@ linear cost gives a ratio of 1.7-1.9x. `run.sh` now also builds N = 10 and
 compares the memory each further `let` costs from 10 to 250 and from 250
 to 500: about 1x when linear. Two runs each:
 
-    final stack:  bug 17   FIXED       rrc: N = 10: 140 MB; N = 250: 31 s, 337 MB; N = 500: 47 s, 556 MB (each let: 0.82 MB up to 250, 0.88 MB from 250 to 500, 1.07x)
+    final stack:  issue 17   FIXED       rrc: N = 10: 140 MB; N = 250: 31 s, 337 MB; N = 500: 47 s, 556 MB (each let: 0.82 MB up to 250, 0.88 MB from 250 to 500, 1.07x)
                   (second run: 141, 335, 578 MB, 1.19x)
-    without 0031: bug 17   REPRODUCES  rrc: N = 10: 141 MB; N = 250: 31 s, 435 MB; N = 500: 55 s, 1151 MB (each let: 1.22 MB up to 250, 2.86 MB from 250 to 500, 2.34x)
+    without 0031: issue 17   REPRODUCES  rrc: N = 10: 141 MB; N = 250: 31 s, 435 MB; N = 500: 55 s, 1151 MB (each let: 1.22 MB up to 250, 2.86 MB from 250 to 500, 2.34x)
                   (second run: 142, 427, 1145 MB, 2.41x)
 
 (`without 0031`: 91da4f80, the apply list + 0016 + 0017.) The thresholds
