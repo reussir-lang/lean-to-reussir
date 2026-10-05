@@ -328,26 +328,88 @@ pub fn big(a: &LTagVec, i: u64) -> LBig {
     word_as_big(&slice(a)[i as usize]).clone()
 }
 
-/// The word at `i`; when it is a big value, the returned word owns one
-/// reference to it (so it outlives the array) and must be turned back into
-/// the handle with `big_of_owned_word`. Lets a reader consume the array
-/// once for both cases.
+/// The first step of a read of a tag vector (the prelude's
+/// `l2r_natarr_give`, `intarr` too): the caller's handle is given up for a
+/// view, as `array::give`.
 #[inline(always)]
-pub fn word_owned(a: &LTagVec, i: u64) -> u64 {
-    let w = word(a, i);
+pub fn give(a: LTagVec) -> u64 {
+    let o = obj(&a);
+    std::mem::forget(a);
+    unsafe {
+        let c = (*o).count;
+        if c != 1 {
+            (*o).count = c - 1;
+            o as u64 | 1
+        } else {
+            o as u64
+        }
+    }
+}
+
+/// The size of the tag vector of a view (`give`).
+///
+/// # Safety
+/// `p` is a view from `give` that neither `view_take` nor `view_end` has
+/// ended.
+#[inline(always)]
+pub unsafe fn view_size(p: u64) -> u64 {
+    unsafe { (*((p & !1) as *mut Obj)).len as u64 }
+}
+
+/// The word at `i` of the tag vector of a view (`give`), which ends here
+/// (`array::view_take`). A big word comes back owning one reference to its
+/// value (so it outlives the array), to be turned back into the handle
+/// with `big_of_owned_word`. A small word of a shared array is the whole
+/// read; a big word and the last reference go to one out-of-line call,
+/// `view_take_slow`.
+///
+/// # Safety
+/// `p` is a view from `give` that neither `view_take` nor `view_end` has
+/// ended, and `i` is below its size.
+#[inline(always)]
+pub unsafe fn view_take(p: u64, i: u64) -> u64 {
+    let o = (p & !1) as *mut Obj;
+    unsafe {
+        debug_assert!((i as usize) < (*o).len);
+        let w = *words(o).add(i as usize);
+        if ((p & 1) != 0) & is_small(w) {
+            w
+        } else {
+            view_take_slow(p, w)
+        }
+    }
+}
+
+/// `view_take` for a big word or the last reference: the word's big value
+/// gets a reference (the array still holds it, through another reference
+/// or through this view until the free below), and the last reference
+/// frees the block, releasing its big elements (`free`).
+#[cold]
+#[inline(never)]
+extern "C" fn view_take_slow(p: u64, w: u64) -> u64 {
     if !is_small(w) {
-        own_big_word(w);
+        std::mem::forget(word_as_big(&w).clone());
+    }
+    if (p & 1) == 0 {
+        free((p & !1) as *mut Obj);
     }
     w
 }
 
-#[cold]
-#[inline(never)]
-extern "C" fn own_big_word(w: u64) {
-    std::mem::forget(word_as_big(&w).clone());
+/// The end of a view without a read (`get!` out of bounds): the last
+/// reference frees the block.
+///
+/// # Safety
+/// `p` is a view from `give` that neither `view_take` nor `view_end` has
+/// ended.
+#[inline(always)]
+pub unsafe fn view_end(p: u64) {
+    if (p & 1) == 0 {
+        free((p & !1) as *mut Obj);
+    }
 }
 
-/// The big handle owned by a word from `word_owned`.
+/// The big handle owned by a word from `view_take`.
 #[inline(always)]
 pub fn big_of_owned_word(w: u64) -> LBig {
     debug_assert!(!is_small(w));
@@ -592,6 +654,46 @@ mod tests {
         assert_eq!(rc(&b), 2);
         assert_eq!(crate::big::limbs(&big(&r, 1)), crate::big::limbs(&b));
         drop(r);
+        assert_eq!(rc(&b), 1);
+    }
+
+    #[test]
+    fn views() {
+        let b = crate::big::of_limbs2(1, 1);
+        let a = push_big(push_word(empty(), 7), b.clone());
+        assert_eq!(rc(&b), 2);
+        // A shared array: `give` decrements now; a small word is the whole
+        // read, a big word comes back owning a reference.
+        let p = give(a.clone());
+        assert_eq!(p & 1, 1);
+        assert_eq!(count(&a), 1);
+        assert_eq!(unsafe { view_size(p) }, 2);
+        assert_eq!(unsafe { view_take(p, 0) }, 7);
+        let p = give(a.clone());
+        let w = unsafe { view_take(p, 1) };
+        assert_eq!(rc(&b), 3);
+        drop(big_of_owned_word(w));
+        assert_eq!(rc(&b), 2);
+        assert_eq!(count(&a), 1);
+        // A shared view ended without a read changes nothing more.
+        unsafe { view_end(give(a.clone())) };
+        assert_eq!(count(&a), 1);
+        // The last reference: the read frees the block (releasing its big
+        // element), the big word it returns keeps its own reference.
+        let a2 = a.clone();
+        let p = give(a);
+        let w = unsafe { view_take(p, 1) };
+        assert_eq!(rc(&b), 3);
+        let p = give(a2);
+        assert_eq!(p & 1, 0);
+        assert_eq!(unsafe { view_take(p, 0) }, 7);
+        assert_eq!(rc(&b), 2);
+        drop(big_of_owned_word(w));
+        assert_eq!(rc(&b), 1);
+        // `view_end` of the last reference frees the block.
+        let c = push_big(empty(), b.clone());
+        assert_eq!(rc(&b), 2);
+        unsafe { view_end(give(c)) };
         assert_eq!(rc(&b), 1);
     }
 

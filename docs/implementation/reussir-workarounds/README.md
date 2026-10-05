@@ -4,7 +4,7 @@ Everything lean2rr does because of a Reussir issue: a bug, a cost or a
 limitation. The issues themselves (repro, cause, patch) are documented
 one file each in [`reussir-bugs/`](../../../reussir-bugs/README.md), whose
 column *Kind* says what each is: only a *bug* is erroneous behaviour;
-costs, the missed optimization (7) and the missing features (13, 27) have
+costs, the missed optimizations (7, 36) and the missing features (13, 27) have
 correct output, and their patches are optimizations or features, not
 fixes ([kinds](../../../reussir-bugs/README.md#kinds)). This directory says
 what lean2rr does about them and whether the patched Reussir still needs
@@ -77,3 +77,4 @@ either way.
 | [33](../../../reussir-bugs/33-rc-trailing-text.md) | bug | none (hand-written MLIR only) | 0064, applied | n/a |
 | [34](../../../reussir-bugs/34-executable-textrel.md) | bug | `scripts/l2r.py` passes `--relocation-mode pic` (as native Lean, a PIE without text relocations) | 0065, applied | keep: harmless with 0065, and needed without it |
 | [35](../../../reussir-bugs/35-texture-rustc-runs.md) | cost | none; `scripts/l2r.py` sets `REUSSIR_FFI_CACHE_DIR` (`runtime/leanrt/target/polyffi-cache`) for the patch's cache, and the `rustc-native` script names lean-runtime's build | 0066, applied | n/a: uses the patch, ignored without it |
+| [36](../../../reussir-bugs/36-trampoline-inline.md) | missed optimization | read textures kept small (the view protocol, [ownership.md](../ownership.md#reads-give-their-reference-up-first-for-a-view)) | none (missed optimization) | needed (every texture LLVM judges too costly at a cold call site stays a call) |

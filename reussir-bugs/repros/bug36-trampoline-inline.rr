@@ -1,0 +1,52 @@
+// Issue 36 (missed optimization): rrc defines the import trampoline of a
+// texture (the function Reussir code calls, which calls the texture's
+// `_ffi` boundary function) without an inline attribute (rewriteImport,
+// lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp). LLVM inlines the
+// `_ffi` function into it, and then inlines the trampoline into a caller by
+// its ordinary cost model: at a call site it judges cold (deep in branches),
+// only below a cost of 45, whatever the texture asks for. `mix` costs more
+// than 45 and less than the threshold of an ordinary call site.
+// Command (run.sh bug36): rrc THIS -o OUT.ll --emit llvm-ir -O aggressive
+// Expected (an inline attribute on the trampoline): no call of `mix` left.
+// Reussir ef922049 and l2r-local d79f8b70: `main`'s call of `mix` is
+// inlined, `deep`'s (under seven conditions) stays a call.
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+#[ffi(import)]
+fn seed() -> u64 [{ std::hint::black_box(20u64) }];
+#[ffi(import)]
+fn mix(x : u64) -> u64 [{
+    {
+        #[cold]
+        #[inline(never)]
+        fn slow(x: u64) -> u64 { std::hint::black_box(x) }
+        let y = x.wrapping_mul(0x9E3779B97F4A7C15) ^ (x >> 7);
+        let z = y.wrapping_add(x >> 11).wrapping_mul(0xBF58476D1CE4E5B9);
+        if z & 1023 == 0 { slow(z) } else { z.rotate_left(13) ^ (z >> 3) ^ (z >> 29) }
+    }
+}];
+
+// `mix` under seven conditions that LLVM's branch heuristics expect false
+// (`x == 0`): a call site it judges cold.
+fn deep(n : u64) -> u64 {
+    if n % 2 != 0 { n } else {
+        if n % 3 != 0 { n + 1 } else {
+            if n % 5 != 0 { n + 2 } else {
+                if n % 7 != 0 { n + 3 } else {
+                    if n % 11 != 0 { n + 4 } else {
+                        if n % 13 != 0 { n + 5 } else {
+                            if n % 17 != 0 { n + 6 } else { mix(n) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[main]
+fn main() {
+    let s = seed();
+    say(mix(s));
+    say(deep(s * 25525 + 510510));
+}

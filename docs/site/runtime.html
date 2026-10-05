@@ -84,7 +84,8 @@ A comment at each function names the C function it follows.</p>
   are the extern's mono parameters without the erased ones and without the
   IO world.</li>
 <li>Every function consumes its arguments (Reussir's rule). A function that
-  only reads a handle releases it at the end.</li>
+  only reads a handle releases it. An array or string read releases it
+  first, before the index check.</li>
 <li>A function never changes a value in place unless the value is unique
   (count 1). The cells of references, thunks and tasks are mutable by design.</li>
 <li>A polymorphic extern takes explicit storage type arguments:

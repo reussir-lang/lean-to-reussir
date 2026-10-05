@@ -3239,9 +3239,21 @@ Each item says what differs and when.
   and a release in the inlined runtime function. LLVM cancels the pair when
   the increment's store reaches the release with no store or call on any
   path in between (Reussir's `rc.inc` lets it assume the old count was at
-  least 1; the prelude ends the impossible big-index paths instead of
-  rejoining them for this, and takes a checked index as its word once): index loops and insertion sort on
-  `Array UInt64` run at 1.2x native or better. It does not when a
+  least 1). So a read gives its reference up first, before its bounds
+  check, for a view of the array, and its failing branch releases nothing;
+  the prelude takes an index as its word and ends the impossible big-index
+  paths instead of rejoining them; lean2rr passes a read's index in a
+  `let`, so that Reussir increments the index before the container; and
+  each read texture is small enough for LLVM to inline at a call site it
+  judges cold (Reussir issue 36; docs/implementation/ownership.md, "Reads
+  give their reference up first, for a view"). Index loops and insertion
+  sort on `Array UInt64` ran at 1.2x native or better before these
+  changes; with them (perf-array-reads, measured in the LLVM IR), no
+  array read of lean-zip stays a call (279 did), and its LZ77 loop has 47
+  count stores on its hot paths, at most 7 on one iteration (77 and 15
+  before). A loop body whose slow path (a big number's arithmetic, a
+  call) rejoins the fast path keeps a count store per iteration: LLVM
+  reloads the count after the call. It does not cancel either when a
   structure field projected at the top of a loop body is released by the
   iteration's last read, as in Lean's `String.Slice` loops (`String.any`,
   `contains`, `toNat?`): 1.7x native (Pf4MinStrAny; 1.1x with the projection

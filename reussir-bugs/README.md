@@ -6,7 +6,7 @@ a repro, the cause in Reussir's source where known, what lean2rr does about
 it, and, if it is patched, the local patch explained, with its review. Not
 every issue is a bug: the column *Kind* of the [status table](#status) says
 what each one is ([kinds](#kinds)). Most are bugs; the others are intended
-behaviour, costs, a missed optimization or missing features, whose output
+behaviour, costs, missed optimizations or missing features, whose output
 is correct.
 
 Older text and commit messages (including the subjects of the patch files)
@@ -53,13 +53,13 @@ The [audit](#review) of 2026-10-02 assigned the first kinds; it also had a
 verdict *unclear* (a real slowdown whose cause is not shown), which issue
 20 had until its cause was found (a cost). It called 10, 11b and 23 *bug
 (build time)*; they were reclassified as costs on 2026-10-05, since their
-output is correct. By kind, the 35 entries are:
+output is correct. By kind, the 36 entries are:
 
 - 20 bugs: 1, 2, 4, 5, 6 (with a flag workaround), 8, 9, 12, 14, 15, 18,
   19, 21, 24, 26, 28, 29, 31, 33, 34;
 - 11 costs: 10, 11 (both parts, 11b included), 16, 17, 20, 22, 23, 25,
   30, 32, 35;
-- 1 missed optimization: 7;
+- 2 missed optimizations: 7, 36;
 - 2 missing features: 13, 27;
 - 1 intended: 3.
 
@@ -133,13 +133,15 @@ since 2026-10-03, 0065 and 0066 since 2026-10-04).
 | [33](33-rc-trailing-text.md) | bug (tooling) | the rc and ref type parser drops the text after a comma (`!reussir.rc<i64 rigid, atomic>` reads as `!reussir.rc<i64 rigid>`) | no, hand-written MLIR only | - | 0064 | rv8/reussir/e/round2: no defect | yes |
 | [34](34-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes: every lean2rr binary has `DT_TEXTREL` on aarch64; with lld or on x86-64 it would not link | `l2r.py` passes `--relocation-mode pic` | 0065 | rv8/reussir/bug34: no defect | yes |
 | [35](35-texture-rustc-runs.md) | cost (build time) | rrc compiles every polymorphic-FFI texture with rustc again on every build (about 470 per lean2rr program, 13 s of a small program's 16 s of rrc) | yes, build time | none needed: `l2r.py` sets `REUSSIR_FFI_CACHE_DIR` for 0066's cache (ignored without the patch) | 0066 | FCR (+ second look): FCR-01 (medium, a race) and the small findings fixed | yes |
+| [36](36-trampoline-inline.md) | missed optimization | a texture's import trampoline has no inline attribute: at a call site LLVM judges cold, a texture costing more than 45 stays a call | yes, speed (array reads deep in branches stayed calls) | read textures kept small (the view protocol, perf-array-reads) | none | - | - |
 
-In numbers: 35 entries (by kind: 20 bugs, 11 costs, 1 missed
-optimization, 2 missing features, 1 intended; [kinds](#kinds)). 32 are
+In numbers: 36 entries (by kind: 20 bugs, 11 costs, 2 missed
+optimizations, 2 missing features, 1 intended; [kinds](#kinds)). 32 are
 patched by 35 patches (0013 to 0015 for issue 13, 0002 and 0019 for bug 2,
 0032 and 0033 for issue 11 and its part 11b; 0009 fixes bugs 9 and 14),
-all applied (0065 and 0066 since 2026-10-04); 3 stay documented only: 3
-(intended), 25 and 32 (costs). Of the 35, 20 fix bugs and 15 are
+all applied (0065 and 0066 since 2026-10-04); 4 stay documented only: 3
+(intended), 25 and 32 (costs), 36 (a missed optimization). Of the 35
+patches, 20 fix bugs and 15 are
 improvements: 11 optimizations (0007 for issue 7; 0017, 0024, 0030, 0031,
 0032, 0033, 0034, 0035, 0062, 0066 for costs) and 4 features (0013 to 0015
 for issue 13, 0027 for issue 27). The two other patches, 0040 and 0050, belong to no

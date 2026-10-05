@@ -366,14 +366,24 @@ get/set/push/size, string get/next/push, the Nat helpers) into Reussir code
 (checked with `rrc --emit llvm-ir`). Inlined, a read's release meets the
 caller's increment, and LLVM folds the pair (the free check included,
 thanks to the `old count >= 1` that Reussir's `rc.inc` asserts) as long as
-no other store or call lies on a path between them. So indices that are
-in bounds by a proof (`fget`, `fset`, `fswap`, and the checked variants
-after their bounds test) and positions proved valid (`String.Pos.get`,
-`next`) are converted by `l2r_index_of_nat`, whose impossible big case
-ends the program instead of rejoining the read with refcount traffic on
-the big number; a checked index (`get!`, `set!`) is taken as its word once
-(`l2r_word_index_ok`), so in bounds there is no refcount traffic on it at
-all.
+no other store or call lies on a path between them. So a read gives its
+reference up first, before its bounds check: `l2r_array_give`
+(`array::give`, `tagvec::give`) returns a view of the array, the check
+follows in Reussir code, and `l2r_view_take` (the element; the last
+reference frees the block) or `l2r_view_end` ends the view; the failing
+branch of a read proved in bounds releases nothing and ends the program.
+String reads decide their release before their rule runs
+(`string::read_owned`). An index in bounds by a proof (`fget`, and the
+checked variants after their bounds test) is taken as its word
+(`l2r_word_index_ok`): a big one is the failing branch, unreachable code;
+`get!`'s index too, so in bounds there is no refcount traffic on it at
+all. Updates (`fset`, `fswap`) convert theirs with `l2r_index_of_nat`,
+whose impossible big case ends the program instead of rejoining the
+update with refcount traffic on the big number; positions proved valid
+(`String.Pos.get`, `next`) are words whose big case is unreachable code
+inside the texture (`leanrt::index_word`). The rules and the measurements:
+docs/implementation/ownership.md, "Reads give their reference up first,
+for a view".
 
 **`Nat`/`Int`.** One word each, with Lean's exact encoding
 (`leanrt::nat`): an odd word is a small value, `lean_box(n)` for a `Nat`

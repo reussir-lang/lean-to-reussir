@@ -41,7 +41,8 @@
 # (--emit mlir-llvm, --emit mlir), 30 times one conversion pass through
 # reussir-opt (SKIPPED when the checkout has not built it), 35 builds one
 # program twice with one REUSSIR_FFI_CACHE_DIR and counts the textures the
-# second build compiles (through a rustc wrapper). Bug 24 runs
+# second build compiles (through a rustc wrapper). Issue 36's repro (a
+# missed optimization) counts the calls left in its LLVM IR. Bug 24 runs
 # reussir-llvm-opt 12 times on one of the checkout's tests. lean2rr works
 # around 16, 17 and 20; the repros turn its workarounds off (L2R_NO_OUTLINE,
 # L2R_NO_INLINE_ANCHORS).
@@ -587,7 +588,26 @@ bug35() {
     else say_line OTHER 35 "$msg" "-O aggressive"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33 34 35"
+bug36() {
+    # The textures built as scripts/l2r.py builds them: for the CPU rrc
+    # compiles for (NATIVE_FLAGS), else LLVM inlines no texture at all
+    # (conflicting target features). Two call sites of `mix`: an ordinary
+    # one in `main`, a cold one in `deep`.
+    local d=$WORK/out/36 n
+    mkdir -p "$d"
+    printf '#!/bin/sh\nexec "%s" "$@" -C target-cpu=native -C target-feature=-outline-atomics\n' "$RUSTC" > "$d/rustc"
+    chmod +x "$d/rustc"
+    { (cd "$WORK/run" && "$RRC" "$HERE/bug36-trampoline-inline.rr" -o "$d/out.ll" --emit llvm-ir -O aggressive \
+        --polyffi-rust-path "$d/rustc" --polyffi-libdir "$RT" --polyffi-libdir "$RT/deps" --polyffi-libdir "$TL") > "$d/log" 2>&1; } 2> /dev/null
+    RC=$?
+    if [ $RC != 0 ]; then say_line OTHER 36 "rrc $(signame "$RC"): $(grep -m1 -o "error[:=].\{0,160\}" "$d/log")" "-O aggressive"; return; fi
+    n=$(grep -c 'call [^@]*@_RC3mix(' "$d/out.ll")
+    if [ "$n" = 1 ]; then say_line REPRODUCES 36 "the cold call site still calls the trampoline of mix; main's call is inlined" "-O aggressive"
+    elif [ "$n" = 0 ]; then say_line FIXED 36 "both calls of mix inlined" "-O aggressive"
+    else say_line OTHER 36 "$n calls of mix left (expected 1, or 0 when fixed)" "-O aggressive"; fi
+}
+
+ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33 34 35 36"
 SLOW=" 06 10 11 16 17 20 23 "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

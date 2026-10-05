@@ -200,10 +200,11 @@ pub fn as_slice<T: Clone>(v: &RVec<T>) -> &[T] {
 }
 
 /// An index that the Lean-level proof (or the prelude's bounds check)
-/// guarantees to be in range was not: a lean2rr/runtime bug.
+/// guarantees to be in range was not: a lean2rr/runtime bug. Also the
+/// failing branch of the prelude's reads (`l2r_array_index_bug`).
 #[cold]
 #[inline(never)]
-extern "C" fn index_bug(i: u64, n: usize) -> ! {
+pub extern "C" fn index_bug(i: u64, n: usize) -> ! {
     crate::internal_panic(&format!("array index {} out of bounds {} (runtime invariant)", i, n))
 }
 
@@ -296,6 +297,86 @@ pub fn get<T: Clone>(v: &RVec<T>, i: u64) -> T {
     match s.get(i as usize) {
         Some(x) => x.clone(),
         None => index_bug(i, s.len()),
+    }
+}
+
+/// The first step of every read (the prelude's `l2r_array_give`): the
+/// caller gives up its handle, which the read received (every FFI call
+/// consumes its arguments), before anything else, and gets a view of the
+/// array: the block's address, with bit 0 set when the array is shared.
+///
+/// A shared array (count above 1) is decremented now: another reference
+/// keeps the block and its elements alive until the read's end (one thread
+/// runs Lean code, and nothing else runs until `view_take` or `view_end`).
+/// So no call and no other store come between the caller's increment and
+/// this decrement on any path (the bounds check and its panic come after),
+/// and LLVM removes both. The last reference keeps its count of 1, and
+/// `view_take`/`view_end` free the block. Bit 0 is set for the shared
+/// case, not the last reference: after the caller's increment, LLVM sees
+/// a shared view `o | 1`, and the test of bit 0 folds (it does not know
+/// that the address `o` is even, which a set bit for the last reference
+/// would need).
+#[inline(always)]
+pub fn give<T: Clone>(v: RVec<T>) -> u64 {
+    let o = v.into_raw();
+    unsafe {
+        let c = (*o).count;
+        if c != 1 {
+            (*o).count = c - 1;
+            o as u64 | 1
+        } else {
+            o as u64
+        }
+    }
+}
+
+#[inline(always)]
+fn view_block(p: u64) -> *mut Hdr {
+    (p & !1) as *mut Hdr
+}
+
+/// The size of the array of a view (`give`).
+///
+/// # Safety
+/// `p` is a view from `give` that neither `view_take` nor `view_end` has
+/// ended.
+#[inline(always)]
+pub unsafe fn view_size(p: u64) -> u64 {
+    unsafe { (*view_block(p)).len as u64 }
+}
+
+/// Element `i` of the array of a view, which ends here: the block is freed
+/// out of line (`drop::free_vec`, as `release` does) when the view holds
+/// the last reference (bit 0 clear). The element is cloned in line on both
+/// paths, so that a release of the element later in the caller cancels
+/// against the clone; the free is the one cold call.
+///
+/// # Safety
+/// `p` is a view from `give` that neither `view_take` nor `view_end` has
+/// ended, and `i` is below its size (the caller's check).
+#[inline(always)]
+pub unsafe fn view_take<T: Clone>(p: u64, i: u64) -> T {
+    let o = view_block(p);
+    unsafe {
+        debug_assert!((i as usize) < (*o).len);
+        let r = (*elems::<T>(o).add(i as usize)).clone();
+        if (p & 1) == 0 {
+            crate::drop::free_vec::<T>(o);
+        }
+        r
+    }
+}
+
+/// The end of a view without a read (`get!` out of bounds): the block is
+/// freed when the view holds the last reference.
+///
+/// # Safety
+/// `p` is a view from `give` that neither `view_take` nor `view_end` has
+/// ended.
+#[inline(always)]
+pub unsafe fn view_end<T: Clone>(p: u64) {
+    if (p & 1) == 0 {
+        crate::drop::free_vec::<T>(view_block(p));
     }
 }
 
@@ -753,6 +834,40 @@ mod tests {
             b = push(b, i as u8);
         }
         assert_eq!(get(&b, 99999), 99999u32 as u8);
+    }
+
+    #[test]
+    fn views() {
+        // A shared array: `give` decrements now, `view_take` clones the
+        // element, and the block stays with the other reference.
+        let a = from_vec(vec![E(1), E(2)]);
+        let p = give(a.clone());
+        assert_eq!(p & 1, 1);
+        assert_eq!(count(&a), 1);
+        assert_eq!(unsafe { view_size(p) }, 2);
+        let x = unsafe { view_take::<E>(p, 1) };
+        assert_eq!(x.0, 2);
+        assert_eq!(take_log(), Vec::<u32>::new());
+        drop(x);
+        assert_eq!(take_log(), vec![2]);
+        // The last reference: the view holds it, keeping the count of 1;
+        // `view_take` clones the element, then frees the block.
+        let p = give(a);
+        assert_eq!(p & 1, 0);
+        assert_eq!(unsafe { (*view_block(p)).count }, 1);
+        let y = unsafe { view_take::<E>(p, 0) };
+        assert_eq!(take_log(), vec![2, 1]);
+        assert_eq!(y.0, 1);
+        drop(y);
+        assert_eq!(take_log(), vec![1]);
+        // `view_end`: nothing more for a shared array, the free for the last
+        // reference.
+        let c = from_vec(vec![E(5)]);
+        unsafe { view_end::<E>(give(c.clone())) };
+        assert_eq!(count(&c), 1);
+        assert_eq!(take_log(), Vec::<u32>::new());
+        unsafe { view_end::<E>(give(c)) };
+        assert_eq!(take_log(), vec![5]);
     }
 
     #[test]

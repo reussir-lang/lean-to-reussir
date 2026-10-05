@@ -313,17 +313,22 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 ### Indices and positions are never big
 
 - **What:** An index that is in bounds (a `Fin`, or after the bounds test
-  of `get!`) or a position proved valid converts with
-  `l2r_index_of_nat`, whose big case ends the program; a checked index is
-  taken as its word once (`l2r_word_index_ok`). Where Lean's C code tells
-  "not a scalar" apart from "out of range", the prelude does too: a big
-  `Nat` (`lean_string_utf8_extract`, where it counts as `SIZE_MAX`, as
-  natively since Lean 4.34), a big `Int` (`Float.scaleB`).
-  `lean_string_utf8_extract_fast` (`String.extract`, new in Lean 4.34)
-  takes its positions, valid by proof, with `l2r_index_of_nat`.
+  of `get!`) or a position proved valid is never a big `Nat`. A read takes
+  it as its word (`l2r_word_index_ok`, `l2r_array_get_word`): a big one
+  falls into the read's failing branch, unreachable code
+  (`l2r_index_fail`; `leanrt::index_word` inside the string reads
+  `get_fast`/`next_fast`); an update converts it with `l2r_index_of_nat`,
+  whose big case ends the program. Where Lean's C code tells "not a
+  scalar" apart from "out of range", the prelude does too: a big `Nat`
+  (`lean_string_utf8_extract`, where it counts as `SIZE_MAX`, as natively
+  since Lean 4.34; the `Pos.Raw` reads, `l2r_pos_of_word`), a big `Int`
+  (`Float.scaleB`). `lean_string_utf8_extract_fast` (`String.extract`,
+  new in Lean 4.34) takes its positions, valid by proof, with
+  `l2r_index_of_nat`.
 - **Why:** See
-  [../ownership.md](../ownership.md#reads-take-their-container-owned-and-in-bounds-indices-end-on-a-big-index).
+  [../ownership.md](../ownership.md#reads-give-their-reference-up-first-for-a-view).
 - **Where:** `prelude.rr`: `l2r_index_of_nat`, `l2r_word_index_ok`,
-  `lean_string_utf8_extract`, `lean_string_utf8_extract_fast`; test
-  `RtString`.
+  `l2r_array_get_word`, `l2r_index_fail`, `l2r_pos_of_word`,
+  `lean_string_utf8_extract`, `lean_string_utf8_extract_fast`;
+  `leanrt/src/lib.rs`: `index_word`; tests `RtString`, `RtArrayReadViews`.
 - **Remove only if:** see the linked entry.

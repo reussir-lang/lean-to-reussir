@@ -22,17 +22,16 @@ CODECS = {
     "nat": ("LNatArr", "Nat", """
 // Elements are `Nat` words (see the Nat section): `lean_box` of a small
 // value, an owned reference to a big number otherwise; the handles move in
-// and out as their words. The array is consumed once (a second use in one
-// branch would make Reussir release it out of line in the other): a big
-// word comes back owning a reference.
-fn l2r_natarr_get(a : LNatArr, i : u64) -> Nat { l2r_nat_of_raw(l2r_natarr_word_owned(a, i)) }
+// and out as their words. A read takes the array's view first, as
+// `l2r_array_get`: a big word comes back owning a reference.
+fn l2r_natarr_take(p : u64, i : u64) -> Nat { l2r_nat_of_raw(l2r_natarr_view_take(p, i)) }
 fn l2r_natarr_set(a : LNatArr, i : u64, x : Nat) -> LNatArr { l2r_natarr_set_word(a, i, l2r_nat_raw(x)) }
 fn l2r_natarr_push(a : LNatArr, x : Nat) -> LNatArr { l2r_natarr_push_word(a, l2r_nat_raw(x)) }
 fn l2r_natarr_replicate(n : u64, x : Nat) -> LNatArr { l2r_natarr_replicate_word(n, l2r_nat_raw(x)) }
 """),
     "int": ("LIntArr", "Int", """
 // Elements are `Int` words (see the Int section), as for `LNatArr`.
-fn l2r_intarr_get(a : LIntArr, i : u64) -> Int { l2r_int_of_raw(l2r_intarr_word_owned(a, i)) }
+fn l2r_intarr_take(p : u64, i : u64) -> Int { l2r_int_of_raw(l2r_intarr_view_take(p, i)) }
 fn l2r_intarr_set(a : LIntArr, i : u64, x : Int) -> LIntArr { l2r_intarr_set_word(a, i, l2r_int_raw(x)) }
 fn l2r_intarr_push(a : LIntArr, x : Int) -> LIntArr { l2r_intarr_push_word(a, l2r_int_raw(x)) }
 fn l2r_intarr_replicate(n : u64, x : Int) -> LIntArr { l2r_intarr_replicate_word(n, l2r_int_raw(x)) }
@@ -50,9 +49,16 @@ fn l2r_{k}arr_replicate_word(n : u64, w : u64) -> {T} [{{ leanrt::tagvec::replic
 fn l2r_{k}arr_size(a : {T}) -> u64 [{{ {{ let r = leanrt::tagvec::size(&a); leanrt::rc_release(a); r }} }}];
 #[ffi(import)]
 fn l2r_{k}arr_word(a : {T}, i : u64) -> u64 [{{ {{ let r = leanrt::tagvec::word(&a, i); leanrt::rc_release(a); r }} }}];
-// The word at `i`; a big word owns a reference.
+// A read's view (see `l2r_array_give`); the word at `i`, which ends it (a
+// big word owns a reference).
 #[ffi(import)]
-fn l2r_{k}arr_word_owned(a : {T}, i : u64) -> u64 [{{ {{ let r = leanrt::tagvec::word_owned(&a, i); leanrt::rc_release(a); r }} }}];
+fn l2r_{k}arr_give(a : {T}) -> u64 [{{ leanrt::tagvec::give(a) }}];
+#[ffi(import)]
+fn l2r_{k}arr_view_size(p : u64) -> u64 [{{ unsafe {{ leanrt::tagvec::view_size(p) }} }}];
+#[ffi(import)]
+fn l2r_{k}arr_view_take(p : u64, i : u64) -> u64 [{{ unsafe {{ leanrt::tagvec::view_take(p, i) }} }}];
+#[ffi(import)]
+fn l2r_{k}arr_view_end(p : u64) -> u64 [{{ {{ unsafe {{ leanrt::tagvec::view_end(p) }}; 0 }} }}];
 #[ffi(import)]
 fn l2r_{k}arr_set_word(a : {T}, i : u64, w : u64) -> {T} [{{ leanrt::tagvec::set_word(a, i, w) }}];
 #[ffi(import)]
@@ -79,19 +85,41 @@ fn lean_mk_empty_{k}arr_with_capacity(n : Nat) -> {T} {{
     if (w & 1) == 1 {{ l2r_{k}arr_with_capacity(w >> 1) }} else {{ l2r_internal_panic_at<{T}>(4) }}
 }}
 
+// Element `i`, which must be in bounds (checked; see `l2r_array_get`).
+fn l2r_{k}arr_get(a : {T}, i : u64) -> {E} {{
+    let p = l2r_{k}arr_give(a);
+    let n = l2r_{k}arr_view_size(p);
+    if i < n {{ l2r_{k}arr_take(p, i) }} else {{ l2r_array_index_bug<{E}>(i, n) }}
+}}
+
+// A read at the word `x` of a `Nat` index a proof keeps in bounds (see
+// `l2r_array_get_word`).
+fn l2r_{k}arr_get_word(a : {T}, x : u64) -> {E} {{
+    let p = l2r_{k}arr_give(a);
+    let n = l2r_{k}arr_view_size(p);
+    if l2r_word_index_ok(x, n) {{ l2r_{k}arr_take(p, x >> 1) }} else {{ l2r_index_fail<{E}>(x, n) }}
+}}
+
 fn lean_{k}arr_get_size(v : {T}) -> Nat {{ l2r_nat_small(l2r_{k}arr_size(v)) }}
 fn lean_{k}arr_size(v : {T}) -> u64 {{ l2r_{k}arr_size(v) }}
-fn lean_{k}arr_fget(v : {T}, i : Nat) -> {E} {{ l2r_{k}arr_get(v, l2r_index_of_nat(i)) }}
-fn lean_{k}arr_fget_borrowed(v : {T}, i : Nat) -> {E} {{ l2r_{k}arr_get(v, l2r_index_of_nat(i)) }}
+fn lean_{k}arr_fget(v : {T}, i : Nat) -> {E} {{ l2r_{k}arr_get_word(v, l2r_nat_raw(i)) }}
+fn lean_{k}arr_fget_borrowed(v : {T}, i : Nat) -> {E} {{ l2r_{k}arr_get_word(v, l2r_nat_raw(i)) }}
 fn lean_{k}arr_uget(v : {T}, i : u64) -> {E} {{ l2r_{k}arr_get(v, i) }}
 fn lean_{k}arr_uget_borrowed(v : {T}, i : u64) -> {E} {{ l2r_{k}arr_get(v, i) }}
 
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
-// return the default.
+// return the default. In bounds the default is released after the take,
+// as `lean_array_get` (nothing is released between give and take).
 fn lean_{k}arr_get(dflt : {E}, v : {T}, i : Nat) -> {E} {{
-    let w = l2r_nat_raw(i);
-    if l2r_word_index_ok(w, l2r_{k}arr_size(v)) {{ l2r_{k}arr_get(v, w >> 1) }} else {{
-        let d = l2r_nat_drop_raw(w);
+    let x = l2r_nat_raw(i);
+    let p = l2r_{k}arr_give(v);
+    if l2r_word_index_ok(x, l2r_{k}arr_view_size(p)) {{
+        let r = l2r_{k}arr_take(p, x >> 1);
+        let d = l2r_consume<{E}>(dflt);
+        r
+    }} else {{
+        let e = l2r_{k}arr_view_end(p);
+        let d = l2r_nat_drop_raw(x);
         let ignored = l2r_panic_code(0);
         dflt
     }}

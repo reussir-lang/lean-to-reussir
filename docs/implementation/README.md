@@ -57,7 +57,7 @@ into it. Reussir issues (bugs, costs and the other kinds) link to
    dependents, the scheduler, polling, the stack guard, the event loop.
 8. [reussir-workarounds/](reussir-workarounds/README.md): each Reussir
    issue (bug or cost) with lean2rr's workaround and whether it can go;
-   Reussir's limitations, its missed optimization and missing feature.
+   Reussir's limitations, its missed optimizations and missing features.
 9. [optional-passes.md](optional-passes.md): one line per optional pass
    with its soundness guard, and the required parts.
 10. [externs-ffi/](externs-ffi/README.md): extern dispatch and its order,

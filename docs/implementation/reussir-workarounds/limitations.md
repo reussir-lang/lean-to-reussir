@@ -119,6 +119,25 @@ files, `runtime/` and `scripts/` from the repository root.
 - **Remove only if:** Reussir's token reuse handles the call-before-branch
   shape; then measure with the passes off.
 
+### A texture at a cold call site inlines only below cost 45 (issue 36, missed optimization)
+
+- **What:** The runtime's textures on hot paths, the array reads above
+  all, are kept small: each costs less than 45 in LLVM's inline cost model
+  once its `_ffi` function is inlined into rrc's import trampoline. An
+  array read is three textures (`l2r_array_give`, `l2r_view_size`,
+  `l2r_view_take`) instead of one.
+- **Why:** A missed optimization, not a bug: rrc defines the trampoline
+  without an inline attribute, so LLVM inlines it into a caller by its
+  ordinary cost model, at a call site it judges cold (deep in branches)
+  only below 45. A read texture that checked the bounds (cost 80) stayed a
+  call at 279 of lean-zip's array reads; one that decremented first and
+  checked after (cost 55) at 41 reads of its LZ77 loop
+  ([36-trampoline-inline.md](../../../reussir-bugs/36-trampoline-inline.md)).
+- **Where:** [../ownership.md](../ownership.md#reads-give-their-reference-up-first-for-a-view);
+  `runtime/prelude.rr` (the read textures).
+- **Remove only if:** rrc marks the trampolines for inlining; then the
+  read could be one texture again.
+
 ### Drop glue recursed once per cell (issue 13, missing feature)
 
 - **What:** The runtime frees its containers through the per-thread

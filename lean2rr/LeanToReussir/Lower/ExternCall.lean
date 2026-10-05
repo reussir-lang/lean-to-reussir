@@ -146,6 +146,51 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
 def refusedExternCall (orig : Name) (args : Array RR.Expr) : RR.Expr :=
   .call ("l2r_refused_" ++ fnName orig) #[] args
 
+/-- The read externs whose index `bindReadIndex` binds first: element
+reads at a `Nat` index (`a[i]'h`, `a[i]!` of `Array`, `ByteArray` and
+`FloatArray`; at `Array Nat`/`Array Int`, the one-word arrays' reads that
+replace them) and the string reads at a `Nat` position.
+`String.Pos.Raw.get?` (`lean_string_utf8_get_opt`) is not here: it goes
+through lean2rr's glue (`Lower/Externs.lean`), not this call. -/
+def readExternSyms : List String := [
+  "lean_array_fget", "lean_array_fget_borrowed", "lean_array_get", "lean_array_get_borrowed",
+  "lean_byte_array_fget", "lean_byte_array_get", "lean_float_array_fget", "lean_float_array_get",
+  "lean_string_utf8_get", "lean_string_utf8_get_bang", "lean_string_utf8_get_fast",
+  "lean_string_utf8_next", "lean_string_utf8_next_fast", "lean_string_utf8_prev",
+  "lean_string_utf8_at_end", "lean_string_is_valid_pos", "lean_string_get_byte_fast"]
+
+/-- The call `mk args` of the extern `sym`; for a read extern
+(`readExternSyms`), each argument that is a variable passed to a parameter
+of type `Nat` is bound by a `let` first: `let k = i; read(a, k)`. That is
+the index, and also `get!`'s default at `Array Nat` (a `Nat` too; binding
+it changes nothing).
+
+Reussir increments a variable that is used again later at the place where it
+is used, the arguments of a call from left to right. As a direct argument, an
+index used after the read (`a[i]`, then `i + 1`) was incremented after the
+container. The increment of a big index is a store that LLVM cannot tell from
+a store to the container's count, so it came between the container's
+increment and the read's decrement: LLVM reloaded the count and kept both
+stores (lean-zip's LZ77 loop). Bound first, the index is incremented at the
+`let`, and the container's increment is the last store before the read.
+The arguments are those of the parameters (the extern's parameter types)
+that `mask` passes. -/
+def bindReadIndex (sym : String) (mask : Array Bool) (params : Array Expr) (args : Array RR.Expr)
+    (mk : Array RR.Expr → RR.Expr) : LowerM RR.Expr := do
+  unless readExternSyms.contains sym do return mk args
+  let isNat := (mask.zip params).filterMap fun (m, p) =>
+    if m then some (p.consumeMData.isConstOf ``Nat) else none
+  let mut lets := #[]
+  let mut args' := #[]
+  for (a, i) in args.zipIdx do
+    match a, isNat[i]? with
+    | .var _, some true =>
+      let k ← fresh "ix"
+      lets := lets.push (k, some (RR.Ty.named "Nat"), a)
+      args' := args'.push (.var k)
+    | _, _ => args' := args'.push a
+  return if lets.isEmpty then mk args else .block ⟨lets, mk args'⟩
+
 /-- Emit a saturated extern call. Default: call the prelude function named
 after the C symbol with the passed arguments.
 
@@ -236,7 +281,7 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
         unless (← read).preludeFns.contains sym' do
           unless (← get).missingExterns.any (·.1 == sym') do
             modify fun s => { s with missingExterns := s.missingExterns.push (sym', orig) }
-        return .call sym' #[] passedArgs
+        return ← bindReadIndex sym mask params passedArgs (.call sym' #[] ·)
   -- Storage for each type argument: the storage type, and the conversions
   -- of a value to and from it (`ArrayRepr.store`/`load`). An extern over
   -- arrays of the type argument stores it as the arrays do (an enumeration
@@ -267,9 +312,10 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
   unless (← read).preludeFns.contains sym do
     unless (← get).missingExterns.any (·.1 == sym) do
       modify fun s => { s with missingExterns := s.missingExterns.push (sym, orig) }
-  let call := RR.Expr.call sym (storage.map (·.storage)) passed
-  match reprOf retUse with
-  | some r => return r.load call
-  | none => return call
+  bindReadIndex sym mask params passed fun passed =>
+    let call := RR.Expr.call sym (storage.map (·.storage)) passed
+    match reprOf retUse with
+    | some r => r.load call
+    | none => call
 
 end LeanToReussir

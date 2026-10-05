@@ -115,6 +115,32 @@ unsafe fn data(o: *mut Obj) -> *mut u8 {
     (o as *mut u8).add(HDR)
 }
 
+/// A read of a string whose handle the caller gives up (the prelude's
+/// read textures whose rule has a call in it, `l2r_string_get` and
+/// others): `f` on the bytes. The release is decided before `f` runs: a
+/// shared string is decremented first (another reference keeps the block
+/// alive; one thread runs Lean code), so the rule's out-of-line paths (the
+/// decoding of a character that is not ASCII; the panic of a big position
+/// in `l2r_string_get_fast_word`) come after the decrement, and LLVM
+/// removes the caller's increment and this decrement on every path. The
+/// last reference runs `f`, then frees the block, as `Drop`.
+#[inline(always)]
+pub fn read_owned<R>(s: LStr, f: impl FnOnce(&[u8]) -> R) -> R {
+    let o = s.0;
+    std::mem::forget(s);
+    unsafe {
+        let c = (*o).count;
+        if c != 1 {
+            (*o).count = c - 1;
+        }
+        let r = f(std::slice::from_raw_parts(data(o), (*o).len));
+        if c == 1 {
+            free(o);
+        }
+        r
+    }
+}
+
 /// Byte views of strings and byte buffers, for functions that accept either.
 pub trait Utf8 {
     fn utf8(&self) -> &[u8];

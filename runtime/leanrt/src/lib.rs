@@ -183,6 +183,26 @@ pub extern "C" fn lean_internal_panic(p: InternalPanic) -> ! {
     xpanic::internal_panic(p.message(), &mut Native)
 }
 
+/// `lean_internal_panic(Unreachable)`: the runtime's reads at a `Nat`
+/// index or position that a proof keeps in bounds, when it is a big number
+/// (`l2r_index_of_nat`'s panic; natively `lean_unbox` of it is garbage).
+#[cold]
+#[inline(never)]
+pub extern "C" fn unreachable_code() -> ! {
+    lean_internal_panic(InternalPanic::Unreachable)
+}
+
+/// The value of the word `x` of a `Nat` index or position that a proof
+/// keeps in bounds; a big one is unreachable code (`unreachable_code`).
+#[inline(always)]
+pub fn index_word(x: u64) -> u64 {
+    if (x & 1) == 1 {
+        x >> 1
+    } else {
+        unreachable_code()
+    }
+}
+
 /// `lean_internal_panic` with a message of its own: Lean's
 /// (`lean_internal_panic`) for a runtime invariant of lean2rr's that does
 /// not hold. lean-runtime's `io::panic::internal_panic`: `INTERNAL PANIC: `,

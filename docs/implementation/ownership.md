@@ -180,26 +180,111 @@ runtime.
   paths).
 - **Remove only if:** never (speed only).
 
-### Reads take their container owned, and in-bounds indices end on a big index
+### Reads give their reference up first, for a view
 
-- **What:** Every FFI call consumes its arguments, so an array or string
-  read is an increment by the caller and a release in the inlined texture
-  (`leanrt::array::release`, last reference out of line). An index proved
-  in bounds, or a position proved valid, converts with
-  `l2r_index_of_nat`, whose big case ends the program instead of
-  rejoining the read; an index checked by `get!`/`set!` is taken as its
-  word once (`l2r_word_index_ok`), with no counting on it in bounds.
-- **Why:** LLVM cancels the increment against the release (Reussir's
-  `rc.inc` lets it assume the old count was at least 1) only when no store
-  or call lies between them; a rejoining big-index path with reference counting
-  on the big number broke that (insertion sort on `Array UInt64`:
-  0.52 → 0.23 s, native 0.19; adv4 PF4-06, ddb46f1). Natively such an index
-  is never big (`lean_unbox` of it would be garbage).
-- **Where:** `runtime/prelude.rr`: `l2r_index_of_nat`, `l2r_word_index_ok`,
-  `lean_array_get`; `runtime/leanrt/src/array.rs`: `release` (a
-  decrement; `drop_last` out of line).
+- **What:** Every FFI call consumes its arguments, so an array read is the
+  caller's increment and the read's decrement. A read gives its reference
+  up before anything else: `l2r_array_give` (`leanrt::array::give`;
+  `tagvec::give` for `Array Nat`/`Array Int`) decrements a shared array
+  and returns a *view*, a `u64`: the block's address, with bit 0 set for a
+  shared array (the last reference keeps its count of 1, bit 0 clear). The
+  bounds check comes next, in Reussir code (`l2r_view_size`); then
+  `l2r_view_take` clones the element (the last reference then frees the
+  block out of line, `free_vec`), or `l2r_view_end` ends the view (`get!`
+  out of bounds). Nothing is released between `give` and `take` or `end`:
+  `get!` releases its default in bounds after the take (`l2r_consume`, a
+  use that keeps it alive until then), where Reussir would release it at
+  the start of the branch. The failing branch
+  of a read that a proof keeps in bounds releases nothing and ends the
+  program: a big index is
+  unreachable code, a small one `index_bug` (`l2r_index_fail`,
+  `l2r_array_index_bug`). String reads decide their release before their
+  rule runs (`leanrt::string::read_owned`); `get_fast`/`next_fast` take
+  the position's word, and a big one is unreachable code inside the
+  texture (`l2r_string_get_fast_word`, `leanrt::index_word`); the
+  `Pos.Raw` reads turn a big position into `u64::MAX` without a call
+  (`l2r_pos_of_word`) and release it after the read.
+- **Why:** LLVM removes the increment and the decrement together only when
+  no call and no other store come between them on any path (Reussir's
+  `rc.inc` lets it assume the old count was at least 1). Three earlier
+  forms kept them (lean-zip's LZ77 loop, count stores on its hot paths;
+  perf-array-reads): the texture checked the bounds and released after
+  (the panic's call came between: 77 stores; and 279 of lean-zip's array
+  reads stayed calls, too costly for LLVM); a check in Reussir code before an
+  unchecked texture left a release in the failing branch, so the
+  increment had two decrements, one on each side, and dead-store
+  elimination needs one store that overwrites it on every path (58); one
+  checked texture that decrements first costs 55 in LLVM's inline cost
+  model, above its threshold for a cold call site, 45 (41 of the loop's
+  reads stayed calls; [Reussir issue 36](../../reussir-bugs/36-trampoline-inline.md),
+  a missed optimization). Split into `give`, `size` and `take`, each
+  texture is small enough for a cold call site: no read stays a call, and
+  the loop has 47 hot stores, at most 7 on one iteration (15 before).
+  Bit 0 is set for the shared case because LLVM does not know that the
+  block's address is even: after the caller's increment it sees the view
+  `o | 1` and folds the test; with the bit set for the last reference it
+  kept the test, unswitched loops on it and kept the clone of a record
+  element. `view_take` clones in line on both of its paths, so that a
+  later release of the element cancels against the clone. `get!`'s default
+  released at the start of the in-bounds branch could hold the other
+  reference to the array (a tree's child or the tree itself, `cs[i]!` with
+  the tree as the default; a closure that captures the array): it freed
+  the block the view then read (review PAR-01, test `RtArrayGetDefault`).
+  Left to LLVM: a
+  loop body whose slow path (a big number's `nat_add`, a call) rejoins the
+  fast path keeps a count store per iteration. GVN reloads the count after
+  the call, so the count becomes a phi: LLVM can no longer tell that it is
+  above 1, or the store writes a phi of loads back, which dead-store
+  elimination does not take for a no-op (one store per iteration in a
+  `ByteArray` sum over a `USize` index; in lean-zip's `ugetUInt32LE`, an
+  increment and a decrement per call). The increments before calls that
+  take the array (`updateHashesMerged`) are the cost of owned parameters,
+  not of reads.
+- **Where:** `runtime/prelude.rr`: `l2r_array_give`, `l2r_view_size`,
+  `l2r_view_take`, `l2r_view_end`, `l2r_array_get`, `l2r_array_get_word`,
+  `l2r_index_fail`, `l2r_array_index_bug`, `lean_array_get`,
+  `lean_byte_array_get`, `lean_float_array_get`, the string reads;
+  `runtime/gen_tagarr.py`: `l2r_natarr_give`, `l2r_natarr_view_take`,
+  `l2r_natarr_get`, `lean_natarr_get` (and `intarr`);
+  `runtime/leanrt/src/array.rs`: `give`, `view_size`, `view_take`,
+  `view_end`; `tagvec.rs`: the same and `view_take_slow`; `string.rs`:
+  `read_owned`; `lib.rs`: `index_word`; tests `RtArrayReadViews`,
+  `RtArrayGetDefault`, `RtReadsDeep`, leanrt's unit tests `views`; plan §10
+  ("Reads take their container owned").
 - **Remove only if:** Reussir gets borrowed FFI parameters (a feature
-  request; plan [§9](../translation-plan.md#9-open-items)).
+  request; plan [§9](../translation-plan.md#9-open-items)). A view is
+  valid only while nothing else runs between `give` and `take` or `end`:
+  no Lean code (one thread runs Lean code, and the bounds check calls
+  none), and no release of another owned value that Reussir inserts there
+  (a value used only on one branch is released at the branch's start: such
+  a value must be consumed after the take, as `get!`'s default is).
+  `tests/runtime/ffi-inline-check.sh` checks that the read textures stay
+  inlined at cold call sites (`RtReadsDeep`).
+
+### A read's index is passed in a `let`
+
+- **What:** lean2rr binds the `Nat` arguments of a read extern (`a[i]'h`,
+  `a[i]!`, the byte, float and one-word arrays' reads, the string reads at
+  a `Nat` position: `readExternSyms`) by a `let` before the call:
+  `let k = i; read(a, k)`. That is the index, and also `get!`'s default at
+  `Array Nat` (a `Nat` too; harmless). `String.Pos.Raw.get?` goes through
+  lean2rr's glue (`Lower/Externs.lean`, `lean_string_utf8_get_opt`) and is
+  not covered.
+- **Why:** Reussir increments a variable that is used again later where it
+  is used, the arguments of a call from left to right. As a direct
+  argument, an index used after the read (`a[i]`, then `i + 1`) was
+  incremented after the array; the increment of a big index is a store
+  that LLVM cannot tell from the array's count, and between the array's
+  increment and the read's decrement it made LLVM reload the count and
+  keep both. With the `let`, Reussir increments the index at the `let` and
+  the array at the call, the last store before the read. Reussir keeps the
+  `let` (its front end does not propagate copies). Lean-zip with the
+  runtime's reads above: the LZ77 loop's hot stores 72 → 47,
+  `updateHashesMergedH3FastU` 12 → 4.
+- **Where:** `Lower/ExternCall.lean`: `readExternSyms`, `bindReadIndex`,
+  both final calls of `lowerExternCall`.
+- **Remove only if:** Reussir gets borrowed FFI parameters, or increments
+  a call's arguments in another order.
 
 ### A thunk's cell gives up its closure before running it
 

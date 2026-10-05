@@ -142,6 +142,11 @@ fn l2r_unreachable<T>() -> T {
 #[transform_anchor]
 fn l2r_sink<T>(x : T) -> u64 { 0 }
 
+// Releases `x` here, in line: a use that keeps `x` alive until this point
+// (Reussir releases a value that one branch does not use at the start of
+// that branch). `get!` releases its default after the read's take with it.
+fn l2r_consume<T>(x : T) -> u64 { 0 }
+
 fn l2r_internal_panic_at<T>(code : u64) -> T {
     let ignored = l2r_internal_panic(code);
     core::intrinsic::panic::panic<T>()
@@ -1393,23 +1398,31 @@ fn lean_string_length(s : LStr) -> Nat { l2r_nat_small(l2r_string_length(s)) }
 
 // The string rules are lean-runtime's (`sem::string`, on the bytes and
 // `u64` positions); a big `Nat` position is passed as `u64::MAX`
-// (`l2r_pos_of_nat`), which every rule but `next`/`prev` treats as Lean's C
-// treats a non-scalar position. `get?`/`get!` answer `0x110000` for `none`
-// (lean2rr's glue builds the `Option Char`; `get!` panics).
+// (`l2r_pos_of_nat`, `l2r_pos_of_word`), which every rule but `next`/`prev`
+// treats as Lean's C treats a non-scalar position. `get?`/`get!` answer
+// `0x110000` for `none` (lean2rr's glue builds the `Option Char`; `get!`
+// panics). The reads whose rule calls out of line (to decode a character
+// that is not ASCII) decide the release first (`leanrt::string::read_owned`),
+// so that LLVM removes the caller's increment and the read's decrement.
 #[ffi(import)]
-fn l2r_string_get(s : LStr, i : u64) -> u32 [{ { let r = sem::string::utf8_get(s.utf8(), i); leanrt::rc_release(s); r } }];
+fn l2r_string_get(s : LStr, i : u64) -> u32 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_get(b, i)) }];
 #[ffi(import)]
-fn l2r_string_get_opt(s : LStr, i : u64) -> u32 [{ { let r = sem::string::utf8_get_opt(s.utf8(), i).unwrap_or(0x110000); leanrt::rc_release(s); r } }];
+fn l2r_string_get_opt(s : LStr, i : u64) -> u32 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_get_opt(b, i).unwrap_or(0x110000)) }];
 #[ffi(import)]
-fn l2r_string_get_bang(s : LStr, i : u64) -> u32 [{ { let r = sem::string::utf8_get_bang(s.utf8(), i).unwrap_or(0x110000); leanrt::rc_release(s); r } }];
+fn l2r_string_get_bang(s : LStr, i : u64) -> u32 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_get_bang(b, i).unwrap_or(0x110000)) }];
 #[ffi(import)]
 fn l2r_char_default() -> u32 [{ sem::string::CHAR_DEFAULT }];
 #[ffi(import)]
-fn l2r_string_get_fast(s : LStr, i : u64) -> u32 [{ { let r = sem::string::utf8_get_fast(s.utf8(), i); leanrt::rc_release(s); r } }];
+fn l2r_string_get_fast(s : LStr, i : u64) -> u32 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_get_fast(b, i)) }];
 #[ffi(import)]
-fn l2r_string_next(s : LStr, i : u64) -> u64 [{ { let r = sem::string::utf8_next(s.utf8(), i); leanrt::rc_release(s); r } }];
+fn l2r_string_next(s : LStr, i : u64) -> u64 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_next(b, i)) }];
+// `get_fast` and `next_fast` at the word `x` of a position a proof keeps
+// valid: a big one is unreachable code, inside the texture (as
+// `l2r_array_get_word`).
 #[ffi(import)]
-fn l2r_string_next_fast(s : LStr, i : u64) -> u64 [{ { let r = sem::string::utf8_next_fast(s.utf8(), i); leanrt::rc_release(s); r } }];
+fn l2r_string_get_fast_word(s : LStr, x : u64) -> u32 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_get_fast(b, leanrt::index_word(x))) }];
+#[ffi(import)]
+fn l2r_string_next_fast_word(s : LStr, x : u64) -> u64 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_next_fast(b, leanrt::index_word(x))) }];
 #[ffi(import)]
 fn l2r_string_prev(s : LStr, i : u64) -> u64 [{ { let r = sem::string::utf8_prev(s.utf8(), i); leanrt::rc_release(s); r } }];
 #[ffi(import)]
@@ -1432,22 +1445,42 @@ fn l2r_pos_of_nat(p : Nat) -> u64 {
     if (x & 1) == 1 { x >> 1 } else { let d = l2r_nat_drop_raw(x); 18446744073709551615 }
 }
 
+// `l2r_pos_of_nat` of a position's word, for a read: no call, so nothing
+// comes between the caller's increment of the string and the read's
+// decrement (a big position's release, a call, rejoining the read kept
+// both); the read releases a big position afterwards (`l2r_nat_drop_raw`).
+fn l2r_pos_of_word(x : u64) -> u64 {
+    if (x & 1) == 1 { x >> 1 } else { 18446744073709551615 }
+}
+
 // `String.Pos.Raw.get`: the character at byte `p`, or `'A'`.
-fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 { l2r_string_get(s, l2r_pos_of_nat(p)) }
+fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 {
+    let x = l2r_nat_raw(p);
+    let c = l2r_string_get(s, l2r_pos_of_word(x));
+    let d = l2r_nat_drop_raw(x);
+    c
+}
 
 // `String.Pos.Raw.get?`.
-fn l2r_string_utf8_get_opt(s : LStr, p : Nat) -> u32 { l2r_string_get_opt(s, l2r_pos_of_nat(p)) }
+fn l2r_string_utf8_get_opt(s : LStr, p : Nat) -> u32 {
+    let x = l2r_nat_raw(p);
+    let c = l2r_string_get_opt(s, l2r_pos_of_word(x));
+    let d = l2r_nat_drop_raw(x);
+    c
+}
 
 // `String.Pos.Raw.get!`: panics (C message) and returns `'A'`.
 fn lean_string_utf8_get_bang(s : LStr, p : Nat) -> u32 {
-    let c = l2r_string_get_bang(s, l2r_pos_of_nat(p));
+    let x = l2r_nat_raw(p);
+    let c = l2r_string_get_bang(s, l2r_pos_of_word(x));
+    let d = l2r_nat_drop_raw(x);
     if c == 1114112 { let ignored = l2r_panic_code(1); l2r_char_default() } else { c }
 }
 
 // `String.Pos.get`/`Pos.Raw.get'` and `next'` take a proof that the
 // position is valid and not the end: never a big `Nat` (see
-// `l2r_index_of_nat`).
-fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 { l2r_string_get_fast(s, l2r_index_of_nat(p)) }
+// `l2r_string_get_fast_word`).
+fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 { l2r_string_get_fast_word(s, l2r_nat_raw(p)) }
 
 // `String.Pos.Raw.next`: `p + 1` at or past the end. lean-runtime's `next`
 // takes a position below 2^63 (a small `Nat`) and may answer 2^63, a big
@@ -1457,16 +1490,26 @@ fn lean_string_utf8_next(s : LStr, p : Nat) -> Nat {
     if (x & 1) == 1 { l2r_nat_of_u64(l2r_string_next(s, x >> 1)) } else { lean_nat_add(l2r_nat_of_raw(x), l2r_nat_small(1)) }
 }
 
-fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat { l2r_nat_small(l2r_string_next_fast(s, l2r_index_of_nat(p))) }
+fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat { l2r_nat_small(l2r_string_next_fast_word(s, l2r_nat_raw(p))) }
 
 fn lean_string_utf8_prev(s : LStr, p : Nat) -> Nat {
     let x = l2r_nat_raw(p);
     if (x & 1) == 1 { l2r_nat_small(l2r_string_prev(s, x >> 1)) } else { lean_nat_sub(l2r_nat_of_raw(x), l2r_nat_small(1)) }
 }
 
-fn lean_string_utf8_at_end(s : LStr, p : Nat) -> bool { l2r_string_at_end(s, l2r_pos_of_nat(p)) }
+fn lean_string_utf8_at_end(s : LStr, p : Nat) -> bool {
+    let x = l2r_nat_raw(p);
+    let r = l2r_string_at_end(s, l2r_pos_of_word(x));
+    let d = l2r_nat_drop_raw(x);
+    r
+}
 
-fn lean_string_is_valid_pos(s : LStr, p : Nat) -> bool { l2r_string_is_valid_pos(s, l2r_pos_of_nat(p)) }
+fn lean_string_is_valid_pos(s : LStr, p : Nat) -> bool {
+    let x = l2r_nat_raw(p);
+    let r = l2r_string_is_valid_pos(s, l2r_pos_of_word(x));
+    let d = l2r_nat_drop_raw(x);
+    r
+}
 
 // `String.Pos.Raw.extract`. A non-scalar (big) position counts as
 // SIZE_MAX, as natively since Lean 4.34: a big start gives "", a big end
@@ -1609,9 +1652,45 @@ fn l2r_array_empty<T>() -> RVec<T> [{ leanrt::array::empty() }];
 fn l2r_array_with_capacity<T>(n : u64, elem : u64) -> RVec<T> [{ leanrt::array::with_capacity_checked(n, elem) }];
 #[ffi(import)]
 fn l2r_array_size<T>(v : RVec<T>) -> u64 [{ { let r = leanrt::array::size(&v); leanrt::array::release(v); r } }];
-// Element `i`, which must be in bounds.
+// Reads. Every read takes its array owned (an FFI call consumes its
+// arguments): the caller's increment, then the read's decrement, which
+// LLVM removes together only when no call and no other store come between
+// them on any path. So a read first gives its reference up for a view
+// (`l2r_array_give`, `leanrt::array::give`): a shared array's decrement,
+// before the bounds check and anything else. The view (a `u64`: the
+// block's address, bit 0 set for a shared array; the last reference keeps
+// its count of 1) is valid until `l2r_view_take` (the element; the last
+// reference frees the block) or `l2r_view_end` ends it. The bounds check
+// is Reussir code between the two, and its failing branch has nothing to
+// release. Each texture is small enough for LLVM to inline at a call site
+// it judges cold.
 #[ffi(import)]
-fn l2r_array_get<T>(v : RVec<T>, i : u64) -> T [{ { let r = leanrt::array::get(&v, i); leanrt::array::release(v); r } }];
+fn l2r_array_give<T>(v : RVec<T>) -> u64 [{ leanrt::array::give(v) }];
+#[ffi(import)]
+fn l2r_view_size(p : u64) -> u64 [{ unsafe { leanrt::array::view_size(p) } }];
+#[ffi(import)]
+fn l2r_view_take<T>(p : u64, i : u64) -> T [{ unsafe { leanrt::array::view_take(p, i) } }];
+#[ffi(import)]
+fn l2r_view_end<T>(p : u64) -> u64 [{ { unsafe { leanrt::array::view_end::<[:T:]>(p) }; 0 } }];
+
+// An index that a proof or the prelude's check keeps in bounds was not
+// (a lean2rr or runtime bug): `INTERNAL PANIC: array index i out of
+// bounds n (runtime invariant)`.
+#[ffi(import)]
+fn l2r_array_index_bug_code(i : u64, n : u64) -> u64 [{ leanrt::array::index_bug(i, n as usize) }];
+
+fn l2r_array_index_bug<T>(i : u64, n : u64) -> T {
+    let ignored = l2r_array_index_bug_code(i, n);
+    core::intrinsic::panic::panic<T>()
+}
+
+// Element `i`, which must be in bounds (a runtime invariant, checked).
+fn l2r_array_get<T>(v : RVec<T>, i : u64) -> T {
+    let p = l2r_array_give<T>(v);
+    let n = l2r_view_size(p);
+    if i < n { l2r_view_take<T>(p, i) } else { l2r_array_index_bug<T>(i, n) }
+}
+
 #[ffi(import)]
 fn l2r_array_push<T>(v : RVec<T>, x : T) -> RVec<T> [{ leanrt::array::push(v, x) }];
 #[ffi(import)]
@@ -1648,28 +1727,57 @@ fn lean_mk_empty_array_with_capacity<T>(n : Nat) -> RVec<T> { l2r_mk_empty_with_
 fn lean_array_get_size<T>(v : RVec<T>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
 fn lean_array_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
 
-fn lean_array_fget<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get(v, l2r_index_of_nat(i)) }
-fn lean_array_fget_borrowed<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get(v, l2r_index_of_nat(i)) }
+fn lean_array_fget<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get_word(v, l2r_nat_raw(i)) }
+fn lean_array_fget_borrowed<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get_word(v, l2r_nat_raw(i)) }
 fn lean_array_uget<T>(v : RVec<T>, i : u64) -> T { l2r_array_get(v, i) }
 fn lean_array_uget_borrowed<T>(v : RVec<T>, i : u64) -> T { l2r_array_get(v, i) }
 
 // An index that is in bounds (a `Fin` of the size, or checked by
 // `l2r_word_index_ok`): never a big `Nat` (natively `lean_unbox` of it would
-// be garbage). The big case ends the program instead of rejoining the read:
-// a rejoining path with refcount traffic on the big number would make LLVM
-// reload the array's count after the caller's increment, and the read's
-// release could then not cancel against it.
+// be garbage). The big case ends the program instead of rejoining the
+// update (`fset`, `fswap`): a rejoining path with refcount traffic on the
+// big number would make LLVM reload the array's count. Reads take the
+// index as its word instead (`l2r_array_get_word`).
 fn l2r_index_of_nat(i : Nat) -> u64 {
     let x = l2r_nat_raw(i);
     if (x & 1) == 1 { x >> 1 } else { l2r_unreachable<u64>() }
 }
 
+// A read at the word `x` of a `Nat` index that a proof keeps in bounds
+// (`a[i]'h`, `ByteArray.get`, `FloatArray.get`): the big and out-of-bounds
+// cases are one failing branch, after the view (with `l2r_index_of_nat` in
+// front of the read, the big case's panic came after the caller's
+// increment with the array still held, and LLVM kept both).
+fn l2r_array_get_word<T>(v : RVec<T>, x : u64) -> T {
+    let p = l2r_array_give<T>(v);
+    let n = l2r_view_size(p);
+    if l2r_word_index_ok(x, n) { l2r_view_take<T>(p, x >> 1) } else { l2r_index_fail<T>(x, n) }
+}
+
+// The failing branch of a read at an index proved in bounds (never taken
+// unless lean2rr or the runtime is wrong), with `l2r_index_of_nat`'s and
+// the read's former messages: a big index is unreachable code, a small one
+// the read's `index_bug`.
+fn l2r_index_fail<T>(x : u64, n : u64) -> T {
+    if (x & 1) == 1 { l2r_array_index_bug<T>(x >> 1, n) } else { l2r_unreachable<T>() }
+}
+
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
 // return the default. The index is taken once (as its word): no reference
-// counting on it in bounds.
+// counting on it in bounds. In bounds the default is released after the
+// view's end (`l2r_consume`): Reussir would release it at the start of the
+// branch, between give and take, and a default that holds the other
+// reference to the array (a tree whose children are read, `cs[i]!` with the
+// tree as the default) freed the block the view reads (review PAR-01).
 fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
     let x = l2r_nat_raw(i);
-    if l2r_word_index_ok(x, l2r_array_size(v)) { l2r_array_get(v, x >> 1) } else {
+    let p = l2r_array_give<T>(v);
+    if l2r_word_index_ok(x, l2r_view_size(p)) {
+        let r = l2r_view_take<T>(p, x >> 1);
+        let d = l2r_consume<T>(dflt);
+        r
+    } else {
+        let e = l2r_view_end<T>(p);
         let d = l2r_nat_drop_raw(x);
         let ignored = l2r_panic_code(0);
         dflt
@@ -1747,9 +1855,16 @@ fn l2r_natarr_replicate_word(n : u64, w : u64) -> LNatArr [{ leanrt::tagvec::rep
 fn l2r_natarr_size(a : LNatArr) -> u64 [{ { let r = leanrt::tagvec::size(&a); leanrt::rc_release(a); r } }];
 #[ffi(import)]
 fn l2r_natarr_word(a : LNatArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word(&a, i); leanrt::rc_release(a); r } }];
-// The word at `i`; a big word owns a reference.
+// A read's view (see `l2r_array_give`); the word at `i`, which ends it (a
+// big word owns a reference).
 #[ffi(import)]
-fn l2r_natarr_word_owned(a : LNatArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word_owned(&a, i); leanrt::rc_release(a); r } }];
+fn l2r_natarr_give(a : LNatArr) -> u64 [{ leanrt::tagvec::give(a) }];
+#[ffi(import)]
+fn l2r_natarr_view_size(p : u64) -> u64 [{ unsafe { leanrt::tagvec::view_size(p) } }];
+#[ffi(import)]
+fn l2r_natarr_view_take(p : u64, i : u64) -> u64 [{ unsafe { leanrt::tagvec::view_take(p, i) } }];
+#[ffi(import)]
+fn l2r_natarr_view_end(p : u64) -> u64 [{ { unsafe { leanrt::tagvec::view_end(p) }; 0 } }];
 #[ffi(import)]
 fn l2r_natarr_set_word(a : LNatArr, i : u64, w : u64) -> LNatArr [{ leanrt::tagvec::set_word(a, i, w) }];
 #[ffi(import)]
@@ -1770,10 +1885,9 @@ fn l2r_natarr_reverse(a : LNatArr) -> LNatArr [{ leanrt::tagvec::reverse(a) }];
 
 // Elements are `Nat` words (see the Nat section): `lean_box` of a small
 // value, an owned reference to a big number otherwise; the handles move in
-// and out as their words. The array is consumed once (a second use in one
-// branch would make Reussir release it out of line in the other): a big
-// word comes back owning a reference.
-fn l2r_natarr_get(a : LNatArr, i : u64) -> Nat { l2r_nat_of_raw(l2r_natarr_word_owned(a, i)) }
+// and out as their words. A read takes the array's view first, as
+// `l2r_array_get`: a big word comes back owning a reference.
+fn l2r_natarr_take(p : u64, i : u64) -> Nat { l2r_nat_of_raw(l2r_natarr_view_take(p, i)) }
 fn l2r_natarr_set(a : LNatArr, i : u64, x : Nat) -> LNatArr { l2r_natarr_set_word(a, i, l2r_nat_raw(x)) }
 fn l2r_natarr_push(a : LNatArr, x : Nat) -> LNatArr { l2r_natarr_push_word(a, l2r_nat_raw(x)) }
 fn l2r_natarr_replicate(n : u64, x : Nat) -> LNatArr { l2r_natarr_replicate_word(n, l2r_nat_raw(x)) }
@@ -1786,19 +1900,41 @@ fn lean_mk_empty_natarr_with_capacity(n : Nat) -> LNatArr {
     if (w & 1) == 1 { l2r_natarr_with_capacity(w >> 1) } else { l2r_internal_panic_at<LNatArr>(4) }
 }
 
+// Element `i`, which must be in bounds (checked; see `l2r_array_get`).
+fn l2r_natarr_get(a : LNatArr, i : u64) -> Nat {
+    let p = l2r_natarr_give(a);
+    let n = l2r_natarr_view_size(p);
+    if i < n { l2r_natarr_take(p, i) } else { l2r_array_index_bug<Nat>(i, n) }
+}
+
+// A read at the word `x` of a `Nat` index a proof keeps in bounds (see
+// `l2r_array_get_word`).
+fn l2r_natarr_get_word(a : LNatArr, x : u64) -> Nat {
+    let p = l2r_natarr_give(a);
+    let n = l2r_natarr_view_size(p);
+    if l2r_word_index_ok(x, n) { l2r_natarr_take(p, x >> 1) } else { l2r_index_fail<Nat>(x, n) }
+}
+
 fn lean_natarr_get_size(v : LNatArr) -> Nat { l2r_nat_small(l2r_natarr_size(v)) }
 fn lean_natarr_size(v : LNatArr) -> u64 { l2r_natarr_size(v) }
-fn lean_natarr_fget(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get(v, l2r_index_of_nat(i)) }
-fn lean_natarr_fget_borrowed(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get(v, l2r_index_of_nat(i)) }
+fn lean_natarr_fget(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get_word(v, l2r_nat_raw(i)) }
+fn lean_natarr_fget_borrowed(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get_word(v, l2r_nat_raw(i)) }
 fn lean_natarr_uget(v : LNatArr, i : u64) -> Nat { l2r_natarr_get(v, i) }
 fn lean_natarr_uget_borrowed(v : LNatArr, i : u64) -> Nat { l2r_natarr_get(v, i) }
 
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
-// return the default.
+// return the default. In bounds the default is released after the take,
+// as `lean_array_get` (nothing is released between give and take).
 fn lean_natarr_get(dflt : Nat, v : LNatArr, i : Nat) -> Nat {
-    let w = l2r_nat_raw(i);
-    if l2r_word_index_ok(w, l2r_natarr_size(v)) { l2r_natarr_get(v, w >> 1) } else {
-        let d = l2r_nat_drop_raw(w);
+    let x = l2r_nat_raw(i);
+    let p = l2r_natarr_give(v);
+    if l2r_word_index_ok(x, l2r_natarr_view_size(p)) {
+        let r = l2r_natarr_take(p, x >> 1);
+        let d = l2r_consume<Nat>(dflt);
+        r
+    } else {
+        let e = l2r_natarr_view_end(p);
+        let d = l2r_nat_drop_raw(x);
         let ignored = l2r_panic_code(0);
         dflt
     }
@@ -1859,9 +1995,16 @@ fn l2r_intarr_replicate_word(n : u64, w : u64) -> LIntArr [{ leanrt::tagvec::rep
 fn l2r_intarr_size(a : LIntArr) -> u64 [{ { let r = leanrt::tagvec::size(&a); leanrt::rc_release(a); r } }];
 #[ffi(import)]
 fn l2r_intarr_word(a : LIntArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word(&a, i); leanrt::rc_release(a); r } }];
-// The word at `i`; a big word owns a reference.
+// A read's view (see `l2r_array_give`); the word at `i`, which ends it (a
+// big word owns a reference).
 #[ffi(import)]
-fn l2r_intarr_word_owned(a : LIntArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word_owned(&a, i); leanrt::rc_release(a); r } }];
+fn l2r_intarr_give(a : LIntArr) -> u64 [{ leanrt::tagvec::give(a) }];
+#[ffi(import)]
+fn l2r_intarr_view_size(p : u64) -> u64 [{ unsafe { leanrt::tagvec::view_size(p) } }];
+#[ffi(import)]
+fn l2r_intarr_view_take(p : u64, i : u64) -> u64 [{ unsafe { leanrt::tagvec::view_take(p, i) } }];
+#[ffi(import)]
+fn l2r_intarr_view_end(p : u64) -> u64 [{ { unsafe { leanrt::tagvec::view_end(p) }; 0 } }];
 #[ffi(import)]
 fn l2r_intarr_set_word(a : LIntArr, i : u64, w : u64) -> LIntArr [{ leanrt::tagvec::set_word(a, i, w) }];
 #[ffi(import)]
@@ -1881,7 +2024,7 @@ fn l2r_intarr_reverse(a : LIntArr) -> LIntArr [{ leanrt::tagvec::reverse(a) }];
 
 
 // Elements are `Int` words (see the Int section), as for `LNatArr`.
-fn l2r_intarr_get(a : LIntArr, i : u64) -> Int { l2r_int_of_raw(l2r_intarr_word_owned(a, i)) }
+fn l2r_intarr_take(p : u64, i : u64) -> Int { l2r_int_of_raw(l2r_intarr_view_take(p, i)) }
 fn l2r_intarr_set(a : LIntArr, i : u64, x : Int) -> LIntArr { l2r_intarr_set_word(a, i, l2r_int_raw(x)) }
 fn l2r_intarr_push(a : LIntArr, x : Int) -> LIntArr { l2r_intarr_push_word(a, l2r_int_raw(x)) }
 fn l2r_intarr_replicate(n : u64, x : Int) -> LIntArr { l2r_intarr_replicate_word(n, l2r_int_raw(x)) }
@@ -1894,19 +2037,41 @@ fn lean_mk_empty_intarr_with_capacity(n : Nat) -> LIntArr {
     if (w & 1) == 1 { l2r_intarr_with_capacity(w >> 1) } else { l2r_internal_panic_at<LIntArr>(4) }
 }
 
+// Element `i`, which must be in bounds (checked; see `l2r_array_get`).
+fn l2r_intarr_get(a : LIntArr, i : u64) -> Int {
+    let p = l2r_intarr_give(a);
+    let n = l2r_intarr_view_size(p);
+    if i < n { l2r_intarr_take(p, i) } else { l2r_array_index_bug<Int>(i, n) }
+}
+
+// A read at the word `x` of a `Nat` index a proof keeps in bounds (see
+// `l2r_array_get_word`).
+fn l2r_intarr_get_word(a : LIntArr, x : u64) -> Int {
+    let p = l2r_intarr_give(a);
+    let n = l2r_intarr_view_size(p);
+    if l2r_word_index_ok(x, n) { l2r_intarr_take(p, x >> 1) } else { l2r_index_fail<Int>(x, n) }
+}
+
 fn lean_intarr_get_size(v : LIntArr) -> Nat { l2r_nat_small(l2r_intarr_size(v)) }
 fn lean_intarr_size(v : LIntArr) -> u64 { l2r_intarr_size(v) }
-fn lean_intarr_fget(v : LIntArr, i : Nat) -> Int { l2r_intarr_get(v, l2r_index_of_nat(i)) }
-fn lean_intarr_fget_borrowed(v : LIntArr, i : Nat) -> Int { l2r_intarr_get(v, l2r_index_of_nat(i)) }
+fn lean_intarr_fget(v : LIntArr, i : Nat) -> Int { l2r_intarr_get_word(v, l2r_nat_raw(i)) }
+fn lean_intarr_fget_borrowed(v : LIntArr, i : Nat) -> Int { l2r_intarr_get_word(v, l2r_nat_raw(i)) }
 fn lean_intarr_uget(v : LIntArr, i : u64) -> Int { l2r_intarr_get(v, i) }
 fn lean_intarr_uget_borrowed(v : LIntArr, i : u64) -> Int { l2r_intarr_get(v, i) }
 
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
-// return the default.
+// return the default. In bounds the default is released after the take,
+// as `lean_array_get` (nothing is released between give and take).
 fn lean_intarr_get(dflt : Int, v : LIntArr, i : Nat) -> Int {
-    let w = l2r_nat_raw(i);
-    if l2r_word_index_ok(w, l2r_intarr_size(v)) { l2r_intarr_get(v, w >> 1) } else {
-        let d = l2r_nat_drop_raw(w);
+    let x = l2r_nat_raw(i);
+    let p = l2r_intarr_give(v);
+    if l2r_word_index_ok(x, l2r_intarr_view_size(p)) {
+        let r = l2r_intarr_take(p, x >> 1);
+        let d = l2r_consume<Int>(dflt);
+        r
+    } else {
+        let e = l2r_intarr_view_end(p);
+        let d = l2r_nat_drop_raw(x);
         let ignored = l2r_panic_code(0);
         dflt
     }
@@ -1962,11 +2127,16 @@ fn lean_mk_empty_byte_array(n : Nat) -> RVec<u8> { l2r_mk_empty_with_capacity<u8
 fn lean_byte_array_size(v : RVec<u8>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
 fn lean_sarray_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
 fn lean_byte_array_uget(v : RVec<u8>, i : u64) -> u8 { l2r_array_get(v, i) }
-fn lean_byte_array_fget(v : RVec<u8>, i : Nat) -> u8 { l2r_array_get(v, l2r_index_of_nat(i)) }
+fn lean_byte_array_fget(v : RVec<u8>, i : Nat) -> u8 { l2r_array_get_word(v, l2r_nat_raw(i)) }
 // `ByteArray.get!`: 0 out of bounds (no panic, as lean.h).
 fn lean_byte_array_get(v : RVec<u8>, i : Nat) -> u8 {
-    let w = l2r_nat_raw(i);
-    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_get(v, w >> 1) } else { let d = l2r_nat_drop_raw(w); 0 }
+    let x = l2r_nat_raw(i);
+    let p = l2r_array_give<u8>(v);
+    if l2r_word_index_ok(x, l2r_view_size(p)) { l2r_view_take<u8>(p, x >> 1) } else {
+        let e = l2r_view_end<u8>(p);
+        let d = l2r_nat_drop_raw(x);
+        0
+    }
 }
 fn lean_byte_array_push(v : RVec<u8>, x : u8) -> RVec<u8> { l2r_array_push(v, x) }
 fn lean_byte_array_uset(v : RVec<u8>, i : u64, x : u8) -> RVec<u8> { l2r_array_set(v, i, x) }
@@ -2007,11 +2177,16 @@ fn lean_byte_array_data(a : RVec<u8>) -> RVec<u8> { a }
 fn lean_mk_empty_float_array(n : Nat) -> RVec<f64> { l2r_mk_empty_with_capacity<f64>(n, 8) }
 fn lean_float_array_size(v : RVec<f64>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
 fn lean_float_array_uget(v : RVec<f64>, i : u64) -> f64 { l2r_array_get(v, i) }
-fn lean_float_array_fget(v : RVec<f64>, i : Nat) -> f64 { l2r_array_get(v, l2r_index_of_nat(i)) }
+fn lean_float_array_fget(v : RVec<f64>, i : Nat) -> f64 { l2r_array_get_word(v, l2r_nat_raw(i)) }
 // `FloatArray.get!`: 0.0 out of bounds.
 fn lean_float_array_get(v : RVec<f64>, i : Nat) -> f64 {
-    let w = l2r_nat_raw(i);
-    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_get(v, w >> 1) } else { let d = l2r_nat_drop_raw(w); 0.0 }
+    let x = l2r_nat_raw(i);
+    let p = l2r_array_give<f64>(v);
+    if l2r_word_index_ok(x, l2r_view_size(p)) { l2r_view_take<f64>(p, x >> 1) } else {
+        let e = l2r_view_end<f64>(p);
+        let d = l2r_nat_drop_raw(x);
+        0.0
+    }
 }
 fn lean_float_array_push(v : RVec<f64>, x : f64) -> RVec<f64> { l2r_array_push(v, x) }
 fn lean_float_array_uset(v : RVec<f64>, i : u64, x : f64) -> RVec<f64> { l2r_array_set(v, i, x) }

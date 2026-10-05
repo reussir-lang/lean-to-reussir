@@ -76,7 +76,10 @@ live two-limb numbers take 49.5 MB, 0.67× native.
 - **Reads.** Reussir has no borrowed parameters, so each read of an array
   or string takes the container owned: an increment by the caller and a
   release in the runtime function. LLVM cancels the pair when nothing lies
-  between them.
+  between them. Thus a read releases the container first: it gets a
+  *view* of the container, then it checks the index, then it takes the
+  element from the view. The last reference frees the container after
+  the read.
 
 ## Records and enums
 

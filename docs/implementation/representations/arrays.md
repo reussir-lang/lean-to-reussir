@@ -86,11 +86,15 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   decrements; never `count > 1`. Its free path is an `extern "C"` function
   (no unwinding, no landing pads in the textures). A cell's read
   (`l2r_lcell_get`, `drop::cell_get`) releases the cell before it copies
-  the state.
+  the state; a read of a shared array or string releases it before its
+  bounds check (`array::give`, `tagvec::give`, `string::read_owned`), and
+  the last reference frees the block after the read (`view_take`,
+  `view_end`, after the rule; see
+  [../ownership.md](../ownership.md#reads-give-their-reference-up-first-for-a-view)).
 - **Why:** Reussir's `rc.inc` asserts that the old count was neither 0 nor
   `u32::MAX`; a read's texture, inlined, releases right after the
   caller's increment, and with `== 1` LLVM sees that the free cannot
-  happen and cancels the pair (and the bounds check behind it). With
+  happen and cancels the pair. With
   `> 1` it cannot exclude a wrapped count: an in-place quicksort ran 1.6x
   the instructions (perf-rvec). For a cell, copying the state first
   increments the state record, which LLVM cannot tell from the cell, so
@@ -98,8 +102,8 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   (the last reference moves the state out) lets the pair fold: reading a
   finished thunk in a loop runs 0.81x the instructions (perf-cell).
 - **Where:** `runtime/leanrt/src/drop.rs`: `Vec::drop`, `free_vec`,
-  `Cell::drop`, `free_cell`, `cell_get`; `runtime/prelude.rr`:
-  `l2r_lcell_get`.
+  `Cell::drop`, `free_cell`, `cell_get`; `runtime/leanrt/src/array.rs`:
+  `give`; `runtime/prelude.rr`: `l2r_lcell_get`, `l2r_array_give`.
 - **Remove only if:** never.
 
 ### Enumerations and `Unit` in arrays are indices
