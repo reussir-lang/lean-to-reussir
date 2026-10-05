@@ -253,7 +253,9 @@ with examples, and what it costs.</p>
 <li>Unboxing is a generated function that accepts every variant that can hold
   a value of the target's Lean type. One Lean type can have several
   representations: <code>List Nat</code> and the uniform <code>List L2RBox</code>, or <code>LNatArr</code> and
-  <code>RVec&lt;L2RBox&gt;</code> for an <code>Array Nat</code>.</li>
+  <code>RVec&lt;L2RBox&gt;</code> for an <code>Array Nat</code>. With the optional pass
+  <code>conv-liveness</code>, the function has arms only for the variants that live
+  code builds.</li>
 <li>A conversion between two representations is structural: element by
   element for arrays and lists. Deep values convert with a loop and an
   explicit stack, not recursion.</li>

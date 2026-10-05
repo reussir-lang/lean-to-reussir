@@ -13,9 +13,10 @@ translation plan §5.8 to §5.14 and §6, and the implementation notes'
 
 | Part | Language | Role |
 |---|---|---|
-| `runtime/prelude.rr` | Reussir | Prepended to every program. Defines the runtime types and one function per Lean extern, named after the extern's C symbol (`lean_nat_add`). Fast paths are inline Reussir code; the rest calls `leanrt`. |
-| `runtime/leanrt/` | Rust | Linked into every program. Big numbers (GMP), strings, arrays, float printing, the glue to lean-runtime's IO (handles, the last-error slot, startup and exit), once-cells, tasks and the scheduler, `Std.Sync`, the event loop. One crate, so one copy of all global state. |
-| `lean2rr/L2RShim.lean` | Lean | lean2rr's own Lean library: the `Std.Internal.UV` externs (timers, sockets, name resolution, signals), `Std.Time.Timestamp.now`, `ShareCommon.Object.eq`/`hash`. Exported under the C symbols and compiled with the program. |
+| `runtime/prelude.rr` | Reussir | Prepended to every program. Defines the runtime types and one function per Lean extern, named after the extern's C symbol (`lean_nat_add`). Fast paths are inline Reussir code; the rest calls `leanrt` or `lean-runtime`. |
+| `runtime/leanrt/` | Rust | Linked into every program. lean2rr's representations: big numbers (GMP), strings, arrays, cells, once-cells. The glue to lean-runtime: its rules, its IO (handles, the last-error slot), its scheduler (the task objects, the one `unsafe` step of a context switch, the current standard streams) and its event loop. One crate, so one copy of all global state. |
+| `third_party/lean-runtime` | Rust | The shared crate, a git submodule pinned by commit. Lean's runtime rules, the IO, the startup, the scheduler with its wait cores, `Std.Sync`, the event loop and the networking. The driver builds it with cargo. |
+| `lean2rr/L2RShim.lean` | Lean | lean2rr's own Lean library: the `Std.Internal.UV` externs (timers, sockets, name resolution, signals), `Std.Time.Timestamp.now`, `ShareCommon.Object.eq`/`hash`, over primitives of lean-runtime's event loop. Exported under the C symbols and compiled with the program. |
 | generated glue | Reussir | Made by lean2rr for externs over Lean-defined types: `IO.Error`, `Option`, `List`, processes, references, tasks. |
 
 Semantics follow Lean 4.34's C runtime (`lean.h`, `src/runtime/*.cpp`).
@@ -94,6 +95,16 @@ switch (with its written proof), and the current standard streams of each
 context and of each emulated worker. The generated task code did not
 change.
 
+**Waits.** A context that needs a thunk or a constant that another context
+computes waits for it. These waits, the reference rule below and the
+resolution of promises released inside a free use lean-runtime's *wait
+cores* (switch step 6). Their fast paths stay inline in the program's loops
+(`tests/runtime/wait-inline-check.sh` checks the machine code).
+
+**Lazy start.** The scheduler starts at the first task, promise,
+`Std.Sync` object, timer, signal watcher, socket or name lookup. The lazy
+start is lean-runtime's too (switch step 7).
+
 **References in a program with tasks.** lean2rr knows when it translates a
 program whether the program can make tasks: the program reaches an extern
 that makes a task or a promise (timers and sockets make promises too). Only
@@ -105,8 +116,10 @@ code is the same, and the scheduler does not start.
 
 **Promises** are runtime objects that hold their task's cell. Dropping the
 last reference to an unresolved promise resolves it with `none`, as
-natively. **`Std.Sync`** mutexes and condition variables are lean-runtime's
-objects in runtime handles; a thread that waits blocks its context.
+natively. When a free releases the promise, the resolution waits until the
+free ends (Reussir patch 0040 reports the end). **`Std.Sync`** mutexes
+and condition variables are lean-runtime's objects in runtime handles; a
+thread that waits blocks its context.
 
 ## Input and output
 
@@ -139,6 +152,17 @@ objects in runtime handles; a thread that waits blocks its context.
 
 {{svg:startup}}
 
+- **Entry.** The startup logic is lean-runtime's (switch step 7). Its ELF
+  constructor opens native Lean's startup descriptors before Rust's runtime
+  starts. The initializers run on the process's main thread (8 MiB stack).
+  Then `main` runs on a thread with a 1 GiB stack, which lean-runtime makes.
+- **Huge pages.** No constructor of lean-runtime allocates: they run before
+  mimalloc's own constructor. So the process's main thread reserves
+  mimalloc's first arena with large pages, and the heap of `main`'s thread
+  is on transparent huge pages, as natively. From switch step 3 to step 6,
+  a constructor allocated first. The heap lost its huge pages, until a
+  workaround in `leanrt` restored them. Step 7 removed the allocation and
+  the workaround.
 - **Constants.** Every zero-parameter declaration of the program's modules
   runs at startup, in Lean's initialization order. Each constant is a
   once-cell. A context that needs a constant that another context is
@@ -164,19 +188,20 @@ The walk is a loop over a work list, not a recursion, and it visits each
 cell once. So a value 300000 cells deep, or a DAG with 2^40 paths, is no
 problem.
 
-## The shared runtime crate (plan)
+## The shared runtime crate
 
 lean2rr uses the shared crate **`lean-runtime`**
 (github.com/QueClr/lean-runtime-rs, public). The crate implements Lean's
-runtime behaviour once, as a library that a translator from Lean to Rust
-can use. lean2rr's `leanrt` moves into it step by step.
+runtime behaviour once, as a library that a translator of Lean programs
+can use. lean2rr switched to it in seven steps, from 2026-10-04 to
+2026-10-05.
 
 | Point | Decision |
 |---|---|
-| What is shared | Lean's runtime semantics: hashes, floats, strings, numbers, arrays, IO, the scheduler. |
-| What stays in lean2rr | The representation of values and the memory protocol: lean2rr keeps thin glue over its own layouts. |
+| What is shared | Lean's runtime semantics: hashes, floats, strings, numbers, arrays, IO, the startup, the scheduler. |
+| What stays in lean2rr | The representation of values and the memory protocol: lean2rr keeps thin glue over its own layouts, and its hot paths. |
 | One runtime | Every runtime function is implemented once, in the crate. lean2rr keeps no copies and no fallbacks. |
-| Safety | `#![forbid(unsafe_code)]` by default. Unsafe code comes only through vetted crates (nix/rustix, mimalloc, corosensei). A faster unsafe path can come later behind an opt-in `unsafe-fast` feature, with a written proof. |
+| Safety | The default build compiles no `unsafe` code of the crate. A few native behaviours that no safe API can give (the process title, the startup descriptors, the stack-overflow report) are small files behind their own features, each with a written proof (the crate's `UNSAFE.md`); lean2rr enables these features. Other unsafe code comes only through vetted crates (such as nix, rustix, corosensei and mimalloc). A faster unsafe path can come later behind an opt-in `unsafe-fast` feature, with a written proof. |
 | Speed | The safe default must be at least as fast as Lean 4.34.0's native runtime. |
 | Big numbers | Behind a trait; lean2rr keeps GMP. |
 | Tasks | Deferred tasks, polling yield points, Lean's exit behaviour; the stack switch through corosensei. |
@@ -184,17 +209,24 @@ can use. lean2rr's `leanrt` moves into it step by step.
 | Reuse | Existing runtime code moves into the crate; it is rewritten only where it does not fit. |
 | Bugs | Every bug found becomes a test. Bugs of Lean's own runtime are not copied; lean-runtime's `docs/lean-bugs.md` lists them. |
 
-Status (2026-10-04): lean-runtime has Lean's semantics (hashes, floats,
-fixed-width integers, strings, `libm`, `Nat` and `Int`, the array edge
-rules, panics, the text of numbers), its IO (files, the standard
-streams, the file system, processes, the system queries, the startup
-descriptors, the exit), the scheduler (tasks, promises, `Std.Sync`, the
-event loop, the stack-overflow report) and the networking. lean2rr uses it
-for all of them: the submodule `third_party/lean-runtime`, which
-`scripts/l2r.py` builds with cargo (the features `io`, `proc-title`,
-`startup-fds`, `sched`, `stack-overflow` and `net`) and links with `leanrt` ([runtime
-README](repo:runtime/README.md), "The shared crate lean-runtime"). lean2rr
-keeps its hot paths: the inline small-`Nat`/`Int` arithmetic, the
-one-block big numbers with GMP (behind lean-runtime's big-number traits),
-the one-block arrays' reads, writes and pushes, and the current standard
-streams, which `IO.println` reads at each call.
+The switch steps:
+
+| Step | What lean2rr takes from lean-runtime since then |
+|---|---|
+| 1 | the rules for hashes, string positions, floats, fixed-width integers and `libm` |
+| 2 | the `Nat` and `Int` slow paths, the array edge rules, panics, the text of numbers |
+| 3 | the IO: files, the standard streams, the file system, processes, the system queries, the startup descriptors, the exit |
+| 4 | tasks, promises, `Std.Sync`, the event loop, timers, signals, sockets, Lean's stack-overflow report |
+| 5 | the last copies of shared functions: the toolchain facts, UTF-8 encoding and lossy decoding, the accessors of `IO.Error`, the clocks, `IO.getTID`, and others |
+| 6 | the wait cores: waits for a thunk or a constant, references in a program that creates tasks, promise resolutions put off to the end of a free |
+| 7 | the startup: `main`'s thread, the constructor that opens the startup descriptors, the scheduler's lazy start |
+
+Status (2026-10-05): the submodule `third_party/lean-runtime` is pinned at
+`471f458`. `scripts/l2r.py` builds it with cargo (the features `io`,
+`proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`) and links
+it with `leanrt` ([runtime README](repo:runtime/README.md), "The shared
+crate lean-runtime"). lean2rr keeps its hot paths: the inline
+small-`Nat`/`Int` arithmetic, the one-block big numbers with GMP (behind
+lean-runtime's big-number traits), the one-block arrays' reads, writes and
+pushes, and the current standard streams, which `IO.println` reads at each
+call. Each step passed lean2rr's full suite before its merge.

@@ -48,6 +48,32 @@ lean2rr --list-opts            # prints the registry
 
 {{gen:passes}}
 
+### Helpers for live code only (`conv-liveness`)
+
+At the end of Stage 4, lean2rr generates helpers that match variants: an
+unboxing function has an arm per `L2RBox` variant that can hold its type,
+an application function an arm per variant of its function type. Each arm
+converts, and a conversion can ask for more helpers. In a program that can
+cast (one `unsafe` implementation in any library that it imports), every
+unboxing function also gets an arm and a conversion for every variant with
+a compatible layout. So the helpers grow quadratically, and almost all of
+them can never run.
+
+`conv-liveness` makes a reachability pass over the generated program, from
+the entry point, the startup chain and the runtime's entry points. It
+generates a helper only when live code reaches it, and an arm only for a
+variant that live code builds. Then it drops the functions that nothing
+reaches.
+
+- **Effect.** A program that imports `Cslib.Init` went from 990,927
+  functions (1.44 GB of `.rr`) to 30,418 (26 MB). A program that imports
+  `Batteries` went from 162,096 functions to 10,743. Small programs get a
+  few percent fewer functions.
+- **Soundness.** An arm that is left out matches a variant that no running
+  code builds, so the program computes the same results. The one other
+  difference is at translation time: an extern that only a removed arm
+  calls is not reported as missing.
+
 ## Parts that look optional but are not
 
 {{v:req_count}} required parts. `--disable-opt` refuses their names.

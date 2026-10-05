@@ -235,14 +235,32 @@ The choice matters for two reasons:
 
 ### Externs and glue
 
-An extern call becomes a call of the prelude function with the extern's C
-symbol as its name (`lean_nat_add`). The prelude function is either inline
-Reussir code (a fast path) or a call into the Rust runtime `leanrt`. For
+A call of an extern of Lean's library becomes a call of the prelude
+function with the extern's C symbol as its name (`lean_nat_add`). The
+prelude function is either inline Reussir code (a fast path) or a call into
+the Rust runtime: `leanrt`, or `lean-runtime` for the rules. For
 externs over Lean-defined types (`Option`, `List`, `IO.Error`, processes,
 references) lean2rr generates *glue*. An extern whose C symbol is an
 `@[export]` Lean definition calls that definition directly, so its
 semantics are exactly Lean's. lean2rr keeps no list of supported externs:
-when the prelude lacks one, rrc reports an unknown function.
+it checks that the prelude defines each function it calls. When the prelude
+lacks one, lean2rr refuses the program at translation and names each such
+extern.
+
+An extern of the program runs Lean code (its `@[implemented_by]` target, a
+matching `@[export]` of the program, or its own Lean definition), or it is
+refused. See [the extern rule](index.html#the-extern-rule).
+
+### Helpers for live code only
+
+At the end of Stage 4, lean2rr generates helper functions: an unboxing
+function per target type, an application function per function type, and
+conversions. Each helper matches variants of `L2RBox` or of a
+function-value enum. The optional pass `conv-liveness` generates a helper
+only when live code reaches it, and an arm only for a variant that live
+code builds. Then it drops the functions that nothing reaches from the
+entry point or from the runtime's entries. See
+[Optional passes](passes.html#helpers-for-live-code-only-conv-liveness).
 
 ### Constants and startup
 
@@ -278,10 +296,14 @@ See [Runtime](runtime.html#startup) for the entry point.
 
 {{svg:rrc}}
 
-The driver builds the runtime crate `leanrt` once (cached by a hash of its
-sources), runs lean2rr, then runs rrc, and links `libleanrt.rlib` and GMP.
-If rrc crashes, the driver tries once more without `--reuse-across-call`
-(a workaround for Reussir bug 4). See [Reussir](reussir.html).
+The driver builds the shared crate `lean-runtime` (the pinned submodule,
+with cargo) and the runtime crate `leanrt`, each one cached. Then it runs
+lean2rr and rrc, and links `leanrt`, `lean-runtime` and GMP. rrc compiles
+each *texture* (the Rust body of a prelude function) with rustc. The driver
+gives rrc a cache directory, so rrc does not compile an unchanged texture
+again (Reussir patch 0066). If rrc crashes, the driver tries once more without
+`--reuse-across-call` (a workaround for Reussir bug 4). See
+[Reussir](reussir.html).
 
 ## Key decisions
 

@@ -131,7 +131,11 @@ native outputs are reproducible.
 - The sizes were chosen by timing the native executables pinned to an idle
   Cortex-X925 core (3.9 GHz, NVIDIA DGX Spark), taking the minimum of 3 runs.
   Native bench-size results (`oracle.py bench --repeat 3`; measured with
-  Lean 4.33, not yet re-measured with 4.34, whose runtime uses mimalloc 3):
+  Lean 4.33, when the sizes were chosen). Native Lean 4.34.0, whose runtime
+  uses mimalloc 3, was timed at the bench size on 2026-10-04 (best of 5):
+  its times are in
+  [`../docs/implementation-status.md`](../docs/implementation-status.md#performance),
+  "Performance". The table keeps the 4.33 sizing run:
 
 | case | bench size | time (s) | max RSS (MiB) |
 |---|---:|---:|---:|

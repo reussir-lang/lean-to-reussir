@@ -30,7 +30,7 @@ lean2rr makes a typed Reussir program from the code. Reussir's compiler
 `rrc` then compiles that program with LLVM. Reussir adds the reference
 counting and reuses memory cells in place. A small runtime supplies what
 Lean's C runtime supplies natively: big numbers, strings, files, processes,
-tasks and more.
+tasks and more. Most of its rules come from the shared crate `lean-runtime`.
 
 {{svg:flow}}
 
@@ -75,38 +75,52 @@ source, a reason and a native repro.
 | Parallelism | Not now. Tasks run on one thread. Real threads come later, and the design must not block them. |
 | C code of the program | Never built, linked or called (see the extern rule below). Support for calling C is parked. |
 | Externs of the program | See "The extern rule" below. |
-| `import Lean` | Programs that only use data structures from `Lean` build. Lean's C++ externs (`Expr.mkData`, `evalConst`, ...) are not available. |
+| `import Lean` | Programs that only use data structures from `Lean` build. Lean's C++ externs (`Expr.mkData`, `evalConst`, ...) are not available: lean2rr refuses a program that reaches one, and names each. |
+| Mathlib | Not a target. Its initializers reach Lean's C++ externs, so lean2rr refuses such a program. Computational code from such a library, written for `Init` and `Std` only, translates. |
 
 ## The extern rule
 
 <div class="rule" markdown="1">
-**Lean code only.** The project's rule for externs:
+**Lean code only.** The project's rule for an `@[extern]` of the program
+or of a package that it uses:
 
-1. An `@[extern]` of the program or of a package it uses is compiled from
-   its Lean definition. Its C code (Lake's `extern_lib`) is never built or
-   linked. This route has no data conversion: the Lean definition works on
-   lean2rr's own representations.
-2. An extern with no Lean definition (`@[extern] opaque`) is refused at
-   translation, with a clear message.
-3. The only native code is Lean's runtime library: `leanrt` today, moving
-   into the shared crate `lean-runtime`. A program extern that re-declares
-   one of these runtime functions with a matching signature uses lean2rr's
-   runtime version.
+1. It runs Lean code: its `@[implemented_by]` target; else the program's
+   own `@[export]` definition that its C symbol names, when the types and
+   the compiled signatures agree; else its own Lean definition. Its C code
+   (Lake's `extern_lib`) is never built or linked. This route has no data
+   conversion: the Lean code works on lean2rr's own representations.
+2. An extern with none of these (an `opaque`, an axiom) is refused at
+   translation. The message names each such extern and the reason.
+3. The only native code is Lean's runtime library: `leanrt` and the shared
+   crate `lean-runtime`. An extern of the program is never bound to it,
+   also when its C symbol names a runtime function. It runs its own
+   definition, or it is refused, and the message names Lean's declaration
+   to call instead.
 </div>
 
-**Current state.** The rule is implemented and in review, not merged yet.
-Until it is merged, lean2rr fails such a program at the rrc build with an
-unknown function. The externs of Lean's own library (`Init`, `Std`) are not
-affected: the runtime implements all of them.
+The externs of Lean's own library (`Init`, `Std`) are not affected: the
+runtime implements all of them. lean2rr's build prints a note that lists
+the externs of the program that run their Lean definition. Plan §5.8
+("Externs of the program") has the full rule.
 
 ## The shared runtime crate
 
 lean2rr uses the shared crate `lean-runtime`
 (github.com/QueClr/lean-runtime-rs, public). The crate holds Lean's runtime
-semantics, implemented once, in safe Rust; lean2rr takes the hash, string,
-float, fixed-width integer, libm, `Nat`/`Int`, array, panic and number-text
-rules, the IO, the task scheduler and the event loop from it, and keeps
-only its hot paths and the glue to its own representations. See [Runtime](runtime.html#the-shared-runtime-crate-plan).
+behaviour, implemented once, in Rust that is safe by default. lean2rr takes
+these parts from it:
+
+- the rules: hashes, strings, floats, fixed-width integers, `libm`,
+  `Nat`/`Int`, arrays, panics and the text of numbers;
+- the IO: files, the standard streams, the file system, processes, the
+  system queries and the exit;
+- the task scheduler, with its wait cores, `Std.Sync`, the event loop and
+  the networking;
+- the startup: `main`'s thread and native Lean's startup descriptors.
+
+lean2rr keeps only its own representations, its hot paths and the glue
+between them and the crate. The switch took seven steps, from 2026-10-04 to
+2026-10-05. See [Runtime](runtime.html#the-shared-runtime-crate).
 
 ## Status
 
@@ -115,30 +129,43 @@ other results are the last recorded runs.
 
 | Check | Result |
 |---|---|
-| Runtime test suite | {{v:rt_tests}} programs† ({{v:rt_xfail}} marked `.xfail`†); 231 of 231 identical to native Lean 4.34.0 at the last full regression (2026-10-03) |
+| Runtime test suite | {{v:rt_tests}} programs† ({{v:rt_xfail}} marked `.xfail`†); at the last full run (2026-10-05), 326 of 327 identical to native Lean 4.34.0, nine of them through expectation files; the other one is the `.xfail` test |
 | Classic corpus | 18 programs × 3 sizes, identical to native, with all optional passes on and with all off |
 | Reussir benchmark suite | 18 of 18 programs identical to native |
 | Loader checks | {{v:env_cases}} cases†, all as expected |
 | Lean's own compile tests | 72 programs of Lean's `tests/compile` and `tests/compile_bench`: all match native (checked with Lean 4.33) |
 | Externs of `Init` and `Std` | all 717 of Lean 4.34 available; 706 checked by programs that call each one |
-| Speed | faster than native on 16 of 18 classic programs, about equal on 2 (measured with Lean 4.33; not measured again for 4.34) |
-| Reussir | {{v:patches_applied}} local patches applied†, 0065 and 0066 (texture cache) included |
+| Speed | against native Lean 4.34.0 (2026-10-04, largest size): faster on 15 of the 18 classic programs, about equal on the other 3; geometric mean 0.71× time and 0.69× memory; less memory on all 18 |
+| Reussir | {{v:patches_applied}} local patches applied†, 0065 (position-independent code) and 0066 (texture cache) included |
 
 [Testing](testing.html) explains each test set and the review process.
 
-## Work in progress
+## Recent changes
 
-As of 2026-10-04, this work is under way and not in the repository's main
-line yet:
+Merged on 2026-10-04 and 2026-10-05:
 
-- the extern rule (above): implemented, in review;
-- fixes found by testing other programs through lean2rr: the release order
-  of handles lent to a call, `libm` calls that LLVM must not fold, and the
-  overflow message of `Array.replicate`;
-- plan §10's list of Lean runtime bugs that lean2rr does not reproduce
-  (see [Known differences](differences.html#lean-bugs-we-do-not-reproduce));
-- the move of the runtime's scheduler and event loop into `lean-runtime`
-  (switch step 4; its IO moved in step 3).
+- **The switch to `lean-runtime`**, in seven steps: the rules (steps 1
+  and 2), the IO (step 3), the scheduler, `Std.Sync` and the event loop
+  (step 4), the last copies of shared functions (step 5), the wait cores
+  (step 6) and the startup (step 7).
+- **The extern rule** (above).
+- **`conv-liveness`**, the 17th optional pass: Stage 4 generates its
+  helpers only for live code (see [Optional passes](passes.html)).
+- **Library initializers at startup.** The `initialize` declarations of
+  `Init` and `Std` (`IO.stdGenRef`) run at their module's place, also when
+  the program does not use them, as natively.
+- **Reussir.** Patches 0065 and 0066 are applied. Each
+  entry is now a numbered *issue* with a kind: only a *bug* is wrong
+  behaviour (see [Reussir](reussir.html#all-entries)).
+- **Plan §10** lists the Lean runtime bugs that lean2rr does not reproduce
+  (see [Known differences](differences.html#lean-bugs-we-do-not-reproduce)),
+  the differences of programs that use the `Lean` package, and that
+  Mathlib is not supported.
+- **Performance** of the classic corpus, measured against native Lean
+  4.34.0 (2026-10-04).
+
+The [implementation status](repo:docs/implementation-status.md) lists the
+possible future work.
 
 ## The pages
 
@@ -157,7 +184,7 @@ Types known only at run time: the uniform type `L2RBox`, examples, costs.
 </div>
 <div class="card" markdown="1">
 #### [Runtime](runtime.html)
-The runtime layers, memory management, the scheduler, IO, startup, and the shared runtime plan.
+The runtime layers, memory management, the scheduler, IO, startup, and the shared crate `lean-runtime`.
 </div>
 <div class="card" markdown="1">
 #### [Optional passes](passes.html)
@@ -169,7 +196,7 @@ Native builds as the oracle, the test sets, the review rounds.
 </div>
 <div class="card" markdown="1">
 #### [Reussir](reussir.html)
-What Reussir is, how lean2rr calls it, and the local patches.
+What Reussir is, how lean2rr calls it, the issues met and the local patches.
 </div>
 <div class="card" markdown="1">
 #### [Known differences](differences.html)

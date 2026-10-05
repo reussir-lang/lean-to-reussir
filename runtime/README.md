@@ -240,7 +240,7 @@ rest.
   - `toolchain`: `Lean.githash`, `Lean.version.specialDesc`,
     `System.Platform.target`.
 
-  and, from its `io` module (features `io`, `proc-title`):
+  and, from its `io` module (features `io`, `proc-title`, `startup-fds`):
   - `handle`, `cfile`: `IO.FS.Handle` and the three standard streams,
     glibc's `FILE` model behind each (buffering, read-ahead, positions, the
     sticky indicators, LB-02), the open-handle list; `leanrt::fs` keeps a
@@ -274,9 +274,12 @@ rest.
     (`current_time_nanos`), `Std.Time.Database.Windows`'s errors off
     Windows, `allocprof`'s text (`allocprof_text`), `dbgTraceIfShared`'s
     line (`shared_rc_line`);
-  - `startup`: native Lean's startup descriptors, which `leanrt::rt`'s ELF
-    constructor opens (a failure ends the program with lean-runtime's
-    message: LB-30, LB-31), and `IO.initializing`;
+  - `startup`: native Lean's startup descriptors, which lean-runtime's own
+    ELF constructor opens since switch step 7 (feature `startup-fds`,
+    `.init_array.00101`; `leanrt::rt::run_main2` calls
+    `ensure_native_descriptors`, which keeps it linked; a failure ends the
+    program with lean-runtime's message: LB-30, LB-31), `main`'s thread
+    (`run_main`, `main_on_thread`) and `IO.initializing`;
   - `exit`: the exit sequence (every normal end of the process, through
     `leanrt::io::exit`), `after_main` (`main`'s return and an uncaught
     error), `show_error` (an uncaught error's text).

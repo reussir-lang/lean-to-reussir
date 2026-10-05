@@ -151,7 +151,7 @@ def overview_flow():
     s.arrow(505, 205, 540, 205)
     s.box(545, 175, 110, 60, ["prog.rr", "Reussir source"], "b-l2r")
     s.arrow(655, 205, 690, 205)
-    s.box(695, 175, 150, 60, ["rrc (Reussir)", "+ leanrt, GMP"], "b-rr")
+    s.box(695, 175, 150, 60, ["rrc (Reussir)", "+ runtime crates, GMP"], "b-rr")
     s.arrow(770, 175, 770, 136)
     s.box(695, 96, 150, 40, ["lean2rr build"], "b-rr")
     # compare
@@ -234,7 +234,7 @@ def pipeline():
                    "reference counting (Perceus), token reuse, drop glue",
                    "LLVM: optimization and code generation"],
          "b-rr", left=["scripts/l2r.py", "runs rrc"])
-    link(884, 906, "object code, linked with the leanrt rlib and GMP")
+    link(884, 906, "object code, linked with leanrt, lean-runtime and GMP")
     step(908, 44, ["executable (position-independent, as native)"], "b-rr")
     s.text(X, 990, "Colours: blue = Lean's code or Lean's passes; green = lean2rr; "
            "yellow = optional pass; orange = Reussir.", "ts")
@@ -280,7 +280,7 @@ def reussir_path():
     s.arrow(570, 70, 600, 70)
     s.box(605, 30, 130, 80, ["LLVM", "optimization,", "code generation"], "b-rr")
     s.arrow(735, 70, 765, 70)
-    s.box(770, 30, 120, 80, ["link", "leanrt.rlib", "libgmp.a"], "b-rt")
+    s.box(770, 30, 120, 80, ["link", "leanrt,", "lean-runtime,", "libgmp.a"], "b-rt")
     s.text(10, 150, "Textures (the Rust bodies of #[ffi(import)] functions) are compiled by rustc "
            "and can be inlined into Reussir code.", "ts")
     return s.render()
@@ -497,8 +497,9 @@ def ref_cells():
 def layers():
     s = SVG("layers", 940, 400, "The layers of a lean2rr build",
             "Every lean2rr build has these layers. The shared crate "
-            "<code>lean-runtime</code> has the semantics and the IO of leanrt; the "
-            "glue to lean2rr's representations stays in lean2rr.")
+            "<code>lean-runtime</code> has Lean's runtime rules, the IO, the startup "
+            "and the scheduler; lean2rr's representations and the glue to them "
+            "stay in leanrt.")
     W = 640
     s.box(10, 10, 420, 66, ["Generated program (lean2rr output)",
                            "the program's functions and types, glue for externs,",
@@ -516,9 +517,9 @@ def layers():
                           "Rc, the pending stack for frees (local patches 0013-0015), mimalloc"], "b-rr")
     s.box(10, 332, W, 50, ["System", "libc, libm, GMP, the kernel"], "b-lean")
     s.box(680, 170, 250, 120, ["lean-runtime (submodule)", "a shared crate: Lean's",
-                              "runtime rules in safe Rust", "(semantics, IO, the scheduler,",
-                              "the event loop, networking);", "leanrt keeps glue, hot paths"], "b-plan")
-    s.path("M 680 212 L 652 212", "ard")
+                              "runtime rules (semantics, IO,", "startup, the scheduler, the",
+                              "event loop, networking);", "leanrt keeps glue, hot paths"], "b-rt")
+    s.path("M 680 212 L 652 212")
     return s.render()
 
 
@@ -529,7 +530,7 @@ def startup_seq():
             "exits 1 before <code>main</code>.")
     steps = [("0", ["open libuv's", "descriptors", "(ELF constructor)"]),
              ("1", ["run the", "initializers", "(main thread, 8 MiB)"]),
-             ("2", ["start the", "task manager;", "1 GiB thread"]),
+             ("2", ["a 1 GiB thread", "for main; the task", "manager is lazy"]),
              ("3", ["call main", "with the args", "and the world"]),
              ("4", ["run the IO tasks", "still pending", "(final run)"]),
              ("5-6", ["error: print it,", "exit 1; else exit", "with main's code"])]
@@ -613,7 +614,10 @@ def runsh():
     s = SVG("runsh", 940, 260, "tests/runtime/run.sh, one test",
             "Each <code>Rt*.lean</code> test is built twice and run twice. "
             "<code>NAME.args</code>, <code>.stdin</code>, <code>.pipe</code>, "
-            "<code>.opts</code> and <code>.xfail</code> files change the run.")
+            "<code>.opts</code>, <code>.deps</code>, <code>.refused</code> and "
+            "<code>.xfail</code> files change the run; expectation files "
+            "(<code>NAME.native.*</code>, <code>NAME.l2r.*</code>) give each "
+            "run its own expected output.")
     s.box(10, 95, 140, 60, ["RtName.lean", "(+ .args, .stdin)"], "b-test")
     s.path("M 150 115 C 180 115 180 50 210 50")
     s.path("M 150 135 C 180 135 180 200 210 200")

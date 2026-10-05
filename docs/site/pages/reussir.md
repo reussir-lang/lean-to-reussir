@@ -48,7 +48,8 @@ Reussir `ef922049` plus {{v:patches_applied}} patches. The patch files are in
   This patch is an optimization, not a fix.
 - Patches are local only: never pushed or submitted upstream.
 - lean2rr keeps its workarounds, so that it also works with an unpatched
-  Reussir. The exception: the runtime needs patch 0014 to build.
+  Reussir. The exceptions: the runtime needs patch 0014 to build, and
+  since switch step 6 the driver requires patch 0040.
 </div>
 
 **Patch 0065 (bug 34), applied since 2026-10-04.** `rrc --emit executable`
@@ -62,9 +63,10 @@ each Rust FFI snippet with its own rustc run, on every build. Every lean2rr
 program has about 470 of them, so this step takes most of rrc's time
 (about 13 s of 16 s for a small program). This is not a bug: the output is
 correct. The patch is an optimization. It keeps the compiled snippets in a
-cache directory, keyed by a digest of everything the output depends on,
-except the documented cases (3 s for the same program). The driver gives
-rrc the directory; an rrc without the patch ignores it. The review found a
+cache directory, keyed by a digest of everything the output depends on
+(the documented exceptions are in the issue's file). With a full cache,
+rrc takes about 3 s for the same program. The driver gives rrc the
+directory; an rrc without the patch ignores it. The review found a
 race (a library replaced during a build); it is fixed, and a second look
 checked the fix.
 

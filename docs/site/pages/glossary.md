@@ -15,7 +15,7 @@ lean2rr build
 :   The executable that lean2rr, rrc and the runtime make from the same program.
 
 driver
-:   `scripts/l2r.py`: it builds the runtime crate, runs lean2rr, runs rrc, and links the result.
+:   `scripts/l2r.py`: it builds the runtime crates (`lean-runtime` and `leanrt`), runs lean2rr, runs rrc, and links the result.
 
 functional equivalence
 :   The contract: the lean2rr build gives the same standard output, standard error and exit code as the native build, except for the known differences.
@@ -47,7 +47,7 @@ closed term
 :   A subexpression without free variables that Lean's `extractClosed` makes into a constant `f._closed_N`, evaluated once at first use.
 
 extern
-:   A declaration with `@[extern "sym"]`: Lean's C runtime implements it under the C symbol `sym`.
+:   A declaration with `@[extern "sym"]`: natively, C code under the symbol `sym` implements it (Lean's runtime, or C code of the program). lean2rr serves the externs of Lean's library with its runtime, and runs Lean code for the externs of the program (see [the extern rule](index.html#the-extern-rule)).
 
 `.olean` file
 :   A compiled Lean module, with its LCNF code and its environment data.
@@ -125,13 +125,13 @@ function value
 ## Runtime
 
 runtime
-:   Everything a lean2rr build contains besides the program: the prelude, `leanrt`, and the shim.
+:   Everything a lean2rr build contains besides the program: the prelude, `leanrt`, `lean-runtime` and the shim.
 
 prelude
 :   `runtime/prelude.rr`: Reussir source prepended to every program, with one function per Lean extern.
 
 `leanrt`
-:   The Rust crate linked into every lean2rr build.
+:   lean2rr's own Rust crate, linked into every lean2rr build: lean2rr's representations, and the glue between them and `lean-runtime`.
 
 shim
 :   `L2RShim`: lean2rr's Lean library for the `Std.Internal.UV` externs and a few others, compiled with the program.
@@ -157,6 +157,9 @@ effect point
 `sync` dependent
 :   A task created with `sync := true`: it runs on the thread that finishes its source, before anything else.
 
+wait core
+:   A wait protocol of lean-runtime's scheduler: the wait for a thunk or a constant that another context computes, the reference rule of a program that creates tasks, and the resolution of a promise put off to the end of a free.
+
 pending stack
 :   The per-thread stack of cells to free. Frees use it instead of recursion (local patches 0013 to 0015).
 
@@ -174,6 +177,9 @@ token reuse
 local patch
 :   A change to Reussir that lean2rr's builds use, on branch `l2r-local` of `./reussir`. Never pushed upstream.
 
+issue
+:   A numbered entry of `reussir-bugs/README.md`: a Reussir problem that lean2rr met. Its kind (bug, cost, missed optimization, missing feature, intended) says what it is. Only a bug is wrong behaviour.
+
 ## Testing and review
 
 oracle
@@ -188,6 +194,9 @@ runtime test
 `.xfail`
 :   A file that marks a runtime test as known to fail, with the reason.
 
+expectation files
+:   `NAME.native.*` and `NAME.l2r.*`: the expected outputs of the two runs of a runtime test that shows an intended difference (plan §10). Each run is compared with its own file.
+
 review round
 :   A period in which reviewers try to break lean2rr and write their findings.
 
@@ -198,4 +207,7 @@ judge
 :   The step that decides whether a finding is real before anyone fixes it.
 
 lean-runtime
-:   The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule `third_party/lean-runtime`): Lean's runtime semantics in safe Rust; lean2rr uses its hash, string, float, fixed-width integer, libm, `Nat`/`Int`, array, panic and number-text rules, its IO, its task scheduler and its event loop (features `io`, `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`), with its own GMP numbers behind the crate's big-number traits.
+:   The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule `third_party/lean-runtime`): Lean's runtime behaviour in Rust, safe by default. lean2rr uses its hash, string, float, fixed-width integer, libm, `Nat`/`Int`, array, panic and number-text rules, its IO, its startup, its task scheduler with the wait cores, and its event loop (features `io`, `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`), with its own GMP numbers behind the crate's big-number traits.
+
+switch step
+:   One of the seven steps (2026-10-04 to 2026-10-05) in which lean2rr's runtime moved to `lean-runtime`.

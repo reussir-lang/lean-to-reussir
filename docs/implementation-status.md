@@ -1,6 +1,6 @@
 # lean2rr: what is implemented
 
-Status as of 2026-10-04 (`dev`, Lean v4.34.0). This is a plain-language overview
+Status as of 2026-10-05 (`dev`, Lean v4.34.0). This is a plain-language overview
 for someone who knows Rust but not Lean. The full rules are in
 [`translation-plan.md`](translation-plan.md); the runtime is described in
 [`../runtime/README.md`](../runtime/README.md); the Reussir issues met on
@@ -42,7 +42,7 @@ same standard output, standard error and exit code.
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
-| Adversarial testing | 9 review rounds (the first 4 wrote about 1,300 test programs to break it; the later ones work by inspection with targeted programs), Lean's own compile tests (72 programs of `tests/compile` and `compile_bench`, Lean 4.33: all identical), and cross-tests on 550 external fixture programs (542 identical; the 6 causes of the 8 differences are XT-1 to XT-6, XT-6 fixed, XT-1 to XT-5 fixed on branch `fix-xt`); every other finding fixed or documented |
+| Adversarial testing | 9 review rounds (the first 4 wrote about 1,300 test programs to break it; the later ones work by inspection with targeted programs), Lean's own compile tests (72 programs of `tests/compile` and `compile_bench`, Lean 4.33: all identical), and cross-tests on 550 external fixture programs (542 identical; the 6 causes of the 8 differences are XT-1 to XT-6, XT-6 fixed, XT-1 to XT-5 fixed (merged 36a5f92)); every other finding fixed or documented |
 | Speed (classic corpus against native Lean 4.34.0, 2026-10-04) | faster than native Lean on 15 of the 18 classic programs and about equal on the other three (bignum 1.00×, binarytrees 1.02×, nqueens 1.04×); geometric mean 0.71× time, 0.69× memory; less memory on all 18. Reussir's suite last measured against 4.33 (faster on 17 of 18); tables below |
 
 ## How a program is compiled
@@ -620,7 +620,8 @@ intended behaviour or build costs, in
 [`../reussir-bugs/`](../reussir-bugs/README.md), whose status table also
 shows which patches are applied. lean2rr keeps its workarounds, so that it
 also works with an unpatched Reussir (except that its runtime needs patch
-0014).
+0014, and since switch step 6 patch 0040, which `scripts/l2r.py` requires:
+`REQUIRED_REUSSIR_PATCHES`).
 Two parts of Reussir that its author offered (LLVM coroutine bindings,
 dynamic-extent arrays) are not needed: lean2rr's tasks need stackful
 contexts, which lean-runtime's scheduler has (corosensei coroutines), and

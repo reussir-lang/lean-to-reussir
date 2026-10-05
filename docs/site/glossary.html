@@ -38,7 +38,7 @@ each concept has one term.</p>
 <dt>lean2rr build</dt>
 <dd>The executable that lean2rr, rrc and the runtime make from the same program.</dd>
 <dt>driver</dt>
-<dd><code>scripts/l2r.py</code>: it builds the runtime crate, runs lean2rr, runs rrc, and links the result.</dd>
+<dd><code>scripts/l2r.py</code>: it builds the runtime crates (<code>lean-runtime</code> and <code>leanrt</code>), runs lean2rr, runs rrc, and links the result.</dd>
 <dt>functional equivalence</dt>
 <dd>The contract: the lean2rr build gives the same standard output, standard error and exit code as the native build, except for the known differences.</dd>
 <dt>known difference</dt>
@@ -61,7 +61,7 @@ each concept has one term.</p>
 <dt>closed term</dt>
 <dd>A subexpression without free variables that Lean's <code>extractClosed</code> makes into a constant <code>f._closed_N</code>, evaluated once at first use.</dd>
 <dt>extern</dt>
-<dd>A declaration with <code>@[extern "sym"]</code>: Lean's C runtime implements it under the C symbol <code>sym</code>.</dd>
+<dd>A declaration with <code>@[extern "sym"]</code>: natively, C code under the symbol <code>sym</code> implements it (Lean's runtime, or C code of the program). lean2rr serves the externs of Lean's library with its runtime, and runs Lean code for the externs of the program (see <a href="index.html#the-extern-rule">the extern rule</a>).</dd>
 <dt><code>.olean</code> file</dt>
 <dd>A compiled Lean module, with its LCNF code and its environment data.</dd>
 </dl>
@@ -118,11 +118,11 @@ each concept has one term.</p>
 <h2 id="runtime">Runtime</h2>
 <dl>
 <dt>runtime</dt>
-<dd>Everything a lean2rr build contains besides the program: the prelude, <code>leanrt</code>, and the shim.</dd>
+<dd>Everything a lean2rr build contains besides the program: the prelude, <code>leanrt</code>, <code>lean-runtime</code> and the shim.</dd>
 <dt>prelude</dt>
 <dd><code>runtime/prelude.rr</code>: Reussir source prepended to every program, with one function per Lean extern.</dd>
 <dt><code>leanrt</code></dt>
-<dd>The Rust crate linked into every lean2rr build.</dd>
+<dd>lean2rr's own Rust crate, linked into every lean2rr build: lean2rr's representations, and the glue between them and <code>lean-runtime</code>.</dd>
 <dt>shim</dt>
 <dd><code>L2RShim</code>: lean2rr's Lean library for the <code>Std.Internal.UV</code> externs and a few others, compiled with the program.</dd>
 <dt>glue</dt>
@@ -139,6 +139,8 @@ each concept has one term.</p>
 <dd>A point (output, exit, <code>IO.sleep 0</code>) where the scheduler lets due timers, ready contexts and old queued tasks run first.</dd>
 <dt><code>sync</code> dependent</dt>
 <dd>A task created with <code>sync := true</code>: it runs on the thread that finishes its source, before anything else.</dd>
+<dt>wait core</dt>
+<dd>A wait protocol of lean-runtime's scheduler: the wait for a thunk or a constant that another context computes, the reference rule of a program that creates tasks, and the resolution of a promise put off to the end of a free.</dd>
 <dt>pending stack</dt>
 <dd>The per-thread stack of cells to free. Frees use it instead of recursion (local patches 0013 to 0015).</dd>
 </dl>
@@ -152,6 +154,8 @@ each concept has one term.</p>
 <dd>Reussir's way to build a new cell in the memory of a cell that dies (Lean's reset/reuse).</dd>
 <dt>local patch</dt>
 <dd>A change to Reussir that lean2rr's builds use, on branch <code>l2r-local</code> of <code>./reussir</code>. Never pushed upstream.</dd>
+<dt>issue</dt>
+<dd>A numbered entry of <code>reussir-bugs/README.md</code>: a Reussir problem that lean2rr met. Its kind (bug, cost, missed optimization, missing feature, intended) says what it is. Only a bug is wrong behaviour.</dd>
 </dl>
 <h2 id="testing-and-review">Testing and review</h2>
 <dl>
@@ -163,6 +167,8 @@ each concept has one term.</p>
 <dd>A program <code>tests/runtime/Rt*.lean</code> that checks one feature or one finding.</dd>
 <dt><code>.xfail</code></dt>
 <dd>A file that marks a runtime test as known to fail, with the reason.</dd>
+<dt>expectation files</dt>
+<dd><code>NAME.native.*</code> and <code>NAME.l2r.*</code>: the expected outputs of the two runs of a runtime test that shows an intended difference (plan §10). Each run is compared with its own file.</dd>
 <dt>review round</dt>
 <dd>A period in which reviewers try to break lean2rr and write their findings.</dd>
 <dt>finding</dt>
@@ -170,7 +176,9 @@ each concept has one term.</p>
 <dt>judge</dt>
 <dd>The step that decides whether a finding is real before anyone fixes it.</dd>
 <dt>lean-runtime</dt>
-<dd>The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule <code>third_party/lean-runtime</code>): Lean's runtime semantics in safe Rust; lean2rr uses its hash, string, float, fixed-width integer, libm, <code>Nat</code>/<code>Int</code>, array, panic and number-text rules, its IO, its task scheduler and its event loop (features <code>io</code>, <code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>), with its own GMP numbers behind the crate's big-number traits.</dd>
+<dd>The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule <code>third_party/lean-runtime</code>): Lean's runtime behaviour in Rust, safe by default. lean2rr uses its hash, string, float, fixed-width integer, libm, <code>Nat</code>/<code>Int</code>, array, panic and number-text rules, its IO, its startup, its task scheduler with the wait cores, and its event loop (features <code>io</code>, <code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>), with its own GMP numbers behind the crate's big-number traits.</dd>
+<dt>switch step</dt>
+<dd>One of the seven steps (2026-10-04 to 2026-10-05) in which lean2rr's runtime moved to <code>lean-runtime</code>.</dd>
 </dl>
   </main>
 </div>

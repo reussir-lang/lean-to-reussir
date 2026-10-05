@@ -14,7 +14,10 @@
 <div class="layout">
   <aside class="toc"><div class="tochead">On this page</div><div class="toc">
 <ul>
-<li><a href="#not-supported">Not supported</a></li>
+<li><a href="#not-supported">Not supported</a><ul>
+<li><a href="#programs-that-use-the-lean-package">Programs that use the Lean package</a></li>
+</ul>
+</li>
 <li><a href="#identity-and-sharing">Identity and sharing</a></li>
 <li><a href="#tasks-and-concurrency">Tasks and concurrency</a></li>
 <li><a href="#startup-and-evaluation">Startup and evaluation</a></li>
@@ -42,6 +45,8 @@ timing, or errors. A program that uses <code>Init</code> and <code>Std</code> in
 gives the same output. Each item says what differs and when you can see it.</p>
 </div>
 <h2 id="not-supported">Not supported</h2>
+<p>lean2rr refuses these programs at translation, except where the table says
+otherwise. Its message names each extern that is the cause.</p>
 <table>
 <thead>
 <tr>
@@ -51,16 +56,24 @@ gives the same output. Each item says what differs and when you can see it.</p>
 </thead>
 <tbody>
 <tr>
-<td>A program with its own <code>@[extern]</code> C code</td>
-<td>Today the build fails in rrc with an unknown function. The rule (implemented, in review): the extern is compiled from its Lean definition and its C code is ignored; an extern with no Lean definition is refused at translation with a clear message. See <a href="index.html#the-extern-rule">the extern rule</a>. Support for calling C is parked.</td>
+<td>An <code>@[extern]</code> of the program with no Lean code behind it (an <code>opaque</code>, an axiom)</td>
+<td>Refused. An extern with Lean code runs that code, and its C code is never built: see <a href="index.html#the-extern-rule">the extern rule</a>. Support for calling C is parked.</td>
+</tr>
+<tr>
+<td>An extern of the program whose C symbol names a function of Lean's runtime</td>
+<td>It runs its own Lean definition, not the runtime function. Where that definition is a stub, the result differs from native. An <code>opaque</code> re-declaration is refused, and the message names Lean's declaration to call instead.</td>
 </tr>
 <tr>
 <td><code>Lean</code>'s externs implemented in C++ (<code>Expr.mkData</code>, <code>evalConst</code>, <code>Dynlib</code>, the LLVM bindings)</td>
-<td>The same: an unknown function at the rrc build. Data structures from <code>Lean</code> work.</td>
+<td>Refused. Their Lean bodies are not used in their place. Data structures from <code>Lean</code> work.</td>
 </tr>
 <tr>
 <td>A constant that <code>main</code> never uses but that reaches an unsupported extern</td>
-<td>The whole program fails to link, because every constant is translated (native Lean evaluates every constant at startup).</td>
+<td>The whole program is refused, because every constant is translated (native Lean evaluates every constant at startup).</td>
+</tr>
+<tr>
+<td>Mathlib, and programs that import it</td>
+<td>Refused: Mathlib's module initializers reach <code>Lean</code>'s C++ externs. Mathlib is not a target. Computational code from such a library, written as a program that imports only <code>Init</code> and <code>Std</code>, translates like any other program.</td>
 </tr>
 <tr>
 <td>A program module named <code>Init.*</code>, <code>Std.*</code>, <code>Lean.*</code>, <code>Lake.*</code> or <code>L2RShim.*</code> that is not the toolchain's</td>
@@ -68,6 +81,20 @@ gives the same output. Each item says what differs and when you can see it.</p>
 </tr>
 </tbody>
 </table>
+<h3 id="programs-that-use-the-lean-package">Programs that use the <code>Lean</code> package</h3>
+<p>Such programs are not a target. They build when they use only data
+structures from <code>Lean</code>, with these differences:</p>
+<ul>
+<li>lean2rr runs only the <code>initialize</code> constants of <code>Lean</code> that the program
+  reads, after those of <code>Init</code> and <code>Std</code>. Natively all of them run.</li>
+<li>An error in an initializer of <code>Init</code> or <code>Std</code> gives <code>uncaught exception</code>
+  and exit code 1. Natively the program aborts (status 134).</li>
+<li>In one rare module order, a program initializer runs after
+  <code>IO.stdGenRef</code>, where natively it runs before.</li>
+<li>When the program imports only parts of <code>Init</code> or <code>Std</code>, lean2rr still
+  loads all of them to find their initializers. This can double the memory
+  that the translation needs. The translated program does not change.</li>
+</ul>
 <h2 id="identity-and-sharing">Identity and sharing</h2>
 <p>lean2rr does not copy native pointer identity or sharing.</p>
 <ul>
@@ -97,7 +124,9 @@ schedules native Lean can produce. See
   outputs is shorter than the sleeps.</li>
 <li><code>IO.waitAny</code> does not pick the fastest of several unfinished tasks.</li>
 <li>A few blocking system calls (opening a FIFO) still block every task.</li>
-<li><code>IO.getTID</code> inside a task is main's id plus a worker number.</li>
+<li><code>IO.getTID</code> inside a task is main's id plus the number of the thread
+  that the task natively runs on (its emulated worker, or a new thread for
+  a dedicated task).</li>
 <li><strong>When you can see it:</strong> in programs whose output depends on timing races
   between tasks. Natively such output is a race too.</li>
 </ul>
@@ -137,9 +166,9 @@ schedules native Lean can produce. See
   differently, the release time follows lean2rr's instance. Resources inside
   closures and thunks are released at their last use.</li>
 <li><strong>Promises released inside a free.</strong> Their <code>sync</code> dependents run when the
-  whole free is over, not when the free reaches the promise. Without Reussir
-  patch 0040, a free that Reussir's glue started ends unseen, and the
-  dependents run at the next task question or <code>Std.Sync</code> operation.</li>
+  whole free is over, not when the free reaches the promise. So they see
+  the rest of the container released too. Another unresolved promise of the
+  same container is still unresolved while they run, as natively.</li>
 <li><strong>Child processes.</strong> <code>IO.Process.output</code> reads both pipes together.
   Natively <code>Child.pid</code> leaks the child's pipes; lean2rr closes them.</li>
 </ul>

@@ -17,6 +17,15 @@ Panic backtraces are turned off on both sides (`LEAN_BACKTRACE=0`), because
 they contain addresses. The differences listed in plan §10 are the only
 accepted ones.
 
+**Expectation files.** Some tests show an intended difference of plan §10:
+a Lean runtime bug that lean2rr does not reproduce, or a trace that prints
+twice (`RtCseFnResult`). Such a test pins both outputs of each stream
+that differs: `NAME.native.out` (or `.err`, `.code`) for the native run,
+and `NAME.l2r.out` (or `.err`, `.code`) for the lean2rr run. Each run is
+compared with its own file, so the test fails if either output changes.
+A `NAME.refused` file expects lean2rr to refuse the program at
+translation, with the lines of the file in its message.
+
 {{svg:runsh}}
 
 ## The test sets
@@ -36,12 +45,23 @@ an alternative build against them, and times both.
 
 {{gen:classic}}
 
-### The last full regression
+### The last full run
 
-At the move to Lean 4.34 (commit 8f72c1f), against native Lean 4.34.0,
-2026-10-03: runtime suite 231 of 231, loader checks 17 of 17, classic
-corpus 54 of 54 with the optional passes on and with them off, Reussir
-benchmark suite 18 of 18. No correctness failure.
+The gate of switch step 7 (merged as commit ece1c7a), against native Lean
+4.34.0, 2026-10-05:
+
+- runtime suite: 326 of 327 identical to native, nine of them through
+  expectation files; the other one is the expected failure
+  `RtLeanUnsupported`;
+- loader checks: 17 of 17;
+- classic corpus: 54 of 54, with all 17 optional passes on and with all
+  off;
+- Reussir benchmark suite: 18 of 18;
+- `leanrt` unit tests 36 of 36; lean-runtime's rows all agree; the
+  inline, conversion-count and big-number checks pass.
+
+No correctness failure. Each switch step passed such a gate before its
+merge.
 
 ## Review rounds
 
@@ -56,6 +76,7 @@ fuzzing and no huge input: inspection with targeted programs finds more.
 | 7 | `RV7…` |
 | 8 | `RV8…` |
 | 9 | `RV9…`, and the reviews of its fixes `C01R…` to `C03R…` |
+| after round 9: the review of each change | `REB…` (the extern rule), `RSG…` (library initializers), `CLR…` (`conv-liveness`), `RULR…`, `RST2…`, `RST3…`, `RS4…` to `RS7…` (the switch steps) |
 
 {{svg:review}}
 

@@ -82,8 +82,11 @@ output is correct. By kind, the 35 entries are:
   "Upstream note" at the end of a patched entry is only text someone could
   use later.
 - lean2rr's workarounds stay, so that lean2rr also works with an unpatched
-  Reussir. The exception is issue 13 (a missing feature): lean2rr's
-  runtime needs 0014 to build.
+  Reussir. The exceptions: issue 13 (a missing feature), since lean2rr's
+  runtime needs 0014 to build; and, since switch step 6, the local
+  addition 0040 ([`local-additions.md`](local-additions.md)):
+  `scripts/l2r.py` stops with an error when the Reussir checkout lacks it
+  (`REQUIRED_REUSSIR_PATCHES`), and leanrt names its symbol.
 
 ## Status
 

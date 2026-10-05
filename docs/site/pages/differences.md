@@ -14,12 +14,32 @@ gives the same output. Each item says what differs and when you can see it.
 
 ## Not supported
 
+lean2rr refuses these programs at translation, except where the table says
+otherwise. Its message names each extern that is the cause.
+
 | What | What happens |
 |---|---|
-| A program with its own `@[extern]` C code | Today the build fails in rrc with an unknown function. The rule (implemented, in review): the extern is compiled from its Lean definition and its C code is ignored; an extern with no Lean definition is refused at translation with a clear message. See [the extern rule](index.html#the-extern-rule). Support for calling C is parked. |
-| `Lean`'s externs implemented in C++ (`Expr.mkData`, `evalConst`, `Dynlib`, the LLVM bindings) | The same: an unknown function at the rrc build. Data structures from `Lean` work. |
-| A constant that `main` never uses but that reaches an unsupported extern | The whole program fails to link, because every constant is translated (native Lean evaluates every constant at startup). |
+| An `@[extern]` of the program with no Lean code behind it (an `opaque`, an axiom) | Refused. An extern with Lean code runs that code, and its C code is never built: see [the extern rule](index.html#the-extern-rule). Support for calling C is parked. |
+| An extern of the program whose C symbol names a function of Lean's runtime | It runs its own Lean definition, not the runtime function. Where that definition is a stub, the result differs from native. An `opaque` re-declaration is refused, and the message names Lean's declaration to call instead. |
+| `Lean`'s externs implemented in C++ (`Expr.mkData`, `evalConst`, `Dynlib`, the LLVM bindings) | Refused. Their Lean bodies are not used in their place. Data structures from `Lean` work. |
+| A constant that `main` never uses but that reaches an unsupported extern | The whole program is refused, because every constant is translated (native Lean evaluates every constant at startup). |
+| Mathlib, and programs that import it | Refused: Mathlib's module initializers reach `Lean`'s C++ externs. Mathlib is not a target. Computational code from such a library, written as a program that imports only `Init` and `Std`, translates like any other program. |
 | A program module named `Init.*`, `Std.*`, `Lean.*`, `Lake.*` or `L2RShim.*` that is not the toolchain's | Rejected at load. lean2rr trusts modules with these names. |
+
+### Programs that use the `Lean` package
+
+Such programs are not a target. They build when they use only data
+structures from `Lean`, with these differences:
+
+- lean2rr runs only the `initialize` constants of `Lean` that the program
+  reads, after those of `Init` and `Std`. Natively all of them run.
+- An error in an initializer of `Init` or `Std` gives `uncaught exception`
+  and exit code 1. Natively the program aborts (status 134).
+- In one rare module order, a program initializer runs after
+  `IO.stdGenRef`, where natively it runs before.
+- When the program imports only parts of `Init` or `Std`, lean2rr still
+  loads all of them to find their initializers. This can double the memory
+  that the translation needs. The translated program does not change.
 
 ## Identity and sharing
 
@@ -52,7 +72,9 @@ schedules native Lean can produce. See
   outputs is shorter than the sleeps.
 - `IO.waitAny` does not pick the fastest of several unfinished tasks.
 - A few blocking system calls (opening a FIFO) still block every task.
-- `IO.getTID` inside a task is main's id plus a worker number.
+- `IO.getTID` inside a task is main's id plus the number of the thread
+  that the task natively runs on (its emulated worker, or a new thread for
+  a dedicated task).
 - **When you can see it:** in programs whose output depends on timing races
   between tasks. Natively such output is a race too.
 
@@ -92,9 +114,9 @@ schedules native Lean can produce. See
   differently, the release time follows lean2rr's instance. Resources inside
   closures and thunks are released at their last use.
 - **Promises released inside a free.** Their `sync` dependents run when the
-  whole free is over, not when the free reaches the promise. Without Reussir
-  patch 0040, a free that Reussir's glue started ends unseen, and the
-  dependents run at the next task question or `Std.Sync` operation.
+  whole free is over, not when the free reaches the promise. So they see
+  the rest of the container released too. Another unresolved promise of the
+  same container is still unresolved while they run, as natively.
 - **Child processes.** `IO.Process.output` reads both pipes together.
   Natively `Child.pid` leaks the child's pipes; lean2rr closes them.
 

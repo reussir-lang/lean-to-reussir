@@ -4,7 +4,7 @@ Two of the local patches belong to no entry: they fix no Reussir bug and
 improve no cost, but add something lean2rr's runtime or representation
 needs. They are kept with the other patches
 ([`README.md`](README.md#applying-the-patches)), applied in `./reussir`
-(`l2r-local` cc8e5aa5), and reviewed like them.
+(`l2r-local`, head `d79f8b70`), and reviewed like them.
 
 | Patch | What | Needed by | Review |
 |---|---|---|---|

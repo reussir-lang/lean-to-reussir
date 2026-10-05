@@ -25,7 +25,7 @@
 <li><a href="#the-walk-of-a-closed-term-for-its-tasks">The walk of a closed term for its tasks</a></li>
 </ul>
 </li>
-<li><a href="#the-shared-runtime-crate-plan">The shared runtime crate (plan)</a></li>
+<li><a href="#the-shared-runtime-crate">The shared runtime crate</a></li>
 </ul>
 </div>
 </aside>
@@ -39,7 +39,7 @@ translation plan §5.8 to §5.14 and §6, and the implementation notes'
 <a href="../../docs/implementation/ownership.md">ownership</a> areas.</p>
 
 <h2 id="layers">Layers</h2>
-<figure class="fig" id="fig-layers"><svg class="diagram" viewBox="0 0 940 400" width="940" role="img" aria-labelledby="layers-title"><title id="layers-title">The layers of a lean2rr build</title><defs><marker id="layers-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="10" width="420" height="66" rx="6" class="b-l2r"/><text x="220.0" y="33.5" text-anchor="middle" class="tb">Generated program (lean2rr output)</text><text x="220.0" y="49.5" text-anchor="middle" class="ts">the program&#x27;s functions and types, glue for externs,</text><text x="220.0" y="64.5" text-anchor="middle" class="ts">startup chain, entry point</text><rect x="440" y="10" width="210" height="66" rx="6" class="b-l2r"/><text x="545.0" y="33.5" text-anchor="middle" class="tb">L2RShim (Lean)</text><text x="545.0" y="49.5" text-anchor="middle" class="ts">UV externs, time, ShareCommon;</text><text x="545.0" y="64.5" text-anchor="middle" class="ts">compiled with the program</text><rect x="10" y="90" width="640" height="66" rx="6" class="b-rt"/><text x="330.0" y="113.5" text-anchor="middle" class="tb">prelude.rr (Reussir source, prepended)</text><text x="330.0" y="129.5" text-anchor="middle" class="ts">runtime types, one function per Lean extern (lean_xxx),</text><text x="330.0" y="144.5" text-anchor="middle" class="ts">fast paths inline (small Nat), l2r_* primitives for the glue</text><rect x="10" y="170" width="640" height="84" rx="6" class="b-rt"/><text x="330.0" y="195.5" text-anchor="middle" class="tb">leanrt (Rust crate, linked into every program)</text><text x="330.0" y="211.5" text-anchor="middle" class="ts">big numbers (GMP) for lean-runtime&#x27;s Nat/Int, strings, arrays,</text><text x="330.0" y="226.5" text-anchor="middle" class="ts">float text, once-cells, glue for lean-runtime&#x27;s IO, its</text><text x="330.0" y="241.5" text-anchor="middle" class="ts">scheduler (task cells, the suspend step) and its event loop</text><rect x="10" y="268" width="640" height="50" rx="6" class="b-rr"/><text x="330.0" y="290.5" text-anchor="middle" class="tb">reussir_rt (Reussir&#x27;s runtime)</text><text x="330.0" y="306.5" text-anchor="middle" class="ts">Rc, the pending stack for frees (local patches 0013-0015), mimalloc</text><rect x="10" y="332" width="640" height="50" rx="6" class="b-lean"/><text x="330.0" y="354.5" text-anchor="middle" class="tb">System</text><text x="330.0" y="370.5" text-anchor="middle" class="ts">libc, libm, GMP, the kernel</text><rect x="680" y="170" width="250" height="120" rx="6" class="b-plan"/><text x="805.0" y="199.5" text-anchor="middle" class="tb">lean-runtime (submodule)</text><text x="805.0" y="215.5" text-anchor="middle" class="ts">a shared crate: Lean&#x27;s</text><text x="805.0" y="230.5" text-anchor="middle" class="ts">runtime rules in safe Rust</text><text x="805.0" y="245.5" text-anchor="middle" class="ts">(semantics, IO, the scheduler,</text><text x="805.0" y="260.5" text-anchor="middle" class="ts">the event loop, networking);</text><text x="805.0" y="275.5" text-anchor="middle" class="ts">leanrt keeps glue, hot paths</text><path d="M 680 212 L 652 212" class="ard" fill="none" marker-end="url(#layers-ah)"/></svg><figcaption>Every lean2rr build has these layers. The shared crate <code>lean-runtime</code> has the semantics and the IO of leanrt; the glue to lean2rr's representations stays in lean2rr.</figcaption></figure>
+<figure class="fig" id="fig-layers"><svg class="diagram" viewBox="0 0 940 400" width="940" role="img" aria-labelledby="layers-title"><title id="layers-title">The layers of a lean2rr build</title><defs><marker id="layers-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="10" width="420" height="66" rx="6" class="b-l2r"/><text x="220.0" y="33.5" text-anchor="middle" class="tb">Generated program (lean2rr output)</text><text x="220.0" y="49.5" text-anchor="middle" class="ts">the program&#x27;s functions and types, glue for externs,</text><text x="220.0" y="64.5" text-anchor="middle" class="ts">startup chain, entry point</text><rect x="440" y="10" width="210" height="66" rx="6" class="b-l2r"/><text x="545.0" y="33.5" text-anchor="middle" class="tb">L2RShim (Lean)</text><text x="545.0" y="49.5" text-anchor="middle" class="ts">UV externs, time, ShareCommon;</text><text x="545.0" y="64.5" text-anchor="middle" class="ts">compiled with the program</text><rect x="10" y="90" width="640" height="66" rx="6" class="b-rt"/><text x="330.0" y="113.5" text-anchor="middle" class="tb">prelude.rr (Reussir source, prepended)</text><text x="330.0" y="129.5" text-anchor="middle" class="ts">runtime types, one function per Lean extern (lean_xxx),</text><text x="330.0" y="144.5" text-anchor="middle" class="ts">fast paths inline (small Nat), l2r_* primitives for the glue</text><rect x="10" y="170" width="640" height="84" rx="6" class="b-rt"/><text x="330.0" y="195.5" text-anchor="middle" class="tb">leanrt (Rust crate, linked into every program)</text><text x="330.0" y="211.5" text-anchor="middle" class="ts">big numbers (GMP) for lean-runtime&#x27;s Nat/Int, strings, arrays,</text><text x="330.0" y="226.5" text-anchor="middle" class="ts">float text, once-cells, glue for lean-runtime&#x27;s IO, its</text><text x="330.0" y="241.5" text-anchor="middle" class="ts">scheduler (task cells, the suspend step) and its event loop</text><rect x="10" y="268" width="640" height="50" rx="6" class="b-rr"/><text x="330.0" y="290.5" text-anchor="middle" class="tb">reussir_rt (Reussir&#x27;s runtime)</text><text x="330.0" y="306.5" text-anchor="middle" class="ts">Rc, the pending stack for frees (local patches 0013-0015), mimalloc</text><rect x="10" y="332" width="640" height="50" rx="6" class="b-lean"/><text x="330.0" y="354.5" text-anchor="middle" class="tb">System</text><text x="330.0" y="370.5" text-anchor="middle" class="ts">libc, libm, GMP, the kernel</text><rect x="680" y="170" width="250" height="120" rx="6" class="b-rt"/><text x="805.0" y="199.5" text-anchor="middle" class="tb">lean-runtime (submodule)</text><text x="805.0" y="215.5" text-anchor="middle" class="ts">a shared crate: Lean&#x27;s</text><text x="805.0" y="230.5" text-anchor="middle" class="ts">runtime rules (semantics, IO,</text><text x="805.0" y="245.5" text-anchor="middle" class="ts">startup, the scheduler, the</text><text x="805.0" y="260.5" text-anchor="middle" class="ts">event loop, networking);</text><text x="805.0" y="275.5" text-anchor="middle" class="ts">leanrt keeps glue, hot paths</text><path d="M 680 212 L 652 212" class="ar" fill="none" marker-end="url(#layers-ah)"/></svg><figcaption>Every lean2rr build has these layers. The shared crate <code>lean-runtime</code> has Lean's runtime rules, the IO, the startup and the scheduler; lean2rr's representations and the glue to them stay in leanrt.</figcaption></figure>
 <table>
 <thead>
 <tr>
@@ -52,17 +52,22 @@ translation plan §5.8 to §5.14 and §6, and the implementation notes'
 <tr>
 <td><code>runtime/prelude.rr</code></td>
 <td>Reussir</td>
-<td>Prepended to every program. Defines the runtime types and one function per Lean extern, named after the extern's C symbol (<code>lean_nat_add</code>). Fast paths are inline Reussir code; the rest calls <code>leanrt</code>.</td>
+<td>Prepended to every program. Defines the runtime types and one function per Lean extern, named after the extern's C symbol (<code>lean_nat_add</code>). Fast paths are inline Reussir code; the rest calls <code>leanrt</code> or <code>lean-runtime</code>.</td>
 </tr>
 <tr>
 <td><code>runtime/leanrt/</code></td>
 <td>Rust</td>
-<td>Linked into every program. Big numbers (GMP), strings, arrays, float printing, the glue to lean-runtime's IO (handles, the last-error slot, startup and exit), once-cells, tasks and the scheduler, <code>Std.Sync</code>, the event loop. One crate, so one copy of all global state.</td>
+<td>Linked into every program. lean2rr's representations: big numbers (GMP), strings, arrays, cells, once-cells. The glue to lean-runtime: its rules, its IO (handles, the last-error slot), its scheduler (the task objects, the one <code>unsafe</code> step of a context switch, the current standard streams) and its event loop. One crate, so one copy of all global state.</td>
+</tr>
+<tr>
+<td><code>third_party/lean-runtime</code></td>
+<td>Rust</td>
+<td>The shared crate, a git submodule pinned by commit. Lean's runtime rules, the IO, the startup, the scheduler with its wait cores, <code>Std.Sync</code>, the event loop and the networking. The driver builds it with cargo.</td>
 </tr>
 <tr>
 <td><code>lean2rr/L2RShim.lean</code></td>
 <td>Lean</td>
-<td>lean2rr's own Lean library: the <code>Std.Internal.UV</code> externs (timers, sockets, name resolution, signals), <code>Std.Time.Timestamp.now</code>, <code>ShareCommon.Object.eq</code>/<code>hash</code>. Exported under the C symbols and compiled with the program.</td>
+<td>lean2rr's own Lean library: the <code>Std.Internal.UV</code> externs (timers, sockets, name resolution, signals), <code>Std.Time.Timestamp.now</code>, <code>ShareCommon.Object.eq</code>/<code>hash</code>, over primitives of lean-runtime's event loop. Exported under the C symbols and compiled with the program.</td>
 </tr>
 <tr>
 <td>generated glue</td>
@@ -139,6 +144,14 @@ connects them to the crate's task ids, the one <code>unsafe</code> step of a con
 switch (with its written proof), and the current standard streams of each
 context and of each emulated worker. The generated task code did not
 change.</p>
+<p><strong>Waits.</strong> A context that needs a thunk or a constant that another context
+computes waits for it. These waits, the reference rule below and the
+resolution of promises released inside a free use lean-runtime's <em>wait
+cores</em> (switch step 6). Their fast paths stay inline in the program's loops
+(<code>tests/runtime/wait-inline-check.sh</code> checks the machine code).</p>
+<p><strong>Lazy start.</strong> The scheduler starts at the first task, promise,
+<code>Std.Sync</code> object, timer, signal watcher, socket or name lookup. The lazy
+start is lean-runtime's too (switch step 7).</p>
 <p><strong>References in a program with tasks.</strong> lean2rr knows when it translates a
 program whether the program can make tasks: the program reaches an extern
 that makes a task or a promise (timers and sockets make promises too). Only
@@ -149,8 +162,10 @@ for its store, as in Lean 4.35. A program without tasks pays nothing: its
 code is the same, and the scheduler does not start.</p>
 <p><strong>Promises</strong> are runtime objects that hold their task's cell. Dropping the
 last reference to an unresolved promise resolves it with <code>none</code>, as
-natively. <strong><code>Std.Sync</code></strong> mutexes and condition variables are lean-runtime's
-objects in runtime handles; a thread that waits blocks its context.</p>
+natively. When a free releases the promise, the resolution waits until the
+free ends (Reussir patch 0040 reports the end). <strong><code>Std.Sync</code></strong> mutexes
+and condition variables are lean-runtime's objects in runtime handles; a
+thread that waits blocks its context.</p>
 <h2 id="input-and-output">Input and output</h2>
 <ul>
 <li><strong>IO is lean-runtime's.</strong> Files, the standard streams, the file system,
@@ -179,8 +194,19 @@ objects in runtime handles; a thread that waits blocks its context.</p>
   native thread does.</li>
 </ul>
 <h2 id="startup">Startup</h2>
-<figure class="fig" id="fig-start"><svg class="diagram" viewBox="0 0 940 200" width="940" role="img" aria-labelledby="start-title"><title id="start-title">What the entry point does</title><defs><marker id="start-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="80.0" y="63.5" text-anchor="middle" class="tb">0.</text><text x="80.0" y="79.5" text-anchor="middle" class="ts">open libuv&#x27;s</text><text x="80.0" y="94.5" text-anchor="middle" class="ts">descriptors</text><text x="80.0" y="109.5" text-anchor="middle" class="ts">(ELF constructor)</text><rect x="165" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="235.0" y="63.5" text-anchor="middle" class="tb">1.</text><text x="235.0" y="79.5" text-anchor="middle" class="ts">run the</text><text x="235.0" y="94.5" text-anchor="middle" class="ts">initializers</text><text x="235.0" y="109.5" text-anchor="middle" class="ts">(main thread, 8 MiB)</text><line x1="147" y1="80" x2="163" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="320" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="390.0" y="63.5" text-anchor="middle" class="tb">2.</text><text x="390.0" y="79.5" text-anchor="middle" class="ts">start the</text><text x="390.0" y="94.5" text-anchor="middle" class="ts">task manager;</text><text x="390.0" y="109.5" text-anchor="middle" class="ts">1 GiB thread</text><line x1="302" y1="80" x2="318" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="475" y="40" width="140" height="80" rx="6" class="b-l2r"/><text x="545.0" y="63.5" text-anchor="middle" class="tb">3.</text><text x="545.0" y="79.5" text-anchor="middle" class="ts">call main</text><text x="545.0" y="94.5" text-anchor="middle" class="ts">with the args</text><text x="545.0" y="109.5" text-anchor="middle" class="ts">and the world</text><line x1="457" y1="80" x2="473" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="630" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="700.0" y="63.5" text-anchor="middle" class="tb">4.</text><text x="700.0" y="79.5" text-anchor="middle" class="ts">run the IO tasks</text><text x="700.0" y="94.5" text-anchor="middle" class="ts">still pending</text><text x="700.0" y="109.5" text-anchor="middle" class="ts">(final run)</text><line x1="612" y1="80" x2="628" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="785" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="855.0" y="63.5" text-anchor="middle" class="tb">5-6.</text><text x="855.0" y="79.5" text-anchor="middle" class="ts">error: print it,</text><text x="855.0" y="94.5" text-anchor="middle" class="ts">exit 1; else exit</text><text x="855.0" y="109.5" text-anchor="middle" class="ts">with main&#x27;s code</text><line x1="767" y1="80" x2="783" y2="80" class="ar" marker-end="url(#start-ah)"/><text x="10" y="160" text-anchor="start" class="ts">Stack overflow in any thread or task prints &quot;Stack overflow detected. Aborting.&quot; and exits 134, as natively.</text></svg><figcaption>As Lean's generated <code>main</code> (EmitC), step by step. An error in an initializer prints <code>uncaught exception</code> and exits 1 before <code>main</code>.</figcaption></figure>
+<figure class="fig" id="fig-start"><svg class="diagram" viewBox="0 0 940 200" width="940" role="img" aria-labelledby="start-title"><title id="start-title">What the entry point does</title><defs><marker id="start-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="80.0" y="63.5" text-anchor="middle" class="tb">0.</text><text x="80.0" y="79.5" text-anchor="middle" class="ts">open libuv&#x27;s</text><text x="80.0" y="94.5" text-anchor="middle" class="ts">descriptors</text><text x="80.0" y="109.5" text-anchor="middle" class="ts">(ELF constructor)</text><rect x="165" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="235.0" y="63.5" text-anchor="middle" class="tb">1.</text><text x="235.0" y="79.5" text-anchor="middle" class="ts">run the</text><text x="235.0" y="94.5" text-anchor="middle" class="ts">initializers</text><text x="235.0" y="109.5" text-anchor="middle" class="ts">(main thread, 8 MiB)</text><line x1="147" y1="80" x2="163" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="320" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="390.0" y="63.5" text-anchor="middle" class="tb">2.</text><text x="390.0" y="79.5" text-anchor="middle" class="ts">a 1 GiB thread</text><text x="390.0" y="94.5" text-anchor="middle" class="ts">for main; the task</text><text x="390.0" y="109.5" text-anchor="middle" class="ts">manager is lazy</text><line x1="302" y1="80" x2="318" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="475" y="40" width="140" height="80" rx="6" class="b-l2r"/><text x="545.0" y="63.5" text-anchor="middle" class="tb">3.</text><text x="545.0" y="79.5" text-anchor="middle" class="ts">call main</text><text x="545.0" y="94.5" text-anchor="middle" class="ts">with the args</text><text x="545.0" y="109.5" text-anchor="middle" class="ts">and the world</text><line x1="457" y1="80" x2="473" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="630" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="700.0" y="63.5" text-anchor="middle" class="tb">4.</text><text x="700.0" y="79.5" text-anchor="middle" class="ts">run the IO tasks</text><text x="700.0" y="94.5" text-anchor="middle" class="ts">still pending</text><text x="700.0" y="109.5" text-anchor="middle" class="ts">(final run)</text><line x1="612" y1="80" x2="628" y2="80" class="ar" marker-end="url(#start-ah)"/><rect x="785" y="40" width="140" height="80" rx="6" class="b-rt"/><text x="855.0" y="63.5" text-anchor="middle" class="tb">5-6.</text><text x="855.0" y="79.5" text-anchor="middle" class="ts">error: print it,</text><text x="855.0" y="94.5" text-anchor="middle" class="ts">exit 1; else exit</text><text x="855.0" y="109.5" text-anchor="middle" class="ts">with main&#x27;s code</text><line x1="767" y1="80" x2="783" y2="80" class="ar" marker-end="url(#start-ah)"/><text x="10" y="160" text-anchor="start" class="ts">Stack overflow in any thread or task prints &quot;Stack overflow detected. Aborting.&quot; and exits 134, as natively.</text></svg><figcaption>As Lean's generated <code>main</code> (EmitC), step by step. An error in an initializer prints <code>uncaught exception</code> and exits 1 before <code>main</code>.</figcaption></figure>
 <ul>
+<li><strong>Entry.</strong> The startup logic is lean-runtime's (switch step 7). Its ELF
+  constructor opens native Lean's startup descriptors before Rust's runtime
+  starts. The initializers run on the process's main thread (8 MiB stack).
+  Then <code>main</code> runs on a thread with a 1 GiB stack, which lean-runtime makes.</li>
+<li><strong>Huge pages.</strong> No constructor of lean-runtime allocates: they run before
+  mimalloc's own constructor. So the process's main thread reserves
+  mimalloc's first arena with large pages, and the heap of <code>main</code>'s thread
+  is on transparent huge pages, as natively. From switch step 3 to step 6,
+  a constructor allocated first. The heap lost its huge pages, until a
+  workaround in <code>leanrt</code> restored them. Step 7 removed the allocation and
+  the workaround.</li>
 <li><strong>Constants.</strong> Every zero-parameter declaration of the program's modules
   runs at startup, in Lean's initialization order. Each constant is a
   once-cell. A context that needs a constant that another context is
@@ -203,11 +229,12 @@ objects in runtime handles; a thread that waits blocks its context.</p>
 <p>The walk is a loop over a work list, not a recursion, and it visits each
 cell once. So a value 300000 cells deep, or a DAG with 2^40 paths, is no
 problem.</p>
-<h2 id="the-shared-runtime-crate-plan">The shared runtime crate (plan)</h2>
+<h2 id="the-shared-runtime-crate">The shared runtime crate</h2>
 <p>lean2rr uses the shared crate <strong><code>lean-runtime</code></strong>
 (github.com/QueClr/lean-runtime-rs, public). The crate implements Lean's
-runtime behaviour once, as a library that a translator from Lean to Rust
-can use. lean2rr's <code>leanrt</code> moves into it step by step.</p>
+runtime behaviour once, as a library that a translator of Lean programs
+can use. lean2rr switched to it in seven steps, from 2026-10-04 to
+2026-10-05.</p>
 <table>
 <thead>
 <tr>
@@ -218,11 +245,11 @@ can use. lean2rr's <code>leanrt</code> moves into it step by step.</p>
 <tbody>
 <tr>
 <td>What is shared</td>
-<td>Lean's runtime semantics: hashes, floats, strings, numbers, arrays, IO, the scheduler.</td>
+<td>Lean's runtime semantics: hashes, floats, strings, numbers, arrays, IO, the startup, the scheduler.</td>
 </tr>
 <tr>
 <td>What stays in lean2rr</td>
-<td>The representation of values and the memory protocol: lean2rr keeps thin glue over its own layouts.</td>
+<td>The representation of values and the memory protocol: lean2rr keeps thin glue over its own layouts, and its hot paths.</td>
 </tr>
 <tr>
 <td>One runtime</td>
@@ -230,7 +257,7 @@ can use. lean2rr's <code>leanrt</code> moves into it step by step.</p>
 </tr>
 <tr>
 <td>Safety</td>
-<td><code>#![forbid(unsafe_code)]</code> by default. Unsafe code comes only through vetted crates (nix/rustix, mimalloc, corosensei). A faster unsafe path can come later behind an opt-in <code>unsafe-fast</code> feature, with a written proof.</td>
+<td>The default build compiles no <code>unsafe</code> code of the crate. A few native behaviours that no safe API can give (the process title, the startup descriptors, the stack-overflow report) are small files behind their own features, each with a written proof (the crate's <code>UNSAFE.md</code>); lean2rr enables these features. Other unsafe code comes only through vetted crates (such as nix, rustix, corosensei and mimalloc). A faster unsafe path can come later behind an opt-in <code>unsafe-fast</code> feature, with a written proof.</td>
 </tr>
 <tr>
 <td>Speed</td>
@@ -258,20 +285,54 @@ can use. lean2rr's <code>leanrt</code> moves into it step by step.</p>
 </tr>
 </tbody>
 </table>
-<p>Status (2026-10-04): lean-runtime has Lean's semantics (hashes, floats,
-fixed-width integers, strings, <code>libm</code>, <code>Nat</code> and <code>Int</code>, the array edge
-rules, panics, the text of numbers), its IO (files, the standard
-streams, the file system, processes, the system queries, the startup
-descriptors, the exit), the scheduler (tasks, promises, <code>Std.Sync</code>, the
-event loop, the stack-overflow report) and the networking. lean2rr uses it
-for all of them: the submodule <code>third_party/lean-runtime</code>, which
-<code>scripts/l2r.py</code> builds with cargo (the features <code>io</code>, <code>proc-title</code>,
-<code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>) and links with <code>leanrt</code> (<a href="../../runtime/README.md">runtime
-README</a>, "The shared crate lean-runtime"). lean2rr
-keeps its hot paths: the inline small-<code>Nat</code>/<code>Int</code> arithmetic, the
-one-block big numbers with GMP (behind lean-runtime's big-number traits),
-the one-block arrays' reads, writes and pushes, and the current standard
-streams, which <code>IO.println</code> reads at each call.</p>
+<p>The switch steps:</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>What lean2rr takes from lean-runtime since then</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>the rules for hashes, string positions, floats, fixed-width integers and <code>libm</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>the <code>Nat</code> and <code>Int</code> slow paths, the array edge rules, panics, the text of numbers</td>
+</tr>
+<tr>
+<td>3</td>
+<td>the IO: files, the standard streams, the file system, processes, the system queries, the startup descriptors, the exit</td>
+</tr>
+<tr>
+<td>4</td>
+<td>tasks, promises, <code>Std.Sync</code>, the event loop, timers, signals, sockets, Lean's stack-overflow report</td>
+</tr>
+<tr>
+<td>5</td>
+<td>the last copies of shared functions: the toolchain facts, UTF-8 encoding and lossy decoding, the accessors of <code>IO.Error</code>, the clocks, <code>IO.getTID</code>, and others</td>
+</tr>
+<tr>
+<td>6</td>
+<td>the wait cores: waits for a thunk or a constant, references in a program that creates tasks, promise resolutions put off to the end of a free</td>
+</tr>
+<tr>
+<td>7</td>
+<td>the startup: <code>main</code>'s thread, the constructor that opens the startup descriptors, the scheduler's lazy start</td>
+</tr>
+</tbody>
+</table>
+<p>Status (2026-10-05): the submodule <code>third_party/lean-runtime</code> is pinned at
+<code>471f458</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
+<code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>) and links
+it with <code>leanrt</code> (<a href="../../runtime/README.md">runtime README</a>, "The shared
+crate lean-runtime"). lean2rr keeps its hot paths: the inline
+small-<code>Nat</code>/<code>Int</code> arithmetic, the one-block big numbers with GMP (behind
+lean-runtime's big-number traits), the one-block arrays' reads, writes and
+pushes, and the current standard streams, which <code>IO.println</code> reads at each
+call. Each step passed lean2rr's full suite before its merge.</p>
   </main>
 </div>
 <footer>Generated by <code>docs/site/build.py</code> from the repository's files (Lean v4.34.0).

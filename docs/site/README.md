@@ -52,7 +52,7 @@ What is generated, and from where:
 |---|---|
 | the pass table, the required parts, the Stage 2 edits | `lean2rr/LeanToReussir/Opt/Registry.lean`; the guards from `docs/implementation/optional-passes.md` |
 | the Reussir entries and patches | the status table of `reussir-bugs/README.md`; the patch count from its apply list |
-| test counts, `.xfail` tests, loader checks | `tests/runtime/`, `tests/env/run.sh`, `tests/classic/cases.json` |
+| test counts, `.xfail` tests, loader checks | `tests/runtime/`, `tests/env/run.sh`, `tests/classic/cases.json`; the `#[test]`s of `runtime/leanrt/src` |
 | the classic corpus table | the "Cases" table of `tests/README.md` |
 | the index of known differences | the groups and items of plan §10 |
 | "Lean bugs we do not reproduce" | the items of plan §10's group of that name, when it exists |
@@ -77,8 +77,8 @@ disagreement (`--check` fails on a warning):
 - Change the markdown documents first, then the page that summarizes the
   change, then run `build.py`.
 - Most counts and tables follow the sources. Hand-written results (the
-  last full regression, performance figures, the work in progress) carry
-  their date in the text: update them when they change.
+  last full run, performance figures, the recent changes) carry their
+  date in the text: update them when they change.
 - Writing style: about 80% ASD-STE100 (Simplified Technical English).
   Short sentences (about 20 words for steps, 25 for descriptions), active
   voice, one idea per sentence, one term per concept (see the glossary

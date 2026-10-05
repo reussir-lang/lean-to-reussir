@@ -156,6 +156,16 @@ def runtime_tests():
     return tests, xfail
 
 
+def leanrt_unit_tests():
+    n = 0
+    for dirpath, _, files in os.walk(os.path.join(REPO, "runtime/leanrt/src")):
+        for f in files:
+            if f.endswith(".rs"):
+                with open(os.path.join(dirpath, f), encoding="utf-8") as fh:
+                    n += sum(1 for line in fh if line.strip() == "#[test]")
+    return n
+
+
 def env_checks():
     t = read("tests/env/run.sh")
     return re.findall(r"^\s*(?:[A-Z_]+=\S+\s+)*check\s+(\S+)\s+(accept|reject)\b", t, re.M)
@@ -254,14 +264,20 @@ def gen_testsets():
          "which program modules lean2rr accepts; <code>--stats</code> on polymorphic recursion"],
         ["Reussir benchmark suite", "<code>tests/reussir-benchmark/run.sh</code>",
          "18 Lean programs, unchanged", "the suite's own programs, built natively and through lean2rr"],
-        ["leanrt unit tests", "<code>tests/runtime/leanrt-unit.sh</code>", "Rust tests",
-         "big numbers, one-word Nat/Int, tagged arrays, string layout and counts, a FILE model differential test"],
+        ["leanrt unit tests", "<code>tests/runtime/leanrt-unit.sh</code>", f"{leanrt_unit_tests()} Rust tests",
+         "big numbers, one-word Nat/Int, tagged arrays, the one-block layouts and their counts, the last-error slot; "
+         "that lean2rr's version and IO error builders are lean-runtime's"],
         ["lean-runtime's rows", "<code>tests/runtime/rows-check.sh</code>", "every row of lean-runtime",
          "lean-runtime's row oracle built with lean2rr against the rows' native values (the Lean definition's result where lean-runtime lifts a Lean limit or bug, LB-nn)"],
         ["Inlined textures", "<code>tests/runtime/ffi-inline-check.sh</code>", "7 runtime tests",
          "no call through the FFI boundary in their LLVM IR (it would keep a loop's tail call)"],
         ["Inlined wait points", "<code>tests/runtime/wait-inline-check.sh</code>", "1 runtime test",
          "in the executable, the reference points and a thunk's store and wake are inline in the loops, their thread-local loads direct"],
+        ["Refused externs", "<code>tests/runtime/allow-missing-check.sh</code>", "1 program",
+         "with <code>L2R_ALLOW_MISSING_EXTERNS=1</code>, a refused extern of the program warns, the build fails, "
+         "and the code calls no runtime function of its symbol"],
+        ["Shim types", "<code>tests/runtime/shim-types.sh</code>", "every export of the shim",
+         "each <code>@[export]</code> of <code>L2RShim</code> has the type of the <code>@[extern]</code> of the same C symbol"],
         ["Big-number counters", "<code>tests/runtime/nat-alloc-check.sh</code>", "2 sizes",
          "every big number made is freed exactly once; big constants made once"],
         ["Conversion counter", "<code>tests/runtime/conv-count-check.sh</code>", "2 sizes",
