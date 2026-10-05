@@ -114,7 +114,9 @@ produce. See <a href="runtime.html#tasks-and-the-scheduler">Runtime</a>.</p>
   different types into one. lean2rr does that too, except in two shapes
   (results that differ at a function type; a call inside a local function
   merged with one outside). There both calls run, and a trace or panic in
-  them prints twice. Test <code>RtCseFnResult</code> is marked <code>.xfail</code> for this.</li>
+  them prints twice. Lean does not fix how often a trace in pure code
+  prints, so this is accepted: test <code>RtCseFnResult</code> records both outputs
+  (expectation files) and fails if either changes.</li>
 <li><strong>Compiler options</strong> of the program's modules (<code>set_option compiler.…</code>)
   are not in the <code>.olean</code>. lean2rr runs Lean's passes with the defaults.</li>
 <li><strong>Order of panics in pure code.</strong> When several pure computations panic,

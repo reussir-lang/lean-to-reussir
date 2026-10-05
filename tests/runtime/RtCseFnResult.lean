@@ -4,7 +4,10 @@ runs the call once; lean2rr does not align it to the earlier call's types
 (XT-6), because a function value there, one closure natively, has no
 conversion between `Nat → Nat` and `String → String` here (review XT6-01):
 the call runs twice and its trace prints twice. A known difference (plan
-§10, "Merging after erasure"). -/
+§10, "Merging after erasure"). Lean does not fix how often a trace in pure
+code prints, so the test records both runs' stderr
+(`RtCseFnResult.native.err`, `RtCseFnResult.l2r.err`) and fails if either
+changes. -/
 
 @[noinline] def mkO {α : Type} (n : Nat) : Option (α → α) :=
   dbgTrace s!"mkO {n}" fun _ => some id

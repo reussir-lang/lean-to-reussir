@@ -3113,7 +3113,8 @@ Each item says what differs and when.
   something unclassified can be (an `Option (α → α)` or a structure with a
   field `run : α → α` at `Nat` and at `String`, a one-field structure around
   a `Nat → Nat` and a `String → String`: lean2rr converts no function
-  between two function types; test `RtCseFnResult`, expected to fail), and
+  between two function types; test `RtCseFnResult` records both outputs
+  in expectation files), and
   a call inside a local function merged with one outside it, which Lean
   merges only where it inlined the local function first.
 - *Running out of memory*: lean2rr ends every failed allocation, including

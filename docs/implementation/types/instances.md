@@ -72,7 +72,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   `alignErasedMerges`, `monoInstance`; plan
   [§2.3](../../translation-plan.md#23-instances), §10 "Merging after
   erasure"; tests `RtCseAcrossTypes`, `RtCseFnValues`, `RtCseResidual`,
-  `RtCseFnField`, `RtCseFnTrivial`, `RtCseFnResult` (expected to fail).
+  `RtCseFnField`, `RtCseFnTrivial`, `RtCseFnResult` (expectation files:
+  the trace prints once natively, twice through lean2rr).
 - **Remove only if:** Stage 1 stops making an instance per type, or Lean's
   `cse` starts comparing type arguments.
 

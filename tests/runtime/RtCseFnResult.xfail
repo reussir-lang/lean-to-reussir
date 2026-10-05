@@ -1,1 +1,0 @@
-A call that Lean's mono cse merges across types, whose result holds a function at two function types, runs twice (its trace prints twice): lean2rr has no conversion between two function types, so it does not align it (plan §10, Merging after erasure).
