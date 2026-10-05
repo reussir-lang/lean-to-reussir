@@ -1857,7 +1857,8 @@ Rules:
   - `IO.Process.output` is Lean code that reads stdout in a dedicated task
     while it reads stderr. lean2rr's tasks are deferred (§5.14), so a child
     writing more than a pipe holds (64 KiB) to stdout before closing stderr
-    would block forever. Its
+    blocked forever before lean2rr ran on lean-runtime's scheduler (whose
+    IO now cooperates: lean-runtime's case `taskio/output_big_stdout`). Its
     declaration is lowered to one runtime primitive instead of its body,
     `l2r_proc_output` (lean-runtime's `io::process::output`), which does
     what Lean's definition does in its order: spawn with stdout and stderr
@@ -1880,14 +1881,15 @@ Rules:
   for the primitive.
 - **`Std.Sync`** (`BaseMutex`, `Condvar`, `BaseRecursiveMutex`,
   `BaseSharedMutex`, whose externs Lean implements over `std::mutex` & co.
-  in `mutex.cpp`) are runtime handles, and their externs payload
-  primitives over `leanrt::sync`. A thread that must wait blocks its
-  context (§5.14, *Blocking*); a lock's owner is a thread: a context, and
-  on it the innermost running task's thread (a task needed by another runs
-  on a worker thread natively). As with glibc, locking a `BaseMutex` the
-  same thread holds waits forever, `tryLock` then fails, and a released
-  mutex goes to the thread that waited longest; the shared mutex follows
-  libc++'s (a writer that has entered keeps new readers out). Everything
+  in `mutex.cpp`) are runtime handles holding lean-runtime's objects
+  (`sched::sync`), and their externs payload primitives over
+  `leanrt::sync`. The rules are lean-runtime's: a thread that must wait
+  blocks its context (§5.14, *Blocking*); a lock's owner is a thread: a
+  context, and on it the innermost running task's thread (a task needed by
+  another runs on a worker thread natively). As with glibc, locking a
+  `BaseMutex` the same thread holds waits forever, `tryLock` then fails,
+  and a released mutex goes to the thread that waited longest; the shared
+  mutex follows libc++'s (a writer that has entered keeps new readers out). Everything
   else (`Mutex`, `Barrier`, channels, `Notify`, `Broadcast`, cancellation
   tokens) is Lean code over these and promises.
 - **`Std.Internal.UV`** (timers, TCP and UDP sockets, name resolution,
@@ -1899,12 +1901,16 @@ Rules:
   lean2rr imports the shim with the program (`LeanToReussir.Env`, from
   `L2R_SHIM_DIR`, which the driver sets to lean2rr's build directory, last
   on the search path; lean2rr stops if that directory has no shim) and
-  treats it as a toolchain module (no startup work). The shim follows the C functions
-  (`uv/*.cpp`) check by check, over primitives of the runtime's event loop
-  (`leanrt::net`, §5.14) on plain values (numbers, strings, byte arrays,
-  handles, promises); errors are built in Lean as `lean_decode_uv_error`
-  builds them (classified by libuv's code, `uv_strerror`'s text, and the
-  positive errno as the error number, as since Lean 4.34).
+  treats it as a toolchain module (no startup work). The shim builds Lean's
+  values over primitives of the runtime (`leanrt::net`, `leanrt::sys`) on
+  plain values (numbers, strings, byte arrays, handles, promises), whose
+  rules are lean-runtime's: its event loop's timers and signal watchers
+  (`sched::uv`), sockets, name resolution and interfaces (`net`), address
+  texts (`semantics::net`) and system queries (`io::uvsys`), §5.14; errors
+  are lean-runtime's `IoError`s, built in Lean by their `IO.Error`
+  builder, code, file name and details (`L2RShim.ioErrorOf`; the system
+  queries' libuv codes are decoded by lean-runtime as
+  `lean_decode_uv_error` does).
   The shim also replaces Lean definitions whose native behaviour depends
   on Lean's borrow inference: a definition exported as
   `l2r_override_<mangled name>` is called instead of the definition of
@@ -2056,15 +2062,18 @@ A generated Reussir `#[main]` does what Lean's generated `main` does
    exits with status 1;
 6. otherwise it exits with the returned `UInt32` (0 for `IO Unit`).
 
-`leanrt::rt::run_main2` implements the two threads and Lean's stack
-overflow report: a stack overflow in either thread, so also in a task
-(tasks run on them, §5.14), prints `Stack overflow detected. Aborting.` and
-aborts (status 134, stdout not flushed), as Lean's handler does in every
-thread. Each thread records the guard page below its stack and gets an
-alternate signal stack; a fault in the guard page is an overflow, and so is
-a fault below the stack while the stack pointer is below it (a frame
-without stack probes, such as GMP's scratch space, can skip the guard
-page).
+`leanrt::rt::run_main2` implements the two threads; Lean's stack
+overflow report is lean-runtime's (`sched::install_stack_overflow_handler`,
+on both threads): a stack overflow in either thread or in a task (on a
+context of lean-runtime's scheduler, §5.14) prints `Stack overflow
+detected. Aborting.` and aborts (status 134, stdout not flushed), as Lean's
+handler does in every thread. Each thread has an alternate signal stack;
+a fault in the guard page below the thread's stack, or below the running
+context's, is an overflow, and any other fault takes the action before
+the handler (Rust's, or the default). leanrt's own handler, gone with step
+4, also took a fault below the stack while the stack pointer was below it
+(a frame without stack probes can skip the guard page); lean-runtime's, as
+Lean's, does not (`RtStackOverflow` still passes).
 
 The runtime flushes stdout at exit. These behaviours were observed on native
 executables.
@@ -2389,328 +2398,190 @@ becomes `Thunk.get`/`Task.get`, and `Thunk.fn` a closure calling
 
 **Tasks.** Native Lean runs tasks on a thread pool. A worker may start a task
 at any time after it is created and must have finished it when its value is
-needed. The translation is single-threaded and picks one such schedule: a
-task runs when it is needed, on the stack of whoever needs it, or when the
-running code blocks (*Blocking*, below).
+needed. The translation is single-threaded and runs its tasks on the shared
+crate lean-runtime's task scheduler (`lean_runtime::sched`; its
+`docs/sched.md` has the model and every rule), which picks one such
+schedule: Lean's task manager on one thread, with *contexts* that block and
+resume. lean2rr's part is the task objects and the glue (`leanrt::task`,
+`leanrt::sched`; implementation notes `docs/implementation/tasks/`).
 
 - Every task created after `main` has started is *deferred*: its cell is
-  `pending(|w| …)`, and the runtime (`leanrt::task`) records it and holds
-  a reference while it is pending. For IO tasks (`BaseIO.asTask`,
-  `mapTask`, `bindTask`) the computation is `act(w).val` (for `mapTask f
-  t`, `f t.get`); for `bindTask t f` the cell is `bind(|w| (f t.get
-  w).val)`, whose computation yields the task the new one continues as.
-  Pure tasks (`Task.spawn`, `Task.map`, `Task.bind`) are deferred the same
-  way; `Task.pure a` is `done(a)`. During module initialization Lean has no
-  task manager and `lean_task_spawn_core` runs the computation at once; so
-  does the translation (those tasks share the initializer's streams).
-- A task that depends on a task unfinished at its creation (`mapTask`,
-  `bindTask`, `Task.map`, `Task.bind`) is recorded as its dependent, as
-  Lean's `add_dep` does, and waits for it; one of a finished task is queued
-  at once.
-- *Dropped pure tasks.* Lean keeps an IO task alive until it has run
-  (`keep_alive`), but not a pure one: when the program drops a pure task
-  before a worker has started it, Lean deletes it and it never runs. The
-  runtime's reference does not count: when the runtime is about to start a
-  pure task (the final run, the worker's pick below, a `sync` dependent
-  released by its source) and holds the only reference to it, the task is
-  dropped instead. So is one whose other references all come from pure
-  dependents that are dropped themselves (`Task.spawn f` and its `map`,
-  both dropped), to any depth (an iterative search over the tree of
-  dependents that could be deleted: pure, held by the runtime, not
-  running); the whole tree is then deleted, dependents before the tasks
-  they hold, as natively the release of a dependent releases its source.
-  A pure task a pending IO task still refers to runs; dropped pure
-  dependents of a task that cannot be deleted are deleted once it has
-  finished, when they come up (they cannot run before).
+  `pending(|w| …)`, and it is given to lean-runtime (`spawn`; for a task
+  that depends on another, `depend`, Lean's `add_dep`), whose job for it
+  runs the generated code through the program's dispatcher. For IO tasks
+  (`BaseIO.asTask`, `mapTask`, `bindTask`) the computation is `act(w).val`
+  (for `mapTask f t`, `f t.get`); for `bindTask t f` the cell is
+  `bind(|w| (f t.get w).val)`, whose computation yields the task the new
+  one continues as. Pure tasks (`Task.spawn`, `Task.map`, `Task.bind`) are
+  deferred the same way (`keep_alive` false); `Task.pure a` is `done(a)`,
+  a finished task, which lean-runtime never sees. During module
+  initialization Lean has no task manager and `lean_task_spawn_core` runs
+  the computation at once; so does the translation (those tasks share the
+  initializer's streams), and so with `LEAN_NUM_THREADS=0`.
+- A task runs, as lean-runtime decides (its "The model"), when it is
+  needed (`Task.get`, `IO.wait`: on the stack of whoever needs it once it
+  is the task a free worker would start), when the running code blocks and
+  a worker is free, at an effect point once a worker would have started it
+  (5 ms), when the program polls for it (`IO.getTaskState`: two sleeps or
+  1000 questions), or when `main` returns (`finish`, which runs what is
+  left in the order Lean's task manager would start it, also a pool task
+  enqueued after `main`, which native Lean never runs: LB-13). Pure tasks
+  no IO task waits for are only marked started where a worker would start
+  them, and run when needed, polled, at exit, or when nothing else can go
+  on (lean-runtime's pure-task rule).
+- *Dropped tasks.* The program's last reference to an unfinished task is
+  its cell's last (the scheduler's job holds no count): its drop calls
+  lean-runtime's `release` (Lean's `deactivate_task`). A pure task that has
+  not started is deleted and never runs; dropping its state releases its
+  source, so a chain of dropped pure tasks goes, as natively. Any other
+  task runs to completion (the glue keeps its cell), and its finish wakes
+  nobody, as natively.
 - *Priorities.* Lean passes `lean_unbox(prio)` as an `unsigned`: the
   priority is taken modulo 2^32. 2^32-1 is `LEAN_SYNC_PRIO`: such a task
-  runs as soon as it is enqueued, on the enqueuing thread (an `asTask` or
-  `Task.spawn` at once, before `main`'s next line, with `main`'s streams
-  and thread id; a dependent as soon as its source finishes, like `sync :=
-  true`). 0 to 8 are the task manager's queues; above 8 is a dedicated
-  thread, which comes first here.
-- A pending task runs at the first of:
-  - `IO.wait`/`Task.get` of it, or a task that needs it running;
-  - `IO.waitAny` on a list none of whose tasks has finished: the first
-    pending task of the list runs (it is the one that finished first);
-  - a program polling for it: `IO.getTaskState`/`IO.hasFinished` report a
-    pending task `waiting`, until the program asks again after time has
-    passed (an `IO.sleep`/`dbgSleep` since the first answer) or keeps asking
-    (1000 times); the task then runs and is reported `finished`. A task
-    that cannot finish without others (it waits for an unresolved promise,
-    or for a task running on another context) does not run: the others go
-    on once (due sleepers and timers, the contexts able to run, a queued
-    task if a worker is free, as natively other threads run while the
-    program polls), and its state is reported then; so is a task running on
-    another context, at every question;
-  - the running code blocks (a sleep, a lock, a promise, *Blocking* below)
-    and a worker is free for it: it starts on a context of its own; or it
-    was queued a while ago (5 ms) with a worker free, and the running code
-    writes output (below);
-  - `main` returning (§5.11): the queued tasks run in the order Lean's task
-    manager starts them. It keeps a queue per priority and takes the first
-    task of the highest non-empty one. An idle worker is woken by the first
-    enqueue and picks its task once it is awake: about 90 µs later for the
-    new worker thread of the first task, 20 µs for an idle one (measured
-    natively with `LEAN_NUM_THREADS=1`). Tasks `main` queues back to back
-    therefore compete by priority, while a task queued before some work has
-    been started by then: the runtime compares the enqueue times, and the
-    started task runs first in the final run. When a task a worker ran
-    finishes, it picks the next one at once. A task starts only when one
-    of the task manager's workers is free for it (below); `main` waits for
-    the tasks running on other contexts too, as Lean's finalization joins
-    its workers. `IO.Process.exit` exits at once, as natively.
-- *Dependents.* A task that waits for another is off the queue until that
-  task finishes. Then, whoever finished it (during `main` too), Lean
-  walks its dependents from the newest (`handle_finished`): one created
-  with `sync := true` (or at priority 2^32-1) runs there and then, on the
-  finishing thread, with that thread's current streams (whatever the
-  finished task left installed), before anything waiting for the finished
-  task resumes; the others are enqueued at their priority. A `sync`
-  dependent's own dependents are walked by the same loop, so a long chain
-  of `sync` dependents does not recurse. A bind task that has run `f`
-  finishes at once if the task `f` returned has finished, and otherwise
-  waits for it, keeping its priority and `sync` flag, reported `waiting`
-  (natively its closure is set again), and finishes as that one
-  (`task_bind_fn1`). Dependents of a cycle are left behind, as Lean's
-  workers stop when the queue is empty. A task needed while the tasks it
-  waits for are pending first runs that chain from its deepest end, one
-  task after the other, so a long chain does not recurse.
-- `mapTask`/`bindTask`/`Task.map`/`Task.bind` with `sync := true` of a
-  finished task apply `f` at once in the calling thread (its streams too),
-  as `lean_task_map_core`/`lean_task_bind_core` do.
-- `IO.cancel` sets the flag of an unfinished task; when a canceled task
-  finishes, the tasks created while it was unfinished that depend on it
-  are canceled too, as Lean's `handle_finished` does. `IO.checkCanceled`
-  answers for the innermost running task, and is false in `main`. When
-  `main` returns, Lean sets its shutdown flag, which makes
-  `IO.checkCanceled` true. A task that was queued then could have been
-  started by a native worker before the flag was set, so it sees the flag
-  only once time has passed in it (a sleep) or from its second check on;
-  so does a task it creates or releases (a dependent) before time has
-  passed in it. Any other task of the final run (a dependent of a task
-  still pending when `main` returned, a task created by a task that has
-  slept, a bind continuation created then) could only start after the
-  flag was set and sees it at once.
+  runs as soon as it is enqueued, on the enqueuing thread; 0 to 8 are the
+  task manager's queues; above 8 is a dedicated thread.
+- *Dependents.* When a task finishes (its job returns, or a promise is
+  resolved), lean-runtime walks its dependents from the newest
+  (`handle_finished`): a `sync := true` one (or at priority 2^32-1) runs
+  there and then, on the finishing context, the others are queued; the
+  waiters of finished tasks wake at the end of the walk. A bind task that
+  has run `f` finishes at once if the task `f` returned has finished, and
+  otherwise waits for it (`task_bind_fn1`). `mapTask`/`bindTask`/
+  `Task.map`/`Task.bind` with `sync := true` of a finished task apply `f`
+  at once in the calling thread, as `lean_task_map_core` does.
+- `IO.cancel`, `IO.checkCanceled` (true at shutdown, for a task that could
+  have started before only once time has passed in it), `IO.getTID`
+  inside tasks (`main`'s id plus lean-runtime's thread number), `IO.waitAny`
+  (its notification rule, what runs on the waiter's stack) and `Task.get`
+  in a `sync := true` task (Lean's panic, then the wait) are lean-runtime's.
 - *Closed terms.* Lean evaluates a closed term once, at its first use, and
   then marks it persistent (`lean_mark_persistent`), which waits for every
-  task it reaches. A closed term whose type may hold tasks runs its tasks
-  right after it is evaluated (`l2r_persist_T`), whether they are in
+  task it reaches. A closed term whose type may hold tasks waits for its
+  tasks right after it is evaluated (`l2r_persist_T`), whether they are in
   fields, arrays, the values of tasks, the values captured by function
   values (partial applications), thunks (their computation, or their
   value: the thunk is not forced), references (their value) or boxed
-  values; so `Task.spawn` of a closed function has finished once the term
-  has been used. The walk
-  works as Lean's does: a loop over a list of the values still to look
-  at (no recursion, so a value deep through any field is walked at a
-  bounded depth), which visits each cell once (the runtime keeps the set
-  of addresses visited: a value whose cells are shared, a DAG, is walked
-  in time linear in its number of cells, not of its paths). Natively,
-  waiting for a task only blocks (`wait_for`): the term's tasks, which have
-  usually not started yet, are run by the workers in their queue's order
-  (a higher priority first, then first in, first out), whatever order the
-  walk waits in, and their traces and panics come in that order. Here a
-  pending task runs when it is waited for, so the walk has two passes. The
-  first collects the unfinished tasks it reaches (without looking into
-  them: their values do not exist yet). The second walks the value again
-  in Lean's order (it pushes an object's fields, a closure's captured
-  values and an array's elements in order and pops the last one first;
-  fields in Lean's declaration order, whatever the record layout) and,
-  before it waits for a task, runs the collected tasks that come before it
-  in the workers' order: by priority, then in the order they were created.
-  So `(List.range 4).map (Task.spawn …)` runs its tasks 0, 1, 2, 3 (test
-  `RtPersistOrder`). The order of the second pass still matters: what it
-  reads out of a reference or a thunk is read when it gets there, so a task
-  that replaces the task a reference next to it holds has run by then, as
-  natively. Only collected tasks run early: other pending tasks of the
-  program, which a native worker would run first too, are not run (one
-  could wait for something the program does later). The walk does not keep
-  the tasks it collects alive (it records their runtime entries), and the
-  second pass does not keep what the first read, so a task the program
-  drops meanwhile (a task replaced in a reference by one the walk ran) is
-  deleted and never runs, as natively (test `RtPersistDropped`). A task
-  held at another representation is a converted copy (§5.1); the walk
-  knows it by its original's identity, so it is collected, not forced, in
-  the first pass (test `RtPersistConv`). A placeholder's never-forced
-  task cell (`pending` with the function value `z`, §5.1), which a
-  reference can hold while `ST.Ref.take` has left the placeholder in it,
-  is not a task: natively it is `box(0)`, which the walk skips (test
-  `RtZeroWalkRef`). The walk
-  keeps what it reads out of thunks, tasks and references until it ends, so that no
-  cell it has visited is freed meanwhile (a task it runs could force a
-  thunk, which drops its computation) and its address given to a new
-  cell. It is skipped when every task of the program has finished
-  (nothing to wait for): always for constants evaluated at startup, where
-  tasks run at once. The walks are generated at the end of lowering, once
-  every variant of the function types and of `Box` is known, and do
-  nothing for types that cannot hold a task. Values captured by a Reussir
-  closure (only lean2rr's own glue makes them, not Lean code) are not
-  looked into.
+  values. The walk works as Lean's does: a loop over a list of the values
+  still to look at (no recursion), which visits each cell once (the runtime
+  keeps the set of addresses visited), in Lean's order (it pushes an
+  object's fields in order and pops the last one first). Natively waiting
+  only blocks, and the workers run the term's tasks in queue order;
+  lean-runtime's `wait` keeps that order too (the awaited task runs only
+  once a free worker would start it), so the walk waits for each task as
+  it reaches it, in one pass (leanrt's own scheduler needed two:
+  `persist::collect` now collects nothing). What it reads out of a
+  reference or a thunk is read when it gets there, so a task that replaces
+  the task a reference next to it holds has run by then, as natively. A
+  placeholder's never-forced task cell (`pending` with the function value
+  `z`, §5.1) is not a task (natively `box(0)`, which the walk skips; test
+  `RtZeroWalkRef`). The walk keeps what it reads out of thunks, tasks and
+  references until it ends, so that no cell it has visited is freed
+  meanwhile and its address given to a new cell. It is skipped when every
+  task of the program has finished. The walks are generated at the end of
+  lowering, and do nothing for types that cannot hold a task.
 - A thunk or task stored at another representation (in `Box`, §5.1) is
   converted to a new cell. One that has its value gives a cell in state
   `done` with the converted value. Otherwise the new cell is in state
   `conv(g, o)`, for a task `conv(g, o, a)`: `g` forces the original and
   converts its value (so it still runs at most once); `o` is the original
-  cell, boxed, so that converting the copy back gives that very cell (a
-  thunk crossing between typed and uniform code in a loop stays one cell
-  instead of growing a chain); a task's `a` is the original's address, the
-  copy's identity for the runtime, so the copy's state (`IO.getTaskState`,
-  `IO.hasFinished`), waiting for it, `IO.cancel` and cancellation, its
-  priority and its dependents are the original's. The copy has no running
-  state of its own: it stays `conv` while it is forced, and forcing it
-  again meanwhile runs `g` again, which waits for the original if that is
-  running and has the original's value once it has finished. (A copy that
-  went `busy` would be waited for until its own computation ends; but the
-  original's end walks its `sync` dependents inside that computation, and
-  one that forces the copy, as natively it may read the finished original,
-  would wait forever.) A forced copy stores `done(v)` and lets the original
-  go; the original has finished then, which is what the runtime answers
-  for the copy's own cell from then on. A copy of a copy records the first
-  original, and converting it to a third representation converts the
-  original directly, so chains stay one level deep. The copy is a cell of
-  its own for `ptrAddrUnsafe` (§9).
+  cell, boxed, so that converting the copy back gives that very cell; a
+  task's `a` is the original's address, the copy's identity for the
+  runtime, so the copy's state, waiting for it, `IO.cancel`, its priority
+  and its dependents are the original's. The copy has no running state of
+  its own: it stays `conv` while it is forced, and forcing it again
+  meanwhile runs `g` again, which waits for the original if that is
+  running and has the original's value once it has finished. A forced copy
+  stores `done(v)` and lets the original go. A copy of a copy records the
+  first original, so chains stay one level deep. The copy is a cell of its
+  own for `ptrAddrUnsafe` (§9).
 - *Promises* (`IO.Promise α`, `lcAny` in mono code) are a runtime object
   (`LPromise`) holding the cell of their task, a task over `Option Box`
-  whatever `α` is, so that typed and uniform code share it. The task stays
-  unresolved (status `running`, as natively) until `Promise.resolve`, which
-  stores `some v` (only the first resolution counts) and walks the task's
-  dependents on the resolving thread, as Lean's `resolve_core`.
-  `Promise.result?` converts the task to `Task (Option α)`, and
-  `Promise.result!` maps `Option.getOrBlock!` over it, as natively.
-  Dropping the last reference to an unresolved promise resolves it with
-  `none` (`deactivate_promise`, through the runtime's finalizer of the
-  promise object). Waiting for an unresolved promise blocks (below): other
-  contexts and queued tasks run, as other threads would meanwhile, until
-  one resolves it; when nothing can any more, the wait lasts forever, as
-  natively. Polling a promise (`isResolved`) lets them go on once per
-  question once time has passed, and `IO.waitAny` does not run a pending
-  task that waits for an unresolved promise (or for a task running on
-  another context). `IO.Promise.new` during initialization is Lean's
-  internal panic.
-- *The event loop* (`leanrt::net`): timers, sockets, name resolution and
-  signals, as libuv's loop natively on a thread of its own. An operation
-  that completes later (a timer firing, data received, a connection
-  accepted) gets, from the shim, a promise `r` of `Unit` and a `sync`
-  continuation on `r` that resolves the program's promise; when the
-  operation completes, the runtime stores its outcome and drops `r`, which
-  resolves it with `none` (`deactivate_promise`) and so runs the
-  continuation, on the event loop's own context, as libuv's callback
-  natively runs on libuv's thread (its `sync` dependents too, the others
-  are queued). The scheduler polls the descriptors and timers when nothing
-  else can go on, and fires a due timer at the program's next output.
-  Sockets follow libuv's Unix code (descriptors created on `bind`,
-  `connect` or `listen` with the address's family, nonblocking;
-  `SO_REUSEADDR` before a TCP bind, whose `EADDRINUSE` `listen` reports;
-  an `accept` with a connection waiting completes at once; writes complete
-  through the loop). Name resolution calls `getaddrinfo`/`getnameinfo`
-  at once (natively on libuv's thread pool) and completes through the
-  loop. Signals are caught by a handler that writes to a pipe the loop
-  watches; stopping the last watcher of a signal restores its default
-  action, as libuv does. `Std.Async` (`Async`, `sleep`, `Interval`,
-  `Selector`, TCP and UDP clients and servers) is Lean code over these.
+  whatever `α` is, so that typed and uniform code share it; lean-runtime's
+  promise is that task. `Promise.resolve` stores `some v` (only the first
+  resolution counts) and lean-runtime walks the task's dependents on the
+  resolving thread (`resolve_core`). `Promise.result?` converts the task to
+  `Task (Option α)`, and `Promise.result!` maps `Option.getOrBlock!` over
+  it (lean-runtime's `option_get_or_block`: Lean's forced panic message,
+  then the context waits forever). Dropping the last reference to an
+  unresolved promise resolves it with `none` (`deactivate_promise`).
+  `IO.Promise.new` during initialization is Lean's internal panic.
+- *The event loop* is lean-runtime's (its scheduler's: epoll, timers,
+  watches, a loop context of its own for the callbacks, as libuv's loop
+  thread natively): `Std.Internal.UV`'s timers and signal watchers
+  (`sched::uv`), sockets and name resolution (`net`). An operation that
+  completes later (a timer firing, data received, a connection accepted)
+  gets, from the shim, a promise `r` of `Unit` and a `sync` continuation on
+  `r` that resolves the program's promise; lean-runtime's completion stores
+  the outcome and drops its reference to `r`, so the continuation runs on
+  the loop context, as libuv's callback natively runs on libuv's thread.
+  `Std.Async` (`Async`, `sleep`, `Interval`, `Selector`, TCP and UDP
+  clients and servers) is Lean code over these.
 - *Standard streams.* Natively each thread has its own current standard
   streams (`IO.setStdout` & co. replace the current thread's, which start as
-  the process's), and a task runs on a worker thread. So a task starts with
-  the process's streams, and when it ends the streams of whoever ran it are
-  back (`l2r_std_enter_if`/`l2r_std_leave_if` set the stream cells aside and
-  restore them). A task that runs on the current thread (a `sync`
-  dependent, priority 2^32-1) shares that thread's streams. `main`, on its
-  own thread, starts with the process's streams whatever the initializers
-  installed (§5.11). Natively a worker keeps its streams from one task to
-  the next, so a task that leaves a redirection behind can affect the next
-  task on the same worker; the translation behaves as if every task (other
-  than a `sync` dependent) ran on a fresh worker.
+  the process's), and a task runs on a worker thread. So each context has
+  its own stream cells (lean-runtime's `Glue::switched`), a task run as on
+  a worker thread starts with the process's streams, and when it ends the
+  streams of whoever ran it are back (`l2r_std_enter_if`/`l2r_std_leave_if`
+  set the stream cells aside and restore them; lean-runtime's
+  `Glue::task_begin` says which tasks). That is a dedicated task's; a pool
+  task runs with its emulated worker's stream cells instead (lean-runtime's
+  `running_worker`), which the worker keeps from one task to the next, as a
+  native worker thread keeps its streams, and which are dropped at the task
+  manager's finalization (as the workers' thread finalizers drop theirs). A
+  task that runs on the current thread (a `sync` dependent, priority
+  2^32-1) shares that thread's streams. `main`, on its own thread, starts
+  with the process's streams whatever the initializers installed (§5.11).
+  A task's `sync` dependents run with whatever streams the task left
+  installed, as natively on its thread (a dedicated task ends inside its
+  stream context, lean-runtime's `end_running_task`).
 
 *Blocking.* A thread that blocks natively (a mutex another thread holds, a
 condition variable, `IO.wait` of a task another worker runs or of an
-unresolved promise, a channel, a socket, `IO.sleep`) lets the others go on.
-A task that is needed runs nested on the stack of whoever needs it, but
-then everything below it would have to wait for it too. So the runtime has
-*contexts* (`leanrt::sched`, `coro`): `main`'s (its thread's stack) and one
-per task the scheduler starts, each on a stack of its own of the size of a
-native worker's (1 GiB, or `LEAN_STACK_SIZE_KB`, reserved but not
-committed, with a guard page that reports Lean's stack overflow). When the
-running context blocks, it is suspended, and the scheduler runs, in this
-order:
+unresolved promise, a channel, a socket, `IO.sleep`, a read of an empty
+pipe) lets the others go on. lean-runtime's contexts do that on one
+thread: `main`'s (its thread's stack) and one per task it starts, each a
+corosensei coroutine on a stack of a native worker's size (1 GiB, or
+`LEAN_STACK_SIZE_KB`, touched only as used, with a guard page that
+reports Lean's stack overflow); when the running context blocks, its hub
+runs a context that can go on, a queued task on a new context if one of
+the task manager's workers is free (`LEAN_NUM_THREADS`, or the online
+processors), or waits in its event loop. Effect points (output, a flush, a
+process spawn, `IO.Process.exit`) and polling points (task-state
+questions, `IO.checkCanceled`, the program's clock reads) let what
+natively would have run by then go first. lean-runtime's IO cooperates
+(a read of an empty pipe, a write to a full one, `flock`, `Child.wait`
+let the others run). lean2rr's glue: the one `unsafe` step of a switch
+(`Glue::suspend`), the per-context streams, the waits of its own objects
+(a thunk being forced on another context: `l2r_thunk_wait_busy`, woken by
+`l2r_thunk_done`; a constant another context computes, `once::claim`).
 
-1. a suspended context that can go on (its lock was handed to it, it was
-   notified, the task or promise it waited for finished, its sleep ended),
-   in the order they became able to;
-2. a queued task, on a new context, in the order `next_tag` would start it
-   (above), if one of the task manager's workers is free: their number is
-   `LEAN_NUM_THREADS`, or the number of online processors, as natively
-   (`std::thread::hardware_concurrency`, not limited by the CPU affinity
-   mask); a context
-   running a task at a priority up to `Task.Priority.max` holds one, except
-   while it waits for a task or promise (Lean's `wait_for` lets another
-   worker start then); a dedicated task (priority above 8) has a thread of
-   its own and always starts;
-3. the event loop's timers and sockets (`leanrt::net`, below) and the
-   sleepers, waiting for the first of them.
-
-When nothing can ever go on, the program waits forever, as a deadlocked
-native one does. A context does not lose the processor otherwise, except at
-*effect points* (output to a stream or file, `IO.Process.exit`) and
-`IO.sleep 0`: what natively would have run by then on other threads goes
-first: a context whose sleep is over, a due timer of the event loop and
-what its completion releases (its continuations, the contexts waiting for
-it, the tasks it queues, which a free worker starts at once), descriptors
-and signals that have become ready (polled at most every 50 µs: a system
-call at every output would cost more than the output), a context able to
-go on for a while
-(5 ms: a lock handed over, a promise resolved), a task queued a while ago
-(5 ms) with a worker free for it (thread wake-ups take microseconds, so
-these would have got past anything that takes no time); then, round after
-round (up to 64), what those release in turn. What runs in those rounds
-happened before natively: its own effect points start no tasks, and let
-go first only what is due or able to run for a while (the context that
-let it run, once it has computed for 5 ms). So sleeps and timers order
-the output of tasks by time, as natively, as long as code between two
-outputs takes less time than the sleeps that order them, and a context
-that computes for a while lets the others print first. A `sleep 0` lets
-those run whatever their age (a queued task after a worker's wake-up
-time). Spawning a process and flushing a handle are effect points too.
-
-A thunk being forced on one context and needed on another (the first
-blocked in its computation, or let others run at an effect point) is
-waited for until it has its value (`l2r_thunk_wait_busy`, woken by
-`l2r_thunk_done`), as natively a thread waits for the one forcing it.
-
-`LEAN_NUM_THREADS` is read as Lean reads it (`atoi`, taken as an
-`unsigned`): 0 (or not a number) is no task manager: tasks run at once, as
-during initialization, and `IO.Promise.new` is Lean's internal panic.
-
-A pending task that waits for one running on another context is natively
-its dependent: it runs, or is queued, when that one finishes. So `Task.get`
-of it waits until that one has finished and looks again (it does not run
-the dependent at once, which would then wait inside its own computation:
-its state, cancellation and `sync` thread would differ).
-
-Each context has what a thread has: its running tasks (`IO.checkCanceled`,
-`IO.getTID`), the walks of dependents it does, its current standard streams
-(saved and restored at a switch: the cells of `l2r_std_*`, which the
-runtime records as mutable). No context is suspended inside a free (the
-free's pending work is the thread's, Reussir's `reussir_rt::drop`, and
-the other contexts would push their frees onto it). This decides when the
-`sync` dependents of a promise dropped unresolved run (natively at once,
-on the dropping thread, wherever that happens):
+No context is suspended inside a free (the free's pending work is the
+thread's, Reussir's `reussir_rt::drop`, and the other contexts would push
+their frees onto it): the drop of a stream handle runs in lean-runtime's
+no-suspend scope (a dropped stream's flush hands what would wait to a
+writer thread), and nothing else a free reaches waits. This decides when the `sync`
+dependents of a promise dropped unresolved run (natively at once, on the
+dropping thread, wherever that happens):
 - a promise whose last reference is released by itself (not inside a
   free) is resolved with `none`, and its dependents run at once, as
   natively;
 - a promise held by a container being freed (an array, a list, a
-  structure, a map, an `Option`, ...) is resolved in its turn, and its
-  dependents are walked as soon as the free is over (natively during the
-  free, when it reaches the promise), before the code that released the
-  container goes on. The runtime sees the end of a free that it started
-  itself (`leanrt::drop::run`): one of its containers (an array, a
-  reference cell, a task or thunk cell), or the old value of a reference's
-  `set` (below); and of any free through local Reussir patch 0040
+  structure, a map, an `Option`, ...) is resolved with `none` in its turn,
+  and resolved in lean-runtime, which walks its dependents, as soon as the
+  free is over, in order (natively during the free, when it reaches the
+  promise), before the code that released the container goes on. A free
+  inside such a dependent is a free of its own: its promises' dependents
+  run when it ends, before the dependent goes on, as natively (test
+  `RtPromiseNestedFreeOrder`). The
+  runtime sees the end of a free that it started itself
+  (`leanrt::drop::run`): one of its containers (an array, a reference
+  cell, a task or thunk cell), or the old value of a reference's `set`
+  (below); and of any free through local Reussir patch 0040
   (`__reussir_drop_drained`, which every drain calls when it ends).
   Without that patch, the end of a free that Reussir's record glue started
-  (a structure, list or `Option` that the program's own code releases) is
-  not seen: those dependents run at the context's next effect point,
-  block, Std.Sync wait (before the object is looked at, so that a release
-  by them is not lost) or question about a task (§10).
+  is not seen: those dependents run at the context's next task primitive,
+  `Std.Sync` operation (before the object is looked at, so that a release
+  by them is not lost) or constant claim (§10).
 
 A reference's `set` stores the new value before it releases the old one,
 as `lean_st_ref_set` does (Reussir's `cell::set` releases first): code that
@@ -2718,51 +2589,69 @@ the release runs sees the new value. It releases the old value as
 `lean_dec` does (`leanrt::drop::release`, through the prelude's
 `l2r_release_value`): a shared value is only decremented, and the last
 reference to a record is freed inside a free the runtime starts, so what
-it holds goes in Lean's order (its last field first, as Reussir's glue
-would not do for the first cell of a free it starts) and the dependents of
-the promises it drops run when that free ends, before the next statement,
-with or without patch 0040. The same holds for the old state of a task or
-thunk cell (`l2r_lcell_set`).
-`Task.get` of a task that is `busy` because it
-runs on another (suspended) context waits until it has finished
-(`l2r_task_wait_running`, then it looks again); on the running context it
-needs itself, and waits forever, as natively. `IO.waitAny` when every task
-of its list is running waits until some task finishes
-(`l2r_task_wait_progress`) and looks again.
+it holds goes in Lean's order (its last field first) and the dependents
+of the promises it drops run when that free ends, before the next
+statement, with or without patch 0040. The same holds for the old state of
+a task or thunk cell (`l2r_lcell_set`, which first lets the writers of the
+streams the context handed off end: a publication, lean-runtime's
+`before_publish`).
+
+*References.* lean2rr decides at translation time whether a program
+creates tasks: whether one of the externs it reaches (its own code and the
+code of Lean's library it calls, after the shim's replacements) makes a
+task or a promise (`Task.spawn`, `Task.map`, `Task.bind`, `IO.asTask`,
+`IO.mapTask`, `IO.bindTask`, `IO.Promise.new`; polymorphic, so each one
+the program reaches is an instance of it). Every context other than
+`main`'s comes from those: a task, a promise's dependents (run where it is
+resolved), the event loop's completions (they resolve the promises the
+shim's Lean code makes); a `Std.Sync` object or a timer alone makes none.
+So a program without them has one context,
+`main`'s, and its reference operations are plain cell operations (its code
+is the same as before). In a program that creates tasks each reference
+operation first has a point (`leanrt::refs`, lean-runtime's glue items 5
+and 7):
+- a read (`get`, `take`, `swap`) is a polling point: every 1000th read on
+  the thread polls (lean-runtime's `ref_read`), so a loop that polls a
+  reference another task sets ends (`while !(← flag.get) do pure ()`);
+- a write (`set`, `take`, `swap`) is a publication (`before_publish`);
+- `ST.Ref.modify` is `take`, then `set`; `take` records the reference as
+  taken by the running thread (a context, and on it the thread number of
+  the task running there), and until that thread's store (`set` or
+  `swap`), the other threads' `get`, `take`, `set` and `swap` of that
+  reference wait, then see modify's value: Lean 4.35's rule (LB-01 and
+  LB-18 not reproduced, §10). The taker's own operations do not wait (its
+  `get` reads the placeholder, as before; only unsafe code reaches the
+  reference inside modify's pure function). A `modify` whose function
+  waits for a task that uses the same reference deadlocks, as in 4.35.
+
+The cost, in programs that create tasks only: a load and a branch per
+read and per write while no reference is taken, a recorded `take` per
+`modify` (to measure in an owner-approved timing session).
+
+lean-runtime's scheduler itself starts at the first task, promise,
+`Std.Sync` object, timer, signal watcher or socket after `main` started
+(`leanrt::task::ensure_started`), with the number of workers and the
+stack size `main`'s start read as natively: a program that makes none
+pays nothing for it.
 
 Why tasks are deferred rather than run at creation: a task may wait for
 `main`. `IO.asTask (do while !(← flag.get) do IO.sleep 1; …)` followed by
 `flag.set true; IO.wait t` finishes natively; run at creation, the task
 would spin forever. Running at creation also prints the task's output
 before `main`'s next line, which natively comes first when the task starts
-with a sleep, and computes pure tasks the program then drops. A task that
-runs only when needed never waits for something that is still to happen.
+with a sleep, and computes pure tasks the program then drops.
 
-What a single thread cannot do:
-- a context that waits for another without blocking (a loop polling an
-  `IO.Ref` that another task sets, without `IO.sleep` or output in it) does
-  not let the others run, and does not terminate; with a sleep in the
-  loop, it does;
-- contexts do not run in parallel: one that computes without output or
-  blocking delays the others (output ordered by time comes in time order
-  only as far as the code between outputs is shorter than the sleeps), and
-  `IO.waitAny` does not pick the fastest of several unfinished tasks;
+What a single thread cannot do (lean-runtime's "The limits of one thread",
+and lean2rr's own):
+- contexts do not run in parallel: one that computes without blocking, an
+  effect point or a polling point delays the others (in a program that
+  creates tasks every 1000th `ST.Ref` read is a polling point, so a loop
+  polling a reference that another task sets ends: "References" below);
+- `IO.waitAny` does not pick the fastest of several unfinished tasks;
 - tasks nobody waits for stay queued, with what they hold, until `main`
-  returns (a chain of 4·10⁶ `mapTask`s built by `main` takes 0.7 GB, as
-  natively with one worker; with free workers native Lean runs it as it is
-  built), and a dropped pure task keeps its memory until the runtime would
-  start it;
-- a task needed by `main` runs at once, where a single native worker would
-  first finish the tasks queued before it, and a task the worker would
-  start right after one `main` waits for runs only when `main` returns or
-  needs it, after `main`'s next lines;
-- Lean's panic for `Task.get` inside a `sync := true` task is not
-  reproduced;
-- a deferred task is reported `waiting` at the first question even after a
-  sleep, when no worker was free to start it meanwhile (a pure task
-  deferred behind a pending IO task, for example);
-- a task or context that starts or goes on late counts its sleeps and
-  timers from then (above).
+  returns or a worker is free;
+- a few blocking calls still block the whole thread (`open` of a FIFO,
+  lean-runtime's list).
 
 Tasks that wait for each other in a cycle wait forever, as natively.
 
@@ -2782,8 +2671,11 @@ text of numbers, and the OS-level IO (lean-runtime's `io`: glibc's `FILE`
 model behind handles and the standard streams, `IO.Error`'s decoding, the
 file system, temporary files, the environment, the clocks, child
 processes, `Std.Internal.UV.System`, the startup descriptors,
-`IO.initializing` and the exit sequence; `runtime/README.md`, "The shared
-crate lean-runtime"). `leanrt` and the prelude hold lean2rr's representations and
+`IO.initializing` and the exit sequence), the task scheduler (lean-runtime's
+`sched`: Lean's task manager on one thread, promises, `Std.Sync`, the event
+loop with `Std.Internal.UV`'s timers and signals, Lean's stack-overflow
+report) and the networking (`net`: sockets, name resolution, interfaces;
+`runtime/README.md`, "The shared crate lean-runtime"). `leanrt` and the prelude hold lean2rr's representations and
 hot paths (the inline small-`Nat`/`Int` arithmetic, the one-block big
 numbers with GMP's kernels behind lean-runtime's `BigNat`/`BigInt`
 traits, the one-block arrays' reads, writes and pushes) and convert
@@ -2800,15 +2692,17 @@ what Reussir lacks:
   some inputs;
 - IO: the glue of lean-runtime's `io` (handles in `LHandle` boxes, the
   last-error slot from which the generated code builds `IO.Error`s, the
-  current standard streams as lean2rr's own cells, effect points of the
-  scheduler before output), argv;
-- the mutable cells of thunks and tasks, the queues of deferred tasks, and
-  promises (§5.14);
+  current standard streams as lean2rr's own cells), argv;
+- the mutable cells of thunks and tasks, their entries naming
+  lean-runtime's tasks, the jobs that run them through the program's
+  dispatcher, promises, and the glue of lean-runtime's scheduler and event
+  loop (§5.14);
 - panic, trace;
 - once-cells for constants.
 
-Everything runs on one thread: tasks are deferred until needed (§5.14),
-which gives one of the schedules native Lean can produce. Real
+Everything runs on one thread: tasks are deferred until needed
+(lean-runtime's scheduler, §5.14), which gives one of the schedules native
+Lean can produce. Real
 threads, using Reussir's atomic reference counting, come later. Each
 runtime function consumes the arguments it owns, and never mutates in
 place unless it has checked for uniqueness (the cells of refs, thunks and
@@ -3044,44 +2938,26 @@ Each item says what differs and when.
   record, a thunk) is not part of a static dictionary, so it is evaluated
   once, as natively (test `RtDictConst`). Visible through traces or panics
   in instance code or in such calls, or as extra time.
-- *Tasks* run on one thread, when they are needed, when the running code
-  blocks (a sleep, a lock, a condition variable, a promise, a socket) or
-  when `main` returns (§5.14). Contexts never run in parallel and switch
-  only when one blocks or at an effect point (output, an exit,
-  `IO.sleep 0`), to what natively would have run by then (a due sleep or
-  timer, a context able to run or a task queued 5 ms ago or more): a loop
-  polling shared state that another task sets never sees it change unless
-  it sleeps or prints, a context that computes without output or blocking
-  delays the others (so output that sleeps order natively comes in time
-  order only as far as the code between outputs is shorter than the
-  sleeps; a context or task made able to run less than 5 ms before an
-  output comes after it, natively a race), and `IO.waitAny` does not pick
-  the fastest task. A task or context that starts or goes on late (at an
-  effect point, when the running code blocks, in the final run) counts its
-  sleeps and timers from then, natively from when a worker started it: a
-  task queued long before an effect point that then sleeps 30 ms prints
-  30 ms after that point. A pure task the program drops before any effect
-  point or block is deleted, even where a free native worker would already
-  have started it, and `IO.checkCanceled` at shutdown follows the
-  heuristics above (§5.14), not the time a task natively spent before
-  `main` returned. A deferred
-  task is reported `waiting` at the first `IO.hasFinished`. The order of
-  the final run is that of Lean's task manager, whose first pick is timed
-  against a native worker's measured wake-up latency (about 90 µs, 20 µs
-  when idle): tasks created about that far apart can come in either order,
-  as natively. Tasks other than `sync` dependents run as if
-  each had a fresh worker thread, so a redirection a task leaves behind
-  never reaches another task (natively it can, on the same worker);
-  `IO.getTID` inside a task is main's thread id plus a worker number (a
-  `sync` dependent's is its source's), as distinct from main's as a
-  worker's. A task needed before tasks queued earlier runs before them
-  (`y.get` before `x.get`, `x` created first, runs `y` first; natively a
-  worker takes `x` first, always with one worker), except the tasks a
-  closed term waits for when it is first evaluated, which run in queue
-  order (§5.14). A closed term does not wait for the task of a promise in it
-  (Lean's `lean_mark_persistent` does, and waits forever for an
-  unresolved one; a closed term can hold a promise only through unsafe
-  code).
+- *Tasks* run on one thread, on lean-runtime's scheduler (§5.14), which
+  picks one of native's schedules; its documented differences hold
+  (lean-runtime's `docs/sched.md`, "Schedules that depend on the machine's
+  speed", "The limits of one thread", "Known differences from native",
+  LSCHED-01). Contexts never run in parallel and switch only when one
+  blocks or at an effect or polling point, to what natively would have run
+  by then (in a program that creates tasks every 1000th `ST.Ref` read is a
+  polling point, §5.14 "References"), a context that computes without
+  these delays the others, and `IO.waitAny` does not pick
+  the fastest task. lean-runtime's pure-task rule defers pure tasks a
+  worker would start (they run when needed, polled, at exit or when nothing
+  else can go on). `IO.getTID` inside a task is main's thread id plus
+  lean-runtime's thread number, as distinct from main's as a worker's. A
+  closed term does not wait for the task of a promise in it (Lean's
+  `lean_mark_persistent` does, and waits forever for an unresolved one; a
+  closed term can hold a promise only through unsafe code).
+- *A reference read inside `modify`'s function by the `sync` dependent of a
+  promise the function drops* (review RS4-01): natively the dependent's
+  `get` waits forever for modify's store (a program that hangs); lean2rr's
+  taker exemption lets it read the placeholder (§5.14, "References").
 - *Startup order of unrecorded constants* (§5.12): a constant that Lean
   compiled to no IR-only declaration although its value calls a function
   (a callee whose type is not syntactically a function, such as
@@ -3295,8 +3171,8 @@ Each item says what differs and when.
   levels at an 8 MB stack). The depth at which
   `Stack overflow detected. Aborting.` (exit 134) happens is not native's,
   in either direction (the report itself is, in every thread: §5.11).
-  Tasks run on `main`'s thread (Lean's 1 GiB, or `LEAN_STACK_SIZE_KB`),
-  where native task workers have the same size of stack each.
+  Tasks run on lean-runtime's contexts, each with a stack of Lean's size
+  (1 GiB, or `LEAN_STACK_SIZE_KB`), as native task workers have.
 - *Stream redirection* (`IO.setStdout`, `setStderr`, `setStdin`,
   `IO.FS.withIsolatedStreams`) is translated: the current streams live in
   cell slots, and panics, `dbgTrace` and `timeit` write through the current
@@ -3434,7 +3310,13 @@ module's behaviour, which lean2rr calls. The lean-runtime cases:
 `temp/temp_long_dir`, `temp_long_file`, `temp_long_dir_4095` (LB-16),
 `process/null_open_fails` (LB-17), `process/exit_while_reading`,
 `process/output_oom_both_pipes`, `process/output_drain_exit_exit` and
-`_panic` (LB-29), `io/startup_fd_exhausted` (LB-30, LB-31))
+`_panic` (LB-29), `io/startup_fd_exhausted` (LB-30, LB-31); the task
+manager's, since lean2rr runs on lean-runtime's scheduler (switch step 4):
+`tasks/late_*` (LB-13: a pool task enqueued after `main` runs),
+`uvloop/signal_failed_next` (LB-19), `uvloop/*_in_sync_dependent` (LB-20,
+and LB-33, LB-34: a `stop` or `cancel` whose release runs a `sync`
+dependent that subscribes again), the `net` cases of LB-21 to LB-28,
+`tasks/dropped_promise_waiter_*` (LB-32))
 - *LB-01, a concurrent `IO.Ref.set` can be lost*
   ([LB-01](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-01-a-concurrent-iorefset-can-be-lost);
   fixed upstream in Lean 4.35): natively `lean_st_ref_get` takes the value
@@ -3443,7 +3325,13 @@ module's behaviour, which lean2rr calls. The lean-runtime cases:
   between is undone (a task's `r.set 1`, then `IO.wait` on it, and `r`
   reads 0 again; a spin on a flag can hang). In lean2rr tasks run on one
   thread (§5.14), so every reference operation is atomic: a completed
-  `set` is seen by every later `get`.
+  `set` is seen by every later `get` (`refs/lost_update`). The other half
+  of Lean 4.35's fix too: `ST.Ref.modify` is `take` then `set`, and while
+  its function blocks, another thread's `get`, `take`, `set` and `swap` of
+  that reference wait for modify's store, in a program that creates tasks
+  (§5.14, "References"; `refs/set_during_modify`, `swap_during_modify`,
+  `get_during_modify`; tests `RtRefSetDuringModify`,
+  `RtRefSwapDuringModify`, `RtRefGetDuringModify`).
 - *LB-02, output followed by a large read on one handle*
   ([LB-02](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-02-output-followed-by-a-large-read-on-one-handle-is-lost)):
   natively a read of at least one buffer (`read 5000`)
@@ -3573,35 +3461,24 @@ module's behaviour, which lean2rr calls. The lean-runtime cases:
   been reached` and exit 1, like a real unreachable.
 
 **Blocking, the event loop and promises**
-- *Blocking system calls* (reading a file, a pipe or standard input,
-  waiting for a child process) block the whole program, where natively
-  only the calling thread waits: a task reading a pipe that another task
-  of the program writes, or that a child writes only after the program has
-  done something else, waits forever. (lean-runtime's io makes these
-  calls cooperate with its own scheduler, `sched`, which lean2rr does not
-  use yet: without it they are the same plain blocking calls.) Name resolution
-  (`Std.Async.DNS`) runs `getaddrinfo` at once, so a slow lookup holds up
-  the other tasks and timers meanwhile (natively it runs on libuv's thread
-  pool).
-- *Event loop details* (§5.14): libuv accepts a waiting connection on
-  its own when no `accept` is pending, and keeps it; here it stays in the
-  kernel's queue until an `accept` (only descriptor numbers and `EMFILE`
-  can tell). Timers count from the monotonic clock when they start
-  (libuv from its loop's cached time, which can make a timer fire a little
-  earlier). A promise the loop gives up without resolving it (a timer
-  re-armed, an operation whose start failed) is released on the loop's
-  context, at its next turn, where natively the C function releases it at
-  once: when that was the last reference, the promise is resolved with
-  `none`, and its `sync` dependents run, that much later (generated code
-  does not run inside a runtime primitive). A timer's or signal watcher's
-  `stop` and `cancel`, and a socket's `cancelAccept` and `cancelRecv`
-  (also of a `waitReadable`), hand the promise back to the extern's glue,
-  which releases it on the caller's context once the primitive has
-  returned, as natively in the call (tests `RtTimerStopDropped`,
-  `RtSockCancel`). Natively these calls hold the event loop's lock while
-  they release the promise, so a `sync` dependent that blocks there for
-  good (`Promise.result!` of the dropped promise) also stops every timer
-  and socket of the program; here only the calling context blocks.
+- *Blocking system calls* cooperate with lean-runtime's scheduler (a read
+  of an empty pipe, a write to a full one, `flock`, `Child.wait`: the
+  other contexts run meanwhile), but a few still block the whole program
+  (`open` of a FIFO, lean-runtime's list in its `docs/sched.md`, "The
+  limits of one thread").
+- *Event loop details* (§5.14): lean-runtime's (its `docs/sched.md`,
+  "Blocking IO and the event loop", `Std.Internal.UV`, and `docs/net.md`,
+  "Where it differs from native"): the loop's callbacks run when the
+  program blocks, at polling and effect points (at most once a
+  millisecond), or on the loop context while other contexts run, so a
+  program that computes without any of these delays them; signal delivery
+  over signal-hook's safe API (SIGIO, SIGTSTP, SIGTTIN, SIGTTOU after
+  their last watcher stops); two lookup threads for name resolution. A
+  timer's or signal watcher's `stop` and `cancel`, and a socket's
+  `cancelAccept` and `cancelRecv`, release the loop's promise on the
+  caller's context (tests `RtTimerStopDropped`, `RtSockCancel`). The
+  `net` cases lean2rr did not support before switch step 4 stay out of
+  scope (implementation status).
 - *Promises released inside a free* (§5.14): the `sync` dependents of a
   promise dropped unresolved because a container holding it is freed run
   once the whole free is over, where natively they run when the free
@@ -3611,9 +3488,10 @@ module's behaviour, which lean2rr calls. The lean-runtime cases:
   Reussir's record glue started (a structure, a list after its first cell,
   an `Option` that the program's own code releases; not the old value of a
   reference's `set`, which the runtime frees) ends unseen, and its
-  promises' dependents run only at the next output, block, Std.Sync wait
-  or question about a task: code in between (reading a reference the
-  dependent sets, a computation, a blocking system call) runs before them.
+  promises' dependents run only at the context's next task primitive,
+  `Std.Sync` operation or constant claim: code in between (reading a
+  reference the dependent sets, a computation, a blocking system call)
+  runs before them.
   A condition-variable loop that reads its condition before it waits
   (`while !(← c.get) do cv.wait m`) then waits forever when such a
   dependent was to set the condition and notify: the dependent runs at the

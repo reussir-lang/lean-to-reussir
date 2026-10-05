@@ -117,6 +117,22 @@ pub fn exit(code: i32) -> ! {
     lio::exit::exit(code)
 }
 
+/// `IO.Process.forceExit` (`std::_Exit`): no flushing, no exit handlers.
+/// First the writer threads of the streams this context's drops handed off
+/// end (lean-runtime's writers point, `sched::before_publish`): natively the
+/// drop's `fclose` had written those bytes before any `_Exit` (lean-runtime
+/// docs/sched.md, "The glue", item 11). lean-runtime's own
+/// `io::exit::force_exit` ends with `std::process::exit`, which runs the
+/// handlers of linked C code (mimalloc's); its documentation asks a glue that
+/// needs `_Exit` exactly to call `_exit`.
+pub fn force_exit(code: i32) -> ! {
+    extern "C" {
+        fn _exit(code: i32) -> !;
+    }
+    crate::sched::before_publish();
+    unsafe { _exit(code) }
+}
+
 /// The end of the process after `main` has returned (`l2r_exit`): the io
 /// layer's dedicated tasks are waited for (`io::exit::after_main`, part of
 /// `lean_finalize_task_manager`), then [`exit`].
@@ -132,6 +148,24 @@ pub fn main_exit(code: i32) -> ! {
 #[inline(never)]
 pub fn mono_nanos() -> u64 {
     lio::env::mono_nanos_now()
+}
+
+/// A clock read of the program (`IO.monoNanosNow`, `IO.monoMsNow`): a
+/// polling point of lean-runtime's scheduler (docs/sched.md, "The glue",
+/// item 5), so that a loop waiting for the time to pass lets the others go
+/// on, then [`mono_nanos`].
+#[inline(never)]
+pub fn mono_nanos_polled() -> u64 {
+    crate::sched::poll();
+    mono_nanos()
+}
+
+/// `Std.Time.Timestamp.now`'s clock read: a polling point, then
+/// [`realtime_nanos`].
+#[inline(never)]
+pub fn realtime_nanos_polled() -> i64 {
+    crate::sched::poll();
+    realtime_nanos()
 }
 
 /// The system (real-time) clock in nanoseconds since the Unix epoch, signed,

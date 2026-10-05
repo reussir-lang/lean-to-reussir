@@ -7,6 +7,7 @@
 //! by a context of the scheduler that blocked meanwhile is waited for by the
 //! others (`claim`).
 
+use lean_runtime::sched::{self as ls, CtxId};
 use std::cell::UnsafeCell;
 
 struct Slots(UnsafeCell<Vec<usize>>, UnsafeCell<Vec<bool>>);
@@ -22,7 +23,7 @@ pub fn has(slot: u64) -> bool {
 
 /// Constants being computed (`claim`): the slot, the context computing it,
 /// the contexts waiting for its value.
-struct Claims(UnsafeCell<Vec<(u64, u32, Vec<u32>)>>);
+struct Claims(UnsafeCell<Vec<(u64, CtxId, Vec<CtxId>)>>);
 unsafe impl Sync for Claims {}
 static CLAIMS: Claims = Claims(UnsafeCell::new(Vec::new()));
 
@@ -45,22 +46,24 @@ pub fn claim(slot: u64) -> bool {
 #[inline(never)]
 fn claim_cold(slot: u64) -> bool {
     // Before it may wait (as `sync::settle`).
-    crate::task::run_later_walks();
+    crate::task::run_later();
     loop {
         if has(slot) {
             return true;
         }
-        let cur = crate::sched::cur();
+        // Before lean-runtime's scheduler starts there is one context,
+        // `main`'s (`task::ensure_started`), and the scheduler is not asked.
+        let cur = if crate::task::sched_started() { ls::current_context() } else { ls::MAIN };
         let claims = unsafe { &mut *CLAIMS.0.get() };
         match claims.iter_mut().find(|c| c.0 == slot) {
             None => {
                 claims.push((slot, cur, Vec::new()));
                 return false;
             }
-            Some(c) if c.1 == cur => crate::task::hang(),
+            Some(c) if c.1 == cur => ls::hang(),
             Some(c) => {
                 c.2.push(cur);
-                crate::sched::block(crate::sched::Wait::Sync(slot as usize));
+                ls::block_sync();
             }
         }
     }
@@ -72,7 +75,7 @@ fn release_claim(slot: u64) {
     if let Some(k) = claims.iter().position(|c| c.0 == slot) {
         let (_, _, waiters) = claims.swap_remove(k);
         for w in waiters {
-            crate::sched::wake(w);
+            ls::wake(w);
         }
     }
 }
@@ -126,8 +129,9 @@ unsafe impl Sync for Saved {}
 static SAVED: Saved = Saved(UnsafeCell::new(Vec::new()));
 
 /// The slots used as mutable cells (the current standard streams): they
-/// belong to the running context of the scheduler (`sched`), as natively
-/// each thread has its own current streams.
+/// belong to the running context of lean-runtime's scheduler (switched by
+/// the glue, `sched::LeanrtGlue::switched`), as natively each thread has its
+/// own current streams.
 struct Mutable(UnsafeCell<Vec<u64>>);
 unsafe impl Sync for Mutable {}
 static MUTABLE: Mutable = Mutable(UnsafeCell::new(Vec::new()));
@@ -147,9 +151,8 @@ pub struct CtxState {
 }
 
 /// Exchange the running context's mutable cells and saved contexts with
-/// `st` (see `sched::switch_to`: the leaving context's go to its record,
-/// whose own were emptied when it last arrived; then the arriving
-/// context's come from its record). A cell missing from `st` is empty.
+/// `st` (the glue's `switched`: `st` is the arriving context's record, and
+/// gets the leaving context's state). A cell missing from `st` is empty.
 pub fn swap_ctx_state(st: &mut CtxState) {
     std::mem::swap(unsafe { &mut *SAVED.0.get() }, &mut st.saved);
     let m = unsafe { (*MUTABLE.0.get()).clone() };
@@ -162,6 +165,46 @@ pub fn swap_ctx_state(st: &mut CtxState) {
         cells.push((slot, cur));
     }
     st.cells = cells;
+}
+
+/// A pool worker's mutable cells (its current standard streams), kept from
+/// one task to the next (`sched::LeanrtGlue::task_begin`, `task_end`).
+#[derive(Default)]
+pub struct CellSet {
+    cells: Vec<(u64, Option<usize>)>,
+}
+
+/// Exchange the running thread's mutable cells with `set` (a pool task's
+/// begin and end: its worker's cells come in, the cells of the thread below
+/// go to `set`, and back). A cell missing from `set` is empty. The saved
+/// stream contexts stay.
+pub fn swap_cells(set: &mut CellSet) {
+    let m = unsafe { (*MUTABLE.0.get()).clone() };
+    let mut cells = Vec::with_capacity(m.len());
+    for &slot in m.iter() {
+        let cur = if has(slot) { Some(take_raw(slot)) } else { None };
+        if let Some(&(_, Some(v))) = set.cells.iter().find(|(s, _)| *s == slot) {
+            set_raw(slot, v);
+        }
+        cells.push((slot, cur));
+    }
+    set.cells = cells;
+}
+
+/// The cells `base..base + 3` of `set` become the current ones, the running
+/// thread's set aside as by `push_context` (the end of a pool worker at the
+/// task manager's finalization: the generated `l2r_std_leave` then drops
+/// them and gives the thread's back). Cells of `set` outside that range
+/// (none: only the standard streams are mutable cells) are left alone.
+pub fn enter_cells(base: u64, set: CellSet) {
+    push_context(base, 3);
+    for (slot, v) in set.cells {
+        if let Some(v) = v {
+            if slot >= base && slot < base + 3 {
+                set_raw(slot, v);
+            }
+        }
+    }
 }
 
 /// Set the cells `base..base + n` aside, leaving them empty: a new context

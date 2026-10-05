@@ -118,6 +118,11 @@ structure LowerCtx where
   never read as another, and an unboxing function matches only the
   instantiations of its own inductive (`boxCastable`, `finishUnboxFns`). -/
   programCasts : Bool := true
+  /-- Whether the program creates tasks (`programCreatesTasks`): then its
+  reference operations are the task-aware ones (`refCellOp`), and it has
+  `l2r_std_drop_workers` (`stdContextFns`). lean-runtime's scheduler itself
+  starts at run time, at the first task (`leanrt::task::ensure_started`). -/
+  createsTasks : Bool := false
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)
   /-- Instance name ↦ instance key (original declaration and type arguments). -/

@@ -279,8 +279,9 @@ pub fn cpu_info() -> LHandle {
     o
 }
 
-/// `random size` (`uv_random`), completing through the event loop as
-/// natively on libuv's thread pool. Lean allocates the array first; then
+/// `random size` (`uv_random`), completing on lean-runtime's loop context
+/// (`net::complete_on_loop`), as natively a libuv callback after its thread
+/// pool's work. Lean allocates the array first; then
 /// libuv refuses more than `0x7FFFFFFF` bytes at once (`UV_E2BIG`, a
 /// `sync_err`); the bytes are lean-runtime's `random_fill`.
 pub fn random(size: u64, r: crate::task::LPromise) -> LHandle {
@@ -288,7 +289,7 @@ pub fn random(size: u64, r: crate::task::LPromise) -> LHandle {
     crate::array::check_alloc(size, 1);
     if let Err(e) = uvsys::random_check(size) {
         op(&o).sync_err = uv_code(&e);
-        crate::net::release(r);
+        drop(r);
         return o;
     }
     let mut buf = vec![0u8; size as usize];
@@ -297,6 +298,6 @@ pub fn random(size: u64, r: crate::task::LPromise) -> LHandle {
         Err(e) => uv_code(&e),
     };
     op(&o).bytes = buf;
-    crate::net::complete_now(&o, r, code);
+    crate::net::complete_on_loop(&o, r, code);
     o
 }

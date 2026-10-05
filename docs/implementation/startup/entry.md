@@ -66,15 +66,19 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
 
 ### Pending tasks run after `main`, before the exit status
 
-- **What:** After `main` returns, whatever its result, the entry sets
-  Lean's shutdown flag and runs the tasks still pending
-  (`l2r_task_shutdown`, `l2r_run_pending_tasks`); then it reports an
-  uncaught exception (`uncaught exception: <message>`, exit 1) or exits
-  with the returned `UInt32` (0 for `IO Unit`).
+- **What:** After `main` returns, whatever its result, the entry calls
+  `l2r_task_shutdown`: lean-runtime's `finish` sets Lean's shutdown flag,
+  runs the tasks still pending and waits for them (and for the io layer's
+  dedicated tasks); the generated final run (`l2r_run_pending_tasks`) then
+  finds nothing. Then it reports an uncaught exception (`uncaught
+  exception: <message>`, exit 1) or exits with the returned `UInt32` (0 for
+  `IO Unit`).
 - **Why:** `lean_finalize_task_manager` waits for the tasks before the
-  result is looked at.
-- **Where:** `Emit/Entry.lean`: `lowerEntry`; `Lower/Promises.lean`:
-  `taskDispatchFns`. See [../tasks/deferral.md](../tasks/deferral.md).
+  result is looked at (lean-runtime's glue item 2; LB-13 not reproduced:
+  a pool task enqueued after `main` still runs).
+- **Where:** `Emit/Entry.lean`: `lowerEntry`; `runtime/leanrt/src/task.rs`:
+  `shutdown`, `next_tag`; `Lower/Promises.lean`: `taskDispatchFns`. See
+  [../tasks/deferral.md](../tasks/deferral.md).
 - **Remove only if:** never.
 
 ### `main`'s argument list reads `argv` once
@@ -98,9 +102,9 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
   descriptor closed at startup is taken by the first of them, as natively.
   When they cannot be made, the program ends there with lean-runtime's
   `INTERNAL PANIC: Failed to initialize event loop: ...` (`fail_as_native`;
-  LB-30, LB-31). Signal watchers use the loop's signal pipe, which
-  `rt::signal_pipe` claims from lean-runtime
-  (`io::startup::claim_signal_pipe`, AR-17). The constructor is in the
+  LB-30, LB-31). Signal watchers use the loop's signal pipe and the
+  scheduler's event loop the epoll descriptor (lean-runtime's `sched`
+  takes them from `io::startup`). The constructor is in the
   plain `.init_array` section, so it runs after the prioritized ones:
   Rust std's (`.init_array.00099`, the arguments) and lean-runtime's
   `proc-title` constructor (`.init_array.00100`, AR-20), which keeps the
@@ -119,7 +123,7 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
   `RtFdStartupNoUring` passes (switch step 3).
 - **Where:** `runtime/leanrt/src/rt.rs`: `startup_descriptors`,
   `open_startup_descriptors`, `reserve_native_descriptors`,
-  `signal_pipe`, `is_rust_dev_null`; lean-runtime's `src/io/startup.rs`.
+  `is_rust_dev_null`; lean-runtime's `src/io/startup.rs`.
 - **Remove only if:** never.
 
 ### Exit finishes the streams as a native program does
@@ -144,8 +148,9 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
 
 - **What:** Every program defines `extern "C"` trampolines:
   `l2r_init_body`, `l2r_main_body`, `l2r_stderr_put_c` (the runtime's own
-  diagnostics), `l2r_task_run_one_c` and `l2r_task_walk_c` (the
-  scheduler); programs that create promises also define
+  diagnostics), `l2r_task_run_one_c` (a task's job runs the task through
+  it) and `l2r_task_walk_c` (no longer called: lean-runtime walks
+  dependents); programs that create promises also define
   `l2r_promise_drop_c` (a promise's last release). The runtime links some
   of them weakly.
 - **Why:** The runtime cannot name generated code; calling through Rust

@@ -72,8 +72,9 @@ things:</p>
   implementation-level functions can see them (<code>ptrAddrUnsafe</code>,
   <code>isExclusiveUnsafe</code>, <code>dbgTraceIfShared</code>). lean2rr does not copy native
   addresses.</li>
-<li><strong>Timing races between tasks.</strong> lean2rr runs all tasks on one thread. It
-  picks one schedule that native Lean can also produce.</li>
+<li><strong>Timing races between tasks.</strong> lean2rr runs all tasks on one thread,
+  on lean-runtime's scheduler. It picks one schedule that native Lean can
+  also produce.</li>
 <li><strong>The other known differences.</strong> <a href="differences.html">Known differences</a>
   lists them, grouped. Plan §10 has the full list.</li>
 </ul>
@@ -144,8 +145,8 @@ affected: the runtime implements all of them.</p>
 (github.com/QueClr/lean-runtime-rs, public). The crate holds Lean's runtime
 semantics, implemented once, in safe Rust; lean2rr takes the hash, string,
 float, fixed-width integer, libm, <code>Nat</code>/<code>Int</code>, array, panic and number-text
-rules and the IO from it so far, and keeps only its hot paths and the glue
-to its own representations. See <a href="runtime.html#the-shared-runtime-crate-plan">Runtime</a>.</p>
+rules, the IO, the task scheduler and the event loop from it, and keeps
+only its hot paths and the glue to its own representations. See <a href="runtime.html#the-shared-runtime-crate-plan">Runtime</a>.</p>
 <h2 id="status">Status</h2>
 <p>Counts with a † are taken from the repository when the site is built. The
 other results are the last recorded runs.</p>
@@ -159,7 +160,7 @@ other results are the last recorded runs.</p>
 <tbody>
 <tr>
 <td>Runtime test suite</td>
-<td>309 programs† (2 marked <code>.xfail</code>†); 231 of 231 identical to native Lean 4.34.0 at the last full regression (2026-10-03)</td>
+<td>319 programs† (1 marked <code>.xfail</code>†); 231 of 231 identical to native Lean 4.34.0 at the last full regression (2026-10-03)</td>
 </tr>
 <tr>
 <td>Classic corpus</td>
@@ -202,8 +203,8 @@ line yet:</p>
   overflow message of <code>Array.replicate</code>;</li>
 <li>plan §10's list of Lean runtime bugs that lean2rr does not reproduce
   (see <a href="differences.html#lean-bugs-we-do-not-reproduce">Known differences</a>);</li>
-<li>the move of the runtime's scheduler into <code>lean-runtime</code> (its IO moved
-  in switch step 3).</li>
+<li>the move of the runtime's scheduler and event loop into <code>lean-runtime</code>
+  (switch step 4; its IO moved in step 3).</li>
 </ul>
 <h2 id="the-pages">The pages</h2>
 <div class="cards">

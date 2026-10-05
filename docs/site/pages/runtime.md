@@ -65,35 +65,48 @@ and several optional passes help token reuse (see
 
 ## Tasks and the scheduler
 
-All tasks run on one thread. A task is *deferred*: it runs when its value is
-needed, when the running code blocks, or when `main` returns. This is one of
-the schedules that native Lean can produce. Why not run a task at once? A
-task can wait for something that `main` does later: run at creation, it
-would never finish.
+All tasks run on one thread, on the scheduler of the shared crate
+lean-runtime (its `sched` module). A task is *deferred*: it runs when its
+value is needed, when the running code blocks, or when `main` returns. This
+is one of the schedules that native Lean can produce. Why not run a task at
+once? A task can wait for something that `main` does later: run at
+creation, it would never finish.
 
 A pending task runs at the first of these events:
 
-1. `IO.wait` or `Task.get` of it, or a task that needs it runs;
-2. `IO.waitAny` on a list where no task has finished;
-3. the program polls it (`IO.hasFinished`) after time has passed;
-4. the running code blocks and a worker is free;
+1. `IO.wait` or `Task.get` of it, when a free worker would start it;
+2. the running code blocks and a worker is free;
+3. an output, when the task waits for 5 ms or more and a worker is free;
+4. the program polls it (`IO.hasFinished`) after time has passed;
 5. `main` returns: the queued tasks run in the order of Lean's task manager.
 
-**Contexts.** A thread that blocks natively lets other threads go on. The
-runtime copies that with *contexts*: `main`'s stack, and one stack per task
-the scheduler starts (1 GiB reserved, with a guard page). When the running
-context blocks, the scheduler chooses:
+**Contexts.** A thread that blocks natively lets other threads go on.
+lean-runtime copies that with *contexts*: `main`'s stack, and one stack per
+task that it starts (1 GiB, with a guard page). When the running context
+blocks, the scheduler chooses:
 
 {{svg:scheduler}}
 
-What one thread cannot do: a loop that polls a reference that another task
-sets, with no sleep and no output, never sees the change. A blocking system
-call (reading a pipe) blocks every task.
+**What lean2rr keeps.** The rules are lean-runtime's. lean2rr keeps the
+glue: the task objects (cells with a generated state), the code that
+connects them to the crate's task ids, the one `unsafe` step of a context
+switch (with its written proof), and the current standard streams of each
+context and of each emulated worker. The generated task code did not
+change.
+
+**References in a program with tasks.** lean2rr knows when it translates a
+program whether the program can make tasks: the program reaches an extern
+that makes a task or a promise (timers and sockets make promises too). Only
+then do reference operations do more than read or write the cell. Every
+1000th read lets the other tasks go on, so a loop that polls a reference set
+by another task ends. While `modify` holds a reference, the other tasks wait
+for its store, as in Lean 4.35. A program without tasks pays nothing: its
+code is the same, and the scheduler does not start.
 
 **Promises** are runtime objects that hold their task's cell. Dropping the
 last reference to an unresolved promise resolves it with `none`, as
-natively. **`Std.Sync`** mutexes and condition variables are runtime
-handles; a thread that waits blocks its context.
+natively. **`Std.Sync`** mutexes and condition variables are lean-runtime's
+objects in runtime handles; a thread that waits blocks its context.
 
 ## Input and output
 
@@ -111,12 +124,16 @@ handles; a thread that waits blocks its context.
   kind and message (Lean 4.34).
 - **Processes.** `IO.Process` follows `process.cpp`. The crate starts a
   child with `posix_spawn` and does what Lean's forked child does before
-  `execvp`. `IO.Process.output` reads both pipes together, because a
-  deferred task cannot read one pipe while `main` reads the other.
-- **The event loop** (`leanrt::net`) for timers, sockets, name resolution and
-  signals. It works, but it is not a target now.
-- **Standard streams per thread.** A task starts with the process's streams,
-  as a new native thread does.
+  `execvp`. `IO.Process.output` reads both pipes together.
+- **IO and tasks.** A read of an empty pipe, a write to a full pipe,
+  `flock` and the wait for a child let the other contexts run, as other
+  threads natively go on.
+- **The event loop** is lean-runtime's: timers, signals, sockets and name
+  resolution. It works, but it is not a target now.
+- **Standard streams per thread.** A pool task uses the streams of its
+  worker, and the worker keeps them for its next task, as a native worker
+  thread does. A dedicated task starts with the process's streams, as a new
+  native thread does.
 
 ## Startup
 
@@ -169,13 +186,15 @@ can use. lean2rr's `leanrt` moves into it step by step.
 
 Status (2026-10-04): lean-runtime has Lean's semantics (hashes, floats,
 fixed-width integers, strings, `libm`, `Nat` and `Int`, the array edge
-rules, panics, the text of numbers) and its IO (files, the standard
+rules, panics, the text of numbers), its IO (files, the standard
 streams, the file system, processes, the system queries, the startup
-descriptors, the exit). lean2rr uses it for all of them: the submodule
-`third_party/lean-runtime`, which `scripts/l2r.py` builds with cargo (the
-features `io` and `proc-title`) and links with `leanrt` ([runtime
+descriptors, the exit), the scheduler (tasks, promises, `Std.Sync`, the
+event loop, the stack-overflow report) and the networking. lean2rr uses it
+for all of them: the submodule `third_party/lean-runtime`, which
+`scripts/l2r.py` builds with cargo (the features `io`, `proc-title`,
+`sched`, `stack-overflow` and `net`) and links with `leanrt` ([runtime
 README](repo:runtime/README.md), "The shared crate lean-runtime"). lean2rr
 keeps its hot paths: the inline small-`Nat`/`Int` arithmetic, the
 one-block big numbers with GMP (behind lean-runtime's big-number traits),
 the one-block arrays' reads, writes and pushes, and the current standard
-streams, which `IO.println` reads at each call. The scheduler follows.
+streams, which `IO.println` reads at each call.

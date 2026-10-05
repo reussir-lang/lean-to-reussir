@@ -86,7 +86,15 @@ pub(crate) fn set_err(e: IoError) {
     l.failed = true;
     l.kind = kind_of(&e) as u8;
     l.errno = if matches!(e, UserError(_)) { USER_ERROR } else { error_code(&e) as i32 };
-    let (fname, details) = match e {
+    let (fname, details) = error_parts(e);
+    l.fname = fname.map(String::into_bytes);
+    l.details = Some(details.into_bytes());
+}
+
+/// An error's file name (if its kind has one) and details.
+fn error_parts(e: IoError) -> (Option<String>, String) {
+    use IoError::*;
+    match e {
         Interrupted(f, _, d) | NoFileOrDirectory(f, _, d) => (Some(f), d),
         AlreadyExists(f, _, d)
         | InvalidArgument(f, _, d)
@@ -105,9 +113,14 @@ pub(crate) fn set_err(e: IoError) {
         | TimeExpired(_, d)
         | UserError(d) => (None, d),
         UnexpectedEof => (None, String::new()),
-    };
-    l.fname = fname.map(String::into_bytes);
-    l.details = Some(details.into_bytes());
+    }
+}
+
+/// An error's file name (empty where it has none) and details, as bytes
+/// (for lean2rr's shim, which builds the `IO.Error` itself: `net`).
+pub(crate) fn error_texts(e: IoError) -> (Vec<u8>, Vec<u8>) {
+    let (f, d) = error_parts(e);
+    (f.unwrap_or_default().into_bytes(), d.into_bytes())
 }
 
 /// Records `r`'s outcome; its value on success.
@@ -299,13 +312,24 @@ impl Drop for FileHandle {
             // reaches it, in Lean's order (`crate::drop`).
             let moved = Box::new(self.h.take());
             crate::drop::defer(Box::into_raw(moved) as usize, close_deferred);
+            return;
         }
+        close(self.h.take());
     }
 }
 
 unsafe fn close_deferred(p: usize) -> bool {
-    drop(Box::from_raw(p as *mut Option<Handle>));
+    close(*Box::from_raw(p as *mut Option<Handle>));
     true
+}
+
+/// Drop a handle (the last clone closes its stream, `fclose`) in a
+/// no-suspend scope of lean-runtime's scheduler (docs/sched.md, "The glue",
+/// item 11): its flush never waits for a full pipe (the rest goes to a
+/// writer thread), so no context is suspended inside a free or a drop.
+fn close(h: Option<Handle>) {
+    let _scope = lean_runtime::sched::no_suspend();
+    drop(h);
 }
 
 #[inline(always)]

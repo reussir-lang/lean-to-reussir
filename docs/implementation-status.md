@@ -38,7 +38,7 @@ same standard output, standard error and exit code.
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (309 programs, `tests/runtime`) | at its last full run (branch `conv-liveness` 0fc9aa3 on dev 090a692, 2026-10-04), 303 of 306 identical to native Lean 4.34.0, six of them through expectation files where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`, `RtStartupFdExhausted`; plan §10, "Runtime: Lean bugs we do not reproduce"); since then `RtCseFnResult` also passes through expectation files (its trace prints once natively and twice through lean2rr, which Lean allows: plan §10, "Merging after erasure"); 2 expected failures: `RtTaskRunawayPureStarted` (until lean2rr adopts lean-runtime's scheduler), `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve; `RtLiftedLimits` and `RtInternalPanic` compare each side with its own expectation files where lean2rr lifts a limit of Lean's runtime (plan §10, LB-04 to LB-12). lean-runtime's own program cases of its IO areas (io, process, streams, temp, uvsys, time) through lean2rr's builds: 85 of 89 as expected (`startup_fd_limit` since lean2rr's startup runs Init's `IO.stdGenRef` initializer, as natively), the other 4 as before the switch: `lock_blocked`, `lock_exit`, `exit_while_reading`, `exit_while_writing_stalled` need IO that waits beside running tasks, fixed by step 4 (lean2rr adopting lean-runtime's `sched`) |
+| Runtime test suite (319 programs, `tests/runtime`) | at its last full run (branch `lean-runtime-step4` on dev eb0ea40, lean-runtime a5d1c51, 2026-10-05), 318 of 319 identical to native Lean 4.34.0, nine of them through expectation files: eight where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`, `RtStartupFdExhausted`, `RtRefSetDuringModify`, `RtRefSwapDuringModify`; plan §10, "Runtime: Lean bugs we do not reproduce"), and `RtCseFnResult` (its trace prints once natively and twice through lean2rr, which Lean allows: plan §10, "Merging after erasure"); 1 expected failure: `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve; `RtLiftedLimits` and `RtInternalPanic` compare each side with its own expectation files where lean2rr lifts a limit of Lean's runtime (plan §10, LB-04 to LB-12). lean-runtime's own program cases through lean2rr's builds: of its IO areas (io, process, streams, temp, uvsys, time) 85 of 89 as expected at step 3, and the other 4 (`lock_blocked`, `lock_exit`, `exit_while_reading`, `exit_while_writing_stalled`) pass since step 4 (lean2rr's IO waits beside running tasks), as `lock_during_read` does; of its task areas (tasks, sync, refs, taskio, uvloop, net) 155 of 155 |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
@@ -316,15 +316,22 @@ exceptions listed further down:
 
 ### How tasks run
 
-Tasks run on one thread: there is no parallelism. A task runs when its
-value is needed, when the running code blocks (sleeping, waiting for a
-lock, a promise, a socket), or when `main` returns; contexts switch at
-those points and at output, in the order native Lean's scheduler would
-have used. Programs get the same output as natively as long as their
-output does not depend on timing races. What cannot match: a loop that
-polls shared state another task sets, without sleeping or printing, never
-sees the change; a blocking system call (reading a pipe, waiting for a
-child process) blocks every task.
+Tasks run on one thread, on the shared crate lean-runtime's scheduler
+(switch step 4): there is no parallelism. A task runs when its value is
+needed, when the running code blocks (sleeping, waiting for a lock, a
+promise, a socket, an empty pipe), or when `main` returns; contexts switch
+at those points, at output and at polling points (task-state questions,
+clock reads, every 1000th reference read), in an order native Lean's
+scheduler could have used. In a program that creates tasks (lean2rr
+decides it at translation time, from the externs the program reaches) a
+reference's `get`, `set` and `swap` wait while a `modify` of it is blocked
+(Lean 4.35's rule); a program without tasks pays nothing for any of this:
+its code is the same, and the scheduler does not start. Programs get the
+same output as natively as long as their output does not depend on timing
+races. A pool task's standard streams are its emulated worker's, kept from
+one task to the next, and a task's `sync` dependents see the streams it
+left, as natively. lean2rr's generated task code is the same as before
+the switch: its task primitives call lean-runtime.
 
 ### Memory
 
@@ -375,7 +382,13 @@ with examples, is §10 of the translation plan.
 - **Lean runtime bugs not reproduced** (plan §10, "Runtime: Lean bugs we
   do not reproduce", from lean-runtime's docs/lean-bugs.md): an
   `IO.Ref.set` from a task is never undone by a concurrent `get` (natively
-  it can be, LB-01, fixed in Lean 4.35); a read of at
+  it can be, LB-01, fixed in Lean 4.35), nor overwritten by a blocked
+  `modify`'s store (LB-01's other half; a `swap` then gets modify's value,
+  LB-18); a pool task enqueued
+  after `main` returned still runs (LB-13); timers, signal watchers and
+  sockets follow lean-runtime's fixes of LB-19 to LB-28, LB-33 and
+  LB-34; a waiter of a
+  dropped promise's `result!` walk wakes (LB-32); a read of at
   least one buffer right after output on the same handle writes the
   pending output first, where natively glibc drops it (LB-02); an error
   without a file name (`getCurrentDir` after its directory was removed) is
@@ -609,8 +622,8 @@ also works with an unpatched Reussir (except that its runtime needs patch
 0014).
 Two parts of Reussir that its author offered (LLVM coroutine bindings,
 dynamic-extent arrays) are not needed: lean2rr's tasks need stackful
-contexts, which its runtime has, and Lean arrays are growable, which
-dynamic-extent arrays are not.
+contexts, which lean-runtime's scheduler has (corosensei coroutines), and
+Lean arrays are growable, which dynamic-extent arrays are not.
 
 ## Possible future work
 

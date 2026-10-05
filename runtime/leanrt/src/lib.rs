@@ -8,8 +8,11 @@
 //! global state: the last-error slot, once-cells, and panic settings.
 //! Lean's runtime behaviour itself is the shared crate lean-runtime's
 //! (`lean_runtime`): its `semantics` (hashes, strings, floats, numbers,
-//! panics) and its `io` (files, streams, processes, the system, the exit);
-//! the modules here convert lean2rr's values to its views and back.
+//! panics), its `io` (files, streams, processes, the system, the exit), its
+//! `sched` (tasks, promises, `Std.Sync`, the event loop, timers, signals,
+//! the stack-overflow report) and its `net` (sockets, name resolution); the
+//! modules here convert lean2rr's values to its views and back, and are the
+//! glue its scheduler asks of a translator (`sched`, `task`).
 //!
 //! Small hot functions are `#[inline]` so they are instantiated into the
 //! textures (and can be inlined into Reussir code); slow paths are
@@ -28,7 +31,6 @@ extern crate reussir_rt;
 pub mod alloc;
 pub mod array;
 pub mod big;
-pub mod coro;
 pub mod drop;
 pub mod float;
 pub mod fs;
@@ -39,6 +41,7 @@ pub mod net;
 pub mod once;
 pub mod persist;
 pub mod proc;
+pub mod refs;
 pub mod rt;
 pub mod sched;
 pub mod string;
@@ -170,6 +173,11 @@ pub extern "C" fn panic_text(msg: LStr) -> LStr {
     let plan = sem_panic::panic_fn_plan(panic_settings());
     let t = panic_lines(msg.utf8(), plan);
     if plan.stream == PanicStream::ProcessStderr {
+        // An output: an effect point first (the prelude writes the other
+        // stream's lines through the current stderr's `putStr`, one too).
+        if plan.print {
+            sched::effect();
+        }
         io::flush_stdout();
         io::eprint(&t);
     }
@@ -221,20 +229,44 @@ pub fn uncaught_exception<M: string::Utf8 + ?Sized>(msg: &M) -> ! {
     io::exit(sem_panic::PANIC_EXIT_STATUS)
 }
 
-/// `Option.getOrBlock!` on `none` (`Promise.result!` of a dropped promise):
-/// a forced panic message (`lean_panic_impl` with `force_stderr`: to
-/// `std::cerr`, so stdout is flushed first), then the running context
-/// blocks forever, as natively the calling thread does (the other tasks
-/// and `main` go on).
+/// A Lean panic of the runtime (`lean_panic(msg, force_stderr)`), by
+/// lean-runtime's `lean_panic_plan`: an effect point, as for any output; the
+/// lines on Lean's current stderr stream (`io_eprintln`, which
+/// `IO.setStderr` redirects: the program's `l2r_stderr_put`), or, forced or
+/// when the process is about to end, on the process's stderr (`std::cerr`:
+/// C's `stdout` flushed first); then the abort or the exit the plan says;
+/// otherwise it returns and the program goes on. Used for `Task.get` in a
+/// `sync := true` task (lean-runtime's `GET_IN_SYNC_TASK`) and
+/// `Promise.result!` of a dropped promise (`PROMISE_DROPPED`, forced).
 #[inline(never)]
-pub fn promise_dropped() -> ! {
-    let plan = sem_panic::panic_fn_plan(panic_settings());
-    io::flush_stdout();
-    io::eprint(&panic_lines(b"PANIC: Promise.result!: promise has been dropped without ever being resolved", plan));
+pub fn lean_panic(msg: &[u8], force_stderr: bool) {
+    let plan = sem_panic::lean_panic_plan(panic_settings(), force_stderr);
+    if plan.print {
+        sched::effect();
+        let t = panic_lines(msg, plan);
+        match plan.stream {
+            PanicStream::LeanStderr => io::diag_put(string::from_bytes(&t)),
+            PanicStream::ProcessStderr => {
+                io::flush_stdout();
+                io::eprint(&t);
+            }
+        }
+    }
     if plan.end != PanicEnd::Return {
         panic_end(plan.end)
     }
-    task::hang()
+}
+
+/// `Option.getOrBlock!` on `none` (`Promise.result!` of a dropped promise):
+/// lean-runtime's `option_get_or_block`, which reports the forced panic
+/// message (`lean_panic` above, `force_stderr`), wakes the waiters of the
+/// walks in progress on this context (LB-32) and then blocks the running
+/// context forever, as natively the calling thread sleeps forever (the
+/// other tasks and `main` go on).
+#[inline(never)]
+pub fn promise_dropped() -> ! {
+    let () = lean_runtime::sched::option_get_or_block(None, |msg| lean_panic(msg.as_bytes(), true));
+    unreachable!("lean-runtime's option_get_or_block returned on none")
 }
 
 #[cfg(test)]

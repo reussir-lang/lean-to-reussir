@@ -569,7 +569,7 @@ partial def genPersist (t : RR.Ty) (gen : IO.Ref PersistGen) : LowerM (Option St
       else if let some (e, rk) := (← get).refInfos[n]? then
         -- A reference: its value (as native Lean, which pushes `m_value`),
         -- kept as a thunk's.
-        let some get ← refCellOp "get" (.var "v") e rk e none | pure unchanged
+        let some get ← refCellOpPlain "get" (.var "v") e rk e none | pure unchanged
         let rest ← each #[("x", e)] (keep := true)
         pure ⟨#[("x", some e, get)] ++ rest.lets, rest.result⟩
       else

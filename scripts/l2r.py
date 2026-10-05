@@ -121,13 +121,18 @@ LEANRT_FLAGS = os.environ.get("L2R_LEANRT_RUSTFLAGS", "").split()
 
 # The features of lean-runtime lean2rr builds: `io` (leanrt's files,
 # streams, processes, system queries, startup and exit glue call
-# lean_runtime::io) and `proc-title` (`setProcessTitle` writes the title into
+# lean_runtime::io), `proc-title` (`setProcessTitle` writes the title into
 # the arguments' memory, as libuv does: the crate's ELF constructor keeps that
-# memory). Not `sched`: leanrt keeps its own task scheduler for now.
-# L2R_LEAN_RUNTIME_FEATURES (comma-separated) adds others, to try a
-# lean-runtime branch.
+# memory), `sched` (the task scheduler: tasks, promises, Std.Sync, the event
+# loop with Std.Internal.UV's timers and signals; leanrt keeps the glue),
+# `stack-overflow` (Lean's stack-overflow report for the scheduler's contexts
+# and lean2rr's threads; named on its own, as lean-runtime's newer branches
+# no longer turn it on with `sched`) and `net` (Std.Internal.UV's sockets
+# and name resolution on the same event loop). L2R_LEAN_RUNTIME_FEATURES
+# (comma-separated) adds others, to try a lean-runtime branch.
+LEAN_RUNTIME_BASE_FEATURES = ["io", "proc-title", "sched", "stack-overflow", "net"]
 LEAN_RUNTIME_EXTRA_FEATURES = [f.strip() for f in os.environ.get("L2R_LEAN_RUNTIME_FEATURES", "").split(",") if f.strip()]
-LEAN_RUNTIME_FEATURES = ["io", "proc-title"] + [f for f in LEAN_RUNTIME_EXTRA_FEATURES if f not in ("io", "proc-title")]
+LEAN_RUNTIME_FEATURES = LEAN_RUNTIME_BASE_FEATURES + [f for f in LEAN_RUNTIME_EXTRA_FEATURES if f not in LEAN_RUNTIME_BASE_FEATURES]
 
 
 def leanrt_out():
@@ -229,8 +234,8 @@ def lean_runtime_manifest():
 
 
 def build_lean_runtime_cargo(out, cargo):
-    """lean-runtime with the features lean2rr enables (`io` and
-    `proc-title`, whose dependencies have build scripts): the pinned
+    """lean-runtime with the features lean2rr enables
+    (`LEAN_RUNTIME_BASE_FEATURES`, whose dependencies have build scripts): the pinned
     toolchain's cargo builds it
     offline (`--offline --locked`) from the crates in cargo's registry cache,
     at the versions its committed Cargo.lock names (so nothing is written in

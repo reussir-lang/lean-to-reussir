@@ -6,50 +6,51 @@ import Std.Time.Zoned.Database.Windows
 /-!
 # lean2rr's shim for `Std.Internal.UV`
 
-Native Lean implements `Std.Internal.UV` (timers, TCP and UDP sockets, name
-resolution, signals, and `Std.Net`'s address conversions) in C over libuv
-(`src/runtime/uv/*.cpp`), building Lean values (`IO.Promise`,
-`Except IO.Error ...`, `SocketAddress`) in C. lean2rr's runtime cannot build
-Lean values, so these externs are implemented here, in Lean, over primitives
-of the runtime's event loop (`runtime/leanrt/src/net.rs`) that take and
+Native Lean implements `Std.Internal.UV` (the loop, timers, signals, TCP
+and UDP sockets, name resolution, `Std.Net`'s address conversions and the
+system queries) in C over libuv (`src/runtime/uv/*.cpp`), building Lean
+values (`IO.Promise`, `Except IO.Error ...`, `SocketAddress`) in C. lean2rr's
+runtime runs these externs with the shared crate lean-runtime (its event
+loop, timers and signals, `sched::uv`; its sockets, name resolution and
+interfaces, `net`; its system queries, `io::uvsys`), whose rules (libuv's
+state machines and system calls, the checks, the errors, when a promise
+resolves) are the only ones; but it cannot build Lean values, so these
+externs are implemented here, in Lean, over primitives that take and
 return plain values (numbers, strings, byte arrays, runtime handles,
-promises). Each definition is exported under the extern's C symbol, so
-lean2rr, which compiles an extern's `@[export]` implementation instead of
-calling the runtime (translation plan §5.8), compiles these with the
-program. lean2rr loads this module next to the program's when it is built
-(`LEAN_PATH`), and treats it as part of the toolchain (no startup work).
+promises: `runtime/leanrt/src/net.rs`, `sys.rs`). This file only turns
+those values into Lean's. Each definition is exported under the extern's C
+symbol, so lean2rr, which compiles an extern's `@[export]` implementation
+instead of calling the runtime (translation plan §5.8), compiles these with
+the program. lean2rr loads this module next to the program's when it is
+built (`LEAN_PATH`), and treats it as part of the toolchain (no startup
+work).
 
-Each definition follows the C function of the same symbol: the same checks
-in the same order, the same errors (`lean_decode_uv_error`: classified by
-libuv's code, `uv_strerror`'s message, and since Lean 4.34 the positive
-errno, `-code`, as the error number), the same promises (resolved at
-once or later, the same values).
+An operation's outcome is an `Op`: its start's error (the extern throws
+it), and, for an operation that completes later, its completion's error
+or value. An operation that completes later works the same way
+everywhere: a promise `r` (of `Unit`) goes to the runtime with the
+operation; when the operation completes, the runtime stores its outcome in
+its `Op` and drops its reference to `r`, which resolves it and runs the
+continuation attached to it here (`whenDone`), a `sync` dependent that
+resolves the promise the program sees, as libuv's callback does natively
+(see `net.rs`).
 
 The shim also replaces a few Lean definitions whose native behaviour
 depends on Lean's reference counting in a way the translation does not
 reproduce (the end of this file).
-
-An operation that completes later works the same way everywhere: a promise
-`r` (of `Unit`) goes to the runtime with the operation; when the operation
-completes, the runtime stores its outcome in its `Op` and drops `r`, which
-resolves it and runs the continuation attached to it here (`whenDone`), a
-`sync` dependent that resolves the promise the program sees, as libuv's
-callback does natively (see `net.rs`).
 -/
 
 namespace L2RShim
 
 open Std.Internal.UV Std.Net
 
-/-- An operation of the runtime's event loop (`leanrt::net::OpSt`): its
-outcome once it is done. -/
+/-- An operation's outcome (`leanrt::net::OpSt`). -/
 opaque OpImpl : NonemptyType.{0}
 def Op : Type := OpImpl.type
 instance : Nonempty Op := OpImpl.property
 
 /-! ## Primitives (`runtime/prelude.rr`, `l2r_shim_*`) -/
 
-@[extern "lean_shim_op_done"] opaque opDone (o : @& Op) : BaseIO Bool
 @[extern "lean_shim_op_canceled"] opaque opCanceled (o : @& Op) : BaseIO Bool
 @[extern "lean_shim_op_code"] opaque opCode (o : @& Op) : BaseIO UInt32
 @[extern "lean_shim_op_sync_err"] opaque opSyncErr (o : @& Op) : BaseIO UInt32
@@ -59,52 +60,64 @@ instance : Nonempty Op := OpImpl.property
 @[extern "lean_shim_op_str_count"] opaque opStrCount (o : @& Op) : BaseIO UInt32
 @[extern "lean_shim_op_has_handle"] opaque opHasHandle (o : @& Op) : BaseIO Bool
 @[extern "lean_shim_op_handle"] opaque opSocket (o : @& Op) : BaseIO TCP.Socket
+/-- An error of the operation, its start's (`which` 0) or its completion's
+(1): the `IO.Error` builder (`leanrt::fs::kind_of`; `0xFFFFFFFF`: no
+error), its code, file name and details. -/
+@[extern "lean_shim_op_err_kind"] opaque opErrKind (o : @& Op) (which : UInt8) : BaseIO UInt32
+@[extern "lean_shim_op_err_code"] opaque opErrCode (o : @& Op) (which : UInt8) : BaseIO UInt32
+@[extern "lean_shim_op_err_file"] opaque opErrFile (o : @& Op) (which : UInt8) : BaseIO String
+@[extern "lean_shim_op_err_details"] opaque opErrDetails (o : @& Op) (which : UInt8) : BaseIO String
+/-- `Timer.next`/`Signal.next`: whether the loop took the promise passed;
+otherwise the one it already had. -/
+@[extern "lean_shim_op_fresh"] opaque opFresh (o : @& Op) : BaseIO Bool
+@[extern "lean_shim_op_promise"] opaque opTimerPromise (o : @& Op) : BaseIO (IO.Promise Unit)
+@[extern "lean_shim_op_promise"] opaque opSignalPromise (o : @& Op) : BaseIO (IO.Promise Int)
 
-/-- `IO.Error` kind of a libuv code (`leanrt::net::uv_error_kind`). -/
+/-- `IO.Error` kind of a libuv code (`leanrt::net::uv_error_kind`: the
+system queries report libuv codes). -/
 @[extern "lean_shim_uv_kind"] opaque uvKind (code : UInt32) : UInt32
 /-- `uv_strerror`. -/
 @[extern "lean_shim_uv_strerror"] opaque uvStrerror (code : UInt32) : String
 
+@[extern "lean_shim_loop_configure"] opaque primLoopConfigure (accumulate blockSigProf : Bool) : BaseIO Unit
+
 @[extern "lean_shim_timer_new"] opaque primTimerNew (timeout : UInt64) (repeating : Bool) : BaseIO Timer
-@[extern "lean_shim_signal_new"] opaque primSignalNew (signum : UInt32) (repeating : Bool) : BaseIO Signal
-@[extern "lean_shim_timer_next_kind"] opaque primTimerNextKind (t : @& Timer) : BaseIO UInt8
-@[extern "lean_shim_timer_next_kind"] opaque primSignalNextKind (t : @& Signal) : BaseIO UInt8
-@[extern "lean_shim_timer_promise"] opaque primTimerPromise (t : @& Timer) : BaseIO (IO.Promise Unit)
-@[extern "lean_shim_timer_promise"] opaque primSignalPromise (t : @& Signal) : BaseIO (IO.Promise Int)
-@[extern "lean_shim_timer_start"] opaque primTimerStart (t : @& Timer) (p r : IO.Promise Unit) : BaseIO Op
-@[extern "lean_shim_timer_start"] opaque primSignalStart (t : @& Signal) (p : IO.Promise Int) (r : IO.Promise Unit) : BaseIO Op
-@[extern "lean_shim_timer_set"] opaque primTimerSet (t : @& Timer) (p r : IO.Promise Unit) : BaseIO Op
-@[extern "lean_shim_timer_set"] opaque primSignalSet (t : @& Signal) (p : IO.Promise Int) (r : IO.Promise Unit) : BaseIO Op
+@[extern "lean_shim_timer_next"] opaque primTimerNext (t : @& Timer) (p r : IO.Promise Unit) : BaseIO Op
 /-- 0 `reset`, 1 `stop`, 2 `cancel`. -/
 @[extern "lean_shim_timer_ctl"] opaque primTimerCtl (t : @& Timer) (which : UInt8) : BaseIO Unit
-@[extern "lean_shim_timer_ctl"] opaque primSignalCtl (t : @& Signal) (which : UInt8) : BaseIO Unit
+@[extern "lean_shim_signal_new"] opaque primSignalNew (signum : UInt32) (repeating : Bool) : BaseIO Signal
+@[extern "lean_shim_signal_next"] opaque primSignalNext (s : @& Signal) (p : IO.Promise Int) (r : IO.Promise Unit) : BaseIO Op
+/-- 1 `stop`, 2 `cancel`. -/
+@[extern "lean_shim_signal_ctl"] opaque primSignalCtl (s : @& Signal) (which : UInt8) : BaseIO Op
 
 @[extern "lean_shim_tcp_new"] opaque primTcpNew : BaseIO TCP.Socket
-@[extern "lean_shim_tcp_bind"] opaque primTcpBind (s : @& TCP.Socket) (addr : @& ByteArray) : BaseIO UInt32
-@[extern "lean_shim_tcp_listen"] opaque primTcpListen (s : @& TCP.Socket) (backlog : UInt32) : BaseIO UInt32
+@[extern "lean_shim_tcp_bind"] opaque primTcpBind (s : @& TCP.Socket) (addr : @& ByteArray) : BaseIO Op
+@[extern "lean_shim_tcp_listen"] opaque primTcpListen (s : @& TCP.Socket) (backlog : UInt32) : BaseIO Op
 @[extern "lean_shim_tcp_connect"] opaque primTcpConnect (s : @& TCP.Socket) (addr : @& ByteArray) (r : IO.Promise Unit) : BaseIO Op
-@[extern "lean_shim_tcp_send"] opaque primTcpSend (s : @& TCP.Socket) (data : ByteArray) (r : IO.Promise Unit) : BaseIO Op
-@[extern "lean_shim_sock_recv"] opaque primTcpRecv (s : @& TCP.Socket) (size : UInt64) (r : IO.Promise Unit) : BaseIO Op
-@[extern "lean_shim_sock_cancel_recv"] opaque primTcpCancelRecv (s : @& TCP.Socket) : BaseIO Unit
+@[extern "lean_shim_tcp_send"] opaque primTcpSend (s : @& TCP.Socket) (data : Array ByteArray) (r : IO.Promise Unit) : BaseIO Op
+@[extern "lean_shim_tcp_recv"] opaque primTcpRecv (s : @& TCP.Socket) (size : UInt64) (r : IO.Promise Unit) : BaseIO Op
+@[extern "lean_shim_tcp_wait_readable"] opaque primTcpWaitReadable (s : @& TCP.Socket) (r : IO.Promise Unit) : BaseIO Op
+@[extern "lean_shim_tcp_cancel_recv"] opaque primTcpCancelRecv (s : @& TCP.Socket) : BaseIO Unit
 @[extern "lean_shim_tcp_accept"] opaque primTcpAccept (s : @& TCP.Socket) (r : IO.Promise Unit) : BaseIO Op
 @[extern "lean_shim_tcp_try_accept"] opaque primTcpTryAccept (s : @& TCP.Socket) : BaseIO Op
 @[extern "lean_shim_tcp_cancel_accept"] opaque primTcpCancelAccept (s : @& TCP.Socket) : BaseIO Unit
 @[extern "lean_shim_tcp_shutdown"] opaque primTcpShutdown (s : @& TCP.Socket) (r : IO.Promise Unit) : BaseIO Op
-@[extern "lean_shim_sock_name"] opaque primTcpName (s : @& TCP.Socket) (peer : Bool) : BaseIO Op
-@[extern "lean_shim_tcp_nodelay"] opaque primTcpNoDelay (s : @& TCP.Socket) : BaseIO UInt32
-@[extern "lean_shim_tcp_keepalive"] opaque primTcpKeepAlive (s : @& TCP.Socket) (enable delay : UInt32) : BaseIO UInt32
+@[extern "lean_shim_tcp_name"] opaque primTcpName (s : @& TCP.Socket) (peer : Bool) : BaseIO Op
+@[extern "lean_shim_tcp_nodelay"] opaque primTcpNoDelay (s : @& TCP.Socket) : BaseIO Op
+@[extern "lean_shim_tcp_keepalive"] opaque primTcpKeepAlive (s : @& TCP.Socket) (enable delay : UInt32) : BaseIO Op
 
 @[extern "lean_shim_udp_new"] opaque primUdpNew : BaseIO UDP.Socket
-@[extern "lean_shim_udp_bind"] opaque primUdpBind (s : @& UDP.Socket) (addr : @& ByteArray) : BaseIO UInt32
-@[extern "lean_shim_udp_connect"] opaque primUdpConnect (s : @& UDP.Socket) (addr : @& ByteArray) : BaseIO UInt32
-@[extern "lean_shim_udp_send"] opaque primUdpSend (s : @& UDP.Socket) (data : ByteArray) (addr : @& ByteArray) (r : IO.Promise Unit) : BaseIO Op
-@[extern "lean_shim_sock_recv"] opaque primUdpRecv (s : @& UDP.Socket) (size : UInt64) (r : IO.Promise Unit) : BaseIO Op
-@[extern "lean_shim_sock_cancel_recv"] opaque primUdpCancelRecv (s : @& UDP.Socket) : BaseIO Unit
-@[extern "lean_shim_sock_name"] opaque primUdpName (s : @& UDP.Socket) (peer : Bool) : BaseIO Op
+@[extern "lean_shim_udp_bind"] opaque primUdpBind (s : @& UDP.Socket) (addr : @& ByteArray) : BaseIO Op
+@[extern "lean_shim_udp_connect"] opaque primUdpConnect (s : @& UDP.Socket) (addr : @& ByteArray) : BaseIO Op
+@[extern "lean_shim_udp_send"] opaque primUdpSend (s : @& UDP.Socket) (data : Array ByteArray) (addr : @& ByteArray) (r : IO.Promise Unit) : BaseIO Op
+@[extern "lean_shim_udp_recv"] opaque primUdpRecv (s : @& UDP.Socket) (size : UInt64) (r : IO.Promise Unit) : BaseIO Op
+@[extern "lean_shim_udp_wait_readable"] opaque primUdpWaitReadable (s : @& UDP.Socket) (r : IO.Promise Unit) : BaseIO Op
+@[extern "lean_shim_udp_cancel_recv"] opaque primUdpCancelRecv (s : @& UDP.Socket) : BaseIO Unit
+@[extern "lean_shim_udp_name"] opaque primUdpName (s : @& UDP.Socket) (peer : Bool) : BaseIO Op
 /-- 0 `setBroadcast`, 1 `setMulticastLoop`, 2 `setMulticastTTL`, 3 `setTTL`. -/
-@[extern "lean_shim_udp_option"] opaque primUdpOption (s : @& UDP.Socket) (which : UInt8) (v : UInt32) : BaseIO UInt32
-@[extern "lean_shim_udp_membership"] opaque primUdpMembership (s : @& UDP.Socket) (mcast iface : @& ByteArray) (membership : UInt8) : BaseIO UInt32
-@[extern "lean_shim_udp_multicast_interface"] opaque primUdpMulticastInterface (s : @& UDP.Socket) (iface : @& ByteArray) : BaseIO UInt32
+@[extern "lean_shim_udp_option"] opaque primUdpOption (s : @& UDP.Socket) (which : UInt8) (v : UInt32) : BaseIO Op
+@[extern "lean_shim_udp_membership"] opaque primUdpMembership (s : @& UDP.Socket) (mcast iface : @& ByteArray) (membership : UInt8) : BaseIO Op
+@[extern "lean_shim_udp_multicast_interface"] opaque primUdpMulticastInterface (s : @& UDP.Socket) (iface : @& ByteArray) : BaseIO Op
 
 @[extern "lean_shim_dns_get_info"] opaque primDnsGetInfo (host service : @& String) (family : UInt8) (r : IO.Promise Unit) : BaseIO Op
 @[extern "lean_shim_dns_get_name"] opaque primDnsGetName (addr : @& ByteArray) (r : IO.Promise Unit) : BaseIO Op
@@ -114,65 +127,76 @@ is not an address. -/
 @[extern "lean_shim_pton"] opaque primPton (s : @& String) (v6 : Bool) : ByteArray
 /-- `uv_inet_ntop` of an address (the family, 4 or 6, then its bytes). -/
 @[extern "lean_shim_ntop"] opaque primNtop (a : @& ByteArray) : String
-/-- `uv_interface_addresses`, kept by the runtime: their number (or, above
-2^31, a libuv error), then each one's fields (`primIfaceName`, ...). -/
+/-- `uv_interface_addresses`: per interface address, its name (`opStr`)
+and 41 bytes (`interfaceAddresses`). -/
 @[extern "lean_shim_ifaces"] opaque primIfaces : BaseIO Op
 
 /-! ## Errors -/
 
-/-- Whether an operation's code is a libuv error. -/
-def isErr (c : UInt32) : Bool := c ≥ 0x80000000
+/-- The `IO.Error` built by the `lean_mk_io_error_*` builder number `kind`
+(the order of lean2rr's `ioErrorBuilderSyms`, `leanrt::fs::kind_of`) from
+the error's code, file name and details, as Lean's `decode_io_error` and
+`lean_decode_uv_error` build it. -/
+def ioErrorOf (kind code : UInt32) (file details : String) : IO.Error :=
+  match kind with
+  | 1 => .mkInterrupted file code details
+  | 2 => .mkInvalidArgument code details
+  | 3 => .mkInvalidArgumentFile file code details
+  | 4 => .mkNoFileOrDirectory file code details
+  | 5 => .mkPermissionDenied code details
+  | 6 => .mkPermissionDeniedFile file code details
+  | 7 => .mkResourceExhausted code details
+  | 8 => .mkResourceExhaustedFile file code details
+  | 9 => .mkInappropriateType code details
+  | 10 => .mkInappropriateTypeFile file code details
+  | 11 => .mkNoSuchThing code details
+  | 12 => .mkNoSuchThingFile file code details
+  | 13 => .mkAlreadyExists code details
+  | 14 => .mkAlreadyExistsFile file code details
+  | 15 => .mkHardwareFault code details
+  | 16 => .mkUnsatisfiedConstraints code details
+  | 17 => .mkIllegalOperation code details
+  | 18 => .mkResourceVanished code details
+  | 19 => .mkProtocolError code details
+  | 20 => .mkTimeExpired code details
+  | 21 => .mkResourceBusy code details
+  | 22 => .mkUnsupportedOperation code details
+  | 23 => .userError details
+  | _ => .mkOtherError code details
 
-/-- `UV_EOF`. -/
-def uvEOF : UInt32 := (0 : UInt32) - 4095
-/-- `UV_ENOBUFS`. -/
-def uvENOBUFS : UInt32 := (0 : UInt32) - 105
+/-- The error of operation `o`'s start (`which` 0) or completion (1). -/
+def opError (o : Op) (which : UInt8) : BaseIO (Option IO.Error) := do
+  let k ← opErrKind o which
+  if k == 0xFFFFFFFF then return none
+  return some (ioErrorOf k (← opErrCode o which) (← opErrFile o which) (← opErrDetails o which))
+
+/-- An operation's start failed: throw its error. -/
+def checkStart (o : Op) : IO Unit := do
+  if let some e ← opError o 0 then throw e
+
+/-- The outcome of a completed operation: its error, or `ok`'s value. -/
+def opResult (o : Op) (ok : BaseIO α) : BaseIO (Except IO.Error α) := do
+  match ← opError o 1 with
+  | some e => return .error e
+  | none => return .ok (← ok)
 
 /-- The error number `lean_decode_uv_error` stores for libuv code `code`:
 since Lean 4.34, `-code`, the positive errno (`2` for `UV_ENOENT`). -/
 def uvErrno (code : UInt32) : UInt32 := 0 - code
 
-/-- `lean_decode_uv_error(code, nullptr)`: classified by libuv's code, with
-`uv_strerror`'s message and the errno `uvErrno code`. -/
+/-- `lean_decode_uv_error(code, nullptr)` of the system queries, which
+report libuv codes: the builder and the message are lean-runtime's
+(`uvKind`, `uvStrerror`), with the errno `uvErrno code`. -/
 def uvError (code : UInt32) : IO.Error :=
-  let d := uvStrerror code
-  let e := uvErrno code
-  match uvKind code with
-  | 1 => .mkInterrupted "" e d
-  | 2 => .mkInvalidArgument e d
-  | 4 => .mkNoFileOrDirectory "" e d
-  | 5 => .mkPermissionDenied e d
-  | 7 => .mkResourceExhausted e d
-  | 9 => .mkInappropriateType e d
-  | 11 => .mkNoSuchThing e d
-  | 13 => .mkAlreadyExists e d
-  | 15 => .mkHardwareFault e d
-  | 16 => .mkUnsatisfiedConstraints e d
-  | 17 => .mkIllegalOperation e d
-  | 18 => .mkResourceVanished e d
-  | 19 => .mkProtocolError e d
-  | 20 => .mkTimeExpired e d
-  | 21 => .mkResourceBusy e d
-  | 22 => .mkUnsupportedOperation e d
-  | _ => .mkOtherError e d
+  ioErrorOf (uvKind code) (uvErrno code) "" (uvStrerror code)
 
-/-- Throw libuv error `code` unless it is 0. -/
+/-- Throw libuv error `code` unless it is 0 (the system queries). -/
 def check (code : UInt32) : IO Unit :=
   if code == 0 then pure () else throw (uvError code)
 
-/-- An operation's start failed at once: throw its error. -/
-def checkStart (o : Op) : IO Unit := do
-  check (← opSyncErr o)
-
-/-- `lean_promise_resolve_with_code`: the outcome of an operation without a
-value. -/
-def codeResult (o : Op) : BaseIO (Except IO.Error Unit) := do
-  let c ← opCode o
-  return if c == 0 then .ok () else .error (uvError c)
-
 /-- Run `k` when operation `o` completes (`r` is its promise), unless it
-is canceled: a `sync` dependent of `r`, which the runtime's event loop
-resolves (see the module comment). -/
+is canceled: a `sync` dependent of `r`, which the runtime resolves (see the
+module comment). -/
 def whenDone (r : IO.Promise Unit) (o : Op) (k : BaseIO Unit) : BaseIO Unit := do
   discard <| BaseIO.mapTask (t := r.result?) (sync := true) fun _ => do
     unless ← opCanceled o do k
@@ -203,12 +227,20 @@ def socketAddrOf (b : ByteArray) : SocketAddress :=
   let port : UInt16 := ((b.get! 1).toUInt16 <<< 8) ||| (b.get! 2).toUInt16
   if b.get! 0 == 4 then .v4 { addr := v4Of b 3, port } else .v6 { addr := v6Of b 3, port }
 
-/-- An operation's address (`getsockname`). -/
+/-- An operation's address (`getsockname`, `getpeername`). -/
 def addrResult (o : Op) : IO SocketAddress := do
-  check (← opCode o)
+  checkStart o
   return socketAddrOf (← opAddr o)
 
-/-! ## Timers (`uv/timer.cpp`) -/
+/-- A new promise `p` resolved by `k` when operation `o` completes (`r`
+its promise), after `o`'s start succeeded. -/
+def completion [Nonempty α] (r : IO.Promise Unit) (o : Op) (k : IO.Promise α → BaseIO Unit) : IO (IO.Promise α) := do
+  checkStart o
+  let p ← IO.Promise.new
+  whenDone r o (k p)
+  return p
+
+/-! ## Timers (`uv/timer.cpp`, lean-runtime's `sched::uv::Timer`) -/
 
 @[export lean_uv_timer_mk]
 def timerMk (timeout : UInt64) (repeating : Bool) : IO Timer :=
@@ -216,18 +248,13 @@ def timerMk (timeout : UInt64) (repeating : Bool) : IO Timer :=
 
 @[export lean_uv_timer_next]
 def timerNext (t : Timer) : IO (IO.Promise Unit) := do
-  let k ← primTimerNextKind t
-  if k == 0 || k == 2 then
-    let p ← IO.Promise.new
-    let r ← IO.Promise.new
-    let o ← if k == 0 then primTimerStart t p r else primTimerSet t p r
-    checkStart o
+  let p ← IO.Promise.new
+  let r ← IO.Promise.new
+  let o ← primTimerNext t p r
+  if ← opFresh o then
     whenDone r o (p.resolve ())
     return p
-  else if k == 1 then
-    primTimerPromise t
-  else
-    IO.Promise.new
+  opTimerPromise o
 
 @[export lean_uv_timer_reset]
 def timerReset (t : Timer) : IO Unit := primTimerCtl t 0
@@ -238,7 +265,7 @@ def timerStop (t : Timer) : IO Unit := primTimerCtl t 1
 @[export lean_uv_timer_cancel]
 def timerCancel (t : Timer) : IO Unit := primTimerCtl t 2
 
-/-! ## Signals (`uv/signal.cpp`) -/
+/-! ## Signals (`uv/signal.cpp`, lean-runtime's `sched::uv::Signal`) -/
 
 @[export lean_uv_signal_mk]
 def signalMk (signum : Int32) (repeating : Bool) : IO Signal :=
@@ -246,31 +273,28 @@ def signalMk (signum : Int32) (repeating : Bool) : IO Signal :=
 
 @[export lean_uv_signal_next]
 def signalNext (s : Signal) : IO (IO.Promise Int) := do
-  let k ← primSignalNextKind s
-  if k == 0 || k == 2 then
-    let p ← IO.Promise.new
-    let r ← IO.Promise.new
-    let o ← if k == 0 then primSignalStart s p r else primSignalSet s p r
-    checkStart o
+  let p ← IO.Promise.new
+  let r ← IO.Promise.new
+  let o ← primSignalNext s p r
+  checkStart o
+  if ← opFresh o then
     whenDone r o do p.resolve (Int.ofNat (← opCode o).toNat)
     return p
-  else if k == 1 then
-    primSignalPromise s
-  else
-    IO.Promise.new
+  opSignalPromise o
 
 @[export lean_uv_signal_stop]
-def signalStop (s : Signal) : IO Unit := primSignalCtl s 1
+def signalStop (s : Signal) : IO Unit := do checkStart (← primSignalCtl s 1)
 
 @[export lean_uv_signal_cancel]
-def signalCancel (s : Signal) : IO Unit := primSignalCtl s 2
+def signalCancel (s : Signal) : IO Unit := do checkStart (← primSignalCtl s 2)
 
 /-! ## The loop (`uv/event_loop.cpp`) -/
 
 @[export lean_uv_event_loop_configure]
-def loopConfigure (_ : Loop.Options) : BaseIO Unit := pure ()
+def loopConfigure (o : Loop.Options) : BaseIO Unit :=
+  primLoopConfigure o.accumulateIdleTime o.blockSigProfSignal
 
-/-! ## TCP (`uv/tcp.cpp`) -/
+/-! ## TCP (`uv/tcp.cpp`, lean-runtime's `net::tcp`) -/
 
 @[export lean_uv_tcp_new]
 def tcpNew : IO TCP.Socket := primTcpNew
@@ -279,87 +303,48 @@ def tcpNew : IO TCP.Socket := primTcpNew
 def tcpConnect (s : TCP.Socket) (addr : SocketAddress) : IO (IO.Promise (Except IO.Error Unit)) := do
   let r ← IO.Promise.new
   let o ← primTcpConnect s (socketAddrBytes addr) r
-  checkStart o
-  let p ← IO.Promise.new
-  whenDone r o do p.resolve (← codeResult o)
-  return p
-
-/-- The buffers of a send, as one (libuv writes them in order). -/
-def joinBytes (data : Array ByteArray) : ByteArray :=
-  data.foldl (· ++ ·) .empty
+  completion r o fun p => do p.resolve (← opResult o (pure ()))
 
 @[export lean_uv_tcp_send]
 def tcpSend (s : TCP.Socket) (data : Array ByteArray) : IO (IO.Promise (Except IO.Error Unit)) := do
-  let p ← IO.Promise.new
-  if data.isEmpty then
-    p.resolve (.ok ())
-    return p
   let r ← IO.Promise.new
-  let o ← primTcpSend s (joinBytes data) r
-  checkStart o
-  whenDone r o do p.resolve (← codeResult o)
-  return p
+  let o ← primTcpSend s data r
+  completion r o fun p => do p.resolve (← opResult o (pure ()))
 
 @[export lean_uv_tcp_recv]
 def tcpRecv (s : TCP.Socket) (size : UInt64) : IO (IO.Promise (Except IO.Error (Option ByteArray))) := do
   let r ← IO.Promise.new
   let o ← primTcpRecv s size r
-  checkStart o
-  let p ← IO.Promise.new
-  whenDone r o do
-    let c ← opCode o
-    if c == uvEOF then p.resolve (.ok none)
-    else if isErr c then p.resolve (.error (uvError c))
-    else p.resolve (.ok (some (← opBytes o)))
-  return p
+  completion r o fun p => do
+    p.resolve (← opResult o do if (← opCode o) == 1 then pure none else pure (some (← opBytes o)))
 
 @[export lean_uv_tcp_wait_readable]
 def tcpWaitReadable (s : TCP.Socket) : IO (IO.Promise (Except IO.Error Bool)) := do
   let r ← IO.Promise.new
-  let o ← primTcpRecv s 0 r
-  checkStart o
-  let p ← IO.Promise.new
-  whenDone r o do
-    let c ← opCode o
-    if c == uvENOBUFS then p.resolve (.ok true)
-    else if c == uvEOF then p.resolve (.ok false)
-    else p.resolve (.error (uvError c))
-  return p
+  let o ← primTcpWaitReadable s r
+  completion r o fun p => do p.resolve (← opResult o do pure ((← opCode o) == 1))
 
 @[export lean_uv_tcp_cancel_recv]
 def tcpCancelRecv (s : TCP.Socket) : IO Unit := primTcpCancelRecv s
 
 @[export lean_uv_tcp_bind]
 def tcpBind (s : TCP.Socket) (addr : SocketAddress) : IO Unit := do
-  check (← primTcpBind s (socketAddrBytes addr))
+  checkStart (← primTcpBind s (socketAddrBytes addr))
 
 @[export lean_uv_tcp_listen]
 def tcpListen (s : TCP.Socket) (backlog : UInt32) : IO Unit := do
-  check (← primTcpListen s backlog)
-
-/-- An accept's outcome. -/
-def acceptResult (o : Op) : BaseIO (Except IO.Error TCP.Socket) := do
-  let c ← opCode o
-  if isErr c then return .error (uvError c)
-  return .ok (← opSocket o)
+  checkStart (← primTcpListen s backlog)
 
 @[export lean_uv_tcp_accept]
 def tcpAccept (s : TCP.Socket) : IO (IO.Promise (Except IO.Error TCP.Socket)) := do
   let r ← IO.Promise.new
   let o ← primTcpAccept s r
-  checkStart o
-  let p ← IO.Promise.new
-  if ← opDone o then
-    p.resolve (← acceptResult o)
-  else
-    whenDone r o do p.resolve (← acceptResult o)
-  return p
+  completion r o fun p => do p.resolve (← opResult o (opSocket o))
 
 @[export lean_uv_tcp_try_accept]
 def tcpTryAccept (s : TCP.Socket) : IO (Except IO.Error (Option TCP.Socket)) := do
   let o ← primTcpTryAccept s
   checkStart o
-  check (← opCode o)
   -- No connection waiting: the operation has no socket.
   if !(← opHasHandle o) then return .ok none
   return .ok (some (← opSocket o))
@@ -371,10 +356,7 @@ def tcpCancelAccept (s : TCP.Socket) : IO Unit := primTcpCancelAccept s
 def tcpShutdown (s : TCP.Socket) : IO (IO.Promise (Except IO.Error Unit)) := do
   let r ← IO.Promise.new
   let o ← primTcpShutdown s r
-  checkStart o
-  let p ← IO.Promise.new
-  whenDone r o do p.resolve (← codeResult o)
-  return p
+  completion r o fun p => do p.resolve (← opResult o (pure ()))
 
 @[export lean_uv_tcp_getpeername]
 def tcpGetPeerName (s : TCP.Socket) : IO SocketAddress := do
@@ -386,67 +368,50 @@ def tcpGetSockName (s : TCP.Socket) : IO SocketAddress := do
 
 @[export lean_uv_tcp_nodelay]
 def tcpNoDelay (s : TCP.Socket) : IO Unit := do
-  check (← primTcpNoDelay s)
+  checkStart (← primTcpNoDelay s)
 
 @[export lean_uv_tcp_keepalive]
 def tcpKeepAlive (s : TCP.Socket) (enable : Int8) (delay : UInt32) : IO Unit := do
-  check (← primTcpKeepAlive s enable.toInt32.toUInt32 delay)
+  checkStart (← primTcpKeepAlive s enable.toInt32.toUInt32 delay)
 
-/-! ## UDP (`uv/udp.cpp`) -/
+/-! ## UDP (`uv/udp.cpp`, lean-runtime's `net::udp`) -/
 
 @[export lean_uv_udp_new]
 def udpNew : IO UDP.Socket := primUdpNew
 
 @[export lean_uv_udp_bind]
 def udpBind (s : UDP.Socket) (addr : SocketAddress) : IO Unit := do
-  check (← primUdpBind s (socketAddrBytes addr))
+  checkStart (← primUdpBind s (socketAddrBytes addr))
 
 @[export lean_uv_udp_connect]
 def udpConnect (s : UDP.Socket) (addr : SocketAddress) : IO Unit := do
-  check (← primUdpConnect s (socketAddrBytes addr))
+  checkStart (← primUdpConnect s (socketAddrBytes addr))
 
 @[export lean_uv_udp_send]
 def udpSend (s : UDP.Socket) (data : Array ByteArray) (addr : Option SocketAddress) :
     IO (IO.Promise (Except IO.Error Unit)) := do
-  let p ← IO.Promise.new
-  if data.isEmpty then
-    p.resolve (.ok ())
-    return p
   let r ← IO.Promise.new
   let a := match addr with
     | some sa => socketAddrBytes sa
     | none => .empty
-  let o ← primUdpSend s (joinBytes data) a r
-  checkStart o
-  whenDone r o do p.resolve (← codeResult o)
-  return p
+  let o ← primUdpSend s data a r
+  completion r o fun p => do p.resolve (← opResult o (pure ()))
 
 @[export lean_uv_udp_recv]
 def udpRecv (s : UDP.Socket) (size : UInt64) :
     IO (IO.Promise (Except IO.Error (ByteArray × Option SocketAddress))) := do
   let r ← IO.Promise.new
   let o ← primUdpRecv s size r
-  checkStart o
-  let p ← IO.Promise.new
-  whenDone r o do
-    let c ← opCode o
-    if isErr c then
-      p.resolve (.error (uvError c))
-    else
+  completion r o fun p => do
+    p.resolve (← opResult o do
       let a ← opAddr o
-      p.resolve (.ok (← opBytes o, if a.size == 0 then none else some (socketAddrOf a)))
-  return p
+      pure (← opBytes o, if a.size == 0 then none else some (socketAddrOf a)))
 
 @[export lean_uv_udp_wait_readable]
 def udpWaitReadable (s : UDP.Socket) : IO (IO.Promise (Except IO.Error Unit)) := do
   let r ← IO.Promise.new
-  let o ← primUdpRecv s 0 r
-  checkStart o
-  let p ← IO.Promise.new
-  whenDone r o do
-    let c ← opCode o
-    p.resolve (if c == uvENOBUFS then .ok () else .error (uvError c))
-  return p
+  let o ← primUdpWaitReadable s r
+  completion r o fun p => do p.resolve (← opResult o (pure ()))
 
 @[export lean_uv_udp_cancel_recv]
 def udpCancelRecv (s : UDP.Socket) : IO Unit := primUdpCancelRecv s
@@ -461,69 +426,49 @@ def udpGetSockName (s : UDP.Socket) : IO SocketAddress := do
 
 @[export lean_uv_udp_set_broadcast]
 def udpSetBroadcast (s : UDP.Socket) (on : Bool) : IO Unit := do
-  check (← primUdpOption s 0 (if on then 1 else 0))
+  checkStart (← primUdpOption s 0 (if on then 1 else 0))
 
 @[export lean_uv_udp_set_multicast_loop]
 def udpSetMulticastLoop (s : UDP.Socket) (on : Bool) : IO Unit := do
-  check (← primUdpOption s 1 (if on then 1 else 0))
+  checkStart (← primUdpOption s 1 (if on then 1 else 0))
 
 @[export lean_uv_udp_set_multicast_ttl]
 def udpSetMulticastTTL (s : UDP.Socket) (ttl : UInt32) : IO Unit := do
-  check (← primUdpOption s 2 ttl)
+  checkStart (← primUdpOption s 2 ttl)
 
 @[export lean_uv_udp_set_membership]
 def udpSetMembership (s : UDP.Socket) (mcast : IPAddr) (iface : Option IPAddr) (membership : UInt8) : IO Unit := do
   let i := match iface with
     | some a => ipBytes a
     | none => .empty
-  check (← primUdpMembership s (ipBytes mcast) i membership)
+  checkStart (← primUdpMembership s (ipBytes mcast) i membership)
 
 @[export lean_uv_udp_set_multicast_interface]
 def udpSetMulticastInterface (s : UDP.Socket) (iface : IPAddr) : IO Unit := do
-  check (← primUdpMulticastInterface s (ipBytes iface))
+  checkStart (← primUdpMulticastInterface s (ipBytes iface))
 
 @[export lean_uv_udp_set_ttl]
 def udpSetTTL (s : UDP.Socket) (ttl : UInt32) : IO Unit := do
-  check (← primUdpOption s 3 ttl)
+  checkStart (← primUdpOption s 3 ttl)
 
-/-! ## Name resolution (`uv/dns.cpp`) -/
-
-/-- `is_safe_ascii_str`. -/
-def safeAscii (s : String) : Bool :=
-  s.toUTF8.data.all fun c =>
-    (c ≥ 97 && c ≤ 122) || (c ≥ 65 && c ≤ 90) || (c ≥ 48 && c ≤ 57) ||
-    "-_.:/+~@=,%".toUTF8.data.contains c
+/-! ## Name resolution (`uv/dns.cpp`, lean-runtime's `net::dns`) -/
 
 @[export lean_uv_dns_get_info]
 def dnsGetInfo (host service : String) (family : UInt8) : IO (IO.Promise (Except IO.Error (Array IPAddr))) := do
-  unless safeAscii host do throw (.mkInvalidArgument 22 "name is not ASCII")
-  unless safeAscii service do throw (.mkInvalidArgument 22 "service is not ASCII")
   let r ← IO.Promise.new
   let o ← primDnsGetInfo host service family r
-  checkStart o
-  let p ← IO.Promise.new
-  whenDone r o do
-    let c ← opCode o
-    if isErr c then
-      p.resolve (.error (uvError c))
-    else
+  completion r o fun p => do
+    p.resolve (← opResult o do
       let b ← opBytes o
-      p.resolve (.ok ((List.range (b.size / 17)).toArray.map fun k => ipOf b (17 * k)))
-  return p
+      pure ((List.range (b.size / 17)).toArray.map fun k => ipOf b (17 * k)))
 
 @[export lean_uv_dns_get_name]
 def dnsGetName (addr : SocketAddress) : IO (IO.Promise (Except IO.Error (String × String))) := do
   let r ← IO.Promise.new
   let o ← primDnsGetName (socketAddrBytes addr) r
-  checkStart o
-  let p ← IO.Promise.new
-  whenDone r o do
-    let c ← opCode o
-    if isErr c then p.resolve (.error (uvError c))
-    else p.resolve (.ok (← opStr o 0, ← opStr o 1))
-  return p
+  completion r o fun p => do p.resolve (← opResult o do pure (← opStr o 0, ← opStr o 1))
 
-/-! ## Addresses (`uv/net_addr.cpp`) -/
+/-! ## Addresses (`uv/net_addr.cpp`, lean-runtime's `semantics::net`, `net::iface`) -/
 
 @[export lean_uv_pton_v4]
 def ptonV4 (s : String) : Option IPv4Addr :=
@@ -552,8 +497,7 @@ then 16 bytes). -/
 @[export lean_uv_interface_addresses]
 def interfaceAddresses : IO (Array InterfaceAddress) := do
   let o ← primIfaces
-  if isErr (← opCode o) then
-    throw (.mkInvalidArgument 22 "failed to get interface addresses")
+  checkStart o
   let b ← opBytes o
   let n := b.size / 41
   let mut out := #[]
@@ -751,7 +695,7 @@ def hrtime : IO UInt64 := primWord 2
 def random (size : UInt64) : IO (IO.Promise (Except IO.Error ByteArray)) := do
   let r ← IO.Promise.new
   let o ← primRandom size r
-  checkStart o
+  check (← opSyncErr o)
   let p ← IO.Promise.new
   whenDone r o do
     let c ← opCode o

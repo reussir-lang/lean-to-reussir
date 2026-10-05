@@ -510,14 +510,14 @@ def layers():
                          "fast paths inline (small Nat), l2r_* primitives for the glue"], "b-rt")
     s.box(10, 170, W, 84, ["leanrt (Rust crate, linked into every program)",
                           "big numbers (GMP) for lean-runtime's Nat/Int, strings, arrays,",
-                          "float text, glue for lean-runtime's IO, once-cells,",
-                          "tasks and the scheduler (contexts), Std.Sync, the event loop"], "b-rt")
+                          "float text, once-cells, glue for lean-runtime's IO, its",
+                          "scheduler (task cells, the suspend step) and its event loop"], "b-rt")
     s.box(10, 268, W, 50, ["reussir_rt (Reussir's runtime)",
                           "Rc, the pending stack for frees (local patches 0013-0015), mimalloc"], "b-rr")
     s.box(10, 332, W, 50, ["System", "libc, libm, GMP, the kernel"], "b-lean")
     s.box(680, 170, 250, 120, ["lean-runtime (submodule)", "a shared crate: Lean's",
-                              "runtime rules in safe Rust", "(hashes, strings, floats, libm,",
-                              "Nat/Int, arrays, panics, IO);", "leanrt keeps glue, hot paths"], "b-plan")
+                              "runtime rules in safe Rust", "(semantics, IO, the scheduler,",
+                              "the event loop, networking);", "leanrt keeps glue, hot paths"], "b-plan")
     s.path("M 680 212 L 652 212", "ard")
     return s.render()
 
@@ -545,16 +545,16 @@ def startup_seq():
 
 def scheduler():
     s = SVG("sched", 940, 330, "Contexts on one thread",
-            "When the running context blocks, the scheduler looks for work in "
-            "this order. Contexts never run in parallel.")
-    s.box(10, 20, 200, 64, ["running context blocks", "a lock, a promise, IO.wait,", "a sleep"], "b-l2r")
+            "When the running context blocks, lean-runtime's scheduler looks for "
+            "work in this order. Contexts never run in parallel.")
+    s.box(10, 20, 200, 64, ["running context blocks", "a lock, a promise, IO.wait,", "a sleep, an empty pipe"], "b-l2r")
     s.arrow(210, 52, 250, 52)
     rows = [(20, ["1. a suspended context that", "can go on now (in the order", "they became ready)?"],
              ["switch to it"]),
             (104, ["2. a queued task, and a", "worker free for it", "(LEAN_NUM_THREADS, or the CPUs)?"],
              ["start it on a new context"]),
-            (188, ["3. a timer, socket or sleeper", "still pending?"],
-             ["wait for the first one,", "then look again"])]
+            (188, ["3. a timer, socket, signal", "or sleeper still pending?"],
+             ["wait for the first one in", "the event loop, then look again"])]
     for y, q, a in rows:
         s.box(255, y, 300, 64, q, "b-rt", head=False, small_after=3)
         s.arrow(555, y + 32, 615, y + 32, "yes", lx=568, ly=y + 25)
@@ -592,17 +592,16 @@ def free_stack():
 def persist_walk():
     s = SVG("persist", 940, 170, "The walk of a closed term for its tasks",
             "Native Lean marks a closed term persistent at its first use and "
-            "waits for every task in it. lean2rr's walk does that in two passes, "
-            "so the tasks run in the workers' queue order.")
+            "waits for every task in it. lean2rr's walk does that in one pass; "
+            "lean-runtime's wait runs the tasks in the workers' queue order.")
     s.box(10, 40, 170, 80, ["closed term", "evaluated once,", "at first use"], "b-l2r")
     s.arrow(180, 80, 225, 80)
-    s.box(230, 30, 290, 100, ["pass 1: collect", "walk the value (a loop, each cell once)",
-                              "note the unfinished tasks", "do not look into them"], "b-rt")
+    s.box(230, 30, 290, 100, ["walk the value", "a loop, each cell once,",
+                              "in Lean's order", "(last field first)"], "b-rt")
     s.arrow(520, 80, 565, 80)
-    s.box(570, 30, 360, 100, ["pass 2: wait", "walk again in Lean's order;",
-                              "before waiting for a task, run the collected",
-                              "tasks that natively come first (priority,",
-                              "then creation order)"], "b-rt")
+    s.box(570, 30, 360, 100, ["wait for each task it reaches", "lean-runtime's wait: the task runs",
+                              "once a free worker would start it;",
+                              "then look into its value"], "b-rt")
     s.text(10, 160, "Skipped when every task has finished (always at startup). A task the program drops meanwhile is deleted, not run.", "ts")
     return s.render()
 

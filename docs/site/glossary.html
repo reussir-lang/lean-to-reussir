@@ -134,7 +134,7 @@ each concept has one term.</p>
 <dt>deferred task</dt>
 <dd>A task that runs only when needed, when the running code blocks, or when <code>main</code> returns.</dd>
 <dt>context</dt>
-<dd>A stack on which the scheduler runs <code>main</code> or a task. Contexts take turns on one thread.</dd>
+<dd>A stack on which lean-runtime's scheduler runs <code>main</code> or a task. Contexts take turns on one thread.</dd>
 <dt>effect point</dt>
 <dd>A point (output, exit, <code>IO.sleep 0</code>) where the scheduler lets due timers, ready contexts and old queued tasks run first.</dd>
 <dt><code>sync</code> dependent</dt>
@@ -170,7 +170,7 @@ each concept has one term.</p>
 <dt>judge</dt>
 <dd>The step that decides whether a finding is real before anyone fixes it.</dd>
 <dt>lean-runtime</dt>
-<dd>The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule <code>third_party/lean-runtime</code>): Lean's runtime semantics in safe Rust; lean2rr uses its hash, string, float, fixed-width integer, libm, <code>Nat</code>/<code>Int</code>, array, panic and number-text rules and its IO (features <code>io</code> and <code>proc-title</code>) so far, with its own GMP numbers behind the crate's big-number traits.</dd>
+<dd>The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule <code>third_party/lean-runtime</code>): Lean's runtime semantics in safe Rust; lean2rr uses its hash, string, float, fixed-width integer, libm, <code>Nat</code>/<code>Int</code>, array, panic and number-text rules, its IO, its task scheduler and its event loop (features <code>io</code>, <code>proc-title</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>), with its own GMP numbers behind the crate's big-number traits.</dd>
 </dl>
   </main>
 </div>

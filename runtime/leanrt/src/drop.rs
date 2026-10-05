@@ -53,13 +53,22 @@ pub fn defer(p: usize, step: Step) {
 }
 
 /// Run `step` on `p` until it is finished, and everything it pushes; or,
-/// inside a running free, push it. When the free is over, the dependents of
-/// the promises it resolved are walked (`task::resolve`).
+/// inside a running free, push it. No context may suspend inside a free
+/// (the free is the thread's, `reussir_rt::drop`: the other contexts would
+/// push their frees onto it); lean-runtime's glue item 11 asks for its
+/// no-suspend scope over the whole free path. leanrt enters it around the
+/// two steps of a free that can wait: a stream handle's drop (its flush,
+/// `fs::close`) and a promise's resolution with `none` (its cell store, a
+/// publication, `task::drop_promise_now`). The rest never waits: a task's
+/// release, Reussir's own frees, and a promise's resolution in
+/// lean-runtime, which comes only after the free (`task::resolve`). When
+/// the free is over, the promises it resolved are resolved in lean-runtime,
+/// which walks their dependents (`task::run_later`).
 #[inline(never)]
 pub fn run(p: usize, step: Step) {
     reussir_rt::drop::run_step(p, step);
     if !active() {
-        crate::task::run_later_walks();
+        crate::task::run_later();
     }
 }
 
@@ -498,10 +507,15 @@ fn cell_take_last<T>(p: usize) -> T {
 }
 
 /// `extern "C"`: it cannot unwind, so the textures that release a cell
-/// need no landing pad for it.
+/// need no landing pad for it. The last reference to an unfinished task
+/// goes to the task glue first (`task::on_last_reference`: lean-runtime's
+/// `release`), which may keep the cell for a task lean-runtime still runs.
 #[cold]
 #[inline(never)]
 extern "C" fn free_cell<T>(p: usize) {
+    if crate::task::on_last_reference(p) {
+        return;
+    }
     run(p, step_cell::<T>);
 }
 

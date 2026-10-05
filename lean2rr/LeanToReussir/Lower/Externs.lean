@@ -341,8 +341,23 @@ def stdContextFns : LowerM (Array RR.Item) := do
   let ifs : Array RR.Item := #["enter", "leave"].map fun w =>
     .fn s!"l2r_std_{w}_if" #[("b", u64)] u64 ⟨#[("one", some u64, .atom "1")],
       .ite (.atom "b == one") (.ofExpr (.call s!"l2r_std_{w}" #[] #[])) (zero "z")⟩
-  let some base := (← get).stdSlots | return #[.fn "l2r_std_enter" #[] u64 (zero "z"), .fn "l2r_std_leave" #[] u64 (zero "z")] ++ ifs
-  let some st := (← get).stdStreamTy | return #[.fn "l2r_std_enter" #[] u64 (zero "z"), .fn "l2r_std_leave" #[] u64 (zero "z")] ++ ifs
+  -- In a program that creates tasks, `l2r_std_drop_workers()` drops the
+  -- pool workers' stream cells at the task manager's finalization (each in
+  -- turn made current, `l2r_worker_streams_enter`, then dropped,
+  -- `l2r_std_leave`), as native worker threads' finalizers drop their
+  -- current streams (lean-runtime's AR-33): the runtime calls it there,
+  -- through its trampoline (`leanrt::sched::workers_end`).
+  let createsTasks := (← read).createsTasks
+  let tramp : RR.Item := .raw "extern \"C\" trampoline \"l2r_std_drop_workers_c\" = l2r_std_drop_workers;\n"
+  let dropWorkers (base : Option Nat) : Array RR.Item := Id.run do
+    unless createsTasks do return #[]
+    let some b := base | return #[.fn "l2r_std_drop_workers" #[] u64 (zero "z"), tramp]
+    return #[tramp, .fn "l2r_std_drop_workers" #[] u64 ⟨#[("more", some u64, .call "l2r_worker_streams_enter" #[] #[.atom (toString b)]),
+      ("one", some u64, .atom "1")],
+      .ite (.atom "more == one")
+        ⟨#[("l", some u64, .call "l2r_std_leave" #[] #[])], .call "l2r_std_drop_workers" #[] #[]⟩ (zero "z")⟩]
+  let some base := (← get).stdSlots | return #[.fn "l2r_std_enter" #[] u64 (zero "z"), .fn "l2r_std_leave" #[] u64 (zero "z")] ++ ifs ++ dropWorkers none
+  let some st := (← get).stdStreamTy | return #[.fn "l2r_std_enter" #[] u64 (zero "z"), .fn "l2r_std_leave" #[] u64 (zero "z")] ++ ifs ++ dropWorkers none
   let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[]
   for fd in [0:3] do
     let slot := RR.Expr.atom (toString (base + fd))
@@ -350,7 +365,7 @@ def stdContextFns : LowerM (Array RR.Item) := do
       .var s!"t{fd}"⟩
     lets := lets.push (s!"d{fd}", some u64, .ite (.call "l2r_once_has" #[] #[slot]) dropIt (zero s!"f{fd}"))
   return #[.fn "l2r_std_enter" #[] u64 (.ofExpr (.call "l2r_std_push" #[] #[.atom (toString base)])),
-    .fn "l2r_std_leave" #[] u64 ⟨lets, .call "l2r_std_pop" #[] #[.atom (toString base)]⟩] ++ ifs
+    .fn "l2r_std_leave" #[] u64 ⟨lets, .call "l2r_std_pop" #[] #[.atom (toString base)]⟩] ++ ifs ++ dropWorkers (some base)
 
 /-- `l2r_stderr_put(s)`, defined in every program for the runtime's
 diagnostics (panics, `dbgTrace`, `timeit`): native Lean writes them with the
@@ -461,14 +476,63 @@ crosses it.) -/
 def refSetFn (e : RR.Ty) : LowerM String := do
   return if ← isBoundaryTy e then "l2r_rc_set" else "l2r_rc_put"
 
+/-- The C symbols of the externs that make a task or a promise: a program
+reaching one can have other contexts than `main`'s (a promise's
+dependents run where it is resolved, the event loop's completions on a
+context of their own). -/
+def taskExternSyms : List String :=
+  ["lean_task_spawn", "lean_task_map", "lean_task_bind", "lean_io_as_task", "lean_io_map_task",
+   "lean_io_bind_task", "lean_io_promise_new"]
+
+/-- Whether the program creates tasks: one of its extern instances
+(`decls`, after the shim's replacements, Lean's library's code included)
+makes a task or a promise (`taskExternSyms`). Every other context comes
+from those: a task's own; a promise's dependents, run where it is resolved;
+the event loop's completions, which resolve the promises the shim's Lean
+code makes (`IO.Promise.new`). So a program without them has one context,
+`main`'s, whatever else it uses (a `Std.Sync` object or a timer alone
+makes none). The seven are polymorphic, so each one a program reaches is an
+instance in `decls`. (The `Std.Sync` and event-loop externs, which this
+once also counted to be safe, are monomorphic: they are never instances,
+so that test could never match; review RS4-07.) Translation plan §5.14,
+"References". -/
+def programCreatesTasks (env : Environment) (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Bool :=
+  decls.any fun d => match d.value with
+    | .extern _ =>
+      let orig := ((keys.find? d.name).map (·.decl)).getD d.name
+      match getExternNameFor env `c orig with
+      | some sym => taskExternSyms.contains sym
+      | none => false
+    | _ => false
+
+/-- In a program that creates tasks, the point before reference operation
+`op` on the reference `r` of record type `rt` (prelude `l2r_ref_*`,
+`leanrt::refs`): a polling point before a read, a publication before a
+write, and, while some reference is taken by a `modify`, the wait for its
+store (Lean 4.35's rule; `take` always records the reference). `none` in a
+program without tasks. -/
+def refPoint (op : String) (r : RR.Expr) (rt : RR.Ty) : LowerM (Option (String × Option RR.Ty × RR.Expr)) := do
+  unless (← read).createsTasks do return none
+  let n ← fresh "rp"
+  let u64 := RR.Ty.named "u64"
+  if op == "take" then return some (n, some u64, .call "l2r_ref_take_mark" #[rt] #[r])
+  let (point, store) := match op with
+    | "get" => ("l2r_ref_read_point", "0")
+    | "set" => ("l2r_ref_write_point", "1")
+    | _ => ("l2r_ref_swap_point", "1")
+  return some (n, some u64,
+    .ite (.call point #[] #[]) (.ofExpr (.call "l2r_ref_wait" #[rt] #[r, .atom store])) (.ofExpr (.atom "0")))
+
 /-- Reference operation `op` on a reference `r` whose cell stores elements
 of type `e` as `k`, for an operation at element type `a` (values converted
 between the two; `none` if they cannot be): `get` (a copy: the cell keeps
 its reference), `take` (the value moves out and the cell gets the
 placeholder, as `lean_st_ref_take` stores `box(0)`: Lean's `modify` is
 take-then-set, so a value only the cell holds stays unshared and is updated
-in place), `set` (`u64` result; `refSetFn`), `swap`. -/
-def refCellOp (op : String) (r : RR.Expr) (e : RR.Ty) (k : RefKind) (a : RR.Ty) (v : Option RR.Expr) :
+in place), `set` (`u64` result; `refSetFn`), `swap`. The cell operation
+alone (`refCellOp` adds the task-aware point): also the read of a
+constant's walk for tasks, which natively reads the cell directly. -/
+def refCellOpPlain (op : String) (r : RR.Expr) (e : RR.Ty) (k : RefKind) (a : RR.Ty) (v : Option RR.Expr) :
     LowerM (Option RR.Expr) := do
   let cell := RR.Expr.field r 0
   let toA (x : RR.Expr) : LowerM (Option RR.Expr) := tryCoerce x e a
@@ -486,6 +550,16 @@ def refCellOp (op : String) (r : RR.Expr) (e : RR.Ty) (k : RefKind) (a : RR.Ty) 
   | .boxed bn, "set" => return some (.call "l2r_rc_set" #[.named bn] #[cell, .ctor bn none #[v'.get!]])
   | .boxed bn, "swap" => toA (.field (.call "l2r_rc_swap" #[.named bn] #[cell, .ctor bn none #[v'.get!]]) 0)
   | _, _ => return none
+
+/-- Reference operation `op` (`refCellOpPlain`) on the reference `r` of
+record type `rt`: in a program that creates tasks, after its `refPoint`. -/
+def refCellOp (op : String) (r : RR.Expr) (rt : RR.Ty) (e : RR.Ty) (k : RefKind) (a : RR.Ty)
+    (v : Option RR.Expr) : LowerM (Option RR.Expr) := do
+  let res ← refCellOpPlain op r e k a v
+  let some res := res | return none
+  match ← refPoint op r rt with
+  | some l => return some (.block ⟨#[l], res⟩)
+  | none => return some res
 
 /-- Glue for `ST.Ref` operations (translation plan §5.1). A reference whose
 contents have Reussir type `e` is a generated record holding a Reussir
@@ -524,7 +598,7 @@ def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : E
         | x => do
           let n ← fresh "rh"
           pure (#[(n, some ht, x)], RR.Expr.var n)
-      let r ← match ← refCellOp op h e k a v with
+      let r ← match ← refCellOp op h ht e k a v with
         | some r => pure r
         | none => coerce (.call "l2r_internal_panic_at" #[e] #[.atom "0"]) e resT
       return if pre.isEmpty then r else .block ⟨pre, r⟩
@@ -569,7 +643,7 @@ def genRefFn (op : String) (a : RR.Ty) : LowerM Unit := do
     let some (e, k) ← refElem? vt | continue
     if ← liveSkipBox vname then continue
     let body ← if op == "addr" then pure (some (RR.Expr.call "l2r_ptr_addr_rec" #[vt] #[.var "r"]))
-      else refCellOp op (.var "r") e k a (if op == "set" || op == "swap" then some (.var "v") else none)
+      else refCellOp op (.var "r") vt e k a (if op == "set" || op == "swap" then some (.var "v") else none)
     let body := body.getD (.call "l2r_unreachable" #[resT] #[])
     arms := arms.push { ty := boxName, ctor := some vname, binders := #[some "r"], body := .ofExpr body }
   arms := arms.push { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[resT] #[]) }

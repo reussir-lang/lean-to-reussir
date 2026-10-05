@@ -393,15 +393,17 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
   let uncachedConsts := chainConsts decls roots
   let decls := spliceChainConsts decls uncachedConsts
   let casts := programCasts (← getEnv) keys decls
+  let createsTasks := programCreatesTasks (← getEnv) keys decls
   if (← IO.getEnv "L2R_DEBUG").isSome then
     IO.eprintln s!"lean2rr: program casts: {match casts with | some n => s!"yes ({n})" | none => "no"}"
+    IO.eprintln s!"lean2rr: program creates tasks: {createsTasks}"
   let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
                           externRefusals,
                           preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls,
                           uncachedConsts, preludeReplacements := cfg.preludeReplacements,
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
                           cachePlaceholders := cfg.cachePlaceholders, natArrays := cfg.natArrays,
-                          programCasts := casts.isSome, callCycles := callCycles decls,
+                          programCasts := casts.isSome, createsTasks, callCycles := callCycles decls,
                           convLiveness := cfg.convLiveness }
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit variant, `box(0)`): types

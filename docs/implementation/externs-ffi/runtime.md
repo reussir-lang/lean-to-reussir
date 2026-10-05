@@ -156,8 +156,9 @@ Paths are relative to the repository root.
   old texture was a call to it.
 - **Where:** `runtime/leanrt/src/lib.rs`: `panic_settings`, `panic_lines`,
   `panic_text`, `lean_internal_panic`, `internal_panic`,
-  `uncaught_exception`, `promise_dropped`; `runtime/leanrt/src/rt.rs`: the
-  stack-overflow handler; `runtime/prelude.rr`: `l2r_internal_panic`,
+  `uncaught_exception`, `promise_dropped`, `lean_panic`; lean-runtime's
+  stack-overflow report (`sched::install_stack_overflow_handler`);
+  `runtime/prelude.rr`: `l2r_internal_panic`,
   `l2r_panic_text`, `l2r_panic_code_text`.
 - **Remove only if:** never.
 
@@ -237,22 +238,18 @@ Paths are relative to the repository root.
     only store and swap values: lean2rr has no stream logic of its own, and
     every operation on a stream is lean-runtime's (the `l2r_stream_*`
     primitives over its standard-stream handles);
-  - the scheduler's effect points before output and spawns, and
-    `IO.sleep`/`dbgSleep` (the scheduler's sleep lets the other contexts
-    run; lean-runtime's `env::sleep` is the thread's). No other wait of
-    leanrt's IO cooperated with its scheduler: a read of a pipe, a
-    `flock`, a `waitpid`, `output`'s `poll` blocked the thread before, as
-    lean-runtime's no-`sched` path does;
   - `IO.Process.forceExit` stays `_exit`: lean-runtime's `force_exit` is
     `std::process::exit`, which runs linked C code's exit handlers, and
-    its documentation asks a glue that needs `_Exit` to call `_exit`;
+    its documentation asks a glue that needs `_Exit` to call `_exit`
+    (since step 4 after the context's handed-off streams are written,
+    `io::force_exit`);
   - `IO.getTID` (`gettid`; lean-runtime has none);
-  - the signal watchers (leanrt's event loop): they use libuv's loop
-    signal pipe, which lean-runtime opens at startup and `rt::signal_pipe`
-    claims at the first watcher (`startup::claim_signal_pipe`, AR-17, which
-    replaced a search of `/proc/self/fd`); test `RtSignalFd`;
   - the Windows time-zone errors stay the shim's Lean code (the same
     errors as lean-runtime's `time::windows_*`).
+  Since step 4 (below) the effect points, `IO.sleep`/`dbgSleep` and the
+  signal watchers are lean-runtime's too, and its IO cooperates with the
+  scheduler (a read of a pipe, a `flock`, a `waitpid`, `output`'s `poll`
+  let the other contexts run).
 - **Tests:** the runtime suite's IO tests unchanged; `RtFdStartupNoUring`
   (no longer an expected failure), `RtTitleCmdline` (the title in
   `/proc/self/cmdline`: lean-runtime's constructor is linked),
@@ -260,15 +257,61 @@ Paths are relative to the repository root.
   program cases through lean2rr's builds (`scripts/cases.py check
   --exe-dir`).
 - **Where:** `runtime/leanrt/src/fs.rs`, `io.rs`, `proc.rs`, `sys.rs`,
-  `rt.rs` (`startup_descriptors`, `signal_pipe`, `set_initializing`);
+  `rt.rs` (`startup_descriptors`, `set_initializing`);
   `runtime/leanrt/src/lib.rs`: `uncaught_exception`; `runtime/prelude.rr`:
   the standard streams, files, processes, `timeit`, `allocprof`,
   `IO.getEnv`, `Std.Internal.UV.System`; `lean2rr/LeanToReussir/Lower/Process.lean`:
   `spawnCall` (`output?`), `processOutputBody`; `lean2rr/L2RShim.lean`:
   `setProcessTitle`; `scripts/l2r.py`: `LEAN_RUNTIME_FEATURES`.
-- **Remove only if:** lean2rr adopts lean-runtime's `sched` (step 4):
-  then the effect points, the sleep and the signal pipe become
-  lean-runtime's too.
+- **Remove only if:** never.
+
+### Tasks, `Std.Sync` and the event loop are lean-runtime's, through glue (switch step 4)
+
+- **What:** lean2rr's tasks, promises, thunk waits, `Std.Sync`, effect and
+  polling points, sleeps, `Std.Internal.UV`'s loop, timers, signals,
+  sockets, name resolution and interfaces, and Lean's stack-overflow
+  report run on lean-runtime's `sched` and `net` (features `sched`,
+  `stack-overflow`, `net`); leanrt keeps the glue lean-runtime's
+  `docs/sched.md` ("The glue") and `docs/net.md` ask for: `Glue::suspend`
+  (the one `unsafe` dereference, with its entry), `switched` (the stream
+  cells per context), `task_begin` (a task's own stream context), the
+  task objects (cells, `leanrt::task`'s entries naming lean-runtime's
+  `TaskId`s, the jobs that run them through the program's dispatcher,
+  `release` at the program's last reference), the waits of lean2rr's own
+  objects (a `busy` thunk, a constant another context computes),
+  `before_publish` at cell stores, in a program that creates tasks the
+  reference operations' points (`refs`: `ref_read`, `before_publish`, and
+  Lean 4.35's wait while `modify` holds a reference), the scheduler's
+  start on `main`'s thread at the first task (`start_with`), `finish`
+  after `main` (with `io::exit::after_main`), the stack-overflow handler
+  on each thread that runs Lean code, the no-suspend scope around a stream
+  handle's drop, promises dropped inside a free resolved once it is over,
+  the event loop's completions through the shim's promises. leanrt's own
+  scheduler (`sched.rs`, `task.rs`, `coro.rs`, `sync.rs`), its event loop
+  and sockets (`net.rs`), its stack-overflow handler (`rt.rs`), and the
+  shim's own checks are gone; the generated code is unchanged (its
+  primitives map onto lean-runtime's API).
+- **Why:** One runtime for both translators (owner decision; lean-runtime's
+  `sched` was built from leanrt's). Lean bugs not reproduced, now
+  lean-runtime's: LB-13 (a pool task enqueued after `main` runs), LB-19,
+  LB-20, LB-21 to LB-28, LB-32, LB-33 and LB-34 (a timer's or signal
+  watcher's `stop` or `cancel` and a `sync` dependent that subscribes
+  again; lean-runtime's `docs/lean-bugs.md`), and LB-01 and LB-18 (a
+  reference's `set` or `swap` during a blocked `modify`).
+- **Tests:** the runtime suite's task, promise, `Std.Sync`, timer, signal
+  and socket tests; lean-runtime's program cases of `tasks`, `sync`,
+  `refs`, `uvloop`, `net`, `taskio` and the IO cases with tasks through
+  lean2rr's builds (`scripts/cases.py check --translator lean2rr`).
+- **Where:** `runtime/leanrt/src/task.rs`, `sched.rs`, `sync.rs`,
+  `net.rs`, `refs.rs`, `persist.rs`, `once.rs`, `drop.rs` (`run`, `free_cell`),
+  `fs.rs` (`close`), `rt.rs` (`install_stack_overflow_handler`), `io.rs`
+  (`mono_nanos_polled`, `force_exit`); `runtime/prelude.rr` (the
+  `l2r_task_*`, `l2r_lcell_set`, `l2r_ref_*`, `l2r_shim_*` textures);
+  `lean2rr/LeanToReussir/Lower/Externs.lean` (`programCreatesTasks`,
+  `refPoint`); `lean2rr/L2RShim.lean`; `scripts/l2r.py`:
+  `LEAN_RUNTIME_BASE_FEATURES`.
+  Implementation notes: [../tasks/](../tasks/README.md).
+- **Remove only if:** never.
 
 ### A large read right after output writes the pending output first
 
@@ -343,8 +386,8 @@ Paths are relative to the repository root.
   triple of the platform the program is built for. The prelude used to
   hard-code `aarch64-unknown-linux-gnu`, which is wrong on an x86-64 host
   (fix-r9-misc). leanrt builds only for Linux with glibc on aarch64 and
-  x86-64 (signal structures, the glibc `FILE` model, `coro`'s stack
-  switching), hence the error elsewhere instead of a guess. Test
+  x86-64 (the glibc `FILE` model, lean-runtime's targets), hence the error
+  elsewhere instead of a guess. Test
   `tests/runtime/RtPlatform.lean` compares the triple, the word size, the
   three flags and the version strings with native.
 - **Where:** `runtime/leanrt/src/rt.rs`: `PLATFORM_TARGET`;

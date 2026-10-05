@@ -1,832 +1,321 @@
-//! The scheduler: contexts that block and resume, on one thread.
+//! The glue between lean2rr's runtime and lean-runtime's task scheduler
+//! (`lean_runtime::sched`, its features `sched` and `stack-overflow`).
 //!
-//! Native Lean runs tasks on a pool of worker threads (and `main` on its own
-//! thread); a thread that blocks on a mutex, a condition variable, a task or
-//! promise that has not finished, or a sleep lets the others go on. The
-//! translation runs on one thread, so it has *contexts* instead (`coro`):
-//! `main`'s (the thread's own stack) and one per task the scheduler starts,
-//! each on a stack of its own. A task that is needed (`Task.get`,
-//! `IO.wait`) still runs right there, on the stack of whoever needs it
-//! (translation plan §5.14); a context switch happens only when the running
-//! context blocks:
+//! The scheduler is lean-runtime's: Lean's task manager on one thread, its
+//! contexts (corosensei coroutines, every switch through `main`'s stack and
+//! its hub), the order in which they run, the effect and polling points,
+//! the event loop, `Std.Sync`'s locks and Lean's stack-overflow report
+//! (lean-runtime's `docs/sched.md`). This module is what lean-runtime asks
+//! of a translator's glue (`docs/sched.md`, "The glue"):
 //!
-//! - it waits for a task that runs on another context, or for a promise;
-//! - it waits for a mutex another context holds, or on a condition
-//!   variable;
-//! - it sleeps (`IO.sleep`);
-//! - after `main` has returned, it waits for the remaining tasks.
+//! - the one `unsafe` step of the switch (`Glue::suspend`, below);
+//! - what a thread owns natively and a context owns here: the current
+//!   standard streams of `IO.setStdout` & co. (lean2rr's mutable once-cells,
+//!   `once::CtxState`), set aside and given back at each switch
+//!   (`Glue::switched`); a pool task runs with the cells of its emulated
+//!   worker (lean-runtime's `running_worker`), which keeps what the task
+//!   leaves, as a native worker thread keeps its streams (`Glue::task_begin`,
+//!   `task_end`); a dedicated task with a fresh stream context, which the
+//!   generated code opens and closes (`l2r_task_begin`, `task::begin`);
+//! - the waits of lean2rr's own objects: a thunk being forced on another
+//!   context (`thunk_wait_busy`, `on_finish`);
+//! - thin calls to the yield points (`effect`, `poll`, `before_publish`).
 //!
-//! The scheduler then runs, in this order: a context that can go on (in the
-//! order they became able to), else a queued task on a new context (in the
-//! order Lean's task manager would start it, within its number of workers:
-//! `LEAN_NUM_THREADS`, or the number of processors; a task at
-//! `Task.Priority.dedicated` has a thread of its own natively and always
-//! starts), else whatever the event loop is waiting for (`net`: timers,
-//! sockets) or the earliest sleeper, waiting for it. When nothing can ever
-//! go on, the program waits forever, as natively a deadlocked one does.
-//!
-//! A context that blocks keeps its own task bookkeeping (`task::CtxState`:
-//! the running tasks, walks of dependents, chains being forced) and its own
-//! standard streams (`once::CtxState`), as a thread keeps its own; the
-//! switch saves the leaving context's and restores the arriving one's.
+//! lean2rr stays on one thread (`main`'s): `start` runs there.
 
-use crate::coro::Stack;
-use std::cell::UnsafeCell;
-use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
+use crate::once;
+use lean_runtime::sched::{self as ls, CtxId, Glue, Suspend};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
-struct Global<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for Global<T> {}
+struct LeanrtGlue;
 
-pub type CtxId = u32;
-/// `main`'s context (also the one of the initializers before it).
-pub const MAIN: CtxId = 0;
+impl Glue for LeanrtGlue {
+    fn suspend(&self, s: Suspend<'_>) {
+        // SAFETY: the one `unsafe` step of lean-runtime's scheduler, done by
+        // the translator's glue (lean-runtime docs/sched.md, "Why
+        // `Glue::suspend` is sound", S1-S7, and its checklist for glue
+        // authors; the shared-runtime decision that each translator's glue
+        // does this dereference with a full entry).
+        //
+        // What is dereferenced: `s.yielder()`, a `*const
+        // corosensei::Yielder<(), ()>`. It is sound when, for the whole call,
+        // (P1) it points to the `Yielder` of a live corosensei coroutine and
+        // (P2) that coroutine is the one running on the current stack, and the
+        // call is made from that coroutine's own stack.
+        //
+        // Why P1 and P2 hold: lean-runtime calls `Glue::suspend` from one
+        // place only, `switch_away` (`src/sched/ctx.rs`), only when the running
+        // context is not `main`'s (S3), with the pointer read from the
+        // running context's own `Ctx::yielder` field in the same borrow that
+        // records the context as blocked or able to run (S1: that field is
+        // written only by the coroutine's own entry, with corosensei's `y`,
+        // and cleared after the coroutine returns; S2: the running context is
+        // the one whose stack this call runs on). corosensei keeps the yielder
+        // (the coroutine's parent link) at a fixed place below the base of
+        // the coroutine's stack, a mapping that lives until the coroutine is
+        // dropped, which lean-runtime never does while it is suspended (S5).
+        // `switch_away` asserts the pointer is not null.
+        //
+        // What lean2rr guarantees in return (the glue's duties, all checked
+        // by inspection of leanrt):
+        // - this body is the only dereference, once per call, and does
+        //   nothing else; the `Suspend` and the pointer are not stored, copied
+        //   out or used anywhere else (no field, thread-local or closure);
+        // - lean-runtime's scheduler functions are called only from `main`'s
+        //   thread stack and its contexts: never from a signal handler (the
+        //   stack-overflow report is lean-runtime's own and calls no
+        //   scheduler function), from another thread (leanrt's only other
+        //   threads are lean-runtime's internal helpers, which run no Lean
+        //   code), or from a stack lean2rr switches to itself (it has none:
+        //   leanrt has no coroutines of its own);
+        // - `switched` only moves state and cannot block or yield (below);
+        // - `sched::start` is called on the thread that runs `main`, and
+        //   every later call is made on that thread (`rt::run_main2`).
+        unsafe { (*s.yielder()).suspend(()) }
+    }
 
-/// What a blocked context waits for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Wait {
-    None,
-    /// The task or promise with this identity finishes.
-    Cell(usize),
-    /// Any task finishes (`IO.waitAny` when every task is running).
-    Progress,
-    /// `main` has returned and waits for the remaining tasks: woken when a
-    /// context ends, a task finishes or is queued.
-    FinalRun,
-    /// A synchronization object (`sync`): woken by whoever hands it over.
-    Sync(usize),
-    /// A sleep until the deadline.
-    Sleep(Instant),
-    /// The event loop's context waits for timers and sockets (`net`).
-    Io,
-    /// Nothing: a context that waits forever (a task needed by its own
-    /// computation; natively the thread waits forever, the others go on).
-    Forever,
-}
+    /// Natively each thread has its own current standard streams: the
+    /// leaving context's stream cells and saved stream contexts go to its
+    /// record, the arriving context's come back from its own (empty for a
+    /// new context: its streams are rebuilt as the process's on first use).
+    /// Moves values only: no Lean code, no call into the scheduler.
+    fn switched(&self, from: CtxId, to: CtxId) {
+        CTX_STATES.with(|m| {
+            let mut m = m.borrow_mut();
+            let mut st = m.remove(&to).unwrap_or_default();
+            once::swap_ctx_state(&mut st);
+            m.insert(from, st);
+        });
+    }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Status {
-    Running,
-    Runnable,
-    Blocked,
-    Dead,
-}
+    /// A task starts. On a thread of its own natively (`own_thread`):
+    /// - a pool task (lean-runtime's `running_worker` names its emulated
+    ///   worker): that worker's stream cells come in, the running thread's
+    ///   are kept until `task_end` (the worker's first task: empty cells,
+    ///   rebuilt as the process's streams on first use);
+    /// - a dedicated task (no worker): a fresh stream context, which the
+    ///   generated code opens and closes (`l2r_task_begin` answers
+    ///   `B_ENTER`, `task::begin`; `task::end` ends the task inside it).
+    ///
+    /// A `sync` task (not `own_thread`) shares the running thread's cells.
+    /// Moves values only: no Lean code.
+    fn task_begin(&self, own_thread: bool) {
+        let run = if !own_thread {
+            TaskRun::Shared
+        } else {
+            // After the workers ended (`workers_end`), a pool task (a
+            // dedicated task's dependent, Lean's LB-13 run corrected) starts
+            // with a fresh set, dropped at its end: as a dedicated task.
+            match ls::running_worker().filter(|_| !WORKERS_ENDED.with(|e| e.get())) {
+                Some(w) => {
+                    let mut set = WORKER_SETS
+                        .with(|s| s.borrow_mut().get_mut(w as usize).and_then(Option::take))
+                        .unwrap_or_default();
+                    once::swap_cells(&mut set);
+                    TaskRun::Worker(w, set)
+                }
+                None => TaskRun::Fresh,
+            }
+        };
+        let me = ls::current_context();
+        RUNS.with(|r| r.borrow_mut().entry(me).or_default().push(run));
+    }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind {
-    Main,
-    /// Runs queued tasks, as a worker thread.
-    Worker,
-    /// The event loop (`net`), as libuv's thread.
-    EvLoop,
-}
+    /// The task manager's finalization ends its standard workers, before it
+    /// waits for the dedicated tasks (lean-runtime's AR-34; natively
+    /// `~task_manager` joins them, and their thread finalizers drop their
+    /// current streams): the workers' stream cells are dropped
+    /// (`workers_end`). Called once.
+    fn workers_end(&self) {
+        WORKERS_ENDED.with(|e| e.set(true));
+        workers_end();
+    }
 
-struct Ctx {
-    status: Status,
-    wait: Wait,
-    kind: Kind,
-    /// The saved stack pointer while not running.
-    sp: usize,
-    stack: Option<Stack>,
-    /// The thread number of tasks running on it outside of any other task
-    /// (`task::cur_thread`): 0 for `main`'s.
-    thread_base: u32,
-    tasks: crate::task::CtxState,
-    once: crate::once::CtxState,
-    /// A worker's first task, with its entry's serial number
-    /// (`task::next_tag` hands it over if it is still that task).
-    preselect: (u32, u32),
-    /// When it last became able to run (`effect`).
-    ready: Instant,
-    /// It lets the others go first at an effect point (`effect_slow`).
-    at_effect: bool,
-}
-
-impl Ctx {
-    fn new(kind: Kind, thread_base: u32) -> Ctx {
-        Ctx {
-            status: Status::Runnable,
-            wait: Wait::None,
-            kind,
-            sp: 0,
-            stack: None,
-            thread_base,
-            tasks: Default::default(),
-            once: Default::default(),
-            preselect: (crate::task::NONE, 0),
-            ready: Instant::now(),
-            at_effect: false,
+    /// The task started by the matching `task_begin` has finished (its
+    /// `sync` dependents have run with its streams), or waits for the task
+    /// its bind function returned: a pool task's worker keeps the cells the
+    /// task leaves, and the running thread's come back.
+    fn task_end(&self, _own_thread: bool) {
+        let me = ls::current_context();
+        let run = RUNS.with(|r| r.borrow_mut().get_mut(&me).and_then(Vec::pop));
+        if let Some(TaskRun::Worker(w, mut set)) = run {
+            once::swap_cells(&mut set);
+            WORKER_SETS.with(|s| {
+                let mut s = s.borrow_mut();
+                let w = w as usize;
+                if s.len() <= w {
+                    s.resize_with(w + 1, || None);
+                }
+                s[w] = Some(set);
+            });
         }
     }
 }
 
-struct Sched {
-    ctxs: Vec<Ctx>,
-    free: Vec<CtxId>,
-    cur: CtxId,
-    /// Contexts that can go on, in the order they became able to.
-    runnable: VecDeque<CtxId>,
-    /// Sleeping contexts and their deadlines.
-    sleepers: Vec<(Instant, CtxId)>,
-    /// Contexts waiting for a task or promise, by its identity.
-    cell_waiters: HashMap<usize, Vec<CtxId>>,
-    /// Contexts waiting for any task to finish (`Wait::Progress`,
-    /// `Wait::FinalRun`).
-    progress_waiters: Vec<CtxId>,
-    /// Blocked contexts (all reasons).
-    blocked: u32,
-    /// Live worker contexts.
-    workers: u32,
-    /// A context that has ended, whose stack is freed by the next one to
-    /// run (it cannot free the stack it runs on).
-    zombie: Option<Stack>,
-    evloop: Option<CtxId>,
-    pool_limit: u32,
-    next_thread: u32,
-    /// Free stacks for new contexts.
-    pool: Vec<Stack>,
-    /// A context is letting the others go first at an effect point
-    /// (`effect_slow`): what they do meanwhile happened before it natively,
-    /// so their own effect points do not start anything more.
-    in_effect: bool,
-    /// When an effect point last polled the event loop's descriptors
-    /// (`effect_slow`).
-    last_poll: Option<Instant>,
+/// How a task running on a context got its standard streams
+/// (`Glue::task_begin`).
+enum TaskRun {
+    /// A `sync` task: the running thread's.
+    Shared,
+    /// A pool task of this emulated worker; the running thread's cells are
+    /// kept here meanwhile.
+    Worker(u32, once::CellSet),
+    /// A dedicated task: a fresh context, opened by the generated code.
+    Fresh,
 }
 
-static SCHED: Global<Option<Sched>> = Global(UnsafeCell::new(None));
-
-#[inline]
-fn sched() -> &'static mut Sched {
-    let s = unsafe { &mut *SCHED.0.get() };
-    if s.is_none() {
-        init(s);
-    }
-    s.as_mut().unwrap()
+thread_local! {
+    /// The stream state of each suspended context (see `switched`).
+    static CTX_STATES: RefCell<HashMap<CtxId, once::CtxState>> = RefCell::new(HashMap::new());
+    /// The tasks running on each context, innermost last (`Glue::task_begin`).
+    static RUNS: RefCell<HashMap<CtxId, Vec<TaskRun>>> = RefCell::new(HashMap::new());
+    /// The workers have ended (`Glue::workers_end`).
+    static WORKERS_ENDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Each emulated pool worker's stream cells between its tasks, by worker
+    /// id (`Glue::task_end`).
+    static WORKER_SETS: RefCell<Vec<Option<once::CellSet>>> = const { RefCell::new(Vec::new()) };
+    /// Contexts waiting for a thunk that another context is forcing, with
+    /// the thunk's address (`thunk_wait_busy`).
+    static THUNK_WAITERS: RefCell<Vec<(usize, CtxId)>> = const { RefCell::new(Vec::new()) };
 }
 
-#[cold]
-fn init(s: &mut Option<Sched>) {
-    let mut main = Ctx::new(Kind::Main, 0);
-    main.status = Status::Running;
-    *s = Some(Sched {
-        ctxs: vec![main],
-        free: Vec::new(),
-        cur: MAIN,
-        runnable: VecDeque::new(),
-        sleepers: Vec::new(),
-        cell_waiters: HashMap::new(),
-        progress_waiters: Vec::new(),
-        blocked: 0,
-        workers: 0,
-        zombie: None,
-        evloop: None,
-        pool_limit: pool_limit(),
-        next_thread: 1,
-        pool: Vec::new(),
-        in_effect: false,
-        last_poll: None,
-    });
+/// Whether the innermost task running on this context is a dedicated one,
+/// which gets a fresh stream context (`Glue::task_begin`); false outside
+/// tasks.
+pub fn fresh_context() -> bool {
+    let me = ls::current_context();
+    RUNS.with(|r| matches!(r.borrow().get(&me).and_then(|v| v.last()), Some(TaskRun::Fresh)))
 }
 
-/// The number of worker threads of Lean's task manager:
-/// `LEAN_NUM_THREADS` (C's `atoi`), or the number of online processors.
-fn pool_limit() -> u32 {
-    if let Some(v) = std::env::var_os("LEAN_NUM_THREADS") {
-        let s = std::os::unix::ffi::OsStrExt::as_bytes(v.as_os_str());
-        let mut i = 0;
-        while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
-            i += 1;
-        }
-        let neg = i < s.len() && s[i] == b'-';
-        if i < s.len() && (s[i] == b'-' || s[i] == b'+') {
-            i += 1;
-        }
-        // glibc's `atoi` is `(int) strtol(s, NULL, 10)`: `strtol` saturates
-        // at the bounds of a `long`, the cast keeps the low 32 bits; Lean
-        // takes the result as an `unsigned` (`lean_init_task_manager_using`):
-        // 0 is no task manager (`task::start`), a negative number wraps.
-        let mut n: i128 = 0;
-        while i < s.len() && s[i].is_ascii_digit() {
-            n = (n * 10 + (s[i] - b'0') as i128).min(i64::MAX as i128 + 1);
-            i += 1;
-        }
-        let n = if neg { -n } else { n }.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
-        return n as i32 as u32;
-    }
-    hardware_concurrency()
+extern "C" {
+    /// The generated `l2r_std_drop_workers` (programs that create tasks):
+    /// each worker's cells in turn made current (`worker_streams_enter`)
+    /// and dropped.
+    #[linkage = "extern_weak"]
+    static l2r_std_drop_workers_c: *const std::ffi::c_void;
 }
 
-/// `std::thread::hardware_concurrency()`, as Lean's C++ runtime calls it:
-/// the number of online processors (`sysconf(_SC_NPROCESSORS_ONLN)`, not
-/// limited by the CPU affinity mask or a cgroup quota), 0 if unknown.
-pub fn hardware_concurrency() -> u32 {
-    extern "C" {
-        fn sysconf(name: i32) -> i64;
-    }
-    const SC_NPROCESSORS_ONLN: i32 = 84;
-    unsafe { sysconf(SC_NPROCESSORS_ONLN) }.max(0) as u32
-}
-
-/// The running context.
-#[inline]
-pub fn cur() -> CtxId {
-    let s = unsafe { &*SCHED.0.get() };
-    match s {
-        Some(s) => s.cur,
-        None => MAIN,
-    }
-}
-
-/// The kind of the running context.
-pub fn cur_kind() -> Kind {
-    let s = sched();
-    s.ctxs[s.cur as usize].kind
-}
-
-/// Whether contexts other than the running one exist (alive).
-#[inline]
-pub fn others_alive() -> bool {
-    let s = unsafe { &*SCHED.0.get() };
-    match s {
-        Some(s) => s.ctxs.len() - s.free.len() > 1,
-        None => false,
-    }
-}
-
-/// Whether some context waits for something (fast check for the hooks).
-#[inline]
-fn any_blocked() -> bool {
-    let s = unsafe { &*SCHED.0.get() };
-    match s {
-        Some(s) => s.blocked > 0,
-        None => false,
-    }
-}
-
-/// The thread number of the running context's own tasks.
-#[inline]
-pub fn cur_thread_base() -> u32 {
-    let s = unsafe { &*SCHED.0.get() };
-    match s {
-        Some(s) => s.ctxs[s.cur as usize].thread_base,
-        None => 0,
-    }
-}
-
-/// The number of worker threads (`pool_limit`).
-pub fn workers_limit() -> u32 {
-    sched().pool_limit
-}
-
-/// A worker's first task, once (see `task::next_tag`).
-pub fn take_preselect() -> (u32, u32) {
-    let s = sched();
-    let c = &mut s.ctxs[s.cur as usize];
-    std::mem::replace(&mut c.preselect, (crate::task::NONE, 0))
-}
-
-/// Visit the task bookkeeping of every live context other than the running
-/// one, with what it waits for (the running context's is the global one).
-pub fn for_each_other(mut f: impl FnMut(&crate::task::CtxState, Wait)) {
-    let s = sched();
-    for (i, c) in s.ctxs.iter().enumerate() {
-        if i as CtxId != s.cur && c.status != Status::Dead {
-            f(&c.tasks, c.wait);
-        }
-    }
-}
-
-/// What the running context waits for (`Wait::None` while it runs).
-pub fn cur_wait() -> Wait {
-    let s = sched();
-    s.ctxs[s.cur as usize].wait
-}
-
-/// Block the running context until it is woken (`wake`) for `w`; other
-/// contexts run meanwhile. Returns once it runs again.
-///
-/// The walks a free left to this context (`task::run_later_walks`) run
-/// first. Callers that put the context in a waiter list before calling
-/// this (`sync`, `once::claim`) have run them already: a wake-up by them
-/// would be lost. For the other waits the context is registered here, and
-/// what the walks did may be what it waits for (a promise they resolved):
-/// then it does not wait, and its caller looks again.
-pub fn block(w: Wait) {
-    if crate::task::run_later_walks() && matches!(w, Wait::Cell(_) | Wait::Progress | Wait::FinalRun) {
+/// The task manager's finalization joins the pool workers, whose thread
+/// finalizers drop their current streams (lean-runtime's AR-33, AR-34;
+/// `Glue::workers_end`): the workers' stream cells are dropped, through the
+/// generated `l2r_std_drop_workers` (absent without tasks or standard
+/// streams).
+fn workers_end() {
+    let f = unsafe { l2r_std_drop_workers_c };
+    if f.is_null() {
         return;
     }
-    let s = sched();
-    let c = s.cur;
-    {
-        let x = &mut s.ctxs[c as usize];
-        debug_assert_eq!(x.status, Status::Running);
-        x.status = Status::Blocked;
-        x.wait = w;
-    }
-    s.blocked += 1;
-    match w {
-        Wait::Cell(a) => s.cell_waiters.entry(a).or_default().push(c),
-        Wait::Progress | Wait::FinalRun => s.progress_waiters.push(c),
-        Wait::Sleep(d) => s.sleepers.push((d, c)),
-        _ => {}
-    }
-    schedule();
+    let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(f) };
+    unsafe { f() };
 }
 
-/// Let other contexts that can go on run first (the running one goes on
-/// after them).
-pub fn yield_now() {
-    crate::task::run_later_walks();
-    let s = sched();
-    let c = s.cur;
-    s.ctxs[c as usize].status = Status::Runnable;
-    s.ctxs[c as usize].ready = Instant::now();
-    s.runnable.push_back(c);
-    schedule();
-}
-
-/// Make blocked context `c` able to go on.
-pub fn wake(c: CtxId) {
-    let s = sched();
-    let x = &mut s.ctxs[c as usize];
-    if x.status == Status::Blocked {
-        x.status = Status::Runnable;
-        x.ready = Instant::now();
-        x.wait = Wait::None;
-        s.blocked -= 1;
-        s.runnable.push_back(c);
+/// The task manager's finalization (`main` has returned and its tasks
+/// have run): natively it joins the pool workers, whose thread finalizers
+/// drop their current streams (lean-runtime's AR-33). The next worker's
+/// cells, in worker order, become the current ones, the running thread's set
+/// aside (`once::enter_cells`; the generated `l2r_std_leave` then drops
+/// them and gives the thread's back). Whether there was one.
+pub fn worker_streams_enter(base: u64) -> bool {
+    let next = WORKER_SETS.with(|s| s.borrow_mut().iter_mut().find_map(Option::take));
+    match next {
+        Some(set) => {
+            once::enter_cells(base, set);
+            true
+        }
+        None => false,
     }
 }
 
-/// A task or promise with identity `a` has finished: wake whoever waits
-/// for it or for any task.
+/// lean-runtime's scheduler starts (`task::ensure_started`, at the first
+/// task, promise, `Std.Sync` object, timer, signal watcher or socket after
+/// `main` started), with the task manager's number of workers (0: no task
+/// manager, tasks run at once) and the contexts' stack size, read when
+/// `main` started (`task::start`, Lean's `lean_init_task_manager`). Called
+/// on `main`'s thread, which then registers with Lean's stack-overflow
+/// report (`rt::run_main2` installed it on this thread).
+pub fn start(workers: u32, stack_size: usize) {
+    ls::start_with(Rc::new(LeanrtGlue), workers, stack_size);
+}
+
+/// An observable effect (output, a flush, a process spawn,
+/// `IO.Process.exit`): what native threads would have done by now goes
+/// first (lean-runtime's `sched::effect`).
+#[inline]
+pub fn effect() {
+    ls::effect()
+}
+
+/// A polling point (clock reads, lean-runtime's `sched::poll`).
+#[inline]
+pub fn poll() {
+    ls::poll()
+}
+
+/// A write another context can see (a thunk's or a task's value stored in
+/// its cell, `l2r_lcell_set`): the streams this context's drops handed to
+/// writer threads are written first (lean-runtime's `sched::before_publish`;
+/// one relaxed load when none is).
+#[inline]
+pub fn before_publish() {
+    ls::before_publish()
+}
+
+/// `std::thread::hardware_concurrency()` (lean-runtime's).
+pub fn hardware_concurrency() -> u32 {
+    ls::hardware_concurrency()
+}
+
+/// A thunk has its value (`l2r_thunk_done`): the contexts waiting for it go
+/// on.
 #[inline]
 pub fn on_finish(a: usize) {
-    if any_blocked() {
-        on_finish_slow(a)
+    if THUNK_WAITERS.with(|w| !w.borrow().is_empty()) {
+        on_finish_slow(a);
     }
 }
 
 #[inline(never)]
 fn on_finish_slow(a: usize) {
-    let s = sched();
-    if let Some(ws) = s.cell_waiters.remove(&a) {
-        for c in ws {
-            if matches!(s.ctxs[c as usize].wait, Wait::Cell(x) if x == a) {
-                wake(c);
+    let ws: Vec<CtxId> = THUNK_WAITERS.with(|w| {
+        let mut w = w.borrow_mut();
+        let mut out = Vec::new();
+        w.retain(|&(t, c)| {
+            if t == a {
+                out.push(c);
+                false
+            } else {
+                true
             }
-        }
-    }
-    wake_progress();
-}
-
-/// Something changed that `Wait::Progress`/`Wait::FinalRun` waiters look
-/// at: a task finished or was queued, a context ended.
-fn wake_progress() {
-    let s = sched();
-    if s.progress_waiters.is_empty() {
-        return;
-    }
-    let ws = std::mem::take(&mut s.progress_waiters);
+        });
+        out
+    });
     for c in ws {
-        if matches!(s.ctxs[c as usize].wait, Wait::Progress | Wait::FinalRun) {
-            wake(c);
-        }
+        ls::wake(c);
     }
 }
 
-/// A task was queued.
-#[inline]
-pub fn on_enqueue() {
-    if any_blocked() {
-        wake_progress()
-    }
-}
-
-/// Sleep for `d` (`IO.sleep`): the running context blocks until then, and
-/// others run meanwhile. Without anything else to do, a plain sleep.
-pub fn sleep(d: Duration) {
-    let s = sched();
-    let alone = s.ctxs.len() - s.free.len() == 1 && s.evloop.is_none() && !crate::task::has_queued();
-    if alone || !crate::task::deferring() {
-        std::thread::sleep(d);
-        return;
-    }
-    block(Wait::Sleep(Instant::now() + d));
-}
-
-/// Wake the sleepers whose deadline has passed (in deadline order, as
-/// their threads would wake); the earliest deadline left.
-fn promote_sleepers(now: Instant) -> Option<Instant> {
-    let s = sched();
-    if s.sleepers.is_empty() {
-        return None;
-    }
-    let mut next: Option<Instant> = None;
-    let mut due: Vec<(Instant, CtxId)> = Vec::new();
-    let mut i = 0;
-    while i < s.sleepers.len() {
-        let (d, c) = s.sleepers[i];
-        let x = &s.ctxs[c as usize];
-        if x.status != Status::Blocked || x.wait != Wait::Sleep(d) {
-            s.sleepers.swap_remove(i);
-            continue;
-        }
-        if d <= now {
-            s.sleepers.swap_remove(i);
-            due.push((d, c));
-            continue;
-        }
-        next = Some(next.map_or(d, |n| n.min(d)));
-        i += 1;
-    }
-    due.sort();
-    for (_, c) in due {
-        wake(c);
-    }
-    next
-}
-
-/// Whether a sleeper's deadline has passed (for effect points).
-pub fn sleeper_due(now: Instant) -> bool {
-    let s = sched();
-    s.sleepers.iter().any(|&(d, c)| d <= now && s.ctxs[c as usize].wait == Wait::Sleep(d))
-}
-
-/// How long a context able to run, or a task a worker has picked, waits
-/// before an output of the running context lets it go first: natively it
-/// runs meanwhile on its own thread, and would by then have got past
-/// anything that takes no time (thread wake-ups take microseconds).
-const STALE: Duration = Duration::from_millis(5);
-
-/// How often effect points poll the descriptors and signals the event loop
-/// watches (`effect_slow`): a system call at every output would cost more
-/// than the output, and natively the event loop's thread sees them only
-/// after a wake-up's latency too.
-const POLL_EVERY: Duration = Duration::from_micros(50);
-
-/// Whether an effect point polls the event loop's descriptors now (at most
-/// once per `POLL_EVERY`).
-fn poll_due(now: Instant) -> bool {
-    let s = sched();
-    if s.last_poll.is_some_and(|t| now.saturating_duration_since(t) < POLL_EVERY) {
-        return false;
-    }
-    s.last_poll = Some(now);
-    true
-}
-
-/// An observable effect (output, an exit) of the running context: what
-/// natively would have run by now on other threads goes first: a context
-/// whose sleep has ended, a due timer of the event loop and what its
-/// completion releases (`sync` continuations, contexts waiting for it, the
-/// tasks it queues), a context able to run for a while (a lock handed over,
-/// a promise resolved), a task the worker picked a while ago.
-#[inline]
-pub fn effect() {
-    crate::task::run_later_walks();
-    let s = unsafe { &*SCHED.0.get() };
-    if let Some(s) = s {
-        if !s.sleepers.is_empty() || s.evloop.is_some() || !s.runnable.is_empty() || crate::task::worker_busy() {
-            effect_slow();
-        }
-    }
-}
-
+/// A `busy` thunk is needed (`l2r_thunk_wait_busy`): another context is
+/// forcing it (its computation blocked, or let others run at an effect
+/// point); wait until it has its value (`on_finish`), as natively a thread
+/// waits for the one forcing it. Needed by its own computation, nothing
+/// ever wakes it: it waits forever, as natively (LB-08: native spins), the
+/// others go on (lean-runtime docs/sched.md, "The glue", item 7). Before
+/// the task manager runs, nothing else can go on: the thread waits forever.
 #[inline(never)]
-fn effect_slow() {
-    if !crate::task::deferring() {
-        return;
+pub fn thunk_wait_busy(a: usize) {
+    if !ls::manager_running() {
+        ls::hang()
     }
-    // What is due goes first, then what it releases in turn (contexts
-    // woken meanwhile, tasks queued that a free worker starts at once),
-    // round after round (a bound: contexts that keep waking each other
-    // natively run beside this one). Inside such a round (`in_effect`),
-    // what runs happened before natively: its own effect points do not
-    // start tasks, and let go first only what is due or able to run for a
-    // while (the context that let it run, if it has computed since).
-    let nested = sched().in_effect;
-    let mark = crate::task::queue_mark();
-    sched().in_effect = true;
-    for round in 0..64 {
-        let now = Instant::now();
-        let mut go = false;
-        if sleeper_due(now) {
-            promote_sleepers(now);
-            go = true;
-        }
-        if crate::net::due(now) {
-            // Due timers fire; completions are delivered by the event
-            // loop's context, which is then able to run.
-            crate::net::process_due(now);
-            go = crate::net::has_fired() || go;
-        }
-        // Descriptors and signals the event loop would have seen by now.
-        if poll_due(now) && crate::net::poll_now() {
-            go = true;
-        }
-        let s = sched();
-        if s.runnable.iter().any(|&c| {
-            let x = &s.ctxs[c as usize];
-            (round > 0 && !x.at_effect) || now.saturating_duration_since(x.ready) >= STALE
-        }) {
-            go = true;
-        }
-        if !nested {
-            let mut w = crate::task::stale_startable(STALE);
-            if w == crate::task::NONE && round > 0 {
-                w = crate::task::released_startable(mark);
-            }
-            if w != crate::task::NONE {
-                start_worker(w);
-                go = true;
-            }
-        }
-        if !go || sched().runnable.is_empty() {
-            break;
-        }
-        let s = sched();
-        let c = s.cur as usize;
-        s.ctxs[c].at_effect = true;
-        yield_now();
-        let s = sched();
-        let c = s.cur as usize;
-        s.ctxs[c].at_effect = false;
-    }
-    if !nested {
-        sched().in_effect = false;
-    }
+    let me = ls::current_context();
+    THUNK_WAITERS.with(|w| w.borrow_mut().push((a, me)));
+    ls::block_sync();
 }
 
-/// `IO.sleep 0`: no time passes, but what natively runs meanwhile does: the
-/// contexts whose sleep has ended, due timers, the contexts able to run, a
-/// queued task a worker would have started by now.
-pub fn zero_sleep() {
-    if !crate::task::deferring() {
-        return;
-    }
-    let now = Instant::now();
-    promote_sleepers(now);
-    if crate::net::due(now) {
-        crate::net::process_due(now);
-    }
-    crate::net::poll_now();
-    let w = crate::task::stale_startable(crate::task::WORKER_LATENCY);
-    if w != crate::task::NONE {
-        start_worker(w);
-    }
-    if !sched().runnable.is_empty() {
-        yield_now();
-    }
-}
-
-/// A program polling for a task that cannot finish without the others (it
-/// runs on another context, or waits for one or for a promise): natively
-/// they go on meanwhile, so they do now: due sleepers and timers, the
-/// contexts able to run, a queued task if a worker is free (as when the
-/// running code blocks).
-pub fn poll_yield() {
-    if !crate::task::deferring() {
-        return;
-    }
-    let now = Instant::now();
-    promote_sleepers(now);
-    if crate::net::due(now) {
-        crate::net::process_due(now);
-    }
-    crate::net::poll_now();
-    if sched().runnable.is_empty() {
-        let e = crate::task::startable(false);
-        if e != crate::task::NONE {
-            start_worker(e);
-        }
-    }
-    if !sched().runnable.is_empty() {
-        yield_now();
-    }
-}
-
-/// Start queued task `e` on a new worker context (able to run).
-fn start_worker(e: u32) {
-    let id = new_ctx(Kind::Worker, worker_entry);
-    sched().ctxs[id as usize].preselect = (e, crate::task::serial_of(e));
-}
-
-/// Mark the event loop's context (`net`) able to run: it has events to
-/// deliver. Not while it waits for something else (blocked inside a `sync`
-/// continuation, natively a libuv callback that blocks): it delivers them
-/// when it is back. Whether it was woken.
-pub fn wake_evloop() -> bool {
-    let s = sched();
-    if let Some(e) = s.evloop {
-        if s.ctxs[e as usize].wait == Wait::Io {
-            wake(e);
-            return true;
-        }
-    }
-    false
-}
-
-/// Start the event loop's context, once (`net` calls this when it starts
-/// watching something).
-pub fn ensure_evloop() {
-    let s = sched();
-    if s.evloop.is_some() {
-        return;
-    }
-    let id = new_ctx(Kind::EvLoop, evloop_entry);
-    // It starts blocked: it runs when there are events.
-    let s = sched();
-    let x = &mut s.ctxs[id as usize];
-    x.status = Status::Blocked;
-    x.wait = Wait::Io;
-    s.blocked += 1;
-    s.evloop = Some(id);
-    // The fresh context is not in the runnable queue (`new_ctx` put it there).
-    s.runnable.retain(|&c| c != id);
-}
-
-extern "C" fn evloop_entry(_: usize) -> ! {
-    note_running_stack();
-    loop {
-        crate::net::deliver();
-        block(Wait::Io);
-    }
-}
-
-extern "C" {
-    /// lean2rr's `l2r_task_run_one() -> u64`: runs the next queued task
-    /// (`task::next_tag`), exported by every program.
-    #[linkage = "extern_weak"]
-    static l2r_task_run_one_c: *const std::ffi::c_void;
-}
-
-extern "C" fn worker_entry(_: usize) -> ! {
-    note_running_stack();
-    let f = unsafe { l2r_task_run_one_c };
-    assert!(!f.is_null(), "leanrt: no l2r_task_run_one_c");
-    let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(f) };
-    loop {
-        unsafe { f() };
-        crate::task::run_later_walks();
-        // Natively the worker takes the next queued task; here a context
-        // that can go on comes first, and this one ends.
-        let s = sched();
-        if !s.runnable.is_empty() {
-            break;
-        }
-        let e = crate::task::startable(true);
-        if e == crate::task::NONE {
-            break;
-        }
-        let s = sched();
-        s.ctxs[s.cur as usize].preselect = (e, crate::task::serial_of(e));
-    }
-    die()
-}
-
-/// End the running context (a worker with nothing left to do).
-fn die() -> ! {
-    let s = sched();
-    let c = s.cur;
-    {
-        let x = &mut s.ctxs[c as usize];
-        x.status = Status::Dead;
-        x.wait = Wait::None;
-    }
-    s.workers -= 1;
-    wake_progress();
-    schedule();
-    unreachable!("leanrt: a dead context was resumed")
-}
-
-/// A new context running `entry`, able to run.
-fn new_ctx(kind: Kind, entry: extern "C" fn(usize) -> !) -> CtxId {
-    let s = sched();
-    let stack = match s.pool.pop() {
-        Some(st) => st,
-        None => match Stack::new(crate::rt::thread_stack_size()) {
-            Some(st) => st,
-            None => crate::rt::thread_create_failed(),
-        },
-    };
-    let sp = stack.init(entry, 0);
-    let tb = s.next_thread << 16;
-    s.next_thread += 1;
-    let mut x = Ctx::new(kind, tb);
-    x.sp = sp;
-    x.stack = Some(stack);
-    let id = match s.free.pop() {
-        Some(i) => {
-            s.ctxs[i as usize] = x;
-            i
-        }
-        None => {
-            s.ctxs.push(x);
-            (s.ctxs.len() - 1) as CtxId
-        }
-    };
-    if kind == Kind::Worker {
-        s.workers += 1;
-    }
-    s.runnable.push_back(id);
-    id
-}
-
-/// Whether worker contexts are alive (tasks started by the scheduler that
-/// have not finished).
-pub fn workers_alive() -> bool {
-    sched().workers > 0
-}
-
-/// Pick the next context to run and switch to it; returns when the running
-/// context runs again (it has blocked, yielded or died before).
-fn schedule() {
-    loop {
-        let s = sched();
-        let next_deadline = promote_sleepers(Instant::now());
-        let s2 = sched();
-        if let Some(n) = s2.runnable.pop_front() {
-            if s2.ctxs[n as usize].status != Status::Runnable {
-                continue;
-            }
-            if n == s2.cur {
-                s2.ctxs[n as usize].status = Status::Running;
-                return;
-            }
-            switch_to(n);
-            return;
-        }
-        let _ = s;
-        // A queued task on a new worker context.
-        let e = crate::task::startable(false);
-        if e != crate::task::NONE {
-            start_worker(e);
-            continue;
-        }
-        // The event loop's timers and sockets, or the earliest sleeper.
-        let timeout = next_deadline.map(|d| d.saturating_duration_since(Instant::now()));
-        if crate::net::wait(timeout) {
-            continue;
-        }
-        if let Some(t) = timeout {
-            std::thread::sleep(t);
-            continue;
-        }
-        crate::task::hang_thread();
-    }
-}
-
-/// Switch from the running context to `n` (able to run).
-fn switch_to(n: CtxId) {
-    // Nothing that may block runs inside a free (`task::resolve` walks the
-    // dependents of a promise dropped there afterwards): the free in
-    // progress is the thread's (`reussir_rt::drop`), and the other contexts
-    // would push their frees onto it.
-    if crate::drop::active() {
-        crate::internal_panic("leanrt: a context switch inside a free");
-    }
-    let s = sched();
-    let c = s.cur;
-    // The leaving context's bookkeeping is set aside, the arriving one's
-    // put in place.
-    crate::task::swap_ctx_state(&mut s.ctxs[c as usize].tasks);
-    crate::once::swap_ctx_state(&mut s.ctxs[c as usize].once);
-    crate::task::swap_ctx_state(&mut s.ctxs[n as usize].tasks);
-    crate::once::swap_ctx_state(&mut s.ctxs[n as usize].once);
-    s.ctxs[n as usize].status = Status::Running;
-    s.cur = n;
-    let to = s.ctxs[n as usize].sp;
-    let save: *mut usize = &mut s.ctxs[c as usize].sp;
-    // A dead context's stack is freed once another runs.
-    if s.ctxs[c as usize].status == Status::Dead {
-        let st = s.ctxs[c as usize].stack.take();
-        free_zombie();
-        let s = sched();
-        s.zombie = st;
-        s.free.push(c);
-    }
-    unsafe { crate::coro::switch(save, to) };
-    note_running_stack();
-    free_zombie();
-}
-
-/// A context starts running (back from a switch, or at its entry): its
-/// stack is the one the stack-overflow handler looks at
-/// (`coro::set_running`).
-fn note_running_stack() {
-    let s = sched();
-    crate::coro::set_running(s.ctxs[s.cur as usize].stack.as_ref());
-}
-
-/// Free the stack of the context that ended last (keeping a few for reuse).
-fn free_zombie() {
-    let s = sched();
-    if let Some(st) = s.zombie.take() {
-        if s.pool.len() < 8 {
-            st.release_memory();
-            s.pool.push(st);
-        }
-    }
+/// A thunk forced from its own computation, tasks waiting for each other:
+/// the running context waits forever while the others go on (lean-runtime's
+/// `sched::hang`).
+pub fn hang() -> ! {
+    ls::hang()
 }

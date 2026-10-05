@@ -8,25 +8,48 @@ compiles it with the program. Plan
 [§5.8](../../translation-plan.md#58-externs-and-runtime-calls)
 ("`Std.Internal.UV`").
 
-### `Std.Internal.UV` is implemented in Lean over the event loop
+### `Std.Internal.UV` is implemented in Lean over lean-runtime's primitives
 
-- **What:** Timers, TCP and UDP sockets, name resolution, signals,
-  `Std.Net`'s address conversions and interfaces, and
-  `Std.Internal.UV.System` are Lean code over primitives of the runtime's
-  event loop (`leanrt::net`, `leanrt::sys`) that take and return plain
-  values (numbers, strings, byte arrays, handles, promises). Each follows
-  the C function of the same symbol (`src/runtime/uv/*.cpp`) check by
-  check, with libuv's errors built as `lean_decode_uv_error` builds them
-  (classified by libuv's code, `uv_strerror`'s message, and since Lean 4.34
-  the positive errno as the code: `L2RShim.uvErrno`).
+- **What:** The loop, timers, signals, TCP and UDP sockets, name
+  resolution, `Std.Net`'s address conversions and interfaces, and
+  `Std.Internal.UV.System` are Lean code over primitives of the runtime
+  (`leanrt::net`, `leanrt::sys`) that take and return plain values
+  (numbers, strings, byte arrays, handles, promises). The rules (libuv's
+  state machines and system calls, the checks and their order, the errors,
+  when a promise resolves) are lean-runtime's (`sched::uv`, `net`,
+  `semantics::net`, `io::uvsys`); the shim only builds Lean's values from
+  an operation's outcome (`Op`). Errors are lean-runtime's `IoError`s, read
+  as the `IO.Error` builder, code, file name and details
+  (`L2RShim.ioErrorOf`, the builders' order of `ioErrorBuilderSyms`); the
+  system queries report libuv codes, decoded by lean-runtime too
+  (`uvError` over `lean_shim_uv_kind`, `lean_shim_uv_strerror`).
 - **Why:** Natively these are C over libuv building Lean values
   (`IO.Promise`, `Except IO.Error …`, `SocketAddress`), which lean2rr's
-  runtime cannot build (5021ddf, 470425c).
-- **Where:** `lean2rr/L2RShim.lean` (`uvError`, `check`, `whenDone`,
-  `addrResult`, `acceptResult`, …); `runtime/leanrt/src/net.rs`, `sys.rs`;
-  `runtime/prelude.rr` (`l2r_shim_*`).
+  runtime cannot build (5021ddf, 470425c). One runtime (switch steps 3 and
+  4): the shim's own checks (an empty `send`, an `accept` already done, the
+  name checks of `getAddrInfo`, the interfaces' error) and leanrt's libuv
+  tables went to lean-runtime.
+- **Where:** `lean2rr/L2RShim.lean` (`ioErrorOf`, `opError`,
+  `checkStart`, `opResult`, `completion`, `whenDone`, `addrResult`, …);
+  `runtime/leanrt/src/net.rs`, `sys.rs`; `runtime/prelude.rr`
+  (`l2r_shim_*`).
 - **Remove only if:** the runtime builds Lean values, or links libuv and
   Lean's C code (see [c-ffi.md](c-ffi.md)).
+
+### A timer's or watcher's `next` hands lean-runtime a new promise; it keeps one or the other
+
+- **What:** The shim's `Timer.next`/`Signal.next` make the program's
+  promise `p` and its completion's `r` first; the primitive passes them to
+  lean-runtime's `next` as the new loop promise (`net::LoopP`), and says
+  whether lean-runtime took it (`opFresh`: the shim attaches the
+  continuation and returns `p`) or gave the promise it had (`opTimerPromise`,
+  `opSignalPromise`: returned instead; `p` and `r` are dropped unused).
+- **Why:** lean-runtime's state machine (`timer.cpp`, `signal.cpp`) decides
+  whether `next` makes a promise (`new_promise`), and lean2rr's promises
+  are made in Lean.
+- **Where:** `lean2rr/L2RShim.lean`: `timerNext`, `signalNext`;
+  `runtime/leanrt/src/net.rs`: `next_op`, `LoopP`.
+- **Remove only if:** the runtime makes promises itself.
 
 ### The shim is loaded with the program and treated as library
 
@@ -51,10 +74,12 @@ compiles it with the program. Plan
 - **What:** The shim gives the runtime a promise `r` of `Unit` with the
   operation and attaches a `sync` continuation to `r` that reads the
   operation's outcome and resolves the promise the program sees; the
-  runtime drops `r` when the operation completes.
+  runtime drops its reference to `r` when the operation completes (on
+  lean-runtime's loop context), or marks the operation canceled when
+  lean-runtime gives it up.
 - **Why/Where:** see
-  [../tasks/scheduler.md](../tasks/scheduler.md#the-event-loop-completes-operations-through-promises);
-  `lean2rr/L2RShim.lean`: `whenDone`.
+  [../tasks/scheduler.md](../tasks/scheduler.md#the-event-loop-is-lean-runtimes-timers-signals-and-sockets-complete-through-promises);
+  `lean2rr/L2RShim.lean`: `whenDone`, `completion`.
 - **Remove only if:** see the linked entry.
 
 ### `IO.Promise.isResolved` is replaced (borrow-dependent behaviour)
@@ -104,14 +129,13 @@ compiles it with the program. Plan
   reports libuv's error. A lean-runtime error reaches the shim as its libuv
   code (`sys::uv_code`: lean-runtime decodes with `decode_uv_error(code,
   name)`, which keeps `-code`), and the shim builds the same `IO.Error`
-  (`uvError`, and the named variants of `chdir` and `osGetGroup`). Name
-  resolution checks the host as libuv does (an empty host name or one of
-  256 bytes or more is `EINVAL`, at once). Strings are decoded as
-  `lean_mk_string`.
+  (`uvError`, whose builder and message are lean-runtime's decoding of the
+  code, and the named variants of `chdir` and `osGetGroup`). Strings are
+  decoded as `lean_mk_string`.
 - **Why:** Round 6 IO findings (IO6-01..13, 15; 1362da1) and 024c024;
   one implementation for both translators (switch step 3; leanrt's own
   ports moved into lean-runtime).
 - **Where:** `runtime/leanrt/src/sys.rs`; lean-runtime's
-  `src/io/uvsys.rs`, `argv_title.rs`; `runtime/leanrt/src/net.rs`:
-  `dns_get_info`; `lean2rr/L2RShim.lean` (the System section).
+  `src/io/uvsys.rs`, `argv_title.rs`; `lean2rr/L2RShim.lean` (the System
+  section).
 - **Remove only if:** never.

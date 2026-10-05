@@ -39,18 +39,19 @@ lean2rr does not copy native pointer identity or sharing.
 
 ## Tasks and concurrency
 
-All tasks run on one thread, as one of the schedules native Lean can
-produce. See [Runtime](runtime.html#tasks-and-the-scheduler).
+All tasks run on one thread, on lean-runtime's scheduler, as one of the
+schedules native Lean can produce. See
+[Runtime](runtime.html#tasks-and-the-scheduler). lean-runtime's
+`docs/sched.md` lists its known differences.
 
-- A loop that polls a reference set by another task, with no sleep and no
-  output, never sees the change. With a sleep in the loop, it does.
-- A context that computes without output or blocking delays the others.
+- A context that computes without output, blocking or reading a
+  reference delays the others. In a program that creates tasks, every
+  1000th reference read lets the other tasks go on, so a loop that polls a
+  reference set by another task ends.
   Output ordered by sleeps comes in time order only when the code between
   outputs is shorter than the sleeps.
 - `IO.waitAny` does not pick the fastest of several unfinished tasks.
-- A task needed by `main` runs at once, before tasks queued earlier.
-- A blocking system call (reading a pipe, waiting for a child) blocks every
-  task. Name resolution (`getaddrinfo`) runs at once.
+- A few blocking system calls (opening a FIFO) still block every task.
 - `IO.getTID` inside a task is main's id plus a worker number.
 - **When you can see it:** in programs whose output depends on timing races
   between tasks. Natively such output is a race too.
@@ -93,7 +94,7 @@ produce. See [Runtime](runtime.html#tasks-and-the-scheduler).
 - **Promises released inside a free.** Their `sync` dependents run when the
   whole free is over, not when the free reaches the promise. Without Reussir
   patch 0040, a free that Reussir's glue started ends unseen, and the
-  dependents run at the next output, block or task question.
+  dependents run at the next task question or `Std.Sync` operation.
 - **Child processes.** `IO.Process.output` reads both pipes together.
   Natively `Child.pid` leaks the child's pipes; lean2rr closes them.
 

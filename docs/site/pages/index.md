@@ -55,8 +55,9 @@ things:
   implementation-level functions can see them (`ptrAddrUnsafe`,
   `isExclusiveUnsafe`, `dbgTraceIfShared`). lean2rr does not copy native
   addresses.
-- **Timing races between tasks.** lean2rr runs all tasks on one thread. It
-  picks one schedule that native Lean can also produce.
+- **Timing races between tasks.** lean2rr runs all tasks on one thread,
+  on lean-runtime's scheduler. It picks one schedule that native Lean can
+  also produce.
 - **The other known differences.** [Known differences](differences.html)
   lists them, grouped. Plan §10 has the full list.
 
@@ -104,8 +105,8 @@ lean2rr uses the shared crate `lean-runtime`
 (github.com/QueClr/lean-runtime-rs, public). The crate holds Lean's runtime
 semantics, implemented once, in safe Rust; lean2rr takes the hash, string,
 float, fixed-width integer, libm, `Nat`/`Int`, array, panic and number-text
-rules and the IO from it so far, and keeps only its hot paths and the glue
-to its own representations. See [Runtime](runtime.html#the-shared-runtime-crate-plan).
+rules, the IO, the task scheduler and the event loop from it, and keeps
+only its hot paths and the glue to its own representations. See [Runtime](runtime.html#the-shared-runtime-crate-plan).
 
 ## Status
 
@@ -136,8 +137,8 @@ line yet:
   overflow message of `Array.replicate`;
 - plan §10's list of Lean runtime bugs that lean2rr does not reproduce
   (see [Known differences](differences.html#lean-bugs-we-do-not-reproduce));
-- the move of the runtime's scheduler into `lean-runtime` (its IO moved
-  in switch step 3).
+- the move of the runtime's scheduler and event loop into `lean-runtime`
+  (switch step 4; its IO moved in step 3).
 
 ## The pages
 
