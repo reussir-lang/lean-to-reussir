@@ -17,8 +17,9 @@
 //!   leaves, as a native worker thread keeps its streams (`Glue::task_begin`,
 //!   `task_end`); a dedicated task with a fresh stream context, which the
 //!   generated code opens and closes (`l2r_task_begin`, `task::begin`);
-//! - the waits of lean2rr's own objects: a thunk being forced on another
-//!   context (`thunk_wait_busy`, `on_finish`);
+//! - the waits of lean2rr's own objects, thin calls to lean-runtime's wait
+//!   cores (core 3.1, keyed by the thunk's address): a thunk being forced on
+//!   another context (`thunk_wait_busy`, `on_finish`);
 //! - thin calls to the yield points (`effect`, `poll`, `before_publish`).
 //!
 //! lean2rr stays on one thread (`main`'s): `start` runs there.
@@ -176,9 +177,6 @@ thread_local! {
     /// Each emulated pool worker's stream cells between its tasks, by worker
     /// id (`Glue::task_end`).
     static WORKER_SETS: RefCell<Vec<Option<once::CellSet>>> = const { RefCell::new(Vec::new()) };
-    /// Contexts waiting for a thunk that another context is forcing, with
-    /// the thunk's address (`thunk_wait_busy`).
-    static THUNK_WAITERS: RefCell<Vec<(usize, CtxId)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Whether the innermost task running on this context is a dedicated one,
@@ -267,50 +265,27 @@ pub fn hardware_concurrency() -> u32 {
     ls::hardware_concurrency()
 }
 
-/// A thunk has its value (`l2r_thunk_done`): the contexts waiting for it go
-/// on.
+/// A thunk has its value (`l2r_thunk_done`, after its store in
+/// `l2r_lcell_set`, which makes the writers point): the contexts waiting
+/// for it go on (lean-runtime's `done_keyed`, under the thunk's address;
+/// one thread-local load when none waits).
 #[inline]
 pub fn on_finish(a: usize) {
-    if THUNK_WAITERS.with(|w| !w.borrow().is_empty()) {
-        on_finish_slow(a);
-    }
-}
-
-#[inline(never)]
-fn on_finish_slow(a: usize) {
-    let ws: Vec<CtxId> = THUNK_WAITERS.with(|w| {
-        let mut w = w.borrow_mut();
-        let mut out = Vec::new();
-        w.retain(|&(t, c)| {
-            if t == a {
-                out.push(c);
-                false
-            } else {
-                true
-            }
-        });
-        out
-    });
-    for c in ws {
-        ls::wake(c);
-    }
+    ls::done_keyed(a)
 }
 
 /// A `busy` thunk is needed (`l2r_thunk_wait_busy`): another context is
 /// forcing it (its computation blocked, or let others run at an effect
 /// point); wait until it has its value (`on_finish`), as natively a thread
-/// waits for the one forcing it. Needed by its own computation, nothing
-/// ever wakes it: it waits forever, as natively (LB-08: native spins), the
-/// others go on (lean-runtime docs/sched.md, "The glue", item 7). Before
-/// the task manager runs, nothing else can go on: the thread waits forever.
+/// waits for the one forcing it (lean-runtime's `wait_running_keyed`: the
+/// generated `busy` state does not name the forcer). Needed by its own
+/// computation, it waits forever, as natively (LB-08: native spins), the
+/// others go on; before the task manager runs, or with no other context,
+/// the thread hangs.
 #[inline(never)]
 pub fn thunk_wait_busy(a: usize) {
-    if !ls::manager_running() {
-        ls::hang()
-    }
-    let me = ls::current_context();
-    THUNK_WAITERS.with(|w| w.borrow_mut().push((a, me)));
-    ls::block_sync();
+    crate::drop::assert_not_in_free("a thunk's wait");
+    ls::wait_running_keyed(a)
 }
 
 /// A thunk forced from its own computation, tasks waiting for each other:

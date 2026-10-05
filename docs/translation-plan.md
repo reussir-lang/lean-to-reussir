@@ -2551,9 +2551,11 @@ questions, `IO.checkCanceled`, the program's clock reads) let what
 natively would have run by then go first. lean-runtime's IO cooperates
 (a read of an empty pipe, a write to a full one, `flock`, `Child.wait`
 let the others run). lean2rr's glue: the one `unsafe` step of a switch
-(`Glue::suspend`), the per-context streams, the waits of its own objects
-(a thunk being forced on another context: `l2r_thunk_wait_busy`, woken by
-`l2r_thunk_done`; a constant another context computes, `once::claim`).
+(`Glue::suspend`), the per-context streams, and the keys under which its
+own objects wait in lean-runtime's wait cores (a thunk being forced on
+another context, under its address: `l2r_thunk_wait_busy`, woken by
+`l2r_thunk_done`; a constant another context computes, under
+`(slot << 1) | 1`: `once::claim`).
 
 No context is suspended inside a free (the free's pending work is the
 thread's, Reussir's `reussir_rt::drop`, and the other contexts would push
@@ -2566,22 +2568,18 @@ dropping thread, wherever that happens):
   free) is resolved with `none`, and its dependents run at once, as
   natively;
 - a promise held by a container being freed (an array, a list, a
-  structure, a map, an `Option`, ...) is resolved with `none` in its turn,
-  and resolved in lean-runtime, which walks its dependents, as soon as the
-  free is over, in order (natively during the free, when it reaches the
-  promise), before the code that released the container goes on. A free
-  inside such a dependent is a free of its own: its promises' dependents
-  run when it ends, before the dependent goes on, as natively (test
-  `RtPromiseNestedFreeOrder`). The
-  runtime sees the end of a free that it started itself
-  (`leanrt::drop::run`): one of its containers (an array, a reference
-  cell, a task or thunk cell), or the old value of a reference's `set`
-  (below); and of any free through local Reussir patch 0040
-  (`__reussir_drop_drained`, which every drain calls when it ends).
-  Without that patch, the end of a free that Reussir's record glue started
-  is not seen: those dependents run at the context's next task primitive,
-  `Std.Sync` operation (before the object is looked at, so that a release
-  by them is not lost) or constant claim (§10).
+  structure, a map, an `Option`, ...) is resolved with `none` as soon as
+  the free is over, its cell's store and the walk of its dependents
+  together, in the order the free reached the promises (natively during
+  the free, when it reaches the promise), before the code that released
+  the container goes on (lean-runtime's deferred resolutions, `defer` and
+  `run_deferred`). A free inside such a dependent is a free of its own:
+  its promises' dependents run when it ends, before the dependent goes
+  on, as natively (test `RtPromiseNestedFreeOrder`). The runtime sees the
+  end of every free through local Reussir patch 0040
+  (`__reussir_drop_drained`, which every drain that released something
+  calls when it ends), which lean2rr requires (`scripts/l2r.py` stops
+  with an error without it).
 
 A reference's `set` stores the new value before it releases the old one,
 as `lean_st_ref_set` does (Reussir's `cell::set` releases first): code that
@@ -2591,7 +2589,7 @@ the release runs sees the new value. It releases the old value as
 reference to a record is freed inside a free the runtime starts, so what
 it holds goes in Lean's order (its last field first) and the dependents
 of the promises it drops run when that free ends, before the next
-statement, with or without patch 0040. The same holds for the old state of
+statement. The same holds for the old state of
 a task or thunk cell (`l2r_lcell_set`, which first lets the writers of the
 streams the context handed off end: a publication, lean-runtime's
 `before_publish`).
@@ -2608,21 +2606,25 @@ shim's Lean code makes); a `Std.Sync` object or a timer alone makes none.
 So a program without them has one context,
 `main`'s, and its reference operations are plain cell operations (its code
 is the same as before). In a program that creates tasks each reference
-operation first has a point (`leanrt::refs`, lean-runtime's glue items 5
-and 7):
+operation first has a point (`leanrt::refs`, lean-runtime's keyed
+reference rule, `sched::ref_keyed`):
 - a read (`get`, `take`, `swap`) is a polling point: every 1000th read on
   the thread polls (lean-runtime's `ref_read`), so a loop that polls a
   reference another task sets ends (`while !(← flag.get) do pure ()`);
 - a write (`set`, `take`, `swap`) is a publication (`before_publish`);
 - `ST.Ref.modify` is `take`, then `set`; `take` records the reference as
-  taken by the running thread (a context, and on it the thread number of
-  the task running there), and until that thread's store (`set` or
-  `swap`), the other threads' `get`, `take`, `set` and `swap` of that
-  reference wait, then see modify's value: Lean 4.35's rule (LB-01 and
-  LB-18 not reproduced, §10). The taker's own operations do not wait (its
-  `get` reads the placeholder, as before; only unsafe code reaches the
-  reference inside modify's pure function). A `modify` whose function
-  waits for a task that uses the same reference deadlocks, as in 4.35.
+  taken by the running frame (the context, the number of tasks running on
+  it, and the innermost one), and until the closing store (a `set` or
+  `swap` in that frame: modify's own), every other `get`, `take`, `set` and
+  `swap` of that reference waits, then sees modify's value: Lean 4.35's
+  rule (LB-01 and LB-18 not reproduced, §10). The taker's own `get` and
+  `take` wait too (natively the reference is multi-threaded where safe code
+  reaches it inside modify's pure function, through the `sync` dependent
+  of a promise the function drops, and its `get` spins forever: review
+  RS4-01, test `RtRefOwnGetDuringModify`), and so does a store from such a
+  dependent (natively 4.34 stores into the empty slot, LB-01). A `modify`
+  whose function waits for a task that uses the same reference deadlocks,
+  as in 4.35.
 
 The cost, in programs that create tasks only: a load and a branch per
 read and per write while no reference is taken, a recorded `take` per
@@ -2949,15 +2951,13 @@ Each item says what differs and when.
   these delays the others, and `IO.waitAny` does not pick
   the fastest task. lean-runtime's pure-task rule defers pure tasks a
   worker would start (they run when needed, polled, at exit or when nothing
-  else can go on). `IO.getTID` inside a task is main's thread id plus
-  lean-runtime's thread number, as distinct from main's as a worker's. A
+  else can go on). `IO.getTID` inside a task is main's thread id plus the
+  number lean-runtime gives the OS thread the code natively runs on (a
+  pool task its emulated worker's, a dedicated task a new one), as
+  distinct from main's as a worker's. A
   closed term does not wait for the task of a promise in it (Lean's
   `lean_mark_persistent` does, and waits forever for an unresolved one; a
   closed term can hold a promise only through unsafe code).
-- *A reference read inside `modify`'s function by the `sync` dependent of a
-  promise the function drops* (review RS4-01): natively the dependent's
-  `get` waits forever for modify's store (a program that hangs); lean2rr's
-  taker exemption lets it read the placeholder (§5.14, "References").
 - *Startup order of unrecorded constants* (§5.12): a constant that Lean
   compiled to no IR-only declaration although its value calls a function
   (a callee whose type is not syntactically a function, such as
@@ -3101,8 +3101,9 @@ Each item says what differs and when.
   equal values, and `ST.Ref.ptrEq` is exact. `dbgTraceIfShared` reports
   lean2rr's counts (below, Runtime).
 - *Order of releases in one free*: when a value holding several resources
-  is freed at once (handles closed, and so flushed; promises resolved),
-  native Lean releases them last pushed first: an array's last element
+  is freed at once (handles closed, and so flushed; promises resolved, or
+  for a resolved promise its task's value released), native Lean releases
+  them last pushed first: an array's last element
   first, a nested array's elements before the elements before it, a
   record's last field first. Here the runtime's containers (`leanrt::drop`)
   and Reussir's drop glue for records (local patch 0014) push what they
@@ -3483,19 +3484,13 @@ dependent that subscribes again), the `net` cases of LB-21 to LB-28,
   promise dropped unresolved because a container holding it is freed run
   once the whole free is over, where natively they run when the free
   reaches the promise: they see the rest of the container released too
-  (a file handle held by a later element already closed, another promise
-  in it already resolved). Without local Reussir patch 0040, a free that
-  Reussir's record glue started (a structure, a list after its first cell,
-  an `Option` that the program's own code releases; not the old value of a
-  reference's `set`, which the runtime frees) ends unseen, and its
-  promises' dependents run only at the context's next task primitive,
-  `Std.Sync` operation or constant claim: code in between (reading a
-  reference the dependent sets, a computation, a blocking system call)
-  runs before them.
-  A condition-variable loop that reads its condition before it waits
-  (`while !(← c.get) do cv.wait m`) then waits forever when such a
-  dependent was to set the condition and notify: the dependent runs at the
-  wait, after the condition was read, and notifies no one.
+  (a file handle held by a later element already closed). Another
+  unresolved promise in the container is not resolved yet while they run,
+  as natively (each resolution, its cell's store included, runs in the
+  free's order after the free, since switch step 6; test
+  `RtPromiseFreeLaterUnresolved`); a resolved promise is released inside
+  the free, in its order (*Order of releases in one free*; test
+  `RtPromiseResolvedFreeOrder`).
 
 **Not supported** (lean2rr rejects the program at translation, naming each
 extern)

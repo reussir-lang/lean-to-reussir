@@ -46,15 +46,22 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
 
 ### A busy thunk is waited for; one needed by its own computation waits forever
 
-- **What:** Forcing a `busy` thunk waits until it has its value
-  (`l2r_thunk_wait_busy`: the context registers as a waiter of the thunk's
-  address and blocks with lean-runtime's `block_sync`; `l2r_thunk_done`
-  wakes the waiters with `wake`). On another context it waits for the one
+- **What:** Forcing a `busy` thunk waits until it has its value, through
+  lean-runtime's keyed wait cores (core 3.1), under the thunk's address:
+  `l2r_thunk_wait_busy` is `wait_running_keyed` (the context registers as
+  a waiter and blocks with `block_sync`), and `l2r_thunk_done`, after the
+  store (`l2r_lcell_set`, which makes the writers point), is `done_keyed`
+  (one thread-local load when none waits; otherwise the waiters wake in the
+  order they began to wait). On another context it waits for the one
   forcing it; on the context that is computing it nothing ever wakes it,
-  so it waits forever while the others go on (before `main`: the thread
-  waits forever, `sched::hang`).
+  so it waits forever while the others go on; before the task manager runs,
+  or with no other context, the thread hangs (`sched::hang`). The generated
+  `busy` state names no forcer, so the generated code is unchanged
+  (lean-runtime's unrecorded runner; lean2rr's L3).
 - **Why:** Natively Lean spins forever on its own thunk (LB-08); another
-  thread waits for the one forcing it (6f14a9e). lean-runtime's glue item 7.
+  thread waits for the one forcing it (6f14a9e). lean-runtime's glue item
+  7; the wait itself is lean-runtime's since switch step 6 (the owner's
+  rule: runtime logic lives in lean-runtime once).
 - **Where:** `Lower/LazyForce.lean`: `lazyGetFn`; `runtime/prelude.rr`:
   `l2r_thunk_wait_busy`, `l2r_thunk_done`; `runtime/leanrt/src/sched.rs`:
   `thunk_wait_busy`, `on_finish`.

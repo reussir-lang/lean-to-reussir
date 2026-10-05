@@ -28,18 +28,24 @@ runtime runs every context of its scheduler on one thread, and the pending
 stack of `reussir_rt::drop` (patches 0014, 0015) is the thread's: a
 dependent may block (a lock, a sleep), and a context suspended inside a
 drain would let the other contexts push their frees onto that drain. So a
-promise resolved inside a drain has its dependents walked once the drain is
-over (`leanrt::task::resolve`, `run_later_walks`).
+promise released unresolved inside a drain is resolved, its cell's store
+and the walk of its dependents together, once the drain is over (since
+lean2rr's switch step 6 through lean-runtime's deferred resolutions:
+`leanrt::task::defer_promise_drop`, run by `leanrt::task::drained`; before,
+`leanrt::task::resolve` and `run_later`).
 
 The runtime sees the end of a drain that it starts itself (`leanrt::drop::run`,
 for arrays, reference cells and task cells, and for the old value of a
 reference's `set`, `leanrt::drop::release`), but not of one that the record
 glue starts (`drop_in_place`'s `__reussir_drop_drain`, when the program's
 own code releases a structure, a list, an `Option`). Without this patch
-those dependents run only at the context's next output, block, Std.Sync
-wait or question about a task: code in between sees the old state, output
-they print escapes `IO.FS.withIsolatedStreams`, and a condition-variable
-loop that reads its condition before waiting can wait forever (plan §10).
+those resolutions would run only at the context's next output, block,
+Std.Sync wait or question about a task: code in between would see the old
+state, output their dependents print would escape
+`IO.FS.withIsolatedStreams`, and a condition-variable loop that reads its
+condition before waiting could wait forever. lean2rr's runtime had that
+fallback until switch step 6; since then lean2rr requires the patch
+(`scripts/l2r.py` stops with an error without it).
 
 ### The change
 
@@ -53,10 +59,11 @@ nothing. The cost is one relaxed load per drain that released something.
 The function may release values (a new drain, which calls it again) and
 switch coroutines.
 
-lean2rr's runtime declares the symbol `#[linkage = "extern_weak"]` and
-stores `leanrt::task::drained` there whenever a promise is resolved inside
-a drain. Against a Reussir without the patch the weak symbol is null
-and nothing is stored: the runtime still builds and works as before.
+lean2rr's runtime names the symbol (`reussir_rt::drop::__reussir_drop_drained`)
+and stores `leanrt::task::drained` there whenever it puts a promise's
+resolution off inside a drain. Until switch step 6 it declared the symbol
+`#[linkage = "extern_weak"]` and also built against a Reussir without the
+patch; since then it does not link without it.
 
 ### Checks
 
@@ -82,7 +89,7 @@ may start new drains, re-enter or switch coroutines; not for nested drains
 or drains with nothing to do. A panic inside a drain aborts (the steps are
 reached only through `extern "C"` frames), so no drain exits by unwinding.
 A relaxed `AtomicPtr` is enough (it publishes a code pointer). Weak linking
-works both ways: a binary built with 0040 defines the symbol and
+(lean2rr's link until switch step 6) works both ways: a binary built with 0040 defines the symbol and
 `RtPromiseFreeGlue` passes; one built against a Reussir without it shows a
 weak undefined symbol and runs. The drop unit tests pass, the new one also
 under Miri. Side note (not introduced by 0040): drop glue is marked

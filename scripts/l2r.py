@@ -344,11 +344,37 @@ def build_lean_runtime(out):
     return build_lean_runtime_cargo(out, lean_runtime_manifest())
 
 
+# Local Reussir patches whose absence would not show as a build error at the
+# right place: (patch, file of the Reussir checkout, a symbol the patch adds
+# there). 0040: every drain that released something calls the function the
+# host stores in `__reussir_drop_drained` once it is over; leanrt resolves
+# the promises a free dropped there (runtime/README.md, "The scheduler").
+# leanrt's reference to the symbol would also fail to compile without it.
+REQUIRED_REUSSIR_PATCHES = [
+    ("0040", "crates/reussir-rt/src/drop.rs", "__reussir_drop_drained"),
+]
+
+
+def check_reussir_patches():
+    """The Reussir checkout (L2R_REUSSIR) is one, and has the local patches
+    lean2rr requires (REQUIRED_REUSSIR_PATCHES)."""
+    if not (REUSSIR / "crates" / "reussir-rt" / "src").is_dir():
+        sys.exit(f"l2r: no Reussir checkout at {REUSSIR} (no crates/reussir-rt/src there): "
+                 "set L2R_REUSSIR to a Reussir checkout (default: reussir/ in the lean2rr checkout)")
+    for patch, rel, symbol in REQUIRED_REUSSIR_PATCHES:
+        src = REUSSIR / rel
+        if not src.is_file() or symbol not in src.read_text():
+            sys.exit(f"l2r: the Reussir checkout {REUSSIR} lacks the local Reussir patch {patch} "
+                     f"(`{symbol}` in {rel}), which lean2rr requires: build with a Reussir that has it "
+                     "(runtime/README.md, \"The scheduler\")")
+
+
 def build_leanrt():
     """Build lean-runtime, then runtime/leanrt against it, as rlibs (leanrt
     cached by a hash of its sources, of lean-runtime's build and of the
     Reussir runtime it links against). Returns leanrt's rlib and the
     LeanRuntime."""
+    check_reussir_patches()
     rt, deps = rt_dirs()
     out = leanrt_out()
     lr = build_lean_runtime(out)

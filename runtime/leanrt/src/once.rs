@@ -3,11 +3,13 @@
 //! pointer-sized bit pattern (the prelude's generic wrappers transmute; the
 //! caller guarantees that a slot is always used at one type).
 //!
-//! Single-threaded, like the rest of the runtime; a constant being computed
+//! Single-threaded, like the rest of the runtime. A constant being computed
 //! by a context of the scheduler that blocked meanwhile is waited for by the
-//! others (`claim`).
+//! others through lean-runtime's keyed claims (`claim`; its wait cores, core
+//! 3.1: `step_keyed`, `done_keyed`), under the key `(slot << 1) | 1`, odd so
+//! that it never meets an object's address.
 
-use lean_runtime::sched::{self as ls, CtxId};
+use lean_runtime::sched as ls;
 use std::cell::UnsafeCell;
 
 struct Slots(UnsafeCell<Vec<usize>>, UnsafeCell<Vec<bool>>);
@@ -21,11 +23,11 @@ pub fn has(slot: u64) -> bool {
     set.get(slot as usize).copied().unwrap_or(false)
 }
 
-/// Constants being computed (`claim`): the slot, the context computing it,
-/// the contexts waiting for its value.
-struct Claims(UnsafeCell<Vec<(u64, CtxId, Vec<CtxId>)>>);
-unsafe impl Sync for Claims {}
-static CLAIMS: Claims = Claims(UnsafeCell::new(Vec::new()));
+/// The key of constant `slot` in lean-runtime's keyed table (odd).
+#[inline]
+fn key(slot: u64) -> usize {
+    ((slot as usize) << 1) | 1
+}
 
 /// Whether constant `slot` has its value (the accessor of a constant or
 /// closed term, `l2r_once_claim`). If not, the running context is to
@@ -35,8 +37,9 @@ static CLAIMS: Claims = Claims(UnsafeCell::new(Vec::new()));
 /// thread waits for the one computing it (`lean_obj_once_cold` takes a
 /// lock). Needed again by the context computing it (by a task its
 /// computation needs, which natively runs on another thread), it waits
-/// forever, as natively. The test for a value is inlined into the accessor
-/// (every read of a constant), as `has` was before the scheduler.
+/// forever, as natively (lean-runtime's `step_keyed`). The test for a value
+/// is inlined into the accessor (every read of a constant), as `has` was
+/// before the scheduler.
 #[inline(always)]
 pub fn claim(slot: u64) -> bool {
     has(slot) || claim_cold(slot)
@@ -45,37 +48,13 @@ pub fn claim(slot: u64) -> bool {
 #[cold]
 #[inline(never)]
 fn claim_cold(slot: u64) -> bool {
-    // Before it may wait (as `sync::settle`).
-    crate::task::run_later();
+    crate::drop::assert_not_in_free("a constant's claim");
     loop {
         if has(slot) {
             return true;
         }
-        // Before lean-runtime's scheduler starts there is one context,
-        // `main`'s (`task::ensure_started`), and the scheduler is not asked.
-        let cur = if crate::task::sched_started() { ls::current_context() } else { ls::MAIN };
-        let claims = unsafe { &mut *CLAIMS.0.get() };
-        match claims.iter_mut().find(|c| c.0 == slot) {
-            None => {
-                claims.push((slot, cur, Vec::new()));
-                return false;
-            }
-            Some(c) if c.1 == cur => ls::hang(),
-            Some(c) => {
-                c.2.push(cur);
-                ls::block_sync();
-            }
-        }
-    }
-}
-
-/// The value of constant `slot` was set: whoever waits for it goes on.
-fn release_claim(slot: u64) {
-    let claims = unsafe { &mut *CLAIMS.0.get() };
-    if let Some(k) = claims.iter().position(|c| c.0 == slot) {
-        let (_, _, waiters) = claims.swap_remove(k);
-        for w in waiters {
-            ls::wake(w);
+        if ls::step_keyed(key(slot)) {
+            return false;
         }
     }
 }
@@ -248,7 +227,7 @@ pub fn set_raw(slot: u64, raw: usize) {
     assert!(!set[i], "leanrt: once slot {} set twice", slot);
     vals[i] = raw;
     set[i] = true;
-    if unsafe { !(*CLAIMS.0.get()).is_empty() } {
-        release_claim(slot);
-    }
+    // whoever waits for the constant goes on (one thread-local load when
+    // nothing is claimed)
+    ls::done_keyed(key(slot));
 }

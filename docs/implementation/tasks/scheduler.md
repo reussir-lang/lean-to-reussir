@@ -156,18 +156,24 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
     polls, once the first task started the scheduler);
   - `set`: a publication (`before_publish`);
   - `swap`: both; `take` (`modify`'s first half): both, and the reference
-    is recorded as taken by the running thread (a context, and on it the
-    thread number of the task running there);
-  - while some reference is taken (one load), an operation on it by
-    another thread waits (`block_sync`) for the taker's store (modify's
-    `set`, or a `swap`), which wakes the waiters. The taker's own
-    operations do not wait (as before: its `get` reads the placeholder).
-    Known difference (review RS4-01): code that runs inside `modify`'s
-    function on the taker's thread can reach the reference without unsafe
-    code, as the `sync` dependent of a promise whose last reference the
-    function drops; natively its `get` waits for modify's store, which
-    never comes (the program hangs), here it reads the placeholder and the
-    program goes on. Only programs that hang natively see it.
+    is recorded as taken by the running frame (lean-runtime's keyed form
+    of its rule, `sched::ref_keyed`, core 3.2, under the record's address:
+    the context, the number of tasks running on it, and the innermost
+    one);
+  - while some reference is taken (one thread-local load), every other
+    operation on it waits (`block_sync`) for the closing store, which
+    wakes the waiters in the order they began to wait. The closing store
+    is a `set` or `swap` in the frame that took it: modify's own store
+    (lean2rr's option B: found at run time, so the generated code is
+    unchanged). The taker's own `get` and `take` wait too: natively the
+    reference is multi-threaded there and its `get` spins until modify's
+    store, which never comes, so the program hangs (review RS4-01, test
+    `RtRefOwnGetDuringModify`; before switch step 6 they read the
+    placeholder, a value the program never stored). A store from code
+    nested inside `modify`'s function (the `sync` dependent of a promise
+    the function drops) waits, as in Lean 4.35; natively 4.34 stores into
+    the empty slot and modify's store overwrites it (LB-01, not
+    reproduced).
   Otherwise the reference operations are plain cell operations. A
   constant's walk for tasks reads a reference's cell directly
   (`refCellOpPlain`), as `lean_mark_persistent` does.
@@ -189,7 +195,8 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   `programCreatesTasks`, `refPoint`, `refCellOp`, `refCellOpPlain`;
   `Emit/Program.lean`: `lowerProgram`; `runtime/prelude.rr`:
   `l2r_ref_read_point`, `l2r_ref_write_point`, `l2r_ref_swap_point`,
-  `l2r_ref_wait`, `l2r_ref_take_mark`; `runtime/leanrt/src/refs.rs`.
+  `l2r_ref_wait`, `l2r_ref_take_mark`; `runtime/leanrt/src/refs.rs`;
+  lean-runtime's `sched::ref_keyed`.
 - **Remove only if:** the runtime gets real threads (then the 4.35 rule
   stays, with atomics).
 
@@ -201,10 +208,14 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   `deferring` from them. lean-runtime's scheduler starts with them at the
   first task, promise, `Std.Sync` object or operation, timer, signal
   watcher or socket after `main` started (`task::ensure_started`), which also turns reference
-  reads into polling points. Until then constants' claims answer `main`'s
-  context without asking it (`once::claim_cold`), and the final run is
-  `finish` without its run of tasks (the handed-off streams' writers, then
-  the io layer's dedicated tasks: `task::shutdown`).
+  reads into polling points. Until then a constant's claim and its store
+  (lean-runtime's `step_keyed` and `done_keyed`, `once::claim_cold`,
+  `set_raw`) take `main`'s context without building the scheduler's state
+  (lean-runtime's fixes-6, asked for in switch step 6: before it, every
+  program built that state, and read std's random hash keys, at its first
+  constant), and the final run is `finish` without its run of tasks (the
+  handed-off streams' writers, then the io layer's dedicated tasks:
+  `task::shutdown`).
 - **Why:** A program that creates no tasks pays nothing for the scheduler
   (owner's rule, as for C externs): no scheduler state, contexts or event
   loop are built, nor their code paged in; until a task exists nothing
@@ -217,12 +228,10 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
 - **Remove only if:** never (the owner's rule: a program without tasks
   pays nothing for the scheduler).
 
-### A stream handle's drop, and a promise's resolution inside a free, run in lean-runtime's no-suspend scope
+### A stream handle's drop runs in lean-runtime's no-suspend scope
 
 - **What:** The drop of a stream handle (`fs::FileHandle`, in or out of a
-  free), and the resolution with `none` of a promise whose last reference
-  goes inside a free (`task::drop_promise_now`, whose cell store is a
-  publication), run inside `sched::no_suspend()`: there a dropped stream's flush
+  free) runs inside `sched::no_suspend()`: there a dropped stream's flush
   never waits (it
   writes what the descriptor takes and hands the rest to a writer thread
   of lean-runtime's), and the io layer's other waits block the thread.
@@ -233,14 +242,15 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
 - **Why:** lean-runtime's glue item 11 asks for its no-suspend scope over
   the whole free path: lean2rr's runtime must never suspend inside a free
   (review RSIO-03), and a pipe whose reader is a task of the same program
-  must still get every byte (RSIO-09). lean2rr enters the scope at the two
-  steps of a free that can wait, the handle's drop and the promise's store
-  (review RS4-04, test `RtPromiseDropInFreeWait`); nothing else a free
-  reaches waits (a promise is resolved in lean-runtime after the free, a
-  task's release never waits), so the free path itself (`drop::run`, on
-  every free) stays without the scope's cost.
-- **Where:** `fs.rs`: `close`, `close_deferred`; `task.rs`:
-  `drop_promise_now`; `io.rs`: `force_exit`; `drop.rs`: `run`.
+  must still get every byte (RSIO-09). lean2rr enters the scope at the one
+  step of a free that can wait, the handle's drop; nothing else a free
+  reaches waits (a promise it drops is resolved after the free, its cell's
+  store included, since switch step 6: [dependents.md](dependents.md);
+  before, that store ran in the scope too: review RS4-04, test
+  `RtPromiseDropInFreeWait`; a task's release never waits), so the free
+  path itself (`drop::run`, on every free) stays without the scope's cost.
+- **Where:** `fs.rs`: `close`, `close_deferred`; `io.rs`: `force_exit`;
+  `drop.rs`: `run`.
 - **Remove only if:** never.
 
 ### The event loop is lean-runtime's: timers, signals and sockets complete through promises

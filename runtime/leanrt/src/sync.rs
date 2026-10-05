@@ -17,22 +17,17 @@ fn get<T: 'static>(h: &LHandle) -> &T {
 }
 
 /// Before every operation on an object (each primitive below calls this,
-/// or `ensure_started` for a constructor):
-/// - lean-runtime's scheduler is started once `main` runs
-///   (`task::ensure_started`; nothing during the initializers). A lock's
-///   owner is a thread, which lean-runtime tells apart from an initializer's
-///   by its scheduler having started (`sched::sync`'s owner): without this,
-///   an object an initializer made, locked by `main` before its first task
-///   and again (nested) after it, would see two different owners, and
-///   `main` would wait for itself forever (review RS4-05, test
-///   `RtRecMutexLazyStart`);
-/// - promises resolved inside a free on this context are resolved in
-///   lean-runtime first (`task::run_later`), as natively their `sync`
-///   dependents ran during the free, before this.
+/// or `ensure_started` for a constructor), lean-runtime's scheduler is
+/// started once `main` runs (`task::ensure_started`; nothing during the
+/// initializers). A lock's owner is a thread, which lean-runtime tells apart
+/// from an initializer's by its scheduler having started (`sched::sync`'s
+/// owner): without this, an object an initializer made, locked by `main`
+/// before its first task and again (nested) after it, would see two
+/// different owners, and `main` would wait for itself forever (review
+/// RS4-05, test `RtRecMutexLazyStart`).
 #[inline]
 fn settle() {
     crate::task::ensure_started();
-    crate::task::run_later();
 }
 
 pub fn mutex_new() -> LHandle {

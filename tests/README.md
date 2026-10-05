@@ -207,6 +207,19 @@ llvm-ir`) and fails on a call through the packed-argument FFI boundary (a
 texture LLVM did not inline; review RULR-01) or a `black_box` barrier inside
 a Reussir function (an inlined `black_box`ed libm function; RULR-07): either
 would keep a Lean loop's tail call.
+`tests/runtime/wait-inline-check.sh` builds `RtWaitInline` (a program that
+creates tasks, with a loop of reference operations and a loop forcing
+thunks) to an executable and fails when, in the functions that hold the
+loops, a fast path of lean-runtime's wait cores (the reference points, a
+thunk's store `l2r_lcell_set` and its `done_keyed`) is reached by a call, a
+tail or conditional branch, or a `blr` to an address the function builds
+or loads from the GOT, or when the executable has a TLS descriptor or
+module relocation (a thread-local access the linker did not relax): it
+reads the linked machine code (lean2rr's condition L7 for switch step 6;
+review RS6-03). It then checks itself on four mutations, each of which
+must fail: a `bl`, a `cbnz` and a `blr` to a fast path added to the
+disassembly, and a TLS descriptor relocation added to readelf's output
+(RS6-06; an indirect tail branch `br` is tracked as `blr` is).
 `tests/runtime/rows-check.sh` builds lean-runtime's row oracle
 (`scripts/oracle/Oracle.lean` of the lean-runtime checkout, which evaluates
 the functions of its `tests/cases/<area>/<area>.rows.toml`) with lean2rr and

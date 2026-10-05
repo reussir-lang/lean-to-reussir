@@ -2,8 +2,8 @@
 (a structure in an `Option`, the cells of a `List` after the first, a
 list of structures) held by an `IO.Ref` that is overwritten: their
 `sync` dependents run before the next statement, as natively. The old
-value is freed by the runtime (`leanrt::drop::release`), which sees that
-free end, with or without Reussir's patch 0040. -/
+value is freed by the runtime (`leanrt::drop::release`), and the
+dependents run when that free ends. -/
 
 structure Pending where
   id : Nat

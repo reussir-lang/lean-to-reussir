@@ -5,7 +5,7 @@ promise's `sync` dependent sets a flag and notifies a condition variable;
 then `main` waits in the usual loop, reading the flag before each wait.
 Natively the dependent ran during the set, so the loop does not wait:
 here too (the reference's old value is freed by the runtime, which runs
-the dependents when that free ends), with or without Reussir patch 0040. -/
+the dependents when that free ends). -/
 
 structure Pending where
   id : Nat

@@ -47,6 +47,17 @@ pub fn active() -> bool {
     reussir_rt::drop::active()
 }
 
+/// One of lean-runtime's wait cores is reached (a reference's wait, a busy
+/// thunk's or a constant's claim): never inside a free, which runs no Lean
+/// code (promises dropped there are resolved after it, `task::Promise`), so
+/// no wait core can block in lean-runtime's no-suspend scope (its W3, "W3 is
+/// unreachable from Lean code"). Checked in debug builds
+/// (`L2R_LEANRT_RUSTFLAGS="-C debug-assertions"`).
+#[inline(always)]
+pub fn assert_not_in_free(what: &str) {
+    debug_assert!(!active(), "leanrt: {what} inside a free (lean-runtime's W3)");
+}
+
 /// Push work for the running free (see `active`).
 pub fn defer(p: usize, step: Step) {
     reussir_rt::drop::defer_step(p, step);
@@ -57,19 +68,15 @@ pub fn defer(p: usize, step: Step) {
 /// (the free is the thread's, `reussir_rt::drop`: the other contexts would
 /// push their frees onto it); lean-runtime's glue item 11 asks for its
 /// no-suspend scope over the whole free path. leanrt enters it around the
-/// two steps of a free that can wait: a stream handle's drop (its flush,
-/// `fs::close`) and a promise's resolution with `none` (its cell store, a
-/// publication, `task::drop_promise_now`). The rest never waits: a task's
-/// release, Reussir's own frees, and a promise's resolution in
-/// lean-runtime, which comes only after the free (`task::resolve`). When
-/// the free is over, the promises it resolved are resolved in lean-runtime,
-/// which walks their dependents (`task::run_later`).
+/// one step of a free that can wait: a stream handle's drop (its flush,
+/// `fs::close`). The rest never waits: a task's release, Reussir's own
+/// frees, and a promise's drop, whose resolution with `none` (its cell's
+/// store, then lean-runtime's walk of its dependents) is put off until the
+/// drain is over (`task::defer_promise_drop`; the drain's end runs it,
+/// `task::drained`).
 #[inline(never)]
 pub fn run(p: usize, step: Step) {
     reussir_rt::drop::run_step(p, step);
-    if !active() {
-        crate::task::run_later();
-    }
 }
 
 /// Release `x`, a value a reference or a task cell gave up (the prelude's
@@ -78,9 +85,10 @@ pub fn run(p: usize, step: Step) {
 /// record is freed inside a free the runtime starts (`run`): its members go
 /// on the stack of pending work (Reussir's glue releases the first cell of
 /// a free it starts itself in field order), so what it holds is released
-/// in Lean's order, its last field first, and the `sync` dependents of the
-/// promises it drops are walked when that free ends (`task::resolve`),
-/// before the caller goes on, also without Reussir's patch 0040. Other
+/// in Lean's order, its last field first, and the promises it drops
+/// unresolved are resolved, their `sync` dependents walked, when that free
+/// ends (`task::defer_promise_drop`, `task::drained`), before the caller
+/// goes on. Other
 /// values are dropped: the runtime's containers free themselves that way,
 /// and the other runtime objects hold no Lean values whose order shows.
 #[inline(always)]

@@ -40,10 +40,12 @@
 //!   `wait_any` (`wait_status`, `wait_progress`).
 //! - **Promises** hold the cell of their task; lean-runtime's promise id is
 //!   that task's. A promise dropped inside a free (whose walk runs Lean
-//!   code, which may block) is resolved in lean-runtime once the free is
-//!   over (`run_later`).
+//!   code, which may block) is resolved, its cell's store included, once
+//!   the free is over (lean-runtime's deferred resolutions, core 3.3:
+//!   `defer`, then `run_deferred` at the drain's end, which Reussir reports
+//!   through its patch 0040).
 
-use lean_runtime::sched::{self as ls, CtxId, Job, Outcome, TaskId, TaskState};
+use lean_runtime::sched::{self as ls, Deferred, Job, Outcome, TaskId, TaskState};
 use std::cell::UnsafeCell;
 
 struct Global<T>(UnsafeCell<T>);
@@ -130,13 +132,6 @@ struct Tasks {
     /// code asks for its own sources (`source_next`) before it runs.
     run_cell: usize,
     wait_any: WaitAny,
-    /// Promises resolved inside a free, to resolve in lean-runtime once it
-    /// is over (`run_later`), in resolution order, with the context whose
-    /// free resolved them.
-    later: Vec<(CtxId, TaskId)>,
-    /// Entries `run_later` has taken out of `later` and not resolved in
-    /// lean-runtime yet (waiting behind a dependent that blocked).
-    later_taken: usize,
 }
 
 static TASKS: Global<Tasks> = Global(UnsafeCell::new(Tasks {
@@ -149,8 +144,6 @@ static TASKS: Global<Tasks> = Global(UnsafeCell::new(Tasks {
     deleting: false,
     run_cell: 0,
     wait_any: WaitAny::Idle,
-    later: Vec::new(),
-    later_taken: 0,
 }));
 
 /// The glue's state. lean2rr runs on one thread at a time (the module
@@ -393,12 +386,13 @@ pub fn deferring() -> bool {
 }
 
 /// Whether every task has finished: no task has an entry (an unfinished
-/// one, a promise included, always has one). Then a constant's walk for
-/// tasks (`persist`) can be skipped.
+/// one, a promise included, always has one) and no promise a free dropped
+/// waits for its resolution (lean-runtime's `deferred_pending`, which also
+/// counts one a resolution under way has not reached). Then a constant's
+/// walk for tasks (`persist`) can be skipped.
 #[inline(never)]
 pub fn settled() -> bool {
-    let t = tasks();
-    t.live == 0 && t.later.is_empty() && t.later_taken == 0
+    tasks().live == 0 && !ls::deferred_pending()
 }
 
 // The task manager. `main` starts it (`start`: Lean's
@@ -469,7 +463,6 @@ pub fn sched_started() -> bool {
 /// same without the run of tasks: the handed-off streams' writers, then
 /// the io layer's dedicated tasks.
 pub fn shutdown() {
-    run_later();
     if sched_started() {
         ls::finish();
     } else {
@@ -604,12 +597,10 @@ pub fn end(cell: usize) -> u64 {
 /// about to run (its forcing code first asks for its own sources).
 fn await_task(a: usize) {
     // First: between a job's hand-over and its `begin` nothing else may run
-    // (a nested job would take `run_cell`), not even promises resolved
-    // inside a free.
+    // (a nested job would take `run_cell`).
     if tasks().run_cell == a {
         return;
     }
-    run_later();
     ls::await_task(id_of(a), |msg| crate::lean_panic(msg.as_bytes(), false));
 }
 
@@ -665,7 +656,6 @@ pub fn walk_next() -> u64 {
 /// finished" is read: `Task.map` with `sync := true`, a bind step).
 #[inline(never)]
 pub fn status(a: usize) -> u8 {
-    run_later();
     if id_of(a) == TaskId::FINISHED {
         2
     } else {
@@ -677,7 +667,6 @@ pub fn status(a: usize) -> u8 {
 /// 1 running, 2 finished.
 #[inline(never)]
 pub fn query(a: usize) -> u8 {
-    run_later();
     let id = id_of(a);
     if id == TaskId::FINISHED {
         return 2;
@@ -701,11 +690,6 @@ pub fn query(a: usize) -> u8 {
 /// lean-runtime's wait, where other contexts run their own `IO.waitAny`.
 #[inline(never)]
 pub fn wait_status(a: usize) -> u8 {
-    // Only before a pass starts: resolutions run here may walk dependents,
-    // which run their own `IO.waitAny` (review RS4-09).
-    if matches!(tasks().wait_any, WaitAny::Idle) {
-        run_later();
-    }
     let t = tasks();
     match &mut t.wait_any {
         WaitAny::Idle => {
@@ -791,24 +775,51 @@ extern "C" {
 impl Drop for Promise {
     fn drop(&mut self) {
         if crate::drop::active() {
-            // Released while a container is freed: resolved when the free
-            // reaches it, in Lean's order (`crate::drop`).
-            crate::drop::defer(self.cell, drop_promise_now);
+            // Released while a container is freed: the free reaches it in
+            // Lean's order (`crate::drop`), and there releases a resolved
+            // promise's cell or puts an unresolved one's resolution off.
+            crate::drop::defer(self.cell, defer_promise_drop);
             return;
         }
         unsafe { drop_promise_now(self.cell) };
     }
 }
 
-/// The generated `l2r_promise_drop` resolves the promise with `none`. Its
-/// cell store is a publication (`before_publish`), which may wait for the
-/// context's handed-off streams: inside a free (a deferred step of
-/// `Promise`'s drop) it runs in lean-runtime's no-suspend scope, where that
-/// wait is left to the next point, since no context may suspend inside a
-/// free (lean-runtime's glue item 11; review RS4-04, test
-/// `RtPromiseDropInFreeWait`).
+/// The free reaches a promise it released (a step of Reussir's drain, in
+/// Lean's order).
+/// - Resolved: there is nothing to resolve, and the promise's reference to
+///   its cell goes right there, so what the cell holds is released in the
+///   free's order, as natively (plan §10, "Order of releases in one free";
+///   review RS6-01, test `RtPromiseResolvedFreeOrder`). Its status cannot
+///   change between the promise's drop and this step: no Lean code runs in
+///   a free.
+/// - Unresolved: natively its resolution with `none` runs right there, its
+///   `sync` dependents included (`deactivate_promise`), but they are Lean
+///   code that may block, and no context may suspend inside a free (the
+///   free is the thread's, `reussir_rt::drop`; lean-runtime's no-suspend
+///   scope, its rules R1-R3). So the whole resolution, the cell's store
+///   included, is put off until the drain is over (lean-runtime's `defer`,
+///   core 3.3), and runs there in the order the free reached the promises
+///   (`drained`). With the store made there too, the other contexts see
+///   the promise unresolved until its dependents run, as natively (the
+///   store-with-resolve shape of the design's review RW1-05).
+unsafe fn defer_promise_drop(cell: usize) -> bool {
+    if promise_resolved(cell) {
+        return drop_promise_now(cell);
+    }
+    hook_drained();
+    ls::defer(Deferred::Call(Box::new(move || unsafe {
+        drop_promise_now(cell);
+    })));
+    true
+}
+
+/// The generated `l2r_promise_drop` resolves the promise with `none` unless
+/// it is resolved already (its cell's store, a publication, then
+/// lean-runtime's `resolve`, which walks its dependents), and releases the
+/// promise's reference to its cell. Inside a free only for a resolved
+/// promise, where it is that release alone (`defer_promise_drop`).
 unsafe fn drop_promise_now(cell: usize) -> bool {
-    let _scope = crate::drop::active().then(lean_runtime::sched::no_suspend);
     let f = l2r_promise_drop_c;
     assert!(!f.is_null(), "leanrt: promise without l2r_promise_drop_c");
     let f: unsafe extern "C" fn(usize) -> u64 = std::mem::transmute(f);
@@ -843,10 +854,10 @@ pub fn promise_cell(p: &LPromise) -> usize {
 /// Promise `a` was resolved (the generated `l2r_promise_resolve_S` has
 /// stored `done(v)` in its cell, `v` being `some x` or, for a dropped
 /// promise, `none`): lean-runtime's `resolve`, which walks its dependents
-/// here. Inside a free (a promise dropped there) its dependents, Lean code
-/// that may block, run once the free is over (`run_later`): a context must
-/// not be suspended inside a free (the free is the thread's, in
-/// `reussir_rt::drop`). Returns 0 (lean-runtime walks the dependents).
+/// here. Never inside a free: a promise a free drops is resolved after it
+/// (`defer_promise_drop`), and no Lean code runs in a free; if it ever were
+/// (checked in debug builds), lean-runtime would put the walk off to the
+/// drain's end. Returns 0 (lean-runtime walks the dependents).
 #[inline(never)]
 pub fn resolve(a: usize) -> u64 {
     let Some(i) = find(a) else { return 0 };
@@ -857,84 +868,34 @@ pub fn resolve(a: usize) -> u64 {
     let id = e.id;
     free_entry(i);
     if crate::drop::active() {
-        tasks().later.push((ls::current_context(), id));
+        debug_assert!(false, "leanrt: a promise resolved inside a free");
         hook_drained();
+        ls::defer(Deferred::Resolve(id));
         return 0;
     }
     ls::resolve(id, || {});
     0
 }
 
-extern "C" {
-    /// `reussir_rt::drop::__reussir_drop_drained` (local Reussir patch
-    /// 0040): the function every drain that released something calls once
-    /// it is over. Null with a Reussir without that patch.
-    #[linkage = "extern_weak"]
-    static __reussir_drop_drained: *const std::sync::atomic::AtomicPtr<()>;
-}
-
-/// Have Reussir's drains call `drained` when they end (`resolve`).
+/// Have Reussir's drains call `drained` when they end: the function every
+/// drain that released something calls once it is over
+/// (`reussir_rt::drop::__reussir_drop_drained`, local Reussir patch 0040,
+/// which lean2rr requires: `scripts/l2r.py` checks for it, and this
+/// reference does not link without it).
 fn hook_drained() {
-    let h = unsafe { __reussir_drop_drained };
-    if !h.is_null() {
-        let f: extern "C" fn() = drained;
-        unsafe { (*h).store(f as *mut (), std::sync::atomic::Ordering::Relaxed) };
-    }
+    let f: extern "C" fn() = drained;
+    reussir_rt::drop::__reussir_drop_drained.store(f as *mut (), std::sync::atomic::Ordering::Relaxed);
 }
 
-/// A drain is over (`__reussir_drop_drained`).
+/// A drain is over (`__reussir_drop_drained`, outside it): the resolutions
+/// put off inside it run, in order, on this context (lean-runtime's
+/// `run_deferred`; a free inside one of them resolves its own promises at
+/// its own end, before the next, as natively a free inside a dependent).
 extern "C" fn drained() {
-    run_later();
-}
-
-/// Resolve in lean-runtime the promises resolved inside a free on this
-/// thread (`resolve`), in order, once the free is over: when the drain ends
-/// (`drained`, with Reussir's patch 0040), when a free a container started
-/// ends (`drop::run`), and at the points where the running context may run
-/// Lean code or wait (the primitives here, `Std.Sync`, a constant's claim),
-/// for frees whose end the runtime does not see (Reussir's record glue,
-/// without that patch). Natively their `sync` dependents ran during the
-/// free, on the dropping thread.
-#[inline]
-pub fn run_later() {
-    if !tasks().later.is_empty() {
-        run_later_slow();
-    }
-}
-
-#[inline(never)]
-fn run_later_slow() {
-    // Not inside a free. Each context resolves only its own frees'
-    // promises (a dependent may block, and other contexts run meanwhile).
-    // Natively each promise's dependents run to their end before the free
-    // reaches the next promise, and a free inside a dependent resolves its
-    // own promises there and then (a nested `lean_dec_ref_cold`). So this
-    // context's entries are taken out first, then resolved in order: the
-    // next one waits for the loop, out of reach of a nested call, while
-    // the promises a free inside a dependent drops go onto the emptied
-    // list and that free's own end resolves them before the dependent goes
-    // on (the `run_later` after each entry catches those whose free's end
-    // the runtime did not see). A guard that made nested calls return
-    // instead left those for the end of the outer loop (judge nested-free,
-    // test `RtPromiseNestedFreeOrder`).
-    if crate::drop::active() {
-        return;
-    }
-    let me = ls::current_context();
-    let mut mine = Vec::new();
-    tasks().later.retain(|&(c, id)| {
-        if c == me {
-            mine.push(id);
-            false
-        } else {
-            true
-        }
-    });
-    tasks().later_taken += mine.len();
-    for id in mine {
-        tasks().later_taken -= 1;
-        ls::resolve(id, || {});
-        run_later();
+    // nothing queued: no out-of-line call (lean-runtime's count of pending
+    // resolutions covers the queued ones; review RS6-04)
+    if !crate::drop::active() && ls::deferred_pending() {
+        ls::run_deferred();
     }
 }
 

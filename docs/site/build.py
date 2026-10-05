@@ -260,6 +260,8 @@ def gen_testsets():
          "lean-runtime's row oracle built with lean2rr against the rows' native values (the Lean definition's result where lean-runtime lifts a Lean limit or bug, LB-nn)"],
         ["Inlined textures", "<code>tests/runtime/ffi-inline-check.sh</code>", "7 runtime tests",
          "no call through the FFI boundary in their LLVM IR (it would keep a loop's tail call)"],
+        ["Inlined wait points", "<code>tests/runtime/wait-inline-check.sh</code>", "1 runtime test",
+         "in the executable, the reference points and a thunk's store and wake are inline in the loops, their thread-local loads direct"],
         ["Big-number counters", "<code>tests/runtime/nat-alloc-check.sh</code>", "2 sizes",
          "every big number made is freed exactly once; big constants made once"],
         ["Conversion counter", "<code>tests/runtime/conv-count-check.sh</code>", "2 sizes",

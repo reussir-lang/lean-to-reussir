@@ -12,8 +12,9 @@ it. Policy
 ([`reussir-bugs/README.md`](../../../reussir-bugs/README.md#policy)):
 lean2rr's workarounds stay even when a local patch fixes the bug or
 improves the cost, so that lean2rr also works with an unpatched Reussir;
-the exception is issue 13 (a missing feature), whose patch 0014 the
-runtime needs to build.
+the exceptions are issue 13 (a missing feature), whose patch 0014 the
+runtime needs to build, and the local additions 0040 and 0050, which
+lean2rr requires too (below).
 
 - [correctness-bugs.md](correctness-bugs.md): bugs that affect the
   program rather than its build time: wrong values, rrc crashes or

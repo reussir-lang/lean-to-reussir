@@ -106,7 +106,7 @@ and hot paths in `leanrt` and the prelude, which call lean-runtime for the
 rest.
 
 - **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
-  pinned at a commit of its `main` (now `9d27ce0`). Clone lean2rr with
+  pinned at a commit of its `main` (now `528fcbb`). Clone lean2rr with
   `git clone --recurse-submodules`, or run `git submodule update --init
   third_party/lean-runtime` in a checkout, and again after a checkout,
   merge or pull that moves the pin: git does not update a submodule on its
@@ -172,7 +172,9 @@ rest.
   2. run lean2rr's suite on it: `tests/runtime/leanrt-unit.sh`,
      `tests/runtime/rows-check.sh` (lean-runtime's own rows through
      lean2rr), `tests/runtime/ffi-inline-check.sh` (lean-runtime's
-     functions leave no stack slot in Reussir code), the runtime tests
+     functions leave no stack slot in Reussir code),
+     `tests/runtime/wait-inline-check.sh` (the fast paths of its wait
+     cores stay inline in an executable's loops), the runtime tests
      (`tests/runtime/run.sh`),
      `tests/runtime/nat-alloc-check.sh`, `tests/env/run.sh`, the classic
      corpus (`tests/oracle.py check`, with the optional passes on and off)
@@ -250,7 +252,8 @@ rest.
     details to the generated glue (below);
   - `fs`, `temp`, `env`: the file system, temporary files, `IO.getEnv`,
     `IO.appPath`, the pid, `IO.getTID` (`get_tid`: `gettid`, plus the
-    scheduler's thread number inside a task), random bytes, the monotonic
+    number of the OS thread the code natively runs on, `sched::tid_offset`),
+    random bytes, the monotonic
     clock (`IO.monoMsNow`'s `mono_ms_now` too);
   - `process`: `IO.Process.spawn` (over `posix_spawn`, the forked child's
     steps reproduced; LB-15, LB-17), `wait`, `tryWait`, `kill` (LB-14),
@@ -290,6 +293,14 @@ rest.
     per-context and per-task hooks of `Glue`, the
     no-suspend scope (`leanrt::task`, `sched`, `refs`, `drop`, `fs`:
     below, "Thunks and tasks", "The scheduler");
+  - the wait cores (wait-1), in their keyed form: a computation another
+    context runs (`step_keyed`, `wait_running_keyed`, `done_keyed`: a
+    `busy` thunk under its address, a constant under `(slot << 1) | 1`;
+    `leanrt::sched`, `once`), the references of a program that creates
+    tasks under Lean 4.35's rule (`ref_keyed`, `leanrt::refs`), and the
+    resolution of a promise a free drops, put off to the free's end
+    (`defer`, `Deferred`, `run_deferred`, `deferred_pending`;
+    `leanrt::task`);
   - `sync`: `Std.Sync`'s mutexes and condition variable (`leanrt::sync`);
   - `uv`: `Std.Internal.UV`'s loop, timers and signal watchers
     (`leanrt::net`, for the shim);
@@ -610,21 +621,25 @@ The glue: `Glue::suspend` (the one `unsafe` step, its `SAFETY` entry in
 and saved stream contexts, `once::CtxState`, set aside and given back at
 each switch), `Glue::task_begin`/`task_end` (whether a task runs as on a
 worker thread of its own, which `l2r_task_begin` answers), the waits of a
-`busy` thunk (`l2r_thunk_wait_busy(a)` registers and blocks with
-`block_sync`, `l2r_thunk_done(a)` wakes with `wake`), a constant computed by
-another context (`once::claim`), and the no-suspend scope: a stream
-handle's drop runs in `sched::no_suspend()`, where a dropped stream's flush
-hands what would wait to a writer thread, so no context is suspended inside
-a free (the free is the thread's, `reussir_rt::drop`). A promise dropped inside a free is
-resolved with `none` in its turn (its cell) but resolved in lean-runtime,
-which walks its dependents (Lean code that may block), only once the free
-is over (`task::run_later`, per context, in order): when the drain ends,
-through Reussir's `__reussir_drop_drained` (local patch 0040;
-`task::resolve` stores `task::drained` there, linking the symbol weakly, so
-the runtime also builds against a Reussir without it), when a free that one
-of the runtime's containers started ends (`drop::run`), and otherwise (the
-record glue's frees, without patch 0040) at the context's next task
-primitive, `Std.Sync` operation (`sync::settle`) or constant claim. Output
+`busy` thunk and of a constant another context computes (lean-runtime's
+wait cores, core 3.1: `l2r_thunk_wait_busy(a)` is `wait_running_keyed(a)`,
+`l2r_thunk_done(a)` is `done_keyed(a)`, under the thunk's address;
+`once::claim`'s cold path is `step_keyed`, a constant's store
+`done_keyed`, under the odd key `(slot << 1) | 1`), the references of a
+program that creates tasks (core 3.2, `leanrt::refs`), and the no-suspend
+scope: a stream handle's drop runs in `sched::no_suspend()`, where a
+dropped stream's flush hands what would wait to a writer thread, so no
+context is suspended inside a free (the free is the thread's,
+`reussir_rt::drop`). A promise dropped inside a free is resolved with
+`none`, its cell's store included, only once the free is over (core 3.3:
+when the free reaches it, in Lean's order, `task::defer_promise_drop` puts
+the resolution off with `defer`; the drain's end runs the resolutions in
+that order, on this context, with `run_deferred`), since its dependents
+are Lean code that may block. Reussir reports every drain's end through
+`__reussir_drop_drained`, its local patch 0040, which lean2rr requires:
+`scripts/l2r.py` stops with an error when the Reussir checkout lacks it,
+and leanrt names the symbol (`task::hook_drained`), so it would not link
+without it. Output
 (`io::stream_put`, `fs::put_str`, `fs::flush`, a panic's lines), spawning a
 process and `IO.Process.exit` are lean-runtime's effect points
 (`sched::effect`); the program's clock reads are polling points
@@ -1156,6 +1171,11 @@ definition's result).
 fails on a call through the FFI boundary (a texture not inlined) or a
 `black_box` barrier inside Reussir code (an inlined `black_box`ed libm
 function): either would keep a Lean loop's tail call.
+`tests/runtime/wait-inline-check.sh` builds `RtWaitInline` to an executable
+and fails when a fast path of lean-runtime's wait cores (a reference
+point, a thunk's store or its `done_keyed`) is reached by a call or branch
+in the functions that hold its loops, or a thread-local access is not
+direct (TLS descriptor or module relocations).
 `tests/runtime/nat-alloc-check.sh`
 builds `RtNatStress` with leanrt's big-number counters and checks that
 every big number made is freed exactly once. `tests/runtime/conv-count-check.sh`

@@ -95,9 +95,10 @@ the repro, the cause in Reussir's source, and the patch explained.
 
 - **0040, a hook at the end of a drain** (`__reussir_drop_drained`).
   Reussir's runtime calls a function that the host stores when a free that
-  released something ends. lean2rr's runtime uses it to run the `sync`
-  dependents of a promise released inside a free. The runtime links the
-  symbol weakly, so it also builds without the patch.
+  released something ends. lean2rr's runtime uses it to resolve the
+  promises released inside a free, and run their `sync` dependents, once
+  the free is over. lean2rr requires the patch: its build script checks
+  for it, and the runtime does not link without it.
 - **0050, tagged opaque handles.** `#[ffi(rust = "...", tagged)]` makes an
   odd handle an immediate that is not counted. lean2rr's one-word `Nat` and
   `Int` need it.

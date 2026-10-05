@@ -159,9 +159,10 @@ belong to no entry:
 
 - **0040**, a hook at the end of a drain (`__reussir_drop_drained`):
   `reussir_rt::drop` calls a function the host stores when a drain that
-  released something ends. lean2rr's runtime uses it to run the `sync`
-  dependents of a promise released inside a free the record glue starts
-  (it links the symbol weakly, so it also builds without the patch).
+  released something ends. lean2rr's runtime uses it to resolve the
+  promises a free released unresolved, and run their `sync` dependents,
+  once the free is over. lean2rr requires it since switch step 6
+  (`scripts/l2r.py` checks for it, and the runtime names the symbol).
 - **0050**, tagged opaque handles: `#[ffi(rust = "...", tagged)]` makes an
   odd handle an immediate that is not counted. lean2rr's one-word `Nat` and
   `Int` (merged from branch `mem-nat`) need it.

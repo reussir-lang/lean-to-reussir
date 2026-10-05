@@ -107,9 +107,10 @@ runtime.
   d5169c4). Releasing through the record's `_ffi_release` let Reussir's
   glue free the old value first field first: the dependents of the
   promises it held ran, and the file handles it held were closed, in the
-  reverse of native's order (round 8 RV8T-02); and without patch 0040 the
-  end of that free was not seen, so the dependents ran late and a
-  condition-variable loop reading its flag first waited forever (RV8T-01;
+  reverse of native's order (round 8 RV8T-02); and without patch 0040
+  (required since switch step 6) the end of that free was not seen, so the
+  dependents ran late and a condition-variable loop reading its flag first
+  waited forever (RV8T-01;
   both 8af8f1a; tests `RtRefSetOrder`, `RtRefSetFiles`,
   `RtSyncLostWakeLoop`, `RtPromiseFreeGlue`).
 - **Where:** `runtime/prelude.rr`: `l2r_rc_set`, `l2r_release_value`,

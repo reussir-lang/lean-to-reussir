@@ -49,43 +49,54 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   handle runs in a no-suspend scope of lean-runtime's scheduler
   (`sched::no_suspend`: a dropped stream's flush writes what the descriptor
   takes and hands the rest to a writer thread), a task's release never
-  waits, and a promise whose last reference goes inside
+  waits, and an unresolved promise whose last reference goes inside
   a free (held by an array, list, map, structure or `Option` being freed)
-  is resolved with `none` in its turn (its cell, stored in the no-suspend
-  scope too: the store is a publication, which would wait for the
-  context's handed-off streams; `task::drop_promise_now`), but resolved in
-  lean-runtime, which walks its dependents (Lean code that may block),
-  only once the free is over (`task::run_later`).
+  is resolved with `none` only once the free is over, its cell's store
+  included (the store is a publication, which may wait for the context's
+  handed-off streams, and the walk of its dependents runs Lean code, which
+  may block): when the free reaches it, `task::defer_promise_drop` puts the
+  whole resolution off with lean-runtime's `defer` (core 3.3). A resolved
+  promise has nothing to resolve: when the free reaches it, its reference
+  to its task's cell goes right there, so what the cell holds is released
+  in the free's order, as natively (review RS6-01, test
+  `RtPromiseResolvedFreeOrder`; its status cannot change between its drop
+  and that step, since no Lean code runs in a free). No Lean
+  code runs inside a free, so none of lean-runtime's wait cores (a
+  reference's, a thunk's, a constant's) is reached there (its W3; checked in
+  debug builds, `drop::assert_not_in_free`; test `RtPromiseFreeDepWaits`).
 - **Why:** The other contexts would push their frees onto the suspended
   one's (2d21a0a: one free stack shared with Reussir's glue); lean-runtime's
   glue item 11, which asks for its no-suspend scope over the whole free
   path (review RSIO-03; RS4-04, test `RtPromiseDropInFreeWait`: a
   promise's store inside a free waited for a stream's writer, and another
   task's drop then went onto the suspended free).
-- **Where:** `runtime/leanrt/src/drop.rs`: `run`; `runtime/leanrt/src/fs.rs`:
-  `FileHandle`'s drop, `close`; `runtime/leanrt/src/task.rs`: `resolve`,
-  `Promise` (`Drop`), `drop_promise_now`.
+- **Where:** `runtime/leanrt/src/drop.rs`: `run`, `assert_not_in_free`;
+  `runtime/leanrt/src/fs.rs`: `FileHandle`'s drop, `close`;
+  `runtime/leanrt/src/task.rs`: `resolve`, `Promise` (`Drop`),
+  `defer_promise_drop`, `drop_promise_now`.
 - **Remove only if:** never.
 
 ### Dependents of a promise dropped inside a free run when the free is over
 
-- **What:** The kept resolutions run as soon as the free is over: when a
-  free one of the runtime's containers started ends (`drop::run`), and,
-  for a free Reussir's record glue started,
-  through `__reussir_drop_drained`, a hook every outermost drain that
-  released something calls when it ends (local Reussir patch 0040;
-  `task::resolve` stores `task::drained` there). The symbol is linked
-  weakly: without the patch, they run at the context's next task
-  primitive, `Std.Sync` operation or constant claim. The `Std.Sync`
-  primitives and `once::claim` run them before looking at their object; the
-  generated code's wait for a task's own sources, right after a job handed
-  the task over, does not (no other job may run before the task begins).
-  Each context resolves only its own frees' promises, in order: it first
-  takes them out of the list, so the next one waits until the dependents
-  of the one before have run to their end, while a free inside such a
-  dependent puts its own promises on the emptied list and resolves them
-  when it ends, before the dependent goes on. `task::settled` counts the
-  ones taken out and not resolved yet.
+- **What:** The resolutions a free put off run as soon as it is over, in
+  the order the free reached their promises, on the context that freed
+  them (lean-runtime's `run_deferred`, core 3.3): Reussir reports the end
+  of every drain that released something through `__reussir_drop_drained`
+  (local Reussir patch 0040), where `task::hook_drained` stores
+  `task::drained`. lean2rr requires the patch: `scripts/l2r.py` stops with
+  an error when the Reussir checkout lacks it, and leanrt names the symbol,
+  so it would not link either. So the deferred list is empty whenever the
+  context could block or switch, and nothing else runs it (the settle
+  points that ran it at the next task primitive, `Std.Sync` operation or
+  constant claim, for frees whose end a Reussir without the patch did not
+  report, are gone). Each resolution stores `none` in the promise's cell,
+  then walks its dependents, so until its dependents run the promise looks
+  unresolved, as natively, to the dependents of a promise the free reached
+  before it and to the other contexts (the store-with-resolve shape of
+  lean-runtime's R3, review RW1-05; test `RtPromiseFreeLaterUnresolved`). A free inside a dependent
+  resolves its own promises at its own end, before the outer free's next
+  promise (lean-runtime's R5). `task::settled` asks lean-runtime's
+  `deferred_pending`, which counts a resolution under way too.
 - **Why:** Natively the dependents run at once, on the dropping thread:
   code in between saw the old state, and their output escaped
   `IO.FS.withIsolatedStreams` (round 7 RV7C-01). A walk run after a
@@ -93,19 +104,24 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   the running context (a no-op) and it waited forever (RV7C-02; d5169c4;
   tests `RtPromiseFreeSync`, `RtSyncLostWake`). A reference's `set` frees
   the old value inside a free the runtime starts, so its walks run when
-  that free ends, with or without 0040 (round 8 RV8T-01, 8af8f1a; test
+  that free ends (round 8 RV8T-01, 8af8f1a; test
   `RtPromiseFreeGlue`, see
   [../ownership.md](../ownership.md#reference-sets-store-the-new-value-before-releasing-the-old-one)).
   Natively a free inside a dependent is a free of its own, whose promises'
-  dependents run inside it: a guard that kept nested calls from resolving
-  anything left them for the end of the outer free's list (switch step 4;
-  judge nested-free, test `RtPromiseNestedFreeOrder`).
-- **Where:** `runtime/leanrt/src/task.rs`: `resolve`, `run_later`,
-  `hook_drained`, `await_task`; `runtime/leanrt/src/drop.rs`: `run`;
-  `runtime/leanrt/src/sync.rs`: `settle`; `runtime/leanrt/src/once.rs`:
-  `claim`.
-- **Remove only if:** never; the fallback stays as long as Reussir builds
-  without patch 0040 are supported. Remaining difference: the
+  dependents run inside it (judge nested-free, test
+  `RtPromiseNestedFreeOrder`). The protocol is lean-runtime's since switch
+  step 6 (the owner's rule: runtime logic lives in lean-runtime once); with
+  the store made in the drain (lean2rr's shape before), the dependents of
+  an earlier promise of the same free, and another context while they
+  blocked, saw a later promise finished, where natively it was not
+  resolved yet. Patch 0040 is
+  required since step 6: without it a drain's resolutions would wait for
+  the context's next run of the list, and lean-runtime's debug builds report
+  that (its R6).
+- **Where:** `runtime/leanrt/src/task.rs`: `Promise` (`Drop`),
+  `defer_promise_drop`, `resolve`, `hook_drained`, `drained`, `settled`;
+  `scripts/l2r.py`: `REQUIRED_REUSSIR_PATCHES`, `check_reussir_patches`.
+- **Remove only if:** never. Remaining difference: the
   dependents see the rest of the container released too (plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
   "Promises released inside a free").

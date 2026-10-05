@@ -458,6 +458,60 @@ Paths are relative to the repository root.
   `lean2rr/LeanToReussir/Lower/LazyGlue.lean` (`IO.getTID`).
 - **Remove only if:** never.
 
+### lean2rr's waits and deferred resolutions are lean-runtime's wait cores (switch step 6)
+
+- **What:** leanrt's own copies of three wait protocols moved onto
+  lean-runtime's wait cores (its wait-1 batch, `docs/sched.md`, "The wait
+  cores"), in their keyed form, since lean2rr's Reussir records have no
+  room for a waiter list:
+  - a computation another context runs (core 3.1): a `busy` thunk waits
+    with `wait_running_keyed` and wakes its waiters with `done_keyed`,
+    under its address; a constant's claim is `step_keyed` and its store
+    `done_keyed`, under `(slot << 1) | 1` (leanrt's `THUNK_WAITERS` and
+    `CLAIMS` are gone);
+  - a reference in a program that creates tasks (core 3.2): the points,
+    `take`, and the wait or closing store are `ref_keyed`'s (leanrt's
+    taken-reference registry is gone); the closing store is found at run
+    time by the taking frame (option B), so the generated code is
+    unchanged;
+  - a promise dropped unresolved inside a free (core 3.3): its
+    resolution, the cell's store included, is put off with `defer` when
+    the free reaches it and run with `run_deferred` at the drain's end
+    (leanrt's `later` list, `run_later` and its settle points are gone); a
+    resolved one releases its task's cell there and then, in the free's
+    order (review RS6-01).
+  Reussir's patch 0040 (the drain-end hook) is required: `scripts/l2r.py`
+  checks for it and leanrt names its symbol. lean-runtime pinned at
+  `528fcbb` (wait-1; fixes-5's `IO.getTID`: a pool task gets its emulated
+  worker's thread id, a dedicated task a new one, through
+  `io::env::get_tid`, which lean2rr calls since step 5; fixes-6: a claim
+  or a store before the task manager runs builds no scheduler state, so a
+  program without tasks still pays nothing for the scheduler).
+- **Why:** The owner's rule: runtime logic lives in lean-runtime once.
+  Behaviour changes, judged: the taker's own `get` and `take` during its
+  `modify` wait, as natively the program hangs there (review RS4-01, test
+  `RtRefOwnGetDuringModify`; they read the placeholder before); a store
+  from a `sync` dependent nested inside `modify`'s function waits, as in
+  Lean 4.35 (LB-01); a promise a free dropped looks unresolved until its
+  dependents run (the store-with-resolve shape, lean-runtime's review
+  RW1-05; test `RtPromiseFreeLaterUnresolved`). No wait core is reached inside a free (W3:
+  debug assertion `drop::assert_not_in_free`; test `RtPromiseFreeDepWaits`).
+- **Tests:** `RtRefOwnGetDuringModify`, `RtPromiseFreeDepWaits`,
+  `RtPromiseFreeLaterUnresolved`, `RtPromiseResolvedFreeOrder`,
+  `RtWaitInline` and `tests/runtime/wait-inline-check.sh` (the points, a
+  thunk's store and `done_keyed` inline in the executable's loops), the
+  suite's thunk, constant, reference and promise tests; lean-runtime's
+  task-area cases through lean2rr.
+- **Where:** `runtime/leanrt/src/sched.rs` (`on_finish`,
+  `thunk_wait_busy`), `once.rs` (`claim_cold`, `set_raw`), `refs.rs`,
+  `task.rs` (`Promise`, `defer_promise_drop`, `resolve`, `hook_drained`,
+  `drained`, `settled`), `drop.rs` (`run`, `assert_not_in_free`),
+  `sync.rs` (`settle`); `scripts/l2r.py` (`check_reussir_patches`).
+  Implementation notes: [../tasks/cells.md](../tasks/cells.md),
+  [../tasks/dependents.md](../tasks/dependents.md),
+  [../tasks/scheduler.md](../tasks/scheduler.md).
+- **Remove only if:** never.
+
 ### leanrt is built and linked with the shared crate lean-runtime
 
 - **What:** `scripts/l2r.py` builds lean-runtime (the git submodule

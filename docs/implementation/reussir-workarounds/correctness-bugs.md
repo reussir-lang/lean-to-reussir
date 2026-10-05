@@ -150,14 +150,17 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
 ### The drain-end hook (local patch 0040)
 
 - **What:** The runtime stores a callback in Reussir's
-  `__reussir_drop_drained`, linked weakly, which local patch 0040 makes
-  every outermost drain that released something call when it ends; without
-  the patch the runtime still builds and falls back to walking later. The
+  `__reussir_drop_drained`, which local patch 0040 makes every outermost
+  drain that released something call when it ends. lean2rr requires the
+  patch since switch step 6: `scripts/l2r.py` stops with an error when the
+  Reussir checkout lacks it (`check_reussir_patches`), and leanrt names the
+  symbol (`task::hook_drained`), so it would not link either. The
   patch is [`reussir-bugs/patches/0040-l2r-local-drop-call-the-host-s-function-when-a-drain.patch`](../../../reussir-bugs/patches/0040-l2r-local-drop-call-the-host-s-function-when-a-drain.patch),
   described in [`reussir-bugs/local-additions.md`](../../../reussir-bugs/local-additions.md).
 - **Why:** Not a bug: Reussir has no hook at the end of a free, and the
   `sync` dependents of promises dropped inside a free must run when it is
   over (round 7 RV7C-01). No entry exists for it.
 - **Where:** [../tasks/dependents.md](../tasks/dependents.md#dependents-of-a-promise-dropped-inside-a-free-run-when-the-free-is-over).
-- **Remove only if:** n/a (the fallback is for Reussir builds without
-  0040; 0040 is applied to `l2r-local` since 2026-10-03).
+- **Remove only if:** n/a (0040 is applied to `l2r-local` since
+  2026-10-03; the fallback for builds without it went in switch step 6,
+  when lean-runtime's deferred resolutions came to need every drain's end).
