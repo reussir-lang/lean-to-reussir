@@ -126,6 +126,11 @@ structure LowerCtx where
   declarations of its cycle (its strongly connected component of the call
   graph, itself included): a tail call of one of them closes a loop. -/
   callCycles : NameMap NameSet := {}
+  /-- Whether the helpers generated at the end (unboxing, application and
+  conversion functions of function values, reference dispatch) are
+  generated only for what live code reaches, and unreachable functions
+  dropped (`PassConfig.convLiveness`, Lower/Live). -/
+  convLiveness : Bool := false
 
 /-- How the target of a function value is called with all its arguments
 (data, so that the lowering state can hold it; see Lower's
@@ -161,6 +166,19 @@ inductive FnVariant where
   | wrap (src : RR.Ty)
   deriving BEq, Hashable, Inhabited
 
+/-- A function whose body is generated at the end, once the variants it
+matches are known (Lower/Live, `finishLive`): unboxing a `Box` to type `t`
+(nominal, array or function type), applying a function value of type `t`
+to `j` arguments, converting a function value from representation `src` to
+`dst`, reference operation `op` at element type `a` on a reference held in
+a `Box`. -/
+inductive LiveHelper where
+  | unbox (t : RR.Ty)
+  | apply (t : RR.Ty) (j : Nat)
+  | fconv (src dst : RR.Ty)
+  | refbox (op : String) (a : RR.Ty)
+  deriving Inhabited
+
 /-- How a reference's cell stores its element (see `refType`). -/
 inductive RefKind where
   /-- `L2RRef_N(Cell<e>)`. -/
@@ -168,6 +186,33 @@ inductive RefKind where
   /-- `L2RRef_N(Cell<ElemBox(e)>)`, for `[value]` structures. -/
   | boxed (bn : String)
   deriving BEq, Inhabited
+
+/-- What `conv-liveness` knows (Lower/Live): the names reached from the
+roots, the variants live code builds, and the helpers it reaches. -/
+structure LiveState where
+  /-- The names reached: functions (generated or not yet), and the
+  identifiers of raw text and atoms, which count as names too. -/
+  names : Std.HashSet String := {}
+  /-- Names reached and not looked up yet. -/
+  work : Array String := #[]
+  /-- The `Box` variants (by name) that live code builds. -/
+  madeBox : Std.HashSet String := {}
+  /-- The variants of function-value enums (enum name, variant name) that
+  live code builds, and how many per enum. -/
+  madeFn : Std.HashSet (String × String) := {}
+  madeFnCount : Std.HashMap String Nat := {}
+  /-- The items of `fns` before this position have been looked at
+  (`dropFns` keeps it in step). -/
+  seen : Nat := 0
+  /-- The helpers requested so far, by function name, and how far each
+  request array (`unboxTargets`, `unboxArrTargets`, `fnUnboxTargets`,
+  `fnApplies`, `fnConvs`, `refBoxOps`) has been indexed. -/
+  helperOf : Std.HashMap String LiveHelper := {}
+  indexed : Array Nat := #[0, 0, 0, 0, 0, 0]
+  /-- The live helpers, and the version (the number of variants they
+  match that live code builds) of their body. -/
+  helpers : Array (String × LiveHelper) := #[]
+  done : Std.HashMap String Nat := {}
 
 structure LowerState where
   /-- The state optional passes keep for the whole program (analyses they
@@ -314,6 +359,8 @@ structure LowerState where
   `refBoxOpFn`): operation and element type. -/
   refBoxOps : Array (String × RR.Ty) := #[]
   counter : Nat := 0
+  /-- The state of `conv-liveness` (Lower/Live; unused without it). -/
+  live : LiveState := {}
 
 abbrev LowerM := ReaderT LowerCtx (StateRefT LowerState CoreM)
 
@@ -376,11 +423,17 @@ def replaceFn (name : String) (item : RR.Item) : LowerM Unit := do
     | some i => { s with fns := (s.fns.setIfInBounds i fnTombstone).push item, fnEdits := s.fnEdits + 1 }
     | none => { s with fns := s.fns.push item }
 
-/-- Remove the functions whose names satisfy `p` (the index starts over). -/
+/-- Remove the functions whose names satisfy `p` (the index starts over;
+the liveness's `seen` counts the items kept before it). -/
 def dropFns (p : String → Bool) : LowerM Unit :=
-  modify fun (s : LowerState) => { s with
-    fns := s.fns.filter fun | .fn n .. => !p n | _ => true
-    fnPos := {}, fnIndexed := 0, fnEdits := s.fnEdits + 1 }
+  modify fun (s : LowerState) => Id.run do
+    let keep : RR.Item → Bool := fun | .fn n .. => !p n | _ => true
+    let mut seen := 0
+    for h : i in [:min s.live.seen s.fns.size] do
+      if keep (s.fns[i]'(Nat.lt_of_lt_of_le h.upper (Nat.min_le_right _ _))) then seen := seen + 1
+    return { s with
+      fns := s.fns.filter keep
+      fnPos := {}, fnIndexed := 0, fnEdits := s.fnEdits + 1, live := { s.live with seen } }
 
 def fresh (pre : String) : LowerM String := do
   let n ← getPart (·.counter)

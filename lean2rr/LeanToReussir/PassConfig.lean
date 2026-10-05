@@ -50,6 +50,13 @@ structure PassConfig where
   their alignments: the fields' indices in record order. Plain: declaration
   order. -/
   fieldOrder : Array Nat → Array Nat := fun aligns => (List.range aligns.size).toArray
+  /-- Whether the helpers generated at the end of Stage 4 (unboxing,
+  application and conversion functions of function values, reference
+  dispatch) follow liveness: generated only once live code reaches them,
+  with arms only for the variants live code builds, and the functions
+  nothing reaches dropped (Lower/Live). Plain: every helper requested,
+  with an arm for every variant. -/
+  convLiveness : Bool := false
   /-- The hooks of code lowering. -/
   lower : LowerHooks := {}
   /-- Passes over the generated Reussir functions (before the program text is

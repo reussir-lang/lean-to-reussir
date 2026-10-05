@@ -3,6 +3,7 @@ import LeanToReussir.Lower.FnValues
 import LeanToReussir.Lower.LazyForce
 import LeanToReussir.Lower.Conv
 import LeanToReussir.Lower.Decls
+import LeanToReussir.Lower.Live
 import LeanToReussir.Lower.Externs
 import LeanToReussir.Lower.LazyGlue
 import LeanToReussir.Lower.Process
@@ -38,5 +39,6 @@ their uses, so the split follows the original order): `Lower/Ctx` (the
 code-lowering context), `FnValues`, `LazyForce`, `Conv`, `Decls`,
 `Externs`, `LazyGlue`, `Process`, `Promises`, `Identity`, `ExternCall`,
 `Borrow`, `Values`, `JoinPoints`, `StateMachine` (J4), `Hooks` (where optional passes plug in), `Code`
-(including `lowerDecl`), `Finish`.
+(including `lowerDecl`), `Finish`. `Live` (the liveness of the optional pass
+`conv-liveness`, used by `Externs` and `Finish`) imports `FnValues`.
 -/

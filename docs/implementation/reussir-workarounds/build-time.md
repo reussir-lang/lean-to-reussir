@@ -105,8 +105,10 @@ lean2rr's files.
   patch 0030 (applied) merges a wildcard arm's copies into one region.
 - **Where:** `Lower/Code.lean`: `sinkWildcardHeld`, `hasWideRelease`,
   `wideReleaseCtors` (8); `runtime/prelude.rr`: `l2r_sink`;
-  `Lower/Finish.lean`: `boxSink`; required part `wildcard-sinks` in
-  `Opt/Registry.lean`.
+  `Lower/Finish.lean`: `boxSink`, and the wildcard `genApply` adds when
+  `conv-liveness` leaves variants out (its arguments sunk:
+  [../conversions/liveness.md](../conversions/liveness.md#an-application-function-with-variants-left-out-ends-in-a-wildcard));
+  required part `wildcard-sinks` in `Opt/Registry.lean`.
 - **Remove only if:** not needed with 0030 (applied: rrc now gives a
   wildcard one region), but kept: by the policy lean2rr also works with an
   unpatched Reussir.

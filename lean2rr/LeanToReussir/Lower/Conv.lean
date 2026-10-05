@@ -1463,15 +1463,25 @@ partial def boxCastable (vt t : RR.Ty) : LowerM Bool := do
 
 /-- The conversion of a `Box` variant holding a value of type `vt` that
 `boxCastable` accepts for an `unsafeCast` to `t` (an arm of `t`'s unboxing
-function): `tryCoerce`, unless converting needs a function value at another
-representation (a wrapper, §5.3). Every unboxing function would then match
-every other type with function fields at the same native slots (the
-dictionaries of uniform code), each wrapper adding arms to the application
-functions of its type: the generated program grew by a fifth on monad
-transformer towers. Such a cast stays unreachable (plan §10); the probe's
-generated functions are dropped with it.
+function): `tryCoerce`, else `castFallback`. A conversion that needs a
+function value at another representation (a wrapper, §5.3) registers the
+wrapper and the conversion of function values it needs, as any other
+conversion does, so whether a cast converts depends only on the two types.
+(It used to be kept only when every wrapper it needed was registered
+already, and refused otherwise, which made the result depend on the order
+in which helpers were generated and, with `conv-liveness`, on which helpers
+were live: review CLR-01, tests `RtCastFnWrapDead`, `RtCastFnWrapLive`,
+`RtCastFnWrapOrder`.) This terminates: a wrapper is a variant `w<S>` of a
+function type `T`, `S` and `T` being function types the program already has
+(a conversion adds no function type), so there are at most F² wrappers and
+conversions `l2r_fconv_S_T` for F function types, and a conversion's body is
+generated again only when its source gains a variant (`finishFnValues`; with
+`conv-liveness`, a variant that live code makes), which happens at most F
+times per source.
 
-The state is saved for that without the functions and types emitted
+A cast that has no conversion (`none`) is undone: what its probe emitted
+and registered is dropped. The state is saved for that without the
+functions and types emitted
 (`fns` and its index, `typeItems`): they only grow during the probe, and
 are cut back to their sizes on a rollback. A saved state that held them
 would share the arrays, which the probe's first push would then copy
@@ -1492,8 +1502,8 @@ def boxCastConv (x : RR.Expr) (vt t : RR.Ty) : LowerM (Option RR.Expr) := do
     | some r => pure (some r)
     | none => castFallback x vt t
   let after ← get
-  let undo := nfn after != nfn saved || after.fnConvs.size != saved.fnConvs.size ||
-     after.fnUnboxTargets.size != saved.fnUnboxTargets.size
+  let undo := r.isNone && (nfn after != nfn saved || after.fnConvs.size != saved.fnConvs.size ||
+     after.fnUnboxTargets.size != saved.fnUnboxTargets.size)
   let edits := after.fnEdits
   let typeEdits := after.typeEdits
   if !undo then return r

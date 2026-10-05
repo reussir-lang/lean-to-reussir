@@ -1,4 +1,5 @@
 import LeanToReussir.Lower.Decls
+import LeanToReussir.Lower.Live
 
 /-! # Externs -/
 
@@ -556,24 +557,29 @@ def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : E
       (.block ⟨#[(x, some u64, ← addrOf 0), (y, some u64, ← addrOf 1)], .atom s!"{x} == {y}"⟩))
   | _ => return none
 
-/-- The bodies of the reference dispatch functions (`refBoxOpFn`): one arm
-per reference type that is boxed. A `Box` that holds no reference is
-unreachable there. -/
+/-- The body of the reference dispatch function of operation `op` at
+element type `a` (`refBoxOpFn`): one arm per reference type that is boxed
+(with `conv-liveness`, that live code boxes). A `Box` that holds no
+reference is unreachable there. -/
+def genRefFn (op : String) (a : RR.Ty) : LowerM Unit := do
+  let fname := if op == "addr" then "l2r_refbox_addr" else s!"l2r_refbox_{op}_{a.enc}"
+  let resT := if op == "set" || op == "addr" then RR.Ty.named "u64" else a
+  let mut arms : Array RR.Arm := #[]
+  for (vt, vname) in (← getPart (·.boxVariants)) do
+    let some (e, k) ← refElem? vt | continue
+    if ← liveSkipBox vname then continue
+    let body ← if op == "addr" then pure (some (RR.Expr.call "l2r_ptr_addr_rec" #[vt] #[.var "r"]))
+      else refCellOp op (.var "r") e k a (if op == "set" || op == "swap" then some (.var "v") else none)
+    let body := body.getD (.call "l2r_unreachable" #[resT] #[])
+    arms := arms.push { ty := boxName, ctor := some vname, binders := #[some "r"], body := .ofExpr body }
+  arms := arms.push { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[resT] #[]) }
+  let params := #[("b", RR.Ty.box)] ++ (if op == "set" || op == "swap" then #[("v", a)] else #[])
+  let item := RR.Item.fn fname params resT (.ofExpr (.mtch (.var "b") arms))
+  replaceFn fname item
+
+/-- The bodies of the reference dispatch functions (`genRefFn`). -/
 def finishRefFns : LowerM Unit := do
-  for (op, a) in (← getPart (·.refBoxOps)) do
-    let fname := if op == "addr" then "l2r_refbox_addr" else s!"l2r_refbox_{op}_{a.enc}"
-    let resT := if op == "set" || op == "addr" then RR.Ty.named "u64" else a
-    let mut arms : Array RR.Arm := #[]
-    for (vt, vname) in (← getPart (·.boxVariants)) do
-      let some (e, k) ← refElem? vt | continue
-      let body ← if op == "addr" then pure (some (RR.Expr.call "l2r_ptr_addr_rec" #[vt] #[.var "r"]))
-        else refCellOp op (.var "r") e k a (if op == "set" || op == "swap" then some (.var "v") else none)
-      let body := body.getD (.call "l2r_unreachable" #[resT] #[])
-      arms := arms.push { ty := boxName, ctor := some vname, binders := #[some "r"], body := .ofExpr body }
-    arms := arms.push { ty := boxName, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[resT] #[]) }
-    let params := #[("b", RR.Ty.box)] ++ (if op == "set" || op == "swap" then #[("v", a)] else #[])
-    let item := RR.Item.fn fname params resT (.ofExpr (.mtch (.var "b") arms))
-    replaceFn fname item
+  for (op, a) in (← getPart (·.refBoxOps)) do genRefFn op a
 
 /-- Externs over Lean-defined types: the runtime's generic helpers receive
 the generated constructors as arguments. -/

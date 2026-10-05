@@ -86,7 +86,9 @@ registry's passes over the generated functions, and the program text
   `Decls`, `Externs`, `LazyGlue`, `Process`, `Promises`, `Identity`,
   `ExternCall`, `Borrow` (release times of borrowed resources, §5.8),
   `Values`, `JoinPoints`, `StateMachine` (J4), `Hooks`,
-  `Code` (`lowerCode`, `lowerDecl`), `Finish`;
+  `Code` (`lowerCode`, `lowerDecl`), `Finish`; and `Live` (the
+  reachability of the optional pass `conv-liveness`, §5.3, used by
+  `Externs` and `Finish`);
 - the program: `Emit/Startup` (initializer order, the startup chain),
   `Emit/Entry` (the entry point), `Emit/Program` (`lowerProgram`, which
   splices chains of closed terms before lowering, and the lowered
@@ -121,8 +123,10 @@ element representation), a pass over the checked mono declarations
 (`monoPasses`), Lean definitions replaced by prelude functions, a lowering
 hook (`LowerHooks`: the body before lowering, the J1′ choice, the form of
 J4's state machine, constant caching, the binding of a `cases`
-alternative's fields), or a pass over the generated Reussir functions
-(`rrPasses`). Every hook's default is the plain translation. A pass keeps
+alternative's fields), the choice of which helpers Stage 4 generates at
+the end (`convLiveness`: only for live code, §5.3), or a pass over the
+generated Reussir functions (`rrPasses`). Every hook's default is the
+plain translation. A pass keeps
 its own state in the code-lowering context's extension slot
 (`CodeCtx.ext`), not in the core's.
 
@@ -957,6 +961,10 @@ its value is stored as `Box`.
   Stage 4 needs them, and the unboxing functions are regenerated until the
   set stops growing, so the set is known at the end of Stage 4. `Box` is
   always emitted, since types can mention it even when nothing is boxed.
+  With the optional pass `conv-liveness` (on by default, §5.3), an
+  unboxing function is generated only once live code calls it, with arms
+  only for the variants that live code builds; `Box` keeps every
+  variant.
 - Converting a precise type `T` to `Box` wraps the value into `T`'s variant.
   Unwrapping must accept every variant that can hold a value of the same
   Lean type, because one Lean type can have several Reussir
@@ -1033,17 +1041,19 @@ its value is stored as `Box`.
   inductive with a constructor without fields) reads any word, any
   constructor (natively the boxed scalar of its index, or an object whose
   address is read: see the words below) and, if it is only ever a boxed
-  scalar, any other heap object. Two kinds of casts are left out. One
-  whose conversion would need a function value at another representation
-  (a wrapper, §5.3): every unboxing function would then match every other
-  type with function fields at the same slots (the dictionaries of uniform
-  code), each wrapper adding arms to the application functions of its
-  type (programs built from monad transformer towers grew by a fifth).
-  And one between inductives that do not correspond constructor for
-  constructor (another number of constructors), which typed code converts:
-  every unboxing function would convert from every inductive sharing a
-  constructor shape with its own (3 to 5 % more code). Such a cast panics
-  (§10).
+  scalar, any other heap object. A cast whose conversion needs a function
+  value at another representation converts through a wrapper (§5.3), like
+  any other conversion, so whether a cast converts depends on the two
+  types only. (Such a cast was once kept only when the wrapper existed
+  already, to save code on monad transformer towers; whether it converted
+  then depended on the order in which helpers were generated: review
+  CLR-01, tests `RtCastFnWrapDead`, `RtCastFnWrapLive`,
+  `RtCastFnWrapOrder`. The wrappers stay finite: one per pair of function
+  types the program has.) One kind of cast is left out: between
+  inductives that do not correspond constructor for constructor (another
+  number of constructors), which typed code converts: every unboxing
+  function would convert from every inductive sharing a constructor shape
+  with its own (3 to 5 % more code). Such a cast panics (§10).
   A boxed unit unwraps to the zero of `T`: a unit used at another type is
   Lean's `box(0)` placeholder (§2.7). Any other variant is unreachable.
 - Conversions are inserted wherever a value's Reussir type differs from
@@ -1246,6 +1256,33 @@ their captured variables.
 The enums and the application functions are generated at the end of
 Stage 4, together with the `Box` unboxing functions, until no new variant or
 application appears.
+
+- **Only for live code** (optional pass `conv-liveness`, on by default).
+  The helpers generated at the end (unboxing functions, application
+  functions, conversions of function values, the dispatch of reference
+  operations on a `Box`) follow a type-based reachability, computed while
+  they are generated (`Lower/Live`, `Finish.finishLive`). The roots are
+  the identifiers of the raw text (the entry point, the startup chain, the
+  trampolines the runtime calls) and of the prelude. A function reached is
+  looked at: the functions it calls and the identifiers of its atoms are
+  reached, and the variants of `Box` and of function-value enums it builds
+  are *made*. A helper is generated once it is reached, with an arm for
+  each made variant only (and `z`, `raw`, the boxed unit; a match left
+  without some variants ends in an `unreachable` wildcard), and again when
+  a variant it matches is made, until nothing changes. Then the functions
+  not reached are dropped; the enums keep every variant. A removed arm
+  matches a variant that no running code builds: no value of it exists,
+  so the program computes the same results. The one other difference is at
+  translation time: an extern that only a removed arm would call (a
+  function value of it that no live code builds) is not reported as
+  missing ([liveness.md](implementation/conversions/liveness.md)). Without
+  the pass, every helper
+  requested anywhere is generated with an arm for every variant
+  registered anywhere: in a program that can cast (§5.1), each unboxing
+  function then has a cast arm and a conversion for every variant of a
+  compatible layout, and a program importing `Cslib.Init` with a
+  one-line `main` had 990,927 functions (1.44 GB of `.rr`) of which about
+  2 % could run; with the pass it has 30,418 (26 MB).
 
 - **Kept out of rrc's MLIR inliner.** The conversions between
   representations (`l2r_fconv_S_T`), the unboxing functions (`l2r_unbox_…`,
@@ -3159,10 +3196,9 @@ Each item says what differs and when.
   constructor with fields or as a string (a number used as an address), a
   constructor read as another inductive's constructor that has fields its
   source does not have, a `UInt64` cell read as `Nat`; and, through a
-  `Box` only, a cast whose conversion would need a function value at
-  another representation, or between inductives whose constructors do not
-  all correspond (another number of constructors), which typed code
-  converts (§5.1). Also out of reach: a cast that reads part of a scalar
+  `Box` only, a cast between inductives whose constructors do not all
+  correspond (another number of constructors), which typed code converts
+  (§5.1). Also out of reach: a cast that reads part of a scalar
   cell (a `Float` or `UInt64` read as `Float32`) or a record of scalars read
   as a `UInt64` (natively its data; here an address stand-in) or the
   reverse panic or differ, and a value cast to `Bool` or an enumeration

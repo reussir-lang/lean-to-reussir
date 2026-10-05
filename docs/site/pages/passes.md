@@ -29,6 +29,8 @@ what was installed before. The hooks are:
 - Lean definitions replaced by prelude functions;
 - lowering hooks (`LowerHooks`: the J1′ choice, the form of a J4 state
   machine, constant caching, how a `cases` binds its fields);
+- which helpers Stage 4 generates at the end (only those live code
+  reaches: unboxing, application and conversion functions);
 - passes over the generated Reussir functions (`rrPasses`).
 
 To turn a pass off for a test:

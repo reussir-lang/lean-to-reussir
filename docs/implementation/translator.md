@@ -186,7 +186,9 @@ relative to `lean2rr/` unless they start with `scripts/`.
   `boxCastConv`, `structConv`, `countConversion`; `Lower/FnValues.lean`:
   `applyCall`, `fnConvFn`, `unboxFnFn`; `Lower/Finish.lean`:
   `finishPersistFns`; `Emit/Program.lean`: `lowerProgram`. Test
-  `RtConvProbeRollback` (an undone probe, then a kept one).
+  `RtConvProbeRollback` (an undone probe, then a kept one, until review
+  CLR-01 made a cast that needs a wrapper convert: a probe is now undone
+  only for a cast without a conversion, and no test reaches that).
 - **Remove only if:** never.
 
 ### Stage 3 finds a declaration's binder types by name through a map

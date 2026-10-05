@@ -23,8 +23,10 @@ to `lean2rr/LeanToReussir/`. Plan
   0cba3ff). Going through `RVec<Box>` keeps the number of conversions
   linear in the number of array types, not quadratic (nested arrays under
   polymorphic recursion have many representations).
-- **Where:** `Lower/Finish.lean`: `finishUnboxFns`, `reprCompatible`,
-  `monoCompatible`; `Lower/Conv.lean`: `tryCoerce`.
+- **Where:** `Lower/Finish.lean`: `genUnbox` (one function; driven by
+  `finishUnboxFns`, or by `finishLive` with `conv-liveness`, which leaves
+  out the variants no live code builds: [liveness.md](liveness.md)),
+  `reprCompatible`, `monoCompatible`; `Lower/Conv.lean`: `tryCoerce`.
 - **Remove only if:** never.
 
 ### Other types' variants only in a program that can cast
@@ -32,22 +34,33 @@ to `lean2rr/LeanToReussir/`. Plan
 - **What:** Besides its own Lean type, an unboxing function accepts the
   variants of types an `unsafeCast` can read (a `[value]` struct as its
   field, `UInt64`/`Float` bits, words, isomorphic inductives) only when
-  `LowerCtx.programCasts` holds. Even then, a cast whose conversion would
-  need a function value at another representation, or between inductives
-  that do not correspond constructor for constructor, stays unreachable in
-  a `Box` arm (typed code still converts the latter).
+  `LowerCtx.programCasts` holds. Even then, a cast between inductives that
+  do not correspond constructor for constructor stays unreachable in a
+  `Box` arm (typed code converts it). A cast whose conversion needs a
+  function value at another representation converts through a wrapper, as
+  any conversion does: it used to be kept only when the wrapper was
+  registered already, so whether it converted depended on the order in
+  which helpers were generated and, with `conv-liveness`, on which were
+  live (review CLR-01; tests `RtCastFnWrapDead`, `RtCastFnWrapLive`,
+  `RtCastFnWrapOrder`). The wrappers stay finite: a wrapper is a variant
+  `w<S>` of function type `T`, both types the program has, so there are
+  at most F² wrappers and conversions for F function types.
 - **Why:** Matching every castable type made each unboxing function match
   every type with function fields at the same slots (the dictionaries of
   uniform code), each wrapper adding arms to application functions:
-  programs over monad transformer towers grew by a fifth (e8feb4a).
+  programs over monad transformer towers grew by a fifth (e8feb4a), which
+  is why wrapper casts were once kept only when the wrapper existed (an
+  order-dependent result, dropped for CLR-01; with `conv-liveness` only
+  live unboxing functions and built variants get arms).
   Accepting inductives with other constructor counts added 3-5% of code
   for casts that hardly ever occur (18fb171). Outside casting programs,
   same-shape boxed types made unboxing quadratic (TY6-02, 5be764c).
-- **Where:** `Lower/Conv.lean`: `boxCastable`, `boxCastConv` (probes and
-  rolls back, cutting the emitted functions and types back to their sizes:
+- **Where:** `Lower/Conv.lean`: `boxCastable`, `boxCastConv` (probes, and
+  rolls back a cast that has no conversion, cutting the emitted functions
+  and types back to their sizes:
   [../translator.md](../translator.md#stage-4-finds-emitted-functions-by-name-and-keeps-its-emitted-items-unshared)),
   `programCasts`; `Lower/Finish.lean`: `boxCastCompatible`,
-  `finishUnboxFns`. The fact itself:
+  `genUnbox`. The fact itself:
   [../types/uniform-types.md](../types/uniform-types.md#whether-the-program-can-cast-at-all-is-a-whole-program-fact).
 - **Remove only if:** never. The casts left out panic (plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
@@ -68,7 +81,7 @@ to `lean2rr/LeanToReussir/`. Plan
   5be764c). The arms stay quadratic, but each is a call (Ty6QS80: 200 s,
   157 s without them; most of the rest, 100 s, is one rustc run per
   generic runtime function instantiated at a type, RV6T-03).
-- **Where:** `Lower/Finish.lean`: `finishUnboxFns` (`viaShared`).
+- **Where:** `Lower/Finish.lean`: `genUnbox` (`viaShared`).
 - **Remove only if:** the build cost is no longer a concern; the result is
   the same either way.
 
@@ -92,6 +105,6 @@ to `lean2rr/LeanToReussir/`. Plan
   its variants, and `Box` has one per boxed type: each unboxing function,
   inlined wherever it is called, held such an expansion in its
   `unreachable` arm (ae5104d).
-- **Where:** `Lower/Finish.lean`: `boxSink`, `finishUnboxFns`. Related:
+- **Where:** `Lower/Finish.lean`: `boxSink`, `genUnbox`. Related:
   [../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#bug-22-a-wildcard-arm-over-a-wide-enum-costs-n3-code).
 - **Remove only if:** rrc releases wide enums out of line itself.

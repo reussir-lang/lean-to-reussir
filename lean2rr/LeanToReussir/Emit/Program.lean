@@ -401,7 +401,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
                           uncachedConsts, preludeReplacements := cfg.preludeReplacements,
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
                           cachePlaceholders := cfg.cachePlaceholders, natArrays := cfg.natArrays,
-                          programCasts := casts.isSome, callCycles := callCycles decls }
+                          programCasts := casts.isSome, callCycles := callCycles decls,
+                          convLiveness := cfg.convLiveness }
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit variant, `box(0)`): types
     -- may mention it even when nothing is ever boxed.
@@ -413,10 +414,23 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
     for d in decls do lowerDecl cfg.lower d
     let entry ← lowerEntry mainInst errStr startup
     modify fun s => { s with fns := s.fns.push entry }
+    -- `conv-liveness`: the prelude's names are roots too (the raw items'
+    -- are found by `liveFollow`).
+    if cfg.convLiveness then liveRootText prelude
     -- Converters and application functions can need each other.
-    repeat
-      finishUnboxFns
-      unless ← finishFnValues do break
+    let finish : LowerM Unit := do
+      if cfg.convLiveness then
+        finishLive
+      else
+        repeat
+          finishUnboxFns
+          unless ← finishFnValues do break
+    finish
+    -- What the functions generated next depend on: whether the program has
+    -- stream cells, and its task types.
+    let lateKey : LowerM (Option Nat × Option RR.Ty × Nat) := do
+      return (← getPart (·.stdSlots), ← getPart (·.stdStreamTy), ← getPart (·.taskTags.size))
+    let key ← lateKey
     -- Only now is every use of the standard streams lowered (function
     -- values' targets included), so the diagnostics writer and the stream
     -- contexts know whether the program has stream cells.
@@ -424,12 +438,28 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
     modify fun s => { s with fns := s.fns.push put }
     let ctxFns ← stdContextFns
     modify fun s => { s with fns := s.fns ++ ctxFns }
-    repeat
-      finishUnboxFns
-      unless ← finishFnValues do break
+    finish
     -- Every task type is known now: the functions running queued tasks.
     let disp ← taskDispatchFns
     modify fun s => { s with fns := s.fns ++ disp }
+    if cfg.convLiveness then
+      let mut key := key
+      repeat
+        finishLive
+        -- A helper reached only from the functions just generated (the
+        -- task dispatch applies the tasks' closures) is generated only
+        -- now, and its arms can add a use of the standard streams or a
+        -- task type: those functions are generated again until they are
+        -- stable (their trampolines stay).
+        if (← lateKey) != key then
+          key ← lateKey
+          for it in #[← stderrPutFn] ++ (← stdContextFns) ++ (← taskDispatchFns) do
+            if let .fn n .. := it then replaceFn n it
+          continue
+        unless ← finishPersistFns do break
+      -- The enums of function types are those of the functions kept
+      -- (`fnTypeItems` after `liveDrop`, below).
+      return (#[], ← anchoredFns)
     repeat
       finishUnboxFns
       -- The traversals of constants for tasks (`persistCall`), for the
@@ -490,6 +520,13 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
     let msg := "\n".intercalate parts.toList
     if (← IO.getEnv "L2R_ALLOW_MISSING_EXTERNS").isSome then IO.eprintln s!"lean2rr: warning: {msg}"
     else throwError msg
+  -- `conv-liveness`: the functions not reached dropped, then the enums of
+  -- the function types the rest mentions.
+  let (fnItems, st) ← if cfg.convLiveness then do
+      let st := { st with fns := liveDrop st }
+      let (items, st) ← (fnTypeItems.run ctx).run st
+      pure (items, st)
+    else pure (fnItems, st)
   let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))
   return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := liveFns st.fns, strLits := st.strLits, anchored }
 

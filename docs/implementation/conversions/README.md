@@ -18,6 +18,10 @@ and [§5.5](../../translation-plan.md#55-cases).
   function accepts, and how it converts them.
 - [casts.md](casts.md): `unsafeCast` between different types, following
   Lean's native layouts and boxed scalars.
+- [liveness.md](liveness.md): the helpers (unboxing, application and
+  conversion functions, reference dispatch) generated only for what live
+  code reaches, and the functions nothing reaches dropped (optional pass
+  `conv-liveness`).
 
 A converted value is a new, unshared value: it is not `ptrEq` to its
 original, and an update of it never shows in the original

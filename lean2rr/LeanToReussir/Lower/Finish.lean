@@ -66,16 +66,85 @@ partial def monoCompatible (a b : Expr) : Bool :=
 through `unsafeCast` (`boxCastable`, Lower/Conv). -/
 def boxCastCompatible (vt t : RR.Ty) : LowerM Bool := boxCastable vt t
 
-/-- Generate the bodies of all `Box → nominal` and `Box → array` converters.
-A converter matches every `Box` variant that can hold a value of the
-target's Lean type and converts it: for a nominal type, any instantiation of
-its inductive (structurally); for an array type, any array representation
-with compatible elements (element by element; e.g. an `Array Nat` built by
-uniform-representation code is boxed as `RVec<Box>`, but its consumer wants
-`LNatArr`). Other variants are unreachable. A boxed unit
-is Lean's `box(0)` placeholder and becomes the target's zero. Generating a
-conversion may add `Box` variants (for fields), so this iterates until the
-variant set is stable. -/
+/-- Generate the body of the `Box → t` converter `fname`. It matches every
+`Box` variant that can hold a value of the target's Lean type (with
+`conv-liveness`, that live code builds) and converts it: for a nominal
+type, any instantiation of its inductive (structurally); for an array
+type, any array representation with compatible elements (element by
+element; e.g. an `Array Nat` built by uniform-representation code is boxed
+as `RVec<Box>`, but its consumer wants `LNatArr`). Other variants are
+unreachable. A boxed unit is Lean's `box(0)` placeholder and becomes the
+target's zero. -/
+def genUnbox (fname : String) (t : RR.Ty) : LowerM Unit := do
+  let th? ← match t with
+    | .named tn => nominalHead tn
+    | _ => pure none
+  let tArr := (← arrayRepr? t).isSome
+  let mut arms : Array RR.Arm := #[]
+  for (vt, vname) in (← getPart (·.boxVariants)) do
+    if ← liveSkipBox vname then continue
+    let accept ← match th?, vt with
+      | some th, .named vn => pure ((← nominalHead vn) == some th)
+      | some _, _ => pure false
+      | none, .fn .. =>
+        -- A function value of any compatible representation (wrapped).
+        pure (t matches .fn .. && (← reprCompatible vt t))
+      | none, .app "LCell" _ =>
+        -- A thunk or task of the same kind with compatible values.
+        match ← lazyOf? t, ← lazyOf? vt with
+        | some (_, k1, a), some (_, k2, b) => pure (k1 == k2 && (← reprCompatible a b))
+        | _, _ => pure false
+      | none, _ => pure (tArr && (← arrayRepr? vt).isSome && (← reprCompatible vt t))
+    let cast := !accept && vt != .unit && (← boxCastCompatible vt t)
+    if !accept && !cast then continue
+    let x ← fresh "bx"
+    -- Arrays of another representation go through `RVec<Box>` (boxing,
+    -- then unboxing each element), so that the conversions generated
+    -- stay linear in the number of array types, not quadratic (nested
+    -- arrays under polymorphic recursion have many representations).
+    let boxArr := RR.Ty.app "RVec" #[RR.Ty.box]
+    let viaBoxArr := tArr && vt != t && vt != boxArr && t != boxArr && (← arrayRepr? vt).isSome
+    -- Another instantiation of the inductive whose Lean type cannot be
+    -- the target's (`Option Nat` read as `Option String`), in a program
+    -- that does not cast (`programCasts`): only a value that Lean's `cse`
+    -- shared between the two types reaches it (`none`, `some []`), with
+    -- no data where the types differ. It goes through the instantiation
+    -- at the arguments both share, `lcAny` elsewhere (`Prod (Array Sⱼ)
+    -- Nat` read as `Prod (Array Sᵢ) Nat` through `Prod lcAny Nat`), so
+    -- that the conversions generated stay linear in the number of
+    -- instantiations, not quadratic.
+    let viaShared ← do
+      if cast || (← read).programCasts || vt == t then pure none else
+      let (.named vn, .named tn, some th) := (vt, t, th?) | pure none
+      let (some vk, some tk) := ((← get).typeKeys[vn]?, (← get).typeKeys[tn]?) | pure none
+      if monoCompatible vk tk || vk.getAppNumArgs != tk.getAppNumArgs then pure none else
+      let args := (vk.getAppArgs.zip tk.getAppArgs).map fun (a, b) =>
+        if a.consumeMData == b.consumeMData then a else anyExpr
+      let u ← lowerTypeApp th args
+      pure (if u == vt || u == t then none else some u)
+    let body ← if cast then boxCastConv (.var x) vt t
+      else if let some u := viaShared then
+        match ← tryCoerce (.var x) vt u with
+        | some b => tryCoerce b u t
+        | none => pure none
+      else if !viaBoxArr then tryCoerce (.var x) vt t
+      else match ← tryCoerce (.var x) vt boxArr with
+        | some b => tryCoerce b boxArr t
+        | none => pure none
+    if let some body := body then
+      arms := arms.push { ty := boxName, ctor := some vname, binders := #[some x], body := .ofExpr body }
+  let u ← boxVariant .unit
+  unless arms.any (·.ctor == some u) do
+    arms := arms.push { ty := boxName, ctor := some u, binders := #[none], body := .ofExpr (← zeroValue t) }
+  -- The `Box` is released out of line (`boxSink`) before the panic.
+  arms := arms.push { ty := boxName, ctor := none, binders := #[],
+                      body := ⟨#[boxSink (.var "b")], .call "l2r_unreachable" #[t] #[]⟩ }
+  let item := RR.Item.fn fname #[("b", RR.Ty.box)] t (.ofExpr (.mtch (.var "b") arms))
+  replaceFn fname item
+
+/-- Generate the bodies of all `Box → nominal`, `Box → array` and `Box →
+function` converters (`genUnbox`). Generating a conversion may add `Box`
+variants (for fields), so this iterates until the variant set is stable. -/
 partial def finishUnboxFns : LowerM Unit := do
   let mut done : Std.HashMap String Nat := {}
   repeat
@@ -88,70 +157,7 @@ partial def finishUnboxFns : LowerM Unit := do
     let pending := (nominal ++ arrays ++ fns).filter fun (f, _) => done.getD f 0 != nvars + 1
     if pending.isEmpty then break
     for (fname, t) in pending do
-      let th? ← match t with
-        | .named tn => nominalHead tn
-        | _ => pure none
-      let tArr := (← arrayRepr? t).isSome
-      let mut arms : Array RR.Arm := #[]
-      for (vt, vname) in (← getPart (·.boxVariants)) do
-        let accept ← match th?, vt with
-          | some th, .named vn => pure ((← nominalHead vn) == some th)
-          | some _, _ => pure false
-          | none, .fn .. =>
-            -- A function value of any compatible representation (wrapped).
-            pure (t matches .fn .. && (← reprCompatible vt t))
-          | none, .app "LCell" _ =>
-            -- A thunk or task of the same kind with compatible values.
-            match ← lazyOf? t, ← lazyOf? vt with
-            | some (_, k1, a), some (_, k2, b) => pure (k1 == k2 && (← reprCompatible a b))
-            | _, _ => pure false
-          | none, _ => pure (tArr && (← arrayRepr? vt).isSome && (← reprCompatible vt t))
-        let cast := !accept && vt != .unit && (← boxCastCompatible vt t)
-        if !accept && !cast then continue
-        let x ← fresh "bx"
-        -- Arrays of another representation go through `RVec<Box>` (boxing,
-        -- then unboxing each element), so that the conversions generated
-        -- stay linear in the number of array types, not quadratic (nested
-        -- arrays under polymorphic recursion have many representations).
-        let boxArr := RR.Ty.app "RVec" #[RR.Ty.box]
-        let viaBoxArr := tArr && vt != t && vt != boxArr && t != boxArr && (← arrayRepr? vt).isSome
-        -- Another instantiation of the inductive whose Lean type cannot be
-        -- the target's (`Option Nat` read as `Option String`), in a program
-        -- that does not cast (`programCasts`): only a value that Lean's `cse`
-        -- shared between the two types reaches it (`none`, `some []`), with
-        -- no data where the types differ. It goes through the instantiation
-        -- at the arguments both share, `lcAny` elsewhere (`Prod (Array Sⱼ)
-        -- Nat` read as `Prod (Array Sᵢ) Nat` through `Prod lcAny Nat`), so
-        -- that the conversions generated stay linear in the number of
-        -- instantiations, not quadratic.
-        let viaShared ← do
-          if cast || (← read).programCasts || vt == t then pure none else
-          let (.named vn, .named tn, some th) := (vt, t, th?) | pure none
-          let (some vk, some tk) := ((← get).typeKeys[vn]?, (← get).typeKeys[tn]?) | pure none
-          if monoCompatible vk tk || vk.getAppNumArgs != tk.getAppNumArgs then pure none else
-          let args := (vk.getAppArgs.zip tk.getAppArgs).map fun (a, b) =>
-            if a.consumeMData == b.consumeMData then a else anyExpr
-          let u ← lowerTypeApp th args
-          pure (if u == vt || u == t then none else some u)
-        let body ← if cast then boxCastConv (.var x) vt t
-          else if let some u := viaShared then
-            match ← tryCoerce (.var x) vt u with
-            | some b => tryCoerce b u t
-            | none => pure none
-          else if !viaBoxArr then tryCoerce (.var x) vt t
-          else match ← tryCoerce (.var x) vt boxArr with
-            | some b => tryCoerce b boxArr t
-            | none => pure none
-        if let some body := body then
-          arms := arms.push { ty := boxName, ctor := some vname, binders := #[some x], body := .ofExpr body }
-      let u ← boxVariant .unit
-      unless arms.any (·.ctor == some u) do
-        arms := arms.push { ty := boxName, ctor := some u, binders := #[none], body := .ofExpr (← zeroValue t) }
-      -- The `Box` is released out of line (`boxSink`) before the panic.
-      arms := arms.push { ty := boxName, ctor := none, binders := #[],
-                          body := ⟨#[boxSink (.var "b")], .call "l2r_unreachable" #[t] #[]⟩ }
-      let item := RR.Item.fn fname #[("b", RR.Ty.box)] t (.ofExpr (.mtch (.var "b") arms))
-      replaceFn fname item
+      genUnbox fname t
       -- Record the variant count this body was generated against; a later
       -- growth of the variant set makes it pending again.
       done := done.insert fname (nvars + 1)
@@ -165,7 +171,9 @@ def targetCall (tg : FnTarget) (args : Array RR.Expr) : LowerM RR.Expr := do
   | .stream fd i streamTy => streamFieldCall fd i streamTy args
 
 /-- Generate `l2r_ap<j>_T`, applying a function value of type `t` to `j`
-arguments (see "Function values"): a match on the variant. -/
+arguments (see "Function values"): a match on the variant (with
+`conv-liveness`, on the variants live code builds, besides `z` and
+`raw`). -/
 def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
   let (doms, _) := fnChain t
   let resJ := fnResult t j
@@ -182,7 +190,11 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
     #[{ ty := tn, ctor := some "z", binders := #[], body := .ofExpr (← zeroValue resJ) }]
   let rawBody ← rest (.apply (.var "l2rc") (.var as[0]!)) 1
   arms := arms.push { ty := tn, ctor := some "raw", binders := #[some "l2rc"], body := .ofExpr rawBody }
+  let mut skipped := false
   for v in (← getPart (·.fnVariants)).getD t #[] do
+    if ← liveSkipFn t v then
+      skipped := true
+      continue
     let (binders, body) ← match v with
       | .wrap src =>
         let k := min (fnChain src).1.size j
@@ -204,6 +216,17 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
             rest (← coerce call tg.ret (fnResult t k)) k
         pure ((List.range m).toArray.map fun i => some s!"l2rx{i}", body)
     arms := arms.push { ty := tn, ctor := some (fnVariantName v), binders, body := .ofExpr body }
+  -- `conv-liveness`: the variants no live code builds are unreachable. rrc
+  -- copies the wildcard into each of them, so the arguments are released
+  -- out of line (`l2r_sink`, as `sinkWildcardHeld`), not each in line, a
+  -- match over its type's variants, in every copy.
+  if skipped then
+    let mut sinks := #[]
+    for (a, aty) in as.zip doms do
+      if aty matches .named "u8" | .named "u16" | .named "u32" | .named "u64" | .named "i8" | .named "i16"
+          | .named "i32" | .named "i64" | .named "f32" | .named "f64" | .named "bool" | .named "L2RUnit" then continue
+      sinks := sinks.push (s!"us{a}", some (RR.Ty.named "u64"), RR.Expr.call "l2r_sink" #[aty] #[.var a])
+    arms := arms.push { ty := tn, ctor := none, binders := #[], body := ⟨sinks, .call "l2r_unreachable" #[resJ] #[]⟩ }
   let name := applyFnName t j
   let params := #[("l2rf", t)] ++ as.zip (doms.extract 0 j)
   let item := RR.Item.fn name params resJ (.ofExpr (.mtch (.var "l2rf") arms))
@@ -223,6 +246,7 @@ def genFnConv (src dst : RR.Ty) : LowerM Unit := do
   let mut arms : Array RR.Arm := #[]
   for v in (← getPart (·.fnVariants)).getD src #[] do
     let .wrap r := v | continue
+    if ← liveSkipFn src v then continue
     let some e ← tryCoerce (.var "l2rg") r dst | continue
     arms := arms.push { ty := RR.fnTypeName src, ctor := some (fnVariantName v), binders := #[some "l2rg"], body := .ofExpr e }
   let body : RR.Expr := if arms.isEmpty then wrapped
@@ -251,6 +275,27 @@ partial def finishFnValues : LowerM Bool := do
     if !progress then break
     any := true
   return any
+
+/-- `finishUnboxFns` and `finishFnValues` with `conv-liveness`: the helpers
+live code reaches, with arms for the variants live code builds, generated
+until liveness (`liveFollow`) finds nothing new for them: a helper whose
+variants grew since its body was generated (`liveVersion`) is generated
+again, and the bodies generated are looked at by the next scan. -/
+partial def finishLive : LowerM Unit := do
+  repeat
+    liveFollow
+    let mut gen := false
+    for (name, h) in ← getPart (·.live.helpers) do
+      let ver ← liveVersion h
+      if (← getPart (·.live.done[name]?)) == some ver then continue
+      match h with
+      | .unbox t => genUnbox name t
+      | .apply t j => genApply t j
+      | .fconv src dst => genFnConv src dst
+      | .refbox op a => genRefFn op a
+      modify fun s => { s with live := { s.live with done := s.live.done.insert name ver } }
+      gen := true
+    if !gen then break
 
 /-- The generated functions that rrc's MLIR inliner is to leave out of
 line (`#[transform_anchor]`, see `Emit/Program`): the conversions between

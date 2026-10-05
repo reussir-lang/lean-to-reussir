@@ -11,9 +11,10 @@
 #   C02R-01 and C02R-02, makes them grow about 16x).
 # - Both runs must print what the native build prints.
 # It also builds RtConvProbeRollback.lean with the counter and runs it once:
-# the counter's function is first emitted inside a cast probe that lean2rr
-# undoes, and must be emitted again by the kept one (review R9S2R-04); the
-# run must print what native prints and count some conversions.
+# its casts' conversions, and the counter's function, are emitted inside
+# cast probes (the first one was undone until review CLR-01, and the counter
+# then had to be emitted again by the kept one: review R9S2R-04); the run
+# must print what native prints and count some conversions.
 #   tests/runtime/conv-count-check.sh [SMALL]   (default 300)
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN).
