@@ -2033,8 +2033,8 @@ A generated Reussir `#[main]` does what Lean's generated `main` does
 (`EmitC`: `initialize_Main`, then `lean_io_mark_end_initialization` and
 `lean_init_task_manager`, then `lean_run_main`, then
 `lean_finalize_task_manager`):
-0. before any of it (an ELF constructor, so before Rust's runtime starts),
-   the runtime opens the descriptors that native Lean's runtime has open
+0. before any of it (lean-runtime's ELF constructor, so before Rust's
+   runtime starts), the runtime opens the descriptors that native Lean's runtime has open
    when the program starts: libuv's event loop opens an epoll descriptor,
    two io_uring rings (when the kernel has them), its two signal pipes and
    an eventfd, close-on-exec, at the lowest free numbers (3 to 10 when the
@@ -2062,7 +2062,9 @@ A generated Reussir `#[main]` does what Lean's generated `main` does
    exits with status 1;
 6. otherwise it exits with the returned `UInt32` (0 for `IO Unit`).
 
-`leanrt::rt::run_main2` implements the two threads; Lean's stack
+`leanrt::rt::run_main2` implements the two threads (`main`'s is
+lean-runtime's `io::startup::run_main` since switch step 7; it has no name
+of its own, as native's `lthread`); Lean's stack
 overflow report is lean-runtime's (`sched::install_stack_overflow_handler`,
 on both threads): a stack overflow in either thread or in a task (on a
 context of lean-runtime's scheduler, §5.14) prints `Stack overflow
@@ -2632,9 +2634,10 @@ read and per write while no reference is taken, a recorded `take` per
 
 lean-runtime's scheduler itself starts at the first task, promise,
 `Std.Sync` object, timer, signal watcher or socket after `main` started
-(`leanrt::task::ensure_started`), with the number of workers and the
-stack size `main`'s start read as natively: a program that makes none
-pays nothing for it.
+(its lazy start, `sched::start_lazy`, which `leanrt::task::start` calls at
+`main`'s start; lean-runtime's entry points call `ensure_started`), with
+the number of workers and the stack size `main`'s start read as natively:
+a program that makes none pays nothing for it.
 
 Why tasks are deferred rather than run at creation: a task may wait for
 `main`. `IO.asTask (do while !(← flag.get) do IO.sleep 1; …)` followed by
@@ -3417,9 +3420,9 @@ dependent that subscribes again), the `net` cases of LB-21 to LB-28,
   [LB-31](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-31-when-libuv-cannot-create-its-global-signal-lock-pipe-startup-aborts)):
   natively a descriptor limit that leaves no room for libuv's loop crashes
   every program before `main` (SIGSEGV, 139, at `ulimit -n` 8 to 10) or
-  aborts it (SIGABRT, 134, at 4 to 7). lean2rr's startup glue
-  (`rt::startup_descriptors`) ends it with lean-runtime's `INTERNAL PANIC:
-  Failed to initialize event loop: too many open files`, status 1. Test
+  aborts it (SIGABRT, 134, at 4 to 7). lean-runtime's startup constructor
+  (feature `startup-fds`) ends it with `INTERNAL PANIC: Failed to
+  initialize event loop: too many open files`, status 1. Test
   `RtStartupFdExhausted`.
 - *LB-11, `Nat.pow` with an exponent of 2^32 or more*
   ([LB-11](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#limits);

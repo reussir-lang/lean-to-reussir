@@ -22,15 +22,18 @@
 //!   another context (`thunk_wait_busy`, `on_finish`);
 //! - thin calls to the yield points (`effect`, `poll`, `before_publish`).
 //!
-//! lean2rr stays on one thread (`main`'s): `start` runs there.
+//! lean2rr stays on one thread (`main`'s): `task::start` (lean-runtime's
+//! `start_lazy`) runs there, and the scheduler is built there at the first
+//! task, promise, `Std.Sync` object or operation, timer, signal watcher or
+//! socket.
 
 use crate::once;
 use lean_runtime::sched::{self as ls, CtxId, Glue, Suspend};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
-struct LeanrtGlue;
+/// lean2rr's glue, given to lean-runtime's scheduler by `task::start`.
+pub(crate) struct LeanrtGlue;
 
 impl Glue for LeanrtGlue {
     fn suspend(&self, s: Suspend<'_>) {
@@ -72,8 +75,10 @@ impl Glue for LeanrtGlue {
         //   code), or from a stack lean2rr switches to itself (it has none:
         //   leanrt has no coroutines of its own);
         // - `switched` only moves state and cannot block or yield (below);
-        // - `sched::start` is called on the thread that runs `main`, and
-        //   every later call is made on that thread (`rt::run_main2`).
+        // - `ls::start_lazy` is called on the thread that runs `main`
+        //   (`task::start`, inside the body `rt::run_main2` gives
+        //   `io::startup::run_main`), so the scheduler is built there, and
+        //   every later call is made on that thread.
         unsafe { (*s.yielder()).suspend(()) }
     }
 
@@ -224,17 +229,6 @@ pub fn worker_streams_enter(base: u64) -> bool {
         }
         None => false,
     }
-}
-
-/// lean-runtime's scheduler starts (`task::ensure_started`, at the first
-/// task, promise, `Std.Sync` object, timer, signal watcher or socket after
-/// `main` started), with the task manager's number of workers (0: no task
-/// manager, tasks run at once) and the contexts' stack size, read when
-/// `main` started (`task::start`, Lean's `lean_init_task_manager`). Called
-/// on `main`'s thread, which then registers with Lean's stack-overflow
-/// report (`rt::run_main2` installed it on this thread).
-pub fn start(workers: u32, stack_size: usize) {
-    ls::start_with(Rc::new(LeanrtGlue), workers, stack_size);
 }
 
 /// An observable effect (output, a flush, a process spawn,

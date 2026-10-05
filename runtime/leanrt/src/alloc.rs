@@ -18,7 +18,7 @@
 //! freed with `free`.
 
 use reussir_rt::rc::Rc;
-use std::ffi::{c_int, c_long, c_void};
+use std::ffi::c_void;
 use std::mem::{align_of, size_of};
 
 extern "C" {
@@ -26,51 +26,6 @@ extern "C" {
     fn mi_zalloc(size: usize) -> *mut c_void;
     fn mi_realloc(p: *mut c_void, size: usize) -> *mut c_void;
     fn mi_free(p: *mut c_void);
-    fn mi_version() -> c_int;
-    fn mi_option_set(option: c_int, value: c_long);
-}
-
-/// `mi_option_eager_commit_delay` in mimalloc v2's `mi_option_t` (v2.2.4,
-/// which Reussir's `libmimalloc-sys` 0.1.44 bundles, and v2.3). mimalloc v3
-/// keeps the slot as `deprecated_eager_commit_delay`; another major version
-/// may reuse it, so [`heap_on_huge_pages`] sets it only on a v2.
-const MI_OPTION_EAGER_COMMIT_DELAY: c_int = 14;
-
-/// Let `main`'s thread allocate on transparent huge pages, as native Lean
-/// does. Called on the process's main thread before `main`'s thread starts
-/// (`rt::run_main`, `rt::run_main2`).
-///
-/// lean-runtime's argument constructor (`.init_array.00100`) allocates
-/// before mimalloc's own constructor has run. mimalloc gives that
-/// allocation a 32 MiB segment straight from the OS and reserves no arena.
-/// The first arena (1 GiB) is then reserved for the first segment of
-/// `main`'s thread, the process's second thread. mimalloc v2 delays the
-/// first `eager_commit_delay` segments (default 1) of every thread but the
-/// first, and a delayed segment may not use large OS pages, so the arena
-/// was mapped without `MADV_HUGEPAGE`. With transparent huge pages in
-/// `madvise` mode, the heap's first GiB then took one page fault per
-/// 4 KiB: `deriv` at size 11 had 263,000 faults and 0.28 s system time,
-/// native 2,800 faults and 0.09 s (native's mimalloc v3 advises every
-/// arena). Before the constructor (lean-runtime switch, step 3), the main
-/// thread reserved the arena, with huge pages. With no delay, the first
-/// segment of `main`'s thread, and so the arena, may use them.
-///
-/// Not set when the environment sets `MIMALLOC_EAGER_COMMIT_DELAY` (any
-/// case, as mimalloc reads it), or on a mimalloc other than v2 (v3 has no
-/// delay).
-pub fn heap_on_huge_pages() {
-    use std::os::unix::ffi::OsStrExt;
-    let v = unsafe { mi_version() };
-    // `MI_MALLOC_VERSION`: major and two digits of minor (224), or since
-    // 2.3 also two digits of patch (20302).
-    let major = if v >= 10000 { v / 10000 } else { v / 100 };
-    if major != 2 {
-        return;
-    }
-    if std::env::vars_os().any(|(k, _)| k.as_bytes().eq_ignore_ascii_case(b"MIMALLOC_EAGER_COMMIT_DELAY")) {
-        return;
-    }
-    unsafe { mi_option_set(MI_OPTION_EAGER_COMMIT_DELAY, 0) }
 }
 
 #[cold]

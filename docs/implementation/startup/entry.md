@@ -9,48 +9,68 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
 - **What:** `leanrt::rt::run_main2` runs the startup chain
   (`l2r_init_body`, which sets `IO.initializing` and clears it at the end)
   on the process's main thread (8 MiB stack), then `l2r_main_body` (which
-  starts the task manager, then calls `main`) on a new thread with a
-  1 GiB stack (`LEAN_STACK_SIZE_KB`); with `LEAN_MAIN_USE_THREAD=0`, on
-  the main thread instead.
+  starts the task manager, calls `main`, then runs the final run of tasks)
+  through lean-runtime's `io::startup::run_main` (audit item 4.2, since
+  switch step 7): on a new thread with a 1 GiB stack
+  (`sched::thread_stack_size`, `LEAN_STACK_SIZE_KB`), or with
+  `LEAN_MAIN_USE_THREAD=0` (exactly `0`) on the main thread instead. The
+  body first installs Lean's stack-overflow report. The thread has no name
+  of its own: it keeps the process's (`/proc/thread-self/comm`), as
+  native's `lthread`. A Rust panic (a runtime bug) inside the generated
+  code (`l2r_main_body` and every frame below it, the runtime's textures
+  included) cannot unwind: Rust reports "panic in a function that cannot
+  unwind" and aborts (status 134, buffered stdout lost), in both modes;
+  only a panic in the glue's own frames (`run_main2`'s closure,
+  `install_stack_overflow_handler`) comes back from `run_main` as `Err`,
+  and the process exits with status 101, its streams written.
 - **Why:** As native Lean: a deep initializer overflows natively at
   8 MiB, and deep non-tail recursion in `main` is common (runtime requests
-  13, 23, 24; be9f201).
+  13, 23, 24; be9f201). The thread is lean-runtime's since switch step 7
+  (leanrt's own `run_body` named it `main`: a Rust panic's header said
+  `thread 'main'` there, now `thread '<unnamed>'`). What a panic does is
+  unchanged from before step 7 (review RS7-01: a panic inside the
+  generated code aborted with status 134 in both modes then too). The task manager's
+  start, `main` and the final run all run inside the body, since the
+  scheduler's state is the thread's own (lean-runtime's review RSH2-03).
 - **Where:** `Emit/Entry.lean`: `lowerEntry`; `Emit/Startup.lean`:
-  `startupChain`; `runtime/leanrt/src/rt.rs`: `run_main2`, `run_body`,
-  `set_initializing`, `main_on_thread`.
+  `startupChain`; `runtime/leanrt/src/rt.rs`: `run_main2`,
+  `set_initializing`, `main_on_thread`; lean-runtime's
+  `src/io/startup.rs`: `run_main`, `main_on_thread`.
 - **Remove only if:** never.
 
 ### `main`'s thread allocates on transparent huge pages
 
-- **What:** Before `main`'s thread starts, `run_main` and `run_main2` set
-  mimalloc's `eager_commit_delay` option to 0
-  (`alloc::heap_on_huge_pages`). They leave it alone when the environment
-  sets `MIMALLOC_EAGER_COMMIT_DELAY` (in any case, as mimalloc reads it),
-  and on a mimalloc other than v2 (`mi_version`).
-- **Why:** lean-runtime's argument constructor (`.init_array.00100`)
-  allocates before mimalloc's own constructor has run, so mimalloc gives
-  the main thread a 32 MiB segment from the OS and reserves no arena. The
-  first arena (1 GiB) is then reserved for the first segment of `main`'s
-  thread. mimalloc v2 delays the first segment of every thread but the
-  first, and a delayed segment may not use large OS pages, so the arena
-  had no `MADV_HUGEPAGE`. With transparent huge pages in `madvise` mode,
-  the first GiB of the heap then took one page fault per 4 KiB: `deriv`
-  at size 11 had 263,000 faults and 0.28 s system time, 2,000 faults and
-  0.07 s with the option at 0 (native: 2,800 faults, 0.09 s; native
-  Lean's mimalloc v3 advises every arena); `rbtree-ck` at its benchmark
-  size went from 262,000 faults to 800. Before the switch to lean-runtime
-  (step 3), the main thread reserved the arena first, with huge pages.
-  The cost is a whole 2 MiB page for the first memory touched in a huge
-  page: a tiny program's peak RSS grows by about 2 MB (5.1-5.4 MB to
-  6.9-7.1 MB; native: 7.9-8.4 MB), a small one's by up to 6 MB
-  (`RtNatArr`: 9.3 MB to 15.2 MB; native: 16.3 MB), a 50-150 MB one's by
-  0.5-2.5%; below native in every program measured.
-- **Where:** `runtime/leanrt/src/alloc.rs`: `heap_on_huge_pages`,
-  `MI_OPTION_EAGER_COMMIT_DELAY`; `runtime/leanrt/src/rt.rs`: `run_main`,
-  `run_main2`.
-- **Remove only if:** Reussir's mimalloc moves to v3 (the function then
-  does nothing), or no allocation happens before mimalloc's constructor
-  again (any constructor that allocates brings the problem back).
+- **What:** Nothing allocates before mimalloc's own constructor has run:
+  lean-runtime's ELF constructors (`proc-title`'s, `.init_array.00100`,
+  and `startup-fds`'s, `.init_array.00101`) use no global allocator (its
+  audit item AR-36, checked by its `tests/ctor_alloc.rs`). So the process's
+  main thread reserves mimalloc's first arena (1 GiB) with large OS pages,
+  and the segments of `main`'s thread come from it: the heap is on
+  transparent huge pages, as native Lean's mimalloc v3 advises every
+  arena. leanrt sets no mimalloc option.
+- **Why:** From switch step 3 to step 6, lean-runtime's argument
+  constructor allocated before mimalloc's constructor, so mimalloc gave
+  the main thread a 32 MiB segment from the OS and reserved no arena. The
+  first arena was then reserved for the first segment of `main`'s thread,
+  which mimalloc v2 delays (`eager_commit_delay` 1) and so does not let use
+  large OS pages: it had no `MADV_HUGEPAGE`, and with transparent huge
+  pages in `madvise` mode the heap's first GiB took one page fault per
+  4 KiB (`deriv` at size 11: 263,000 faults, native 2,800). dev eb0ea40
+  worked around it (`alloc::heap_on_huge_pages`: `eager_commit_delay` at 0
+  before `main`'s thread started). With AR-36 (switch step 7) the
+  workaround changed nothing measured, and was removed: `deriv` at size 11
+  1,920 faults with it, 1,922 without (dev 698e92b without it: 263,329);
+  `rbtree-ck` at 4,200,000 704 and 705 (dev without it: 262,152); `Qsort`
+  at 80 133 and 134; peak RSS the same (`Qsort` at 80: 7,140 and 7,144 KB;
+  `deriv` at 11: 3,650,692 and 3,650,756 KB). Measured with
+  `MIMALLOC_EAGER_COMMIT_DELAY=1` (mimalloc v2's default), which the
+  workaround left alone.
+- **Where:** lean-runtime's `src/io/argv_title.rs` and
+  `src/io/startup_fds.rs` (AR-36), `tests/ctor_alloc.rs`.
+- **Remove only if:** this is a constraint, not code: an ELF constructor
+  that allocates before mimalloc's own (one of lean-runtime's, Reussir's,
+  or leanrt's) brings the page faults back; after adding one, check
+  `deriv`'s page faults at size 11 (`/usr/bin/time -v`).
 
 ### `main` gets fresh standard streams only on a thread of its own
 
@@ -93,37 +113,47 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
 
 ### Native Lean's startup descriptors are opened by an ELF constructor
 
-- **What:** Before Rust's runtime starts, an `.init_array` constructor
-  has lean-runtime open the descriptors native Lean's libuv loop has open
-  at startup (`io::startup::open_native_descriptors`: epoll, two io_uring
-  rings when libuv would make them, mapped as libuv maps them, the signal
-  lock pipe with its byte, the loop's signal pipe, an eventfd),
-  close-on-exec, in that order, at the lowest free numbers. A standard
-  descriptor closed at startup is taken by the first of them, as natively.
-  When they cannot be made, the program ends there with lean-runtime's
-  `INTERNAL PANIC: Failed to initialize event loop: ...` (`fail_as_native`;
-  LB-30, LB-31). Signal watchers use the loop's signal pipe and the
-  scheduler's event loop the epoll descriptor (lean-runtime's `sched`
-  takes them from `io::startup`). The constructor is in the
-  plain `.init_array` section, so it runs after the prioritized ones:
-  Rust std's (`.init_array.00099`, the arguments) and lean-runtime's
-  `proc-title` constructor (`.init_array.00100`, AR-20), which keeps the
-  arguments' memory before any startup descriptor exists, as native's
+- **What:** Before Rust's runtime starts, lean-runtime's own ELF
+  constructor (feature `startup-fds`, audit item 4.3, since switch step 7)
+  opens the descriptors native Lean's libuv loop has open at startup
+  (`io::startup::open_native_descriptors`: epoll, two io_uring rings when
+  libuv would make them, mapped as libuv maps them, the signal lock pipe
+  with its byte, the loop's signal pipe, an eventfd), close-on-exec, in
+  that order, at the lowest free numbers. A standard descriptor closed at
+  startup is taken by the first of them, as natively. When they cannot be
+  made, the program ends there with lean-runtime's `INTERNAL PANIC: Failed
+  to initialize event loop: ...` and status 1 (LB-30, LB-31). Signal
+  watchers use the loop's signal pipe and the scheduler's event loop the
+  epoll descriptor (lean-runtime's `sched` takes them from `io::startup`).
+  The constructor is in `.init_array.00101`, so it runs after Rust std's
+  (`.init_array.00099`, the arguments) and lean-runtime's `proc-title`
+  constructor (`.init_array.00100`, AR-20), which keeps the arguments'
+  memory before any startup descriptor exists, as native's
   `lean_setup_args` runs before libuv's loop (review RST3-01: after it, at
-  one free descriptor the title could not be written).
+  one free descriptor the title could not be written). It acts only in the
+  program's own executable and uses no global allocator (AR-36). At
+  `main`'s start `rt::run_main2` calls
+  `io::startup::ensure_native_descriptors()`, which keeps the constructor
+  linked and, if it did not act (under `ld.so ./prog` or without `/proc`:
+  lean-runtime's accepted deviations RSH2-11), opens them where they
+  land; it closes nothing, so a standard descriptor closed at startup
+  then stays Rust's `/dev/null`.
 - **Why:** `/proc/self/fd`, the numbers of the descriptors the program
   opens and the point where opening fails with `EMFILE` are then native's
   (84a4c08, test `RtFdLimit`). Running before Rust's runtime also keeps it
   from putting `/dev/null` in the place of closed standard descriptors,
   which could not be told apart later from a `/dev/null` the program was
   given (a94fafd). Watchers made a new pipe of their own, two descriptors
-  native Lean does not open (round 7 RV7C-05, 10b7568). lean-runtime has
-  no constructor of its own for them (its glue duty, `io::startup`); its
-  rings are real and made only when libuv would make them, so
-  `RtFdStartupNoUring` passes (switch step 3).
-- **Where:** `runtime/leanrt/src/rt.rs`: `startup_descriptors`,
-  `open_startup_descriptors`, `reserve_native_descriptors`,
-  `is_rust_dev_null`; lean-runtime's `src/io/startup.rs`.
+  native Lean does not open (round 7 RV7C-05, 10b7568). The rings are
+  real and made only when libuv would make them, so `RtFdStartupNoUring`
+  passes (switch step 3). Until switch step 7 the constructor was
+  leanrt's (`rt.rs`, plain `.init_array`), with a fallback that closed the
+  read-write `/dev/null`s on descriptors 0 to 2 when it had not run;
+  lean-runtime keeps no such recovery (a safe function that closes
+  descriptors it does not own: its reviews RSH2-04, LS2-01).
+- **Where:** `runtime/leanrt/src/rt.rs`: `run_main2`; `scripts/l2r.py`:
+  `LEAN_RUNTIME_BASE_FEATURES` (`startup-fds`); lean-runtime's
+  `src/io/startup.rs` and `src/io/startup_fds.rs`.
 - **Remove only if:** never.
 
 ### Exit finishes the streams as a native program does

@@ -26,8 +26,8 @@ The runtime has these parts:
   `l2r_shim_*` primitives of lean-runtime's event loop (below).
 - `third_party/lean-runtime` (a git submodule) — the crate `lean_runtime`,
   Lean's runtime behaviour shared with another Lean translator: its
-  `semantics` and, with its features `io`, `proc-title`, `sched`,
-  `stack-overflow` and `net`, its OS-level IO, its task scheduler (with
+  `semantics` and, with its features `io`, `proc-title`, `startup-fds`,
+  `sched`, `stack-overflow` and `net`, its OS-level IO, its task scheduler (with
   `Std.Sync`, the event loop, timers and signals) and its networking.
   The rules it has are its alone: the prelude's textures (as `sem::...`)
   and `leanrt` call it and only convert lean2rr's values to its views and
@@ -106,7 +106,7 @@ and hot paths in `leanrt` and the prelude, which call lean-runtime for the
 rest.
 
 - **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
-  pinned at a commit of its `main` (now `528fcbb`). Clone lean2rr with
+  pinned at a commit of its `main` (now `471f458`). Clone lean2rr with
   `git clone --recurse-submodules`, or run `git submodule update --init
   third_party/lean-runtime` in a checkout, and again after a checkout,
   merge or pull that moves the pin: git does not update a submodule on its
@@ -126,14 +126,17 @@ rest.
 - **The build.** lean2rr enables lean-runtime's features `io` (its
   OS-level IO, over rustix, nix and io-uring), `proc-title` (the process
   title in the arguments' memory: a native quirk written with `unsafe`,
-  `UNSAFE.md` in the submodule), `sched` (the task scheduler over
+  `UNSAFE.md` in the submodule), `startup-fds` (native Lean's startup
+  descriptors opened by the crate's own ELF constructor before Rust's
+  runtime starts: another native quirk with `unsafe`), `sched` (the task
+  scheduler over
   corosensei, its event loop over rustix's epoll, signal watchers over
   signal-hook), `stack-overflow` (Lean's stack-overflow report: another
   native quirk with `unsafe`; named on its own, as lean-runtime's newer
   branches no longer turn it on with `sched`) and `net` (sockets, name
   resolution over dns-lookup). The dependencies' build scripts need cargo, so the
   pinned toolchain's cargo builds it: `cargo build --offline --locked
-  --release --lib --features io,proc-title,sched,stack-overflow,net[,...]` from inside the
+  --release --lib --features io,proc-title,startup-fds,sched,stack-overflow,net[,...]` from inside the
   checkout, from the crates in cargo's registry cache
   (`~/.cargo/registry`) at the versions its committed `Cargo.lock` names
   (so nothing is written in the checkout; lean-runtime has no `vendor/`),
@@ -155,7 +158,11 @@ rest.
   `proc-title`'s ELF constructor is lean-runtime's own: the title
   functions refer to it, so the linker keeps its object in every program
   that calls them (checked by the title tests, `RtSystem` and
-  lean-runtime's `uvsys/process_title`, `title_cmdline`).
+  lean-runtime's `uvsys/process_title`, `title_cmdline`). So is
+  `startup-fds`'s: `ensure_native_descriptors` and
+  `mark_end_initialization`, which every program calls, refer to it
+  (checked by the descriptor tests, `RtFdLimit`, `RtFdStartupNoUring`,
+  `RtStartupFdExhausted`, `RtClosedStreams`).
 - **Trying another lean-runtime.** `L2R_LEAN_RUNTIME=<checkout>` builds
   that checkout instead of the submodule (its checked-out commit is not
   compared with the pin), in its own directory (`target/.../lr-<hash>/`),
@@ -590,15 +597,16 @@ not), `l2r_task_query_at(a)` (`IO.getTaskState`: lean-runtime's `state`),
 the generated loop's two passes collect the list, then lean-runtime's
 `wait_any` chooses, and the next pass takes the task at its position),
 `l2r_task_cancel_at(a)`, `l2r_task_check_canceled()`,
-`l2r_task_deferring()` (`manager_running`: false during
+`l2r_task_deferring()` (lean-runtime's `deferring`: false during
 initialization and with `LEAN_NUM_THREADS=0`, when Lean runs tasks at once;
-read from the numbers `main`'s start read), `l2r_task_manager_start()`
+set from the numbers `main`'s start read), `l2r_task_manager_start()`
 (before `main`: the task manager's number of workers and stack size, read
 as natively; lean-runtime's scheduler starts with them, with leanrt's
 glue, at the first task, promise, `Std.Sync` object, timer, signal watcher
-or socket: `task::ensure_started`) and `l2r_task_shutdown()` (after `main`:
+or socket: lean-runtime's lazy start, `sched::start_lazy`, whose entry
+points call `ensure_started`) and `l2r_task_shutdown()` (after `main`:
 lean-runtime's `finish`, the final run, then the io layer's dedicated
-tasks; without a started scheduler, the same without the run). The generated walks
+tasks; without a built scheduler, the same without the run). The generated walks
 (`l2r_task_walk_next()`, `l2r_task_walk_if`) and the generated final run
 (`l2r_run_pending_tasks`) find nothing: lean-runtime does them.
 `l2r_sleep_ms` is lean-runtime's `sleep_ms`. Standard streams are per task,
@@ -865,22 +873,38 @@ order; fallible) and `l2r_proc_output_str(1/2) -> LStr` (stdout, stderr).
 | `timeit`, `allocprof` | `l2r_io_timeit_with<R>(msg, act)`, `l2r_io_allocprof_with<R>(msg, act)` (their lines are lean-runtime's: `io::time::timeit_line`, `io::debug::ALLOCPROF_NOTE`) |
 | `Void.mk` | `lean_void_mk<T>(x)` |
 
-**Main thread.** `leanrt::rt::run_main(|| body())` runs the program on a
-thread with a 1 GiB stack (lean-runtime's `sched::thread_stack_size`) and
-Lean's stack-overflow report (lean-runtime's, feature `stack-overflow`: a
-fault in the guard page of the thread's stack, or of the scheduler's
-context running on it, prints `\nStack overflow detected. Aborting.` and
-aborts, exit 134, without flushing stdout — as native).
-`leanrt::rt::run_main2(|| init(), || body())` first runs `init` (the
-module initializers) on the calling thread, as native `main` does. Both
-first let `main`'s thread allocate on transparent huge pages, as native
-Lean's mimalloc does (`alloc::heap_on_huge_pages`: mimalloc v2's
-`eager_commit_delay` at 0, unless `MIMALLOC_EAGER_COMMIT_DELAY` is set).
-Every thread that runs Lean code calls `install_stack_overflow_handler`
-(lean-runtime's, at the thread's entry; `sched::start` registers `main`'s
-thread again). Before `main`, an ELF constructor
-(`rt::startup_descriptors`, lean-runtime's glue duty) has lean-runtime
-open the descriptors native Lean's runtime has open at startup
+**Main thread.** `leanrt::rt::run_main2(|| init(), || body())` runs
+`init` (the module initializers) on the calling thread, as native `main`
+does, then `body` as `lean_run_main` does: lean-runtime's
+`io::startup::run_main` (audit item 4.2), on a thread with a 1 GiB stack
+(`sched::thread_stack_size`, `LEAN_STACK_SIZE_KB`), or on the calling
+thread with `LEAN_MAIN_USE_THREAD=0`. The thread has no name of its own:
+it keeps the process's (`/proc/thread-self/comm`), as native's `lthread`
+(until switch step 7 lean2rr named it `main`; a Rust panic's header there
+now says `thread '<unnamed>'`). A Rust panic (a runtime bug) inside the
+generated code (`l2r_main_body` and every frame below it, the runtime's
+textures included) cannot unwind: Rust reports "panic in a function that
+cannot unwind" and aborts, status 134, buffered stdout lost, in both
+modes, as before step 7. Only a panic in the glue's own frames
+(`run_main2`'s closure, `install_stack_overflow_handler`) comes back from
+`run_main` as `Err`, and the process exits with status 101, its streams
+written. Both threads have Lean's stack-overflow report
+(lean-runtime's, feature `stack-overflow`: a fault in the guard page of
+the thread's stack, or of the scheduler's context running on it, prints
+`\nStack overflow detected. Aborting.` and aborts, exit 134, without
+flushing stdout — as native): `install_stack_overflow_handler` at the
+thread's entry (for `main`'s thread, first in the body `run_main2` gives
+`run_main`; the scheduler's start registers it again). `body` holds the
+whole of `main`'s life with tasks (`task::start`, `main`,
+`task::shutdown`): the scheduler's state is the thread's own. `main`'s
+thread allocates on transparent huge pages, as native Lean's mimalloc
+does: no constructor allocates before mimalloc's own (lean-runtime's
+AR-36), so the process's main thread reserves the first arena with large
+OS pages (until switch step 7 leanrt set mimalloc v2's
+`eager_commit_delay` to 0 for it, `alloc::heap_on_huge_pages`; implementation
+notes, startup/entry.md). Before `main`, lean-runtime's own
+ELF constructor (feature `startup-fds`, `.init_array.00101`, audit item
+4.3) opens the descriptors native Lean's runtime has open at startup
 (`io::startup`: libuv's epoll descriptor, two io_uring rings when the
 kernel has them, real rings mapped as libuv maps them, the signal lock
 pipe with its byte, the loop's signal pipe and an eventfd, close-on-exec,
@@ -892,6 +916,14 @@ the program ends before `main` with `INTERNAL PANIC: Failed to initialize
 event loop: ...` and status 1 (natively a crash or an abort: LB-30,
 LB-31). Running before Rust's runtime, the constructor also keeps Rust
 from putting `/dev/null` in the place of closed standard descriptors.
+`run_main2` calls `io::startup::ensure_native_descriptors()` first, which
+keeps the constructor linked and, if it did not act (it acts only in the
+program's own executable: under `ld.so ./prog` or without `/proc` it does
+nothing, lean-runtime's accepted deviations RSH2-11), opens them where
+they land; it closes nothing (until switch step 7 lean2rr's own
+constructor and fallback, which closed Rust's read-write `/dev/null`s on
+descriptors 0 to 2 first, did this: lean-runtime's reviews RSH2-04 and
+LS2-01 dropped that recovery).
 Signal watchers use the loop's signal pipe, as libuv's loop does
 (lean-runtime's `sched::uv` claims it from `io::startup`).
 `IO.initializing` is lean-runtime's flag (`io::startup`), true until the
@@ -950,7 +982,9 @@ lean2rr's dev branch (the tests pass with it).
     `leanrt::rt::run_main(|| unsafe { l2r_main_body() })` instead of its
     own `std::thread` (Lean's stack size incl. `LEAN_STACK_SIZE_KB` and
     `LEAN_MAIN_USE_THREAD`, and Lean's stack-overflow message; test
-    `RtStack`).
+    `RtStack`). (Since item 24 the entry calls `run_main2`; since switch
+    step 7 its thread is lean-runtime's `io::startup::run_main`, and
+    `run_main` is gone.)
 14. *done* — The standard-stream glue should check each `l2r_stream_*` call with
     `l2r_io_finish`, as for files (tests `RtBrokenPipe`, `RtClosedStreams`).
 15. *done* — `lean_io_prim_handle_is_tty` and `lean_io_prim_handle_is_eof` are

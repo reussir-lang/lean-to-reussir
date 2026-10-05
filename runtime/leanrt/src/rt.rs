@@ -1,7 +1,22 @@
-//! Process-level runtime: running `main` on a large stack, Lean's stack
-//! overflow report, and the startup glue lean-runtime's io asks of a
-//! translator (`io::startup`): the ELF constructor that opens native Lean's
-//! startup descriptors, and `IO.initializing`'s end.
+//! Process-level runtime: the startup glue lean-runtime's io asks of a
+//! translator (`io::startup`): native Lean's startup descriptors, `main` on
+//! a thread of its own with Lean's stack (`lean_run_main`), Lean's
+//! stack-overflow report on each thread that runs Lean code, and
+//! `IO.initializing`'s end.
+//!
+//! The startup descriptors (libuv's loop: epoll, the io_uring rings, the
+//! signal lock pipe, the signal pipe, the eventfd, numbers 3 to 10 when the
+//! standard ones are open) are opened by lean-runtime's own ELF constructor
+//! (feature `startup-fds`, `.init_array.00101`), before Rust's runtime puts
+//! `/dev/null` in the place of a closed standard descriptor, so a closed
+//! standard descriptor is taken by the first of them, as natively. The glue
+//! calls `io::startup::ensure_native_descriptors` at the start of `main`
+//! (`run_main2`), which keeps the constructor linked and, if it did not act
+//! (no `/proc`, a launch through the dynamic loader), opens them where they
+//! land. When they cannot be made, the program does not reach `main`:
+//! lean-runtime ends it with `INTERNAL PANIC: Failed to initialize event
+//! loop: ...` and exit status 1, where native crashes (LB-30) or aborts
+//! (LB-31).
 //!
 //! Lean's stack-overflow report (`src/runtime/stack_overflow.cpp`: a
 //! SIGSEGV/SIGBUS handler on an alternate signal stack in every thread that
@@ -13,102 +28,16 @@
 //! `stack-overflow`, a native quirk written with `unsafe`: its UNSAFE.md and
 //! docs/native-quirks.md). The glue's duty is the call, once per OS thread
 //! that runs Lean code, at that thread's entry: the process's main thread
-//! (the initializers) and `main`'s thread (`run_main2`, `run_body`); the
-//! scheduler's contexts need nothing more. The program's `main` is Reussir's
-//! launcher, a Rust `main`: std's runtime start installs Rust's handler
-//! first, which lean-runtime's keeps as the previous action (a fault that is
-//! no Lean stack overflow goes there).
+//! (the initializers) and `main`'s thread (the body `run_main2` gives
+//! `io::startup::run_main`); the scheduler's contexts need nothing more. The
+//! program's `main` is Reussir's launcher, a Rust `main`: std's runtime start
+//! installs Rust's handler first, which lean-runtime's keeps as the previous
+//! action (a fault that is no Lean stack overflow goes there).
 
 /// Lean's stack-overflow report on the calling thread (lean-runtime's; see
 /// the module comment).
 pub fn install_stack_overflow_handler() {
     lean_runtime::sched::install_stack_overflow_handler()
-}
-
-/// The stack size of Lean's main thread (`lean_run_main`), the same as its
-/// worker threads' (`lthread`): 1 GiB on 64-bit targets, or
-/// `LEAN_STACK_SIZE_KB` (rounded down to 4 KiB) plus a 128 KiB buffer
-/// (lean-runtime's `sched::thread_stack_size`, which also sizes the
-/// scheduler's contexts).
-fn main_stack_size() -> usize {
-    lean_runtime::sched::thread_stack_size()
-}
-
-extern "C" {
-    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-    fn close(fd: i32) -> i32;
-}
-
-/// Whether native Lean's startup descriptors are open (`startup_descriptors`
-/// or `reserve_native_descriptors` ran).
-static DESCRIPTORS_RESERVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// lean-runtime's startup descriptors (`io::startup`): native Lean's runtime
-/// starts libuv's event loop at startup, which opens (close-on-exec, at the
-/// lowest free numbers) an epoll descriptor, two io_uring rings when the
-/// kernel has them, the pipe that locks signal handling, the loop's signal
-/// pipe and an eventfd: numbers 3 to 10 when the standard ones are open, so
-/// that `/proc/self/fd`, the numbers of the descriptors the program opens and
-/// the point where opening fails with `EMFILE` are native's, and a standard
-/// descriptor closed at startup is taken by the first of them. When they
-/// cannot be made, the program does not reach `main`: lean-runtime ends it
-/// with `INTERNAL PANIC: Failed to initialize event loop: ...` and exit status
-/// 1, where native crashes (LB-30) or aborts (LB-31).
-fn open_startup_descriptors() {
-    if let Err(f) = lean_runtime::io::startup::open_native_descriptors() {
-        lean_runtime::io::startup::fail_as_native(f)
-    }
-}
-
-/// An ELF constructor (lean-runtime's glue duty, `io::startup`): it runs
-/// before `main`, and so before Rust's runtime puts `/dev/null` in the place
-/// of closed standard descriptors (`sanitize_standard_fds`), which could not
-/// be told apart afterwards from a `/dev/null` the program was given
-/// (Python's `subprocess.DEVNULL`, `<>/dev/null`). It opens native Lean's
-/// startup descriptors, which take the places of closed standard
-/// descriptors, as natively.
-extern "C" fn startup_descriptors() {
-    open_startup_descriptors();
-    DESCRIPTORS_RESERVED.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[used]
-#[link_section = ".init_array"]
-static STARTUP_DESCRIPTORS: extern "C" fn() = startup_descriptors;
-
-/// Whether `fd` is the `/dev/null` Rust's runtime opens (read-write) in
-/// place of a standard descriptor that was closed at startup
-/// (`sanitize_standard_fds`, run before any Rust `main`).
-fn is_rust_dev_null(fd: i32) -> bool {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    use std::os::unix::io::FromRawFd;
-    const F_GETFL: i32 = 3;
-    const O_ACCMODE: i32 = 3;
-    const O_RDWR: i32 = 2;
-    const DEV_NULL: u64 = (1 << 8) | 3; // makedev(1, 3)
-    let f = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
-    let Ok(m) = f.metadata() else { return false };
-    m.file_type().is_char_device() && m.rdev() == DEV_NULL && unsafe { fcntl(fd, F_GETFL) } & O_ACCMODE == O_RDWR
-}
-
-/// Open native Lean's startup descriptors if the constructor has not.
-/// Without it, Rust's runtime has already put a read-write `/dev/null` in the
-/// place of each closed standard descriptor: those are closed again first,
-/// so that the startup descriptors take their places (a standard descriptor
-/// that is `/dev/null` opened read-write is then taken for a closed one).
-pub fn reserve_native_descriptors() {
-    // Refer to the constructor, so that the linker keeps the object that
-    // holds it.
-    let _ = unsafe { std::ptr::read_volatile(&STARTUP_DESCRIPTORS) };
-    if DESCRIPTORS_RESERVED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        return;
-    }
-    for fd in 0..3 {
-        if is_rust_dev_null(fd) {
-            unsafe { close(fd) };
-        }
-    }
-    open_startup_descriptors();
 }
 
 /// The command line (`argv`), read once.
@@ -135,66 +64,47 @@ pub fn set_initializing(b: bool) {
     }
 }
 
-/// Run the program's main body as Lean does (`lean_run_main`): on a thread
-/// with Lean's main stack size (unless `LEAN_MAIN_USE_THREAD=0`), with
-/// Lean's stack-overflow report, and wait for it.
-pub fn run_main<F: FnOnce() + Send + 'static>(body: F) {
-    crate::alloc::heap_on_huge_pages();
-    reserve_native_descriptors();
-    run_body(body)
-}
-
 /// Run a program as Lean's generated C `main` does: `init` (the module
 /// initializers) on the calling thread (the process's main thread, with its
 /// usual stack, so deep initializers overflow as natively), then `body` as
-/// `run_main` does (`lean_run_main`: Lean's big main stack). Both have
-/// Lean's stack-overflow report. `init` decides itself whether to continue
-/// (an initializer's uncaught error exits); `IO.initializing` is the
-/// caller's business (`set_initializing`).
+/// `lean_run_main` does, on a thread of its own with Lean's main stack size
+/// (lean-runtime's `io::startup::run_main` with `sched::thread_stack_size`:
+/// 1 GiB on 64-bit targets, or `LEAN_STACK_SIZE_KB` rounded down to 4 KiB
+/// plus 128 KiB), or on the calling thread with `LEAN_MAIN_USE_THREAD=0`.
+/// Both have Lean's stack-overflow report. `init` decides itself whether to
+/// continue (an initializer's uncaught error exits); `IO.initializing` is
+/// the caller's business (`set_initializing`). `body` holds the whole of
+/// `main`'s life with tasks (the generated `l2r_main_body`:
+/// `task::start`, the program's `main`, then `task::shutdown`), since the
+/// scheduler's state is the thread's own.
 pub fn run_main2<I: FnOnce(), F: FnOnce() + Send + 'static>(init: I, body: F) {
-    crate::alloc::heap_on_huge_pages();
-    reserve_native_descriptors();
+    lean_runtime::io::startup::ensure_native_descriptors();
     install_stack_overflow_handler();
     init();
-    run_body(body)
-}
-
-/// Whether `main` runs on a thread of its own (`run_body`), set before it
-/// starts. With `LEAN_MAIN_USE_THREAD=0` it runs on the initializers'
-/// thread and, as natively, keeps that thread's current standard streams
-/// (lean2rr's entry starts a fresh stream context for `main` only when this
-/// is true).
-static MAIN_ON_THREAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub fn main_on_thread() -> bool {
-    MAIN_ON_THREAD.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-fn run_body<F: FnOnce() + Send + 'static>(body: F) {
-    if std::env::var("LEAN_MAIN_USE_THREAD").map(|v| v == "0").unwrap_or(false) {
+    let ran = lean_runtime::io::startup::run_main(lean_runtime::sched::thread_stack_size(), move || {
         install_stack_overflow_handler();
-        body();
-        return;
-    }
-    MAIN_ON_THREAD.store(true, std::sync::atomic::Ordering::Relaxed);
-    let t = match std::thread::Builder::new()
-        .name("main".into())
-        .stack_size(main_stack_size())
-        .spawn(move || {
-            install_stack_overflow_handler();
-            body()
-        }) {
-        Ok(t) => t,
-        // Native `lean_run_main` throws `lean::exception("failed to create
-        // thread: " << strerror(err))`, which nothing catches: libc++
-        // reports it and aborts (lean-runtime's text, as for its workers).
-        Err(e) => lean_runtime::sched::thread_create_failed(&e),
-    };
-    if t.join().is_err() {
-        // A Rust panic of `main`'s thread (a runtime bug): exit as a Rust
-        // program does, with the streams written.
+        body()
+    });
+    if ran.is_err() {
+        // A Rust panic (a runtime bug) that unwound out of the body: only
+        // one raised in the glue's own frames (the closure above,
+        // `install_stack_overflow_handler`) gets here; exit as a Rust program
+        // does, with the streams written. A panic inside the generated code
+        // (`l2r_main_body` and every frame below it, the runtime's textures
+        // included) cannot unwind through it: Rust reports "panic in a
+        // function that cannot unwind" and aborts (status 134, buffered
+        // stdout lost), in both modes, as before switch step 7.
         crate::io::exit(101);
     }
+}
+
+/// Whether `main` runs on a thread of its own (lean-runtime's
+/// `io::startup::main_on_thread`, set by `run_main2` before `body` starts).
+/// With `LEAN_MAIN_USE_THREAD=0` it runs on the initializers' thread and, as
+/// natively, keeps that thread's current standard streams (lean2rr's entry
+/// starts a fresh stream context for `main` only when this is true).
+pub fn main_on_thread() -> bool {
+    lean_runtime::io::startup::main_on_thread()
 }
 
 // `System.Platform.target` and the other toolchain facts are lean-runtime's

@@ -203,28 +203,39 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
 ### lean-runtime's scheduler starts at the first task
 
 - **What:** `main`'s start (`task::start`, Lean's `lean_init_task_manager`)
-  only reads the task manager's number of workers (`LEAN_NUM_THREADS`, else
-  the online processors) and the contexts' stack size, and answers
-  `deferring` from them. lean-runtime's scheduler starts with them at the
-  first task, promise, `Std.Sync` object or operation, timer, signal
-  watcher or socket after `main` started (`task::ensure_started`), which also turns reference
-  reads into polling points. Until then a constant's claim and its store
-  (lean-runtime's `step_keyed` and `done_keyed`, `once::claim_cold`,
-  `set_raw`) take `main`'s context without building the scheduler's state
-  (lean-runtime's fixes-6, asked for in switch step 6: before it, every
-  program built that state, and read std's random hash keys, at its first
-  constant), and the final run is `finish` without its run of tasks (the
-  handed-off streams' writers, then the io layer's dedicated tasks:
-  `task::shutdown`).
+  is lean-runtime's lazy start (`sched::start_lazy`, audit item 4.5, since
+  switch step 7): it only reads the task manager's number of workers
+  (`LEAN_NUM_THREADS`, else the online processors) and the contexts' stack
+  size, and answers `deferring` from them. lean-runtime builds the
+  scheduler with lean2rr's glue at the first task, promise, `Std.Sync`
+  object or operation, timer, signal watcher or socket: its own entry
+  points for those call `ensure_started` (`spawn`, `depend`,
+  `dependent_runs_now`, `promise_new`, every method of `sync`'s objects,
+  `uv::loop_configure` and `loop_alive`, `Timer::new`, `Signal::new`,
+  `TcpSocket::new`, `UdpSocket::new`, `dns::get_addr_info` and
+  `get_name_info`), and the start turns reference reads into polling
+  points. leanrt calls none of it itself. Until then a constant's claim and
+  its store (lean-runtime's `step_keyed` and `done_keyed`,
+  `once::claim_cold`, `set_raw`) take `main`'s context without building the
+  scheduler's state (lean-runtime's fixes-6, asked for in switch step 6:
+  before it, every program built that state, and read std's random hash
+  keys, at its first constant), and the final run, `finish`, builds nothing
+  either (the handed-off streams' writers, then the io layer's dedicated
+  tasks: `task::shutdown`). The state is the thread's own (thread-locals),
+  so `task::start`, `main` and `task::shutdown` all run inside the body
+  that `rt::run_main2` gives `io::startup::run_main`, on `main`'s thread;
+  during the initializers nothing is started.
 - **Why:** A program that creates no tasks pays nothing for the scheduler
   (owner's rule, as for C externs): no scheduler state, contexts or event
   loop are built, nor their code paged in; until a task exists nothing
   could have been deferred or run elsewhere, so the two are the same. The
   number of workers is still read at `main`'s start: the same system calls
-  as natively.
-- **Where:** `task.rs`: `start`, `ensure_started`, `start_sched`,
-  `deferring`, `shutdown`, `register`, `promise_new`; `sync.rs`,
-  `net.rs` (constructors), `once.rs`: `claim_cold`; `sched.rs`: `start`.
+  as natively. The lazy start was leanrt's own (its `ensure_started`,
+  `start_sched` and the flags beside them) until switch step 7 moved it
+  into the crate.
+- **Where:** `task.rs`: `start`, `deferring`, `shutdown`; `sched.rs`:
+  `LeanrtGlue`; `once.rs`: `claim_cold`; lean-runtime's `src/sched/mod.rs`
+  (`start_lazy`, `ensure_started`, `deferring`).
 - **Remove only if:** never (the owner's rule: a program without tasks
   pays nothing for the scheduler).
 
@@ -281,8 +292,9 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
 - **What:** lean-runtime's `sched::install_stack_overflow_handler()`
   (feature `stack-overflow`) on each thread that runs Lean code, at its
   entry: the process's main thread before the initializers and `main`'s
-  thread (`rt::run_main2`, `run_body`; `sched::start` registers `main`'s
-  thread again). A fault in the guard page of the thread's stack, or of
+  thread (`rt::run_main2`, at the start of the body it gives
+  `io::startup::run_main`; the scheduler's start registers `main`'s thread
+  again). A fault in the guard page of the thread's stack, or of
   the running context's, prints `Stack overflow detected. Aborting.` and
   aborts (status 134, stdout not flushed); another fault takes the
   default action.
@@ -290,8 +302,8 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   leanrt's own handler is gone (it also took a fault below the stack with
   the stack pointer below it, a frame skipping the guard page, b1cd76c;
   `RtStackOverflow`'s GMP case passes with lean-runtime's).
-- **Where:** `rt.rs`: `install_stack_overflow_handler`, `run_main2`,
-  `run_body`; lean-runtime's `src/sched/stack_overflow.rs`.
+- **Where:** `rt.rs`: `install_stack_overflow_handler`, `run_main2`;
+  lean-runtime's `src/sched/stack_overflow.rs`.
 - **Remove only if:** never.
 
 ### `Std.Sync` is lean-runtime's
@@ -300,15 +312,24 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   `BaseSharedMutex` are lean-runtime's (`sched::sync`) in runtime handles:
   locks belong to threads (a context, and on it the innermost running
   task's thread), glibc's and libc++'s rules, waits that let the others go
-  on. Before each operation (`settle`), lean-runtime's scheduler is started
-  once `main` runs (`task::ensure_started`), and promises resolved inside a
-  free are resolved in lean-runtime.
+  on. Each of lean-runtime's methods, the constructors included, starts
+  the scheduler first if the lazy start is waiting for it (its
+  `ensure_started`; until switch step 7 leanrt's `settle` did it before
+  each call), and promises resolved inside a free are resolved in
+  lean-runtime.
 - **Why:** As Lean's `mutex.cpp` over `std::mutex` & co. (f87ea08); one
   implementation (lean-runtime's, from leanrt's). A lock's owner is a
   thread, which lean-runtime tells apart from an initializer's by its
   scheduler having started: with the scheduler started only at the first
   task, a mutex an initializer made, locked by `main` before that task and
   again (nested) after it, had two owners, and `main` waited for itself
-  forever (review RS4-05, test `RtRecMutexLazyStart`).
+  forever (review RS4-05, test `RtRecMutexLazyStart`). The owner names
+  the OS thread (lean-runtime's AR-39, fixed in 471f458, fixes-7; review
+  RS7-02): until then it told an initializer from `main` by the scheduler
+  having started, so a lock an initializer kept, taken again by `main`,
+  hung with `LEAN_MAIN_USE_THREAD=0` (natively nested on one thread) and
+  was taken with `LEAN_NUM_THREADS=0` on `main`'s own thread (natively a
+  deadlock; now `main` waits forever too, the hub asleep, nothing printed);
+  test `RtRecMutexInitOwner`.
 - **Where:** `sync.rs`; lean-runtime's `src/sched/sync.rs`.
 - **Remove only if:** never.

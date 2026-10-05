@@ -192,7 +192,7 @@ descriptors, the exit), the scheduler (tasks, promises, `Std.Sync`, the
 event loop, the stack-overflow report) and the networking. lean2rr uses it
 for all of them: the submodule `third_party/lean-runtime`, which
 `scripts/l2r.py` builds with cargo (the features `io`, `proc-title`,
-`sched`, `stack-overflow` and `net`) and links with `leanrt` ([runtime
+`startup-fds`, `sched`, `stack-overflow` and `net`) and links with `leanrt` ([runtime
 README](repo:runtime/README.md), "The shared crate lean-runtime"). lean2rr
 keeps its hot paths: the inline small-`Nat`/`Int` arithmetic, the
 one-block big numbers with GMP (behind lean-runtime's big-number traits),

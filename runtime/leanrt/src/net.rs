@@ -278,13 +278,11 @@ pub fn ntop(a: &[u8]) -> Vec<u8> {
 
 /// `Loop.configure` (lean-runtime's `uv::loop_configure`).
 pub fn loop_configure(accumulate_idle_time: bool, block_sigprof: bool) {
-    crate::task::ensure_started();
     let _ = uv::loop_configure(accumulate_idle_time, block_sigprof);
 }
 
 /// `Loop.alive` (lean-runtime's `uv::loop_alive`).
 pub fn loop_alive() -> bool {
-    crate::task::ensure_started();
     uv::loop_alive()
 }
 
@@ -340,7 +338,6 @@ fn next_op(p: LPromise, r: LPromise, next: impl FnOnce(LoopP) -> Result<LoopP, i
 
 /// `Timer.mk timeout repeating`.
 pub fn timer_new(timeout: u64, repeating: bool) -> LHandle {
-    crate::task::ensure_started();
     new_handle(Timer::<LoopP>::new(timeout, repeating))
 }
 
@@ -362,7 +359,6 @@ pub fn timer_ctl(t: &LHandle, which: u8) {
 
 /// `Signal.mk signum repeating`.
 pub fn signal_new(signum: i32, repeating: bool) -> LHandle {
-    crate::task::ensure_started();
     new_handle(Signal::<LoopP>::new(signum, repeating))
 }
 
@@ -415,7 +411,6 @@ fn recv_buf(size: u64) -> Vec<u8> {
 /// lean-runtime's error (which libuv 1.48 never reports for `uv_tcp_init`;
 /// natively it would be an `IO.Error` too).
 pub fn tcp_new() -> LHandle {
-    crate::task::ensure_started();
     socket_op(TcpSocket::new().map(new_handle))
 }
 
@@ -529,7 +524,6 @@ pub fn tcp_keepalive(s: &LHandle, enable: i32, delay: u32) -> LHandle {
 
 /// `UDP.Socket.new`, as `tcp_new`.
 pub fn udp_new() -> LHandle {
-    crate::task::ensure_started();
     socket_op(UdpSocket::new().map(new_handle))
 }
 

@@ -376,13 +376,13 @@ pub fn on_last_reference(p: usize) -> bool {
 // ---------------------------------------------------------------------------
 // The generated code's primitives
 
-/// Whether new tasks are deferred (otherwise they run at once): the task
-/// manager runs (lean-runtime's `manager_running`: after `start`, and not
-/// with `LEAN_NUM_THREADS=0`; read here, as lean-runtime may not have
-/// started yet, `ensure_started`).
+/// Whether new tasks are deferred (otherwise they run at once):
+/// lean-runtime's `deferring`, true from `main`'s start (`start`) when the
+/// task manager has workers (not with `LEAN_NUM_THREADS=0`), also before
+/// the lazy start has built the scheduler.
 #[inline]
 pub fn deferring() -> bool {
-    DEFERRING.load(Relaxed)
+    ls::deferring()
 }
 
 /// Whether every task has finished: no task has an entry (an unfinished
@@ -395,80 +395,37 @@ pub fn settled() -> bool {
     tasks().live == 0 && !ls::deferred_pending()
 }
 
-// The task manager. `main` starts it (`start`: Lean's
-// `lean_init_task_manager`), reading the number of workers and the stack
-// size as natively; lean-runtime's scheduler itself starts with them at the
-// first task, promise, `Std.Sync` object, timer, signal watcher or socket
-// (`ensure_started`), so a program that makes none pays nothing for it (no
-// scheduler state, contexts or event loop are built, nor their code paged
-// in). Until then nothing could have been deferred or run elsewhere, so the
-// two are the same.
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
-
-/// `main` has started and the task manager has workers: new tasks are
-/// deferred (lean-runtime's `manager_running`).
-static DEFERRING: AtomicBool = AtomicBool::new(false);
-static MAIN_STARTED: AtomicBool = AtomicBool::new(false);
-static WORKERS: AtomicU32 = AtomicU32::new(0);
-static STACK: AtomicUsize = AtomicUsize::new(0);
-/// lean-runtime's scheduler has started (`ensure_started`).
-static SCHED_STARTED: AtomicBool = AtomicBool::new(false);
-
-/// The entry point calls this right before `main`
-/// (`lean_io_mark_end_initialization` + `lean_init_task_manager`): the
-/// task manager's number of workers (`LEAN_NUM_THREADS`, else the online
-/// processors: the same system calls as natively) and the contexts' stack
-/// size (`LEAN_STACK_SIZE_KB`, else 1 GiB).
+/// The task manager (Lean's `lean_init_task_manager`): the entry point
+/// calls this at `main`'s start, on `main`'s thread (the generated
+/// `l2r_main_body`, inside the body `rt::run_main2` gives
+/// `io::startup::run_main`: the scheduler's state is that thread's own).
+/// lean-runtime's lazy start (`start_lazy`) takes the number of workers
+/// (`LEAN_NUM_THREADS`, else the online processors: the same system calls as
+/// natively) and the contexts' stack size (`LEAN_STACK_SIZE_KB`, else 1 GiB)
+/// now, and builds the scheduler itself with lean2rr's glue at the first
+/// task, promise, `Std.Sync` object or operation, timer, signal watcher or
+/// socket: lean-runtime's entry points for those start it themselves
+/// (`ensure_started`), and the start turns `ST.Ref` reads into polling
+/// points (`set_ref_read_yields`; see `refs`). So a program that makes none
+/// builds no scheduler state, context or event loop, nor pages in their
+/// code. During the module initializers nothing is started: Lean has no task
+/// manager then.
 pub fn start() {
-    let workers = ls::lean_num_threads();
-    WORKERS.store(workers, Relaxed);
-    STACK.store(ls::thread_stack_size(), Relaxed);
-    DEFERRING.store(workers > 0, Relaxed);
-    MAIN_STARTED.store(true, Relaxed);
-}
-
-/// Before the first task, promise, `Std.Sync` object, timer, signal
-/// watcher or socket after `main` started: lean-runtime's scheduler starts
-/// (`sched::start`), and `ST.Ref` reads become polling points
-/// (`set_ref_read_yields`; see `refs`). Before `main` (initializers) nothing
-/// is started: Lean has no task manager then.
-#[inline]
-pub fn ensure_started() {
-    if !SCHED_STARTED.load(Relaxed) {
-        start_sched()
-    }
-}
-
-#[cold]
-#[inline(never)]
-fn start_sched() {
-    if !MAIN_STARTED.load(Relaxed) {
-        return;
-    }
-    SCHED_STARTED.store(true, Relaxed);
-    crate::sched::start(WORKERS.load(Relaxed), STACK.load(Relaxed));
-    ls::set_ref_read_yields(true);
-}
-
-/// Whether lean-runtime's scheduler has started (`ensure_started`).
-#[inline]
-pub fn sched_started() -> bool {
-    SCHED_STARTED.load(Relaxed)
+    ls::start_lazy(
+        std::rc::Rc::new(crate::sched::LeanrtGlue),
+        ls::lean_num_threads(),
+        ls::thread_stack_size(),
+    );
 }
 
 /// `main` has returned: lean-runtime's final run (`finish`: the remaining
 /// tasks run as during Lean's task-manager shutdown, then the io layer's
 /// dedicated tasks are waited for); the program's dispatcher then finds
-/// nothing more to run (`next_tag`). If the scheduler never started, the
-/// same without the run of tasks: the handed-off streams' writers, then
-/// the io layer's dedicated tasks.
+/// nothing more to run (`next_tag`). If the scheduler was never built, the
+/// same without the run of tasks: the handed-off streams' writers, then the
+/// io layer's dedicated tasks (and nothing is built).
 pub fn shutdown() {
-    if sched_started() {
-        ls::finish();
-    } else {
-        ls::before_publish();
-        lean_runtime::io::exit::after_main();
-    }
+    ls::finish();
 }
 
 /// `IO.sleep` / `dbgSleep`.
@@ -484,7 +441,6 @@ pub fn sleep_ms(ms: u32) {
 /// (the generated code's "run it now" answer, 1, is lean-runtime's now).
 #[inline(never)]
 pub fn register(cell: usize, tag: u64, prio: u64, kind: u64) -> u64 {
-    ensure_started();
     let mut flags = 0;
     if kind & K_PURE != 0 {
         flags |= PURE;
@@ -834,7 +790,6 @@ pub type LPromise = reussir_rt::rc::Rc<Box<dyn std::any::Any>>;
 /// manager runs, Lean's internal panic.
 #[inline(never)]
 pub fn promise_new(cell: usize) -> LPromise {
-    ensure_started();
     match ls::promise_new() {
         Ok(id) => {
             let i = alloc(cell, 0, PROMISE | HAS_ID, 0);

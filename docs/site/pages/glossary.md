@@ -198,4 +198,4 @@ judge
 :   The step that decides whether a finding is real before anyone fixes it.
 
 lean-runtime
-:   The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule `third_party/lean-runtime`): Lean's runtime semantics in safe Rust; lean2rr uses its hash, string, float, fixed-width integer, libm, `Nat`/`Int`, array, panic and number-text rules, its IO, its task scheduler and its event loop (features `io`, `proc-title`, `sched`, `stack-overflow` and `net`), with its own GMP numbers behind the crate's big-number traits.
+:   The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule `third_party/lean-runtime`): Lean's runtime semantics in safe Rust; lean2rr uses its hash, string, float, fixed-width integer, libm, `Nat`/`Int`, array, panic and number-text rules, its IO, its task scheduler and its event loop (features `io`, `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`), with its own GMP numbers behind the crate's big-number traits.

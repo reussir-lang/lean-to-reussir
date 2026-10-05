@@ -212,8 +212,9 @@ Paths are relative to the repository root.
     errors themselves, kept in the operation (switch step 5; at step 3 as
     libuv codes, which the shim decoded again); `setProcessTitle` reports
     lean-runtime's error.
-  - Startup: `rt`'s ELF constructor calls `io::startup::open_native_descriptors`
-    (on failure `fail_as_native`: LB-30, LB-31); `l2r_set_initializing(false)`
+  - Startup: an ELF constructor opens `io::startup`'s native descriptors
+    (on failure LB-30, LB-31; `rt`'s own until switch step 7, lean-runtime's
+    feature `startup-fds` since, below); `l2r_set_initializing(false)`
     is `mark_end_initialization`; `main`'s return (`l2r_exit`,
     `io::main_exit`) and an uncaught error call `io::exit::after_main`
     first; every normal end calls `io::exit::exit`; an uncaught error's
@@ -259,7 +260,7 @@ Paths are relative to the repository root.
   program cases through lean2rr's builds (`scripts/cases.py check
   --exe-dir`).
 - **Where:** `runtime/leanrt/src/fs.rs`, `io.rs`, `proc.rs`, `sys.rs`,
-  `rt.rs` (`startup_descriptors`, `set_initializing`);
+  `rt.rs` (`run_main2`, `set_initializing`);
   `runtime/leanrt/src/lib.rs`: `uncaught_exception`; `runtime/prelude.rr`:
   the standard streams, files, processes, `timeit`, `allocprof`,
   `IO.getEnv`, `Std.Internal.UV.System`; `lean2rr/LeanToReussir/Lower/Process.lean`:
@@ -284,7 +285,8 @@ Paths are relative to the repository root.
   `before_publish` at cell stores, in a program that creates tasks the
   reference operations' points (`refs`: `ref_read`, `before_publish`, and
   Lean 4.35's wait while `modify` holds a reference), the scheduler's
-  start on `main`'s thread at the first task (`start_with`), `finish`
+  start on `main`'s thread at the first task (`start_with`; lean-runtime's
+  `start_lazy` since switch step 7, below), `finish`
   after `main` (with `io::exit::after_main`), the stack-overflow handler
   on each thread that runs Lean code, the no-suspend scope around a stream
   handle's drop, promises dropped inside a free resolved once it is over,
@@ -505,10 +507,103 @@ Paths are relative to the repository root.
 - **Where:** `runtime/leanrt/src/sched.rs` (`on_finish`,
   `thunk_wait_busy`), `once.rs` (`claim_cold`, `set_raw`), `refs.rs`,
   `task.rs` (`Promise`, `defer_promise_drop`, `resolve`, `hook_drained`,
-  `drained`, `settled`), `drop.rs` (`run`, `assert_not_in_free`),
-  `sync.rs` (`settle`); `scripts/l2r.py` (`check_reussir_patches`).
+  `drained`, `settled`), `drop.rs` (`run`, `assert_not_in_free`);
+  `scripts/l2r.py` (`check_reussir_patches`).
   Implementation notes: [../tasks/cells.md](../tasks/cells.md),
   [../tasks/dependents.md](../tasks/dependents.md),
+  [../tasks/scheduler.md](../tasks/scheduler.md).
+- **Remove only if:** never.
+
+### lean2rr's startup logic is lean-runtime's (switch step 7)
+
+- **What:** Three pieces of startup logic only leanrt kept moved into
+  lean-runtime (its shared-2 batch, f618102; audit items 4.2, 4.3, 4.5),
+  and leanrt's copies are gone:
+  - `main` on a thread of its own (4.2): `rt::run_main2` gives `main`'s
+    body to `io::startup::run_main(sched::thread_stack_size(), ...)`,
+    whose first step installs Lean's stack-overflow report; a Rust panic
+    that unwinds out of the body comes back as `Err` and ends the process
+    with status 101, its streams written: only one in the glue's own
+    frames (the closure, `install_stack_overflow_handler`), since a panic
+    inside the generated code (`l2r_main_body` and below) cannot unwind
+    and aborts (status 134, buffered stdout lost), in both modes, as
+    before. `rt::main_on_thread` asks
+    `io::startup::main_on_thread`. leanrt's `run_body`, `MAIN_ON_THREAD`,
+    `main_stack_size` and the unused `run_main` are gone;
+  - the startup descriptors (4.3): lean-runtime's feature `startup-fds`
+    (in `LEAN_RUNTIME_BASE_FEATURES`), its own ELF constructor in
+    `.init_array.00101` (after `proc-title`'s 100, AR-20), opens them
+    before Rust's runtime starts; `run_main2` calls
+    `io::startup::ensure_native_descriptors()` first, which keeps the
+    constructor linked and, if it did not act, opens them where they land.
+    leanrt's constructor (plain `.init_array`), the `fcntl` and `close`
+    externs, `DESCRIPTORS_RESERVED`, `open_startup_descriptors`,
+    `is_rust_dev_null` and `reserve_native_descriptors` are gone;
+  - the lazy start (4.5): `task::start` is `sched::start_lazy(LeanrtGlue,
+    lean_num_threads(), thread_stack_size())`, `task::deferring` is
+    lean-runtime's `deferring`, `task::shutdown` is `finish`;
+    lean-runtime's entry points start the scheduler themselves
+    (`ensure_started`), and the start turns `ST.Ref` read yields on.
+    leanrt's `DEFERRING`, `MAIN_STARTED`, `WORKERS`, `STACK`,
+    `SCHED_STARTED`, `ensure_started`, `start_sched`, `sched_started`,
+    `sched::start`, `sync.rs`'s `settle`, and the `ensure_started` calls
+    in front of `promise_new`, `register` and the `Std.Sync`, loop, timer,
+    signal and socket constructors are gone.
+  The prelude and lean2rr are unchanged: the generated entry still calls
+  `rt::run_main2`, `rt::main_on_thread`, `task::start`,
+  `task::deferring` and `task::shutdown`, now thin glue. leanrt's
+  workaround for an allocation made before mimalloc's constructor
+  (`alloc::heap_on_huge_pages`, dev eb0ea40) is gone too: lean-runtime's
+  constructors no longer allocate (AR-36), and the page faults stay at
+  their fixed level without it ([../startup/entry.md](../startup/entry.md)).
+- **Why:** The owner's rule: runtime code lives in lean-runtime, once;
+  leanrt keeps only lean2rr's layouts and glue. Behaviour changes, from
+  lean-runtime's versions:
+  - `main`'s thread has no name of its own: it keeps the process's
+    (`/proc/thread-self/comm`), as native's `lthread`; leanrt named it
+    `main`. A Rust panic's header (a runtime bug) on that thread now says
+    `thread '<unnamed>'` where it said `thread 'main'`; what the panic
+    does is unchanged (inside the generated code, an abort with status 134
+    in both modes, as before; review RS7-01);
+  - when the constructor did not act (under `ld.so ./prog`, without
+    `/proc`, or in a shared library: lean-runtime's accepted deviations,
+    RSH2-02, RSH2-11), the descriptors open at `main`'s start where they
+    land, and a standard descriptor closed at startup stays Rust's
+    `/dev/null`: leanrt's fallback closed the read-write `/dev/null`s on
+    descriptors 0 to 2 first, which lean-runtime does not keep (a safe
+    function that closes descriptors it does not own; reviews RSH2-04,
+    LS2-01). In a normal launch the constructor acts, and the descriptors
+    are native's, as before;
+  - the lazy start's state is the thread's own (thread-locals) where
+    leanrt's flags were process-wide: lean2rr runs Lean code on one thread
+    at a time, and `task::start`, `main` and `task::shutdown` all run on
+    `main`'s, inside `run_main`'s body;
+  - a recursive mutex an initializer kept locked, locked again by `main`
+    (fixes-7; dev 698e92b had the bug too): with `LEAN_MAIN_USE_THREAD=0` the
+    lock is nested and the program goes on, and on `main`'s own thread
+    `main` waits forever, also with `LEAN_NUM_THREADS=0`, as natively;
+    before, the first hung and the second, with `LEAN_NUM_THREADS=0`, took
+    the lock.
+  lean-runtime's constructors use no global allocator (AR-36).
+  lean-runtime pinned at `471f458` (shared-2, then fixes-7: a `Std.Sync`
+  lock's owner names its OS thread instead of whether the scheduler has
+  started, AR-39, review RS7-02; test `RtRecMutexInitOwner`).
+- **Tests:** the runtime suite's startup, descriptor, title, stack and
+  `LEAN_MAIN_USE_THREAD` tests (`RtFdLimit`, `RtFdStartupNoUring`,
+  `RtStartupFdExhausted`, `RtStartupInit*`, `RtTitleCmdline`,
+  `RtSignalFd`, `RtClosedStreams`, `RtInitRedirectNoThread`, `RtStack`,
+  `RtStackOverflow*`, `RtThreadCreateFails`, and the new
+  `RtMainThreadComm`: `main`'s thread keeps the process's name, and with
+  `LEAN_MAIN_USE_THREAD=0` `main` runs on the process's main thread), and
+  its task, constant, thunk, reference and `Std.Sync` tests
+  (`RtRecMutexLazyStart`, `RtRecMutexInitOwner`, `RtTaskNoManager`);
+  strace of startup against native.
+- **Where:** `runtime/leanrt/src/rt.rs` (`run_main2`, `main_on_thread`),
+  `task.rs` (`start`, `deferring`, `shutdown`), `sched.rs` (`LeanrtGlue`),
+  `sync.rs`, `net.rs`, `alloc.rs`; `scripts/l2r.py`: `LEAN_RUNTIME_BASE_FEATURES`;
+  lean-runtime's `src/io/startup.rs`, `src/io/startup_fds.rs`,
+  `src/sched/mod.rs`. Implementation notes:
+  [../startup/entry.md](../startup/entry.md),
   [../tasks/scheduler.md](../tasks/scheduler.md).
 - **Remove only if:** never.
 
@@ -517,8 +612,9 @@ Paths are relative to the repository root.
 - **What:** `scripts/l2r.py` builds lean-runtime (the git submodule
   `third_party/lean-runtime`, pinned by commit; `L2R_LEAN_RUNTIME` names
   another checkout, `L2R_LEAN_RUNTIME_FEATURES` adds features) next to
-  leanrt, with leanrt's rustc and flags and the features `io` and
-  `proc-title` (`LEAN_RUNTIME_FEATURES`): the pinned toolchain's cargo,
+  leanrt, with leanrt's rustc and flags and the features `io`,
+  `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`
+  (`LEAN_RUNTIME_FEATURES`): the pinned toolchain's cargo,
   `--offline --locked --release` from inside the checkout, against cargo's
   registry cache at the versions of its committed `Cargo.lock` (`cargo
   fetch --locked` fills the cache once; `l2r.py` says so when a crate is
@@ -552,7 +648,8 @@ Paths are relative to the repository root.
   1 and 2) went with step 3, which enables `io`. `proc-title`'s ELF
   constructor is lean-runtime's: its title functions refer to it, so the
   linker keeps its object whenever they are linked (checked by the title
-  tests).
+  tests); `startup-fds`'s too, kept by `ensure_native_descriptors` and
+  `mark_end_initialization`, which every program calls.
 - **Where:** `scripts/l2r.py`: `LEAN_RUNTIME_FEATURES`, `build_lean_runtime`,
   `build_lean_runtime_cargo`, `cargo_link_order`, `check_pin`,
   `lean_runtime_manifest`, `LeanRuntime`, `build_leanrt`, `rustc_wrapper`,

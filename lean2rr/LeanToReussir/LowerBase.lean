@@ -121,7 +121,8 @@ structure LowerCtx where
   /-- Whether the program creates tasks (`programCreatesTasks`): then its
   reference operations are the task-aware ones (`refCellOp`), and it has
   `l2r_std_drop_workers` (`stdContextFns`). lean-runtime's scheduler itself
-  starts at run time, at the first task (`leanrt::task::ensure_started`). -/
+  starts at run time, at the first task (its lazy start, `sched::start_lazy`,
+  which `leanrt::task::start` calls at `main`'s start). -/
   createsTasks : Bool := false
   /-- The mono declarations of the program (code and extern instances). -/
   decls : NameMap (Decl .pure)

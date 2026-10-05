@@ -123,14 +123,19 @@ LEANRT_FLAGS = os.environ.get("L2R_LEANRT_RUSTFLAGS", "").split()
 # streams, processes, system queries, startup and exit glue call
 # lean_runtime::io), `proc-title` (`setProcessTitle` writes the title into
 # the arguments' memory, as libuv does: the crate's ELF constructor keeps that
-# memory), `sched` (the task scheduler: tasks, promises, Std.Sync, the event
-# loop with Std.Internal.UV's timers and signals; leanrt keeps the glue),
-# `stack-overflow` (Lean's stack-overflow report for the scheduler's contexts
-# and lean2rr's threads; named on its own, as lean-runtime's newer branches
-# no longer turn it on with `sched`) and `net` (Std.Internal.UV's sockets
-# and name resolution on the same event loop). L2R_LEAN_RUNTIME_FEATURES
-# (comma-separated) adds others, to try a lean-runtime branch.
-LEAN_RUNTIME_BASE_FEATURES = ["io", "proc-title", "sched", "stack-overflow", "net"]
+# memory), `startup-fds` (native Lean's startup descriptors, libuv's loop,
+# opened by the crate's ELF constructor before Rust's runtime starts, so a
+# closed standard descriptor is taken by the first of them, as natively;
+# `rt::run_main2` calls `io::startup::ensure_native_descriptors`), `sched`
+# (the task scheduler: tasks, promises, Std.Sync, the event loop with
+# Std.Internal.UV's timers and signals, `main`'s thread; leanrt keeps the
+# glue), `stack-overflow` (Lean's stack-overflow report for the scheduler's
+# contexts and lean2rr's threads; named on its own, as lean-runtime's newer
+# branches no longer turn it on with `sched`) and `net` (Std.Internal.UV's
+# sockets and name resolution on the same event loop).
+# L2R_LEAN_RUNTIME_FEATURES (comma-separated) adds others, to try a
+# lean-runtime branch.
+LEAN_RUNTIME_BASE_FEATURES = ["io", "proc-title", "startup-fds", "sched", "stack-overflow", "net"]
 LEAN_RUNTIME_EXTRA_FEATURES = [f.strip() for f in os.environ.get("L2R_LEAN_RUNTIME_FEATURES", "").split(",") if f.strip()]
 LEAN_RUNTIME_FEATURES = LEAN_RUNTIME_BASE_FEATURES + [f for f in LEAN_RUNTIME_EXTRA_FEATURES if f not in LEAN_RUNTIME_BASE_FEATURES]
 

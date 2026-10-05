@@ -8,7 +8,8 @@ starts the scheduler lazily (at the first task, promise, `Std.Sync` object,
 timer or socket after `main` started), so `main`'s first lock, taken before
 its first task, had another owner than its nested one, and `main` waited for
 itself forever. Every `Std.Sync` operation now starts the scheduler once
-`main` runs (`leanrt::sync::settle`). -/
+`main` runs (lean-runtime's `ensure_started`, called by each of its `sync`
+methods; leanrt's `settle` until switch step 7). -/
 
 initialize gm : Std.BaseRecursiveMutex ← Std.BaseRecursiveMutex.new
 
