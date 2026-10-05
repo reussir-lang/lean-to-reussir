@@ -345,6 +345,7 @@ pub fn set_initializing(b: bool) {
 /// with Lean's main stack size (unless `LEAN_MAIN_USE_THREAD=0`), with
 /// Lean's stack-overflow report, and wait for it.
 pub fn run_main<F: FnOnce() + Send + 'static>(body: F) {
+    crate::alloc::heap_on_huge_pages();
     reserve_native_descriptors();
     run_body(body)
 }
@@ -357,6 +358,7 @@ pub fn run_main<F: FnOnce() + Send + 'static>(body: F) {
 /// (an initializer's uncaught error exits); `IO.initializing` is the
 /// caller's business (`set_initializing`).
 pub fn run_main2<I: FnOnce(), F: FnOnce() + Send + 'static>(init: I, body: F) {
+    crate::alloc::heap_on_huge_pages();
     reserve_native_descriptors();
     install_stack_overflow_handler();
     init();

@@ -809,9 +809,12 @@ exit 134, without flushing stdout — as native; also a fault below the stack
 while the stack pointer is below it, which a frame without stack probes,
 such as GMP's scratch space, causes when it skips the guard page).
 `leanrt::rt::run_main2(|| init(), || body())` first runs `init` (the
-module initializers) on the calling thread, as native `main` does. Every
-thread that runs Lean code calls `install_stack_overflow_handler` (its
-guard page is recorded per thread). Before `main`, an ELF constructor
+module initializers) on the calling thread, as native `main` does. Both
+first let `main`'s thread allocate on transparent huge pages, as native
+Lean's mimalloc does (`alloc::heap_on_huge_pages`: mimalloc v2's
+`eager_commit_delay` at 0, unless `MIMALLOC_EAGER_COMMIT_DELAY` is set).
+Every thread that runs Lean code calls `install_stack_overflow_handler`
+(its guard page is recorded per thread). Before `main`, an ELF constructor
 (`rt::startup_descriptors`, lean-runtime's glue duty) has lean-runtime
 open the descriptors native Lean's runtime has open at startup
 (`io::startup`: libuv's epoll descriptor, two io_uring rings when the

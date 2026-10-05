@@ -20,6 +20,38 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
   `set_initializing`, `main_on_thread`.
 - **Remove only if:** never.
 
+### `main`'s thread allocates on transparent huge pages
+
+- **What:** Before `main`'s thread starts, `run_main` and `run_main2` set
+  mimalloc's `eager_commit_delay` option to 0
+  (`alloc::heap_on_huge_pages`). They leave it alone when the environment
+  sets `MIMALLOC_EAGER_COMMIT_DELAY` (in any case, as mimalloc reads it),
+  and on a mimalloc other than v2 (`mi_version`).
+- **Why:** lean-runtime's argument constructor (`.init_array.00100`)
+  allocates before mimalloc's own constructor has run, so mimalloc gives
+  the main thread a 32 MiB segment from the OS and reserves no arena. The
+  first arena (1 GiB) is then reserved for the first segment of `main`'s
+  thread. mimalloc v2 delays the first segment of every thread but the
+  first, and a delayed segment may not use large OS pages, so the arena
+  had no `MADV_HUGEPAGE`. With transparent huge pages in `madvise` mode,
+  the first GiB of the heap then took one page fault per 4 KiB: `deriv`
+  at size 11 had 263,000 faults and 0.28 s system time, 2,000 faults and
+  0.07 s with the option at 0 (native: 2,800 faults, 0.09 s; native
+  Lean's mimalloc v3 advises every arena); `rbtree-ck` at its benchmark
+  size went from 262,000 faults to 800. Before the switch to lean-runtime
+  (step 3), the main thread reserved the arena first, with huge pages.
+  The cost is a whole 2 MiB page for the first memory touched in a huge
+  page: a tiny program's peak RSS grows by about 2 MB (5.1-5.4 MB to
+  6.9-7.1 MB; native: 7.9-8.4 MB), a small one's by up to 6 MB
+  (`RtNatArr`: 9.3 MB to 15.2 MB; native: 16.3 MB), a 50-150 MB one's by
+  0.5-2.5%; below native in every program measured.
+- **Where:** `runtime/leanrt/src/alloc.rs`: `heap_on_huge_pages`,
+  `MI_OPTION_EAGER_COMMIT_DELAY`; `runtime/leanrt/src/rt.rs`: `run_main`,
+  `run_main2`.
+- **Remove only if:** Reussir's mimalloc moves to v3 (the function then
+  does nothing), or no allocation happens before mimalloc's constructor
+  again (any constructor that allocates brings the problem back).
+
 ### `main` gets fresh standard streams only on a thread of its own
 
 - **What:** The entry enters a fresh standard-stream context for `main`
