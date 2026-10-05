@@ -42,7 +42,7 @@ same standard output, standard error and exit code.
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
 | Adversarial testing | 9 review rounds (the first 4 wrote about 1,300 test programs to break it; the later ones work by inspection with targeted programs), Lean's own compile tests (72 programs of `tests/compile` and `compile_bench`, Lean 4.33: all identical), and cross-tests on 550 external fixture programs (542 identical; the 6 causes of the 8 differences are XT-1 to XT-6, XT-6 fixed, XT-1 to XT-5 fixed on branch `fix-xt`); every other finding fixed or documented |
-| Speed (measured against native Lean 4.33; not re-measured for 4.34) | faster than native Lean on 16 of the 18 classic programs and about equal on the other two (monadic-interp 1.01×, deriv ≈1×), faster on 17 of the 18 Reussir-suite programs (the 18th at 1.07×); tables below |
+| Speed (classic corpus against native Lean 4.34.0, 2026-10-04) | faster than native Lean on 15 of the 18 classic programs and about equal on the other three (bignum 1.00×, binarytrees 1.02×, nqueens 1.04×); geometric mean 0.71× time, 0.69× memory; less memory on all 18. Reussir's suite last measured against 4.33 (faster on 17 of 18); tables below |
 
 ## How a program is compiled
 
@@ -428,42 +428,50 @@ with examples, is §10 of the translation plan.
 
 ## Performance
 
-Measured on this machine (aarch64, 20 cores, shared with other jobs: load
-9 to 16 during these runs), each program's lean2rr and native builds run
-alternately, pinned to the least-loaded fast core; best of 5 (classic) or
-3 (Reussir suite); time ratio = lean2rr time / native time (below 1 =
+Measured on this machine (aarch64, 20 cores) in a timing window on
+2026-10-04 (the other jobs paused, load 0.9 to 1.25), each program's
+lean2rr and native builds run alternately, pinned to the least-loaded fast
+core; best of 5; time ratio = lean2rr time / native time (below 1 =
 faster than native). Every run's output was checked against native.
-`dev` 9f5b642, Reussir `l2r-local` at `ef0235b9` (the local patches up to
-0015), against native Lean 4.33. Not re-measured with Lean 4.34, whose
-native runtime changed (mimalloc 3, `lean_dec_ref_cold`, sticky reference
-counts, folded `UInt` literals): the timings wait for a measurement window.
+`dev` 4fbc6d5 (all 17 optional passes on), Reussir `l2r-local` at
+`d79f8b70` (37 local patches), against native Lean 4.34.0
+(`python3 tests/oracle.py bench --cmd 'out/{exe} {size}'`).
 
 **Classic corpus** (`tests/classic`, largest size):
 
 | program | native s | lean2rr s | time × | memory × |
 |---|---|---|---|---|
-| mergesort | 2.11 | 0.79 | 0.37 | 0.64 |
-| rbmap | 1.89 | 0.84 | 0.44 | 1.00 |
-| typeclass-generic | 2.15 | 0.95 | 0.44 | 0.91 |
-| rbtree | 1.84 | 0.83 | 0.45 | 1.00 |
-| liasolver | 2.17 | 1.18 | 0.54 | 1.00 |
-| unionfind | 1.18 | 0.71 | 0.60 | 1.03 |
-| higher-order | 2.35 | 1.49 | 0.63 | 0.84 |
-| rbtree-ck | 1.40 | 0.91 | 0.65 | 0.99 |
-| strings | 1.82 | 1.31 | 0.72 | 0.94 |
-| cfold | 0.79 | 0.63 | 0.80 | 0.79 |
-| sieve | 1.51 | 1.22 | 0.81 | 0.31 |
-| hashmap | 1.63 | 1.45 | 0.89 | 1.13 |
-| binarytrees | 3.07 | 2.79 | 0.91 | 0.42 |
-| qsort | 1.20 | 1.12 | 0.93 | 0.85 |
-| nqueens | 3.77 | 3.55 | 0.94 | 0.75 |
-| bignum | 2.46 | 2.36 | 0.96 | 1.34 |
-| monadic-interp | 1.80 | 1.81 | 1.01 | 0.84 |
-| deriv | (3.7–10) | 4.73 | ≈1 (noisy) | 0.80 |
+| typeclass-generic | 2.08 | 0.84 | 0.40 | 0.59 |
+| rbmap | 1.87 | 0.84 | 0.45 | 0.83 |
+| liasolver | 2.08 | 0.94 | 0.45 | 0.83 |
+| rbtree | 1.85 | 0.85 | 0.46 | 0.83 |
+| deriv | 6.46 | 4.16 | 0.64 | 0.77 |
+| unionfind | 0.97 | 0.64 | 0.66 | 0.78 |
+| mergesort | 1.33 | 0.89 | 0.67 | 0.55 |
+| rbtree-ck | 1.33 | 0.92 | 0.69 | 0.83 |
+| higher-order | 2.25 | 1.56 | 0.69 | 0.67 |
+| strings | 1.57 | 1.17 | 0.75 | 0.80 |
+| sieve | 1.38 | 1.14 | 0.83 | 0.31 |
+| cfold | 0.72 | 0.63 | 0.88 | 0.75 |
+| qsort | 1.12 | 0.99 | 0.88 | 0.64 |
+| monadic-interp | 1.81 | 1.66 | 0.92 | 0.66 |
+| hashmap | 1.51 | 1.46 | 0.97 | 0.98 |
+| bignum | 2.28 | 2.27 | 1.00 | 0.59 |
+| binarytrees | 2.71 | 2.76 | 1.02 | 0.62 |
+| nqueens | 3.52 | 3.67 | 1.04 | 0.75 |
 
-deriv allocates 3.7 GB and its native time varied from 3.7 s to 10 s
-between runs on the loaded machine, so its ratio here is not meaningful;
-on a quieter machine it measured 1.0–1.1×.
+Geometric mean: 0.71× time, 0.69× memory. At the medium size (0.1 to 1 s
+natively) the geometric mean is 0.75× time and 0.67× memory, with deriv at
+1.37× (0.52 s against 0.38 s; not yet explained); at the small size the
+times are below the tool's resolution, and every program uses less
+memory than natively (about 5.5 MB against 7.8 MB at startup).
+
+Against the previous measurement (dev 9f5b642 against native Lean 4.33,
+on a loaded machine): native Lean 4.34 is faster on several programs
+(mergesort 2.11 s → 1.33 s, binarytrees 3.07 s → 2.71 s), so some ratios
+rose while lean2rr's own times stayed about the same; memory fell on
+every program, most on bignum (1.34× → 0.59×, one-block big numbers) and
+the tree programs.
 
 **Reussir's benchmark suite** (its 18 Lean programs, unchanged; several run
 for well under a second, so their ratios are rough):
