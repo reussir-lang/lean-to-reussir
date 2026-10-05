@@ -21,13 +21,14 @@
 //! **Errors.** Every fallible primitive records its outcome in a global
 //! last-error slot: nothing, or lean-runtime's [`IoError`]. lean2rr's glue
 //! checks [`ok`] after the call and otherwise builds the `IO.Error` from
-//! [`error_kind`] (which `lean_mk_io_error_*` builder, numbered as in
-//! runtime/README.md), [`errno`], [`error_fname`] and [`error_details`].
+//! [`error_kind`] (which `lean_mk_io_error_*` builder: lean-runtime's
+//! `IoError::builder_index`, numbered as in runtime/README.md), [`errno`],
+//! [`error_fname`] and [`error_details`] (lean-runtime's accessors).
 //!
 //! **Sinks.** Results of unbounded size go into a `Vec<u8>`, infallible as
 //! lean-runtime's contract asks (a failed allocation aborts, never exits:
 //! `getLine` appends under the stream's lock), except a child's output,
-//! which goes into a [`Sink`] that stops instead (`ByteSink::stopped`, see
+//! which goes into lean-runtime's `StoppingSink`, which stops instead (see
 //! "sinks" below).
 
 use crate::string::{from_bytes, from_bytes_lossy, LStr};
@@ -81,46 +82,12 @@ pub(crate) fn set_ok() {
 }
 
 pub(crate) fn set_err(e: IoError) {
-    use IoError::*;
     let l = last();
     l.failed = true;
     l.kind = kind_of(&e) as u8;
-    l.errno = if matches!(e, UserError(_)) { USER_ERROR } else { error_code(&e) as i32 };
-    let (fname, details) = error_parts(e);
-    l.fname = fname.map(String::into_bytes);
-    l.details = Some(details.into_bytes());
-}
-
-/// An error's file name (if its kind has one) and details.
-fn error_parts(e: IoError) -> (Option<String>, String) {
-    use IoError::*;
-    match e {
-        Interrupted(f, _, d) | NoFileOrDirectory(f, _, d) => (Some(f), d),
-        AlreadyExists(f, _, d)
-        | InvalidArgument(f, _, d)
-        | PermissionDenied(f, _, d)
-        | ResourceExhausted(f, _, d)
-        | InappropriateType(f, _, d)
-        | NoSuchThing(f, _, d) => (f, d),
-        OtherError(_, d)
-        | ResourceBusy(_, d)
-        | ResourceVanished(_, d)
-        | UnsupportedOperation(_, d)
-        | HardwareFault(_, d)
-        | UnsatisfiedConstraints(_, d)
-        | IllegalOperation(_, d)
-        | ProtocolError(_, d)
-        | TimeExpired(_, d)
-        | UserError(d) => (None, d),
-        UnexpectedEof => (None, String::new()),
-    }
-}
-
-/// An error's file name (empty where it has none) and details, as bytes
-/// (for lean2rr's shim, which builds the `IO.Error` itself: `net`).
-pub(crate) fn error_texts(e: IoError) -> (Vec<u8>, Vec<u8>) {
-    let (f, d) = error_parts(e);
-    (f.unwrap_or_default().into_bytes(), d.into_bytes())
+    l.errno = if matches!(e, IoError::UserError(_)) { USER_ERROR } else { e.os_code().unwrap_or(0) as i32 };
+    l.fname = e.file_name().map(|f| f.clone().into_bytes());
+    l.details = Some(e.details().cloned().unwrap_or_default().into_bytes());
 }
 
 /// Records `r`'s outcome; its value on success.
@@ -172,116 +139,35 @@ pub fn error_kind() -> u32 {
     last().kind as u32
 }
 
-/// The code an `IO.Error` holds (0 when its constructor has none).
-pub(crate) fn error_code(e: &IoError) -> u32 {
-    use IoError::*;
-    match e {
-        AlreadyExists(_, c, _)
-        | Interrupted(_, c, _)
-        | NoFileOrDirectory(_, c, _)
-        | InvalidArgument(_, c, _)
-        | PermissionDenied(_, c, _)
-        | ResourceExhausted(_, c, _)
-        | InappropriateType(_, c, _)
-        | NoSuchThing(_, c, _)
-        | OtherError(c, _)
-        | ResourceBusy(c, _)
-        | ResourceVanished(c, _)
-        | UnsupportedOperation(c, _)
-        | HardwareFault(c, _)
-        | UnsatisfiedConstraints(c, _)
-        | IllegalOperation(c, _)
-        | ProtocolError(c, _)
-        | TimeExpired(c, _) => *c,
-        UnexpectedEof | UserError(_) => 0,
-    }
-}
-
-/// The builder of an `IO.Error`: its constructor, and for the constructors
-/// with an optional file name whether it has one.
+/// The `lean_mk_io_error_*` builder of an `IO.Error` (lean-runtime's
+/// `IoError::builder_index`: its constructor, and for the constructors with
+/// an optional file name whether it has one; the numbering of
+/// `IO_ERROR_BUILDERS`, which lean2rr's `ioErrorBuilderSyms` and the shim's
+/// `ioErrorOf` follow).
 pub(crate) fn kind_of(e: &IoError) -> u32 {
-    use IoError::*;
-    let file = |f: &Option<String>, no: u32| if f.is_some() { no + 1 } else { no };
-    match e {
-        OtherError(..) => 0,
-        Interrupted(..) => 1,
-        InvalidArgument(f, ..) => file(f, 2),
-        NoFileOrDirectory(..) => 4,
-        PermissionDenied(f, ..) => file(f, 5),
-        ResourceExhausted(f, ..) => file(f, 7),
-        InappropriateType(f, ..) => file(f, 9),
-        NoSuchThing(f, ..) => file(f, 11),
-        AlreadyExists(f, ..) => file(f, 13),
-        HardwareFault(..) => 15,
-        UnsatisfiedConstraints(..) => 16,
-        IllegalOperation(..) => 17,
-        ResourceVanished(..) => 18,
-        ProtocolError(..) => 19,
-        TimeExpired(..) => 20,
-        ResourceBusy(..) => 21,
-        UnsupportedOperation(..) => 22,
-        UserError(..) => 23,
-        // No io primitive of lean-runtime reports it, and Lean's runtime has
-        // no builder for it.
-        UnexpectedEof => crate::internal_panic("an IO primitive reported unexpectedEof (runtime invariant)"),
+    match e.builder_index() {
+        Some(k) => k as u32,
+        // No io primitive of lean-runtime reports `unexpectedEof`, and Lean's
+        // runtime has no builder for it.
+        None => crate::internal_panic("an IO primitive reported unexpectedEof (runtime invariant)"),
     }
 }
 
 // ---- sinks ----
 
-/// The sinks lean2rr gives lean-runtime for its results of unbounded size.
-///
-/// A line, a path, a name, an environment value go into a plain `Vec<u8>`
-/// (lean-runtime's `ByteSink` for `Vec`), infallible as lean-runtime's
-/// contract asks of `getLine`'s sink: an allocation that fails aborts the
-/// process (Rust's `memory allocation of N bytes failed`, status 134),
-/// where native Lean's `std::bad_alloc` aborts it too (134). It never
-/// returns into lean-runtime and never exits, so the exit cannot wait for
-/// the stream lock `getLine` holds while it appends (review RST3-02: a
-/// fallible sink there made a line without end spin forever, since
-/// lean-runtime's `get_line` reads on).
-///
-/// A child's output (`IO.Process.output`, which reads another process
-/// without bound) goes into a [`Sink`]: it grows with `try_reserve` (the
-/// growth of `extend_from_slice`), and when that fails it drops the bytes
-/// and says it has stopped (`ByteSink::stopped`), so that lean-runtime stops
-/// reading at once; [`Sink::finish`], called once the crate has returned,
-/// then ends the process as Lean's failed allocation of the growing
-/// `ByteArray` does (`INTERNAL PANIC: out of memory`, exit 1; AR-5).
-#[derive(Default)]
-pub(crate) struct Sink {
-    v: Vec<u8>,
-    stopped: bool,
-}
-
-impl ByteSink for Sink {
-    #[inline]
-    fn extend_from_slice(&mut self, bytes: &[u8]) {
-        if self.stopped {
-            return;
-        }
-        if self.v.try_reserve(bytes.len()).is_err() {
-            self.stopped = true;
-            self.v = Vec::new();
-            return;
-        }
-        self.v.extend_from_slice(bytes)
-    }
-
-    fn stopped(&self) -> bool {
-        self.stopped
-    }
-}
-
-impl Sink {
-    /// The bytes, or the end of the process if the sink stopped.
-    pub(crate) fn finish(self) -> Vec<u8> {
-        if self.stopped {
-            out_of_memory()
-        }
-        self.v
-    }
-}
+// A line, a path, a name, an environment value go into a plain `Vec<u8>`
+// (lean-runtime's `ByteSink` for `Vec`), infallible as lean-runtime's
+// contract asks of `getLine`'s sink: an allocation that fails aborts the
+// process (Rust's `memory allocation of N bytes failed`, status 134), where
+// native Lean's `std::bad_alloc` aborts it too (134). It never returns into
+// lean-runtime and never exits, so the exit cannot wait for the stream lock
+// `getLine` holds while it appends (review RST3-02: a fallible sink there
+// made a line without end spin forever, since lean-runtime's `get_line`
+// reads on). A child's output (`IO.Process.output`, which reads another
+// process without bound) goes into lean-runtime's `StoppingSink` instead
+// (`proc::output`), which stops when it cannot grow; the process then ends
+// as Lean's failed allocation of the growing `ByteArray` does
+// ([`out_of_memory`]: `INTERNAL PANIC: out of memory`, exit 1; AR-5).
 
 #[cold]
 #[inline(never)]

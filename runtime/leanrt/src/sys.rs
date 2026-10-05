@@ -1,26 +1,20 @@
 //! Glue for `Std.Internal.UV.System` (`src/runtime/uv/system.cpp`, natively
 //! over libuv 1.48) over lean-runtime's `io::uvsys`: the primitives of
-//! lean2rr's shim (`lean2rr/L2RShim.lean`), on plain values. Results with
-//! several parts come as an operation (`net::OpSt`): `code` a libuv error (or
-//! 0), strings in `strs`, numbers as little-endian 64-bit words in `bytes`.
+//! lean2rr's shim (`lean2rr/L2RShim.lean`), on plain values. Results come as
+//! an operation (`net::OpSt`): strings in `strs`, numbers as little-endian
+//! 64-bit words in `bytes`, `code` 1 for a query's `none` (no such group, an
+//! unset variable), and a failure as its start's error (`start_err`).
 //!
-//! lean-runtime reports a failure as `lean_decode_uv_error(code, fname)`
-//! (`IoError::decode_uv_error`), which keeps `-code` as the error's code; the
-//! shim builds the same `IO.Error` from `code` (`uvError`, and the file-name
-//! variants of `chdir` and `osGetGroup`), so an error is passed on as
-//! [`uv_code`]. The shim refuses strings holding NUL bytes itself, before
-//! these primitives.
+//! The errors are lean-runtime's: `lean_decode_uv_error(code, fname)`
+//! (`IoError::decode_uv_error`, with `chdir`'s path and `osGetGroup`'s
+//! `"group"`), `mk_embedded_nul_error` for a string holding a NUL byte
+//! (`IoError::embedded_nul`). The shim builds the `IO.Error` from the one
+//! kept in the operation, as for the sockets (`L2RShim.checkStart`).
 
-use crate::fs::{error_code, LHandle};
-use crate::net::{op, op_new};
+use crate::fs::LHandle;
+use crate::net::{op, op_new, started};
 use lean_runtime::io::uvsys;
 use lean_runtime::io::IoError;
-
-/// The libuv code of a failure lean-runtime decoded with
-/// `decode_uv_error(code, ...)`: `code` is the negated error code.
-fn uv_code(e: &IoError) -> i32 {
-    -(error_code(e) as i32)
-}
 
 fn push_u64(v: &mut Vec<u8>, x: u64) {
     v.extend_from_slice(&x.to_le_bytes());
@@ -39,7 +33,7 @@ fn string_op(f: impl FnOnce(&mut Vec<u8>) -> Result<(), IoError>) -> LHandle {
     let mut v = Vec::new();
     match f(&mut v) {
         Ok(()) => x.strs.push(v),
-        Err(e) => x.code = uv_code(&e),
+        Err(e) => x.start_err = Some(e),
     }
     o
 }
@@ -49,14 +43,11 @@ pub fn title_get() -> LHandle {
     string_op(|s| uvsys::get_process_title(s))
 }
 
-/// `setProcessTitle` (`uv_set_process_title`): 0 or the libuv error. With
-/// lean-runtime's feature `proc-title` (lean2rr enables it), the title is
-/// written into the arguments' memory, as libuv does.
-pub fn title_set(s: &[u8]) -> i32 {
-    match uvsys::set_process_title(s) {
-        Ok(()) => 0,
-        Err(e) => uv_code(&e),
-    }
+/// `setProcessTitle` (`uv_set_process_title`). With lean-runtime's feature
+/// `proc-title` (lean2rr enables it), the title is written into the
+/// arguments' memory, as libuv does.
+pub fn title_set(s: &[u8]) -> LHandle {
+    started(uvsys::set_process_title(s))
 }
 
 /// `uptime` (`uv_uptime`): seconds.
@@ -65,7 +56,7 @@ pub fn uptime() -> LHandle {
     let x = op(&o);
     match uvsys::uptime() {
         Ok(v) => push_u64(&mut x.bytes, v),
-        Err(e) => x.code = uv_code(&e),
+        Err(e) => x.start_err = Some(e),
     }
     o
 }
@@ -85,12 +76,9 @@ pub fn cwd() -> LHandle {
     string_op(|s| uvsys::cwd(s))
 }
 
-/// `chdir` (`uv_chdir`): 0 or the libuv error (the shim names the path).
-pub fn chdir_to(p: &[u8]) -> i32 {
-    match uvsys::chdir(p) {
-        Ok(()) => 0,
-        Err(e) => uv_code(&e),
-    }
+/// `chdir` (`uv_chdir`; lean-runtime's error names the path).
+pub fn chdir_to(p: &[u8]) -> LHandle {
+    started(uvsys::chdir(p))
 }
 
 /// `osHomedir` (`uv_os_homedir`).
@@ -114,14 +102,14 @@ pub fn passwd() -> LHandle {
             push_u64(&mut x.bytes, p.uid.unwrap_or(0));
             push_u64(&mut x.bytes, p.gid.unwrap_or(0));
         }
-        Err(e) => x.code = uv_code(&e),
+        Err(e) => x.start_err = Some(e),
     }
     o
 }
 
 /// `osGetGroup gid` (`uv_os_get_group`): strings the name then the
-/// members, word the gid; code `UV_ENOENT` (-2) when there is no such group
-/// (the shim's `none`); another error is the one the shim names `group`.
+/// members, word the gid; code 1 when there is no such group (the shim's
+/// `none`); an error names `group` (lean-runtime's).
 pub fn group(gid: u64) -> LHandle {
     let o = done_op();
     let x = op(&o);
@@ -131,8 +119,8 @@ pub fn group(gid: u64) -> LHandle {
             x.strs.extend(g.members);
             push_u64(&mut x.bytes, g.gid);
         }
-        Ok(None) => x.code = -2,
-        Err(e) => x.code = uv_code(&e),
+        Ok(None) => x.code = 1,
+        Err(e) => x.start_err = Some(e),
     }
     o
 }
@@ -148,7 +136,8 @@ pub fn environ_all() -> LHandle {
     o
 }
 
-/// `osGetenv` (`uv_os_getenv`): the value (code `UV_ENOENT` when unset).
+/// `osGetenv` (`uv_os_getenv`): the value (code 1 when unset, or when the
+/// name holds a NUL byte: lean-runtime's `os_getenv`).
 pub fn getenv(name: &[u8]) -> LHandle {
     let o = done_op();
     let x = op(&o);
@@ -156,21 +145,17 @@ pub fn getenv(name: &[u8]) -> LHandle {
     if uvsys::os_getenv(name, &mut v) {
         x.strs.push(v);
     } else {
-        x.code = -2;
+        x.code = 1;
     }
     o
 }
 
-/// `osSetenv`, `osUnsetenv`: 0 or the libuv error.
-pub fn setenv_to(name: &[u8], value: Option<&[u8]>) -> i32 {
-    let r = match value {
+/// `osSetenv`, `osUnsetenv`.
+pub fn setenv_to(name: &[u8], value: Option<&[u8]>) -> LHandle {
+    started(match value {
         Some(v) => uvsys::os_setenv(name, v),
         None => uvsys::os_unsetenv(name),
-    };
-    match r {
-        Ok(()) => 0,
-        Err(e) => uv_code(&e),
-    }
+    })
 }
 
 /// `osGetHostname` (`uv_os_gethostname`).
@@ -185,18 +170,14 @@ pub fn get_priority(pid: u64) -> LHandle {
     let x = op(&o);
     match uvsys::os_getpriority(pid) {
         Ok(p) => push_u64(&mut x.bytes, p as u64),
-        Err(e) => x.code = uv_code(&e),
+        Err(e) => x.start_err = Some(e),
     }
     o
 }
 
-/// `osSetPriority` (`uv_os_setpriority`; `prio` an `Int64`'s bits): 0 or the
-/// libuv error.
-pub fn set_priority(pid: u64, prio: u64) -> i32 {
-    match uvsys::os_setpriority(pid, prio as i64) {
-        Ok(()) => 0,
-        Err(e) => uv_code(&e),
-    }
+/// `osSetPriority` (`uv_os_setpriority`; `prio` an `Int64`'s bits).
+pub fn set_priority(pid: u64, prio: u64) -> LHandle {
+    started(uvsys::os_setpriority(pid, prio as i64))
 }
 
 /// `osUname` (`uv_os_uname`): sysname, release, version, machine.
@@ -205,7 +186,7 @@ pub fn uname_all() -> LHandle {
     let x = op(&o);
     match uvsys::os_uname() {
         Ok(u) => x.strs = vec![u.sysname, u.release, u.version, u.machine],
-        Err(e) => x.code = uv_code(&e),
+        Err(e) => x.start_err = Some(e),
     }
     o
 }
@@ -238,7 +219,7 @@ pub fn rusage() -> LHandle {
                 push_u64(&mut x.bytes, w);
             }
         }
-        Err(e) => x.code = uv_code(&e),
+        Err(e) => x.start_err = Some(e),
     }
     o
 }
@@ -274,7 +255,7 @@ pub fn cpu_info() -> LHandle {
                 }
             }
         }
-        Err(e) => x.code = uv_code(&e),
+        Err(e) => x.start_err = Some(e),
     }
     o
 }
@@ -282,22 +263,31 @@ pub fn cpu_info() -> LHandle {
 /// `random size` (`uv_random`), completing on lean-runtime's loop context
 /// (`net::complete_on_loop`), as natively a libuv callback after its thread
 /// pool's work. Lean allocates the array first; then
-/// libuv refuses more than `0x7FFFFFFF` bytes at once (`UV_E2BIG`, a
-/// `sync_err`); the bytes are lean-runtime's `random_fill`.
+/// libuv refuses more than `0x7FFFFFFF` bytes at once (`UV_E2BIG`, the
+/// start's error); the bytes are lean-runtime's `random_fill` (its error is
+/// the completion's).
 pub fn random(size: u64, r: crate::task::LPromise) -> LHandle {
-    let o = op_new();
     crate::array::check_alloc(size, 1);
     if let Err(e) = uvsys::random_check(size) {
-        op(&o).sync_err = uv_code(&e);
         drop(r);
-        return o;
+        return started(Err(e));
     }
+    let o = op_new();
     let mut buf = vec![0u8; size as usize];
-    let code = match uvsys::random_fill(&mut buf) {
-        Ok(()) => 0,
-        Err(e) => uv_code(&e),
-    };
+    let err = uvsys::random_fill(&mut buf).err();
     op(&o).bytes = buf;
-    crate::net::complete_on_loop(&o, r, code);
+    crate::net::complete_on_loop(&o, r, err);
     o
+}
+
+/// `Std.Time.Database.Windows.getNextTransition` off Windows: an operation
+/// with lean-runtime's error (`io::time`).
+pub fn windows_next_transition(id: &[u8], t: i64, default_time: bool) -> LHandle {
+    started(Err(lean_runtime::io::time::windows_get_next_transition(id, t, default_time)))
+}
+
+/// `Std.Time.Database.Windows.getLocalTimeZoneIdentifierAt` off Windows:
+/// an operation with lean-runtime's error (`io::time`).
+pub fn windows_local_timezone_id_at(t: i64) -> LHandle {
+    started(Err(lean_runtime::io::time::windows_local_timezone_id_at(t)))
 }

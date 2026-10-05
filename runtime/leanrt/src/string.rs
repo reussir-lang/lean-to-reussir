@@ -230,32 +230,6 @@ fn utf8_count_long(s: &[u8]) -> u64 {
     sem::string::utf8_strlen(s)
 }
 
-/// The UTF-8 encoding of a scalar into `buf`, returning its length
-/// (`utf8.cpp:push_unicode_scalar`, which also encodes invalid code points,
-/// by masking, as C does).
-#[inline(always)]
-pub fn encode_scalar(buf: &mut [u8; 4], code: u32) -> usize {
-    if code < 0x80 {
-        buf[0] = code as u8;
-        1
-    } else if code < 0x800 {
-        buf[0] = ((code >> 6) & 0x1F) as u8 | 0xC0;
-        buf[1] = (code & 0x3F) as u8 | 0x80;
-        2
-    } else if code < 0x10000 {
-        buf[0] = ((code >> 12) & 0x0F) as u8 | 0xE0;
-        buf[1] = ((code >> 6) & 0x3F) as u8 | 0x80;
-        buf[2] = (code & 0x3F) as u8 | 0x80;
-        3
-    } else {
-        buf[0] = ((code >> 18) & 0x07) as u8 | 0xF0;
-        buf[1] = ((code >> 12) & 0x3F) as u8 | 0x80;
-        buf[2] = ((code >> 6) & 0x3F) as u8 | 0x80;
-        buf[3] = (code & 0x3F) as u8 | 0x80;
-        4
-    }
-}
-
 /// Unique access with room for `extra` more bytes, for an in-place update:
 /// a shared string is copied first, a full one grown.
 #[inline]
@@ -356,7 +330,7 @@ pub fn push(s: LStr, c: u32) -> LStr {
 fn push_slow(s: LStr, c: u32) -> LStr {
     let mut s = s;
     let mut buf = [0u8; 4];
-    let n = encode_scalar(&mut buf, c);
+    let n = sem::string::push_unicode_scalar(c, &mut buf) as usize;
     let o = make_mut(&mut s, 4);
     unsafe { extend(o, &buf[..n], 1) };
     s
@@ -479,7 +453,7 @@ fn set_slow(s: LStr, i: u64, c: u32) -> LStr {
         4
     };
     let mut enc = [0u8; 4];
-    let n = encode_scalar(&mut enc, c);
+    let n = sem::string::push_unicode_scalar(c, &mut enc) as usize;
     // The old character's bytes `[i, end)` become the new one's `n`.
     let end = (i + old_len).min(len);
     let old_n = end - i;
@@ -584,81 +558,17 @@ extern "C" fn shared_empty_init() -> LStr {
     s
 }
 
-/// `lean_mk_string_from_bytes`: validate, replacing each maximal invalid
-/// sequence start with U+FFFD as `lean_mk_string_lossy_recover` does.
+/// `lean_mk_string_from_bytes`: validate, replacing each invalid
+/// sequence start with U+FFFD as `lean_mk_string_lossy_recover` does
+/// (lean-runtime's `semantics::string::lossy_utf8`).
 pub fn from_bytes_lossy(s: &[u8]) -> LStr {
     if std::str::from_utf8(s).is_ok() {
         return from_bytes(s);
     }
-    let mut out = Vec::with_capacity(s.len() + 8);
-    let mut pos = 0;
-    let mut start = 0;
-    while pos < s.len() {
-        match validate_one(s, pos) {
-            Some(p) => pos = p,
-            None => {
-                out.extend_from_slice(&s[start..pos]);
-                out.extend_from_slice("\u{fffd}".as_bytes());
-                pos += 1;
-                while pos < s.len() && (s[pos] & 0xc0) == 0x80 {
-                    pos += 1;
-                }
-                start = pos;
-            }
-        }
-    }
-    out.extend_from_slice(&s[start..pos]);
-    from_vec(out)
-}
-
-/// `validate_utf8_one`: the position after one valid character, or `None`.
-fn validate_one(s: &[u8], pos: usize) -> Option<usize> {
-    let size = s.len();
-    let c = s[pos] as u32;
-    if c & 0x80 == 0 {
-        Some(pos + 1)
-    } else if (c & 0xe0) == 0xc0 {
-        if pos + 1 >= size {
-            return None;
-        }
-        let c1 = s[pos + 1] as u32;
-        if c1 & 0xc0 != 0x80 {
-            return None;
-        }
-        let r = ((c & 0x1f) << 6) | (c1 & 0x3f);
-        if r < 0x80 {
-            return None;
-        }
-        Some(pos + 2)
-    } else if (c & 0xf0) == 0xe0 {
-        if pos + 2 >= size {
-            return None;
-        }
-        let (c1, c2) = (s[pos + 1] as u32, s[pos + 2] as u32);
-        if c1 & 0xc0 != 0x80 || c2 & 0xc0 != 0x80 {
-            return None;
-        }
-        let r = ((c & 0x0f) << 12) | ((c1 & 0x3f) << 6) | (c2 & 0x3f);
-        if r < 0x800 || (0xD800..=0xDFFF).contains(&r) {
-            return None;
-        }
-        Some(pos + 3)
-    } else if (c & 0xf8) == 0xf0 {
-        if pos + 3 >= size {
-            return None;
-        }
-        let (c1, c2, c3) = (s[pos + 1] as u32, s[pos + 2] as u32, s[pos + 3] as u32);
-        if c1 & 0xc0 != 0x80 || c2 & 0xc0 != 0x80 || c3 & 0xc0 != 0x80 {
-            return None;
-        }
-        let r = ((c & 0x07) << 18) | ((c1 & 0x3f) << 12) | ((c2 & 0x3f) << 6) | (c3 & 0x3f);
-        if !(0x10000..=0x10FFFF).contains(&r) {
-            return None;
-        }
-        Some(pos + 4)
-    } else {
-        None
-    }
+    let mut out = String::with_capacity(s.len() + 8);
+    // A `String`'s writes cannot fail.
+    let _ = sem::string::lossy_utf8(s, &mut out);
+    from_vec(out.into_bytes())
 }
 
 /// `lean_string_validate_utf8`.

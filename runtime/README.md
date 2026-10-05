@@ -106,7 +106,7 @@ and hot paths in `leanrt` and the prelude, which call lean-runtime for the
 rest.
 
 - **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
-  pinned at a commit of its `main` (now `a5d1c51`). Clone lean2rr with
+  pinned at a commit of its `main` (now `9d27ce0`). Clone lean2rr with
   `git clone --recurse-submodules`, or run `git submodule update --init
   third_party/lean-runtime` in a checkout, and again after a checkout,
   merge or pull that moves the pin: git does not update a submodule on its
@@ -188,9 +188,12 @@ rest.
   - `string`: `get`, `get?`, `get!` (with its panic text), `get'`, `next`,
     `next'`, `prev`, `atEnd`, `isValid`, `extract` and `extract_fast`
     (lean-runtime gives the byte range, `leanrt::string` makes the string),
-    `getUTF8Byte`, `memcmp`, `decLt`, `compare`, the default character, and
+    `getUTF8Byte`, `memcmp`, `decLt`, `compare`, the default character,
     the character count a string caches when it is made (`utf8_strlen`;
-    `String.length` reads the cached count). A big `Nat` position is
+    `String.length` reads the cached count), the UTF-8 encoding of a
+    character (`push_unicode_scalar`, inline in `String.push`'s and
+    `String.set`'s slow paths) and the lossy decoding of bytes
+    (`lossy_utf8`, `lean_mk_string_lossy_recover`). A big `Nat` position is
     passed as `u64::MAX` (`l2r_pos_of_nat`); `next` takes a position below
     2^63 and may answer 2^63, which becomes a big `Nat`;
   - `float`, `float32`: `toString` (written into a stack buffer by
@@ -224,7 +227,9 @@ rest.
     stack-overflow text (`leanrt::panic_text`, `lean_internal_panic`);
   - `repr`: the decimal digits of a word (`decimal_u64_bytes`:
     `USize.repr`, `Nat.repr`, `Int.repr`; a big number's are its
-    `write_decimal`, GMP's `mpz_get_str`).
+    `write_decimal`, GMP's `mpz_get_str`);
+  - `toolchain`: `Lean.githash`, `Lean.version.specialDesc`,
+    `System.Platform.target`.
 
   and, from its `io` module (features `io`, `proc-title`):
   - `handle`, `cfile`: `IO.FS.Handle` and the three standard streams,
@@ -236,20 +241,29 @@ rest.
     own block (`Handle::read_uninit` through `array::bytes_filled`);
     `getLine` appends to a `Vec<u8>` (below, "Sinks");
   - `error`: `IO.Error` as data (`IoError`), decoded from `errno`s and
-    libuv codes; `leanrt::fs` keeps the last one in its slot and gives its
-    builder number, code, file name and details to the generated glue
-    (below);
+    libuv codes, with its accessors (`os_code`, `file_name`, `details`)
+    and its builder number (`builder_index`, the order of
+    `IO_ERROR_BUILDERS`, which lean2rr's `ioErrorBuilderSyms` and the
+    shim's `ioErrorOf` follow: unit test
+    `tests::io_error_builders_are_lean_runtimes`); `leanrt::fs` keeps the
+    last one in its slot and gives its builder number, code, file name and
+    details to the generated glue (below);
   - `fs`, `temp`, `env`: the file system, temporary files, `IO.getEnv`,
-    `IO.appPath`, the pid, random bytes, the monotonic clock;
+    `IO.appPath`, the pid, `IO.getTID` (`get_tid`: `gettid`, plus the
+    scheduler's thread number inside a task), random bytes, the monotonic
+    clock (`IO.monoMsNow`'s `mono_ms_now` too);
   - `process`: `IO.Process.spawn` (over `posix_spawn`, the forked child's
     steps reproduced; LB-15, LB-17), `wait`, `tryWait`, `kill` (LB-14),
-    `IO.Process.output` (`leanrt::proc` keeps each child's process object
-    by pid until it is reaped);
+    `IO.Process.output` with its `StoppingSink`s (`leanrt::proc` keeps each
+    child's process object by pid until it is reaped; a reaped child's pid
+    gets lean-runtime's object for it, `ChildProcess::from_pid`);
   - `uvsys`: `Std.Internal.UV.System`'s queries (`leanrt::sys`, for the
     shim), the process title written into the arguments' memory
     (`proc-title`);
-  - `time`, `debug`: `timeit`'s line, `Std.Time.Timestamp.now`'s clock,
-    `allocprof`'s note;
+  - `time`, `debug`: `timeit`'s line, `Std.Time.Timestamp.now`'s clock
+    (`current_time_nanos`), `Std.Time.Database.Windows`'s errors off
+    Windows, `allocprof`'s text (`allocprof_text`), `dbgTraceIfShared`'s
+    line (`shared_rc_line`);
   - `startup`: native Lean's startup descriptors, which `leanrt::rt`'s ELF
     constructor opens (a failure ends the program with lean-runtime's
     message: LB-30, LB-31), and `IO.initializing`;
@@ -260,8 +274,8 @@ rest.
   What stays lean2rr's: the current standard streams of `IO.setStdout` &
   co. (lean2rr's cells of its own `IO.FS.Stream` records, generated with
   the program and set aside per context and per task: `IO.println` reads
-  the current stdout at every call, inline), `IO.getTID`'s thread id and
-  `forceExit` (`_exit`, below). Since lean2rr runs on lean-runtime's
+  the current stdout at every call, inline) and `forceExit` (`_exit`,
+  below). Since lean2rr runs on lean-runtime's
   scheduler (`sched`), its IO cooperates: a read of an empty pipe, a write
   to a full one, `flock` and `Child.wait` let the other contexts run.
 
@@ -269,7 +283,9 @@ rest.
   - the task manager (`spawn`, `depend`, `wait`, `wait_any`, `state`,
     `cancel`, `check_canceled`, `release`, `promise_new`, `resolve`,
     `option_get_or_block`, `start_with`, `finish`, `end_running_task`,
-    `running_worker`, the yield points `effect`, `poll`, `sleep_ms`,
+    `running_worker`, `await_task` (`Task.get`'s rule in a `sync` task),
+    `thread_create_failed` (libc++'s abort text when `main`'s thread
+    cannot be made), the yield points `effect`, `poll`, `sleep_ms`,
     `ref_read`, the publication `before_publish`), its contexts, the
     per-context and per-task hooks of `Glue`, the
     no-suspend scope (`leanrt::task`, `sched`, `refs`, `drop`, `fs`:
@@ -563,8 +579,7 @@ not), `l2r_task_query_at(a)` (`IO.getTaskState`: lean-runtime's `state`),
 the generated loop's two passes collect the list, then lean-runtime's
 `wait_any` chooses, and the next pass takes the task at its position),
 `l2r_task_cancel_at(a)`, `l2r_task_check_canceled()`,
-`l2r_task_tid_offset()` (`thread_number`, added to `IO.getTID` inside
-tasks), `l2r_task_deferring()` (`manager_running`: false during
+`l2r_task_deferring()` (`manager_running`: false during
 initialization and with `LEAN_NUM_THREADS=0`, when Lean runs tasks at once;
 read from the numbers `main`'s start read), `l2r_task_manager_start()`
 (before `main`: the task manager's number of workers and stack size, read
@@ -656,10 +671,8 @@ and signals (`timer_new`, `timer_next`, `timer_ctl`, `signal_new`,
 `udp_cancel_recv`, `udp_name`, `udp_option`, `udp_membership`,
 `udp_multicast_interface`), name resolution (`dns_get_info`,
 `dns_get_name`), interfaces (`ifaces`), the pure `lean_shim_pton`,
-`lean_shim_ntop` (lean-runtime's `semantics::net`) and `lean_shim_uv_kind`,
-`lean_shim_uv_strerror` (lean-runtime's decoding of a libuv code, for the
-system queries); `Std.Internal.UV.System` over `leanrt::sys`, the glue of
-lean-runtime's `io::uvsys` (`sys_title_set` (0 or a libuv error),
+`lean_shim_ntop` (lean-runtime's `semantics::net`); `Std.Internal.UV.System`
+over `leanrt::sys`, the glue of lean-runtime's `io::uvsys` (`sys_title_set`,
 `sys_query(which)` for the queries with a string or several results, the
 process title included, `sys_group`, `sys_getenv`, `sys_priority`,
 `sys_word(which)` for single numbers, `sys_chdir`, `sys_setenv`,
@@ -667,9 +680,16 @@ process title included, `sys_group`, `sys_getenv`, `sys_priority`,
 `net::complete_on_loop`): lean-runtime's ports of libuv's Linux code with
 the buffers Lean passes; `setProcessTitle` writes the title into the
 arguments' memory, so `/proc/self/cmdline` shows it, as natively (feature
-`proc-title`). A system query's lean-runtime error
-(`decode_uv_error(code, name)`) reaches the shim as its libuv code
-(`sys::uv_code`), from which the shim builds the same `IO.Error`. An
+`proc-title`); and `windows_next_transition`,
+`windows_local_timezone_id_at` (`Std.Time.Database.Windows`, which fails
+off Windows: lean-runtime's `io::time` errors). A system query's error is
+lean-runtime's (`decode_uv_error(code, name)` with `chdir`'s path and
+`osGetGroup`'s `"group"`, `embedded_nul` for a string holding a NUL byte),
+kept as the operation's start error, which the shim throws (`checkStart`,
+as for the sockets); a query's `none` (no such group, an unset variable) is
+code 1. `TCP.Socket.new` and `UDP.Socket.new` give an operation holding
+the socket, or lean-runtime's error, an `IO.Error` as natively (libuv 1.48
+never fails there). An
 operation's strings are decoded as `lean_mk_string` does (invalid UTF-8
 becomes U+FFFD). Addresses are byte arrays: the family (4 or 6), the port
 (big-endian, for socket addresses), the address bytes. The shim's
@@ -764,11 +784,12 @@ allocation of N bytes failed`, status 134; native's `std::bad_alloc` aborts
 with 134 too), so the process never exits under the lock (its exit would
 wait for it) and `getLine` of a line without end ends (test
 `RtLineNoEnd`). A child's output (`IO.Process.output`) goes into
-leanrt's `fs::Sink`, which grows with `try_reserve` and, when that fails,
-drops the bytes and says it has stopped (`ByteSink::stopped`;
-lean-runtime then stops reading); `Sink::finish`, once lean-runtime has
-returned, ends the process with `INTERNAL PANIC: out of memory`, as Lean's
-failed allocation of the growing `ByteArray` does (AR-5).
+lean-runtime's `StoppingSink`, which grows with `try_reserve` and, when
+that fails, drops the bytes and says it has stopped (`ByteSink::stopped`;
+lean-runtime then stops reading); once lean-runtime has returned, a
+stopped sink ends the process with `INTERNAL PANIC: out of memory`
+(`proc::output`), as Lean's failed allocation of the growing `ByteArray`
+does (AR-5).
 
 **stdio model.** Handles and the standard streams are lean-runtime's
 models of glibc's `FILE` (`io::cfile`, following libio's

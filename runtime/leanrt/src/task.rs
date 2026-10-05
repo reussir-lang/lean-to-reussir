@@ -598,10 +598,10 @@ pub fn end(cell: usize) -> u64 {
 }
 
 /// The generated code's wait for task `a` (`Task.get`, `IO.wait`), whose
-/// cell does not hold its value yet: lean-runtime's `wait(id)`, after the
-/// Lean panic native `Task.get` prints in a `sync := true` task
-/// (`GET_IN_SYNC_TASK`). Nothing for the task a job is about to run (its
-/// forcing code first asks for its own sources).
+/// cell does not hold its value yet: lean-runtime's `await_task` (in a
+/// `sync := true` task, the Lean panic native `Task.get` prints,
+/// `GET_IN_SYNC_TASK`, then `wait(id)`). Nothing for the task a job is
+/// about to run (its forcing code first asks for its own sources).
 fn await_task(a: usize) {
     // First: between a job's hand-over and its `begin` nothing else may run
     // (a nested job would take `run_cell`), not even promises resolved
@@ -610,14 +610,7 @@ fn await_task(a: usize) {
         return;
     }
     run_later();
-    let id = id_of(a);
-    if id == TaskId::FINISHED {
-        return;
-    }
-    if ls::in_sync_task() {
-        crate::lean_panic(ls::GET_IN_SYNC_TASK.as_bytes(), false);
-    }
-    ls::wait(id);
+    ls::await_task(id_of(a), |msg| crate::lean_panic(msg.as_bytes(), false));
 }
 
 /// Before pending task `a` runs (`l2r_task_force_sources`): it is waited
@@ -666,13 +659,6 @@ pub fn next_tag() -> u64 {
 #[inline]
 pub fn walk_next() -> u64 {
     u64::MAX
-}
-
-/// A thread id for `IO.getTID` inside tasks: the number lean-runtime adds to
-/// `main`'s (`thread_number`).
-#[inline(never)]
-pub fn tid_offset() -> u64 {
-    ls::thread_number()
 }
 
 /// Whether task `a` has finished for lean2rr: 2; otherwise 1 (only "has

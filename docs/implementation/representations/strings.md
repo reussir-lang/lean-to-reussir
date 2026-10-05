@@ -67,7 +67,8 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/string.rs`, and
 
 - **What:** Strings that come from the OS or libuv (environment, home and
   temporary directories, process title, passwd entries, paths of temporary
-  files, `argv`) are decoded with invalid UTF-8 replaced by U+FFFD.
+  files, `argv`) are decoded with invalid UTF-8 replaced by U+FFFD
+  (lean-runtime's `semantics::string::lossy_utf8`).
 - **Why:** Native Lean builds them with `lean_mk_string`, which does this
   (round 6 IO6 findings, 1362da1).
 - **Where:** `leanrt/src/string.rs`: `from_bytes_lossy`;

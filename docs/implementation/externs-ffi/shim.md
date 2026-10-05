@@ -20,9 +20,9 @@ compiles it with the program. Plan
   `semantics::net`, `io::uvsys`); the shim only builds Lean's values from
   an operation's outcome (`Op`). Errors are lean-runtime's `IoError`s, read
   as the `IO.Error` builder, code, file name and details
-  (`L2RShim.ioErrorOf`, the builders' order of `ioErrorBuilderSyms`); the
-  system queries report libuv codes, decoded by lean-runtime too
-  (`uvError` over `lean_shim_uv_kind`, `lean_shim_uv_strerror`).
+  (`L2RShim.ioErrorOf`, the builders' order of lean-runtime's
+  `IoError::builder_index`, which `ioErrorBuilderSyms` follows too), the
+  system queries' errors included.
 - **Why:** Natively these are C over libuv building Lean values
   (`IO.Promise`, `Except IO.Error …`, `SocketAddress`), which lean2rr's
   runtime cannot build (5021ddf, 470425c). One runtime (switch steps 3 and
@@ -102,7 +102,8 @@ compiles it with the program. Plan
 
 - **What:** `Std.Time.Timestamp.now` is the system clock in nanoseconds,
   split as `Duration.ofNanoseconds` splits it; the Windows-only time zone
-  externs fail with `io.cpp`'s errors for other systems;
+  externs fail with `io.cpp`'s errors for other systems (lean-runtime's
+  `io::time` errors, thrown by the shim);
   `ShareCommon.Object.eq`/`hash` work by object identity.
 - **Why:** Found by probing every `Init`/`Std` extern in a program of its
   own (a2b49cd). lean2rr's objects have no Lean layout to compare byte by
@@ -111,7 +112,8 @@ compiles it with the program. Plan
   `lean_windows_get_next_transition`,
   `lean_get_windows_local_timezone_id_at`, `lean_sharecommon_eq`,
   `lean_sharecommon_hash`); `runtime/leanrt/src/io.rs`: `realtime_nanos`
-  (lean-runtime's `io::time::current_time`).
+  (lean-runtime's `io::time::current_time_nanos`); `runtime/leanrt/src/sys.rs`:
+  `windows_next_transition`, `windows_local_timezone_id_at`.
 - **Remove only if:** never.
 
 ### System queries follow libuv's Linux code, with Lean's buffers
@@ -126,15 +128,17 @@ compiles it with the program. Plan
   priority outside [-20, 19], `random` of more than `0x7FFFFFFF` bytes).
   `setProcessTitle` writes the title into the arguments' memory, so
   `/proc/self/cmdline` shows it (lean-runtime's feature `proc-title`), and
-  reports libuv's error. A lean-runtime error reaches the shim as its libuv
-  code (`sys::uv_code`: lean-runtime decodes with `decode_uv_error(code,
-  name)`, which keeps `-code`), and the shim builds the same `IO.Error`
-  (`uvError`, whose builder and message are lean-runtime's decoding of the
-  code, and the named variants of `chdir` and `osGetGroup`). Strings are
+  reports libuv's error. The errors are lean-runtime's
+  (`decode_uv_error(code, name)` with `chdir`'s path and `osGetGroup`'s
+  `"group"`; `embedded_nul` for a string holding a NUL byte), kept as the
+  operation's start error, which the shim throws (`checkStart`); a
+  query's `none` (no such group, an unset variable) is code 1. Strings are
   decoded as `lean_mk_string`.
 - **Why:** Round 6 IO findings (IO6-01..13, 15; 1362da1) and 024c024;
   one implementation for both translators (switch step 3; leanrt's own
-  ports moved into lean-runtime).
+  ports moved into lean-runtime; switch step 5: the shim no longer decodes
+  libuv codes again or checks NUL bytes itself, lean-runtime's errors are
+  passed on).
 - **Where:** `runtime/leanrt/src/sys.rs`; lean-runtime's
   `src/io/uvsys.rs`, `argv_title.rs`; `lean2rr/L2RShim.lean` (the System
   section).

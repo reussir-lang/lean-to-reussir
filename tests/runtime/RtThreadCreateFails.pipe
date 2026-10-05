@@ -1,0 +1,1 @@
+{ ulimit -c 0; ulimit -v 600000; $BIN 2>&1; } 2>/dev/null

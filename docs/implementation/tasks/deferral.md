@@ -17,9 +17,9 @@ entries here are how lean2rr's generated code reaches them.
   scheduler; its primitives (`l2r_task_*` in the prelude, `leanrt::task`)
   now map it onto lean-runtime's API: `register` is `spawn` (or, for a
   dependent, records the task until `depend_at`, which is `depend`);
-  `source_next` and `wait_running` are `wait`; `query` is `state`;
-  `cancel_at`, `check_canceled`, `tid_offset` (`thread_number`),
-  `sleep_ms`, `shutdown` (`finish`) and `promise_new` are the calls of the
+  `source_next` and `wait_running` are `await_task` (`wait`, after
+  `Task.get`'s panic in a `sync` task); `query` is `state`; `cancel_at`,
+  `check_canceled`, `sleep_ms`, `shutdown` (`finish`) and `promise_new` are the calls of the
   same names; `deferring` is `manager_running`, read from the numbers
   `main`'s start read (lean-runtime starts at the first task:
   [scheduler.md](scheduler.md#lean-runtimes-scheduler-starts-at-the-first-task)).
@@ -145,13 +145,15 @@ entries here are how lean2rr's generated code reaches them.
 ### `Task.get` in a `sync := true` task prints Lean's panic
 
 - **What:** A wait for an unfinished task (`l2r_task_force_sources`,
-  `l2r_task_wait_running`) from a `sync := true` task (lean-runtime's
-  `in_sync_task`) first reports the Lean panic native `Task.get` prints
-  (`GET_IN_SYNC_TASK`, through Lean's current stderr, or the process's
-  under `LEAN_ABORT_ON_PANIC`: `leanrt::lean_panic`), then waits.
+  `l2r_task_wait_running`) from a `sync := true` task first reports the
+  Lean panic native `Task.get` prints (`GET_IN_SYNC_TASK`, through Lean's
+  current stderr, or the process's under `LEAN_ABORT_ON_PANIC`:
+  `leanrt::lean_panic`), then waits: lean-runtime's `await_task`, the rule
+  both translators share.
 - **Why:** As native `task_manager::wait_for` (lean-runtime's glue item
   3; cases `tasks/get_in_sync_task`, `get_in_sync_task_redirected`);
   leanrt's own scheduler did not print it.
 - **Where:** `runtime/leanrt/src/task.rs`: `await_task`;
-  `runtime/leanrt/src/lib.rs`: `lean_panic`.
+  `runtime/leanrt/src/lib.rs`: `lean_panic`; lean-runtime's
+  `sched::await_task`.
 - **Remove only if:** never.

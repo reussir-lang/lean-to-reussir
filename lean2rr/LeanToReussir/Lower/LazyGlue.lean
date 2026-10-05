@@ -231,12 +231,11 @@ def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Arra
     let (z, t) ← lazyOf (← lowerType ret)
     return some (lazyDone z (← coerce args[0]! (← pty 0) t))
   | ``Thunk.get | ``Task.get => return some (← lazyGet args[0]! (← pty 0) (← lowerType ret))
-  -- `IO.getTID` inside a task: natively a worker thread's (see
-  -- `leanrt::task::tid_offset`).
+  -- `IO.getTID`: lean-runtime's `io::env::get_tid` (inside a task,
+  -- natively a worker thread's id: `gettid` plus the scheduler's thread
+  -- number).
   | ``IO.getTID =>
-    let u64 := RR.Ty.named "u64"
-    return some (← wrapIOResult (← lowerType ret) (.block ⟨#[("tid", some u64, .call "l2r_io_get_tid" #[] #[]),
-      ("toff", some u64, .call "l2r_task_tid_offset" #[] #[])], .atom "tid + toff"⟩))
+    return some (← wrapIOResult (← lowerType ret) (.call "l2r_io_get_tid" #[] #[]))
   -- Pure tasks (see `taskNewFn`).
   | ``Task.spawn =>
     let rt ← lowerType ret

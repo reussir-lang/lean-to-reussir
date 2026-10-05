@@ -54,11 +54,9 @@ pub struct OpSt {
     /// Given up without completing: the continuation does nothing.
     pub canceled: bool,
     /// A value: a signal's number, a `bool` (`waitReadable`), 1 for the end
-    /// of a stream (`recv?`'s `none`); a libuv code for the system queries
-    /// (`sys`).
+    /// of a stream (`recv?`'s `none`) and for a system query's `none`
+    /// (`sys`: no such group, an unset variable).
     pub code: i32,
-    /// `sys`: a libuv error its start reports at once.
-    pub sync_err: i32,
     /// The error its start reports at once (the extern throws it).
     pub start_err: Option<IoError>,
     /// The completion's error.
@@ -85,7 +83,7 @@ pub fn op(h: &LHandle) -> &'static mut OpSt {
 }
 
 /// An operation whose start failed (or succeeded: `Ok`).
-fn started(r: Result<(), IoError>) -> LHandle {
+pub(crate) fn started(r: Result<(), IoError>) -> LHandle {
     let o = op_new();
     if let Err(e) = r {
         op(&o).start_err = Some(e);
@@ -105,18 +103,16 @@ pub fn err_kind(o: &LHandle, which: u8) -> u32 {
     op_err(o, which).map_or(u32::MAX, crate::fs::kind_of)
 }
 
-/// Its code (0 for a user error).
+/// Its code (0 for a user error, which has none).
 pub fn err_errno(o: &LHandle, which: u8) -> u32 {
-    match op_err(o, which) {
-        Some(IoError::UserError(_)) | None => 0,
-        Some(e) => crate::fs::error_code(e),
-    }
+    op_err(o, which).and_then(IoError::os_code).unwrap_or(0)
 }
 
 /// Its file name and details (the empty string where it has none).
 pub fn err_texts(o: &LHandle, which: u8) -> (Vec<u8>, Vec<u8>) {
-    match op_err(o, which).cloned() {
-        Some(e) => crate::fs::error_texts(e),
+    let text = |s: Option<&String>| s.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+    match op_err(o, which) {
+        Some(e) => (text(e.file_name()), text(e.details())),
         None => (Vec::new(), Vec::new()),
     }
 }
@@ -171,14 +167,16 @@ fn pending(r: LPromise, start: impl FnOnce(Completion) -> Result<(), IoError>) -
     o
 }
 
-/// Complete operation `o` (its promise `r`) on lean-runtime's loop context
-/// at the loop's next turn, as natively a libuv callback after its thread
-/// pool's work (`sys::random`).
-pub fn complete_on_loop(o: &LHandle, r: LPromise, code: i32) {
+/// Complete operation `o` (its promise `r`) with the error `err` (or
+/// none) on lean-runtime's loop context at the loop's next turn, as
+/// natively a libuv callback after its thread pool's work (`sys::random`).
+pub fn complete_on_loop(o: &LHandle, r: LPromise, err: Option<IoError>) {
     let c = RefCell::new(Some(Completion::new(o, r)));
+    let err = RefCell::new(err);
     let cb: Rc<dyn Fn()> = Rc::new(move || {
         if let Some(c) = c.borrow_mut().take() {
-            c.finish(|x| x.code = code);
+            let e = err.borrow_mut().take();
+            c.finish(|x| x.err = e);
         }
     });
     lean_runtime::sched::timer_start(std::time::Instant::now(), cb);
@@ -273,18 +271,6 @@ pub fn ntop(a: &[u8]) -> Vec<u8> {
         None => Ok(()),
     };
     s.into_bytes()
-}
-
-/// The `IO.Error` builder of libuv code `code` without a file name
-/// (lean-runtime's `IoError::decode_uv_error`, `fs::kind_of`): the shim's
-/// `uvError` of the system queries (`sys`), which report libuv codes.
-pub fn uv_error_kind(code: i32) -> u32 {
-    crate::fs::kind_of(&IoError::decode_uv_error(code, None))
-}
-
-/// `uv_strerror(code)`, the details of lean-runtime's decoded error.
-pub fn uv_strerror(code: i32) -> Vec<u8> {
-    crate::fs::error_texts(IoError::decode_uv_error(code, None)).1
 }
 
 // ---------------------------------------------------------------------------
@@ -425,12 +411,23 @@ fn recv_buf(size: u64) -> Vec<u8> {
     v
 }
 
-/// `TCP.Socket.new`.
+/// `TCP.Socket.new`: an operation with the socket as its handle, or with
+/// lean-runtime's error (which libuv 1.48 never reports for `uv_tcp_init`;
+/// natively it would be an `IO.Error` too).
 pub fn tcp_new() -> LHandle {
     crate::task::ensure_started();
-    match TcpSocket::new() {
-        Ok(s) => new_handle(s),
-        Err(_) => crate::internal_panic("Socket.new failed (runtime invariant)"),
+    socket_op(TcpSocket::new().map(new_handle))
+}
+
+/// An operation holding a new socket's handle, or its start's error.
+fn socket_op(r: Result<LHandle, IoError>) -> LHandle {
+    match r {
+        Ok(h) => {
+            let o = op_new();
+            op(&o).handle = Some(h);
+            o
+        }
+        Err(e) => started(Err(e)),
     }
 }
 
@@ -530,13 +527,10 @@ pub fn tcp_keepalive(s: &LHandle, enable: i32, delay: u32) -> LHandle {
     started(tcp(s).keep_alive(enable, delay))
 }
 
-/// `UDP.Socket.new`.
+/// `UDP.Socket.new`, as `tcp_new`.
 pub fn udp_new() -> LHandle {
     crate::task::ensure_started();
-    match UdpSocket::new() {
-        Ok(s) => new_handle(s),
-        Err(_) => crate::internal_panic("Socket.new failed (runtime invariant)"),
-    }
+    socket_op(UdpSocket::new().map(new_handle))
 }
 
 pub fn udp_bind(s: &LHandle, a: &[u8]) -> LHandle {

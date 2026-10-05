@@ -168,14 +168,19 @@ pub fn realtime_nanos_polled() -> i64 {
     realtime_nanos()
 }
 
-/// The system (real-time) clock in nanoseconds since the Unix epoch, signed,
-/// from lean-runtime's seconds and nanoseconds (`lean_get_current_time`,
-/// which `Std.Time.Timestamp.now` calls; lean2rr's shim builds the
-/// timestamp).
+/// The system (real-time) clock in nanoseconds since the Unix epoch, signed
+/// (lean-runtime's `current_time_nanos`, `lean_get_current_time`, which
+/// `Std.Time.Timestamp.now` calls; lean2rr's shim builds the timestamp).
 #[inline(never)]
 pub fn realtime_nanos() -> i64 {
-    let (s, ns) = lio::time::current_time();
-    s.wrapping_mul(1_000_000_000).wrapping_add(ns)
+    lio::time::current_time_nanos()
+}
+
+/// `IO.monoMsNow`: a polling point, then lean-runtime's `mono_ms_now`.
+#[inline(never)]
+pub fn mono_ms_polled() -> u64 {
+    crate::sched::poll();
+    lio::env::mono_ms_now()
 }
 
 /// `timeit`'s line (`lean_io_timeit`): lean-runtime's text of `msg` and the
@@ -190,17 +195,12 @@ pub fn timeit_text(msg: crate::string::LStr, start: u64) -> crate::string::LStr 
     crate::string::from_bytes(&line)
 }
 
-/// `allocprof`'s text after the action (`lean_io_allocprof`): `msg` up to
-/// its first NUL, a newline, lean-runtime's note and a newline, with the
-/// newline of `io_eprintln`.
+/// `allocprof`'s text after the action (`lean_io_allocprof`), lean-runtime's
+/// `allocprof_text`; lean2rr writes it with the current stderr stream's
+/// `putStr` (`io_eprintln`).
 #[inline(never)]
 pub fn allocprof_text(msg: crate::string::LStr) -> crate::string::LStr {
-    let m = crate::string::bytes(&msg);
-    let m = &m[..m.iter().position(|&b| b == 0).unwrap_or(m.len())];
-    let mut out = m.to_vec();
-    out.push(b'\n');
-    out.extend_from_slice(lio::debug::ALLOCPROF_NOTE);
-    out.extend_from_slice(b"\n\n");
+    let out = lio::debug::allocprof_text(crate::string::bytes(&msg));
     crate::rc_release(msg);
     crate::string::from_bytes(&out)
 }

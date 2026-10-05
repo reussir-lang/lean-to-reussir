@@ -9,14 +9,15 @@
 //! (`ChildProcess`: the pid, the flag, and the state of a child it models
 //! when no stand-in process can be started) is kept here by pid, for
 //! `wait`, `tryWait` and `kill`, until the child is reaped; a pid with no
-//! entry (a reaped child's) gets the system call itself, as natively.
+//! entry (a reaped child's) gets the system call itself, as natively,
+//! through lean-runtime's object for that pid (`ChildProcess::from_pid`).
 //!
 //! Errors are recorded in the last-error slot (`fs::record`).
 
-use crate::fs::{record, wrap, LHandle, Sink};
+use crate::fs::{out_of_memory, record, wrap, LHandle};
 use crate::string::{from_bytes, LStr};
 use lean_runtime::io::process::{self as lproc, ChildProcess, SpawnArgs, Stdio, StdioConfig};
-use lean_runtime::io::Handle;
+use lean_runtime::io::{Handle, StoppingSink};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 
@@ -69,52 +70,28 @@ pub fn take_end(i: u64) -> LHandle {
 }
 
 /// The process object of a child spawned here and not yet reaped (a clone:
-/// the pid, the flag and a shared modelled state).
-fn child(pid: u32) -> Option<ChildProcess> {
-    children().get(&pid).cloned()
+/// the pid, the flag and a shared modelled state); for a pid with no entry
+/// (a reaped child's), lean-runtime's object for it, whose calls are the
+/// plain system calls on the pid (`waitpid` then fails with `ECHILD`, `kill`
+/// with `ESRCH` unless the pid was reused), as natively.
+fn child(pid: u32, setsid: bool) -> ChildProcess {
+    match children().get(&pid) {
+        Some(c) => c.clone(),
+        None => ChildProcess::from_pid(pid, setsid),
+    }
 }
 
 /// The child has been reaped: its entry goes (review RST3-04). Natively the
 /// pid then names no child of the program, and a later `wait`, `tryWait` or
-/// `kill` of it is a plain system call on the pid (`os_wait`, `os_kill`).
+/// `kill` of it is a plain system call on the pid (lean-runtime's
+/// `ChildProcess::from_pid`, through `child`).
 fn reaped(pid: u32) {
     children().remove(&pid);
 }
 
-extern "C" {
-    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
-    fn kill(pid: i32, sig: i32) -> i32;
-    fn killpg(pgrp: i32, sig: i32) -> i32;
-    fn __errno_location() -> *mut i32;
-}
-
-/// `decode_io_error(errno, nullptr)` of the system call that just failed,
-/// with lean-runtime's model of `errno` set as the call set C's.
-fn os_error() -> lean_runtime::io::IoError {
-    let e = unsafe { *__errno_location() };
-    lean_runtime::io::error::set_errno(e);
-    lean_runtime::io::IoError::decode_io_error(e, None)
-}
-
-/// `lean_io_process_child_wait`/`try_wait` of a pid that names no child this
-/// runtime holds (one already reaped): `waitpid` itself, as natively (it
-/// fails with `ECHILD`). The status as Lean reports it (128 + signal when
-/// killed), `None` while running.
-fn os_wait(pid: u32, nohang: bool) -> Result<Option<u32>, lean_runtime::io::IoError> {
-    let mut st = 0i32;
-    match unsafe { waitpid(pid as i32, &mut st, if nohang { 1 } else { 0 }) } {
-        -1 => Err(os_error()),
-        0 => Ok(None),
-        _ => Ok(Some(if st & 0x7f == 0 { ((st >> 8) & 0xff) as u32 } else { 128 + (st & 0x7f) as u32 })),
-    }
-}
-
 /// `Child.wait`: the exit code (`128 + signal` if killed).
 pub fn wait(pid: u32) -> u32 {
-    let r = match child(pid) {
-        Some(c) => c.wait(),
-        None => os_wait(pid, false).map(|s| s.unwrap_or(0)),
-    };
+    let r = child(pid, false).wait();
     if r.is_ok() {
         reaped(pid);
     }
@@ -124,10 +101,7 @@ pub fn wait(pid: u32) -> u32 {
 /// `Child.tryWait`: `(1 << 32) | code` once the child has exited, 0 while it
 /// runs.
 pub fn try_wait(pid: u32) -> u64 {
-    let r = match child(pid) {
-        Some(c) => c.try_wait(),
-        None => os_wait(pid, true),
-    };
+    let r = child(pid, false).try_wait();
     if let Ok(Some(_)) = r {
         reaped(pid);
     }
@@ -142,16 +116,7 @@ pub fn try_wait(pid: u32) -> u64 {
 /// as lean-runtime does: LB-14). A reaped child's pid is signalled as
 /// natively, `kill`/`killpg` itself (`ESRCH` unless the pid was reused).
 pub fn kill_child(pid: u32, new_session: bool) {
-    match child(pid) {
-        Some(c) => {
-            record(c.kill());
-        }
-        None => {
-            const SIGKILL: i32 = 9;
-            let r = unsafe { if new_session { killpg(pid as i32, SIGKILL) } else { kill(pid as i32, SIGKILL) } };
-            record(if r == -1 { Err(os_error()) } else { Ok(()) });
-        }
-    }
+    record(child(pid, new_session).kill());
 }
 
 /// The standard output and standard error of the last `output`.
@@ -159,13 +124,17 @@ static OUTPUT: Global<(Vec<u8>, Vec<u8>)> = Global(UnsafeCell::new((Vec::new(), 
 
 /// `IO.Process.output args input?` (lean-runtime's `io::process::output`):
 /// the exit code, its two outputs then `take_output(1)` and `(2)` (valid
-/// UTF-8); failures recorded. A sink that could not grow ends the process
-/// once lean-runtime has returned (`INTERNAL PANIC: out of memory`; AR-5).
+/// UTF-8); failures recorded. A sink that could not grow
+/// (lean-runtime's `StoppingSink`) ends the process once lean-runtime has
+/// returned (`INTERNAL PANIC: out of memory`; AR-5).
 pub fn output(args: &SpawnArgs, input: Option<&[u8]>) -> u32 {
     crate::sched::effect();
-    let (mut o, mut e) = (Sink::default(), Sink::default());
+    let (mut o, mut e) = (StoppingSink::default(), StoppingSink::default());
     let r = lproc::output(args, input, &mut o, &mut e);
-    let (o, e) = (o.finish(), e.finish());
+    let (o, e) = match (o.finish(), e.finish()) {
+        (Ok(o), Ok(e)) => (o, e),
+        _ => out_of_memory(),
+    };
     let code = record(r);
     unsafe { *OUTPUT.0.get() = if code.is_some() { (o, e) } else { (Vec::new(), Vec::new()) } };
     code.unwrap_or(0)

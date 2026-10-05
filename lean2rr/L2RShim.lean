@@ -53,13 +53,13 @@ instance : Nonempty Op := OpImpl.property
 
 @[extern "lean_shim_op_canceled"] opaque opCanceled (o : @& Op) : BaseIO Bool
 @[extern "lean_shim_op_code"] opaque opCode (o : @& Op) : BaseIO UInt32
-@[extern "lean_shim_op_sync_err"] opaque opSyncErr (o : @& Op) : BaseIO UInt32
 @[extern "lean_shim_op_bytes"] opaque opBytes (o : @& Op) : BaseIO ByteArray
 @[extern "lean_shim_op_addr"] opaque opAddr (o : @& Op) : BaseIO ByteArray
 @[extern "lean_shim_op_str"] opaque opStr (o : @& Op) (i : UInt32) : BaseIO String
 @[extern "lean_shim_op_str_count"] opaque opStrCount (o : @& Op) : BaseIO UInt32
 @[extern "lean_shim_op_has_handle"] opaque opHasHandle (o : @& Op) : BaseIO Bool
 @[extern "lean_shim_op_handle"] opaque opSocket (o : @& Op) : BaseIO TCP.Socket
+@[extern "lean_shim_op_handle"] opaque opUdpSocket (o : @& Op) : BaseIO UDP.Socket
 /-- An error of the operation, its start's (`which` 0) or its completion's
 (1): the `IO.Error` builder (`leanrt::fs::kind_of`; `0xFFFFFFFF`: no
 error), its code, file name and details. -/
@@ -73,12 +73,6 @@ otherwise the one it already had. -/
 @[extern "lean_shim_op_promise"] opaque opTimerPromise (o : @& Op) : BaseIO (IO.Promise Unit)
 @[extern "lean_shim_op_promise"] opaque opSignalPromise (o : @& Op) : BaseIO (IO.Promise Int)
 
-/-- `IO.Error` kind of a libuv code (`leanrt::net::uv_error_kind`: the
-system queries report libuv codes). -/
-@[extern "lean_shim_uv_kind"] opaque uvKind (code : UInt32) : UInt32
-/-- `uv_strerror`. -/
-@[extern "lean_shim_uv_strerror"] opaque uvStrerror (code : UInt32) : String
-
 @[extern "lean_shim_loop_configure"] opaque primLoopConfigure (accumulate blockSigProf : Bool) : BaseIO Unit
 
 @[extern "lean_shim_timer_new"] opaque primTimerNew (timeout : UInt64) (repeating : Bool) : BaseIO Timer
@@ -90,7 +84,7 @@ system queries report libuv codes). -/
 /-- 1 `stop`, 2 `cancel`. -/
 @[extern "lean_shim_signal_ctl"] opaque primSignalCtl (s : @& Signal) (which : UInt8) : BaseIO Op
 
-@[extern "lean_shim_tcp_new"] opaque primTcpNew : BaseIO TCP.Socket
+@[extern "lean_shim_tcp_new"] opaque primTcpNew : BaseIO Op
 @[extern "lean_shim_tcp_bind"] opaque primTcpBind (s : @& TCP.Socket) (addr : @& ByteArray) : BaseIO Op
 @[extern "lean_shim_tcp_listen"] opaque primTcpListen (s : @& TCP.Socket) (backlog : UInt32) : BaseIO Op
 @[extern "lean_shim_tcp_connect"] opaque primTcpConnect (s : @& TCP.Socket) (addr : @& ByteArray) (r : IO.Promise Unit) : BaseIO Op
@@ -106,7 +100,7 @@ system queries report libuv codes). -/
 @[extern "lean_shim_tcp_nodelay"] opaque primTcpNoDelay (s : @& TCP.Socket) : BaseIO Op
 @[extern "lean_shim_tcp_keepalive"] opaque primTcpKeepAlive (s : @& TCP.Socket) (enable delay : UInt32) : BaseIO Op
 
-@[extern "lean_shim_udp_new"] opaque primUdpNew : BaseIO UDP.Socket
+@[extern "lean_shim_udp_new"] opaque primUdpNew : BaseIO Op
 @[extern "lean_shim_udp_bind"] opaque primUdpBind (s : @& UDP.Socket) (addr : @& ByteArray) : BaseIO Op
 @[extern "lean_shim_udp_connect"] opaque primUdpConnect (s : @& UDP.Socket) (addr : @& ByteArray) : BaseIO Op
 @[extern "lean_shim_udp_send"] opaque primUdpSend (s : @& UDP.Socket) (data : Array ByteArray) (addr : @& ByteArray) (r : IO.Promise Unit) : BaseIO Op
@@ -134,8 +128,10 @@ and 41 bytes (`interfaceAddresses`). -/
 /-! ## Errors -/
 
 /-- The `IO.Error` built by the `lean_mk_io_error_*` builder number `kind`
-(the order of lean2rr's `ioErrorBuilderSyms`, `leanrt::fs::kind_of`) from
-the error's code, file name and details, as Lean's `decode_io_error` and
+(lean-runtime's `IoError::builder_index`, the order of its
+`IO_ERROR_BUILDERS` and of lean2rr's `ioErrorBuilderSyms`; checked by
+leanrt's unit test `io_error_builders_are_lean_runtimes`) from the error's
+code, file name and details, as Lean's `decode_io_error` and
 `lean_decode_uv_error` build it. -/
 def ioErrorOf (kind code : UInt32) (file details : String) : IO.Error :=
   match kind with
@@ -179,20 +175,6 @@ def opResult (o : Op) (ok : BaseIO α) : BaseIO (Except IO.Error α) := do
   match ← opError o 1 with
   | some e => return .error e
   | none => return .ok (← ok)
-
-/-- The error number `lean_decode_uv_error` stores for libuv code `code`:
-since Lean 4.34, `-code`, the positive errno (`2` for `UV_ENOENT`). -/
-def uvErrno (code : UInt32) : UInt32 := 0 - code
-
-/-- `lean_decode_uv_error(code, nullptr)` of the system queries, which
-report libuv codes: the builder and the message are lean-runtime's
-(`uvKind`, `uvStrerror`), with the errno `uvErrno code`. -/
-def uvError (code : UInt32) : IO.Error :=
-  ioErrorOf (uvKind code) (uvErrno code) "" (uvStrerror code)
-
-/-- Throw libuv error `code` unless it is 0 (the system queries). -/
-def check (code : UInt32) : IO Unit :=
-  if code == 0 then pure () else throw (uvError code)
 
 /-- Run `k` when operation `o` completes (`r` is its promise), unless it
 is canceled: a `sync` dependent of `r`, which the runtime resolves (see the
@@ -297,7 +279,10 @@ def loopConfigure (o : Loop.Options) : BaseIO Unit :=
 /-! ## TCP (`uv/tcp.cpp`, lean-runtime's `net::tcp`) -/
 
 @[export lean_uv_tcp_new]
-def tcpNew : IO TCP.Socket := primTcpNew
+def tcpNew : IO TCP.Socket := do
+  let o ← primTcpNew
+  checkStart o
+  opSocket o
 
 @[export lean_uv_tcp_connect]
 def tcpConnect (s : TCP.Socket) (addr : SocketAddress) : IO (IO.Promise (Except IO.Error Unit)) := do
@@ -377,7 +362,10 @@ def tcpKeepAlive (s : TCP.Socket) (enable : Int8) (delay : UInt32) : IO Unit := 
 /-! ## UDP (`uv/udp.cpp`, lean-runtime's `net::udp`) -/
 
 @[export lean_uv_udp_new]
-def udpNew : IO UDP.Socket := primUdpNew
+def udpNew : IO UDP.Socket := do
+  let o ← primUdpNew
+  checkStart o
+  opUdpSocket o
 
 @[export lean_uv_udp_bind]
 def udpBind (s : UDP.Socket) (addr : SocketAddress) : IO Unit := do
@@ -516,11 +504,11 @@ def interfaceAddresses : IO (Array InterfaceAddress) := do
 namespace Sys
 open Std.Internal.UV.System
 
-@[extern "lean_shim_sys_title_set"] opaque primTitleSet (s : @& String) : BaseIO UInt32
+@[extern "lean_shim_sys_title_set"] opaque primTitleSet (s : @& String) : BaseIO Op
 /-- 0 `uptime`, 1 `cpuInfo`, 2 `cwd`, 3 `osHomedir`, 4 `osTmpdir`,
 5 `osGetPasswd`, 6 `osEnviron`, 7 `osGetHostname`, 8 `osUname`,
 9 `getrusage`, 10 `exePath`, 11 `getProcessTitle`: an operation with the
-result. -/
+result, or with lean-runtime's error as its start's (`checkStart`). -/
 @[extern "lean_shim_sys_query"] opaque primQuery (which : UInt8) : BaseIO Op
 @[extern "lean_shim_sys_group"] opaque primGroup (gid : UInt64) : BaseIO Op
 @[extern "lean_shim_sys_getenv"] opaque primGetenv (name : @& String) : BaseIO Op
@@ -528,24 +516,18 @@ result. -/
 /-- 0 `osGetPid`, 1 `osGetPpid`, 2 `hrtime`, 3 `freeMemory`,
 4 `totalMemory`, 5 `constrainedMemory`, 6 `availableMemory`. -/
 @[extern "lean_shim_sys_word"] opaque primWord (which : UInt8) : BaseIO UInt64
-@[extern "lean_shim_sys_chdir"] opaque primChdir (p : @& String) : BaseIO UInt32
-@[extern "lean_shim_sys_setenv"] opaque primSetenv (n v : @& String) (set : Bool) : BaseIO UInt32
-@[extern "lean_shim_sys_setpriority"] opaque primSetPriority (pid prio : UInt64) : BaseIO UInt32
+@[extern "lean_shim_sys_chdir"] opaque primChdir (p : @& String) : BaseIO Op
+@[extern "lean_shim_sys_setenv"] opaque primSetenv (n v : @& String) (set : Bool) : BaseIO Op
+@[extern "lean_shim_sys_setpriority"] opaque primSetPriority (pid prio : UInt64) : BaseIO Op
 @[extern "lean_shim_sys_random"] opaque primRandom (size : UInt64) (r : IO.Promise Unit) : BaseIO Op
 
 /-- The little-endian word at byte `i`. -/
 def word (b : ByteArray) (i : Nat) : UInt64 :=
   (List.range 8).foldl (fun acc k => acc ||| ((b.get! (i + k)).toUInt64 <<< (8 * k).toUInt64)) 0
 
-/-- `mk_embedded_nul_error`. -/
-def nulError (s : String) : IO.Error :=
-  .mkInvalidArgumentFile s 22 "string contains NUL bytes"
-
-def hasNul (s : String) : Bool := s.toUTF8.data.contains 0
-
 /-- An operation's result: its error, or its first string. -/
 def str0 (o : Op) : IO String := do
-  check (← opCode o)
+  checkStart o
   opStr o 0
 
 @[export lean_uv_get_process_title]
@@ -553,13 +535,12 @@ def getProcessTitle : IO String := do str0 (← primQuery 11)
 
 @[export lean_uv_set_process_title]
 def setProcessTitle (t : String) : IO Unit := do
-  if hasNul t then throw (nulError t)
-  check (← primTitleSet t)
+  checkStart (← primTitleSet t)
 
 @[export lean_uv_uptime]
 def uptime : IO UInt64 := do
   let o ← primQuery 0
-  check (← opCode o)
+  checkStart o
   return word (← opBytes o) 0
 
 @[export lean_uv_os_getpid]
@@ -571,7 +552,7 @@ def osGetPpid : IO UInt64 := primWord 1
 @[export lean_uv_cpu_info]
 def cpuInfo : IO (Array CPUInfo) := do
   let o ← primQuery 1
-  check (← opCode o)
+  checkStart o
   let b ← opBytes o
   let n := b.size / 48
   let mut out := #[]
@@ -589,22 +570,7 @@ def cwd : IO String := do str0 (← primQuery 2)
 
 @[export lean_uv_chdir]
 def chdir (p : String) : IO Unit := do
-  if hasNul p then throw (nulError p)
-  let c ← primChdir p
-  if c != 0 then
-    -- `lean_decode_uv_error(result, path)`: the file name variants.
-    let d := uvStrerror c
-    let e := uvErrno c
-    throw <| match uvKind c with
-      | 1 => .mkInterrupted p e d
-      | 2 => .mkInvalidArgumentFile p e d
-      | 4 => .mkNoFileOrDirectory p e d
-      | 5 => .mkPermissionDeniedFile p e d
-      | 7 => .mkResourceExhaustedFile p e d
-      | 9 => .mkInappropriateTypeFile p e d
-      | 11 => .mkNoSuchThingFile p e d
-      | 13 => .mkAlreadyExistsFile p e d
-      | _ => uvError c
+  checkStart (← primChdir p)
 
 @[export lean_uv_os_homedir]
 def osHomedir : IO String := do str0 (← primQuery 3)
@@ -615,7 +581,7 @@ def osTmpdir : IO String := do str0 (← primQuery 4)
 @[export lean_uv_os_get_passwd]
 def osGetPasswd : IO PasswdInfo := do
   let o ← primQuery 5
-  check (← opCode o)
+  checkStart o
   let b ← opBytes o
   let shell ← opStr o 1
   let home ← opStr o 2
@@ -625,18 +591,8 @@ def osGetPasswd : IO PasswdInfo := do
 @[export lean_uv_os_get_group]
 def osGetGroup (gid : UInt64) : IO (Option GroupInfo) := do
   let o ← primGroup gid
-  let c ← opCode o
-  if c == (0 : UInt32) - 2 then return none
-  if c != 0 then
-    -- `lean_decode_uv_error(result, "group")`.
-    let d := uvStrerror c
-    let e := uvErrno c
-    throw <| match uvKind c with
-      | 2 => .mkInvalidArgumentFile "group" e d
-      | 5 => .mkPermissionDeniedFile "group" e d
-      | 7 => .mkResourceExhaustedFile "group" e d
-      | 11 => .mkNoSuchThingFile "group" e d
-      | _ => uvError c
+  checkStart o
+  if (← opCode o) == 1 then return none
   let n := (← opBytes o)
   let mut members := #[]
   for k in [1:(← opStrCount o).toNat] do
@@ -653,21 +609,17 @@ def osEnviron : IO (Array (String × String)) := do
 
 @[export lean_uv_os_getenv]
 def osGetenv (name : String) : IO (Option String) := do
-  if hasNul name then return none
   let o ← primGetenv name
-  if (← opCode o) != 0 then return none
+  if (← opCode o) == 1 then return none
   return some (← opStr o 0)
 
 @[export lean_uv_os_setenv]
 def osSetenv (name value : String) : IO Unit := do
-  if hasNul name then throw (nulError name)
-  if hasNul value then throw (nulError value)
-  check (← primSetenv name value true)
+  checkStart (← primSetenv name value true)
 
 @[export lean_uv_os_unsetenv]
 def osUnsetenv (name : String) : IO Unit := do
-  if hasNul name then throw (nulError name)
-  check (← primSetenv name "" false)
+  checkStart (← primSetenv name "" false)
 
 @[export lean_uv_os_gethostname]
 def osGetHostname : IO String := do str0 (← primQuery 7)
@@ -675,17 +627,17 @@ def osGetHostname : IO String := do str0 (← primQuery 7)
 @[export lean_uv_os_getpriority]
 def osGetPriority (pid : UInt64) : IO Int64 := do
   let o ← primGetPriority pid
-  check (← opCode o)
+  checkStart o
   return (word (← opBytes o) 0).toInt64
 
 @[export lean_uv_os_setpriority]
 def osSetPriority (pid : UInt64) (prio : Int64) : IO Unit := do
-  check (← primSetPriority pid prio.toUInt64)
+  checkStart (← primSetPriority pid prio.toUInt64)
 
 @[export lean_uv_os_uname]
 def osUname : IO UnameInfo := do
   let o ← primQuery 8
-  check (← opCode o)
+  checkStart o
   return { sysname := ← opStr o 0, release := ← opStr o 1, version := ← opStr o 2, machine := ← opStr o 3 }
 
 @[export lean_uv_hrtime]
@@ -695,17 +647,18 @@ def hrtime : IO UInt64 := primWord 2
 def random (size : UInt64) : IO (IO.Promise (Except IO.Error ByteArray)) := do
   let r ← IO.Promise.new
   let o ← primRandom size r
-  check (← opSyncErr o)
+  checkStart o
   let p ← IO.Promise.new
   whenDone r o do
-    let c ← opCode o
-    if c != 0 then p.resolve (.error (uvError c)) else p.resolve (.ok (← opBytes o))
+    match ← opError o 1 with
+    | some e => p.resolve (.error e)
+    | none => p.resolve (.ok (← opBytes o))
   return p
 
 @[export lean_uv_getrusage]
 def getrusage : IO RUsage := do
   let o ← primQuery 9
-  check (← opCode o)
+  checkStart o
   let b ← opBytes o
   let w (k : Nat) := word b (8 * k)
   return { userTime := w 0, systemTime := w 1, maxRSS := w 2, ixRSS := w 3, idRSS := w 4,
@@ -743,18 +696,25 @@ the epoch, split into seconds and nanoseconds by truncating division, as
 def currentTime : IO Std.Time.Timestamp := do
   return Std.Time.Timestamp.ofNanosecondsSinceUnixEpoch ⟨← realtimeNanos⟩
 
+@[extern "lean_shim_windows_next_transition"]
+opaque primWindowsNextTransition (id : @& String) (t : UInt64) (d : Bool) : BaseIO Op
+@[extern "lean_shim_windows_local_timezone_id_at"]
+opaque primWindowsLocalTimeZoneIdAt (t : UInt64) : BaseIO Op
+
 /-- `Std.Time.Database.Windows.getNextTransition`: Windows only; elsewhere
-the C function fails with this error. -/
+the C function fails (lean-runtime's error, `io::time`). -/
 @[export lean_windows_get_next_transition]
-def windowsNextTransition (_ : String) (_ : Int64) (_ : Bool) :
-    IO (Option (Int64 × Std.Time.TimeZone)) :=
-  throw (IO.Error.mkInvalidArgument 22 "failed to get timezone, its windows only.")
+def windowsNextTransition (id : String) (t : Int64) (d : Bool) :
+    IO (Option (Int64 × Std.Time.TimeZone)) := do
+  checkStart (← primWindowsNextTransition id t.toUInt64 d)
+  return none
 
 /-- `Std.Time.Database.Windows.getLocalTimeZoneIdentifierAt`: Windows only;
-elsewhere the C function fails with this error. -/
+elsewhere the C function fails (lean-runtime's error, `io::time`). -/
 @[export lean_get_windows_local_timezone_id_at]
-def windowsLocalTimeZoneId (_ : Int64) : IO String :=
-  throw (IO.Error.mkInvalidArgument 22 "timezone retrieval is Windows-only")
+def windowsLocalTimeZoneId (t : Int64) : IO String := do
+  checkStart (← primWindowsLocalTimeZoneIdAt t.toUInt64)
+  return ""
 
 /-! ## Sharing (`src/runtime/sharecommon.cpp`)
 

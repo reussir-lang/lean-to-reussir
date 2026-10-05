@@ -2442,11 +2442,6 @@ fn l2r_task_handed<S>() -> LCell<S> [{ unsafe { ::std::mem::transmute_copy(&lean
 #[ffi(import)]
 fn l2r_task_deleting() -> bool [{ leanrt::task::deleting() }];
 
-// Added to the thread id inside tasks (`IO.getTID`): a number for the
-// worker thread the innermost running task runs on (0: main's).
-#[ffi(import)]
-fn l2r_task_tid_offset() -> u64 [{ leanrt::task::tid_offset() }];
-
 // A task starts running (for `IO.checkCanceled`, its state, its thread);
 // it leaves the queue, and the runtime's reference is dropped. 1: it runs
 // as on a worker thread, with stream cells of its own (`l2r_std_enter`);
@@ -2682,8 +2677,7 @@ fn l2r_io_basesharedmutex_unlock_read(m : LHandle) -> L2RUnit { l2r_sync_unit(13
 // operations are runtime handles (`LHandle`), promises `LPromise`; addresses
 // are byte arrays (`leanrt::net::decode_addr`); errors lean-runtime's
 // `IoError`s, kept in an operation (`leanrt::net::OpSt`), read as the
-// `IO.Error` builder, code, file name and details (the system queries,
-// below, report libuv's codes as `u32`).
+// `IO.Error` builder, code, file name and details.
 
 fn l2r_unit_of(x : u64) -> L2RUnit { L2RUnit::u{} }
 
@@ -2692,8 +2686,6 @@ fn l2r_unit_of(x : u64) -> L2RUnit { L2RUnit::u{} }
 fn l2r_shim_op_canceled(o : LHandle) -> bool [{ { let r = leanrt::net::op(&o).canceled; leanrt::rc_release(o); r } }];
 #[ffi(import)]
 fn l2r_shim_op_code(o : LHandle) -> u32 [{ { let r = leanrt::net::op(&o).code as u32; leanrt::rc_release(o); r } }];
-#[ffi(import)]
-fn l2r_shim_op_sync_err(o : LHandle) -> u32 [{ { let r = leanrt::net::op(&o).sync_err as u32; leanrt::rc_release(o); r } }];
 #[ffi(import)]
 fn l2r_shim_op_bytes(o : LHandle) -> RVec<u8> [{
     { let b = ::std::mem::take(&mut leanrt::net::op(&o).bytes); leanrt::rc_release(o); leanrt::array::bytes_of_vec(b) }
@@ -2743,13 +2735,6 @@ fn l2r_shim_op_fresh(o : LHandle) -> bool [{ { let r = leanrt::net::op(&o).fresh
 fn l2r_shim_op_promise(o : LHandle) -> LPromise [{
     { let p = leanrt::net::op(&o).promise.clone().expect("leanrt: operation without a promise"); leanrt::rc_release(o); p }
 }];
-
-// Errors of the system queries (pure externs of the shim): lean-runtime's
-// decoding of a libuv code.
-#[ffi(import)]
-fn lean_shim_uv_kind(code : u32) -> u32 [{ leanrt::net::uv_error_kind(code as i32) }];
-#[ffi(import)]
-fn lean_shim_uv_strerror(code : u32) -> LStr [{ leanrt::string::from_bytes(&leanrt::net::uv_strerror(code as i32)) }];
 
 // Addresses (pure externs of the shim).
 #[ffi(import)]
@@ -2887,7 +2872,7 @@ fn l2r_shim_dns_get_name(a : RVec<u8>, r : LPromise) -> LHandle [{
 
 // Std.Internal.UV.System (`leanrt::sys`, over lean-runtime's `io::uvsys`).
 #[ffi(import)]
-fn l2r_shim_sys_title_set(s : LStr) -> u32 [{ { let r = leanrt::sys::title_set(s.utf8()) as u32; leanrt::rc_release(s); r } }];
+fn l2r_shim_sys_title_set(s : LStr) -> LHandle [{ { let o = leanrt::sys::title_set(s.utf8()); leanrt::rc_release(s); o } }];
 #[ffi(import)]
 fn l2r_shim_sys_query(which : u8) -> LHandle [{
     match which {
@@ -2911,18 +2896,33 @@ fn l2r_shim_sys_word(which : u8) -> u64 [{
     }
 }];
 #[ffi(import)]
-fn l2r_shim_sys_chdir(p : LStr) -> u32 [{ { let r = leanrt::sys::chdir_to(p.utf8()) as u32; leanrt::rc_release(p); r } }];
+fn l2r_shim_sys_chdir(p : LStr) -> LHandle [{ { let o = leanrt::sys::chdir_to(p.utf8()); leanrt::rc_release(p); o } }];
 #[ffi(import)]
-fn l2r_shim_sys_setenv(n : LStr, v : LStr, set : bool) -> u32 [{
+fn l2r_shim_sys_setenv(n : LStr, v : LStr, set : bool) -> LHandle [{
     {
-        let r = leanrt::sys::setenv_to(n.utf8(), if set { Some(v.utf8()) } else { None }) as u32;
+        let o = leanrt::sys::setenv_to(n.utf8(), if set { Some(v.utf8()) } else { None });
         leanrt::rc_release(n);
         leanrt::rc_release(v);
-        r
+        o
     }
 }];
 #[ffi(import)]
-fn l2r_shim_sys_setpriority(pid : u64, prio : u64) -> u32 [{ leanrt::sys::set_priority(pid, prio) as u32 }];
+fn l2r_shim_sys_setpriority(pid : u64, prio : u64) -> LHandle [{ leanrt::sys::set_priority(pid, prio) }];
+
+// `Std.Time.Database.Windows`'s two functions off Windows: lean-runtime's
+// errors (`io::time`), as the start's error of an operation.
+#[ffi(import)]
+fn l2r_shim_windows_next_transition(id : LStr, t : u64, d : bool) -> LHandle [{
+    {
+        let o = leanrt::sys::windows_next_transition(id.utf8(), t as i64, d);
+        leanrt::rc_release(id);
+        o
+    }
+}];
+#[ffi(import)]
+fn l2r_shim_windows_local_timezone_id_at(t : u64) -> LHandle [{
+    leanrt::sys::windows_local_timezone_id_at(t as i64)
+}];
 #[ffi(import)]
 fn l2r_shim_sys_random(size : u64, r : LPromise) -> LHandle [{ leanrt::sys::random(size, r) }];
 
@@ -2958,10 +2958,7 @@ fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
             c != 1 && c < 0x8000_0000
         };
         if shared {
-            let mut line = b"shared RC ".to_vec();
-            line.extend_from_slice(&msg.utf8()[..msg.utf8().iter().position(|&b| b == 0).unwrap_or(msg.utf8().len())]);
-            line.push(b'\n');
-            leanrt::io::diag_put(leanrt::string::from_bytes(&line));
+            leanrt::io::diag_put(leanrt::string::from_bytes(&lean_runtime::io::debug::shared_rc_line(msg.utf8())));
         }
         leanrt::rc_release(msg);
         a
@@ -2989,9 +2986,7 @@ fn l2r_last_shared() -> bool [{ leanrt::last_shared() }];
 #[ffi(import)]
 fn l2r_shared_rc_text(msg : LStr) -> LStr [{
     {
-        let mut line = b"shared RC ".to_vec();
-        line.extend_from_slice(&msg.utf8()[..msg.utf8().iter().position(|&b| b == 0).unwrap_or(msg.utf8().len())]);
-        line.push(b'\n');
+        let line = lean_runtime::io::debug::shared_rc_line(msg.utf8());
         leanrt::rc_release(msg);
         leanrt::string::from_bytes(&line)
     }
@@ -3117,16 +3112,17 @@ fn l2r_io_initializing() -> bool [{ leanrt::rt::initializing() }];
 fn l2r_set_initializing(b : bool) -> u64 [{ { leanrt::rt::set_initializing(b); 0 } }];
 fn l2r_io_set_heartbeats(n : Nat) -> L2RUnit { L2RUnit::u{} }
 
-// `Lean.githash` of the Lean 4.34.0 toolchain.
-fn lean_get_githash(u : L2RUnit) -> LStr { lean_mk_string("293d5d0c0c3f3dded4688b3ccd6a33939ac5102b") }
+// The toolchain facts (`Lean.githash`, `Lean.version.specialDesc`,
+// `System.Platform.target`) are lean-runtime's (`semantics::toolchain`): the
+// Lean 4.34.0 toolchain's, the target triple the program is built for.
+#[ffi(import)]
+fn l2r_toolchain_githash() -> LStr [{ leanrt::string::from_bytes(sem::toolchain::GITHASH.as_bytes()) }];
+fn lean_get_githash(u : L2RUnit) -> LStr { l2r_toolchain_githash() }
 
 // The platform queries. leanrt builds only for Linux with glibc on aarch64
-// and x86-64 (`leanrt::rt::PLATFORM_TARGET`), so Windows, macOS and
+// and x86-64 (`leanrt::rt`'s target guard), so Windows, macOS and
 // Emscripten are false, Linux (`isLinux`, new in Lean 4.34) is true, and
 // `numBits` (`lean_system_platform_nbits`) is 64 (`USize` is `u64` here).
-// `System.Platform.target` is natively `LEAN_PLATFORM_TARGET`, the
-// toolchain's target triple: the one the native toolchain for leanrt's
-// target reports.
 fn lean_system_platform_windows(u : L2RUnit) -> bool { false }
 fn lean_system_platform_osx(u : L2RUnit) -> bool { false }
 fn lean_system_platform_linux(u : L2RUnit) -> bool { true }
@@ -3137,9 +3133,11 @@ fn lean_version_get_major(u : L2RUnit) -> Nat { l2r_nat_small(4) }
 fn lean_version_get_minor(u : L2RUnit) -> Nat { l2r_nat_small(34) }
 fn lean_version_get_patch(u : L2RUnit) -> Nat { l2r_nat_small(0) }
 fn lean_version_get_is_release(u : L2RUnit) -> bool { true }
-fn lean_version_get_special_desc(u : L2RUnit) -> LStr { lean_mk_string("") }
 #[ffi(import)]
-fn l2r_platform_target() -> LStr [{ leanrt::string::from_bytes(leanrt::rt::PLATFORM_TARGET.as_bytes()) }];
+fn l2r_toolchain_special_desc() -> LStr [{ leanrt::string::from_bytes(sem::toolchain::SPECIAL_DESC.as_bytes()) }];
+fn lean_version_get_special_desc(u : L2RUnit) -> LStr { l2r_toolchain_special_desc() }
+#[ffi(import)]
+fn l2r_platform_target() -> LStr [{ leanrt::string::from_bytes(sem::toolchain::PLATFORM_TARGET.as_bytes()) }];
 fn lean_system_platform_target(u : L2RUnit) -> LStr { l2r_platform_target() }
 
 #[ffi(import)]
@@ -3160,11 +3158,13 @@ fn l2r_io_get_num_heartbeats() -> Nat { l2r_nat_small(0) }
 fn l2r_io_check_canceled() -> bool { l2r_task_check_canceled() }
 fn l2r_io_get_tid() -> u64 { l2r_io_get_tid_u64() }
 
+// `IO.getTID` (lean-runtime's `io::env::get_tid`: `gettid`, plus, inside a
+// task, the number of the worker thread it natively runs on).
 #[ffi(import)]
-fn l2r_io_get_tid_u64() -> u64 [{ { extern "C" { fn gettid() -> i32; } unsafe { gettid() as u64 } } }];
+fn l2r_io_get_tid_u64() -> u64 [{ lean_runtime::io::env::get_tid() }];
 
 #[ffi(import)]
-fn l2r_io_mono_ms_now_u64() -> u64 [{ leanrt::io::mono_nanos_polled() / 1000000 }];
+fn l2r_io_mono_ms_now_u64() -> u64 [{ leanrt::io::mono_ms_polled() }];
 
 #[ffi(import)]
 fn l2r_io_mono_nanos_now_u64() -> u64 [{ leanrt::io::mono_nanos_polled() }];

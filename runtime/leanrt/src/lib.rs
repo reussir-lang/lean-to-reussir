@@ -287,4 +287,36 @@ mod tests {
         let prelude_version = format!("{}.{}.{}", part("major"), part("minor"), part("patch"));
         assert_eq!(prelude_version, lean_runtime::LEAN_VERSION);
     }
+
+    /// lean2rr numbers the `IO.Error` builders as lean-runtime does
+    /// (`IoError::builder_index`, `IO_ERROR_BUILDERS`): the error paths of
+    /// the generated code (`ioErrorBuilderSyms`, Mono.lean) and the shim's
+    /// `ioErrorOf` (L2RShim.lean) build the error the index names.
+    #[test]
+    fn io_error_builders_are_lean_runtimes() {
+        use lean_runtime::io::error::IO_ERROR_BUILDERS;
+        let mono = include_str!("../../../lean2rr/LeanToReussir/Mono.lean");
+        let start = mono.find("def ioErrorBuilderSyms : Array String := #[").expect("ioErrorBuilderSyms");
+        let list = &mono[start..start + mono[start..].find(']').expect("ioErrorBuilderSyms's end")];
+        let syms: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
+        assert_eq!(syms, IO_ERROR_BUILDERS);
+        // `| k => .mkSomeThing ...`: `mk` and the builder's words after
+        // `lean_mk_io_error_`, capitalized (index 0, `other_error`, is the
+        // match's default; 23 is `userError`).
+        let shim = include_str!("../../../lean2rr/L2RShim.lean");
+        for (k, sym) in IO_ERROR_BUILDERS.iter().enumerate().skip(1) {
+            let ctor = match sym.strip_prefix("lean_mk_io_error_") {
+                Some(words) => {
+                    let camel: String = words
+                        .split('_')
+                        .map(|w| w[..1].to_uppercase() + &w[1..])
+                        .collect();
+                    format!(".mk{camel} ")
+                }
+                None => ".userError ".to_string(),
+            };
+            let arm = format!("  | {k} => {ctor}");
+            assert!(shim.contains(&arm), "L2RShim.ioErrorOf lacks `{arm}` for {sym}");
+        }
+    }
 }

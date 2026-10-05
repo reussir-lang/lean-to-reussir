@@ -19,13 +19,6 @@
 //! first, which lean-runtime's keeps as the previous action (a fault that is
 //! no Lean stack overflow goes there).
 
-use std::ffi::c_void;
-
-extern "C" {
-    fn abort() -> !;
-    fn write(fd: i32, buf: *const c_void, n: usize) -> isize;
-}
-
 /// Lean's stack-overflow report on the calling thread (lean-runtime's; see
 /// the module comment).
 pub fn install_stack_overflow_handler() {
@@ -39,17 +32,6 @@ pub fn install_stack_overflow_handler() {
 /// scheduler's contexts).
 fn main_stack_size() -> usize {
     lean_runtime::sched::thread_stack_size()
-}
-
-/// Creating a thread failed: native Lean throws `lean::exception("failed
-/// to create thread")`, which nothing catches: libc++ reports it and
-/// aborts (nothing is flushed).
-pub fn thread_create_failed() -> ! {
-    let msg = b"libc++abi: terminating due to uncaught exception of type lean::exception: failed to create thread\n";
-    unsafe {
-        write(2, msg.as_ptr() as *const c_void, msg.len());
-        abort()
-    }
 }
 
 extern "C" {
@@ -204,8 +186,9 @@ fn run_body<F: FnOnce() + Send + 'static>(body: F) {
         }) {
         Ok(t) => t,
         // Native `lean_run_main` throws `lean::exception("failed to create
-        // thread")`, which nothing catches.
-        Err(_) => thread_create_failed(),
+        // thread: " << strerror(err))`, which nothing catches: libc++
+        // reports it and aborts (lean-runtime's text, as for its workers).
+        Err(e) => lean_runtime::sched::thread_create_failed(&e),
     };
     if t.join().is_err() {
         // A Rust panic of `main`'s thread (a runtime bug): exit as a Rust
@@ -214,21 +197,15 @@ fn run_body<F: FnOnce() + Send + 'static>(body: F) {
     }
 }
 
-/// `System.Platform.target` (`lean_system_platform_target`). Natively it is
-/// `LEAN_PLATFORM_TARGET` (`version.h`), the target triple the Lean
-/// toolchain was built for: `clang --print-target-triple` on Lean's CI, the
-/// triple `lean --version` shows. Here, the triple the native toolchain for
-/// leanrt's own target reports. leanrt builds only for Linux with glibc on
-/// aarch64 and x86-64 (the glibc `FILE` model, lean-runtime's targets); the
-/// prelude's other platform answers
-/// (Windows, macOS and Emscripten false, `numBits` 64) rely on that too.
-#[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"))]
-pub const PLATFORM_TARGET: &str = "aarch64-unknown-linux-gnu";
-#[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"))]
-pub const PLATFORM_TARGET: &str = "x86_64-unknown-linux-gnu";
+// `System.Platform.target` and the other toolchain facts are lean-runtime's
+// (`semantics::toolchain`). leanrt builds only for Linux with glibc on
+// aarch64 and x86-64 (the glibc `FILE` model, lean-runtime's targets): the
+// prelude's other platform answers (Windows, macOS and Emscripten false,
+// `numBits` 64) rely on that.
 #[cfg(not(all(target_os = "linux", target_env = "gnu", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 compile_error!(
-    "leanrt supports Linux with glibc on aarch64 and x86-64 only: for another target, add the triple \
-     the native Lean toolchain reports (`lean --version`) to `PLATFORM_TARGET` and review the \
-     prelude's platform queries (`lean_system_platform_*`)"
+    "leanrt supports Linux with glibc on aarch64 and x86-64 only: for another target, check \
+     lean-runtime's `semantics::toolchain::PLATFORM_TARGET` against the triple the native Lean \
+     toolchain reports (`lean --version`) and review the prelude's platform queries \
+     (`lean_system_platform_*`)"
 );

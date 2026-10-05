@@ -190,9 +190,10 @@ Paths are relative to the repository root.
     aborts with `std::bad_alloc`, 134), never exits (review RST3-02: a
     fallible sink there made a line without end spin forever; test
     `RtLineNoEnd`). Only a child's output (`IO.Process.output`) goes into
-    `fs::Sink`, which stops (`ByteSink::stopped`, so lean-runtime stops
-    reading) and ends the process with `INTERNAL PANIC: out of memory` once
-    the crate has returned (AR-5).
+    lean-runtime's `StoppingSink` (switch step 5; leanrt's own `fs::Sink`
+    before), which stops (`ByteSink::stopped`, so lean-runtime stops
+    reading); the process then ends with `INTERNAL PANIC: out of memory`
+    once the crate has returned (AR-5).
   - `IO.Process.output` is one primitive, `l2r_proc_output` (lean-runtime's
     `io::process::output`), with `l2r_proc_output_str`; lean2rr's
     generated drain, UTF-8 checks and `wait` are gone (`Lower/Process.lean`,
@@ -200,16 +201,17 @@ Paths are relative to the repository root.
     process object by pid (`proc::CHILDREN`) until the child is reaped
     (`wait`, or a `tryWait` that sees it exit); a reaped child's pid gets
     the system call itself, as natively: `waitpid` (`ECHILD`), `kill` or
-    `killpg` (`ESRCH`) (review RST3-04; test `RtProcessReaped`). A child
+    `killpg` (`ESRCH`) (review RST3-04; test `RtProcessReaped`), through
+    lean-runtime's object for the pid (`ChildProcess::from_pid`, switch
+    step 5; leanrt's own `unsafe` system calls before). A child
     lean-runtime models because no stand-in could be started keeps its
     standard input's read end until it is reaped (lean-runtime's model of a
     stdin that takes a pipe's capacity, then fails with `EPIPE`); natively
     the failed child closes it when it exits.
   - The shim's `Std.Internal.UV.System` functions get lean-runtime's
-    errors as libuv codes (`sys::uv_code`: lean-runtime decodes them with
-    `decode_uv_error(code, name)`, which keeps `-code`), and build the same
-    `IO.Error` as before; `setProcessTitle` now reports a libuv error
-    (`lean_shim_sys_title_set` returns it).
+    errors themselves, kept in the operation (switch step 5; at step 3 as
+    libuv codes, which the shim decoded again); `setProcessTitle` reports
+    lean-runtime's error.
   - Startup: `rt`'s ELF constructor calls `io::startup::open_native_descriptors`
     (on failure `fail_as_native`: LB-30, LB-31); `l2r_set_initializing(false)`
     is `mark_end_initialization`; `main`'s return (`l2r_exit`,
@@ -371,12 +373,12 @@ Paths are relative to the repository root.
 
 ### `System.Platform.target` follows leanrt's target
 
-- **What:** `lean_system_platform_target` returns
-  `leanrt::rt::PLATFORM_TARGET`, chosen by `cfg` for the target leanrt is
-  compiled for: `aarch64-unknown-linux-gnu` or `x86_64-unknown-linux-gnu`,
-  the triples the native Lean toolchains for those hosts report
-  (`lean --version`). Any other target is a `compile_error!` naming what
-  to do. The prelude's other platform answers are constants that rely on
+- **What:** `lean_system_platform_target` returns lean-runtime's
+  `semantics::toolchain::PLATFORM_TARGET`, put together by `cfg` from the
+  target leanrt is compiled for: `aarch64-unknown-linux-gnu` or
+  `x86_64-unknown-linux-gnu`, the triples the native Lean toolchains for
+  those hosts report (`lean --version`). Any other target is a
+  `compile_error!` of leanrt (`rt.rs`) naming what to check. The prelude's other platform answers are constants that rely on
   the same restriction: `isWindows`, `isOSX` and `isEmscripten` are false,
   `isLinux` (`lean_system_platform_linux`, new in Lean 4.34) is true, and
   `numBits` is 64 (`USize` is `u64` in the prelude).
@@ -390,20 +392,23 @@ Paths are relative to the repository root.
   elsewhere instead of a guess. Test
   `tests/runtime/RtPlatform.lean` compares the triple, the word size, the
   three flags and the version strings with native.
-- **Where:** `runtime/leanrt/src/rt.rs`: `PLATFORM_TARGET`;
-  `runtime/prelude.rr`: `lean_system_platform_target`,
-  `l2r_platform_target`, `lean_system_platform_windows`/`osx`/`linux`/
-  `emscripten`, `lean_system_platform_nbits`.
-- **Remove only if:** never; extend `PLATFORM_TARGET` (and review the
-  constants) when leanrt gains a target.
+- **Where:** lean-runtime's `src/semantics/toolchain.rs`;
+  `runtime/leanrt/src/rt.rs` (the target guard); `runtime/prelude.rr`:
+  `lean_system_platform_target`, `l2r_platform_target`,
+  `lean_system_platform_windows`/`osx`/`linux`/`emscripten`,
+  `lean_system_platform_nbits`.
+- **Remove only if:** never; extend the guard (and review the constants)
+  when leanrt gains a target.
 
 ### The version and git hash are the pinned toolchain's constants
 
-- **What:** `Lean.githash` (`lean_get_githash`: the toolchain's commit),
-  `Lean.version.major/minor/patch/isRelease/specialDesc` (so
-  `Lean.versionString` and `Lean.toolchain`) and
-  `Lean.Internal.isStage0/hasLLVMBackend` are prelude constants of the
-  toolchain lean2rr is built with, v4.34.0 (`lean2rr/lean-toolchain`).
+- **What:** `Lean.githash` (`lean_get_githash`: the toolchain's commit)
+  and `Lean.version.specialDesc` are lean-runtime's
+  (`semantics::toolchain::GITHASH`, `SPECIAL_DESC`);
+  `Lean.version.major/minor/patch/isRelease` (so `Lean.versionString` and
+  `Lean.toolchain`) and `Lean.Internal.isStage0/hasLLVMBackend` are
+  prelude constants of the toolchain lean2rr is built with, v4.34.0
+  (`lean2rr/lean-toolchain`).
 - **Why:** Natively they are compile-time constants of the toolchain's
   runtime (`version.h`); a program built by lean2rr must answer what the
   same program built natively answers.
@@ -414,6 +419,44 @@ Paths are relative to the repository root.
   pinned lean-runtime mirrors (`lean_runtime::LEAN_VERSION`).
 - **Remove only if:** never. Update them with every toolchain change;
   `RtPlatform` fails otherwise.
+
+### Runtime functions both translators had are lean-runtime's (switch step 5)
+
+- **What:** leanrt and the prelude call lean-runtime where they kept a copy
+  of a runtime function lean-runtime has (its shared-1 batch, the
+  redundancy audit of 2026-10-05): the toolchain facts
+  (`semantics::toolchain`); `String.push`'s and `String.set`'s encoder
+  (`semantics::string::push_unicode_scalar`, inline in their slow paths)
+  and the lossy decoding of bytes (`lossy_utf8`); `IO.Process.output`'s
+  sink (`io::StoppingSink`); `IO.Error`'s accessors and builder number
+  (`IoError::os_code`, `file_name`, `details`, `builder_index`); the
+  system clock in nanoseconds (`io::time::current_time_nanos`),
+  `IO.monoMsNow` (`io::env::mono_ms_now`, after the polling point),
+  `IO.getTID` (`io::env::get_tid`, the scheduler's thread number
+  included, so the generated code no longer adds it); `allocprof`'s and
+  `dbgTraceIfShared`'s texts (`io::debug::allocprof_text`,
+  `shared_rc_line`); a reaped child's system calls
+  (`io::process::ChildProcess::from_pid`); `Task.get`'s rule in a `sync`
+  task (`sched::await_task`); the abort when `main`'s thread cannot be
+  made (`sched::thread_create_failed`, whose line ends with `: <strerror>`
+  as native's); `Std.Internal.UV.System`'s errors (passed on as
+  `IoError`s instead of libuv codes the shim decoded again) and
+  `Std.Time.Database.Windows`'s errors (`io::time`). leanrt's unit test of
+  the 141 decoded errnos went to lean-runtime's; leanrt keeps a test of its
+  last-error slot's wiring and one that its builder numbering is
+  lean-runtime's.
+- **Why:** The owner's rule: each translator keeps its own layout, and
+  every shared runtime function lives in lean-runtime, once. Behaviour
+  changes only where judged: the thread-creation text gains native's
+  `: <strerror>` (the judge's verdict on audit item 5.14), and
+  `TCP.Socket.new`/`UDP.Socket.new` report lean-runtime's error as an
+  `IO.Error` (natively too) instead of an internal panic (verdict 5; libuv
+  1.48 never fails there).
+- **Where:** `runtime/leanrt/src/string.rs`, `fs.rs`, `fs_tests.rs`,
+  `proc.rs`, `io.rs`, `rt.rs`, `task.rs`, `sys.rs`, `net.rs`, `lib.rs`
+  (tests); `runtime/prelude.rr`; `lean2rr/L2RShim.lean`;
+  `lean2rr/LeanToReussir/Lower/LazyGlue.lean` (`IO.getTID`).
+- **Remove only if:** never.
 
 ### leanrt is built and linked with the shared crate lean-runtime
 
