@@ -141,8 +141,6 @@ below, takes a <code>String</code> out of an <code>L2RBox</code> <code>v</code>:
     _ =&gt; { l2r_unreachable&lt;LStr&gt;() }         // no other variant holds a String
 }
 </code></pre>
-<p>Lean's type checker makes sure that the value is a <code>String</code> at this point.
-The last arm does not run.</p>
 <h2 id="where-lean2rr-uses-the-enum">Where lean2rr uses the enum</h2>
 <p>Every position whose type is <code>lcAny</code> holds an <code>L2RBox</code>: a field, a
 parameter, a result, a local value, or an argument of a function value. A
@@ -441,22 +439,17 @@ fn describe(b : bool, v : L2RBox) -&gt; LStr {
 }
 </code></pre>
 <ul>
-<li><strong>Arm 1: the variant <code>b2</code></strong> holds a <code>Nat</code>. The arm gives that <code>Nat</code>
-  (<code>n</code>). This is the arm that runs: <code>pickT true</code> put 42 into <code>b2</code>.</li>
-<li><strong>Arm 2: the variant <code>b0</code></strong> is Lean's <code>box(0)</code>. lean2rr adds this arm to
-  each unbox, because Lean's library can write <code>box(0)</code> as a temporary
-  value into a slot of any type (<code>Array.modify</code>). Here no <code>box(0)</code> can
-  arrive: the value comes from <code>pickT</code>. The arm gives <code>0</code>, the value that
-  <code>box(0)</code> has as a <code>Nat</code> in a native build:</li>
+<li><strong>Arm 1: the variant <code>b2</code></strong> holds a <code>Nat</code>. The arm gives that <code>Nat</code>.</li>
+<li><strong>Arm 2: the variant <code>b0</code></strong> is Lean's <code>box(0)</code>. It is reached only with
+  <code>unsafeCast</code>. The arm gives <code>0</code>, as in a native build:</li>
 </ul>
 <p><code>rust
   fn zero_Nat() -&gt; Nat {
       l2r_nat_small(0)
   }</code></p>
 <ul>
-<li><strong>Arm 3: all the other variants</strong> (<code>b1</code>, <code>b3</code>, <code>b4</code>, <code>b5</code>). A <code>match</code> must
-  cover each variant. None of these holds a <code>Nat</code>. The arm calls the general
-  unbox function for <code>Nat</code>:</li>
+<li><strong>Arm 3: all the other variants.</strong> The arm calls the general unbox
+  function for <code>Nat</code>:</li>
 </ul>
 <p><code>rust
   fn l2r_unbox_Nat(b : L2RBox) -&gt; Nat {
@@ -469,16 +462,8 @@ fn describe(b : bool, v : L2RBox) -&gt; LStr {
           }
       }
   }</code></p>
-<p>In a program that casts, this function has more arms: a value of another
-  word type can be read as a <code>Nat</code> through <code>unsafeCast</code>. In this program it
-  has none. For the other variants, it releases the box with one call
-  (<code>l2r_ptr_addr_rec</code>) and stops the program (<code>l2r_unreachable</code>). Lean's
-  type checker makes sure that the value is a <code>Nat</code>, so this arm does not
-  run.</p>
-<p>The <code>false</code> branch uses the same three arms for a <code>String</code>: <code>b3</code> gives the
-<code>String</code>, <code>b0</code> gives the empty string, and the last arm stops the program
-(<code>l2r_unreachable</code>) directly, because no other type is read as a <code>String</code>.
-The empty string is a constant too:</p>
+<p>The <code>false</code> branch does the same for a <code>String</code>. Its <code>b0</code> arm gives the
+empty string, a constant:</p>
 <pre><code class="language-rust">fn zero_String_init() -&gt; LStr { l2r_str_lit(0) }   // literal number 0: &quot;&quot;
 
 fn zero_String() -&gt; LStr {
@@ -488,10 +473,6 @@ fn zero_String() -&gt; LStr {
     l2r_once_get&lt;LStr&gt;(38)
 }
 </code></pre>
-<p><strong>When the <code>b0</code> arm runs.</strong> In typed code, a read at the type <code>Nat</code> gets a
-<code>Nat</code>, so the <code>b0</code> arm does not run. It runs only when a program reads a
-unit value as a <code>Nat</code> with <code>unsafeCast</code>. A native build then gives <code>0</code>, and
-the arm gives <code>0</code> too.</p>
 <h3 id="sigma-types">Sigma types</h3>
 <p>A Sigma type <code>(x : A) × B x</code> is a pair. The type of its second component
 depends on the value of its first component.</p>

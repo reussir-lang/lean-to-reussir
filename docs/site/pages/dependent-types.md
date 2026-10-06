@@ -127,9 +127,6 @@ match v {
 }
 ```
 
-Lean's type checker makes sure that the value is a `String` at this point.
-The last arm does not run.
-
 ## Where lean2rr uses the enum
 
 Every position whose type is `lcAny` holds an `L2RBox`: a field, a
@@ -428,13 +425,9 @@ match v {
 }
 ```
 
-- **Arm 1: the variant `b2`** holds a `Nat`. The arm gives that `Nat`
-  (`n`). This is the arm that runs: `pickT true` put 42 into `b2`.
-- **Arm 2: the variant `b0`** is Lean's `box(0)`. lean2rr adds this arm to
-  each unbox, because Lean's library can write `box(0)` as a temporary
-  value into a slot of any type (`Array.modify`). Here no `box(0)` can
-  arrive: the value comes from `pickT`. The arm gives `0`, the value that
-  `box(0)` has as a `Nat` in a native build:
+- **Arm 1: the variant `b2`** holds a `Nat`. The arm gives that `Nat`.
+- **Arm 2: the variant `b0`** is Lean's `box(0)`. It is reached only with
+  `unsafeCast`. The arm gives `0`, as in a native build:
 
   ```rust
   fn zero_Nat() -> Nat {
@@ -442,9 +435,8 @@ match v {
   }
   ```
 
-- **Arm 3: all the other variants** (`b1`, `b3`, `b4`, `b5`). A `match` must
-  cover each variant. None of these holds a `Nat`. The arm calls the general
-  unbox function for `Nat`:
+- **Arm 3: all the other variants.** The arm calls the general unbox
+  function for `Nat`:
 
   ```rust
   fn l2r_unbox_Nat(b : L2RBox) -> Nat {
@@ -459,17 +451,9 @@ match v {
   }
   ```
 
-  In a program that casts, this function has more arms: a value of another
-  word type can be read as a `Nat` through `unsafeCast`. In this program it
-  has none. For the other variants, it releases the box with one call
-  (`l2r_ptr_addr_rec`) and stops the program (`l2r_unreachable`). Lean's
-  type checker makes sure that the value is a `Nat`, so this arm does not
-  run.
 
-The `false` branch uses the same three arms for a `String`: `b3` gives the
-`String`, `b0` gives the empty string, and the last arm stops the program
-(`l2r_unreachable`) directly, because no other type is read as a `String`.
-The empty string is a constant too:
+The `false` branch does the same for a `String`. Its `b0` arm gives the
+empty string, a constant:
 
 ```rust
 fn zero_String_init() -> LStr { l2r_str_lit(0) }   // literal number 0: ""
@@ -481,11 +465,6 @@ fn zero_String() -> LStr {
     l2r_once_get<LStr>(38)
 }
 ```
-
-**When the `b0` arm runs.** In typed code, a read at the type `Nat` gets a
-`Nat`, so the `b0` arm does not run. It runs only when a program reads a
-unit value as a `Nat` with `unsafeCast`. A native build then gives `0`, and
-the arm gives `0` too.
 
 ### Sigma types
 
