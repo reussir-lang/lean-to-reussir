@@ -62,6 +62,13 @@ This page shows why such types need nothing special at run time.</p>
   a type (<code>α : Type</code>), and a proof give the program no information at run
   time. Lean's compiler erases them. It writes <code>◾</code> for an erased argument,
   and <code>lcAny</code> for a value whose type it does not know.</li>
+<li><strong>The two marks are different.</strong> <code>◾</code> replaces a value that holds no data
+  (a type or a proof), and lean2rr discards it. <code>lcAny</code> replaces only the
+  value's <em>type</em>. The value itself is data that the program uses, such as
+  the number 5 in <code>⟨.nat, 5⟩</code> below, so lean2rr keeps it, in the enum. Lean's
+  own documentation says the same: <code>lcErased</code> is "information that has been
+  erased", and <code>lcAny</code> is a "type dependency that has been erased". A native
+  build keeps an <code>lcAny</code> value as an object and drops a <code>◾</code> value.</li>
 <li><strong>Native Lean does the same.</strong> In a native build, every value is one
   machine word (<code>lean_object*</code>): a pointer to an object, or a small number
   inside the word. No value carries its type.</li>

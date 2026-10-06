@@ -31,6 +31,13 @@ This page shows why such types need nothing special at run time.
   a type (`α : Type`), and a proof give the program no information at run
   time. Lean's compiler erases them. It writes `◾` for an erased argument,
   and `lcAny` for a value whose type it does not know.
+- **The two marks are different.** `◾` replaces a value that holds no data
+  (a type or a proof), and lean2rr discards it. `lcAny` replaces only the
+  value's *type*. The value itself is data that the program uses, such as
+  the number 5 in `⟨.nat, 5⟩` below, so lean2rr keeps it, in the enum. Lean's
+  own documentation says the same: `lcErased` is "information that has been
+  erased", and `lcAny` is a "type dependency that has been erased". A native
+  build keeps an `lcAny` value as an object and drops a `◾` value.
 - **Native Lean does the same.** In a native build, every value is one
   machine word (`lean_object*`): a pointer to an object, or a small number
   inside the word. No value carries its type.
