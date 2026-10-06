@@ -631,9 +631,28 @@ structure Packed where                      -- a tree whose element type is a fi
 leftDepth ⟨Nat, build n⟩                    -- Tree Nat goes into Tree lcAny
 ```
 
+lean2rr generates two tree types and a conversion call (checked with
+`--keep-rr`):
+
+```rust
+enum T_Tree_763 {                 // Tree Nat: the layout that build uses
+    c_leaf(Nat),
+    c_node(T_Tree_763, T_Tree_763)
+}
+enum T_Tree_774 {                 // Tree lcAny: the layout that leftDepth uses
+    c_leaf(L2RBox),
+    c_node(T_Tree_774, T_Tree_774)
+}
+
+// in main:
+let x822 : T_Tree_763 = l_build___l2r_0_(x821);
+let x830 : Nat = l_leftDepth___l2r_0_(l2r_conv_T_Tree_763_T_Tree_774(x822));
+```
+
 - `build n` has n + 1 nodes. Each node points two times to the same child.
-- The conversion follows each pointer separately. It makes
-  2<sup>n+1</sup> − 1 nodes.
+- `l2r_conv_T_Tree_763_T_Tree_774` makes a `Tree lcAny` with the same
+  shape: each leaf's `Nat` goes into `L2RBox::b2`. It follows each pointer
+  separately, so it makes 2<sup>n+1</sup> − 1 nodes.
 
 | n | Native | Current version |
 |---|---|---|
