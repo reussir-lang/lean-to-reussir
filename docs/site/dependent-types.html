@@ -58,13 +58,17 @@ value with a <code>match</code> on the enum's variant.</p>
 lean2rr build gives the same output as its native build. The LCNF on this
 page is the output of Lean's compiler for that program (mono phase, with
 the types of parameters and <code>let</code> values). The Reussir code is the output
-of lean2rr for that program (<code>--keep-rr</code>), with shorter, readable names.</p>
+of lean2rr for that program (<code>--keep-rr</code>), with shorter, readable names and
+without <code>lcErased</code> (rule 4 of
+<a href="#layouts-of-generic-types">Layouts of generic types</a>).</p>
 <h2 id="types-and-values">Types and values</h2>
 <p>Lean's compiler translates a program to LCNF, its intermediate code. In
 LCNF, it replaces two kinds of items:</p>
 <ul>
 <li><strong><code>◾</code></strong> replaces an item without data: a type, a type argument or a proof.
-  In a type, LCNF writes it as <code>lcErased</code>. lean2rr does not store it.</li>
+  In a type, LCNF writes it as <code>lcErased</code>. It carries no information, and
+  lean2rr does not need it: the Reussir code has no field, no parameter
+  and no argument for it.</li>
 <li><strong><code>lcAny</code></strong> replaces the <em>type</em> of a value when the compiler does not know
   that type. The value itself has data. lean2rr stores the value in an
   <code>L2RBox</code>.</li>
@@ -111,7 +115,7 @@ layout:</p>
 <li>one variant for each kind of scalar;</li>
 <li>one variant for function values;</li>
 <li>one variant for strings, one for arrays, one for big numbers;</li>
-<li>one <em>erased</em> variant, for a type or a proof in such a position.</li>
+<li>one unit variant (<code>b0</code>), for the unit value <code>()</code> and Lean's <code>box(0)</code>.</li>
 </ul>
 <p>The set of variants is finite. It stays finite when polymorphic recursion
 makes the set of types infinite. lean2rr compiles the whole program at one
@@ -165,9 +169,10 @@ type.</p>
    <code>structure P where x : Float</code>, <code>x</code> is a raw <code>f64</code>.</li>
 <li><strong>A structure with one relevant field is that field</strong> (<code>Fin n</code>,
    <code>Subtype</code>).</li>
-<li><strong>Erased parameters are dropped.</strong> lean2rr removes every <code>lcErased</code>
-   parameter from functions and function types. A function with only
-   erased parameters keeps one <code>L2RUnit</code> parameter.</li>
+<li><strong><code>lcErased</code> is removed.</strong> It carries no information, and lean2rr does
+   not need it. No function, function type or call has an <code>lcErased</code>
+   parameter or argument. A function whose parameters are all <code>lcErased</code>
+   keeps one unit parameter, so that it stays a function.</li>
 <li><strong>Function values have one calling convention.</strong> A function that is
    stored where its type is generic gets an entry that takes and returns
    <code>L2RBox</code> values.</li>
@@ -784,15 +789,15 @@ def ops : List Op := [⟨List.length⟩, ⟨fun xs =&gt; xs.length * 2⟩]
     c_cons(L2RBox, List_Box)
 }
 
-fn ops_lam(α : L2RUnit, xs : List_Box) -&gt; Nat {
+fn ops_lam(xs : List_Box) -&gt; Nat {
     let len : Nat = List_length_Box(xs);
     let two : Nat = l2r_nat_small(2);
     lean_nat_mul(len, two)
 }
 </code></pre>
 <ul>
-<li><code>α</code> is the erased type argument: an <code>L2RUnit</code>, which holds no data. With
-  rule 4, lean2rr removes it.</li>
+<li>The type argument <code>α.1</code> is <code>lcErased</code>. <code>ops_lam</code> has no parameter for
+  it.</li>
 <li><code>xs</code> is the list: each cell holds an <code>L2RBox</code> and the rest of the list.</li>
 <li>The function counts the cells and multiplies by 2:</li>
 </ul>
@@ -822,9 +827,9 @@ fn ops_lam(α : L2RUnit, xs : List_Box) -&gt; Nat {
   return _x.5
 </code></pre>
 <p>lean2rr generates this code:</p>
-<pre><code class="language-rust">enum Fn_Op {                          // a function value: L2RUnit -&gt; List_Box -&gt; Nat
+<pre><code class="language-rust">enum Fn_Op {                          // a function value: List_Box -&gt; Nat
     z,
-    raw(L2RUnit -&gt; Fn_ListBox_Nat),
+    raw(List_Box -&gt; Nat),
     ops_lam,                          // the function ops_lam
     List_length                       // the function List.lengthTR
 }

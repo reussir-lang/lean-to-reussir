@@ -23,7 +23,9 @@ All the Lean code on this page is one program. It type-checks, and its
 lean2rr build gives the same output as its native build. The LCNF on this
 page is the output of Lean's compiler for that program (mono phase, with
 the types of parameters and `let` values). The Reussir code is the output
-of lean2rr for that program (`--keep-rr`), with shorter, readable names.
+of lean2rr for that program (`--keep-rr`), with shorter, readable names and
+without `lcErased` (rule 4 of
+[Layouts of generic types](#layouts-of-generic-types)).
 
 ## Types and values
 
@@ -31,7 +33,9 @@ Lean's compiler translates a program to LCNF, its intermediate code. In
 LCNF, it replaces two kinds of items:
 
 - **`◾`** replaces an item without data: a type, a type argument or a proof.
-  In a type, LCNF writes it as `lcErased`. lean2rr does not store it.
+  In a type, LCNF writes it as `lcErased`. It carries no information, and
+  lean2rr does not need it: the Reussir code has no field, no parameter
+  and no argument for it.
 - **`lcAny`** replaces the *type* of a value when the compiler does not know
   that type. The value itself has data. lean2rr stores the value in an
   `L2RBox`.
@@ -86,7 +90,7 @@ layout:
 - one variant for each kind of scalar;
 - one variant for function values;
 - one variant for strings, one for arrays, one for big numbers;
-- one *erased* variant, for a type or a proof in such a position.
+- one unit variant (`b0`), for the unit value `()` and Lean's `box(0)`.
 
 The set of variants is finite. It stays finite when polymorphic recursion
 makes the set of types infinite. lean2rr compiles the whole program at one
@@ -154,9 +158,10 @@ These are the layout rules:
    `structure P where x : Float`, `x` is a raw `f64`.
 3. **A structure with one relevant field is that field** (`Fin n`,
    `Subtype`).
-4. **Erased parameters are dropped.** lean2rr removes every `lcErased`
-   parameter from functions and function types. A function with only
-   erased parameters keeps one `L2RUnit` parameter.
+4. **`lcErased` is removed.** It carries no information, and lean2rr does
+   not need it. No function, function type or call has an `lcErased`
+   parameter or argument. A function whose parameters are all `lcErased`
+   keeps one unit parameter, so that it stays a function.
 5. **Function values have one calling convention.** A function that is
    stored where its type is generic gets an entry that takes and returns
    `L2RBox` values.
@@ -816,15 +821,15 @@ enum List_Box {                  // List lcAny
     c_cons(L2RBox, List_Box)
 }
 
-fn ops_lam(α : L2RUnit, xs : List_Box) -> Nat {
+fn ops_lam(xs : List_Box) -> Nat {
     let len : Nat = List_length_Box(xs);
     let two : Nat = l2r_nat_small(2);
     lean_nat_mul(len, two)
 }
 ```
 
-- `α` is the erased type argument: an `L2RUnit`, which holds no data. With
-  rule 4, lean2rr removes it.
+- The type argument `α.1` is `lcErased`. `ops_lam` has no parameter for
+  it.
 - `xs` is the list: each cell holds an `L2RBox` and the rest of the list.
 - The function counts the cells and multiplies by 2:
 
@@ -861,9 +866,9 @@ def ops : List ({α : lcErased} → List lcAny → Nat) :=
 lean2rr generates this code:
 
 ```rust
-enum Fn_Op {                          // a function value: L2RUnit -> List_Box -> Nat
+enum Fn_Op {                          // a function value: List_Box -> Nat
     z,
-    raw(L2RUnit -> Fn_ListBox_Nat),
+    raw(List_Box -> Nat),
     ops_lam,                          // the function ops_lam
     List_length                       // the function List.lengthTR
 }
