@@ -178,7 +178,7 @@ other results are the last recorded runs.</p>
 <tbody>
 <tr>
 <td>Runtime test suite</td>
-<td>340 programs† (3 marked <code>.xfail</code>†); at the last full run (2026-10-06), 336 of 337 identical to native Lean 4.34.0, some of them through expectation files; the other one is the <code>.xfail</code> test</td>
+<td>342 programs† (3 marked <code>.xfail</code>†); at the last full run (2026-10-06), 336 of 337 identical to native Lean 4.34.0, some of them through expectation files; the other one is the <code>.xfail</code> test</td>
 </tr>
 <tr>
 <td>Classic corpus</td>
@@ -230,6 +230,12 @@ other results are the last recorded runs.</p>
   pop or a reference set that frees the last reference to a record puts
   the record on the pending stack as one cell: about 74 instructions per
   freed record, and unionfind +0.8% against step 9.</li>
+<li><strong>More fast paths in the runtime library</strong> (step 12): a big <code>Int</code> that
+  fits 64 bits is computed as a small value; a substring of an ASCII
+  string gets its character count from its length; <code>Float.toString</code>
+  copies lean-runtime's bytes. Instruction counts against step 11:
+  liasolver −6.5%, strings −2.9% (see
+  <a href="runtime.html#fast-paths-of-the-runtime-library-step-12">Runtime</a>).</li>
 <li><strong>The extern rule</strong> (above).</li>
 <li><strong><code>conv-liveness</code></strong>, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see <a href="passes.html">Optional passes</a>).</li>

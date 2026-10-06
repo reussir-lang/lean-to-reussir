@@ -21,6 +21,34 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/string.rs`, and
   strings took 314 MB, now 277 MB (native 360). `String.toUTF8` and
   `String.fromUTF8` copy the bytes, as natively.
 
+### A substring of an ASCII string takes its count from its length
+
+- **What:** `of_range` (`String.Pos.Raw.extract`, `String.extract`, so
+  `splitOn` and the slices' `toString`) copies the range of a string whose
+  character count equals its byte count with the range's length as its
+  count; other ranges are counted (`utf8_count`). lean-runtime's
+  `utf8_strlen`, the count, takes eight bytes at a time in a `u64`
+  (lean-runtime perf-3). `leanrt::float::to_string` copies the text of a
+  finite value below 2^53 in magnitude from lean-runtime's bytes
+  (`float::to_string_fast_bytes`) with its length as its count, without
+  the `&str` check of `float::to_string`, and without the 320-byte stack
+  buffer, which only the other values use.
+- **Why:** A string with as many characters as bytes has no continuation
+  byte, so valid UTF-8 makes all of it ASCII, and every range of it too.
+  The count before was a filter that LLVM vectorized with every byte
+  widened to a 64-bit lane: about 36 instructions for a 5-byte word,
+  about 120 for a 32-byte line. The `&str` check of a float's text took
+  about 86 instructions. Switch step 12: strings 2.9% fewer instructions,
+  its runtime library's own instructions 12% fewer.
+- **Where:** `leanrt/src/string.rs`: `of_range`, `utf8_count`;
+  `leanrt/src/float.rs`: `to_string`; lean-runtime's
+  `src/semantics/string.rs` (`utf8_strlen`, `continuation_bytes`) and
+  `src/semantics/float.rs` (`to_string_fast_bytes`, `FIXED6_LEN`); unit
+  tests `string::tests::counts_follow_every_update` (every range of four
+  strings, unique and shared), `float::tests::to_string_is_the_rules_text`;
+  runtime test `RtStringExtractCount`.
+- **Remove only if:** never (speed only); the count must stay exact.
+
 ### String equality tests the same block first
 
 - **What:** `lean_string_dec_eq` (`leanrt::string::dec_eq`) compares the

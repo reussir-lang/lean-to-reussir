@@ -219,6 +219,37 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `RtIntSmallBigEq`.
 - **Remove only if:** lean2rr stops using lean-runtime.
 
+### A big `Int` in the `i64` range is computed as a word
+
+- **What:** The slow paths of `Int`'s arithmetic and comparisons
+  (`int_add`, `int_sub`, `int_mul`, `int_div`, `int_mod`, `int_ediv`,
+  `int_emod`, `int_nat_abs`, `int_cmp`, `int_eq`) view each operand with
+  `int_view_narrow`: a big number whose value fits `i64` (`big::fits_i64`:
+  no limb, or one limb with a magnitude below 2^63, or exactly 2^63 when
+  negative) is released and viewed as a word
+  (`sem::int::Int::Small`). With both operands words, lean-runtime's rule
+  takes its word path (`checked_*` in `i64`, else the `*_small` helpers in
+  `i128`), and `of_int_view` normalizes the result once: a word in the
+  `int32` range, else a new block. The other paths (`int_neg`, `int_repr`,
+  the conversions) keep `int_view`.
+- **Why:** lean2rr's big `Int`s are the values outside the `int32` range,
+  most of them one limb. Before, a word and such a number took the rule's
+  big path: the size test (`bit_len`), the word method (`mul_limb`,
+  `add_limb`, `div_limb`) on the limbs, the trim of the result, and the
+  range test of `LInt::of_big`, about 160 instructions for a product. The
+  rules take either form for any value (`sem::int::Int`), so the results
+  are the same. Switch step 12: liasolver 6.5% fewer instructions, its
+  runtime library's own instructions 24% fewer. The block of a unique
+  operand is no longer reused for the result: a big result is a new
+  block, which mimalloc takes from the operand's freed one.
+- **Where:** `leanrt/src/nat.rs`: `int_view_narrow` and the slow paths
+  above; unit test `nat::tests::narrowed_operands` (every operation on
+  operands at the `int32` and `i64` edges and beyond, unique and shared:
+  a shared operand keeps its value and gives up one reference); runtime
+  test `RtIntWordBand`.
+- **Remove only if:** the small `Int` range becomes `i64` (then no big
+  number fits `i64`).
+
 ### Add and mul test "both small" on the parity of the sum
 
 - **What:** `lean_nat_add` and `lean_nat_mul` compute `s = x + (y - 1)`

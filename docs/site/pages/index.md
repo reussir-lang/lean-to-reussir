@@ -161,6 +161,12 @@ Merged from 2026-10-04 to 2026-10-06:
   pop or a reference set that frees the last reference to a record puts
   the record on the pending stack as one cell: about 74 instructions per
   freed record, and unionfind +0.8% against step 9.
+- **More fast paths in the runtime library** (step 12): a big `Int` that
+  fits 64 bits is computed as a small value; a substring of an ASCII
+  string gets its character count from its length; `Float.toString`
+  copies lean-runtime's bytes. Instruction counts against step 11:
+  liasolver −6.5%, strings −2.9% (see
+  [Runtime](runtime.html#fast-paths-of-the-runtime-library-step-12)).
 - **The extern rule** (above).
 - **`conv-liveness`**, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see [Optional passes](passes.html)).

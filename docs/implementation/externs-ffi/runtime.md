@@ -59,9 +59,11 @@ Paths are relative to the repository root.
   `Int` for `scaleB` is `i64::MIN`/`MAX` by its sign (`l2r_int_sat_i64`);
   `leanrt::string::extract`/`extract_fast` make the string of
   lean-runtime's byte range (the string itself when the range is all of
-  it); `leanrt::float::to_string` writes lean-runtime's text into a 320-byte
-  stack buffer (the longest `%f` of a double is 317 bytes; a longer text
-  would go to the heap); `leanrt::string::utf8_count`, the count cached
+  it); `leanrt::float::to_string` copies the bytes of lean-runtime's fast
+  path (`float::to_string_fast_bytes`, a finite value below 2^53) and
+  writes the other values' text into a 320-byte stack buffer (the longest
+  `%f` of a double is 317 bytes; a longer text would go to the heap);
+  `leanrt::string::utf8_count`, the count cached
   when a string is made, is lean-runtime's `utf8_strlen`, out of line for
   more than 16 bytes so that the textures that make strings stay small.
 - **Why:** One runtime for both translators. Checked: lean-runtime's
@@ -852,6 +854,45 @@ Paths are relative to the repository root.
   leanrt's `runtime/leanrt/src/drop.rs` (`free_unique`, `release_unique`,
   `release_record`) and `runtime/leanrt/src/array.rs` (`release_last`).
 - **Remove only if:** never.
+
+### The runtime library's speed items of a second profile (switch step 12)
+
+- **What:** lean-runtime pinned at `2910ef7` (main: perf-3, 2910ef7:
+  `to_string_fast_bytes`, the word-at-a-time `utf8_strlen`). With it,
+  three changes of leanrt: a big `Int` in the `i64` range is computed as
+  a word
+  ([../representations/nat-int.md](../representations/nat-int.md#a-big-int-in-the-i64-range-is-computed-as-a-word)),
+  a substring of an ASCII string takes its count from its length, and
+  `Float.toString` copies the rule's bytes
+  ([../representations/strings.md](../representations/strings.md#a-substring-of-an-ascii-string-takes-its-count-from-its-length)).
+- **Why:** A second instruction-count profile of the 18 classic programs
+  (cachegrind, small sizes, the same attribution as step 10's) found the
+  runtime library's share still large in liasolver (21%: `Int` beyond
+  `int32`) and strings (12%: substrings, `Float.toString`), and under 5% in
+  the others. Against dev 7bfc758, the run with the fewest instructions of
+  each binary (mimalloc's free path differs from run to run, see below):
+  liasolver 6.5% fewer, strings 2.9% fewer, sieve 1.6% fewer (a side
+  effect: LLVM compiles `main` differently), bignum 0.03% more (the range
+  test on its big operands), the others within 0.15%. mimalloc's free
+  path: Reussir's `ReussirGlobalAlloc` asks for 16-byte alignment for
+  every Rust allocation (`mi_malloc_aligned`), and with
+  `MI_MAX_ALIGN_SIZE=8` a request whose size class is not a multiple of 16
+  can be over-allocated, which marks its page as holding aligned blocks;
+  every later free in that page then takes `mi_free_generic_local` and
+  `_mi_page_ptr_unalign`. Which page it is changes from run to run: up to
+  8% of monadic-interp's instructions, 5.5% of unionfind's, 2.5% of
+  liasolver's.
+- **Tests:** leanrt's unit tests `nat::tests::narrowed_operands`,
+  `float::tests::to_string_is_the_rules_text` and the extended
+  `string::tests::counts_follow_every_update`; lean-runtime's
+  `semantics::string::tests::utf8_strlen_counts_every_length_and_position`
+  and its float tests on `to_string_fast_bytes`; the new runtime tests
+  `RtIntWordBand` and `RtStringExtractCount`; `RtInt`,
+  `RtIntSmallBigEq`, `RtFloat`, `RtFloatLits`.
+- **Where:** leanrt's `runtime/leanrt/src/nat.rs`, `string.rs` and
+  `float.rs`; lean-runtime's `src/semantics/string.rs` and
+  `src/semantics/float.rs`.
+- **Remove only if:** never (speed only).
 
 ### leanrt is built and linked with the shared crate lean-runtime
 

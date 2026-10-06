@@ -39,10 +39,17 @@ impl StackText {
     }
 }
 
-/// `lean_float_to_string` (lean-runtime's `float::to_string`), formatted on
-/// the stack (on the heap should a text not fit).
+/// `lean_float_to_string` (lean-runtime's `float::to_string`). A finite
+/// value below 2^53 in magnitude is copied from the bytes of the rule's fast
+/// path (`to_string_fast_bytes`: ASCII, so as many characters as bytes,
+/// without the `&str` check of `to_string`); the others are formatted on the
+/// stack (on the heap should a text not fit).
 #[inline(never)]
 pub fn to_string(x: f64) -> LStr {
+    let mut b = [0; sem::float::FIXED6_LEN];
+    if let Some(t) = sem::float::to_string_fast_bytes(x, &mut b) {
+        return from_counted(t, t.len() as u64);
+    }
     let mut t = StackText::new();
     if sem::float::to_string(x, &mut t).is_ok() {
         return t.to_str();
@@ -128,5 +135,29 @@ pub mod libm_call {
         atanh(x) -> f64;
         cbrtf(x) -> f32;
         atanhf(x) -> f32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `to_string` gives the rule's text, with its count, on both sides of
+    /// the fast path's range (2^53), at the special values, and on values
+    /// whose text is long (1e300: the stack buffer).
+    #[test]
+    fn to_string_is_the_rules_text() {
+        let two53 = 9007199254740992.0f64;
+        let mut xs = vec![0.0, -0.0, 2.5, -2.5, 0.1 + 0.2, 1e-7, -1.5e-3, 123456789.125, f64::MIN_POSITIVE, 5e-324,
+            two53, -two53, two53 - 1.0, two53 + 2.0, 1e21, 1e100, 1e300, f64::MAX, f64::NAN, -f64::NAN,
+            f64::INFINITY, f64::NEG_INFINITY];
+        xs.extend((0..2000).map(|i| i as f64 / 8.0 - 100.0));
+        for x in xs {
+            let mut want = String::new();
+            sem::float::to_string(x, &mut want).unwrap();
+            let got = to_string(x);
+            assert_eq!(crate::string::bytes(&got), want.as_bytes(), "bits {:#018x}", x.to_bits());
+            assert_eq!(crate::string::length(&got), want.chars().count() as u64);
+        }
     }
 }

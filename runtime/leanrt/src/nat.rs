@@ -481,6 +481,27 @@ unsafe fn int_view(w: u64) -> sem::int::Int<GInt> {
     }
 }
 
+/// `int_view` for the slow paths of the arithmetic and the comparisons: a
+/// big number whose value is in the `i64` range is released and viewed as
+/// a word (`Small`). lean2rr's big `Int`s are the values outside the
+/// `int32` range, most of them of one limb: with both operands words, the
+/// rule computes on its word path (`sem::int`'s `*_small` helpers, exact in
+/// `i128`), without the big-number path (the size test, the word methods,
+/// a block per operand), and the result is normalized once
+/// (`of_int_view`). A rule takes either form for any value
+/// (`sem::int::Int`), so the result is the same.
+#[inline(always)]
+unsafe fn int_view_narrow(w: u64) -> sem::int::Int<GInt> {
+    match int_view(w) {
+        sem::int::Int::Big(GInt(b)) if big::fits_i64(&b) => {
+            let v = big::to_i64(&b);
+            crate::rc_release(b);
+            sem::int::Int::Small(v)
+        }
+        i => i,
+    }
+}
+
 /// An `Int` the rules computed, as a normalized handle.
 #[inline]
 fn of_int_view(i: sem::int::Int<GInt>) -> LInt {
@@ -499,60 +520,60 @@ pub extern "C" fn int_neg(a: u64) -> LInt {
 
 #[inline(never)]
 pub extern "C" fn int_add(a: u64, b: u64) -> LInt {
-    of_int_view(ok(sem::int::add(unsafe { int_view(a) }, unsafe { int_view(b) })))
+    of_int_view(ok(sem::int::add(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) })))
 }
 
 #[inline(never)]
 pub extern "C" fn int_sub(a: u64, b: u64) -> LInt {
-    of_int_view(ok(sem::int::sub(unsafe { int_view(a) }, unsafe { int_view(b) })))
+    of_int_view(ok(sem::int::sub(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) })))
 }
 
 #[inline(never)]
 pub extern "C" fn int_mul(a: u64, b: u64) -> LInt {
-    of_int_view(ok(sem::int::mul(unsafe { int_view(a) }, unsafe { int_view(b) })))
+    of_int_view(ok(sem::int::mul(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) })))
 }
 
 /// `Int.div` (T-division, C's `/`).
 #[inline(never)]
 pub extern "C" fn int_div(a: u64, b: u64) -> LInt {
-    of_int_view(sem::int::tdiv(unsafe { int_view(a) }, unsafe { int_view(b) }))
+    of_int_view(sem::int::tdiv(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) }))
 }
 
 /// `Int.mod` (T-remainder, C's `%`, sign of the dividend).
 #[inline(never)]
 pub extern "C" fn int_mod(a: u64, b: u64) -> LInt {
-    of_int_view(sem::int::tmod(unsafe { int_view(a) }, unsafe { int_view(b) }))
+    of_int_view(sem::int::tmod(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) }))
 }
 
 /// `Int.ediv` (Euclidean).
 #[inline(never)]
 pub extern "C" fn int_ediv(a: u64, b: u64) -> LInt {
-    of_int_view(sem::int::ediv(unsafe { int_view(a) }, unsafe { int_view(b) }))
+    of_int_view(sem::int::ediv(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) }))
 }
 
 /// `Int.emod` (Euclidean, never negative for `y != 0`).
 #[inline(never)]
 pub extern "C" fn int_emod(a: u64, b: u64) -> LInt {
-    of_int_view(sem::int::emod(unsafe { int_view(a) }, unsafe { int_view(b) }))
+    of_int_view(sem::int::emod(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) }))
 }
 
 /// Three-way comparison: -1, 0, 1.
 #[inline(never)]
 pub extern "C" fn int_cmp(a: u64, b: u64) -> i64 {
-    let (x, y) = unsafe { (int_view(a), int_view(b)) };
+    let (x, y) = unsafe { (int_view_narrow(a), int_view_narrow(b)) };
     sem::int::compare(&x, &y) as i64
 }
 
 #[inline(never)]
 pub extern "C" fn int_eq(a: u64, b: u64) -> bool {
-    let (x, y) = unsafe { (int_view(a), int_view(b)) };
+    let (x, y) = unsafe { (int_view_narrow(a), int_view_narrow(b)) };
     sem::int::dec_eq(&x, &y)
 }
 
 /// `Int.natAbs`.
 #[inline(never)]
 pub extern "C" fn int_nat_abs(a: u64) -> LNat {
-    of_nat_view(sem::int::nat_abs(unsafe { int_view(a) }))
+    of_nat_view(sem::int::nat_abs(unsafe { int_view_narrow(a) }))
 }
 
 /// Whether an `Int` is negative (`!Int.decNonneg`).
@@ -797,6 +818,129 @@ mod tests {
             check(nat_to_int(n(m).into_raw()), m as i128, "ofNat");
             check(nat_neg_succ(n(m).into_raw()), -(m as i128) - 1, "negSucc");
         }
+    }
+    /// The arithmetic slow paths view a big operand in the `i64` range as a
+    /// word (`int_view_narrow`): exact, normalized results with unique
+    /// operands, shared ones (a shared operand keeps its value and gives up
+    /// the one reference the call took) and one block as both operands, at
+    /// the edges of the `int32` and `i64` ranges, beyond `i64` and beyond
+    /// two limbs; every product that fits `i128` (`i64::MIN * -1`,
+    /// `i64::MIN^2`, ...); the divisions against Lean's definitions on
+    /// magnitudes, a zero divisor included; and `Int.natAbs` at the same
+    /// edges (review RS12-02).
+    #[test]
+    fn narrowed_operands() {
+        let (lo, hi) = (INT_MIN as i128, INT_MAX as i128);
+        let (m, mx) = (i64::MIN as i128, i64::MAX as i128);
+        let edges: [i128; 31] = [0, 1, -1, 2, -2, 7, -7, hi, lo, hi + 1, lo - 1, hi + 2, lo - 2, 1 << 32, -(1 << 32),
+            1 << 40, -(1 << 40) - 1, mx, m, mx - 1, m + 1, mx + 1, m - 1, mx + 2, m - 2, 1 << 64, -(1 << 64),
+            (1 << 64) + 1, -(1 << 64) - 3, 1 << 100, -(1 << 100) + 5];
+        // `Int.tdiv`, `Int.tmod`, `Int.ediv` (`/`) and `Int.emod` (`%`) of
+        // Lean 4.34, by cases on the signs, on magnitudes (`Nat`).
+        fn tdiv(a: i128, b: i128) -> i128 {
+            if b == 0 {
+                return 0;
+            }
+            let q = (a.unsigned_abs() / b.unsigned_abs()) as i128;
+            if (a < 0) != (b < 0) { -q } else { q }
+        }
+        fn tmod(a: i128, b: i128) -> i128 {
+            if b == 0 {
+                return a;
+            }
+            let r = (a.unsigned_abs() % b.unsigned_abs()) as i128;
+            if a < 0 { -r } else { r }
+        }
+        fn ediv(a: i128, b: i128) -> i128 {
+            let (ua, ub) = (a.unsigned_abs(), b.unsigned_abs());
+            if b == 0 {
+                0
+            } else if a >= 0 {
+                if b > 0 { (ua / ub) as i128 } else { -((ua / ub) as i128) }
+            } else if b > 0 {
+                -(((ua - 1) / ub) as i128 + 1)
+            } else {
+                ((ua - 1) / ub) as i128 + 1
+            }
+        }
+        fn emod(a: i128, b: i128) -> i128 {
+            let (ua, ub) = (a.unsigned_abs(), b.unsigned_abs());
+            if ub == 0 {
+                a
+            } else if a >= 0 {
+                (ua % ub) as i128
+            } else {
+                ub as i128 - (((ua - 1) % ub) as i128 + 1)
+            }
+        }
+        let i = |v: i128| LInt::of_big(<GInt as lean_runtime::semantics::bignum::BigInt>::from_i128(v).0);
+        let ival = |x: &LInt| -> i128 {
+            let w = x.word();
+            if is_small(w) {
+                int_of_small_word(w) as i128
+            } else {
+                let b = unsafe { big_ref(&w) };
+                let mg = big::limbs(b).iter().rev().fold(0i128, |acc, &l| (acc << 64) | l as i128);
+                // -2^127 (a product of the edges) has the magnitude i128::MIN
+                if big::is_neg(b) { mg.wrapping_neg() } else { mg }
+            }
+        };
+        let count = |x: &LInt| if is_small(x.word()) { 1 } else { unsafe { big_ref(&x.word()) }.count() };
+        let check = |r: LInt, want: i128, what: &str| {
+            assert_eq!(ival(&r), want, "{what}");
+            assert_eq!(is_small(r.word()), (lo..=hi).contains(&want), "{what}: not normalized");
+        };
+        let mut products = 0;
+        for &a in &edges {
+            for &b in &edges {
+                let (x, y) = (i(a), i(b));
+                // 0: fresh unique operands; 1: shared ones; 2: one shared
+                // block as both operands (`a = b`).
+                for mode in 0..3 {
+                    if mode == 2 && a != b {
+                        continue;
+                    }
+                    let s = format!("{a} {b} mode={mode}");
+                    let args = || match mode {
+                        0 => (i(a).into_raw(), i(b).into_raw()),
+                        1 => (x.clone().into_raw(), y.clone().into_raw()),
+                        _ => (x.clone().into_raw(), x.clone().into_raw()),
+                    };
+                    let (p, q) = args();
+                    check(int_add(p, q), a + b, &s);
+                    let (p, q) = args();
+                    check(int_sub(p, q), a - b, &s);
+                    if let Some(pr) = a.checked_mul(b) {
+                        let (p, q) = args();
+                        check(int_mul(p, q), pr, &s);
+                        products += 1;
+                    }
+                    let (p, q) = args();
+                    check(int_div(p, q), tdiv(a, b), &s);
+                    let (p, q) = args();
+                    check(int_mod(p, q), tmod(a, b), &s);
+                    let (p, q) = args();
+                    check(int_ediv(p, q), ediv(a, b), &s);
+                    let (p, q) = args();
+                    check(int_emod(p, q), emod(a, b), &s);
+                    let (p, q) = args();
+                    assert_eq!(int_eq(p, q), a == b, "{s}");
+                    let (p, q) = args();
+                    assert_eq!(int_cmp(p, q), (a > b) as i64 - (a < b) as i64, "{s}");
+                    assert_eq!((ival(&x), ival(&y), count(&x), count(&y)), (a, b, 1, 1), "{s}: the operands changed");
+                }
+            }
+            let r = int_nat_abs(i(a).into_raw());
+            assert_eq!(val(&r), a.unsigned_abs(), "natAbs {a}");
+            assert!(canonical(&r), "natAbs {a}: not normalized");
+            let x = i(a);
+            let r = int_nat_abs(x.clone().into_raw());
+            let v = val(&r);
+            drop(r); // a big result may be the operand's block
+            assert_eq!((v, ival(&x), count(&x)), (a.unsigned_abs(), a, 1), "natAbs {a} shared");
+        }
+        // Every product of two edges below 2^127 in magnitude was checked.
+        assert!(products > 900, "{products}");
     }
     /// A big `Int` in the small range (never made: `of_big` normalizes) is
     /// caught where a slow path reads it, in builds with debug assertions.

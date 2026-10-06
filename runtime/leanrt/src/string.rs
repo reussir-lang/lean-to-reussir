@@ -447,14 +447,18 @@ pub fn extract_fast(s: LStr, b: u64, e: u64) -> LStr {
 }
 
 /// The bytes `r` of `s` as a string, consuming `s`: `s` itself for the whole
-/// string, else a copy.
+/// string, else a copy. A string with as many characters as bytes is ASCII
+/// (valid UTF-8 without continuation bytes), so every range of it is too:
+/// the copy's count is its length, without counting.
 #[inline]
 fn of_range(s: LStr, r: std::ops::Range<usize>) -> LStr {
     let v = bytes(&s);
     if r.start == 0 && r.end == v.len() {
         return s;
     }
-    let out = from_bytes(&v[r]);
+    let b = &v[r];
+    let chars = if length(&s) == v.len() as u64 { b.len() as u64 } else { utf8_count(b) };
+    let out = from_counted(b, chars);
     crate::rc_release(s);
     out
 }
@@ -672,6 +676,23 @@ mod tests {
         ok(&extract(s("aé€😀b"), 1, 6), "é€");
         ok(&extract(s("aé€😀b"), 2, 6), "");
         ok(&extract(s("aé€😀b"), 0, 99), "aé€😀b");
+        // Ranges of an ASCII string (counted by their length) and of strings
+        // with one character of each width, short and long, unique and
+        // shared.
+        for t in ["plain ascii text, long enough to pass sixteen bytes", "ascii then é", "😀 first", "mid € dle"] {
+            let n = t.len() as u64;
+            for b in 0..=n {
+                for e in b..=n + 1 {
+                    let want = t.get(b as usize..(e.min(n)) as usize).unwrap_or("");
+                    if t.is_char_boundary(b as usize) && t.is_char_boundary(e.min(n) as usize) {
+                        ok(&extract(s(t), b, e), want);
+                        let keep = s(t);
+                        ok(&extract(keep.clone(), b, e), want);
+                        ok(&keep, t);
+                    }
+                }
+            }
+        }
         ok(&of_u64(18446744073709551615), "18446744073709551615");
         ok(&of_i64(-9223372036854775808), "-9223372036854775808");
         ok(&from_bytes_lossy(b"a\xffb\xe2\x82"), "a\u{fffd}b\u{fffd}");

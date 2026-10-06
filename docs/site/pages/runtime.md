@@ -240,9 +240,10 @@ The switch steps:
 | 9 | no new part: a fix in the scheduler (lean-runtime's fixes-8). A wait for a pure task that the worker starts during the wait now runs the task; before, it could wait for ever |
 | 10 | no new part: speed (lean-runtime's perf-2). `Float.toString` computes its six decimals exactly with integers; the `Int` rules let lean2rr compute with a word and a big number without a block for the word. lean2rr's own runtime changed at the same step (see below) |
 | 11 | no new part: fixes in the signal watchers (lean-runtime's fixes-9 to fixes-11). A one-shot watcher gets one signal, as with `SA_RESETHAND` natively. lean2rr's own runtime changed at the same step (see below) |
+| 12 | no new part: speed (lean-runtime's perf-3). `Float.toString` gives its text as bytes; the character count of a new string takes eight bytes at a time. lean2rr's own runtime changed at the same step (see below) |
 
 Status (2026-10-06): the submodule `third_party/lean-runtime` is pinned at
-`dce982d`. `scripts/l2r.py` builds it with cargo (the features `io`,
+`2910ef7`. `scripts/l2r.py` builds it with cargo (the features `io`,
 `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`) and links
 it with `leanrt` ([runtime README](repo:runtime/README.md), "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline
@@ -280,3 +281,32 @@ Instruction counts at steps 10 and 11, against step 9 (small sizes):
 | unionfind | +5.0% | +0.8% |
 | monadic-interp | −1.9% | −1.9% |
 | qsort | −0.15% | −0.15% |
+
+### Fast paths of the runtime library (step 12)
+
+- **`Int` beyond `int32`.** A big `Int` whose value fits 64 bits is
+  released and computed as a small value. The arithmetic, the divisions,
+  `natAbs` and the comparisons use the word rules of lean-runtime. The
+  result is a small value or a new big number.
+- **Substrings.** A string with as many characters as bytes is ASCII. A
+  substring of it gets its character count from its length. Other
+  substrings count their characters eight bytes at a time.
+- **`Float.toString`.** For a finite value below 2<sup>53</sup>, the
+  runtime copies the bytes that lean-runtime writes. It does not check
+  that they are UTF-8.
+
+Instruction counts at step 12, against step 11 (small sizes; for each
+binary, the run with the fewest instructions):
+
+| Program | Step 12 |
+|---|---|
+| liasolver | −6.5% |
+| strings | −2.9% |
+| sieve | −1.6% |
+| other programs | from −0.1% to +0.15% |
+
+mimalloc's free path changes the counts from run to run. A Rust
+allocation asks for 16-byte alignment, and mimalloc can give it a larger
+block in a page of 8-byte size classes. Every later free in that page
+then takes a slower path. This cost goes up to 8% of monadic-interp's
+instructions.
