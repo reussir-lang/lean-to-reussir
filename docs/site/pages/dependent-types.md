@@ -337,6 +337,19 @@ def describe (x.1 : Bool) (x.2 : lcAny) : String :=
   uses it as a `String` (`String.append`). The `true` branch uses it as a
   `Nat` (`Nat.add`).
 
+The program's `L2RBox` enum (shown in [The enum](#the-enum-l2rbox)) is:
+
+```rust
+enum L2RBox {
+    b0(L2RUnit),      // the unit variant: Lean's box(0)
+    b1(LStr),         // a String
+    b2(Nat),          // a Nat
+    b3(L2RRef291),    // a reference cell
+    b4(T_Prod_766),   // a pair of two boxes
+    b5(T_Prod_744)    // a pair of two Nats
+}
+```
+
 lean2rr generates this code (checked with `--keep-rr`; the accessors of
 the string constants are left out):
 
@@ -379,11 +392,56 @@ fn l_describe___l2r_0_(a704 : bool, a705 : L2RBox) -> LStr {
   variant `b2`. The `false` branch puts `"hello"` into the `String` variant
   `b1`.
 - `describe` takes the value as an `L2RBox` (`a705`). The `true` branch
-  takes a `Nat` out of `b2` and adds 1. The `false` branch takes a `String`
-  out of `b1` and appends it.
-- In each `match`, the second arm is Lean's `box(0)` placeholder: it gives
-  the zero of the type. The last arm does not run: `l2r_unbox_Nat` also
-  ends in `l2r_unreachable` for the other variants.
+  takes a `Nat` out of the box and adds 1. The `false` branch takes a
+  `String` out of the box and appends it.
+
+The `true` branch of `describe` takes the `Nat` out with this `match`:
+
+```rust
+match a705 {
+    L2RBox::b2(ub708) => { ub708 },          // arm 1
+    L2RBox::b0(_) => { l2r_zero_709() },     // arm 2
+    _ => { l2r_unbox_Nat(a705) }             // arm 3
+}
+```
+
+- **Arm 1: the variant `b2`** holds a `Nat`. The arm gives that `Nat`
+  (`ub708`). This is the arm that runs: `pickT true` put 42 into `b2`.
+- **Arm 2: the variant `b0`** is Lean's `box(0)` placeholder. Lean's
+  library puts it into some positions that the program never reads (for
+  example in `Array.modify`). The arm gives the zero of the type `Nat`:
+
+  ```rust
+  fn l2r_zero_709() -> Nat {
+      let z : u64 = 0;
+      l2r_nat_small(z)
+  }
+  ```
+
+- **Arm 3: all the other variants** (`b1`, `b3`, `b4`, `b5`). None of them
+  holds a `Nat`. The arm calls the general unbox function for `Nat`:
+
+  ```rust
+  fn l2r_unbox_Nat(b : L2RBox) -> Nat {
+      match b {
+          L2RBox::b2(bx1011) => { bx1011 },
+          L2RBox::b0(_) => { l2r_zero_709() },
+          _ => {
+              let l2rbs : u64 = l2r_ptr_addr_rec<L2RBox>(b);
+              l2r_unreachable<Nat>()
+          }
+      }
+  }
+  ```
+
+  For a variant other than `b2` and `b0`, it releases the box with one call
+  (`l2r_ptr_addr_rec`), which keeps the code small, and then stops the
+  program (`l2r_unreachable`). Lean's type checker makes sure that the
+  value in the `true` branch is a `Nat`, so this arm does not run.
+
+The `false` branch uses the same three arms for a `String`: `b1` gives the
+`String`, `b0` gives the empty string, and the last arm stops the program
+(`l2r_unreachable`) directly.
 
 ### Sigma types
 

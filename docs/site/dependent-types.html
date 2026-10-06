@@ -363,6 +363,16 @@ def describe (x.1 : Bool) (x.2 : lcAny) : String :=
   uses it as a <code>String</code> (<code>String.append</code>). The <code>true</code> branch uses it as a
   <code>Nat</code> (<code>Nat.add</code>).</li>
 </ul>
+<p>The program's <code>L2RBox</code> enum (shown in <a href="#the-enum-l2rbox">The enum</a>) is:</p>
+<pre><code class="language-rust">enum L2RBox {
+    b0(L2RUnit),      // the unit variant: Lean's box(0)
+    b1(LStr),         // a String
+    b2(Nat),          // a Nat
+    b3(L2RRef291),    // a reference cell
+    b4(T_Prod_766),   // a pair of two boxes
+    b5(T_Prod_744)    // a pair of two Nats
+}
+</code></pre>
 <p>lean2rr generates this code (checked with <code>--keep-rr</code>; the accessors of
 the string constants are left out):</p>
 <pre><code class="language-rust">fn l_pickT___l2r_0_(a699 : bool) -&gt; L2RBox {
@@ -403,12 +413,50 @@ fn l_describe___l2r_0_(a704 : bool, a705 : L2RBox) -&gt; LStr {
   variant <code>b2</code>. The <code>false</code> branch puts <code>"hello"</code> into the <code>String</code> variant
   <code>b1</code>.</li>
 <li><code>describe</code> takes the value as an <code>L2RBox</code> (<code>a705</code>). The <code>true</code> branch
-  takes a <code>Nat</code> out of <code>b2</code> and adds 1. The <code>false</code> branch takes a <code>String</code>
-  out of <code>b1</code> and appends it.</li>
-<li>In each <code>match</code>, the second arm is Lean's <code>box(0)</code> placeholder: it gives
-  the zero of the type. The last arm does not run: <code>l2r_unbox_Nat</code> also
-  ends in <code>l2r_unreachable</code> for the other variants.</li>
+  takes a <code>Nat</code> out of the box and adds 1. The <code>false</code> branch takes a
+  <code>String</code> out of the box and appends it.</li>
 </ul>
+<p>The <code>true</code> branch of <code>describe</code> takes the <code>Nat</code> out with this <code>match</code>:</p>
+<pre><code class="language-rust">match a705 {
+    L2RBox::b2(ub708) =&gt; { ub708 },          // arm 1
+    L2RBox::b0(_) =&gt; { l2r_zero_709() },     // arm 2
+    _ =&gt; { l2r_unbox_Nat(a705) }             // arm 3
+}
+</code></pre>
+<ul>
+<li><strong>Arm 1: the variant <code>b2</code></strong> holds a <code>Nat</code>. The arm gives that <code>Nat</code>
+  (<code>ub708</code>). This is the arm that runs: <code>pickT true</code> put 42 into <code>b2</code>.</li>
+<li><strong>Arm 2: the variant <code>b0</code></strong> is Lean's <code>box(0)</code> placeholder. Lean's
+  library puts it into some positions that the program never reads (for
+  example in <code>Array.modify</code>). The arm gives the zero of the type <code>Nat</code>:</li>
+</ul>
+<p><code>rust
+  fn l2r_zero_709() -&gt; Nat {
+      let z : u64 = 0;
+      l2r_nat_small(z)
+  }</code></p>
+<ul>
+<li><strong>Arm 3: all the other variants</strong> (<code>b1</code>, <code>b3</code>, <code>b4</code>, <code>b5</code>). None of them
+  holds a <code>Nat</code>. The arm calls the general unbox function for <code>Nat</code>:</li>
+</ul>
+<p><code>rust
+  fn l2r_unbox_Nat(b : L2RBox) -&gt; Nat {
+      match b {
+          L2RBox::b2(bx1011) =&gt; { bx1011 },
+          L2RBox::b0(_) =&gt; { l2r_zero_709() },
+          _ =&gt; {
+              let l2rbs : u64 = l2r_ptr_addr_rec&lt;L2RBox&gt;(b);
+              l2r_unreachable&lt;Nat&gt;()
+          }
+      }
+  }</code></p>
+<p>For a variant other than <code>b2</code> and <code>b0</code>, it releases the box with one call
+  (<code>l2r_ptr_addr_rec</code>), which keeps the code small, and then stops the
+  program (<code>l2r_unreachable</code>). Lean's type checker makes sure that the
+  value in the <code>true</code> branch is a <code>Nat</code>, so this arm does not run.</p>
+<p>The <code>false</code> branch uses the same three arms for a <code>String</code>: <code>b1</code> gives the
+<code>String</code>, <code>b0</code> gives the empty string, and the last arm stops the program
+(<code>l2r_unreachable</code>) directly.</p>
 <h3 id="sigma-types">Sigma types</h3>
 <p>A Sigma type <code>(x : A) × B x</code> is a pair. The type of its second component
 depends on the value of its first component.</p>
