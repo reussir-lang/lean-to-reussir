@@ -266,7 +266,8 @@ def gen_testsets():
          "18 Lean programs, unchanged", "the suite's own programs, built natively and through lean2rr"],
         ["leanrt unit tests", "<code>tests/runtime/leanrt-unit.sh</code>", f"{leanrt_unit_tests()} Rust tests",
          "big numbers, one-word Nat/Int, tagged arrays, the one-block layouts and their counts, the last-error slot; "
-         "that lean2rr's version and IO error builders are lean-runtime's"],
+         "that lean2rr's version and IO error builders are lean-runtime's; that a panic's lines make one text for "
+         "Lean's stderr stream"],
         ["lean-runtime's rows", "<code>tests/runtime/rows-check.sh</code>", "every row of lean-runtime",
          "lean-runtime's row oracle built with lean2rr against the rows' native values (the Lean definition's result where lean-runtime lifts a Lean limit or bug, LB-nn)"],
         ["Inlined textures", "<code>tests/runtime/ffi-inline-check.sh</code>", "7 runtime tests",

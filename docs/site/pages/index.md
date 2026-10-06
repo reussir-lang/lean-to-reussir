@@ -113,13 +113,14 @@ these parts from it:
 - the rules: hashes, strings, floats, fixed-width integers, `libm`,
   `Nat`/`Int`, arrays, panics and the text of numbers;
 - the IO: files, the standard streams, the file system, processes, the
-  system queries and the exit;
+  system queries, the exit, and the execution of panics and other ends of
+  a program;
 - the task scheduler, with its wait cores, `Std.Sync`, the event loop and
   the networking;
 - the startup: `main`'s thread and native Lean's startup descriptors.
 
 lean2rr keeps only its own representations, its hot paths and the glue
-between them and the crate. The switch took seven steps, from 2026-10-04 to
+between them and the crate. The switch took eight steps, from 2026-10-04 to
 2026-10-05. See [Runtime](runtime.html#the-shared-runtime-crate).
 
 ## Status
@@ -144,10 +145,10 @@ other results are the last recorded runs.
 
 Merged on 2026-10-04 and 2026-10-05:
 
-- **The switch to `lean-runtime`**, in seven steps: the rules (steps 1
+- **The switch to `lean-runtime`**, in eight steps: the rules (steps 1
   and 2), the IO (step 3), the scheduler, `Std.Sync` and the event loop
   (step 4), the last copies of shared functions (step 5), the wait cores
-  (step 6) and the startup (step 7).
+  (step 6), the startup (step 7) and the panic and exit executor (step 8).
 - **The extern rule** (above).
 - **`conv-liveness`**, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see [Optional passes](passes.html)).

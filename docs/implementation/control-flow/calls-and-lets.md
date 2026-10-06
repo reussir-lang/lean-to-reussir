@@ -82,5 +82,7 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **Why:** Native behaviour; lean2rr's impossibilities look like Lean's
   own (plan [§5.9](../../translation-plan.md#59-panics-and-unreachable-code)).
 - **Where:** `runtime/prelude.rr`: `l2r_panic_text`, `l2r_panic_str`,
-  `lean_panic_fn`, `l2r_unreachable`, `l2r_internal_panic`.
+  `lean_panic_fn`, `l2r_unreachable`, `l2r_internal_panic`; lean-runtime's
+  `io::panic` (`report`, `internal_panic`), through `runtime/leanrt/src/lib.rs`
+  ([../externs-ffi/runtime.md](../externs-ffi/runtime.md), switch step 8).
 - **Remove only if:** never.

@@ -233,7 +233,7 @@ problem.</p>
 <p>lean2rr uses the shared crate <strong><code>lean-runtime</code></strong>
 (github.com/QueClr/lean-runtime-rs, public). The crate implements Lean's
 runtime behaviour once, as a library that a translator of Lean programs
-can use. lean2rr switched to it in seven steps, from 2026-10-04 to
+can use. lean2rr switched to it in eight steps, from 2026-10-04 to
 2026-10-05.</p>
 <table>
 <thead>
@@ -322,10 +322,14 @@ can use. lean2rr switched to it in seven steps, from 2026-10-04 to
 <td>7</td>
 <td>the startup: <code>main</code>'s thread, the constructor that opens the startup descriptors, the scheduler's lazy start</td>
 </tr>
+<tr>
+<td>8</td>
+<td>the panic and exit executor: it carries out a panic's plan (the stream, the flush of stdout, the abort or the exit), and does the internal panic, the uncaught error and <code>IO.Process.exit</code></td>
+</tr>
 </tbody>
 </table>
 <p>Status (2026-10-05): the submodule <code>third_party/lean-runtime</code> is pinned at
-<code>471f458</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
+<code>e34cd61</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
 <code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>) and links
 it with <code>leanrt</code> (<a href="../../runtime/README.md">runtime README</a>, "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline

@@ -156,13 +156,14 @@ these parts from it:</p>
 <li>the rules: hashes, strings, floats, fixed-width integers, <code>libm</code>,
   <code>Nat</code>/<code>Int</code>, arrays, panics and the text of numbers;</li>
 <li>the IO: files, the standard streams, the file system, processes, the
-  system queries and the exit;</li>
+  system queries, the exit, and the execution of panics and other ends of
+  a program;</li>
 <li>the task scheduler, with its wait cores, <code>Std.Sync</code>, the event loop and
   the networking;</li>
 <li>the startup: <code>main</code>'s thread and native Lean's startup descriptors.</li>
 </ul>
 <p>lean2rr keeps only its own representations, its hot paths and the glue
-between them and the crate. The switch took seven steps, from 2026-10-04 to
+between them and the crate. The switch took eight steps, from 2026-10-04 to
 2026-10-05. See <a href="runtime.html#the-shared-runtime-crate">Runtime</a>.</p>
 <h2 id="status">Status</h2>
 <p>Counts with a † are taken from the repository when the site is built. The
@@ -213,10 +214,10 @@ other results are the last recorded runs.</p>
 <h2 id="recent-changes">Recent changes</h2>
 <p>Merged on 2026-10-04 and 2026-10-05:</p>
 <ul>
-<li><strong>The switch to <code>lean-runtime</code></strong>, in seven steps: the rules (steps 1
+<li><strong>The switch to <code>lean-runtime</code></strong>, in eight steps: the rules (steps 1
   and 2), the IO (step 3), the scheduler, <code>Std.Sync</code> and the event loop
   (step 4), the last copies of shared functions (step 5), the wait cores
-  (step 6) and the startup (step 7).</li>
+  (step 6), the startup (step 7) and the panic and exit executor (step 8).</li>
 <li><strong>The extern rule</strong> (above).</li>
 <li><strong><code>conv-liveness</code></strong>, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see <a href="passes.html">Optional passes</a>).</li>

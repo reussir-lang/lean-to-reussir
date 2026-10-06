@@ -143,6 +143,8 @@ each concept has one term.</p>
 <dd>A wait protocol of lean-runtime's scheduler: the wait for a thunk or a constant that another context computes, the reference rule of a program that creates tasks, and the resolution of a promise put off to the end of a free.</dd>
 <dt>pending stack</dt>
 <dd>The per-thread stack of cells to free. Frees use it instead of recursion (local patches 0013 to 0015).</dd>
+<dt>internal panic</dt>
+<dd>An error of the runtime itself that ends the program at once, as Lean's <code>lean_internal_panic</code>: <code>INTERNAL PANIC:</code> and a message on the process's stderr (for example <code>out of memory</code>), then exit status 1, or an abort (134) under <code>LEAN_ABORT_ON_PANIC</code>. A <code>panic!</code> is not one: it prints its message and the program goes on.</dd>
 </dl>
 <h2 id="reussir">Reussir</h2>
 <dl>
@@ -176,9 +178,9 @@ each concept has one term.</p>
 <dt>judge</dt>
 <dd>The step that decides whether a finding is real before anyone fixes it.</dd>
 <dt>lean-runtime</dt>
-<dd>The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule <code>third_party/lean-runtime</code>): Lean's runtime behaviour in Rust, safe by default. lean2rr uses its hash, string, float, fixed-width integer, libm, <code>Nat</code>/<code>Int</code>, array, panic and number-text rules, its IO, its startup, its task scheduler with the wait cores, and its event loop (features <code>io</code>, <code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>), with its own GMP numbers behind the crate's big-number traits.</dd>
+<dd>The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule <code>third_party/lean-runtime</code>): Lean's runtime behaviour in Rust, safe by default. lean2rr uses its hash, string, float, fixed-width integer, libm, <code>Nat</code>/<code>Int</code>, array, panic and number-text rules, its IO with the panic and exit executor, its startup, its task scheduler with the wait cores, and its event loop (features <code>io</code>, <code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>), with its own GMP numbers behind the crate's big-number traits.</dd>
 <dt>switch step</dt>
-<dd>One of the seven steps (2026-10-04 to 2026-10-05) in which lean2rr's runtime moved to <code>lean-runtime</code>.</dd>
+<dd>One of the eight steps (2026-10-04 to 2026-10-05) in which lean2rr's runtime moved to <code>lean-runtime</code>.</dd>
 </dl>
   </main>
 </div>

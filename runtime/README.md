@@ -106,7 +106,7 @@ and hot paths in `leanrt` and the prelude, which call lean-runtime for the
 rest.
 
 - **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
-  pinned at a commit of its `main` (now `471f458`). Clone lean2rr with
+  pinned at a commit of its `main` (now `e34cd61`). Clone lean2rr with
   `git clone --recurse-submodules`, or run `git submodule update --init
   third_party/lean-runtime` in a checkout, and again after a checkout,
   merge or pull that moves the pin: git does not update a submodule on its
@@ -233,7 +233,7 @@ rest.
   - `panic`: `lean_panic_fn`'s plan (`panic_fn_plan`: the lines, the
     stream, abort under `LEAN_ABORT_ON_PANIC`), the internal panics'
     messages and endings, the `uncaught exception: ` prefix, the
-    stack-overflow text (`leanrt::panic_text`, `lean_internal_panic`);
+    stack-overflow text (carried out by `io::panic`, below);
   - `repr`: the decimal digits of a word (`decimal_u64_bytes`:
     `USize.repr`, `Nat.repr`, `Int.repr`; a big number's are its
     `write_decimal`, GMP's `mpz_get_str`);
@@ -281,8 +281,21 @@ rest.
     program with lean-runtime's message: LB-30, LB-31), `main`'s thread
     (`run_main`, `main_on_thread`) and `IO.initializing`;
   - `exit`: the exit sequence (every normal end of the process, through
-    `leanrt::io::exit`), `after_main` (`main`'s return and an uncaught
-    error), `show_error` (an uncaught error's text).
+    `leanrt::io::exit` or `io::panic`), `after_main` (`main`'s return and
+    an uncaught error);
+  - `panic` (since switch step 8): the panic and exit executor, which
+    carries out a panic's plan (the settings read at each panic, the
+    effect point, the stream, stdout's flush, the abort or the exit) and
+    the program's other ends: `report` (`leanrt::panic_text` for
+    `panicCore`, `leanrt::lean_panic` for the runtime's panics),
+    `internal_panic` (`leanrt::lean_internal_panic`, `internal_panic`: the
+    line built on the stack, no allocation), `uncaught`
+    (`leanrt::uncaught_exception`) and `process_exit` (the prelude's
+    `l2r_process_exit`). leanrt's glue `Collect` collects the lines of a
+    panic that goes on, which lean2rr writes with one `putStr` of Lean's
+    current stderr stream, and makes `panicCore`'s effect point only on
+    the process's stderr (lean-runtime docs/panic.md, rows 3 and 4); the
+    rest is the executor's default.
 
   What stays lean2rr's: the current standard streams of `IO.setStdout` &
   co. (lean2rr's cells of its own `IO.FS.Stream` records, generated with
@@ -1116,6 +1129,15 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
     is blocked reading it (LB-29).
 - Panics print `backtrace:` and `(stack trace unavailable)` instead of a
   stack trace (unless `LEAN_BACKTRACE=0`, which prints neither, as native).
+- An internal panic in a program that has made a task, a promise, a timer
+  or a watch does not wait for stderr's lock, on any thread (lean-runtime's
+  `io::panic`, docs/panic.md row 10; switch step 8; review RS8-01): its
+  line is written without waiting for a write to stderr in progress by
+  another context (a task or `main`, suspended in the middle of it on a
+  full pipe), and, from the thread that drains `IO.Process.output`'s
+  stdout after a failure, for any write to stderr in progress, so it can
+  land inside that write, where natively it comes after it. Same bytes.
+  Without tasks it waits, as natively.
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`, and
   `dbgTraceIfShared` of values held by value (`[value]` structures, small
   `Nat`s) never reports sharing. Pointer identity is not emulated (translation

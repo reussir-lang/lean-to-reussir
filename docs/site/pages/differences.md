@@ -150,6 +150,13 @@ garbage.
 
 - `IO.getNumHeartbeats` is 0. `dbgStackTrace` prints nothing. A panic's
   backtrace line is `(stack trace unavailable)`.
+- An internal panic in a program with tasks does not wait for a write to
+  stderr that another task or `main` started and stopped in (for example,
+  on a full pipe). On the thread that reads the rest of a child's output
+  after `IO.Process.output` fails, it does not wait for any write to
+  stderr. So the panic's line can come inside the other text. Natively,
+  the line comes after it. The bytes are the same. In a program without
+  tasks, the line waits, as natively.
 - The `errno` after a sticky handle error can differ.
 - `ShareCommon.Object.eq` holds at most for the same cell.
 - The Windows-only time zone functions fail, as natively on other systems.

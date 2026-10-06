@@ -137,6 +137,7 @@ Paths are relative to the repository root.
 ### Panics and their texts are lean-runtime's
 
 - **What:** `lean_panic_fn`'s output follows `sem::panic::panic_fn_plan`
+  and is carried out by lean-runtime's executor, `io::panic::report`
   (`leanrt::panic_text`: the message, then `backtrace:` and lean-runtime's
   `NO_BACKTRACE` line unless `LEAN_BACKTRACE=0`, for Lean's current stderr
   stream; under `LEAN_ABORT_ON_PANIC`, to descriptor 2 after flushing
@@ -144,22 +145,23 @@ Paths are relative to the repository root.
   `sem::panic::INTERNAL_PANIC_PREFIX` and the message of an
   `InternalPanic` (`leanrt::lean_internal_panic`; lean2rr's own invariant
   failures keep their own texts, `leanrt::internal_panic`) and end as
-  `sem::panic::internal_panic_end` says; `uncaught exception: ` and the
+  `io::panic::internal_panic` does; `uncaught exception: ` and the
   stack-overflow text are lean-runtime's constants; the index-out-of-bounds
   message is `sem::array::INDEX_OUT_OF_BOUNDS`. `panic_text` and
-  `lean_internal_panic` are `extern "C"`.
+  `lean_internal_panic` are `extern "C"`. Since switch step 8 the executor
+  is lean-runtime's (below).
 - **Why:** One runtime for both translators; lean-runtime's panic rows
   (`rows-check.sh`) check them. `extern "C"` (no unwinding): the prelude's
   texture is now one call, which LLVM inlines into the panicking code; a
   Rust function there would add a landing pad and change the caller's
   code (seen in Sieve's `main`: different registers and blocks), where the
   old texture was a call to it.
-- **Where:** `runtime/leanrt/src/lib.rs`: `panic_settings`, `panic_lines`,
-  `panic_text`, `lean_internal_panic`, `internal_panic`,
-  `uncaught_exception`, `promise_dropped`, `lean_panic`; lean-runtime's
+- **Where:** `runtime/leanrt/src/lib.rs`: `Collect`, `panic_text`,
+  `lean_internal_panic`, `internal_panic`, `uncaught_exception`,
+  `promise_dropped`, `lean_panic`; lean-runtime's `io::panic` and
   stack-overflow report (`sched::install_stack_overflow_handler`);
   `runtime/prelude.rr`: `l2r_internal_panic`,
-  `l2r_panic_text`, `l2r_panic_code_text`.
+  `l2r_panic_text`, `l2r_panic_code_text`, `l2r_process_exit`.
 - **Remove only if:** never.
 
 ### IO is lean-runtime's, through glue (switch step 3)
@@ -218,7 +220,8 @@ Paths are relative to the repository root.
     is `mark_end_initialization`; `main`'s return (`l2r_exit`,
     `io::main_exit`) and an uncaught error call `io::exit::after_main`
     first; every normal end calls `io::exit::exit`; an uncaught error's
-    text is `io::exit::show_error` (three writes, as natively).
+    text is `io::exit::show_error` (three writes, as natively;
+    `io::panic::uncaught` since switch step 8).
 - **Why:** One runtime for both translators (owner decision); lean-runtime's
   io was built from leanrt's own `FILE` model, file-system code and
   fork-based processes and the other translator's runtime, and fixes Lean bugs (LB-02, LB-03,
@@ -605,6 +608,113 @@ Paths are relative to the repository root.
   `src/sched/mod.rs`. Implementation notes:
   [../startup/entry.md](../startup/entry.md),
   [../tasks/scheduler.md](../tasks/scheduler.md).
+- **Remove only if:** never.
+
+### The panic and exit executor is lean-runtime's (switch step 8)
+
+- **What:** leanrt's copy of the code that carries out a panic's plan, and
+  the other ends of a program, moved onto lean-runtime's `io::panic` (its
+  shared-3 batch, 4deda83; redundancy audit item 3.4). leanrt's
+  `panic_settings`, `panic_lines` and `panic_end` are gone, and its entry
+  points forward:
+  - `panic_text` (`panicCore`) and `lean_panic` (the runtime's
+    `lean_panic`: `Task.get` in a `sync` task, `Promise.result!` of a
+    dropped promise) call `io::panic::report(msg, force_stderr, glue)`,
+    which reads the settings at each panic, makes the effect point, picks
+    the stream, flushes stdout before the process's stderr, writes the
+    lines there, and aborts or exits;
+  - `lean_internal_panic` and `internal_panic` call
+    `io::panic::internal_panic(msg, &mut Native)`;
+  - `uncaught_exception` calls `io::panic::uncaught(msg, &mut Native)`
+    (`after_main`, the line, status 1);
+  - the prelude's `l2r_process_exit` (`IO.Process.exit`) calls
+    `io::panic::process_exit(code, &mut Native)` (the effect point, then
+    the exit), the only prelude texture that changed.
+  The glue `Collect` (leanrt's `PanicGlue`) keeps two choices of lean2rr's
+  (lean-runtime docs/panic.md, rows 3 and 4): the lines of a panic that
+  goes on are collected and written with one `putStr` of Lean's current
+  stderr stream (`panic_text` returns them to the prelude, which writes
+  them through `l2r_stderr_put`; `lean_panic` through `io::diag_put`), as
+  before; and `panic_text` makes its effect point only when the lines go
+  to the process's stderr (on Lean's stream the default stream's `putStr`
+  has one). Every other method is the executor's default, which is what
+  leanrt did: the process's stderr and stdout are lean-runtime's models,
+  the abort is `std::process::abort`, the exit is lean-runtime's `exit`.
+- **Why:** The owner's rule: runtime code lives in lean-runtime, once;
+  leanrt keeps only lean2rr's layouts and glue. Behaviour changes, from
+  lean-runtime's executor:
+  - the internal panic builds its line on the stack and writes it
+    straight to descriptor 2, with no allocation (before: a `Vec`,
+    allocated and grown twice, then lean-runtime's `stderr` model, whose
+    first use allocates its one-byte buffer, and with tasks, when
+    contended, the cooperative lock's bookkeeping; counted with gdb from
+    `lean_internal_panic` to the process's end: four allocator calls
+    before, none now). The bytes
+    are the same, in one `write` (every message is under 256 bytes; the
+    message stops at a NUL byte, as native's `%s`, and no lean2rr message
+    holds one). Without tasks, promises, timers or watches the line is
+    written under the same `stderr` lock as before, so it never lands
+    inside another write in progress;
+  - when this thread holds `stderr`'s lock already (an internal panic
+    raised during its own write to `stderr`), the line is written at once
+    and the exit's flush skips `stderr`; before, both waited for good
+    (lean-runtime's `tests/io_panic.rs`, case `internal_while_holding`).
+    No lean2rr program reaches this case: the only way would be an
+    allocation failure inside that write, and a Rust allocation failure
+    aborts through `handle_alloc_error` instead (review RS8-02);
+  - once the program has a task, a promise, a timer or a watch (the
+    cooperative locks on; the test is process-wide, so on every thread),
+    the line is written without the lock: it does not wait for a write to
+    `stderr` in progress by another context (a task or `main`, suspended
+    in the middle of it on a full pipe), and, from the thread that drains
+    `IO.Process.output`'s stdout after a failure (its out-of-memory end,
+    case `process/output_drain_oom`), for any write to `stderr` in
+    progress, `main`'s blocked write included. The line can then land
+    inside that write, where before it waited (cooperatively on the
+    scheduler's thread, with the plain lock on the drain thread), as
+    natively the line waits for the other thread's `FILE` lock. A
+    recorded deviation of lean-runtime's (docs/panic.md, row 10): the
+    cooperative lock allocates and may switch contexts, which the
+    out-of-memory end must not, and a plain lock off the scheduler's
+    thread could wait for good for a context suspended in the middle of
+    its write, which only that thread resumes (review RS8-01, judged: a
+    hang ranks above the place of a line in an error path; lean-runtime's
+    note AR-45). Only the place of the line in stderr's bytes changes
+    (plan §10, "Runtime"). Probe: a task's
+    200001-byte write to stderr into a pipe read only after a second, and
+    an internal panic of `main` meanwhile: the line at byte 65536 (the
+    pipe's size), natively and before at byte 200001;
+  - a panic's lines on the process's stderr (abort mode, `force_stderr`)
+    are written line by line, each line then its newline, as native's
+    `std::cerr`; before, one `write` for all of them. Same bytes, same
+    order.
+  Nothing else changes: the collected lines, the effect points, the
+  flush, the settings read at each panic, the abort, `exit(1)`, the
+  uncaught line and `IO.Process.exit`. The generated code is unchanged
+  but for the prelude's `l2r_process_exit` texture (and two comments).
+  lean-runtime pinned at `e34cd61` (main: shared-3 with tests-1, 45679c6,
+  test-only; perf-1, 109a9c3: AR-40, a constant's claim and a reference's
+  keyed take keep their first entries inside the thread-local, so they
+  allocate nothing; and net-threads, e34cd61: networking in threads mode,
+  where lean2rr's single-thread build makes the same calls as before
+  through the crate's mode layer, and `SendData` and `RecvBuf` gain the
+  supertrait `MaybeSend`, empty and blanket in single-thread mode, so
+  leanrt's `impl SendData for Bufs` is unchanged).
+- **Tests:** the runtime suite's panic, internal-panic, uncaught-error,
+  exit, abort, initialization, promise and stack tests (`RtPanic`,
+  `RtPanicOrder`, `RtAbortPanic`, `RtInternalPanic`, `RtLiftedLimits`,
+  `RtAllocOom`, `RtCastSorry`, `RtThrow`, `RtStdioUncaughtNul`, `RtExit`,
+  `RtExitFlush`, `RtStdioExitOrder`, `RtTaskExit`, `RtInit*`,
+  `RtStartup*`, `RtPromise*`, `RtStack*`), the `Std.Sync` and stream
+  redirection tests, the network tests (`RtTcp`, `RtUdp`, `RtSockCancel`,
+  `RtNetAddr`, `RtNetEffectPoll`; net-threads); the unit test
+  `tests::panic_lines_are_collected_for_one_put` (the glue's one text);
+  lean-runtime's panic rows (`rows-check.sh`) and its cases
+  `tasks/promise_in_initialize` and `_abort` through lean2rr.
+- **Where:** `runtime/leanrt/src/lib.rs` (`Collect`, `panic_text`,
+  `lean_internal_panic`, `internal_panic`, `uncaught_exception`,
+  `lean_panic`); `runtime/prelude.rr` (`l2r_process_exit`);
+  lean-runtime's `src/io/panic.rs` and `docs/panic.md`.
 - **Remove only if:** never.
 
 ### leanrt is built and linked with the shared crate lean-runtime

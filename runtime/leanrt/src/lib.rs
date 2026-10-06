@@ -5,10 +5,11 @@
 //! textures that call into this crate. Keeping the code here (rather than in
 //! the prelude's `extern "rust"` block, which is copied into every texture)
 //! keeps texture compilation cheap and gives the runtime one copy of its
-//! global state: the last-error slot, once-cells, and panic settings.
+//! global state: the last-error slot and once-cells.
 //! Lean's runtime behaviour itself is the shared crate lean-runtime's
 //! (`lean_runtime`): its `semantics` (hashes, strings, floats, numbers,
-//! panics), its `io` (files, streams, processes, the system, the exit), its
+//! panics), its `io` (files, streams, processes, the system, the exit, the
+//! panic and exit executor), its
 //! `sched` (tasks, promises, `Std.Sync`, the event loop, timers, signals,
 //! the stack-overflow report) and its `net` (sockets, name resolution); the
 //! modules here convert lean2rr's values to its views and back, and are the
@@ -116,144 +117,114 @@ extern "C" fn rc_drop_last<T>(r: reussir_rt::rc::Rc<T>) {
     drop(r)
 }
 
-use lean_runtime::semantics::panic::{self as sem_panic, InternalPanic, PanicEnd, PanicSettings, PanicStream};
+use lean_runtime::io::panic::{self as xpanic, Native, PanicGlue};
+use lean_runtime::semantics::panic::{InternalPanic, PanicPlan, PanicStream};
 
-/// The settings Lean's panics read (`sem_panic::PanicSettings`): the
-/// environment variables `LEAN_ABORT_ON_PANIC` and `LEAN_BACKTRACE`, read
-/// at each panic as natively; exit-on-panic and panic messages keep their
-/// defaults (lean2rr has no `Lean.Internal` setters).
-pub fn panic_settings() -> PanicSettings {
-    use std::os::unix::ffi::OsStrExt;
-    let abort = std::env::var_os("LEAN_ABORT_ON_PANIC");
-    let backtrace = std::env::var_os("LEAN_BACKTRACE");
-    PanicSettings::from_env(abort.as_deref().map(|v| v.as_bytes()), backtrace.as_deref().map(|v| v.as_bytes()))
+/// lean2rr's glue for lean-runtime's panic executor (`io::panic`, which
+/// carries out a panic's plan: the settings read at each panic, the effect
+/// point, the stream, the flush of stdout, the abort or the exit). Two
+/// choices of lean2rr's are kept (lean-runtime docs/panic.md, rows 3 and 4):
+/// - Lean's current stderr stream (`IO.setStderr`) is lean2rr's own (its
+///   stream cells, the program's `l2r_stderr_put`), so the lines of a panic
+///   that goes on are collected here and written with one `putStr` by the
+///   caller (natively one `putStr` per line; only a stream whose `putStr` is
+///   not plain concatenation, with backtraces on, sees the difference);
+/// - `panicCore`'s effect point (`panic_text`) is made only when the lines
+///   go to the process's stderr: on Lean's stream, the default stream's
+///   `putStr` makes one (a stream of `IO.setStderr` none).
+///
+/// Everything else is the executor's default (native's behaviour on
+/// lean-runtime's streams): the process's stderr and stdout, the abort and
+/// `exit(1)`.
+struct Collect {
+    lines: Vec<u8>,
+    /// `panicCore` (`panic_text`): an effect point only on the process's
+    /// stderr; on Lean's stream, the stream's own `putStr` has one.
+    effect_only_on_process_stderr: bool,
 }
 
-/// The lines `lean_panic_impl` prints for `msg` under `plan`
-/// (`sem_panic::panic_fn_plan`): the message, then, with backtraces on,
-/// `backtrace:` and the frames: none here, but the line of a runtime
-/// without backtrace support (`sem_panic::NO_BACKTRACE`). Natively each
-/// line is one `io_eprintln`; here they are one text.
-fn panic_lines(msg: &[u8], plan: sem_panic::PanicPlan) -> Vec<u8> {
-    let mut t = Vec::new();
-    if plan.print {
-        t.extend_from_slice(msg);
-        t.push(b'\n');
-        if plan.backtrace {
-            t.extend_from_slice(sem_panic::BACKTRACE_HEADER.as_bytes());
-            t.push(b'\n');
-            t.extend_from_slice(sem_panic::NO_BACKTRACE.as_bytes());
-            t.push(b'\n');
-        }
+impl PanicGlue for Collect {
+    fn lean_eprintln(&mut self, line: &[u8]) {
+        self.lines.extend_from_slice(line);
+        self.lines.push(b'\n');
     }
-    t
-}
 
-/// How a panic whose plan ends the process ends it (after its lines).
-fn panic_end(end: PanicEnd) -> ! {
-    match end {
-        PanicEnd::Abort => std::process::abort(),
-        // `std::exit(1)`, which flushes C's streams.
-        _ => io::exit(sem_panic::PANIC_EXIT_STATUS),
+    fn panic_effect(&mut self, plan: PanicPlan) {
+        if !self.effect_only_on_process_stderr || plan.stream == PanicStream::ProcessStderr {
+            sched::effect();
+        }
     }
 }
 
 /// `lean_panic_fn`'s output (Lean has already formatted the message as
-/// `PANIC at ...`), by `sem_panic::panic_fn_plan`: when the process goes
-/// on, the lines for Lean's current stderr stream (`IO.setStderr`), which
-/// the prelude writes through the program's `l2r_stderr_put`; when the plan
-/// ends the process (`LEAN_ABORT_ON_PANIC`), this does not return: the
-/// lines go to the process's stderr, `std::cerr`, which is tied to
-/// `std::cout`, so stdout is flushed first, and the process aborts.
+/// `PANIC at ...`), by lean-runtime's `io::panic::report` (`force_stderr`
+/// off): when the process goes on, the lines for Lean's current stderr
+/// stream (`IO.setStderr`), which the prelude writes through the program's
+/// `l2r_stderr_put`; when the plan ends the process (`LEAN_ABORT_ON_PANIC`),
+/// this does not return: an effect point, stdout flushed (`std::cerr` is
+/// tied to `std::cout`), the lines on the process's stderr, the abort.
 /// `extern "C"` (it cannot unwind): the prelude's texture inlines into the
 /// panicking Reussir code as a plain call, with no landing pad.
 #[inline(never)]
 pub extern "C" fn panic_text(msg: LStr) -> LStr {
     use string::Utf8;
-    let plan = sem_panic::panic_fn_plan(panic_settings());
-    let t = panic_lines(msg.utf8(), plan);
-    if plan.stream == PanicStream::ProcessStderr {
-        // An output: an effect point first (the prelude writes the other
-        // stream's lines through the current stderr's `putStr`, one too).
-        if plan.print {
-            sched::effect();
-        }
-        io::flush_stdout();
-        io::eprint(&t);
-    }
-    if plan.end != PanicEnd::Return {
-        panic_end(plan.end)
-    }
+    let mut g = Collect { lines: Vec::new(), effect_only_on_process_stderr: true };
+    xpanic::report(msg.utf8(), false, &mut g);
     rc_release(msg);
-    string::from_bytes(&t)
+    string::from_bytes(&g.lines)
 }
 
-/// `lean_internal_panic` (`sem_panic::InternalPanic`): `INTERNAL PANIC: `
-/// and the message straight to stderr, then `exit(1)` (which flushes stdout
-/// afterwards), or `abort()` without flushing under `LEAN_ABORT_ON_PANIC`
-/// (`sem_panic::internal_panic_end`). `extern "C"`, as `panic_text`.
+/// `lean_internal_panic` (`semantics::panic::InternalPanic`), by
+/// lean-runtime's `io::panic::internal_panic`. `extern "C"`, as
+/// `panic_text`.
 #[cold]
 #[inline(never)]
 pub extern "C" fn lean_internal_panic(p: InternalPanic) -> ! {
-    internal_panic(p.message())
+    xpanic::internal_panic(p.message(), &mut Native)
 }
 
 /// `lean_internal_panic` with a message of its own: Lean's
 /// (`lean_internal_panic`) for a runtime invariant of lean2rr's that does
-/// not hold.
+/// not hold. lean-runtime's `io::panic::internal_panic`: `INTERNAL PANIC: `,
+/// the message and a newline, built on the stack and written straight to
+/// descriptor 2 (with no allocation; under lean-runtime's `stderr` lock
+/// unless this thread holds it or the program has a task, a promise, a timer
+/// or a watch), then `exit(1)` (which flushes stdout afterwards), or
+/// `abort()` without flushing under `LEAN_ABORT_ON_PANIC`.
 #[cold]
 #[inline(never)]
 pub fn internal_panic(msg: &str) -> ! {
-    let mut line = sem_panic::INTERNAL_PANIC_PREFIX.as_bytes().to_vec();
-    line.extend_from_slice(msg.as_bytes());
-    line.push(b'\n');
-    io::eprint(&line);
-    match sem_panic::internal_panic_end(panic_settings()) {
-        PanicEnd::Abort => std::process::abort(),
-        _ => io::exit(sem_panic::PANIC_EXIT_STATUS),
-    }
+    xpanic::internal_panic(msg, &mut Native)
 }
 
 /// An uncaught `IO` exception at the top level, of `main` or of an
-/// initializer: as a native program's C `main`, the io layer's dedicated
-/// tasks are waited for (`lean_finalize_task_manager`,
-/// `io::exit::after_main`), then `lean_io_result_show_error` prints
-/// `uncaught exception: ` and the error's text up to its first NUL
-/// (`string_cstr`) with `std::cerr` (which flushes stdout first;
-/// lean-runtime's `io::exit::show_error`), and the process exits with
-/// status 1.
+/// initializer, by lean-runtime's `io::panic::uncaught`: as a native
+/// program's C `main`, the io layer's dedicated tasks are waited for
+/// (`lean_finalize_task_manager`, `io::exit::after_main`), then
+/// `lean_io_result_show_error` prints `uncaught exception: ` and the error's
+/// text up to its first NUL (`string_cstr`) with `std::cerr` (which flushes
+/// stdout first), and the process exits with status 1.
 #[inline(never)]
 pub fn uncaught_exception<M: string::Utf8 + ?Sized>(msg: &M) -> ! {
-    lean_runtime::io::exit::after_main();
-    lean_runtime::io::exit::show_error(msg.utf8());
-    io::exit(sem_panic::PANIC_EXIT_STATUS)
+    xpanic::uncaught(msg.utf8(), &mut Native)
 }
 
 /// A Lean panic of the runtime (`lean_panic(msg, force_stderr)`), by
-/// lean-runtime's `lean_panic_plan`: an effect point, as for any output; the
-/// lines on Lean's current stderr stream (`io_eprintln`, which
-/// `IO.setStderr` redirects: the program's `l2r_stderr_put`), or, forced or
-/// when the process is about to end, on the process's stderr (`std::cerr`:
-/// C's `stdout` flushed first); then the abort or the exit the plan says;
-/// otherwise it returns and the program goes on. Used for `Task.get` in a
-/// `sync := true` task (lean-runtime's `GET_IN_SYNC_TASK`) and
-/// `Promise.result!` of a dropped promise (`PROMISE_DROPPED`, forced).
+/// lean-runtime's `io::panic::report`: an effect point, as for any output;
+/// the lines on Lean's current stderr stream (`io_eprintln`, which
+/// `IO.setStderr` redirects: the program's `l2r_stderr_put`, one `putStr`
+/// here), or, forced or when the process is about to end, on the process's
+/// stderr (`std::cerr`: C's `stdout` flushed first); then the abort or the
+/// exit the plan says; otherwise it returns and the program goes on. Used
+/// for `Task.get` in a `sync := true` task (lean-runtime's
+/// `GET_IN_SYNC_TASK`) and `Promise.result!` of a dropped promise
+/// (`PROMISE_DROPPED`, forced).
 #[inline(never)]
 pub fn lean_panic(msg: &[u8], force_stderr: bool) {
-    let plan = sem_panic::lean_panic_plan(panic_settings(), force_stderr);
-    if plan.print {
-        sched::effect();
-        let t = panic_lines(msg, plan);
-        match plan.stream {
-            PanicStream::LeanStderr => io::diag_put(string::from_bytes(&t)),
-            PanicStream::ProcessStderr => {
-                io::flush_stdout();
-                io::eprint(&t);
-            }
-        }
-    }
-    if plan.end != PanicEnd::Return {
-        panic_end(plan.end)
+    let mut g = Collect { lines: Vec::new(), effect_only_on_process_stderr: false };
+    xpanic::report(msg, force_stderr, &mut g);
+    if !g.lines.is_empty() {
+        io::diag_put(string::from_bytes(&g.lines))
     }
 }
 
@@ -271,6 +242,29 @@ pub fn promise_dropped() -> ! {
 
 #[cfg(test)]
 mod tests {
+    /// lean2rr's panic glue (`Collect`) keeps the lines of a panic that goes
+    /// on for one `putStr` of Lean's current stderr stream (lean-runtime
+    /// docs/panic.md, row 3): the message, then, with backtraces on,
+    /// `backtrace:` and lean-runtime's stand-in for the frames, each with its
+    /// newline, in one text; lean-runtime's executor writes nothing itself.
+    #[test]
+    fn panic_lines_are_collected_for_one_put() {
+        use lean_runtime::io::panic as xpanic;
+        if xpanic::abort_on_panic() {
+            return; // the plan would end the test process
+        }
+        for effect_only_on_process_stderr in [true, false] {
+            let mut g = super::Collect { lines: Vec::new(), effect_only_on_process_stderr };
+            xpanic::report(b"PANIC at f", false, &mut g);
+            let want: &[u8] = if xpanic::settings().backtrace {
+                b"PANIC at f\nbacktrace:\n(stack trace unavailable)\n"
+            } else {
+                b"PANIC at f\n"
+            };
+            assert_eq!(g.lines, want);
+        }
+    }
+
     /// lean-runtime mirrors the Lean version lean2rr is pinned to: the
     /// prelude's `lean_version_get_major`/`minor`/`patch` (`l2r_nat_small(N)`)
     /// spell `lean_runtime::LEAN_VERSION`. Fails when the submodule's pin and

@@ -162,16 +162,19 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
   is flushed first, then the pending output of every `FILE` newest first,
   then used buffered streams are synced (a seekable stdin is left where the
   program stopped reading): lean-runtime's `io::exit::exit`, which every
-  normal end of the process calls (`leanrt::io::exit`). `main`'s return
-  (`l2r_exit`, `io::main_exit`) and an uncaught error first wait for
-  lean-runtime's dedicated tasks (`io::exit::after_main`), as
-  `lean_finalize_task_manager` does.
+  normal end of the process calls (`leanrt::io::exit`; for
+  `IO.Process.exit`, the internal panics, the panics that end the process
+  and an uncaught error, lean-runtime's `io::panic` since switch step 8).
+  `main`'s return (`l2r_exit`, `io::main_exit`) and an uncaught error
+  first wait for lean-runtime's dedicated tasks (`io::exit::after_main`),
+  as `lean_finalize_task_manager` does.
 - **Why:** libc++'s `ios_base::Init` destructor, then glibc's
   `_IO_cleanup`: the bytes and their order on the descriptors match
   (d2ae23d).
 - **Where:** `runtime/leanrt/src/io.rs`: `exit`, `main_exit`;
   `runtime/leanrt/src/lib.rs`: `uncaught_exception`; lean-runtime's
-  `src/io/exit.rs`; `runtime/prelude.rr`: `l2r_exit`.
+  `src/io/exit.rs` and `src/io/panic.rs`; `runtime/prelude.rr`: `l2r_exit`,
+  `l2r_process_exit`.
 - **Remove only if:** never.
 
 ### The program exports C trampolines the runtime calls back

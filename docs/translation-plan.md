@@ -3284,6 +3284,25 @@ Each item says what differs and when.
   not even equal to itself, and its hash can change.
 - `IO.getNumHeartbeats` is 0; `dbgStackTrace` prints nothing; a panic's
   backtrace line is `(stack trace unavailable)`.
+- An internal panic (`INTERNAL PANIC: ...`, the end of the program) in a
+  program that has made a task, a promise, a timer or a watch writes its
+  line straight to descriptor 2, without waiting for stderr's lock
+  (lean-runtime's `io::panic`, its docs/panic.md row 10; switch step 8;
+  the test is process-wide, so on every thread): it does not wait for a
+  write to stderr in progress by another context (a task or `main`
+  suspended in the middle of it, on a full pipe), and, from the thread
+  that drains `IO.Process.output`'s stdout after a failure (its
+  out-of-memory end), for any write to stderr in progress, `main`'s
+  blocked write included. The line then lands inside that write, where
+  natively it comes after it (the writing thread holds C's `FILE` lock).
+  The bytes are the same, and the exit then writes the rest of the other
+  write. Without tasks the line waits for a write in progress, as
+  natively. The lock is skipped because the cooperative lock allocates
+  and may switch contexts, which the out-of-memory end must not, and a
+  plain lock off the scheduler's thread could wait for good for a context
+  suspended in the middle of its write, which only that thread resumes
+  (review RS8-01: a hang ranks above the place of a line in an error
+  path).
 - `errno` after a sticky handle error can differ.
 - Child processes (§5.8): code that reads one of a child's pipes in a task
   while it reads the other (as `IO.Process.output` does natively, stdout

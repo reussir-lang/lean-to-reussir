@@ -193,7 +193,7 @@ problem.
 lean2rr uses the shared crate **`lean-runtime`**
 (github.com/QueClr/lean-runtime-rs, public). The crate implements Lean's
 runtime behaviour once, as a library that a translator of Lean programs
-can use. lean2rr switched to it in seven steps, from 2026-10-04 to
+can use. lean2rr switched to it in eight steps, from 2026-10-04 to
 2026-10-05.
 
 | Point | Decision |
@@ -220,9 +220,10 @@ The switch steps:
 | 5 | the last copies of shared functions: the toolchain facts, UTF-8 encoding and lossy decoding, the accessors of `IO.Error`, the clocks, `IO.getTID`, and others |
 | 6 | the wait cores: waits for a thunk or a constant, references in a program that creates tasks, promise resolutions put off to the end of a free |
 | 7 | the startup: `main`'s thread, the constructor that opens the startup descriptors, the scheduler's lazy start |
+| 8 | the panic and exit executor: it carries out a panic's plan (the stream, the flush of stdout, the abort or the exit), and does the internal panic, the uncaught error and `IO.Process.exit` |
 
 Status (2026-10-05): the submodule `third_party/lean-runtime` is pinned at
-`471f458`. `scripts/l2r.py` builds it with cargo (the features `io`,
+`e34cd61`. `scripts/l2r.py` builds it with cargo (the features `io`,
 `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`) and links
 it with `leanrt` ([runtime README](repo:runtime/README.md), "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline

@@ -163,6 +163,9 @@ wait core
 pending stack
 :   The per-thread stack of cells to free. Frees use it instead of recursion (local patches 0013 to 0015).
 
+internal panic
+:   An error of the runtime itself that ends the program at once, as Lean's `lean_internal_panic`: `INTERNAL PANIC: ` and a message on the process's stderr (for example `out of memory`), then exit status 1, or an abort (134) under `LEAN_ABORT_ON_PANIC`. A `panic!` is not one: it prints its message and the program goes on.
+
 ## Reussir
 
 Reussir
@@ -207,7 +210,7 @@ judge
 :   The step that decides whether a finding is real before anyone fixes it.
 
 lean-runtime
-:   The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule `third_party/lean-runtime`): Lean's runtime behaviour in Rust, safe by default. lean2rr uses its hash, string, float, fixed-width integer, libm, `Nat`/`Int`, array, panic and number-text rules, its IO, its startup, its task scheduler with the wait cores, and its event loop (features `io`, `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`), with its own GMP numbers behind the crate's big-number traits.
+:   The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule `third_party/lean-runtime`): Lean's runtime behaviour in Rust, safe by default. lean2rr uses its hash, string, float, fixed-width integer, libm, `Nat`/`Int`, array, panic and number-text rules, its IO with the panic and exit executor, its startup, its task scheduler with the wait cores, and its event loop (features `io`, `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`), with its own GMP numbers behind the crate's big-number traits.
 
 switch step
-:   One of the seven steps (2026-10-04 to 2026-10-05) in which lean2rr's runtime moved to `lean-runtime`.
+:   One of the eight steps (2026-10-04 to 2026-10-05) in which lean2rr's runtime moved to `lean-runtime`.

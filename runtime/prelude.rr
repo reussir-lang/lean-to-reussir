@@ -94,10 +94,11 @@ pub struct LHandle;
 #[ffi(import)]
 fn l2r_exit(code : u32) -> unit [{ leanrt::io::main_exit(code as i32) }];
 
-// `IO.Process.exit` (the status is a `UInt8`): what other threads would
-// have done by now goes first (`sched::effect`).
+// `IO.Process.exit` (the status is a `UInt8`): lean-runtime's
+// `io::panic::process_exit`, an effect point (what other threads would have
+// done by now goes first) and the exit.
 #[ffi(import)]
-fn l2r_process_exit(code : u8) -> u64 [{ { leanrt::sched::effect(); leanrt::io::exit(code as i32) } }];
+fn l2r_process_exit(code : u8) -> u64 [{ lean_runtime::io::panic::process_exit(code, &mut lean_runtime::io::panic::Native) }];
 
 // `IO.Process.forceExit` (`std::_Exit`): no flushing, no exit handlers,
 // once the streams this context handed off are written (`leanrt::io`).
@@ -153,8 +154,8 @@ fn l2r_internal_panic_at<T>(code : u64) -> T {
 // before the process dies (abort-mode panics, internal panics, uncaught
 // exceptions, stack overflow) go to descriptor 2, as natively.
 
-// `lean_panic_impl`'s lines (lean-runtime's `sem::panic::panic_fn_plan`):
-// the message, then (unless `LEAN_BACKTRACE=0`) `backtrace:` and the frames
+// `lean_panic_impl`'s lines (lean-runtime's `io::panic::report`): the
+// message, then (unless `LEAN_BACKTRACE=0`) `backtrace:` and the frames
 // (none here). Natively one `io_eprintln` per line; written here with one
 // `putStr` (the same bytes). Under `LEAN_ABORT_ON_PANIC` this does not
 // return: `leanrt::panic_text` flushes stdout, writes the lines to
