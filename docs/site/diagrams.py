@@ -440,6 +440,80 @@ def dep_values():
     return s.render()
 
 
+def spec_layouts():
+    s = SVG("spec", 900, 330, "One Lean type, one layout per type argument",
+            "The value <code>Tree.leaf 1.5</code> in memory. Native Lean has one "
+            "layout for every <code>Tree α</code>: the field is a pointer, and a "
+            "<code>Float</code> needs its own cell. lean2rr's instance at "
+            "<code>Float</code> stores the number in the leaf. Its uniform instance "
+            "(at <code>lcAny</code>) stores a pointer to an <code>L2RBox</code> cell, "
+            "as native Lean does.")
+    s.text(10, 24, "native Lean, every Tree α: 2 cells, 32 bytes", "t")
+    bar(s, 10, 40, [("header", 8, "c-hdr"), ("x : pointer", 8, "c-ptr")],
+        unit=16, offsets=False)
+    s.arrow(266, 57, 318, 57)
+    bar(s, 320, 40, [("header", 8, "c-hdr"), ("1.5 : f64", 8, "c-data")],
+        unit=16, offsets=False)
+    s.text(590, 54, "a boxed Float:", "ts")
+    s.text(590, 70, "lean_box_float allocates it", "ts")
+    s.text(10, 124, "lean2rr, the instance at Float: 1 cell, 16 bytes", "t")
+    bar(s, 10, 140, [("count, tag", 8, "c-hdr"), ("x : f64 1.5", 8, "c-data")],
+        unit=16, offsets=False)
+    s.text(290, 154, "c_leaf(f64): the number is in the leaf", "ts")
+    s.text(290, 170, "no second cell", "ts")
+    s.text(10, 224, "lean2rr, the uniform instance (at lcAny): 2 cells, 32 bytes", "t")
+    bar(s, 10, 240, [("count, tag", 8, "c-hdr"), ("x : L2RBox", 8, "c-ptr")],
+        unit=16, offsets=False)
+    s.arrow(266, 257, 318, 257)
+    bar(s, 320, 240, [("count, tag", 8, "c-hdr"), ("1.5 : f64", 8, "c-data")],
+        unit=16, offsets=False)
+    s.text(590, 254, "an L2RBox cell: the variant", "ts")
+    s.text(590, 270, "that holds a Float", "ts")
+    s.text(10, 318, "Sizes for a 64-bit target. A small Nat is different: natively and in lean2rr's "
+           "Tree Nat it is a word in the field; in L2RBox it needs a cell.", "ts")
+    return s.render()
+
+
+def dag_conversion():
+    s = SVG("dagconv", 900, 345, "A conversion and shared nodes",
+            "<code>build 3</code> makes 4 cells: each <code>node</code> points "
+            "twice to the same child. A conversion that visits each pointer "
+            "separately makes 15 cells: 2<sup>n+1</sup> − 1 for "
+            "<code>build n</code>. A conversion that converts each cell once "
+            "makes 4 cells: one for each source cell.")
+
+    def chain(x, cls):
+        ys = [50, 120, 190, 260]
+        for i, y in enumerate(ys):
+            s.box(x, y, 120, 30, ["leaf 7" if i == 3 else "node"], cls, head=False)
+            if i < 3:
+                s.arrow(x + 45, y + 30, x + 45, y + 68)
+                s.arrow(x + 75, y + 30, x + 75, y + 68)
+
+    s.text(10, 26, "build 3: 4 cells", "t")
+    chain(25, "b-l2r")
+    s.text(195, 26, "converted, each pointer separately: 15 cells", "t")
+    leaf_c = [221 + 66 * i for i in range(8)]
+    rows = [leaf_c]
+    while len(rows[-1]) > 1:
+        r = rows[-1]
+        rows.append([(r[2 * j] + r[2 * j + 1]) / 2 for j in range(len(r) // 2)])
+    rows.reverse()
+    ys = [50, 120, 190, 260]
+    for lvl, centers in enumerate(rows):
+        for c in centers:
+            s.box(c - 26, ys[lvl], 52, 30, ["leaf" if lvl == 3 else "node"], "b-rt", head=False)
+            if lvl < 3:
+                for child in rows[lvl + 1][2 * centers.index(c):2 * centers.index(c) + 2]:
+                    s.arrow(c, ys[lvl] + 30, child, ys[lvl + 1] - 2)
+    s.text(825, 18, "converted, each", "t", "middle")
+    s.text(825, 36, "cell once: 4 cells", "t", "middle")
+    chain(765, "b-ok")
+    s.text(10, 320, "Each converted leaf also points to its own L2RBox cell (8 in the middle, "
+           "1 on the right). Depth n+2 needs 4 times the memory of depth n in the middle.", "ts")
+    return s.render()
+
+
 def lazy_cells():
     s = SVG("lazy", 900, 300, "Thunks and tasks",
             "<code>Thunk α</code> and <code>Task α</code> are a runtime cell "
@@ -667,6 +741,8 @@ DIAGRAMS = {
     "records": record_cells,
     "box": box_uniform,
     "depvalues": dep_values,
+    "spec": spec_layouts,
+    "dagconv": dag_conversion,
     "lazy": lazy_cells,
     "fnvalues": fn_values,
     "refs": ref_cells,

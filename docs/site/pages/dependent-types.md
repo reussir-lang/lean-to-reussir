@@ -25,6 +25,86 @@ erases such values, so these types need nothing special. This page is about
 the other case: the type itself changes with a value that is known only at
 run time.
 
+## Specialization first
+
+lean2rr makes a separate copy of each generic type and each generic
+function for each list of type arguments. Each copy is an *instance*. This
+is *monomorphization*: the specialization that `rustc` does for generics
+(Stage 1 of the [pipeline](pipeline.html#stage-1-collect-and-monomorphize)).
+Native Lean does not do it: it has one copy, and each field of a generic
+type holds a pointer.
+
+```lean
+inductive Tree (α : Type) where
+  | leaf (x : α)
+  | node (left right : Tree α)
+
+@[noinline] def Tree.size {α : Type} : Tree α → Nat
+  | .leaf _ => 1
+  | .node l r => l.size + r.size
+
+def main : IO Unit := do
+  let a : Tree Float := .node (.leaf 1.5) (.leaf 2.5)
+  let b : Tree String := .node (.leaf "x") (.leaf "y")
+  IO.println (a.size + b.size)
+```
+
+- Line 1: `Tree` is a generic type. `α` is its type parameter, as `T` in
+  the Rust type `Tree<T>`.
+- Line 2: a `leaf` holds one value of the type `α`.
+- Line 3: a `node` holds two subtrees.
+- Line 5: `Tree.size` is a generic function. `{α : Type}` is its type
+  parameter. `@[noinline]` keeps it a separate function.
+- Lines 6 and 7: a leaf counts 1. A node adds the sizes of its two
+  subtrees.
+- Lines 10 and 11: `main` makes a tree of `Float`s and a tree of
+  `String`s.
+- Line 12: it prints the sum of the two sizes: 4.
+
+In Rust terms: `enum Tree<T> { Leaf(T), Node(Rc<Tree<T>>, Rc<Tree<T>>) }`
+and `fn size<T>(t: Rc<Tree<T>>) -> Nat`.
+
+lean2rr generates two types and two functions (checked with
+`lean2rr --emit rr`, abridged):
+
+```rust
+enum T_Tree_1236 {                    // Tree Float
+    c_leaf(f64),                      // the number is in the leaf
+    c_node(T_Tree_1236, T_Tree_1236)
+}
+enum T_Tree_1248 {                    // Tree String
+    c_leaf(LStr),
+    c_node(T_Tree_1248, T_Tree_1248)
+}
+
+fn l_Tree_size___l2r_0____redArg(a : T_Tree_1236) -> Nat { … }  // size at Float
+fn l_Tree_size___l2r_1____redArg(a : T_Tree_1248) -> Nat { … }  // size at String
+```
+
+- Each instance has its own name. The numbers in the names only make the
+  names unique.
+- A leaf of `Tree Float` holds the `f64` itself. Native Lean allocates a
+  separate cell for each `Float` in a generic field (`lean_box_float`). So
+  natively, each leaf costs two cells.
+- `main` calls the instance at `Float` for `a`, and the instance at
+  `String` for `b`.
+
+{{svg:spec}}
+
+Monomorphization is the reason why most lean2rr code has no boxes.
+lean2rr makes an instance only for the type arguments that the program
+uses. A type
+parameter that no data field uses (a *phantom*) does not make a new type.
+
+**When monomorphization stops.** Sometimes the type argument is not known
+at compile time. Then lean2rr uses Lean's unknown type, `lcAny`, and makes
+the *uniform instance*: the instance at `lcAny`. In the uniform instance, a
+field of the type `α` is an `L2RBox`: a pointer to a cell with a tag (see
+[Representations](representations.html#the-uniform-type-l2rbox)).
+Natively, all code works in this way. The rest of this page shows where
+a type is not known at compile time, what lean2rr does there, and what a
+value costs when it goes from one layout to the other.
+
 ## The mechanism
 
 1. **Lean marks the position.** Lean's compiler cannot compute a type such
@@ -324,6 +404,129 @@ type-erased list: `fn(&[Box<dyn Any>]) -> usize`. lean2rr does the same.
 `lcAny`: it takes a list of `L2RBox`es. A call `o.run [1, 2, 3]` first
 converts the `List Nat` to that representation.
 
+## When a value changes layout
+
+One Lean type can have two layouts in one program: the *specialized
+layout* of its instance at a precise type, and the uniform layout. When a value goes from one to the
+other, lean2rr *converts* it: it makes a new value in the other layout.
+
+```lean
+@[noinline] def build : Nat → Tree Nat
+  | 0 => .leaf 7
+  | n + 1 => let t := build n; .node t t
+
+structure Packed where
+  α : Type
+  tree : Tree α
+
+@[noinline] def leftDepth (p : Packed) : Nat := go p.tree
+where
+  go {α : Type} : Tree α → Nat
+    | .leaf _ => 0
+    | .node l _ => 1 + go l
+
+def main (args : List String) : IO Unit := do
+  let n := (args.headD "4").toNat!
+  IO.println (leftDepth ⟨Nat, build n⟩)
+```
+
+`Tree` is the type from [Specialization first](#specialization-first).
+
+- Line 1: `build` takes a number and returns a `Tree Nat`.
+- Line 2: `build 0` is a leaf that holds 7.
+- Line 3: `build (n + 1)` calculates `t := build n` once. Then it makes a
+  node whose two subtrees are both `t`.
+- So `build n` has only n + 1 nodes, and each node points two times to the
+  same child. This value is *shared*: it is a directed acyclic graph (DAG),
+  not a tree.
+- Lines 5 to 7: a `Packed` holds a type `α` and a `Tree α`. The type is a
+  field, so a `Packed` can hold a tree of each element type. This is an
+  *existential* type, similar to `Box<dyn Any>` in Rust.
+- Line 9: `leftDepth` takes a `Packed` and calls `go` on its tree.
+- Lines 10 to 13: `go` counts the nodes on the leftmost path. It works for
+  each `α`.
+- Lines 16 and 17: `main` reads `n` from the command line. It builds the
+  tree, packs it with `α := Nat`, and prints the left depth, which is `n`.
+
+In Rust terms, `build` returns an `Rc<Tree<Nat>>`, and the two children of
+each node are two clones of one `Rc`.
+
+In `leftDepth`, the element type of the tree is the value of a field. So
+lean2rr cannot know it at compile time, and `go` is the uniform instance.
+lean2rr generates (abridged):
+
+```rust
+enum T_Tree_763 {                 // Tree Nat: the instance that build uses
+    c_leaf(Nat),
+    c_node(T_Tree_763, T_Tree_763)
+}
+enum T_Tree_774 {                 // Tree lcAny: the instance that go uses
+    c_leaf(L2RBox),
+    c_node(T_Tree_774, T_Tree_774)
+}
+
+fn l_leftDepth___l2r_0_(a : T_Tree_774) -> Nat { … }
+
+// in main:
+let x822 : T_Tree_763 = l_build___l2r_0_(x821);
+let x830 : Nat = l_leftDepth___l2r_0_(l2r_conv_T_Tree_763_T_Tree_774(x822));
+```
+
+- `Packed` has no cell. The field `α` is a type, so the compiler erases it.
+  A structure with one data field is stored as that field (pass
+  `value-structs`). So `leftDepth` takes the tree.
+- `l2r_conv_T_Tree_763_T_Tree_774` is the *conversion*. lean2rr generates
+  it for this pair of layouts. It reads the `Tree Nat` and makes a
+  `Tree lcAny` with the same shape. Each leaf's `Nat` goes into an `L2RBox`
+  (`L2RBox::b2{7}`).
+- The conversion uses a loop and an explicit stack, not recursion. So a
+  deep value does not overflow the stack.
+- Natively, there is no conversion: `Tree Nat` and `Tree α` have the same
+  layout.
+
+### Shared values and conversions
+
+{{svg:dagconv}}
+
+On the current version, a conversion follows each pointer separately. It
+does not see that two pointers go to the same cell. So it converts a shared
+cell one time for each pointer to it, and the result is a tree. `build n`
+has n + 1 nodes, but its conversion has 2<sup>n+1</sup> − 1 nodes. Thus the
+time and the memory increase exponentially (plan §10, "Structural
+conversions"). The peak memory (resident set size) of the example:
+
+| n | Nodes in `build n` | native Lean | lean2rr |
+|---|---|---|---|
+| 16 | 17 | 7.9 MB | 11 MB |
+| 20 | 21 | 7.9 MB | 65 MB |
+| 22 | 23 | 7.9 MB | 237 MB |
+| 24 | 25 | 7.9 MB | 927 MB |
+
+The output is correct. But each +2 in `n` multiplies the memory by 4, so
+`n` = 30 would need approximately 60 GB, and the program would stop.
+
+**The fix (in progress): convert each cell once.** For one conversion,
+lean2rr keeps a table from each shared source cell to its converted cell.
+When a second pointer goes to the same cell, the conversion uses the
+converted cell from the table. Thus a conversion makes at most one cell for
+each source cell, and its memory is linear in the size of the value (the
+right part of the figure).
+
+- A cell with only one reference cannot be reached two times. So it does
+  not go into the table, and a tree without sharing has no table cost.
+- The table belongs to lean2rr's generated code and runtime glue, and it
+  lives for one conversion. The shared runtime crate does not change.
+
+Two limits stay after this fix:
+
+- A conversion is a copy. While it runs, the source and the copy both
+  exist: at most two times the memory. If nothing else uses the source, the
+  source is freed after the conversion.
+- A value that goes into a uniform position many times is converted each
+  time. Each conversion takes time in proportion to the size of the value.
+  So a loop of such conversions can be quadratic.
+  [Possible future work](#possible-future-work) removes the conversion.
+
 ## Costs
 
 These costs are time and memory, never results. Plan
@@ -340,7 +543,8 @@ pointer. A read of a boxed value checks one tag.
 `Array Nat`, and the `.nat` branch passes it the column's `data`. If the
 parameter stays typed (see below), lean2rr converts the `RVec<L2RBox>` into
 a new `Array Nat` (an `LNatArr`), element by element. That costs O(n) per
-call. Natively, the cast is free. A conversion also loses sharing.
+call. Natively, the cast is free. A conversion also loses sharing (see
+[Shared values and conversions](#shared-values-and-conversions)).
 
 **`uniform-updates` keeps update loops linear.** In the `.nat` branch of
 `Column.push`, Lean pushes onto `d` at the type `Array Nat`. Without the
@@ -401,6 +605,26 @@ Plan §10 lists two more shapes that convert at each execution:
   back to a uniform position.
 
 ## Possible future work
+
+**A uniform layout from the start, for the types that cross.** The
+conversion in [When a value changes layout](#when-a-value-changes-layout)
+exists because `Tree Nat` has two layouts in one program. lean2rr sees the
+whole program after specialization. So it can find each type whose values
+go into a uniform position. In the example, `Tree Nat` goes to `go` at
+`lcAny`. For such a type, lean2rr could use the uniform layout from the
+start (not implemented):
+
+- `build` would make leaves that hold an `L2RBox`. The call of `leftDepth`
+  would then give the tree as it is: no conversion, no copy, and the same
+  memory as native Lean.
+- The types inside such a type get the same rule. If a `List (Tree Nat)`
+  goes into a uniform position, `Tree Nat` also gets the uniform layout.
+- The cost is one `L2RBox` cell for each leaf, but only for the types that
+  cross. All other types keep their specialized layouts.
+
+Another design gives each generic type one layout for all type arguments,
+as native Lean does. Then no value changes its layout. But each program
+pays for the boxes, also a program that never uses an unknown type.
 
 **A typed union per dependent position.** Today one `L2RBox` per program
 holds every boxed value, and each element of a dependent array is boxed by

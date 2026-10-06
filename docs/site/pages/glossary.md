@@ -114,7 +114,13 @@ storage type
 :   A generated one-field shared struct that wraps a value that cannot cross the FFI boundary.
 
 conversion
-:   Generated code that rebuilds a value from one representation into another. The result is a new, unshared value.
+:   Generated code that rebuilds a value from one representation into another. The result is a new value. On the current version, a conversion does not keep sharing: a value with shared parts can grow exponentially (see [Dependent types](dependent-types.html#shared-values-and-conversions)).
+
+specialized layout
+:   The layout of an instance at precise type arguments: a `Tree Float` leaf holds an `f64`. The other layout of the same Lean type is the uniform layout, with `L2RBox` fields.
+
+shared value
+:   A value in which two or more pointers go to the same cell, such as a node whose two subtrees are one tree. Its cells form a directed acyclic graph (DAG).
 
 placeholder
 :   Lean's `box(0)`, a value that is never read. lean2rr gives it the *zero* of the expected type.

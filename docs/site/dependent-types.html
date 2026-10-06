@@ -14,6 +14,7 @@
 <div class="layout">
   <aside class="toc"><div class="tochead">On this page</div><div class="toc">
 <ul>
+<li><a href="#specialization-first">Specialization first</a></li>
 <li><a href="#the-mechanism">The mechanism</a></li>
 <li><a href="#examples">Examples</a><ul>
 <li><a href="#a-column-whose-element-type-is-a-field">A column whose element type is a field</a></li>
@@ -26,6 +27,10 @@
 <li><a href="#a-type-unpacked-from-an-existential">A type unpacked from an existential</a></li>
 <li><a href="#polymorphic-recursion">Polymorphic recursion</a></li>
 <li><a href="#a-partial-application-that-leaves-a-type-open">A partial application that leaves a type open</a></li>
+</ul>
+</li>
+<li><a href="#when-a-value-changes-layout">When a value changes layout</a><ul>
+<li><a href="#shared-values-and-conversions">Shared values and conversions</a></li>
 </ul>
 </li>
 <li><a href="#costs">Costs</a></li>
@@ -58,6 +63,77 @@ proof or a length, such as the <code>n</code> in <code>Vector String n</code>. L
 erases such values, so these types need nothing special. This page is about
 the other case: the type itself changes with a value that is known only at
 run time.</p>
+<h2 id="specialization-first">Specialization first</h2>
+<p>lean2rr makes a separate copy of each generic type and each generic
+function for each list of type arguments. Each copy is an <em>instance</em>. This
+is <em>monomorphization</em>: the specialization that <code>rustc</code> does for generics
+(Stage 1 of the <a href="pipeline.html#stage-1-collect-and-monomorphize">pipeline</a>).
+Native Lean does not do it: it has one copy, and each field of a generic
+type holds a pointer.</p>
+<pre><code class="language-lean">inductive Tree (α : Type) where
+  | leaf (x : α)
+  | node (left right : Tree α)
+
+@[noinline] def Tree.size {α : Type} : Tree α → Nat
+  | .leaf _ =&gt; 1
+  | .node l r =&gt; l.size + r.size
+
+def main : IO Unit := do
+  let a : Tree Float := .node (.leaf 1.5) (.leaf 2.5)
+  let b : Tree String := .node (.leaf &quot;x&quot;) (.leaf &quot;y&quot;)
+  IO.println (a.size + b.size)
+</code></pre>
+<ul>
+<li>Line 1: <code>Tree</code> is a generic type. <code>α</code> is its type parameter, as <code>T</code> in
+  the Rust type <code>Tree&lt;T&gt;</code>.</li>
+<li>Line 2: a <code>leaf</code> holds one value of the type <code>α</code>.</li>
+<li>Line 3: a <code>node</code> holds two subtrees.</li>
+<li>Line 5: <code>Tree.size</code> is a generic function. <code>{α : Type}</code> is its type
+  parameter. <code>@[noinline]</code> keeps it a separate function.</li>
+<li>Lines 6 and 7: a leaf counts 1. A node adds the sizes of its two
+  subtrees.</li>
+<li>Lines 10 and 11: <code>main</code> makes a tree of <code>Float</code>s and a tree of
+  <code>String</code>s.</li>
+<li>Line 12: it prints the sum of the two sizes: 4.</li>
+</ul>
+<p>In Rust terms: <code>enum Tree&lt;T&gt; { Leaf(T), Node(Rc&lt;Tree&lt;T&gt;&gt;, Rc&lt;Tree&lt;T&gt;&gt;) }</code>
+and <code>fn size&lt;T&gt;(t: Rc&lt;Tree&lt;T&gt;&gt;) -&gt; Nat</code>.</p>
+<p>lean2rr generates two types and two functions (checked with
+<code>lean2rr --emit rr</code>, abridged):</p>
+<pre><code class="language-rust">enum T_Tree_1236 {                    // Tree Float
+    c_leaf(f64),                      // the number is in the leaf
+    c_node(T_Tree_1236, T_Tree_1236)
+}
+enum T_Tree_1248 {                    // Tree String
+    c_leaf(LStr),
+    c_node(T_Tree_1248, T_Tree_1248)
+}
+
+fn l_Tree_size___l2r_0____redArg(a : T_Tree_1236) -&gt; Nat { … }  // size at Float
+fn l_Tree_size___l2r_1____redArg(a : T_Tree_1248) -&gt; Nat { … }  // size at String
+</code></pre>
+<ul>
+<li>Each instance has its own name. The numbers in the names only make the
+  names unique.</li>
+<li>A leaf of <code>Tree Float</code> holds the <code>f64</code> itself. Native Lean allocates a
+  separate cell for each <code>Float</code> in a generic field (<code>lean_box_float</code>). So
+  natively, each leaf costs two cells.</li>
+<li><code>main</code> calls the instance at <code>Float</code> for <code>a</code>, and the instance at
+  <code>String</code> for <code>b</code>.</li>
+</ul>
+<figure class="fig" id="fig-spec"><svg class="diagram" viewBox="0 0 900 330" width="900" role="img" aria-labelledby="spec-title"><title id="spec-title">One Lean type, one layout per type argument</title><defs><marker id="spec-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><text x="10" y="24" text-anchor="start" class="t">native Lean, every Tree α: 2 cells, 32 bytes</text><rect x="10" y="40" width="128" height="34" rx="0" class="c-hdr"/><text x="74.0" y="62.0" text-anchor="middle" class="tc">header</text><rect x="138" y="40" width="128" height="34" rx="0" class="c-ptr"/><text x="202.0" y="62.0" text-anchor="middle" class="tc">x : pointer</text><line x1="266" y1="57" x2="318" y2="57" class="ar" marker-end="url(#spec-ah)"/><rect x="320" y="40" width="128" height="34" rx="0" class="c-hdr"/><text x="384.0" y="62.0" text-anchor="middle" class="tc">header</text><rect x="448" y="40" width="128" height="34" rx="0" class="c-data"/><text x="512.0" y="62.0" text-anchor="middle" class="tc">1.5 : f64</text><text x="590" y="54" text-anchor="start" class="ts">a boxed Float:</text><text x="590" y="70" text-anchor="start" class="ts">lean_box_float allocates it</text><text x="10" y="124" text-anchor="start" class="t">lean2rr, the instance at Float: 1 cell, 16 bytes</text><rect x="10" y="140" width="128" height="34" rx="0" class="c-hdr"/><text x="74.0" y="162.0" text-anchor="middle" class="tc">count, tag</text><rect x="138" y="140" width="128" height="34" rx="0" class="c-data"/><text x="202.0" y="162.0" text-anchor="middle" class="tc">x : f64 1.5</text><text x="290" y="154" text-anchor="start" class="ts">c_leaf(f64): the number is in the leaf</text><text x="290" y="170" text-anchor="start" class="ts">no second cell</text><text x="10" y="224" text-anchor="start" class="t">lean2rr, the uniform instance (at lcAny): 2 cells, 32 bytes</text><rect x="10" y="240" width="128" height="34" rx="0" class="c-hdr"/><text x="74.0" y="262.0" text-anchor="middle" class="tc">count, tag</text><rect x="138" y="240" width="128" height="34" rx="0" class="c-ptr"/><text x="202.0" y="262.0" text-anchor="middle" class="tc">x : L2RBox</text><line x1="266" y1="257" x2="318" y2="257" class="ar" marker-end="url(#spec-ah)"/><rect x="320" y="240" width="128" height="34" rx="0" class="c-hdr"/><text x="384.0" y="262.0" text-anchor="middle" class="tc">count, tag</text><rect x="448" y="240" width="128" height="34" rx="0" class="c-data"/><text x="512.0" y="262.0" text-anchor="middle" class="tc">1.5 : f64</text><text x="590" y="254" text-anchor="start" class="ts">an L2RBox cell: the variant</text><text x="590" y="270" text-anchor="start" class="ts">that holds a Float</text><text x="10" y="318" text-anchor="start" class="ts">Sizes for a 64-bit target. A small Nat is different: natively and in lean2rr&#x27;s Tree Nat it is a word in the field; in L2RBox it needs a cell.</text></svg><figcaption>The value <code>Tree.leaf 1.5</code> in memory. Native Lean has one layout for every <code>Tree α</code>: the field is a pointer, and a <code>Float</code> needs its own cell. lean2rr's instance at <code>Float</code> stores the number in the leaf. Its uniform instance (at <code>lcAny</code>) stores a pointer to an <code>L2RBox</code> cell, as native Lean does.</figcaption></figure>
+<p>Monomorphization is the reason why most lean2rr code has no boxes.
+lean2rr makes an instance only for the type arguments that the program
+uses. A type
+parameter that no data field uses (a <em>phantom</em>) does not make a new type.</p>
+<p><strong>When monomorphization stops.</strong> Sometimes the type argument is not known
+at compile time. Then lean2rr uses Lean's unknown type, <code>lcAny</code>, and makes
+the <em>uniform instance</em>: the instance at <code>lcAny</code>. In the uniform instance, a
+field of the type <code>α</code> is an <code>L2RBox</code>: a pointer to a cell with a tag (see
+<a href="representations.html#the-uniform-type-l2rbox">Representations</a>).
+Natively, all code works in this way. The rest of this page shows where
+a type is not known at compile time, what lean2rr does there, and what a
+value costs when it goes from one layout to the other.</p>
 <h2 id="the-mechanism">The mechanism</h2>
 <ol>
 <li><strong>Lean marks the position.</strong> Lean's compiler cannot compute a type such
@@ -333,6 +409,147 @@ type-erased list: <code>fn(&amp;[Box&lt;dyn Any&gt;]) -&gt; usize</code>. lean2r
 <code>List.length</code> is used here without its type argument, so its instance is at
 <code>lcAny</code>: it takes a list of <code>L2RBox</code>es. A call <code>o.run [1, 2, 3]</code> first
 converts the <code>List Nat</code> to that representation.</p>
+<h2 id="when-a-value-changes-layout">When a value changes layout</h2>
+<p>One Lean type can have two layouts in one program: the <em>specialized
+layout</em> of its instance at a precise type, and the uniform layout. When a value goes from one to the
+other, lean2rr <em>converts</em> it: it makes a new value in the other layout.</p>
+<pre><code class="language-lean">@[noinline] def build : Nat → Tree Nat
+  | 0 =&gt; .leaf 7
+  | n + 1 =&gt; let t := build n; .node t t
+
+structure Packed where
+  α : Type
+  tree : Tree α
+
+@[noinline] def leftDepth (p : Packed) : Nat := go p.tree
+where
+  go {α : Type} : Tree α → Nat
+    | .leaf _ =&gt; 0
+    | .node l _ =&gt; 1 + go l
+
+def main (args : List String) : IO Unit := do
+  let n := (args.headD &quot;4&quot;).toNat!
+  IO.println (leftDepth ⟨Nat, build n⟩)
+</code></pre>
+<p><code>Tree</code> is the type from <a href="#specialization-first">Specialization first</a>.</p>
+<ul>
+<li>Line 1: <code>build</code> takes a number and returns a <code>Tree Nat</code>.</li>
+<li>Line 2: <code>build 0</code> is a leaf that holds 7.</li>
+<li>Line 3: <code>build (n + 1)</code> calculates <code>t := build n</code> once. Then it makes a
+  node whose two subtrees are both <code>t</code>.</li>
+<li>So <code>build n</code> has only n + 1 nodes, and each node points two times to the
+  same child. This value is <em>shared</em>: it is a directed acyclic graph (DAG),
+  not a tree.</li>
+<li>Lines 5 to 7: a <code>Packed</code> holds a type <code>α</code> and a <code>Tree α</code>. The type is a
+  field, so a <code>Packed</code> can hold a tree of each element type. This is an
+  <em>existential</em> type, similar to <code>Box&lt;dyn Any&gt;</code> in Rust.</li>
+<li>Line 9: <code>leftDepth</code> takes a <code>Packed</code> and calls <code>go</code> on its tree.</li>
+<li>Lines 10 to 13: <code>go</code> counts the nodes on the leftmost path. It works for
+  each <code>α</code>.</li>
+<li>Lines 16 and 17: <code>main</code> reads <code>n</code> from the command line. It builds the
+  tree, packs it with <code>α := Nat</code>, and prints the left depth, which is <code>n</code>.</li>
+</ul>
+<p>In Rust terms, <code>build</code> returns an <code>Rc&lt;Tree&lt;Nat&gt;&gt;</code>, and the two children of
+each node are two clones of one <code>Rc</code>.</p>
+<p>In <code>leftDepth</code>, the element type of the tree is the value of a field. So
+lean2rr cannot know it at compile time, and <code>go</code> is the uniform instance.
+lean2rr generates (abridged):</p>
+<pre><code class="language-rust">enum T_Tree_763 {                 // Tree Nat: the instance that build uses
+    c_leaf(Nat),
+    c_node(T_Tree_763, T_Tree_763)
+}
+enum T_Tree_774 {                 // Tree lcAny: the instance that go uses
+    c_leaf(L2RBox),
+    c_node(T_Tree_774, T_Tree_774)
+}
+
+fn l_leftDepth___l2r_0_(a : T_Tree_774) -&gt; Nat { … }
+
+// in main:
+let x822 : T_Tree_763 = l_build___l2r_0_(x821);
+let x830 : Nat = l_leftDepth___l2r_0_(l2r_conv_T_Tree_763_T_Tree_774(x822));
+</code></pre>
+<ul>
+<li><code>Packed</code> has no cell. The field <code>α</code> is a type, so the compiler erases it.
+  A structure with one data field is stored as that field (pass
+  <code>value-structs</code>). So <code>leftDepth</code> takes the tree.</li>
+<li><code>l2r_conv_T_Tree_763_T_Tree_774</code> is the <em>conversion</em>. lean2rr generates
+  it for this pair of layouts. It reads the <code>Tree Nat</code> and makes a
+  <code>Tree lcAny</code> with the same shape. Each leaf's <code>Nat</code> goes into an <code>L2RBox</code>
+  (<code>L2RBox::b2{7}</code>).</li>
+<li>The conversion uses a loop and an explicit stack, not recursion. So a
+  deep value does not overflow the stack.</li>
+<li>Natively, there is no conversion: <code>Tree Nat</code> and <code>Tree α</code> have the same
+  layout.</li>
+</ul>
+<h3 id="shared-values-and-conversions">Shared values and conversions</h3>
+<figure class="fig" id="fig-dagconv"><svg class="diagram" viewBox="0 0 900 345" width="900" role="img" aria-labelledby="dagconv-title"><title id="dagconv-title">A conversion and shared nodes</title><defs><marker id="dagconv-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><text x="10" y="26" text-anchor="start" class="t">build 3: 4 cells</text><rect x="25" y="50" width="120" height="30" rx="6" class="b-l2r"/><text x="85.0" y="69.5" text-anchor="middle" class="t">node</text><line x1="70" y1="80" x2="70" y2="118" class="ar" marker-end="url(#dagconv-ah)"/><line x1="100" y1="80" x2="100" y2="118" class="ar" marker-end="url(#dagconv-ah)"/><rect x="25" y="120" width="120" height="30" rx="6" class="b-l2r"/><text x="85.0" y="139.5" text-anchor="middle" class="t">node</text><line x1="70" y1="150" x2="70" y2="188" class="ar" marker-end="url(#dagconv-ah)"/><line x1="100" y1="150" x2="100" y2="188" class="ar" marker-end="url(#dagconv-ah)"/><rect x="25" y="190" width="120" height="30" rx="6" class="b-l2r"/><text x="85.0" y="209.5" text-anchor="middle" class="t">node</text><line x1="70" y1="220" x2="70" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><line x1="100" y1="220" x2="100" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><rect x="25" y="260" width="120" height="30" rx="6" class="b-l2r"/><text x="85.0" y="279.5" text-anchor="middle" class="t">leaf 7</text><text x="195" y="26" text-anchor="start" class="t">converted, each pointer separately: 15 cells</text><rect x="426.0" y="50" width="52" height="30" rx="6" class="b-rt"/><text x="452.0" y="69.5" text-anchor="middle" class="t">node</text><line x1="452.0" y1="80" x2="320.0" y2="118" class="ar" marker-end="url(#dagconv-ah)"/><line x1="452.0" y1="80" x2="584.0" y2="118" class="ar" marker-end="url(#dagconv-ah)"/><rect x="294.0" y="120" width="52" height="30" rx="6" class="b-rt"/><text x="320.0" y="139.5" text-anchor="middle" class="t">node</text><line x1="320.0" y1="150" x2="254.0" y2="188" class="ar" marker-end="url(#dagconv-ah)"/><line x1="320.0" y1="150" x2="386.0" y2="188" class="ar" marker-end="url(#dagconv-ah)"/><rect x="558.0" y="120" width="52" height="30" rx="6" class="b-rt"/><text x="584.0" y="139.5" text-anchor="middle" class="t">node</text><line x1="584.0" y1="150" x2="518.0" y2="188" class="ar" marker-end="url(#dagconv-ah)"/><line x1="584.0" y1="150" x2="650.0" y2="188" class="ar" marker-end="url(#dagconv-ah)"/><rect x="228.0" y="190" width="52" height="30" rx="6" class="b-rt"/><text x="254.0" y="209.5" text-anchor="middle" class="t">node</text><line x1="254.0" y1="220" x2="221" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><line x1="254.0" y1="220" x2="287" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><rect x="360.0" y="190" width="52" height="30" rx="6" class="b-rt"/><text x="386.0" y="209.5" text-anchor="middle" class="t">node</text><line x1="386.0" y1="220" x2="353" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><line x1="386.0" y1="220" x2="419" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><rect x="492.0" y="190" width="52" height="30" rx="6" class="b-rt"/><text x="518.0" y="209.5" text-anchor="middle" class="t">node</text><line x1="518.0" y1="220" x2="485" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><line x1="518.0" y1="220" x2="551" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><rect x="624.0" y="190" width="52" height="30" rx="6" class="b-rt"/><text x="650.0" y="209.5" text-anchor="middle" class="t">node</text><line x1="650.0" y1="220" x2="617" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><line x1="650.0" y1="220" x2="683" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><rect x="195" y="260" width="52" height="30" rx="6" class="b-rt"/><text x="221.0" y="279.5" text-anchor="middle" class="t">leaf</text><rect x="261" y="260" width="52" height="30" rx="6" class="b-rt"/><text x="287.0" y="279.5" text-anchor="middle" class="t">leaf</text><rect x="327" y="260" width="52" height="30" rx="6" class="b-rt"/><text x="353.0" y="279.5" text-anchor="middle" class="t">leaf</text><rect x="393" y="260" width="52" height="30" rx="6" class="b-rt"/><text x="419.0" y="279.5" text-anchor="middle" class="t">leaf</text><rect x="459" y="260" width="52" height="30" rx="6" class="b-rt"/><text x="485.0" y="279.5" text-anchor="middle" class="t">leaf</text><rect x="525" y="260" width="52" height="30" rx="6" class="b-rt"/><text x="551.0" y="279.5" text-anchor="middle" class="t">leaf</text><rect x="591" y="260" width="52" height="30" rx="6" class="b-rt"/><text x="617.0" y="279.5" text-anchor="middle" class="t">leaf</text><rect x="657" y="260" width="52" height="30" rx="6" class="b-rt"/><text x="683.0" y="279.5" text-anchor="middle" class="t">leaf</text><text x="825" y="18" text-anchor="middle" class="t">converted, each</text><text x="825" y="36" text-anchor="middle" class="t">cell once: 4 cells</text><rect x="765" y="50" width="120" height="30" rx="6" class="b-ok"/><text x="825.0" y="69.5" text-anchor="middle" class="t">node</text><line x1="810" y1="80" x2="810" y2="118" class="ar" marker-end="url(#dagconv-ah)"/><line x1="840" y1="80" x2="840" y2="118" class="ar" marker-end="url(#dagconv-ah)"/><rect x="765" y="120" width="120" height="30" rx="6" class="b-ok"/><text x="825.0" y="139.5" text-anchor="middle" class="t">node</text><line x1="810" y1="150" x2="810" y2="188" class="ar" marker-end="url(#dagconv-ah)"/><line x1="840" y1="150" x2="840" y2="188" class="ar" marker-end="url(#dagconv-ah)"/><rect x="765" y="190" width="120" height="30" rx="6" class="b-ok"/><text x="825.0" y="209.5" text-anchor="middle" class="t">node</text><line x1="810" y1="220" x2="810" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><line x1="840" y1="220" x2="840" y2="258" class="ar" marker-end="url(#dagconv-ah)"/><rect x="765" y="260" width="120" height="30" rx="6" class="b-ok"/><text x="825.0" y="279.5" text-anchor="middle" class="t">leaf 7</text><text x="10" y="320" text-anchor="start" class="ts">Each converted leaf also points to its own L2RBox cell (8 in the middle, 1 on the right). Depth n+2 needs 4 times the memory of depth n in the middle.</text></svg><figcaption><code>build 3</code> makes 4 cells: each <code>node</code> points twice to the same child. A conversion that visits each pointer separately makes 15 cells: 2<sup>n+1</sup> − 1 for <code>build n</code>. A conversion that converts each cell once makes 4 cells: one for each source cell.</figcaption></figure>
+<p>On the current version, a conversion follows each pointer separately. It
+does not see that two pointers go to the same cell. So it converts a shared
+cell one time for each pointer to it, and the result is a tree. <code>build n</code>
+has n + 1 nodes, but its conversion has 2<sup>n+1</sup> − 1 nodes. Thus the
+time and the memory increase exponentially (plan §10, "Structural
+conversions"). The peak memory (resident set size) of the example:</p>
+<table>
+<thead>
+<tr>
+<th>n</th>
+<th>Nodes in <code>build n</code></th>
+<th>native Lean</th>
+<th>lean2rr</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>16</td>
+<td>17</td>
+<td>7.9 MB</td>
+<td>11 MB</td>
+</tr>
+<tr>
+<td>20</td>
+<td>21</td>
+<td>7.9 MB</td>
+<td>65 MB</td>
+</tr>
+<tr>
+<td>22</td>
+<td>23</td>
+<td>7.9 MB</td>
+<td>237 MB</td>
+</tr>
+<tr>
+<td>24</td>
+<td>25</td>
+<td>7.9 MB</td>
+<td>927 MB</td>
+</tr>
+</tbody>
+</table>
+<p>The output is correct. But each +2 in <code>n</code> multiplies the memory by 4, so
+<code>n</code> = 30 would need approximately 60 GB, and the program would stop.</p>
+<p><strong>The fix (in progress): convert each cell once.</strong> For one conversion,
+lean2rr keeps a table from each shared source cell to its converted cell.
+When a second pointer goes to the same cell, the conversion uses the
+converted cell from the table. Thus a conversion makes at most one cell for
+each source cell, and its memory is linear in the size of the value (the
+right part of the figure).</p>
+<ul>
+<li>A cell with only one reference cannot be reached two times. So it does
+  not go into the table, and a tree without sharing has no table cost.</li>
+<li>The table belongs to lean2rr's generated code and runtime glue, and it
+  lives for one conversion. The shared runtime crate does not change.</li>
+</ul>
+<p>Two limits stay after this fix:</p>
+<ul>
+<li>A conversion is a copy. While it runs, the source and the copy both
+  exist: at most two times the memory. If nothing else uses the source, the
+  source is freed after the conversion.</li>
+<li>A value that goes into a uniform position many times is converted each
+  time. Each conversion takes time in proportion to the size of the value.
+  So a loop of such conversions can be quadratic.
+  <a href="#possible-future-work">Possible future work</a> removes the conversion.</li>
+</ul>
 <h2 id="costs">Costs</h2>
 <p>These costs are time and memory, never results. Plan
 <a href="../../docs/translation-plan.md#26-when-a-type-is-not-statically-known">§2.6</a>,
@@ -346,7 +563,8 @@ pointer. A read of a boxed value checks one tag.</p>
 <code>Array Nat</code>, and the <code>.nat</code> branch passes it the column's <code>data</code>. If the
 parameter stays typed (see below), lean2rr converts the <code>RVec&lt;L2RBox&gt;</code> into
 a new <code>Array Nat</code> (an <code>LNatArr</code>), element by element. That costs O(n) per
-call. Natively, the cast is free. A conversion also loses sharing.</p>
+call. Natively, the cast is free. A conversion also loses sharing (see
+<a href="#shared-values-and-conversions">Shared values and conversions</a>).</p>
 <p><strong><code>uniform-updates</code> keeps update loops linear.</strong> In the <code>.nat</code> branch of
 <code>Column.push</code>, Lean pushes onto <code>d</code> at the type <code>Array Nat</code>. Without the
 optional pass <code>uniform-updates</code>, each update converts the whole array to
@@ -402,6 +620,25 @@ makes instances.</p>
   back to a uniform position.</li>
 </ul>
 <h2 id="possible-future-work">Possible future work</h2>
+<p><strong>A uniform layout from the start, for the types that cross.</strong> The
+conversion in <a href="#when-a-value-changes-layout">When a value changes layout</a>
+exists because <code>Tree Nat</code> has two layouts in one program. lean2rr sees the
+whole program after specialization. So it can find each type whose values
+go into a uniform position. In the example, <code>Tree Nat</code> goes to <code>go</code> at
+<code>lcAny</code>. For such a type, lean2rr could use the uniform layout from the
+start (not implemented):</p>
+<ul>
+<li><code>build</code> would make leaves that hold an <code>L2RBox</code>. The call of <code>leftDepth</code>
+  would then give the tree as it is: no conversion, no copy, and the same
+  memory as native Lean.</li>
+<li>The types inside such a type get the same rule. If a <code>List (Tree Nat)</code>
+  goes into a uniform position, <code>Tree Nat</code> also gets the uniform layout.</li>
+<li>The cost is one <code>L2RBox</code> cell for each leaf, but only for the types that
+  cross. All other types keep their specialized layouts.</li>
+</ul>
+<p>Another design gives each generic type one layout for all type arguments,
+as native Lean does. Then no value changes its layout. But each program
+pays for the boxes, also a program that never uses an unknown type.</p>
 <p><strong>A typed union per dependent position.</strong> Today one <code>L2RBox</code> per program
 holds every boxed value, and each element of a dependent array is boxed by
 itself. lean2rr could instead generate one union for each dependent

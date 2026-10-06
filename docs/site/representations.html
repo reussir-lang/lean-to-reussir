@@ -132,7 +132,7 @@ heap cell. A <em><code>[value]</code></em> type is stored inline and is never al
 <tr>
 <td>inductive types, structures</td>
 <td>one generated Reussir type per instantiation</td>
-<td>rules below</td>
+<td>rules below; <a href="dependent-types.html#specialization-first">an example</a></td>
 </tr>
 <tr>
 <td>function types</td>
@@ -262,9 +262,10 @@ with examples, and what it costs.</p>
 <li>A conversion between two representations is structural: element by
   element for arrays and lists. Deep values convert with a loop and an
   explicit stack, not recursion.</li>
-<li>A converted value is a new, unshared object. Converting it back rebuilds
-  it again. Only identity and sharing can tell the difference, and neither
-  is preserved.</li>
+<li>A converted value is a new object. On the current version, a conversion
+  does not keep sharing: a value with shared parts can grow exponentially
+  (see <a href="dependent-types.html#shared-values-and-conversions">Dependent types</a>,
+  with an example and the fix). A conversion back makes a second copy.</li>
 <li>A boxed unit unboxes to the <em>zero</em> of the target type. It is Lean's
   <code>box(0)</code> placeholder.</li>
 </ul>

@@ -34,7 +34,7 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 | `Thunk α`, `Task α` | `LCell<S>` holding a generated state | memoized thunks, deferred tasks |
 | `IO.Promise α` | `LPromise`, a runtime object | holds the cell of its task |
 | handles, processes, mutexes, sockets | `LHandle`, a runtime object | closed with the last reference |
-| inductive types, structures | one generated Reussir type per instantiation | rules below |
+| inductive types, structures | one generated Reussir type per instantiation | rules below; [an example](dependent-types.html#specialization-first) |
 | function types | one generated enum per function type | [function values](#function-values) |
 | a type not statically known (`lcAny`) | `L2RBox` | [the uniform type](#the-uniform-type-l2rbox); [dependent types](dependent-types.html) |
 
@@ -149,9 +149,10 @@ with examples, and what it costs.
 - A conversion between two representations is structural: element by
   element for arrays and lists. Deep values convert with a loop and an
   explicit stack, not recursion.
-- A converted value is a new, unshared object. Converting it back rebuilds
-  it again. Only identity and sharing can tell the difference, and neither
-  is preserved.
+- A converted value is a new object. On the current version, a conversion
+  does not keep sharing: a value with shared parts can grow exponentially
+  (see [Dependent types](dependent-types.html#shared-values-and-conversions),
+  with an example and the fix). A conversion back makes a second copy.
 - A boxed unit unboxes to the *zero* of the target type. It is Lean's
   `box(0)` placeholder.
 
