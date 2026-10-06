@@ -19,10 +19,8 @@ value with a `match` on the enum's variant.
 A *dependent type* is a type that contains a value, such as the `n` in
 `Vector String n`, or a type that a value selects, such as `t.denote` below.
 
-All the Lean code on this page is one program, except the small program
-in [A type selected by a Boolean](#a-type-selected-by-a-boolean) that uses
-`unsafeCast`. Each program type-checks, and its lean2rr build gives the
-same output as its native build. The LCNF on this
+All the Lean code on this page is one program. It type-checks, and its
+lean2rr build gives the same output as its native build. The LCNF on this
 page is the output of Lean's compiler for that program (mono phase, with
 the types of parameters and `let` values). The Reussir code is the output
 of lean2rr for that program (`--keep-rr`), with shorter, readable names.
@@ -484,45 +482,10 @@ fn zero_String() -> LStr {
 }
 ```
 
-**When the `b0` arm runs.** A box holds `b0` only for a unit value, for a
-type or a proof, or for the placeholder that Lean's library writes into a
-slot and overwrites before a read. In typed code, a read at the type `Nat`
-gets a `Nat`. Only a cast can read a `b0` as a `Nat`. This is a separate, small program
-(not part of the program of this page):
-
-```lean
-structure Pkg0 where
-  α : Type
-  v : α
-
-@[noinline] unsafe def asNat (p : Pkg0) : Nat := unsafeCast p.v
-
-unsafe def main : IO Unit :=
-  IO.println (asNat ⟨Unit, ()⟩)
-```
-
-- `Pkg0` holds a type and a value of that type.
-- `asNat` reads the value as a `Nat` with `unsafeCast`, without a check.
-- `main` packs the unit value `()` and reads it as a `Nat`. A native build
-  prints `0`: natively, `()` is `box(0)`, the same word as the number 0.
-
-lean2rr generates this code:
-
-```rust
-fn asNat(p : L2RBox) -> Nat {
-    match p {
-        L2RBox::b2(n) => { n },
-        L2RBox::b0(_) => { zero_Nat() },     // runs: the box holds ()
-        _ => { l2r_unbox_Nat(p) }
-    }
-}
-
-// in main:
-let u : L2RUnit = L2RUnit::u{};
-let n : Nat = asNat(L2RBox::b0{u});
-```
-
-The lean2rr build also prints `0`.
+**When the `b0` arm runs.** In typed code, a read at the type `Nat` gets a
+`Nat`, so the `b0` arm does not run. It runs only when a program reads a
+unit value as a `Nat` with `unsafeCast`. A native build then gives `0`, and
+the arm gives `0` too.
 
 ### Sigma types
 
