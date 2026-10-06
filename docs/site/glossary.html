@@ -109,7 +109,7 @@ each concept has one term.</p>
 <dt><code>ElemBox</code></dt>
 <dd>A generated one-field shared struct that wraps a value that cannot cross the FFI boundary.</dd>
 <dt>conversion</dt>
-<dd>Generated code that rebuilds a value from one representation into another. The result is a new value. On the current version, a conversion does not keep sharing: a value with shared parts can grow exponentially (see <a href="dependent-types.html#current-version-and-planned-change">Dependent types</a>). The planned change removes conversions.</dd>
+<dd>Generated code that rebuilds a value from one representation into another. The result is a new value. On the current version, a conversion does not keep sharing: a value with shared parts can grow exponentially (see <a href="dependent-types.html#the-current-version">Dependent types</a>). The planned change removes conversions.</dd>
 <dt>specialized layout</dt>
 <dd>The layout of an instance at precise type arguments: a <code>Tree Float</code> leaf holds an <code>f64</code>. The other layout of the same Lean type is the uniform layout, with <code>L2RBox</code> fields.</dd>
 <dt>shared value</dt>

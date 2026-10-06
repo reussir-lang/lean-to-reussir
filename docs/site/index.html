@@ -241,10 +241,14 @@ other results are the last recorded runs.</p>
   a constant read in a loop becomes a call again.</li>
 <li><strong>Dependent types: the rule.</strong> Types do not compute, so lean2rr erases
   them, and a value of unknown type is one enum, matched by its variant.
-  The current version still converts values between a layout for each type
-  argument and the boxed layout, which can grow exponentially on shared
-  values. The planned change gives each datatype one layout, so no value is
-  converted (see <a href="dependent-types.html">Dependent types</a>).</li>
+  Two independent reviews confirmed it against Lean 4.34.0's source: <code>◾</code>
+  values hold no data and are dropped, <code>lcAny</code> values hold data and are
+  kept. The current version still converts values between a layout for each
+  type argument and the boxed layout, which can grow exponentially on
+  shared values. The planned implementation is native Lean's own scheme:
+  one layout for each datatype and an enum in every <code>lcAny</code> position, so no
+  value is converted (see
+  <a href="dependent-types.html#the-planned-implementation">Dependent types</a>).</li>
 <li><strong>Plan §10</strong> lists the Lean runtime bugs that lean2rr does not reproduce
   (see <a href="differences.html#lean-bugs-we-do-not-reproduce">Known differences</a>),
   the differences of programs that use the <code>Lean</code> package, and that

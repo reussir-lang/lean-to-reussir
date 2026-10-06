@@ -285,23 +285,125 @@ def ops : List Op := [⟨List.length⟩, ⟨fun xs => xs.length * 2⟩]
 
 The field's function takes a list of boxes: `List.length` runs at `lcAny`.
 
-## Current version and planned change
+## What was checked
 
-<div class="note" markdown="1">
-**The rule above is the design.** The current version adds one
-optimization that does not follow it. The planned change removes that
-optimization.
-</div>
+Two independent reviews checked four statements against the source of Lean
+4.34.0 and against native builds. They agree on every verdict.
 
-**The current optimization: a layout for each type argument.** The current
-version gives a generic type a separate layout for each type argument. A
-`Tree Float` leaf holds the `f64` itself, and a `Tree Nat` leaf holds the
-`Nat` word. The unknown case, `Tree lcAny`, has a third layout, whose leaf
-holds an `L2RBox`.
+| Statement | Verdict |
+|---|---|
+| A value marked `◾` holds no data, and a compiler can drop it. | correct (one exception in Lean itself, see below) |
+| A value of type `lcAny` can be dropped, because a program cannot compute with types. | **incorrect** |
+| A value of type `lcAny` holds data that can change the result, so a compiler must keep it. | correct |
+| One layout for each datatype, with an enum in the unknown positions, gives native results. | correct when the rule covers all the cases of [The planned implementation](#the-planned-implementation) |
 
-**Its cost: conversions.** When a value goes from one layout to another,
-the current version *converts* it. It rebuilds the value, node by node, in
-the other layout. For example:
+The reason: `lcAny` replaces only the *type* of a value. Lean's compiler
+erases a value only when its type is a proposition or a type
+(`ToLCNF.lean`). A native build keeps an `lcAny` value as an object pointer
+(`ToImpureType.lean`). An example from the reviews:
+
+```lean
+def pick (α : Type) (b : Bool) (x y : α) : α := if b then x else y
+```
+
+- `pick` takes a type `α`, a Boolean and two values of the type `α`. It
+  returns `x` if `b` is true, else `y`.
+- After erasure, `α` is `◾`: it is dropped. `x` and `y` have the type
+  `lcAny`: they are kept. The result is one of them, so a compiler that
+  dropped them could not return it.
+
+**One exception in Lean itself.** A review found a program where Lean
+4.34.0's own compiler gives a value that holds data the mark `◾`. The
+native build then prints a wrong result: 100, where Lean's kernel proves
+200. This is recorded for judgment. lean2rr does not copy a Lean bug after
+a judge confirms it (plan §10, "Lean bugs we do not reproduce").
+
+## The planned implementation
+
+This is native Lean's own representation. lean2rr writes Lean's uniform
+pointer as an explicit enum, because Reussir is a typed language.
+
+1. **Not stored:** types, type arguments and proofs (`◾`). A function keeps
+   its parameter list. A function whose parameters are all erased stays a
+   function, and does not become a constant: a constant is computed at
+   startup, and the function body would then run when no call runs it.
+2. **One layout for each datatype.** lean2rr computes the layout of each
+   constructor one time, from its declared field types, whatever the type
+   arguments are. `Tree Nat` and `Tree α` are the same type.
+3. **Every `lcAny` position holds an `L2RBox`.** This includes fields,
+   parameters, results, local values and the arguments of function values.
+   The type can be unknown in four ways:
+    - a type parameter (`x : α`);
+    - a type stored in another field (`val : α` in a package with the field
+      `α : Type`);
+    - a type computed from a value (`Sigma.snd`, `Array ty.denote`);
+    - a type function applied to an argument (`f Nat`, with `f` a
+      parameter).
+4. **The enum has one variant for each run-time layout,** not one for each
+   type:
+    - one variant for each datatype;
+    - one for each kind of scalar;
+    - one for function values;
+    - one for strings, arrays and big numbers;
+    - one *erased* variant, because a type or a proof can occupy such a
+      position.
+
+   Thus the set of variants is finite, also when polymorphic recursion
+   makes the set of types infinite.
+5. **A field with a concrete type keeps that type.** In
+   `structure P where x : Float`, `x` is a raw `f64`.
+6. **Box and unbox at the boundary.** A value of a known type is put into
+   its variant where it goes into an `lcAny` position. It is taken out where
+   it comes back to a known type.
+7. **One calling convention for function values.** A function that is
+   stored where its type is generic gets an entry that takes and returns
+   `L2RBox` values. Native Lean uses `_boxed` wrappers in the same way.
+8. **A structure with one relevant field is that field** (`Fin n`,
+   `Subtype`), as in native Lean.
+9. **Casts in Lean's library go through the enum.** `Dynamic`,
+   `Array.mapM` (through `mapMUnsafe`) and `ShareCommon` use `NonScalar`
+   with unsafe casts. lean2rr represents `NonScalar` as an `L2RBox`, so each
+   such cast is a box or an unbox.
+10. **Unsafe functions that look at representations** (`ptrAddrUnsafe`,
+    `isExclusiveUnsafe`, `ptrEq`) can answer differently, as today (see
+    [Known differences](differences.html#identity-and-sharing)).
+
+The enum is closed: it lists the variants of one program. That is possible
+because lean2rr compiles the whole program at one time.
+
+### Memory compared with native
+
+The enum's encoding is not chosen yet. A two-word enum (an 8-byte tag word
+and an 8-byte payload) works with Reussir today:
+
+| Value | Native | Two-word enum |
+|---|---|---|
+| `structure P where a : UInt64; b : Nat; c : Float` | 1 allocation, 32 B | the same |
+| `UInt64 × UInt64` | 3 allocations, 56 B | 1 allocation, 40 B |
+| `List Float`, one cell | 2 allocations, 40 B | 1 allocation, 32 B |
+| `List Nat` (small values), one cell | 1 allocation, 24 B | 1 allocation, 32 B |
+| `Array Nat`, one element | 8 B | 16 B |
+| `Array Float`, one element | 8 B and a 16 B box | 16 B, no allocation |
+
+- The two-word enum never allocates where native does not. It saves the
+  box of each 64-bit scalar in a generic position. It doubles the size of a
+  generic position that holds a pointer or a small value.
+- A one-word encoding (a small value inside the word, an object as its
+  pointer) has the same sizes as native, and boxes 64-bit scalars as native
+  does. It needs more support from Reussir.
+- Measured natively: a list of 10<sup>6</sup> small `Nat`s takes 47 MB, a
+  list of 10<sup>6</sup> `Float`s 63 MB (the boxes).
+
+Status: planned, not implemented.
+
+## The current version
+
+The current version does not follow rule 2. It gives a generic type a
+separate layout for each type argument: a `Tree Float` leaf holds the `f64`
+itself, and a `Tree Nat` leaf holds the `Nat` word. The unknown case,
+`Tree lcAny`, has another layout, whose leaf holds an `L2RBox`. When a value
+goes from one layout to another, the current version rebuilds it, node by
+node:
 
 ```lean
 def build : Nat → Tree Nat
@@ -317,8 +419,8 @@ leftDepth ⟨Nat, build n⟩                    -- Tree Nat goes into Tree lcAny
 
 - `build n` has only n + 1 nodes, because each node points two times to the
   same child.
-- The conversion to `Tree lcAny` follows each pointer separately, so it
-  makes 2<sup>n+1</sup> − 1 nodes.
+- The conversion follows each pointer separately, so it makes
+  2<sup>n+1</sup> − 1 nodes.
 
 | n | native Lean | current version |
 |---|---|---|
@@ -326,42 +428,10 @@ leftDepth ⟨Nat, build n⟩                    -- Tree Nat goes into Tree lcAny
 | 20 | 7.9 MB | 65 MB |
 | 24 | 7.9 MB | 927 MB |
 
-The output is correct, but the memory grows exponentially. A conversion
-also costs time in proportion to the value at each crossing, so a loop that
-crosses at each step is quadratic.
-
-**The planned change: one layout for each datatype.**
-
-- A field whose type is a type parameter always holds the enum.
-  `Tree Nat` and `Tree α` are then the same type, and `leftDepth` gets the
-  tree as it is: no copy and no conversion, as in native Lean.
-- A field with a concrete type keeps that type. In
-  `structure P where x : Float`, `x` stays a raw `f64`.
-- Functions are still compiled for each type, so arithmetic on a local
-  `Nat` stays direct. A value goes into the enum only when it is stored in a
-  type-parameter field.
-- The enum needs a cheap encoding:
-  - a small value (`Nat`, `Bool`, `Char`, a small integer) goes inside the
-    word, as in native Lean;
-  - an object does not need an extra cell.
-
-  Today every boxed value is one heap cell: a column of 10<sup>6</sup>
-  small `Nat`s takes 48 MB, natively 31 MB.
-
-Status: planned, not implemented. The conversion code then goes away.
-
-## Costs
-
-These costs are time and memory, never results. Plan
+The output is correct, but the memory grows exponentially, and a loop that
+crosses at each step is quadratic. Today each boxed value is also one heap
+cell: a column of 10<sup>6</sup> small `Nat`s takes 48 MB, natively 31 MB.
+The planned implementation removes the conversions, because each datatype
+has one layout. Plan
 [§10](repo:docs/translation-plan.md#10-known-divergences-and-unsupported-features)
-gives the details.
-
-- **Boxing allocates.** Today each boxed value is one `L2RBox` cell.
-  Natively, a small number in a uniform position costs nothing, because it
-  is inside the pointer. A read of a boxed value checks one tag.
-- **Conversions** (current version only, see above) cost time and memory in
-  proportion to the value, at each crossing, and lose sharing. The optional
-  pass `uniform-updates` keeps the common update loops linear: an `Array`
-  update on a column (`push`, `set!`, …) runs on the boxed array, and only
-  the one element is boxed or unboxed. The tests are `RtUniformUpdates` and
-  its variants, and `tests/runtime/conv-count-check.sh`.
+lists these costs.

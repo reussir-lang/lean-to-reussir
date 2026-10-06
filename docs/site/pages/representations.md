@@ -34,7 +34,7 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 | `Thunk α`, `Task α` | `LCell<S>` holding a generated state | memoized thunks, deferred tasks |
 | `IO.Promise α` | `LPromise`, a runtime object | holds the cell of its task |
 | handles, processes, mutexes, sockets | `LHandle`, a runtime object | closed with the last reference |
-| inductive types, structures | one generated Reussir type per instantiation | rules below; a planned change gives each datatype one layout ([dependent types](dependent-types.html#current-version-and-planned-change)) |
+| inductive types, structures | one generated Reussir type per instantiation | rules below; a planned change gives each datatype one layout ([dependent types](dependent-types.html#the-planned-implementation)) |
 | function types | one generated enum per function type | [function values](#function-values) |
 | a type not statically known (`lcAny`) | `L2RBox` | [the uniform type](#the-uniform-type-l2rbox); [dependent types](dependent-types.html) |
 
@@ -152,7 +152,7 @@ with examples, and what it costs.
 - A converted value is a new object. On the current version, a conversion
   does not keep sharing: a value with shared parts can grow exponentially.
   The planned change removes conversions: each datatype gets one layout (see
-  [Dependent types](dependent-types.html#current-version-and-planned-change)).
+  [Dependent types](dependent-types.html#the-planned-implementation)).
 - A boxed unit unboxes to the *zero* of the target type. It is Lean's
   `box(0)` placeholder.
 
