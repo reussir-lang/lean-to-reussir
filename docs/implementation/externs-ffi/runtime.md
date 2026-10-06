@@ -733,9 +733,12 @@ Paths are relative to the repository root.
   the mark again and runs the task on the waiter's stack, as for any
   awaited started task. Before, the waiter blocked on the started task
   with no wake-up to come: the hub starts a started pure task by itself
-  only as its last resort (`last_resort`), which never runs while a
-  descriptor is watched, so with a socket open the hub waited in
-  `epoll_wait` forever. leanrt, the prelude and the generated code are
+  only as its last resort (`last_resort`), which a watched descriptor
+  prevents for good, and a pending sleep or timer until it ends. So with
+  a socket open the hub waited in `epoll_wait` forever, and without one
+  the wait was delayed until every pending sleep or timer had ended (a
+  `Task.get` waited out an unrelated `IO.sleep`: 500 ms instead of 2 ms
+  in the crate review's probe). leanrt, the prelude and the generated code are
   unchanged.
 - **Why:** A hang where native Lean finishes: `RtTcp` hung about one run
   in 20 (natively 0 in 100). The window: a pure task spawned while the

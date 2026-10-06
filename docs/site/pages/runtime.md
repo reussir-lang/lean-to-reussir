@@ -89,7 +89,9 @@ the worker takes the awaited pure task at that time, the waiting context
 runs the task. Before switch step 9, the wait did not see that start: the
 context waited for a signal that had already gone. If a socket was open,
 nothing woke it, and the program did not end (`RtTcp` did not end in
-about one run in 20).
+about one run in 20). If a sleep or a timer was pending, the wait
+continued until it ended: a `Task.get` could wait for an unrelated
+`IO.sleep` to end.
 The test `RtTaskPickedInWait` checks this case.
 
 **Contexts.** A thread that blocks natively lets other threads go on.
