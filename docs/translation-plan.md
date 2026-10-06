@@ -3156,7 +3156,16 @@ Each item says what differs and when.
   the runtime starts, so its fields go last first, as `lean_dec` frees them
   in `lean_array_uset` and `lean_array_pop` (switch step 10, review
   RS10-01; tests `RtArraySetFreeOrder`, `RtArrayPopFreeOrder`); before,
-  the record's own release freed them in field order.
+  the record's own release freed them in field order. A case below the
+  first cell is open: in a cell that a free reaches below its first one,
+  Reussir's glue (`drop_and_free`, local patch 0014) releases the cell's
+  last record field after the cell, directly, while a later field that it
+  releases through the field type's own drop (an array) has already
+  pushed its free. So the record field's contents go before the array's:
+  a structure `{i : In, arr : Array Handle}` (`In` holding two handles)
+  two cells below the freed record closes `i.b i.a arr1 arr0`, natively
+  `arr1 arr0 i.b i.a` (review RS11-01 of switch step 11; test
+  `RtNestedArrayFreeOrder`, expected to fail; the fix is a Reussir patch).
 - *Release time of borrowed parameters* (§5.8): emulated for values that
   may hold a resource, with Lean's inference run on lean2rr's monomorphic
   instances: where Lean infers a polymorphic declaration or one of its own

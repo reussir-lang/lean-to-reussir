@@ -55,8 +55,10 @@ and several optional passes help token reuse (see
   value deep through records and containers is freed at a bounded depth.
 - **Order of releases.** File handles close (and flush) and promises resolve
   in Lean's order: last pushed, first freed. An array set or pop frees the
-  record that it removes the same way. One difference stays: the first
-  cell of a free that user code starts at a record (plan §10).
+  record that it removes the same way. Two differences stay: the first
+  cell of a free that user code starts at a record, and a cell below the
+  first one whose last record field comes before an array field (plan
+  §10).
 - **Reference `set`.** `l2r_rc_set` stores the new value first, then releases
   the old one as `lean_dec` does. So code that the release runs (the `sync`
   dependents of a promise it drops) sees the new value.
@@ -237,9 +239,10 @@ The switch steps:
 | 8 | the panic and exit executor: it carries out a panic's plan (the stream, the flush of stdout, the abort or the exit), and does the internal panic, the uncaught error and `IO.Process.exit` |
 | 9 | no new part: a fix in the scheduler (lean-runtime's fixes-8). A wait for a pure task that the worker starts during the wait now runs the task; before, it could wait for ever |
 | 10 | no new part: speed (lean-runtime's perf-2). `Float.toString` computes its six decimals exactly with integers; the `Int` rules let lean2rr compute with a word and a big number without a block for the word. lean2rr's own runtime changed at the same step (see below) |
+| 11 | no new part: fixes in the signal watchers (lean-runtime's fixes-9 to fixes-11). A one-shot watcher gets one signal, as with `SA_RESETHAND` natively. lean2rr's own runtime changed at the same step (see below) |
 
 Status (2026-10-06): the submodule `third_party/lean-runtime` is pinned at
-`e5e502e`. `scripts/l2r.py` builds it with cargo (the features `io`,
+`dce982d`. `scripts/l2r.py` builds it with cargo (the features `io`,
 `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`) and links
 it with `leanrt` ([runtime README](repo:runtime/README.md), "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline
@@ -263,16 +266,17 @@ call. Each step passed lean2rr's full suite before its merge.
 - **Array sets and pops of records.** A set decrements the record that it
   replaces in line, so LLVM inlines the set into the loop. A set or pop
   that frees the last reference to a record releases its fields last
-  first, as Lean does. This costs about 140 instructions per freed record.
+  first, as Lean does. The record goes on the pending stack as one cell
+  (step 11). This costs about 74 instructions per freed record.
 - **Block sizes.** Up to 64 bytes, the runtime knows mimalloc's block size
   without a call.
 
-Instruction counts at step 10, against step 9 (small sizes):
+Instruction counts at steps 10 and 11, against step 9 (small sizes):
 
-| Program | Change |
-|---|---|
-| strings | −19.9% |
-| liasolver | −14.7% |
-| unionfind | +4.6% |
-| monadic-interp | −1.9% |
-| qsort | −0.15% |
+| Program | Step 10 | Step 11 |
+|---|---|---|
+| strings | −20.2% | −20.2% |
+| liasolver | −14.4% | −14.4% |
+| unionfind | +5.0% | +0.8% |
+| monadic-interp | −1.9% | −1.9% |
+| qsort | −0.15% | −0.15% |

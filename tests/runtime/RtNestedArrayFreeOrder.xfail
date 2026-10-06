@@ -1,0 +1,1 @@
+Reussir's glue for a cell below the first one of a free (local patch 0014, drop_and_free) releases the cell's last record field after the cell, directly, while a later array field has already pushed its free: the record field's handles close before the array's (review RS11-01; translation plan §10, "Order of releases in one free"; a Reussir patch).

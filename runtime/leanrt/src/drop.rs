@@ -82,7 +82,7 @@ pub fn run(p: usize, step: Step) {
 /// Release `x`, a value a reference or a task cell gave up (the prelude's
 /// `l2r_rc_set`, `l2r_ref_set`, `l2r_lcell_set`), as native `lean_dec`
 /// does. A shared value is only decremented. The last reference to a
-/// record is freed inside a free the runtime starts (`run`): its members go
+/// record is freed inside a free the runtime starts (`free_record`): its members go
 /// on the stack of pending work (Reussir's glue releases the first cell of
 /// a free it starts itself in field order), so what it holds is released
 /// in Lean's order, its last field first, and the promises it drops
@@ -96,14 +96,28 @@ pub fn release<T>(x: T) {
     ReleaseValue::release_value(x)
 }
 
+/// `release` of the last reference to `x`, for `array::release_last`: on
+/// aarch64 the caller has found a record's count at 1 and the record no
+/// immediate, so it is freed without testing them again (`free_unique`).
+/// Any other value, or any record on other targets: `release`.
+#[inline(always)]
+pub(crate) unsafe fn release_unique<T>(x: T) {
+    ReleaseValue::release_unique(x)
+}
+
 trait ReleaseValue: Sized {
     fn release_value(self);
+    unsafe fn release_unique(self);
 }
 
 impl<T> ReleaseValue for T {
     #[inline(always)]
     default fn release_value(self) {
         drop(self)
+    }
+    #[inline(always)]
+    default unsafe fn release_unique(self) {
+        self.release_value()
     }
 }
 
@@ -133,18 +147,58 @@ impl<X> ReleaseValue for reussir_rt::bridge::Bridge<X> {
         std::mem::forget(self);
         free_record::<X>(p);
     }
+    #[inline(always)]
+    unsafe fn release_unique(self) {
+        if !(cfg!(target_arch = "aarch64") && std::mem::size_of::<Self>() == std::mem::size_of::<usize>()) {
+            return self.release_value();
+        }
+        let p: usize = std::mem::transmute_copy(&self);
+        std::mem::forget(self);
+        free_unique::<X>(p);
+    }
 }
 
+/// Free the record `p` (`release_value`): on aarch64 `free_unique`, on
+/// other targets (the immortal encoding: the count is not tested, so it
+/// may be shared) a step that runs the record's release (`run`).
 #[cold]
 #[inline(never)]
 fn free_record<X>(p: usize) {
+    if cfg!(target_arch = "aarch64") {
+        return unsafe { free_unique::<X>(p) };
+    }
     run(p, step_record::<X>);
+}
+
+/// Free the record `p`, whose count is 1 and which is no immediate. The
+/// record goes on the stack of pending work as one deferred cell
+/// (`__reussir_drop_defer`, which does not write the cell), and the drain
+/// releases it (`__reussir_drop_drain`). Outside a free that is Reussir's
+/// drain of one pending cell (`drain_one`): the drain starts, the record's
+/// `<record>_ffi_release` runs inside it (so its fields go on the stack and
+/// are released last first), and the drain ends, through the general loop
+/// only when the release pushed work. Inside a free the cell is only
+/// pushed, as a step would be, and released when the free pops it. The
+/// order is the same as with a step (`run`); the cost is lower: no entry
+/// in the stack's vector, no step dispatch, no `memmove` of the entries
+/// above it.
+#[inline(always)]
+unsafe fn free_unique<X>(p: usize) {
+    reussir_rt::drop::__reussir_drop_defer(p as *mut u8, release_record::<X>);
+    reussir_rt::drop::__reussir_drop_drain();
 }
 
 /// Release the record whose handle is `p` (its `<record>_ffi_release`).
 unsafe fn step_record<X>(p: usize) -> bool {
     drop(std::mem::transmute_copy::<usize, reussir_rt::bridge::Bridge<X>>(&p));
     true
+}
+
+/// The release function of a record deferred by `free_unique`: its
+/// `<record>_ffi_release`, called by the drain.
+unsafe extern "C" fn release_record<X>(cell: *mut u8) {
+    let p = cell as usize;
+    drop(std::mem::transmute_copy::<usize, reussir_rt::bridge::Bridge<X>>(&p));
 }
 
 #[inline(always)]
@@ -567,6 +621,116 @@ mod tests {
 
     fn cell_count<T>(c: &Cell<T>) -> u32 {
         count(unsafe { *(c as *const Cell<T> as *const usize) })
+    }
+
+    /// A record cell as Reussir lays it out for `free_record`: the 32-bit
+    /// count at offset 0. `id` is logged when the cell is freed, and the
+    /// members are released then, in field order, as Reussir's glue does.
+    #[repr(C)]
+    struct TCell {
+        count: u32,
+        id: u32,
+        members: std::vec::Vec<TRec>,
+    }
+
+    /// A record handle (`Bridge<TRec>`): its drop is the record's
+    /// `<record>_ffi_release` (a count of 1 frees the cell, else a
+    /// decrement). Inside a free a member is released through `release`,
+    /// so a member freed goes on the stack, as the glue defers it.
+    struct TRec(*mut TCell);
+
+    type B = reussir_rt::bridge::Bridge<TRec>;
+
+    fn rec(id: u32, members: std::vec::Vec<TRec>) -> TRec {
+        TRec(Box::into_raw(Box::new(TCell { count: 1, id, members })))
+    }
+
+    impl Drop for TRec {
+        fn drop(&mut self) {
+            let c = unsafe { &mut *self.0 };
+            if c.count != 1 {
+                c.count -= 1;
+                return;
+            }
+            // 1000 + id: freed outside a free (the order would be the glue's
+            // top-level one, field order).
+            LOG.with(|l| l.borrow_mut().push(if active() { c.id } else { 1000 + c.id }));
+            let cell = unsafe { Box::from_raw(self.0) };
+            for m in cell.members {
+                release(B::new(m));
+            }
+        }
+    }
+
+    /// `free_record` releases a record inside a free: its members in Lean's
+    /// order (the last first, a member's members before the members that
+    /// precede it), a shared member only decremented; the free is over when
+    /// `release` returns.
+    #[test]
+    fn record_free_order() {
+        let shared = rec(9, vec![]);
+        let s2 = TRec(shared.0);
+        unsafe { (*shared.0).count = 2 };
+        let a = rec(2, vec![rec(3, vec![]), rec(4, vec![])]);
+        let b = rec(5, vec![s2, rec(6, vec![rec(7, vec![])])]);
+        release(B::new(rec(1, vec![a, b])));
+        assert_eq!(take_log(), vec![1, 5, 6, 7, 2, 4, 3]);
+        assert!(!active());
+        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(unsafe { (*shared.0).count }, 1);
+        release(B::new(shared));
+        assert_eq!(take_log(), vec![9]);
+        // Shared: a decrement only.
+        let r = rec(8, vec![]);
+        unsafe { (*r.0).count = 2 };
+        let r2 = TRec(r.0);
+        release(B::new(r));
+        assert_eq!(take_log(), std::vec::Vec::<u32>::new());
+        release(B::new(r2));
+        assert_eq!(take_log(), vec![8]);
+        // The last reference, the count not tested again (a set's or a
+        // pop's `release_last`): the same free.
+        let a = rec(12, vec![rec(13, vec![])]);
+        unsafe { release_unique(B::new(rec(11, vec![a, rec(14, vec![rec(15, vec![])])]))) };
+        assert_eq!(take_log(), vec![11, 14, 15, 12, 13]);
+        assert!(!active());
+        assert_eq!(reussir_rt::drop::depth(), 0);
+    }
+
+    thread_local! {
+        static PENDING: RefCell<Option<TRec>> = const { RefCell::new(None) };
+    }
+
+    /// A step that releases the record left in `PENDING`, logging 100
+    /// before and 101 after.
+    unsafe fn step_release(_: usize) -> bool {
+        LOG.with(|l| l.borrow_mut().push(100));
+        let r = PENDING.with(|p| p.borrow_mut().take()).unwrap();
+        release(B::new(r));
+        LOG.with(|l| l.borrow_mut().push(101));
+        true
+    }
+
+    /// Inside a free, `free_record` only pushes the record: it is released
+    /// after the step that released it, before the work pushed earlier.
+    #[test]
+    fn record_free_inside_a_free() {
+        PENDING.with(|p| *p.borrow_mut() = Some(rec(1, vec![rec(2, vec![]), rec(3, vec![])])));
+        let first = rec(4, vec![]);
+        // The free: a step releasing `first` (pushed below), then one
+        // releasing the pending record.
+        unsafe fn step_first(p: usize) -> bool {
+            LOG.with(|l| l.borrow_mut().push(50));
+            defer(0, step_release);
+            release(B::new(TRec(p as *mut TCell)));
+            true
+        }
+        let p = first.0 as usize;
+        std::mem::forget(first);
+        run(p, step_first);
+        assert_eq!(take_log(), vec![50, 4, 100, 101, 1, 3, 2]);
+        assert!(!active());
+        assert_eq!(reussir_rt::drop::depth(), 0);
     }
 
     #[test]

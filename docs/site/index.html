@@ -178,7 +178,7 @@ other results are the last recorded runs.</p>
 <tbody>
 <tr>
 <td>Runtime test suite</td>
-<td>337 programs† (1 marked <code>.xfail</code>†); at the last full run (2026-10-06), 336 of 337 identical to native Lean 4.34.0, some of them through expectation files; the other one is the <code>.xfail</code> test</td>
+<td>340 programs† (3 marked <code>.xfail</code>†); at the last full run (2026-10-06), 336 of 337 identical to native Lean 4.34.0, some of them through expectation files; the other one is the <code>.xfail</code> test</td>
 </tr>
 <tr>
 <td>Classic corpus</td>
@@ -221,11 +221,15 @@ other results are the last recorded runs.</p>
   and a fix of a scheduler wait that could wait for ever (step 9).</li>
 <li><strong>Fast paths in the runtime library</strong> (step 10): <code>Float.toString</code>,
   <code>Int</code> with one small operand, <code>Int</code> and string equality, array sets of
-  records. Instruction counts: strings −19.9%, liasolver −14.7%,
-  unionfind +4.6%. An array set that frees the last reference to a record
-  releases its fields last first, as Lean does; this costs about 140
-  instructions per freed record (see
+  records. Instruction counts against step 9: strings −20.2%, liasolver
+  −14.4%, unionfind +5.0%. An array set that frees the last reference to a record
+  releases its fields last first, as Lean does (see
   <a href="runtime.html#fast-paths-of-the-runtime-library-step-10">Runtime</a>).</li>
+<li><strong>Signal watchers and the record free</strong> (step 11): a one-shot signal
+  watcher gets one signal (lean-runtime's fixes-9 to fixes-11). A set, a
+  pop or a reference set that frees the last reference to a record puts
+  the record on the pending stack as one cell: about 74 instructions per
+  freed record, and unionfind +0.8% against step 9.</li>
 <li><strong>The extern rule</strong> (above).</li>
 <li><strong><code>conv-liveness</code></strong>, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see <a href="passes.html">Optional passes</a>).</li>

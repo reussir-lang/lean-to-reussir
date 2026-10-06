@@ -1,0 +1,1 @@
+A reference set that is the reference's last use frees the new value before the old one (runtime/README.md, Requests for lean2rr 33): l2r_rc_set takes the reference's cell, whose last use is the store, so it is released before the old value's release; natively ST.Ref.set borrows the reference and the caller releases it after the set.

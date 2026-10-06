@@ -94,7 +94,9 @@ runtime.
   `l2r_lcell_set` (thunk, task and promise cells) does the same in Rust.
   Both release with `leanrt::drop::release`, as `lean_dec`: a shared value
   (or an immediate) is only decremented, in line; the last reference to a
-  record is freed inside a free the runtime starts (`drop::run`), so its
+  record is freed inside a free the runtime starts (`drop::free_record`:
+  the record is one pending cell, see
+  [below](#the-last-reference-to-a-record-is-freed-as-one-pending-cell)), so its
   members go on the pending stack and are released last field first, and
   the `sync` dependents of the promises it drops run when that free ends,
   before the caller goes on. Other values are dropped (the runtime's
@@ -116,7 +118,8 @@ runtime.
 - **Where:** `runtime/prelude.rr`: `l2r_rc_set`, `l2r_release_value`,
   `l2r_rc_put`, `l2r_lcell_set` (`l2r_ref_set` too, but `LRef` is no
   longer used); `runtime/leanrt/src/drop.rs`: `release`, `ReleaseValue`,
-  `free_record`, `step_record`; `Lower/Externs.lean`: `refSetFn`.
+  `free_record`, `free_unique`, `release_record`; `Lower/Externs.lean`:
+  `refSetFn`.
 - **Remove only if:** the `l2r_release_value` detour in `l2r_rc_set` can go
   if Reussir's `cell::set` stores before it releases and frees in Lean's
   order; the order inside `l2r_lcell_set` (plain Rust) must stay.
@@ -195,7 +198,9 @@ runtime.
   immediate is skipped and a count above 1 is decremented, as the array
   free does (`drop::ReleaseElems`). The last reference goes to
   `array::release_last` (`#[cold] #[inline(never)] extern "C"`), which
-  frees the record as `lean_dec` does (`drop::release`): inside a free the
+  frees the record as `lean_dec` does (`drop::release_unique`, which does
+  not test the count again; the record is one pending cell, see
+  [below](#the-last-reference-to-a-record-is-freed-as-one-pending-cell)): inside a free the
   runtime starts, so its fields go in Lean's order, the last one first,
   and the `sync` dependents of the promises it drops unresolved run when
   that free ends, before the set returns. Other element types are dropped
@@ -211,21 +216,21 @@ runtime.
   `{a, b}` replaced by a set (or removed by a pop) closed `a b`, natively
   `b a` (review RS10-01 of switch step 10; dev had it too; tests
   `RtArraySetFreeOrder`, `RtArrayPopFreeOrder`). `extern "C"`:
-  `drop::run` may unwind, and a Rust call is then an invoke with a landing
+  the free may unwind, and a Rust call is then an invoke with a landing
   pad in the texture, which stayed a call at six sites of `RtArraySets`.
-  Cost, switch step 10 (cachegrind, small sizes, against dev): a set that
-  frees the replaced record pays for the free the runtime starts, about
-  140 instructions (`drain_slow` 64, `run_step` 33, `step_record` 11,
-  `release_last` 11, the stack's `memmove`/`memcpy` 13, `free_record` 3),
-  the same per-free cost as a reference set that frees its old value
-  (`l2r_rc_set`). Correctness first: unionfind (174,000 freeing sets of
-  `{find, rank : Nat}`) runs 4.6% more instructions than dev (9.4% more
-  than with the record's own release out of line, which had it 4.4%
-  fewer); a micro loop of 300,000 sets each freeing a record of scalars
-  118% more, one with a record of two strings too 50% more. A set whose
-  replaced record is shared only decrements it in line: liasolver 3.9%
-  fewer instructions (the sets of a hash map's buckets), monadic-interp
-  0.6%. The immediate test costs 2 instructions per set of a record.
+  Cost (cachegrind, small sizes): a set that frees the replaced record
+  pays for the free the runtime starts, about 74 instructions since
+  switch step 11 (about 140 at step 10, when the record was a step: next
+  section), the same per-free cost as a reference set that frees its old
+  value (`l2r_rc_set`). Unionfind (174,000 freeing sets of
+  `{find, rank : Nat}`) runs 0.8% more instructions than dev d39294a
+  (step 10: 5.0% more than d39294a). Against dev 9a2ddf6 (step 10's
+  micro baseline): a micro loop of 300,000 sets each freeing a record of
+  five `UInt64`s runs 63% more (step 10: 118%), one with a record of two
+  strings too 19% more (step 10: 50%). A set whose replaced record is
+  shared only decrements it in line (step 10, against dev 9a2ddf6):
+  liasolver 3.9% fewer instructions (the sets of a hash map's buckets),
+  monadic-interp 0.6%. The immediate test costs 2 instructions per set of a record.
   `tests/runtime/ffi-inline-check.sh` builds `RtArraySets` (sets of
   every element representation in loops) to LLVM IR and fails when a
   set's texture or function stays a call; dev's runtime kept the two sets
@@ -238,9 +243,63 @@ runtime.
   `release`; tests `RtArraySets`, `RtArraySetFreeOrder`,
   `RtArrayPopFreeOrder`, `tests/runtime/ffi-inline-check.sh`.
 - **Remove only if:** never; the immediate skip depends on patch 0006, as
-  the array free's. A cheaper free of the last reference (a free-stack
-  drain that costs less, or the record's own release for element types
-  with no observable release) would remove the cost.
+  the array free's. The record's own release for element types with no
+  observable release, or a cheaper drain of one cell in Reussir's
+  runtime, would remove the rest of the cost.
+
+### The last reference to a record is freed as one pending cell
+
+- **What:** `drop::release` (reference and cell sets) and
+  `drop::release_unique` (`array::release_last`: a set or a pop that
+  removes the last reference) free a record whose count is 1 (aarch64,
+  8-byte `Bridge`) with `drop::free_unique`: `__reussir_drop_defer(p,
+  release_record::<X>)` puts the record on the thread's pending stack as
+  one deferred cell (a deferral that is not `_wide` writes nothing into
+  the cell), and `__reussir_drop_drain()` releases it. Outside a free that
+  is Reussir's drain of one pending cell (`drain_one`, local patch 0014):
+  the drain starts, `release_record` runs the record's
+  `<record>_ffi_release` inside it (its fields go on the stack and come
+  out last first), and the drain ends, through the general loop only when
+  the release pushed work; the end of the drain calls
+  `__reussir_drop_drained` (patch 0040: the promise resolutions put off,
+  `task::drained`). Inside a free the cell is only pushed (above the run
+  on top, which moves to the vector) and is released when the free pops
+  it. `release_unique` does not test the count again (its caller did). On
+  other targets (the immortal encoding: the count is not tested) the
+  record's release is a step (`drop::run`, `step_record`).
+- **Why:** At switch step 10 the record was a step (`drop::run`:
+  `run_step` writes a `Work::Step` into the stack's vector, the drain
+  dispatches it and moves the entries above it down with `memmove`):
+  about 140 instructions per freed record (`drain_slow` 64, `run_step` 33,
+  `step_record` 11, `release_last` 11, `memmove`/`memcpy` 13,
+  `free_record` 3). As one pending cell: about 74 (cachegrind, the loop
+  of 300,000 sets each freeing a record of five `UInt64`s: `drain_one` 26,
+  `__reussir_drop_drain` 18, `__reussir_drop_defer` 17, `release_last` 7,
+  `release_record` 6 with the record's own free). The order is the same:
+  in both forms the record's release runs inside the drain on top of the
+  stack as it was, and the stack is popped last pushed first. Totals
+  (step 10 in brackets): unionfind +0.8% against dev d39294a (+5.0%);
+  the micro loop 58.1 M instructions (77.9 M; dev 9a2ddf6 35.7 M), with a
+  record of two strings too 87.4 M (109.6 M; dev 9a2ddf6 73.3 M); 16 of
+  the other 17 classic programs as at step 10 (within 0.02%), and
+  binarytrees +2.9%
+  from code layout only (an
+  identical `.rr`; `check` has four alignment `nop`s before its loop,
+  executed once per call, and an erratum-843419 veneer moved to a load
+  in `make'`).
+- **Where:** `runtime/leanrt/src/drop.rs`: `release`, `release_unique`,
+  `ReleaseValue`, `free_record`, `free_unique`, `release_record`,
+  `step_record`; `runtime/leanrt/src/array.rs`: `release_last`;
+  Reussir's `reussir_rt::drop` (`__reussir_drop_defer`,
+  `__reussir_drop_drain`, `drain_one`). Tests: leanrt's unit tests
+  `drop::tests::record_free_order` and `record_free_inside_a_free`;
+  `RtArraySetFreeNested` (a set, a pop and a reference set freeing
+  structures that hold structures and a list), `RtArraySetFreeOrder`,
+  `RtArrayPopFreeOrder`, `RtRefSetOrder`, `RtPromiseFreeLaterUnresolved`.
+- **Remove only if:** Reussir's pending stack changes what a deferral
+  that is not `_wide` does (the drain releases the cell with the given
+  function and writes nothing into it) or what a drain of one pending
+  cell does; then the step (`run`) is the fallback.
 
 ### Reads give their reference up first, for a view
 

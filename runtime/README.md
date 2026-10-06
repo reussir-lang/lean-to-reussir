@@ -106,7 +106,7 @@ and hot paths in `leanrt` and the prelude, which call lean-runtime for the
 rest.
 
 - **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
-  pinned at a commit of its `main` (now `e5e502e`). Clone lean2rr with
+  pinned at a commit of its `main` (now `dce982d`). Clone lean2rr with
   `git clone --recurse-submodules`, or run `git submodule update --init
   third_party/lean-runtime` in a checkout, and again after a checkout,
   merge or pull that moves the pin: git does not update a submodule on its
@@ -1118,6 +1118,15 @@ lean2rr's dev branch (the tests pass with it).
     their Lean bodies in their place (translation plan §5.8): it rejects a
     program that reaches one, naming each (test `RtLeanUnsupported`,
     expected to fail).
+33. A reference set that is the reference's last use frees the new value
+    before the old one: `l2r_rc_set` takes the reference's cell, and the
+    cell's last use is the store, so the cell (and with it the new value,
+    when the reference held the last reference to it) is released before
+    `l2r_release_value` releases the old value. Natively `ST.Ref.set`
+    borrows the reference (`@&`): the old value is released inside the
+    set, and the caller releases the reference afterwards. A structure of
+    two handles closes "new.b new.a old.b old.a" (natively "old.b old.a
+    new.b new.a"); test `RtRefSetLastUse`, expected to fail.
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store enum-like values directly; and `mi_free` takes mimalloc's

@@ -426,7 +426,8 @@ extern "C" fn push_slow<T: Clone>(mut v: RVec<T>, x: T) -> RVec<T> {
 /// record (`Bridge`, see `CloneInto`) has only its decrement in line, as
 /// `rc.dec` does it: a count above 1 is decremented here, and the last
 /// reference goes to `release_last`, out of line, which frees the record
-/// as `drop::release` does: inside a free the runtime starts, so its
+/// as `drop::release` does (`drop::release_unique`, without testing the
+/// count again): inside a free the runtime starts, so its
 /// fields go in Lean's order, its last field first, and the `sync`
 /// dependents of the promises it drops unresolved run when that free ends,
 /// before the set returns (the record's own `_ffi_release`, which the set
@@ -445,10 +446,12 @@ extern "C" fn push_slow<T: Clone>(mut v: RVec<T>, x: T) -> RVec<T> {
 /// inline into Reussir code (an instruction-count profile: unionfind's
 /// `l2r_array_set<nodeData>`, 6.9 % of its instructions, about 12 of 29 per
 /// call the call's own cost); now it is inlined. A set that frees the
-/// replaced record pays for the free the runtime starts: about 140
-/// instructions (cachegrind: `drain_slow` 64, `run_step` 33, `step_record`
-/// 11, `release_last` 11, the stack's `memmove`/`memcpy` 13, `free_record`
-/// 3), as a reference set that frees its old value does (`l2r_rc_set`).
+/// replaced record pays for the free the runtime starts, with the record
+/// as one pending cell (`drop::free_unique`): about 74 instructions
+/// (cachegrind: Reussir's `drain_one` 26, `__reussir_drop_drain` 18,
+/// `__reussir_drop_defer` 17, `release_last` 7, `drop::release_record` 6
+/// with the record's own free), as a reference set that frees its old
+/// value does (`l2r_rc_set`).
 trait ReleaseElem: Sized {
     unsafe fn release_elem(x: Self);
 }
@@ -481,14 +484,15 @@ impl<X> ReleaseElem for reussir_rt::bridge::Bridge<X> {
 }
 
 /// The last reference to an element that a set or a pop removes (or any
-/// record on a target without the aarch64 encoding): `drop::release`, a
-/// free the runtime starts (`ReleaseElem`). `extern "C"`: `drop::run` may
-/// unwind, and a Rust call would be an invoke with a landing pad in the
-/// texture, which then stayed a call at six sites of `RtArraySets`.
+/// record on a target without the aarch64 encoding): freed inside a free
+/// the runtime starts (`drop::release_unique`: the count, found at 1 by
+/// `ReleaseElem`, is not tested again). `extern "C"`: the free may unwind,
+/// and a Rust call would be an invoke with a landing pad in the texture,
+/// which then stayed a call at six sites of `RtArraySets`.
 #[cold]
 #[inline(never)]
 extern "C" fn release_last<T>(x: T) {
-    crate::drop::release(x)
+    unsafe { crate::drop::release_unique(x) }
 }
 
 /// Replace element `i` of the unique block `o` (in bounds: else a runtime

@@ -794,7 +794,8 @@ Paths are relative to the repository root.
   liasolver 14.7% fewer, strings 19.9%, monadic-interp 1.9%, qsort
   0.15%, and unionfind 4.6% more: a set that frees the record it replaces
   now frees it in Lean's order through the runtime's free (review
-  RS10-01), about 140 instructions per free
+  RS10-01), about 140 instructions per free (about 74 since switch step
+  11, next section)
   ([../ownership.md](../ownership.md#a-set-releases-a-replaced-record-with-its-decrement-in-line)).
 - **Tests:** leanrt's unit test `big::tests::word_methods_match_defaults`
   (each override against the trait's default, big operands at the word
@@ -810,6 +811,47 @@ Paths are relative to the repository root.
   `div_limb`).
 - **Remove only if:** never (speed only); the overrides must give the
   defaults' values (the unit test).
+
+### A record's last reference is one pending cell; one-shot signal watchers (switch step 11)
+
+- **What:** lean-runtime pinned at `dce982d` (main: fixes-9, 8dc5224;
+  fixes-10, 6de95aa; cases-1, 68a32e6 and 927922b, the crate's case
+  tooling and expectations; fixes-11, dce982d). The fixes change only
+  `src/sched/uv_signals.rs`, the delivery of signals to one-shot watchers
+  (`Std.Internal.UV.Signal.mk n false`, natively `SA_RESETHAND`): a signal's handler
+  checks the flag the loop can change before its byte wakes the loop, and
+  each one-shot registration's reset is a pair on a fresh flag of its own
+  (fixes-9); a one-shot registration delivers one signal, and the loop
+  drops a later one until the next registration, as the kernel's default
+  action after the reset discards a signal it ignores (fixes-10); a later
+  signal of a spent registration whose default action ends the process
+  ends it, and a signal that came before a one-shot re-registration does
+  not spend it (fixes-11). No API change: leanrt, the prelude and the
+  generated code are unchanged by the pin. The same step frees the last
+  reference to a record that a set, a pop or a reference or cell set
+  gives up as one pending cell of Reussir's stack instead of a step
+  ([../ownership.md](../ownership.md#the-last-reference-to-a-record-is-freed-as-one-pending-cell)).
+- **Why:** The pin: a one-shot watcher started in a dependent of another
+  one-shot watcher's promise got a second signal that natively the reset
+  discards, a stopped last watcher between the loop's wake-up and the
+  handler's check could end the process, and a signal that came before a
+  one-shot re-registration spent it, so the loop dropped the next one
+  (the crate's cases `uvloop/signal_reset_*`). The free: about 74 instructions per freed
+  record instead of about 140; unionfind 0.8% more instructions than dev
+  d39294a (step 10: 5.0% more than d39294a), the same release order.
+- **Tests:** `RtSignal`, `RtSignalFd`, the timer and network tests
+  (`RtTimer`, `RtTimerSyncSleep`, `RtTimerPeriod0`, `RtTimerStopDropped`,
+  `RtTcp`, `RtUdp`, `RtSockCancel`, `RtNetEffectPoll`, `RtUvSysLimits`,
+  `RtTaskEffectRounds`, `RtSystem`); leanrt's unit tests
+  `drop::tests::record_free_order` and `record_free_inside_a_free`; the
+  new test `RtArraySetFreeNested`; the free-order tests
+  (`RtArraySetFreeOrder`, `RtArrayPopFreeOrder`, `RtArrayRecordFreeOrder`,
+  `RtDropOrder*`, `RtPromise*FreeOrder`, `RtPromiseFreeLaterUnresolved`,
+  `RtRefSet*`).
+- **Where:** lean-runtime's `src/sched/uv_signals.rs` and `docs/sched.md`;
+  leanrt's `runtime/leanrt/src/drop.rs` (`free_unique`, `release_unique`,
+  `release_record`) and `runtime/leanrt/src/array.rs` (`release_last`).
+- **Remove only if:** never.
 
 ### leanrt is built and linked with the shared crate lean-runtime
 

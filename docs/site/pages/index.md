@@ -152,11 +152,15 @@ Merged from 2026-10-04 to 2026-10-06:
   and a fix of a scheduler wait that could wait for ever (step 9).
 - **Fast paths in the runtime library** (step 10): `Float.toString`,
   `Int` with one small operand, `Int` and string equality, array sets of
-  records. Instruction counts: strings −19.9%, liasolver −14.7%,
-  unionfind +4.6%. An array set that frees the last reference to a record
-  releases its fields last first, as Lean does; this costs about 140
-  instructions per freed record (see
+  records. Instruction counts against step 9: strings −20.2%, liasolver
+  −14.4%, unionfind +5.0%. An array set that frees the last reference to a record
+  releases its fields last first, as Lean does (see
   [Runtime](runtime.html#fast-paths-of-the-runtime-library-step-10)).
+- **Signal watchers and the record free** (step 11): a one-shot signal
+  watcher gets one signal (lean-runtime's fixes-9 to fixes-11). A set, a
+  pop or a reference set that frees the last reference to a record puts
+  the record on the pending stack as one cell: about 74 instructions per
+  freed record, and unionfind +0.8% against step 9.
 - **The extern rule** (above).
 - **`conv-liveness`**, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see [Optional passes](passes.html)).

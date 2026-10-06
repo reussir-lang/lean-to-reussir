@@ -109,12 +109,17 @@ schedules native Lean can produce. See
   itself, Reussir's inline release goes in field order: a list of handles
   `L0 … L7` closes `L0 L7 L6 … L1` (natively `L7 … L0`). An array set or
   pop that frees the last reference to a record releases its fields last
-  first, as Lean does.
+  first, as Lean does. One case below the first cell is open: a cell whose
+  last record field comes before an array field releases the record
+  field's contents first (test `RtNestedArrayFreeOrder`, expected to fail;
+  the fix is a Reussir patch).
 - **Release time of borrowed parameters.** lean2rr emulates Lean's borrowing
   for values that can hold a resource, with Lean's inference run on
   lean2rr's instances. Where Lean infers its own specializations
   differently, the release time follows lean2rr's instance. Resources inside
-  closures and thunks are released at their last use.
+  closures and thunks are released at their last use. A reference `set`
+  that is the reference's last use frees the new value before the old one
+  (test `RtRefSetLastUse`, expected to fail).
 - **Promises released inside a free.** Their `sync` dependents run when the
   whole free is over, not when the free reaches the promise. So they see
   the rest of the container released too. Another unresolved promise of the

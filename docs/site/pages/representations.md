@@ -87,9 +87,10 @@ size without asking mimalloc: there, mimalloc's sizes are all multiples of 8.
   the read.
 - **Sets.** A set (or a pop) releases the element that it removes. For a
   record, only the decrement is inline, so LLVM inlines the set into the
-  loop. When the set frees the last reference to a record, a call releases
-  the record's fields last first, as Lean does. This costs about 140
-  instructions per freed record.
+  loop. When the set frees the last reference to a record, a call puts the
+  record on the pending stack as one cell, and the free releases the record's
+  fields last first, as Lean does. This costs about 74 instructions per
+  freed record.
 - **String equality.** Strings of different lengths are not equal. Two
   references to the same string are equal. Other strings compare their
   bytes.
