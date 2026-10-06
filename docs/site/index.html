@@ -224,6 +224,12 @@ other results are the last recorded runs.</p>
 <li><strong>Library initializers at startup.</strong> The <code>initialize</code> declarations of
   <code>Init</code> and <code>Std</code> (<code>IO.stdGenRef</code>) run at their module's place, also when
   the program does not use them, as natively.</li>
+<li><strong>Array reads without counting traffic.</strong> A read releases its
+  container first, takes the element from a view and keeps every read
+  function small enough to inline (see
+  <a href="representations.html#strings-and-arrays">Representations</a>). In
+  lean-zip's compression loop, the counting stores fell from 77 to 47 and
+  the read calls from 281 to 2.</li>
 <li><strong>Reussir.</strong> Patches 0065 and 0066 are applied. Each
   entry is now a numbered <em>issue</em> with a kind: only a <em>bug</em> is wrong
   behaviour (see <a href="reussir.html#all-entries">Reussir</a>).</li>

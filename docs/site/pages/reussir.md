@@ -121,6 +121,11 @@ Not bugs, but each one costs lean2rr measurably:
   container owned. A traversal that keeps the nodes it visits pays
   increments and releases that native Lean does not (about 1.5× native on
   such a traversal).
+- **Inlining of runtime calls (issue 36, a missed optimization).** rrc's
+  import trampolines carry no inline attribute, so LLVM inlines a runtime
+  function at a call site it judges cold only when the function is small.
+  lean2rr keeps its array and string read functions below that limit;
+  `tests/runtime/ffi-inline-check.sh` fails if a read stays a call.
 - **`[value]` types across the FFI boundary.** Arrays of `[value]` records
   need a wrapper (`ElemBox`).
 - **Guaranteed tail calls.** A mutual tail call is a sibling call only when

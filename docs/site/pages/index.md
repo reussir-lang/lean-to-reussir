@@ -155,6 +155,12 @@ Merged on 2026-10-04 and 2026-10-05:
 - **Library initializers at startup.** The `initialize` declarations of
   `Init` and `Std` (`IO.stdGenRef`) run at their module's place, also when
   the program does not use them, as natively.
+- **Array reads without counting traffic.** A read releases its
+  container first, takes the element from a view and keeps every read
+  function small enough to inline (see
+  [Representations](representations.html#strings-and-arrays)). In
+  lean-zip's compression loop, the counting stores fell from 77 to 47 and
+  the read calls from 281 to 2.
 - **Reussir.** Patches 0065 and 0066 are applied. Each
   entry is now a numbered *issue* with a kind: only a *bug* is wrong
   behaviour (see [Reussir](reussir.html#all-entries)).

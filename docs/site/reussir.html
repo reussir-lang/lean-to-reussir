@@ -155,6 +155,11 @@ repro on a given rrc and prints <code>REPRODUCES</code> or <code>FIXED</code> fo
   container owned. A traversal that keeps the nodes it visits pays
   increments and releases that native Lean does not (about 1.5× native on
   such a traversal).</li>
+<li><strong>Inlining of runtime calls (issue 36, a missed optimization).</strong> rrc's
+  import trampolines carry no inline attribute, so LLVM inlines a runtime
+  function at a call site it judges cold only when the function is small.
+  lean2rr keeps its array and string read functions below that limit;
+  <code>tests/runtime/ffi-inline-check.sh</code> fails if a read stays a call.</li>
 <li><strong><code>[value]</code> types across the FFI boundary.</strong> Arrays of <code>[value]</code> records
   need a wrapper (<code>ElemBox</code>).</li>
 <li><strong>Guaranteed tail calls.</strong> A mutual tail call is a sibling call only when
