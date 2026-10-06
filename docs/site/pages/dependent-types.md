@@ -56,8 +56,18 @@ def pick (α : lcErased) (b : Bool) (x : lcAny) (y : lcAny) : lcAny :=
   the type of the result of the whole match, not the type of `b`.
 
 lean2rr makes a copy of `pick` for each type argument that the program
-uses. In the copy at `Nat`, `x` and `y` are `Nat` values. A copy at an
-unknown type uses `L2RBox` for `x` and `y`.
+uses. The program on this page calls `pick Nat`. lean2rr generates this
+copy (checked with `--keep-rr`):
+
+```rust
+fn l_pick___l2r_0____redArg(a656 : bool, a657 : Nat, a658 : Nat) -> Nat {
+    if a656 { a657 } else { a658 }
+}
+```
+
+- `_redArg` is the copy without the erased parameter `α`.
+- In the copy at `Nat`, `x` and `y` are `Nat` values. A copy at an unknown
+  type uses `L2RBox` for `x` and `y`.
 
 In Rust terms, an `L2RBox` is similar to a `Box<dyn Any>`.
 
@@ -76,25 +86,32 @@ The set of variants is finite. It stays finite when polymorphic recursion
 makes the set of types infinite. lean2rr compiles the whole program at one
 time, so it knows all the variants.
 
-For the examples on this page, the enum has three variants:
+All the examples on this page are in one program. For that program,
+lean2rr generates this enum:
 
 ```rust
 enum L2RBox {
-    b0(L2RUnit),   // the unit variant: Lean's box(0)
-    b1(LStr),      // a String
-    b2(Nat)        // a Nat
+    b0(L2RUnit),      // the unit variant: Lean's box(0)
+    b1(LStr),         // a String
+    b2(Nat),          // a Nat
+    b3(L2RRef291),    // a reference cell (IO.stdGenRef, made at startup)
+    b4(T_Prod_766),   // a pair of two boxes (Prod lcAny lcAny)
+    b5(T_Prod_744)    // a pair of two Nats (Prod Nat Nat)
 }
 ```
 
-Code that needs the value matches the variant. This code reads one element
-of an array of boxes as a `String`:
+`b4` and `b5` are two layouts of `Prod`. The current version gives each
+type argument its own layout (see [The current version](#the-current-version)).
+
+Code that needs the value matches the variant. This code, from `describe`
+below, takes a `String` out of an `L2RBox` (`a705`):
 
 ```rust
-let s : LStr = match lean_array_uget<L2RBox>(d, i) {
-    L2RBox::b1(s) => { s },                // the String variant
-    L2RBox::b0(_) => { l2r_zero_LStr() },  // Lean's box(0): the zero String
-    _ => { l2r_unreachable<LStr>() }       // no other variant holds a String
-};
+match a705 {
+    L2RBox::b1(ub714) => { ub714 },          // the String variant
+    L2RBox::b0(_) => { l2r_zero_715() },     // Lean's box(0): the empty String
+    _ => { l2r_unreachable<LStr>() }         // no other variant holds a String
+}
 ```
 
 Lean's type checker makes sure that the value is a `String` at this point.
@@ -232,24 +249,30 @@ def Column.push (c : Column) (i : Nat) : Column :=
 - `Array.push ◾ data.2 i`: the first argument is the element type. It is
   `◾`: it holds no data.
 
-lean2rr generates this code (abridged, names shortened):
+lean2rr generates this code (checked with `--keep-rr`):
 
 ```rust
-struct T_Column(RVec<L2RBox>, T_Ty)   // data, then ty
-enum [value] T_Ty { c_nat, c_str }    // stored inline, never allocated
+struct T_Column_686(RVec<L2RBox>, T_Ty_33)   // data, then ty
+enum [value] T_Ty_33 { c_nat, c_str }        // stored inline, never allocated
 
-fn Column_push(c : T_Column, i : Nat) -> T_Column {
-    let ty : T_Ty = c.1;
-    let d : RVec<L2RBox> = c.0;
-    match ty {
-        T_Ty::c_nat => {
-            let d2 : RVec<L2RBox> = lean_array_push<L2RBox>(d, L2RBox::b2{i});
-            T_Column{d2, T_Ty::c_nat{}}
-        },
-        T_Ty::c_str => {
-            let s : LStr = l2r_nat_repr(i);
-            let d2 : RVec<L2RBox> = lean_array_push<L2RBox>(d, L2RBox::b1{s});
-            T_Column{d2, T_Ty::c_str{}}
+fn l_Column_push___l2r_0_(a687 : T_Column_686, a688 : Nat) -> T_Column_686 {
+    {
+        let f689 : T_Ty_33 = a687.1;
+        let f690 : RVec<L2RBox> = a687.0;
+        match f689 {
+            T_Ty_33::c_nat => {
+                let nc691 : T_Ty_33 = T_Ty_33::c_nat{};
+                let x692 : RVec<L2RBox> = lean_array_push<L2RBox>(f690, L2RBox::b2{a688});
+                let x693 : T_Column_686 = T_Column_686{x692, nc691};
+                x693
+            },
+            T_Ty_33::c_str => {
+                let nc694 : T_Ty_33 = T_Ty_33::c_str{};
+                let x695 : LStr = l2r_nat_repr(a688);
+                let x696 : RVec<L2RBox> = lean_array_push<L2RBox>(f690, L2RBox::b1{x695});
+                let x697 : T_Column_686 = T_Column_686{x696, nc694};
+                x697
+            }
         }
     }
 }
@@ -314,12 +337,53 @@ def describe (x.1 : Bool) (x.2 : lcAny) : String :=
   uses it as a `String` (`String.append`). The `true` branch uses it as a
   `Nat` (`Nat.add`).
 
-Both functions use the type `L2RBox` for that position:
+lean2rr generates this code (checked with `--keep-rr`; the accessors of
+the string constants are left out):
 
 ```rust
-fn pickT(b : bool) -> L2RBox                // L2RBox::b2{42} or L2RBox::b1{"hello"}
-fn describe(b : bool, v : L2RBox) -> LStr   // each branch takes v out of its variant
+fn l_pickT___l2r_0_(a699 : bool) -> L2RBox {
+    if a699 {
+        let x700 : Nat = l2r_nat_small(42);
+        L2RBox::b2{x700}
+    } else {
+        let x701 : LStr = l_pickT___l2r_0____closed__0();   // "hello"
+        L2RBox::b1{x701}
+    }
+}
+
+fn l_describe___l2r_0_(a704 : bool, a705 : L2RBox) -> LStr {
+    if a704 {
+        let x706 : LStr = l_describe___l2r_0____closed__1();   // "nat "
+        let x707 : Nat = l2r_nat_small(1);
+        let x710 : Nat = lean_nat_add(match a705 {
+            L2RBox::b2(ub708) => { ub708 },
+            L2RBox::b0(_) => { l2r_zero_709() },
+            _ => { l2r_unbox_Nat(a705) }
+        }, x707);
+        let x711 : LStr = l2r_nat_repr(x710);
+        let x712 : LStr = lean_string_append(x706, x711);
+        x712
+    } else {
+        let x713 : LStr = l_describe___l2r_0____closed__0();   // "str "
+        let x716 : LStr = lean_string_append(x713, match a705 {
+            L2RBox::b1(ub714) => { ub714 },
+            L2RBox::b0(_) => { l2r_zero_715() },
+            _ => { l2r_unreachable<LStr>() }
+        });
+        x716
+    }
+}
 ```
+
+- `pickT` returns an `L2RBox`. The `true` branch puts 42 into the `Nat`
+  variant `b2`. The `false` branch puts `"hello"` into the `String` variant
+  `b1`.
+- `describe` takes the value as an `L2RBox` (`a705`). The `true` branch
+  takes a `Nat` out of `b2` and adds 1. The `false` branch takes a `String`
+  out of `b1` and appends it.
+- In each `match`, the second arm is Lean's `box(0)` placeholder: it gives
+  the zero of the type. The last arm does not run: `l2r_unbox_Nat` also
+  ends in `l2r_unreachable` for the other variants.
 
 ### Sigma types
 
@@ -358,6 +422,20 @@ def entries : List (Sigma Ty lcAny) :=
   pair does not store them.
 - The second component (`5`, `"five"`) is an `L2RBox`.
 
+lean2rr generates this pair type and these two pairs (checked with
+`--keep-rr`):
+
+```rust
+struct T_Sigma_32(L2RBox, T_Ty_33)   // the second component, then the first
+
+let x44 : T_Sigma_32 = T_Sigma_32{L2RBox::b2{x43}, x42};   // ⟨.nat, 5⟩
+let x36 : T_Sigma_32 = T_Sigma_32{L2RBox::b1{x34}, x35};   // ⟨.str, "five"⟩
+```
+
+- The first component is a `T_Ty_33` (the enumeration `Ty`).
+- The second component is an `L2RBox`: `5` is in the `Nat` variant, and
+  `"five"` is in the `String` variant.
+
 ### A type stored in a field
 
 ```lean
@@ -392,8 +470,36 @@ def Pkg.show (p : Pkg) : String :=
 - The field `val` is `lcAny`. It is an `L2RBox`.
 - The field `fmt` takes an `lcAny`. It takes an `L2RBox`.
 
-The code that builds a package knows the type of `val`. It puts `val` into
-its variant. The function `fmt` takes the value out of that variant.
+lean2rr generates this code (checked with `--keep-rr`):
+
+```rust
+struct T_Pkg_739(L2RBox, L2RFn_F6nL2RBox4nLStr)   // val, fmt; α has no field
+
+enum L2RFn_F6nL2RBox4nLStr {                       // a function value: L2RBox -> LStr
+    z,
+    raw(L2RBox -> LStr),
+    wF10nT_Prod_7664nLStr(L2RFn_F10nT_Prod_7664nLStr),
+    wF10nT_Prod_7444nLStr(L2RFn_F10nT_Prod_7444nLStr),
+    wF3nNat4nLStr(L2RFn_F3nNat4nLStr)              // wraps a Nat -> LStr function
+}
+
+fn l_Pkg_show___l2r_0_(a740 : T_Pkg_739) -> LStr {
+    {
+        let f741 : L2RBox = a740.0;
+        let f742 : L2RFn_F6nL2RBox4nLStr = a740.1;
+        let x743 : LStr = l2r_ap1_F6nL2RBox4nLStr(f742, f741);
+        x743
+    }
+}
+```
+
+- A `Pkg` has two fields: `val` is an `L2RBox`, and `fmt` is a function
+  value that takes an `L2RBox`.
+- The program builds `⟨Nat, 5, toString⟩`. `toString` at `Nat` takes a
+  `Nat`, so lean2rr stores it in the variant `wF3nNat4nLStr`. A call through
+  that variant takes the `Nat` out of the box, then calls `toString`.
+- `Pkg.show` reads the two fields and applies `fmt` to `val`
+  (`l2r_ap1_…`).
 
 ### Polymorphic recursion
 
@@ -425,7 +531,33 @@ def nest._redArg (inst.1 : lcAny → String) (x.2 : Nat) (x.3 : lcAny) : String 
 
 The types grow without end: `Nat`, `Nat × Nat`, and so on. lean2rr compiles
 one copy of `nest` for these calls. In that copy, `x` is an `L2RBox`, and
-the `ToString` dictionary is a value that the copy receives.
+the `ToString` dictionary is a value that the copy receives (checked with
+`--keep-rr`):
+
+```rust
+fn l_nest___l2r_1____redArg(a789 : L2RFn_F6nL2RBox4nLStr, a790 : Nat, a791 : L2RBox) -> LStr {
+    let x792 : L2RFn_F10nT_Prod_7664nLStr = L2RFn_F10nT_Prod_7664nLStr::p2_dl_instToStringProd___l2r_1____redArg___lam__0{a789, a789};
+    let x793 : Nat = l2r_nat_small(0);
+    let x794 : bool = lean_nat_dec_eq(a790, x793);
+    if x794 {
+        let x795 : LStr = l2r_ap1_F6nL2RBox4nLStr(a789, a791);
+        x795
+    } else {
+        let x796 : Nat = l2r_nat_small(1);
+        let x797 : Nat = lean_nat_sub(a790, x796);
+        let x798 : T_Prod_766 = T_Prod_766{a791, a791};
+        let x799 : LStr = l_nest___l2r_1____redArg(l2r_fconv_F10nT_Prod_7664nLStr_F6nL2RBox4nLStr(x792), x797, L2RBox::b4{x798});
+        x799
+    }
+}
+```
+
+- `a791` is `x`, an `L2RBox`. `a789` is the `ToString` dictionary: a
+  function value that takes an `L2RBox`.
+- At count 0, the copy applies the dictionary to `x`.
+- Else it builds the pair `(x, x)` as a `T_Prod_766` (two boxes), puts the
+  pair into the variant `b4`, and calls itself. The dictionary for the pair
+  is wrapped (`l2r_fconv_…`) so that it also takes an `L2RBox`.
 
 ### A partial application that leaves a type open
 
@@ -457,7 +589,25 @@ def ops : List ({α : lcErased} → List lcAny → Nat) :=
   type argument is erased, and the list holds values of an unknown type.
 
 The function in the field takes a list whose elements are `L2RBox`
-values.
+values (checked with `--keep-rr`):
+
+```rust
+enum T_List_0 {                  // List lcAny
+    c_nil,
+    c_cons(L2RBox, T_List_0)
+}
+
+fn l_ops___l2r_0____lam__0(a18 : L2RUnit, a19 : T_List_0) -> Nat {
+    let x20 : Nat = l_List_lengthTR___l2r_0____redArg(a19);
+    let x21 : Nat = l2r_nat_small(2);
+    let x22 : Nat = lean_nat_mul(x20, x21);
+    x22
+}
+```
+
+- `a18` is the erased type argument: an `L2RUnit`, which holds no data.
+- `a19` is the list: each cell holds an `L2RBox` and the rest of the list.
+- The function counts the cells and multiplies by 2.
 
 ## The current version
 
