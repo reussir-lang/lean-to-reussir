@@ -242,7 +242,7 @@ garbage.</p>
 </tr>
 <tr>
 <td>Constants read in a loop</td>
-<td>a once-cell check at each read</td>
+<td>one load and a test per read (native: one load for a named constant; two loads and a test for a closed term); a constant whose bits are all 0 needs a second load</td>
 </tr>
 <tr>
 <td>No borrowed parameters</td>

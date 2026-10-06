@@ -170,7 +170,7 @@ garbage.
 | `ElemBox` for array elements that cannot cross the FFI | one allocation per element |
 | Reads take their container owned | an increment and a release per read, unless LLVM cancels them |
 | One-block arrays | a 16 MiB payload (a hash table's 2^21 buckets) becomes a huge mimalloc segment, freed late |
-| Constants read in a loop | a once-cell check at each read |
+| Constants read in a loop | one load and a test per read (native: one load for a named constant; two loads and a test for a closed term); a constant whose bits are all 0 needs a second load |
 | No borrowed parameters | a traversal that keeps the nodes it visits writes counts native Lean only reads (about 1.5×) |
 
 ## Lean bugs we do not reproduce

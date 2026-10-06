@@ -206,7 +206,10 @@ runtime.
   (`l2r_pos_of_word`) and release it after the read.
 - **Why:** LLVM removes the increment and the decrement together only when
   no call and no other store come between them on any path (Reussir's
-  `rc.inc` lets it assume the old count was at least 1). Three earlier
+  `rc.inc` lets it assume the old count was at least 1; so do the
+  runtime's clones of array and string handles, such as a constant's read,
+  `l2r_once_get`: [startup/constants.md](startup/constants.md), "A read of
+  a constant is one load"). Three earlier
   forms kept them (lean-zip's LZ77 loop, count stores on its hot paths;
   perf-array-reads): the texture checked the bounds and released after
   (the panic's call came between: 77 stores; and 279 of lean-zip's array

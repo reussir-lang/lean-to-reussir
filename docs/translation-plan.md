@@ -2018,7 +2018,10 @@ fn l_main___l2r_0____closed__0_init() -> LStr {
     x504
 }
 fn l_main___l2r_0____closed__0() -> LStr {
-    if l2r_once_claim(28) { l2r_once_get<LStr>(28) } else { l2r_once_set<LStr>(28, l_main___l2r_0____closed__0_init()) }
+    let r : u64 = if l2r_once_ready(28) { 0 } else {
+        if l2r_once_claim(28) { 0 } else { l2r_once_put<LStr>(28, l_main___l2r_0____closed__0_init()) }
+    };
+    l2r_once_get<LStr>(28)
 }
 fn l_main___l2r_0_(a505 : L2RUnit) -> T_EST_Out_348 {
     let x506 : LStr = l_main___l2r_0____closed__0();
@@ -2339,15 +2342,28 @@ overflows its stack on a few thousand. An error in a step exits from inside
 it, so later steps do not run.
 
 The storage is a runtime once-cell per constant (the prelude's
-`l2r_once_claim`/`get`/`set` over `leanrt::once`), holding a value that is
-never freed. `l2r_once_claim` answers whether the value is there; if not,
-the caller computes it, and another context of the scheduler (§5.14) that
-needs it meanwhile (the computation blocked) waits until it is set, as
-natively a thread waits for the one computing a closed term
-(`lean_obj_once_cold` holds a lock); needed again by the context computing
-it, it waits forever, as natively. A value that is not a pointer-sized boundary type is wrapped in
-an `ElemBox` struct. The same slots back the runtime's mutable cells
-(`l2r_cell_swap`). Reussir globals would be a cheaper replacement.
+`l2r_once_ready`/`claim`/`put`/`get` over `leanrt::once`), holding a value
+that is never freed. Each slot's word and set flag are also kept in static
+tables at fixed addresses (`leanrt::once::FAST`, `FLAGS`), so that a read
+of a set constant is one load from a constant address and a test
+(`l2r_once_ready`), then the reference's increment (`l2r_once_get`, whose
+load LLVM merges with the first): a load fewer than a native closed
+term's `lean_obj_once` (its state, then its value), a test more than a
+native named constant (a global's load). A value whose bits are all 0
+(its word is 0) costs a second load, of its flag; no read calls out.
+When the slot is not set, `l2r_once_claim` decides who computes the
+value: the caller computes it (`l2r_once_put` stores it), and another
+context of the scheduler (§5.14) that needs it meanwhile (the computation
+blocked) waits until it is set, as natively a thread waits for the one
+computing a closed term (`lean_obj_once_cold` holds a lock); needed again
+by the context computing it, it waits forever, as natively. A value that
+is not a pointer-sized boundary type is wrapped in an `ElemBox` struct.
+The tables' words and flags are plain loads and stores: Lean code runs
+on one thread at a time (the initializers', then `main`'s); with Lean
+code on several threads, the store would have to release and the load
+acquire. The same slots back the runtime's mutable cells
+(`l2r_cell_swap`). Reussir has no global variables; they would not be
+cheaper than the table.
 
 ### 5.13 Names
 
@@ -2748,7 +2764,8 @@ tasks are mutable by design).
 work runs or what the program computes:
 - `[value]` for small non-recursive structs;
 - borrowed parameters, if Reussir adds them;
-- globals for constants;
+- globals for constants (done without them: a constant's read is one
+  load from a runtime table at a fixed address, §5.12);
 - re-running Lean's `specialize` after monomorphization.
 
 The lowering keeps Reussir's job easy:
@@ -3284,7 +3301,13 @@ Each item says what differs and when.
   bucket array after each update while a parked version is live, went from
   1.79x native to 1.05x with this.
 - *Constants read in a loop* (a top-level `Array` or `String` table)
-  check their once-cell on every read: Pf4BigLit 1.16x native.
+  test their once-cell's word on every read: one load and a test, where
+  a native named constant is one load and a native closed term
+  (`lean_obj_once`) two loads and a test (§5.12). The reference's
+  increment stays when the read is not right before a read from the
+  table (a use in between). A constant whose bits are all 0 (a computed
+  `UInt64`, `Float` or `UInt8` 0, `false`) costs a second load, of its
+  set flag.
 
 **Runtime** (details in `runtime/README.md`, "Known divergences")
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`;

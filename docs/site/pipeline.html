@@ -333,7 +333,9 @@ entry point or from the runtime's entries. See
   until their first use. The other constants of Lean's library are pure,
   and lean2rr evaluates them lazily.</li>
 <li>A constant is a <em>once-cell</em> with an accessor. The value is computed once
-  and never freed.</li>
+  and never freed. A read is one load and a test: the runtime keeps each
+  cell's value in a table at a fixed address, and a value whose bits are
+  all 0 also has a flag (a second load). No read is a call.</li>
 <li>Closed terms (<code>extractClosed</code>) are evaluated lazily, once.</li>
 <li>The startup work is cut into functions of at most 128 steps, because one
   long chain overflows rrc's stack.</li>

@@ -565,9 +565,13 @@ goes takes the glue and the stack, so the order of releases is unchanged.
 (Inside a free the array is pushed as before: a later field of the record
 being freed may hold one of its elements.)
 
-**Constants.** A constant's accessor tests its once-cell inline
-(`once::claim`'s fast path); the slow path, out of line, computes it or
-waits for the scheduler context computing it.
+**Constants.** A constant's accessor tests its slot's word in a static
+table at a fixed address (`once::ready`: one load, inline; 0 while the
+slot is empty, and then its set flag in a second table, a second load),
+then reads the same word (`once::get_raw`) and clones the value; the slow
+path (`once::claim`) computes it or waits for the scheduler context
+computing it. The tables (`once::FAST`, `once::FLAGS`) mirror the record
+of the slots (`once::SLOTS`).
 
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
 lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),

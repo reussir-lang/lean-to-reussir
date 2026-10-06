@@ -73,7 +73,20 @@ rest of the run, like native Lean's CAFs and closed terms (translation plan
 that may contain tasks first waits for them (`persistCall`), unless `walk`
 is false: a placeholder (`zeroTry`) is natively `box(0)`, which
 `lean_mark_persistent` never sees, and the never-forced `pending` cell one
-can hold must not be run. -/
+can hold must not be run.
+
+The accessor reads the cell in one place, after the test:
+
+    let r : u64 = if l2r_once_ready(k) { 0 }
+                  else { if l2r_once_claim(k) { 0 } else { l2r_once_put<T>(k, init) } };
+    l2r_once_get<T>(k)
+
+`l2r_once_ready` is one load from the runtime's table at a fixed address
+(the slot is a literal), and `l2r_once_get` loads the same word again,
+which LLVM merges: a read of a set constant is one load, a test and the
+increment, with no call. `l2r_once_claim` (the scheduler's wait for a
+context computing it, and the slots whose word is 0) and the computation
+are the slow path. -/
 def cafAccessor (name : String) (ret : RR.Ty) (walk := true) : LowerM RR.Item := do
   let slot ← getPart (·.cafSlots)
   modify fun s => { s with cafSlots := slot + 1 }
@@ -89,9 +102,11 @@ def cafAccessor (name : String) (ret : RR.Ty) (walk := true) : LowerM RR.Item :=
     | none => init
   -- `l2r_once_claim`: a context of the runtime's scheduler that needs the
   -- value while another computes it waits for it.
-  let body : RR.Block := .ofExpr (.ite (.call "l2r_once_claim" #[] #[k])
-    (.ofExpr (unwrap (.call "l2r_once_get" #[st] #[k])))
-    (.ofExpr (unwrap (.call "l2r_once_set" #[st] #[k, wrap init]))))
+  let zero := RR.Block.ofExpr (.atom "0")
+  let fill := RR.Expr.ite (.call "l2r_once_ready" #[] #[k]) zero
+    (.ofExpr (.ite (.call "l2r_once_claim" #[] #[k]) zero
+      (.ofExpr (.call "l2r_once_put" #[st] #[k, wrap init]))))
+  let body : RR.Block := ⟨#[("r", some (.named "u64"), fill)], unwrap (.call "l2r_once_get" #[st] #[k])⟩
   return .fn name #[] ret body
 
 /-- The placeholder of `t` (`zeroValue`), searched for depth first: a

@@ -61,7 +61,9 @@ and passes").
   `Nat`/`Int` variables it binds and accepts `Nat.succ` below 2^63 and
   `Int.ofNat`/`Int.negSucc` of `int32` values only.
 - **Why:** It cannot panic, trace or allocate, so the change is
-  unobservable, and a once-cell read costs more: deriv 1.20x → 1.11x
+  unobservable, and a once-cell read costs more (a load, a test and the
+  count's increment, startup/constants.md; the numbers that follow are
+  from before a read became one load): deriv 1.20x → 1.11x
   native (a570011); `instInhabitedUInt32` read on every `get!` of an
   `Array UInt32`: qsort 1.03x → 0.89x (8c58721). A big `Nat`/`Int` is a
   heap number: `def K : Int := 3000000000` recomputed was allocated at

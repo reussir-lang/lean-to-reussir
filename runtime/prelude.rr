@@ -2454,11 +2454,21 @@ fn l2r_thunk_done(a : u64) -> u64 [{ { leanrt::sched::on_finish(a as usize); 0 }
 #[ffi(import)]
 fn l2r_thunk_wait_busy(a : u64) -> u64 [{ { leanrt::sched::thunk_wait_busy(a as usize); 0 } }];
 
-// The accessor of a constant: whether it has its value, else the caller
-// computes and sets it (another context computing it is waited for).
+// The accessor of a constant, first: whether its value is there, by its
+// word in the runtime's table at a fixed address (one load, inlined;
+// a second load, of its set flag, when the word is 0:
+// `leanrt::once::ready`). Then, when it is not: whether it has its value,
+// else the caller computes and sets it (another context computing it is
+// waited for).
+#[ffi(import)]
+fn l2r_once_ready(slot : u64) -> bool [{ leanrt::once::ready(slot) }];
+
 #[ffi(import)]
 fn l2r_once_claim(slot : u64) -> bool [{ leanrt::once::claim(slot) }];
 
+// A new reference to the value of set slot `slot` (inline: its word in the
+// table, then the increment; `leanrt::once::get_raw`). Read at the type it
+// was stored at (`leanrt::once::word_of`).
 #[ffi(import)]
 fn l2r_once_get<T>(slot : u64) -> T [{
     {
@@ -2469,17 +2479,22 @@ fn l2r_once_get<T>(slot : u64) -> T [{
     }
 }];
 
+// Store `v` in slot `slot` and return it (the slot keeps a reference).
 #[ffi(import)]
 fn l2r_once_set<T>(slot : u64, v : T) -> T [{
     {
-        assert!(::std::mem::size_of::<[:T:]>() <= ::std::mem::size_of::<usize>());
-        let keep = ::std::mem::ManuallyDrop::new(v.clone());
-        let mut raw: usize = 0;
-        unsafe {
-            ::std::ptr::copy_nonoverlapping(&*keep as *const [:T:] as *const u8, &mut raw as *mut usize as *mut u8, ::std::mem::size_of::<[:T:]>())
-        };
-        leanrt::once::set_raw(slot, raw);
+        leanrt::once::set_raw(slot, leanrt::once::word_of::<[:T:]>(v.clone()));
         v
+    }
+}];
+
+// Store `v` in slot `slot`: its reference moves into the slot (the
+// accessor of a constant reads the slot afterwards, `l2r_once_get`).
+#[ffi(import)]
+fn l2r_once_put<T>(slot : u64, v : T) -> u64 [{
+    {
+        leanrt::once::set_raw(slot, leanrt::once::word_of::<[:T:]>(v));
+        0
     }
 }];
 
@@ -2491,13 +2506,7 @@ fn l2r_once_set<T>(slot : u64, v : T) -> T [{
 #[ffi(import)]
 fn l2r_cell_swap<T>(slot : u64, v : T) -> T [{
     {
-        assert!(::std::mem::size_of::<[:T:]>() <= ::std::mem::size_of::<usize>());
-        let keep = ::std::mem::ManuallyDrop::new(v);
-        let mut raw: usize = 0;
-        unsafe {
-            ::std::ptr::copy_nonoverlapping(&*keep as *const [:T:] as *const u8, &mut raw as *mut usize as *mut u8, ::std::mem::size_of::<[:T:]>())
-        };
-        let old = leanrt::once::swap_raw(slot, raw);
+        let old = leanrt::once::swap_raw(slot, leanrt::once::word_of::<[:T:]>(v));
         let p: [:T:] = unsafe { ::std::mem::transmute_copy(&old) };
         p
     }

@@ -7,26 +7,102 @@ runtime. Plan
 ### A constant is a once-cell read through an accessor
 
 - **What:** A declaration without parameters becomes `<f>_init` (its
-  body) and an accessor `<f>` that tests the constant's once-cell inline
-  (`l2r_once_claim`), reads it if set, and otherwise computes and stores
-  the value. The cell stores a boundary type; another value is wrapped in
-  an `ElemBox`. The value is never freed. Program constants are forced at
-  startup ([order.md](order.md)); toolchain constants and closed terms
-  only on first use (the library's `initialize` constants run at
-  startup, at their module's place, used or not; order.md).
+  body) and an accessor `<f>` that tests the constant's once-cell inline,
+  computes and stores the value if it is not there, then reads the cell
+  (next entry). The cell stores a boundary type; another value is wrapped
+  in an `ElemBox`. The value is never freed. Program constants are forced
+  at startup ([order.md](order.md)); toolchain constants and closed terms
+  only on first use, as natively (Lean 4.34.0 makes a closed term a
+  `lean_obj_once` cell, computed at its first read; the library's
+  `initialize` constants run at startup, at their module's place, used or
+  not; order.md).
 - **Why:** Native CAFs and closed terms live for the whole run, evaluated
-  once. `l2r_once_claim` also makes a scheduler context that needs a
-  constant another context is computing wait for it, as natively
+  once. `l2r_once_claim` makes a scheduler context that needs a constant
+  another context is computing wait for it, as natively
   `lean_obj_once_cold` holds a lock: it was computed twice and the runtime
-  aborted ("once slot set twice", 7edc0f5). Its fast path is inline again
-  (the scheduler had made every constant read a call; perf5, 32db458).
+  aborted ("once slot set twice", 7edc0f5). `l2r_once_has` is the plain
+  test (no wait), for the standard streams' mutable cells, which share
+  the slots (`Lower/Externs.lean`).
 - **Where:** `Lower/Conv.lean`: `cafAccessor`; `Lower/Code.lean`:
-  `lowerDecl`; `runtime/prelude.rr`: `l2r_once_claim`, `l2r_once_get`,
-  `l2r_once_set`; `runtime/leanrt/src/once.rs`: `claim`.
-- **Remove only if:** Reussir globals replace once-cells (plan
-  [§7](../../translation-plan.md#7-optimization-what-is-already-done-and-what-is-left),
-  "globals for constants"). Cost: a constant read in a loop checks its cell
-  every time (Pf4BigLit 1.16x native).
+  `lowerDecl`; `runtime/prelude.rr`: `l2r_once_ready`, `l2r_once_claim`,
+  `l2r_once_get`, `l2r_once_put`, `l2r_once_set`;
+  `runtime/leanrt/src/once.rs`: `claim`.
+- **Remove only if:** never (the storage may change, next entry).
+
+### A read of a constant is one load
+
+- **What:** The accessor is
+
+  ```
+  let r : u64 = if l2r_once_ready(k) { 0 }
+                else { if l2r_once_claim(k) { 0 } else { l2r_once_put<T>(k, <f>_init()) } };
+  l2r_once_get<T>(k)
+  ```
+
+  Each slot's word and set flag are also kept in `leanrt::once::FAST`
+  and `FLAGS`, static tables at fixed addresses (2^18 words and 2^18
+  bytes in `.bss`; untouched pages cost no memory). `l2r_once_ready(k)`
+  loads word `k` and tests it against 0; when the word is 0 it loads flag
+  `k` (a set slot whose value's bits are all 0: a `UInt64`, `Int64`,
+  `USize`, `Float` or `UInt8` 0, `false`, a first constructor's index).
+  `l2r_once_get` loads the same word (and flag) again, which LLVM merges
+  with the first loads. The slot number is a literal at every read, so a
+  read of a set constant, inlined, is one load from a constant address, a
+  test and the increment; two loads and two tests when its word is 0; no
+  call either way. The slow path (`claim`: the wait for another context,
+  the computation, `put`, which moves the value's reference into the
+  cell) rejoins before the read, so the read and its increment are on one
+  straight path. A word is the value's bytes, the rest 0, as before the
+  tables (`leanrt::once::word_of`). The streams'
+  `has` uses the tables too. The clones of `Array`, `ByteArray`,
+  `FloatArray`, `Array Nat`/`Array Int` and `String` handles tell LLVM
+  that the count was at least 1 (`assert_unchecked`, `leanrt::drop::Vec`,
+  `TagVec`, `LStr`): a read from the table right after the constant's
+  read (`give`, ownership.md "Reads give their reference up first, for a
+  view") then folds the increment and the decrement away, so the table
+  read has no count store at all, as a native persistent object.
+- **Why:** lean-zip's decoder (`goTreeFreeU`) read its length and
+  distance tables (`lengthBase`, `distExtra`, …) through two calls each:
+  `l2r_once_claim`, then `l2r_once_get`, whose bounds checks and panics
+  kept it above LLVM's inlining threshold; inline, a read was seven loads
+  (the vectors' lengths and pointers, the set flag, the value), five
+  branches and two count stores. A profile of the decompression put 3.8%
+  of its cycles in these calls. Now (lean-zip's survey IR, perf-const-reads):
+  in the hot loop paths of lean-zip's codec functions, once-cell calls 17
+  to 0 and loads of once-cell state 170 to 49 (one per read; each flag's
+  load sits behind its word's test, in a block LLVM keeps cold); in the
+  whole program, once-cell call sites 1068 to 433, all on slow paths, and
+  inline loads of the slot record 7131 to 0 (its IR 9% smaller). A CRC
+  table read in a loop is `ldr x0, [x28, #24]; cbnz x0, …` and nothing
+  else (aarch64; `x28` holds the table's address for the whole loop).
+  Native Lean reads a named constant as one global load and a closed term
+  through `lean_obj_once` (two loads and a test). Reussir has no global
+  variables; a table in the runtime gives the same one load. Leaving out
+  the test after startup, where every program constant is set, would need
+  a proof that the read runs after startup (code reachable from `main`
+  only), and closed terms and toolchain constants are computed on first
+  use anyway: the test is one well-predicted branch.
+- **Where:** `Lower/Conv.lean`: `cafAccessor`; `runtime/prelude.rr`:
+  `l2r_once_ready`, `l2r_once_get`, `l2r_once_put`, `l2r_once_set`,
+  `l2r_cell_swap`; `runtime/leanrt/src/once.rs`: `FAST`, `FLAGS`,
+  `FAST_SLOTS`, `has`, `ready`, `word_of`, `get_raw`, `rec_has`,
+  `rec_get`, `set_raw`, `swap_raw`, `take_raw` (each keeps the tables in
+  step with the record `SLOTS`); `runtime/leanrt/src/drop.rs` (`Vec::clone`),
+  `tagvec.rs`, `string.rs`: the clones. Guard:
+  `tests/runtime/const-read-check.sh` with `tests/runtime/RtConstReads.lean`
+  (fails when a constant read in a loop is a call or reads `SLOTS`;
+  review PCR-01: symbols read by their identifiers, whatever the
+  mangling's prefix, and the check's own mutations named from the IR).
+- **Remove only if:** Reussir gets globals that are cheaper still (none
+  can be: one load), or Lean code runs on several threads at once (then
+  the word's store must release and its load acquire, as natively; plan
+  §5.12). A program with more than 2^18 slots reads the slots above
+  through the record in line, as before the tables. The first version
+  marked values smaller than a word with a bit of the word, so that only
+  a 64-bit 0 had the word 0, and sent word-0 reads through two calls:
+  slower than before for those constants, and a slot read at a wider type
+  than it was stored at would have seen the mark (review PCR-02, PCR-03);
+  the flag table replaced both.
 
 ### Cheap constants are recomputed, float literals folded
 

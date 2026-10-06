@@ -224,6 +224,19 @@ review RS6-03). It then checks itself on four mutations, each of which
 must fail: a `bl`, a `cbnz` and a `blr` to a fast path added to the
 disassembly, and a TLS descriptor relocation added to readelf's output
 (RS6-06; an indirect tail branch `br` is tracked as `blr` is).
+`tests/runtime/const-read-check.sh` builds `RtConstReads` (constants of
+every kind of once-cell read in loops: a table computed at startup, a
+literal table, closed terms, a toolchain constant, a small scalar,
+64-bit and 8-bit zeros, in a task too) to LLVM IR and fails when, on the
+hot path of a loop, a constant's read calls its accessor, a once-cell
+texture or a function of leanrt's `once` module, or loads leanrt's slot
+record instead of the tables at fixed addresses (a read of a constant is
+one load: docs/implementation/startup/constants.md). It reads symbols by
+their identifiers, whatever the mangling's prefix, fails when it finds
+no accessor or cannot read the IR's symbols, and checks itself on four
+mutations of the IR named from the IR's own symbols (a call of an
+accessor, of `l2r_once_claim`, of `once::claim`, a load of the record,
+added to a hot loop block), each of which must fail (review PCR-01).
 `tests/runtime/rows-check.sh` builds lean-runtime's row oracle
 (`scripts/oracle/Oracle.lean` of the lean-runtime checkout, which evaluates
 the functions of its `tests/cases/<area>/<area>.rows.toml`) with lean2rr and

@@ -178,7 +178,7 @@ other results are the last recorded runs.</p>
 <tbody>
 <tr>
 <td>Runtime test suite</td>
-<td>331 programs† (1 marked <code>.xfail</code>†); at the last full run (2026-10-05), 326 of 327 identical to native Lean 4.34.0, nine of them through expectation files; the other one is the <code>.xfail</code> test</td>
+<td>332 programs† (1 marked <code>.xfail</code>†); at the last full run (2026-10-05), 326 of 327 identical to native Lean 4.34.0, nine of them through expectation files; the other one is the <code>.xfail</code> test</td>
 </tr>
 <tr>
 <td>Classic corpus</td>
@@ -234,6 +234,11 @@ other results are the last recorded runs.</p>
 <li><strong>Reussir.</strong> Patches 0065 and 0066 are applied. Each
   entry is now a numbered <em>issue</em> with a kind: only a <em>bug</em> is wrong
   behaviour (see <a href="reussir.html#all-entries">Reussir</a>).</li>
+<li><strong>A read of a constant is one load.</strong> Each once-cell's value is also
+  kept in a table at a fixed address, so a read is one load and a test, with
+  no call (lean-zip fix 4). In lean-zip's codec loops, the once-cell calls
+  fell from 17 to 0 and the loads from 170 to 49. A check fails the tests if
+  a constant read in a loop becomes a call again.</li>
 <li><strong>Dependent types: the rule.</strong> Types do not compute, so lean2rr erases
   them, and a value of unknown type is one enum, matched by its variant.
   The current version still converts values between a layout for each type

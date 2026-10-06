@@ -165,6 +165,11 @@ Merged on 2026-10-04 and 2026-10-05:
 - **Reussir.** Patches 0065 and 0066 are applied. Each
   entry is now a numbered *issue* with a kind: only a *bug* is wrong
   behaviour (see [Reussir](reussir.html#all-entries)).
+- **A read of a constant is one load.** Each once-cell's value is also
+  kept in a table at a fixed address, so a read is one load and a test, with
+  no call (lean-zip fix 4). In lean-zip's codec loops, the once-cell calls
+  fell from 17 to 0 and the loads from 170 to 49. A check fails the tests if
+  a constant read in a loop becomes a call again.
 - **Dependent types: the rule.** Types do not compute, so lean2rr erases
   them, and a value of unknown type is one enum, matched by its variant.
   The current version still converts values between a layout for each type

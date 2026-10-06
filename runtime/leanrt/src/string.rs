@@ -75,7 +75,15 @@ impl LStr {
 impl Clone for LStr {
     #[inline(always)]
     fn clone(&self) -> Self {
-        unsafe { (*self.0).count += 1 };
+        // A clone is taken from a live reference: the count is at least
+        // 1. Told to LLVM, a release right after (a read's `give`) folds
+        // to nothing: no store at all for a shared block, such as a
+        // constant's (`l2r_once_get` then a read).
+        unsafe {
+            let c = (*self.0).count;
+            std::hint::assert_unchecked(c != 0);
+            (*self.0).count = c + 1;
+        }
         LStr(self.0)
     }
 }
