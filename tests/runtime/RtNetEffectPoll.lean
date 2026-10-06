@@ -30,8 +30,11 @@ def main : IO Unit := do
   let p ← s.accept
   let _ ← BaseIO.mapTask (sync := true) (t := p.result?) fun _ => accepted.set true
   let child ← IO.Process.spawn { cmd := "bash", args := #["-c", s!"exec 3<>/dev/tcp/127.0.0.1/{port}; sleep 0.3"] }
+  -- A deadline, not an iteration count: on a loaded machine native Lean
+  -- printed 100 million lines before the child had connected.
+  let deadline := (← IO.monoMsNow) + 60000
   let mut i := 0
-  while !(← accepted.get) && i < 100000000 do
+  while !(← accepted.get) && (← IO.monoMsNow) < deadline do
     out.putStrLn s!"waiting {i}"
     i := i + 1
   IO.println s!"accepted during the loop: {← accepted.get}"
