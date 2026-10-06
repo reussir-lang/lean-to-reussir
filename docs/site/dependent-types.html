@@ -165,9 +165,9 @@ type.</p>
    <code>structure P where x : Float</code>, <code>x</code> is a raw <code>f64</code>.</li>
 <li><strong>A structure with one relevant field is that field</strong> (<code>Fin n</code>,
    <code>Subtype</code>).</li>
-<li><strong>A function keeps its parameter list.</strong> A function whose parameters are
-   all erased stays a function. It does not become a constant, because
-   lean2rr computes constants at startup.</li>
+<li><strong>Erased parameters are dropped.</strong> lean2rr removes every <code>lcErased</code>
+   parameter from functions and function types. A function with only
+   erased parameters keeps one <code>L2RUnit</code> parameter.</li>
 <li><strong>Function values have one calling convention.</strong> A function that is
    stored where its type is generic gets an entry that takes and returns
    <code>L2RBox</code> values.</li>
@@ -227,9 +227,10 @@ enum (an 8-byte tag word and an 8-byte payload):</p>
 <p>A one-word encoding has the same sizes as native. It puts a small value
 inside the word and an object as its pointer. It boxes 64-bit scalars, as
 native does. It needs more support from Reussir.</p>
-<p>Status: rule 1 is planned. Today a generic type has one layout for each
-type argument, and the enum has one variant for each such layout (see
-<a href="#the-current-version">The current version</a>).</p>
+<p>Status: rules 1 and 4 are planned. Today a generic type has one layout for
+each type argument, and the enum has one variant for each such layout (see
+<a href="#the-current-version">The current version</a>). Today a function value keeps
+its erased parameters, as in LCNF.</p>
 <h2 id="examples">Examples</h2>
 <h3 id="a-column-whose-element-type-is-a-field">A column whose element type is a field</h3>
 <pre><code class="language-lean">inductive Ty | nat | str
@@ -790,8 +791,8 @@ fn ops_lam(α : L2RUnit, xs : List_Box) -&gt; Nat {
 }
 </code></pre>
 <ul>
-<li><code>α</code> is the erased type argument: an <code>L2RUnit</code>, which holds no data. The
-  function keeps the parameter (rule 4).</li>
+<li><code>α</code> is the erased type argument: an <code>L2RUnit</code>, which holds no data. With
+  rule 4, lean2rr removes it.</li>
 <li><code>xs</code> is the list: each cell holds an <code>L2RBox</code> and the rest of the list.</li>
 <li>The function counts the cells and multiplies by 2:</li>
 </ul>

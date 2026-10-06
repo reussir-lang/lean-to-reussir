@@ -154,9 +154,9 @@ These are the layout rules:
    `structure P where x : Float`, `x` is a raw `f64`.
 3. **A structure with one relevant field is that field** (`Fin n`,
    `Subtype`).
-4. **A function keeps its parameter list.** A function whose parameters are
-   all erased stays a function. It does not become a constant, because
-   lean2rr computes constants at startup.
+4. **Erased parameters are dropped.** lean2rr removes every `lcErased`
+   parameter from functions and function types. A function with only
+   erased parameters keeps one `L2RUnit` parameter.
 5. **Function values have one calling convention.** A function that is
    stored where its type is generic gets an entry that takes and returns
    `L2RBox` values.
@@ -188,9 +188,10 @@ A one-word encoding has the same sizes as native. It puts a small value
 inside the word and an object as its pointer. It boxes 64-bit scalars, as
 native does. It needs more support from Reussir.
 
-Status: rule 1 is planned. Today a generic type has one layout for each
-type argument, and the enum has one variant for each such layout (see
-[The current version](#the-current-version)).
+Status: rules 1 and 4 are planned. Today a generic type has one layout for
+each type argument, and the enum has one variant for each such layout (see
+[The current version](#the-current-version)). Today a function value keeps
+its erased parameters, as in LCNF.
 
 ## Examples
 
@@ -822,8 +823,8 @@ fn ops_lam(α : L2RUnit, xs : List_Box) -> Nat {
 }
 ```
 
-- `α` is the erased type argument: an `L2RUnit`, which holds no data. The
-  function keeps the parameter (rule 4).
+- `α` is the erased type argument: an `L2RUnit`, which holds no data. With
+  rule 4, lean2rr removes it.
 - `xs` is the list: each cell holds an `L2RBox` and the rest of the list.
 - The function counts the cells and multiplies by 2:
 
