@@ -82,6 +82,16 @@ A pending task runs at the first of these events:
 4. the program polls it (`IO.hasFinished`) after time has passed;
 5. `main` returns: the queued tasks run in the order of Lean's task manager.
 
+**A task that a worker starts during the wait.** In event 1, the waiting
+context runs the task on its own stack. Before the scheduler decides, it
+lets the worker take the work that the worker would have taken by then. If
+the worker takes the awaited pure task at that time, the waiting context
+runs the task. Before switch step 9, the wait did not see that start: the
+context waited for a signal that had already gone. If a socket was open,
+nothing woke it, and the program did not end (`RtTcp` did not end in
+about one run in 20).
+The test `RtTaskPickedInWait` checks this case.
+
 **Contexts.** A thread that blocks natively lets other threads go on.
 lean-runtime copies that with *contexts*: `main`'s stack, and one stack per
 task that it starts (1 GiB, with a guard page). When the running context
@@ -194,7 +204,7 @@ problem.
 lean2rr uses the shared crate **`lean-runtime`**
 (github.com/QueClr/lean-runtime-rs, public). The crate implements Lean's
 runtime behaviour once, as a library that a translator of Lean programs
-can use. lean2rr switched to it in eight steps, from 2026-10-04 to
+can use. lean2rr switched to it in nine steps, from 2026-10-04 to
 2026-10-05.
 
 | Point | Decision |
@@ -222,9 +232,10 @@ The switch steps:
 | 6 | the wait cores: waits for a thunk or a constant, references in a program that creates tasks, promise resolutions put off to the end of a free |
 | 7 | the startup: `main`'s thread, the constructor that opens the startup descriptors, the scheduler's lazy start |
 | 8 | the panic and exit executor: it carries out a panic's plan (the stream, the flush of stdout, the abort or the exit), and does the internal panic, the uncaught error and `IO.Process.exit` |
+| 9 | no new part: a fix in the scheduler (lean-runtime's fixes-8). A wait for a pure task that the worker starts during the wait now runs the task; before, it could wait for ever |
 
 Status (2026-10-05): the submodule `third_party/lean-runtime` is pinned at
-`e34cd61`. `scripts/l2r.py` builds it with cargo (the features `io`,
+`83f7127`. `scripts/l2r.py` builds it with cargo (the features `io`,
 `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`) and links
 it with `leanrt` ([runtime README](repo:runtime/README.md), "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline

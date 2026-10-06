@@ -219,4 +219,4 @@ lean-runtime
 :   The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule `third_party/lean-runtime`): Lean's runtime behaviour in Rust, safe by default. lean2rr uses its hash, string, float, fixed-width integer, libm, `Nat`/`Int`, array, panic and number-text rules, its IO with the panic and exit executor, its startup, its task scheduler with the wait cores, and its event loop (features `io`, `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`), with its own GMP numbers behind the crate's big-number traits.
 
 switch step
-:   One of the eight steps (2026-10-04 to 2026-10-05) in which lean2rr's runtime moved to `lean-runtime`.
+:   One of the nine steps (2026-10-04 to 2026-10-05) in which lean2rr's runtime moved to `lean-runtime`. Step 9 only moved the pin to a fix of the scheduler.

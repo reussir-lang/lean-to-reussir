@@ -184,7 +184,7 @@ each concept has one term.</p>
 <dt>lean-runtime</dt>
 <dd>The shared runtime crate (github.com/QueClr/lean-runtime-rs, the submodule <code>third_party/lean-runtime</code>): Lean's runtime behaviour in Rust, safe by default. lean2rr uses its hash, string, float, fixed-width integer, libm, <code>Nat</code>/<code>Int</code>, array, panic and number-text rules, its IO with the panic and exit executor, its startup, its task scheduler with the wait cores, and its event loop (features <code>io</code>, <code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>), with its own GMP numbers behind the crate's big-number traits.</dd>
 <dt>switch step</dt>
-<dd>One of the eight steps (2026-10-04 to 2026-10-05) in which lean2rr's runtime moved to <code>lean-runtime</code>.</dd>
+<dd>One of the nine steps (2026-10-04 to 2026-10-05) in which lean2rr's runtime moved to <code>lean-runtime</code>. Step 9 only moved the pin to a fix of the scheduler.</dd>
 </dl>
   </main>
 </div>

@@ -38,7 +38,13 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   only as used; up to 8 ended contexts' stacks are kept for reuse with the
   pages they touched. A task that is needed runs on the stack of whoever
   needs it once a free worker would start it (lean-runtime's
-  `may_run_awaited`). The number of workers is `LEAN_NUM_THREADS` (glibc's
+  `may_run_awaited`), also a pure task that the worker woken by an
+  earlier enqueue starts during the wait's own look (`settle_worker`,
+  then `pick`; lean-runtime's fixes-8, 83f7127, switch step 9: before it,
+  the waiter blocked after `pick`'s wake-up had gone by, and with a
+  descriptor watched nothing ran the task, so the program hung; test
+  `RtTaskPickedInWait`, [../externs-ffi/runtime.md](../externs-ffi/runtime.md)).
+  The number of workers is `LEAN_NUM_THREADS` (glibc's
   `atoi`) or the online processors (`std::thread::hardware_concurrency`);
   0 is no task manager (tasks run at once).
 - **Why:** lean-runtime's model (its `docs/sched.md`, "The model",

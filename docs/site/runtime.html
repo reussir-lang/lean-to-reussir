@@ -134,6 +134,15 @@ creation, it would never finish.</p>
 <li>the program polls it (<code>IO.hasFinished</code>) after time has passed;</li>
 <li><code>main</code> returns: the queued tasks run in the order of Lean's task manager.</li>
 </ol>
+<p><strong>A task that a worker starts during the wait.</strong> In event 1, the waiting
+context runs the task on its own stack. Before the scheduler decides, it
+lets the worker take the work that the worker would have taken by then. If
+the worker takes the awaited pure task at that time, the waiting context
+runs the task. Before switch step 9, the wait did not see that start: the
+context waited for a signal that had already gone. If a socket was open,
+nothing woke it, and the program did not end (<code>RtTcp</code> did not end in
+about one run in 20).
+The test <code>RtTaskPickedInWait</code> checks this case.</p>
 <p><strong>Contexts.</strong> A thread that blocks natively lets other threads go on.
 lean-runtime copies that with <em>contexts</em>: <code>main</code>'s stack, and one stack per
 task that it starts (1 GiB, with a guard page). When the running context
@@ -234,7 +243,7 @@ problem.</p>
 <p>lean2rr uses the shared crate <strong><code>lean-runtime</code></strong>
 (github.com/QueClr/lean-runtime-rs, public). The crate implements Lean's
 runtime behaviour once, as a library that a translator of Lean programs
-can use. lean2rr switched to it in eight steps, from 2026-10-04 to
+can use. lean2rr switched to it in nine steps, from 2026-10-04 to
 2026-10-05.</p>
 <table>
 <thead>
@@ -327,10 +336,14 @@ can use. lean2rr switched to it in eight steps, from 2026-10-04 to
 <td>8</td>
 <td>the panic and exit executor: it carries out a panic's plan (the stream, the flush of stdout, the abort or the exit), and does the internal panic, the uncaught error and <code>IO.Process.exit</code></td>
 </tr>
+<tr>
+<td>9</td>
+<td>no new part: a fix in the scheduler (lean-runtime's fixes-8). A wait for a pure task that the worker starts during the wait now runs the task; before, it could wait for ever</td>
+</tr>
 </tbody>
 </table>
 <p>Status (2026-10-05): the submodule <code>third_party/lean-runtime</code> is pinned at
-<code>e34cd61</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
+<code>83f7127</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
 <code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>) and links
 it with <code>leanrt</code> (<a href="../../runtime/README.md">runtime README</a>, "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline

@@ -717,6 +717,46 @@ Paths are relative to the repository root.
   lean-runtime's `src/io/panic.rs` and `docs/panic.md`.
 - **Remove only if:** never.
 
+### A wait for a pure task that the worker starts during the wait no longer hangs (switch step 9)
+
+- **What:** lean-runtime pinned at `83f7127` (main: tests-2, 6786aa6,
+  test and doc changes only, among them LB-35 under "Not bugs" in its
+  `docs/lean-bugs.md`; and fixes-8, 83f7127: a hang in the scheduler's
+  wait). The fix is in lean-runtime's `may_run_awaited`, the rule that
+  decides whether a waiter runs the awaited task on its own stack. Before
+  it decides, the rule lets the worker that an earlier enqueue woke take
+  what it would have taken by now (`settle_worker`: 90 µs after the
+  enqueue for the first worker, 20 µs later on). A worker only marks a
+  pure task started (`pick`), and the mark wakes the task's waiters. When
+  the worker takes the awaited pure task there, the mark comes before the
+  waiter has blocked, so its wake-up reaches nobody. The rule now checks
+  the mark again and runs the task on the waiter's stack, as for any
+  awaited started task. Before, the waiter blocked on the started task
+  with no wake-up to come: the hub starts a started pure task by itself
+  only as its last resort (`last_resort`), which never runs while a
+  descriptor is watched, so with a socket open the hub waited in
+  `epoll_wait` forever. leanrt, the prelude and the generated code are
+  unchanged.
+- **Why:** A hang where native Lean finishes: `RtTcp` hung about one run
+  in 20 (natively 0 in 100). The window: a pure task spawned while the
+  worker is idle, more than 90 µs without a scheduler call, then a wait
+  for that task, with a descriptor watched. Test `RtTaskPickedInWait`: a
+  listening socket kept open until `main`'s last line, a pure
+  `Task.spawn`, about a millisecond of computation without an effect
+  point (`IO.lazyPure`), then `Task.get`; it hung in 8 of 8 runs with
+  lean-runtime e34cd61 and passes with 83f7127, as natively. The socket
+  must still be used after the wait: a socket last used at `listen` is
+  freed and closed right after it, nothing is watched, and the last
+  resort runs the task.
+- **Tests:** `RtTaskPickedInWait`; `RtTcp` (50 runs, no hang); the
+  runtime suite's task, promise and network tests; lean-runtime's unit
+  test `a_pure_task_the_worker_starts_in_the_waiters_look_runs_there`.
+- **Where:** lean-runtime's `src/sched/task.rs` (`may_run_awaited`,
+  `settle_worker`, `pick`, `last_resort`) and `docs/sched.md` ("The
+  pure-task rule"). Implementation notes:
+  [../tasks/scheduler.md](../tasks/scheduler.md).
+- **Remove only if:** never.
+
 ### leanrt is built and linked with the shared crate lean-runtime
 
 - **What:** `scripts/l2r.py` builds lean-runtime (the git submodule

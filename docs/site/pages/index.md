@@ -120,7 +120,7 @@ these parts from it:
 - the startup: `main`'s thread and native Lean's startup descriptors.
 
 lean2rr keeps only its own representations, its hot paths and the glue
-between them and the crate. The switch took eight steps, from 2026-10-04 to
+between them and the crate. The switch took nine steps, from 2026-10-04 to
 2026-10-05. See [Runtime](runtime.html#the-shared-runtime-crate).
 
 ## Status
@@ -145,10 +145,11 @@ other results are the last recorded runs.
 
 Merged on 2026-10-04 and 2026-10-05:
 
-- **The switch to `lean-runtime`**, in eight steps: the rules (steps 1
+- **The switch to `lean-runtime`**, in nine steps: the rules (steps 1
   and 2), the IO (step 3), the scheduler, `Std.Sync` and the event loop
   (step 4), the last copies of shared functions (step 5), the wait cores
-  (step 6), the startup (step 7) and the panic and exit executor (step 8).
+  (step 6), the startup (step 7), the panic and exit executor (step 8),
+  and a fix of a scheduler wait that could wait for ever (step 9).
 - **The extern rule** (above).
 - **`conv-liveness`**, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see [Optional passes](passes.html)).
