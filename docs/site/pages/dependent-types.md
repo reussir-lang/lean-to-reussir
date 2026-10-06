@@ -406,20 +406,20 @@ fn describe(b : bool, v : L2RBox) -> LStr {
 - A string constant (`"hello"`, `"nat "`, `"str "`) is made once and kept
   in a once-cell; each use reads it. The constant `"hello"`:
 
-  ```rust
-  fn hello_init() -> LStr {
-      l2r_str_lit(28)                 // literal number 28 of the program: "hello"
-  }
+```rust
+fn hello_init() -> LStr {
+    l2r_str_lit(28)                 // literal number 28 of the program: "hello"
+}
 
-  fn hello() -> LStr {
-      let r : u64 = if l2r_once_ready(35) { 0 } else {
-          if l2r_once_claim(35) { 0 } else { l2r_once_put<LStr>(35, hello_init()) }
-      };
-      l2r_once_get<LStr>(35)
-  }
-  ```
+fn hello() -> LStr {
+    let r : u64 = if l2r_once_ready(35) { 0 } else {
+        if l2r_once_claim(35) { 0 } else { l2r_once_put<LStr>(35, hello_init()) }
+    };
+    l2r_once_get<LStr>(35)
+}
+```
 
-  `nat_prefix` and `str_prefix` are the same, with other slots.
+`nat_prefix` and `str_prefix` are the same, with other slots.
 
 The `true` branch of `describe` takes the `Nat` out with this `match`:
 
@@ -435,27 +435,27 @@ match v {
 - **Arm 2: the variant `b0`** is Lean's `box(0)`. It is reached only with
   `unsafeCast`. The arm gives `0`, as in a native build:
 
-  ```rust
-  fn zero_Nat() -> Nat {
-      l2r_nat_small(0)
-  }
-  ```
+```rust
+fn zero_Nat() -> Nat {
+    l2r_nat_small(0)
+}
+```
 
 - **Arm 3: all the other variants.** The arm calls the general unbox
   function for `Nat`:
 
-  ```rust
-  fn l2r_unbox_Nat(b : L2RBox) -> Nat {
-      match b {
-          L2RBox::b2(n) => { n },
-          L2RBox::b0(_) => { zero_Nat() },
-          _ => {
-              let released : u64 = l2r_ptr_addr_rec<L2RBox>(b);
-              l2r_unreachable<Nat>()
-          }
-      }
-  }
-  ```
+```rust
+fn l2r_unbox_Nat(b : L2RBox) -> Nat {
+    match b {
+        L2RBox::b2(n) => { n },
+        L2RBox::b0(_) => { zero_Nat() },
+        _ => {
+            let released : u64 = l2r_ptr_addr_rec<L2RBox>(b);
+            l2r_unreachable<Nat>()
+        }
+    }
+}
+```
 
 
 The `false` branch does the same for a `String`. Its `b0` arm gives the
@@ -773,19 +773,19 @@ fn nest_Nat(n : Nat, x : Nat) -> LStr {
 - `unbox_Prod_Box` accepts both layouts. It converts a `Prod_Nat` to a
   `Prod_Box`:
 
-  ```rust
-  fn unbox_Prod_Box(b : L2RBox) -> Prod_Box {
-      match b {
-          L2RBox::b4(p) => { p },
-          L2RBox::b5(p) => { conv_Prod_Nat_to_Prod_Box(p) },
-          L2RBox::b0(_) => { zero_Prod_Box() },
-          _ => {
-              let released : u64 = l2r_ptr_addr_rec<L2RBox>(b);
-              l2r_unreachable<Prod_Box>()
-          }
-      }
-  }
-  ```
+```rust
+fn unbox_Prod_Box(b : L2RBox) -> Prod_Box {
+    match b {
+        L2RBox::b4(p) => { p },
+        L2RBox::b5(p) => { conv_Prod_Nat_to_Prod_Box(p) },
+        L2RBox::b0(_) => { zero_Prod_Box() },
+        _ => {
+            let released : u64 = l2r_ptr_addr_rec<L2RBox>(b);
+            l2r_unreachable<Prod_Box>()
+        }
+    }
+}
+```
 
 ### A partial application that leaves a type open
 
@@ -833,23 +833,23 @@ fn ops_lam(xs : List_Box) -> Nat {
 - `xs` is the list: each cell holds an `L2RBox` and the rest of the list.
 - The function counts the cells and multiplies by 2:
 
-  ```rust
-  fn List_length_Box(xs : List_Box) -> Nat {
-      let zero : Nat = l2r_nat_small(0);
-      List_length_aux_Box(xs, zero)
-  }
+```rust
+fn List_length_Box(xs : List_Box) -> Nat {
+    let zero : Nat = l2r_nat_small(0);
+    List_length_aux_Box(xs, zero)
+}
 
-  fn List_length_aux_Box(xs : List_Box, acc : Nat) -> Nat {
-      match xs {
-          List_Box::c_nil => { acc },
-          List_Box::c_cons(h, t) => {
-              let one : Nat = l2r_nat_small(1);
-              let acc1 : Nat = lean_nat_add(acc, one);
-              List_length_aux_Box(t, acc1)
-          }
-      }
-  }
-  ```
+fn List_length_aux_Box(xs : List_Box, acc : Nat) -> Nat {
+    match xs {
+        List_Box::c_nil => { acc },
+        List_Box::c_cons(h, t) => {
+            let one : Nat = l2r_nat_small(1);
+            let acc1 : Nat = lean_nat_add(acc, one);
+            List_length_aux_Box(t, acc1)
+        }
+    }
+}
+```
 
 The list `ops`. LCNF:
 

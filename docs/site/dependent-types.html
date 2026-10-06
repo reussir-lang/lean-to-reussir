@@ -425,17 +425,17 @@ fn describe(b : bool, v : L2RBox) -&gt; LStr {
 <li>A string constant (<code>"hello"</code>, <code>"nat "</code>, <code>"str "</code>) is made once and kept
   in a once-cell; each use reads it. The constant <code>"hello"</code>:</li>
 </ul>
-<p>```rust
-  fn hello_init() -&gt; LStr {
-      l2r_str_lit(28)                 // literal number 28 of the program: "hello"
-  }</p>
-<p>fn hello() -&gt; LStr {
-      let r : u64 = if l2r_once_ready(35) { 0 } else {
-          if l2r_once_claim(35) { 0 } else { l2r_once_put<LStr>(35, hello_init()) }
-      };
-      l2r_once_get<LStr>(35)
-  }
-  ```</p>
+<pre><code class="language-rust">fn hello_init() -&gt; LStr {
+    l2r_str_lit(28)                 // literal number 28 of the program: &quot;hello&quot;
+}
+
+fn hello() -&gt; LStr {
+    let r : u64 = if l2r_once_ready(35) { 0 } else {
+        if l2r_once_claim(35) { 0 } else { l2r_once_put&lt;LStr&gt;(35, hello_init()) }
+    };
+    l2r_once_get&lt;LStr&gt;(35)
+}
+</code></pre>
 <p><code>nat_prefix</code> and <code>str_prefix</code> are the same, with other slots.</p>
 <p>The <code>true</code> branch of <code>describe</code> takes the <code>Nat</code> out with this <code>match</code>:</p>
 <pre><code class="language-rust">match v {
@@ -449,25 +449,25 @@ fn describe(b : bool, v : L2RBox) -&gt; LStr {
 <li><strong>Arm 2: the variant <code>b0</code></strong> is Lean's <code>box(0)</code>. It is reached only with
   <code>unsafeCast</code>. The arm gives <code>0</code>, as in a native build:</li>
 </ul>
-<p><code>rust
-  fn zero_Nat() -&gt; Nat {
-      l2r_nat_small(0)
-  }</code></p>
+<pre><code class="language-rust">fn zero_Nat() -&gt; Nat {
+    l2r_nat_small(0)
+}
+</code></pre>
 <ul>
 <li><strong>Arm 3: all the other variants.</strong> The arm calls the general unbox
   function for <code>Nat</code>:</li>
 </ul>
-<p><code>rust
-  fn l2r_unbox_Nat(b : L2RBox) -&gt; Nat {
-      match b {
-          L2RBox::b2(n) =&gt; { n },
-          L2RBox::b0(_) =&gt; { zero_Nat() },
-          _ =&gt; {
-              let released : u64 = l2r_ptr_addr_rec&lt;L2RBox&gt;(b);
-              l2r_unreachable&lt;Nat&gt;()
-          }
-      }
-  }</code></p>
+<pre><code class="language-rust">fn l2r_unbox_Nat(b : L2RBox) -&gt; Nat {
+    match b {
+        L2RBox::b2(n) =&gt; { n },
+        L2RBox::b0(_) =&gt; { zero_Nat() },
+        _ =&gt; {
+            let released : u64 = l2r_ptr_addr_rec&lt;L2RBox&gt;(b);
+            l2r_unreachable&lt;Nat&gt;()
+        }
+    }
+}
+</code></pre>
 <p>The <code>false</code> branch does the same for a <code>String</code>. Its <code>b0</code> arm gives the
 empty string, a constant:</p>
 <pre><code class="language-rust">fn zero_String_init() -&gt; LStr { l2r_str_lit(0) }   // literal number 0: &quot;&quot;
@@ -749,18 +749,18 @@ at <code>Nat</code> for this call. It makes the first pair, then calls the copy 
 <li><code>unbox_Prod_Box</code> accepts both layouts. It converts a <code>Prod_Nat</code> to a
   <code>Prod_Box</code>:</li>
 </ul>
-<p><code>rust
-  fn unbox_Prod_Box(b : L2RBox) -&gt; Prod_Box {
-      match b {
-          L2RBox::b4(p) =&gt; { p },
-          L2RBox::b5(p) =&gt; { conv_Prod_Nat_to_Prod_Box(p) },
-          L2RBox::b0(_) =&gt; { zero_Prod_Box() },
-          _ =&gt; {
-              let released : u64 = l2r_ptr_addr_rec&lt;L2RBox&gt;(b);
-              l2r_unreachable&lt;Prod_Box&gt;()
-          }
-      }
-  }</code></p>
+<pre><code class="language-rust">fn unbox_Prod_Box(b : L2RBox) -&gt; Prod_Box {
+    match b {
+        L2RBox::b4(p) =&gt; { p },
+        L2RBox::b5(p) =&gt; { conv_Prod_Nat_to_Prod_Box(p) },
+        L2RBox::b0(_) =&gt; { zero_Prod_Box() },
+        _ =&gt; {
+            let released : u64 = l2r_ptr_addr_rec&lt;L2RBox&gt;(b);
+            l2r_unreachable&lt;Prod_Box&gt;()
+        }
+    }
+}
+</code></pre>
 <h3 id="a-partial-application-that-leaves-a-type-open">A partial application that leaves a type open</h3>
 <pre><code class="language-lean">structure Op where
   run : {α : Type} → List α → Nat
@@ -801,22 +801,22 @@ fn ops_lam(xs : List_Box) -&gt; Nat {
 <li><code>xs</code> is the list: each cell holds an <code>L2RBox</code> and the rest of the list.</li>
 <li>The function counts the cells and multiplies by 2:</li>
 </ul>
-<p>```rust
-  fn List_length_Box(xs : List_Box) -&gt; Nat {
-      let zero : Nat = l2r_nat_small(0);
-      List_length_aux_Box(xs, zero)
-  }</p>
-<p>fn List_length_aux_Box(xs : List_Box, acc : Nat) -&gt; Nat {
-      match xs {
-          List_Box::c_nil =&gt; { acc },
-          List_Box::c_cons(h, t) =&gt; {
-              let one : Nat = l2r_nat_small(1);
-              let acc1 : Nat = lean_nat_add(acc, one);
-              List_length_aux_Box(t, acc1)
-          }
-      }
-  }
-  ```</p>
+<pre><code class="language-rust">fn List_length_Box(xs : List_Box) -&gt; Nat {
+    let zero : Nat = l2r_nat_small(0);
+    List_length_aux_Box(xs, zero)
+}
+
+fn List_length_aux_Box(xs : List_Box, acc : Nat) -&gt; Nat {
+    match xs {
+        List_Box::c_nil =&gt; { acc },
+        List_Box::c_cons(h, t) =&gt; {
+            let one : Nat = l2r_nat_small(1);
+            let acc1 : Nat = lean_nat_add(acc, one);
+            List_length_aux_Box(t, acc1)
+        }
+    }
+}
+</code></pre>
 <p>The list <code>ops</code>. LCNF:</p>
 <pre><code class="language-text">def ops : List ({α : lcErased} → List lcAny → Nat) :=
   let _f.1 : lcErased → List lcAny → Nat := ops._lam_0;
