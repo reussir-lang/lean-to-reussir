@@ -19,8 +19,10 @@ value with a `match` on the enum's variant.
 A *dependent type* is a type that contains a value, such as the `n` in
 `Vector String n`, or a type that a value selects, such as `t.denote` below.
 
-All the Lean code on this page is one program. It type-checks, and its
-lean2rr build gives the same output as its native build. The LCNF on this
+All the Lean code on this page is one program, except the small program
+in [A type selected by a Boolean](#a-type-selected-by-a-boolean) that uses
+`unsafeCast`. Each program type-checks, and its lean2rr build gives the
+same output as its native build. The LCNF on this
 page is the output of Lean's compiler for that program (mono phase, with
 the types of parameters and `let` values). The Reussir code is the output
 of lean2rr for that program (`--keep-rr`), with shorter, readable names.
@@ -103,6 +105,14 @@ enum L2RBox {
     b4(Prod_Box),     // a pair of two boxes (Prod lcAny lcAny)
     b5(Prod_Nat)      // a pair of two Nats (Prod Nat Nat)
 }
+```
+
+The payload types:
+
+```rust
+struct Ref_StdGen(Cell<StdGen>)       // IO.Ref StdGen: a reference cell
+struct Prod_Box(L2RBox, L2RBox)       // Prod lcAny lcAny
+struct Prod_Nat(Nat, Nat)             // Prod Nat Nat
 ```
 
 `b4` and `b5` are two layouts of `Prod`. The current version gives each
@@ -392,8 +402,23 @@ fn describe(b : bool, v : L2RBox) -> LStr {
 - `describe` takes the value as an `L2RBox` (`v`). The `true` branch takes
   a `Nat` out of the box and adds 1. The `false` branch takes a `String` out
   of the box and appends it.
-- A string constant (`"hello"`, `"nat "`, `"str "`) is made once and kept;
-  each use reads it.
+- A string constant (`"hello"`, `"nat "`, `"str "`) is made once and kept
+  in a once-cell; each use reads it. The constant `"hello"`:
+
+  ```rust
+  fn hello_init() -> LStr {
+      l2r_str_lit(28)                 // literal number 28 of the program: "hello"
+  }
+
+  fn hello() -> LStr {
+      let r : u64 = if l2r_once_ready(35) { 0 } else {
+          if l2r_once_claim(35) { 0 } else { l2r_once_put<LStr>(35, hello_init()) }
+      };
+      l2r_once_get<LStr>(35)
+  }
+  ```
+
+  `nat_prefix` and `str_prefix` are the same, with other slots.
 
 The `true` branch of `describe` takes the `Nat` out with this `match`:
 
@@ -446,6 +471,58 @@ match v {
 The `false` branch uses the same three arms for a `String`: `b3` gives the
 `String`, `b0` gives the empty string, and the last arm stops the program
 (`l2r_unreachable`) directly, because no other type is read as a `String`.
+The empty string is a constant too:
+
+```rust
+fn zero_String_init() -> LStr { l2r_str_lit(0) }   // literal number 0: ""
+
+fn zero_String() -> LStr {
+    let r : u64 = if l2r_once_ready(38) { 0 } else {
+        if l2r_once_claim(38) { 0 } else { l2r_once_put<LStr>(38, zero_String_init()) }
+    };
+    l2r_once_get<LStr>(38)
+}
+```
+
+**When the `b0` arm runs.** A box holds `b0` only for a unit value, for a
+type or a proof, or for the placeholder that Lean's library writes into a
+slot and overwrites before a read. In typed code, a read at the type `Nat`
+gets a `Nat`. Only a cast can read a `b0` as a `Nat`. This is a separate, small program
+(not part of the program of this page):
+
+```lean
+structure Pkg0 where
+  α : Type
+  v : α
+
+@[noinline] unsafe def asNat (p : Pkg0) : Nat := unsafeCast p.v
+
+unsafe def main : IO Unit :=
+  IO.println (asNat ⟨Unit, ()⟩)
+```
+
+- `Pkg0` holds a type and a value of that type.
+- `asNat` reads the value as a `Nat` with `unsafeCast`, without a check.
+- `main` packs the unit value `()` and reads it as a `Nat`. A native build
+  prints `0`: natively, `()` is `box(0)`, the same word as the number 0.
+
+lean2rr generates this code:
+
+```rust
+fn asNat(p : L2RBox) -> Nat {
+    match p {
+        L2RBox::b2(n) => { n },
+        L2RBox::b0(_) => { zero_Nat() },     // runs: the box holds ()
+        _ => { l2r_unbox_Nat(p) }
+    }
+}
+
+// in main:
+let u : L2RUnit = L2RUnit::u{};
+let n : Nat = asNat(L2RBox::b0{u});
+```
+
+The lean2rr build also prints `0`.
 
 ### Sigma types
 
@@ -562,11 +639,71 @@ fn Pkg_show(p : Pkg) -> LStr {
 
 - A `Pkg` has two fields: `val` is an `L2RBox`, and `fmt` is a function
   value that takes an `L2RBox`.
-- The program builds `⟨Nat, 5, toString⟩`. `toString` at `Nat` takes a
-  `Nat`, so lean2rr stores it in the variant `wrap_Nat`. A call through
-  that variant takes the `Nat` out of the box, then calls `toString`.
-- `Pkg_show` reads the two fields and applies `fmt` to `val`
-  (`apply_Fn_Box_Str`), as the LCNF does (`fmt val`).
+- `Pkg_show` reads the two fields and applies `fmt` to `val`, as the LCNF
+  does (`fmt val`).
+
+`main` builds the package `⟨Nat, 5, toString⟩`. LCNF (part of `main`):
+
+```text
+let _f.29 : Nat → String := Nat.reprFast;
+let _x.30 : Nat := 5;
+let _x.31 : Pkg := Pkg.mk ◾ _x.30 _f.29;
+let _x.32 : String := Pkg.show _x.31;
+```
+
+lean2rr generates this code:
+
+```rust
+enum Fn_Nat_Str {                     // a function value: Nat -> LStr
+    z,
+    raw(Nat -> LStr),
+    reprFast                          // the function Nat.reprFast
+}
+
+let f : Fn_Nat_Str = Fn_Nat_Str::reprFast{};
+let five : Nat = l2r_nat_small(5);
+let p : Pkg = Pkg{L2RBox::b2{five}, Fn_Box_Str::wrap_Nat{f}};
+let s : LStr = Pkg_show(p);
+```
+
+- `Pkg.mk ◾ _x.30 _f.29`: the `◾` is the type `Nat`. It has no field.
+- `5` goes into the `Nat` variant `b2`.
+- `Nat.reprFast` takes a `Nat`, not an `L2RBox`, so lean2rr puts it into the
+  variant `wrap_Nat`.
+
+`apply_Fn_Box_Str` applies a function value of the type
+`Fn_Box_Str`:
+
+```rust
+fn apply_Fn_Box_Str(f : Fn_Box_Str, x : L2RBox) -> LStr {
+    match f {
+        Fn_Box_Str::z => { zero_String() },
+        Fn_Box_Str::raw(c) => { c(x) },
+        Fn_Box_Str::wrap_ProdBox(g) => { apply_Fn_ProdBox_Str(g, unbox_Prod_Box(x)) },
+        Fn_Box_Str::wrap_ProdNat(g) => { apply_Fn_ProdNat_Str(g, unbox_Prod_Nat(x)) },
+        Fn_Box_Str::wrap_Nat(g) => { apply_Fn_Nat_Str(g, match x {
+            L2RBox::b2(n) => { n },
+            L2RBox::b0(_) => { zero_Nat() },
+            _ => { l2r_unbox_Nat(x) }
+        }) }
+    }
+}
+
+fn apply_Fn_Nat_Str(f : Fn_Nat_Str, n : Nat) -> LStr {
+    match f {
+        Fn_Nat_Str::z => { zero_String() },
+        Fn_Nat_Str::raw(c) => { c(n) },
+        Fn_Nat_Str::reprFast => { Nat_reprFast(n) }
+    }
+}
+```
+
+- `z` is the placeholder function. It gives the zero of the result.
+- `raw` holds a closure.
+- Each `wrap_…` variant holds a function that takes another type. The call
+  takes the value out of the box at that type, then calls the function.
+  For `Pkg.show ⟨Nat, 5, toString⟩`, the call goes through `wrap_Nat`, then
+  `reprFast`.
 
 ### Polymorphic recursion
 
@@ -630,7 +767,77 @@ fn nest_Box(inst : Fn_Box_Str, n : Nat, x : L2RBox) -> LStr {
 - Else it builds the pair `(x, x)` as a `Prod_Box` (two boxes), puts the
   pair into the variant `b4`, and calls itself. `instPair` takes a
   `Prod_Box`, and the copy needs a dictionary that takes an `L2RBox`, so
-  lean2rr wraps it (`wrap_ProdBox_as_Box`).
+  lean2rr wraps it.
+
+The dictionary for pairs, and its wrapper:
+
+```rust
+enum Fn_ProdBox_Str {                 // a function value: Prod_Box -> LStr
+    z,
+    raw(Prod_Box -> LStr),
+    toStringPair(Fn_Box_Str, Fn_Box_Str)  // ToString (α × β), from the two dictionaries
+}
+
+fn wrap_ProdBox_as_Box(f : Fn_ProdBox_Str) -> Fn_Box_Str {
+    Fn_Box_Str::wrap_ProdBox{f}
+}
+
+fn toStringPair(fa : Fn_Box_Str, fb : Fn_Box_Str, p : Prod_Box) -> LStr {
+    let a : L2RBox = p.0;
+    let b : L2RBox = p.1;
+    let open : LStr = open_paren();              // the constant "("
+    let sa : LStr = apply_Fn_Box_Str(fa, a);
+    let s1 : LStr = lean_string_append(open, sa);
+    let sep : LStr = comma();                    // the constant ", "
+    let s2 : LStr = lean_string_append(s1, sep);
+    let sb : LStr = apply_Fn_Box_Str(fb, b);
+    let s3 : LStr = lean_string_append(s2, sb);
+    let close : LStr = close_paren();            // the constant ")"
+    lean_string_append(s3, close)
+}
+```
+
+- A call through `wrap_ProdBox` takes the `Prod_Box` out of the box
+  (`b4`), then calls `toStringPair`.
+
+The program calls `nest 2 n` with `n : Nat`. lean2rr makes a copy of `nest`
+at `Nat` for this call. It makes the first pair, then calls the copy at
+`L2RBox`:
+
+```rust
+fn nest_Nat(n : Nat, x : Nat) -> LStr {
+    let zero : Nat = l2r_nat_small(0);
+    let isZero : bool = lean_nat_dec_eq(n, zero);
+    if isZero {
+        l2r_nat_repr(x)
+    } else {
+        let instPair : Fn_ProdNat_Str = Fn_ProdNat_Str::toStringPairNat{};
+        let one : Nat = l2r_nat_small(1);
+        let n1 : Nat = lean_nat_sub(n, one);
+        let pair : Prod_Nat = Prod_Nat{x, x};
+        nest_Box(wrap_ProdNat_as_Box(instPair), n1, L2RBox::b5{pair})
+    }
+}
+```
+
+- The first pair is a `Prod_Nat` (two `Nat`s), in the variant `b5`.
+- `nest_Box` makes the next pairs as `Prod_Box` values (`b4`).
+- `unbox_Prod_Box` accepts both layouts. It converts a `Prod_Nat` to a
+  `Prod_Box`:
+
+  ```rust
+  fn unbox_Prod_Box(b : L2RBox) -> Prod_Box {
+      match b {
+          L2RBox::b4(p) => { p },
+          L2RBox::b5(p) => { conv_Prod_Nat_to_Prod_Box(p) },
+          L2RBox::b0(_) => { zero_Prod_Box() },
+          _ => {
+              let released : u64 = l2r_ptr_addr_rec<L2RBox>(b);
+              l2r_unreachable<Prod_Box>()
+          }
+      }
+  }
+  ```
 
 ### A partial application that leaves a type open
 
@@ -676,7 +883,67 @@ fn ops_lam(α : L2RUnit, xs : List_Box) -> Nat {
 - `α` is the erased type argument: an `L2RUnit`, which holds no data. The
   function keeps the parameter (rule 4).
 - `xs` is the list: each cell holds an `L2RBox` and the rest of the list.
-- The function counts the cells and multiplies by 2.
+- The function counts the cells and multiplies by 2:
+
+  ```rust
+  fn List_length_Box(xs : List_Box) -> Nat {
+      let zero : Nat = l2r_nat_small(0);
+      List_length_aux_Box(xs, zero)
+  }
+
+  fn List_length_aux_Box(xs : List_Box, acc : Nat) -> Nat {
+      match xs {
+          List_Box::c_nil => { acc },
+          List_Box::c_cons(h, t) => {
+              let one : Nat = l2r_nat_small(1);
+              let acc1 : Nat = lean_nat_add(acc, one);
+              List_length_aux_Box(t, acc1)
+          }
+      }
+  }
+  ```
+
+The list `ops`. LCNF:
+
+```text
+def ops : List ({α : lcErased} → List lcAny → Nat) :=
+  let _f.1 : lcErased → List lcAny → Nat := ops._lam_0;
+  let _x.2 : {α : lcErased} → List lcAny → Nat := List.lengthTR;
+  let _x.3 : List ({α : lcErased} → List lcAny → Nat) := [] ◾;
+  let _x.4 : List ({α : lcErased} → List lcAny → Nat) := List.cons ◾ _f.1 _x.3;
+  let _x.5 : List ({α : lcErased} → List lcAny → Nat) := List.cons ◾ _x.2 _x.4;
+  return _x.5
+```
+
+lean2rr generates this code:
+
+```rust
+enum Fn_Op {                          // a function value: L2RUnit -> List_Box -> Nat
+    z,
+    raw(L2RUnit -> Fn_ListBox_Nat),
+    ops_lam,                          // the function ops_lam
+    List_length                       // the function List.lengthTR
+}
+enum List_Fn_Op { c_nil, c_cons(Fn_Op, List_Fn_Op) }
+
+fn ops_tail() -> List_Fn_Op {             // the constant [ops_lam]
+    let nil : List_Fn_Op = List_Fn_Op::c_nil{};
+    let f : Fn_Op = Fn_Op::ops_lam{};
+    List_Fn_Op::c_cons{f, nil}
+}
+
+fn ops_init() -> List_Fn_Op {
+    let tail : List_Fn_Op = ops_tail();
+    let g : Fn_Op = Fn_Op::List_length{};
+    List_Fn_Op::c_cons{g, tail}
+}
+```
+
+- `ops` is a constant: lean2rr computes `ops_init()` once and keeps the
+  list in a once-cell. Lean's compiler also makes the tail `[ops_lam]` a
+  constant of its own (`ops_tail`).
+- Each element is a function value. It names the function; it allocates
+  nothing.
 
 ## The current version
 
@@ -718,22 +985,49 @@ LCNF:
 
 ```text
 def build (x.1 : Nat) : Tree Nat :=
-  ...
-  let t : Tree Nat := build n.4;
-  let _x.5 : Tree Nat := @Tree.node ◾ t t;
-  return _x.5
+  let zero : Nat := 0;
+  let isZero : Bool := Nat.decEq x.1 zero;
+  cases isZero : Tree Nat
+  | Bool.true =>
+    let _x.2 : Nat := 7;
+    let _x.3 : Tree Nat := @Tree.leaf ◾ _x.2;
+    return _x.3
+  | Bool.false =>
+    let one : Nat := 1;
+    let n.4 : Nat := Nat.sub x.1 one;
+    let t : Tree Nat := build n.4;
+    let _x.5 : Tree Nat := @Tree.node ◾ t t;
+    return _x.5
+
+def leftDepth.go._redArg (a.1 : Tree lcAny) : Nat :=
+  cases a.1 : Nat
+  | Tree.leaf (x.2 : lcAny) =>
+    let _x.3 : Nat := 0;
+    return _x.3
+  | Tree.node (left.4 : Tree lcAny) (right.5 : Tree lcAny) =>
+    let _x.6 : Nat := 1;
+    let _x.7 : Nat := leftDepth.go._redArg left.4;
+    let _x.8 : Nat := Nat.add _x.6 _x.7;
+    return _x.8
 
 def leftDepth (p : Tree lcAny) : Nat :=
   let _x.1 : Nat := leftDepth.go._redArg p;
   return _x.1
 ```
 
+The call in `main`:
+
+```text
+let _x.46 : Tree Nat := build n;
+let _x.47 : Nat := leftDepth _x.46;
+```
+
 - `build` returns a `Tree Nat`. `leftDepth` takes a `Tree lcAny`: Lean's
   compiler stores a `Packed` as its one data field, the tree.
-- In a native build, `Tree Nat` and `Tree lcAny` have the same layout, so
-  `main` passes the tree as it is.
+- `main` passes the `Tree Nat` to `leftDepth`. In a native build, `Tree Nat`
+  and `Tree lcAny` have the same layout, so the tree goes as it is.
 
-lean2rr generates two tree types and a conversion call:
+lean2rr generates two tree types:
 
 ```rust
 enum Tree_Nat {                   // Tree Nat: the layout that build uses
@@ -744,15 +1038,118 @@ enum Tree_Box {                   // Tree lcAny: the layout that leftDepth uses
     c_leaf(L2RBox),
     c_node(Tree_Box, Tree_Box)
 }
+```
+
+The functions:
+
+```rust
+fn leaf7_init() -> Tree_Nat {             // the constant .leaf 7
+    let seven : Nat = l2r_nat_small(7);
+    Tree_Nat::c_leaf{seven}
+}
+
+fn build(n : Nat) -> Tree_Nat {
+    let zero : Nat = l2r_nat_small(0);
+    let isZero : bool = lean_nat_dec_eq(n, zero);
+    if isZero {
+        leaf7()                           // reads the constant from its once-cell
+    } else {
+        let one : Nat = l2r_nat_small(1);
+        let n1 : Nat = lean_nat_sub(n, one);
+        let t : Tree_Nat = build(n1);
+        Tree_Nat::c_node{t, t}            // both children are the same t
+    }
+}
+
+fn leftDepth_go(t : Tree_Box) -> Nat {
+    match t {
+        Tree_Box::c_leaf(x) => { l2r_nat_small(0) },
+        Tree_Box::c_node(l, r) => {
+            let one : Nat = l2r_nat_small(1);
+            let d : Nat = leftDepth_go(l);
+            lean_nat_add(one, d)
+        }
+    }
+}
+
+fn leftDepth(p : Tree_Box) -> Nat {
+    leftDepth_go(p)
+}
 
 // in main:
 let t : Tree_Nat = build(n);
 let depth : Nat = leftDepth(conv_Tree_Nat_to_Tree_Box(t));
 ```
 
-- `conv_Tree_Nat_to_Tree_Box` makes a `Tree lcAny` with the same shape:
-  each leaf's `Nat` goes into `L2RBox::b2`. It follows each pointer
-  separately, so it makes 2<sup>n+1</sup> − 1 nodes.
+- `build` and `leftDepth` follow the LCNF line by line.
+- `main` cannot pass a `Tree_Nat` where a `Tree_Box` is expected, so it
+  calls a conversion.
+
+The conversion. It keeps its own stack of nodes (`Conv_K`), so a deep tree
+does not overflow the machine stack:
+
+```rust
+enum Conv_M {                     // the next step
+    down(Tree_Nat),               // convert this node
+    up(Tree_Box)                  // a node is converted: give it to the stack
+}
+enum Conv_K {                     // the stack of nodes in progress
+    done,
+    left(Tree_Nat, Conv_K),       // the left child is in progress
+    right(Tree_Nat, Tree_Box, Conv_K)   // the right child is in progress; the left is done
+}
+
+fn conv_leaf(x : Tree_Nat) -> Tree_Box {
+    match x {
+        Tree_Nat::c_leaf(n) => { Tree_Box::c_leaf{L2RBox::b2{n}} },
+        _ => { l2r_unreachable<Tree_Box>() }
+    }
+}
+
+fn conv_node(x : Tree_Nat, l : Tree_Box, r : Tree_Box) -> Tree_Box {
+    match x {
+        Tree_Nat::c_node(_, _) => { Tree_Box::c_node{l, r} },
+        _ => { l2r_unreachable<Tree_Box>() }
+    }
+}
+
+fn conv_loop(m : Conv_M, k : Conv_K) -> Tree_Box {
+    match m {
+        Conv_M::down(x) => {
+            match x {
+                Tree_Nat::c_leaf(_) => { conv_loop(Conv_M::up{conv_leaf(x)}, k) },
+                Tree_Nat::c_node(_, _) => { conv_loop(Conv_M::down{match x {
+                    Tree_Nat::c_node(l, _) => { l },
+                    _ => { l2r_unreachable<Tree_Nat>() }
+                }}, Conv_K::left{x, k}) }
+            }
+        },
+        Conv_M::up(d) => {
+            match k {
+                Conv_K::done => { d },
+                Conv_K::left(x, k2) => { conv_loop(Conv_M::down{match x {
+                    Tree_Nat::c_node(_, r) => { r },
+                    _ => { l2r_unreachable<Tree_Nat>() }
+                }}, Conv_K::right{x, d, k2}) },
+                Conv_K::right(x, l, k2) => { conv_loop(Conv_M::up{conv_node(x, l, d)}, k2) }
+            }
+        }
+    }
+}
+
+fn conv_Tree_Nat_to_Tree_Box(x : Tree_Nat) -> Tree_Box {
+    conv_loop(Conv_M::down{x}, Conv_K::done{})
+}
+```
+
+- `conv_loop` calls itself only in tail position, so LLVM turns these
+  calls into a loop.
+- At a node, it converts the left child, then the right child, then makes
+  the new node (`conv_node`).
+- It does not remember a node that it converted. `build` makes each node
+  with two pointers to the same child, so the conversion converts that
+  child two times. Each level doubles the work: `build n` (n + 1 nodes)
+  gives 2<sup>n+1</sup> − 1 nodes.
 
 | n | Native | Current version |
 |---|---|---|
