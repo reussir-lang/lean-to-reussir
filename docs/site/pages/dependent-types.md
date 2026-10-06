@@ -52,6 +52,8 @@ def pick (α : lcErased) (b : Bool) (x : lcAny) (y : lcAny) : lcAny :=
 
 - `α` is `lcErased`. lean2rr does not store it.
 - `x`, `y` and the result have the type `lcAny`. Each one holds data.
+- `cases b : lcAny` is a match on `b`. In LCNF, the type after the colon is
+  the type of the result of the whole match, not the type of `b`.
 
 lean2rr makes a copy of `pick` for each type argument that the program
 uses. In the copy at `Nat`, `x` and `y` are `Nat` values. A copy at an
@@ -223,6 +225,8 @@ def Column.push (c : Column) (i : Nat) : Column :=
       return _x.7
 ```
 
+- `cases ty.1 : Column` is a match on `ty.1`, a `Ty`. `Column` is the type
+  of the result of the match: each branch returns a column.
 - The field `data` has the type `Array lcAny`: an array whose element type
   is not known.
 - `Array.push ◾ data.2 i`: the first argument is the element type. It is

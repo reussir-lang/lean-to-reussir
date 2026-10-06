@@ -81,6 +81,8 @@ LCNF, it replaces two kinds of items:</p>
 <ul>
 <li><code>α</code> is <code>lcErased</code>. lean2rr does not store it.</li>
 <li><code>x</code>, <code>y</code> and the result have the type <code>lcAny</code>. Each one holds data.</li>
+<li><code>cases b : lcAny</code> is a match on <code>b</code>. In LCNF, the type after the colon is
+  the type of the result of the whole match, not the type of <code>b</code>.</li>
 </ul>
 <p>lean2rr makes a copy of <code>pick</code> for each type argument that the program
 uses. In the copy at <code>Nat</code>, <code>x</code> and <code>y</code> are <code>Nat</code> values. A copy at an
@@ -257,6 +259,8 @@ structure Column where
       return _x.7
 </code></pre>
 <ul>
+<li><code>cases ty.1 : Column</code> is a match on <code>ty.1</code>, a <code>Ty</code>. <code>Column</code> is the type
+  of the result of the match: each branch returns a column.</li>
 <li>The field <code>data</code> has the type <code>Array lcAny</code>: an array whose element type
   is not known.</li>
 <li><code>Array.push ◾ data.2 i</code>: the first argument is the element type. It is
