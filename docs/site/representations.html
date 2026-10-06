@@ -132,7 +132,7 @@ heap cell. A <em><code>[value]</code></em> type is stored inline and is never al
 <tr>
 <td>inductive types, structures</td>
 <td>one generated Reussir type per instantiation</td>
-<td>rules below; a planned change gives each datatype one layout (<a href="dependent-types.html#the-planned-implementation">dependent types</a>)</td>
+<td>rules below; a planned change gives each datatype one layout (<a href="dependent-types.html#layouts-of-generic-types">dependent types</a>)</td>
 </tr>
 <tr>
 <td>function types</td>
@@ -265,7 +265,7 @@ with examples, and what it costs.</p>
 <li>A converted value is a new object. On the current version, a conversion
   does not keep sharing: a value with shared parts can grow exponentially.
   The planned change removes conversions: each datatype gets one layout (see
-  <a href="dependent-types.html#the-planned-implementation">Dependent types</a>).</li>
+  <a href="dependent-types.html#layouts-of-generic-types">Dependent types</a>).</li>
 <li>A boxed unit unboxes to the <em>zero</em> of the target type. It is Lean's
   <code>box(0)</code> placeholder.</li>
 </ul>
