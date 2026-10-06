@@ -114,7 +114,7 @@ storage type
 :   A generated one-field shared struct that wraps a value that cannot cross the FFI boundary.
 
 conversion
-:   Generated code that rebuilds a value from one representation into another. The result is a new value. On the current version, a conversion does not keep sharing: a value with shared parts can grow exponentially (see [Dependent types](dependent-types.html#shared-values-and-conversions)).
+:   Generated code that rebuilds a value from one representation into another. The result is a new value. On the current version, a conversion does not keep sharing: a value with shared parts can grow exponentially (see [Dependent types](dependent-types.html#current-version-and-planned-change)). The planned change removes conversions.
 
 specialized layout
 :   The layout of an instance at precise type arguments: a `Tree Float` leaf holds an `f64`. The other layout of the same Lean type is the uniform layout, with `L2RBox` fields.

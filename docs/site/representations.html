@@ -132,7 +132,7 @@ heap cell. A <em><code>[value]</code></em> type is stored inline and is never al
 <tr>
 <td>inductive types, structures</td>
 <td>one generated Reussir type per instantiation</td>
-<td>rules below; <a href="dependent-types.html#specialization-first">an example</a></td>
+<td>rules below; a planned change gives each datatype one layout (<a href="dependent-types.html#current-version-and-planned-change">dependent types</a>)</td>
 </tr>
 <tr>
 <td>function types</td>
@@ -263,9 +263,9 @@ with examples, and what it costs.</p>
   element for arrays and lists. Deep values convert with a loop and an
   explicit stack, not recursion.</li>
 <li>A converted value is a new object. On the current version, a conversion
-  does not keep sharing: a value with shared parts can grow exponentially
-  (see <a href="dependent-types.html#shared-values-and-conversions">Dependent types</a>,
-  with an example and the fix). A conversion back makes a second copy.</li>
+  does not keep sharing: a value with shared parts can grow exponentially.
+  The planned change removes conversions: each datatype gets one layout (see
+  <a href="dependent-types.html#current-version-and-planned-change">Dependent types</a>).</li>
 <li>A boxed unit unboxes to the <em>zero</em> of the target type. It is Lean's
   <code>box(0)</code> placeholder.</li>
 </ul>

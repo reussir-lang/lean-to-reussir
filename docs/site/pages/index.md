@@ -165,12 +165,12 @@ Merged on 2026-10-04 and 2026-10-05:
 - **Reussir.** Patches 0065 and 0066 are applied. Each
   entry is now a numbered *issue* with a kind: only a *bug* is wrong
   behaviour (see [Reussir](reussir.html#all-entries)).
-- **Exponential conversions found.** A conversion of a value with shared
-  parts follows each pointer separately, so its result can grow
-  exponentially. A fix that converts each cell once is in progress (see
-  [Dependent types](dependent-types.html#shared-values-and-conversions)).
-  The dependent types page now also shows monomorphization and conversions
-  with real generated code.
+- **Dependent types: the rule.** Types do not compute, so lean2rr erases
+  them, and a value of unknown type is one enum, matched by its variant.
+  The current version still converts values between a layout for each type
+  argument and the boxed layout, which can grow exponentially on shared
+  values. The planned change gives each datatype one layout, so no value is
+  converted (see [Dependent types](dependent-types.html)).
 - **Plan §10** lists the Lean runtime bugs that lean2rr does not reproduce
   (see [Known differences](differences.html#lean-bugs-we-do-not-reproduce)),
   the differences of programs that use the `Lean` package, and that

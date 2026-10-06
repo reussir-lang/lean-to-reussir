@@ -165,7 +165,7 @@ garbage.
 
 | Cost | Why |
 |---|---|
-| Structural conversions rebuild a value as a tree | sharing is lost, so a value with shared parts can grow exponentially and use all memory ([an example](dependent-types.html#shared-values-and-conversions)); a value converted at each call costs O(size) per call |
+| Structural conversions rebuild a value as a tree | sharing is lost, so a value with shared parts can grow exponentially and use all memory ([an example](dependent-types.html#current-version-and-planned-change)); a value converted at each call costs O(size) per call |
 | `Array.map` that changes the representation | the input and the new result live together until the map ends |
 | `ElemBox` for array elements that cannot cross the FFI | one allocation per element |
 | Reads take their container owned | an increment and a release per read, unless LLVM cancels them |
