@@ -130,7 +130,7 @@ other results are the last recorded runs.
 
 | Check | Result |
 |---|---|
-| Runtime test suite | {{v:rt_tests}} programs† ({{v:rt_xfail}} marked `.xfail`†); at the last full run (2026-10-05), 326 of 327 identical to native Lean 4.34.0, nine of them through expectation files; the other one is the `.xfail` test |
+| Runtime test suite | {{v:rt_tests}} programs† ({{v:rt_xfail}} marked `.xfail`†); at the last full run (2026-10-06), 336 of 337 identical to native Lean 4.34.0, some of them through expectation files; the other one is the `.xfail` test |
 | Classic corpus | 18 programs × 3 sizes, identical to native, with all optional passes on and with all off |
 | Reussir benchmark suite | 18 of 18 programs identical to native |
 | Loader checks | {{v:env_cases}} cases†, all as expected |
@@ -143,13 +143,20 @@ other results are the last recorded runs.
 
 ## Recent changes
 
-Merged on 2026-10-04 and 2026-10-05:
+Merged from 2026-10-04 to 2026-10-06:
 
 - **The switch to `lean-runtime`**, in nine steps: the rules (steps 1
   and 2), the IO (step 3), the scheduler, `Std.Sync` and the event loop
   (step 4), the last copies of shared functions (step 5), the wait cores
   (step 6), the startup (step 7), the panic and exit executor (step 8),
   and a fix of a scheduler wait that could wait for ever (step 9).
+- **Fast paths in the runtime library** (step 10): `Float.toString`,
+  `Int` with one small operand, `Int` and string equality, array sets of
+  records. Instruction counts: strings −19.9%, liasolver −14.7%,
+  unionfind +4.6%. An array set that frees the last reference to a record
+  releases its fields last first, as Lean does; this costs about 140
+  instructions per freed record (see
+  [Runtime](runtime.html#fast-paths-of-the-runtime-library-step-10)).
 - **The extern rule** (above).
 - **`conv-liveness`**, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see [Optional passes](passes.html)).

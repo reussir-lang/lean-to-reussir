@@ -24,7 +24,6 @@ extern "C" {
     fn mi_malloc(size: usize) -> *mut c_void;
     fn mi_realloc(p: *mut c_void, size: usize) -> *mut c_void;
     fn mi_free(p: *mut c_void);
-    fn mi_good_size(size: usize) -> usize;
 }
 
 /// The header of a string block:
@@ -181,6 +180,21 @@ pub fn bytes(s: &LStr) -> &[u8] {
     s.utf8()
 }
 
+/// `String.decEq` (`lean_string_dec_eq`): two references to the same block
+/// are equal without comparing the bytes, as natively (`lean_string_eq`:
+/// `s1 == s2 ||` the sizes and the bytes). The lengths are compared first
+/// here, then the blocks, then the bytes (the same answer; strings of other
+/// lengths skip the block test: measured, 0.1 % fewer instructions in
+/// monadic-interp than the block test first). Both handles are released.
+#[inline(always)]
+pub fn dec_eq(a: LStr, b: LStr) -> bool {
+    let (x, y) = (a.utf8(), b.utf8());
+    let r = x.len() == y.len() && (a.0 == b.0 || x == y);
+    drop(a);
+    drop(b);
+    r
+}
+
 
 #[cold]
 #[inline(never)]
@@ -306,7 +320,7 @@ extern "C" fn copy_shared(s: LStr, extra: usize) -> LStr {
 
 /// Grow a unique string to room for at least `need` bytes, at least
 /// doubling (so appends are amortized O(1)). The capacity is all of the
-/// block: mimalloc's size classes for small blocks (`mi_good_size`), powers
+/// block: mimalloc's size classes for small blocks (`alloc::good_size`), powers
 /// of two beyond 4 KiB (as `tagvec::grow`).
 #[cold]
 #[inline(never)]
@@ -318,7 +332,7 @@ extern "C" fn grow(s: LStr, need: usize) -> LStr {
     unsafe {
         let want = need.max((*o).cap.saturating_mul(2)).max(8);
         let b = bytes_for(want);
-        let bytes = if b > 4096 { b.checked_next_power_of_two().unwrap_or(b) } else { mi_good_size(b) };
+        let bytes = if b > 4096 { b.checked_next_power_of_two().unwrap_or(b) } else { crate::alloc::good_size(b) };
         // `bytes >= b >= HDR + want`; realloc keeps the header and the
         // `len` bytes.
         let n = mi_realloc(o as *mut c_void, bytes) as *mut Obj;
@@ -763,5 +777,20 @@ mod tests {
         ok(&of_i64(-7), "-7");
         ok(&of_i64(i64::MAX), "9223372036854775807");
         ok(&of_u64(0), "0");
+    }
+
+    /// `dec_eq`: the same block, equal bytes in two blocks, other lengths
+    /// and other bytes; both handles are released every time.
+    #[test]
+    fn dec_eq_releases_both() {
+        let a = s("abc");
+        assert!(dec_eq(a.clone(), a.clone()));
+        assert_eq!(count(&a), 1);
+        let b = s("abc");
+        assert!(dec_eq(a.clone(), b.clone()));
+        assert!(!dec_eq(a.clone(), s("abd")));
+        assert!(!dec_eq(a.clone(), s("ab")));
+        assert!(dec_eq(s(""), shared_empty()));
+        assert_eq!((count(&a), count(&b)), (1, 1));
     }
 }

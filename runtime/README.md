@@ -106,7 +106,7 @@ and hot paths in `leanrt` and the prelude, which call lean-runtime for the
 rest.
 
 - **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
-  pinned at a commit of its `main` (now `83f7127`). Clone lean2rr with
+  pinned at a commit of its `main` (now `e5e502e`). Clone lean2rr with
   `git clone --recurse-submodules`, or run `git submodule update --init
   third_party/lean-runtime` in a checkout, and again after a checkout,
   merge or pull that moves the pin: git does not update a submodule on its
@@ -341,7 +341,7 @@ rest.
 | `Nat` | `Nat` = `leanrt::nat::LNat`, one word, declared `tagged` (Reussir patch 0050) | odd: the small value `(n << 1) \| 1`, n < 2^63; even: an owned `LBig` pointer (below) |
 | `Int` | `Int` = `leanrt::nat::LInt`, likewise | odd: `lean_box((unsigned)(int)i)` for i in the `int32` range; even: an owned `LBig` pointer |
 | big numbers | `LBig`, one `mi_malloc` block: count `u32`, flags `u32`, signed size `i32` (limbs in use, negative for a negative value), capacity `u32`, then the limbs | GMP `mpn` operations on the limbs, in a unique operand's block with room (grown by a carry, shrunk when a result leaves most of it unused) or a fresh one; `mpz` operations on read-only views for `pow`, `gcd`, parsing and printing; normalized (only values outside the small ranges); only behind a `Nat`/`Int` word |
-| `String` | `LStr` = `leanrt::string::LStr`, a pointer to one block: count, byte size, capacity, character count (32 bytes, as Lean's header), bytes | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write; grows by `realloc` (below) |
+| `String` | `LStr` = `leanrt::string::LStr`, a pointer to one block: count, byte size, capacity, character count (32 bytes, as Lean's header), bytes | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write; grows by `realloc` (below); equality compares the lengths, then the blocks (two references to one block are equal at once, as `lean_string_eq`), then the bytes |
 | `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a pointer to one block: count `u32` (padded), size, capacity (24 bytes), then the elements | `E` = storage type of `α` (lean2rr boxes non-boundary types); copy-on-write, grows by `realloc`; freed without recursion (below) |
 | `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` = `leanrt::tagvec::TagVec` | the elements' own words, one block with Lean's 24-byte header (below) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` (and `FloatArray`'s) are the identity (`Array UInt8` is `RVec<u8>` too); `String.toUTF8`/`fromUTF8` copy the bytes, as natively |
@@ -363,7 +363,14 @@ Reussir's `Rc`, `LStr`, `TagVec`)/`array::release`, whose last-reference
 drop is out of line; together with `#[inline(always)]` fast paths and
 `#[cold]` slow paths this lets LLVM inline the hot textures (array
 get/set/push/size, string get/next/push, the Nat helpers) into Reussir code
-(checked with `rrc --emit llvm-ir`). Inlined, a read's release meets the
+(checked with `rrc --emit llvm-ir`; `tests/runtime/ffi-inline-check.sh`
+checks reads and sets). An array set (and a pop) releases the element it
+removes with only its decrement in line when it is a Reussir record
+(`array::ReleaseElem`): the record's whole release in line kept the set
+texture out of line (unionfind). The last reference is released out of
+line by `array::release_last`, inside a free the runtime starts
+(`drop::release`), so its fields go in Lean's order, the last one first,
+as `lean_dec` frees them in `lean_array_uset` (review RS10-01). Inlined, a read's release meets the
 caller's increment, and LLVM folds the pair (the free check included,
 thanks to the `old count >= 1` that Reussir's `rc.inc` asserts) as long as
 no other store or call lies on a path between them. So a read gives its
@@ -403,7 +410,11 @@ views its words as lean-runtime's `Nat`/`Int`, runs lean-runtime's rule
 and normalizes the result) for the rest; `l2r_nat_of_raw` makes a handle of a word, `l2r_nat_drop_raw`
 releases one. The slow paths normalize: a `Nat` below 2^63 (an `Int` in
 `int32`) is always small, so two small words are equal exactly when the
-values are. A build with `L2R_LEANRT_RUSTFLAGS="--cfg leanrt_count_bigs"`
+values are, and a small `Int` never equals a big one: `lean_int_dec_eq`
+answers a small and a big word `false` without a call (releasing the big
+one). `LInt::of_big` is the one place where a big `Int` handle is made;
+builds with debug assertions check there, and where a slow path reads a
+big `Int` (`int_view`), that it is outside the small range. A build with `L2R_LEANRT_RUSTFLAGS="--cfg leanrt_count_bigs"`
 counts the big numbers made and freed and prints the counts at exit
 (`tests/runtime/nat-alloc-check.sh`).
 
@@ -431,8 +442,9 @@ increments the count inline, its uniqueness analysis reads it; `rc.dec`
 calls the type's drop hook, a texture that drops the Rust value), so their
 `Clone` and `Drop` do the counting, the drop's last reference out of line.
 A unique block grows in place with `mi_realloc` (at least doubling; the
-capacity is the whole block: mimalloc's size class, `mi_good_size`, for
-small blocks, a power of two above 4 KiB); a fresh block's size is
+capacity is the whole block: mimalloc's size class, `alloc::good_size`,
+for small blocks, without `mi_good_size`'s call up to 64 bytes, where the
+classes are every multiple of 8; a power of two above 4 KiB); a fresh block's size is
 rounded up to 8 bytes, the rest becoming capacity; a shared one is copied
 with room for the update (a string: at least doubled, as
 `lean_string_push`; an array, for a push: `lean_array_push`'s capacity;

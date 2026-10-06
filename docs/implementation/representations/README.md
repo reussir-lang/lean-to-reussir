@@ -6,14 +6,15 @@ the special cases behind those choices. The type table is in plan
 is in [`runtime/README.md`](../../../runtime/README.md).
 
 - [nat-int.md](nat-int.md): `Nat` and `Int` as one word in Lean's encoding
-  (tagged handles, Reussir patch 0050), fast paths, big numbers in one
+  (tagged handles, Reussir patch 0050), fast paths, normalization and the
+  call-free equality of a small and a big `Int`, big numbers in one
   block (header and limbs), literals, printing.
 - [records.md](records.md): generated types for inductives: unit, value
   enums and structs, field order, hidden fields, names.
 - [arrays.md](arrays.md): the one-block array and its `count == 1`
   release, storage types, `ElemBox`, enumerations as indices, one-word
-  `Nat`/`Int` arrays, capacities, indices.
-- [strings.md](strings.md): the counted string, the string literal table
+  `Nat`/`Int` arrays, capacities (mimalloc's size class), indices.
+- [strings.md](strings.md): the counted string, its equality, the string literal table
   and its `[` escape.
 - [box-and-uniform.md](box-and-uniform.md): the uniform `Box` type and its
   variants.

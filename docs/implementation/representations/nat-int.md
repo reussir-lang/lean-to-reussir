@@ -53,15 +53,88 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 
 - **What:** A `Nat` below 2^63 and an `Int` in `int32` are always small;
   every slow path returns through `LNat::of_big`/`LInt::of_big`, which
-  turn an in-range big result back into its word.
+  turn an in-range big result back into its word. `LInt::of_big` is the
+  one place where a big `Int` handle is made; lean-runtime's rules do not
+  normalize (their `Int` may hold any value in either form), and leanrt
+  turns every rule's result into a word through `of_int_view`
+  (`LInt::of_i64` for a word, `LInt::of_big` for a big number). The
+  prelude makes small words only for values it has range-checked
+  (`l2r_int_of_i64`) or knows to be in range (`l2r_int_small`); any other
+  word is a copy of an existing `Int`. The producers of an `Int` (the
+  audit of switch step 10; each normalizes as said):
+  - leanrt: `LInt::small` (a value in range), `LInt::of_i64` and
+    `int_big_of_i64` (a range test, then `of_big`), `LInt::of_big`, and
+    `of_int_view`, through which every slow path returns (`int_neg`,
+    `int_add`, `int_sub`, `int_mul`, `int_div`, `int_mod`, `int_ediv`,
+    `int_emod`, `nat_to_int`, `nat_neg_succ`); lean-runtime's rules and
+    `GInt`'s word methods only give `of_int_view` their results;
+  - the prelude's fast paths: `lean_int_neg`, `lean_int_add`, `_sub`,
+    `_mul`, `_div`, `_ediv` and `_emod` through `l2r_int_of_i64` (two
+    small values in `i64` cannot overflow), `lean_int_mod` and
+    `lean_int_emod` through `l2r_int_small` (a remainder by a small
+    divisor, or zero) or the dividend's own word (`x % 0`);
+  - conversions: `lean_nat_to_int` (`Int.ofNat`, and `unsafeCast` from
+    `Nat`, `Lower/Conv.lean`) reuses the word of a small `Nat` below 2^31,
+    else `nat_to_int`; `lean_int_neg_succ_of_nat` (`Int.negSucc`, also
+    `Int.negOfNat` and so `String.toInt?`); `lean_int8_to_int`,
+    `lean_int16_to_int`, `lean_int32_to_int` and `lean_int_to_int` (an
+    `int32`), `lean_int64_to_int_sint` and `lean_isize_to_int` (through
+    `l2r_int_of_i64`; also `IO.FS.Metadata`'s times, `Lower/Externs.lean`:
+    `metadataOf`); `l2r_int_of_word` (`unsafeCast` of a word, its low 32
+    bits); `Float.frExp`'s exponent and the shim's clock
+    (`l2r_shim_realtime_nanos`, behind `L2RShim`'s `currentTime`) through
+    `l2r_int_of_i64`; `L2RShim`'s `signalNext` through `Int.ofNat`;
+  - literals: none (Lean's LCNF has no `Int` literal; constants are
+    `Int.ofNat`, `Int.negSucc` and `Int.neg` calls, recomputed the same way
+    as cheap constants);
+  - `zeroValue` (`Lower/Conv.lean`): `l2r_int_small(0)`; a `Box` read at
+    `Int` (`genUnbox`): the `Int` variant's handle, a `Nat` through
+    `lean_nat_to_int`, a word through `l2r_int_of_word`, the unit through
+    `zeroValue`;
+  - copies of existing words: an `Array Int`'s elements (`tagvec`), a
+    record's or a `Box`'s field, a once-cell's value, a reference's or a
+    task's value; arrays of another element type are converted element by
+    element (`vecConv`), never retyped between `Nat` and `Int`
+    (`retypableAux`).
+  In builds with debug assertions, `LInt::of_big` checks that a big
+  number is in its one form (no zero top limb, no negative zero: what
+  `fits_i64` and its range test read), and `int_view` (every slow path's
+  read of a big `Int`, comparisons included) that, and that no big `Int`
+  is in the small range; leanrt's unit tests run with them
+  (`tests/runtime/leanrt-unit.sh`).
 - **Why:** Two small words are then equal exactly when the values are,
-  and every small value is below every big one, so the fast paths compare
-  words and never look at a big number; native Lean keeps the same
-  invariant.
+  a small value never equals a big one, and every small `Nat` is below
+  every big one, so the fast paths compare words and never look at a big
+  number; native Lean keeps the same invariant.
 - **Where:** `leanrt/src/nat.rs`: `of_big`, `of_u64`, `of_i64`,
-  `of_nat_view`, `of_int_view` (lean-runtime's results); the prelude fast
-  paths' range checks (`l2r_int_of_i64`, `l2r_nat_of_u64`).
+  `of_nat_view`, `of_int_view` (lean-runtime's results),
+  `big_trimmed`, `big_int_normalized`, `int_view`; the prelude fast paths' range checks
+  (`l2r_int_of_i64`, `l2r_nat_of_u64`); unit tests
+  `nat::tests::int_results_are_normalized` (every `Int` slow path at the
+  range's edges) and `nat::tests::unnormalized_big_int_is_caught`;
+  runtime test `RtIntSmallBigEq`.
 - **Remove only if:** never (a correctness invariant).
+
+### `Int` equality of a small and a big word needs no call
+
+- **What:** `lean_int_dec_eq` compares two small words directly (as
+  before); for a small and a big word it answers `false` at once and
+  releases the big one (the pair's one even word); only two big words
+  call `leanrt::nat::int_eq`.
+- **Why:** By normalization a big `Int` is never in the small range, so it
+  never equals a small one. The mixed pair went to `int_eq` and
+  lean-runtime's `compare_slow`: in an instruction-count profile of the
+  classic programs, 120,000 calls in liasolver, most of them comparisons of a big value with a small one.
+  Without the call, liasolver runs 3.1% fewer instructions (switch step
+  10, cachegrind, size 16). The order (`<`, `≤`, `compare`) still calls
+  leanrt for a mixed pair (the answer is the big number's sign).
+- **Where:** `prelude.rr`: `lean_int_dec_eq`; runtime test
+  `RtIntSmallBigEq` (86 values at and around the range's edges, from every
+  operation and conversion, and the equality and order of every pair:
+  with a result left big in the small range, the test fails).
+- **Remove only if:** never (speed only, but it depends on normalization
+  above; `Nat` equality keeps its call for a mixed pair: its producers
+  were not audited).
 
 ### Prelude functions take each `Nat` argument as its word once
 
@@ -105,7 +178,18 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   rule's `InternalPanic` (`lean_internal_panic`). `GNat` and `GInt` are
   `LBig` as lean-runtime's `BigNat`/`BigInt` traits: each method is one of
   `big.rs`'s operations (the four divisions are `big::div`'s fused `mpn`
-  ones, not the traits' default from `tdiv_rem`). `big::MAX_BITS`, the
+  ones, not the traits' default from `tdiv_rem`). When one operand is a
+  word and the other big, the rules call `BigInt`'s word methods
+  (`add_i64`, `i64_add`, `sub_i64`, `i64_sub`, `mul_i64`, `i64_mul`,
+  `tdiv_i64`, `tmod_i64`, `ediv_i64`, `emod_i64`, `div_exact_i64`;
+  lean-runtime perf-2, switch step 10), which `GInt` overrides with
+  `big::add_limb` (`mpn_add_1`/`mpn_sub_1`), `mul_limb` (`mpn_mul_1`) and
+  `div_limb` (`mpn_divrem_1`, `mpn_mod_1`) on the big operand's limbs, in
+  its block when it is unique: no block for the word (the trait's
+  defaults make one with `from_i64`). The big operand may be any value,
+  zero (no limb) included, which `add_limb` and `div_limb` answer apart
+  (`mpn_add_1` and `mpn_sub_1` need a limb: a zero operand would give 0
+  instead of the word). `big::MAX_BITS`, the
   largest result the rules ask for, is `(INT_MAX - 5) * 64` bits: GMP's
   `mpz_t` (and a block) holds `INT_MAX` limbs, and `mpz_pow_ui`, the one
   operation whose result GMP allocates, asks for at most
@@ -126,9 +210,13 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   Cfold, Sieve and Bignum is the same but for the targets of those calls.
 - **Where:** `leanrt/src/nat.rs`: `nat_view`, `int_view`, `ok`, the slow
   paths; `leanrt/src/big.rs`: `GNat`, `GInt`, `MAX_BITS`, `bit_len`,
-  `trailing_zeros`; unit tests `nat::tests::lifted_limits`,
-  `big::tests::max_bits`, `big::tests::trait_views`; runtime tests
-  `RtLiftedLimits`, `RtInternalPanic`.
+  `trailing_zeros`, `add_limb`, `div_limb`; unit tests
+  `nat::tests::lifted_limits`, `big::tests::max_bits`,
+  `big::tests::trait_views`, `big::tests::word_methods_match_defaults`
+  (every word method against the trait's default, on big operands at the
+  word ranges' edges and zero, unique and shared, and words at `i64`'s
+  edges); runtime tests `RtLiftedLimits`, `RtInternalPanic`,
+  `RtIntSmallBigEq`.
 - **Remove only if:** lean2rr stops using lean-runtime.
 
 ### Add and mul test "both small" on the parity of the sum
@@ -181,8 +269,10 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 - **What:** `LBig` is a pointer to one `mi_malloc` block: the 32-bit
   count (Reussir's, at offset 0), 4 reserved bytes (`flags`, 0), the signed
   size (GMP's convention: the limbs in use, negated for a negative value;
-  no zero top limb), the capacity, then the limbs inline (`mi_good_size`
-  rounds the capacity up to the allocator's size class). The frequent
+  no zero top limb), the capacity, then the limbs inline (the capacity
+  is rounded up to the allocator's size class, `alloc::good_size`, see
+  [arrays.md](arrays.md#a-blocks-capacity-is-mimallocs-size-class-without-a-call-up-to-64-bytes)).
+  The frequent
   operations (add, sub, mul, div/mod in the four Lean flavours, shifts)
   call GMP's `mpn_*` functions on the limbs; bitwise operations and
   comparisons are loops over them. A result goes into a unique operand

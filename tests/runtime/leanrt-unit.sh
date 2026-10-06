@@ -28,6 +28,9 @@ lr = l2r.build_lean_runtime(l2r.leanrt_out())
 for e in lr.externs: print("--extern"); print(e)
 for d in lr.dirs: print("-L"); print(f"dependency={d}")' "$ROOT/scripts")
 [ ${#LR[@]} -ge 4 ] || exit 1
-"$RUSTC" --edition 2021 --test --crate-name leanrt -C opt-level=1 -L "$RT" -L "$RT/deps" \
+# Debug assertions on (rustc turns them on by itself only at opt-level 0):
+# leanrt's invariant checks run, e.g. that no big `Int` is in the small
+# range (nat::tests::unnormalized_big_int_is_caught).
+"$RUSTC" --edition 2021 --test --crate-name leanrt -C opt-level=1 -C debug-assertions=on -L "$RT" -L "$RT/deps" \
   "${LR[@]}" -C link-arg="$GMP" "$ROOT/runtime/leanrt/src/lib.rs" -o "$OUT"
 "$OUT" "$@"

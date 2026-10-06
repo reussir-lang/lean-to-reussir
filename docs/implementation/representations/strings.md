@@ -21,6 +21,24 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/string.rs`, and
   strings took 314 MB, now 277 MB (native 360). `String.toUTF8` and
   `String.fromUTF8` copy the bytes, as natively.
 
+### String equality tests the same block first
+
+- **What:** `lean_string_dec_eq` (`leanrt::string::dec_eq`) compares the
+  lengths, then answers `true` for two handles of the same block at once,
+  then compares the bytes; both handles are released.
+- **Why:** As native `lean_string_eq` (`s1 == s2 ||` the sizes and the
+  bytes): equal strings that are one shared value are not scanned.
+  monadic-interp, whose variables are looked up by name, runs 1.3% fewer
+  instructions (switch step 10, cachegrind, size 1000; half of its `bcmp`
+  calls go); strings, which compares distinct strings of equal length,
+  0.09% more (about 6 instructions a call, register moves around
+  `bcmp`). The lengths come first, then the blocks: the same answer, and
+  0.1% fewer instructions in monadic-interp than the block test first.
+- **Where:** `prelude.rr`: `lean_string_dec_eq`;
+  `leanrt/src/string.rs`: `dec_eq`; unit test
+  `string::tests::dec_eq_releases_both`.
+- **Remove only if:** never (speed only).
+
 ### `String.set` updates in place without a temporary vector
 
 - **What:** `String.set` encodes the character into a stack buffer and

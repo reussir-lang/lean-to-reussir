@@ -107,7 +107,9 @@ schedules native Lean can produce. See
   holds last pushed, first released. lean2rr does the same inside every free
   that starts at a container. When user code drops a record of handles by
   itself, Reussir's inline release goes in field order: a list of handles
-  `L0 … L7` closes `L0 L7 L6 … L1` (natively `L7 … L0`).
+  `L0 … L7` closes `L0 L7 L6 … L1` (natively `L7 … L0`). An array set or
+  pop that frees the last reference to a record releases its fields last
+  first, as Lean does.
 - **Release time of borrowed parameters.** lean2rr emulates Lean's borrowing
   for values that can hold a resource, with Lean's inference run on
   lean2rr's instances. Where Lean infers its own specializations

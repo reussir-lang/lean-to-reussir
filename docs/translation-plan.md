@@ -3151,7 +3151,12 @@ Each item says what differs and when.
   while no free runs, and that function frees a container field (an array,
   a reference, a thunk) as soon as it reaches it, before the record fields.
   So a structure `{a : Array Handle, l : List Handle}` in a list dropped by
-  itself closes `A1 A0 L1 L0` (natively `L1 L0 A1 A0`).
+  itself closes `A1 A0 L1 L0` (natively `L1 L0 A1 A0`). An array set or
+  pop that removes the last reference to a record frees it inside a free
+  the runtime starts, so its fields go last first, as `lean_dec` frees them
+  in `lean_array_uset` and `lean_array_pop` (switch step 10, review
+  RS10-01; tests `RtArraySetFreeOrder`, `RtArrayPopFreeOrder`); before,
+  the record's own release freed them in field order.
 - *Release time of borrowed parameters* (§5.8): emulated for values that
   may hold a resource, with Lean's inference run on lean2rr's monomorphic
   instances: where Lean infers a polymorphic declaration or one of its own

@@ -760,6 +760,57 @@ Paths are relative to the repository root.
   [../tasks/scheduler.md](../tasks/scheduler.md).
 - **Remove only if:** never.
 
+### The runtime library's speed items of an instruction profile (switch step 10)
+
+- **What:** lean-runtime pinned at `e5e502e` (main: fixes-8b, 1a21a63:
+  tests, docs and a debug assertion in the scheduler's wait; perf-2,
+  e5e502e: `Float.toString`'s exact fast path and `BigInt`'s word
+  methods). `Float.toString` writes a finite value below 2^53 in magnitude
+  from `round_half_even(|x| * 10^6)`, computed exactly in integers, instead
+  of Rust's `{:.6}`, which fell back to the bignum Dragon algorithm for
+  values with few significant digits; the text is unchanged. The `Int`
+  rules call a word method (`add_i64`, `i64_sub`, `mul_i64`, `tdiv_i64`,
+  ...) when one operand is a word and the other big; leanrt's `GInt`
+  overrides all eleven with its in-place limb code (`big::add_limb`,
+  `mul_limb`, `div_limb`), so the word needs no block (see
+  [../representations/nat-int.md](../representations/nat-int.md#the-slow-paths-are-lean-runtimes-rules-on-lean2rrs-numbers)).
+  The same step changes four things of leanrt and the prelude: no
+  `mi_good_size` call up to 64 bytes
+  ([../representations/arrays.md](../representations/arrays.md#a-blocks-capacity-is-mimallocs-size-class-without-a-call-up-to-64-bytes)),
+  the equality of a small and a big `Int` without a call
+  ([../representations/nat-int.md](../representations/nat-int.md#int-equality-of-a-small-and-a-big-word-needs-no-call)),
+  the block test of string equality
+  ([../representations/strings.md](../representations/strings.md#string-equality-tests-the-same-block-first))
+  and the release of a record an array set replaces
+  ([../ownership.md](../ownership.md#a-set-releases-a-replaced-record-with-its-decrement-in-line)).
+- **Why:** An instruction-count profile of the 18 classic programs
+  (cachegrind, no timing) found the runtime library's share large
+  in strings (about 30%, `Float.toString`), liasolver (25%, `Int` beyond
+  `int32`), unionfind (7%, a set texture not inlined) and monadic-interp
+  (6.5%). Measured with cachegrind at the small sizes (instructions,
+  without mimalloc's free-path functions, whose counts vary from run to
+  run): the pin alone, strings 19.8% fewer and liasolver 0.8%; the word
+  methods' overrides, liasolver 4.6% fewer; the whole step against dev,
+  liasolver 14.7% fewer, strings 19.9%, monadic-interp 1.9%, qsort
+  0.15%, and unionfind 4.6% more: a set that frees the record it replaces
+  now frees it in Lean's order through the runtime's free (review
+  RS10-01), about 140 instructions per free
+  ([../ownership.md](../ownership.md#a-set-releases-a-replaced-record-with-its-decrement-in-line)).
+- **Tests:** leanrt's unit test `big::tests::word_methods_match_defaults`
+  (each override against the trait's default, big operands at the word
+  ranges' edges and zero, unique and shared); the runtime suite's `Int`,
+  `Nat`, `Float`, `String` and array tests; `tests/runtime/rows-check.sh`
+  (lean-runtime's `Int` and `Float` rows through lean2rr); the new tests
+  `RtIntSmallBigEq`, `RtArraySets`, `RtArrayRecordFreeOrder`,
+  `RtArraySetFreeOrder` and `RtArrayPopFreeOrder`.
+- **Where:** lean-runtime's `src/semantics/float.rs` (`to_string`,
+  `fixed6`), `src/semantics/bignum.rs` (the word methods) and
+  `src/semantics/int.rs` (`ring_op!`, `div_slow`); leanrt's
+  `runtime/leanrt/src/big.rs` (`impl BigInt for GInt`, `add_limb`,
+  `div_limb`).
+- **Remove only if:** never (speed only); the overrides must give the
+  defaults' values (the unit test).
+
 ### leanrt is built and linked with the shared crate lean-runtime
 
 - **What:** `scripts/l2r.py` builds lean-runtime (the git submodule

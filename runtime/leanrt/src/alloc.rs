@@ -26,12 +26,34 @@ extern "C" {
     fn mi_zalloc(size: usize) -> *mut c_void;
     fn mi_realloc(p: *mut c_void, size: usize) -> *mut c_void;
     fn mi_free(p: *mut c_void);
+    fn mi_good_size(size: usize) -> usize;
 }
 
 #[cold]
 #[inline(never)]
 fn oom() -> ! {
     crate::lean_internal_panic(lean_runtime::semantics::panic::InternalPanic::OutOfMemory)
+}
+
+/// The bytes a mimalloc block asked for with `bytes` bytes (a multiple of
+/// 8) can hold, mimalloc's size class (`mi_good_size`): the capacity big
+/// numbers, strings and arrays take for a block. Up to 64 bytes it is
+/// `bytes` itself, without the call: mimalloc's classes there are every
+/// multiple of 8 (one per word count, `mi_bin`), so `mi_good_size` would
+/// return its argument (unit test `alloc::tests::small_good_size`); and were
+/// a class bigger, a capacity of `bytes` would still lie inside the block,
+/// with room left unused. In an instruction-count profile of the classic
+/// programs the call (with mimalloc's `_mi_bin_size`) was 1.9 % of
+/// liasolver's instructions (one-limb big numbers) and 0.65 % of qsort's
+/// (array growth).
+#[inline(always)]
+pub fn good_size(bytes: usize) -> usize {
+    debug_assert!(bytes % 8 == 0);
+    if bytes <= 64 {
+        bytes
+    } else {
+        unsafe { mi_good_size(bytes) }
+    }
 }
 
 /// Mirror of `reussir_rt::rc::RcBox` (`#[repr(C)] { count: Cell<u32>, data }`).
@@ -159,5 +181,20 @@ fn grow<T>(v: &mut Vec<T>, need: usize) {
             oom();
         }
         *v = Vec::from_raw_parts(np, len, new_cap);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `good_size` skips `mi_good_size` up to 64 bytes: there mimalloc's
+    /// size class of a multiple of 8 is that size, so no capacity is lost;
+    /// above, it is the call.
+    #[test]
+    fn small_good_size() {
+        for b in (8..=4096).step_by(8) {
+            assert_eq!(good_size(b), unsafe { mi_good_size(b) }, "{b} bytes");
+        }
     }
 }

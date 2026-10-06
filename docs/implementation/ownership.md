@@ -137,7 +137,11 @@ runtime.
   through containers (a tree whose children are in arrays, chains of thunks)
   overflowed the stack (59b2551). Two separate stacks (the runtime's and
   0014's) released handles in another order than native (6889792, test
-  `RtDropOrderRec`). The order still differs at the top of a free that
+  `RtDropOrderRec`; `RtArrayRecordFreeOrder`: one release of an array of
+  structures that hold handles, an array of handles and unresolved
+  promises, whose file and dependents fail if elements whose last
+  reference goes were released outside the stack, in field order). The
+  order still differs at the top of a free that
   starts at a record user code drops by itself (plan
   [§10](../translation-plan.md#10-known-divergences-and-unsupported-features),
   "Order of releases in one free").
@@ -179,6 +183,64 @@ runtime.
 - **Where:** `runtime/leanrt/src/array.rs` (`ExtendCloned`, the copy
   paths).
 - **Remove only if:** never (speed only).
+
+### A set releases a replaced record with its decrement in line
+
+- **What:** An array set (`leanrt::array::set`, the texture
+  `l2r_array_set`, behind `Array.set`, `set!`, `uset`, `fset`) releases
+  the element it replaces first, then stores the new one, as
+  `lean_array_uset`; a pop (`array::pop`) releases the element it removes,
+  as `lean_array_pop`. For a Reussir record (`Bridge` elements, aarch64,
+  8 bytes) only the decrement is in line, as `rc.dec` does it: an
+  immediate is skipped and a count above 1 is decremented, as the array
+  free does (`drop::ReleaseElems`). The last reference goes to
+  `array::release_last` (`#[cold] #[inline(never)] extern "C"`), which
+  frees the record as `lean_dec` does (`drop::release`): inside a free the
+  runtime starts, so its fields go in Lean's order, the last one first,
+  and the `sync` dependents of the promises it drops unresolved run when
+  that free ends, before the set returns. Other element types are dropped
+  in line as before (a handle's decrement, its free out of line).
+- **Why:** With the record's whole release in line (its fields' tagged
+  decrements, `big::free`, `__reussir_deallocate`), the set texture was
+  too big for LLVM to inline into Reussir code: unionfind's
+  `l2r_array_set<nodeData>` stayed a call at all five sites (6.9% of its
+  instructions, 29 per call, about 12 of them the call's own cost, in an
+  instruction-count profile of the classic programs); now none is. That
+  in-line release also freed the record through its own release, which
+  frees the first cell's fields in field order: a structure of two handles
+  `{a, b}` replaced by a set (or removed by a pop) closed `a b`, natively
+  `b a` (review RS10-01 of switch step 10; dev had it too; tests
+  `RtArraySetFreeOrder`, `RtArrayPopFreeOrder`). `extern "C"`:
+  `drop::run` may unwind, and a Rust call is then an invoke with a landing
+  pad in the texture, which stayed a call at six sites of `RtArraySets`.
+  Cost, switch step 10 (cachegrind, small sizes, against dev): a set that
+  frees the replaced record pays for the free the runtime starts, about
+  140 instructions (`drain_slow` 64, `run_step` 33, `step_record` 11,
+  `release_last` 11, the stack's `memmove`/`memcpy` 13, `free_record` 3),
+  the same per-free cost as a reference set that frees its old value
+  (`l2r_rc_set`). Correctness first: unionfind (174,000 freeing sets of
+  `{find, rank : Nat}`) runs 4.6% more instructions than dev (9.4% more
+  than with the record's own release out of line, which had it 4.4%
+  fewer); a micro loop of 300,000 sets each freeing a record of scalars
+  118% more, one with a record of two strings too 50% more. A set whose
+  replaced record is shared only decrements it in line: liasolver 3.9%
+  fewer instructions (the sets of a hash map's buckets), monadic-interp
+  0.6%. The immediate test costs 2 instructions per set of a record.
+  `tests/runtime/ffi-inline-check.sh` builds `RtArraySets` (sets of
+  every element representation in loops) to LLVM IR and fails when a
+  set's texture or function stays a call; dev's runtime kept the two sets
+  of the structure there. At a call site that LLVM judges cold (deep in
+  branches) every set texture, of any element type, is still a call: the
+  uniqueness test with its copy, the bounds check with its panic and the
+  store are above LLVM's cold-site threshold (Reussir issue 36).
+- **Where:** `runtime/leanrt/src/array.rs`: `ReleaseElem`,
+  `release_last`, `set_in`, `pop_in`; `runtime/leanrt/src/drop.rs`:
+  `release`; tests `RtArraySets`, `RtArraySetFreeOrder`,
+  `RtArrayPopFreeOrder`, `tests/runtime/ffi-inline-check.sh`.
+- **Remove only if:** never; the immediate skip depends on patch 0006, as
+  the array free's. A cheaper free of the last reference (a free-stack
+  drain that costs less, or the record's own release for element types
+  with no observable release) would remove the cost.
 
 ### Reads give their reference up first, for a view
 

@@ -47,23 +47,17 @@ an alternative build against them, and times both.
 
 ### The last full run
 
-The gate of switch step 8 (branch `lean-runtime-step8` at 8e5c5eb), against
-native Lean 4.34.0, 2026-10-05:
+The gate of switch step 10 (branch `lean-runtime-step10` at 0410be6), against
+native Lean 4.34.0, 2026-10-06:
 
-- runtime suite: 326 of 327 identical to native, nine of them through
+- runtime suite: 336 of 337 identical to native, some of them through
   expectation files; the other one is the expected failure
-  `RtLeanUnsupported`. In the gate's run, the native build of
-  `RtNetEffectPoll` printed another result once (a timing flake of
-  native's). Its re-runs did not repeat it, and the test passed when it
-  ran again;
+  `RtLeanUnsupported`;
 - loader checks: 17 of 17;
-- classic corpus: 54 of 54, with all 17 optional passes on and with all
-  off;
+- classic corpus: 54 of 54, with all optional passes on and with all off;
 - Reussir benchmark suite: 18 of 18;
-- `leanrt` unit tests 37 of 37; lean-runtime's rows all agree; the
-  inline, conversion-count and big-number checks pass;
-- beside the gate, 94 of lean-runtime's program cases through lean2rr
-  (the panic, exit, stream and network cases, and step 7's set): 94 of 94.
+- `leanrt` unit tests 46 of 46; lean-runtime's rows all agree; the
+  inline, constant-read, conversion-count and big-number checks pass.
 
 No correctness failure. Each switch step passed such a gate before its
 merge.

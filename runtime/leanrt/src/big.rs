@@ -58,7 +58,6 @@ extern "C" {
     fn mi_malloc(size: usize) -> *mut c_void;
     fn mi_realloc(p: *mut c_void, size: usize) -> *mut c_void;
     fn mi_free(p: *mut c_void);
-    fn mi_good_size(size: usize) -> usize;
 }
 
 /// The header of a big number's block (see the module comment).
@@ -266,13 +265,13 @@ fn oom() -> ! {
 }
 
 /// The block size for `n` limbs, rounded up to mimalloc's size class (the
-/// rounding becomes capacity).
+/// rounding becomes capacity; `alloc::good_size`, no call up to six limbs).
 #[inline]
 fn block_bytes(n: usize) -> usize {
     if n > MAX_LIMBS {
         oom()
     }
-    unsafe { mi_good_size(HDR + 8 * n) }
+    crate::alloc::good_size(HDR + 8 * n)
 }
 
 #[inline]
@@ -784,6 +783,118 @@ fn div(a: LBig, b: LBig, k: Div) -> LBig {
     unsafe { ptr::copy_nonoverlapping(src, out.ptr(), n) };
     out.set(n, neg);
     out
+}
+
+/// `a + w` with signs: the value `a`, plus the word of magnitude `w`, negated
+/// when `wneg`. In `a`'s block when it is unique (`mpn_add_1`, `mpn_sub_1`
+/// over their source, which GMP allows), else in a fresh block. A zero word
+/// gives `a` itself; zero is never negative (`set`).
+fn add_limb(a: LBig, w: u64, wneg: bool) -> LBig {
+    let n = a.len();
+    if w == 0 {
+        return a;
+    }
+    let sa = a.neg();
+    if n == 0 {
+        // `a` is zero: the word itself.
+        let mut r = if a.is_unique() { a } else { drop(a); alloc(1) };
+        unsafe { *r.ptr() = w };
+        r.set(1, wneg);
+        return r;
+    }
+    unsafe {
+        if sa == wneg {
+            // |a| + w, sign of `a`.
+            if a.is_unique() {
+                let mut r = a;
+                let c = __gmpn_add_1(r.ptr(), r.ptr(), n as i64, w);
+                if c != 0 {
+                    reserve(&mut r, n + 1);
+                    *r.ptr().add(n) = c;
+                }
+                r.set(n + c as usize, sa);
+                r
+            } else {
+                let mut r = alloc(n + 1);
+                *r.ptr().add(n) = __gmpn_add_1(r.ptr(), a.ptr(), n as i64, w);
+                drop(a);
+                r.set(n + 1, sa);
+                r
+            }
+        } else if n > 1 || *a.ptr() >= w {
+            // |a| >= w: |a| - w, sign of `a` (zero when equal).
+            if a.is_unique() {
+                let mut r = a;
+                __gmpn_sub_1(r.ptr(), r.ptr(), n as i64, w);
+                r.set(n, sa);
+                r
+            } else {
+                let mut r = alloc(n);
+                __gmpn_sub_1(r.ptr(), a.ptr(), n as i64, w);
+                drop(a);
+                r.set(n, sa);
+                r
+            }
+        } else {
+            // |a| < w (one limb): w - |a|, sign of the word.
+            let v = w - *a.ptr();
+            let mut r = if a.is_unique() { a } else { drop(a); alloc(1) };
+            *r.ptr() = v;
+            r.set(1, wneg);
+            r
+        }
+    }
+}
+
+/// Division of `a` by the word of magnitude `w != 0`, negative when `wneg`,
+/// as `div` (`k`) computes it for a one-limb divisor: the quotient in `a`'s
+/// block when it is unique (`mpn_divrem_1` over its source), the remainder
+/// (one limb) with `mpn_mod_1`.
+fn div_limb(a: LBig, w: u64, wneg: bool, k: Div) -> LBig {
+    debug_assert!(w != 0);
+    let n = a.len();
+    if n == 0 {
+        // 0 / w = 0, 0 % w = 0.
+        return a;
+    }
+    let sa = a.neg();
+    unsafe {
+        match k {
+            Div::TQ | Div::EQ => {
+                let (mut r, rem) = if a.is_unique() {
+                    let r = a;
+                    let rem = __gmpn_divrem_1(r.ptr(), 0, r.ptr(), n as i64, w);
+                    (r, rem)
+                } else {
+                    let r = alloc(n);
+                    let rem = __gmpn_divrem_1(r.ptr(), 0, a.ptr(), n as i64, w);
+                    drop(a);
+                    (r, rem)
+                };
+                let mut m = n;
+                if k == Div::EQ && sa && rem != 0 {
+                    // One further from zero; no carry out of `n` limbs
+                    // (w >= 2 when rem != 0, so |q| < |a|).
+                    let c = __gmpn_add_1(r.ptr(), r.ptr(), n as i64, 1);
+                    if c != 0 {
+                        reserve(&mut r, n + 1);
+                        *r.ptr().add(n) = c;
+                        m = n + 1;
+                    }
+                }
+                r.set(m, sa != wneg);
+                r
+            }
+            Div::TR | Div::ER => {
+                let rem = __gmpn_mod_1(a.ptr(), n as i64, w);
+                let (v, neg) = if k == Div::TR { (rem, sa) } else if sa && rem != 0 { (w - rem, false) } else { (rem, false) };
+                let mut r = if a.is_unique() { a } else { drop(a); alloc(1) };
+                *r.ptr() = v;
+                r.set(1, neg);
+                r
+            }
+        }
+    }
 }
 
 /// The bitwise operations on magnitudes (`Nat`s).
@@ -1449,6 +1560,63 @@ impl BigInt for GInt {
         GInt(int_emod(self.0, o.0))
     }
 
+    // lean-runtime's word methods (perf-2): one operand a word, the other
+    // big. Computed from the word's magnitude and sign (`unsigned_abs`:
+    // `i64::MIN` is one limb) on the big operand's limbs, in its block when
+    // it is unique, without a block for the word (the defaults make one,
+    // `from_i64`). The big operand may hold any value, zero included
+    // (`add_limb` and `div_limb` answer it apart: `mpn_add_1` and
+    // `mpn_sub_1` need a limb).
+
+    fn add_i64(self, o: i64) -> GInt {
+        GInt(add_limb(self.0, o.unsigned_abs(), o < 0))
+    }
+
+    fn i64_add(a: i64, o: GInt) -> GInt {
+        GInt(add_limb(o.0, a.unsigned_abs(), a < 0))
+    }
+
+    fn sub_i64(self, o: i64) -> GInt {
+        GInt(add_limb(self.0, o.unsigned_abs(), o >= 0))
+    }
+
+    /// `a - o = -(o - a)`.
+    fn i64_sub(a: i64, o: GInt) -> GInt {
+        GInt(int_neg(add_limb(o.0, a.unsigned_abs(), a >= 0)))
+    }
+
+    fn mul_i64(self, o: i64) -> GInt {
+        if o == 0 {
+            return GInt(zero_of(self.0));
+        }
+        let neg = self.0.neg() != (o < 0);
+        GInt(mul_limb(self.0, o.unsigned_abs(), neg))
+    }
+
+    fn i64_mul(a: i64, o: GInt) -> GInt {
+        o.mul_i64(a)
+    }
+
+    fn tdiv_i64(self, o: i64) -> GInt {
+        GInt(div_limb(self.0, o.unsigned_abs(), o < 0, Div::TQ))
+    }
+
+    fn tmod_i64(self, o: i64) -> GInt {
+        GInt(div_limb(self.0, o.unsigned_abs(), o < 0, Div::TR))
+    }
+
+    fn ediv_i64(self, o: i64) -> GInt {
+        GInt(div_limb(self.0, o.unsigned_abs(), o < 0, Div::EQ))
+    }
+
+    fn emod_i64(self, o: i64) -> GInt {
+        GInt(div_limb(self.0, o.unsigned_abs(), o < 0, Div::ER))
+    }
+
+    fn div_exact_i64(self, o: i64) -> GInt {
+        GInt(div_limb(self.0, o.unsigned_abs(), o < 0, Div::TQ))
+    }
+
     fn write_decimal<W: fmt::Write + ?Sized>(&self, out: &mut W) -> fmt::Result {
         write_decimal(&self.0, out)
     }
@@ -1917,5 +2085,67 @@ mod tests {
             }
         }
         assert!(xs.iter().all(|x| x.count() == 1));
+    }
+    /// lean-runtime's word methods as `GInt` overrides them (`add_limb`,
+    /// `mul_limb`, `div_limb`) against the trait's defaults (the word made a
+    /// block, `of_i64`, then the big operation), on big operands at the
+    /// edges of the word ranges, zero included (no limb), each unique (in
+    /// place) and shared (a copy; the original kept), and on words at the
+    /// edges of `i64` (`i64::MIN` included).
+    #[test]
+    fn word_methods_match_defaults() {
+        let bigs: Vec<LBig> = {
+            let mut v: Vec<i128> = vec![0, 1, -1, 2, -2, 7, -7, (1 << 31) - 1, -(1 << 31), 1 << 31, -(1 << 31) - 1,
+                1 << 32, (1 << 63) - 1, -(1 << 63), 1 << 63, -(1 << 63) - 1, (1 << 64) - 1, 1 << 64, -(1 << 64),
+                (1 << 64) + 1, -(1 << 64) - 7, (1 << 126) + 12345, -(1 << 126) - 3];
+            v.sort();
+            let mut out: Vec<LBig> = v.iter().map(|&x| GInt::from_i128(x).0).collect();
+            out.push(of_decimal("340282366920938463463374607431768211457000000000000005"));
+            out.push(int_neg(of_decimal("340282366920938463463374607431768211457000000000000005")));
+            out
+        };
+        let words: [i64; 17] = [i64::MIN, i64::MIN + 1, -(1 << 32), -(1 << 31) - 1, -(1 << 31), -10, -2, -1, 0, 1, 2, 7, 10,
+            (1 << 31) - 1, 1 << 31, 1 << 32, i64::MAX];
+        type Op = fn(LBig, i64) -> LBig;
+        let ops: [(&str, Op, Op, bool); 11] = [
+            ("add_i64", |a, o| GInt(a).add_i64(o).0, |a, o| int_add(a, of_i64(o)), false),
+            ("i64_add", |a, o| GInt::i64_add(o, GInt(a)).0, |a, o| int_add(of_i64(o), a), false),
+            ("sub_i64", |a, o| GInt(a).sub_i64(o).0, |a, o| int_sub(a, of_i64(o)), false),
+            ("i64_sub", |a, o| GInt::i64_sub(o, GInt(a)).0, |a, o| int_sub(of_i64(o), a), false),
+            ("mul_i64", |a, o| GInt(a).mul_i64(o).0, |a, o| int_mul(a, of_i64(o)), false),
+            ("i64_mul", |a, o| GInt::i64_mul(o, GInt(a)).0, |a, o| int_mul(of_i64(o), a), false),
+            ("tdiv_i64", |a, o| GInt(a).tdiv_i64(o).0, |a, o| int_tdiv(a, of_i64(o)), true),
+            ("tmod_i64", |a, o| GInt(a).tmod_i64(o).0, |a, o| int_tmod(a, of_i64(o)), true),
+            ("ediv_i64", |a, o| GInt(a).ediv_i64(o).0, |a, o| int_ediv(a, of_i64(o)), true),
+            ("emod_i64", |a, o| GInt(a).emod_i64(o).0, |a, o| int_emod(a, of_i64(o)), true),
+            ("div_exact_i64", |a, o| GInt(a).div_exact_i64(o).0, |a, o| int_tdiv(a, of_i64(o)), true),
+        ];
+        // The form of a result: the value, and no zero top limb.
+        let form = |b: &LBig| (dec(b), limbs(b).last() != Some(&0));
+        for b in &bigs {
+            for &o in &words {
+                for (name, mine, default, div) in ops {
+                    if div && o == 0 {
+                        continue;
+                    }
+                    // div_exact of an exact quotient: of `b * o`.
+                    let a = if name == "div_exact_i64" { int_mul(b.clone(), of_i64(o)) } else { b.clone() };
+                    let want = form(&default(unique(a.clone(), a.len()), o));
+                    // unique operand (a fresh copy, written in place)
+                    let u = unique(a.clone(), a.len());
+                    assert!(u.is_unique());
+                    let got = mine(u, o);
+                    assert_eq!(form(&got), want, "{name}({}, {o}) unique", dec(&a));
+                    // shared operand: the original is kept
+                    let keep = unique(a.clone(), a.len());
+                    let before = dec(&keep);
+                    let got = mine(keep.clone(), o);
+                    assert_eq!(form(&got), want, "{name}({}, {o}) shared", dec(&a));
+                    assert_eq!(dec(&keep), before);
+                    drop(got);
+                    assert_eq!(keep.count(), 1);
+                }
+            }
+        }
     }
 }

@@ -49,7 +49,8 @@ into it. Reussir issues (bugs, costs and the other kinds) link to
 4. [control-flow/](control-flow/README.md): calls and `let`s, `cases`
    shapes, join points (J1/J1′/J2/J3), state machines (J4), `Outline`.
 5. [ownership.md](ownership.md): borrow emulation, store-then-release
-   reference sets, the drop stack, `ReleaseElems`, owned reads.
+   reference sets, the drop stack, `ReleaseElems`, owned reads, the
+   release of an element a set replaces.
 6. [startup/](startup/README.md): module phases and initializer order
    (the library's initializers included), constants and once-cells,
    closed-term chains, persist walks, the entry point.

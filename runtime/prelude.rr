@@ -696,10 +696,20 @@ fn l2r_int_cmp(a : Int, b : Int) -> i64 {
     } else { l2r_int_cmp_raw(x, y) }
 }
 
+// Every value has one form: a big number is never in the `int32` range
+// (leanrt::nat normalizes every result: `LInt::of_big`, `LInt::of_i64`). So
+// a small and a big word are never equal: only two big words call leanrt.
+// The big word of a mixed pair is released here (the one even word).
 fn lean_int_dec_eq(a : Int, b : Int) -> bool {
     let x = l2r_int_raw(a);
     let y = l2r_int_raw(b);
-    if (x & y & 1) == 1 { x == y } else { l2r_int_eq_raw(x, y) }
+    if (x & y & 1) == 1 { x == y } else {
+        if ((x | y) & 1) == 1 {
+            let w = if (x & 1) == 1 { y } else { x };
+            let d = l2r_int_drop_raw(w);
+            false
+        } else { l2r_int_eq_raw(x, y) }
+    }
 }
 
 fn lean_int_dec_lt(a : Int, b : Int) -> bool {
@@ -1532,8 +1542,10 @@ fn lean_string_utf8_set(s : LStr, p : Nat, c : u32) -> LStr {
 fn lean_string_get_byte_fast(s : LStr, i : Nat) -> u8 { l2r_string_get_byte(s, lean_usize_of_nat(i)) }
 fn lean_string_uget_byte_fast(s : LStr, i : u64) -> u8 { l2r_string_get_byte(s, i) }
 
+// Two references to the same string are equal without comparing the bytes,
+// as natively (`lean_string_eq`): `leanrt::string::dec_eq`.
 #[ffi(import)]
-fn lean_string_dec_eq(a : LStr, b : LStr) -> bool [{ { let r = a.utf8() == b.utf8(); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
+fn lean_string_dec_eq(a : LStr, b : LStr) -> bool [{ leanrt::string::dec_eq(a, b) }];
 #[ffi(import)]
 fn lean_string_dec_lt(a : LStr, b : LStr) -> bool [{ { let r = sem::string::lt(a.utf8(), b.utf8()); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 // `String.compare`: 0 = lt, 1 = eq, 2 = gt (lean2rr maps it to `Ordering`).

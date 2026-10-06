@@ -19,7 +19,6 @@ use std::mem::size_of;
 extern "C" {
     fn mi_malloc(size: usize) -> *mut c_void;
     fn mi_realloc(p: *mut c_void, size: usize) -> *mut c_void;
-    fn mi_good_size(size: usize) -> usize;
 }
 
 #[cold]
@@ -62,7 +61,7 @@ fn alloc<T: Clone>(cap: usize) -> RVec<T> {
 /// Grow a unique block to room for at least `need` elements, at least
 /// doubling (`max(need, 2 * cap, 8)`, so pushes are amortized O(1)). The
 /// capacity is the whole block: mimalloc's size class for small blocks
-/// (`mi_good_size`), a power of two beyond 4 KiB (as `tagvec::grow`: with
+/// (`alloc::good_size`), a power of two beyond 4 KiB (as `tagvec::grow`: with
 /// the header added to a power of two, large blocks would fall just past
 /// mimalloc's size steps, and realloc copies a block's whole usable size).
 #[cold]
@@ -74,7 +73,7 @@ extern "C" fn grow<T: Clone>(v: RVec<T>, need: usize) -> RVec<T> {
     unsafe {
         let want = need.max((*o).cap.saturating_mul(2)).max(8);
         let b = bytes_for::<T>(want);
-        let bytes = if b > 4096 { b.checked_next_power_of_two().unwrap_or(b) } else { mi_good_size(b) };
+        let bytes = if b > 4096 { b.checked_next_power_of_two().unwrap_or(b) } else { crate::alloc::good_size(b) };
         // `bytes >= b >= HDR + want * size`: the capacity is at least
         // `want`; realloc keeps the header and the `len` elements.
         let n = mi_realloc(o as *mut c_void, bytes) as *mut Hdr;
@@ -421,15 +420,88 @@ extern "C" fn push_slow<T: Clone>(mut v: RVec<T>, x: T) -> RVec<T> {
     v
 }
 
+/// How a set or a pop releases the element it removes, as `lean_dec` does
+/// natively (`lean_array_uset`, `lean_array_pop`): by default the element's
+/// own drop, in line (a handle's decrement, its free out of line). A Reussir
+/// record (`Bridge`, see `CloneInto`) has only its decrement in line, as
+/// `rc.dec` does it: a count above 1 is decremented here, and the last
+/// reference goes to `release_last`, out of line, which frees the record
+/// as `drop::release` does: inside a free the runtime starts, so its
+/// fields go in Lean's order, its last field first, and the `sync`
+/// dependents of the promises it drops unresolved run when that free ends,
+/// before the set returns (the record's own `_ffi_release`, which the set
+/// called before, releases the first cell's fields in field order; review
+/// RS10-01: a structure of two handles closed them in the opposite order to
+/// native's). The decrement is `rc.dec`'s, as the increments of
+/// `CloneInto` are `rc.inc`'s and the array free's decrements are
+/// (`drop::ReleaseElems`): the 32-bit count at offset 0 (these records are
+/// not atomic); an immediate (a nullary constructor under the aarch64
+/// encoding, a nonzero top byte) has no count of its own and is never
+/// decremented (`rc.dec` steers away from it). On other targets (the
+/// immortal encoding) every record goes to `release_last`.
+///
+/// With the record's release in the texture (its fields' decrements and
+/// frees, `__reussir_deallocate`), the set texture was too big for LLVM to
+/// inline into Reussir code (an instruction-count profile: unionfind's
+/// `l2r_array_set<nodeData>`, 6.9 % of its instructions, about 12 of 29 per
+/// call the call's own cost); now it is inlined. A set that frees the
+/// replaced record pays for the free the runtime starts: about 140
+/// instructions (cachegrind: `drain_slow` 64, `run_step` 33, `step_record`
+/// 11, `release_last` 11, the stack's `memmove`/`memcpy` 13, `free_record`
+/// 3), as a reference set that frees its old value does (`l2r_rc_set`).
+trait ReleaseElem: Sized {
+    unsafe fn release_elem(x: Self);
+}
+
+impl<T> ReleaseElem for T {
+    #[inline(always)]
+    default unsafe fn release_elem(x: T) {
+        drop(x)
+    }
+}
+
+impl<X> ReleaseElem for reussir_rt::bridge::Bridge<X> {
+    #[inline(always)]
+    unsafe fn release_elem(x: Self) {
+        if cfg!(target_arch = "aarch64") && size_of::<Self>() == 8 {
+            let p = std::mem::transmute_copy::<Self, *mut u32>(&x);
+            if (p as usize) >> 56 != 0 {
+                // An immediate.
+                std::mem::forget(x);
+                return;
+            }
+            if *p != 1 {
+                *p -= 1;
+                std::mem::forget(x);
+                return;
+            }
+        }
+        release_last(x)
+    }
+}
+
+/// The last reference to an element that a set or a pop removes (or any
+/// record on a target without the aarch64 encoding): `drop::release`, a
+/// free the runtime starts (`ReleaseElem`). `extern "C"`: `drop::run` may
+/// unwind, and a Rust call would be an invoke with a landing pad in the
+/// texture, which then stayed a call at six sites of `RtArraySets`.
+#[cold]
+#[inline(never)]
+extern "C" fn release_last<T>(x: T) {
+    crate::drop::release(x)
+}
+
 /// Replace element `i` of the unique block `o` (in bounds: else a runtime
-/// bug), releasing the old one first, as `lean_array_uset`.
+/// bug), releasing the old one first, as `lean_array_uset` (`ReleaseElem`).
 #[inline(always)]
 unsafe fn set_in<T>(o: *mut Hdr, i: u64, x: T) {
     let n = (*o).len;
     if (i as usize) >= n {
         index_bug(i, n);
     }
-    *elems::<T>(o).add(i as usize) = x;
+    let slot = elems::<T>(o).add(i as usize);
+    <T as ReleaseElem>::release_elem(std::ptr::read(slot));
+    std::ptr::write(slot, x);
 }
 
 /// Replace element `i` (in bounds): in place when unique.
@@ -451,12 +523,12 @@ extern "C" fn set_slow<T: Clone>(mut v: RVec<T>, i: u64, x: T) -> RVec<T> {
 }
 
 /// Remove the last element of the unique block `o` (non-empty) and release
-/// it.
+/// it, as `lean_array_pop` (`ReleaseElem`).
 #[inline(always)]
 unsafe fn pop_in<T>(o: *mut Hdr) {
     let n = (*o).len - 1;
     (*o).len = n;
-    drop(std::ptr::read(elems::<T>(o).add(n)));
+    <T as ReleaseElem>::release_elem(std::ptr::read(elems::<T>(o).add(n)));
 }
 
 /// Drop the last element (no-op when empty).

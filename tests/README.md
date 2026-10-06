@@ -198,7 +198,9 @@ test's header says what it covers. Many come from the adversarial reviews:
 a finding (a bug a reviewer reproduced, fixed since) or a check that held
 up in review.
 
-`tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests.
+`tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests, with
+debug assertions on (so leanrt's invariant checks run, such as no big
+`Int` in the small range).
 `tests/runtime/allow-missing-check.sh` builds `tests/runtime/AllowMissing.lean`
 (refused externs of the program used directly, partially applied, as a
 closure, through an instance and through the `ptrAddrUnsafe` shortcut) with
@@ -210,7 +212,10 @@ string, hash, float and fixed-width rules to LLVM IR (`scripts/l2r.py --emit
 llvm-ir`) and fails on a call through the packed-argument FFI boundary (a
 texture LLVM did not inline; review RULR-01) or a `black_box` barrier inside
 a Reussir function (an inlined `black_box`ed libm function; RULR-07): either
-would keep a Lean loop's tail call.
+would keep a Lean loop's tail call. For `RtReadsDeep` it also fails when an
+array read stays a call (reads deep in branches, cold call sites), and for
+`RtArraySets` when an array set stays a call (sets in loops; the set of an
+`Array` of a structure stayed a call before switch step 10).
 `tests/runtime/wait-inline-check.sh` builds `RtWaitInline` (a program that
 creates tasks, with a loop of reference operations and a loop forcing
 thunks) to an executable and fails when, in the functions that hold the
@@ -325,6 +330,10 @@ it draws on, with their copyright notices (Apache 2.0):
 | LR1-01 (lean-runtime's oracle rows) | RtStringExtractBig |
 | lean-runtime's case io/startup_fd_limit (`IO.stdGenRef`, the library's initializer, ran only when the program used it) | RtStartupInitUrandom, RtStartupInitRand |
 | lean-runtime's fixes-8, 83f7127 (`RtTcp` hung about one run in 20: a wait for a pure task that the worker started during the wait, with a socket watched) | RtTaskPickedInWait |
+| switch step 10: the equality of a small and a big `Int` without a call, which relies on every `Int` result being normalized | RtIntSmallBigEq |
+| switch step 10: the set of an `Array` of a structure was not inlined (ffi-inline-check) | RtArraySets |
+| switch step 10: the order of the closes and promise dependents when one release frees an array of structures (a guard for the free of arrays of records) | RtArrayRecordFreeOrder |
+| RS10-01 (review of switch step 10: an array set or pop releasing the last reference to a record closed its fields in field order, natively the last first) | RtArraySetFreeOrder, RtArrayPopFreeOrder |
 | RSG-01 (review of fix-stdgen: the library's initializers ran before the program's, not at their module's place) | RtStartupInitOrder (companion module `StartupInitOrderDep`, `RtStartupInitOrder.deps`) |
 | RSG-02, RSG-03 (a program that uses the `Lean` package: `lean_initialize()` runs `Init`'s initializers first; natively an error there aborts) | RtStartupInitLeanPkg (expectation files for RSG-03, plan §10) |
 | RV8E-01, RV8E-02, RV8E-05, RV8E-06 (rv8/ext, branch lean-externs) | RtExternNames, RtExternLeanPkg |

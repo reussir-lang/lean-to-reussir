@@ -406,8 +406,14 @@ impl LInt {
     }
 
     /// A big number as an `Int` (normalized: small in [INT_MIN, INT_MAX]).
+    /// The one place where a big `Int` handle is made: every big `Int` word
+    /// is outside the small range (the prelude's `lean_int_dec_eq` answers
+    /// a small and a big word unequal without a call).
     #[inline]
     pub fn of_big(b: LBig) -> LInt {
+        // What the range test below needs (`fits_i64` reads the limb count):
+        // checked in builds with debug assertions.
+        debug_assert!(big_trimmed(&b), "a big number with a zero top limb or a negative zero");
         if big::fits_i64(&b) {
             let v = big::to_i64(&b);
             if (INT_MIN..=INT_MAX).contains(&v) {
@@ -446,10 +452,33 @@ pub fn int_of_small_word(w: u64) -> i64 {
     (w >> 1) as u32 as i32 as i64
 }
 
+/// Whether a big number is in its one form: no zero top limb, and a zero
+/// never negative (`LBig::set` keeps it so; `fits_i64` and the range test
+/// of `LInt::of_big` rely on it).
+#[inline]
+fn big_trimmed(b: &LBig) -> bool {
+    big::limbs(b).last() != Some(&0) && !(big::limbs(b).is_empty() && big::is_neg(b))
+}
+
+/// Whether a big number is outside the small `Int` range, as the big
+/// number of every `Int` word is (`LInt::of_big`).
+#[inline]
+fn big_int_normalized(b: &LBig) -> bool {
+    !(big::fits_i64(b) && (INT_MIN..=INT_MAX).contains(&big::to_i64(b)))
+}
+
 /// The rules' view of an `Int` word: its value, or the big number it owns.
+/// Every big `Int` that a slow path computes with or compares comes
+/// through here: checked to be normalized in builds with debug assertions.
 #[inline(always)]
 unsafe fn int_view(w: u64) -> sem::int::Int<GInt> {
-    if is_small(w) { sem::int::Int::Small(int_of_small_word(w)) } else { sem::int::Int::Big(GInt(big_of_word(w))) }
+    if is_small(w) {
+        sem::int::Int::Small(int_of_small_word(w))
+    } else {
+        debug_assert!(big_trimmed(big_ref(&w)), "a big Int with a zero top limb or a negative zero");
+        debug_assert!(big_int_normalized(big_ref(&w)), "a big Int in the small range");
+        sem::int::Int::Big(GInt(big_of_word(w)))
+    }
 }
 
 /// An `Int` the rules computed, as a normalized handle.
@@ -716,5 +745,66 @@ mod tests {
                 }
             }
         }
+    }
+    /// Every `Int` slow path returns a normalized word, small exactly in
+    /// the `int32` range, on operands and results at the range's edges and
+    /// beyond `i64` (the prelude's `lean_int_dec_eq` relies on it: a small
+    /// and a big word are never equal).
+    #[test]
+    fn int_results_are_normalized() {
+        let (lo, hi) = (INT_MIN as i128, INT_MAX as i128);
+        let edges: [i128; 18] = [0, 1, -1, 2, -2, hi, lo, hi + 1, lo - 1, hi - 1, lo + 1, 1 << 32, -(1 << 32),
+            i64::MIN as i128, i64::MAX as i128, i64::MAX as i128 + 1, 1 << 64, -(1 << 64)];
+        let i = |v: i128| LInt::of_big(<GInt as lean_runtime::semantics::bignum::BigInt>::from_i128(v).0);
+        let ival = |x: &LInt| -> i128 {
+            let w = x.word();
+            if is_small(w) {
+                int_of_small_word(w) as i128
+            } else {
+                let b = unsafe { big_ref(&w) };
+                let m = big::limbs(b).iter().rev().fold(0i128, |acc, &l| (acc << 64) | l as i128);
+                if big::is_neg(b) { -m } else { m }
+            }
+        };
+        let check = |x: LInt, want: i128, what: &str| {
+            assert_eq!(ival(&x), want, "{what}");
+            assert_eq!(is_small(x.word()), (lo..=hi).contains(&want), "{what}: not normalized");
+        };
+        for &a in &edges {
+            check(i(a), a, "of_big");
+            check(int_neg(i(a).into_raw()), -a, "neg");
+            if let Ok(v) = i64::try_from(a) {
+                check(LInt::of_i64(v), a, "of_i64");
+            }
+            for &b in &edges {
+                let s = format!("{a} {b}");
+                check(int_add(i(a).into_raw(), i(b).into_raw()), a + b, &s);
+                check(int_sub(i(a).into_raw(), i(b).into_raw()), a - b, &s);
+                if a.unsigned_abs().leading_zeros() + b.unsigned_abs().leading_zeros() > 128 {
+                    check(int_mul(i(a).into_raw(), i(b).into_raw()), a * b, &s);
+                }
+                let (q, r, eq, er) = if b == 0 { (0, a, 0, a) } else { (a / b, a % b, a.div_euclid(b), a.rem_euclid(b)) };
+                check(int_div(i(a).into_raw(), i(b).into_raw()), q, &s);
+                check(int_mod(i(a).into_raw(), i(b).into_raw()), r, &s);
+                check(int_ediv(i(a).into_raw(), i(b).into_raw()), eq, &s);
+                check(int_emod(i(a).into_raw(), i(b).into_raw()), er, &s);
+                assert_eq!(int_eq(i(a).into_raw(), i(b).into_raw()), a == b, "{s}");
+            }
+        }
+        // `Int.ofNat` and `Int.negSucc` of `Nat`s at the small `Int` and the
+        // small `Nat` edges.
+        for &m in &[0u128, 1, (1 << 31) - 1, 1 << 31, (1 << 31) + 1, 1 << 32, (1 << 63) - 1, 1 << 63, 1 << 64] {
+            check(nat_to_int(n(m).into_raw()), m as i128, "ofNat");
+            check(nat_neg_succ(n(m).into_raw()), -(m as i128) - 1, "negSucc");
+        }
+    }
+    /// A big `Int` in the small range (never made: `of_big` normalizes) is
+    /// caught where a slow path reads it, in builds with debug assertions.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a big Int in the small range")]
+    fn unnormalized_big_int_is_caught() {
+        let w = word_of_big(big::of_i64(5));
+        drop(unsafe { int_view(w) });
     }
 }

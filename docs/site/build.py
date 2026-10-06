@@ -156,6 +156,16 @@ def runtime_tests():
     return tests, xfail
 
 
+def ffi_inline_tests():
+    """The runtime tests that ffi-inline-check.sh builds by default (its
+    `set -- ...` line)."""
+    with open(os.path.join(REPO, "tests/runtime/ffi-inline-check.sh"), encoding="utf-8") as fh:
+        for line in fh:
+            if line.startswith("[ $# -gt 0 ] || set --"):
+                return len(line.split("set --", 1)[1].split())
+    raise SystemExit("build.py: no default test list in tests/runtime/ffi-inline-check.sh")
+
+
 def leanrt_unit_tests():
     n = 0
     for dirpath, _, files in os.walk(os.path.join(REPO, "runtime/leanrt/src")):
@@ -270,8 +280,9 @@ def gen_testsets():
          "Lean's stderr stream"],
         ["lean-runtime's rows", "<code>tests/runtime/rows-check.sh</code>", "every row of lean-runtime",
          "lean-runtime's row oracle built with lean2rr against the rows' native values (the Lean definition's result where lean-runtime lifts a Lean limit or bug, LB-nn)"],
-        ["Inlined textures", "<code>tests/runtime/ffi-inline-check.sh</code>", "7 runtime tests",
-         "no call through the FFI boundary in their LLVM IR (it would keep a loop's tail call)"],
+        ["Inlined textures", "<code>tests/runtime/ffi-inline-check.sh</code>", f"{ffi_inline_tests()} runtime tests",
+         "no call through the FFI boundary in their LLVM IR (it would keep a loop's tail call); "
+         "no array read left as a call in <code>RtReadsDeep</code> and no array set in <code>RtArraySets</code>"],
         ["Inlined wait points", "<code>tests/runtime/wait-inline-check.sh</code>", "1 runtime test",
          "in the executable, the reference points and a thunk's store and wake are inline in the loops, their thread-local loads direct"],
         ["Refused externs", "<code>tests/runtime/allow-missing-check.sh</code>", "1 program",

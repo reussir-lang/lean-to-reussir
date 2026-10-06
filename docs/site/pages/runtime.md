@@ -54,7 +54,8 @@ and several optional passes help token reuse (see
   per-thread stack that Reussir's drop glue uses (local patch 0014). So a
   value deep through records and containers is freed at a bounded depth.
 - **Order of releases.** File handles close (and flush) and promises resolve
-  in Lean's order: last pushed, first freed. One difference stays: the first
+  in Lean's order: last pushed, first freed. An array set or pop frees the
+  record that it removes the same way. One difference stays: the first
   cell of a free that user code starts at a record (plan §10).
 - **Reference `set`.** `l2r_rc_set` stores the new value first, then releases
   the old one as `lean_dec` does. So code that the release runs (the `sync`
@@ -207,7 +208,7 @@ lean2rr uses the shared crate **`lean-runtime`**
 (github.com/QueClr/lean-runtime-rs, public). The crate implements Lean's
 runtime behaviour once, as a library that a translator of Lean programs
 can use. lean2rr switched to it in nine steps, from 2026-10-04 to
-2026-10-05.
+2026-10-05; a tenth step (2026-10-06) took faster code from it.
 
 | Point | Decision |
 |---|---|
@@ -235,9 +236,10 @@ The switch steps:
 | 7 | the startup: `main`'s thread, the constructor that opens the startup descriptors, the scheduler's lazy start |
 | 8 | the panic and exit executor: it carries out a panic's plan (the stream, the flush of stdout, the abort or the exit), and does the internal panic, the uncaught error and `IO.Process.exit` |
 | 9 | no new part: a fix in the scheduler (lean-runtime's fixes-8). A wait for a pure task that the worker starts during the wait now runs the task; before, it could wait for ever |
+| 10 | no new part: speed (lean-runtime's perf-2). `Float.toString` computes its six decimals exactly with integers; the `Int` rules let lean2rr compute with a word and a big number without a block for the word. lean2rr's own runtime changed at the same step (see below) |
 
-Status (2026-10-05): the submodule `third_party/lean-runtime` is pinned at
-`83f7127`. `scripts/l2r.py` builds it with cargo (the features `io`,
+Status (2026-10-06): the submodule `third_party/lean-runtime` is pinned at
+`e5e502e`. `scripts/l2r.py` builds it with cargo (the features `io`,
 `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`) and links
 it with `leanrt` ([runtime README](repo:runtime/README.md), "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline
@@ -245,3 +247,32 @@ small-`Nat`/`Int` arithmetic, the one-block big numbers with GMP (behind
 lean-runtime's big-number traits), the one-block arrays' reads, writes and
 pushes, and the current standard streams, which `IO.println` reads at each
 call. Each step passed lean2rr's full suite before its merge.
+
+### Fast paths of the runtime library (step 10)
+
+- **`Float.toString`** (lean-runtime) computes the six decimals of a value
+  below 2^53 with exact integer arithmetic.
+- **`Int` with one small operand** (lean-runtime and `leanrt`). The runtime
+  changes the big number in its own block when the block is unique. The
+  small operand does not become a big number.
+- **`Int` equality.** A small and a big `Int` are never equal, because
+  every result is normalized. This comparison does not call the runtime.
+- **String equality.** Strings of different lengths are not equal. Two
+  references to the same string are equal. Other strings compare their
+  bytes.
+- **Array sets and pops of records.** A set decrements the record that it
+  replaces in line, so LLVM inlines the set into the loop. A set or pop
+  that frees the last reference to a record releases its fields last
+  first, as Lean does. This costs about 140 instructions per freed record.
+- **Block sizes.** Up to 64 bytes, the runtime knows mimalloc's block size
+  without a call.
+
+Instruction counts at step 10, against step 9 (small sizes):
+
+| Program | Change |
+|---|---|
+| strings | −19.9% |
+| liasolver | −14.7% |
+| unionfind | +4.6% |
+| monadic-interp | −1.9% |
+| qsort | −0.15% |

@@ -178,7 +178,7 @@ other results are the last recorded runs.</p>
 <tbody>
 <tr>
 <td>Runtime test suite</td>
-<td>332 programs† (1 marked <code>.xfail</code>†); at the last full run (2026-10-05), 326 of 327 identical to native Lean 4.34.0, nine of them through expectation files; the other one is the <code>.xfail</code> test</td>
+<td>337 programs† (1 marked <code>.xfail</code>†); at the last full run (2026-10-06), 336 of 337 identical to native Lean 4.34.0, some of them through expectation files; the other one is the <code>.xfail</code> test</td>
 </tr>
 <tr>
 <td>Classic corpus</td>
@@ -212,13 +212,20 @@ other results are the last recorded runs.</p>
 </table>
 <p><a href="testing.html">Testing</a> explains each test set and the review process.</p>
 <h2 id="recent-changes">Recent changes</h2>
-<p>Merged on 2026-10-04 and 2026-10-05:</p>
+<p>Merged from 2026-10-04 to 2026-10-06:</p>
 <ul>
 <li><strong>The switch to <code>lean-runtime</code></strong>, in nine steps: the rules (steps 1
   and 2), the IO (step 3), the scheduler, <code>Std.Sync</code> and the event loop
   (step 4), the last copies of shared functions (step 5), the wait cores
   (step 6), the startup (step 7), the panic and exit executor (step 8),
   and a fix of a scheduler wait that could wait for ever (step 9).</li>
+<li><strong>Fast paths in the runtime library</strong> (step 10): <code>Float.toString</code>,
+  <code>Int</code> with one small operand, <code>Int</code> and string equality, array sets of
+  records. Instruction counts: strings −19.9%, liasolver −14.7%,
+  unionfind +4.6%. An array set that frees the last reference to a record
+  releases its fields last first, as Lean does; this costs about 140
+  instructions per freed record (see
+  <a href="runtime.html#fast-paths-of-the-runtime-library-step-10">Runtime</a>).</li>
 <li><strong>The extern rule</strong> (above).</li>
 <li><strong><code>conv-liveness</code></strong>, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see <a href="passes.html">Optional passes</a>).</li>

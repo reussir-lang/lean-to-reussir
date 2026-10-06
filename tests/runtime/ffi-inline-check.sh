@@ -19,6 +19,13 @@
 # docs/implementation/ownership.md, "Reads give their reference up first,
 # for a view"): the read textures must stay under LLVM's inlining threshold
 # for a cold call site (Reussir issue 36), else every such read is a call.
+# For RtArraySets (array sets in loops at ordinary call sites), it likewise fails
+# on any call left of an array set's texture or function (`l2r_array_set`,
+# `lean_array_set`, `l2r_natarr_set_word`, ...; docs/implementation/
+# ownership.md, "A set releases a replaced record with its decrement in
+# line"): the set of an `Array` of a structure released the replaced
+# element with the structure's whole release in line, and LLVM kept the
+# texture out of line (unionfind's `l2r_array_set`).
 #   tests/runtime/ffi-inline-check.sh [NAME...]
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN, L2R_LEAN_RUNTIME).
@@ -29,18 +36,26 @@ ROOT=$(cd "$HERE/../.." && pwd)
 OUT=${L2R_TEST_BUILD:-$HERE/build}/ffi-inline-check
 mkdir -p "$OUT"
 cd "$OUT"
-[ $# -gt 0 ] || set -- RtFloatLoopStack RtFloat RtString RtSweepStrPos RtHashMap RtSweepFixed RtUInt RtReadsDeep
+[ $# -gt 0 ] || set -- RtFloatLoopStack RtFloat RtString RtSweepStrPos RtHashMap RtSweepFixed RtUInt RtReadsDeep RtArraySets
 # Reussir's symbols are `_RC<length><name>...` (`_RIC` for an instance of a
-# generic function); the read functions whose calls RtReadsDeep must not keep.
-read_calls() {
-  python3 - "$1" <<'PY'
+# generic function); the read functions whose calls RtReadsDeep must not keep
+# (`deep_calls FILE reads`), the set functions whose calls RtArraySets must
+# not keep (`deep_calls FILE sets`).
+deep_calls() {
+  python3 - "$1" "$2" <<'PY'
 import re, sys
-names = {f"l2r_{k}arr_{op}" for k in ("nat", "int") for op in
-         ("give", "view_size", "view_take", "view_end", "take", "get", "get_word")}
-names |= {"l2r_array_give", "l2r_view_size", "l2r_view_take", "l2r_view_end",
-          "l2r_array_get", "l2r_array_get_word", "l2r_consume"}
-names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array", "natarr", "intarr")
-          for op in ("fget", "fget_borrowed", "uget", "uget_borrowed", "get", "get_borrowed")}
+if sys.argv[2] == "reads":
+    names = {f"l2r_{k}arr_{op}" for k in ("nat", "int") for op in
+             ("give", "view_size", "view_take", "view_end", "take", "get", "get_word")}
+    names |= {"l2r_array_give", "l2r_view_size", "l2r_view_take", "l2r_view_end",
+              "l2r_array_get", "l2r_array_get_word", "l2r_consume"}
+    names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array", "natarr", "intarr")
+              for op in ("fget", "fget_borrowed", "uget", "uget_borrowed", "get", "get_borrowed")}
+else:
+    names = {f"l2r_{k}arr_{op}" for k in ("nat", "int") for op in ("set", "set_word")}
+    names |= {"l2r_array_set"}
+    names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array", "natarr", "intarr")
+              for op in ("set", "fset", "uset")}
 seen = {}
 for m in re.finditer(r'call [^@\n]*@"?_RI?C(\d+)([A-Za-z0-9_]+)\(', open(sys.argv[1]).read()):
     n = m.group(2)[:int(m.group(1))]
@@ -65,11 +80,15 @@ for t in "$@"; do
     name != "" && index($0, "asm sideeffect \"\", \"r,~{memory}\"") { n[name]++ }
     END { for (f in n) printf "%7d x %s\n", n[f], f }' "$t.ll")
   reads=""
-  [ "$t" = RtReadsDeep ] && reads=$(read_calls "$t.ll")
+  [ "$t" = RtReadsDeep ] && reads=$(deep_calls "$t.ll" reads)
+  sets=""
+  [ "$t" = RtArraySets ] && sets=$(deep_calls "$t.ll" sets)
   if [ -n "$calls" ]; then
     echo "FAIL $t: calls through the FFI boundary (not inlined):"; echo "$calls"; status=1
   elif [ -n "$reads" ]; then
     echo "FAIL $t: array reads left as calls (a read texture over LLVM's cold-site threshold):"; echo "$reads"; status=1
+  elif [ -n "$sets" ]; then
+    echo "FAIL $t: array sets left as calls (a set texture LLVM did not inline):"; echo "$sets"; status=1
   elif [ -n "$barriers" ]; then
     echo "FAIL $t: black_box barriers inlined into Reussir functions:"; echo "$barriers"; status=1
   else

@@ -59,6 +59,33 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   would need the element offset and allocation alignment generalized:
   `elems` rejects one at compile time).
 
+### A block's capacity is mimalloc's size class, without a call up to 64 bytes
+
+- **What:** A grown array, string or tag vector (`Array Nat`/`Array Int`)
+  and every big number take as capacity the whole mimalloc block their
+  size falls in (`alloc::good_size`; arrays, strings and tag vectors from
+  4 KiB on a power of two instead). Up to 64 bytes `good_size` returns the
+  size itself, without calling `mi_good_size`: mimalloc's size classes
+  there are every multiple of 8, and the sizes asked for are multiples of
+  8, so the answer is the same (unit test `alloc::tests::small_good_size`
+  checks every size up to 4 KiB against `mi_good_size`).
+- **Why:** The call (with mimalloc's `_mi_bin_size`) was 1.9% of
+  liasolver's instructions (218,000 calls, for one-limb big numbers) in an
+  instruction-count profile of the classic programs. Without it (switch
+  step 10, cachegrind, small sizes): liasolver 2.8% fewer instructions,
+  strings 0.26%, qsort 0.15% (an array's growth is under 64 bytes only for
+  its first growth, to 8 elements, of elements of 4 bytes or less, such as
+  qsort's `UInt32`: 24 + 32 bytes; a tag vector's first growth, to 4
+  words, is 56 bytes; a string's up to 32 bytes). Were
+  a size class there bigger, a capacity of the size asked for would still
+  lie inside the block (room left unused).
+- **Where:** `runtime/leanrt/src/alloc.rs`: `good_size`; its callers
+  `big.rs` (`block_bytes`), `array.rs`, `string.rs` and `tagvec.rs`
+  (`grow`).
+- **Remove only if:** mimalloc's small size classes stop being every
+  multiple of 8 (the unit test fails then; the capacity stays safe, only
+  smaller than the block).
+
 ### Bytes read go straight into the array
 
 - **What:** `Handle.read` (so `IO.FS.readBinFile`), reads of standard input

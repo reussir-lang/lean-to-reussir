@@ -52,12 +52,17 @@ The prelude's functions take each argument as its raw word once
 (`l2r_nat_raw`). Small values are computed inline; a big value or an
 overflow calls the runtime, which uses GMP. Every value has exactly one
 form: a value in the small range is always small. So two small words are
-equal exactly when their values are equal.
+equal exactly when their values are equal, and a small `Int` is never
+equal to a big one. So the equality of a small and a big `Int` does not
+call the runtime. Builds with debug assertions check the rule where the
+runtime makes a big `Int` and where it reads one.
 
 {{svg:bigblock}}
 
 A two-limb number takes 32 bytes here, and 56 bytes natively. A million
-live two-limb numbers take 49.5 MB, 0.67× native.
+live two-limb numbers take 49.5 MB, 0.67× native. The capacity of a block is
+the whole mimalloc block. Up to 64 bytes (six limbs) the runtime knows that
+size without asking mimalloc: there, mimalloc's sizes are all multiples of 8.
 
 ## Strings and arrays
 
@@ -80,6 +85,14 @@ live two-limb numbers take 49.5 MB, 0.67× native.
   *view* of the container, then it checks the index, then it takes the
   element from the view. The last reference frees the container after
   the read.
+- **Sets.** A set (or a pop) releases the element that it removes. For a
+  record, only the decrement is inline, so LLVM inlines the set into the
+  loop. When the set frees the last reference to a record, a call releases
+  the record's fields last first, as Lean does. This costs about 140
+  instructions per freed record.
+- **String equality.** Strings of different lengths are not equal. Two
+  references to the same string are equal. Other strings compare their
+  bytes.
 
 ## Records and enums
 
