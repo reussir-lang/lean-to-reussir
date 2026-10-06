@@ -21,10 +21,11 @@ A *dependent type* is a type that contains a value, such as the `n` in
 
 ## Types and values
 
-Lean's compiler replaces two kinds of items before lean2rr reads the code:
+Lean's compiler translates a program to LCNF, its intermediate code. In
+LCNF, it replaces two kinds of items:
 
 - **`◾`** replaces an item without data: a type, a type argument or a proof.
-  lean2rr does not store it.
+  In a type, LCNF writes it as `lcErased`. lean2rr does not store it.
 - **`lcAny`** replaces the *type* of a value when the compiler does not know
   that type. The value itself has data. lean2rr stores the value in an
   `L2RBox`.
@@ -37,8 +38,24 @@ def pick (α : Type) (b : Bool) (x y : α) : α := if b then x else y
 
 - `pick` takes a type `α`, a Boolean `b`, and two values `x` and `y` of the
   type `α`. It returns `x` if `b` is true, else `y`.
-- `α` becomes `◾`. lean2rr does not store it.
-- `x` and `y` have the type `lcAny`. Each one is an `L2RBox`.
+
+Lean's compiler gives this LCNF (mono phase, with the parameter types):
+
+```text
+def pick (α : lcErased) (b : Bool) (x : lcAny) (y : lcAny) : lcAny :=
+  cases b : lcAny
+  | Bool.false =>
+    return y
+  | Bool.true =>
+    return x
+```
+
+- `α` is `lcErased`. lean2rr does not store it.
+- `x`, `y` and the result have the type `lcAny`. Each one holds data.
+
+lean2rr makes a copy of `pick` for each type argument that the program
+uses. In the copy at `Nat`, `x` and `y` are `Nat` values. A copy at an
+unknown type uses `L2RBox` for `x` and `y`.
 
 In Rust terms, an `L2RBox` is similar to a `Box<dyn Any>`.
 
@@ -188,6 +205,29 @@ def Column.push (c : Column) (i : Nat) : Column :=
 - Line 4: if `ty` is `.str`, then `d` is an `Array String`. `push` adds
   `i` as a string.
 
+LCNF (mono phase):
+
+```text
+def Column.push (c : Column) (i : Nat) : Column :=
+  cases c : Column
+  | Column.mk (ty.1 : Ty) (data.2 : Array lcAny) =>
+    cases ty.1 : Column
+    | Ty.nat =>
+      let _x.3 := Array.push ◾ data.2 i;
+      let _x.4 := mk ty.1 _x.3;
+      return _x.4
+    | Ty.str =>
+      let _x.5 := Nat.reprFast i;
+      let _x.6 := Array.push ◾ data.2 _x.5;
+      let _x.7 := mk ty.1 _x.6;
+      return _x.7
+```
+
+- The field `data` has the type `Array lcAny`: an array whose element type
+  is not known.
+- `Array.push ◾ data.2 i`: the first argument is the element type. It is
+  `◾`: it holds no data.
+
 lean2rr generates this code (abridged, names shortened):
 
 ```rust
@@ -237,6 +277,39 @@ def describe : (b : Bool) → (if b then Nat else String) → String
 - Lines 7 and 8: each branch uses the value at the type that the Boolean
   selects.
 
+LCNF (mono phase):
+
+```text
+def pickT (b : Bool) : lcAny :=
+  cases b : lcAny
+  | Bool.false =>
+    let _x.1 := "hello";
+    return _x.1
+  | Bool.true =>
+    let _x.2 := 42;
+    return _x.2
+
+def describe (x.1 : Bool) (x.2 : lcAny) : String :=
+  cases x.1 : String
+  | Bool.false =>
+    let _x.3 := "str ";
+    let _x.4 := String.append _x.3 x.2;
+    return _x.4
+  | Bool.true =>
+    let _x.5 := "nat ";
+    let _x.6 := 1;
+    let _x.7 := Nat.add x.2 _x.6;
+    let _x.8 := Nat.reprFast _x.7;
+    let _x.9 := String.append _x.5 _x.8;
+    return _x.9
+```
+
+- The result of `pickT` has the type `lcAny`. In one branch it is a
+  `String`, in the other a `Nat`.
+- The parameter `x.2` of `describe` has the type `lcAny`. The `false` branch
+  uses it as a `String` (`String.append`). The `true` branch uses it as a
+  `Nat` (`Nat.add`).
+
 Both functions use the type `L2RBox` for that position:
 
 ```rust
@@ -259,8 +332,27 @@ def entries : List ((t : Ty) × t.denote) :=
 - Line 2: the first pair holds `.nat` and the number 5. The second pair
   holds `.str` and the string `"five"`.
 
-The type of the second component is not known at compile time. The second
-component is an `L2RBox`.
+LCNF (mono phase):
+
+```text
+def entries : List (Sigma Ty lcAny) :=
+  let _x.1 := Ty.nat;
+  let _x.2 := 5;
+  let _x.3 := Sigma.mk ◾ ◾ _x.1 _x.2;
+  let _x.4 := Ty.str;
+  let _x.5 := "five";
+  let _x.6 := Sigma.mk ◾ ◾ _x.4 _x.5;
+  let _x.7 := [] ◾;
+  let _x.8 := List.cons ◾ _x.6 _x.7;
+  let _x.9 := List.cons ◾ _x.3 _x.8;
+  return _x.9
+```
+
+- The pair has the type `Sigma Ty lcAny`: the type of the second component
+  is not known.
+- In `Sigma.mk ◾ ◾ _x.1 _x.2`, the two `◾` are the type arguments. The
+  pair does not store them.
+- The second component (`5`, `"five"`) is an `L2RBox`.
 
 ### A type stored in a field
 
@@ -275,10 +367,29 @@ structure Pkg where
 - Line 3: the field `val` is a value of the type `α`. It is an `L2RBox`.
 - Line 4: the field `fmt` is a function that turns an `α` into a string.
 
-In Rust terms, a `Pkg` is similar to a `Box<dyn Display>`. The code that
-builds a package knows the type of `val`. It puts `val` into its variant.
-The function `fmt` takes an `L2RBox` and takes the value out of that
-variant.
+In Rust terms, a `Pkg` is similar to a `Box<dyn Display>`. A function that
+uses a package:
+
+```lean
+def Pkg.show (p : Pkg) : String := p.fmt p.val
+```
+
+LCNF (mono phase):
+
+```text
+def Pkg.show (p : Pkg) : String :=
+  cases p : String
+  | Pkg.mk (α : lcErased) (val : lcAny) (fmt : lcAny → String) =>
+    let _x.1 := fmt val;
+    return _x.1
+```
+
+- The field `α` is `lcErased`. It has no storage.
+- The field `val` is `lcAny`. It is an `L2RBox`.
+- The field `fmt` takes an `lcAny`. It takes an `L2RBox`.
+
+The code that builds a package knows the type of `val`. It puts `val` into
+its variant. The function `fmt` takes the value out of that variant.
 
 ### Polymorphic recursion
 
@@ -292,6 +403,21 @@ def nest {α : Type} [ToString α] : Nat → α → String
   printed.
 - Line 2: at count 0, it prints the value.
 - Line 3: else it calls itself with the pair `(x, x)`, at the type `α × α`.
+
+LCNF (mono phase), the part that recurses:
+
+```text
+def nest._redArg (inst.1 : lcAny → String) (x.2 : Nat) (x.3 : lcAny) : String :=
+  let _f.4 := instToStringProd._redArg._lam_0 inst.1 inst.1;
+  ...
+  let _x.7 := Prod.mk ◾ ◾ x.3 x.3;
+  let _x.8 := nest._redArg _f.4 n.6 _x.7;
+  ...
+```
+
+- `x.3` has the type `lcAny`, and the `ToString` dictionary `inst.1` takes
+  an `lcAny`.
+- The recursive call passes the pair `Prod.mk ◾ ◾ x.3 x.3`.
 
 The types grow without end: `Nat`, `Nat × Nat`, and so on. lean2rr compiles
 one copy of `nest` for these calls. In that copy, `x` is an `L2RBox`, and
@@ -309,6 +435,22 @@ def ops : List Op := [⟨List.length⟩, ⟨fun xs => xs.length * 2⟩]
 - Line 2: the field `run` is a function that takes a list of any element
   type.
 - Line 4: `ops` holds two such functions.
+
+LCNF (mono phase):
+
+```text
+def ops._lam_0 (α.1 : lcErased) (xs : List lcAny) : Nat :=
+  let _x.2 := List.lengthTR._redArg xs;
+  let _x.3 := 2;
+  let _x.4 := Nat.mul _x.2 _x.3;
+  return _x.4
+
+def ops : List ({α : lcErased} → List lcAny → Nat) :=
+  ...
+```
+
+- The field's function type is `{α : lcErased} → List lcAny → Nat`: the
+  type argument is erased, and the list holds values of an unknown type.
 
 The function in the field takes a list whose elements are `L2RBox`
 values.

@@ -54,10 +54,11 @@ value with a <code>match</code> on the enum's variant.</p>
 <p>A <em>dependent type</em> is a type that contains a value, such as the <code>n</code> in
 <code>Vector String n</code>, or a type that a value selects, such as <code>t.denote</code> below.</p>
 <h2 id="types-and-values">Types and values</h2>
-<p>Lean's compiler replaces two kinds of items before lean2rr reads the code:</p>
+<p>Lean's compiler translates a program to LCNF, its intermediate code. In
+LCNF, it replaces two kinds of items:</p>
 <ul>
 <li><strong><code>◾</code></strong> replaces an item without data: a type, a type argument or a proof.
-  lean2rr does not store it.</li>
+  In a type, LCNF writes it as <code>lcErased</code>. lean2rr does not store it.</li>
 <li><strong><code>lcAny</code></strong> replaces the <em>type</em> of a value when the compiler does not know
   that type. The value itself has data. lean2rr stores the value in an
   <code>L2RBox</code>.</li>
@@ -68,9 +69,22 @@ value with a <code>match</code> on the enum's variant.</p>
 <ul>
 <li><code>pick</code> takes a type <code>α</code>, a Boolean <code>b</code>, and two values <code>x</code> and <code>y</code> of the
   type <code>α</code>. It returns <code>x</code> if <code>b</code> is true, else <code>y</code>.</li>
-<li><code>α</code> becomes <code>◾</code>. lean2rr does not store it.</li>
-<li><code>x</code> and <code>y</code> have the type <code>lcAny</code>. Each one is an <code>L2RBox</code>.</li>
 </ul>
+<p>Lean's compiler gives this LCNF (mono phase, with the parameter types):</p>
+<pre><code class="language-text">def pick (α : lcErased) (b : Bool) (x : lcAny) (y : lcAny) : lcAny :=
+  cases b : lcAny
+  | Bool.false =&gt;
+    return y
+  | Bool.true =&gt;
+    return x
+</code></pre>
+<ul>
+<li><code>α</code> is <code>lcErased</code>. lean2rr does not store it.</li>
+<li><code>x</code>, <code>y</code> and the result have the type <code>lcAny</code>. Each one holds data.</li>
+</ul>
+<p>lean2rr makes a copy of <code>pick</code> for each type argument that the program
+uses. In the copy at <code>Nat</code>, <code>x</code> and <code>y</code> are <code>Nat</code> values. A copy at an
+unknown type uses <code>L2RBox</code> for <code>x</code> and <code>y</code>.</p>
 <p>In Rust terms, an <code>L2RBox</code> is similar to a <code>Box&lt;dyn Any&gt;</code>.</p>
 <h2 id="the-enum-l2rbox">The enum <code>L2RBox</code></h2>
 <p>Each program has one <code>L2RBox</code> enum. It has one variant for each run-time
@@ -227,6 +241,27 @@ structure Column where
 <li>Line 4: if <code>ty</code> is <code>.str</code>, then <code>d</code> is an <code>Array String</code>. <code>push</code> adds
   <code>i</code> as a string.</li>
 </ul>
+<p>LCNF (mono phase):</p>
+<pre><code class="language-text">def Column.push (c : Column) (i : Nat) : Column :=
+  cases c : Column
+  | Column.mk (ty.1 : Ty) (data.2 : Array lcAny) =&gt;
+    cases ty.1 : Column
+    | Ty.nat =&gt;
+      let _x.3 := Array.push ◾ data.2 i;
+      let _x.4 := mk ty.1 _x.3;
+      return _x.4
+    | Ty.str =&gt;
+      let _x.5 := Nat.reprFast i;
+      let _x.6 := Array.push ◾ data.2 _x.5;
+      let _x.7 := mk ty.1 _x.6;
+      return _x.7
+</code></pre>
+<ul>
+<li>The field <code>data</code> has the type <code>Array lcAny</code>: an array whose element type
+  is not known.</li>
+<li><code>Array.push ◾ data.2 i</code>: the first argument is the element type. It is
+  <code>◾</code>: it holds no data.</li>
+</ul>
 <p>lean2rr generates this code (abridged, names shortened):</p>
 <pre><code class="language-rust">struct T_Column(RVec&lt;L2RBox&gt;, T_Ty)   // data, then ty
 enum [value] T_Ty { c_nat, c_str }    // stored inline, never allocated
@@ -272,6 +307,37 @@ def describe : (b : Bool) → (if b then Nat else String) → String
 <li>Lines 7 and 8: each branch uses the value at the type that the Boolean
   selects.</li>
 </ul>
+<p>LCNF (mono phase):</p>
+<pre><code class="language-text">def pickT (b : Bool) : lcAny :=
+  cases b : lcAny
+  | Bool.false =&gt;
+    let _x.1 := &quot;hello&quot;;
+    return _x.1
+  | Bool.true =&gt;
+    let _x.2 := 42;
+    return _x.2
+
+def describe (x.1 : Bool) (x.2 : lcAny) : String :=
+  cases x.1 : String
+  | Bool.false =&gt;
+    let _x.3 := &quot;str &quot;;
+    let _x.4 := String.append _x.3 x.2;
+    return _x.4
+  | Bool.true =&gt;
+    let _x.5 := &quot;nat &quot;;
+    let _x.6 := 1;
+    let _x.7 := Nat.add x.2 _x.6;
+    let _x.8 := Nat.reprFast _x.7;
+    let _x.9 := String.append _x.5 _x.8;
+    return _x.9
+</code></pre>
+<ul>
+<li>The result of <code>pickT</code> has the type <code>lcAny</code>. In one branch it is a
+  <code>String</code>, in the other a <code>Nat</code>.</li>
+<li>The parameter <code>x.2</code> of <code>describe</code> has the type <code>lcAny</code>. The <code>false</code> branch
+  uses it as a <code>String</code> (<code>String.append</code>). The <code>true</code> branch uses it as a
+  <code>Nat</code> (<code>Nat.add</code>).</li>
+</ul>
 <p>Both functions use the type <code>L2RBox</code> for that position:</p>
 <pre><code class="language-rust">fn pickT(b : bool) -&gt; L2RBox                // L2RBox::b2{42} or L2RBox::b1{&quot;hello&quot;}
 fn describe(b : bool, v : L2RBox) -&gt; LStr   // each branch takes v out of its variant
@@ -288,8 +354,26 @@ depends on the value of its first component.</p>
 <li>Line 2: the first pair holds <code>.nat</code> and the number 5. The second pair
   holds <code>.str</code> and the string <code>"five"</code>.</li>
 </ul>
-<p>The type of the second component is not known at compile time. The second
-component is an <code>L2RBox</code>.</p>
+<p>LCNF (mono phase):</p>
+<pre><code class="language-text">def entries : List (Sigma Ty lcAny) :=
+  let _x.1 := Ty.nat;
+  let _x.2 := 5;
+  let _x.3 := Sigma.mk ◾ ◾ _x.1 _x.2;
+  let _x.4 := Ty.str;
+  let _x.5 := &quot;five&quot;;
+  let _x.6 := Sigma.mk ◾ ◾ _x.4 _x.5;
+  let _x.7 := [] ◾;
+  let _x.8 := List.cons ◾ _x.6 _x.7;
+  let _x.9 := List.cons ◾ _x.3 _x.8;
+  return _x.9
+</code></pre>
+<ul>
+<li>The pair has the type <code>Sigma Ty lcAny</code>: the type of the second component
+  is not known.</li>
+<li>In <code>Sigma.mk ◾ ◾ _x.1 _x.2</code>, the two <code>◾</code> are the type arguments. The
+  pair does not store them.</li>
+<li>The second component (<code>5</code>, <code>"five"</code>) is an <code>L2RBox</code>.</li>
+</ul>
 <h3 id="a-type-stored-in-a-field">A type stored in a field</h3>
 <pre><code class="language-lean">structure Pkg where
   α : Type
@@ -301,10 +385,24 @@ component is an <code>L2RBox</code>.</p>
 <li>Line 3: the field <code>val</code> is a value of the type <code>α</code>. It is an <code>L2RBox</code>.</li>
 <li>Line 4: the field <code>fmt</code> is a function that turns an <code>α</code> into a string.</li>
 </ul>
-<p>In Rust terms, a <code>Pkg</code> is similar to a <code>Box&lt;dyn Display&gt;</code>. The code that
-builds a package knows the type of <code>val</code>. It puts <code>val</code> into its variant.
-The function <code>fmt</code> takes an <code>L2RBox</code> and takes the value out of that
-variant.</p>
+<p>In Rust terms, a <code>Pkg</code> is similar to a <code>Box&lt;dyn Display&gt;</code>. A function that
+uses a package:</p>
+<pre><code class="language-lean">def Pkg.show (p : Pkg) : String := p.fmt p.val
+</code></pre>
+<p>LCNF (mono phase):</p>
+<pre><code class="language-text">def Pkg.show (p : Pkg) : String :=
+  cases p : String
+  | Pkg.mk (α : lcErased) (val : lcAny) (fmt : lcAny → String) =&gt;
+    let _x.1 := fmt val;
+    return _x.1
+</code></pre>
+<ul>
+<li>The field <code>α</code> is <code>lcErased</code>. It has no storage.</li>
+<li>The field <code>val</code> is <code>lcAny</code>. It is an <code>L2RBox</code>.</li>
+<li>The field <code>fmt</code> takes an <code>lcAny</code>. It takes an <code>L2RBox</code>.</li>
+</ul>
+<p>The code that builds a package knows the type of <code>val</code>. It puts <code>val</code> into
+its variant. The function <code>fmt</code> takes the value out of that variant.</p>
 <h3 id="polymorphic-recursion">Polymorphic recursion</h3>
 <pre><code class="language-lean">def nest {α : Type} [ToString α] : Nat → α → String
   | 0, x =&gt; toString x
@@ -315,6 +413,19 @@ variant.</p>
   printed.</li>
 <li>Line 2: at count 0, it prints the value.</li>
 <li>Line 3: else it calls itself with the pair <code>(x, x)</code>, at the type <code>α × α</code>.</li>
+</ul>
+<p>LCNF (mono phase), the part that recurses:</p>
+<pre><code class="language-text">def nest._redArg (inst.1 : lcAny → String) (x.2 : Nat) (x.3 : lcAny) : String :=
+  let _f.4 := instToStringProd._redArg._lam_0 inst.1 inst.1;
+  ...
+  let _x.7 := Prod.mk ◾ ◾ x.3 x.3;
+  let _x.8 := nest._redArg _f.4 n.6 _x.7;
+  ...
+</code></pre>
+<ul>
+<li><code>x.3</code> has the type <code>lcAny</code>, and the <code>ToString</code> dictionary <code>inst.1</code> takes
+  an <code>lcAny</code>.</li>
+<li>The recursive call passes the pair <code>Prod.mk ◾ ◾ x.3 x.3</code>.</li>
 </ul>
 <p>The types grow without end: <code>Nat</code>, <code>Nat × Nat</code>, and so on. lean2rr compiles
 one copy of <code>nest</code> for these calls. In that copy, <code>x</code> is an <code>L2RBox</code>, and
@@ -329,6 +440,20 @@ def ops : List Op := [⟨List.length⟩, ⟨fun xs =&gt; xs.length * 2⟩]
 <li>Line 2: the field <code>run</code> is a function that takes a list of any element
   type.</li>
 <li>Line 4: <code>ops</code> holds two such functions.</li>
+</ul>
+<p>LCNF (mono phase):</p>
+<pre><code class="language-text">def ops._lam_0 (α.1 : lcErased) (xs : List lcAny) : Nat :=
+  let _x.2 := List.lengthTR._redArg xs;
+  let _x.3 := 2;
+  let _x.4 := Nat.mul _x.2 _x.3;
+  return _x.4
+
+def ops : List ({α : lcErased} → List lcAny → Nat) :=
+  ...
+</code></pre>
+<ul>
+<li>The field's function type is <code>{α : lcErased} → List lcAny → Nat</code>: the
+  type argument is erased, and the list holds values of an unknown type.</li>
 </ul>
 <p>The function in the field takes a list whose elements are <code>L2RBox</code>
 values.</p>
