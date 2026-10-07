@@ -120,13 +120,21 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   nullary), any other immediate a cast or unreachable; a pointer is checked
   against `t`'s number and taken (`l2r_any_raw_take`), any other number a
   cast or unreachable. A `[value]` struct is its field's unboxing (over a
-  `Box`, the struct around the box itself). The
+  `Box`, the struct around the box itself; over a function value, the
+  struct around the generated unboxing of the function type,
+  `l2r_unbox_fn_T`, which `boxUnbox` gets as `fnUnbox`). The
   prelude's comment above `l2r_any_as` shows the rule.
 - **Why:** `box(0)` reaches typed positions (an erased argument at a type
   with data, rule 4e), and only the program can make a record's zero or a
-  nullary variant.
+  nullary variant. A function value has several representations and typed
+  immediates (`l2r_any_of_fn`), which only the generated function reads: a
+  recursive structure whose one field is a function
+  (`inductive G | mk : (Nat → Option (Nat × G)) → G`, a `[value]` struct)
+  stopped lean2rr at its first unboxing, "boxUnbox at function type
+  (internal error)" (hunt box, test `RtValueStructFnBox`).
 - **Where:** `LowerBase.lean`: `boxUnbox`; `Lower/Conv.lean`:
-  `unboxMatch`, `tryCoerce`.
+  `unboxMatch` (passes `unboxFnFn`), `tryCoerce`; `Lower/Finish.lean`:
+  `genUnbox` (its immediates through `unboxMatch`).
 - **Remove only if:** `box(0)` stops reaching typed positions.
 
 ### A field of a parameter's type holds a `Box`; a boxed value is matched at its type

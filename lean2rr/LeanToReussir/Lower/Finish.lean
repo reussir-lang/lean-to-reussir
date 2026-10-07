@@ -87,7 +87,7 @@ def genUnbox (fname : String) (t : RR.Ty) : LowerM Unit := do
         .mtch (.var n) fnArms⟩
       return ⟨#[(v, some u64, .call "l2r_any_raw_imm" #[] #[.var w]), (z, some u64, .atom "0")],
         .ite (.atom s!"{v} == {z}") (.ofExpr (← zeroValue t)) typed⟩
-    | _ => return .ofExpr (← boxUnbox bx t zeroValue none)
+    | _ => return .ofExpr (← unboxMatch bx t)
   let m ← boxDispatch (.var "b") arms imm unreach
   let item := RR.Item.fn fname #[("b", RR.Ty.box)] t (.ofExpr m)
   replaceFn fname item

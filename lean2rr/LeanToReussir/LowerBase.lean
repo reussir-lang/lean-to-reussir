@@ -863,15 +863,19 @@ partial def boxWordRead? (b : RR.Expr) (at_ : RR.Ty) : Option RR.Expr :=
   | .block ⟨lets, r⟩ => (boxWordRead? r at_).map fun r' => .block ⟨lets, r'⟩
   | _ => none
 
-/-- Box `b` unboxed at type `t` (not a function type), as the prelude's
+/-- Box `b` unboxed at type `t`, as the prelude's
 rule for generated unboxes says: an immediate is `t`'s scalar, its
 enumeration index, one of its nullary variants by index, or, for the word
 1 (`box(0)`, index 0), its zero (`zeroOf t`); a pointer is checked against
 `t`'s number. Anything else is a cast (`slow`: the generated function
 `Box → t` that reads values of the types Lean represents alike, in a
-program that casts) or unreachable (the box released first). -/
+program that casts) or unreachable (the box released first). A function
+type (`t` itself, or the field of a `[value]` struct) is unboxed by the
+generated function `fnUnbox t` (`unboxFnFn`: it reads every
+representation of the function type and the typed immediates of
+`l2r_any_of_fn`). -/
 partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Expr)
-    (slow : Option String := none) : LowerM RR.Expr := do
+    (fnUnbox : RR.Ty → LowerM String) (slow : Option String := none) : LowerM RR.Expr := do
   let u64 := RR.Ty.named "u64"
   let back (w : String) : RR.Expr := .call "l2r_any_of_raw" #[] #[.var w]
   let otherwise (w : String) : RR.Block := match slow with
@@ -925,8 +929,10 @@ partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Exp
   | .valueStruct tn ft =>
     -- Over a box (`ST.Out σ α`): the struct around the box itself.
     if ft == RR.Ty.box then return .ctor tn none #[b]
-    -- The field's own unboxing (its zero is the field of the struct's zero).
-    return .ctor tn none #[← boxUnbox b ft zeroOf none]
+    -- The field's own unboxing (its zero is the field of the struct's zero);
+    -- a function value's through `fnUnbox` (a recursive structure whose one
+    -- field is a function, `inductive G | mk : (Nat → Option (Nat × G)) → G`).
+    return .ctor tn none #[← boxUnbox b ft zeroOf fnUnbox none]
   | .leanrt n =>
     if slow.isNone then
       -- An array element read at once as a `Nat` or `Int`: an immediate
@@ -938,7 +944,7 @@ partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Exp
       let yes := RR.Block.ofExpr (.call "l2r_any_as" #[t] #[back w, .atom (toString n)])
       return .ite (isImm w) yes (.ofExpr (← ifNum w n yes (otherwise w)))
   | .prog n _ _ nullary isFn =>
-    if isFn then throwError "lean2rr: boxUnbox at function type {t.render} (internal error)"
+    if isFn then return .call (← fnUnbox t) #[] #[b]
     boxWithWord b fun w => do
       -- An immediate: the index (0 first: `box(0)`).
       let immB : RR.Block ← if nullary.isEmpty then do

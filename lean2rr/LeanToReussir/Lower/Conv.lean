@@ -347,9 +347,11 @@ def boxOf (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
 API's `boxUnbox`): its payload, or, for `box(0)`, the placeholder of `t`
 (see `zeroValue`); any other payload is unreachable (the box released
 first), or goes to the generated unboxing function `slow` (values of other
-types read through `unsafeCast`). -/
+types read through `unsafeCast`). A function value (the field of a
+`[value]` struct) through the generated unboxing function of its type
+(`unboxFnFn`). -/
 def unboxMatch (e : RR.Expr) (t : RR.Ty) (slow : Option String := none) : LowerM RR.Expr :=
-  boxUnbox e t zeroValue slow
+  boxUnbox e t zeroValue unboxFnFn slow
 
 /-- An enumeration: `bool`, or a generated `[value]` enum without fields. -/
 def isEnumName (n : String) : LowerM Bool := do
