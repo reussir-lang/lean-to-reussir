@@ -49,11 +49,13 @@ same standard output, standard error and exit code.
 ## How a program is compiled
 
 1. **Collect and monomorphize.** Starting from `main`, lean2rr collects
-   every function and type the program uses and makes a separate copy for
-   each type it is used at (as Rust does with generics): `List Nat` and
-   `List String` become two different types with their own code. Lean
-   itself does not do this (it represents everything as pointers to boxed
-   objects), so lean2rr recovers precise types where Lean erased them.
+   every function the program uses and makes a separate copy of each
+   function for each type it is used at (as Rust does with generics):
+   `List.map` at `Nat` and at `String` become two functions. Data keeps one
+   layout per datatype: `List Nat` and `List String` are one Reussir type,
+   whose element is a one-word box (dependent types, rule 1). lean2rr
+   recovers precise types for parameters, results and local values where
+   Lean erased them.
 2. **Lean's optimizations.** lean2rr runs Lean's own optimization passes
    (inlining, specialization, case-of-known-constructor…) on the
    monomorphic code, with two passes replaced so they keep types.
