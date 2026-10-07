@@ -1,0 +1,11 @@
+# flatten-structs never copies a shared object per call (review of the pass): n calls, n = 2000 and 8000; native makes
+# no allocation per call for store and find (the array grows by doubling) and one for fn (the Option); the review's
+# builds copied the pair or the record at every call (+6000 for each line).
+store 2000 | store 8000 | 1 200
+find 2000 | find 8000 | 1 200
+fn 2000 | fn 8000 | 1 200
+# a shared object one level below a rebuilt one (re-review): inner, elems and opt copied it once per call or step
+# (+6000 each) before the fix
+inner 2000 | inner 8000 | 1 200
+elems 2000 | elems 8000 | 1 200
+opt 2000 | opt 8000 | 1 200

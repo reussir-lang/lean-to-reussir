@@ -1148,6 +1148,41 @@ def fieldAlign (t : RR.Ty) : LowerM Nat := do
     | none => return 8
   | _ => return 8
 
+/-- A `[value]` struct type carrying several values: the arguments of a
+join point (J2), or a result of optimization `flatten-structs`
+(`flatTupleName`). -/
+def tupleType (tys : Array RR.Ty) : LowerM String := do
+  if let some n := (← get).tupleTypes[tys]? then return n
+  let n ← fresh "Tuple"
+  modify fun s => { s with
+    tupleTypes := s.tupleTypes.insert tys n
+    tupleKeys := s.tupleKeys.insert n tys
+    typeItems := s.typeItems.push (.struct n true tys) }
+  return n
+
+/-- The structure `L2RFlat.Tuple<k>` (`k` type parameters, one field of
+each) that optimization `flatten-structs` (Opt/Flatten) adds to the
+environment for a function that returns the fields of a structure instead
+of the structure. Unlike every other inductive, its values are a `[value]`
+struct of its fields at their own types (`tupleType`): it is lean2rr's own
+type, built and projected only by the code of that pass, never boxed. -/
+def flatTupleName (k : Nat) : Name := .str `L2RFlat s!"Tuple{k}"
+
+/-- Its constructor. -/
+def flatTupleCtor (k : Nat) : Name := .str (flatTupleName k) "mk"
+
+/-- The `k` of `L2RFlat.Tuple<k>`, if `n` is one. -/
+def flatTupleArity? (n : Name) : Option Nat :=
+  match n with
+  | .str `L2RFlat s =>
+    if s.startsWith "Tuple" then (List.range 257).find? (fun k => s == s!"Tuple{k}") else none
+  | _ => none
+
+/-- The `k` of `L2RFlat.Tuple<k>.mk`, if `n` is that constructor. -/
+def flatTupleCtorArity? : Name → Option Nat
+  | .str p "mk" => flatTupleArity? p
+  | _ => none
+
 /-- The type constants `lowerTypeApp` translates itself (not through
 `nominalType`). -/
 def builtinTypeNames : List Name :=
@@ -1175,7 +1210,12 @@ mutual
     | .sort _ => return .unit
     | .const .. | .app .. =>
       match e.getAppFn with
-      | .const n _ => lowerTypeApp n
+      | .const n _ =>
+        -- `flatten-structs`' tuples: a `[value]` struct of the fields.
+        if let some k := flatTupleArity? n then
+          let args := e.getAppArgs
+          if args.size == k then return .named (← tupleType (← args.mapM lowerType))
+        lowerTypeApp n
       | _ => return RR.Ty.box
     | _ => return RR.Ty.box
 
@@ -1330,15 +1370,5 @@ def unboxFn (t : String) : LowerM String := do
   unless ← getPart (·.unboxTargetSet.contains t) do
     modify fun s => { s with unboxTargets := s.unboxTargets.push t, unboxTargetSet := s.unboxTargetSet.insert t }
   return s!"l2r_unbox_{t}"
-
-/-- A `[value]` struct type carrying several join-point arguments. -/
-def tupleType (tys : Array RR.Ty) : LowerM String := do
-  if let some n := (← get).tupleTypes[tys]? then return n
-  let n ← fresh "Tuple"
-  modify fun s => { s with
-    tupleTypes := s.tupleTypes.insert tys n
-    tupleKeys := s.tupleKeys.insert n tys
-    typeItems := s.typeItems.push (.struct n true tys) }
-  return n
 
 end LeanToReussir

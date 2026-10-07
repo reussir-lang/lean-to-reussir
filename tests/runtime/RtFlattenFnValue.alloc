@@ -1,0 +1,3 @@
+# flatten-structs never copies the caller's record per call through a function value (review of the pass, round 4,
+# F1): n calls, n = 2000 and 8000; native no allocation per call (the array grows by doubling); 9bc84de +6004.
+2000 | 8000 | 1 200

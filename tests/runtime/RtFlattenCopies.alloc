@@ -1,0 +1,6 @@
+# flatten-structs never copies an object native shares (review of the pass, round 3): n calls or steps, n = 2000 and
+# 8000. Native: no allocation per call for store (the array grows by doubling), about one and a half per step for two
+# (mkP's pair, the other branch's pair at every second step); before the fix the pass added one record per call (store,
+# +6000) and one pair at every second step (two, +3000).
+store 2000 | store 8000 | 1 200
+two 2000 | two 8000 | 1 200

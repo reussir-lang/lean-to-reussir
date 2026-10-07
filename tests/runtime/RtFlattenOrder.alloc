@@ -1,0 +1,3 @@
+# flatten-structs builds a call's result once when a join point's body uses it whole and it is passed to that join
+# point (review of the pass, round 4, F3): n steps, n = 2000 and 8000; native +9001; 9bc84de +12002.
+2000 | 8000 | 1 200

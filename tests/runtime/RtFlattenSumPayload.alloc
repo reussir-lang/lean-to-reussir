@@ -1,0 +1,5 @@
+# flatten-structs builds a matched payload once (review of the pass, round 5, G1): n steps, n = 2000 and 8000. Native
+# +12000 (e) and +8000 (o); the review's build of 291f105 made +17141 (e). (lean2rr with every pass on matches native;
+# with flatten-structs off it makes about 850 (e) and 2000 (o) more, outside this pass.)
+e 2000 | e 8000 | 1 200
+o 2000 | o 8000 | 1 200

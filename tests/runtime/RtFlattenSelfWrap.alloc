@@ -1,0 +1,3 @@
+# the same for a non-tail self-call through the wrapper (review of the pass, round 5, G2): n calls of sumW (2 to 6
+# steps each), n = 2000 and 8000; native +88799.
+2000 | 8000 | 1 200

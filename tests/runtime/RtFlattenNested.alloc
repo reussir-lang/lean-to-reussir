@@ -1,0 +1,8 @@
+# flatten-structs builds each value once (review of the pass, round 4): n calls or steps, n = 2000 and 8000. 9bc84de
+# built one more object per call or step in both (the inner record again), loopJ (the state in the join point and at the
+# jump), exit2 (the inner record again) and chain (+6000, the pair again in the second join point; still below native,
+# whose chainJ also builds a state per step, so only the identity line of the test catches it).
+both 2000 | both 8000 | 1 200
+loopJ 2000 | loopJ 8000 | 1 200
+exit2 2000 | exit2 8000 | 1 200
+chain 2000 | chain 8000 | 1 200

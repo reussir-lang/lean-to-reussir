@@ -1,0 +1,8 @@
+# flatten-structs builds a fresh value that goes split both to another loop's worker and to a second place once (review
+# of the pass, round 6, H1): n calls, n = 2000 and 8000. 2637913 built it twice (outer +18000, pair +18002 allocations
+# against native's +12000; outerJ +1248048 bytes). outerJ: lean2rr with the pass off requests about 24 bytes more than
+# native per call (+1104000 against +960006, outside this pass; the same with the pass on), hence its offset (64 x 3000
+# bytes; the double build is +144000 bytes more).
+outer 2000 | outer 8000 | 1 200
+outerJ 2000 | outerJ 8000 | 1 3000
+pair 2000 | pair 8000 | 1 200

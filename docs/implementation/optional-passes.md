@@ -30,6 +30,7 @@ and passes").
 | `nullary-scrutinee` | in a field-less arm, the matched value rebuilt | only arms of constructors without fields that use the value | [cases](control-flow/cases.md#the-matched-value-of-a-nullary-arm-is-rebuilt-nullary-scrutinee) |
 | `sink-proj` | structure projections sunk into the branches that use them | the projection is unused later in the block and in the condition, and no binder clashes; applies only where some branches use it while another keeps the structure whole | [cases](control-flow/cases.md#structure-projections-move-into-the-branches-that-use-them-sink-proj) |
 | `fresh-rebuild` | an arm returning a fresh matched value returns it rebuilt | the value is freshly built (whole-program analysis); the arm binds every field and only returns it | [cases](control-flow/cases.md#fresh-values-returned-whole-are-rebuilt-fresh-rebuild) |
+| `flatten-structs` | a structure argument of a loop (join point, self-recursive function) and a structure or two-constructor result passed as its fields at their precise types (worker/wrapper) | a value is split only where its fields are known at every jump, self-call and return; a whole use keeps that level whole, except two rebuilds that add no allocation: a loop's parameter at the loop's exit after a step that built a new value (the first step peeled into the wrapper), and a call's result (each value built at most once per run of its scope); a value whose object is inspected (`ptrAddrUnsafe`, `dbgTraceIfShared`, `isExclusiveUnsafe`) or that the caller passed in is never rebuilt; a result level stays whole when callers (or the wrapper) only use it whole, or when a shared object may arrive there; results with function types or without finite placeholders are not split; in a program that creates resources, declarations with resource parameters or results are left alone (their inferred borrows stay Lean's); bounds: 8 levels, 16 variables, peeled bodies of at most 300 nodes | below |
 | `conv-liveness` | unboxing, application and conversion helpers generated only for what live code reaches; unreachable functions dropped | none needed for soundness: an arm left out matches a variant that no live code builds, so no value of it exists at run time; every identifier of raw text, of the prelude and of atoms is a root, every arm of other matches counts, and a variant that text names counts as built | [liveness](conversions/liveness.md) |
 | `merge-fns` | generated functions equal up to their own and local names merged: a copy calls the first, calls of a copy call the first | the canonical texts are equal (the same code once names are renamed in binding order, inside atoms too); a copy keeps its name and calls the function its first ends at, never itself; nothing is removed; a function called from one place only stays (LLVM inlines it there), except startup code (`_init`, `l2r_persist_`) | below |
 
@@ -201,6 +202,165 @@ and passes").
   `LowerHooks.recomputeConst`; `Lower/Code.lean`: `lowerDecl`.
 - **Remove only if:** the pass is off (every constant outside closed-term
   chains is then cached).
+
+### Structure arguments and results are spread into their fields (`flatten-structs`)
+
+- **What:** A worker/wrapper transformation on the mono code after Stage 3
+  (`Opt/Flatten.lean`). It splits:
+  - a parameter of a join point, or of a declaration that calls itself (and
+    is in no larger call cycle), whose type is a structure: one parameter
+    per relevant field, at the field's precise type (`Nat`, not the
+    `LAny` of the structure's layout), nested structures too (`MProd Nat
+    (MProd Nat Nat)` gives three parameters). Join points also take
+    two-constructor values (a `Bool` tag and the fields of both
+    constructors). A parameter of a declaration that does not call itself
+    is split only where it is only read and some caller passes it a value
+    whose fields are known (`prunePassed`): lean-zip's Adler-32 fold passes
+    its split state to `updateByte`, which Lean does not inline;
+  - a result whose type is a structure or a type of two constructors
+    (`EST.Out`, `Except`, `Option`, `ForInStep`), nested in each other:
+    the declaration returns the variables as a `[value]` tuple
+    (`L2RFlat.Tuple<k>`, a structure the pass adds to the environment, which
+    `lowerType` lowers to `tupleType` of its fields' types). The fields of
+    the constructor a value does not have are placeholders (`◾`); two
+    constructors with the same field types (`ForInStep`) share them.
+
+  A value's fields are known where it is a constructor application of the
+  same declaration, a split parameter or a field of one, a value matched
+  by an enclosing `cases` (its alternative's parameters), a constant that
+  only builds one constructor (`pure 0`, extracted as a closed term), or
+  the result of a call that returns a tuple (a value the callee built at
+  every call, unless it may return an existing object there). A constructor application
+  used only through such places is not built. A use of a split value
+  "whole" (stored, passed to another function, returned unsplit) keeps
+  that level of a join point's or a declaration's parameter whole, except
+  at the exit (no self-call reachable) of a self-recursive declaration
+  whose self-calls are all tail calls, when every self-call passes a value
+  built in that step: the loop built one value per step, and now builds
+  one there when it ends. Such a declaration keeps a copy of its body in
+  the wrapper (`AState.peel`), which runs the first step on the value as
+  it came, so a loop that ends at once returns it unchanged; every other
+  declaration calls it through the wrapper. A whole use of a call's
+  result rebuilds it there from the tuple (the callee no longer builds
+  it). A join point's parameter is never rebuilt: rebuilding one gained
+  nothing measurable on the benchmark programs (Sieve, MonadicInterp,
+  Unionfind, Liasolver, Mergesort, HigherOrder, lean-zip: the same
+  instructions without it), and every review round found a new copy in
+  that logic.
+
+  A level that receives an object the program shares (a matched value, a
+  constant, a declaration's parameter, or such a level in turn:
+  `AState.existing`; a parameter counts where some self-call passes it on
+  unchanged) is never rebuilt either, nor copied when a level above it is
+  rebuilt: Unionfind's `findEntryAux`
+  returns an array element it matched, which a caller stores again;
+  rebuilding it there allocated a copy at every step of the path
+  compression instead of sharing the element. A value whose object is
+  inspected (`ptrAddrUnsafe`, `dbgTraceIfShared`, `isExclusiveUnsafe`) is
+  never rebuilt. The
+  analysis is a greatest fixed point over the whole program (`analyze`,
+  constraining again only the declarations a change concerns):
+  shapes start from the largest (`maxShape`: 8 levels, 16 variables) and
+  shrink where a value's fields are not known or a whole use is not
+  allowed. A result level stays whole when some caller uses it whole and
+  no other declaration reads it field by field, or when the declaration
+  may return a shared object there, or when a level above it is used whole
+  and a shared object arrives there (`pruneUnread`; a declaration that no
+  code of the program mentions, such as Lean's original of a `_redArg`
+  declaration, does not count as a user); a declaration reached
+  through its wrapper (a function value, a caller the pass leaves alone, a
+  peeled loop: `wrapperUsers`) counts as used whole at every level (the
+  review of the pass found copies of a matched pair per call through a
+  function value, a join point at a loop's exit rebuilding the caller's
+  pair, a `dbgTraceIfShared` that a rebuilt copy silenced, and in a second
+  round a shared object one level below a rebuilt one: test
+  `RtFlattenShared`). A loop's parameter also counts as shared at a level
+  where some other declaration passes it an object that exists there (a
+  value whose fields are not known there, a matched value, a constant, a
+  value built anyway: `AState.entryExisting`), and at every level where
+  callers reach it through the wrapper (a function value, a caller the
+  pass leaves alone: `analyze`; a peeled loop, whose wrapper runs the
+  first step on the caller's value: `allowedWhole`). A run with no step
+  returns that object, so a result level it reaches stays whole where a
+  caller uses it whole. A constructor application that stays and a call's
+  result used whole (`AState.builtCalls`) are objects that exist too: a
+  join point or a result they reach does not build them again.
+
+  Each value is built at most once per run of the code that binds it. The
+  rewrite remembers every value it builds along the scope (`Env.mats`, by
+  the value's constructors and leaves: a record and a projection of its
+  inner record share the inner one). Two rebuilds of one value (or of a
+  level inside it) of which a join point's body holds one may both run, so
+  that level stays whole (`constrainDecl`'s sites, `AState.sites`): for a
+  parameter, the slot is cut there; for a call's result, the declaration
+  calls the wrapper and keeps the result whole (`AState.wholeCalls`), and
+  the arguments of that call count as whole uses (the wrapper takes them
+  whole; the callee's parameters then get existing objects). A
+  two-constructor value built behind a join on its tag is matched as the
+  built object, so the alternative's fields are the ones built there. A
+  fresh value (a constructor application the pass leaves unbuilt, a call's
+  result) that goes split both to another declaration's worker, which may
+  return it as it came in a tuple a caller rebuilds, and to a second place
+  (a self-call, a jump, a return, another call) counts as built: one
+  object, which the callee gets as an existing one (`constrainDecl`'s flow
+  sites, `AState.flowSites`). A rebuild copies no level below it that is
+  not fresh. These rebuild
+  checks run in the round after each fixed point (`AState.checkSites`),
+  on shapes that no longer shrink. A loop peeled while its parameter was
+  split keeps no first step when the parameter ends up whole.
+
+  The review of the pass found, in its third round, a loop that ran no
+  step returning the caller's record, which a caller that stored it built
+  again from the tuple (one record per call), and a call's result stored
+  and also given to a split join point parameter that was stored again
+  (one more pair per step: test `RtFlattenCopies`); in its fourth round
+  the same copy through a function value and in a peeled loop's first
+  step (`RtFlattenFnValue`, `RtFlattenPeelFirst`, and the
+  `dbgTraceIfShared` they silenced: `RtFlattenTrace`), a call's result
+  used whole in a join point's body and at the jump to it
+  (`RtFlattenOrder`), and values built twice: a record and its inner
+  record, a loop's state in a join point's body and at its argument
+  (`RtFlattenNested`); in its fifth round a matched payload built again
+  after its value was built behind a tag join (`RtFlattenSumPayload`), and
+  the arguments of a call through the wrapper constrained as passed field
+  by field (`RtFlattenWrapArgs`, `RtFlattenSelfWrap`); in its sixth round a
+  fresh value given to another loop's worker and also to a second place,
+  built twice (`RtFlattenEscape`). Every
+  saturated call in the program calls the worker (`f._l2r_flat`), with the
+  arguments' fields (projected when they are not known); the wrapper keeps
+  the declaration's name and signature for function values and entry
+  points. `L2R_FLATTEN_DEBUG=NAME` prints the decisions about the
+  declarations whose names contain NAME.
+- **Why:** Rule 1 gives every datatype one layout with type parameters
+  boxed, so a loop's state and a monad's result were boxed and unboxed at
+  every step, and records allocated per call: the classic Sieve took 166
+  instructions per step of its six-variable loop instead of dev's 77
+  (+61 % against dev), MonadicInterp +57 %, Unionfind +42 % (performance
+  review of the dependent-type work, item 1). Measured with cachegrind
+  (instructions) against the same build with the pass off, on dev 393c739
+  (one run): Sieve −53.9 %, MonadicInterp −51.0 %, Unionfind −51.3 %; on
+  the dependent-type branch before (mean of two runs): HigherOrder
+  −4.2 %, Liasolver −8.0 %, Mergesort −7.3 %; lean-zip compress −4.8 %,
+  decompress −11.0 % (its Adler-32 state passed split to `updateByte`).
+- **Where:** `Opt/Flatten.lean`: `Shape`, `maxShape`, `indInfo?`,
+  `placeholderOk`, `collectDecl` (uses, aliases of matched values,
+  `constCtor?`), `analyze`, `constrainDecl`, `flowInto`, `allowedWhole`,
+  `freshFed`, `isExisting`, `wholeRoot`, `constrainDecl` (rebuild
+  sites), `pruneUnread`, `resourceExcluded`; the rewrite `xform`,
+  `explode`, `materialize` (`Env.mats`, `VVal.key`), `callWorker`, `run` (workers, wrappers,
+  peeled wrappers). `LowerBase.lean`: `flatTupleName`, `lowerType` (the
+  tuple types); `Lower/Values.lean`: `lowerLetValue` (tuple constructor and
+  projections); `Opt/Flatten.lean`'s `holdsResource` follows
+  `Lower/Borrow.lean`'s `mayHoldResource` (memoized); hook `PassConfig.monoPassesCore`
+  (run by `Main.lean` after `monoPasses`; `--emit opt` prints the result).
+  Tests `RtFlattenLoops`, `RtFlattenResults`, `RtFlattenSums`,
+  `RtFlattenAlloc` (with `RtFlattenAlloc.alloc`), `RtFlattenShared` (with
+  `RtFlattenShared.alloc`), `RtFlattenCopies`, `RtFlattenFnValue`,
+  `RtFlattenPeelFirst`, `RtFlattenOrder`, `RtFlattenNested`,
+  `RtFlattenSumPayload`, `RtFlattenWrapArgs`, `RtFlattenSelfWrap`,
+  `RtFlattenEscape` (each with its `.alloc`), `RtFlattenTrace`.
+- **Remove only if:** the pass is off (the structures are then built at
+  every step, with boxed fields, as rule 1 lays them out).
 
 ## Required parts that look like optimizations
 

@@ -16,7 +16,7 @@ structure CliOptions where
   listOpts : Bool := false
 
 def usage : String :=
-  "usage: lean2rr <Module> [--root NAME] [--stats] [--emit base|inst|mono|externs|retyped|rr] [--prelude FILE]\n" ++
+  "usage: lean2rr <Module> [--root NAME] [--stats] [--emit base|inst|mono|externs|retyped|opt|rr] [--prelude FILE]\n" ++
   "               [--no-check] [--disable-opt NAME]... [--enable-opt NAME]... [-o FILE]\n" ++
   "       lean2rr --list-opts\n" ++
   "  Modules are found via LEAN_PATH; run inside `lake env` for Lake projects. A module name\n" ++
@@ -48,8 +48,8 @@ partial def parseArgs : List String → CliOptions → Except String CliOptions
   | [], o => .ok o
   | "--root" :: r :: rest, o => parseArgs rest { o with root := r.toName }
   | "--emit" :: e :: rest, o =>
-    if e ∈ ["base", "inst", "mono", "externs", "retyped", "rr"] then parseArgs rest { o with emit := some e }
-    else .error s!"unknown --emit stage '{e}' (supported: base, inst, mono, externs, retyped, rr)"
+    if e ∈ ["base", "inst", "mono", "externs", "retyped", "opt", "rr"] then parseArgs rest { o with emit := some e }
+    else .error s!"unknown --emit stage '{e}' (supported: base, inst, mono, externs, retyped, opt, rr)"
   | "--prelude" :: f :: rest, o => parseArgs rest { o with prelude := some f }
   | "--no-check" :: rest, o => parseArgs rest { o with check := false }
   | "--stats" :: rest, o => parseArgs rest { o with stats := true }
@@ -74,7 +74,7 @@ def emitBase (prog : Program) : CoreM String := do
     out := out ++ toString (← ppDecl' decl .base) ++ "\n"
   return out
 
-/-- Mono declarations, one per line (`--emit inst|mono|retyped`). -/
+/-- Mono declarations, one per line (`--emit inst|mono|retyped|opt`). -/
 def dumpDecls (header : String) (decls : Array (Decl .pure)) : String :=
   decls.foldl (init := header) fun out d => out ++ fmtDecl d ++ "\n"
 
@@ -133,8 +133,11 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let decls ← retypeMono table decls st.keys roots
   let keys := st.keys
   if stage == "retyped" then return dumpDecls header decls
-  -- The registry's passes over mono LCNF (`Opt/FloatLits`).
+  -- The registry's passes over mono LCNF (`Opt/FloatLits`), then those
+  -- that need the environment (`Opt/Flatten`).
   let decls := cfg.monoPasses.foldl (fun ds pass => pass keys ds) decls
+  let decls ← cfg.monoPassesCore.foldlM (fun ds pass => pass keys ds) decls
+  if stage == "opt" then return dumpDecls header decls
   -- Stage 4: lowering, with the registry's lowering hooks.
   let prog ← lowerProgram cfg prelude mainInst errStr startup roots decls keys
     (st.externRoutes.foldl (init := {}) fun m f r => match r with

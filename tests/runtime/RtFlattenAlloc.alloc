@@ -1,0 +1,16 @@
+# flatten-structs: n steps of each shape, n = 2000 and 8000.
+# loop6, adler: no allocation per step of the state (Reussir reuses the state's cell even without the pass; adler's
+# allocations are the input list's). A regression guard.
+loop6 2000 | loop6 8000 | 1 2000
+adler 2000 | adler 8000 | 1 2000
+# helper: the step function (not inlined) takes the split state and returns a tuple; a regression guard (Reussir
+# reuses the pair's cell without the pass too: the gain is in boxing, not allocations)
+helper 2000 | helper 8000 | 1 2000
+# monad, interp: each step's result is a tuple of fields: monad allocates nothing per step (without the pass 1, natively
+# 2: the Except and the Prod), interp 1 (without the pass 4, natively 4). Factor 0: at most the offset in all; these two
+# lines pin the pass (with flatten-structs off they fail).
+monad 2000 | monad 8000 | 0 2000
+interp 2000 | interp 8000 | 0 8000
+# bucket: the inner loop's state is rebuilt at its exit only after a step: an empty bucket costs nothing (a rebuild per
+# run of the inner loop would be +4500 allocations here).
+bucket 2000 | bucket 8000 | 1 2000

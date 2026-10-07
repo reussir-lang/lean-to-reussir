@@ -31,6 +31,10 @@ structure PassConfig where
   /-- Passes over the checked mono declarations (after Stage 3, before
   lowering), in order; they get the instance keys. -/
   monoPasses : Array (NameMap InstKey → Array (Decl .pure) → Array (Decl .pure)) := #[]
+  /-- Passes over the checked mono declarations that need the environment
+  (field types at type arguments, new declarations), run after
+  `monoPasses`, in order. -/
+  monoPassesCore : Array (NameMap InstKey → Array (Decl .pure) → CoreM (Array (Decl .pure))) := #[]
   /-- Unary Lean definitions returning a `String` replaced by a prelude
   function with the same results (definition ↦ prelude function and its
   parameter type). -/

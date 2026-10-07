@@ -18,6 +18,7 @@ import LeanToReussir.Opt.BoxedConsts
 import LeanToReussir.Opt.FreshRebuild
 import LeanToReussir.Opt.ConvLiveness
 import LeanToReussir.Opt.MergeFns
+import LeanToReussir.Opt.Flatten
 
 /-!
 # The pass registry
@@ -43,7 +44,7 @@ or a lowering hook of `LowerHooks`), import it here and add its line to
 `optimizations`.
 
 Order. The lines are installed in order, and every `install` keeps what
-was installed before: list hooks (`monoPasses`, `rrPasses`) append, so
+was installed before: list hooks (`monoPasses`, `monoPassesCore`, `rrPasses`) append, so
 their passes run in line order; `prepareBody` and `fieldOrder` apply the
 new pass after the earlier ones; the predicates (`duplicateJp`,
 `recomputeConst`) are true if any pass says so; the binding hooks
@@ -87,6 +88,7 @@ def optimizations : Array OptPass := #[
   ⟨"nullary-scrutinee", true, "in the arm of a constructor without fields, the matched value rebuilt instead of kept", NullaryScrutinee.install⟩,
   ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩,
   ⟨"fresh-rebuild", true, "an alternative that only returns a freshly built matched value returns it rebuilt from its fields (Reussir then reuses the cell in every alternative)", FreshRebuild.install⟩,
+  ⟨"flatten-structs", true, "a structure argument of a loop (join point, self-recursive function) and a structure or two-constructor result (EST.Out, Except, Option; a tuple with a tag) passed as its fields, each at its precise type (worker/wrapper), where the fields are known at every jump, call and return: no record built and no field boxed per step", Flatten.install⟩,
   ⟨"conv-liveness", true, "unboxing, application and conversion helpers generated only for what live code reaches (arms only for the Box variants and function values it builds), and functions unreachable from the entry point and the runtime's entries dropped", ConvLiveness.install⟩,
   ⟨"merge-fns", true, "generated functions equal up to their own and local names merged: each copy calls the first, and calls of a copy call the first (List.reverseAux at every type); a function called from one place stays (LLVM inlines it), except startup code", MergeFns.install⟩]
 
