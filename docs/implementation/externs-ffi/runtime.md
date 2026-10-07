@@ -901,6 +901,38 @@ Paths are relative to the repository root.
   `src/semantics/float.rs`.
 - **Remove only if:** never (speed only).
 
+### Tasks run on a waiter's stack only with a native worker's room, the event loop's stack (switch step 16)
+
+- **What:** lean-runtime pinned at `9044998` (main: fixes-16). No glue
+  changes: leanrt already runs `main` on a thread of `thread_stack_size()`
+  and registers it with lean-runtime's stack-overflow report, which gives
+  lean-runtime the thread's stack bounds.
+  - lean-runtime's single-thread scheduler runs a task on the stack of
+    the context that waits for it only when that stack's free part is at
+    least min(a native worker's stack, the contexts' stack) less a slack
+    (1 MiB, at most a sixteenth of that stack); otherwise the task runs on
+    a context of its own (hunt HSK-01, review RF16-01). With
+    `LEAN_MAIN_USE_THREAD=0`, `main`'s stack is the process's, which never
+    has that room, so awaited tasks and the final run's tasks run on
+    contexts (HSK-02).
+  - The event loop's context has at least 1 GiB of stack whatever
+    `LEAN_STACK_SIZE_KB` says, as natively libuv's loop thread, which is
+    made before the variable is read (HSK-03).
+  - A spawn's helper thread goes back to `/` before it ends (LRIO2-F1).
+- **Why:** natively each awaited task runs on a worker thread of its own
+  with a whole stack, so nested waits under deep recursion that are fine
+  natively overflowed here.
+- **Tests:** `RtNestedWaitDeepStacks` (HSK-01: `chain` and `chainio`,
+  `200000 3` at `LEAN_STACK_SIZE_KB=16384`; status 134 before the fix,
+  native's `164092` after) and `RtLoopDeepSyncDependent` (HSK-03: a
+  timer's `sync` dependent recursing 3000000 levels; 134 before, native's
+  `272977` after).
+- **Where:** lean-runtime's `src/sched/ctx.rs` (`stack_room`,
+  `inline_slack`, `loop_stack_size`), `src/sched/task.rs`
+  (`here_or_own_context`), `src/sched/stack_overflow.rs`
+  (`own_stack_low`), `src/io/process.rs` (`spawn_and_leave`).
+- **Remove only if:** never.
+
 ### The event loop's streams, the leave of a thread's streams, and the crate's fixes (switch step 15)
 
 - **What:** lean-runtime pinned at `d042b79` (main: fixes-15). The glue

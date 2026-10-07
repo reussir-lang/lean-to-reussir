@@ -386,10 +386,14 @@ can use. lean2rr switched to it in nine steps, from 2026-10-04 to
 <td>15</td>
 <td>fixes in both schedulers and the network code (lean-runtime's fixes-15), and three Lean runtime bugs that the crate no longer copies (LB-50, LB-51, LB-52). A connect that a shutdown interrupts stays pending until the connection exists. The crate tells the glue which context is the event loop's. lean2rr's glue changed at the same step (see below)</td>
 </tr>
+<tr>
+<td>16</td>
+<td>no new part: fixes in the single-thread scheduler (lean-runtime's fixes-16). A task runs on the stack of the task that waits for it only when that stack has the room of a native worker's stack; otherwise it runs on a context of its own. The event loop's context has at least 1 GiB of stack, as libuv's loop thread natively. A spawn's helper thread holds no directory after the spawn</td>
+</tr>
 </tbody>
 </table>
 <p>Status (2026-10-07): the submodule <code>third_party/lean-runtime</code> is pinned at
-<code>d042b79</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
+<code>9044998</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
 <code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>) and links
 it with <code>leanrt</code> (<a href="../../runtime/README.md">runtime README</a>, "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline
