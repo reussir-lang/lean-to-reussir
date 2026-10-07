@@ -1,14 +1,14 @@
 # Pay-nothing baseline of Qsort (tests/classic/Qsort.lean), arguments '80'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 15955
-bytes 5951056
-native-allocs 299235
-native-bytes 12675598
-items 189
-functions 159
+allocs 9550
+bytes 5848584
+native-allocs 299234
+native-bytes 12675574
+items 198
+functions 162
 conversion-fns 0
 conversion-sites 0
-box-sites 67
+box-sites 56
 box-variants 5
 item L2RFn_F3nu64F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» f96e8eb23184
 item L2RFn_F4aRVec1_2nu8F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9c0c234ead50
@@ -28,7 +28,13 @@ item T_ST_Out_# d89b44c55864
 item T_StdGen_# 066265cc92ad
 item T_Std_IterStep_# 2e6b3397c95a
 item T_String_Slice_# 74f079416627
+item Tuple# 1bec48b38b83
+item Tuple# 380acfa4c4fa
+item Tuple# 4bccd1310e0a
 item Tuple# 7c0ccd471d3a
+item Tuple# ba7bdcc15089
+item Tuple# d4eee5540d99
+item Tuple# d895e58c720b
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 3a413da5f108
@@ -53,11 +59,11 @@ item l2r_err_string 1887e0c9d8df
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 a528b54ef546
+item l2r_init_chunk_0 4a859fd9679e
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 c690b1a252f6
-item l2r_main_body 903f86afbebd
+item l2r_main_body 3bebab77e921
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
 item l2r_run_main d750382a583f
@@ -67,10 +73,11 @@ item l2r_std_enter_if 5de670c1226b
 item l2r_std_leave 1770b2b31b99
 item l2r_std_leave_if 085389c2a4a4
 item l2r_stderr_put 810383903ea2
-item l2r_str_lit d2e1042ff046
+item l2r_str_lit 0b11589df278
 item l2r_task_run_before 467f31cb0d8d
 item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
+item l2r_zero_# 426eecea9538
 item l2r_zero_# 4d338cf27777
 item l2r_zero_# 6065a415a850
 item l2r_zero_# 7006a7d3821b
@@ -80,7 +87,9 @@ item l2r_zero_# 9890feb46a2f
 item l2r_zero_# 9f3e31b628c0
 item l2r_zero_# b416255d196c
 item l2r_zero_# d71d5ec18d04
+item l2r_zero_# f33d0f6f8f3a
 item l2r_zero_# fb7fc53512ff
+item l2r_zero_#_init 408c8ca4b52d
 item l2r_zero_#_init c42c9dfca394
 item l2r_zero_#_init e25c46d5b44d
 item l2r_zero_#_init e7e03c1546b6
@@ -158,27 +167,27 @@ item l_IO_println___at___00main_spec__3___l2r_#_ b5d74f2355d1
 item l_IO_userError___l2r_#_ e5a4f2aa2427
 item l_Lean_Name_mkStr1___l2r_#_ 26d3431e96f7
 item l_Lean_Name_str___override___l2r_#_ 73b9590253f3
-item l_List_head_x3f___l2r_#____redArg 8ba282021317
-item l_String_Slice_isNat___l2r_#_ 9071100022e8
+item l_List_head_x3f___l2r_#____redArg___l2r__flat 16f153cd41ba
 item l_String_Slice_isNat___l2r_#____closed__0 b714bad5e76d
 item l_String_Slice_isNat___l2r_#____closed__0_init 5fe2f6ecbfaf
-item l_String_Slice_toNat_x3f___l2r_#_ 2a4ae3a11fb6
-item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg abcc4cc38aa5
-item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg 5542782ce4b2
+item l_String_Slice_isNat___l2r_#____l2r__flat bdf8886b8a2e
+item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 195635684912
+item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 81db83ef79c1
+item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
 item l___private_Init_Data_Array_Basic_0__Array_foldlMUnsafe_fold___at___00checksum_spec__0___l2r_#_ fde2406f40a7
-item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg b6a940774ef8
 item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg___closed__0 63f9015b8989
 item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg___closed__0_init 18bab2f4fe41
-item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__2___l2r_#____redArg c6ba85ce5432
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 062f1febc52c
+item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg___l2r__flat 5d3356651e69
+item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__2___l2r_#____redArg___l2r__flat a2f1fde63bea
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 3b465ab51dc1
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
-item l___private_Qsort_0__partitionAux___at___00qsortAux___at___00main_spec__0_spec__0___l2r_#_ 83504e48362c
+item l___private_Qsort_0__partitionAux___at___00qsortAux___at___00main_spec__0_spec__0___l2r_#____l2r__flat 83d1ce1fe632
 item l_badRand___l2r_#_ 58f5f04afa61
-item l_checkSortedAux___l2r_#_ 8038eb85c6e5
 item l_checkSortedAux___l2r_#____closed__1 1ab30c4d61a8
 item l_checkSortedAux___l2r_#____closed__1_init 8cf7f7883992
+item l_checkSortedAux___l2r_#____l2r__flat 82e04f1d04cb
 item l_checksum___l2r_#_ 7e5f5f0a91fb
-item l_main___l2r_#_ 5023b2d885d8
+item l_main___l2r_#_ 382909a7f019
 item l_main___l2r_#____closed__0 8640918e9b41
 item l_main___l2r_#____closed__0_init 6a40c8755eff
 item l_main___l2r_#____closed__1 bc45fafb4c77
@@ -193,9 +202,9 @@ item l_mkPanicMessageWithDecl___l2r_#____closed__2_init 8088fa74060b
 item l_mkPanicMessageWithDecl___l2r_#____closed__3 2d4009e0bf37
 item l_mkPanicMessageWithDecl___l2r_#____closed__3_init 90cc2109b2ec
 item l_mkRandomArray___l2r_#_ 0efa5c8ac9cd
-item l_mkStdGen___l2r_#_ dd4c5a2a5508
+item l_mkStdGen___l2r_#____l2r__flat b08dfeda83c3
 item l_panic___at___00ByteArray_toUInt64LE_x21_spec__0___l2r_#_ 0bbcedca4180
-item l_qsortAux___at___00main_spec__0___l2r_#_ 96538c74069c
+item l_qsortAux___at___00main_spec__0___l2r_#_ 575ee23ffcd1
 item l_term_u2191___00__l2r_0_ f9cde14f7654
 item l_term_u2191___00__l2r_0__init 9655b5202d26
 item lean_main_entry cfcc2a3788db

@@ -1,14 +1,14 @@
 # Pay-nothing baseline of Cfold (tests/classic/Cfold.lean), arguments '15'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 91905
-bytes 2001080
-native-allocs 102939
-native-bytes 2242758
-items 175
-functions 147
+allocs 91900
+bytes 2000992
+native-allocs 102940
+native-bytes 2242782
+items 182
+functions 150
 conversion-fns 0
 conversion-sites 0
-box-sites 51
+box-sites 42
 box-variants 5
 item L2RFn_F3nu64F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» f96e8eb23184
 item L2RFn_F4aRVec1_2nu8F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9c0c234ead50
@@ -27,6 +27,10 @@ item T_ST_Out_# d89b44c55864
 item T_StdGen_# 066265cc92ad
 item T_Std_IterStep_# 2e6b3397c95a
 item T_String_Slice_# 74f079416627
+item Tuple# 1bec48b38b83
+item Tuple# 380acfa4c4fa
+item Tuple# d4eee5540d99
+item Tuple# d895e58c720b
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 3a413da5f108
@@ -51,11 +55,11 @@ item l2r_err_string 1887e0c9d8df
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 89d055e2e451
+item l2r_init_chunk_0 4790203c346a
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 c690b1a252f6
-item l2r_main_body c74b85ea8507
+item l2r_main_body 591a58af02ea
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
@@ -66,10 +70,11 @@ item l2r_std_enter_if 5de670c1226b
 item l2r_std_leave 2c680caf725f
 item l2r_std_leave_if 085389c2a4a4
 item l2r_stderr_put 810383903ea2
-item l2r_str_lit e0ed892491ca
+item l2r_str_lit 4edfb0770f0e
 item l2r_task_run_before 467f31cb0d8d
 item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
+item l2r_zero_# 426eecea9538
 item l2r_zero_# 4d338cf27777
 item l2r_zero_# 6065a415a850
 item l2r_zero_# 8cd89651b501
@@ -78,7 +83,9 @@ item l2r_zero_# 9890feb46a2f
 item l2r_zero_# 9f3e31b628c0
 item l2r_zero_# b416255d196c
 item l2r_zero_# d71d5ec18d04
+item l2r_zero_# f33d0f6f8f3a
 item l2r_zero_# fb7fc53512ff
+item l2r_zero_#_init 408c8ca4b52d
 item l2r_zero_#_init c42c9dfca394
 item l2r_zero_#_init e7e03c1546b6
 item l_ByteArray_toUInt64LE_x21___l2r_#_ 39cd43438ee8
@@ -161,16 +168,16 @@ item l_IO_Error_toString___l2r_#____closed__9_init 1f8870b1fc62
 item l_IO_print___at___00IO_println___at___00main_spec__0_spec__0___l2r_#_ f09422cca6b5
 item l_IO_println___at___00main_spec__0___l2r_#_ 1a79d53029b5
 item l_IO_userError___l2r_#_ e5a4f2aa2427
-item l_List_head_x3f___l2r_#____redArg 8ba282021317
-item l_String_Slice_isNat___l2r_#_ 9071100022e8
+item l_List_head_x3f___l2r_#____redArg___l2r__flat 16f153cd41ba
 item l_String_Slice_isNat___l2r_#____closed__0 b714bad5e76d
 item l_String_Slice_isNat___l2r_#____closed__0_init 5fe2f6ecbfaf
-item l_String_Slice_toNat_x3f___l2r_#_ 2a4ae3a11fb6
-item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg abcc4cc38aa5
-item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg 5542782ce4b2
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 062f1febc52c
+item l_String_Slice_isNat___l2r_#____l2r__flat bdf8886b8a2e
+item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 195635684912
+item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 81db83ef79c1
+item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 3b465ab51dc1
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
-item l_main___l2r_#_ 3f53b70cfa35
+item l_main___l2r_#_ 82042f79bb53
 item l_main___l2r_#____closed__0 60365f4860fa
 item l_main___l2r_#____closed__0_init 408b02dafb7c
 item l_mkPanicMessageWithDecl___l2r_#_ 86cf874e4ec8
@@ -182,6 +189,6 @@ item l_mkPanicMessageWithDecl___l2r_#____closed__2 7a3c0faa3813
 item l_mkPanicMessageWithDecl___l2r_#____closed__2_init 8088fa74060b
 item l_mkPanicMessageWithDecl___l2r_#____closed__3 2d4009e0bf37
 item l_mkPanicMessageWithDecl___l2r_#____closed__3_init 90cc2109b2ec
-item l_mkStdGen___l2r_#_ dd4c5a2a5508
+item l_mkStdGen___l2r_#____l2r__flat b08dfeda83c3
 item l_panic___at___00ByteArray_toUInt64LE_x21_spec__0___l2r_#_ 0bbcedca4180
 item lean_main_entry cfcc2a3788db

@@ -1,14 +1,14 @@
 # Pay-nothing baseline of Rbtree (tests/classic/Rbtree.lean), arguments '100000'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 100027
-bytes 4005824
+allocs 100024
+bytes 4005768
 native-allocs 2490228
 native-bytes 99519442
-items 160
-functions 132
+items 165
+functions 134
 conversion-fns 0
 conversion-sites 0
-box-sites 47
+box-sites 38
 box-variants 3
 item L2RFn_F3nNat3nNat 85013f2fb298
 item L2RFn_F3nNatF4nboolF3nNat3nNat eadd54893e45
@@ -29,6 +29,9 @@ item T_Std_IterStep_# 2e6b3397c95a
 item T_String_Slice_# 74f079416627
 item T_Tree_# ca905445e993
 item T_color_# a09f46348e79
+item Tuple# 1bec48b38b83
+item Tuple# 380acfa4c4fa
+item Tuple# d895e58c720b
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 3a413da5f108
@@ -54,7 +57,7 @@ item l2r_get_std_2 3818079a4a43
 item l2r_init_body c5e90e6a0b70
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
-item l2r_main_body 7ebfba83695c
+item l2r_main_body 382f04d125be
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
@@ -65,10 +68,11 @@ item l2r_std_enter_if 5de670c1226b
 item l2r_std_leave 70863378a236
 item l2r_std_leave_if 085389c2a4a4
 item l2r_stderr_put 810383903ea2
-item l2r_str_lit 83103bb6c9c8
+item l2r_str_lit 8eb87ec1e294
 item l2r_task_run_before 467f31cb0d8d
 item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
+item l2r_zero_# 426eecea9538
 item l2r_zero_# 4d338cf27777
 item l2r_zero_# 6065a415a850
 item l2r_zero_# 8cd89651b501
@@ -79,6 +83,7 @@ item l2r_zero_# b416255d196c
 item l2r_zero_# d71d5ec18d04
 item l2r_zero_# f33d0f6f8f3a
 item l2r_zero_# fb7fc53512ff
+item l2r_zero_#_init 408c8ca4b52d
 item l2r_zero_#_init c42c9dfca394
 item l2r_zero_#_init e7e03c1546b6
 item l_IO_Error_fopenErrorToString___l2r_#_ d5864a773c39
@@ -150,19 +155,19 @@ item l_IO_Error_toString___l2r_#____closed__9_init 1f8870b1fc62
 item l_IO_print___at___00IO_println___at___00main_spec__0_spec__0___l2r_#_ f09422cca6b5
 item l_IO_println___at___00main_spec__0___l2r_#_ 1a79d53029b5
 item l_IO_userError___l2r_#_ e5a4f2aa2427
-item l_List_head_x3f___l2r_#____redArg 8ba282021317
-item l_String_Slice_isNat___l2r_#_ 9071100022e8
+item l_List_head_x3f___l2r_#____redArg___l2r__flat 16f153cd41ba
 item l_String_Slice_isNat___l2r_#____closed__0 b714bad5e76d
 item l_String_Slice_isNat___l2r_#____closed__0_init 5fe2f6ecbfaf
-item l_String_Slice_toNat_x3f___l2r_#_ 2a4ae3a11fb6
-item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg abcc4cc38aa5
-item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg 5542782ce4b2
+item l_String_Slice_isNat___l2r_#____l2r__flat bdf8886b8a2e
+item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 195635684912
+item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 81db83ef79c1
+item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
 item l_fold___l2r_#_ 845f5050f04b
 item l_ins___l2r_#_ e4edb70926a8
 item l_insert___l2r_#_ 030ce5914839
 item l_isRed___l2r_#_ 9318f7d069f5
-item l_main___l2r_#_ 8c320928688e
+item l_main___l2r_#_ 4e1736477b8e
 item l_main___l2r_#____closed__0 63dbe229bad0
 item l_main___l2r_#____closed__0_init 4cc0e1f4b459
 item l_main___l2r_#____lam__0 3ba41cac9847
