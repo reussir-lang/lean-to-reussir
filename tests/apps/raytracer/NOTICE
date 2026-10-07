@@ -1,0 +1,30 @@
+lean4-raytracer
+Copyright (c) 2021 Kyle Miller.
+Source: https://github.com/kmill/lean4-raytracer, commit
+205143b32c006199c914cf6f340004137aaaa72a (2024-05-16).
+License: Apache License 2.0, in LICENSE.md.
+
+This copy is a test program of lean2rr. We changed these files:
+
+- lean-toolchain: leanprover/lean4:v4.34.0 (upstream: v4.8.0-rc1).
+  lean2rr reads the .olean files of Lean 4.34.0, so the program must
+  build with that version.
+- Main.lean: `Array.mkArray` became `Array.replicate`. Lean 4.34 does
+  not have `Array.mkArray`.
+- Main.lean: `writeTestImage` takes the width, the samples per pixel,
+  the number of threads and the maximum depth as parameters. Their
+  defaults are the upstream values. `main` reads them from the command
+  line: `render FILE WIDTH SAMPLES THREADS [DEPTH]`. Thus the test can
+  render small images.
+- Main.lean: THREADS = 0 renders on the main thread, without a task.
+  The divisor of the pixel sums is then the samples per pixel. All tasks
+  take random numbers from the same generator, IO.stdGenRef. With two or
+  more tasks, the image thus depends on the order in which the threads
+  run. Only THREADS = 0 and THREADS = 1 give one image that the test can
+  compare.
+- Main.lean: a note at the top and two comments say what changed.
+
+Render/Vec3.lean, lakefile.lean, lake-manifest.json and LICENSE.md are
+unchanged. We did not copy c/ (a C version of the program), old/ (older
+files that the program does not use), output/ (images), README.md and
+.gitignore.

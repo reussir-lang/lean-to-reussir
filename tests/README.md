@@ -171,6 +171,34 @@ lean2rr (`lean -o`, then `scripts/l2r.py FILE.lean`), runs both and compares
 stdout, stderr and the exit code. The programs check their own results. It
 is a correctness check only; the suite itself does the timing.
 
+## Applications
+
+`tests/apps/` holds real Lean programs of more than one module. Each is a
+Lake package with its own runner script. The runner copies the package
+into its build directory and builds it natively (`lake build`) and through
+lean2rr (`scripts/l2r.py` on the root module, with the package's `.olean`
+files on `--lean-path`). Then it runs both with the same arguments and
+compares stdout, stderr, the exit code and each file that the program
+writes, byte for byte. It does no timing.
+
+- `tests/apps/raytracer/`: lean4-raytracer
+  (github.com/kmill/lean4-raytracer, commit 205143b; Apache 2.0, its
+  `LICENSE.md`), the ray tracer of the book *Ray Tracing in One Weekend*
+  in two modules (`Main`, `Render.Vec3`). It writes a PPM image. `NOTICE`
+  lists our changes: the port to Lean 4.34 (`Array.replicate`), the image
+  settings on the command line (`render FILE WIDTH SAMPLES THREADS
+  [DEPTH]`) and THREADS = 0, which renders on the main thread.
+  `tests/apps/raytracer/run.sh [CONFIG...]` runs `small0` (60×40 pixels,
+  2 samples per pixel, depth 10, main thread) and `small1` (the same in
+  one task) by default, and `bench0` (200×133 pixels, 4 samples per pixel,
+  depth 30, main thread; about 10 s natively) when you name it. Only
+  THREADS = 0 and THREADS = 1 give one image: all tasks take random
+  numbers from `IO.stdGenRef`, so natively the image of two or more tasks
+  changes from run to run. The program uses `Float` arithmetic through a
+  polymorphic structure (`Vec3 α` at `Float`), inductive types with
+  `Float` fields, a reference to the random generator that the inner loop
+  reads and writes, arrays of structures, and a file written line by line.
+
 ## Loader checks
 
 `tests/env/run.sh` checks which program modules lean2rr accepts (plan §10,

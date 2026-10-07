@@ -274,6 +274,9 @@ def gen_testsets():
          "which program modules lean2rr accepts; <code>--stats</code> on polymorphic recursion"],
         ["Reussir benchmark suite", "<code>tests/reussir-benchmark/run.sh</code>",
          "18 Lean programs, unchanged", "the suite's own programs, built natively and through lean2rr"],
+        ["Applications", "<code>tests/apps/raytracer/run.sh</code>",
+         "1 program of two modules (lean4-raytracer), 3 settings",
+         "a real program built with Lake; the image file it writes, compared byte for byte"],
         ["leanrt unit tests", "<code>tests/runtime/leanrt-unit.sh</code>", f"{leanrt_unit_tests()} Rust tests",
          "big numbers, one-word Nat/Int, tagged arrays, the one-block layouts and their counts, the last-error slot; "
          "that lean2rr's version and IO error builders are lean-runtime's; that a panic's lines make one text for "

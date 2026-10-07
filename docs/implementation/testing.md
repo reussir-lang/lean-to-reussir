@@ -235,3 +235,20 @@ Paths are relative to the repository root.
 - **Where:** `tests/runtime/RtDepX*.lean`, `.args`, `.alloc`.
 - **Remove only if:** never; a case that fails is split out into its own
   test with an `.xfail`.
+
+### An application test compares the files it writes, at settings that give one result
+
+- **What:** `tests/apps/raytracer/run.sh` builds lean4-raytracer from a
+  copy of its Lake package in the build directory (`lake build`, then
+  `scripts/l2r.py Main --lean-path <copy>/.lake/build/lib/lean`). It
+  compares the PPM image that each build writes, byte for byte, in
+  addition to stdout, stderr and the exit code. It runs only THREADS = 0
+  (the main thread, a change of ours to the program; see its `NOTICE`)
+  and THREADS = 1 (one task).
+- **Why:** the image is the program's result; its stdout is only progress
+  lines. All tasks of the program take random numbers from one
+  `IO.stdGenRef`, so with two or more tasks native Lean gives another
+  image at each run. The copy keeps `.lake/` out of the source tree.
+- **Where:** `tests/apps/raytracer/run.sh`, `tests/apps/raytracer/NOTICE`.
+- **Remove only if:** never; a new setting must give one image natively
+  (check two native runs) before the test uses it.

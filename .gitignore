@@ -9,6 +9,7 @@
 /tests/runtime/build/
 /tests/env/build/
 /tests/reussir-benchmark/build/
+/tests/apps/build/
 __pycache__/
 # rrc polymorphic-FFI scratch files (rrc run from the repository)
 reussir_rust_module_*

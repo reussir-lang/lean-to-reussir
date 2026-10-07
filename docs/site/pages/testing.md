@@ -45,6 +45,17 @@ an alternative build against them, and times both.
 
 {{gen:classic}}
 
+### Applications
+
+Real programs of more than one module, built with Lake as their authors
+build them. `tests/apps/raytracer/run.sh` builds lean4-raytracer
+(github.com/kmill/lean4-raytracer), the ray tracer of the book *Ray Tracing
+in One Weekend*, in both ways. Both builds render the same image, and the
+test compares the image file byte for byte, as well as the streams and the
+exit code. The program renders on the main thread or in one task. With
+more tasks, all tasks take random numbers from one generator, so natively
+the image changes from run to run.
+
 ### The last full run
 
 The gate of switch step 10 (branch `lean-runtime-step10` at 0410be6), against
