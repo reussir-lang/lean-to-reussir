@@ -67,8 +67,11 @@ switch coroutines.
 
 lean2rr's runtime names the symbol
 (`reussir_rt::drop::__reussir_drop_drained`) and stores
-`leanrt::task::drained` there whenever it puts a promise's resolution off
-inside a drain. Until switch step 6 it declared the symbol
+`leanrt::task::drained` there whenever it puts a promise's resolution or
+a stream handle's close off inside a drain (the close since switch step
+14: the function runs the put-off resolutions, then calls
+lean-runtime's drain-end hook `sched::after_drain`, where the writer
+thread that the close may have handed the stream's last bytes to ends). Until switch step 6 it declared the symbol
 `#[linkage = "extern_weak"]` and also built against a Reussir without the
 patch; since then it does not link without it.
 

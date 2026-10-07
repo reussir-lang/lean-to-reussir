@@ -252,9 +252,10 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   never waits (it
   writes what the descriptor takes and hands the rest to a writer thread
   of lean-runtime's), and the io layer's other waits block the thread.
-  The writers are waited for at the context's next point that publishes:
-  a cell store (`l2r_lcell_set`), a task's or `main`'s end, every
-  scheduler call; `IO.Process.forceExit` waits for them before `_exit`
+  The writers are waited for at the end of the handle's free (next
+  entry), and otherwise at the context's next point that publishes: a
+  cell store (`l2r_lcell_set`), a task's or `main`'s end, every scheduler
+  call; `IO.Process.forceExit` waits for them before `_exit`
   (`io::force_exit`).
 - **Why:** lean-runtime's glue item 11 asks for its no-suspend scope over
   the whole free path: lean2rr's runtime must never suspend inside a free
@@ -268,6 +269,84 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   path itself (`drop::run`, on every free) stays without the scope's cost.
 - **Where:** `fs.rs`: `close`, `close_deferred`; `io.rs`: `force_exit`;
   `drop.rs`: `run`.
+- **Remove only if:** never.
+
+### The end of a handle's free waits for its writer (lean-runtime's drain-end hook)
+
+- **What:** Once the free that closed a stream handle is over, the writer
+  threads of the streams the context handed off end, while the other
+  contexts run: lean-runtime's drain-end hook `sched::after_drain()`
+  (its docs/sched.md, "The glue", item 11). Two places call it:
+  - a handle released outside a drain (by itself, or a member that
+    Reussir's drop glue releases at once as it frees a record):
+    `FileHandle`'s drop, right after the close, its no-suspend scope left,
+    when nothing is pending on the thread's stack of pending work
+    (`reussir_rt::drop::depth()` is 0). When something is pending (the
+    glue has pushed record boxes of the same free, which it drains before
+    it returns), a switch would leave them on the thread's stack, where
+    another context's drain would pop them: the close installs the drained
+    hook instead, and the end of the glue's drain waits, with the stack
+    empty (review RS14-01);
+  - a handle a drain reaches (in an array or a list, a box, a record below
+    the first cell of a free): its close is put off to that point of the
+    drain (`close_deferred`), and the drain's end calls the hook
+    (`task::drained`, Reussir's drain-end hook, patch 40-a), after the
+    deferred resolutions (`run_deferred`). The hook is installed there
+    (`task::hook_drained`), at the first close a free puts off, as at the
+    first promise it puts off, so a program with neither pays nothing at
+    a drain's end.
+
+  The order at a drain's end is lean-runtime's (review RF14-07): each
+  deferred resolution first waits for the writers of the streams the
+  context handed off before the free reached its promise, and runs with
+  the writers of the streams the drain closed after it still writing; then
+  `after_drain` waits for those. lean2rr's free reaches a container's
+  elements from the last, as native's `lean_del_core`, so a promise after
+  a stream handle in an array is resolved before the handle's close, as
+  natively before the close's `fclose` blocks (test
+  `RtDeferredResolveBeforeHandOff`: with `after_drain` first, the context
+  waited for a writer whose reader waited for the promise, and the
+  program hung).
+
+  One relaxed load while no writer runs in the process (while another
+  context's writer runs, a lock and a scan, and no wait: lean-runtime's
+  RF14-06). lean-runtime waits for nothing in a no-suspend scope, while
+  the context holds a stream lock, or while a panic unwinds (the
+  context's next writers point waits then).
+- **Why:** Natively the close's `fclose` blocks the thread until the pipe
+  takes the last bytes, so the code after the free reads what every other
+  thread did meanwhile. Here the close returns at once, and before this
+  hook the context waited at its next writers point, during which other
+  contexts ran: glue code that read state after the free, reached that
+  point, then acted on what it read, acted on stale state (reviews HR-01
+  to HR-03, switch step 14: a promise resolved again over another
+  context's resolution, test `RtHandOffResolveAgain`; a `sync` map over a
+  task that finished meanwhile run as a queued `sync` task, with the
+  "`Task.get` called from a `(sync := true)` task" panic and the lines
+  reversed, tests `RtHandOffSyncMap`, `RtHandOffTreeSyncMap`; a try lock
+  that took a lock another context takes first natively, test
+  `RtHandOffTryLock`). A switch is allowed at both places: the drain's
+  end already runs the deferred resolutions, whose dependents may block
+  (Reussir calls the hook once the drain is over, with nothing pending),
+  and a handle's last reference is dropped in generated code or in a
+  runtime function's FFI body, with no runtime state borrowed (neither
+  leanrt nor lean-runtime holds a stream handle), and the close waits
+  there only with nothing pending on the thread's stack of pending work.
+  The one piece of glue state that lives across that wait, the outcome
+  of the IO primitive that released the handle (leanrt's last-error slot
+  `fs::LastError`, which the program reads after the call), is each
+  context's own: the glue's `switched` exchanges it with the arriving
+  context's, as it does the stream cells (hunt HCO-01, test
+  `RtHandOffLastError`: a `putStr` that was a handle's last use read a
+  task's failed open, and a failed `truncate` read a task's success).
+  Another context's
+  handed-off stream is never waited for, and a writer whose wait was put
+  off (a stream lock held) is waited for at the next drain's end or
+  writers point, as lean-runtime's contract says.
+- **Where:** `fs.rs`: `FileHandle`'s drop, `LastError`, `swap_last`;
+  `sched.rs`: `switched`; `task.rs`: `drained`,
+  `hook_drained`; lean-runtime's `src/sched/mod.rs` (`after_drain`) and
+  `src/sched/drain.rs` (`run_deferred`, R4).
 - **Remove only if:** never.
 
 ### The event loop is lean-runtime's: timers, signals and sockets complete through promises

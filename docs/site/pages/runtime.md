@@ -130,7 +130,10 @@ by another task ends. While `modify` holds a reference, the other tasks wait
 for its store, as in Lean 4.35. A program without tasks pays nothing: its
 code is the same, and the scheduler does not start.
 
-**Promises** are runtime objects that hold their task's cell. Dropping the
+**Promises** are runtime objects that hold their task's cell. Only the
+first resolution has an effect: the crate's `resolve` examines the promise
+and stores the value in one step, after its wait for the context's writer
+threads. Dropping the
 last reference to an unresolved promise resolves it with `none`, as
 natively. When a free releases the promise, the resolution waits until the
 free ends (Reussir patch 40-a reports the end). **`Std.Sync`** mutexes
@@ -157,6 +160,13 @@ thread that waits blocks its context.
 - **IO and tasks.** A read of an empty pipe, a write to a full pipe,
   `flock` and the wait for a child let the other contexts run, as other
   threads natively go on.
+- **The close of a stream in a free.** A free must not suspend its
+  context. So when the close of a stream cannot write all its bytes, a
+  writer thread of the crate writes the rest. At the end of that free, the
+  context waits for the writer thread, and the other contexts run (the
+  crate's `after_drain`). Natively the close blocks the thread until the
+  bytes are written. So the code after the free sees the same state as
+  natively.
 - **The event loop** is lean-runtime's: timers, signals, sockets and name
   resolution. It works, but it is not a target now.
 - **Standard streams per thread.** A pool task uses the streams of its
@@ -242,9 +252,10 @@ The switch steps:
 | 11 | no new part: fixes in the signal watchers (lean-runtime's fixes-9 to fixes-11). A one-shot watcher gets one signal, as with `SA_RESETHAND` natively. lean2rr's own runtime changed at the same step (see below) |
 | 12 | no new part: speed (lean-runtime's perf-3). `Float.toString` gives its text as bytes; the character count of a new string takes eight bytes at a time. lean2rr's own runtime changed at the same step (see below) |
 | 13 | no new part: fixes of Lean runtime bugs that the crate no longer copies (lean-runtime's semantics-4, io-fixes-1 and fixes-12; LB-36, LB-37, LB-39 to LB-45). A capacity that cannot be reserved gives the empty array; every task priority above 8 makes a dedicated task. lean2rr's glue changed at the same step (see below) |
+| 14 | the drain-end hook `after_drain` (lean-runtime's fixes-14), with fixes of the single-thread scheduler (fixes-13, fixes-14), `sin` and `cos` as two calls (semantics-5), and two Lean runtime bugs that the crate no longer copies (io-fixes-2; LB-46, LB-47). lean2rr's glue changed at the same step (see below) |
 
-Status (2026-10-06): the submodule `third_party/lean-runtime` is pinned at
-`1d5d4d3`. `scripts/l2r.py` builds it with cargo (the features `io`,
+Status (2026-10-07): the submodule `third_party/lean-runtime` is pinned at
+`46c5731`. `scripts/l2r.py` builds it with cargo (the features `io`,
 `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`) and links
 it with `leanrt` ([runtime README](repo:runtime/README.md), "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline
@@ -349,3 +360,40 @@ list with each test: [Known differences](differences.html#lean-bugs-we-do-not-re
   A child that cannot start does not write the parent's pending output.
   Two descriptor leaks are closed. `Std.Internal.UV.System` takes ids and
   priorities whole.
+
+### The end of a free, and promise resolutions (step 14)
+
+- **The end of a free.** A stream that a free closes can give its last
+  bytes to a writer thread (above, "Input and output"). lean2rr calls the
+  crate's `after_drain` at the end of that free. When no other release of
+  the free is pending, the call comes right after the close. When other
+  releases are pending (a handle in an array, a list or a structure), the
+  call comes at the end of the drain that does them. The context waits for
+  its writer threads there, and the other contexts run, as natively the
+  close blocks the thread. At the end of a drain, the promise resolutions
+  that the drain put off run first. Each waits only for the writer threads
+  of the streams that the free closed before it reached the promise. Then
+  the context waits for the other writer threads. The free reaches the
+  elements of an array from the last, as natively. So a promise after a
+  handle in an array is resolved before the handle's close blocks, as
+  natively.
+- **The result of an IO primitive.** The generated code reads the result
+  of an IO primitive from a slot of leanrt, after the call. Each context
+  has its own slot: leanrt changes the slot at each switch, with the
+  stream cells. So when the primitive releases the last reference to a
+  handle and waits for its writer thread, the other contexts do not
+  change its result.
+- **Promise resolutions.** The generated resolution is one call of the
+  crate's `resolve`. The crate examines the promise and stores the value
+  after its wait, so a second resolution never replaces the first.
+- **`sync` dependents.** A `sync := true` dependent of a task that ends
+  during the wait of `depend` runs at once, in the call, as the caller's
+  code: Lean applies the function at once when the task has ended. A
+  `sync` bind task whose task ends during its wait continues at once, on
+  the thread of its first run.
+- **`sin` and `cos`.** The crate's `sin`, `cos`, `sinf` and `cosf` are
+  never inlined. So a sine and a cosine of one value stay two calls, as
+  natively. One `sincos` call can give another sine.
+- **IO** (LB-46, LB-47). A new `append` handle starts at the end of the
+  file, so `truncate` keeps the content. `EBADMSG` is
+  `inappropriateType`, as `IO.Error` documents.

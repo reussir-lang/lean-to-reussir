@@ -39,11 +39,19 @@
 //!   value. `IO.waitAny`'s generated loop is mapped onto lean-runtime's
 //!   `wait_any` (`wait_status`, `wait_progress`).
 //! - **Promises** hold the cell of their task; lean-runtime's promise id is
-//!   that task's. A promise dropped inside a free (whose walk runs Lean
-//!   code, which may block) is resolved, its cell's store included, once
-//!   the free is over (lean-runtime's deferred resolutions, core 3.3:
-//!   `defer`, then `run_deferred` at the drain's end, which Reussir reports
-//!   through its patch 40-a).
+//!   that task's. A resolution tests whether the promise is resolved and
+//!   stores its value inside lean-runtime's `resolve`, after that call's
+//!   writers point (`resolve_with`; review HR-01). A promise dropped inside
+//!   a free (whose walk runs Lean code, which may block) is resolved, its
+//!   cell's store included, once the free is over (lean-runtime's deferred
+//!   resolutions, core 3.3: `defer`, then `run_deferred` at the drain's
+//!   end, which Reussir reports through its patch 40-a).
+//! - **The drain's end** (`drained`, Reussir's drain-end hook): first the
+//!   deferred resolutions (`run_deferred`: each waits only for the writers
+//!   of the streams handed off before it, review RF14-07), then
+//!   lean-runtime's drain-end hook `after_drain` (the writer threads of the
+//!   other streams the context's closes handed off end, as natively the
+//!   close's `fclose` had returned; review HR-01..03).
 
 use lean_runtime::sched::{self as ls, Deferred, Job, Outcome, TaskId, TaskState};
 use std::cell::UnsafeCell;
@@ -474,7 +482,17 @@ fn set_id(i: u32, serial: u32, id: TaskId) {
 /// `dep` (just registered with `K_DEP`) was created depending on `src`
 /// (`sync`: with `sync := true`): lean-runtime's `depend` (Lean's
 /// `add_dep`). The generated code applies the function itself when `sync`
-/// and `src` has finished (`dependent_runs_now`). Returns 0.
+/// and `src` has finished (`dependent_runs_now`). `depend`'s writers point
+/// may let other contexts run, so `src` may finish after the generated
+/// code's test: lean-runtime then runs a `sync` dependent inside the call
+/// (its job, `run_job`, stores its value in the cell and frees its entry,
+/// so `set_id` finds no entry and the returned id is never kept), as Lean's
+/// fast path, the caller's code (`lean_task_map_core` applies the function
+/// at once when the source has finished; lean-runtime's reviews HR-02 and
+/// RF14-03). No reference into the entries is held
+/// across the call: the job may add entries. Returns 0 (the generated
+/// code's "run it now" answer, 1, is never given: such a dependent has run
+/// already).
 #[inline(never)]
 pub fn depend(src: usize, dep: usize, sync: bool) -> u64 {
     let Some(d) = find(dep) else { return 0 };
@@ -778,8 +796,8 @@ unsafe fn defer_promise_drop(cell: usize) -> bool {
 }
 
 /// The generated `l2r_promise_drop` resolves the promise with `none` unless
-/// it is resolved already (its cell's store, a publication, then
-/// lean-runtime's `resolve`, which walks its dependents), and releases the
+/// it is resolved already (lean-runtime's `resolve`, whose store sets the
+/// cell, then its walk of the dependents; `resolve_with`), and releases the
 /// promise's reference to its cell. Inside a free only for a resolved
 /// promise, where it is that release alone (`defer_promise_drop`).
 unsafe fn drop_promise_now(cell: usize) -> bool {
@@ -813,29 +831,47 @@ pub fn promise_cell(p: &LPromise) -> usize {
     p.downcast_ref::<Promise>().expect("leanrt: not a promise").cell
 }
 
-/// Promise `a` was resolved (the generated `l2r_promise_resolve_S` has
-/// stored `done(v)` in its cell, `v` being `some x` or, for a dropped
-/// promise, `none`): lean-runtime's `resolve`, which walks its dependents
-/// here. Never inside a free: a promise a free drops is resolved after it
-/// (`defer_promise_drop`), and no Lean code runs in a free; if it ever were
-/// (checked in debug builds), lean-runtime would put the walk off to the
+/// `IO.Promise.resolve`, and the resolution with `none` of a dropped
+/// promise (the generated `l2r_promise_resolve_S`, through the prelude's
+/// `l2r_promise_resolve_with`): if the promise whose task is `a` is
+/// unresolved, `store` stores the cell's `done(v)`, then lean-runtime walks
+/// its dependents here. The test and the store are made inside
+/// lean-runtime's `resolve`, which calls `store` only for an unresolved
+/// promise, after its writers point (lean-runtime docs/sched.md, "The
+/// glue", item 4): that point may let other contexts run, and one may
+/// resolve the promise meanwhile; only the first resolution counts (Lean's
+/// docs: "Only the first call to this function has an effect"). Review
+/// HR-01: the generated code tested the cell, then its store's publication
+/// let another context resolve the promise, and it stored over that
+/// resolution. The entry goes inside `store` too: until then another
+/// context's resolution finds it and resolves. A resolved promise (no
+/// entry) gives nothing, with no call. Never inside a free: a promise a
+/// free drops is resolved after it (`defer_promise_drop`), and no Lean code
+/// runs in a free; if it ever were (checked in debug builds), the store is
+/// made now (no context runs inside a free) and the walk is put off to the
 /// drain's end. Returns 0 (lean-runtime walks the dependents).
 #[inline(never)]
-pub fn resolve(a: usize) -> u64 {
+pub fn resolve_with(a: usize, store: &mut dyn FnMut()) -> u64 {
     let Some(i) = find(a) else { return 0 };
     let e = ent(i);
     if e.flags & PROMISE == 0 {
         return 0;
     }
     let id = e.id;
-    free_entry(i);
     if crate::drop::active() {
         debug_assert!(false, "leanrt: a promise resolved inside a free");
+        free_entry(i);
+        store();
         hook_drained();
         ls::defer(Deferred::Resolve(id));
         return 0;
     }
-    ls::resolve(id, || {});
+    ls::resolve(id, || {
+        if let Some(i) = find(a) {
+            free_entry(i);
+        }
+        store();
+    });
     0
 }
 
@@ -843,22 +879,47 @@ pub fn resolve(a: usize) -> u64 {
 /// drain that released something calls once it is over
 /// (`reussir_rt::drop::__reussir_drop_drained`, local Reussir patch 40-a,
 /// which lean2rr requires: `scripts/l2r.py` checks for it, and this
-/// reference does not link without it).
-fn hook_drained() {
+/// reference does not link without it). Installed at the first thing a
+/// free puts off to its end: an unresolved promise's resolution
+/// (`defer_promise_drop`) or a stream handle's close (`fs::FileHandle`'s
+/// drop), so a program with neither pays nothing at a drain's end.
+pub(crate) fn hook_drained() {
     let f: extern "C" fn() = drained;
     reussir_rt::drop::__reussir_drop_drained.store(f as *mut (), std::sync::atomic::Ordering::Relaxed);
 }
 
-/// A drain is over (`__reussir_drop_drained`, outside it): the resolutions
-/// put off inside it run, in order, on this context (lean-runtime's
-/// `run_deferred`; a free inside one of them resolves its own promises at
-/// its own end, before the next, as natively a free inside a dependent).
+/// A drain is over (`__reussir_drop_drained`, outside it), where a switch
+/// is allowed (Reussir calls it once the drain has ended, with nothing
+/// pending; every drain may put off a promise's resolution, whose
+/// dependents may block). In lean-runtime's order (docs/sched.md, "The
+/// glue", item 11):
+/// - first the resolutions put off inside the drain run, in order, on this
+///   context (lean-runtime's `run_deferred`; a free inside one of them
+///   resolves its own promises at its own end, before the next, as natively
+///   a free inside a dependent). Each waits for the writer threads of the
+///   streams the context handed off before it, and runs with those of the
+///   streams the drain closed after it still writing (review RF14-07): the
+///   drain reaches a container's elements from the last, as native's free,
+///   so a promise after a stream handle in an array is resolved before the
+///   handle's close, as natively before its `fclose` blocks;
+/// - then lean-runtime's drain-end hook (`after_drain`; review HR-01..03):
+///   the writer threads of the other streams this context's closes handed
+///   off end, the other contexts running meanwhile, as natively the close's
+///   `fclose` had returned before the free went on; so the code after the
+///   free reads what the other contexts did meanwhile, as natively. One
+///   relaxed load while no writer runs in the process; it waits for
+///   nothing in a no-suspend scope, while the context holds a stream lock,
+///   or while a panic unwinds.
 extern "C" fn drained() {
+    if crate::drop::active() {
+        return;
+    }
     // nothing queued: no out-of-line call (lean-runtime's count of pending
     // resolutions covers the queued ones; review RS6-04)
-    if !crate::drop::active() && ls::deferred_pending() {
+    if ls::deferred_pending() {
         ls::run_deferred();
     }
+    ls::after_drain();
 }
 
 /// Whether the promise whose task is `cell` has been resolved (no polling

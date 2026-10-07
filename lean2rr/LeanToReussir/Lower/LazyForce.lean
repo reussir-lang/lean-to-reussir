@@ -39,7 +39,13 @@ runs `f` (`g(())` gives the task it continues as). If that task has
 finished, so has this one, with its value (`task_bind_fn1`), and its
 dependents are walked on its thread; otherwise it waits for that task,
 keeping its priority and flags, and finishes as it (`l2r_task_bind_wait`;
-Lean re-adds it as a dependent). `get` is the state's forcing function. -/
+Lean re-adds it as a dependent). That task may finish after the test (the
+continuation's store is a publication, a writers point where other contexts
+run): `l2r_task_bind_wait` then gives lean-runtime the finished task, and
+lean-runtime runs a `sync` bind task's continuation at once on this thread
+and queues an async one, as Lean's `add_dep` (lean-runtime's review HR-02;
+before, it queued a `sync` one too). `get` is the state's forcing
+function. -/
 def taskBindStepFn (z get : String) : LowerM String := do
   let t := RR.Ty.box
   let name := s!"l2r_task_bindstep_{z}"

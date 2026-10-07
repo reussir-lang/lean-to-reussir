@@ -91,7 +91,9 @@ pub fn to_string32(x: f32) -> LStr {
 /// native Lean's direct call into libm (the wrapper, then lean-runtime's
 /// function). LLVM cannot see into them from Reussir code either. Remove
 /// these wrappers when lean-runtime marks the functions `#[inline(never)]`
-/// itself (agreed by lean-runtime's users).
+/// itself (agreed by lean-runtime's users): it does for `sinf` and `cosf`
+/// since its semantics-5 (review HF-01, with `sin` and `cos`), whose
+/// wrappers are gone (the prelude calls lean-runtime's functions directly).
 pub mod libm_call {
     use lean_runtime::semantics::libm;
 
@@ -114,14 +116,12 @@ pub mod libm_call {
         asinf(x) -> f32;
         asinhf(x) -> f32;
         atanf(x) -> f32;
-        cosf(x) -> f32;
         coshf(x) -> f32;
         expf(x) -> f32;
         exp2f(x) -> f32;
         logf(x) -> f32;
         log10f(x) -> f32;
         log2f(x) -> f32;
-        sinf(x) -> f32;
         sinhf(x) -> f32;
         tanf(x) -> f32;
         tanhf(x) -> f32;

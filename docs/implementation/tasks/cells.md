@@ -38,10 +38,11 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
 ### A store into a cell is a publication
 
 - **What:** `l2r_lcell_set` (a thunk's or task's value, a bind task's
-  continuation, a promise's resolution) first calls lean-runtime's
-  `sched::before_publish()`: the writer threads of the streams the running
-  context's drops handed off end first (one relaxed load when there is
-  none).
+  continuation) first calls lean-runtime's `sched::before_publish()`: the
+  writer threads of the streams the running context's drops handed off end
+  first (one relaxed load when there is none). A promise's resolution
+  stores inside lean-runtime's `resolve`, after that call's own writers
+  point (next entries).
 - **Why:** lean-runtime's glue duty (its `docs/sched.md`, "The glue",
   items 3, 7 and 11): natively the dropping thread was inside those
   streams' `fclose` until then, so whoever sees the value sees their bytes
@@ -95,19 +96,30 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
 
 - **What:** `IO.Promise α` (`lcAny` in mono code) is an `LPromise` holding
   the cell of a task over `Option Box`, whatever `α` is; lean-runtime's
-  promise id (`sched::promise_new`) is that task's. `resolve` stores
-  `some v` (only the first resolution counts) and then calls
-  lean-runtime's `resolve`, which walks the task's dependents on the
-  resolving thread; `result?` gives the task as it is (one task type);
+  promise id (`sched::promise_new`) is that task's. `resolve` is
+  lean-runtime's `resolve` (`l2r_promise_resolve_with`,
+  `task::resolve_with`): after its writers point, and only for an
+  unresolved promise, its store frees the promise's entry and stores
+  `done(some v)` in the cell (only the first resolution counts), then
+  lean-runtime walks the task's dependents on the resolving thread; the
+  old state is released after the walk. `result?` gives the task as it is (one task type);
   `result!` maps `Option.getOrBlock!` over it. Dropping the last reference
   to an unresolved promise resolves it with `none` (the runtime calls the
   program's `l2r_promise_drop_c`). `IO.Promise.new` during initialization
   is Lean's internal panic (lean-runtime's `PROMISE_BEFORE_MANAGER`).
 - **Why:** Typed and uniform code share one promise; native semantics
-  (`resolve_core`, `deactivate_promise`) (4f8f6f1).
+  (`resolve_core`, `deactivate_promise`) (4f8f6f1). The test and the store
+  are made inside lean-runtime's `resolve` (lean-runtime's glue item 4):
+  until switch step 14 the generated code tested the cell, then the
+  store's publication (a writers point) let another context resolve the
+  promise, and the store replaced that resolution (review HR-01, test
+  `RtHandOffResolveAgain`: "main sees (some 1)" where native's is
+  `some 2`). Lean's docs: "Only the first call to this function has an
+  effect".
 - **Where:** `Lower/Promises.lean`: `promiseTask`, `promiseResolveFn`,
-  `promiseExtern`; `runtime/leanrt/src/task.rs`: `promise_new`,
-  `promise_cell`, `resolve`.
+  `promiseExtern`; `runtime/prelude.rr`: `l2r_promise_resolve_with`;
+  `runtime/leanrt/src/task.rs`: `promise_new`, `promise_cell`,
+  `resolve_with`.
 - **Remove only if:** never.
 
 ### `Promise.result!` of a dropped promise blocks only its reader

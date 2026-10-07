@@ -1,0 +1,2 @@
+truncate after open: "+more"
+truncate with a pending byte: "keep\x00x"

@@ -105,7 +105,7 @@ and hot paths in `leanrt` and the prelude, which call lean-runtime for the
 rest.
 
 - **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
-  pinned at a commit of its `main` (now `1d5d4d3`). Clone lean2rr with
+  pinned at a commit of its `main` (now `46c5731`). Clone lean2rr with
   `git clone --recurse-submodules`, or run `git submodule update --init
   third_party/lean-runtime` in a checkout, and again after a checkout,
   merge or pull that moves the pin: git does not update a submodule on its
@@ -215,7 +215,9 @@ rest.
     on every target). Those four and the ones that hide their operands with
     `black_box` are called out of line (`leanrt::float::libm_call`, one call
     more than native Lean's direct libm call), so that a Lean loop calling
-    them stays a loop;
+    them stays a loop; `sin`, `cos`, `sinf` and `cosf` are out of line in
+    lean-runtime itself (`#[inline(never)]`), so a sine and a cosine of one
+    operand stay two calls, never one `sincos` (review HF-01);
   - `nat`, `int`, over `bignum`'s traits: every `Nat`/`Int` slow path
     (`leanrt::nat`, below: the prelude's inline small cases stay lean2rr's)
     is lean-runtime's rule on its words, with `leanrt::big`'s numbers as
@@ -312,7 +314,8 @@ rest.
     `running_worker`, `await_task` (`Task.get`'s rule in a `sync` task),
     `thread_create_failed` (libc++'s abort text when `main`'s thread
     cannot be made), the yield points `effect`, `poll`, `sleep_ms`,
-    `ref_read`, the publication `before_publish`), its contexts, the
+    `ref_read`, the publication `before_publish`, the drain-end hook
+    `after_drain`), its contexts, the
     per-context and per-task hooks of `Glue`, the
     no-suspend scope (`leanrt::task`, `sched`, `refs`, `drop`, `fs`:
     below, "Thunks and tasks", "The scheduler");
@@ -688,11 +691,16 @@ program that creates tasks (core 3.2, `leanrt::refs`), and the no-suspend
 scope: a stream handle's drop runs in `sched::no_suspend()`, where a
 dropped stream's flush hands what would wait to a writer thread, so no
 context is suspended inside a free (the free is the thread's,
-`reussir_rt::drop`). A promise dropped inside a free is resolved with
+`reussir_rt::drop`). At the end of the free that closed it (right after a
+close outside a drain when nothing is pending on the thread's stack of
+pending work, at the drain's end otherwise), the
+writer ends while the other contexts run (lean-runtime's drain-end hook
+`after_drain`, `fs::FileHandle`'s drop and `task::drained`), as natively
+the close's `fclose` returns before the free goes on. A promise dropped inside a free is resolved with
 `none`, its cell's store included, only once the free is over (core 3.3:
 when the free reaches it, in Lean's order, `task::defer_promise_drop` puts
 the resolution off with `defer`; the drain's end runs the resolutions in
-that order, on this context, with `run_deferred`), since its dependents
+that order, on this context, with `run_deferred`, before `after_drain`), since its dependents
 are Lean code that may block. Reussir reports every drain's end through
 `__reussir_drop_drained`, its local patch 40-a, which lean2rr requires:
 `scripts/l2r.py` stops with an error when the Reussir checkout lacks it,
@@ -776,9 +784,11 @@ question.
 promise's task (`leanrt::task::Promise`); lean-runtime's promise id is that
 task's: `l2r_promise_new<S>(c)` (lean-runtime's `promise_new`: Lean's
 internal panic before `main`), `l2r_promise_cell<S>(p)` (the task, a new
-reference), `l2r_promise_release(p)`, and `l2r_task_resolve_at(a)` after
-the generated code has stored the value (lean-runtime's `resolve`, which
-walks the dependents; inside a free, once it is over). When the last
+reference), `l2r_promise_release(p)`, and `l2r_promise_resolve_with<S>(c,
+v)`, the resolution (lean-runtime's `resolve`: after its writers point, and
+only for an unresolved promise, its store puts `v`, the `done` state, in
+the cell, as only the first resolution counts; then it walks the
+dependents; inside a free, once it is over). When the last
 reference to a promise goes, the runtime calls the program's
 `l2r_promise_drop_c(cell)` (a trampoline lean2rr exports), which resolves an
 unresolved promise with `none`. `l2r_option_get_or_block_none<T>()` is
@@ -788,8 +798,11 @@ lean-runtime's `option_get_or_block`, with Lean's forced panic message
 natively the calling thread does: the other tasks and `main` go on.
 
 **Fallible IO** (files, standard streams, processes): primitives record
-their outcome in a global last-error slot (`leanrt::fs`: nothing, or
-lean-runtime's `IoError`); the glue is
+their outcome in a last-error slot (`leanrt::fs`: nothing, or
+lean-runtime's `IoError`), each context's own (exchanged at each switch,
+`sched::LeanrtGlue::switched`: a primitive that releases a handle's last
+reference can switch while the close waits for the handle's writer; hunt
+HCO-01); the glue is
 
     let v = l2r_fs_open(path, modeIndex);
     l2r_io_finish(v, |v| EST.Out.ok(v), |kind| |errno| |fname| |details| mkError)

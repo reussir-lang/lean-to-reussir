@@ -18,8 +18,9 @@
 //! handle finalizer does; a handle released while a container is being freed
 //! closes when the free reaches it, in Lean's order (`crate::drop`).
 //!
-//! **Errors.** Every fallible primitive records its outcome in a global
-//! last-error slot: nothing, or lean-runtime's [`IoError`]. lean2rr's glue
+//! **Errors.** Every fallible primitive records its outcome in a
+//! last-error slot, each context's own (`LastError`, exchanged at each
+//! switch): nothing, or lean-runtime's [`IoError`]. lean2rr's glue
 //! checks [`ok`] after the call and otherwise builds the `IO.Error` from
 //! [`error_kind`] (which `lean_mk_io_error_*` builder: lean-runtime's
 //! `IoError::builder_index`, numbered as in runtime/README.md), [`errno`],
@@ -50,7 +51,16 @@ unsafe impl<T> Sync for Global<T> {}
 /// IO primitive (`l2r_io_ok`, inline in the program), `errno` on every
 /// error path (inline too), so both stay plain fields of the shape they had
 /// before lean-runtime's io (the program's code is unchanged).
-struct LastError {
+///
+/// Each context has its own: natively each call returns its own result, so
+/// the glue's `switched` exchanges the running context's outcome with the
+/// arriving one's (`swap_last`). A primitive whose arguments it releases
+/// after its `record` can switch there: a handle's last reference closes
+/// it, and the drain-end hook (`after_drain`) waits for its writer while
+/// the other contexts run (hunt HCO-01: the program then read another
+/// context's outcome).
+#[derive(Default)]
+pub(crate) struct LastError {
     failed: bool,
     /// The error's code; `USER_ERROR` for a user error, which has none.
     errno: i32,
@@ -69,6 +79,16 @@ static LAST: Global<LastError> =
 #[inline(always)]
 fn last() -> &'static mut LastError {
     unsafe { &mut *LAST.0.get() }
+}
+
+/// Exchange the running context's outcome with `saved` (the glue's
+/// `switched`: `saved` is the arriving context's, and gets the leaving
+/// one's). A context on a fresh id starts with a success; one on the id of
+/// a context that ended starts with that context's last outcome, which it
+/// never reads: every primitive records on each of its paths before the
+/// program reads the slot (review RHCO-01).
+pub(crate) fn swap_last(saved: &mut LastError) {
+    std::mem::swap(last(), saved);
 }
 
 #[inline]
@@ -192,15 +212,46 @@ pub struct FileHandle {
 }
 
 impl Drop for FileHandle {
+    /// The last reference's drop closes the stream (`close`). Then, as
+    /// natively the close's `fclose` has returned before the free goes on,
+    /// the writer thread its flush may have handed the rest of its output
+    /// to ends, while the other contexts run (lean-runtime's drain-end hook
+    /// `after_drain`, docs/sched.md, "The glue", item 11; review HR-01..03):
+    /// - released while a drain runs (a container's free, a record's below
+    ///   the first cell): closed when the free reaches it, in Lean's order
+    ///   (`crate::drop`); the drain's end calls the hook (`task::drained`,
+    ///   installed here);
+    /// - otherwise closed now. With nothing pending on the thread's stack of
+    ///   pending work, the free is over right after the close, and the hook
+    ///   is called there, where a switch is allowed (the drop of a handle's
+    ///   last reference is a release in generated code or in a runtime
+    ///   function's FFI body, with no runtime state borrowed; neither
+    ///   leanrt's state nor lean-runtime's holds a stream handle, so none is
+    ///   dropped inside the scheduler). With something pending (Reussir's
+    ///   drop glue releases a record's members that are not record boxes at
+    ///   once, after it has pushed the record boxes before them, and drains
+    ///   them before it returns), a switch would leave them on the thread's
+    ///   stack, where another context's drain would pop them (review
+    ///   RS14-01): the drained hook is installed instead, and the end of the
+    ///   glue's drain calls `after_drain`, with the stack empty.
+    ///
+    /// lean-runtime's hook waits for nothing in a no-suspend scope, while the
+    /// context holds a stream lock, or while a panic unwinds (then the
+    /// context's next writers point waits).
     fn drop(&mut self) {
-        if self.h.is_some() && crate::drop::active() {
-            // Released while a container is freed: closed when the free
-            // reaches it, in Lean's order (`crate::drop`).
-            let moved = Box::new(self.h.take());
+        let Some(h) = self.h.take() else { return };
+        if crate::drop::active() {
+            crate::task::hook_drained();
+            let moved = Box::new(Some(h));
             crate::drop::defer(Box::into_raw(moved) as usize, close_deferred);
             return;
         }
-        close(self.h.take());
+        close(Some(h));
+        if reussir_rt::drop::depth() == 0 {
+            lean_runtime::sched::after_drain();
+        } else {
+            crate::task::hook_drained();
+        }
     }
 }
 

@@ -1420,11 +1420,16 @@ fn l2r_int_sat_i64(b : Int) -> i64 {
 // ...): lean-runtime's `sem::libm`, glibc's results. Its inexact `Float32`
 // functions, `exp2` and `pow` take their operands through `black_box`, so
 // LLVM neither folds nor rewrites them (`pow x 0.5` as `sqrt`, an `f32` call
-// in double precision); the others fold to glibc's own results. The
-// `black_box` ones and lean-runtime's ports of glibc's `cbrt`, `cbrtf`,
-// `atanh`, `atanhf` are called out of line (`leanrt::float::libm_call`):
-// inlined, a `black_box` slot, and not inlined, a texture's packed
-// arguments, would stop LLVM from making a Lean loop that calls them a loop.
+// in double precision). `sin`, `cos`, `sinf` and `cosf` are never inlined
+// (lean-runtime's `#[inline(never)]`, review HF-01): a sine and a cosine of
+// one operand stay two calls, as natively, never one call of glibc's
+// `sincos`, whose sine can differ from `sin`'s; LLVM does not fold them
+// either. The others fold to glibc's own results. The `black_box` ones and
+// lean-runtime's ports of glibc's `cbrt`, `cbrtf`, `atanh`, `atanhf` are
+// called out of line (`leanrt::float::libm_call`; `sinf` and `cosf`, out of
+// line in lean-runtime, are called directly): inlined, a `black_box` slot,
+// and not inlined, a texture's packed arguments, would stop LLVM from making
+// a Lean loop that calls them a loop.
 #[ffi(import)]
 fn sin(x : f64) -> f64 [{ sem::libm::sin(x) }];
 #[ffi(import)]
@@ -1477,9 +1482,9 @@ fn atan2(y : f64, x : f64) -> f64 [{ sem::libm::atan2(y, x) }];
 fn pow(x : f64, y : f64) -> f64 [{ leanrt::float::libm_call::pow(x, y) }];
 
 #[ffi(import)]
-fn sinf(x : f32) -> f32 [{ leanrt::float::libm_call::sinf(x) }];
+fn sinf(x : f32) -> f32 [{ sem::libm::sinf(x) }];
 #[ffi(import)]
-fn cosf(x : f32) -> f32 [{ leanrt::float::libm_call::cosf(x) }];
+fn cosf(x : f32) -> f32 [{ sem::libm::cosf(x) }];
 #[ffi(import)]
 fn tanf(x : f32) -> f32 [{ leanrt::float::libm_call::tanf(x) }];
 #[ffi(import)]
@@ -2396,10 +2401,34 @@ fn l2r_promise_cell<S>(p : LPromise) -> LCell<S> [{
 #[ffi(import)]
 fn l2r_promise_release(p : LPromise) -> u64 [{ { drop(p); 0 } }];
 
-// Promise `a` was resolved (its cell is `done`): 1 if its dependents must be
-// walked now (`l2r_task_walk`).
+// Resolve the promise whose task is `c` with the state `v` (`done(some x)`,
+// or `done(none)` for a dropped promise) unless it is resolved already
+// (only the first resolution counts): lean-runtime's `resolve`
+// (`leanrt::task::resolve_with`), which tests the promise and calls the
+// store after its writers point, during which another context may resolve
+// it (review HR-01), then walks its dependents. The old state (the pending
+// one) is released after the walk, outside the store; `v`, when the promise
+// was resolved already. `c` is consumed (released here). Returns 0.
 #[ffi(import)]
-fn l2r_task_resolve_at(a : u64) -> u64 [{ leanrt::task::resolve(a as usize) }];
+fn l2r_promise_resolve_with<T>(c : LCell<T>, v : T) -> u64 [{
+    {
+        let mut c = c;
+        let a: usize = unsafe { ::std::mem::transmute_copy(&c) };
+        let mut v = Some(v);
+        let mut old = None;
+        leanrt::task::resolve_with(a, &mut || {
+            if let Some(v) = v.take() {
+                old = Some(unsafe { ::std::mem::replace(c.data_mut(), v) });
+            }
+        });
+        drop(c);
+        drop(v);
+        if let Some(old) = old {
+            leanrt::drop::release(old);
+        }
+        0
+    }
+}];
 
 // `Option.getOrBlock!` on `none`: Lean's forced panic message, then block
 // forever (as natively).
@@ -2662,7 +2691,10 @@ fn l2r_task_cancel_at(a : u64) -> u64 [{ { leanrt::task::cancel(a as usize); 0 }
 
 // Task `dep` (registered as a dependent) was created depending on task
 // `src`, with `sync := true` or not (for its start and its cancellation).
-// Returns 0 (1, the caller runs it now, is never answered).
+// A `sync` dependent whose source finished during the call (lean-runtime's
+// writers point, after the caller's test of `src`) has run inside it, its
+// value stored (lean-runtime's review HR-02). Returns 0 (1, the caller runs
+// it now, is never answered).
 #[ffi(import)]
 fn l2r_task_depend_at(src : u64, dep : u64, sync : bool) -> u64 [{ leanrt::task::depend(src as usize, dep as usize, sync) }];
 
@@ -3367,7 +3399,8 @@ fn l2r_io_process_get_pid() -> u32 [{ lean_runtime::io::env::get_pid() }];
 //
 // A handle (`IO.FS.Handle`, `lcAny` in mono code) is `LHandle`: a shared,
 // buffered file, closed when the last reference goes away. Fallible
-// primitives record their outcome in a global last-error slot; lean2rr's
+// primitives record their outcome in a last-error slot (each context's
+// own, exchanged at each switch); lean2rr's
 // glue for an `IO` extern calls the primitive, then
 //   l2r_io_finish(v, |v| EST.Out.ok(v), mkError)
 // where `mkError kind errno fname details` builds the `IO.Error` with the

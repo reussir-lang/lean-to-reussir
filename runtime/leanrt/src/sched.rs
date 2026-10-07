@@ -11,8 +11,9 @@
 //! - the one `unsafe` step of the switch (`Glue::suspend`, below);
 //! - what a thread owns natively and a context owns here: the current
 //!   standard streams of `IO.setStdout` & co. (lean2rr's mutable once-cells,
-//!   `once::CtxState`), set aside and given back at each switch
-//!   (`Glue::switched`); a pool task runs with the cells of its emulated
+//!   `once::CtxState`), and the outcome of the last IO primitive, which
+//!   the program reads after the call (`fs::LastError`), set aside and
+//!   given back at each switch (`Glue::switched`); a pool task runs with the cells of its emulated
 //!   worker (lean-runtime's `running_worker`), which keeps what the task
 //!   leaves, as a native worker thread keeps its streams (`Glue::task_begin`,
 //!   `task_end`); a dedicated task with a fresh stream context, which the
@@ -85,14 +86,20 @@ impl Glue for LeanrtGlue {
     /// Natively each thread has its own current standard streams: the
     /// leaving context's stream cells and saved stream contexts go to its
     /// record, the arriving context's come back from its own (empty for a
-    /// new context: its streams are rebuilt as the process's on first use).
+    /// context on a fresh id: its streams are rebuilt as the process's on
+    /// first use; a context on the id of one that ended gets what that one
+    /// left, which tasks keep empty: they run with a worker's set or a
+    /// fresh stream context). So does the outcome of its last IO
+    /// primitive, which its code reads after the call (`fs::LastError`,
+    /// hunt HCO-01; review RHCO-01 for a reused id).
     /// Moves values only: no Lean code, no call into the scheduler.
     fn switched(&self, from: CtxId, to: CtxId) {
         CTX_STATES.with(|m| {
             let mut m = m.borrow_mut();
-            let mut st = m.remove(&to).unwrap_or_default();
+            let (mut st, mut last) = m.remove(&to).unwrap_or_default();
             once::swap_ctx_state(&mut st);
-            m.insert(from, st);
+            crate::fs::swap_last(&mut last);
+            m.insert(from, (st, last));
         });
     }
 
@@ -173,8 +180,10 @@ enum TaskRun {
 }
 
 thread_local! {
-    /// The stream state of each suspended context (see `switched`).
-    static CTX_STATES: RefCell<HashMap<CtxId, once::CtxState>> = RefCell::new(HashMap::new());
+    /// The stream state and the last IO outcome of each suspended context
+    /// (see `switched`).
+    static CTX_STATES: RefCell<HashMap<CtxId, (once::CtxState, crate::fs::LastError)>> =
+        RefCell::new(HashMap::new());
     /// The tasks running on each context, innermost last (`Glue::task_begin`).
     static RUNS: RefCell<HashMap<CtxId, Vec<TaskRun>>> = RefCell::new(HashMap::new());
     /// The workers have ended (`Glue::workers_end`).

@@ -3320,7 +3320,8 @@ dependent that subscribes again), the `net` cases of LB-21 to LB-28,
 and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
 (LB-41), `process/failed_child_pending_stdout` (LB-42),
 `io/random_overflow_fd` (LB-43), `process/spawn_late_pipe_fails` (LB-44),
-`uvsys/uv_system` and `uvsys/rt_system` (LB-45))
+`uvsys/uv_system` and `uvsys/rt_system` (LB-45), `io/append_starts_at_end`
+(LB-46))
 - *LB-01, a concurrent `IO.Ref.set` can be lost*
   ([LB-01](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-01-a-concurrent-iorefset-can-be-lost);
   fixed upstream in Lean 4.35): natively `lean_st_ref_get` takes the value
@@ -3489,6 +3490,25 @@ and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
   2^31 - 1 is `ESRCH`, a priority outside -20 to 19 is `EINVAL`, and a gid
   above 2^32 - 1 names no group (`none`). `RtUvSysLimits`' values give the
   same answers both ways.
+- *LB-46, `truncate` right after an `append` open empties the file*
+  ([LB-46](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-46-truncate-right-after-an-append-open-empties-the-file)):
+  natively `IO.FS.Handle.mk path .append` opens with `O_APPEND`, and
+  glibc's `fdopen(fd, "a")` then leaves the cursor at 0, where
+  `IO.FS.Mode.append` documents it at the end of the file: writes still go
+  to the end, but `Handle.truncate` (to the cursor) deletes the whole
+  content. lean2rr opens files through lean-runtime's `Handle::open`
+  (`leanrt::fs::open_file`), which moves an `append` descriptor of a
+  regular file to its end before `fdopen`, as glibc's `fopen(path, "a")`
+  does; other descriptors (devices, FIFOs, terminals) keep native's
+  cursor. Test `RtFileAppendTruncate`.
+- *LB-47, `EBADMSG` is a protocol error or an unknown error*
+  ([LB-47](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-47-ebadmsg-is-a-protocol-error-or-an-unknown-error-where-ioerror-documents-an-inappropriate-type)):
+  natively `EBADMSG` (a file system's checksum failure) is
+  `protocolError` from a C library call and `otherError` from a libuv
+  call, where `IO.Error` documents `inappropriateType`. lean-runtime's
+  decoders give `inappropriateType` on both paths, with native's details.
+  No program can cause it on demand (a corrupted file system);
+  lean-runtime's decoding table checks it.
 - *LB-11, `Nat.pow` with an exponent of 2^32 or more*
   ([LB-11](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#limits);
   this and the next five are lean-bugs.md's "Limits", implementation caps
@@ -3534,6 +3554,42 @@ and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
   gives the empty array (`leanrt::array::check_capacity`; the prelude
   releases a big `Nat`). `Array.replicate` keeps native's ends. Tests
   `RtAllocBigNat`, `RtAllocOverflow`, `RtAllocOom`.
+
+**Runtime: Lean defects and candidates followed as native** (lean-runtime's
+[docs/lean-bugs.md](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md),
+"Lean library definitions", "Not bugs" and "Candidates": a defect of a Lean
+library definition that both translators compile as written, a behaviour
+judged not a bug, and suspected bugs that wait for a verdict or a native
+repro; until a verdict moves one to the list above, lean-runtime and lean2rr
+do what native does, and the tests expect native's outcome; LBC-06 is the
+one departure, where native builds no program at all)
+- *LB-48* (a Lean library definition): `IO.FS.writeFile` and
+  `writeBinFile` do not flush, so the content is written when the handle
+  is released, and a failure there (a full disk, `/dev/full`) is dropped:
+  the call has succeeded. lean2rr compiles the definitions, and the
+  handle's release drops the error, as natively.
+- *LB-49* (not a bug): `truncate` on an `append` handle with output
+  pending counts the pending bytes from the end, so the flush leaves a NUL
+  gap; glibc's behaviour, and `truncate`'s docstring says to flush first.
+  The second line of `RtFileAppendTruncate`.
+- *LBC-01 to LBC-05* (io candidates): `readDir`'s short list when
+  `readdir` fails, `putStr`'s lost line when a line-buffered flush fails,
+  `realPath`'s one error class, a `getLine` that drops the bytes it read
+  before `EAGAIN`, and the libuv path's `otherError` for the `errno`s that
+  libuv cannot name. lean2rr gets native's behaviour from lean-runtime's
+  `io`.
+- *LBC-06* (a compiler candidate; a lean2rr departure): natively a
+  program with an `initialize` constant of function type does not link
+  (the generated C calls the constant as a function it never defines), so
+  there is no native outcome to follow. lean2rr builds it: it stores the
+  function in the constant's cell and applies it at each use, the
+  program's evident meaning.
+- *LBC-07*: `Child.kill` sends `SIGKILL`, where its docstring says
+  `SIGTERM`; lean2rr sends `SIGKILL`, as natively (a killed child's status
+  is 137).
+- *LBC-08*: `osEnviron`'s failure path returns a `String` as its
+  `IO.Error`; in lean-runtime `osEnviron` cannot fail (it reads its own
+  copy of the environment), so lean2rr never reaches that path.
 
 **Compiler: Lean bugs we do not reproduce** (each judged a bug in Lean
 4.34.0's compiler: the source lines, the kernel's value of a minimal

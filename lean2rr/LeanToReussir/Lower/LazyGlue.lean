@@ -105,7 +105,13 @@ def newTask (taskTy : RR.Ty) (pure : Bool) (prio : RR.Expr) (body : RR.Expr → 
 task `src`, with `sync` (a `Bool` expression): recorded with
 `l2r_task_depend_at` (Lean's `add_dep`). The runtime never answers 1 (run
 it now): only `sync := true` runs a dependent on the current thread
-(lean-runtime's walk, or the generated code when `src` has finished). -/
+(lean-runtime's walk, or the generated code when `src` has finished). The
+caller tests `src` before the call, and the call's writers point may let
+`src` finish after that test: lean-runtime then runs a `sync` dependent
+inside the call (lean-runtime's review HR-02), and the answer is 0 still
+(nothing is run twice, and no `sync` task is queued). A map then holds its
+value on return; a bind whose function returned an unfinished task waits
+for that task, as after any run of its function. -/
 def taskDepend (z : String) (taskTy : RR.Ty) (c : RR.Expr) (src sync : RR.Expr) :
     LowerM RR.Block := do
   let get ← lazyGetFn z

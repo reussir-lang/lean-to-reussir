@@ -125,7 +125,9 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 ### Fallible IO uses a last-error slot and Lean's own error builders
 
 - **What:** A fallible IO primitive (files, file system, standard streams,
-  processes) records its outcome in a global last-error slot; the glue
+  processes) records its outcome in a last-error slot, each context's
+  own (one static, which the scheduler glue's `switched` exchanges with
+  the arriving context's at each switch: hunt HCO-01); the glue
   turns it into `EST.Out.ok` with the payload converted (unit, a handle,
   `Metadata`, an array of `DirEntry`) or into `EST.Out.error e`, with `e`
   built by Lean's exported `lean_mk_io_error_*` builder for the kind the
@@ -142,12 +144,16 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   (`decode_uv_error`) store the positive errno (4.33: libuv's negated
   code). leanrt's slot takes lean-runtime's `IoError` apart into the
   builder number (`fs::kind_of`), the code, the file name and the details
-  (switch step 3).
+  (switch step 3). The slot is each context's own because a primitive
+  can switch contexts after its `record`: when it releases a handle's
+  last reference, the close waits for the handle's writer thread (the
+  drain-end hook, switch step 14) while the other contexts run.
 - **Where:** `Lower/Externs.lean`: `fallibleIOGlue`, `fallibleIOPrim`,
   `ioFinish`, `ioCheck`, `ioErrorFn`, `ioErrorCtor`, `ioUserError`,
   `metadataOf`, `dirEntriesOf`; `Mono.lean`: `isFallibleIOSym`,
   `ioErrorBuilderSyms`, `ensureIOErrorBuilders`;
-  `runtime/leanrt/src/fs.rs` (`set_err`, `kind_of`, `errno`, `error_kind`,
+  `runtime/leanrt/src/sched.rs` (`switched`);
+  `runtime/leanrt/src/fs.rs` (`LastError`, `swap_last`, `set_err`, `kind_of`, `errno`, `error_kind`,
   `error_details`; unit test `fs_tests.rs`, every errno through the slot
   against native Lean);
   `runtime/README.md` ("Fallible IO", the table of error kinds); tests

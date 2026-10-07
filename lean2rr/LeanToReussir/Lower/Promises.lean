@@ -22,10 +22,14 @@ def promiseTask : LowerM (RR.Ty × String × RR.Ty) := do
 
 /-- `l2r_promise_resolve_S(c, v)`: resolve the promise task `c` with `v`
 unless it is resolved already (only the first resolution counts): its
-dependents are walked on this thread (Lean's `resolve_core`). Also
-`l2r_promise_drop(c)`, which the runtime calls (as the trampoline
-`l2r_promise_drop_c`) when the last reference to a promise goes: an
-unresolved promise is resolved with `none` (`deactivate_promise`). -/
+dependents are walked on this thread (Lean's `resolve_core`). The test and
+the cell's store are the runtime's, inside lean-runtime's `resolve`, after
+its writers point (`l2r_promise_resolve_with`): a test here, before that
+point, could see the promise unresolved while another context resolves it
+during the point, and the store would replace that resolution (review
+HR-01). Also `l2r_promise_drop(c)`, which the runtime calls (as the
+trampoline `l2r_promise_drop_c`) when the last reference to a promise goes:
+an unresolved promise is resolved with `none` (`deactivate_promise`). -/
 def promiseResolveFn : LowerM String := do
   let (cellTy, z, optTy) ← promiseTask
   let name := s!"l2r_promise_resolve_{z}"
@@ -34,12 +38,8 @@ def promiseResolveFn : LowerM String := do
     let u64 := RR.Ty.named "u64"
     -- The task's value is the `Option`, boxed.
     let bv ← coerce (.var "v") optTy RR.Ty.box
-    let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
-      lazyArm z "done" #[none] ⟨#[("z", some u64, .atom "0")], .var "z"⟩,
-      { ty := z, ctor := none, binders := #[], body := ⟨#[
-          ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[bv]]),
-          ("r", some u64, .call "l2r_task_resolve_at" #[] #[.call "l2r_lcell_addr" #[zt] #[.var "c"]]),
-          ("wk", some u64, .call "l2r_task_walk_if" #[] #[.var "r"])], .atom "0"⟩ }])
+    let body : RR.Block := .ofExpr
+      (.call "l2r_promise_resolve_with" #[zt] #[.var "c", .ctor z (some "done") #[bv]])
     let none' ← ctorValue optTy ``Option.none #[]
     return #[.fn name #[("c", cellTy), ("v", optTy)] u64 body,
       .fn "l2r_promise_drop" #[("c", cellTy)] u64 (.ofExpr (.call name #[] #[.var "c", none'])),

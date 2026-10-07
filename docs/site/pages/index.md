@@ -181,6 +181,12 @@ Merged from 2026-10-04 to 2026-10-07:
   error, `IO.Process.output` with a large input and a child that cannot
   start are correct (see
   [Runtime](runtime.html#lean-runtime-bugs-the-crate-no-longer-copies-step-13)).
+- **The end of a free, and promise resolutions** (step 14): at the end of
+  a free that closes a stream, the context waits for the stream's writer
+  thread, as natively the close waits; a promise resolution examines the
+  promise and stores the value in one step of the crate; `sin` and `cos`
+  stay two calls; a new `append` handle starts at the end of the file (see
+  [Runtime](runtime.html#the-end-of-a-free-and-promise-resolutions-step-14)).
 - **The extern rule** (above).
 - **`conv-liveness`**, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see [Optional passes](passes.html)).

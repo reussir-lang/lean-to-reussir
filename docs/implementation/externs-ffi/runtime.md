@@ -10,11 +10,19 @@ Paths are relative to the repository root.
   lean-runtime's `sem::libm::<name>`. Two groups are called through
   `leanrt::float::libm_call::<name>`, an `#[inline(never)]` wrapper of the
   same function: those whose operands lean-runtime hides with `black_box`
-  (`exp2`, `pow`, the inexact `Float32` functions, `atan2f`, `powf`), and
-  lean-runtime's ports of glibc's `cbrt`, `cbrtf`, `atanh`, `atanhf`
-  (glibc 2.39's aarch64 results; lean-runtime defines them on every target
-  since its 1c36a58, so leanrt's run-time panic for other targets is
-  gone).
+  (`exp2`, `pow`, the inexact `Float32` functions but `sinf` and `cosf`,
+  `atan2f`, `powf`), and lean-runtime's ports of glibc's `cbrt`, `cbrtf`,
+  `atanh`, `atanhf` (glibc 2.39's aarch64 results; lean-runtime defines
+  them on every target since its 1c36a58, so leanrt's run-time panic for
+  other targets is gone). `sin`, `cos`, `sinf` and `cosf` are
+  `#[inline(never)]` in lean-runtime itself since its semantics-5 (review
+  HF-01), and the textures call them directly (switch step 14 removed the
+  `sinf` and `cosf` wrappers, a second hop): a sine and a cosine of one
+  operand stay two calls, as natively, never one call of glibc's `sincos`,
+  whose sine is one ulp away from `sin`'s at ±0x1.ad1fb54442d18p+0 (with
+  lean-runtime 1d5d4d3, lean2rr inlined both into one block and called
+  `sincos`: test `RtFloatSinCosPair`, lean-runtime's case
+  `folding/sin_cos_one_operand`).
 - **Why:** One runtime for both translators (owner decision): lean2rr has
   no libm code of its own. Before, the prelude used LLVM's intrinsics,
   which LLVM folds or rewrites on a known operand, one ulp away from glibc
@@ -37,12 +45,13 @@ Paths are relative to the repository root.
   Rust's), `RtFloatLoopStack` (every libm function in loops on a 1 MiB
   stack), `tests/runtime/ffi-inline-check.sh` (no call through the FFI
   boundary and no `black_box` barrier in Reussir functions in those loops'
-  IR), the libm rows of `rows-check.sh`.
+  IR), the libm rows of `rows-check.sh`, `RtFloatSinCosPair` (the
+  `sincos` pair).
 - **Where:** `runtime/prelude.rr`: the libm section of `Float`;
   `runtime/leanrt/src/float.rs`: `libm_call`.
 - **Remove only if:** lean-runtime marks these functions
   `#[inline(never)]` itself (agreed by lean-runtime's users): then the textures call
-  `sem::libm` directly. Check `RtFloatLoopStack` and
+  `sem::libm` directly, as for `sinf` and `cosf`. Check `RtFloatLoopStack` and
   `ffi-inline-check.sh`.
 
 ### Strings, floats and fixed-width rules are lean-runtime's, through glue
@@ -509,7 +518,7 @@ Paths are relative to the repository root.
   task-area cases through lean2rr.
 - **Where:** `runtime/leanrt/src/sched.rs` (`on_finish`,
   `thunk_wait_busy`), `once.rs` (`claim_cold`, `set_raw`), `refs.rs`,
-  `task.rs` (`Promise`, `defer_promise_drop`, `resolve`, `hook_drained`,
+  `task.rs` (`Promise`, `defer_promise_drop`, `resolve_with`, `hook_drained`,
   `drained`, `settled`), `drop.rs` (`run`, `assert_not_in_free`);
   `scripts/l2r.py` (`check_reussir_patches`).
   Implementation notes: [../tasks/cells.md](../tasks/cells.md),
@@ -891,6 +900,76 @@ Paths are relative to the repository root.
   `float.rs`; lean-runtime's `src/semantics/string.rs` and
   `src/semantics/float.rs`.
 - **Remove only if:** never (speed only).
+
+### The drain-end hook, promise resolutions inside lean-runtime's `resolve`, and the crate's fixes (switch step 14)
+
+- **What:** lean-runtime pinned at `46c5731` (main: fixes-14 with its two
+  fix rounds merged onto `d93adb5`, which has io-fixes-2, fixes-13 and
+  semantics-5; the same tree as fixes-14's `0de7e51`, where the step was
+  tested). The glue changes:
+  - lean-runtime's new drain-end hook `sched::after_drain()` is called at
+    the end of every free that closes a stream handle: in `task::drained`
+    (Reussir's drain-end hook) after `run_deferred` (lean-runtime's order
+    since its RF14-07: each deferred resolution waits only for the writers
+    handed off before it), installed at the
+    first close a free puts off; and in `FileHandle`'s drop right after a
+    close made outside a drain, when nothing is pending on the thread's
+    stack of pending work (otherwise the close installs the hook, and the
+    drain that Reussir's drop glue runs before it returns waits at its end;
+    review RS14-01); since the close can switch contexts there, the
+    outcome of the IO primitive that released the handle (leanrt's
+    last-error slot) is each context's own, exchanged at each switch
+    (hunt HCO-01)
+    ([../tasks/scheduler.md](../tasks/scheduler.md#the-end-of-a-handles-free-waits-for-its-writer-lean-runtimes-drain-end-hook));
+  - a promise's resolution tests the promise and stores inside
+    lean-runtime's `resolve`, after its writers point: the generated
+    `l2r_promise_resolve_S` is one call of the prelude's
+    `l2r_promise_resolve_with` (`task::resolve_with`), which replaces
+    `l2r_task_resolve_at` and the generated test and store
+    ([../tasks/cells.md](../tasks/cells.md#a-promise-is-a-runtime-object-holding-a-task-over-option-box));
+  - the `sinf` and `cosf` wrappers of `libm_call` are gone (lean-runtime
+    makes them `#[inline(never)]`, with `sin` and `cos`);
+  - none for the rest: `depend` keeps its signature and runs a `sync`
+    dependent whose source finished during its writers point inside the
+    call (leanrt answers 0, the cell holds the value), a `sync` bind task
+    whose task finished meanwhile runs on at once (`bind_wait`'s
+    `RunNow`), `Std.Sync`'s try functions make a writers point
+    (lean-runtime's HR-02 and HR-03 halves); an `append` handle starts at
+    the end of the file (LB-46: lean2rr opens through `Handle::open`), and
+    `EBADMSG` is `inappropriateType` (LB-47); the single-thread
+    scheduler's exit, bind and timer fixes (fixes-13, AR-52, HU-01 to
+    HU-06) need no glue.
+- **Why:** reviews HR-01 to HR-03 (a hunt of lean2rr's references,
+  promises and thunks): a close hands its unwritten bytes to a writer
+  thread and returns, and the context waited for it only at its next
+  writers point, where other contexts run; glue code that read state
+  before that point acted on stale state. Natively the close's `fclose`
+  returns before the free goes on. The promise's test inside `resolve`
+  holds whatever comes between the test and the store; the drain-end hook
+  makes the state after a free native's. Lean's docs for
+  `IO.Promise.resolve`: "Only the first call to this function has an
+  effect".
+- **Tests:** the new runtime tests `RtHandOffResolveAgain` (HR-01),
+  `RtHandOffSyncMap` and `RtHandOffTreeSyncMap` (HR-02, a handle closed by
+  itself and one a free reaches), `RtHandOffTryLock` (HR-03),
+  `RtFloatSinCosPair` (HF-01), `RtFileAppendTruncate` (LB-46, with
+  expectation files) and `RtDeferredResolveBeforeHandOff` (RF14-07: hung
+  with `after_drain` before `run_deferred`), and `RtHandOffLastError`
+  (HCO-01: failed before the last-error slot was each context's own, in
+  both directions; passes on dev `393c739`, which has no wait there);
+  each of the first five failed on dev `393c739`
+  (lean-runtime `1d5d4d3`): "main sees (some 1)"; the panic and the lines
+  reversed; a hang (the try took the lock, the task waited for it);
+  `sincos`'s sine. With the new resolution and without the close's hook,
+  `RtHandOffResolveAgain` passes: the resolution alone holds.
+- **Where:** `runtime/leanrt/src/task.rs` (`drained`, `hook_drained`,
+  `resolve_with`, `depend`'s doc), `fs.rs` (`FileHandle`'s drop,
+  `LastError`, `swap_last`), `sched.rs` (`switched`),
+  `float.rs` (`libm_call`); `runtime/prelude.rr`
+  (`l2r_promise_resolve_with`, the libm comment, `sinf`, `cosf`);
+  `Lower/Promises.lean` (`promiseResolveFn`); lean-runtime's
+  `docs/sched.md` ("The glue", items 3, 4 and 11) and `docs/lean-bugs.md`.
+- **Remove only if:** never.
 
 ### Lean runtime bugs and a limit the crate no longer copies (switch step 13)
 

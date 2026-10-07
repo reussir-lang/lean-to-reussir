@@ -13,7 +13,19 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   there and then, on the finishing context, the
   others are queued; waiters wake at the end of the walk. `sync := true` on
   a finished task applies `f` at once in the calling thread (generated
-  code, as lean-runtime's `dependent_runs_now`). The `sync` dependents
+  code, as lean-runtime's `dependent_runs_now`). If the source finishes
+  after that test, during `depend`'s writers point, lean-runtime runs a
+  `sync` dependent inside `depend` (its job stores the value in the cell
+  and frees the entry, so leanrt keeps no id and answers 0: nothing runs
+  twice, and no `sync` task is queued). It runs as Lean's fast path, the
+  caller's code (`lean_task_map_core` applies the function at once when
+  the source has finished, as natively it had before the close that
+  delayed it here returned), so a `Task.get` in it prints the
+  "`Task.get` called from a `(sync := true)` task" panic only where the
+  caller is a `sync` task (lean-runtime's HR-02 and RF14-03, since switch
+  step 14; before, it queued the `sync` dependent, which later printed
+  that panic when it waited). leanrt holds no reference into its entries across
+  `depend`, where the job may add entries. The `sync` dependents
   run with the streams the task left: a pool task's walk comes after its
   job, with its worker's stream cells still installed; a dedicated task's
   comes inside its job, before the generated code closes its fresh stream
@@ -36,7 +48,13 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   generated code stores a continuation reading that task's value
   (`pending`) and calls `l2r_task_bind_wait`, and the task's job returns
   `Outcome::Continue`: lean-runtime makes it wait for that task, keeping
-  its priority and `sync` flag, and runs the continuation's job then.
+  its priority and `sync` flag, and runs the continuation's job then. The
+  task may finish after the generated test (the continuation's store is a
+  publication, where other contexts run): `bind_wait` then passes the
+  finished task (`TaskId::FINISHED`), and lean-runtime runs a `sync` bind
+  task's continuation at once, on the thread of its first run, and queues an async one
+  (lean-runtime's HR-02, since switch step 14; before, it queued the
+  `sync` one too).
 - **Why:** As Lean's `task_bind_fn1` (f9e06af; adv4 TK4-06, 5ec3ab9).
 - **Where:** `Lower/LazyForce.lean`: `taskBindStepFn`;
   `runtime/leanrt/src/task.rs`: `bind_wait`, `run_job`.
@@ -72,7 +90,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   task's drop then went onto the suspended free).
 - **Where:** `runtime/leanrt/src/drop.rs`: `run`, `assert_not_in_free`;
   `runtime/leanrt/src/fs.rs`: `FileHandle`'s drop, `close`;
-  `runtime/leanrt/src/task.rs`: `resolve`, `Promise` (`Drop`),
+  `runtime/leanrt/src/task.rs`: `resolve_with`, `Promise` (`Drop`),
   `defer_promise_drop`, `drop_promise_now`.
 - **Remove only if:** never.
 
@@ -83,7 +101,12 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   them (lean-runtime's `run_deferred`, core 3.3): Reussir reports the end
   of every drain that released something through `__reussir_drop_drained`
   (local Reussir patch 40-a), where `task::hook_drained` stores
-  `task::drained`. lean2rr requires the patch: `scripts/l2r.py` stops with
+  `task::drained`, which calls `run_deferred`, then lean-runtime's
+  drain-end hook `after_drain` (the writers of the streams the context
+  handed off end; each resolution waits only for those handed off before
+  it, review RF14-07:
+  [scheduler.md](scheduler.md#the-end-of-a-handles-free-waits-for-its-writer-lean-runtimes-drain-end-hook)).
+  lean2rr requires the patch: `scripts/l2r.py` stops with
   an error when the Reussir checkout lacks it, and leanrt names the symbol,
   so it would not link either. So the deferred list is empty whenever the
   context could block or switch, and nothing else runs it (the settle
@@ -119,7 +142,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   the context's next run of the list, and lean-runtime's debug builds report
   that (its R6).
 - **Where:** `runtime/leanrt/src/task.rs`: `Promise` (`Drop`),
-  `defer_promise_drop`, `resolve`, `hook_drained`, `drained`, `settled`;
+  `defer_promise_drop`, `resolve_with`, `hook_drained`, `drained`, `settled`;
   `scripts/l2r.py`: `REQUIRED_REUSSIR_PATCHES`, `check_reussir_patches`.
 - **Remove only if:** never. Remaining difference: the
   dependents see the rest of the container released too (plan
