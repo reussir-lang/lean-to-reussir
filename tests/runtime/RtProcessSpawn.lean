@@ -1,7 +1,9 @@
 /-! Runtime test: more child processes — a child that cannot execute or
-change directory first flushes the parent's pending stdout into its own
-stdout (natively `std::cerr` is tied to `std::cout`), which
-`IO.Process.output` captures; `wait` borrows the child, so an unread pipe
+change directory: natively it first flushes the parent's pending stdout
+into its own stdout (`std::cerr` is tied to `std::cout`), which
+`IO.Process.output` captures, so the bytes appear twice
+(`NAME.native.out`); lean2rr's child writes none of them
+(lean-runtime's LB-42; `NAME.l2r.out`); `wait` borrows the child, so an unread pipe
 stays open while it runs; `tryWait` after exit and after reaping; `kill`
 of a reaped child; `setsid` (the group is killed); `output` with input;
 `run` failures; a non-UTF-8 stdout (reported after `wait`); children in

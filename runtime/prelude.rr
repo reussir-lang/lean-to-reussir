@@ -117,9 +117,9 @@ fn l2r_uncaught_exception(msg : LStr) -> unit [{ leanrt::uncaught_exception(msg.
 
 // `lean_internal_panic` (lean-runtime's `sem::panic::InternalPanic`), by
 // code (no `str` arguments on hot paths): 0 unreachable code (also
-// lean2rr's `l2r_internal_panic_at<T>(0)`), 4 out of memory (an array
-// capacity that is not a word, as `sem::array::empty_with_capacity` answers
-// for 2^63 or more), 5 `sorry`.
+// lean2rr's `l2r_internal_panic_at<T>(0)`), 4 out of memory (no caller
+// since an array capacity that is not a word gives the empty array,
+// lean-runtime's LB-37), 5 `sorry`.
 #[ffi(import)]
 fn l2r_internal_panic(code : u64) -> u64 [{
     leanrt::lean_internal_panic(match code {
@@ -1724,14 +1724,14 @@ fn l2r_array_reverse<T>(v : RVec<T>) -> RVec<T> [{ leanrt::array::reverse(v) }];
 
 fn lean_mk_empty_array<T>() -> RVec<T> { l2r_array_empty<T>() }
 
-// A capacity's checks are lean-runtime's (`sem::array::empty_with_capacity`):
-// one that is not a Lean scalar (a big `Nat`, >= 2^63) is an out-of-memory
-// panic (code 4), the others are checked by `leanrt::array::
-// with_capacity_checked`; `elem` is the native element size (for Lean's
-// allocation-size checks).
+// A capacity is only a hint (lean-runtime's `sem::array::empty_with_capacity`,
+// LB-37): a capacity that cannot be reserved reserves nothing. One that is not
+// a Lean scalar (a big `Nat`, >= 2^63) is released and gives the empty array;
+// the others are checked by `leanrt::array::with_capacity_checked`; `elem` is
+// the native element size (for Lean's allocation-size checks).
 fn l2r_mk_empty_with_capacity<T>(n : Nat, elem : u64) -> RVec<T> {
     let x = l2r_nat_raw(n);
-    if (x & 1) == 1 { l2r_array_with_capacity<T>(x >> 1, elem) } else { l2r_internal_panic_at<RVec<T>>(4) }
+    if (x & 1) == 1 { l2r_array_with_capacity<T>(x >> 1, elem) } else { let d = l2r_nat_drop_raw(x); l2r_array_empty<T>() }
 }
 
 fn lean_mk_empty_array_with_capacity<T>(n : Nat) -> RVec<T> { l2r_mk_empty_with_capacity<T>(n, 8) }
@@ -1835,9 +1835,9 @@ fn lean_array_swap<T>(v : RVec<T>, i : Nat, j : Nat) -> RVec<T> {
 // `sem::array::replicate_len`, `l2r_replicate_len`): a big `n` that is a
 // `size_t` (2^63 <= n < 2^64) is the size asked for, and the byte size
 // `24 + 8n` then overflows (`integer overflow in runtime computation`);
-// 2^64 or more is `out of memory`. Unlike `Array.mkEmpty`, whose
-// `lean_mk_empty_array_with_capacity` is `out of memory` for every big
-// capacity (cross-test XT-5).
+// 2^64 or more is `out of memory`. Unlike `Array.mkEmpty`: natively out of
+// memory for every big capacity; lean2rr gives the empty array (LB-37;
+// cross-test XT-5).
 fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> { l2r_array_replicate(l2r_replicate_len(n), x) }
 
 // ---- Array Nat / Array Int ----
@@ -1907,9 +1907,10 @@ fn l2r_natarr_replicate(n : u64, x : Nat) -> LNatArr { l2r_natarr_replicate_word
 
 fn lean_mk_empty_natarr() -> LNatArr { l2r_natarr_empty() }
 
+// A big capacity gives the empty array, as `l2r_mk_empty_with_capacity`.
 fn lean_mk_empty_natarr_with_capacity(n : Nat) -> LNatArr {
     let w = l2r_nat_raw(n);
-    if (w & 1) == 1 { l2r_natarr_with_capacity(w >> 1) } else { l2r_internal_panic_at<LNatArr>(4) }
+    if (w & 1) == 1 { l2r_natarr_with_capacity(w >> 1) } else { let d = l2r_nat_drop_raw(w); l2r_natarr_empty() }
 }
 
 // Element `i`, which must be in bounds (checked; see `l2r_array_get`).
@@ -2044,9 +2045,10 @@ fn l2r_intarr_replicate(n : u64, x : Int) -> LIntArr { l2r_intarr_replicate_word
 
 fn lean_mk_empty_intarr() -> LIntArr { l2r_intarr_empty() }
 
+// A big capacity gives the empty array, as `l2r_mk_empty_with_capacity`.
 fn lean_mk_empty_intarr_with_capacity(n : Nat) -> LIntArr {
     let w = l2r_nat_raw(n);
-    if (w & 1) == 1 { l2r_intarr_with_capacity(w >> 1) } else { l2r_internal_panic_at<LIntArr>(4) }
+    if (w & 1) == 1 { l2r_intarr_with_capacity(w >> 1) } else { let d = l2r_nat_drop_raw(w); l2r_intarr_empty() }
 }
 
 // Element `i`, which must be in bounds (checked; see `l2r_array_get`).
@@ -2608,7 +2610,7 @@ fn l2r_lcell_swap<T>(c : LCell<T>, v : T) -> T [{
 
 // A new deferred task at priority `prio` (`kind`: 1 a pure task, 2 a
 // dependent, see `leanrt::task::register`), given to lean-runtime's
-// scheduler, which may run it at once (priority 2^32-1). Its job holds no
+// scheduler, which never runs it inside the call (LB-39). Its job holds no
 // reference: the program's last one releases the task (`leanrt::task`).
 // Returns 0 (1, the caller runs it now, is never answered).
 #[ffi(import)]
@@ -2642,7 +2644,7 @@ fn l2r_task_deleting() -> bool [{ leanrt::task::deleting() }];
 // A task starts running (for `IO.checkCanceled`, its state, its thread);
 // it leaves the queue, and the runtime's reference is dropped. 1: it runs
 // as on a worker thread, with stream cells of its own (`l2r_std_enter`);
-// 0: on the current thread (a `sync` dependent, priority 2^32-1).
+// 0: on the current thread (only a `sync := true` dependent).
 #[ffi(import)]
 fn l2r_task_begin<S>(c : LCell<S>) -> u64 [{
     {
@@ -2698,7 +2700,7 @@ fn l2r_task_cancel_at(a : u64) -> u64 [{ { leanrt::task::cancel(a as usize); 0 }
 
 // Task `dep` (registered as a dependent) was created depending on task
 // `src`, with `sync := true` or not (for its start and its cancellation).
-// 1: the caller runs it now (`src` finished, priority 2^32-1).
+// Returns 0 (1, the caller runs it now, is never answered).
 #[ffi(import)]
 fn l2r_task_depend_at(src : u64, dep : u64, sync : bool) -> u64 [{ leanrt::task::depend(src as usize, dep as usize, sync) }];
 

@@ -1,6 +1,10 @@
 /-! Runtime test: errno left by a successful `IO.FS.realPath` (glibc's
-realpath leaves EINVAL from readlink on non-symlink components), observed
-through a sticky error indicator on a read-only handle. -/
+realpath leaves EINVAL from readlink on non-symlink components). Natively
+it shows through a sticky error indicator on a read-only handle: the
+failed `putStr` sets it, and the later `getLine` reads its line and fails
+with whatever errno holds then (`NAME.native.out`). lean2rr's `getLine`
+clears the indicator first and reports only its own error (lean-runtime's
+LB-41), so it returns the line (`NAME.l2r.out`). -/
 
 def main (args : List String) : IO Unit := do
   let f := "rv-errno.txt"

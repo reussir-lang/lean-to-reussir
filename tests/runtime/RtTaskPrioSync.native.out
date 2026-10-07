@@ -1,0 +1,12 @@
+sync-priority task runs
+after asTask: finished, on main's thread 1
+spawn: finished 41
+source
+sync-priority dependent 1
+main after source
+main end
+first max
+prio 2^33+4
+prio 3
+prio 2
+prio 2^32+1

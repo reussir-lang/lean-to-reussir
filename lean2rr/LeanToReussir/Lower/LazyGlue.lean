@@ -49,8 +49,8 @@ def taskKind (pure dep : Bool) : Nat := (if pure then 1 else 0) + (if dep then 2
 initialization Lean has no task manager and runs it at once
 (`lean_task_spawn_core`); afterwards it is pending, and the runtime queues
 it (`kind`, see `taskKind`: a dependent is queued or made to wait by
-`l2r_task_depend_at` instead), or, at priority 2^32-1, has it run now, on
-the current thread. -/
+`l2r_task_depend_at` instead). The runtime never answers 1 (run it now):
+no priority runs a task on the current thread (lean-runtime's LB-39). -/
 def taskNewFn (z : String) (pure : Bool) (bind : Bool := false) : LowerM String := do
   let (_, t) ← lazyInfo z
   let tag ← taskTag z
@@ -100,8 +100,9 @@ def newTask (taskTy : RR.Ty) (pure : Bool) (prio : RR.Expr) (body : RR.Expr → 
 
 /-- The new dependent task `c : taskTy` (state type `z`) of task `src`
 (whose identity function is `srcAddr`), with `sync` (a `Bool` expression):
-recorded with `l2r_task_depend_at` (Lean's `add_dep`), and run now if the
-runtime says so (`src` finished, priority 2^32-1). -/
+recorded with `l2r_task_depend_at` (Lean's `add_dep`). The runtime never
+answers 1 (run it now): only `sync := true` runs a dependent on the current
+thread (lean-runtime's walk, or the generated code when `src` has finished). -/
 def taskDepend (z : String) (taskTy : RR.Ty) (c : RR.Expr) (srcAddr : String) (src sync : RR.Expr) :
     LowerM RR.Block := do
   let get ← lazyGetFn z
@@ -209,9 +210,10 @@ def taskWaitAnyFn (listTy : RR.Ty) (taskTy : RR.Ty) : LowerM String := do
     return #[.fn run #[("l", listTy), ("all", listTy)] t firstPending,
       .fn name #[("l", listTy), ("all", listTy)] t firstDone]
 
-/-- A task priority (`Task.Priority`, a `Nat`) for the runtime, which takes
-it modulo 2^32 as Lean's `lean_unbox(prio)` passed as an `unsigned`. -/
-def prioOf (p : RR.Expr) : RR.Expr := .call "lean_usize_of_nat" #[] #[p]
+/-- A task priority (`Task.Priority`, a `Nat`) for the runtime: the whole
+value, one of 2^64 or more saturated to `u64::MAX` (every priority above 8
+is a dedicated task; lean-runtime's LB-39: Lean cuts it to an `unsigned`). -/
+def prioOf (p : RR.Expr) : RR.Expr := .call "l2r_nat_sat" #[] #[p]
 
 /-- The glue of `lazyExtern`, on arguments that are variables. -/
 def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Array RR.Expr) :

@@ -129,17 +129,28 @@ entries here are how lean2rr's generated code reaches them.
   `before`; `Lower/Finish.lean`: `genPersist`.
 - **Remove only if:** lean2rr no longer generates the two passes.
 
-### Priorities are taken modulo 2^32, as an `unsigned`
+### A priority is the whole value; above 8 is a dedicated task
 
-- **What:** A priority is passed as Lean passes it
-  (`lean_usize_of_nat(prio)`); lean-runtime takes it modulo 2^32: 2^32-1
-  (`LEAN_SYNC_PRIO`) runs at once on the enqueuing thread (a dependent as
-  soon as its source finishes), 0 to 8 are the task manager's queues,
-  above 8 is a dedicated thread.
-- **Why:** Lean passes `lean_unbox(prio)` as an `unsigned` (adv4 TK4-03,
-  5ec3ab9).
-- **Where:** `Lower/LazyGlue.lean`: `prioOf`; lean-runtime's
-  `sched::task::priority`.
+- **What:** A priority is passed whole (`l2r_nat_sat(prio)`: its value,
+  `u64::MAX` for 2^64 or more). leanrt keeps a dependent's priority until
+  `depend` in its 40-byte entry as a `u32`, one of 2^32 or more as
+  `u32::MAX`, which is above 8 too. lean-runtime's rule: 0 to 8 are the task
+  manager's queues, every priority above 8 is a dedicated task (2^32-1,
+  2^32 to 2^32+8 and a big `Nat` included). No priority makes a task
+  `sync`: only `sync := true` does.
+- **Why:** `Task.Priority`'s documentation: "Tasks with a priority greater
+  than `Task.Priority.max` are scheduled on dedicated threads". Native Lean
+  passes `lean_unbox(prio)` as an `unsigned`, so 2^32-1 is `LEAN_SYNC_PRIO`
+  (the task runs at once on the enqueuing thread) and 2^32 to 2^32+8 are
+  pool priorities: lean-runtime's LB-39, which lean2rr does not reproduce
+  (switch step 13; before it, lean2rr took the priority modulo 2^32, adv4
+  TK4-03, and the low 64 bits of a big `Nat`). Example: `IO.asTask (prio
+  := 2^32 + 1)` while the one pool worker is busy runs at once on its own
+  context; natively it waits in queue 1. Tests `RtTaskPrioBig`,
+  `RtTaskPrioSync`.
+- **Where:** `Lower/LazyGlue.lean`: `prioOf`; `runtime/leanrt/src/task.rs`:
+  `Entry::prio`, `register`, `depend`; lean-runtime's
+  `sched::common::priority`.
 - **Remove only if:** never.
 
 ### `Task.get` in a `sync := true` task prints Lean's panic

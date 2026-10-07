@@ -98,8 +98,10 @@ struct Entry {
     /// serial, since entries and cell addresses are reused.
     serial: u32,
     flags: u16,
-    /// `Task.Priority` modulo 2^32, as lean-runtime takes it (a dependent,
-    /// until `depend`).
+    /// A dependent's `Task.Priority` until `depend` passes it to
+    /// lean-runtime: the value, or `u32::MAX` for one of 2^32 or more (every
+    /// priority above 8 is a dedicated task, so lean-runtime treats it as the
+    /// whole value; the entry stays 40 bytes).
     prio: u32,
     /// With `CONT`: a bind task whose function returned the unfinished task
     /// `cont`: it waits for it (`bind_wait`).
@@ -434,11 +436,12 @@ pub fn sleep_ms(ms: u32) {
     ls::sleep_ms(ms)
 }
 
-/// A new deferred task at priority `prio` (Lean's `Task.Priority`, as
-/// passed): `Task.spawn`/`IO.asTask` (lean-runtime's `spawn`), or a
-/// dependent (`K_DEP`: `depend` follows). lean-runtime may run it at once
-/// (priority `LEAN_SYNC_PRIO`): it has finished when this returns. Returns 0
-/// (the generated code's "run it now" answer, 1, is lean-runtime's now).
+/// A new deferred task at priority `prio` (Lean's `Task.Priority`, the
+/// whole value; a big `Nat` is `u64::MAX`): `Task.spawn`/`IO.asTask`
+/// (lean-runtime's `spawn`), or a dependent (`K_DEP`: `depend` follows).
+/// Every priority above 8 is a dedicated task (lean-runtime's LB-39).
+/// Returns 0 (the generated code's "run it now" answer, 1, is
+/// lean-runtime's now).
 #[inline(never)]
 pub fn register(cell: usize, tag: u64, prio: u64, kind: u64) -> u64 {
     let mut flags = 0;
@@ -448,7 +451,7 @@ pub fn register(cell: usize, tag: u64, prio: u64, kind: u64) -> u64 {
     if kind & K_DEP != 0 {
         flags |= DEP;
     }
-    let i = alloc(cell, tag as u32, flags, prio as u32);
+    let i = alloc(cell, tag as u32, flags, u32::try_from(prio).unwrap_or(u32::MAX));
     if kind & K_DEP != 0 {
         return 0;
     }
@@ -529,9 +532,13 @@ pub fn begin(cell: usize) -> u64 {
 /// which the generated code closes next (natively they run on its thread
 /// with the streams it left). Otherwise lean-runtime ends the task once the
 /// job returns: a pool task's worker cells and a `sync` task's thread stay
-/// installed until then. A job that runs inside `spawn` or `depend`, before
-/// they return, has no id yet: it ends when it returns, on the thread that
-/// ran it. Returns 0.
+/// installed until then. A job that runs before `spawn` or `depend` has
+/// returned has no id yet: it ends when it returns, on the thread that ran
+/// it. In lean2rr's single-thread build that is only a job of `spawn`
+/// without a task manager (during the module initializers, or with
+/// `LEAN_NUM_THREADS=0`), which runs inside the call; in lean-runtime's
+/// threads mode a worker thread can also start a job before `spawn` or
+/// `depend` returns. Returns 0.
 #[inline(never)]
 pub fn end(cell: usize) -> u64 {
     if let Some(i) = find(cell) {

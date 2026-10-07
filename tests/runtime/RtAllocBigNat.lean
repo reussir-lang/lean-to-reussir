@@ -11,6 +11,12 @@ on the size (`lean.h`, `object.cpp`):
   a small capacity overflows like `replicate` (`24 + elem * n`, elements of
   8 bytes, 1 for `ByteArray`) or fails to allocate (`out of memory`).
 lean2rr's `replicate` took the out-of-memory path for every big `Nat`.
+A capacity is only a hint (the Lean definitions give the empty array
+whatever it is): lean2rr's `mkEmpty`, `ByteArray.emptyWithCapacity` and
+`FloatArray.emptyWithCapacity` reserve nothing for a capacity that cannot
+be reserved and give the empty array (lean-runtime's LB-37, a lifted limit;
+`NAME.l2r.out`), where native ends as above (`NAME.native.out`);
+`replicate` ends as natively.
 The `.pipe` runs one allocation per process: the allocator and the size
 come from the command line. `Array Nat` and `Array Int` have their own
 representation in lean2rr (one word per element), so they are separate

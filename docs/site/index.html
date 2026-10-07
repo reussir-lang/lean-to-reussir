@@ -178,7 +178,7 @@ other results are the last recorded runs.</p>
 <tbody>
 <tr>
 <td>Runtime test suite</td>
-<td>342 programs† (3 marked <code>.xfail</code>†); at the last full run (2026-10-06), 336 of 337 identical to native Lean 4.34.0, some of them through expectation files; the other one is the <code>.xfail</code> test</td>
+<td>344 programs† (3 marked <code>.xfail</code>†); at the last full run (2026-10-06), 336 of 337 identical to native Lean 4.34.0, some of them through expectation files; the other one is the <code>.xfail</code> test</td>
 </tr>
 <tr>
 <td>Classic corpus</td>
@@ -236,6 +236,12 @@ other results are the last recorded runs.</p>
   copies lean-runtime's bytes. Instruction counts against step 11:
   liasolver −6.5%, strings −2.9% (see
   <a href="runtime.html#fast-paths-of-the-runtime-library-step-12">Runtime</a>).</li>
+<li><strong>Lean runtime bugs the crate no longer copies</strong> (step 13): a capacity
+  that cannot be reserved gives the empty array; every task priority
+  above 8 makes a dedicated task; <code>Float.scaleB</code>, <code>getLine</code> after an
+  error, <code>IO.Process.output</code> with a large input and a child that cannot
+  start are correct (see
+  <a href="runtime.html#lean-runtime-bugs-the-crate-no-longer-copies-step-13">Runtime</a>).</li>
 <li><strong>The extern rule</strong> (above).</li>
 <li><strong><code>conv-liveness</code></strong>, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see <a href="passes.html">Optional passes</a>).</li>

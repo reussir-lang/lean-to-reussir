@@ -164,7 +164,6 @@ garbage.
   stderr. So the panic's line can come inside the other text. Natively,
   the line comes after it. The bytes are the same. In a program without
   tasks, the line waits, as natively.
-- The `errno` after a sticky handle error can differ.
 - `ShareCommon.Object.eq` holds at most for the same cell.
 - The Windows-only time zone functions fail, as natively on other systems.
 

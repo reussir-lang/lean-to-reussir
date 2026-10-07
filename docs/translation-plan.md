@@ -2454,13 +2454,15 @@ resume. lean2rr's part is the task objects and the glue (`leanrt::task`,
   source, so a chain of dropped pure tasks goes, as natively. Any other
   task runs to completion (the glue keeps its cell), and its finish wakes
   nobody, as natively.
-- *Priorities.* Lean passes `lean_unbox(prio)` as an `unsigned`: the
-  priority is taken modulo 2^32. 2^32-1 is `LEAN_SYNC_PRIO`: such a task
-  runs as soon as it is enqueued, on the enqueuing thread; 0 to 8 are the
-  task manager's queues; above 8 is a dedicated thread.
+- *Priorities.* 0 to 8 are the task manager's queues; every priority
+  above 8 is a dedicated task, as `Task.Priority`'s documentation says.
+  lean2rr passes the whole priority, one of 2^64 or more as `u64::MAX`
+  (`l2r_nat_sat`). Natively Lean passes `lean_unbox(prio)` as an
+  `unsigned`: 2^32-1 is `LEAN_SYNC_PRIO`, a task that runs at once on the
+  enqueuing thread, and 2^32 to 2^32+8 are pool priorities (LB-39, §10).
 - *Dependents.* When a task finishes (its job returns, or a promise is
   resolved), lean-runtime walks its dependents from the newest
-  (`handle_finished`): a `sync := true` one (or at priority 2^32-1) runs
+  (`handle_finished`): a `sync := true` one runs
   there and then, on the finishing context, the others are queued; the
   waiters of finished tasks wake at the end of the walk. A bind task that
   has run `f` finishes at once if the task `f` returned has finished, and
@@ -2546,8 +2548,8 @@ resume. lean2rr's part is the task objects and the glue (`leanrt::task`,
   `running_worker`), which the worker keeps from one task to the next, as a
   native worker thread keeps its streams, and which are dropped at the task
   manager's finalization (as the workers' thread finalizers drop theirs). A
-  task that runs on the current thread (a `sync` dependent, priority
-  2^32-1) shares that thread's streams. `main`, on its own thread, starts
+  task that runs on the current thread (a `sync` dependent) shares that
+  thread's streams. `main`, on its own thread, starts
   with the process's streams whatever the initializers installed (§5.11).
   A task's `sync` dependents run with whatever streams the task left
   installed, as natively on its thread (a dedicated task ends inside its
@@ -3352,7 +3354,6 @@ Each item says what differs and when.
   suspended in the middle of its write, which only that thread resumes
   (review RS8-01: a hang ranks above the place of a line in an error
   path).
-- `errno` after a sticky handle error can differ.
 - Child processes (§5.8): code that reads one of a child's pipes in a task
   while it reads the other (as `IO.Process.output` does natively, stdout
   in the task; its glue here reads both together) deadlocks if the child
@@ -3388,7 +3389,12 @@ manager's, since lean2rr runs on lean-runtime's scheduler (switch step 4):
 `uvloop/signal_failed_next` (LB-19), `uvloop/*_in_sync_dependent` (LB-20,
 and LB-33, LB-34: a `stop` or `cancel` whose release runs a `sync`
 dependent that subscribes again), the `net` cases of LB-21 to LB-28,
-`tasks/dropped_promise_waiter_*` (LB-32))
+`tasks/dropped_promise_waiter_*` (LB-32), `tasks/big_priority_dedicated`
+(LB-39); and the `float/scaleb*` rows (LB-36), `process/output_large_input`
+and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
+(LB-41), `process/failed_child_pending_stdout` (LB-42),
+`io/random_overflow_fd` (LB-43), `process/spawn_late_pipe_fails` (LB-44),
+`uvsys/uv_system` and `uvsys/rt_system` (LB-45))
 - *LB-01, a concurrent `IO.Ref.set` can be lost*
   ([LB-01](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-01-a-concurrent-iorefset-can-be-lost);
   fixed upstream in Lean 4.35): natively `lean_st_ref_get` takes the value
@@ -3492,9 +3498,74 @@ dependent that subscribes again), the `net` cases of LB-21 to LB-28,
   (feature `startup-fds`) ends it with `INTERNAL PANIC: Failed to
   initialize event loop: too many open files`, status 1. Test
   `RtStartupFdExhausted`.
+- *LB-36, `Float.scaleB` with an `Int` outside the C `int` range*
+  ([LB-36](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-36-floatscaleb-and-float32scaleb-with-an-int-outside-the-c-int-range-give-00-for-a-nan-an-infinity--00-and-a-negative-value)):
+  natively the big-`Int` branch of `Float.scaleB x i` and `Float32.scaleB`
+  returns `+0.0` when `x == 0` or `i < 0`: a NaN, an infinity scaled
+  down, `-0.0` and a negative value scaled down lose their value or sign
+  (`(-1.5).scaleB (-(2^40))` is `0.000000`), with a step between -2^31 and
+  -2^31 - 1. lean2rr passes the `Int` saturated to `i64`
+  (`l2r_int_sat_i64`) to lean-runtime's `scaleb`, `scalbn` of the exponent
+  clamped to the `int` range: `x * 2^i` for every `Int` (`-0.000000`
+  there). Test `RtFloatScaleBBig`.
+- *LB-39, a task priority cut to 32 bits*
+  ([LB-39](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-39-a-task-priority-is-cut-to-32-bits-232---1-runs-the-task-at-once-on-the-spawning-thread-and-232-to-232--8-go-to-the-pool)):
+  natively `Task.spawn`, `Task.map`, `Task.bind`, `IO.asTask`,
+  `IO.mapTask` and `IO.bindTask` take the priority modulo 2^32: 2^32 - 1
+  runs the task at once on the spawning thread, as a `sync` task (a
+  `Task.get` in it prints the `sync` task panic), 2^32 to 2^32 + 8 go to
+  the pool, and a big `Nat` (2^63 or more) gives the bits of its pointer.
+  lean2rr passes the whole priority, one of 2^64 or more as `u64::MAX`
+  (`Lower/LazyGlue.lean`, `prioOf`), and lean-runtime makes every priority
+  above 8 a dedicated task, as `Task.Priority`'s documentation says.
+  Tests `RtTaskPrioBig`, `RtTaskPrioSync`.
+- *LB-40, `IO.Process.output` with an input waits for good*
+  ([LB-40](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-40-ioprocessoutput-with-an-input-waits-for-good-once-the-child-fills-a-pipe)):
+  natively `output` writes and flushes all of the input before it reads
+  the child's output, so a child that writes while it reads (`cat` with
+  more input than a pipe holds) and the program wait for each other for
+  good. lean-runtime's `output` writes the input while it reads both
+  output pipes, and closes the input's pipe once every byte is in; a
+  write error (`EPIPE` once the child has closed its standard input) still
+  ends `output` at once, as Lean's `putStr` error comes first.
+- *LB-41, after one stream error, every later `getLine` fails*
+  ([LB-41](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-41-after-one-stream-error-every-later-getline-fails-and-loses-its-line)):
+  natively a failed read or write on a handle (a write on a read-only
+  handle, a non-blocking descriptor's `EAGAIN`) sets its error indicator,
+  and every later `getLine` reads its line, then fails with whatever
+  `errno` holds: the line is lost. lean-runtime's `getLine` clears the
+  indicator first and reports only its own error; `read`, `putStr`,
+  `flush` and end of file are as natively. So no Lean program reads a
+  stale `errno`. Tests `RtErrnoRealpath`, `RtFifoErrnoRestore`,
+  `RtFiles2`.
+- *LB-42, a child that cannot start writes the parent's pending output
+  again*
+  ([LB-42](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-42-a-spawn-whose-child-cannot-start-writes-the-parents-pending-standard-output-a-second-time)):
+  natively a child that cannot execute its program or enter `cwd` writes
+  its copy of the parent's pending standard-output buffer before its
+  message (`std::cerr` is tied to `std::cout`), so the bytes appear twice,
+  and `IO.Process.output` returns them as the child's output. In lean2rr
+  the child writes none of them. Test `RtProcessSpawn` (`out ""`,
+  natively `out "pending\n"`).
+- *LB-43, LB-44, descriptor leaks*
+  ([LB-43](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-43-iogetrandombytes-of-a-size-whose-array-would-overflow-leaks-a-descriptor),
+  [LB-44](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-44-a-spawn-that-fails-at-a-later-pipe-leaks-the-pipes-made-before-it)):
+  natively `IO.getRandomBytes n` with an `n` whose array would overflow
+  fails with `ENOMEM` and leaves `/dev/urandom` open, and a spawn that
+  fails at a later `pipe2` leaves open the pipes it made. lean-runtime
+  closes them.
+- *LB-45, `Std.Internal.UV.System` cuts ids and priorities to 32 bits*
+  ([LB-45](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-45-stdinternaluvsystem-cuts-process-ids-group-ids-and-priorities-to-32-bits)):
+  natively `osGetPriority`, `osSetPriority` and `osGetGroup` pass their
+  `UInt64` id and `Int64` priority as a C `int` or a `gid_t`: pid 2^32 is
+  the calling process, priority 2^32 + 19 is 19 and accepted, gid 2^32 is
+  `root`'s group. lean-runtime takes them whole: a pid outside 0 to
+  2^31 - 1 is `ESRCH`, a priority outside -20 to 19 is `EINVAL`, and a gid
+  above 2^32 - 1 names no group (`none`). `RtUvSysLimits`' values give the
+  same answers both ways.
 - *LB-11, `Nat.pow` with an exponent of 2^32 or more*
   ([LB-11](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#limits);
-  this and the next four are lean-bugs.md's "Limits", implementation caps
+  this and the next five are lean-bugs.md's "Limits", implementation caps
   where Lean's definition has a value, which lean-runtime's rules compute
   wherever the result fits): natively `INTERNAL PANIC: Nat.pow exponent is
   too big`, whatever the base. lean2rr gives `0 ^ e = 0` and `1 ^ e = 1`
@@ -3526,6 +3597,17 @@ dependent that subscribes again), the `net` cases of LB-21 to LB-28,
   `INTERNAL PANIC: out of memory` (natively GMP's allocator prints its
   message and aborts, 134; the one-block numbers' known difference), GMP's
   own limbs in `pow` as natively. Test `RtLiftedLimits`.
+- *LB-37, a capacity that cannot be reserved*
+  ([LB-37](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-37-a-capacity-that-cannot-be-reserved-ends-mkempty-and-emptywithcapacity)):
+  natively `Array.mkEmpty c`, `Array.emptyWithCapacity c`,
+  `ByteArray.emptyWithCapacity c` and `FloatArray.emptyWithCapacity c` end
+  with `INTERNAL PANIC: out of memory` for a `c` of 2^63 or more or a
+  failed allocation, and with `integer overflow in runtime computation`
+  for an object size above 2^64 - 1. The Lean definitions give the empty
+  array whatever `c` is: lean2rr reserves nothing for such a capacity and
+  gives the empty array (`leanrt::array::check_capacity`; the prelude
+  releases a big `Nat`). `Array.replicate` keeps native's ends. Tests
+  `RtAllocBigNat`, `RtAllocOverflow`, `RtAllocOom`.
 
 **Diagnostics**
 - lean2rr's own impossibilities (a `Box` unwrap of another variant, a cast

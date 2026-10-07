@@ -167,6 +167,12 @@ Merged from 2026-10-04 to 2026-10-06:
   copies lean-runtime's bytes. Instruction counts against step 11:
   liasolver −6.5%, strings −2.9% (see
   [Runtime](runtime.html#fast-paths-of-the-runtime-library-step-12)).
+- **Lean runtime bugs the crate no longer copies** (step 13): a capacity
+  that cannot be reserved gives the empty array; every task priority
+  above 8 makes a dedicated task; `Float.scaleB`, `getLine` after an
+  error, `IO.Process.output` with a large input and a child that cannot
+  start are correct (see
+  [Runtime](runtime.html#lean-runtime-bugs-the-crate-no-longer-copies-step-13)).
 - **The extern rule** (above).
 - **`conv-liveness`**, the 17th optional pass: Stage 4 generates its
   helpers only for live code (see [Optional passes](passes.html)).

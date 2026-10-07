@@ -1,0 +1,3 @@
+put: invalid argument (error code: 9, bad file descriptor)
+realpath /usr/bin 0
+getLine: invalid argument (error code: 22, invalid argument)

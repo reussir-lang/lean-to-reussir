@@ -2,7 +2,8 @@
 subnormals, 1e±300, 2^53+1, the rounding boundaries of every integer width)
 through `toString`, `toBits`, `floor`/`ceil`/`round`/`abs`, saturating
 `toUInt8..64`/`toInt8..64`/`USize`/`ISize`, `frExp`, `toFloat32`, every libm
-function, `^`, `atan2`, `scaleB` (10, -1074, ±2^40, 2^31), NaN comparisons,
+function, `^`, `atan2`, `scaleB` (10, -1074; ±2^40 and 2^31, where native's
+result is wrong, lean-runtime's LB-36, in `RtFloatScaleBBig`), NaN comparisons,
 `max`/`min`; Float32 counterparts; `ofBits` of signalling and negative NaNs;
 `Float.ofNat`/`ofInt` up to 3^700. FSweep: the printing sweep (`%f`) of
 123456789e-(8..337) and 987654321e(0..329) and their Float32 casts, 60
@@ -36,7 +37,7 @@ def main : IO Unit := do
     IO.println s!"  u8 {x.toUInt8} u16 {x.toUInt16} u32 {x.toUInt32} u64 {x.toUInt64} usz {x.toUSize} i8 {x.toInt8} i16 {x.toInt16} i32 {x.toInt32} i64 {x.toInt64} isz {x.toISize}"
     IO.println s!"  frexp {x.frExp} toF32 {x.toFloat32} back {x.toFloat32.toFloat} sqrt {x.sqrt} cbrt {x.cbrt} exp {x.exp} exp2 {x.exp2} log {x.log} log2 {x.log2} log10 {x.log10}"
     IO.println s!"  sin {x.sin} cos {x.cos} tan {x.tan} asin {x.asin} acos {x.acos} atan {x.atan} sinh {x.sinh} cosh {x.cosh} tanh {x.tanh} asinh {x.asinh} acosh {x.acosh} atanh {x.atanh}"
-    IO.println s!"  pow2 {x ^ bf 2.0} pow.5 {x ^ bf 0.5} 2pow {(bf 2.0) ^ x} atan2 {Float.atan2 x (bf (-1.0))} {Float.atan2 (bf 0.0) x} scaleB10 {x.scaleB (bi 10)} scaleB-1074 {x.scaleB (bi (-1074))} scaleBbig {x.scaleB (bi (2^40))} {x.scaleB (bi (-(2^40)))} {x.scaleB (bi (2^31))}"
+    IO.println s!"  pow2 {x ^ bf 2.0} pow.5 {x ^ bf 0.5} 2pow {(bf 2.0) ^ x} atan2 {Float.atan2 x (bf (-1.0))} {Float.atan2 (bf 0.0) x} scaleB10 {x.scaleB (bi 10)} scaleB-1074 {x.scaleB (bi (-1074))}"
     IO.println s!"  cmp1 {decide (x < bf 1.0)} {decide (x ≤ bf 1.0)} {x == bf 1.0} {x != x} {x == x} max {max x (bf 1.0)} min {min x (bf 1.0)} {max (bf 1.0) x}"
     i := i + 1
   -- Float32

@@ -1,0 +1,12 @@
+sync-priority task runs
+after asTask: waiting, on main's thread 0
+spawn: waiting 41
+source
+main after source
+sync-priority dependent 1
+main end
+prio 2^32+1
+prio 2^33+4
+first max
+prio 3
+prio 2

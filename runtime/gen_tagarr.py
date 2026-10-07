@@ -80,9 +80,10 @@ fn l2r_{k}arr_reverse(a : {T}) -> {T} [{{ leanrt::tagvec::reverse(a) }}];
 EXTERNS = """
 fn lean_mk_empty_{k}arr() -> {T} {{ l2r_{k}arr_empty() }}
 
+// A big capacity gives the empty array, as `l2r_mk_empty_with_capacity`.
 fn lean_mk_empty_{k}arr_with_capacity(n : Nat) -> {T} {{
     let w = l2r_nat_raw(n);
-    if (w & 1) == 1 {{ l2r_{k}arr_with_capacity(w >> 1) }} else {{ l2r_internal_panic_at<{T}>(4) }}
+    if (w & 1) == 1 {{ l2r_{k}arr_with_capacity(w >> 1) }} else {{ let d = l2r_nat_drop_raw(w); l2r_{k}arr_empty() }}
 }}
 
 // Element `i`, which must be in bounds (checked; see `l2r_array_get`).

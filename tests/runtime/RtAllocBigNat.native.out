@@ -1,0 +1,90 @@
+INTERNAL PANIC: out of memory
+replicate 2305843009213693948: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicate 2305843009213693949: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicate 9223372036854775807: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicate 9223372036854775808: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicate 18446744073709551615: exit 1
+INTERNAL PANIC: out of memory
+replicate 18446744073709551616: exit 1
+INTERNAL PANIC: out of memory
+replicateNat 2305843009213693948: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateNat 2305843009213693949: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateNat 9223372036854775807: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateNat 9223372036854775808: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateNat 18446744073709551615: exit 1
+INTERNAL PANIC: out of memory
+replicateNat 18446744073709551616: exit 1
+INTERNAL PANIC: out of memory
+replicateInt 2305843009213693948: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateInt 2305843009213693949: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateInt 9223372036854775807: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateInt 9223372036854775808: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateInt 18446744073709551615: exit 1
+INTERNAL PANIC: out of memory
+replicateInt 18446744073709551616: exit 1
+INTERNAL PANIC: out of memory
+replicateFloat 2305843009213693948: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateFloat 2305843009213693949: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateFloat 9223372036854775807: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateFloat 9223372036854775808: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+replicateFloat 18446744073709551615: exit 1
+INTERNAL PANIC: out of memory
+replicateFloat 18446744073709551616: exit 1
+INTERNAL PANIC: out of memory
+mkEmpty 2305843009213693948: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+mkEmpty 2305843009213693949: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+mkEmpty 9223372036854775807: exit 1
+INTERNAL PANIC: out of memory
+mkEmpty 9223372036854775808: exit 1
+INTERNAL PANIC: out of memory
+mkEmpty 18446744073709551615: exit 1
+INTERNAL PANIC: out of memory
+mkEmpty 18446744073709551616: exit 1
+INTERNAL PANIC: out of memory
+mkEmptyNat 2305843009213693948: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+mkEmptyNat 2305843009213693949: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+mkEmptyNat 9223372036854775807: exit 1
+INTERNAL PANIC: out of memory
+mkEmptyNat 9223372036854775808: exit 1
+INTERNAL PANIC: out of memory
+mkEmptyNat 18446744073709551615: exit 1
+INTERNAL PANIC: out of memory
+mkEmptyNat 18446744073709551616: exit 1
+INTERNAL PANIC: out of memory
+floatArray 2305843009213693948: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+floatArray 2305843009213693949: exit 1
+INTERNAL PANIC: integer overflow in runtime computation
+floatArray 9223372036854775807: exit 1
+INTERNAL PANIC: out of memory
+floatArray 9223372036854775808: exit 1
+INTERNAL PANIC: out of memory
+floatArray 18446744073709551615: exit 1
+INTERNAL PANIC: out of memory
+floatArray 18446744073709551616: exit 1
+INTERNAL PANIC: out of memory
+byteArray 9223372036854775807: exit 1
+INTERNAL PANIC: out of memory
+byteArray 9223372036854775808: exit 1
+INTERNAL PANIC: out of memory
+byteArray 18446744073709551616: exit 1

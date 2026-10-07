@@ -1,6 +1,8 @@
 /-! Runtime test: `Float`/`Float32`: `toString` (printf `%f`), literals
 (`ofScientific`), arithmetic with NaN, inf and -0.0, comparisons, libm functions,
-bit casts, `scaleB`, conversions from `Nat`/`Int`. -/
+bit casts, `scaleB`, conversions from `Nat`/`Int`. (`scaleB` by an `Int`
+outside the C `int` range where native's result is wrong, lean-runtime's
+LB-36: `RtFloatScaleBBig`.) -/
 
 def vals (k : Nat) : List Float :=
   [0.0, -0.0, 1.0, -1.0, 0.1, 0.2, 0.3, 1.0/3.0, 2.0/3.0, 0.5, 1.5, 2.5, -2.5, 0.0078125, 1e-7, 5e-7,
@@ -31,7 +33,7 @@ def main (args : List String) : IO Unit := do
   IO.println s!"literals {(1.23456789 : Float)} {(123.456e10 : Float)} {(0.000001 : Float)} {(1e-320 : Float)} {(1.7976931348623159e308 : Float)} {(2.5e-324 : Float)}"
   IO.println s!"ofNat {(2^53 + 1).toFloat} {(2^64).toFloat} {(10^400).toFloat} {(123456789012345678901234567890 : Nat).toFloat}"
   IO.println s!"ofInt {Float.ofInt (-(2^70))} {Float.ofInt (-7)} ofScientific {Float.ofScientific 12345 true 2} {Float.ofScientific 12345 false 400} {Float.ofScientific 1 true 400}"
-  IO.println s!"scaleB big {(1.5 : Float).scaleB (2^40)} {(1.5 : Float).scaleB (-(2^40))} {(0.0 : Float).scaleB (2^40)} {(-1.5 : Float).scaleB (2^70)} {(-1.5 : Float).scaleB (-(2^70))}"
+  IO.println s!"scaleB big {(1.5 : Float).scaleB (2^40)} {(1.5 : Float).scaleB (-(2^40))} {(0.0 : Float).scaleB (2^40)} {(-1.5 : Float).scaleB (2^70)}"
   IO.println s!"f32 literals {(0.1 : Float32)} {(1e30 : Float32)} {(16777217 : Float32)} {(1.0 : Float32) / 3.0} {(3.0e38 : Float32) * 10.0}"
   IO.println s!"f32 ops {(2.0 : Float32).sqrt} {(0.5 : Float32).exp} {(10.0 : Float32).log} {Float32.ofBits 2143289344} {(1.5 : Float32).scaleB 10}"
   IO.println s!"toString {toString (2.0 : Float)} repr {repr (2.5 : Float)} {repr (0.0/0.0 : Float)} {repr (-1.0/0.0 : Float)}"

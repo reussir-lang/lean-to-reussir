@@ -181,9 +181,9 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   `lean_array_push` gives (its own, unless below `2 * size + 1`); other
   updates of a shared generic array copy it to its size (rounded up to 8
   bytes), while a tag vector keeps its capacity (`lean_copy_expand_array`);
-  `Array.mkEmpty` and `ByteArray.emptyWithCapacity` reserve what is asked,
-  after Lean's allocation checks; growing blocks take whole mimalloc
-  blocks.
+  `Array.mkEmpty` and `ByteArray.emptyWithCapacity` reserve what is asked
+  when it can be reserved (next section); growing blocks take whole
+  mimalloc blocks.
 - **Why:** A literal `#[a, b, c]` pushes onto a shared empty closed term of
   capacity 3: copied with capacity 0, it grew three times (PF4-08,
   a74072b). Capacities were capped at 2^24 elements, so large buffers grew
@@ -191,6 +191,41 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   a mimalloc size class wasted 35 MB growing a 10M-element `Array Nat`
   (de0352f).
 - **Where:** `runtime/leanrt/src/array.rs`, `tagvec.rs`.
+- **Remove only if:** never.
+
+### A capacity that cannot be reserved reserves nothing
+
+- **What:** `Array.mkEmpty c`, `Array.emptyWithCapacity c`,
+  `ByteArray.emptyWithCapacity c` and `FloatArray.emptyWithCapacity c`
+  (the `Array Nat`/`Array Int` tag vectors too) reserve `c` elements when
+  they can, and nothing otherwise, and give the empty array either way. A
+  big `Nat` (2^63 or more) is released and gives the empty array (the
+  prelude). Above 2^24 elements, `leanrt::array::check_capacity` takes
+  lean-runtime's rule (`sem::array::empty_with_capacity`: 0 when the object
+  size `24 + elem * c` is above 2^64 - 1 or `isize::MAX`), then reserves
+  nothing when the native allocation of that size would fail (a `mi_malloc`
+  probe, untouched, then freed). Example: `ByteArray.emptyWithCapacity
+  (2^62)` passes the rule, the probe fails, and the result is the empty
+  array with capacity 0. The probe is freed before the array's own
+  allocation, so a failure between the two (unreachable in practice: one
+  thread, the same size just reserved) would still end with `out of
+  memory`; a fallible allocation of the array itself needs fallible
+  versions of leanrt's block allocations (`array::alloc`, `tagvec::alloc`,
+  which end with `out of memory` on a null `mi_malloc`; an issue, not
+  done).
+- **Why:** the Lean definitions give the empty array whatever the
+  capacity: it is only a hint. Natively a capacity that cannot be reserved
+  ends the process (`INTERNAL PANIC: out of memory`, or `integer overflow
+  in runtime computation` for an object size above 2^64 - 1):
+  lean-runtime's LB-37, a lifted limit (switch step 13). `Array.replicate`
+  keeps native's ends (`check_alloc`): its size is the array's.
+- **Where:** `runtime/leanrt/src/array.rs`: `check_capacity`,
+  `capacity_slow`, `with_capacity_checked`; `tagvec.rs`: `with_capacity`;
+  `runtime/prelude.rr`: `l2r_mk_empty_with_capacity`,
+  `lean_mk_empty_natarr_with_capacity`,
+  `lean_mk_empty_intarr_with_capacity`. Tests `RtAllocBigNat`,
+  `RtAllocOverflow`, `RtAllocOom`; lean-runtime's rows `array/mkempty.*`,
+  `bytesempty.*`, `floatsempty.*` (`rows-check.sh`).
 - **Remove only if:** never.
 
 ### `Array T` inside `T`'s own fields

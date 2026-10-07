@@ -80,7 +80,7 @@ Paths are relative to the repository root.
 - **Remove only if:** lean2rr's representations change (the conversions
   follow them).
 
-### Huge array sizes panic with Lean's message for each allocator and size
+### Huge array sizes panic with Lean's message; a capacity reserves nothing
 
 - **What:** The sizes are lean-runtime's rules (`sem::array`): an
   allocation of more than 2^24 elements checks what Lean's allocation would
@@ -96,26 +96,28 @@ Paths are relative to the repository root.
     so 2^63 … 2^64 − 1 overflow, and 2^64 or more is `out of memory`;
   - `Array.mkEmpty`/`emptyWithCapacity`, `ByteArray.emptyWithCapacity` and
     `FloatArray.emptyWithCapacity` (`lean_mk_empty_*`, inline in `lean.h`)
-    are `out of memory` for every big `Nat` (`sem::array::
-    empty_with_capacity`: the prelude's tag test, then code 4 of
-    `l2r_internal_panic`, lean-runtime's `InternalPanic::OutOfMemory`; a
-    small capacity is checked by `leanrt::array::check_capacity`).
-  For small sizes the two agree: with 8-byte elements, 2^61 − 3 and up
+    never end the process: a capacity that cannot be reserved reserves
+    nothing, and the result is the empty array (lean-runtime's LB-37,
+    switch step 13; natively `out of memory` for every big `Nat` and the
+    `replicate` ends below): the prelude's tag test releases a big `Nat`,
+    and `leanrt::array::check_capacity` takes `sem::array::
+    empty_with_capacity` and a `mi_malloc` probe for a small one
+    ([../representations/arrays.md](../representations/arrays.md#a-capacity-that-cannot-be-reserved-reserves-nothing)).
+  For `replicate`'s sizes: with 8-byte elements, 2^61 − 3 and up
   overflow, 2^61 − 4 is `out of memory`.
 - **Why:** `replicate` took the `out of memory` path for every big `Nat`,
   where Lean overflows below 2^64 (cross-test XT-5, the `panics` fixture's
   row `array_replicate_nonscalar`; test `RtAllocBigNat`, which runs every
   allocator at the sizes around each boundary; `RtAllocOverflow`; and
   lean-runtime's `array/replicate.*`, `array/mkempty.*` rows through
-  `rows-check.sh`). The capacity's inline tag test and its panic call keep
-  the shape of the inline code at every `mkEmpty` (the panic does not
-  rejoin it).
+  `rows-check.sh`). The capacity's inline tag test keeps the inline code
+  at every `mkEmpty` small.
 - **Where:** `runtime/prelude.rr`: `lean_mk_array`,
   `l2r_mk_empty_with_capacity`, `l2r_replicate_len`, `l2r_internal_panic`;
   the generated `lean_mk_{nat,int}arr` and
   `lean_mk_empty_{nat,int}arr_with_capacity` (`runtime/gen_tagarr.py`);
   `runtime/leanrt/src/array.rs`: `check_alloc`, `check_capacity`,
-  `check_alloc_slow`, `with_capacity_checked`, `replicate`;
+  `check_alloc_slow`, `capacity_slow`, `with_capacity_checked`, `replicate`;
   `runtime/leanrt/src/tagvec.rs`: `with_capacity`, `replicate_word`;
   `runtime/leanrt/src/nat.rs`: `nat_replicate_len`.
 - **Remove only if:** never (the messages are observable).
@@ -893,6 +895,60 @@ Paths are relative to the repository root.
   `float.rs`; lean-runtime's `src/semantics/string.rs` and
   `src/semantics/float.rs`.
 - **Remove only if:** never (speed only).
+
+### Lean runtime bugs and a limit the crate no longer copies (switch step 13)
+
+- **What:** lean-runtime pinned at `1d5d4d3` (main: semantics-4, 33420fc;
+  io-fixes-1, 374f5b3; fixes-12, 1d5d4d3). The crate fixes LB-36
+  (`Float.scaleB` by an `Int` outside the C `int` range), lifts LB-37 (a
+  capacity that cannot be reserved), and fixes LB-39 (a task priority cut
+  to 32 bits), LB-40 to LB-44 (`IO.Process.output` with a large input,
+  `getLine` after a stream error, a failed spawn's duplicated output, two
+  descriptor leaks) and LB-45 (`Std.Internal.UV.System`'s ids cut to 32
+  bits). Three glue changes follow:
+  - `sem::array::empty_with_capacity` returns the capacity to reserve (0
+    when it cannot be reserved) instead of a `Result`: `leanrt::array::
+    check_capacity` returns it too, 0 also when the `mi_malloc` probe of
+    the native size fails, and `with_capacity_checked` and
+    `tagvec::with_capacity` reserve it; the prelude's
+    `l2r_mk_empty_with_capacity` and the tag vectors' versions release a
+    big `Nat` and give the empty array
+    ([../representations/arrays.md](../representations/arrays.md#a-capacity-that-cannot-be-reserved-reserves-nothing)).
+    `l2r_internal_panic`'s code 4 has no caller now.
+  - A task's priority is passed whole: `prioOf` is `l2r_nat_sat` (the
+    value, `u64::MAX` for 2^64 or more) instead of `lean_usize_of_nat`
+    (the low 64 bits), and leanrt's `register` passes it to `spawn` as it
+    is and keeps a dependent's until `depend` as a `u32` saturated at
+    `u32::MAX`, instead of its low 32 bits
+    ([../tasks/deferral.md](../tasks/deferral.md#a-priority-is-the-whole-value-above-8-is-a-dedicated-task)).
+  - None for the rest: the prelude passes `Float.scaleB`'s `Int` saturated
+    to `i64`, which the new `scaleb` clamps; `sys.rs` passes the whole ids
+    and priority to `io::uvsys`; the prelude routes a string position of
+    2^63 or more itself, so lean-runtime's new assertion in `utf8_next`,
+    `utf8_next_fast` and `utf8_prev` (a position below 2^63) holds.
+- **Why:** each of these is a Lean runtime bug or limit that the crate and
+  both translators do not copy (plan §10, "Runtime: Lean bugs we do not
+  reproduce"). Before the step, a dependent at priority 2^32 + 1 and every
+  task at 2^64 or more went to the pool (test `RtTaskPrioBig`, which
+  failed before the change).
+- **Tests:** leanrt's unit test `array::tests::capacities`; the new
+  runtime tests `RtTaskPrioBig` (every spawner at 2^32 + 1 and 2^64 while
+  the one pool worker is busy) and `RtFloatScaleBBig` (the big exponents
+  of `RtFloat` and `RtSweepFloat`, moved); expectation files where
+  lean2rr now differs from native: `RtAllocBigNat`, `RtAllocOverflow`,
+  `RtAllocOom` (LB-37), `RtTaskPrioSync`, `RtTaskPrioBig` (LB-39),
+  `RtErrnoRealpath`, `RtFifoErrnoRestore`, `RtFiles2` (LB-41),
+  `RtProcessSpawn` (LB-42), `RtFloatScaleBBig` (LB-36); lean-runtime's
+  rows through `rows-check.sh` (the `array/mkempty.*`, `bytesempty.*`,
+  `floatsempty.*` and `float/scaleb*` rows expect the definition's
+  result).
+- **Where:** `runtime/leanrt/src/array.rs` (`check_capacity`,
+  `capacity_slow`, `native_alloc_ok`, `with_capacity_checked`), `tagvec.rs`
+  (`with_capacity`), `task.rs` (`Entry::prio`, `register`, `depend`);
+  `runtime/prelude.rr` and `runtime/gen_tagarr.py` (the `mkEmpty`
+  externs); `Lower/LazyGlue.lean` (`prioOf`); lean-runtime's
+  `docs/lean-bugs.md`.
+- **Remove only if:** never.
 
 ### leanrt is built and linked with the shared crate lean-runtime
 

@@ -1,0 +1,6 @@
+b flush: error file too large (error code: 27)
+getLine: ok "abc\n"
+putStr: ok 
+read 4096: ok 4096 bytes
+b getLine: error file too large (error code: 27)
+exit 0

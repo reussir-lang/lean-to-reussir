@@ -1,0 +1,21 @@
+pending
+missing: code 255 out "" err "could not execute external process 'rt-process-spawn-no-such-command'\n"
+badcwd: code 255 out "" err "could not change directory to /rt-process-spawn-no-such-dir\n"
+env: code 0 out "[2][][unset]\n" err ""
+noinherit: code 0 out "ONLY=me\n" err ""
+signal: code 143 out "" err ""
+input: code 0 out "fed\n" err "done\n"
+late writer: 0
+tryWait running: none
+killed: 137
+tryWait after reap: no such thing (error code: 10, no such process)
+kill after reap: no such thing (error code: 3, no such process)
+polled: (some 7)
+group killed: 137
+grandchild: gone
+run failed: process 'sh' exited with code 3
+stderr:
+oops
+
+codes: [1, 2, 3]
+bad stdout: Tried to read from handle containing non UTF-8 data.

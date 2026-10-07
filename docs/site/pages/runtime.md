@@ -241,9 +241,10 @@ The switch steps:
 | 10 | no new part: speed (lean-runtime's perf-2). `Float.toString` computes its six decimals exactly with integers; the `Int` rules let lean2rr compute with a word and a big number without a block for the word. lean2rr's own runtime changed at the same step (see below) |
 | 11 | no new part: fixes in the signal watchers (lean-runtime's fixes-9 to fixes-11). A one-shot watcher gets one signal, as with `SA_RESETHAND` natively. lean2rr's own runtime changed at the same step (see below) |
 | 12 | no new part: speed (lean-runtime's perf-3). `Float.toString` gives its text as bytes; the character count of a new string takes eight bytes at a time. lean2rr's own runtime changed at the same step (see below) |
+| 13 | no new part: fixes of Lean runtime bugs that the crate no longer copies (lean-runtime's semantics-4, io-fixes-1 and fixes-12; LB-36, LB-37, LB-39 to LB-45). A capacity that cannot be reserved gives the empty array; every task priority above 8 makes a dedicated task. lean2rr's glue changed at the same step (see below) |
 
 Status (2026-10-06): the submodule `third_party/lean-runtime` is pinned at
-`2910ef7`. `scripts/l2r.py` builds it with cargo (the features `io`,
+`1d5d4d3`. `scripts/l2r.py` builds it with cargo (the features `io`,
 `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`) and links
 it with `leanrt` ([runtime README](repo:runtime/README.md), "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline
@@ -310,3 +311,25 @@ allocation asks for 16-byte alignment, and mimalloc can give it a larger
 block in a page of 8-byte size classes. Every later free in that page
 then takes a slower path. This cost goes up to 8% of monadic-interp's
 instructions.
+
+### Lean runtime bugs the crate no longer copies (step 13)
+
+lean-runtime fixes these bugs of Lean's runtime, and lean2rr follows (the
+list with each test: [Known differences](differences.html#lean-bugs-we-do-not-reproduce)):
+
+- **Capacities** (LB-37). `Array.mkEmpty c` and the `emptyWithCapacity`
+  functions reserve `c` elements when they can. Otherwise they reserve
+  nothing. The result is the empty array in both cases, as in the Lean
+  definitions. Natively a capacity that cannot be reserved ends the
+  process. `Array.replicate` keeps native's ends.
+- **Task priorities** (LB-39). lean2rr gives the whole priority to the
+  scheduler, and a priority of 2^64 or more becomes 2^64 - 1. Every
+  priority above 8 makes a dedicated task. Natively the priority is cut
+  to 32 bits: 2^32 - 1 runs the task at once on the spawning thread, and
+  2^32 + 1 is a pool priority.
+- **`Float.scaleB`** (LB-36) gives `x * 2^i` for every `Int`.
+- **IO** (LB-40 to LB-45). `IO.Process.output` writes a large input while
+  it reads the output. `getLine` reports only the error of its own call.
+  A child that cannot start does not write the parent's pending output.
+  Two descriptor leaks are closed. `Std.Internal.UV.System` takes ids and
+  priorities whole.

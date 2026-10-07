@@ -78,8 +78,8 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
     in the task's entry before anyone else gets it; not while a bind
     continuation is pending), so its `sync` dependents run inside its
     context;
-  - a task on the current thread (a `sync` dependent, priority 2^32-1)
-    shares that thread's cells.
+  - a task on the current thread (a `sync` dependent) shares that
+    thread's cells.
   When the task manager's finalization ends its standard workers
   (lean-runtime's `Glue::workers_end`: no pool task is queued or running
   any more, and the dedicated tasks are not waited for yet), the generated

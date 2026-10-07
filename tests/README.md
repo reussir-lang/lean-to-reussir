@@ -337,6 +337,8 @@ it draws on, with their copyright notices (Apache 2.0):
 | switch step 11: the last reference to a record is one pending cell of the free (a set, a pop and a reference set freeing structures whose fields hold structures and a list) | RtArraySetFreeNested |
 | switch step 11: a reference set that is the reference's last use frees the new value before the old one (runtime/README.md, Requests for lean2rr 33; expected to fail) | RtRefSetLastUse |
 | RS11-01 (review of switch step 11: below the first cell of a free, Reussir's glue releases a cell's last record field before a later array field that has already pushed its free; a Reussir patch; expected to fail) | RtNestedArrayFreeOrder |
+| switch step 13, lean-runtime's LB-39 (review RF12-02 of its fixes-12): a dependent kept its priority as 32 bits, so 2^32 + 1 was a pool priority, and a priority of 2^64 or more was its low 64 bits, 0 (expectation files: natively 2^32 + 1 is a pool priority) | RtTaskPrioBig |
+| switch step 13, lean-runtime's LB-36: `scaleB` by an `Int` outside the C `int` range, moved from RtFloat and RtSweepFloat (expectation files: natively `+0.0` for a NaN, an infinity, `-0.0` and a negative value scaled down) | RtFloatScaleBBig |
 | RSG-01 (review of fix-stdgen: the library's initializers ran before the program's, not at their module's place) | RtStartupInitOrder (companion module `StartupInitOrderDep`, `RtStartupInitOrder.deps`) |
 | RSG-02, RSG-03 (a program that uses the `Lean` package: `lean_initialize()` runs `Init`'s initializers first; natively an error there aborts) | RtStartupInitLeanPkg (expectation files for RSG-03, plan §10) |
 | RV8E-01, RV8E-02, RV8E-05, RV8E-06 (rv8/ext, branch lean-externs) | RtExternNames, RtExternLeanPkg |

@@ -106,7 +106,7 @@ and hot paths in `leanrt` and the prelude, which call lean-runtime for the
 rest.
 
 - **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
-  pinned at a commit of its `main` (now `2910ef7`). Clone lean2rr with
+  pinned at a commit of its `main` (now `1d5d4d3`). Clone lean2rr with
   `git clone --recurse-submodules`, or run `git submodule update --init
   third_party/lean-runtime` in a checkout, and again after a checkout,
   merge or pull that moves the pin: git does not update a submodule on its
@@ -227,7 +227,8 @@ rest.
     result fits (`Nat.pow` and `Nat.shiftLeft` by 2^32 or more,
     `Nat.shiftRight` of a huge value; LB-04, LB-11, LB-12);
   - `array`: the allocation sizes (`alloc_bytes`, `replicate_len`,
-    `empty_with_capacity`), `copySlice`'s plan (offsets and lengths of 2^64
+    `empty_with_capacity`: a capacity that cannot be reserved reserves
+    nothing, LB-37), `copySlice`'s plan (offsets and lengths of 2^64
     or more passed saturated, `l2r_nat_sat`: LB-06), the index-out-of-bounds
     message; the bounds tests themselves stay inline comparisons;
   - `panic`: `lean_panic_fn`'s plan (`panic_fn_plan`: the lines, the
@@ -623,8 +624,9 @@ included); a task lean-runtime still runs keeps its cell (the glue holds
 that last reference, and the job gets it). The generated code's primitives
 (unchanged from leanrt's own scheduler, so the program's code is the same):
 `l2r_task_register<S>(c, tag, prio, kind)` (a new task: lean-runtime's
-`spawn`, which may run it at once, at priority 2^32-1; `prio` as Lean passes
-it; `kind` 1 pure (`keep_alive` false), 2 a dependent: recorded until
+`spawn`; `prio` the whole priority, one of 2^64 or more passed as
+`u64::MAX`, every priority above 8 a dedicated task: LB-39; `kind` 1 pure
+(`keep_alive` false), 2 a dependent: recorded until
 `l2r_task_depend_at(src, dep, sync)`, which is `depend`), `l2r_task_begin<S>(c)`
 (1 when the task runs as on a worker thread, with stream cells of its own:
 lean-runtime's `Glue::task_begin`), `l2r_task_end<S>(c)` (its cell holds its
@@ -864,9 +866,10 @@ get/put areas and cached offset; `fwrite` (`_IO_new_file_xsputn`,
 line-buffered tails flushed at each newline), `fread` (`_IO_file_xsgetn`,
 including direct reads of whole blocks), `getc`, `fflush`, `fseek`
 (in-buffer seeks), `ftello`; `EBADF` for the wrong direction after the
-same mode switch; sticky end-of-file and error indicators (after any
-failed operation on a handle, `getLine` fails, as natively); reading a
-terminal first flushes a line-buffered stdout. The same system calls
+same mode switch; sticky end-of-file and error indicators (`getLine`
+clears the error indicator first and reports only its own error, LB-41:
+natively, after any failed operation on a handle, `getLine` fails);
+reading a terminal first flushes a line-buffered stdout. The same system calls
 happen in the same order, so the `errno`s are native's (lean-runtime keeps
 its own model of `errno`, `io::error::errno`). At exit (`io::exit`),
 stdout is flushed first (libc++'s `ios_base::Init`), then every `FILE`'s
@@ -1209,10 +1212,11 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   what remains different).
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
-- The `errno` reported by a handle's sticky error indicator (see file
-  primitives) is lean-runtime's model of it, set by every failing call it
-  models as the C call would; it may differ from native after unrelated
-  failing calls (the runtime's own calls are not libc++'s).
+- `getLine` reports only its own call's error (LB-41, plan §10): natively
+  a handle's sticky error indicator makes it fail with whatever `errno`
+  holds, which was the only way a Lean program could read a stale
+  `errno`. lean-runtime keeps its own model of `errno`, set by every
+  failing call it models as the C call would.
 - `IO.FS.createTempFile`/`createTempDir` with `TMPDIR` naming a missing
   directory report `no such file or directory` with an empty file name;
   natively `decode_uv_error` dereferences a null file name and crashes.

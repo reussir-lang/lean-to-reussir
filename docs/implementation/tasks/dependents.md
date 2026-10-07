@@ -9,8 +9,8 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
 - **What:** A task that waits for another (`mapTask`, `bindTask`,
   `Task.map`, `Task.bind`) is lean-runtime's dependent (`depend`). When its
   source finishes (its job returns, or a promise is resolved), lean-runtime
-  walks the source's dependents newest first: a `sync := true` one (or one
-  at priority 2^32-1) runs there and then, on the finishing context, the
+  walks the source's dependents newest first: a `sync := true` one runs
+  there and then, on the finishing context, the
   others are queued; waiters wake at the end of the walk. `sync := true` on
   a finished task applies `f` at once in the calling thread (generated
   code, as lean-runtime's `dependent_runs_now`). The `sync` dependents

@@ -1,8 +1,12 @@
-/-! Runtime test (with one native worker thread, `NAME.pipe`): Lean passes a
-task priority to its task manager as an `unsigned` (`lean_unbox(prio)`):
-modulo 2^32, and 2^32-1 is `LEAN_SYNC_PRIO`, which runs the task as soon as
-it is enqueued, on the enqueuing thread: an IO task or `Task.spawn` at
-once, in `main`, a dependent as soon as its source finishes. -/
+/-! Runtime test (with one native worker thread, `NAME.pipe`): native Lean
+passes a task priority to its task manager as an `unsigned`
+(`lean_unbox(prio)`): modulo 2^32, and 2^32-1 is `LEAN_SYNC_PRIO`, which
+runs the task as soon as it is enqueued, on the enqueuing thread (an IO
+task or `Task.spawn` at once, in `main`, a dependent as soon as its source
+finishes), and 2^32+1 and 2^33+4 are the pool's priorities 1 and 4
+(`NAME.native.out`). lean2rr passes the whole priority (lean-runtime's
+LB-39): each of them is above 8, a dedicated task, which runs on a context
+of its own and, at exit, before the pool's tasks (`NAME.l2r.out`). -/
 def ex (x : Except IO.Error Nat) : Nat := x.toOption.getD 999
 
 def stateStr : IO.TaskState → String

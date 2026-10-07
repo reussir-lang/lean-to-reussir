@@ -270,13 +270,11 @@ pub fn empty() -> LTagVec {
     alloc(0)
 }
 
-/// `Array.mkEmpty n`: Lean's allocation checks for a capacity
-/// (`array::check_capacity`), then the capacity asked for (natively
-/// reserved too; untouched pages cost no memory).
+/// `Array.mkEmpty n`: the capacity `array::check_capacity` gives (natively
+/// reserved too; untouched pages cost no memory), or none.
 #[inline(never)]
 pub fn with_capacity(n: u64) -> LTagVec {
-    crate::array::check_capacity(n, 8);
-    alloc(n as usize)
+    alloc(crate::array::check_capacity(n, 8))
 }
 
 /// `n` copies of a word that owns its reference (a big word: one reference

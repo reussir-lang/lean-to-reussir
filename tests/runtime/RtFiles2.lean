@@ -4,7 +4,11 @@
 * `realPath` failures are always "no such file or directory".
 * Paths with NUL bytes are invalid arguments, never successes.
 * Writing to a handle opened for reading (and reading from one opened for
-  writing) fails at once with `EBADF`.
+  writing) fails at once with `EBADF`. Natively the failed write also sets
+  the read handle's error indicator, so its next `getLine` reads the line
+  and fails with `EBADF` (`NAME.native.out`); lean2rr's `getLine` clears
+  the indicator first and reports only its own error (lean-runtime's LB-41),
+  so it returns the line (`NAME.l2r.out`).
 * Handle writes are buffered in `st_blksize` blocks as glibc does, so
   another reader sees the same prefix of the file.
 * End of file on `read`/`getLine`. -/

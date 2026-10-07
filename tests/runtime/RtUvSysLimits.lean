@@ -5,7 +5,9 @@ import Std.Internal.UV.DNS
 when it is empty, `osTmpdir` the first of `TMPDIR`, `TMP`, `TEMP`,
 `TEMPDIR` that is set, even empty; a value of `PATH_MAX` (4096) bytes or
 more is `ENOBUFS`, and so is a process title of 512 bytes or more;
-priorities outside [-20, 19] (after the cut to an `int`), `random` of more
+priorities outside [-20, 19] (natively after the cut to an `int`, in
+lean2rr whole, lean-runtime's LB-45: the same answers for these values),
+`random` of more
 than 0x7FFFFFFF bytes, and an empty host name or one of 256 bytes or more
 are rejected at once. `RtUvSysLimits.pipe` runs the program (mode `env`)
 under several environments, then with a long argument (room for a long

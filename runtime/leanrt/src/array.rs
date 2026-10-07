@@ -213,7 +213,7 @@ pub fn with_capacity<T: Clone>(n: usize) -> RVec<T> {
 }
 
 /// Allocations of more elements than this are checked against what the
-/// native allocation would do (`check_alloc_slow`) first.
+/// native allocation would do (`check_alloc_slow`, `capacity_slow`) first.
 pub const CHECK_THRESHOLD: u64 = 1 << 24;
 
 /// Lean's allocation of an array object of `n` elements of `elem` bytes
@@ -224,24 +224,54 @@ pub const CHECK_THRESHOLD: u64 = 1 << 24;
 #[inline(always)]
 pub fn check_alloc(n: u64, elem: u64) {
     if n > CHECK_THRESHOLD {
-        check_alloc_slow(n, elem, false)
+        check_alloc_slow(n, elem)
     }
 }
 
-/// `check_alloc` for a capacity (`Array.mkEmpty`, `emptyWithCapacity`):
-/// lean-runtime's rule for it (`sem::array::empty_with_capacity`: a
-/// capacity of 2^63 or more, which is not a Lean scalar, is `out of
-/// memory`), then the allocation.
+/// The capacity to reserve for `Array.mkEmpty n` and `emptyWithCapacity n`
+/// (`elem` bytes per element): lean-runtime's rule for it
+/// (`sem::array::empty_with_capacity`: `n`, or 0 when the object size
+/// `24 + elem * n` is above 2^64 - 1 or `isize::MAX`, every `n` of 2^63 or
+/// more among them), then 0 too when the native allocation of that size
+/// would fail. The capacity is only a hint: the Lean definitions give the
+/// empty array whatever `n` is, so no capacity ends the process
+/// (lean-runtime's LB-37; natively `out of memory` or `integer overflow in
+/// runtime computation`).
 #[inline(always)]
-pub fn check_capacity(n: u64, elem: u64) {
+pub fn check_capacity(n: u64, elem: u64) -> usize {
     if n > CHECK_THRESHOLD {
-        check_alloc_slow(n, elem, true)
+        capacity_slow(n, elem)
+    } else {
+        n as usize
     }
 }
 
 #[cold]
 #[inline(never)]
-extern "C" fn check_alloc_slow(n: u64, elem: u64, capacity: bool) {
+extern "C" fn check_alloc_slow(n: u64, elem: u64) {
+    match sem::array::alloc_bytes(elem, n) {
+        Err(p) => crate::lean_internal_panic(p),
+        Ok(bytes) if !native_alloc_ok(bytes) => {
+            crate::lean_internal_panic(sem::panic::InternalPanic::OutOfMemory)
+        }
+        Ok(_) => {}
+    }
+}
+
+#[cold]
+#[inline(never)]
+extern "C" fn capacity_slow(n: u64, elem: u64) -> usize {
+    match sem::array::empty_with_capacity(elem, n) {
+        0 => 0,
+        // `empty_with_capacity` has checked that this does not overflow.
+        c if native_alloc_ok(sem::array::ARRAY_HEADER_BYTES + elem * c as u64) => c,
+        _ => 0,
+    }
+}
+
+/// Would the native allocation of an object of `bytes` bytes succeed? It is
+/// only reserved, not touched, so this costs no memory.
+fn native_alloc_ok(bytes: u64) -> bool {
     // Lean allocates big objects with mimalloc too.
     extern "C" {
         #[link_name = "mi_malloc"]
@@ -249,34 +279,21 @@ extern "C" fn check_alloc_slow(n: u64, elem: u64, capacity: bool) {
         #[link_name = "mi_free"]
         fn free(p: *mut std::ffi::c_void);
     }
-    let checked = if capacity {
-        sem::array::empty_with_capacity(elem, n).map(|_| ())
-    } else {
-        sem::array::alloc_bytes(elem, n).map(|_| ())
-    };
-    if let Err(p) = checked {
-        crate::lean_internal_panic(p)
-    }
-    // Both rules have checked that this does not overflow.
-    let bytes = sem::array::ARRAY_HEADER_BYTES + elem * n;
-    // Would the native allocation succeed? (It is only reserved, not
-    // touched, so this costs no memory. `black_box` keeps the compiler from
-    // eliding the malloc/free pair.)
+    // `black_box` keeps the compiler from eliding the malloc/free pair.
     let p = std::hint::black_box(unsafe { malloc(std::hint::black_box(bytes as usize)) });
     if p.is_null() {
-        crate::lean_internal_panic(sem::panic::InternalPanic::OutOfMemory)
+        return false;
     }
     unsafe { free(p) };
+    true
 }
 
 /// `Array.mkEmpty n` (and the scalar-array variants, `elem` bytes per
-/// element): Lean's allocation checks (`check_capacity`), then the capacity
-/// asked for, as natively (reserved address space: untouched pages cost no
-/// memory).
+/// element): the capacity `check_capacity` gives, as natively (reserved
+/// address space: untouched pages cost no memory), or none.
 #[inline(never)]
 pub fn with_capacity_checked<T: Clone>(n: u64, elem: u64) -> RVec<T> {
-    check_capacity(n, elem);
-    alloc(n as usize)
+    alloc(check_capacity(n, elem))
 }
 
 #[inline]
@@ -1009,5 +1026,37 @@ mod tests {
         assert!(ref_ptr_eq(r.clone(), r.clone()));
         drop((t, r));
         take_log();
+    }
+
+    /// `mkEmpty`'s capacity (lean-runtime's LB-37): the capacity asked for
+    /// while it can be reserved, else none; never an end. A byte array of
+    /// 2^62 passes lean-runtime's size rule, and the native allocation's
+    /// probe fails; the other big ones fail the rule (an object size above
+    /// 2^64 - 1 or `isize::MAX`).
+    #[test]
+    fn capacities() {
+        assert_eq!(check_capacity(0, 8), 0);
+        assert_eq!(check_capacity(3, 8), 3);
+        assert_eq!(check_capacity(CHECK_THRESHOLD, 8), CHECK_THRESHOLD as usize);
+        assert_eq!(check_capacity(1 << 25, 8), 1 << 25);
+        let unreservable = [
+            (1 << 62, 1),
+            ((1 << 61) - 4, 8),
+            ((1 << 61) - 3, 8),
+            ((1 << 63) - 1, 8),
+            (1 << 63, 1),
+            (u64::MAX, 8),
+            (u64::MAX, 1),
+        ];
+        for (n, elem) in unreservable {
+            assert_eq!(check_capacity(n, elem), 0, "{n} elements of {elem} bytes");
+        }
+        let a: RVec<u64> = with_capacity_checked(1 << 63, 8);
+        assert_eq!((size(&a), cap(&a)), (0, 0));
+        let b: RVec<u8> = with_capacity_checked(1 << 62, 1);
+        assert_eq!((size(&b), cap(&b)), (0, 0));
+        let c: RVec<u64> = with_capacity_checked(1 << 25, 8);
+        assert_eq!(size(&c), 0);
+        assert!(cap(&c) >= 1 << 25);
     }
 }

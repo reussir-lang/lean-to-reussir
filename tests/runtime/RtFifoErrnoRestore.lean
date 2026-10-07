@@ -3,10 +3,13 @@ pending output cannot be written. On a FIFO opened `readWrite` and read
 ahead, lean2rr's write-out before a direct read (LB-02) seeks back over the
 read-ahead, which fails with `ESPIPE`; the bytes are dropped and the read
 goes on, as natively, and `errno` must be left as it was: native's direct
-read makes no seek. A later error report that reads `errno` shows it:
-`getLine` on a handle whose error indicator is set (here by a write beyond
-the file size limit, `EFBIG`) reports the current `errno`, natively 27
-(lean2rr reported 29). `RtFifoErrnoRestore.pipe` ignores `SIGXFSZ`, sets
+read makes no seek. Natively a later error report that reads `errno`
+shows it: `getLine` on a handle whose error indicator is set (here by a
+write beyond the file size limit, `EFBIG`) reports the current `errno`, 27
+(`NAME.native.out`; lean2rr reported 29). lean2rr's `getLine` clears the
+indicator first and reports only its own error (lean-runtime's LB-41), so
+it reads the line (`NAME.l2r.out`), and no Lean program sees that `errno`
+any more. `RtFifoErrnoRestore.pipe` ignores `SIGXFSZ`, sets
 `ulimit -f 1` (1024 bytes) and passes a FIFO made with `mkfifo` in a
 `mktemp -d` directory; the FIFO never holds more than one page. -/
 
