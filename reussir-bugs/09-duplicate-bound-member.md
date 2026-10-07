@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0009, applied in `./reussir` (`l2r-local` cc8e5aa5), which also fixes
+**Kind:** bug. **Status:** patched (09-a, applied in `./reussir` (`l2r-local` cc8e5aa5), which also fixes
 [bug 14](14-member-consumed-before-release.md)).
 
 When a match arm binds a constructor's fields, Reussir retains each bound
@@ -19,7 +19,7 @@ per field, still unused at the release. Two shapes broke the count:
   The retain's reference was already gone.
 
 Either way a field ends up with one reference too few, and is freed while
-still in use (use after free). Patch 0009 fuses at most one retain per
+still in use (use after free). Patch 09-a fuses at most one retain per
 field, and fuses nothing when a bound field is consumed before the
 release.
 
@@ -139,10 +139,10 @@ field used twice or stored in a dead value.
 ## Patch
 
 Patch file
-[`patches/0009-l2r-local-bug-9-fuse-an-arm-s-retains-only-when-the-.patch`](patches/0009-l2r-local-bug-9-fuse-an-arm-s-retains-only-when-the-.patch)
-(`l2r-local` commit `e13c2e2c`, applied in `./reussir`; `l2r-local` head cc8e5aa5). It needs 0007: its second hunk calls
-`consumesFusedMember`, which 0007 adds ([issue 7](07-phantom-reuse-donor.md)).
-(The file applies on ef922049 without 0007, but does not compile there.)
+[`patches/09-a-fuse-retains-once.patch`](patches/09-a-fuse-retains-once.patch)
+(`l2r-local` commit `e13c2e2c`, applied in `./reussir`; `l2r-local` head cc8e5aa5). It needs 07-a: its second hunk calls
+`consumesFusedMember`, which 07-a adds ([issue 7](07-phantom-reuse-donor.md)).
+(The file applies on ef922049 without 07-a, but does not compile there.)
 
 **The fix.** Two hunks in `fuseArm`. The first binds each member once and
 erases only its first retain:
@@ -175,7 +175,7 @@ member (bug 14):
 +  }
 ```
 
-`consumesFusedMember(op, members)` (from 0007) is true when `op` takes one
+`consumesFusedMember(op, members)` (from 07-a) is true when `op` takes one
 of the retained values as an operand and is neither `rc.borrow` nor
 `rc.inc`.
 
@@ -204,33 +204,33 @@ of the retained values as an operand and is neither `rc.borrow` nor
 With the patch, the bug 9 repro is not fused at all, because `z` consumes
 `l` and `r` before `x`'s release: it is fixed by the bug 14 rule. The bug
 14 repro is not fused either. `take_twice` keeps one retain, with
-`boundMembers = [1]`. The first version of 0009, reviewed in round 2, had
+`boundMembers = [1]`. The first version of 09-a, reviewed in round 2, had
 only the duplicate rule. That already fixed the bug 9 repro: with one
 retain per member kept, `z` owns its references. It did not fix bug 14
 (round 2, finding R2-2), so the rule against consumption was added (the
-revision after round 2). 0007 had the same flaw in its own scan, found in
+revision after round 2). 07-a had the same flaw in its own scan, found in
 the same review, and is fixed the same way.
 
 **Verification.**
 
 - Review round 1 found bug 9 in unpatched code (RV-3) with the generators
   (two failing seeds had duplicate `boundMembers` in their fused IR).
-- Round 2 checked 0009 v1: the round-1 repros and seeds, a test with
+- Round 2 checked 09-a v1: the round-1 repros and seeds, a test with
   members used two and three times with an inlined dropper, duplicates
-  inside a branch together with 0007's sinking, and 611 programs from a
+  inside a branch together with 07-a's sinking, and 611 programs from a
   generator with inlinable droppers, all correct and ASan-clean. It also
   found bug 14 in unpatched code (R2-2, also generator seed 5077).
-- Round 3 checked the revised 0009 together with the revised 0007: the
+- Round 3 checked the revised 09-a together with the revised 07-a: the
   targeted attacks listed under issue 7's verification and fuzzing with ASan
   (712 + 195 programs). It found no failure, and 25 programs that fail
   with unpatched rrc pass.
-- FIXED (`0`) on the round-2 stack and with the revised 0007/0009. `run.sh`
+- FIXED (`0`) on the round-2 stack and with the revised 07-a/09-a. `run.sh`
   on the patched build:
 
       issue 09   FIXED       prints 0 (no wrong result in 1000 runs)   [lean2rr's flags]
       issue 14   FIXED       prints 0 (no wrong result in 1000 runs)   [lean2rr's flags]
 
-  On the round-2 stack, with the first 0009, bug 14 still crashed.
+  On the round-2 stack, with the first 09-a, bug 14 still crashed.
 
 **Effect on lean2rr.** A member used twice, or consumed, before the
 scrutinee's release keeps its count: the use-after-free shapes above are

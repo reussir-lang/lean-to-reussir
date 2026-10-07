@@ -55,7 +55,8 @@ entries here are how lean2rr's generated code reaches them.
   the continuation the generated code stored.
 - **Why:** lean-runtime's jobs are boxed closures; lean2rr's tasks are
   run by generated code, which only the program's dispatcher can call
-  (one entry point for every state type). The job and the entry are kept
+  (one entry point; the tag is that of the one task state type, 0, and the
+  dispatcher has one arm, `taskDispatchFns`). The job and the entry are kept
   small: lean-runtime keeps its own slab entry and the boxed job for every
   unfinished task besides (its `docs/sched.md`, "Per-task cost"), about
   twice leanrt's own scheduler's bookkeeping per live task.

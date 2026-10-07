@@ -1,0 +1,16 @@
+# Adversarial review of the dependent-type branch, finding 2: n = 1000 and 4000.
+# get!, getD, modify, set! on an Array Float; get! and modify on one-field
+# structures over Float and UInt64; constants pushed. Native allocates no
+# cell per read (the default is boxed once) and one per update (the new
+# value); lean2rr must grow as native does. Before the fix a get! made a
+# Float cell per read (4n), and a modify or set! two cells per update.
+get 1000 | get 4000 | 1 200
+getd 1000 | getd 4000 | 1 200
+modify 1000 | modify 4000 | 1 200
+set 1000 | set 4000 | 1 200
+getw 1000 | getw 4000 | 1 200
+getu 1000 | getu 4000 | 1 200
+modw 1000 | modw 4000 | 1 200
+pushc 1000 | pushc 4000 | 1 200
+pushu 1000 | pushu 4000 | 1 200
+pushl 1000 | pushl 4000 | 1 200

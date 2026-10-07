@@ -9,24 +9,22 @@ to `lean2rr/LeanToReussir/`. Plan
 
 ### An unboxing function accepts every representation of its Lean type
 
-- **What:** The generated unboxing function to a nominal type matches the
-  `Box` variants of every instantiation of the same inductive and converts
-  them structurally; to an array type, every array representation with
-  compatible elements; to a thunk or task, every cell of the same kind
-  with compatible values; to a function type, every compatible function
-  representation (wrapped). Arrays of another representation go through
-  `RVec<Box>` (boxing each element, then unboxing it). Each function also
-  has the boxed-unit arm (the target's zero) and an `unreachable` arm.
-- **Why:** An inner `Array.map` result is boxed as `RVec<Box>` while its
-  consumer wants `LNatArr` (nested `Array.map` → "INTERNAL PANIC", F03,
-  829f20a); thunks and arrays of thunks in `Box` (FN-03, D2; 1fcb07f,
-  0cba3ff). Going through `RVec<Box>` keeps the number of conversions
-  linear in the number of array types, not quadratic (nested arrays under
-  polymorphic recursion have many representations).
+- **What:** Unboxing to a nominal type, an array, a thunk or task, a
+  reference or a word type accepts that type's own variant only (one type
+  per inductive, one per builtin generic type), besides the boxed-unit arm
+  (the target's zero) and, in a program that casts, the cast arms below.
+  The generated unboxing function to a function type accepts every
+  compatible function representation (wrapped). Each function also has an
+  `unreachable` arm.
+- **Why:** A function type keeps one representation per lowered type
+  (`Nat → Nat`, `Box → Box`), so a function value boxed at one is read at
+  another. (Before arrays and cells had one representation each, an inner
+  `Array.map` result boxed as `RVec<Box>` reached a consumer wanting
+  `LNatArr`: F03, 829f20a; and thunks in `Box`: FN-03, D2.)
 - **Where:** `Lower/Finish.lean`: `genUnbox` (one function; driven by
   `finishUnboxFns`, or by `finishLive` with `conv-liveness`, which leaves
   out the variants no live code builds: [liveness.md](liveness.md)),
-  `reprCompatible`, `monoCompatible`; `Lower/Conv.lean`: `tryCoerce`.
+  `reprCompatible`; `Lower/Conv.lean`: `tryCoerce`, `unboxMatch`.
 - **Remove only if:** never.
 
 ### Other types' variants only in a program that can cast
@@ -55,56 +53,50 @@ to `lean2rr/LeanToReussir/`. Plan
   Accepting inductives with other constructor counts added 3-5% of code
   for casts that hardly ever occur (18fb171). Outside casting programs,
   same-shape boxed types made unboxing quadratic (TY6-02, 5be764c).
-- **Where:** `Lower/Conv.lean`: `boxCastable`, `boxCastConv` (probes, and
-  rolls back a cast that has no conversion, cutting the emitted functions
-  and types back to their sizes:
-  [../translator.md](../translator.md#stage-4-finds-emitted-functions-by-name-and-keeps-its-emitted-items-unshared)),
-  `programCasts`; `Lower/Finish.lean`: `boxCastCompatible`,
-  `genUnbox`. The fact itself:
+- **Where:** `Lower/Conv.lean`: `boxCastable`, `tryCoerce`,
+  `castFallback` (a pair `boxCastable` accepts converts, or fails before
+  it registers a helper: the arm is then left out, with nothing to undo),
+  `programCasts`; `Lower/Finish.lean`: `genUnbox`. The fact itself:
   [../types/uniform-types.md](../types/uniform-types.md#whether-the-program-can-cast-at-all-is-a-whole-program-fact).
 - **Remove only if:** never. The casts left out panic (plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
   "Casts that natively read an address").
 
-### Instantiations that cannot be the target go through a shared one
+### Unboxing keeps the target's own variant in line
 
-- **What:** In a program that does not cast, a `Box` variant of another
-  instantiation of the target's inductive whose Lean type cannot be the
-  target's (`Option Nat` read as `Option String`) is converted through the
-  instantiation at the arguments both share, `lcAny` elsewhere
-  (`Prod (Array S₁) Nat` read as `Prod (Array S₀) Nat` goes through
-  `Prod lcAny Nat`).
-- **Why:** Only a value `cse` shared between the two types (`none`,
-  `some []`) reaches such an arm. Converting directly, K same-shape
-  structures through uniform code made K² conversion functions, each with
-  its own generic runtime calls (build time quadratic; round 6 TY6-02,
-  5be764c). The arms stay quadratic, but each is a call (Ty6QS80: 200 s,
-  157 s without them; most of the rest, 100 s, is one rustc run per
-  generic runtime function instantiated at a type, RV6T-03).
-- **Where:** `Lower/Finish.lean`: `genUnbox` (`viaShared`).
-- **Remove only if:** the build cost is no longer a concern; the result is
-  the same either way.
-
-### Unboxing to a word type keeps its own variant in line
-
-- **What:** Unboxing to `Nat`, `Int`, `UInt8/16/32/64`, `Bool` or a float
-  is an in-line match on the target's own variant (and the boxed unit),
-  with the other variants (another word type read through `unsafeCast`)
-  sent to the generated function.
+- **What:** Unboxing to `Nat`, `Int`, `UInt8/16/32/64`, `Bool`, a float or
+  a nominal type is in line (`boxUnbox`): the target's own payload, an
+  immediate read at the target, and the boxed unit (the target's zero).
+  Only in a program that casts (`programCasts`) do the other payloads go
+  to the generated function (`l2r_unbox_T`: another word type or an
+  object read through `unsafeCast`, the types a cast reads); otherwise
+  they are `unreachable`, for a word type as for a nominal type.
 - **Why:** Sending every word unboxing through the generated function cost
   rrc build time on uniform code (Cn3PolyS1: 123 s → 105 s, 2.1 → 1.7 GB;
-  72b13f0).
-- **Where:** `Lower/Conv.lean`: `unboxMatch` (`slow`), `tryCoerce`.
+  72b13f0). Without casts the generated function is the same match: one
+  type per inductive, so only the target's own payload holds a value of
+  it, and an immediate is read at the target whatever word type boxed it,
+  as natively; out of line it was a call at every read of a generic
+  field, and a copy of the in-line match (review of rule 1, simplicity
+  finding 5: a word unboxing outside casting programs had kept an
+  out-of-line function until the switch to the one-word box gated it).
+- **Where:** `Lower/Conv.lean`: `unboxMatch` (`slow`), `tryCoerce`;
+  `LowerBase.lean`: `boxUnbox`.
 - **Remove only if:** never.
 
 ### The `unreachable` arm releases the `Box` out of line
 
-- **What:** The fallback arm of every unboxing function releases the `Box`
-  through `l2r_ptr_addr_rec` (a call that consumes it) before panicking.
-- **Why:** rrc expands every release of an enum in line into a match over
-  its variants, and `Box` has one per boxed type: each unboxing function,
-  inlined wherever it is called, held such an expansion in its
-  `unreachable` arm (ae5104d).
-- **Where:** `Lower/Finish.lean`: `boxSink`, `genUnbox`. Related:
+- **What:** The fallback arm of every unboxing function, and of an in-line
+  unboxing without a generated function, releases the `Box` through a
+  call that consumes it (`boxSink`: `l2r_any_addr`; in line,
+  `l2r_any_drop_raw` of the word) before panicking.
+- **Why:** When `Box` was a shared enum, rrc expanded its release in line
+  into a match over its variants, one per boxed type: each unboxing
+  function, inlined wherever it is called, held such an expansion in its
+  `unreachable` arm (ae5104d). The one-word box releases through its drop
+  hook (one call), so the call costs the same as an in-line release now.
+- **Where:** `LowerBase.lean`: `boxSink`, `boxUnbox`;
+  `Lower/Finish.lean`: `genUnbox`. Related:
   [../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#issue-22-cost-a-wildcard-arm-over-a-wide-enum-costs-n3-code).
-- **Remove only if:** rrc releases wide enums out of line itself.
+- **Remove only if:** any time (the one-word box): an in-line release of
+  the box is one call too.

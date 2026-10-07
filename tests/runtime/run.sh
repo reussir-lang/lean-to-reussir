@@ -15,7 +15,10 @@
 #               comma-separated, added to L2R_DISABLE_OPTS), e.g. to check a
 #               shape the default passes hide
 #   NAME.xfail  the test is known to fail through lean2rr; the file says why
-#               (a "Requests for lean2rr" item in runtime/README.md)
+#               (a "Requests for lean2rr" item in runtime/README.md); a
+#               file whose first line starts with `alloc-check:` marks only
+#               tests/runtime/alloc-check.sh's check of the test (its
+#               allocations) as known to fail: this script ignores it
 #   NAME.l2r.out, NAME.l2r.err, NAME.l2r.code
 #               a documented, intended difference from native (a Lean
 #               runtime bug lean2rr does not reproduce, plan §10 "Runtime:
@@ -183,7 +186,7 @@ for t in "${TESTS[@]}"; do
       status=fail; why="$why the executable has text relocations (readelf -d $d/l2r);"
     fi
   fi
-  if [ -f "$HERE/$t.xfail" ]; then
+  if [ -f "$HERE/$t.xfail" ] && ! head -1 "$HERE/$t.xfail" | grep -q '^alloc-check:'; then
     if [ $status = ok ]; then
       xpass=$((xpass + 1)); echo "XPASS $t (remove $t.xfail)"
     else

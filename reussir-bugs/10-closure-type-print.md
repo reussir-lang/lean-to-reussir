@@ -2,13 +2,13 @@
 
 **Kind:** cost (build time). Not a bug: rrc's output is correct; the
 exponential type printing can make large builds infeasible (time or
-memory), and patch 0024 is an optimization.
+memory), and patch 10-a is an optimization.
 
 ## Summary
 
 **Kind:** cost (build time; the audit's first verdict was bug (build
 time), reclassified on 2026-10-05 because the output is correct).
-**Status:** patched (0024, an optimization), applied in `./reussir`
+**Status:** patched (10-a, an optimization), applied in `./reussir`
 (`l2r-local` cc8e5aa5); lean2rr also works around it (it passes
 `--no-closure-wpd`).
 
@@ -47,7 +47,7 @@ closure devirtualization, 2.1 s with --no-closure-wpd   [-O aggressive]`
 (loaded machine); K = 22 builds in 0.4 s either way.
 
 The same exponential text appears in `rrc --emit mlir`, which prints every
-type with the same rule ([issue 32](32-emit-mlir-size.md)); 0024 does not
+type with the same rule ([issue 32](32-emit-mlir-size.md)); 10-a does not
 change that printer.
 
 Sizes that hit the limits (lean2rr outputs before the workaround, rrc to an
@@ -83,13 +83,13 @@ Fewer and smaller types would shrink the printed text, but the text is
 exponential in nesting either way, and the towers that hit this also hit
 [issue 20](20-statet-tower.md); with both worked around the towers of the
 adversarial rounds build in 15 s to 2.5 minutes. lean2rr keeps passing the
-flag with 0024 applied (README policy: workarounds stay, so that lean2rr
+flag with 10-a applied (README policy: workarounds stay, so that lean2rr
 also works with an unpatched Reussir); it costs nothing measurable.
 
 ## Patch
 
 Patch file
-[`patches/0024-l2r-local-bug-10-compute-closure-WPD-type-ids-from-a.patch`](patches/0024-l2r-local-bug-10-compute-closure-WPD-type-ids-from-a.patch)
+[`patches/10-a-closure-type-ids.patch`](patches/10-a-closure-type-ids.patch)
 (`l2r-local` commit `362d6a21`, applied in `./reussir`; `l2r-local` head
 `cc8e5aa5`).
 

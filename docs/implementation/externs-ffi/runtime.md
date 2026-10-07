@@ -90,8 +90,7 @@ Paths are relative to the repository root.
   a `mi_malloc` of that size failing is `out of memory`). Where the size is
   a `Nat`, a big one (2^63 or more) depends on the allocator, as in
   `lean.h` and `object.cpp`:
-  - `Array.replicate` (`lean_mk_array`, and lean2rr's `Array Nat`/`Array
-    Int` versions `lean_mk_natarr`/`lean_mk_intarr`) takes any `n` below
+  - `Array.replicate` (`lean_mk_array`) takes any `n` below
     2^64 as the size (`l2r_replicate_len`, `sem::array::replicate_len`),
     so 2^63 … 2^64 − 1 overflow, and 2^64 or more is `out of memory`;
   - `Array.mkEmpty`/`emptyWithCapacity`, `ByteArray.emptyWithCapacity` and
@@ -114,11 +113,8 @@ Paths are relative to the repository root.
   at every `mkEmpty` small.
 - **Where:** `runtime/prelude.rr`: `lean_mk_array`,
   `l2r_mk_empty_with_capacity`, `l2r_replicate_len`, `l2r_internal_panic`;
-  the generated `lean_mk_{nat,int}arr` and
-  `lean_mk_empty_{nat,int}arr_with_capacity` (`runtime/gen_tagarr.py`);
   `runtime/leanrt/src/array.rs`: `check_alloc`, `check_capacity`,
   `check_alloc_slow`, `capacity_slow`, `with_capacity_checked`, `replicate`;
-  `runtime/leanrt/src/tagvec.rs`: `with_capacity`, `replicate_word`;
   `runtime/leanrt/src/nat.rs`: `nat_replicate_len`.
 - **Remove only if:** never (the messages are observable).
 
@@ -489,7 +485,7 @@ Paths are relative to the repository root.
     (leanrt's `later` list, `run_later` and its settle points are gone); a
     resolved one releases its task's cell there and then, in the free's
     order (review RS6-01).
-  Reussir's patch 0040 (the drain-end hook) is required: `scripts/l2r.py`
+  Reussir's patch 40-a (the drain-end hook) is required: `scripts/l2r.py`
   checks for it and leanrt names its symbol. lean-runtime pinned at
   `528fcbb` (wait-1; fixes-5's `IO.getTID`: a pool task gets its emulated
   worker's thread id, a dedicated task a new one, through
@@ -909,10 +905,9 @@ Paths are relative to the repository root.
   - `sem::array::empty_with_capacity` returns the capacity to reserve (0
     when it cannot be reserved) instead of a `Result`: `leanrt::array::
     check_capacity` returns it too, 0 also when the `mi_malloc` probe of
-    the native size fails, and `with_capacity_checked` and
-    `tagvec::with_capacity` reserve it; the prelude's
-    `l2r_mk_empty_with_capacity` and the tag vectors' versions release a
-    big `Nat` and give the empty array
+    the native size fails, and `with_capacity_checked` reserves it; the
+    prelude's `l2r_mk_empty_with_capacity` releases a big `Nat` and gives
+    the empty array
     ([../representations/arrays.md](../representations/arrays.md#a-capacity-that-cannot-be-reserved-reserves-nothing)).
     `l2r_internal_panic`'s code 4 has no caller now.
   - A task's priority is passed whole: `prioOf` is `l2r_nat_sat` (the
@@ -943,10 +938,9 @@ Paths are relative to the repository root.
   `floatsempty.*` and `float/scaleb*` rows expect the definition's
   result).
 - **Where:** `runtime/leanrt/src/array.rs` (`check_capacity`,
-  `capacity_slow`, `native_alloc_ok`, `with_capacity_checked`), `tagvec.rs`
-  (`with_capacity`), `task.rs` (`Entry::prio`, `register`, `depend`);
-  `runtime/prelude.rr` and `runtime/gen_tagarr.py` (the `mkEmpty`
-  externs); `Lower/LazyGlue.lean` (`prioOf`); lean-runtime's
+  `capacity_slow`, `native_alloc_ok`, `with_capacity_checked`), `task.rs`
+  (`Entry::prio`, `register`, `depend`); `runtime/prelude.rr` (the
+  `mkEmpty` externs); `Lower/LazyGlue.lean` (`prioOf`); lean-runtime's
   `docs/lean-bugs.md`.
 - **Remove only if:** never.
 

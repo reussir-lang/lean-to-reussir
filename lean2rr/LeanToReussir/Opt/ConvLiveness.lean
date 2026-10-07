@@ -5,8 +5,7 @@ import LeanToReussir.PassConfig
 # Helpers for live code only (optimization `conv-liveness`)
 
 The functions Stage 4 generates at the end (unboxing functions, the
-application and conversion functions of function values, the reference
-dispatch) follow a type-based reachability from the entry point and the
+application and conversion functions of function values) follow a type-based reachability from the entry point and the
 runtime's entries: a helper is generated only once live code calls it,
 with an arm only for each variant of `Box` or of its function type that
 live code builds, and the functions nothing reaches are dropped
@@ -17,8 +16,10 @@ only a removed arm would call is not reported as missing
 (docs/implementation/conversions/liveness.md).
 Without this pass every helper requested anywhere is generated with an arm
 for every variant registered anywhere: in a program that can cast, the
-helpers grow quadratically (on a program importing a large library, 95 %
-of the functions were helpers that can never run).
+helpers grow quadratically (the casts between inductives that the
+unboxing functions read). A program importing `Cslib.Init` with a one-line
+`main` has 226,219 functions (380 MB of `.rr`) without the pass and 28,300
+(29 MB) with it; small programs lose about 4 % of their functions.
 -/
 
 namespace LeanToReussir

@@ -106,7 +106,7 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/string.rs`, and
   ([Reussir bug 21](../../../reussir-bugs/21-unterminated-placeholder.md);
   round 6 RV6L-01, 96c7140; test `RtStrLitBracket`).
 - **Where:** `LowerBase.lean`: `strLitTable`.
-- **Remove only if:** never needed with patch 0016 applied (it is not, on
+- **Remove only if:** never needed with patch 21-a applied (it is not, on
   `l2r-local`); the escape costs nothing, so it can stay.
 
 ### Strings from the operating system are decoded as `lean_mk_string`

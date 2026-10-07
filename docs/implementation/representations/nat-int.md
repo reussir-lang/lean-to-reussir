@@ -29,10 +29,10 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   does not constrain lean2rr's layouts while the C FFI is parked) or
   Reussir gains a native tagged-integer type.
 
-### Reussir counts only the even words (tagged opaque handles, patch 0050)
+### Reussir counts only the even words (tagged opaque handles, patch 41-a)
 
 - **What:** The prelude declares `#[ffi(rust = "::leanrt::nat::LNat",
-  tagged)] pub struct Nat;` (and `Int`). With Reussir patch 0050, `rc.inc`
+  tagged)] pub struct Nat;` (and `Int`). With Reussir patch 41-a, `rc.inc`
   of a `tagged` handle touches the count, and `rc.dec` calls the drop hook,
   only when the low bit is clear; the nonlinear-FFI instrumentation and
   `rc.assume_unique` skip such handles too. Copying or dropping a small
@@ -42,8 +42,8 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   hook would cost a call per copy; lean2rr cannot count `Nat`s itself
   because it cannot change the drop glue Reussir generates for records,
   closures and enums.
-- **Where:** `reussir-bugs/patches/0050-*.patch` and
-  [local-additions.md](../../../reussir-bugs/local-additions.md#0050-tagged-opaque-handles-one-word-nat-and-int)
+- **Where:** `reussir-bugs/patches/41-a-tagged-ffi-objects.patch` and
+  [issue 41](../../../reussir-bugs/41-tagged-ffi-objects.md)
   (`BasicOpsLowering.cpp`: `beginRealBoxGuard`); `prelude.rr`: `struct
   Nat`, `struct Int`.
 - **Remove only if:** upstream Reussir supports immediates in opaque types
@@ -91,11 +91,9 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
     `Int` (`genUnbox`): the `Int` variant's handle, a `Nat` through
     `lean_nat_to_int`, a word through `l2r_int_of_word`, the unit through
     `zeroValue`;
-  - copies of existing words: an `Array Int`'s elements (`tagvec`), a
-    record's or a `Box`'s field, a once-cell's value, a reference's or a
-    task's value; arrays of another element type are converted element by
-    element (`vecConv`), never retyped between `Nat` and `Int`
-    (`retypableAux`).
+  - copies of existing words: a record's or a `Box`'s field (an
+    `Array Int`'s elements are boxes), a once-cell's value, a reference's
+    or a task's value.
   In builds with debug assertions, `LInt::of_big` checks that a big
   number is in its one form (no zero top limb, no negative zero: what
   `fits_i64` and its range test read), and `int_view` (every slow path's
@@ -146,8 +144,7 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   borrowed parameters, so a handle passed on would be incremented and
   released around each test).
 - **Where:** `prelude.rr`: the Nat and Int sections, string positions,
-  array indices (`l2r_word_index_ok`), the generated `natarr`/`intarr`
-  codecs; `leanrt/src/nat.rs`: the slow paths (`nat_add`, ... every
+  array indices (`l2r_word_index_ok`); `leanrt/src/nat.rs`: the slow paths (`nat_add`, ... every
   small/big combination).
 - **Remove only if:** Reussir gets borrowed parameters.
 
@@ -256,7 +253,7 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   and take the fast path when `s & x & 1` is 1 (both words odd: `s` is
   odd when `x` and `y` have the same parity), not when `x & y & 1` is.
 - **Why:** With `x & y & 1`, LLVM pairs `y & 1` with the identical
-  low-bit test of Reussir's `rc.inc` of `y` (patch 0050's guard; `y` is
+  low-bit test of Reussir's `rc.inc` of `y` (patch 41-a's guard; `y` is
   often a field just read out of a cell that is then released) and keeps
   it in a callee-saved register across the release calls in between. In
   cfold's `constFolding`, which recurses about 2^n deep without a tail
@@ -361,23 +358,21 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 ### Literals: small below 2^63, big ones parsed from their decimal text
 
 - **What:** A `Nat` literal below 2^63 is `l2r_nat_small(k)` (the word
-  `2k+1`; `ArrayLits` recognizes it for literal tables); a bigger one is
+  `2k+1`); a bigger one is
   `l2r_nat_of_decimal_lstr(s)`, with `s` the decimal digits in the string
   literal table.
 - **Why:** 2^63 is the small range. A nested arithmetic expression per
   limb overflowed rrc's stack at about 20000 digits and cost quadratic time
   (adv2 N1, fbf37e8).
-- **Where:** `Lower/Values.lean`: `natLiteral`; `ArrayLits.lean`:
-  `smallLit?`; `prelude.rr`: `l2r_nat_small`, `l2r_nat_of_decimal_lstr`;
+- **Where:** `Lower/Values.lean`: `natLiteral`; `prelude.rr`: `l2r_nat_small`, `l2r_nat_of_decimal_lstr`;
   `leanrt/src/nat.rs`: `nat_of_decimal`.
 - **Remove only if:** the encoding changes; the flat call is cheaper
   anyway. Plan [§5.4](../../translation-plan.md#54-let-return-literals).
 
 ### `Nat` and `Int` are FFI-boundary types
 
-- **What:** `isBoundaryTy` counts `Nat`/`Int` as runtime handles: without
-  the `nat-arrays` pass `Array Nat` is `RVec<Nat>` (one word per element);
-  an `IO.Ref Nat` is a cell holding the handle, like any other reference
+- **What:** `isBoundaryTy` counts `Nat`/`Int` as runtime handles: a `Box`
+  holds the handle like any other value, and a once-cell holds it directly
   (the prelude's `L2RNatRef`/`L2RIntRef` are gone).
 - **Why:** They are counted handles now, which Reussir passes across the
   FFI boundary and keeps in cells (bug 19 only concerns `[value]`

@@ -1,0 +1,2 @@
+# BA-17 (mode copy): n reads of a dependent payload, a list of n, n = 200 and 800: a read is O(1)
+200 | 800 | 4 2000

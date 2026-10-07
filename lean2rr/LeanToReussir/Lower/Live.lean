@@ -7,15 +7,15 @@ The helpers generated at the end of Stage 4 match variants: an unboxing
 function (`l2r_unbox_…`) has an arm per `Box` variant that can hold a value
 of its type, an application function (`l2r_ap<j>_…`) an arm per variant of
 its function type, a conversion of function values (`l2r_fconv_S_T`) an arm
-per wrapped representation of its source, a reference dispatch
-(`l2r_refbox_…`) an arm per boxed reference type. Without this pass every
+per wrapped representation of its source. Without this pass every
 helper requested anywhere is generated, with an arm for every variant
 registered anywhere, and each arm converts (`tryCoerce`), which requests
 more helpers and registers more variants. In a program that can cast
 (`programCasts`), every unboxing function also gets a cast arm for every
-variant of a compatible layout, so the helpers grow quadratically: on a
-program importing a large library, 95 % of the functions were helpers that
-can never run.
+variant of a compatible layout, so the helpers grow quadratically: a
+program importing `Cslib.Init` with a one-line `main` has 226,219
+functions without the pass, 28,300 with it (deptypes-cleanup, after one
+layout per datatype; 990,927 and 30,418 before).
 
 With the pass, the helpers follow a type-based reachability (rapid type
 analysis), computed here while they are generated (`Finish.finishLive`):
@@ -52,9 +52,9 @@ structure LiveRefs where
   names : Array String := #[]
   made : Array (String × String) := #[]
 
-/-- The enums whose variants liveness tracks: `Box` and the enums of
-function values. -/
-def liveTracked (ty : String) : Bool := ty == boxName || ty.startsWith "L2RFn_"
+/-- The enums whose variants liveness tracks: the enums of function values
+(the payloads of `Box` are tracked by their constructions, `exprRefs`). -/
+def liveTracked (ty : String) : Bool := ty.startsWith "L2RFn_"
 
 /-- The identifiers of text `t` (raw items, atoms) as names, and every
 `T::v` of a tracked enum (built or matched: both count as built). A
@@ -96,7 +96,13 @@ mutual
     match e with
     | .var _ => r
     | .atom t => if t.any (fun c => c.isAlpha || c == '_') then textRefs t r else r
-    | .call f _ args => args.foldl (fun r a => exprRefs a r) { r with names := r.names.push f }
+    | .call f _ args =>
+      -- A box construction makes payload `b<n>` (the box API's `boxValue`).
+      let r := match f, args[1]? with
+        | "l2r_any_of", some (.atom n) | "l2r_any_of_fn", some (.atom n) =>
+          { r with made := r.made.push (boxName, s!"b{n}") }
+        | _, _ => r
+      args.foldl (fun r a => exprRefs a r) { r with names := r.names.push f }
     | .apply f a => exprRefs a (exprRefs f r)
     | .ctor ty v args =>
       let r := match v with
@@ -151,24 +157,19 @@ def liveFollow : LowerM Unit := do
   syncFnIndex
   let pre := (← read).preludeFns
   let unboxTs ← getPart (·.unboxTargets)
-  let arrTs ← getPart (·.unboxArrTargets)
   let fnTs ← getPart (·.fnUnboxTargets)
   let applies ← getPart (·.fnApplies)
   let convs ← getPart (·.fnConvs)
-  let refOps ← getPart (·.refBoxOps)
   let fns ← getPart (·.fns)
   let pos ← getPart (·.fnPos)
   let mut lv ← modifyGet fun s => (s.live, { s with live := {} })
   -- The helpers requested since the last call.
   let ix := lv.indexed
   for t in unboxTs[ix[0]!:] do lv := lv.request s!"l2r_unbox_{t}" (.unbox (.named t))
-  for (t, f) in arrTs[ix[1]!:] do lv := lv.request f (.unbox t)
-  for t in fnTs[ix[2]!:] do lv := lv.request s!"l2r_unbox_fn_{t.enc}" (.unbox t)
-  for (t, j) in applies[ix[3]!:] do lv := lv.request (applyFnName t j) (.apply t j)
-  for (src, dst) in convs[ix[4]!:] do lv := lv.request s!"l2r_fconv_{src.enc}_{dst.enc}" (.fconv src dst)
-  for (op, a) in refOps[ix[5]!:] do
-    lv := lv.request (if op == "addr" then "l2r_refbox_addr" else s!"l2r_refbox_{op}_{a.enc}") (.refbox op a)
-  lv := { lv with indexed := #[unboxTs.size, arrTs.size, fnTs.size, applies.size, convs.size, refOps.size] }
+  for t in fnTs[ix[1]!:] do lv := lv.request s!"l2r_unbox_fn_{t.enc}" (.unbox t)
+  for (t, j) in applies[ix[2]!:] do lv := lv.request (applyFnName t j) (.apply t j)
+  for (src, dst) in convs[ix[3]!:] do lv := lv.request s!"l2r_fconv_{src.enc}_{dst.enc}" (.fconv src dst)
+  lv := { lv with indexed := #[unboxTs.size, fnTs.size, applies.size, convs.size] }
   -- The items emitted since the last call.
   for h : i in [lv.seen:fns.size] do
     match fns[i]'h.upper with
@@ -201,13 +202,19 @@ def liveSkipFn (t : RR.Ty) (v : FnVariant) : LowerM Bool := do
   return !(← getPart (·.live.madeFn.contains (RR.fnTypeName t, fnVariantName v)))
 
 /-- The version a live helper's body is generated for: the number of
-variants it can match that live code builds. -/
+variants it can match that live code builds; for a function type, plus the
+number of its variants registered (both only grow, so the sum changes when
+either does). A variant registered after an application function was
+generated, which no live code builds (a conversion that `tryCoerce` only
+tries registers its wrapper), is in the enum (`fnTypeItems`), so the
+function is generated again, with the arm for unbuilt variants (`genApply`):
+without it, rrc rejected the match as not exhaustive. -/
 def liveVersion (h : LiveHelper) : LowerM Nat := do
   match h with
-  | .unbox _ | .refbox .. => getPart (·.live.madeBox.size)
+  | .unbox _ => getPart (·.live.madeBox.size)
   | .apply t _ | .fconv t _ =>
     let tn := RR.fnTypeName t
-    getPart (·.live.madeFnCount.getD tn 0)
+    return (← getPart (·.live.madeFnCount.getD tn 0)) + ((← getPart (·.fnVariants)).getD t.rt #[]).size
 
 /-- `fns` without the functions liveness did not reach (raw items stay). -/
 def liveDrop (st : LowerState) : Array RR.Item :=

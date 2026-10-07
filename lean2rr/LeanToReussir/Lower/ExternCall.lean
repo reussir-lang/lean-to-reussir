@@ -82,36 +82,64 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   if orig == ``Array.mk then
     let lt ← lowerType params[0]!
     let arrTy ← lowerType ret
-    let some repr ← arrayRepr? arrTy | throwError "lean2rr: bad array type {arrTy.render}"
-    let fn ← listFold s!"l2r_list_to_array_{lt.render.map fun c => if c.isAlphanum then c else '_'}" lt arrTy
-      repr.value fun acc x => repr.call "push" #[acc, repr.store x]
-    return some (.call fn #[] #[args[0]!, repr.call "empty" #[]])
+    let some ae := arrayElem? arrTy | throwError "lean2rr: bad array type {arrTy.render}"
+    let fn ← listFold s!"l2r_list_to_array_{lt.render.map fun c => if c.isAlphanum then c else '_'}_{arrTy.enc}" lt arrTy
+      ae fun acc x => arrayCall ae "push" #[acc, x]
+    return some (.call fn #[] #[args[0]!, arrayCall ae "empty" #[]])
+  -- `ByteArray.mk`/`data`, `FloatArray.mk`/`data`: between an array of
+  -- `Box`es and the runtime's array of bytes or floats (natively a copy
+  -- too): the prelude's texture (`tex`), which allocates the result at its
+  -- exact size and converts the elements in one loop. Unboxing at `u8` or
+  -- `f64` reads a pointer only in a program that casts (`programCasts`:
+  -- the generated cast, `l2r_unbox_u8`): there the texture serves an array
+  -- whose boxes it reads (`check`: all immediates, or immediates and the
+  -- float and `UInt64` cells), and a generated loop, element by element
+  -- (`arrayMapFn`), the others.
+  let sym ← externSymbol orig
+  if let some (dstElem, name, tex, check?) := (match sym with
+      | "lean_byte_array_mk" => some (RR.Ty.named "u8", "l2r_byte_array_of_array", "l2r_bytes_of_boxes",
+          some "l2r_boxes_all_imm")
+      | "lean_byte_array_data" => some (RR.Ty.box, "l2r_byte_array_to_array", "l2r_boxes_of_bytes", none)
+      | "lean_float_array_mk" => some (RR.Ty.named "f64", "l2r_float_array_of_array", "l2r_floats_of_boxes",
+          some "l2r_boxes_all_float_words")
+      | "lean_float_array_data" => some (RR.Ty.box, "l2r_float_array_to_array", "l2r_boxes_of_floats", none)
+      | _ => none) then
+    let srcTy ← lowerType params[0]!
+    let some se := arrayElem? srcTy | throwError "lean2rr: bad array type {srcTy.render}"
+    let loop : LowerM String := arrayMapFn name srcTy dstElem fun x => coerce x se dstElem
+    -- The textures take and give arrays of boxes (rule 1).
+    let retElem := arrayElem? (← lowerType ret)
+    unless (if check?.isSome then se == RR.Ty.box else retElem == some RR.Ty.box) do
+      return some (.call (← loop) #[] #[args[0]!])
+    let some check := check? | return some (.call tex #[] #[args[0]!])
+    unless (← read).programCasts do return some (.call tex #[] #[args[0]!])
+    let fn ← loop
+    let v ← fresh "ba"
+    return some (.block ⟨#[(v, some srcTy, args[0]!)],
+      .ite (.call check #[] #[.var v]) (.ofExpr (.call tex #[] #[.var v])) (.ofExpr (.call fn #[] #[.var v]))⟩)
   -- `Array.toList : Array α → List α`: cons the elements from the last.
   if orig == ``Array.toList then
     let arrTy ← lowerType params[0]!
     let lt ← lowerType ret
-    let some repr ← arrayRepr? arrTy | throwError "lean2rr: bad array type {arrTy.render}"
+    let some ae := arrayElem? arrTy | throwError "lean2rr: bad array type {arrTy.render}"
     let .named ltn := lt | throwError "lean2rr: bad list type"
     let some info := (← get).typeInfos[ltn]? | throwError "lean2rr: bad list type"
     let some nil := info.ctors.find? ``List.nil | throwError "lean2rr: bad list type"
     let some cons := info.ctors.find? ``List.cons | throwError "lean2rr: bad list type"
-    let valTy? := (cons.fields[0]?.join).map (·.2)
-    let name := s!"l2r_array_to_list_{ltn}_{repr.family}"
+    -- The head is a `Box` at every instantiation (`nominalType`).
+    let some (_, valTy) := cons.fields[0]?.join | throwError "lean2rr: bad list type {ltn} (internal error)"
+    let name := s!"l2r_array_to_list_{ltn}_{arrTy.enc}"
     unless (← hasFn name) do
       let u64 := RR.Ty.named "u64"
-      -- Elements without a representation (types, proofs) are not stored.
-      let (xLet, fieldVals) ← match valTy? with
-        | some valTy => do
-          let x := repr.load (repr.call "get" #[.var "v", .var "j"])
-          pure (#[("x", some valTy, ← coerce x repr.value valTy)], #[RR.Expr.var "x", .var "acc"])
-        | none => pure (#[], #[RR.Expr.var "acc"])
+      let x := arrayCall ae "get" #[.var "v", .var "j"]
+      let (xLet, fieldVals) := (#[("x", some valTy, ← coerce x ae valTy)], #[RR.Expr.var "x", .var "acc"])
       let body : RR.Block := ⟨#[("zero", some u64, .atom "0")], .ite (.atom "zero < i")
         ⟨#[("one", some u64, .atom "1"), ("j", some u64, .atom "i - one")] ++ xLet ++
          #[("c", some lt, .ctor ltn (some cons.variant) (cons.place fieldVals))],
           .call (name ++ "_go") #[] #[.var "v", .var "j", .var "c"]⟩
         (.ofExpr (.var "acc"))⟩
       let entry : RR.Block :=
-        .ofExpr (.call (name ++ "_go") #[] #[.var "v", repr.call "size" #[.var "v"],
+        .ofExpr (.call (name ++ "_go") #[] #[.var "v", arrayCall ae "size" #[.var "v"],
           .ctor ltn (some nil.variant) #[]])
       modify fun s => { s with fns := s.fns ++ #[
         .fn (name ++ "_go") #[("v", arrTy), ("i", u64), ("acc", lt)] lt body,
@@ -128,15 +156,12 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   if let some (fd, set) := std? then
     -- `BaseIO FS.Stream`: the result is `ST.Out σ FS.Stream`.
     let resTy ← lowerType ret
-    let .named rn := resTy | return none
-    let some info := (← get).typeInfos[rn]? | return none
-    let some layout := info.ctors.find? info.ctorOrder[0]! | return none
-    let some (some (_, streamTy)) := layout.fields[0]? | return none
+    let streamTy ← lowerType (mkConst ``IO.FS.Stream)
     let (getFn, setFn) ← stdStreamFns fd streamTy
     if set then
       let s ← coerce args[0]! (← lowerType params[0]!) streamTy
-      return some (← wrapIOResult resTy (.call setFn #[] #[s]))
-    return some (← wrapIOResult resTy (.call getFn #[] #[]))
+      return some (← wrapIOResult resTy (.call setFn #[] #[s]) streamTy)
+    return some (← wrapIOResult resTy (.call getFn #[] #[]) streamTy)
   return none
 
 /-- The call of an extern of the program that lean2rr refuses
@@ -148,8 +173,7 @@ def refusedExternCall (orig : Name) (args : Array RR.Expr) : RR.Expr :=
 
 /-- The read externs whose index `bindReadIndex` binds first: element
 reads at a `Nat` index (`a[i]'h`, `a[i]!` of `Array`, `ByteArray` and
-`FloatArray`; at `Array Nat`/`Array Int`, the one-word arrays' reads that
-replace them) and the string reads at a `Nat` position.
+`FloatArray`) and the string reads at a `Nat` position.
 `String.Pos.Raw.get?` (`lean_string_utf8_get_opt`) is not here: it goes
 through lean2rr's glue (`Lower/Externs.lean`), not this call. -/
 def readExternSyms : List String := [
@@ -196,10 +220,15 @@ after the C symbol with the passed arguments.
 
 For extern instances (polymorphic externs such as `Array.push {α}`), the
 prelude function is generic; it receives the storage types of the type
-arguments explicitly. A type argument whose values cannot cross Reussir's
-FFI boundary (a value type, a closure) is stored boxed in a one-field shared
-struct, so arguments of that type are wrapped and a result of that type is
-unwrapped here. -/
+arguments explicitly: `Box` for a type parameter whose values the extern
+stores as array elements (its declared signature has `Array α`: an
+`Array α` is an array of `Box`es), so arguments of that type are boxed and
+a result of that type is unboxed here; for any other, the type itself, or,
+for a type whose values cannot cross Reussir's FFI boundary (a value type,
+a closure), a one-field shared struct (`cellStorage`). The decision is per
+type parameter and from the declared signature: `dbgTraceIfShared` at
+`α := Array Nat` passes the array itself (a box would be a new reference to
+it, whose sharing the extern would report instead of the array's). -/
 def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
     (args : Array RR.Expr) : LowerM RR.Expr := do
   -- An extern of the program that lean2rr refuses: `calleeOf` reported it,
@@ -215,8 +244,7 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
     !(p.isErased || p.isSort)
   if let some e ← customExtern orig (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
   if orig.getPrefix == `ST.Prim || orig.getPrefix == `ST.Prim.Ref then
-    if let some e ← refGlue orig typeArgs (relevant.map (·.1)) ret (relevant.map (·.2))
-        (← relevant.mapM (lowerType ·.1)) then return e
+    if let some e ← refGlue orig (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
   let sym ← externSymbol orig
   -- Which parameters the runtime receives: not erased ones, not the world,
   -- not proofs.
@@ -240,8 +268,8 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
     if (← read).preludeFns.contains prim then
       let resTy ← lowerType ret
       if let .named rn := resTy then
-        if let some k := (← get).typeKeys[rn]? then
-          if k.isAppOf ``EST.Out || k.isAppOf ``ST.Out then
+        if let some k := (← get).typeHeads[rn]? then
+          if k == ``EST.Out || k == ``ST.Out then
             -- Arguments at the primitive's parameter types (a handle is
             -- `lcAny` in mono code, so it arrives boxed).
             let argTys ← (mask.zip params).filterMapM fun (m, p) => if m then some <$> lowerType p else pure none
@@ -250,10 +278,20 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
             -- The result too, from a non-generic primitive's result type (a
             -- runtime object such as a mutex or promise is `lcAny` in mono
             -- code).
-            let payload ← match (← read).preludeRets[prim]?, (← read).preludeParams.contains prim with
-              | some r, true => coerce (.call prim #[] passed) r (← ioPayloadTy resTy)
-              | _, _ => pure (.call prim #[] passed)
-            return ← wrapIOResult resTy payload
+            match (← read).preludeRets[prim]?, (← read).preludeParams.contains prim with
+              | some r, true => return ← wrapIOResult resTy (.call prim #[] passed) r
+              | r?, _ =>
+                -- A generic primitive (`fn l2r_runtime_hold<T>(a : T) ->
+                -- L2RUnit`, `fn l2r_runtime_mark_persistent<T>(a : T) -> T`):
+                -- its result has the prelude's result type or, when that
+                -- is one of its type parameters, the type of the argument
+                -- declared at it. The result's field is a `Box` (rule 1),
+                -- so `wrapIOResult` converts.
+                let vt ← match (← read).preludeRetArg[prim]?, r? with
+                  | some i, _ => pure (argTys[i]?.getD RR.Ty.box)
+                  | none, some r => pure r
+                  | none, none => ioPayloadFieldTy resTy
+                return ← wrapIOResult resTy (.call prim #[] passed) vt
   -- A generic prelude function in plain Reussir that does not store its
   -- values in runtime containers (`dbgTrace`, `dbgSleep`, `panic`, …) is
   -- instantiated at the value types themselves: its arguments and result
@@ -265,46 +303,37 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
     -- A function value becomes a Reussir closure for the prelude.
     let argTys ← (mask.zip params).filterMapM fun (m, p) => if m then some <$> lowerType p else pure none
     let cls := (← read).valueGenericCls.getD sym #[]
-    let passed ← (passedArgs.zip argTys).zipIdx.mapM fun ((a, t), i) => match t with
+    let passed ← (passedArgs.zip argTys).zipIdx.mapM fun ((a, t), i) => match t.rt with
       | .fn d c => if cls[i]?.getD false then coerce a t (.cls d c) else pure a
       | _ => pure a
     return .call sym tys passed
-  -- Array externs at `Array Nat`/`Array Int` use the one-word arrays,
-  -- when those represent them (`LowerCtx.natArrays`).
-  if let (some α, true) := (typeArgs[0]?, (← read).natArrays) then
-    let fam? := match ← lowerType (← toMonoTypeKeep α) with
-      | .named "Nat" => some "natarr"
-      | .named "Int" => some "intarr"
-      | _ => none
-    if let some fam := fam? then
-      if let some sym' := natArrSym? sym fam then
-        unless (← read).preludeFns.contains sym' do
-          unless (← get).missingExterns.any (·.1 == sym') do
-            modify fun s => { s with missingExterns := s.missingExterns.push (sym', orig) }
-        return ← bindReadIndex sym mask params passedArgs (.call sym' #[] ·)
-  -- Storage for each type argument: the storage type, and the conversions
-  -- of a value to and from it (`ArrayRepr.store`/`load`). An extern over
-  -- arrays of the type argument stores it as the arrays do (an enumeration
-  -- as its index, `arrayStorage`); any other as `arrayElemTy`.
-  let overArrays := (params.push ret).any fun p => (p.find? (·.isAppOf ``Array)).isSome
-  let mut storage : Array ArrayRepr := #[]
-  for t in typeArgs do
+  -- Storage for each type argument. A type parameter the extern stores
+  -- as array elements (its declared signature has `Array α`) is stored as
+  -- the arrays store it, in a `Box` (one array type, `RVec<Box>`); any
+  -- other in its own type, or wrapped (`cellStorage`).
+  let inArrays ← typeVarsInArrays orig
+  let mut storage : Array RR.Ty := #[]
+  for h : k in [:typeArgs.size] do
     -- Instance keys hold base-phase types.
-    let rt ← lowerType (← toMonoTypeKeep t)
-    let st ← if overArrays then arrayStorage rt else pure (← arrayElemTy rt).1
-    let some r ← arrayRepr? (.app "RVec" #[st]) | throwError "lean2rr: no storage for {rt.render}"
-    storage := storage.push r
+    let rt ← lowerType (← toMonoTypeKeep typeArgs[k])
+    storage := storage.push (← if inArrays[k]?.getD false then pure RR.Ty.box else pure (← cellStorage rt).1)
   -- Values whose declared type is a type parameter `α` are passed and
-  -- returned in `α`'s storage (e.g. `Array.push`'s element): wrapped if the
-  -- storage is a wrapper, as an index for an enumeration.
+  -- returned in `α`'s storage (e.g. `Array.push`'s element): boxed, or
+  -- wrapped if the storage is a wrapper.
   let (uses, retUse) ← typeVarUses orig
-  let reprOf (use : Option Nat) : Option ArrayRepr := do storage[← use]?
+  let storageOf (use : Option Nat) : Option RR.Ty := do storage[← use]?
+  let toStorage (a : RR.Expr) (t st : RR.Ty) : LowerM RR.Expr := do
+    if st == t then return a
+    if (← elemBoxOf? st).isSome then
+      let .named bn := st | return a
+      return .ctor bn none #[a]
+    coerce a t st
   let mut passed := #[]
   for i in [:params.size] do
     if mask[i]! then
       let a := args[i]!
-      match reprOf (uses[i]?.join) with
-      | some r => passed := passed.push (r.store a)
+      match storageOf (uses[i]?.join) with
+      | some st => passed := passed.push (← toStorage a (← lowerType params[i]!) st)
       | none => passed := passed.push a
   -- The prelude's function of that name (and through it the runtime):
   -- one that does not exist is reported, with the extern, by
@@ -312,10 +341,13 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
   unless (← read).preludeFns.contains sym do
     unless (← get).missingExterns.any (·.1 == sym) do
       modify fun s => { s with missingExterns := s.missingExterns.push (sym, orig) }
-  bindReadIndex sym mask params passed fun passed =>
-    let call := RR.Expr.call sym (storage.map (·.storage)) passed
-    match reprOf retUse with
-    | some r => r.load call
-    | none => call
+  let call ← bindReadIndex sym mask params passed fun passed => RR.Expr.call sym storage passed
+  match storageOf retUse with
+  | some st =>
+    let rt ← lowerType ret
+    if st == rt then return call
+    if (← elemBoxOf? st).isSome then return .field call 0
+    coerce call st rt
+  | none => return call
 
 end LeanToReussir

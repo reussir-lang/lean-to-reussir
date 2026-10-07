@@ -57,8 +57,12 @@ structure StateMachine where
 structure CodeCtx where
   vars : Std.HashMap FVarId (String × RR.Ty) := {}
   jumps : Std.HashMap FVarId JumpAction := {}
-  /-- Types of join-point parameters, for lowering jump arguments. -/
+  /-- Types of join-point parameters, for lowering jump arguments (of the
+parameters the join point takes: rule 4 removes the erased ones). -/
   jpParams : Std.HashMap FVarId (Array RR.Ty) := {}
+  /-- Which parameters of each join point it takes (not the erased ones,
+  rule 4); a jump passes the arguments of these. -/
+  jpKeep : Std.HashMap FVarId (Array Bool) := {}
   sm : Option StateMachine := none
   /-- Bodies of the join points in scope. -/
   jpBodies : Std.HashMap FVarId (Code .pure) := {}
@@ -86,6 +90,15 @@ structure CodeCtx where
   Opt/LazyFields); the names stay in scope, so a join point outlined there
   that jumps to one captures them too. -/
   captured : Std.HashMap String RR.Ty := {}
+  /-- The variables the declaration being lowered uses (`codeUses` of its
+  body): a field parameter that is not used is not converted to its own
+  type (`bindField`). -/
+  used : Std.HashSet FVarId := {}
+  /-- The field parameters that `bindField` converted to their own types,
+  with the name of the conversion's `let`: a binding drops such a `let`
+  when its code does not use it (`dropUnusedConvs`), and `lazy-fields`'
+  consuming re-match keeps it instead of converting the field again. -/
+  fieldConv : Std.HashMap FVarId String := {}
   /-- The state optional passes keep in the context, by the pass's name
   (`CodeCtx.getExt?`, `CodeCtx.setExt`). -/
   ext : NameMap Dynamic := {}

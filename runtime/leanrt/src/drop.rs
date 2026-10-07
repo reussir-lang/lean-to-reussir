@@ -4,7 +4,7 @@
 //! Native Lean frees an object iteratively (`lean_dec_ref_cold`): the
 //! children whose count drops to zero go onto a stack of objects to free,
 //! popped last first. Reussir's drop glue does the same with the local
-//! patch 0014: a record member it frees is pushed on a stack of pending
+//! patch 13-b: a record member it frees is pushed on a stack of pending
 //! work per thread (`reussir_rt::drop`), which the outermost drop empties.
 //! A record releases a container field through the container's Rust `Drop`
 //! (the opaque type's drop hook), which releases the elements, records
@@ -80,7 +80,7 @@ pub fn run(p: usize, step: Step) {
 }
 
 /// Release `x`, a value a reference or a task cell gave up (the prelude's
-/// `l2r_rc_set`, `l2r_ref_set`, `l2r_lcell_set`), as native `lean_dec`
+/// `l2r_rc_set_ref`, `l2r_ref_set`, `l2r_lcell_set`), as native `lean_dec`
 /// does. A shared value is only decremented. The last reference to a
 /// record is freed inside a free the runtime starts (`free_record`): its members go
 /// on the stack of pending work (Reussir's glue releases the first cell of
@@ -132,7 +132,7 @@ impl<X> ReleaseValue for reussir_rt::bridge::Bridge<X> {
         let p: usize = unsafe { std::mem::transmute_copy(&self) };
         if cfg!(target_arch = "aarch64") {
             // An immediate (nonzero top byte, never freed: local patch
-            // 0006) changes nothing; a shared cell is decremented in line.
+            // 06-a) changes nothing; a shared cell is decremented in line.
             if p >> 56 != 0 {
                 std::mem::forget(self);
                 return;
@@ -184,7 +184,18 @@ fn free_record<X>(p: usize) {
 /// above it.
 #[inline(always)]
 unsafe fn free_unique<X>(p: usize) {
-    reussir_rt::drop::__reussir_drop_defer(p as *mut u8, release_record::<X>);
+    free_deferred(p, release_record::<X>);
+}
+
+/// Free, as one pending cell (`free_unique`'s rule), a record whose last
+/// reference is given up and whose release is `release(p)`. Reussir's
+/// `__reussir_drop_defer` neither reads nor writes `p` (a deferral that is
+/// not `_wide`: the record's layout is not known here), so the drain calls
+/// `release` with the cell as it was. (A box's program payload is deferred
+/// by `any::release_last` itself, with `_wide` when its type allows.)
+#[inline(always)]
+pub(crate) unsafe fn free_deferred(p: usize, release: unsafe extern "C" fn(*mut u8)) {
+    reussir_rt::drop::__reussir_drop_defer(p as *mut u8, release);
     reussir_rt::drop::__reussir_drop_drain();
 }
 
@@ -437,7 +448,7 @@ impl<T> ReleaseElems for T {
 /// encoding of nullary variants) and frees the box when the count was 1.
 /// Here a shared element is decremented inline, as `lean_del` does
 /// natively, and an immediate is skipped (its release changes nothing:
-/// Reussir never frees one, local patch 0006); only an element whose count
+/// Reussir never frees one, local patch 06-a); only an element whose count
 /// is 1 goes through `<record>_ffi_release`, which frees it, so the order
 /// of releases and the stack's work are as with the generic loop.
 impl<X> ReleaseElems for reussir_rt::bridge::Bridge<X> {
@@ -492,6 +503,65 @@ impl<X> ReleaseElems for reussir_rt::bridge::Bridge<X> {
             }
             n -= 1;
             (*o).len = n;
+        }
+        true
+    }
+}
+
+/// A box (`any::LAny`, the element of every `Array` of a Lean type): an
+/// immediate releases nothing and is skipped; a shared payload is
+/// decremented in line; only a payload whose count is 1 goes to
+/// `any::release_last` (which frees one of leanrt's leaves at once and
+/// pushes anything else), after the block's `len` is set to the elements
+/// before it, and only then is the stack's depth read. So the order of
+/// releases and the stack's work are as with the generic loop
+/// (`release_from_end_each`), which stored `len` and read the depth for
+/// every element (12 instructions an element of an array of immediates;
+/// sieve frees a million-element `Array Bool` that way).
+impl ReleaseElems for crate::any::LAny {
+    #[inline(always)]
+    unsafe fn release_from_end(o: *mut Hdr, depth: usize) -> bool {
+        let e = elems::<u64>(o);
+        let mut n = (*o).len;
+        while n > 0 {
+            n -= 1;
+            let w = *e.add(n);
+            if crate::any::is_imm(w) {
+                continue;
+            }
+            let p = crate::any::addr_of(w) as *mut u32;
+            let c = *p;
+            if c != 1 {
+                *p = c - 1;
+                continue;
+            }
+            (*o).len = n;
+            crate::any::release_last(w);
+            if n == 0 {
+                break;
+            }
+            if reussir_rt::drop::depth() != depth {
+                return false;
+            }
+        }
+        true
+    }
+    #[inline(always)]
+    unsafe fn release_shared_from_end(o: *mut Hdr) -> bool {
+        let e = elems::<u64>(o);
+        let mut n = (*o).len;
+        while n > 0 {
+            let w = *e.add(n - 1);
+            if !crate::any::is_imm(w) {
+                let p = crate::any::addr_of(w) as *mut u32;
+                let c = *p;
+                if c == 1 {
+                    (*o).len = n;
+                    return false;
+                }
+                *p = c - 1;
+            }
+            n -= 1;
         }
         true
     }

@@ -1,44 +1,51 @@
-// Issue 3 (intended, not a bug): Reussir's Rust global allocator
-// (ReussirGlobalAlloc) raises every Rust allocation to 16-byte alignment.
-// Reussir builds mimalloc with MI_MAX_ALIGN_SIZE=8, so every Rust Box/Vec
-// allocation takes mimalloc's aligned path (mi_malloc_aligned), and later
-// frees in those pages take mimalloc's generic path.
+// Issue 3 (a cost; the 16-byte alignment itself is intended): Reussir's
+// Rust global allocator (ReussirGlobalAlloc) gives every Rust allocation
+// 16-byte alignment through mimalloc's aligned path (mi_malloc_aligned),
+// and Reussir builds mimalloc with MI_MAX_ALIGN_SIZE=8. For a size whose
+// size class is not a multiple of 16, mi_malloc_aligned allocates 15 bytes
+// more and moves the pointer when the block it got is not 16-aligned. That
+// marks the block's page, and every later free in the page takes
+// mimalloc's slow path.
 // The texture keeps 1000 Box<u64> (size 8, align 8) and 1000 mi_malloc(8)
-// blocks alive and counts how many are 16-aligned. Then it times
-// allocate/free pairs of 16 bytes through Box::new and through mi_malloc
-// (best of 5 rounds of 20,000,000).
-// Expected (an allocator that keeps Rust's alignment): about half of the
-// boxes 16-aligned, as for mi_malloc(8).
-// Reussir ef922049: "Box<u64> 16-aligned: 1000 of 1000"; the pairs took
-// 6-33% longer through Box::new on the (loaded) test machine.
+// blocks alive and counts the 16-aligned ones. Then it counts the boxes
+// that do not start a mimalloc block (moved pointers): it visits the
+// heap's blocks with mi_heap_visit_blocks.
+// Expected (patch 03-a): every box 16-aligned, none moved.
+// Reussir ef922049 and l2r-anybox 1eb710b4: every box 16-aligned, about
+// half of them moved ("Box<u64> 16-aligned: 1000 of 1000; ... boxes moved
+// inside a larger block: 500 of 1000").
 #[ffi(import)]
 fn probe() [{
-    use std::time::Instant;
-    extern "C" { fn mi_malloc(size: usize) -> *mut u8; fn mi_free(p: *mut u8); }
+    use std::ffi::c_void;
+    type Visit = extern "C" fn(*const c_void, *const c_void, *mut c_void, usize, *mut c_void) -> bool;
+    extern "C" {
+        fn mi_malloc(size: usize) -> *mut u8;
+        fn mi_free(p: *mut u8);
+        fn mi_heap_get_default() -> *mut c_void;
+        fn mi_heap_visit_blocks(heap: *const c_void, all: bool, visit: Visit, arg: *mut c_void) -> bool;
+    }
+    // The sorted addresses of the boxes and which of them start a block.
+    struct Seen { ptrs: Vec<usize>, found: Vec<bool> }
+    extern "C" fn visit(_h: *const c_void, _a: *const c_void, block: *mut c_void, _size: usize, arg: *mut c_void) -> bool {
+        if !block.is_null() {
+            let seen = unsafe { &mut *(arg as *mut Seen) };
+            if let Ok(i) = seen.ptrs.binary_search(&(block as usize)) { seen.found[i] = true; }
+        }
+        true
+    }
     let boxes: Vec<Box<u64>> = (0..1000u64).map(Box::new).collect();
     let raw: Vec<*mut u8> = (0..1000).map(|_| unsafe { mi_malloc(8) }).collect();
     let a = boxes.iter().filter(|b| (&***b as *const u64 as usize) % 16 == 0).count();
     let m = raw.iter().filter(|p| (**p as usize) % 16 == 0).count();
+    let mut ptrs: Vec<usize> = boxes.iter().map(|b| &**b as *const u64 as usize).collect();
+    ptrs.sort_unstable();
+    let mut seen = Seen { found: vec![false; ptrs.len()], ptrs };
+    unsafe { mi_heap_visit_blocks(mi_heap_get_default(), true, visit, &mut seen as *mut Seen as *mut c_void) };
+    let moved = seen.found.iter().filter(|f| !**f).count();
     for p in raw { unsafe { mi_free(p) } }
     drop(boxes);
-    let n = 20_000_000u64;
-    let (mut t_box, mut t_mi) = (f64::MAX, f64::MAX);
-    for _ in 0..5 {
-        let t0 = Instant::now();
-        for i in 0..n { drop(std::hint::black_box(Box::new([i, i]))); }
-        t_box = t_box.min(t0.elapsed().as_secs_f64());
-        let t1 = Instant::now();
-        for i in 0..n {
-            unsafe {
-                let p = std::hint::black_box(mi_malloc(16));
-                *(p as *mut u64) = i;
-                mi_free(p);
-            }
-        }
-        t_mi = t_mi.min(t1.elapsed().as_secs_f64());
-    }
     println!("Box<u64> 16-aligned: {} of 1000; mi_malloc(8) 16-aligned: {} of 1000", a, m);
-    println!("alloc/free pairs: Box::new {:.3} s, mi_malloc {:.3} s, ratio {:.2}", t_box, t_mi, t_box / t_mi);
+    println!("boxes moved inside a larger block: {} of 1000", moved);
 }];
 #[main]
 fn main() { probe(); }

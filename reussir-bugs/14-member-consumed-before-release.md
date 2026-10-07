@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (by 0009, the patch of
+**Kind:** bug. **Status:** patched (by 09-a, the patch of
 [bug 9](09-duplicate-bound-member.md)), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 `RcDispatchFusion`'s `fuseArm` fuses a match arm's member retains into the
@@ -12,7 +12,7 @@ consumes a bound member, such as storing it in a new cell that is released
 again before the scrutinee. The retain's reference is then already gone
 when the release transfers it: the member is freed while still in use (use
 after free). Found by review round 2 (finding R2-2, also generator seed
-5077) in unpatched code, while checking the first version of 0009.
+5077) in unpatched code, while checking the first version of 09-a.
 
 ## Symptom and repro
 
@@ -80,13 +80,13 @@ not seen in the corpus or test suites.
 
 ## Patch
 
-Fixed by 0009, the patch of [bug 9](09-duplicate-bound-member.md#patch)
+Fixed by 09-a, the patch of [bug 9](09-duplicate-bound-member.md#patch)
 (its second hunk, in the revision after review round 2): no fusion when an
 op before the release uses a bound member other than by a borrow or a
-retain (`consumesFusedMember`, which 0007 adds). 0007 had the same flaw in
+retain (`consumesFusedMember`, which 07-a adds). 07-a had the same flaw in
 its own scan, found in review (R2-1), and is fixed the same way
 ([issue 7](07-phantom-reuse-donor.md#patch)).
 
-The round-2 stack, which has the first 0009 (duplicate rule only), still
-crashes; with the revised 0007/0009: FIXED (`0`). `run.sh` on the patched
+The round-2 stack, which has the first 09-a (duplicate rule only), still
+crashes; with the revised 07-a/09-a: FIXED (`0`). `run.sh` on the patched
 build: `issue 14   FIXED       prints 0 (no wrong result in 1000 runs)   [lean2rr's flags]`.

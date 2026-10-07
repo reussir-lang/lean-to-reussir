@@ -19,7 +19,8 @@ runs Lean's own borrow inference on its mono declarations
 (`inferBorrowedParams`) and emulates Lean's reference counting at the
 calls where it matters:
 - a direct call whose parameter is borrowed, with an argument the caller
-  owns of a type that may hold a resource (`mayHoldResource`), keeps the
+  owns of a type that may hold a resource (`mayHoldResource`, on mono
+  types), keeps the
   argument until the call returns (`l2r_release_after`), as Lean's
   `explicitRC` puts the caller's `dec` after the call; an argument the
   caller only borrows itself (a borrowed parameter, or a field or array
@@ -75,13 +76,7 @@ pipeline up to `inferBorrow`, as Lean compiles its own declarations after
 (projections pushed into branches, reset/reuse inserted: a value reused in
 place is owned). Extern instances get the borrow annotations (`@&`) of
 their extern; a callee with no known signature takes its arguments owned.
-lean2rr's own mono type of a typed reference, `_l2r.TypedRef α`
-(`typedRefName`, Stage 3), is not a Lean constant: Lean's `toImpureType`
-would fail on it (`Unknown constant`), so it is declared for the run as an
-opaque type, which Lean represents as `tobject`, as the `lcAny` its own mono
-phase gives a reference (cross-test XT-2: a program with an `IO.Ref` of a
-structure lost the emulation). The environment is restored afterwards.
-A failure is an error: the emulation is all or nothing, and the program
+The environment is restored afterwards. A failure is an error: the emulation is all or nothing, and the program
 would silently get Reussir's release times. -/
 def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
     CoreM (NameMap (Array Bool)) := do
@@ -95,8 +90,6 @@ def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
     let some bi := m.impurePasses.findIdx? (·.name == `inferBorrow) | fail "no `inferBorrow` pass"
     let impure := m.impurePasses.extract 0 (bi + 1)
     try
-      let typeToType : Expr := .forallE `α (.sort 1) (.sort 1) .default
-      addDecl (.axiomDecl { name := typedRefName, levelParams := [], type := typeToType, isUnsafe := true })
       CompilerM.run (phase := .mono) do
         let names := decls.foldl (fun s d => s.insert d.name) ({} : NameSet)
         let mut ds := #[]
@@ -224,30 +217,47 @@ def borrowInfo : LowerM (NameMap (Array Bool) × FVarIdSet) := do
   modify fun s => { s with borrowInfo := some r }
   return r
 
-/-- Whether a value of Reussir type `t` may hold a resource with an
-observable release (see `resourceExterns`): a handle (`IO.FS.Handle`,
-whose mono type is `lcAny`, so also a `Box`), or a record, array or
-reference with such a field or element (`IO.Process.Child` holds its pipes
-in `Box` fields). Closures are not looked into. -/
-partial def mayHoldResource (t : RR.Ty) (seen : List RR.Ty := []) : LowerM Bool := do
-  if seen.contains t then return false
-  let seen := t :: seen
-  match t with
-  | .named "LHandle" => return true
-  | .named n =>
-    if n == boxName then return true
-    if let some info := (← get).typeInfos[n]? then
-      for c in info.ctorOrder do
-        let some l := info.ctors.find? c | continue
-        for ft in l.posTys do
-          if ← mayHoldResource ft seen then return true
-      return false
-    if let some (e, _) := (← get).refInfos[n]? then return ← mayHoldResource e seen
-    return false
-  | .app "RVec" #[st] =>
-    let (v, _) ← storageElem st
-    mayHoldResource v seen
-  | _ => return false
+/-- Whether a value of mono type `e` may hold a resource with an
+observable release (see `resourceExterns`): a handle (`IO.FS.Handle`, whose
+mono type is `lcAny`), so also any value of unknown type (`lcAny`), or a
+value of an inductive or array with such a field or element at its type
+arguments (a reference is `lcAny` in mono code) (`IO.Process.Child` holds its pipes in `lcAny` fields;
+`List Nat` holds none). Decided on mono types, not Reussir types: a field
+of a parameter's type is a `Box` in every instantiation (one type per
+inductive), which would make every container look like a handle's.
+Closures, thunks and tasks are not looked into. Types already being
+examined count as not holding one (the least fixed point). -/
+partial def mayHoldResource (e : Expr) (seen : Array Expr := #[]) : LowerM Bool := do
+  let e := e.consumeMData.headBeta
+  if seen.contains e then return false
+  let seen := seen.push e
+  if e.isForall || e.isSort then return false
+  let .const n _ := e.getAppFn | return true
+  if n == ``lcAny || n == ``IO.FS.Handle then return true
+  let args := e.getAppArgs
+  if n == ``Array then
+    return ← match args[0]? with
+      | some a => mayHoldResource a seen
+      | none => pure true
+  if n == ``lcErased || n == ``lcVoid || builtinTypeNames.contains n then return false
+  let env ← getEnv
+  let some ival := (match env.find? (n ++ `_impl), env.find? n with
+      | some (.inductInfo iv), _ => some iv
+      | _, some (.inductInfo iv) => some iv
+      | _, _ => none) | return true
+  if ival.type.getForallBody.isProp then return false
+  let params := (List.range ival.numParams).toArray.map fun i => (args[i]?.getD anyExpr).consumeMData
+  for c in ival.ctors do
+    let mut ty ← instantiateForall (← getOtherDeclBaseType c []) params
+    repeat
+      match ty.headBeta with
+      | .forallE _ d b _ =>
+        let m ← toMonoTypeKeep d
+        if !(m.isErased || m == mkConst ``lcVoid) then
+          if ← mayHoldResource m seen then return true
+        ty := b.instantiate1 anyExpr
+      | _ => break
+  return false
 
 /-- The arguments of a call of declaration `f` (arguments `args`, the
 first `n` passed to `f`) that the caller keeps until the call returns: the
@@ -260,6 +270,7 @@ def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) 
     LowerM (Array (String × RR.Ty)) := do
   let (flags, lent) ← borrowInfo
   let some bs := flags.find? f | return #[]
+  let d? := (← read).decls.find? f
   let args := args.extract 0 n
   let mut out := #[]
   for h : i in [:args.size] do
@@ -271,7 +282,9 @@ def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) 
     if lent.contains x then continue
     let some (v, t) := ctx.vars[x]? | continue
     if out.any (·.1 == v) then continue
-    if ← mayHoldResource t then out := out.push (v, t)
+    -- The type of the parameter it is passed to (the variable's).
+    let some p := (d?.bind (·.params[i]?)) | continue
+    if ← mayHoldResource p.type then out := out.push (v, t)
   return out
 
 /-- `call` (of type `ret`) followed by the release of `keeps`: the value of
@@ -291,21 +304,29 @@ def releaseAfter (call : RR.Expr) (ret : RR.Ty) (keeps : Array (String × RR.Ty)
   return .block ⟨lets, .var r⟩
 
 /-- The function a function value of declaration `f` (Reussir function
-`fn`, parameter types `params`, result `ret`) calls: `fn` itself, or, when
-Lean borrows a parameter that may hold a resource, `fn_boxed`, which
-releases the borrowed arguments after the call (Lean's `_boxed`). -/
-def boxedTarget (f : Name) (fn : String) (params : Array RR.Ty) (ret : RR.Ty) : LowerM String := do
+`fn`, parameter types `params` by Lean position, of which it takes those
+`keep` marks (rule 4a; empty: all), result `ret`) calls: `fn` itself, or,
+when Lean borrows a parameter that may hold a resource, `fn_boxed`, which
+releases the borrowed arguments after the call (Lean's `_boxed`). Lean's
+borrow flags are by Lean position. -/
+def boxedTarget (f : Name) (fn : String) (params : Array RR.Ty) (keep : Array Bool) (ret : RR.Ty) :
+    LowerM String := do
   let (flags, _) ← borrowInfo
   let some bs := flags.find? f | return fn
+  let some d := (← read).decls.find? f | return fn
+  -- The parameters `fn` takes, with their Lean positions.
+  let taken := params.zipIdx.filter fun (_, i) => keep[i]?.getD true
   let mut kept := #[]
-  for h : i in [:params.size] do
+  for h : k in [:taken.size] do
+    let (_, i) := taken[k]
     if bs[i]?.getD false then
-      if ← mayHoldResource params[i] then kept := kept.push i
+      let some p := d.params[i]? | continue
+      if ← mayHoldResource p.type then kept := kept.push k
   if kept.isEmpty then return fn
   let name := fn ++ "_boxed"
   unless (← hasFn name) do
-    let ps := params.mapIdx fun i t => (s!"a{i}", t)
-    let body ← releaseAfter (.call fn #[] (ps.map (.var ·.1))) ret (kept.map fun i => (s!"a{i}", params[i]!))
+    let ps := taken.mapIdx fun k (t, _) => (s!"a{k}", t)
+    let body ← releaseAfter (.call fn #[] (ps.map (.var ·.1))) ret (kept.map fun k => (s!"a{k}", taken[k]!.1))
     modify fun s => { s with fns := s.fns.push (.fn name ps ret (.ofExpr body)) }
   return name
 

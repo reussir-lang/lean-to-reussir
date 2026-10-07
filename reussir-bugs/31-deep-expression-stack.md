@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (crash on valid input). **Status:** patched (0063), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** bug (crash on valid input). **Status:** patched (31-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug.** rrc aborts with "thread 'main' has overflowed its stack"
 on a sum of 8000 terms, or a literal in 100000 parentheses. Reussir's
@@ -69,7 +69,7 @@ main thread.
 ## Patch
 
 Patch file
-[`patches/0063-l2r-local-bug-31-run-rrc-s-driver-on-a-thread-with-a.patch`](patches/0063-l2r-local-bug-31-run-rrc-s-driver-on-a-thread-with-a.patch)
+[`patches/31-a-big-driver-stack.patch`](patches/31-a-big-driver-stack.patch)
 (`l2r-local` commit `f8afea34`, applied in `./reussir`; `l2r-local` head cc8e5aa5; made as commit `b2e0bfd3`
 in a scratch checkout; it depends on no other patch). `main` runs the driver on a thread with a 1 GiB
 stack:
@@ -135,7 +135,7 @@ panic prints once and exits 101, a stack overflow still aborts (134), and
 `process::exit` codes pass through. **RV8RE-02** (low): the 1 GiB stack is
 reserved address space, which `ulimit -v` counts, so under a limit between
 about 0.4 and 1.5 GB rrc panicked at startup ("failed to spawn the driver
-thread", exit 101) where it used to compile. Fixed in the final 0063: if
+thread", exit 101) where it used to compile. Fixed in the final 31-a: if
 the thread cannot be created, the driver runs on the main thread as
 before (test `frontend/driver_stack_address_limit.rr`, a build under
 `ulimit -v 1000000`). lean2rr's `bin/l2r` limit (16 GB) and the memory cap

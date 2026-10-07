@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0016), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also works around it
+**Kind:** bug. **Status:** patched (21-a), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also works around it
 (it escapes `[` in its string literal table).
 
 **Verdict: bug.** Reussir has two implementations of placeholder
@@ -16,7 +16,7 @@ placeholders `[:Name:]`, which rrc replaces with the function's type or
 value arguments before handing the body to rustc. The C++ code that does
 the replacement treated every `[:` as the start of a placeholder. When no
 `:]` followed, it dropped the `[:`, and it did not look for any later `[:`
-either. Patch 0016 makes the C++ code keep such a `[:` as written, as the
+either. Patch 21-a makes the C++ code keep such a `[:` as written, as the
 Rust implementation does.
 
 ## Symptom and repro
@@ -118,7 +118,7 @@ so lean2rr itself no longer depends on it.
 ## Patch
 
 Patch file
-[`patches/0016-l2r-local-bug-21-keep-an-unterminated-in-a-polymorph.patch`](patches/0016-l2r-local-bug-21-keep-an-unterminated-in-a-polymorph.patch)
+[`patches/21-a-unterminated-placeholder.patch`](patches/21-a-unterminated-placeholder.patch)
 (`l2r-local` commit `17657841`, applied in `./reussir`; `l2r-local` head cc8e5aa5). Write the pending `[:`
 before the rest of the body, as the Rust implementation does:
 
@@ -155,7 +155,7 @@ in which every `[:` is closed take the old path unchanged.
   `replace "[:" "<>"`. Its output equals native Lean's (it passes with or
   without the patch, thanks to lean2rr's escape of `[`).
 - Round-6 review (RV6L-01) traced the C++ scan and found the patch correct:
-  with 0016, `monomorphize` returns its input unchanged when there are no
+  with 21-a, `monomorphize` returns its input unchanged when there are no
   substitutions, the Rust frontend never attaches any, and Reussir has no
   other substitution site (`CompilePolymorphicFFI.cpp` and `ffi.rs` are
   the only two). It also checked the e2e test's values (4 and 43, so 443).

@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (miscompile). **Status:** patched (0021), applied in
+**Kind:** bug (miscompile). **Status:** patched (26-a), applied in
 `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug.** When a unique cell is reused for a new record, Reussir
@@ -53,10 +53,10 @@ expected 25009648`.
 Through lean2rr (`morepatches-a/launder-bug/lean-bool-loop.lean`, the same
 program in Lean, and `lean-uint8-loop.lean` with a `UInt8` field instead of
 the `Bool`): native Lean prints `25009648`; lean2rr with Reussir 91da4f80
-(or with 0018-0020) prints `2`; with 0021, `25009648`. Small variations
+(or with 08-a, 02-b and 01-a) prints `2`; with 26-a, `25009648`. Small variations
 (`morepatches-a/launder-bug/`, five programs) fail under `-O aggressive`
 in the packed and the declaration-order layouts and under lean2rr's flags;
-one is right on 91da4f80 by luck and wrong once 0018-0020 change its layout.
+one is right on 91da4f80 by luck and wrong once 08-a, 02-b and 01-a change its layout.
 
 Found by differential fuzzing of the patches for bugs 1, 2 and 8 (random
 record and enum shapes against a reference evaluator; agent A,
@@ -110,7 +110,7 @@ fields) is enough. No lean2rr workaround.
 ## Patch
 
 Patch file
-[`patches/0021-l2r-local-bug-26-no-llvm.assume-launder-p-p-after-an.patch`](patches/0021-l2r-local-bug-26-no-llvm.assume-launder-p-p-after-an.patch)
+[`patches/26-a-no-launder-assume.patch`](patches/26-a-no-launder-assume.patch)
 (`l2r-local` commit `9a171995`; applied in `./reussir`, `l2r-local`
 cc8e5aa5). No assume after the launder, in both lowerings:
 
@@ -145,7 +145,7 @@ unsound folds.
   that none follows the launder.
 - `run.sh`: `issue 26   FIXED       prints 25009648   [-O aggressive]`.
 
-**Review.** Review rv8/reussir (patches 0018-0021, 0027, 0040): no
+**Review.** Review rv8/reussir (patches 08-a, 02-b, 01-a, 26-a, 27-a and 40-a): no
 correctness defect.
 
 - Every launder, `invariant.group` and assume in `lib/` was checked: two
@@ -157,9 +157,9 @@ correctness defect.
   of launders (9, 62, 112); static load and store counts are essentially
   unchanged.
 - A struct cell, a two-arm enum and the repro's enum rebuilt in place in
-  loops: right at every level and with lean2rr's flags (without 0021 the
+  loops: right at every level and with lean2rr's flags (without 26-a the
   repro's case prints 2). The Lean repros through lean2rr print 25009648.
-- The pending-stack frees (0013-0015) never reuse tokens in drop glue, so
+- The pending-stack frees (13-a to 13-c) never reuse tokens in drop glue, so
   they have no launders.
 
 **Effect on lean2rr.** Fixes wrong results in programs that rebuild a cell

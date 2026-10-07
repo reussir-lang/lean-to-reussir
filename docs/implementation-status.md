@@ -38,7 +38,7 @@ same standard output, standard error and exit code.
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (344 programs, `tests/runtime`) | at its last full run (the gate of switch step 10, branch `lean-runtime-step10` at 0410be6 on dev d39294a, lean-runtime e5e502e, 2026-10-06), 336 of 337 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`); the classic corpus 54 of 54 with all optional passes on and with all off; the Reussir benchmark suite 18 of 18. At the gate of `perf-const-reads` (e7bc212 on dev 9a2ddf6, lean-runtime 83f7127, 2026-10-06), 331 of 332 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`). At the gate of switch step 8 (branch `lean-runtime-step8` at 8e5c5eb on dev d3032e4, lean-runtime e34cd61, 2026-10-05), 326 of 327 identical to native Lean 4.34.0 (`RtNetEffectPoll` counted after one re-run: in the gate's run its native build printed `accepted during the loop: false`, a timing flake of native's that its re-runs did not repeat; lean2rr's output was the expected one), nine of them through expectation files: eight where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`, `RtStartupFdExhausted`, `RtRefSetDuringModify`, `RtRefSwapDuringModify`; plan §10, "Runtime: Lean bugs we do not reproduce"), and `RtCseFnResult` (its trace prints once natively and twice through lean2rr, which Lean allows: plan §10, "Merging after erasure"); 1 expected failure: `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve; `RtLiftedLimits` and `RtInternalPanic` compare each side with its own expectation files where lean2rr lifts a limit of Lean's runtime (plan §10, LB-04 to LB-12). lean-runtime's own program cases through lean2rr's builds: of its IO areas (io, process, streams, temp, uvsys, time) 90 of 90 at lean-runtime 9d27ce0 (switch step 5); of its task areas (tasks, sync, refs, taskio, uvloop, net) 163 of 163 at lean-runtime ed1e8af (switch step 6), a subset of 26 of them (references shared with tasks, promises) 26 of 26 at 528fcbb (switch step 6), at 471f458 (switch step 7) a subset of 39 (those 26, the other `sync` cases, `tasks/poll_threshold_mutex`, and the startup and title cases `io/initializing`, `io/startup_*`, `uvsys/process_title`, `uvsys/title_*`) 39 of 39, and at e34cd61 (switch step 8) a subset of 94 (those 39, 31 panic, exit and stream cases such as `panics/replicate_overflow`, `process/output_*oom*`, `tasks/get_in_sync_task*`, `tasks/promise_in_initialize*`, `io/exit_*`, `streams/stream_redirect`, and the 27 `net` cases) 94 of 94 |
+| Runtime test suite (487 programs, `tests/runtime`) | at its last full run (the gate of switch step 10, branch `lean-runtime-step10` at 0410be6 on dev d39294a, lean-runtime e5e502e, 2026-10-06), 336 of 337 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`); the classic corpus 54 of 54 with all optional passes on and with all off; the Reussir benchmark suite 18 of 18. At the gate of `perf-const-reads` (e7bc212 on dev 9a2ddf6, lean-runtime 83f7127, 2026-10-06), 331 of 332 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`). At the gate of switch step 8 (branch `lean-runtime-step8` at 8e5c5eb on dev d3032e4, lean-runtime e34cd61, 2026-10-05), 326 of 327 identical to native Lean 4.34.0 (`RtNetEffectPoll` counted after one re-run: in the gate's run its native build printed `accepted during the loop: false`, a timing flake of native's that its re-runs did not repeat; lean2rr's output was the expected one), nine of them through expectation files: eight where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`, `RtStartupFdExhausted`, `RtRefSetDuringModify`, `RtRefSwapDuringModify`; plan §10, "Runtime: Lean bugs we do not reproduce"), and `RtCseFnResult` (its trace prints once natively and twice through lean2rr, which Lean allows: plan §10, "Merging after erasure"); 1 expected failure: `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve; `RtLiftedLimits` and `RtInternalPanic` compare each side with its own expectation files where lean2rr lifts a limit of Lean's runtime (plan §10, LB-04 to LB-12). lean-runtime's own program cases through lean2rr's builds: of its IO areas (io, process, streams, temp, uvsys, time) 90 of 90 at lean-runtime 9d27ce0 (switch step 5); of its task areas (tasks, sync, refs, taskio, uvloop, net) 163 of 163 at lean-runtime ed1e8af (switch step 6), a subset of 26 of them (references shared with tasks, promises) 26 of 26 at 528fcbb (switch step 6), at 471f458 (switch step 7) a subset of 39 (those 26, the other `sync` cases, `tasks/poll_threshold_mutex`, and the startup and title cases `io/initializing`, `io/startup_*`, `uvsys/process_title`, `uvsys/title_*`) 39 of 39, and at e34cd61 (switch step 8) a subset of 94 (those 39, 31 panic, exit and stream cases such as `panics/replicate_overflow`, `process/output_*oom*`, `tasks/get_in_sync_task*`, `tasks/promise_in_initialize*`, `io/exit_*`, `streams/stream_redirect`, and the 27 `net` cases) 94 of 94 |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
@@ -100,7 +100,7 @@ traits.
 Reussir generates the reference counting itself, and normally treats every
 handle as a pointer whose count it increments when the value is copied. A
 small `Nat` is not a pointer, so lean2rr declares `Nat` and `Int` as
-*tagged* opaque handles, a small local Reussir extension (patch 0050):
+*tagged* opaque handles, a small local Reussir extension (patch 41-a):
 Reussir counts such a handle only when its low bit is clear, exactly as
 Lean's C runtime tests the bit before every count update. Copying or
 dropping a small `Nat` is a bit test; it is never allocated.
@@ -124,9 +124,9 @@ Compared with native Lean:
 - a `Nat` or `Int` field in a record takes 8 bytes, as natively;
 - a big number is one allocation (natively two: the object and GMP's
   limbs), 32 bytes for a two-limb number (natively 56);
-- in the rare places where a `Nat` has to go through the generic `Box`
-  (code whose types cannot be made concrete, below), boxing it allocates;
-  natively a small `Nat` is never allocated.
+- a `Nat` in the generic `Box` (a field or an array element of a type
+  parameter's type, code whose types cannot be made concrete, below) is
+  its own word when small, as natively: boxing it allocates nothing.
 
 Peak memory (max RSS, 2026-10-03, against the native build): `rbmap`
 (a red-black tree with `Nat` keys and values) 0.84× (with the earlier
@@ -144,26 +144,27 @@ Liasolver 5.8 MB, within a few hundred KB of the two-allocation layout
 | Lean | Representation | Notes |
 |---|---|---|
 | `String` | runtime `LStr`: one block like Lean's string object (reference count, byte size, capacity, character count, then the UTF-8 bytes) | copy-on-write: modified in place when unique, like Lean |
-| `Array α` | runtime vector of `α`'s storage type: one block, header (count, size, capacity) then the elements | in place when unique; enumerations stored as small indices; non-shareable values wrapped in a one-field box (Lean boxes elements too) |
-| `ByteArray`, `FloatArray` | arrays of `u8`, `f64` | `ByteArray.mk`/`data` cost nothing |
+| `Array α` | runtime vector of boxes, one word each whatever `α` is: one block, header (count, size, capacity) then the elements | in place when unique; a small `Nat`, a `Bool` or an enumeration is the word itself, a `Float` a cell, as natively |
+| `ByteArray`, `FloatArray` | arrays of `u8`, `f64` | `ByteArray.mk`/`data` copy the elements in one loop, as natively |
 | `IO.Ref α` / `ST.Ref` | a shared mutable cell | mutations seen through every alias, as in Lean |
 | `Thunk α`, `Task α` | a shared cell holding a state machine (pending / running / done) | lazy, computed once |
 | file handles, processes, sockets, timers | runtime handles | closed when the last reference goes, as in Lean |
 
 ### Your own types
 
-Each inductive type at each type instantiation becomes one Reussir type
-with the same constructors and fields:
+Each inductive type becomes one Reussir type, whatever its type
+arguments, with the same constructors and fields. A field whose type is a
+type parameter is a `Box` (one word, as Lean's `lean_object*`):
 
 ```
 inductive Tree α | leaf | node (l : Tree α) (k : α) (r : Tree α)
 ```
 
 means "a `Tree α` is either `leaf` or `node` with a left subtree, a value
-and a right subtree", and at `α = Nat` it becomes roughly
+and a right subtree", and for every `α` it becomes roughly
 
 ```rust
-enum Tree_Nat { leaf, node(Tree_Nat, Nat, Tree_Nat) }   // heap-allocated, reference counted
+enum Tree { leaf, node(Tree, Box, Tree) }   // heap-allocated, reference counted
 ```
 
 A type whose constructors have no fields (like `Ordering`) is a plain value
@@ -184,10 +185,10 @@ Monomorphization makes almost everything concrete. What stays generic
 (polymorphic recursion such as a monad transformer applied to itself, or
 an unsafe inductive family holding itself at a larger index, `Nest (α × α)`
 in `Nest α`; existential types; values stored in `Dynamic`) uses a uniform
-type `Box`: an enum with one variant per concrete type the program ever
-boxes.
-Converting between a concrete and the uniform representation is generated
-code, element by element for arrays and lists.
+type `Box`: one word, which holds a small value itself or points to an
+object and records the object's type number. Each datatype has one
+layout, so a value goes into a box and out of it as it is: nothing is
+rebuilt.
 
 ## An example
 
@@ -372,8 +373,8 @@ with examples, is §10 of the translation plan.
   answers the address of the value's own cell, or a word computed from a
   scalar value (`UInt64` and `Float` their bits), so `ptrEq`,
   `ptrEqList` and `withPtrAddr` may answer otherwise than natively (a
-  value converted between representations is a new object, not `ptrEq` to
-  its original), but `ptrEq` answering `true` still means equal values,
+  value cast to an inductive whose layout differs is a new object, not
+  `ptrEq` to its original), but `ptrEq` answering `true` still means equal values,
   and `IO.Ref.ptrEq` is exact. Casting an object to a number
   (`unsafeCast` to read an address) gives a deterministic stand-in
   instead of a real address.
@@ -423,6 +424,12 @@ with examples, is §10 of the translation plan.
   with an offset or length of 2^64 or more (LB-06); a power too big for
   GMP ends at once with `INTERNAL PANIC: out of memory`, where natively
   GMP kills the program with SIGFPE (LB-05).
+- **Lean compiler bugs not reproduced** (plan §10, "Compiler: Lean bugs we
+  do not reproduce"): a `match` whose one arm gives a type or a proof and
+  whose other arm gives data computes with the data, as the kernel does,
+  where native Lean's join point reads `◾` (the boxed 0) in its place and
+  gives a wrong value or a crash (`joinTypes` types the parameter `◾`;
+  tests `RtJoinErased*`).
 - **Lean code only, plus Lean's runtime library** (the owner's decision,
   2026-10-03). The C code of a program or of a package it requires
   (Lake's `extern_lib`) is never compiled, linked or called: an
@@ -525,7 +532,7 @@ for well under a second, so their ratios are rough):
 
 Where lean2rr is not faster, the known causes are: freeing through the
 pending-work stack that bounded-depth frees need (deriv, monadic-interp;
-local patch 0015 made it cheaper), and Reussir having no borrowed
+local patch 13-c made it cheaper), and Reussir having no borrowed
 parameters, so code that walks shared data (looking up a hash bucket
 shared between map versions) writes reference counts that native Lean
 only reads (hash-map-heavily-shared).
@@ -544,10 +551,8 @@ soundness.
 |---|---|
 | `field-order` | record fields ordered by size, so records have no padding |
 | `value-structs` | a structure with one field is represented by the field |
-| `nat-arrays` | `Array Nat`/`Array Int` with one word per element |
-| `split-map-loops` | an `Array.map` that changes the element representation writes a new array instead of going through `Box` |
-| `uniform-updates` | an update of a container whose element type depends on a value (`Array lcAny`) runs on the uniform array, boxing one element, instead of converting the whole array there and back at each step |
 | `placeholder-cache` | Lean's placeholder values built once |
+| `boxed-consts` | a constant whose boxing allocates (a `Float`, a `UInt64` from 2^63) boxed once, as native Lean's `_boxed_const` |
 | `float-lits` | float literals computed at compile time |
 | `cheap-consts` | constants made of small literals (one-word `Nat`/`Int` values only) recomputed instead of cached |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code |
@@ -566,21 +571,24 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches
-(branch `l2r-local` of the checkout in `./reussir`, head `d79f8b70`:
-Reussir `ef922049` plus 37 patches; the patches are in
-[`../reussir-bugs/patches/`](../reussir-bugs/patches/), each explained in
-depth in the file of its issue, indexed in
-[`../reussir-bugs/README.md`](../reussir-bugs/README.md)).
+(Reussir `ef922049` plus the patches of
+[`../reussir-bugs/patches/series`](../reussir-bugs/patches/series), in
+that order; each patch file is named after its issue, `NN-x-*.patch`, and
+explained in depth in the file of that issue, indexed in
+[`../reussir-bugs/README.md`](../reussir-bugs/README.md)). Branch
+`l2r-local` of the checkout in `./reussir` (head `d79f8b70`) has the
+first 37 of the 39 patches; 38-a and 13-d, which `scripts/l2r.py`
+requires, are not on it yet.
 They are local only, never submitted upstream, and each is reviewed
 adversarially.
 An independent audit checked whether each problem is really a Reussir
-bug. The 35 documented problems are numbered issues; their kind says what
-each is: 20 are bugs (erroneous behaviour), 11 are costs, 1 is a missed
-optimization, 2 are missing features and 1 is intended behaviour. Only
-the bugs are wrong: the others have correct output, and their patches are
-optimizations or features, not fixes. 32 issues are patched in
-`l2r-local` (35 patches, all applied; 0065 and 0066 since 2026-10-04) and
-3 are documented only; two more patches add features lean2rr needs:
+bug. The 40 documented problems are numbered issues (37 is reserved);
+their kind says what each is: 20 are bugs (erroneous behaviour), 11 are
+costs, 3 are missed optimizations, 5 are missing features and 1 is
+intended behaviour. Only the bugs are wrong: the others have correct
+output, and their patches are optimizations or features, not fixes. 34
+issues have patches (39 patch files; issue 14 is fixed by issue 9's patch
+09-a) and 5 are documented only:
 
 - **Real bugs fixed (19 patches):** wrong values after in-place reuse of a
   structure or variant cell (bug 2), `[value]` enum bytes lost (1), a
@@ -594,7 +602,7 @@ optimizations or features, not fixes. 32 issues are patched in
   text was silently dropped (33), Reussir's own build (18), and executables
   linked with text relocations (34: lean2rr's driver also passes
   `--relocation-mode pic`).
-- **A real bug with a flag workaround:** a static cell freed after 2^32
+- **A real bug with a flag workaround (1 patch):** a static cell freed after 2^32
   references (6). Another nullary-constructor encoding avoids it; the patch
   keeps the default encoding for speed.
 - **Build-time costs, not bugs, with a small optimization (10 patches):**
@@ -608,32 +616,33 @@ optimizations or features, not fixes. 32 issues are patched in
   program's 16 s; the patch caches the bitcode, and lean2rr's driver gives
   rrc the cache directory). The superlinear ones can make large builds
   infeasible; the output is correct either way.
-- **A missed optimization, not a bug:** token reuse picking a cell that
-  never frees (7). Its optimization patch stays because the use-after-free
+- **A missed optimization, not a bug (1 patch):** token reuse picking a
+  cell that never frees (7). Its optimization patch stays because the use-after-free
   fix (9) builds on it.
-- **A missing feature, not a bug, implemented locally:** freeing long or deep
-  structures without recursion, in Lean's order (13, three patches;
-  lean2rr's runtime needs it), and the same for a member behind
-  `Nullable` (27).
-- **Local additions (no entry):** a hook at the end of a drain that lean2rr's
-  runtime uses for promises released inside a free (0040, required since
-  switch step 6), and opaque
-  handles that may be a tagged number instead of a pointer (0050), so that
-  `Nat` and `Int` are one word with no allocation for small values
-  (lean2rr's prelude needs it).
+- **Missing features, not bugs, implemented locally (8 patches):** freeing
+  long or deep structures without recursion, in Lean's order (13, four
+  patches; lean2rr's runtime needs them), and the same for a member behind
+  `Nullable` (27); a hook at the end of a drain that lean2rr's runtime
+  uses for promises released inside a free (40, required since switch
+  step 6); opaque handles that may be a tagged number instead of a pointer
+  (41), so that `Nat` and `Int` are one word with no allocation for small
+  values (lean2rr's prelude needs it); and foreign data in the top 16 bits
+  of such a handle (38, for the one-word `Box`).
 - **Documented only, not bugs:** Rust allocations on mimalloc's aligned
-  path (3, intended), and two costs whose removal would be a redesign: the
+  path (3, intended), two costs whose removal would be a redesign: the
   inline expansion of copies of `[value]` records shared in a DAG (25) and
-  the size of `--emit mlir` dumps (32).
+  the size of `--emit mlir` dumps (32), and two missed optimizations: no
+  inline attribute on texture trampolines (36) and a reuse token taken
+  from a release that never frees (39).
 
 Every Reussir problem met so far is documented with a reproducer,
 including those lean2rr works around and those the audit classified as
 intended behaviour or build costs, in
 [`../reussir-bugs/`](../reussir-bugs/README.md), whose status table also
 shows which patches are applied. lean2rr keeps its workarounds, so that it
-also works with an unpatched Reussir (except that its runtime needs patch
-0014, and since switch step 6 patch 0040, which `scripts/l2r.py` requires:
-`REQUIRED_REUSSIR_PATCHES`).
+also works with an unpatched Reussir (except for the features it
+requires: its runtime needs patch 13-b, its prelude 41-a, and
+`scripts/l2r.py` requires 40-a, 38-a and 13-d: `REQUIRED_REUSSIR_PATCHES`).
 Two parts of Reussir that its author offered (LLVM coroutine bindings,
 dynamic-extent arrays) are not needed: lean2rr's tasks need stackful
 contexts, which lean-runtime's scheduler has (corosensei coroutines), and

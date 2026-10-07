@@ -3,13 +3,13 @@
 afterwards in different ways: uniform updates only (and captured by a
 `dbgTrace` closure on a rare path), a read at the precise type (`foldl` at
 `Nat`, every 997 steps), captured in a closure (review of RV9C-02's fix,
-rv9/containers/c02review/round2, C2Jp). `uniform-updates` keeps each chain
-uniform: a join point's parameter planned in one round can be the jump
-argument that lets another join point's parameter be planned, so the
-candidates are made until none is added (a first version depended on the
-order in which it looked at the join points: the `foldl` column stayed
-`Array Nat` and was converted at every step). Output checked here;
-tests/runtime/conv-count-check.sh runs it at two sizes. -/
+rv9/containers/c02review/round2, C2Jp). `uniform-updates` kept each chain
+uniform by a fixpoint over the join points (a first version depended on
+the order in which it looked at them: the `foldl` column stayed
+`Array Nat` and was converted at every step). Since rule 1 (one
+representation per `Array α`, which deleted the pass) the columns are one
+array type through every join point. Output checked here; tests/runtime/
+conv-count-check.sh checks that the code has no conversion function. -/
 inductive Ty | nat | str
   deriving BEq
 

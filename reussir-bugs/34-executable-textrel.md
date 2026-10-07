@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (link). **Status:** patched (0065), applied in `./reussir`
+**Kind:** bug (link). **Status:** patched (34-a), applied in `./reussir`
 since 2026-10-04 (`l2r-local` commit `e0c500b7`; made on branch
 `l2r-final-0065` of a local Reussir integration checkout, on
 `l2r-final` cc8e5aa5); reviewed, no defect. lean2rr works around it: its
@@ -100,7 +100,7 @@ executables are PIEs without text relocations, as native Lean's are.
 ## Patch
 
 Patch file
-[`patches/0065-l2r-local-bug-34-compile-link-products-position-inde.patch`](patches/0065-l2r-local-bug-34-compile-link-products-position-inde.patch)
+[`patches/34-a-pic-by-default.patch`](patches/34-a-pic-by-default.patch)
 (commit `c8a524e7` on branch `l2r-final-0065` of the local
 integration checkout, on cc8e5aa5; in `./reussir` since 2026-10-04 as
 `l2r-local` commit `e0c500b7`). When the mode is left at `default` and the product is an executable
@@ -144,7 +144,7 @@ no relocations.
   was not measured (a benchmark needs the user's go-ahead).
 
 **Review.** RV8 bug34 (`rv8/reussir/bug34/FINDINGS.txt`): no defect, in
-0065 or in lean2rr's workaround. Static vs PIC builds of LeanBoolLoop,
+34-a or in lean2rr's workaround. Static vs PIC builds of LeanBoolLoop,
 Binarytrees and Rbmap give instruction-identical functions once addresses
 are normalized (68k instructions, no new GOT load in any loop). The GOT is
 the same size, and the textures' TLS accesses are relaxed to the same

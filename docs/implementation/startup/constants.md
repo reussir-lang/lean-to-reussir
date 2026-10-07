@@ -55,12 +55,16 @@ runtime. Plan
   straight path. A word is the value's bytes, the rest 0, as before the
   tables (`leanrt::once::word_of`). The streams'
   `has` uses the tables too. The clones of `Array`, `ByteArray`,
-  `FloatArray`, `Array Nat`/`Array Int` and `String` handles tell LLVM
-  that the count was at least 1 (`assert_unchecked`, `leanrt::drop::Vec`,
-  `TagVec`, `LStr`): a read from the table right after the constant's
+  `FloatArray` and `String` handles tell LLVM that the count was at least
+  1 (`assert_unchecked`, `leanrt::drop::Vec`, `LStr`): a read from the table right after the constant's
   read (`give`, ownership.md "Reads give their reference up first, for a
   view") then folds the increment and the decrement away, so the table
-  read has no count store at all, as a native persistent object.
+  read has no count store at all, as a native persistent object. The
+  computation `<f>_init` is kept out of rrc's MLIR inliner
+  (`#[transform_anchor]`, `cafInits`, `anchoredFns`): it runs once, and
+  inlined into the accessor (a literal table's run of pushes became small
+  enough once a boxed immediate stopped allocating) it made the accessor
+  too big to be inlined where the constant is read.
 - **Why:** lean-zip's decoder (`goTreeFreeU`) read its length and
   distance tables (`lengthBase`, `distExtra`, …) through two calls each:
   `l2r_once_claim`, then `l2r_once_get`, whose bounds checks and panics
@@ -82,13 +86,13 @@ runtime. Plan
   a proof that the read runs after startup (code reachable from `main`
   only), and closed terms and toolchain constants are computed on first
   use anyway: the test is one well-predicted branch.
-- **Where:** `Lower/Conv.lean`: `cafAccessor`; `runtime/prelude.rr`:
+- **Where:** `Lower/Conv.lean`: `cafAccessor`; `Lower/Finish.lean`: `anchoredFns`; `runtime/prelude.rr`:
   `l2r_once_ready`, `l2r_once_get`, `l2r_once_put`, `l2r_once_set`,
   `l2r_cell_swap`; `runtime/leanrt/src/once.rs`: `FAST`, `FLAGS`,
   `FAST_SLOTS`, `has`, `ready`, `word_of`, `get_raw`, `rec_has`,
   `rec_get`, `set_raw`, `swap_raw`, `take_raw` (each keeps the tables in
   step with the record `SLOTS`); `runtime/leanrt/src/drop.rs` (`Vec::clone`),
-  `tagvec.rs`, `string.rs`: the clones. Guard:
+  `string.rs`: the clones. Guard:
   `tests/runtime/const-read-check.sh` with `tests/runtime/RtConstReads.lean`
   (fails when a constant read in a loop is a call or reads `SLOTS`;
   review PCR-01: symbols read by their identifiers, whatever the
@@ -115,6 +119,15 @@ runtime. Plan
 - **Why/Where:** see [../optional-passes.md](../optional-passes.md).
 - **Remove only if:** they are optional passes: without them only speed
   changes.
+
+### A constant's box is a once-cell too
+
+- **What:** A constant boxed where boxing allocates (a `Float`, a
+  `UInt64` from 2^63, ...) is boxed once: its box is the value of a
+  once-cell `l2r_boxed_N` (`boxed-consts`), forced on first use, as
+  native Lean's `_boxed_const_N` closed terms.
+- **Why/Where:** see [../optional-passes.md](../optional-passes.md).
+- **Remove only if:** the pass is off.
 
 ### A closed term used once, by another constant, is not cached
 
@@ -152,23 +165,6 @@ runtime. Plan
 - **Remove only if:** rrc's per-function cost drops by orders of
   magnitude.
 
-### Long `Array Nat` literals become tables
-
-- **What:** In the generated code, a run of 32 or more small `Nat`
-  literals pushed onto an `Array Nat` (each literal and each intermediate
-  array used only there) becomes one call `l2r_natarr_lits(a, id)`, which
-  pushes the words of table `id`, generated with the program. Only with
-  `nat-arrays` (it matches `lean_natarr_push`).
-- **Why:** rrc costs about 0.3 MB per `Nat` operation in a straight-line
-  function ([Reussir issue 17](../../../reussir-bugs/17-long-nat-block.md),
-  a cost);
-  a 100000-element literal is now one call (7c4ab5c, test `RtArrayLit`).
-- **Where:** `ArrayLits.lean`: `natArrLits`, `tableLets`, `smallLit?`,
-  `minRun`, `natLitTable`; `Emit/Program.lean`:
-  `LoweredProgram.literalTables`.
-- **Remove only if:** the cost of issue 17 is gone (and the build stays
-  fast without it).
-
 ### A constant that may hold tasks waits for them
 
 - **What:** When a constant whose type may hold a task is first computed,
@@ -191,9 +187,9 @@ runtime. Plan
   without a reference, and `l2r_persist_rewalk` releases what the first
   pass kept, so a task the program drops during the second pass is
   deleted, not run (RV7L-07, test `RtPersistDropped`). A task is known by
-  its identity for the runtime (`taskAddrFn`: a converted copy's is its
-  original's), so a copy is collected rather than forced in the first
-  pass (test `RtPersistConv`). It visits each cell
+  its identity for the runtime, its cell's address (`taskAddr`), so a task
+  seen through another binder is collected rather than forced in the
+  first pass (test `RtPersistConv`). It visits each cell
   (record, array, thunk or task, function value, `Box`, reference) once:
   the runtime keeps the set of addresses seen and, until the walk ends,
   what it read out of thunks, tasks and references, so no seen cell is
@@ -201,7 +197,9 @@ runtime. Plan
   (`l2r_task_settled`), always the case for constants evaluated at
   startup. The walks are generated at the end, once every variant of
   function types and `Box` is known; a type that cannot hold a task gets
-  none. A placeholder's never-forced task cell (`pending` with the `z`
+  none. In a program that creates no task (`LowerCtx.createsTasks`) no
+  constant is walked: with one type per inductive, nearly every type
+  holds a `Box`, which could hold a task in a program that has some. A placeholder's never-forced task cell (`pending` with the `z`
   function value) is not a task (`l2r_persist_ph_T`): natively it is
   `box(0)`, which the walk skips (C01R-03).
 - **Why:** As `lean_mark_persistent` at a closed term's first evaluation:
@@ -223,8 +221,9 @@ runtime. Plan
   it gets to them: a task that replaces the task a reference next to it
   holds has run by then, as natively. Native pushes a reference's value
   too (RV7L-05, test `RtPersistRef`).
-- **Where:** `Lower/Conv.lean`: `persistCall`, `mayHoldTask`,
-  `persistFnName`, `cafAccessor`; `Lower/Finish.lean`: `holdsTask`,
+- **Where:** `Lower/Conv.lean`: `persistCall`, `typeHoldsTask` (one
+  search: `mayHoldTask` before the variants are final, `holdsTask`
+  after), `persistFnName`, `cafAccessor`; `Lower/Finish.lean`: `holdsTask`,
   `persistListName`, `persistCell`, `PersistGen`, `genPersist`,
   `finishPersistFns`, `variantCount`; `runtime/prelude.rr`:
   `l2r_persist_begin`, `l2r_persist_seen`, `l2r_persist_keep`,

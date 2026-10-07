@@ -41,8 +41,7 @@ lean-runtime has is lean-runtime's.
 
 Generated sections of the prelude (edit the generator, then run it):
 `runtime/gen_scalars.py` (UIntN/IntN/USize/ISize: the single operations
-inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`)
-and `runtime/gen_tagarr.py` (`Array Nat`/`Array Int`).
+inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`).
 
 ## Building and linking
 
@@ -85,7 +84,7 @@ and `runtime/gen_tagarr.py` (`Array Nat`/`Array Int`).
      (`runtime/leanrt/target/polyffi-cache`, unless the caller sets it;
      empty turns it off): rrc compiles each of the prelude's textures with
      its own rustc run, about 470 per program and most of rrc's time, and
-     with Reussir patch 0066 it keeps their bitcode there and reuses it
+     with Reussir patch 35-a it keeps their bitcode there and reuses it
      (Reussir issue 35, a cost; an rrc without the patch ignores the
      variable). Its key covers the texture, the `rustc-native` script (whose
      text also names lean-runtime's build), rustc's options and every
@@ -339,15 +338,14 @@ rest.
 
 | Lean (mono) | Reussir | Notes |
 |---|---|---|
-| `Nat` | `Nat` = `leanrt::nat::LNat`, one word, declared `tagged` (Reussir patch 0050) | odd: the small value `(n << 1) \| 1`, n < 2^63; even: an owned `LBig` pointer (below) |
+| `Nat` | `Nat` = `leanrt::nat::LNat`, one word, declared `tagged` (Reussir patch 41-a) | odd: the small value `(n << 1) \| 1`, n < 2^63; even: an owned `LBig` pointer (below) |
 | `Int` | `Int` = `leanrt::nat::LInt`, likewise | odd: `lean_box((unsigned)(int)i)` for i in the `int32` range; even: an owned `LBig` pointer |
 | big numbers | `LBig`, one `mi_malloc` block: count `u32`, flags `u32`, signed size `i32` (limbs in use, negative for a negative value), capacity `u32`, then the limbs | GMP `mpn` operations on the limbs, in a unique operand's block with room (grown by a carry, shrunk when a result leaves most of it unused) or a fresh one; `mpz` operations on read-only views for `pow`, `gcd`, parsing and printing; normalized (only values outside the small ranges); only behind a `Nat`/`Int` word |
 | `String` | `LStr` = `leanrt::string::LStr`, a pointer to one block: count, byte size, capacity, character count (32 bytes, as Lean's header), bytes | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write; grows by `realloc` (below); equality compares the lengths, then the blocks (two references to one block are equal at once, as `lean_string_eq`), then the bytes |
-| `Array α` | `RVec<E>` = `leanrt::drop::Vec<E>`, a pointer to one block: count `u32` (padded), size, capacity (24 bytes), then the elements | `E` = storage type of `α` (lean2rr boxes non-boundary types); copy-on-write, grows by `realloc`; freed without recursion (below) |
-| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` = `leanrt::tagvec::TagVec` | the elements' own words, one block with Lean's 24-byte header (below) |
-| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` (and `FloatArray`'s) are the identity (`Array UInt8` is `RVec<u8>` too); `String.toUTF8`/`fromUTF8` copy the bytes, as natively |
-| `ST.Ref σ α` / `IO.Ref α` | a lean2rr-generated shared record `L2RRefN(Cell<E>)` around a Reussir cell (two allocations: the record and the cell); a `Nat`/`Int` reference holds the handle like any other | mutated through every alias; `take` leaves the placeholder |
-| `Thunk α`, `Task α` | `LCell<S>` = `leanrt::drop::Cell<S>`, a transparent wrapper of `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below) |
+| `Array α` | `RVec<LAny>` = `leanrt::drop::Vec<LAny>`, a pointer to one block: count `u32` (padded), size, capacity (24 bytes), then the elements | one representation whatever `α` is: the elements are boxes (`LAny`, one word each); copy-on-write, grows by `realloc`; freed without recursion (below) |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` (and `FloatArray`'s) copy from/to an `Array UInt8` (an array of boxes) in one loop at the exact size (`array::boxes_of_bytes`, ...), as natively; `String.toUTF8`/`fromUTF8` copy the bytes, as natively |
+| `ST.Ref σ α` / `IO.Ref α` | a lean2rr-generated shared record `L2RRefN(Cell<LAny>)` around a Reussir cell (two allocations: the record and the cell), whatever `α` is | mutated through every alias; `take` leaves the placeholder |
+| `Thunk α`, `Task α` | `LCell<S>` = `leanrt::drop::Cell<S>`, a transparent wrapper of `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below), one for thunks and one for tasks, over boxes (`LAny`) |
 | `IO.FS.Handle` | `LHandle` | shared buffered file, closed with its last reference |
 | `UInt8..64`, `USize` | `u8..u64`, `u64` | |
 | `Int8..64`, `ISize` | `u8..u64`, `u64` (bit patterns) | signed semantics as `lean_int8_*` etc. |
@@ -360,23 +358,25 @@ Every function consumes its arguments (Reussir's convention). Strings,
 arrays and big numbers are updated in place when uniquely referenced
 (count 1), otherwise copied once. Textures that only read a handle
 release it through `leanrt::rc_release` (any `leanrt::Release` handle:
-Reussir's `Rc`, `LStr`, `TagVec`)/`array::release`, whose last-reference
+Reussir's `Rc`, `LStr`)/`array::release`, whose last-reference
 drop is out of line; together with `#[inline(always)]` fast paths and
 `#[cold]` slow paths this lets LLVM inline the hot textures (array
 get/set/push/size, string get/next/push, the Nat helpers) into Reussir code
 (checked with `rrc --emit llvm-ir`; `tests/runtime/ffi-inline-check.sh`
 checks reads and sets). An array set (and a pop) releases the element it
 removes with only its decrement in line when it is a Reussir record
-(`array::ReleaseElem`): the record's whole release in line kept the set
+(`array::ReleaseElem`) or a box (`LAny::drop`; the array of a Lean type
+holds boxes): the record's whole release in line kept the set
 texture out of line (unionfind). The last reference is released out of
-line by `array::release_last`, inside a free the runtime starts
-(`drop::release`), so its fields go in Lean's order, the last one first,
+line by `array::release_last` (a box's by `any::release_last`), inside a
+free the runtime starts, as one pending cell (`drop::free_unique`,
+`drop::free_deferred`), so its fields go in Lean's order, the last one first,
 as `lean_dec` frees them in `lean_array_uset` (review RS10-01). Inlined, a read's release meets the
 caller's increment, and LLVM folds the pair (the free check included,
 thanks to the `old count >= 1` that Reussir's `rc.inc` asserts) as long as
 no other store or call lies on a path between them. So a read gives its
 reference up first, before its bounds check: `l2r_array_give`
-(`array::give`, `tagvec::give`) returns a view of the array, the check
+(`array::give`) returns a view of the array, the check
 follows in Reussir code, and `l2r_view_take` (the element; the last
 reference frees the block) or `l2r_view_end` ends the view; the failing
 branch of a read proved in bounds releases nothing and ends the program.
@@ -401,7 +401,7 @@ with a 16-byte header and the limbs inline (`leanrt::big`; native Lean's
 `lean_mpz_object` keeps the limbs in a second allocation). C code written
 against `lean.h` could take and return the small words unchanged; a big
 number would be converted. Reussir copies and drops them as handles of an opaque type declared
-`#[ffi(rust = "::leanrt::nat::LNat", tagged)]`: with Reussir patch 0050 it
+`#[ffi(rust = "::leanrt::nat::LNat", tagged)]`: with Reussir patch 41-a it
 counts only even words (`rc.inc` and the drop hook, `LNat`'s `Drop`, run
 only when the low bit is clear). The prelude's functions take each `Nat`
 argument as its word once (`l2r_nat_raw`, which then owns the reference),
@@ -419,23 +419,7 @@ big `Int` (`int_view`), that it is outside the small range. A build with `L2R_LE
 counts the big numbers made and freed and prints the counts at exit
 (`tests/runtime/nat-alloc-check.sh`).
 
-**`Array Nat`/`Array Int`.** `LNatArr`/`LIntArr` (`leanrt::tagvec`, the
-`nat-arrays` pass) store the elements' words, like Lean's array object:
-the handles move in and out as their words (`l2r_natarr_get` wraps the
-owned word it reads, `l2r_natarr_set` stores `l2r_nat_raw(x)`). Without
-the pass an `Array Nat` is an `RVec<Nat>`, one word per element in the
-same layout (the generic array's block). Every
-`lean_array_xxx<E>` / `l2r_array_xxx<E>` has `lean_natarr_xxx` /
-`l2r_natarr_xxx` (and `intarr`) with the same arguments and element type
-`Nat` (`Int`); `lean_mk_array`/`lean_mk_empty_array_with_capacity` become
-`lean_mk_natarr`/`lean_mk_empty_natarr_with_capacity`. A tag vector is one
-allocation laid out like Lean's array object: the count (a `u32`, padded
-to a word), the size, the capacity, then the words, so a three-element
-array takes 48 bytes as natively. A copy of a shared one keeps its
-capacity (`lean_copy_expand_array`), so a literal `#[a, b, c]`, which
-pushes onto a shared empty array of capacity 3, allocates once.
-
-**Runtime-owned objects.** `LStr`, `TagVec` and the arrays (`RVec`,
+**Runtime-owned objects.** `LStr` and the arrays (`RVec`,
 `LRef`: `leanrt::drop::Vec`) are `leanrt` types: a `#[repr(transparent)]`
 pointer to a block allocated with `mi_malloc`, whose first word is the
 `u32` count. That is all Reussir needs of an opaque type (its `rc.inc`
@@ -466,9 +450,27 @@ payload is exactly 16 MiB (a hash table's 2^21 buckets) is, with the
 header, past mimalloc's large-object limit, a huge segment that mimalloc
 purges only 100 ms after it is freed (plan §10, "Arrays and strings are
 one block each").
-`dbgTraceIfShared` recognizes strings and tag vectors by their Rust type
-names (`leanrt::string::`, `leanrt::tagvec::`) besides `reussir_rt::`; it
+`dbgTraceIfShared` recognizes strings by their Rust type names
+(`leanrt::string::`) besides `reussir_rt::`; it
 reports no generic array (sharing is not observable, plan §10).
+
+**The one-word box `LAny` (lean2rr's `Box`).** `leanrt::any::LAny`, the
+prelude's `LAny` (`tagged`), is a value of unknown type in one word, as
+`lean_object*`: an odd word is an immediate `(v << 1) | 1` (scalars, unit
+= word 1, small `Nat`/`Int` words as they are, a nullary variant as its
+index); an even word owns a reference to a counted object, its address in
+the low 48 bits and the number of its payload's type in the top 16 (1 to
+15: leanrt's kinds, `NUM_*`; 16 and up: the program's). A copy increments
+the payload's count in line (Reussir patch 38-a masks the top bits); the
+last reference releases leanrt's kinds directly and a program payload
+through the program's release of its type (`l2r_any_rel_<num>_c(cell)`,
+a trampoline per payload type, in leanrt's table by number), its cell
+deferred on the drop worklist (a leaf payload, numbered with `LEAF_BIT`,
+directly outside a free). `l2r_any_of<T>(x, num)` and `l2r_any_as<T>(a, num)` box and unbox (a
+mismatch panics); `l2r_any_raw`/`l2r_any_raw_as<T>` split an immediate
+from a pointer first where the type has nullary variants;
+`l2r_any_of_fn<T>` keeps a function value's nullary variant typed. Rules:
+docs/implementation/representations/box-and-uniform.md.
 
 ## Calling convention
 
@@ -510,7 +512,7 @@ single call:
 | `lean_string_compare` (→ `Ordering`) | `l2r_string_compare_with<O>(a, b, lt, eq, gt)`; or `l2r_string_compare(a, b) -> u8` (0/1/2) |
 | `lean_string_data` (`String.toList`) | `l2r_string_to_list<L>(s, nil, \|c\| \|t\| cons(c, t))` |
 | `lean_string_utf8_get_opt` (→ `Option Char`) | `l2r_string_utf8_get_opt_with<O>(s, p, none, \|c\| some(c))`; or `l2r_string_utf8_get_opt(s, p) -> u32` (`0x110000` = none) |
-| `lean_array_to_list` (→ `List α`) | `l2r_array_to_list<E, L>(a, nil, \|x\| \|t\| cons(unbox(x), t))`; `l2r_natarr_to_list<L>`, `l2r_intarr_to_list<L>` |
+| `lean_array_to_list` (→ `List α`) | `l2r_array_to_list<E, L>(a, nil, \|x\| \|t\| cons(unbox(x), t))` |
 | `lean_float_frexp`, `lean_float32_frexp` (→ `Float × Int`) | `l2r_float_frexp_with<P>(x, \|m\| \|e\| mk(m, e))`; or `l2r_float_frexp_mant`/`_exp` |
 | `lean_io_getenv` (→ `Option String`) | `l2r_io_getenv_with<O>(name, none, \|s\| some(s))` |
 | `lean_slice_hash`, `lean_slice_dec_lt` (take `String.Slice`) | `l2r_slice_hash(s, b, e)`, `l2r_slice_dec_lt(s1, b1, e1, s2, b2, e2)` |
@@ -529,18 +531,20 @@ and `l2r_io_process_get_current_dir()` are infallible stand-ins for the
 fallible primitives below.) References are Reussir cells in a
 lean2rr-generated record (`L2RRefN(Cell<T>)`, two allocations;
 translation plan §5.1), read and written by the plain-Reussir helpers
-`l2r_rc_get/set/swap<T>` (a `Nat` or `Int` reference holds the handle
-like any other). Promises hold the `LCell` of their task
+`l2r_rc_get<T>`, `l2r_rc_set_ref<T, R>` and `l2r_rc_swap<T>` (the cell
+holds a `Box`). Promises hold the `LCell` of their task
 (below). `LRef<T>` and its `l2r_ref_*` functions (a runtime cell, a
 0-or-1 element vector) are no longer used by generated code. A `set`
-(`l2r_rc_set`, and `l2r_lcell_set` for task and thunk cells) stores the
+(`l2r_rc_set_ref`, and `l2r_lcell_set` for task and thunk cells) stores the
 new value first and then releases the old one as `lean_dec` does
-(`leanrt::drop::release`, through `l2r_release_value`): a shared value is
-decremented; the last reference to a record is freed inside a free the
-runtime starts (`drop::run`), so its fields go last first and the `sync`
-dependents of the promises it drops run when that free ends. A unit or
-enumeration value cannot cross the FFI boundary and its release runs
-nothing: lean2rr stores it with `l2r_rc_put` (`refSetFn`). In a program
+(`leanrt::drop::release`, through `l2r_release_value_then`): a shared value
+is decremented; the last reference to a record is freed inside a free the
+runtime starts (as one pending cell: `drop::free_unique`, and for a box
+`drop::free_deferred`), so its fields go last first and the `sync`
+dependents of the promises it drops run when that free ends. A reference
+set then releases the reference itself (natively the caller's release
+after the borrowed set): a set that is the reference's last use frees the
+new value after the old one, as natively (`RtRefSetLastUse`). In a program
 that creates tasks (lean2rr's `programCreatesTasks`, translation plan
 §5.14 "References") each reference operation first has a point
 (`leanrt::refs`): `l2r_ref_read_point()` before `get` (lean-runtime's
@@ -555,12 +559,12 @@ records `r` as taken by the running thread (Lean 4.35's rule).
 **Freeing containers.** Native Lean frees an object iteratively: the
 children whose count drops to zero go on a stack of objects to free, popped
 last first. Reussir's drop glue does the same for records with the local
-patches 0013 and 0014: the record members it frees go on a stack of
+patches 13-a and 13-b: the record members it frees go on a stack of
 pending work per thread (`reussir_rt::drop`), and it releases a container
 field through the container's Rust `Drop` (the opaque type's drop hook),
 which releases the elements. The prelude's containers are therefore
 `leanrt::drop`'s types, whose `Drop` frees the last reference through
-that same stack (so the runtime needs Reussir with 0014): a container
+that same stack (so the runtime needs Reussir with 13-b): a container
 freed while another free runs (from an element's release, or from record
 glue) is pushed instead, and the outermost free, glue or container, pops
 the stack until it is empty. An array is emptied from its last element,
@@ -575,6 +579,9 @@ compiler's glue, an out-of-line call; it decrements the same count), and,
 outside a running free, an array none of whose elements is freed is freed
 without the stack (`ReleaseElems`): only an element whose last reference
 goes takes the glue and the stack, so the order of releases is unchanged.
+An array of boxes (`LAny`) is freed the same way: an immediate is skipped,
+a shared payload decremented inline, and only a payload whose count is 1
+goes to `any::release_last`.
 (Inside a free the array is pushed as before: a later field of the record
 being freed may hold one of its elements.)
 
@@ -587,10 +594,9 @@ computing it. The tables (`once::FAST`, `once::FLAGS`) mirror the record
 of the slots (`once::SLOTS`).
 
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
-lean2rr-generated state `enum S { pending(L2RUnit -> α), busy, done(α),
-conv(L2RUnit -> α, L2RBox) }` (a task's `conv` also holds the original's
-address, its identity for `leanrt::task`, and tasks also have
-`bind(L2RUnit -> LCell<S>)`; a shared enum, so any `α` fits). Cell primitives: `l2r_lcell_new<S>(v)`,
+lean2rr-generated state `enum S { pending(L2RUnit -> LAny), busy,
+done(LAny) }`, one for thunks and one for tasks (tasks also have
+`bind(L2RUnit -> LCell<S>)`; a shared enum over boxes, so any `α` fits). Cell primitives: `l2r_lcell_new<S>(v)`,
 `l2r_lcell_get<S>(c)` (a new reference to the state; the cell's own
 reference is released first, `drop::cell_get`, so that LLVM cancels it
 with the caller's increment), `l2r_lcell_set<S>(c, v)` (a store another
@@ -688,7 +694,7 @@ when the free reaches it, in Lean's order, `task::defer_promise_drop` puts
 the resolution off with `defer`; the drain's end runs the resolutions in
 that order, on this context, with `run_deferred`), since its dependents
 are Lean code that may block. Reussir reports every drain's end through
-`__reussir_drop_drained`, its local patch 0040, which lean2rr requires:
+`__reussir_drop_drained`, its local patch 40-a, which lean2rr requires:
 `scripts/l2r.py` stops with an error when the Reussir checkout lacks it,
 and leanrt names the symbol (`task::hook_drained`), so it would not link
 without it. Output
@@ -889,7 +895,8 @@ reproduced, pipes with `O_CLOEXEC`, stdout flushed first when the child
 inherits stdin; a `null` stream's `/dev/null` is opened by the parent with
 `O_CLOEXEC`, see "Known divergences from native Lean"):
 `l2r_proc_spawn(cmd, args, cwd, has_cwd, env_names, env_values, env_set,
-modes, inherit_env, setsid) -> u32` (the pid; fallible; `modes` = stdin |
+modes, inherit_env, setsid) -> u32` (the pid; fallible; `args` is Lean's
+`Array String`, an array of boxes read in place; `modes` = stdin |
 stdout << 8 | stderr << 16 as `IO.Process.Stdio` indices; `env` as parallel
 arrays, `env_set[i]` for `some`), then `l2r_proc_end(0/1/2) -> LHandle` (the
 parent's end of a piped stream, a handle that is not open otherwise);
@@ -1019,7 +1026,9 @@ lean2rr's dev branch (the tests pass with it).
     compile and call that code (`Mono.redirectTarget`). The prelude's
     hand-written versions of the `String.Internal.*` ones, never called
     since, are deleted.
-11. *done* — `Array Nat`/`Array Int` as `LNatArr`/`LIntArr` (names above).
+11. *done, then withdrawn* — `Array Nat`/`Array Int` as one-word arrays
+    (`LNatArr`/`LIntArr`): with one representation per builtin type, an
+    `Array Nat` is an array of boxes (`LAny`), like every array.
 12. *done* — `Nat.repr`/`Int.repr` of big numbers are Lean code dividing by 10 digit
     by digit (quadratic); `l2r_nat_repr`/`l2r_int_repr` are exact
     replacements using GMP.
@@ -1121,15 +1130,17 @@ lean2rr's dev branch (the tests pass with it).
     their Lean bodies in their place (translation plan §5.8): it rejects a
     program that reaches one, naming each (test `RtLeanUnsupported`,
     expected to fail).
-33. A reference set that is the reference's last use frees the new value
-    before the old one: `l2r_rc_set` takes the reference's cell, and the
-    cell's last use is the store, so the cell (and with it the new value,
-    when the reference held the last reference to it) is released before
-    `l2r_release_value` releases the old value. Natively `ST.Ref.set`
-    borrows the reference (`@&`): the old value is released inside the
-    set, and the caller releases the reference afterwards. A structure of
-    two handles closes "new.b new.a old.b old.a" (natively "old.b old.a
-    new.b new.a"); test `RtRefSetLastUse`, expected to fail.
+33. *done* — A reference set that is the reference's last use freed the
+    new value before the old one: `l2r_rc_set` took the reference's cell,
+    and the cell's last use was the store, so the cell (and with it the
+    new value, when the reference held the last reference to it) was
+    released before `l2r_release_value` released the old value. Natively
+    `ST.Ref.set` borrows the reference (`@&`): the old value is released
+    inside the set, and the caller releases the reference afterwards. A
+    structure of two handles closed "new.b new.a old.b old.a" (natively
+    "old.b old.a new.b new.a"). `l2r_rc_set_ref` now also takes the
+    reference and releases it after the old value
+    (`l2r_release_value_then`); test `RtRefSetLastUse`.
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store enum-like values directly; and `mi_free` takes mimalloc's
@@ -1178,7 +1189,9 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   Without tasks it waits, as natively.
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`, and
   `dbgTraceIfShared` of values held by value (`[value]` structures, small
-  `Nat`s) never reports sharing. Pointer identity is not emulated (translation
+  `Nat`s) and of a shared big number (natively reported) never reports
+  sharing; nor of a task that one reference holds
+  (natively a task that `Task.spawn` made is multi-threaded and reported). Pointer identity is not emulated (translation
   plan §9): `ptrAddrUnsafe` answers the handle pointer of a heap value in
   its own representation (`l2r_ptr_addr_obj`, `l2r_ptr_addr_rec`, which
   give the reference back inline), the boxed scalar `2n+1` for
@@ -1277,7 +1290,10 @@ direct (TLS descriptor or module relocations).
 `tests/runtime/nat-alloc-check.sh`
 builds `RtNatStress` with leanrt's big-number counters and checks that
 every big number made is freed exactly once. `tests/runtime/conv-count-check.sh`
-builds the `RtUniformUpdates*` tests with lean2rr's
-conversion counter (`L2R_COUNT_CONVERSIONS`: each generated conversion
-counts the elements it rebuilds, printed at exit) and checks that they grow
-at most linearly with the size (no container converted per update).
+translates the `RtUniformUpdates*` tests and three others whose values
+cross between typed and uniform code and checks that their code has no
+conversion function (one representation per datatype: nothing is rebuilt
+to change its layout), and builds `RtConvProbeRollback`, a cast between two
+inductives, with lean2rr's conversion counter (`L2R_COUNT_CONVERSIONS`:
+each generated conversion counts the elements it rebuilds, printed at
+exit), which must count some.

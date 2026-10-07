@@ -1,11 +1,11 @@
 # 30. The call lowering scans the module once per call
 
-**Kind:** cost (build time). Not a bug: rrc's output is correct; patch 0062
+**Kind:** cost (build time). Not a bug: rrc's output is correct; patch 30-a
 is an optimization.
 
 ## Summary
 
-**Kind:** cost (build time). **Status:** patched (0062), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** cost (build time). **Status:** patched (30-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: cost, with a small optimization.** `reussir-convert-to-llvm` lowers every
 `func.call` with the func dialect's stock pattern, which looks the callee
@@ -27,10 +27,10 @@ conversion alone; `reussir-opt` is not in the default build target:
 
 **Expected.** Time about linear in N.
 
-**Actual on ef922049** (the apply list + 0016 + 0017, whose patches do not
+**Actual on ef922049** (the ten-patch set + 21-a + 23-a, whose patches do not
 touch this code; loaded machine):
 
-| N | conversion | with 0062 |
+| N | conversion | with 30-a |
 |---|---|---|
 | 5000 | 0.75 s | 0.16 s |
 | 10000 | 3.9 s | 0.27 s |
@@ -45,7 +45,7 @@ Inside rrc (`-O none`, perf, a `.rr` of the same shape with N = 10000):
 the conversion took about 11e9 cycles, 88% of them in the call lowering's
 lookups (`CallOpLowering::matchAndRewrite` →
 `SymbolTable::lookupNearestSymbolFrom` → `SymbolTable::lookupSymbolIn`);
-with 0062 0.9e9. In that build MLIR's SCCP ([issue 11](11-sccp-call-graph.md))
+with 30-a 0.9e9. In that build MLIR's SCCP ([issue 11](11-sccp-call-graph.md))
 takes most of the remaining time.
 
 ## Cause
@@ -85,7 +85,7 @@ workaround.
 ## Patch
 
 Patch file
-[`patches/0062-l2r-local-bug-30-look-up-call-lowering-s-callees-in-.patch`](patches/0062-l2r-local-bug-30-look-up-call-lowering-s-callees-in-.patch)
+[`patches/30-a-callee-symbol-table.patch`](patches/30-a-callee-symbol-table.patch)
 (`l2r-local` commit `cdc1102d`, applied in `./reussir`; `l2r-local` head cc8e5aa5; made as commit `33bf4710`
 in a scratch checkout; it depends on no other patch). The func dialect's interface is skipped and its
 patterns are added with a collection, as `convert-func-to-llvm` does:
@@ -142,7 +142,7 @@ with and without the patch, and the LLVM dialect of LeanBoolLoop and
 Rbmap is identical.
 
 **Latent hazard.** If this conversion ever runs without pattern rollback
-(`allowPatternRollback = false`, as 0031 does for `convert-scf-to-cf`),
+(`allowPatternRollback = false`, as 17-a does for `convert-scf-to-cf`),
 the trampoline's erase-and-recreate would free the operation the table
 still names, and a later call to it would read freed memory. Before such
 a change, the trampoline pattern must update the collection (or the

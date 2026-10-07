@@ -74,10 +74,9 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   (5) a fallible IO extern's runtime primitive with the last-error
   protocol; (6) a `BaseIO` extern's payload primitive, `l2r_` followed by
   the symbol without `lean_`; (7) a generic prelude function in plain
-  Reussir, at the value types; (8) the `natarr`/`intarr` function for
-  `Array Nat`/`Array Int`; (9) the prelude function named after the
-  symbol, with storage types; (10) otherwise lean2rr rejects the program,
-  naming the extern. A refused extern of the program gets no glue, and the
+  Reussir, at the value types; (8) the prelude function named after the
+  symbol, with storage types (`Box` for an extern over arrays); (9)
+  otherwise lean2rr rejects the program, naming the extern. A refused extern of the program gets no glue, and the
   program is rejected.
 - **Why:** lean2rr's own implementations first; the more specific glue
   before the generic call.

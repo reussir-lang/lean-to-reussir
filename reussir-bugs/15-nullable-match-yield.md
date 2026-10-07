@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0022), applied in `./reussir`
+**Kind:** bug. **Status:** patched (15-a), applied in `./reussir`
 (`l2r-local` cc8e5aa5). It does not affect lean2rr (it does not use
 `Nullable`).
 
@@ -99,7 +99,7 @@ Does not use `Nullable`.
 ## Patch
 
 Patch file
-[`patches/0022-l2r-local-bug-15-check-a-reussir.scf.yield-against-i.patch`](patches/0022-l2r-local-bug-15-check-a-reussir.scf.yield-against-i.patch)
+[`patches/15-a-yield-parent-check.patch`](patches/15-a-yield-parent-check.patch)
 (`l2r-local` commit `0f02c434`, applied in `./reussir`; `l2r-local` head
 `cc8e5aa5`).
 
@@ -156,7 +156,7 @@ with another message). No generated code changes.
 no defect; the reviewer confirmed the trait argument above and that
 "accepts only more IR" holds in effect (the two hand-written mismatched
 modules under `v22/` are rejected by the patched and the unpatched rrc, with
-different messages). Round 8 checked its interaction with 0020 (an
+different messages). Round 8 checked its interaction with 01-a (an
 opaque-payload enum yielded from a `Nullable` match): correct at every
 level.
 

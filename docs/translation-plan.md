@@ -61,10 +61,11 @@ instance; Lean's base `specialize` is not run again (§7).
 
 `lean2rr/Main.lean` reads as the pipeline, with an `--emit` checkpoint
 after the stages: Stage 1 (`monomorphize`, `--emit inst`), Stage 2
-(`runStage2`, `--emit mono` and `externs`), Stage 3 (`retypeMono`, from the
+(`runStage2`, `--emit mono` and `externs`; before it and after it,
+`retypeErasedData`), Stage 3 (`retypeMono`, from the
 declarations the entry point calls, `--emit retyped`), the registry's
 passes over mono LCNF, Stage 4 (`lowerProgram`, with the registry's
-lowering hooks), the `Array Nat` literal tables and `Outline`, the
+lowering hooks), `Outline`, the
 registry's passes over the generated functions, and the program text
 (`--emit rr`). The modules of
 `lean2rr/LeanToReussir/`:
@@ -79,6 +80,9 @@ registry's passes over the generated functions, and the program text
   Lean passes), `MonoTypesKeep`, `CompileRecord` (what the `.olean`
   records of Lean's compilation: its order and its closed terms, also read
   by `Emit/Startup`);
+- between the stages: `ErasedData` (a parameter of type `lcErased` that
+  receives data gets the type `lcAny`, after Stage 1 and after Stage 2: a
+  Lean compiler bug that lean2rr does not reproduce, §10);
 - Stage 3: `MonoRetype`;
 - Stage 4: `RR` (the `.rr` syntax tree and its text), `LowerBase` (state,
   type translation), then `Lower/*.lean`, each importing the previous one:
@@ -92,7 +96,7 @@ registry's passes over the generated functions, and the program text
 - the program: `Emit/Startup` (initializer order, the startup chain),
   `Emit/Entry` (the entry point), `Emit/Program` (`lowerProgram`, which
   splices chains of closed terms before lowering, and the lowered
-  program's steps), `ArrayLits` (`Array Nat` literals as tables),
+  program's steps),
   `Outline` (deep and long tail paths and `let` values cut into
   functions, for rrc; run before the optional passes over the generated
   functions);
@@ -117,9 +121,8 @@ and the runtime suite match native Lean with every optional pass off).
 Each optimization is a module of `Opt/` with an `install : PassConfig →
 PassConfig` that plugs it into a hook of `PassConfig`, keeping what was
 installed before: a representation choice of the type translation (record
-field order, `[value]` structs, one-word `Nat`/`Int` arrays,
-placeholders kept in once-cells), a part of Stage 3 (map loops split by
-element representation), a pass over the checked mono declarations
+field order, `[value]` structs, placeholders kept in once-cells), a pass
+over the checked mono declarations
 (`monoPasses`), Lean definitions replaced by prelude functions, a lowering
 hook (`LowerHooks`: the body before lowering, the J1′ choice, the form of
 J4's state machine, constant caching, the binding of a `cases`
@@ -221,7 +224,9 @@ does (`Specialize.mkSpecDecl`), with one difference: the type parameters are
 *kept*, as erased parameters, so that the instance has exactly Lean's arity
 (§5.2). Dropping them would, for example, turn a polymorphic function with
 only type parameters into a zero-parameter declaration: a constant
-evaluated once at startup, while Lean runs its body at every use. Lean represents a
+evaluated once at startup, while Lean runs its body at every use. Stages 2
+and 3 see these arities; Stage 4 removes the erased parameters, keeping one
+unit parameter for a function's trailing erased ones (§5.2, rule 4). Lean represents a
 higher-kinded argument as a type-level function, e.g.
 `StateT Nat Id ↦ fun α => Nat → α × Nat`. Substitution plus beta reduction
 therefore turns `m (β × σ)` into an ordinary type such as
@@ -231,47 +236,83 @@ Sometimes a type argument is not statically known, for example a type taken
 out of an existential package. The instance is then built with that argument
 set to `lcAny`, Lean's own "unknown type". Values of that type use the
 uniform `Box` representation (§5.1). Lean itself treats every value this
-way, so this is always correct, only slower.
+way, so this is always correct, only slower. A type argument whose values
+are types (`Type`, `Type → Type`) also gives the instance at `lcAny`: at
+`Type`, a parameter `x : α` would become a type parameter, which Lean's
+passes erase (so `f x + f y` would become `f ◾ + f ◾`, one call after
+`cse`), where natively it is a data parameter (`lcAny`, given `box(0)`).
 
 Natively a declaration is one function at every type, and Lean's mono-phase
 `cse` compares mono values, with type arguments erased: a call merges into
 an earlier call of the same declaration with the same value arguments even
-at other type arguments (`gp xs none` used as an `Option String`, then as an
-`Option (Nat → Nat)`), and runs once; the merged variable keeps the first
+at other type arguments (`gp xs none` used as an `Option String`, then as
+an `Option (Nat → Nat)`), and runs once; the merged variable keeps the first
 call's type. Instances at the two types would be two calls, and a panic or
-trace in them would print twice. So Stage 1 finds these calls in each
-instance as `cse` does, on the values `toMono` makes (type arguments
+trace in them would print twice. So Stage 1 finds these groups of calls in
+each instance as `cse` does, on the values `toMono` makes (type arguments
 erased, merged variables identified, a trivial structure such as `Subtype`
 or `Fin` taken for its field, `Decidable` for `Bool`; one scope per `cases`
 alternative, join points in the enclosing scope, a local function's body in
 a scope of its own, since Lean's `cse` runs after lambda lifting;
-`@[never_extract]` calls apart), and gives the later call the earlier
-call's arguments, type and value ones (`Mono.alignErasedMerges`). Both then
-call one instance with the same arguments, and Stage 2's `cse` merges them
-as natively. A use of the merged value at the later call's type converts
-it (§5.1). A value that exists at two types holds nothing where the types
-differ (`none`, `[]`; nothing is both a `String` and a function), so the
-conversion meets no part it cannot convert, except where both types make
-room for something it cannot reach: a function, one closure at two
-function types natively (`List.take k` as `List Nat → List Nat` and as
-`List String → List String`, a structure with a field `run : α → α`), for
-which lean2rr has no conversion, or the contents of a runtime object (a
-thunk, a task, a reference). So a call is aligned only if its two result
-types, compared as `toMono` sees them (a trivial structure, such as a
-one-field structure around a function, is its field's type, `Decidable` is
-`Bool`) and followed into the field types of their inductives, differ only
-at positions that no value has at both types (two different inductive
-types, a function and a value of an inductive type) or that hold
-first-order data; two function types, two instantiations of a runtime
-object, a type-former argument, an index, a type that is not an inductive
-or anything else unclassified prevent it (`Mono.alignable`; §10). Constructors are not renamed by Stage 1 and merge in Stage 2
-as they are; extern instances and instances (dictionary builders) compute
-nothing observable and keep their per-type instances. Lean's closed-term
-cache compares types, so closed calls at two types in two declarations stay
-two closed terms, natively too; after the merge, one declaration's call
-reads the other's closed term as natively (cross-test XT-6, fixture A482; review XT6-01,
-XT6-02, XT6-03, XT6-04; tests `RtCseAcrossTypes`, `RtCseFnValues`,
-`RtCseResidual`, `RtCseFnField`, `RtCseFnTrivial`).
+`@[never_extract]` calls apart), and gives the calls of a group one
+instance and the same arguments (`Mono.erasedMerges`,
+`Mono.alignErasedMerges`). Stage 2's `cse` then merges them as natively,
+and a use of the merged value at another type converts it (§5.1: a box, an
+unboxing, or a wrapper of a function value).
+
+With one layout per datatype, the two values need no conversion as data.
+But an instance at concrete types reads its inputs at those types:
+`fst@Nat` unboxes a list element as a `Nat`, and its `Nat → Nat` closure is
+not a `String → String`. A value made by the earlier call's instance takes
+inputs of the later call's types only through its function values. So:
+1. The calls take the earlier call's instance when its result *serves*
+   every later call's result type (`Mono.serves`): walked in parallel as
+   `toMono` sees them, the two types differ only where no value has both
+   types (`none : Option String` and `none : Option (Nat → Nat)`; nothing
+   is both a `String` and a function), and every function in them has the
+   same domain at both types. Equal types that mention `lcAny` do not
+   serve: `lcAny` can hide the type argument (`(b : Bool) → (if b then List
+   α else Unit) → Nat` is `Bool → lcAny → Nat` at every `α`). Function
+   codomains must convert too (a closure is converted when it is used),
+   and the contents of a thunk, a task, a reference or a promise are not
+   followed. This keeps the merged variable's type as natively, so Lean's
+   closed-term cache, which compares types, shares terms with other
+   declarations as natively.
+2. Otherwise the calls take the instance at `lcAny` for each type argument
+   that differs, the earlier call too (`Mono.uniformArgs`). That is the
+   uniform code native Lean runs: its closures take boxes, and each use
+   reads them at its own type through wrappers (`mkO n : Option (α → α)` at
+   `Nat` and at `String`: one `Box → Box` closure). The earlier call's value
+   arguments go into it, and it can return them, so each argument that
+   replaces another variable must serve at that variable's type, unless
+   both are calls of one group at `lcAny` (the uniform value serves at every
+   type of its group). A type argument that differs and is a type former
+   prevents this. A closed group (the earlier call is a closed term) takes
+   the instance at `lcAny` only where the earlier call's instance does not
+   change, or where Stage 1's test before the review of the dependent-type
+   work (`lcAny` hides nothing, function types must be equal) aligned it to
+   the earlier call's instance too: Lean's closed-term cache shares the
+   merged call with the same call at the earlier call's types in other
+   functions, and the instance at `lcAny` is a closed term of its own.
+3. Otherwise only the calls of 1 are aligned; the others run apart (§10).
+
+A type parameter that shows nowhere in a declaration's LCNF type (`len {α}
+(b : Bool) (v : if b then List α else Unit) : Nat` is `Bool → lcAny → Nat`
+at every `α`; a phantom parameter) gets `lcAny` at every call, so all calls
+share one instance (`Mono.typeParamHidden`): the instances would all have
+one type, and natively one closed term serves such a call at every type.
+
+Constructors are not renamed by Stage 1 and merge in Stage 2 as they are;
+extern instances and instances (dictionary builders) compute nothing
+observable and keep their per-type instances. Lean's closed-term cache
+compares types, so closed calls at two types in two declarations stay two
+closed terms, natively too; after a merge into the earlier call's instance,
+one declaration's call reads the other's closed term as natively
+(cross-test XT-6, fixture A482; review XT6-01, XT6-02, XT6-03, XT6-04;
+shared cases A833, A1028, D71TesterT23; tests `RtCseAcrossTypes`,
+`RtCseFnValues`, `RtCseResidual`, `RtCseFnField`, `RtCseFnTrivial`,
+`RtCseFnResult`, `RtCseHiddenAny`, `RtCseUniform`, `RtCseClosed`,
+`RtCseApart`).
 
 ### 2.4 Type classes
 
@@ -356,9 +397,8 @@ unavailable, the uniform `Box` representation (§5.1) takes its place:
   `StateT Nat m`) or a mutual partner. It stops at the nearest uniform
   instance of `d`, whose own recursive request at a type built from its
   `lcAny` (`List lcAny`, `lcAny × lcAny`) goes to the uniform instance as
-  well: a typed instance there would convert whatever the uniform code
-  passes on every call, and could not hold a value only `unsafeCast` to that
-  type (natively any object). Growth through a type function (`m` →
+  well: a typed instance there could not hold a value only `unsafeCast` to
+  that type (natively any object). Growth through a type function (`m` →
   `OptionT m`) gets one typed instance at `F lcAny`, which adapts the
   dictionary the uniform instance passes, and whose request at
   `F (F lcAny)` goes back to the uniform one. Growth that no path shows is cut by bounds: a type
@@ -366,9 +406,10 @@ unavailable, the uniform `Box` representation (§5.1) takes its place:
   past 1024 instances of one declaration every further instance is the
   uniform one. So the set of instances stays finite. This is
   necessary: Reussir's own monomorphizer cannot handle polymorphic
-  recursion. Callers of a uniform instance convert their arguments
-  structurally on every call (§5.1), which costs time proportional to the
-  arguments' size.
+  recursion. Only code has instances: a datatype has one type whatever its
+  arguments (§5.1), so a caller of a uniform instance passes its values as
+  they are, boxing or unboxing only values of the instance's `lcAny` types
+  (an array too: `Array α` is one array of boxes, §5.1).
 - **Existential values.** A structure with a `Type`-valued field stores its
   payload boxed, and functions over the payload take `Box`.
 - **Dynamic polymorphic dictionaries** (§2.4).
@@ -388,15 +429,12 @@ These functions are `@[inline]`/`@[specialize]`, so their code is already
 inlined into the persisted LCNF of user code. lean2rr translates it as is,
 giving it the representation it assumes:
 - `NonScalar` and `PNonScalar` (types that stand for "any object") become
-  `lcAny`, so values of those types are `Box`es. The casts become the
-  ordinary representation conversions of §5.1; between arrays of different
-  element types the conversion is element by element. Stage 3 (§4) recovers
-  the precise types around this code. When source and target elements have
-  the same representation, the `map` loop runs on the precise array, in
-  place. When they differ, Stage 3 splits the loop over two arrays: it reads
-  the source at its own representation (still replacing each slot by the
-  placeholder after reading it) and pushes each mapped value onto a new
-  result array created with the source's size as capacity (§4).
+  `lcAny`, so values of those types are `Box`es. An array has one
+  representation whatever its element type (`RVec<Box>`, §5.1), so the
+  casts between `Array α` and `Array NonScalar` change nothing: the `map`
+  loop runs on the array in place, reading each `Box`, unboxing it to the
+  function's argument type and boxing the result back into the slot, as
+  natively. Stage 3 (§4) recovers the precise types around this code.
 - A `box(0)` placeholder is a value that is never inspected. It arrives as
   a unit-like value used at another type, or as `◾` at a relevant type.
   Stage 4 materializes it as the *zero* of the expected type: `0`, `false`,
@@ -421,7 +459,10 @@ giving it the representation it assumes:
   persistent): `modify` stores one per update, and since a placeholder is never
   inspected, a shared value serves as well as a fresh one (optional pass
   `placeholder-cache`; without it each placeholder is built where it is
-  used).
+  used). A placeholder that is put in a box is `box(0)` itself (the word
+  1), not its type's zero boxed: `modify` on an `Array Float` stored a
+  new `Float` cell per update for it (adversarial finding 2). `box(0)`
+  reads back as the type's zero at every type.
 
 This keeps Lean's in-place update tricks, including `modify`'s unshared
 element. An alternative, redirecting to the safe reference implementations
@@ -553,20 +594,21 @@ Mono can still lose type information in two ways:
   `structProjCases` can type the fields of an exactly typed pair `lcAny`, and
   lambda lifting can give a lifted lambda the result type `lcAny`.
 - The library code of §2.7 casts with `unsafeCast`, which LCNF erases. The
-  result of `xs.map f` is bound at `Array NonScalar`, i.e. `Array lcAny`, and
-  so is every loop parameter it is passed to.
+  result of `xs.map f` is bound at `Array NonScalar`, i.e. `Array lcAny`.
 
 A binder typed `lcAny` uses the uniform `Box` representation (§5.1), and each
-use at a precise type converts it. For an array that is an element-by-element
-copy: a loop reading `ys[i]!` from a loop-invariant `Array lcAny` would copy
-the whole array at every step, which is quadratic. So Stage 3 recovers the
-exact type wherever the program determines it. It iterates over the whole
-program until nothing changes.
+use at a precise type unboxes it. Data types have one representation
+whatever their type arguments (§5.1), so `List lcAny` and `List Nat`, or
+`Array lcAny` and `Array Nat`, are one type: Stage 3 does not choose
+layouts. It types locals, so that `pick Nat`'s `x` is a `Nat` and a field
+is read at its own type (§5.5), recovering the exact type wherever the
+program determines it. It iterates over the whole program until nothing
+changes.
 
 A binder's type is recovered from what flows *into* it, never from how it
 is used. A use at a precise type only speaks for its own branch. With a type
 that depends on a value, `data : Array t.denote` is used as `Array Nat` only
-in the branch where `t = .nat`. A conversion moved from that use to the
+in the branch where `t = .nat`. An unboxing moved from that use to the
 binder would also run, and fail, when `t = .str`. The rules:
 - **From definitions.** A `cases` field gets the constructor's field type,
   instantiated at the discriminant's type, when that type is the
@@ -587,7 +629,7 @@ binder would also run, and fail, when `t = .str`. The rules:
   do not count, and neither do constructors without fields (`none`) of `T`'s
   inductive. It also gets `T` when every call of it binds the result at `T`,
   provided it is used nowhere else, e.g. not as a closure. The callers would
-  convert right away anyway; the conversion moves to the callee's `return`,
+  unbox right away anyway; the unboxing moves to the callee's `return`,
   which for a constant happens once instead of at every read. A self call
   that binds the result at another type than the declaration's own counts
   as a call here: that is polymorphic recursion into the uniform instance
@@ -595,153 +637,30 @@ binder would also run, and fail, when `t = .str`. The rules:
   a value of a different type at every depth, so the type at which the one
   typed caller binds the result (`List (Nat × Nat)`) does not hold for all
   of them (adv2 PrgPoly1, runtime test RtPolyRecResult).
-- **The `map` loops of §2.7.** The loop of `Array.mapMUnsafe` or
-  `Array.mapFinIdxMUnsafe` (recognized by name, as Lean's specializations of
-  it) returns its array once `Array.uset` has replaced every element. If
-  every value it stores, other than the `box(0)` placeholder, has the same
-  precise type `β`, its result is an `Array β`: `Array lcAny` becomes
-  `Array β` in its result type (`Option (Array β)` for `mapM` in `Option`).
-  The rule only applies when the loop's array stays within the loop: it is
-  read, written, passed back to the loop, returned or jumped with.
-- **Parameters from callers.** A parameter whose type holds an erased array
-  (`Array lcAny`, `Option (Array lcAny)`, …) gets `T` if every call site
-  passes it at the same precise type `T`. The assumption is checked: the
-  body is retyped under it, and the self calls must then pass `T` too. By
-  induction on the calls, every value reaching the parameter has type `T`.
-  Only call sites in declarations reachable from `main` and the startup
-  work count. A partial application that leaves the parameter open blocks
-  the rule. Other `lcAny` parameters are left alone. Code over a dynamically
-  typed value (`Dynamic.get?`) casts it, in branches that a runtime check
-  rules out, to types that a precise parameter type could not be converted
-  to.
 - **Externs at unknown types.** A call of a polymorphic extern instantiated
-  at `lcAny`, e.g. `Array.uget` and `Array.uset` at `NonScalar`, is
-  redirected to the extern's instance at the type arguments the arguments
-  determine. Every argument must then have exactly the expected type, or be a
-  `◾` placeholder, and a binder that already has a precise type must be
-  given exactly that type. An extern does not depend on its type arguments;
-  only the representation changes.
+  at `lcAny`, e.g. `Array.uget` and `Array.uset` at `NonScalar`, binds its
+  result at the type the extern returns at the type arguments the
+  arguments determine. Every argument must then have exactly the expected
+  type, or be a `◾` placeholder. The call keeps its callee: an extern does
+  not depend on its type arguments, and with one representation per
+  datatype only the result binder's type changes.
 - **Placeholders.** A placeholder `let z := ◾` gets the type its uses
   expect when they agree: it has no value to convert.
-- **References.** Mono types every `ST.Ref σ α` `lcAny`. An instance of
-  `ST.Prim.mkRef` at a precise `α` returns `typedRef α` instead (a type
-  only lean2rr uses), and the rules above carry it to the binders the
-  reference flows into: the `ST.Out` field, join-point parameters, and the
-  parameters of functions that every caller passes it to (the rule
-  *parameters from callers* also applies to parameters that receive a
-  typed reference). Stage 4 gives `typedRef α` the typed representation of
-  §5.1, so an `IO.Ref Nat` counter or the state of a `StateRefT` is read
-  and written without boxing. A reference stored in a structure field,
-  passed to uniform code or created there stays `lcAny`.
 
-For `xs.map (· * 2)` these rules make the whole map run on the precise array,
-in place and without boxing, like native Lean. The loop is assumed to
-receive `Array Nat`. Its reads become `Array.uget@Nat`, its placeholder is a
-`Nat` zero, and its writes of `Nat` values become `Array.uset@Nat`, so it
-passes `Array Nat` back. The loops that read the result then receive the
-precise array from their callers.
-
-When `f` changes the representation (`Nat → Bool`), the loop's array
-parameter stays `Array lcAny` after the fixpoint: it holds `Nat`s and
-`Bool`s. Such a loop is *split* (optional pass `split-map-loops`; without it
-the loop runs on an array of `Box`es), also where it is entered inside
-another split loop's body (`a.map (·.map f)`: the entry calls of the split
-instances are rewritten too, until no new instance appears). Its split instance takes two arrays instead
-of one, the source `src : Array α` and the result `dst : Array β`:
-- a read `uget bs i` of an array derived from the parameter becomes
-  `uget@α src i`, a value of `α`'s own representation;
-- the placeholder write `uset bs i ◾` becomes `uset@α src i ◾` (the element
-  stays unshared, as in Lean);
-- the value write `uset bs i v` becomes `push@β dst v`;
-- `usize`/`size` measure `src`; a self call passes both arrays; a returned
-  array, or one put in a constructor (`EST.Out.ok bs w`, `some bs`), is `dst`;
-  a join-point parameter receiving derived arrays gets two parameters.
-
-An entry call `map sz 0 xs` with `xs : Array α` becomes `map' sz 0 xs
-(Array.emptyWithCapacity@β xs.size)`. The push is the write at index `i`
-because `dst` holds exactly the `i` values mapped so far whenever the loop
-runs at index `i`: it starts empty at index 0, and every path to a self call
-writes one value and passes `i + 1`. The split only happens when the loop
-has this shape: derived arrays are read and written only at the loop index
-(reads before the value write, the value write once per path), passed to the
-loop with the index plus one after the write (or with the index to the loop
-that a `_redArg` wrapper calls), returned, put in constructors or passed to
-join points, and never captured or used otherwise; the entry passes the
-literal index `0` (possibly through join-point parameters). The values it
-stores must all have one type `β` that Stage 3 recovered, neither `lcAny`
-nor `◾`. Otherwise the
-loop keeps the `Box` array: its input is converted once on entry, and its
-result type (`Array β` by the `map` rule) makes it convert once on exit.
-A map whose function projects a field of a parametric structure
-(`(xs.zip ys).map (·.2)`, `rs.map (·.y)` with `structure R (α) where s :
-String; y : α`) is such a loop: the element it reads from `Array lcAny`
-has type `lcAny`, so the fields of the `cases` on it stay `lcAny` (round 7
-RV7D-01: they had been given the constructor's parameter types, `◾` or an
-earlier field's type, so the loop's result became an `Array ◾`, read back
-as zeros, or an `Array String` holding `Nat`s, an unreachable panic with
-the pass off too; test `RtMapProjFields`).
-The original loop is dropped when nothing reachable calls it any more, and
-the fixpoint runs once more, so the values the split loop reads can type
-what they flow into.
-
-Lean sometimes runs the first iteration in a specialization of its own.
-When the same function is mapped at two sites (`rows.map (·.map
-Nat.toFloat)` twice), `spec_2` runs one iteration and passes the array, with
-one value written, at index 1 to the actual loop `spec_2.spec_2` (or to
-another specialization of the same map). `spec_2` has no self call, so the
-rule *parameters from callers* gives its parameter the callers' type
-`Array α`, although it stores `β` values. Its array parameter is then the
-only parameter of a precise array type that it reads with `uget`, provided
-the values it stores have another type `β`. It is split like the other
-loops, and its continuation with it (a call with the index plus one after
-the write). The `map` rule gives `spec_2` no result type, since it returns
-its array or its continuation's result. Its split instance returns
-`Array β`: it returns only `dst`, the result of a split instance, or a
-constructor around them. Without this, the loop ran on an array of `Box`es,
-converted on entry and exit (round 6 RV6L-02: 3.5x native memory).
+For `xs.map (· * 2)` the loop of §2.7 runs on the one array type
+(`RVec<Box>`), in place: it reads a `Box`, unboxes it to the `Nat` the
+function takes, and boxes the result into the same slot, as natively (where
+the slot is a `lean_object*`). No loop is split and no array converted. (A
+container whose element type depends on a value, a column `data : Array
+ty.denote`, is also an `Array lcAny`: updating it at a precise type boxes
+one element; before arrays had one representation, it converted the whole
+array there and back at every update, review RV9C-02, and needed passes of
+its own.)
 
 Each rule is exact. A value's type is taken only from its definition or from
 everything that flows into it, so the recovered type is the type the value
 has on every path. Where the program does not determine the type, the
-binder keeps `lcAny` and uses `Box`, with conversions where it meets a
-precise type.
-
-A container whose element type depends on a value (`data : Array ty.denote`
-in a structure with a field `ty`) keeps `Array lcAny` (`Box` elements). Where
-Lean updates it at a precise type (`d.push i` in the branch where `ty =
-.nat`) and stores the result back in an `Array lcAny` position, the rules
-above would convert the whole array to `Array Nat`, push, and convert the
-result back: two copies per update, so a loop of updates is quadratic, where
-natively the cast is free and the push in place (review RV9C-02: 40000
-pushes 7.7 s for 0.00 s natively). So, after the fixpoint, such an update
-runs on the uniform array (optional pass `uniform-updates`): a call of an
-`Array` extern (`push`, `set!`, `pop`, `swap`, `get`, `size`, …, which do not
-depend on their type arguments) whose array is uniform is made at its
-instance at `lcAny`, so only the single element is boxed or unboxed; its
-result binder becomes the uniform type when it is a container, provided one
-use of it expects exactly that type (the value goes back to a uniform
-position) and every other use expects that type or a precise one it
-converts to: such a read (a fold at `Array Nat`, a rare path) converts at
-that use, on its own path, instead of the whole update converting there and
-back at every step (review C02R-02). A chain of such calls counts, and so
-does a join point's parameter that a jump passes a uniform value, every
-other jump a uniform value or a precise one (a fresh `#[i]` on a rare path,
-converted at that jump), and whose uses fit as above: the join point several
-match arms share, or an `if` choosing between two arrays (review C02R-01).
-A constructor application whose uses all expect one uniform type (`i :: d`
-stored in a `List lcAny` field) is built at that type. Then a declaration's
-parameter of a precise array type that every call site, partial
-applications included, passes a uniform array (a closure capturing an
-updated column, lifted to `_lam_N d'`; a fold loop called on it) becomes
-uniform when, with that type, its body uses it only where a uniform array is
-expected (its reads planned as above; its own recursive calls passing it on
-uniform), so no call converts. A call is changed only if it receives a
-uniform value it would otherwise convert and its other arguments then need
-at most a box; code that never meets a uniform container is unchanged.
-Tests `RtUniformUpdates`, `RtUniformUpdatesJp`, `RtUniformUpdatesMixed`,
-`RtUniformUpdatesNested`, and
-`tests/runtime/conv-count-check.sh`, which counts the elements conversions
-rebuild in a run (`L2R_COUNT_CONVERSIONS`) at two sizes.
+binder keeps `lcAny` and uses `Box`, unboxed where it meets a precise type.
 
 Stage 4 relies on structural facts of Stage 2's output:
 - join points are not recursive, and jumps are in tail position;
@@ -777,11 +696,10 @@ Stage 4 sees only mono types:
 | `Nat` | `Nat`, a *tagged* opaque handle: one word, `2n+1` for n < 2^63, else a pointer to a counted runtime bignum (GMP) | as natively; see "One-word `Nat` and `Int`" below |
 | `Int` | `Int`, the same with small values in the `int32` range (`lean_box((unsigned)(int)i)`) | |
 | `String` | `LStr`, an opaque copy-on-write handle to one block like Lean's string object: a 32-byte header (count, byte size, capacity, character count) and the UTF-8 bytes | literals: §5.4 |
-| `Array α` | `RVec<S>`, the runtime's copy-on-write vector: one block, a 24-byte header (count, size, capacity) and the elements | in place when unique. `S` is the storage type of `α`: `⟦α⟧` itself if it can cross Reussir's FFI boundary (scalars, `bool`, runtime handles, shared records); for an enumeration or `Unit`, its index (`u8`, `u16` or `u32` by the number of constructors; Lean stores a tagged scalar); otherwise a generated one-field shared struct `ElemBox` around it (Lean boxes array elements too) |
-| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` | the elements' own words, in one block with Lean's 24-byte array header (count, size, capacity), like Lean's array object; the array functions are the `natarr`/`intarr` counterparts of the generic ones, with the same arguments (optional pass `nat-arrays`; without it they are `RVec<Nat>`, `RVec<Int>`, also one word per element) |
-| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` are the identity (`Array UInt8` is `RVec<u8>` too) |
-| `ST.Ref σ α` | a generated shared record `L2RRefN(Cell<⟦α⟧>)` (N a counter) around Reussir's mutable cell | the contents keep their own representation; `[value]` structures are stored in an `ElemBox`, since Reussir's cells do not hold `[value]` records with counted members. Mono types a reference `lcAny`: it travels in a `Box` except where Stage 3 types it (below) |
-| `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧), … }` | memoized thunks, deferred tasks (§5.14) |
+| `Array α` | `RVec<Box>`, the runtime's copy-on-write vector: one block, a 24-byte header (count, size, capacity) and the elements | in place when unique. One representation whatever `α` is: an element goes in by boxing and comes out by unboxing (natively one `lean_object*` per element) |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` (and `FloatArray`'s) convert from/to an `Array UInt8` (an array of `Box`es) in one loop at the exact size, as natively they copy |
+| `ST.Ref σ α` | one generated shared record `L2RRefN(Cell<Box>)` (N a counter) around Reussir's mutable cell, whatever `α` is | a value is boxed when stored and unboxed when read at a precise type. Mono types a reference `lcAny`: it travels in a `Box`, and an operation unboxes it (one variant) |
+| `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> Box), busy, done(Box), … }`, one for thunks and one for tasks, whatever `α` is | memoized thunks, deferred tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
 
 **One-word `Nat` and `Int`.** A `Nat` is one machine word, with Lean's
@@ -827,7 +745,7 @@ were weighed (2026-10):
    the low bit is free. Nothing else in Reussir reads through an opaque
    handle (opaque values never donate their cells for reuse, are never
    deferred by the drop glue, and are only passed to Rust code, which knows
-   the encoding). The patch (Reussir patch 0050) carries the flag from the
+   the encoding). The patch (Reussir patch 41-a) carries the flag from the
    attribute to the type (`!reussir.ffi_object<…, tagged = true>`) and adds
    the two guards in the LLVM lowering of `rc.inc`/`rc.dec`.
 3. *lean2rr alone.* Reussir's only immediates are field-less constructors,
@@ -844,9 +762,8 @@ value costing one bit test and no call. Option 1 is the same mechanism
 with a call where the bit test suffices; option 3 is not possible.
 
 `Nat` and `Int` are then ordinary handles to lean2rr: they cross the FFI
-boundary (`Array Nat` without the `nat-arrays` pass is `RVec<Nat>`, one
-word per element; an `IO.Ref Nat` is a cell holding the handle), and
-records, constructors, closures and `Box` hold them as one word. The
+boundary, and records, constructors, closures and `Box` hold them as one
+word. The
 prelude's functions work on the words: `l2r_nat_raw(n)` turns a `Nat`
 into its word, which then owns the handle's reference, and each function
 does that once per argument, so the small path has no reference counting
@@ -874,27 +791,46 @@ computed fields. Lean's runtime does the same, and mono code uses both names
 for the same values.
 
 **`◾` (erased)** values have the unit representation. Erased parameters are
-kept, so arities are exactly Lean's (§5.2), and they receive `L2RUnit::u{}`.
-Erased constructor fields have no representation. Where `◾` or a unit-like
-value is used at a *relevant* type, it is Lean's `box(0)` placeholder
-(§2.7) and becomes the zero of that type.
+removed, except a function's last parameter, which stays one unit parameter
+for its trailing erased ones and receives `L2RUnit::u{}` (§5.2, rule 4). An
+erased domain of a function type is a unit domain where some function value
+of the program runs its body right after it, otherwise a *phantom* domain
+with no parameter at run time (§5.3). Erased constructor fields have no
+representation. Where `◾` or a unit-like value is used at a *relevant*
+type, it is Lean's `box(0)` placeholder (§2.7) and becomes the zero of
+that type.
 
-**Other inductives** become one Reussir type per instantiation, mirroring
-the Lean declaration: same constructors, same field order, fields typed by
-translating their instantiated types. Only *relevant* type parameters
-distinguish instantiations. A parameter is relevant if it appears in a data
-field. A phantom parameter such as `EST.Out`'s world type does not multiply
-types. The shape follows the constructors:
+**Other inductives** become one Reussir type each, whatever their type
+arguments (rule 1 of the layouts of generic types: types do not compute,
+values do), mirroring the Lean declaration: same constructors, same field
+order, fields typed by translating their declared types with every
+parameter of the inductive `lcAny`. A field of a parameter's type is a
+`Box`; `List α` in a field is the one `List` type; `α → β` is the function
+type `Box → Box`; a concrete field keeps its type. `Tree Nat` and `Tree α`
+are one type, as natively, where a field of unknown type is one
+`lean_object*`. The shape follows the constructors:
 
 ```
 inductive Ordering | lt | eq | gt          ↦  enum [value] Ordering { lt, eq, gt }        -- no fields: unboxed
 inductive Tree α | leaf | node (l) (k : α) (r)
-   at α := Nat                             ↦  enum Tree_Nat { leaf, node(Tree_Nat, Nat, Tree_Nat) }
+                                           ↦  enum Tree { leaf, node(Tree, Box, Tree) }
 structure P where a : UInt8; b : Nat; c : Float
                                            ↦  struct P { a : u8, b : Nat, c : f64 }
-Prod Nat P                                 ↦  struct Prod_Nat_P { fst : Nat, snd : P }
-List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons(Prod_Nat_P, List_Prod_Nat_P) }
+Prod Nat P                                 ↦  struct Prod { fst : Box, snd : Box }
+List (Prod Nat P)                          ↦  enum List { nil, cons(Box, List) }
 ```
+
+Typed code keeps precise types for its own values: Stage 1 makes an
+instance of each function per type argument and Stage 3 types parameters,
+results and locals, so `pick Nat`'s `x` is a `Nat`. A value goes into a
+field of a parameter's type by boxing and comes out by unboxing, O(1);
+`cases` unboxes a field once, at the binder's type (§5.5). A value is never
+rebuilt to change its layout: with one type per instantiation, a value
+crossing into uniform code was rebuilt node by node, without memory of
+the nodes already rebuilt, so a tree whose nodes share their children
+took exponential time and memory (`build n` with `.node t t`: 927 MB at
+n = 24, native 7.9 MB). A field of a parameter's type is a `Box` also
+where the parameter is a proof or a type: it holds `box(0)`, as natively.
 
 - **Shapes.** No relevant fields anywhere (proofs and erased fields do not
   count) means a `[value]` enum (no allocation). One constructor means a
@@ -915,40 +851,17 @@ List (Prod Nat P)                          ↦  enum List_Prod_Nat_P { nil, cons
   the fields stay in declaration order, and Reussir lays the padding out as
   bytes.
 - **Recursion.** Recursive, mutual and nested inductives refer to each
-  other's instances; `inductive Rose | node : List Rose → Rose` gives
-  `Rose` and `List_Rose`, defined together. Whether a type is a shared
-  record (so that arrays store it as it is, not in an `ElemBox`) is decided
-  from its constructor shapes before its fields are translated, so
-  `inductive Tree | node (v : Nat) (cs : Array Tree)` holds `RVec<Tree>`,
-  the representation `Array Tree` has everywhere else (also through mutual
-  types, whichever is translated first).
+  other's types; `inductive Rose | node : List Rose → Rose` gives `Rose`
+  and the one `List`, whose head is a `Box`; `inductive Tree | node (v :
+  Nat) (cs : Array Tree)` holds the one array type, `RVec<Box>`.
 - **Polymorphic recursion in a type.** Since Lean 4.34 an inductive can use
   itself at a larger argument only as an *index*: `unsafe inductive Nest :
   Type → Type 1 | nil {α} : Nest α | cons {α} (x : α) (rest : Nest (α × α)) :
-  Nest α`. Lean's mono phase erases indices, and nominal types are keyed on
-  parameters only, so all its instances are one type whose `x` is a `Box`:
-  nothing to cut (test `RtNestGrowType`). Lean 4.33 also accepted a growing
-  *parameter* in an `unsafe inductive`, `Nest α | nil | cons (x : α) (rest :
-  Nest (α × α))`; Lean 4.34's kernel rejects that (lean4#14582), so the rule
-  below no longer applies to any program lean2rr can load, and stays as a
-  defensive check. For such a parameter, translating `Nest Nat` would need
-  `Nest (Nat × Nat)`, whose field needs
-  `Nest ((Nat × Nat) × (Nat × Nat))`, and so on without end. So the rule of
-  §2.6 applies to the instantiations requested while fields are translated,
-  for an inductive whose block uses its types at other arguments than its
-  parameters (only `unsafe` ones can; a safe `Tree | node (kids : List (Nat
-  × Tree))`, whose `List Tree` reaches `List (Nat × Tree)`, is never cut):
-  an instantiation that strictly contains the arguments of an instantiation
-  of the same inductive whose fields are being translated (the path: a
-  mutual partner, `A α` holding `B (α × α)` holding `A (List (α × α))`, or
-  another inductive, `List (Rose (Option α))`, in between), or that is built
-  from the `lcAny` of the uniform instantiation on the path, or that has 256
-  instantiations of its inductive on the path, is the uniform instantiation.
-  `Nest Nat` is `enum Nest_Nat { nil, cons(Nat, Nest_Box) }`, and
-  `Nest_Box`'s own field is `Nest_Box`. A typed `Nest (Nat × Nat)` value
-  stored in that field is converted (boxing its `x`, its own `rest` being a
-  `Nest_Box` already), like any value meeting another representation of its
-  type (below).
+  Nest α`. Lean's mono phase erases indices, and an inductive has one type,
+  so `Nest` is one type whose `x` is a `Box`: nothing to cut (test
+  `RtNestGrowType`). (Lean 4.33 also accepted a growing *parameter* in an
+  `unsafe inductive`; with one type per inductive it would be one type
+  too.)
 
 **Function types** become generated shared enums, one per (lowered,
 curried) function type, whose variants say what a value is a partial
@@ -956,49 +869,28 @@ application of (§5.3). They are not Reussir closures.
 
 **The uniform type `Box`.** When a data position has type `lcAny` (§2.6, §4),
 its value is stored as `Box`.
-- `Box` is a generated enum with one variant per concrete Reussir type that
-  the program ever boxes, plus a unit variant. Variants are created as
-  Stage 4 needs them, and the unboxing functions are regenerated until the
-  set stops growing, so the set is known at the end of Stage 4. `Box` is
-  always emitted, since types can mention it even when nothing is boxed.
-  With the optional pass `conv-liveness` (on by default, §5.3), an
-  unboxing function is generated only once live code calls it, with arms
-  only for the variants that live code builds; `Box` keeps every
-  variant.
-- Converting a precise type `T` to `Box` wraps the value into `T`'s variant.
-  Unwrapping must accept every variant that can hold a value of the same
-  Lean type, because one Lean type can have several Reussir
-  representations: the instantiations of an inductive (`List Nat` and a
-  uniform `List Box`), or the representations of an array (`LNatArr`, and
-  `RVec<Box>` for an `Array Nat` built by the code of §2.7). Unboxing to a
-  nominal, array or word type (`Nat`, `Int`, `UInt8/16/32`, `Bool`,
-  `UInt64`, floats) is therefore a generated function that matches all
-  such variants and converts structurally, element by element for arrays.
-  An instantiation whose Lean type cannot be the target's (`Option Nat`
-  read as `Option String`) is reached only by a value that Lean's `cse`
-  shared between the two types (`none`, `some []`: no data where the types
-  differ). In a program that cannot cast (defined next) it converts
-  through the instantiation at the arguments both types share, `lcAny`
-  elsewhere: `Prod (Array S₁) Nat` read as `Prod (Array S₀) Nat` goes
-  through `Prod lcAny Nat`. Converted directly, K structures of one shape
-  going through uniform code made K² conversion functions, each with its
-  own generic runtime calls (build time grew quadratically). The arms
-  stay quadratic (each of the K unboxing functions has an arm per
-  instantiation), but they are no longer the main cost, and sending them
-  through one function per inductive would not make the matches smaller:
-  rrc gives every `match` on `Box` one region per variant, a wildcard arm
-  being copied into each variant it covers (Reussir issue 22, a cost).
-  Measured (shared machine) on 80 structures of one shape through one
-  polymorphically recursive function (`Prod (Array Sᵢ) Nat`; round 6
-  Ty6QS80) and on the program of the round-6 report (Ty6RT1): the build
-  takes 200 s and 334 s (native: 3 s and 1 s; lean2rr's translation 1 s);
-  without the 6,320 and 7,287 arms that convert through the shared
-  instantiation, 157 s and 270 s. The largest part is rrc compiling each
-  generic runtime function instantiated at a type with a separate rustc
-  run (`l2r_once_get<T>`/`l2r_once_set<T>` for every type's cached zero
-  value and constants and, when this was measured, the origin records of
-  every conversion, since removed): 1,970 and 1,992 runs, 100 s and 128 s
-  (a small program: 368 runs, about 30 s).
+- `Box` is one word, as Lean's `lean_object*` (the prelude's `LAny`,
+  `leanrt::any`): an odd word is an immediate (a scalar, an enumeration's
+  index, a nullary constructor by index, a small `Nat` or `Int`, unit =
+  `box(0)`); an even word owns a counted object, its address in the low
+  48 bits and the number of its payload type in the top 16 (leanrt's kinds
+  1 to 15, the program's from 16). Payload types are numbered as Stage 4
+  boxes values; the program's releases of its payload types
+  (`l2r_any_rel_<n>`, installed in leanrt's table by number) and the
+  unboxing functions are generated at the end, once every payload
+  type is known. With the optional pass `conv-liveness` (on by default,
+  §5.3), an unboxing function is generated only once live code calls it,
+  with arms only for the payloads that live code builds.
+- Converting a precise type `T` to `Box` boxes the value at `T`'s payload
+  number (an immediate, or the pointer; a value that is not one counted
+  pointer goes into a cell first). Unboxing to a nominal type `T`, an
+  array, a thunk or a task, a reference, a string or a word type accepts
+  `T`'s own payload only (one type per inductive, one per builtin generic
+  type), and `box(0)` as `T`'s zero, in line. Unboxing to a function type
+  must accept every payload that can hold a value of the same Lean type,
+  because a function type has several Reussir representations (`Nat →
+  Nat` and `Box → Box`): it is a generated function that dispatches on the
+  payload number and wraps them.
   When the program can cast at all, unboxing also accepts the variants of
   types that an `unsafeCast` can read (below). A program can cast when
   some declaration it reaches outside Lean's library (`Init`, `Std`,
@@ -1061,8 +953,8 @@ its value is stored as `Box`.
   constructor fields, join-point arguments, closure arguments and results.
   This is the typed counterpart of Lean's own `explicitBoxing`, which
   converts between `obj` and unboxed scalars.
-- An inductive applied to `lcAny` is instantiated with `Box`:
-  `Free lcAny Nat` ↦ `Free_Box_Nat`.
+- An inductive applied to `lcAny` is the inductive's one type:
+  `Free lcAny Nat` ↦ `Free`, whose fields of parameter types are `Box`es.
 - A function value is boxed under the variant of its own type. Unboxing it
   to the same type gives the value back; unboxing it to another
   representation of the same Lean type (for example to `Box → Box`, for
@@ -1074,48 +966,23 @@ its value is stored as `Box`.
   wrapped at all (it is the same object), and one read at three
   representations in a loop (`Nat → Nat`, `Nat → Box`, `Box → Box`)
   stays one wrapper deep.
-- A reference (`ST.Ref`) is boxed under the variant of its own type. A
-  reference cannot be converted without losing aliasing, so where one is
-  used in a `Box` (uniform code, or typed code that got it through a
-  `lcAny` position), each operation goes through a generated dispatch over
-  every reference type the program boxes: it acts on that reference's one
-  cell, converting the value between the cell's element type and the
-  operation's (`get` at `Box` on a reference to a `Nat` boxes the `Nat`; `set`
-  unboxes). Typed references come only from `ST.Prim.mkRef` instances at a
-  precise element type, and flow only to binders that Stage 3 types from
-  them (§4), so a typed position never receives a reference of another
-  representation. `ST.Ref.ptrEq` compares the records' addresses.
+- A reference (`ST.Ref`) has one type, whose cell holds a `Box`; mono
+  types every reference `lcAny`, so it travels boxed, and each operation
+  unboxes it (one variant) and acts on its one cell: `set` boxes the
+  value, `get` gives a `Box` (which the IO result's field holds as it is).
+  `ST.Ref.ptrEq` compares the records' addresses.
 - A partial application has the type of its target with the supplied
   arguments removed. Lambda lifting can give a lifted lambda the result type
   `lcAny` while its closure is used at `Nat × Int → Int`, or the reverse; the
   value is then converted to the binder's type as above, and the callee
   still runs only when the last argument arrives.
-- When a structure built at a uniform type (for example a `List Box` coming
-  out of polymorphically recursive code) meets code expecting the precise
-  type (`List Nat`), the conversion is structural, element by element.
-  An array whose elements cannot be converted (`Array String` to
-  `Array Nat`) must be empty when that happens: an empty array that `cse`
-  shared between two element types, or the result of mapping nothing. Its
-  element step is therefore `unreachable`. (`Array Nat` to `Array Int`
-  converts element by element: a `Nat` converts to an `Int`.)
-  - *Loops, not recursion.* A conversion whose recursion goes through one
-    field of each constructor (a list's tail, a snoc list's init) is a
-    directly recursive function that Reussir compiles as a loop (tail
-    recursion modulo constructors). Any other recursion (several recursive
-    fields, as in a tree; through other types, as a rose tree's `List` of
-    trees or mutual inductives; through array elements) is an explicit
-    stack: the generated function is a loop over a stack of pending
-    constructors, each holding the source value and the fields converted
-    so far (`convMachine`). Converting a deep value uses heap, not stack,
-    as native Lean, which converts nothing, uses none.
-  - *A new value.* The converted value is a new object, equal to the
-    original and unshared, so it is updated in place; the original is
-    released as soon as nothing else holds it, with any resource it holds.
-    Nothing links the two: converting the value back rebuilds it again (a
-    value that crosses into uniform code and back is converted twice).
-    Natively there is one object; only identity (`ptrAddrUnsafe`, `ptrEq`)
-    and sharing (`dbgTraceIfShared`) can tell the difference, and neither
-    is preserved (§9).
+- A value is never rebuilt to change its layout: a datatype, an array, a
+  thunk or task and a reference each have one type. The one rebuilt value
+  is a cast's (below), between two inductives whose layouts differ: a new
+  object, equal to the original and unshared. Natively there is one
+  object; only identity (`ptrAddrUnsafe`, `ptrEq`) and sharing
+  (`dbgTraceIfShared`) can tell the difference, and neither is preserved
+  (§9).
 - Through `unsafeCast` (mono erases it), a value can meet code expecting
   another type that Lean represents alike. The conversions follow Lean's
   representation:
@@ -1163,18 +1030,21 @@ its value is stored as `Box`.
     read as an object with fields is natively a number used as an address
     (a crash): unreachable.
   - A `[value]` struct is natively its field.
-  When the two Reussir types have the same layout (the same constructors
-  with fields of the same layouts, position by position, coinductively;
-  arrays of such elements) and the conversion would pair exactly those
-  fields, the value is used as it is (`l2r_retype`, the same object
-  reinterpreted): a user list read as another user list, or an `Array T₁`
-  field read at `Array T₂`, costs nothing and keeps its sharing. This
-  applies to instantiations of one inductive as well (`structConv`,
-  `vecConv` otherwise rebuild). Where no conversion exists at all, lean2rr
-  warns and emits a run-time panic for that cast: the program is still
-  translated.
-- `Box` costs one allocation per boxing, and appears only on the rare paths
-  of §2.6. Typed code never pays for it.
+  When the two Reussir types (two inductives' records; an array has one
+  type) have the same layout (the same constructors with fields of the
+  same layouts, position by position, coinductively) and the conversion
+  would pair exactly those fields, the value is used as it is
+  (`l2r_retype`, the same object
+  reinterpreted): a user list read as another user list costs nothing and
+  keeps its sharing (`structConv` otherwise rebuilds it, converting a
+  recursive field by calling itself, so a deep value uses stack). Where no
+  conversion exists at all, lean2rr warns and emits a run-time panic for
+  that cast: the program is still translated.
+- `Box` costs one word, as natively; boxing allocates only a cell for a
+  `Float`, a `UInt64` from 2^63 (natively a cell too) or a value that is
+  not one counted pointer (a multi-word `[value]` record). It appears in
+  every field, array element, reference and thunk of a parameter's type,
+  and on the paths of §2.6; a typed local never pays for it.
 
 ### 5.2 Declarations, calls, arities
 
@@ -1204,6 +1074,22 @@ work runs is observable.
 | `let y := f a b c` with `f` of arity 2 | `let t = f(a, b); let y = t(c);` |
 | `let y := g a b` with `g` a function value | `let y = l2r_ap2_…(g, a, b);` (§5.3) |
 
+**Erased parameters (rule 4).** The arity counts erased parameters (`◾`:
+types, type arguments, proofs), but the Reussir function takes none of
+them, except its last parameter: when that one is erased, the function
+takes one `L2RUnit` for its trailing erased parameters. A call drops the
+`◾` arguments of removed parameters and passes `()` for the trailing unit.
+So the body still runs when Lean's last argument is applied: `f 3` of
+`def f (x : Nat) (α : Type)` stays a partial application (`f(x, u)`), and
+a function whose parameters are all erased stays a function. Join points
+take no erased parameter. The IO world (`lcVoid`) and `Unit` are data.
+
+| Mono LCNF | Reussir |
+|---|---|
+| `def f (x : Nat) (α : Type) (y : Nat) (β γ : Type)` | `fn f(x : Nat, y : Nat, u : L2RUnit)` |
+| `let y := f a ◾ b ◾ ◾` | `let y = f(a, b, L2RUnit::u{});` |
+| `let h := f a ◾` | `let h = …::p2_f{a};` (captures `a` only) |
+
 ### 5.3 Closures (function values)
 
 After Stage 2, every closure is a partial application of a top-level
@@ -1213,15 +1099,16 @@ their captured variables.
 - **Representation.** A Lean function value of lowered, curried type
   `T = A₁ → … → Aₙ → R` is a value of a generated shared enum `L2RFn_…`
   with these variants:
-  - `p<m>_<target>(c₁, …, cₘ)`: a *target* (a declaration, an extern, a
-    constructor, a standard-stream primitive) with its first `m` arguments
-    captured. With `m = 0` the variant is nullary and costs no allocation;
+  - `p<j>_<target>(c₁, …)`: a *target* (a declaration, an extern, a
+    constructor, a standard-stream primitive) applied to its first `j`
+    Lean arguments, capturing those it takes (not the erased ones, §5.2).
+    When it captures none, the variant is nullary and costs no allocation;
   - `raw(A₁ -> …)`: a Reussir closure, for values built by glue code;
   - `w<S>(g)`: a value `g` of another representation `S` of the same Lean
     type (§5.1);
   - `z`: the `box(0)` placeholder (§2.7), a function that is never applied.
 - **Creating a function value.** A partial application of a target of
-  arity `k` to `m < k` arguments builds `p<m>_<target>(args)`: one
+  arity `k` to `j < k` arguments builds `p<j>_<target>(args)`: one
   allocation, like native `lean_alloc_closure`.
 - **Applying a function value.** `g a₁ … aⱼ` calls a generated
   `l2r_ap<j>_T(g, a₁, …, aⱼ)` (at most the chain length at a time), which
@@ -1243,10 +1130,28 @@ their captured variables.
   can inline, and a known target is a direct call. In a prototype, 10⁸ calls
   of shared function values took 0.09 s this way and 0.55 s with Reussir
   closures.
-- **Erased parameters.** Lean still passes erased parameters (a proof, the
-  IO world, a type) to closures, and they count toward the arity. They
-  remain parameters of type `L2RUnit`, in declarations and closures alike,
-  and receive `L2RUnit::u{}`. Only extern calls drop them.
+- **Erased parameters.** Lean still passes erased parameters (a proof, a
+  type) to closures, and they count toward the arity. A target takes none
+  of them except its last parameter (§5.2); a `p<j>` variant counts Lean
+  arguments, and captures the ones the target takes. The IO world is data.
+- **Erased domains.** A function type keeps an erased domain as a unit
+  domain only where some function value of the program runs its body
+  right after it (`mkF n b : (α : Type) → β` at `β := List Nat → Nat`
+  runs at the type); otherwise the domain is *phantom*: the RR type keeps
+  it (Lean positions) but the run-time type has no parameter for it, so
+  `{α : Type} → List α → Nat` filled with `List.length` and `fun xs => …`
+  is `List_Box → Nat`. The decision is by the type from that domain on:
+  the domain stays if it is the type's last domain, if a value completes
+  at an erased domain of the same skeleton (erased, data or `lcAny`
+  domains), or if a value that completes there can become a value of this
+  type along the program's flow (use sites where a function value of one
+  type is used at another, and `Box` positions, read from mono LCNF before
+  the lowering). Application
+  takes Lean arguments along the type (a phantom domain drops its `◾`);
+  an application function drops a unit argument at a parameter its
+  variant's target does not take; a wrapper knows the phantom domains of
+  both types, so uniform code that applies a boxed value to `box(0)` for a
+  type argument lines up with the value's own domains.
 - **Constructors and externs** are targets like declarations. Constructors
   do no work, so their timing does not matter.
 - **Prelude callbacks.** Runtime helpers that take a Reussir closure
@@ -1259,8 +1164,8 @@ application appears.
 
 - **Only for live code** (optional pass `conv-liveness`, on by default).
   The helpers generated at the end (unboxing functions, application
-  functions, conversions of function values, the dispatch of reference
-  operations on a `Box`) follow a type-based reachability, computed while
+  functions, conversions of function values) follow a type-based
+  reachability, computed while
   they are generated (`Lower/Live`, `Finish.finishLive`). The roots are
   the identifiers of the raw text (the entry point, the startup chain, the
   trampolines the runtime calls) and of the prelude. A function reached is
@@ -1281,8 +1186,9 @@ application appears.
   registered anywhere: in a program that can cast (§5.1), each unboxing
   function then has a cast arm and a conversion for every variant of a
   compatible layout, and a program importing `Cslib.Init` with a
-  one-line `main` had 990,927 functions (1.44 GB of `.rr`) of which about
-  2 % could run; with the pass it has 30,418 (26 MB).
+  one-line `main` has 226,219 functions (380 MB of `.rr`; 990,927 in
+  1.44 GB before one layout per datatype); with the pass it has 28,300
+  (29 MB).
 
 - **Kept out of rrc's MLIR inliner.** The conversions between
   representations (`l2r_fconv_S_T`), the unboxing functions (`l2r_unbox_…`,
@@ -1331,13 +1237,21 @@ application appears.
 | Mono LCNF | Reussir |
 |---|---|
 | `cases b : Bool \| false => e₁ \| true => e₂` | `if b { ⟦e₂⟧ } else { ⟦e₁⟧ }` |
-| `cases t : Tree Nat \| leaf => e₁ \| node l k r => e₂` | `match t { Tree_Nat::leaf => ⟦e₁⟧, Tree_Nat::node(l, k, r) => ⟦e₂⟧ }` |
+| `cases t : Tree Nat \| leaf => e₁ \| node l k r => e₂` | `match t { Tree::leaf => ⟦e₁⟧, Tree::node(l, b, r) => let k = unbox(b); ⟦e₂⟧ }` |
 | `cases p : P \| P.mk a b c => e` (single constructor) | `let a = p.0; let b = p.1; let c = p.2; ⟦e⟧`, positions from the alignment-sorted layout (§5.1) |
 | alternatives missing a constructor, no default | extra arm `_ => unreachable` (Lean has proved it impossible) |
 
-Erased fields get no binders. Reussir syntax notes: match arms have no
-trailing comma after the last arm, and there is no `else if` (use
-`else { if … }`).
+Erased fields get no binders. A field is bound at its parameter's own
+type (from Stage 3): a `Box` field (a field of a parameter's type, §5.1)
+read by a parameter of type `Nat` is unboxed once, right after the match,
+not at each use; a parameter the code never uses is not converted. Where
+the parameter goes back to a `Box` position (a rebuilt constructor's
+field), its value is boxed again: passing the field's own box left the
+unboxed value's release dead in that branch, and Reussir's token reuse
+took it as the new node's donor instead of the matched cell (Reussir
+issue 39, reussir-bugs/39-alias-release-donor.md).
+Reussir syntax notes: match arms have no trailing comma after the last
+arm, and there is no `else if` (use `else { if … }`).
 
 **Cast values.** Mono erases `unsafeCast`, so a `cases` (or a projection)
 can meet a value of another type that Lean represents alike. A value of an
@@ -1355,8 +1269,8 @@ match (unsafeCast x : L2) with | .cons h _ => h | .nil => 0     -- x : L1
 A word matched as an enumeration or as an inductive with nullary
 constructors (and an enumeration matched as another one with a different
 number of constructors, or as `Bool`) is converted first (§5.1). A value
-in `Box` is converted to the inductive's uniform instance first, which
-accepts values boxed from those other types too. Where no conversion
+in `Box` is unboxed to the inductive's type first, which in a program that
+casts accepts values boxed from those other types too. Where no conversion
 exists, lean2rr warns and the match panics when it runs.
 
 An arm that returns the matched value (`simp` turns `node l k r` back
@@ -1793,7 +1707,7 @@ Rules:
      the module of Lean's library that does, to import if that declaration
      is public (read from the toolchain's library source, imported or not;
      REB-03); a helper of
-     lean2rr's own prelude (`l2r_nat_repr`, `lean_natarr_push`) gets no
+     lean2rr's own prelude (`l2r_nat_repr`, `lean_array_uswap`) gets no
      such hint (REB-07). It says that lean2rr supports Lean code plus
      Lean's runtime library only.
 
@@ -1928,10 +1842,10 @@ Rules:
   arguments. A value whose *declared* type is a type parameter `α` (the
   element of `Array.push`, or a trivial structure over `α` such as
   `[Inhabited α]`, which mono represents by its field) is passed and
-  returned in `α`'s storage type, wrapped or unwrapped if that is an
-  `ElemBox`, converted to or from its index for an enumeration stored as
-  one (only for externs over arrays of `α`, whose storage must be the
-  array's). Other parameters, like an index, are passed as they are.
+  returned in `α`'s storage type: a `Box` for an extern over arrays of `α`
+  (an array holds `Box`es), boxed and unboxed at the call; for any other,
+  `α`'s own type, wrapped or unwrapped if that is an `ElemBox`. Other
+  parameters, like an index, are passed as they are.
   Instance keys hold base-phase types, so type arguments go through
   `toMonoType` first.
 - **Generic prelude functions over values.** Storage types exist only
@@ -1956,8 +1870,10 @@ Rules:
   declarations (Lower/Borrow: copies go through `toImpure` and the impure
   passes up to `inferBorrow`, as Lean compiles its own declarations; extern
   instances get their extern's `@&`) and emulates Lean's reference counting
-  where a value may hold a resource (a handle, which mono types `lcAny`, so
-  any `Box`; a record, array or reference with such a field):
+  where a value may hold a resource, decided on the mono type of the
+  parameter it is passed to (a handle, which mono types `lcAny`, so any
+  `lcAny`; an inductive or array with such a field at its type arguments,
+  so not a `List Nat`, although its one Reussir type holds `Box`es):
   - a direct call keeps an argument passed to a borrowed parameter until
     the call returns (`l2r_release_after`, an effectful FFI call after the
     call, as Lean's `dec`), when the caller owns it; an argument the caller
@@ -1971,9 +1887,8 @@ Rules:
     their first occurrences among the arguments, as Lean's `explicitRc`
     prepends each `dec` after the call: `put3 a b c` with three dead
     handles closes `c`, then `b`, then `a`.
-  Lean's passes see lean2rr's typed references (`_l2r.TypedRef α`) as an
-  opaque type, as they see their own `lcAny` references, and a failure of
-  the inference is a translation error: the emulation is all or nothing.
+  A failure of the inference is a translation error: the emulation is all
+  or nothing.
   Other values keep Reussir's release times: the same results without the
   extra reference counting. The process glue keeps a `Child` alive across
   `wait`, `tryWait` and `kill`, which borrow it by annotation.
@@ -2102,7 +2017,11 @@ use instead of cached. Every `Nat` or `Int` it builds must be small (a
 big number, which is cached: recomputed it would be allocated at every
 use, RV8N-01). It cannot panic, trace or allocate, so this is
 unobservable, and it is cheaper than a once-cell read (optional pass
-`cheap-consts`). A closed term referenced exactly once, by another constant
+`cheap-consts`). A constant boxed where boxing allocates (a `Float`, a
+`UInt64` from 2^63) is boxed once, its box kept in a once-cell, as Lean's
+`_boxed_const_N` (optional pass `boxed-consts`): the default of `a[i]!`
+on an `Array Float` is `instInhabitedFloat`, and boxing it at every read
+was a new cell per read. A closed term referenced exactly once, by another constant
 (the steps of an array literal, `_closed_k := push _closed_(k-1) e_k`), is
 evaluated where it is used instead of cached: it still runs once, and the
 intermediate values are not kept (caching every step of a 10000-element
@@ -2112,11 +2031,11 @@ lowering (`spliceChainConsts`): an `n`-element literal (`#[…]`, `[…]`, a
 `ByteArray`) becomes one straight-line body instead of `n` functions
 calling each other (rrc compiles about 80 functions per second: a
 100000-element `Array Nat` took ten minutes to build), each element's
-literal placed right before its push. In that body, a run of 32 or more
-small `Nat` literals pushed onto an `Array Nat` becomes one call
-`l2r_natarr_lits(a, id)` that pushes the words of a table generated with the
-program (`ArrayLits`); other long bodies are cut by `Outline` (§10, "Build
-time"). The 100000-element `Array Nat` literal builds in about 25 s.
+literal placed right before its push. Long bodies are cut by `Outline`
+(§10, "Build time"). (While an `Array Nat` was a one-word `LNatArr`, a run
+of small `Nat` literals became a table the runtime pushed; an array of
+`Box`es has none, and the 100000-element `Array Nat` literal's build time
+is to be measured again.)
 Only a chain where nothing but literals (and closed terms of literals) is
 computed before a step reads the previous one is spliced: otherwise every
 element would be computed before the whole rest of the chain and live
@@ -2381,19 +2300,20 @@ arguments.
 
 Both are a runtime cell `LCell<S>`: one allocation holding a count and one
 value, updated in place and seen through every alias. The value is a
-generated state, one type per value type `α` (and per kind, thunk or task):
+generated state, one type for thunks and one for tasks, whatever `α` is
+(the value is boxed):
 
 ```
-enum L2RThunk_N { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧),
-                  conv(L2RUnit -> ⟦α⟧, Box) }
-enum L2RTask_N  { pending(L2RUnit -> ⟦α⟧), busy, done(⟦α⟧),
-                  conv(L2RUnit -> ⟦α⟧, Box, u64), bind(L2RUnit -> LCell<L2RTask_N>) }
+enum L2RThunk_N { pending(L2RUnit -> Box), busy, done(Box) }
+enum L2RTask_N  { pending(L2RUnit -> Box), busy, done(Box),
+                  bind(L2RUnit -> LCell<L2RTask_N>) }
 ```
 
 The state is a shared Reussir enum, so every `α` fits, closures and value
 types included; a closure cannot be stored in a runtime cell directly.
-`conv` is a converted thunk or task and `bind` a bind task that has not
-started (both below).
+`bind` is a bind task that has not started (below). `Thunk.mk f` wraps `f`
+(`Unit → α`) as a function value returning a `Box` (§5.3), `Thunk.get`
+unboxes the value it gives.
 toMono leaves only a few externs to translate: `cases` on a thunk or task
 becomes `Thunk.get`/`Task.get`, and `Thunk.fn` a closure calling
 `Thunk.get`.
@@ -2499,28 +2419,15 @@ resume. lean2rr's part is the task objects and the glue (`leanrt::task`,
   meanwhile and its address given to a new cell. It is skipped when every
   task of the program has finished. The walks are generated at the end of
   lowering, and do nothing for types that cannot hold a task.
-- A thunk or task stored at another representation (in `Box`, §5.1) is
-  converted to a new cell. One that has its value gives a cell in state
-  `done` with the converted value. Otherwise the new cell is in state
-  `conv(g, o)`, for a task `conv(g, o, a)`: `g` forces the original and
-  converts its value (so it still runs at most once); `o` is the original
-  cell, boxed, so that converting the copy back gives that very cell; a
-  task's `a` is the original's address, the copy's identity for the
-  runtime, so the copy's state, waiting for it, `IO.cancel`, its priority
-  and its dependents are the original's. The copy has no running state of
-  its own: it stays `conv` while it is forced, and forcing it again
-  meanwhile runs `g` again, which waits for the original if that is
-  running and has the original's value once it has finished. A forced copy
-  stores `done(v)` and lets the original go. A copy of a copy records the
-  first original, so chains stay one level deep. The copy is a cell of its
-  own for `ptrAddrUnsafe` (§9).
+- A thunk or task is never converted: it has one type whatever its value
+  type, so typed and uniform code share the one cell (a task's address is
+  its identity for the runtime).
 - *Promises* (`IO.Promise α`, `lcAny` in mono code) are a runtime object
-  (`LPromise`) holding the cell of their task, a task over `Option Box`
-  whatever `α` is, so that typed and uniform code share it; lean-runtime's
-  promise is that task. `Promise.resolve` stores `some v` (only the first
+  (`LPromise`) holding the cell of their task (the one task type, whose
+  value, an `Option α`, is boxed); lean-runtime's promise is that task. `Promise.resolve` stores `some v` (only the first
   resolution counts) and lean-runtime walks the task's dependents on the
-  resolving thread (`resolve_core`). `Promise.result?` converts the task to
-  `Task (Option α)`, and `Promise.result!` maps `Option.getOrBlock!` over
+  resolving thread (`resolve_core`). `Promise.result?` gives the task as it
+  is (one task type), and `Promise.result!` maps `Option.getOrBlock!` over
   it (lean-runtime's `option_get_or_block`: Lean's forced panic message,
   then the context waits forever). Dropping the last reference to an
   unresolved promise resolves it with `none` (`deactivate_promise`).
@@ -2596,7 +2503,7 @@ dropping thread, wherever that happens):
   `run_deferred`). A free inside such a dependent is a free of its own:
   its promises' dependents run when it ends, before the dependent goes
   on, as natively (test `RtPromiseNestedFreeOrder`). The runtime sees the
-  end of every free through local Reussir patch 0040
+  end of every free through local Reussir patch 40-a
   (`__reussir_drop_drained`, which every drain that released something
   calls when it ends), which lean2rr requires (`scripts/l2r.py` stops
   with an error without it).
@@ -2605,7 +2512,9 @@ A reference's `set` stores the new value before it releases the old one,
 as `lean_st_ref_set` does (Reussir's `cell::set` releases first): code that
 the release runs sees the new value. It releases the old value as
 `lean_dec` does (`leanrt::drop::release`, through the prelude's
-`l2r_release_value`): a shared value is only decremented, and the last
+`l2r_release_value_then`, which then releases the reference: a set that is
+the reference's last use frees the old value before the new one, test
+`RtRefSetLastUse`): a shared value is only decremented, and the last
 reference to a record is freed inside a free the runtime starts, so what
 it holds goes in Lean's order (its last field first) and the dependents
 of the promises it drops run when that free ends, before the next
@@ -2844,9 +2753,9 @@ Probe results (Reussir at the pinned commit):
   FFI parameters (an array `get` currently takes ownership and releases);
   a no-inline attribute (lean2rr uses `#[transform_anchor]`, whose
   `no_inline` is a side effect, reussir-bugs/20-statet-tower.md); tagged
-  opaque handles (one-word `Nat`/`Int`, §5.1: local patch 0050,
-  reussir-bugs/local-additions.md); bounded-depth frees (local patches
-  0013-0015).
+  opaque handles (one-word `Nat`/`Int`, §5.1: local patch 41-a,
+  reussir-bugs/41-tagged-ffi-objects.md); bounded-depth frees (local patches
+  13-a to 13-c).
 
 Answered (Lean):
 - Startup order: `EmitC.emitInitFn` runs the module's compiled
@@ -2899,14 +2808,23 @@ Answered (Lean):
   (`addrL (convert p)`), and a polymorphic function value such as
   `{β} → β → USize`, which boxes its argument at each call. Answers
   differ from native where a value has another representation or another
-  cell here: a value
-  converted to another representation (§5.1) is a new object, so it is not
-  `ptrEq` to its original, nor are two conversions of one value; two
-  boxings of one value are two `Box` cells; a function value wrapped for
-  another representation (§5.3) and a converted thunk or task (§5.14) are
-  cells of their own; an arm rebuilt by `fresh-rebuild` (§5.5) is a new
+  cell here: a value cast to another inductive whose layout differs
+  (§5.1) is a new object, so it is not `ptrEq` to its original, nor are two
+  conversions of one value; two boxings of one value are two `Box` cells; a
+  function value wrapped for another representation (§5.3) is a cell of
+  its own; an arm rebuilt by `fresh-rebuild` (§5.5) is a new
   cell; equal `UInt64`s, `Float`s and small numbers are `ptrEq` (natively
-  each boxing of a `UInt64` or `Float` is a new cell). So code that stops
+  each boxing of a `UInt64` or `Float` is a new cell), also through a
+  generic function (`ptrEq` on `α` applied to two `Float`s: lean2rr
+  instantiates the function at `Float` and compares the bits; natively it
+  receives two new boxes and answers `false`; adversarial finding 4); a
+  constant boxed twice is one cell (`boxed-consts`), as natively
+  (`_boxed_const_N`) within one module only: native Lean caches its boxed
+  constants per module (`cacheAuxDecl`), lean2rr one cell per constant for
+  the whole program, so the boxings of one constant in two modules are two
+  cells natively and one here; and in the body of a constant (which runs
+  once) lean2rr boxes a constant in line, a new cell each time, where
+  natively it is the module's cell. So code that stops
   only when `ptrEq` says a step returned its argument (a fixpoint over
   values that cross representations) can take more steps than natively.
   `ST.Ref.ptrEq` (`IO.Ref.ptrEq`) stays real identity: a reference is never
@@ -3006,16 +2924,31 @@ Each item says what differs and when.
   (`ulimit -v 16000000`) on such inputs.
 - *Merging after erasure* (§2.3): Lean's mono `cse` merges calls of one
   declaration at different type arguments whose value arguments agree after
-  erasure, and runs them once; lean2rr does too, except in two shapes, where
-  both calls run and a trace or panic in them prints twice: a call whose
-  results at the two types differ where a function, a runtime object or
-  something unclassified can be (an `Option (α → α)` or a structure with a
-  field `run : α → α` at `Nat` and at `String`, a one-field structure around
-  a `Nat → Nat` and a `String → String`: lean2rr converts no function
-  between two function types; test `RtCseFnResult` records both outputs
-  in expectation files), and
-  a call inside a local function merged with one outside it, which Lean
-  merges only where it inlined the local function first.
+  erasure, and runs them once; lean2rr does too, with the earlier call's
+  instance or with the instance at `lcAny`, except in these shapes, where a
+  trace or panic in the calls prints another number of times (test
+  `RtCseApart` records both outputs in expectation files):
+  - the calls cannot share an instance: the earlier call's result does not
+    serve the later one, and the instance at `lcAny` is not possible,
+    because a type argument that differs is a type former, or an argument
+    of the earlier call does not serve at the type of the argument it
+    replaces (the earlier call's `⟨tagger n⟩ : Fn`, a `Nat → Nat`, for the
+    later call's `String → String`), or the group is closed and the base
+    test refused it (`mkO 3 : Option (α → α)` in `one` at `Nat` and in
+    `both` at `Nat` and `String`: natively `both` shares `one`'s closed
+    term, one trace; lean2rr runs `both`'s calls apart, two traces, as
+    before): both calls run;
+  - a closed call that takes the instance at `lcAny` because the base test
+    aligned it, and whose result type hides the type argument in a field
+    (`Foo α` with a field `(b : Bool) → if b then List α else Unit`): it is
+    not the closed term of the same call at the earlier call's types in
+    another function, which natively and on the base it is: it runs once
+    more;
+  - a call that Lean's `cse` finds in the scope of the other only after
+    its later passes moved the code (a call inside a local function merged
+    with one outside it, where Lean inlined the local function first; a
+    call in a join point merged with one in a branch that jumps to it,
+    where Lean inlined the join point into that branch): both run.
 - *Running out of memory*: lean2rr ends every failed allocation, including
   a big number's limbs (one block allocated by leanrt since the one-block
   layout; only `pow`, `gcd` and decimal conversion go through GMP's own
@@ -3069,12 +3002,9 @@ Each item says what differs and when.
   rrc's inliner): the same release at the same point (40 constructors: 27
   s). A 2000-line `main` builds in about two minutes and
   2 GB, a recursive IO function of 2000 statements in about 70 s and
-  1.5 GB, a recursive function with a 3000-arm match in 80 s. Many
-  instantiations of one inductive in `Box`es (K structures of one shape
-  through polymorphically recursive code) make K unboxing functions of K
-  arms each, and rrc compiles each generic runtime function instantiated
-  at a type with its own rustc run: 80 such structures build in about
-  3 minutes (§5.1). `Outline`
+  1.5 GB, a recursive function with a 3000-arm match in 80 s. rrc
+  compiles each generic runtime function instantiated at a type with its
+  own rustc run (§5.1). `Outline`
   itself takes lean2rr time quadratic in the length of a tail path: each
   cut computes the free variables of the whole rest of the path
   (`partParams`). A function made of 1600 matches in a row, each holding
@@ -3115,11 +3045,13 @@ Each item says what differs and when.
   answers the address of a value's cell in its own representation, or a
   word computed from a scalar's value, so `ptrEq`, `ptrEqList` and
   `withPtrAddr` can answer otherwise than natively wherever a value has
-  another representation or another cell here (a value converted to
-  another representation and its original, two conversions or two
-  boxings of one value, a wrapped function value, a converted thunk or
-  task, an arm rebuilt by `fresh-rebuild`), and equal `UInt64`s, `Float`s
-  and small numbers are `ptrEq`. `ptrEq` answering `true` still means
+  another representation or another cell here (a value cast to another
+  inductive whose layout differs and its original, two conversions or two
+  boxings of one value, a wrapped function value, an arm rebuilt by
+  `fresh-rebuild`), and equal `UInt64`s, `Float`s
+  and small numbers are `ptrEq`, also through a generic function, which
+  lean2rr instantiates at the type (two `Float`s: natively two new boxes,
+  `false`). `ptrEq` answering `true` still means
   equal values, and `ST.Ref.ptrEq` is exact. `dbgTraceIfShared` reports
   lean2rr's counts (below, Runtime).
 - *Order of releases in one free*: when a value holding several resources
@@ -3128,13 +3060,18 @@ Each item says what differs and when.
   them last pushed first: an array's last element
   first, a nested array's elements before the elements before it, a
   record's last field first. Here the runtime's containers (`leanrt::drop`)
-  and Reussir's drop glue for records (local patch 0014) push what they
+  and Reussir's drop glue for records (local patch 13-b) push what they
   free on one stack of pending work per thread, so the order is Lean's
   inside every free that starts at a container (an array, a reference, a
   thunk or task cell), through any records (tests `RtDropOrder`,
-  `RtDropOrderRec`), and mostly below the first cell of a free that starts
-  at a record. That first cell is the difference. When user code drops a
-  record by itself (a list, tree or structure of handles), Reussir's
+  `RtDropOrderRec`; with Reussir patch 13-d, which scripts/l2r.py
+  requires, also a record field before a container field below the first
+  record: `RtNestedArrayFreeOrder`), and mostly below the first cell of a
+  free that starts at a record. An element of an array, a reference or a
+  thunk or task value is a box (rule 1): the last release of a boxed
+  record runs inside a free of leanrt's worklist, so a record replaced in
+  an array (`Array.set!`) is freed in Lean's order too. That first cell is the difference. When user
+  code drops a record by itself (a list, tree or structure of handles), Reussir's
   inline release in the user's function releases its fields in field
   order, each completely before the next. Natively the order depends on
   where the value is dropped: where Lean's code knows the constructor
@@ -3143,31 +3080,41 @@ Each item says what differs and when.
   last first. lean2rr's code does not drop values where Lean's does: where
   Lean borrows a parameter and drops the value in the caller, lean2rr's
   function takes the value and releases it as it destructures it. So a
-  value dropped by itself can come out in the other order: a list of
-  handles `L0 … L7` is closed `L0 L7 L6 … L1` (natively `L7 … L0`), and a
-  tree's left subtree goes before its handle and its right subtree. No fixed
+  value dropped by itself can come out in the other order. A value of a
+  parameter's type (a `List α` element, a field of type `α`) is a box
+  (rule 1), which Reussir does not push as it pushes a record: it calls
+  the box's drop, which releases the payload at once, inside a free of its
+  own, when no free runs (`any::release_last`). Reussir's release of the
+  first cell also releases the members of a record member it frees (the
+  second cell) before it drains the stack of pending work; from the third
+  cell on, members are pushed. So the boxes of the first two cells come
+  out in field order and the rest last first: a `List IO.FS.Handle`
+  `L0 … L7` dropped by itself closes `L0 L1 L7 L6 … L2` (natively
+  `L0 L7 … L1` where Lean knows the constructor, `L7 … L0` elsewhere),
+  and `{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}` over handles
+  closes `a b d c e` (natively `e d c b a`) (test `RtDepDropOrderBoxed`,
+  with expectation files; while a box was the record enum `L2RBox`, the
+  list closed `L0 L7 … L1` and the structure `b a d c e`). A tree of
+  handles closes its left subtree before its handle and its right
+  subtree. No fixed
   order of the fields in Reussir's releases matches both cases. Reversing
   it was tried: that fixes these cases but breaks the field-order ones and
   the order inside containers. One case below the first cell also differs:
   a record that the first cell holds is released through its drop function
   while no free runs, and that function frees a container field (an array,
   a reference, a thunk) as soon as it reaches it, before the record fields.
-  So a structure `{a : Array Handle, l : List Handle}` in a list dropped by
-  itself closes `A1 A0 L1 L0` (natively `L1 L0 A1 A0`). An array set or
+  So a structure `{a : Array Handle, l : List Handle}` as the field of a
+  monomorphic list type dropped by itself closes `A1 A0 L1 L0` (natively
+  `L1 L0 A1 A0`). In a `List` the structure is a box's payload, released
+  inside a free of the runtime, so it closes `L1 L0 A1 A0` as natively
+  (with `L2RBox`, `A1 A0 L1 L0`). An array set or
   pop that removes the last reference to a record frees it inside a free
   the runtime starts, so its fields go last first, as `lean_dec` frees them
   in `lean_array_uset` and `lean_array_pop` (switch step 10, review
   RS10-01; tests `RtArraySetFreeOrder`, `RtArrayPopFreeOrder`); before,
-  the record's own release freed them in field order. A case below the
-  first cell is open: in a cell that a free reaches below its first one,
-  Reussir's glue (`drop_and_free`, local patch 0014) releases the cell's
-  last record field after the cell, directly, while a later field that it
-  releases through the field type's own drop (an array) has already
-  pushed its free. So the record field's contents go before the array's:
-  a structure `{i : In, arr : Array Handle}` (`In` holding two handles)
-  two cells below the freed record closes `i.b i.a arr1 arr0`, natively
-  `arr1 arr0 i.b i.a` (review RS11-01 of switch step 11; test
-  `RtNestedArrayFreeOrder`, expected to fail; the fix is a Reussir patch).
+  the record's own release freed them in field order. With an array of
+  boxes (rule 1) that record is a box's payload, freed the same way
+  (`any::release_last`, one pending cell).
 - *Release time of borrowed parameters* (§5.8): emulated for values that
   may hold a resource, with Lean's inference run on lean2rr's monomorphic
   instances: where Lean infers a polymorphic declaration or one of its own
@@ -3183,10 +3130,12 @@ Each item says what differs and when.
   group them differently in lean2rr's instances. stdout and results are the
   same.
 - *Stack depth* in general: frame sizes differ from native. lean2rr adds
-  no recursion of its own: structural conversions are loops (§5.1), the
+  no recursion of its own, except in the conversion of a value cast to
+  another inductive whose layout differs (§5.1, recursive through
+  recursive fields; values of one inductive are never converted): the
   `Array.mk`, `String.mk` and `String.ofList` list folds are tail-recursive
   loops, and the walk of a closed term for its tasks (§5.14) is a loop over
-  a work list, so converting or folding a list of 10⁷ elements, or walking
+  a work list, so folding a list of 10⁷ elements, or walking
   a closed term 300000 cells deep through its first field, works at an 8 MB
   stack (`LEAN_STACK_SIZE_KB=8192`) as natively (test `RtPersistWalk`).
   The walk's work list and set of visited cells are heap memory while it
@@ -3200,8 +3149,8 @@ Each item says what differs and when.
   between (a tree whose children are in arrays, a record → array → record
   chain, a chain of thunks or tasks), is freed at a bounded depth.
   Records are freed by Reussir's drop glue, which with the local patches
-  releases the last record member being freed in a loop (0013) and pushes
-  the other record members being freed on the same stack (0014), so a
+  releases the last record member being freed in a loop (13-a) and pushes
+  the other record members being freed on the same stack (13-b), so a
   value deep through records too is freed at a bounded depth: a list, a
   snoc list, a binary tree deep along its left child whose right children
   are fresh nodes, a rose tree in uniform code (test `RtDropGlue`, 10⁶
@@ -3223,50 +3172,20 @@ Each item says what differs and when.
   over a DAG that replaces nothing) increments and releases the fields of
   every node it keeps, and every `ptrEq` operand: 1.5x native on such a
   traversal (adv4 RP4-09).
-- *Structural conversions* (§5.1) rebuild a value as a tree: sharing is lost,
-  so a DAG costs exponential time and memory (a program that runs out of
-  memory this way also ends with another exit status, *Running out of
-  memory* above), and a conversion on every call
-  costs O(size) per call, also when the value goes back to the
-  representation it came from (a round trip through uniform code converts
-  twice); a conversion through an explicit stack (a tree, a rose tree)
-  allocates a stack frame per node. Past the instance caps of §2.6 this can
-  happen inside loops, and also where uniform values meet precise uses in a
-  loop without a cap: a container whose element type depends on a value is
-  updated and read on its uniform representation (§4, `uniform-updates`),
-  but a use at a precise type that the pass cannot make uniform still
-  converts it there, at each execution: a function taking `Array Nat` that
-  something else keeps typed (another call site passes it a typed array, it
-  is used as a function value, or it calls itself with a precise array; its
-  parameter is retyped only when every call site passes a uniform array),
-  called on the column at each step (review C03R-01, test
-  `RtUniformUpdatesShared`; a copy of such a function with the parameter
-  uniform, for the call sites that pass a uniform array, as Stage 1 makes
-  instances, would remove it); a function that passes its parameter on at a
-  precise type; and an update whose result is used only at precise types
-  (never stored back uniformly). Values of
-  types with the same layout are not converted (`l2r_retype`); a cast
-  between layouts that differ (an `Array T₁` field read at `Array T₃` whose
-  elements hold an `Int` where `T₁`'s hold a `Nat`) converts the field at
-  each use, where natively the cast is free.
-- *`Array.map` that changes the representation* (for example
-  `(Array.range n).map (· % 3 == 0)`) reads the input and pushes onto a new
-  result array (§4): the two arrays are live together until the map ends,
-  where native Lean replaces the elements of one array (peak memory
-  0.7–1.1x native for scalar targets in tests, more for records). Maps that keep the representation run in
-  place. A map loop of another shape (not Lean's), or one whose function
-  projects a field of a parametric structure (`(xs.zip ys).map (·.2)`,
-  §4), still converts its input to an array of `Box` on entry and back on
-  exit.
-- *Element storage*: array elements, once-cell values and polymorphic
-  extern arguments whose type cannot cross the FFI boundary (`[value]`
-  tuples, closures) are wrapped in an `ElemBox` cell, one allocation each;
-  enumerations and `Unit` in arrays are stored as indices, but once-cell
-  values and other extern arguments of those types are still wrapped.
-  `ST.Ref` contents are stored in their own representation (§5.1), except
-  `[value]` structures (an `ElemBox` per `set`). A reference used through a `Box` costs a dispatch on its
-  type at each operation. `UInt64` and `Float` arrays, on
-  the other hand, are unboxed, unlike native.
+- *Casts between layouts that differ* (§5.1): a value cast to another
+  inductive whose layout differs (a field holding an `Int` where the
+  source's holds a `Nat`) is rebuilt, O(size), at each such cast, where
+  natively the cast is free. (A value of one datatype, array, thunk, task
+  or reference is never converted: one type each.)
+- *Boxes*: a box is one word (`LAny`, as Lean's `lean_object*`): a small
+  `Nat`, a `Bool` or an enumeration is a scalar in the slot, as natively;
+  a `Float` and a `UInt64` from 2^63 are cells, as natively; a `[value]`
+  value that is not a struct of one field is wrapped in an `ElemBox` cell.
+  Once-cell values and polymorphic extern
+  arguments (other than arrays' elements) whose type cannot cross the FFI
+  boundary (`[value]` tuples, closures) are wrapped in an `ElemBox` cell,
+  one allocation each. `ByteArray` and `FloatArray` are unboxed, as
+  natively; `Array UInt64` and `Array Float` hold boxes.
 - *Reads take their container owned* (Reussir has no borrowed FFI
   parameters, §9): every array or string read is an increment by the caller
   and a release in the inlined runtime function. LLVM cancels the pair when
@@ -3279,7 +3198,8 @@ Each item says what differs and when.
   `let`, so that Reussir increments the index before the container; and
   each read texture is small enough for LLVM to inline at a call site it
   judges cold (Reussir issue 36; docs/implementation/ownership.md, "Reads
-  give their reference up first, for a view"). Index loops and insertion
+  give their reference up first, for a view"; with the one-word `Box`,
+  `l2r_view_take<LAny>` is not, and needs Reussir patch 36-a). Index loops and insertion
   sort on `Array UInt64` ran at 1.2x native or better before these
   changes; with them (perf-array-reads, measured in the LLVM IR), no
   array read of lean-zip stays a call (279 did), and its LZ77 loop has 47
@@ -3328,7 +3248,11 @@ Each item says what differs and when.
 **Runtime** (details in `runtime/README.md`, "Known divergences")
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`;
   `dbgTraceIfShared` reads lean2rr's own counts (a converted value is a
-  new, unshared object, §5.1); `shareCommon` shares nothing, and
+  new, unshared object, §5.1). It does not report a shared big number
+  (natively it does: lean2rr's check looks at a `Nat` as a value), nor a task
+  that one reference holds, where natively a task that `Task.spawn` made
+  is multi-threaded (its count is negative) and reported as shared;
+  `shareCommon` shares nothing, and
   `ShareCommon.Object.eq` compares addresses (§9: at most the same cell;
   natively also two objects with the same fields; `L2RShim`), so an
   object converted at each call (a value cast to `ShareCommon.Object`) is
@@ -3608,6 +3532,92 @@ and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
   gives the empty array (`leanrt::array::check_capacity`; the prelude
   releases a big `Nat`). `Array.replicate` keeps native's ends. Tests
   `RtAllocBigNat`, `RtAllocOverflow`, `RtAllocOom`.
+
+**Compiler: Lean bugs we do not reproduce** (each judged a bug in Lean
+4.34.0's compiler: the source lines, the kernel's value of a minimal
+program, and a native repro that prints another value; lean2rr computes
+the value that Lean's semantics, the kernel, give; a runtime test pins
+native's output and lean2rr's in expectation files, `NAME.native.*` and
+`NAME.l2r.*`)
+- *Data after a `match` with a type or proof arm: a wrong value or a crash*
+  (judged 2026-10-06; no upstream issue found). In a `match` whose one arm
+  gives a type or a proof and whose other arm gives data, `toLCNF` gives
+  the `cases` the join of its arms' types
+  (`src/lean/Lean/Compiler/LCNF/ToLCNF.lean:670`, `visitCases`:
+  `resultType := joinTypes altType resultType`), and `joinTypes?` gives
+  `◾` when either side is `◾` (`Types.lean:243-245`);
+  `InferType.mkCasesResultType` (`InferType.lean:321`) joins the same way
+  when a later pass rebuilds a `cases`. So in
+  ```lean
+  def T : Bool → Type | true => Nat → Prop | false => Nat
+  def f2 (b : Bool) (n : Nat) : Nat :=
+    let v : T b := match b with | true => fun _ => True | false => n
+    match b, v with | false, v => (show Nat from v) + 1 | true, _ => 0
+  ```
+  the join point after the first `match` gets a parameter of type
+  `lcErased` (`jp _jp (_y : lcErased)`), and the jump from the `false` arm
+  passes `n` to it. Native's `toImpure` removes a join-point parameter of
+  erased type (`ToImpure.lean:52-53`, `:234`), and the body computes with
+  `◾`, the boxed 0: `f2 false 41` is 1, and so is a constant
+  `c := f2 false 41`, where the kernel gives 42 (`example : f2 false 41 =
+  42 := rfl` is accepted; with `native_decide` the bug proves `False`). An
+  arm that gives a type (`T true = Type`, `T false = ULift Nat`) has the
+  same effect. Lean's specializer gives the declaration it makes for a
+  lambda over the value (`List.map (fun x => x + v.1)`) a parameter of the
+  same type `lcErased`, and `toMono` then passes `◾` at every call of it.
+  So native gives a wrong value or a crash, by the type of the data: a
+  wrong number for a `Nat`, a `Bool`, a `Decidable`, an `Option`, a pair
+  whose fields are read, a closure applied, a structure of two scalars; a
+  segmentation fault (exit 139) for a `String`, an `Array`, a structure
+  with a `Float` field, pairs passed to a function; and for an unboxed
+  `Float`, `UInt64` or `UInt8` Lean's C code does not compile
+  (`lean_float_add(lean_box(0), …)`). lean2rr gives every parameter of type `lcErased` that receives data at a
+  jump or a direct call (a join point's, a local function's, a
+  declaration's) the type `lcAny`, a boxed data parameter: after Stage 1,
+  before `toMono` runs, and again after Stage 2 (`ErasedData`). Data is a
+  variable whose type is not `lcErased` and not a type former type; a type
+  or a proof has such a type, so a type or proof parameter stays erased. A
+  jump that passes `◾` there passes `box(0)`, as natively. Where Lean
+  inlines the function into its caller, `simp` puts the jump's argument in
+  place of the parameter, and native gives the kernel's value too. Not
+  covered: data that Lean's own passes already replaced by `◾` (`simp`
+  replaces a `let` of type `◾`, value and all, by `◾`), and data passed to
+  a function value whose domain Lean typed `◾` (not a direct call). Tests
+  `RtJoinErasedProp`, `RtJoinErasedType`, `RtJoinErasedFlow`,
+  `RtJoinErasedIndirect` (a closure over the value applied elsewhere, one
+  in a structure, a partial application, two joined matches),
+  `RtJoinErasedMisc` (a `Decidable`, `Bool.casesOn` with a motive),
+  `RtJoinErasedMerge` (two lambdas the specializer merges, three arms),
+  `RtJoinErasedLayouts` (the crashes: native's expected exit code 139).
+- *A boxed constant in a branch that never runs is computed at startup*
+  (a Lean 4.34.0 compiler bug, judged 2026-10-07; the same class as
+  lean4 issue #1965, whose fix, #12044's lazy closed terms, missed this
+  path; no issue for it; unchanged on master). `ExplicitBoxing.mkCast`
+  (`isExpensiveConstantValueBoxing`) boxes a scalar constant (a `Float`, a
+  `UInt64`, a closed term of one) passed where a box is expected through
+  an auxiliary declaration `X._boxed_const_N`, which is not registered as
+  a closed term, so `EmitC.emitDeclInit` (`EmitC.lean:1003`) computes it
+  at module init, before `main` and outside its branch, which forces the
+  closed term it boxes. So in
+  ```lean
+  @[noinline] def flag (n : Nat) : Bool := n % 2 == 0
+  partial def spin (b : Bool) (x : Float) : Float := if b then x else spin b x
+  def K : List Float := match flag 3 with
+    | true  => [spin false 2.5]
+    | false => [1.0]
+  ```
+  the native program hangs at startup, where by Lean's semantics `K` is
+  `[1.0]`; with issue #1965's program over a `Float` (`if h : 0 <
+  arr.size then [arr[0]] else [42.0]` on an empty array) a native build
+  with assertions aborts and one with `-DNDEBUG` reads out of bounds; a
+  trace or panic in such a closed term prints at startup, also in a dead
+  branch. lean2rr computes Lean's value: its boxed constants
+  (`boxed-consts`) are once-cells computed at their first use, as Lean's
+  other closed terms are, so it prints `[1.000000]` and `[42.000000]`
+  (test `RtDeadBoxedConst`, with expectation files: native's empty output
+  and exit code 124 under the test's 3-second limit, lean2rr's
+  `[1.000000]`; `RtDepBoxedClosedOnce` keeps its traced closed terms in
+  live branches).
 
 **Diagnostics**
 - lean2rr's own impossibilities (a `Box` unwrap of another variant, a cast

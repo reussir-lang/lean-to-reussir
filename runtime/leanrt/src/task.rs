@@ -6,8 +6,8 @@
 //! their walks, waits, polling, cancellation, the pure-task rule, promises,
 //! the final run when `main` returns) are lean-runtime's. What is lean2rr's
 //! is the task object and its value: a task is a runtime cell (`LCell`,
-//! `drop::Cell`) whose state lean2rr generates per value type (`pending(f)`,
-//! `busy`, `done(v)`, `conv(...)`, `bind(g)`; translation plan §5.14), with
+//! `drop::Cell`) whose state lean2rr generates once, over boxes (`pending(f)`,
+//! `busy`, `done(v)`, `bind(g)`; translation plan §5.14), with
 //! functions that force it (`l2r_task_get_S`, ...). This module connects
 //! the two through the primitives that generated code calls (`l2r_task_*`,
 //! unchanged from leanrt's own scheduler), so the generated code is the
@@ -43,7 +43,7 @@
 //!   code, which may block) is resolved, its cell's store included, once
 //!   the free is over (lean-runtime's deferred resolutions, core 3.3:
 //!   `defer`, then `run_deferred` at the drain's end, which Reussir reports
-//!   through its patch 0040).
+//!   through its patch 40-a).
 
 use lean_runtime::sched::{self as ls, Deferred, Job, Outcome, TaskId, TaskState};
 use std::cell::UnsafeCell;
@@ -841,7 +841,7 @@ pub fn resolve(a: usize) -> u64 {
 
 /// Have Reussir's drains call `drained` when they end: the function every
 /// drain that released something calls once it is over
-/// (`reussir_rt::drop::__reussir_drop_drained`, local Reussir patch 0040,
+/// (`reussir_rt::drop::__reussir_drop_drained`, local Reussir patch 40-a,
 /// which lean2rr requires: `scripts/l2r.py` checks for it, and this
 /// reference does not link without it).
 fn hook_drained() {

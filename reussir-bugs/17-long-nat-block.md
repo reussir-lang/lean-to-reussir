@@ -1,12 +1,12 @@
 # 17. rrc memory is quadratic in the length of a straight-line function on `Nat`
 
 **Kind:** cost (build memory of a stock MLIR pass's default mode). Not a
-bug: rrc's output is correct; patch 0031 is an optimization.
+bug: rrc's output is correct; patch 17-a is an optimization.
 
 ## Summary
 
 **Kind:** cost (a stock MLIR pass's default mode), with a small local
-optimization. **Status:** patched (0031), applied in `./reussir`
+optimization. **Status:** patched (17-a), applied in `./reussir`
 (`l2r-local` cc8e5aa5); lean2rr also works around it (it cuts long
 functions into parts and turns `Array Nat` literals into tables), and keeps
 doing so.
@@ -18,7 +18,7 @@ build), so it is neither the inliner nor `--reuse-across-call`. The pass
 was later found: MLIR's `convert-scf-to-cf`, run with the dialect
 conversion driver's pattern rollback, which records every operation a
 pattern moves (below). Upstream offers a mode without it for this pass;
-0031 uses it.
+17-a uses it.
 
 ## Symptom and repro
 
@@ -61,7 +61,7 @@ The memory is taken in rrc's MLIR lowering pipeline: a build that stops
 after it (`--emit mlir-llvm`) already reaches the peak (417 MB at N = 250,
 1.19 GB at N = 500), while the IR it emits grows linearly (301k and 565k
 lines). Every `Nat` operation was a match on a two-arm `[value]` enum
-(lean2rr's `Nat` then; since patch 0050 it is one tagged word, and each
+(lean2rr's `Nat` then; since patch 41-a it is one tagged word, and each
 operation's inline fast path still branches on small or big), so
 after ConvertToSTD the function is one block of N `scf.if` and
 `scf.index_switch` operations. MLIR's `convert-scf-to-cf`
@@ -90,7 +90,7 @@ becomes a table (plan §5.12): a 100000-element literal is one call.
 ## Patch
 
 Patch file
-[`patches/0031-l2r-local-bug-17-lower-SCF-to-ControlFlow-without-pa.patch`](patches/0031-l2r-local-bug-17-lower-SCF-to-ControlFlow-without-pa.patch)
+[`patches/17-a-scf-to-cf-no-rollback.patch`](patches/17-a-scf-to-cf-no-rollback.patch)
 (`l2r-local` commit `54cdf054`, applied in `./reussir`; `l2r-local` head
 cc8e5aa5). The pass is created with `allowPatternRollback = false`, the
 option upstream offers for it: the same patterns, applied without the
@@ -122,7 +122,7 @@ to the random names of texture modules) for the 18 programs of lean2rr's
 classic corpus and four lean2rr repros; the lit suite passes.
 
 `run.sh` measures three sizes. Its first version compared rrc's memory at
-N = 500 and N = 250 and called a ratio of at most 1.6x linear; with 0031
+N = 500 and N = 250 and called a ratio of at most 1.6x linear; with 17-a
 it printed 1.70x and 1.94x (`OTHER`). The measure was wrong, not the fix:
 about 140 MB of rrc's memory does not depend on N (the prelude, the
 runtime glue, the FFI textures), a third of the total at N = 250, so a
@@ -132,10 +132,10 @@ to 500: about 1x when linear. Two runs each:
 
     final stack:  issue 17   FIXED       rrc: N = 10: 140 MB; N = 250: 31 s, 337 MB; N = 500: 47 s, 556 MB (each let: 0.82 MB up to 250, 0.88 MB from 250 to 500, 1.07x)
                   (second run: 141, 335, 578 MB, 1.19x)
-    without 0031: issue 17   REPRODUCES  rrc: N = 10: 141 MB; N = 250: 31 s, 435 MB; N = 500: 55 s, 1151 MB (each let: 1.22 MB up to 250, 2.86 MB from 250 to 500, 2.34x)
+    without 17-a: issue 17   REPRODUCES  rrc: N = 10: 141 MB; N = 250: 31 s, 435 MB; N = 500: 55 s, 1151 MB (each let: 1.22 MB up to 250, 2.86 MB from 250 to 500, 2.34x)
                   (second run: 142, 427, 1145 MB, 2.41x)
 
-(`without 0031`: 91da4f80, the apply list + 0016 + 0017.) The thresholds
+(`without 17-a`: 91da4f80, the ten-patch set + 21-a + 23-a.) The thresholds
 are now FIXED at most 1.5x, REPRODUCES at least 1.9x.
 
 **Review.** Round RV8C (local review notes,

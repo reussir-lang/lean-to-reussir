@@ -30,7 +30,7 @@ mono code that still has exact types.
 | 2. Mono pipeline | the monomorphic program | optimized mono LCNF with exact types | Lean's passes, driven by lean2rr (`Pipeline`) |
 | 3. Check and recover types | mono LCNF | the same code, fewer `lcAny` | lean2rr (`MonoRetype`) |
 | 4. Lowering | checked mono LCNF | Reussir functions and types | lean2rr (`Lower/*`, `Emit/*`) |
-| After lowering | Reussir functions | the program text `prog.rr` | lean2rr (`ArrayLits`, `Outline`) |
+| After lowering | Reussir functions | the program text `prog.rr` | lean2rr (`Outline`) |
 | rrc | `prog.rr` with the prelude | an executable | Reussir |
 
 `lean2rr --emit STAGE` stops after a stage and prints its output:
@@ -91,13 +91,29 @@ the callee only reads it.
 code after type erasure. So it can merge two calls of one function at two
 different types into one call, which runs once. lean2rr's two instances
 would be two calls, and a panic in them would print twice. So Stage 1 finds
-these calls as `cse` does and gives the later call the earlier call's
-arguments (`Mono.alignErasedMerges`). It refuses when the two result types
-differ at a function, a runtime object or something it cannot classify,
-because no conversion exists there.
+these calls as `cse` does and gives them one instance and the same
+arguments (`Mono.erasedMerges`):
 
-**When a type is not statically known.** Then the uniform type `L2RBox`
-takes its place (see [Representations](representations.html#the-uniform-type-l2rbox)):
+1. The earlier call's instance, when its result can be used at the later
+   call's type. An instance at `Nat` reads its inputs as `Nat` values. So
+   every function in the result must have the same domain at both types,
+   and no `lcAny` may hide the type argument.
+2. Otherwise the instance at `lcAny` for each type argument that differs,
+   for every call of the group. This is the uniform code that native Lean
+   runs. Its closures take boxes, and each use reads them at its own type
+   through a wrapper.
+3. Otherwise the calls run apart: when a type argument that differs is a
+   type former, when an argument of the earlier call cannot be used at the
+   type of the argument it replaces, or when the calls are a closed term
+   that Lean can share with the same call in other functions (then the
+   calls run apart, as before this rule, unless the earlier rule merged
+   them too).
+
+A type parameter that shows nowhere in a function's type gets `lcAny` at
+every call. All calls of the function then use one instance, as natively.
+
+**When a type is not statically known.** Then a box (`LAny`) takes its
+place (see [Representations](representations.html#the-box-lany)):
 
 - a type that depends on a run-time value: Lean's base code already has
   `lcAny` there (see [Dependent types](dependent-types.html));
@@ -113,7 +129,7 @@ takes its place (see [Representations](representations.html#the-uniform-type-l2r
 **Library code that relies on Lean's uniform objects.** `Array.map` and
 `Array.modify` use unsafe code that is correct only because every Lean
 value is a pointer. lean2rr translates that code as it is: `NonScalar`
-becomes `lcAny`, the casts become conversions, and the `box(0)`
+becomes `lcAny`, the casts become boxing and unboxing, and the `box(0)`
 placeholder becomes the *zero* of the expected type.
 
 ## Stage 2: Lean's mono pipeline
@@ -140,8 +156,10 @@ structures become their field (`Char` → `UInt32`, `Fin n` → `Nat`), and
 
 Mono code can still have `lcAny` where the type is known: types inferred
 during the passes go through erased signatures, and the casts of the library
-code above are erased. A binder at `lcAny` is a `L2RBox`, and every use at a
-precise type converts it. For an array that is a copy of every element.
+code above are erased. A binder at `lcAny` is a box, and every use at a
+precise type unboxes it. Stage 3 gives such a binder its precise type where
+the program determines it. Data types have one layout whatever their type
+arguments, so Stage 3 types locals; it does not choose layouts.
 
 <div class="rule" markdown="1">
 **The rule.** A binder's type comes from what flows *into* it, never from
@@ -155,20 +173,13 @@ The sources of a type:
   callee's result type; a join point parameter gets the type that all its
   jumps agree on;
 - **result types**: a declaration gets `T` when all its returned values have
-  type `T`;
-- **parameters from callers**: an array parameter gets `T` when every call
-  site passes `T` (lean2rr then checks the body under that assumption);
-- **the `map` loops** of `Array.map`: the result is `Array β` when every
-  stored value is a `β`;
-- **references**: an `ST.Prim.mkRef` at a precise type gives a typed
-  reference, which flows to its binders.
+  type `T`, or when every call binds its result at `T`;
+- **externs at unknown types**: a call of a polymorphic extern at `lcAny`
+  (`Array.uget` at `NonScalar`) whose arguments determine the type
+  arguments gets the type that the extern returns at them.
 
-The fixpoint runs over the whole program until nothing changes. Two
-optional passes work here: `split-map-loops` (a `map` that changes the
-element representation reads one array and writes a new one) and
-`uniform-updates` (an update of a container whose element type depends on a
-value runs on the uniform container, so it boxes one element, not the whole
-array). See [Optional passes](passes.html).
+The fixpoint runs over the whole program until nothing changes. What it
+does not recover stays `lcAny`, a box.
 
 ## Stage 4: lowering to Reussir
 
@@ -186,6 +197,14 @@ Lean's *arity*: the number of parameters after Lean's optimizations.
 - a call with fewer arguments builds a function value, and nothing runs;
 - a call with more arguments runs the function and applies its result to
   the rest.
+
+Stages 1 to 3 keep the erased parameters (types, type arguments, proofs),
+so that Lean's passes see Lean's arities. Stage 4 removes them: the Reussir
+function has no parameter for them, and a call passes no argument for
+them. When the last parameters of a declaration are erased, the function
+keeps one unit parameter for that group. So the body runs at the same
+point as natively (see
+[Dependent types](dependent-types.html#rule-4-examples)).
 
 <div class="note" markdown="1">
 **Why arity matters: an example.**
@@ -254,11 +273,12 @@ refused. See [the extern rule](index.html#the-extern-rule).
 ### Helpers for live code only
 
 At the end of Stage 4, lean2rr generates helper functions: an unboxing
-function per target type, an application function per function type, and
-conversions. Each helper matches variants of `L2RBox` or of a
-function-value enum. The optional pass `conv-liveness` generates a helper
-only when live code reaches it, and an arm only for a variant that live
-code builds. Then it drops the functions that nothing reaches from the
+function per target type, an application function per function type,
+function-value wrappers, and the casts between inductives. Each helper
+matches the type numbers of a box or the variants of a function-value
+enum. The optional pass `conv-liveness` generates a helper only when live
+code reaches it, and an arm only for a type or a variant that live code
+builds. Then it drops the functions that nothing reaches from the
 entry point or from the runtime's entries. See
 [Optional passes](passes.html#helpers-for-live-code-only-conv-liveness).
 
@@ -284,8 +304,6 @@ See [Runtime](runtime.html#startup) for the entry point.
 
 ## After lowering
 
-- **Literal tables.** A run of 32 or more small `Nat` literals pushed onto
-  an `Array Nat` becomes one call that reads a generated table.
 - **Outline.** rrc's analyses grow faster than linearly with nesting depth
   and with straight-line length (Reussir issues 16 and 17, costs). So a tail path 32
   matches deep or 256 `let`s long is cut into functions. A recursive function
@@ -303,7 +321,7 @@ with cargo) and the runtime crate `leanrt`, each one cached. Then it runs
 lean2rr and rrc, and links `leanrt`, `lean-runtime` and GMP. rrc compiles
 each *texture* (the Rust body of a prelude function) with rustc. The driver
 gives rrc a cache directory, so rrc does not compile an unchanged texture
-again (Reussir patch 0066). If rrc crashes, the driver tries once more without
+again (Reussir patch 35-a). If rrc crashes, the driver tries once more without
 `--reuse-across-call` (a workaround for Reussir bug 4). See
 [Reussir](reussir.html).
 
@@ -313,9 +331,9 @@ again (Reussir patch 0066). If rrc crashes, the driver tries once more without
 |---|---|
 | Read `.olean` files, not source | Every Lean feature arrives as ordinary functions and data. |
 | Monomorphize base code, then run Lean's mono passes | Lean's optimizations stay; exact types stay too. |
-| Keep Lean's arities exactly | When work runs is observable (traces, panics). |
+| Keep the point where a body runs | When work runs is observable (traces, panics). Erased parameters go in Stage 4; a trailing group keeps one unit. |
 | Types from definitions only (Stage 3) | A use at a type speaks only for its branch; a guessed type can panic on another path. |
 | Function values as generated enums | Applying a shared Reussir closure copies it; enums and a `match` do not allocate. |
 | Join points J1/J2 first | Loops stay loops, and Reussir can reuse cells in place. |
-| Uniform `L2RBox` only where needed | Typed code never pays for boxing. |
+| One layout per datatype, a one-word box in generic positions | Typed code never pays for boxing, and no value is converted. |
 | Every optimization optional | The core translation is correct alone; each pass can be turned off for a test. |

@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0020), applied in `./reussir`
+**Kind:** bug. **Status:** patched (01-a), applied in `./reussir`
 (`l2r-local` cc8e5aa5). lean2rr's output was never affected: it emits only
 unaffected `[value]` enums.
 
@@ -33,7 +33,7 @@ fn main() {
 **Actual on ef922049.** `0`, at every optimization level: only bit 0 of 42
 survives (43 gives 1). With a nested `[value]` enum on the padding, a
 pointer can lose its upper bytes (SIGSEGV). `run.sh` printed
-`issue 01   REPRODUCES  prints 0, expected 42   [-O default]`; with 0020
+`issue 01   REPRODUCES  prints 0, expected 42   [-O default]`; with 01-a
 (the final stack) it prints `issue 01   FIXED       prints 42   [-O default]`.
 
 ## Cause
@@ -55,7 +55,7 @@ rest; those bytes are copied.)
 
 lean2rr emits only `[value]` enums that are unaffected: enumerations
 without fields (`Nat`/`Int`, once two-arm `[value]` enums whose arms each
-held one 64-bit word, are tagged handles since patch 0050).
+held one 64-bit word, are tagged handles since patch 41-a).
 Other multi-arm types are shared enums, and multi-field value records are
 `[value]` structs, whose padding is explicit (plan §10).
 
@@ -67,9 +67,9 @@ with an unpatched Reussir).
 ## Patch
 
 Patch file
-[`patches/0020-l2r-local-bug-1-keep-every-arm-s-bytes-when-a-value-.patch`](patches/0020-l2r-local-bug-1-keep-every-arm-s-bytes-when-a-value-.patch)
+[`patches/01-a-value-enum-arm-bytes.patch`](patches/01-a-value-enum-arm-bytes.patch)
 (`l2r-local` commit `d1fbe33b`, applied in `./reussir`; `l2r-local` head
-`cc8e5aa5`). It needs 0018 ([bug 8](08-padding-lift.md)), applied before
+`cc8e5aa5`). It needs 08-a ([bug 8](08-padding-lift.md)), applied before
 it.
 
 **The change.** `convertRecordType`
@@ -123,7 +123,7 @@ between construction and the `rc.create` that boxes them, which
 cross the FFI, and export trampolines take records by pointer, so no
 calling convention changes. The arm's LLVM struct must fit in the payload,
 which needs the declaration-order layout to agree with Reussir's: that is
-0018.
+08-a.
 
 **Verification.**
 
@@ -134,25 +134,25 @@ which needs the declaration-order layout to agree with Reussir's: that is
   without the patch.
 - `run.sh` on the final stack: `issue 01   FIXED       prints 42   [-O default]`.
 - lean2rr: the LLVM type definitions of LeanBoolLoop, RtReprFuzzTypes and
-  RtExistPayloads are identical with and without 0018-0021 (95, 207 and 541
+  RtExistPayloads are identical with and without 08-a, 02-b, 01-a and 26-a (95, 207 and 541
   types; review below).
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed.
 
 **Review.** Round 8 (local review notes):
-no correctness defect in 0018-0021. Checked: every access to an arm goes
+no correctness defect in 08-a, 02-b, 01-a and 26-a. Checked: every access to an arm goes
 through a GEP to the payload member and then the arm's type, and no
 lowering does `extractvalue`/`insertvalue` into a variant payload; `[value]`
 records are rejected at the FFI, polymorphic textures included; partly
 filled alignment words (`A(u8)` in `[2 x i64]`, a three-arm enum with
 `u8,u16` / `u64,bool` / `u32` arms) with black-boxed inputs, at `-O none`,
 default and aggressive, with `--no-pack-record-members` and with `-g`,
-introduce no poison; the interaction with 0022 (an opaque-payload enum
+introduce no poison; the interaction with 15-a (an opaque-payload enum
 yielded from a `Nullable` match); closures that capture, take and return
 such enums; a 16-aligned payload (`{i128, i1} | {i8, i1}` becomes
 `{i8, [2 x i128]}`, 48 bytes, Reussir's layout); single-arm, zero-size-arm
 and `i1` cases. [Bug 26](26-launder-assume.md) (an `llvm.assume` after the invariant-group
-launder, patch 0021) was found by the differential fuzzing of 0018-0020; it
+launder, patch 26-a) was found by the differential fuzzing of 08-a, 02-b and 01-a; it
 is not caused by them.
 
 **Effect on lean2rr.** None on its current output (its `[value]` enums keep

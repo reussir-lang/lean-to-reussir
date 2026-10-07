@@ -4,7 +4,10 @@ Polymorphic recursion (a function calling itself at `α`, `List α`,
 `List (List α)`, …; a nested datatype; a monad transformer applied to
 itself) would need infinitely many instances. Reussir's own monomorphizer
 cannot handle it, so lean2rr cuts it and sends the rest to the uniform
-instance, whose type arguments are all `lcAny` (values in `Box`). Plan
+instance, whose type arguments are all `lcAny` (values in `Box`). Only
+code has instances: a datatype has one type whatever its arguments
+([../representations/records.md](../representations/records.md#an-inductive-has-one-type-whatever-its-arguments)),
+so a nested datatype's types never grow. Plan
 [§2.6](../../translation-plan.md#26-when-a-type-is-not-statically-known)
 has the rules. Paths are relative to `lean2rr/LeanToReussir/`.
 
@@ -47,9 +50,10 @@ has the rules. Paths are relative to `lean2rr/LeanToReussir/`.
   a type built from its `lcAny` (`List lcAny`, `lcAny × lcAny`) goes to the
   uniform instance too, not to a new typed instance.
 - **Why:** A typed instance there would receive whatever the uniform code
-  passes, converted structurally on every call, and a value only
-  `unsafeCast` to that type (natively any object) could not be converted
-  at all (adv4 RP4-03/RP4-07, aefebc6).
+  passes, and a value only `unsafeCast` to that type (natively any
+  object) could not be converted at all (adv4 RP4-03/RP4-07, aefebc6).
+  (The other reason, a structural conversion of the arguments on every
+  call, is gone: a datatype has one type.)
 - **Where:** `Mono.lean`: `instanceName` (the `k.typeArgs.all (· ==
   anyExpr)` case).
 - **Remove only if:** never.
@@ -69,39 +73,6 @@ has the rules. Paths are relative to `lean2rr/LeanToReussir/`.
 - **Remove only if:** never. The values can change; the `--stats` dry run
   (`Specialize.lean`: `visitConstApp`) bounds its type arguments the same way
   (round 7 RV7F-03, 4ad6df7).
-
-### A field type that grows is the uniform instantiation
-
-- **What:** While the fields of an inductive are translated, a requested
-  instantiation of the same inductive that strictly contains the arguments
-  of one on the path (or that is built from the `lcAny` of the uniform
-  instantiation on the path, or that has 256 instantiations of its
-  inductive on the path already) is translated at the uniform
-  instantiation instead: schematically, `Nest Nat` is
-  `enum Nest_Nat { nil, cons(Nat, Nest_Box) }`. Only an inductive whose
-  block uses its types at other arguments than its parameters is checked;
-  a safe one is never cut. **Unreachable since Lean 4.34:** its kernel
-  rejects such an inductive, `unsafe` or not (lean4#14582), so
-  `nonUniformInductive` is always `false` for programs lean2rr can load. It
-  is kept as a cheap defensive check (one cached walk of the constructor
-  types, only for an inductive met again while its own fields are lowered).
-  The form 4.34 accepts, a growing *index* (`unsafe inductive Nest : Type →
-  Type 1 | cons {α} (x : α) (rest : Nest (α × α)) : Nest α`), needs no cut:
-  Lean's mono phase erases indices and nominal types are keyed on
-  parameters only (`nominalKey`), so its instances are one type, `x` a
-  `Box` (test `RtNestGrowType`, rewritten that way; its old parameter
-  shapes are kept in its header).
-- **Why:** `unsafe inductive Nest α | nil | cons (x : α) (rest : Nest (α × α))`
-  made lean2rr translate `Nest (Nat × Nat)`, `Nest ((Nat × Nat) × …)`, …
-  until it ran out of memory (round 6 TY6-01, f23fb89), with Lean 4.33.
-- **Where:** `LowerBase.lean`: `nonUniformInductive`, `usesOtherArgs`,
-  `typeGrowsOnPath`, `nominalArgs`, `nominalKey`, `nominalType`
-  (`pendingBoundary` is the path); plan
-  [§5.1](../../translation-plan.md#51-type-translation), "Polymorphic
-  recursion in a type".
-- **Remove only if:** lean2rr no longer needs to load programs of a Lean
-  that accepts non-uniform parameters (none since 4.34); it costs nearly
-  nothing.
 
 ### Result types of polymorphically recursive functions
 

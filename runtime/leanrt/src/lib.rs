@@ -25,11 +25,13 @@
 #![allow(improper_ctypes_definitions)]
 #![allow(incomplete_features)]
 #![feature(linkage)]
+#![feature(ptr_mask)]
 #![feature(specialization)]
 
 extern crate reussir_rt;
 
 pub mod alloc;
+pub mod any;
 pub mod array;
 pub mod big;
 pub mod drop;
@@ -48,7 +50,6 @@ pub mod sched;
 pub mod string;
 pub mod sync;
 pub mod sys;
-pub mod tagvec;
 pub mod task;
 
 pub use big::LBig;
@@ -93,7 +94,7 @@ pub fn rc_release<R: Release>(r: R) {
 }
 
 /// A counted handle that `rc_release` gives up: Reussir's `Rc` and the
-/// runtime's own one-block objects (`string::LStr`, `tagvec::TagVec`).
+/// runtime's own one-block objects (`string::LStr`).
 pub trait Release {
     fn release(self);
 }

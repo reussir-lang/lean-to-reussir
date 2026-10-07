@@ -1,0 +1,4 @@
+# n probes of a uniform column of n by a typed helper, n = 1000 and 4000 (no conversion per call)
+# The offset covers the uniform column's own cost, linear in n (dev: 2 allocations per element, its boxes; native none);
+# a conversion per call would add n per probe (n^2, about 1.6e7 at 4000)
+1000 | 4000 | 4 8000

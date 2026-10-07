@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build and run the repros of the Reussir issues in reussir-bugs/ (one file
 # per entry, NN-*.md; the index is reussir-bugs/README.md, whose Kind column
-# says which issues are bugs and which are costs, a missed optimization,
+# says which issues are bugs and which are costs, missed optimizations,
 # missing features or intended behaviour) with one Reussir build.
 #
 #   reussir-bugs/repros/run.sh RRC_CHECKOUT [NN...]
@@ -9,8 +9,9 @@
 # RRC_CHECKOUT is a Reussir checkout with a build: its build/bin/rrc compiles
 # the repros, and plain .rr repros link against its build/target-rt/release.
 # NN is an entry number (1, 02, 13, ...); the default is every entry that
-# has a line here (all but 22, whose generator is run by hand). Each repro
-# prints one line:
+# has a line here (all but 22, whose generator is run by hand, and the
+# missing features 40 and 41, which have no repro: their patches carry
+# their own tests). Each repro prints one line:
 #
 #   issue NN  REPRODUCES  the documented behaviour (the bug, the cost, ...)
 #                         was seen
@@ -42,7 +43,9 @@
 # reussir-opt (SKIPPED when the checkout has not built it), 35 builds one
 # program twice with one REUSSIR_FFI_CACHE_DIR and counts the textures the
 # second build compiles (through a rustc wrapper). Issue 36's repro (a
-# missed optimization) counts the calls left in its LLVM IR. Bug 24 runs
+# missed optimization) counts the calls left in its LLVM IR; issue 39's (a
+# missed optimization) counts the cells its program allocates (Reussir's
+# allocation entry points wrapped at link time). Bug 24 runs
 # reussir-llvm-opt 12 times on one of the checkout's tests. lean2rr works
 # around 16, 17 and 20; the repros turn its workarounds off (L2R_NO_OUTLINE,
 # L2R_NO_INLINE_ANCHORS).
@@ -148,6 +151,8 @@ plain_value() {
 WRAP=$ROOT/runtime/leanrt/target/run-sh/checkout-$(echo "$CK" | sha256sum | cut -c1-12)
 mkdir -p "$WRAP/build/bin"
 ln -sfn "$CK/build/target-rt" "$WRAP/build/target-rt"
+# l2r.py checks the checkout's runtime sources for the patches it requires.
+ln -sfn "$CK/crates" "$WRAP/crates"
 cat > "$WRAP/build/bin/rrc" <<EOF
 #!/bin/sh
 exec /usr/bin/time -a -o "\${RRC_STATS:-/dev/null}" -f "%e %M" "$RRC" "\$@"
@@ -182,13 +187,15 @@ bug03() {
     rr bug03-global-alloc-align.rr 03 -O aggressive
     if [ $RC != 0 ]; then say_line OTHER 03 "$(build_fail 03)" "-O aggressive"; return; fi
     exe 03
-    local a m
+    local a v
     a=$(sed -n 's/^Box<u64> 16-aligned: \([0-9]*\) of 1000.*/\1/p' "$WORK/out/03.stdout")
-    m=$(sed -n 's/.*mi_malloc(8) 16-aligned: \([0-9]*\) of 1000.*/\1/p' "$WORK/out/03.stdout")
-    if [ -z "$a" ]; then say_line OTHER 03 "prints '$OUT_TXT'" "-O aggressive"
-    elif [ "$a" = 1000 ] && [ "${m:-1000}" -lt 900 ]; then say_line REPRODUCES 03 "$OUT_TXT" "-O aggressive"
-    elif [ "$a" -lt 900 ]; then say_line FIXED 03 "$OUT_TXT" "-O aggressive"
-    else say_line OTHER 03 "$OUT_TXT" "-O aggressive"; fi
+    v=$(sed -n 's/^boxes moved inside a larger block: \([0-9]*\) of 1000.*/\1/p' "$WORK/out/03.stdout")
+    # The alignment is intended (a box not 16-aligned is OTHER); the moved
+    # boxes are the cost.
+    if [ -z "$a" ] || [ -z "$v" ]; then say_line OTHER 03 "prints '$OUT_TXT'" "-O aggressive"
+    elif [ "$a" != 1000 ]; then say_line OTHER 03 "$OUT_TXT (boxes not 16-aligned)" "-O aggressive"
+    elif [ "$v" -gt 0 ]; then say_line REPRODUCES 03 "$OUT_TXT" "-O aggressive"
+    else say_line FIXED 03 "$OUT_TXT" "-O aggressive"; fi
 }
 compile_crash() { # BUG NAME EXPECTED FLAGS: the bad behaviour is an rrc crash
     local bug=$1 name=$2 exp=$3; shift 3
@@ -344,7 +351,7 @@ bug17() {
     # a third of the total at N = 250, so the plain ratio of two sizes is
     # 1.7-1.9x even when the cost is linear. The line compares the memory
     # each further `let` costs from 10 to 250 and from 250 to 500: 1.1-1.2x
-    # with 0031 (linear), 2.3-2.4x without it (quadratic).
+    # with 17-a (linear), 2.3-2.4x without it (quadratic).
     local n
     for n in 10 250 500; do python3 "$HERE/bug17-long-nat-block.py" $n "$WORK/out/Lets$n.lean"; done
     # Without lean2rr's workaround (Outline), so that rrc sees the long block.
@@ -375,10 +382,10 @@ bug20() {
     local why
     if ! why=$(have_lean); then say_line SKIPPED 20 "$why"; return; fi
     # Without lean2rr's workaround (#[transform_anchor] on its conversion
-    # and unboxing functions), then with it. Without 0034 the first build
+    # and unboxing functions), then with it. Without 20-a the first build
     # takes about 10x the memory of the second (2.9 GB against 0.3 GB): the
     # inliner follows chains of copied calls through recursive functions.
-    # With 0034 about 3.5x remains (0.77 GB against 0.22 GB): the inliner's
+    # With 20-a about 3.5x remains (0.77 GB against 0.22 GB): the inliner's
     # ordinary one-level inlining of the calls the program writes, which
     # lean2rr's anchors still avoid (lean2rr keeps them).
     export L2R_NO_INLINE_ANCHORS=1
@@ -607,7 +614,34 @@ bug36() {
     else say_line OTHER 36 "$n calls of mix left (expected 1, or 0 when fixed)" "-O aggressive"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33 34 35 36"
+bug38() {
+    rr bug38-tagged-top-bits.rr 38 -O aggressive
+    if [ $RC != 0 ]; then say_line OTHER 38 "$(build_fail 38)" "-O aggressive"; return; fi
+    exe 38
+    if [ "$OUT_TXT" = 143 ] && [ $EXIT = 0 ]; then say_line FIXED 38 "a tagged handle with top bits copied in line: prints 143" "-O aggressive"
+    elif [ $EXIT -ge 128 ]; then say_line REPRODUCES 38 "a tagged handle with top bits copied in line: killed by $(signame $EXIT)" "-O aggressive"
+    else say_line OTHER 38 "prints '$OUT_TXT' ($(signame $EXIT)), expected 143" "-O aggressive"; fi
+}
+
+bug39() {
+    # The cells allocated by bump (the rebuilt cell gets the original head)
+    # and by bump_b (it gets the value the opaque identity returned),
+    # counted by wrapping Reussir's allocation entry points at link time.
+    local fl="$L2R_FLAGS --link-arg=-Wl,--wrap=__reussir_allocate,--wrap=__reussir_allocate_small"
+    rr bug39-alias-release-donor.rr 39 $fl
+    if [ $RC != 0 ]; then say_line OTHER 39 "$(build_fail 39)" "$L2R_FLAGS"; return; fi
+    exe 39
+    local a1 a2 b1 b2
+    read -r a1 a2 b1 b2 < <(sed -n 's/^bump \([0-9]*\) \([0-9]*\) bump_b \([0-9]*\) \([0-9]*\)$/\1 \2 \3 \4/p' "$WORK/out/39.stdout")
+    if [ -z "${b2:-}" ]; then say_line OTHER 39 "prints '$OUT_TXT' ($(signame $EXIT))" "$L2R_FLAGS"
+    elif [ "$b1" = 0 ] && [ "$b2" = 0 ] && [ $((a2 - a1)) -ge 30000 ]; then
+        say_line REPRODUCES 39 "bump allocates $a1 cells for 1000 bumps, $a2 for 4000 (bump_b: $b1, $b2)" "$L2R_FLAGS"
+    elif [ "$a1" = 0 ] && [ "$a2" = 0 ] && [ "$b1" = 0 ] && [ "$b2" = 0 ]; then
+        say_line FIXED 39 "no cell allocated by either bump" "$L2R_FLAGS"
+    else say_line OTHER 39 "prints '$OUT_TXT'" "$L2R_FLAGS"; fi
+}
+
+ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33 34 35 36 38 39"
 SLOW=" 06 10 11 16 17 20 23 "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

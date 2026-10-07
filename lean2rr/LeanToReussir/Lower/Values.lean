@@ -46,32 +46,22 @@ def preludeReplacement? (f : Name) : LowerM (Option (String × RR.Ty)) := do
   let orig := ((← read).keys.find? f).map (·.decl) |>.getD f
   return (← read).preludeReplacements.find? orig
 
-/-- A saturated call of an `ST.Ref` operation: the reference arguments are
-passed at their own representation (a typed reference, or a `Box`; see
-`refGlue`), not converted to the extern's parameter type (`lcAny`, which
-would box a typed reference). -/
-def refCall? (ctx : CodeCtx) (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
-    (args : Array (Arg .pure)) : LowerM (Option RR.Expr) := do
-  unless orig.getPrefix == `ST.Prim.Ref do return none
-  let mut ps := #[]
-  let mut as := #[]
-  let mut ts := #[]
-  for (a, p) in args.zip params do
-    let p' := p.consumeMData
-    if p'.isErased || p'.isSort then continue
-    let pt ← lowerType p
-    -- The references: the first relevant parameter (both, for `ptrEq`).
-    let handle := ps.size == 0 || (orig == ``ST.Prim.Ref.ptrEq && ps.size == 1)
-    match a, handle with
-    | .fvar x, true =>
-      let some (vn, vt) := ctx.vars[x]? | throwError "lean2rr: unbound variable {x.name} (internal error)"
-      as := as.push (RR.Expr.var vn)
-      ts := ts.push vt
-    | _, _ =>
-      as := as.push (← lowerArg ctx a pt)
-      ts := ts.push pt
-    ps := ps.push p
-  refGlue orig typeArgs ps ret as ts
+/-- The mono function type of constructor `c` at the instance `fullTy`
+(its parameters, erased in mono code, then its fields at their types there,
+as `nominalType` computes them), for the type of a partial application. -/
+def ctorFnType (c : ConstructorVal) (fullTy : Expr) : LowerM Expr := do
+  -- The same field types as rule 4's flow analysis (`ErasedDomains`).
+  return mkFnType (Array.replicate c.numParams erasedExpr ++ (← layoutFieldTypes c.name fullTy)) fullTy
+
+/-- The arguments `args[:k]` that a callee taking the Lean parameters
+`keep` (rule 4a, `keepMask`; empty: all) receives, at its parameter types
+`params`. -/
+def lowerTaken (ctx : CodeCtx) (args : Array (Arg .pure)) (params : Array RR.Ty) (keep : Array Bool)
+    (k : Nat) : LowerM (Array RR.Expr) := do
+  let mut out := #[]
+  for i in [:min k (min args.size params.size)] do
+    if keep[i]?.getD true then out := out.push (← lowerArg ctx args[i]! params[i]!)
+  return out
 
 /-- Lower a constant application with Lean's arity rules. -/
 def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy : Expr) :
@@ -82,25 +72,30 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
   match ← calleeOf f with
   | .initConst slot ty =>
     let t ← lowerType ty
-    let (st, boxed) ← arrayElemTy t
+    let (st, boxed) ← cellStorage t
     let v := RR.Expr.call "l2r_once_get" #[st] #[.atom (toString slot)]
     let v := if boxed then .field v 0 else v
     let (e, t) ← applyChain v t ctx args
     coerce e t (← lowerType resTy)
-  | .code fn params ret =>
+  | .code fn params ret keep =>
     let n := params.size
     -- Arguments Lean lends to the callee: released after the call
     -- (Lower/Borrow).
     let keeps ← borrowKeeps ctx f args n
+    -- Rule 4a: the arguments of the parameters the function takes.
     if args.size == n then
-      let as ← (args.zip params).mapM fun (a, t) => lowerArg ctx a t
+      let as ← lowerTaken ctx args params keep n
       coerce (← releaseAfter (.call fn #[] as) ret keeps) ret (← lowerType resTy)
     else if args.size < n then
-      let supplied ← (args.zip params).mapM fun (a, t) => lowerArg ctx a t
-      let target ← boxedTarget f fn params ret
-      partialApp { id := "d" ++ target, params, ret, call := .code target } supplied (← lowerType resTy)
+      let supplied ← lowerTaken ctx args params keep args.size
+      let target ← boxedTarget f fn params keep ret
+      let ty ← match (← read).decls.find? f with
+        | some d => some <$> lowerType d.type
+        | none => pure none
+      partialApp { id := "d" ++ target, params, ret, call := .code target, keep, ty } args.size supplied
+        (← lowerType resTy)
     else
-      let as ← (args[:n].toArray.zip params).mapM fun (a, t) => lowerArg ctx a t
+      let as ← lowerTaken ctx args params keep n
       let (e, t) ← applyChain (← releaseAfter (.call fn #[] as) ret keeps) ret ctx args[n:].toArray
       coerce e t (← lowerType resTy)
   | .extern orig typeArgs params ret =>
@@ -121,14 +116,16 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
         if let some (.fvar x) := args.back? then
           if let some (vn, vt) := ctx.vars[x]? then
             return ← coerce (← addrOf (.var vn) vt) (.named "u64") (← lowerType resTy)
-      if let some e ← refCall? ctx orig typeArgs params ret args then
-        return ← coerce e retTy (← lowerType resTy)
       let as ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
       coerce (← lowerExternCall orig typeArgs params ret as) retTy (← lowerType resTy)
     else if args.size < n then
-      let supplied ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
-      partialApp { id := "e" ++ fnName f, params := ptys, ret := retTy, call := .extern orig typeArgs params ret }
-        supplied (← lowerType resTy)
+      -- Rule 4a for the target: the call gets placeholders for the erased
+      -- parameters it does not take (`targetCall`).
+      let keep := keepMask params
+      let supplied ← lowerTaken ctx args ptys keep args.size
+      partialApp { id := "e" ++ fnName f, params := ptys, ret := retTy, call := .extern orig typeArgs params ret,
+                   keep, ty := some (← lowerType (mkFnType params ret)) }
+        args.size supplied (← lowerType resTy)
     else
       let as ← (args[:n].toArray.zip ptys).mapM fun (a, t) => lowerArg ctx a t
       let call ← lowerExternCall orig typeArgs params ret as
@@ -154,10 +151,19 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
           pure (tys.extract 0 arity)
         | none => pure (Array.replicate arity RR.Ty.unit)
       | _ => pure (Array.replicate arity RR.Ty.unit)
-    let vals ← (args.zip argTys).mapM fun (a, t) => lowerArg ctx a t
-    if args.size ≥ arity then ctorBuild c.name fullRt vals
-    else partialApp { id := "k" ++ fullRt.enc ++ "_" ++ fnName c.name, params := argTys, ret := fullRt,
-                      call := .ctor c.name fullRt } vals (← lowerType resTy)
+    if args.size ≥ arity then
+      let vals ← (args.zip argTys).mapM fun (a, t) => lowerArg ctx a t
+      ctorBuild c.name fullRt vals
+    else
+      -- Rule 4a for the target: erased parameters and fields are not
+      -- captured (`targetCall` gives them placeholders).
+      let fty ← ctorFnType c fullTy
+      let (lps, _) := splitFnType fty arity
+      let keep := if lps.size == arity then keepMask lps else #[]
+      let ty ← if lps.size == arity then some <$> lowerType fty else pure none
+      let vals ← lowerTaken ctx args argTys keep args.size
+      partialApp { id := "k" ++ fullRt.enc ++ "_" ++ fnName c.name, params := argTys, ret := fullRt,
+                   call := .ctor c.name fullRt, keep, ty } args.size vals (← lowerType resTy)
 
 /-- How a `cases` (or projection) of inductive `typeName` treats a
 discriminant of Reussir type `sty`. Mono erases `unsafeCast`, so the
@@ -167,11 +173,11 @@ discriminant can be a value of another type that Lean represents alike
 inductive CastCases where
   /-- A value of `typeName` (the usual case). -/
   | same
-  /-- A value of isomorphic inductive `sn` (§5.1), matched as `dn`, an
-  instance of `typeName`: constructors correspond by position, relevant
-  fields by position (`viewLayout`), and are bound at their own types. -/
+  /-- A value of isomorphic inductive `sn` (§5.1), matched as `dn`, the
+  type of `typeName`: constructors correspond by position, relevant fields
+  by position (`viewLayout`), and are read at their own types. -/
   | view (sn dn : String)
-  /-- Converted to `typeName`'s instance `dst` first (enumerations by index;
+  /-- Converted to `typeName`'s type `dst` first (enumerations by index;
   where no conversion exists, `coerce` warns and the cast panics). -/
   | convert (dst : RR.Ty)
   /-- `typeName` has no representation (its values carry nothing). -/
@@ -186,22 +192,13 @@ def castCases (sty : RR.Ty) (typeName : Name) : LowerM CastCases := do
     let some h ← nominalHead tn | return .same
     if sameHead h then return .same
   else if tn == "bool" && typeName == ``Bool then return .same
-  -- The instance of `typeName` to match against: at the discriminant's
-  -- type arguments when the parameter counts agree (`Option Nat` cast to
-  -- `MyOpt Nat`), otherwise the uniform one.
+  -- The type of `typeName` to match against (one type per inductive).
   let uniform ← uniformType typeName
   if uniform == .unit then return .unit
   if uniform == sty || uniform == RR.Ty.box then return .same
   if nominal then
-    let mut cands : Array RR.Ty := #[]
-    if let some k := (← get).typeKeys[tn]? then
-      if let some (.inductInfo ival) := (← getEnv).find? typeName then
-        if ival.numParams == k.getAppNumArgs && ival.numParams > 0 then
-          cands := cands.push (← lowerTypeApp typeName k.getAppArgs)
-    cands := cands.push uniform
-    for dt in cands do
-      if let .named dn := dt then
-        if (← get).typeInfos.contains dn && (← isomorphic tn dn) then return .view tn dn
+    if let .named dn := uniform then
+      if (← get).typeInfos.contains dn && (← isomorphic tn dn) then return .view tn dn
   return .convert uniform
 
 /-- The layout of constructor `dc` (layout `dl`, of the instance a cast

@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched: structures by 0002, variants by 0019,
+**Kind:** bug. **Status:** patched: structures by 02-a, variants by 02-b,
 both applied in `./reussir` (`l2r-local` cc8e5aa5). lean2rr also works
 around the variant half (it turns member packing off).
 
@@ -16,11 +16,11 @@ there: a wrong value with no error.
 
 - **Structures:** the check compares only the field *index*, not the two
   types. In a different structure type, field i can sit at a different
-  offset, under any layout. Patch 0002 skips such stores only when the old
+  offset, under any layout. Patch 02-a skips such stores only when the old
   and new cells have the same type.
 - **Variants:** the check compares the member types at indices 0..i, which
   implies equal offsets under declaration order but not under Reussir's
-  default packed layout. Patch 0019 also requires field i to sit at the
+  default packed layout. Patch 02-b also requires field i to sit at the
   same byte offset from the box. lean2rr avoids the case with a flag, and
   keeps the flag.
 
@@ -93,7 +93,7 @@ fn main() { say(f(M::A{5, 11})); }
 
 **Actual on ef922049.** `11001` (`B.c` reads the low half of `A.x`), at
 every `-O` level. With `--no-pack-record-members`: `5001`. `run.sh` on the
-final stack (0002 and 0019 applied):
+final stack (02-a and 02-b applied):
 
     issue 02a  FIXED       prints 7005009   [-O aggressive --no-pack-record-members]
     issue 02b  FIXED       prints 5001   [-O aggressive]
@@ -165,7 +165,7 @@ all the members: `A.c` is at offset 8 and `B.c` at 0. The same check uses
 `structurallySameType` ([bug 4](04-recursive-type-compare.md)), which also
 ignored a record's capability: a `[value]` member is stored inline and a
 shared one as a pointer, so two arms could compare equal while their
-layouts differ (patch 0004 compares capability and `fixed` too).
+layouts differ (patch 04-a compares capability and `fixed` too).
 
 ## lean2rr
 
@@ -173,10 +173,10 @@ layouts differ (patch 0004 compares capability and `fixed` too).
 different structure of the same size could return a wrong field. lean2rr
 cannot avoid this: the types and field orders are the program's, and
 ordering fields by alignment does not make two different structures agree.
-Patch 0002 fixes it.
+Patch 02-a fixes it.
 
 **Variants:** lean2rr keeps its workaround (README policy: workarounds
-stay, so that lean2rr also works with an unpatched Reussir), although 0019
+stay, so that lean2rr also works with an unpatched Reussir), although 02-b
 fixes the variant half. `scripts/l2r.py` passes
 `--no-pack-record-members`, and lean2rr orders each constructor's fields by
 decreasing alignment itself (plan §5.1), so its records have no padding
@@ -187,10 +187,10 @@ same offset. The prefix check is then sound.
 
 Two patches, one per half.
 
-### 0002: structures
+### 02-a: structures
 
 Patch file
-[`patches/0002-l2r-local-bug-2-compound-skip-a-reused-struct-cell-s.patch`](patches/0002-l2r-local-bug-2-compound-skip-a-reused-struct-cell-s.patch)
+[`patches/02-a-struct-field-store.patch`](patches/02-a-struct-field-store.patch)
 (`l2r-local` commit `ae5345cf`, applied in `./reussir`; `l2r-local` head
 `cc8e5aa5`). Structures only.
 
@@ -223,8 +223,8 @@ the same type in its own cell (a record update), still skips the unchanged
 fields. The only loss is copy avoidance between distinct structure types
 that happen to have identical layouts, which is rare.
 
-**Not covered: variants.** 0002 does not touch `markVariantAvoidedCopies`;
-0019 (below) does.
+**Not covered: variants.** 02-a does not touch `markVariantAvoidedCopies`;
+02-b (below) does.
 
 **Verification.**
 
@@ -234,23 +234,23 @@ that happen to have identical layouts, which is rare.
   value. Later rounds re-ran it with every combined stack.
 - On the round-2 stack: `bug02a` FIXED (`7005009`), `bug02b` still `11001`
   with the packed layout (not covered; lean2rr's flag avoids it).
-- `run.sh` on the build with 0002 alone (before 0019):
+- `run.sh` on the build with 02-a alone (before 02-b):
 
       issue 02a  FIXED       prints 7005009   [-O aggressive --no-pack-record-members]
       issue 02b  REPRODUCES  prints 11001, expected 5001   [-O aggressive]
 
-  The second line is the variant case, fixed by 0019.
+  The second line is the variant case, fixed by 02-b.
 
 **Review.** Passed in review round 1; the later rounds re-ran it in every
-combined stack (rounds 2 to 4c, and round 8 with 0019 on top).
+combined stack (rounds 2 to 4c, and round 8 with 02-b on top).
 
 **Effect on lean2rr.** A reused structure cell always gets the fields that
 sit elsewhere in the new type: the wrong-field results above are gone.
 
-### 0019: variants
+### 02-b: variants
 
 Patch file
-[`patches/0019-l2r-local-bug-2-variant-skip-a-reused-variant-cell-s.patch`](patches/0019-l2r-local-bug-2-variant-skip-a-reused-variant-cell-s.patch)
+[`patches/02-b-variant-field-store.patch`](patches/02-b-variant-field-store.patch)
 (`l2r-local` commit `0218538c`, applied in `./reussir`; `l2r-local` head
 `cc8e5aa5`).
 
@@ -315,8 +315,8 @@ member; `getMemberOffset` and `deriveCompoundLayout` use
 closures, arrays, cells); equal header types plus equal element alignment
 give an equal element offset, regional boxes included; cross-variant reuse
 with a different region alignment (8 against 16) never skips; recursive
-members are pointers and `structurallySameType` is coinductive (0004); the
-new tag store never overlaps a payload field; with 0023 (cell glue) it
+members are pointers and `structurallySameType` is coinductive (04-a); the
+new tag store never overlaps a payload field; with 19-a (cell glue) it
 shares no logic. Repro 02b is FIXED.
 
 **Effect on lean2rr.** None today (it passes `--no-pack-record-members` and

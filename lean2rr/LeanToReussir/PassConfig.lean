@@ -28,8 +28,6 @@ structure RRProgram where
 structure PassConfig where
   /-- Edits of Lean's pass lists for Stage 2. -/
   stage2 : Stage2Config := #[]
-  /-- The optional parts of Stage 3. -/
-  stage3 : Stage3Config := {}
   /-- Passes over the checked mono declarations (after Stage 3, before
   lowering), in order; they get the instance keys. -/
   monoPasses : Array (NameMap InstKey → Array (Decl .pure) → Array (Decl .pure)) := #[]
@@ -43,16 +41,16 @@ structure PassConfig where
   /-- Whether a placeholder (Lean's `box(0)` at a type) that would allocate
   is built once and kept in a once-cell. Plain: built where it is used. -/
   cachePlaceholders : Bool := false
-  /-- Whether `Array Nat`/`Array Int` are the runtime's one-word-per-element
-  arrays `LNatArr`/`LIntArr`. Plain: arrays like the others. -/
-  natArrays : Bool := false
+  /-- Whether a constant whose boxing allocates (a `Float`, a `UInt64` from
+  2^63) is boxed once and kept in a once-cell, as native Lean's
+  `_boxed_const`. Plain: boxed where it is used. -/
+  boxedConsts : Bool := false
   /-- The order of a constructor's relevant fields in its record, given
   their alignments: the fields' indices in record order. Plain: declaration
   order. -/
   fieldOrder : Array Nat → Array Nat := fun aligns => (List.range aligns.size).toArray
   /-- Whether the helpers generated at the end of Stage 4 (unboxing,
-  application and conversion functions of function values, reference
-  dispatch) follow liveness: generated only once live code reaches them,
+  application and conversion functions of function values) follow liveness: generated only once live code reaches them,
   with arms only for the variants live code builds, and the functions
   nothing reaches dropped (Lower/Live). Plain: every helper requested,
   with an arm for every variant. -/

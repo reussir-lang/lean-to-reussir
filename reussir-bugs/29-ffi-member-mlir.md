@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (tooling). **Status:** patched (0061), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** bug (tooling). **Status:** patched (29-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug.** The frontend writes a record member of an opaque
 `#[ffi]` type as an explicit shared rc link, `!reussir.rc<!reussir.ffi_object<..>>`,
@@ -93,9 +93,9 @@ problem by hand.
 ## Patch
 
 Patch file
-[`patches/0061-l2r-local-bug-29-accept-a-record-member-linking-to-a.patch`](patches/0061-l2r-local-bug-29-accept-a-record-member-linking-to-a.patch)
+[`patches/29-a-ffi-member-verifier.patch`](patches/29-a-ffi-member-verifier.patch)
 (`l2r-local` commit `83a49c66`, applied in `./reussir`; `l2r-local` head cc8e5aa5; made as commit `a4fabec4`
-in a scratch checkout, after 0060, on which it does not depend). The verifier also accepts a shared rc member whose element
+in a scratch checkout, after 28-a, on which it does not depend). The verifier also accepts a shared rc member whose element
 is an `ffi_object`:
 
 ```c++
@@ -137,7 +137,7 @@ member with the `[field]` capability.
 **Review.** Round RV8 (e)
 (local review notes): no defect. A
 lean2rr dump (LeanBoolLoop, 9.2 MB, 5244 `ffi_object` occurrences) parses
-back and prints identically; without 0061 it is rejected. The verifier
+back and prints identically; without 29-a it is rejected. The verifier
 now accepts shared `rc<ffi_object>` members, normal or atomic, in
 compound, `[value]` and regional records, and still rejects rigid and
 flex ones, `[field]` rc members and normal `rc<record>` members. Side

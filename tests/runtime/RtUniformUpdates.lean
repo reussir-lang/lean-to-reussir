@@ -4,11 +4,12 @@
 lean2rr converted the whole array to `Array Nat` for each `push`, `set!`,
 `pop` or read, and the result back to `Array lcAny` to store it: two copies
 per update, quadratic in a loop (40000 pushes: 7.7 s for 0.00 s natively).
-The optimization `uniform-updates` runs these operations on the uniform
-array, boxing or unboxing the single element; a `List ty.denote` cons is
-built at `List lcAny`. The output is checked here; that no conversion runs
-per update is checked by tests/runtime/conv-count-check.sh, which runs this
-program at two sizes in a build that counts the conversions. -/
+The optimization `uniform-updates` then ran these operations on the
+uniform array; since rule 1 (one representation per `Array α`, deleted
+with the pass) there is one array type, and an update boxes or unboxes
+the single element; a `List ty.denote` cons is the one `List` type. The
+output is checked here; that the code has no conversion function is
+checked by tests/runtime/conv-count-check.sh (translation only). -/
 
 inductive Col | r | g | b deriving Repr, BEq, Inhabited
 

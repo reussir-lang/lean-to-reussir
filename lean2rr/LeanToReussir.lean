@@ -14,6 +14,7 @@ import LeanToReussir.LowerBase
 import LeanToReussir.Lower
 import LeanToReussir.Emit
 import LeanToReussir.MonoRetype
+import LeanToReussir.ErasedData
 import LeanToReussir.Passes
 import LeanToReussir.MonoTypesKeep
 import LeanToReussir.TypedToMono

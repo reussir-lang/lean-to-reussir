@@ -26,6 +26,23 @@ where
     let (bound, acc) := b.lets.foldl (fun (bound, acc) (x, _, e) => (bound.insert x, rrFreeVars e bound acc)) (bound, acc)
     rrFreeVars b.result bound acc
 
+/-- The names of the conversions `bindField` made for field parameters
+`ps` (`CodeCtx.fieldConv`), in context `ctx` right after the binding. -/
+def fieldConvNames (ctx : CodeCtx) (ps : Array FVarId) : Std.HashSet String :=
+  ps.foldl (fun acc p => match ctx.fieldConv[p]? with
+    | some y => acc.insert y
+    | none => acc) {}
+
+/-- The `lets` that bind an alternative's fields (projections, and the
+conversions `bindField` made: the names `convs`), without the conversions
+that the alternative's code `body` does not use. Every site that binds
+fields filters them so: enum and structure alternatives (`lowerCases`) and
+Opt/LazyFields' later bindings. -/
+def dropUnusedConvs (lets : ArmLets) (convs : Std.HashSet String) (body : RR.Block) : ArmLets :=
+  if !lets.any (convs.contains ·.1) then lets else
+  let free := rrFreeVars.blockFreeVars body {} {}
+  lets.filter fun (y, _, _) => !convs.contains y || free.contains y
+
 /-- The number of constructors from which the release of an inductive's
 value is wide: rrc expands every release of an enum in line into a match
 over its variants. -/
@@ -80,6 +97,49 @@ def sinkWildcardHeld (ctx : CodeCtx) (scrut : String) (nCtors : Nat) (arms : Arr
   if sinks.isEmpty then return arms
   return arms.set! w { wild with body := { wild.body with lets := sinks ++ wild.body.lets } }
 
+/-- Whether constant `f`'s value is a literal that a box holds as an
+immediate: its code returns a `UInt8`/`UInt16`/`UInt32` literal or a
+`UInt64`/`USize` literal below 2^63, possibly through other such constants
+(up to `fuel` deep). -/
+partial def constIsImmediate (f : Name) (fuel : Nat := 8) : LowerM Bool := do
+  let some { params := #[], value := .code body, .. } := (← read).decls.find? f | return false
+  let rec go (c : Code .pure) (vals : Std.HashMap FVarId (LetValue .pure)) : LowerM Bool := do
+    match c with
+    | .let d k => go k (vals.insert d.fvarId d.value)
+    | .return x =>
+      match vals[x]? with
+      | some (.lit (.uint64 n)) | some (.lit (.usize n)) => return n.toNat < 2 ^ 63
+      | some (.lit (.uint8 _)) | some (.lit (.uint16 _)) | some (.lit (.uint32 _)) => return true
+      | some (.const g _ #[] _) => return fuel > 0 && (← constIsImmediate g (fuel - 1))
+      | _ => return false
+    | _ => return false
+  go body {}
+
+/-- The value `e` of a `let` with Lean value `v`, if boxing treats it as
+native Lean does (`boxOf`, `LowerState.closedLets`): a placeholder (`◾`,
+`zeroValue`), a call of a declaration of the program without parameters
+(a constant or closed term, cached in a once-cell or recomputed by
+`cheap-consts`, which cannot trace or panic), or a `UInt64`/`USize`
+literal from 2^63 (smaller ones are immediates). Not a closed term
+evaluated where it is used (`uncachedConsts`): calling it again for its
+box would run it twice (a trace, a panic). -/
+def closedLetValue (v : LetValue .pure) (e : RR.Expr) : LowerM (Option RR.Expr) := do
+  match v, e with
+  | .erased, .call _ #[] #[] => return some e
+  | .const f _ #[] _, .call _ #[] #[] =>
+    if (← read).uncachedConsts.contains f then return none
+    match (← read).decls.find? f with
+    | some { params := #[], value := .code _, .. } =>
+      -- A constant whose value is a literal that boxes as an immediate
+      -- (`def k : UInt64 := 77`): boxed in line, which LLVM folds, not
+      -- read from a once-cell.
+      if ← constIsImmediate f then return none
+      return some e
+    | _ => return none
+  | .lit (.uint64 n), .atom _ | .lit (.usize n), .atom _ =>
+    return if n.toNat ≥ 2 ^ 63 then some e else none
+  | _, _ => return none
+
 section
 variable (H : LowerHooks)
 
@@ -118,13 +178,19 @@ mutual
                 if x == d.fvarId then
                   let some selfDecl := (← read).decls.find? f | throwError "lean2rr: no declaration {f}"
                   let (ps, _) := splitFnType selfDecl.type sm.arity
-                  let vals ← (args.zip ps).mapM fun (a, p) => do lowerArg ctx a (← lowerType p)
+                  -- Rule 4a: the arguments of the parameters it takes.
+                  let keep := keepMask (selfDecl.params.map (·.type))
+                  let mut vals := #[]
+                  for h : i in [:min args.size ps.size] do
+                    if keep[i]?.getD true then vals := vals.push (← lowerArg ctx args[i]! (← lowerType ps[i]!))
                   return ⟨lets, ← H.stateMachine.selfCall sm vals⟩
         let e ← try lowerLetValue ctx d.value d.type t
           catch ex => throwError "{ex.toMessageData}\n  in let {d.binderName} : {d.type}"
         let x ← fresh "x"
         lets := lets.push (x, some t, e)
         runVars := runVars.insert d.fvarId (x, t)
+        if let some v ← closedLetValue d.value e then
+          modify fun s => { s with closedLets := s.closedLets.insert x (v, t) }
         if let .const f _ args _ := d.value then
           if !args.isEmpty then runCalls := runCalls.insert d.fvarId (f, args.size)
         c := k
@@ -139,6 +205,11 @@ mutual
     | .unreach _ => return .ofExpr (.call "l2r_unreachable" #[retTy] #[])
     | .cases cs => return .ofExpr (← lowerCases ctx outlined retTy cs)
     | .jmp j args =>
+      -- The arguments of the parameters the join point takes (rule 4:
+      -- not the erased ones), for the jumps that pass arguments.
+      let taken : Array (Arg .pure) := match ctx.jpKeep[j]? with
+        | some keep => (args.zipIdx.filter fun (_, i) => keep[i]?.getD true).map (·.1)
+        | none => args
       match ctx.jumps[j]? with
       | some (.inline params body) =>
         -- J1: bind the parameters to the arguments, then the body.
@@ -152,29 +223,36 @@ mutual
         let b ← lowerCode ctx' outlined retTy body
         return { b with lets := lets ++ b.lets }
       | some (.yield tys) =>
-        let vals ← (args.zip tys).mapM fun (a, t) => lowerArg ctx a t
+        let vals ← (taken.zip tys).mapM fun (a, t) => lowerArg ctx a t
         match vals.size with
         | 0 => return .ofExpr .unitVal
         | 1 => return .ofExpr vals[0]!
         | _ => return .ofExpr (.ctor (← tupleType tys) none vals)
       | some (.call fn captured) =>
         let tys := ctx.jpParams.getD j #[]
-        let vals ← (args.zip tys).mapM fun (a, t) => lowerArg ctx a t
+        let vals ← (taken.zip tys).mapM fun (a, t) => lowerArg ctx a t
         return .ofExpr (.call fn #[] (captured.map .var ++ vals))
       | some (.enter variant captured) =>
         let some sm := ctx.sm | throwError "lean2rr: state-machine jump outside a state machine"
         let tys := ctx.jpParams.getD j #[]
-        let vals ← (args.zip tys).mapM fun (a, t) => lowerArg ctx a t
+        let vals ← (taken.zip tys).mapM fun (a, t) => lowerArg ctx a t
         return .ofExpr (← H.stateMachine.jumpCall sm variant (captured.map .var ++ vals))
       | none => throwError "lean2rr: jump to unknown join point (internal error)"
     | .jp d k =>
-      let ptys ← d.params.mapM (lowerType ·.type)
+      -- Rule 4: a join point takes no erased parameter (bound to the unit
+      -- value in its body).
+      let keepJ := d.params.map fun p => !erasedDom p.type
+      let params := (d.params.zip keepJ).filterMap fun (p, b) => if b then some p else none
+      let unitVars (m : Std.HashMap FVarId (String × RR.Ty)) : Std.HashMap FVarId (String × RR.Ty) :=
+        (d.params.zip keepJ).foldl (init := m) fun m (p, b) => if b then m else m.insert p.fvarId ("L2RUnit::u{}", .unit)
+      let ptys ← params.mapM (lowerType ·.type)
       let ctx := { ctx with jpParams := ctx.jpParams.insert d.fvarId ptys,
+                            jpKeep := ctx.jpKeep.insert d.fvarId keepJ,
                             jpBodies := ctx.jpBodies.insert d.fvarId d.value }
       if outlined.contains d.fvarId then
         -- J3: outline the body into a function over its free variables.
-        let pnames ← d.params.mapM fun _ => fresh "p"
-        let vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) ctx.vars
+        let pnames ← params.mapM fun _ => fresh "p"
+        let vars := (params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) (unitVars ctx.vars)
         let bodyCtx := { ctx with vars }
         let body ← lowerCode bodyCtx outlined retTy d.value
         let bound := pnames.foldl (·.insert ·) ({} : Std.HashSet String)
@@ -212,9 +290,9 @@ mutual
           let scope ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.yield ptys) } outlined resTy k
           let r ← fresh "jv"
           let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[(r, some resTy, .block scope)]
-          let mut ctx' := ctx
-          for h : i in [:d.params.size] do
-            let p := d.params[i]
+          let mut ctx' := { ctx with vars := unitVars ctx.vars }
+          for h : i in [:params.size] do
+            let p := params[i]
             let x ← fresh "y"
             let e := if ptys.size == 1 then RR.Expr.var r else .field (.var r) i
             lets := lets.push (x, some ptys[i]!, e)
@@ -222,20 +300,42 @@ mutual
           let b ← lowerCode ctx' outlined retTy d.value
           return { b with lets := lets ++ b.lets }
     | .fun d k _ =>
-      -- Lambda lifting normally removes local functions; lower defensively.
-      let ptys ← d.params.mapM (lowerType ·.type)
-      let pnames ← d.params.mapM fun _ => fresh "lp"
-      let (_, rt) := splitFnType d.type d.params.size
-      let rt ← lowerType rt
-      let vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) ctx.vars
+      -- Lambda lifting normally removes local functions; lower defensively:
+      -- nested Reussir closures, one per domain of the function's type at
+      -- run time (rule 4: a phantom domain has none; a unit domain at a
+      -- parameter the function does not take, `keepMask`, is ignored).
+      let fty ← lowerType d.type
+      let keep := keepMask (d.params.map (·.type))
+      let mut vars := ctx.vars
+      let mut layers : Array (String × RR.Ty) := #[]
+      let mut pre : Array (String × Option RR.Ty × RR.Expr) := #[]
+      let mut t := fty
+      for h : i in [:d.params.size] do
+        let p := d.params[i]
+        -- `lowerType` gives a domain (unit, phantom or data) for every
+        -- domain of the Lean type, and a local function's type has one per
+        -- parameter (Lean's invariant), so this holds.
+        let .fn dom c := t | throwError "lean2rr: local function {d.binderName}: its type {d.type} has fewer domains than its {d.params.size} parameters (internal error)"
+        if dom == RR.Ty.phantom then
+          -- No argument at run time: a placeholder for a parameter it takes.
+          if keep[i]! && !erasedDom p.type then
+            let x ← fresh "lp"
+            let pt ← lowerType p.type
+            pre := pre.push (x, some pt, ← zeroValue pt)
+            vars := vars.insert p.fvarId (x, pt)
+          else vars := vars.insert p.fvarId ("L2RUnit::u{}", .unit)
+        else
+          let x ← fresh "lp"
+          layers := layers.push (x, t)
+          vars := vars.insert p.fvarId (if keep[i]! then (x, dom) else ("L2RUnit::u{}", .unit))
+        t := c
+      if layers.isEmpty then
+        throwError "lean2rr: local function {d.binderName}: every domain of its type {d.type} is phantom (internal error: its last domain stays, `keptErasedHead`)"
       let bodyCtx := { ctx with vars }
-      let body ← lowerCode bodyCtx outlined rt d.value
-      let mut lam := RR.Expr.block body
-      let mut lt := rt
-      for (n, t) in (pnames.zip ptys).reverse do
-        lt := .fn t lt
+      let body ← lowerCode bodyCtx outlined t d.value
+      let mut lam := RR.Expr.block { body with lets := pre ++ body.lets }
+      for (n, lt) in layers.reverse do
         lam := rawFnValue lt n (.ofExpr lam)
-      let fty := lt
       let x ← fresh "f"
       let b ← lowerCode { ctx with vars := ctx.vars.insert d.fvarId (x, fty) } outlined retTy k
       return { b with lets := #[(x, some fty, lam)] ++ b.lets }
@@ -244,8 +344,8 @@ mutual
   partial def lowerCases (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (cs : Cases .pure) :
       LowerM RR.Expr := do
     let some (scrut0, sty0) := ctx.vars[cs.discr]? | throwError "lean2rr: cases on unbound variable"
-    -- A `cases` on a value of statically unknown type: convert it to the
-    -- inductive's uniform instance first.
+    -- A `cases` on a value of statically unknown type: unbox it to the
+    -- inductive's one type first (`uniformType`).
     if sty0 == RR.Ty.box then
       let uty ← uniformType cs.typeName
       let u ← fresh "uv"
@@ -309,8 +409,9 @@ mutual
           let arm : CasesArm := { discr := cs.discr, scrut, ty := tn, layout, params := ps, code := k,
                                   shared := !info.value && view.isNone }
           let (lets, ctx') ← H.structFields ctx arm
+          let convs := fieldConvNames ctx' (ps.map (·.fvarId))
           let b ← lowerCode ctx' outlined retTy k
-          return .block { b with lets := lets ++ b.lets }
+          return .block { b with lets := dropUnusedConvs lets convs b ++ b.lets }
         | .default k => return .block (← lowerCode ctx outlined retTy k)
         | _ => throwError "lean2rr: impure alternative"
       | _ =>
@@ -335,9 +436,24 @@ mutual
                                     shared := info.shape == .enum, view := view.isSome }
             let (armBinders, armCtx) ← H.enumFields ctx' arm binders
             let (pre, armCtx) ← H.armPrelude armCtx arm armBinders
+            -- The fields bound by the match, at their parameters' own types
+            -- (`bindField`); a hook may have left some to be bound later
+            -- (Opt/LazyFields), and the binders keep the fields' values as
+            -- the record holds them (Opt/FreshRebuild rebuilds from them).
+            let mut conv := #[]
+            let mut armCtx := armCtx
+            for h : i in [:ps.size] do
+              let p := ps[i]
+              let some (some (j, ft)) := layout.fields[i]? | continue
+              let some (some x) := armBinders[j]? | continue
+              unless armCtx.vars[p.fvarId]? == some (x, ft) do continue
+              let (c, ctx2) ← bindField armCtx p.fvarId (← lowerType p.type) x ft
+              conv := conv ++ c
+              armCtx := ctx2
             let body ← lowerAlt armCtx outlined retTy k
+            conv := dropUnusedConvs conv (conv.foldl (fun s (y, _, _) => s.insert y) {}) body
             arms := arms.push { ty := tn, ctor := some layout.variant, binders := armBinders,
-                                body := { body with lets := pre ++ body.lets } }
+                                body := { body with lets := pre ++ conv ++ body.lets } }
           | _ => pure ()
         if arms.size < info.ctorOrder.size then
           let body ← match dflt with
@@ -360,15 +476,28 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let body := H.prepareBody body
   let (ps, r) := splitFnType d.type d.params.size
   let _ := ps
-  let ptys ← d.params.mapM (lowerType ·.type)
   let ret ← lowerType r
-  let pnames ← d.params.mapM fun _ => fresh "a"
+  -- Rule 4a: the Reussir function takes an erased parameter only when it
+  -- is the last one (one unit for the trailing erased ones); the others
+  -- are bound to the unit value.
+  let keep := keepMask (d.params.map (·.type))
+  let mut params : Array (String × RR.Ty) := #[]
+  let mut vars : Std.HashMap FVarId (String × RR.Ty) := {}
+  for h : i in [:d.params.size] do
+    let p := d.params[i]
+    if keep[i]! then
+      let x ← fresh "a"
+      let t ← lowerType p.type
+      params := params.push (x, t)
+      vars := vars.insert p.fvarId (x, t)
+    else vars := vars.insert p.fvarId ("L2RUnit::u{}", .unit)
+  let pnames := params.map (·.1)
   -- `IO.Process.output`: generated glue instead of Lean's body (see
   -- `processOutputBody`).
   let orig := ((← read).keys.find? d.name).map (·.decl) |>.getD d.name
   if orig == ``IO.Process.output && d.params.size == 3 then
-    let block ← processOutputBody (pnames.zip ptys) ret
-    modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
+    let block ← processOutputBody params ret r
+    modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) params ret block) }
     return
   let loop := ((← read).callCycles.find? d.name).getD {}
   let outlined := chooseOutlined H.duplicateJp loop body
@@ -376,11 +505,15 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
   -- calls it back in tail position (`LowerHooks.stateMachine`).
   let sm? := H.stateMachine.plan d body outlined pnames
   modify fun s => { s with smArms := #[] }
-  let ctx : CodeCtx := { vars := (d.params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) {}, sm := sm?, loop }
+  let ctx : CodeCtx := { vars, sm := sm?, loop, used := codeUses body {} }
+  -- The body of a declaration without parameters runs once: a constant
+  -- boxed there is boxed in line (`boxOf`), not given a once-cell.
+  modify fun s => { s with inConstBody := d.params.isEmpty }
   let block ← try lowerCode H ctx outlined ret body
     catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
+  modify fun s => { s with inConstBody := false }
   if let some sm := sm? then
-    H.stateMachine.emit d sm (pnames.zip ptys) ret block
+    H.stateMachine.emit d sm params ret block
     return
   -- A constant is cached in a once-cell, unless a hook has it recomputed
   -- at each use (Opt/CheapConsts) or it is a closed term evaluated where
@@ -389,7 +522,7 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
     let acc ← cafAccessor (fnName d.name) ret
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name ++ "_init") #[] ret block) |>.push acc }
   else
-    modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) (pnames.zip ptys) ret block) }
+    modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) params ret block) }
 
 end
 

@@ -1,0 +1,9 @@
+p2 false 0 = 205
+p3 false 0 = 100
+p5 false 0 [1, 2] = 303
+p7 false 0 = 101
+p7 false 5 = 210
+p2 true 7 = 107
+p3 true 7 = 107
+p5 true 7 [1, 2] = 107
+p7 true 7 = 107

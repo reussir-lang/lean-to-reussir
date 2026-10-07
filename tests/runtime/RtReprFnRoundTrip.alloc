@@ -1,0 +1,2 @@
+# n round trips of a function value through two packages, n = 10000 and 40000 (no wrapper chain grows)
+10000 | 40000 | 4 2000

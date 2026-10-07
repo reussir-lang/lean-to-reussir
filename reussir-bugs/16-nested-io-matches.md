@@ -1,12 +1,12 @@
 # 16. Reuse across calls is superlinear in the nesting depth of matches
 
 **Kind:** cost (build time of the opt-in flag `--reuse-across-call`). Not a
-bug: rrc's output is correct; patch 0035 is an optimization.
+bug: rrc's output is correct; patch 16-a is an optimization.
 
 ## Summary
 
 **Kind:** cost (opt-in flag), with a small local optimization.
-**Status:** patched (0035), applied in `./reussir` (`l2r-local`
+**Status:** patched (16-a), applied in `./reussir` (`l2r-local`
 cc8e5aa5); lean2rr also works around it (it cuts deep tail paths and deep
 `let` values into functions), and keeps doing so.
 
@@ -99,7 +99,7 @@ cutting off.
 ## Patch
 
 Patch file
-[`patches/0035-l2r-local-bug-16-free-a-token-taken-from-a-nested-sc.patch`](patches/0035-l2r-local-bug-16-free-a-token-taken-from-a-nested-sc.patch)
+[`patches/16-a-nested-if-token-free.patch`](patches/16-a-nested-if-token-free.patch)
 (`l2r-local` commit `a639ae44`, applied in `./reussir`; `l2r-local` head
 cc8e5aa5).
 

@@ -1,0 +1,735 @@
+From df9d06771d2e96ecde20a69c064b541a0c2dfb04 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Tue, 6 Oct 2026 17:37:37 -0400
+Subject: [PATCH] l2r-local: issue 36: small textures and their import
+ trampolines are alwaysinline
+
+An import trampoline (rewriteImport) packs its arguments and calls the
+texture's boundary function, which the linked rustc bitcode defines.
+Neither carried an inline attribute, so LLVM inlined them into a caller
+by its cost model alone: at a call site it judges cold (below 2% of the
+caller's entry frequency) only below the cold-call-site threshold, 45,
+whatever the threshold of an ordinary site (225, 250 at -O aggressive).
+A texture of cost 46 to 250 was inlined at an ordinary call site and
+stayed a call at a cold one, with its argument packing. inlinehint does
+not help: LLVM applies the cold-site threshold after the hint's.
+
+rewriteImport now names the boundary function in the trampoline's LLVM
+attribute "reussir-import-boundary". ImportTrampolineInlinePass (new,
+lib/LLVMPass/AllocationSimplication) runs first in the backend's LLVM
+pipeline at -O default and -O aggressive, after the texture bitcode is
+linked: for each marked trampoline whose boundary function has a body,
+when LLVM may inline that call (getAttributeBasedInliningDecision: target
+features and attributes compatible, no noinline, not interposable;
+isInlineViable), the boundary is not cold, and the call's inline cost
+(getInliningCostEstimate) is at most the pipeline's own inline threshold,
+both functions get alwaysinline. A texture is then inlined at every call
+site exactly when LLVM would inline it at an ordinary one; larger
+textures keep the cost model's decision. Both functions stay defined
+(external and weak_odr). -O size and -O none are unchanged.
+reussir-llvm-opt registers the pass as reussir-import-trampoline-inline.
+
+Tests: llvmpass/import_trampoline_inline.ll (which trampolines are
+marked: small, packed, over the threshold, cold, noinline, other target
+features, an external boundary; a cold call site inlined with the pass
+and kept without it), frontend/ffi_import_inline_cold.rr (a texture of
+cost 70 under seven unlikely conditions is inlined at -O default and
+-O aggressive; the unpatched rrc keeps the call), and the passthrough
+attribute in conversion/trampoline_import_scalar.mlir.
+---
+ docs/design/polymorphic-ffi.md                |  19 +-
+ .../Reussir/LLVMPass/ImportTrampolineInline.h |  51 ++++
+ lib/CAPI/Jit.cpp                              |  11 +
+ .../BasicOpsLowering/BasicOpsLowering.cpp     |   7 +
+ .../AllocationSimplication/CMakeLists.txt     |   1 +
+ .../ImportTrampolineInline.cpp                | 112 ++++++++
+ .../conversion/trampoline_import_scalar.mlir  |   5 +-
+ .../frontend/ffi_import_inline_cold.rr        |  63 +++++
+ .../llvmpass/import_trampoline_inline.ll      | 254 ++++++++++++++++++
+ tool/reussir-llvm-opt/CMakeLists.txt          |   1 +
+ tool/reussir-llvm-opt/main.cpp                |   9 +
+ 11 files changed, 531 insertions(+), 2 deletions(-)
+ create mode 100644 include/Reussir/LLVMPass/ImportTrampolineInline.h
+ create mode 100644 lib/LLVMPass/AllocationSimplication/ImportTrampolineInline.cpp
+ create mode 100644 tests/integration/frontend/ffi_import_inline_cold.rr
+ create mode 100644 tests/integration/llvmpass/import_trampoline_inline.ll
+
+diff --git a/docs/design/polymorphic-ffi.md b/docs/design/polymorphic-ffi.md
+index a9ef111a..ee4070aa 100644
+--- a/docs/design/polymorphic-ffi.md
++++ b/docs/design/polymorphic-ffi.md
+@@ -308,6 +308,22 @@ the space. `translateToModule` links the
+ gathered bitcode into the final LLVM module. The JIT/REPL path does not
+ gather polyffi modules yet and rejects programs containing them.
+ 
++Each import trampoline names its boundary function in the LLVM function
++attribute `reussir-import-boundary`. At `-O default` and `-O aggressive`,
++the first pass of the LLVM pipeline, `ImportTrampolineInlinePass`
++(`lib/LLVMPass/AllocationSimplication/ImportTrampolineInline.cpp`), takes
++the inline cost of the linked boundary function at its call in the
++trampoline. When that cost is at most the pipeline's inline threshold (225;
++250 at `-O aggressive`) and LLVM may inline the call, the boundary function
++and the trampoline both become `alwaysinline`, so the texture is inlined at
++every call site. Without the attribute, LLVM inlines at a call site that it
++judges cold (rare relative to the caller's entry) only below a cost of 45,
++and `inlinehint` does not change that threshold: a texture inlined at an
++ordinary call site stayed a call, with its argument packing, at a cold one.
++Larger textures, textures LLVM judges `cold`, `noinline` ones and textures
++compiled for other target features keep the cost model's decision, and
++`-O size` runs no such pass.
++
+ ## Implementation map
+ 
+ * surface/parsing: `crates/reussir-syntax` (`ExternSourceStmt`, foreign
+@@ -327,4 +343,5 @@ gather polyffi modules yet and rejects programs containing them.
+   `ffi_object` types, polyffi/trampoline emission, lifecycle glue, borrowed
+   comparison entries, and hook functions);
+ * MLIR: `reussir.trampoline` import direction materializes the native
+-  marshaling body (`lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp`).
++  marshaling body (`lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp`)
++  and names the boundary function for `ImportTrampolineInlinePass`.
+diff --git a/include/Reussir/LLVMPass/ImportTrampolineInline.h b/include/Reussir/LLVMPass/ImportTrampolineInline.h
+new file mode 100644
+index 00000000..4b3e89da
+--- /dev/null
++++ b/include/Reussir/LLVMPass/ImportTrampolineInline.h
+@@ -0,0 +1,51 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++///
++/// \file
++/// This pass marks small polymorphic-FFI textures `alwaysinline`, together
++/// with their import trampolines.
++///
++/// An import trampoline (`rewriteImport` in BasicOpsLowering.cpp) only packs
++/// its arguments and calls the texture's boundary function, which the linked
++/// texture bitcode defines. Neither carries an inline attribute of its own, so
++/// LLVM inlines them into a caller by its cost model alone, and at a call site
++/// it judges cold (rare relative to the caller's entry) only below the
++/// cold-call-site threshold (45): a texture that LLVM inlines at an ordinary
++/// call site stays a call there, with its argument packing. When the boundary
++/// function's inline cost (measured at its one call, in the trampoline) is at
++/// most `threshold` (the backend passes the default pipeline's own inline
++/// threshold) and LLVM could inline it, both functions get `alwaysinline`:
++/// the texture is then inlined at every call site, as at an ordinary one.
++/// Larger textures keep the cost model's decision.
++///
++//===----------------------------------------------------------------------===//
++
++#pragma once
++
++#include <llvm/IR/PassManager.h>
++
++namespace reussir::llvmpass {
++
++/// The string function attribute that marks an import trampoline; its value
++/// is the name of the boundary function the trampoline calls.
++inline constexpr const char *kImportBoundaryAttr = "reussir-import-boundary";
++
++class ImportTrampolineInlinePass
++    : public llvm::PassInfoMixin<ImportTrampolineInlinePass> {
++public:
++  explicit ImportTrampolineInlinePass(int threshold) : threshold(threshold) {}
++  llvm::PreservedAnalyses run(llvm::Module &module,
++                              llvm::ModuleAnalysisManager &);
++
++private:
++  int threshold;
++};
++
++} // namespace reussir::llvmpass
+diff --git a/lib/CAPI/Jit.cpp b/lib/CAPI/Jit.cpp
+index c8d363ad..a39058a9 100644
+--- a/lib/CAPI/Jit.cpp
++++ b/lib/CAPI/Jit.cpp
+@@ -17,6 +17,7 @@
+ 
+ #include <llvm-c/Core.h>
+ 
++#include <llvm/Analysis/InlineCost.h>
+ #include <llvm/IR/IntrinsicInst.h>
+ #include <llvm/IR/Module.h>
+ #include <llvm/IR/PassManager.h>
+@@ -33,6 +34,7 @@
+ #include <llvm/Transforms/Utils/NameAnonGlobals.h>
+ 
+ #include "Reussir/LLVMPass/AllocationSimplication.h"
++#include "Reussir/LLVMPass/ImportTrampolineInline.h"
+ #include "Reussir/LLVMPass/LinearRecurrence.h"
+ #include "Reussir/LLVMPass/RuntimeFunctionAttributor.h"
+ #include "Reussir/LLVMPass/SizeAttributes.h"
+@@ -128,6 +130,15 @@ void reussirRunBackendLLVMPipeline(LLVMModuleRef module, ReussirJitOptLevel opt,
+ 
+   llvm::ModulePassManager mpm;
+   mpm.addPass(reussir::llvmpass::RuntimeFunctionAttributorPass());
++  // A polymorphic-FFI texture that the inliner takes at an ordinary call site
++  // (its cost at most the pipeline's own inline threshold) is inlined at
++  // every call site, cold ones included: it and its import trampoline become
++  // `alwaysinline`. Speed levels only; `-O size` keeps the cost model's
++  // choice.
++  if (opt == ReussirJitOptDefault || opt == ReussirJitOptAggressive)
++    mpm.addPass(reussir::llvmpass::ImportTrampolineInlinePass(
++        llvm::getInlineParamsFromOptLevel(static_cast<unsigned>(level))
++            .DefaultThreshold));
+   // Whole-program devirtualization of closures, ahead of the module pipeline
+   // so devirtualized slot calls can inline. The lowering tagged each closure
+   // vtable with its return-type family id and asserted it — on the very
+diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+index 34d12d09..c7aa9364 100644
+--- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
++++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+@@ -69,6 +69,7 @@
+ #include "Reussir/IR/ReussirEnumAttrs.h"
+ #include "Reussir/IR/ReussirOps.h"
+ #include "Reussir/IR/ReussirTypes.h"
++#include "Reussir/LLVMPass/ImportTrampolineInline.h"
+ #include "Reussir/Support/AllocatorBinModel.h"
+ #include "Reussir/Transformation/SpecialPointerTag.h"
+ #include "Sync/Conversion/ConvertSyncToLLVM.h"
+@@ -3752,6 +3753,12 @@ struct ReussirTrampolineOpConversionPattern
+     auto nativeTy = mlir::LLVM::LLVMFunctionType::get(llvmRetTy, llvmParamTys);
+     auto native = mlir::LLVM::LLVMFuncOp::create(rewriter, op.getLoc(),
+                                                  nativeName, nativeTy);
++    // Name the boundary function for the LLVM pipeline: once the texture's
++    // bitcode is linked in, ImportTrampolineInlinePass marks both functions
++    // `alwaysinline` when the boundary's body is small.
++    native.setPassthroughAttr(rewriter.getArrayAttr({rewriter.getArrayAttr(
++        {rewriter.getStringAttr(reussir::llvmpass::kImportBoundaryAttr),
++         op.getSymNameAttr()})}));
+     inheritSanitizerPassthrough(module, native);
+ 
+     mlir::Block *entry = native.addEntryBlock(rewriter);
+diff --git a/lib/LLVMPass/AllocationSimplication/CMakeLists.txt b/lib/LLVMPass/AllocationSimplication/CMakeLists.txt
+index 97a8ee47..b3ece8f5 100644
+--- a/lib/LLVMPass/AllocationSimplication/CMakeLists.txt
++++ b/lib/LLVMPass/AllocationSimplication/CMakeLists.txt
+@@ -1,5 +1,6 @@
+ add_library(ReussirLLVMAllocationSimplicationPass STATIC
+   AllocationSimplication.cpp
++  ImportTrampolineInline.cpp
+   RuntimeFunctionAttributor.cpp
+ )
+ 
+diff --git a/lib/LLVMPass/AllocationSimplication/ImportTrampolineInline.cpp b/lib/LLVMPass/AllocationSimplication/ImportTrampolineInline.cpp
+new file mode 100644
+index 00000000..d83ba6fc
+--- /dev/null
++++ b/lib/LLVMPass/AllocationSimplication/ImportTrampolineInline.cpp
+@@ -0,0 +1,112 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++///
++/// \file
++/// This file implements the marking of small polymorphic-FFI textures and
++/// their import trampolines as `alwaysinline` (see the header).
++///
++//===----------------------------------------------------------------------===//
++
++#include "Reussir/LLVMPass/ImportTrampolineInline.h"
++
++#include <optional>
++
++#include <llvm/Analysis/AssumptionCache.h>
++#include <llvm/Analysis/InlineCost.h>
++#include <llvm/Analysis/TargetLibraryInfo.h>
++#include <llvm/Analysis/TargetTransformInfo.h>
++#include <llvm/IR/Attributes.h>
++#include <llvm/IR/Function.h>
++#include <llvm/IR/InstIterator.h>
++#include <llvm/IR/Instructions.h>
++#include <llvm/IR/Module.h>
++
++namespace reussir::llvmpass {
++namespace {
++
++/// The trampoline's call of its boundary function, if there is one.
++llvm::CallBase *boundaryCall(llvm::Function &trampoline,
++                             llvm::Function &boundary) {
++  for (llvm::Instruction &inst : llvm::instructions(trampoline))
++    if (auto *call = llvm::dyn_cast<llvm::CallBase>(&inst))
++      if (call->getCalledFunction() == &boundary)
++        return call;
++  return nullptr;
++}
++
++} // namespace
++
++llvm::PreservedAnalyses
++ImportTrampolineInlinePass::run(llvm::Module &module,
++                                llvm::ModuleAnalysisManager &mam) {
++  auto &fam =
++      mam.getResult<llvm::FunctionAnalysisManagerModuleProxy>(module)
++          .getManager();
++  auto getAssumptionCache = [&](llvm::Function &f) -> llvm::AssumptionCache & {
++    return fam.getResult<llvm::AssumptionAnalysis>(f);
++  };
++  auto getTLI = [&](llvm::Function &f) -> const llvm::TargetLibraryInfo & {
++    return fam.getResult<llvm::TargetLibraryAnalysis>(f);
++  };
++
++  bool changed = false;
++  for (llvm::Function &trampoline : module) {
++    llvm::Attribute marker = trampoline.getFnAttribute(kImportBoundaryAttr);
++    if (!marker.isStringAttribute() || trampoline.isDeclaration())
++      continue;
++    // `alwaysinline` and `noinline` exclude each other (optnone implies
++    // noinline).
++    if (trampoline.hasFnAttribute(llvm::Attribute::NoInline))
++      continue;
++    // The boundary function has a body only when the texture's bitcode is
++    // linked in; a boundary defined elsewhere (a C function) cannot be
++    // measured.
++    llvm::Function *boundary = module.getFunction(marker.getValueAsString());
++    if (!boundary || boundary->isDeclaration())
++      continue;
++    llvm::CallBase *call = boundaryCall(trampoline, *boundary);
++    if (!call)
++      continue;
++    // A texture that LLVM judges cold (it only reaches cold code) stays out
++    // of line.
++    if (boundary->hasFnAttribute(llvm::Attribute::Cold))
++      continue;
++    llvm::TargetTransformInfo &tti =
++        fam.getResult<llvm::TargetIRAnalysis>(*boundary);
++    // LLVM's own legality checks for this call: incompatible target features
++    // or other attributes, `noinline`, a boundary that the linker may replace
++    // (`weak`, `linkonce`; the textures' `weak_odr` is not). Success means the
++    // boundary is `alwaysinline` already.
++    std::optional<llvm::InlineResult> decision =
++        llvm::getAttributeBasedInliningDecision(*call, boundary, tti, getTLI);
++    if (decision && !decision->isSuccess())
++      continue;
++    if (!decision) {
++      if (!llvm::isInlineViable(*boundary).isSuccess())
++        continue;
++      // The cost of inlining the boundary function into the trampoline:
++      // its body, less what the call itself costs. The packed arguments
++      // live in the trampoline's stack slots, which the analysis counts as
++      // free once inlined (SROA).
++      std::optional<int> cost =
++          llvm::getInliningCostEstimate(*call, tti, getAssumptionCache,
++                                        /*GetBFI=*/nullptr, getTLI);
++      if (!cost || *cost > threshold)
++        continue;
++      boundary->addFnAttr(llvm::Attribute::AlwaysInline);
++    }
++    trampoline.addFnAttr(llvm::Attribute::AlwaysInline);
++    changed = true;
++  }
++  return changed ? llvm::PreservedAnalyses::none()
++                 : llvm::PreservedAnalyses::all();
++}
++
++} // namespace reussir::llvmpass
+diff --git a/tests/integration/conversion/trampoline_import_scalar.mlir b/tests/integration/conversion/trampoline_import_scalar.mlir
+index 19edc69e..cf04795a 100644
+--- a/tests/integration/conversion/trampoline_import_scalar.mlir
++++ b/tests/integration/conversion/trampoline_import_scalar.mlir
+@@ -1,7 +1,9 @@
+ // RUN: %reussir-opt %s --convert-to-llvm | %FileCheck %s
+ 
+ // Trivial import: all-scalar signature, so the materialized native function
+-// forwards straight to the external boundary symbol.
++// forwards straight to the external boundary symbol. It names that symbol in
++// the attribute "reussir-import-boundary", for the LLVM pipeline's
++// ImportTrampolineInlinePass.
+ module attributes {llvm.target_triple = "x86_64-pc-linux-gnu"} {
+   llvm.func @id_i64(i64) -> i64
+ 
+@@ -12,5 +14,6 @@ module attributes {llvm.target_triple = "x86_64-pc-linux-gnu"} {
+ // CHECK-LABEL: llvm.func @id_i64(
+ // CHECK-SAME: %[[A:.*]]: i64
+ // CHECK-SAME: -> i64
++// CHECK-SAME: passthrough = {{\[\[}}"reussir-import-boundary", "id_i64_c"{{\]\]}}
+ // CHECK: %[[R:.*]] = llvm.call @id_i64_c(%[[A]]) : (i64) -> i64
+ // CHECK: llvm.return %[[R]] : i64
+diff --git a/tests/integration/frontend/ffi_import_inline_cold.rr b/tests/integration/frontend/ffi_import_inline_cold.rr
+new file mode 100644
+index 00000000..8cf49077
+--- /dev/null
++++ b/tests/integration/frontend/ffi_import_inline_cold.rr
+@@ -0,0 +1,63 @@
++// UNSUPPORTED: darwin, windows
++// A small texture is inlined at a call site that LLVM judges cold: its
++// import trampoline and its boundary function are `alwaysinline`
++// (ImportTrampolineInlinePass). Without the attribute, LLVM inlines a
++// trampoline at such a site only below a cost of 45; `mix` costs more
++// (about 70), so the call in `deep`, under seven conditions that LLVM's
++// branch heuristics expect false, stayed a call. %t/rustc compiles the
++// textures for the CPU rrc compiles for: with other target features, LLVM
++// inlines no texture at all.
++
++// RUN: rm -rf %t && mkdir -p %t
++// RUN: printf '#!/bin/sh\nexec "$REAL_RUSTC" "$@" -C target-cpu=native -C target-feature=-outline-atomics\n' > %t/rustc
++// RUN: chmod +x %t/rustc
++// RUN: env REAL_RUSTC=%rustc_path %rrc %s --polyffi-rust-path %t/rustc \
++// RUN:   --emit llvm-ir -O aggressive -o %t/aggressive.ll
++// RUN: %FileCheck %s --implicit-check-not='call {{.*}}@_RC3mix(' < %t/aggressive.ll
++// RUN: env REAL_RUSTC=%rustc_path %rrc %s --polyffi-rust-path %t/rustc \
++// RUN:   --emit llvm-ir -O default -o %t/default.ll
++// RUN: %FileCheck %s --implicit-check-not='call {{.*}}@_RC3mix(' < %t/default.ll
++
++// CHECK: define {{.*}} @_RC3mix(i64 {{.*}}#[[TRAMPOLINE:[0-9]+]]
++// CHECK: define weak_odr {{.*}} @_RC3mix_ffi(i64 {{.*}}#[[BOUNDARY:[0-9]+]]
++// CHECK-DAG: attributes #[[TRAMPOLINE]] = { {{.*}}alwaysinline{{.*}}"reussir-import-boundary"="_RC3mix_ffi"
++// CHECK-DAG: attributes #[[BOUNDARY]] = { {{.*}}alwaysinline
++
++#[ffi(import)]
++fn say(x : u64) [{ println!("{}", x) }];
++#[ffi(import)]
++fn seed() -> u64 [{ std::hint::black_box(20u64) }];
++#[ffi(import)]
++fn mix(x : u64) -> u64 [{
++    {
++        #[cold]
++        #[inline(never)]
++        fn slow(x: u64) -> u64 { std::hint::black_box(x) }
++        let y = x.wrapping_mul(0x9E3779B97F4A7C15) ^ (x >> 7);
++        let z = y.wrapping_add(x >> 11).wrapping_mul(0xBF58476D1CE4E5B9);
++        if z & 1023 == 0 { slow(z) } else { z.rotate_left(13) ^ (z >> 3) ^ (z >> 29) }
++    }
++}];
++
++fn deep(n : u64) -> u64 {
++    if n % 2 != 0 { n } else {
++        if n % 3 != 0 { n + 1 } else {
++            if n % 5 != 0 { n + 2 } else {
++                if n % 7 != 0 { n + 3 } else {
++                    if n % 11 != 0 { n + 4 } else {
++                        if n % 13 != 0 { n + 5 } else {
++                            if n % 17 != 0 { n + 6 } else { mix(n) }
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
++
++#[main]
++fn main() {
++    let s = seed();
++    say(mix(s));
++    say(deep(s * 25525 + 510510));
++}
+diff --git a/tests/integration/llvmpass/import_trampoline_inline.ll b/tests/integration/llvmpass/import_trampoline_inline.ll
+new file mode 100644
+index 00000000..c4833588
+--- /dev/null
++++ b/tests/integration/llvmpass/import_trampoline_inline.ll
+@@ -0,0 +1,254 @@
++; RUN: %reussir-llvm-opt --passes=reussir-import-trampoline-inline %s -o - \
++; RUN:   | %FileCheck %s
++; RUN: %reussir-llvm-opt --passes='reussir-import-trampoline-inline,default<O3>' \
++; RUN:   %s -o - | %FileCheck %s --check-prefix=O3
++; RUN: %reussir-llvm-opt --passes='default<O3>' %s -o - \
++; RUN:   | %FileCheck %s --check-prefix=NOPASS
++
++; An import trampoline (the function Reussir code calls) packs its arguments
++; and calls its texture's boundary function (`*_ffi`, from the texture's
++; bitcode); the attribute "reussir-import-boundary" names that function.
++; When the boundary function's inline cost is at most the inline threshold
++; (here LLVM's default, 225) and LLVM may inline it, both functions become
++; `alwaysinline`; otherwise both stay as they are.
++
++declare i64 @slow(i64) cold noinline
++declare i64 @ext_c(i64)
++
++; A small texture: some arithmetic and a cold call. Its cost (about 70) is
++; above the threshold of a cold call site (45).
++; CHECK: define weak_odr i64 @mix_ffi(i64 %x) #[[MIX_FFI:[0-9]+]] {
++define weak_odr i64 @mix_ffi(i64 %x) nounwind {
++start:
++  %y0 = mul i64 %x, -7046029254386353131
++  %s7 = lshr i64 %x, 7
++  %y = xor i64 %y0, %s7
++  %s11 = lshr i64 %x, 11
++  %z0 = add i64 %y, %s11
++  %z = mul i64 %z0, -4658895280553007687
++  %low = and i64 %z, 1023
++  %rare = icmp eq i64 %low, 0
++  br i1 %rare, label %slow, label %fast
++
++slow:
++  %r = call i64 @slow(i64 %z)
++  ret i64 %r
++
++fast:
++  %rot = call i64 @llvm.fshl.i64(i64 %z, i64 %z, i64 13)
++  %s3 = lshr i64 %z, 3
++  %s29 = lshr i64 %z, 29
++  %t = xor i64 %rot, %s3
++  %u = xor i64 %t, %s29
++  ret i64 %u
++}
++
++; CHECK: define i64 @mix(i64 %x) #[[MIX:[0-9]+]] {
++define i64 @mix(i64 %x) "reussir-import-boundary"="mix_ffi" {
++  %r = call i64 @mix_ffi(i64 %x)
++  ret i64 %r
++}
++
++; A small texture behind the packed boundary: the arguments in one stack
++; slot, the result in another.
++; CHECK: define weak_odr void @pair_ffi(ptr %ret, ptr %args) #[[PAIR_FFI:[0-9]+]] {
++define weak_odr void @pair_ffi(ptr %ret, ptr %args) nounwind willreturn {
++start:
++  %a = load i64, ptr %args, align 8
++  %bp = getelementptr inbounds { i64, double }, ptr %args, i64 0, i32 1
++  %b = load double, ptr %bp, align 8
++  %af = sitofp i64 %a to double
++  %s = fmul double %af, %b
++  %t = fadd double %s, %b
++  %u = fdiv double %t, %af
++  store double %u, ptr %ret, align 8
++  ret void
++}
++
++; CHECK: define double @pair(i64 %a, double %b) #[[PAIR:[0-9]+]] {
++define double @pair(i64 %a, double %b) "reussir-import-boundary"="pair_ffi" {
++  %ret = alloca double, align 8
++  %args = alloca { i64, double }, align 8
++  store i64 %a, ptr %args, align 8
++  %bp = getelementptr inbounds { i64, double }, ptr %args, i64 0, i32 1
++  store double %b, ptr %bp, align 8
++  call void @pair_ffi(ptr %ret, ptr %args)
++  %r = load double, ptr %ret, align 8
++  ret double %r
++}
++
++; A texture over the threshold (80 instructions, cost about 400): unchanged.
++; CHECK: define weak_odr i64 @big_ffi(i64 %x) {
++define weak_odr i64 @big_ffi(i64 %x) {
++  %m0 = mul i64 %x, 3
++  %b0 = xor i64 %m0, %x
++  %m1 = mul i64 %b0, 5
++  %b1 = xor i64 %m1, %x
++  %m2 = mul i64 %b1, 7
++  %b2 = xor i64 %m2, %x
++  %m3 = mul i64 %b2, 9
++  %b3 = xor i64 %m3, %x
++  %m4 = mul i64 %b3, 11
++  %b4 = xor i64 %m4, %x
++  %m5 = mul i64 %b4, 13
++  %b5 = xor i64 %m5, %x
++  %m6 = mul i64 %b5, 15
++  %b6 = xor i64 %m6, %x
++  %m7 = mul i64 %b6, 17
++  %b7 = xor i64 %m7, %x
++  %m8 = mul i64 %b7, 19
++  %b8 = xor i64 %m8, %x
++  %m9 = mul i64 %b8, 21
++  %b9 = xor i64 %m9, %x
++  %m10 = mul i64 %b9, 23
++  %b10 = xor i64 %m10, %x
++  %m11 = mul i64 %b10, 25
++  %b11 = xor i64 %m11, %x
++  %m12 = mul i64 %b11, 27
++  %b12 = xor i64 %m12, %x
++  %m13 = mul i64 %b12, 29
++  %b13 = xor i64 %m13, %x
++  %m14 = mul i64 %b13, 31
++  %b14 = xor i64 %m14, %x
++  %m15 = mul i64 %b14, 33
++  %b15 = xor i64 %m15, %x
++  %m16 = mul i64 %b15, 35
++  %b16 = xor i64 %m16, %x
++  %m17 = mul i64 %b16, 37
++  %b17 = xor i64 %m17, %x
++  %m18 = mul i64 %b17, 39
++  %b18 = xor i64 %m18, %x
++  %m19 = mul i64 %b18, 41
++  %b19 = xor i64 %m19, %x
++  %m20 = mul i64 %b19, 43
++  %b20 = xor i64 %m20, %x
++  %m21 = mul i64 %b20, 45
++  %b21 = xor i64 %m21, %x
++  %m22 = mul i64 %b21, 47
++  %b22 = xor i64 %m22, %x
++  %m23 = mul i64 %b22, 49
++  %b23 = xor i64 %m23, %x
++  %m24 = mul i64 %b23, 51
++  %b24 = xor i64 %m24, %x
++  %m25 = mul i64 %b24, 53
++  %b25 = xor i64 %m25, %x
++  %m26 = mul i64 %b25, 55
++  %b26 = xor i64 %m26, %x
++  %m27 = mul i64 %b26, 57
++  %b27 = xor i64 %m27, %x
++  %m28 = mul i64 %b27, 59
++  %b28 = xor i64 %m28, %x
++  %m29 = mul i64 %b28, 61
++  %b29 = xor i64 %m29, %x
++  %m30 = mul i64 %b29, 63
++  %b30 = xor i64 %m30, %x
++  %m31 = mul i64 %b30, 65
++  %b31 = xor i64 %m31, %x
++  %m32 = mul i64 %b31, 67
++  %b32 = xor i64 %m32, %x
++  %m33 = mul i64 %b32, 69
++  %b33 = xor i64 %m33, %x
++  %m34 = mul i64 %b33, 71
++  %b34 = xor i64 %m34, %x
++  %m35 = mul i64 %b34, 73
++  %b35 = xor i64 %m35, %x
++  %m36 = mul i64 %b35, 75
++  %b36 = xor i64 %m36, %x
++  %m37 = mul i64 %b36, 77
++  %b37 = xor i64 %m37, %x
++  %m38 = mul i64 %b37, 79
++  %b38 = xor i64 %m38, %x
++  %m39 = mul i64 %b38, 81
++  %b39 = xor i64 %m39, %x
++  ret i64 %b39
++}
++
++; CHECK: define i64 @big(i64 %x) #[[BIG:[0-9]+]] {
++define i64 @big(i64 %x) "reussir-import-boundary"="big_ffi" {
++  %r = call i64 @big_ffi(i64 %x)
++  ret i64 %r
++}
++
++; A texture LLVM judges cold: unchanged.
++; CHECK: define weak_odr i64 @rare_ffi(i64 %x) #[[RARE_FFI:[0-9]+]] {
++define weak_odr i64 @rare_ffi(i64 %x) cold {
++  %r = call i64 @slow(i64 %x)
++  ret i64 %r
++}
++
++; CHECK: define i64 @rare(i64 %x) #[[RARE:[0-9]+]] {
++define i64 @rare(i64 %x) "reussir-import-boundary"="rare_ffi" {
++  %r = call i64 @rare_ffi(i64 %x)
++  ret i64 %r
++}
++
++; A `noinline` texture: unchanged.
++; CHECK: define weak_odr i64 @pinned_ffi(i64 %x) #[[PINNED_FFI:[0-9]+]] {
++define weak_odr i64 @pinned_ffi(i64 %x) noinline {
++  %r = add i64 %x, 1
++  ret i64 %r
++}
++
++; CHECK: define i64 @pinned(i64 %x) #[[PINNED:[0-9]+]] {
++define i64 @pinned(i64 %x) "reussir-import-boundary"="pinned_ffi" {
++  %r = call i64 @pinned_ffi(i64 %x)
++  ret i64 %r
++}
++
++; A texture compiled for other target features than its trampoline: LLVM
++; may not inline it, so it stays unchanged.
++; CHECK: define weak_odr i64 @tuned_ffi(i64 %x) #[[TUNED_FFI:[0-9]+]] {
++define weak_odr i64 @tuned_ffi(i64 %x) "target-features"="+sve2" {
++  %r = add i64 %x, 2
++  ret i64 %r
++}
++
++; CHECK: define i64 @tuned(i64 %x) #[[TUNED:[0-9]+]] {
++define i64 @tuned(i64 %x) "reussir-import-boundary"="tuned_ffi" {
++  %r = call i64 @tuned_ffi(i64 %x)
++  ret i64 %r
++}
++
++; A boundary defined outside the module (no texture linked in): unchanged.
++; CHECK: define i64 @ext(i64 %x) #[[EXT:[0-9]+]] {
++define i64 @ext(i64 %x) "reussir-import-boundary"="ext_c" {
++  %r = call i64 @ext_c(i64 %x)
++  ret i64 %r
++}
++
++; A call of `mix` in a block reached once in 2001 runs of the function: a
++; call site LLVM judges cold. The cost model alone keeps the call (cost 70,
++; threshold 45); with the attribute, the texture is inlined.
++; O3-LABEL: define i64 @deep(
++; O3-NOT: call {{.*}}@mix
++; O3: call i64 @slow(
++; O3-NOT: call {{.*}}@mix
++; NOPASS-LABEL: define i64 @deep(
++; NOPASS: call i64 @mix(i64 %n)
++define i64 @deep(i64 %n) {
++entry:
++  %c = icmp ult i64 %n, 3
++  br i1 %c, label %rare, label %done, !prof !0
++
++rare:
++  %r = call i64 @mix(i64 %n)
++  ret i64 %r
++
++done:
++  ret i64 %n
++}
++
++!0 = !{!"branch_weights", i32 1, i32 2000}
++
++; CHECK-DAG: attributes #[[MIX_FFI]] = { alwaysinline nounwind }
++; CHECK-DAG: attributes #[[MIX]] = { alwaysinline "reussir-import-boundary"="mix_ffi" }
++; CHECK-DAG: attributes #[[PAIR_FFI]] = { alwaysinline nounwind willreturn }
++; CHECK-DAG: attributes #[[PAIR]] = { alwaysinline "reussir-import-boundary"="pair_ffi" }
++; CHECK-DAG: attributes #[[BIG]] = { "reussir-import-boundary"="big_ffi" }
++; CHECK-DAG: attributes #[[RARE_FFI]] = { cold }
++; CHECK-DAG: attributes #[[RARE]] = { "reussir-import-boundary"="rare_ffi" }
++; CHECK-DAG: attributes #[[PINNED_FFI]] = { noinline }
++; CHECK-DAG: attributes #[[PINNED]] = { "reussir-import-boundary"="pinned_ffi" }
++; CHECK-DAG: attributes #[[TUNED_FFI]] = { "target-features"="+sve2" }
++; CHECK-DAG: attributes #[[TUNED]] = { "reussir-import-boundary"="tuned_ffi" }
++; CHECK-DAG: attributes #[[EXT]] = { "reussir-import-boundary"="ext_c" }
+diff --git a/tool/reussir-llvm-opt/CMakeLists.txt b/tool/reussir-llvm-opt/CMakeLists.txt
+index 77af7a29..eee45f4c 100644
+--- a/tool/reussir-llvm-opt/CMakeLists.txt
++++ b/tool/reussir-llvm-opt/CMakeLists.txt
+@@ -1,4 +1,5 @@
+ set(LLVM_LINK_COMPONENTS
++  Analysis
+   Core
+   IRReader
+   Passes
+diff --git a/tool/reussir-llvm-opt/main.cpp b/tool/reussir-llvm-opt/main.cpp
+index 3557ab27..92932f49 100644
+--- a/tool/reussir-llvm-opt/main.cpp
++++ b/tool/reussir-llvm-opt/main.cpp
+@@ -18,6 +18,7 @@
+ 
+ #include <optional>
+ 
++#include <llvm/Analysis/InlineCost.h>
+ #include <llvm/IR/LLVMContext.h>
+ #include <llvm/IR/Module.h>
+ #include <llvm/IR/Verifier.h>
+@@ -30,6 +31,7 @@
+ #include <llvm/Support/ToolOutputFile.h>
+ 
+ #include "Reussir/LLVMPass/AllocationSimplication.h"
++#include "Reussir/LLVMPass/ImportTrampolineInline.h"
+ #include "Reussir/LLVMPass/LinearRecurrence.h"
+ #include "Reussir/LLVMPass/RuntimeFunctionAttributor.h"
+ #include "Reussir/LLVMPass/SizeAttributes.h"
+@@ -129,6 +131,13 @@ int main(int argc, char **argv) {
+           mpm.addPass(reussir::llvmpass::RuntimeFunctionAttributorPass());
+           return true;
+         }
++        // The bound is LLVM's default inline threshold (225, or
++        // -inline-threshold); the backend passes its pipeline's.
++        if (name == "reussir-import-trampoline-inline") {
++          mpm.addPass(reussir::llvmpass::ImportTrampolineInlinePass(
++              llvm::getInlineParams().DefaultThreshold));
++          return true;
++        }
+         return false;
+       });
+   passBuilder.registerPipelineParsingCallback(
+-- 
+2.43.0
+

@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0004), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** bug. **Status:** patched (04-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 When a construction reuses the cell of a value that was just freed,
 Reussir tries to skip storing fields whose bytes are already in place
@@ -11,7 +11,7 @@ types member by member. The comparison follows member records with no
 memory of what it is already comparing. Two distinct recursive types with
 the same shape, such as a user's `MyList` and `List`, made it recurse
 until rrc's worker thread ran out of stack: rrc died with SIGSEGV and no
-message. Patch 0004 compares coinductively: a pair of types met again while
+message. Patch 04-a compares coinductively: a pair of types met again while
 it is still being compared counts as equal. It also compares each record's
 capability (`[value]` or shared) and `fixed` flag. Without those two
 checks, fixing the crash would have turned some of these programs into
@@ -140,7 +140,7 @@ this bug.
 ## Patch
 
 Patch file
-[`patches/0004-l2r-local-bug-4-compare-recursive-record-types-coind.patch`](patches/0004-l2r-local-bug-4-compare-recursive-record-types-coind.patch)
+[`patches/04-a-coinductive-type-compare.patch`](patches/04-a-coinductive-type-compare.patch)
 (`l2r-local` commit `60267ac3`, applied in `./reussir`; `l2r-local` head cc8e5aa5).
 
 **The fix.** All changes are in `structurallySameType` and a new wrapper.
@@ -197,7 +197,7 @@ layout) gets no skip.
   of the type is stored (inline or as a pointer). Per the patch comment,
   `fixed` decides how a variant box is sized. Records that differ in
   either only look alike.
-- Callers are unchanged. After 0002 only the variant prefix check uses the
+- Callers are unchanged. After 02-a only the variant prefix check uses the
   function.
 
 **Verification.**

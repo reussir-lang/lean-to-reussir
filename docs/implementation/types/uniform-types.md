@@ -11,16 +11,16 @@ to `lean2rr/LeanToReussir/`.
 
 - **What:** A parameter of an inductive is *relevant* when it occurs, in
   a relevant position, in some data field of a constructor (least
-  fixpoint over the program's inductives). An `lcAny` in a phantom
-  position (`EST.Out ε lcAny α`'s state) is ignored; one in a relevant
-  position is a `Box`. Generated nominal types are keyed by their relevant
-  arguments only. `ST.Ref`, `Array`, `Thunk` and `Task` have fixed
-  relevance (their payload is not a Lean field).
-- **Why:** `EST.Out IO.Error σ PUnit` is one type for every `σ`; without
-  relevance every phantom `lcAny` would multiply types and force boxing.
+  fixpoint over the program's inductives). Stage 3 counts a binder's type
+  as unknown only for an `lcAny` in a relevant position, and compares types
+  with phantom arguments erased (`normTy`). `ST.Ref`, `Array`, `Thunk` and
+  `Task` have fixed relevance (their payload is not a Lean field). Stage 4
+  does not use relevance: a generated nominal type is one per inductive.
+- **Why:** An `lcAny` in a phantom position (`EST.Out ε lcAny α`'s state)
+  carries no data, so Stage 3 has nothing to recover there.
 - **Where:** `Relevance.lean`: `computeRelevance`, `builtinRelevance`,
-  `hasRelevantAny`; `LowerBase.lean`: `nominalKey`, `relevanceOf`,
-  `programRelevance`.
+  `hasRelevantAny`; `MonoRetype.lean`: `programRelevance`, `isUnknown`,
+  `normTy`.
 - **Remove only if:** never.
 
 ### Type arguments that are not statically known become `lcAny`
@@ -43,7 +43,8 @@ to `lean2rr/LeanToReussir/`.
   object") become `lcAny` in every type, and `NonScalar.mk`/
   `PNonScalar.mk` (used only to build Lean's `box(0)` placeholder) become
   `◾`. The `unsafeCast`s around them (erased by LCNF) become ordinary
-  representation conversions, element by element for arrays.
+  representation conversions: boxing or unboxing one element (an
+  `Array α` and an `Array NonScalar` are one array of boxes).
 - **Why:** `Array.mapMUnsafe` (behind `Array.map`) and `mapFinIdxMUnsafe`
   reinterpret an `Array α` as an `Array NonScalar` and replace elements one
   by one with values of another type; `Array.modifyMUnsafe` stores

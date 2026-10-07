@@ -5,7 +5,7 @@ Native Lean frees through one stack of objects, last pushed first: a
 record's fields are pushed in order, so its last field is freed first, and
 a freed object's children before the objects pushed earlier. Here the
 array's free (`leanrt::drop`) and Reussir's drop glue for the records
-(local patch 0014) share one stack of pending work, so the order is the
+(local patch 13-b) share one stack of pending work, so the order is the
 same (plan §10). -/
 inductive Tr where
   | leaf : Tr

@@ -15,10 +15,17 @@ def splitFnType (ty : Expr) (n : Nat) : Array Expr × Expr := Id.run do
     | _ => break
   return (ps, ty)
 
+/-- The function type with parameter types `ps` (closed: as `splitFnType`
+gives them) and result `r`. -/
+def mkFnType (ps : Array Expr) (r : Expr) : Expr :=
+  ps.foldr (fun p b => .forallE `a p b .default) r
+
 /-- What a constant application targets. -/
 inductive Callee where
-  /-- A declaration with code in the translated program. -/
-  | code (fn : String) (params : Array RR.Ty) (ret : RR.Ty)
+  /-- A declaration with code in the translated program: Reussir parameter
+  types (one per Lean parameter), result type, and which parameters its
+  Reussir function takes (rule 4a, `keepMask`). -/
+  | code (fn : String) (params : Array RR.Ty) (ret : RR.Ty) (keep : Array Bool)
   /-- An extern: Lean name (original, for the extern table), key type
   arguments (for polymorphic externs), mono parameter types, result type. -/
   | extern (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
@@ -47,7 +54,7 @@ def calleeOf (f : Name) : LowerM Callee := do
   if let some d := (← read).decls.find? f then
     let (ps, r) := splitFnType d.type d.params.size
     match d.value with
-    | .code _ => return .code (fnName f) (← ps.mapM lowerType) (← lowerType r)
+    | .code _ => return .code (fnName f) (← ps.mapM lowerType) (← lowerType r) (keepMask (d.params.map (·.type)))
     | .extern _ =>
       let key := (← read).keys.find? f
       let orig := key.map (·.decl) |>.getD f
@@ -74,20 +81,33 @@ def lowerArg (ctx : CodeCtx) (a : Arg .pure) (expected : RR.Ty) : LowerM RR.Expr
   -- `◾` (type arguments, proofs, or `box(0)` at a relevant type)
   | _ => zeroValue expected
 
-/-- A partial application of target `tg` to `supplied` (at its parameter
-types) as a value of type `expected`, the type of the binder. That may be
+/-- A partial application of target `tg` to its first `j` Lean arguments,
+of which it captures `supplied` (those it takes, at its parameter types),
+as a value of type `expected`, the type of the binder. That may be
 another representation (a lifted lambda whose result Lean typed `lcAny`,
 a closure stored at a uniform type, `Box`): the value is then converted
 (`tryCoerce`). The target runs only when its last argument arrives. -/
-def partialApp (tg : FnTarget) (supplied : Array RR.Expr) (expected : RR.Ty) : LowerM RR.Expr := do
-  let (v, t) ← partValue tg supplied
+def partialApp (tg : FnTarget) (j : Nat) (supplied : Array RR.Expr) (expected : RR.Ty) : LowerM RR.Expr := do
+  let (v, t) ← partValue tg j supplied
   coerce v t expected
 
-/-- Apply `f : t` to `args` (each with its type): up to a chain's length at
-a time (`applyCall`); a function value of statically unknown type (`Box`)
-is unboxed to `Box → Box`. The result and its type. -/
-def applyExprs (f : RR.Expr) (t : RR.Ty) (args : Array (RR.Expr × RR.Ty)) :
-    LowerM (RR.Expr × RR.Ty) := do
+/-- An argument of a Lean application: a value with its Reussir type, or
+`◾`. -/
+inductive LArg where
+  | val (e : RR.Expr) (t : RR.Ty)
+  | erased
+  deriving Inhabited
+
+/-- Apply `f : t` to Lean arguments `args`, along `t`'s Lean positions
+(rule 4): a phantom domain takes its argument away; any other domain gets
+its argument at its type (`◾` gives the domain's placeholder: `()` at a
+unit domain, Lean's `box(0)` at a relevant one). The domains in a row are
+applied at once (`applyCall`, up to the chain's length), so that a target
+whose arity they reach is called directly. A function value of statically
+unknown type (`Box`) is unboxed to `Box → Box`, which has a domain for
+every Lean argument (`◾` included: uniform code applies `box(0)` there).
+The result and its type (by Lean positions). -/
+def applyLean (f : RR.Expr) (t : RR.Ty) (args : Array LArg) : LowerM (RR.Expr × RR.Ty) := do
   let mut e := f
   let mut t := t
   let mut i := 0
@@ -96,38 +116,38 @@ def applyExprs (f : RR.Expr) (t : RR.Ty) (args : Array (RR.Expr × RR.Ty)) :
       let canon := RR.Ty.fn RR.Ty.box RR.Ty.box
       e ← coerce e RR.Ty.box canon
       t := canon
-    let (doms, _) := fnChain t
-    if doms.isEmpty then throwError "lean2rr: application of a non-function value of type {t.render}"
-    let j := min doms.size (args.size - i)
+    unless t matches .fn .. do
+      throwError "lean2rr: application of a non-function value of type {t.render}"
+    let start := t
     let mut as := #[]
-    for k in [:j] do
-      let (a, aty) := args[i + k]!
-      as := as.push (← coerce a aty doms[k]!)
-    e ← applyCall e t as
-    t := fnResult t j
-    i := i + j
+    while i < args.size do
+      let .fn d c := t | break
+      if d != RR.Ty.phantom then
+        let a : LArg := args[i]!
+        as := as.push (← match a with
+          | .val a aty => coerce a aty d
+          | .erased => zeroValue d)
+      t := c
+      i := i + 1
+    unless as.isEmpty do e ← applyCall e start as
   return (e, t)
+
+/-- Apply `f : t` to `args` (each with its type, one per Lean position of
+`t`; see `applyLean`). The result and its type. -/
+def applyExprs (f : RR.Expr) (t : RR.Ty) (args : Array (RR.Expr × RR.Ty)) :
+    LowerM (RR.Expr × RR.Ty) :=
+  applyLean f t (args.map fun (a, aty) => .val a aty)
 
 /-- Apply a function value `f : fty` to further (Lean) arguments. -/
 def applyChain (f : RR.Expr) (fty : RR.Ty) (ctx : CodeCtx) (args : Array (Arg .pure)) :
     LowerM (RR.Expr × RR.Ty) := do
-  let mut e := f
-  let mut t := fty
-  let mut i := 0
-  while i < args.size do
-    if t == RR.Ty.box then
-      let canon := RR.Ty.fn RR.Ty.box RR.Ty.box
-      e ← coerce e RR.Ty.box canon
-      t := canon
-    let (doms, _) := fnChain t
-    if doms.isEmpty then throwError "lean2rr: application of a non-function value of type {t.render}"
-    let j := min doms.size (args.size - i)
-    let mut as := #[]
-    for k in [:j] do
-      as := as.push (← lowerArg ctx args[i + k]! doms[k]!)
-    e ← applyCall e t as
-    t := fnResult t j
-    i := i + j
-  return (e, t)
+  let largs ← args.mapM fun a => do
+    match a with
+    | .fvar x =>
+      match ctx.vars[x]? with
+      | some (n, t) => pure (LArg.val (.var n) t)
+      | none => throwError "lean2rr: unbound variable {x.name} (internal error)"
+    | _ => pure .erased
+  applyLean f fty largs
 
 end LeanToReussir

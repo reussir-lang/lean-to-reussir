@@ -1,0 +1,2 @@
+# polymorphic recursion at a doubling type, n = 10 and 20 levels (a conversion per level would build 2^n cells)
+10 | 20 | 4 2000

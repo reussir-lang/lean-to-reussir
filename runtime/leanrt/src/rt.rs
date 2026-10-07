@@ -78,6 +78,9 @@ pub fn set_initializing(b: bool) {
 /// `task::start`, the program's `main`, then `task::shutdown`), since the
 /// scheduler's state is the thread's own.
 pub fn run_main2<I: FnOnce(), F: FnOnce() + Send + 'static>(init: I, body: F) {
+    // The program's releases of its boxed payloads, before any box is made
+    // and before any other thread runs (`any::RELEASES`).
+    crate::any::init_releases();
     lean_runtime::io::startup::ensure_native_descriptors();
     install_stack_overflow_handler();
     init();

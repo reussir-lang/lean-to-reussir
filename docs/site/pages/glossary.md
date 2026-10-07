@@ -32,10 +32,10 @@ base, mono, impure
 :   The three phases of Lean's compiler. Base code is typed and polymorphic. Mono code has type variables erased to `lcAny`. Impure code adds boxing and reference counting. lean2rr uses base and mono, never impure.
 
 `lcAny`
-:   Lean's "unknown type" in compiled code. Base code has it where the compiler cannot compute a type (`t.denote` for a variable `t`); mono code also has it for erased type variables. lean2rr stores a value of this type as an `L2RBox`.
+:   Lean's "unknown type" in compiled code. Base code has it where the compiler cannot compute a type (`t.denote` for a variable `t`); mono code also has it for erased type variables. lean2rr stores a value of this type as a box (`LAny`).
 
 erased value (`◾`)
-:   A type, a proof or another value with no run-time meaning. lean2rr stores it as `L2RUnit`.
+:   A type, a proof or another value with no run-time meaning. lean2rr removes an erased parameter; when the last parameters of a function are erased, the function keeps one `L2RUnit` parameter for them. Where data is expected, an erased value is Lean's `box(0)`.
 
 arity
 :   The number of parameters of a declaration after Lean's optimizations. A call with exactly that many arguments runs the function.
@@ -64,7 +64,7 @@ instance
 :   One such copy, with a fresh name (`d._l2r.k`).
 
 uniform instance
-:   The instance with every type argument `lcAny`; its values of those types are `L2RBox`es. Polymorphic recursion and the instance bounds lead to it. A call whose type arguments are not statically known (a type unpacked from an existential, a partial application that leaves a type open) goes to an instance at `lcAny`: the uniform instance when no type argument is known.
+:   The instance with every type argument `lcAny`; its values of those types are boxes. Polymorphic recursion and the instance bounds lead to it. A call whose type arguments are not statically known (a type unpacked from an existential, a partial application that leaves a type open) goes to an instance at `lcAny`: the uniform instance when no type argument is known.
 
 dictionary
 :   The record of functions that a type class instance passes at run time.
@@ -76,10 +76,10 @@ precise type
 :   A type that lean2rr knows exactly, as opposed to `lcAny`.
 
 relevant parameter
-:   A type parameter that appears in a data field. Only relevant parameters make different generated types.
+:   A type parameter that appears in a data field. A field of its type is a box. No type parameter makes a new generated type: each datatype has one.
 
 dependent type
-:   A type that mentions a value (`Array t.denote`, `Vector α n`). A value that occurs only in a proof or an index is erased. When the type changes with a run-time value, the base code has `lcAny` there, and lean2rr stores the value as an `L2RBox`. See [Dependent types](dependent-types.html).
+:   A type that mentions a value (`Array t.denote`, `Vector α n`). A value that occurs only in a proof or an index is erased. When the type changes with a run-time value, the base code has `lcAny` there, and lean2rr stores the value as a box. See [Dependent types](dependent-types.html).
 
 type family
 :   A function that gives a type (`Ty.denote`, `fun n => Vector String n`). Stage 2 keeps a constant family or a type constructor. Any other family becomes `lcAny`.
@@ -87,7 +87,7 @@ type family
 ## Representations
 
 representation
-:   The Reussir type that stores a value. One Lean type can have several representations (`List Nat` and `List L2RBox`).
+:   The Reussir type that stores a value. A datatype has one representation (`List Nat` and `List α` are one type). A function type can have several (`Nat → Nat` and `LAny → LAny`).
 
 shared type
 :   A Reussir record or enum stored in a counted heap cell.
@@ -102,22 +102,19 @@ immediate
 :   A constructor without fields of a shared enum: a tagged pointer to a static cell, never allocated.
 
 tagged handle
-:   An opaque Reussir handle that may be a number instead of a pointer (local patch 0050). Reussir counts it only when its low bit is 0. `Nat` and `Int` are tagged handles.
+:   An opaque Reussir handle that may be a number instead of a pointer (local patch 41-a). Reussir counts it only when its low bit is 0. `Nat` and `Int` are tagged handles.
 
-`L2RBox`
-:   The uniform type: a closed tagged union that lean2rr generates for each program (a shared enum), with one variant per concrete type that the program boxes, plus a unit variant. It stores a value whose type is not statically known. Code that needs the concrete type checks the tag.
+box (`LAny`)
+:   The uniform type: one word, as Lean's `lean_object*`. An odd word is an immediate (a small scalar, a small `Nat`, an enumeration's index, `box(0)`). An even word points to a counted object and holds the object's type number in its top 16 bits. It stores a value whose type is not statically known, and every field, array element and cell value of a parameter's type. Code that needs the concrete type checks the word.
 
-storage type
-:   The type in which an array stores its elements: the element's own type when it can cross Reussir's FFI boundary, an index for an enumeration, otherwise an `ElemBox`.
+type number
+:   The top 16 bits of a box that points to an object: 1 to 15 for the runtime's kinds (big `Nat`, `String`, `Array`, ...), 16 and up for the program's types. An unboxing checks it.
 
 `ElemBox`
-:   A generated one-field shared struct that wraps a value that cannot cross the FFI boundary.
+:   A generated one-field shared struct that wraps a value that cannot cross the FFI boundary: a `[value]` struct of several fields in a box, a once-cell or a polymorphic extern's argument.
 
 conversion
-:   Generated code that rebuilds a value from one representation into another. The result is a new value. On the current version, a conversion does not keep sharing: a value with shared parts can grow exponentially (see [Dependent types](dependent-types.html#the-current-version)). The planned change removes conversions.
-
-specialized layout
-:   The layout of an instance at precise type arguments: a `Tree Float` leaf holds an `f64`. The other layout of the same Lean type is the uniform layout, with `L2RBox` fields.
+:   Generated code that changes the representation of a value: boxing, unboxing, a wrapper around a function value, or a cast between two different inductives whose layouts differ (it rebuilds the value). A value of a datatype is never rebuilt to change its layout (see [Dependent types](dependent-types.html#one-layout-for-a-shared-tree)).
 
 shared value
 :   A value in which two or more pointers go to the same cell, such as a node whose two subtrees are one tree. Its cells form a directed acyclic graph (DAG).
@@ -167,7 +164,7 @@ wait core
 :   A wait protocol of lean-runtime's scheduler: the wait for a thunk or a constant that another context computes, the reference rule of a program that creates tasks, and the resolution of a promise put off to the end of a free.
 
 pending stack
-:   The per-thread stack of cells to free. Frees use it instead of recursion (local patches 0013 to 0015).
+:   The per-thread stack of cells to free. Frees use it instead of recursion (local patches 13-a to 13-c).
 
 internal panic
 :   An error of the runtime itself that ends the program at once, as Lean's `lean_internal_panic`: `INTERNAL PANIC: ` and a message on the process's stderr (for example `out of memory`), then exit status 1, or an abort (134) under `LEAN_ABORT_ON_PANIC`. A `panic!` is not one: it prints its message and the program goes on.

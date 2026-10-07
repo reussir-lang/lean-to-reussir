@@ -1,0 +1,787 @@
+
+// ===========================================================================
+// LAny probe (hand-written; appended to a lean2rr program's .rr, called from
+// l2r_main_body before the Lean main). Its payload numbers are 1016 to
+// 1029; it installs its own releases of them in leanrt's table first
+// (probe_install, as the host's generated l2r_any_releases does its own).
+
+// ---- reporting (alloclive.o is linked in) ----
+#[ffi(import)]
+fn probe_say(label : str, v : u64) -> u64 [{ { println!("  {} = {}", &*label, v); 0 } }];
+#[ffi(import)]
+fn probe_live() -> u64 [{ { extern "C" { fn alloclive_live() -> u64; } unsafe { alloclive_live() } } }];
+#[ffi(import)]
+fn probe_bad() -> u64 [{ { extern "C" { fn alloclive_bad_frees() -> u64; } unsafe { alloclive_bad_frees() } } }];
+#[ffi(import)]
+fn probe_allocs() -> u64 [{ { extern "C" { fn alloclive_allocs() -> u64; } unsafe { alloclive_allocs() } } }];
+#[ffi(import)]
+fn probe_report(label : str, live0 : u64, bad0 : u64, allocs0 : u64, r : u64, expect : u64, strict : bool) -> u64 [{
+    {
+        extern "C" { fn alloclive_live() -> u64; fn alloclive_bad_frees() -> u64; fn alloclive_allocs() -> u64; }
+        let (l, b, a) = unsafe { (alloclive_live(), alloclive_bad_frees(), alloclive_allocs()) };
+        let ok = l == live0 && b == bad0 && r == expect;
+        println!("{} {}: result {} (expected {}), allocations {}, live blocks after - before = {}, bad frees {}",
+                 if ok { "PASS" } else if strict { "FAIL" } else { "NOTE" }, &*label, r, expect, a - allocs0, l as i64 - live0 as i64, b - bad0);
+        if ok { 0 } else { 1 }
+    }
+}];
+// The count of the payload of `a` while `a` is held (includes `a`'s own reference).
+#[ffi(import)]
+fn probe_rc(a : LAny) -> u64 [{
+    { let w = a.word(); let c = if w & 1 == 1 { 0 } else { unsafe { *((w & ((1u64 << 48) - 1)) as *const u32) } }; drop(a); c as u64 }
+}];
+#[ffi(import)]
+fn probe_word(a : LAny) -> u64 [{ { let w = a.word(); drop(a); w } }];
+#[ffi(import)]
+fn probe_u64_max() -> u64 [{ u64::MAX }];
+#[ffi(import)]
+fn probe_f64_bits(x : f64) -> u64 [{ x.to_bits() }];
+#[ffi(import)]
+fn probe_f32_bits(x : f32) -> u64 [{ x.to_bits() as u64 }];
+#[ffi(import)]
+fn probe_opaque(x : u64) -> u64 [{ ::std::hint::black_box(x) }];
+#[ffi(import)]
+fn probe_env(name : str) -> bool [{ ::std::env::var_os(&*name).is_some() }];
+#[ffi(import)]
+fn probe_f64_of_bits(b : u64) -> f64 [{ f64::from_bits(b) }];
+#[ffi(import)]
+fn probe_f32_of_bits(b : u64) -> f32 [{ f32::from_bits(b as u32) }];
+
+// ---- payload types of the probe program, numbered from 16 ----
+struct Pt(u64, u64)                          // 1016
+enum Tree { leaf, node(LAny, u64, LAny) }    // 1017 (leaf: a nullary variant)
+enum FnV { z, raw(u64 -> u64), p1_add(u64) } // 1018 (a function value: z nullary, raw a closure)
+struct Chain(u64, LAny)                      // 1019
+struct AnyRef(Cell<LAny>)                    // 1020 (a reference record)
+struct [value] VPair(u64, f64)
+struct VCell(VPair)                          // 1021 (a multi-word value in a cell)
+                                             // 1022: LCell<LAny>
+struct Holder(LAny, LAny, u64)               // 1023
+enum AList { nil, cons(LAny, AList) }        // 1024
+enum Mx { a(u64), b, c }                     // 1025 (nullary variants at indices 1 and 2)
+enum Col { r, g, bl }                        // 1026 (every variant nullary)
+struct [value] VA(LAny, u64)
+struct VHold(VA)                             // 1027 (a value record holding a box, in a cell)
+struct OH2(LHandle, LHandle)                 // 1028 (two file handles)
+struct OC(LHandle, LAny)                     // 1029 (a chain cell: a handle and the next box)
+
+// The program's release of each payload type (a cell whose count is 1),
+// installed in leanrt's table by number (leanrt::any::release_last).
+fn probe_rel_1016(x : Pt) -> unit { }
+extern "C" trampoline "probe_rel_1016_c" = probe_rel_1016;
+fn probe_rel_1017(x : Tree) -> unit { }
+extern "C" trampoline "probe_rel_1017_c" = probe_rel_1017;
+fn probe_rel_1018(x : FnV) -> unit { }
+extern "C" trampoline "probe_rel_1018_c" = probe_rel_1018;
+fn probe_rel_1019(x : Chain) -> unit { }
+extern "C" trampoline "probe_rel_1019_c" = probe_rel_1019;
+fn probe_rel_1020(x : AnyRef) -> unit { }
+extern "C" trampoline "probe_rel_1020_c" = probe_rel_1020;
+fn probe_rel_1021(x : VCell) -> unit { }
+extern "C" trampoline "probe_rel_1021_c" = probe_rel_1021;
+fn probe_rel_1022(x : LCell<LAny>) -> unit { }
+extern "C" trampoline "probe_rel_1022_c" = probe_rel_1022;
+fn probe_rel_1023(x : Holder) -> unit { }
+extern "C" trampoline "probe_rel_1023_c" = probe_rel_1023;
+fn probe_rel_1024(x : AList) -> unit { }
+extern "C" trampoline "probe_rel_1024_c" = probe_rel_1024;
+fn probe_rel_1025(x : Mx) -> unit { }
+extern "C" trampoline "probe_rel_1025_c" = probe_rel_1025;
+fn probe_rel_1026(x : Col) -> unit { }
+extern "C" trampoline "probe_rel_1026_c" = probe_rel_1026;
+fn probe_rel_1027(x : VHold) -> unit { }
+extern "C" trampoline "probe_rel_1027_c" = probe_rel_1027;
+fn probe_rel_1028(x : OH2) -> unit { }
+extern "C" trampoline "probe_rel_1028_c" = probe_rel_1028;
+fn probe_rel_1029(x : OC) -> unit { }
+extern "C" trampoline "probe_rel_1029_c" = probe_rel_1029;
+#[ffi(import)]
+fn probe_install() -> u64 [{ {
+    extern "C" {
+        fn probe_rel_1016_c(cell: *mut u8);
+        fn probe_rel_1017_c(cell: *mut u8);
+        fn probe_rel_1018_c(cell: *mut u8);
+        fn probe_rel_1019_c(cell: *mut u8);
+        fn probe_rel_1020_c(cell: *mut u8);
+        fn probe_rel_1021_c(cell: *mut u8);
+        fn probe_rel_1022_c(cell: *mut u8);
+        fn probe_rel_1023_c(cell: *mut u8);
+        fn probe_rel_1024_c(cell: *mut u8);
+        fn probe_rel_1025_c(cell: *mut u8);
+        fn probe_rel_1026_c(cell: *mut u8);
+        fn probe_rel_1027_c(cell: *mut u8);
+        fn probe_rel_1028_c(cell: *mut u8);
+        fn probe_rel_1029_c(cell: *mut u8);
+    }
+    static RELEASES: [leanrt::any::Rel; 14] = [
+        leanrt::any::Rel(1016, probe_rel_1016_c),
+        leanrt::any::Rel(1017, probe_rel_1017_c),
+        leanrt::any::Rel(1018, probe_rel_1018_c),
+        leanrt::any::Rel(1019, probe_rel_1019_c),
+        leanrt::any::Rel(1020, probe_rel_1020_c),
+        leanrt::any::Rel(1021, probe_rel_1021_c),
+        leanrt::any::Rel(1022, probe_rel_1022_c),
+        leanrt::any::Rel(1023, probe_rel_1023_c),
+        leanrt::any::Rel(1024, probe_rel_1024_c),
+        leanrt::any::Rel(1025, probe_rel_1025_c),
+        leanrt::any::Rel(1026, probe_rel_1026_c),
+        leanrt::any::Rel(1027, probe_rel_1027_c),
+        leanrt::any::Rel(1028, probe_rel_1028_c),
+        leanrt::any::Rel(1029, probe_rel_1029_c),
+    ];
+    leanrt::any::install(&RELEASES)
+} }];
+
+// ---- box / unbox per type ----
+fn box_pt(p : Pt) -> LAny { l2r_any_of<Pt>(p, 1016) }
+// The unbox shape for program types (the prelude's rule): an immediate is
+// a nullary variant by index or, for index 0 (box(0)), the type's zero.
+fn unbox_pt(a : LAny) -> Pt {
+    let w : u64 = l2r_any_raw(a);
+    if l2r_any_raw_is_imm(w) {
+        if l2r_any_raw_imm(w) == 0 { Pt{0, 0} } else { l2r_unreachable<Pt>() }
+    } else { l2r_any_raw_as<Pt>(w, 1016) }
+}
+fn box_tree(t : Tree) -> LAny { l2r_any_of<Tree>(t, 1017) }
+fn unbox_tree(a : LAny) -> Tree {
+    let w : u64 = l2r_any_raw(a);
+    if l2r_any_raw_is_imm(w) {
+        if l2r_any_raw_imm(w) == 0 { Tree::leaf{} } else { l2r_unreachable<Tree>() }
+    } else { l2r_any_raw_as<Tree>(w, 1017) }
+}
+fn box_fnv(f : FnV) -> LAny { l2r_any_of<FnV>(f, 1018) }
+fn unbox_fnv(a : LAny) -> FnV {
+    let w : u64 = l2r_any_raw(a);
+    if l2r_any_raw_is_imm(w) {
+        if l2r_any_raw_imm(w) == 0 { FnV::z{} } else { l2r_unreachable<FnV>() }
+    } else { l2r_any_raw_as<FnV>(w, 1018) }
+}
+fn box_alist(l : AList) -> LAny { l2r_any_of<AList>(l, 1024) }
+fn unbox_alist(a : LAny) -> AList {
+    let w : u64 = l2r_any_raw(a);
+    if l2r_any_raw_is_imm(w) {
+        if l2r_any_raw_imm(w) == 0 { AList::nil{} } else { l2r_unreachable<AList>() }
+    } else { l2r_any_raw_as<AList>(w, 1024) }
+}
+
+// ---- scenarios; each returns a checksum ----
+
+// Immediates of every scalar kind, and the two cells (f64, u64 >= 2^63).
+fn mk_mx(i : u64) -> Mx {
+    if i == 0 { Mx::a{probe_opaque(41)} } else { if i == 1 { Mx::b{} } else { Mx::c{} } }
+}
+fn mk_col(i : u64) -> Col {
+    if i == 0 { Col::r{} } else { if i == 1 { Col::g{} } else { Col::bl{} } }
+}
+fn unbox_mx(a : LAny) -> Mx {
+    let w : u64 = l2r_any_raw(a);
+    if l2r_any_raw_is_imm(w) {
+        let i : u64 = l2r_any_raw_imm(w);
+        if i == 1 { Mx::b{} } else { if i == 2 { Mx::c{} } else { if i == 0 { Mx::a{0} } else { l2r_unreachable<Mx>() } } }
+    } else { l2r_any_raw_as<Mx>(w, 1025) }
+}
+fn mx_code(m : Mx) -> u64 {
+    match m {
+        Mx::a(x) => { x },
+        Mx::b => { 1000 },
+        Mx::c => { 2000 }
+    }
+}
+fn unbox_col(a : LAny) -> Col {
+    let w : u64 = l2r_any_raw(a);
+    if l2r_any_raw_is_imm(w) {
+        let i : u64 = l2r_any_raw_imm(w);
+        if i == 0 { Col::r{} } else { if i == 1 { Col::g{} } else { if i == 2 { Col::bl{} } else { l2r_unreachable<Col>() } } }
+    } else { l2r_any_raw_as<Col>(w, 1026) }
+}
+fn col_code(c : Col) -> u64 {
+    match c {
+        Col::r => { 1 },
+        Col::g => { 2 },
+        Col::bl => { 3 }
+    }
+}
+
+// Nullary variants at indices other than 0, in a mixed and an all-nullary
+// enum (immediates of their indices, under both nullary encodings).
+#[transform_anchor]
+fn s_variants() -> u64 {
+    let w0 : u64 = probe_word(l2r_any_of<Mx>(mk_mx(probe_opaque(0)), 1025)) >> 48;
+    let w1 : u64 = probe_word(l2r_any_of<Mx>(mk_mx(probe_opaque(1)), 1025));
+    let w2 : u64 = probe_word(l2r_any_of<Mx>(mk_mx(probe_opaque(2)), 1025));
+    let c0 : u64 = probe_word(l2r_any_of<Col>(mk_col(probe_opaque(0)), 1026));
+    let c1 : u64 = probe_word(l2r_any_of<Col>(mk_col(probe_opaque(1)), 1026));
+    let c2 : u64 = probe_word(l2r_any_of<Col>(mk_col(probe_opaque(2)), 1026));
+    let r0 : u64 = mx_code(unbox_mx(l2r_any_of<Mx>(mk_mx(probe_opaque(0)), 1025)));
+    let r1 : u64 = mx_code(unbox_mx(l2r_any_of<Mx>(mk_mx(probe_opaque(1)), 1025)));
+    let r2 : u64 = mx_code(unbox_mx(l2r_any_of<Mx>(mk_mx(probe_opaque(2)), 1025)));
+    let q0 : u64 = col_code(unbox_col(l2r_any_of<Col>(mk_col(probe_opaque(0)), 1026)));
+    let q2 : u64 = col_code(unbox_col(l2r_any_of<Col>(mk_col(probe_opaque(2)), 1026)));
+    let k0 : u64 = probe_say("Mx a: number (1025); b, c words (3, 5)", w0 * 10000 + w1 * 100 + w2);
+    let k1 : u64 = probe_say("Col r, g, bl words (1, 3, 5)", c0 * 10000 + c1 * 100 + c2);
+    let k2 : u64 = probe_say("round trips a, b, c (41, 1000, 2000); r, bl (1, 3)", r0 + r1 + r2 + q0 * 10 + q2);
+    w0 * 10000 + w1 * 100 + w2 + c0 * 10000 + c1 * 100 + c2 + r0 + r1 + r2 + q0 * 10 + q2
+}
+
+// A closure that captures a box, inside a boxed function value used twice.
+#[transform_anchor]
+fn s_closure() -> u64 {
+    let a : LAny = box_pt(Pt{3, 4});
+    let f : u64 -> u64 = |x : u64| { x + sum_pt(unbox_pt(a)) };
+    let g : LAny = box_fnv(FnV::raw{f});
+    let g2 : LAny = g;
+    let r1 : u64 = apply_fnv(unbox_fnv(g), 100);
+    let r2 : u64 = apply_fnv(unbox_fnv(g2), 200);
+    let c : u64 = probe_rc(a);
+    let k0 : u64 = probe_say("closure(100), closure(200), count of the captured box once the closure is gone (the probe's reference)", r1 * 1000000 + r2 * 1000 + c);
+    r1 + r2 + c
+}
+
+fn sum_pt(p : Pt) -> u64 { p.0 + p.1 }
+
+// A [value] record holding a box, in a boxed record, copied out twice.
+#[transform_anchor]
+fn s_value() -> u64 {
+    let a : LAny = box_pt(Pt{5, 6});
+    let hb : LAny = l2r_any_of<VHold>(VHold{VA{a, 7}}, 1027);
+    let hb2 : LAny = hb;
+    let h1 : VHold = l2r_any_as<VHold>(hb, 1027);
+    let va : VA = h1.0;
+    let c : u64 = probe_rc(va.0);
+    let h2 : VHold = l2r_any_as<VHold>(hb2, 1027);
+    let vb : VA = h2.0;
+    let p : Pt = unbox_pt(vb.0);
+    let k0 : u64 = probe_say("value record: count seen (the cell's value, the copied-out value record, the probe's copy), payload sum", c * 1000 + p.0 + p.1 + va.1);
+    c * 1000 + p.0 + p.1 + va.1
+}
+
+// Lean's box(0) read at every kind of type: its zero.
+#[transform_anchor]
+fn s_unit_zero() -> u64 {
+    let p : Pt = unbox_pt(l2r_any_unit());
+    let t : u64 = sum_tree(unbox_tree(l2r_any_unit()));
+    let f : u64 = apply_fnv(unbox_fnv(l2r_any_unit()), 5);
+    let m : u64 = mx_code(unbox_mx(l2r_any_unit()));
+    let s : u64 = lean_uint64_of_nat(lean_string_length(l2r_any_as<LStr>(l2r_any_unit(), 3)));
+    let v : u64 = l2r_array_size<LAny>(l2r_any_as<RVec<LAny>>(l2r_any_unit(), 6));
+    let by : u64 = l2r_array_size<u8>(l2r_any_as<RVec<u8>>(l2r_any_unit(), 7));
+    let fl : u64 = l2r_array_size<f64>(l2r_any_as<RVec<f64>>(l2r_any_unit(), 8));
+    let n : u64 = lean_uint64_of_nat(l2r_any_as<Nat>(l2r_any_unit(), 0));
+    let i : u64 = if lean_int_dec_eq(l2r_any_as<Int>(l2r_any_unit(), 0), l2r_int_small(0)) { 0 } else { 1 };
+    let u : u64 = l2r_any_as_u64(l2r_any_unit()) + l2r_any_as<u64>(l2r_any_unit(), 0);
+    let d : u64 = probe_f64_bits(l2r_any_as_f64(l2r_any_unit())) + probe_f64_bits(l2r_any_as<f64>(l2r_any_unit(), 0));
+    let e : u64 = probe_f32_bits(l2r_any_as_f32(l2r_any_unit()));
+    let b : u64 = if l2r_any_as_bool(l2r_any_unit()) { 1 } else { 0 };
+    let sm : u64 = (l2r_any_as_u8(l2r_any_unit()) as u64) + (l2r_any_as_u16(l2r_any_unit()) as u64) + (l2r_any_as_u32(l2r_any_unit()) as u64);
+    let k0 : u64 = probe_say("box(0) at record, tree, fn, Mx (a 0), String, arrays, Nat, Int, u64, f64, f32, bool, u8-32: sum of zeros", p.0 + p.1 + t + f + m + s + v + by + fl + n + i + u + d + e + b + sm);
+    p.0 + p.1 + t + f + m + s + v + by + fl + n + i + u + d + e + b + sm
+}
+
+// The generic textures at scalars and at leanrt's kinds, and the
+// record-address texture at a box.
+#[transform_anchor]
+fn s_generic() -> u64 {
+    let u : u64 = probe_word(l2r_any_of<u64>(probe_opaque(4096), 1016));
+    let ub : u64 = l2r_any_as<u64>(l2r_any_of<u64>(probe_u64_max(), 1016), 16);
+    let fb : u64 = probe_f64_bits(l2r_any_as<f64>(l2r_any_of<f64>(probe_f64_of_bits(4612248968380809216), 1016), 16));
+    let sn : u64 = probe_word(l2r_any_of<LStr>(lean_mk_string("k"), 1016)) >> 48;
+    let an : u64 = probe_word(l2r_any_of<RVec<LAny>>(l2r_array_empty<LAny>(), 30)) >> 48;
+    let au : u64 = l2r_ptr_addr_rec<LAny>(l2r_any_unit());
+    let x : LAny = box_pt(Pt{probe_opaque(1), 2});
+    let ap : u64 = if l2r_ptr_addr_rec<LAny>(x) == l2r_any_addr(x) { 1 } else { 0 };
+    let k0 : u64 = probe_say("u64 4096 word (8193), u64 max back, f64 bits back equal", u + (if ub == probe_u64_max() { 1 } else { 0 }) + (if fb == 4612248968380809216 { 1 } else { 0 }));
+    let k1 : u64 = probe_say("numbers of a string and an array boxed under 16 and 30 (3, 6)", sn * 10 + an);
+    let k2 : u64 = probe_say("record address of box(0) (1); of a pointer box equals l2r_any_addr", au * 10 + ap);
+    u + (if ub == probe_u64_max() { 1 } else { 0 }) + (if fb == 4612248968380809216 { 1 } else { 0 }) + sn * 10 + an + au * 10 + ap
+}
+
+// ---- order of observable releases: file handles opened for appending
+// write their text when they are closed, so a file's contents show the
+// order. Native Lean frees a box's payload with lean_dec / lean_del, last
+// field first (tests/runtime/any-probe/Order.lean, which gives BA, 321, BA).
+#[ffi(import)]
+fn probe_reset(path : str) -> u64 [{ { let _ = ::std::fs::write(&*path, b""); 0 } }];
+// 1 when the file holds `want`; prints it.
+#[ffi(import)]
+fn probe_file_is(label : str, path : str, want : str) -> u64 [{
+    {
+        let got = ::std::fs::read_to_string(&*path).unwrap_or_default();
+        println!("  order: {} = {} (native: {})", &*label, got, &*want);
+        if got == &*want { 1 } else { 0 }
+    }
+}];
+fn probe_handle(path : str, text : str) -> LHandle {
+    let h : LHandle = l2r_fs_open(lean_mk_string(path), 4);
+    let k : u64 = l2r_fs_put_str(h, lean_mk_string(text));
+    h
+}
+
+// A box of H2(A, B) dropped by the program.
+fn order_box() -> u64 {
+    let z : u64 = probe_reset("any-order-o1.txt");
+    let b : LAny = l2r_any_of<OH2>(OH2{probe_handle("any-order-o1.txt", "A"), probe_handle("any-order-o1.txt", "B")}, 1028);
+    let d : u64 = l2r_consume<LAny>(b);
+    probe_file_is("o1, a box of H2(A, B) dropped", "any-order-o1.txt", "BA")
+}
+
+// A chain of boxes C(1, box C(2, box C(3))) dropped by the program.
+fn order_chain() -> u64 {
+    let z : u64 = probe_reset("any-order-o4.txt");
+    let c3 : LAny = l2r_any_of<OC>(OC{probe_handle("any-order-o4.txt", "3"), l2r_any_unit()}, 1029);
+    let c2 : LAny = l2r_any_of<OC>(OC{probe_handle("any-order-o4.txt", "2"), c3}, 1029);
+    let c1 : LAny = l2r_any_of<OC>(OC{probe_handle("any-order-o4.txt", "1"), c2}, 1029);
+    let d : u64 = l2r_consume<LAny>(c1);
+    probe_file_is("o4, a chain box C(1, box C(2, box C(3))) dropped", "any-order-o4.txt", "321")
+}
+
+// IO.Ref.set over a box of H2(A, B).
+fn order_ref() -> u64 {
+    let z : u64 = probe_reset("any-order-o5.txt");
+    let c : Cell<LAny> = core::intrinsic::cell::alloc(l2r_any_of<OH2>(OH2{probe_handle("any-order-o5.txt", "A"), probe_handle("any-order-o5.txt", "B")}, 1028));
+    let s : u64 = l2r_rc_set_ref<LAny, LAny>(c, l2r_any_unit(), l2r_any_unit());
+    let k : u64 = probe_file_is("o5, IO.Ref.set over a box of H2(A, B)", "any-order-o5.txt", "BA");
+    let d : u64 = l2r_consume<Cell<LAny>>(c);
+    k
+}
+
+#[transform_anchor]
+fn s_order() -> u64 {
+    let a : u64 = order_box();
+    let b : u64 = order_chain();
+    let c : u64 = order_ref();
+    a + b + c
+}
+
+// box(0) through the generic unbox at a record type (run only under
+// ANY_PROBE_UNIT_AT_RECORD: a message naming the split rule, then Lean's
+// internal panic, exit 1).
+#[transform_anchor]
+fn s_unit_at_record() -> u64 {
+    let p : Pt = l2r_any_as<Pt>(l2r_any_unit(), 1016);
+    p.0
+}
+
+// Unboxing at the wrong number (run only under ANY_PROBE_MISMATCH: Lean's
+// internal panic, exit 1).
+#[transform_anchor]
+fn s_mismatch() -> u64 {
+    let p : Pt = l2r_any_as<Pt>(l2r_any_of<Mx>(mk_mx(probe_opaque(0)), 1025), 16);
+    p.0
+}
+
+// dbgTraceIfShared's check on boxes: a unique payload, a shared one, an
+// immediate.
+#[transform_anchor]
+fn s_shared_check() -> u64 {
+    let u : LAny = l2r_shared_check<LAny>(box_pt(Pt{1, 1}));
+    let us : u64 = if l2r_last_shared() { 1 } else { 0 };
+    let v : LAny = l2r_shared_check<LAny>(u);
+    let vs : u64 = if l2r_last_shared() { 1 } else { 0 };
+    let im : LAny = l2r_shared_check<LAny>(l2r_any_imm(3));
+    let is : u64 = if l2r_last_shared() { 1 } else { 0 };
+    let w : u64 = probe_word(u) - probe_word(v) + probe_word(im);
+    let k0 : u64 = probe_say("shared: unique box, shared box, immediate", us * 100 + vs * 10 + is);
+    us * 100 + vs * 10 + is + w
+}
+
+#[transform_anchor]
+fn s_imm() -> u64 {
+    let b : u64 = if l2r_any_as_bool(l2r_any_of_bool(true)) { 1 } else { 0 };
+    let b2 : u64 = if l2r_any_as_bool(l2r_any_of_bool(false)) { 100 } else { 0 };
+    let c : u64 = l2r_any_as_u8(l2r_any_of_u8(200)) as u64;
+    let d : u64 = l2r_any_as_u16(l2r_any_of_u16(60000)) as u64;
+    let e : u64 = l2r_any_as_u32(l2r_any_of_u32(4000000000)) as u64;
+    let ch : u64 = l2r_any_as_u32(l2r_any_of_u32(128512)) as u64;
+    let f : u64 = probe_f32_bits(l2r_any_as_f32(l2r_any_of_f32(probe_f32_of_bits(1069547520))));
+    let u : u64 = l2r_any_as_imm(l2r_any_unit());
+    let uw : u64 = probe_word(l2r_any_unit());
+    let n : Nat = l2r_any_as<Nat>(l2r_any_of<Nat>(l2r_nat_small(12345), 0), 0);
+    let nw : u64 = probe_word(l2r_any_of<Nat>(l2r_nat_small(12345), 0));
+    let i : Int = l2r_any_as<Int>(l2r_any_of<Int>(l2r_int_small(0 - 7), 0), 0);
+    let ieq : u64 = if lean_int_dec_eq(i, l2r_int_small(0 - 7)) { 1 } else { 0 };
+    let g : u64 = l2r_any_as_u64(l2r_any_of_u64(123));
+    let big : u64 = probe_u64_max();
+    let h : u64 = l2r_any_as_u64(l2r_any_of_u64(big));
+    let hw : u64 = probe_word(l2r_any_of_u64(big)) & 1;
+    let x : u64 = probe_f64_bits(l2r_any_as_f64(l2r_any_of_f64(probe_f64_of_bits(4612248968380809216))));
+    let k0 : u64 = probe_say("bool true/false", b + b2);
+    let k1 : u64 = probe_say("u8", c);
+    let k2 : u64 = probe_say("u16", d);
+    let k3 : u64 = probe_say("u32", e);
+    let k4 : u64 = probe_say("char", ch);
+    let k5 : u64 = probe_say("f32 bits", f);
+    let k6 : u64 = probe_say("unit value / word", u * 1000 + uw);
+    let k7 : u64 = probe_say("small Nat / word", lean_uint64_of_nat(n) * 100000 + nw);
+    let k8 : u64 = probe_say("small Int -7 equal", ieq);
+    let k9 : u64 = probe_say("u64 123", g);
+    let k10 : u64 = probe_say("u64 max equal / low bit of its box (0 = cell)", (if h == big { 10 } else { 0 }) + hw);
+    let k11 : u64 = probe_say("f64 2.25 bits", x);
+    b + b2 + c + d + e + ch + f + u + uw + lean_uint64_of_nat(n) + nw + ieq + g + (if h == big { 1 } else { 0 }) + hw + x
+}
+
+fn share_many(a : LAny, n : u64, acc : RVec<LAny>) -> RVec<LAny> {
+    if n == 0 { acc } else { share_many(a, n - 1, l2r_array_push<LAny>(acc, a)) }
+}
+
+fn sum_pts(v : RVec<LAny>, i : u64, n : u64, acc : u64) -> u64 {
+    if i == n { acc } else {
+        let p : Pt = unbox_pt(l2r_array_get<LAny>(v, i));
+        sum_pts(v, i + 1, n, acc + p.0 + p.1)
+    }
+}
+
+// Sharing: one record boxed once, the box copied 1000 times.
+#[transform_anchor]
+fn s_share() -> u64 {
+    let a : LAny = box_pt(Pt{3, 4});
+    let rc1 : u64 = probe_rc(a);
+    let v : RVec<LAny> = share_many(a, 1000, l2r_array_empty<LAny>());
+    let rc2 : u64 = probe_rc(l2r_array_get<LAny>(v, 7));
+    let s : u64 = sum_pts(v, 0, 1000, 0);
+    let k0 : u64 = probe_say("count with one box + the probe's copy", rc1);
+    let k1 : u64 = probe_say("count with 1000 boxes in an array + the probe's copy", rc2);
+    s + rc1 + rc2
+}
+
+fn bump(p : Pt) -> Pt { Pt{p.0 + 1, p.1} }
+
+// Uniqueness: a box whose payload count is 1 unboxes to a unique record,
+// updated in place (same address, no allocation); an array likewise.
+#[transform_anchor]
+fn s_unique() -> u64 {
+    let a : LAny = box_pt(Pt{10, 20});
+    let addr0 : u64 = l2r_any_addr(a);
+    let p : Pt = unbox_pt(a);
+    let al0 : u64 = probe_allocs();
+    let q : Pt = bump(p);
+    let al1 : u64 = probe_allocs();
+    let addr1 : u64 = l2r_ptr_addr_rec<Pt>(q);
+    let b : LAny = box_pt(q);
+    let r : Pt = unbox_pt(b);
+    let k1 : u64 = probe_say("same address after the update", if addr0 == addr1 { 1 } else { 0 });
+    let k2 : u64 = probe_say("allocations made by the update", al1 - al0);
+    let v : RVec<LAny> = l2r_array_push<LAny>(l2r_array_push<LAny>(l2r_array_empty<LAny>(), l2r_any_imm(1)), l2r_any_imm(2));
+    let va : LAny = l2r_any_of<RVec<LAny>>(v, 6);
+    let vaddr0 : u64 = l2r_any_addr(va);
+    let v2 : RVec<LAny> = l2r_any_as<RVec<LAny>>(va, 6);
+    let al2 : u64 = probe_allocs();
+    let v3 : RVec<LAny> = l2r_array_set<LAny>(v2, 0, l2r_any_imm(7));
+    let al3 : u64 = probe_allocs();
+    let vaddr1 : u64 = l2r_ptr_addr_obj<RVec<LAny>>(v3);
+    let x : u64 = l2r_any_as_imm(l2r_array_get<LAny>(v3, 0));
+    let k3 : u64 = probe_say("array updated in place (same address, no allocation)", if vaddr0 == vaddr1 { if al3 == al2 { 1 } else { 0 } } else { 0 });
+    r.0 + r.1 + (if addr0 == addr1 { 1 } else { 0 }) + (al1 - al0) + x + (if vaddr0 == vaddr1 { 1 } else { 0 })
+}
+
+fn mk_tree(d : u64) -> Tree {
+    if d == 0 { Tree::leaf{} } else { Tree::node{box_tree(mk_tree(d - 1)), d, box_tree(mk_tree(d - 1))} }
+}
+
+fn sum_tree(t : Tree) -> u64 {
+    match t {
+        Tree::leaf => { 0 },
+        Tree::node(l, v, r) => { sum_tree(unbox_tree(l)) + v + sum_tree(unbox_tree(r)) }
+    }
+}
+
+// Enums: a nullary variant boxes as an immediate; nodes hold boxes.
+#[transform_anchor]
+fn s_enum() -> u64 {
+    let lw : u64 = probe_word(box_tree(Tree::leaf{}));
+    let t : LAny = box_tree(mk_tree(10));
+    let t2 : LAny = t;
+    let s : u64 = sum_tree(unbox_tree(t));
+    let s2 : u64 = sum_tree(unbox_tree(t2));
+    let k0 : u64 = probe_say("word of a boxed leaf", lw);
+    let k1 : u64 = probe_say("sum of a depth-10 tree of boxes (twice)", s + s2);
+    lw + s + s2
+}
+
+fn apply_fnv(f : FnV, x : u64) -> u64 {
+    match f {
+        FnV::z => { 0 },
+        FnV::raw(c) => { c(x) },
+        FnV::p1_add(k) => { x + k }
+    }
+}
+
+// Function values: a closure inside the enum, a partial application, z.
+#[transform_anchor]
+fn s_fn() -> u64 {
+    let k : u64 = 1000;
+    let f : LAny = box_fnv(FnV::raw{|x : u64| { x * 2 + k }});
+    let g : LAny = box_fnv(FnV::p1_add{5});
+    let zw : u64 = probe_word(box_fnv(FnV::z{}));
+    let a1 : u64 = apply_fnv(unbox_fnv(f), 21);
+    let a2 : u64 = apply_fnv(unbox_fnv(f), 1);
+    let a3 : u64 = apply_fnv(unbox_fnv(g), 10);
+    let a4 : u64 = apply_fnv(unbox_fnv(l2r_any_unit()), 10);
+    let k0 : u64 = probe_say("closure(21), closure(1), add5(10), z(10), word of z", a1 * 1000000 + a2 * 1000 + a3 + a4 + zw);
+    a1 + a2 + a3 + a4 + zw
+}
+
+// Strings, big Nat and Int, a multi-word value in a cell.
+#[transform_anchor]
+fn s_objects() -> u64 {
+    let s : LAny = l2r_any_of<LStr>(lean_mk_string("hello, box"), 3);
+    let s2 : LAny = s;
+    let len : u64 = lean_uint64_of_nat(lean_string_length(l2r_any_as<LStr>(s, 3)));
+    let len2 : u64 = lean_uint64_of_nat(lean_string_length(l2r_any_as<LStr>(s2, 3)));
+    let n : Nat = lean_nat_pow(l2r_nat_small(2), l2r_nat_small(100));
+    let na : LAny = l2r_any_of<Nat>(n, 0);
+    let nnum : u64 = probe_word(na) >> 48;
+    let na2 : LAny = na;
+    let n2 : Nat = l2r_any_as<Nat>(na, 0);
+    let neq : u64 = if lean_nat_dec_eq(n2, lean_nat_pow(l2r_nat_small(2), l2r_nat_small(100))) { 1 } else { 0 };
+    let n3 : Nat = l2r_any_as<Nat>(na2, 0);
+    let i : Int = lean_int_neg(lean_nat_to_int(n3));
+    let ia : LAny = l2r_any_of<Int>(i, 0);
+    let inum : u64 = probe_word(ia) >> 48;
+    let i2 : Int = l2r_any_as<Int>(ia, 0);
+    let ieq : u64 = if lean_int_dec_eq(i2, lean_int_neg(lean_nat_to_int(lean_nat_pow(l2r_nat_small(2), l2r_nat_small(100))))) { 1 } else { 0 };
+    let vc : LAny = l2r_any_of<VCell>(VCell{VPair{7, probe_f64_of_bits(4612811918334230528)}}, 1021);
+    let vc2 : VCell = l2r_any_as<VCell>(vc, 1021);
+    let vp : VPair = vc2.0;
+    let vx : u64 = vp.0 + probe_f64_bits(vp.1);
+    let k0 : u64 = probe_say("string length twice", len + len2);
+    let k1 : u64 = probe_say("big Nat: number, equal", nnum * 10 + neq);
+    let k2 : u64 = probe_say("big Int: number, equal", inum * 10 + ieq);
+    let k3 : u64 = probe_say("value pair in a cell", vx);
+    len + len2 + nnum + neq + inum + ieq + vx
+}
+
+fn fill(v : RVec<LAny>, i : u64, n : u64) -> RVec<LAny> {
+    if i == n { v } else { fill(l2r_array_push<LAny>(v, box_pt(Pt{i, i})), i + 1, n) }
+}
+
+// An array of boxes in a box: a copy-on-write update of a shared array
+// increments every element; each element is released exactly once.
+#[transform_anchor]
+fn s_array() -> u64 {
+    let v : RVec<LAny> = fill(l2r_array_empty<LAny>(), 0, 100);
+    let a1 : LAny = l2r_any_of<RVec<LAny>>(v, 6);
+    let a2 : LAny = a1;
+    let w1 : RVec<LAny> = l2r_any_as<RVec<LAny>>(a1, 6);
+    let rc0 : u64 = probe_rc(l2r_array_get<LAny>(w1, 5));
+    let w2 : RVec<LAny> = l2r_array_set<LAny>(l2r_any_as<RVec<LAny>>(a2, 6), 0, l2r_any_imm(99));
+    let rc1 : u64 = probe_rc(l2r_array_get<LAny>(w1, 5));
+    let rc0e : u64 = probe_rc(l2r_array_get<LAny>(w1, 0));
+    let x : u64 = l2r_any_as_imm(l2r_array_get<LAny>(w2, 0));
+    let s2 : u64 = sum_pts(w2, 1, 100, 0);
+    let rc2 : u64 = probe_rc(l2r_array_get<LAny>(w1, 5));
+    let s1 : u64 = sum_pts(w1, 0, 100, 0);
+    let k0 : u64 = probe_say("element count before / after the copy / element 0 after (each + the probe's copy)", rc0 * 100 + rc1 * 10 + rc0e);
+    let k1 : u64 = probe_say("element count once the copy is dropped (the first array's slot + the probe's copy)", rc2);
+    rc0 + rc1 + rc0e + rc2 + s1 + s2 + x
+}
+
+// A reference record holding Cell<LAny>, and an LCell<LAny>, each boxed.
+#[transform_anchor]
+fn s_cells() -> u64 {
+    let r : LAny = l2r_any_of<AnyRef>(AnyRef{core::intrinsic::cell::alloc(box_pt(Pt{1, 2}))}, 1020);
+    let r2 : LAny = r;
+    let rr : AnyRef = l2r_any_as<AnyRef>(r, 1020);
+    let p : Pt = unbox_pt(l2r_rc_get<LAny>(rr.0));
+    let s0 : u64 = l2r_rc_set_ref<LAny, AnyRef>(rr.0, box_pt(Pt{30, 40}), rr);
+    let rr2 : AnyRef = l2r_any_as<AnyRef>(r2, 1020);
+    let p2 : Pt = unbox_pt(l2r_rc_get<LAny>(rr2.0));
+    let c : LAny = l2r_any_of<LCell<LAny>>(l2r_lcell_new<LAny>(box_pt(Pt{5, 6})), 1022);
+    let cc : LCell<LAny> = l2r_any_as<LCell<LAny>>(c, 1022);
+    let p3 : Pt = unbox_pt(l2r_lcell_get<LAny>(cc));
+    let k0 : u64 = probe_say("ref get, after set (seen through another box), lcell get", (p.0 + p.1) * 10000 + (p2.0 + p2.1) * 100 + p3.0 + p3.1);
+    p.0 + p.1 + p2.0 + p2.1 + p3.0 + p3.1
+}
+
+fn mk_chain(i : u64, n : u64, acc : LAny) -> LAny {
+    if i == n { acc } else { mk_chain(i + 1, n, l2r_any_of<Chain>(Chain{i, acc}, 1019)) }
+}
+
+fn mk_tree_chain(i : u64, n : u64, acc : Tree) -> Tree {
+    if i == n { acc } else { mk_tree_chain(i + 1, n, Tree::node{box_tree(acc), i, box_tree(Tree::leaf{})}) }
+}
+
+fn mk_arr_chain(i : u64, n : u64, acc : LAny) -> LAny {
+    if i == n { acc } else { mk_arr_chain(i + 1, n, l2r_any_of<RVec<LAny>>(l2r_array_push<LAny>(l2r_array_empty<LAny>(), acc), 6)) }
+}
+
+fn mk_alist(i : u64, n : u64, acc : AList) -> AList {
+    if i == n { acc } else { mk_alist(i + 1, n, AList::cons{box_pt(Pt{i, 1}), acc}) }
+}
+
+fn alist_len(l : AList, acc : u64) -> u64 {
+    match l {
+        AList::nil => { acc },
+        AList::cons(h, t) => { alist_len(t, acc + 1) }
+    }
+}
+
+// Deep structures freed at once (no deep recursion: the program runs on an
+// 8 MiB or smaller stack).
+#[transform_anchor]
+fn s_deep_chain() -> u64 {
+    let c : LAny = mk_chain(0, 1000000, l2r_any_unit());
+    let top : Chain = l2r_any_as<Chain>(c, 1019);
+    let id : u64 = top.0;
+    let rest : LAny = top.1;
+    let d : u64 = l2r_consume<LAny>(rest);
+    id
+}
+
+#[transform_anchor]
+fn s_deep_tree() -> u64 {
+    let t : Tree = mk_tree_chain(0, 1000000, Tree::leaf{});
+    let b : LAny = box_tree(t);
+    let d : u64 = l2r_consume<LAny>(b);
+    1
+}
+
+#[transform_anchor]
+fn s_deep_array() -> u64 {
+    let a : LAny = mk_arr_chain(0, 100000, l2r_any_unit());
+    let d : u64 = l2r_consume<LAny>(a);
+    2
+}
+
+// Boxes inside records released by Reussir's drop glue: a holder, and a
+// Reussir list of 10^6 cells each holding a box (the list itself boxed).
+#[transform_anchor]
+fn s_glue() -> u64 {
+    let h : Holder = Holder{box_tree(mk_tree(8)), l2r_any_of<LStr>(lean_mk_string("held"), 3), 3};
+    let hb : LAny = l2r_any_of<Holder>(h, 1023);
+    let h2 : Holder = l2r_any_as<Holder>(hb, 1023);
+    let s : u64 = sum_tree(unbox_tree(h2.0)) + h2.2;
+    let l : AList = mk_alist(0, 1000000, AList::nil{});
+    let lb : LAny = box_alist(l);
+    let n : u64 = alist_len(unbox_alist(lb), 0);
+    let l2 : AList = mk_alist(0, 1000000, AList::nil{});
+    let d : u64 = l2r_consume<AList>(l2);
+    let k0 : u64 = probe_say("holder tree sum, list length", s * 10000000 + n);
+    s + n
+}
+
+// Each scenario runs twice: the first run may leave the runtime's caches
+// allocated (stdout's buffer at the first print, the drop worklist's vector
+// at the first free through it: NOTE lines); the second must give its
+// result and free every block it allocates, exactly once. The scenarios
+// are kept out of the inliner (`transform_anchor`): Reussir's reuse across
+// calls would otherwise carry a freed cell of one scenario into the next.
+fn anyprobe_main() -> u64 {
+    let pi : u64 = probe_install();
+    let mm : u64 = if probe_env("ANY_PROBE_MISMATCH") { s_mismatch() } else { 0 };
+    let mu : u64 = if probe_env("ANY_PROBE_UNIT_AT_RECORD") { s_unit_at_record() } else { 0 };
+    let l0_1 : u64 = probe_live(); let b0_1 : u64 = probe_bad(); let a0_1 : u64 = probe_allocs();
+    let r0_1 : u64 = s_imm();
+    let c0_1 : u64 = probe_report("immediates and scalar cells (run 1)", l0_1, b0_1, a0_1, r0_1, 4612248973450582611, false);
+    let l0_2 : u64 = probe_live(); let b0_2 : u64 = probe_bad(); let a0_2 : u64 = probe_allocs();
+    let r0_2 : u64 = s_imm();
+    let c0_2 : u64 = probe_report("immediates and scalar cells (run 2)", l0_2, b0_2, a0_2, r0_2, 4612248973450582611, true);
+    let l1_1 : u64 = probe_live(); let b1_1 : u64 = probe_bad(); let a1_1 : u64 = probe_allocs();
+    let r1_1 : u64 = s_share();
+    let c1_1 : u64 = probe_report("sharing (run 1)", l1_1, b1_1, a1_1, r1_1, 8003, false);
+    let l1_2 : u64 = probe_live(); let b1_2 : u64 = probe_bad(); let a1_2 : u64 = probe_allocs();
+    let r1_2 : u64 = s_share();
+    let c1_2 : u64 = probe_report("sharing (run 2)", l1_2, b1_2, a1_2, r1_2, 8003, true);
+    let l2_1 : u64 = probe_live(); let b2_1 : u64 = probe_bad(); let a2_1 : u64 = probe_allocs();
+    let r2_1 : u64 = s_unique();
+    let c2_1 : u64 = probe_report("uniqueness (run 1)", l2_1, b2_1, a2_1, r2_1, 40, false);
+    let l2_2 : u64 = probe_live(); let b2_2 : u64 = probe_bad(); let a2_2 : u64 = probe_allocs();
+    let r2_2 : u64 = s_unique();
+    let c2_2 : u64 = probe_report("uniqueness (run 2)", l2_2, b2_2, a2_2, r2_2, 40, true);
+    let l3_1 : u64 = probe_live(); let b3_1 : u64 = probe_bad(); let a3_1 : u64 = probe_allocs();
+    let r3_1 : u64 = s_enum();
+    let c3_1 : u64 = probe_report("enums with a nullary variant (run 1)", l3_1, b3_1, a3_1, r3_1, 4073, false);
+    let l3_2 : u64 = probe_live(); let b3_2 : u64 = probe_bad(); let a3_2 : u64 = probe_allocs();
+    let r3_2 : u64 = s_enum();
+    let c3_2 : u64 = probe_report("enums with a nullary variant (run 2)", l3_2, b3_2, a3_2, r3_2, 4073, true);
+    let l4_1 : u64 = probe_live(); let b4_1 : u64 = probe_bad(); let a4_1 : u64 = probe_allocs();
+    let r4_1 : u64 = s_fn();
+    let c4_1 : u64 = probe_report("function values (run 1)", l4_1, b4_1, a4_1, r4_1, 2060, false);
+    let l4_2 : u64 = probe_live(); let b4_2 : u64 = probe_bad(); let a4_2 : u64 = probe_allocs();
+    let r4_2 : u64 = s_fn();
+    let c4_2 : u64 = probe_report("function values (run 2)", l4_2, b4_2, a4_2, r4_2, 2060, true);
+    let l5_1 : u64 = probe_live(); let b5_1 : u64 = probe_bad(); let a5_1 : u64 = probe_allocs();
+    let r5_1 : u64 = s_objects();
+    let c5_1 : u64 = probe_report("strings, big numbers, value cell (run 1)", l5_1, b5_1, a5_1, r5_1, 4612811918334230560, false);
+    let l5_2 : u64 = probe_live(); let b5_2 : u64 = probe_bad(); let a5_2 : u64 = probe_allocs();
+    let r5_2 : u64 = s_objects();
+    let c5_2 : u64 = probe_report("strings, big numbers, value cell (run 2)", l5_2, b5_2, a5_2, r5_2, 4612811918334230560, true);
+    let l6_1 : u64 = probe_live(); let b6_1 : u64 = probe_bad(); let a6_1 : u64 = probe_allocs();
+    let r6_1 : u64 = s_array();
+    let c6_1 : u64 = probe_report("array of boxes, copy on write (run 1)", l6_1, b6_1, a6_1, r6_1, 19908, false);
+    let l6_2 : u64 = probe_live(); let b6_2 : u64 = probe_bad(); let a6_2 : u64 = probe_allocs();
+    let r6_2 : u64 = s_array();
+    let c6_2 : u64 = probe_report("array of boxes, copy on write (run 2)", l6_2, b6_2, a6_2, r6_2, 19908, true);
+    let l7_1 : u64 = probe_live(); let b7_1 : u64 = probe_bad(); let a7_1 : u64 = probe_allocs();
+    let r7_1 : u64 = s_cells();
+    let c7_1 : u64 = probe_report("reference record and LCell (run 1)", l7_1, b7_1, a7_1, r7_1, 84, false);
+    let l7_2 : u64 = probe_live(); let b7_2 : u64 = probe_bad(); let a7_2 : u64 = probe_allocs();
+    let r7_2 : u64 = s_cells();
+    let c7_2 : u64 = probe_report("reference record and LCell (run 2)", l7_2, b7_2, a7_2, r7_2, 84, true);
+    let l8_1 : u64 = probe_live(); let b8_1 : u64 = probe_bad(); let a8_1 : u64 = probe_allocs();
+    let r8_1 : u64 = s_deep_chain();
+    let c8_1 : u64 = probe_report("chain of 10^6 nested boxes (run 1)", l8_1, b8_1, a8_1, r8_1, 999999, false);
+    let l8_2 : u64 = probe_live(); let b8_2 : u64 = probe_bad(); let a8_2 : u64 = probe_allocs();
+    let r8_2 : u64 = s_deep_chain();
+    let c8_2 : u64 = probe_report("chain of 10^6 nested boxes (run 2)", l8_2, b8_2, a8_2, r8_2, 999999, true);
+    let l9_1 : u64 = probe_live(); let b9_1 : u64 = probe_bad(); let a9_1 : u64 = probe_allocs();
+    let r9_1 : u64 = s_deep_tree();
+    let c9_1 : u64 = probe_report("enum chain of 10^6 boxes (run 1)", l9_1, b9_1, a9_1, r9_1, 1, false);
+    let l9_2 : u64 = probe_live(); let b9_2 : u64 = probe_bad(); let a9_2 : u64 = probe_allocs();
+    let r9_2 : u64 = s_deep_tree();
+    let c9_2 : u64 = probe_report("enum chain of 10^6 boxes (run 2)", l9_2, b9_2, a9_2, r9_2, 1, true);
+    let l10_1 : u64 = probe_live(); let b10_1 : u64 = probe_bad(); let a10_1 : u64 = probe_allocs();
+    let r10_1 : u64 = s_deep_array();
+    let c10_1 : u64 = probe_report("array chain of 10^5 boxes (run 1)", l10_1, b10_1, a10_1, r10_1, 2, false);
+    let l10_2 : u64 = probe_live(); let b10_2 : u64 = probe_bad(); let a10_2 : u64 = probe_allocs();
+    let r10_2 : u64 = s_deep_array();
+    let c10_2 : u64 = probe_report("array chain of 10^5 boxes (run 2)", l10_2, b10_2, a10_2, r10_2, 2, true);
+    let l11_1 : u64 = probe_live(); let b11_1 : u64 = probe_bad(); let a11_1 : u64 = probe_allocs();
+    let r11_1 : u64 = s_glue();
+    let c11_1 : u64 = probe_report("boxes in records freed by drop glue (run 1)", l11_1, b11_1, a11_1, r11_1, 1000505, false);
+    let l11_2 : u64 = probe_live(); let b11_2 : u64 = probe_bad(); let a11_2 : u64 = probe_allocs();
+    let r11_2 : u64 = s_glue();
+    let c11_2 : u64 = probe_report("boxes in records freed by drop glue (run 2)", l11_2, b11_2, a11_2, r11_2, 1000505, true);
+    let l12_1 : u64 = probe_live(); let b12_1 : u64 = probe_bad(); let a12_1 : u64 = probe_allocs();
+    let r12_1 : u64 = s_shared_check();
+    let c12_1 : u64 = probe_report("shared check on boxes (run 1)", l12_1, b12_1, a12_1, r12_1, 17, false);
+    let l12_2 : u64 = probe_live(); let b12_2 : u64 = probe_bad(); let a12_2 : u64 = probe_allocs();
+    let r12_2 : u64 = s_shared_check();
+    let c12_2 : u64 = probe_report("shared check on boxes (run 2)", l12_2, b12_2, a12_2, r12_2, 17, true);
+    let l13_1 : u64 = probe_live(); let b13_1 : u64 = probe_bad(); let a13_1 : u64 = probe_allocs();
+    let r13_1 : u64 = s_variants();
+    let c13_1 : u64 = probe_report("nullary variants at other indices (run 1)", l13_1, b13_1, a13_1, r13_1, 10263664, false);
+    let l13_2 : u64 = probe_live(); let b13_2 : u64 = probe_bad(); let a13_2 : u64 = probe_allocs();
+    let r13_2 : u64 = s_variants();
+    let c13_2 : u64 = probe_report("nullary variants at other indices (run 2)", l13_2, b13_2, a13_2, r13_2, 10263664, true);
+    let l14_1 : u64 = probe_live(); let b14_1 : u64 = probe_bad(); let a14_1 : u64 = probe_allocs();
+    let r14_1 : u64 = s_closure();
+    let c14_1 : u64 = probe_report("closure capturing a box (run 1)", l14_1, b14_1, a14_1, r14_1, 315, false);
+    let l14_2 : u64 = probe_live(); let b14_2 : u64 = probe_bad(); let a14_2 : u64 = probe_allocs();
+    let r14_2 : u64 = s_closure();
+    let c14_2 : u64 = probe_report("closure capturing a box (run 2)", l14_2, b14_2, a14_2, r14_2, 315, true);
+    let l15_1 : u64 = probe_live(); let b15_1 : u64 = probe_bad(); let a15_1 : u64 = probe_allocs();
+    let r15_1 : u64 = s_value();
+    let c15_1 : u64 = probe_report("value record holding a box (run 1)", l15_1, b15_1, a15_1, r15_1, 3018, false);
+    let l15_2 : u64 = probe_live(); let b15_2 : u64 = probe_bad(); let a15_2 : u64 = probe_allocs();
+    let r15_2 : u64 = s_value();
+    let c15_2 : u64 = probe_report("value record holding a box (run 2)", l15_2, b15_2, a15_2, r15_2, 3018, true);
+    let l16_1 : u64 = probe_live(); let b16_1 : u64 = probe_bad(); let a16_1 : u64 = probe_allocs();
+    let r16_1 : u64 = s_unit_zero();
+    let c16_1 : u64 = probe_report("box(0) at every type (run 1)", l16_1, b16_1, a16_1, r16_1, 0, false);
+    let l16_2 : u64 = probe_live(); let b16_2 : u64 = probe_bad(); let a16_2 : u64 = probe_allocs();
+    let r16_2 : u64 = s_unit_zero();
+    let c16_2 : u64 = probe_report("box(0) at every type (run 2)", l16_2, b16_2, a16_2, r16_2, 0, true);
+    let l17_1 : u64 = probe_live(); let b17_1 : u64 = probe_bad(); let a17_1 : u64 = probe_allocs();
+    let r17_1 : u64 = s_generic();
+    let c17_1 : u64 = probe_report("generic textures at scalars and leanrt kinds, record address of a box (run 1)", l17_1, b17_1, a17_1, r17_1, 8242, false);
+    let l17_2 : u64 = probe_live(); let b17_2 : u64 = probe_bad(); let a17_2 : u64 = probe_allocs();
+    let r17_2 : u64 = s_generic();
+    let c17_2 : u64 = probe_report("generic textures at scalars and leanrt kinds, record address of a box (run 2)", l17_2, b17_2, a17_2, r17_2, 8242, true);
+    let l18_1 : u64 = probe_live(); let b18_1 : u64 = probe_bad(); let a18_1 : u64 = probe_allocs();
+    let r18_1 : u64 = s_order();
+    let c18_1 : u64 = probe_report("order of observable releases, as native (run 1)", l18_1, b18_1, a18_1, r18_1, 3, false);
+    let l18_2 : u64 = probe_live(); let b18_2 : u64 = probe_bad(); let a18_2 : u64 = probe_allocs();
+    let r18_2 : u64 = s_order();
+    let c18_2 : u64 = probe_report("order of observable releases, as native (run 2)", l18_2, b18_2, a18_2, r18_2, 3, true);
+    c0_2 + c1_2 + c2_2 + c3_2 + c4_2 + c5_2 + c6_2 + c7_2 + c8_2 + c9_2 + c10_2 + c11_2 + c12_2 + c13_2 + c14_2 + c15_2 + c16_2 + c17_2 + c18_2
+}

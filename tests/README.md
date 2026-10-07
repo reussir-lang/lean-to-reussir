@@ -88,7 +88,9 @@ python3 tests/oracle.py bench --cmd 'out/{exe} {size}' [--cases A B] [--size ben
 
 The native builds (`oracle.py build`, `tests/runtime/run.sh`,
 `tests/env/run.sh`, `tests/runtime/nat-alloc-check.sh`,
-`tests/runtime/conv-count-check.sh`, `tests/reussir-benchmark/run.sh`, `reussir-bugs/repros/run.sh`) and
+`tests/runtime/conv-count-check.sh`, `tests/runtime/alloc-check.sh`,
+`tests/runtime/paynothing-check.sh`, `tests/runtime/determinism-check.sh`,
+`tests/reussir-benchmark/run.sh`, `reussir-bugs/repros/run.sh`) and
 `scripts/l2r.py`'s GMP use the Lean toolchain lean2rr is pinned to
 (`lean2rr/lean-toolchain`, the elan toolchain
 `~/.elan/toolchains/leanprover--lean4---v4.34.0`), not elan's default:
@@ -201,6 +203,20 @@ up in review.
 `tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests, with
 debug assertions on (so leanrt's invariant checks run, such as no big
 `Int` in the small range).
+`tests/runtime/any-probe.sh` probes the one-word box `LAny` (every `Box`)
+with a hand-written Reussir program (`tests/runtime/any-probe/`)
+appended to a translated host program and linked with an allocation
+tracker: 19 scenarios (records, enums with nullary variants, function
+values and closures capturing boxes, strings, big numbers, cells, value
+records holding boxes, arrays of boxes, references, chains of 10^6 boxes
+on a 1 MiB stack, boxes in records, `box(0)` at every kind of type, the
+generic textures at scalars, the order of observable releases checked
+against native Lean's, `tests/runtime/any-probe/Order.lean`), each run
+twice, under both of Reussir's
+nullary-variant encodings; the second run must give its result and free
+every block it allocates exactly once. A third run unboxes at the wrong
+number and must end with Lean's internal panic. It needs a Reussir with
+patch 38-a (`L2R_REUSSIR`).
 `tests/runtime/allow-missing-check.sh` builds `tests/runtime/AllowMissing.lean`
 (refused externs of the program used directly, partially applied, as a
 closure, through an instance and through the `ptrAddrUnsafe` shortcut) with
@@ -254,6 +270,247 @@ docs/lean-bugs.md expects the Lean definition's result, which lean2rr must
 give (native's outcome, in the row's `native`, is not compared); a row
 naming a difference of lean2rr's own (none so far) is listed, not
 failed.
+
+### Representation changes: allocations, determinism, pay nothing
+
+Values whose type is not known at compile time use the uniform layout
+(`Box` fields; before the one-word `LAny`, the enum `L2RBox`), and a value
+that went from one layout to the other was converted (plan §2.6, §10 "Structural conversions";
+`docs/implementation/conversions/`). The blowup audit (`BA-00`..`BA-19`)
+and the design reviews of a layout redesign (`DRC-…` correctness,
+`DRP-…` performance) found where that costs more than native Lean, and
+asked for these checks before the redesign. They cover costs as well as
+results, so each runs at two sizes.
+
+- `tests/runtime/alloccount/`: an allocation counter, `alloccount.c`, linked
+  into both builds with `-Wl,--wrap` on mimalloc's allocation entry points
+  (both runtimes link mimalloc statically: native Lean's libleanrt, and
+  Reussir's runtime crate under lean2rr). At exit it prints `alloccount:
+  allocs A reallocs R bytes B` to stderr. `alloccount.sh` compiles it with
+  `leanc` and gives the link flags of both builds (`leanc … $AC_LEANC`;
+  `L2R_RRC_FLAGS=$AC_RRC` for `scripts/l2r.py`, which hands each
+  `--link-arg` to rrc's link). It needs an ELF linker with `--wrap` (GNU
+  ld, gold, lld); a run that prints no count fails the check.
+- `tests/runtime/alloc-check.sh [NAME...]` builds each runtime test that has
+  a `NAME.alloc` file natively and through lean2rr with the counter, runs
+  both at the two sizes of each line of `NAME.alloc` (`SMALL ARGS | LARGE
+  ARGS | FACTOR OFFSET [| rss FACTOR OFFSET_KB]`), and checks that the
+  outputs equal native's, and that lean2rr's allocations, and the bytes it
+  allocates, grow from the small run to the large one at most FACTOR times
+  as much as native's, plus OFFSET (64 × OFFSET bytes): `L_large − L_small
+  ≤ FACTOR × (N_large − N_small) + OFFSET`. The startup of each build
+  cancels out; linear where native is linear passes, quadratic or
+  exponential where native is linear fails at sizes a few times apart. The
+  bytes catch the copies of a whole array (one allocation of n elements),
+  which the count alone misses (C03R-01, BA-13). `rss` also bounds the peak
+  memory of the large run. The sizes keep every run under a second on
+  today's lean2rr, quadratic or not.
+- A `NAME.xfail` whose first line starts with `alloc-check:` marks only the
+  allocation check as known to fail: `run.sh` then still expects the
+  test's output to equal native's. `alloc-check.sh` reports `XFAIL` for
+  any `NAME.xfail`, and `XPASS` when such a test passes. Each of these
+  files says what dev does (its numbers at the two sizes) and that one
+  layout for each datatype (rule 1 of the design site's page "Dependent
+  types") removes it.
+- `tests/runtime/determinism-check.sh [PROGRAM...]` translates a few
+  programs (`lean2rr --emit rr`, no Reussir build) twice and requires
+  byte-identical `.rr` files; then it adds an unrelated definition (a
+  structure of two numbers and a recursive function over it, with a new
+  entry point `l2rDetRoot` that runs `main` and then the function,
+  translated with `--root l2rDetRoot`) and requires every function
+  translated from the program's own code, except `main`, to be unchanged
+  in the canonical form below. A program known to fail is listed in the
+  script's `KNOWN` table with the reason (XFAIL).
+- `tests/runtime/rr-fingerprint.py` gives each item of the generated part
+  of a `.rr` file (functions, types, `extern` lines) a hash of a canonical
+  form that does not change when only lean2rr's numbering changes: one
+  counter numbers types (`T_List_15`), helpers (`l2r_zero_836`, `jp_77`),
+  the payload numbers of `Box` and local names, and Stage 1
+  numbers each declaration's instances in the order it finds them, so an
+  added definition shifts names in code it does not touch. Numbered names
+  become labels made from their own canonical definitions; string literal
+  indices become the literals. `show` prints the pay-nothing counts and
+  the hashes, `compare` and `check` list the changed and dropped items, and
+  `text` prints an item's canonical form.
+- `tests/runtime/paynothing-check.sh [--update] [NAME...]`: programs
+  without values of unknown type (the classic programs rbtree, cfold,
+  qsort, deriv and unionfind at their `small` size, and RtJpSlots and
+  RtLazyFields) against their baselines in `tests/runtime/paynothing/`: the
+  pay-nothing counts of the generated code (conversion helpers and their
+  uses, values put into a `Box`, the program's pointer payload types of
+  `Box`) must not
+  grow, nor the allocations and bytes of a run (1% plus 100 allocations or
+  10000 bytes of slack); the native counts are recorded beside them. The
+  changed items are listed (with `PAYNOTHING_STRICT=1` they fail the
+  check). `--update` rewrites the baselines after an intended change; the
+  allocation counts belong to this machine's toolchain and runtime pin.
+
+The runtime tests of this suite are named `RtRepr*` (the older
+`RtReprFuzzCtx`, `RtReprFuzzTypes` and `RtReprShare` are other tests):
+
+| source | test | what | `alloc-check` on dev |
+|---|---|---|---|
+| BA-01, BA-02, BA-07 | RtDepShareDag, RtDepShareShapes, RtDepShareHeld | a shared tree, rose tree, list of suffixes and five more shapes through existentials | see "Dependent types" below |
+| BA-03 | RtReprProdDag | a shared tree through `Prod`, packed once | exponential (rule 1) |
+| BA-04 | RtReprThunkDag | a shared tree in a forced thunk, packed once | exponential (rule 1) |
+| BA-05 | RtReprCseDag | a shared tree converted typed to typed after `cse` | exponential (rule 1) |
+| BA-06 | RtReprArrShared | one row shared n times in an `Array (Array α)` | quadratic (rule 1) |
+| BA-08 | RtReprExistShared | one list in n live packages | quadratic, also peak memory (rule 1) |
+| BA-09 | RtReprExistRepack | a growing list packed at every step | quadratic (rule 1) |
+| BA-10 | RtReprRefUniform | an `IO.Ref (List α)` modified by uniform code | quadratic (rule 1) |
+| BA-11 | RtReprColListLib | a list column, cons then a typed `head!` | quadratic (rule 1) |
+| BA-12 = C03R-01 | RtUniformUpdatesShared | a typed helper on the uniform column | quadratic in bytes (rule 1) |
+| BA-13 | RtReprColPassOn | a helper passing its parameter on at `Array Nat` | quadratic in bytes (rule 1) |
+| BA-14 | RtReprFnArgConv | a typed function value applied by uniform code | quadratic (rule 1) |
+| BA-15 | RtReprOpenPoly | a generic function field called with typed lists | quadratic (rule 1) |
+| BA-16 | RtReprThunkRepack | a forced thunk packed at every step | quadratic (rule 1) |
+| BA-17 | RtDepBoxMatchReads, RtDepBoxMatchFallback; RtReprBoxCopy | reads of a dependent payload; RtReprBoxCopy: the reducible family and a payload boxed again | quadratic (rule 1) |
+| BA-18 | RtDepProofBuilder, RtDepUniformBuilder | a builder at a proposition; at a type too large for its own copy | see "Dependent types" below |
+| BA-19 | RtReprThunkChain, RtReprThunkForced | a thunk's round trips typed → uniform → typed, pending (both modes' output) and forced | pending: linear; forced: quadratic (rule 1) |
+| DRP-04 | RtReprRecRepack | BA-09 with the list also in a typed record field | quadratic (rule 1) |
+| DRC-07 | RtReprSwapLoop | a tail loop swapping a typed and a crossing list: 10^8 iterations, constant stack | — |
+| DRC-01 | RtReprInitRef, RtReprExitPoly | `initialize` values; an exit code from the uniform instance (7) | — |
+| DRC-02 | RtReprDepHeads | one dependent position reached by two heads | — |
+| DRC-04, DRC-05 | RtReprModShape | `Array.modify`'s placeholder, `Array.map`'s cast | — |
+| DRC-08 | RtReprConstAcc | constants shared by a helper's callers | — |
+| audit semantics probes | RtReprRefAlias, RtReprThunkOnce, RtReprTaskOnce, RtReprClosure, RtReprCowPlaceholder, RtReprIndexed | aliasing, evaluation once, closure timing, copy-on-write, indexed families across crossings | RtReprIndexed passes (no conversion) |
+| audit, repeated crossings | RtReprFnRoundTrip | a function value through two packages and back at every step: no wrapper chain | passes |
+| audit, checked and not a problem | RtReprNestPair, RtReprMonadGrow, RtReprCseLoop, RtReprColUpdateTyped | polymorphic recursion at `α × α` and through `StateT`; a `cse`-merged value read in a loop; a typed helper whose call sites are all uniform | pass (guards: linear today) |
+
+BA-00 (in test builds only, the conversion counter broke the loop of the
+conversion machine: a deep conversion overflowed the stack) has the shape of
+RtConvDeep (an 8 MB stack) and of RtDepDeep's left spine. The branches
+fix-conv-sharing, fix-box-match and fix-proof-builder are superseded by the
+layout redesign (one layout per datatype, rule 1 of the design site's page
+"Dependent types"); their tests are RtDep* tests below, without the address
+checks (sharing is checked by memory).
+
+### Dependent types: the `RtDep*` corpus
+
+Values whose type is not known at compile time, or depends on a value
+(existential packages, dependent pairs and fields, polymorphic recursion,
+type parameters, casts), and the points where a function runs when some of
+its parameters are types. Each test's output must equal native's; each
+runs in well under a second natively. A blowup (a value copied when its
+representation changes) shows as allocation growth, checked by
+`alloc-check.sh` at two sizes (the test's `.alloc`), not as a long run.
+Sharing is checked by memory, not by addresses (`ptrAddrUnsafe` may differ,
+site rule 7). The corpus also has a copy outside the repository, with
+native's outputs, for other translators' cross-checks.
+
+Tests from repros of earlier reviews (the scratch directories named in the
+first column):
+
+| source | test | what | `alloc-check` on dev |
+|---|---|---|---|
+| BA-01; dag-blowup, site-deptypes `DagTree`; fix-conv-sharing's RtConvShareDag | RtDepShareDag | a tree of n + 1 shared nodes (2^n paths) through existentials, also built by code over an unknown type and cast back; flat memory at n = 16 and 28 | exponential (`.xfail`: rule 1) |
+| BA-02, BA-07; fix-conv-sharing's RtConvShareShapes | RtDepShareShapes | shared values of eight shapes (array diamond, mutual, nested `Rose`, one array twice, list suffixes, function values and thunks in a DAG) through existentials; flat memory | exponential (`.xfail`: rule 1) |
+| fix-conv-sharing's RtConvShareHeld | RtDepShareHeld | unshared trees, lists and arrays packed while held and as their last use, read back with `unsafeCast`; linear | linear but 5 × native (`.xfail`: rule 1) |
+| BA-17 (mode copy); fix-box-match's RtBoxMatchReads | RtDepBoxMatchReads | n reads by a match of a dependent payload; O(1) per read | quadratic (`.xfail`: rule 1) |
+| BA-17; fix-box-match's RtBoxMatchFallback | RtDepBoxMatchFallback | matches on a dependent payload for every way it was built and every pattern shape | — |
+| BA-18; fix-proof-builder's RtProofBuilder | RtDepProofBuilder | generic builders and structures over `Sort u` at a proposition and at data; linear | quadratic (`.xfail`: rule 1) |
+| BA-18 (data); fix-proof-builder's RtUniformBuilder | RtDepUniformBuilder | a generic builder at a type with more than 256 nodes; linear | quadratic (`.xfail`: rule 1) |
+| design-review-perf `ClosureLoopPack` (BA-09 in a closure) | RtDepClosureLoopPack | a growing list packed at every step of a loop run by a stored closure | quadratic (`.xfail`: rule 1) |
+| design-review-perf `ColdPack` | RtDepColdPack | a hot `List Float` field loop with a cold packing branch | passes |
+| design-review-perf `P1Rebox` | RtDepP1Rebox | a `Float` loop state stored into two packages per step | passes |
+| design-review-correctness `closedpanic` (DRC2-01) | RtDepClosedPanic | a closed term whose callee traces and panics: evaluated once | — |
+| review-opus `anytest` (Any1, Conf, Drop, Dyn, Fields, Layout) | RtDepReviewOpus | type fields, `Bool`-selected types, a proof-only function, `Dynamic`, computed field types, scalar fields | — |
+| review-fable `c123`, `c4`, `c4b` | RtDepReviewFable | `pick`, proof fields, a computed `Σ`, recursion at `List α`, `f Nat` fields, closures over scalars | — |
+| review-fable `mem` | RtDepListMem | lists of n `Float`s and small `Nat`s: allocations and peak memory | passes |
+| site-lcnf2 `SiteEx` (the design site's program) | RtDepSiteEx | the page "Dependent types" in one program | — |
+| site-deptypes `Spec` | RtDepSiteSpec | one generic function at `Tree Float` and `Tree String` | — |
+| b0-cast `UnitAsNat` | RtDepUnitAsNat | the unit value read as a `Nat` (0) | — |
+
+New cases:
+
+| test | what | `alloc-check` on dev |
+|---|---|---|
+| RtDepExist | existential packages of nine types; `Sigma`/`PSigma` with a type-valued first component; a column with `Array ty.denote` for eight types; `Dynamic`; packages with their own `ToString`, `BEq`, `Hashable` | — |
+| RtDepFieldLoops | each kind of type-parameter field (`α`, `List`, `Array`, `IO.Ref`, `Thunk`, `Task`, `α → β`, `α → α → α`, `Option`, `Except`, `Array (Array α)`, `List (α × β)`, `Std.HashMap`) read, changed and stored back in n steps by typed code and by code over the unknown type | quadratic in 11 of 13 modes (`.xfail`: rule 1) |
+| RtDepPayloadScalars | every scalar kind (with a 300-constructor enum, `UInt64` around 2^63, float specials, `Nat`/`Int` boundaries) through nine generic routes, bit for bit | — |
+| RtDepPayloadObjects | strings, byte/float arrays, arrays of each kind, structures, `Subtype`, `Fin`, closures, recursive/mutual/nested inductives, computed fields, sums and products of scalars, through the same routes | — |
+| RtDepOneField | one-field structures over a type parameter (represented as their field) and `unsafeCast` between containers of them and of the field type | — |
+| RtDepShareMany | one list and one array in K generic containers of every kind at once | K × M (`.xfail`: rule 1) |
+| RtDepDeep | chains of 10^6 nested values of unknown type, built, read in loops and freed at an 8 MB stack (`RtDepDeep.pipe`; BA-00's shape) | — |
+| RtDepPolyRec | polymorphic recursion with dictionaries built per level, nested datatypes over growing types, monad transformers added per level at an unknown monad | — |
+| RtDepCasts | the library's casts (`Array.map`/`mapM`/`mapIdx`/`mapFinIdx`, `Array.modify`, `attach`/`pmap`, `ShareCommon`) and user casts (`NonScalar`, unit/`Fin`/`Subtype` as `Nat`) | — |
+| RtDepEraseTiming | where bodies run when parameters are types (rule 4): traces and their counts equal native's | — |
+| RtDepRoundTrip | references and function values through every generic container and back; aliasing holds | — |
+| RtDepGenericOrder | sorting, equality, hashing and sums by generic code on boxed scalars around 2^63, floats, chars, strings | — |
+| RtDepUnique | in-place updates of a value held in an existential by code over its unknown type | passes (linear: one box per step) |
+| RtDepIOResults | IO results of every scalar kind through generic monads, `initialize` values of generic types, an exit code | — |
+| RtDepFloatArrayAlloc | `get!`, `getD`, `modify`, `set!` on an `Array Float` and on arrays of one-field structures over `Float` and `UInt64`, constants pushed, reads out of bounds, `unsafeCast ()` read back (adversarial finding 2: a constant default is boxed once, `Array.modify`'s placeholder is `box(0)`) | passes (before the fix on this branch: a cell per `get!`, two per update) |
+| RtDepBoxedClosedOnce | a closed term that traces, evaluated where it is used by a constant and boxed there, runs once (`boxed-consts` leaves such closed terms out) | — |
+| RtDeadBoxedConst | a boxed closed term in a branch that never runs is not computed (a judged Lean compiler bug: natively its `_boxed_const` is computed at startup and the program hangs; expectation files, `.pipe` with a 3-second limit) | — |
+| RtDepDropOrderBoxed | the order in which handles in boxes (a `List IO.FS.Handle`, a structure over a type parameter) close when user code drops the value by itself (adversarial finding 3; expectation files, plan §10) | — |
+
+`RtDepX*` hold the cases of the shared dependent-type corpus (programs
+another translator's team wrote and checked against native Lean), about
+eleven to a test: each case in a namespace named after its case id, run by
+the test's `main` with its own arguments after a line `-- <id>`
+(docs/implementation/testing.md, "The shared cases are combined"). A case
+that exits with another code than 0, has a global effect, or is checked at
+a large size is a test of its own (`RtDepX<id>`). Left out as exact
+duplicates: A936 (RtProcess) and A1028 (RtCseFnResult).
+
+| test | cases (shared case ids) |
+|---|---|
+| RtDepXA01 | A1007 A1011 A1012 A1013 A1015 A1016 A1017 A1018 A1019 A1020 A1021 |
+| RtDepXA02 | A1023 A1024 A1025 A1026 A1027 A1040 A1041 A1042 A1043 A1044 A1045 |
+| RtDepXA03 | A1046 A1048 A1049 A1066 A1067 A1068 A1069 A1070 A1071 A1072 A1073 |
+| RtDepXA04 | A1074 A1075 A1076 A1077 A1078 A1079 A1080 A1081 A1082 A1083 A1084 |
+| RtDepXA05 | A1085 A1086 A1087 A1088 A1089 A1090 A1091 A1092 A1093 A1095 |
+| RtDepXA06 | A1096 A1097 A1098 A1099 A1200 A1202 A587 A612 A743 A765Field A765Op |
+| RtDepXA07 | A765Ref A765Shared A769 A796 A797 A798 A799 A801 A802 A805 A806 |
+| RtDepXA08 | A808 A817 A831 A834 A867 A869 A871 A872 A874 A876 |
+| RtDepXA09 | A880 A881 A883 A885 A886 A887 A888 A890 A892 A893 A894 |
+| RtDepXA10 | A896 A897 A910 A911 A912 A913 A914 A917 A918 A919 A924 |
+| RtDepXA11 | A927 A931 A934 A935 A937 A942 A943 A947 A948 A951 A957 |
+| RtDepXA12 | A958 A959 A960 A961 A962 A963 A964 A965 A968 A969 A970 |
+| RtDepXA13 | A971 A972 A973 A974 A975 A977 A978 A979 A981 A982 A983 |
+| RtDepXA14 | A984 A986 A987 A988 A989 A990 A991 A992 A993 A994 A995 |
+| RtDepXA15 | A996 A997 A998 A999 A1111 A1310 A1300 A1301 A1302 A1303 A1304 |
+| RtDepXA16 | A1305 A1306 A1307 A1308 A1311 A1312 A1313 A1314 A1315 A1316 A1317 |
+| RtDepXA830 | A830 (its own test) |
+| RtDepXA833 | A833 (its own test) |
+| RtDepXA866 | A866 (its own test) |
+| RtDepXA1010 | A1010 (its own test) |
+| RtDepXA1014 | A1014 (its own test) |
+| RtDepXA1100 | A1100 (its own test) |
+| RtDepXD01 | D71Breaker2Q01 D71Breaker2Q02 D71Breaker2Q03 D71Breaker2Q04 D71Breaker2Q05 D71Breaker2Q06 D71Breaker2Q07 D71Breaker2Q08 D71Breaker2Q09 D71Breaker2Q09A D71Breaker2Q09B |
+| RtDepXD02 | D71Breaker2Q09D D71Breaker2Q09E D71Breaker2Q09F D71Breaker2Q10 D71Breaker2Q11 D71Breaker2Q12 D71Breaker2Q16 D71Breaker2Q17 D71Breaker2Q19 D71Breaker2Q20 D71Breaker2Q21 |
+| RtDepXD03 | D71Breaker3R01 D71Breaker3R02 D71Breaker3R03 D71Breaker3R04 D71Breaker3R05 D71Breaker3R06 D71Breaker3R07 D71Breaker3R08 D71Breaker3R09 D71Breaker3R11 D71Breaker3R12 |
+| RtDepXD04 | D71Breaker3R13 D71BreakerP01 D71BreakerP02 D71BreakerP03 D71BreakerP04 D71BreakerP05 D71BreakerP06 D71BreakerP07 D71BreakerP08 D71BreakerP08B D71BreakerP08C |
+| RtDepXD05 | D71BreakerP10 D71BreakerP11 D71BreakerP11A D71BreakerP11D D71BreakerP11F D71BreakerP12 D71BreakerP13 D71BreakerP14A D71BreakerP14AD D71BreakerP14AE D71BreakerP14B |
+| RtDepXD06 | D71BreakerP14BC D71BreakerP14C D71BreakerP14D D71BreakerP14E D71BreakerP15 D71BreakerP16B D71BreakerP17 D71BreakerP18 D71BreakerP19 D71BreakerP20 D71BreakerP21 |
+| RtDepXD07 | D71BreakerP22 D71BreakerP24A D71BreakerP24C D71BreakerP24D D71BreakerP24E D71BreakerP24F D71BreakerP25 D71BreakerP27 D71BreakerP28 D71BreakerP29 D71BreakerP30 |
+| RtDepXD08 | D71BreakerP30C D71ReviewerC1 D71Tester8e9R01 D71Tester8e9R02 D71Tester8e9R03 D71Tester8e9R04 D71Tester8e9R05 D71Tester8e9R06 D71TesterF33N01 D71TesterF33N02 D71TesterF33N03 |
+| RtDepXD09 | D71TesterF33N05 D71TesterF33N06 D71TesterF33N07 D71TesterF33N08 D71TesterF33N09 D71TesterF33N10 D71TesterF33N11 D71TesterF33N13 D71TesterF33T24G1 D71TesterF33T24G2 D71TesterF33T24G3 |
+| RtDepXD10 | D71TesterF33T24G4 D71TesterF33T24P D71TesterT01 D71TesterT02 D71TesterT02A D71TesterT02B D71TesterT03 D71TesterT04 D71TesterT05 D71TesterT06B D71TesterT07 |
+| RtDepXD11 | D71TesterT08 D71TesterT09 D71TesterT10 D71TesterT11 D71TesterT12 D71TesterT14 D71TesterT16 D71TesterT17 D71TesterT18 D71TesterT19 D71TesterT20 |
+| RtDepXD12 | D71TesterT24A D71TesterT24B D71TesterT24C D71TesterT24D D71TesterT24I D71TesterT24K40 D71TesterT24K62 |
+| RtDepXD13 | D71TesterT24L1 D71TesterT24L2 D71TesterT24L3 D71TesterT24L6 D71TesterT24M63 D71TesterT24N16 D71TesterT24N4 D71TesterT24N8 D71TesterT24O D71TesterT25 D71TesterT26 |
+| RtDepXD14 | D71TesterT27 D71TesterT28 D71TesterT28A D71TesterT28B D71TesterT28C D71TesterT29 D71TesterT30 D71TesterT31 D71TesterT33 D71TesterT35 D71TesterT37 |
+| RtDepXD15 | D71TesterT38 D71TesterT39 D71TesterT41A D71TesterT41B D71TesterX66 |
+| RtDepXD71BreakerP09A | D71BreakerP09A (its own test) |
+| RtDepXD71TesterT06 | D71TesterT06 (its own test) |
+| RtDepXD71TesterT06A | D71TesterT06A (its own test) |
+| RtDepXD71TesterT23 | D71TesterT23 (its own test) |
+| RtDepXD71TesterT36 | D71TesterT36 (its own test) |
+| RtDepXPairs | A1094, D71TesterT24E, T24F, T24H at five types |
+
+Dev results of the shared cases: every output equals native's except
+RtDepXA833 (`.xfail`, a lean2rr crash) and RtDepXD71TesterT23 (expectation
+files, as RtCseFnResult then); `alloc-check` passes RtDepXA1010 and
+RtDepXD71TesterT36 and fails RtDepXA1014 (its shared inner list is copied
+for each element). With rule 1 and Stage 1's merged calls at the instance
+at `lcAny` (plan §2.3), both outputs equal native's: the `.xfail` and the
+expectation files are removed.
+
+The `alloc-check` column of the tables above is dev 922ca03's result. With
+rule 1 and the one-word box (`LAny`), `alloc-check` passes every test it
+lists as failing, and the `alloc-check:` `.xfail` files of those tests and
+of the 16 RtRepr* tests are removed.
 
 Tests for findings (the reviews' FINDINGS.txt files are in the scratch
 directories `adv3`..`adv6`, `rv6`..`rv9`). The rows marked "none" are
@@ -324,8 +581,14 @@ it draws on, with their copyright notices (Apache 2.0):
 | RV9C-01, C01R-01, C01R-03 | RtZeroFinite, RtZeroLazyCycle, RtZeroTaskCycle, RtZeroWalkRef, RtZeroWalkRefNoCache |
 | RV9C-02, C02R-01, C02R-02, C03R-01 | RtUniformUpdates, RtUniformUpdatesJp, RtUniformUpdatesMixed, RtUniformUpdatesNested, RtUniformUpdatesShared (and `conv-count-check.sh`) |
 | RV9L-01, RV9L-01a | RtCtorNameClash |
-| R9S2R-04 (review of RV9S-02: no test took `boxCastConv`'s rollback) | RtConvProbeRollback (and `conv-count-check.sh`) |
-| XT-6 (cross-test), XT6-01..XT6-04 | RtCseAcrossTypes, RtCseFnValues, RtCseResidual, RtCseFnField, RtCseFnTrivial, RtCseFnResult (expectation files: the trace prints once natively, twice through lean2rr) |
+| R9S2R-04 (review of RV9S-02: no test took `boxCastConv`'s rollback; the rollback was removed with rule 1, its simplicity review's finding 1) | RtConvProbeRollback (and `conv-count-check.sh`) |
+| XT-6 (cross-test), XT6-01..XT6-04 | RtCseAcrossTypes, RtCseFnValues, RtCseResidual, RtCseFnField, RtCseFnTrivial, RtCseFnResult |
+| Review of the dependent-type work: shared case A833 (merged calls whose types are equal because `lcAny` hides the type argument), A1028 and D71TesterT23 (merged calls whose results hold functions of `α` ran apart) | RtCseHiddenAny, RtCseUniform, RtCseClosed, RtCseApart (expectation files: the shapes that still run apart or more often than natively, plan §10 "Merging after erasure"), RtDepXA833, RtDepXD71TesterT23 |
+| Review of the cleanups of rule 1 (F2: with rule 1, `Runtime.markPersistent`, `markMultiThreaded`, `forget` and `hold` did not compile at any type: the generic primitive's result was taken to be of the IO result field's type, a `Box`) | RtRuntimeMarks |
+| Review of the deferral of a box's word (22bcf89: `any::release_last` defers a box's tagged word as one pending cell; since the release table, the payload's cell) | RtBoxPackFreeOrder (boxes and a record with a wide header deferred in a row: the order of the closes), RtBoxDeepChain (10^6 nested boxes freed on a 1 MiB stack, `RtBoxDeepChain.pipe`) |
+| Adversarial review of the dependent-type work: K3, K2, TypesAsData (a function polymorphic in `α : Type u` at `α := Type`: its data parameters erased, two applications merged) | RtTypesAsValues |
+| Review of deptypes-lowperf, finding 1 (a `[value]` struct over a `Box`, `ST.Out σ α`, got a payload number of its own for the box: a panic at the first unboxing) | RtValueStructBox |
+| A Lean 4.34.0 compiler bug, judged (plan §10, "Compiler: Lean bugs we do not reproduce"): a `match` whose one arm gives a type or a predicate and whose other arm gives data; `joinTypes` types the join point's parameter `◾`, so native reads `box(0)` in place of the data (a wrong value or a crash), and lean2rr did too | RtJoinErasedProp, RtJoinErasedType, RtJoinErasedFlow; from the review of the fix RtJoinErasedIndirect, RtJoinErasedMisc, RtJoinErasedMerge, RtJoinErasedLayouts (native crashes: exit 139) (expectation files: native's output and the kernel's values) |
 | RVA-01 (review of perf-rvec) | RtReadIntoArray |
 | LR1-01 (lean-runtime's oracle rows) | RtStringExtractBig |
 | lean-runtime's case io/startup_fd_limit (`IO.stdGenRef`, the library's initializer, ran only when the program used it) | RtStartupInitUrandom, RtStartupInitRand |
@@ -335,8 +598,10 @@ it draws on, with their copyright notices (Apache 2.0):
 | switch step 10: the order of the closes and promise dependents when one release frees an array of structures (a guard for the free of arrays of records) | RtArrayRecordFreeOrder |
 | RS10-01 (review of switch step 10: an array set or pop releasing the last reference to a record closed its fields in field order, natively the last first) | RtArraySetFreeOrder, RtArrayPopFreeOrder |
 | switch step 11: the last reference to a record is one pending cell of the free (a set, a pop and a reference set freeing structures whose fields hold structures and a list) | RtArraySetFreeNested |
-| switch step 11: a reference set that is the reference's last use frees the new value before the old one (runtime/README.md, Requests for lean2rr 33; expected to fail) | RtRefSetLastUse |
-| RS11-01 (review of switch step 11: below the first cell of a free, Reussir's glue releases a cell's last record field before a later array field that has already pushed its free; a Reussir patch; expected to fail) | RtNestedArrayFreeOrder |
+| perf review of the dependent-type work, item 3: `ByteArray.data`/`mk` and `FloatArray.data`/`mk` as one loop at the exact size (leanrt's textures; in a program that casts, after a check of the boxes, else the generated loop) | RtByteArrayData, RtByteArrayDataCast |
+| switch step 11: a reference set that is the reference's last use freed the new value before the old one (runtime/README.md, Requests for lean2rr 33, done: `l2r_rc_set_ref` releases the reference after the old value) | RtRefSetLastUse |
+| RS11-01 (review of switch step 11: below the first cell of a free, Reussir's glue released a cell's last record field before a later array field that had already pushed its free; Reussir patch 13-d, issue 13; its first part needed switch step 10 before rule 1; with rule 1 an array element is a box, which leanrt's worklist frees in Lean's order) | RtNestedArrayFreeOrder |
+| review of Reussir patch 13-d (a record field before an array, a thunk, in a variant's arm, after an `Option` of a record, three cells below the start of a free; needs Reussir patch 13-d, which `scripts/l2r.py` requires) | RtDropDepth3Order |
 | switch step 13, lean-runtime's LB-39 (review RF12-02 of its fixes-12): a dependent kept its priority as 32 bits, so 2^32 + 1 was a pool priority, and a priority of 2^64 or more was its low 64 bits, 0 (expectation files: natively 2^32 + 1 is a pool priority) | RtTaskPrioBig |
 | switch step 13, lean-runtime's LB-36: `scaleB` by an `Int` outside the C `int` range, moved from RtFloat and RtSweepFloat (expectation files: natively `+0.0` for a NaN, an infinity, `-0.0` and a negative value scaled down) | RtFloatScaleBBig |
 | RSG-01 (review of fix-stdgen: the library's initializers ran before the program's, not at their module's place) | RtStartupInitOrder (companion module `StartupInitOrderDep`, `RtStartupInitOrder.deps`) |
@@ -404,7 +669,7 @@ Tests made from the programs of checks that held up in review rounds 6 and 7
 | RtFnValues | rv7/lowering checks 12, 13 (LwFn1, LwFn2) |
 | RtGenControl | rv7/lowering check 26 (Rcf6, gen/rcf.py) |
 | RtStateMachines | rv7/opts O7SM, O7SM2; rv6/jp check 18 (JpSm3) |
-| RtSplitMaps | rv7/opts O7Map; rv6/lower check 5 (SMapA) |
+| RtSplitMaps | rv7/opts O7Map; rv6/lower check 5 (SMapA); written for `split-map-loops`, deleted with rule 1 (the maps now run on the one array type) |
 | RtConvUniform | rv7/repr R7Conv |
 | RtReprFuzzCtx | rv7/repr fz/Gz5 (gen2.py) |
 | RtReprFuzzTypes | rv7/repr fz/gen.py, seed 7, 6 types |

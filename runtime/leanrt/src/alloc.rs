@@ -3,11 +3,14 @@
 //! Reussir's global allocator (`reussir_rt::alloc::ReussirGlobalAlloc`)
 //! raises every Rust allocation to 16-byte alignment, above what it treats as
 //! mimalloc's natural alignment (8), so *every* Rust `Box`/`Vec` allocation
-//! takes mimalloc's aligned path (`mi_malloc_aligned`, `mi_realloc_aligned`),
-//! and pages holding aligned blocks send later frees down mimalloc's generic
-//! path too. Strings, arrays and big numbers are allocated here instead with
-//! `mi_malloc`/`mi_realloc`, whose blocks are 8-aligned (Reussir builds
-//! mimalloc with `MI_MAX_ALIGN_SIZE=8`), which is all runtime objects need.
+//! takes mimalloc's aligned path (`mi_malloc_aligned`, `mi_realloc_aligned`).
+//! Without Reussir patch 03-a, a size that is not a multiple of 16 could be
+//! moved inside a larger block, and later frees in that page went down
+//! mimalloc's generic path (reussir-bugs/03-global-alloc-align.md); with it,
+//! the size is rounded up to a multiple of 16. Strings, arrays and big
+//! numbers are allocated here instead with `mi_malloc`/`mi_realloc`, whose
+//! blocks are 8-aligned (Reussir builds mimalloc with `MI_MAX_ALIGN_SIZE=8`),
+//! which is all runtime objects need, in blocks no larger than they need.
 //! They are freed normally: the global allocator frees any mimalloc block
 //! with `mi_free`.
 //!
@@ -23,6 +26,7 @@ use std::mem::{align_of, size_of};
 
 extern "C" {
     fn mi_malloc(size: usize) -> *mut c_void;
+    fn mi_malloc_small(size: usize) -> *mut c_void;
     fn mi_zalloc(size: usize) -> *mut c_void;
     fn mi_realloc(p: *mut c_void, size: usize) -> *mut c_void;
     fn mi_free(p: *mut c_void);
@@ -68,14 +72,22 @@ fn plain<T>() -> bool {
     align_of::<T>() <= 8 && size_of::<T>() > 0
 }
 
-/// `Rc::new(v)` allocated with `mi_malloc`.
+/// mimalloc's `MI_SMALL_SIZE_MAX` (128 words): `mi_malloc_small` takes
+/// sizes up to it.
+const SMALL_SIZE_MAX: usize = 128 * size_of::<usize>();
+
+/// `Rc::new(v)` allocated with `mi_malloc`, or `mi_malloc_small` when the
+/// box is small (every scalar cell: a boxed `Float` or large `UInt64`),
+/// which skips mimalloc's test of the size (the size is a constant here,
+/// so the choice costs nothing).
 #[inline(always)]
 pub fn rc_new<T>(v: T) -> Rc<T> {
     if !plain::<RcBoxMirror<T>>() {
         return Rc::new(v);
     }
     unsafe {
-        let p = mi_malloc(size_of::<RcBoxMirror<T>>()) as *mut RcBoxMirror<T>;
+        let size = size_of::<RcBoxMirror<T>>();
+        let p = if size <= SMALL_SIZE_MAX { mi_malloc_small(size) } else { mi_malloc(size) } as *mut RcBoxMirror<T>;
         if p.is_null() {
             oom();
         }
@@ -98,6 +110,22 @@ pub unsafe fn rc_into_inner<T>(r: Rc<T>) -> T {
     let v = std::ptr::read(&(*p).data);
     mi_free(p as *mut c_void);
     v
+}
+
+/// Free a mimalloc block whose contents need no drop (a scalar cell).
+///
+/// # Safety
+/// `p` is a live mimalloc block that nothing references any more.
+#[inline(always)]
+pub unsafe fn free(p: *mut u8) {
+    unsafe { mi_free(p as *mut c_void) }
+}
+
+/// The value in the box `p` of an `Rc<T>` (`RcBoxMirror`'s `data`), for
+/// reads of a cell by its address.
+#[inline(always)]
+pub fn rc_data<T>(p: *mut u8) -> *mut T {
+    p.wrapping_add(std::mem::offset_of!(RcBoxMirror<T>, data)) as *mut T
 }
 
 /// `Box::new(v)` allocated with `mi_malloc`.

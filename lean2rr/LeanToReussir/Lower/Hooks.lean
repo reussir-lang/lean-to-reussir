@@ -34,8 +34,27 @@ structure CasesArm where
 /-- `let`s placed before an alternative's code. -/
 abbrev ArmLets := Array (String × Option RR.Ty × RR.Expr)
 
+/-- Field parameter `p` of an alternative (its Reussir type `pt`, from its
+mono type), whose value is `x : ft` (the field's type in the record),
+bound in the context at its own type: a field of a parameter's type is a
+`Box` in the record (one type per inductive, `nominalType`), and is unboxed
+here, once, not at each use of the parameter. The `let` that converts it
+(none when the types agree, at a unit type, which carries nothing, or when
+the declaration never uses the parameter, `CodeCtx.used`), recorded in
+`CodeCtx.fieldConv`. -/
+def bindField (ctx : CodeCtx) (p : FVarId) (pt : RR.Ty) (x : String) (ft : RR.Ty) :
+    LowerM (ArmLets × CodeCtx) := do
+  if pt == ft || !ctx.used.contains p then
+    return (#[], { ctx with vars := ctx.vars.insert p (x, ft) })
+  if pt == .unit then
+    return (#[], { ctx with vars := ctx.vars.insert p ("L2RUnit::u{}", .unit) })
+  let y ← fresh "fv"
+  return (#[(y, some pt, ← coerce (.var x) ft pt)],
+    { ctx with vars := ctx.vars.insert p (y, pt), fieldConv := ctx.fieldConv.insert p y })
+
 /-- The plain binding of a structure alternative's fields: every relevant
-field projected from the matched value, the others bound to the unit. -/
+field projected from the matched value (and converted to the parameter's
+own type, `bindField`), the others bound to the unit. -/
 def bindStructFields (ctx : CodeCtx) (arm : CasesArm) : LowerM (ArmLets × CodeCtx) := do
   let mut ctx' := ctx
   let mut lets := #[]
@@ -45,7 +64,9 @@ def bindStructFields (ctx : CodeCtx) (arm : CasesArm) : LowerM (ArmLets × CodeC
     | some (some (j, ft)) =>
       let x ← fresh "f"
       lets := lets.push (x, some ft, RR.Expr.field (.var arm.scrut) j)
-      ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
+      let (conv, c) ← bindField ctx' p.fvarId (← lowerType p.type) x ft
+      lets := lets ++ conv
+      ctx' := c
     | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
   return (lets, ctx')
 

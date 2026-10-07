@@ -186,15 +186,16 @@ def usesWhileLive (jps : Std.HashMap FVarId (Code .pure)) (x : FVarId) (c : Code
 
 /-- A matched value that stays live in its arm, whose fields are bound where
 they are used. `fields` are the arm's field parameters that the arm uses,
-with their binder index and type; `pending` those not bound yet. -/
+with their binder index, their type in the record and the parameter's own
+type (`bindField`); `pending` those not bound yet. -/
 structure LazyMatch where
   discr : FVarId
   scrut : String
   ty : String
   variant : String
   nbinders : Nat
-  fields : Array (FVarId × Nat × RR.Ty)
-  pending : Array (FVarId × Nat × RR.Ty)
+  fields : Array (FVarId × Nat × RR.Ty × RR.Ty)
+  pending : Array (FVarId × Nat × RR.Ty × RR.Ty)
   /-- A structure: its pending fields are projected where they are used
   (Reussir has no structure patterns). -/
   struct : Bool := false
@@ -239,12 +240,15 @@ def lazyStructFields (prev : CodeCtx → CasesArm → LowerM (ArmLets × CodeCtx
     let p := arm.params[i]
     match arm.layout.fields[i]? with
     | some (some (j, ft)) =>
+      let pt ← lowerType p.type
       if !early.contains p.fvarId then
-        if used.contains p.fvarId then pending := pending.push (p.fvarId, j, ft)
+        if used.contains p.fvarId then pending := pending.push (p.fvarId, j, ft, pt)
       else
         let x ← fresh "f"
         lets := lets.push (x, some ft, RR.Expr.field (.var arm.scrut) j)
-        ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ft) }
+        let (conv, c) ← bindField ctx' p.fvarId pt x ft
+        lets := lets ++ conv
+        ctx' := c
     | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
   if !pending.isEmpty then
     let l : LazyMatch := { discr := arm.discr, scrut := arm.scrut, ty := arm.ty, variant := arm.layout.variant,
@@ -274,11 +278,12 @@ def lazyEnumFields (prev : CodeCtx → CasesArm → Array (Option String) → Lo
   for h : i in [:arm.params.size] do
     let p := arm.params[i]
     if let some (some (j, ft)) := arm.layout.fields[i]? then
-      if used.contains p.fvarId then fields := fields.push (p.fvarId, j, ft)
+      let pt ← lowerType p.type
+      if used.contains p.fvarId then fields := fields.push (p.fvarId, j, ft, pt)
       if !early.contains p.fvarId then
         binders := binders.set! j none
         ctx' := { ctx' with vars := ctx'.vars.erase p.fvarId }
-        if used.contains p.fvarId then pending := pending.push (p.fvarId, j, ft)
+        if used.contains p.fvarId then pending := pending.push (p.fvarId, j, ft, pt)
   if !fields.isEmpty then
     let l : LazyMatch :=
       { discr := arm.discr, scrut := arm.scrut, ty := arm.ty, variant := arm.layout.variant,
@@ -290,8 +295,11 @@ def lazyEnumFields (prev : CodeCtx → CasesArm → Array (Option String) → Lo
 `lowerCode`). A lazily matched value whose fields the alternative uses is
 matched again first. When the alternative does not use the value itself,
 the value dies here: this match consumes it and binds every field the
-alternative uses (also those bound before, which are then only borrowed).
-Otherwise it binds the pending fields needed while the value is live. -/
+alternative uses (also those bound before, which are then only borrowed),
+except a field bound before and converted to its parameter's own type,
+which keeps that conversion (no second unboxing). Otherwise it binds the
+pending fields needed while the value is live. Conversions the code does
+not use are dropped (`dropUnusedConvs`). -/
 def lazyLowerAlt (prev : (self code : CodeCtx → Code .pure → LowerM RR.Block) → CodeCtx → RR.Ty → Code .pure →
       LowerM RR.Block)
     (self code : CodeCtx → Code .pure → LowerM RR.Block) (ctx : CodeCtx) (retTy : RR.Ty)
@@ -318,14 +326,17 @@ def lazyLowerAlt (prev : (self code : CodeCtx → Code .pure → LowerM RR.Block
         | none => l.scrut
       let mut lets := #[]
       let mut ctx' := ctx
-      for (p, j, ft) in now do
+      for (p, j, ft, pt) in now do
         let x ← fresh "f"
         lets := lets.push (x, some ft, RR.Expr.field (.var scrut) j)
-        ctx' := { ctx' with vars := ctx'.vars.insert p (x, ft) }
+        let (conv, c) ← bindField ctx' p pt x ft
+        lets := lets ++ conv
+        ctx' := c
       let rest := l.pending.filter fun q => !now.any (·.1 == q.1)
+      let convs := fieldConvNames ctx' (now.map (·.1))
       ctx' := ctx'.withLazyMatches (if rest.isEmpty then lazy.eraseIdx! i else lazy.set! i { l with pending := rest })
       let body ← self ctx' k
-      return { body with lets := lets ++ body.lets }
+      return { body with lets := dropUnusedConvs lets convs body ++ body.lets }
     let now := if live then
         let need := l.pending.filter (used.contains ·.1)
         if need.isEmpty then need else
@@ -340,15 +351,23 @@ def lazyLowerAlt (prev : (self code : CodeCtx → Code .pure → LowerM RR.Block
       | none => l.scrut
     let mut binders := Array.replicate l.nbinders (none : Option String)
     let mut ctx' := ctx
-    for (p, j, ft) in now do
+    let mut conv := #[]
+    for (p, j, ft, pt) in now do
+      -- A field bound before (while the value was live) and converted to
+      -- its own type keeps that conversion: the match drops the field.
+      if let some y := ctx'.fieldConv[p]? then
+        if ctx'.vars[p]? == some (y, pt) then continue
       let x ← fresh "f"
       binders := binders.set! j (some x)
-      ctx' := { ctx' with vars := ctx'.vars.insert p (x, ft) }
+      let (c, ctx2) ← bindField ctx' p pt x ft
+      conv := conv ++ c
+      ctx' := ctx2
     let rest := l.pending.filter fun q => !now.any (·.1 == q.1)
     ctx' := ctx'.withLazyMatches (if live then lazy.set! i { l with pending := rest } else lazy.eraseIdx! i)
     let body ← self ctx' k
+    conv := dropUnusedConvs conv (conv.foldl (fun s (y, _, _) => s.insert y) {}) body
     return .ofExpr (.mtch (.var scrut) #[
-      { ty := l.ty, ctor := some l.variant, binders, body },
+      { ty := l.ty, ctor := some l.variant, binders, body := { body with lets := conv ++ body.lets } },
       { ty := l.ty, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[retTy] #[]) }])
   prev self code ctx retTy k
 

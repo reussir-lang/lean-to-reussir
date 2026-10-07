@@ -1,14 +1,14 @@
 # 20. The MLIR inliner grows lean2rr's conversion code superlinearly (build time)
 
 **Kind:** cost (build time and memory of the MLIR inliner; first unclear,
-cause found later). Not a bug: rrc's output is correct; patch 0034 is an
+cause found later). Not a bug: rrc's output is correct; patch 20-a is an
 optimization.
 
 ## Summary
 
 **Kind:** unclear at first; found later to be a growth of the MLIR
 inliner's chains of copied calls (a cost), with a small local
-optimization. **Status:** patched (0034), applied in `./reussir`
+optimization. **Status:** patched (20-a), applied in `./reussir`
 (`l2r-local` cc8e5aa5); lean2rr also works around it (it keeps its
 conversion, unboxing and uniform-code application functions out of rrc's
 inliner), and keeps doing so.
@@ -29,7 +29,7 @@ codegen adds `no_inline` only so that the anchor survives, so lean2rr
 relies on a side effect (pinned by Reussir's test
 `tests/integration/frontend/inline_transform.rr`; LLVM still inlines
 anchored functions). A plain no-inline attribute would be the clean way (a
-missing feature). The cause was found later (0034, below): within its one
+missing feature). The cause was found later (20-a, below): within its one
 iteration, MLIR's inliner also inlines the calls an inlining copies in, so
 a call into a recursive group of functions gets every chain of distinct
 members inlined.
@@ -114,7 +114,7 @@ to 2.5 minutes and at most 3 GB, the whole build (`St4PolyP1a`: 21 s,
 ## Patch
 
 Patch file
-[`patches/0034-l2r-local-bug-20-do-not-inline-a-copied-call-into-a-.patch`](patches/0034-l2r-local-bug-20-do-not-inline-a-copied-call-into-a-.patch)
+[`patches/20-a-no-inline-into-recursion.patch`](patches/20-a-no-inline-into-recursion.patch)
 (`l2r-local` commit `ac5d1d85`, applied in `./reussir`; `l2r-local` head
 cc8e5aa5).
 
@@ -161,7 +161,7 @@ is removed after inlining on both the success and the failure path.
 (fails without the rule: more copies of the SCC's members). The tower
 without lean2rr's workaround: 16,980 -> 67,238 operations after the
 inliner; rrc 236 s, 1.8 GB -> 70 s, 0.98 GB (through `l2r.py`, back to
-back, loaded machine, the series 0030-0035). With the workaround, peak
+back, loaded machine, the six patches 22-a, 17-a, 11-a, 11-b, 20-a and 16-a). With the workaround, peak
 memory is unchanged (226 MB).
 
 `run.sh` on the final stack: `rrc: 78 s, 770 MB; with the conversion

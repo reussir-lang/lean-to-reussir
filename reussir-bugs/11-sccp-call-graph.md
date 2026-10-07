@@ -3,14 +3,14 @@
 **Kind:** cost (build time), in both parts: the superlinear SCCP of a stock
 MLIR pass, and 11b, quadratic glue lookups in Reussir's own code. Not a
 bug: rrc's output is correct; the blowup can make large builds infeasible
-(time or memory), and patches 0032 and 0033 are optimizations.
+(time or memory), and patches 11-a and 11-b are optimizations.
 
 ## Summary
 
 **Kind:** cost (stock MLIR pass), with a small local optimization; plus a
 cost in Reussir's own code (11b, build time; first classed as a bug,
 reclassified on 2026-10-05 because the output is correct). **Status:**
-patched (0032 for SCCP, 0033 for 11b), applied in `./reussir` (`l2r-local`
+patched (11-a for SCCP, 11-b for 11b), applied in `./reussir` (`l2r-local`
 cc8e5aa5).
 
 **Verdict: cost of a stock MLIR pass, not a Reussir defect.** The pipeline
@@ -21,11 +21,11 @@ about size^2.4 on one large function; no bound from MLIR's documentation
 is known here); Reussir promises nothing linear. The towers first blamed
 on it were
 [issue 20](20-statet-tower.md). Under the policy's third refinement
-(fixable build-time costs get a small patch), 0032 runs SCCP across calls
+(fixable build-time costs get a small patch), 11-a runs SCCP across calls
 only within a budget of call sites. Building the Std.Http program once
 SCCP was fixed exposed **11b**, a real quadratic in Reussir's own code:
 the acquire/drop expansion built a symbol table of the whole module for
-every glue lookup; 0033 fixes it.
+every glue lookup; 11-b fixes it.
 
 MLIR's interprocedural SCCP takes superlinear time on large call graphs.
 Large lean2rr programs (thousands of functions) spend most of their build
@@ -66,7 +66,7 @@ GB; the same tower at `Id` builds in 60 s.
 
 A Std.Http program (round 6, `adv6/io/Io6Http.lean`, a local HTTP server
 and TCP clients; lean2rr's output has 17,197 functions and 8241
-polymorphic-FFI instances), built with patch 0017
+polymorphic-FFI instances), built with patch 23-a
 ([issue 23](23-polyffi-link.md)), reaches the MLIR lowering pipeline after 12
 minutes of texture compiles and a 6 s link. perf sampled 31 minutes into
 the pipeline: all of the time in interprocedural SCCP
@@ -101,10 +101,10 @@ expansion of the arguments cost more than they save (`Cn3PolyS1` 649 s and
 
 ## Patch
 
-### 0032: SCCP across calls only within a budget
+### 11-a: SCCP across calls only within a budget
 
 Patch file
-[`patches/0032-l2r-local-bug-11-run-SCCP-across-calls-only-within-a.patch`](patches/0032-l2r-local-bug-11-run-SCCP-across-calls-only-within-a.patch)
+[`patches/11-a-sccp-call-budget.patch`](patches/11-a-sccp-call-budget.patch)
 (`l2r-local` commit `ac70115a`, applied in `./reussir`; `l2r-local` head
 cc8e5aa5).
 
@@ -152,10 +152,10 @@ has at most 1.5M pairs).
 call sites)` (unpatched: 2.9-4.8x). The Std.Http program (335M pairs)
 gets SCCP per function: 3 s and 19 s for the two runs.
 
-### 0033 (issue 11b): glue looked up in symbol tables built once
+### 11-b (issue 11b): glue looked up in symbol tables built once
 
 Patch file
-[`patches/0033-l2r-local-bug-11b-look-up-drop-and-acquire-glue-in-s.patch`](patches/0033-l2r-local-bug-11b-look-up-drop-and-acquire-glue-in-s.patch)
+[`patches/11-b-glue-symbol-tables.patch`](patches/11-b-glue-symbol-tables.patch)
 (`l2r-local` commit `5e0273b2`).
 
 **The cost.** `createDtorIfNotExists` and
@@ -174,7 +174,7 @@ the drain declaration, the acquire glue). The acquire/drop expansion
 builds one collection per run and passes it through its patterns. The
 outlined acquire glue of a record creates, while its body is built, the
 glue of its named `[value]` members ([bug 19](19-cell-of-value-record.md),
-0023); `emitOwnershipAcquisition` passes the collection on to that
+19-a); `emitOwnershipAcquisition` passes the collection on to that
 creation too. Other callers keep building a table per call.
 
 **Why it is correct.** The same functions are found and created; only
@@ -183,29 +183,30 @@ the lookup changes. Functions are never erased during the pass
 entries, and every function the pass creates is entered in it.
 
 **Verification.** Test `frontend/cell_value_record_glue_order` (a
-`Cell<Pair>` read before a `Cell<Quad>`, RV8C-01 below). With 0032 and
-0033 the Std.Http program builds to an object: 26 minutes of MLIR passes,
+`Cell<Pair>` read before a `Cell<Quad>`, RV8C-01 below). With 11-a and
+11-b the Std.Http program builds to an object: 26 minutes of MLIR passes,
 the second acquire/drop expansion 84 s.
 
 ### Review
 
-Round RV8C (local review notes, patches
-0030-0035):
+Round RV8C (local review notes, patches 22-a, 17-a, 11-a, 11-b, 20-a
+and 16-a):
 
-- 0032 held (Q3): per-function SCCP is sound and safe in parallel, the
+- 11-a held (Q3): per-function SCCP is sound and safe in parallel, the
   budget arithmetic is right and deterministic, and under the budget the
   stock pass runs unchanged (identical IR for four corpus programs).
   **RV8C-04** (low, optimization loss): the budget counted call sites of
   declarations, which cost the analysis nothing. Resolved in the final
-  0032: only callees with a body count.
-- 0033 held on its own (Q4). **RV8C-01** (medium): composed with 0023
-  (bug 19), the member glue that 0023's outlined acquire glue creates
+  11-a: only callees with a body count.
+- 11-b held on its own (Q4). **RV8C-01** (medium): composed with 19-a
+  (bug 19), the member glue that 19-a's outlined acquire glue creates
   bypassed the collection, so a later lookup missed it and rrc failed
   with "redefinition of symbol" (a `Cell<Pair>` read before a
-  `Cell<Quad>`). Resolved in the final 0033: the collection is threaded
+  `Cell<Quad>`). Resolved in the final 11-b: the collection is threaded
   through `emitOwnershipAcquisition`; the reviewer's repro is the new
-  test. **RV8C-02** (textual conflicts with the 0018-0027 stack):
-  resolved by rebasing 0030-0035 onto it.
+  test. **RV8C-02** (textual conflicts with the ten patches from 08-a to
+  27-a of the series): resolved by rebasing the six patches of the round
+  onto them.
 
 **Effect on lean2rr.** Build time only. Programs under the budget are
 compiled exactly as before; very large programs (the Std.Http program,

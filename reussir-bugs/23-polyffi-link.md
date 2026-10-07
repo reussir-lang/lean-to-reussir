@@ -2,11 +2,11 @@
 
 **Kind:** cost (build time). Not a bug: rrc's output is correct; the
 quadratic link can make large builds infeasible (65 minutes for 8241
-instances), and patch 0017 is an optimization.
+instances), and patch 23-a is an optimization.
 
 ## Summary
 
-**Kind:** cost (build time). **Status:** patched (0017, an optimization),
+**Kind:** cost (build time). **Status:** patched (23-a, an optimization),
 applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict (audit): bug (build time); reclassified on 2026-10-05 as a cost,
@@ -25,7 +25,7 @@ rrc compiles the Rust body of every instance of a polymorphic
 per instance, and then links all these bitcode modules into one before the
 MLIR lowering pipeline runs. Each link call's linker walks the whole module
 linked so far, so linking K modules took time quadratic in K: a lean2rr
-program using Std.Http (8241 instances) spent 65 minutes there. Patch 0017
+program using Std.Http (8241 instances) spent 65 minutes there. Patch 23-a
 links all the modules through one linker, as `llvm-link` does: 6.4 s.
 
 ## Symptom and repro
@@ -53,12 +53,12 @@ about two minutes, mostly other phases.
 0.1 s per heavy instance on the loaded test machine); the link of the K
 modules that follows should be too.
 
-**Actual on ef922049** (measured on `l2r-local` + 0016, whose patches do
+**Actual on ef922049** (measured on `l2r-local` + 21-a, whose patches do
 not touch this code; link = from the exit of the last texture's rustc to
 the start of the MLIR lowering pipeline, timed with a rustc wrapper and
 `rrc -v`):
 
-| K (heavy) | link | with 0017 | whole build | with 0017 |
+| K (heavy) | link | with 23-a | whole build | with 23-a |
 |---|---|---|---|---|
 | 300 | 4.0 s | 0.3 s | | |
 | 600 | 22.8 s | 0.5 s | | |
@@ -70,7 +70,7 @@ K = 300: 4.0 s, K = 600: 22.8 s (5.70x for twice the instances)` on the
 unpatched build.
 
 `Io6Http`: rrc's polymorphic-FFI phase took 4669 s, 788 s of texture
-compiles and **3881 s of linking** (6.4 s with 0017).
+compiles and **3881 s of linking** (6.4 s with 23-a).
 
 ## Cause
 
@@ -146,8 +146,8 @@ design (`docs/design/polymorphic-ffi.md`), a cost, not part of this issue.
 ## Patch
 
 Patch file
-[`patches/0017-l2r-local-bug-23-link-the-gathered-polymorphic-FFI-m.patch`](patches/0017-l2r-local-bug-23-link-the-gathered-polymorphic-FFI-m.patch)
-(`l2r-local` commit `91da4f80`, applied in `./reussir`; `l2r-local` head cc8e5aa5; made on top of 0016, it
+[`patches/23-a-one-linker.patch`](patches/23-a-one-linker.patch)
+(`l2r-local` commit `91da4f80`, applied in `./reussir`; `l2r-local` head cc8e5aa5; made on top of 21-a, it
 also applies without it). One `llvm::Linker` for the whole gather,
 `linkInModule` for each module, as `llvm-link` does:
 
@@ -235,7 +235,7 @@ mover can give a different but equivalent representative name).
 **Effect on lean2rr.** Build time only: lean2rr's output is linked the
 same way, faster. Large programs (thousands of instances, as with
 Std.Http) spent most of rrc's time linking: `Io6Http` spent 65 minutes in
-the link alone. With 0017 it goes on to MLIR's interprocedural SCCP
+the link alone. With 23-a it goes on to MLIR's interprocedural SCCP
 ([issue 11](11-sccp-call-graph.md)), where it was still running after 50
 minutes, so such programs need more than this patch to build in
 reasonable time.

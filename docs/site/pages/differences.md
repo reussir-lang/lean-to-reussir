@@ -47,14 +47,22 @@ lean2rr does not copy native pointer identity or sharing.
 
 - `ptrAddrUnsafe` answers the address of a value's cell in its own
   representation, or a word computed from a scalar. So `ptrEq`, `ptrEqList`
-  and `withPtrAddr` can answer otherwise than natively: for a value and its
-  conversion to another representation, two boxings of one value, a wrapped
-  function value, a converted thunk or task.
+  and `withPtrAddr` can answer otherwise than natively: for a value and
+  its cast to an inductive whose layout differs (a new object), and for a
+  wrapped function value.
 - Equal `UInt64`s, `Float`s and small numbers are `ptrEq` (natively each
-  boxing of a `UInt64` is a new cell).
+  boxing of a `UInt64` or `Float` is a new cell). This is also true through
+  a generic function: lean2rr makes a copy of the function for `Float` and
+  compares the bits. Natively the function gets two new boxes, and `ptrEq`
+  answers `false`. A constant boxed twice is one cell. Native Lean shares
+  that cell only within one module: boxings of one constant in two
+  modules are two cells natively, and one cell in lean2rr.
 - `ptrEq` answering `true` still means equal values. `ST.Ref.ptrEq` is exact.
 - `isExclusiveUnsafe` answers `false`. `shareCommon` shares nothing.
-  `dbgTraceIfShared` reads lean2rr's own counts.
+  `dbgTraceIfShared` reads lean2rr's own counts. It does not report a
+  shared big number (natively it does). It does not report a task that
+  one reference holds; natively a task that `Task.spawn` made is
+  multi-threaded, and the check reports it as shared.
 - **When you can see it:** only through these unsafe or debug functions.
 
 ## Tasks and concurrency
@@ -89,37 +97,47 @@ schedules native Lean can produce. See
   run more or fewer times than natively. You can see it through traces or
   panics in instance code, or as extra time.
 - **Merging after erasure.** Lean's mono `cse` can merge two calls at
-  different types into one. lean2rr does that too, except in two shapes
-  (results that differ at a function type; a call inside a local function
-  merged with one outside). There both calls run, and a trace or panic in
-  them prints twice. Lean does not fix how often a trace in pure code
-  prints, so this is accepted: test `RtCseFnResult` records both outputs
-  (expectation files) and fails if either changes.
+  different types into one. lean2rr does that too, except in a few shapes:
+  calls that cannot share an instance (a type former that differs; an
+  argument of the earlier call that cannot be used at the later call's
+  type; a closed term that only the earlier call's instance could share
+  with other functions) and calls that Lean's `cse` merges only after its
+  later passes moved the code (a local function or a join point inlined),
+  where both calls run; and a closed call at the instance at `lcAny` whose
+  result hides the type argument in a field, which does not share the
+  closed term of the same call in another function, so it runs once
+  more. A trace or panic in them then prints another number of
+  times. Lean does not fix how often a trace in pure code prints, so this
+  is accepted: test `RtCseApart` records both outputs (expectation files)
+  and fails if either changes.
 - **Compiler options** of the program's modules (`set_option compiler.…`)
   are not in the `.olean`. lean2rr runs Lean's passes with the defaults.
 - **Order of panics in pure code.** When several pure computations panic,
   their messages can come in another order: closed-term extraction can group
   them differently in lean2rr's instances.
+- **A boxed constant in a branch that never runs** is computed at startup
+  natively, a bug of Lean's compiler that lean2rr does not reproduce (see
+  [Lean bugs we do not reproduce](#lean-bugs-we-do-not-reproduce)).
 
 ## Resources and releases
 
 - **Order of releases in one free.** Natively a freed value releases what it
   holds last pushed, first released. lean2rr does the same inside every free
   that starts at a container. When user code drops a record of handles by
-  itself, Reussir's inline release goes in field order: a list of handles
-  `L0 … L7` closes `L0 L7 L6 … L1` (natively `L7 … L0`). An array set or
+  itself, Reussir's inline release goes in field order. A value of a
+  parameter's type is a box, and Reussir releases a box at once. So the
+  boxes of the first two cells close in field order, and the rest last
+  first. A `List IO.FS.Handle` `L0 … L7` closes `L0 L1 L7 L6 … L2`
+  (natively `L0 L7 … L1` where Lean knows the constructor, else
+  `L7 … L0`). A structure `{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}`
+  of handles closes `a b d c e` (natively `e d c b a`). An array set or
   pop that frees the last reference to a record releases its fields last
-  first, as Lean does. One case below the first cell is open: a cell whose
-  last record field comes before an array field releases the record
-  field's contents first (test `RtNestedArrayFreeOrder`, expected to fail;
-  the fix is a Reussir patch).
+  first, as Lean does.
 - **Release time of borrowed parameters.** lean2rr emulates Lean's borrowing
   for values that can hold a resource, with Lean's inference run on
   lean2rr's instances. Where Lean infers its own specializations
   differently, the release time follows lean2rr's instance. Resources inside
-  closures and thunks are released at their last use. A reference `set`
-  that is the reference's last use frees the new value before the old one
-  (test `RtRefSetLastUse`, expected to fail).
+  closures and thunks are released at their last use.
 - **Promises released inside a free.** Their `sync` dependents run when the
   whole free is over, not when the free reaches the promise. So they see
   the rest of the container released too. Another unresolved promise of the
@@ -171,9 +189,8 @@ garbage.
 
 | Cost | Why |
 |---|---|
-| Structural conversions rebuild a value as a tree | sharing is lost, so a value with shared parts can grow exponentially and use all memory ([an example](dependent-types.html#the-current-version)); a value converted at each call costs O(size) per call |
-| `Array.map` that changes the representation | the input and the new result live together until the map ends |
-| `ElemBox` for array elements that cannot cross the FFI | one allocation per element |
+| Casts between inductives whose layouts differ | the value is rebuilt, O(size), at each such cast; natively the cast is free. A value of one datatype, array, thunk, task or reference is never converted ([an example](dependent-types.html#one-layout-for-a-shared-tree)) |
+| `ElemBox` for a `[value]` struct of several fields in a box | one allocation per boxing |
 | Reads take their container owned | an increment and a release per read, unless LLVM cancels them |
 | One-block arrays | a 16 MiB payload (a hash table's 2^21 buckets) becomes a huge mimalloc segment, freed late |
 | Constants read in a loop | one load and a test per read (native: one load for a named constant; two loads and a test for a closed term); a constant whose bits are all 0 needs a second load |
@@ -182,11 +199,14 @@ garbage.
 ## Lean bugs we do not reproduce
 
 <div class="rule" markdown="1">
-lean2rr does not copy bugs of Lean's own runtime. A suspected bug becomes
-an intended difference only after a judge confirms it: the C source lines,
-why it is wrong (the C standard, POSIX, Lean's documentation, data loss or a
-crash), and a minimal native repro. lean-runtime's `docs/lean-bugs.md`
-lists the confirmed ones (entries `LB-nn`).
+lean2rr does not copy bugs of Lean's own runtime or compiler. A suspected
+bug becomes an intended difference only after a judge confirms it: the
+source lines, why it is wrong (the C standard, POSIX, Lean's documentation,
+data loss, a crash, or a value that differs from the kernel's), and a
+minimal native repro. lean-runtime's `docs/lean-bugs.md` lists the
+confirmed runtime bugs (entries `LB-nn`). For a compiler bug, where native
+Lean gives a wrong value or a crash, lean2rr computes the value that the
+kernel gives.
 </div>
 
 {{gen:leanbugs}}

@@ -49,10 +49,10 @@ partial def addrOf (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
     if n == "f32" then return .cast (.call "l2r_f32_raw_bits" #[] #[e]) u64
     -- `box(0)`.
     if n == "L2RUnit" then return ← evalThen (← u64Lit 1)
-    if n == boxName then return .call "l2r_ptr_addr_rec" #[t] #[e]
+    if n == boxName then return boxAddr e
     -- `UInt8/16/32`, `Char`, `Bool`, enumerations.
     if let some i ← scalarWord e n then return .call "l2r_addr_word" #[] #[i]
-    if n ∈ ["LStr", "LNatArr", "LIntArr", "LHandle"] then
+    if n ∈ ["LStr", "LHandle"] then
       return .call "l2r_ptr_addr_obj" #[t] #[e]
     match (← get).typeInfos[n]? with
     | some info =>

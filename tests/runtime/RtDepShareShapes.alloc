@@ -1,0 +1,3 @@
+# shared values of eight shapes through existentials, n = 10 and 16: native grows only with the suffixes (n x 100 cells)
+# (copies of every path stay under 10^7 cells at n = 16; n = 28 is in the shared corpus)
+10 | 16 | 4 2000 | rss 2 4000

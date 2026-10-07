@@ -7,7 +7,9 @@ Aligning the later partial application to the earlier one's type arguments
 made it a `List Nat → List Nat` (`Nat → Nat`) closure used at the String
 type: no representation conversion exists ("no representation conversion
 from L2RFn_F3nNat3nNat to L2RFn_F4nLStr4nLStr"), and the program died with
-"INTERNAL PANIC: unreachable code has been reached". -/
+"INTERNAL PANIC: unreachable code has been reached". Such calls now go to
+the instance at `lcAny`, whose closures serve both types through wrappers
+(`Mono.serves`, `uniformArgs`). -/
 
 @[noinline] def tagger {α : Type} (n : Nat) (x : α) : α := dbgTrace s!"tag {n}" fun _ => x
 

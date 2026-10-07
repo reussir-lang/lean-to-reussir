@@ -120,7 +120,10 @@ relative to `lean2rr/LeanToReussir/`. Plan
 ### A local `fun` left after lambda lifting is a raw closure
 
 - **What:** A local function (lambda lifting normally removes them all) is
-  lowered defensively to nested `raw` function values.
+  lowered defensively to nested `raw` function values: one closure per
+  domain of its type at run time (rule 4: none for a phantom domain; a
+  closure that ignores its argument at a unit domain for an erased
+  parameter that the function does not take, `keepMask`).
 - **Why:** Stage 2's lambda lifting should leave none; if one slips
   through, the program is still translated, with the closure semantics.
 - **Where:** `Lower/Code.lean`: `lowerCode` (the `.fun` case).

@@ -1,17 +1,19 @@
 /-! Runtime test: two casts through a `Box` to `F2` (plan §5.1, §10 "Casts
-that natively read an address"), whose conversions both need `T1`→`T2` (a
-tree: two recursive fields, so `convMachine`, which also adds two enum
-types) and `Q1`→`Q2` (inside an array field, `vecConv`), generated inside
-`boxCastConv`'s probes. `F1`'s conversion also needs a function value at
-another representation (its field `f`). Its probe used to be undone, which
-cut the functions and types it had generated (eight and two) back off the
-emitted items and their names out of the function index, and `H1`'s, kept,
-generated them anew; a rollback that left a name in the index, or a type or
-function behind, failed the build (review R9S2R-04, program R9Probe9).
-Since review CLR-01 a cast that needs a wrapper converts too: both are kept
-and both run here. A probe is now undone only for a cast that has no
-conversion after it registered function-value helpers. `conv-count-check.sh`
-also builds this program with the conversion counter. -/
+that natively read an address"), of an `F1` and of an `H1`. Both
+conversions are generated inside the unboxing function to `F2`
+(`genUnbox`) and need the same helpers: `T1`→`T2` (a tree: two recursive
+fields, a `structConv` that calls itself) and, for each element of the
+array field (an array of boxes, one `Array` type), `Q1`→`Q2` in the
+unboxing function to `Q2`; `F1`'s also needs a function value at another
+representation (its field `f`: a wrapper and its conversion). The test
+used to guard the rollback of a cast's probe (`boxCastConv`: a rollback
+that left a name in the function index, or a type or function behind,
+failed the build; review R9S2R-04, program R9Probe9). The rollback is gone,
+since no cast that `boxCastable` accepts registers a helper and then fails
+(review of rule 1, simplicity finding 1): the test now checks that both
+conversions run, with helpers that the first one generates and the second
+one reuses. `conv-count-check.sh` also builds this program with the
+conversion counter. -/
 structure Pkg where
   α : Type
   v : α

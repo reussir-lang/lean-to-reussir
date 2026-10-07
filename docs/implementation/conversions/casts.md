@@ -80,6 +80,25 @@ values"); divergences in
   `l2r_f32_raw_bits`.
 - **Remove only if:** never.
 
+### A cast between inductives whose layouts differ converts constructor by constructor
+
+- **What:** When an isomorphic inductive (or, in a cast the program
+  performs, one that corresponds by tag) is read as another and their
+  layouts differ (a `Nat` field read as an `Int`), a generated function
+  rebuilds the value at the target's layout, each field converted as
+  `tryCoerce` converts it; a recursive field calls the function again
+  (`convsInProgress` names the functions being generated). Two values of
+  one inductive never convert (one type per inductive).
+- **Why:** The two types' layouts differ, so the object cannot be reused
+  (when they agree it is: `retypable`). Such a conversion uses stack
+  proportional to the depth of the value; the explicit-stack loop that
+  conversions between instantiations of one inductive needed (a 10^6-level
+  spine, `RtConvDeep`) went with them, and a cast of a deep value of two
+  inductives that differ in layout is rare.
+- **Where:** `Lower/Conv.lean`: `structConv`, `structConvBody`,
+  `convBuild`, `convArms`, `ConvArm`.
+- **Remove only if:** never.
+
 ### Inductives that do not correspond convert by tag
 
 - **What:** A cast the program performs between inductives with

@@ -45,22 +45,22 @@ def optionCases (o : RR.Expr) (ot : RR.Ty) (onSome : RR.Expr → RR.Ty → Lower
     { ty := on, ctor := none, binders := #[], body := .ofExpr onNone }]
 
 /-- A generated function `name(src : srcTy) -> RVec<dstElem>` mapping each
-element `x` of array `src` to `f x` (`dstElem` is stored as it is: a string
-or `bool`). Cached by name. -/
+element `x` of array `src` (at the source array's element type) to `f x`.
+Cached by name. -/
 def arrayMapFn (name : String) (srcTy dstElem : RR.Ty) (f : RR.Expr → LowerM RR.Expr) : LowerM String := do
   if (← hasFn name) then return name
-  let some sr ← arrayRepr? srcTy | throwError "lean2rr: bad array type {srcTy.render}"
+  let some se := arrayElem? srcTy | throwError "lean2rr: bad array type {srcTy.render}"
   let dstTy := RR.Ty.app "RVec" #[dstElem]
   let u64 := RR.Ty.named "u64"
   let go := name ++ "_go"
   let y ← f (.var "x")
   let loop : RR.Block := .ofExpr <| .ite (.atom "i < n")
-    ⟨#[("one", some u64, .atom "1"), ("x", some sr.value, sr.load (sr.call "get" #[.var "src", .var "i"])),
+    ⟨#[("one", some u64, .atom "1"), ("x", some se, arrayCall se "get" #[.var "src", .var "i"]),
         ("y", some dstElem, y)],
       .call go #[] #[.var "src", .atom "i + one", .var "n",
         .call "l2r_array_push" #[dstElem] #[.var "acc", .var "y"]]⟩
     (.ofExpr (.var "acc"))
-  let entry : RR.Block := ⟨#[("n", some u64, sr.call "size" #[.var "src"]), ("zero", some u64, .atom "0")],
+  let entry : RR.Block := ⟨#[("n", some u64, arrayCall se "size" #[.var "src"]), ("zero", some u64, .atom "0")],
     .call go #[] #[.var "src", .var "zero", .var "n", .call "l2r_array_empty" #[dstElem] #[]]⟩
   modify fun s => { s with fns := s.fns ++ #[
     .fn go #[("src", srcTy), ("i", u64), ("n", u64), ("acc", dstTy)] dstTy loop,
@@ -119,7 +119,9 @@ def spawnCall (sa : RR.Expr) (saTy : RR.Ty) (modes : Option Nat)
       (m, some u64, .atom s!"{i 0} + ({i 1} * {k8}) + ({i 2} * {k16})")]
     modesE := .atom s!"({m} as u32)"
   let (cmd, cmdT, cmdE) ← field 1 (some str) "pcmd"
-  let (argv, argvT, argvE) ← field 2 (some strs) "pargs"
+  -- `args : Array String`: the one array type (`RVec<Box>`), passed as it
+  -- is; the runtime reads each boxed string in place (`any::str_ref`).
+  let (argv, argvT, argvE) ← field 2 (some (.app "RVec" #[RR.Ty.box])) "pargs"
   let (co, coT, coE) ← field 3 none "pco"
   let cd ← fresh "pcd"
   let ch ← fresh "pch"
@@ -128,16 +130,26 @@ def spawnCall (sa : RR.Expr) (saTy : RR.Ty) (modes : Option Nat)
     (ch, some .bool, ← optionCases (.var co) coT (fun _ _ => pure (.atom "true")) (.atom "false"))]
   -- `env : Array (String × Option String)`.
   let (en, enT, enE) ← field 4 none "pen"
-  let some er ← arrayRepr? enT | throwError "lean2rr: bad IO.Process.SpawnArgs.env type {enT.render}"
-  let pairTy := er.value
+  let some ee := arrayElem? enT | throwError "lean2rr: bad IO.Process.SpawnArgs.env type {enT.render}"
   let tag := enT.enc
+  -- An element: a pair (in a `Box`), whose value is an `Option String` (in
+  -- the pair's `Box` field).
+  let strE := mkConst ``String
+  let pairTy ← lowerType (mkApp2 (mkConst ``Prod [levelZero, levelZero]) strE
+    (mkApp (mkConst ``Option [levelZero]) strE))
+  let optTy ← lowerType (mkApp (mkConst ``Option [levelZero]) strE)
+  let pairOf (x : RR.Expr) (k : RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
+    let p ← fresh "pp"
+    return .block ⟨#[(p, some pairTy, ← coerce x ee pairTy)], ← k (.var p)⟩
   let valueOf (x : RR.Expr) (onSome : RR.Expr → RR.Ty → LowerM RR.Expr) (onNone : RR.Expr) : LowerM RR.Expr := do
-    let (e, t) ← structField pairTy x 1
-    let o ← fresh "po"
-    return .block ⟨#[(o, some t, e)], ← optionCases (.var o) t onSome onNone⟩
+    pairOf x fun p => do
+      let (e, t) ← structField pairTy p 1
+      let o ← fresh "po"
+      return .block ⟨#[(o, some optTy, ← coerce e t optTy)], ← optionCases (.var o) optTy onSome onNone⟩
   let namesFn ← arrayMapFn s!"l2r_proc_env_names_{tag}" enT str fun x => do
-    let (e, t) ← structField pairTy x 0
-    coerce e t str
+    pairOf x fun p => do
+      let (e, t) ← structField pairTy p 0
+      coerce e t str
   let valuesFn ← arrayMapFn s!"l2r_proc_env_values_{tag}" enT str fun x => do
     valueOf x (fun v vt => coerce v vt str) (← strLit "")
   let setFn ← arrayMapFn s!"l2r_proc_env_set_{tag}" enT .bool fun x => do
@@ -196,35 +208,35 @@ def processExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array
   -- `wait`, `tryWait` and `kill` borrow the child (`@&`): natively it is
   -- released after the call, by its last user, so its pipes stay open
   -- while the call runs. Here the glue holds it until the result is built.
-  let borrowing (c : RR.Expr) (ct : RR.Ty) (prim : RR.Expr) (primRet resTy : RR.Ty)
+  let borrowing (c : RR.Expr) (ct : RR.Ty) (prim : RR.Expr) (primRet resTy payTy : RR.Ty)
       (okOf : RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
     let r ← fresh "pr"
     let res ← fresh "pres"
     let d ← fresh "pd"
-    return .block ⟨#[(r, some primRet, prim), (res, some resTy, ← ioFinish (.var r) primRet resTy okOf),
+    return .block ⟨#[(r, some primRet, prim), (res, some resTy, ← ioFinish (.var r) primRet resTy payTy okOf),
       (d, some .unit, .call "lean_void_mk" #[ct] #[c])], .var res⟩
   match orig with
   | ``IO.Process.spawn =>
     let resTy ← lowerType ret
-    let childTy ← ioPayloadTy resTy
+    let childTy ← ioPayloadType ret
     let saTy ← lowerType params[0]!
     return some (← withVar "sa" saTy args[0]! fun sa => do
       let (lets, pid, ss, idx) ← spawnCall sa saTy none
-      return .block ⟨lets, ← ioFinish pid u32 resTy fun x => spawnedChild childTy idx x ss⟩)
+      return .block ⟨lets, ← ioFinish pid u32 resTy childTy fun x => spawnedChild childTy idx x ss⟩)
   | ``IO.Process.Child.wait =>
     let resTy ← lowerType ret
-    let pay ← ioPayloadTy resTy
+    let pay ← ioPayloadType ret
     return some (← childArg fun c ct => do
       let (pid, _) ← structField ct c 3
-      borrowing c ct (.call "l2r_proc_wait" #[] #[pid]) u32 resTy fun x => coerce x u32 pay)
+      borrowing c ct (.call "l2r_proc_wait" #[] #[pid]) u32 resTy pay fun x => coerce x u32 pay)
   | ``IO.Process.Child.tryWait =>
     let resTy ← lowerType ret
-    let pay ← ioPayloadTy resTy
+    let pay ← ioPayloadType ret
     let some vt := (← ctorFieldTys pay ``Option.some)[0]? | return none
     return some (← childArg fun c ct => do
       let (pid, _) ← structField ct c 3
       -- `(1 << 32) | code` once the child has exited, 0 while it runs.
-      borrowing c ct (.call "l2r_proc_try_wait" #[] #[pid]) u64 resTy fun x => do
+      borrowing c ct (.call "l2r_proc_try_wait" #[] #[pid]) u64 resTy pay fun x => do
         let z ← fresh "pz"
         let code ← coerce (.atom s!"({x.render 0} as u32)") u32 vt
         return .block ⟨#[(z, some u64, .atom "0")], .ite (.atom s!"{x.render 0} == {z}")
@@ -234,7 +246,7 @@ def processExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array
     return some (← childArg fun c ct => do
       let (pid, _) ← structField ct c 3
       let (ss, _) ← structField ct c 4
-      borrowing c ct (.call "l2r_proc_kill" #[] #[pid, ss]) u64 resTy fun _ => pure .unitVal)
+      borrowing c ct (.call "l2r_proc_kill" #[] #[pid, ss]) u64 resTy .unit fun _ => pure .unitVal)
   | ``IO.Process.Child.pid =>
     let rt ← lowerType ret
     return some (← childArg fun c ct => do
@@ -244,10 +256,15 @@ def processExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array
     -- `(stdin, child')`: the new child has a unit stdin (`box(0)`) and the
     -- other fields, the pid and the `setsid` flag included.
     let resTy ← lowerType ret
-    let pay ← ioPayloadTy resTy
+    let pay ← ioPayloadType ret
     let tys ← ctorFieldTys pay ``Prod.mk
-    let some fstTy := tys[0]? | return none
-    let some newTy := tys[1]? | return none
+    let some fstField := tys[0]? | return none
+    let some newField := tys[1]? | return none
+    -- The pair's components' own types (its fields are `Box`es).
+    let some pe := ioPayloadExpr? ret | return none
+    unless pe.isAppOfArity ``Prod 2 do return none
+    let fstTy ← lowerType pe.appFn!.appArg!
+    let newTy ← lowerType pe.appArg!
     return some (← childArg fun c ct => do
       let (s0, t0) ← structField ct c 0
       let fst ← if fstTy == .unit then pure .unitVal else coerce s0 t0 fstTy
@@ -259,11 +276,12 @@ def processExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array
         else
           let (e, t) ← structField ct c i
           vals := vals.push (← coerce e t dt)
-      wrapIOResult resTy (← ctorValue pay ``Prod.mk #[fst, ← ctorValue newTy cn vals]))
+      let child ← ctorValue newTy cn vals
+      wrapIOResult resTy (← ctorValue pay ``Prod.mk #[← coerce fst fstTy fstField, ← coerce child newTy newField]) pay)
   | _ => return none
 
 /-- The body of `IO.Process.output args input?`'s declaration (parameters
-`ps`, result `ret`), in place of Lean's: that one reads stdout in a
+`ps`, result `ret`, of Lean type `retE`), in place of Lean's: that one reads stdout in a
 dedicated task while it reads stderr, and lean2rr's tasks are deferred, so
 a child writing more than a pipe holds to stdout before closing stderr would
 block forever. The runtime's `l2r_proc_output` (lean-runtime's
@@ -273,12 +291,12 @@ is written and flushed, and the handle closed); read both pipes to end of
 file together; `readToEnd`'s UTF-8 check of stderr; `wait`; the same check
 of stdout; errors in that order. On success the outputs are
 `l2r_proc_output_str(1)` and `(2)`. -/
-def processOutputBody (ps : Array (String × RR.Ty)) (ret : RR.Ty) : LowerM RR.Block := do
+def processOutputBody (ps : Array (String × RR.Ty)) (ret : RR.Ty) (retE : Expr) : LowerM RR.Block := do
   let some (sa, saTy) := ps[0]? | throwError "lean2rr: bad IO.Process.output signature"
   let some (inp, inTy) := ps[1]? | throwError "lean2rr: bad IO.Process.output signature"
   let u32 := RR.Ty.named "u32"
   let str := RR.Ty.named "LStr"
-  let outTy ← ioPayloadTy ret
+  let outTy ← ioPayloadType retE
   let (_, oc, _) ← structLayoutOf outTy
   let outFs ← ctorFieldTys outTy oc
   unless outFs.size == 3 do throwError "lean2rr: bad IO.Process.Output type {outTy.render}"
@@ -291,6 +309,6 @@ def processOutputBody (ps : Array (String × RR.Ty)) (ret : RR.Ty) : LowerM RR.B
   let outStr (k : Nat) : RR.Expr := .call "l2r_proc_output_str" #[] #[.atom (toString k)]
   let output ← ctorValue outTy oc #[← coerce code u32 outFs[0]!,
     ← coerce (outStr 1) str outFs[1]!, ← coerce (outStr 2) str outFs[2]!]
-  return ⟨inLets ++ lets, ← ioCheck ret (.ofExpr (← wrapIOResult ret output))⟩
+  return ⟨inLets ++ lets, ← ioCheck ret (.ofExpr (← wrapIOResult ret output outTy))⟩
 
 end LeanToReussir

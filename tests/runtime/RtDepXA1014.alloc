@@ -1,0 +1,3 @@
+# shared case A1014: lists of lists sharing one inner list of 1000 and their tails, n = 30 and 120: linear in n
+# (a copy of the inner list per element is n x 1000 cells; the case's large size, n = 10^6, is in the shared corpus)
+30 | 120 | 4 2000 | rss 2 4000

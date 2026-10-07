@@ -627,8 +627,10 @@ inductive StartupStep where
   | init (decl inst : Name)
   deriving Inhabited
 
-/-- The IO result type of an instance and its `ok`/`error` variants. -/
-def ioResultOf (inst : Name) : LowerM (String × String × String × Option RR.Ty) := do
+/-- The IO result type of an instance, its `ok`/`error` variants, the type
+of its `ok` field (a `Box`: the payload's type is a parameter) and the
+payload's own type (from the instance's Lean result type). -/
+def ioResultOf (inst : Name) : LowerM (String × String × String × Option RR.Ty × RR.Ty) := do
   let some d := (← read).decls.find? inst | throwError "lean2rr: no declaration {inst}"
   let (_, r) := splitFnType d.type d.params.size
   let .named outTy ← lowerType r | throwError "lean2rr: {inst} does not return an IO result"
@@ -636,7 +638,41 @@ def ioResultOf (inst : Name) : LowerM (String × String × String × Option RR.T
   let okV := (info.ctors.find? ``EST.Out.ok).map (·.variant) |>.getD "c_ok"
   let errV := (info.ctors.find? ``EST.Out.error).map (·.variant) |>.getD "c_error"
   let okField := (info.ctors.find? ``EST.Out.ok).bind (·.fields[0]?) |>.join |>.map (·.2)
-  return (outTy, okV, errV, okField)
+  return (outTy, okV, errV, okField, ← ioPayloadType r)
+
+/-- `l2r_err_string(e)`: the text of an uncaught `IO.Error` (Lean's
+`IO.Error.toString`, instance `errStr`), from the error field `e : errTy`
+of an IO result (a `Box`, unboxed here: the raw text of the entry point and
+the startup chain calls this function). Generated once. -/
+def errStringFn (errStr : Name) (outTy : String) : LowerM String := do
+  let name := "l2r_err_string"
+  if ← hasFn name then return name
+  let some info := (← get).typeInfos[outTy]? | throwError "lean2rr: no IO result type {outTy}"
+  let some (some (_, errTy)) := (info.ctors.find? ``EST.Out.error).bind (·.fields[0]?)
+    | throwError "lean2rr: IO result {outTy} has no error field"
+  let some d := (← read).decls.find? errStr | throwError "lean2rr: no declaration {errStr}"
+  let pt ← match d.params[0]? with
+    | some p => lowerType p.type
+    | none => pure errTy
+  let arg ← coerce (.var "e") errTy pt
+  let body ← coerce (.call (fnName errStr) #[] #[arg]) (← lowerType (splitFnType d.type d.params.size).2) (.named "LStr")
+  modify fun s => { s with fns := s.fns.push (.fn name #[("e", errTy)] (.named "LStr") (.ofExpr body)) }
+  return name
+
+/-- `l2r_init_put_<slot>(v)`: store the value `v : vt` (the `ok` field of
+the IO result of `initialize` constant `decl`'s action, a `Box`) into the
+constant's once-cell `slot`, at the constant's own type, the type its reads
+take it at (`Callee.initConst`). Generated once per constant. -/
+def initPutFn (decl : Name) (slot : Nat) (vt : RR.Ty) : LowerM String := do
+  let name := s!"l2r_init_put_{slot}"
+  if ← hasFn name then return name
+  let t ← lowerType (← toMonoTypeKeep (← getOtherDeclBaseType decl []))
+  let (st, boxed) ← cellStorage t
+  let v ← coerce (.var "v") vt t
+  let stored := if boxed then match st with | .named bn => RR.Expr.ctor bn none #[v] | _ => v else v
+  let body : RR.Block := ⟨#[("s", some st, .call "l2r_once_set" #[st] #[.atom (toString slot), stored])], .atom "0"⟩
+  modify fun s => { s with fns := s.fns.push (.fn name #[("v", vt)] (.named "u64") body) }
+  return name
 
 /-- The startup chain is cut into functions of at most this many steps
 (and their calls grouped the same way): one chain of nested matches per
@@ -654,7 +690,10 @@ def startupChain (errStr : Name) (startup : Array StartupStep) : LowerM String :
   -- initializer is reported and exits (`l2r_init_failed`), so later
   -- initializers do not run. The chain ends by clearing `IO.initializing`.
   let chunk := startupChunk
-  let failed (e : String) := s!"l2r_init_failed({fnName errStr}({e}))"
+  let errFn ← match startup.findSome? (fun | .ioUnit i | .init _ i => some i | .caf _ => none) with
+    | none => pure (fnName errStr)
+    | some inst => errStringFn errStr (← ioResultOf inst).1
+  let failed (e : String) := s!"l2r_init_failed({errFn}({e}))"
   let mut initFns := ""
   let mut calls : Array String := #[]
   let mut start := 0
@@ -667,15 +706,13 @@ def startupChain (errStr : Name) (startup : Array StartupStep) : LowerM String :
       match startup[j]! with
       | .caf inst => code := s!"let caf{j} = {fnName inst}();\n" ++ code
       | .ioUnit inst =>
-        let (t, ok, err, _) ← ioResultOf inst
+        let (t, ok, err, _, _) ← ioResultOf inst
         code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\n{code}\n},\n{t}::{err}(e{j}) => \{ {failed s!"e{j}"} }\n}"
       | .init decl inst =>
-        let (t, ok, err, field) ← ioResultOf inst
+        let (t, ok, err, field, _) ← ioResultOf inst
         let some slot := (← get).initSlots.find? decl | throwError "lean2rr: no slot for {decl}"
-        let vt := field.getD RR.Ty.unit
-        let (st, boxed) ← arrayElemTy vt
-        let stored := if boxed then match st with | .named bn => s!"{bn}\{v{j}}" | _ => s!"v{j}" else s!"v{j}"
-        code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\nlet s{j} : {st.render} = l2r_once_set<{st.render}>({slot}, {stored});\n{code}\n},\n{t}::{err}(e{j}) => \{ {failed s!"e{j}"} }\n}"
+        let put ← initPutFn decl slot (field.getD RR.Ty.unit)
+        code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\nlet s{j} : u64 = {put}(v{j});\n{code}\n},\n{t}::{err}(e{j}) => \{ {failed s!"e{j}"} }\n}"
     let name := s!"l2r_init_chunk_{calls.size}"
     initFns := initFns ++ s!"fn {name}() -> u64 \{\n{code}\n}\n\n"
     calls := calls.push s!"let ic{calls.size} : u64 = {name}();"

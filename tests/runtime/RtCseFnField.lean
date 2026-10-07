@@ -5,10 +5,11 @@ the result type let `Fns α` and `Sink α`, which hide them in a field, be
 aligned to the earlier type, and the closure in the field, used at the other
 type with an argument of that type, needed a conversion that does not exist
 ("no representation conversion from Nat to LStr"): "INTERNAL PANIC:
-unreachable code has been reached". `Mono.alignable` now follows the
-inductives into their fields; the calls are not aligned and run twice, as
-plan §10 "Merging after erasure" says (their traces are in the closures,
-which run per application in both). -/
+unreachable code has been reached". `Mono.serves` follows the inductives
+into their fields, so the calls are not aligned to the earlier call's
+instance; they go to the instance at `lcAny`, whose closures serve both
+types (their traces are in the closures, which run per application in
+both). -/
 
 @[noinline] def tagger {α : Type} (n : Nat) (x : α) : α := dbgTrace s!"tag {n}" fun _ => x
 

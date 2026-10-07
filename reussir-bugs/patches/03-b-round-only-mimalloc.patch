@@ -1,0 +1,123 @@
+From 136d9a9f83eb50fef57442d36a5814f60ab29937 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Tue, 6 Oct 2026 19:30:58 -0400
+Subject: [PATCH] l2r-local: issue 3: round global allocation sizes only under
+ mimalloc; the whole-block test is for mimalloc v2
+
+Review of 03-a (local notes review-inline):
+
+- F5: the rounding also applied to the libc fallback backend (the
+  sanitizer runtime variants, miri), where malloc already gives 16-byte
+  alignment and the rounded size hid a Rust-side overflow of up to 15
+  bytes from the sanitizers. global_size now rounds only under
+  all(feature = "mimalloc", not(miri)).
+- F6: under --features mimalloc-v3 global_alloc_takes_whole_blocks fails
+  (at size 33): with MI_MAX_ALIGN_SIZE=8, v3 starts most pages of classes
+  that are not powers of two 8 bytes off 16, so it still moves blocks.
+  The test is now cfg'd to mimalloc v2.
+- F7: the comment said that a page's blocks start at a multiple of the
+  block size, which mimalloc does not always do; what holds is that a
+  page starts at a 64 KiB slice boundary plus an offset that is a
+  multiple of 16 when the block size is. It also says now that only
+  requests of at most 64 bytes change size (every larger class is a
+  multiple of 16).
+
+Checked: cargo test --lib alloc:: with the default features (6 tests),
+--no-default-features (5) and --no-default-features --features
+mimalloc-v3 (5) pass.
+---
+ crates/reussir-rt/src/alloc.rs | 51 +++++++++++++++++++++-------------
+ 1 file changed, 31 insertions(+), 20 deletions(-)
+
+diff --git a/crates/reussir-rt/src/alloc.rs b/crates/reussir-rt/src/alloc.rs
+index f36414f0..7a7bed8c 100644
+--- a/crates/reussir-rt/src/alloc.rs
++++ b/crates/reussir-rt/src/alloc.rs
+@@ -289,31 +289,40 @@ pub struct ReussirGlobalAlloc;
+ /// provide for any allocation.
+ const GLOBAL_MAX_ALIGN: usize = 16;
+ 
+-/// The size a global allocation asks the backend for: the requested size
+-/// rounded up to a multiple of `GLOBAL_MAX_ALIGN`.
++/// The size a global allocation asks the backend for: under mimalloc, the
++/// requested size rounded up to a multiple of `GLOBAL_MAX_ALIGN`.
+ ///
+-/// mimalloc (built with `MI_MAX_ALIGN_SIZE=8`) then gives the 16-byte
++/// mimalloc v2 (built with `MI_MAX_ALIGN_SIZE=8`) then gives the 16-byte
+ /// alignment from the size class alone: every size class of a multiple of 16
+ /// bytes is a multiple of 16 (the classes up to 64 bytes are exact, the
+-/// larger ones even word counts), and the blocks of a page start at a
+-/// multiple of the block size (`_mi_segment_page_start_from_slice`; a block
+-/// over 64 KiB starts its own page, at a 64 KiB boundary).
+-/// `mi_malloc_aligned` and `mi_realloc_aligned` take the free block or the
+-/// plain allocation (`mi_malloc_is_naturally_aligned`). With the size as
+-/// requested (24 bytes, say), `mi_malloc_aligned` took the 24-byte class only
+-/// when its next free block happened to be 16-aligned; otherwise it
++/// larger ones even word counts), and a page starts at a 64 KiB slice
++/// boundary plus an offset that is then a multiple of 16
++/// (`_mi_segment_page_start_from_slice`; a block over 64 KiB is alone in its
++/// page). `mi_malloc_aligned` and `mi_realloc_aligned` take the free block
++/// or the plain allocation (`mi_malloc_is_naturally_aligned`). With the size
++/// as requested (24 bytes, say), `mi_malloc_aligned` took the 24-byte class
++/// only when its next free block happened to be 16-aligned; otherwise it
+ /// allocated `size + 15` bytes and moved the pointer, which marks the page
+ /// as holding moved blocks (`mi_page_set_has_aligned`): every later free in
+ /// that page, of any object (the language heap shares the pages), took
+ /// mimalloc's slow path (`mi_free_generic_local`, `_mi_page_ptr_unalign`).
++/// Only requests of at most 64 bytes change size: every larger class is a
++/// multiple of 16 already.
+ ///
+ /// A larger block is allowed: Rust's `dealloc` and `realloc` pass the
+ /// requested size back, which the size-recovering backends ignore. The
+ /// default `alloc_zeroed` goes through `alloc`. No overflow: a `Layout`'s
+-/// size is at most `isize::MAX`.
++/// size is at most `isize::MAX`. The libc fallback (the sanitizer builds,
++/// miri) gets the size as requested: `malloc` gives 16-byte alignment
++/// anyway, and the exact size lets the sanitizers see a Rust-side overflow
++/// past the end of the block.
+ #[inline]
+ const fn global_size(size: usize) -> usize {
+-    size.next_multiple_of(GLOBAL_MAX_ALIGN)
++    if cfg!(all(feature = "mimalloc", not(miri))) {
++        size.next_multiple_of(GLOBAL_MAX_ALIGN)
++    } else {
++        size
++    }
+ }
+ 
+ unsafe impl std::alloc::GlobalAlloc for ReussirGlobalAlloc {
+@@ -496,8 +505,8 @@ mod tests {
+ 
+     /// The global allocator keeps `max_align_t` (16-byte) alignment for every
+     /// request, through `alloc`, `alloc_zeroed` and `realloc`, whatever the
+-    /// requested size and alignment (sizes are rounded up to a multiple of 16:
+-    /// `global_size`), and `realloc` keeps the contents.
++    /// requested size and alignment (under mimalloc, sizes are rounded up to
++    /// a multiple of 16: `global_size`), and `realloc` keeps the contents.
+     #[test]
+     fn global_alloc_is_16_aligned() {
+         use std::alloc::{GlobalAlloc, Layout};
+@@ -532,12 +541,14 @@ mod tests {
+         }
+     }
+ 
+-    /// Under mimalloc, a global allocation is a whole block of the size class
+-    /// of its size rounded up to 16: mimalloc did not allocate more and move
+-    /// the pointer, which would mark the page and send every later free in it
+-    /// to mimalloc's slow path. The blocks stay live, so that the allocations
+-    /// come from fresh and partly used pages alike.
+-    #[cfg(all(feature = "mimalloc", not(miri)))]
++    /// Under mimalloc v2, a global allocation is a whole block of the size
++    /// class of its size rounded up to 16: mimalloc did not allocate more and
++    /// move the pointer, which would mark the page and send every later free
++    /// in it to mimalloc's slow path. The blocks stay live, so that the
++    /// allocations come from fresh and partly used pages alike. (v3 starts
++    /// most pages of classes that are not powers of two 8 bytes off 16, so
++    /// it still moves blocks there.)
++    #[cfg(all(feature = "mimalloc", not(feature = "mimalloc-v3"), not(miri)))]
+     #[test]
+     fn global_alloc_takes_whole_blocks() {
+         use libmimalloc_sys as ffi;
+-- 
+2.43.0
+

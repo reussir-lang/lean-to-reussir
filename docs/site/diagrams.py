@@ -209,25 +209,25 @@ def pipeline():
     link(388, 410, "mono LCNF with exact types (a few lcAny left)")
     step(412, 80, ["Stage 3: check and recover lost types",
                    "types flow from definitions, never from uses",
-                   "split-map-loops, uniform-updates (optional passes)",
-                   "typed references (typedRef)"],
-         "b-l2r", emit="--emit retyped", left=["MonoRetype.lean", "Opt/*"])
+                   "result types from returns and callers",
+                   "what is not recovered stays lcAny, a box"],
+         "b-l2r", emit="--emit retyped", left=["MonoRetype.lean"])
     link(492, 514, "checked mono LCNF")
     step(516, 40, ["passes over mono LCNF (float-lits)"], "b-opt",
          left=["Opt/FloatLits"])
     link(556, 578)
     step(580, 112, ["Stage 4: lower to Reussir",
-                    "types: records, enums, Box, function-value enums",
-                    "declarations with Lean's arities; join points J1 to J4",
+                    "types: one per datatype, the box LAny, function-value enums",
+                    "declarations: erased parameters removed; join points J1 to J4",
                     "externs: prelude functions and generated glue",
                     "startup chain, constants in once-cells, the entry point",
                     "lowering hooks of the optional passes"],
          "b-l2r", left=["Lower/*.lean", "Emit/*.lean"])
     link(692, 714, "Reussir functions and types")
     step(716, 64, ["After lowering",
-                   "Array Nat literal tables, Outline (long code cut for rrc)",
+                   "Outline (long code cut for rrc)",
                    "passes over the generated functions (sink-proj)"],
-         "b-l2r", emit="--emit rr", left=["ArrayLits", "Outline", "Opt/SinkProj"])
+         "b-l2r", emit="--emit rr", left=["Outline", "Opt/SinkProj"])
     link(780, 802, "prog.rr: the program text, prelude.rr prepended")
     step(804, 80, ["rrc: Reussir",
                    "Reussir front end, then MLIR passes:",
@@ -293,7 +293,7 @@ def nat_word():
     s = SVG("natword", 900, 215, "One-word Nat and Int",
             "A <code>Nat</code> or <code>Int</code> is one 64-bit word. Reussir "
             "counts the word only when its low bit is 0 (tagged handles, local "
-            "patch 0050).")
+            "patch 41-a).")
     s.text(10, 28, "small value n (a Nat below 2^63, an Int in the int32 range): the word 2n+1", "t")
     s.rect(10, 40, 440, 34, "c-data")
     s.text(230, 62, "n  (bits 63 to 1)", "tc", "middle")
@@ -336,19 +336,19 @@ def lstr_block():
 
 def rvec_block():
     s = SVG("rvec", 900, 180, "Arrays: one block",
-            "<code>RVec&lt;S&gt;</code> (<code>Array α</code>, <code>ByteArray</code>, "
-            "<code>FloatArray</code>) and <code>TagVec</code> (<code>Array Nat</code>, "
-            "<code>Array Int</code>) have Lean's 24-byte array header, then the "
-            "elements inline.")
-    s.text(10, 26, "RVec<S>: elements in their storage type S (at most 8 bytes each)", "t")
+            "<code>RVec&lt;LAny&gt;</code> (<code>Array α</code>, for every "
+            "<code>α</code>), <code>RVec&lt;u8&gt;</code> (<code>ByteArray</code>) and "
+            "<code>RVec&lt;f64&gt;</code> (<code>FloatArray</code>) have Lean's "
+            "24-byte array header, then the elements inline.")
+    s.text(10, 26, "RVec<LAny>: each element is one box (8 bytes)", "t")
     bar(s, 10, 44, [("count", 4, "c-hdr"), ("pad", 4, "c-pad"),
                     ("size", 8, "c-hdr"), ("capacity", 8, "c-hdr"),
-                    ("elem 0", 8, "c-data"), ("elem 1", 8, "c-data"),
+                    ("box 0", 8, "c-data"), ("box 1", 8, "c-data"),
                     ("more ...", "n", "c-data")], unit=16)
-    s.text(10, 114, "TagVec: each element is the Nat's or Int's own word (odd: small; even: big pointer)", "t")
+    s.text(10, 114, "An Array Nat: a small Nat is its own odd word; a big Nat is its block's pointer, with the type number 1", "t")
     bar(s, 10, 132, [("count", 4, "c-hdr"), ("pad", 4, "c-pad"),
                      ("size", 8, "c-hdr"), ("capacity", 8, "c-hdr"),
-                     ("2n+1", 8, "c-data"), ("address", 8, "c-ptr"),
+                     ("2n+1", 8, "c-data"), ("1 | address", 8, "c-ptr"),
                      ("more words ...", "n", "c-data")], unit=16)
     return s.render()
 
@@ -369,26 +369,34 @@ def record_cells():
     s.text(10, 214, "Tree.leaf (a constructor without fields): an immediate, a tagged pointer to a static cell; no allocation", "t")
     s.text(10, 238, "Ordering (no fields anywhere): enum [value], a small integer; no allocation", "t")
     s.text(10, 262, "ST.Out α (one relevant field): [value] struct, the field itself, stored inline", "t")
-    s.text(10, 286, "Option α, Except ε α, List α, user types: one Reussir type per instantiation of their relevant parameters", "t")
+    s.text(10, 286, "Option α, Except ε α, List α, user types: one Reussir type per datatype; a field of a parameter's type is a box", "t")
     s.text(10, 310, "The widths are schematic (a : u8 is one byte): Reussir computes the real layout.", "ts")
     return s.render()
 
 
 def box_uniform():
-    s = SVG("box", 900, 240, "The uniform type L2RBox",
-            "A value whose type is not statically known (<code>lcAny</code>) is an "
-            "<code>L2RBox</code>: a generated shared enum with one variant per "
-            "type the program boxes. Conversions go in and out of it.")
-    s.box(10, 30, 170, 60, ["List Nat", "precise representation"], "b-l2r")
-    s.box(10, 140, 170, 60, ["Nat → Nat", "function-value enum"], "b-l2r")
-    s.arrow(180, 60, 330, 95, "box: wrap in its variant", lx=190, ly=60)
-    s.arrow(180, 170, 330, 125)
-    s.box(335, 70, 220, 90, ["L2RBox", "b0 (the boxed unit)", "b1(List Nat)", "b2(Nat → Nat), ..."], "b-rt")
-    s.arrow(555, 115, 690, 115, "unbox", lx=622, ly=105, anchor="middle")
-    s.text(622, 135, "(generated)", "ts", "middle")
-    s.box(695, 70, 195, 90, ["precise use", "matches every variant", "that can hold the type;", "converts if needed"], "b-l2r")
-    s.text(10, 228, "Typed code never pays for Box. It appears only where a type is unknown: a type that "
-           "depends on a value, polymorphic recursion, existentials, Dynamic.", "ts")
+    s = SVG("box", 900, 280, "The one-word box LAny",
+            "A value in a generic position (<code>lcAny</code>, or a field, an array "
+            "element or a cell value of a parameter's type) is a box: one 64-bit "
+            "word, as native Lean's <code>lean_object*</code>.")
+    s.text(10, 26, "an immediate: an odd word, (v << 1) | 1; never allocated", "t")
+    s.rect(10, 38, 440, 34, "c-data")
+    s.text(230, 60, "v  (bits 63 to 1)", "tc", "middle")
+    s.rect(450, 38, 40, 34, "c-tag")
+    s.text(470, 60, "1", "tc", "middle")
+    s.text(10, 92, "(): the word 1 (Lean's box(0)); Bool, Char, UInt8/16/32, Float32, an enumeration's index,", "ts")
+    s.text(10, 108, "a constructor without fields, a small Nat or Int (its own word), a UInt64 below 2^63", "ts")
+    s.text(10, 138, "a pointer: an even word; the top 16 bits are the type number of the object", "t")
+    s.rect(10, 150, 160, 34, "c-tag")
+    s.text(90, 172, "type number", "tc", "middle")
+    s.rect(170, 150, 320, 34, "c-ptr")
+    s.text(330, 172, "address (48 bits)", "tc", "middle")
+    s.arrow(490, 167, 555, 167)
+    s.box(560, 147, 330, 40, ["a counted object (a String, a record, ...)"], "b-rt")
+    s.text(10, 206, "numbers 1 to 15: the runtime's kinds (big Nat, big Int, String, the Float and UInt64 cells,", "ts")
+    s.text(10, 222, "Array, ByteArray, FloatArray); 16 and up: the program's types", "ts")
+    s.text(10, 246, "An unboxing checks the word against the number of its type: a wrong word is a panic, never a wrong read.", "ts")
+    s.text(10, 266, "Typed code never pays for the box. Each datatype has one layout, so no value of it is converted.", "ts")
     return s.render()
 
 
@@ -407,10 +415,9 @@ def lazy_cells():
     s.box(265, 140, 150, 50, ["busy", "f is running"], "b-rr")
     s.arrow(415, 165, 505, 165, "f returns v", lx=420, ly=158)
     s.box(510, 140, 150, 50, ["done(v)", "value stored"], "b-ok")
-    s.box(20, 225, 230, 50, ["conv(g, o[, a])", "a copy at another representation"], "b-rt")
-    s.box(280, 225, 230, 50, ["bind(f)", "a bind task not started"], "b-rt")
-    s.text(540, 245, "conv: g forces the original o;", "ts")
-    s.text(540, 262, "a task's a is the original's identity.", "ts")
+    s.box(20, 225, 230, 50, ["bind(f)", "a bind task not started"], "b-rt")
+    s.text(280, 245, "The value v is a box, so one state type serves", "ts")
+    s.text(280, 262, "every Thunk α and every Task α.", "ts")
     s.text(690, 160, "busy forced again by its own", "ts")
     s.text(690, 176, "computation: waits forever,", "ts")
     s.text(690, 192, "as natively.", "ts")
@@ -437,7 +444,7 @@ def ref_cells():
             "seen everywhere. Two allocations (Lean: one).")
     s.box(10, 30, 210, 60, ["L2RRefN", "shared record (count, cell)"], "b-l2r")
     s.arrow(220, 60, 300, 60)
-    s.box(305, 30, 230, 60, ["Cell<E>", "the value, in its own type"], "b-rr")
+    s.box(305, 30, 230, 60, ["Cell<LAny>", "the value, a box"], "b-rr")
     s.text(560, 55, "set: store the new value, then release the old one", "ts")
     s.text(560, 72, "take: move the value out, leave the placeholder", "ts")
     return s.render()
@@ -466,7 +473,7 @@ def layers():
                           "float text, once-cells, glue for lean-runtime's IO, its",
                           "scheduler (task cells, the suspend step) and its event loop"], "b-rt")
     s.box(10, 268, W, 50, ["reussir_rt (Reussir's runtime)",
-                          "Rc, the pending stack for frees (local patches 0013-0015), mimalloc"], "b-rr")
+                          "Rc, the pending stack for frees (local patches 13-a to 13-c), mimalloc"], "b-rr")
     s.box(10, 332, W, 50, ["System", "libc, libm, GMP, the kernel"], "b-lean")
     s.box(680, 170, 250, 120, ["lean-runtime (submodule)", "a shared crate: Lean's",
                               "runtime rules (semantics, IO,", "startup, the scheduler, the",
@@ -527,7 +534,7 @@ def scheduler():
 def free_stack():
     s = SVG("free", 940, 190, "Freeing without recursion",
             "Native Lean frees iteratively. Here the runtime's containers and "
-            "Reussir's drop glue (local patches 0013-0015) share one stack of "
+            "Reussir's drop glue (local patches 13-a to 13-c) share one stack of "
             "pending work per thread, popped last first.")
     s.box(10, 50, 170, 70, ["last reference", "released", "(count was 1)"], "b-l2r")
     s.arrow(180, 85, 230, 85)

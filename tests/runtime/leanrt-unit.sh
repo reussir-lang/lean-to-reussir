@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit tests of the leanrt crate (bignums, tagged arrays, hashes), built with
+# Unit tests of the leanrt crate (bignums, arrays, hashes), built with
 # the pinned rustc against Reussir's runtime, GMP and the shared crate
 # lean-runtime (third_party/lean-runtime, built and cached by scripts/l2r.py
 # as for programs).

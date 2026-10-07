@@ -8,12 +8,13 @@ use kept the update's result, and the join point it goes through, at
   happens here); the join point stayed precise.
 - `rareRead`: a `foldl` at `Nat` every 997 steps.
 - `captured`: the updated column captured by a closure.
-At 20000 steps: 4.2 s vs 0.09 s natively. `uniform-updates` now keeps the
-chain uniform, converts a precise read at that read, a fresh array at its
-jump, and makes the parameter of the closure (and of the fold loop) uniform,
-since every caller passes it a uniform array. Output checked here;
-tests/runtime/conv-count-check.sh runs this program at two sizes and counts
-the elements conversions rebuild. -/
+At 20000 steps: 4.2 s vs 0.09 s natively. `uniform-updates` then kept the
+chain uniform, converted a precise read at that read, a fresh array at its
+jump, and made the parameter of the closure (and of the fold loop)
+uniform. Since rule 1 (one representation per `Array α`, which deleted the
+pass) every one of these arrays is the one array type, and a read at `Nat`
+unboxes the element it reads. Output checked here; tests/runtime/
+conv-count-check.sh checks that the code has no conversion function. -/
 inductive Ty | nat | str
 
 @[reducible] def Ty.denote : Ty → Type

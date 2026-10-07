@@ -9,10 +9,12 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   positions of its layout (alignment-sorted under `field-order`); on an
   enum, a `match` whose
   missing constructors (no default) get `_ => l2r_unreachable`. A `cases`
-  on a `Box` converts the value to the inductive's uniform instance first;
-  one on a cast value goes through `castCases`
+  on a `Box` unboxes the value to the inductive's type first; one on a cast
+  value goes through `castCases`
   ([../conversions/casts.md](../conversions/casts.md#a-cases-on-a-cast-value-matches-through-the-values-own-constructors)).
-  Erased fields get no binders.
+  Erased fields get no binders; the others are bound at their parameters'
+  own types
+  ([../representations/records.md](../representations/records.md#a-field-is-read-at-its-binders-type-once)).
 - **Why:** Lean has proved the missing alternatives impossible.
 - **Where:** `Lower/Code.lean`: `lowerCases`, `lowerAlt`.
 - **Remove only if:** never.
@@ -78,7 +80,7 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   `returnedWhole`, `LazyFieldsState`.
 - **Remove only if:** the pass is off (correct, slower), or Reussir's token
   reuse stops preferring decrements that never free in the
-  call-before-branch case (patch 0007 alone does not cover it).
+  call-before-branch case (patch 07-a alone does not cover it).
 
 ### The matched value of a nullary arm is rebuilt (`nullary-scrutinee`)
 

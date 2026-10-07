@@ -2,16 +2,16 @@
 
 ## Summary
 
-**Kind:** bug, with a flag workaround. **Status:** patched (0006), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** bug, with a flag workaround. **Status:** patched (06-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug, with a flag workaround.** Reussir's lowering states that a
 nullary dummy's count stays above the shared/unique decision point, but the
 default (TBI) encoding increments it unguarded with a 32-bit count. The two
 documented encodings `--nullary-variant-encoding arch-independent` and
-`boxed` avoid it: the repro prints `4294967300` with either. 0006 keeps the
+`boxed` avoid it: the repro prints `4294967300` with either. 06-a keeps the
 default encoding and its unguarded increment, so it is a speed choice over
 the flag. Measured on 2026-10-02 (pinned, best of 5, a loaded machine, so
-only indicative), `arch-independent` against the default with 0006,
+only indicative), `arch-independent` against the default with 06-a,
 lean2rr/native time: rbtree 0.44/0.45, deriv 0.75/0.83, cfold 0.79/0.74,
 binarytrees 0.94/0.85, mergesort 0.52/0.46, monadic-interp 1.03/1.01: a
 few percent slower on three programs, faster on one. Remeasure on an idle
@@ -24,7 +24,7 @@ cell. On aarch64, a retain of an immediate still increments the dummy's
 at 2, so after 2^32 − 1 net increments (about 2^32 references) it wraps
 around to 1. The next release then believes it
 holds the last reference, takes the "free the cell" branch, and hands the
-static dummy to the allocator: the program dies with SIGSEGV. Patch 0006
+static dummy to the allocator: the program dies with SIGSEGV. Patch 06-a
 makes that branch first check whether the value is one of its type's
 immediates; if it is, the release frees nothing and produces no reuse
 token. Retains stay exactly as cheap as before.
@@ -103,7 +103,7 @@ release), skips immediates (`ReussirRcSetConversionPattern`, behind
 `emitGuardedStore`, which skips the store behind an unlikely branch; the
 comment block itself still says `rc.set` "steers a recognized-immediate
 access to a separate scratch word (an address select ...)", which is stale:
-the code branches around the store, and 0006 leaves that comment line as
+the code branches around the store, and 06-a leaves that comment line as
 it is). Increments are left unguarded:
 
 ```
@@ -161,13 +161,13 @@ to the same nullary constructor (`[]`, `none`, a `leaf`), for example a
 long loop over a structure that contains one, crashed. lean2rr cannot
 avoid it in its own output: the retains come from Reussir's own lowering.
 It could pass `--nullary-variant-encoding arch-independent` (or `boxed`)
-to rrc; it uses 0006 instead, which keeps the default encoding (see the
+to rrc; it uses 06-a instead, which keeps the default encoding (see the
 verdict above).
 
 ## Patch
 
 Patch file
-[`patches/0006-l2r-local-bug-6-never-free-a-tagged-immediate-whose-.patch`](patches/0006-l2r-local-bug-6-never-free-a-tagged-immediate-whose-.patch)
+[`patches/06-a-immediate-count-wrap.patch`](patches/06-a-immediate-count-wrap.patch)
 (`l2r-local` commit `4d27dc85`, applied in `./reussir`; `l2r-local` head cc8e5aa5).
 
 The increment stays a plain load, add and store, so LLVM can still fold
@@ -243,7 +243,7 @@ address, so real cells take the old path. The guard is also emitted under
 the immortal encoding (the module attribute is set for both). There it is
 redundant but harmless. The drop glue's member releases go through the
 same pattern (AcquireDropExpansion reuses it), so they are covered too.
-0013's `drop_and_free` returns early for nullary arms for the same reason
+13-a's `drop_and_free` returns early for nullary arms for the same reason
 ([issue 13](13-long-list-drop.md)).
 
 **Alternative tried first.** The first version guarded the increment's
@@ -268,7 +268,7 @@ cores (this entry's own measurement), "up to 30%" (the patch message) and
   generated programs × 3 wrap values. A real wrap (a Lean program with
   4294967300 iterations, through lean2rr) passed in 18.5 s.
 - Rounds 3, 4, 4b and 4c repeated the forced-wrap tests and wrap fuzzing
-  with 0013 and 0014 applied.
+  with 13-a and 13-b applied.
 - On the round-2 stack: FIXED (`4294967300`, 14 s). `run.sh` on the
   patched build:
   `issue 06   FIXED       N = 4294967300: prints 4294967300   [-O aggressive --no-pack-record-members --reuse-across-call]`.
@@ -285,7 +285,7 @@ cores (this entry's own measurement), "up to 30%" (the patch message) and
   effect on [issue 7](07-phantom-reuse-donor.md)'s phantom donors: on
   `l2r-local` the member releases of a matched node sit one `scf.if`
   deeper, TokenReuse frees their tokens inside, and the node's own cell is
-  reused even where 0007 cannot fire (observed 2026-10-02 with
+  reused even where 07-a cannot fire (observed 2026-10-02 with
   `repros/bug07b-call-before-branch.rr`: ratio 1.34-2.08 with the default
   encoding, 5.61-11.37 with `--nullary-variant-encoding boxed`, which emits
   no guard; commands and the remarks in issue 7's entry).

@@ -6,9 +6,9 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 ### Calls follow Lean's arities exactly
 
 - **What:** A call with exactly the callee's arity (the number of
-  parameters Lean gave it after its optimizations) runs it; fewer
-  arguments build a partial application (a `p` variant, nothing runs); more
-  arguments run it and apply the result to the rest.
+  parameters Lean gave it after its optimizations, erased ones included)
+  runs it; fewer arguments build a partial application (a `p` variant,
+  nothing runs); more arguments run it and apply the result to the rest.
 - **Why:** Where work runs is observable: the native build of
   `mkAdder` with a `dbgTrace` before its inner `fun` has arity 2 and prints
   once per call of `mkAdder 3 x`; a translation at arity 1 prints once in
@@ -18,13 +18,46 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   [§5.2](../../translation-plan.md#52-declarations-calls-arities).
 - **Remove only if:** never.
 
+### Erased parameters are removed (rule 4)
+
+- **What:** A Reussir function takes no parameter for an erased Lean
+  parameter (`◾`: a type, a type argument, a proof; `erasedDom`), except
+  its last parameter: when that one is erased, the function takes one
+  `L2RUnit` for the trailing erased parameters (`keepMask`). Example:
+  `def f (x : Nat) (α : Type) (y : Nat) (β γ : Type)` becomes
+  `f(x : Nat, y : Nat, u : L2RUnit)`, and `def el {α} : List α` keeps
+  `el(u : L2RUnit)`. A removed parameter is bound to `L2RUnit::u{}` in the
+  body. A call passes the arguments of the parameters the function takes
+  (`()` for the trailing unit); a partial application captures those among
+  the arguments it has (`p<j>` counts Lean arguments). Targets of function
+  values (externs, constructors) follow the same rule, and their call gets
+  placeholders back at Lean positions (`targetCall`), as a direct call of
+  them has. Join points take no erased parameter at all; their jumps drop
+  those arguments. The IO world (`lcVoid`) and `Unit` are data, not
+  erased. Stage 1 to 3 keep Lean's arities; only Stage 4 removes.
+- **Why:** `◾` carries no information. Keeping the last erased parameter
+  keeps the point where the body runs: Lean runs a body when the last
+  parameter is applied, so `f 3` of `def f (x : Nat) (α : Type)` must stay
+  a partial application that runs `f` only when the type is applied (map C
+  hazard H2), and a function with only erased parameters must stay a
+  function (H1, review finding fixed in 4674426). Lean's passes, closed
+  terms (`ExtractClosedK`), `chainConsts`, the startup `.caf` items and
+  `safeToElim` decide on Lean's arities (H9), so the removal is in Stage 4,
+  keyed on LCNF parameter lists.
+- **Where:** `ErasedDomains.lean`: `erasedDom`, `keepMask`;
+  `Lower/Code.lean`: `lowerDecl`, the `.jp`, `.jmp` and `.fun` cases, the
+  state machine's self call; `Lower/Decls.lean`: `calleeOf`;
+  `Lower/Values.lean`: `lowerConstApp`, `lowerTaken`, `ctorFnType`;
+  `Lower/Borrow.lean`: `boxedTarget` (Lean's borrow flags by Lean
+  position); `Lower/Finish.lean`: `targetCall`; tests `RtErasedTrailing`,
+  `RtErasedTypeOnly`, `RtErasedMid`.
+- **Remove only if:** never (it is rule 4 of the dependent-types design).
+
 ### Lean's `let`s that can have an effect are never dropped, duplicated on a path, or reordered
 
 - **What:** Lowering adds bindings of its own (conversions, placeholders,
   copies of duplicated join points, one per path) but keeps every Lean
-  `let` that can have an effect, in order, once per path. The only fusion
-  is of effect-free `let`s: `ArrayLits` replaces a run of small `Nat`
-  literals and their pushes onto an `Array Nat` by one table call.
+  `let` that can have an effect, in order, once per path.
 - **Why:** A `let` can call a function that panics or traces; Lean's
   passes have already removed dead `let`s.
 - **Where:** `Lower/Code.lean`: `lowerCode`; plan

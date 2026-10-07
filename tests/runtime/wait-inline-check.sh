@@ -14,9 +14,11 @@
 # data, a closure or a vtable, and are counted only). The functions checked are those that hold the
 # loops, wherever LLVM inlined them: every function that calls a reference
 # operation's slow path (the prelude's `l2r_ref_wait` or
-# `l2r_ref_take_mark`: `modify`'s take) and every function that calls a
-# thunk force's slow path (leanrt's `thunk_wait_busy`), other than those
-# helpers themselves; it fails when there are none of either kind. The fast
+# `l2r_ref_take_mark`: `modify`'s take; when Reussir inlines these small
+# textures (issue 36), their callers call lean-runtime's `ref_keyed::wait`,
+# `take` or `wait_taken` directly, which count the same) and every function
+# that calls a thunk force's slow path (leanrt's `thunk_wait_busy`), other
+# than those helpers themselves; it fails when there are none of either kind. The fast
 # paths:
 # - a reference point (the prelude's `l2r_ref_read_point`,
 #   `l2r_ref_write_point`, `l2r_ref_swap_point`; lean-runtime's
@@ -131,7 +133,8 @@ forbidden = re.compile(r'l2r_ref_(read|write|swap)_point|read_point|write_point|
                        r'|ref_read(?!_poll)|before_publish|writers_point'
                        r'|l2r_lcell_set|l2r_thunk_done|on_finish|done_keyed(?!_slow)|__tls_get_addr')
 helper = re.compile(r'l2r_ref_wait|l2r_ref_take_mark|thunk_wait_busy|lean_runtime|6leanrt')
-groups = {"reference operations": re.compile(r'l2r_ref_wait|l2r_ref_take_mark'),
+groups = {"reference operations": re.compile(r'l2r_ref_wait|l2r_ref_take_mark'
+                                             r'|ref_keyed4wait|ref_keyed4take|ref_keyed10wait_taken'),
           "thunk forces": re.compile(r'thunk_wait_busy')}
 
 def check(funcs, quiet=False):

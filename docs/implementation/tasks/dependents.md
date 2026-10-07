@@ -45,7 +45,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
 ### No context is ever suspended inside a free
 
 - **What:** A free's pending work is the thread's (`reussir_rt::drop`,
-  patch 0014), so nothing that may block runs there: the drop of a stream
+  patch 13-b), so nothing that may block runs there: the drop of a stream
   handle runs in a no-suspend scope of lean-runtime's scheduler
   (`sched::no_suspend`: a dropped stream's flush writes what the descriptor
   takes and hands the rest to a writer thread), a task's release never
@@ -82,7 +82,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   the order the free reached their promises, on the context that freed
   them (lean-runtime's `run_deferred`, core 3.3): Reussir reports the end
   of every drain that released something through `__reussir_drop_drained`
-  (local Reussir patch 0040), where `task::hook_drained` stores
+  (local Reussir patch 40-a), where `task::hook_drained` stores
   `task::drained`. lean2rr requires the patch: `scripts/l2r.py` stops with
   an error when the Reussir checkout lacks it, and leanrt names the symbol,
   so it would not link either. So the deferred list is empty whenever the
@@ -114,7 +114,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   the store made in the drain (lean2rr's shape before), the dependents of
   an earlier promise of the same free, and another context while they
   blocked, saw a later promise finished, where natively it was not
-  resolved yet. Patch 0040 is
+  resolved yet. Patch 40-a is
   required since step 6: without it a drain's resolutions would wait for
   the context's next run of the list, and lean-runtime's debug builds report
   that (its R6).

@@ -1,7 +1,7 @@
 // Issue 7 (missed optimization), variant: the bug07-phantom-reuse-donor.rr
 // program with its key comparisons made FFI calls (`less`). The call before
-// the branch stops patch 0007's fusion (fuseArm's scan stops at a call), so
-// this shows what token reuse does on a build that has 0006 but where 0007
+// the branch stops patch 07-a's fusion (fuseArm's scan stops at a call), so
+// this shows what token reuse does on a build that has 06-a but where 07-a
 // cannot fire.
 // Output: "<size> <size> ratio <t(ins) / t(ins_b)>", as in bug07.
 // Measured 2026-10-02 on l2r-local (loaded machine) with
@@ -10,7 +10,7 @@
 //       --token-reuse-remarks OUT.json  (+ the polymorphic-FFI flags):
 //   default (TBI) and arch-independent: ratio 1.34-2.08; TokenReuse sees one
 //     token at each rebuild in ins (t's cell) and reuses it (ensure, score 2);
-//   boxed (no immediates, so no 0006 guard): ratio 5.61-11.37; three tokens
+//   boxed (no immediates, so no 06-a guard): ratio 5.61-11.37; three tokens
 //     available, and the rebuilds take a phantom donor (realloc, score 0).
 #[ffi(import)]
 fn less(a : u64, b : u64) -> bool [{ a < b }];

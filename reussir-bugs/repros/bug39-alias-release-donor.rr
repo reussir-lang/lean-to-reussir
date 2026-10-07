@@ -1,0 +1,107 @@
+// Issue 39 (missed optimization, not a bug): TokenReuse takes the release
+// of a value that an opaque call returned as the donor of a new cell. The
+// value has another reference, which Reussir cannot see, so the release
+// never frees; the matched cell, which does become free, is freed, and the
+// new cell is allocated.
+// `bump` walks a list of pairs to the key and rebuilds each cell on the way.
+// The head `h` goes through `same`, an opaque identity (as lean2rr's
+// unboxing of a `Box` does: `l2r_any_raw`, then `l2r_any_raw_take`), and the
+// rebuilt cell gets `h` again. So Reussir retains `h` before the call, and
+// releases `p` (the same pair) in the rebuilding branch, where its count is
+// at least 2. That release gives a token of a list cell's size (a pair cell
+// and a list cell are both 24 bytes), and TokenReuse prefers it to the
+// matched cell's token: both score 2, and the most recent producer wins.
+// `bump_b` differs only in its rebuilding branch, which gets `p` (the value
+// `same` returned) instead of `h`: then no release of `p` is left.
+// Each runs 1000 and then 4000 bumps on a new 64-pair list (a bump rebuilds
+// about 32 cells) and counts the cells allocated meanwhile, through
+// Reussir's allocation entry points wrapped at link time.
+// Command: rrc THIS -O aggressive --no-pack-record-members
+//   --reuse-across-call
+//   --link-arg=-Wl,--wrap=__reussir_allocate,--wrap=__reussir_allocate_small
+//   (the polymorphic-FFI directories as run.sh passes them).
+// Output: "bump <cells at 1000> <cells at 4000> bump_b <..> <..>".
+// Expected: no cell allocated in any loop (each rebuilt cell reuses the
+// matched one): "bump 0 0 bump_b 0 0".
+// Reussir l2r-local d79f8b70 and l2r-anybox 1eb710b4 (d79f8b70, 38-a,
+// 13-d): "bump 32020 129488 bump_b 0 0" (bump allocates one cell per
+// rebuilt cell).
+#[ffi(import)]
+fn same<T>(x : T) -> T [{ x }];
+#[ffi(import)]
+fn allocs() -> u64 [{ {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static N: AtomicU64 = AtomicU64::new(0);
+    unsafe extern "C" {
+        fn __real___reussir_allocate(align: usize, size: usize) -> *mut u8;
+        fn __real___reussir_allocate_small(size: usize) -> *mut u8;
+    }
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn __wrap___reussir_allocate(align: usize, size: usize) -> *mut u8 {
+        N.fetch_add(1, Relaxed);
+        unsafe { __real___reussir_allocate(align, size) }
+    }
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn __wrap___reussir_allocate_small(size: usize) -> *mut u8 {
+        N.fetch_add(1, Relaxed);
+        unsafe { __real___reussir_allocate_small(size) }
+    }
+    N.load(Relaxed)
+} }];
+#[ffi(import)]
+fn report(a1 : u64, a2 : u64, b1 : u64, b2 : u64) [{ println!("bump {} {} bump_b {} {}", a1, a2, b1, b2) }];
+struct P { k : u64, v : u64 }
+enum L { Nil, Cons(P, L) }
+fn bump(l : L, k : u64) -> L {
+    match l {
+        L::Nil => { L::Nil{} },
+        L::Cons(h, t) => {
+            let p : P = same(h);
+            let x : u64 = p.k;
+            if x == k { L::Cons{P{x, p.v + 1}, t} } else { L::Cons{h, bump(t, k)} }
+        }
+    }
+}
+fn bump_b(l : L, k : u64) -> L {
+    match l {
+        L::Nil => { L::Nil{} },
+        L::Cons(h, t) => {
+            let p : P = same(h);
+            let x : u64 = p.k;
+            if x == k { L::Cons{P{x, p.v + 1}, t} } else { L::Cons{p, bump_b(t, k)} }
+        }
+    }
+}
+fn build(i : u64) -> L {
+    if i == 64 { L::Nil{} } else { L::Cons{P{i, 0}, build(i + 1)} }
+}
+fn total(l : L) -> u64 {
+    match l { L::Nil => { 0 }, L::Cons(p, t) => { p.v + total(t) } }
+}
+fn run(l : L, i : u64, n : u64) -> L {
+    if i == n { l } else { run(bump(l, i % 64), i + 1, n) }
+}
+fn run_b(l : L, i : u64, n : u64) -> L {
+    if i == n { l } else { run_b(bump_b(l, i % 64), i + 1, n) }
+}
+// The cells `run` allocates for `n` bumps (the list is built first).
+fn count(n : u64) -> u64 {
+    let l = build(0);
+    let a = allocs();
+    let r = run(l, 0, n);
+    let b = allocs();
+    let s = total(r);
+    if s == n { b - a } else { 1000000000 + s }
+}
+fn count_b(n : u64) -> u64 {
+    let l = build(0);
+    let a = allocs();
+    let r = run_b(l, 0, n);
+    let b = allocs();
+    let s = total(r);
+    if s == n { b - a } else { 1000000000 + s }
+}
+#[main]
+fn main() {
+    report(count(1000), count(4000), count_b(1000), count_b(4000));
+}

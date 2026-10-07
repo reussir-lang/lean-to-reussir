@@ -204,23 +204,23 @@ lowering at the library extern's type arguments, was removed).
   under `L2R_ALLOW_MISSING_EXTERNS`, review REB-15).
 - **Remove only if:** never.
 
-### Stage 3 does not re-instantiate a body instance as an extern
+### Stage 3 does not take a body instance for an extern
 
-- **What:** `MonoRetype.reinstantiate?` and the optimization
-  `uniform-updates` (`Opt/UniformUpdates.lean`: `uniformUpdatesDecl`)
-  skip a callee with code (`MRetypeState.codeDecls`).
-- **Why:** Both re-instantiate extern instances at `lcAny` from the
-  persisted base declaration, which for an extern that runs its Lean
-  definition is still the extern: a body instance would have become a
-  call of the C symbol. `uniform-updates` did it to `Array.restart` of
-  test `RtExternUniform` (an `Array` extern of the program whose body uses
-  no parameter, so Lean's `reduceArity` leaves calls on the instance):
-  lean2rr then reported its C symbol as a missing extern of Lean's
-  library. (rv8/ext round 1 found no program reaching `reinstantiate?`.)
-  `lowerProgram` labels an extern of the program that still reaches its
-  missing-extern list an internal error.
-- **Where:** `MonoRetype.lean`: `reinstantiate?`;
-  `Opt/UniformUpdates.lean`: `uniformUpdatesDecl`; `Emit/Program.lean`:
+- **What:** `MonoRetype.externResultType?` skips a callee with code
+  (`MRetypeState.codeDecls`).
+- **Why:** It reads the extern's types from the persisted base
+  declaration, which for an extern that runs its Lean definition is still
+  the extern. Stage 3 used to redirect such calls to a new extern
+  instance (until simplicity finding 2 of the rule 1 review, it built
+  one): a body instance would have become a call of the C symbol. The
+  optimization `uniform-updates` (deleted with the one array type) did it
+  to `Array.restart` of test `RtExternUniform` (an `Array` extern of the
+  program whose body uses no parameter, so Lean's `reduceArity` leaves
+  calls on the instance): lean2rr then reported its C symbol as a missing
+  extern of Lean's library. (rv8/ext round 1 found no program reaching
+  the redirection.) `lowerProgram` labels an extern of the program that
+  still reaches its missing-extern list an internal error.
+- **Where:** `MonoRetype.lean`: `externResultType?`; `Emit/Program.lean`:
   `lowerProgram`.
 - **Remove only if:** never.
 
@@ -259,7 +259,7 @@ lowering at the library extern's type arguments, was removed).
   library declares: `librarySourceExternSyms` reads the `@[extern …]`
   attributes, with their modules, from the toolchain's library source
   (`src/lean/{Init,Std,Lean}` and `src/lean/lake/Lake`, imported or not),
-  so a helper of lean2rr's prelude (`l2r_nat_repr`, `lean_natarr_push`),
+  so a helper of lean2rr's prelude (`l2r_nat_repr`, `lean_array_uswap`),
   which no Lean module declares, gets none (review REB-07). The scan
   (about 2,600 files) runs once, and only for a refused extern whose
   symbol is a prelude function no imported declaration has: `do`

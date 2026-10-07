@@ -1,0 +1,2 @@
+# K = 10 levels over a list of n, n = 1000 and 4000 (a conversion of the list per level would add K x n)
+10 1000 | 10 4000 | 4 2000

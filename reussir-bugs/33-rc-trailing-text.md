@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (tooling). **Status:** patched (0064), applied in
+**Kind:** bug (tooling). **Status:** patched (33-a), applied in
 `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug.** The parser of `!reussir.rc<...>` and `!reussir.ref<...>`
@@ -15,7 +15,7 @@ other Reussir type parser ends at its `>`. It matters only for MLIR written
 or edited by hand: Reussir's printer never writes anything after the
 keywords.
 
-Found by the review of patch 0061 ([bug 29](29-ffi-member-mlir.md)), as a
+Found by the review of patch 29-a ([bug 29](29-ffi-member-mlir.md)), as a
 side note.
 
 ## Symptom and repro
@@ -78,7 +78,7 @@ someone bisecting a pass by hand with an edited dump.
 ## Patch
 
 Patch file
-[`patches/0064-l2r-local-bug-33-end-the-rc-and-ref-types-at-their-c.patch`](patches/0064-l2r-local-bug-33-end-the-rc-and-ref-types-at-their-c.patch)
+[`patches/33-a-rc-type-closing-bracket.patch`](patches/33-a-rc-type-closing-bracket.patch)
 (`l2r-local` commit `cc8e5aa5`, applied in `./reussir`; `l2r-local` head
 cc8e5aa5). The parser reads the closing `>` after the keywords:
 

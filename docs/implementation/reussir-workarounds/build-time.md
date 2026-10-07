@@ -20,10 +20,10 @@ lean2rr's files.
   CN3-05, bfa3063). No classic benchmark changes by more than 1%: lean2rr
   dispatches function values itself
   ([10-closure-type-print.md](../../../reussir-bugs/10-closure-type-print.md);
-  a cost, not a bug: rrc's output is correct; patch 0024, an optimization,
+  a cost, not a bug: rrc's output is correct; patch 10-a, an optimization,
   applied).
 - **Where:** `scripts/l2r.py`: `main`.
-- **Remove only if:** not needed with 0024 (applied), but kept: by the
+- **Remove only if:** not needed with 10-a (applied), but kept: by the
   policy lean2rr also works with an unpatched Reussir, and devirtualization
   buys lean2rr nothing measurable.
 
@@ -34,8 +34,8 @@ lean2rr's files.
   function types was tried and was worse (a hub for SCCP).
 - **Why:** A cost of a stock MLIR pass, not a bug
   ([11-sccp-call-graph.md](../../../reussir-bugs/11-sccp-call-graph.md));
-  patch 0032 (an optimization, applied) runs it across calls only within
-  a budget of call sites, and 0033 (an optimization, applied) removes 11b,
+  patch 11-a (an optimization, applied) runs it across calls only within
+  a budget of call sites, and 11-b (an optimization, applied) removes 11b,
   a quadratic glue lookup in Reussir's own code (also a cost).
 - **Where:** n/a.
 - **Remove only if:** n/a.
@@ -43,19 +43,19 @@ lean2rr's files.
 ### Issues 16 and 17 (costs): nesting depth and straight-line length
 
 - **What:** `Outline` cuts deep and long tail paths and `let` values into
-  functions (recursive functions keep their loops through step values);
-  long `Array Nat` literals become tables.
+  functions (recursive functions keep their loops through step values).
+  (Long `Array Nat` literals were tables, pushed by the runtime, while an
+  `Array Nat` was a one-word `LNatArr`; an array of `Box`es has none.)
 - **Why:** Reuse across calls is superlinear in match nesting
   ([16-nested-io-matches.md](../../../reussir-bugs/16-nested-io-matches.md),
-  a cost of the opt-in flag; patch 0035, an optimization, applied), and
+  a cost of the opt-in flag; patch 16-a, an optimization, applied), and
   rrc's memory was quadratic in a straight-line `Nat` function
   ([17-long-nat-block.md](../../../reussir-bugs/17-long-nat-block.md):
-  a cost of `convert-scf-to-cf` with pattern rollback; patch 0031, an
+  a cost of `convert-scf-to-cf` with pattern rollback; patch 17-a, an
   optimization, applied). Neither is a bug: rrc's output is correct.
 - **Where:** [../control-flow/outline.md](../control-flow/outline.md);
-  [../startup/constants.md](../startup/constants.md#long-array-nat-literals-become-tables);
   `L2R_NO_OUTLINE` turns `Outline` off for the repros.
-- **Remove only if:** both costs are gone with 0031 and 0035 (applied),
+- **Remove only if:** both costs are gone with 17-a and 16-a (applied),
   and the `.rr` text no longer grows with nesting; kept meanwhile (policy,
   and it still bounds the `.rr` text).
 
@@ -63,7 +63,7 @@ lean2rr's files.
 
 - **What:** Build Reussir's default target.
 - **Why:** [18-rrc-target-deps.md](../../../reussir-bugs/18-rrc-target-deps.md)
-  (patch 0025, applied: the `rrc` target alone now links).
+  (patch 18-a, applied: the `rrc` target alone now links).
 - **Where:** n/a.
 - **Remove only if:** n/a.
 
@@ -84,7 +84,7 @@ lean2rr's files.
   now 21 s and 0.4 GB. lean2rr relies on a side effect: a plain no-inline
   attribute would be the clean way
   ([20-statet-tower.md](../../../reussir-bugs/20-statet-tower.md); a cost,
-  not a bug: rrc's output is correct). Patch 0034 (an optimization,
+  not a bug: rrc's output is correct). Patch 20-a (an optimization,
   applied) stops the inliner's chains of copied calls through
   recursive functions: without the anchors the repro now takes 0.77 GB
   instead of 2.9 GB, against 0.22 GB with them, so lean2rr keeps them.
@@ -94,7 +94,7 @@ lean2rr's files.
   `inline-anchors` in `Opt/Registry.lean`.
 - **Remove only if:** a no-inline attribute replaces the anchor, or the
   inliner's ordinary one-level inlining of this code stops costing
-  memory (with 0034 it is still 3.5x).
+  memory (with 20-a it is still 3.5x).
 
 ### Issue 22 (cost): a wildcard arm over a wide enum costs N^3 code
 
@@ -109,7 +109,7 @@ lean2rr's files.
   constructors: a 9-minute build, then 27 s; round 6 PRG6-02, 5324154). A
   cost, not a bug
   ([22-wildcard-wide-enum.md](../../../reussir-bugs/22-wildcard-wide-enum.md));
-  patch 0030 (an optimization, applied) merges a wildcard arm's copies
+  patch 22-a (an optimization, applied) merges a wildcard arm's copies
   into one region.
 - **Where:** `Lower/Code.lean`: `sinkWildcardHeld`, `hasWideRelease`,
   `wideReleaseCtors` (8); `runtime/prelude.rr`: `l2r_sink`;
@@ -117,13 +117,13 @@ lean2rr's files.
   `conv-liveness` leaves variants out (its arguments sunk:
   [../conversions/liveness.md](../conversions/liveness.md#an-application-function-with-variants-left-out-ends-in-a-wildcard));
   required part `wildcard-sinks` in `Opt/Registry.lean`.
-- **Remove only if:** not needed with 0030 (applied: rrc now gives a
+- **Remove only if:** not needed with 22-a (applied: rrc now gives a
   wildcard one region), but kept: by the policy lean2rr also works with an
   unpatched Reussir.
 
 ### Issue 23 (cost): linking the polymorphic-FFI modules is quadratic
 
-- **What:** No workaround. Patch 0017 (an optimization, applied) links all
+- **What:** No workaround. Patch 23-a (an optimization, applied) links all
   texture modules through one linker. Fewer generic instances would shrink
   both the compile and the link (at the time two thirds of them were the
   conversion-origin calls, which went with the origin table: mem-identity,
@@ -138,7 +138,7 @@ lean2rr's files.
 
 - **What:** `scripts/l2r.py` sets `REUSSIR_FFI_CACHE_DIR` for rrc to
   `runtime/leanrt/target/polyffi-cache` unless the caller sets it (empty:
-  off), so that rrc with patch 0066 (an optimization, applied since
+  off), so that rrc with patch 35-a (an optimization, applied since
   2026-10-04) takes the bitcode of
   textures it compiled before from there. The `rustc-native` script's
   text names lean-runtime's build (`# lean-runtime build <digest>`):

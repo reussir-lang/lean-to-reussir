@@ -7,19 +7,25 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
 
 - **What:** `Thunk α` and `Task α` are `LCell<S>`, one runtime cell (a
   count and one value, seen through every alias) holding a generated
-  shared enum `S { pending(L2RUnit -> α), busy, done(α), conv(…) }`, one
-  per value type and kind (tasks also `bind(…)`). A
-  shared enum fits every `α`, closures and value types included.
-  `Thunk.mk f` is `pending(f)`, `Thunk.pure a` is `done(a)`; `Thunk.get`
-  swaps in `busy`, runs the closure, stores `done(v)`. The cell is
+  shared enum `S { pending(L2RUnit -> Box), busy, done(Box) }`, one for
+  thunks and one for tasks (tasks also `bind(…)`), whatever `α` is: the
+  value is boxed, so typed and uniform code share every cell and nothing
+  converts one. A shared enum holds closures too.
+  `Thunk.mk f` is `pending(f)` (`f` wrapped to return a `Box`),
+  `Thunk.pure a` is `done(a)` (boxed); `Thunk.get` swaps in `busy`, runs
+  the closure, stores `done(v)`, and its caller unboxes `v`. The cell is
   lean-runtime's "translator's slot" of the task: the value lives there,
   and the slot comes first (once the cell holds `done`, the task has
   finished for lean2rr).
 - **Why:** A thunk was a one-field struct holding its closure, so
   `Thunk.get` re-ran it every time (03bbbfd). A Reussir cell cannot hold a
-  closure directly. Cost: `Thunk.mk` allocates one object more than Lean
-  (the `pending` state).
-- **Where:** `LowerBase.lean`: `lazyState`, `lazyOf?`;
+  closure directly. With a state type per value type, a thunk or task
+  crossing between typed and uniform code needed a converted copy (a
+  `conv` state forcing the original, its own identity, and a task's
+  address recorded for the runtime). Cost: `Thunk.mk` allocates one object
+  more than Lean (the `pending` state).
+- **Where:** `LowerBase.lean`: `lazyState` (`thunkState`, `taskState`),
+  `lazyOf?`;
   `Lower/LazyForce.lean`: `lazyGetFn`, `lazyDone`, `lazyFn`;
   `Lower/LazyGlue.lean`: `lazyExtern`, `lazyExternGlue`;
   `runtime/prelude.rr`: `LCell`, `l2r_lcell_new`, `l2r_lcell_swap`;
@@ -71,10 +77,9 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
 
 - **What:** lean-runtime names a task with a `TaskId`. A cell that is a
   task lean-runtime has not finished has an entry in `leanrt::task`'s slab
-  (its `TaskId`, its state type's tag, flags); the entry's index is stored
+  (its `TaskId`, the task state type's tag, flags); the entry's index is stored
   in the 4 bytes of padding after the cell's count (`l2r_lcell_new`
-  initializes it to "none"). A task is found by an address: its cell's, or
-  the one a converted task records. Once the cell holds `done`, its id is
+  initializes it to "none"). A task is found by its cell's address. Once the cell holds `done`, its id is
   never given out again (`TaskId::FINISHED` instead: lean-runtime reuses
   entries and, after 2^32 tasks, generations).
 - **Why:** The generated code names tasks by address (unchanged from
@@ -83,7 +88,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
   lean-runtime's rule that the glue's slot comes first (its
   `docs/sched.md`, "The glue", item 3).
 - **Where:** `runtime/leanrt/src/task.rs` (module comment): `init_cell`,
-  `find`, `alloc`, `id_of`; `Lower/LazyForce.lean`: `taskAddrFn`.
+  `find`, `alloc`, `id_of`; `Lower/LazyForce.lean`: `taskAddr`.
 - **Remove only if:** never.
 
 ### A promise is a runtime object holding a task over `Option Box`
@@ -93,7 +98,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
   promise id (`sched::promise_new`) is that task's. `resolve` stores
   `some v` (only the first resolution counts) and then calls
   lean-runtime's `resolve`, which walks the task's dependents on the
-  resolving thread; `result?` converts the task to `Task (Option α)`;
+  resolving thread; `result?` gives the task as it is (one task type);
   `result!` maps `Option.getOrBlock!` over it. Dropping the last reference
   to an unresolved promise resolves it with `none` (the runtime calls the
   program's `l2r_promise_drop_c`). `IO.Promise.new` during initialization
@@ -119,12 +124,3 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
 - **Where:** `runtime/prelude.rr`: `l2r_option_get_or_block_none`;
   `runtime/leanrt/src/lib.rs`: `promise_dropped`, `lean_panic`.
 - **Remove only if:** never.
-
-### Converted cells
-
-- **What:** A thunk or task at another representation is a `conv` cell
-  that forces the original; it has no running state of its own, and a
-  converted task names the original's address (its entry) to the runtime.
-- **Why/Where:** see
-  [../conversions/wrappers.md](../conversions/wrappers.md#thunks-and-tasks-convert-lazily-and-convert-back-to-the-original).
-- **Remove only if:** see the linked entry.

@@ -130,21 +130,29 @@ other results are the last recorded runs.
 
 | Check | Result |
 |---|---|
-| Runtime test suite | {{v:rt_tests}} programs† ({{v:rt_xfail}} marked `.xfail`†); at the last full run (2026-10-06), 336 of 337 identical to native Lean 4.34.0, some of them through expectation files; the other one is the `.xfail` test |
+| Runtime test suite | {{v:rt_tests}} programs† ({{v:rt_xfail}} marked `.xfail`†); at the last full run (2026-10-07), 485 of 486 identical to native Lean 4.34.0, some of them through expectation files; the other one is the `.xfail` test |
 | Classic corpus | 18 programs × 3 sizes, identical to native, with all optional passes on and with all off |
 | Reussir benchmark suite | 18 of 18 programs identical to native |
 | Loader checks | {{v:env_cases}} cases†, all as expected |
 | Lean's own compile tests | 72 programs of Lean's `tests/compile` and `tests/compile_bench`: all match native (checked with Lean 4.33) |
 | Externs of `Init` and `Std` | all 717 of Lean 4.34 available; 706 checked by programs that call each one |
 | Speed | against native Lean 4.34.0 (2026-10-04, largest size): faster on 15 of the 18 classic programs, about equal on the other 3; geometric mean 0.71× time and 0.69× memory; less memory on all 18 |
-| Reussir | {{v:patches_applied}} local patches applied†, 0065 (position-independent code) and 0066 (texture cache) included |
+| Reussir | {{v:patches_applied}} local patches applied†, 34-a (position-independent code) and 35-a (texture cache) included |
 
 [Testing](testing.html) explains each test set and the review process.
 
 ## Recent changes
 
-Merged from 2026-10-04 to 2026-10-06:
+Merged from 2026-10-04 to 2026-10-07:
 
+- **Dependent types: one layout for each datatype.** Types do not
+  compute, so lean2rr erases them. A value of unknown type is a box: one
+  word, as Lean's `lean_object*`. Each datatype has one layout, whose
+  fields of a parameter's type are boxes. `Array α`, `Thunk α`, `Task α`
+  and references are over the box too. So no value is converted between
+  typed and generic code. A function has no parameter for a type, a type
+  argument or a proof; a trailing group of them becomes one unit
+  parameter (see [Dependent types](dependent-types.html#layouts-of-generic-types)).
 - **The switch to `lean-runtime`**, in nine steps: the rules (steps 1
   and 2), the IO (step 3), the scheduler, `Std.Sync` and the event loop
   (step 4), the last copies of shared functions (step 5), the wait cores
@@ -185,7 +193,7 @@ Merged from 2026-10-04 to 2026-10-06:
   [Representations](representations.html#strings-and-arrays)). In
   lean-zip's compression loop, the counting stores fell from 77 to 47 and
   the read calls from 281 to 2.
-- **Reussir.** Patches 0065 and 0066 are applied. Each
+- **Reussir.** Patches 34-a and 35-a are applied. Each
   entry is now a numbered *issue* with a kind: only a *bug* is wrong
   behaviour (see [Reussir](reussir.html#all-entries)).
 - **A read of a constant is one load.** Each once-cell's value is also
@@ -193,13 +201,6 @@ Merged from 2026-10-04 to 2026-10-06:
   no call (lean-zip fix 4). In lean-zip's codec loops, the once-cell calls
   fell from 17 to 0 and the loads from 170 to 49. A check fails the tests if
   a constant read in a loop becomes a call again.
-- **Dependent types: the rule.** Types do not compute, so lean2rr erases
-  them, and a value of unknown type is one enum, matched by its variant.
-  `◾` items (types, type arguments, proofs) are not stored. An `lcAny`
-  value is stored in the enum. The current version converts values between
-  a layout for each type argument and the boxed layout. The planned layout
-  rule gives each datatype one layout, so no value is converted (see
-  [Dependent types](dependent-types.html#layouts-of-generic-types)).
 - **Plan §10** lists the Lean runtime bugs that lean2rr does not reproduce
   (see [Known differences](differences.html#lean-bugs-we-do-not-reproduce)),
   the differences of programs that use the `Lean` package, and that
@@ -223,7 +224,7 @@ How each Lean type is stored, with memory layouts.
 </div>
 <div class="card" markdown="1">
 #### [Dependent types](dependent-types.html)
-Types known only at run time: the uniform type `L2RBox`, examples, costs.
+Types known only at run time: the one-word box, one layout for each datatype, examples.
 </div>
 <div class="card" markdown="1">
 #### [Runtime](runtime.html)

@@ -147,14 +147,16 @@ pub fn take_output(which: u64) -> LStr {
 }
 
 /// The arguments of a spawn as lean-runtime's views of lean2rr's values,
-/// for `f`: the command, the arguments, the working directory (if
+/// for `f`: the command, the arguments (Lean's `Array String`: an array of
+/// boxes, each string read in place), the working directory (if
 /// `has_cwd`), the environment changes as parallel arrays (names, values,
-/// whether the value is `some`: set, else unset), `inheritEnv` and
+/// whether the value is `some`: set, else unset; lean2rr's glue splits
+/// Lean's `Array (String × Option String)` into them), `inheritEnv` and
 /// `setsid`.
 #[allow(clippy::too_many_arguments)]
 pub fn with_args<R>(
     cmd: &LStr,
-    args: &crate::array::RVec<LStr>,
+    args: &crate::array::RVec<crate::any::LAny>,
     cwd: &LStr,
     has_cwd: bool,
     env_names: &crate::array::RVec<LStr>,
@@ -165,7 +167,7 @@ pub fn with_args<R>(
     f: impl FnOnce(&SpawnArgs) -> R,
 ) -> R {
     use crate::string::Utf8;
-    let argv: Vec<&[u8]> = crate::array::as_slice(args).iter().map(|a| a.utf8()).collect();
+    let argv: Vec<&[u8]> = crate::array::as_slice(args).iter().map(crate::any::str_ref).collect();
     let names = crate::array::as_slice(env_names);
     let values = crate::array::as_slice(env_values);
     let set = crate::array::as_slice(env_set);

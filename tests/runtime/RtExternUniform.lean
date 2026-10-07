@@ -1,14 +1,16 @@
 /-!
 Externs of the program in the `Array` namespace, used on containers whose
-element type depends on a value (mono type `Array lcAny`). The optimization
-`uniform-updates` runs `Array` externs there at their `lcAny` instances:
+element type depends on a value (mono type `Array lcAny`), where they run
+at their `lcAny` instances (the optimization `uniform-updates` ran them so
+until rule 1 deleted it; with one array type every caller does):
 - `Array.pushTwice` and `Array.restart` run their Lean definitions (code
-  instances): they are not extern instances, and must not be
-  re-instantiated as ones (that would call their C symbols, which lean2rr
-  never links). `Array.restart` uses none of its parameters, so Lean's
-  `reduceArity` leaves its calls on the instance itself, which the pass
-  sees as a call of an `Array` declaration whose persisted declaration is
-  an extern;
+  instances): they are not extern instances, and Stage 3 must not take
+  them for ones (it once re-instantiated them as extern instances, which
+  called their C symbols, which lean2rr never links; Stage 3 now only
+  types the results of extern instances at `lcAny`, `externResultType?`,
+  and skips code instances). `Array.restart` uses none of its parameters, so Lean's
+  `reduceArity` leaves its calls on the instance itself, a call of an
+  `Array` declaration whose persisted declaration is an extern;
 - `Array.push0` names the runtime's `lean_array_push`; an extern of the
   program is never bound to Lean's runtime, so its definition runs too (a
   code instance, at `lcAny` as well).

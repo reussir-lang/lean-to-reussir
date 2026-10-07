@@ -61,7 +61,7 @@ fn alloc<T: Clone>(cap: usize) -> RVec<T> {
 /// Grow a unique block to room for at least `need` elements, at least
 /// doubling (`max(need, 2 * cap, 8)`, so pushes are amortized O(1)). The
 /// capacity is the whole block: mimalloc's size class for small blocks
-/// (`alloc::good_size`), a power of two beyond 4 KiB (as `tagvec::grow`: with
+/// (`alloc::good_size`), a power of two beyond 4 KiB (with
 /// the header added to a power of two, large blocks would fall just past
 /// mimalloc's size steps, and realloc copies a block's whole usable size).
 #[cold]
@@ -133,6 +133,26 @@ impl<X: Clone> CloneInto for reussir_rt::bridge::Bridge<X> {
         } else {
             for (i, x) in src.iter().enumerate() {
                 std::ptr::write(dst.add(i), x.clone());
+            }
+        }
+    }
+}
+
+/// A box (`any::LAny`): the words are copied as they are (`memcpy`), then
+/// each pointer's payload count goes up, as `LAny`'s `Clone` does it; an
+/// immediate needs nothing. (The generic loop cloned and stored each box in
+/// turn.)
+impl CloneInto for crate::any::LAny {
+    #[inline(always)]
+    unsafe fn clone_to(src: &[Self], dst: *mut Self) {
+        std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+        for x in src {
+            let w = x.word();
+            if !crate::any::is_imm(w) {
+                let p = crate::any::addr_of(w) as *mut u32;
+                let c = *p;
+                std::hint::assert_unchecked(c != 0);
+                *p = c + 1;
             }
         }
     }
@@ -767,6 +787,131 @@ pub fn copy_slice(src: RVec<u8>, src_off: u64, dest: RVec<u8>, dest_off: u64, le
     dest
 }
 
+// ---- `ByteArray`/`FloatArray` and `Array UInt8`/`Array Float` ---------------
+//
+// `ByteArray.data`, `ByteArray.mk`, `FloatArray.data`, `FloatArray.mk`
+// (`lean_byte_array_data`, ...): a new array of exactly the source's size
+// (natively `lean_alloc_array(n, n)`, `lean_alloc_sarray(.., n, n)`), the
+// elements converted in one loop, then the source released. An `Array` of
+// any Lean type holds boxes (`LAny`, rule 1).
+
+/// `ByteArray.data`: each byte as its box, an immediate.
+#[inline(never)]
+pub fn boxes_of_bytes(src: RVec<u8>) -> RVec<crate::any::LAny> {
+    let n = src.len();
+    check_alloc(n as u64, 8);
+    let v = alloc::<crate::any::LAny>(n);
+    unsafe {
+        let s = elems::<u8>(src.hdr());
+        let d = elems::<u64>(v.hdr());
+        for i in 0..n {
+            *d.add(i) = ((*s.add(i) as u64) << 1) | 1;
+        }
+        (*v.hdr()).len = n;
+    }
+    drop(src);
+    v
+}
+
+/// `ByteArray.mk`: each box read as a `UInt8` (`l2r_any_as_u8`: an
+/// immediate's value, truncated; a pointer is `any::mismatch`, a panic, as
+/// the generated unboxing in a program without casts). One pass that also
+/// gathers the words' low bits (vectorized): a pointer is found after it.
+#[inline(never)]
+pub fn bytes_of_boxes(src: RVec<crate::any::LAny>) -> RVec<u8> {
+    let n = src.len();
+    let v = alloc::<u8>(n);
+    unsafe {
+        let s = elems::<u64>(src.hdr());
+        let d = elems::<u8>(v.hdr());
+        let mut all = 1u64;
+        for i in 0..n {
+            let w = *s.add(i);
+            all &= w;
+            *d.add(i) = (w >> 1) as u8;
+        }
+        if all & 1 == 0 {
+            not_immediates(src.as_slice());
+        }
+        (*v.hdr()).len = n;
+    }
+    drop(src);
+    v
+}
+
+/// A pointer among boxes read as scalars: the generated unboxing's panic
+/// (`any::mismatch`) for the first one.
+#[cold]
+#[inline(never)]
+fn not_immediates(s: &[crate::any::LAny]) -> ! {
+    let w = s.iter().map(|a| a.word()).find(|w| w & 1 == 0).unwrap_or(0);
+    crate::any::mismatch(w, 0)
+}
+
+/// Whether every box is an immediate (what `bytes_of_boxes` reads without
+/// a panic): in a program that casts, a pointer is read by the generated
+/// cast instead (`l2r_unbox_u8`).
+#[inline(never)]
+pub fn boxes_all_imm(src: RVec<crate::any::LAny>) -> bool {
+    let all = unsafe {
+        let s = elems::<u64>(src.hdr());
+        (0..src.len()).fold(1u64, |a, i| a & *s.add(i))
+    };
+    drop(src);
+    all & 1 == 1
+}
+
+/// `FloatArray.data`: each float in its box, a cell (`any::of_f64`), as
+/// natively (`lean_box_float`).
+#[inline(never)]
+pub fn boxes_of_floats(src: RVec<f64>) -> RVec<crate::any::LAny> {
+    let n = src.len();
+    check_alloc(n as u64, 8);
+    let v = alloc::<crate::any::LAny>(n);
+    unsafe {
+        let s = elems::<f64>(src.hdr());
+        let d = elems::<crate::any::LAny>(v.hdr());
+        for i in 0..n {
+            std::ptr::write(d.add(i), crate::any::of_f64(*s.add(i)));
+            // The block holds exactly the boxes made so far (a cell's
+            // allocation can end the process, never unwind).
+            (*v.hdr()).len = i + 1;
+        }
+    }
+    drop(src);
+    v
+}
+
+/// `FloatArray.mk`: each box read as a `Float` (`l2r_any_as_f64`: a float's
+/// or a large `UInt64`'s cell gives its bits, an immediate its value's
+/// bits, `box(0)` 0.0; any other pointer is `any::mismatch`), the boxes
+/// read in place and released with the source.
+#[inline(never)]
+pub fn floats_of_boxes(src: RVec<crate::any::LAny>) -> RVec<f64> {
+    let n = src.len();
+    let v = alloc::<f64>(n);
+    unsafe {
+        let s = elems::<u64>(src.hdr());
+        let d = elems::<f64>(v.hdr());
+        for i in 0..n {
+            *d.add(i) = f64::from_bits(crate::any::bits_of_word(*s.add(i)));
+        }
+        (*v.hdr()).len = n;
+    }
+    drop(src);
+    v
+}
+
+/// Whether every box is one `floats_of_boxes` reads without a panic (an
+/// immediate, a float's or a large `UInt64`'s cell): in a program that
+/// casts, another pointer is read by the generated cast instead.
+#[inline(never)]
+pub fn boxes_all_float_words(src: RVec<crate::any::LAny>) -> bool {
+    let r = src.as_slice().iter().all(|a| crate::any::is_word_box(a.word()));
+    drop(src);
+    r
+}
+
 // ---- reference cells (`LRef`) -----------------------------------------------
 //
 // A 0-or-1 element array of capacity 1 or more, mutated in place through
@@ -1004,6 +1149,39 @@ mod tests {
         assert_eq!(count(&inner), 1);
         drop(inner);
         assert_eq!(take_log(), vec![5]);
+    }
+
+    /// `ByteArray.data`/`mk`, `FloatArray.data`/`mk`: the exact size, the
+    /// elements' boxes, the round trips, and what the checks accept.
+    #[test]
+    fn byte_and_float_array_conversions() {
+        use crate::any::{of, of_f64, of_u64, LAny, NUM_STR};
+        let b = bytes_of_vec((0..=255u8).collect());
+        let d = boxes_of_bytes(b.clone());
+        assert_eq!((size(&d), cap(&d)), (256, 256));
+        assert!(d.as_slice().iter().enumerate().all(|(i, a)| a.word() == ((i as u64) << 1) | 1));
+        assert!(boxes_all_imm(d.clone()));
+        let b2 = bytes_of_boxes(d);
+        assert_eq!(b2.as_slice(), b.as_slice());
+        assert_eq!(cap(&b2), 256);
+        assert_eq!(count(&b), 1);
+        assert_eq!(size(&boxes_of_bytes(empty())), 0);
+        assert_eq!(size(&bytes_of_boxes(empty())), 0);
+        let f = from_slice(&[1.5f64, -0.0, f64::INFINITY, f64::NAN, 2.0]);
+        let fd = boxes_of_floats(f.clone());
+        assert_eq!((size(&fd), cap(&fd)), (5, 5));
+        assert!(boxes_all_float_words(fd.clone()));
+        let f2 = floats_of_boxes(fd);
+        assert!(f2.as_slice().iter().zip(f.as_slice()).all(|(x, y)| x.to_bits() == y.to_bits()));
+        // `box(0)`, a `UInt64` immediate and cell, a float cell: their bits.
+        let mixed = from_vec(vec![LAny::unit(), of_u64(u64::MAX), of_u64(3), of_f64(0.5)]);
+        assert!(boxes_all_float_words(mixed.clone()));
+        assert!(!boxes_all_imm(mixed.clone()));
+        let fm = floats_of_boxes(mixed);
+        assert_eq!(fm.as_slice().iter().map(|x| x.to_bits()).collect::<Vec<_>>(), vec![0, u64::MAX, 3, 0.5f64.to_bits()]);
+        let s = from_vec(vec![LAny::imm(1), of(crate::string::from_bytes(b"s"), NUM_STR)]);
+        assert!(!boxes_all_imm(s.clone()));
+        assert!(!boxes_all_float_words(s));
     }
 
     #[test]

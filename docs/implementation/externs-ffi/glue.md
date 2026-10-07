@@ -9,17 +9,27 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **What:** A value whose *declared* type is a type parameter `α` (the
   element of `Array.push`, or a trivial structure over `α` such as
   `[Inhabited α]`, which mono represents by its field) is passed and
-  returned in `α`'s storage type: wrapped or unwrapped if that is an
-  `ElemBox`, converted to or from its index for an enumeration (only for
-  externs over arrays of `α`). Other parameters (an index) are passed as
-  they are. Type arguments go through `toMonoTypeKeep` first (instance keys
+  returned in `α`'s storage type: a `Box` when the extern stores `α`'s
+  values as array elements (its *declared* signature has `Array α`, as
+  `Array.push`: an array holds `Box`es, boxed going in, unboxed coming
+  out, O(1)), and for any other `α` its own type, wrapped or unwrapped if
+  that is an `ElemBox` (`cellStorage`). The choice is per type parameter,
+  from the declared signature: `dbgTraceIfShared` at `α := Array Nat`
+  passes the array itself. Other parameters (an index) are passed as they
+  are. Type arguments go through `toMonoTypeKeep` first (instance keys
   hold base-phase types).
 - **Why:** Storage types exist because values cross into Rust; boxing
   every argument broke the index of `Array.get!Internal` (runtime requests
-  3 and 4; 9346467).
+  3 and 4; 9346467). The choice was once made for the whole extern, from
+  its instantiated types: any extern instantiated at an array type boxed
+  its `α` arguments, so `dbgTraceIfShared` on an array looked at a new box
+  (never shared) and each call allocated a cell (correctness review of
+  rule 1, finding 1; test `RtDbgShared`; the shared-check textures now
+  read the count of a leanrt array or cell, `leanrt::drop::`, too).
 - **Where:** `Lower/ExternCall.lean`: `lowerExternCall`;
-  `Lower/Externs.lean`: `typeVarUses`; `LowerBase.lean`: `ArrayRepr`,
-  `arrayStorage`, `arrayElemTy`.
+  `Lower/Externs.lean`: `typeVarUses`, `typeVarsInArrays`;
+  `LowerBase.lean`: `cellStorage`, `elemBoxOf?`; `runtime/prelude.rr`:
+  `lean_dbg_trace_if_shared`, `l2r_shared_check`.
 - **Remove only if:** never.
 
 ### Generic prelude functions over values are instantiated at the value types
@@ -59,6 +69,31 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `customExtern`; `Lower/LazyGlue.lean`: `sliceGlue?`.
 - **Remove only if:** never.
 
+### Glue builds a payload at its own type, then boxes it into the result
+
+- **What:** The fields of a generic type's parameter type are `Box`es (one
+  type per inductive), among them the value of every IO result
+  (`EST.Out.ok`, `ST.Out`), the error of `EST.Out.error`, a list's head
+  and an `Option`'s value. Glue that builds or reads such a value works at
+  the value's own type, taken from the extern's Lean type
+  (`ioPayloadType`: `α` of `EST.Out ε σ α`; the components of a `Prod`,
+  the tasks of a `List (Task α)`, the `Option String` of a process
+  environment pair, `IO.FS.Stream`'s field types, `IO.Error`), and boxes
+  it into the field (`wrapIOResult v vt`, `coerce`) or unboxes it from
+  there: O(1), nothing is copied. `listFold` unboxes each head to the
+  element type its step takes.
+- **Why:** Glue that took the type to build from the result's field got a
+  `Box` and stopped (metadata, directory entries, temporary files,
+  `getEnv`, the standard streams, `asTask`, `mapTask`, `bindTask`,
+  `waitAny`, `getTaskState`, `spawn`, `tryWait`, `takeStdin`,
+  `IO.Process.output`), and a `Unit` payload was boxed as the `u64` the
+  primitive returns.
+- **Where:** `Lower/Externs.lean`: `ioPayloadFieldTy` (the field),
+  `ioPayloadExpr?`, `ioPayloadType`, `ioErrorTy`, `wrapIOResult`,
+  `ioFinish`, `streamPayloadTy`; their callers in `Lower/ExternCall.lean`,
+  `Lower/LazyGlue.lean`, `Lower/Process.lean` and `Lower/Promises.lean`.
+- **Remove only if:** never.
+
 ### `BaseIO` externs that cannot fail use payload primitives
 
 - **What:** A `BaseIO` extern whose symbol `lean_xxx` has a prelude
@@ -67,13 +102,24 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   result, are converted between the extern's mono types and the
   primitive's: a runtime object (a handle, a mutex, a promise) is `lcAny`
   in mono code (a `Box`), and the runtime's `LHandle` or `LPromise` for the
-  primitive.
+  primitive. A generic primitive (`Runtime.markPersistent`,
+  `markMultiThreaded`, `forget`, `hold`:
+  `fn l2r_runtime_mark_persistent<T>(a : T) -> T`,
+  `fn l2r_runtime_forget<T>(a : T) -> L2RUnit`) gets its arguments as
+  they are. Its result has the type of the argument declared at the
+  result's type parameter (`preludeRetArg`), or the prelude's result type
+  (`L2RUnit`). The result field of the IO result is a `Box` (rule 1), so
+  `wrapIOResult` boxes the result (test `RtRuntimeMarks`).
 - **Why:** The runtime cannot build `EST.Out`; one convention for all
-  infallible IO (runtime request 9; c7b3933, f87ea08).
+  infallible IO (runtime request 9; c7b3933, f87ea08). A generic
+  primitive's result was taken to be of the field's type, so with rule 1
+  rrc rejected every call of the four externs (`expected 'LAny', found
+  'LStr'`).
 - **Where:** `Lower/ExternCall.lean`: `lowerExternCall`;
-  `Lower/Externs.lean`: `wrapIOResult`, `ioPayloadTy`;
+  `Lower/Externs.lean`: `wrapIOResult`, `ioPayloadFieldTy`;
   `Emit/Program.lean`: `lowerProgram` (`preludeRets`, `preludeParams`,
-  parsed from the prelude's signatures).
+  parsed from the prelude's signatures), `genericRetParams`
+  (`preludeRetArg`).
 - **Remove only if:** never.
 
 ### Fallible IO uses a last-error slot and Lean's own error builders
@@ -129,6 +175,31 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `runtime/leanrt/src/io.rs`; lean-runtime's `src/io/handle.rs`,
   `cfile.rs`. Per-task streams:
   [../tasks/scheduler.md](../tasks/scheduler.md#each-task-starts-with-the-processs-standard-streams).
+- **Remove only if:** never.
+
+### A Lean array the runtime reads is an array of boxes, read in place
+
+- **What:** A runtime primitive that takes a Lean `Array T` (T not
+  `UInt8` or `Float`) takes the one array type, `RVec<LAny>`, and reads
+  each element in place from its box: the sends of the network shim
+  (`Array ByteArray`: `l2r_shim_tcp_send`, `l2r_shim_udp_send`,
+  `leanrt::any::bytes_ref`) and a spawn's arguments (`SpawnArgs.args :
+  Array String`: `l2r_proc_spawn`, `l2r_proc_output`,
+  `leanrt::any::str_ref`). `box(0)` reads as empty (the placeholder of
+  the element type). Arrays the glue builds for a primitive from other
+  Lean data (a spawn's environment as three parallel arrays, a
+  directory's names) keep their own element types.
+- **Why:** One representation per `Array α` (rule 1). A primitive declared
+  over `RVec<RVec<u8>>` had no conversion from `RVec<LAny>`: every TCP and
+  UDP send hit the "no representation conversion" panic (ef4a84a; RtTcp,
+  RtUdp). A spawn's arguments were copied into an `RVec<LStr>` element by
+  element (`l2r_proc_args_…`), a copy per spawn that native's
+  `lean_io_process_spawn` does not make.
+- **Where:** `runtime/prelude.rr`: `l2r_shim_tcp_send`,
+  `l2r_shim_udp_send`, `l2r_proc_spawn`, `l2r_proc_output`;
+  `runtime/leanrt/src/any.rs`: `bytes_ref`, `str_ref`;
+  `runtime/leanrt/src/net.rs`: `Bufs`; `runtime/leanrt/src/proc.rs`:
+  `with_args`; `Lower/Process.lean`: `spawnCall`.
 - **Remove only if:** never.
 
 ### Child processes are glue over runtime primitives

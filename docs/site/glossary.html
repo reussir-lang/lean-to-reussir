@@ -51,9 +51,9 @@ each concept has one term.</p>
 <dt>base, mono, impure</dt>
 <dd>The three phases of Lean's compiler. Base code is typed and polymorphic. Mono code has type variables erased to <code>lcAny</code>. Impure code adds boxing and reference counting. lean2rr uses base and mono, never impure.</dd>
 <dt><code>lcAny</code></dt>
-<dd>Lean's "unknown type" in compiled code. Base code has it where the compiler cannot compute a type (<code>t.denote</code> for a variable <code>t</code>); mono code also has it for erased type variables. lean2rr stores a value of this type as an <code>L2RBox</code>.</dd>
+<dd>Lean's "unknown type" in compiled code. Base code has it where the compiler cannot compute a type (<code>t.denote</code> for a variable <code>t</code>); mono code also has it for erased type variables. lean2rr stores a value of this type as a box (<code>LAny</code>).</dd>
 <dt>erased value (<code>◾</code>)</dt>
-<dd>A type, a proof or another value with no run-time meaning. lean2rr stores it as <code>L2RUnit</code>.</dd>
+<dd>A type, a proof or another value with no run-time meaning. lean2rr removes an erased parameter; when the last parameters of a function are erased, the function keeps one <code>L2RUnit</code> parameter for them. Where data is expected, an erased value is Lean's <code>box(0)</code>.</dd>
 <dt>arity</dt>
 <dd>The number of parameters of a declaration after Lean's optimizations. A call with exactly that many arguments runs the function.</dd>
 <dt>join point</dt>
@@ -74,7 +74,7 @@ each concept has one term.</p>
 <dt>instance</dt>
 <dd>One such copy, with a fresh name (<code>d._l2r.k</code>).</dd>
 <dt>uniform instance</dt>
-<dd>The instance with every type argument <code>lcAny</code>; its values of those types are <code>L2RBox</code>es. Polymorphic recursion and the instance bounds lead to it. A call whose type arguments are not statically known (a type unpacked from an existential, a partial application that leaves a type open) goes to an instance at <code>lcAny</code>: the uniform instance when no type argument is known.</dd>
+<dd>The instance with every type argument <code>lcAny</code>; its values of those types are boxes. Polymorphic recursion and the instance bounds lead to it. A call whose type arguments are not statically known (a type unpacked from an existential, a partial application that leaves a type open) goes to an instance at <code>lcAny</code>: the uniform instance when no type argument is known.</dd>
 <dt>dictionary</dt>
 <dd>The record of functions that a type class instance passes at run time.</dd>
 <dt>static dictionary</dt>
@@ -82,16 +82,16 @@ each concept has one term.</p>
 <dt>precise type</dt>
 <dd>A type that lean2rr knows exactly, as opposed to <code>lcAny</code>.</dd>
 <dt>relevant parameter</dt>
-<dd>A type parameter that appears in a data field. Only relevant parameters make different generated types.</dd>
+<dd>A type parameter that appears in a data field. A field of its type is a box. No type parameter makes a new generated type: each datatype has one.</dd>
 <dt>dependent type</dt>
-<dd>A type that mentions a value (<code>Array t.denote</code>, <code>Vector α n</code>). A value that occurs only in a proof or an index is erased. When the type changes with a run-time value, the base code has <code>lcAny</code> there, and lean2rr stores the value as an <code>L2RBox</code>. See <a href="dependent-types.html">Dependent types</a>.</dd>
+<dd>A type that mentions a value (<code>Array t.denote</code>, <code>Vector α n</code>). A value that occurs only in a proof or an index is erased. When the type changes with a run-time value, the base code has <code>lcAny</code> there, and lean2rr stores the value as a box. See <a href="dependent-types.html">Dependent types</a>.</dd>
 <dt>type family</dt>
 <dd>A function that gives a type (<code>Ty.denote</code>, <code>fun n =&gt; Vector String n</code>). Stage 2 keeps a constant family or a type constructor. Any other family becomes <code>lcAny</code>.</dd>
 </dl>
 <h2 id="representations">Representations</h2>
 <dl>
 <dt>representation</dt>
-<dd>The Reussir type that stores a value. One Lean type can have several representations (<code>List Nat</code> and <code>List L2RBox</code>).</dd>
+<dd>The Reussir type that stores a value. A datatype has one representation (<code>List Nat</code> and <code>List α</code> are one type). A function type can have several (<code>Nat → Nat</code> and <code>LAny → LAny</code>).</dd>
 <dt>shared type</dt>
 <dd>A Reussir record or enum stored in a counted heap cell.</dd>
 <dt><code>[value]</code> type</dt>
@@ -101,17 +101,15 @@ each concept has one term.</p>
 <dt>immediate</dt>
 <dd>A constructor without fields of a shared enum: a tagged pointer to a static cell, never allocated.</dd>
 <dt>tagged handle</dt>
-<dd>An opaque Reussir handle that may be a number instead of a pointer (local patch 0050). Reussir counts it only when its low bit is 0. <code>Nat</code> and <code>Int</code> are tagged handles.</dd>
-<dt><code>L2RBox</code></dt>
-<dd>The uniform type: a closed tagged union that lean2rr generates for each program (a shared enum), with one variant per concrete type that the program boxes, plus a unit variant. It stores a value whose type is not statically known. Code that needs the concrete type checks the tag.</dd>
-<dt>storage type</dt>
-<dd>The type in which an array stores its elements: the element's own type when it can cross Reussir's FFI boundary, an index for an enumeration, otherwise an <code>ElemBox</code>.</dd>
+<dd>An opaque Reussir handle that may be a number instead of a pointer (local patch 41-a). Reussir counts it only when its low bit is 0. <code>Nat</code> and <code>Int</code> are tagged handles.</dd>
+<dt>box (<code>LAny</code>)</dt>
+<dd>The uniform type: one word, as Lean's <code>lean_object*</code>. An odd word is an immediate (a small scalar, a small <code>Nat</code>, an enumeration's index, <code>box(0)</code>). An even word points to a counted object and holds the object's type number in its top 16 bits. It stores a value whose type is not statically known, and every field, array element and cell value of a parameter's type. Code that needs the concrete type checks the word.</dd>
+<dt>type number</dt>
+<dd>The top 16 bits of a box that points to an object: 1 to 15 for the runtime's kinds (big <code>Nat</code>, <code>String</code>, <code>Array</code>, ...), 16 and up for the program's types. An unboxing checks it.</dd>
 <dt><code>ElemBox</code></dt>
-<dd>A generated one-field shared struct that wraps a value that cannot cross the FFI boundary.</dd>
+<dd>A generated one-field shared struct that wraps a value that cannot cross the FFI boundary: a <code>[value]</code> struct of several fields in a box, a once-cell or a polymorphic extern's argument.</dd>
 <dt>conversion</dt>
-<dd>Generated code that rebuilds a value from one representation into another. The result is a new value. On the current version, a conversion does not keep sharing: a value with shared parts can grow exponentially (see <a href="dependent-types.html#the-current-version">Dependent types</a>). The planned change removes conversions.</dd>
-<dt>specialized layout</dt>
-<dd>The layout of an instance at precise type arguments: a <code>Tree Float</code> leaf holds an <code>f64</code>. The other layout of the same Lean type is the uniform layout, with <code>L2RBox</code> fields.</dd>
+<dd>Generated code that changes the representation of a value: boxing, unboxing, a wrapper around a function value, or a cast between two different inductives whose layouts differ (it rebuilds the value). A value of a datatype is never rebuilt to change its layout (see <a href="dependent-types.html#one-layout-for-a-shared-tree">Dependent types</a>).</dd>
 <dt>shared value</dt>
 <dd>A value in which two or more pointers go to the same cell, such as a node whose two subtrees are one tree. Its cells form a directed acyclic graph (DAG).</dd>
 <dt>placeholder</dt>
@@ -146,7 +144,7 @@ each concept has one term.</p>
 <dt>wait core</dt>
 <dd>A wait protocol of lean-runtime's scheduler: the wait for a thunk or a constant that another context computes, the reference rule of a program that creates tasks, and the resolution of a promise put off to the end of a free.</dd>
 <dt>pending stack</dt>
-<dd>The per-thread stack of cells to free. Frees use it instead of recursion (local patches 0013 to 0015).</dd>
+<dd>The per-thread stack of cells to free. Frees use it instead of recursion (local patches 13-a to 13-c).</dd>
 <dt>internal panic</dt>
 <dd>An error of the runtime itself that ends the program at once, as Lean's <code>lean_internal_panic</code>: <code>INTERNAL PANIC:</code> and a message on the process's stderr (for example <code>out of memory</code>), then exit status 1, or an abort (134) under <code>LEAN_ABORT_ON_PANIC</code>. A <code>panic!</code> is not one: it prints its message and the program goes on.</dd>
 </dl>

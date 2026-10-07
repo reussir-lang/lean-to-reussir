@@ -9,8 +9,10 @@ README</a> ("Representations") and the implementation notes'
 
 Think of each Lean type as a Rust type. lean2rr gives every value a precise
 type where the program determines it. Lean itself stores almost every value
-as a pointer to a boxed object; lean2rr does that only where the type is not
-statically known (the uniform type `L2RBox`).
+as a pointer to a boxed object. lean2rr does that only in a generic
+position: where the type is not statically known, and in a field, an array
+element or a cell whose type is a parameter. There a value is a *box*
+(`LAny`): one word, as Lean's `lean_object*`.
 
 Reussir does the reference counting. A *shared* type lives in a counted
 heap cell. A *`[value]`* type is stored inline and is never allocated.
@@ -27,16 +29,15 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 | `Char`, `Bool` | `u32`, `bool` | |
 | `Unit`, `PUnit`, erased values, the IO world | `L2RUnit` | a one-variant `[value]` enum |
 | `String` | `LStr`: one block | header (count, byte size, capacity, character count), then UTF-8 bytes |
-| `Array α` | `RVec<S>`: one block | `S` is the *storage type* of `α` |
-| `Array Nat`, `Array Int` | `LNatArr`, `LIntArr` (`TagVec`) | each element is the number's own word (pass `nat-arrays`) |
-| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk` and `.data` cost nothing |
-| `ST.Ref`, `IO.Ref` | a generated record around a Reussir `Cell` | updates seen through every alias |
-| `Thunk α`, `Task α` | `LCell<S>` holding a generated state | memoized thunks, deferred tasks |
+| `Array α` | `RVec<LAny>`: one block | for every `α`: each element is a box |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk` and `.data` copy the elements in one loop, as natively |
+| `ST.Ref`, `IO.Ref` | one generated record around a Reussir `Cell` of a box | for every element type; updates seen through every alias |
+| `Thunk α`, `Task α` | `LCell<S>` holding a generated state | for every `α`: the value is a box; memoized thunks, deferred tasks |
 | `IO.Promise α` | `LPromise`, a runtime object | holds the cell of its task |
 | handles, processes, mutexes, sockets | `LHandle`, a runtime object | closed with the last reference |
-| inductive types, structures | one generated Reussir type per instantiation | rules below; a planned change gives each datatype one layout ([dependent types](dependent-types.html#layouts-of-generic-types)) |
+| inductive types, structures | one generated Reussir type per datatype | a field whose type is a parameter is a box; rules below ([dependent types](dependent-types.html#layouts-of-generic-types)) |
 | function types | one generated enum per function type | [function values](#function-values) |
-| a type not statically known (`lcAny`) | `L2RBox` | [the uniform type](#the-uniform-type-l2rbox); [dependent types](dependent-types.html) |
+| a type not statically known (`lcAny`) | `LAny`, the box: one word | [the box](#the-box-lany); [dependent types](dependent-types.html) |
 
 ## Numbers
 
@@ -44,7 +45,7 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 
 `Nat` and `Int` use Lean's own encoding of small values. Reussir inserts the
 reference counting, and normally it counts every handle at its address. A
-small `Nat` has no address. Local Reussir patch 0050 adds *tagged opaque
+small `Nat` has no address. Local Reussir patch 41-a adds *tagged opaque
 handles*: Reussir counts such a handle only when its low bit is 0. So copying
 or dropping a small value costs one bit test, as natively.
 
@@ -72,12 +73,10 @@ size without asking mimalloc: there, mimalloc's sizes are all multiples of 8.
 
 - **Copy-on-write.** A unique block is updated in place and grows with
   `mi_realloc`. A shared block is copied once, with room for the update.
-- **Storage type.** An array element is stored in its own type when that
-  type can cross Reussir's FFI boundary (integers, floats, `bool`, runtime
-  handles, `Nat`, `Int`, shared records, function values). An enumeration
-  is stored as its index (`u8`, `u16` or `u32`). Other values (`[value]`
-  structs, Reussir closures) go in a one-field shared struct, `ElemBox`.
-  Lean boxes array elements too.
+- **Elements.** An `Array α` holds boxes, whatever `α` is, as Lean's
+  array holds `lean_object*` words. A small `Nat`, a `Bool` or an
+  enumeration is the word itself. A `Float` is a cell, as natively.
+  `ByteArray` and `FloatArray` hold raw bytes and floats.
 - **Reads.** Reussir has no borrowed parameters, so each read of an array
   or string takes the container owned: an increment by the caller and a
   release in the runtime function. LLVM cancels the pair when nothing lies
@@ -110,12 +109,13 @@ lean2rr chooses the shape of each inductive type from its constructors:
 
 Other rules:
 
-- **Relevant parameters only.** A type parameter that appears in no data
-  field (a phantom, such as `EST.Out`'s world type) does not make a new type.
+- **One type for each datatype.** A field whose type is a parameter is a
+  box. `Option Nat` and `Option α` are one type, and a value goes from one
+  to the other as it is.
 - **Field order.** Fields are sorted by decreasing alignment, so records
   have no padding (pass `field-order`). Reussir's own member packing is off,
   because its in-place reuse mishandled packed fields (Reussir bug 2).
-- **Recursive and mutual types** refer to each other's instances.
+- **Recursive and mutual types** refer to each other's types.
 - **Computed fields** (`Lean.Name`): the implementation type `T._impl`, as
   in Lean's runtime.
 - **Proofs** have no representation.
@@ -145,30 +145,33 @@ enum T_Tree_346 {                 // shared: one counted cell per node
 }
 ```
 
-## The uniform type `L2RBox`
+## The box `LAny`
 
 {{svg:box}}
 
-[Dependent types](dependent-types.html) shows where `L2RBox` comes from,
+[Dependent types](dependent-types.html) shows where the box comes from,
 with examples, and what it costs.
 
-- `L2RBox` has one variant per concrete type that the program boxes, plus a
-  unit variant. Stage 4 adds variants as it needs them.
-- Unboxing is a generated function that accepts every variant that can hold
-  a value of the target's Lean type. One Lean type can have several
-  representations: `List Nat` and the uniform `List L2RBox`, or `LNatArr` and
-  `RVec<L2RBox>` for an `Array Nat`. With the optional pass
-  `conv-liveness`, the function has arms only for the variants that live
-  code builds.
-- A conversion between two representations is structural: element by
-  element for arrays and lists. Deep values convert with a loop and an
-  explicit stack, not recursion.
-- A converted value is a new object. On the current version, a conversion
-  does not keep sharing: a value with shared parts can grow exponentially.
-  The planned change removes conversions: each datatype gets one layout (see
-  [Dependent types](dependent-types.html#layouts-of-generic-types)).
-- A boxed unit unboxes to the *zero* of the target type. It is Lean's
-  `box(0)` placeholder.
+- A box is one word. An odd word is an immediate: a small scalar, an
+  enumeration's index, a constructor without fields, a small `Nat` or
+  `Int`. An even word is a pointer to a counted object, with the object's
+  type number in its top 16 bits.
+- A `Float` and a `UInt64` from 2<sup>63</sup> go into a cell, as natively.
+  A `[value]` struct of several fields goes into a one-field cell
+  (`ElemBox`).
+- To unbox, the code checks the word against the type number of the
+  target. A wrong word is a panic, never a wrong read. With the optional
+  pass `conv-liveness`, an unboxing function has arms only for the types
+  that live code boxes.
+- No value of a datatype, array, thunk, task or reference is converted: each
+  has one type. A function type has several representations (`Nat -> Nat`
+  and `LAny -> LAny`), so a function value can be wrapped for another
+  representation. A cast between two different inductives whose layouts
+  differ rebuilds the value.
+- The unit and Lean's `box(0)` are the word 1. `box(0)` unboxes to the
+  *zero* of the target type.
+- The program releases its own types: lean2rr generates a release function
+  for each type number, and the runtime calls it for the last reference.
 
 ## Placeholders
 
@@ -178,7 +181,14 @@ gives such a placeholder the *zero* of the expected type: `0`, `false`, a
 constructor without fields, else the first constructor whose fields have
 zeros, an empty array or string. A type without a finite value (`Empty`) gets
 `unreachable`, which never runs. A zero that would allocate is built once and
-kept in a once-cell (pass `placeholder-cache`).
+kept in a once-cell (pass `placeholder-cache`). A placeholder that goes into
+a box is `box(0)` itself, as natively: the box does not hold a zero.
+
+A constant that goes into a box, where the box needs a heap cell (a `Float`,
+a `UInt64` from 2^63), is boxed once and kept in a once-cell, as native
+Lean's `_boxed_const` (pass `boxed-consts`). For example, the default of
+`a[i]!` on an `Array Float` is the constant `instInhabitedFloat`: no read
+allocates.
 
 ## Function values
 

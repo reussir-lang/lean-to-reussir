@@ -1,21 +1,91 @@
 # Generated types for inductives
 
-Every inductive instantiation becomes one generated Reussir type
-(`nominalType`), mirroring the Lean declaration. Paths are relative to
-`lean2rr/LeanToReussir/` unless they start with `runtime/`. Plan
-[§5.1](../../translation-plan.md#51-type-translation).
+Every inductive becomes one generated Reussir type (`nominalType`),
+mirroring the Lean declaration, whatever its type arguments. Paths are
+relative to `lean2rr/LeanToReussir/` unless they start with `runtime/`.
+Plan [§5.1](../../translation-plan.md#51-type-translation).
+
+### An inductive has one type whatever its arguments
+
+- **What:** `nominalType` computes the fields of each constructor once,
+  from their declared types with every parameter of the inductive
+  `lcAny`, through Lean's `toMonoTypeKeep`: a field `x : α` is a `Box`,
+  `xs : List α` is the one `List` type, `f : α → β` is the function type
+  `Box → Box`, a concrete field (`n : Nat`, `x : Float`) keeps its type.
+  `Tree Nat` and `Tree α` are one type, keyed by the inductive
+  (`LowerState.typeNames`; `typeHeads` gives the inductive back). A field
+  of a parameter's type is a `Box` at every instantiation, also where the
+  parameter is a proof or a type: it then holds `box(0)`, as natively.
+  `uniformType` is that type.
+- **Why:** Native Lean does the same: a field of unknown type is one
+  `lean_object*`. With one type per instantiation, a value crossing into
+  uniform code was rebuilt node by node (exponential on shared data:
+  [../conversions/structural.md](../conversions/structural.md#a-value-of-an-inductive-is-never-rebuilt)),
+  and polymorphic recursion in a type needed a cut (Lean 4.33's growing
+  parameters; Lean 4.34 accepts only growing indices, which mono erases).
+  Typed code keeps precise types for its own values (Stage 3 types
+  parameters, results and locals): only data layouts are uniform.
+- **Where:** `LowerBase.lean`: `nominalType`, `uniformType`; plan
+  [§5.1](../../translation-plan.md#51-type-translation).
+- **Remove only if:** never.
+
+### A field is read at its binder's type, once
+
+- **What:** A `cases` binds each field parameter at the parameter's own
+  Reussir type (`lowerType p.type`, which Stage 3 refines): a `Box` field
+  read by a parameter of type `Nat` is unboxed in a `let` right after the
+  match, not at each use. A parameter the declaration never uses is not
+  converted (`CodeCtx.used`, `codeUses` of the body), nor one of a unit
+  type (it carries nothing). The match's binders keep the record's
+  values, which `fresh-rebuild` rebuilds the matched value from; the
+  fields `lazy-fields` binds later are converted where it binds them.
+  Where such a parameter goes back to a position of the field's type (a
+  field of a rebuilt constructor), the code boxes its value again; it does
+  not pass the field's own box. A binding drops a conversion's `let` that
+  its code does not use (`dropUnusedConvs`, `CodeCtx.fieldConv`): enum and
+  structure arms, and the later bindings of `lazy-fields`, whose consuming
+  re-match also keeps a conversion made while the value was live instead
+  of unboxing that field again.
+- **Why:** With one type per inductive, the fields of a parameter's type
+  are `Box`es; binding them at the record's type made every use of a
+  `Nat` field unbox again. With the one-word box, a new box of a pointer
+  payload or of a small scalar allocates nothing (only a `Float`, a
+  `UInt64` from 2^63 and an `ElemBox` are cells). Passing the field's own
+  box instead (commit 3f0cb30, reverted) left the unboxed value dead in
+  the rebuilding branch, and Reussir's token reuse took its release (which
+  never frees) as the donor of the new node instead of the matched cell:
+  `RtProbeBump`, an association list of pairs bumped in a loop, allocated
+  a list cell per rebuilt node (Reussir
+  [issue 39](../../../reussir-bugs/39-alias-release-donor.md), a missed
+  optimization). A new box leaves no such release.
+- **Where:** `Lower/Hooks.lean`: `bindField`, `bindStructFields`;
+  `Lower/Ctx.lean`: `CodeCtx.fieldConv`;
+  `Lower/Code.lean`: `lowerCases` (enum and structure arms),
+  `dropUnusedConvs`, `fieldConvNames`, `lowerDecl` (`used`);
+  `Opt/LazyFields.lean`: `lazyStructFields`, `lazyLowerAlt`
+  (`LazyMatch.fields` carry the parameter's type); projections
+  (`Lower/Values.lean`: `lowerLetValue`, `.proj`) convert to the binder's
+  type at once.
+- **Remove only if:** never.
 
 ### Unit-like values are the value enum `L2RUnit`
 
 - **What:** `Unit`, `PUnit`, `◾` (erased values) and the IO world
   `lcVoid` are `enum [value] L2RUnit { u }` from the prelude. Erased
-  parameters stay parameters of type `L2RUnit` in declarations and closures
-  and receive `L2RUnit::u{}`; only extern calls drop them.
+  parameters are removed (rule 4), except a function's last parameter,
+  which stays one `L2RUnit` parameter for its trailing erased ones and
+  receives `L2RUnit::u{}`
+  ([../control-flow/calls-and-lets.md](../control-flow/calls-and-lets.md#erased-parameters-are-removed-rule-4));
+  an erased domain of a function type is a unit domain or a phantom one
+  ([function-values.md](function-values.md#erased-domains-of-function-types-are-unit-or-phantom-rule-4)).
+  The world and `Unit` are values: their parameters stay.
 - **Why:** Reussir's own `unit` is result-only: it cannot be stored or
-  passed. Keeping erased parameters keeps Lean's arities
-  ([../types/instances.md](../types/instances.md#instances-keep-leans-arity)).
+  passed. The unit kept for trailing erased parameters keeps the point
+  where Lean runs the body
+  ([../types/instances.md](../types/instances.md#instances-keep-leans-arity-stage-1)).
 - **Where:** `RR.lean`: `Ty.unit`, `Expr.unitVal`; `LowerBase.lean`:
-  `lowerTypeApp`; `Lower/Externs.lean`: `externParamPassed`;
+  `lowerTypeApp`; `ErasedDomains.lean`: `keepMask`;
+  `Lower/Externs.lean`: `externParamPassed`;
   `runtime/prelude.rr`: `L2RUnit`.
 - **Remove only if:** Reussir's `unit` becomes a value type.
 
@@ -42,33 +112,18 @@ Every inductive instantiation becomes one generated Reussir type
   of every `BaseIO` call once the world is gone) is a `[value]` struct,
   unless its field's type is being translated at the same time (no type
   contains itself by value). Identity (`ptrAddrUnsafe`) and cast reads
-  treat it as its field; arrays, once-cells and references, which need a
-  type that crosses the FFI boundary, wrap it in an `ElemBox`
-  (`TypeInfo.value`).
+  treat it as its field; once-cells, which need a type that crosses the
+  FFI boundary, wrap it in an `ElemBox` (`TypeInfo.value`; arrays and
+  references hold `Box`es).
 - **Why:** No heap cell per `BaseIO` result (an `IO.Ref` loop: 0.25 s →
   0.17 s, 2f0255e); natively Lean represents such a structure by its
   field.
-- **Where:** `LowerBase.lean`: `nominalType` (`predictValue`,
-  `inProgressType`); `Opt/ValueStructs.lean`. Optional pass
+- **Where:** `LowerBase.lean`: `nominalType` (after its fields are
+  lowered: a field type being translated has a name, `typeHeads`, but no
+  `typeInfos` yet); `Opt/ValueStructs.lean`. Optional pass
   `value-structs` ([../optional-passes.md](../optional-passes.md)).
 - **Remove only if:** the pass is off; then such structures are shared
   records like the others.
-
-### Whether a type is a shared record is decided before its fields
-
-- **What:** Before translating an inductive's fields, `nominalType`
-  predicts from the constructor shapes whether the type will be a boundary
-  type (a shared record) and records it in `pendingBoundary`, which
-  `isBoundaryTy` consults for types in progress.
-- **Why:** A field `Array Tree` inside `Tree` was translated while `Tree`
-  was unknown, so it became `RVec<ElemBox(Tree)>`, while `Array Tree` is
-  `RVec<Tree>` everywhere else: every `get!`, `size` or `push` of the field
-  converted the whole array (Rp3MinArrSelf 1e5: 4.36 s → 0.00 s; adv3
-  RP3-6, d6dd848). The `[value]` decision follows the same prediction, so
-  the two cannot disagree; mutual types work whichever is translated first.
-- **Where:** `LowerBase.lean`: `nominalType`, `isBoundaryTy`,
-  `inProgressType`, `LowerState.pendingBoundary`.
-- **Remove only if:** never.
 
 ### Fields are ordered by decreasing alignment
 

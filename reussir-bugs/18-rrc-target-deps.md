@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (build system). **Status:** patched (0025), applied in
+**Kind:** bug (build system). **Status:** patched (18-a), applied in
 `./reussir` (`l2r-local` cc8e5aa5). It affects only Reussir's own build.
 
 **Verdict: bug in Reussir's build system (minor).** The README lists
@@ -49,7 +49,7 @@ Not affected: lean2rr's tools build Reussir's default target.
 ## Patch
 
 Patch file
-[`patches/0025-l2r-local-bug-18-build-every-archive-build.rs-links-.patch`](patches/0025-l2r-local-bug-18-build-every-archive-build.rs-links-.patch)
+[`patches/18-a-archive-build-order.patch`](patches/18-a-archive-build-order.patch)
 (`l2r-local` commit `a3658320`, applied in `./reussir`; `l2r-local` head
 `cc8e5aa5`).
 
@@ -78,7 +78,7 @@ says what it must cover:
 **Why it is correct.** `ReussirCAPI` depends on every archive of the list,
 and the cargo targets depend on `ReussirCAPI`, so each archive `build.rs`
 links is built before cargo runs. Nothing else changes: the default target
-built the four anyway. In the final stack, 0032 adds `MLIRReussirSCCP` to
+built the four anyway. In the final stack, 11-a adds `MLIRReussirSCCP` to
 the same list, as this rule requires (review RV8C-02).
 
 **Verification.** With a fresh build directory and `--target rrc` alone:

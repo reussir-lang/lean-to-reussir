@@ -8,10 +8,11 @@ update under an `if`. `uniform-updates` kept an update's result uniform only
 when every use expected `Array lcAny`, and a jump to a join point whose
 parameter is `Array Nat` is not such a use: the whole column was converted
 to `Array Nat` and back at every step (20000 steps: 3.9 s for 0.00 s
-natively). A join point's parameter is now part of the pass's fixpoint: it
-becomes `Array lcAny` when every jump passes a uniform value and every use
-expects one. Output checked here; tests/runtime/conv-count-check.sh runs
-this program at two sizes and counts the elements conversions rebuild. -/
+natively). A join point's parameter was then made part of the pass's
+fixpoint. Since rule 1 (one representation per `Array α`, which deleted
+the pass) the join point's parameter and the column are one array type,
+whatever Lean's types say. Output checked here; tests/runtime/
+conv-count-check.sh checks that the code has no conversion function. -/
 inductive Ty | nat | str
 
 @[reducible] def Ty.denote : Ty → Type

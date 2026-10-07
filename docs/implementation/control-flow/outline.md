@@ -87,14 +87,14 @@ text, from growing superlinearly. It is a required part (`outline` in
 
 ### Outline runs before the passes over the generated functions
 
-- **What:** The pipeline runs the `Array Nat` literal tables, then
-  `Outline`, then the registry's passes over the generated functions
-  (`sink-proj`), then the text.
+- **What:** The pipeline runs `Outline`, then the registry's passes over
+  the generated functions (`sink-proj`), then the text. (The `Array Nat`
+  literal tables, which came first, went with the one array type: an
+  array of `Box`es has no table form.)
 - **Why:** Those passes then see bounded functions (`sink-proj` was
   quadratic in the nesting depth of uncut code, aa2dce4).
 - **Where:** `lean2rr/Main.lean`: `pipeline`; `Emit/Program.lean`:
-  `LoweredProgram.literalTables`, `LoweredProgram.outline`,
-  `LoweredProgram.runRRPasses`.
+  `LoweredProgram.outline`, `LoweredProgram.runRRPasses`.
 - **Remove only if:** never.
 
 ### Known limit: Outline's own time is quadratic in a tail path's length

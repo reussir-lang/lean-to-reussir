@@ -1,0 +1,10 @@
+ss false 0 = 100/0
+sa false 0 = 203
+sp false 0 = 100.000000
+st false 0 = 200
+m2 false 0 = 1310
+ss true 7 = 7
+sa true 7 = 107
+sp true 7 = 7.000000
+st true 7 = 107
+m2 true 7 = 107

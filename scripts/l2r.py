@@ -351,12 +351,20 @@ def build_lean_runtime(out):
 
 # Local Reussir patches whose absence would not show as a build error at the
 # right place: (patch, file of the Reussir checkout, a symbol the patch adds
-# there). 0040: every drain that released something calls the function the
-# host stores in `__reussir_drop_drained` once it is over; leanrt resolves
-# the promises a free dropped there (runtime/README.md, "The scheduler").
-# leanrt's reference to the symbol would also fail to compile without it.
+# there). A patch is named NN-x, as its file reussir-bugs/patches/NN-x-*.patch
+# (NN: its entry, reussir-bugs/NN-*.md). 40-a: every drain that released
+# something calls the function the host stores in `__reussir_drop_drained`
+# once it is over; leanrt resolves the promises a free dropped there
+# (runtime/README.md, "The scheduler"). leanrt's reference to the symbol
+# would also fail to compile without it.
 REQUIRED_REUSSIR_PATCHES = [
-    ("0040", "crates/reussir-rt/src/drop.rs", "__reussir_drop_drained"),
+    ("40-a", "crates/reussir-rt/src/drop.rs", "__reussir_drop_drained"),
+    # The one-word box `LAny` keeps its payload's type number in the top 16
+    # bits of a tagged handle (reussir-bugs/38-tagged-top-bits.md).
+    ("38-a", "lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp", "taggedBoxAddress"),
+    # The drop glue releases a cell's members in native Lean's order when a
+    # later field pushes work (reussir-bugs/13-long-list-drop.md).
+    ("13-d", "lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp", "releasesQuietly"),
 ]
 
 
@@ -371,7 +379,7 @@ def check_reussir_patches():
         if not src.is_file() or symbol not in src.read_text():
             sys.exit(f"l2r: the Reussir checkout {REUSSIR} lacks the local Reussir patch {patch} "
                      f"(`{symbol}` in {rel}), which lean2rr requires: build with a Reussir that has it "
-                     "(runtime/README.md, \"The scheduler\")")
+                     "(reussir-bugs/README.md)")
 
 
 def build_leanrt():
@@ -484,7 +492,7 @@ def main():
     env["L2R_SHIM_DIR"] = str(SHIM_DIR)
     # rrc compiles each of the prelude's textures with its own rustc run,
     # most of its time on a small program; this directory keeps the bitcode
-    # (Reussir issue 35, a cost; patch 0066; an rrc without the patch ignores
+    # (Reussir issue 35, a cost; patch 35-a; an rrc without the patch ignores
     # the variable). rrc keys each entry by everything the bitcode depends on,
     # the texture, rustc (here the rustc-native script, whose text names the
     # rlibs and the flags), its options and the libraries in the
@@ -536,7 +544,7 @@ def main():
                # otherwise, but links a position-independent executable, so
                # read-only data with absolute addresses (closure vtables) needs
                # text relocations (DT_TEXTREL) with GNU ld and fails with lld
-               # (Reussir bug 34, patch 0065). Native Lean executables are PIEs
+               # (Reussir bug 34, patch 34-a). Native Lean executables are PIEs
                # without text relocations.
                + ["--relocation-mode", "pic"]
                # Extra rrc flags for experiments (L2R_RRC_FLAGS, split on spaces).

@@ -1,0 +1,10 @@
+# n in-place updates of a value held in an existential package, by code over its unknown type, n = 1000 and 4000: no copy per step (bytes linear)
+# the offset covers a box per step (natively none for a pointer); a copy of the value per step is n^2/2 bytes or more
+floats 1000 | floats 4000 | 4 8000
+bytes 1000 | bytes 4000 | 4 8000
+farr 1000 | farr 4000 | 4 8000
+string 1000 | string 4000 | 4 8000
+rows 1000 | rows 4000 | 4 8000
+ref 1000 | ref 4000 | 4 8000
+map 1000 | map 4000 | 4 8000
+list 1000 | list 4000 | 4 8000

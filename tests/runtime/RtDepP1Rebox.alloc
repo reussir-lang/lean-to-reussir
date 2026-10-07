@@ -1,0 +1,2 @@
+# n steps storing a Float state into two packages, n = 100000 and 400000: one box per step at most
+100000 | 400000 | 4 2000

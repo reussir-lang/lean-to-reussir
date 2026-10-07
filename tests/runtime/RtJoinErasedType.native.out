@@ -1,0 +1,4 @@
+f false 0 = 100
+h false 0 = 100
+f true 7 = 107
+h true 7 = 107

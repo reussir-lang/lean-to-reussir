@@ -3,8 +3,8 @@ import LeanToReussir.Lower.Process
 /-! # Promises
 
 `IO.Promise α` is `lcAny` in mono code, so a promise is passed boxed: a
-runtime `LPromise` holding the cell of its task, a task over `Option Box`
-whatever `α` is, so that typed and uniform code share it (translation plan
+runtime `LPromise` holding the cell of its task (the one task type, whose
+value, an `Option α`, is boxed), whatever `α` is (translation plan
 §5.14). The task is pending, without a computation the runtime would run,
 until the promise is resolved; forcing it while unresolved runs queued
 tasks until one resolves it (`l2r_task_force_sources`), and otherwise
@@ -14,10 +14,10 @@ namespace LeanToReussir
 open Lean Compiler LCNF
 
 /-- The task type of every promise (`Task (Option lcAny)`), its state type
-and its value type. -/
+and the `Option` type of its value (held boxed in the task's state). -/
 def promiseTask : LowerM (RR.Ty × String × RR.Ty) := do
   let optTy ← lowerType (mkApp (mkConst ``Option [levelZero]) (mkConst ``lcAny))
-  let z ← lazyState true optTy
+  let z ← lazyState true
   return (.app "LCell" #[.named z], z, optTy)
 
 /-- `l2r_promise_resolve_S(c, v)`: resolve the promise task `c` with `v`
@@ -32,10 +32,12 @@ def promiseResolveFn : LowerM String := do
   lazyFn name do
     let zt := RR.Ty.named z
     let u64 := RR.Ty.named "u64"
+    -- The task's value is the `Option`, boxed.
+    let bv ← coerce (.var "v") optTy RR.Ty.box
     let body : RR.Block := .ofExpr (.mtch (.call "l2r_lcell_get" #[zt] #[.var "c"]) #[
       lazyArm z "done" #[none] ⟨#[("z", some u64, .atom "0")], .var "z"⟩,
       { ty := z, ctor := none, binders := #[], body := ⟨#[
-          ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]]),
+          ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[bv]]),
           ("r", some u64, .call "l2r_task_resolve_at" #[] #[.call "l2r_lcell_addr" #[zt] #[.var "c"]]),
           ("wk", some u64, .call "l2r_task_walk_if" #[] #[.var "r"])], .atom "0"⟩ }])
     let none' ← ctorValue optTy ``Option.none #[]
@@ -54,16 +56,15 @@ def promiseExtern (sym : String) (params : Array Expr) (ret : Expr) (args : Arra
     return .call "l2r_promise_cell" #[.named z] #[← coerce args[i]! (← lowerType params[i]!) lpTy]
   match sym with
   | "lean_io_promise_new" =>
-    let (cellTy, z, optTy) ← promiseTask
+    let (cellTy, z, _) ← promiseTask
     let _ ← promiseResolveFn
     let resTy ← lowerType ret
     let u ← fresh "u"
-    let hang := rawFnValue (.fn .unit optTy) u (.ofExpr (.call "l2r_lazy_cycle" #[optTy] #[]))
+    let hang := rawFnValue (.fn .unit RR.Ty.box) u (.ofExpr (.call "l2r_lazy_cycle" #[RR.Ty.box] #[]))
     let c ← fresh "pc"
     let p ← fresh "pr"
-    let v ← coerce (.var p) lpTy (← ioPayloadTy resTy)
     return some (.block ⟨#[(c, some cellTy, .call "l2r_lcell_new" #[.named z] #[.ctor z (some "pending") #[hang]]),
-      (p, some lpTy, .call "l2r_promise_new" #[.named z] #[.var c])], ← wrapIOResult resTy v⟩)
+      (p, some lpTy, .call "l2r_promise_new" #[.named z] #[.var c])], ← wrapIOResult resTy (.var p) lpTy⟩)
   | "lean_io_promise_resolve" =>
     let some _ := args[1]? | return none
     let (cellTy, _, optTy) ← promiseTask
@@ -81,7 +82,7 @@ def promiseExtern (sym : String) (params : Array Expr) (ret : Expr) (args : Arra
       (c, some cellTy, .call "l2r_promise_cell" #[.named z] #[.var q]),
       (r, some (.named "u64"), .call resolve #[] #[.var c, ← ctorValue optTy ``Option.some #[boxed]]),
       (k, some (.named "u64"), .call "l2r_promise_release" #[] #[.var q])],
-      ← wrapIOResult (← lowerType ret) .unitVal⟩)
+      ← wrapIOResult (← lowerType ret) .unitVal .unit⟩)
   | "lean_io_promise_result_opt" =>
     let some _ := args[0]? | return none
     let (cellTy, _, _) ← promiseTask
@@ -97,7 +98,7 @@ def promiseExtern (sym : String) (params : Array Expr) (ret : Expr) (args : Arra
   | _ => return none
 
 /-- The functions that run tasks handed over by the runtime, dispatching on
-their state type's tag: `l2r_task_run_one()` (the next queued task: 1 if
+the state type's tag (`taskTag`): `l2r_task_run_one()` (the next queued task: 1 if
 there was one), `l2r_run_pending_tasks()` (the final run of queued tasks
 when `main` has returned), `l2r_task_walk()` (the `sync` dependents of a
 task that just finished, in Lean's walk order; `l2r_task_walk_if(e)` when
@@ -107,9 +108,10 @@ it waits for a promise), `l2r_task_run_before(h, a)` (the tasks walk `h`
 of a constant collected that natively run before task `a`). Each runs its task as a worker would
 (`taskStepFn`), or drops it when the runtime says it is deleted (a pure
 task the program has dropped), then asks again. Generated once every task
-type is known. -/
+is registered. -/
 def taskDispatchFns : LowerM (Array RR.Item) := do
-  let tags ← getPart (·.taskTags)
+  -- The task state type, tag 0 (`taskTag`), once a task is registered.
+  let tags ← if ← getPart (·.taskTagged) then pure #[← lazyState true] else pure #[]
   let u64 := RR.Ty.named "u64"
   let mk (name : String) (params : Array (String × RR.Ty)) (first : RR.Expr) (take : String) (again : RR.Expr) :
       LowerM RR.Item := do

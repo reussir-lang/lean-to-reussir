@@ -41,11 +41,11 @@ into it. Reussir issues (bugs, costs and the other kinds) link to
    static dictionaries, polymorphic recursion, Lean's passes, type
    recovery, `lcAny` and the "can cast" fact.
 2. [representations/](representations/README.md): `Nat`/`Int`, generated
-   records and value types, arrays and `ElemBox`, strings and the literal
+   records and value types, arrays, strings and the literal
    table, `Box`, placeholders, function values, references, identity.
-3. [conversions/](conversions/README.md): structural conversions and
-   `convMachine`, lazy conversions of function values, thunks and tasks,
-   unboxing, casts.
+3. [conversions/](conversions/README.md): where conversions go (a value
+   of an inductive is never rebuilt: one type per inductive), lazy
+   conversions of function values, thunks and tasks, unboxing, casts.
 4. [control-flow/](control-flow/README.md): calls and `let`s, `cases`
    shapes, join points (J1/J1′/J2/J3), state machines (J4), `Outline`.
 5. [ownership.md](ownership.md): borrow emulation, store-then-release
@@ -68,3 +68,9 @@ into it. Reussir issues (bugs, costs and the other kinds) link to
     definitions, refusals), the C FFI (parked).
 11. [translator.md](translator.md): lean2rr itself: loading the program,
     its stack and limits, its switches.
+12. [testing.md](testing.md): the test tooling that checks costs and the
+    translation itself: the allocation counter, its limits and
+    `alloc-check.sh`, the `.xfail` of the allocation check alone, canonical
+    fingerprints of the generated code, the determinism check, pay-nothing
+    baselines; the dependent-type corpus (sharing checked by memory, timing
+    tests that follow Lean's arities, the combined shared cases).

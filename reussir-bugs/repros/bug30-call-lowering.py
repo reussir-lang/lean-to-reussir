@@ -8,9 +8,9 @@ N functions f0..f(N-1) in the func dialect; each f(i) calls f(i-1) twice
 (2N calls). `reussir-opt OUT.mlir --reussir-convert-to-llvm` lowers them to
 the LLVM dialect. The func dialect's call lowering looked each callee up
 with a linear scan of the module, so the conversion took time quadratic in
-N. On Reussir ef922049 + the ten-patch list + 0016/0017 (this machine,
+N. On Reussir ef922049 + the ten-patch set + 21-a/23-a (this machine,
 loaded): N = 5000: 0.75 s, N = 10000: 3.9 s, N = 20000: 13.2 s; with
-patch 0062: 0.16 s, 0.27 s, 0.9 s (see 30-call-lowering-lookup.md).
+patch 30-a: 0.16 s, 0.27 s, 0.9 s (see 30-call-lowering-lookup.md).
 """
 import sys
 

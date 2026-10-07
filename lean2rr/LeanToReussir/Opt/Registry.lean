@@ -13,10 +13,8 @@ import LeanToReussir.Opt.NullaryScrutinee
 import LeanToReussir.Opt.StateMachines
 import LeanToReussir.Opt.ValueStructs
 import LeanToReussir.Opt.FieldOrder
-import LeanToReussir.Opt.NatArrays
 import LeanToReussir.Opt.PlaceholderCache
-import LeanToReussir.Opt.SplitMapLoops
-import LeanToReussir.Opt.UniformUpdates
+import LeanToReussir.Opt.BoxedConsts
 import LeanToReussir.Opt.FreshRebuild
 import LeanToReussir.Opt.ConvLiveness
 
@@ -76,10 +74,8 @@ def stage2 : Stage2Config := #[
 def optimizations : Array OptPass := #[
   ⟨"field-order", true, "record fields in decreasing alignment, so records have no padding (declaration order otherwise)", FieldOrder.install⟩,
   ⟨"value-structs", true, "a structure with one relevant field (ST.Out of every BaseIO call) is a [value] struct, not a heap record", ValueStructs.install⟩,
-  ⟨"nat-arrays", true, "Array Nat/Int as the runtime's one-word-per-element LNatArr/LIntArr", NatArrays.install⟩,
-  ⟨"split-map-loops", true, "an Array.map loop whose element representation changes split into source and result arrays, instead of running on Boxes (Stage 3)", SplitMapLoops.install⟩,
-  ⟨"uniform-updates", true, "an update of a container whose element type depends on a value (Array lcAny) runs on its uniform representation, boxing one element, instead of converting the whole container to the precise type and back (Stage 3)", UniformUpdates.install⟩,
   ⟨"placeholder-cache", true, "placeholders (box(0) at a type) that would allocate built once, in a once-cell", PlaceholderCache.install⟩,
+  ⟨"boxed-consts", true, "a constant whose boxing allocates (a Float, a UInt64 from 2^63) boxed once, in a once-cell, as native Lean's _boxed_const", BoxedConsts.install⟩,
   ⟨"float-lits", true, "Float literals (Float.ofScientific/ofNat on literals) folded to their bits at compile time", FloatLits.install⟩,
   ⟨"cheap-consts", true, "constants built from small literals and scalar conversions recomputed at each use, not cached", CheapConsts.install⟩,
   ⟨"prelude-repr", true, "Nat.repr/Int.repr calls replaced by the runtime's GMP versions (same strings; the runtime keeps them, unused, without the pass)", PreludeRepr.install⟩,
@@ -99,10 +95,10 @@ def required : Array RequiredPass := #[
     "not an optimization: one chain of nested matches would be as deep as the program has initializers, and rrc's recursive lowering overflows its stack on a few thousand (translation plan §5.12)"⟩,
   ⟨"loop-state-machines", "a declaration whose outlined join point calls it back in tail position is one state machine, its entry variant carrying the parameters (J4; Lower/StateMachine)",
     "otherwise a loop through an outlined join point is mutually recursive and uses stack per iteration where native Lean uses none: without it, and with the join-point passes off, the classic Sieve and Strings overflowed Lean's 1 GiB stack at their medium size"⟩,
-  ⟨"closed-chains", "a closed term used once, by another constant, is evaluated there instead of cached, and spliced into it when both are straight-line (Emit/Program, chainConsts, spliceChainConsts; Array Nat runs as tables: ArrayLits)",
+  ⟨"closed-chains", "a closed term used once, by another constant, is evaluated there instead of cached, and spliced into it when both are straight-line (Emit/Program, chainConsts, spliceChainConsts)",
     "an array literal is a chain of closed terms, and caching every step keeps every intermediate array: memory quadratic in the literal's length (10000 elements: 1036 MB instead of 7 MB); as one function per step, a 100000-element literal took ten minutes to build"⟩,
-  ⟨"stage3-types", "Stage 3 recovers parameter types from call sites and result types from callers' bindings (MonoRetype: paramsFromCallers, refineSignature)",
-    "type recovery, not a choice of representation: a value left at lcAny is a Box, and an array whose representation differs is converted, a copy, each time it crosses such a position (a call in a loop, each read of a constant), and the copy is another object than native Lean's"⟩,
+  ⟨"stage3-types", "Stage 3 recovers result types from the returned values and from callers' bindings (MonoRetype: refineSignature, resultsFromCallers)",
+    "type recovery, not a choice of representation: a value left at lcAny is a Box, unboxed at each use at a precise type (each read of a constant), and a function value over one is wrapped at each such use"⟩,
   ⟨"outline", "deep and long tail paths and let values of a function cut into functions, recursive functions included (their loops through step values) (Outline)",
     "rrc's analyses are superlinear in nesting depth and straight-line length (Reussir issues 16 and 17, costs), and so is the .rr text, whose indentation follows the nesting: without it a 3000-arm literal match in tail position gives 126 MB of .rr instead of 1 MB"⟩,
   ⟨"wildcard-sinks", "a wildcard arm covering several constructors releases the wide-enum values it holds and does not use through one out-of-line call (`l2r_sink`; Lower/Code, sinkWildcardHeld)",

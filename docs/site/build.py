@@ -292,8 +292,9 @@ def gen_testsets():
          "each <code>@[export]</code> of <code>L2RShim</code> has the type of the <code>@[extern]</code> of the same C symbol"],
         ["Big-number counters", "<code>tests/runtime/nat-alloc-check.sh</code>", "2 sizes",
          "every big number made is freed exactly once; big constants made once"],
-        ["Conversion counter", "<code>tests/runtime/conv-count-check.sh</code>", "2 sizes",
-         "uniform-updates: conversions grow at most linearly; a counter emitted in an undone cast probe is emitted again"],
+        ["Conversion counter", "<code>tests/runtime/conv-count-check.sh</code>", "9 programs",
+         "no conversion function in eight programs whose containers cross between typed and generic code; "
+         "a cast between inductives whose layouts differ converts, counts its elements and prints what native prints"],
         ["Reussir repros", "<code>reussir-bugs/repros/run.sh</code>", "one per Reussir issue",
          "REPRODUCES or FIXED for each issue, on a given rrc"],
     ]
@@ -346,11 +347,16 @@ def gen_diffindex():
 
 
 def gen_leanbugs():
-    for name, items in section10_groups():
-        if name.startswith("Runtime: Lean bugs we do not reproduce"):
+    groups = [(name, items) for name, items in section10_groups()
+              if name.startswith(("Runtime: Lean bugs we do not reproduce",
+                                  "Compiler: Lean bugs we do not reproduce"))]
+    if groups:
+        parts = []
+        for name, items in groups:
             lis = "".join(f"<li>{code_spans(i)}</li>" for i in items)
-            return (f"<p>Plan §10 lists them, each with the native behaviour, lean2rr's "
-                    f"behaviour and its test:</p><ul>{lis}</ul>")
+            parts.append(f"<p>{html.escape(name.split(' (')[0].split(':')[0])}:</p><ul>{lis}</ul>")
+        return (f"<p>Plan §10 lists them, each with the native behaviour, lean2rr's "
+                f"behaviour and its test.</p>" + "".join(parts))
     return ('<div class="note"><p><strong>In progress.</strong> The list of Lean runtime '
             'bugs that lean2rr does not reproduce is not in plan §10 yet. This section '
             'shows its items once it is.</p></div>')
@@ -379,11 +385,16 @@ def values():
     rb = read("reussir-bugs/README.md")
     m = re.search(r"branch `l2r-local` \(head `([0-9a-f]+)`\)", rb)
     rhead = m.group(1) if m else "?"
-    m = re.search(r"for p in (.*?); do", rb, re.S)
-    applied = re.findall(r"\b0\d{3}\b", m.group(1)) if m else []
-    m2 = re.search(r"the (\d+) local patches", rb)
-    if m2 and int(m2.group(1)) != len(applied):
-        warn(f"reussir-bugs/README.md says {m2.group(1)} local patches; its apply list has {len(applied)}")
+    series = read("reussir-bugs/patches/series").split()
+    pdir = os.path.join(REPO, "reussir-bugs", "patches")
+    files = sorted(f for f in os.listdir(pdir) if f.endswith(".patch"))
+    if sorted(series) != files:
+        warn("reussir-bugs/patches/series does not list exactly the patch files of reussir-bugs/patches/")
+    m2 = re.search(r"plus\s+the\s+first\s+(\d+)\s+patches\s+of\s+the\s+series", rb)
+    applied = int(m2.group(1)) if m2 else 0
+    if not m2 or applied > len(series):
+        warn(f"reussir-bugs/README.md does not say how many of the {len(series)} patches of the series "
+             "l2r-local has ('plus the first N patches of the series')")
     m3 = re.search(r"Runtime test suite \((\d+) programs", read("docs/implementation-status.md"))
     if m3 and int(m3.group(1)) != len(tests):
         warn(f"docs/implementation-status.md says {m3.group(1)} runtime tests; tests/runtime has {len(tests)}")
@@ -395,7 +406,8 @@ def values():
         "opt_count": str(len(opts)),
         "req_count": str(len(req)),
         "reussir_head": rhead,
-        "patches_applied": str(len(applied)),
+        "patches_applied": str(applied),
+        "patches_total": str(len(series)),
         "bug_entries": str(len(parse_md_table(rb, "#"))),
     }
 

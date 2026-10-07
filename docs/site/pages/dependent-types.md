@@ -12,20 +12,21 @@ and the implementation notes on
 
 <div class="rule" markdown="1">
 **lean2rr keeps values and discards types.** A value whose type the
-compiler does not know goes into one enum, `L2RBox`. The program reads the
-value with a `match` on the enum's variant.
+compiler does not know is one word, a *box* (`LAny`). The box holds a
+small value itself, or it points to an object and records the type of
+that object. The program takes the value out of the box at the type that
+it needs.
 </div>
 
 A *dependent type* is a type that contains a value, such as the `n` in
 `Vector String n`, or a type that a value selects, such as `t.denote` below.
 
-All the Lean code on this page is one program. It type-checks, and its
-lean2rr build gives the same output as its native build. The LCNF on this
-page is the output of Lean's compiler for that program (mono phase, with
-the types of parameters and `let` values). The Reussir code is the output
-of lean2rr for that program (`--keep-rr`), with shorter, readable names and
-without `lcErased` (rule 4 of
-[Layouts of generic types](#layouts-of-generic-types)).
+All the Lean code on this page is one program (the runtime test
+`RtDepSiteEx`). It type-checks, and its lean2rr build gives the same output
+as its native build. The LCNF on this page is the output of Lean's compiler
+for that program (mono phase, with the types of parameters and `let`
+values). The Reussir code is the output of lean2rr for that program
+(`--keep-rr`), with shorter, readable names.
 
 ## Types and values
 
@@ -34,11 +35,11 @@ LCNF, it replaces two kinds of items:
 
 - **`◾`** replaces an item without data: a type, a type argument or a proof.
   In a type, LCNF writes it as `lcErased`. It carries no information, and
-  lean2rr does not need it: the Reussir code has no field, no parameter
-  and no argument for it.
+  lean2rr removes it: the Reussir code has no field, no parameter and no
+  argument for it (rule 4 of
+  [Layouts of generic types](#layouts-of-generic-types)).
 - **`lcAny`** replaces the *type* of a value when the compiler does not know
-  that type. The value itself has data. lean2rr stores the value in an
-  `L2RBox`.
+  that type. The value itself has data. lean2rr stores the value in a box.
 
 An example:
 
@@ -77,65 +78,68 @@ fn pick_Nat(b : bool, x : Nat, y : Nat) -> Nat {
 ```
 
 - In the copy at `Nat`, `x` and `y` are `Nat` values. A copy at an unknown
-  type uses `L2RBox` for `x` and `y`.
+  type uses `LAny` for `x` and `y`.
 
-In Rust terms, an `L2RBox` is similar to a `Box<dyn Any>`.
+Functions get a copy for each type argument. Data types do not: each
+datatype has one layout (rule 1).
 
-## The enum `L2RBox`
+In Rust terms, a box is similar to an `Rc<dyn Any>` that stores small
+values inside the word.
 
-Each program has one `L2RBox` enum. It has one variant for each run-time
-layout:
+## The box `LAny`
 
-- one variant for each datatype;
-- one variant for each kind of scalar;
-- one variant for function values;
-- one variant for strings, one for arrays, one for big numbers;
-- one unit variant (`b0`), for the unit value `()` and Lean's `box(0)`.
+{{svg:box}}
 
-The set of variants is finite. It stays finite when polymorphic recursion
-makes the set of types infinite. lean2rr compiles the whole program at one
-time, so it knows all the variants.
+A box is one 64-bit word, as native Lean's `lean_object*`:
 
-For the program on this page, lean2rr generates this enum:
+- **An odd word is an immediate**, `(v << 1) | 1`. The unit value `()` and
+  Lean's `box(0)` are the word 1. A `Bool`, a `Char`, a `UInt8`, `UInt16`
+  or `UInt32`, a `Float32`, an enumeration's index, a constructor without
+  fields, a small `Nat` or `Int` (its own word) and a `UInt64` below
+  2<sup>63</sup> are immediates. An immediate is never allocated.
+- **An even word is a pointer** to a counted object. The low 48 bits are the
+  address. The top 16 bits are the *type number* of the object.
+
+The type numbers:
+
+| Number | Object |
+|---|---|
+| 1, 2 | a big `Nat`, a big `Int` |
+| 3 | a `String` |
+| 4, 5 | a cell for a `Float`, a cell for a `UInt64` from 2<sup>63</sup> |
+| 6, 7, 8 | an `Array`, a `ByteArray`, a `FloatArray` |
+| 16 and up | a type of the program: a record, an enum, a function value, a reference, a thunk or task cell |
+
+For the program on this page, lean2rr numbers seven types of its own. Two
+of them occur below: `Sigma` is 21, `Prod` is 22.
+
+To put a value into a box, the code calls `l2r_any_of<T>(x, num)`. To take
+a value out, it calls `l2r_any_as<T>(b, num)`, or it splits the word
+itself. Each read checks the word:
+
+- a pointer with the expected number gives the object;
+- `box(0)` gives the *zero* of the type: `0`, `""`, an empty array, or a
+  value that lean2rr builds for the type (see
+  [Placeholders](representations.html#placeholders));
+- any other word is a panic (`unreachable`), never a wrong read. In a
+  program that casts, a read also accepts the types that a cast can give.
+
+This code, from `describe` below, takes a `String` out of the box `v`:
 
 ```rust
-enum L2RBox {
-    b0(L2RUnit),      // the unit variant: Lean's box(0)
-    b1(Ref_StdGen),   // a reference cell (IO.stdGenRef, made at startup)
-    b2(Nat),          // a Nat
-    b3(LStr),         // a String
-    b4(Prod_Box),     // a pair of two boxes (Prod lcAny lcAny)
-    b5(Prod_Nat)      // a pair of two Nats (Prod Nat Nat)
-}
+lean_string_append(prefix, l2r_any_as<LStr>(v, 3))     // 3: the number of String
 ```
 
-The payload types:
+The program releases its own types. For each type number, lean2rr
+generates a release function (`l2r_any_rel_<n>`). The runtime keeps these
+functions in a table. When the last reference to a boxed record goes, the
+runtime calls the function of its number.
 
-```rust
-struct Ref_StdGen(Cell<StdGen>)       // IO.Ref StdGen: a reference cell
-struct Prod_Box(L2RBox, L2RBox)       // Prod lcAny lcAny
-struct Prod_Nat(Nat, Nat)             // Prod Nat Nat
-```
+## Where lean2rr uses the box
 
-`b4` and `b5` are two layouts of `Prod`. The current version gives each
-type argument its own layout (see [The current version](#the-current-version)).
-
-Code that needs the value matches the variant. This code, from `describe`
-below, takes a `String` out of an `L2RBox` `v`:
-
-```rust
-match v {
-    L2RBox::b3(s) => { s },                  // the String variant
-    L2RBox::b0(_) => { zero_String() },      // Lean's box(0): the empty String
-    _ => { l2r_unreachable<LStr>() }         // no other variant holds a String
-}
-```
-
-## Where lean2rr uses the enum
-
-Every position whose type is `lcAny` holds an `L2RBox`: a field, a
-parameter, a result, a local value, or an argument of a function value. A
-type is unknown in these cases:
+Every position whose type is `lcAny` holds a box: a field, a parameter, a
+result, a local value, or an argument of a function value. A type is
+unknown in these cases:
 
 - a type parameter (`x : α`);
 - a type that another field holds (`val : α` in a structure with the field
@@ -143,7 +147,11 @@ type is unknown in these cases:
 - a type that a value selects (`Sigma.snd`, `Array ty.denote`);
 - a type function applied to an argument (`f Nat`, with `f` a parameter).
 
-lean2rr puts a value into its variant where the value goes into such a
+A field of a datatype whose type is a parameter is also a box, at every
+type argument (rule 1). So are the elements of an array, the value of a
+thunk or task, and the contents of a reference.
+
+lean2rr puts a value into a box where the value goes into such a
 position. It takes the value out where the value comes back to a known
 type.
 
@@ -152,22 +160,28 @@ type.
 These are the layout rules:
 
 1. **One layout for each datatype.** lean2rr computes the layout of each
-   constructor one time, from the declared field types. `Tree Nat` and
-   `Tree α` have the same layout.
+   constructor one time, from the declared field types. A field whose type
+   is a parameter is a box. `Tree Nat` and `Tree α` are one Reussir type.
+   `Array α` is `RVec<LAny>` for every `α`. `Thunk α`, `Task α`,
+   references and promises also have one type each, over the box. So no
+   value is converted when it goes from typed code to generic code.
 2. **A field with a concrete type keeps that type.** In
    `structure P where x : Float`, `x` is a raw `f64`.
 3. **A structure with one relevant field is that field** (`Fin n`,
    `Subtype`).
 4. **`lcErased` is removed.** It carries no information, and lean2rr does
-   not need it. No function, function type or call has an `lcErased`
-   parameter or argument. A function whose parameters are all `lcErased`
-   keeps one unit parameter, so that it stays a function.
+   not need it. A function has no parameter for it, and a call has no
+   argument for it. When the last parameters of a function are erased, the
+   function keeps one unit parameter for that group. So its body runs at
+   the same point as natively, and a function with only erased parameters
+   stays a function. A function type keeps a unit domain only where a
+   function value of that type runs its body right after that domain.
 5. **Function values have one calling convention.** A function that is
    stored where its type is generic gets an entry that takes and returns
-   `L2RBox` values.
-6. **Casts in Lean's library go through the enum.** `Dynamic`,
+   boxes.
+6. **Casts in Lean's library go through the box.** `Dynamic`,
    `Array.mapM` and `ShareCommon` use `NonScalar` with unsafe casts.
-   lean2rr represents `NonScalar` as an `L2RBox`.
+   lean2rr represents `NonScalar` as a box.
 7. **Unsafe functions that read a representation** (`ptrAddrUnsafe`,
    `isExclusiveUnsafe`, `ptrEq`) can give other answers than in a native
    build (see [Known differences](differences.html#identity-and-sharing)).
@@ -175,28 +189,31 @@ These are the layout rules:
 Native Lean uses the same layout scheme. In a native build, a field of
 unknown type is one `lean_object*` word.
 
+### Rule 4: examples
+
+| Lean | Reussir |
+|---|---|
+| `def f (x : Nat) (α : Type) (y : Nat) (β γ : Type)` | `f(x : Nat, y : Nat, u : L2RUnit)` |
+| `def el {α : Type} : List α` | `el(u : L2RUnit)` |
+| `pick (α : Type) (b : Bool) (x y : α)` | `pick_Nat(b : bool, x : Nat, y : Nat)` |
+| the type `{α : Type} → List α → Nat` (`Op.run` below) | the function type `List -> Nat` |
+
+- In `f`, the parameter `α` is removed. `β` and `γ` are the last parameters,
+  so they become one unit parameter `u`. A call `f 1 Nat 2` runs the body
+  only when the types `β` and `γ` are applied, as natively.
+- `el` has only erased parameters. It keeps one unit parameter, so it stays
+  a function.
+- In the type of `Op.run`, the erased domain `{α : Type}` comes before a
+  data domain, so it is removed.
+
 ### Memory
 
-The encoding of the enum is not fixed yet. This table shows a two-word
-enum (an 8-byte tag word and an 8-byte payload):
-
-| Value | Native | Two-word enum |
-|---|---|---|
-| `structure P where a : UInt64; b : Nat; c : Float` | 1 allocation, 32 B | 1 allocation, 32 B |
-| `UInt64 × UInt64` | 3 allocations, 56 B | 1 allocation, 40 B |
-| `List Float`, one cell | 2 allocations, 40 B | 1 allocation, 32 B |
-| `List Nat` (small values), one cell | 1 allocation, 24 B | 1 allocation, 32 B |
-| `Array Nat`, one element | 8 B | 16 B |
-| `Array Float`, one element | 8 B and a 16 B box | 16 B, no allocation |
-
-A one-word encoding has the same sizes as native. It puts a small value
-inside the word and an object as its pointer. It boxes 64-bit scalars, as
-native does. It needs more support from Reussir.
-
-Status: rules 1 and 4 are planned. Today a generic type has one layout for
-each type argument, and the enum has one variant for each such layout (see
-[The current version](#the-current-version)). Today a function value keeps
-its erased parameters, as in LCNF.
+A box is one word. So a generic field or an array element takes 8 bytes,
+as natively. A small value goes into the word: a `List Nat` cell or an
+`Array Nat` element of a small number allocates nothing more. A `Float`
+and a `UInt64` from 2<sup>63</sup> go into a cell of their own, as in a
+native build. A `[value]` struct of several fields goes into a one-field
+cell (`ElemBox`).
 
 ## Examples
 
@@ -268,29 +285,31 @@ def Column.push (c : Column) (i : Nat) : Column :=
 lean2rr generates this code:
 
 ```rust
-struct Column(RVec<L2RBox>, Ty)       // data, then ty
+struct Column(RVec<LAny>, Ty)         // data, then ty
 enum [value] Ty { c_nat, c_str }      // stored inline, never allocated
 
 fn Column_push(c : Column, i : Nat) -> Column {
     let ty : Ty = c.1;
-    let data : RVec<L2RBox> = c.0;
+    let data : RVec<LAny> = c.0;
     match ty {
         Ty::c_nat => {
-            let data2 : RVec<L2RBox> = lean_array_push<L2RBox>(data, L2RBox::b2{i});
+            let data2 : RVec<LAny> = lean_array_push<LAny>(data, l2r_any_of<Nat>(i, 1));
             Column{data2, Ty::c_nat{}}
         },
         Ty::c_str => {
             let s : LStr = l2r_nat_repr(i);
-            let data2 : RVec<L2RBox> = lean_array_push<L2RBox>(data, L2RBox::b3{s});
+            let data2 : RVec<LAny> = lean_array_push<LAny>(data, l2r_any_of<LStr>(s, 3));
             Column{data2, Ty::c_str{}}
         }
     }
 }
 ```
 
-- `data` is an `RVec<L2RBox>`: an array of boxes.
-- `push` puts the new element into its variant: `b2` for a `Nat`, `b3` for
-  a `String`. It changes the array in place when the array is unique.
+- `data` is an `RVec<LAny>`: an array of boxes. `Array Nat`,
+  `Array String` and `Array lcAny` are all this type.
+- `push` puts the new element into a box: number 1 for a `Nat`, 3 for a
+  `String`. A small `Nat` is its own word, so its box allocates nothing.
+  `push` changes the array in place when the array is unique.
 - `ty` is a `[value]` enum, so a `Column` is one cell, plus its array.
   Each branch writes the tag again (`Ty::c_nat{}`), where LCNF reuses
   `ty.1`: a `[value]` enum costs nothing to build.
@@ -349,60 +368,43 @@ def describe (x.1 : Bool) (x.2 : lcAny) : String :=
   uses it as a `String` (`String.append`). The `true` branch uses it as a
   `Nat` (`Nat.add`).
 
-The program's enum, from [The enum](#the-enum-l2rbox):
-
-```rust
-enum L2RBox {
-    b0(L2RUnit),      // the unit variant: Lean's box(0)
-    b1(Ref_StdGen),   // a reference cell
-    b2(Nat),          // a Nat
-    b3(LStr),         // a String
-    b4(Prod_Box),     // a pair of two boxes
-    b5(Prod_Nat)      // a pair of two Nats
-}
-```
-
 lean2rr generates this code:
 
 ```rust
-fn pickT(b : bool) -> L2RBox {
+fn pickT(b : bool) -> LAny {
     if b {
         let n : Nat = l2r_nat_small(42);
-        L2RBox::b2{n}
+        l2r_any_of<Nat>(n, 1)
     } else {
         let s : LStr = hello();          // the constant "hello", made once
-        L2RBox::b3{s}
+        l2r_any_of<LStr>(s, 3)
     }
 }
 
-fn describe(b : bool, v : L2RBox) -> LStr {
+fn describe(b : bool, v : LAny) -> LStr {
     if b {
         let prefix : LStr = nat_prefix();    // the constant "nat "
         let one : Nat = l2r_nat_small(1);
-        let m : Nat = lean_nat_add(match v {
-            L2RBox::b2(n) => { n },
-            L2RBox::b0(_) => { zero_Nat() },
-            _ => { l2r_unbox_Nat(v) }
-        }, one);
+        let m : Nat = lean_nat_add(l2r_any_as<Nat>(v, 1), one);
         let digits : LStr = l2r_nat_repr(m);
         lean_string_append(prefix, digits)
     } else {
         let prefix : LStr = str_prefix();    // the constant "str "
-        lean_string_append(prefix, match v {
-            L2RBox::b3(s) => { s },
-            L2RBox::b0(_) => { zero_String() },
-            _ => { l2r_unreachable<LStr>() }
-        })
+        lean_string_append(prefix, l2r_any_as<LStr>(v, 3))
     }
 }
 ```
 
-- `pickT` returns an `L2RBox`. The `true` branch puts 42 into the `Nat`
-  variant `b2`. The `false` branch puts `"hello"` into the `String` variant
-  `b3`.
-- `describe` takes the value as an `L2RBox` (`v`). The `true` branch takes
-  a `Nat` out of the box and adds 1. The `false` branch takes a `String` out
+- `pickT` returns a box. The `true` branch puts 42 into it: the box is the
+  word of the small `Nat` 42. The `false` branch puts `"hello"` into it:
+  the box is the string's pointer, with the number 3.
+- `describe` takes the value as a box (`v`). The `true` branch takes a
+  `Nat` out of the box and adds 1. The `false` branch takes a `String` out
   of the box and appends it.
+- `l2r_any_as<Nat>(v, 1)` gives the `Nat` of a small word or of a pointer
+  with the number 1. For `box(0)`, it gives 0, as in a native build:
+  `box(0)` is reached only with `unsafeCast`. For any other word, it
+  panics.
 - A string constant (`"hello"`, `"nat "`, `"str "`) is made once and kept
   in a once-cell; each use reads it. The constant `"hello"`:
 
@@ -412,65 +414,14 @@ fn hello_init() -> LStr {
 }
 
 fn hello() -> LStr {
-    let r : u64 = if l2r_once_ready(35) { 0 } else {
-        if l2r_once_claim(35) { 0 } else { l2r_once_put<LStr>(35, hello_init()) }
+    let r : u64 = if l2r_once_ready(36) { 0 } else {
+        if l2r_once_claim(36) { 0 } else { l2r_once_put<LStr>(36, hello_init()) }
     };
-    l2r_once_get<LStr>(35)
+    l2r_once_get<LStr>(36)
 }
 ```
 
 `nat_prefix` and `str_prefix` are the same, with other slots.
-
-The `true` branch of `describe` takes the `Nat` out with this `match`:
-
-```rust
-match v {
-    L2RBox::b2(n) => { n },                  // arm 1
-    L2RBox::b0(_) => { zero_Nat() },         // arm 2
-    _ => { l2r_unbox_Nat(v) }                // arm 3
-}
-```
-
-- **Arm 1: the variant `b2`** holds a `Nat`. The arm gives that `Nat`.
-- **Arm 2: the variant `b0`** is Lean's `box(0)`. It is reached only with
-  `unsafeCast`. The arm gives `0`, as in a native build:
-
-```rust
-fn zero_Nat() -> Nat {
-    l2r_nat_small(0)
-}
-```
-
-- **Arm 3: all the other variants.** The arm calls the general unbox
-  function for `Nat`:
-
-```rust
-fn l2r_unbox_Nat(b : L2RBox) -> Nat {
-    match b {
-        L2RBox::b2(n) => { n },
-        L2RBox::b0(_) => { zero_Nat() },
-        _ => {
-            let released : u64 = l2r_ptr_addr_rec<L2RBox>(b);
-            l2r_unreachable<Nat>()
-        }
-    }
-}
-```
-
-
-The `false` branch does the same for a `String`. Its `b0` arm gives the
-empty string, a constant:
-
-```rust
-fn zero_String_init() -> LStr { l2r_str_lit(0) }   // literal number 0: ""
-
-fn zero_String() -> LStr {
-    let r : u64 = if l2r_once_ready(38) { 0 } else {
-        if l2r_once_claim(38) { 0 } else { l2r_once_put<LStr>(38, zero_String_init()) }
-    };
-    l2r_once_get<LStr>(38)
-}
-```
 
 ### Sigma types
 
@@ -511,27 +462,29 @@ def entries (n : Nat) : List (Sigma Ty lcAny) :=
 lean2rr generates this code:
 
 ```rust
-struct Sigma_Ty(L2RBox, Ty)                  // snd, then fst
-enum List_Sigma_Ty { c_nil, c_cons(Sigma_Ty, List_Sigma_Ty) }
+struct Sigma(LAny, LAny)                     // fst, snd
+enum List { c_nil, c_cons(LAny, List) }      // every List
 
-fn entries(n : Nat) -> List_Sigma_Ty {
+fn entries(n : Nat) -> List {
     let t1 : Ty = Ty::c_nat{};
-    let p1 : Sigma_Ty = Sigma_Ty{L2RBox::b2{n}, t1};     // ⟨.nat, n⟩
+    let p1 : Sigma = Sigma{l2r_any_imm(Ty_index(t1)), l2r_any_of<Nat>(n, 1)};      // ⟨.nat, n⟩
     let t2 : Ty = Ty::c_str{};
     let s : LStr = l2r_nat_repr(n);
-    let p2 : Sigma_Ty = Sigma_Ty{L2RBox::b3{s}, t2};     // ⟨.str, toString n⟩
-    let nil : List_Sigma_Ty = List_Sigma_Ty::c_nil{};
-    let l2 : List_Sigma_Ty = List_Sigma_Ty::c_cons{p2, nil};
-    List_Sigma_Ty::c_cons{p1, l2}
+    let p2 : Sigma = Sigma{l2r_any_imm(Ty_index(t2)), l2r_any_of<LStr>(s, 3)};     // ⟨.str, toString n⟩
+    let nil : List = List::c_nil{};
+    let l2 : List = List::c_cons{l2r_any_of<Sigma>(p2, 21), nil};
+    List::c_cons{l2r_any_of<Sigma>(p1, 21), l2}
 }
 ```
 
 - The code follows the LCNF line by line: two pairs, then the list.
-- The second component of a pair is an `L2RBox`: `n` goes into the `Nat`
-  variant `b2`, and the string goes into the `String` variant `b3`.
-- In `Sigma_Ty`, the second component comes first. lean2rr sorts the
-  fields of a structure by size, largest first (pass `field-order`): the
-  8-byte box comes before the 1-byte `Ty`.
+- `Sigma` has one layout. Both of its fields have a parameter's type
+  (`Sigma α β`), so both are boxes. The `Ty` goes into its box as the
+  immediate of its index. `n` goes in as a `Nat` (number 1), the string as
+  a `String` (number 3).
+- `List` has one layout for every element type: each cell holds a box and
+  the rest of the list. Each pair goes into the list as a box with the
+  number of `Sigma`, 21.
 
 ### A type stored in a field
 
@@ -562,31 +515,30 @@ def Pkg.show (p : Pkg) : String :=
 ```
 
 - The field `α` is `lcErased`. It has no storage.
-- The field `val` is `lcAny`. It is an `L2RBox`.
-- The field `fmt` takes an `lcAny`. It takes an `L2RBox`.
+- The field `val` is `lcAny`. It is a box.
+- The field `fmt` takes an `lcAny`. It takes a box.
 
 lean2rr generates this code:
 
 ```rust
-struct Pkg(L2RBox, Fn_Box_Str)        // val, fmt; α has no field
+struct Pkg(LAny, Fn_Box_Str)          // val, fmt; α has no field
 
-enum Fn_Box_Str {                     // a function value: L2RBox -> LStr
+enum Fn_Box_Str {                     // a function value: LAny -> LStr
     z,
-    raw(L2RBox -> LStr),
-    wrap_ProdBox(Fn_ProdBox_Str),     // wraps a Prod_Box -> LStr function
-    wrap_ProdNat(Fn_ProdNat_Str),     // wraps a Prod_Nat -> LStr function
+    raw(LAny -> LStr),
+    wrap_Prod(Fn_Prod_Str),           // wraps a Prod -> LStr function
     wrap_Nat(Fn_Nat_Str)              // wraps a Nat -> LStr function
 }
 
 fn Pkg_show(p : Pkg) -> LStr {
-    let val : L2RBox = p.0;
+    let val : LAny = p.0;
     let fmt : Fn_Box_Str = p.1;
     apply_Fn_Box_Str(fmt, val)
 }
 ```
 
-- A `Pkg` has two fields: `val` is an `L2RBox`, and `fmt` is a function
-  value that takes an `L2RBox`.
+- A `Pkg` has two fields: `val` is a box, and `fmt` is a function value
+  that takes a box.
 - `Pkg_show` reads the two fields and applies `fmt` to `val`, as the LCNF
   does (`fmt val`).
 
@@ -610,30 +562,27 @@ enum Fn_Nat_Str {                     // a function value: Nat -> LStr
 
 let f : Fn_Nat_Str = Fn_Nat_Str::reprFast{};
 let five : Nat = l2r_nat_small(5);
-let p : Pkg = Pkg{L2RBox::b2{five}, Fn_Box_Str::wrap_Nat{f}};
+let p : Pkg = Pkg{l2r_any_of<Nat>(five, 1), Fn_Box_Str::wrap_Nat{f}};
 let s : LStr = Pkg_show(p);
 ```
 
 - `Pkg.mk ◾ _x.30 _f.29`: the `◾` is the type `Nat`. It has no field.
-- `5` goes into the `Nat` variant `b2`.
-- `Nat.reprFast` takes a `Nat`, not an `L2RBox`, so lean2rr puts it into the
+- `5` goes into a box: the word of the small `Nat` 5.
+- `Nat.reprFast` takes a `Nat`, not a box, so lean2rr puts it into the
   variant `wrap_Nat`.
+- These lines have no free variables, so Lean's compiler makes them a
+  closed term of `main`: they run once.
 
 `apply_Fn_Box_Str` applies a function value of the type
 `Fn_Box_Str`:
 
 ```rust
-fn apply_Fn_Box_Str(f : Fn_Box_Str, x : L2RBox) -> LStr {
+fn apply_Fn_Box_Str(f : Fn_Box_Str, x : LAny) -> LStr {
     match f {
         Fn_Box_Str::z => { zero_String() },
         Fn_Box_Str::raw(c) => { c(x) },
-        Fn_Box_Str::wrap_ProdBox(g) => { apply_Fn_ProdBox_Str(g, unbox_Prod_Box(x)) },
-        Fn_Box_Str::wrap_ProdNat(g) => { apply_Fn_ProdNat_Str(g, unbox_Prod_Nat(x)) },
-        Fn_Box_Str::wrap_Nat(g) => { apply_Fn_Nat_Str(g, match x {
-            L2RBox::b2(n) => { n },
-            L2RBox::b0(_) => { zero_Nat() },
-            _ => { l2r_unbox_Nat(x) }
-        }) }
+        Fn_Box_Str::wrap_Prod(g) => { apply_Fn_Prod_Str(g, unbox_Prod(x)) },
+        Fn_Box_Str::wrap_Nat(g) => { apply_Fn_Nat_Str(g, l2r_any_as<Nat>(x, 1)) }
     }
 }
 
@@ -652,6 +601,10 @@ fn apply_Fn_Nat_Str(f : Fn_Nat_Str, n : Nat) -> LStr {
   takes the value out of the box at that type, then calls the function.
   For `Pkg.show ⟨Nat, 5, toString⟩`, the call goes through `wrap_Nat`, then
   `reprFast`.
+- A function type has several representations (`Nat -> LStr` and
+  `LAny -> LStr`). So lean2rr wraps a function value of one
+  representation for another. The wrapper is one new cell around the
+  function value. It does not copy the function.
 
 ### Polymorphic recursion
 
@@ -691,12 +644,14 @@ def nest._redArg (inst.1 : lcAny → String) (x.2 : Nat) (x.3 : lcAny) : String 
 - The recursive call passes the pair `Prod.mk ◾ ◾ x.3 x.3` and `_f.4`.
 
 The types grow without end: `Nat`, `Nat × Nat`, and so on. lean2rr compiles
-one copy of `nest` for these calls. In that copy, `x` is an `L2RBox`, and
-the `ToString` dictionary is a value that the copy receives:
+one copy of `nest` for these calls. In that copy, `x` is a box, and the
+`ToString` dictionary is a value that the copy receives:
 
 ```rust
-fn nest_Box(inst : Fn_Box_Str, n : Nat, x : L2RBox) -> LStr {
-    let instPair : Fn_ProdBox_Str = Fn_ProdBox_Str::toStringPair{inst, inst};
+struct Prod(LAny, LAny)               // every Prod
+
+fn nest_Box(inst : Fn_Box_Str, n : Nat, x : LAny) -> LStr {
+    let instPair : Fn_Prod_Str = Fn_Prod_Str::toStringPair{inst, inst};
     let zero : Nat = l2r_nat_small(0);
     let isZero : bool = lean_nat_dec_eq(n, zero);
     if isZero {
@@ -704,35 +659,31 @@ fn nest_Box(inst : Fn_Box_Str, n : Nat, x : L2RBox) -> LStr {
     } else {
         let one : Nat = l2r_nat_small(1);
         let n1 : Nat = lean_nat_sub(n, one);
-        let pair : Prod_Box = Prod_Box{x, x};
-        nest_Box(wrap_ProdBox_as_Box(instPair), n1, L2RBox::b4{pair})
+        let pair : Prod = Prod{x, x};
+        nest_Box(Fn_Box_Str::wrap_Prod{instPair}, n1, l2r_any_of<Prod>(pair, 22))
     }
 }
 ```
 
 - `instPair` is `_f.4`: the dictionary for pairs.
 - At count 0, the copy applies `inst` to `x`.
-- Else it builds the pair `(x, x)` as a `Prod_Box` (two boxes), puts the
-  pair into the variant `b4`, and calls itself. `instPair` takes a
-  `Prod_Box`, and the copy needs a dictionary that takes an `L2RBox`, so
-  lean2rr wraps it.
+- Else it builds the pair `(x, x)`, puts the pair into a box (the number of
+  `Prod` is 22), and calls itself. `instPair` takes a `Prod`, and the copy
+  needs a dictionary that takes a box, so lean2rr wraps it.
 
-The dictionary for pairs, and its wrapper:
+The dictionary for pairs:
 
 ```rust
-enum Fn_ProdBox_Str {                 // a function value: Prod_Box -> LStr
+enum Fn_Prod_Str {                    // a function value: Prod -> LStr
     z,
-    raw(Prod_Box -> LStr),
+    raw(Prod -> LStr),
+    toStringPairNat,                  // ToString (Nat × Nat)
     toStringPair(Fn_Box_Str, Fn_Box_Str)  // ToString (α × β), from the two dictionaries
 }
 
-fn wrap_ProdBox_as_Box(f : Fn_ProdBox_Str) -> Fn_Box_Str {
-    Fn_Box_Str::wrap_ProdBox{f}
-}
-
-fn toStringPair(fa : Fn_Box_Str, fb : Fn_Box_Str, p : Prod_Box) -> LStr {
-    let a : L2RBox = p.0;
-    let b : L2RBox = p.1;
+fn toStringPair(fa : Fn_Box_Str, fb : Fn_Box_Str, p : Prod) -> LStr {
+    let a : LAny = p.0;
+    let b : LAny = p.1;
     let open : LStr = open_paren();              // the constant "("
     let sa : LStr = apply_Fn_Box_Str(fa, a);
     let s1 : LStr = lean_string_append(open, sa);
@@ -745,12 +696,12 @@ fn toStringPair(fa : Fn_Box_Str, fb : Fn_Box_Str, p : Prod_Box) -> LStr {
 }
 ```
 
-- A call through `wrap_ProdBox` takes the `Prod_Box` out of the box
-  (`b4`), then calls `toStringPair`.
+- A call through `wrap_Prod` takes the `Prod` out of the box, then calls
+  `toStringPair`.
 
 The program calls `nest 2 n` with `n : Nat`. lean2rr makes a copy of `nest`
 at `Nat` for this call. It makes the first pair, then calls the copy at
-`L2RBox`:
+the box:
 
 ```rust
 fn nest_Nat(n : Nat, x : Nat) -> LStr {
@@ -759,30 +710,31 @@ fn nest_Nat(n : Nat, x : Nat) -> LStr {
     if isZero {
         l2r_nat_repr(x)
     } else {
-        let instPair : Fn_ProdNat_Str = Fn_ProdNat_Str::toStringPairNat{};
+        let instPair : Fn_Prod_Str = Fn_Prod_Str::toStringPairNat{};
         let one : Nat = l2r_nat_small(1);
         let n1 : Nat = lean_nat_sub(n, one);
-        let pair : Prod_Nat = Prod_Nat{x, x};
-        nest_Box(wrap_ProdNat_as_Box(instPair), n1, L2RBox::b5{pair})
+        let pair : Prod = Prod{l2r_any_of<Nat>(x, 1), l2r_any_of<Nat>(x, 1)};
+        nest_Box(Fn_Box_Str::wrap_Prod{instPair}, n1, l2r_any_of<Prod>(pair, 22))
     }
 }
 ```
 
-- The first pair is a `Prod_Nat` (two `Nat`s), in the variant `b5`.
-- `nest_Box` makes the next pairs as `Prod_Box` values (`b4`).
-- `unbox_Prod_Box` accepts both layouts. It converts a `Prod_Nat` to a
-  `Prod_Box`:
+- The first pair is a `Prod` too: `Prod Nat Nat` and `Prod α α` have one
+  layout. Its fields are the boxes of `x`.
+- `nest_Box` makes the next pairs, with the same type.
+- The arm `wrap_Prod` of `apply_Fn_Box_Str` takes the `Prod` out of the
+  box in line. It splits the word, and it converts nothing. Here is that
+  code as a function, `unbox_Prod`:
 
 ```rust
-fn unbox_Prod_Box(b : L2RBox) -> Prod_Box {
-    match b {
-        L2RBox::b4(p) => { p },
-        L2RBox::b5(p) => { conv_Prod_Nat_to_Prod_Box(p) },
-        L2RBox::b0(_) => { zero_Prod_Box() },
-        _ => {
-            let released : u64 = l2r_ptr_addr_rec<L2RBox>(b);
-            l2r_unreachable<Prod_Box>()
-        }
+fn unbox_Prod(b : LAny) -> Prod {
+    let w : u64 = l2r_any_raw(b);
+    if l2r_any_raw_is_imm(w) {
+        if w == 1 { zero_Prod() }                        // box(0): the zero of Prod
+        else { l2r_unreachable<Prod>() }
+    } else {
+        if l2r_any_raw_num(w) == 22 { l2r_any_raw_take<Prod>(w) }   // the number of Prod
+        else { l2r_unreachable<Prod>() }
     }
 }
 ```
@@ -816,36 +768,31 @@ def ops._lam_0 (α.1 : lcErased) (xs : List lcAny) : Nat :=
 lean2rr generates this code:
 
 ```rust
-enum List_Box {                  // List lcAny
-    c_nil,
-    c_cons(L2RBox, List_Box)
-}
-
-fn ops_lam(xs : List_Box) -> Nat {
-    let len : Nat = List_length_Box(xs);
+fn ops_lam(xs : List) -> Nat {
+    let len : Nat = List_length(xs);
     let two : Nat = l2r_nat_small(2);
     lean_nat_mul(len, two)
 }
 ```
 
-- The type argument `α.1` is `lcErased`. `ops_lam` has no parameter for
-  it.
-- `xs` is the list: each cell holds an `L2RBox` and the rest of the list.
+- The type argument `α.1` is `lcErased`, and it is not the last parameter.
+  So `ops_lam` has no parameter for it (rule 4).
+- `xs` is the list: each cell holds a box and the rest of the list.
 - The function counts the cells and multiplies by 2:
 
 ```rust
-fn List_length_Box(xs : List_Box) -> Nat {
+fn List_length(xs : List) -> Nat {
     let zero : Nat = l2r_nat_small(0);
-    List_length_aux_Box(xs, zero)
+    List_length_aux(xs, zero)
 }
 
-fn List_length_aux_Box(xs : List_Box, acc : Nat) -> Nat {
+fn List_length_aux(xs : List, acc : Nat) -> Nat {
     match xs {
-        List_Box::c_nil => { acc },
-        List_Box::c_cons(h, t) => {
+        List::c_nil => { acc },
+        List::c_cons(h, t) => {
             let one : Nat = l2r_nat_small(1);
             let acc1 : Nat = lean_nat_add(acc, one);
-            List_length_aux_Box(t, acc1)
+            List_length_aux(t, acc1)
         }
     }
 }
@@ -866,40 +813,39 @@ def ops : List ({α : lcErased} → List lcAny → Nat) :=
 lean2rr generates this code:
 
 ```rust
-enum Fn_Op {                          // a function value: List_Box -> Nat
+enum Fn_Op {                          // a function value: List -> Nat
     z,
-    raw(List_Box -> Nat),
+    raw(List -> Nat),
     ops_lam,                          // the function ops_lam
     List_length                       // the function List.lengthTR
 }
-enum List_Fn_Op { c_nil, c_cons(Fn_Op, List_Fn_Op) }
 
-fn ops_tail() -> List_Fn_Op {             // the constant [ops_lam]
-    let nil : List_Fn_Op = List_Fn_Op::c_nil{};
+fn ops_tail() -> List {               // the constant [ops_lam]
+    let nil : List = List::c_nil{};
     let f : Fn_Op = Fn_Op::ops_lam{};
-    List_Fn_Op::c_cons{f, nil}
+    List::c_cons{l2r_any_of_fn<Fn_Op>(f, 16), nil}
 }
 
-fn ops_init() -> List_Fn_Op {
-    let tail : List_Fn_Op = ops_tail();
+fn ops_init() -> List {
+    let tail : List = ops_tail();
     let g : Fn_Op = Fn_Op::List_length{};
-    List_Fn_Op::c_cons{g, tail}
+    List::c_cons{l2r_any_of_fn<Fn_Op>(g, 16), tail}
 }
 ```
 
+- The type of `run` has the erased domain `{α : Type}` before the list.
+  So the function type is `List -> Nat`, without a unit (rule 4).
 - `ops` is a constant: lean2rr computes `ops_init()` once and keeps the
   list in a once-cell. Lean's compiler also makes the tail `[ops_lam]` a
   constant of its own (`ops_tail`).
-- Each element is a function value. It names the function; it allocates
-  nothing.
+- Each element is a function value in a box. A function value without
+  captured values is an immediate: its type number (16) and its variant.
+  It allocates nothing.
 
-## The current version
+## One layout for a shared tree
 
-The current version gives a generic type one layout for each type
-argument. A `Tree Float` leaf holds the `f64`, and a `Tree Nat` leaf holds
-the `Nat` word. The unknown case, `Tree lcAny`, has another layout, whose
-leaf holds an `L2RBox`. When a value goes from one layout to another, the
-current version rebuilds it, node by node:
+Rule 1 gives `Tree Nat` and `Tree α` one layout. So a tree goes from typed
+code to generic code as it is, and its shared nodes stay shared:
 
 ```lean
 inductive Tree (α : Type) where
@@ -973,30 +919,27 @@ let _x.47 : Nat := leftDepth _x.46;
 - `build` returns a `Tree Nat`. `leftDepth` takes a `Tree lcAny`: Lean's
   compiler stores a `Packed` as its one data field, the tree.
 - `main` passes the `Tree Nat` to `leftDepth`. In a native build, `Tree Nat`
-  and `Tree lcAny` have the same layout, so the tree goes as it is.
+  and `Tree lcAny` have the same layout, so the tree goes as it is. In the
+  lean2rr build too.
 
-lean2rr generates two tree types:
+lean2rr generates one tree type:
 
 ```rust
-enum Tree_Nat {                   // Tree Nat: the layout that build uses
-    c_leaf(Nat),
-    c_node(Tree_Nat, Tree_Nat)
-}
-enum Tree_Box {                   // Tree lcAny: the layout that leftDepth uses
-    c_leaf(L2RBox),
-    c_node(Tree_Box, Tree_Box)
+enum Tree {                       // Tree Nat, Tree lcAny and every other Tree
+    c_leaf(LAny),
+    c_node(Tree, Tree)
 }
 ```
 
 The functions:
 
 ```rust
-fn leaf7_init() -> Tree_Nat {             // the constant .leaf 7
+fn leaf7_init() -> Tree {                 // the constant .leaf 7
     let seven : Nat = l2r_nat_small(7);
-    Tree_Nat::c_leaf{seven}
+    Tree::c_leaf{l2r_any_of<Nat>(seven, 1)}
 }
 
-fn build(n : Nat) -> Tree_Nat {
+fn build(n : Nat) -> Tree {
     let zero : Nat = l2r_nat_small(0);
     let isZero : bool = lean_nat_dec_eq(n, zero);
     if isZero {
@@ -1004,15 +947,15 @@ fn build(n : Nat) -> Tree_Nat {
     } else {
         let one : Nat = l2r_nat_small(1);
         let n1 : Nat = lean_nat_sub(n, one);
-        let t : Tree_Nat = build(n1);
-        Tree_Nat::c_node{t, t}            // both children are the same t
+        let t : Tree = build(n1);
+        Tree::c_node{t, t}                // both children are the same t
     }
 }
 
-fn leftDepth_go(t : Tree_Box) -> Nat {
+fn leftDepth_go(t : Tree) -> Nat {
     match t {
-        Tree_Box::c_leaf(x) => { l2r_nat_small(0) },
-        Tree_Box::c_node(l, r) => {
+        Tree::c_leaf(x) => { l2r_nat_small(0) },
+        Tree::c_node(l, r) => {
             let one : Nat = l2r_nat_small(1);
             let d : Nat = leftDepth_go(l);
             lean_nat_add(one, d)
@@ -1020,97 +963,34 @@ fn leftDepth_go(t : Tree_Box) -> Nat {
     }
 }
 
-fn leftDepth(p : Tree_Box) -> Nat {
+fn leftDepth(p : Tree) -> Nat {
     leftDepth_go(p)
 }
 
 // in main:
-let t : Tree_Nat = build(n);
-let depth : Nat = leftDepth(conv_Tree_Nat_to_Tree_Box(t));
+let t : Tree = build(n);
+let depth : Nat = leftDepth(t);
 ```
 
 - `build` and `leftDepth` follow the LCNF line by line.
-- `main` cannot pass a `Tree_Nat` where a `Tree_Box` is expected, so it
-  calls a conversion.
+- The leaf's field has the parameter's type, so it is a box. `build` puts
+  7 into it: the word of the small `Nat` 7.
+- `main` passes the tree to `leftDepth` as it is. No code copies the tree.
+  `build n` makes n + 1 nodes, and they stay n + 1 nodes.
 
-The conversion. It keeps its own stack of nodes (`Conv_K`), so a deep tree
-does not overflow the machine stack:
+Peak memory (max RSS) of the whole program, with `build n`:
 
-```rust
-enum Conv_M {                     // the next step
-    down(Tree_Nat),               // convert this node
-    up(Tree_Box)                  // a node is converted: give it to the stack
-}
-enum Conv_K {                     // the stack of nodes in progress
-    done,
-    left(Tree_Nat, Conv_K),       // the left child is in progress
-    right(Tree_Nat, Tree_Box, Conv_K)   // the right child is in progress; the left is done
-}
-
-fn conv_leaf(x : Tree_Nat) -> Tree_Box {
-    match x {
-        Tree_Nat::c_leaf(n) => { Tree_Box::c_leaf{L2RBox::b2{n}} },
-        _ => { l2r_unreachable<Tree_Box>() }
-    }
-}
-
-fn conv_node(x : Tree_Nat, l : Tree_Box, r : Tree_Box) -> Tree_Box {
-    match x {
-        Tree_Nat::c_node(_, _) => { Tree_Box::c_node{l, r} },
-        _ => { l2r_unreachable<Tree_Box>() }
-    }
-}
-
-fn conv_loop(m : Conv_M, k : Conv_K) -> Tree_Box {
-    match m {
-        Conv_M::down(x) => {
-            match x {
-                Tree_Nat::c_leaf(_) => { conv_loop(Conv_M::up{conv_leaf(x)}, k) },
-                Tree_Nat::c_node(_, _) => { conv_loop(Conv_M::down{match x {
-                    Tree_Nat::c_node(l, _) => { l },
-                    _ => { l2r_unreachable<Tree_Nat>() }
-                }}, Conv_K::left{x, k}) }
-            }
-        },
-        Conv_M::up(d) => {
-            match k {
-                Conv_K::done => { d },
-                Conv_K::left(x, k2) => { conv_loop(Conv_M::down{match x {
-                    Tree_Nat::c_node(_, r) => { r },
-                    _ => { l2r_unreachable<Tree_Nat>() }
-                }}, Conv_K::right{x, d, k2}) },
-                Conv_K::right(x, l, k2) => { conv_loop(Conv_M::up{conv_node(x, l, d)}, k2) }
-            }
-        }
-    }
-}
-
-fn conv_Tree_Nat_to_Tree_Box(x : Tree_Nat) -> Tree_Box {
-    conv_loop(Conv_M::down{x}, Conv_K::done{})
-}
-```
-
-- `conv_loop` calls itself only in tail position, so LLVM turns these
-  calls into a loop.
-- At a node, it converts the left child, then the right child, then makes
-  the new node (`conv_node`).
-- It does not remember a node that it converted. `build` makes each node
-  with two pointers to the same child, so the conversion converts that
-  child two times. Each level doubles the work: `build n` (n + 1 nodes)
-  gives 2<sup>n+1</sup> − 1 nodes.
-
-| n | Native | Current version |
+| n | Native | lean2rr |
 |---|---|---|
-| 16 | 7.9 MB | 11 MB |
-| 20 | 7.9 MB | 65 MB |
-| 24 | 7.9 MB | 927 MB |
+| 16 | 8.1 MB | 7.1 MB |
+| 20 | 8.0 MB | 7.3 MB |
+| 24 | 8.0 MB | 7.2 MB |
 
-Each boxed value is also one heap cell in the current version. A column of
-10<sup>6</sup> small `Nat`s takes 48 MB, and 31 MB in a native build. With
-rule 1 of [Layouts of generic types](#layouts-of-generic-types), a value
-keeps one layout, and lean2rr does not convert it. Plan
+A value is converted only for a cast between two different inductives
+whose layouts differ (a field that holds an `Int` where the source's field
+holds a `Nat`). Plan
 [§10](repo:docs/translation-plan.md#10-known-divergences-and-unsupported-features)
-lists the costs of the current version.
+lists this cost.
 
 ## The program's main
 

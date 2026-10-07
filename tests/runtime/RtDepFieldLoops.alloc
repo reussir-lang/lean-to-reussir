@@ -1,0 +1,14 @@
+# each field kind read, changed and stored back in n steps through typed and uniform code, n = 300 and 1200: O(1) per step
+x 300 | x 1200 | 4 2000
+list 300 | list 1200 | 4 2000
+array 300 | array 1200 | 4 2000
+ref 300 | ref 1200 | 4 2000
+thunk 300 | thunk 1200 | 4 2000
+task 300 | task 1200 | 4 2000
+fn 300 | fn 1200 | 4 2000
+fn2 300 | fn2 1200 | 4 2000
+option 300 | option 1200 | 4 2000
+except 300 | except 1200 | 4 2000
+rows 300 | rows 1200 | 4 2000
+pairs 300 | pairs 1200 | 4 2000
+hashmap 300 | hashmap 1200 | 4 2000

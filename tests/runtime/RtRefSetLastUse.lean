@@ -3,10 +3,12 @@ handle's text reaches the shared temporary file when it is closed).
 Natively `ST.Ref.set` borrows the reference (`@&`): `lean_st_ref_set`
 stores the new value and releases the old one, and then the caller
 releases the reference, which frees the new value: the old value's handles
-are closed first ("old.b old.a new.b new.a"). lean2rr's `l2r_rc_set` takes
-the reference's cell, and the cell's last use is the store, so the cell is
-released there, before the old value's release: the new value is freed
-first (runtime/README.md, Requests for lean2rr 33). -/
+are closed first ("old.b old.a new.b new.a"). lean2rr's `l2r_rc_set` took
+the reference's cell, and the cell's last use was the store, so the cell
+was released there, before the old value's release: the new value was
+freed first ("new.b new.a old.b old.a"; runtime/README.md, Requests for
+lean2rr 33, on the branch that added this test). `l2r_rc_set_ref` now also
+takes the reference and releases it after the old value. -/
 
 structure P where
   a : IO.FS.Handle

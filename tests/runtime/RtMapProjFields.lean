@@ -4,11 +4,13 @@ element is read from the uniform `Array NonScalar` (`Array lcAny`), so its
 type is `lcAny`, and Stage 3 must leave the fields of a `cases` on it
 `lcAny` too. Taking the constructor's parameter types for the fields gave
 `Prod.mk (fst : ◾)` and `R.mk (s : String) (y : String)` (`y` holds a
-`Nat`); `split-map-loops` then took that type for the result's elements:
-an `Array ◾` read back as zeros (`#[0, 0]` for `#[5, 7]`), or an
-`Array String` holding `Nat`s ("INTERNAL PANIC: unreachable code has been
-reached"). Each map below is used at one site, and some at two (the shared
-function value of `twoSites`). -/
+`Nat`); `split-map-loops` (deleted with rule 1) then took that type for
+the result's elements: an `Array ◾` read back as zeros (`#[0, 0]` for
+`#[5, 7]`), or an `Array String` holding `Nat`s ("INTERNAL PANIC:
+unreachable code has been reached"). With one array type a wrong field
+type would unbox a field at the wrong type, so the test still guards
+Stage 3's typing of such fields. Each map below is used at one site, and
+some at two (the shared function value of `twoSites`). -/
 
 structure Pair (α β : Type) where
   a : α

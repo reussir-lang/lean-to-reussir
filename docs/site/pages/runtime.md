@@ -32,8 +32,8 @@ A comment at each function names the C function it follows.
   first, before the index check.
 - A function never changes a value in place unless the value is unique
   (count 1). The cells of references, thunks and tasks are mutable by design.
-- A polymorphic extern takes explicit storage type arguments:
-  `lean_array_push<E>(arr, x)`.
+- A polymorphic extern takes an explicit type argument:
+  `lean_array_push<LAny>(arr, x)`. The elements of an array are boxes.
 - A runtime function cannot build a Lean-defined type (it does not know the
   generated names). So generic helpers take the result type's constructors
   as arguments, and lean2rr's glue makes a single call.
@@ -51,17 +51,17 @@ and several optional passes help token reuse (see
 
 - **Containers of the runtime** (arrays, string blocks, task and thunk cells)
   are `leanrt` types. Their `Drop` frees the last reference through the same
-  per-thread stack that Reussir's drop glue uses (local patch 0014). So a
+  per-thread stack that Reussir's drop glue uses (local patch 13-b). So a
   value deep through records and containers is freed at a bounded depth.
 - **Order of releases.** File handles close (and flush) and promises resolve
   in Lean's order: last pushed, first freed. An array set or pop frees the
-  record that it removes the same way. Two differences stay: the first
-  cell of a free that user code starts at a record, and a cell below the
-  first one whose last record field comes before an array field (plan
-  §10).
-- **Reference `set`.** `l2r_rc_set` stores the new value first, then releases
-  the old one as `lean_dec` does. So code that the release runs (the `sync`
-  dependents of a promise it drops) sees the new value.
+  record that it removes the same way. One difference stays: the first
+  cell of a free that user code starts at a record (plan §10).
+- **Reference `set`.** `l2r_rc_set_ref` stores the new value first, then
+  releases the old one as `lean_dec` does, and then the reference. So code
+  that the release runs (the `sync` dependents of a promise it drops) sees
+  the new value. When the set is the reference's last use, the old value is
+  freed before the new one, as natively.
 - **Borrowed parameters.** Reussir has none. Natively a parameter that Lean
   borrows is released by the caller after the call. Only resources can show
   the difference (a file handle still open, a pipe not yet at end of file).
@@ -133,7 +133,7 @@ code is the same, and the scheduler does not start.
 **Promises** are runtime objects that hold their task's cell. Dropping the
 last reference to an unresolved promise resolves it with `none`, as
 natively. When a free releases the promise, the resolution waits until the
-free ends (Reussir patch 0040 reports the end). **`Std.Sync`** mutexes
+free ends (Reussir patch 40-a reports the end). **`Std.Sync`** mutexes
 and condition variables are lean-runtime's objects in runtime handles; a
 thread that waits blocks its context.
 
@@ -269,7 +269,23 @@ call. Each step passed lean2rr's full suite before its merge.
   replaces in line, so LLVM inlines the set into the loop. A set or pop
   that frees the last reference to a record releases its fields last
   first, as Lean does. The record goes on the pending stack as one cell
-  (step 11). This costs about 74 instructions per freed record.
+  (step 11). This costs about 74 instructions per freed record. An array
+  of a Lean type holds boxes: the last reference to a boxed record goes on
+  the pending stack as one cell in the same way.
+- **`ByteArray.data` and `ByteArray.mk`** (and those of `FloatArray`).
+  The runtime makes the new array at its exact size and converts the
+  elements in one loop, as Lean does.
+- **Arrays of boxes.** A free of an array skips the immediates and
+  decrements the shared values in line; only a value whose last
+  reference goes is released through the pending stack. A copy of an
+  array copies the words in one block and increments only the pointers.
+- **Boxed `Float` and `UInt64` values.** The runtime allocates their
+  small cells with mimalloc's small-block call and reads a cell in line.
+- **Release of a boxed value.** The program has one release function for
+  each type that it boxes. `leanrt` keeps these functions in a table by
+  type number. When the last reference to a boxed record goes, `leanrt`
+  puts the record's cell on the pending stack with the function of its
+  type. There is no dispatch on the type number in the program.
 - **Block sizes.** Up to 64 bytes, the runtime knows mimalloc's block size
   without a call.
 

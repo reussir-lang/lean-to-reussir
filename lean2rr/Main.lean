@@ -112,8 +112,15 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
       function its C symbol is linked to: {"; ".intercalate whys.toList}"
   let header := s!"-- root instances: {rootInsts}; instances: {st.decls.size}, extern instances: {st.externs.size}, lcAny type arguments: {st.uniformArgs}\n"
   if stage == "inst" then return dumpDecls header (st.externs ++ st.decls)
+  -- A parameter of type `lcErased` that receives data (a join point after a
+  -- `match` whose arms give a type or proof and data: a Lean compiler bug,
+  -- plan §10) gets the type `lcAny`, before `toMono` erases the arguments
+  -- at such parameters of declarations (`ErasedData`).
+  let insts := retypeErasedData st.decls
   -- Stage 2: Lean's own mono pipeline, with the registry's edits.
-  let decls ← runStage2 cfg.stage2 st.decls st.externs st.keys opts.check
+  let decls ← runStage2 cfg.stage2 insts st.externs st.keys opts.check
+  -- Again on Stage 2's output: a join point Lean's mono passes made.
+  let decls := retypeErasedData decls
   if stage == "externs" then return ← externReport decls st.keys
   if stage == "mono" then return dumpDecls header decls
   -- Stage 3: the types mono lost, recovered from the code the entry point
@@ -123,22 +130,22 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let startup ← startupSteps leanInit items rootInsts st
   let roots := entryCallees mainInst errStr startup
   let table ← programRelevance decls
-  let (decls, keys) ← retypeMono cfg.stage2 cfg.stage3 table decls st.keys roots
+  let decls ← retypeMono table decls st.keys roots
+  let keys := st.keys
   if stage == "retyped" then return dumpDecls header decls
   -- The registry's passes over mono LCNF (`Opt/FloatLits`).
   let decls := cfg.monoPasses.foldl (fun ds pass => pass keys ds) decls
   -- Stage 4: lowering, with the registry's lowering hooks.
-  let prog ← lowerProgram cfg prelude table mainInst errStr startup roots decls keys
+  let prog ← lowerProgram cfg prelude mainInst errStr startup roots decls keys
     (st.externRoutes.foldl (init := {}) fun m f r => match r with
       | .refused why => m.insert f why
       | _ => m)
-  -- `Array Nat` literal tables and `Outline` (core; first, so that the
-  -- passes after them see bounded functions), the registry's passes over
-  -- the generated functions, and the program text. `L2R_NO_OUTLINE` and
+  -- `Outline` (core; first, so that the passes after it see bounded
+  -- functions), the registry's passes over the generated functions, and
+  -- the program text. `L2R_NO_OUTLINE` and
   -- `L2R_NO_INLINE_ANCHORS` turn the two build-time workarounds off, for
   -- the repros of Reussir issues 16, 17 and 20, costs
   -- (reussir-bugs/repros/run.sh).
-  let prog := prog.literalTables
   let prog := if (← IO.getEnv "L2R_NO_OUTLINE").isSome then prog else prog.outline
   let prog := if (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome then { prog with anchored := {} } else prog
   return prog.runRRPasses cfg |>.render

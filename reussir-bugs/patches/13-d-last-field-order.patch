@@ -1,0 +1,268 @@
+From 1eb710b47e4ff941faf9e7304dbc00441ffbd313 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Tue, 6 Oct 2026 06:02:30 -0400
+Subject: [PATCH] l2r-local: issue 13: keep a cell's last record box for last
+ only when nothing after it pushes work
+
+drop_and_free (0014, as 0027 amended it) releases the members of a cell
+whose count was read as 1: it defers the record boxes to the thread's
+pending stack, releases the other managed members through their own drop
+glue (ref.drop), frees the cell, and then releases the arm's last
+non-leaf record box directly (a tail call when its count is 1), so that a
+chain through it is a loop. That box therefore comes out before anything
+the cell's other members pushed. A member after it that goes through
+ref.drop can push work: a host runtime that shares the stack pushes the
+free of its own objects while a drain runs (lean2rr's runtime: arrays,
+thunk and task cells, file handles), and a [value] record's glue defers
+its boxes. The box's contents were then released before that work, where
+Lean's lean_del, which pushes a cell's fields in order and pops the last
+first, releases the later member first. In lean2rr, a structure
+{i : In, arr : Array Handle} two cells below a freed record closed the
+handles of i before those of the array.
+
+emitCellRelease now keeps the last non-leaf record box for last only when
+every managed member after it releases quietly: it is trivially copyable,
+or it is a leaf box (plain or in a Nullable), freed at once with no
+effect. Otherwise no member is kept for last: every record box is
+deferred in field order, like the other members, and the drain pops them
+last first. A chain whose link is the last managed member (a list, a tree
+whose recursive member is last) is still a loop; a chain with a member
+through ref.drop after the link is freed through the drain, at the same
+constant stack depth.
+
+New lit test frontend/drop_member_order.rr: the glue of five records (an
+FFI object, a [value] record, or through Nullable an FFI object after the
+box: the box is deferred; a leaf box and a scalar after it, or an FFI
+object before it: the box is kept for last), and a chain of two million
+cells with a [value] record after the link, freed on an 8 MB stack.
+---
+ .../AcquireDropExpansion.cpp                  |  34 ++++-
+ .../integration/frontend/drop_member_order.c  |  15 ++
+ .../integration/frontend/drop_member_order.rr | 132 ++++++++++++++++++
+ 3 files changed, 177 insertions(+), 4 deletions(-)
+ create mode 100644 tests/integration/frontend/drop_member_order.c
+ create mode 100644 tests/integration/frontend/drop_member_order.rr
+
+diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+index ceebc855..9298cfd5 100644
+--- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
++++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+@@ -68,8 +68,11 @@ namespace reussir {
+ // drain, frees a cell whose count was read as 1: per arm it releases the
+ // members (deferring the record boxes) but the last non-leaf record box
+ // (plain or in a `Nullable`), frees the cell, and then releases that last
+-// box directly, by a tail call when its count is 1, so a chain is a loop. Releases outside drop glue
+-// (whose tokens may be reused) are unchanged.
++// box directly, by a tail call when its count is 1, so a chain is a loop.
++// It keeps that box for last only when no member after it is released
++// through its own drop glue (which may push work that the stack must pop
++// before the box); otherwise it defers every record box, in field order.
++// Releases outside drop glue (whose tokens may be reused) are unchanged.
+ 
+ namespace {
+ 
+@@ -255,17 +258,40 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+   // record box, plain or `Nullable` (whose box would otherwise be deferred
+   // like a plain one), so the members are released in the same order either
+   // way and a chain through either kind of link is a loop.
+-  auto isTail = [&](size_t idx) {
++  auto boxType = [&](size_t idx) {
+     mlir::Type type = projected(idx);
+     if (auto nullableType = llvm::dyn_cast<NullableType>(type))
+       type = nullableType.getPtrTy();
+-    return isDeferredNonLeaf(type);
++    return type;
++  };
++  auto isTail = [&](size_t idx) { return isDeferredNonLeaf(boxType(idx)); };
++  // A member whose release pushes nothing and has no effect: nothing
++  // (trivially copyable), or a leaf box (plain or `Nullable`), freed at once.
++  auto releasesQuietly = [&](size_t idx) {
++    return isTriviallyCopyable(projected(idx)) ||
++           (isDeferrable(boxType(idx)) && !isDeferredNonLeaf(boxType(idx)));
+   };
+   std::optional<size_t> last;
+   for (auto [idx, memberTy, memberIsField] : llvm::enumerate(
+            payload.getMembers(), payload.getMemberIsField()))
+     if (!memberIsField && isTail(idx))
+       last = idx;
++  // A member after it that is released through its own drop glue (an FFI
++  // object, a closure, an array, a cell, a [value] record or a box that is not
++  // deferred) may push work onto the pending stack: a host runtime's
++  // container pushes its free, a [value] record defers its boxes. Like
++  // `lean_del`, which pushes a cell's fields in order and pops the last
++  // first, that work must run before the box's contents, but a box released
++  // directly after the free runs before anything this cell pushed. Then no
++  // member is kept for last: every record box is deferred in field order, so
++  // the stack pops the members last first.
++  if (last)
++    for (auto [idx, memberTy, memberIsField] : llvm::enumerate(
++             payload.getMembers(), payload.getMemberIsField()))
++      if (idx > *last && !memberIsField && !releasesQuietly(idx)) {
++        last.reset();
++        break;
++      }
+   mlir::Value lastValue;
+   if (last)
+     lastValue = ReussirRefLoadOp::create(rewriter, loc, projected(*last),
+diff --git a/tests/integration/frontend/drop_member_order.c b/tests/integration/frontend/drop_member_order.c
+new file mode 100644
+index 00000000..7765fbca
+--- /dev/null
++++ b/tests/integration/frontend/drop_member_order.c
+@@ -0,0 +1,15 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for drop_member_order.rr: two independent properties, one decimal
++// digit each.
++
++extern long long reussir_main(void);
++
++int main(void) { return reussir_main() == 11 ? 0 : 1; }
+diff --git a/tests/integration/frontend/drop_member_order.rr b/tests/integration/frontend/drop_member_order.rr
+new file mode 100644
+index 00000000..6834bf45
+--- /dev/null
++++ b/tests/integration/frontend/drop_member_order.rr
+@@ -0,0 +1,132 @@
++// UNSUPPORTED: darwin
++// Inside drop glue, drop_and_free releases a cell's members with one stack of
++// pending releases per thread (the record boxes are deferred, a host runtime
++// may push the free of its own objects), and keeps the last non-leaf record
++// box for last: it releases that box directly after the cell is freed (a tail
++// call, so a chain through it is a loop). That box therefore comes out before
++// everything the cell's other members pushed. Like Lean's `lean_del`, which
++// pushes a cell's fields in order and pops the last first, it may be kept for
++// last only when no member after it pushes work. A member after it that is
++// released through its own drop glue (an FFI object, whose host may push its
++// free; a [value] record, which defers its boxes) makes every record box
++// deferred, in field order. Checked on the glue of
++//   Sa { i: In, v: Vec<u64> }           an FFI object after the box: In deferred
++//   Sv { i: In, w: Vw }                 a [value] record with a box after it
++//   Sn { i: Nullable<In>, v: Vec<u64> } the same through `Nullable`
++//   Sl { i: In, l: Lf, k: u64 }         a leaf box and a scalar after it: In last
++//   Sf { v: Vec<u64>, i: In }           the FFI object before it: In last
++// and on a chain linked through its first member, with a [value] record
++// after the link: its glue (C) keeps no member for last and defers the link.
++// Two million cells of it are still freed at a constant stack depth, through
++// the pending stack, on the driver's 8 MB main thread.
++
++// RUN: %rrc %s -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/drop_member_order.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++// RUN: %rrc %s -o %t.opt.o --relocation-mode pic -Oaggressive
++// RUN: %cc %t.opt.o %S/drop_member_order.c -o %t.opt.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.opt.exe
++// RUN: %rrc %s --emit mlir-llvm -o %t.mlir
++// RUN: %FileCheck %s --check-prefix=SA < %t.mlir
++// RUN: %FileCheck %s --check-prefix=SV < %t.mlir
++// RUN: %FileCheck %s --check-prefix=SN < %t.mlir
++// RUN: %FileCheck %s --check-prefix=SL < %t.mlir
++// RUN: %FileCheck %s --check-prefix=SF < %t.mlir
++// RUN: %FileCheck %s --check-prefix=CH < %t.mlir
++
++extern "rust" [{
++    use reussir_rt::collections::vec::Vec as RVec;
++}];
++
++#[ffi(rust = "::reussir_rt::collections::vec::Vec")]
++pub struct Vec<T>;
++
++#[ffi(import)]
++pub fn new<T>() -> Vec<T> [{ RVec::new() }];
++
++#[ffi(import)]
++pub fn push<T>(v: Vec<T>, x: T) -> Vec<T> [{ RVec::push(v, x) }];
++
++struct [shared] Lf(u64)
++struct In { a: Lf, k: u64 }
++struct [value] Vw { b: In, k: u64 }
++struct Sa { i: In, v: Vec<u64> }
++struct Sv { i: In, w: Vw }
++struct Sn { i: Nullable<In>, v: Vec<u64> }
++struct Sl { i: In, l: Lf, k: u64 }
++struct Sf { v: Vec<u64>, i: In }
++struct Top { a: Sa, v: Sv, n: Sn, l: Sl, f: Sf, k: u64 }
++struct Outer { t: Top, k: u64 }
++
++struct [value] Vk { l: Lf, k: u64 }
++enum C { Cell(C, Vk), End }
++
++fn mk_in(x : u64) -> In { In { a: Lf{x}, k: x } }
++fn mk_vec(x : u64) -> Vec<u64> { push(new<u64>(), x) }
++fn mk_top(x : u64) -> Top {
++    Top { a: Sa { i: mk_in(x), v: mk_vec(x) },
++          v: Sv { i: mk_in(x), w: Vw { b: mk_in(x + 1), k: x } },
++          n: Sn { i: Nullable::NonNull{mk_in(x)}, v: mk_vec(x) },
++          l: Sl { i: mk_in(x), l: Lf{x}, k: x },
++          f: Sf { v: mk_vec(x), i: mk_in(x) },
++          k: 3 }
++}
++// The caller releases Outer's fields itself; Top's drop_in_place defers
++// its members, whose drop_and_free is the glue checked below.
++fn outer_k(o : Outer) -> u64 { o.k }
++
++fn chain(n : u64, acc : C) -> C {
++    if n == 0 { acc } else { chain(n - 1, C::Cell { acc, Vk { l: Lf{n}, k: n } }) }
++}
++fn chead(c : C) -> u64 { match c { C::Cell(t, v) => v.k, C::End => 0 } }
++
++pub fn main() -> i64 {
++    let top_ok = if outer_k(Outer { t: mk_top(5), k: 3 }) == 3 { 1 } else { 0 };
++    let chain_ok = if chead(chain(2000000, C::End {})) == 1 { 1 } else { 0 };
++    top_ok + chain_ok * 10
++}
++
++extern "C" trampoline "reussir_main" = main;
++
++// A function of the dump ends with a line `  }`: the second label of each
++// prefix ends the function, so the checks between them stay inside it.
++
++// SA-LABEL: llvm.func {{.*}}@_RINvNvC4core9intrinsic22drop_and_free_in_drainC2SaE(
++// SA: llvm.mlir.addressof @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2InE
++// SA: llvm.call @__reussir_drop_defer
++// SA: llvm.call @__reussir_deallocate
++// SA-NOT: llvm.call @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2InE(
++// SA-LABEL: {{^  [}]$}}
++
++// SV-LABEL: llvm.func {{.*}}@_RINvNvC4core9intrinsic22drop_and_free_in_drainC2SvE(
++// SV: llvm.mlir.addressof @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2InE
++// SV: llvm.call @__reussir_drop_defer
++// SV: llvm.call @__reussir_deallocate
++// SV-NOT: llvm.call @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2InE(
++// SV-LABEL: {{^  [}]$}}
++
++// SN-LABEL: llvm.func {{.*}}@_RINvNvC4core9intrinsic22drop_and_free_in_drainC2SnE(
++// SN: llvm.mlir.addressof @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2InE
++// SN: llvm.call @__reussir_drop_defer
++// SN: llvm.call @__reussir_deallocate
++// SN-NOT: llvm.call @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2InE(
++// SN-LABEL: {{^  [}]$}}
++
++// SL-LABEL: llvm.func {{.*}}@_RINvNvC4core9intrinsic22drop_and_free_in_drainC2SlE(
++// SL-NOT: llvm.call @__reussir_drop_defer
++// SL: llvm.call @__reussir_deallocate
++// SL: llvm.call @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2InE(
++// SL-LABEL: {{^  [}]$}}
++
++// SF-LABEL: llvm.func {{.*}}@_RINvNvC4core9intrinsic22drop_and_free_in_drainC2SfE(
++// SF-NOT: llvm.call @__reussir_drop_defer
++// SF: llvm.call @__reussir_deallocate
++// SF: llvm.call @_RINvNvC4core9intrinsic22drop_and_free_in_drainC2InE(
++// SF-LABEL: {{^  [}]$}}
++
++// CH-LABEL: llvm.func {{.*}}@_RINvNvC4core9intrinsic22drop_and_free_in_drainC1CE(
++// CH: llvm.call @__reussir_drop_defer
++// CH: llvm.call @_RINvNvC4core9intrinsic13drop_in_placeC2VkE(
++// CH: llvm.call @__reussir_deallocate
++// CH-NOT: llvm.call @_RINvNvC4core9intrinsic22drop_and_free_in_drainC1CE(
++// CH-LABEL: {{^  [}]$}}
+-- 
+2.43.0
+

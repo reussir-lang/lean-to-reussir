@@ -1,28 +1,73 @@
 # Arrays
 
-`Array α` is the runtime's copy-on-write vector `RVec<S>`, updated in place
-when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
-`runtime/` for the runtime. Plan
+`Array α` is the runtime's copy-on-write vector `RVec<LAny>`, updated in
+place when unique, whatever `α` is; `ByteArray` and `FloatArray` are
+`RVec<u8>` and `RVec<f64>`. Paths: `lean2rr/LeanToReussir/` for lean2rr's
+files, `runtime/` for the runtime. Plan
 [§5.1](../../translation-plan.md#51-type-translation).
 
-### Elements are stored in their storage type
+### An array holds `Box`es, whatever its element type
 
-- **What:** `S`, the storage type of `α`, is `α`'s own representation when
-  that can cross Reussir's FFI boundary (integers, floats, `bool`, runtime
-  handles, `Nat` and `Int` among them, shared records, function values);
-  otherwise a generated one-field shared struct `ElemBox` around it
-  (`[value]` structs, Reussir closures; `Nat` and `Int` too before
-  mem-nat). The same storage
-  wraps once-cell values and the type-parameter arguments of extern
-  instances.
-- **Why:** Reussir's FFI passes only integers, floats, `bool`, opaque
-  types and shared records; `[value]` records, closures and `unit` do not
-  cross it (plan [§9](../../translation-plan.md#9-open-items), probe
-  results). Lean boxes array elements too.
-- **Where:** `LowerBase.lean`: `isBoundaryTy`, `arrayElemTy`,
-  `arrayStorage`, `storageElem`, `ArrayRepr`, `arrayRepr?`.
-- **Remove only if:** Reussir passes `[value]` types across the FFI (a
-  feature request).
+- **What:** `Array α` is `RVec<LAny>` for every `α` (`lowerTypeApp`). A
+  value goes into an array by boxing (`Array.push` at `Nat` boxes the
+  `Nat`) and comes out by unboxing, at the extern's boundary
+  (`lowerExternCall`: an extern over arrays stores its type parameters'
+  values as `Box`es). `Array.mk`, `Array.toList` and the map loops of
+  Lean's library move the boxes as they are. `ByteArray.mk`/`data` and
+  `FloatArray.mk`/`data` convert between an array of `Box`es and the
+  runtime's bytes or floats (natively `lean_byte_array_mk` copies too;
+  [below](#bytearraymkdata-and-floatarraymkdata-are-one-loop-at-the-exact-size)).
+- **Why:** One representation per type (rule 1 of the layouts of generic
+  types): with an array type per element type (`RVec<Nat>`, `LNatArr`,
+  index arrays for enumerations, `ElemBox` cells for `[value]` elements),
+  an array read at another element type (`Array Nat` out of a generic
+  `Prod (Array α) Nat`, the `NonScalar` arrays of `Array.map`) was copied
+  element by element, at every use: quadratic in a loop of updates
+  (review RV9C-02), and the `map` loops needed a split pass. Natively an
+  array element of unknown type is one `lean_object*`.
+- **Cost:** none for small scalars: a box is one word (`LAny`), so a small
+  `Nat`, a `Bool` or an enumeration is a scalar in the slot, as natively; a
+  `Float` element is a cell, as natively. Each `get!` boxes its default
+  value.
+- **Where:** `LowerBase.lean`: `lowerTypeApp`, `arrayElem?`, `arrayCall`;
+  `Lower/ExternCall.lean`: `lowerExternCall`, `customExtern`;
+  `Lower/Process.lean`: `arrayMapFn`.
+- **Remove only if:** never.
+
+### `ByteArray.mk`/`data` and `FloatArray.mk`/`data` are one loop at the exact size
+
+- **What:** `ByteArray.data` (`lean_byte_array_data`), `ByteArray.mk`,
+  `FloatArray.data` and `FloatArray.mk` call a texture of the prelude
+  (`l2r_boxes_of_bytes`, `l2r_bytes_of_boxes`, `l2r_boxes_of_floats`,
+  `l2r_floats_of_boxes`; `leanrt::array`): it allocates the result at the
+  source's size, converts the elements in one loop (a byte to its
+  immediate box and back; a float to its cell, `any::of_f64`, and back,
+  the box read in place) and releases the source, as natively
+  (`lean_alloc_array(n, n)`). A box that the plain unboxing does not read
+  (a pointer read as a `UInt8`; a pointer other than a float's or a large
+  `UInt64`'s cell read as a `Float`) is `any::mismatch`, a panic, as the
+  generated unboxing is in a program without casts. In a program that
+  casts, that unboxing reads such a pointer instead (`l2r_unbox_u8`): there
+  lean2rr calls the texture only after a check of the elements
+  (`l2r_boxes_all_imm`, `l2r_boxes_all_float_words`), and else its
+  generated loop, element by element (`arrayMapFn`).
+- **Why:** The generated loop pushed each element onto an empty array:
+  about 18 instructions a byte and a block that grew by doubling, so a
+  `ByteArray.data` of a buffer used up to twice its size. In lean-zip it
+  was the largest cost (Adler-32 over `data`, buffers made with
+  `ByteArray.mk`). With the textures (cachegrind, silesia `xml`; outputs
+  equal native): decompression 865.9 to 775.1 M instructions (-10.5 %),
+  compression 2517.7 to 2437.5 M (-3.2 %); peak RSS from 141.4 to 61 to
+  69 MB and from 150.7 to 71 to 83 MB (two runs; native 74.7 and 98.4
+  MB).
+- **Where:** `Lower/ExternCall.lean`: `customExtern`;
+  `runtime/prelude.rr`: the `ByteArray` section;
+  `runtime/leanrt/src/array.rs`: `boxes_of_bytes`, `bytes_of_boxes`,
+  `boxes_all_imm`, `boxes_of_floats`, `floats_of_boxes`,
+  `boxes_all_float_words`; `runtime/leanrt/src/any.rs`: `bits_of_word`,
+  `is_word_box`. Tests: `RtByteArrayData`, `RtByteArrayDataCast`; leanrt's
+  `array::tests::byte_and_float_array_conversions`.
+- **Remove only if:** `ByteArray` and `FloatArray` become arrays of boxes.
 
 ### An array is one block
 
@@ -33,7 +78,7 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   `leanrt::array` allocates (a fresh block's size rounded up to 8 bytes,
   the rest capacity), grows a unique block in place (`mi_realloc`, at least
   doubling, to a whole mimalloc block) and copies a shared one
-  (copy-on-write). `ByteArray.mk`/`data` stay the identity.
+  (copy-on-write).
 - **Why:** It was Reussir's `reussir_rt::collections::vec::Vec` (an `Rc`
   around a Rust `Vec`): two allocations per array, a 32-byte counted box
   and the buffer, and every element read loaded the buffer pointer first.
@@ -61,10 +106,10 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
 
 ### A block's capacity is mimalloc's size class, without a call up to 64 bytes
 
-- **What:** A grown array, string or tag vector (`Array Nat`/`Array Int`)
-  and every big number take as capacity the whole mimalloc block their
-  size falls in (`alloc::good_size`; arrays, strings and tag vectors from
-  4 KiB on a power of two instead). Up to 64 bytes `good_size` returns the
+- **What:** A grown array or string and every big number take as
+  capacity the whole mimalloc block their size falls in
+  (`alloc::good_size`; arrays and strings from 4 KiB on a power of two
+  instead). Up to 64 bytes `good_size` returns the
   size itself, without calling `mi_good_size`: mimalloc's size classes
   there are every multiple of 8, and the sizes asked for are multiples of
   8, so the answer is the same (unit test `alloc::tests::small_good_size`
@@ -75,13 +120,12 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   step 10, cachegrind, small sizes): liasolver 2.8% fewer instructions,
   strings 0.26%, qsort 0.15% (an array's growth is under 64 bytes only for
   its first growth, to 8 elements, of elements of 4 bytes or less, such as
-  qsort's `UInt32`: 24 + 32 bytes; a tag vector's first growth, to 4
-  words, is 56 bytes; a string's up to 32 bytes). Were
+  qsort's `UInt32` at the time: 24 + 32 bytes; a string's up to 32
+  bytes). Were
   a size class there bigger, a capacity of the size asked for would still
   lie inside the block (room left unused).
 - **Where:** `runtime/leanrt/src/alloc.rs`: `good_size`; its callers
-  `big.rs` (`block_bytes`), `array.rs`, `string.rs` and `tagvec.rs`
-  (`grow`).
+  `big.rs` (`block_bytes`), `array.rs` and `string.rs` (`grow`).
 - **Remove only if:** mimalloc's small size classes stop being every
   multiple of 8 (the unit test fails then; the capacity stays safe, only
   smaller than the block).
@@ -108,13 +152,13 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
 ### A release tests `count == 1`
 
 - **What:** The `Drop` of an array (`leanrt::drop::Vec`, also
-  `tagvec::TagVec`, `string::LStr`, `array::release`) and of a thunk or
+  `string::LStr`, `array::release`) and of a thunk or
   task cell (`drop::Cell`) frees when the count is 1 and otherwise
   decrements; never `count > 1`. Its free path is an `extern "C"` function
   (no unwinding, no landing pads in the textures). A cell's read
   (`l2r_lcell_get`, `drop::cell_get`) releases the cell before it copies
   the state; a read of a shared array or string releases it before its
-  bounds check (`array::give`, `tagvec::give`, `string::read_owned`), and
+  bounds check (`array::give`, `string::read_owned`), and
   the last reference frees the block after the read (`view_take`,
   `view_end`, after the rule; see
   [../ownership.md](../ownership.md#reads-give-their-reference-up-first-for-a-view)).
@@ -133,54 +177,11 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   `give`; `runtime/prelude.rr`: `l2r_lcell_get`, `l2r_array_give`.
 - **Remove only if:** never.
 
-### Enumerations and `Unit` in arrays are indices
-
-- **What:** An array of an enumeration (a field-less `[value]` enum) or of
-  `Unit` stores each element's constructor index, as `u8`, `u16` or `u32`
-  by the number of constructors. Internally the storage type is
-  `L2RIx<w, T>` (so different enumerations stay distinct); it renders as
-  `w`. Generated `l2r_ix_of_T`/`l2r_ix_to_T` convert; an index past the
-  last constructor gives the last one, and an empty enumeration is
-  unreachable.
-- **Why:** An `ElemBox` per element was one allocation each; natively Lean
-  stores a tagged scalar (adv4 K2, 23e65fb).
-- **Where:** `LowerBase.lean`: `ixStorage?`, `arrayStorage`,
-  `ArrayRepr.store`, `ArrayRepr.load`; `RR.lean`: `Ty.render`.
-- **Remove only if:** never. Once-cell values and other extern arguments
-  of such types are still wrapped (plan
-  [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
-  "Element storage").
-
-### `Array Nat` and `Array Int` store one word per element
-
-- **What:** With the optional pass `nat-arrays`, `Array Nat`/`Array Int`
-  are the runtime's `LNatArr`/`LIntArr`, which store the elements' own
-  words ([nat-int.md](nat-int.md): a small value's `lean_box`, a big
-  number's pointer); the handles move in and out as their words. The
-  object is one block laid out like Lean's array
-  object, with the same 24-byte header (a `u32` count that Reussir's
-  `rc.inc` bumps, size, capacity, then the words), a pointer of type
-  `leanrt::tagvec::TagVec` that does its own counting. Every `lean_array_*`/
-  `l2r_array_*` function has a `natarr`/`intarr` counterpart with the same
-  arguments, generated by `runtime/gen_tagarr.py`.
-- **Why:** Before mem-nat, `Nat`/`Int` were `[value]` enums and a generic
-  `RVec` boxed each element (adv4 PF4-08, a74072b; runtime request 11);
-  then a generic `RVec<Nat>` (one word per element) was two allocations.
-  Since arrays are one block (above), `RVec<Nat>` has the same memory
-  layout as a tag vector; whether the pass still pays for itself is open.
-- **Where:** `LowerBase.lean`: `lowerTypeApp`, `natArrSym?`;
-  `Lower/ExternCall.lean`: `lowerExternCall`; `Opt/NatArrays.lean`;
-  `runtime/leanrt/src/tagvec.rs`; `runtime/gen_tagarr.py`.
-- **Remove only if:** the pass is off (arrays like the others). The
-  header was 40 bytes (with a `Box<dyn Any>` marker) until mem-layout
-  (7a784e1): 6M small rows took 431 MB, now 336 MB (native 338).
-
 ### Shared copies keep their capacity for a push
 
 - **What:** A push onto a shared array copies it with the capacity
   `lean_array_push` gives (its own, unless below `2 * size + 1`); other
-  updates of a shared generic array copy it to its size (rounded up to 8
-  bytes), while a tag vector keeps its capacity (`lean_copy_expand_array`);
+  updates of a shared array copy it to its size (rounded up to 8 bytes);
   `Array.mkEmpty` and `ByteArray.emptyWithCapacity` reserve what is asked
   when it can be reserved (next section); growing blocks take whole
   mimalloc blocks.
@@ -190,29 +191,28 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   by copying (1.73x memory, adv4 K3, b97cdcd). Blocks that fell just past
   a mimalloc size class wasted 35 MB growing a 10M-element `Array Nat`
   (de0352f).
-- **Where:** `runtime/leanrt/src/array.rs`, `tagvec.rs`.
+- **Where:** `runtime/leanrt/src/array.rs`.
 - **Remove only if:** never.
 
 ### A capacity that cannot be reserved reserves nothing
 
 - **What:** `Array.mkEmpty c`, `Array.emptyWithCapacity c`,
   `ByteArray.emptyWithCapacity c` and `FloatArray.emptyWithCapacity c`
-  (the `Array Nat`/`Array Int` tag vectors too) reserve `c` elements when
-  they can, and nothing otherwise, and give the empty array either way. A
-  big `Nat` (2^63 or more) is released and gives the empty array (the
-  prelude). Above 2^24 elements, `leanrt::array::check_capacity` takes
-  lean-runtime's rule (`sem::array::empty_with_capacity`: 0 when the object
-  size `24 + elem * c` is above 2^64 - 1 or `isize::MAX`), then reserves
-  nothing when the native allocation of that size would fail (a `mi_malloc`
-  probe, untouched, then freed). Example: `ByteArray.emptyWithCapacity
-  (2^62)` passes the rule, the probe fails, and the result is the empty
-  array with capacity 0. The probe is freed before the array's own
-  allocation, so a failure between the two (unreachable in practice: one
-  thread, the same size just reserved) would still end with `out of
-  memory`; a fallible allocation of the array itself needs fallible
-  versions of leanrt's block allocations (`array::alloc`, `tagvec::alloc`,
-  which end with `out of memory` on a null `mi_malloc`; an issue, not
-  done).
+  reserve `c` elements when they can, and nothing otherwise, and give the
+  empty array either way. A big `Nat` (2^63 or more) is released and gives
+  the empty array (the prelude). Above 2^24 elements,
+  `leanrt::array::check_capacity` takes lean-runtime's rule
+  (`sem::array::empty_with_capacity`: 0 when the object size
+  `24 + elem * c` is above 2^64 - 1 or `isize::MAX`), then reserves nothing
+  when the native allocation of that size would fail (a `mi_malloc` probe,
+  untouched, then freed). Example: `ByteArray.emptyWithCapacity (2^62)`
+  passes the rule, the probe fails, and the result is the empty array with
+  capacity 0. The probe is freed before the array's own allocation, so a
+  failure between the two (unreachable in practice: one thread, the same
+  size just reserved) would still end with `out of memory`; a fallible
+  allocation of the array itself needs a fallible version of leanrt's
+  block allocation (`array::alloc`, which ends with `out of memory` on a
+  null `mi_malloc`; an issue, not done).
 - **Why:** the Lean definitions give the empty array whatever the
   capacity: it is only a hint. Natively a capacity that cannot be reserved
   ends the process (`INTERNAL PANIC: out of memory`, or `integer overflow
@@ -220,20 +220,10 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
   lean-runtime's LB-37, a lifted limit (switch step 13). `Array.replicate`
   keeps native's ends (`check_alloc`): its size is the array's.
 - **Where:** `runtime/leanrt/src/array.rs`: `check_capacity`,
-  `capacity_slow`, `with_capacity_checked`; `tagvec.rs`: `with_capacity`;
-  `runtime/prelude.rr`: `l2r_mk_empty_with_capacity`,
-  `lean_mk_empty_natarr_with_capacity`,
-  `lean_mk_empty_intarr_with_capacity`. Tests `RtAllocBigNat`,
-  `RtAllocOverflow`, `RtAllocOom`; lean-runtime's rows `array/mkempty.*`,
-  `bytesempty.*`, `floatsempty.*` (`rows-check.sh`).
-- **Remove only if:** never.
-
-### `Array T` inside `T`'s own fields
-
-- **What:** A field `Array T` of `T` (a rose tree's children) has the
-  representation `Array T` has everywhere else.
-- **Why/Where:** see
-  [records.md](records.md#whether-a-type-is-a-shared-record-is-decided-before-its-fields).
+  `capacity_slow`, `with_capacity_checked`; `runtime/prelude.rr`:
+  `l2r_mk_empty_with_capacity`. Tests `RtAllocBigNat`, `RtAllocOverflow`,
+  `RtAllocOom`; lean-runtime's rows `array/mkempty.*`, `bytesempty.*`,
+  `floatsempty.*` (`rows-check.sh`).
 - **Remove only if:** never.
 
 ### `Array.mk`, `Array.toList` and list folds are generated loops
@@ -241,7 +231,8 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
 - **What:** `Array.mk` and `String.mk`/`String.ofList` fold their list with
   a generated tail-recursive function (`listFold`); `Array.toList` is a
   generated loop that conses the elements from the last
-  (`l2r_array_to_list_<list type>_<family>`). Lists whose elements have no
+  (`l2r_array_to_list_<list type>_<array type>`); an array's `Box`es are a
+  list's heads as they are. Lists whose elements have no
   representation (`Array Type`, `Array Prop`) are handled (adv2 D3,
   0cba3ff).
 - **Why:** These externs take or return Lean-defined `List`, which the
@@ -252,90 +243,3 @@ when unique. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
 - **Where:** `Lower/ExternCall.lean`: `customExtern`;
   `Lower/Externs.lean`: `listFold`.
 - **Remove only if:** never.
-
-### Maps that change the element representation write a new array
-
-- **What:** A `map` loop whose element representation changes
-  (`Nat → Bool`) gets a split instance over the source `Array α` and a new
-  result `Array β` created with the source's size as capacity: reads at
-  `α`'s representation, the placeholder written back into the source,
-  each mapped value pushed onto the result. No split when the stored
-  values' type is `◾` (a value Stage 3 did not recover).
-- **Why:** Otherwise the loop runs on an array of `Box`es, converted on
-  entry and on exit (adv4 PF4-07, d044198); nested maps and a first
-  iteration Lean specialized apart are split too (round 6 PRG6-01: up to
-  22x native memory; RV6L-02: 3.5x). A split at `◾`, a map projecting a
-  field of a parametric structure (`(xs.zip ys).map (·.2)`), stored
-  placeholders or panicked "unreachable" (round 7 RV7D-01, a9b89e6; test
-  `RtMapProjFields`).
-- **Where:** `Opt/SplitMapLoops.lean`: `splitMapLoops`, `loopShape?`,
-  `ensureSplit`, `buildSplit`, `splitCode`, `splitEntries`; plan
-  [§4](../../translation-plan.md#4-stage-3--check-and-recover-lost-types).
-  Optional pass `split-map-loops`.
-- **Remove only if:** the pass is off (correct, slower). Cost when on: the
-  two arrays live together until the map ends (0.7-1.1x native peak
-  memory for scalar targets).
-
-### Updates of a uniform container run on it (`uniform-updates`)
-
-- **What:** After Stage 3's fixpoint, in each declaration: a call of an
-  `Array` extern at a precise type whose array argument is uniform
-  (`Array lcAny`) calls the extern's instance at `lcAny` instead. The
-  single element is boxed going in, or unboxed when the binder stays
-  precise (`get`, `size`). When the result is itself a container, its binder
-  becomes `Array lcAny`; that needs one use of it to expect exactly that
-  type and every other use to expect it or a precise type it converts to (a
-  read, converted at that use: review C02R-02), and a chain of such calls
-  counts (greatest fixpoint), as does a join point's parameter of a precise
-  container type that a jump passes a uniform value (or a planned uniform
-  result), every other jump that or a precise array (converted at that
-  jump), and whose uses fit as above (candidate parameters are made until
-  none is added, since one join point's planned parameter can be the jump
-  argument another needs). Then `uniformParams`: a declaration's
-  parameter of a precise array type that every call site (partial
-  applications included; `callSites`) passes a uniform array becomes uniform
-  when, with that type, the body after the pass uses it only where a uniform
-  array is expected and its recursive calls pass a uniform array (a lifted
-  closure capturing the column, a fold loop). A constructor
-  application whose uses all expect one uniform type (`i :: d` at
-  `List lcAny`) is built at that type, if its fields then need at most a box.
-  A call is changed only if it receives a uniform value that the current
-  call would convert.
-- **Why:** A column `data : Array ty.denote` (the element type depends on a
-  value) is `Array lcAny`. Each `push` at `Array Nat` converted the whole
-  array there and the result back into the field: two O(n) copies per
-  update, quadratic in a loop (review RV9C-02: C9DepPush 40000 pushes 7.7 s
-  for 0.00 s natively; C9Columns 29 s for 0.07 s; through a join point
-  typed at `Array Nat`, review C02R-01: 20000 `modify` steps 3.84 s for
-  0.00 s). Natively the cast is free
-  and the update is in place. Externs do not depend on their type
-  arguments, so the `lcAny` instance computes the same thing.
-- **Where:** `Opt/UniformUpdates.lean`: `uniformUpdatesDecl`;
-  `MonoRetype.lean`: `Stage3Config.uniformUpdates`, called at the end of
-  `retypeMono`; plan [§4](../../translation-plan.md#4-stage-3--check-and-recover-lost-types)
-  and §10 "Structural conversions". Tests `RtUniformUpdates`,
-  `RtUniformUpdatesJp`, `RtUniformUpdatesMixed`, `RtUniformUpdatesNested` (review C02R-02: a rare
-  `foldl`, a closure capture, a fresh array on a rare path kept the chain
-  precise: 20000 steps 4.2 s for 0.09 s), `tests/runtime/conv-count-check.sh` (the elements
-  conversions rebuild, counted at two sizes: `L2R_COUNT_CONVERSIONS` makes
-  every generated conversion count the array elements or constructor
-  cells it rebuilds, `Lower/Conv.lean`: `countConversion`; off by default,
-  so ordinary builds are unchanged).
-- **Remove only if:** the pass is off (correct, quadratic on such loops).
-  Cost when on: none where no uniform container meets a precise use.
-  Not covered (plan §10): a function taking `Array Nat` that another call
-  site keeps typed (a typed argument, a use as a function value, a recursive
-  call with a precise array) is not retyped, so a column passed to it at
-  every step is converted at every call (review C03R-01, test
-  `RtUniformUpdatesShared`). The fix would be a copy of the function with
-  the parameter uniform for the uniform call sites (cloning, as Stage 1
-  makes instances), not a retyping of the function itself.
-
-### `Array Nat` literals of small numbers are built from tables
-
-- **What:** With `nat-arrays`, a run of 32 or more small `Nat` literals
-  pushed onto an `Array Nat` becomes one call that pushes the words of a
-  generated table.
-- **Why/Where:** see
-  [../startup/constants.md](../startup/constants.md#long-array-nat-literals-become-tables).
-- **Remove only if:** see the linked entry.

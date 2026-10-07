@@ -1,0 +1,46 @@
+// Issue 38: Reussir's inline count increment of a `tagged` opaque handle
+// (patch 41-a) uses the handle as the box's address. lean2rr's one-word box
+// (`leanrt::any::LAny`) keeps the number of its payload's type in the top 16
+// bits of a pointer handle, as other runtimes keep tags there; the address
+// is the handle without them. A missing feature, not a bug: patch 41-a
+// promised only the odd-word immediates.
+// Here `make` returns a counted box whose handle carries 5 in bits 48 to 63,
+// and `take` (which reads the count and gives the reference up) is called
+// twice on it, so Reussir increments its count in line before the first
+// call.
+// Command: rrc THIS -O aggressive (the polymorphic-FFI directories as
+// run.sh passes them).
+// Expected: prints 143 (7 * 10 + count 2, then 7 * 10 + count 1).
+// Reussir with patch 41-a and without 38-a: killed by SIGSEGV at the
+// increment (aarch64 ignores only the top 8 bits of an address; x86-64
+// none).
+extern "rust" [{
+    use reussir_rt::rc::Rc;
+}];
+
+#[ffi(rust = "::reussir_rt::rc::Rc<u64>", tagged)]
+pub struct Word;
+
+// A new box of `x`, its handle tagged with 5 in the top 16 bits.
+#[ffi(import)]
+fn make(x : u64) -> Word [{ unsafe { ::std::mem::transmute::<usize, Rc<u64>>(::std::mem::transmute::<Rc<u64>, usize>(Rc::new(x)) | (5usize << 48)) } }];
+
+// 10 * the value + the count the box has here; the reference is given up
+// (through the handle without its tag).
+#[ffi(import)]
+fn take(w : Word) -> u64 [{ {
+    let r = unsafe { ::std::mem::transmute::<usize, Rc<u64>>(::std::mem::transmute::<Rc<u64>, usize>(w) & ((1usize << 48) - 1)) };
+    let c = unsafe { *::std::mem::transmute_copy::<Rc<u64>, *const u32>(&r) } as u64;
+    *r * 10 + c
+} }];
+
+#[ffi(import)]
+fn say(x : u64) [{ println!("{}", x) }];
+
+#[main]
+fn main() {
+    let w = make(7);
+    let a = take(w);
+    let b = take(w);
+    say(a + b);
+}

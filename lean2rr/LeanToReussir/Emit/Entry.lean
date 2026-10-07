@@ -55,22 +55,34 @@ reported like an uncaught exception of `main`. -/
 def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM RR.Item := do
   let some mainDecl := (← read).decls.find? mainInst | throwError "lean2rr: no main"
   let (ps, _) := splitFnType mainDecl.type mainDecl.params.size
-  let (outTy, okV, errV, okField) ← ioResultOf mainInst
-  let exitCode := match okField with
-    | some (.named "u32") => "l2r_exit(v)"
-    | _ => "l2r_exit(0)"
+  let (outTy, okV, errV, okField, payTy) ← ioResultOf mainInst
+  -- The exit code: a `UInt32` result, held boxed in the result's field
+  -- (`l2r_main_code` unboxes it).
+  let mut exitCode := "l2r_exit(0)"
+  if payTy == .named "u32" then
+    let ft := okField.getD payTy
+    let code ← coerce (.var "v") ft payTy
+    modify fun s => { s with fns := s.fns.push (.fn "l2r_main_code" #[("v", ft)] payTy (.ofExpr code)) }
+    exitCode := "l2r_exit(l2r_main_code(v))"
   let takesArgs := ps.size == 2
-  let mut pre := ""
   let mut argExpr := ""
   if takesArgs then
+    -- `l2r_mk_args(i, acc)`: the arguments `i - 1` down to 0 consed onto
+    -- `acc`, each string boxed into the list's head field.
     let listTy ← lowerType ps[0]!
     let .named lt := listTy | throwError "lean2rr: bad main argument type"
     let some linfo := (← get).typeInfos[lt]? | throwError "lean2rr: bad main argument type"
     let nilV := (linfo.ctors.find? ``List.nil).map (·.variant) |>.getD "c_nil"
-    let consV := (linfo.ctors.find? ``List.cons).map (·.variant) |>.getD "c_cons"
-    pre := s!"fn l2r_mk_args(i : u64, acc : {lt}) -> {lt} \{\n    if i == 0 \{ acc } else \{ l2r_mk_args(i - 1, {lt}::{consV}\{l2r_argv(i - 1), acc}) }\n}\n\n"
+    let headTy := ((← ctorFieldTys listTy ``List.cons)[0]?).getD (.named "LStr")
+    let hd ← coerce (.call "l2r_argv" #[] #[.atom "i - 1"]) (.named "LStr") headTy
+    let cons ← ctorValue listTy ``List.cons #[hd, .var "acc"]
+    let u64 := RR.Ty.named "u64"
+    let body : RR.Block := .ofExpr (.ite (.atom "i == 0") (.ofExpr (.var "acc"))
+      (.ofExpr (.call "l2r_mk_args" #[] #[.atom "i - 1", cons])))
+    modify fun s => { s with fns := s.fns.push (.fn "l2r_mk_args" #[("i", u64), ("acc", listTy)] listTy body) }
     argExpr := s!"l2r_mk_args(l2r_argc(), {lt}::{nilV}\{}), "
-  let uncaught (e : String) := s!"l2r_uncaught_exception({fnName errStr}({e}))"
+  let errFn ← errStringFn errStr outTy
+  let uncaught (e : String) := s!"l2r_uncaught_exception({errFn}({e}))"
   -- IO tasks are deferred once `main` starts (before, during
   -- initialization, Lean has no task manager and runs them at once). After
   -- `main` returns, whatever its result, the tasks still pending run, as
@@ -104,6 +116,6 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
     "    extern \"C\" { fn l2r_init_body(); fn l2r_main_body(); }\n" ++
     "    leanrt::rt::run_main2(|| unsafe { l2r_init_body() }, || unsafe { l2r_main_body() })\n} }];\n\n" ++
     "#[main]\npub fn lean_main_entry() { l2r_run_main() }\n"
-  return .raw (pre ++ body ++ "\n" ++ entry)
+  return .raw (body ++ "\n" ++ entry)
 
 end LeanToReussir

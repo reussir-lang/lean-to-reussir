@@ -2,7 +2,7 @@ import Lean
 import LeanToReussir.MonoTypesKeep
 import LeanToReussir.Relevance
 import LeanToReussir.Mono
-import LeanToReussir.Pipeline
+import LeanToReussir.Collect
 
 /-!
 # Stage 3: exact recovery of types lost in mono
@@ -17,17 +17,18 @@ precise type (translation plan §4):
   result type `lcAny`;
 * library code that relies on the uniform representation (§2.7) casts with
   `unsafeCast`, which LCNF erases: the result of `Array.map` is bound at
-  `Array NonScalar`, i.e. `Array lcAny`, and so is every loop parameter it is
-  passed to.
+  `Array NonScalar`, i.e. `Array lcAny`.
 
 A binder typed `lcAny` is represented by `Box`, and every use at a precise
-type converts it; an array converts element by element, so a loop reading a
-loop-invariant `Array lcAny` would convert the whole array per access. This
-pass recomputes binder types where the program determines them, iterating
-over the whole program to a fixpoint (translation plan §4). A type is taken
-from what flows into a binder, never from how it is used: with a type that
-depends on a value (`data : Array t.denote`), a use as `Array Nat` speaks
-only for the branch where `t = .nat`.
+type unboxes it (a datatype has one representation whatever its type
+arguments, so `List lcAny` and `List Nat` are one type: only a value of
+unknown type, or a function value over one, changes representation). This
+pass recomputes binder types where the program determines them, so that
+locals are typed (`pick Nat`'s `x : Nat`, a field read at its own type),
+iterating over the whole program to a fixpoint (translation plan §4). A
+type is taken from what flows into a binder, never from how it is used:
+with a type that depends on a value (`data : Array t.denote`), a use as
+`Array Nat` speaks only for the branch where `t = .nat`.
 
 * **from definitions**: a `cases` field gets its constructor's field type at
   the discriminant's type arguments; a constructor application, a projection,
@@ -36,17 +37,11 @@ only for the branch where `t = .nat`.
   and agree;
 * **result types**: a declaration whose result is `lcAny` gets the type all
   its `return`s have, or the type all its callers bind the result at (if it
-  is used nowhere else); a `map` loop of `Array.mapMUnsafe` or
-  `Array.mapFinIdxMUnsafe` returns `Array β` when every value it stores has
-  type `β`;
-* **parameters from callers**: a parameter holding an erased array that
-  every caller passes at the same precise type `T` gets `T` when the body,
-  retyped under that assumption, passes `T` back in its self calls (this
-  makes the `map` loop precise when the source and target element types
-  agree, e.g. `xs.map (· * 2)`);
+  is used nowhere else);
 * **externs**: a call of a polymorphic extern instantiated at `lcAny`
   (`Array.uget`/`Array.uset` at `NonScalar`) whose arguments determine the
-  type arguments is redirected to the extern's instance at those types;
+  type arguments binds its result at the type the extern returns at those
+  type arguments (the callee stays);
 * **placeholders**: `let z := ◾` gets the type its uses expect.
 
 Whatever stays unknown keeps `lcAny` and is represented by the uniform `Box`
@@ -57,6 +52,15 @@ namespace LeanToReussir
 open Lean Compiler LCNF
 
 abbrev Types := Std.HashMap FVarId Expr
+
+/-- Relevance for every inductive mentioned by the program's types (Stage
+3's `normTy` erases the arguments of irrelevant parameters). -/
+def programRelevance (decls : Array (Decl .pure)) : CoreM RelevanceTable := do
+  let env ← getEnv
+  let inds := decls.foldl (fun s d => foldDeclTypes (addInductives env) d s) ({} : NameSet)
+  let inds := closeInductives env inds
+  let (table, _) ← Meta.MetaM.run' <| computeRelevance inds.toArray
+  return table
 
 def isUnknown (table : RelevanceTable) (t : Expr) : Bool := hasRelevantAny table t
 
@@ -104,8 +108,8 @@ partial def matchTy (holes : Array FVarId) (pat target : Expr) (assign : Array (
   | _ => assign
 
 /-- A type for comparisons: no metadata, no universe levels, and `◾` at the
-arguments of irrelevant (phantom) parameters, which do not change the
-representation. -/
+arguments of irrelevant (phantom) parameters, which carry no data (two
+types that differ only there have the same values). -/
 partial def normTy (table : RelevanceTable) (e : Expr) : Expr :=
   match e.consumeMData with
   | .forallE n d b bi => .forallE n (normTy table d) (normTy table b) bi
@@ -209,8 +213,9 @@ def withSig (d : Decl .pure) (params : Array (Param .pure)) (ret : Expr) : Decl 
 
 structure MRetypeCtx where
   table : RelevanceTable
-  /-- Stage 2's pass lists (extern instances are built as Stage 2 builds them). -/
-  stage2 : Stage2Config
+  /-- Instance name ↦ instance key (original declaration and type
+  arguments). -/
+  keys : NameMap InstKey
 
 structure MRetypeState where
   /-- Current signatures of the program's declarations and extern instances. -/
@@ -220,20 +225,6 @@ structure MRetypeState where
   /-- Declarations with code reachable from the program's roots (only their
   call sites say what a parameter receives). -/
   live : NameSet := {}
-  keys : NameMap InstKey := {}
-  /-- Extern instances by (extern, type arguments). -/
-  instances : Std.HashMap (Name × Array Expr) Name := {}
-  /-- Extern instances created by this pass. -/
-  newExterns : Array (Decl .pure) := #[]
-  nextInst : Nat := 0
-  /-- Split `map` loops (see `splitMapLoops`): (loop, source and target
-  element types, normalized) ↦ the split instance, `none` if the loop
-  cannot be split. -/
-  splits : Std.HashMap (Name × Expr × Expr) (Option Name) := {}
-  /-- Split instances being built. -/
-  splitBusy : NameSet := {}
-  /-- Split instances built. -/
-  splitDecls : Array (Decl .pure) := #[]
 
 abbrev MRetypeM := ReaderT MRetypeCtx (StateRefT MRetypeState CoreM)
 
@@ -254,45 +245,31 @@ def Scope.isPlaceholder (sc : Scope) : Arg .pure → Bool
   | .fvar x => sc.erased.contains x
   | _ => true
 
-/-! ## Extern re-instantiation -/
+/-! ## Results of externs at unknown types -/
 
-/-- The instance of extern `orig` (base declaration `base`) at `typeArgs`:
-an existing one, or a new one built like Stage 1 and Stage 2 build extern
-instances. -/
-def externInstance (orig : Name) (base : Decl .pure) (typeArgs : Array Expr) : MRetypeM Name := do
-  if let some n := (← get).instances[(orig, typeArgs)]? then return n
-  let k := (← get).nextInst
-  let name := Name.num (orig ++ `_l2r_re) k
-  let passes ← stage2Passes (← read).stage2
-  let decl ← CompilerM.run (phase := .base) do
-    let d ← instantiateExtern base name typeArgs
-    let out ← runPasses passes.toMono #[uniformDecl d] false
-    return out[0]!
-  modify fun s => { s with
-    nextInst := k + 1
-    instances := s.instances.insert (orig, typeArgs) name
-    sigs := s.sigs.insert name (declSig decl)
-    keys := s.keys.insert name { decl := orig, typeArgs }
-    newExterns := s.newExterns.push decl }
-  return name
-
-/-- A saturated call of `f`, an extern instance whose type arguments Lean did
-not know (`lcAny`, e.g. `Array.uget` at `NonScalar` inside `Array.map`): the
-instance of the same extern at the type arguments that the argument types
-determine, provided every argument then has exactly the expected type (or is
-a placeholder). An extern does not depend on its type arguments; only the
-representation changes. -/
-def reinstantiate? (sc : Scope) (f : Name) (args : Array (Arg .pure)) (resTy : Expr) :
-    MRetypeM (Option Name) := do
-  let some key := (← get).keys.find? f | return none
+/-- The result type of a saturated call of `f`, an extern instance whose
+type arguments Lean did not know (`lcAny`, e.g. `Array.uget` at
+`NonScalar` inside `Array.map`), when the argument types determine them:
+the base extern's declared parameter types are matched strictly against
+the argument types (an argument of unknown type determines nothing), and
+every argument must then have exactly its parameter's mono type at those
+type arguments (or be a placeholder). An over-applied call (the element
+read of an `Array.map` over functions, applied to the function's argument)
+gives the result after the extra arguments. The types are computed as
+Stage 2 computes an extern instance's (`toMonoTypeKeep`). The call keeps
+its callee: an extern does not depend on its type arguments, and with one
+representation per datatype (`Array α` is one array of boxes) an instance
+at the precise types would differ only in its result type, which Stage 4
+converts to the binder's type anyway (`lowerConstApp`). -/
+def externResultType? (sc : Scope) (f : Name) (args : Array (Arg .pure)) : MRetypeM (Option Expr) := do
+  let some key := (← read).keys.find? f | return none
   unless key.dicts.isEmpty && key.typeArgs.any (· == anyExpr) do return none
   -- An instance with code (the Lean definition of an extern of the program,
   -- `Mono.ExternRoute.body`) is not an extern instance.
   if (← get).codeDecls.contains f then return none
   let some base ← getBaseDecl? key.decl | return none
   let positions := typeParamPositions base
-  -- Saturated, or over-applied (the element read of an `Array.map` over
-  -- functions is applied to the function's argument).
+  -- Saturated, or over-applied.
   let n := base.params.size
   unless positions.size == key.typeArgs.size && n ≤ args.size do return none
   let holes ← positions.mapM fun _ => mkFreshFVarId
@@ -305,30 +282,31 @@ def reinstantiate? (sc : Scope) (f : Name) (args : Array (Arg .pure)) (resTy : E
       | some j => ty := b.instantiate1 (.fvar holes[j]!)
       | none =>
         unless sc.isPlaceholder args[i]! do
-          assign := matchTy holes d (sc.argTy args[i]!) assign
+          assign := matchTy holes d (sc.argTy args[i]!) assign (strict := true)
         ty := b.instantiate1 anyExpr
     | _ => return none
   let some typeArgs := assign.mapM id | return none
   for t in typeArgs do
     if (← unknown t) || t.hasFVar then return none
-  let inst ← externInstance key.decl base (typeArgs.map eraseLevels)
-  if inst == f then return none
-  let some sig := (← get).sigs[inst]? | return none
+  -- The extern's mono signature at those type arguments: each argument has
+  -- exactly its parameter's type.
+  let mut inst := eraseLevels base.type
   for h : i in [:n] do
-    let p := sig.params[i]!.consumeMData
-    if p.isErased || p.isSort || p == mkConst ``lcVoid then continue
-    if sc.isPlaceholder args[i]! then continue
-    if (← norm (sc.argTy args[i]!)) != (← norm p) then return none
+    let .forallE _ d b _ := inst.headBeta | return none
+    match positions.idxOf? i with
+    | some j => inst := b.instantiate1 (eraseLevels typeArgs[j]!)
+    | none =>
+      let p := (← toMonoTypeKeep d).consumeMData
+      unless sc.isPlaceholder args[i]! || p.isErased || p.isSort || p == mkConst ``lcVoid do
+        if (← norm (sc.argTy args[i]!)) != (← norm p) then return none
+      inst := b.instantiate1 anyExpr
   -- The result after the extra arguments, if any.
-  let mut ret := sig.ret
+  let mut ret ← toMonoTypeKeep inst
   for _ in [n:args.size] do
     match ret.consumeMData with
     | .forallE _ _ b _ => ret := b.instantiate1 anyExpr
     | _ => return none
-  -- A binder that already has a precise type keeps it; the instance must
-  -- produce exactly that.
-  unless (← unknown resTy) || (← norm resTy) == (← norm ret) do return none
-  return some inst
+  return some ret
 
 /-! ## Retyping from definitions -/
 
@@ -356,16 +334,14 @@ def applyType? (t : Expr) : Nat → Option Expr
     | .forallE _ _ b _ => applyType? (b.instantiate1 anyExpr) n
     | _ => none
 
-/-- Is `t` an array type? -/
-def isArrayTy (t : Expr) : Bool := t.consumeMData.headBeta.isAppOf ``Array
-
 partial def fwdCode (sc : Scope) : Code .pure → StateT Bool MRetypeM (Code .pure × Scope)
   | .let d k => do
     let mut d := d
-    if let .const f us args h := d.value then
-      if let some inst ← reinstantiate? sc f args d.type then
-        d := { d with value := .const inst us args h }
-        set true
+    if let .const f _ args _ := d.value then
+      if ← unknown d.type then
+        if let some t ← refineTo? d.type (← externResultType? sc f args) then
+          d := { d with type := t }
+          set true
     if ← unknown d.type then
       let candidate ← match d.value with
         | .const f _ args _ =>
@@ -471,12 +447,9 @@ abbrev Uses := Std.HashMap FVarId (Array Expr)
 /-- The precise types that the uses of each variable expect: arguments of
 calls (from the callee's signature) and of constructors (from the field
 types), jump arguments (the join point's parameter types), and closure
-arguments. Arguments of self calls (of `self`) at positions `skip` are not
-counted: those parameter types are assumptions being checked
-(`paramsFromCallers`). -/
+arguments. -/
 partial def collectUses (types : Types) (jps : Std.HashMap FVarId (Array Expr))
-    (c : Code .pure) (acc : Uses) (self : Name := .anonymous) (skip : Array Nat := #[]) :
-    MRetypeM Uses := do
+    (c : Code .pure) (acc : Uses) : MRetypeM Uses := do
   let add (acc : Uses) (a : Arg .pure) (t : Expr) : MRetypeM Uses := do
     let .fvar x := a | return acc
     if ← unknown t then return acc
@@ -493,8 +466,7 @@ partial def collectUses (types : Types) (jps : Std.HashMap FVarId (Array Expr))
             if let some t := fs[i - ci.numParams]? then acc ← add acc args[i] t
       else if let some sig := (← get).sigs[f]? then
         for i in [:min args.size sig.params.size] do
-          unless f == self && skip.contains i do
-            acc ← add acc args[i]! sig.params[i]!
+          acc ← add acc args[i]! sig.params[i]!
     | .fvar g args =>
       let mut t := types.getD g anyExpr
       for a in args do
@@ -502,12 +474,12 @@ partial def collectUses (types : Types) (jps : Std.HashMap FVarId (Array Expr))
         | .forallE _ dom b _ => acc ← add acc a dom; t := b.instantiate1 anyExpr
         | _ => break
     | _ => pure ()
-    collectUses types jps k acc self skip
+    collectUses types jps k acc
   | .jp d k =>
     let jps := jps.insert d.fvarId (d.params.map (·.type))
-    collectUses types jps k (← collectUses types jps d.value acc self skip) self skip
-  | .fun _ k _ => collectUses types jps k acc self skip
-  | .cases cs => cs.alts.foldlM (fun acc alt => collectUses types jps alt.getCode acc self skip) acc
+    collectUses types jps k (← collectUses types jps d.value acc)
+  | .fun _ k _ => collectUses types jps k acc
+  | .cases cs => cs.alts.foldlM (fun acc alt => collectUses types jps alt.getCode acc) acc
   | .jmp j args =>
     let some ps := jps[j]? | return acc
     let mut acc := acc
@@ -552,9 +524,8 @@ def paramScope (d : Decl .pure) : Scope :=
   { types := d.params.foldl (fun m p => m.insert p.fvarId p.type) {} }
 
 /-- Retype the body of a declaration to a local fixpoint; returns the new
-declaration, whether it changed, and the types of all its binders. The
-parameters at positions `skip` carry assumptions (see `collectUses`). -/
-def localRetype (d : Decl .pure) (skip : Array Nat := #[]) : MRetypeM (Decl .pure × Bool × Types) := do
+declaration, whether it changed, and the types of all its binders. -/
+def localRetype (d : Decl .pure) : MRetypeM (Decl .pure × Bool × Types) := do
   let .code c := d.value | return (d, false, {})
   let mut c := c
   let mut any := false
@@ -562,7 +533,7 @@ def localRetype (d : Decl .pure) (skip : Array Nat := #[]) : MRetypeM (Decl .pur
   for _ in [:8] do
     let ((c1, sc), ch1) ← (fwdCode (paramScope d) c).run false
     types := sc.types
-    let uses ← collectUses types {} c1 {} d.name skip
+    let uses ← collectUses types {} c1 {}
     let (c2, ch2) ← (bwdCode uses c1).run false
     c := c2
     if !(ch1 || ch2) then break
@@ -580,14 +551,6 @@ partial def constApps (c : Code .pure) (acc : Array (Name × Array (Arg .pure) �
     constApps k acc
   | .jp d k | .fun d k _ => constApps k (constApps d.value acc)
   | .cases cs => cs.alts.foldl (fun acc alt => constApps alt.getCode acc) acc
-  | _ => acc
-
-/-- Variables of `c` bound to `◾`. -/
-partial def erasedVars (c : Code .pure) (acc : FVarIdSet) : FVarIdSet :=
-  match c with
-  | .let d k => erasedVars k (if d.value matches .erased then acc.insert d.fvarId else acc)
-  | .jp d k | .fun d k _ => erasedVars k (erasedVars d.value acc)
-  | .cases cs => cs.alts.foldl (fun acc alt => erasedVars alt.getCode acc) acc
   | _ => acc
 
 /-- What a declaration returns: the types of the returned values, except the
@@ -615,154 +578,33 @@ partial def returnTypes (env : Environment) (self : Name) (arity : Nat) (types :
     | none => (tys.push (types.getD x anyExpr), inds)
   | _, _, acc => acc
 
-/-- Is `n` the `map` loop of `Array.mapMUnsafe` or `Array.mapFinIdxMUnsafe`
-(an instance of one of Lean's specializations of it, or its `_redArg`
-part)? These are the loops of §2.7 that reinterpret an array. -/
-def isMapLoop (keys : NameMap InstKey) (n : Name) : Bool :=
-  let n := match n with
-    | .str p "_redArg" => p
-    | n => n
-  match keys.find? n with
-  | some k =>
-    let u := userName ((specOrigin? k.decl).getD k.decl)
-    u == `Array.mapMUnsafe.map || u == `Array.mapFinIdxMUnsafe.map
-  | none => false
-
-def isArrayAny (e : Expr) : Bool := e.isAppOfArity ``Array 1 && e.appArg!.consumeMData == anyExpr
-
-/-- Occurrences of `Array lcAny` in `e`. -/
-partial def countArrayAny (e : Expr) : Nat :=
-  if isArrayAny e then 1
-  else match e with
-    | .app f a => countArrayAny f + countArrayAny a
-    | .forallE _ d b _ => countArrayAny d + countArrayAny b
-    | .mdata _ b => countArrayAny b
-    | _ => 0
-
-/-- The element type of the array that a `map` loop returns (see
-`isMapLoop`). The loop replaces the elements of its array parameter one by
-one with `Array.uset` and returns the array when every element has been
-replaced; if every value it stores (other than the `box(0)` placeholder) has
-the same precise type `β`, it returns an `Array β`. The array parameter and
-the arrays derived from it must only be read, written, passed back to the
-loop, returned (possibly inside a constructor, e.g. `some bs`) or jumped
-with; any other use (the array escaping into a closure, say) gives up. -/
-partial def mapLoopElem? (d : Decl .pure) (types : Types) : MRetypeM (Option Expr) := do
-  let .code c := d.value | return none
-  let arrs ← d.params.filterM fun p => return isArrayTy p.type && (← unknown p.type)
-  let some bs := arrs[0]? | return none
-  unless arrs.size == 1 do return none
-  let keys := (← get).keys
-  let env ← getEnv
-  let erased := erasedVars c {}
-  -- The arrays derived from `bs`, to a fixpoint (join-point parameters
-  -- receive them through jumps).
-  let mut chain : FVarIdSet := ({} : FVarIdSet).insert bs.fvarId
-  let mut result : Bool × Array (Option Expr) := (true, #[])
-  for _ in [:4] do
-    let before := chain.size
-    let (chain', ok, stored) := visit env keys erased types d.name c (chain, true, #[])
-    chain := chain'
-    result := (ok, stored)
-    if chain.size == before then break
-  let (ok, stored) := result
-  unless ok do return none
-  let tys := stored.filterMap id
-  let some t := tys[0]? | return none
-  if tys.size != stored.size then return none
-  let n ← norm t
-  for t' in tys do
-    if (← unknown t') || (← norm t') != n then return none
-  return some t
-where
-  /-- One pass over the loop body: extends the chain of derived arrays,
-  checks their uses, and collects the types of the stored values (`none` for
-  a value of unknown type; placeholders are skipped). -/
-  visit (env : Environment) (keys : NameMap InstKey) (erased : FVarIdSet) (types : Types) (self : Name)
-      (c : Code .pure) : FVarIdSet × Bool × Array (Option Expr) → FVarIdSet × Bool × Array (Option Expr)
-    | (chain, ok, stored) =>
-    let inChain (a : Arg .pure) : Bool := match a with
-      | .fvar x => chain.contains x
-      | _ => false
-    match c with
-    | .let d k =>
-      let st := match d.value with
-        | .const f _ args _ =>
-          match (keys.find? f).map (·.decl) with
-          | some ``Array.uset =>
-            -- `Array.uset α a i v h`: only the array argument may be derived.
-            if args.size != 5 || args.zipIdx.any (fun (a, i) => i != 1 && inChain a) then (chain, false, stored)
-            else if inChain args[1]! then
-              let stored := match args[3]! with
-                | .fvar x => if erased.contains x then stored else stored.push (types[x]?.filter (!·.isErased))
-                | _ => stored
-              (chain.insert d.fvarId, ok, stored)
-            else (chain, ok, stored)
-          | some ``Array.uget | some ``Array.usize | some ``Array.size => (chain, ok, stored)
-          | _ =>
-            if f == self || env.isConstructor f || !args.any inChain then (chain, ok, stored)
-            else (chain, false, stored)
-        | .fvar _ args => (chain, ok && !args.any inChain, stored)
-        | .proj _ _ x => (chain, ok && !chain.contains x, stored)
-        | _ => (chain, ok, stored)
-      visit env keys erased types self k st
-    | .jp d k =>
-      -- Parameters that receive a derived array join the chain.
-      let chain := d.params.zipIdx.foldl (fun ch (p, i) =>
-        if jumpsWith d.fvarId i k chain then ch.insert p.fvarId else ch) chain
-      visit env keys erased types self k (visit env keys erased types self d.value (chain, ok, stored))
-    | .fun d k _ =>
-      visit env keys erased types self k (visit env keys erased types self d.value (chain, ok, stored))
-    | .cases cs =>
-      cs.alts.foldl (fun st alt => visit env keys erased types self alt.getCode st)
-        (chain, ok && !chain.contains cs.discr, stored)
-    | _ => (chain, ok, stored)
-  jumpsWith (j : FVarId) (i : Nat) (c : Code .pure) (chain : FVarIdSet) : Bool :=
-    match c with
-    | .jmp j' args => j' == j && (match args[i]? with | some (.fvar x) => chain.contains x | _ => false)
-    | .let _ k => jumpsWith j i k chain
-    | .fun d k _ | .jp d k => jumpsWith j i d.value chain || jumpsWith j i k chain
-    | .cases cs => cs.alts.any fun alt => jumpsWith j i alt.getCode chain
-    | _ => false
-
-/-- Refine a declaration's result type, if unknown: for a `map` loop, from
-the values it stores (`mapLoopElem?`); otherwise from the values it returns,
-when they agree (constructors without fields must belong to the inductive of
-that type). -/
+/-- Refine a declaration's result type, if unknown, from the values it
+returns, when they agree (constructors without fields must belong to the
+inductive of that type). -/
 def refineSignature (d : Decl .pure) (types : Types) : MRetypeM (Decl .pure × Bool) := do
   let .code c := d.value | return (d, false)
   let sig := ((← get).sigs[d.name]?).getD (declSig d)
   unless ← unknown sig.ret do return (d, false)
   let mut cand : Option Expr := none
-  if isMapLoop (← get).keys d.name then
-    if let some β ← mapLoopElem? d types then
-      -- The loop's result type holds its array once, e.g. `Option (Array lcAny)`.
-      let occ := countArrayAny sig.ret
-      if occ == 1 then
-        cand := some (sig.ret.replace fun e => if isArrayAny e then some (mkApp (mkConst ``Array) β) else none)
-  if cand.isNone then
-    let (rets, inds) := returnTypes (← getEnv) d.name d.params.size types c {} (#[], #[])
-    if let some t := rets[0]? then
-      let n ← norm t
-      let mut agree := true
-      for r in rets do
-        if (← norm r) != n then agree := false
-      for ind in inds do
-        unless sameHead t.consumeMData.getAppFn (.const ind []) do agree := false
-      if agree then cand := some t
+  let (rets, inds) := returnTypes (← getEnv) d.name d.params.size types c {} (#[], #[])
+  if let some t := rets[0]? then
+    let n ← norm t
+    let mut agree := true
+    for r in rets do
+      if (← norm r) != n then agree := false
+    for ind in inds do
+      unless sameHead t.consumeMData.getAppFn (.const ind []) do agree := false
+    if agree then cand := some t
   let some t ← refineTo? sig.ret cand | return (d, false)
   let d := withSig d d.params t
   modify fun s => { s with sigs := s.sigs.insert d.name (declSig d) }
   return (d, true)
 
-/-! ## Parameters from call sites -/
+/-! ## Result types from call sites -/
 
 /-- What the call sites in the program's live declarations tell (self calls
-not included, except as below): the argument types per (callee, parameter),
-`none` for a placeholder argument; the parameters that some partial
-application leaves open (`blocked`: they receive whatever the closure is
-applied to); the types of the binders of saturated calls, per callee; and
-which callees are referenced otherwise.
+not included, except as below): the types of the binders of saturated
+calls, per callee, and which callees are referenced otherwise.
 
 A saturated self call whose binder has another type than the declaration's
 result is polymorphic recursion, which Mono sends to the uniform instance
@@ -771,21 +613,18 @@ its binder counts among the results, since the value returned has a
 different type at every depth and no caller's binder type holds for all of
 them (adv2 PrgPoly1). -/
 structure CallSites where
-  args : Std.HashMap (Name × Nat) (Array (Option Expr)) := {}
-  blocked : Std.HashSet (Name × Nat) := {}
   results : Std.HashMap Name (Array Expr) := {}
   /-- Declarations also referenced otherwise than by a saturated call (a
   closure, an over-application), including by themselves. -/
   escapes : NameSet := {}
 
-def callSites (decls : Array (Decl .pure)) (types : Array Types) : MRetypeM CallSites := do
+def callSites (decls : Array (Decl .pure)) : MRetypeM CallSites := do
   let mut cs : CallSites := {}
   let st ← get
   for h : i in [:decls.size] do
     let d := decls[i]
     let .code c := d.value | continue
     unless st.live.contains d.name do continue
-    let sc : Scope := { types := types[i]!, erased := erasedVars c {} }
     for (f, args, resTy) in constApps c #[] do
       if !st.codeDecls.contains f then continue
       let some sig := st.sigs[f]? | continue
@@ -794,80 +633,18 @@ def callSites (decls : Array (Decl .pure)) (types : Array Types) : MRetypeM Call
         if args.size == sig.params.size && (← norm resTy) != (← norm sig.ret) then
           cs := { cs with results := cs.results.insert f ((cs.results.getD f #[]).push resTy) }
         continue
-      for j in [:sig.params.size] do
-        match args[j]? with
-        | some a =>
-          let t := if sc.isPlaceholder a then none else some (sc.argTy a)
-          cs := { cs with args := cs.args.insert (f, j) ((cs.args.getD (f, j) #[]).push t) }
-        | none => cs := { cs with blocked := cs.blocked.insert (f, j) }
       if args.size == sig.params.size then
         cs := { cs with results := cs.results.insert f ((cs.results.getD f #[]).push resTy) }
   return cs
 
-/-- Do all self calls of `d` pass arguments of the types `hyp` assigns to
-parameter positions? -/
-def selfCallsAgree (d : Decl .pure) (types : Types) (hyp : Array (Nat × Expr)) : MRetypeM Bool := do
-  let .code c := d.value | return true
-  let sc : Scope := { types, erased := erasedVars c {} }
-  for (f, args, _) in constApps c #[] do
-    if f != d.name then continue
-    for (j, t) in hyp do
-      let some a := args[j]? | return false
-      if sc.isPlaceholder a then continue
-      if (← norm (sc.argTy a)) != (← norm t) then return false
-  return true
-
-/-- Parameters that every caller passes at the same precise type: assume
-that type, retype the body, and keep the assumption if the self calls agree
-(then every value reaching the parameter has the type). -/
-def paramsFromCallers (decls : Array (Decl .pure)) (types : Array Types) :
-    MRetypeM (Array (Decl .pure) × Array Types × Bool) := do
-  let sites ← callSites decls types
+/-- Result types: when every saturated call binds the result at the same
+precise type, the value returned has it (callers would unbox right away;
+the unboxing moves to the callee's returns, typically once into a constant
+instead of at every read of it). -/
+def resultsFromCallers (decls : Array (Decl .pure)) : MRetypeM (Array (Decl .pure) × Bool) := do
+  let sites ← callSites decls
   let mut decls := decls
-  let mut types := types
   let mut changed := false
-  for i in [:decls.size] do
-    let d := decls[i]!
-    unless d.value matches .code _ do continue
-    let mut hyp : Array (Nat × Expr) := #[]
-    for h : j in [:d.params.size] do
-      let p := d.params[j]
-      -- (A borrow annotation, `mdata`, does not change the type.)
-      let pt := p.type.consumeMData
-      unless ← unknown pt do continue
-      if sites.blocked.contains (d.name, j) then continue
-      let ts := ((sites.args.getD (d.name, j) #[]).filterMap id)
-      let some t := ts[0]? | continue
-      -- Only types holding an erased array (`Array lcAny`, `Option (Array
-      -- lcAny)`, …) or receiving a typed reference: code over a dynamically
-      -- typed value (`Dynamic.get?`) casts it to other types in branches
-      -- that a runtime check rules out, and at a precise parameter type
-      -- those casts could not be translated.
-      unless countArrayAny pt > 0 || hasTypedRef t do continue
-      let n ← norm t
-      let mut agree := true
-      for t' in ts do
-        if (← unknown t') || (← norm t') != n then agree := false
-      if !agree then continue
-      if let some t ← refineTo? pt (some t) then hyp := hyp.push (j, t)
-    if hyp.isEmpty then continue
-    let oldSig := (← get).sigs[d.name]?
-    let params := hyp.foldl (fun ps (j, t) => ps.set! j { ps[j]! with type := t }) d.params
-    let d' := withSig d params (oldSig.map (·.ret) |>.getD (declSig d).ret)
-    modify fun s => { s with sigs := s.sigs.insert d.name (declSig d') }
-    let (d'', _, types'') ← localRetype d' (hyp.map (·.1))
-    if ← selfCallsAgree d'' types'' hyp then
-      decls := decls.set! i d''
-      types := types.set! i types''
-      changed := true
-    else
-      modify fun s => { s with sigs := match oldSig with
-        | some sig => s.sigs.insert d.name sig
-        | none => s.sigs.erase d.name }
-  -- Result types: when every saturated call binds the result at the same
-  -- precise type, the value returned has it (callers would convert right
-  -- away; the conversion moves to the callee's returns, typically once
-  -- into a constant instead of at every read of it).
   for i in [:decls.size] do
     let d := decls[i]!
     unless d.value matches .code _ do continue
@@ -887,59 +664,19 @@ def paramsFromCallers (decls : Array (Decl .pure)) (types : Array Types) :
       modify fun s => { s with sigs := s.sigs.insert d.name (declSig d) }
       decls := decls.set! i d
       changed := true
-  return (decls, types, changed)
-
-/-- The optional parts of Stage 3 (installed by Opt/Registry.lean). -/
-structure Stage3Config where
-  /-- Map loops whose element representation changes, split into a loop
-  over the source and a loop pushing to the result (Opt/SplitMapLoops):
-  the declarations, their binder types and the entry point's roots give
-  the new declarations, the split instances recorded in
-  `MRetypeState.splitDecls`. Plain: none; such a loop runs on an array of
-  `Box`es. -/
-  splitMapLoops : Array (Decl .pure) → Array Types → Array Name → MRetypeM (Array (Decl .pure)) :=
-    fun decls _ _ => pure decls
-  /-- Updates of containers whose element type depends on a value
-  (`Array lcAny`) run on the uniform representation instead of converting
-  the whole container there and back (Opt/UniformUpdates), after the
-  fixpoint. Plain: none; each such use at a precise type converts. -/
-  uniformUpdates : Array (Decl .pure) → MRetypeM (Array (Decl .pure)) := pure
-
-/-- An instance of `ST.Prim.mkRef` at a precise element type `α` returns a
-`typedRef α` (Lean's mono type of a reference is `lcAny`): the references
-it creates, and the binders they flow into by the rules above, get a typed
-representation (translation plan §5.1). -/
-def typeMkRef (d : Decl .pure) : MRetypeM (Decl .pure) := do
-  unless d.value matches .extern _ do return d
-  let some k := (← get).keys.find? d.name | return d
-  unless k.decl == ``ST.Prim.mkRef do return d
-  let some α := k.typeArgs[1]? | return d
-  let α ← toMonoTypeKeep α
-  if (← unknown α) || α.isErased then return d
-  let ret := (splitArrows d.type d.params.size).2.consumeMData
-  let args := ret.getAppArgs
-  unless (ret.isAppOf ``ST.Out || ret.isAppOf ``EST.Out) && args.back? == some anyExpr do return d
-  let d := withSig d d.params (mkAppN ret.getAppFn (args.pop.push (mkTypedRef α)))
-  modify fun s => { s with sigs := s.sigs.insert d.name (declSig d) }
-  return d
+  return (decls, changed)
 
 /-- Stage 3 on all mono declarations (bounded global fixpoint). `roots` are
-the declarations the entry point calls (`main`, startup work). Returns the
-declarations, including extern instances created by re-instantiation, and
-the instance keys extended with theirs. -/
-def retypeMono (stage2 : Stage2Config) (stage3 : Stage3Config) (table : RelevanceTable) (decls : Array (Decl .pure))
-    (keys : NameMap InstKey) (roots : Array Name) : CoreM (Array (Decl .pure) × NameMap InstKey) := do
-  let mut st : MRetypeState := { keys }
+the declarations the entry point calls (`main`, startup work). -/
+def retypeMono (table : RelevanceTable) (decls : Array (Decl .pure))
+    (keys : NameMap InstKey) (roots : Array Name) : CoreM (Array (Decl .pure)) := do
+  let mut st : MRetypeState := {}
   let mut bodies : NameMap (Code .pure) := {}
   for d in decls do
     st := { st with sigs := st.sigs.insert d.name (declSig d) }
-    match d.value with
-    | .code c =>
+    if let .code c := d.value then
       st := { st with codeDecls := st.codeDecls.insert d.name }
       bodies := bodies.insert d.name c
-    | .extern _ =>
-      if let some k := keys.find? d.name then
-        if k.dicts.isEmpty then st := { st with instances := st.instances.insert (k.decl, k.typeArgs) d.name }
   -- Reachable declarations.
   let mut live : NameSet := {}
   let mut work := roots.toList
@@ -953,46 +690,21 @@ def retypeMono (stage2 : Stage2Config) (stage3 : Stage3Config) (table : Relevanc
       unless live.contains f do work := f :: work
   st := { st with live }
   let act : MRetypeM (Array (Decl .pure)) := do
-    let mut decls ← decls.mapM typeMkRef
-    let mut types : Array Types := decls.map fun _ => {}
-    -- The fixpoint, then the split of `map` loops (whose split instances
-    -- type the values they read, so a second fixpoint can type what those
-    -- flow into, e.g. a closure capturing them).
-    for round in [:2] do
-      for _ in [:8] do
-        let mut changed := false
-        for i in [:decls.size] do
-          let d := decls[i]!
-          unless d.value matches .code _ do continue
-          let (d, ch1, ts) ← localRetype d
-          let (d, ch2) ← refineSignature d ts
-          decls := decls.set! i d
-          types := types.set! i ts
-          changed := changed || ch1 || ch2
-        let (decls', types', ch3) ← paramsFromCallers decls types
-        decls := decls'
-        types := types'
-        if !(changed || ch3) then break
-      if round == 1 then break
-      let before := (← get).splitDecls.size
-      let split ← stage3.splitMapLoops decls types roots
-      if (← get).splitDecls.size == before then break
-      let added := (← get).splitDecls
-      modify fun s => { s with
-        live := added.foldl (fun l d => l.insert d.name) s.live
-        codeDecls := added.foldl (fun l d => l.insert d.name) s.codeDecls }
-      -- Each declaration kept takes its binder types by name, through a
-      -- name ↦ index map built once (a `findIdx?` per declaration was
-      -- quadratic: about half of Stage 3 on a program with many
-      -- declarations). The first index of a name, as `findIdx?` gave.
-      let mut index : Std.HashMap Name Nat := {}
-      for h : i in [:decls.size] do
-        index := index.insertIfNew decls[i].name i
-      types := split.map fun d => (index[d.name]?).map (types[·]!) |>.getD {}
-      decls := split
-    decls ← stage3.uniformUpdates decls
-    return decls ++ (← get).newExterns
-  let (decls, st') ← (act.run { table, stage2 }).run st
-  return (decls, st'.keys)
+    let mut decls := decls
+    for _ in [:8] do
+      let mut changed := false
+      for i in [:decls.size] do
+        let d := decls[i]!
+        unless d.value matches .code _ do continue
+        let (d, ch1, ts) ← localRetype d
+        let (d, ch2) ← refineSignature d ts
+        decls := decls.set! i d
+        changed := changed || ch1 || ch2
+      let (decls', ch3) ← resultsFromCallers decls
+      decls := decls'
+      if !(changed || ch3) then break
+    return decls
+  let (decls, _) ← (act.run { table, keys }).run st
+  return decls
 
 end LeanToReussir

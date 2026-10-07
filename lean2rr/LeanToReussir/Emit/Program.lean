@@ -2,7 +2,6 @@ import Lean
 import LeanToReussir.Emit.Entry
 import LeanToReussir.PassConfig
 import LeanToReussir.Outline
-import LeanToReussir.ArrayLits
 import LeanToReussir.MonoRetype
 
 /-!
@@ -68,6 +67,36 @@ def valueGenericPreludeFns (prelude : String) : Std.HashMap String Nat := Id.run
         unless sig.contains '<' || sig.contains '[' do
           out := out.insert name (gens.splitOn ",").length
     unless line.all Char.isWhitespace do prev := line
+  return out
+
+/-- The prelude's generic functions whose result type is one of their type
+parameters, with the index of the first parameter declared at that type
+parameter: `fn l2r_runtime_mark_persistent<T>(a : T) -> T` ↦ 0. The result
+of such a call has the type of that argument (`lowerExternCall`, a `BaseIO`
+primitive). -/
+def genericRetParams (prelude : String) : Std.HashMap String Nat := Id.run do
+  let mut out : Std.HashMap String Nat := {}
+  for line in prelude.splitOn "\n" do
+    let line := line.trimLeft
+    let line := if line.startsWith "pub fn " then (line.drop 4).toString else line
+    if line.startsWith "fn " then
+      let rest := (line.drop 3).toString
+      let name := (rest.takeWhile fun c => c.isAlphanum || c == '_').toString
+      let after := (rest.drop name.length).toString
+      if after.startsWith "<" then
+        let gensStr := ((after.drop 1).takeWhile (· != '>')).toString
+        let gens := gensStr.splitOn "," |>.map (·.trim)
+        let sig := (after.drop (gensStr.length + 2)).toString
+        if sig.startsWith "(" then
+          let params := ((sig.drop 1).takeWhile (· != ')')).toString
+          let ps := if params.trim.isEmpty then [] else params.splitOn ","
+          let pTys := ps.map fun p => match p.splitOn ":" with | [_, t] => t.trim | _ => ""
+          match sig.splitOn ") -> " with
+          | _ :: r :: _ =>
+            let r := ((r.splitOn " [{").head!.splitOn " {").head!.splitOn ";" |>.head!.trim
+            if gens.contains r then
+              if let some i := pTys.findIdx? (· == r) then out := out.insert name i
+          | _ => pure ()
   return out
 
 /-- For the prelude functions of `valueGenericPreludeFns`: which parameters
@@ -243,8 +272,8 @@ makes an `n`-element literal (`#[…]`, `[…]`, a `ByteArray`) a chain of `n`
 closed terms, `_closed_k := push _closed_(k-1) e_k`, and rrc compiles
 about 80 functions per second: a 100000-element array literal took ten
 minutes to build as 100000 functions calling each other. Spliced, the
-literal is one straight-line body (cut into parts by `Outline`, its runs of
-`Nat` literals made tables by `ArrayLits`), evaluated as before: once, where
+literal is one straight-line body (cut into parts by `Outline`), evaluated
+as before: once, where
 the constant using it is evaluated, in the same order. Code that is not
 straight-line, and chains that compute more than literals before reading
 their previous step (`spliceable`), are left as they are. -/
@@ -282,9 +311,8 @@ def entryCallees (mainInst errStr : Name) (startup : Array StartupStep) : Array 
 /-- A lowered program before its text is assembled: the prelude, the
 generated types (`typeItems`, the enums of function types `fnItems`, the
 `Box` enum, the step enums of the recursive functions `Outline` cut) and
-functions, the string literals, the functions kept out of rrc's MLIR
-inliner (`anchoredFns`), and the tables of `Array Nat` literals
-(`ArrayLits`). -/
+functions, the string literals and the functions kept out of rrc's MLIR
+inliner (`anchoredFns`). -/
 structure LoweredProgram where
   prelude : String
   preludeFns : Std.HashSet String
@@ -295,7 +323,6 @@ structure LoweredProgram where
   strLits : Array String
   anchored : Std.HashSet String := {}
   stepItems : Array RR.Item := #[]
-  natTables : Array (Array UInt64) := #[]
 
 /-- What passes over the generated functions see of the program. -/
 def LoweredProgram.rrProgram (p : LoweredProgram) : RRProgram :=
@@ -306,12 +333,6 @@ def LoweredProgram.rrProgram (p : LoweredProgram) : RRProgram :=
 (`Opt/SinkProj`: projections sunk into the branches that use them). -/
 def LoweredProgram.runRRPasses (cfg : PassConfig) (p : LoweredProgram) : LoweredProgram :=
   { p with fns := cfg.rrPasses.foldl (fun fns pass => pass p.rrProgram fns) p.fns }
-
-/-- Runs of pushed small `Nat` literals (a spliced `Array Nat` literal) as
-tables (`ArrayLits`; core). -/
-def LoweredProgram.literalTables (p : LoweredProgram) : LoweredProgram :=
-  let (fns, tables) := ArrayLits.natArrLits p.fns
-  { p with fns, natTables := p.natTables ++ tables }
 
 /-- Deep and long tail paths and `let` values cut into functions, for rrc
 (`Outline`; core), with the step enums of the recursive functions cut. Run
@@ -325,8 +346,7 @@ def LoweredProgram.outline (p : LoweredProgram) : LoweredProgram :=
 /-- The program text: the prelude, the generated types, the functions
 (`#[transform_anchor]` on those kept out of rrc's MLIR inliner: a transform
 anchor stays a function for transform scripts, lean2rr has none, and LLVM
-still inlines it; see `anchoredFns`), the string literal table and the
-`Array Nat` literal tables. -/
+still inlines it; see `anchoredFns`) and the string literal table. -/
 def LoweredProgram.render (p : LoweredProgram) : String := Id.run do
   let mut out := p.prelude ++ "\n// ---- generated types ----\n\n"
   for it in p.typeItems do out := out ++ it.render ++ "\n"
@@ -340,13 +360,12 @@ def LoweredProgram.render (p : LoweredProgram) : String := Id.run do
       | _ => false
     out := out ++ (if anchor then "#[transform_anchor]\n" else "") ++ f.render ++ "\n"
   unless p.strLits.isEmpty do out := out ++ strLitTable p.strLits
-  unless p.natTables.isEmpty do out := out ++ ArrayLits.natLitTable p.natTables
   return out
 
 /-- Stage 4: lower every declaration of the (retyped) program `decls`, the
-entry point and what they need (translation plan §5), with the relevance
-`table` Stage 3 used and the entry point's callees `roots`. -/
-def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) (mainInst errStr : Name)
+entry point and what they need (translation plan §5), with the entry
+point's callees `roots`. -/
+def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
     (startup : Array StartupStep) (roots : Array Name) (decls : Array (Decl .pure)) (keys : NameMap InstKey)
     (externRefusals : NameMap String := {}) :
     CoreM LoweredProgram := do
@@ -387,6 +406,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
   let exports ← (exportMap.run' {config := {}} : CoreM _)
   let ioErrorBuilders := ioErrorBuilderSyms.map fun sym => (exports.get? sym).bind byDecl.find?
   let valueGenericFns := valueGenericPreludeFns prelude
+  let preludeRetArg := genericRetParams prelude
   let valueGenericCls := valueGenericClosureParams prelude
   -- Closed terms used once, by another constant, are not cached; those
   -- read by straight-line code are spliced into it.
@@ -394,21 +414,26 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
   let decls := spliceChainConsts decls uncachedConsts
   let casts := programCasts (← getEnv) keys decls
   let createsTasks := programCreatesTasks (← getEnv) keys decls
+  -- Rule 4: where the program's function values complete, along its flow,
+  -- for the erased domains of function types (`ErasedDomains`).
+  let inits := startup.filterMap fun | .init decl inst => some (decl, inst) | _ => none
+  let erased ← flowAnalysis decls casts.isSome inits
   if (← IO.getEnv "L2R_DEBUG").isSome then
     IO.eprintln s!"lean2rr: program casts: {match casts with | some n => s!"yes ({n})" | none => "no"}"
     IO.eprintln s!"lean2rr: program creates tasks: {createsTasks}"
-  let ctx : LowerCtx := { table, decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
+    IO.eprintln s!"lean2rr: rule 4: {erased.eMarks.size} skeletons with a completion at an erased domain, {erased.reached.size} function types reached by a completion"
+  let ctx : LowerCtx := { decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
                           externRefusals,
-                          preludeRets, preludeParams, ioErrorBuilders, valueGenericFns, valueGenericCls,
+                          preludeRets, preludeParams, preludeRetArg, ioErrorBuilders, valueGenericFns, valueGenericCls,
                           uncachedConsts, preludeReplacements := cfg.preludeReplacements,
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
-                          cachePlaceholders := cfg.cachePlaceholders, natArrays := cfg.natArrays,
+                          cachePlaceholders := cfg.cachePlaceholders, boxedConsts := cfg.boxedConsts,
                           programCasts := casts.isSome, createsTasks, callCycles := callCycles decls,
-                          convLiveness := cfg.convLiveness }
+                          convLiveness := cfg.convLiveness, erased }
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
-    -- `Box` always exists (with at least the unit variant, `box(0)`): types
+    -- `Box` always exists (with at least the unit payload, `box(0)`): types
     -- may mention it even when nothing is ever boxed.
-    let _ ← boxVariant .unit
+    boxInit
     -- Once-cells of `initialize` constants (read by `calleeOf`).
     for st in startup do
       if let .init decl _ := st then
@@ -429,9 +454,9 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
           unless ← finishFnValues do break
     finish
     -- What the functions generated next depend on: whether the program has
-    -- stream cells, and its task types.
-    let lateKey : LowerM (Option Nat × Option RR.Ty × Nat) := do
-      return (← getPart (·.stdSlots), ← getPart (·.stdStreamTy), ← getPart (·.taskTags.size))
+    -- stream cells, and whether it registers tasks with the runtime.
+    let lateKey : LowerM (Option Nat × Option RR.Ty × Bool) := do
+      return (← getPart (·.stdSlots), ← getPart (·.stdStreamTy), ← getPart (·.taskTagged))
     let key ← lateKey
     -- Only now is every use of the standard streams lowered (function
     -- values' targets included), so the diagnostics writer and the stream
@@ -441,7 +466,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
     let ctxFns ← stdContextFns
     modify fun s => { s with fns := s.fns ++ ctxFns }
     finish
-    -- Every task type is known now: the functions running queued tasks.
+    -- Every task registration is lowered now: the functions running queued
+    -- tasks.
     let disp ← taskDispatchFns
     modify fun s => { s with fns := s.fns ++ disp }
     if cfg.convLiveness then
@@ -450,8 +476,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
         finishLive
         -- A helper reached only from the functions just generated (the
         -- task dispatch applies the tasks' closures) is generated only
-        -- now, and its arms can add a use of the standard streams or a
-        -- task type: those functions are generated again until they are
+        -- now, and its arms can add a use of the standard streams or a task
+        -- registration: those functions are generated again until they are
         -- stable (their trampolines stay).
         if (← lateKey) != key then
           key ← lateKey
@@ -469,6 +495,14 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
       unless (← finishFnValues) || (← finishPersistFns) do break
     return (← fnTypeItems, ← anchoredFns)
   let ((fnItems, anchored), st) ← (act.run ctx).run {}
+  if (← IO.getEnv "L2R_DEBUG").isSome then
+    -- By skeleton (the types of one skeleton can differ in their flow).
+    let env ← getEnv
+    let bySkel : Std.HashMap Skel Bool := st.keptErasedOf.fold (init := {}) fun m e b =>
+      let k := skelOf env e
+      m.insert k (b || m.getD k false)
+    let kept := bySkel.fold (fun n _ b => if b then n + 1 else n) 0
+    IO.eprintln s!"lean2rr: erased domains: {kept} skeletons kept, {bySkel.size - kept} phantom ({st.keptErasedOf.size} types)"
   -- Externs the program reaches that lean2rr cannot use, reported here,
   -- all at once, naming each one, rather than by rrc as unknown functions
   -- of the generated code (translation plan §5.8 and §10, "Not supported"):
@@ -529,7 +563,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (table : RelevanceTable) 
       let (items, st) ← (fnTypeItems.run ctx).run st
       pure (items, st)
     else pure (fnItems, st)
-  let boxItem := RR.Item.enum boxName false (st.boxVariants.map fun (t, v) => (v, #[t]))
+  let (boxItem, st) ← (boxTypeItems.run ctx).run st
   return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := liveFns st.fns, strLits := st.strLits, anchored }
 
 end LeanToReussir

@@ -145,12 +145,11 @@ relative to `lean2rr/` unless they start with `scripts/`.
   emitted function by name (`fnPos`, brought up to date lazily by
   `syncFnIndex`), and every "is helper X already emitted" check asks it
   (`hasFn`); a test build's conversion counter has a flag
-  (`convTickEmitted`), generated `[value]` structs a reverse map
-  (`tupleKeys`), and function-value variants a count (`fnVariantCount`).
-  The other lists that grow with the program and are searched before
+  (`convTickEmitted`), and generated `[value]` structs a reverse map
+  (`tupleKeys`). The other lists that grow with the program and are searched before
   each addition have a set or map beside them: `Box` variants
   (`boxVariantOf`), unboxing targets (`unboxTargetSet`,
-  `unboxArrTargetOf`, `fnUnboxTargetSet`), application functions
+  `fnUnboxTargetSet`), application functions
   (`fnApplySet`) and function-value conversions (`fnConvSet`); the lists
   keep the order the output follows.
   A function replaced by another of the same name leaves a tombstone
@@ -159,13 +158,7 @@ relative to `lean2rr/` unless they start with `scripts/`.
   (`liveFns`), so the items come out in the order that removing the old
   function and appending the new one gave. The state is read with
   `getPart f` (`modifyGet fun s => (f s, s)`), not `(← get).f`, wherever
-  the read is followed by an update. `boxCastConv` saves the state for its
-  rollback without `fns`, its index and `typeItems`, and cuts those back
-  to their sizes instead; it stops with an internal error if the probe
-  replaced or removed a function or a type (`fnEdits`, `typeEdits`). The
-  other fields stay shared with the saved state (the probe's first update
-  of each copies it; none of them grows with every emitted item).
-  `structConv` takes a function out of `convsInProgress` once it is
+  the read is followed by an update. `structConv` takes a function out of `convsInProgress` once it is
   emitted. Each function name appears at most once among the functions
   in `fns` (tombstones aside): every generator asks `hasFn` or a cache of
   its own first, or uses a fresh name; `syncFnIndex` stops with an
@@ -176,32 +169,16 @@ relative to `lean2rr/` unless they start with `scripts/`.
   about 160000; round 9 RV9S-02). The arrays were copied because the
   state was shared: Lean's compiler computes a pure projection of
   `(← get)` where it is used, and keeps the state alive (shared) until
-  then, across later `modify`s; a state saved for a rollback shares every
-  field likewise, so the probe's first update of each copied it. The
-  output is byte-identical.
+  then, across later `modify`s. The output is byte-identical.
 - **Where:** `LeanToReussir/LowerBase.lean`: `LowerState`, `getPart`,
   `fnTombstone`, `liveFns`, `syncFnIndex`, `hasFn`, `replaceFn`,
-  `dropFns`, `lazyState`, `boxVariant`, `unboxFn`, `unboxArrFn`;
+  `dropFns`, `lazyState`, `boxPayload`, `unboxFn`;
   `Lower/Conv.lean`:
-  `boxCastConv`, `structConv`, `countConversion`; `Lower/FnValues.lean`:
+  `structConv`, `countConversion`; `Lower/FnValues.lean`:
   `applyCall`, `fnConvFn`, `unboxFnFn`; `Lower/Finish.lean`:
   `finishPersistFns`; `Emit/Program.lean`: `lowerProgram`. Test
-  `RtConvProbeRollback` (an undone probe, then a kept one, until review
-  CLR-01 made a cast that needs a wrapper convert: a probe is now undone
-  only for a cast without a conversion, and no test reaches that).
-- **Remove only if:** never.
-
-### Stage 3 finds a declaration's binder types by name through a map
-
-- **What:** After the split of `map` loops, each declaration of the new
-  list takes the binder types of the declaration of the same name in the
-  old list. Stage 3 builds a map from each name to its position in the old
-  list once (the first position of a name, as a search from the start
-  gives) and looks every name up in it.
-- **Why:** A search of the old list for each declaration (`findIdx?`) was
-  quadratic in the number of declarations: about half of Stage 3's time on
-  a program that imports `Cslib.Init` and prints one line (Stage 3 67 s
-  before, 36 s after, single indicative runs). The output is
-  byte-identical.
-- **Where:** `LeanToReussir/MonoRetype.lean`: `retypeMono`.
+  `RtConvProbeRollback` (two casts whose conversions generate the same
+  helpers inside unboxing functions). The rollback of a cast's probe
+  (`boxCastConv`) is gone: no cast that `boxCastable` accepts registers a
+  helper and then fails (review of rule 1, simplicity finding 1).
 - **Remove only if:** never.

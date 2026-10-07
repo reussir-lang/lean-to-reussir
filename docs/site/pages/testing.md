@@ -19,7 +19,7 @@ accepted ones.
 
 **Expectation files.** Some tests show an intended difference of plan §10:
 a Lean runtime bug that lean2rr does not reproduce, or a trace that prints
-twice (`RtCseFnResult`). Such a test pins both outputs of each stream
+twice (`RtCseApart`). Such a test pins both outputs of each stream
 that differs: `NAME.native.out` (or `.err`, `.code`) for the native run,
 and `NAME.l2r.out` (or `.err`, `.code`) for the lean2rr run. Each run is
 compared with its own file, so the test fails if either output changes.

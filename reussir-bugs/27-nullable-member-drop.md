@@ -2,18 +2,18 @@
 
 **Kind:** missing feature (a gap in [issue 13](13-long-list-drop.md)'s
 bounded-depth frees). Not a bug: Reussir never promised frees of bounded
-depth; patch 0027 extends the feature of issue 13's patches to `Nullable`
+depth; patch 27-a extends the feature of issue 13's patches to `Nullable`
 members.
 
 ## Summary
 
 **Kind:** missing feature (the bounded-depth frees of
 [issue 13](13-long-list-drop.md) did not cover `Nullable` links). **Status:**
-patched (0027), applied in `./reussir` (`l2r-local` cc8e5aa5); does not
+patched (27-a), applied in `./reussir` (`l2r-local` cc8e5aa5); does not
 affect lean2rr (it does not use `Nullable`).
 
 **Verdict: a gap in issue 13's patches, not caused by them.** With patches
-0013-0015, drop glue releases a member box of a shared record through the
+13-a to 13-c, drop glue releases a member box of a shared record through the
 thread's pending stack, so a long chain is freed in a loop. A member of type
 `Nullable<shared record>` was released by a plain decrement, which recurses
 into the next link's glue: a chain linked through `Nullable` takes a stack
@@ -51,7 +51,7 @@ released.
 
 **Expected.** Prints `1`.
 
-**Actual on ef922049 with 0013-0015** (91da4f80): the program aborts,
+**Actual on ef922049 with 13-a to 13-c** (91da4f80): the program aborts,
 "thread 'main' has overflowed its stack" (SIGABRT; gdb shows
 `drop_in_place::<A>` recursing), at `-O default`, `-O aggressive` and with
 lean2rr's flags. The same chain linked through a plain shared enum
@@ -66,7 +66,7 @@ its stack (SIGABRT)`.
 expands each `ref.drop` in drop glue. For a plain shared record member,
 `rewriteDropRc` releases the box through `emitDeferredRelease` when it is
 inside drop glue (`kDropGlueAttr`) and the box is deferrable: when the
-count is 1 the box goes onto the thread's pending stack (patch 0014), and
+count is 1 the box goes onto the thread's pending stack (patch 13-b), and
 the outermost glue drains the stack in a loop. `rewriteDropNullable`, the
 pattern for a `Nullable` member, dispatches on null and, in the non-null
 arm, always emitted a plain `rc.dec`. Its expansion calls the box's drop
@@ -82,7 +82,7 @@ the patch. No workaround needed.
 ## Patch
 
 Patch file
-[`patches/0027-l2r-local-bug-27-defer-a-nullable-member-s-release-i.patch`](patches/0027-l2r-local-bug-27-defer-a-nullable-member-s-release-i.patch)
+[`patches/27-a-defer-nullable-member.patch`](patches/27-a-defer-nullable-member.patch)
 (`l2r-local` commit `9ea68905`, the version amended after review finding
 RV8R-01; applied in `./reussir`, `l2r-local` cc8e5aa5). Two changes in
 `AcquireDropExpansion.cpp`:
@@ -141,13 +141,13 @@ adds the `Nullable` case.
 
 **Review.** The gap was found by review rv7/p22, round 2 (RV7P-05,
 pre-existing, low: lean2rr does not use `Nullable`). Review rv8/reussir
-checked the first version of 0027: the deferral condition is identical to
+checked the first version of 27-a: the deferral condition is identical to
 `rewriteDropRc`'s; `Nullable` of a `[value]` record, a closure, an FFI
 object, a `field` member or an atomic rc is handled as before; chains
 through `Nullable<shared enum>` with nullary arms (1.5M links) are right.
 It found one low-severity defect, RV8R-01: the release order reversal
 described in item 2 (memory safety and stack depth unaffected). The
-amended 0027 makes the reviewer's suggested fix (a `Nullable` member can
+amended 27-a makes the reviewer's suggested fix (a `Nullable` member can
 be the last member, released after the free).
 
 **Effect on lean2rr.** None (no `Nullable` in lean2rr's output).

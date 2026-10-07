@@ -104,11 +104,33 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
 ### `main`'s argument list reads `argv` once
 
 - **What:** `main`'s `List String` is built by a generated loop from the
-  last argument, over `argv` read once and kept (`leanrt::rt::args`).
+  last argument, over `argv` read once and kept (`leanrt::rt::args`); each
+  string is boxed into the list's head field (`List`'s one type holds a
+  `Box`).
 - **Why:** Reading `argv` per argument was quadratic (round 6, 1362da1).
-- **Where:** `Emit/Entry.lean`: `lowerEntry` (`l2r_mk_args`);
+- **Where:** `Emit/Entry.lean`: `lowerEntry` (`l2r_mk_args`, a generated
+  function, not raw text, so that the head is boxed as everywhere else);
   `runtime/prelude.rr`: `l2r_argv`, `l2r_argc`;
   `runtime/leanrt/src/rt.rs`: `args`.
+- **Remove only if:** never.
+
+### The raw text of the entry point reads IO results through generated functions
+
+- **What:** The entry point and the startup chain are raw text that
+  matches IO results (`EST.Out`, one type, whose `ok` and `error` fields
+  are `Box`es). They read the fields through generated functions: the
+  exit code of a `main : IO UInt32` through `l2r_main_code` (unboxes the
+  `UInt32`), an uncaught error's text through `l2r_err_string` (unboxes
+  the `IO.Error`, then Lean's `IO.Error.toString`), and an `initialize`
+  constant's value is stored into its once-cell at the constant's own
+  type by `l2r_init_put_<slot>` (the type its reads take it at,
+  `Callee.initConst`).
+- **Why:** The text cannot box or unbox: it hard-coded the field types, so
+  with `Box` fields the exit code was always 0 and the stored constant had
+  another type than its reads.
+- **Where:** `Emit/Entry.lean`: `lowerEntry`; `Emit/Startup.lean`:
+  `ioResultOf` (the payload's own type too), `errStringFn`, `initPutFn`,
+  `startupChain`.
 - **Remove only if:** never.
 
 ### Native Lean's startup descriptors are opened by an ELF constructor

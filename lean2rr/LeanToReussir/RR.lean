@@ -32,14 +32,27 @@ partial def Ty.enc : Ty → String
   | .fn d c => "F" ++ d.enc ++ c.enc
   | .cls d c => "C" ++ d.enc ++ c.enc
 
-/-- The generated enum representing Lean function values of type `t`. -/
-def fnTypeName (t : Ty) : String := "L2RFn_" ++ t.enc
+/-- The domain of a function type at an erased Lean domain (`◾`) that has
+no parameter at run time (rule 4, Lower's `lowerType`): `.fn phantom c`
+is the Lean domain `◾ → c`, represented as `c` itself. It keeps the
+type's Lean positions visible to the code that applies or wraps function
+values; it is never rendered (`Ty.rt` removes it). -/
+def Ty.phantom : Ty := .named "L2RErased"
+
+/-- The type as it exists at run time: every phantom domain
+(`Ty.phantom`) removed, at any depth. -/
+partial def Ty.rt : Ty → Ty
+  | .fn d c => if d == .phantom then c.rt else .fn d.rt c.rt
+  | .app n args => .app n (args.map Ty.rt)
+  | .cls d c => .cls d.rt c.rt
+  | t => t
+
+/-- The generated enum representing Lean function values of type `t`: one
+per run-time type (`Ty.rt`). -/
+def fnTypeName (t : Ty) : String := "L2RFn_" ++ t.rt.enc
 
 partial def Ty.render : Ty → String
   | .named n => n
-  -- An enumeration stored in an array as its index (Lower's
-  -- `arrayStorage`): the index type, `L2RIx<u8, T>` renders as `u8`.
-  | .app "L2RIx" #[w, _] => w.render
   | .app n args => s!"{n}<{", ".intercalate (args.toList.map Ty.render)}>"
   | t@(.fn ..) => fnTypeName t
   -- The arrow is right-associative; parenthesize a function domain.
@@ -84,7 +97,9 @@ mutual
     | block (b : Block)
 
   /-- One match arm: a constructor pattern with field binders
-  (`none` binds `_`), or a wildcard when `ctor = none`. -/
+  (`none` binds `_`), or a wildcard when `ctor = none`, or an integer
+  literal pattern when `ty` is empty (`ctor` is the literal; a match on an
+  integer, `RR.Arm.lit`). -/
   structure Arm where
     ty : String
     ctor : Option String
@@ -96,6 +111,9 @@ mutual
     lets : Array (String × Option Ty × Expr)
     result : Expr
 end
+
+/-- An arm of a `match` on an integer: literal `n`. -/
+def Arm.lit (n : Nat) (body : Block) : Arm := { ty := "", ctor := some (toString n), binders := #[], body }
 
 /-- Parse a type as written in the prelude: `name` or `name<T, …>`. -/
 partial def parseTy (s : String) : Option Ty :=
@@ -219,6 +237,7 @@ mutual
     let out := match a.ctor with
       | none => out ++ "_"
       | some c =>
+        if a.ty.isEmpty then out ++ c else
         let out := out ++ a.ty ++ "::" ++ c
         if a.binders.isEmpty then out
         else joinTo (out ++ "(") a.binders ", " (fun b o => o ++ (match b with | some b => b | none => "_")) ++ ")"

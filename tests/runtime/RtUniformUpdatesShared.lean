@@ -1,14 +1,16 @@
 /-! Runtime test: a uniform column (`data : Array ty.denote`, mono
 `Array lcAny`) passed at every step to a helper taking `Array Nat` that is
 also called with a typed array elsewhere (review of uniform-updates round 3,
-rv9/containers/c02review/round3 C03R-01). `uniformParams` makes a parameter
-uniform only when every call site passes a uniform array, so this helper
-keeps `Array Nat`, and the column is converted to it at each call: linear
+rv9/containers/c02review/round3 C03R-01). `uniformParams` made a parameter
+uniform only when every call site passed a uniform array, so this helper
+kept `Array Nat`, and the column was converted to it at each call: linear
 work per step, quadratic in the loop, where natively the call is O(1)
-(20000 steps: 0.79 s, 0.00 s natively). A known difference (plan §10,
-"Structural conversions"; a copy of the helper with the parameter uniform
-for the uniform call sites would remove it). The output is checked here,
-not the time. -/
+(20000 steps: 0.79 s, 0.00 s natively). Since rule 1 (one representation
+per `Array α`) the helper takes the one array type, and the call passes
+the column as it is. The output is checked here, not the time;
+tests/runtime/alloc-check.sh (RtUniformUpdatesShared.alloc) checks that
+the bytes allocated grow as native's do (blowup audit BA-12; it passes
+since rule 1). -/
 inductive Ty | nat | str
 
 @[reducible] def Ty.denote : Ty → Type

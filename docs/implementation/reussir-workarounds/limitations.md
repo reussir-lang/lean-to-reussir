@@ -1,7 +1,7 @@
 # Reussir limitations that shape lean2rr's output
 
-Not bugs: documented Reussir behaviour (issue 3, intended), a missed
-optimization (issue 7), a missing feature (issue 13), or properties of its
+Not bugs: a cost of documented Reussir behaviour (issue 3), missed
+optimizations (issues 7 and 36), a missing feature (issue 13), or properties of its
 FFI and LLVM pipeline, that lean2rr works with. In each case rrc's output
 is correct; a local patch for one of these issues is an optimization or a
 feature, not a fix. Plan
@@ -12,17 +12,19 @@ files, `runtime/` and `scripts/` from the repository root.
 ### Only some types cross Reussir's FFI boundary
 
 - **What:** Runtime functions receive and return only integers, floats,
-  `bool`, opaque runtime types and shared records. lean2rr therefore: wraps
-  other values in a one-field `ElemBox` for arrays, once-cells and extern
-  type-parameter arguments; stores enumerations in arrays as indices;
+  `bool`, opaque runtime types and shared records. lean2rr therefore: puts
+  `Box`es in arrays, references and thunk and task cells (one
+  representation each); wraps other values in a one-field `ElemBox` for
+  once-cells and the type-parameter arguments of externs that do not store
+  them in arrays;
   represents unit-like values as `L2RUnit`; gives runtime helpers over
   Lean-defined types the constructors as arguments; and instantiates
   plain-Reussir generic prelude functions (`dbgTrace`, `panic`, …) at the
   value types themselves, since they never cross the boundary.
 - **Why:** `[value]` records, closures and `unit` parameters do not cross
   it (probe results). Reussir's `unit` is result-only.
-- **Where:** `LowerBase.lean`: `isBoundaryTy`, `arrayElemTy`,
-  `ixStorage?`; `Emit/Program.lean`: `valueGenericPreludeFns`;
+- **Where:** `LowerBase.lean`: `isBoundaryTy`, `cellStorage`;
+  `Emit/Program.lean`: `valueGenericPreludeFns`;
   `Lower/ExternCall.lean`: `lowerExternCall`; see
   [../representations/arrays.md](../representations/arrays.md),
   [../representations/records.md](../representations/records.md#unit-like-values-are-the-value-enum-l2runit),
@@ -89,18 +91,22 @@ files, `runtime/` and `scripts/` from the repository root.
   [../ownership.md](../ownership.md#reference-sets-store-the-new-value-before-releasing-the-old-one).
 - **Remove only if:** see the linked entry.
 
-### Rust allocations are 16-aligned (issue 3, intended)
+### Rust allocations are 16-aligned (issue 3, a cost)
 
 - **What:** The runtime allocates strings, arrays and big numbers with
   `mi_malloc`/`mi_realloc` directly, not through Rust's global allocator.
 - **Why:** Reussir's global allocator raises every Rust allocation to
-  16-byte alignment, which sends it and later frees in its pages down
-  mimalloc's aligned paths; intended behaviour, so calling `mi_malloc` is
-  the right answer
+  16-byte alignment (intended) through mimalloc's aligned path. Without
+  Reussir patch 03-a, a size that is not a multiple of 16 could be moved
+  inside a larger block, and every later free in that block's page took
+  mimalloc's slow path (up to 5% of a program's instructions, varying
+  from run to run). 03-a rounds the size up instead. The runtime's own
+  objects need only 8-byte alignment: `mi_malloc` keeps their blocks
+  smaller either way
   ([03-global-alloc-align.md](../../../reussir-bugs/03-global-alloc-align.md);
   98f27d2).
 - **Where:** `runtime/leanrt/src/alloc.rs`.
-- **Remove only if:** never.
+- **Remove only if:** never (the blocks would grow to multiples of 16).
 
 ### Token reuse picks decrements that never free (issue 7, missed optimization)
 
@@ -110,11 +116,11 @@ files, `runtime/` and `scripts/` from the repository root.
   constructor without fields in its arm, so the scrutinee is not kept
   alive by a use there.
 - **Why:** A missed optimization, not a bug: rrc's output is correct, only
-  slower (allocations where a cell could be reused). Patch 0007 (an
+  slower (allocations where a cell could be reused). Patch 07-a (an
   optimization, applied) covers some shapes (`UInt64` keys) but not a call
   before the branch (`Nat` and `String` comparisons), which the passes do
   ([07-phantom-reuse-donor.md](../../../reussir-bugs/07-phantom-reuse-donor.md)).
-  0007 stays because 0009 uses its helper.
+  07-a stays because 09-a uses its helper.
 - **Where:** [../control-flow/cases.md](../control-flow/cases.md).
 - **Remove only if:** Reussir's token reuse handles the call-before-branch
   shape; then measure with the passes off.
@@ -125,7 +131,13 @@ files, `runtime/` and `scripts/` from the repository root.
   all, are kept small: each costs less than 45 in LLVM's inline cost model
   once its `_ffi` function is inlined into rrc's import trampoline. An
   array read is three textures (`l2r_array_give`, `l2r_view_size`,
-  `l2r_view_take`) instead of one.
+  `l2r_view_take`) instead of one. With the one-word `Box`,
+  `l2r_view_take<LAny>` costs more than 45: without Reussir patch 36-a,
+  `RtReadsDeep`'s `Array` reads stay calls. 36-a marks a texture whose
+  cost is at most LLVM's threshold for an ordinary call site (225, 250 at
+  `-O aggressive`) and its trampoline `alwaysinline`; 36-b leaves out
+  textures with a stack frame over 1024 bytes and textures that cannot
+  return.
 - **Why:** A missed optimization, not a bug: rrc defines the trampoline
   without an inline attribute, so LLVM inlines it into a caller by its
   ordinary cost model, at a call site it judges cold (deep in branches)
@@ -135,17 +147,18 @@ files, `runtime/` and `scripts/` from the repository root.
   ([36-trampoline-inline.md](../../../reussir-bugs/36-trampoline-inline.md)).
 - **Where:** [../ownership.md](../ownership.md#reads-give-their-reference-up-first-for-a-view);
   `runtime/prelude.rr` (the read textures).
-- **Remove only if:** rrc marks the trampolines for inlining; then the
-  read could be one texture again.
+- **Remove only if:** every Reussir that lean2rr supports has 36-a and
+  36-b; then
+  the read could be one texture again (measure the reads first).
 
 ### Drop glue recursed once per cell (issue 13, missing feature)
 
 - **What:** The runtime frees its containers through the per-thread
-  pending stack that patch 0014 adds (`reussir_rt::drop`), and needs it to
-  build; 0013 and 0015 complete it.
+  pending stack that patch 13-b adds (`reussir_rt::drop`), and needs it to
+  build; 13-a and 13-c complete it.
 - **Why:** A missing feature, not a bug: Reussir never promised frees of
   bounded depth (its drop glue recurses, as Rust's does), and Lean frees
-  iteratively. Patches 0013 to 0015 (applied) add the feature
+  iteratively. Patches 13-a to 13-c (applied) add the feature
   ([13-long-list-drop.md](../../../reussir-bugs/13-long-list-drop.md)).
 - **Where:** [../ownership.md](../ownership.md#containers-free-through-the-threads-pending-stack-in-leans-order).
 - **Remove only if:** never (required).
@@ -182,7 +195,7 @@ files, `runtime/` and `scripts/` from the repository root.
   `--no-reuse-across-call` (with the bug-4 retry); `--no-pack-record-members`
   (bug 2); `--no-closure-wpd` (issue 10, a cost); `L2R_RRC_FLAGS` appends
   flags for experiments. rrc runs with `REUSSIR_FFI_CACHE_DIR` set, for
-  patch 0066's texture cache (issue 35, a cost,
+  patch 35-a's texture cache (issue 35, a cost,
   [build-time.md](build-time.md#issue-35-cost-every-texture-is-compiled-again-on-every-build)).
   `leanrt` is built per Reussir checkout (`L2R_REUSSIR`) and cached by a
   hash of its sources, under a file lock for concurrent drivers; rustc

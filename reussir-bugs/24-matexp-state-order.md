@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (non-reproducible builds). **Status:** patched (0026),
+**Kind:** bug (non-reproducible builds). **Status:** patched (24-a),
 applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug.** Reussir's LLVM pass that turns linear recurrences into
@@ -83,7 +83,7 @@ differs between builds. No workaround needed.
 ## Patch
 
 Patch file
-[`patches/0026-l2r-local-bug-24-order-the-matrix-exponentiation-sta.patch`](patches/0026-l2r-local-bug-24-order-the-matrix-exponentiation-sta.patch)
+[`patches/24-a-matexp-state-order.patch`](patches/24-a-matexp-state-order.patch)
 (`l2r-local` commit `d3d6688b`; applied in `./reussir`, `l2r-local`
 cc8e5aa5). The state PHIs an expression uses are added in the order of the
 loop header's PHIs:

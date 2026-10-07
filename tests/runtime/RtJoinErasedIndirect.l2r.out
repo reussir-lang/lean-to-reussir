@@ -1,0 +1,8 @@
+q1 false 0 = 101
+q2 false 0 = 112
+q3 false 0 = 103
+q6 false 0 = 102
+q1 true 7 = 0
+q2 true 7 = 12
+q3 true 7 = 3
+q6 true 7 = 0

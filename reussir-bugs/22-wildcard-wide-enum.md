@@ -1,11 +1,11 @@
 # 22. A wildcard arm over a wide enum costs N^3 code
 
-**Kind:** cost (build time). Not a bug: rrc's output is correct; patch 0030
+**Kind:** cost (build time). Not a bug: rrc's output is correct; patch 22-a
 is an optimization.
 
 ## Summary
 
-**Kind:** cost. **Status:** patched (0030, a build-time optimization),
+**Kind:** cost. **Status:** patched (22-a, a build-time optimization),
 applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also works around
 it (it releases held wide values out of line in wildcard arms).
 
@@ -45,7 +45,7 @@ analogue: 1.2, 9.3, 65, 444 s. The `beq` function grows from 939 MLIR lines
 at entry to 24k after TokenReuse at N = 10 (3.3k to 155k at N = 20); MLIR's
 SCCP then takes about size^2.4 ([issue 11](11-sccp-call-graph.md)'s class).
 
-With 0030 (the pure-Reussir analogue, `rrc -O aggressive` to an executable,
+With 22-a (the pure-Reussir analogue, `rrc -O aggressive` to an executable,
 loaded machine): N = 10: 1.7 s -> 0.6 s; N = 20: 15.0 s -> 1.8 s; N = 30:
 136 s -> 3.7 s; N = 40: 444 s (before, from above) -> 7.8 s; the same
 output (`100`). `run.sh` does not run this repro (its generator is run by
@@ -64,19 +64,20 @@ one out-of-line call (`l2r_sink`, `#[transform_anchor]` so the inliner does
 not put the expansion back; Lower/Code, `sinkWildcardHeld`; a required
 part in the registry): BEq N = 40 27 s, DecidableEq N = 30 21 s.
 
-lean2rr keeps `l2r_sink` with 0030 applied (README policy: workarounds
+lean2rr keeps `l2r_sink` with 22-a applied (README policy: workarounds
 stay, so that lean2rr also works with an unpatched Reussir).
 
 Of the possible improvements (one region for the constructors a wildcard
 covers; no releases on paths that end in a panic; outlining the release of
-a wide enum in the first expansion phase), 0030 does the first.
+a wide enum in the first expansion phase), 22-a does the first.
 
 ## Patch
 
 Patch file
-[`patches/0030-l2r-local-bug-22-merge-the-copies-of-a-wildcard-arm-.patch`](patches/0030-l2r-local-bug-22-merge-the-copies-of-a-wildcard-arm-.patch)
+[`patches/22-a-merge-wildcard-copies.patch`](patches/22-a-merge-wildcard-copies.patch)
 (`l2r-local` commit `bc4aca4b`, applied in `./reussir`; `l2r-local` head
-`cc8e5aa5`), rebased onto 0018-0027 and 0040 for the final stack, with the
+`cc8e5aa5`), rebased onto the patches from 08-a to 40-a of the series for the final
+stack, with the
 change of review finding RV8C-03 (below).
 
 **The change.** A canonicalization pattern on `reussir.record.dispatch`,
@@ -133,7 +134,7 @@ scrutinee's type, hence the boxing exception.
 - Smaller functions reach the inliner's size cap sooner: on lean2rr's
   StateT tower built without its inlining workaround
   ([issue 20](20-statet-tower.md)), rrc's peak memory went from 1.8 GB to
-  2.4 GB with this patch alone; 0034 (issue 20) brings the series to 1.0 GB.
+  2.4 GB with this patch alone; 20-a (issue 20) brings the series to 1.0 GB.
   With the workaround: unchanged.
 - On the final stack (all 34 patches): Reussir's lit suite, 645 tests, 564
   passed, 81 unsupported, none failed; lean2rr's classic corpus builds and
@@ -154,8 +155,8 @@ finding, RV8C-03 (low, performance only): a merged arm that rebuilds the
 scrutinee's type lost exact-size reuse (`_ => E::b{k, k, k}`: reuse
 decisions {ensure 1, realloc 2, allocate 2} became {realloc 1}, 1500 more
 allocator events per run). Resolved in the final patch: regions that box
-the dispatched type are not merged. RV8C-02 (the rebase onto 0018-0027)
-did not concern 0030, which applied cleanly.
+the dispatched type are not merged. RV8C-02 (the rebase onto the patches from
+08-a to 27-a of the series) did not concern 22-a, which applied cleanly.
 
 **Effect on lean2rr.** Build time only: wildcard arms of lean2rr's output
 (derived `BEq`/`DecidableEq` on wide inductives, and any `match` with a

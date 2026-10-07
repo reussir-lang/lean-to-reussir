@@ -10,10 +10,10 @@ lean2rr rejects the program ([program-externs.md](program-externs.md)).
 Where lean2rr's own layouts and Lean's object layouts conflict, lean2rr's
 win. The C FFI work is kept on an unmerged branch, described below so it
 can be resumed; nothing of it is in the translator. The one piece merged
-is the single-block layout of strings and `Array Nat`/`Int` with Lean's
-header sizes (mem-layout, 7a784e1), which lean2rr uses for its own sake
+is the single-block layout of strings and arrays with Lean's header sizes
+(mem-layout, 7a784e1), which lean2rr uses for its own sake
 ([strings](../representations/strings.md#a-string-keeps-its-character-count),
-[arrays](../representations/arrays.md#array-nat-and-array-int-store-one-word-per-element)).
+[arrays](../representations/arrays.md#an-array-is-one-block)).
 
 ### Branch `ffi-c`: linking and calling the program's C (parked at ffac4f1)
 

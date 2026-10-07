@@ -1,0 +1,2 @@
+# a hot loop of n pushes with a cold packing branch, n = 100000 and 400000: natively 2 allocations per push
+100000 | 400000 | 4 2000

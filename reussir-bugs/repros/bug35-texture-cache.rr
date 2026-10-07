@@ -7,7 +7,7 @@
 // Command (run.sh bug35): two builds, both with REUSSIR_FFI_CACHE_DIR set to
 // one new directory, through a rustc wrapper that counts texture compiles:
 //   rrc THIS -o OUT --emit executable -O aggressive
-// Expected (patch 0066): the second build compiles no texture; both print 42.
+// Expected (patch 35-a): the second build compiles no texture; both print 42.
 // Reussir ef922049: the second build compiles all 3 textures again (rrc has
 // no cache and ignores the variable); both print 42.
 #[ffi(import)]

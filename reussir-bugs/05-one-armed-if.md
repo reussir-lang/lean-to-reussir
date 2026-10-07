@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0005), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** bug. **Status:** patched (05-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 TokenReuse matches cells freed by releases ("tokens") with later
 allocations of the same size. A token that no allocation takes must be
@@ -11,7 +11,7 @@ allocation inside the then-branch takes it, the pass frees it at the end
 of the else-branch instead. When the `if` had no else-branch (MLIR's
 canonical form of a one-armed `scf.if`), the pass looked up the first
 block of an empty region, got a dangling reference, and rrc crashed with
-SIGSEGV (sometimes it hung). Patch 0005 creates the missing else block,
+SIGSEGV (sometimes it hung). Patch 05-a creates the missing else block,
 holding only an `scf.yield`, and frees the token there.
 
 ## Symptom and repro
@@ -128,7 +128,7 @@ stays.
 ## Patch
 
 Patch file
-[`patches/0005-l2r-local-bug-5-free-tokens-on-the-else-path-of-an-s.patch`](patches/0005-l2r-local-bug-5-free-tokens-on-the-else-path-of-an-s.patch)
+[`patches/05-a-one-armed-if-tokens.patch`](patches/05-a-one-armed-if-tokens.patch)
 (`l2r-local` commit `0f02db2c`, applied in `./reussir`; `l2r-local` head cc8e5aa5).
 
 **New helper `getOrCreateExitBlock(region)`:**

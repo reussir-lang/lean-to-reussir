@@ -25,7 +25,7 @@ each declaration, its module and its symbol, and why:
   declaration (`Lean.decodeLossyUTF8`) is in a module the program does not
   import: the message names the module (`Lean.Shell`), to import if that
   declaration is public (reviews REB-03, REB-10; it is not:
-  `RtExternPrivate`); but not for `l2r_nat_repr` and `lean_natarr_push`,
+  `RtExternPrivate`); but not for `l2r_nat_repr` and `lean_array_uswap`,
   functions of lean2rr's own prelude that no module of Lean's library
   declares (review REB-07).
 Native Lean compiles the program (`lean -c`); it would need C code for the
@@ -108,7 +108,7 @@ opaque decodeLossy : @& ByteArray → String
 @[extern "l2r_nat_repr"]
 opaque myRepr : Nat → String
 
-@[extern "lean_natarr_push"]
+@[extern "lean_array_uswap"]
 opaque np : Array Nat → Nat → Array Nat
 
 def main : IO Unit := do

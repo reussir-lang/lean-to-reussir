@@ -17,7 +17,7 @@ nesting depth: one copy of `D(K)` is 2^K retains. The in-line form is there
 on purpose: it exposes each member's retain and release to the inc/dec
 cancellation that runs next. Found by the review of the patch for
 [bug 19](19-cell-of-value-record.md), which had the same shape in the
-outlined acquire glue; that part is fixed by that patch (0023).
+outlined acquire glue; that part is fixed by that patch (19-a).
 
 ## Symptom and repro
 
@@ -43,8 +43,8 @@ module, before LLVM).
 About 2x per level. `run.sh` prints `issue 25   REPRODUCES  --emit
 mlir-llvm: K = 8: 7341 lines, K = 10: 28875 lines (3.93x for two more
 levels)`. The review measured the same shape without the FFI print
-(`rv7/p22/x/u12.rr`, rv7/p22 round 1, on a build without 0031) at 16 s and
-4.7 GB; the final stack's 208 MB at K = 12 is probably patch 0031
+(`rv7/p22/x/u12.rr`, rv7/p22 round 1, on a build without 17-a) at 16 s and
+4.7 GB; the final stack's 208 MB at K = 12 is probably patch 17-a
 ([issue 17](17-long-nat-block.md)), which removed the quadratic memory of the
 SCF lowering: the code is as large as before.
 
@@ -70,7 +70,7 @@ against a later release of the same value. It dates from upstream 4af21eb9
 
 The outlined acquire glue (`acquire_in_place`) had the same in-line
 expansion in its body, so it was exponential too; the patch for
-[bug 19](19-cell-of-value-record.md) (0023, `callMemberGlue`) makes it call
+[bug 19](19-cell-of-value-record.md) (19-a, `callMemberGlue`) makes it call
 the members' glue instead. The first phase is unchanged.
 
 ## lean2rr

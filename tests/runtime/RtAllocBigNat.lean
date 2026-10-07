@@ -18,9 +18,9 @@ be reserved and give the empty array (lean-runtime's LB-37, a lifted limit;
 `NAME.l2r.out`), where native ends as above (`NAME.native.out`);
 `replicate` ends as natively.
 The `.pipe` runs one allocation per process: the allocator and the size
-come from the command line. `Array Nat` and `Array Int` have their own
-representation in lean2rr (one word per element), so they are separate
-cases. -/
+come from the command line. `Array Nat` and `Array Int` are separate
+cases: they once had their own representation in lean2rr (one word per
+element); with rule 1 they are arrays of boxes like every `Array α`. -/
 
 def main (args : List String) : IO Unit := do
   let n := args[1]!.toNat!

@@ -11,14 +11,16 @@ start with `runtime/`.
 
 - **What:** `ptrAddrUnsafe x` takes `x` in its own representation (it is
   not converted for the call) and answers: for a heap value (a record, a
-  function value, a `Box`, a string, an array, a reference, a thunk or
-  task, a runtime handle) its cell's address, whatever its count (a
-  nullary constructor of a shared enum: its immediate); for a `Nat` or
+  function value, a string, an array, a reference, a thunk or task, a
+  runtime handle) its cell's address, whatever its count (a nullary
+  constructor of a shared enum: its immediate); for a `Box` (the one-word
+  `LAny`) its payload's address, or an immediate's own word, which is
+  native's boxed scalar (`LAny::addr`); for a `Nat` or
   `Int` its word, which is native Lean's (the boxed scalar `2n+1` when
   small, else the big number's pointer; [nat-int.md](nat-int.md)); for
   `UInt8/16/32`, `Char`, `Bool` or an enumeration the boxed scalar's word
   `2n+1`; for `Unit` and erased values in typed code `1` (in uniform code
-  an erased value is the boxed unit, which answers its `Box` cell); for
+  an erased value is the boxed unit, the word `1`, native's `box(0)`); for
   `UInt64`, `Float`, `Float32` their bits; for a `[value]` struct its
   field's; for a value of a type `addrOf` does not know, a number
   answered only once.
@@ -38,13 +40,23 @@ start with `runtime/`.
   received back inline: 66edbfb), `l2r_addr_word`, `l2r_addr_nat`,
   `l2r_addr_int`, `l2r_addr_fresh`; `runtime/leanrt/src/lib.rs`:
   `fresh_addr`. Tests `RtPtrSound`, `RtPtrAddr`.
-- **Remove only if:** never. Answers that differ from native (a converted
-  value is a new object; two boxings are two cells; equal `UInt64`s and
-  small numbers are `ptrEq`) are plan §9's list. A temporary can reuse the
+- **Remove only if:** never. Answers that differ from native (a value
+  converted by a cast is a new object; equal `UInt64`s,
+  `Float`s and small numbers are `ptrEq`, also through a generic function,
+  which lean2rr instantiates at the type: two `Float`s compared by
+  `ptrEq` on `α` are natively two new boxes, `false`, adversarial
+  finding 4) are plan §9's list. Two boxings of one constant are one cell
+  (`boxed-consts`), as natively (`_boxed_const_N`) within one module:
+  native Lean caches its boxed constants per module (`cacheAuxDecl` in
+  `ExplicitBoxing`), lean2rr one cell per constant for the whole program,
+  so `ptrEq` on the boxings of one constant from two modules answers
+  `true` here and `false` natively; in the body of a constant lean2rr
+  boxes in line (a new cell each time, natively the module's cell). A
+  temporary can reuse the
   cell of one that has died: `ptrAddrUnsafe` as a function value applied
   at another representation, the parameter of a non-inlined function given
-  a converted argument, a polymorphic function value that boxes its
-  argument.
+  an argument converted by a cast, a polymorphic function value that boxes
+  a `Float` or another value boxed in a cell.
 
 ### `ST.Ref.ptrEq` stays real identity
 
@@ -57,7 +69,10 @@ start with `runtime/`.
 - **What:** `isExclusiveUnsafe` answers `false`, `lean_is_scalar` answers
   `false`, `shareCommon` is the identity, `ShareCommon.Object.eq`/`hash`
   compare addresses, and `dbgTraceIfShared` reads the cell's count, which
-  conversions and lean2rr's own copies can make differ from native.
+  conversions and lean2rr's own copies can make differ from native. A
+  shared big number is not reported (natively it is), and a task that
+  one reference holds is not reported (natively a task from `Task.spawn` is
+  multi-threaded, and so reported as shared).
 - **Why:** lean2rr's objects have no Lean layout to compare byte by byte;
   answering "shared" only makes such code take its general path.
 - **Where:** `runtime/prelude.rr`: `lean_is_exclusive_obj`,

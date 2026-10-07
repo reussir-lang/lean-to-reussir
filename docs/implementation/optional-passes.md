@@ -18,10 +18,8 @@ and passes").
 |---|---|---|---|
 | `field-order` | record fields by decreasing alignment, no padding | none needed: every access goes through the constructor layout | [records](representations/records.md#fields-are-ordered-by-decreasing-alignment) |
 | `value-structs` | a structure with one relevant field is a `[value]` struct | not when the field's type is being translated (no type contains itself by value) | [records](representations/records.md#one-field-structures-are-value-structs) |
-| `nat-arrays` | `Array Nat`/`Array Int` as one-word `LNatArr`/`LIntArr` | none needed: every array extern has a `natarr`/`intarr` counterpart | [arrays](representations/arrays.md#array-nat-and-array-int-store-one-word-per-element) |
-| `split-map-loops` | a `map` loop that changes the element representation writes a new array | only loops of Lean's exact shape (`loopShape?`, `splitCode` fails otherwise): derived arrays used only at the loop index, entered at index 0, never captured | [arrays](representations/arrays.md#maps-that-change-the-element-representation-write-a-new-array) |
-| `uniform-updates` | an update or read of a container whose element type depends on a value (`Array lcAny`) runs on the uniform array, boxing one element, instead of converting the whole array there and back; a cons stored at `List lcAny` built there | an `Array` extern only (they do not depend on their type arguments); only when the call receives a uniform value it would convert, its other arguments need at most a box, and a uniform container result goes back to a uniform position and its other uses expect that type or a precise one it converts to there (greatest fixpoint over chains and join points' parameters, whose jumps may pass precise arrays, converted at the jump); constructor applications likewise, without chains; a parameter that every call site passes a uniform array, if the body then uses it only uniformly | [arrays](representations/arrays.md#updates-of-a-uniform-container-run-on-it-uniform-updates) |
 | `placeholder-cache` | placeholders that would allocate built once, in a once-cell | only heap placeholders; a placeholder is never inspected | [placeholders](representations/placeholders.md#placeholders-that-allocate-are-built-once) |
+| `boxed-consts` | a constant whose boxing allocates boxed once, in a once-cell (native Lean's `_boxed_const`) | only a variable bound to a declaration without parameters that runs once (cached) or cannot trace or panic (`cheap-consts`) and whose value is not a literal that boxes as an immediate (`constIsImmediate`), or to a `UInt64` literal from 2^63, at a type whose boxing can allocate (`boxAllocates`), outside the body of a declaration without parameters (`inConstBody`: it runs once); a constant is pure, so one box does as well as a new one | below |
 | `float-lits` | float literals folded to their bits at compile time | literal arguments only (the functions are pure and total); work bound: exponent ≤ 2000, mantissa (or `Float.ofNat`'s argument) at most 4096 bits | below |
 | `cheap-consts` | constants of small literals recomputed at each use | `isCheapConst`: unboxed types only, every `Nat`/`Int` small (`Nat` literals and `Nat.succ` < 2^63, `Int.ofNat`/`Int.negSucc` of `int32` values), other constructors, total scalar conversions, other cheap constants; no strings | below |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code | none needed: the same strings (unary calls only) | [nat-int](representations/nat-int.md#natrepr-of-0127-shares-one-string-per-number) |
@@ -33,6 +31,59 @@ and passes").
 | `sink-proj` | structure projections sunk into the branches that use them | the projection is unused later in the block and in the condition, and no binder clashes; applies only where some branches use it while another keeps the structure whole | [cases](control-flow/cases.md#structure-projections-move-into-the-branches-that-use-them-sink-proj) |
 | `fresh-rebuild` | an arm returning a fresh matched value returns it rebuilt | the value is freshly built (whole-program analysis); the arm binds every field and only returns it | [cases](control-flow/cases.md#fresh-values-returned-whole-are-rebuilt-fresh-rebuild) |
 | `conv-liveness` | unboxing, application and conversion helpers generated only for what live code reaches; unreachable functions dropped | none needed for soundness: an arm left out matches a variant that no live code builds, so no value of it exists at run time; every identifier of raw text, of the prelude and of atoms is a root, every arm of other matches counts, and a variant that text names counts as built | [liveness](conversions/liveness.md) |
+
+### Constants are boxed once (`boxed-consts`)
+
+- **What:** When a variable bound to a constant is boxed (`boxOf`, the
+  box branch of `tryCoerce`), and boxing its type can allocate
+  (`boxAllocates`: a `Float`, a `UInt64` or `i64` word, a `[value]`
+  struct of one, a value in an `ElemBox`; not an immediate: `UInt8`…
+  `UInt32`, `Char`, `Bool`, `Float32`, an enumeration, Lean's `Int8`…
+  `Int32`, which are `[value]` structs of `u8`…`u32`), the box is built
+  once and kept in a once-cell, the accessor `l2r_boxed_N` (`boxedConst`;
+  one per constant and type, `cafAccessor` without the walk for tasks). A
+  constant is a declaration of the program without parameters (a
+  constant or closed term cached in a once-cell, or one `cheap-consts`
+  recomputes, which cannot trace or panic; not a closed term evaluated
+  where it is used, `uncachedConsts`, which a second call would run
+  again; not a constant whose value is a literal that boxes as an
+  immediate, `constIsImmediate`: `def k : UInt64 := 77` is boxed in line,
+  which LLVM folds, where a once-cell read is a load, a test and a copy)
+  or a `UInt64`/`USize` literal from 2^63; `lowerCode` records the
+  variables bound to one (`closedLetValue`, `LowerState.closedLets`). Not
+  in the body of a declaration without parameters (`inConstBody`, set by
+  `lowerDecl`): that body runs once, so a once-cell there saves no
+  allocation and costs a slot and two functions per constant (a table
+  constant of 600 distinct big `UInt64` literals went from 1159 to 2359
+  functions).
+- **Why:** Native Lean does the same (`ExplicitBoxing`,
+  `isExpensiveConstantValueBoxing`: an auxiliary constant
+  `_boxed_const_N`). The default of `a[i]!` is a constant
+  (`instInhabitedFloat`, a structure's `Inhabited` instance); boxed at
+  every read, an `Array Float` read allocated a 16-byte cell per read
+  (adversarial review of the dependent-type branch, finding 2: 4 × 40000
+  reads, 160046 allocations, natively 11079 with its startup's 11000; with
+  the pass 47). A named constant or closed term, or a `UInt64` literal
+  from 2^63, pushed or stored n times is one cell, as natively. A `Float`
+  literal written in a loop (`a.push 0.25`) is no constant: it is
+  computed there, natively too (Lean extracts no closed term for it), and
+  boxed at each push on both sides. A constant is pure, so one box does
+  as well as a new one; two boxings of one constant are one cell
+  (`ptrEq`), as natively within one module (native Lean caches its boxed
+  constants per module, `cacheAuxDecl`; lean2rr has one cell per constant
+  for the whole program; plan §9, identity). Test `RtDepFloatArrayAlloc` (`.alloc`: `get!`,
+  `getD`, `modify`, `set!`, a structure's default, constants and literals
+  pushed, at two sizes). A closed term
+  evaluated where it is used (`uncachedConsts`) is left out: the box's
+  call ran it a second time, and a trace in it printed twice (test
+  `RtDepBoxedClosedOnce`).
+- **Where:** `Lower/Conv.lean`: `boxOf`, `boxedConst`; `Lower/Code.lean`:
+  `closedLetValue`, `constIsImmediate`, the `let` loop of `lowerCode`,
+  `lowerDecl`; `LowerBase.lean`: `boxAllocates`, `LowerState.closedLets`,
+  `boxedConstFns`, `inConstBody`, `LowerCtx.boxedConsts`;
+  `Opt/BoxedConsts.lean`.
+- **Remove only if:** the pass is off (each box of a constant is built
+  where it is used).
 
 ### Float literals are folded to their bits (`float-lits`)
 

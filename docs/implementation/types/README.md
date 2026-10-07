@@ -14,7 +14,9 @@ and [§4](../../translation-plan.md#4-stage-3--check-and-recover-lost-types).
   that keep the set of instances and types finite.
 - [lean-passes.md](lean-passes.md): Stage 2, Lean's mono pipeline with
   lean2rr's copies of three passes and two passes not run.
-- [type-recovery.md](type-recovery.md): Stage 3's rules for types mono lost.
+- [type-recovery.md](type-recovery.md): Stage 3's rules for types mono lost,
+  and the parameters of type `lcErased` that receive data (a Lean
+  compiler bug, retyped `lcAny` after Stage 1 and after Stage 2).
 - [uniform-types.md](uniform-types.md): `lcAny`, relevance, Lean's
   uniform-representation library code, and the "can cast" fact.
 

@@ -1,11 +1,11 @@
 # 7. Token reuse picks decrements that can never free
 
 **Kind:** missed optimization. Not a bug: rrc's output is correct; patch
-0007 is an optimization.
+07-a is an optimization.
 
 ## Summary
 
-**Kind:** missed optimization. **Status:** patched (0007), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also
+**Kind:** missed optimization. **Status:** patched (07-a), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also
 works around it.
 
 **Verdict: missed optimization, not a bug.** The output is correct.
@@ -13,11 +13,11 @@ works around it.
 the release by design (its comment: the release may be conditional or the
 box may escape), and TokenReuse documents its choice of donor as a
 heuristic. lean2rr's own workaround (`lazy-fields`) already gives native
-speed on the shapes found. 0007 is an optimization extension; it stays
-because 0009 (a real use-after-free fix, [bug 9](09-duplicate-bound-member.md))
+speed on the shapes found. 07-a is an optimization extension; it stays
+because 09-a (a real use-after-free fix, [bug 9](09-duplicate-bound-member.md))
 uses the helper it adds (`consumesFusedMember`). Whether lean2rr still
-gains from 0007 with `lazy-fields` on is not measured; if it does not, 0009
-should be rebased without it and 0007 dropped.
+gains from 07-a with `lazy-fields` on is not measured; if it does not, 09-a
+should be rebased without it and 07-a dropped.
 
 A binary-search-tree insert that returns the matched node unchanged for an
 equal key, `t` instead of `Node{l, x, r}`, ran about 6x slower than the
@@ -27,7 +27,7 @@ node at every level and freed the old one. Because `t` stays alive on the
 equal-key path, Reussir retains `t`'s children before the branch. On the
 rebuilding paths, releasing `t` releases those children again. Those
 releases can never free anything, yet token reuse offers them as donor
-cells and prefers them to `t`'s own cell. Patch 0007 moves the children's
+cells and prefers them to `t`'s own cell. Patch 07-a moves the children's
 retains into the branch. The paths that release `t` then get Reussir's
 efficient "destructuring" release: the children move to the arm, and `t`'s
 cell becomes the reuse token. The paths that keep `t` get a retain and
@@ -65,7 +65,7 @@ aggressive --no-pack-record-members --reuse-across-call`).
 the path.
 
 **Actual on ef922049.** `100003 100003 ratio 6.12` (5.8-7.9 over runs; the
-message of patch 0007 says "5x slower", an earlier measurement):
+message of patch 07-a says "5x slower", an earlier measurement):
 `ins` allocates a new node at every level of every insertion. `run.sh`
 printed `issue 07   REPRODUCES  insert returning t is 6.65x the rebuilding insert`.
 
@@ -168,17 +168,22 @@ Std.TreeMap insert is as fast as native Lean, BST inserts with `Nat` or
 even on ef922049, and `List.mergeSort`'s merge reuses the cell it takes
 apart (before values passed to calls were included it allocated a cell at
 every step: round-6 finding S6-02). That covers the `Nat`/`String`-keyed
-case that 0007 does not reach (a call before the branch); 0007 covers
+case that 07-a does not reach (a call before the branch); 07-a covers
 shapes the passes do not rewrite, such as `UInt64` keys.
 
 An earlier workaround returned the constructor rebuilt from the arm's
 fields instead of the matched value; it broke `ptrEq` identity and sharing
 (Lean's `Expr.replace`-style fixpoints never stopped) and was removed.
 
+The same choice of donor (at an equal score, the most recent producer)
+has another cause in [issue 39](39-alias-release-donor.md): the release
+of a value that an opaque call returned, an alias of a reference that
+stays live, which Reussir cannot see and 07-a does not reach.
+
 ## Patch
 
 Patch file
-[`patches/0007-l2r-local-bug-7-sink-bound-retains-into-the-branch-t.patch`](patches/0007-l2r-local-bug-7-sink-bound-retains-into-the-branch-t.patch)
+[`patches/07-a-sink-bound-retains.patch`](patches/07-a-sink-bound-retains.patch)
 (`l2r-local` commit `5f6d37d5`, applied in `./reussir`; `l2r-local` head cc8e5aa5). In short: when the release of the
 scrutinee sits inside a branch that runs exactly one of its regions once
 (`if` with an else, `index_switch`, record or nullable dispatch), the arm's
@@ -238,7 +243,7 @@ then replace a reference that no longer exists (the flaw of
 [bug 14](14-member-consumed-before-release.md)).
 
 The same `ins` arm after the patched pass (dumped with a build that has
-the final 0007):
+the final 07-a):
 
 ```
   %9 = scf.if (k < x) {
@@ -276,7 +281,7 @@ pairs cancel, so no phantom donors remain.
 
 **What it leaves alone.** The scan still stops at a call before the
 branch. In lean2rr output a `Nat` or `String` key comparison is a call
-(`lean_nat_dec_lt`), so 0007 rarely fires there; review round 1 noted
+(`lean_nat_dec_lt`), so 07-a rarely fires there; review round 1 noted
 this. lean2rr binds such a value's fields where they are used instead
 (plan §5.5). Else-less ifs and loops are left alone.
 
@@ -289,7 +294,7 @@ out.
 
 **Verification.**
 
-- Review round 1 passed 0007. It covered the window whitelist (every pure
+- Review round 1 passed 07-a. It covered the window whitelist (every pure
   Reussir op was checked to neither release nor free), nested matches,
   re-matching the scrutinee, deep if/switch nests, inc/dec-cancellation
   interplay, differential fuzzing (gen to gen4, 5615 programs, no failure
@@ -309,7 +314,7 @@ out.
 - Measured: the BST above allocates exactly like the rebuilding version
   (0.74 s → 0.16 s). A TreeMap-shaped insert without lean2rr's workaround
   drops from 12.35 to 1.33 allocations per insertion. The repro's ratio is
-  0.86-1.36 on the round-2 stack and 0.95-1.13 with the revised 0007/0009:
+  0.86-1.36 on the round-2 stack and 0.95-1.13 with the revised 07-a/09-a:
   FIXED.
 - `run.sh` on `l2r-local` (a timing ratio, on a loaded machine; 1.14x in
   the run recorded in the index):
@@ -319,17 +324,17 @@ out.
 reuse in the other arms, for the shapes lean2rr's own passes do not
 rewrite.
 
-**On `l2r-local`, the phantom donors lose even without 0007 (observed
-2026-10-02).** Patch 0006 ([bug 6](06-static-count-wrap.md)) wraps the
+**On `l2r-local`, the phantom donors lose even without 07-a (observed
+2026-10-02).** Patch 06-a ([bug 6](06-static-count-wrap.md)) wraps the
 unique path of every release of a type with nullary immediates in one more
 `scf.if` (the immediate guard). The member releases of `l` and `r` then sit
 one level deeper, and TokenReuse frees their (null) tokens inside instead
-of offering them at the construction: the other side of 0006's finding
-R2-4. So on `l2r-local` the phantom donors no longer win even where 0007
+of offering them at the construction: the other side of 06-a's finding
+R2-4. So on `l2r-local` the phantom donors no longer win even where 07-a
 cannot fire. The repro
 [`repros/bug07b-call-before-branch.rr`](repros/bug07b-call-before-branch.rr)
 is this entry's repro with the key comparisons made FFI calls, so that the
-call before the branch stops 0007's fusion. Commands (from a scratch
+call before the branch stops 07-a's fusion. Commands (from a scratch
 directory, with the polymorphic-FFI flags of the
 [index](README.md#running-the-repros)):
 
@@ -347,13 +352,13 @@ Results on `l2r-local` (a loaded machine; the original repro gave
 |---|---|---|
 | default (TBI) | 1.34-2.08 | 1 token available (`t`'s cell), reused (`ensure`, score 2) |
 | `arch-independent` | 1.40-1.48 | the same |
-| `boxed` (no immediates, so no 0006 guard) | 5.61-11.37 | 3 tokens available, a phantom donor taken (`realloc`, score 0) |
+| `boxed` (no immediates, so no 06-a guard) | 5.61-11.37 | 3 tokens available, a phantom donor taken (`realloc`, score 0) |
 
 The guard is emitted for both immediate encodings and not for `boxed`, and
-ef922049 (no 0006) showed the mechanism with the default encoding, so the
-difference follows 0006's guard (the IR shows the member releases nested
-one level deeper). This bears on whether lean2rr still needs 0007 and
-`lazy-fields`: it suggests that, with 0006 applied and an immediate
+ef922049 (no 06-a) showed the mechanism with the default encoding, so the
+difference follows 06-a's guard (the IR shows the member releases nested
+one level deeper). This bears on whether lean2rr still needs 07-a and
+`lazy-fields`: it suggests that, with 06-a applied and an immediate
 encoding, this shape is reused without either. Not yet measured on
 lean2rr's own programs (with `lazy-fields` off).
 

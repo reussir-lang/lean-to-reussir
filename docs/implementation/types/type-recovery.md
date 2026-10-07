@@ -3,14 +3,17 @@
 Mono can type a binder `lcAny` although its value has one precise type: types
 inferred during the passes go through erased signatures, and Lean's
 uniform-representation library code casts with `unsafeCast`, which LCNF
-erases. A binder left at `lcAny` is a `Box`, converted at every precise use
-(an array element by element). Stage 3 recovers the types the program
+erases. A binder left at `lcAny` is a `Box`, unboxed at every precise use.
+(Data types have one representation whatever their type arguments, so
+`List lcAny` and `List Nat` are one type; Stage 3 types locals, it no
+longer chooses layouts.) Stage 3 recovers the types the program
 determines, by a bounded whole-program fixpoint (whatever is not recovered
 stays `lcAny`). It is required, not optional
 (`stage3-types` in `Opt/Registry.lean`). Plan
 [§4](../../translation-plan.md#4-stage-3--check-and-recover-lost-types).
 `lean2rr --emit retyped` prints its result. Paths are relative to
-`lean2rr/LeanToReussir/`.
+`lean2rr/LeanToReussir/`. The last entry is a related step that runs
+before Stage 3: data that Lean's `toLCNF` typed `◾`.
 
 ### Types come from what flows in, never from uses
 
@@ -58,7 +61,7 @@ stays `lcAny`). It is required, not optional
   the declaration is used nowhere else (not as a closure, not
   over-applied). A self call that binds the result at another type than
   the declaration's own counts as a call site.
-- **Why:** The conversion moves from every caller to the callee's
+- **Why:** The unboxing moves from every caller to the callee's
   `return` (for a constant: once instead of at every read). The self-call
   case is polymorphic recursion into the uniform instance: `FSeq.flatten`
   at `lcAny` calls itself at `lcAny × lcAny`, so the one typed caller's
@@ -66,67 +69,67 @@ stays `lcAny`). It is required, not optional
   panicked "unreachable" (adv2 PrgPoly1, 513379f; runtime test
   `RtPolyRecResult`).
 - **Where:** `MonoRetype.lean`: `returnTypes`, `refineSignature`
-  (from the returns); `callSites`, `CallSites` (`escapes`) and the second
-  loop of `paramsFromCallers` (from the callers).
+  (from the returns); `callSites`, `CallSites` (`escapes`),
+  `resultsFromCallers` (from the callers).
 - **Remove only if:** never.
 
-### `map` loops return the type of the values they store
-
-- **What:** The loop of `Array.mapMUnsafe` or `Array.mapFinIdxMUnsafe`
-  (recognized by name, as Lean's specializations of it or their `_redArg`
-  part) returns `Array β` when every value it stores with `Array.uset`,
-  placeholders aside, has type `β`, and the loop's array stays within the
-  loop.
-- **Why:** The result of `xs.map f` is bound at `Array NonScalar`, that is
-  `Array lcAny`, and so is every loop parameter it reaches; each `ys[i]!`
-  then converted the whole array (quadratic, F02, 011966c).
-- **Where:** `MonoRetype.lean`: `isMapLoop`, `mapLoopElem?`,
-  `refineSignature`. Loops whose element representation changes:
-  [../optional-passes.md](../optional-passes.md) (`split-map-loops`) and
-  [../representations/arrays.md](../representations/arrays.md#maps-that-change-the-element-representation-write-a-new-array).
-- **Remove only if:** Lean's `Array.map` stops casting through
-  `NonScalar`.
-
-### Parameters take the type every caller passes
-
-- **What:** A parameter whose type holds an erased array (`Array lcAny`,
-  `Option (Array lcAny)`, …) or a typed reference gets `T` when every call
-  site passes it at `T`. The assumption is checked: the body is retyped
-  under it, and the self calls must pass `T` back. Only call sites in
-  declarations reachable from the entry point count, and a partial
-  application that leaves the parameter open blocks the rule.
-- **Why:** This is what makes `xs.map (· * 2)` run on the precise array,
-  in place. Other `lcAny` parameters are left alone: code over `Dynamic`
-  casts its value, in branches a runtime check rules out, to types a
-  precise parameter could not be converted to.
-- **Where:** `MonoRetype.lean`: `paramsFromCallers`, `selfCallsAgree`,
-  `CallSites`.
-- **Remove only if:** never.
-
-### Externs at unknown types are re-instantiated
+### Externs at unknown types type their results
 
 - **What:** A saturated call of a polymorphic extern instantiated at
-  `lcAny` (`Array.uget` and `Array.uset` at `NonScalar`) is redirected to
-  the extern's instance at the type arguments its arguments determine,
-  provided every argument then has exactly the expected type or is a
-  placeholder. Over-applied calls (the element of an array of functions,
-  applied) are covered too.
-- **Why:** An extern does not depend on its type arguments; only the
-  representation changes. Over-applied, the whole captured array was
-  converted on every call (FN-02: 3.33 s → 0.06 s, native 0.05 s;
-  1fcb07f).
-- **Where:** `MonoRetype.lean`: `reinstantiate?`, `externInstance`.
+  `lcAny` (`Array.uget` and `Array.uset` at `NonScalar`) whose arguments
+  determine the type arguments binds its result at the type the extern
+  returns at them. The base extern's declared parameter types are matched
+  strictly against the argument types, and every argument must then have
+  exactly its parameter's mono type (`toMonoTypeKeep`, as Stage 2 types an
+  extern instance) or be a placeholder. Over-applied calls (the element of
+  an array of functions, applied) are covered too. The callee stays the
+  instance at `lcAny`.
+- **Why:** The result binder gets its precise type: unboxed once, at the
+  call (Stage 4 converts an extern call's result to the binder's type).
+  An extern does not depend on its type arguments, and with one
+  representation per datatype the instance at the precise types would
+  differ only in its result type: the call was redirected to a new
+  instance, built through Stage 2's passes, until rule 1 (simplicity
+  review of rule 1, finding 2). (Before arrays had one representation, an
+  over-applied call converted the whole captured array on every call:
+  FN-02, 1fcb07f.)
+- **Where:** `MonoRetype.lean`: `externResultType?`, `fwdCode`.
 - **Remove only if:** never.
 
-### References created at a precise type are typed
+### A parameter of type `lcErased` that receives data gets `lcAny`
 
-- **What:** An instance of `ST.Prim.mkRef` at a precise `α` returns
-  `typedRef α`, a type only lean2rr uses, and the rules above carry it to
-  the binders the reference flows into.
-- **Why:** Mono types every `ST.Ref` `lcAny`; without this an
-  `IO.Ref Nat` counter or a `StateRefT` state goes through a `Box` and a
-  dispatch at every access (see
-  [../representations/references.md](../representations/references.md)).
-- **Where:** `MonoRetype.lean`: `typeMkRef`; `MonoTypesKeep.lean`:
-  `typedRefName`, `hasTypedRef`.
-- **Remove only if:** never.
+- **What:** A parameter of type `lcErased` (of a join point, of a local
+  function applied directly, or of a declaration with code called
+  directly, also partially) that receives data at some jump or call gets
+  the type `lcAny`: a boxed data parameter (also in its function's type).
+  Data is a variable not bound to `◾` whose type is not `lcErased` and not
+  a type former type (a sort, or a function type that ends in one). A
+  retyped parameter is data in turn, so the step repeats until nothing
+  changes. It runs on Stage 1's instances (before `toMono`, which passes
+  `◾` at every call to a declaration's erased parameter) and again on
+  Stage 2's output (a join point that Lean's mono passes made). A jump or
+  call that passes `◾` to a retyped parameter passes `box(0)` (rule 4e).
+  Rule 4 and its flow analysis (`ErasedDomains`) read the new type: the
+  parameter is kept and is a `Box`.
+- **Why:** A Lean 4.34.0 compiler bug (plan
+  [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
+  "Compiler: Lean bugs we do not reproduce"): `toLCNF` joins the types of
+  a `match`'s arms with `joinTypes`, which gives `◾` when one arm gives a
+  type or a proof, so the join point after `let v : T b := match b with |
+  true => fun _ => True | false => n` gets a parameter of type `lcErased`
+  that the `false` arm passes `n` to; Lean's specializer copies that type
+  to the declaration it makes for a lambda over `v`. Native Lean and rule 4
+  remove such a parameter and compute with `box(0)`: a wrong value
+  (`f2 false 41` gave 1, the kernel 42) or a crash (a `String`, an
+  `Array`; tests `RtJoinErased*`). A type or proof parameter never receives a variable
+  of a data type (proofs and types have the type `lcErased` or a type
+  former type), so it stays erased: the classic corpus's `--emit retyped`
+  output is the same with and without the step.
+- **Where:** `ErasedData.lean`: `retypeErasedData`; `ErasedData.scan`
+  (the parameters that receive data), `rewrite` and `retypeParams` (the
+  new types); `../Main.lean`: `pipeline` (after `monomorphize` and after
+  `runStage2`).
+- **Remove only if:** Lean's `toLCNF` and `mkCasesResultType` stop
+  typing such a `match` `◾` (`joinTypes` gives `lcAny` for `◾` and data).
+  Not covered now: data that a closure carries to an erased domain, and
+  data that Lean's `simp` already replaced by `◾` (a `let` of type `◾`).

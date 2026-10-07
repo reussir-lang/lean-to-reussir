@@ -384,14 +384,16 @@ pub fn signal_ctl(s: &LHandle, which: u8) -> LHandle {
 
 /// A `send`'s buffers (Lean's `Array ByteArray`), held until the write is
 /// done, as natively.
-struct Bufs(RVec<RVec<u8>>);
+/// The buffers of a send: an `Array ByteArray`, an array of boxes (one
+/// representation per `Array α`), each a boxed `ByteArray`.
+struct Bufs(RVec<crate::any::LAny>);
 
 impl SendData for Bufs {
     fn count(&self) -> usize {
         self.0.len()
     }
     fn get(&self, i: usize) -> &[u8] {
-        self.0.as_slice()[i].as_slice()
+        crate::any::bytes_ref(&self.0.as_slice()[i])
     }
 }
 
@@ -446,7 +448,7 @@ pub fn tcp_connect(s: &LHandle, a: &[u8], r: LPromise) -> LHandle {
     pending(r, |c| tcp(s).connect(addr_of(a)?, move |res| c.result(res, |_, ()| {})))
 }
 
-pub fn tcp_send(s: &LHandle, data: RVec<RVec<u8>>, r: LPromise) -> LHandle {
+pub fn tcp_send(s: &LHandle, data: RVec<crate::any::LAny>, r: LPromise) -> LHandle {
     pending(r, |c| tcp(s).send(Bufs(data), move |res| c.result(res, |_, ()| {})))
 }
 
@@ -536,7 +538,7 @@ pub fn udp_connect(s: &LHandle, a: &[u8]) -> LHandle {
 }
 
 /// `send data addr?` (`a` empty: none).
-pub fn udp_send(s: &LHandle, data: RVec<RVec<u8>>, a: &[u8], r: LPromise) -> LHandle {
+pub fn udp_send(s: &LHandle, data: RVec<crate::any::LAny>, a: &[u8], r: LPromise) -> LHandle {
     pending(r, |c| {
         let to = if a.is_empty() { None } else { Some(addr_of(a)?) };
         udp(s).send(Bufs(data), to, move |res| c.result(res, |_, ()| {}))

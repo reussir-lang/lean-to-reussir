@@ -178,7 +178,7 @@ other results are the last recorded runs.</p>
 <tbody>
 <tr>
 <td>Runtime test suite</td>
-<td>344 programs† (3 marked <code>.xfail</code>†); at the last full run (2026-10-06), 336 of 337 identical to native Lean 4.34.0, some of them through expectation files; the other one is the <code>.xfail</code> test</td>
+<td>487 programs† (1 marked <code>.xfail</code>†); at the last full run (2026-10-07), 485 of 486 identical to native Lean 4.34.0, some of them through expectation files; the other one is the <code>.xfail</code> test</td>
 </tr>
 <tr>
 <td>Classic corpus</td>
@@ -206,14 +206,22 @@ other results are the last recorded runs.</p>
 </tr>
 <tr>
 <td>Reussir</td>
-<td>37 local patches applied†, 0065 (position-independent code) and 0066 (texture cache) included</td>
+<td>37 local patches applied†, 34-a (position-independent code) and 35-a (texture cache) included</td>
 </tr>
 </tbody>
 </table>
 <p><a href="testing.html">Testing</a> explains each test set and the review process.</p>
 <h2 id="recent-changes">Recent changes</h2>
-<p>Merged from 2026-10-04 to 2026-10-06:</p>
+<p>Merged from 2026-10-04 to 2026-10-07:</p>
 <ul>
+<li><strong>Dependent types: one layout for each datatype.</strong> Types do not
+  compute, so lean2rr erases them. A value of unknown type is a box: one
+  word, as Lean's <code>lean_object*</code>. Each datatype has one layout, whose
+  fields of a parameter's type are boxes. <code>Array α</code>, <code>Thunk α</code>, <code>Task α</code>
+  and references are over the box too. So no value is converted between
+  typed and generic code. A function has no parameter for a type, a type
+  argument or a proof; a trailing group of them becomes one unit
+  parameter (see <a href="dependent-types.html#layouts-of-generic-types">Dependent types</a>).</li>
 <li><strong>The switch to <code>lean-runtime</code></strong>, in nine steps: the rules (steps 1
   and 2), the IO (step 3), the scheduler, <code>Std.Sync</code> and the event loop
   (step 4), the last copies of shared functions (step 5), the wait cores
@@ -254,7 +262,7 @@ other results are the last recorded runs.</p>
   <a href="representations.html#strings-and-arrays">Representations</a>). In
   lean-zip's compression loop, the counting stores fell from 77 to 47 and
   the read calls from 281 to 2.</li>
-<li><strong>Reussir.</strong> Patches 0065 and 0066 are applied. Each
+<li><strong>Reussir.</strong> Patches 34-a and 35-a are applied. Each
   entry is now a numbered <em>issue</em> with a kind: only a <em>bug</em> is wrong
   behaviour (see <a href="reussir.html#all-entries">Reussir</a>).</li>
 <li><strong>A read of a constant is one load.</strong> Each once-cell's value is also
@@ -262,13 +270,6 @@ other results are the last recorded runs.</p>
   no call (lean-zip fix 4). In lean-zip's codec loops, the once-cell calls
   fell from 17 to 0 and the loads from 170 to 49. A check fails the tests if
   a constant read in a loop becomes a call again.</li>
-<li><strong>Dependent types: the rule.</strong> Types do not compute, so lean2rr erases
-  them, and a value of unknown type is one enum, matched by its variant.
-  <code>◾</code> items (types, type arguments, proofs) are not stored. An <code>lcAny</code>
-  value is stored in the enum. The current version converts values between
-  a layout for each type argument and the boxed layout. The planned layout
-  rule gives each datatype one layout, so no value is converted (see
-  <a href="dependent-types.html#layouts-of-generic-types">Dependent types</a>).</li>
 <li><strong>Plan §10</strong> lists the Lean runtime bugs that lean2rr does not reproduce
   (see <a href="differences.html#lean-bugs-we-do-not-reproduce">Known differences</a>),
   the differences of programs that use the <code>Lean</code> package, and that
@@ -290,7 +291,7 @@ possible future work.</p>
 </div>
 <div class="card">
 <h4 id="dependent-types"><a href="dependent-types.html">Dependent types</a></h4>
-<p>Types known only at run time: the uniform type <code>L2RBox</code>, examples, costs.</p>
+<p>Types known only at run time: the one-word box, one layout for each datatype, examples.</p>
 </div>
 <div class="card">
 <h4 id="runtime"><a href="runtime.html">Runtime</a></h4>

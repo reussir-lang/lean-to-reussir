@@ -1,15 +1,15 @@
 # 35. rrc compiles every texture with rustc again on every build
 
-**Kind:** cost (build time). Not a bug: rrc's output is correct; patch 0066
+**Kind:** cost (build time). Not a bug: rrc's output is correct; patch 35-a
 is an optimization.
 
 ## Summary
 
 **Kind:** cost (build time), with a small optimization.
-**Status:** patched (0066), applied in `./reussir` since 2026-10-04
+**Status:** patched (35-a), applied in `./reussir` since 2026-10-04
 (`l2r-local` commit `d79f8b70`; made on branch `l2r-polyffi-cache` of a
 local Reussir build with the l2r-local patches applied, on `l2r-local`
-cc8e5aa5 + 0065); reviewed
+cc8e5aa5 + 34-a); reviewed
 (round FCR: one medium finding, a race, and small ones; a second look:
 two more small ones; all fixed in the amended patch). lean2rr uses the
 patch when it is there: its driver sets `REUSSIR_FFI_CACHE_DIR` (below).
@@ -24,7 +24,7 @@ rrc can name (the source, rustc, its options and the libraries rustc
 reads), and these rarely change between two builds, but every build
 compiles every texture again. Every lean2rr program carries the whole
 prelude (473 imports), so every build pays for about 470 rustc runs, about
-13 s of a small program's 16 s of rrc. Patch 0066 keeps the bitcode in a
+13 s of a small program's 16 s of rrc. Patch 35-a keeps the bitcode in a
 content-addressed cache when `REUSSIR_FFI_CACHE_DIR` is set (3 s).
 
 ## Symptom and repro
@@ -53,8 +53,8 @@ machine (2026-10-04, load about 9):
 | rrc | wall | user | sys |
 |---|---|---|---|
 | without the cache | 16.1 s | 7.8 s | 9.9 s |
-| 0066, empty cache (fills it) | 16.5 s | 8.2 s | 9.9 s |
-| 0066, full cache | 3.2 s | 3.7 s | 0.4 s |
+| 35-a, empty cache (fills it) | 16.5 s | 8.2 s | 9.9 s |
+| 35-a, full cache | 3.2 s | 3.7 s | 0.4 s |
 
 A rustc run costs about 30 ms, more than half of it in the kernel
 (starting a process that maps rustc's 106 MB driver library and the rlibs
@@ -94,7 +94,7 @@ below (478 imports each) fill the cache with 918 entries.
 `scripts/l2r.py` sets `REUSSIR_FFI_CACHE_DIR` for rrc to
 `runtime/leanrt/target/polyffi-cache` (ignored by git, like the rest of
 `runtime/leanrt/target/`), unless the caller sets it; an empty value
-turns the cache off. An rrc without 0066 ignores the variable, so nothing
+turns the cache off. An rrc without 35-a ignores the variable, so nothing
 changes there. One directory serves every build: rrc's key covers the
 rustc wrapper (`rustc-native`, one per leanrt build directory, whose text
 names the extern rlibs and the flags) and the libraries of the
@@ -116,10 +116,10 @@ reclaim the space.
 ## Patch
 
 Patch file
-[`patches/0066-l2r-local-bug-35-cache-the-compiled-polymorphic-FFI-.patch`](patches/0066-l2r-local-bug-35-cache-the-compiled-polymorphic-FFI-.patch)
+[`patches/35-a-texture-cache.patch`](patches/35-a-texture-cache.patch)
 (commit `968c4b7d` on branch `l2r-polyffi-cache` of a local Reussir build
-with the l2r-local patches applied, on 0065; it touches none of 0065's
-files and applies after 0064 as well; in `./reussir` since 2026-10-04 as
+with the l2r-local patches applied, on 34-a; it touches none of 34-a's
+files and applies after 33-a as well; in `./reussir` since 2026-10-04 as
 `l2r-local` commit `d79f8b70`). In
 `lib/RustCompiler/RustCompiler.cpp`, `compileRustSourceToBitcode` builds
 rustc's options first (everything but the source and output files), and
@@ -344,7 +344,7 @@ disk) fails the digest check and is rebuilt.
   entries are complete, no temporary file is left.
 
 **Review.** Round FCR (local review notes): no defect in normal
-single-build use; findings, all fixed in the amended 0066 or in lean2rr:
+single-build use; findings, all fixed in the amended 35-a or in lean2rr:
 
 - FCR-01 (medium): the toolchain digest was computed once per process, so
   a library replaced while rrc compiled textures (in lean2rr: another
@@ -367,7 +367,7 @@ single-build use; findings, all fixed in the amended 0066 or in lean2rr:
   35's; wording of three claims.
 
 A second look at the fixes found them sound and two more small issues,
-fixed in the amended 0066 (`968c4b7d`):
+fixed in the amended 35-a (`968c4b7d`):
 
 - FCR2-01 (low): a package directory's stamp changes with any entry
   added or removed, so with rrc running in a package directory (its

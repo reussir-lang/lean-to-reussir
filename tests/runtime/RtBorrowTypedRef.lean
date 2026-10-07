@@ -1,10 +1,13 @@
 /-! Runtime test: the release time of borrowed resources (plan §5.8) in a
 program that also has references of precise types (cross-test XT-2,
-fixture A621). lean2rr gives a reference created at a precise type
-its own mono type `_l2r.TypedRef α`, which is not a Lean constant; Lean's
-borrow inference, which lean2rr runs on its mono declarations, failed on it
+fixture A621). lean2rr gave a reference created at a precise type its own
+mono type `_l2r.TypedRef α`, which is not a Lean constant; Lean's borrow
+inference, which lean2rr runs on its mono declarations, failed on it
 (`toImpureType`: unknown constant), and the failure was swallowed: the
 whole program then released every borrowed handle inside the callee.
+Since rule 1 a reference has one type whatever its contents (no
+`TypedRef`); the test keeps checking the release times of borrowed handles
+in a program with references at precise types.
 - `writeThenRead h`: a helper writes to a handle it borrows, then reads the
   file: natively the handle is still open, its byte still buffered (`""`);
 - `keepB hb hb`: a structure holding a handle, lent (`@&`) and stored in a

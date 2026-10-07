@@ -1,0 +1,4 @@
+dec false 0 = 101
+cas false 0 = 200
+dec true 7 = 107
+cas true 7 = 107

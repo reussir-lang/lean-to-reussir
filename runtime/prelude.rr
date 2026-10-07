@@ -50,7 +50,7 @@ pub struct LStr;
 // word is a small value: `lean_box(n)` for a `Nat` below 2^63,
 // `lean_box((unsigned)(int)i)` for an `Int` in the `int32` range. An even
 // word is a reference to a big number, one block with the limbs inline
-// (`leanrt::big`). `tagged` (local Reussir patch 0050): Reussir copies and
+// (`leanrt::big`). `tagged` (local Reussir patch 41-a): Reussir copies and
 // drops them like any shared handle but counts only the even words, so a
 // small value costs no allocation and its copy or drop is a bit test.
 #[ffi(rust = "::leanrt::nat::LNat", tagged)]
@@ -85,6 +85,136 @@ pub struct LCell<T>;
 // the event loop (all `lcAny` in mono code).
 #[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
 pub struct LHandle;
+
+// ===========================================================================
+// The one-word box (`LAny`, leanrt::any)
+//
+// A value whose type is not known at compile time, in one word, as Lean's
+// `lean_object*`: lean2rr's uniform type `Box` (LowerBase, "The box API").
+// An odd word is an immediate `(v << 1) | 1`
+// (scalars, unit = `box(0)` = word 1, a small `Nat`/`Int`, which is its own
+// word, a nullary constructor as its variant index). An even word owns a
+// reference to a counted object: the low 48 bits are its address, the top
+// 16 bits the number of the payload's type (1 to 15: leanrt's kinds,
+// `leanrt::any::NUM_*`; 16 and up: the program's). `tagged` (local Reussir
+// patches 41-a and 38-a): Reussir copies an even word by incrementing the
+// count at the address without the top 16 bits, in line, and drops it
+// through the drop hook, which sends the last reference of a program
+// payload to the program's release of its type through the drop worklist
+// (`leanrt::any::release_last`: the payload's cell, deferred with
+// `l2r_any_rel_<num>_c`, a trampoline the program exports for each payload
+// type and installs in leanrt's table before `main`, `l2r_any_init_c`).
+//
+// Words: `l2r_any_raw(a)` turns a box into its word, which then owns the
+// reference; an even word must reach exactly one owner on every path
+// (`l2r_any_of_raw`, `l2r_any_raw_as<T>`, `l2r_any_drop_raw`), as for
+// `Nat` words.
+#[ffi(rust = "::leanrt::any::LAny", tagged)]
+pub struct LAny;
+
+#[ffi(import)]
+fn l2r_any_raw(a : LAny) -> u64 [{ a.into_raw() }];
+#[ffi(import)]
+fn l2r_any_of_raw(w : u64) -> LAny [{ unsafe { leanrt::any::LAny::from_raw(w) } }];
+// Release the reference a word owns (nothing for an immediate); 0.
+#[ffi(import)]
+fn l2r_any_drop_raw(w : u64) -> u64 [{ { drop(unsafe { leanrt::any::LAny::from_raw(w) }); 0 } }];
+
+// Immediates: `v` below 2^63.
+fn l2r_any_imm(v : u64) -> LAny { l2r_any_of_raw((v << 1) | 1) }
+fn l2r_any_unit() -> LAny { l2r_any_of_raw(1) }
+fn l2r_any_raw_is_imm(w : u64) -> bool { (w & 1) == 1 }
+fn l2r_any_raw_imm(w : u64) -> u64 { w >> 1 }
+fn l2r_any_raw_num(w : u64) -> u64 { w >> 48 }
+// The value of an immediate box (a pointer: `l2r_unreachable`).
+fn l2r_any_as_imm(a : LAny) -> u64 {
+    let w = l2r_any_raw(a);
+    if (w & 1) == 1 { w >> 1 } else { l2r_any_mismatch(w, 0) }
+}
+#[ffi(import)]
+fn l2r_any_mismatch(w : u64, num : u64) -> u64 [{ leanrt::any::mismatch(w, num) }];
+
+fn l2r_any_of_bool(b : bool) -> LAny { if b { l2r_any_of_raw(3) } else { l2r_any_of_raw(1) } }
+fn l2r_any_as_bool(a : LAny) -> bool { l2r_any_as_imm(a) != 0 }
+fn l2r_any_of_u8(x : u8) -> LAny { l2r_any_imm(x as u64) }
+fn l2r_any_as_u8(a : LAny) -> u8 { l2r_any_as_imm(a) as u8 }
+fn l2r_any_of_u16(x : u16) -> LAny { l2r_any_imm(x as u64) }
+fn l2r_any_as_u16(a : LAny) -> u16 { l2r_any_as_imm(a) as u16 }
+fn l2r_any_of_u32(x : u32) -> LAny { l2r_any_imm(x as u64) }
+fn l2r_any_as_u32(a : LAny) -> u32 { l2r_any_as_imm(a) as u32 }
+#[ffi(import)]
+fn l2r_any_of_f32(x : f32) -> LAny [{ leanrt::any::LAny::imm(x.to_bits() as u64) }];
+#[ffi(import)]
+fn l2r_any_as_f32(a : LAny) -> f32 [{ f32::from_bits(leanrt::any::as_u64(a) as u32) }];
+// `UInt64`/`USize`: an immediate below 2^63, a cell from there.
+#[ffi(import)]
+fn l2r_any_of_u64(x : u64) -> LAny [{ leanrt::any::of_u64(x) }];
+#[ffi(import)]
+fn l2r_any_as_u64(a : LAny) -> u64 [{ leanrt::any::as_u64(a) }];
+// `Float`: a cell.
+#[ffi(import)]
+fn l2r_any_of_f64(x : f64) -> LAny [{ leanrt::any::of_f64(x) }];
+#[ffi(import)]
+fn l2r_any_as_f64(a : LAny) -> f64 [{ leanrt::any::as_f64(a) }];
+
+// A counted value boxed as payload `num`: a Reussir record or enum (a
+// nullary variant becomes the immediate of its index), an opaque type of
+// this prelude (`LStr`, `RVec`, `LCell`, `LHandle`), a `Nat` or `Int` (their
+// own words). leanrt's own kinds keep their fixed numbers whatever `num`
+// says: `Nat`, `Int`, `LStr`, `RVec<LAny>`, `RVec<u8>`, `RVec<f64>` (and
+// `LRef<LAny>`, the same Rust type as `RVec<LAny>`: number 6, and `box(0)`
+// unboxes to an empty one; generated code does not use `LRef`); a
+// `u64`/`i64` or `f64` boxes as `l2r_any_of_u64`/`l2r_any_of_f64` do. The
+// address is checked (48 bits).
+#[ffi(import)]
+fn l2r_any_of<T>(x : T, num : u64) -> LAny [{ leanrt::any::of(x, num) }];
+// A function value (a generated function-value enum): a nullary variant
+// becomes the immediate `(num << 32) | index`, which keeps its type.
+#[ffi(import)]
+fn l2r_any_of_fn<T>(x : T, num : u64) -> LAny [{ leanrt::any::of_typed(x, num) }];
+// The payload of a box at payload `num`. Lean's `box(0)` (word 1) read at
+// one of leanrt's kinds is its zero (`0`, `0.0`, `""`, `#[]`), as the `b0`
+// arm of the old enum `L2RBox` gave; a `Nat` or `Int` also decodes its own
+// immediates. Anything else is `l2r_unreachable` (a panic, never a wrong
+// read).
+//
+// The rule for generated unboxes at a program type `T` (a record, an enum,
+// a function value, a reference, an `LCell`): split the word first, since
+// only the program can make `T`'s zero and its nullary variants. For
+// `enum T { c_0(u64), c_1, c_2 }` (payload number 25):
+//
+//     fn l2r_unbox_T(a : LAny) -> T {
+//         let w : u64 = l2r_any_raw(a);
+//         if l2r_any_raw_is_imm(w) {
+//             match l2r_any_raw_imm(w) {
+//                 0 => { l2r_zero_T() },      // box(0): T's zero (c_0 is not nullary)
+//                 1 => { T::c_1{} },
+//                 2 => { T::c_2{} },
+//                 _ => { l2r_unreachable<T>() }
+//             }
+//         } else { l2r_any_raw_as<T>(w, 25) }
+//     }
+//
+// Word 1 is index 0: `box(0)` is the zero of `T`, or its variant 0 when
+// that one is nullary (the 0 arm is then `T::c_0{}`; Lean's `lean_box(0)`
+// is that constructor). A type without nullary variants has only the 0
+// arm and the unreachable one. `l2r_any_as<T>` at a program type panics
+// on any immediate, `box(0)` included.
+#[ffi(import)]
+fn l2r_any_as<T>(a : LAny, num : u64) -> T [{ leanrt::any::as_(a, num) }];
+#[ffi(import)]
+fn l2r_any_raw_as<T>(w : u64, num : u64) -> T [{ unsafe { leanrt::any::raw_as(w, num) } }];
+// An even word's payload, unchecked: a generated match on the number
+// (`boxTake`), after its dispatch.
+#[ffi(import)]
+fn l2r_any_raw_take<T>(w : u64) -> T [{ unsafe { leanrt::any::raw_take(w) } }];
+
+// `ptrAddrUnsafe` of a box: its payload's address (an immediate: its word,
+// as natively); and whether it is the only reference (`isExclusive`).
+#[ffi(import)]
+fn l2r_any_addr(a : LAny) -> u64 [{ { let r = a.addr(); drop(a); r } }];
+#[ffi(import)]
+fn l2r_any_is_exclusive(a : LAny) -> bool [{ { let r = a.is_exclusive(); drop(a); r } }];
 
 // ===========================================================================
 // Process, panics, unreachable code
@@ -292,7 +422,7 @@ fn l2r_u64_pow_checked(x : u64, e : u64) -> u64 [{ x.checked_pow(e as u32).unwra
 // Both words are odd exactly when `s` and `x` are (`s` is odd when `x` and
 // `y` have the same parity). The test is not `x & y & 1`: LLVM then shares
 // `y & 1` with the low-bit test of Reussir's `rc.inc` of `y` (a field just
-// read from a cell, patch 0050's guard) and keeps it in a callee-saved
+// read from a cell, patch 41-a's guard) and keeps it in a callee-saved
 // register across the calls in between, which grew cfold's recursive
 // `constFolding` frame from 80 to 96 bytes (peak memory at n = 23:
 // 1074 MB instead of 946).
@@ -1840,301 +1970,6 @@ fn lean_array_swap<T>(v : RVec<T>, i : Nat, j : Nat) -> RVec<T> {
 // cross-test XT-5).
 fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> { l2r_array_replicate(l2r_replicate_len(n), x) }
 
-// ---- Array Nat / Array Int ----
-//
-// One tagged word per element (leanrt::tagvec) instead of a heap box per
-// element. lean2rr represents `Array Nat` as `LNatArr` and `Array Int` as
-// `LIntArr`, and calls `lean_natarr_xxx` / `l2r_natarr_xxx` (`intarr`) in
-// place of `lean_array_xxx<E>` / `l2r_array_xxx<E>`.
-
-#[ffi(rust = "::leanrt::tagvec::TagVec")]
-pub struct LNatArr;
-
-#[ffi(rust = "::leanrt::tagvec::TagVec")]
-pub struct LIntArr;
-
-// BEGIN GENERATED: tagarr (runtime/gen_tagarr.py)
-
-// ---- Array Nat (LNatArr) ----
-
-#[ffi(import)]
-fn l2r_natarr_empty() -> LNatArr [{ leanrt::tagvec::empty() }];
-#[ffi(import)]
-fn l2r_natarr_with_capacity(n : u64) -> LNatArr [{ leanrt::tagvec::with_capacity(n) }];
-#[ffi(import)]
-fn l2r_natarr_replicate_word(n : u64, w : u64) -> LNatArr [{ leanrt::tagvec::replicate_word(n, w) }];
-#[ffi(import)]
-fn l2r_natarr_size(a : LNatArr) -> u64 [{ { let r = leanrt::tagvec::size(&a); leanrt::rc_release(a); r } }];
-#[ffi(import)]
-fn l2r_natarr_word(a : LNatArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word(&a, i); leanrt::rc_release(a); r } }];
-// A read's view (see `l2r_array_give`); the word at `i`, which ends it (a
-// big word owns a reference).
-#[ffi(import)]
-fn l2r_natarr_give(a : LNatArr) -> u64 [{ leanrt::tagvec::give(a) }];
-#[ffi(import)]
-fn l2r_natarr_view_size(p : u64) -> u64 [{ unsafe { leanrt::tagvec::view_size(p) } }];
-#[ffi(import)]
-fn l2r_natarr_view_take(p : u64, i : u64) -> u64 [{ unsafe { leanrt::tagvec::view_take(p, i) } }];
-#[ffi(import)]
-fn l2r_natarr_view_end(p : u64) -> u64 [{ { unsafe { leanrt::tagvec::view_end(p) }; 0 } }];
-#[ffi(import)]
-fn l2r_natarr_set_word(a : LNatArr, i : u64, w : u64) -> LNatArr [{ leanrt::tagvec::set_word(a, i, w) }];
-#[ffi(import)]
-fn l2r_natarr_push_word(a : LNatArr, w : u64) -> LNatArr [{ leanrt::tagvec::push_word(a, w) }];
-#[ffi(import)]
-fn l2r_natarr_pop(a : LNatArr) -> LNatArr [{ leanrt::tagvec::pop(a) }];
-#[ffi(import)]
-fn l2r_natarr_swap(a : LNatArr, i : u64, j : u64) -> LNatArr [{ leanrt::tagvec::swap(a, i, j) }];
-#[ffi(import)]
-fn l2r_natarr_append(a : LNatArr, b : LNatArr) -> LNatArr [{ leanrt::tagvec::append(a, b) }];
-#[ffi(import)]
-fn l2r_natarr_extract(a : LNatArr, s : u64, e : u64) -> LNatArr [{ leanrt::tagvec::extract(a, s, e) }];
-#[ffi(import)]
-fn l2r_natarr_truncate(a : LNatArr, n : u64) -> LNatArr [{ leanrt::tagvec::truncate(a, n) }];
-#[ffi(import)]
-fn l2r_natarr_reverse(a : LNatArr) -> LNatArr [{ leanrt::tagvec::reverse(a) }];
-
-
-// Elements are `Nat` words (see the Nat section): `lean_box` of a small
-// value, an owned reference to a big number otherwise; the handles move in
-// and out as their words. A read takes the array's view first, as
-// `l2r_array_get`: a big word comes back owning a reference.
-fn l2r_natarr_take(p : u64, i : u64) -> Nat { l2r_nat_of_raw(l2r_natarr_view_take(p, i)) }
-fn l2r_natarr_set(a : LNatArr, i : u64, x : Nat) -> LNatArr { l2r_natarr_set_word(a, i, l2r_nat_raw(x)) }
-fn l2r_natarr_push(a : LNatArr, x : Nat) -> LNatArr { l2r_natarr_push_word(a, l2r_nat_raw(x)) }
-fn l2r_natarr_replicate(n : u64, x : Nat) -> LNatArr { l2r_natarr_replicate_word(n, l2r_nat_raw(x)) }
-
-
-fn lean_mk_empty_natarr() -> LNatArr { l2r_natarr_empty() }
-
-// A big capacity gives the empty array, as `l2r_mk_empty_with_capacity`.
-fn lean_mk_empty_natarr_with_capacity(n : Nat) -> LNatArr {
-    let w = l2r_nat_raw(n);
-    if (w & 1) == 1 { l2r_natarr_with_capacity(w >> 1) } else { let d = l2r_nat_drop_raw(w); l2r_natarr_empty() }
-}
-
-// Element `i`, which must be in bounds (checked; see `l2r_array_get`).
-fn l2r_natarr_get(a : LNatArr, i : u64) -> Nat {
-    let p = l2r_natarr_give(a);
-    let n = l2r_natarr_view_size(p);
-    if i < n { l2r_natarr_take(p, i) } else { l2r_array_index_bug<Nat>(i, n) }
-}
-
-// A read at the word `x` of a `Nat` index a proof keeps in bounds (see
-// `l2r_array_get_word`).
-fn l2r_natarr_get_word(a : LNatArr, x : u64) -> Nat {
-    let p = l2r_natarr_give(a);
-    let n = l2r_natarr_view_size(p);
-    if l2r_word_index_ok(x, n) { l2r_natarr_take(p, x >> 1) } else { l2r_index_fail<Nat>(x, n) }
-}
-
-fn lean_natarr_get_size(v : LNatArr) -> Nat { l2r_nat_small(l2r_natarr_size(v)) }
-fn lean_natarr_size(v : LNatArr) -> u64 { l2r_natarr_size(v) }
-fn lean_natarr_fget(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get_word(v, l2r_nat_raw(i)) }
-fn lean_natarr_fget_borrowed(v : LNatArr, i : Nat) -> Nat { l2r_natarr_get_word(v, l2r_nat_raw(i)) }
-fn lean_natarr_uget(v : LNatArr, i : u64) -> Nat { l2r_natarr_get(v, i) }
-fn lean_natarr_uget_borrowed(v : LNatArr, i : u64) -> Nat { l2r_natarr_get(v, i) }
-
-// `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
-// return the default. In bounds the default is released after the take,
-// as `lean_array_get` (nothing is released between give and take).
-fn lean_natarr_get(dflt : Nat, v : LNatArr, i : Nat) -> Nat {
-    let x = l2r_nat_raw(i);
-    let p = l2r_natarr_give(v);
-    if l2r_word_index_ok(x, l2r_natarr_view_size(p)) {
-        let r = l2r_natarr_take(p, x >> 1);
-        let d = l2r_consume<Nat>(dflt);
-        r
-    } else {
-        let e = l2r_natarr_view_end(p);
-        let d = l2r_nat_drop_raw(x);
-        let ignored = l2r_panic_code(0);
-        dflt
-    }
-}
-
-fn lean_natarr_get_borrowed(dflt : Nat, v : LNatArr, i : Nat) -> Nat { lean_natarr_get(dflt, v, i) }
-fn lean_natarr_fset(v : LNatArr, i : Nat, x : Nat) -> LNatArr { l2r_natarr_set(v, l2r_index_of_nat(i), x) }
-fn lean_natarr_uset(v : LNatArr, i : u64, x : Nat) -> LNatArr { l2r_natarr_set(v, i, x) }
-
-// `Array.set!`: out of bounds, panic and return the array unchanged.
-fn lean_natarr_set(v : LNatArr, i : Nat, x : Nat) -> LNatArr {
-    let w = l2r_nat_raw(i);
-    if l2r_word_index_ok(w, l2r_natarr_size(v)) { l2r_natarr_set(v, w >> 1, x) } else {
-        let d = l2r_nat_drop_raw(w);
-        let ignored = l2r_panic_code(0);
-        v
-    }
-}
-
-fn lean_natarr_push(v : LNatArr, x : Nat) -> LNatArr { l2r_natarr_push(v, x) }
-fn lean_natarr_pop(v : LNatArr) -> LNatArr { l2r_natarr_pop(v) }
-fn lean_natarr_fswap(v : LNatArr, i : Nat, j : Nat) -> LNatArr { l2r_natarr_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) }
-fn lean_natarr_uswap(v : LNatArr, i : u64, j : u64) -> LNatArr { l2r_natarr_swap(v, i, j) }
-
-// `Array.swapIfInBounds`.
-fn lean_natarr_swap(v : LNatArr, i : Nat, j : Nat) -> LNatArr {
-    let n = l2r_natarr_size(v);
-    let x = l2r_nat_raw(i);
-    let y = l2r_nat_raw(j);
-    if l2r_word_index_ok(x, n) && l2r_word_index_ok(y, n) { l2r_natarr_swap(v, x >> 1, y >> 1) } else {
-        let d = l2r_nat_drop_raw(x) + l2r_nat_drop_raw(y);
-        v
-    }
-}
-
-// `Array.replicate n x` (big sizes as `lean_mk_array`).
-fn lean_mk_natarr(n : Nat, x : Nat) -> LNatArr { l2r_natarr_replicate(l2r_replicate_len(n), x) }
-
-// `Array.toList` glue (see `l2r_array_to_list`).
-fn l2r_natarr_to_list<L>(a : LNatArr, nil : L, cons : Nat -> (L -> L)) -> L {
-    l2r_natarr_to_list_go(a, l2r_natarr_size(a), nil, cons)
-}
-
-fn l2r_natarr_to_list_go<L>(a : LNatArr, i : u64, acc : L, cons : Nat -> (L -> L)) -> L {
-    if i == 0 { acc } else { l2r_natarr_to_list_go(a, i - 1, cons(l2r_natarr_get(a, i - 1))(acc), cons) }
-}
-
-
-// ---- Array Int (LIntArr) ----
-
-#[ffi(import)]
-fn l2r_intarr_empty() -> LIntArr [{ leanrt::tagvec::empty() }];
-#[ffi(import)]
-fn l2r_intarr_with_capacity(n : u64) -> LIntArr [{ leanrt::tagvec::with_capacity(n) }];
-#[ffi(import)]
-fn l2r_intarr_replicate_word(n : u64, w : u64) -> LIntArr [{ leanrt::tagvec::replicate_word(n, w) }];
-#[ffi(import)]
-fn l2r_intarr_size(a : LIntArr) -> u64 [{ { let r = leanrt::tagvec::size(&a); leanrt::rc_release(a); r } }];
-#[ffi(import)]
-fn l2r_intarr_word(a : LIntArr, i : u64) -> u64 [{ { let r = leanrt::tagvec::word(&a, i); leanrt::rc_release(a); r } }];
-// A read's view (see `l2r_array_give`); the word at `i`, which ends it (a
-// big word owns a reference).
-#[ffi(import)]
-fn l2r_intarr_give(a : LIntArr) -> u64 [{ leanrt::tagvec::give(a) }];
-#[ffi(import)]
-fn l2r_intarr_view_size(p : u64) -> u64 [{ unsafe { leanrt::tagvec::view_size(p) } }];
-#[ffi(import)]
-fn l2r_intarr_view_take(p : u64, i : u64) -> u64 [{ unsafe { leanrt::tagvec::view_take(p, i) } }];
-#[ffi(import)]
-fn l2r_intarr_view_end(p : u64) -> u64 [{ { unsafe { leanrt::tagvec::view_end(p) }; 0 } }];
-#[ffi(import)]
-fn l2r_intarr_set_word(a : LIntArr, i : u64, w : u64) -> LIntArr [{ leanrt::tagvec::set_word(a, i, w) }];
-#[ffi(import)]
-fn l2r_intarr_push_word(a : LIntArr, w : u64) -> LIntArr [{ leanrt::tagvec::push_word(a, w) }];
-#[ffi(import)]
-fn l2r_intarr_pop(a : LIntArr) -> LIntArr [{ leanrt::tagvec::pop(a) }];
-#[ffi(import)]
-fn l2r_intarr_swap(a : LIntArr, i : u64, j : u64) -> LIntArr [{ leanrt::tagvec::swap(a, i, j) }];
-#[ffi(import)]
-fn l2r_intarr_append(a : LIntArr, b : LIntArr) -> LIntArr [{ leanrt::tagvec::append(a, b) }];
-#[ffi(import)]
-fn l2r_intarr_extract(a : LIntArr, s : u64, e : u64) -> LIntArr [{ leanrt::tagvec::extract(a, s, e) }];
-#[ffi(import)]
-fn l2r_intarr_truncate(a : LIntArr, n : u64) -> LIntArr [{ leanrt::tagvec::truncate(a, n) }];
-#[ffi(import)]
-fn l2r_intarr_reverse(a : LIntArr) -> LIntArr [{ leanrt::tagvec::reverse(a) }];
-
-
-// Elements are `Int` words (see the Int section), as for `LNatArr`.
-fn l2r_intarr_take(p : u64, i : u64) -> Int { l2r_int_of_raw(l2r_intarr_view_take(p, i)) }
-fn l2r_intarr_set(a : LIntArr, i : u64, x : Int) -> LIntArr { l2r_intarr_set_word(a, i, l2r_int_raw(x)) }
-fn l2r_intarr_push(a : LIntArr, x : Int) -> LIntArr { l2r_intarr_push_word(a, l2r_int_raw(x)) }
-fn l2r_intarr_replicate(n : u64, x : Int) -> LIntArr { l2r_intarr_replicate_word(n, l2r_int_raw(x)) }
-
-
-fn lean_mk_empty_intarr() -> LIntArr { l2r_intarr_empty() }
-
-// A big capacity gives the empty array, as `l2r_mk_empty_with_capacity`.
-fn lean_mk_empty_intarr_with_capacity(n : Nat) -> LIntArr {
-    let w = l2r_nat_raw(n);
-    if (w & 1) == 1 { l2r_intarr_with_capacity(w >> 1) } else { let d = l2r_nat_drop_raw(w); l2r_intarr_empty() }
-}
-
-// Element `i`, which must be in bounds (checked; see `l2r_array_get`).
-fn l2r_intarr_get(a : LIntArr, i : u64) -> Int {
-    let p = l2r_intarr_give(a);
-    let n = l2r_intarr_view_size(p);
-    if i < n { l2r_intarr_take(p, i) } else { l2r_array_index_bug<Int>(i, n) }
-}
-
-// A read at the word `x` of a `Nat` index a proof keeps in bounds (see
-// `l2r_array_get_word`).
-fn l2r_intarr_get_word(a : LIntArr, x : u64) -> Int {
-    let p = l2r_intarr_give(a);
-    let n = l2r_intarr_view_size(p);
-    if l2r_word_index_ok(x, n) { l2r_intarr_take(p, x >> 1) } else { l2r_index_fail<Int>(x, n) }
-}
-
-fn lean_intarr_get_size(v : LIntArr) -> Nat { l2r_nat_small(l2r_intarr_size(v)) }
-fn lean_intarr_size(v : LIntArr) -> u64 { l2r_intarr_size(v) }
-fn lean_intarr_fget(v : LIntArr, i : Nat) -> Int { l2r_intarr_get_word(v, l2r_nat_raw(i)) }
-fn lean_intarr_fget_borrowed(v : LIntArr, i : Nat) -> Int { l2r_intarr_get_word(v, l2r_nat_raw(i)) }
-fn lean_intarr_uget(v : LIntArr, i : u64) -> Int { l2r_intarr_get(v, i) }
-fn lean_intarr_uget_borrowed(v : LIntArr, i : u64) -> Int { l2r_intarr_get(v, i) }
-
-// `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
-// return the default. In bounds the default is released after the take,
-// as `lean_array_get` (nothing is released between give and take).
-fn lean_intarr_get(dflt : Int, v : LIntArr, i : Nat) -> Int {
-    let x = l2r_nat_raw(i);
-    let p = l2r_intarr_give(v);
-    if l2r_word_index_ok(x, l2r_intarr_view_size(p)) {
-        let r = l2r_intarr_take(p, x >> 1);
-        let d = l2r_consume<Int>(dflt);
-        r
-    } else {
-        let e = l2r_intarr_view_end(p);
-        let d = l2r_nat_drop_raw(x);
-        let ignored = l2r_panic_code(0);
-        dflt
-    }
-}
-
-fn lean_intarr_get_borrowed(dflt : Int, v : LIntArr, i : Nat) -> Int { lean_intarr_get(dflt, v, i) }
-fn lean_intarr_fset(v : LIntArr, i : Nat, x : Int) -> LIntArr { l2r_intarr_set(v, l2r_index_of_nat(i), x) }
-fn lean_intarr_uset(v : LIntArr, i : u64, x : Int) -> LIntArr { l2r_intarr_set(v, i, x) }
-
-// `Array.set!`: out of bounds, panic and return the array unchanged.
-fn lean_intarr_set(v : LIntArr, i : Nat, x : Int) -> LIntArr {
-    let w = l2r_nat_raw(i);
-    if l2r_word_index_ok(w, l2r_intarr_size(v)) { l2r_intarr_set(v, w >> 1, x) } else {
-        let d = l2r_nat_drop_raw(w);
-        let ignored = l2r_panic_code(0);
-        v
-    }
-}
-
-fn lean_intarr_push(v : LIntArr, x : Int) -> LIntArr { l2r_intarr_push(v, x) }
-fn lean_intarr_pop(v : LIntArr) -> LIntArr { l2r_intarr_pop(v) }
-fn lean_intarr_fswap(v : LIntArr, i : Nat, j : Nat) -> LIntArr { l2r_intarr_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j)) }
-fn lean_intarr_uswap(v : LIntArr, i : u64, j : u64) -> LIntArr { l2r_intarr_swap(v, i, j) }
-
-// `Array.swapIfInBounds`.
-fn lean_intarr_swap(v : LIntArr, i : Nat, j : Nat) -> LIntArr {
-    let n = l2r_intarr_size(v);
-    let x = l2r_nat_raw(i);
-    let y = l2r_nat_raw(j);
-    if l2r_word_index_ok(x, n) && l2r_word_index_ok(y, n) { l2r_intarr_swap(v, x >> 1, y >> 1) } else {
-        let d = l2r_nat_drop_raw(x) + l2r_nat_drop_raw(y);
-        v
-    }
-}
-
-// `Array.replicate n x` (big sizes as `lean_mk_array`).
-fn lean_mk_intarr(n : Nat, x : Int) -> LIntArr { l2r_intarr_replicate(l2r_replicate_len(n), x) }
-
-// `Array.toList` glue (see `l2r_array_to_list`).
-fn l2r_intarr_to_list<L>(a : LIntArr, nil : L, cons : Int -> (L -> L)) -> L {
-    l2r_intarr_to_list_go(a, l2r_intarr_size(a), nil, cons)
-}
-
-fn l2r_intarr_to_list_go<L>(a : LIntArr, i : u64, acc : L, cons : Int -> (L -> L)) -> L {
-    if i == 0 { acc } else { l2r_intarr_to_list_go(a, i - 1, cons(l2r_intarr_get(a, i - 1))(acc), cons) }
-}
-
-// END GENERATED: tagarr
-
 // ---- ByteArray (RVec<u8>) ----
 
 fn lean_mk_empty_byte_array(n : Nat) -> RVec<u8> { l2r_mk_empty_with_capacity<u8>(n, 1) }
@@ -2181,10 +2016,25 @@ fn lean_byte_array_copy_slice(src : RVec<u8>, so : Nat, dest : RVec<u8>, d : Nat
         l2r_byte_array_copy_slice(src, s, dest, o, n, exact)
     }
 }
-// `ByteArray.mk`/`ByteArray.data` convert from/to `Array UInt8` (`RVec<u8>`
-// too: `UInt8` crosses the boundary unboxed), so they are the identity.
-fn lean_byte_array_mk(a : RVec<u8>) -> RVec<u8> { a }
-fn lean_byte_array_data(a : RVec<u8>) -> RVec<u8> { a }
+// `ByteArray.mk`/`ByteArray.data` convert from/to `Array UInt8` (an array
+// of boxes), `FloatArray.mk`/`FloatArray.data` from/to `Array Float`: a new
+// array of exactly the source's size, the elements converted in one loop
+// (`leanrt::array`), as natively. lean2rr calls these; in a program that
+// casts, `l2r_bytes_of_boxes` and `l2r_floats_of_boxes` only for an array
+// whose boxes they read (`l2r_boxes_all_imm`, `l2r_boxes_all_float_words`),
+// its generated loop (`l2r_byte_array_of_array`, ...) otherwise.
+#[ffi(import)]
+fn l2r_boxes_of_bytes(src : RVec<u8>) -> RVec<LAny> [{ leanrt::array::boxes_of_bytes(src) }];
+#[ffi(import)]
+fn l2r_bytes_of_boxes(src : RVec<LAny>) -> RVec<u8> [{ leanrt::array::bytes_of_boxes(src) }];
+#[ffi(import)]
+fn l2r_boxes_all_imm(src : RVec<LAny>) -> bool [{ leanrt::array::boxes_all_imm(src) }];
+#[ffi(import)]
+fn l2r_boxes_of_floats(src : RVec<f64>) -> RVec<LAny> [{ leanrt::array::boxes_of_floats(src) }];
+#[ffi(import)]
+fn l2r_floats_of_boxes(src : RVec<LAny>) -> RVec<f64> [{ leanrt::array::floats_of_boxes(src) }];
+#[ffi(import)]
+fn l2r_boxes_all_float_words(src : RVec<LAny>) -> bool [{ leanrt::array::boxes_all_float_words(src) }];
 
 // ---- FloatArray (RVec<f64>) ----
 
@@ -2209,8 +2059,6 @@ fn lean_float_array_set(v : RVec<f64>, i : Nat, x : f64) -> RVec<f64> {
     let w = l2r_nat_raw(i);
     if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_set(v, w >> 1, x) } else { let d = l2r_nat_drop_raw(w); v }
 }
-fn lean_float_array_mk(a : RVec<f64>) -> RVec<f64> { a }
-fn lean_float_array_data(a : RVec<f64>) -> RVec<f64> { a }
 
 // ===========================================================================
 // Standard streams
@@ -2262,34 +2110,35 @@ fn l2r_diag_println(s : LStr) -> u64 { l2r_stderr_put(lean_string_push(s, 10)) }
 
 fn l2r_rc_get<T>(c : Cell<T>) -> T { core::intrinsic::cell::get(c) }
 
-// As natively (`lean_st_ref_set`), the new value is stored before the old
-// one is released, so code that the release runs (the `sync` dependents of
-// a promise it drops, `leanrt::task::resolve`) sees the new value. Reussir's
-// `cell::set` releases the old value before the store: the old value is
-// taken (a second reference) and released after the store, by an FFI call
-// (`l2r_release_value`), which Reussir keeps there. For a type that cannot
-// cross the FFI boundary lean2rr calls `l2r_rc_put` (`refSetFn`).
-fn l2r_rc_set<T>(c : Cell<T>, v : T) -> u64 {
+// `ST.Ref.set` on the reference `r` (a record of type `R`, lean2rr's
+// `L2RRefN`) whose cell is `c` (`r.0`). As natively (`lean_st_ref_set`),
+// the new value is stored before the old one is released, so code that the
+// release runs (the `sync` dependents of a promise it drops,
+// `leanrt::task::resolve`) sees the new value. Reussir's `cell::set`
+// releases the old value before the store: the old value is taken (a
+// second reference) and released after the store, by an FFI call
+// (`l2r_release_value_then`), which Reussir keeps there. Natively the set
+// borrows the reference, and the caller releases it after the set: when the
+// set is the reference's last use, the old value is released first, then
+// the reference, which frees the new value. Here the cell `c` dies at the
+// store, so the reference `r` is passed too, and released by the same FFI
+// call after the old value (a release of `c` at the store would free the
+// cell, and the new value with it, before the old value: test
+// `RtRefSetLastUse`).
+fn l2r_rc_set_ref<T, R>(c : Cell<T>, v : T, r : R) -> u64 {
     let old = core::intrinsic::cell::get(c);
     core::intrinsic::cell::set(c, v);
-    l2r_release_value<T>(old)
+    l2r_release_value_then<T, R>(old, r)
 }
 
-// The release of a value a reference gave up, as `lean_dec` does natively
-// (`leanrt::drop::release`): the last reference to a record is freed inside
-// a free the runtime starts, so what it holds is released in Lean's order
-// (its last field first) and the `sync` dependents of the promises it drops
-// run when that free ends, before the caller goes on. Returns 0.
+// The release of a value a reference gave up, then of the reference, as
+// `lean_dec` does natively (`leanrt::drop::release`): the last reference to
+// a record is freed inside a free the runtime starts, so what it holds is
+// released in Lean's order (its last field first) and the `sync`
+// dependents of the promises it drops run when that free ends, before the
+// next release and before the caller goes on. Returns 0.
 #[ffi(import)]
-fn l2r_release_value<T>(x : T) -> u64 [{ { leanrt::drop::release(x); 0 } }];
-
-// `l2r_rc_set` for a cell whose value's release runs nothing: a scalar, a
-// unit or enumeration value (a `[value]` type, which cannot cross the FFI
-// boundary).
-fn l2r_rc_put<T>(c : Cell<T>, v : T) -> u64 {
-    core::intrinsic::cell::set(c, v);
-    0
-}
+fn l2r_release_value_then<T, R>(x : T, r : R) -> u64 [{ { leanrt::drop::release(x); leanrt::drop::release(r); 0 } }];
 
 fn l2r_rc_swap<T>(c : Cell<T>, v : T) -> T {
     let old = core::intrinsic::cell::get(c);
@@ -2373,7 +2222,7 @@ fn l2r_ref_new<T>(v : T) -> LRef<T> [{ leanrt::array::ref_new(v) }];
 fn l2r_ref_get<T>(r : LRef<T>) -> T [{ leanrt::array::ref_get(r) }];
 
 // The old value is released after the new one is stored, as `lean_dec`
-// does (`l2r_rc_set`).
+// does (`l2r_rc_set_ref`).
 #[ffi(import)]
 fn l2r_ref_set<T>(r : LRef<T>, v : T) -> u64 [{ { leanrt::array::ref_set(r, v); 0 } }];
 
@@ -2552,11 +2401,9 @@ fn l2r_std_pop(base : u64) -> u64 [{ { leanrt::once::pop_context(base, 3); 0 } }
 // Thunks and tasks
 //
 // A `Thunk α` or `Task α` is an `LCell<S>` whose state type `S` lean2rr
-// generates per value type: `enum S { pending(L2RUnit -> α), busy, done(α),
-// conv(L2RUnit -> α, L2RBox) }` (a shared enum; `conv` is a thunk or task
-// converted from another representation: its computation and the original
-// cell; a task's also holds the original's address, its identity for
-// `leanrt::task`; tasks also have a `bind` state). lean2rr also generates
+// generates once for thunks and once for tasks, over boxes:
+// `enum S { pending(L2RUnit -> LAny), busy, done(LAny) }` (a shared enum;
+// tasks also have `bind(L2RUnit -> LCell<S>)`). lean2rr also generates
 // the functions that force the state (`l2r_thunk_get_S`, `l2r_task_get_S`,
 // ...): a thunk runs its closure
 // on first `get` and keeps the value; a task created after `main` has
@@ -2583,7 +2430,7 @@ fn l2r_lcell_new<T>(v : T) -> LCell<T> [{
 fn l2r_lcell_get<T>(c : LCell<T>) -> T [{ leanrt::drop::cell_get(c) }];
 
 // The old state is released after the new one is stored, as `lean_dec`
-// does (`l2r_rc_set`). The store is one another context can see (a thunk's
+// does (`l2r_rc_set_ref`). The store is one another context can see (a thunk's
 // or a task's value, a bind task's continuation): first the writers of the
 // streams this context handed off end (lean-runtime's
 // `sched::before_publish`; one relaxed load when there is none).
@@ -2992,7 +2839,7 @@ fn l2r_shim_tcp_connect(s : LHandle, a : RVec<u8>, r : LPromise) -> LHandle [{
     { let o = leanrt::net::tcp_connect(&s, leanrt::array::as_slice(&a), r); leanrt::array::release(a); leanrt::rc_release(s); o }
 }];
 #[ffi(import)]
-fn l2r_shim_tcp_send(s : LHandle, d : RVec<RVec<u8>>, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_send(&s, d, r); leanrt::rc_release(s); o } }];
+fn l2r_shim_tcp_send(s : LHandle, d : RVec<LAny>, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_send(&s, d, r); leanrt::rc_release(s); o } }];
 #[ffi(import)]
 fn l2r_shim_tcp_recv(s : LHandle, size : u64, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_recv(&s, size, r); leanrt::rc_release(s); o } }];
 #[ffi(import)]
@@ -3030,7 +2877,7 @@ fn l2r_shim_udp_connect(s : LHandle, a : RVec<u8>) -> LHandle [{
     { let o = leanrt::net::udp_connect(&s, leanrt::array::as_slice(&a)); leanrt::array::release(a); leanrt::rc_release(s); o }
 }];
 #[ffi(import)]
-fn l2r_shim_udp_send(s : LHandle, d : RVec<RVec<u8>>, a : RVec<u8>, r : LPromise) -> LHandle [{
+fn l2r_shim_udp_send(s : LHandle, d : RVec<LAny>, a : RVec<u8>, r : LPromise) -> LHandle [{
     { let o = leanrt::net::udp_send(&s, d, leanrt::array::as_slice(&a), r); leanrt::array::release(a); leanrt::rc_release(s); o }
 }];
 #[ffi(import)]
@@ -3136,10 +2983,13 @@ fn lean_dbg_trace<T>(msg : LStr, f : L2RUnit -> T) -> T {
 
 // `dbgTraceIfShared msg a`: prints `shared RC <msg>` when `a` is a heap
 // object whose reference count is not 1 (scalars never are). Reference-counted
-// storage types (runtime handles and Reussir records) have their u32 count at
-// offset 0 of the object they point to. Nullary constructors are Reussir
+// storage types (runtime handles, leanrt's arrays and cells
+// (`leanrt::drop::Vec`, `Cell`: an `Array α` passed at `α := Array T`) and
+// Reussir records) have their u32 count at offset 0 of the object they point
+// to. Nullary constructors are Reussir
 // immediates, scalars in Lean: a pointer with a nonzero top byte (the `tbi`
-// encoding) or to a dummy box with an immortal count (>= 2^31).
+// encoding) or to a dummy box with an immortal count (>= 2^31). A one-word
+// box (`LAny`) answers for its payload (an immediate is never shared).
 // This must be an FFI import (lean2rr then passes values that cannot cross
 // the boundary in fresh wrappers, which are never shared: native Lean's
 // small `Nat`s are scalars), so the message reaches the current stderr
@@ -3150,11 +3000,15 @@ fn lean_dbg_trace<T>(msg : LStr, f : L2RUnit -> T) -> T {
 fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
     {
         let name = ::std::any::type_name::<[:T:]>();
-        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::tagvec::") || name.starts_with("leanrt::string::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
+        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::string::") || name.starts_with("leanrt::drop::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
         let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
-        let shared = boxed && (p >> 56) == 0 && {
-            let c = unsafe { *(p as *const u32) };
-            c != 1 && c < 0x8000_0000
+        let shared = if name == "leanrt::any::LAny" {
+            !unsafe { &*(&a as *const [:T:] as *const leanrt::any::LAny) }.is_exclusive()
+        } else {
+            boxed && (p >> 56) == 0 && {
+                let c = unsafe { *(p as *const u32) };
+                c != 1 && c < 0x8000_0000
+            }
         };
         if shared {
             leanrt::io::diag_put(leanrt::string::from_bytes(&lean_runtime::io::debug::shared_rc_line(msg.utf8())));
@@ -3168,11 +3022,15 @@ fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
 fn l2r_shared_check<T>(a : T) -> T [{
     {
         let name = ::std::any::type_name::<[:T:]>();
-        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::tagvec::") || name.starts_with("leanrt::string::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
+        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::string::") || name.starts_with("leanrt::drop::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
         let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
-        let shared = boxed && (p >> 56) == 0 && {
-            let c = unsafe { *(p as *const u32) };
-            c != 1 && c < 0x8000_0000
+        let shared = if name == "leanrt::any::LAny" {
+            !unsafe { &*(&a as *const [:T:] as *const leanrt::any::LAny) }.is_exclusive()
+        } else {
+            boxed && (p >> 56) == 0 && {
+                let c = unsafe { *(p as *const u32) };
+                c != 1 && c < 0x8000_0000
+            }
         };
         leanrt::set_last_shared(shared);
         a
@@ -3261,19 +3119,30 @@ fn l2r_ptr_addr_obj<T>(a : T) -> u64 [{
 // static cells and immediates, tagged in the top byte or with an immortal
 // count, and a last reference go through the record's release), so that
 // the call costs no out-of-line release: `ptrEq` in a traversal
-// (`Expr.replace`) spent 40% of its time there.
+// (`Expr.replace`) spent 40% of its time there. A one-word box (`LAny`,
+// an opaque type whose word is not an address) answers `l2r_any_addr`'s
+// address and is released as a box (lean2rr's `addrOf` and `boxSink` call
+// this texture at `Box`).
 #[ffi(import)]
 fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
     {
-        let p = unsafe { *(&a as *const [:T:] as *const usize) };
-        if (p >> 56) == 0 {
-            let c = unsafe { *(p as *const u32) };
-            if c > 1 && c < 0x8000_0000 {
-                unsafe { *(p as *mut u32) = c - 1 };
-                ::std::mem::forget(a);
+        if ::std::any::type_name::<[:T:]>() == "leanrt::any::LAny" {
+            let b: leanrt::any::LAny = unsafe { ::std::mem::transmute_copy(&a) };
+            ::std::mem::forget(a);
+            let r = b.addr();
+            drop(b);
+            r
+        } else {
+            let p = unsafe { *(&a as *const [:T:] as *const usize) };
+            if (p >> 56) == 0 {
+                let c = unsafe { *(p as *const u32) };
+                if c > 1 && c < 0x8000_0000 {
+                    unsafe { *(p as *mut u32) = c - 1 };
+                    ::std::mem::forget(a);
+                }
             }
+            p as u64
         }
-        p as u64
     }
 }];
 
@@ -3497,7 +3366,9 @@ fn l2r_fs_create_tempdir() -> LStr [{ leanrt::fs::create_temp_dir() }];
 
 // ---- Child processes (IO.Process) ----
 //
-// `IO.Process.spawn args`: the fields of `SpawnArgs` — `modes` is
+// `IO.Process.spawn args`: the fields of `SpawnArgs` — `args` is Lean's
+// `Array String` as it is (an array of boxes, each string read in place),
+// `modes` is
 // stdin | stdout << 8 | stderr << 16 (`IO.Process.Stdio` constructor
 // indices: piped, inherit, null), `cwd`/`has_cwd` the `Option FilePath`,
 // the `env` array as parallel arrays of names, values and whether the value
@@ -3507,7 +3378,7 @@ fn l2r_fs_create_tempdir() -> LStr [{ leanrt::fs::create_temp_dir() }];
 // streams, a closed handle otherwise). A `Child` needs its pid and whether
 // it was spawned with `setsid` for `wait`/`tryWait`/`kill`/`pid`.
 #[ffi(import)]
-fn l2r_proc_spawn(cmd : LStr, args : RVec<LStr>, cwd : LStr, has_cwd : bool, env_names : RVec<LStr>, env_values : RVec<LStr>, env_set : RVec<bool>, modes : u32, inherit_env : bool, setsid : bool) -> u32 [{
+fn l2r_proc_spawn(cmd : LStr, args : RVec<LAny>, cwd : LStr, has_cwd : bool, env_names : RVec<LStr>, env_values : RVec<LStr>, env_set : RVec<bool>, modes : u32, inherit_env : bool, setsid : bool) -> u32 [{
     {
         let pid = leanrt::proc::with_args(&cmd, &args, &cwd, has_cwd, &env_names, &env_values, &env_set, inherit_env, setsid, |a| leanrt::proc::spawn(a, modes));
         leanrt::rc_release(cmd);
@@ -3535,7 +3406,7 @@ fn l2r_proc_try_wait(pid : u32) -> u64 [{ leanrt::proc::try_wait(pid) }];
 // UTF-8 error before `wait`, stdout's after). On success the outputs are
 // `l2r_proc_output_str(1)` and `(2)`, valid UTF-8.
 #[ffi(import)]
-fn l2r_proc_output(cmd : LStr, args : RVec<LStr>, cwd : LStr, has_cwd : bool, env_names : RVec<LStr>, env_values : RVec<LStr>, env_set : RVec<bool>, inherit_env : bool, setsid : bool, input : LStr, has_input : bool) -> u32 [{
+fn l2r_proc_output(cmd : LStr, args : RVec<LAny>, cwd : LStr, has_cwd : bool, env_names : RVec<LStr>, env_values : RVec<LStr>, env_set : RVec<bool>, inherit_env : bool, setsid : bool, input : LStr, has_input : bool) -> u32 [{
     {
         let code = leanrt::proc::with_args(&cmd, &args, &cwd, has_cwd, &env_names, &env_values, &env_set, inherit_env, setsid,
             |a| leanrt::proc::output(a, if has_input { Some(input.utf8()) } else { None }));

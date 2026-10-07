@@ -17,12 +17,12 @@ where the rustc processes dominate and the quadratic term stays small).
 
 The program prints K*(K-1)/2 (the same for every compiler).
 
-Link times on Reussir ef922049 (measured on l2r-local + 0016, which do not
+Link times on Reussir ef922049 (measured on l2r-local + 21-a, which do not
 touch this code), `rrc OUT.rr --emit executable -O aggressive`, heavy, on
 the loaded test machine. The texture compiles are linear (about 0.1 s per
 instance) and come first; the link is the part that grows:
 
-    K      link    with 0017    whole build   with 0017
+    K      link    with 23-a    whole build   with 23-a
     300     4.0 s    0.3 s
     600    22.8 s    0.5 s
     1000   56 s      0.9 s        260 s         162 s

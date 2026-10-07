@@ -29,8 +29,8 @@ decodeLossy (module RtExternRefused, C symbol lean_decode_lossy_utf8): it has no
 its C symbol lean_decode_lossy_utf8 is that of an extern of Lean's library declared in module Lean.Shell, which the program does not import; if that declaration is public, import Lean.Shell and call it instead
 myRepr (module RtExternRefused, C symbol l2r_nat_repr): it has no Lean definition
 ! its C symbol l2r_nat_repr
-np (module RtExternRefused, C symbol lean_natarr_push): it has no Lean definition
-! its C symbol lean_natarr_push
+np (module RtExternRefused, C symbol lean_array_uswap): it has no Lean definition
+! its C symbol lean_array_uswap
 ! of Lean's runtime library, but the binding fails
 ! binds
 myDropO (module RtExternRefused, C symbol lean_string_drop): it has no Lean definition

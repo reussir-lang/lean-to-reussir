@@ -1,69 +1,325 @@
 # The uniform type `Box`
 
 A value whose type is `lcAny` in a relevant position (see
-[../types/uniform-types.md](../types/uniform-types.md)) is stored as
-`L2RBox`. Typed code never pays for it. Paths are relative to
+[../types/uniform-types.md](../types/uniform-types.md)) is a `Box`: the
+`lcAny` binders of uniform code, and every field, array element, reference
+and thunk or task value of a parameter's type (one representation per
+type). A typed local never pays for it. `Box` is the prelude's `LAny`
+(`leanrt::any`): one word, as Lean's `lean_object*`. Paths are relative to
 `lean2rr/LeanToReussir/`. Plan
 [§5.1](../../translation-plan.md#51-type-translation), "The uniform type
 `Box`".
 
-### `Box` has one variant per boxed type, made on demand
+### The box API: one place knows the encoding
 
-- **What:** `L2RBox` is a generated enum with one variant `b<n>(T)` per
-  concrete Reussir type the program ever boxes, created as lowering needs
-  them. It is always emitted, with at least the unit variant, which is
-  created first and so is `b0`.
-- **Why:** The set of boxed types is only known at the end of Stage 4;
-  types can mention `Box` even when nothing is boxed (F05b: "unknown type
-  L2RBox", 829f20a). A boxed unit is Lean's `box(0)` (see
-  [placeholders.md](placeholders.md#a-boxed-unit-is-leans-box0)).
-- **Where:** `LowerBase.lean`: `boxName`, `boxVariant`;
-  `Emit/Program.lean`: `lowerProgram` (`boxVariant .unit` first, the
-  `boxItem`).
+- **What:** Every box made, taken apart, tested for `box(0)` or looked
+  into goes through the box API of `LowerBase.lean`: `boxKind` (how a type
+  is boxed), `boxNum` (a payload number), `boxPayload` (the registration of
+  a payload type), `boxPayloads`, `boxInit`, `boxValue`, `boxZero` (and
+  `boxZeroAllocates`, false), `boxUnbox` (the unboxing at a type),
+  `boxDispatch` (a match on the payload number, `BoxArm`), `boxSink`,
+  `boxAddr`, `boxFnOfIndex`, `boxAllocates` (whether boxing a type can
+  allocate); and `boxTypeItems` (`Lower/Finish.lean`,
+  the program's release of its payloads). The callers: boxing and
+  unboxing in `tryCoerce` (boxing through `boxOf`: a placeholder is
+  `box(0)`, a constant boxed once, [placeholders.md](placeholders.md),
+  [../optional-passes.md](../optional-passes.md)) and `unboxMatch`
+  (`Lower/Conv.lean`), the box
+  placeholder (`zeroTry`), the unboxing functions (`genUnbox`), the walk of
+  a constant for tasks (`genPersist`, `holdsTask`), identity (`addrOf`) and
+  the program's box item (`lowerProgram`). Outside it, `Lower/Live`
+  recognizes the payloads live code builds by the number a box
+  construction passes, and the runtime's generic `l2r_sink`,
+  `l2r_ptr_addr_rec` and `l2r_persist_seen` take a box as one counted
+  handle (`l2r_ptr_addr_rec` answers `LAny::addr` for a box).
+- **Why:** The encoding changed from a shared enum (a heap cell per box,
+  rule 1's step 4) to one word in one section; the rest of lowering did
+  not change.
+- **Where:** `LowerBase.lean`: "The box API"; `Lower/Finish.lean`:
+  `genUnbox`, `boxTypeItems`.
 - **Remove only if:** never.
 
-### `lcAny` arguments hold `Box`; a boxed value is matched at the uniform instantiation
+### How each type is boxed
 
-- **What:** An inductive applied to `lcAny` is instantiated with `Box` in
-  those positions (schematically, `Free lcAny Nat` is `Free_Box_Nat`);
-  `uniformType` gives the instantiation with every relevant argument
-  `lcAny`. A `cases` on a value held in a `Box` first converts it to that
-  uniform instantiation.
-- **Why:** The uniform instantiation accepts values boxed from every
-  instantiation of the inductive (and, in a program that can cast, from
-  the types a cast reads), so one match covers them.
-- **Where:** `LowerBase.lean`: `lowerTypeApp`, `uniformType`;
+- **What:** `boxKind` gives a type's form in a box:
+  - the unit: `box(0)`, the word 1 (`l2r_any_unit`), no allocation;
+  - `u8`, `u16`, `u32` (`Char`), `bool`, `f32`: the immediate of the word
+    (`l2r_any_of_<k>`, `l2r_any_as_<k>`); an enumeration (a `[value]` enum
+    without fields): the immediate of its index;
+  - `u64`, `f64` (and `i64` as its `u64` bits): an immediate below 2^63,
+    else a cell (`l2r_any_of_u64`; a `Float` is always a cell, as
+    natively); `i8`, `i16`, `i32`: their bits zero-extended, always an
+    immediate (Lean's `Int8`…`Int32` are `[value]` structs of `u8`…`u32`,
+    so boxed as those);
+  - a `[value]` struct: its one field, boxed at the field's type; a field
+    that is a `Box` (`ST.Out σ α`) is the box itself (below);
+  - `Nat`, `Int`, `String`, `Array α`, `ByteArray`, `FloatArray`:
+    leanrt's kinds 1, 2, 3, 6, 7, 8 (`l2r_any_of<T>`; a small `Nat`/`Int`
+    is its own word);
+  - every other type (a shared record or enum, a function value, a
+    reference, a thunk or task cell, a handle, another array): a pointer
+    with the program's payload number (`boxNum`, from 16; from `0x8000 +
+    16` for a leaf type, `boxIsLeaf`: a record or enum whose fields are
+    all scalars), wrapped in an `ElemBox` when it cannot cross the FFI
+    boundary. A shared enum's nullary variant is the immediate of its
+    index (Reussir represents it as an immediate; `leanrt::any` turns it
+    into the index). A function value boxes with `l2r_any_of_fn`, whose
+    nullary variants keep their type: `(num << 32) | index`.
+- **Why:** One word per generic field and array element, as natively; a
+  cell only for `Float`, large `UInt64` and values that need one. An
+  immediate is untyped, as natively: a word read at another word type
+  through `unsafeCast` reads the same word. A function type has several
+  representations (`Nat → Nat`, `Box → Box`), so a nullary variant's index
+  is only meaningful with its type.
+- **Where:** `LowerBase.lean`: `BoxKind`, `boxKind`, `boxNum`, `boxIsLeaf`,
+  `boxValue`.
+- **Remove only if:** never.
+
+### A `[value]` struct over a box is the box itself
+
+- **What:** A `[value]` struct whose one field is a `Box` (`ST.Out σ α`:
+  `val : α`, a parameter's type, and an erased `Void σ`, lowered as
+  `struct [value] T_ST_Out(LAny)`) is boxed as that field, the box itself
+  (`boxValue`), and unboxed as the struct around the box (`boxUnbox`). It
+  has no payload of its own (`boxPayload` registers none), and its boxing
+  never allocates (`boxAllocates`). `boxKind` of `Box` itself is an
+  internal error: a box is never boxed again.
+- **Why:** The struct was boxed by boxing its field at the field's type,
+  and `boxKind` of `Box` fell through to a program payload with a number
+  of its own: an `ST.Out` put into a list, an array, a thunk or a
+  reference panicked at its first unboxing (`ifNum` against that number,
+  "unreachable code"; with `l2r_any_of_ptr`, at its first boxing). Natively
+  the struct is its field, the same object (review of deptypes-lowperf,
+  finding 1; test `RtValueStructBox`).
+- **Where:** `LowerBase.lean`: `BoxKind.valueStruct`, `boxKind`,
+  `boxPayload`, `boxAllocates`, `boxValue`, `boxUnbox`.
+- **Remove only if:** never (a box cannot be a payload).
+
+### Unboxing follows the split rule
+
+- **What:** `boxUnbox` at a type `t`: a scalar, an enumeration or one of
+  leanrt's kinds is decoded by the runtime (`box(0)` is its zero); a
+  program type splits the word: an immediate is a nullary variant by
+  index, the 0 arm (`box(0)`) the type's zero (or variant 0 when it is
+  nullary), any other immediate a cast or unreachable; a pointer is checked
+  against `t`'s number and taken (`l2r_any_raw_take`), any other number a
+  cast or unreachable. A `[value]` struct is its field's unboxing (over a
+  `Box`, the struct around the box itself). The
+  prelude's comment above `l2r_any_as` shows the rule.
+- **Why:** `box(0)` reaches typed positions (an erased argument at a type
+  with data, rule 4e), and only the program can make a record's zero or a
+  nullary variant.
+- **Where:** `LowerBase.lean`: `boxUnbox`; `Lower/Conv.lean`:
+  `unboxMatch`, `tryCoerce`.
+- **Remove only if:** `box(0)` stops reaching typed positions.
+
+### A field of a parameter's type holds a `Box`; a boxed value is matched at its type
+
+- **What:** An inductive has one type, whose fields of a parameter's type
+  are `Box`es (`nominalType`; `uniformType` gives that type). A `cases` on
+  a value held in a `Box` first unboxes it to that type.
+- **Why:** Values boxed from every use of the inductive have the one
+  type (and, in a program that can cast, the unboxing also reads the
+  types a cast reads), so one match covers them.
+- **Where:** `LowerBase.lean`: `nominalType`, `uniformType`;
   `Lower/Code.lean`: `lowerCases`.
 - **Remove only if:** never.
 
-### Unboxing functions are generated last, until the variants are stable
+### Unboxing functions are generated last, until the payloads are stable
 
-- **What:** Unboxing to a nominal type, an array type or a function type is
-  a generated function (`l2r_unbox_T`, `l2r_unbox_arr_N`,
-  `l2r_unbox_fn_T`) whose body is generated at the end, matching every
-  `Box` variant that can hold a value of the target's Lean type. Generating
-  a conversion can add variants (for fields), so the bodies are
-  regenerated until the variant set stops growing, interleaved with the
-  application functions of function values.
-- **Why:** One Lean type has several Reussir representations (`List Nat`
-  and a uniform `List Box`; `LNatArr` and an `RVec<Box>` built by
-  uniform-representation code), so unwrapping must accept all of them.
-- **Where:** `LowerBase.lean`: `unboxFn`, `unboxArrFn`;
-  `Lower/FnValues.lean`: `unboxFnFn`; `Lower/Finish.lean`:
-  `finishUnboxFns`; `Emit/Program.lean`: `lowerProgram` (the finishing
-  loops). Which variants each one accepts:
-  [../conversions/box-unboxing.md](../conversions/box-unboxing.md).
+- **What:** Unboxing to a function type, or to a nominal or word type in a
+  program that casts, is a generated function (`l2r_unbox_T`,
+  `l2r_unbox_fn_T`; a nominal or word type unboxes its own payload in
+  line, `boxUnbox`), whose body (`genUnbox`, `boxDispatch`) matches the
+  payload numbers that can hold a value of the target's Lean type (with
+  `conv-liveness`, those live code boxes): at a function type every
+  compatible representation, converted (and the typed immediates of their
+  nullary variants, `l2r_fn_of_index_S`); in a program that casts, the
+  payloads of types a cast reads. Generating a conversion can add payload
+  types, so the bodies are regenerated until the set stops growing.
+- **Why:** A function type has several Reussir representations, and in a
+  program that casts a box can hold a value of another type.
+- **Where:** `LowerBase.lean`: `unboxFn`, `boxDispatch`;
+  `Lower/FnValues.lean`: `unboxFnFn`; `Lower/Finish.lean`: `genUnbox`,
+  `finishUnboxFns`, `boxTypeItems` (`l2r_fn_of_index_S`).
 - **Remove only if:** never.
 
-### References and function values keep their identity in a `Box`
+### Function values keep their identity in a `Box`
 
-- **What:** A function value is boxed under the variant of its own type,
-  and so is a reference; neither is converted when boxed.
+- **What:** A function value is boxed as itself, at its own type; it is
+  not converted when boxed.
 - **Why:** A function value that goes through uniform code and back is
-  then the same object (no wrapper chain); a reference cannot be converted
-  without losing aliasing, so operations on a boxed reference dispatch
-  over the boxed reference types
-  ([references.md](references.md#a-reference-in-a-box-is-used-through-a-generated-dispatch)).
-- **Where:** `Lower/Conv.lean`: `coerce`; `Lower/Externs.lean`:
-  `refBoxOpFn`, `finishRefFns`.
+  then the same object (no wrapper chain).
+- **Where:** `Lower/Conv.lean`: `coerce`.
 - **Remove only if:** never.
+
+### The program releases its own payloads, one function per type
+
+- **What:** For each program payload type `T` with number `n`, lean2rr
+  emits `fn l2r_any_rel_<n>(x : T) -> unit { }` (Reussir drops `x` at its
+  type) and the trampoline `l2r_any_rel_<n>_c`, whose C signature is
+  `void (cell)`, the type of a release on Reussir's pending stack. A
+  texture, `l2r_any_releases`, holds a static table of
+  `leanrt::any::Rel(n, l2r_any_rel_<n>_c)` and installs it in leanrt
+  (`leanrt::any::install`). The trampoline `l2r_any_init_c` calls it;
+  leanrt calls that once at the start of `rt::run_main2`, before the
+  initializers and before any other thread (`any::init_releases`; a weak
+  symbol, absent in a program without program payloads).
+- **Why:** Only the program knows its types' drop glue. A function per
+  type, found by number in a table, replaces one release with a `match` on
+  the number (`l2r_any_drop`, called through `l2r_any_drop_c` and leanrt's
+  `release_program`): that function saved six register pairs and went
+  through a jump table on every call, about 26 instructions of its own,
+  and the trampoline of each type now takes the cell itself, so it is
+  deferred as is. With the changes of `release_last` (cachegrind, small
+  sizes, two runs, without mimalloc's free path, whose generic branch
+  varies from run to run; outputs equal native): monadic-interp 1008.1 to
+  917.3 M instructions (-9.0 %), unionfind -3.3 %, liasolver -1.1 %,
+  typeclass-generic -0.9 %.
+- **Where:** `Lower/Finish.lean`: `boxTypeItems`; `Emit/Program.lean`:
+  `lowerProgram` (after `liveDrop`, with every payload type known);
+  `runtime/leanrt/src/any.rs`: `Rel`, `RELEASES`, `install`,
+  `init_releases`; `runtime/leanrt/src/rt.rs`: `run_main2`; the probe's
+  own table (`tests/runtime/any-probe/probe.rr`, `probe_install`).
+- **Remove only if:** never.
+
+## The runtime side: `leanrt::any`
+
+### A box is one word: an immediate or a numbered pointer
+
+- **What:** `LAny` (`leanrt::any`, the prelude section "The one-word box")
+  is a `tagged` opaque type. An odd word is an immediate `(v << 1) | 1`:
+  scalars, unit (word 1, Lean's `box(0)`), a small `Nat` or `Int` (its own
+  word). An even word owns a reference to a counted object: the low 48
+  bits are the address, the top 16 bits the number of the payload's type.
+  Numbers 1 to 15 are leanrt's kinds (big `Nat`, big `Int`, `LStr`, the
+  `f64` and large-`u64` cells, `RVec<LAny>`, `ByteArray`, `FloatArray`);
+  16 and up are the program's. A `Float` and a `UInt64`/`USize` from 2^63
+  go into a cell (`Rc`), as natively.
+- **Why:** One word per generic field and array element, as Lean's
+  `lean_object*`. A copy is the payload's count increment, in line; the
+  number lets the drop hook release the payload as its own type and lets
+  an unbox check the type (a mismatch panics, it never reads wrongly).
+- **Where:** `runtime/leanrt/src/any.rs`; `runtime/prelude.rr`, section
+  "The one-word box"; Reussir patch 38-a (issue 38: `rc.inc` clears the top
+  16 bits of a tagged handle; `reussir-bugs/38-tagged-top-bits.md`).
+  Places in lean2rr that the switch to `LAny` touches, because they treat
+  `Box` as one record pointer today: `Lower/Identity.lean`, `addrOf` (the
+  `Box` case calls `l2r_ptr_addr_rec`, used by `ptrAddrUnsafe` and
+  `ptrEq`; the texture answers `LAny::addr` for a box, `l2r_any_addr` is
+  the direct form); `Lower/Finish.lean`, `boxSink` (releases a box out of
+  line through `l2r_ptr_addr_rec`); `LowerBase.lean`, `isBoundaryTy` (a box
+  crosses the FFI boundary as one handle) and `refType`'s boxed path; the
+  prelude's shared checks (`lean_dbg_trace_if_shared`, `l2r_shared_check`:
+  they answer for a box's payload); leanrt's array copy and release loops
+  (an `RVec<LAny>` has its own: `CloneInto for LAny`, `ReleaseElems for
+  LAny`, ownership.md); the capacity checks that pass the element size 8.
+- **Remove only if:** `Box` goes back to a generated enum (the fallback is
+  a two-word `[value]` enum).
+
+### A boxed `Float` or large `UInt64` is a small cell, read in line
+
+- **What:** `any::of_f64` and `any::of_u64` (from 2^63) put the value in
+  a cell from `alloc::rc_new`, which takes `mi_malloc_small` for a box of
+  at most 128 words (a constant size, so the choice is made at compile
+  time). `any::as_u64` and `any::as_f64` read a cell in line
+  (`take_cell_bits`: the type number checked, the 8 bytes at offset 8
+  read, then the cell freed with `mi_free` when that was its last
+  reference, else decremented); the two cells have one layout, so each
+  reads the other's bits, as `unsafeCast` does natively. `release_kind`
+  frees a scalar cell with `mi_free` too.
+- **Why:** The read was a call into a generic `Rc` read and drop (about 21
+  instructions and Rust's deallocator), and `mi_malloc` tests the size
+  that `mi_malloc_small` takes as small. Mergesort reads 145 000 `UInt64`
+  cells (values from 2^63) and typeclass-generic boxes floats: -1.6 % and
+  -1.8 % instructions, higher-order -1.0 % (cachegrind, small sizes).
+- **Where:** `runtime/leanrt/src/alloc.rs`: `rc_new`, `free`, `rc_data`;
+  `runtime/leanrt/src/any.rs`: `of_f64`, `of_u64_cell`, `as_u64`,
+  `as_f64`, `take_cell_bits`, `release_kind`. Test: leanrt's
+  `any::tests::scalar_cells_read_shared_and_last`.
+- **Remove only if:** `Float` and large `UInt64` stop going into cells.
+
+### A nullary variant is boxed as the immediate of its index
+
+- **What:** `leanrt::any::of` turns a Reussir nullary-variant immediate
+  (top byte `tag + 1` under the `tbi` encoding; a dummy count of at least
+  2^31 under the `immortal` one) into the box immediate of its variant
+  index. Unboxing an immediate at an enum type is the program's code: it
+  splits on the low bit (`l2r_any_raw_is_imm`) and builds the variant from
+  the index (index 0 also serves `box(0)`).
+- **Why:** The top bits of a box hold the type number, and only Reussir can
+  make a nullary variant's handle (the dummy box's address). As natively:
+  Lean boxes a nullary constructor as `lean_box(i)`.
+- **Where:** `runtime/leanrt/src/any.rs`: `Payload for Bridge<X>`.
+- **Remove only if:** Reussir stops encoding nullary variants as
+  immediates.
+
+### `box(0)` unboxes to the zero of every type
+
+- **What:** Lean's `box(0)` is the box word 1 (the immediate 0). Read at
+  one of leanrt's kinds it is that kind's zero (`0`, `0.0`, `""`, `#[]`,
+  the `Nat`/`Int` 0), in `leanrt::any`. A generated unbox at a program
+  type splits the word first (`l2r_any_raw`, `l2r_any_raw_is_imm`): an
+  immediate `i` is the nullary variant of index `i`, or, for index 0 when
+  variant 0 is not nullary, the zero of the type (lean2rr's `l2r_zero_N`);
+  any other immediate is `l2r_unreachable`; a pointer goes to
+  `l2r_any_raw_as<T>`. The prelude's comment above `l2r_any_as` shows the
+  shape.
+- **Why:** As the `b0` arm of the old enum `L2RBox` did: an erased argument passed
+  where data is expected (rule 4e) is `box(0)`, and code may read it at any
+  type. Only the program can make a record's zero or a nullary variant.
+- **Where:** `runtime/leanrt/src/any.rs`: `leanrt_kind!`, `f64_of_word`;
+  `runtime/prelude.rr`, the comment above `l2r_any_as`; the probe's unbox
+  functions (`tests/runtime/any-probe/probe.rr`).
+- **Remove only if:** `box(0)` stops reaching typed positions.
+
+### The last reference of a program payload goes to the program, through the worklist (a leaf directly)
+
+- **What:** `LAny`'s drop decrements the payload's count in line. At count
+  1 it calls `any::release_last(w)` (out of line, `#[cold]`), which tests
+  for a program number first (16 and up). A program payload's
+  release is `RELEASES[num]` (the program's `l2r_any_rel_<num>_c`, see
+  above); its cell, the word without the number, is deferred as one
+  pending cell with `__reussir_drop_defer(cell, release)` and drained with
+  `__reussir_drop_drain()` (switch step 11's rule for records,
+  `drop::free_unique`). Inside a free that only pushes the cell; outside
+  one Reussir's `drain_one` runs the release inside a new drain and then
+  what it pushed. A leaf payload (a number with `LEAF_BIT`, `0x8000`:
+  lean2rr's `boxIsLeaf`, a record or enum whose fields are all scalars) is
+  released by a direct call when no free is running (`release_leaf`, out
+  of line, so that the main path reads no thread-local state). leanrt's
+  own kinds go to `release_kind`. A number without a release installs the
+  table if that was not done yet, else it is Lean's internal panic
+  (`release_unregistered`).
+- **Why:** Only the program knows its types' release (Reussir's drop glue).
+  Through the worklist, a chain of nested boxes is freed in a loop, not by
+  recursion (the probe frees chains of 10^6 boxes on a 1 MiB stack, and
+  `RtBoxDeepChain` 10^6 nested boxes on a 1 MiB stack), and in native
+  Lean's order: inside a free, a record's observable members (a file
+  handle, a promise) are pushed and released last field first, as
+  `lean_dec`/`lean_del` frees a box's payload. A direct call of the
+  program's release outside a free runs the payload's glue in field order
+  instead (a box of `H2(A, B)`: `AB`, natively `BA`; a chain of boxes
+  `C(1, C(2, C(3)))`: `132`, natively `321`), and runs promise dependents
+  in the middle of it; the probe checks the native orders (any-probe,
+  `s_order`). A leaf holds nothing to order and frees nothing else, so its
+  direct release changes no order. The cell is deferred without `_wide`:
+  with `_wide`, a cell whose first 8 bytes are header could link to the
+  run on top, but in the classic programs the stack was empty at every
+  such deferral (no link formed) and the wide deferral cost 3
+  instructions more each (monadic-interp 1077.5 against 1071.2 M), and it
+  needs lean2rr to know Reussir's layouts. A deferral that is not `_wide`
+  neither reads nor writes the cell. `release_last` stays `#[cold]`: the
+  drops in a loop then keep their decrement in line and the call out of
+  the way (without it, sieve +0.5 % instructions from the loop's layout,
+  monadic-interp -0.1 %).
+- **Where:** `runtime/leanrt/src/any.rs`: `release_last` (`LEAF_BIT`),
+  `defer_and_drain`, `release_leaf`, `release_kind`,
+  `release_unregistered`; `LowerBase.lean`: `boxIsLeaf`, `boxNum`. Tests:
+  leanrt's `any::tests` (`deep_chain_frees_without_recursion`,
+  `deep_chain_of_two_numbers`, `fields_in_lean_order`,
+  `a_leaf_payload_is_released_directly`), any-probe, `RtBoxDeepChain`,
+  `RtBoxPackFreeOrder`, `RtDepDropOrderBoxed`, the order tests of
+  ownership.md.
+- **Remove only if:** Reussir gives opaque types a drop glue of their own
+  that defers.

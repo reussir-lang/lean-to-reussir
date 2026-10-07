@@ -1,0 +1,3 @@
+# shared case D71TesterT36: a chain of n records holding values of unknown type, n = 10^3 and 10^5: linear, freed without recursion
+# (the case's large size, n = 10^6, is in the shared corpus)
+1000 | 100000 | 4 2000 | rss 2 4000

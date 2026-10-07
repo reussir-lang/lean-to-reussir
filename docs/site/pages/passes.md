@@ -22,9 +22,8 @@ registry lists it in one line: name, on by default, description,
 `install`. `install` plugs the pass into a hook of `PassConfig` and keeps
 what was installed before. The hooks are:
 
-- choices of representation (field order, `[value]` structs, one-word
-  `Nat` arrays, cached placeholders);
-- a part of Stage 3 (split map loops, uniform updates);
+- choices of representation (field order, `[value]` structs, cached
+  placeholders, boxed constants);
 - passes over the checked mono code (`monoPasses`);
 - Lean definitions replaced by prelude functions;
 - lowering hooks (`LowerHooks`: the J1′ choice, the form of a J4 state
@@ -50,20 +49,20 @@ lean2rr --list-opts            # prints the registry
 
 ### Helpers for live code only (`conv-liveness`)
 
-At the end of Stage 4, lean2rr generates helpers that match variants: an
-unboxing function has an arm per `L2RBox` variant that can hold its type,
-an application function an arm per variant of its function type. Each arm
-converts, and a conversion can ask for more helpers. In a program that can
+At the end of Stage 4, lean2rr generates helpers that match: an unboxing
+function has an arm per boxed type that can hold a value of its type, an
+application function an arm per variant of its function type. An arm can
+wrap or cast, and that can ask for more helpers. In a program that can
 cast (one `unsafe` implementation in any library that it imports), every
-unboxing function also gets an arm and a conversion for every variant with
-a compatible layout. So the helpers grow quadratically, and almost all of
+unboxing function also gets an arm and a cast for every type with a
+compatible layout. So the helpers grow quadratically, and almost all of
 them can never run.
 
 `conv-liveness` makes a reachability pass over the generated program, from
 the entry point, the startup chain and the runtime's entry points. It
 generates a helper only when live code reaches it, and an arm only for a
-variant that live code builds. Then it drops the functions that nothing
-reaches.
+type or a variant that live code builds. Then it drops the functions that
+nothing reaches.
 
 - **Effect.** A program that imports `Cslib.Init` went from 990,927
   functions (1.44 GB of `.rr`) to 30,418 (26 MB). A program that imports

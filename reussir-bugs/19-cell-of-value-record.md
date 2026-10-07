@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0023, with 0033's composition fix),
+**Kind:** bug. **Status:** patched (19-a, with 11-b's composition fix),
 applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also works around it
 (it stores `Nat`/`Int` references in two cells and boxes other `[value]`
 records).
@@ -63,22 +63,22 @@ has materialized the Cell accesses.
 
 A reference to a `Nat` or `Int` (`ST.Ref`, `IO.Ref`) was the prelude's
 `L2RNatRef`/`L2RIntRef` (a tagged word in a `Cell<u64>` and the big number
-in a `Cell<L2RBigOpt>`) while they were `[value]` enums; since patch 0050
-([local additions](local-additions.md)) they are counted tagged handles,
+in a `Cell<L2RBigOpt>`) while they were `[value]` enums; since patch 41-a
+([issue 41](41-tagged-ffi-objects.md)) they are counted tagged handles,
 which a cell holds directly. A reference to a `[value]` record keeps the
 element in an `ElemBox` (one allocation per `set`; such references do not
 occur in practice, since lean2rr's `[value]` structs are IO results).
-lean2rr keeps this representation with 0023 applied (README policy:
+lean2rr keeps this representation with 19-a applied (README policy:
 workarounds stay, so that lean2rr also works with an unpatched Reussir).
 
 ## Patch
 
 Patch file
-[`patches/0023-l2r-local-bug-19-give-a-cell-s-value-record-its-own-.patch`](patches/0023-l2r-local-bug-19-give-a-cell-s-value-record-its-own-.patch)
+[`patches/19-a-cell-value-record-glue.patch`](patches/19-a-cell-value-record-glue.patch)
 (`l2r-local` commit `c9e640b3`, applied in `./reussir`; `l2r-local` head
 `cc8e5aa5`), as amended after review round 7 (RV7P-01). Its composition
-with 0033 ([issue 11b](11-sccp-call-graph.md)'s symbol table collection) is
-fixed in 0033 (RV8C-01, below).
+with 11-b ([issue 11b](11-sccp-call-graph.md)'s symbol table collection) is
+fixed in 11-b (RV8C-01, below).
 
 **The change.** The capability of the argument reference becomes part of
 the outlined glue, as the atomic kind already is:
@@ -129,15 +129,15 @@ stack and are drained at its end. Outlining a `rigid`, `flex` or `field`
 reference failed `func.call` verification before, so no program that
 compiled took the new symbols.
 
-**The composition fix (0033, RV8C-01).** 0033 gives the acquire/drop
+**The composition fix (11-b, RV8C-01).** 11-b gives the acquire/drop
 expansion one `SymbolTableCollection` per run, kept up to date by the two
-glue creators. With 0023, the acquire glue of a record also creates its
+glue creators. With 19-a, the acquire glue of a record also creates its
 named members' glue while its body is built (`callMemberGlue`), through a
 call that did not get the collection: the member's glue was added to the
 module but not to the collection, and a later lookup of that glue in the
 same pass missed it and defined it again ("redefinition of symbol named
 '_RINvNvC4core9intrinsic22acquire_in_place_fieldC4PairE'"), depending on
-the order of the accesses. The final 0033 passes the collection on through
+the order of the accesses. The final 11-b passes the collection on through
 `emitOwnershipAcquisition` to that creation.
 
 **Verification.**
@@ -146,9 +146,9 @@ the order of the accesses. The final 0033 passes the collection on through
   get and set of a variant, of a compound and of a nested compound, a cell
   freed holding a counted arm, at `-O default` and `-O aggressive`; the
   field glue of the nested record calls the inner record's field glue) and,
-  from 0033, `cell_value_record_glue_order` (a `Cell<Pair>` read before a
-  `Cell<Quad>`, the order that failed). The first fails without 0023, the
-  second on a stack with the first version of 0033.
+  from 11-b, `cell_value_record_glue_order` (a `Cell<Pair>` read before a
+  `Cell<Quad>`, the order that failed). The first fails without 19-a, the
+  second on a stack with the first version of 11-b.
 - The MLIR and LLVM IR of Reussir's frontend tests (except the new tests)
   and the LLVM IR of 30 lean2rr programs are the same before and after.
 - Compile cost of the review's DAG repro (get/set/get of a `Cell<D(K)>`):
@@ -177,7 +177,7 @@ the right name, linear glue); a second fuzz (65 seeds, 260 builds, deeper
 types and mutually recursive records through cells) and the "IR unchanged"
 claim (147 frontend tests, 10 lean2rr programs) held. Round 8, `reussir-c`
 (local review notes): RV8C-01 (medium)
-in the composition with 0033, fixed in the final 0033 as above; with that
+in the composition with 11-b, fixed in the final 11-b as above; with that
 fix the full lit suite passes on the composed stack.
 
 **Effect on lean2rr.** None today (it keeps its two-cell references).

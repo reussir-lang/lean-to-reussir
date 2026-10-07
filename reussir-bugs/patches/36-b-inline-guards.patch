@@ -1,0 +1,316 @@
+From 0ea913836a94013495a4f7c08905644f7175e8df Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Tue, 6 Oct 2026 19:30:49 -0400
+Subject: [PATCH] l2r-local: issue 36: no alwaysinline for a texture with a
+ large or dynamic frame, one that cannot return, or an interposable trampoline
+
+Review of 36-a (local notes review-inline):
+
+- F1: alwaysinline skips the inliner's limit for recursive callers
+  (-recursive-inline-max-stacksize: no callee with more than 1024 bytes
+  of static allocas into a recursive caller), and the pass measured the
+  texture at its call in the trampoline, which is not recursive. A
+  texture with a 64 KiB buffer called from a non-tail recursive function
+  was inlined into every frame: at depth 2000 the program overflowed its
+  stack, where the unpatched rrc printed 1. The pass now leaves a
+  boundary alone when its static allocas sum to more than
+  InlineConstants::TotalAllocaSizeRecursiveCaller (1024), or when it has
+  a dynamic alloca.
+- F2: a texture whose every path ends in a call that does not return (a
+  panic) is cold, but LLVM infers no attribute on a weak_odr boundary, so
+  the cold check missed it (l2r_internal_panic: 54 call sites in a
+  lean2rr program, all inlined). The pass now also skips a boundary that
+  is noreturn or has no ret.
+- F3: a trampoline that the linker may replace (isInterposable) is left
+  alone.
+
+Tests: llvmpass/import_trampoline_inline.ll gains a 1024-byte frame
+(marked), a 2048-byte frame, a texture without ret and a weak trampoline
+(unmarked); new frontend/ffi_import_inline_recursive.rr (the review's
+repro: the trampoline of the 64 KiB texture has no alwaysinline, and the
+program prints 1). docs/design/polymorphic-ffi.md lists the new rules.
+---
+ docs/design/polymorphic-ffi.md                | 11 ++-
+ .../Reussir/LLVMPass/ImportTrampolineInline.h |  6 +-
+ .../ImportTrampolineInline.cpp                | 51 +++++++++++--
+ .../frontend/ffi_import_inline_recursive.rr   | 47 ++++++++++++
+ .../llvmpass/import_trampoline_inline.ll      | 73 ++++++++++++++++++-
+ 5 files changed, 177 insertions(+), 11 deletions(-)
+ create mode 100644 tests/integration/frontend/ffi_import_inline_recursive.rr
+
+diff --git a/docs/design/polymorphic-ffi.md b/docs/design/polymorphic-ffi.md
+index ee4070aa..bc414119 100644
+--- a/docs/design/polymorphic-ffi.md
++++ b/docs/design/polymorphic-ffi.md
+@@ -320,9 +320,14 @@ every call site. Without the attribute, LLVM inlines at a call site that it
+ judges cold (rare relative to the caller's entry) only below a cost of 45,
+ and `inlinehint` does not change that threshold: a texture inlined at an
+ ordinary call site stayed a call, with its argument packing, at a cold one.
+-Larger textures, textures LLVM judges `cold`, `noinline` ones and textures
+-compiled for other target features keep the cost model's decision, and
+-`-O size` runs no such pass.
++Larger textures, textures LLVM judges `cold` or that cannot return (no
++`ret`: a panic), `noinline` ones, textures compiled for other target
++features, and textures whose stack frame is dynamic or larger than 1024
++bytes keep the cost model's decision. The last rule keeps the inliner's
++own limit for recursive callers (`-recursive-inline-max-stacksize`), which
++`alwaysinline` would skip: a texture with a large buffer inlined into a
++recursive function would grow every frame. A trampoline the linker may
++replace (`weak`) is left alone, and `-O size` runs no such pass.
+ 
+ ## Implementation map
+ 
+diff --git a/include/Reussir/LLVMPass/ImportTrampolineInline.h b/include/Reussir/LLVMPass/ImportTrampolineInline.h
+index 4b3e89da..f6cd3009 100644
+--- a/include/Reussir/LLVMPass/ImportTrampolineInline.h
++++ b/include/Reussir/LLVMPass/ImportTrampolineInline.h
+@@ -22,8 +22,10 @@
+ /// function's inline cost (measured at its one call, in the trampoline) is at
+ /// most `threshold` (the backend passes the default pipeline's own inline
+ /// threshold) and LLVM could inline it, both functions get `alwaysinline`:
+-/// the texture is then inlined at every call site, as at an ordinary one.
+-/// Larger textures keep the cost model's decision.
++/// the texture is then inlined at every call site. Not marked: larger
++/// textures, textures that are `cold` or cannot return, and textures whose
++/// stack frame is dynamic or larger than the inliner allows in a recursive
++/// caller (`alwaysinline` would skip that check).
+ ///
+ //===----------------------------------------------------------------------===//
+ 
+diff --git a/lib/LLVMPass/AllocationSimplication/ImportTrampolineInline.cpp b/lib/LLVMPass/AllocationSimplication/ImportTrampolineInline.cpp
+index d83ba6fc..ad13d206 100644
+--- a/lib/LLVMPass/AllocationSimplication/ImportTrampolineInline.cpp
++++ b/lib/LLVMPass/AllocationSimplication/ImportTrampolineInline.cpp
+@@ -23,6 +23,7 @@
+ #include <llvm/Analysis/TargetLibraryInfo.h>
+ #include <llvm/Analysis/TargetTransformInfo.h>
+ #include <llvm/IR/Attributes.h>
++#include <llvm/IR/DataLayout.h>
+ #include <llvm/IR/Function.h>
+ #include <llvm/IR/InstIterator.h>
+ #include <llvm/IR/Instructions.h>
+@@ -41,6 +42,43 @@ llvm::CallBase *boundaryCall(llvm::Function &trampoline,
+   return nullptr;
+ }
+ 
++/// Whether the boundary's stack frame is small enough to be inlined into a
++/// recursive caller. The inliner refuses a callee whose static allocas exceed
++/// InlineConstants::TotalAllocaSizeRecursiveCaller (1024 bytes) when the
++/// caller is recursive (-recursive-inline-max-stacksize), but `alwaysinline`
++/// skips that check, and the pass cannot see the trampoline's callers'
++/// recursion: a texture with a large buffer, inlined into a non-tail
++/// recursive function, would multiply that function's frame. A dynamic
++/// alloca has no size to compare: such a texture is left alone too.
++bool hasSmallFrame(llvm::Function &boundary) {
++  const llvm::DataLayout &layout = boundary.getParent()->getDataLayout();
++  uint64_t bytes = 0;
++  for (llvm::Instruction &inst : llvm::instructions(boundary)) {
++    auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(&inst);
++    if (!alloca)
++      continue;
++    std::optional<llvm::TypeSize> size = alloca->getAllocationSize(layout);
++    if (!alloca->isStaticAlloca() || !size || size->isScalable())
++      return false;
++    bytes += size->getFixedValue();
++    if (bytes > llvm::InlineConstants::TotalAllocaSizeRecursiveCaller)
++      return false;
++  }
++  return true;
++}
++
++/// Whether the boundary can return: a texture whose every path ends in a
++/// call that does not return (a panic) is cold, though LLVM infers no
++/// attribute on a `weak_odr` function, and inlining it buys nothing.
++bool canReturn(llvm::Function &boundary) {
++  if (boundary.doesNotReturn())
++    return false;
++  for (llvm::BasicBlock &block : boundary)
++    if (llvm::isa<llvm::ReturnInst>(block.getTerminator()))
++      return true;
++  return false;
++}
++
+ } // namespace
+ 
+ llvm::PreservedAnalyses
+@@ -62,8 +100,10 @@ ImportTrampolineInlinePass::run(llvm::Module &module,
+     if (!marker.isStringAttribute() || trampoline.isDeclaration())
+       continue;
+     // `alwaysinline` and `noinline` exclude each other (optnone implies
+-    // noinline).
+-    if (trampoline.hasFnAttribute(llvm::Attribute::NoInline))
++    // noinline). A trampoline that the linker may replace by another
++    // definition is left alone: the attribute describes this one only.
++    if (trampoline.hasFnAttribute(llvm::Attribute::NoInline) ||
++        trampoline.isInterposable())
+       continue;
+     // The boundary function has a body only when the texture's bitcode is
+     // linked in; a boundary defined elsewhere (a C function) cannot be
+@@ -74,9 +114,10 @@ ImportTrampolineInlinePass::run(llvm::Module &module,
+     llvm::CallBase *call = boundaryCall(trampoline, *boundary);
+     if (!call)
+       continue;
+-    // A texture that LLVM judges cold (it only reaches cold code) stays out
+-    // of line.
+-    if (boundary->hasFnAttribute(llvm::Attribute::Cold))
++    // A texture that LLVM judges cold, or that cannot return, stays out of
++    // line; so does one with a large or dynamic stack frame.
++    if (boundary->hasFnAttribute(llvm::Attribute::Cold) ||
++        !canReturn(*boundary) || !hasSmallFrame(*boundary))
+       continue;
+     llvm::TargetTransformInfo &tti =
+         fam.getResult<llvm::TargetIRAnalysis>(*boundary);
+diff --git a/tests/integration/frontend/ffi_import_inline_recursive.rr b/tests/integration/frontend/ffi_import_inline_recursive.rr
+new file mode 100644
+index 00000000..5df20067
+--- /dev/null
++++ b/tests/integration/frontend/ffi_import_inline_recursive.rr
+@@ -0,0 +1,47 @@
++// UNSUPPORTED: darwin, windows
++// A texture with a 64 KiB stack buffer, called from a recursive function
++// that is not tail recursive (depth 2000). LLVM's inliner refuses to inline
++// a callee whose static allocas exceed 1024 bytes into a recursive caller
++// (-recursive-inline-max-stacksize); `alwaysinline` would skip that check,
++// so ImportTrampolineInlinePass leaves such a texture unmarked. Marked, the
++// buffer lands in every frame of `walk` (128 MB at depth 2000) and the
++// program overflows its stack. %t/rustc compiles the textures for the CPU
++// rrc compiles for, as in ffi_import_inline_cold.rr.
++
++// RUN: rm -rf %t && mkdir -p %t
++// RUN: printf '#!/bin/sh\nexec "$REAL_RUSTC" "$@" -C target-cpu=native -C target-feature=-outline-atomics\n' > %t/rustc
++// RUN: chmod +x %t/rustc
++// RUN: env REAL_RUSTC=%rustc_path %rrc %s --polyffi-rust-path %t/rustc \
++// RUN:   --emit llvm-ir -O aggressive -o %t/aggressive.ll
++// RUN: grep -E '^attributes .*"reussir-import-boundary"="_RC8scramble_ffi"' %t/aggressive.ll \
++// RUN:   | %FileCheck %s --check-prefix=ATTR
++// RUN: env REAL_RUSTC=%rustc_path %rrc %s --polyffi-rust-path %t/rustc \
++// RUN:   -o %t/walk --emit executable -O aggressive --relocation-mode pic %rrc_linker
++// RUN: %t/walk | %FileCheck %s --check-prefix=OUT
++
++// ATTR-NOT: alwaysinline
++// ATTR: "reussir-import-boundary"="_RC8scramble_ffi"
++// OUT: 1
++
++#[ffi(import)]
++fn scramble(x : u64) -> u64 [{
++    {
++        let mut buf = [0u64; 8192];
++        buf[(x as usize) & 8191] = x;
++        std::hint::black_box(&mut buf);
++        buf[((x >> 13) as usize) & 8191] ^ x
++    }
++}];
++#[ffi(import)]
++fn depth() -> u64 [{ std::hint::black_box(2000u64) }];
++#[ffi(import)]
++fn say(x : u64) [{ println!("{}", x) }];
++
++fn walk(n : u64) -> u64 {
++    if n == 0 { 1 } else { scramble(walk(n - 1)) }
++}
++
++#[main]
++fn main() {
++    say(walk(depth()));
++}
+diff --git a/tests/integration/llvmpass/import_trampoline_inline.ll b/tests/integration/llvmpass/import_trampoline_inline.ll
+index c4833588..1e29fe71 100644
+--- a/tests/integration/llvmpass/import_trampoline_inline.ll
++++ b/tests/integration/llvmpass/import_trampoline_inline.ll
+@@ -9,10 +9,13 @@
+ ; and calls its texture's boundary function (`*_ffi`, from the texture's
+ ; bitcode); the attribute "reussir-import-boundary" names that function.
+ ; When the boundary function's inline cost is at most the inline threshold
+-; (here LLVM's default, 225) and LLVM may inline it, both functions become
++; (here LLVM's default, 225), LLVM may inline it, it can return, it is not
++; cold and its stack frame is at most 1024 bytes, both functions become
+ ; `alwaysinline`; otherwise both stay as they are.
+ 
+ declare i64 @slow(i64) cold noinline
++declare void @die(i64) noreturn
++declare void @touch(ptr)
+ declare i64 @ext_c(i64)
+ 
+ ; A small texture: some arithmetic and a cold call. Its cost (about 70) is
+@@ -209,6 +212,69 @@ define i64 @tuned(i64 %x) "reussir-import-boundary"="tuned_ffi" {
+   ret i64 %r
+ }
+ 
++; A texture with a 1024-byte stack frame: the most that LLVM inlines into a
++; recursive caller (-recursive-inline-max-stacksize).
++; CHECK: define weak_odr i64 @buf_ffi(i64 %x) #[[BUF_FFI:[0-9]+]] {
++define weak_odr i64 @buf_ffi(i64 %x) {
++  %buf = alloca [1024 x i8], align 8
++  call void @touch(ptr %buf)
++  %v = load i64, ptr %buf, align 8
++  %r = xor i64 %v, %x
++  ret i64 %r
++}
++
++; CHECK: define i64 @buf(i64 %x) #[[BUF:[0-9]+]] {
++define i64 @buf(i64 %x) "reussir-import-boundary"="buf_ffi" {
++  %r = call i64 @buf_ffi(i64 %x)
++  ret i64 %r
++}
++
++; A texture with a larger frame: unchanged. `alwaysinline` would skip the
++; inliner's check, and a recursive caller's frame would grow by 2048 bytes
++; per level.
++; CHECK: define weak_odr i64 @framed_ffi(i64 %x) {
++define weak_odr i64 @framed_ffi(i64 %x) {
++  %buf = alloca [2048 x i8], align 8
++  call void @touch(ptr %buf)
++  %v = load i64, ptr %buf, align 8
++  %r = xor i64 %v, %x
++  ret i64 %r
++}
++
++; CHECK: define i64 @framed(i64 %x) #[[FRAMED:[0-9]+]] {
++define i64 @framed(i64 %x) "reussir-import-boundary"="framed_ffi" {
++  %r = call i64 @framed_ffi(i64 %x)
++  ret i64 %r
++}
++
++; A texture that cannot return (a panic), though not marked cold or
++; noreturn: unchanged.
++; CHECK: define weak_odr i64 @abort_ffi(i64 %x) {
++define weak_odr i64 @abort_ffi(i64 %x) {
++  %c = add i64 %x, 7
++  call void @die(i64 %c)
++  unreachable
++}
++
++; CHECK: define i64 @abort(i64 %x) #[[ABORT:[0-9]+]] {
++define i64 @abort(i64 %x) "reussir-import-boundary"="abort_ffi" {
++  %r = call i64 @abort_ffi(i64 %x)
++  ret i64 %r
++}
++
++; A trampoline that the linker may replace (weak): unchanged.
++; CHECK: define weak_odr i64 @weakt_ffi(i64 %x) {
++define weak_odr i64 @weakt_ffi(i64 %x) {
++  %r = add i64 %x, 3
++  ret i64 %r
++}
++
++; CHECK: define weak i64 @weakt(i64 %x) #[[WEAKT:[0-9]+]] {
++define weak i64 @weakt(i64 %x) "reussir-import-boundary"="weakt_ffi" {
++  %r = call i64 @weakt_ffi(i64 %x)
++  ret i64 %r
++}
++
+ ; A boundary defined outside the module (no texture linked in): unchanged.
+ ; CHECK: define i64 @ext(i64 %x) #[[EXT:[0-9]+]] {
+ define i64 @ext(i64 %x) "reussir-import-boundary"="ext_c" {
+@@ -252,3 +318,8 @@ done:
+ ; CHECK-DAG: attributes #[[TUNED_FFI]] = { "target-features"="+sve2" }
+ ; CHECK-DAG: attributes #[[TUNED]] = { "reussir-import-boundary"="tuned_ffi" }
+ ; CHECK-DAG: attributes #[[EXT]] = { "reussir-import-boundary"="ext_c" }
++; CHECK-DAG: attributes #[[BUF_FFI]] = { alwaysinline }
++; CHECK-DAG: attributes #[[BUF]] = { alwaysinline "reussir-import-boundary"="buf_ffi" }
++; CHECK-DAG: attributes #[[FRAMED]] = { "reussir-import-boundary"="framed_ffi" }
++; CHECK-DAG: attributes #[[ABORT]] = { "reussir-import-boundary"="abort_ffi" }
++; CHECK-DAG: attributes #[[WEAKT]] = { "reussir-import-boundary"="weakt_ffi" }
+-- 
+2.43.0
+

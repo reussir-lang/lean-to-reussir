@@ -231,9 +231,9 @@ def instanceName (key : InstKey) : MonoM Name := do
   -- nearest uniform one. A request made under the uniform instance at a
   -- type built from its `lcAny` (`List lcAny`, `lcAny × lcAny`) is the same
   -- recursion, and goes to the uniform instance too: a typed instance at
-  -- that type would receive whatever the uniform code passes there,
-  -- converted structurally on every call, and a value only `unsafeCast` to
-  -- it (natively any object) could not be converted at all. A type function
+  -- that type would receive whatever the uniform code passes there, and a
+  -- value only `unsafeCast` to it (natively any object) could not be
+  -- converted at all. A type function
   -- (a monad `m` → `OptionT m`) instead gets one typed instance at
   -- `F lcAny`, whose own request `F (F lcAny)` grows: the uniform instance
   -- has no static dictionary, and the typed one adapts the dictionary it
@@ -980,6 +980,25 @@ def typeParamPositions (decl : Decl .pure) : Array Nat := Id.run do
     if isTypeFormerType decl.params[i].type then out := out.push i
   return out
 
+/-- Is parameter `i` of `decl` a type (not a type former or a proposition)
+that shows in no later parameter's type and not in the result type (its
+LCNF type)? Then
+every instance of `decl` has one type whatever the argument: `len {α}
+(b : Bool) (v : if b then List α else Unit) : Nat` is
+`Bool → lcAny → Nat` at every `α`. -/
+def typeParamHidden (decl : Decl .pure) (i : Nat) : Bool := Id.run do
+  -- A type: of kind `Sort u`, but not `Prop` (a proposition is erased).
+  let isType (p : Param .pure) : Bool := match p.type with
+    | .sort u => !u.isZero
+    | _ => false
+  unless decl.params[i]?.any isType do return false
+  let mut t := decl.type
+  for _ in [:i] do
+    let .forallE _ _ b _ := t | return false
+    t := b
+  let .forallE _ _ b _ := t | return false
+  return !b.hasLooseBVar 0
+
 /-! ## Static dictionaries
 
 A type-class dictionary is *static* when it is built from instance constants
@@ -1129,9 +1148,24 @@ def renameApp (statics : Std.HashMap FVarId Expr) (f : Name) (args : Array (Arg 
       -- its own name.
       return if f != f0 then some (f, args) else none
   let mut typeArgs := #[]
+  let isExternCallee := callee.value matches .extern _
   for i in positions do
+    -- A type that shows nowhere in the callee's type: `lcAny`, so that every
+    -- call of it, at any type, calls one instance, as natively one function
+    -- whose calls and closed terms Lean merges by value and type.
+    if !isExternCallee && typeParamHidden callee i then
+      if (← IO.getEnv "L2R_DEBUG_HIDDEN").isSome then IO.eprintln s!"lean2rr: hidden type parameter {i} of {f}"
+      typeArgs := typeArgs.push anyExpr
+      continue
     match args[i]? with
-    | some (.type e _) => typeArgs := typeArgs.push (← normTypeArg e)
+    | some (.type e _) =>
+      let t ← normTypeArg e
+      -- A type whose values are types (`Type`, `Type → Type`, `Prop`):
+      -- natively a parameter whose type is the type parameter stays data
+      -- (`x : α` is `lcAny`, given `box(0)`), but at `t` it would be a type
+      -- parameter, erased, and Lean's `cse` would merge `f x` and `f y`. The
+      -- uniform instance keeps it data.
+      typeArgs := typeArgs.push (if !isExternCallee && isTypeFormerType t then anyExpr else t)
     -- A type that is a variable here (taken out of an existential package,
     -- or a type parameter Lean's specializer turned into a value) is not
     -- statically known: the uniform instance.
@@ -1332,29 +1366,46 @@ arguments (`gp xs none` used as an `Option String` and later as an
 `Option (Nat → Nat)`): the call runs once, and the merged variable keeps the
 first call's type. Stage 1 gives the two calls instances at different types,
 under different names, so both would run, and a panic or trace in them
-would come out twice. So the later call is made with the first call's type
-and value arguments: both call the same instance with the same arguments,
-and Stage 2's `cse` (Lean's) merges them as natively. Where the later call's
-result is used at its own type, the first call's value is converted to it
-(§5.1). The two values agree after erasure: a value that exists at two
-types holds nothing at the positions where the types differ (`none`, `[]`;
-nothing is both a `String` and a function), except where both types make
-room for something a conversion cannot reach: a function, one closure at
-two function types natively (`List.take k`, a structure with a field
-`run : α → α`), for which lean2rr has no conversion, or the contents of a
-runtime object (a thunk, a task, a reference). A call is aligned only when
-`alignable` shows that its two result types differ nowhere else (plan
-§10). Calls without such a partner are left as they are. -/
+would come out twice. So Stage 1 gives the calls of such a group one
+instance and the same arguments, and Stage 2's `cse` (Lean's) merges them
+as natively. A use of the merged value at another type converts it (§5.1:
+a box, an unbox, or a wrapper of a function value).
 
-/-- Runtime objects whose type arguments classify contents that the
-conversions of §5.1 do not reach: two instantiations of one of them are
-never converted into each other. -/
+An instance at concrete types reads its inputs at those types: `fst@Nat`
+unboxes a list element as a `Nat`. A value that exists at two types holds
+nothing where the types differ (`none`, `[]`; nothing is both a `String`
+and a function), except a function: one closure at two function types
+natively (`id` as `Nat → Nat` and as `String → String`). The instance's
+closure, used at the other type, gets inputs of that type. So the instance
+is chosen as follows (`erasedMerges`):
+1. The earlier call's, when its value serves every later use (`serves`):
+   each function value in it has the same domain at both types, and no
+   `lcAny` hides a difference of the type arguments. The later calls get
+   the earlier call's type and value arguments, and the merged value keeps
+   its type, as natively.
+2. Else the instance at `lcAny` for each type argument that differs, for
+   every call of the group, the earlier one too (`uniformArgs`). This is
+   the uniform code that native Lean runs: its closures take boxes, so
+   they serve both uses through wrappers. The calls get the earlier call's
+   value arguments; one that replaces another variable must serve at that
+   variable's type, since the uniform code can return it, unless both are
+   calls of one group at `lcAny`. A type-former argument that differs
+   prevents this. So does a closed group (a closed term, which Lean's
+   closed-term cache shares with the same call at the same type in other
+   functions), unless the earlier call keeps its instance or the base test
+   aligned it (`erasedMerges`).
+3. Else only the later calls of 1 are aligned. The others are left as they
+   are and run apart (plan §10, "Merging after erasure").
+
+A type parameter that shows nowhere in a declaration's type
+(`typeParamHidden`) gets `lcAny` at every call (`renameApp`): every
+instance would have the same type, and natively one closed term serves the
+calls at every type. -/
+
+/-- Runtime objects whose contents are not fields that `serves` follows
+(a task, a thunk, a reference, a promise): two instantiations of one of them
+do not serve each other. -/
 def opaqueTypes : List Name := [``Task, ``Thunk, ``ST.Ref, ``IO.Promise]
-
-/-- Builtin types without parameters whose representation is a scalar or
-plain data, although a field is opaque to Lean (`Float`'s
-`floatSpec.float`). -/
-def atomicDataTypes : List Name := [``Float, ``Float32]
 
 /-- The field types of the constructors of inductive `iv` at arguments
 `args`, as in base LCNF (dependent fields at `lcAny`). -/
@@ -1373,11 +1424,21 @@ def inductiveHead (t : Expr) : CoreM Bool := do
   let .const n _ := t.getAppFn | return false
   return (← getEnv).find? n matches some (.inductInfo _)
 
-mutual
-/-- Is everything a value of type `t` can hold first-order data, so that a
-`Box` converts to it and back: no function (also behind a trivial
-structure), no runtime object, nothing unclassified? Inductives are followed
-into their fields (`seen` stops at types already followed). -/
+/-- Does type `t` mention `lcAny` (or `NonScalar`)? Behind it, a type
+argument of the call can hide (`if b then List α else Unit` is `lcAny`). -/
+def mentionsAny (t : Expr) : Bool :=
+  (t.find? fun e => e.isConstOf ``lcAny || (e.isConst && isUniformConst e.constName!)).isSome
+
+/-- Builtin types without parameters whose representation is a scalar or
+plain data, although a field is opaque to Lean (`Float`'s
+`floatSpec.float`). -/
+def atomicDataTypes : List Name := [``Float, ``Float32]
+
+/-- Can a value of type `t` hold only data: no function (also behind a
+trivial structure), no runtime object, nothing unclassified? Inductives are
+followed into their fields (`seen` stops at types already followed); `lcAny`
+is taken to hold data. Only the base test (`serves` with `strict := false`)
+uses it. -/
 partial def firstOrderData (t : Expr) : StateT (Std.HashSet (Expr × Expr)) CoreM Bool := do
   let some t ← monoHead t | return false
   if t == anyExpr || t.isErased then return true
@@ -1396,38 +1457,61 @@ partial def firstOrderData (t : Expr) : StateT (Std.HashSet (Expr × Expr)) Core
     return true
   | _ => return false
 
-/-- Can a value that has, after erasure, both type `a` and type `b` (the
-results of one call at two instantiations) be converted from `a` to `b`
-without meeting a part that has no conversion? Both types are compared as
-`toMono` sees them (`monoHead` at every level), since the values were found
-equal on mono values. Where the types differ, either no value has both
-(two different inductive types, a function and a value of an inductive
-type), or everything there must be first-order data. Two function types
-that differ, two instantiations of a runtime object, a type-former argument,
-an index, a type that is not an inductive or anything unclassified: no.
-Inductives are compared field by field at their arguments (`seen` stops at
-pairs already compared). -/
-partial def alignable (a b : Expr) : StateT (Std.HashSet (Expr × Expr)) CoreM Bool := do
+/-- Does a value of type `a`, made by the instance at the earlier call's
+type arguments, serve a use at type `b`, the type of a later call or
+argument? The types are compared as `toMono` sees them (`monoHead` at every
+level) and walked in parallel:
+- equal types serve, unless they mention `lcAny` (`mentionsAny`);
+- an erased type serves: it holds no data;
+- `lcAny` and another type do not: the box can hold a function;
+- two function types serve when their domains are equal and do not mention
+  `lcAny` (the instance reads its inputs at its own types) and their
+  codomains serve as codomains (`cod`, below);
+- a function type and an inductive type, or two different inductive types,
+  serve: no value has both types (the values were found equal on
+  constructor names); but not as codomains (`cod`): a closure exists at both
+  function types, and it is converted when it is used, which needs a
+  conversion of its results;
+- two instantiations of one inductive serve when only parameters differ, no
+  differing parameter is a type former or shows in no field, the inductive
+  is not a runtime object (`opaqueTypes`), and their fields serve (one
+  layout per inductive: fields are not converted; `seen` stops at pairs
+  already compared);
+- anything else does not.
+
+With `strict := false`, the test that Stage 1 made before the review of the
+dependent-type work (*the base test*): `lcAny` is taken to hide nothing
+(equal types serve; `lcAny` and a type that holds only data serve,
+`firstOrderData`), and two function types that differ do not serve. It
+decides only whether a closed group may take the instance at `lcAny`
+(`erasedMerges`). -/
+partial def serves (a b : Expr) (cod : Bool := false) (strict : Bool := true) :
+    StateT (Std.HashSet (Expr × Expr)) CoreM Bool := do
   let some a ← monoHead a | return false
   let some b ← monoHead b | return false
-  if a == b then return true
-  if (← get).contains (a, b) then return true
-  modify (·.insert (a, b))
+  if a == b then return !strict || !mentionsAny a
   if a.isErased || b.isErased then return true
-  if a == anyExpr then return ← firstOrderData b
-  if b == anyExpr then return ← firstOrderData a
+  if a == anyExpr || b == anyExpr then
+    return !strict && (← firstOrderData (if a == anyExpr then b else a))
+  unless cod do
+    if (← get).contains (a, b) then return true
+    modify (·.insert (a, b))
   match a, b with
-  | .forallE .., .forallE .. => return false
+  | .forallE _ da ca _, .forallE _ db cb _ =>
+    if !strict || ca.hasLooseBVars || cb.hasLooseBVars then return false
+    let some da ← monoHead da | return false
+    let some db ← monoHead db | return false
+    if da != db || mentionsAny da then return false
+    serves ca cb (cod := true)
   -- Nothing is both a closure and a value of an inductive type.
-  | .forallE .., _ => inductiveHead b
-  | _, .forallE .. => inductiveHead a
+  | .forallE .., _ => return !cod && (← inductiveHead b)
+  | _, .forallE .. => return !cod && (← inductiveHead a)
   | _, _ =>
     let (.const n _, .const m _) := (a.getAppFn, b.getAppFn) | return false
     let some (.inductInfo iv) := (← getEnv).find? n | return false
     unless ← inductiveHead b do return false
-    -- Values of two different inductive types: nothing has both types (the
-    -- values were compared with constructor names).
-    if n != m then return true
+    -- Values of two different inductive types: nothing has both types.
+    if n != m then return !cod
     let as := a.getAppArgs
     let bs := b.getAppArgs
     if as.size != bs.size || opaqueTypes.contains n then return false
@@ -1438,56 +1522,158 @@ partial def alignable (a b : Expr) : StateT (Std.HashSet (Expr × Expr)) CoreM B
     let fbs ← ctorFieldTypesAt iv bs
     for (fa, fb) in fas.zip fbs do
       for (x, y) in fa.zip fb do
-        unless ← alignable x y do return false
+        unless ← serves x y (strict := strict) do return false
     -- A parameter that differs but shows in no field classifies contents the
-    -- fields do not hold (a runtime object): unclassified.
+    -- fields do not hold: unclassified.
     for i in [:iv.numParams] do
       if as[i]! != bs[i]! then
         let fis ← ctorFieldTypesAt iv (as.set! i bs[i]!)
         if fis == fas then return false
     return true
-end
+
+/-- The arguments of the calls of `f` in one group (`args₀`, the earlier
+call's, and `others`, the later calls') at the instance at `lcAny` for every
+type argument in which they differ, with the earlier call's value arguments.
+`none` when a type argument that differs is not a type (a type former, by
+the kind of `f`'s parameter), or when a value argument of the earlier call
+replaces another variable that it does not serve at that variable's type
+(`serves`). Two calls of one group that took the instance at `lcAny`
+(`uniformOf`: each call's earlier call) serve each other: the uniform value
+serves at the type of each call of its group. -/
+def uniformArgs (f : Name) (args₀ : Array (Arg .pure)) (others : Array (Array (Arg .pure)))
+    (uniformOf : Std.HashMap FVarId FVarId) : CompilerM (Option (Array (Arg .pure))) := do
+  -- The binder kinds of `f`: its base declaration's parameters (a
+  -- specialization Lean made has no kernel constant), else its type.
+  let kinds : Array Expr ← do
+    if let some d ← getBaseDecl? f then pure (d.params.map (·.type))
+    else if (← getEnv).contains f then pure (getParamTypes (← getOtherDeclBaseType f []))
+    else pure #[]
+  let mut out := #[]
+  for h : i in [:args₀.size] do
+    let a₀ := args₀[i]
+    let kind? := kinds[i]?
+    let as := others.map (·[i]!)
+    if as.all (· == a₀) then
+      out := out.push a₀
+      continue
+    match a₀ with
+    | .type _ _ =>
+      unless kind? matches some (.sort _) && as.all (· matches .type ..) do return none
+      out := out.push (.type anyExpr)
+    | .fvar x =>
+      for a in as do
+        let .fvar y := a | return none
+        if x != y then
+          let together := match uniformOf[x]?, uniformOf[y]? with
+            | some g, some g' => g == g'
+            | _, _ => false
+          unless together || (← (serves (← getType x) (← getType y)).run' {}) do return none
+      out := out.push a₀
+    | _ => return none
+  return some out
+
+/-- Does the earlier call keep its instance with arguments `args` instead of
+`args₀`: does every type argument they change show nowhere in `f`'s type
+(`typeParamHidden`), so that `renameApp` gives both the instance at `lcAny`? -/
+def keepsInstance (f : Name) (args₀ args : Array (Arg .pure)) : CoreM Bool := do
+  let some d ← getBaseDecl? f | return false
+  for h : i in [:args₀.size] do
+    if args₀[i] != args[i]! && !typeParamHidden d i then return false
+  return true
+
+/-- What `erasedMerges` collects in one instance's code. -/
+structure MergeScan where
+  /-- The variable each merged variable stands for. -/
+  reps : Std.HashMap FVarId FVarId := {}
+  /-- The variables merged into each representative. -/
+  groups : Std.HashMap FVarId (Array FVarId) := {}
+  /-- The calls of definitions, with their binder types. -/
+  calls : Std.HashMap FVarId (Name × List Level × Array (Arg .pure) × Expr) := {}
+  /-- The binders of `calls`, in program order. -/
+  order : Array FVarId := #[]
+  /-- The `let`s whose values use no variable but such `let`s: closed terms,
+  which Lean's closed-term extraction may share with other functions. -/
+  closed : Std.HashSet FVarId := {}
 
 /-- The calls of `code` that Lean's mono-phase `cse` merges into an earlier
 call of the same declaration at other type arguments, each with the
-earlier call's universe levels and arguments. The grouping follows
-`Code.cse` on mono code: values are compared with type arguments erased,
-variables replaced by the variable they were merged into, and a trivial
-structure (`Subtype`, `Fin`) taken for its field and `Decidable` for `Bool`,
-as `toMono` does; a `let` is merged into one in scope (`cases` alternatives
-start a nested scope, join points see the enclosing scope, and a local
-function's body only its own: Lean's `cse` runs after lambda lifting), and
-`@[never_extract]` calls are not merged. Only calls of definitions count:
-Stage 1 does not rename constructors (Stage 2's `cse` merges them as
-natively), and extern instances and instances (dictionary builders) compute
-nothing observable. -/
+universe levels and arguments it gets: the earlier call's, or the ones of
+the instance at `lcAny` (`uniformArgs`), which the earlier call then gets
+too (see the section's comment). A closed group (the earlier call is a
+closed term) takes the instance at `lcAny` only when the earlier call keeps
+its instance (`keepsInstance`) or when the base test (`serves` with
+`strict := false`) serves every later call: Lean's closed-term cache
+compares values and types, so natively the merged call shares the closed
+term of the same call at the earlier call's types in other functions, which
+the base kept by aligning to the earlier call's instance or by running the
+calls apart; the instance at `lcAny` would be a closed term of its own.
+Groups are decided in program order, so that an argument's group is decided
+before the group of its call. The grouping follows `Code.cse` on mono code:
+values are compared with type arguments erased, variables replaced by the
+variable they were merged into, and a trivial structure (`Subtype`, `Fin`)
+taken for its field and `Decidable` for `Bool`, as `toMono` does; a `let` is
+merged into one in scope (`cases` alternatives start a nested scope, join
+points see the enclosing scope, and a local function's body only its own:
+Lean's `cse` runs after lambda lifting), and `@[never_extract]` calls are
+not merged. Only calls of definitions count: Stage 1 does not rename
+constructors (Stage 2's `cse` merges them as natively), and extern instances
+and instances (dictionary builders) compute nothing observable. -/
 partial def erasedMerges (code : Code .pure) :
-    CoreM (Std.HashMap FVarId (List Level × Array (Arg .pure))) := do
-  let ((_, _, groups), calls) ← ((go code {}).run ({}, {})).run {}
+    CompilerM (Std.HashMap FVarId (List Level × Array (Arg .pure))) := do
+  let ((), scan) ← (go code {}).run {}
+  let typeArgs (as : Array (Arg .pure)) := as.filterMap fun
+    | .type t _ => some t
+    | _ => none
+  let debug := (← IO.getEnv "L2R_DEBUG").isSome
   let mut out := {}
-  for (r, members) in groups.toList do
-    let some (f, us, args₀, ty₀) := calls[r]? | continue
-    for m in members do
-      if let some (g, _, args, ty) := calls[m]? then
-        let typeArgs (as : Array (Arg .pure)) := as.filterMap fun
-          | .type t _ => some t
-          | _ => none
-        if g == f && args.size == args₀.size && typeArgs args != typeArgs args₀ then
-          if (← (alignable ty₀ ty).run' {}) then
-            out := out.insert m (us, args₀)
+  -- The calls that took the instance at `lcAny`, each with its group's
+  -- earlier call.
+  let mut uniformOf : Std.HashMap FVarId FVarId := {}
+  for r in scan.order do
+    let some members := scan.groups[r]? | continue
+    let some (f, us, args₀, ty₀) := scan.calls[r]? | continue
+    -- The calls of `f` merged into `r`, with their arguments and types.
+    let group := members.filterMap fun m => match scan.calls[m]? with
+      | some (g, _, args, ty) => if g == f && args.size == args₀.size then some (m, args, ty) else none
+      | none => none
+    let later := group.filter fun (_, args, _) => typeArgs args != typeArgs args₀
+    if later.isEmpty then continue
+    let served ← later.filterM fun (_, _, ty) => (serves ty₀ ty).run' {}
+    if served.size < later.size then
+      if let some args ← uniformArgs f args₀ (group.map (·.2.1)) uniformOf then
+        let allowed ← do
+          if !scan.closed.contains r then pure true
+          else if ← keepsInstance f args₀ args then pure true
+          else later.allM fun (_, _, ty) => (serves ty₀ ty (strict := false)).run' {}
+        if allowed then
+          if debug then IO.eprintln s!"lean2rr: merged calls of {f}: {group.size + 1} at lcAny"
+          out := out.insert r (us, args)
+          uniformOf := uniformOf.insert r r
+          for (m, _, _) in group do
+            out := out.insert m (us, args)
+            uniformOf := uniformOf.insert m r
+          continue
+    if debug then
+      IO.eprintln s!"lean2rr: merged calls of {f}: {served.size} at the earlier call's types, {later.size - served.size} apart"
+    for (m, _, _) in served do
+      out := out.insert m (us, args₀)
   return out
 where
-  /-- State: the variable each merged variable stands for and the
-  variables merged into each representative; the calls of definitions,
-  with their binder types. -/
-  go (code : Code .pure) (map : Std.HashMap Expr FVarId) :
-      StateT (Std.HashMap FVarId FVarId × Std.HashMap FVarId (Array FVarId))
-        (StateT (Std.HashMap FVarId (Name × List Level × Array (Arg .pure) × Expr)) CoreM) Unit := do
+  go (code : Code .pure) (map : Std.HashMap Expr FVarId) : StateT MergeScan CoreM Unit := do
     match code with
     | .let d k =>
       let env ← getEnv
-      let (reps, groups) ← get
-      let rep (x : FVarId) : FVarId := reps.getD x x
+      let s ← get
+      let rep (x : FVarId) : FVarId := s.reps.getD x x
+      let closedArg (a : Arg .pure) : Bool := match a with
+        | .fvar x => s.closed.contains x
+        | _ => true
+      let isClosed := match d.value with
+        | .lit _ | .erased => true
+        | .const _ _ args _ => args.all closedArg
+        | .proj _ _ x => s.closed.contains x
+        | .fvar .. => false
+      if isClosed then modify fun s => { s with closed := s.closed.insert d.fvarId }
       -- A value that is another variable in mono: a trivial structure's
       -- constructor or projection, `Decidable.decide`.
       let alias? : Option FVarId ← match d.value with
@@ -1508,7 +1694,7 @@ where
           | none => pure none
         | _ => pure none
       if let some x := alias? then
-        set (reps.insert d.fvarId (rep x), groups)
+        modify fun s => { s with reps := s.reps.insert d.fvarId (rep x) }
         return ← go k map
       let arg (a : Arg .pure) : Expr := match a with
         | .fvar x => .fvar (rep x)
@@ -1523,15 +1709,16 @@ where
         | .erased => erasedExpr
       if let .const f us args _ := d.value then
         unless env.isConstructor f || isExtern env f || (← isInstanceReducible f) do
-          modifyThe (Std.HashMap FVarId (Name × List Level × Array (Arg .pure) × Expr))
-            (·.insert d.fvarId (f, us, args, d.type))
+          modify fun s => { s with calls := s.calls.insert d.fvarId (f, us, args, d.type),
+                                   order := s.order.push d.fvarId }
       let neverExtract := match d.value with
         | .const f .. => hasNeverExtractAttribute env f
         | _ => false
       if neverExtract then go k map
       else match map[key]? with
         | some r =>
-          set (reps.insert d.fvarId r, groups.insert r ((groups.getD r #[]).push d.fvarId))
+          modify fun s => { s with reps := s.reps.insert d.fvarId r,
+                                   groups := s.groups.insert r ((s.groups.getD r #[]).push d.fvarId) }
           go k map
         | none => go k (map.insert key d.fvarId)
     | .fun d k _ => go d.value {}; go k map
@@ -1539,8 +1726,8 @@ where
     | .cases cs => for alt in cs.alts do go alt.getCode map
     | _ => pure ()
 
-/-- Make the calls `erasedMerges` finds with the arguments of the call they
-are merged into; their binders get the type of the new call. -/
+/-- Make the calls `erasedMerges` finds with the arguments it gives them;
+their binders get the type of the new call. -/
 partial def alignErasedMerges (code : Code .pure) : CompilerM (Code .pure) := do
   let marked ← erasedMerges code
   if marked.isEmpty then return code

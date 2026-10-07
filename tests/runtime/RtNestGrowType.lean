@@ -17,7 +17,9 @@ nominal type `Nest`, whose element fields are `Box`es (plan §5.1,
 
 Until Lean 4.33 this test declared them with a parameter, the shapes
 lean2rr's guard against unbounded instantiation of field types was written
-for (`LowerBase.nonUniformInductive`; round 6 TY6-01):
+for (`LowerBase.nonUniformInductive`; round 6 TY6-01; one type per
+inductive, rule 1, needs no guard: the test now checks that the values
+built and read through the one type are right):
 
     unsafe inductive Nest (α : Type) where
       | nil

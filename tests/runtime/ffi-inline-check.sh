@@ -19,9 +19,12 @@
 # docs/implementation/ownership.md, "Reads give their reference up first,
 # for a view"): the read textures must stay under LLVM's inlining threshold
 # for a cold call site (Reussir issue 36), else every such read is a call.
+# With the one-word `Box`, `l2r_view_take<LAny>` is over it: the test needs
+# Reussir patches 36-a and 36-b, which inline a texture whose cost is at
+# most LLVM's threshold for an ordinary call site at a cold one too.
 # For RtArraySets (array sets in loops at ordinary call sites), it likewise fails
 # on any call left of an array set's texture or function (`l2r_array_set`,
-# `lean_array_set`, `l2r_natarr_set_word`, ...; docs/implementation/
+# `lean_array_set`, ...; docs/implementation/
 # ownership.md, "A set releases a replaced record with its decrement in
 # line"): the set of an `Array` of a structure released the replaced
 # element with the structure's whole release in line, and LLVM kept the
@@ -45,16 +48,13 @@ deep_calls() {
   python3 - "$1" "$2" <<'PY'
 import re, sys
 if sys.argv[2] == "reads":
-    names = {f"l2r_{k}arr_{op}" for k in ("nat", "int") for op in
-             ("give", "view_size", "view_take", "view_end", "take", "get", "get_word")}
-    names |= {"l2r_array_give", "l2r_view_size", "l2r_view_take", "l2r_view_end",
-              "l2r_array_get", "l2r_array_get_word", "l2r_consume"}
-    names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array", "natarr", "intarr")
+    names = {"l2r_array_give", "l2r_view_size", "l2r_view_take", "l2r_view_end",
+             "l2r_array_get", "l2r_array_get_word", "l2r_consume"}
+    names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array")
               for op in ("fget", "fget_borrowed", "uget", "uget_borrowed", "get", "get_borrowed")}
 else:
-    names = {f"l2r_{k}arr_{op}" for k in ("nat", "int") for op in ("set", "set_word")}
-    names |= {"l2r_array_set"}
-    names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array", "natarr", "intarr")
+    names = {"l2r_array_set"}
+    names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array")
               for op in ("set", "fset", "uset")}
 seen = {}
 for m in re.finditer(r'call [^@\n]*@"?_RI?C(\d+)([A-Za-z0-9_]+)\(', open(sys.argv[1]).read()):

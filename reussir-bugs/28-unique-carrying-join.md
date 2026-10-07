@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug (miscompile). **Status:** patched (0060), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** bug (miscompile). **Status:** patched (28-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug.** At `-O aggressive`, Reussir's uniqueness-carrying
 analysis can prove a value unique when it is fresh on one path but shared on
@@ -118,7 +118,7 @@ get a plain `count == 1`. No workaround.
 ## Patch
 
 Patch file
-[`patches/0060-l2r-local-bug-28-make-Unknown-absorb-the-uniqueness-.patch`](patches/0060-l2r-local-bug-28-make-Unknown-absorb-the-uniqueness-.patch)
+[`patches/28-a-unknown-absorbs-join.patch`](patches/28-a-unknown-absorbs-join.patch)
 (`l2r-local` commit `5239371f`, applied in `./reussir`; `l2r-local` head cc8e5aa5; made as commit `b8aedd37`
 in a scratch checkout on `91da4f80`).
 
@@ -192,8 +192,8 @@ pass unchanged.
   with a C driver, at `-O aggressive` and `-O default`). Both fail on the
   unpatched build.
 - Reussir's lit suite: 546 passed, 81 unsupported, none failed, with the
-  first versions of 0060 to 0063 on 91da4f80 (the unpatched build: 540
-  passed); on the final stack with the amended patches and 0064: 647
+  first versions of 28-a, 29-a, 30-a and 31-a on 91da4f80 (the unpatched build: 540
+  passed); on the final stack with the amended patches and 33-a: 647
   tests, 566 passed, 81 unsupported, none failed.
 - lean2rr's runtime tests (14, among them RtFuzzReuse, RtShareMutators,
   RtFreshRebuildShared, RtReprShare, RtHashMap, RtPersistWalk): all pass.
@@ -212,7 +212,7 @@ printed wrong values without the patch, all are right with it.
 the poison of an unreachable arm and a nullary constructor's immediate
 `Unknown`, so they absorbed joins and blocked sound clones: lean2rr's
 Mergesort lost one (13 -> 12), Rbmap and Rbtree `mkMapAux.unique`
-(5 -> 4). Fixed in the final 0060 (bottom for both, the hunk above): with
+(5 -> 4). Fixed in the final 28-a (bottom for both, the hunk above): with
 it Mergesort, Rbmap and Rbtree have 13, 5 and 5 clones again and
 TypeclassGeneric 16 (checked on the final stack with the reviewer's
 `clones.sh`), and the reviewer's soundness probes still print the right

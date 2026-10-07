@@ -2,7 +2,8 @@
 LLVM judges cold, in loops. `tests/runtime/ffi-inline-check.sh` also builds
 this test to LLVM IR and fails when a read's texture or function stays a
 call (the read textures must stay under LLVM's inlining threshold for a
-cold call site; Reussir issue 36). Each `pick` reads after seven
+cold call site, Reussir issue 36, or the Reussir build must have patch
+36-a, which `l2r_view_take<LAny>` needs). Each `pick` reads after seven
 conditions: `ByteArray`, `Array UInt64`, `Array Nat`, `Array Int`, `Array`
 of a structure, `FloatArray`, at a proved index and with `get!` (at the
 structure, a counted element: its default released after the read,

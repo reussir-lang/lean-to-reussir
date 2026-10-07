@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (0018), applied in `./reussir`
+**Kind:** bug. **Status:** patched (08-a), applied in `./reussir`
 (`l2r-local` cc8e5aa5). It does not affect lean2rr (it never emits the
 shape).
 
@@ -56,7 +56,7 @@ fields 0 to 6 of `!llvm.struct<(i32, struct<"_RC1R", ...>)>`; `L::Cons` is
 disagree: when a cell of `struct R1(Q, u16)` is reused for
 `struct R2(S6, u16)` (`S6` = three `u16`) and the store of the `u16` is
 skipped ([bug 2](02-reuse-field-store.md)), `R2.1` reads the wrong bytes
-(`300000` instead of `305000`; with 0002 the store is no longer skipped
+(`300000` instead of `305000`; with 02-a the store is no longer skipped
 there). The packed layout sorts members by alignment and never needs the
 lift.
 
@@ -69,7 +69,7 @@ field whose size is a power of two.
 ## Patch
 
 Patch file
-[`patches/0018-l2r-local-bug-8-widen-a-member-over-its-padding-only.patch`](patches/0018-l2r-local-bug-8-widen-a-member-over-its-padding-only.patch)
+[`patches/08-a-padding-widening.patch`](patches/08-a-padding-widening.patch)
 (`l2r-local` commit `599064fb`, applied in `./reussir`; `l2r-local` head
 `cc8e5aa5`).
 
@@ -126,7 +126,7 @@ of Reussir's sizes (for example `R4 = {R1, i16, R3, i1, [7 x i8]}`,
 lifted or padded member is stored correctly. The fix was written when the
 review of the first versions of the patches for bugs 1 and 2 (variants)
 showed that they, computing offsets from Reussir's layout, need it to
-agree with LLVM's; 0020 needs this patch.
+agree with LLVM's; 01-a needs this patch.
 
 **Effect on lean2rr.** None: its records have no padding between members.
 

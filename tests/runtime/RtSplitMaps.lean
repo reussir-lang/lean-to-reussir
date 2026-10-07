@@ -1,5 +1,7 @@
-/-! Runtime test: maps that lean2rr's split-map-loops pass runs as a typed loop
-writing a second array. O7Map: mapM in IO with effects and a throw mid-loop
+/-! Runtime test: maps over arrays (written for lean2rr's split-map-loops pass,
+which ran such a map as a typed loop writing a second array; since rule 1
+the maps run Lean's own loop on the one array type, in place, boxing and
+unboxing each element). O7Map: mapM in IO with effects and a throw mid-loop
 (caught), StateM, ExceptT, Option, StateT over Except, mapIdxM, mapFinIdxM,
 closures reading the source, nested maps, Bool → Option, UInt64 → Nat,
 tuples, Float → UInt8, empty arrays. SMapA: 15 nested shapes (Nat →

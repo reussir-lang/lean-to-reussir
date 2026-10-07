@@ -117,6 +117,14 @@ extern "C" fn free(o: *mut Obj) {
     unsafe { mi_free(o as *mut c_void) }
 }
 
+/// The bytes of the live string block at address `p`, borrowed while the
+/// caller keeps a reference to it (`any::str_ref`: a boxed string).
+#[inline(always)]
+pub(crate) unsafe fn bytes_at<'a>(p: *mut u8) -> &'a [u8] {
+    let o = p as *mut Obj;
+    unsafe { std::slice::from_raw_parts(data(o), (*o).len) }
+}
+
 #[inline(always)]
 unsafe fn data(o: *mut Obj) -> *mut u8 {
     (o as *mut u8).add(HDR)
@@ -321,7 +329,7 @@ extern "C" fn copy_shared(s: LStr, extra: usize) -> LStr {
 /// Grow a unique string to room for at least `need` bytes, at least
 /// doubling (so appends are amortized O(1)). The capacity is all of the
 /// block: mimalloc's size classes for small blocks (`alloc::good_size`), powers
-/// of two beyond 4 KiB (as `tagvec::grow`).
+/// of two beyond 4 KiB (as `array::grow`).
 #[cold]
 #[inline(never)]
 extern "C" fn grow(s: LStr, need: usize) -> LStr {

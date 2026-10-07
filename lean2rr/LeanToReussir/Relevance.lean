@@ -14,10 +14,10 @@ concerned. Examples:
   no data, so only `ε` and `α` are relevant.
 * `String.Pos s`: `s` is a value, never relevant.
 
-The distinction matters twice: a nominal Reussir type is instantiated only
-over relevant parameters (so `EST.Out IO.Error σ PUnit` is one type for every
-`σ`), and an `lcAny` in a phantom position is harmless while an `lcAny` in a
-relevant position is a value of statically unknown type.
+The distinction matters to Stage 3: an `lcAny` in a phantom position is
+harmless, while an `lcAny` in a relevant position is a value of statically
+unknown type (`MonoRetype.isUnknown`, `normTy`). Stage 4 does not use it:
+an inductive has one Reussir type whatever its arguments.
 
 Relevance is the least fixpoint of "occurs relevantly in a data field",
 computed over a set of inductives. Builtin runtime types whose Lean model hides

@@ -14,7 +14,7 @@ record reachable along k paths in a type is written k times, at every use
 of the type. When records share sub-records the dump grows exponentially
 with their nesting, and rrc holds the whole text in memory. This is the
 mechanism of [issue 10](10-closure-type-print.md), in the general printer.
-Patch 0024, written for issue 10, changed only the closure devirtualization's
+Patch 10-a, written for issue 10, changed only the closure devirtualization's
 type ids. A fix would change the dialect's textual format, and the output
 is only a debug dump, so it stays unpatched.
 
@@ -31,7 +31,7 @@ builds a `D(K)` and prints `1`.
 **Actual on ef922049.** About 2x per level: K = 8: 0.55 MB, K = 10:
 2.2 MB, K = 12: 8.7 MB. `run.sh` prints `issue 32   REPRODUCES  --emit mlir:
 K = 10: 2133 KB, K = 12: 8532 KB (3.99x for two more levels)` (also with
-0060 to 0063). Issue 10's generator, which nests the same records inside
+28-a, 29-a, 30-a and 31-a). Issue 10's generator, which nests the same records inside
 closure types, gives 16 MB at K = 10 and 1.0 GB at K = 16 (14 s, 1.06 GB of
 rrc memory).
 
@@ -71,7 +71,7 @@ opaque `!llvm.ptr` and the nesting stops at each box.
 A fix changes the textual format: either the dialect gives named records
 type aliases (every dump gains an alias section and uses the aliases), or
 the printer writes each body once per type and the parser accepts the
-short form for a record defined earlier (patch 0024's
+short form for a record defined earlier (patch 10-a's
 `printTypeWithRecordBodiesOnce` is the printing half, used only for type
 ids). Either is a design change of the dialect's textual form, not a
 small fix: aliases must also cover recursive records (printed while their

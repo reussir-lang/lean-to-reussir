@@ -51,7 +51,7 @@ What is generated, and from where:
 | Generated part | Source |
 |---|---|
 | the pass table, the required parts, the Stage 2 edits | `lean2rr/LeanToReussir/Opt/Registry.lean`; the guards from `docs/implementation/optional-passes.md` |
-| the Reussir entries and patches | the status table of `reussir-bugs/README.md`; the patch count from its apply list |
+| the Reussir entries and patches | the status table of `reussir-bugs/README.md`; the patch counts from `reussir-bugs/patches/series` and the README's "plus the first N patches of the series" |
 | test counts, `.xfail` tests, loader checks | `tests/runtime/`, `tests/env/run.sh`, `tests/classic/cases.json`; the `#[test]`s of `runtime/leanrt/src` |
 | the classic corpus table | the "Cases" table of `tests/README.md` |
 | the index of known differences | the groups and items of plan §10 |
@@ -70,7 +70,9 @@ disagreement (`--check` fails on a warning):
   table of `docs/implementation-status.md`, and the reverse;
 - the runtime test count in `docs/implementation-status.md` matches
   `tests/runtime`;
-- the patch count in `reussir-bugs/README.md` matches its apply list.
+- `reussir-bugs/patches/series` lists exactly the patch files of
+  `reussir-bugs/patches/`, and `reussir-bugs/README.md` says how many of
+  them `l2r-local` has.
 
 ## Keeping it up to date
 

@@ -1,0 +1,6 @@
+f false 0 = 200
+f2 false 41 = 42
+f true 7 = 107
+f2 true 48 = 0
+c = 42
+ci = 42

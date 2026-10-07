@@ -2,12 +2,12 @@
 
 ## Summary
 
-**Kind:** bug (in cstree). **Status:** patched (0012), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** bug (in cstree). **Status:** patched (12-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
 **Verdict: bug, in Reussir's parser dependency `cstree` (0.14), not in
 Reussir's code.** `get_cached_node` (`cstree/src/green/builder.rs`) keys its
 node cache on `{kind, text_len, child_hash: u32}` and never compares the
-children; cstree's current master has the same code. 0012 works around it
+children; cstree's current master has the same code. 12-a works around it
 in Reussir's sink by not using the cache.
 
 Reussir's parser builds its syntax tree with the `cstree` library.
@@ -19,7 +19,7 @@ subtrees eventually collide, and the later one silently becomes a copy of
 the earlier one. A literal can turn into a variable of an unrelated
 function. That gives a baffling "unknown variable" error, or, if the
 variable happens to be in scope, a program that compiles and computes the
-wrong thing. Patch 0012 builds every syntax node directly, with no cache.
+wrong thing. Patch 12-a builds every syntax node directly, with no cache.
 The builder is still used for tokens, whose cache compares whole tokens.
 
 ## Symptom and repro
@@ -157,7 +157,7 @@ are large (tens of MB for big programs).
 ## Patch
 
 Patch file
-[`patches/0012-l2r-local-bug-12-build-syntax-nodes-without-cstree-s.patch`](patches/0012-l2r-local-bug-12-build-syntax-nodes-without-cstree-s.patch)
+[`patches/12-a-no-hash-node-cache.patch`](patches/12-a-no-hash-node-cache.patch)
 (`l2r-local` commit `fe717f85`, applied in `./reussir`; `l2r-local` head cc8e5aa5). It also applies alone on ef922049.
 
 **The fix.** The sink no longer uses the builder for nodes (`sink.rs`, plus
@@ -225,7 +225,7 @@ measurements differ in what they measure:
   HIR is silently wrong.
 - Corpus, runtime suite and lean2rr programs with the combined stack:
   passed (round 3).
-- With 0012 (ef922049 + 0012 alone, and the patched build): FIXED
+- With 12-a (ef922049 + 12-a alone, and the patched build): FIXED
   (`424242`). `run.sh` on the patched build:
   `issue 12   FIXED       prints 424242   [-O aggressive]`.
 
