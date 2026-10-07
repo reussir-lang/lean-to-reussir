@@ -229,7 +229,16 @@ files, `runtime/` for the runtime. Plan
 ### `Array.mk`, `Array.toList` and list folds are generated loops
 
 - **What:** `Array.mk` and `String.mk`/`String.ofList` fold their list with
-  a generated tail-recursive function (`listFold`); `Array.toList` is a
+  a generated tail-recursive function (`listFold`). `Array.mk` first takes
+  the list's length (`listLength`, a loop that binds no head) and pushes
+  onto `l2r_array_with_capacity` of that length, as natively
+  `List.toArrayImpl` reserves `Array.mkEmpty xs.length` (review HA-02:
+  pushes onto the empty array reallocated it about log2 n times, up to
+  twice the size; test `RtListToArrayAlloc`). `String.mk`/`String.ofList`
+  likewise add up the characters' UTF-8 sizes first (`listSum`,
+  `l2r_utf8_size_add`) and push onto `l2r_string_with_capacity` of that
+  size, as natively `lean_string_mk` makes the string at its exact size
+  (review RLF1-06, test `RtStrOfListAlloc`). `Array.toList` is a
   generated loop that conses the elements from the last
   (`l2r_array_to_list_<list type>_<array type>`); an array's `Box`es are a
   list's heads as they are. Lists whose elements have no
@@ -241,5 +250,6 @@ files, `runtime/` for the runtime. Plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
   "Stack depth").
 - **Where:** `Lower/ExternCall.lean`: `customExtern`;
-  `Lower/Externs.lean`: `listFold`.
+  `Lower/Externs.lean`: `listFold`, `listSum`, `listLength`,
+  `stringOfList`.
 - **Remove only if:** never.

@@ -258,10 +258,23 @@ pub(crate) fn count_mark_main() {
     count::mark_main()
 }
 
+/// A failed allocation: `INTERNAL PANIC: out of memory`, as natively a Lean
+/// object that cannot be allocated (blocks, scratch limbs, decimal text).
 #[cold]
 #[inline(never)]
-fn oom() -> ! {
+pub(crate) fn oom() -> ! {
     crate::lean_internal_panic(lean_runtime::semantics::panic::InternalPanic::OutOfMemory)
+}
+
+/// `n` zero bytes or limbs, or `oom` (`vec![0; n]` would abort the process
+/// on a failed allocation, without the message; review HB-02).
+pub(crate) fn zeroed<T: Copy + Default>(n: usize) -> Vec<T> {
+    let mut v = Vec::new();
+    if v.try_reserve_exact(n).is_err() {
+        oom()
+    }
+    v.resize(n, T::default());
+    v
 }
 
 /// The block size for `n` limbs, rounded up to mimalloc's size class (the
@@ -420,7 +433,7 @@ fn scratch(stack: &mut [u64; SMALL], heap: &mut Vec<u64>, n: usize) -> *mut u64 
     if n <= SMALL {
         stack.as_mut_ptr()
     } else {
-        *heap = vec![0; n];
+        *heap = zeroed(n);
         heap.as_mut_ptr()
     }
 }
@@ -521,7 +534,7 @@ pub fn to_decimal(b: &LBig) -> Vec<u8> {
     // `mpz_sizeinbase` may overestimate by one; one more for the sign and
     // one for the terminating NUL.
     let cap = unsafe { __gmpz_sizeinbase(&z, 10) } + 2;
-    let mut out = vec![0u8; cap];
+    let mut out: Vec<u8> = zeroed(cap);
     unsafe { __gmpz_get_str(out.as_mut_ptr(), 10, &z) };
     let n = out.iter().position(|&c| c == 0).unwrap_or(out.len());
     out.truncate(n);
@@ -1537,8 +1550,10 @@ impl BigInt for GInt {
     }
 
     /// Required by the trait but unused: the rules call `tdiv`, `tmod`,
-    /// `ediv`, `emod` and `div_exact`, overridden below with `big::div`,
-    /// which computes only its own result; this one clones and divides twice.
+    /// `ediv` and `emod`, overridden below with `big::div`, which computes
+    /// only its own result, and `div_exact`, which is not overridden (the
+    /// trait's default calls `tdiv`; lean2rr's `Int.divExact` is
+    /// `lean_int_div` anyway, prelude.rr); this one clones and divides twice.
     fn tdiv_rem(self, o: &GInt) -> (GInt, GInt) {
         let q = int_tdiv(self.0.clone(), o.0.clone());
         (GInt(q), GInt(int_tmod(self.0, o.0.clone())))

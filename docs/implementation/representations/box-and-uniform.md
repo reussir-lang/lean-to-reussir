@@ -386,16 +386,21 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   release is `RELEASES[num]` (the program's `l2r_any_rel_<num>_c`, see
   above); its cell, the word without the number, is deferred as one
   pending cell with `__reussir_drop_defer(cell, release)` and drained with
-  `__reussir_drop_drain()` (switch step 11's rule for records,
-  `drop::free_unique`). Inside a free that only pushes the cell; outside
-  one Reussir's `drain_one` runs the release inside a new drain and then
-  what it pushed. A leaf payload (a number with `LEAF_BIT`, `0x8000`:
+  `__reussir_drop_drain()` (`drop::free_deferred`; switch step 11's rule
+  for records, `drop::free_unique`). Inside a free that only pushes the
+  cell; outside one Reussir's `drain_one` runs the release inside a new
+  drain and then what it pushed. A leaf payload (a number with `LEAF_BIT`, `0x8000`:
   lean2rr's `boxIsLeaf`, a record or enum whose fields are all scalars) is
   released by a direct call when no free is running (`release_leaf`, out
-  of line, so that the main path reads no thread-local state). leanrt's
+  of line, so that the main path reads no thread-local state), and
+  deferred with `__reussir_drop_defer` inside one. leanrt's
   own kinds go to `release_kind`. A number without a release installs the
   table if that was not done yet, else it is Lean's internal panic
-  (`release_unregistered`).
+  (`release_unregistered`). The array free calls a payload's release
+  directly where the stack would pop the deferred cell next
+  (`release_last_in_step` in its step; an array that keeps one element,
+  outside a free: ownership.md, "The array free calls a payload's release
+  where the stack would pop it next").
 - **Why:** Only the program knows its types' release (Reussir's drop glue).
   Through the worklist, a chain of nested boxes is freed in a loop, not by
   recursion (the probe frees chains of 10^6 boxes on a 1 MiB stack, and
@@ -419,8 +424,9 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   the way (without it, sieve +0.5 % instructions from the loop's layout,
   monadic-interp -0.1 %).
 - **Where:** `runtime/leanrt/src/any.rs`: `release_last` (`LEAF_BIT`),
-  `defer_and_drain`, `release_leaf`, `release_kind`,
-  `release_unregistered`; `LowerBase.lean`: `boxIsLeaf`, `boxNum`. Tests:
+  `release_leaf`, `release_kind`,
+  `release_unregistered`; `runtime/leanrt/src/drop.rs`: `free_deferred`;
+  `LowerBase.lean`: `boxIsLeaf`, `boxNum`. Tests:
   leanrt's `any::tests` (`deep_chain_frees_without_recursion`,
   `deep_chain_of_two_numbers`, `fields_in_lean_order`,
   `a_leaf_payload_is_released_directly`), any-probe, `RtBoxDeepChain`,

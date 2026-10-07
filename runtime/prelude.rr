@@ -1553,6 +1553,18 @@ fn lean_string_append(a : LStr, b : LStr) -> LStr [{ leanrt::string::append(a, b
 #[ffi(import)]
 fn lean_string_push(s : LStr, c : u32) -> LStr [{ leanrt::string::push(s, c) }];
 
+// `String.ofList`/`String.mk` (lean2rr's `stringOfList`): a unique empty
+// string with room for `n` bytes, and the UTF-8 size of the characters,
+// added up over the list first, as natively `lean_string_mk` makes the
+// string at its exact size (review RLF1-06: pushing onto "" grew it, up to
+// twice its size).
+#[ffi(import)]
+fn l2r_string_with_capacity(n : u64) -> LStr [{ leanrt::string::with_capacity(n) }];
+
+fn l2r_utf8_size_add(n : u64, c : u32) -> u64 {
+    if c < 128 { n + 1 } else { if c < 2048 { n + 2 } else { if c < 65536 { n + 3 } else { n + 4 } } }
+}
+
 #[ffi(import)]
 fn l2r_string_size(s : LStr) -> u64 [{ { let r = s.utf8().len() as u64; leanrt::rc_release(s); r } }];
 
@@ -1936,7 +1948,17 @@ fn l2r_index_fail<T>(x : u64, n : u64) -> T {
 // view's end (`l2r_consume`): Reussir would release it at the start of the
 // branch, between give and take, and a default that holds the other
 // reference to the array (a tree whose children are read, `cs[i]!` with the
-// tree as the default) freed the block the view reads (review PAR-01).
+// tree as the default) freed the block the view reads (review PAR-01). Out
+// of bounds the panic comes first, then the view's end, as natively
+// (`lean_array_get_panic` inside the extern, then the caller's release of
+// the array it lent): when the view held the last reference, what freeing
+// the array releases (a handle that flushes) comes after the message, and
+// under `LEAN_ABORT_ON_PANIC` not at all (review HA-01). The panic is the
+// one call between a give and its view's end that can run Lean code (a
+// stderr stream that `IO.setStderr` made of Lean functions), which may drop
+// the reference that keeps a shared array alive: nothing reads through the
+// view after it (`l2r_view_end` of a shared view reads nothing;
+// `leanrt::array::give`).
 fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
     let x = l2r_nat_raw(i);
     let p = l2r_array_give<T>(v);
@@ -1945,9 +1967,9 @@ fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
         let d = l2r_consume<T>(dflt);
         r
     } else {
+        let ignored = l2r_panic_code(0);
         let e = l2r_view_end<T>(p);
         let d = l2r_nat_drop_raw(x);
-        let ignored = l2r_panic_code(0);
         dflt
     }
 }
@@ -2295,7 +2317,7 @@ fn l2r_ref_wait<R>(r : R, store : u64) -> u64 [{
         let p = unsafe { *(&r as *const [:R:] as *const usize) };
         if (p >> 56) == 0 {
             let c = unsafe { *(p as *const u32) };
-            if c > 1 && c < 0x8000_0000 {
+            if c > 1 && c < leanrt::drop::IMMORTAL {
                 unsafe { *(p as *mut u32) = c - 1 };
                 ::std::mem::forget(r);
             }
@@ -2313,7 +2335,7 @@ fn l2r_ref_take_mark<R>(r : R) -> u64 [{
         let p = unsafe { *(&r as *const [:R:] as *const usize) };
         if (p >> 56) == 0 {
             let c = unsafe { *(p as *const u32) };
-            if c > 1 && c < 0x8000_0000 {
+            if c > 1 && c < leanrt::drop::IMMORTAL {
                 unsafe { *(p as *mut u32) = c - 1 };
                 ::std::mem::forget(r);
             }
@@ -3129,35 +3151,20 @@ fn lean_dbg_trace<T>(msg : LStr, f : L2RUnit -> T) -> T {
 }
 
 // `dbgTraceIfShared msg a`: prints `shared RC <msg>` when `a` is a heap
-// object whose reference count is not 1 (scalars never are). Reference-counted
-// storage types (runtime handles, leanrt's arrays and cells
-// (`leanrt::drop::Vec`, `Cell`: an `Array α` passed at `α := Array T`) and
-// Reussir records) have their u32 count at offset 0 of the object they point
-// to. Nullary constructors are Reussir
-// immediates, scalars in Lean: a pointer with a nonzero top byte (the `tbi`
-// encoding) or to a dummy box with an immortal count (>= 2^31). A one-word
-// box (`LAny`) answers for its payload (an immediate is never shared).
+// object that another reference also holds (`leanrt::is_shared`, by the
+// storage type: the count of a runtime handle, of leanrt's strings, arrays
+// and cells, of a Reussir record and of a big `Nat` or `Int`; a one-word box
+// (`LAny`) answers for its payload; small numbers, scalars and nullary
+// constructors, Reussir immediates, never are).
 // This must be an FFI import (lean2rr then passes values that cannot cross
-// the boundary in fresh wrappers, which are never shared: native Lean's
-// small `Nat`s are scalars), so the message reaches the current stderr
-// stream from Rust (`leanrt::io::diag_put`). The pieces below
-// (`l2r_shared_check<S>(a)`, `l2r_last_shared()`, `l2r_shared_rc_text`)
-// allow the same from Reussir code.
+// the boundary in fresh wrappers, which are never shared), so the message
+// reaches the current stderr stream from Rust (`leanrt::io::diag_put`). The
+// pieces below (`l2r_shared_check<S>(a)`, `l2r_last_shared()`,
+// `l2r_shared_rc_text`) allow the same from Reussir code.
 #[ffi(import)]
 fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
     {
-        let name = ::std::any::type_name::<[:T:]>();
-        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::string::") || name.starts_with("leanrt::drop::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
-        let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
-        let shared = if name == "leanrt::any::LAny" {
-            !unsafe { &*(&a as *const [:T:] as *const leanrt::any::LAny) }.is_exclusive()
-        } else {
-            boxed && (p >> 56) == 0 && {
-                let c = unsafe { *(p as *const u32) };
-                c != 1 && c < 0x8000_0000
-            }
-        };
-        if shared {
+        if leanrt::is_shared::<[:T:]>(&a) {
             leanrt::io::diag_put(leanrt::string::from_bytes(&lean_runtime::io::debug::shared_rc_line(msg.utf8())));
         }
         leanrt::rc_release(msg);
@@ -3166,23 +3173,7 @@ fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
 }];
 
 #[ffi(import)]
-fn l2r_shared_check<T>(a : T) -> T [{
-    {
-        let name = ::std::any::type_name::<[:T:]>();
-        let boxed = (name.starts_with("reussir_rt::") || name.starts_with("leanrt::string::") || name.starts_with("leanrt::drop::")) && ::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>();
-        let p = if boxed { unsafe { *(&a as *const [:T:] as *const usize) } } else { 0 };
-        let shared = if name == "leanrt::any::LAny" {
-            !unsafe { &*(&a as *const [:T:] as *const leanrt::any::LAny) }.is_exclusive()
-        } else {
-            boxed && (p >> 56) == 0 && {
-                let c = unsafe { *(p as *const u32) };
-                c != 1 && c < 0x8000_0000
-            }
-        };
-        leanrt::set_last_shared(shared);
-        a
-    }
-}];
+fn l2r_shared_check<T>(a : T) -> T [{ { leanrt::set_last_shared(leanrt::is_shared::<[:T:]>(&a)); a } }];
 
 #[ffi(import)]
 fn l2r_last_shared() -> bool [{ leanrt::last_shared() }];
@@ -3283,7 +3274,7 @@ fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
             let p = unsafe { *(&a as *const [:T:] as *const usize) };
             if (p >> 56) == 0 {
                 let c = unsafe { *(p as *const u32) };
-                if c > 1 && c < 0x8000_0000 {
+                if c > 1 && c < leanrt::drop::IMMORTAL {
                     unsafe { *(p as *mut u32) = c - 1 };
                     ::std::mem::forget(a);
                 }

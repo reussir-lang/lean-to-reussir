@@ -53,8 +53,8 @@ builds do not apply them (below).
   the build-time costs that make large builds slow (their patches are
   optimizations, not fixes), the allocator fix of issue 3, and the
   features that lean2rr needs. A patch that only gives a small gain in
-  speed on a few programs is parked: 07-a (issue 7) and 36-a and 36-b
-  (issue 36).
+  speed on a few programs is parked: 07-a (issue 7), 36-a and 36-b
+  (issue 36), and 42-a (issue 42).
 - lean2rr's work keeps the patches local: it does not push them or submit
   them. Five bug fixes (26-a, 02-a, 09-a, 04-a and 05-a) have open pull
   requests on Reussir's repository; the table below gives their numbers.
@@ -122,7 +122,15 @@ mimalloc's slow path, also for lean2rr's own objects. The patch rounds the
 size of a Rust allocation up to a multiple of 16. The alignment stays 16,
 and mimalloc does not move these pointers any more. Patch 03-b (review
 fixes) keeps the exact size in the sanitizer builds, which use the C
-allocator.
+allocator. Patch 03-c is parked outside the series: it gives each Rust
+allocation the alignment that it asks for. Reussir keeps its 16-byte rule.
+
+**Issue 42 (a cost), not patched.** The runtime frees the last reference
+to a record or to a boxed value as one cell of Reussir's pending stack.
+This takes three calls: one pushes the cell, one starts the drain, and the
+drain pops the cell again. Patch 42-a does this in one call. It is parked
+outside the series (instruction counts: monadic-interp −5.0%, unionfind
+−2.5%).
 
 ## All entries
 

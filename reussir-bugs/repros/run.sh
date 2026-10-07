@@ -9,9 +9,10 @@
 # RRC_CHECKOUT is a Reussir checkout with a build: its build/bin/rrc compiles
 # the repros, and plain .rr repros link against its build/target-rt/release.
 # NN is an entry number (1, 02, 13, ...); the default is every entry that
-# has a line here (all but 22, whose generator is run by hand, and the
-# missing features 40 and 41, which have no repro: their patches carry
-# their own tests). Each repro prints one line:
+# has a line here (all but 22, whose generator is run by hand, the missing
+# features 40 and 41, which have no repro: their patches carry their own
+# tests, and 44 and 45, which need a 32-bit target or hand-written MLIR).
+# Each repro prints one line:
 #
 #   issue NN  REPRODUCES  the documented behaviour (the bug, the cost, ...)
 #                         was seen
@@ -45,7 +46,8 @@
 # second build compiles (through a rustc wrapper). Issue 36's repro (a
 # missed optimization) counts the calls left in its LLVM IR; issue 39's (a
 # missed optimization) counts the cells its program allocates (Reussir's
-# allocation entry points wrapped at link time). Bug 24 runs
+# allocation entry points wrapped at link time). Bug 43's repro is a Rust
+# test of the checkout's runtime sources, compiled with RUSTC. Bug 24 runs
 # reussir-llvm-opt 12 times on one of the checkout's tests. lean2rr works
 # around 16, 17 and 20; the repros turn its workarounds off (L2R_NO_OUTLINE,
 # L2R_NO_INLINE_ANCHORS).
@@ -641,7 +643,25 @@ bug39() {
     else say_line OTHER 39 "prints '$OUT_TXT'" "$L2R_FLAGS"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33 34 35 36 38 39"
+bug43() {
+    # A Rust test of the checkout's reussir-rt sources (nullable.rs, rc.rs),
+    # linked as rt/ next to a copy of the repro.
+    local d=$WORK/out/43 fails
+    mkdir -p "$d"
+    cp "$HERE/bug43-nullable-as-ref.rs" "$d/"
+    ln -sfn "$CK/crates/reussir-rt/src" "$d/rt"
+    { "$RUSTC" --edition 2021 --test "$d/bug43-nullable-as-ref.rs" -o "$d/t" > "$d/log" 2>&1; } 2> /dev/null
+    RC=$?
+    if [ $RC != 0 ]; then say_line OTHER 43 "rustc $(signame "$RC"): $(grep -m1 -o "error.\{0,160\}" "$d/log")"; return; fi
+    # Only the repro's two tests (`as_ref_*`), not the modules' own.
+    { (cd "$d" && timeout 60 ./t --test-threads=1 as_ref_) > "$d/out" 2>&1; } 2> /dev/null
+    if grep -q '^test result: ok. 2 passed' "$d/out"; then say_line FIXED 43 "Nullable::as_ref: both tests pass"
+    elif fails=$(sed -n 's/^test result: FAILED. [0-9]* passed; \([0-9]*\) failed.*/\1/p' "$d/out") && [ -n "$fails" ]; then
+        say_line REPRODUCES 43 "Nullable::as_ref: $fails of 2 tests fail (the reference points to a dead copy)"
+    else say_line OTHER 43 "$(tail -1 "$d/out")"; fi
+}
+
+ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33 34 35 36 38 39 43"
 SLOW=" 06 10 11 16 17 20 23 "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

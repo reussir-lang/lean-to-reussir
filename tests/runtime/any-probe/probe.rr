@@ -783,5 +783,5 @@ fn anyprobe_main() -> u64 {
     let l18_2 : u64 = probe_live(); let b18_2 : u64 = probe_bad(); let a18_2 : u64 = probe_allocs();
     let r18_2 : u64 = s_order();
     let c18_2 : u64 = probe_report("order of observable releases, as native (run 2)", l18_2, b18_2, a18_2, r18_2, 3, true);
-    c0_2 + c1_2 + c2_2 + c3_2 + c4_2 + c5_2 + c6_2 + c7_2 + c8_2 + c9_2 + c10_2 + c11_2 + c12_2 + c13_2 + c14_2 + c15_2 + c16_2 + c17_2 + c18_2
+    pi + c0_2 + c1_2 + c2_2 + c3_2 + c4_2 + c5_2 + c6_2 + c7_2 + c8_2 + c9_2 + c10_2 + c11_2 + c12_2 + c13_2 + c14_2 + c15_2 + c16_2 + c17_2 + c18_2
 }

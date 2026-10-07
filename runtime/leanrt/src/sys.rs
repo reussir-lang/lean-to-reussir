@@ -92,12 +92,20 @@ pub fn tmpdir() -> LHandle {
 }
 
 /// `osGetPasswd` (`uv_os_get_passwd`): strings username, shell, homedir;
-/// words uid, gid (lean-runtime gives them all on Linux).
+/// words uid, gid (lean-runtime gives them all on Linux). The encoding has
+/// no presence bits: the shim (`L2RShim.lean`, `osGetPasswd`) makes all
+/// four optional fields `some`. A platform where one may be absent needs a
+/// presence mask in the operation and the shim's `none`; debug builds check
+/// that all four are there (review HSY-03).
 pub fn passwd() -> LHandle {
     let o = done_op();
     let x = op(&o);
     match uvsys::os_get_passwd() {
         Ok(p) => {
+            debug_assert!(
+                p.shell.is_some() && p.homedir.is_some() && p.uid.is_some() && p.gid.is_some(),
+                "leanrt: osGetPasswd without a shell, homedir, uid or gid: the shim would make it `some`"
+            );
             x.strs = vec![p.username, p.shell.unwrap_or_default(), p.homedir.unwrap_or_default()];
             push_u64(&mut x.bytes, p.uid.unwrap_or(0));
             push_u64(&mut x.bytes, p.gid.unwrap_or(0));

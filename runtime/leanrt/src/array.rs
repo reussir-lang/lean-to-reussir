@@ -116,8 +116,14 @@ impl<T: Clone> CloneInto for T {
 /// through a single word. The dummy's count is never decremented (Reussir
 /// steers decrements of immediates away) and never frees, so these
 /// increments are skipped here; real boxes are incremented as `rc.inc` does
-/// (the 32-bit count at offset 0; these records are not atomic). Other
-/// targets use the immortal encoding: the generic clone there.
+/// (the 32-bit count at offset 0; these records are not atomic). The
+/// `immortal` encoding (other targets, and aarch64 under
+/// `--nullary-variant-encoding arch-independent`) makes an immediate the
+/// plain address of its dummy, whose count is `drop::IMMORTAL` or more and
+/// stays as it is, as Reussir's own increment leaves it (review HRT-04): the
+/// loop adds `c < IMMORTAL` to the count it loads, without a branch, and so
+/// stores a dummy's count back unchanged (the dummy is a writable global).
+/// Other targets: the generic clone.
 impl<X: Clone> CloneInto for reussir_rt::bridge::Bridge<X> {
     #[inline(always)]
     unsafe fn clone_to(src: &[Self], dst: *mut Self) {
@@ -126,7 +132,8 @@ impl<X: Clone> CloneInto for reussir_rt::bridge::Bridge<X> {
             for x in src {
                 let p = std::mem::transmute_copy::<Self, *mut u32>(x);
                 let q = if (p as usize) >> 56 == 0 { p } else { &mut scratch as *mut u32 };
-                *q = (*q).wrapping_add(1);
+                let c = *q;
+                *q = c + (c < crate::drop::IMMORTAL) as u32;
             }
             std::hint::black_box(scratch);
             std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
@@ -344,6 +351,13 @@ pub fn get<T: Clone>(v: &RVec<T>, i: u64) -> T {
 /// A shared array (count above 1) is decremented now: another reference
 /// keeps the block and its elements alive until the read's end (one thread
 /// runs Lean code, and nothing else runs until `view_take` or `view_end`).
+/// One exception: `get!` out of bounds (the prelude's `lean_array_get`)
+/// panics between the give and `view_end`, as natively (review HA-01), and
+/// the message goes to the current stderr stream, which `IO.setStderr` may
+/// have made a stream of Lean functions: Lean code can run there and drop
+/// the reference that keeps a shared array alive. So nothing reads through
+/// a view after a panic: `view_end` of a shared view reads nothing, and the
+/// last reference's view is the read's own.
 /// So no call and no other store come between the caller's increment and
 /// this decrement on any path (the bounds check and its panic come after),
 /// and LLVM removes both. The last reference keeps its count of 1, and
@@ -506,12 +520,17 @@ impl<X> ReleaseElem for reussir_rt::bridge::Bridge<X> {
         if cfg!(target_arch = "aarch64") && size_of::<Self>() == 8 {
             let p = std::mem::transmute_copy::<Self, *mut u32>(&x);
             if (p as usize) >> 56 != 0 {
-                // An immediate.
+                // An immediate (`tbi`).
                 std::mem::forget(x);
                 return;
             }
-            if *p != 1 {
-                *p -= 1;
+            let c = *p;
+            if c != 1 {
+                // Shared; an immediate's dummy (`immortal`) stays as it is
+                // (`drop::IMMORTAL`).
+                if c < crate::drop::IMMORTAL {
+                    *p = c - 1;
+                }
                 std::mem::forget(x);
                 return;
             }
@@ -641,19 +660,21 @@ pub fn replicate<T: Clone>(n: u64, x: T) -> RVec<T> {
     v
 }
 
-/// Drop elements from index `n` on (the size is set first, then the
-/// removed elements are released in order, as `Vec::truncate`).
+/// Drop elements from index `n` on, the last first, each as `pop` drops it
+/// (natively a loop of `Array.pop`, `lean_array_pop`; review HA-01's note:
+/// it released them first to last). The prelude's `l2r_array_truncate`,
+/// which generated code does not call.
 #[inline]
 pub fn truncate<T: Clone>(v: RVec<T>, n: u64) -> RVec<T> {
-    let len = v.len();
-    if (n as usize) >= len {
+    if (n as usize) >= v.len() {
         return v;
     }
     let mut v = v;
     let o = make_mut(&mut v, 0);
     unsafe {
-        (*o).len = n as usize;
-        std::ptr::drop_in_place(std::slice::from_raw_parts_mut(elems::<T>(o).add(n as usize), len - n as usize));
+        while (*o).len > n as usize {
+            pop_in::<T>(o);
+        }
     }
     v
 }
@@ -1122,7 +1143,7 @@ mod tests {
         let b = pop(b);
         assert_eq!(take_log(), vec![3]);
         let b = truncate(push(push(b, E(4)), E(5)), 1);
-        assert_eq!(take_log(), vec![9, 4, 5]);
+        assert_eq!(take_log(), vec![5, 4, 9]);
         drop(replicate(3, E(7)));
         assert_eq!(take_log(), vec![7, 7, 7]);
         drop(b);

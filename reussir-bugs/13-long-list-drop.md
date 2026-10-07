@@ -670,18 +670,22 @@ above in a `List` is a box's payload, released inside a drain:
   order (lists `A0 … A3` and `B0 B1 B2` in one array: `B1 B2 B0 A1 A2 A3
   A0`, natively `B2 B1 B0 A3 A2 A1 A0`; test `RtDropOrderRec`). With one
   stack it matches native.
-- lean2rr's runtime also defers single cells with 13-b's
-  `__reussir_drop_defer`: the last reference to a record (lean2rr's switch
-  step 11, `leanrt::drop::free_deferred`) and to a box's program payload
-  (`leanrt::any::release_last`). For a box, the deferred cell is the
-  payload's cell address (the box's word without its type number), with
-  the program's release of the payload's type, found in leanrt's table by
-  number. This relies on one property of 13-b's runtime: a cell deferred
-  without `_wide` is never read or written (the drain passes the pointer
-  back to the release function unchanged); a wide cell deferred after it
-  may link to it, which writes only the wide cell's own header. (From
-  22bcf89 until the table, the deferred pointer was the box's tagged word,
-  and lean2rr also relied on a later wide cell never linking to it.)
+- lean2rr's runtime also frees single cells through the stack: the last
+  reference to a record (lean2rr's switch step 11,
+  `leanrt::drop::free_unique`) and to a box's program payload
+  (`leanrt::any::release_last`). Both defer the cell with 13-b's
+  `__reussir_drop_defer` and then call `__reussir_drop_drain`
+  (`leanrt::drop::free_deferred`); outside a drain, the drain's one-cell
+  path (`drain_one`) releases it at once ([issue 42](42-drop-run.md): the
+  cost of these three calls). For a box, the cell is the payload's cell
+  address (the box's word without its type number), with the program's
+  release of the payload's type, found in leanrt's table by number. This
+  relies on one property of 13-b's runtime: a cell deferred without
+  `_wide` is never read or written (the drain passes the pointer back to
+  the release function unchanged); a wide cell deferred after it may link
+  to it, which writes only the wide cell's own header. (From 22bcf89 until
+  the table, the deferred pointer was the box's tagged word, and lean2rr
+  also relied on a later wide cell never linking to it.)
 - Cost: about 10% on allocation-heavy programs (Deriv 3.70 → 4.09 s,
   MonadicInterp 1.73 → 1.89 s), most of it recovered by 13-c.
 - Still recursive (review round 4, R4-5): chains through `Nullable` links

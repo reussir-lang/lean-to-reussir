@@ -65,6 +65,50 @@ pub use lean_runtime::LEAN_VERSION;
 
 static LAST_SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// `dbgTraceIfShared`'s test (the prelude's `lean_dbg_trace_if_shared` and
+/// `l2r_shared_check`): whether `a`, a value of the storage type `T` (the
+/// textures' `[:T:]`), is a heap object that another reference also holds.
+/// Natively `!lean_is_scalar(a) && !lean_is_exclusive(a)`. By `T`:
+/// - a one-word box (`any::LAny`) answers for its payload; an immediate is
+///   never shared;
+/// - a `Nat` or `Int` (`nat::LNat`, `nat::LInt`): an even word is a big
+///   number, whose block starts with its `u32` count; an odd word is a small
+///   value, a scalar natively (review HL-01: the big numbers were never
+///   reported);
+/// - a one-word handle of Reussir (`reussir_rt::`: records, through
+///   `Bridge`, and runtime objects) or of leanrt (`string::`, and `drop::`:
+///   arrays, `ByteArray`, `FloatArray`, the cells of thunks and tasks): the
+///   `u32` count at the pointer. A Reussir immediate (a nullary
+///   constructor, a scalar natively) is not shared: its top byte is not zero
+///   (the `tbi` encoding), or it points to a dummy box whose count is 2^31
+///   or more (the `immortal` encoding);
+/// - any other type (scalars, and the fresh wrappers lean2rr passes values
+///   that cannot cross the boundary in) is never shared.
+///
+/// A task that one reference holds is not shared; natively a task that
+/// `Task.spawn` made is multi-threaded, so never exclusive (a documented
+/// difference).
+#[inline]
+pub fn is_shared<T>(a: &T) -> bool {
+    let name = std::any::type_name::<T>();
+    if name == "leanrt::any::LAny" {
+        return !unsafe { &*(a as *const T as *const any::LAny) }.is_exclusive();
+    }
+    let counted = name.starts_with("reussir_rt::")
+        || name.starts_with("leanrt::string::")
+        || name.starts_with("leanrt::drop::")
+        || name.starts_with("leanrt::nat::");
+    if !counted || std::mem::size_of::<T>() != std::mem::size_of::<usize>() {
+        return false;
+    }
+    let p = unsafe { *(a as *const T as *const usize) };
+    if p & 1 != 0 || p >> 56 != 0 {
+        return false;
+    }
+    let c = unsafe { *(p as *const u32) };
+    c != 1 && c < drop::IMMORTAL
+}
+
 /// `dbgTraceIfShared`'s check, recorded for the prelude to read back.
 pub fn set_last_shared(b: bool) {
     LAST_SHARED.store(b, std::sync::atomic::Ordering::Relaxed)
@@ -284,6 +328,50 @@ mod tests {
             };
             assert_eq!(g.lines, want);
         }
+    }
+
+    /// `is_shared` (`dbgTraceIfShared`): each storage type's own count; a
+    /// small number, an immediate and a scalar are never shared.
+    #[test]
+    fn shared_by_storage_type() {
+        use super::is_shared;
+        use crate::any::{self, LAny};
+        use crate::nat::{LInt, LNat};
+        // Nat and Int: a small value is a scalar; a big one has a count.
+        assert!(!is_shared(&LNat::of_u64(5)));
+        let b = LNat::of_u64(u64::MAX);
+        assert!(!is_shared(&b));
+        let b2 = b.clone();
+        assert!(is_shared(&b) && is_shared(&b2));
+        drop(b2);
+        assert!(!is_shared(&b));
+        let i = LInt::of_i64(i64::MIN);
+        let i2 = i.clone();
+        assert!(is_shared(&i));
+        drop(i2);
+        assert!(!is_shared(&i));
+        assert!(!is_shared(&LInt::of_i64(-3)));
+        // Strings and arrays (`ByteArray` here).
+        let s = crate::string::from_bytes(b"abc");
+        assert!(!is_shared(&s));
+        let s2 = s.clone();
+        assert!(is_shared(&s));
+        drop(s2);
+        let v = crate::array::push(crate::array::empty::<u8>(), 7);
+        assert!(!is_shared(&v));
+        let v2 = v.clone();
+        assert!(is_shared(&v));
+        drop(v2);
+        assert!(!is_shared(&v));
+        // A box answers for its payload; an immediate is not shared.
+        let a = any::of(crate::string::from_bytes(b"boxed"), any::NUM_STR);
+        assert!(!is_shared(&a));
+        let a2 = a.clone();
+        assert!(is_shared(&a));
+        drop(a2);
+        assert!(!is_shared(&LAny::imm(3)));
+        // Scalars.
+        assert!(!is_shared(&7u64) && !is_shared(&1.5f64) && !is_shared(&true));
     }
 
     /// lean-runtime mirrors the Lean version lean2rr is pinned to: the

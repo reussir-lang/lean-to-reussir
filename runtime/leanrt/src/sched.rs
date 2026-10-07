@@ -93,6 +93,16 @@ impl Glue for LeanrtGlue {
     /// primitive, which its code reads after the call (`fs::LastError`,
     /// hunt HCO-01; review RHCO-01 for a reused id).
     /// Moves values only: no Lean code, no call into the scheduler.
+    ///
+    /// A context that has ended leaves its state here too, under its id, and
+    /// a new context that reuses the id starts with it: lean-runtime's `Glue`
+    /// reports no context's end (its hub knows it, `after_resume`'s `ended`),
+    /// so neither a fix nor a check is possible here (review HL-01's
+    /// suspicion a, latent). A task gives its context's cells back when it
+    /// ends (`task_end`; a dedicated task's fresh stream context is closed
+    /// by the generated code), so an ended task context leaves empty cells;
+    /// only Lean code run on a context outside a task (a promise's `sync`
+    /// dependents on the event loop's context) can leave streams behind.
     fn switched(&self, from: CtxId, to: CtxId) {
         CTX_STATES.with(|m| {
             let mut m = m.borrow_mut();

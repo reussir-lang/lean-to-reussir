@@ -223,15 +223,20 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   The runtime keeps lean-runtime's process object of each child by pid
   until the child is reaped (`runtime/leanrt/src/proc.rs`).
 - **Why:** As `process.cpp` (runtime request 29, ef971b7). Lean's
-  `output` reads stdout in a dedicated task while it reads stderr; tasks
-  are deferred here, so a child filling the stdout pipe before closing
-  stderr would block forever.
+  `output` reads stdout in a dedicated task while it reads stderr (which
+  lean-runtime's scheduler also runs: its pipe reads cooperate), and writes
+  all of a `some` input before it reads the outputs, so a child that fills
+  a pipe while it reads its input and the program wait for each other for
+  good (LB-40). `l2r_proc_output` reads both pipes together and writes the
+  input meanwhile. (The replacement first came because lean2rr's deferred
+  tasks blocked Lean's pattern for good, before lean-runtime's IO
+  cooperated.)
 - **Where:** `Lower/Process.lean`: `processExtern`, `spawnCall`,
   `spawnedChild`, `structField`, `processOutputBody`; `Lower/Code.lean`:
   `lowerDecl` (the `IO.Process.output` case); `runtime/leanrt/src/proc.rs`;
   lean-runtime's `src/io/process.rs`.
-- **Remove only if:** the runtime gets real threads (for `output`); the
-  rest never.
+- **Remove only if:** never (without the `output` replacement LB-40 comes
+  back).
 
 ### `Std.Sync` objects are runtime handles
 

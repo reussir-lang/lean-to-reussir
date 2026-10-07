@@ -532,7 +532,7 @@ def scheduler():
 
 
 def free_stack():
-    s = SVG("free", 940, 190, "Freeing without recursion",
+    s = SVG("free", 940, 205, "Freeing without recursion",
             "Native Lean frees iteratively. Here the runtime's containers and "
             "Reussir's drop glue (local patches 13-a to 13-c) share one stack of "
             "pending work per thread, popped last first.")
@@ -544,8 +544,9 @@ def free_stack():
     s.box(550, 30, 170, 110, ["pending stack", "(per thread)", "last pushed,", "first popped"], "b-rt")
     s.arrow(720, 85, 770, 85)
     s.box(775, 50, 155, 70, ["outermost free", "pops until empty"], "b-rt")
-    s.text(10, 170, "Order: an array from its last element, a record from its last field, as Lean's lean_dec "
-           "(one difference: the first cell of a free that user code starts at a record).", "ts")
+    s.text(10, 170, "Order: an array's elements decremented in index order, then freed from the last; a record "
+           "from its last field, as Lean's lean_dec", "ts")
+    s.text(10, 188, "(one difference: the first cell of a free that user code starts at a record).", "ts")
     return s.render()
 
 

@@ -31,7 +31,10 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
   `runtime/prelude.rr`: `LCell`, `l2r_lcell_new`, `l2r_lcell_swap`;
   `runtime/leanrt/src/drop.rs`: `Cell` (its release and `l2r_lcell_get`'s
   `cell_get` test `count == 1`, the read releasing the cell before it
-  copies the state, so that LLVM cancels the caller's increment:
+  copies the state, so that LLVM cancels the caller's increment; a read
+  that takes the last reference skips `task::on_last_reference`, which
+  has nothing to do then: checked in debug builds,
+  `task::last_reference_is_plain`;
   [../representations/arrays.md](../representations/arrays.md#a-release-tests-count--1)).
 - **Remove only if:** never.
 

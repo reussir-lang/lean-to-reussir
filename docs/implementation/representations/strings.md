@@ -73,11 +73,38 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/string.rs`, and
   overwrites in place when the width does not change, with an inline fast
   path for an ASCII character over an ASCII character of a unique string;
   `String.append` has an inline fast path for a unique left string with
-  spare capacity.
+  spare capacity. A `set` on a shared string copies it with room for
+  `len + extra` bytes (`copy_shared(s, extra, false)`: its new size, or its
+  old one when the new character is shorter), as natively
+  `lean_string_utf8_set` makes a string of exactly its new size; a push or an append copies a shared
+  string with room to double, as `lean_string_push` does (review HSTR-01:
+  `set` doubled too, each modified copy of a shared string twice its size;
+  test `RtStrSetSharedAlloc`).
 - **Why:** As C's fast paths (adv4 PF4-05, 5dfb324; 5153e6c).
 - **Where:** `prelude.rr`: `lean_string_utf8_set`, `lean_string_append`;
-  `leanrt/src/string.rs`: `set`, `append`.
+  `leanrt/src/string.rs`: `set`, `set_slow`, `copy_shared`, `append`.
 - **Remove only if:** never (speed only).
+
+### `String.ofList` makes the string at its exact size
+
+- **What:** `String.ofList` and `String.mk` (`lean_string_mk`) first sum
+  the UTF-8 sizes of the list's characters (a generated loop,
+  `l2r_list_utf8_size_<list type>`, with `l2r_utf8_size_add`), then make
+  an empty string with room for exactly that many bytes
+  (`l2r_string_with_capacity`, `leanrt::string::with_capacity`) and push
+  the characters onto it (a generated fold of `lean_string_push`). When a
+  push finds no room, `push_slow` makes room for the character's own
+  bytes (`n`, 1 to 4) instead of 4, so a string made at its exact size
+  takes its last character without growing.
+- **Why:** As natively `lean_string_mk` collects the bytes and makes the
+  string at its exact size. Pushes onto `""` grew the string about log2 n
+  times, up to twice its size (review RLF1-06, test `RtStrOfListAlloc`);
+  with room for 4 bytes, a last character shorter than 4 bytes still
+  grew a string made at its exact size.
+- **Where:** `Lower/Externs.lean`: `stringOfList`; `prelude.rr`:
+  `l2r_string_with_capacity`, `l2r_utf8_size_add`;
+  `leanrt/src/string.rs`: `with_capacity`, `push_slow`.
+- **Remove only if:** never (memory and speed only).
 
 ### String literals come from a generated table
 

@@ -518,6 +518,56 @@ def listFold (name : String) (listTy accTy elemTy : RR.Ty) (step : RR.Expr → R
   modify fun s => { s with fns := s.fns.push (.fn name #[("l", listTy), ("acc", accTy)] accTy body) }
   return name
 
+/-- A generated function adding up a `u64` over a Lean `List` of type
+`listTy`: `f(l, n)` = `n` plus each element's share, `step n x` (the
+accumulator `n` and the head `x`, converted to `elemTy`, a `u64` result).
+With `elemTy = none` the heads are not bound (so not retained) and
+`step` gets `_`. Cached by `name`, which must name the list type. -/
+def listSum (name : String) (listTy : RR.Ty) (elemTy : Option RR.Ty)
+    (step : RR.Expr → RR.Expr → RR.Expr) : LowerM String := do
+  if (← hasFn name) then return name
+  let .named lt := listTy | throwError "lean2rr: bad list type"
+  let some info := (← get).typeInfos[lt]? | throwError "lean2rr: bad list type"
+  let some nil := info.ctors.find? ``List.nil | throwError "lean2rr: bad list type"
+  let some cons := info.ctors.find? ``List.cons | throwError "lean2rr: bad list type"
+  let (head, x) ← match elemTy with
+    | none => pure (RR.Expr.atom "_", RR.Expr.atom "_")
+    | some et => do
+      let some (_, ht) := cons.fields[0]?.join | throwError "lean2rr: bad list type {lt} (internal error)"
+      pure (RR.Expr.var "x", ← coerce (.var "x") ht et)
+  let u64 := RR.Ty.named "u64"
+  let body : RR.Block := .ofExpr (.mtch (.var "l") #[
+    { ty := lt, ctor := some nil.variant, binders := #[], body := .ofExpr (.var "n") },
+    { ty := lt, ctor := some cons.variant,
+      binders := (cons.place #[head, .var "t"]).map fun
+        | .var v => some v | _ => none,
+      body := .ofExpr (.call name #[] #[.var "t", step (.var "n") x]) }])
+  modify fun s => { s with fns := s.fns.push (.fn name #[("l", listTy), ("n", u64)] u64 body) }
+  return name
+
+/-- A generated function giving the length of a Lean `List` of type
+`listTy`: `len(l, n)` = `n` + the number of elements (the heads are not
+bound, so not retained). -/
+def listLength (listTy : RR.Ty) : LowerM String :=
+  listSum s!"l2r_list_length_{listTy.render.map fun c => if c.isAlphanum then c else '_'}" listTy none
+    fun _ _ => .atom "n + 1"
+
+/-- `String.ofList`/`String.mk` of the list `l` (of type `listTy`, a
+`List Char`): the UTF-8 size of its characters first (a generated loop,
+`l2r_list_utf8_size_<list type>`), then a fold that pushes them onto a
+string made with room for exactly that many bytes, as natively
+`lean_string_mk` makes the string at its exact size (review RLF1-06:
+pushes onto `""` grew it, up to twice its size). `fold` names the
+generated fold. -/
+def stringOfList (fold : String) (listTy : RR.Ty) (l : RR.Expr) : LowerM RR.Expr := do
+  let san := listTy.render.map fun c => if c.isAlphanum then c else '_'
+  let fn ← listFold fold listTy (.named "LStr") (.named "u32") fun acc x => .call "lean_string_push" #[] #[acc, x]
+  let size ← listSum s!"l2r_list_utf8_size_{san}" listTy (some (.named "u32"))
+    fun n x => .call "l2r_utf8_size_add" #[] #[n, x]
+  let xs ← fresh "xs"
+  return .block ⟨#[(xs, some listTy, l)], .call fn #[] #[.var xs,
+    .call "l2r_string_with_capacity" #[] #[.call size #[] #[.var xs, .atom "0"]]]⟩
+
 /-- The C symbols of the externs that make a task or a promise: a program
 reaching one can have other contexts than `main`'s (a promise's
 dependents run where it is resolved, the event loop's completions on a
@@ -569,9 +619,10 @@ def refPoint (op : String) (r : RR.Expr) : LowerM (Option (String × Option RR.T
 /-- Reference operation `op` on the reference `r` (of the reference type,
 `refType`, whose cell holds a `Box`; `v`, for `set` and `swap`, a `Box`):
 `get` (a copy: the cell keeps its reference), `take` (the value moves out
-and the cell gets the placeholder, as `lean_st_ref_take` stores `box(0)`:
-Lean's `modify` is take-then-set, so a value only the cell holds stays
-unshared and is updated in place), `set` (`u64` result: `l2r_rc_set_ref`,
+and the cell gets the placeholder `box(0)`, `zeroValue`; natively
+`lean_st_ref_take` stores a null pointer, which only unsafe code can see
+before the next store: Lean's `modify` is take-then-set, so a value only
+the cell holds stays unshared and is updated in place), `set` (`u64` result: `l2r_rc_set_ref`,
 which releases the old value after storing the new one, as
 `lean_st_ref_set` does: code the release runs, the `sync` dependents of a
 promise it drops, sees the new value; and then the reference `r` itself,

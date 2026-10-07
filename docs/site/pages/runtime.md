@@ -286,10 +286,19 @@ call. Each step passed lean2rr's full suite before its merge.
 - **`ByteArray.data` and `ByteArray.mk`** (and those of `FloatArray`).
   The runtime makes the new array at its exact size and converts the
   elements in one loop, as Lean does.
-- **Arrays of boxes.** A free of an array skips the immediates and
-  decrements the shared values in line; only a value whose last
-  reference goes is released through the pending stack. A copy of an
-  array copies the words in one block and increments only the pointers.
+- **Arrays of boxes.** A free of an array has two passes, as in Lean.
+  The first pass goes through the elements in index order: it skips the
+  immediates and decrements the shared values in line. The second pass
+  releases the values whose last reference went, the last one first,
+  through the pending stack. So a value that the array holds twice is
+  released at its last index. The second pass calls the release of a
+  boxed record at once when the stack would pop that record next. When
+  no free runs, no work is pending and the first pass keeps one value
+  only, the runtime frees the array and then releases that value without
+  a step on the stack (not if the value is an array). The order of
+  releases does not change.
+  A copy of an array copies the words in one block and increments only
+  the pointers.
 - **Boxed `Float` and `UInt64` values.** The runtime allocates their
   small cells with mimalloc's small-block call and reads a cell in line.
 - **Release of a boxed value.** The program has one release function for

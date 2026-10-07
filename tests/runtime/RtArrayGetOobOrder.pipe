@@ -1,0 +1,1 @@
+$BIN 2>&1 | cat; echo "exit $?"; { LEAN_ABORT_ON_PANIC=1 $BIN 2>&1 | cat; } 2>/dev/null; echo "abort: exit $?"

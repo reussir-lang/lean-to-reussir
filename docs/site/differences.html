@@ -113,9 +113,8 @@ structures from <code>Lean</code>, with these differences:</p>
 <li><code>ptrEq</code> answering <code>true</code> still means equal values. <code>ST.Ref.ptrEq</code> is exact.</li>
 <li><code>isExclusiveUnsafe</code> answers <code>false</code>. <code>shareCommon</code> shares nothing.
   <code>dbgTraceIfShared</code> reads lean2rr's own counts. It does not report a
-  shared big number (natively it does). It does not report a task that
-  one reference holds; natively a task that <code>Task.spawn</code> made is
-  multi-threaded, and the check reports it as shared.</li>
+  task that one reference holds; natively a task that <code>Task.spawn</code> made
+  is multi-threaded, and the check reports it as shared.</li>
 <li><strong>When you can see it:</strong> only through these unsafe or debug functions.</li>
 </ul>
 <h2 id="tasks-and-concurrency">Tasks and concurrency</h2>

@@ -60,9 +60,8 @@ lean2rr does not copy native pointer identity or sharing.
 - `ptrEq` answering `true` still means equal values. `ST.Ref.ptrEq` is exact.
 - `isExclusiveUnsafe` answers `false`. `shareCommon` shares nothing.
   `dbgTraceIfShared` reads lean2rr's own counts. It does not report a
-  shared big number (natively it does). It does not report a task that
-  one reference holds; natively a task that `Task.spawn` made is
-  multi-threaded, and the check reports it as shared.
+  task that one reference holds; natively a task that `Task.spawn` made
+  is multi-threaded, and the check reports it as shared.
 - **When you can see it:** only through these unsafe or debug functions.
 
 ## Tasks and concurrency

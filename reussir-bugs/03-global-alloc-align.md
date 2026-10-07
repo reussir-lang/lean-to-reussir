@@ -220,6 +220,31 @@ coordinator judged the findings):
 
 A second look at 03-b is pending.
 
+### Parked option: 03-c
+
+Patch file
+[`patches/parked/03-c-natural-alignment.patch`](patches/parked/03-c-natural-alignment.patch),
+outside the series: no build applies it. It applies after 03-b (and after
+the whole series).
+
+- **What it does.** The global allocator gives each Rust request the
+  alignment that its `Layout` asks for. A request aligned to 8 bytes or
+  less takes mimalloc's plain path, whose blocks are always 8-aligned:
+  no pointer moves and no byte is added. Only a request aligned above 8
+  bytes gets a rounded size, to a multiple of its alignment, as 03-a does
+  with 16.
+- **Measured.** The repro moves 0 of its 2000 Rust allocations, as with
+  03-a. A small Rust allocation aligned to 8 bytes or less whose size is
+  not a multiple of 16 takes up to 8 bytes less than with 03-a: a 24-byte
+  `Vec<u64>` buffer gets a 24-byte block instead of a 32-byte one.
+  Reussir's allocator unit tests and its FFI lit tests (`frontend/ffi_*`,
+  `frontend/str_ffi*`, `frontend/polyffi*`, `llvmpass/*`,
+  `*trampoline*`: 43 tests) pass.
+- **Not measured.** Instruction counts, peak RSS, and
+  `tests/runtime/ffi-inline-check.sh`.
+- **Why it is parked.** The owner keeps Reussir's 16-byte rule for Rust
+  allocations.
+
 ## Upstream note
 
 A global allocator that promises `max_align_t` on top of a heap built for

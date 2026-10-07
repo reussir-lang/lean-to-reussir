@@ -281,11 +281,13 @@ def processExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array
   | _ => return none
 
 /-- The body of `IO.Process.output args input?`'s declaration (parameters
-`ps`, result `ret`, of Lean type `retE`), in place of Lean's: that one reads stdout in a
-dedicated task while it reads stderr, and lean2rr's tasks are deferred, so
-a child writing more than a pipe holds to stdout before closing stderr would
-block forever. The runtime's `l2r_proc_output` (lean-runtime's
-`io::process::output`) does what Lean's definition does: spawn with stdout
+`ps`, result `ret`, of Lean type `retE`), in place of Lean's, which reads
+stdout in a dedicated task while it reads stderr (lean-runtime's scheduler
+runs that too: its pipe reads cooperate). The runtime's `l2r_proc_output`
+(lean-runtime's `io::process::output`) reads both pipes together, and
+writes a large input while it reads them, where Lean's definition writes
+all of it first and then waits for good on a child that fills a pipe
+(LB-40). Otherwise it does what Lean's definition does: spawn with stdout
 and stderr piped, stdin null, or piped when `input?` is `some s` (then `s`
 is written and flushed, and the handle closed); read both pipes to end of
 file together; `readToEnd`'s UTF-8 check of stderr; `wait`; the same check

@@ -69,23 +69,27 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   -- `String.ofList : List Char → String`
   if orig == ``String.ofList then
     let lt ← lowerType params[0]!
-    let fn ← listFold s!"l2r_list_to_string_{lt.render.map fun c => if c.isAlphanum then c else '_'}" lt
-      (.named "LStr") (.named "u32") fun acc x => .call "lean_string_push" #[] #[acc, x]
-    return some (.call fn #[] #[args[0]!, ← strLit ""])
+    return some (← stringOfList s!"l2r_list_to_string_{lt.render.map fun c => if c.isAlphanum then c else '_'}" lt args[0]!)
   -- `Array.mk : List α → Array α`
-  -- `String.mk : List Char → String`: push the characters onto "".
+  -- `String.mk : List Char → String`: push the characters onto a string
+  -- made at their UTF-8 size (`stringOfList`).
   if (← externSymbol orig) == "lean_string_mk" then
     let lt ← lowerType params[0]!
-    let fn ← listFold s!"l2r_string_of_list_{lt.render.map fun c => if c.isAlphanum then c else '_'}" lt
-      (.named "LStr") (.named "u32") fun acc x => .call "lean_string_push" #[] #[acc, x]
-    return some (.call fn #[] #[args[0]!, ← strLit ""])
+    return some (← stringOfList s!"l2r_string_of_list_{lt.render.map fun c => if c.isAlphanum then c else '_'}" lt args[0]!)
   if orig == ``Array.mk then
     let lt ← lowerType params[0]!
     let arrTy ← lowerType ret
     let some ae := arrayElem? arrTy | throwError "lean2rr: bad array type {arrTy.render}"
     let fn ← listFold s!"l2r_list_to_array_{lt.render.map fun c => if c.isAlphanum then c else '_'}_{arrTy.enc}" lt arrTy
       ae fun acc x => arrayCall ae "push" #[acc, x]
-    return some (.call fn #[] #[args[0]!, arrayCall ae "empty" #[]])
+    -- The array is made at the list's length once, as natively
+    -- `List.toArrayImpl` reserves `Array.mkEmpty xs.length` (a capacity
+    -- hint, LB-37; review HA-02: pushes onto the empty array grew it about
+    -- log2 n times, up to twice the size).
+    let len ← listLength lt
+    let xs ← fresh "xs"
+    return some (.block ⟨#[(xs, some lt, args[0]!)], .call fn #[] #[.var xs,
+      arrayCall ae "with_capacity" #[.call len #[] #[.var xs, .atom "0"], .atom "8"]]⟩)
   -- `ByteArray.mk`/`data`, `FloatArray.mk`/`data`: between an array of
   -- `Box`es and the runtime's array of bytes or floats (natively a copy
   -- too): the prelude's texture (`tex`), which allocates the result at its

@@ -221,6 +221,14 @@ fn bytes_for(cap: usize) -> usize {
     }
 }
 
+/// A unique empty string with room for (at least) `cap` bytes (the
+/// prelude's `l2r_string_with_capacity`: `String.ofList` at its exact
+/// size).
+#[inline(never)]
+pub fn with_capacity(cap: u64) -> LStr {
+    alloc(cap as usize)
+}
+
 /// A fresh unique string with room for (at least) `cap` bytes, empty.
 #[inline(always)]
 fn alloc(cap: usize) -> LStr {
@@ -286,13 +294,14 @@ fn utf8_count_long(s: &[u8]) -> u64 {
     sem::string::utf8_strlen(s)
 }
 
-/// Unique access with room for `extra` more bytes, for an in-place update:
-/// a shared string is copied first, a full one grown.
+/// Unique access with room for `extra` more bytes, for a push or an
+/// append: a shared string is copied first (at least doubling), a full one
+/// grown.
 #[inline]
 fn make_mut(s: &mut LStr, extra: usize) -> *mut Obj {
     // By value: the address of `s` must not escape (see array::make_mut).
     if !s.is_unique() {
-        unsafe { std::ptr::write(s, copy_shared(std::ptr::read(s), extra)) };
+        unsafe { std::ptr::write(s, copy_shared(std::ptr::read(s), extra, true)) };
     } else {
         let o = s.0;
         let need = match unsafe { (*o).len }.checked_add(extra) {
@@ -306,13 +315,20 @@ fn make_mut(s: &mut LStr, extra: usize) -> *mut Obj {
     s.0
 }
 
-/// A private copy of a shared string (with room for `extra` more bytes, at
-/// least doubling as `lean_string_push` does), releasing the shared one.
+/// A private copy of a shared string with room for `extra` more bytes,
+/// releasing the shared one: at least doubling for a push or an append
+/// (`double`; `lean_string_push` copies a shared string with twice its
+/// size), with room for exactly `len + extra` bytes for `set_slow`: the new
+/// size, or the old one when the new character is shorter (natively
+/// `lean_string_utf8_set` makes a string of exactly its new size; doubling
+/// cost each modified copy of a shared string its length again, review
+/// HSTR-01).
 #[cold]
 #[inline(never)]
-extern "C" fn copy_shared(s: LStr, extra: usize) -> LStr {
+extern "C" fn copy_shared(s: LStr, extra: usize, double: bool) -> LStr {
     let src = bytes(&s);
-    let cap = match src.len().checked_add(extra.max(src.len())) {
+    let room = if double { extra.max(src.len()) } else { extra };
+    let cap = match src.len().checked_add(room) {
         Some(c) => c,
         None => oom(),
     };
@@ -387,7 +403,9 @@ fn push_slow(s: LStr, c: u32) -> LStr {
     let mut s = s;
     let mut buf = [0u8; 4];
     let n = sem::string::push_unicode_scalar(c, &mut buf) as usize;
-    let o = make_mut(&mut s, 4);
+    // Room for the character's own bytes: a string made at its exact size
+    // (`with_capacity`) takes its last character without growing.
+    let o = make_mut(&mut s, n);
     unsafe { extend(o, &buf[..n], 1) };
     s
 }
@@ -517,8 +535,12 @@ fn set_slow(s: LStr, i: u64, c: u32) -> LStr {
     // The old character's bytes `[i, end)` become the new one's `n`.
     let end = (i + old_len).min(len);
     let old_n = end - i;
-    let mut s = s;
-    let o = make_mut(&mut s, n.saturating_sub(old_n));
+    let extra = n.saturating_sub(old_n);
+    // A shared string is copied with room for `len + extra` bytes (the new
+    // size, or the old one for a shorter character), a unique one updated
+    // in place (grown when full).
+    let mut s = if s.is_unique() { s } else { copy_shared(s, extra, false) };
+    let o = make_mut(&mut s, extra);
     unsafe {
         // `make_mut` keeps the bytes (`len` of them) and leaves room for
         // `len - old_n + n`; the tail moves within the block (memmove).
@@ -798,6 +820,20 @@ mod tests {
         // unique and shared strings.
         let full = s("12345678"); // capacity 8: no room
         ok(&set(full, 7, '😀' as u32), "1234567😀");
+        // A set copies a shared string at `len + extra` (HSTR-01); a push
+        // or an append copies one with room to double.
+        let long = s(&"a".repeat(40));
+        let t = set(long.clone(), 3, '€' as u32); // 3 bytes for 1: 42 bytes
+        ok(&t, &format!("aaa€{}", "a".repeat(36)));
+        assert_eq!(cap(&t), 48);
+        let t = set(long.clone(), 3, 'b' as u32);
+        assert_eq!(cap(&t), 40);
+        let p = push(long.clone(), 'b' as u32);
+        assert!(cap(&p) >= 80);
+        let p = append(long.clone(), s("b"));
+        assert!(cap(&p) >= 80);
+        ok(&long, &"a".repeat(40));
+        assert_eq!(count(&long), 1);
         let wide = s("a😀b");
         let keep = wide.clone();
         ok(&set(wide, 1, 'z' as u32), "azb");

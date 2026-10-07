@@ -372,9 +372,11 @@ removes with only its decrement in line when it is a Reussir record
 holds boxes): the record's whole release in line kept the set
 texture out of line (unionfind). The last reference is released out of
 line by `array::release_last` (a box's by `any::release_last`), inside a
-free the runtime starts, as one pending cell (`drop::free_unique`,
-`drop::free_deferred`), so its fields go in Lean's order, the last one first,
-as `lean_dec` frees them in `lean_array_uset` (review RS10-01). Inlined, a read's release meets the
+free the runtime starts, as one pending cell (a record's by
+`drop::free_unique`; both through `drop::free_deferred`: Reussir's
+`__reussir_drop_defer`, then its drain, which outside a free pops the
+cell at once), so its fields go in Lean's order, the last one first, as `lean_dec` frees them in
+`lean_array_uset` (review RS10-01). Inlined, a read's release meets the
 caller's increment, and LLVM folds the pair (the free check included,
 thanks to the `old count >= 1` that Reussir's `rc.inc` asserts) as long as
 no other store or call lies on a path between them. So a read gives its
@@ -453,9 +455,11 @@ payload is exactly 16 MiB (a hash table's 2^21 buckets) is, with the
 header, past mimalloc's large-object limit, a huge segment that mimalloc
 purges only 100 ms after it is freed (plan §10, "Arrays and strings are
 one block each").
-`dbgTraceIfShared` recognizes strings by their Rust type names
-(`leanrt::string::`) besides `reussir_rt::`; it
-reports no generic array (sharing is not observable, plan §10).
+`dbgTraceIfShared` (`leanrt::is_shared`) recognizes the counted storage
+types by their Rust type names: `reussir_rt::` (records, runtime
+objects), `leanrt::string::`, `leanrt::drop::` (arrays, `ByteArray`,
+`FloatArray`, thunk and task cells) and `leanrt::nat::` (a big number's
+count; a small one is a scalar); a box answers for its payload.
 
 **The one-word box `LAny` (lean2rr's `Box`).** `leanrt::any::LAny`, the
 prelude's `LAny` (`tagged`), is a value of unknown type in one word, as
@@ -542,8 +546,10 @@ holds a `Box`). Promises hold the `LCell` of their task
 new value first and then releases the old one as `lean_dec` does
 (`leanrt::drop::release`, through `l2r_release_value_then`): a shared value
 is decremented; the last reference to a record is freed inside a free the
-runtime starts (as one pending cell: `drop::free_unique`, and for a box
-`drop::free_deferred`), so its fields go last first and the `sync`
+runtime starts (as one pending cell: `drop::free_unique` for a record,
+`any::release_last` for a box's payload, both through
+`drop::free_deferred`: Reussir's `__reussir_drop_defer`, then its drain,
+which outside a free pops the cell at once), so its fields go last first and the `sync`
 dependents of the promises it drops run when that free ends. A reference
 set then releases the reference itself (natively the caller's release
 after the borrowed set): a set that is the reference's last use frees the
@@ -570,9 +576,11 @@ which releases the elements. The prelude's containers are therefore
 that same stack (so the runtime needs Reussir with 13-b): a container
 freed while another free runs (from an element's release, or from record
 glue) is pushed instead, and the outermost free, glue or container, pops
-the stack until it is empty. An array is emptied from its last element,
-and what an element's release pushes is done before the next element, so
-the order of observable releases matches Lean's (file handles closed, and
+the stack until it is empty. An array is freed in native Lean's two
+passes: its elements are decremented in index order, then those whose last
+reference went are released from the last one, and what an element's
+release pushes is done before the next element (`drop::free_vec`,
+`ReleaseElems::scan`), so the order of observable releases matches Lean's (file handles closed, and
 so flushed, promises resolved; `fs` and `task` push those too while a free
 runs), except at the top of a free that starts at a record that user code
 drops by itself (translation plan §10). For an
@@ -584,7 +592,14 @@ without the stack (`ReleaseElems`): only an element whose last reference
 goes takes the glue and the stack, so the order of releases is unchanged.
 An array of boxes (`LAny`) is freed the same way: an immediate is skipped,
 a shared payload decremented inline, and only a payload whose count is 1
-goes to `any::release_last`.
+goes to `any::release_last`. Where the stack would pop that payload's cell
+next, the free skips the round trip: in the second pass's step every kept
+element but the last has its release called at once
+(`any::release_last_in_step`), and, outside a free with nothing pending,
+an array that keeps one element that is a program payload or a leaf of
+leanrt frees its block and gives that element to `any::release_last`
+without a step (`ReleaseElems::free_single`; an array element keeps the
+step); the order is the same (docs/implementation/ownership.md).
 (Inside a free the array is pushed as before: a later field of the record
 being freed may hold one of its elements.)
 
@@ -922,8 +937,10 @@ then makes the system call on the pid itself, as natively (`ECHILD`,
 directory or execute prints Lean's message and exits with 255, its stdout
 first getting the bytes the parent had pending, as natively (lean-runtime
 starts a stand-in process for it). `IO.Process.output` reads stdout in a
-dedicated task while it reads stderr; lean2rr's tasks are deferred, so
-lean2rr replaces its body with `l2r_proc_output(cmd, args, cwd, has_cwd,
+dedicated task while it reads stderr, and writes all of a `some` input
+before it reads (LB-40: a child that fills a pipe and the program then wait
+for each other for good); lean2rr replaces its body with
+`l2r_proc_output(cmd, args, cwd, has_cwd,
 env_names, env_values, env_set, inherit_env, setsid, input, has_input) ->
 u32` (lean-runtime's `io::process::output`: both pipes read to end of file
 together with `poll`; `readToEnd`'s UTF-8 checks and the errors in Lean's
@@ -1213,8 +1230,7 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   Without tasks it waits, as natively.
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`, and
   `dbgTraceIfShared` of values held by value (`[value]` structures, small
-  `Nat`s) and of a shared big number (natively reported) never reports
-  sharing; nor of a task that one reference holds
+  `Nat`s) never reports sharing; nor of a task that one reference holds
   (natively a task that `Task.spawn` made is multi-threaded and reported). Pointer identity is not emulated (translation
   plan §9): `ptrAddrUnsafe` answers the handle pointer of a heap value in
   its own representation (`l2r_ptr_addr_obj`, `l2r_ptr_addr_rec`, which

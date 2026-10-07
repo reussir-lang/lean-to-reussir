@@ -1,0 +1,700 @@
+From 2ca1a7d3eddad947aee1ea790a7a22e0d9d399ec Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Tue, 6 Oct 2026 21:48:44 -0400
+Subject: [PATCH] l2r-local: issue 42: __reussir_drop_run: outside a drain,
+ releases a cell at once in a drain of its own (inside one it only defers it),
+ instead of a deferral and a drain
+
+A host that frees one cell through the pending stack outside a drain
+(lean2rr's runtime: the last reference to a record or a boxed payload
+that a set, a pop or a reference's set gives up) had to call
+__reussir_drop_defer, then __reussir_drop_drain, which pops the cell
+again and releases it in drain_one: about 17 + 18 + 26 instructions of
+bookkeeping per freed cell, three calls.
+
+__reussir_drop_run(cell, release) does the same in one call:
+
+- inside a drain it defers the cell exactly as __reussir_drop_defer
+  does (a narrow deferral; the running drain releases it);
+- otherwise it sets draining, calls release(cell) and ends as drain_one
+  does once its cell is popped: drained() if nothing is pending, else
+  drain_slow.
+
+The pending stack is last in, first out: a cell pushed on top is popped
+first, and what its release pushes goes on top again. So releasing it at
+once, with any pending work left where it is (work pushed outside a
+drain), gives the same releases and steps in the same order, with the
+same depth() and active() at each. Only the bookkeeping differs: no
+entry for the cell, so a run on top is not moved to the vector and back.
+The function is extern "C" like the other entry points: no unwinding,
+and the drained hook is called once per run outside a drain, after it.
+Unlike drain_one it does not set n to 0: nothing was popped, and a run
+pending outside a drain must stay.
+
+Tests (drop/tests.rs): a scenario action Run, done either through
+__reussir_drop_run or through a deferral and a drain;
+random_runs_match_defer_and_drain runs 400 random forests both ways
+(roots released by a run or in line, so runs happen inside a drain,
+outside one with nothing pending and outside one with work pending, all
+three checked to occur) and asserts the same events with the same depth
+and activity, the same calls of the drained hook (each after its drain:
+not active, depth 0), and the model's order; run_outside_a_drain,
+run_with_pending_work and run_inside_a_drain give hand-made forests and
+their expected orders; drained_runs_once_per_run checks one hook call per
+run outside a drain: nothing pushed, a cell pushed, a cell or a step
+pending before, a release that pushes only a step, a run inside the
+drain. The existing scenarios are unchanged: the digest of the 400
+scenarios is still 5906a65ce6ae636a. cargo test -p reussir-rt (51
+tests), the drop tests in release mode, and under Miri with strict
+provenance (stacked and tree borrows) pass.
+
+Review (local notes review-rtperf): correct, equivalent to a deferral
+and a drain in every state. R42-01: the module comment and this subject
+say that a run inside a drain only defers. R42-02: the hook checks missed
+a stack with no run but a step (n == 0, len > 0); the cases with a step
+pending and with a release that pushes only a step, and the hook calls
+compared in the random forests, now fail for a run that tests n alone.
+---
+ crates/reussir-rt/src/drop.rs       |  61 +++-
+ crates/reussir-rt/src/drop/tests.rs | 426 ++++++++++++++++++++++++++--
+ 2 files changed, 464 insertions(+), 23 deletions(-)
+
+diff --git a/crates/reussir-rt/src/drop.rs b/crates/reussir-rt/src/drop.rs
+index c906a3cd..fab40185 100644
+--- a/crates/reussir-rt/src/drop.rs
++++ b/crates/reussir-rt/src/drop.rs
+@@ -7,9 +7,12 @@
+ //! whose last reference the glue drops is pushed together with the glue
+ //! function that releases it ([`__reussir_drop_defer_wide`],
+ //! [`__reussir_drop_defer`]), and the outermost drop empties the stack
+-//! ([`__reussir_drop_drain`]), last pushed first. The depth of the native
+-//! stack stays bounded however deep the value is, and resources held in
+-//! records are released in Lean's order (a record's last member first).
++//! ([`__reussir_drop_drain`]), last pushed first. A host that frees one
++//! cell this way can call [`__reussir_drop_run`] instead: outside a drain it
++//! releases the cell at once, in a drain of its own; inside one it only
++//! defers it. The depth of the native stack stays bounded however deep the
++//! value is, and resources held in records are released in Lean's order (a
++//! record's last member first).
+ //!
+ //! Like Lean's list, the stack takes no memory per pending cell: consecutive
+ //! deferred cells form one entry, a run, linked through the cells
+@@ -487,6 +490,58 @@ pub unsafe extern "C" fn __reussir_drop_defer_wide(cell: *mut u8, release: Relea
+     }
+ }
+ 
++/// [`__reussir_drop_defer`] of `cell` and `release` followed by
++/// [`__reussir_drop_drain`], in one call: outside a drain the cell is
++/// released at once, instead of being pushed and then popped. `cell` is
++/// what [`__reussir_drop_defer`] takes (a box whose count was read as 1 and
++/// which nothing else references, or an immediate's dummy box); it is
++/// passed to `release` unchanged.
++///
++/// - Inside a drain (from a release or a step), the cell is deferred
++///   exactly as [`__reussir_drop_defer`] defers it: the running drain
++///   releases it.
++/// - Otherwise this call starts a drain: [`active`] is true while
++///   `release(cell)` runs, so the cells that release frees are pushed, not
++///   released in line. The drain then ends as one of
++///   [`__reussir_drop_drain`] with one cell pending does: if nothing is
++///   pending, it ends at once and calls [`__reussir_drop_drained`]'s
++///   function; else the general loop releases what is pending, last pushed
++///   first, then calls that function.
++///
++/// **Order.** The stack is last in, first out. A cell pushed on top of it
++/// is popped first and released before anything pushed earlier, and what
++/// its release pushes goes on top again. So releasing the cell at once,
++/// with the pending work left where it is, is the same as pushing it and
++/// draining, also when work is pending (pushed outside a drain): the same
++/// releases and steps in the same order, with the same [`depth`] and
++/// [`active`] at each (a pushed cell is popped before its release runs).
++/// Only the stack's own bookkeeping differs: no entry is made for the cell,
++/// so a run on top stays in place instead of going to the vector and back.
++///
++/// Like the other entry points this function is `extern "C"` and cannot
++/// unwind: `release` cannot either, and a panic in a step or in the
++/// function in [`__reussir_drop_drained`] aborts, as in any drain.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __reussir_drop_run(cell: *mut u8, release: Release) {
++    let state = state();
++    if state.draining.get() {
++        return unsafe { __reussir_drop_defer(cell, release) };
++    }
++    // As in `drain_one`, once its cell is popped: outside a drain nothing is
++    // popped, so `release` pops nothing either (a drain started inside it
++    // returns at once). With nothing pending after it, nothing was pending
++    // before it and nothing was pushed: the table is still empty and the
++    // vector no longer than KEEP.
++    state.draining.set(true);
++    unsafe { release(cell) };
++    if state.n.get() == 0 && state.len.get() == 0 {
++        state.draining.set(false);
++        drained();
++        return;
++    }
++    unsafe { drain_slow() }
++}
++
+ /// Runs the current thread's pending work, last pushed first, until none is
+ /// left, including the work it pushes in turn. A call made while the thread
+ /// is already draining (from a release) returns at once: the outermost call
+diff --git a/crates/reussir-rt/src/drop/tests.rs b/crates/reussir-rt/src/drop/tests.rs
+index d8533af8..e782863d 100644
+--- a/crates/reussir-rt/src/drop/tests.rs
++++ b/crates/reussir-rt/src/drop/tests.rs
+@@ -3,8 +3,10 @@
+ //! A scenario is a forest of cells and steps: freeing a cell (its release
+ //! function) records it, checks its header, and does its actions in order:
+ //! defer a child cell (wide or not), release a child cell at once (as the
+-//! glue's tail call does), push a child step ([`defer_step`], [`run_step`]),
+-//! or call [`__reussir_drop_drain`]. A step does its actions as
++//! glue's tail call does), release a child cell through
++//! [`__reussir_drop_run`] (or, to compare, through [`__reussir_drop_defer`]
++//! and [`__reussir_drop_drain`]), push a child step ([`defer_step`],
++//! [`run_step`]), or call [`__reussir_drop_drain`]. A step does its actions as
+ //! lean2rr's array frees do: one after another until one pushes work (then
+ //! it answers "not done") or none is left. Random scenarios are run through
+ //! the runtime and through a model with one stack entry per pending cell or
+@@ -22,6 +24,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
+ enum Action {
+     Defer { child: usize, wide: bool },
+     Inline { child: usize },
++    Run { child: usize },
+     Step { child: usize },
+     RunStep { child: usize },
+     Drain,
+@@ -52,6 +55,13 @@ struct World {
+     trace: Vec<Ev>,
+     /// Every event with the depth and activity the runtime reported then.
+     seen: Vec<(Ev, usize, bool)>,
++    /// [`Action::Run`] and a root released by a run call
++    /// [`__reussir_drop_defer`] and [`__reussir_drop_drain`] instead of
++    /// [`__reussir_drop_run`].
++    defer_runs: bool,
++    /// The runs made: inside a drain, outside one with nothing pending,
++    /// outside one with work pending.
++    runs: [usize; 3],
+ }
+ 
+ thread_local! {
+@@ -150,12 +160,36 @@ fn perform(a: Action) {
+             let (p, k) = with_world(|w| (ptr_of(w, child), w.nodes[child].k));
+             unsafe { release_fn(k)(p) }
+         }
++        Action::Run { child } => {
++            let (p, k, defer) = with_world(|w| (ptr_of(w, child), w.nodes[child].k, w.defer_runs));
++            unsafe { release_now(p, release_fn(k), defer) }
++        }
+         Action::Step { child } => defer_step(child, step_fn),
+         Action::RunStep { child } => run_step(child, step_fn),
+         Action::Drain => unsafe { __reussir_drop_drain() },
+     }
+ }
+ 
++/// [`__reussir_drop_run`], or what it stands for: a deferral, then a drain.
++unsafe fn release_now(p: *mut u8, release: Release, defer: bool) {
++    let kind = if active() {
++        0
++    } else if depth() == 0 {
++        1
++    } else {
++        2
++    };
++    with_world(|w| w.runs[kind] += 1);
++    unsafe {
++        if defer {
++            __reussir_drop_defer(p, release);
++            __reussir_drop_drain();
++        } else {
++            __reussir_drop_run(p, release);
++        }
++    }
++}
++
+ unsafe fn step_fn(id: usize) -> bool {
+     let actions = with_world(|w| {
+         let done = w.progress[id];
+@@ -203,6 +237,10 @@ impl Model<'_> {
+         match a {
+             Action::Defer { child, .. } => self.stack.push((false, child)),
+             Action::Inline { child } => self.release(child),
++            Action::Run { child } => {
++                self.stack.push((false, child));
++                self.drain();
++            }
+             Action::Step { child } => self.stack.push((true, child)),
+             Action::RunStep { child } => {
+                 self.stack.push((true, child));
+@@ -275,6 +313,12 @@ impl Rng {
+ 
+ /// A random forest: the roots, then all nodes (index = id).
+ fn scenario(seed: u64, budget: usize) -> (Vec<usize>, Vec<Node>) {
++    scenario_with(seed, budget, false)
++}
++
++/// [`scenario`], with [`Action::Run`] among the actions when `runs` (with
++/// `runs` false, the same forest as before that action existed).
++fn scenario_with(seed: u64, budget: usize, runs: bool) -> (Vec<usize>, Vec<Node>) {
+     let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+     let kinds = [1, 3, 40, 300][rng.below(4)];
+     let imm_pct = [0, 5, 30][rng.below(3)];
+@@ -316,9 +360,13 @@ fn scenario(seed: u64, budget: usize) -> (Vec<usize>, Vec<Node>) {
+                 let action = if roll < 70 {
+                     let c = new_node(&mut rng, &mut nodes, false);
+                     queue.push_back(c);
+-                    Action::Defer {
+-                        child: c,
+-                        wide: rng.chance(wide_pct),
++                    if runs && rng.chance(30) {
++                        Action::Run { child: c }
++                    } else {
++                        Action::Defer {
++                            child: c,
++                            wide: rng.chance(wide_pct),
++                        }
+                     }
+                 } else if roll < 80 {
+                     let c = new_node(&mut rng, &mut nodes, false);
+@@ -351,6 +399,37 @@ fn run(seed: u64, budget: usize) -> u64 {
+ /// [`run`], and the number of events, of steps, and the largest depth seen.
+ fn run_stats(seed: u64, budget: usize) -> (u64, usize, usize, usize) {
+     let (roots, nodes) = scenario(seed, budget);
++    let roots: Vec<(usize, bool)> = roots.into_iter().map(|r| (r, false)).collect();
++    let seen = run_forest(seed, &roots, nodes, false).seen;
++    let mut h = DefaultHasher::new();
++    seen.hash(&mut h);
++    let steps = seen
++        .iter()
++        .filter(|e| matches!(e.0, Ev::Step { .. }))
++        .count();
++    let deepest = seen.iter().map(|s| s.1).max().unwrap_or(0);
++    (h.finish(), seen.len(), steps, deepest)
++}
++
++/// What [`run_forest`] saw.
++struct Outcome {
++    /// Every event with the [`depth`] and [`active`] seen at it.
++    seen: Vec<(Ev, usize, bool)>,
++    /// The runs made ([`World::runs`]).
++    runs: [usize; 3],
++    /// The calls of the function in `__reussir_drop_drained`, each with the
++    /// [`active`] and [`depth`] it saw.
++    hooks: Vec<(bool, usize)>,
++}
++
++/// Runs the forest `nodes` through the runtime, root after root, and checks
++/// the order against the model; answers what it saw ([`Outcome`]). A root
++/// `(r, false)` is released in line, then drained, as the glue releases a
++/// value it drops; `(r, true)` is released by a run ([`release_now`]:
++/// [`__reussir_drop_run`], or with `defer_runs` a deferral and a drain, as
++/// are the forest's [`Action::Run`]s). The cells sit at slots of one arena
++/// that `seed` shuffles.
++fn run_forest(seed: u64, roots: &[(usize, bool)], nodes: Vec<Node>, defer_runs: bool) -> Outcome {
+     let n = nodes.len();
+     let mut rng = Rng(seed ^ 0x5555);
+     // Cells at random slots of one arena: links in both directions.
+@@ -377,9 +456,13 @@ fn run_stats(seed: u64, budget: usize) -> (u64, usize, usize, usize) {
+         progress: vec![0; n],
+         trace: Vec::new(),
+     };
+-    for &r in &roots {
+-        model.release(r);
+-        model.drain();
++    for &(r, run) in roots {
++        if run {
++            model.perform(Action::Run { child: r });
++        } else {
++            model.release(r);
++            model.drain();
++        }
+     }
+     let expected = model.trace;
+     let ks: Vec<usize> = nodes.iter().map(|node| node.k).collect();
+@@ -392,19 +475,31 @@ fn run_stats(seed: u64, budget: usize) -> (u64, usize, usize, usize) {
+             released: vec![false; n],
+             trace: Vec::new(),
+             seen: Vec::new(),
++            defer_runs,
++            runs: [0; 3],
+         })
+     });
+     assert!(!active());
+     assert_eq!(depth(), 0);
+-    for &r in &roots {
++    let hook = HOOK.lock().unwrap_or_else(|e| e.into_inner());
++    DRAINED.with(|d| *d.borrow_mut() = Some(Vec::new()));
++    __reussir_drop_drained.store(on_drained as *mut (), Ordering::Relaxed);
++    for &(r, run) in roots {
+         let p = with_world(|w| ptr_of(w, r));
+         unsafe {
+-            release_fn(ks[r])(p);
+-            __reussir_drop_drain();
++            if run {
++                release_now(p, release_fn(ks[r]), defer_runs);
++            } else {
++                release_fn(ks[r])(p);
++                __reussir_drop_drain();
++            }
+         }
+         assert!(!active());
+         assert_eq!(depth(), 0);
+     }
++    __reussir_drop_drained.store(core::ptr::null_mut(), Ordering::Relaxed);
++    let hooks = DRAINED.with(|d| d.borrow_mut().take().unwrap());
++    drop(hook);
+     let world = WORLD.with(|w| w.borrow_mut().take().unwrap());
+     drop(arena);
+     assert_eq!(
+@@ -415,15 +510,11 @@ fn run_stats(seed: u64, budget: usize) -> (u64, usize, usize, usize) {
+     for (i, (got, want)) in world.trace.iter().zip(&expected).enumerate() {
+         assert_eq!(got, want, "seed {seed}: event {i}");
+     }
+-    let mut h = DefaultHasher::new();
+-    world.seen.hash(&mut h);
+-    let steps = world
+-        .trace
+-        .iter()
+-        .filter(|e| matches!(e, Ev::Step { .. }))
+-        .count();
+-    let deepest = world.seen.iter().map(|s| s.1).max().unwrap_or(0);
+-    (h.finish(), world.trace.len(), steps, deepest)
++    Outcome {
++        seen: world.seen,
++        runs: world.runs,
++        hooks,
++    }
+ }
+ 
+ fn seeds() -> (u64, usize) {
+@@ -494,6 +585,8 @@ fn table_full() {
+             released: vec![false; n + 1],
+             trace: Vec::new(),
+             seen: Vec::new(),
++            defer_runs: false,
++            runs: [0; 3],
+         })
+     });
+     // Cells 1..=256 form one run (255 table entries), each later cell its own.
+@@ -516,6 +609,241 @@ fn table_full() {
+     assert_eq!(order, want);
+ }
+ 
++/// A random forest with runs ([`scenario_with`]), its roots released by a
++/// run or in line at random, through [`run_forest`].
++fn run_scenario(seed: u64, budget: usize, defer_runs: bool) -> Outcome {
++    let (roots, nodes) = scenario_with(seed, budget, true);
++    let mut rng = Rng(seed ^ 0xaaaa);
++    let roots: Vec<(usize, bool)> = roots.into_iter().map(|r| (r, rng.chance(50))).collect();
++    run_forest(seed, &roots, nodes, defer_runs)
++}
++
++/// Asserts that two runs of a forest saw the same events, with the same
++/// depth and activity at each, and the same calls of the drain-end hook,
++/// each after its drain (not active, nothing pending).
++fn assert_same_events(what: &str, a: &Outcome, b: &Outcome) {
++    assert_eq!(a.seen.len(), b.seen.len(), "{what}: event count");
++    for (i, (x, y)) in a.seen.iter().zip(&b.seen).enumerate() {
++        assert_eq!(x, y, "{what}: event {i}");
++    }
++    assert_eq!(a.hooks, b.hooks, "{what}: drain-end hook calls");
++    assert!(
++        a.hooks.iter().all(|&h| h == (false, 0)),
++        "{what}: {:?}",
++        a.hooks
++    );
++}
++
++/// A run releases in the order of a deferral and a drain, with the same
++/// depth and activity at every event, and in the model's order (one stack
++/// entry per pending cell): inside a drain, outside one with nothing
++/// pending, and outside one with work pending (a root released in line
++/// does its actions outside a drain, so its deferrals and steps are
++/// pending when a run among them follows).
++#[test]
++fn random_runs_match_defer_and_drain() {
++    let (count, budget) = seeds();
++    let mut kinds = [0; 3];
++    for seed in 0..count {
++        let run = run_scenario(seed, budget, false);
++        let defer = run_scenario(seed, budget, true);
++        assert_same_events(&format!("seed {seed}"), &run, &defer);
++        assert_eq!(run.runs, defer.runs, "seed {seed}: runs");
++        for (k, n) in run.runs.iter().enumerate() {
++            kinds[k] += n;
++        }
++    }
++    assert!(
++        kinds.iter().all(|&n| n > 0),
++        "runs inside, outside, outside with work pending: {kinds:?}"
++    );
++}
++
++/// A cell with no header word of note.
++fn cell_node(actions: Vec<Action>) -> Node {
++    Node {
++        k: 0,
++        imm: false,
++        word: 0,
++        actions,
++    }
++}
++
++/// Runs a hand-made forest with runs both ways ([`__reussir_drop_run`];
++/// deferral and drain), asserts the same events, and answers them as the
++/// nodes released or stepped, in order, with the activity seen at each.
++fn run_both_ways(roots: &[(usize, bool)], nodes: impl Fn() -> Vec<Node>) -> Vec<(usize, bool)> {
++    let run = run_forest(1, roots, nodes(), false);
++    let defer = run_forest(1, roots, nodes(), true);
++    assert_same_events("hand-made forest", &run, &defer);
++    run.seen
++        .iter()
++        .map(|&(ev, _, active)| match ev {
++            Ev::Release { node, .. } | Ev::Step { node, .. } => (node, active),
++        })
++        .collect()
++}
++
++/// Outside a drain with nothing pending: the cell is released inside the
++/// drain the run starts (its deferrals are pushed, a run it makes is
++/// deferred, a release in line happens at once), then what it pushed,
++/// last first.
++#[test]
++fn run_outside_a_drain() {
++    use Action::*;
++    let nodes = || {
++        vec![
++            cell_node(vec![
++                Defer {
++                    child: 1,
++                    wide: true,
++                },
++                Defer {
++                    child: 2,
++                    wide: false,
++                },
++                Run { child: 3 },
++                Inline { child: 4 },
++            ]),
++            cell_node(vec![Defer {
++                child: 5,
++                wide: true,
++            }]),
++            cell_node(vec![]),
++            cell_node(vec![]),
++            cell_node(vec![]),
++            cell_node(vec![]),
++        ]
++    };
++    let events = run_both_ways(&[(0, true)], nodes);
++    assert_eq!(
++        events,
++        vec![
++            (0, true),
++            (4, true),
++            (3, true),
++            (2, true),
++            (1, true),
++            (5, true)
++        ]
++    );
++}
++
++/// Outside a drain with work pending (cells and a step that a value
++/// released in line pushed): the run's cell and what it pushes are
++/// released first, then the pending work, last pushed first.
++#[test]
++fn run_with_pending_work() {
++    use Action::*;
++    // 0: released in line; 1, 3, 5: cells it defers; 2: a step it pushes;
++    // 4: the cell it runs, which defers 6 and runs 7; 8: the step's cell.
++    let nodes = || {
++        vec![
++            cell_node(vec![
++                Defer {
++                    child: 1,
++                    wide: true,
++                },
++                Step { child: 2 },
++                Defer {
++                    child: 3,
++                    wide: true,
++                },
++                Run { child: 4 },
++                Defer {
++                    child: 5,
++                    wide: false,
++                },
++            ]),
++            cell_node(vec![]),
++            cell_node(vec![Defer {
++                child: 8,
++                wide: true,
++            }]),
++            cell_node(vec![]),
++            cell_node(vec![
++                Defer {
++                    child: 6,
++                    wide: true,
++                },
++                Run { child: 7 },
++            ]),
++            cell_node(vec![]),
++            cell_node(vec![]),
++            cell_node(vec![]),
++            cell_node(vec![]),
++        ]
++    };
++    let events = run_both_ways(&[(0, false)], nodes);
++    assert_eq!(
++        events,
++        vec![
++            (0, false),
++            (4, true),
++            (7, true),
++            (6, true),
++            (3, true),
++            (2, true),
++            (8, true),
++            (1, true),
++            (5, true),
++        ]
++    );
++}
++
++/// Inside a drain a run only defers its cell: from a release (the cell
++/// goes below what the release pushes after it) and from a step (which
++/// then answers "not done", having pushed work).
++#[test]
++fn run_inside_a_drain() {
++    use Action::*;
++    let nodes = || {
++        vec![
++            // 0: run; it runs 1 (deferred), then defers 2.
++            cell_node(vec![
++                Run { child: 1 },
++                Defer {
++                    child: 2,
++                    wide: true,
++                },
++            ]),
++            cell_node(vec![Defer {
++                child: 3,
++                wide: true,
++            }]),
++            cell_node(vec![]),
++            cell_node(vec![]),
++            // 4: released in line; it runs the step 5.
++            cell_node(vec![RunStep { child: 5 }]),
++            // 5: a step that runs 6, then defers 7.
++            cell_node(vec![
++                Run { child: 6 },
++                Defer {
++                    child: 7,
++                    wide: true,
++                },
++            ]),
++            cell_node(vec![]),
++            cell_node(vec![]),
++        ]
++    };
++    let events = run_both_ways(&[(0, true), (4, false)], nodes);
++    assert_eq!(
++        events,
++        vec![
++            (0, true),
++            (2, true),
++            (1, true),
++            (3, true),
++            (4, false),
++            (5, true),
++            (6, true),
++            (5, true),
++            (7, true),
++        ]
++    );
++}
++
+ thread_local! {
+     /// What the function in `__reussir_drop_drained` saw on this thread
+     /// ([`active`], [`depth`]), while the test below has armed it.
+@@ -530,8 +858,32 @@ unsafe extern "C" fn on_drained() {
+     });
+ }
+ 
++/// Held by a test that stores a function in `__reussir_drop_drained` (a
++/// global), so that another one does not clear it under it.
++static HOOK: std::sync::Mutex<()> = std::sync::Mutex::new(());
++
+ unsafe extern "C" fn release_nothing(_: *mut u8) {}
+ 
++/// An immediate's dummy box: never written or read.
++fn dummy() -> *mut u8 {
++    core::ptr::without_provenance_mut(1usize << 56)
++}
++
++/// A release that defers a cell.
++unsafe extern "C" fn release_deferring(_: *mut u8) {
++    unsafe { __reussir_drop_defer(dummy(), release_nothing) }
++}
++
++/// A release that pushes only a step.
++unsafe extern "C" fn release_stepping(_: *mut u8) {
++    defer_step(0, leaf_step);
++}
++
++/// A release that runs a cell (inside a drain: deferred).
++unsafe extern "C" fn release_running(_: *mut u8) {
++    unsafe { __reussir_drop_run(dummy(), release_deferring) }
++}
++
+ unsafe fn leaf_step(_: usize) -> bool {
+     true
+ }
+@@ -551,6 +903,7 @@ unsafe fn nesting_step(_: usize) -> bool {
+ #[test]
+ fn drained_runs_after_the_outermost_drain() {
+     use core::sync::atomic::Ordering::Relaxed;
++    let _hook = HOOK.lock().unwrap_or_else(|e| e.into_inner());
+     DRAINED.with(|d| *d.borrow_mut() = Some(Vec::new()));
+     __reussir_drop_drained.store(on_drained as *mut (), Relaxed);
+     run_step(0, nesting_step);
+@@ -564,3 +917,36 @@ fn drained_runs_after_the_outermost_drain() {
+     let seen = DRAINED.with(|d| d.borrow_mut().take().unwrap());
+     assert_eq!(seen, vec![(false, 0), (false, 0)]);
+ }
++
++/// The host's function runs once per run outside a drain, after it is over
++/// (not active, nothing pending): with nothing pushed (the one-cell end),
++/// with a cell pushed, with a cell pending before, with a step pending
++/// before, with a release that pushes only a step (the general loop), and
++/// with a run inside the drain (deferred: no call of its own).
++#[test]
++fn drained_runs_once_per_run() {
++    use core::sync::atomic::Ordering::Relaxed;
++    let _hook = HOOK.lock().unwrap_or_else(|e| e.into_inner());
++    DRAINED.with(|d| *d.borrow_mut() = Some(Vec::new()));
++    __reussir_drop_drained.store(on_drained as *mut (), Relaxed);
++    let calls = || DRAINED.with(|d| d.borrow().as_ref().unwrap().len());
++    unsafe {
++        __reussir_drop_run(dummy(), release_nothing);
++        assert_eq!(calls(), 1);
++        __reussir_drop_run(dummy(), release_deferring);
++        assert_eq!(calls(), 2);
++        __reussir_drop_defer(dummy(), release_nothing);
++        __reussir_drop_run(dummy(), release_nothing);
++        assert_eq!(calls(), 3);
++        __reussir_drop_run(dummy(), release_running);
++        assert_eq!(calls(), 4);
++        defer_step(0, leaf_step);
++        __reussir_drop_run(dummy(), release_nothing);
++        assert_eq!(calls(), 5);
++        __reussir_drop_run(dummy(), release_stepping);
++        assert_eq!(calls(), 6);
++    }
++    __reussir_drop_drained.store(core::ptr::null_mut(), Relaxed);
++    let seen = DRAINED.with(|d| d.borrow_mut().take().unwrap());
++    assert_eq!(seen, vec![(false, 0); 6]);
++}
+-- 
+2.43.0
+

@@ -1773,8 +1773,11 @@ Rules:
     while it reads stderr. lean2rr's tasks are deferred (§5.14), so a child
     writing more than a pipe holds (64 KiB) to stdout before closing stderr
     blocked forever before lean2rr ran on lean-runtime's scheduler (whose
-    IO now cooperates: lean-runtime's case `taskio/output_big_stdout`). Its
-    declaration is lowered to one runtime primitive instead of its body,
+    IO now cooperates: lean-runtime's case `taskio/output_big_stdout`; the
+    pattern runs in user code too). The replacement stays because it reads
+    both pipes together and writes a large input while it reads them,
+    where Lean's code writes all of the input first and can wait for good
+    (LB-40). Its declaration is lowered to one runtime primitive instead of its body,
     `l2r_proc_output` (lean-runtime's `io::process::output`), which does
     what Lean's definition does in its order: spawn with stdout and stderr
     piped and stdin null, or piped when `input?` is `some s` (then `s` is
@@ -3059,8 +3062,10 @@ Each item says what differs and when.
   is freed at once (handles closed, and so flushed; promises resolved, or
   for a resolved promise its task's value released), native Lean releases
   them last pushed first: an array's last element
-  first, a nested array's elements before the elements before it, a
-  record's last field first. Here the runtime's containers (`leanrt::drop`)
+  first (after a first pass that decrements every element in index order,
+  so an element held twice is freed at its last index:
+  `RtArrayDupFreeOrder`), a nested array's elements before the elements
+  before it, a record's last field first. Here the runtime's containers (`leanrt::drop`)
   and Reussir's drop glue for records (local patch 13-b) push what they
   free on one stack of pending work per thread, so the order is Lean's
   inside every free that starts at a container (an array, a reference, a
@@ -3250,8 +3255,8 @@ Each item says what differs and when.
 **Runtime** (details in `runtime/README.md`, "Known divergences")
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`;
   `dbgTraceIfShared` reads lean2rr's own counts (a converted value is a
-  new, unshared object, §5.1). It does not report a shared big number
-  (natively it does: lean2rr's check looks at a `Nat` as a value), nor a task
+  new, unshared object, §5.1; `leanrt::is_shared`, which also reads a big
+  `Nat`'s or `Int`'s count, review HL-01). It does not report a task
   that one reference holds, where natively a task that `Task.spawn` made
   is multi-threaded (its count is negative) and reported as shared;
   `shareCommon` shares nothing, and

@@ -383,6 +383,20 @@ pub fn on_last_reference(p: usize) -> bool {
     true
 }
 
+/// Whether `on_last_reference(p)` would answer false and do nothing, so
+/// that the last reference to cell `p` may be freed without it: the cell has
+/// no entry, or a promise's or a dependent's, or the entry of a task that
+/// has stored its value and needs no `ls::release` (released already, or
+/// without an id). For `drop::cell_get`'s debug check: it frees a cell whose
+/// count is 1 without asking `on_last_reference` (each generated read of a
+/// task's or a promise's state uses the cell again on some path after it,
+/// so the caller holds another reference: the read never frees it).
+pub(crate) fn last_reference_is_plain(p: usize) -> bool {
+    let Some(i) = find(p) else { return true };
+    let f = ent(i).flags;
+    f & (PROMISE | DEP) != 0 || (f & DONE != 0 && f & (RELEASED | HAS_ID) != HAS_ID)
+}
+
 // ---------------------------------------------------------------------------
 // The generated code's primitives
 

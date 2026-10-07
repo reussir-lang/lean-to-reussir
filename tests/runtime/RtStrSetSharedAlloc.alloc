@@ -1,0 +1,8 @@
+# Review HSTR-01: 20000 and 80000 modified copies of a shared string of 1001
+# bytes, kept. Natively each copy is a string of its own size (1034 or 1035
+# bytes requested, with the terminating NUL); lean2rr's is 1040 bytes (its
+# block sizes are rounded up to 8: 6 bytes more a copy, about 360 KB over
+# the 60000 copies, within the offset). Before the fix lean2rr's copies had
+# room for twice the length (about 2 KB each: twice the bytes and the peak
+# memory).
+20000 | 80000 | 1 8000 | rss 1 16000

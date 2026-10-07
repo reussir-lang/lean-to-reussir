@@ -201,7 +201,10 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   (`tests/runtime/rows-check.sh`). They lift Lean's limits where the
   result can be computed (LB-04, LB-11, LB-12; plan §10) and end at once
   with `INTERNAL PANIC: out of memory` above `MAX_BITS`, where native's GMP
-  raises SIGFPE (LB-05). The step changed no generated code: the classic
+  raises SIGFPE (LB-05). Below it, an allocation that fails ends the same
+  way: the blocks, and the scratch limbs and the decimal text of
+  `Nat.repr`/`Int.repr` (`big::zeroed`, `nat::big_decimal`; review HB-02:
+  those two aborted without a message). The step changed no generated code: the classic
   corpus's `.rr` differs only in the prelude's panic textures and two
   renamed helpers, and the machine code of every Reussir function of
   Cfold, Sieve and Bignum is the same but for the targets of those calls.

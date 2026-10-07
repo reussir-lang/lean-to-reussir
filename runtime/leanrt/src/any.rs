@@ -33,6 +33,9 @@
 //! native Lean's order. A leaf payload (a number with `LEAF_BIT`: lean2rr
 //! gives it to records and enums whose fields are all scalars) is released
 //! by a direct call when no free is running: it holds nothing to order.
+//! The array free calls a payload's release directly where the deferred
+//! cell would be popped next anyway (`release_last_in_step`, and an array
+//! that keeps one element: `drop::ReleaseElems::free_single`).
 //!
 //! A payload that is not one counted pointer is boxed in a cell first: an
 //! `f64` and a `UInt64`/`USize` from 2^63 here (`NUM_F64`, `NUM_U64`, a
@@ -254,13 +257,18 @@ pub struct Rel(pub u16, pub unsafe extern "C" fn(*mut u8));
 
 /// The program's release of each payload number (16 to 65535; leanrt's own
 /// kinds, 1 to 15, have none; null: none installed). Filled before `main`
-/// (`init_releases`, from `rt::run_main2`) and never changed afterwards. In
-/// `.bss`: only the pages of the numbers in use are touched.
+/// (`init_releases`, from `rt::run_main2`); a program never changes it
+/// afterwards. Only tests install entries later: leanrt's unit tests (their
+/// own numbers), and the box probe (`tests/runtime/any-probe`),
+/// whose `probe_install` runs after `main` has started, for its numbers
+/// 1016 to 1029, which its host program does not use. In `.bss`: only the
+/// pages of the numbers in use are touched.
 static RELEASES: [AtomicPtr<()>; 1 << 16] = [const { AtomicPtr::new(std::ptr::null_mut()) }; 1 << 16];
 
 /// Install a program's releases (lean2rr's generated `l2r_any_releases`, a
-/// texture that the trampoline `l2r_any_init_c` calls; a test's own). An
-/// entry installed again gets the same value. 0.
+/// texture that the trampoline `l2r_any_init_c` calls, before `main`; a
+/// test's own, also later: see `RELEASES`). An entry installed again gets
+/// the same value. 0.
 pub fn install(rels: &[Rel]) -> u64 {
     for r in rels {
         let n = r.0 as usize;
@@ -298,9 +306,10 @@ pub fn init_releases() {
 /// reference given up). A program payload (tested first) goes to the
 /// release of its type (`RELEASES`) through the worklist: its cell (the
 /// word without the number) is deferred as one pending cell, the rule of
-/// `drop::free_unique` for records (`__reussir_drop_defer`, which neither
-/// reads nor writes the cell). Inside a free it is only pushed; outside one
-/// Reussir's drain releases it and then what it pushed (`drain_one`). So
+/// `drop::free_unique` for records (`drop::free_deferred`: Reussir's
+/// `__reussir_drop_defer`, which neither reads nor writes the cell, then
+/// its drain). Inside a free it is only pushed; outside one Reussir's
+/// drain releases it and then what it pushed (`drain_one`). So
 /// nested boxes are released one after the other, not by recursion, and
 /// what a payload holds in native Lean's order. A leaf payload outside a
 /// free is released directly. leanrt's own kinds are dropped as their
@@ -324,37 +333,69 @@ pub extern "C" fn release_last(w: u64) {
         if num & LEAF_BIT != 0 {
             return release_leaf(cell, f);
         }
-        return unsafe { defer_and_drain(cell, f) };
+        return unsafe { crate::drop::free_deferred(cell as usize, f) };
     }
     release_kind(w, num)
 }
 
-/// Defer `release(cell)` as one pending cell, then drain: Reussir's drain
-/// runs it now when no free runs (`drain_one`), else the free on top pops
-/// it after what is pushed later. Not `__reussir_drop_defer_wide`, which
-/// could link the cell to the run on top through its header (when the
-/// type's first 8 bytes are header): in the classic programs the stack was
-/// empty at every such deferral, so no link ever formed, and the wide
-/// deferral cost 3 instructions more each (monadic-interp +0.6 %).
+/// `release_last` of a box's last reference in a step of a running free
+/// that returns to the drain as soon as the stack's depth changes (the
+/// array free's second pass, `drop::ReleaseElems for LAny`), for any kept
+/// element but the last: a program payload's release, leaf or not, is
+/// called at once instead of being deferred. Deferred, the cell would be
+/// the only entry above the step, popped next with the step as the top
+/// entry again: the same release, at the same point, with the same stack
+/// (the argument is at the caller). leanrt's own kinds, and a payload
+/// without a release: `release_last` (a leaf kind is freed at once, an
+/// array pushes its step).
 #[inline(always)]
-unsafe fn defer_and_drain(cell: *mut u8, release: unsafe extern "C" fn(*mut u8)) {
-    unsafe {
-        reussir_rt::drop::__reussir_drop_defer(cell, release);
-        reussir_rt::drop::__reussir_drop_drain();
+pub(crate) unsafe fn release_last_in_step(w: u64) {
+    let num = num_of(w);
+    if num >= FIRST_PROGRAM_NUM {
+        let f = RELEASES[num as usize].load(Ordering::Relaxed);
+        if !f.is_null() {
+            let f = unsafe { std::mem::transmute::<*mut (), unsafe extern "C" fn(*mut u8)>(f) };
+            return unsafe { f(ptr_of(w).mask(ADDR_MASK as usize)) };
+        }
     }
+    release_last(w)
 }
+
+/// Whether `release_last` of the pointer word `w` outside a free frees it
+/// without a step of its own and without recursion: a program payload (in
+/// a drain of its own, `drop::free_deferred`, or a leaf's release directly)
+/// or one of leanrt's leaves (a big number, a string, a scalar cell: one
+/// block freed at once), for `drop::ReleaseElems::free_single`. Not an
+/// array of boxes (`NUM_ARRAY`): its release is `drop::free_vec` again,
+/// which would recurse through a deep nesting of one-element arrays. Not a
+/// `ByteArray` or `FloatArray` (`NUM_BYTES`, `NUM_FLOATS`) either, whose
+/// free is one `mi_free` without recursion: the case is rare, so it keeps
+/// the step.
+#[inline(always)]
+pub(crate) fn frees_flat(w: u64) -> bool {
+    let num = num_of(w);
+    num >= FIRST_PROGRAM_NUM || matches!(num, NUM_NAT | NUM_INT | NUM_STR | NUM_F64 | NUM_U64)
+}
+
+// The cell is deferred without `_wide` (`__reussir_drop_defer`, in
+// `drop::free_deferred` and in `release_leaf`): `__reussir_drop_defer_wide`
+// could link the cell to the run on top through its header (when the
+// type's first 8 bytes are header), but in the classic programs the stack
+// was empty at every such deferral, so no link ever formed, and the wide
+// deferral cost 3 instructions more each (monadic-interp +0.6 %).
 
 /// `release_last` of a leaf payload: outside a free its release frees only
 /// its own cell (no member to order, no recursion), so it is called
-/// directly; inside one it is deferred as any payload. Apart from
-/// `release_last`, whose path then reads no thread-local state.
+/// directly; inside one it is deferred as any payload (the free pops it
+/// after what is pushed later). Apart from `release_last`, whose path then
+/// reads no thread-local state.
 #[inline(never)]
 extern "C" fn release_leaf(cell: *mut u8, release: unsafe extern "C" fn(*mut u8)) {
     unsafe {
         if !crate::drop::active() {
             return release(cell);
         }
-        defer_and_drain(cell, release)
+        reussir_rt::drop::__reussir_drop_defer(cell, release)
     }
 }
 
@@ -490,7 +531,7 @@ impl<X> Payload for reussir_rt::bridge::Bridge<X> {
         // `immortal`: the dummy's count is at least 2^31 (a real box's never
         // is), and its tag the next `u32`.
         let c = unsafe { *(ptr_of(p) as *const u32) };
-        if c >= 0x8000_0000 {
+        if c >= crate::drop::IMMORTAL {
             return LAny::imm(unsafe { *(ptr_of(p) as *const u32).add(1) } as u64);
         }
         unsafe { of_ptr(p, num) }
@@ -896,6 +937,50 @@ mod tests {
         drop(unsafe { take_word::<Rc<Pair>>(cell as u64) });
     }
 
+    thread_local! {
+        static SEEN: RefCell<std::vec::Vec<(u32, bool, usize)>> = RefCell::new(std::vec::Vec::new());
+    }
+
+    fn take_seen() -> std::vec::Vec<(u32, bool, usize)> {
+        SEEN.with(|l| std::mem::take(&mut *l.borrow_mut()))
+    }
+
+    /// A program payload (number 104, or the leaf number `LEAF_BIT | 21`
+    /// when it holds no box) that logs, when its release starts, its id,
+    /// whether a free runs and the depth of the stack of pending work.
+    struct Probe {
+        id: u32,
+        #[allow(dead_code)]
+        next: LAny,
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            SEEN.with(|l| l.borrow_mut().push((self.id, crate::drop::active(), reussir_rt::drop::depth())));
+        }
+    }
+
+    const PROBE: u64 = 104;
+    const LEAF_PROBE: u64 = LEAF_BIT | 21;
+
+    unsafe extern "C" fn release_probe(cell: *mut u8) {
+        drop(unsafe { take_word::<Rc<Probe>>(cell as u64) });
+    }
+
+    fn probe(id: u32, next: LAny) -> LAny {
+        of(crate::alloc::rc_new(Probe { id, next }), PROBE)
+    }
+
+    fn leaf_probe(id: u32) -> LAny {
+        of(crate::alloc::rc_new(Probe { id, next: LAny::unit() }), LEAF_PROBE)
+    }
+
+    /// A step of pending work that logs its argument.
+    unsafe fn step_mark(p: usize) -> bool {
+        LOG.with(|l| l.borrow_mut().push(p as u32));
+        true
+    }
+
     fn install() {
         super::install(&[
             Rel(NODE as u16, release_node),
@@ -903,6 +988,8 @@ mod tests {
             Rel(LEAF as u16, release_leaf),
             Rel(PAIR as u16, release_pair),
             Rel(PAIR2 as u16, release_pair),
+            Rel(PROBE as u16, release_probe),
+            Rel(LEAF_PROBE as u16, release_probe),
         ]);
     }
 
@@ -1109,6 +1196,157 @@ mod tests {
         assert_eq!(reussir_rt::drop::depth(), 0);
         drop(shared);
         assert_eq!(take_log(), vec![50]);
+    }
+
+    /// An array whose elements are shared inside it is freed in native
+    /// Lean's two passes (`lean_del_core`): every element decremented in
+    /// index order, then the ones whose count reached zero released last
+    /// first. So a payload the array holds twice is released at its last
+    /// index, and one that a later element also holds inside that
+    /// element's release; outside a free and inside one. (From the last
+    /// element while decrementing, the orders were 4 3 2 1 and 7 6 5.)
+    #[test]
+    fn box_array_free_shared_inside() {
+        install();
+        // [1, x, an immediate, 3, x, 4], x = node 2 held only by the array.
+        let dup = || {
+            let x = node(2, LAny::unit());
+            [node(1, LAny::unit()), x.clone(), LAny::imm(5), node(3, LAny::unit()), x, node(4, LAny::unit())]
+                .into_iter()
+                .fold(crate::array::empty::<LAny>(), crate::array::push)
+        };
+        drop(of(dup(), NUM_ARRAY));
+        assert_eq!(take_log(), vec![4, 2, 3, 1]);
+        drop(node(100, of(dup(), NUM_ARRAY)));
+        assert_eq!(take_log(), vec![100, 4, 2, 3, 1]);
+        // [x, 6, node 7 holding x], x = node 5.
+        let holder = || {
+            let x = node(5, LAny::unit());
+            [x.clone(), node(6, LAny::unit()), node(7, x)].into_iter().fold(crate::array::empty::<LAny>(), crate::array::push)
+        };
+        drop(of(holder(), NUM_ARRAY));
+        assert_eq!(take_log(), vec![7, 5, 6]);
+        drop(node(101, of(holder(), NUM_ARRAY)));
+        assert_eq!(take_log(), vec![101, 7, 5, 6]);
+        assert!(!crate::drop::active());
+        assert_eq!(reussir_rt::drop::depth(), 0);
+    }
+
+    /// The second pass of an array free calls a kept payload's release in
+    /// its step (`release_last_in_step`) instead of deferring it, but for
+    /// the last kept element: the same releases in the same order, each
+    /// with the stack the deferral's pop had (the array's step on top:
+    /// depth 1 for an array freed outside a free; the last kept element is
+    /// released after the step's entry is gone: depth 0), whether the
+    /// payload is a leaf, pushes work or not; outside a free and inside
+    /// one (the array a payload's field, also with other work pending
+    /// below the array's step).
+    #[test]
+    fn box_array_free_releases_in_its_step() {
+        install();
+        let shared = probe(50, LAny::unit());
+        let mk = |shared: &LAny| {
+            [
+                probe(1, LAny::unit()),
+                probe(2, probe(3, LAny::imm(1))),
+                of(crate::string::from_bytes(b"s"), NUM_STR),
+                shared.clone(),
+                probe(4, LAny::unit()),
+                leaf_probe(5),
+                LAny::imm(9),
+                probe(6, LAny::unit()),
+            ]
+            .into_iter()
+            .fold(crate::array::empty::<LAny>(), crate::array::push)
+        };
+        let want = vec![(6, true, 1), (5, true, 1), (4, true, 1), (2, true, 1), (3, true, 1), (1, true, 0)];
+        drop(of(mk(&shared), NUM_ARRAY));
+        assert_eq!(take_seen(), want);
+        drop(probe(100, of(mk(&shared), NUM_ARRAY)));
+        assert_eq!(take_seen(), [vec![(100, true, 0)], want.clone()].concat());
+        // The array the second field of a pair whose first field, a
+        // payload, is pushed before it: the step runs with that payload
+        // below it (one entry more under each release), which comes out
+        // last.
+        drop(pair(200, probe(300, LAny::unit()), of(mk(&shared), NUM_ARRAY), PAIR));
+        let below: std::vec::Vec<_> = want.iter().map(|&(id, a, d)| (id, a, d + 1)).collect();
+        assert_eq!(take_seen(), [below, vec![(300, true, 0)]].concat());
+        assert_eq!(take_log(), vec![200]);
+        assert_eq!(count(&shared), 1);
+        assert!(!crate::drop::active());
+        assert_eq!(reussir_rt::drop::depth(), 0);
+        drop(shared);
+        assert_eq!(take_seen(), vec![(50, true, 0)]);
+    }
+
+    /// An array freed outside a free whose first pass keeps exactly one
+    /// element, a program payload or one of leanrt's leaves, is freed
+    /// without a step (`drop::ReleaseElems::free_single`): a payload's
+    /// release runs in a drain of its own with nothing else on the stack,
+    /// as the step's pop had it, and what it pushes after it; a leaf
+    /// payload is released directly (outside a drain: the one difference a
+    /// release can see). With work pending outside a drain, the step: its
+    /// drain releases that work too before the free returns.
+    #[test]
+    fn one_kept_element_without_a_step() {
+        install();
+        let shared = probe(50, LAny::unit());
+        let arr = |e: LAny, shared: &LAny| {
+            [shared.clone(), LAny::imm(3), e, LAny::unit(), shared.clone()].into_iter().fold(crate::array::empty::<LAny>(), crate::array::push)
+        };
+        drop(arr(probe(1, probe(2, LAny::unit())), &shared));
+        assert_eq!(take_seen(), vec![(1, true, 0), (2, true, 0)]);
+        drop(arr(leaf_probe(3), &shared));
+        assert_eq!(take_seen(), vec![(3, false, 0)]);
+        for e in [
+            of(crate::string::from_bytes(b"t"), NUM_STR),
+            of_nat(LNat::of_u64(u64::MAX)),
+            of_int(LInt::of_i64(i64::MIN)),
+            of_f64(0.5),
+            of_u64(u64::MAX),
+        ] {
+            assert!(!e.is_imm() && e.is_exclusive());
+            drop(arr(e, &shared));
+        }
+        assert!(take_seen().is_empty());
+        assert_eq!(count(&shared), 1);
+        assert_eq!(reussir_rt::drop::depth(), 0);
+        // Work pending outside a drain (as a record's `drop_in_place`
+        // leaves it between the members it defers and its drain).
+        crate::drop::defer(77, step_mark);
+        drop(arr(leaf_probe(4), &shared));
+        let (seen, log) = (take_seen(), take_log());
+        if reussir_rt::drop::depth() != 0 {
+            unsafe { reussir_rt::drop::__reussir_drop_drain() };
+        }
+        assert_eq!((seen, log), (vec![(4, true, 1)], vec![77]));
+        assert_eq!(count(&shared), 1);
+        assert!(!crate::drop::active());
+        assert_eq!(reussir_rt::drop::depth(), 0);
+    }
+
+    /// A deep nesting of one-element arrays freed outside a free: the one
+    /// element an array keeps is an array, which keeps the step (released
+    /// directly, it would be freed by `free_vec` again, by recursion), so
+    /// a small stack suffices.
+    #[test]
+    fn deep_nesting_of_one_element_arrays() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                install();
+                let mut a = probe(1, LAny::unit());
+                for _ in 0..1_000_000 {
+                    a = of(crate::array::push(crate::array::with_capacity::<LAny>(1), a), NUM_ARRAY);
+                }
+                drop(a);
+                assert_eq!(take_seen(), vec![(1, true, 0)]);
+                assert!(!crate::drop::active());
+                assert_eq!(reussir_rt::drop::depth(), 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// A shared array of boxes copied for an update: every pointer's

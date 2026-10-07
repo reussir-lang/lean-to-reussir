@@ -299,23 +299,26 @@ pub extern "C" fn nat_gcd(a: u64, b: u64) -> LNat {
 
 /// Text that a `fmt::Write` produces (lean-runtime's text rules write into
 /// one), collected for a string: ASCII here, the decimal digits of a big
-/// number.
+/// number. A failed allocation is the write's error.
 struct Digits(Vec<u8>);
 
 impl std::fmt::Write for Digits {
     fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.try_reserve(s.len()).map_err(|_| std::fmt::Error)?;
         self.0.extend_from_slice(s.as_bytes());
         Ok(())
     }
 }
 
 /// The decimal digits (and sign) of a big number as a string
-/// (`sem::nat::write_decimal`, `sem::int::write_decimal`).
+/// (`sem::nat::write_decimal`, `sem::int::write_decimal`). A failed
+/// allocation, the write's only error, ends as the blocks' do (`big::oom`:
+/// `INTERNAL PANIC: out of memory`; review HB-02).
 #[inline(never)]
 fn big_decimal(write: impl FnOnce(&mut Digits) -> std::fmt::Result) -> crate::LStr {
     let mut d = Digits(Vec::new());
     if write(&mut d).is_err() {
-        crate::lean_internal_panic(InternalPanic::OutOfMemory)
+        big::oom()
     }
     crate::string::from_vec(d.0)
 }

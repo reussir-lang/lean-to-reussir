@@ -119,10 +119,11 @@ runtime.
   reference through Reussir's per-thread
   stack of pending work (`reussir_rt::drop`, local patch 13-b), shared with
   the record drop glue. A container freed while a free runs is pushed
-  instead; the outermost free pops until empty. An array is emptied from
-  its last element, and what an element's release pushes is done before
-  the next one. File handles and promises reached during a free are pushed
-  too.
+  instead; the outermost free pops until empty. An array is freed in
+  native Lean's two passes (below): its elements are decremented in index
+  order, then those whose last reference went are released from the last
+  one, and what an element's release pushes is done before the next one.
+  File handles and promises reached during a free are pushed too.
 - **Why:** Lean frees iteratively (`lean_dec_ref_cold`); a value deep
   through containers (a tree whose children are in arrays, chains of thunks)
   overflowed the stack (59b2551). Two separate stacks (the runtime's and
@@ -149,21 +150,64 @@ runtime.
 - **Remove only if:** never; the runtime does not build without patch
   13-b.
 
+### Arrays are freed in native Lean's two passes
+
+- **What:** The free of an array of boxes (on every target) or of
+  Reussir records (on aarch64 with 8-byte handles: elsewhere the immortal
+  encoding of nullary variants is not told apart, and the generic loop
+  releases every element from the last) (`drop::free_vec`, `step_vec`)
+  first decrements every element in index order (`ReleaseElems::scan`): an immediate is skipped, a shared element
+  is decremented in line, and an element whose count is 1 is kept, moved
+  to the front of the block (`len`: the number kept). Then the kept
+  elements are released from the last one (`release_from_end`), each with
+  what it pushes done before the one before it. Outside a running free the
+  first pass runs in `free_vec`, and an array that keeps no element is
+  freed without the stack; inside one the array is pushed, and both passes
+  run when it is popped. A step may run several times (it stops when a
+  release pushes work), so the block's header records that the first pass
+  is done: `Hdr::_pad` (`SCANNED`, 1; 0 in every live block).
+- **Why:** Native `lean_del_core` decrements every element of an array in
+  index order, pushing each one whose count reaches zero, and pops them
+  last first. The order differs from one pass from the last element when
+  an element is shared inside the array: a value held twice is freed at
+  its last index, and a value that a later element also holds is freed
+  inside that element's release (review of the runtime's speed items,
+  finding F1: `RtArrayDupFreeOrder` printed `dcba` and `cba`, natively
+  `dbca` and `acb`). The kept elements' counts stay 1 until they are
+  released: each is the array's only reference. The first pass is a
+  loop, so a deep nesting of arrays still frees on a small stack
+  (`RtArrayDeepSharedFree`: 10^6 levels on 256 KiB). Cost (cachegrind,
+  small sizes, minimum of two runs, against one pass from the end):
+  monadic-interp -0.53 % (its shared elements are decremented in the first
+  pass instead of by the step's loop), sieve +0.25 %, qsort +0.31 %,
+  liasolver +0.41 % (an immediate costs 5 instructions instead of 4:
+  sieve's million-element `Array Bool`); unionfind, binarytrees, deriv
+  and rbtree unchanged.
+- **Where:** `runtime/leanrt/src/drop.rs`: `free_vec`, `step_vec`,
+  `SCANNED`, `ReleaseElems` (`scan`, `release_from_end`) for `LAny` and
+  `Bridge`; tests leanrt's `any::tests::box_array_free_shared_inside`,
+  `drop::tests::record_array_free_shared_inside` (aarch64 only),
+  `RtArrayDupFreeOrder`,
+  `RtArrayDeepSharedFree`. Other element types (scalars, which have no
+  release, and strings, whose order is not seen) keep one pass from the
+  last element (`release_from_end_each`).
+- **Remove only if:** never (native's order).
+
 ### Arrays of records release shared elements inline
 
 - **What:** Freeing an array of Reussir records (`Bridge` elements)
   decrements a shared element's count inline and skips nullary-constructor
-  immediates (aarch64, 8-byte elements); only an element whose last
-  reference goes takes the record's out-of-line `_ffi_release` and the
-  stack. Outside a running free, an array none of whose elements is freed
-  is freed without the stack at all.
+  immediates (aarch64, 8-byte elements), in the first pass (above); only
+  an element whose last reference goes takes the record's out-of-line
+  `_ffi_release` and the stack. Outside a running free, an array none of
+  whose elements is freed is freed without the stack at all.
 - **Why:** One out-of-line glue call per element: `hash-map-heavily-shared`
   1.79x → 1.05x native, `hash-map-shared` 1.33x → 0.84x (perf5, 1dc63c6).
   Inside a free the array is still pushed: a later field of the record
   being freed may hold one of its elements. An immediate is never freed
   (local patch 06-a), so skipping it changes nothing.
 - **Where:** `runtime/leanrt/src/drop.rs`: `ReleaseElems`,
-  `release_from_end`, `release_shared_from_end`, `free_vec`.
+  `release_from_end`, `scan`, `free_vec`.
 - **Remove only if:** never (speed only); the immediate skip depends on
   patch 06-a ([Reussir bug 6](../../reussir-bugs/06-static-count-wrap.md)).
 
@@ -172,12 +216,14 @@ runtime.
 - **What:** Freeing an array of boxes (`LAny` elements: every `Array` of
   a Lean type) skips an immediate (an odd word) and decrements a shared
   payload's count inline, without storing the block's `len` or reading
-  the stack's depth (`ReleaseElems for LAny`). Only a payload whose count
-  is 1 goes to `any::release_last`, after `len` is set to the elements
-  before it, and only then is the depth read (a payload that the release
-  pushed is done before the next element). Outside a running free, an
-  array none of whose elements is freed is freed without the stack at all
-  (`release_shared_from_end`).
+  the stack's depth (`ReleaseElems for LAny`, its first pass `scan`).
+  Only a payload whose count is 1 is released (`any::release_last`, or
+  its release called in the step: next section), after `len` is set to
+  the elements before it, and only then is the depth read (a payload that
+  the release pushed is done before the next element). Outside a running
+  free, an array none of whose elements is freed is freed without the
+  stack at all (`scan` in `free_vec`), and one that keeps one payload or
+  leaf releases it without a step (next section).
 - **Why:** The generic loop (`release_from_end_each`) stored `len`, dropped
   the element (`LAny`'s drop, inline) and read the depth for every
   element: 12 to 15 instructions an element, and an array of immediates
@@ -195,11 +241,111 @@ runtime.
   `RtArrayRecordFreeOrder`, `RtDropOrderRec`.
 - **Remove only if:** never (speed only).
 
+### The array free calls a payload's release where the stack would pop it next
+
+- **What:** Two shortcuts in the free of an array of boxes
+  (`ReleaseElems for LAny`). Neither changes the order of releases.
+  - *In the step.* The second pass runs as a step of a running free
+    (`step_vec`, `release_from_end`). A kept element that is a program
+    payload (leaf or not), other than the last kept element, has its
+    release called in the step (`any::release_last_in_step`: the
+    program's `l2r_any_rel_<num>_c` from leanrt's table) instead of being
+    deferred (`any::release_last`). When the release pushed nothing the
+    loop goes on with the element before; when it pushed work the step
+    returns to the drain, as before. The last kept element (index 0) is
+    still deferred. leanrt's own kinds go to `release_last` as before.
+  - *Outside a free.* When no free runs and nothing is pending on the
+    stack (`depth() == 0`), an array whose first pass keeps exactly one
+    element is freed without a step (`free_single`, called by
+    `free_vec`) if that element is a program payload or one of leanrt's
+    leaves (a big number, a string, a scalar cell; `any::frees_flat`):
+    the block is freed, then the element goes to `any::release_last`. A
+    payload that is not a leaf is then deferred and drained
+    (`drop::free_deferred`): with nothing else pending, Reussir's drain
+    of one cell (`drain_one`) releases it in a drain of its own. A leaf,
+    of either kind, is released directly.
+- **Why:** MonadicInterp frees about 144,000 old copies of its variables
+  array, each holding one count-1 pair of its own, and each went through
+  `run_step`, the drain's general loop, `step_vec` and a deferral. Hash
+  maps free bucket arrays inside a step, one deferral, one return to the
+  drain, one pop and one new call of the step per freed bucket (liasolver
+  62,500, hashmap 17,500). Instructions against the same runtime without
+  these two shortcuts (cachegrind, small sizes, SVE off, minimum of two
+  runs, the `.rr` files identical, outputs equal native, `mi_free`'s
+  instructions equal within 0.0001 %): monadic-interp -1.63 %
+  (1,055.13 -> 1,037.93 M), liasolver -2.28 % (220.29 -> 215.27 M),
+  hashmap -1.25 % (120.84 -> 119.33 M); unionfind -0.01 %, binarytrees
+  unchanged. The order:
+  - *In the step.* Deferred, the payload's cell would be the only entry
+    above the step. The step sees the depth change and returns. The drain
+    pops the cell next, and the pop of a run of one cell leaves the step
+    as the top entry, so the drain calls the same release with the stack
+    as it was in the step. What the release pushes goes above the step in
+    both cases, and the depth test returns to the drain, which does that
+    work before it runs the step again. When the release pushed nothing,
+    the drain runs the step again at once, and the step goes on with the
+    element before. So the same releases come in the same order, each
+    with the same stack under it (leanrt's `Bridge` loop calls a record's
+    `<record>_ffi_release` the same way). The last kept element stays
+    deferred: the block is then freed first, as natively (`lean_del_core`
+    frees the array, then pops its elements), and the element is released
+    after the step's entry is gone.
+  - *Outside a free.* The step would start a drain with the step as its
+    only entry. The step frees the block and defers the element (its last
+    kept element). The drain removes the step, pops the element and
+    releases it with nothing else on the stack, releases what that pushed,
+    last first, and ends; its end runs the promise resolutions put off in
+    it (`__reussir_drop_drained`). `any::release_last` does exactly that
+    for a payload, without the step: it defers the cell and drains, and
+    with nothing else pending Reussir's drain of one cell (`drain_one`)
+    starts a drain, pops the cell, releases it, releases what that
+    pushed and ends the same way. A leaf (a leaf payload or a leanrt
+    leaf) frees its own block and nothing else: it has no member and holds
+    no promise, so outside a drain it pushes nothing and does the same as
+    inside one, and the end of the skipped drain would have run nothing (a
+    leaf puts off no resolution, and outside a drain no resolution is put
+    off: every drain's end runs those put off in it). Natively,
+    `lean_del_core` also frees the block and then pops its one element.
+    With work pending outside a drain (a record's `drop_in_place` between
+    the members it defers and its drain), the step stays: its drain
+    releases that work too before the free returns, and a leaf's direct
+    release would leave it for later. An element that is an array of
+    boxes keeps the step: released directly, it would be freed by
+    `free_vec` again, and a deep nesting of one-element arrays would
+    recurse (the unit test `deep_nesting_of_one_element_arrays`: 10^6
+    levels on a 256 KiB stack). A `ByteArray` or `FloatArray` element
+    would be one `mi_free`, without recursion; it keeps the step only
+    because the case is rare.
+- **Where:** `runtime/leanrt/src/drop.rs`: `free_vec`,
+  `ReleaseElems::free_single`, `ReleaseElems for LAny`
+  (`release_from_end`, `free_single`); `runtime/leanrt/src/any.rs`:
+  `release_last_in_step`, `frees_flat`. Tests: leanrt's
+  `any::tests::box_array_free_releases_in_its_step` (the order, and the
+  depth of the stack each release sees, as the deferral's pop gave it),
+  `one_kept_element_without_a_step` (also with work pending outside a
+  drain), `deep_nesting_of_one_element_arrays`; `RtArrayFreeDirectOrder`
+  (the closes in native's order, through both shortcuts),
+  `RtArrayDupFreeOrder`, `RtArrayDeepSharedFree`, `RtBoxLeafRelease`,
+  `RtNestedArrayFreeOrder`, `RtArrayRecordFreeOrder`, `RtDropOrderRec`.
+- **Remove only if:** never (speed only). It depends on how Reussir's
+  drain pops a run of one cell above a step and on how it drains one
+  pending cell outside a drain (`drain_one`; `reussir_rt::drop`); if
+  either changes, the deferral (`any::release_last` in the step) and the
+  step (`run`) are the fallback.
+
 ### Array copies skip the increments of immediates
 
 - **What:** Copying an array of records (copy-on-write, `extract`,
   `append`) increments real boxes inline, as `rc.inc` does, and skips
-  immediates (aarch64 only; elsewhere the generic clone).
+  immediates (aarch64 only; elsewhere the generic clone). An immediate is
+  a pointer with a nonzero top byte (`tbi`, the default encoding) or one
+  to a dummy box whose count is 2^31 or more (`immortal`, which
+  `--nullary-variant-encoding arch-independent` selects on aarch64 too):
+  both are skipped, here and in the in-line releases of records
+  (`drop::ReleaseValue`, `ReleaseElems`, `array::ReleaseElem`), as
+  `any`'s `into_any` tells them apart (review HRT-04: the `immortal`
+  dummy's count was changed, and after about 2^30 releases it was no
+  longer immortal; `drop::IMMORTAL`).
 - **Why:** Under Reussir's aarch64 (TBI) encoding of nullary variants,
   which patch 06-a keeps, an immediate's increment is unguarded: every
   `nil` bucket of a hash map incremented the one static dummy of `nil`, a
@@ -286,30 +432,31 @@ runtime.
 - **What:** `drop::release` (reference and cell sets) and
   `drop::release_unique` (`array::release_last`: a set or a pop that
   removes the last reference) free a record whose count is 1 (aarch64,
-  8-byte `Bridge`) with `drop::free_unique`: `__reussir_drop_defer(p,
-  release_record::<X>)` puts the record on the thread's pending stack as
-  one deferred cell (a deferral that is not `_wide` writes nothing into
-  the cell), and `__reussir_drop_drain()` releases it. Outside a free that
-  is Reussir's drain of one pending cell (`drain_one`, local patch 13-b):
-  the drain starts, `release_record` runs the record's
-  `<record>_ffi_release` inside it (its fields go on the stack and come
-  out last first), and the drain ends, through the general loop only when
-  the release pushed work; the end of the drain calls
+  8-byte `Bridge`) with `drop::free_unique`: `drop::free_deferred` calls
+  `__reussir_drop_defer(p, release_record::<X>)`, which puts the record on
+  the thread's pending stack as one deferred cell (a deferral that is not
+  `_wide` writes nothing into the cell), and `__reussir_drop_drain()`
+  releases it. Outside a free that is Reussir's drain of one pending cell
+  (`drain_one`, local patch 13-b): the drain starts, `release_record` runs
+  the record's `<record>_ffi_release` inside it (its fields go on the
+  stack and come out last first), and the drain ends, through the general
+  loop only when the release pushed work; the end of the drain calls
   `__reussir_drop_drained` (patch 40-a: the promise resolutions put off,
-  `task::drained`). Inside a free the cell is only pushed (above the run
-  on top, which moves to the vector) and is released when the free pops
-  it. `release_unique` does not test the count again (its caller did). On
-  other targets (the immortal encoding: the count is not tested) the
-  record's release is a step (`drop::run`, `step_record`). The last
-  reference to a box's program payload is freed the same way, on every
-  target (`LAny`'s count is always tested): `any::release_last` defers the
-  payload's cell (the box's word without its number) with
-  `__reussir_drop_defer(cell, release)`, where `release` is the program's
-  release of the payload's type, found by number in leanrt's table
-  (`l2r_any_rel_<num>_c`, box-and-uniform.md); a leaf payload outside a
-  free is released directly. This covers boxed records replaced or
-  removed in an array, a reference's or cell's old value, and any other
-  box dropped for the last time.
+  `task::drained`). Inside a free the drain returns at once: the cell is
+  only pushed (above the run on top, which moves to the vector) and is
+  released when the free pops it. `release_unique` does not test the
+  count again (its caller did). On other targets (the immortal encoding:
+  the count is not tested) the record's release is a step (`drop::run`,
+  `step_record`). The last reference to a box's program payload is freed
+  the same way, on every target (`LAny`'s count is always tested):
+  `any::release_last` gives the payload's cell (the box's word without its
+  number) to `drop::free_deferred` with `release`, the program's release
+  of the payload's type, found by number in leanrt's table
+  (`l2r_any_rel_<num>_c`, box-and-uniform.md). A leaf payload outside a
+  free is released directly; inside one it is only deferred
+  (`any::release_leaf`: a drain there would return at once). This covers
+  boxed records replaced or removed in an array, a reference's or cell's
+  old value, and any other box dropped for the last time.
 - **Why:** At switch step 10 the record was a step (`drop::run`:
   `run_step` writes a `Work::Step` into the stack's vector, the drain
   dispatches it and moves the entries above it down with `memmove`):
@@ -329,13 +476,16 @@ runtime.
   from code layout only (an
   identical `.rr`; `check` has four alignment `nop`s before its loop,
   executed once per call, and an erratum-843419 veneer moved to a load
-  in `make'`).
+  in `make'`). Reussir's three calls (61 of the 74 instructions) could be
+  one: the parked Reussir patch 42-a (reussir-bugs/42-drop-run.md) adds
+  that entry point (monadic-interp -4.99% instructions, unionfind
+  -2.52%), a gain too small for a local Reussir patch (owner,
+  2026-10-07).
 - **Where:** `runtime/leanrt/src/drop.rs`: `release`, `release_unique`,
   `ReleaseValue`, `free_record`, `free_unique`, `free_deferred`,
   `release_record`, `step_record`; `runtime/leanrt/src/array.rs`:
   `release_last`; `runtime/leanrt/src/any.rs`: `release_last`,
-  `defer_and_drain`;
-  Reussir's `reussir_rt::drop` (`__reussir_drop_defer`,
+  `release_leaf`; Reussir's `reussir_rt::drop` (`__reussir_drop_defer`,
   `__reussir_drop_drain`, `drain_one`). Tests: leanrt's unit tests
   `drop::tests::record_free_order` and `record_free_inside_a_free`;
   `RtArraySetFreeNested` (a set, a pop and a reference set freeing
@@ -405,6 +555,11 @@ runtime.
   reference to the array (a tree's child or the tree itself, `cs[i]!` with
   the tree as the default; a closure that captures the array): it freed
   the block the view then read (review PAR-01, test `RtArrayGetDefault`).
+  Out of bounds, `get!` panics before it ends the view, as natively the
+  panic comes inside the extern and the caller's release of the array
+  after it: what freeing the array releases (a handle's flush) follows the
+  message, and under `LEAN_ABORT_ON_PANIC` does not happen (review HA-01,
+  test `RtArrayGetOobOrder`).
   Left to LLVM: a
   loop body whose slow path (a big number's `nat_add`, a call) rejoins the
   fast path keeps a count store per iteration. GVN reloads the count after

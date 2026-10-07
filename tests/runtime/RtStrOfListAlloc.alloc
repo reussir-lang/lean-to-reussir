@@ -1,0 +1,6 @@
+# Review RLF1-06: k = 200 and 2000 conversions of a list of 1001 characters
+# (2501 bytes) to a string. Natively one string of its exact size each
+# (2534 bytes requested, with the header and the NUL); lean2rr's is 2536
+# (its block sizes are rounded up to 8). Before the fix lean2rr pushed onto
+# "" and grew the string about log2 n times (about twice the bytes).
+200 | 2000 | 1 2000

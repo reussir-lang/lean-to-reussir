@@ -69,14 +69,16 @@ start with `runtime/`.
 - **What:** `isExclusiveUnsafe` answers `false`, `lean_is_scalar` answers
   `false`, `shareCommon` is the identity, `ShareCommon.Object.eq`/`hash`
   compare addresses, and `dbgTraceIfShared` reads the cell's count, which
-  conversions and lean2rr's own copies can make differ from native. A
-  shared big number is not reported (natively it is), and a task that
-  one reference holds is not reported (natively a task from `Task.spawn` is
-  multi-threaded, and so reported as shared).
+  conversions and lean2rr's own copies can make differ from native: the
+  count of each storage type (`leanrt::is_shared`: handles, strings,
+  arrays, thunk and task cells, records, big numbers; a box answers for
+  its payload). A task that one reference holds is not reported (natively
+  a task from `Task.spawn` is multi-threaded, and so reported as shared).
 - **Why:** lean2rr's objects have no Lean layout to compare byte by byte;
   answering "shared" only makes such code take its general path.
 - **Where:** `runtime/prelude.rr`: `lean_is_exclusive_obj`,
-  `lean_is_scalar`, `lean_sharecommon_quick`; `Lower/ExternCall.lean`:
+  `lean_is_scalar`, `lean_sharecommon_quick`, `lean_dbg_trace_if_shared`
+  (`runtime/leanrt/src/lib.rs`: `is_shared`); `Lower/ExternCall.lean`:
   `customExtern` (`ShareCommon.State.shareCommon`);
   `lean2rr/L2RShim.lean` (`lean_sharecommon_eq`/`hash`).
 - **Remove only if:** never (plan

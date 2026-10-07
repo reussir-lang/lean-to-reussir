@@ -1,0 +1,4 @@
+# Review HA-02: k = 200 and 2000 conversions of a list of 1001 elements to an
+# array. Natively one allocation of 1001 elements each; lean2rr grew an empty
+# array instead (about 1.5 times the bytes, in eight reallocations).
+200 | 2000 | 1 2000

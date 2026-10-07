@@ -26,9 +26,9 @@ and the earlier form of 09-a included. (The `l2r-local` before
 
 ## Names
 
-- **Entry numbers** run from 1 to 41: 40 entries, because number 37 is
+- **Entry numbers** run from 1 to 45: 44 entries, because number 37 is
   reserved (another track will use it for its patch: value records across
-  the FFI boundary). The next free number is 42.
+  the FFI boundary). The next free number is 46.
 - **A patch file** is named `NN-x-slug.patch`. NN is the number of its
   entry. The letter x gives the order of the entry's patches (a, b, c,
   ...). The slug is a short description. Every patch belongs to exactly one
@@ -105,6 +105,9 @@ a patch outside the series ([parked patches](#parked-patches)).
 | [29](29-ffi-member-mlir.md) | bug (tooling) | the `--emit mlir` dump of a record with an `#[ffi]` member does not parse back | no, builds unaffected; every lean2rr dump fails to parse | - | [29-a](patches/29-a-ffi-member-verifier.patch) | rv8/reussir/e: no defect | yes |
 | [31](31-deep-expression-stack.md) | bug | rrc overflows its stack on deeply nested expressions | no, lean2rr bounds nesting | - | [31-a](patches/31-a-big-driver-stack.patch) | rv8/reussir/e (+ round 2): no correctness defect; RV8RE-02 (`ulimit -v`) fixed | yes |
 | [33](33-rc-trailing-text.md) | bug (tooling) | the rc and ref type parser drops the text after a comma (`!reussir.rc<i64 rigid, atomic>` reads as `!reussir.rc<i64 rigid>`) | no, hand-written MLIR only | - | [33-a](patches/33-a-rc-type-closing-bracket.patch) | rv8/reussir/e/round2: no defect | yes |
+| [43](43-nullable-as-ref.md) | bug | reussir-rt's `Nullable::as_ref` returns a reference to a local copy of the pointer word (dangling); `Nullable::new` checks the size only in debug builds | no: nothing calls it, and a `Nullable` cannot cross the FFI boundary | - | none | - | - |
+| [44](44-small-allocation-limit.md) | bug (32-bit targets) | constant-size boxes of 513 to 1024 bytes go to `mi_malloc_small`, whose limit is 512 bytes there (heap corruption) | no: lean2rr builds only for 64-bit targets | - | none | - | - |
+| [45](45-polyffi-rc-substitution.md) | bug (hand-written MLIR only) | a polymorphic-FFI substitution given as an MLIR rc type becomes Rust's `Rc` without the record's glue (members leak, immediates and atomic counts mishandled) | no: only hand-written MLIR gets there (the front end substitutes the text itself) | - | none | - | - |
 | [34](34-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes: every lean2rr binary has `DT_TEXTREL` on aarch64; with lld or on x86-64 it would not link | `l2r.py` passes `--relocation-mode pic` | [34-a](patches/34-a-pic-by-default.patch) | rv8/reussir/bug34: no defect | yes |
 | [10](10-closure-type-print.md) | cost (build time) | closure devirtualization prints types exponentially | yes, build time and memory | `--no-closure-wpd` | [10-a](patches/10-a-closure-type-ids.patch) | rv7/p22 rounds 1-2 (RV7P-02, RV7P-04 fixed) | yes |
 | [11](11-sccp-call-graph.md) | cost (stock MLIR pass; 11b: Reussir's own glue lookups) | interprocedural SCCP is superlinear; glue lookups rebuild a symbol table per call (11b) | yes, build time of large programs | none | [11-a](patches/11-a-sccp-call-budget.patch) (SCCP), [11-b](patches/11-b-glue-symbol-tables.patch) (11b) | rv8/reussir-c (RV8C-01, -02, -04 resolved) | yes |
@@ -118,6 +121,7 @@ a patch outside the series ([parked patches](#parked-patches)).
 | [32](32-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected; large programs cannot be dumped | dump smaller programs | none | - | - |
 | [35](35-texture-rustc-runs.md) | cost (build time) | rrc compiles every polymorphic-FFI texture with rustc again on every build (about 470 per lean2rr program, 13 s of a small program's 16 s of rrc) | yes, build time | none needed: `l2r.py` sets `REUSSIR_FFI_CACHE_DIR` for 35-a's cache (ignored without the patch) | [35-a](patches/35-a-texture-cache.patch) | FCR (+ second look): FCR-01 (medium, a race) and the small findings fixed | yes |
 | [3](03-global-alloc-align.md) | cost (run time; the 16-byte alignment itself is intended) | a Rust allocation whose size is not a multiple of 16 can be moved inside a larger mimalloc block: its page is marked, and every later free in it takes mimalloc's slow path | yes, speed (up to 5% of a program's instructions, varying from run to run) | the runtime allocates its own objects with `mi_malloc` | [03-a](patches/03-a-global-alloc-size-classes.patch), [03-b](patches/03-b-round-only-mimalloc.patch) (review fixes) | review-inline: F5-F7 (low) fixed in 03-b; second look pending | yes |
+| [42](42-drop-run.md) | cost (run time) | a host frees one cell through the pending stack with a deferral and a drain: three calls, a push and a pop per freed cell | yes, speed (leanrt frees the last reference to a record or a boxed payload this way: about 5% of monadic-interp's instructions) | none possible (a host cannot start a drain itself) | none: the gain is too small for a local patch (owner, 2026-10-07); 42-a parked ([parked option](42-drop-run.md#parked-option-42-a)) | review-rtperf (42-a): correct; R42-01 to R42-03 (comments, a test gap) fixed | - |
 | [7](07-phantom-reuse-donor.md) | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (plan §5.5) | none (parked: [07-a](patches/parked/07-a-sink-bound-retains.patch)) | passed (revised after round 2); parked on 2026-10-07 | parked |
 | [36](36-trampoline-inline.md) | missed optimization | a texture's import trampoline has no inline attribute: at a call site LLVM judges cold, a texture costing more than 45 stays a call | yes, speed (at a cold call site the read of a box from an `Array`, and of a `Nat` or `Int` element at its type, `RtReadsDeep`) | read textures kept small (the view protocol, perf-array-reads); `ffi-inline-check.sh` allows these three reads at `RtReadsDeep`'s cold call sites | none (parked: [36-a](patches/parked/36-a-inline-small-textures.patch), [36-b](patches/parked/36-b-inline-guards.patch)) | review-inline: F1 (high, a stack overflow) and F2-F4 fixed in 36-b; parked on 2026-10-07 | parked |
 | [39](39-alias-release-donor.md) | missed optimization | token reuse takes the release of a value an opaque call returned (an alias of a live reference, so it never frees) as the donor, over the matched cell (equal score: the most recent producer wins) | no longer: it did with lean2rr commit 3f0cb30 (a field's own box passed back into a rebuilt node; `RtProbeBump`: one list cell for each rebuilt node), now reverted | avoided: a field put back into a rebuilt node is boxed again from its unboxed value | none | - | - |
@@ -127,13 +131,13 @@ a patch outside the series ([parked patches](#parked-patches)).
 | [40](40-drain-end-hook.md) | missing feature | Reussir's runtime does not tell the host when a drain (a free) ends | yes: the `sync` dependents of a promise released inside a free must run when the free is over (`scripts/l2r.py` requires it) | none (a fallback until switch step 6) | [40-a](patches/40-a-drain-end-hook.patch) | rv8/reussir: no defect | yes |
 | [41](41-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate (a number) | yes: the one-word `Nat` and `Int` need it (the prelude declares them `tagged`) | none (before: `Nat` was a two-word `[value]` enum) | [41-a](patches/41-a-tagged-ffi-objects.patch) | the mem-nat review and rv8/nat: no defect | yes |
 
-**Counts.** 40 entries: 20 bugs, 12 costs, 3 missed optimizations, 5
+**Counts.** 44 entries: 23 bugs, 13 costs, 3 missed optimizations, 5
 missing features. 34 entries have patches of their own, 40 patch files in
 all (two each for entries 2, 3 and 11, four for entry 13, one each for
-the others); entry 14 is fixed by entry 9's patch 09-a; 5 entries have no
-patch (7, 25, 32, 36, 39). The 40 patches are 20 bug fixes, 12
-optimizations and 8 features; all 40 are on `l2r-trim`. Three parked
-patches lie outside the series and these counts
+the others); entry 14 is fixed by entry 9's patch 09-a; 9 entries have no
+patch (7, 25, 32, 36, 39, 42, 43, 44, 45). The 40 patches are 20 bug
+fixes, 12 optimizations and 8 features; all 40 are on `l2r-trim`. Five
+parked patches lie outside the series and these counts
 ([parked patches](#parked-patches)).
 
 Status words used in the entries' summaries:
@@ -233,7 +237,7 @@ come back).
 
 **Adding a patch.** Name the file after its entry: `NN-x-slug.patch`, with
 the next free letter of the entry (a new problem gets the next free entry
-number, 42). Put it in `patches/` and add its name as the last line of
+number, 46). Put it in `patches/` and add its name as the last line of
 `patches/series`. Write the *Patch* and *Upstream note* sections of the
 entry's file, and update the entry's row in the status table (column
 *Applied*: "no" until it is on the Reussir branch named
@@ -252,9 +256,11 @@ why it is parked and describes the patch.
 |---|---|---|---|---|
 | [07-a](patches/parked/07-a-sink-bound-retains.patch) | [7](07-phantom-reuse-donor.md) | optimization | 2026-10-07 | a missed optimization; lean2rr's `lazy-fields` covers it |
 | [36-a](patches/parked/36-a-inline-small-textures.patch), [36-b](patches/parked/36-b-inline-guards.patch) (review fixes) | [36](36-trampoline-inline.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch |
+| [42-a](patches/parked/42-a-drop-run.patch) | [42](42-drop-run.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch (about 5% of monadic-interp's instructions) |
+| [03-c](patches/parked/03-c-natural-alignment.patch) | [3](03-global-alloc-align.md) | optimization | 2026-10-06 | an alternative to 03-a and 03-b that changes Reussir's rule of 16-byte alignment for Rust allocations; the owner kept the rule |
 
-Both entries say "not patched"; their issues stay open as missed
-optimizations. Remove a patch from the series the same way: move its file
+Their entries say "not patched" (03-c: issue 3 keeps 03-a and 03-b);
+the issues stay open. Remove a patch from the series the same way: move its file
 to `patches/parked/`, delete its line from `patches/series`, rebuild the
 Reussir stack from the series, and update the entry, its row and the
 counts.
@@ -266,10 +272,12 @@ counts.
 (`bugNN-name.lean`) where the issue needs lean2rr's output, a small
 generator (`bugNN-name.py`) where the program must be large, or a check
 script (bugs 18 and 24), plus `bug07b-call-before-branch.rr`, a variant
-used in issue 7's entry. Entries 40 and 41 have no repro: they are missing
-features that show only through a host that uses them, and their patches
-carry their own tests. Each repro file starts with what it shows, the
-expected output and what Reussir ef922049 does.
+used in issue 7's entry, and a Rust test of Reussir's runtime sources
+(`bug43-nullable-as-ref.rs`). Entries 40 and 41 have no repro: they are
+missing features that show only through a host that uses them, and their
+patches carry their own tests. Entries 44 and 45 have none either: 44
+needs a 32-bit target, 45 MLIR written by hand. Each repro file starts
+with what it shows, the expected output and what Reussir ef922049 does.
 
     reussir-bugs/repros/run.sh RRC_CHECKOUT [NN...]
 
