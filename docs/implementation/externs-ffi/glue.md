@@ -32,6 +32,27 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `lean_dbg_trace_if_shared`, `l2r_shared_check`.
 - **Remove only if:** never.
 
+### Glue gets every value parameter of the declaration, erased or not
+
+- **What:** The glue of an extern (`customExtern`, `refGlue`) reads its
+  arguments by position. It gets each parameter that the extern's
+  declaration does not erase (not a type argument, not a proof), the
+  world included. A parameter that the instance erases but the
+  declaration does not (`Task.pure`'s `a : α` at `α := Type`,
+  `Thunk.mk`'s `Unit → α` at `α := Prop`) gets the value that Lean
+  passes: `box(0)`, at the declaration's mono type, and for a function
+  type a function that gives `box(0)`. Natively such a closure is
+  `box(0)`, and `lean_apply_n` of a scalar gives the scalar, so a body
+  that the instance erases never runs.
+- **Why:** The glue got only the parameters that the instance does not
+  erase: `Task.pure Nat`, `Thunk.mk fun _ => n = 3` and
+  `Task.spawn fun _ => Nat` stopped the translation (`index out of
+  bounds`, then a type error in rrc), and `ptrAddrUnsafe` of a type had
+  no glue (the program was refused; test `RtExternErasedValue`).
+- **Where:** `Lower/ExternCall.lean`: `lowerExternCall`,
+  `genericParamTypes`, `erasedArg`.
+- **Remove only if:** the glue stops reading arguments by position.
+
 ### Generic prelude functions over values are instantiated at the value types
 
 - **What:** A prelude function that is plain Reussir code (not an FFI

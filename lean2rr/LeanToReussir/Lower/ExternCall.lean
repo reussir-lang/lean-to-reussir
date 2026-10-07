@@ -221,6 +221,35 @@ def bindReadIndex (sym : String) (mask : Array Bool) (atVar : Array Bool) (param
     | _, _ => args' := args'.push a
   return if lets.isEmpty then mk args else .block ⟨lets, mk args'⟩
 
+/-- The mono types of the parameters of extern `orig` in its declaration
+(type arguments and proofs erased, a value of a type parameter `lcAny`);
+empty if they cannot be computed. -/
+def genericParamTypes (orig : Name) : LowerM (Array Expr) := do
+  try
+    let mut ty ← toMonoTypeKeep (← getOtherDeclBaseType orig [])
+    let mut out := #[]
+    repeat
+      match ty.consumeMData.headBeta with
+      | .forallE _ d b _ =>
+        out := out.push d
+        ty := b.instantiate1 anyExpr
+      | _ => break
+    return out
+  catch _ => return #[]
+
+/-- The argument Lean passes for a parameter of mono type `g` (in the
+extern's declaration) that an instance erases: `box(0)`, and for a function
+type a function that gives `box(0)` (natively the closure is `box(0)` too,
+and `lean_apply_n` of a scalar gives the scalar: a body that the instance
+erases never runs). `none` for a function type with an erased domain. -/
+partial def erasedArg (g : Expr) : LowerM (Option RR.Expr) := do
+  match g.consumeMData.headBeta with
+  | .forallE _ d b _ =>
+    if erasedDom d then return none
+    let some body ← erasedArg (b.instantiate1 anyExpr) | return none
+    return some (rawFnValue (← lowerType g) (← fresh "ea") (.ofExpr body))
+  | g' => return some (← coerce .unitVal .unit (← lowerType g'))
+
 /-- Emit a saturated extern call. Default: call the prelude function named
 after the C symbol with the passed arguments.
 
@@ -245,9 +274,19 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
     return refusedExternCall orig args
   -- Glue sees only relevant parameters: erased ones (type arguments,
   -- proofs) are dropped; the world is kept (IO glue applies actions to it).
-  let relevant := (params.zip args).filter fun (p, _) =>
-    let p := p.consumeMData
-    !(p.isErased || p.isSort)
+  -- The glue reads its arguments by position, so a parameter that this
+  -- instance erases but the declaration does not (`Task.pure`'s `a : α`
+  -- at `α := Type`, `Thunk.mk`'s `Unit → α` at `α := Prop`) stays, at the
+  -- declaration's mono type, with the argument Lean passes (`erasedArg`;
+  -- test `RtExternErasedValue`).
+  let gen ← genericParamTypes orig
+  let mut relevant : Array (Expr × RR.Expr) := #[]
+  for h : i in [:params.size] do
+    if !erasedDom params[i] then
+      relevant := relevant.push (params[i], args[i]!)
+    else if let some g := gen[i]? then
+      unless erasedDom g do
+        if let some a ← erasedArg g then relevant := relevant.push (g, a)
   if let some e ← customExtern orig (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
   if orig.getPrefix == `ST.Prim || orig.getPrefix == `ST.Prim.Ref then
     if let some e ← refGlue orig (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
