@@ -631,12 +631,15 @@ binder would also run, and fail, when `t = .str`. The rules:
   provided it is used nowhere else, e.g. not as a closure. The callers would
   unbox right away anyway; the unboxing moves to the callee's `return`,
   which for a constant happens once instead of at every read. A self call
-  that binds the result at another type than the declaration's own counts
-  as a call here: that is polymorphic recursion into the uniform instance
+  counts as a call here too, except a tail call (`let y := f …; return y`)
+  at the declaration's own result type, whose value is the result. Other
+  self calls can return a value of another type than the one typed caller
+  binds the result at: polymorphic recursion into the uniform instance
   (`FSeq.flatten` at `lcAny` calls itself at `lcAny × lcAny`), which returns
-  a value of a different type at every depth, so the type at which the one
-  typed caller binds the result (`List (Nat × Nat)`) does not hold for all
-  of them (adv2 PrgPoly1, runtime test RtPolyRecResult).
+  a value of a different type at every depth (adv2 PrgPoly1, runtime test
+  RtPolyRecResult), or a call at a type computed from a value, which the
+  binder types `lcAny`, the declaration's own result type (hunt MONO-01,
+  runtime test RtSelfCallResult).
 - **Externs at unknown types.** A call of a polymorphic extern instantiated
   at `lcAny`, e.g. `Array.uget` and `Array.uset` at `NonScalar`, binds its
   result at the type the extern returns at the type arguments the

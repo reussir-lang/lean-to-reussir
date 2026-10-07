@@ -76,11 +76,11 @@ has the rules. Paths are relative to `lean2rr/LeanToReussir/`.
 
 ### Result types of polymorphically recursive functions
 
-- **What:** Stage 3 counts a self call that binds the result at another
-  type than the declaration's own among the call sites' result types, so
-  the uniform instance's result stays uniform.
+- **What:** Stage 3 counts a self call among the call sites' result types
+  (all but a tail call at the declaration's own result type), so the
+  uniform instance's result stays uniform.
 - **Why:** See [type-recovery.md](type-recovery.md#result-types-come-from-the-returned-values-and-from-the-callers)
-  (adv2 PrgPoly1).
+  (adv2 PrgPoly1, hunt MONO-01).
 - **Where:** `MonoRetype.lean`: `callSites` (its self-call case),
-  `CallSites`.
+  `CallSites`, `constAppsTail`.
 - **Remove only if:** never.

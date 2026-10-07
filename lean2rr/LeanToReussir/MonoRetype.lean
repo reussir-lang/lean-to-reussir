@@ -553,6 +553,23 @@ partial def constApps (c : Code .pure) (acc : Array (Name × Array (Arg .pure) �
   | .cases cs => cs.alts.foldl (fun acc alt => constApps alt.getCode acc) acc
   | _ => acc
 
+/-- `constApps` with, per application, whether it is a tail call: its binder
+is returned at once (`let y := f …; return y`). -/
+partial def constAppsTail (c : Code .pure) (acc : Array (Name × Array (Arg .pure) × Expr × Bool)) :
+    Array (Name × Array (Arg .pure) × Expr × Bool) :=
+  match c with
+  | .let d k =>
+    let tail := match k with
+      | .return x => x == d.fvarId
+      | _ => false
+    let acc := match d.value with
+      | .const f _ args _ => acc.push (f, args, d.type, tail)
+      | _ => acc
+    constAppsTail k acc
+  | .jp d k | .fun d k _ => constAppsTail k (constAppsTail d.value acc)
+  | .cases cs => cs.alts.foldl (fun acc alt => constAppsTail alt.getCode acc) acc
+  | _ => acc
+
 /-- What a declaration returns: the types of the returned values, except the
 results of its own saturated self calls (by induction on the recursion they
 have the declaration's result type, whatever it is) and constructors without
@@ -602,16 +619,24 @@ def refineSignature (d : Decl .pure) (types : Types) : MRetypeM (Decl .pure × B
 
 /-! ## Result types from call sites -/
 
-/-- What the call sites in the program's live declarations tell (self calls
-not included, except as below): the types of the binders of saturated
-calls, per callee, and which callees are referenced otherwise.
+/-- What the call sites in the program's live declarations tell: the types
+of the binders of saturated calls, per callee, and which callees are
+referenced otherwise.
 
-A saturated self call whose binder has another type than the declaration's
-result is polymorphic recursion, which Mono sends to the uniform instance
-(`FSeq.flatten` at `lcAny` calls itself at `lcAny × lcAny`, Mono.instanceName):
-its binder counts among the results, since the value returned has a
-different type at every depth and no caller's binder type holds for all of
-them (adv2 PrgPoly1). -/
+A saturated self call counts among the results too, except a tail call
+(`let y := f …; return y`) whose binder has the declaration's result type:
+its value is the declaration's result, so it has the type the callers bind
+the outermost call at, by induction on the recursion. Any other self call
+can return a value of another type than the callers' binders say:
+- polymorphic recursion, which Mono sends to the uniform instance
+  (`FSeq.flatten` at `lcAny` calls itself at `lcAny × lcAny`,
+  Mono.instanceName): the value returned has a different type at every
+  depth (adv2 PrgPoly1);
+- a result type that depends on a value or a type argument hidden behind
+  `lcAny` (`f {α} (n) (x : α) : α` at `lcAny` calling itself at `T k`, a
+  type computed from `k`): the binder has the declaration's own result type
+  `lcAny`, but the inner call's value is a `T k`, not what the callers bind
+  the outermost call at (hunt MONO-01; test `RtSelfCallResult`). -/
 structure CallSites where
   results : Std.HashMap Name (Array Expr) := {}
   /-- Declarations also referenced otherwise than by a saturated call (a
@@ -625,12 +650,12 @@ def callSites (decls : Array (Decl .pure)) : MRetypeM CallSites := do
     let d := decls[i]
     let .code c := d.value | continue
     unless st.live.contains d.name do continue
-    for (f, args, resTy) in constApps c #[] do
+    for (f, args, resTy, tail) in constAppsTail c #[] do
       if !st.codeDecls.contains f then continue
       let some sig := st.sigs[f]? | continue
       if args.size != sig.params.size then cs := { cs with escapes := cs.escapes.insert f }
       if f == d.name then
-        if args.size == sig.params.size && (← norm resTy) != (← norm sig.ret) then
+        if args.size == sig.params.size && (!tail || (← norm resTy) != (← norm sig.ret)) then
           cs := { cs with results := cs.results.insert f ((cs.results.getD f #[]).push resTy) }
         continue
       if args.size == sig.params.size then

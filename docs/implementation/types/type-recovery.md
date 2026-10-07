@@ -59,18 +59,25 @@ before Stage 3: data that Lean's `toLCNF` typed `◾`.
   not count, nor do constructors without fields of `T`'s own inductive.
   It also gets `T` when every saturated call binds the result at `T` and
   the declaration is used nowhere else (not as a closure, not
-  over-applied). A self call that binds the result at another type than
-  the declaration's own counts as a call site.
+  over-applied). A saturated self call counts as a call site too, except a
+  tail call (`let y := f …; return y`) that binds the result at the
+  declaration's own result type.
 - **Why:** The unboxing moves from every caller to the callee's
-  `return` (for a constant: once instead of at every read). The self-call
-  case is polymorphic recursion into the uniform instance: `FSeq.flatten`
-  at `lcAny` calls itself at `lcAny × lcAny`, so the one typed caller's
-  `List (Nat × Nat)` does not hold at the deeper levels, and the program
-  panicked "unreachable" (adv2 PrgPoly1, 513379f; runtime test
-  `RtPolyRecResult`).
+  `return` (for a constant: once instead of at every read). The callers'
+  binders give the type of the outermost call only. A tail self call
+  returns its value as the declaration's result, so by induction it has
+  that type too. Any other self call can give a value of another type:
+  polymorphic recursion into the uniform instance (`FSeq.flatten` at
+  `lcAny` calls itself at `lcAny × lcAny`, so the one typed caller's
+  `List (Nat × Nat)` does not hold at the deeper levels: adv2 PrgPoly1,
+  513379f; runtime test `RtPolyRecResult`), or a self call whose binder has
+  the declaration's own result type `lcAny` but whose value has a type
+  computed from a value (`f {α} (n) (x : α) : α` at `lcAny`, called at
+  `Big 70` and calling itself at `T k`: hunt MONO-01; runtime test
+  `RtSelfCallResult`). Both programs panicked "unreachable".
 - **Where:** `MonoRetype.lean`: `returnTypes`, `refineSignature`
   (from the returns); `callSites`, `CallSites` (`escapes`),
-  `resultsFromCallers` (from the callers).
+  `constAppsTail`, `resultsFromCallers` (from the callers).
 - **Remove only if:** never.
 
 ### Externs at unknown types type their results
