@@ -6,6 +6,9 @@
 both applied in `./reussir` (`l2r-local` cc8e5aa5). lean2rr also works
 around the variant half (it turns member packing off).
 
+**Upstream:** pull request #652 (open), with 02-a only: 02-b, the
+variant part, is not in it.
+
 When a function consumes a record and builds another of the same size,
 Reussir writes the new record into the old cell (token reuse). Its copy
 avoidance then skips the store of any field i whose new value was just

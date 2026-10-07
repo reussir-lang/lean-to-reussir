@@ -184,6 +184,11 @@ mutual
                   for h : i in [:min args.size ps.size] do
                     if keep[i]?.getD true then vals := vals.push (← lowerArg ctx args[i]! (← lowerType ps[i]!))
                   return ⟨lets, ← H.stateMachine.selfCall sm vals⟩
+        -- A box that only goes into boxes is bound as a `Box`
+        -- (`CodeCtx.boxedOnly`, `letValueBoxed`): a box field or a callee's
+        -- `Box` result is not unboxed only to be boxed again.
+        let t ← if t != RR.Ty.box && t != .unit && ctx.boxedOnly.contains d.fvarId &&
+            (← letValueBoxed ctx d.value) then pure RR.Ty.box else pure t
         let e ← try lowerLetValue ctx d.value d.type t
           catch ex => throwError "{ex.toMessageData}\n  in let {d.binderName} : {d.type}"
         let x ← fresh "x"
@@ -505,7 +510,8 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
   -- calls it back in tail position (`LowerHooks.stateMachine`).
   let sm? := H.stateMachine.plan d body outlined pnames
   modify fun s => { s with smArms := #[] }
-  let ctx : CodeCtx := { vars, sm := sm?, loop, used := codeUses body {} }
+  let ctx : CodeCtx := { vars, sm := sm?, loop, used := codeUses body {},
+                         boxedOnly := ← boxedOnlyVars body ret }
   -- The body of a declaration without parameters runs once: a constant
   -- boxed there is boxed in line (`boxOf`), not given a once-cell.
   modify fun s => { s with inConstBody := d.params.isEmpty }

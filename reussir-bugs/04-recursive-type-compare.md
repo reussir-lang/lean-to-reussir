@@ -4,6 +4,8 @@
 
 **Kind:** bug. **Status:** patched (04-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
+**Upstream:** pull request #654 (open), with 04-a.
+
 When a construction reuses the cell of a value that was just freed,
 Reussir tries to skip storing fields whose bytes are already in place
 ("copy avoidance"). To decide that, it compares the old and new record

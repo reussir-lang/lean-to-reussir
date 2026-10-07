@@ -40,8 +40,12 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   values, which `fresh-rebuild` rebuilds the matched value from; the
   fields `lazy-fields` binds later are converted where it binds them.
   Where such a parameter goes back to a position of the field's type (a
-  field of a rebuilt constructor), the code boxes its value again; it does
-  not pass the field's own box. A binding drops a conversion's `let` that
+  field of a rebuilt constructor) and also has another use, the code boxes
+  its value again; it does not pass the field's own box. A parameter whose
+  every use puts it back into a box is not converted at all: it keeps the
+  field's box (`CodeCtx.boxedOnly`,
+  [box-and-uniform.md](box-and-uniform.md#a-value-that-only-goes-back-into-boxes-keeps-its-box)).
+  A binding drops a conversion's `let` that
   its code does not use (`dropUnusedConvs`, `CodeCtx.fieldConv`): enum and
   structure arms, and the later bindings of `lazy-fields`, whose consuming
   re-match also keeps a conversion made while the value was live instead
@@ -57,7 +61,9 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   `RtProbeBump`, an association list of pairs bumped in a loop, allocated
   a list cell per rebuilt node (Reussir
   [issue 39](../../../reussir-bugs/39-alias-release-donor.md), a missed
-  optimization). A new box leaves no such release.
+  optimization). A new box leaves no such release. A parameter that is
+  only boxed again has no unboxed value, so there is no dead release
+  either (`RtProbeBump` stays at native's allocations).
 - **Where:** `Lower/Hooks.lean`: `bindField`, `bindStructFields`;
   `Lower/Ctx.lean`: `CodeCtx.fieldConv`;
   `Lower/Code.lean`: `lowerCases` (enum and structure arms),

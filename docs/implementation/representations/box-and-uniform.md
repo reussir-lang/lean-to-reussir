@@ -49,8 +49,10 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   - `u64`, `f64` (and `i64` as its `u64` bits): an immediate below 2^63,
     else a cell (`l2r_any_of_u64`; a `Float` is always a cell, as
     natively); `i8`, `i16`, `i32`: their bits zero-extended, always an
-    immediate (Lean's `Int8`…`Int32` are `[value]` structs of `u8`…`u32`,
-    so boxed as those);
+    immediate. No Lean value has a signed type: Lean's `toMonoType` erases
+    `Int8`…`Int64` and `ISize` to `UInt8`…`USize` (`hasTrivialStructure?`),
+    so they are `u8`…`u64` and boxed as those. The signed words keep the
+    box API total; no caller boxes one today;
   - a `[value]` struct: its one field, boxed at the field's type; a field
     that is a `Box` (`ST.Out σ α`) is the box itself (below);
   - `Nat`, `Int`, `String`, `Array α`, `ByteArray`, `FloatArray`:
@@ -64,15 +66,27 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
     boundary. A shared enum's nullary variant is the immediate of its
     index (Reussir represents it as an immediate; `leanrt::any` turns it
     into the index). A function value boxes with `l2r_any_of_fn`, whose
-    nullary variants keep their type: `(num << 32) | index`.
+    nullary variants keep their type: `(num << 32) | index`. A type
+    without nullary variants (a record, an enum whose constructors all
+    have fields, an `ElemBox`, a reference, a cell, a handle) boxes with
+    `l2r_any_of_ptr`: its handle is always a pointer, so the box is the
+    word with the number (`leanrt::any::of_ptr`'s check of the address
+    only), without `l2r_any_of`'s tests for a nullary variant's immediate
+    (the top byte under `tbi`, the dummy's count under `immortal`).
 - **Why:** One word per generic field and array element, as natively; a
   cell only for `Float`, large `UInt64` and values that need one. An
   immediate is untyped, as natively: a word read at another word type
   through `unsafeCast` reads the same word. A function type has several
   representations (`Nat → Nat`, `Box → Box`), so a nullary variant's index
   is only meaningful with its type.
+  The tests for a nullary variant cost a top-byte test and a load and
+  compare of the count at every box of a record (review perf-r1 item 6;
+  cachegrind, without mimalloc's free path: sieve -4.1 %, unionfind
+  -3.7 %, monadic-interp -2.4 %, typeclass-generic -2.3 %, liasolver and
+  mergesort -1.0 %).
 - **Where:** `LowerBase.lean`: `BoxKind`, `boxKind`, `boxNum`, `boxIsLeaf`,
-  `boxValue`.
+  `boxValue` (`l2r_any_of_ptr`); `runtime/prelude.rr`: `l2r_any_of_ptr`;
+  `Lower/Live.lean`: `exprRefs` (a box construction's payload).
 - **Remove only if:** never.
 
 ### A `[value]` struct over a box is the box itself
@@ -82,17 +96,19 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   `struct [value] T_ST_Out(LAny)`) is boxed as that field, the box itself
   (`boxValue`), and unboxed as the struct around the box (`boxUnbox`). It
   has no payload of its own (`boxPayload` registers none), and its boxing
-  never allocates (`boxAllocates`). `boxKind` of `Box` itself is an
+  never allocates (`boxAllocates`). The boxing of such a struct built at
+  once folds to the field (`boxUnboxed?`). `boxKind` of `Box` itself is an
   internal error: a box is never boxed again.
 - **Why:** The struct was boxed by boxing its field at the field's type,
   and `boxKind` of `Box` fell through to a program payload with a number
   of its own: an `ST.Out` put into a list, an array, a thunk or a
   reference panicked at its first unboxing (`ifNum` against that number,
-  "unreachable code"; with `l2r_any_of_ptr`, at its first boxing). Natively
+  "unreachable code"; with `l2r_any_of_ptr`, at its first boxing: the box's
+  word is not a 48-bit address). Natively
   the struct is its field, the same object (review of deptypes-lowperf,
   finding 1; test `RtValueStructBox`).
 - **Where:** `LowerBase.lean`: `BoxKind.valueStruct`, `boxKind`,
-  `boxPayload`, `boxAllocates`, `boxValue`, `boxUnbox`.
+  `boxPayload`, `boxAllocates`, `boxValue`, `boxUnbox`, `boxUnboxed?`.
 - **Remove only if:** never (a box cannot be a payload).
 
 ### Unboxing follows the split rule
@@ -124,6 +140,95 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
 - **Where:** `LowerBase.lean`: `nominalType`, `uniformType`;
   `Lower/Code.lean`: `lowerCases`.
 - **Remove only if:** never.
+
+### A value that only goes back into boxes keeps its box
+
+- **What:** Before a declaration is lowered, `boxedOnlyVars` finds the
+  variables whose every use is a boxed position: a field of a parameter's
+  type in a constructor, a `Box` parameter of a callee, an extern's
+  argument at a `Box` parameter or at a type variable it stores in a
+  `Box` (`Array.push`'s element), a `Box` result, a `Box` join-point
+  parameter (`CodeCtx.boxedOnly`). A `cases` field among them is bound as
+  the field's box (`bindField`: no unboxing `let`), and a `let` among them
+  whose value is a box to start with (a projection of a box field, a call
+  whose callee returns a `Box`, an extern's result at a type variable it
+  stores in a `Box`: `letValueBoxed`) is bound as a `Box`. Separately,
+  `tryCoerce` folds a box unboxed and boxed again at once into the box
+  itself (`boxUnboxed?` recognizes each form of `boxUnbox`'s result). Any
+  other use (a projection, a `cases`, an extern's argument at its own
+  type, a closure's argument, a capture by a local function) keeps the
+  old binding: the field is unboxed once and boxed again where it goes
+  back into a box.
+- **Why:** `List.reverseAux` at a concrete `α` unboxed each head and boxed
+  it again into the new cell, at every instance (mergesort -11.8 %,
+  typeclass-generic -10.2 %, monadic-interp -3.0 %, unionfind -3.4 %
+  instructions; review perf-r1 item 5); a `Float` or a `UInt64` from 2^63
+  got a new cell each time (`a ++ b` on `Array Float`: one cell per
+  appended element, from 1000 to 4000 elements +6002 allocations against
+  native's +3001, now +3002; `RtArrayAppendFloat`). Natively the head is the same object all
+  along, so passing the box on is closer to native: `box(0)` stays
+  `box(0)` (every unboxing at the type reads its zero, as it read the
+  boxed zero before), a nullary variant stays its immediate, and a word
+  read at another type through `unsafeCast` is passed on unchanged where
+  the unboxing truncated it (`RtBoxPassOnCast`: a `List Nat` read as
+  `List UInt8` and copied read back 255 for 511). The `reverseAux`
+  instances are now identical up to names. A variable with another use as
+  well is not given the box for its boxed uses: the unboxed value would
+  then be dead where only the box goes on, and Reussir's token reuse
+  takes such a release as a new cell's donor (issue 39, `RtProbeBump`).
+  So a word read at another type and also used at that type is still
+  truncated where it is boxed again (`RtCastMixedRebox`, expected to
+  fail). A `let` whose value is not a box (a constructor) stays at its
+  type: boxing it at the `let` instead of at its use saves nothing, and
+  it moved a hot loop's code in nqueens.
+- **Where:** `Lower/BoxedUses.lean`: `boxedOnlyVars`, `boxedUsesCode`,
+  `boxedUsesValue`, `boxedArgMask` (which arguments of a declaration or an
+  extern are boxed positions, cached by callee in
+  `LowerState.boxedArgMasks`), `letValueBoxed`; `Lower/Hooks.lean`: `bindField`;
+  `Lower/Code.lean`: `lowerCode` (`let`s), `lowerDecl`; `Lower/Values.lean`:
+  `lowerConstApp` (its value at the binder's type `rty`),
+  `lowerLetValue`; `LowerBase.lean`: `boxUnboxed?`; `Lower/Conv.lean`:
+  `tryCoerce`; `Lower/ExternCall.lean`: `bindReadIndex` (`atVar`). Tests
+  `RtBoxPassOn`, `RtBoxPassOnCast`, `RtCastMixedRebox` (xfail),
+  `RtProbeBump` and `RtArrayAppendFloat` (alloc-check).
+- **Remove only if:** never (the round trips come back).
+
+### An array element read at once at an immediate type, `Nat` or `Int` takes no copy of its box
+
+- **What:** An unboxing at a type a box holds only as an immediate
+  (`UInt8/16/32`, `Char`, `Bool`, an enumeration) or at `Nat` or `Int`,
+  whose box is an array read at `Box` (`lean_array_fget`, `get!`'s
+  `lean_array_get`, `uget`, their `_borrowed` forms, maybe in
+  `bindReadIndex`'s block), calls the read's `_as<T>` variant instead
+  (`boxWordRead?`): `l2r_view_take_as<T>` looks at the element in place and
+  tests bit 0 once; an immediate is read without a copy of the box (no
+  reference count step), a big `Nat` or `Int` is copied as before. At an
+  immediate type the result is the box's word, which `l2r_any_word_as_<k>`
+  (or `l2r_any_word_imm` for an enumeration) reads, any pointer being a
+  mismatch, as for `l2r_any_as_<k>`; `get!`'s default out of bounds is
+  taken at `T` (`l2r_any_take_as`). Only without `slow` (a program that
+  casts reads other payloads through the generated function, which needs
+  the box). `boxUnboxed?` folds the boxing of such a read back into the
+  read of the box.
+- **Why:** The read copied the element (`LAny::clone`: a test of bit 0,
+  an increment for a pointer) and the unboxing tested bit 0 again (review
+  perf-r1 item 7). The same read of a field (a match binder or a
+  projection unboxed at once) still copies the field's box: Reussir
+  copies a field a use takes, and no texture can borrow it (Reussir has no
+  borrowed reads across its FFI boundary).
+- **Where:** `LowerBase.lean`: `boxWordReads`, `boxWordRead?`,
+  `boxWordReadBack?`, `boxUnbox` (`.scalar`, `.enumIdx`, `.leanrt` 1 and 2),
+  `boxUnboxed?`; `runtime/prelude.rr`: `l2r_view_take_as`,
+  `l2r_any_take_as`, `l2r_array_get_as`, `l2r_array_get_word_as`,
+  `lean_array_fget_as` and the other `_as` reads, `l2r_any_word_imm`,
+  `l2r_any_word_as_<k>`; `tests/runtime/ffi-inline-check.sh` lists the
+  `_as` reads among those that must stay inlined at cold call sites. At
+  `RtReadsDeep`'s cold sites LLVM keeps 3 `l2r_view_take_as` calls (the
+  reads at `Nat` and `Int`; a big number's copy is out of line, `big`),
+  as it keeps 4 `l2r_view_take` calls there: on deptypes 5234d3b with the
+  anybox Reussir it kept 7 `l2r_view_take` calls, so the check failed
+  before. Test `RtArrayReadImm`.
+- **Remove only if:** never (each read copies the box again).
 
 ### Unboxing functions are generated last, until the payloads are stable
 

@@ -434,8 +434,13 @@ runtime.
 - **What:** lean2rr binds the `Nat` arguments of a read extern (`a[i]'h`,
   `a[i]!`, the byte and float arrays' reads, the string reads at
   a `Nat` position: `readExternSyms`) by a `let` before the call:
-  `let k = i; read(a, k)`. That is the index, and also `get!`'s default at
-  `Array Nat` (a `Nat` too; harmless). `String.Pos.Raw.get?` goes through
+  `let k = i; read(a, k)`. That is the index. A parameter declared at a
+  type variable (`get!`'s default, at `Array Nat` a `Nat`) is left out
+  (`atVar`): its argument is in its storage, a `Box`, and since the
+  boxing of a box unboxed at once folds away (`boxUnboxed?`), a box field
+  passed as the default is the box variable itself, which a `Nat` `let`
+  would mistype (the classic `sieve`'s `omega` passes such a default).
+  `String.Pos.Raw.get?` goes through
   lean2rr's glue (`Lower/Externs.lean`, `lean_string_utf8_get_opt`) and is
   not covered.
 - **Why:** Reussir increments a variable that is used again later where it

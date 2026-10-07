@@ -1,0 +1,8 @@
+# Every float literal of the test folds to its bits (float-lits), also those
+# whose flag simp replaced by a discriminant or a join point's parameter: no
+# call of Float.ofScientific or Float32.ofScientific is left in the loop,
+# so lean2rr's allocations do not grow with N (FACTOR 0). A call left there
+# takes the slow path (exponent above 22, or above 10 for Float32) at each
+# iteration, and that path allocates big numbers. Native Lean calls them at
+# each iteration (its allocations grow; FACTOR 0 ignores them).
+1000 | 4000 | 0 200

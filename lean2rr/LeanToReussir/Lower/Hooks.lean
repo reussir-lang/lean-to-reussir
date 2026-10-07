@@ -1,4 +1,4 @@
-import LeanToReussir.Lower.StateMachine
+import LeanToReussir.Lower.BoxedUses
 
 /-!
 # Stage 4: the hooks of code lowering
@@ -39,15 +39,20 @@ mono type), whose value is `x : ft` (the field's type in the record),
 bound in the context at its own type: a field of a parameter's type is a
 `Box` in the record (one type per inductive, `nominalType`), and is unboxed
 here, once, not at each use of the parameter. The `let` that converts it
-(none when the types agree, at a unit type, which carries nothing, or when
-the declaration never uses the parameter, `CodeCtx.used`), recorded in
-`CodeCtx.fieldConv`. -/
+(none when the types agree, at a unit type, which carries nothing, when
+the declaration never uses the parameter, `CodeCtx.used`, or when every use
+puts the value back into a box, `CodeCtx.boxedOnly`: the field's box is
+then passed on), recorded in `CodeCtx.fieldConv`. -/
 def bindField (ctx : CodeCtx) (p : FVarId) (pt : RR.Ty) (x : String) (ft : RR.Ty) :
     LowerM (ArmLets × CodeCtx) := do
   if pt == ft || !ctx.used.contains p then
     return (#[], { ctx with vars := ctx.vars.insert p (x, ft) })
   if pt == .unit then
     return (#[], { ctx with vars := ctx.vars.insert p ("L2RUnit::u{}", .unit) })
+  -- Every use puts the value back into a box: the field's box is passed
+  -- on, never unboxed (`boxedOnlyVars`).
+  if ft == RR.Ty.box && ctx.boxedOnly.contains p then
+    return (#[], { ctx with vars := ctx.vars.insert p (x, ft) })
   let y ← fresh "fv"
   return (#[(y, some pt, ← coerce (.var x) ft pt)],
     { ctx with vars := ctx.vars.insert p (y, pt), fieldConv := ctx.fieldConv.insert p y })

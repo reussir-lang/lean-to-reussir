@@ -59,6 +59,9 @@ def genUnbox (fname : String) (t : RR.Ty) : LowerM Unit := do
     let body ← match ← tryCoerce (.var x) vt t with
       | some b => pure (some b)
       | none => if cast then castFallback (.var x) vt t else pure none
+    -- A cast whose conversion never returns a value (`convCall`): no arm
+    -- (the unreachable arm panics alike).
+    let body := body.filter (!deadConvExpr? ·)
     if let some body := body then
       arms := arms.push { payload := vt, binder := some x, body := .ofExpr body }
       if accept && vt matches .fn .. then fnPayloads := fnPayloads.push (n, vt)

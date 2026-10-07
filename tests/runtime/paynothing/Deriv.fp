@@ -1,16 +1,16 @@
 # Pay-nothing baseline of Deriv (tests/classic/Deriv.lean), arguments '8'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 464362
-bytes 10506533
+allocs 464360
+bytes 10506600
 native-allocs 553538
 native-bytes 11997667
 items 203
 functions 171
 conversion-fns 0
 conversion-sites 0
-box-sites 57
+box-sites 53
 box-variants 6
-item L2RFn_F10nT_Expr_1604nLStr f6c182045153
+item L2RFn_F10nT_Expr_1594nLStr 99ca091a55fe
 item L2RFn_F3nNatF«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 0fdd90e73b1d
 item L2RFn_F3nu64F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» f96e8eb23184
 item L2RFn_F4aRVec1_2nu8F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9c0c234ead50
@@ -53,16 +53,16 @@ item l2r_any_releases 2c66b2a554d2
 item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 7a7cfac1f5f9
 item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» a550170c679c
 item l2r_ap2_F«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» a099449a6b70
-item l2r_ap3_F3nNatF«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 163d0fe34eda
+item l2r_ap3_F3nNatF«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 2f60751d7561
 item l2r_err_string 1887e0c9d8df
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 4ba135a7d939
+item l2r_init_chunk_0 5831230391dc
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 c690b1a252f6
-item l2r_main_body 30622ee66ea4
+item l2r_main_body ebf781aa88c3
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
@@ -99,18 +99,18 @@ item l_Expr_count___l2r_#_ fffc91531b0d
 item l_Expr_d___l2r_#_ f32eb8fb3a42
 item l_Expr_d___l2r_#____closed__1 0bc493f75760
 item l_Expr_d___l2r_#____closed__1_init b2356f1e0ace
-item l_Expr_deriv___l2r_#_ 994f0c5b8228
+item l_Expr_deriv___l2r_#_ 8bde97f90872
 item l_Expr_deriv___l2r_#____closed__0 b67a4dccc660
 item l_Expr_deriv___l2r_#____closed__0_init 24a7602c7f44
 item l_Expr_deriv___l2r_#____closed__1 37ad9d716836
 item l_Expr_deriv___l2r_#____closed__1_init 8f75fd1399d8
-item l_Expr_instToString___l2r_#_ 7fa2c3f68806
-item l_Expr_instToString___l2r_#__init 8b3eea8033f3
+item l_Expr_instToString___l2r_#_ 30e45f35174a
+item l_Expr_instToString___l2r_#__init 48e7b34b5aa6
 item l_Expr_ln___l2r_#_ d14a79ad7a6a
 item l_Expr_mul___l2r_#_ e62a32cd60fb
 item l_Expr_mul___l2r_#____closed__0 c877b068bea4
 item l_Expr_mul___l2r_#____closed__0_init 112740bda9cc
-item l_Expr_nestAux___l2r_#_ 83f0c4fd8d25
+item l_Expr_nestAux___l2r_#_ c301338e5c7f
 item l_Expr_pow___l2r_#_ ce6c49decaf5
 item l_Expr_pow___l2r_#____closed__0 68776bd53e02
 item l_Expr_pow___l2r_#____closed__0_init 9dbfc86b2120
@@ -184,19 +184,19 @@ item l_IO_Error_toString___l2r_#____closed__8 59d3836910a2
 item l_IO_Error_toString___l2r_#____closed__8_init 8f62d1bac94c
 item l_IO_Error_toString___l2r_#____closed__9 9309d8474da0
 item l_IO_Error_toString___l2r_#____closed__9_init 1f8870b1fc62
-item l_IO_print___at___00IO_println___at___00Expr_deriv_spec__0_spec__0___l2r_#_ 7a0d0b4f9fbc
-item l_IO_println___at___00Expr_deriv_spec__0___l2r_#_ 0f34e1e1b7cc
+item l_IO_print___at___00IO_println___at___00Expr_deriv_spec__0_spec__0___l2r_#_ befcfb9ee34f
+item l_IO_println___at___00Expr_deriv_spec__0___l2r_#_ 0e78db46874f
 item l_IO_userError___l2r_#_ e5a4f2aa2427
-item l_List_head_x3f___l2r_#____redArg 321d92740b48
+item l_List_head_x3f___l2r_#____redArg 8ba282021317
 item l_String_Slice_isNat___l2r_#_ 9071100022e8
 item l_String_Slice_isNat___l2r_#____closed__0 b714bad5e76d
 item l_String_Slice_isNat___l2r_#____closed__0_init 5fe2f6ecbfaf
 item l_String_Slice_toNat_x3f___l2r_#_ 2a4ae3a11fb6
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg abcc4cc38aa5
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg 5542782ce4b2
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 5a7032eea6f1
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 062f1febc52c
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
-item l_main___l2r_#_ 121dadd8f819
+item l_main___l2r_#_ 30923b087108
 item l_main___l2r_#____closed__1 78cb48e905b2
 item l_main___l2r_#____closed__1_init e6f06a29a032
 item l_main___l2r_#____closed__2 20253b064d68

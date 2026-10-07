@@ -1,0 +1,2 @@
+# 1000 and 4000 bumps of a 64-pair list: the rebuilt cells reuse the matched ones (natively +0 allocations)
+1000 | 4000 | 4 2000

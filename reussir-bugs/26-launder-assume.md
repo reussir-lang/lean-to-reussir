@@ -5,6 +5,8 @@
 **Kind:** bug (miscompile). **Status:** patched (26-a), applied in
 `./reussir` (`l2r-local` cc8e5aa5).
 
+**Upstream:** pull request #651 (open), with 26-a.
+
 **Verdict: bug.** When a unique cell is reused for a new record, Reussir
 launders the cell's pointer (`llvm.launder.invariant.group`) so that LLVM
 does not take the new record's fields for the old one's, and then tells

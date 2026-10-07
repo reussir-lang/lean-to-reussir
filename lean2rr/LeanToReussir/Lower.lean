@@ -14,6 +14,7 @@ import LeanToReussir.Lower.Borrow
 import LeanToReussir.Lower.Values
 import LeanToReussir.Lower.JoinPoints
 import LeanToReussir.Lower.StateMachine
+import LeanToReussir.Lower.BoxedUses
 import LeanToReussir.Lower.Hooks
 import LeanToReussir.Lower.Code
 import LeanToReussir.Lower.Finish
@@ -38,7 +39,8 @@ The parts, each importing the previous one (Lean needs definitions before
 their uses, so the split follows the original order): `Lower/Ctx` (the
 code-lowering context), `FnValues`, `LazyForce`, `Conv`, `Decls`,
 `Externs`, `LazyGlue`, `Process`, `Promises`, `Identity`, `ExternCall`,
-`Borrow`, `Values`, `JoinPoints`, `StateMachine` (J4), `Hooks` (where optional passes plug in), `Code`
+`Borrow`, `Values`, `JoinPoints`, `StateMachine` (J4), `BoxedUses` (the
+variables that only go back into boxes), `Hooks` (where optional passes plug in), `Code`
 (including `lowerDecl`), `Finish`. `Live` (the liveness of the optional pass
 `conv-liveness`, used by `Externs` and `Finish`) imports `FnValues`.
 -/

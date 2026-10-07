@@ -99,7 +99,8 @@ mutual
     | .call f _ args =>
       -- A box construction makes payload `b<n>` (the box API's `boxValue`).
       let r := match f, args[1]? with
-        | "l2r_any_of", some (.atom n) | "l2r_any_of_fn", some (.atom n) =>
+        | "l2r_any_of", some (.atom n) | "l2r_any_of_fn", some (.atom n)
+        | "l2r_any_of_ptr", some (.atom n) =>
           { r with made := r.made.push (boxName, s!"b{n}") }
         | _, _ => r
       args.foldl (fun r a => exprRefs a r) { r with names := r.names.push f }

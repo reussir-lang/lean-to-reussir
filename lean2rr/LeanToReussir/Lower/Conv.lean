@@ -750,7 +750,7 @@ mutual
     -- `castFallback`), not by `tryCoerce`'s words.
     if let (.named sn, .named dn) := (src, dst) then
       if (← nominalHead sn) != (← nominalHead dn) && !(← isomorphic sn dn) && (← ctorCastable sn dn) then
-        return .call (← structConv sn dn) #[] #[e]
+        return ← convCall sn dn e
     match ← tryCoerce e src dst with
     | some r => return r
     | none =>
@@ -772,7 +772,11 @@ mutual
     -- goes through uniform code and back is not wrapped at all.
     -- A unit boxed is `box(0)`, the word 1 (no allocation per `IO Unit`
     -- result).
-    if dst == RR.Ty.box then return some (← boxOf e src)
+    if dst == RR.Ty.box then
+      -- A box unboxed and boxed again at once is the box itself
+      -- (`boxUnboxed?`).
+      if let some b ← boxUnboxed? e src then return some b
+      return some (← boxOf e src)
     if src == RR.Ty.box then
       match dst with
       | .fn .. => return some (.call (← unboxFnFn dst) #[] #[e])
@@ -848,7 +852,7 @@ mutual
       if let (some _, some _) := (← nominalHead sn, ← nominalHead dn) then
         if ← isomorphic sn dn then
           if ← retypable src dst then return some (.call "l2r_retype" #[src, dst] #[e])
-          return some (.call (← structConv sn dn) #[] #[e])
+          return some (← convCall sn dn e)
       -- The rest is only reachable through `unsafeCast`, between values that
       -- Lean represents by the same word; the conversions follow Lean's
       -- `lean_box`/`lean_unbox`. `Float` and `UInt64` are both a cell with
@@ -977,12 +981,25 @@ mutual
   program performs: a value of one inductive never changes layout. -/
   partial def structConv (sn dn : String) : LowerM String := do
     let fname := s!"l2r_conv_{sn}_{dn}"
-    if (← hasFn fname) ||
-       (← get).convsInProgress.contains fname then return fname
+    if (← hasFn fname) || (← get).deadConvs.contains fname then return fname
+    if (← get).convsInProgress.contains fname then
+      modify fun s => { s with convsCalledEarly := s.convsCalledEarly.insert fname }
+      return fname
     modify fun s => { s with convsInProgress := s.convsInProgress.insert fname }
     structConvBody sn dn fname
     modify fun s => { s with convsInProgress := s.convsInProgress.erase fname }
     return fname
+
+  /-- `e : sn` converted to `dn` by `structConv`'s function; a conversion
+  that can never return a value (`LowerState.deadConvs`) is
+  `l2r_unreachable` in line (`e` still evaluated first), with no function
+  (a generated unboxing leaves its arm out: `deadConvExpr?`). -/
+  partial def convCall (sn dn : String) (e : RR.Expr) : LowerM RR.Expr := do
+    let f ← structConv sn dn
+    if (← get).deadConvs.contains f then
+      let d ← fresh "dc"
+      return .block ⟨#[(d, some (.named sn), e)], .call "l2r_unreachable" #[.named dn] #[]⟩
+    return .call f #[] #[e]
 
   /-- The body of `structConv`'s function `fname`. -/
   partial def structConvBody (sn dn fname : String) : LowerM Unit := do
@@ -1001,9 +1018,27 @@ mutual
     let body := match structBody with
       | some b => b
       | none => .ofExpr (.mtch (.var "x") arms)
+    -- No constructor converts (each value is `l2r_unreachable`): no
+    -- function, unless one being generated calls it already; then its body
+    -- is the panic alone.
+    let unreachable (b : RR.Block) : Bool := b.result matches .call "l2r_unreachable" _ #[]
+    let dead := match structBody with
+      | some b => unreachable b
+      | none => arms.all (unreachable ·.body)
+    if dead then
+      modify fun s => { s with deadConvs := s.deadConvs.insert fname }
+      if (← get).convsCalledEarly.contains fname then
+        modify fun s => { s with fns := s.fns.push (.fn fname #[("x", .named sn)] (.named dn)
+          (.ofExpr (.call "l2r_unreachable" #[.named dn] #[]))) }
+      return
     let body ← countConversion body
     modify fun s => { s with fns := s.fns.push (.fn fname #[("x", .named sn)] (.named dn) body) }
 end
+
+/-- Whether `e` is `convCall`'s use of a conversion that can never return
+a value (`l2r_unreachable` after evaluating the converted value). -/
+def deadConvExpr? (e : RR.Expr) : Bool :=
+  e matches .block ⟨#[(_, _, _)], .call "l2r_unreachable" _ #[]⟩
 
 /-- The field type of `[value]` struct `info` (natively the struct is its
 field). -/

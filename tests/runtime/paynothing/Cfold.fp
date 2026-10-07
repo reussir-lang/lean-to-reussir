@@ -1,14 +1,14 @@
 # Pay-nothing baseline of Cfold (tests/classic/Cfold.lean), arguments '15'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
 allocs 91905
-bytes 2000991
-native-allocs 102940
-native-bytes 2242782
+bytes 2001080
+native-allocs 102939
+native-bytes 2242758
 items 175
 functions 147
 conversion-fns 0
 conversion-sites 0
-box-sites 54
+box-sites 51
 box-variants 5
 item L2RFn_F3nu64F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» f96e8eb23184
 item L2RFn_F4aRVec1_2nu8F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9c0c234ead50
@@ -51,11 +51,11 @@ item l2r_err_string 1887e0c9d8df
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 a49458230bed
+item l2r_init_chunk_0 89d055e2e451
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 c690b1a252f6
-item l2r_main_body c0ef827ac5fa
+item l2r_main_body c74b85ea8507
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
@@ -158,21 +158,21 @@ item l_IO_Error_toString___l2r_#____closed__8 59d3836910a2
 item l_IO_Error_toString___l2r_#____closed__8_init 8f62d1bac94c
 item l_IO_Error_toString___l2r_#____closed__9 9309d8474da0
 item l_IO_Error_toString___l2r_#____closed__9_init 1f8870b1fc62
-item l_IO_print___at___00IO_println___at___00main_spec__0_spec__0___l2r_#_ 20828f8f7756
-item l_IO_println___at___00main_spec__0___l2r_#_ 52c00e8f6fa0
+item l_IO_print___at___00IO_println___at___00main_spec__0_spec__0___l2r_#_ f09422cca6b5
+item l_IO_println___at___00main_spec__0___l2r_#_ 1a79d53029b5
 item l_IO_userError___l2r_#_ e5a4f2aa2427
-item l_List_head_x3f___l2r_#____redArg 321d92740b48
+item l_List_head_x3f___l2r_#____redArg 8ba282021317
 item l_String_Slice_isNat___l2r_#_ 9071100022e8
 item l_String_Slice_isNat___l2r_#____closed__0 b714bad5e76d
 item l_String_Slice_isNat___l2r_#____closed__0_init 5fe2f6ecbfaf
 item l_String_Slice_toNat_x3f___l2r_#_ 2a4ae3a11fb6
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg abcc4cc38aa5
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg 5542782ce4b2
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 5a7032eea6f1
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 062f1febc52c
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
-item l_main___l2r_#_ caacb896ece9
-item l_main___l2r_#____closed__0 ed5bd4679552
-item l_main___l2r_#____closed__0_init e2a25da0e995
+item l_main___l2r_#_ 3f53b70cfa35
+item l_main___l2r_#____closed__0 60365f4860fa
+item l_main___l2r_#____closed__0_init 408b02dafb7c
 item l_mkPanicMessageWithDecl___l2r_#_ 86cf874e4ec8
 item l_mkPanicMessageWithDecl___l2r_#____closed__0 94f337210897
 item l_mkPanicMessageWithDecl___l2r_#____closed__0_init 6f02193c1d5f

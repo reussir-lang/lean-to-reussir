@@ -186,8 +186,10 @@ def readExternSyms : List String := [
 /-- The call `mk args` of the extern `sym`; for a read extern
 (`readExternSyms`), each argument that is a variable passed to a parameter
 of type `Nat` is bound by a `let` first: `let k = i; read(a, k)`. That is
-the index, and also `get!`'s default at `Array Nat` (a `Nat` too; binding
-it changes nothing).
+the index. A parameter declared at a type variable (`get!`'s default, at
+`Array Nat` a `Nat`) is not: its argument is passed in its storage (`Box`,
+the boxed `Nat`, or the box itself where the boxing was folded away,
+`boxUnboxed?`), not as a `Nat`; `atVar` marks those parameters.
 
 Reussir increments a variable that is used again later at the place where it
 is used, the arguments of a call from left to right. As a direct argument, an
@@ -199,11 +201,11 @@ stores (lean-zip's LZ77 loop). Bound first, the index is incremented at the
 `let`, and the container's increment is the last store before the read.
 The arguments are those of the parameters (the extern's parameter types)
 that `mask` passes. -/
-def bindReadIndex (sym : String) (mask : Array Bool) (params : Array Expr) (args : Array RR.Expr)
-    (mk : Array RR.Expr → RR.Expr) : LowerM RR.Expr := do
+def bindReadIndex (sym : String) (mask : Array Bool) (atVar : Array Bool) (params : Array Expr)
+    (args : Array RR.Expr) (mk : Array RR.Expr → RR.Expr) : LowerM RR.Expr := do
   unless readExternSyms.contains sym do return mk args
-  let isNat := (mask.zip params).filterMap fun (m, p) =>
-    if m then some (p.consumeMData.isConstOf ``Nat) else none
+  let isNat := (mask.zip params).zipIdx.filterMap fun ((m, p), i) =>
+    if m then some (!(atVar[i]?.getD false) && p.consumeMData.isConstOf ``Nat) else none
   let mut lets := #[]
   let mut args' := #[]
   for (a, i) in args.zipIdx do
@@ -341,7 +343,8 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
   unless (← read).preludeFns.contains sym do
     unless (← get).missingExterns.any (·.1 == sym) do
       modify fun s => { s with missingExterns := s.missingExterns.push (sym, orig) }
-  let call ← bindReadIndex sym mask params passed fun passed => RR.Expr.call sym storage passed
+  let atVar := params.mapIdx fun i _ => (uses[i]?.join).isSome
+  let call ← bindReadIndex sym mask atVar params passed fun passed => RR.Expr.call sym storage passed
   match storageOf retUse with
   | some st =>
     let rt ← lowerType ret

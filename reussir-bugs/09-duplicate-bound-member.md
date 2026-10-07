@@ -5,6 +5,9 @@
 **Kind:** bug. **Status:** patched (09-a, applied in `./reussir` (`l2r-local` cc8e5aa5), which also fixes
 [bug 14](14-member-consumed-before-release.md)).
 
+**Upstream:** pull request #653 (open), with 09-a (which also fixes
+entry 14).
+
 When a match arm binds a constructor's fields, Reussir retains each bound
 field and later releases the matched cell. `RcDispatchFusion` merges this
 into one "destructuring" release: if the cell dies, each field's reference

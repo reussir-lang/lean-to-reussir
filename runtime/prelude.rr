@@ -134,6 +134,14 @@ fn l2r_any_as_imm(a : LAny) -> u64 {
 #[ffi(import)]
 fn l2r_any_mismatch(w : u64, num : u64) -> u64 [{ leanrt::any::mismatch(w, num) }];
 
+// A box's word read at a type held as an immediate (see
+// `l2r_view_take_word`): the immediate's value; any other word is a
+// mismatch.
+fn l2r_any_word_imm(w : u64) -> u64 { if (w & 1) == 1 { w >> 1 } else { l2r_any_mismatch(w, 0) } }
+fn l2r_any_word_as_bool(w : u64) -> bool { l2r_any_word_imm(w) != 0 }
+fn l2r_any_word_as_u8(w : u64) -> u8 { l2r_any_word_imm(w) as u8 }
+fn l2r_any_word_as_u16(w : u64) -> u16 { l2r_any_word_imm(w) as u16 }
+fn l2r_any_word_as_u32(w : u64) -> u32 { l2r_any_word_imm(w) as u32 }
 fn l2r_any_of_bool(b : bool) -> LAny { if b { l2r_any_of_raw(3) } else { l2r_any_of_raw(1) } }
 fn l2r_any_as_bool(a : LAny) -> bool { l2r_any_as_imm(a) != 0 }
 fn l2r_any_of_u8(x : u8) -> LAny { l2r_any_imm(x as u64) }
@@ -172,6 +180,19 @@ fn l2r_any_of<T>(x : T, num : u64) -> LAny [{ leanrt::any::of(x, num) }];
 // becomes the immediate `(num << 32) | index`, which keeps its type.
 #[ffi(import)]
 fn l2r_any_of_fn<T>(x : T, num : u64) -> LAny [{ leanrt::any::of_typed(x, num) }];
+// A counted value whose handle is always a pointer, boxed as payload `num`:
+// a Reussir record, an enum without nullary variants, an opaque handle
+// (lean2rr's `boxValue` picks it). As `l2r_any_of`, without the tests for
+// a nullary variant's immediate (the `tbi` top byte, the `immortal`
+// dummy's count) that `leanrt::any::of` makes for a Reussir type. The
+// handle's word is read as a pointer and exposed, as `leanrt::any` does.
+#[ffi(import)]
+fn l2r_any_of_ptr<T>(x : T, num : u64) -> LAny [{ {
+    const { assert!(std::mem::size_of::<[:T:]>() == 8) };
+    let p: *mut u8 = unsafe { std::mem::transmute_copy(&x) };
+    std::mem::forget(x);
+    unsafe { leanrt::any::of_ptr(p.expose_provenance() as u64, num) }
+} }];
 // The payload of a box at payload `num`. Lean's `box(0)` (word 1) read at
 // one of leanrt's kinds is its zero (`0`, `0.0`, `""`, `#[]`), as the `b0`
 // arm of the old enum `L2RBox` gave; a `Nat` or `Int` also decodes its own
@@ -1927,6 +1948,100 @@ fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
 }
 
 fn lean_array_get_borrowed<T>(dflt : T, v : RVec<T>, i : Nat) -> T { lean_array_get(dflt, v, i) }
+
+// Reads of an element of an array of boxes at a type that a box holds as
+// an immediate, or as an immediate or one of leanrt's own cells (lean2rr's
+// `boxWordRead?`): `T` is `u64` (the box's word, for `UInt8/16/32`,
+// `Char`, `Bool`, an enumeration: `l2r_any_word_as_<k>` reads it, any
+// pointer is a mismatch), `Nat` or `Int`. An immediate is read without a
+// copy of the box: one test of bit 0, no reference counting; a big
+// `Nat`/`Int` is copied as `l2r_any_as` copies it. The view ends as in
+// `l2r_view_take` (the block freed when it held the last reference; a
+// word that is not an immediate is then only printed by the mismatch).
+#[ffi(import)]
+fn l2r_view_take_as<T>(p : u64, i : u64) -> T [{ {
+    trait Take: Sized { fn take(a: &leanrt::any::LAny) -> Self; }
+    impl Take for u64 {
+        #[inline(always)]
+        fn take(a: &leanrt::any::LAny) -> u64 { a.word() }
+    }
+    // A big number: copied out of line (the texture stays small enough
+    // for LLVM to inline at a cold call site).
+    #[cold]
+    #[inline(never)]
+    fn big<B>(a: &leanrt::any::LAny, num: u64) -> B { leanrt::any::as_(a.clone(), num) }
+    impl Take for leanrt::nat::LNat {
+        #[inline(always)]
+        fn take(a: &leanrt::any::LAny) -> Self {
+            let w = a.word();
+            if w & 1 == 1 { unsafe { leanrt::nat::LNat::from_raw(w) } } else { big(a, leanrt::any::NUM_NAT) }
+        }
+    }
+    impl Take for leanrt::nat::LInt {
+        #[inline(always)]
+        fn take(a: &leanrt::any::LAny) -> Self {
+            let w = a.word();
+            if w & 1 == 1 { unsafe { leanrt::nat::LInt::from_raw(w) } } else { big(a, leanrt::any::NUM_INT) }
+        }
+    }
+    let o = (p & !1) as *mut leanrt::drop::Hdr;
+    let r = <[:T:] as Take>::take(unsafe { &*leanrt::drop::elems::<leanrt::any::LAny>(o).add(i as usize) });
+    if (p & 1) == 0 { leanrt::drop::free_vec::<leanrt::any::LAny>(o); }
+    r
+} }];
+
+// A box taken at `T` as `l2r_view_take_as` reads it: `get!`'s default.
+#[ffi(import)]
+fn l2r_any_take_as<T>(a : LAny) -> T [{ {
+    trait Take: Sized { fn take(a: leanrt::any::LAny) -> Self; }
+    impl Take for u64 {
+        #[inline(always)]
+        fn take(a: leanrt::any::LAny) -> u64 { a.into_raw() }
+    }
+    impl Take for leanrt::nat::LNat {
+        #[inline(always)]
+        fn take(a: leanrt::any::LAny) -> Self { leanrt::any::as_(a, leanrt::any::NUM_NAT) }
+    }
+    impl Take for leanrt::nat::LInt {
+        #[inline(always)]
+        fn take(a: leanrt::any::LAny) -> Self { leanrt::any::as_(a, leanrt::any::NUM_INT) }
+    }
+    <[:T:] as Take>::take(a)
+} }];
+
+fn l2r_array_get_as<T>(v : RVec<LAny>, i : u64) -> T {
+    let p = l2r_array_give<LAny>(v);
+    let n = l2r_view_size(p);
+    if i < n { l2r_view_take_as<T>(p, i) } else { l2r_array_index_bug<T>(i, n) }
+}
+
+fn l2r_array_get_word_as<T>(v : RVec<LAny>, x : u64) -> T {
+    let p = l2r_array_give<LAny>(v);
+    let n = l2r_view_size(p);
+    if l2r_word_index_ok(x, n) { l2r_view_take_as<T>(p, x >> 1) } else { l2r_index_fail<T>(x, n) }
+}
+
+fn lean_array_fget_as<T>(v : RVec<LAny>, i : Nat) -> T { l2r_array_get_word_as<T>(v, l2r_nat_raw(i)) }
+fn lean_array_fget_borrowed_as<T>(v : RVec<LAny>, i : Nat) -> T { l2r_array_get_word_as<T>(v, l2r_nat_raw(i)) }
+fn lean_array_uget_as<T>(v : RVec<LAny>, i : u64) -> T { l2r_array_get_as<T>(v, i) }
+fn lean_array_uget_borrowed_as<T>(v : RVec<LAny>, i : u64) -> T { l2r_array_get_as<T>(v, i) }
+
+// `get!` (as `lean_array_get`): out of bounds, the default taken at `T`.
+fn lean_array_get_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T {
+    let x = l2r_nat_raw(i);
+    let p = l2r_array_give<LAny>(v);
+    if l2r_word_index_ok(x, l2r_view_size(p)) {
+        let r = l2r_view_take_as<T>(p, x >> 1);
+        let d = l2r_consume<LAny>(dflt);
+        r
+    } else {
+        let e = l2r_view_end<LAny>(p);
+        let d = l2r_nat_drop_raw(x);
+        let ignored = l2r_panic_code(0);
+        l2r_any_take_as<T>(dflt)
+    }
+}
+fn lean_array_get_borrowed_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T { lean_array_get_as<T>(dflt, v, i) }
 
 fn lean_array_fset<T>(v : RVec<T>, i : Nat, x : T) -> RVec<T> { l2r_array_set(v, l2r_index_of_nat(i), x) }
 fn lean_array_uset<T>(v : RVec<T>, i : u64, x : T) -> RVec<T> { l2r_array_set(v, i, x) }

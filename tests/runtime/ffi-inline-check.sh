@@ -15,7 +15,8 @@
 # (tests/runtime/RtFloatLoopStack.lean).
 # For RtReadsDeep (array reads deep in branches, call sites that LLVM judges
 # cold), it also fails on any call left of an array read's texture or
-# function (`l2r_array_give`, `l2r_view_take`, `lean_byte_array_fget`, ...;
+# function (`l2r_array_give`, `l2r_view_take`, `lean_byte_array_fget`, the
+# reads at a type `lean_array_fget_as`, `l2r_view_take_as`, ...;
 # docs/implementation/ownership.md, "Reads give their reference up first,
 # for a view"): the read textures must stay under LLVM's inlining threshold
 # for a cold call site (Reussir issue 36), else every such read is a call.
@@ -49,9 +50,13 @@ deep_calls() {
 import re, sys
 if sys.argv[2] == "reads":
     names = {"l2r_array_give", "l2r_view_size", "l2r_view_take", "l2r_view_end",
-             "l2r_array_get", "l2r_array_get_word", "l2r_consume"}
+             "l2r_array_get", "l2r_array_get_word", "l2r_consume",
+             "l2r_view_take_as", "l2r_any_take_as", "l2r_array_get_as", "l2r_array_get_word_as"}
     names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array")
               for op in ("fget", "fget_borrowed", "uget", "uget_borrowed", "get", "get_borrowed")}
+    # The reads of an element at a type (an immediate without a copy of its
+    # box: lean2rr's boxWordRead?).
+    names |= {f"lean_array_{op}_as" for op in ("fget", "fget_borrowed", "uget", "uget_borrowed", "get", "get_borrowed")}
 else:
     names = {"l2r_array_set"}
     names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array")

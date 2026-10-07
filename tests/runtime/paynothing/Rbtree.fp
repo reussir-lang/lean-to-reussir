@@ -1,14 +1,14 @@
 # Pay-nothing baseline of Rbtree (tests/classic/Rbtree.lean), arguments '100000'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
 allocs 100027
-bytes 4005765
+bytes 4005824
 native-allocs 2490228
 native-bytes 99519442
 items 160
 functions 132
 conversion-fns 0
 conversion-sites 0
-box-sites 49
+box-sites 47
 box-variants 3
 item L2RFn_F3nNat3nNat 85013f2fb298
 item L2RFn_F3nNatF4nboolF3nNat3nNat eadd54893e45
@@ -54,7 +54,7 @@ item l2r_get_std_2 3818079a4a43
 item l2r_init_body c5e90e6a0b70
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
-item l2r_main_body b59cb3891588
+item l2r_main_body 7ebfba83695c
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
@@ -147,10 +147,10 @@ item l_IO_Error_toString___l2r_#____closed__8 59d3836910a2
 item l_IO_Error_toString___l2r_#____closed__8_init 8f62d1bac94c
 item l_IO_Error_toString___l2r_#____closed__9 9309d8474da0
 item l_IO_Error_toString___l2r_#____closed__9_init 1f8870b1fc62
-item l_IO_print___at___00IO_println___at___00main_spec__0_spec__0___l2r_#_ 20828f8f7756
-item l_IO_println___at___00main_spec__0___l2r_#_ 52c00e8f6fa0
+item l_IO_print___at___00IO_println___at___00main_spec__0_spec__0___l2r_#_ f09422cca6b5
+item l_IO_println___at___00main_spec__0___l2r_#_ 1a79d53029b5
 item l_IO_userError___l2r_#_ e5a4f2aa2427
-item l_List_head_x3f___l2r_#____redArg 321d92740b48
+item l_List_head_x3f___l2r_#____redArg 8ba282021317
 item l_String_Slice_isNat___l2r_#_ 9071100022e8
 item l_String_Slice_isNat___l2r_#____closed__0 b714bad5e76d
 item l_String_Slice_isNat___l2r_#____closed__0_init 5fe2f6ecbfaf
@@ -162,7 +162,7 @@ item l_fold___l2r_#_ 845f5050f04b
 item l_ins___l2r_#_ e4edb70926a8
 item l_insert___l2r_#_ 030ce5914839
 item l_isRed___l2r_#_ 9318f7d069f5
-item l_main___l2r_#_ b2e70ae18db8
+item l_main___l2r_#_ 8c320928688e
 item l_main___l2r_#____closed__0 63dbe229bad0
 item l_main___l2r_#____closed__0_init 4cc0e1f4b459
 item l_main___l2r_#____lam__0 3ba41cac9847

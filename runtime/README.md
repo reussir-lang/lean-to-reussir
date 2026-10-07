@@ -1141,6 +1141,17 @@ lean2rr's dev branch (the tests pass with it).
     "old.b old.a new.b new.a"). `l2r_rc_set_ref` now also takes the
     reference and releases it after the old value
     (`l2r_release_value_then`); test `RtRefSetLastUse`.
+34. A field of a parameter's type that an alternative uses at its own
+    type and also puts back into a box is unboxed once and boxed again
+    (lean2rr's `bindField`). Natively the box gets the field's object
+    unchanged. The two differ only for a word read at another type
+    through `unsafeCast`: a `List Nat` read as `List UInt8` gives `300` as
+    the byte 44, and the new cell holds the byte, so the list read back as
+    `List Nat` has 44 (natively 300). A field whose uses all go back into
+    boxes keeps its box (`boxedOnlyVars`, test `RtBoxPassOnCast`). Giving
+    the box to the boxed uses of a field with other uses too would leave
+    the unboxed value dead there, which Reussir's token reuse takes as a
+    donor (Reussir issue 39). Test `RtCastMixedRebox`, expected to fail.
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store enum-like values directly; and `mi_free` takes mimalloc's

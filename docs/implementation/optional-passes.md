@@ -20,7 +20,7 @@ and passes").
 | `value-structs` | a structure with one relevant field is a `[value]` struct | not when the field's type is being translated (no type contains itself by value) | [records](representations/records.md#one-field-structures-are-value-structs) |
 | `placeholder-cache` | placeholders that would allocate built once, in a once-cell | only heap placeholders; a placeholder is never inspected | [placeholders](representations/placeholders.md#placeholders-that-allocate-are-built-once) |
 | `boxed-consts` | a constant whose boxing allocates boxed once, in a once-cell (native Lean's `_boxed_const`) | only a variable bound to a declaration without parameters that runs once (cached) or cannot trace or panic (`cheap-consts`) and whose value is not a literal that boxes as an immediate (`constIsImmediate`), or to a `UInt64` literal from 2^63, at a type whose boxing can allocate (`boxAllocates`), outside the body of a declaration without parameters (`inConstBody`: it runs once); a constant is pure, so one box does as well as a new one | below |
-| `float-lits` | float literals folded to their bits at compile time | literal arguments only (the functions are pure and total); work bound: exponent ≤ 2000, mantissa (or `Float.ofNat`'s argument) at most 4096 bits | below |
+| `float-lits` | float literals folded to their bits at compile time | literal arguments only (the functions are pure and total): a `let` of a literal, a `Bool` discriminant inside an alternative that fixes it, a join point parameter to which every jump passes the same literal; work bound: exponent ≤ 2000, mantissa (or `Float.ofNat`'s argument) at most 4096 bits | below |
 | `cheap-consts` | constants of small literals recomputed at each use | `isCheapConst`: unboxed types only, every `Nat`/`Int` small (`Nat` literals and `Nat.succ` < 2^63, `Int.ofNat`/`Int.negSucc` of `int32` values), other constructors, total scalar conversions, other cheap constants; no strings | below |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code | none needed: the same strings (unary calls only) | [nat-int](representations/nat-int.md#natrepr-of-0127-shares-one-string-per-number) |
 | `jp-sink` | join points moved to the smallest code containing their jumps | moves only, never duplicates; binders are unique | [join points](control-flow/join-points.md#join-points-are-sunk-before-the-choice-jp-sink) |
@@ -31,6 +31,43 @@ and passes").
 | `sink-proj` | structure projections sunk into the branches that use them | the projection is unused later in the block and in the condition, and no binder clashes; applies only where some branches use it while another keeps the structure whole | [cases](control-flow/cases.md#structure-projections-move-into-the-branches-that-use-them-sink-proj) |
 | `fresh-rebuild` | an arm returning a fresh matched value returns it rebuilt | the value is freshly built (whole-program analysis); the arm binds every field and only returns it | [cases](control-flow/cases.md#fresh-values-returned-whole-are-rebuilt-fresh-rebuild) |
 | `conv-liveness` | unboxing, application and conversion helpers generated only for what live code reaches; unreachable functions dropped | none needed for soundness: an arm left out matches a variant that no live code builds, so no value of it exists at run time; every identifier of raw text, of the prelude and of atoms is a root, every arm of other matches counts, and a variant that text names counts as built | [liveness](conversions/liveness.md) |
+| `merge-fns` | generated functions equal up to their own and local names merged: a copy calls the first, calls of a copy call the first | the canonical texts are equal (the same code once names are renamed in binding order, inside atoms too); a copy keeps its name and calls the function its first ends at, never itself; nothing is removed; a function called from one place only stays (LLVM inlines it there), except startup code (`_init`, `l2r_persist_`) | below |
+
+### Functions equal up to names are merged (`merge-fns`)
+
+- **What:** After the other passes over the generated functions, each
+  function gets a canonical text: its own name `SELF`, its local names
+  (parameters, `let`s, match binders, lambda parameters, and those names in
+  atoms) renamed `v0`, `v1`, ... in binding order. Of the functions with one
+  text, the first stays; each other one keeps its name and signature and
+  its body becomes a call of the first (`fn f(a, b) -> T { g(a, b) }`), and
+  every call of it in a function body calls the first. Functions whose
+  calls changed are looked at again, so callers merge in the next round
+  (`List.reverse` at each type once `List.reverseAux` is), up to 8 rounds.
+  A function that is a first already but changes later keeps the
+  functions merged into it: its new body computes what the old one did.
+  A copy calls the function its first ends at, never itself (two functions
+  could otherwise call each other). A function that one place calls
+  (besides its own recursive calls) takes no part: LLVM inlines such a
+  function into its caller, and merged it would be one function that
+  several places call, which LLVM does not inline (mergesort's six
+  `splitHalf.go` instances, each inlined into its `mergeSort`, cost
+  +2.3 % instructions merged); startup code merges anyway: a constant's
+  computation (`_init`) and the persist walks (`l2r_persist_`).
+- **Why:** With one layout per inductive, instances of a definition at
+  different types are often the same code: `List.reverseAux` at `String`,
+  `Nat` and a structure (since the heads pass their boxes on,
+  [box-and-uniform.md](representations/box-and-uniform.md#a-value-that-only-goes-back-into-boxes-keeps-its-box)),
+  `List.lengthTRAux`, the persist walks of function types that differ
+  only in phantom domains. CslInitOnly: `.rr` 32.0 -> 30.7 MB (-4.1 %;
+  -6.6 % when functions called from one place merge too), for about 1 %
+  more translation time (the functions are bucketed by a hash of their
+  canonical form, `canonHash`, which hashes types as rendered, `Ty.rt`;
+  texts are built only within a bucket).
+- **Where:** `Opt/MergeFns.lean`: `mergeFns` (`keep`), `countCalls`,
+  `canonHash`, `canonText`, `renameCalls`; hook `PassConfig.rrPasses`
+  (last). Test `RtMergeFns`.
+- **Remove only if:** the pass is off (the copies stay whole).
 
 ### Constants are boxed once (`boxed-consts`)
 
@@ -39,7 +76,7 @@ and passes").
   (`boxAllocates`: a `Float`, a `UInt64` or `i64` word, a `[value]`
   struct of one, a value in an `ElemBox`; not an immediate: `UInt8`…
   `UInt32`, `Char`, `Bool`, `Float32`, an enumeration, Lean's `Int8`…
-  `Int32`, which are `[value]` structs of `u8`…`u32`), the box is built
+  `Int32`, which Lean erases to `UInt8`…`UInt32`), the box is built
   once and kept in a once-cell, the accessor `l2r_boxed_N` (`boxedConst`;
   one per constant and type, `cafAccessor` without the walk for tasks). A
   constant is a declaration of the program without parameters (a
@@ -92,13 +129,53 @@ and passes").
   same Lean functions, and replaced by `Float.ofBits` of the bit pattern, a
   total conversion of a literal. Calls with an exponent above 2000 or a
   mantissa (or `Float.ofNat` argument) of more than 4096 bits are left to
-  run.
+  run. An argument is a literal when its variable is one of these:
+  - bound by a `let` to a literal (`10`, `Bool.true`);
+  - the discriminant of a `cases` on `Bool`, inside an alternative that
+    fixes its value: `Bool.true`, `Bool.false`, or a `.default`
+    alternative when the other alternatives name exactly one constructor
+    (`boolOfAlt?`; Lean's simp leaves no such `.default` today, because
+    two equal alternatives remove the `cases`);
+  - a parameter of a join point, when every jump to the join point passes
+    the same literal at that parameter (`JumpLits`).
+
+  Example. In `match b with | true => x * 2.5 | false => x * 3e2`, the
+  literal `2.5` is `Float.ofScientific 25 true 1`. Inside the alternative
+  `true` of `cases b`, Lean's simp replaces the constructor `Bool.true` by
+  `b` (`Simp.simpCtorDiscr?`: a constructor equal to a discriminant there
+  becomes the discriminant). So the mono code has
+  `Float.ofScientific 25 b 1`. The pass knows that `b` is `true` in this
+  alternative, and folds the call. In the alternative `false`, `3e2`
+  (`Float.ofScientific 3 false 2`) becomes `Float.ofScientific 3 b 2` in
+  the same way. If `Simp.simpJpCases?` then moves such an alternative into
+  a join point of its own, `b` becomes that join point's parameter. In
+  `if x && y then a + 0.5 else a * 2e3`, the `else` code is a join point.
+  One jump passes `x` from the alternative `false` of `cases x`, the other
+  passes `y` from the alternative `false` of `cases y`. Both are `false`,
+  so the parameter is `false`, and `2e3` folds.
 - **Why:** These are Lean functions, not C: the slow path goes through
   `Float.Model` with bignum arithmetic. lean2rr is compiled from the same
   `Init` code, so the bits are Lean's, subnormals and rounding included
-  (adv3 CN3-01, d3e80aa; test `RtFloatLits`).
-- **Where:** `Opt/FloatLits.lean`: `foldFloatLits`, `floatLitBits?`,
-  `floatLitMaxExp`, `floatLitMaxBits`; hook `PassConfig.monoPasses`.
+  (adv3 CN3-01, d3e80aa; test `RtFloatLits`). After simp's replacement, a
+  literal is no longer a closed term, so it is computed at each iteration
+  of a loop (natively too), and a slow-path literal allocates there. The
+  discriminant and join point rules fold these calls (test
+  `RtFloatLitDiscr`; its `.alloc` file checks that lean2rr's allocations
+  do not grow with N). They are sound: an alternative runs only when the discriminant
+  has that value. A join point's body runs only after a jump to it, and
+  every jump is in its continuation: a join point is not recursive, and a
+  jump does not leave its function (LCNF's checker).
+  Simp replaces only constructor applications. The `Nat` arguments of
+  float literals are raw literals (`.lit`), not constructors, and mono code
+  has no `cases` on `Nat`. So simp hides no `Nat` literal argument, except
+  an explicit `Nat.zero` inside the alternative `Nat.zero` of a base-phase
+  `cases` (the call then runs, with the same result).
+  Not folded: a flag that is a parameter of a function, for example in a
+  specialization of `List.map` for a closure that captured `b`
+  (`if b then xs.map (· + 0.5) else …`). That call runs, as natively.
+- **Where:** `Opt/FloatLits.lean`: `foldFloatLitsCore`, `boolOfAlt?`,
+  `JumpLits`, `floatLitBits?`, `floatLitMaxExp`, `floatLitMaxBits`; hook
+  `PassConfig.monoPasses`.
 - **Remove only if:** the pass is off (the program computes the same bits
   at run time).
 

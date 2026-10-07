@@ -49,7 +49,8 @@ form:
 - replaces a payload number of `Box` by the label of its type (the program's
   release of each payload type, the item `fn l2r_any_rel_17(x : T) -> unit`,
   gives each number's type): where a box is made or taken apart
-  (`l2r_any_of<T>(e, 17)`, `l2r_any_of_fn`, `l2r_any_as`, `l2r_any_raw_as`),
+  (`l2r_any_of<T>(e, 17)`, `l2r_any_of_fn`, `l2r_any_of_ptr`, `l2r_any_as`,
+  `l2r_any_raw_as`),
   where an unboxing compares a word's number with it (`let bm12 : u64 =
   17;`), in a `match` arm on a number (`17 => `) in an item that reads a
   box's number (`l2r_any_raw_num`), in the names of the releases and their
@@ -69,7 +70,7 @@ values of unknown type has few, all from the runtime's own startup code):
   `l2r_vconv_*`, `l2r_fconv_*`, `l2r_lazyconv_*`, `l2r_unbox_*`);
 - `conversion-sites`: the uses of those helpers in the other items;
 - `box-sites`: values put into a `Box` (a call of `l2r_any_of`,
-  `l2r_any_of_fn`, `l2r_any_of_<scalar>` or `l2r_any_imm`) in the items
+  `l2r_any_of_fn`, `l2r_any_of_ptr`, `l2r_any_of_<scalar>` or `l2r_any_imm`) in the items
   other than conversion helpers;
 - `box-variants`: the program's pointer payload types of `Box` (the items
   `l2r_any_rel_N`, one per type);
@@ -109,8 +110,8 @@ KEPT = re.compile(r"\x00(\d+)\x00")
 REL_DEF = re.compile(r"^fn l2r_any_rel_(\d+)\(x : (.*)\) -> unit")
 REL_TOK = re.compile(r"\bl2r_any_rel_(\d+)(_c)?\b")
 REL_ARG = re.compile(r"(leanrt::any::Rel\()(\d+)(,)")
-BOX_SITE = re.compile(r"\bl2r_any_(?:of|of_fn|of_u8|of_u16|of_u32|of_bool|of_f32|of_u64|of_f64|imm)\s*[<(]")
-PAYLOAD_CALL = re.compile(r"\b(l2r_any_(?:of|of_fn|as|raw_as)<)")
+BOX_SITE = re.compile(r"\bl2r_any_(?:of|of_fn|of_ptr|of_u8|of_u16|of_u32|of_bool|of_f32|of_u64|of_f64|imm)\s*[<(]")
+PAYLOAD_CALL = re.compile(r"\b(l2r_any_(?:of|of_fn|of_ptr|as|raw_as)<)")
 NUM_ARG = re.compile(r"(,\s*)(\d+)(\))")
 NUM_LET = re.compile(r"(let bm\d+ : u64 = )(\d+)(;)")
 NUM_ARM = re.compile(r"^(\s+)(\d+)( => )", re.M)

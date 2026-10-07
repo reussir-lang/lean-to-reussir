@@ -17,6 +17,7 @@ import LeanToReussir.Opt.PlaceholderCache
 import LeanToReussir.Opt.BoxedConsts
 import LeanToReussir.Opt.FreshRebuild
 import LeanToReussir.Opt.ConvLiveness
+import LeanToReussir.Opt.MergeFns
 
 /-!
 # The pass registry
@@ -86,7 +87,8 @@ def optimizations : Array OptPass := #[
   ⟨"nullary-scrutinee", true, "in the arm of a constructor without fields, the matched value rebuilt instead of kept", NullaryScrutinee.install⟩,
   ⟨"sink-proj", true, "field projections sunk into the branches that use them (Reussir token-reuse workaround)", SinkProj.install⟩,
   ⟨"fresh-rebuild", true, "an alternative that only returns a freshly built matched value returns it rebuilt from its fields (Reussir then reuses the cell in every alternative)", FreshRebuild.install⟩,
-  ⟨"conv-liveness", true, "unboxing, application and conversion helpers generated only for what live code reaches (arms only for the Box variants and function values it builds), and functions unreachable from the entry point and the runtime's entries dropped", ConvLiveness.install⟩]
+  ⟨"conv-liveness", true, "unboxing, application and conversion helpers generated only for what live code reaches (arms only for the Box variants and function values it builds), and functions unreachable from the entry point and the runtime's entries dropped", ConvLiveness.install⟩,
+  ⟨"merge-fns", true, "generated functions equal up to their own and local names merged: each copy calls the first, and calls of a copy call the first (List.reverseAux at every type); a function called from one place stays (LLVM inlines it), except startup code", MergeFns.install⟩]
 
 /-- Parts of the translation that look like optimizations but are not
 optional. -/

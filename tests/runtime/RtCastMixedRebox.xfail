@@ -1,0 +1,1 @@
+A word read at another type through `unsafeCast` and used at that type is truncated where lean2rr boxes it again (runtime/README.md, Requests for lean2rr 34): the copied list reads back 44 for 300, natively 300.

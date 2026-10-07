@@ -94,6 +94,11 @@ parameters the join point takes: rule 4 removes the erased ones). -/
   body): a field parameter that is not used is not converted to its own
   type (`bindField`). -/
   used : Std.HashSet FVarId := {}
+  /-- The variables of the declaration being lowered whose every use puts
+  the value into a box (`boxedOnlyVars`): a field parameter among them
+  keeps the field's `Box` (`bindField`), and a `let` among them is bound as
+  a `Box` (`lowerCode`). -/
+  boxedOnly : Std.HashSet FVarId := {}
   /-- The field parameters that `bindField` converted to their own types,
   with the name of the conversion's `let`: a binding drops such a `let`
   when its code does not use it (`dropUnusedConvs`), and `lazy-fields`'

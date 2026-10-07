@@ -63,12 +63,14 @@ def lowerTaken (ctx : CodeCtx) (args : Array (Arg .pure)) (params : Array RR.Ty)
     if keep[i]?.getD true then out := out.push (← lowerArg ctx args[i]! params[i]!)
   return out
 
-/-- Lower a constant application with Lean's arity rules. -/
-def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy : Expr) :
+/-- Lower a constant application with Lean's arity rules, as a value of
+Reussir type `rty` (the binder's: `lowerType resTy`, or `Box` for a value
+that only goes into boxes, `CodeCtx.boxedOnly`). -/
+def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy : Expr) (rty : RR.Ty) :
     LowerM RR.Expr := do
   if args.size == 1 then
     if let some (prim, argTy) ← preludeReplacement? f then
-      return ← coerce (.call prim #[] #[← lowerArg ctx args[0]! argTy]) (.named "LStr") (← lowerType resTy)
+      return ← coerce (.call prim #[] #[← lowerArg ctx args[0]! argTy]) (.named "LStr") rty
   match ← calleeOf f with
   | .initConst slot ty =>
     let t ← lowerType ty
@@ -76,7 +78,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     let v := RR.Expr.call "l2r_once_get" #[st] #[.atom (toString slot)]
     let v := if boxed then .field v 0 else v
     let (e, t) ← applyChain v t ctx args
-    coerce e t (← lowerType resTy)
+    coerce e t rty
   | .code fn params ret keep =>
     let n := params.size
     -- Arguments Lean lends to the callee: released after the call
@@ -85,7 +87,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     -- Rule 4a: the arguments of the parameters the function takes.
     if args.size == n then
       let as ← lowerTaken ctx args params keep n
-      coerce (← releaseAfter (.call fn #[] as) ret keeps) ret (← lowerType resTy)
+      coerce (← releaseAfter (.call fn #[] as) ret keeps) ret rty
     else if args.size < n then
       let supplied ← lowerTaken ctx args params keep args.size
       let target ← boxedTarget f fn params keep ret
@@ -93,11 +95,11 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
         | some d => some <$> lowerType d.type
         | none => pure none
       partialApp { id := "d" ++ target, params, ret, call := .code target, keep, ty } args.size supplied
-        (← lowerType resTy)
+        rty
     else
       let as ← lowerTaken ctx args params keep n
       let (e, t) ← applyChain (← releaseAfter (.call fn #[] as) ret keeps) ret ctx args[n:].toArray
-      coerce e t (← lowerType resTy)
+      coerce e t rty
   | .extern orig typeArgs params ret =>
     let n := params.size
     let ptys ← params.mapM lowerType
@@ -106,7 +108,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       -- A refused extern of the program: no shortcut either (review REB-11).
       if (← read).externRefusals.contains orig then
         let as ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
-        return ← coerce (refusedExternCall orig as) retTy (← lowerType resTy)
+        return ← coerce (refusedExternCall orig as) retTy rty
       -- `ptrAddrUnsafe x`: the address of `x` in its own representation
       -- (converted to the parameter's, it would be a temporary cell, whose
       -- address the next temporary can get: `ptrEq` would then say `true`
@@ -115,9 +117,9 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       if (← externSymbol orig) == "lean_ptr_addr" then
         if let some (.fvar x) := args.back? then
           if let some (vn, vt) := ctx.vars[x]? then
-            return ← coerce (← addrOf (.var vn) vt) (.named "u64") (← lowerType resTy)
+            return ← coerce (← addrOf (.var vn) vt) (.named "u64") rty
       let as ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
-      coerce (← lowerExternCall orig typeArgs params ret as) retTy (← lowerType resTy)
+      coerce (← lowerExternCall orig typeArgs params ret as) retTy rty
     else if args.size < n then
       -- Rule 4a for the target: the call gets placeholders for the erased
       -- parameters it does not take (`targetCall`).
@@ -125,12 +127,12 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       let supplied ← lowerTaken ctx args ptys keep args.size
       partialApp { id := "e" ++ fnName f, params := ptys, ret := retTy, call := .extern orig typeArgs params ret,
                    keep, ty := some (← lowerType (mkFnType params ret)) }
-        args.size supplied (← lowerType resTy)
+        args.size supplied rty
     else
       let as ← (args[:n].toArray.zip ptys).mapM fun (a, t) => lowerArg ctx a t
       let call ← lowerExternCall orig typeArgs params ret as
       let (e, t) ← applyChain call retTy ctx args[n:].toArray
-      coerce e t (← lowerType resTy)
+      coerce e t rty
   | .ctor c =>
     let arity := c.numParams + c.numFields
     let rt ← lowerType (← if args.size ≥ arity then pure resTy else pure resTy)
@@ -153,7 +155,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       | _ => pure (Array.replicate arity RR.Ty.unit)
     if args.size ≥ arity then
       let vals ← (args.zip argTys).mapM fun (a, t) => lowerArg ctx a t
-      ctorBuild c.name fullRt vals
+      coerce (← ctorBuild c.name fullRt vals) fullRt rty
     else
       -- Rule 4a for the target: erased parameters and fields are not
       -- captured (`targetCall` gives them placeholders).
@@ -163,7 +165,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       let ty ← if lps.size == arity then some <$> lowerType fty else pure none
       let vals ← lowerTaken ctx args argTys keep args.size
       partialApp { id := "k" ++ fullRt.enc ++ "_" ++ fnName c.name, params := argTys, ret := fullRt,
-                   call := .ctor c.name fullRt, keep, ty } args.size vals (← lowerType resTy)
+                   call := .ctor c.name fullRt, keep, ty } args.size vals rty
 
 /-- How a `cases` (or projection) of inductive `typeName` treats a
 discriminant of Reussir type `sty`. Mono erases `unsafeCast`, so the
@@ -215,12 +217,17 @@ def viewLayout (sc dc : Name) (sl dl : CtorLayout) : LowerM CtorLayout := do
   return { variant := sl.variant, numParams := dl.numParams, fields }
 
 def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty) : LowerM RR.Expr := do
+  -- A fixed-width literal is its own word (`rty` is its type, or `Box` for
+  -- a value that only goes into boxes).
+  let litAt (e : RR.Expr) (lt : String) : LowerM RR.Expr :=
+    if rty == RR.Ty.box then coerce e (.named lt) rty else pure e
   match v with
   | .lit (.nat n) => coerce (← natLiteral n) (.named "Nat") rty
   | .lit (.str s) => coerce (← strLit s) (.named "LStr") rty
-  | .lit (.uint8 n) | .lit (.uint16 n) => return .atom (toString n)
-  | .lit (.uint32 n) => return .atom (toString n)
-  | .lit (.uint64 n) | .lit (.usize n) => return .atom (toString n)
+  | .lit (.uint8 n) => litAt (.atom (toString n)) "u8"
+  | .lit (.uint16 n) => litAt (.atom (toString n)) "u16"
+  | .lit (.uint32 n) => litAt (.atom (toString n)) "u32"
+  | .lit (.uint64 n) | .lit (.usize n) => litAt (.atom (toString n)) "u64"
   | .erased => zeroValue rty
   | .proj sn i x _ =>
     match ctx.vars[x]? with
@@ -255,7 +262,7 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
         | _ => withVar "pv" (.named tn) e fun v => coerce (.field v j) ft rty
       | _ => zeroValue rty
     | _ => throwError "lean2rr: projection from unknown variable"
-  | .const f _ args _ => lowerConstApp ctx f args ty
+  | .const f _ args _ => lowerConstApp ctx f args ty rty
   | .fvar g args =>
     match ctx.vars[g]? with
     | some (n, t) =>

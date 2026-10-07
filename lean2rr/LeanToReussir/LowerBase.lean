@@ -338,6 +338,18 @@ structure LowerState where
   /-- Conversions between inductives read through `unsafeCast` being
   generated (for recursive types, `structConv`). -/
   convsInProgress : Std.HashSet String := {}
+  /-- Which arguments of a call of a declaration or an extern are boxed
+  positions (`boxedArgMask`, for `boxedOnlyVars`), by callee. -/
+  boxedArgMasks : NameMap (Array (Option Bool)) := {}
+  /-- Conversions of `structConv` that can never return a value (every
+  constructor's value is `l2r_unreachable`): a use is `l2r_unreachable` in
+  line (`convCall`), and the function is not generated unless a conversion
+  being generated called it first (`convsCalledEarly`). -/
+  deadConvs : Std.HashSet String := {}
+  /-- Conversions called while they were being generated (a recursive or
+  mutually recursive field): generated even when dead, as a function whose
+  body is `l2r_unreachable`. -/
+  convsCalledEarly : Std.HashSet String := {}
   /-- Lean's borrowed parameters of the program's declarations, and the
   variables they lend (`Lower/Borrow`), once computed. -/
   borrowInfo : Option (NameMap (Array Bool) × FVarIdSet) := none
@@ -697,6 +709,9 @@ def boxKind (t : RR.Ty) : LowerM BoxKind := do
   | .named n =>
     if n == "L2RUnit" then return .unit
     if n ∈ ["u8", "u16", "u32", "bool", "f32"] then return .scalar n
+    -- No Lean value has a signed type (Lean's `toMonoType` erases `Int8`…
+    -- `Int64` and `ISize` to `UInt8`…`USize`): the signed words keep the
+    -- box API total over Reussir's integer types; no caller boxes one today.
     if n ∈ ["u64", "f64", "i8", "i16", "i32", "i64"] then return .word n
     if n == "Nat" then return .leanrt 1
     if n == "Int" then return .leanrt 2
@@ -772,10 +787,13 @@ def boxZeroAllocates : Bool := false
 `i64` or `f64` word (a `Float`, a `UInt64` from 2^63, a negative `i64`),
 a `[value]` struct of one, a value wrapped in an `ElemBox`. An immediate
 never does: `u8`/`u16`/`u32` (`Char`), `bool`, `f32`, an enumeration, the
-unit, and `i8`/`i16`/`i32`, boxed as their zero-extended bits (Lean's
-`Int8`…`Int32` are `[value]` structs of `u8`…`u32`). -/
+unit, and `i8`/`i16`/`i32`, boxed as their zero-extended bits. Lean's
+`Int8`…`Int64` and `ISize` are not signed types here: Lean's `toMonoType`
+erases them to `UInt8`…`USize` (`hasTrivialStructure?`), so they are
+`u8`…`u64`. -/
 partial def boxAllocates (t : RR.Ty) : LowerM Bool := do
   match ← boxKind t with
+  -- The signed words: no Lean value has one (`boxKind`).
   | .word k => return k ∉ ["i8", "i16", "i32"]
   | .valueStruct _ ft => if ft == RR.Ty.box then return false else boxAllocates ft
   | .prog _ _ wrapped _ _ => return wrapped
@@ -793,7 +811,8 @@ partial def boxValue (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
   | .word "u64" => return .call "l2r_any_of_u64" #[] #[e]
   | .word "f64" => return .call "l2r_any_of_f64" #[] #[e]
   -- `i8`/`i16`/`i32`: the bits zero-extended (an immediate); `i64`: its
-  -- bits.
+  -- bits. No Lean value reaches these arms: Lean erases its signed integers
+  -- to unsigned words (`boxKind`).
   | .word "i8" => return .call "l2r_any_of_u64" #[] #[.cast (.cast e (.named "u8")) (.named "u64")]
   | .word "i16" => return .call "l2r_any_of_u64" #[] #[.cast (.cast e (.named "u16")) (.named "u64")]
   | .word "i32" => return .call "l2r_any_of_u64" #[] #[.cast (.cast e (.named "u32")) (.named "u64")]
@@ -805,9 +824,12 @@ partial def boxValue (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
     if ft == RR.Ty.box then return .block ⟨#[(v, some t, e)], .field (.var v) 0⟩
     return .block ⟨#[(v, some t, e)], ← boxValue (.field (.var v) 0) ft⟩
   | .leanrt n => return .call "l2r_any_of" #[t] #[e, .atom (toString n)]
-  | .prog n st wrapped _ isFn =>
+  | .prog n st wrapped nullary isFn =>
     let v := if wrapped then (match st with | .named sn => RR.Expr.ctor sn none #[e] | _ => e) else e
-    return .call (if isFn then "l2r_any_of_fn" else "l2r_any_of") #[st] #[v, .atom (toString n)]
+    -- Without nullary variants the handle is always a pointer: no test for
+    -- a nullary variant's immediate (`l2r_any_of_ptr`).
+    let f := if isFn then "l2r_any_of_fn" else if nullary.isEmpty then "l2r_any_of_ptr" else "l2r_any_of"
+    return .call f #[st] #[v, .atom (toString n)]
 
 /-- The value of type `t` a pointer word `w` (owning its reference) of
 payload `t` holds: `l2r_any_raw_take` (the number was checked). -/
@@ -821,6 +843,25 @@ owns the box's reference (`l2r_any_raw`). -/
 def boxWithWord (b : RR.Expr) (k : String → LowerM RR.Expr) : LowerM RR.Expr := do
   let w ← fresh "bw"
   return .block ⟨#[(w, some (.named "u64"), .call "l2r_any_raw" #[] #[b])], ← k w⟩
+
+/-- The prelude's reads of an element of an array of boxes (`RVec<Box>`)
+that have a variant reading the element at a type, an immediate without a
+copy of the box (`<name>_as<T>`, `l2r_view_take_as`). -/
+def boxWordReads : List String :=
+  ["lean_array_fget", "lean_array_fget_borrowed", "lean_array_get", "lean_array_get_borrowed",
+   "lean_array_uget", "lean_array_uget_borrowed"]
+
+/-- The array read `b` (a call of a `boxWordReads` read at `Box`, maybe in
+the block of `bindReadIndex`) as the read of the element at `at` (`u64`:
+the box's word, for an unboxing at a type held only as an immediate;
+`Nat`, `Int`), without a copy of the box when it is an immediate: one test
+of bit 0, no reference counting (`boxUnbox`). -/
+partial def boxWordRead? (b : RR.Expr) (at_ : RR.Ty) : Option RR.Expr :=
+  match b with
+  | .call f #[t] args =>
+    if t == RR.Ty.box && boxWordReads.contains f then some (.call (f ++ "_as") #[at_] args) else none
+  | .block ⟨lets, r⟩ => (boxWordRead? r at_).map fun r' => .block ⟨lets, r'⟩
+  | _ => none
 
 /-- Box `b` unboxed at type `t` (not a function type), as the prelude's
 rule for generated unboxes says: an immediate is `t`'s scalar, its
@@ -849,12 +890,18 @@ partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Exp
     return .block ⟨#[(d, some RR.Ty.box, b)], .unitVal⟩
   | .scalar k =>
     let dec (e : RR.Expr) : RR.Expr := .call s!"l2r_any_as_{k}" #[] #[e]
-    if slow.isNone then return dec b
+    if slow.isNone then
+      -- An array element read at once: its word, without a copy of the box
+      -- (`boxWordRead?`).
+      if k != "f32" then
+        if let some w := boxWordRead? b (.named "u64") then return .call s!"l2r_any_word_as_{k}" #[] #[w]
+      return dec b
     boxWithWord b fun w => return .ite (isImm w) (.ofExpr (dec (back w))) (otherwise w)
   | .word k =>
     let dec (e : RR.Expr) : RR.Expr := match k with
       | "u64" => .call "l2r_any_as_u64" #[] #[e]
       | "f64" => .call "l2r_any_as_f64" #[] #[e]
+      -- The signed words: no Lean value has one (`boxKind`).
       | _ => .cast (.call "l2r_any_as_u64" #[] #[e]) t
     if slow.isNone then return dec b
     -- leanrt reads its immediates and both cells (`u64` and `f64` read
@@ -869,7 +916,9 @@ partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Exp
       return .ite (isImm w) (.ofExpr (dec (back w))) ptr
   | .enumIdx tn =>
     let ofIdx ← enumOfIndexFn tn
-    if slow.isNone then return .call ofIdx #[] #[.call "l2r_any_as_imm" #[] #[b]]
+    if slow.isNone then
+      if let some w := boxWordRead? b (.named "u64") then return .call ofIdx #[] #[.call "l2r_any_word_imm" #[] #[w]]
+      return .call ofIdx #[] #[.call "l2r_any_as_imm" #[] #[b]]
     boxWithWord b fun w => do
       let yes := RR.Block.ofExpr (.call ofIdx #[] #[.call "l2r_any_raw_imm" #[] #[.var w]])
       return .ite (isImm w) yes (otherwise w)
@@ -879,7 +928,12 @@ partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Exp
     -- The field's own unboxing (its zero is the field of the struct's zero).
     return .ctor tn none #[← boxUnbox b ft zeroOf none]
   | .leanrt n =>
-    if slow.isNone then return .call "l2r_any_as" #[t] #[b, .atom (toString n)]
+    if slow.isNone then
+      -- An array element read at once as a `Nat` or `Int`: an immediate
+      -- without a copy of the box (`boxWordRead?`).
+      if n == 1 || n == 2 then
+        if let some r := boxWordRead? b t then return r
+      return .call "l2r_any_as" #[t] #[b, .atom (toString n)]
     boxWithWord b fun w => do
       let yes := RR.Block.ofExpr (.call "l2r_any_as" #[t] #[back w, .atom (toString n)])
       return .ite (isImm w) yes (.ofExpr (← ifNum w n yes (otherwise w)))
@@ -903,6 +957,63 @@ partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Exp
           pure ⟨#[(i, some u64, .call "l2r_any_raw_imm" #[] #[.var w])], .mtch (.var i) arms⟩
       let ptrB ← ifNum w n (.ofExpr (← boxTake (.var w) t)) (otherwise w)
       return .ite (isImm w) immB (.ofExpr ptrB)
+
+/-- The array read of a box that `boxWordRead?` made a read at a type. -/
+partial def boxWordReadBack? (w : RR.Expr) : Option RR.Expr :=
+  match w with
+  | .call f #[_] args =>
+    match boxWordReads.find? (· ++ "_as" == f) with
+    | some r => some (.call r #[RR.Ty.box] args)
+    | none => none
+  | .block ⟨lets, r⟩ => (boxWordReadBack? r).map fun r' => .block ⟨lets, r'⟩
+  | _ => none
+
+/-- The box `b` if `e` is `boxUnbox b t` (any `slow`): `boxValue e t` is
+then `b` itself (`tryCoerce`). Folding the round trip passes the box on, as
+native code passes the object on. What a box can hold reads alike before
+and after: `box(0)` is read as `t`'s zero by every unboxing at `t`, where
+`box(zero)` was before; a nullary variant boxes back to its own immediate;
+a word or a cell (`Float`, a large `UInt64`) is passed on unchanged instead
+of being read and boxed again (a new cell). -/
+partial def boxUnboxed? (e : RR.Expr) (t : RR.Ty) : LowerM (Option RR.Expr) := do
+  -- `boxWithWord`'s block: the unboxings of the program's payloads, and
+  -- every unboxing with a `slow` function.
+  let ofWordBlock : Option RR.Expr := match e with
+    | .block ⟨#[(_, some (.named "u64"), .call "l2r_any_raw" #[] #[b])], _⟩ => some b
+    | _ => none
+  match ← boxKind t with
+  | .unit => return none
+  | .scalar k =>
+    if let .call f #[] #[b] := e then
+      if f == s!"l2r_any_as_{k}" then return some b
+      -- An array element read as its word (`boxWordRead?`): the read of the box.
+      if f == s!"l2r_any_word_as_{k}" then return boxWordReadBack? b
+    return ofWordBlock
+  | .word k =>
+    match e with
+    | .call "l2r_any_as_u64" #[] #[b] => return if k == "u64" then some b else none
+    | .call "l2r_any_as_f64" #[] #[b] => return if k == "f64" then some b else none
+    | .cast (.call "l2r_any_as_u64" #[] #[b]) _ => return if k != "u64" && k != "f64" then some b else none
+    | _ => return ofWordBlock
+  | .enumIdx tn =>
+    if let .call f #[] #[.call "l2r_any_as_imm" #[] #[b]] := e then
+      if f == s!"l2r_enum_of_index_{tn}" then return some b
+    if let .call f #[] #[.call "l2r_any_word_imm" #[] #[w]] := e then
+      if f == s!"l2r_enum_of_index_{tn}" then return boxWordReadBack? w
+    return ofWordBlock
+  | .valueStruct tn ft =>
+    match e with
+    | .ctor n none #[inner] =>
+      if n != tn then return none
+      -- Over a box: the box itself (`boxUnbox`).
+      if ft == RR.Ty.box then return some inner
+      boxUnboxed? inner ft
+    | _ => return none
+  | .leanrt _ =>
+    if let .call "l2r_any_as" #[_] #[b, _] := e then return some b
+    if let some b := boxWordReadBack? e then return some b
+    return ofWordBlock
+  | .prog _ _ _ _ isFn => return if isFn then none else ofWordBlock
 
 /-- An arm of `boxDispatch`: a pointer payload type, the binder of its
 value (at that type), and the arm's code. -/

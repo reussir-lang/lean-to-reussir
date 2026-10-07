@@ -74,27 +74,29 @@ a feature), not a fix.
 
 One row per entry, grouped by kind. Column *Patches*: the entry's patch
 files, in apply order; "none" marks an entry that stays unpatched (the
-reason is in its file). Column *Review*: the adversarial review round and
-its result ([Review](#review)). Column *Applied*: whether the patches are
+reason is in its file); "upstream: #N" names the pull request on
+github.com/reussir-lang/reussir that carries the patch (all open).
+Column *Review*: the adversarial review round and its result
+([Review](#review)). Column *Applied*: whether the patches are
 on `./reussir`'s `l2r-local`.
 
 | # | Kind | Effect | Affects lean2rr output? | lean2rr workaround | Patches | Review | Applied |
 |---|---|---|---|---|---|---|---|
 | [1](01-value-enum-payload.md) | bug | `[value]` enum payload bytes lost when a variant is moved | no, shape avoided | emits only unaffected `[value]` enums | [01-a](patches/01-a-value-enum-arm-bytes.patch) | rv8/reussir: no defect | yes |
-| [2](02-reuse-field-store.md) | bug | in-place reuse skips the store of a field that sits elsewhere in the new cell | structures: yes, wrong values; variants: no | variants: `--no-pack-record-members` and fields ordered by alignment | [02-a](patches/02-a-struct-field-store.patch) (structures), [02-b](patches/02-b-variant-field-store.patch) (variants) | 02-a passed (rounds 1-3); 02-b rv8/reussir: no defect | yes |
-| [4](04-recursive-type-compare.md) | bug | rrc recurses forever on two equal recursive types (SIGSEGV) | yes, rrc crash | driver retries without `--reuse-across-call` | [04-a](patches/04-a-coinductive-type-compare.patch) | passed | yes |
-| [5](05-one-armed-if.md) | bug | TokenReuse crashes on a one-armed `if` (SIGSEGV) | yes, rrc crash | prelude panics avoid the shape; user code can still hit it | [05-a](patches/05-a-one-armed-if-tokens.patch) | passed | yes |
+| [2](02-reuse-field-store.md) | bug | in-place reuse skips the store of a field that sits elsewhere in the new cell | structures: yes, wrong values; variants: no | variants: `--no-pack-record-members` and fields ordered by alignment | [02-a](patches/02-a-struct-field-store.patch) (structures; upstream: #652), [02-b](patches/02-b-variant-field-store.patch) (variants) | 02-a passed (rounds 1-3); 02-b rv8/reussir: no defect | yes |
+| [4](04-recursive-type-compare.md) | bug | rrc recurses forever on two equal recursive types (SIGSEGV) | yes, rrc crash | driver retries without `--reuse-across-call` | [04-a](patches/04-a-coinductive-type-compare.patch) (upstream: #654) | passed | yes |
+| [5](05-one-armed-if.md) | bug | TokenReuse crashes on a one-armed `if` (SIGSEGV) | yes, rrc crash | prelude panics avoid the shape; user code can still hit it | [05-a](patches/05-a-one-armed-if-tokens.patch) (upstream: #655) | passed | yes |
 | [6](06-static-count-wrap.md) | bug, with a flag workaround | a static cell is freed after about 2^32 references | yes, crash | `--nullary-variant-encoding arch-independent` or `boxed` (not used: 06-a keeps the default encoding's speed; to be remeasured on an idle machine) | [06-a](patches/06-a-immediate-count-wrap.patch) | passed | yes |
 | [8](08-padding-lift.md) | bug | padding "lift" gives LLVM a larger layout than Reussir's | no, shape never emitted | - | [08-a](patches/08-a-padding-widening.patch) | rv8/reussir: no defect | yes |
-| [9](09-duplicate-bound-member.md) | bug | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | [09-a](patches/09-a-fuse-retains-once.patch) (also fixes 14) | passed (revised after round 2) | yes |
+| [9](09-duplicate-bound-member.md) | bug | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | [09-a](patches/09-a-fuse-retains-once.patch) (also fixes 14; upstream: #653) | passed (revised after round 2) | yes |
 | [12](12-node-cache-collision.md) | bug (in cstree) | the parser swaps syntax subtrees whose hashes collide | yes, wrong code or bogus errors on very large files | none | [12-a](patches/12-a-no-hash-node-cache.patch) | passed | yes |
-| [14](14-member-consumed-before-release.md) | bug | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | none of its own: fixed by [09-a](patches/09-a-fuse-retains-once.patch) (entry 9) | passed | yes |
+| [14](14-member-consumed-before-release.md) | bug | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | none of its own: fixed by [09-a](patches/09-a-fuse-retains-once.patch) (entry 9; upstream: #653) | passed | yes |
 | [15](15-nullable-match-yield.md) | bug | a `match` on a `Nullable` yielding a counted value does not compile | no, `Nullable` not used | - | [15-a](patches/15-a-yield-parent-check.patch) | rv7/p22: no defect | yes |
 | [18](18-rrc-target-deps.md) | bug (build system) | the `rrc` build target alone does not link | no, Reussir's build only | build the default target | [18-a](patches/18-a-archive-build-order.patch) | rv7/p22: no defect | yes |
 | [19](19-cell-of-value-record.md) | bug | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `[value]` records in references boxed (`Nat`/`Int` are tagged handles since 41-a) | [19-a](patches/19-a-cell-value-record-glue.patch) (with 11-b's composition fix) | rv7/p22 rounds 1-2 (RV7P-01 fixed); RV8C-01 fixed in 11-b | yes |
 | [21](21-unterminated-placeholder.md) | bug | an unterminated `[:` in a polymorphic FFI texture is dropped | yes, wrong output (a string literal containing `[:` printed without it) | `[` escaped (`\x5b`) in the string literal table | [21-a](patches/21-a-unterminated-placeholder.patch) | round 6 (RV6L-01) | yes |
 | [24](24-matexp-state-order.md) | bug (non-reproducible builds) | the matrix-exponentiation pass orders a loop's state by heap addresses: equivalent but different code from run to run | no difference seen (no transformed loop in the lean2rr programs checked) | - | [24-a](patches/24-a-matexp-state-order.patch) | rv7/p22 round 2: deterministic, values unchanged | yes |
-| [26](26-launder-assume.md) | bug (miscompile) | `assume(launder(p) == p)` undoes the launder, so LICM hoists the stores of a cell rebuilt in place | yes, wrong output (a Lean loop prints 2, natively 25009648) | none | [26-a](patches/26-a-no-launder-assume.patch) | rv8/reussir: no defect | yes |
+| [26](26-launder-assume.md) | bug (miscompile) | `assume(launder(p) == p)` undoes the launder, so LICM hoists the stores of a cell rebuilt in place | yes, wrong output (a Lean loop prints 2, natively 25009648) | none | [26-a](patches/26-a-no-launder-assume.patch) (upstream: #651) | rv8/reussir: no defect | yes |
 | [28](28-unique-carrying-join.md) | bug (miscompile) | `-O aggressive` proves a value unique that is shared on one path; the shared cell is updated in place | possible: not seen in lean2rr's corpus | none | [28-a](patches/28-a-unknown-absorbs-join.patch) | rv8/reussir/e (+ round 2): no correctness defect; RV8RE-01 (lost clones) fixed | yes |
 | [29](29-ffi-member-mlir.md) | bug (tooling) | the `--emit mlir` dump of a record with an `#[ffi]` member does not parse back | no, builds unaffected; every lean2rr dump fails to parse | - | [29-a](patches/29-a-ffi-member-verifier.patch) | rv8/reussir/e: no defect | yes |
 | [31](31-deep-expression-stack.md) | bug | rrc overflows its stack on deeply nested expressions | no, lean2rr bounds nesting | - | [31-a](patches/31-a-big-driver-stack.patch) | rv8/reussir/e (+ round 2): no correctness defect; RV8RE-02 (`ulimit -v`) fixed | yes |
@@ -320,9 +322,11 @@ patch; there was no 0067 file.
   are for missing features that lean2rr needs: 13-a to 13-d (issue 13), 27-a (issue 27,
   which extends issue 13's feature to `Nullable` members), 38-a, 40-a and
   41-a.
-- Patches are local only: never pushed or submitted upstream. The
-  "Upstream note" at the end of a patched entry is only text someone could
-  use later.
+- Patches are local: lean2rr's work never pushes or submits them. The
+  "Upstream note" at the end of a patched entry is text for an upstream
+  report. Five of the bug fixes now have pull requests upstream (26-a,
+  02-a, 09-a, 04-a and 05-a: "upstream: #N" in the
+  [status table](#status), and an *Upstream* line in each entry).
 - lean2rr's workarounds stay, so that lean2rr also works with an unpatched
   Reussir. The exceptions are the features lean2rr requires
   ([what lean2rr needs](#applying-the-patches)): 13-b (the runtime does not

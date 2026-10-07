@@ -4,6 +4,8 @@
 
 **Kind:** bug. **Status:** patched (05-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
+**Upstream:** pull request #655 (open), with 05-a.
+
 TokenReuse matches cells freed by releases ("tokens") with later
 allocations of the same size. A token that no allocation takes must be
 freed on every path. If a token is available before an `if` and an

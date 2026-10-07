@@ -52,7 +52,9 @@ series.
   issue 3) gets a small patch too. This patch is an optimization, not a
   fix. A missed optimization gets a patch only when lean2rr cannot work
   around it (issue 36).
-- Patches are local only: never pushed or submitted upstream.
+- lean2rr's work keeps the patches local: it does not push them or submit
+  them. Five bug fixes (26-a, 02-a, 09-a, 04-a and 05-a) have open pull
+  requests on Reussir's repository; the table below gives their numbers.
 - lean2rr keeps its workarounds, so that it also works with an unpatched
   Reussir. The exceptions are the features that lean2rr requires: the
   runtime needs patch 13-b to build, the prelude needs 41-a, and the

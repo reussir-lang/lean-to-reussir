@@ -5,6 +5,8 @@
 **Kind:** bug. **Status:** patched (by 09-a, the patch of
 [bug 9](09-duplicate-bound-member.md)), applied in `./reussir` (`l2r-local` cc8e5aa5).
 
+**Upstream:** pull request #653 (open), with 09-a, the patch of entry 9.
+
 `RcDispatchFusion`'s `fuseArm` fuses a match arm's member retains into the
 release of the scrutinee (a "destructuring" release that transfers the
 cell's reference to each member). It keeps scanning past a use that

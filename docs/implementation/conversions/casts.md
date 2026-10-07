@@ -99,6 +99,32 @@ values"); divergences in
   `convBuild`, `convArms`, `ConvArm`.
 - **Remove only if:** never.
 
+### A conversion that no constructor survives is not generated
+
+- **What:** When every constructor of a conversion between inductives is
+  `l2r_unreachable` (a field with no conversion, or no native value),
+  `structConv` records it as dead (`LowerState.deadConvs`) and generates no
+  function. A use (`convCall`) is `l2r_unreachable` in line, after the
+  converted value is evaluated; a generated unboxing leaves the cast's arm
+  out (`deadConvExpr?`), so the payload reaches the unreachable arm, which
+  panics alike. Only a conversion that one being generated already called
+  (a recursive or mutually recursive field, `convsCalledEarly`) is
+  generated, with the panic as its whole body (and dropped with
+  `conv-liveness` when no live function calls it).
+- **Why:** In a program that casts, each unboxing function gets an arm per
+  payload type a cast can read (`boxCastable`), and most such pairs of
+  structures fail on a field: on the Init-only stress program
+  CslInitOnly, 2,690 of 4,217 `l2r_conv_` functions were projections
+  followed by `l2r_unreachable`, called from 2,687 unboxing arms (review
+  perf-r1). Without them: 538 `l2r_conv_` functions instead of 3,203, and
+  32.0 MB of `.rr` instead of 34.0 MB; the translation time does not
+  change.
+- **Where:** `Lower/Conv.lean`: `structConv`, `convCall`,
+  `structConvBody`, `deadConvExpr?`, `coerce`, `tryCoerce`;
+  `Lower/Finish.lean`: `genUnbox`; `LowerBase.lean`: `deadConvs`,
+  `convsCalledEarly`. Test `RtCastDeadConv`.
+- **Remove only if:** never (the functions and arms come back).
+
 ### Inductives that do not correspond convert by tag
 
 - **What:** A cast the program performs between inductives with
