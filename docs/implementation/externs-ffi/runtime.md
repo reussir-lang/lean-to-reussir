@@ -901,6 +901,52 @@ Paths are relative to the repository root.
   `src/semantics/float.rs`.
 - **Remove only if:** never (speed only).
 
+### The event loop's streams, the leave of a thread's streams, and the crate's fixes (switch step 15)
+
+- **What:** lean-runtime pinned at `d042b79` (main: fixes-15). The glue
+  changes:
+  - the event loop's contexts share one record of the per-thread state
+    (the stream cells and the last IO outcome, `sched::LOOP_STATE`):
+    inside `Glue::switched`, lean-runtime's new
+    `sched::switch_is_event_loop()` says whether the side that is not
+    `MAIN` is the loop's
+    ([../tasks/scheduler.md](../tasks/scheduler.md#each-context-pool-worker-and-dedicated-task-has-its-own-standard-streams));
+  - the leave of a thread's streams (`l2r_std_leave`, `once::pop_context`)
+    leaves a cell that the drop of another cell set again as it is, where
+    it asserted;
+  - a dedicated task's fresh stream context is closed by the runtime at
+    the task's end (`Glue::task_end`, `TaskRun::Fresh`, through the
+    generated trampoline `l2r_std_leave_c`), after its job returned and
+    lean-runtime dropped what it left (its value when nothing else holds
+    it; a deleted bind task's continuation, which the crate drops before
+    `task_end` since HST-04), no longer by the generated code inside the
+    job (`Lower/LazyForce.lean`: the forcing function and the bind step).
+  The crate's other fixes need no other glue: in the single-thread
+  scheduler a fast dependent's caller answers for the shutdown flag
+  (AR-53), a held released bind task continues, and `forceExit` passes
+  over a skip window's writers (HCO-02); the network fixes LB-50 and
+  LB-51; LB-52 and LB-13's new trigger are threads-mode and native facts.
+- **Why:** hunt HST-01 (a stdout that one UV callback's `sync` dependent
+  set was gone for a later callback once the next loop context started on
+  another id; natively libuv's loop is one thread; the limit RS4-06 had
+  recorded) and hunt HST-02 (at `main`'s end the drop of its stderr
+  stream released a promise whose `sync` dependent printed to stdout,
+  whose cell was already dropped; the assertion aborted the program, where
+  natively both lines are printed), and review RS15-01 (a dedicated task's
+  dropped value was freed after its stream context had closed, so a
+  promise's `sync` dependent that the free released printed to the
+  process's stdout; natively `run_task` frees it on the task's thread).
+- **Tests:** `RtLoopStreamsKept` (HST-01), `RtStdLeaveReentry` (HST-02) and
+  `RtDedicatedValueStreams` (RS15-01); each program failed on dev
+  `393c739` (the first printed "d2 (buffer)" on the real stdout, the second
+  aborted with no output, the third printed "dependent runs" on stdout).
+- **Where:** `runtime/leanrt/src/sched.rs` (`switched`, `LOOP_STATE`,
+  `task_end`, `std_leave`), `once.rs` (`pop_context`);
+  `lean2rr/LeanToReussir/Lower/LazyForce.lean`, `Lower/Externs.lean`
+  (`stdContextFns`: `l2r_std_leave_c`); lean-runtime's `src/sched/ctx.rs`
+  (`switch_is_event_loop`).
+- **Remove only if:** never.
+
 ### The drain-end hook, promise resolutions inside lean-runtime's `resolve`, and the crate's fixes (switch step 14)
 
 - **What:** lean-runtime pinned at `46c5731` (main: fixes-14 with its two

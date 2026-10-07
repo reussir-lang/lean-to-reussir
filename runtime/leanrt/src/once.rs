@@ -321,13 +321,20 @@ pub fn push_context(base: u64, n: u64) {
 }
 
 /// Restore the cells set aside by the matching `push_context`; the caller
-/// has emptied them.
+/// has emptied them. A cell that is set again meanwhile is left as it is
+/// (its reference leaks): the leave's drop of another cell ran code that
+/// used it (a stream's closure held a promise's last reference, whose
+/// deferred resolution ran a `sync` dependent that printed), as natively a
+/// thread-local stream made again during the thread's finalization is never
+/// finalized (hunt HST-02: an assertion aborted the program here).
 #[inline(never)]
 pub fn pop_context(base: u64, n: u64) {
     let ctx = unsafe { &mut *SAVED.0.get() }.pop().expect("leanrt: no saved context");
     for i in 0..n {
         let slot = base + i;
-        assert!(!has(slot), "leanrt: context cell {} still set", slot);
+        if has(slot) {
+            let _leaked = take_raw(slot);
+        }
         if let Some(raw) = ctx[i as usize] {
             set_raw(slot, raw);
         }

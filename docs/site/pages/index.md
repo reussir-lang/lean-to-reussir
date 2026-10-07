@@ -130,7 +130,7 @@ other results are the last recorded runs.
 
 | Check | Result |
 |---|---|
-| Runtime test suite | {{v:rt_tests}} programs† ({{v:rt_xfail}} marked `.xfail`†); at the last full run (2026-10-07), 485 of 486 identical to native Lean 4.34.0, some of them through expectation files; the other one is the `.xfail` test |
+| Runtime test suite | {{v:rt_tests}} programs† ({{v:rt_xfail}} marked `.xfail`†); at the last full run (the gate of switch step 15, 2026-10-07), 496 of 497 identical to native Lean 4.34.0, some of them through expectation files; the other one is the `.xfail` test |
 | Classic corpus | 18 programs × 3 sizes, identical to native, with all optional passes on and with all off |
 | Reussir benchmark suite | 18 of 18 programs identical to native |
 | Loader checks | {{v:env_cases}} cases†, all as expected |

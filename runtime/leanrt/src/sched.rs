@@ -92,6 +92,17 @@ impl Glue for LeanrtGlue {
     /// fresh stream context). So does the outcome of its last IO
     /// primitive, which its code reads after the call (`fs::LastError`,
     /// hunt HCO-01; review RHCO-01 for a reused id).
+    ///
+    /// The event loop's contexts share one record (`LOOP_STATE`): natively
+    /// libuv's loop is one thread for the whole program, and lean-runtime
+    /// runs it on a context that ends when no callback is due and starts
+    /// again for the next ones, on whatever id is free. So what a callback's
+    /// `sync` dependent leaves in the streams is the loop thread's for every
+    /// later callback (hunt HST-01: a later loop context on another id
+    /// started with empty cells), as lean-runtime keeps its own per-thread
+    /// state for the loop (`slots`). Every switch goes through `main`, so
+    /// the side that is not `MAIN` is the loop's when
+    /// `switch_is_event_loop()` says so.
     /// Moves values only: no Lean code, no call into the scheduler.
     ///
     /// A context that has ended leaves its state here too, under its id, and
@@ -99,17 +110,31 @@ impl Glue for LeanrtGlue {
     /// reports no context's end (its hub knows it, `after_resume`'s `ended`),
     /// so neither a fix nor a check is possible here (review HL-01's
     /// suspicion a, latent). A task gives its context's cells back when it
-    /// ends (`task_end`; a dedicated task's fresh stream context is closed
-    /// by the generated code), so an ended task context leaves empty cells;
+    /// ends (`task_end`, which also closes a dedicated task's fresh stream
+    /// context, review RS15-01), so an ended task context leaves empty cells;
     /// only Lean code run on a context outside a task (a promise's `sync`
     /// dependents on the event loop's context) can leave streams behind.
+    /// (A context that stopped being the loop's while suspended would come
+    /// back with `switch_is_event_loop()` false and miss `LOOP_STATE`; only
+    /// a glue that breaks the drain contract R6 could make one, review
+    /// RS15-05.)
     fn switched(&self, from: CtxId, to: CtxId) {
+        let event_loop = ls::switch_is_event_loop();
         CTX_STATES.with(|m| {
             let mut m = m.borrow_mut();
-            let (mut st, mut last) = m.remove(&to).unwrap_or_default();
+            let arriving = if event_loop && to != ls::MAIN {
+                LOOP_STATE.with(|l| l.borrow_mut().take())
+            } else {
+                m.remove(&to)
+            };
+            let (mut st, mut last) = arriving.unwrap_or_default();
             once::swap_ctx_state(&mut st);
             crate::fs::swap_last(&mut last);
-            m.insert(from, (st, last));
+            if event_loop && from != ls::MAIN {
+                LOOP_STATE.with(|l| *l.borrow_mut() = Some((st, last)));
+            } else {
+                m.insert(from, (st, last));
+            }
         });
     }
 
@@ -163,16 +188,30 @@ impl Glue for LeanrtGlue {
     fn task_end(&self, _own_thread: bool) {
         let me = ls::current_context();
         let run = RUNS.with(|r| r.borrow_mut().get_mut(&me).and_then(Vec::pop));
-        if let Some(TaskRun::Worker(w, mut set)) = run {
-            once::swap_cells(&mut set);
-            WORKER_SETS.with(|s| {
-                let mut s = s.borrow_mut();
-                let w = w as usize;
-                if s.len() <= w {
-                    s.resize_with(w + 1, || None);
-                }
-                s[w] = Some(set);
-            });
+        match run {
+            Some(TaskRun::Worker(w, mut set)) => {
+                once::swap_cells(&mut set);
+                WORKER_SETS.with(|s| {
+                    let mut s = s.borrow_mut();
+                    let w = w as usize;
+                    if s.len() <= w {
+                        s.resize_with(w + 1, || None);
+                    }
+                    s[w] = Some(set);
+                });
+            }
+            // A dedicated task's fresh stream context closes here, once its
+            // job has returned and lean-runtime has dropped what it left (its
+            // value when nothing else holds it, a deleted bind task's
+            // continuation): natively those frees run on the task's thread
+            // before its finalizers drop its streams, so the code they run
+            // (a promise's resolution, its `sync` dependents) prints to the
+            // task's streams (review RS15-01: the generated code closed the
+            // context inside the job, and that code printed to the context
+            // below). The generated `l2r_std_leave` drops the cells, which
+            // runs Lean code, so the run is popped first.
+            Some(TaskRun::Fresh) => std_leave(),
+            _ => {}
         }
     }
 }
@@ -194,6 +233,10 @@ thread_local! {
     /// (see `switched`).
     static CTX_STATES: RefCell<HashMap<CtxId, (once::CtxState, crate::fs::LastError)>> =
         RefCell::new(HashMap::new());
+    /// The event loop's record, kept from one loop context to the next
+    /// (see `switched`).
+    static LOOP_STATE: RefCell<Option<(once::CtxState, crate::fs::LastError)>> =
+        const { RefCell::new(None) };
     /// The tasks running on each context, innermost last (`Glue::task_begin`).
     static RUNS: RefCell<HashMap<CtxId, Vec<TaskRun>>> = RefCell::new(HashMap::new());
     /// The workers have ended (`Glue::workers_end`).
@@ -217,6 +260,22 @@ extern "C" {
     /// and dropped.
     #[linkage = "extern_weak"]
     static l2r_std_drop_workers_c: *const std::ffi::c_void;
+    /// The generated `l2r_std_leave` (programs that create tasks): the
+    /// running context's stream cells dropped and the saved context given
+    /// back (`task_end` of a dedicated task).
+    #[linkage = "extern_weak"]
+    static l2r_std_leave_c: *const std::ffi::c_void;
+}
+
+/// Close the running dedicated task's fresh stream context (`Glue::task_end`),
+/// through the generated `l2r_std_leave` (absent without tasks).
+fn std_leave() {
+    let f = unsafe { l2r_std_leave_c };
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(f) };
+    unsafe { f() };
 }
 
 /// The task manager's finalization joins the pool workers, whose thread

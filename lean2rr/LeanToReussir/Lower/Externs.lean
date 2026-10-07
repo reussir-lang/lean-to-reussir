@@ -410,12 +410,16 @@ def stdContextFns : LowerM (Array RR.Item) := do
   -- `l2r_std_leave`), as native worker threads' finalizers drop their
   -- current streams (lean-runtime's AR-33): the runtime calls it there,
   -- through its trampoline (`leanrt::sched::workers_end`).
+  -- A dedicated task's fresh stream context is closed by the runtime at the
+  -- task's end (`Glue::task_end`, after its job returned and what it left
+  -- was dropped, review RS15-01), through the trampoline `l2r_std_leave_c`.
   let createsTasks := (← read).createsTasks
   let tramp : RR.Item := .raw "extern \"C\" trampoline \"l2r_std_drop_workers_c\" = l2r_std_drop_workers;\n"
+  let leaveTramp : RR.Item := .raw "extern \"C\" trampoline \"l2r_std_leave_c\" = l2r_std_leave;\n"
   let dropWorkers (base : Option Nat) : Array RR.Item := Id.run do
     unless createsTasks do return #[]
-    let some b := base | return #[.fn "l2r_std_drop_workers" #[] u64 (zero "z"), tramp]
-    return #[tramp, .fn "l2r_std_drop_workers" #[] u64 ⟨#[("more", some u64, .call "l2r_worker_streams_enter" #[] #[.atom (toString b)]),
+    let some b := base | return #[.fn "l2r_std_drop_workers" #[] u64 (zero "z"), tramp, leaveTramp]
+    return #[tramp, leaveTramp, .fn "l2r_std_drop_workers" #[] u64 ⟨#[("more", some u64, .call "l2r_worker_streams_enter" #[] #[.atom (toString b)]),
       ("one", some u64, .atom "1")],
       .ite (.atom "more == one")
         ⟨#[("l", some u64, .call "l2r_std_leave" #[] #[])], .call "l2r_std_drop_workers" #[] #[]⟩ (zero "z")⟩]

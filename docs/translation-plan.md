@@ -3170,7 +3170,13 @@ Each item says what differs and when.
   cell slots, and panics, `dbgTrace` and `timeit` write through the current
   stderr stream (`l2r_stderr_put`), as natively, and per thread as
   natively: a task, and `main` after the initializers, start with the
-  process's streams (§5.14).
+  process's streams (§5.14). One order differs: at a thread's end its
+  streams are dropped in a fixed order (stdin, stdout, stderr), where
+  natively the thread's finalizers run in the reverse order of each
+  stream's first use on that thread; it shows only when the drop of one
+  stream runs code that uses another of the thread's streams (a promise
+  whose `sync` dependent prints), or when two drops have effects whose
+  order shows (two handles of one file) (hunt HST-03).
 
 **Cost** (time and memory, not results)
 - *No borrowed parameters* (§5.8, §7): a parameter Lean borrows is owned
@@ -3514,6 +3520,26 @@ and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
   decoders give `inappropriateType` on both paths, with native's details.
   No program can cause it on demand (a corrupted file system);
   lean-runtime's decoding table checks it.
+- *LB-50, a `shutdown` during a `connect` resolves the connect `ok` before
+  the connection exists*
+  ([LB-50](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-50-a-shutdown-during-a-connect-resolves-the-connect-ok-before-the-connection-exists)):
+  natively libuv's `uv_shutdown` makes a pending connect read the socket's
+  error while the handshake goes on, and resolve `ok`. lean-runtime's
+  connect stays pending until the connection exists or fails, and the
+  shutdown queued behind it (LB-28) then shuts it. Case
+  `net/shutdown_during_slow_connect`.
+- *LB-51, `waitReadable` resolves `true` at the end of the stream*
+  ([LB-51](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-51-waitreadable-resolves-true-at-the-end-of-the-stream)):
+  its docstring and Lean's own end-of-file branch say `false`; lean-runtime
+  gives `false` there, as LB-26's `recv? 0` decides. Case
+  `net/wait_readable_eof`.
+- *LB-52, a wait in a pool task wraps the pool's limit to 0 when
+  `LEAN_NUM_THREADS` is 2^32 - 1*
+  ([LB-52](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-52-a-wait-in-a-pool-task-wraps-the-pools-limit-to-0-when-lean_num_threads-is-232---1)):
+  natively the raise of the limit while a pool task waits wraps an
+  `unsigned`, and no worker takes a queued task while the wait lasts (a
+  hang); lean2rr's single-thread scheduler counts the waiter's worker as
+  free instead. Case `tasks/pool_limit_wrap`.
 - *LB-11, `Nat.pow` with an exponent of 2^32 or more*
   ([LB-11](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#limits);
   this and the next five are lean-bugs.md's "Limits", implementation caps

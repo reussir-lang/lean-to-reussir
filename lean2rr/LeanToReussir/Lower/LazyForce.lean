@@ -58,9 +58,8 @@ def taskBindStepFn (z get : String) : LowerM String := do
     let cont := rawFnValue (.fn .unit t) u (.ofExpr (.call get #[] #[.var "t2"]))
     let finish : RR.Block := ⟨#[("v", some t, .call get #[] #[.var "t2"]),
       ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]]),
-      ("e", some u64, onCell "l2r_task_end"), ("wk", some u64, .call "l2r_task_walk_if" #[] #[.var "e"]),
-      ("sl", some u64, .call "l2r_std_leave_if" #[] #[.var "b"])], .atom "0"⟩
-    let wait : RR.Block := ⟨#[("sl", some u64, .call "l2r_std_leave_if" #[] #[.var "b"]),
+      ("e", some u64, onCell "l2r_task_end"), ("wk", some u64, .call "l2r_task_walk_if" #[] #[.var "e"])], .atom "0"⟩
+    let wait : RR.Block := ⟨#[
       ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "pending") #[cont]]),
       ("w", some u64, .call "l2r_task_bind_wait" #[zt] #[.var "c", taskAddr z (.var "t2")])], .atom "0"⟩
     let body : RR.Block := ⟨#[("b", some u64, onCell "l2r_task_begin"),
@@ -81,10 +80,15 @@ scheduler and is waited for, unless it is the running context's own
 (translation plan §5.14). A pending task is
 also registered as running for the duration (`IO.checkCanceled`, and it leaves the queue of
 pending tasks), and runs with its own standard streams,
-as a native task runs on a worker thread (`l2r_std_enter_if`/`l2r_std_leave_if`),
+as a native task runs on a worker thread (`l2r_std_enter_if`, and the
+runtime's `task_end` closes the context: `leanrt::sched`, `l2r_std_leave_c`),
 unless the runtime runs it on the current thread (a `sync` dependent). When
 it has finished, its dependents are walked on its thread, with its streams
-(`l2r_task_walk_if`), before the caller's streams are back. -/
+(`l2r_task_walk_if`), before the caller's streams are back. The context
+closes only once the job has returned and the runtime has dropped what the
+task left (its value, a deleted bind task's continuation), whose frees run
+natively on the task's thread before its finalizers drop its streams
+(review RS15-01). -/
 def lazyGetFn (z : String) : LowerM String := do
   let task ← lazyIsTask z
   let t := RR.Ty.box
@@ -128,8 +132,7 @@ def lazyGetFn (z : String) : LowerM String := do
         else #[]) ++
       #[("v", some t, force),
         ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]])] ++
-      (if task then #[("e", some u64, onCell "l2r_task_end"), ("wk", some u64, .call "l2r_task_walk_if" #[] #[.var "e"]),
-          ("sl", some u64, .call "l2r_std_leave_if" #[] #[.var "b"])]
+      (if task then #[("e", some u64, onCell "l2r_task_end"), ("wk", some u64, .call "l2r_task_walk_if" #[] #[.var "e"])]
         else #[("td", some u64, .call "l2r_thunk_done" #[] #[onCell "l2r_lcell_addr"])])
     -- A `bind` task runs `f` (`taskBindStepFn`): it has then finished, or
     -- waits for the task it continues as; either way it is needed now.

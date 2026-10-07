@@ -253,9 +253,10 @@ The switch steps:
 | 12 | no new part: speed (lean-runtime's perf-3). `Float.toString` gives its text as bytes; the character count of a new string takes eight bytes at a time. lean2rr's own runtime changed at the same step (see below) |
 | 13 | no new part: fixes of Lean runtime bugs that the crate no longer copies (lean-runtime's semantics-4, io-fixes-1 and fixes-12; LB-36, LB-37, LB-39 to LB-45). A capacity that cannot be reserved gives the empty array; every task priority above 8 makes a dedicated task. lean2rr's glue changed at the same step (see below) |
 | 14 | the drain-end hook `after_drain` (lean-runtime's fixes-14), with fixes of the single-thread scheduler (fixes-13, fixes-14), `sin` and `cos` as two calls (semantics-5), and two Lean runtime bugs that the crate no longer copies (io-fixes-2; LB-46, LB-47). lean2rr's glue changed at the same step (see below) |
+| 15 | fixes in both schedulers and the network code (lean-runtime's fixes-15), and three Lean runtime bugs that the crate no longer copies (LB-50, LB-51, LB-52). A connect that a shutdown interrupts stays pending until the connection exists. The crate tells the glue which context is the event loop's. lean2rr's glue changed at the same step (see below) |
 
 Status (2026-10-07): the submodule `third_party/lean-runtime` is pinned at
-`46c5731`. `scripts/l2r.py` builds it with cargo (the features `io`,
+`d042b79`. `scripts/l2r.py` builds it with cargo (the features `io`,
 `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`) and links
 it with `leanrt` ([runtime README](repo:runtime/README.md), "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline
@@ -369,6 +370,21 @@ list with each test: [Known differences](differences.html#lean-bugs-we-do-not-re
   A child that cannot start does not write the parent's pending output.
   Two descriptor leaks are closed. `Std.Internal.UV.System` takes ids and
   priorities whole.
+
+### Streams of the event loop and of dedicated tasks (step 15)
+
+- **The event loop.** Natively libuv's loop is one thread for the whole
+  program. Here the loop runs on a context that ends when no callback is
+  due, and a new context runs the next callbacks. lean2rr keeps one record
+  of the loop's stream cells for all of these contexts. So a stream that
+  one callback sets is the stream of the next callbacks, as natively.
+- **The end of a dedicated task.** A dedicated task has a fresh set of
+  streams. The runtime closes that set at the end of the task, after the
+  task's value is freed. So the code that the free runs uses the task's
+  streams, as natively on the task's thread.
+- **The leave of a thread's streams.** When the drop of one stream sets
+  another cell of the same thread again, that cell stays as it is, as
+  natively.
 
 ### The end of a free, and promise resolutions (step 14)
 

@@ -70,10 +70,17 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
     first task) and stay installed through the walk of its `sync`
     dependents; at `task_end` the worker keeps what the task left and the
     running thread's cells come back;
-  - a dedicated task opens a fresh stream context and closes it at its end
-    (`l2r_task_begin` answers `B_ENTER`: `l2r_std_enter_if`/
-    `l2r_std_leave_if` over `once::push_context`/`pop_context`); right
-    before the close, `l2r_task_end` ends the task in lean-runtime
+  - a dedicated task opens a fresh stream context (`l2r_task_begin`
+    answers `B_ENTER`: `l2r_std_enter_if` over `once::push_context`), and
+    the runtime closes it at the task's end (`Glue::task_end`, through the
+    generated `l2r_std_leave` and its trampoline `l2r_std_leave_c`, over
+    `once::pop_context`), once the job has returned and lean-runtime has
+    dropped what the task left: its value when nothing else holds it, a
+    deleted bind task's continuation, whose frees natively run on the
+    task's thread before its finalizers drop its streams (review RS15-01,
+    test `RtDedicatedValueStreams`: the generated code closed the context
+    inside the job, and a `sync` dependent that the value's free released
+    printed to the process's stdout); before that, `l2r_task_end` ends the task in lean-runtime
     (`end_running_task(id)`, with the id `spawn` or `depend` returned, kept
     in the task's entry before anyone else gets it; not while a bind
     continuation is pending), so its `sync` dependents run inside its
@@ -94,6 +101,23 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   dedicated task. `IO.Process.exit` drops nothing (natively it runs no
   thread finalizers). Panics, `dbgTrace` and `timeit` write through the current
   stderr stream (`l2r_stderr_put`).
+  The leave (`l2r_std_leave`) drops the cells of stdin, stdout and stderr in
+  that order, then gives back the saved context (`pop_context`). A cell
+  that is set again meanwhile, by code that the drop of another cell runs
+  (a stream's closure held the last reference to a promise, whose
+  deferred resolution runs a `sync` dependent that prints), is left as it
+  is: natively a thread-local stream made again during the thread's
+  finalization is never finalized (hunt HST-02, test `RtStdLeaveReentry`:
+  the leave asserted, and the program aborted with no output). Natively a
+  thread's finalizers run in the reverse order of the first use of each
+  stream's getter on that thread; the fixed order differs from it when
+  the drop of one cell runs code that uses another standard stream of the
+  thread (a promise whose `sync` dependent prints), or when two drops
+  have effects whose order shows (two handles of one file), a documented
+  difference (hunt HST-03, review RS15-02; plan §10). A stream whose own
+  drop uses that same stream reads freed memory natively (the finalizer
+  deletes the stream before it clears the thread-local); here that code
+  finds the cell empty and gets the process's stream (review RS15-03).
 - **Why:** Natively `IO.setStdout` & co. replace the current thread's
   streams; a pool worker keeps them from one task to the next, a task's
   `sync` dependents run on its thread with what it left, a dedicated task
@@ -108,12 +132,16 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   build and drop, so the glue keeps them per worker id. A context's record
   outlives it and is given to a new context that reuses its id
   (lean-runtime's `CtxId`s are reused and the glue hears of no context's
-  end). The event loop's context follows the same rule: its stream cells
-  are those of its `CtxId`, where lean-runtime keeps one set for the loop
-  and gives it to the next loop context. A `sync` dependent of a promise
-  the loop resolves that sets a standard stream and does not restore it
-  leaves it to a later loop context only when that context gets the same
-  id (review RS4-06; only such a program can see it).
+  end). The event loop's contexts are the exception: they share one record
+  (`LOOP_STATE`), as lean-runtime keeps one set of its own per-thread state
+  for the loop and gives it to the next loop context, so a `sync`
+  dependent of a promise the loop resolves that sets a standard stream and
+  does not restore it leaves it to every later callback, as natively on
+  libuv's loop thread (hunt HST-01, test `RtLoopStreamsKept`: before, a
+  later loop context on another id started with empty cells, the limit
+  review RS4-06 recorded). Inside `Glue::switched`, lean-runtime's
+  `switch_is_event_loop()` says whether the side that is not `MAIN` is the
+  loop's.
 - **Where:** `sched.rs`: `LeanrtGlue::switched`, `task_begin`, `task_end`,
   `workers_end`, `fresh_context`, `worker_streams_enter`; `task.rs`:
   `begin`, `end`;
