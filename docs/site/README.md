@@ -71,8 +71,8 @@ disagreement (`--check` fails on a warning):
 - the runtime test count in `docs/implementation-status.md` matches
   `tests/runtime`;
 - `reussir-bugs/patches/series` lists exactly the patch files of
-  `reussir-bugs/patches/`, and `reussir-bugs/README.md` says how many of
-  them `l2r-local` has.
+  `reussir-bugs/patches/`, and `reussir-bugs/README.md` names the Reussir
+  branch that has them and says how many it has.
 
 ## Keeping it up to date
 

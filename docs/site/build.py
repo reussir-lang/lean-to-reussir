@@ -383,18 +383,19 @@ def values():
     tests, xfail = runtime_tests()
     opts, req, _ = registry()
     rb = read("reussir-bugs/README.md")
-    m = re.search(r"branch `l2r-local` \(head `([0-9a-f]+)`\)", rb)
-    rhead = m.group(1) if m else "?"
+    # "Its branch `NAME` (head `SHA`) is ef922049 plus the [first] N patches of the series"
+    m = re.search(r"branch `([\w.-]+)` \(head `([0-9a-f]+)`\) is ef922049\s+plus\s+the\s+(?:first\s+)?(\d+)\s+"
+                  r"patches\s+of\s+the\s+series", rb)
+    rbranch, rhead, applied = (m.group(1), m.group(2), int(m.group(3))) if m else ("?", "?", 0)
     series = read("reussir-bugs/patches/series").split()
     pdir = os.path.join(REPO, "reussir-bugs", "patches")
     files = sorted(f for f in os.listdir(pdir) if f.endswith(".patch"))
     if sorted(series) != files:
         warn("reussir-bugs/patches/series does not list exactly the patch files of reussir-bugs/patches/")
-    m2 = re.search(r"plus\s+the\s+first\s+(\d+)\s+patches\s+of\s+the\s+series", rb)
-    applied = int(m2.group(1)) if m2 else 0
-    if not m2 or applied > len(series):
-        warn(f"reussir-bugs/README.md does not say how many of the {len(series)} patches of the series "
-             "l2r-local has ('plus the first N patches of the series')")
+    if not m or applied > len(series):
+        warn(f"reussir-bugs/README.md does not say which Reussir branch has how many of the {len(series)} "
+             "patches of the series ('Its branch `NAME` (head `SHA`) is ef922049 plus the [first] N patches "
+             "of the series')")
     m3 = re.search(r"Runtime test suite \((\d+) programs", read("docs/implementation-status.md"))
     if m3 and int(m3.group(1)) != len(tests):
         warn(f"docs/implementation-status.md says {m3.group(1)} runtime tests; tests/runtime has {len(tests)}")
@@ -405,6 +406,7 @@ def values():
         "env_cases": str(len(env_checks())),
         "opt_count": str(len(opts)),
         "req_count": str(len(req)),
+        "reussir_branch": rbranch,
         "reussir_head": rhead,
         "patches_applied": str(applied),
         "patches_total": str(len(series)),

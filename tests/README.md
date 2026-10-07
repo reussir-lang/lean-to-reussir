@@ -229,8 +229,12 @@ llvm-ir`) and fails on a call through the packed-argument FFI boundary (a
 texture LLVM did not inline; review RULR-01) or a `black_box` barrier inside
 a Reussir function (an inlined `black_box`ed libm function; RULR-07): either
 would keep a Lean loop's tail call. For `RtReadsDeep` it also fails when an
-array read stays a call (reads deep in branches, cold call sites), and for
-`RtArraySets` when an array set stays a call (sets in loops; the set of an
+array read stays a call (reads deep in branches, cold call sites), except
+the three reads that cost more than LLVM's cold-site threshold
+(`l2r_view_take<LAny>`, `l2r_view_take_as<Nat>` and `<Int>`), whose calls
+it allows and counts (Reussir issue 36, not patched: its patch 36-a is
+parked), and for `RtArraySets` when an array set or read stays a call
+(sets in loops and a read of a box, at ordinary call sites; the set of an
 `Array` of a structure stayed a call before switch step 10).
 `tests/runtime/wait-inline-check.sh` builds `RtWaitInline` (a program that
 creates tasks, with a loop of reference operations and a loop forcing

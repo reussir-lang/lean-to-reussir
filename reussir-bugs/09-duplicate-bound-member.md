@@ -2,7 +2,9 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (09-a, applied in `./reussir` (`l2r-local` cc8e5aa5), which also fixes
+**Kind:** bug. **Status:** patched (09-a, on `./reussir`'s `l2r-trim`;
+since 2026-10-07 in the helper-only form of upstream pull request #653,
+which does not need 07-a; it also fixes
 [bug 14](14-member-consumed-before-release.md)).
 
 **Upstream:** pull request #653 (open), with 09-a (which also fixes
@@ -142,10 +144,16 @@ field used twice or stored in a dead value.
 ## Patch
 
 Patch file
-[`patches/09-a-fuse-retains-once.patch`](patches/09-a-fuse-retains-once.patch)
-(`l2r-local` commit `e13c2e2c`, applied in `./reussir`; `l2r-local` head cc8e5aa5). It needs 07-a: its second hunk calls
-`consumesFusedMember`, which 07-a adds ([issue 7](07-phantom-reuse-donor.md)).
-(The file applies on ef922049 without 07-a, but does not compile there.)
+[`patches/09-a-fuse-retains-once.patch`](patches/09-a-fuse-retains-once.patch):
+since 2026-10-07 the helper-only form, commit `670cfac6` of the
+`./reussir` branch `pr/dispatch-fusion-member-retain` (upstream pull
+request #653), as commit `fabae64b` of `l2r-trim` (its subject is the pull
+request's). It adds `consumesFusedMember` itself, so it no longer needs
+07-a, which is parked ([issue 7](07-phantom-reuse-donor.md)). The code of
+`fuseArm` and the tests `take_twice` and `consume_then_take` are those of
+the earlier form. That earlier form (`l2r-local` commit `e13c2e2c`, also
+on `l2r-local` 136d9a9f) came after 07-a and called the helper that 07-a
+added.
 
 **The fix.** Two hunks in `fuseArm`. The first binds each member once and
 erases only its first retain:
@@ -178,7 +186,8 @@ member (bug 14):
 +  }
 ```
 
-`consumesFusedMember(op, members)` (from 07-a) is true when `op` takes one
+`consumesFusedMember(op, members)` (09-a adds it; before 2026-10-07, 07-a
+added it) is true when `op` takes one
 of the retained values as an operand and is neither `rc.borrow` nor
 `rc.inc`.
 

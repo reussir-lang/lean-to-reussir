@@ -80,7 +80,7 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   `returnedWhole`, `LazyFieldsState`.
 - **Remove only if:** the pass is off (correct, slower), or Reussir's token
   reuse stops preferring decrements that never free in the
-  call-before-branch case (patch 07-a alone does not cover it).
+  call-before-branch case (the parked patch 07-a did not cover it).
 
 ### The matched value of a nullary arm is rebuilt (`nullary-scrutinee`)
 

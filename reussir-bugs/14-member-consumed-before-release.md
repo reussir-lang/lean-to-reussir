@@ -85,8 +85,9 @@ not seen in the corpus or test suites.
 Fixed by 09-a, the patch of [bug 9](09-duplicate-bound-member.md#patch)
 (its second hunk, in the revision after review round 2): no fusion when an
 op before the release uses a bound member other than by a borrow or a
-retain (`consumesFusedMember`, which 07-a adds). 07-a had the same flaw in
-its own scan, found in review (R2-1), and is fixed the same way
+retain (`consumesFusedMember`, which 09-a adds; before 2026-10-07 the
+parked 07-a added it). 07-a had the same flaw in its own scan, found in
+review (R2-1), and was fixed the same way
 ([issue 7](07-phantom-reuse-donor.md#patch)).
 
 The round-2 stack, which has the first 09-a (duplicate rule only), still

@@ -15,12 +15,14 @@ local patches that lean2rr's builds apply to Reussir.
   which builds and runs them ([running the repros](#running-the-repros)).
 
 Reussir revision: `ef922049`. The checkout at `./reussir` is not part of
-this repository. Its branch `l2r-local` (head `d79f8b70`) is ef922049
-plus the first 37 patches of the series. The last six patches of the
-series, 38-a, 13-d, 36-a, 03-a, 36-b and 03-b, are not on `l2r-local`
-yet. (The
-`l2r-local` before 2026-10-03, the first twelve patches, is kept as
-branch `l2r-local-pre-final`.)
+this repository. Its branch `l2r-trim` (head `79c1d5f2`) is ef922049
+plus the 40 patches of the series: the stack that lean2rr's builds use,
+made on 2026-10-07, when the optimizations 07-a, 36-a and 36-b were
+parked ([parked patches](#parked-patches)). Its branch `l2r-local` (head
+`136d9a9f`) is the series as it was before: 43 patches, the parked three
+and the earlier form of 09-a included. (The `l2r-local` before
+2026-10-03, the first twelve patches, is kept as branch
+`l2r-local-pre-final`.)
 
 ## Names
 
@@ -36,7 +38,8 @@ branch `l2r-local-pre-final`.)
   A file's subject line is the subject of its commit on `l2r-local`, and
   these subjects use older words: "bug NN" or "issue NN" means entry NN,
   whatever its kind; "13b" and "11b" are parts of entries 13 and 11. The
-  subjects of 40-a and 41-a have no number.
+  subjects of 40-a and 41-a have no number, and 09-a's is the subject of
+  upstream pull request #653's commit (`[rc] dispatch fusion: ...`).
 - **Old numbers.** Until 2026-10-06 the patch files had four-digit numbers
   (0002 to 0069), and commit messages and older notes cite them. The
   [table of old numbers](#old-patch-numbers) gives the new name of each.
@@ -78,7 +81,8 @@ reason is in its file); "upstream: #N" names the pull request on
 github.com/reussir-lang/reussir that carries the patch (all open).
 Column *Review*: the adversarial review round and its result
 ([Review](#review)). Column *Applied*: whether the patches are
-on `./reussir`'s `l2r-local`.
+on `./reussir`'s `l2r-trim` (every patch of the series is); "parked" marks
+a patch outside the series ([parked patches](#parked-patches)).
 
 | # | Kind | Effect | Affects lean2rr output? | lean2rr workaround | Patches | Review | Applied |
 |---|---|---|---|---|---|---|---|
@@ -88,7 +92,7 @@ on `./reussir`'s `l2r-local`.
 | [5](05-one-armed-if.md) | bug | TokenReuse crashes on a one-armed `if` (SIGSEGV) | yes, rrc crash | prelude panics avoid the shape; user code can still hit it | [05-a](patches/05-a-one-armed-if-tokens.patch) (upstream: #655) | passed | yes |
 | [6](06-static-count-wrap.md) | bug, with a flag workaround | a static cell is freed after about 2^32 references | yes, crash | `--nullary-variant-encoding arch-independent` or `boxed` (not used: 06-a keeps the default encoding's speed; to be remeasured on an idle machine) | [06-a](patches/06-a-immediate-count-wrap.patch) | passed | yes |
 | [8](08-padding-lift.md) | bug | padding "lift" gives LLVM a larger layout than Reussir's | no, shape never emitted | - | [08-a](patches/08-a-padding-widening.patch) | rv8/reussir: no defect | yes |
-| [9](09-duplicate-bound-member.md) | bug | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | [09-a](patches/09-a-fuse-retains-once.patch) (also fixes 14; upstream: #653) | passed (revised after round 2) | yes |
+| [9](09-duplicate-bound-member.md) | bug | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | [09-a](patches/09-a-fuse-retains-once.patch) (also fixes 14; upstream: #653, whose helper-only form it is since 2026-10-07) | passed (revised after round 2) | yes |
 | [12](12-node-cache-collision.md) | bug (in cstree) | the parser swaps syntax subtrees whose hashes collide | yes, wrong code or bogus errors on very large files | none | [12-a](patches/12-a-no-hash-node-cache.patch) | passed | yes |
 | [14](14-member-consumed-before-release.md) | bug | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | none of its own: fixed by [09-a](patches/09-a-fuse-retains-once.patch) (entry 9; upstream: #653) | passed | yes |
 | [15](15-nullable-match-yield.md) | bug | a `match` on a `Nullable` yielding a counted value does not compile | no, `Nullable` not used | - | [15-a](patches/15-a-yield-parent-check.patch) | rv7/p22: no defect | yes |
@@ -113,22 +117,24 @@ on `./reussir`'s `l2r-local`.
 | [30](30-call-lowering-lookup.md) | cost (build time) | the call lowering scans the module once per call | yes, build time of large programs | none | [30-a](patches/30-a-callee-symbol-table.patch) | rv8/reussir/e: no defect (a latent hazard noted) | yes |
 | [32](32-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected; large programs cannot be dumped | dump smaller programs | none | - | - |
 | [35](35-texture-rustc-runs.md) | cost (build time) | rrc compiles every polymorphic-FFI texture with rustc again on every build (about 470 per lean2rr program, 13 s of a small program's 16 s of rrc) | yes, build time | none needed: `l2r.py` sets `REUSSIR_FFI_CACHE_DIR` for 35-a's cache (ignored without the patch) | [35-a](patches/35-a-texture-cache.patch) | FCR (+ second look): FCR-01 (medium, a race) and the small findings fixed | yes |
-| [3](03-global-alloc-align.md) | cost (run time; the 16-byte alignment itself is intended) | a Rust allocation whose size is not a multiple of 16 can be moved inside a larger mimalloc block: its page is marked, and every later free in it takes mimalloc's slow path | yes, speed (up to 5% of a program's instructions, varying from run to run) | the runtime allocates its own objects with `mi_malloc` | [03-a](patches/03-a-global-alloc-size-classes.patch), [03-b](patches/03-b-round-only-mimalloc.patch) (review fixes) | review-inline: F5-F7 (low) fixed in 03-b; second look pending | no |
-| [7](07-phantom-reuse-donor.md) | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (plan §5.5) | [07-a](patches/07-a-sink-bound-retains.patch) | passed (revised after round 2) | yes |
-| [36](36-trampoline-inline.md) | missed optimization | a texture's import trampoline has no inline attribute: at a call site LLVM judges cold, a texture costing more than 45 stays a call | yes, speed (array reads deep in branches stayed calls; with the one-word `Box`, `RtReadsDeep`'s `Array` reads) | read textures kept small (the view protocol, perf-array-reads) | [36-a](patches/36-a-inline-small-textures.patch), [36-b](patches/36-b-inline-guards.patch) (review fixes) | review-inline: F1 (high, a stack overflow) and F2-F4 fixed in 36-b; second look pending | no |
+| [3](03-global-alloc-align.md) | cost (run time; the 16-byte alignment itself is intended) | a Rust allocation whose size is not a multiple of 16 can be moved inside a larger mimalloc block: its page is marked, and every later free in it takes mimalloc's slow path | yes, speed (up to 5% of a program's instructions, varying from run to run) | the runtime allocates its own objects with `mi_malloc` | [03-a](patches/03-a-global-alloc-size-classes.patch), [03-b](patches/03-b-round-only-mimalloc.patch) (review fixes) | review-inline: F5-F7 (low) fixed in 03-b; second look pending | yes |
+| [7](07-phantom-reuse-donor.md) | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (plan §5.5) | none (parked: [07-a](patches/parked/07-a-sink-bound-retains.patch)) | passed (revised after round 2); parked on 2026-10-07 | parked |
+| [36](36-trampoline-inline.md) | missed optimization | a texture's import trampoline has no inline attribute: at a call site LLVM judges cold, a texture costing more than 45 stays a call | yes, speed (at a cold call site the read of a box from an `Array`, and of a `Nat` or `Int` element at its type, `RtReadsDeep`) | read textures kept small (the view protocol, perf-array-reads); `ffi-inline-check.sh` allows these three reads at `RtReadsDeep`'s cold call sites | none (parked: [36-a](patches/parked/36-a-inline-small-textures.patch), [36-b](patches/parked/36-b-inline-guards.patch)) | review-inline: F1 (high, a stack overflow) and F2-F4 fixed in 36-b; parked on 2026-10-07 | parked |
 | [39](39-alias-release-donor.md) | missed optimization | token reuse takes the release of a value an opaque call returned (an alias of a live reference, so it never frees) as the donor, over the matched cell (equal score: the most recent producer wins) | no longer: it did with lean2rr commit 3f0cb30 (a field's own box passed back into a rebuilt node; `RtProbeBump`: one list cell for each rebuilt node), now reverted | avoided: a field put back into a rebuilt node is boxed again from its unboxed value | none | - | - |
-| [13](13-long-list-drop.md) | missing feature | releasing a long list or a deep tree recurses once per cell | yes, stack overflow, 2x time and memory | none | [13-a](patches/13-a-release-chains-in-loop.patch), [13-b](patches/13-b-pending-release-stack.patch), [13-c](patches/13-c-cheaper-pending-stack.patch), [13-d](patches/13-d-last-field-order.patch) | 13-a passed (extended after round 2); 13-b passed (round 4, revised twice); 13-c passed (round 5); 13-d (13-b's release order, review RS11-01) passed (review-0069: no defect) | 13-a to 13-c: yes; 13-d: no |
+| [13](13-long-list-drop.md) | missing feature | releasing a long list or a deep tree recurses once per cell | yes, stack overflow, 2x time and memory | none | [13-a](patches/13-a-release-chains-in-loop.patch), [13-b](patches/13-b-pending-release-stack.patch), [13-c](patches/13-c-cheaper-pending-stack.patch), [13-d](patches/13-d-last-field-order.patch) | 13-a passed (extended after round 2); 13-b passed (round 4, revised twice); 13-c passed (round 5); 13-d (13-b's release order, review RS11-01) passed (review-0069: no defect) | yes |
 | [27](27-nullable-member-drop.md) | missing feature (a gap in issue 13's bounded-depth frees) | drop glue does not defer a `Nullable` member: a long chain through `Nullable` overflows the stack when freed | no, `Nullable` not used | - | [27-a](patches/27-a-defer-nullable-member.patch) (amended for RV8R-01) | rv7/p22 round 2 (RV7P-05); rv8/reussir: RV8R-01 fixed | yes |
-| [38](38-tagged-top-bits.md) | missing feature | the inline count increment of a `tagged` handle uses all 64 bits as the address, so the top 16 bits cannot carry foreign data | yes: the one-word `Box` (`LAny`) needs it (`scripts/l2r.py` requires it) | none | [38-a](patches/38-a-tagged-top-bits.patch) | review-anybox r1: no defect (atomic test case added) | no |
+| [38](38-tagged-top-bits.md) | missing feature | the inline count increment of a `tagged` handle uses all 64 bits as the address, so the top 16 bits cannot carry foreign data | yes: the one-word `Box` (`LAny`) needs it (`scripts/l2r.py` requires it) | none | [38-a](patches/38-a-tagged-top-bits.patch) | review-anybox r1: no defect (atomic test case added) | yes |
 | [40](40-drain-end-hook.md) | missing feature | Reussir's runtime does not tell the host when a drain (a free) ends | yes: the `sync` dependents of a promise released inside a free must run when the free is over (`scripts/l2r.py` requires it) | none (a fallback until switch step 6) | [40-a](patches/40-a-drain-end-hook.patch) | rv8/reussir: no defect | yes |
 | [41](41-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate (a number) | yes: the one-word `Nat` and `Int` need it (the prelude declares them `tagged`) | none (before: `Nat` was a two-word `[value]` enum) | [41-a](patches/41-a-tagged-ffi-objects.patch) | the mem-nat review and rv8/nat: no defect | yes |
 
 **Counts.** 40 entries: 20 bugs, 12 costs, 3 missed optimizations, 5
-missing features. 36 entries have patches of their own, 43 patch files in
-all (two each for entries 2, 3, 11 and 36, four for entry 13, one each
-for the others); entry 14 is fixed by entry 9's patch 09-a; 3 entries
-have no patch (25, 32, 39). The 43 patches are 20 bug fixes, 15
-optimizations and 8 features; 37 are applied on `l2r-local`.
+missing features. 34 entries have patches of their own, 40 patch files in
+all (two each for entries 2, 3 and 11, four for entry 13, one each for
+the others); entry 14 is fixed by entry 9's patch 09-a; 5 entries have no
+patch (7, 25, 32, 36, 39). The 40 patches are 20 bug fixes, 12
+optimizations and 8 features; all 40 are on `l2r-trim`. Three parked
+patches lie outside the series and these counts
+([parked patches](#parked-patches)).
 
 Status words used in the entries' summaries:
 
@@ -145,7 +151,7 @@ the order to apply them. To make a patched Reussir, from the repository
 root:
 
 ```sh
-git -C reussir checkout -b l2r-local ef922049
+git -C reussir checkout -b l2r-trim ef922049
 while read -r p; do
     git -C reussir am "$PWD/reussir-bugs/patches/$p" || break
 done < reussir-bugs/patches/series
@@ -153,20 +159,25 @@ cmake --build reussir/build
 ```
 
 `git am` records the patches as local commits; `git apply` works as well,
-if you would rather keep them as uncommitted changes. `head -n 37
-reussir-bugs/patches/series` gives the patches of `./reussir`'s
-`l2r-local` (d79f8b70). Checked on 2026-10-06 in a scratch worktree: the
-whole series on ef922049 gives tree `70f24fae`, the tree of the scratch
-Reussir branch `l2r-inline` (`136d9a9f`, l2r-anybox + 36-a + 03-a + 36-b
-+ 03-b); its first 41 patches give tree `85ec7bd2` (`l2r-inline` at
-`ad079b37`, before the review fixes); its first 39 patches give tree
-`560e017e`, the tree of the scratch Reussir
-branch `l2r-anybox` (`1eb710b4`, d79f8b70 + 38-a + 13-d); its first 37
-patches give tree `cececf25`, the tree of `l2r-local` d79f8b70; the
-four-digit files in their old order gave the same trees. The `From
-<sha>` line of each patch file names the commit of the local integration
-checkout; `l2r-local`'s commits have the same contents and messages (their
-hashes are in each entry's *Patch* section).
+if you would rather keep them as uncommitted changes. Checked on
+2026-10-07 in a scratch worktree: the series on ef922049 gives tree
+`a3f5b608`, the tree of `./reussir`'s `l2r-trim` (`79c1d5f2`). The `From
+<sha>` line of each patch file names the commit it was made from (for
+09-a, the commit of `l2r-trim`); apart from 09-a, the commits of
+`l2r-trim` have the same contents and messages as those of `l2r-local`
+(the hashes of `l2r-local`'s commits are in each entry's *Patch*
+section).
+
+Until 2026-10-07 the series had 43 patches: 07-a after 02-a, 36-a after
+13-d and 36-b after 03-a, and 09-a in its earlier form, which called a
+helper of 07-a. That series on ef922049 gave tree `70f24fae`, the tree of
+`l2r-local` and of the scratch Reussir branch `l2r-inline` (`136d9a9f`);
+its first 41 patches gave tree `85ec7bd2` (`l2r-inline` at `ad079b37`,
+before the review fixes of 36-a and 03-a); its first 39 patches gave
+tree `560e017e`, the tree of the scratch Reussir branch `l2r-anybox`
+(`1eb710b4`, d79f8b70 + 38-a + 13-d); its first 37 patches gave tree
+`cececf25`, the tree of `l2r-local` d79f8b70 (2026-10-04 to 2026-10-06);
+the four-digit files in their old order gave the same trees.
 
 **Why the series is not in entry order.** The series is the order in which
 the patches were made, reviewed and applied. Each patch applies on the
@@ -175,7 +186,8 @@ needs 08-a, and 11-b must come after 19-a.
 
 Order and dependencies:
 
-- 09-a needs 07-a: it calls `consumesFusedMember`, which 07-a adds.
+- 09-a (the helper-only form of upstream pull request #653) applies on
+  ef922049 alone; in the series it comes after 02-a.
 - 13-b rewrites 13-a's code, and 13-c rewrites 13-b's runtime: 13-a, 13-b,
   13-c in that order. 13-d changes `emitCellRelease`, 13-b's code as 27-a
   amended it: it comes after 27-a. It was made on branch `l2r-anybox` of a
@@ -197,23 +209,25 @@ Order and dependencies:
   none of 34-a's files, so it applies after 33-a or after 34-a.
 - 38-a (issue 38) was made on `l2r-local` d79f8b70 (the series up to
   35-a).
-- 36-a (issue 36, a missed optimization) was made on `l2r-anybox` (the
-  series up to 13-d), on branch `l2r-inline` of a Reussir worktree. It
-  also applies on d79f8b70 and on ef922049 alone (checked with `git apply
-  --check`).
-- 03-a (issue 3, a cost) was made on 36-a, on the same branch. It
-  changes only `crates/reussir-rt/src/alloc.rs` and also applies on
-  d79f8b70 and on ef922049 alone.
-- 36-b and 03-b, the review fixes of 36-a and 03-a, were made on 03-a, on
-  the same branch, in that order (03-b is the last line of the series).
-  Each needs its `a` patch.
+- 03-a (issue 3, a cost) was made on the parked 36-a, on branch
+  `l2r-inline` of a Reussir worktree. It changes only
+  `crates/reussir-rt/src/alloc.rs`, which 36-a does not touch, and also
+  applies on d79f8b70 and on ef922049 alone; in the series it comes after
+  13-d.
+- 03-b, the review fixes of 03-a, was made on the same branch after the
+  parked 36-b (which touches none of its files). It needs 03-a and is the
+  last line of the series.
 
 What lean2rr needs: its runtime needs 13-b to build (`leanrt::drop` uses
 `reussir_rt::drop`, the pending stack 13-b adds to Reussir's runtime);
 `scripts/l2r.py` stops with an error when the Reussir checkout lacks 40-a,
 38-a or 13-d (`REQUIRED_REUSSIR_PATCHES`); its prelude needs 41-a (it
 declares `Nat` and `Int` `tagged`). `tests/runtime/ffi-inline-check.sh`
-needs 36-a (the reads of `RtReadsDeep`). Without the other patches,
+does not need the parked 36-a: at the cold call sites of `RtReadsDeep` it
+allows the calls of the three read textures that cost more than LLVM's
+cold-site threshold, the read of a box and the reads of a `Nat` or `Int`
+element at its type ([issue 36](36-trampoline-inline.md)).
+Without the other patches,
 lean2rr programs still compile, but the bugs can appear (and the costs
 come back).
 
@@ -222,8 +236,28 @@ the next free letter of the entry (a new problem gets the next free entry
 number, 42). Put it in `patches/` and add its name as the last line of
 `patches/series`. Write the *Patch* and *Upstream note* sections of the
 entry's file, and update the entry's row in the status table (column
-*Applied*: "no" until it is on `l2r-local`). Add a row to the
+*Applied*: "no" until it is on the Reussir branch named
+[above](#reussir-issues-and-local-patches)). Add a row to the
 [review table](#review) when its review is done.
+
+### Parked patches
+
+A parked patch was made and reviewed, but lean2rr's builds do not apply
+it: the owner removed it from the series. Its file is in
+[`patches/parked/`](patches/parked/), outside
+[`patches/series`](patches/series) and the counts above; its entry says
+why it is parked and describes the patch.
+
+| Patch | Entry | Kind | Parked | Why |
+|---|---|---|---|---|
+| [07-a](patches/parked/07-a-sink-bound-retains.patch) | [7](07-phantom-reuse-donor.md) | optimization | 2026-10-07 | a missed optimization; lean2rr's `lazy-fields` covers it |
+| [36-a](patches/parked/36-a-inline-small-textures.patch), [36-b](patches/parked/36-b-inline-guards.patch) (review fixes) | [36](36-trampoline-inline.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch |
+
+Both entries say "not patched"; their issues stay open as missed
+optimizations. Remove a patch from the series the same way: move its file
+to `patches/parked/`, delete its line from `patches/series`, rebuild the
+Reussir stack from the series, and update the entry, its row and the
+counts.
 
 ## Running the repros
 
@@ -309,19 +343,19 @@ patch; there was no 0067 file.
 - A real Reussir bug (verified reproducible erroneous behaviour) gets a
   small local patch, reviewed adversarially, even if lean2rr never
   triggers it or works around it.
-- A cost that comes from an avoidable inefficiency gets a small patch too:
-  an optimization, not a fix (issues 10, 11, 16, 17, 20, 22, 23, 30, 35,
-  build time; issue 3, run time: 03-a keeps the intended alignment and
-  removes the avoidable slow frees). Costs whose removal would be a
-  redesign (25, 32) and missed optimizations stay unpatched, with the
-  reason in their file, unless lean2rr cannot work around them: 36-a
-  (issue 36: with the one-word `Box`, the read of an `Array` element no
-  longer fits under LLVM's threshold for a cold call site). The
-  optimization 07-a (issue 7, a missed optimization; 09-a builds on it)
-  predates this rule and stays, for the reasons in its file. The features
-  are for missing features that lean2rr needs: 13-a to 13-d (issue 13), 27-a (issue 27,
-  which extends issue 13's feature to `Nullable` members), 38-a, 40-a and
-  41-a.
+- Only bug fixes and major items stay in the series (owner, 2026-10-07).
+  Besides the bug fixes these are: the build-time costs that make large
+  builds slow or infeasible (issues 10, 11, 16, 17, 20, 22, 23, 30, 35:
+  optimizations, not fixes), the allocator fix that the owner chose
+  (03-a and 03-b, issue 3, run time: they keep the intended alignment and
+  remove the avoidable slow frees), and the features for missing features
+  that lean2rr needs: 13-a to 13-d (issue 13), 27-a (issue 27, which
+  extends issue 13's feature to `Nullable` members), 38-a, 40-a and 41-a.
+- A patch that only buys a small run-time gain on a few programs is
+  parked, not kept: 07-a (issue 7) and 36-a with 36-b (issue 36), both
+  missed optimizations ([parked patches](#parked-patches)). Costs whose
+  removal would be a redesign (25, 32) and missed optimizations stay
+  unpatched, with the reason in their file.
 - Patches are local: lean2rr's work never pushes or submits them. The
   "Upstream note" at the end of a patched entry is text for an upstream
   report. Five of the bug fixes now have pull requests upstream (26-a,
@@ -345,7 +379,7 @@ finding X" or by finding IDs are local notes, outside this repository
 
 | Patches | Round | Notes | Result |
 |---|---|---|---|
-| 02-a, 04-a, 05-a, 06-a, 07-a, 09-a, 12-a, 13-a | rounds 1 to 3 | `rv-patches/FINDINGS.txt`, `rv-patches/roundN/FINDINGS.txt` | passed (07-a, 09-a, 13-a revised) |
+| 02-a, 04-a, 05-a, 06-a, 07-a, 09-a, 12-a, 13-a | rounds 1 to 3 | `rv-patches/FINDINGS.txt`, `rv-patches/roundN/FINDINGS.txt` | passed (07-a, 09-a, 13-a revised) (07-a parked on 2026-10-07; 09-a now in the helper-only form of upstream #653, the same code) |
 | 13-b | round 4 (4, 4b, 4c) | `rv-patches/round4*/FINDINGS.txt` | passed, revised twice |
 | 13-c | round 5 | `perf0014-review/` | passed |
 | 21-a | lean2rr round 6 (RV6L-01) | `rv6/` | passed |
@@ -360,7 +394,7 @@ finding X" or by finding IDs are local notes, outside this repository
 | 35-a | FCR | `ffi-cache-review/` (repros) | no defect in single-build use; FCR-01 (medium: a library replaced during a run filed entries under the old key) fixed by stamping the hashed files; FCR-02 (`-L` kinds), FCR-03 (`%` in the directory), FCR-04 (say when caching is off), FCR-05 (bitcode magic) fixed; FCR-06/07 documentation; FCR-08 to FCR-10 lean2rr's documents; second look: the fixes sound, FCR2-01 (a package directory's stamp changed by unrelated entries) and FCR2-02 (in-place rewrite with the time put back: status-change time added) fixed |
 | 38-a | review-anybox r1 | `review-anybox/r1` | no defect; the atomic case was added to the patch's test |
 | 13-d | review-0069 | `review-0069/` | no defect |
-| 36-a, 03-a | review-inline | `review-inline/` (repros: `stack/stack36.rr`, `v3/`, `cg/`) | F1 (36-a, high: `alwaysinline` skipped the inliner's stack limit for recursive callers; a stack overflow), F2 (36-a, low: textures that cannot return), F3 (36-a, hardening: interposable trampolines), F4 (36-a docs) fixed in 36-b; F5 (03-a, low: the rounding hid overflows from the sanitizers), F6 (03-a, low: the whole-block test under mimalloc v3), F7 (03-a docs) fixed in 03-b; a second look is pending |
+| 36-a, 03-a | review-inline | `review-inline/` (repros: `stack/stack36.rr`, `v3/`, `cg/`) | F1 (36-a, high: `alwaysinline` skipped the inliner's stack limit for recursive callers; a stack overflow), F2 (36-a, low: textures that cannot return), F3 (36-a, hardening: interposable trampolines), F4 (36-a docs) fixed in 36-b; F5 (03-a, low: the rounding hid overflows from the sanitizers), F6 (03-a, low: the whole-block test under mimalloc v3), F7 (03-a docs) fixed in 03-b; a second look is pending for 03-b; 36-a and 36-b parked on 2026-10-07 |
 
 The integration of the first 34 patches
 (the local integration checkout, then at `5c0514e3`) was checked
@@ -421,10 +455,15 @@ The repros were checked on these builds (on the aarch64 test machine):
   Before the review of 28-a to 31-a was folded in, it was 34 patches with
   the first versions of 28-a and 31-a (`5c0514e3`, kept in that checkout
   as branch `l2r-final-pre-e2`).
-- `d79f8b70`: the final stack + 34-a + 35-a, `l2r-local` since 2026-10-04
-  (the first 37 patches of the series).
+- `d79f8b70`: the final stack + 34-a + 35-a, `l2r-local` from 2026-10-04
+  to 2026-10-06 (the first 37 patches of the series then).
 - `1eb710b4`: d79f8b70 + 38-a + 13-d, branch `l2r-anybox` of a scratch
-  Reussir worktree (the whole series).
+  Reussir worktree.
+- `136d9a9f`: 1eb710b4 + 36-a, 03-a, 36-b, 03-b, branch `l2r-inline` of a
+  scratch Reussir worktree, and `l2r-local` since 2026-10-07 (the series
+  of 43 before 2026-10-07).
+- `79c1d5f2`: `l2r-trim`, ef922049 + the series of 40 (2026-10-07: 07-a,
+  36-a and 36-b parked, 09-a in its helper-only form).
 
 The unpatched `run.sh` lines quoted in the entries come from a recorded run
 of the same script on unpatched ef922049, or, for entries 24 to 32, on

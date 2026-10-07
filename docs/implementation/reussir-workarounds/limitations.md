@@ -116,11 +116,11 @@ files, `runtime/` and `scripts/` from the repository root.
   constructor without fields in its arm, so the scrutinee is not kept
   alive by a use there.
 - **Why:** A missed optimization, not a bug: rrc's output is correct, only
-  slower (allocations where a cell could be reused). Patch 07-a (an
-  optimization, applied) covers some shapes (`UInt64` keys) but not a call
-  before the branch (`Nat` and `String` comparisons), which the passes do
-  ([07-phantom-reuse-donor.md](../../../reussir-bugs/07-phantom-reuse-donor.md)).
-  07-a stays because 09-a uses its helper.
+  slower (allocations where a cell could be reused). Reussir has no patch
+  for it: 07-a (an optimization for some shapes, such as `UInt64` keys,
+  but not a call before the branch, `Nat` and `String` comparisons) is
+  parked, because the passes cover the issue (owner, 2026-10-07;
+  [07-phantom-reuse-donor.md](../../../reussir-bugs/07-phantom-reuse-donor.md)).
 - **Where:** [../control-flow/cases.md](../control-flow/cases.md).
 - **Remove only if:** Reussir's token reuse handles the call-before-branch
   shape; then measure with the passes off.
@@ -131,25 +131,30 @@ files, `runtime/` and `scripts/` from the repository root.
   all, are kept small: each costs less than 45 in LLVM's inline cost model
   once its `_ffi` function is inlined into rrc's import trampoline. An
   array read is three textures (`l2r_array_give`, `l2r_view_size`,
-  `l2r_view_take`) instead of one. With the one-word `Box`,
-  `l2r_view_take<LAny>` costs more than 45: without Reussir patch 36-a,
-  `RtReadsDeep`'s `Array` reads stay calls. 36-a marks a texture whose
-  cost is at most LLVM's threshold for an ordinary call site (225, 250 at
-  `-O aggressive`) and its trampoline `alwaysinline`; 36-b leaves out
-  textures with a stack frame over 1024 bytes and textures that cannot
-  return.
+  `l2r_view_take`) instead of one. Three reads cost more than 45: the
+  read of a box (`l2r_view_take<LAny>`, with the one-word `Box`) and the
+  reads of a `Nat` or `Int` element at its type (`l2r_view_take_as<Nat>`,
+  `<Int>`). At a call site that LLVM judges cold they stay calls.
+  `tests/runtime/ffi-inline-check.sh` allows these calls in `RtReadsDeep`
+  (every read there sits behind seven conditions) and nowhere else; in
+  `RtArraySets` (sets, and the read of a box, at ordinary call sites) no
+  read or set may stay a call.
 - **Why:** A missed optimization, not a bug: rrc defines the trampoline
   without an inline attribute, so LLVM inlines it into a caller by its
   ordinary cost model, at a call site it judges cold (deep in branches)
   only below 45. A read texture that checked the bounds (cost 80) stayed a
   call at 279 of lean-zip's array reads; one that decremented first and
-  checked after (cost 55) at 41 reads of its LZ77 loop
-  ([36-trampoline-inline.md](../../../reussir-bugs/36-trampoline-inline.md)).
+  checked after (cost 55) at 41 reads of its LZ77 loop. Patches 36-a and
+  36-b, which inlined such textures at cold sites too, are parked: the
+  gain is too small for a local Reussir patch (owner, 2026-10-07;
+  [36-trampoline-inline.md](../../../reussir-bugs/36-trampoline-inline.md)).
 - **Where:** [../ownership.md](../ownership.md#reads-give-their-reference-up-first-for-a-view);
-  `runtime/prelude.rr` (the read textures).
-- **Remove only if:** every Reussir that lean2rr supports has 36-a and
-  36-b; then
-  the read could be one texture again (measure the reads first).
+  `runtime/prelude.rr` (the read textures);
+  `tests/runtime/ffi-inline-check.sh` (`COLD_ALLOWED`).
+- **Remove only if:** Reussir inlines small textures at cold call sites
+  (an inline attribute on the trampoline); then remove the exception from
+  the check, and the read could be one texture again (measure the reads
+  first).
 
 ### Drop glue recursed once per cell (issue 13, missing feature)
 

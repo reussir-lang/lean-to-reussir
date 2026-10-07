@@ -38,9 +38,10 @@ lean2rr needs Reussir built from source with local patches: Reussir
 [reussir-bugs/patches/series](repo:reussir-bugs/patches/series), in that
 order. Each patch belongs to one entry and is named after it: the file
 `13-b-pending-release-stack.patch` is the second patch of issue 13, and the
-text calls it 13-b. Branch `l2r-local` of the checkout `./reussir` (head
-{{v:reussir_head}}) has the first {{v:patches_applied}} patches of the
-series.
+text calls it 13-b. Branch `{{v:reussir_branch}}` of the checkout
+`./reussir` (head {{v:reussir_head}}) has {{v:patches_applied}} patches of
+the series. Three patches are parked: they were made and reviewed, but the
+builds do not apply them (below).
 
 <div class="rule" markdown="1">
 **Policy.**
@@ -48,10 +49,12 @@ series.
 - Every Reussir problem that lean2rr meets is documented, with a repro.
 - A real Reussir bug gets a small local patch, reviewed adversarially, even
   when lean2rr works around it or never triggers it.
-- A cost from an avoidable inefficiency (build time, or run time as in
-  issue 3) gets a small patch too. This patch is an optimization, not a
-  fix. A missed optimization gets a patch only when lean2rr cannot work
-  around it (issue 36).
+- Only bug fixes and major items stay in the series (owner, 2026-10-07):
+  the build-time costs that make large builds slow (their patches are
+  optimizations, not fixes), the allocator fix of issue 3, and the
+  features that lean2rr needs. A patch that only gives a small gain in
+  speed on a few programs is parked: 07-a (issue 7) and 36-a and 36-b
+  (issue 36).
 - lean2rr's work keeps the patches local: it does not push them or submit
   them. Five bug fixes (26-a, 02-a, 09-a, 04-a and 05-a) have open pull
   requests on Reussir's repository; the table below gives their numbers.
@@ -79,7 +82,7 @@ directory; an rrc without the patch ignores it. The review found a
 race (a library replaced during a build); it is fixed, and a second look
 checked the fix.
 
-**Patch 13-d (issue 13), not applied yet.** Inside a free, the drop glue
+**Patch 13-d (issue 13), applied since 2026-10-07.** Inside a free, the drop glue
 releases the last record field of a cell after the cell, directly. So a
 chain through that field is freed in a loop. But this field then comes
 before the work that the other fields of the cell pushed, and Lean
@@ -88,22 +91,29 @@ no field after it can push work (an array, a thunk or task cell, a
 `[value]` record). Otherwise the glue pushes every record field, in field
 order.
 
-**Patch 36-a (issue 36, a missed optimization), not applied yet.** Reussir
-code calls a Rust FFI snippet through a small trampoline that rrc makes.
-The trampoline only packs the arguments. Neither function has an inline
+**Parked: patch 36-a (issue 36, a missed optimization).** Reussir code
+calls a Rust FFI snippet through a small trampoline that rrc makes. The
+trampoline only packs the arguments. Neither function has an inline
 attribute, so LLVM uses its cost model alone. At a call site that LLVM
 thinks is rare (deep in branches), it inlines only very small functions
-(cost 45). The read of an `Array` element became too large for this limit
-with the one-word `Box`, so such reads stayed calls. The patch marks a
-snippet and its trampoline `alwaysinline` when the snippet's cost is at
-most the limit of a usual call site (cost 225, or 250 at `-O
-aggressive`). Larger snippets do not change. The review found that
-`alwaysinline` also skipped LLVM's stack limit for recursive callers: a
-snippet with a 64 KiB buffer, inlined into a recursive function,
-overflowed the stack. Patch 36-b leaves out snippets with a stack frame
-over 1024 bytes and snippets that cannot return (panics).
+(cost 45). The read of a box from an `Array` became too large for this
+limit with the one-word `Box`, and so are the reads of a `Nat` or `Int`
+element at its type, so such reads stay calls. The patch
+marked a snippet and its trampoline `alwaysinline` when the snippet's cost
+was at most the limit of a usual call site. Patch 36-b, from its review,
+left out snippets with a large stack frame and snippets that cannot
+return. The gain was too small for a local patch, so both are parked. The
+check `tests/runtime/ffi-inline-check.sh` allows the calls of these three
+reads at the rare call sites of `RtReadsDeep`, and nowhere else.
 
-**Patch 03-a (issue 3, a cost), not applied yet.** Reussir's Rust
+**Parked: patch 07-a (issue 7, a missed optimization).** Token reuse can
+take a release that never frees as the donor of a new cell. 07-a moved
+some increments into a branch so that the matched cell is reused. The
+optional pass `lazy-fields` already avoids the shape, so 07-a is parked.
+Patch 09-a (bug 9) used a helper of 07-a. It is now in the form of
+Reussir's pull request #653, which adds the helper itself.
+
+**Patch 03-a (issue 3, a cost), applied since 2026-10-07.** Reussir's Rust
 allocator gives every Rust allocation 16-byte alignment, on purpose.
 For sizes of at most 64 bytes, mimalloc gives this alignment from a
 block's size class only when the size is a multiple of 16. For other
@@ -175,16 +185,19 @@ Not bugs, but each one costs lean2rr measurably:
   import trampolines carry no inline attribute, so LLVM inlines a runtime
   function at a call site it judges cold only when the function is small.
   lean2rr keeps its array and string read functions small;
-  `tests/runtime/ffi-inline-check.sh` fails if a read stays a call.
-  Patches 36-a and 36-b (not applied yet) inline small runtime functions
-  at such sites.
+  `tests/runtime/ffi-inline-check.sh` fails if a read stays a call, except
+  three reads at a rare call site that are over the limit (a box, and a
+  `Nat` or `Int` at its type). Patches
+  36-a and 36-b, which inlined small runtime functions at such sites, are
+  parked.
 - **The choice of a reuse token (issues 7 and 39, missed optimizations).**
   When two dead cells have the right size, token reuse takes the one
   released last. A release that never frees can win: a cell that a later
   field still holds (issue 7), or a value that an opaque call returned
   while another reference to it stays live (issue 39). The new cell is
   then allocated, and the cell that does die is freed. lean2rr binds the
-  fields of a live matched value late (`lazy-fields`) because of issue 7.
+  fields of a live matched value late (`lazy-fields`) because of issue 7
+  (its patch 07-a is parked).
   Because of issue 39, lean2rr boxes a field again when it puts the field
   back into a rebuilt node. If it put back the field's own box, the
   unboxed value would die there, and `RtProbeBump` would allocate one list

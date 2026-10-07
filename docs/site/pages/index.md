@@ -3,7 +3,7 @@
 <p class="lead">lean2rr compiles Lean 4 programs to native executables through
 Reussir. This site explains the design with diagrams and short text. It
 describes the repository that it is built from: Lean {{v:lean}}, and Reussir
-with lean2rr's local patches (<code>l2r-local</code> at {{v:reussir_head}}).</p>
+with lean2rr's local patches (<code>{{v:reussir_branch}}</code> at {{v:reussir_head}}).</p>
 
 <div class="note" markdown="1">
 **How to read this site.** Each page is a summary. The markdown documents

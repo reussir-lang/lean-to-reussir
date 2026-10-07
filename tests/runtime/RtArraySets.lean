@@ -1,6 +1,7 @@
 /-! Runtime test: array sets in loops, at ordinary call sites (one condition
 before each). `tests/runtime/ffi-inline-check.sh` also builds this test to
-LLVM IR and fails when a set's texture or function stays a call. The set of
+LLVM IR and fails when a set's or a read's texture or function stays a
+call (it reads a box once, at an ordinary call site). The set of
 an `Array` of a structure had the structure's whole release in line for the
 element it replaces (its fields' releases, its free), and LLVM kept that
 texture out of line (unionfind's `l2r_array_set`). Each `put` sets: an

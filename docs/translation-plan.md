@@ -1338,8 +1338,9 @@ used and every field is bound at the match):
   instead of the cell actually freed: `TreeMap.insert` rebuilt every node
   of the path, and so did a BST insert whose key comparison is a call
   before the branch (`Nat`, `String`, `compare`), even with the local fix
-  of Reussir issue 7, a missed optimization
-  (reussir-bugs/07-phantom-reuse-donor.md). A structure
+  of Reussir issue 7, a missed optimization (patch 07-a, parked since
+  2026-10-07: this pass covers the issue;
+  reussir-bugs/07-phantom-reuse-donor.md). A structure
   (one constructor: no match, its fields are projections) that stays live
   the same way projects only the fields used while it is live; an inner
   alternative that no longer uses it projects the others there (the pair
@@ -3199,7 +3200,8 @@ Each item says what differs and when.
   each read texture is small enough for LLVM to inline at a call site it
   judges cold (Reussir issue 36; docs/implementation/ownership.md, "Reads
   give their reference up first, for a view"; with the one-word `Box`,
-  `l2r_view_take<LAny>` is not, and needs Reussir patch 36-a). Index loops and insertion
+  `l2r_view_take<LAny>` is not, and stays a call there: the patch that
+  inlined it, 36-a, is parked). Index loops and insertion
   sort on `Array UInt64` ran at 1.2x native or better before these
   changes; with them (perf-array-reads, measured in the LLVM IR), no
   array read of lean-zip stays a call (279 did), and its LZ77 loop has 47

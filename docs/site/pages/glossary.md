@@ -181,7 +181,7 @@ token reuse
 :   Reussir's way to build a new cell in the memory of a cell that dies (Lean's reset/reuse).
 
 local patch
-:   A change to Reussir that lean2rr's builds use, on branch `l2r-local` of `./reussir`. Never pushed upstream.
+:   A change to Reussir that lean2rr's builds use, on branch `{{v:reussir_branch}}` of `./reussir`. lean2rr's work does not push it upstream. A *parked* patch is kept outside the series: the builds do not apply it.
 
 issue
 :   A numbered entry of `reussir-bugs/README.md`: a Reussir problem that lean2rr met. Its kind (bug, cost, missed optimization, missing feature, intended) says what it is. Only a bug is wrong behaviour.

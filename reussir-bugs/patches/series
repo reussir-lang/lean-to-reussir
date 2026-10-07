@@ -1,7 +1,6 @@
 06-a-immediate-count-wrap.patch
 04-a-coinductive-type-compare.patch
 02-a-struct-field-store.patch
-07-a-sink-bound-retains.patch
 09-a-fuse-retains-once.patch
 05-a-one-armed-if-tokens.patch
 13-a-release-chains-in-loop.patch
@@ -37,7 +36,5 @@
 35-a-texture-cache.patch
 38-a-tagged-top-bits.patch
 13-d-last-field-order.patch
-36-a-inline-small-textures.patch
 03-a-global-alloc-size-classes.patch
-36-b-inline-guards.patch
 03-b-round-only-mimalloc.patch

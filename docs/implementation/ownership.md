@@ -266,13 +266,12 @@ runtime.
   `tests/runtime/ffi-inline-check.sh` builds `RtArraySets` (sets of
   every element representation in loops) to LLVM IR and fails when a
   set's texture or function stays a call; dev's runtime kept the two sets
-  of the structure there. Without Reussir patch 36-a, at a call site that
-  LLVM judges cold (deep in branches) every set texture, of any element
-  type, is still a call: the uniqueness test with its copy, the bounds
-  check with its panic and the store are above LLVM's cold-site threshold
-  (Reussir issue 36). With 36-a every set texture is `alwaysinline` (each
-  costs less than LLVM's threshold for an ordinary call site) and is
-  inlined there too.
+  of the structure there. At a call site that LLVM judges cold (deep in
+  branches) every set texture, of any element type, is still a call: the
+  uniqueness test with its copy, the bounds check with its panic and the
+  store are above LLVM's cold-site threshold (Reussir issue 36, not
+  patched: its patch 36-a, which made every such texture `alwaysinline`,
+  is parked).
 - **Where:** `runtime/leanrt/src/array.rs`: `ReleaseElem`,
   `release_last`, `set_in`, `pop_in`; `runtime/leanrt/src/drop.rs`:
   `release`; tests `RtArraySets`, `RtArraySetFreeOrder`,
@@ -387,9 +386,15 @@ runtime.
   checked texture that decrements first costs 55 in LLVM's inline cost
   model, above its threshold for a cold call site, 45 (41 of the loop's
   reads stayed calls; [Reussir issue 36](../../reussir-bugs/36-trampoline-inline.md),
-  a missed optimization). Split into `give`, `size` and `take`, each
-  texture is small enough for a cold call site: no read stays a call, and
-  the loop has 47 hot stores, at most 7 on one iteration (15 before).
+  a missed optimization, not patched). Split into `give`, `size` and
+  `take`, each texture is small enough for a cold call site: no read stays
+  a call, and the loop has 47 hot stores, at most 7 on one iteration (15
+  before). With the one-word `Box` the read of a box is over that
+  threshold again (`view_take<LAny>`: the copy of a box tests its low bit
+  and masks its top bits), and so are the reads of a `Nat` or `Int`
+  element at its type (`view_take_as`): at a cold call site they stay
+  calls (`tests/runtime/ffi-inline-check.sh` allows this in `RtReadsDeep`
+  only).
   Bit 0 is set for the shared case because LLVM does not know that the
   block's address is even: after the caller's increment it sees the view
   `o | 1` and folds the test; with the bit set for the last reference it

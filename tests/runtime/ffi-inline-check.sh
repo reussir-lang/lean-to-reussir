@@ -19,17 +19,23 @@
 # reads at a type `lean_array_fget_as`, `l2r_view_take_as`, ...;
 # docs/implementation/ownership.md, "Reads give their reference up first,
 # for a view"): the read textures must stay under LLVM's inlining threshold
-# for a cold call site (Reussir issue 36), else every such read is a call.
-# With the one-word `Box`, `l2r_view_take<LAny>` is over it: the test needs
-# Reussir patches 36-a and 36-b, which inline a texture whose cost is at
-# most LLVM's threshold for an ordinary call site at a cold one too.
-# For RtArraySets (array sets in loops at ordinary call sites), it likewise fails
-# on any call left of an array set's texture or function (`l2r_array_set`,
-# `lean_array_set`, ...; docs/implementation/
-# ownership.md, "A set releases a replaced record with its decrement in
-# line"): the set of an `Array` of a structure released the replaced
-# element with the structure's whole release in line, and LLVM kept the
-# texture out of line (unionfind's `l2r_array_set`).
+# for a cold call site (cost 45), else every such read is a call. The
+# exception: three read textures cost more than 45, the read of a box
+# (`l2r_view_take<LAny>`: with the one-word `Box`) and the reads of a `Nat`
+# or `Int` element at its type (`l2r_view_take_as<Nat>`, `<Int>`), and rrc
+# gives a texture's import trampoline no inline attribute (Reussir issue
+# 36, not patched: its patch 36-a is parked). So in RtReadsDeep, whose
+# reads all sit at cold call sites, the calls of these three symbols
+# (COLD_ALLOWED) are allowed and counted.
+# For RtArraySets (array sets and reads in loops at ordinary call sites), it
+# fails on any call left of an array set's or read's texture or function
+# (`l2r_array_set`, `lean_array_set`, `l2r_view_take`, ...), with no
+# exception: at an ordinary call site LLVM inlines a texture up to cost
+# 250 (RtArraySets reads a box there). The set of an `Array` of a structure
+# released the replaced element with the structure's whole release in line,
+# and LLVM kept the texture out of line (unionfind's `l2r_array_set`;
+# docs/implementation/ownership.md, "A set releases a replaced record with
+# its decrement in line").
 #   tests/runtime/ffi-inline-check.sh [NAME...]
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN, L2R_LEAN_RUNTIME).
@@ -42,34 +48,42 @@ mkdir -p "$OUT"
 cd "$OUT"
 [ $# -gt 0 ] || set -- RtFloatLoopStack RtFloat RtString RtSweepStrPos RtHashMap RtSweepFixed RtUInt RtReadsDeep RtArraySets
 # Reussir's symbols are `_RC<length><name>...` (`_RIC` for an instance of a
-# generic function); the read functions whose calls RtReadsDeep must not keep
-# (`deep_calls FILE reads`), the set functions whose calls RtArraySets must
-# not keep (`deep_calls FILE sets`).
+# generic function, its type arguments after the name). `deep_calls FILE
+# KINDS [SYMBOL...]` counts the calls of the read functions (KINDS `reads`)
+# or of the read and set functions (`reads,sets`); a call of one of the
+# SYMBOLs is printed as `allowed`.
 deep_calls() {
-  python3 - "$1" "$2" <<'PY'
+  python3 - "$@" <<'PY'
 import re, sys
-if sys.argv[2] == "reads":
-    names = {"l2r_array_give", "l2r_view_size", "l2r_view_take", "l2r_view_end",
-             "l2r_array_get", "l2r_array_get_word", "l2r_consume",
-             "l2r_view_take_as", "l2r_any_take_as", "l2r_array_get_as", "l2r_array_get_word_as"}
+kinds, allow = sys.argv[2].split(","), set(sys.argv[3:])
+names = set()
+if "reads" in kinds:
+    names |= {"l2r_array_give", "l2r_view_size", "l2r_view_take", "l2r_view_end",
+              "l2r_array_get", "l2r_array_get_word", "l2r_consume",
+              "l2r_view_take_as", "l2r_any_take_as", "l2r_array_get_as", "l2r_array_get_word_as"}
     names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array")
               for op in ("fget", "fget_borrowed", "uget", "uget_borrowed", "get", "get_borrowed")}
     # The reads of an element at a type (an immediate without a copy of its
     # box: lean2rr's boxWordRead?).
     names |= {f"lean_array_{op}_as" for op in ("fget", "fget_borrowed", "uget", "uget_borrowed", "get", "get_borrowed")}
-else:
-    names = {"l2r_array_set"}
+if "sets" in kinds:
+    names |= {"l2r_array_set"}
     names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array")
               for op in ("set", "fset", "uset")}
 seen = {}
-for m in re.finditer(r'call [^@\n]*@"?_RI?C(\d+)([A-Za-z0-9_]+)\(', open(sys.argv[1]).read()):
-    n = m.group(2)[:int(m.group(1))]
+for m in re.finditer(r'call [^@\n]*@"?(_RI?C(\d+)([A-Za-z0-9_]+))\(', open(sys.argv[1]).read()):
+    n = m.group(3)[:int(m.group(2))]
     if n in names:
-        seen[n] = seen.get(n, 0) + 1
-for n, k in sorted(seen.items()):
-    print(f"{k:7d} x {n}")
+        k = ("allowed", m.group(1)) if m.group(1) in allow else ("", n)
+        seen[k] = seen.get(k, 0) + 1
+for (a, n), k in sorted(seen.items()):
+    print(f"{a + ' ' if a else ''}{k:7d} x {n}")
 PY
 }
+# The reads that Reussir issue 36 (not patched) keeps as calls at a cold
+# call site: `l2r_view_take<LAny>`, `l2r_view_take_as<Nat>`,
+# `l2r_view_take_as<Int>`.
+COLD_ALLOWED="_RIC13l2r_view_takeC4LAnyE _RIC16l2r_view_take_asC3NatE _RIC16l2r_view_take_asC3IntE"
 status=0
 for t in "$@"; do
   cp "$HERE/$t.lean" .
@@ -84,20 +98,20 @@ for t in "$@"; do
     /^}/ { name = "" }
     name != "" && index($0, "asm sideeffect \"\", \"r,~{memory}\"") { n[name]++ }
     END { for (f in n) printf "%7d x %s\n", n[f], f }' "$t.ll")
-  reads=""
-  [ "$t" = RtReadsDeep ] && reads=$(deep_calls "$t.ll" reads)
-  sets=""
-  [ "$t" = RtArraySets ] && sets=$(deep_calls "$t.ll" sets)
+  deep=""
+  [ "$t" = RtReadsDeep ] && deep=$(deep_calls "$t.ll" reads $COLD_ALLOWED)
+  [ "$t" = RtArraySets ] && deep=$(deep_calls "$t.ll" reads,sets)
+  reads=$(printf '%s\n' "$deep" | grep -v -e '^allowed' -e '^$' || true)
+  allowed=$(printf '%s\n' "$deep" | grep '^allowed' | sed 's/^allowed */  /' || true)
   if [ -n "$calls" ]; then
     echo "FAIL $t: calls through the FFI boundary (not inlined):"; echo "$calls"; status=1
   elif [ -n "$reads" ]; then
-    echo "FAIL $t: array reads left as calls (a read texture over LLVM's cold-site threshold):"; echo "$reads"; status=1
-  elif [ -n "$sets" ]; then
-    echo "FAIL $t: array sets left as calls (a set texture LLVM did not inline):"; echo "$sets"; status=1
+    echo "FAIL $t: array reads or sets left as calls (a texture LLVM did not inline):"; echo "$reads"; status=1
   elif [ -n "$barriers" ]; then
     echo "FAIL $t: black_box barriers inlined into Reussir functions:"; echo "$barriers"; status=1
   else
     echo "PASS  $t"
+    [ -z "$allowed" ] || { echo "      allowed at cold call sites (Reussir issue 36, not patched):"; echo "$allowed"; }
   fi
 done
 [ $status -eq 0 ] && echo "PASS  ffi-inline-check"

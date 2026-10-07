@@ -1,23 +1,27 @@
 # 7. Token reuse picks decrements that can never free
 
-**Kind:** missed optimization. Not a bug: rrc's output is correct; patch
-07-a is an optimization.
+**Kind:** missed optimization. Not a bug: rrc's output is correct; the
+parked patch 07-a is an optimization.
 
 ## Summary
 
-**Kind:** missed optimization. **Status:** patched (07-a), applied in `./reussir` (`l2r-local` cc8e5aa5); lean2rr also
-works around it.
+**Kind:** missed optimization. **Status:** not patched: a missed
+optimization; lean2rr's `lazy-fields` covers it (owner, 2026-10-07);
+patch parked. The file of 07-a is in
+[`patches/parked/`](patches/parked/), outside the series: no lean2rr
+build applies it. It was never measured on lean2rr's programs with
+`lazy-fields` on. Patch 09-a (a real use-after-free fix,
+[bug 9](09-duplicate-bound-member.md)) used the helper that 07-a added
+(`consumesFusedMember`); since 2026-10-07 its file is the form that adds
+the helper itself (the commit of upstream pull request #653), so it no
+longer needs 07-a.
 
 **Verdict: missed optimization, not a bug.** The output is correct.
 `RcDispatchFusion`'s `fuseArm` stops at region-bearing or opaque ops before
 the release by design (its comment: the release may be conditional or the
 box may escape), and TokenReuse documents its choice of donor as a
 heuristic. lean2rr's own workaround (`lazy-fields`) already gives native
-speed on the shapes found. 07-a is an optimization extension; it stays
-because 09-a (a real use-after-free fix, [bug 9](09-duplicate-bound-member.md))
-uses the helper it adds (`consumesFusedMember`). Whether lean2rr still
-gains from 07-a with `lazy-fields` on is not measured; if it does not, 09-a
-should be rebased without it and 07-a dropped.
+speed on the shapes found. 07-a was an optimization extension.
 
 A binary-search-tree insert that returns the matched node unchanged for an
 equal key, `t` instead of `Node{l, x, r}`, ran about 6x slower than the
@@ -27,11 +31,13 @@ node at every level and freed the old one. Because `t` stays alive on the
 equal-key path, Reussir retains `t`'s children before the branch. On the
 rebuilding paths, releasing `t` releases those children again. Those
 releases can never free anything, yet token reuse offers them as donor
-cells and prefers them to `t`'s own cell. Patch 07-a moves the children's
-retains into the branch. The paths that release `t` then get Reussir's
-efficient "destructuring" release: the children move to the arm, and `t`'s
-cell becomes the reuse token. The paths that keep `t` get a retain and
-release side by side, which a later pass cancels.
+cells and prefers them to `t`'s own cell. The parked patch 07-a moves the
+children's retains into the branch. The paths that release `t` then get
+Reussir's efficient "destructuring" release: the children move to the arm,
+and `t`'s cell becomes the reuse token. The paths that keep `t` get a
+retain and release side by side, which a later pass cancels. lean2rr's
+`lazy-fields` binds such fields only where they are used, so its output
+does not have the shape ([lean2rr](#lean2rr)).
 
 ## Symptom and repro
 
@@ -168,8 +174,8 @@ Std.TreeMap insert is as fast as native Lean, BST inserts with `Nat` or
 even on ef922049, and `List.mergeSort`'s merge reuses the cell it takes
 apart (before values passed to calls were included it allocated a cell at
 every step: round-6 finding S6-02). That covers the `Nat`/`String`-keyed
-case that 07-a does not reach (a call before the branch); 07-a covers
-shapes the passes do not rewrite, such as `UInt64` keys.
+case that 07-a does not reach (a call before the branch); the parked 07-a
+covered shapes the passes do not rewrite, such as `UInt64` keys.
 
 An earlier workaround returned the constructor rebuilt from the arm's
 fields instead of the matched value; it broke `ptrEq` identity and sharing
@@ -182,9 +188,15 @@ stays live, which Reussir cannot see and 07-a does not reach.
 
 ## Patch
 
+The patch is parked: its file is in [`patches/parked/`](patches/parked/),
+outside [`patches/series`](patches/series). Until 2026-10-07 it was the
+fourth line of the series. `./reussir`'s `l2r-local` (136d9a9f) has it;
+`l2r-trim`, the stack of the current series, does not. The rest of this
+section describes the patch as it was made and reviewed.
+
 Patch file
-[`patches/07-a-sink-bound-retains.patch`](patches/07-a-sink-bound-retains.patch)
-(`l2r-local` commit `5f6d37d5`, applied in `./reussir`; `l2r-local` head cc8e5aa5). In short: when the release of the
+[`patches/parked/07-a-sink-bound-retains.patch`](patches/parked/07-a-sink-bound-retains.patch)
+(`l2r-local` commit `5f6d37d5`). In short: when the release of the
 scrutinee sits inside a branch that runs exactly one of its regions once
 (`if` with an else, `index_switch`, record or nullable dispatch), the arm's
 retains of the bound members move into every region of that branch. Paths

@@ -1,17 +1,23 @@
 # 36. A texture's import trampoline has no inline attribute
 
-**Kind:** missed optimization. Not a bug: rrc's output is correct;
-patches 36-a and 36-b are an optimization.
+**Kind:** missed optimization. Not a bug: rrc's output is correct; the
+parked patches 36-a and 36-b are an optimization.
 
 ## Summary
 
-**Kind:** missed optimization. **Status:** patched (36-a, with the review
-fixes in 36-b), not applied in `./reussir` yet (made on branch
-`l2r-inline` of a Reussir worktree, on `l2r-anybox` 1eb710b4); reviewed
-(review-inline: one high finding, a stack overflow, and smaller ones; all
-fixed in 36-b; a second look is pending). Before the patch, lean2rr kept
-its read textures small (perf-array-reads); with the one-word `Box` the
-read of an `Array` element no longer fitted (below).
+**Kind:** missed optimization. **Status:** not patched: the gain is too
+small for a local Reussir patch (owner, 2026-10-07); the patch is parked.
+The files of 36-a and of its review fixes 36-b are in
+[`patches/parked/`](patches/parked/), outside the series: no lean2rr
+build applies them. They were made on branch `l2r-inline` of a Reussir
+worktree (on `l2r-anybox` 1eb710b4) and reviewed (review-inline: one high
+finding, a stack overflow, and smaller ones, all fixed in 36-b). lean2rr
+keeps its read textures small (perf-array-reads). With the one-word `Box`,
+the read of a box from an `Array` no longer fits under the threshold of a
+cold call site, nor do the reads of a `Nat` or `Int` element at its type,
+so at such a site they stay calls; `tests/runtime/ffi-inline-check.sh`
+allows these calls in `RtReadsDeep` and nowhere else
+([What lean2rr does](#what-lean2rr-does)).
 
 **Verdict: missed optimization.** Reussir code calls a texture (an
 `#[ffi(import)]` function with a Rust body) through an import trampoline
@@ -51,7 +57,8 @@ OUT.ll --emit llvm-ir -O aggressive`.
   unoptimized IR (`opt -O3 -mcpu=native -pass-remarks-missed=inline`):
   `'_RC3mix' not inlined into '_RC4deep' because too costly to inline
   (cost=70, threshold=45)`.
-- *With 36-a* (`l2r-inline` df9d0677): FIXED, both calls inlined.
+- *With the parked 36-a* (`l2r-inline` df9d0677): FIXED, both calls
+  inlined.
 
 In lean2rr: lean-zip's LZ77 loop (perf-array-reads). With the array read
 as one texture that checks the bounds and releases the array (cost 80 for
@@ -74,35 +81,58 @@ isColdCallSite`, relative frequency `-cold-callsite-rel-freq`, 2%).
 
 ## What lean2rr does
 
-Before 36-a, lean2rr kept the textures of reads small: each cost less
-than 45 once the `_ffi` function was inlined into its trampoline (the
-runtime's other hot textures are small for the same reason;
+lean2rr keeps the textures of reads small: each costs less than 45 once
+the `_ffi` function is inlined into its trampoline (the runtime's other
+hot textures are small for the same reason;
 `tests/runtime/ffi-inline-check.sh` fails on a texture called through the
 packed-argument boundary).
 
 Since `Box` is the one-word `LAny` (every `Array α` is an `RVec<LAny>`),
-the read of an array element (`l2r_view_take<LAny>`) no longer fits: the
-copy of a box tests the word's low bit and masks its top bits before the
-increment (the old enum box's copy was an unguarded increment), which puts
-the texture over the cold-site threshold (it was just under). At a call
-site LLVM judges cold, such a read stays a call: without 36-a,
-`tests/runtime/ffi-inline-check.sh` fails on `RtReadsDeep` (7 calls of
-`l2r_view_take<LAny>`; the reads of `ByteArray` and `FloatArray` stay
-inline). A branch-free copy (the increment of an immediate sent to the
-array header's padding word) did not fit either. With 36-a the check
-passes (every test of it, `RtReadsDeep` included), whatever the textures
-cost below the ordinary threshold. lean2rr keeps the three read textures
+the read of a box from an array (`l2r_view_take<LAny>`) no longer fits:
+the copy of a box tests the word's low bit and masks its top bits before
+the increment (the old enum box's copy was an unguarded increment), which
+puts the texture over the cold-site threshold (it was just under). A
+branch-free copy (the increment of an immediate sent to the array header's
+padding word) did not fit either. The reads of a `Nat` or `Int` element at
+its type (`l2r_view_take_as<Nat>`, `l2r_view_take_as<Int>`, since dev
+c032178: no copy of an immediate's box) cost more than 45 too. So at a call
+site that LLVM judges cold, these three reads stay calls. At an ordinary
+call site (threshold 250 at `-O aggressive`) they are inlined. lean2rr keeps the three read textures
 (they are smaller, and the decrement before the bounds check is what lets
 LLVM cancel the increments).
 
-## Patch
+`tests/runtime/ffi-inline-check.sh` checks the reads at both kinds of call
+site:
+
+- `RtReadsDeep` puts every read behind seven conditions, at cold call
+  sites. On `l2r-trim` 79c1d5f2 (lean2rr dev c032178 and 5bc8885) it
+  keeps 7 calls: 4 of `l2r_view_take<LAny>`, 2 of
+  `l2r_view_take_as<Nat>` and 1 of `l2r_view_take_as<Int>`. The check allows the calls of these three
+  symbols there (`COLD_ALLOWED`), counts them, and names this issue. Every
+  other read function (the reads of `ByteArray` and `FloatArray`,
+  `l2r_array_give`, `l2r_view_size`, ...) must still be inlined.
+- `RtArraySets` sets array elements in loops at ordinary call sites, and
+  reads a box there. The check fails on any call left of a read or set
+  texture there, the read of a box included.
+
+With the parked 36-a, `RtReadsDeep` kept no call (on `l2r-inline`
+136d9a9f, lean2rr deptypes 91fe1e3).
+
+## Parked patch
+
+The patch files are in [`patches/parked/`](patches/parked/), outside
+[`patches/series`](patches/series). Until 2026-10-07 they were in the
+series, after 13-d and 03-a. The Reussir branch `l2r-inline` (136d9a9f)
+has them; `./reussir`'s `l2r-trim`, the stack of the current series, does
+not. The rest of this section describes the patch as it was made and
+reviewed.
 
 Patch files
-[`patches/36-a-inline-small-textures.patch`](patches/36-a-inline-small-textures.patch)
+[`patches/parked/36-a-inline-small-textures.patch`](patches/parked/36-a-inline-small-textures.patch)
 (commit `df9d0677` on branch `l2r-inline` of a Reussir worktree, made on
 `l2r-anybox` 1eb710b4, that is `l2r-local` d79f8b70 + 38-a + 13-d; it
 also applies on d79f8b70 and on ef922049 alone) and
-[`patches/36-b-inline-guards.patch`](patches/36-b-inline-guards.patch)
+[`patches/parked/36-b-inline-guards.patch`](patches/parked/36-b-inline-guards.patch)
 (commit `0ea91383` on the same branch, after 03-a: the review's fixes).
 
 - **The mark.** `rewriteImport` gives the trampoline it defines the LLVM
@@ -270,7 +300,7 @@ coordinator judged the findings):
   LLVM would inline it at an ordinary one" were not exact (F1, F2), and the
   sieve explanation lacked the rest of `main`. Corrected above.
 
-A second look at 36-b is pending.
+No second look at 36-b was made: the patch was parked first (2026-10-07).
 
 ## Upstream note
 
