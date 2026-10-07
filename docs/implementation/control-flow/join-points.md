@@ -109,10 +109,15 @@ relative to `lean2rr/LeanToReussir/`. Plan
   (`CodeCtx.captured`), so a join point outlined in an alternative that
   bound a matched variable again (a fresh nullary value, a converted boxed
   scrutinee, a lazily bound field) captures the old names its jumps pass.
-  Free variables are also found inside casts (an `RR.Expr.cast` node).
+  The binders that a rebuilt matched value reads (`fresh-rebuild`) are
+  recorded there too. Free variables are also found inside casts (an
+  `RR.Expr.cast` node).
 - **Why:** Every `Std.Http` program failed in rrc with "unknown variable"
   (round 6 IO6-14, 8f1dfa7, test `RtJpRebound`); an `IO.FS.Mode` index in
-  a join point was missed inside a cast (adv2 EFF-2, aa03809).
+  a join point was missed inside a cast (adv2 EFF-2, aa03809); a join
+  point outlined in an arm that returned a rebuilt value did not capture
+  the binder of a converted field (hunt 2026-10-07, test
+  `RtFreshRebuildJp`).
 - **Where:** `Lower/Code.lean`: `lowerCode` (the `.jp` case),
   `rrFreeVars`; `Lower/Ctx.lean`: `CodeCtx.captured`.
 - **Remove only if:** never.

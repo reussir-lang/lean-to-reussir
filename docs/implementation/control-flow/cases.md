@@ -42,7 +42,10 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   value returns the constructor rebuilt from its fields, an equal value,
   when the matched value is freshly built: bound in the same function to a
   constructor application, or to a full call of a declaration all of whose
-  results are freshly built (a whole-program analysis).
+  results are freshly built (a whole-program analysis). The rebuilt value
+  reads the match's binders, the fields as the record holds them; they are
+  recorded as names in scope (`CodeCtx.captured`), so a join point
+  outlined in the arm that returns the value captures them.
 - **Why:** The error arm of every `ExceptT`/`Option`/`EStateM` bind
   (`| .error _ => r`) kept the matched value live, so each bind's success
   path allocated and freed a cell. Rebuilt, every arm consumes the cell
@@ -53,9 +56,14 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   from an equal copy, are not preserved
   ([../representations/identity.md](../representations/identity.md)), so
   the pass has no identity guard any more (it had one until c5eaca5).
+  A field converted to its parameter's own type (`bindField`) is no
+  longer named by `vars`: a join point outlined in the arm (J3, J4) that
+  returned the rebuilt value read a binder it did not capture, and rrc
+  rejected the program ("unknown variable"; hunt 2026-10-07, test
+  `RtFreshRebuildJp`).
 - **Where:** `Opt/FreshRebuild.lean`: `enumFields`, `freshDecls`,
   `bodyFresh`, `onlyReturned`, `freshApp`; `Lower/Ctx.lean`:
-  `CodeCtx.rebuild`, `CodeCtx.letCalls`.
+  `CodeCtx.rebuild`, `CodeCtx.letCalls`, `CodeCtx.captured`.
 - **Remove only if:** the pass is off (correct, slower).
 
 ### Fields of a live matched value are bound where they are used (`lazy-fields`)

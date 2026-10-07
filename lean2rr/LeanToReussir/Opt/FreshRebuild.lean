@@ -175,7 +175,18 @@ def enumFields (prev : CodeCtx → CasesArm → Array (Option String) →
         let lctx ← read
         if freshApp (← getEnv) lctx.keys lctx.decls (← freshDeclsCached) g n then
           let e := RR.Expr.ctor arm.ty (some arm.layout.variant) (binders.map fun b => .var b.get!)
-          return (binders, { ctx with rebuild := ctx.rebuild.insert arm.discr (e, .named arm.ty) })
+          -- The rebuilt value reads the binders themselves, which `vars`
+          -- no longer names once a field is converted to its parameter's
+          -- own type (`bindField`): a join point outlined in this
+          -- alternative that returns the value captures them, so they are
+          -- names in scope, at their types in the record (`CodeCtx.captured`).
+          let scope := arm.layout.fields.foldl (init := ctx.captured) fun m f => match f with
+            | some (j, ft) => match binders[j]? with
+              | some (some b) => m.insert b ft
+              | _ => m
+            | none => m
+          return (binders, { ctx with rebuild := ctx.rebuild.insert arm.discr (e, .named arm.ty),
+                                      captured := scope })
   prev ctx arm binders
 
 end Opt.FreshRebuild

@@ -88,7 +88,10 @@ parameters the join point takes: rule 4 removes the erased ones). -/
   `vars` names the same LCNF variable differently (a hook or a `cases` bound
   it again in an alternative: Opt/NullaryScrutinee, a converted scrutinee,
   Opt/LazyFields); the names stay in scope, so a join point outlined there
-  that jumps to one captures them too. -/
+  that jumps to one captures them too. Also the binders that a rebuilt
+  matched value reads (`rebuild`, Opt/FreshRebuild), which `vars` no longer
+  names when a field is converted: a join point outlined there that
+  returns the value captures them. -/
   captured : Std.HashMap String RR.Ty := {}
   /-- The variables the declaration being lowered uses (`codeUses` of its
   body): a field parameter that is not used is not converted to its own
