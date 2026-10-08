@@ -38,6 +38,7 @@ and passes").
 | `flatten-structs` | a structure argument of a loop (join point, self-recursive function) and a structure or two-constructor result passed as its fields at their precise types (worker/wrapper) | a value is split only where its fields are known at every jump, self-call and return; a whole use keeps that level whole, except two rebuilds that add no allocation: a loop's parameter at the loop's exit after a step that built a new value (the first step peeled into the wrapper), and a call's result (each value built at most once per run of its scope); a value whose object is inspected (`ptrAddrUnsafe`, `dbgTraceIfShared`, `isExclusiveUnsafe`) or that the caller passed in is never rebuilt; a result level stays whole when callers (or the wrapper) only use it whole, or when a shared object may arrive there; results with function types or without finite placeholders are not split; in a program that creates resources, declarations with resource parameters or results are left alone (their inferred borrows stay Lean's); bounds: 8 levels, 16 variables, peeled bodies of at most 300 nodes | below |
 | `conv-liveness` | unboxing, application and conversion helpers generated only for what live code reaches; unreachable functions dropped | none needed for soundness: an arm left out matches a variant that no live code builds, so no value of it exists at run time; every identifier of raw text, of the prelude and of atoms is a root, every arm of other matches counts, and a variant that text names counts as built | [liveness](conversions/liveness.md) |
 | `merge-fns` | generated functions equal up to their own and local names merged: a copy calls the first, calls of a copy call the first | the canonical texts are equal (the same code once names are renamed in binding order, inside atoms too); a copy keeps its name and calls the function its first ends at, never itself; nothing is removed; a function called from one place only stays (LLVM inlines it there), except startup code (`_init`, `l2r_persist_`) | below |
+| `prelude-liveness` | the runtime prelude's functions that the program text does not name, directly or through the prelude's kept functions, are left out of the `.rr` | none needed for soundness: a function no text names cannot be called; every identifier of the generated text and of the prelude's items that always stay (the `extern "rust"` blocks, the types) is a root, also in string literals and in comments at the end of a line; only functions of the form `fn NAME` at column 0, outside a texture, with no attributes but `#[ffi(import)]` and `#[transform_anchor]`, can go; a name the scan missed would make rrc stop with an unknown function, not build another program | below |
 
 ### Values in unread fields are left out (`unread-fields`)
 
@@ -217,6 +218,52 @@ and passes").
   `canonHash`, `canonText`, `renameCalls`; hook `PassConfig.rrPasses`
   (last). Test `RtMergeFns`.
 - **Remove only if:** the pass is off (the copies stay whole).
+
+### Only the prelude functions that a program uses are kept (`prelude-liveness`)
+
+- **What:** `LoweredProgram.render` writes the generated part of the text
+  first (types, functions, trampolines, the string table) and gives it with
+  the prelude to `PreludePrune.prune`. `prune` cuts the prelude into its
+  top-level items (`items`): a line at column 0, outside a texture, that
+  is not blank, a comment or a closing bracket starts an item, and
+  attribute lines (`#[`) belong to the item of the line they are attached
+  to. An item can go only when it is a function of the form `fn NAME` with
+  no attributes other than `#[ffi(import)]` and `#[transform_anchor]`. The
+  roots are the prelude's function names that occur as identifiers in the
+  generated part and in the items that always stay (the `extern "rust"`
+  blocks, the types). From there, `prune` reads the bodies of the kept
+  functions until it finds no new name (`namesIn`). It does not read lines
+  of the prelude that are a comment as a whole; it reads every other line,
+  string literals and comments at the end of a line included. A removed
+  function's lines go from its first attribute line to its last line of
+  code; the blank and comment lines after it stay. A comment line after the
+  prelude gives the number of functions removed. The generated part is the
+  same text with and without the pass.
+- **Why:** rrc compiles every texture of its input with its own rustc run,
+  one after the other, about 25 ms each, also a texture that no code calls
+  (Reussir issue 35, a cost), and it lowers every function. The texture
+  cache of patch 35-a hides this only while it is full: it is empty in a
+  new checkout and after each change of leanrt, lean-runtime, Reussir's
+  runtime or the toolchain. Measured on 2026-10-08 (rrc's wall time, quiet
+  machine, single runs, empty cache / full cache): a one-line program,
+  484 → 75 textures, 14.3 → 3.1 s / 1.8 → 1.1 s; lean-regex's benchmark
+  driver, 679 → 327 textures, 27.3 → 17.3 s / 8.4 s both; lean-zip's
+  benchmark driver, 622 → 286 textures, 74 → 64 s / 57 s both. The 18
+  classic programs built one after the other in a new checkout: rrc 90 →
+  69 s in total. For a big program the rest of rrc's time (its MLIR
+  passes, LLVM's optimization and code generation) does not change. The
+  executables are about 1 MB smaller: each texture is an exported symbol,
+  which keeps its `leanrt` code in the link.
+- **Where:** `PreludePrune.lean`: `prune`, `items`, `namesIn`;
+  `Emit/Program.lean`: `LoweredProgram.render`; `Main.lean`: `pipeline`;
+  the switch `PassConfig.prunePrelude`, which `Opt/PreludeLiveness.lean`
+  sets. Check `tests/runtime/prelude-liveness-check.sh` (the generated part
+  unchanged, at most half of the prelude's textures kept for `RtIO`);
+  `tests/runtime/any-probe.sh` turns the pass off: its probe calls prelude
+  functions that its host program does not use.
+- **Remove only if:** rrc compiles only the textures of the functions that
+  code reaches and lowers only those functions; or the pass is off (the
+  whole prelude is in the text, as before).
 
 ### Constants are boxed once (`boxed-consts`)
 

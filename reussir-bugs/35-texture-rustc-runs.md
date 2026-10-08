@@ -87,7 +87,10 @@ program, and rrc compiles almost all of it (RtBorrowReleaseOrder: 478
 imports, 474 textures), whether the program uses an import or not. So the
 cost is almost the same for every program, and most textures are the same
 from one program to the next: the eight runtime tests of the verification
-below (478 imports each) fill the cache with 918 entries.
+below (478 imports each) fill the cache with 918 entries. (Since the
+optimization `prelude-liveness`, 2026-10-08, lean2rr writes only the
+prelude functions a program uses: a one-line program has 75 textures, not
+484. The numbers in this file are from before it.)
 
 ## lean2rr
 

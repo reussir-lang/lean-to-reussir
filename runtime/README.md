@@ -56,7 +56,9 @@ inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`).
    directory in the rlib, and rrc's texture cache (step 3) hashes the
    rlibs, so a rebuild from another directory would miss on every texture;
    built this way, a rebuild gives the same bytes;
-2. runs lean2rr (`L2R_LEAN2RR`) with `--prelude runtime/prelude.rr`;
+2. runs lean2rr (`L2R_LEAN2RR`) with `--prelude runtime/prelude.rr`
+   (the text keeps only the prelude functions the program uses: the
+   optimization `prelude-liveness`);
 3. runs rrc (`L2R_REUSSIR`; with `--reuse-across-call` unless `l2r.py` gets
    `--no-reuse-across-call`) with
    - `--polyffi-rust-path <leanrt dir>/rustc-native`: a wrapper that
@@ -82,8 +84,10 @@ inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`).
      `$(lean --print-prefix)/lib/libgmp.a`, or `L2R_GMP`),
    - and the environment variable `REUSSIR_FFI_CACHE_DIR`
      (`runtime/leanrt/target/polyffi-cache`, unless the caller sets it;
-     empty turns it off): rrc compiles each of the prelude's textures with
-     its own rustc run, about 470 per program and most of rrc's time, and
+     empty turns it off): rrc compiles each texture of the program text
+     with its own rustc run (about 470 per program when the text had the
+     whole prelude, most of rrc's time; with `prelude-liveness` about 75
+     for a one-line program, 330 for a regex engine), and
      with Reussir patch 35-a it keeps their bitcode there and reuses it
      (Reussir issue 35, a cost; an rrc without the patch ignores the
      variable). Its key covers the texture, the `rustc-native` script (whose

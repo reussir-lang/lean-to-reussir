@@ -1,6 +1,10 @@
 // lean2rr runtime prelude.
 //
-// Prepended to every program lean2rr generates. A Lean extern whose C
+// Prepended to every program lean2rr generates (only the functions the
+// program uses: the optimization prelude-liveness, which removes a line
+// `fn NAME` at column 0, with its `#[ffi(import)]` or `#[transform_anchor]`
+// attribute lines, when no kept text names NAME; see
+// lean2rr/LeanToReussir/PreludePrune.lean). A Lean extern whose C
 // symbol is `lean_xxx` is implemented here by the function `lean_xxx`, on
 // lean2rr's representation types, with the semantics of Lean's own C
 // runtime (lean.h and src/runtime/*.cpp of Lean 4.34). `l2r_*` functions

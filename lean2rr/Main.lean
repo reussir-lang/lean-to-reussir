@@ -174,7 +174,7 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   -- (reussir-bugs/repros/run.sh).
   let prog := if (← IO.getEnv "L2R_NO_OUTLINE").isSome then prog else prog.outline
   let prog := if (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome then { prog with anchored := {} } else prog
-  return prog.runRRPasses cfg |>.render
+  return (prog.runRRPasses cfg).render cfg.prunePrelude
 
 def run (opts : CliOptions) (cfg : PassConfig) (module : Name) : IO UInt32 := do
   let env ← loadEnvironment #[module]

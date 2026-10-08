@@ -153,6 +153,28 @@ nothing reaches.
   difference is at translation time: an extern that only a removed arm
   calls is not reported as missing.
 
+### Only the prelude functions a program uses (`prelude-liveness`)
+
+The prelude has about 1000 functions. About 500 of them have a Rust body
+(a texture). rrc compiles each texture of its input with its own rustc
+run, one after the other, also a texture that no code calls. Its texture
+cache helps only when the cache is full. The cache is empty in a new
+checkout and after each change of the runtime crates.
+
+`prelude-liveness` keeps a prelude function only when the generated code
+names it, or a kept prelude function names it. It removes only lines of
+the form `fn NAME` (with their `#[ffi(import)]` attribute). The types and
+the `extern "rust"` blocks stay.
+
+- **Effect.** A one-line program has 75 textures instead of 484. Its rrc
+  step takes 3.1 s instead of 14.3 s with an empty cache, and 1.1 s
+  instead of 1.8 s with a full one. A regex engine (lean-regex) has 327
+  textures instead of 679: 17 s instead of 27 s with an empty cache. For
+  a big program, the rest of rrc's time does not change.
+- **Soundness.** A removed function is one that no text of the program
+  names, so no code can call it. The generated part of the text does not
+  change.
+
 ### Values spread into their fields (`flatten-structs`)
 
 Rule 1 gives every datatype one layout. A field whose type is a type

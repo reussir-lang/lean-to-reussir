@@ -77,6 +77,10 @@ structure PassConfig where
   nothing reaches dropped (Lower/Live). Plain: every helper requested,
   with an arm for every variant. -/
   convLiveness : Bool := false
+  /-- Whether the program text leaves out the runtime prelude's functions
+  that the generated code does not reach by name (PreludePrune). Plain: the
+  whole prelude. -/
+  prunePrelude : Bool := false
   /-- The hooks of code lowering. -/
   lower : LowerHooks := {}
   /-- Passes over the generated Reussir functions (before the program text is

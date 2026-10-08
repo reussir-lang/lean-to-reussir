@@ -131,7 +131,7 @@ runtime
 :   Everything a lean2rr build contains besides the program: the prelude, `leanrt`, `lean-runtime` and the shim.
 
 prelude
-:   `runtime/prelude.rr`: Reussir source prepended to every program, with one function per Lean extern.
+:   `runtime/prelude.rr`: Reussir source prepended to every program (only the functions it uses), with one function per Lean extern.
 
 `leanrt`
 :   lean2rr's own Rust crate, linked into every lean2rr build: lean2rr's representations, and the glue between them and `lean-runtime`.

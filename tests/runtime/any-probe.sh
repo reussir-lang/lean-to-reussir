@@ -36,8 +36,10 @@ cd "$OUT"
 LEAN2RR=${L2R_LEAN2RR:-$ROOT/lean2rr/.lake/build/bin/lean2rr}
 cp "$HERE/any-probe/AnyHost.lean" .
 lean -o AnyHost.olean AnyHost.lean
+# The whole prelude (`--disable-opt prelude-liveness`): the probe calls
+# prelude functions that the host does not use.
 LEAN_PATH=. L2R_SHIM_DIR=${L2R_SHIM_DIR:-$(dirname "$LEAN2RR")/../lib/lean} "$LEAN2RR" AnyHost --root main --emit rr \
-  --prelude "$ROOT/runtime/prelude.rr" -o host.rr
+  --prelude "$ROOT/runtime/prelude.rr" -o host.rr --disable-opt prelude-liveness
 python3 - "$HERE/any-probe/probe.rr" <<'PY'
 import sys
 s = open('host.rr').read()

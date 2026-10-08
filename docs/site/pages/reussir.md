@@ -75,8 +75,10 @@ and every runtime test checks that the executable has no text relocations.
 
 **Patch 35-a (issue 35, a cost), applied since 2026-10-04.** rrc compiles
 each Rust FFI snippet with its own rustc run, on every build. Every lean2rr
-program has about 470 of them, so this step takes most of rrc's time
-(about 13 s of 16 s for a small program). This is not a bug: the output is
+program had about 470 of them, so this step took most of rrc's time
+(about 13 s of 16 s for a small program). Since `prelude-liveness`,
+lean2rr writes only the prelude functions a program uses: about 75
+snippets for a small program. This is not a bug: the output is
 correct. The patch is an optimization. It keeps the compiled snippets in a
 cache directory, keyed by a digest of everything the output depends on
 (the documented exceptions are in the issue's file). With a full cache,

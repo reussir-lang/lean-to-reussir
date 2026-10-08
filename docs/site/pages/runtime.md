@@ -13,7 +13,7 @@ translation plan §5.8 to §5.14 and §6, and the implementation notes'
 
 | Part | Language | Role |
 |---|---|---|
-| `runtime/prelude.rr` | Reussir | Prepended to every program. Defines the runtime types and one function per Lean extern, named after the extern's C symbol (`lean_nat_add`). Fast paths are inline Reussir code; the rest calls `leanrt` or `lean-runtime`. |
+| `runtime/prelude.rr` | Reussir | Prepended to every program (only the functions the program uses). Defines the runtime types and one function per Lean extern, named after the extern's C symbol (`lean_nat_add`). Fast paths are inline Reussir code; the rest calls `leanrt` or `lean-runtime`. |
 | `runtime/leanrt/` | Rust | Linked into every program. lean2rr's representations: big numbers (GMP), strings, arrays, cells, once-cells. The glue to lean-runtime: its rules, its IO (handles, the last-error slot), its scheduler (the task objects, the one `unsafe` step of a context switch, the current standard streams) and its event loop. One crate, so one copy of all global state. |
 | `third_party/lean-runtime` | Rust | The shared crate, a git submodule pinned by commit. Lean's runtime rules, the IO, the startup, the scheduler with its wait cores, `Std.Sync`, the event loop and the networking. The driver builds it with cargo. |
 | `lean2rr/L2RShim.lean` | Lean | lean2rr's own Lean library: the `Std.Internal.UV` externs (timers, sockets, name resolution, signals), `Std.Time.Timestamp.now`, `ShareCommon.Object.eq`/`hash`, over primitives of lean-runtime's event loop. Exported under the C symbols and compiled with the program. |

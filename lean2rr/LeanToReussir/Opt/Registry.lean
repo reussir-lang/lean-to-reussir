@@ -21,6 +21,7 @@ import LeanToReussir.Opt.MergeFns
 import LeanToReussir.Opt.Flatten
 import LeanToReussir.Opt.SplitMapLoops
 import LeanToReussir.Opt.UnreadFields
+import LeanToReussir.Opt.PreludeLiveness
 
 /-!
 # The pass registry
@@ -96,7 +97,8 @@ def optimizations : Array OptPass := #[
   ⟨"fresh-rebuild", true, "an alternative that only returns a freshly built matched value returns it rebuilt from its fields (Reussir then reuses the cell in every alternative)", FreshRebuild.install⟩,
   ⟨"flatten-structs", true, "a structure argument of a loop (join point, self-recursive function) and a structure or two-constructor result (EST.Out, Except, Option; a tuple with a tag) passed as its fields, each at its precise type (worker/wrapper), where the fields are known at every jump, call and return: no record built and no field boxed per step", Flatten.install⟩,
   ⟨"conv-liveness", true, "unboxing, application and conversion helpers generated only for what live code reaches (arms only for the Box variants and function values it builds), and functions unreachable from the entry point and the runtime's entries dropped", ConvLiveness.install⟩,
-  ⟨"merge-fns", true, "generated functions equal up to their own and local names merged: each copy calls the first, and calls of a copy call the first (List.reverseAux at every type); a function called from one place stays (LLVM inlines it), except startup code", MergeFns.install⟩]
+  ⟨"merge-fns", true, "generated functions equal up to their own and local names merged: each copy calls the first, and calls of a copy call the first (List.reverseAux at every type); a function called from one place stays (LLVM inlines it), except startup code", MergeFns.install⟩,
+  ⟨"prelude-liveness", true, "the runtime prelude's functions that the generated code does not name, directly or through the prelude's kept functions, left out of the .rr: rrc compiles each texture (#[ffi(import)] body) with its own rustc run, also one nothing calls (PreludePrune)", PreludeLiveness.install⟩]
 
 /-- Parts of the translation that look like optimizations but are not
 optional. -/

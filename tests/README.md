@@ -272,6 +272,12 @@ closure, through an instance and through the `ptrAddrUnsafe` shortcut) with
 `L2R_ALLOW_MISSING_EXTERNS=1` and checks that lean2rr warns, that rrc fails
 on an unknown `l2r_refused_…` function, and that the generated code calls
 no runtime function of those symbols (review REB-15, of REB-11).
+`tests/runtime/prelude-liveness-check.sh` translates `RtIO` with and
+without the optimization `prelude-liveness` (lean2rr only) and checks that
+the generated parts of the two texts are equal, that the text without it
+starts with the whole prelude, and that the text with it keeps at most half
+of the prelude's `#[ffi(import)]` functions (RtIO: 86 of 493; each is a
+rustc run of rrc when its texture cache misses).
 `tests/runtime/ffi-inline-check.sh` builds runtime tests that call the libm,
 string, hash, float and fixed-width rules to LLVM IR (`scripts/l2r.py --emit
 llvm-ir`) and fails on a call through the packed-argument FFI boundary (a

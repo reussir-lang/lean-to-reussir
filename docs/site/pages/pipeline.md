@@ -310,7 +310,8 @@ See [Runtime](runtime.html#startup) for the entry point.
   keeps its loops: the cut part returns a step value, and the function makes
   the tail call itself.
 - **Passes over the generated functions**: `sink-proj`.
-- The text: `prog.rr`, with `prelude.rr` prepended.
+- The text: `prog.rr`, with the functions of `prelude.rr` that it uses
+  prepended (`prelude-liveness`).
 
 ## rrc
 
@@ -319,7 +320,9 @@ See [Runtime](runtime.html#startup) for the entry point.
 The driver builds the shared crate `lean-runtime` (the pinned submodule,
 with cargo) and the runtime crate `leanrt`, each one cached. Then it runs
 lean2rr and rrc, and links `leanrt`, `lean-runtime` and GMP. rrc compiles
-each *texture* (the Rust body of a prelude function) with rustc. The driver
+each *texture* (the Rust body of a prelude function) with rustc, one run
+per texture. lean2rr writes only the prelude functions that the program
+uses, so a small program has about 75 textures, not about 480. The driver
 gives rrc a cache directory, so rrc does not compile an unchanged texture
 again (Reussir patch 35-a). If rrc crashes, the driver tries once more without
 `--reuse-across-call` (a workaround for Reussir bug 4). See

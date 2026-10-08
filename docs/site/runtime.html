@@ -59,7 +59,7 @@ translation plan §5.8 to §5.14 and §6, and the implementation notes'
 <tr>
 <td><code>runtime/prelude.rr</code></td>
 <td>Reussir</td>
-<td>Prepended to every program. Defines the runtime types and one function per Lean extern, named after the extern's C symbol (<code>lean_nat_add</code>). Fast paths are inline Reussir code; the rest calls <code>leanrt</code> or <code>lean-runtime</code>.</td>
+<td>Prepended to every program (only the functions the program uses). Defines the runtime types and one function per Lean extern, named after the extern's C symbol (<code>lean_nat_add</code>). Fast paths are inline Reussir code; the rest calls <code>leanrt</code> or <code>lean-runtime</code>.</td>
 </tr>
 <tr>
 <td><code>runtime/leanrt/</code></td>

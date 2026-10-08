@@ -152,11 +152,15 @@ lean2rr's files.
   directory in an rlib, and a rebuild from another directory would
   otherwise change every key (the recorded source paths, which panic
   messages show, stay absolute and unchanged).
-- **Why:** rrc runs rustc once per texture, and lean2rr writes the whole
+- **Why:** rrc runs rustc once per texture, and lean2rr wrote the whole
   prelude into every program: about 470 rustc runs, 13 s of a small
   program's 16 s of rrc; with the cache full, 3 s
   ([35-texture-rustc-runs.md](../../../reussir-bugs/35-texture-rustc-runs.md);
-  a cost, not a bug: rrc's output is correct).
+  a cost, not a bug: rrc's output is correct). Since the optimization
+  `prelude-liveness`, the text has only the prelude functions the program
+  uses (a one-line program: 75 textures;
+  [optional-passes.md](../optional-passes.md#only-the-prelude-functions-that-a-program-uses-are-kept-prelude-liveness)),
+  so an empty cache costs much less; the cache still saves the rest.
 - **Where:** `scripts/l2r.py`: `main`, `rustc_wrapper`, `build_locked`.
 - **Remove only if:** n/a (not a workaround: it turns the patch's cache
   on; an rrc without the patch ignores the variable).

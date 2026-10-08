@@ -122,7 +122,7 @@ each concept has one term.</p>
 <dt>runtime</dt>
 <dd>Everything a lean2rr build contains besides the program: the prelude, <code>leanrt</code>, <code>lean-runtime</code> and the shim.</dd>
 <dt>prelude</dt>
-<dd><code>runtime/prelude.rr</code>: Reussir source prepended to every program, with one function per Lean extern.</dd>
+<dd><code>runtime/prelude.rr</code>: Reussir source prepended to every program (only the functions it uses), with one function per Lean extern.</dd>
 <dt><code>leanrt</code></dt>
 <dd>lean2rr's own Rust crate, linked into every lean2rr build: lean2rr's representations, and the glue between them and <code>lean-runtime</code>.</dd>
 <dt>shim</dt>

@@ -4,6 +4,7 @@ import LeanToReussir.PassConfig
 import LeanToReussir.Outline
 import LeanToReussir.MonoRetype
 import LeanToReussir.CompactArrays
+import LeanToReussir.PreludePrune
 
 /-!
 # Program assembly
@@ -368,12 +369,14 @@ def LoweredProgram.outline (p : LoweredProgram) : LoweredProgram :=
     (Outline.takenNames p.preludeFns p.fns) p.fns
   { p with fns, stepItems := p.stepItems ++ steps }
 
-/-- The program text: the prelude, the generated types, the functions
+/-- The program text: the prelude (with `prunePrelude`, optimization
+`prelude-liveness`, only the functions the rest of the text reaches:
+PreludePrune), the generated types, the functions
 (`#[transform_anchor]` on those kept out of rrc's MLIR inliner: a transform
 anchor stays a function for transform scripts, lean2rr has none, and LLVM
 still inlines it; see `anchoredFns`) and the string literal table. -/
-def LoweredProgram.render (p : LoweredProgram) : String := Id.run do
-  let mut out := p.prelude ++ "\n// ---- generated types ----\n\n"
+def LoweredProgram.render (p : LoweredProgram) (prunePrelude : Bool := false) : String := Id.run do
+  let mut out := "\n// ---- generated types ----\n\n"
   for it in p.typeItems do out := out ++ it.render ++ "\n"
   for it in p.fnItems do out := out ++ it.render ++ "\n"
   for it in p.stepItems do out := out ++ it.render ++ "\n"
@@ -385,7 +388,10 @@ def LoweredProgram.render (p : LoweredProgram) : String := Id.run do
       | _ => false
     out := out ++ (if anchor then "#[transform_anchor]\n" else "") ++ f.render ++ "\n"
   unless p.strLits.isEmpty do out := out ++ strLitTable p.strLits
-  return out
+  unless prunePrelude do return p.prelude ++ out
+  let (prelude, removed) := PreludePrune.prune p.prelude out
+  if removed == 0 then return prelude ++ out
+  return prelude ++ s!"\n// lean2rr: {removed} functions of the prelude that this program does not use are left out (optimization prelude-liveness).\n" ++ out
 
 /-- Stage 4: lower every declaration of the (retyped) program `decls`, the
 entry point and what they need (translation plan §5), with the entry
