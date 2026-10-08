@@ -1,0 +1,10 @@
+# per kind: n = 2000 and 8000 steps on a unique array of 1000 elements (set!, uget/uset, swap, push/pop, a map every 50 steps); in place, as natively
+u8 2000 | u8 8000 | 1 1000
+bool 2000 | bool 8000 | 1 1000
+u16 2000 | u16 8000 | 1 1000
+u32 2000 | u32 8000 | 1 1000
+char 2000 | char 8000 | 1 1000
+u64 2000 | u64 8000 | 1 1000
+usize 2000 | usize 8000 | 1 1000
+f32 2000 | f32 8000 | 1 1000
+f64 2000 | f64 8000 | 1 1000

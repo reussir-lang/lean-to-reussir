@@ -57,7 +57,10 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
     that is a `Box` (`ST.Out σ α`) is the box itself (below);
   - `Nat`, `Int`, `String`, `Array α`, `ByteArray`, `FloatArray`:
     leanrt's kinds 1, 2, 3, 6, 7, 8 (`l2r_any_of<T>`; a small `Nat`/`Int`
-    is its own word);
+    is its own word); a compact array (`compact-arrays`,
+    [compact-arrays.md](compact-arrays.md)) by its storage: `RVec<u8>` 7
+    (as `ByteArray`), `RVec<f64>` 8 (as `FloatArray`), `RVec<u16>` 9,
+    `RVec<u32>` 10, `RVec<u64>` 11, `RVec<f32>` 12;
   - every other type (a shared record or enum, a function value, a
     reference, a thunk or task cell, a handle, another array): a pointer
     with the program's payload number (`boxNum`, from 16; from `0x8000 +
@@ -305,10 +308,18 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   scalars, unit (word 1, Lean's `box(0)`), a small `Nat` or `Int` (its own
   word). An even word owns a reference to a counted object: the low 48
   bits are the address, the top 16 bits the number of the payload's type.
-  Numbers 1 to 15 are leanrt's kinds (big `Nat`, big `Int`, `LStr`, the
-  `f64` and large-`u64` cells, `RVec<LAny>`, `ByteArray`, `FloatArray`);
-  16 and up are the program's. A `Float` and a `UInt64`/`USize` from 2^63
-  go into a cell (`Rc`), as natively.
+  Numbers 1 to 15 are leanrt's kinds: 1 a big `Nat`, 2 a big `Int`, 3
+  `LStr`, 4 and 5 the `f64` and large-`u64` cells, 6 `RVec<LAny>`, and 7 to
+  12 the arrays of scalars (below); 13 to 15 are free. 16 and up are the
+  program's. A `Float` and a `UInt64`/`USize` from 2^63 go into a cell
+  (`Rc`), as natively. The arrays of scalars:
+  - 7 `NUM_BYTES`, `RVec<u8>`: `ByteArray`; a compact `Array` of `UInt8`,
+    `Bool` or an enumeration of at most 256 constructors;
+  - 8 `NUM_FLOATS`, `RVec<f64>`: `FloatArray`; a compact `Array Float`;
+  - 9 `NUM_U16S`, `RVec<u16>`: a compact `Array UInt16`;
+  - 10 `NUM_U32S`, `RVec<u32>`: a compact `Array UInt32` or `Array Char`;
+  - 11 `NUM_U64S`, `RVec<u64>`: a compact `Array UInt64` or `Array USize`;
+  - 12 `NUM_F32S`, `RVec<f32>`: a compact `Array Float32`.
 - **Why:** One word per generic field and array element, as Lean's
   `lean_object*`. A copy is the payload's count increment, in line; the
   number lets the drop hook release the payload as its own type and lets
@@ -381,10 +392,45 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
 - **Why:** As the `b0` arm of the old enum `L2RBox` did: an erased argument passed
   where data is expected (rule 4e) is `box(0)`, and code may read it at any
   type. Only the program can make a record's zero or a nullary variant.
-- **Where:** `runtime/leanrt/src/any.rs`: `leanrt_kind!`, `f64_of_word`;
-  `runtime/prelude.rr`, the comment above `l2r_any_as`; the probe's unbox
-  functions (`tests/runtime/any-probe/probe.rr`).
+- **Where:** `runtime/leanrt/src/any.rs`: `leanrt_kind!`, `Payload for
+  Vec<LAny>`, `f64_of_word`; `runtime/prelude.rr`, the comment above
+  `l2r_any_as`; the probe's unbox functions
+  (`tests/runtime/any-probe/probe.rr`).
 - **Remove only if:** `box(0)` stops reaching typed positions.
+
+### An array of scalars unboxed as an array of boxes is converted (the safety net of compact arrays)
+
+- **What:** `Payload for Vec<LAny>` (the unbox at `RVec<LAny>`, number 6:
+  `l2r_any_as`, `l2r_any_raw_as`) accepts a box of an array of scalars
+  (numbers 7 to 12) too. `any::boxes_of_compact` (out of line, `#[cold]`)
+  makes a new array of the same size whose elements are the scalars boxed
+  as lean2rr boxes them (`array::boxes_of_scalars`, trait `BoxScalar`):
+  `u8`, `u16` and `u32` as immediates, an `f32` as the immediate of its
+  bits, a `u64` as `of_u64` (an immediate below 2^63, a cell from there),
+  an `f64` as `of_f64` (a cell). Then it gives up the box's reference (a
+  shared source is decremented, a unique one freed). For example, the box
+  of an `RVec<u16>` `[1, 2]` unboxed at `RVec<LAny>` gives `[imm 1, imm 2]`;
+  the box of an `RVec<u64>` `[5, 2^63]` gives `[imm 5, cell 2^63]`. With
+  the environment variable `L2R_DEBUG_ARRAY_CONVERT` set (read once), each
+  conversion writes `leanrt: compact array of kind N converted to boxes (L
+  elements)` on descriptor 2. The reverse (a box of number 6 unboxed at an
+  array of scalars) stays a mismatch.
+- **Why:** lean2rr's whole-program check (C0) keeps a compact array away
+  from every place that reads it as `Array lcAny`, so the conversion does
+  not happen. If the check misses a flow, the program gives the same
+  results as with boxes, at the cost of a copy, instead of the mismatch's
+  panic. The line lets tests check that no conversion happens. The reverse
+  needs the element type, which a box of number 6 does not give.
+- **Where:** `runtime/leanrt/src/any.rs`: `Payload for Vec<LAny>`,
+  `boxes_of_compact`, `report_conversion`; `runtime/leanrt/src/array.rs`:
+  `BoxScalar`, `boxes_of_scalars`. A generated unbox in a program that
+  casts tests the number before it calls `l2r_any_as` (`boxUnbox` with a
+  cast function): there a box of 7 to 12 goes to the cast function, not
+  here. Tests: leanrt's `any::tests::compact_arrays_convert_at_an_array_of_boxes`,
+  `any::tests::conversion_line_and_reverse_mismatch`,
+  `array::tests::scalar_arrays_as_boxes`.
+- **Remove only if:** compact arrays are removed, or the static check is
+  proved to cover every flow.
 
 ### The last reference of a program payload goes to the program, through the worklist (a leaf directly)
 

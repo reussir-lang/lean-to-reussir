@@ -1105,7 +1105,8 @@ where lean2rr's representations agree: an `Array α` read as an
 `Array NonScalar` (`Box` elements) and back, `unsafeCast ()` placeholders,
 `Subtype` (`attach`), the world token, `Dynamic` values read at the type
 their `TypeName` names. -/
-def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Option Name := Id.run do
+def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (Decl .pure))
+    (ignoreAxiom : ConstantInfo → Bool := fun _ => false) : Option Name := Id.run do
   let library (n : Name) : Bool := match env.getModuleIdxFor? n with
     | some i => (env.header.moduleNames[i.toNat]?.map isToolchainModule).getD false
     | none => false
@@ -1119,7 +1120,7 @@ def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (De
     if seen.contains n || library n then continue
     seen := seen.insert n
     let some ci := env.find? n | continue
-    if ci matches .axiomInfo _ then return some n
+    if ci matches .axiomInfo _ && !ignoreAxiom ci then return some n
     if ci.isUnsafe || isExtern env n || (getExportNameFor? env n).isSome then return some n
     if let some impl := Compiler.getImplementedBy? env n then
       -- An `unsafe` implementation counts even from the library: Lean only
@@ -1131,6 +1132,16 @@ def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (De
       if v.foldConsts false (fun k b => b || k == ``sorryAx) then return some n
       work := v.foldConsts work fun k acc => if seen.contains k then acc else acc.push k
   return none
+
+/-- Whether axiom `ci` states a `Bool` equation (`∀ …, a = b` at `Bool`):
+the axioms `native_decide` and `bv_decide` add (`…._native.bv_decide.ax_…
+: verifyBVExpr … = true`), whose statements Lean checked by evaluation.
+Such an axiom proves no equation between two types, unless it is false; so
+for the compact arrays (`compactArrayKinds`) it does not make the program
+cast (`programCasts`' `ignoreAxiom`). -/
+def isBoolEqAxiom (ci : ConstantInfo) : Bool :=
+  let body := ci.type.getForallBody
+  body.isAppOfArity ``Eq 3 && body.appFn!.appFn!.appArg!.isConstOf ``Bool
 
 /-- Whether a `Box` holding a value of type `vt` may be read at type `t`,
 so that the unboxing function to `t` (generated at the end, `Finish`)

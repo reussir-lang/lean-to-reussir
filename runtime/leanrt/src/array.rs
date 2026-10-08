@@ -7,8 +7,12 @@
 //! uniquely referenced, like Lean's. A unique block grows in place with
 //! `mi_realloc` (at least doubling).
 //!
-//! `ByteArray` and `FloatArray` are `RVec<u8>`/`RVec<f64>`; an `LRef`
-//! (`ref_*` below) is a 0/1-element `RVec` mutated through every alias.
+//! `ByteArray` and `FloatArray` are `RVec<u8>`/`RVec<f64>`, and lean2rr's
+//! compact scalar arrays `RVec<u8>`, `RVec<u16>`, `RVec<u32>`, `RVec<u64>`,
+//! `RVec<f32>` and `RVec<f64>` (every function here is generic over the
+//! element type; a scalar's clone is its bits, its release nothing). An
+//! `LRef` (`ref_*` below) is a 0/1-element `RVec` mutated through every
+//! alias.
 
 pub use crate::drop::Vec as RVec;
 use crate::drop::{elems, Hdr, HDR};
@@ -813,8 +817,11 @@ pub fn copy_slice(src: RVec<u8>, src_off: u64, dest: RVec<u8>, dest_off: u64, le
 // `ByteArray.data`, `ByteArray.mk`, `FloatArray.data`, `FloatArray.mk`
 // (`lean_byte_array_data`, ...): a new array of exactly the source's size
 // (natively `lean_alloc_array(n, n)`, `lean_alloc_sarray(.., n, n)`), the
-// elements converted in one loop, then the source released. An `Array` of
-// any Lean type holds boxes (`LAny`, rule 1).
+// elements converted in one loop, then the source released. An `Array`
+// holds boxes (`LAny`, rule 1) unless lean2rr stores it compactly (an
+// `RVec` of its scalars: `RVec<u8>` and `RVec<f64>` as here, `RVec<u16>`,
+// `RVec<u32>`, `RVec<u64>`, `RVec<f32>`; `any::NUM_BYTES` to
+// `any::NUM_F32S`).
 
 /// `ByteArray.data`: each byte as its box, an immediate.
 #[inline(never)]
@@ -918,6 +925,82 @@ pub fn floats_of_boxes(src: RVec<crate::any::LAny>) -> RVec<f64> {
             *d.add(i) = f64::from_bits(crate::any::bits_of_word(*s.add(i)));
         }
         (*v.hdr()).len = n;
+    }
+    drop(src);
+    v
+}
+
+/// A scalar that a compact array stores, boxed as lean2rr boxes a value of
+/// its Lean types (`LowerBase.boxValue`): `UInt8`, `Bool`, an enumeration's
+/// index (`u8`), `UInt16`, `UInt32` and `Char` as immediates; a `Float32`'s
+/// bits as an immediate (the prelude's `l2r_any_of_f32`); a `UInt64` or
+/// `USize` as `any::of_u64` (a cell from 2^63); a `Float` as `any::of_f64`
+/// (a cell).
+pub trait BoxScalar: Clone + Copy {
+    fn boxed(self) -> crate::any::LAny;
+}
+
+impl BoxScalar for u8 {
+    #[inline(always)]
+    fn boxed(self) -> crate::any::LAny {
+        crate::any::LAny::imm(self as u64)
+    }
+}
+
+impl BoxScalar for u16 {
+    #[inline(always)]
+    fn boxed(self) -> crate::any::LAny {
+        crate::any::LAny::imm(self as u64)
+    }
+}
+
+impl BoxScalar for u32 {
+    #[inline(always)]
+    fn boxed(self) -> crate::any::LAny {
+        crate::any::LAny::imm(self as u64)
+    }
+}
+
+impl BoxScalar for f32 {
+    #[inline(always)]
+    fn boxed(self) -> crate::any::LAny {
+        crate::any::LAny::imm(self.to_bits() as u64)
+    }
+}
+
+impl BoxScalar for u64 {
+    #[inline(always)]
+    fn boxed(self) -> crate::any::LAny {
+        crate::any::of_u64(self)
+    }
+}
+
+impl BoxScalar for f64 {
+    #[inline(always)]
+    fn boxed(self) -> crate::any::LAny {
+        crate::any::of_f64(self)
+    }
+}
+
+/// A compact array of scalars as an array of boxes (`BoxScalar`): a new
+/// array of exactly the source's size, then the source released, as
+/// `boxes_of_bytes` and `boxes_of_floats` (the same boxes at `u8` and
+/// `f64`). The safety net of `any`'s unboxing at `RVec<LAny>`
+/// (`any::boxes_of_compact`).
+#[inline(never)]
+pub fn boxes_of_scalars<T: BoxScalar>(src: RVec<T>) -> RVec<crate::any::LAny> {
+    let n = src.len();
+    check_alloc(n as u64, 8);
+    let v = alloc::<crate::any::LAny>(n);
+    unsafe {
+        let s = elems::<T>(src.hdr());
+        let d = elems::<crate::any::LAny>(v.hdr());
+        for i in 0..n {
+            std::ptr::write(d.add(i), (*s.add(i)).boxed());
+            // The block holds exactly the boxes made so far (a cell's
+            // allocation can end the process, never unwind).
+            (*v.hdr()).len = i + 1;
+        }
     }
     drop(src);
     v
@@ -1203,6 +1286,95 @@ mod tests {
         let s = from_vec(vec![LAny::imm(1), of(crate::string::from_bytes(b"s"), NUM_STR)]);
         assert!(!boxes_all_imm(s.clone()));
         assert!(!boxes_all_float_words(s));
+    }
+
+    /// Every array operation at a scalar element type of the compact
+    /// arrays (`u8`, `u16`, `u32`, `u64`, `f32`, `f64`): the elements' bits
+    /// kept, and a shared array copied for every update, the other
+    /// reference's array unchanged.
+    fn scalar_ops<T: Clone + Copy + PartialEq + std::fmt::Debug>(x: [T; 4]) {
+        let a = from_slice(&x[..3]);
+        assert_eq!((size(&a), a.as_slice()), (3, &x[..3]));
+        assert_eq!(get(&a, 2), x[2]);
+        let p = give(a.clone());
+        assert_eq!((p & 1, unsafe { view_size(p) }), (1, 3));
+        assert_eq!(unsafe { view_take::<T>(p, 1) }, x[1]);
+        // Updates of a shared array: each one a copy.
+        let s = set(a.clone(), 0, x[3]);
+        assert_eq!((s.as_slice(), a.as_slice()), (&[x[3], x[1], x[2]][..], &x[..3]));
+        let w = swap(a.clone(), 0, 2);
+        assert_eq!(w.as_slice(), &[x[2], x[1], x[0]]);
+        let q = push(a.clone(), x[3]);
+        assert_eq!(q.as_slice(), &x[..]);
+        let o = pop(a.clone());
+        assert_eq!(o.as_slice(), &x[..2]);
+        let r = reverse(a.clone());
+        assert_eq!(r.as_slice(), &[x[2], x[1], x[0]]);
+        let t = truncate(a.clone(), 1);
+        assert_eq!(t.as_slice(), &x[..1]);
+        assert_eq!(a.as_slice(), &x[..3]);
+        assert_eq!(count(&a), 1);
+        // Unique: in place, the same block.
+        let h = a.hdr();
+        let a = set(a, 1, x[0]);
+        let a = swap(a, 0, 2);
+        let a = pop(a);
+        assert_eq!((a.hdr(), a.as_slice()), (h, &[x[2], x[0]][..]));
+        let e = extract(append(a.clone(), q.clone()), 1, 4);
+        assert_eq!(e.as_slice(), &[x[0], x[0], x[1]]);
+        let m = replicate(3, x[3]);
+        assert_eq!(m.as_slice(), &[x[3]; 3]);
+        let mut g: RVec<T> = with_capacity_checked(2, 8);
+        for i in 0..1000 {
+            g = push(g, x[i % 4]);
+        }
+        assert!((0..1000).all(|i| get(&g, i as u64) == x[i % 4]));
+        assert_eq!(size(&empty::<T>()), 0);
+        drop((s, w, q, o, r, t, e, m, g));
+    }
+
+    #[test]
+    fn scalar_element_types() {
+        scalar_ops([0u8, 1, 0x7f, 0xff]);
+        scalar_ops([0u16, 1, 0x8000, 0xffff]);
+        scalar_ops([0u32, 0x10ffff, 0x8000_0000, u32::MAX]);
+        scalar_ops([0u64, 1, 1 << 63, u64::MAX]);
+        scalar_ops([1.5f32, -0.0, f32::INFINITY, f32::MIN_POSITIVE]);
+        scalar_ops([1.5f64, -0.0, f64::INFINITY, f64::MIN_POSITIVE]);
+        // NaNs keep their bits.
+        let n = from_slice(&[f32::from_bits(0x7fc0_0001), f32::from_bits(0xffc0_0002)]);
+        let c = set(n.clone(), 0, 2.0);
+        assert_eq!(n.as_slice().iter().map(|x| x.to_bits()).collect::<Vec<_>>(), vec![0x7fc0_0001, 0xffc0_0002]);
+        assert_eq!(get(&c, 1).to_bits(), 0xffc0_0002);
+    }
+
+    /// A compact array as boxes (`boxes_of_scalars`): the size, each
+    /// scalar boxed as lean2rr boxes it, the source released (a shared one
+    /// decremented, unchanged).
+    #[test]
+    fn scalar_arrays_as_boxes() {
+        use crate::any::{as_f64, as_u64, LAny, NUM_F64, NUM_U64};
+        let words = |v: &RVec<LAny>| v.as_slice().iter().map(|a| a.word()).collect::<Vec<_>>();
+        let imm = |x: u64| (x << 1) | 1;
+        let b = from_slice(&[0u8, 7, 255]);
+        let d = boxes_of_scalars(b.clone());
+        assert_eq!((words(&d), cap(&d), count(&b)), (vec![1, imm(7), imm(255)], 3, 1));
+        let d = boxes_of_scalars(from_slice(&[0u16, 0xffff]));
+        assert_eq!(words(&d), vec![1, imm(0xffff)]);
+        let d = boxes_of_scalars(from_slice(&[0x41u32, u32::MAX]));
+        assert_eq!(words(&d), vec![imm(0x41), imm(u32::MAX as u64)]);
+        let d = boxes_of_scalars(from_slice(&[1.5f32, -0.0, f32::from_bits(0x7fc0_0001)]));
+        assert_eq!(words(&d), vec![imm(1.5f32.to_bits() as u64), imm(0x8000_0000), imm(0x7fc0_0001)]);
+        // `UInt64`: an immediate below 2^63, a cell from there.
+        let d = boxes_of_scalars(from_slice(&[0u64, (1 << 63) - 1, 1 << 63, u64::MAX]));
+        assert_eq!(&words(&d)[..2], &[1, imm((1 << 63) - 1)]);
+        assert_eq!(d.as_slice().iter().map(|a| a.num()).collect::<Vec<_>>(), vec![0, 0, NUM_U64, NUM_U64]);
+        assert_eq!(d.as_slice().iter().map(|a| as_u64(a.clone())).collect::<Vec<_>>(), vec![0, (1 << 63) - 1, 1 << 63, u64::MAX]);
+        // `Float`: a cell each.
+        let d = boxes_of_scalars(from_slice(&[2.5f64, -0.0]));
+        assert!(d.as_slice().iter().all(|a| a.num() == NUM_F64));
+        assert_eq!(d.as_slice().iter().map(|a| as_f64(a.clone()).to_bits()).collect::<Vec<_>>(), vec![2.5f64.to_bits(), (-0.0f64).to_bits()]);
+        assert_eq!(size(&boxes_of_scalars(empty::<u16>())), 0);
     }
 
     #[test]

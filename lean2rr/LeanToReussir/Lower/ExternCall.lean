@@ -100,6 +100,12 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   -- float and `UInt64` cells), and a generated loop, element by element
   -- (`arrayMapFn`), the others.
   let sym ← externSymbol orig
+  -- With compact arrays (`compact-arrays`), an `Array UInt8` and an
+  -- `Array Float` are the runtime's bytes and floats already: `mk` and
+  -- `data` are the identity (natively a copy; the result is the same value).
+  if ["lean_byte_array_mk", "lean_byte_array_data", "lean_float_array_mk", "lean_float_array_data"].contains sym then
+    if let some p := params[0]? then
+      if (← lowerType p) == (← lowerType ret) then return some args[0]!
   if let some (dstElem, name, tex, check?) := (match sym with
       | "lean_byte_array_mk" => some (RR.Ty.named "u8", "l2r_byte_array_of_array", "l2r_bytes_of_boxes",
           some "l2r_boxes_all_imm")
@@ -354,21 +360,25 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
     return .call sym tys passed
   -- Storage for each type argument. A type parameter the extern stores
   -- as array elements (its declared signature has `Array α`) is stored as
-  -- the arrays store it, in a `Box` (one array type, `RVec<Box>`); any
-  -- other in its own type, or wrapped (`cellStorage`).
+  -- the arrays store it (`arrayStorage`): in a `Box` (one array type,
+  -- `RVec<Box>`), or, for a compact array (`compact-arrays`), as its
+  -- storage kind (`RVec<u64>`); any other in its own type, or wrapped
+  -- (`cellStorage`).
   let inArrays ← typeVarsInArrays orig
   let mut storage : Array RR.Ty := #[]
   for h : k in [:typeArgs.size] do
     -- Instance keys hold base-phase types.
-    let rt ← lowerType (← toMonoTypeKeep typeArgs[k])
-    storage := storage.push (← if inArrays[k]?.getD false then pure RR.Ty.box else pure (← cellStorage rt).1)
+    let mt ← toMonoTypeKeep typeArgs[k]
+    storage := storage.push (← if inArrays[k]?.getD false then arrayStorage mt else pure (← cellStorage (← lowerType mt)).1)
   -- Values whose declared type is a type parameter `α` are passed and
-  -- returned in `α`'s storage (e.g. `Array.push`'s element): boxed, or
+  -- returned in `α`'s storage (e.g. `Array.push`'s element): boxed, as
+  -- the compact storage (a `Bool` as its byte, `elemToStorage?`), or
   -- wrapped if the storage is a wrapper.
   let (uses, retUse) ← typeVarUses orig
   let storageOf (use : Option Nat) : Option RR.Ty := do storage[← use]?
   let toStorage (a : RR.Expr) (t st : RR.Ty) : LowerM RR.Expr := do
     if st == t then return a
+    if let some e ← elemToStorage? a t st then return e
     if (← elemBoxOf? st).isSome then
       let .named bn := st | return a
       return .ctor bn none #[a]
@@ -392,6 +402,7 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
   | some st =>
     let rt ← lowerType ret
     if st == rt then return call
+    if let some e ← elemOfStorage? call st rt then return e
     if (← elemBoxOf? st).isSome then return .field call 0
     coerce call st rt
   | none => return call

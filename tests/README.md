@@ -380,7 +380,7 @@ results, so each runs at two sizes.
 The runtime tests of this suite are named `RtRepr*` (the older
 `RtReprFuzzCtx`, `RtReprFuzzTypes` and `RtReprShare` are other tests):
 
-| source | test | what | `alloc-check` on dev |
+| source | test | what | `alloc-check` |
 |---|---|---|---|
 | BA-01, BA-02, BA-07 | RtDepShareDag, RtDepShareShapes, RtDepShareHeld | a shared tree, rose tree, list of suffixes and five more shapes through existentials | see "Dependent types" below |
 | BA-03 | RtReprProdDag | a shared tree through `Prod`, packed once | exponential (rule 1) |
@@ -725,3 +725,32 @@ Tests made from the programs of checks that held up in review rounds 6 and 7
 | RtConvUniform | rv7/repr R7Conv |
 | RtReprFuzzCtx | rv7/repr fz/Gz5 (gen2.py) |
 | RtReprFuzzTypes | rv7/repr fz/gen.py, seed 7, 6 types |
+
+### Compact scalar arrays: the `RtCArr*` corpus
+
+Tests for compact scalar arrays: an `Array S` whose element type `S` is a
+scalar is to be stored as a vector of `S`'s storage kind (u8: `UInt8`,
+`Bool`, enumerations; u16: `UInt16`; u32: `UInt32`, `Char`; u64: `UInt64`,
+`USize`; f32: `Float32`; f64: `Float`), unless the program's flows connect
+it to an array of unknown element type, to another kind, or to a cast. The
+tests check behaviour, not layout: each output must equal native's with
+today's boxed arrays and with compact arrays. Peak memory and allocation
+growth are checked by `alloc-check.sh` (the test's `.alloc`). On dev
+e4a1e5f (boxed arrays) every output equals native's.
+
+| test | what | `alloc-check` on dev |
+|---|---|---|
+| RtCArrKinds | every storage kind (`UInt8`, `Bool`, an enum, `UInt16`, `UInt32`, `Char`, `UInt64` and `USize` at and above 2^63, `Float` and `Float32` with NaNs, -0.0, infinities, a denormal) through the operations of typed code: `push`, `set!`, `get!`, `getD`, `uget`/`uset`, swaps, `pop`, `back`, `extract`, `++`, `reverse`, folds, `any`/`all`, lists, `ofFn`, `replicate`, `range`, searches, `qsort`, `insertionSort`, `binSearch`, subarrays, inserts and erases, `get!` out of bounds | — |
+| RtCArrMaps | `map` within a kind and across kinds (`UInt64` to `UInt8`, `Float` to `UInt64` by value and by bits, and others), to and from boxed element types, `mapIdx`, `mapFinIdx`, `mapM` in `IO`, `StateM` and `Except`, `mapMono`, `zip`, `zipWith`, `unzip`, `filterMap`, `flatMap`, a map repeated on a unique array, shared sources printed afterwards | — |
+| RtCArrShare | copy on write for every kind: 13 operations on a shared array, the old array printed after the new one; snapshots of a unique array updated in a loop; `dbgTraceIfShared` on a shared and a unique array of each kind; constant arrays of each kind (literals, a computed table, a literal in a loop) updated by their users stay unchanged | — |
+| RtCArrInPlace | a unique array of 1000 elements of each kind updated n times by `set!`, `uget`/`uset`, a swap, `push`/`pop` and a same-kind `map`: no copy (`RtCArrInPlace.alloc`, one line per kind) | passes |
+| RtCArrContainers | scalar arrays in `Prod`, `Option`, `List`, `IO.Ref`, `Task`, `Thunk`, a structure, `Except`, `StateM`, `Std.HashMap`, `Array (Array UInt8)` (in place and through a shared row), an `Array (Array Float)` matrix product, three levels of `Array Bool` | — |
+| RtCArrGeneric | user functions polymorphic in `α` that read and write `Array α`, class-generic folds, arrays through function values of generic type, existential packages beside typed arrays of the same kinds, polymorphic recursion from `Array UInt8` and `Array Float` | — |
+| RtCArrColumn | a dependent column `Array ty.denote` for every kind (as RtUniformUpdates): updates, maps within and across kinds; typed arrays put into and taken out of a column, and typed arrays that never meet one | — |
+| RtCArrAttach | `attach`, `attachWith`, `unattach`, `pmap` on every kind; `Array.modify` (its `unsafeCast ()` placeholder) unique, shared and out of bounds; `Subtype` arrays; proofs used for indices | — |
+| RtCArrCast | `unsafeCast` between arrays that native Lean represents alike (`UInt64`/`Float` bits, `UInt64`/`USize`, `UInt8` as `Bool`, `UInt16`, `UInt32`, `Char`, `Nat`, an enum as `UInt8`), a view updated while the original is used; `Array UInt64` as `Array UInt8` has no defined native result and is not tested | — |
+| RtCArrFields | a field `Array α` boxed in an inductive used with a compact array: `Subarray UInt64` values in a list read by a function not inlined, a subarray of an array updated afterwards, `Vector UInt16` set and read, a user structure with an `Array α` field at `Float` and at `Nat`, a `Subarray Nat` beside them | — |
+| RtCArrDepUniverse | an array of boxes that arrives in a box read at a scalar array type where no binder has that type (review F1): a type-code universe (`Ty.denote`) read by externs at `UInt64`, by `ByteArray.mk` and `FloatArray.mk`, and an array cast by a proved equation read by externs and put into a structure field `Array UInt64` | — |
+| RtCArrBytes | `ByteArray.mk`/`.data` and `FloatArray.mk`/`.data` round trips, also of shared arrays updated afterwards on either side; `ByteArray` operations next to `Array UInt8` ones; UTF-8 through `Array UInt8` | — |
+| RtCArrPresize | lean-zip's presize (`ByteArray.mk (Array.replicate n 0)`) filled in place, and an `Array UInt8` filled by `uset` then converted, n = 5 * 10^7: peak memory at most 120000 KB (`RtCArrPresize.alloc`; its bytes may grow twice as much as native's: leanrt's size check of a big `Array.replicate` mallocs and frees an untouched block of the native size, which the counter counts) | passes with compact arrays: peak 56496 KB (bytes) and 56624 KB (array), native 448312 and 448572 KB; on dev e4a1e5f (boxed) it failed the bound: 447660 KB |
+| RtCArrSieve | the sieve of Eratosthenes over an `Array Bool` of 5 * 10^7 + 1 elements: peak memory at most 120000 KB (`RtCArrSieve.alloc`, with the same factor 2 for bytes) | passes with compact arrays: peak 60524 KB, native 405372 KB, bytes 1.24 times native's; on dev e4a1e5f (boxed) it failed the peak bound (398512 KB) and the bytes bound (2.1 times native's) |

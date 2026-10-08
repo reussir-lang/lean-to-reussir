@@ -345,8 +345,9 @@ rest.
 | `Int` | `Int` = `leanrt::nat::LInt`, likewise | odd: `lean_box((unsigned)(int)i)` for i in the `int32` range; even: an owned `LBig` pointer |
 | big numbers | `LBig`, one `mi_malloc` block: count `u32`, flags `u32`, signed size `i32` (limbs in use, negative for a negative value), capacity `u32`, then the limbs | GMP `mpn` operations on the limbs, in a unique operand's block with room (grown by a carry, shrunk when a result leaves most of it unused) or a fresh one; `mpz` operations on read-only views for `pow`, `gcd`, parsing and printing; normalized (only values outside the small ranges); only behind a `Nat`/`Int` word |
 | `String` | `LStr` = `leanrt::string::LStr`, a pointer to one block: count, byte size, capacity, character count (32 bytes, as Lean's header), bytes | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write; grows by `realloc` (below); equality compares the lengths, then the blocks (two references to one block are equal at once, as `lean_string_eq`), then the bytes |
-| `Array α` | `RVec<LAny>` = `leanrt::drop::Vec<LAny>`, a pointer to one block: count `u32` (padded), size, capacity (24 bytes), then the elements | one representation whatever `α` is: the elements are boxes (`LAny`, one word each); copy-on-write, grows by `realloc`; freed without recursion (below) |
-| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` (and `FloatArray`'s) copy from/to an `Array UInt8` (an array of boxes) in one loop at the exact size (`array::boxes_of_bytes`, ...), as natively; `String.toUTF8`/`fromUTF8` copy the bytes, as natively |
+| `Array α` | `RVec<LAny>` = `leanrt::drop::Vec<LAny>`, a pointer to one block: count `u32` (padded), size, capacity (24 bytes), then the elements | the elements are boxes (`LAny`, one word each) for every `α` without a storage kind, and for every `α` when the program's check turns its kind off; copy-on-write, grows by `realloc`; freed without recursion (below) |
+| `Array S`, `S` a scalar (lean2rr's `compact-arrays`) | `RVec<u8>` (`UInt8`, `Bool`, an enumeration of at most 256 constructors), `RVec<u16>`, `RVec<u32>` (`UInt32`, `Char`), `RVec<u64>` (`UInt64`, `USize`), `RVec<f32>`, `RVec<f64>` (`Float`) | the same block with the scalars inline; in a box, kinds 7 to 12 (below); lean2rr's whole-program check decides per storage kind (`docs/implementation/representations/compact-arrays.md`) |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` (and `FloatArray`'s) are the identity with a compact `Array UInt8` (`Array Float`); with an array of boxes they copy in one loop at the exact size (`array::boxes_of_bytes`, ...), as natively; `String.toUTF8`/`fromUTF8` copy the bytes, as natively |
 | `ST.Ref σ α` / `IO.Ref α` | a lean2rr-generated shared record `L2RRefN(Cell<LAny>)` around a Reussir cell (two allocations: the record and the cell), whatever `α` is | mutated through every alias; `take` leaves the placeholder |
 | `Thunk α`, `Task α` | `LCell<S>` = `leanrt::drop::Cell<S>`, a transparent wrapper of `Rc<S>` | one mutable value, seen through every alias; `S` is a state enum lean2rr generates (below), one for thunks and one for tasks, over boxes (`LAny`) |
 | `IO.FS.Handle` | `LHandle` | shared buffered file, closed with its last reference |
@@ -467,7 +468,20 @@ prelude's `LAny` (`tagged`), is a value of unknown type in one word, as
 = word 1, small `Nat`/`Int` words as they are, a nullary variant as its
 index); an even word owns a reference to a counted object, its address in
 the low 48 bits and the number of its payload's type in the top 16 (1 to
-15: leanrt's kinds, `NUM_*`; 16 and up: the program's). A copy increments
+15: leanrt's kinds, `NUM_*`: 1 a big `Nat`, 2 a big `Int`, 3 `LStr`, 4 and
+5 the `Float` and large-`UInt64` cells, 6 `RVec<LAny>`, 7 to 12 the arrays
+of scalars `RVec<u8>` (`NUM_BYTES`: `ByteArray`, a compact `Array` of
+`UInt8`, `Bool` or a small enumeration), `RVec<f64>` (`NUM_FLOATS`:
+`FloatArray`, a compact `Array Float`), `RVec<u16>` (`NUM_U16S`),
+`RVec<u32>` (`NUM_U32S`: `UInt32`, `Char`), `RVec<u64>` (`NUM_U64S`:
+`UInt64`, `USize`), `RVec<f32>` (`NUM_F32S`); 13 to 15 free; 16 and up:
+the program's). An array of scalars unboxed at `RVec<LAny>` is converted
+to an array of boxes, each scalar boxed as lean2rr boxes it
+(`any::boxes_of_compact`, `array::boxes_of_scalars`): the safety net of
+lean2rr's compact arrays, which its whole-program check rules out; with
+`L2R_DEBUG_ARRAY_CONVERT` set, each conversion writes `leanrt: compact
+array of kind N converted to boxes (L elements)` on descriptor 2. The
+reverse (an array of boxes at a compact kind) is a mismatch. A copy increments
 the payload's count in line (Reussir patch 38-a masks the top bits); the
 last reference releases leanrt's kinds directly and a program payload
 through the program's release of its type (`l2r_any_rel_<num>_c(cell)`,

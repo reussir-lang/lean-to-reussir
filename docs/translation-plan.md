@@ -429,12 +429,18 @@ These functions are `@[inline]`/`@[specialize]`, so their code is already
 inlined into the persisted LCNF of user code. lean2rr translates it as is,
 giving it the representation it assumes:
 - `NonScalar` and `PNonScalar` (types that stand for "any object") become
-  `lcAny`, so values of those types are `Box`es. An array has one
-  representation whatever its element type (`RVec<Box>`, §5.1), so the
-  casts between `Array α` and `Array NonScalar` change nothing: the `map`
-  loop runs on the array in place, reading each `Box`, unboxing it to the
-  function's argument type and boxing the result back into the slot, as
-  natively. Stage 3 (§4) recovers the precise types around this code.
+  `lcAny`, so values of those types are `Box`es. An array of a type
+  without a storage kind has one representation (`RVec<Box>`, §5.1), so
+  the casts between `Array α` and `Array NonScalar` change nothing: the
+  `map` loop runs on the array in place, reading each `Box`, unboxing it to
+  the function's argument type and boxing the result back into the slot,
+  as natively. Stage 3 (§4) recovers the precise types around this code.
+  With compact arrays (an `Array S` of a scalar `S` is `RVec<k>` of its
+  storage kind, optimization `compact-arrays`), Stage 3 gives a `map` loop
+  that reads or writes such elements a typed instance: in place when the
+  element type does not change, else a loop that reads the source and
+  pushes onto a new array of the result's kind
+  (`docs/implementation/representations/compact-arrays.md`).
 - A `box(0)` placeholder is a value that is never inspected. It arrives as
   a unit-like value used at another type, or as `◾` at a relevant type.
   Stage 4 materializes it as the *zero* of the expected type: `0`, `false`,
@@ -699,8 +705,9 @@ Stage 4 sees only mono types:
 | `Nat` | `Nat`, a *tagged* opaque handle: one word, `2n+1` for n < 2^63, else a pointer to a counted runtime bignum (GMP) | as natively; see "One-word `Nat` and `Int`" below |
 | `Int` | `Int`, the same with small values in the `int32` range (`lean_box((unsigned)(int)i)`) | |
 | `String` | `LStr`, an opaque copy-on-write handle to one block like Lean's string object: a 32-byte header (count, byte size, capacity, character count) and the UTF-8 bytes | literals: §5.4 |
-| `Array α` | `RVec<Box>`, the runtime's copy-on-write vector: one block, a 24-byte header (count, size, capacity) and the elements | in place when unique. One representation whatever `α` is: an element goes in by boxing and comes out by unboxing (natively one `lean_object*` per element) |
-| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` (and `FloatArray`'s) convert from/to an `Array UInt8` (an array of `Box`es) in one loop at the exact size, as natively they copy |
+| `Array α` | `RVec<Box>`, the runtime's copy-on-write vector: one block, a 24-byte header (count, size, capacity) and the elements | in place when unique. One representation for every `α` without a storage kind: an element goes in by boxing and comes out by unboxing (natively one `lean_object*` per element) |
+| `Array S`, `S` a scalar | `RVec<u8>` (`UInt8`, `Bool`, an enumeration of at most 256 constructors), `RVec<u16>`, `RVec<u32>` (`UInt32`, `Char`), `RVec<u64>` (`UInt64`, `USize`), `RVec<f32>`, `RVec<f64>` (`Float`) | optimization `compact-arrays`: per storage kind, when a whole-program check finds that no array of the kind meets an array of boxes; otherwise `RVec<Box>` (`docs/implementation/representations/compact-arrays.md`) |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` (and `FloatArray`'s) are the identity with a compact `Array UInt8` (`Array Float`); with an array of `Box`es they convert in one loop at the exact size, as natively they copy |
 | `ST.Ref σ α` | one generated shared record `L2RRefN(Cell<Box>)` (N a counter) around Reussir's mutable cell, whatever `α` is | a value is boxed when stored and unboxed when read at a precise type. Mono types a reference `lcAny`: it travels in a `Box`, and an operation unboxes it (one variant) |
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> Box), busy, done(Box), … }`, one for thunks and one for tasks, whatever `α` is | memoized thunks, deferred tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |

@@ -335,10 +335,11 @@ def lstr_block():
 
 
 def rvec_block():
-    s = SVG("rvec", 900, 180, "Arrays: one block",
-            "<code>RVec&lt;LAny&gt;</code> (<code>Array α</code>, for every "
-            "<code>α</code>), <code>RVec&lt;u8&gt;</code> (<code>ByteArray</code>) and "
-            "<code>RVec&lt;f64&gt;</code> (<code>FloatArray</code>) have Lean's "
+    s = SVG("rvec", 900, 270, "Arrays: one block",
+            "<code>RVec&lt;LAny&gt;</code> (<code>Array α</code>), the compact "
+            "arrays <code>RVec&lt;u8&gt;</code> … <code>RVec&lt;f64&gt;</code> "
+            "(<code>Array UInt64</code> is <code>RVec&lt;u64&gt;</code>), "
+            "<code>ByteArray</code> and <code>FloatArray</code> have Lean's "
             "24-byte array header, then the elements inline.")
     s.text(10, 26, "RVec<LAny>: each element is one box (8 bytes)", "t")
     bar(s, 10, 44, [("count", 4, "c-hdr"), ("pad", 4, "c-pad"),
@@ -350,6 +351,11 @@ def rvec_block():
                      ("size", 8, "c-hdr"), ("capacity", 8, "c-hdr"),
                      ("2n+1", 8, "c-data"), ("1 | address", 8, "c-ptr"),
                      ("more words ...", "n", "c-data")], unit=16)
+    s.text(10, 202, "An Array UInt64, compact: RVec<u64>, each element is the value itself (8 bytes; no cell from 2^63)", "t")
+    bar(s, 10, 220, [("count", 4, "c-hdr"), ("pad", 4, "c-pad"),
+                     ("size", 8, "c-hdr"), ("capacity", 8, "c-hdr"),
+                     ("u64 0", 8, "c-data"), ("u64 1", 8, "c-data"),
+                     ("more values ...", "n", "c-data")], unit=16)
     return s.render()
 
 
@@ -393,8 +399,8 @@ def box_uniform():
     s.text(330, 172, "address (48 bits)", "tc", "middle")
     s.arrow(490, 167, 555, 167)
     s.box(560, 147, 330, 40, ["a counted object (a String, a record, ...)"], "b-rt")
-    s.text(10, 206, "numbers 1 to 15: the runtime's kinds (big Nat, big Int, String, the Float and UInt64 cells,", "ts")
-    s.text(10, 222, "Array, ByteArray, FloatArray); 16 and up: the program's types", "ts")
+    s.text(10, 206, "numbers 1 to 15: the runtime's kinds (big Nat, big Int, String, the Float and UInt64 cells, Array;", "ts")
+    s.text(10, 222, "7 to 12: ByteArray, FloatArray and the compact arrays of scalars); 16 and up: the program's types", "ts")
     s.text(10, 246, "An unboxing checks the word against the number of its type: a wrong word is a panic, never a wrong read.", "ts")
     s.text(10, 266, "Typed code never pays for the box. Each datatype has one layout, so no value of it is converted.", "ts")
     return s.render()

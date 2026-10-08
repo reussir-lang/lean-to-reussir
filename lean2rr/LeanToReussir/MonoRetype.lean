@@ -3,6 +3,7 @@ import LeanToReussir.MonoTypesKeep
 import LeanToReussir.Relevance
 import LeanToReussir.Mono
 import LeanToReussir.Collect
+import LeanToReussir.Pipeline
 
 /-!
 # Stage 3: exact recovery of types lost in mono
@@ -213,9 +214,9 @@ def withSig (d : Decl .pure) (params : Array (Param .pure)) (ret : Expr) : Decl 
 
 structure MRetypeCtx where
   table : RelevanceTable
-  /-- Instance name ↦ instance key (original declaration and type
-  arguments). -/
-  keys : NameMap InstKey
+  /-- Stage 2's pass lists (an extern instance made here, `externInstance`,
+  is built as Stage 2 builds them). -/
+  stage2 : Stage2Config := #[]
 
 structure MRetypeState where
   /-- Current signatures of the program's declarations and extern instances. -/
@@ -225,6 +226,24 @@ structure MRetypeState where
   /-- Declarations with code reachable from the program's roots (only their
   call sites say what a parameter receives). -/
   live : NameSet := {}
+  /-- Instance name ↦ instance key (original declaration and type
+  arguments), with the extern instances made here. -/
+  keys : NameMap InstKey := {}
+  /-- Extern instances without dictionaries, by (extern, type arguments). -/
+  instances : Std.HashMap (Name × Array Expr) Name := {}
+  /-- Extern instances made here (`externInstance`). -/
+  newExterns : Array (Decl .pure) := #[]
+  nextInst : Nat := 0
+  /-- Typed `map` loops (Opt/SplitMapLoops): (loop, source and result
+  element types, normalized) ↦ the typed instance, `none` if the loop
+  cannot be typed. -/
+  splits : Std.HashMap (Name × Expr × Expr) (Option Name) := {}
+  /-- Typed instances being built. -/
+  splitBusy : NameSet := {}
+  /-- Typed instances built. -/
+  splitDecls : Array (Decl .pure) := #[]
+  /-- The number of the next typed instance's name. -/
+  splitCount : Nat := 0
 
 abbrev MRetypeM := ReaderT MRetypeCtx (StateRefT MRetypeState CoreM)
 
@@ -245,6 +264,32 @@ def Scope.isPlaceholder (sc : Scope) : Arg .pure → Bool
   | .fvar x => sc.erased.contains x
   | _ => true
 
+/-! ## Extern instances at other type arguments -/
+
+/-- The instance of extern `orig` (base declaration `base`) at `typeArgs`:
+an existing one, or a new one built as Stage 1 and Stage 2 build extern
+instances (`instantiateExtern`, then Stage 2's `toMono` passes). Its key
+is added to `MRetypeState.keys`, and the declaration to `newExterns`
+(`retypeMono` returns both). Used by the typed `map` loops
+(Opt/SplitMapLoops): with compact arrays an extern over `Array α` depends
+on `α`'s storage kind. -/
+def externInstance (orig : Name) (base : Decl .pure) (typeArgs : Array Expr) : MRetypeM Name := do
+  if let some n := (← get).instances[(orig, typeArgs)]? then return n
+  let k := (← get).nextInst
+  let name := Name.num (orig ++ `_l2r_re) k
+  let passes ← stage2Passes (← read).stage2
+  let decl ← CompilerM.run (phase := .base) do
+    let d ← instantiateExtern base name typeArgs
+    let out ← runPasses passes.toMono #[uniformDecl d] false
+    return out[0]!
+  modify fun s => { s with
+    nextInst := k + 1
+    instances := s.instances.insert (orig, typeArgs) name
+    sigs := s.sigs.insert name (declSig decl)
+    keys := s.keys.insert name { decl := orig, typeArgs }
+    newExterns := s.newExterns.push decl }
+  return name
+
 /-! ## Results of externs at unknown types -/
 
 /-- The result type of a saturated call of `f`, an extern instance whose
@@ -262,7 +307,7 @@ representation per datatype (`Array α` is one array of boxes) an instance
 at the precise types would differ only in its result type, which Stage 4
 converts to the binder's type anyway (`lowerConstApp`). -/
 def externResultType? (sc : Scope) (f : Name) (args : Array (Arg .pure)) : MRetypeM (Option Expr) := do
-  let some key := (← read).keys.find? f | return none
+  let some key := (← get).keys.find? f | return none
   unless key.dicts.isEmpty && key.typeArgs.any (· == anyExpr) do return none
   -- An instance with code (the Lean definition of an extern of the program,
   -- `Mono.ExternRoute.body`) is not an extern instance.
@@ -691,17 +736,40 @@ def resultsFromCallers (decls : Array (Decl .pure)) : MRetypeM (Array (Decl .pur
       changed := true
   return (decls, changed)
 
+/-- The optional parts of Stage 3 (installed by Opt/Registry.lean). -/
+structure Stage3Config where
+  /-- Typed `map` loops (Opt/SplitMapLoops): from the declarations after the
+  fixpoint, their binder types and the entry point's roots, the new
+  declarations; the typed instances are recorded in
+  `MRetypeState.splitDecls`. Plain: none; a `map` loop runs on an array of
+  `Box`es. -/
+  typedMapLoops : Array (Decl .pure) → Array Types → Array Name → MRetypeM (Array (Decl .pure)) :=
+    fun decls _ _ => pure decls
+  /-- Parameters typed `Array lcAny` that every caller passes a compact
+  array of one type (Opt/SplitMapLoops, `arrayParamsFromCallers`), in each
+  round of the fixpoint: the declarations, their binder types, and whether
+  something changed. Plain: none. -/
+  paramsFromCallers : Array (Decl .pure) → Array Types → MRetypeM (Array (Decl .pure) × Array Types × Bool) :=
+    fun decls types => pure (decls, types, false)
+
 /-- Stage 3 on all mono declarations (bounded global fixpoint). `roots` are
-the declarations the entry point calls (`main`, startup work). -/
-def retypeMono (table : RelevanceTable) (decls : Array (Decl .pure))
-    (keys : NameMap InstKey) (roots : Array Name) : CoreM (Array (Decl .pure)) := do
-  let mut st : MRetypeState := {}
+the declarations the entry point calls (`main`, startup work). Returns the
+declarations, with the extern instances made here (`externInstance`), and
+the instance keys with theirs. -/
+def retypeMono (stage2 : Stage2Config) (stage3 : Stage3Config) (table : RelevanceTable)
+    (decls : Array (Decl .pure)) (keys : NameMap InstKey) (roots : Array Name) :
+    CoreM (Array (Decl .pure) × NameMap InstKey) := do
+  let mut st : MRetypeState := { keys }
   let mut bodies : NameMap (Code .pure) := {}
   for d in decls do
     st := { st with sigs := st.sigs.insert d.name (declSig d) }
-    if let .code c := d.value then
+    match d.value with
+    | .code c =>
       st := { st with codeDecls := st.codeDecls.insert d.name }
       bodies := bodies.insert d.name c
+    | .extern _ =>
+      if let some k := keys.find? d.name then
+        if k.dicts.isEmpty then st := { st with instances := st.instances.insert (k.decl, k.typeArgs) d.name }
   -- Reachable declarations.
   let mut live : NameSet := {}
   let mut work := roots.toList
@@ -716,20 +784,45 @@ def retypeMono (table : RelevanceTable) (decls : Array (Decl .pure))
   st := { st with live }
   let act : MRetypeM (Array (Decl .pure)) := do
     let mut decls := decls
-    for _ in [:8] do
-      let mut changed := false
-      for i in [:decls.size] do
-        let d := decls[i]!
-        unless d.value matches .code _ do continue
-        let (d, ch1, ts) ← localRetype d
-        let (d, ch2) ← refineSignature d ts
-        decls := decls.set! i d
-        changed := changed || ch1 || ch2
-      let (decls', ch3) ← resultsFromCallers decls
-      decls := decls'
-      if !(changed || ch3) then break
-    return decls
-  let (decls, _) ← (act.run { table, keys }).run st
-  return decls
+    let mut types : Array Types := decls.map fun _ => {}
+    -- The fixpoint, then the typed `map` loops (whose typed instances type
+    -- the values they produce, so the next fixpoint types what those flow
+    -- into, maybe the source of another `map`: `(a.map f).map g`), until
+    -- a round types no new loop (at most 12 rounds).
+    for round in [:13] do
+      for _ in [:8] do
+        let mut changed := false
+        for i in [:decls.size] do
+          let d := decls[i]!
+          unless d.value matches .code _ do continue
+          let (d, ch1, ts) ← localRetype d
+          let (d, ch2) ← refineSignature d ts
+          decls := decls.set! i d
+          types := types.set! i ts
+          changed := changed || ch1 || ch2
+        let (decls', ch3) ← resultsFromCallers decls
+        decls := decls'
+        let (decls', types', ch4) ← stage3.paramsFromCallers decls types
+        decls := decls'
+        types := types'
+        if !(changed || ch3 || ch4) then break
+      if round == 12 then break
+      let before := (← get).splitDecls.size
+      let typed ← stage3.typedMapLoops decls types roots
+      if (← get).splitDecls.size == before then break
+      let added := (← get).splitDecls
+      modify fun s => { s with
+        live := added.foldl (fun l d => l.insert d.name) s.live
+        codeDecls := added.foldl (fun l d => l.insert d.name) s.codeDecls }
+      -- Each declaration kept takes its binder types by name (the first
+      -- index of a name).
+      let mut index : Std.HashMap Name Nat := {}
+      for h : i in [:decls.size] do
+        index := index.insertIfNew decls[i].name i
+      types := typed.map fun d => (index[d.name]?).map (types[·]!) |>.getD {}
+      decls := typed
+    return decls ++ (← get).newExterns
+  let (decls, st') ← (act.run { table, stage2 }).run st
+  return (decls, st'.keys)
 
 end LeanToReussir

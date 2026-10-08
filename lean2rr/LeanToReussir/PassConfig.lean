@@ -28,6 +28,13 @@ structure RRProgram where
 structure PassConfig where
   /-- Edits of Lean's pass lists for Stage 2. -/
   stage2 : Stage2Config := #[]
+  /-- The optional parts of Stage 3 (the typed `map` loops). -/
+  stage3 : Stage3Config := {}
+  /-- Whether an `Array S` of a scalar `S` is stored compactly, `RVec<k>` of
+  its storage kind `k`, for the kinds the whole-program check allows
+  (`compactArrayKinds`, Opt/SplitMapLoops). Plain: every `Array α` is an
+  array of `Box`es. -/
+  compactArrays : Bool := false
   /-- Passes over the checked mono declarations (after Stage 3, before
   lowering), in order; they get the instance keys. -/
   monoPasses : Array (NameMap InstKey → Array (Decl .pure) → Array (Decl .pure)) := #[]

@@ -19,6 +19,7 @@ import LeanToReussir.Opt.FreshRebuild
 import LeanToReussir.Opt.ConvLiveness
 import LeanToReussir.Opt.MergeFns
 import LeanToReussir.Opt.Flatten
+import LeanToReussir.Opt.SplitMapLoops
 
 /-!
 # The pass registry
@@ -76,6 +77,7 @@ def stage2 : Stage2Config := #[
 def optimizations : Array OptPass := #[
   ⟨"field-order", true, "record fields in decreasing alignment, so records have no padding (declaration order otherwise)", FieldOrder.install⟩,
   ⟨"value-structs", true, "a structure with one relevant field (ST.Out of every BaseIO call) is a [value] struct, not a heap record", ValueStructs.install⟩,
+  ⟨"compact-arrays", true, "an Array of a scalar (UInt8, Bool and enumerations of at most 256 constructors as u8; UInt16; UInt32 and Char; UInt64 and USize; Float32; Float) is a compact RVec<u8|u16|u32|u64|f32|f64>, for each storage kind no value of which can reach generic code or a field of type Array α (a whole-program check, CompactArrays); the loops of Array.map are typed at their element types (Opt/SplitMapLoops)", CompactArrays.install⟩,
   ⟨"placeholder-cache", true, "placeholders (box(0) at a type) that would allocate built once, in a once-cell", PlaceholderCache.install⟩,
   ⟨"boxed-consts", true, "a constant whose boxing allocates (a Float, a UInt64 from 2^63) boxed once, in a once-cell, as native Lean's _boxed_const", BoxedConsts.install⟩,
   ⟨"float-lits", true, "Float literals (Float.ofScientific/ofNat on literals) folded to their bits at compile time", FloatLits.install⟩,

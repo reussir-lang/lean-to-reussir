@@ -29,8 +29,9 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 | `Char`, `Bool` | `u32`, `bool` | |
 | `Unit`, `PUnit`, erased values, the IO world | `L2RUnit` | a one-variant `[value]` enum |
 | `String` | `LStr`: one block | header (count, byte size, capacity, character count), then UTF-8 bytes |
-| `Array α` | `RVec<LAny>`: one block | for every `α`: each element is a box |
-| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk` and `.data` copy the elements in one loop, as natively |
+| `Array α` | `RVec<LAny>`: one block | for every `α` without a storage kind: each element is a box |
+| `Array S`, `S` a scalar | `RVec<u8>`, `RVec<u16>`, `RVec<u32>`, `RVec<u64>`, `RVec<f32>`, `RVec<f64>`: one block | the scalars inline ([compact arrays](#compact-arrays)) |
+| `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk` and `.data` are the identity with a compact `Array UInt8`; with an array of boxes they copy the elements in one loop |
 | `ST.Ref`, `IO.Ref` | one generated record around a Reussir `Cell` of a box | for every element type; updates seen through every alias |
 | `Thunk α`, `Task α` | `LCell<S>` holding a generated state | for every `α`: the value is a box; memoized thunks, deferred tasks |
 | `IO.Promise α` | `LPromise`, a runtime object | holds the cell of its task |
@@ -73,10 +74,10 @@ size without asking mimalloc: there, mimalloc's sizes are all multiples of 8.
 
 - **Copy-on-write.** A unique block is updated in place and grows with
   `mi_realloc`. A shared block is copied once, with room for the update.
-- **Elements.** An `Array α` holds boxes, whatever `α` is, as Lean's
-  array holds `lean_object*` words. A small `Nat`, a `Bool` or an
-  enumeration is the word itself. A `Float` is a cell, as natively.
-  `ByteArray` and `FloatArray` hold raw bytes and floats.
+- **Elements.** An `Array α` holds boxes, as Lean's array holds
+  `lean_object*` words. A small `Nat` is the word itself. A `Float` in a
+  box is a cell, as natively. An array of scalars is compact (next
+  section). `ByteArray` and `FloatArray` hold raw bytes and floats.
 - **Reads.** Reussir has no borrowed parameters, so each read of an array
   or string takes the container owned: an increment by the caller and a
   release in the runtime function. LLVM cancels the pair when nothing lies
@@ -93,6 +94,46 @@ size without asking mimalloc: there, mimalloc's sizes are all multiples of 8.
 - **String equality.** Strings of different lengths are not equal. Two
   references to the same string are equal. Other strings compare their
   bytes.
+
+## Compact arrays
+
+An array whose element type is a scalar holds the scalars inline. The
+element type gives the *storage kind*:
+
+| Element type | Storage kind | Bytes per element |
+|---|---|---|
+| `UInt8`, `Bool` (0 or 1), an enumeration with at most 256 constructors (its index) | `u8` | 1 |
+| `UInt16` | `u16` | 2 |
+| `UInt32`, `Char` | `u32` | 4 |
+| `UInt64`, `USize` | `u64` | 8 |
+| `Float32` | `f32` | 4 |
+| `Float` | `f64` | 8 |
+
+The figure above shows an `Array UInt64` as `RVec<u64>`.
+
+- **The rule.** One check looks at the whole program, once for each
+  storage kind. A kind is compact when no value of an array of that kind
+  can reach code that reads the array as an array of boxes. Generic code
+  reads arrays so: an `Array α` whose `α` is not statically known. A
+  program that casts has no compact arrays. In other programs, an array
+  of a kind that fails the check holds boxes, as natively. The other kinds
+  stay compact.
+- **`Array.map`.** Lean's library maps an array in place through an
+  array of boxes. lean2rr gives each such loop a typed copy at the element
+  types of its call. When the two types are equal, the loop runs in place.
+  Otherwise it writes a new array of the result's kind.
+- **Fields.** A structure field `Array α` (`Subarray.array`) holds a box
+  when the program uses that structure with a compact array. The box holds
+  the compact array or an array of boxes.
+- **Boxes.** A compact array in a box is one word with the kind's number
+  (7 to 12). If generic code ever unboxes it as an array of boxes, the
+  runtime converts it (a copy). The check makes this unreachable.
+- **Example.** `def f (a : Array UInt64) := a.push 1` stores 8 bytes per
+  element in `RVec<u64>`, and `1` is the word itself. A generic
+  `List.foldl` that gets the array as an `α` passes one box.
+
+Status: a tag for the arrays that reach generic code is a possible later
+extension.
 
 ## Records and enums
 

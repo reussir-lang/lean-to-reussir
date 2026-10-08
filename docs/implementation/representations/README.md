@@ -11,9 +11,13 @@ is in [`runtime/README.md`](../../../runtime/README.md).
   block (header and limbs), literals, printing.
 - [records.md](records.md): generated types for inductives: unit, value
   enums and structs, field order, hidden fields, names.
-- [arrays.md](arrays.md): the one array type (`RVec<Box>`), the one-block
+- [arrays.md](arrays.md): the array of boxes (`RVec<Box>`), the one-block
   array and its `count == 1` release, capacities (mimalloc's size class),
   indices.
+- [compact-arrays.md](compact-arrays.md): `Array S` of a scalar as
+  `RVec<u8|u16|u32|u64|f32|f64>` (optimization `compact-arrays`): the
+  storage kinds, the whole-program check, the typed `map` loops, the boxed
+  `Array α` fields, the safety net, the alternatives considered.
 - [strings.md](strings.md): the counted string, its equality, the string literal table
   and its `[` escape.
 - [box-and-uniform.md](box-and-uniform.md): the uniform `Box` type and its

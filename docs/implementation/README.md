@@ -41,7 +41,7 @@ into it. Reussir issues (bugs, costs and the other kinds) link to
    static dictionaries, polymorphic recursion, Lean's passes, type
    recovery, `lcAny` and the "can cast" fact.
 2. [representations/](representations/README.md): `Nat`/`Int`, generated
-   records and value types, arrays, strings and the literal
+   records and value types, arrays (compact arrays of scalars), strings and the literal
    table, `Box`, placeholders, function values, references, identity.
 3. [conversions/](conversions/README.md): where conversions go (a value
    of an inductive is never rebuilt: one type per inductive), lazy

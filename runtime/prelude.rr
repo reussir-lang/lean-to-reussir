@@ -169,11 +169,13 @@ fn l2r_any_as_f64(a : LAny) -> f64 [{ leanrt::any::as_f64(a) }];
 // nullary variant becomes the immediate of its index), an opaque type of
 // this prelude (`LStr`, `RVec`, `LCell`, `LHandle`), a `Nat` or `Int` (their
 // own words). leanrt's own kinds keep their fixed numbers whatever `num`
-// says: `Nat`, `Int`, `LStr`, `RVec<LAny>`, `RVec<u8>`, `RVec<f64>` (and
-// `LRef<LAny>`, the same Rust type as `RVec<LAny>`: number 6, and `box(0)`
-// unboxes to an empty one; generated code does not use `LRef`); a
-// `u64`/`i64` or `f64` boxes as `l2r_any_of_u64`/`l2r_any_of_f64` do. The
-// address is checked (48 bits).
+// says: `Nat`, `Int`, `LStr`, `RVec<LAny>`, the arrays of scalars
+// `RVec<u8>`, `RVec<f64>`, `RVec<u16>`, `RVec<u32>`, `RVec<u64>`,
+// `RVec<f32>` (7 to 12: `ByteArray`, `FloatArray`, lean2rr's compact
+// arrays), and `LRef<LAny>`, the same Rust type as `RVec<LAny>` (number 6,
+// and `box(0)` unboxes to an empty one; generated code does not use
+// `LRef`); a `u64`/`i64` or `f64` boxes as `l2r_any_of_u64`/
+// `l2r_any_of_f64` do. The address is checked (48 bits).
 #[ffi(import)]
 fn l2r_any_of<T>(x : T, num : u64) -> LAny [{ leanrt::any::of(x, num) }];
 // A function value (a generated function-value enum): a nullary variant
@@ -197,7 +199,10 @@ fn l2r_any_of_ptr<T>(x : T, num : u64) -> LAny [{ {
 // one of leanrt's kinds is its zero (`0`, `0.0`, `""`, `#[]`), as the `b0`
 // arm of the old enum `L2RBox` gave; a `Nat` or `Int` also decodes its own
 // immediates. Anything else is `l2r_unreachable` (a panic, never a wrong
-// read).
+// read), with one exception, the safety net of the compact arrays: an
+// array of scalars (7 to 12) unboxed at `RVec<LAny>` is converted to an
+// array of boxes (`leanrt::any`, `boxes_of_compact`; never expected,
+// reported under `L2R_DEBUG_ARRAY_CONVERT`).
 //
 // The rule for generated unboxes at a program type `T` (a record, an enum,
 // a function value, a reference, an `LCell`): split the word first, since
@@ -1823,8 +1828,10 @@ fn l2r_float32_frexp_with<P>(x : f32, mk : f32 -> (Int -> P)) -> P {
 // Array
 //
 // `RVec<E>` where `E` is the element's storage type (lean2rr boxes element
-// types that cannot cross the FFI boundary). Indices are `Nat`; big ones
-// are always out of bounds.
+// types that cannot cross the FFI boundary; a compact array of scalars
+// stores `u8`, `u16`, `u32`, `u64`, `f32` or `f64`, at which every texture
+// with a `<T>` parameter works). Indices are `Nat`; big ones are always
+// out of bounds.
 
 #[ffi(import)]
 fn l2r_array_empty<T>() -> RVec<T> [{ leanrt::array::empty() }];

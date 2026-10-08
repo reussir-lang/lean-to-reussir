@@ -74,12 +74,16 @@ def boxedArgMask (f : Name) : LowerM (Option (Array (Option Bool))) := do
     let inArrays ← typeVarsInArrays orig
     let mut acc := #[]
     for h : i in [:params.size] do
+      -- (An array element is a box unless the array is compact,
+      -- `arrayStorage`.)
       let atVar ← match uses[i]?.join with
         | some k =>
-          if inArrays[k]?.getD false then pure true
-          else match typeArgs[k]? with
-            | some ta => pure ((← lowerType (← toMonoTypeKeep ta)) == RR.Ty.box)
-            | none => pure false
+          match typeArgs[k]? with
+          | some ta =>
+            let mt ← toMonoTypeKeep ta
+            if inArrays[k]?.getD false then pure ((← arrayStorage mt) == RR.Ty.box)
+            else pure ((← lowerType mt) == RR.Ty.box)
+          | none => pure (inArrays[k]?.getD false)
         | none => pure false
       acc := acc.push (atVar || (← lowerType params[i]) == RR.Ty.box)
     let m := acc.map some
@@ -177,9 +181,11 @@ def letValueBoxed (ctx : CodeCtx) (v : LetValue .pure) : LowerM Bool := do
       if (← lowerType ret) == RR.Ty.box then return true
       let (_, retUse) ← typeVarUses orig
       let some k := retUse | return false
-      if (← typeVarsInArrays orig)[k]?.getD false then return true
-      let some ta := typeArgs[k]? | return false
-      return (← lowerType (← toMonoTypeKeep ta)) == RR.Ty.box
+      let inArrays := (← typeVarsInArrays orig)[k]?.getD false
+      let some ta := typeArgs[k]? | return inArrays
+      let mt ← toMonoTypeKeep ta
+      if inArrays then return (← arrayStorage mt) == RR.Ty.box
+      return (← lowerType mt) == RR.Ty.box
     | _ => return false
   | _ => return false
 

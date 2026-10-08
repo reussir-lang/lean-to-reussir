@@ -5,6 +5,7 @@ import LeanToReussir.Relevance
 import LeanToReussir.Collect
 import LeanToReussir.Mono
 import LeanToReussir.ErasedDomains
+import LeanToReussir.ArrayKinds
 
 /-!
 # Stage 4 foundations: state and type translation
@@ -151,6 +152,15 @@ structure LowerCtx where
   (`flowAnalysis`): which erased domains of function types stay as unit
   domains (`keptErasedHead`, `lowerType`). -/
   erased : ErasedInfo := {}
+  /-- The storage kinds whose arrays are compact (`RVec<k>`;
+  optimization `compact-arrays`, `compactArrayKinds`): an `Array S` whose
+  element type has one of these kinds (`arrayStorage`). Empty: every array
+  is an array of `Box`es. -/
+  compactKindsOn : Array String := #[]
+  /-- The inductives whose fields of type `Array α` (`α` a parameter) are a
+  `Box` instead of an array of boxes, because the program also stores a
+  compact array there (`arrayFieldInductives`, `nominalType`). -/
+  boxedArrayFields : NameSet := {}
 
 /-- How the target of a function value is called with all its arguments
 (data, so that the lowering state can hold it; see Lower's
@@ -238,6 +248,8 @@ structure LowerState where
   /-- The state optional passes keep for the whole program (analyses they
   compute once), by the pass's name (`LowerState.getExt?`). -/
   ext : NameMap Dynamic := {}
+  /-- `enumCtorCount?`'s answers, by inductive (`arrayKindOf`). -/
+  enumCounts : Std.HashMap Name (Option Nat) := {}
   /-- Targets of function values, by id. -/
   fnTargets : Std.HashMap String FnTarget := {}
   /-- Variants of each function-value type (an `RR.Ty.fn`, at run time:
@@ -618,6 +630,42 @@ def enumOfIndexFn (tn : String) : LowerM String := do
     modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named "u64")] (.named tn) (.ofExpr e)) }
   return name
 
+/-- `l2r_bool_of_u8(x)`: the `bool` that a compact array of `Bool`s stores
+as the byte `x` (`elemOfStorage?`). -/
+def boolOfU8Fn : LowerM String := do
+  let name := "l2r_bool_of_u8"
+  unless (← hasFn name) do
+    modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named "u8")] .bool
+      ⟨#[("z", some (.named "u8"), .atom "0")], .atom "x != z"⟩) }
+  return name
+
+/-- Whether `tn` is an enumeration (a generated `[value]` enum without
+fields). -/
+def isEnumType (tn : String) : LowerM Bool :=
+  return ((← get).typeInfos[tn]?.map (·.shape == .enumLike)).getD false
+
+/-- Value `v` of Reussir type `vt` as an element of compact storage `st`
+(optimization `compact-arrays`), when that is not `coerce`'s conversion: a
+`bool` as its byte (`lean_bool_to_uint8`), an enumeration as the byte of
+its index (`l2r_enum_index_T`). A box needs no more: its immediate is the
+byte (`l2r_any_as_u8`). -/
+def elemToStorage? (v : RR.Expr) (vt st : RR.Ty) : LowerM (Option RR.Expr) := do
+  unless st == .named "u8" do return none
+  let .named tn := vt | return none
+  if tn == "bool" then return some (.call "lean_bool_to_uint8" #[] #[v])
+  if ← isEnumType tn then return some (.cast (.call (← enumIndexFn tn) #[] #[v]) (.named "u8"))
+  return none
+
+/-- An element `v` of compact storage `st` as a value of Reussir type `vt`
+(the inverse of `elemToStorage?`): a byte as a `bool` (`l2r_bool_of_u8`),
+or as an enumeration by index (`l2r_enum_of_index_T`). -/
+def elemOfStorage? (v : RR.Expr) (st vt : RR.Ty) : LowerM (Option RR.Expr) := do
+  unless st == .named "u8" do return none
+  let .named tn := vt | return none
+  if tn == "bool" then return some (.call (← boolOfU8Fn) #[] #[v])
+  if ← isEnumType tn then return some (.call (← enumOfIndexFn tn) #[] #[.cast v (.named "u64")])
+  return none
+
 /-- How values of a payload type are held in a box (`boxKind`). -/
 inductive BoxKind where
   /-- The unit: `box(0)`, the word 1. -/
@@ -639,7 +687,8 @@ inductive BoxKind where
   `Box` (`ST.Out σ α`) is the box itself. -/
   | valueStruct (tn : String) (ft : RR.Ty)
   /-- One of leanrt's kinds, with its fixed number: `Nat` 1, `Int` 2,
-  `LStr` 3, `RVec<Box>` 6, `RVec<u8>` 7, `RVec<f64>` 8 (`l2r_any_of<T>`;
+  `LStr` 3, `RVec<Box>` 6, `RVec<u8>` 7, `RVec<f64>` 8, and the compact
+  arrays `RVec<u16>` 9, `RVec<u32>` 10, `RVec<u64>` 11, `RVec<f32>` 12 (`l2r_any_of<T>`;
   `l2r_any_as<T>` decodes `box(0)` as the kind's zero). -/
   | leanrt (num : Nat)
   /-- A program payload: a pointer with the program's number `num`
@@ -732,6 +781,14 @@ def boxKind (t : RR.Ty) : LowerM BoxKind := do
     if e == RR.Ty.box then return .leanrt 6
     if e == .named "u8" then return .leanrt 7
     if e == .named "f64" then return .leanrt 8
+    -- Compact arrays (`compact-arrays`): leanrt's kinds for `Vec<u16>`,
+    -- `Vec<u32>`, `Vec<u64>` and `Vec<f32>` (an `Array UInt8`, `Bool` or
+    -- enumeration is kind 7, an `Array Float` kind 8, as `ByteArray` and
+    -- `FloatArray`).
+    if e == .named "u16" then return .leanrt 9
+    if e == .named "u32" then return .leanrt 10
+    if e == .named "u64" then return .leanrt 11
+    if e == .named "f32" then return .leanrt 12
     return .prog (← boxNum t) t false #[] false
   | .app .. => return .prog (← boxNum t) t false #[] false
   | .fn .. => return .prog (← boxNum t) t false #[] true
@@ -1129,8 +1186,9 @@ def strLitTable (lits : Array String) : String :=
   s!"    const LITS: &[&[u8]] = &[{", ".intercalate items}];\n" ++
   "    leanrt::string::from_bytes(LITS[id as usize])\n} }];\n"
 
-/-- The element type of runtime array type `t` (`RVec<e>`: `Box` for every
-`Array α`, `u8` for `ByteArray`, `f64` for `FloatArray`), if it is one. -/
+/-- The element type of runtime array type `t` (`RVec<e>`: the storage
+type of `Array α`, `arrayStorage`, `u8` for `ByteArray`, `f64` for
+`FloatArray`), if it is one. -/
 def arrayElem? (t : RR.Ty) : Option RR.Ty :=
   match t with
   | .app "RVec" #[e] => some e
@@ -1221,12 +1279,54 @@ mutual
         if let some k := flatTupleArity? n then
           let args := e.getAppArgs
           if args.size == k then return .named (← tupleType (← args.mapM lowerType))
+        -- An array: of its element type's storage (`compact-arrays`).
+        if n == ``Array && e.getAppNumArgs == 1 then
+          return .app "RVec" #[← arrayStorage e.appArg!]
         lowerTypeApp n
       | _ => return RR.Ty.box
     | _ => return RR.Ty.box
 
+  /-- The storage kind of an array element of mono type `t`, as
+  `scalarKind?` (`ArrayKinds.lean`) gives it, which the whole-program check
+  uses: an enumeration (`enumCtorCount?`, cached) is exactly a type
+  `nominalType` gives the shape `enumLike`, stored as its index (`u8`). The
+  element type is not lowered here, so that generated types keep their
+  order (and names) with the optimization on. -/
+  partial def arrayKindOf (t : Expr) : LowerM (Option String) := do
+    let .const n _ := t.consumeMData.headBeta.getAppFn | return none
+    match n with
+    | ``UInt8 | ``Bool => return some "u8"
+    | ``UInt16 => return some "u16"
+    | ``UInt32 => return some "u32"
+    | ``UInt64 | ``USize => return some "u64"
+    | ``Float32 => return some "f32"
+    | ``Float => return some "f64"
+    | _ =>
+      let k ← match (← get).enumCounts[n]? with
+        | some k => pure k
+        | none => do
+          let k ← enumCtorCount? n
+          modify fun s => { s with enumCounts := s.enumCounts.insert n k }
+          pure k
+      match k with
+      | some k => return if 1 ≤ k && k ≤ 256 then some "u8" else none
+      | none => return none
+
+  /-- The storage type of the elements of an `Array t` (`t` a mono type):
+  its storage kind (`arrayKindOf`) when the program stores that kind
+  compactly (`LowerCtx.compactKindsOn`, optimization `compact-arrays`),
+  otherwise `Box` (rule 1: one array of boxes for every other type). A
+  `Bool` is stored as its `u8`, an enumeration as its index. -/
+  partial def arrayStorage (t : Expr) : LowerM RR.Ty := do
+    let on := (← read).compactKindsOn
+    if on.isEmpty then return RR.Ty.box
+    match ← arrayKindOf t with
+    | some k => return if on.contains k then .named k else RR.Ty.box
+    | none => return RR.Ty.box
+
   /-- Translate a mono type whose head is constant `n` (its arguments do
-  not change the representation, rule 1). -/
+  not change the representation, rule 1; an `Array` with its element type
+  is `lowerType`'s). -/
   partial def lowerTypeApp (n : Name) : LowerM RR.Ty := do
     match n with
     | ``UInt8 => return .named "u8"
@@ -1299,7 +1399,11 @@ mutual
         match m with
         | none => fields := fields.push none
         | some mono =>
-          let t ← lowerType mono
+          -- A field `Array α` (`Array lcAny` here) of an inductive that the
+          -- program also uses with a compact array there (`compact-arrays`,
+          -- `arrayFieldInductives`): a `Box`, which holds either array.
+          let t ← if mono.isAppOfArity ``Array 1 && mono.appArg!.consumeMData == anyExpr &&
+              (← read).boxedArrayFields.contains ival.name then pure RR.Ty.box else lowerType mono
           fields := fields.push (some (rrFields.size, t))
           rrFields := rrFields.push t
       -- `IO.Process.Child`: native Lean's object also carries the pid

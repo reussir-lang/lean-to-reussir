@@ -1,0 +1,6 @@
+# lean-zip's presize, n = 5 * 10^6 and 5 * 10^7 bytes. Peak memory at n = 5 * 10^7 at most 120000 KB (compact: the
+# buffer is 48828 KB; boxed: the replicated array alone is 390625 KB). Allocations and bytes grow at most twice as
+# much as native's: above 2^24 elements leanrt's size check of `Array.replicate` (`array::check_alloc`) mallocs and
+# frees a block of the native size (8 bytes per element) without touching it, which the counter counts.
+bytes 5000000 | bytes 50000000 | 2 1000 | rss 0 120000
+array 5000000 | array 50000000 | 2 1000 | rss 0 120000

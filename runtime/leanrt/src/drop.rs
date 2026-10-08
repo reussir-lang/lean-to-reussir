@@ -717,9 +717,10 @@ impl ReleaseElems for crate::any::LAny {
     /// `free_vec` again, so a deep nesting of one-element arrays would
     /// recurse; the step keeps such a free iterative (the unit test
     /// `any::tests::deep_nesting_of_one_element_arrays`: 10^6 levels on a
-    /// 256 KiB stack). A `ByteArray` or `FloatArray` (`NUM_BYTES`,
-    /// `NUM_FLOATS`) would be freed by one `mi_free`, with no recursion; it
-    /// keeps the step only because the case is rare.
+    /// 256 KiB stack). An array of scalars (`NUM_BYTES` to `NUM_F32S`: a
+    /// `ByteArray`, a `FloatArray`, a compact `Array` of scalars) would be
+    /// freed by one `mi_free`, with no recursion; it keeps the step only
+    /// because the case is rare.
     #[inline(always)]
     unsafe fn free_single(o: *mut Hdr) -> bool {
         if (*o).len != 1 {

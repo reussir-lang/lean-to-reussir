@@ -3,6 +3,7 @@ import LeanToReussir.Emit.Entry
 import LeanToReussir.PassConfig
 import LeanToReussir.Outline
 import LeanToReussir.MonoRetype
+import LeanToReussir.CompactArrays
 
 /-!
 # Program assembly
@@ -418,8 +419,19 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   -- for the erased domains of function types (`ErasedDomains`).
   let inits := startup.filterMap fun | .init decl inst => some (decl, inst) | _ => none
   let erased ← flowAnalysis decls casts.isSome inits
+  -- `compact-arrays`: the storage kinds whose arrays are compact.
+  -- (An axiom that states a `Bool` equation, `native_decide`'s and
+  -- `bv_decide`'s, casts no array: `isBoolEqAxiom`.)
+  let (compactKindsOn, compactOff, boxedArrayFields) ← if cfg.compactArrays then
+      compactArrayKinds decls (programCasts (← getEnv) keys decls (ignoreAxiom := isBoolEqAxiom)) inits roots
+    else pure (#[], #[], {})
   if (← IO.getEnv "L2R_DEBUG").isSome then
     IO.eprintln s!"lean2rr: program casts: {match casts with | some n => s!"yes ({n})" | none => "no"}"
+    if cfg.compactArrays then
+      IO.eprintln s!"lean2rr: compact arrays: {compactKindsOn}"
+      for (k, why) in compactOff do IO.eprintln s!"lean2rr: compact arrays: {k} off: {why}"
+      unless boxedArrayFields.isEmpty do
+        IO.eprintln s!"lean2rr: compact arrays: fields `Array α` boxed in {boxedArrayFields.toList}"
     IO.eprintln s!"lean2rr: program creates tasks: {createsTasks}"
     IO.eprintln s!"lean2rr: rule 4: {erased.eMarks.size} skeletons with a completion at an erased domain, {erased.reached.size} function types reached by a completion"
   let ctx : LowerCtx := { decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
@@ -429,7 +441,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
                           cachePlaceholders := cfg.cachePlaceholders, boxedConsts := cfg.boxedConsts,
                           programCasts := casts.isSome, createsTasks, callCycles := callCycles decls,
-                          convLiveness := cfg.convLiveness, erased }
+                          convLiveness := cfg.convLiveness, erased, compactKindsOn, boxedArrayFields }
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit payload, `box(0)`): types
     -- may mention it even when nothing is ever boxed.

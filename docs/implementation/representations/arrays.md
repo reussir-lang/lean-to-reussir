@@ -1,14 +1,20 @@
 # Arrays
 
 `Array α` is the runtime's copy-on-write vector `RVec<LAny>`, updated in
-place when unique, whatever `α` is; `ByteArray` and `FloatArray` are
-`RVec<u8>` and `RVec<f64>`. Paths: `lean2rr/LeanToReussir/` for lean2rr's
-files, `runtime/` for the runtime. Plan
-[§5.1](../../translation-plan.md#51-type-translation).
+place when unique, for every `α` without a storage kind; an `Array S` of
+a scalar `S` is `RVec<k>` of its storage kind `k` (`RVec<u64>` for
+`Array UInt64`) when the program's whole-program check allows it
+(optimization `compact-arrays`, [compact-arrays.md](compact-arrays.md));
+`ByteArray` and `FloatArray` are `RVec<u8>` and `RVec<f64>`. Paths:
+`lean2rr/LeanToReussir/` for lean2rr's files, `runtime/` for the runtime.
+Plan [§5.1](../../translation-plan.md#51-type-translation).
 
-### An array holds `Box`es, whatever its element type
+### An array holds `Box`es, whatever its element type (unless it is compact)
 
-- **What:** `Array α` is `RVec<LAny>` for every `α` (`lowerTypeApp`). A
+- **What:** `Array α` is `RVec<LAny>` for every `α` that has no storage
+  kind, or whose kind the program stores as boxes (`lowerType`,
+  `arrayStorage`; the compact arrays are in
+  [compact-arrays.md](compact-arrays.md)). A
   value goes into an array by boxing (`Array.push` at `Nat` boxes the
   `Nat`) and comes out by unboxing, at the extern's boundary
   (`lowerExternCall`: an extern over arrays stores its type parameters'
@@ -16,7 +22,8 @@ files, `runtime/` for the runtime. Plan
   Lean's library move the boxes as they are. `ByteArray.mk`/`data` and
   `FloatArray.mk`/`data` convert between an array of `Box`es and the
   runtime's bytes or floats (natively `lean_byte_array_mk` copies too;
-  [below](#bytearraymkdata-and-floatarraymkdata-are-one-loop-at-the-exact-size)).
+  [below](#bytearraymkdata-and-floatarraymkdata-are-one-loop-at-the-exact-size)),
+  and are the identity for a compact `Array UInt8` or `Array Float`.
 - **Why:** One representation per type (rule 1 of the layouts of generic
   types): with an array type per element type (`RVec<Nat>`, `LNatArr`,
   index arrays for enumerations, `ElemBox` cells for `[value]` elements),
@@ -29,10 +36,11 @@ files, `runtime/` for the runtime. Plan
   `Nat`, a `Bool` or an enumeration is a scalar in the slot, as natively; a
   `Float` element is a cell, as natively. Each `get!` boxes its default
   value.
-- **Where:** `LowerBase.lean`: `lowerTypeApp`, `arrayElem?`, `arrayCall`;
-  `Lower/ExternCall.lean`: `lowerExternCall`, `customExtern`;
+- **Where:** `LowerBase.lean`: `lowerType`, `arrayStorage`, `arrayElem?`,
+  `arrayCall`; `Lower/ExternCall.lean`: `lowerExternCall`, `customExtern`;
   `Lower/Process.lean`: `arrayMapFn`.
-- **Remove only if:** never.
+- **Remove only if:** never (the compact arrays cover only scalars that
+  never reach generic code).
 
 ### `ByteArray.mk`/`data` and `FloatArray.mk`/`data` are one loop at the exact size
 
@@ -60,8 +68,8 @@ files, `runtime/` for the runtime. Plan
   compression 2517.7 to 2437.5 M (-3.2 %); peak RSS from 141.4 to 61 to
   69 MB and from 150.7 to 71 to 83 MB (two runs; native 74.7 and 98.4
   MB).
-- **Where:** `Lower/ExternCall.lean`: `customExtern`;
-  `runtime/prelude.rr`: the `ByteArray` section;
+- **Where:** `Lower/ExternCall.lean`: `customExtern` (the identity for a
+  compact array, then the textures); `runtime/prelude.rr`: the `ByteArray` section;
   `runtime/leanrt/src/array.rs`: `boxes_of_bytes`, `bytes_of_boxes`,
   `boxes_all_imm`, `boxes_of_floats`, `floats_of_boxes`,
   `boxes_all_float_words`; `runtime/leanrt/src/any.rs`: `bits_of_word`,
@@ -251,5 +259,7 @@ files, `runtime/` for the runtime. Plan
   "Stack depth").
 - **Where:** `Lower/ExternCall.lean`: `customExtern`;
   `Lower/Externs.lean`: `listFold`, `listSum`, `listLength`,
-  `stringOfList`.
+  `stringOfList`. A compact array's loops unbox the list's heads at its
+  storage kind and box its elements back (a `Bool`'s box is the immediate
+  of its byte, [compact-arrays.md](compact-arrays.md#the-storage-kinds)).
 - **Remove only if:** never.

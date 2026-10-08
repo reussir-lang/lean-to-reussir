@@ -130,8 +130,9 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let startup ← startupSteps leanInit items rootInsts st
   let roots := entryCallees mainInst errStr startup
   let table ← programRelevance decls
-  let decls ← retypeMono table decls st.keys roots
-  let keys := st.keys
+  -- (With `compact-arrays`, the typed `map` loops, which can add extern
+  -- instances and their keys.)
+  let (decls, keys) ← retypeMono cfg.stage2 cfg.stage3 table decls st.keys roots
   if stage == "retyped" then return dumpDecls header decls
   -- The registry's passes over mono LCNF (`Opt/FloatLits`), then those
   -- that need the environment (`Opt/Flatten`).

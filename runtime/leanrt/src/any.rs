@@ -22,20 +22,29 @@
 //! `rc.dec` calls the drop hook (`Drop` below) for an even word.
 //!
 //! Payload numbers: 0 is never used; 1 to 15 are leanrt's own payload kinds
-//! (`NUM_*`), released here; 16 and up are the program's (lean2rr numbers
-//! the payload types of a program). The last reference to a program
-//! payload goes to the program's release function of its type (a table by
-//! payload number, `RELEASES`: lean2rr's `l2r_any_rel_<num>_c(cell)`, an
-//! `extern "C" trampoline` of a generated Reussir function that drops the
-//! payload at its type), through the drop worklist: the payload's cell is
-//! deferred as one pending cell, so a chain of a million nested boxes is
-//! freed without deep recursion and what the payload holds is released in
-//! native Lean's order. A leaf payload (a number with `LEAF_BIT`: lean2rr
-//! gives it to records and enums whose fields are all scalars) is released
-//! by a direct call when no free is running: it holds nothing to order.
-//! The array free calls a payload's release directly where the deferred
-//! cell would be popped next anyway (`release_last_in_step`, and an array
-//! that keeps one element: `drop::ReleaseElems::free_single`).
+//! (`NUM_*`), released here: 1 a big `Nat`, 2 a big `Int`, 3 a `String`, 4
+//! a `Float`'s cell, 5 a large `UInt64`'s cell, 6 an array of boxes, 7 to
+//! 12 the arrays of scalars (7 `RVec<u8>`, a `ByteArray` or a compact
+//! `Array` of `UInt8`, `Bool` or a small enumeration; 8 `RVec<f64>`, a
+//! `FloatArray` or a compact `Array Float`; 9 `RVec<u16>`, 10 `RVec<u32>`,
+//! 11 `RVec<u64>`, 12 `RVec<f32>`: compact `Array`s of `UInt16`, of
+//! `UInt32` or `Char`, of `UInt64` or `USize`, of `Float32`); 13 to 15 are
+//! free. 16 and up are the program's (lean2rr numbers the payload types of
+//! a program). An array of boxes unboxed from an array of scalars is
+//! converted (`boxes_of_compact`, the safety net). The last reference to a
+//! program payload goes to the program's release function of its type (a
+//! table by payload number, `RELEASES`: lean2rr's
+//! `l2r_any_rel_<num>_c(cell)`, an `extern "C" trampoline` of a generated
+//! Reussir function that drops the payload at its type), through the drop
+//! worklist: the payload's cell is deferred as one pending cell, so a chain
+//! of a million nested boxes is freed without deep recursion and what the
+//! payload holds is released in native Lean's order. A leaf payload (a
+//! number with `LEAF_BIT`: lean2rr gives it to records and enums whose
+//! fields are all scalars) is released by a direct call when no free is
+//! running: it holds nothing to order. The array free calls a payload's
+//! release directly where the deferred cell would be popped next anyway
+//! (`release_last_in_step`, and an array that keeps one element:
+//! `drop::ReleaseElems::free_single`).
 //!
 //! A payload that is not one counted pointer is boxed in a cell first: an
 //! `f64` and a `UInt64`/`USize` from 2^63 here (`NUM_F64`, `NUM_U64`, a
@@ -85,10 +94,20 @@ pub const NUM_F64: u64 = 4;
 pub const NUM_U64: u64 = 5;
 /// An `Array` of boxes (`RVec<LAny>`).
 pub const NUM_ARRAY: u64 = 6;
-/// A `ByteArray` (`RVec<u8>`).
+/// A `ByteArray` (`RVec<u8>`); also a compact `Array` of `UInt8`, `Bool` or
+/// an enumeration of at most 256 constructors (lean2rr's compact scalar
+/// arrays: the elements as their storage type, not boxes).
 pub const NUM_BYTES: u64 = 7;
-/// A `FloatArray` (`RVec<f64>`).
+/// A `FloatArray` (`RVec<f64>`); also a compact `Array Float`.
 pub const NUM_FLOATS: u64 = 8;
+/// A compact `Array UInt16` (`RVec<u16>`).
+pub const NUM_U16S: u64 = 9;
+/// A compact `Array UInt32` or `Array Char` (`RVec<u32>`).
+pub const NUM_U32S: u64 = 10;
+/// A compact `Array UInt64` or `Array USize` (`RVec<u64>`).
+pub const NUM_U64S: u64 = 11;
+/// A compact `Array Float32` (`RVec<f32>`).
+pub const NUM_F32S: u64 = 12;
 pub const FIRST_PROGRAM_NUM: u64 = 16;
 /// The bit of a program payload number that marks a leaf type: a record or
 /// enum without counted or observable members (its fields are scalars), so
@@ -367,10 +386,10 @@ pub(crate) unsafe fn release_last_in_step(w: u64) {
 /// or one of leanrt's leaves (a big number, a string, a scalar cell: one
 /// block freed at once), for `drop::ReleaseElems::free_single`. Not an
 /// array of boxes (`NUM_ARRAY`): its release is `drop::free_vec` again,
-/// which would recurse through a deep nesting of one-element arrays. Not a
-/// `ByteArray` or `FloatArray` (`NUM_BYTES`, `NUM_FLOATS`) either, whose
-/// free is one `mi_free` without recursion: the case is rare, so it keeps
-/// the step.
+/// which would recurse through a deep nesting of one-element arrays. Not an
+/// array of scalars (`NUM_BYTES` to `NUM_F32S`: a `ByteArray`, a
+/// `FloatArray`, a compact `Array` of scalars) either, whose free is one
+/// `mi_free` without recursion: the case is rare, so it keeps the step.
 #[inline(always)]
 pub(crate) fn frees_flat(w: u64) -> bool {
     let num = num_of(w);
@@ -411,8 +430,13 @@ extern "C" fn release_kind(w: u64, num: u64) {
             // A scalar cell holds nothing to drop.
             NUM_F64 | NUM_U64 => crate::alloc::free(p),
             NUM_ARRAY => drop(std::mem::transmute::<*mut u8, crate::drop::Vec<LAny>>(p)),
+            // The arrays of scalars: one block, freed at once.
             NUM_BYTES => drop(std::mem::transmute::<*mut u8, crate::drop::Vec<u8>>(p)),
             NUM_FLOATS => drop(std::mem::transmute::<*mut u8, crate::drop::Vec<f64>>(p)),
+            NUM_U16S => drop(std::mem::transmute::<*mut u8, crate::drop::Vec<u16>>(p)),
+            NUM_U32S => drop(std::mem::transmute::<*mut u8, crate::drop::Vec<u32>>(p)),
+            NUM_U64S => drop(std::mem::transmute::<*mut u8, crate::drop::Vec<u64>>(p)),
+            NUM_F32S => drop(std::mem::transmute::<*mut u8, crate::drop::Vec<f32>>(p)),
             _ => mismatch(w, num),
         }
     }
@@ -616,11 +640,81 @@ macro_rules! leanrt_kind {
 leanrt_kind!(LStr, NUM_STR, Some(|| crate::string::from_bytes(b"")));
 leanrt_kind!(Rc<f64>, NUM_F64, None);
 leanrt_kind!(Rc<u64>, NUM_U64, None);
-// `RVec<LAny>`; also the prelude's `LRef<LAny>`, the same Rust type (number
-// 6; `box(0)` unboxes to an empty one; generated code does not use `LRef`).
-leanrt_kind!(crate::drop::Vec<LAny>, NUM_ARRAY, Some(crate::array::empty::<LAny>));
+// The arrays of scalars. An array of boxes in one of these boxes is a
+// mismatch (the reverse of the conversion below is not made).
 leanrt_kind!(crate::drop::Vec<u8>, NUM_BYTES, Some(crate::array::empty::<u8>));
 leanrt_kind!(crate::drop::Vec<f64>, NUM_FLOATS, Some(crate::array::empty::<f64>));
+leanrt_kind!(crate::drop::Vec<u16>, NUM_U16S, Some(crate::array::empty::<u16>));
+leanrt_kind!(crate::drop::Vec<u32>, NUM_U32S, Some(crate::array::empty::<u32>));
+leanrt_kind!(crate::drop::Vec<u64>, NUM_U64S, Some(crate::array::empty::<u64>));
+leanrt_kind!(crate::drop::Vec<f32>, NUM_F32S, Some(crate::array::empty::<f32>));
+
+/// `RVec<LAny>` (number 6); also the prelude's `LRef<LAny>`, the same Rust
+/// type (generated code does not use `LRef`). As `leanrt_kind!`: `box(0)`
+/// unboxes to an empty array, any other immediate is a mismatch. One more
+/// case, the safety net of lean2rr's compact scalar arrays: an array of
+/// scalars (`NUM_BYTES` to `NUM_F32S`) unboxed here is converted to an
+/// array of boxes (`boxes_of_compact`). lean2rr's whole-program check keeps
+/// a compact array from every place that reads it as an array of boxes
+/// (`Array lcAny`), so this does not happen; if it does, the result is the
+/// same as with the boxes, at the cost of a copy.
+impl Payload for crate::drop::Vec<LAny> {
+    #[inline(always)]
+    fn into_any(self, _num: u64) -> LAny {
+        unsafe { of_ptr(word_of(self), NUM_ARRAY) }
+    }
+    #[inline(always)]
+    unsafe fn from_any_word(w: u64, _num: u64) -> Self {
+        if is_imm(w) || num_of(w) != NUM_ARRAY {
+            if w == 1 {
+                return crate::array::empty::<LAny>();
+            }
+            return boxes_of_compact(w);
+        }
+        unsafe { take_word(w) }
+    }
+}
+
+/// The array of boxes of the array of scalars that the pointer word `w`
+/// (owning its reference) holds: a new array of the same size whose
+/// elements are the scalars boxed as lean2rr boxes them
+/// (`array::boxes_of_scalars`), the reference to the source given up. Any
+/// other word is a mismatch at `NUM_ARRAY`. With the environment variable
+/// `L2R_DEBUG_ARRAY_CONVERT` set, each conversion writes a line on
+/// descriptor 2 (`report_conversion`): tests check that none happens.
+#[cold]
+#[inline(never)]
+extern "C" fn boxes_of_compact(w: u64) -> crate::drop::Vec<LAny> {
+    use crate::drop::Vec as V;
+    let num = if is_imm(w) { 0 } else { num_of(w) };
+    unsafe {
+        match num {
+            NUM_BYTES => convert_compact(take_word::<V<u8>>(w), num),
+            NUM_FLOATS => convert_compact(take_word::<V<f64>>(w), num),
+            NUM_U16S => convert_compact(take_word::<V<u16>>(w), num),
+            NUM_U32S => convert_compact(take_word::<V<u32>>(w), num),
+            NUM_U64S => convert_compact(take_word::<V<u64>>(w), num),
+            NUM_F32S => convert_compact(take_word::<V<f32>>(w), num),
+            _ => mismatch(w, NUM_ARRAY),
+        }
+    }
+}
+
+#[inline(always)]
+fn convert_compact<T: crate::array::BoxScalar>(src: crate::drop::Vec<T>, num: u64) -> crate::drop::Vec<LAny> {
+    report_conversion(num, src.len());
+    crate::array::boxes_of_scalars(src)
+}
+
+/// The line of a conversion (`boxes_of_compact`) when
+/// `L2R_DEBUG_ARRAY_CONVERT` is set (read once).
+fn report_conversion(num: u64, len: usize) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("L2R_DEBUG_ARRAY_CONVERT").is_some()) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "leanrt: compact array of kind {num} converted to boxes ({len} elements)");
+    }
+}
 
 /// The 8-byte scalars a texture can be instantiated at: a `UInt64` or
 /// `USize` (and the bits of an `Int64` or `ISize`) boxes as `of_u64` (an
@@ -1414,6 +1508,10 @@ mod tests {
         drop(v);
         assert_eq!(of(crate::array::with_capacity::<u8>(2), 17).num(), NUM_BYTES);
         assert_eq!(of(crate::array::with_capacity::<f64>(2), 18).num(), NUM_FLOATS);
+        assert_eq!(of(crate::array::with_capacity::<u16>(2), 19).num(), NUM_U16S);
+        assert_eq!(of(crate::array::with_capacity::<u32>(2), 20).num(), NUM_U32S);
+        assert_eq!(of(crate::array::with_capacity::<u64>(2), 21).num(), NUM_U64S);
+        assert_eq!(of(crate::array::with_capacity::<f32>(2), 22).num(), NUM_F32S);
     }
 
     #[test]
@@ -1423,10 +1521,162 @@ mod tests {
         assert_eq!(as_::<crate::drop::Vec<LAny>>(LAny::unit(), NUM_ARRAY).len(), 0);
         assert_eq!(as_::<crate::drop::Vec<u8>>(LAny::unit(), NUM_BYTES).len(), 0);
         assert_eq!(as_::<crate::drop::Vec<f64>>(LAny::unit(), NUM_FLOATS).len(), 0);
+        assert_eq!(as_::<crate::drop::Vec<u16>>(LAny::unit(), NUM_U16S).len(), 0);
+        assert_eq!(as_::<crate::drop::Vec<u32>>(LAny::unit(), NUM_U32S).len(), 0);
+        assert_eq!(as_::<crate::drop::Vec<u64>>(LAny::unit(), NUM_U64S).len(), 0);
+        assert_eq!(as_::<crate::drop::Vec<f32>>(LAny::unit(), NUM_F32S).len(), 0);
         assert_eq!(as_f64(LAny::unit()), 0.0);
         assert_eq!(as_u64(LAny::unit()), 0);
         assert_eq!(as_::<LNat>(LAny::unit(), 0).low_u64(), 0);
         assert_eq!(crate::nat::int_of_small_word(as_::<LInt>(LAny::unit(), 0).into_raw()), 0);
+    }
+
+    /// A compact array of scalars boxed at its kind (whatever number is
+    /// passed): the same block, unboxed back unique; a copy of the box
+    /// shares the block (`is_shared`), and an update through an unboxed
+    /// copy copies it; the persist walk records the block once; the last
+    /// reference releases it (`release_last`, then `release_kind`), also
+    /// inside a free (a payload's field) and as an element of an array of
+    /// boxes (the array free's two passes, `release_last_in_step`).
+    fn scalar_kind<T: Clone + Copy + PartialEq + std::fmt::Debug>(x: [T; 3], num: u64)
+    where
+        crate::drop::Vec<T>: Payload,
+    {
+        type V<T> = crate::drop::Vec<T>;
+        install();
+        let v = crate::array::from_slice(&x);
+        let h = v.hdr();
+        let a = of(v, 99);
+        assert_eq!((a.num(), a.addr(), a.is_exclusive()), (num, h as u64, true));
+        let v: V<T> = as_(a, 99);
+        assert_eq!((v.hdr(), v.is_unique(), v.as_slice()), (h, true, &x[..]));
+        let walk = crate::persist::begin();
+        assert!(!crate::persist::seen(walk, v.clone()));
+        assert!(crate::persist::seen(walk, v.clone()));
+        crate::persist::end(walk);
+        // Shared: an update through a copy copies the block.
+        let a = of(v, num);
+        let b = a.clone();
+        assert!(crate::is_shared(&a) && crate::is_shared(&b));
+        let w: V<T> = as_(b, num);
+        assert!(w.hdr() == h && crate::is_shared(&w));
+        let w = crate::array::set(w, 0, x[2]);
+        assert!(w.hdr() != h && w.is_unique());
+        assert_eq!(w.as_slice(), &[x[2], x[1], x[2]]);
+        assert!(a.is_exclusive());
+        let v: V<T> = as_(a.clone(), num);
+        assert_eq!(v.as_slice(), &x[..]);
+        drop(v);
+        drop(a);
+        // A payload's field, released inside its free.
+        drop(node(7, of(crate::array::from_slice(&x), num)));
+        assert_eq!(take_log(), vec![7]);
+        // Elements of an array of boxes, one of them shared.
+        let keep = of(w, num);
+        let arr = [of(crate::array::from_slice(&x), num), keep.clone(), LAny::imm(3), of(crate::array::empty::<T>(), num), node(8, LAny::unit())]
+            .into_iter()
+            .fold(crate::array::empty::<LAny>(), crate::array::push);
+        assert_eq!(count(&keep), 2);
+        drop(arr);
+        assert_eq!((take_log(), count(&keep)), (vec![8], 1));
+        let w: V<T> = as_(keep, num);
+        assert_eq!(w.as_slice(), &[x[2], x[1], x[2]]);
+        assert!(!crate::drop::active());
+        assert_eq!(reussir_rt::drop::depth(), 0);
+    }
+
+    #[test]
+    fn scalar_array_kinds() {
+        scalar_kind([1u8, 0, 255], NUM_BYTES);
+        scalar_kind([1.5f64, -0.0, f64::INFINITY], NUM_FLOATS);
+        scalar_kind([1u16, 0, 0xffff], NUM_U16S);
+        scalar_kind([0x41u32, 0x10ffff, u32::MAX], NUM_U32S);
+        scalar_kind([1u64, 1 << 63, u64::MAX], NUM_U64S);
+        scalar_kind([1.5f32, -0.0, f32::MAX], NUM_F32S);
+    }
+
+    /// The safety net: an array of scalars unboxed at `RVec<LAny>` is
+    /// converted to boxes, each scalar boxed as lean2rr boxes it (an
+    /// immediate; a `UInt64` from 2^63 and a `Float` a cell; a `Float32`
+    /// its bits), the source released (a shared one decremented and kept as
+    /// it is). `box(0)` is still the empty array, and an array of boxes the
+    /// same block.
+    #[test]
+    fn compact_arrays_convert_at_an_array_of_boxes() {
+        type V<T> = crate::drop::Vec<T>;
+        let words = |v: &V<LAny>| v.as_slice().iter().map(|a| a.word()).collect::<std::vec::Vec<_>>();
+        let imm = |x: u64| (x << 1) | 1;
+        let conv = |a: LAny| -> V<LAny> { as_(a, NUM_ARRAY) };
+        let v = conv(of(crate::array::from_slice(&[0u8, 1, 255]), 0));
+        assert_eq!(words(&v), vec![1, imm(1), imm(255)]);
+        let v = conv(of(crate::array::from_slice(&[0u16, 0x8000, 0xffff]), 0));
+        assert_eq!(words(&v), vec![1, imm(0x8000), imm(0xffff)]);
+        let v = conv(of(crate::array::from_slice(&[0x41u32, 0x10ffff, u32::MAX]), 0));
+        assert_eq!(words(&v), vec![imm(0x41), imm(0x10ffff), imm(u32::MAX as u64)]);
+        let v = conv(of(crate::array::from_slice(&[1.5f32, -0.0, f32::from_bits(0xffc0_0002)]), 0));
+        assert_eq!(words(&v), vec![imm(1.5f32.to_bits() as u64), imm(0x8000_0000), imm(0xffc0_0002)]);
+        let v = conv(of(crate::array::from_slice(&[5u64, (1 << 63) - 1, 1 << 63, u64::MAX]), 0));
+        assert_eq!(&words(&v)[..2], &[imm(5), imm((1 << 63) - 1)]);
+        assert_eq!(v.as_slice().iter().map(|a| a.num()).collect::<std::vec::Vec<_>>(), vec![0, 0, NUM_U64, NUM_U64]);
+        assert_eq!(v.as_slice().iter().map(|a| as_u64(a.clone())).collect::<std::vec::Vec<_>>(), vec![5, (1 << 63) - 1, 1 << 63, u64::MAX]);
+        let v = conv(of(crate::array::from_slice(&[2.5f64, -0.0, f64::NAN]), 0));
+        assert!(v.as_slice().iter().all(|a| a.num() == NUM_F64 && a.is_exclusive()));
+        let bits: std::vec::Vec<u64> = v.as_slice().iter().map(|a| as_f64(a.clone()).to_bits()).collect();
+        assert_eq!(bits, vec![2.5f64.to_bits(), (-0.0f64).to_bits(), f64::NAN.to_bits()]);
+        assert_eq!(conv(of(crate::array::empty::<u64>(), 0)).len(), 0);
+        // A shared source: decremented, unchanged.
+        let src = crate::array::from_slice(&[1u32, 2]);
+        let v = conv(of(src.clone(), 0));
+        assert_eq!((words(&v), src.is_unique(), src.as_slice()), (vec![imm(1), imm(2)], true, &[1u32, 2][..]));
+        // The unboxing by word (`raw_as`) takes the same path.
+        let v: V<LAny> = unsafe { raw_as(of(crate::array::from_slice(&[9u16]), 0).into_raw(), NUM_ARRAY) };
+        assert_eq!(words(&v), vec![imm(9)]);
+        // `box(0)`, an array of boxes.
+        assert_eq!(conv(LAny::unit()).len(), 0);
+        let b = crate::array::from_slice(&[LAny::imm(4)]);
+        let h = b.hdr();
+        assert_eq!(conv(of(b, 0)).hdr(), h);
+    }
+
+    /// The line `L2R_DEBUG_ARRAY_CONVERT` asks for (one per conversion, the
+    /// kind and the size), and the reverse unboxing, an array of boxes at a
+    /// compact kind, which stays a mismatch (here with `L2R_ANY_DEBUG`'s
+    /// line): each in a child process (this test binary, this test only).
+    #[test]
+    fn conversion_line_and_reverse_mismatch() {
+        type V<T> = crate::drop::Vec<T>;
+        match std::env::var("LEANRT_TEST_CHILD").as_deref() {
+            Ok("convert") => {
+                let v: V<LAny> = as_(of(crate::array::from_slice(&[1u16, 2, 3]), 0), NUM_ARRAY);
+                let e: V<LAny> = as_(of(crate::array::empty::<u64>(), 0), NUM_ARRAY);
+                assert_eq!((v.len(), e.len()), (3, 0));
+                return;
+            }
+            Ok("reverse") => {
+                let _: V<u16> = as_(of(crate::array::empty::<LAny>(), 0), NUM_U16S);
+                return;
+            }
+            _ => {}
+        }
+        let run = |mode: &str, var: &str| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "any::tests::conversion_line_and_reverse_mismatch", "--test-threads=1"])
+                .env("LEANRT_TEST_CHILD", mode)
+                .env(var, "1")
+                .output()
+                .unwrap()
+        };
+        let out = run("convert", "L2R_DEBUG_ARRAY_CONVERT");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{err}");
+        let lines: std::vec::Vec<&str> = err.lines().filter(|l| l.starts_with("leanrt:")).collect();
+        assert_eq!(
+            lines,
+            vec!["leanrt: compact array of kind 9 converted to boxes (3 elements)", "leanrt: compact array of kind 11 converted to boxes (0 elements)"]
+        );
+        let out = run("reverse", "L2R_ANY_DEBUG");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && err.contains("at payload 9"), "{err}");
     }
 
     #[test]
