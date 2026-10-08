@@ -104,11 +104,14 @@ Paths are relative to the repository root.
   the canonical definition, refined over four rounds; numbered
   constructors (a state machine's `j123`) named by their fields and rank;
   string literal indices replaced by the literals, once cells by their
-  rank in the item; the payload numbers of `Box` (where a box is made or
-  taken apart, where an unboxing compares a word's number, in an arm on a
-  number, in the program's releases `l2r_any_rel_<n>` and their table)
-  replaced by the label of their type, which the release
-  `fn l2r_any_rel_<n>(x : T)` gives.
+  rank in the item; the payload numbers of `Box` (the last argument of a
+  call that makes or takes apart a box, found by bracket matching, so also
+  when the call spans lines; where an unboxing compares a word's number; in
+  an arm of a `match` on a name bound to `l2r_any_raw_num`; in the
+  program's releases `l2r_any_rel_<n>` and their table) replaced by the
+  label of their type, which the release `fn l2r_any_rel_<n>(x : T)` gives.
+  Other numbers equal to a payload number stay (an immediate's index in
+  the arm of another `match`).
 - **Why:** `fresh` (LowerBase.lean) numbers types, helpers, constructors
   and locals with one counter for the program, the payload numbers of
   `Box` follow the order in which Stage 4 boxes types, and Stage 1 numbers a

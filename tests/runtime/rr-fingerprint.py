@@ -49,14 +49,18 @@ form:
   constant (`l2r_once_get<T>(5)`) by its rank in the item;
 - replaces a payload number of `Box` by the label of its type (the program's
   release of each payload type, the item `fn l2r_any_rel_17(x : T) -> unit`,
-  gives each number's type): where a box is made or taken apart
-  (`l2r_any_of<T>(e, 17)`, `l2r_any_of_fn`, `l2r_any_of_ptr`, `l2r_any_as`,
-  `l2r_any_raw_as`),
-  where an unboxing compares a word's number with it (`let bm12 : u64 =
-  17;`), in a `match` arm on a number (`17 => `) in an item that reads a
-  box's number (`l2r_any_raw_num`), in the names of the releases and their
-  trampolines (`l2r_any_rel_17`, `l2r_any_rel_17_c`) and in the table that
-  installs them (`leanrt::any::Rel(17, ...)`).
+  gives each number's type): where a box is made or taken apart (the last
+  argument of `l2r_any_of<T>(e, 17)`, `l2r_any_of_fn`, `l2r_any_of_ptr`,
+  `l2r_any_as`, `l2r_any_raw_as`, also when the call spans lines, as
+  `l2r_any_of<T>({` ... `}, 17)` does), where an unboxing compares a
+  word's number with it (`let bm12 : u64 = 17;`), in an arm of a `match`
+  on a box's number (`let bn5 : u64 = l2r_any_raw_num(w); match bn5 {
+  17 => ...`), in the names of the releases and their trampolines
+  (`l2r_any_rel_17`, `l2r_any_rel_17_c`) and in the table that installs
+  them (`leanrt::any::Rel(17, ...)`). Other numbers stay, also when they
+  equal a payload number: the other arguments of those calls (and those of
+  other calls inside them), the arms of another `match` (an immediate's
+  index, `match bi4 { 17 => ...`).
 
 The key of an item is its name with the numbers replaced by `#` (labels
 inside longer names); several items can share a key (the instances of one
@@ -112,15 +116,79 @@ REL_DEF = re.compile(r"^fn l2r_any_rel_(\d+)\(x : (.*)\) -> unit")
 REL_TOK = re.compile(r"\bl2r_any_rel_(\d+)(_c)?\b")
 REL_ARG = re.compile(r"(leanrt::any::Rel\()(\d+)(,)")
 BOX_SITE = re.compile(r"\bl2r_any_(?:of|of_fn|of_ptr|of_u8|of_u16|of_u32|of_bool|of_f32|of_u64|of_f64|imm)\s*[<(]")
-PAYLOAD_CALL = re.compile(r"\b(l2r_any_(?:of|of_fn|of_ptr|as|raw_as)<)")
-NUM_ARG = re.compile(r"(,\s*)(\d+)(\))")
+# The prelude's functions whose last argument is a payload number:
+# `l2r_any_of<T>(x : T, num : u64)`, `l2r_any_of_fn`, `l2r_any_of_ptr`,
+# `l2r_any_as<T>(a : LAny, num : u64)`, `l2r_any_raw_as<T>(w : u64, num : u64)`.
+PAYLOAD_CALL = re.compile(r"\bl2r_any_(?:of|of_fn|of_ptr|as|raw_as)(?=<)")
+LAST_NUM = re.compile(r",\s*(\d+)\s*$")
 NUM_LET = re.compile(r"(let bm\d+ : u64 = )(\d+)(;)")
-NUM_ARM = re.compile(r"^(\s+)(\d+)( => )", re.M)
+# A box's number, bound to a name that a `match` takes apart (`boxDispatch`).
+NUM_BIND = re.compile(r"\blet ([a-z]+\d+) : u64 = l2r_any_raw_num\(")
+MATCH = re.compile(r"\bmatch ([a-z]+\d+)\s*\{")
+NUM_ARM = re.compile(r"\s*(\d+)\s*=>")
 ROUNDS = 4
 
 
 def h(s):
     return hashlib.sha1(s.encode("utf-8", "surrogateescape")).hexdigest()[:12]
+
+
+def bracket(text, i):
+    """For the bracket `(`, `[` or `{` at `text[i]`: the index of the bracket
+    that closes it (string literals skipped; `len(text)` if none) and the
+    indices of the commas directly inside the pair."""
+    depth, commas, n = 0, [], len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i, commas
+        elif c == "," and depth == 1:
+            commas.append(i)
+        i += 1
+    return n, commas
+
+
+def payload_spans(text):
+    """The (start, end) spans of the payload numbers that calls and matches
+    take in `text`, whatever lines they span: the last argument of a call of
+    a PAYLOAD_CALL function (`l2r_any_of<T>(e, 17)`), and the number of an
+    arm of a `match` on a name bound to `l2r_any_raw_num(w)` (`17 => `; not
+    an arm of another match, as an immediate's index `bi`)."""
+    spans, n = set(), len(text)
+    for m in PAYLOAD_CALL.finditer(text):
+        i, depth = m.end(), 0
+        while i < n:  # the type arguments, `<T>` or `<RVec<u8>>`
+            if text[i] == "<":
+                depth += 1
+            elif text[i] == ">" and text[i - 1] != "-":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        i += 1
+        while i < n and text[i].isspace():
+            i += 1
+        if i < n and text[i] == "(":
+            a = LAST_NUM.search(text, i + 1, bracket(text, i)[0])
+            if a:
+                spans.add(a.span(1))
+    bound = set(NUM_BIND.findall(text))
+    for m in MATCH.finditer(text):
+        if bound and m.group(1) in bound:
+            close, commas = bracket(text, m.end() - 1)
+            for start in [m.end()] + [c + 1 for c in commas]:
+                a = NUM_ARM.match(text, start, close)
+                if a:
+                    spans.add(a.span(1))
+    return spans
 
 
 def split_items(text):
@@ -265,17 +333,17 @@ class Program:
             return m.group(1) + "::" + (keep(new) if new else m.group(2))
         text = VARIANT_REF.sub(variant, text)
         if self.payload_ty:
+            def label(n):
+                ty = self.payload_ty.get(n)
+                return keep("payload<" + self.sub_tokens(ty) + ">") if ty else n
             def num(m):
-                ty = self.payload_ty.get(m.group(2))
-                return m.group(1) + (keep("payload<" + self.sub_tokens(ty) + ">") if ty else m.group(2)) + m.group(3)
-            lines = text.split("\n")
-            for i, line in enumerate(lines):
-                if PAYLOAD_CALL.search(line):
-                    line = NUM_ARG.sub(num, line)
-                lines[i] = NUM_LET.sub(num, line)
-            text = "\n".join(lines)
-            if "l2r_any_raw_num" in text:
-                text = NUM_ARM.sub(num, text)
+                return m.group(1) + label(m.group(2)) + m.group(3)
+            parts, pos = [], 0
+            for a, b in sorted(payload_spans(text)):
+                parts += [text[pos:a], label(text[a:b])]
+                pos = b
+            text = "".join(parts) + text[pos:]
+            text = NUM_LET.sub(num, text)
             def rel(m):
                 ty = self.payload_ty.get(m.group(1))
                 return keep("l2r_any_rel<" + self.sub_tokens(ty) + ">" + (m.group(2) or "")) if ty else m.group(0)
