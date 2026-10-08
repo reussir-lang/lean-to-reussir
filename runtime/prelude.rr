@@ -2699,7 +2699,9 @@ fn l2r_task_bind_wait<S>(c : LCell<S>, src : u64) -> u64 [{
 // while the task ran, this is the last, and the task is released before
 // lean-runtime ends it, so its finish wakes no waiter, as natively. Returns
 // 0: lean-runtime ends the task and walks its dependents once the job has
-// returned (`l2r_task_walk_if` does nothing).
+// returned (the task walk helper of Lower/Promises.lean does nothing; it is
+// not named here: conv-liveness takes every name in this file, comments
+// included, as a root, and would keep the helper in every program).
 #[ffi(import)]
 fn l2r_task_end<S>(c : LCell<S>) -> u64 [{
     {
