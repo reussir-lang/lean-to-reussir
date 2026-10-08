@@ -8,7 +8,11 @@ Variants: patched by 02-b, on `./reussir`'s `l2r-base2`. lean2rr also
 works around the variant half (it turns member packing off).
 
 **Upstream:** pull request #652, merged as commit `3be77a64`, with 02-a
-only: 02-b, the variant part, is not in it and stays in the series.
+only: 02-b, the variant part, is not in it and stays in the series. Pull
+request #656 (open since 2026-10-08) fixes the variant half in another
+form: copy avoidance skips the store of a variant field only when the
+field has the same type and the same byte offset from the box in both
+arms. If upstream merges it, 02-b drops at the next base move.
 
 When a function consumes a record and builds another of the same size,
 Reussir writes the new record into the old cell (token reuse). Its copy
