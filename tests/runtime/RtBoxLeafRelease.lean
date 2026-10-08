@@ -1,6 +1,6 @@
 /-! Runtime test (review of the runtime's speed items): leaf payloads
-(records and enums of scalars, `any::release_leaf`: released directly
-outside a free) and other payloads in boxes, released outside a free (an
+(records and enums of scalars, `any::LEAF_BIT`: released directly, also
+inside a free) and other payloads in boxes, released outside a free (an
 array set, a pop, a reference set) and inside one (a list freed). -/
 
 structure P where

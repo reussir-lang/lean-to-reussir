@@ -24,8 +24,9 @@ one counter for the whole program (`fresh`, LowerBase.lean): types
 (`T_List_15`, `L2RRef245`, `L2RConvK827`, `Tuple12`, `L2RTask7`), helper
 functions (`l2r_zero_836`, `l2r_vconv_301`, `jp_77`), constructors of
 some types (a state machine's `j123`), the payload numbers of `Box` (the
-prelude's `LAny`: 16 and up, `0x8000` + 16 and up for a leaf type, in the
-order the program boxes them) and every local name (`x815`, `kj909`); and
+prelude's `LAny`: 16 and up, `0x4000` + 16 and up for a type whose cell
+has a wide header, `0x8000` + 16 and up for a leaf type, in the order the
+program boxes them) and every local name (`x815`, `kj909`); and
 it numbers the instances of each Lean declaration in the order Stage 1
 finds them (`l_List_lengthTR___l2r_1____redArg`). A definition added to a
 program shifts those numbers for code it does not touch. The canonical

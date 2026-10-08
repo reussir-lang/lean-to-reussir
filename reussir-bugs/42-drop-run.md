@@ -43,9 +43,10 @@ of the drain (issue 40) would not run.
 leanrt's `drop::free_deferred` (the last reference to a record that a
 set, a pop or a reference's set gives up: `drop::free_unique`) and
 `any::release_last` (the last reference to a box's program payload) call
-`__reussir_drop_defer` and then `__reussir_drop_drain`. `any::release_leaf`
-(a leaf payload inside a free) only pushes its cell
-(`__reussir_drop_defer`): a drain after it would return at once.
+`__reussir_drop_defer` (`__reussir_drop_defer_wide` for a payload whose
+cell has a wide header: `drop::free_deferred_wide`) and then
+`__reussir_drop_drain`. A leaf payload is released directly, never
+deferred.
 
 ## Parked option: 42-a
 

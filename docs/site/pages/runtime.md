@@ -318,7 +318,12 @@ call. Each step passed lean2rr's full suite before its merge.
   each type that it boxes. `leanrt` keeps these functions in a table by
   type number. When the last reference to a boxed record goes, `leanrt`
   puts the record's cell on the pending stack with the function of its
-  type. There is no dispatch on the type number in the program.
+  type. There is no dispatch on the type number in the program. When the
+  first 8 bytes of the cell are its header (an enum, or a record with an
+  8-byte field), the cell links to the cell that went on the stack before
+  it. Thus a list that a free releases whole takes no stack memory for its
+  boxed elements, as in Lean. The runtime frees a record that holds only
+  scalars at once.
 - **Block sizes.** Up to 64 bytes, the runtime knows mimalloc's block size
   without a call.
 

@@ -289,7 +289,9 @@ runtime.
     `<record>_ffi_release` the same way). The last kept element stays
     deferred: the block is then freed first, as natively (`lean_del_core`
     frees the array, then pops its elements), and the element is released
-    after the step's entry is gone.
+    after the step's entry is gone. (A leaf payload is released at once,
+    in the step, by `any::release_last`: it frees only its own cell, so no
+    release can tell the difference.)
   - *Outside a free.* The step would start a drain with the step as its
     only entry. The step frees the block and defers the element (its last
     kept element). The drain removes the step, pops the element and
@@ -452,9 +454,11 @@ runtime.
   `any::release_last` gives the payload's cell (the box's word without its
   number) to `drop::free_deferred` with `release`, the program's release
   of the payload's type, found by number in leanrt's table
-  (`l2r_any_rel_<num>_c`, box-and-uniform.md). A leaf payload outside a
-  free is released directly; inside one it is only deferred
-  (`any::release_leaf`: a drain there would return at once). This covers
+  (`l2r_any_rel_<num>_c`, box-and-uniform.md); a number with `WIDE_BIT`
+  goes to `drop::free_deferred_wide` (`__reussir_drop_defer_wide`, which
+  links the cell to the run on top: box-and-uniform.md, "A payload whose
+  cell has a wide header is deferred `_wide`"). A leaf payload is released
+  directly, inside a free too (it frees only its own cell). This covers
   boxed records replaced or removed in an array, a reference's or cell's
   old value, and any other box dropped for the last time.
 - **Why:** At switch step 10 the record was a step (`drop::run`:
@@ -483,9 +487,10 @@ runtime.
   2026-10-07).
 - **Where:** `runtime/leanrt/src/drop.rs`: `release`, `release_unique`,
   `ReleaseValue`, `free_record`, `free_unique`, `free_deferred`,
-  `release_record`, `step_record`; `runtime/leanrt/src/array.rs`:
-  `release_last`; `runtime/leanrt/src/any.rs`: `release_last`,
-  `release_leaf`; Reussir's `reussir_rt::drop` (`__reussir_drop_defer`,
+  `release_record`, `step_record`, `free_deferred_wide`;
+  `runtime/leanrt/src/array.rs`: `release_last`;
+  `runtime/leanrt/src/any.rs`: `release_last`; Reussir's
+  `reussir_rt::drop` (`__reussir_drop_defer`, `__reussir_drop_defer_wide`,
   `__reussir_drop_drain`, `drain_one`). Tests: leanrt's unit tests
   `drop::tests::record_free_order` and `record_free_inside_a_free`;
   `RtArraySetFreeNested` (a set, a pop and a reference set freeing

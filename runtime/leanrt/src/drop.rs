@@ -217,10 +217,29 @@ unsafe fn free_unique<X>(p: usize) {
 /// cell at once (the stack is last in, first out, so also with work
 /// pending it comes first); inside one the drain returns at once and the
 /// free pops the cell after what is pushed later. (`any::release_last`
-/// frees a box's program payload this way.)
+/// frees a box's program payload this way.) Inside a free each such cell
+/// starts a run of its own, so the run on top moves to the stack's vector:
+/// one 24-byte entry per cell deferred while others wait (the heads of a
+/// list that Reussir's glue frees whole); `free_deferred_wide` links them.
 #[inline(always)]
 pub(crate) unsafe fn free_deferred(p: usize, release: unsafe extern "C" fn(*mut u8)) {
     reussir_rt::drop::__reussir_drop_defer(p as *mut u8, release);
+    reussir_rt::drop::__reussir_drop_drain();
+}
+
+/// `free_deferred` of a cell whose first 8 bytes are header: the 32-bit
+/// count (1), then a 32-bit word that is padding or a tag below 2^16
+/// (`any::WIDE_BIT`: lean2rr marks the payload types whose Reussir cell is
+/// laid out so, by Reussir's own rule). `__reussir_drop_defer_wide` links
+/// the cell to the run on top when there is one (the link takes the count
+/// and the upper 16 bits of the word; Reussir's drain sets both back, count
+/// 1 and the upper bits 0, before it calls `release`), so cells deferred
+/// one after the other take no memory, as native Lean's to-do list, which
+/// links the freed objects themselves. The order is the same as with
+/// `free_deferred`: a link only stores the run's next cell in the cell.
+#[inline(always)]
+pub(crate) unsafe fn free_deferred_wide(p: usize, release: unsafe extern "C" fn(*mut u8)) {
+    reussir_rt::drop::__reussir_drop_defer_wide(p as *mut u8, release);
     reussir_rt::drop::__reussir_drop_drain();
 }
 
@@ -629,7 +648,9 @@ impl<X> ReleaseElems for reussir_rt::bridge::Bridge<X> {
 /// `<record>_ffi_release` directly). The last kept element (index 0) is
 /// still deferred: the block is then freed before it is released, as
 /// natively (`lean_del_core` frees the array, then pops its elements), and
-/// it is released after the step's entry is gone.
+/// it is released after the step's entry is gone. (A leaf payload there is
+/// released at once by `any::release_last`, before the block is freed: it
+/// frees only its own cell, so no release can tell the difference.)
 impl ReleaseElems for crate::any::LAny {
     #[inline(always)]
     unsafe fn release_from_end(o: *mut Hdr, depth: usize) -> bool {

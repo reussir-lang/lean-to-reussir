@@ -486,8 +486,10 @@ the payload's count in line (Reussir patch 38-a masks the top bits); the
 last reference releases leanrt's kinds directly and a program payload
 through the program's release of its type (`l2r_any_rel_<num>_c(cell)`,
 a trampoline per payload type, in leanrt's table by number), its cell
-deferred on the drop worklist (a leaf payload, numbered with `LEAF_BIT`,
-directly outside a free). `l2r_any_of<T>(x, num)` and `l2r_any_as<T>(a, num)` box and unbox (a
+deferred on the drop worklist (a payload numbered with `WIDE_BIT`, whose
+cell has a wide header, with Reussir's `_wide` deferral, which links
+consecutive cells through their headers; a leaf payload, numbered with
+`LEAF_BIT`, released directly). `l2r_any_of<T>(x, num)` and `l2r_any_as<T>(a, num)` box and unbox (a
 mismatch panics); `l2r_any_raw`/`l2r_any_raw_as<T>` split an immediate
 from a pointer first where the type has nullary variants;
 `l2r_any_of_fn<T>` keeps a function value's nullary variant typed. Rules:

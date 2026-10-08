@@ -288,9 +288,11 @@ structure LowerState where
   /-- `boxVariants` by type (a scan was linear: round 9 RV9S-02). -/
   boxVariantOf : Std.HashMap RR.Ty String := {}
   /-- The payload numbers of the program's pointer payload types (`boxNum`):
-  16 and up, leaf types from `leafBit` up. -/
+  16 and up, types whose cell has a wide header from `boxWideBit` + 16 up,
+  leaf types from `boxLeafBit` + 16 up. -/
   boxNums : Std.HashMap RR.Ty Nat := {}
   boxNextNum : Nat := 16
+  boxNextWide : Nat := 0x4000 + 16
   boxNextLeaf : Nat := 0x8000 + 16
   /-- Function types whose nullary variants an unboxing builds by index
   (`l2r_fn_of_index_T`, generated with the program's box item). -/
@@ -516,7 +518,8 @@ index, a shared enum's nullary variant by index, small `Nat`/`Int` words,
 unit = `box(0)` = the word 1); an even word owns a reference to a counted
 object, its address in the low 48 bits and the number of its payload type
 in the top 16 (1 to 15: leanrt's kinds; 16 and up: the program's, given by
-`boxNum`, leaf types with `boxLeafBit`). Every place that boxes a value,
+`boxNum`, leaf types with `boxLeafBit`, types whose cell has a wide header
+with `boxWideBit`). Every place that boxes a value,
 takes one out, makes or tests for `box(0)`, or looks at what a box can hold
 goes through this section, which alone knows the encoding (with
 `boxTypeItems` in `Lower/Finish`, which emits the program's release of
@@ -701,8 +704,8 @@ inductive BoxKind where
   | prog (num : Nat) (store : RR.Ty) (wrapped : Bool) (nullary : Array (Nat × String)) (isFn : Bool)
 
 /-- The number of the first leaf payload type (`LEAF_BIT` in
-`leanrt::any`): a leaf type's payloads are released directly outside a
-free. -/
+`leanrt::any`): a leaf type's payloads are released directly, never
+deferred (also inside a free). -/
 def boxLeafBit : Nat := 0x8000
 
 /-- A type whose values hold nothing counted or observable: a number, a
@@ -734,17 +737,90 @@ def boxIsLeaf (t : RR.Ty) : LowerM Bool := do
       unless ← boxPlainScalar ft do return false
   return true
 
-/-- The program's payload number of pointer payload type `t`, given once:
-16 and up, or `boxLeafBit` + 16 and up for a leaf type (`boxIsLeaf`). -/
-def boxNum (t : RR.Ty) : LowerM Nat := do
+/-- The number of the first payload type whose Reussir cell has a wide
+header (`WIDE_BIT` in `leanrt::any`; `boxIsWide`): leanrt defers such a
+payload's cell with `__reussir_drop_defer_wide`, which links the cell to the
+cell deferred before it through that header, so the boxed heads of a list
+freed whole take no memory on Reussir's pending stack. Only on numbers
+without `boxLeafBit` (a leaf payload is released directly, never deferred). -/
+def boxWideBit : Nat := 0x4000
+
+/-- Whether a record member of Reussir type `t` is 8-byte aligned in
+Reussir's layout (`memberStorageType` and `deriveCompoundLayout` in
+Reussir's `lib/IR/ReussirTypes.cpp`): a 64-bit scalar; a member that Reussir
+stores as a pointer (a shared record or enum, an `ElemBox`, the reference
+record, a function value, a Reussir `Cell` or closure, an opaque runtime
+type such as `Nat`, `LStr`, `LAny` or `RVec`, which the frontend stores as
+a shared link); or a `[value]` struct or tuple that holds one. Any other
+type answers false: a payload is then deferred without the wide mark, which
+costs memory, never correctness. -/
+partial def rrAlign8 (t : RR.Ty) : LowerM Bool := do
+  match t with
+  | .named n =>
+    if n ∈ ["u64", "i64", "f64", "Nat", "Int", "LStr", "LHandle", boxName] then return true
+    if (← get).refName == some n then return true
+    match (← get).typeInfos[n]? with
+    | some info =>
+      if info.shape == .enumLike then return false
+      if !info.value then return true
+      match (info.ctors.find? info.ctorOrder[0]!).bind (·.posTys[0]?) with
+      | some ft => rrAlign8 ft
+      | none => return false
+    | none =>
+      if (← elemBoxOf? t).isSome then return true
+      match ← tupleFields? n with
+      | some fs => fs.anyM rrAlign8
+      | none => return false
+  | .app n _ => return n ∈ ["RVec", "LRef", "LCell", "Cell"]
+  | .fn .. | .cls .. => return true
+
+/-- Whether the Reussir cell of a pointer payload whose handle has type
+`store` (`BoxKind.prog`) has a wide header: its first 8 bytes are the
+32-bit count and a 32-bit word that is a fused tag below 2^16 or padding.
+That is Reussir's own rule for `__reussir_drop_defer_wide`
+(`hasWideHeader` in Reussir's
+`lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp`): a shared enum of
+at most 2^16 constructors (Reussir fuses its tag into the header), or a
+shared struct whose alignment is 8 (its members start at offset 8, after 4
+bytes of padding; `rrAlign8` of a member): a generated record of the
+program, the reference record, an `ElemBox`. Not a function value's enum
+(its constructors are known only at the end of the translation) nor a
+runtime type (`RVec`, `LCell`, `LHandle`: blocks of leanrt or Reussir's
+runtime, not Reussir records). That exclusion is needed for safety, not
+only for accuracy: the deferral writes the second word of the header, and
+those blocks keep data there (an `LCell` its task index, an `RVec` header
+its `SCANNED` mark), so a runtime type must never get the mark. A false
+answer only costs memory; a true one for a cell without a wide header
+corrupts it. -/
+def boxIsWide (store : RR.Ty) : LowerM Bool := do
+  let .named n := store | return false
+  if (← get).refName == some n then return true
+  match (← get).typeInfos[n]? with
+  | some info =>
+    if info.shape == .enumLike || info.value then return false
+    if info.shape == .enum then return info.ctorOrder.size ≤ 0x10000
+    let some l := info.ctors.find? info.ctorOrder[0]! | return false
+    l.posTys.anyM rrAlign8
+  | none =>
+    match ← elemBoxOf? store with
+    | some t => rrAlign8 t
+    | none => return false
+
+/-- The program's payload number of pointer payload type `t`, whose handle
+has type `store`, given once: 16 and up; `boxWideBit` + 16 and up for a
+type whose cell has a wide header (`boxIsWide`); `boxLeafBit` + 16 and up
+for a leaf type (`boxIsLeaf`; never wide). -/
+def boxNum (t store : RR.Ty) : LowerM Nat := do
   if let some n := (← get).boxNums[t]? then return n
   let leaf ← boxIsLeaf t
-  let n ← getPart fun s => if leaf then s.boxNextLeaf else s.boxNextNum
-  if (leaf && n ≥ 0x10000) || (!leaf && n ≥ boxLeafBit) then
+  let wide ← if leaf then pure false else boxIsWide store
+  let n ← getPart fun s => if leaf then s.boxNextLeaf else if wide then s.boxNextWide else s.boxNextNum
+  if n ≥ (if leaf then 0x10000 else if wide then boxLeafBit else boxWideBit) then
     throwError "lean2rr: more payload types of Box than its 16-bit numbers hold"
   modify fun s => { s with
     boxNums := s.boxNums.insert t n
-    boxNextNum := if leaf then s.boxNextNum else n + 1
+    boxNextNum := if leaf || wide then s.boxNextNum else n + 1
+    boxNextWide := if wide then n + 1 else s.boxNextWide
     boxNextLeaf := if leaf then n + 1 else s.boxNextLeaf }
   return n
 
@@ -773,10 +849,10 @@ def boxKind (t : RR.Ty) : LowerM BoxKind := do
         return .unit
       let nullary := info.ctorOrder.zipIdx.filterMap fun (c, i) =>
         (info.ctors.find? c).bind fun l => if l.fields.all Option.isNone then some (i, l.variant) else none
-      return .prog (← boxNum t) t false (if info.shape == .enum then nullary else #[]) false
-    if ← isBoundaryTy t then return .prog (← boxNum t) t false #[] false
+      return .prog (← boxNum t t) t false (if info.shape == .enum then nullary else #[]) false
+    if ← isBoundaryTy t then return .prog (← boxNum t t) t false #[] false
     let (st, wrapped) ← cellStorage t
-    return .prog (← boxNum t) st wrapped #[] false
+    return .prog (← boxNum t st) st wrapped #[] false
   | .app "RVec" #[e] =>
     if e == RR.Ty.box then return .leanrt 6
     if e == .named "u8" then return .leanrt 7
@@ -789,12 +865,12 @@ def boxKind (t : RR.Ty) : LowerM BoxKind := do
     if e == .named "u32" then return .leanrt 10
     if e == .named "u64" then return .leanrt 11
     if e == .named "f32" then return .leanrt 12
-    return .prog (← boxNum t) t false #[] false
-  | .app .. => return .prog (← boxNum t) t false #[] false
-  | .fn .. => return .prog (← boxNum t) t false #[] true
+    return .prog (← boxNum t t) t false #[] false
+  | .app .. => return .prog (← boxNum t t) t false #[] false
+  | .fn .. => return .prog (← boxNum t t) t false #[] true
   | .cls .. =>
     let (st, wrapped) ← cellStorage t
-    return .prog (← boxNum t) st wrapped #[] false
+    return .prog (← boxNum t st) st wrapped #[] false
 
 /-- Register payload type `t` (values of `t` may be boxed), once; its name
 (`b<number>` for a pointer payload, which liveness reads off the number a
