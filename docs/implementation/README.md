@@ -61,7 +61,7 @@ into it. Reussir issues (bugs, costs and the other kinds) link to
    Reussir's limitations, its missed optimizations and missing features.
 9. [optional-passes.md](optional-passes.md): one line per optional pass
    with its soundness guard (all on by default but `unread-fields`, which
-   leaves out callbacks no kept code can call: the owner's exception), and
+   leaves out values in fields no kept code reads: the owner's exception), and
    the required parts.
 10. [externs-ffi/](externs-ffi/README.md): extern dispatch and its order,
     glue, the `L2RShim` library, special cases of single runtime externs,

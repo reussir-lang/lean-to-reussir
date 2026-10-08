@@ -118,7 +118,7 @@ relative to `lean2rr/` unless they start with `scripts/`.
   `unread-fields` kept; with that optimization on,
   `L2R_UNREAD_FIELDS_WHY` prints, for each extern of the `Lean` package
   that kept code reaches, the chain of declarations and reasons that
-  keeps it ([optional-passes.md](optional-passes.md#function-values-in-unread-fields-are-left-out-unread-fields)).
+  keeps it ([optional-passes.md](optional-passes.md#values-in-unread-fields-are-left-out-unread-fields)).
   The driver reads `L2R_REUSSIR`,
   `L2R_RUSTC`,
   `L2R_GMP`, `L2R_LEAN2RR`, `L2R_DISABLE_OPTS`, `L2R_ENABLE_OPTS`,

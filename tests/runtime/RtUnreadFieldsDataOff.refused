@@ -1,0 +1,3 @@
+lean_expr_mk_data  (extern of Lean.Expr.mkData, module Lean.Expr)
+lean_expr_mk_app_data  (extern of Lean.Expr.mkAppData, module Lean.Expr)
+lean_level_mk_data  (extern of Lean.Level.mkData, module Lean.Level)

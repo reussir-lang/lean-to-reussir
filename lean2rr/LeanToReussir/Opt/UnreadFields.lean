@@ -4,7 +4,7 @@ import LeanToReussir.Emit.Program
 import LeanToReussir.Opt.Flatten
 
 /-!
-# Function values in unread fields left out (optimization `unread-fields`)
+# Values in unread fields left out (optimization `unread-fields`)
 
 Off by default, as the owner decided (2026-10-08): `--enable-opt
 unread-fields` turns it on. This is an exception to the rule that every
@@ -44,11 +44,17 @@ mentions. A closure that only an unread field held goes with the
 values it captured: `registerTagAttribute`'s `validate` argument is
 unused, so the caller's lambda goes too.
 
-Only an argument whose type may hold a function value (a function type,
-`lcAny`, a type variable, a task, thunk or reference, or an inductive with
-such a field) is replaced: data stays as it is (`deriving Lean.ToExpr`
-stores an `Expr`, which Lean's C++ builds, in the instance's
-`toTypeExpr`: that stays).
+The argument at an unread field is replaced whatever its type: a function
+value, or data (`deriving Lean.ToExpr` stores an `Expr`, which Lean's C++
+builds, in the instance's `toTypeExpr`, which no kept code reads). The
+fields of the types the lowering or the runtime represents by itself
+(`builtinTypeNames`: strings, arrays, numbers, thunks, tasks) are never
+replaced. No code reads a field generically: structural equality,
+hashing, `Repr`, `ToString` and the other derived instances are Lean
+code, which projects or matches; the runtime prints only strings, and the
+uncaught error with `IO.Error.toString` (a root); `lean_name_eq`, the one
+structural equality lean2rr's runtime implements, is an extern, so its
+type's fields count as read.
 
 The startup steps of the program and of `Init` and `Std` stay. A step of
 the `Lean` package's `initialize` constants that the program uses (Stage 1
@@ -73,11 +79,11 @@ does not see may read it:
 - a program that can read a value as another type (`programCasts`, the
   whole-program fact of the lowering, computed on the declarations kept):
   the pass then changes nothing;
-- in a program whose kept code creates tasks, a closure is replaced only
-  when the values it captured cannot hold a task (`holdsNoTask`, or the
-  same test on the values of a constant): natively a constant's first
-  evaluation waits for the tasks its value holds, closures' captured
-  values included;
+- in a program whose kept code creates tasks, a value (a closure or data)
+  is replaced only when it cannot hold a task, nor can the values a
+  closure captured (`holdsNoTask`, or the same test on the values of a
+  constant): natively a constant's first evaluation waits for the tasks
+  its value holds, closures' captured values included;
 - in a program whose kept code makes resources (files, child processes),
   a value that may hold one is not replaced, neither at a field nor at an
   unused parameter: natively it would keep the resource alive, and a file
@@ -90,9 +96,16 @@ that a closure left out captured has one reference less, which
 (docs/implementation/representations/identity.md, "Sharing is not
 observable").
 
-Not covered: a closed term whose evaluation would panic, read only to
-build a callback that the pass leaves out, is not evaluated; natively its
-panic message would show.
+Not covered: messages. A full application whose arguments are not all
+constants stays, even when its result only fed a replaced field (it may
+panic or trace). But Stage 2 lifts every full application with constant
+arguments into a closed term, and the read of a closed term has no
+effect: a closed term read only to build a value the pass leaves out (a
+callback or data) is not evaluated, so the `panic!` and `dbg_trace`
+messages of its evaluation, which native Lean prints, do not show. This
+also holds for the program's own constants, `{ s with … }` updates and
+`initialize` blocks: `def cfg : Cfg := { name := "c", extra := costly 5 }`
+with `extra` never read does not run `costly 5`.
 -/
 
 namespace LeanToReussir.Opt.UnreadFields
@@ -342,12 +355,14 @@ def fieldRead (c : ConstructorVal) (j : Nat) : M Bool := do
   return f.allRead.contains c.induct || f.read.contains (c.name, j)
 
 /-- Whether the argument `a` that constructor `c` stores in field `j` may be
-replaced by `◾` when the field is not read. -/
+replaced by `◾` when the field is not read: a function value or data, but
+never a field of a type the lowering or the runtime reads by itself
+(`alwaysRead`) or represents by itself (`builtinTypeNames`: strings,
+arrays, numbers, thunks, tasks). -/
 def replaceable (c : ConstructorVal) (_j : Nat) (a : Arg .pure) : M Bool := do
   let .fvar x := a | return false
-  if alwaysRead.contains c.induct then return false
+  if alwaysRead.contains c.induct || builtinTypeNames.contains c.induct then return false
   let loc := (← get).loc
-  unless ← mayHoldCode (loc.types.getD x anyExpr) do return false
   if ← isR a then return false
   if (← read).tasks then noTaskValue loc x 8 else return true
 

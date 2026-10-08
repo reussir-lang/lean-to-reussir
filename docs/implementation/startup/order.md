@@ -19,7 +19,11 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   the runtime lacks (or an extern of the program that lean2rr refuses)
   makes lean2rr reject the program (plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
-  "Not supported").
+  "Not supported"). The exception, with the optimization `unread-fields`
+  (off by default): a constant's closed terms that only feed fields no
+  kept code reads are not evaluated (the constant itself still is), so a
+  `panic!` or `dbg_trace` in them does not show
+  ([../optional-passes.md](../optional-passes.md#values-in-unread-fields-are-left-out-unread-fields)).
 - **Where:** `Emit/Startup.lean`: `startupItems`, `StartupItem`;
   `Emit/Entry.lean`: `entryRoots`, `programRoots`.
 - **Remove only if:** never.
@@ -116,7 +120,7 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   With the optimization `unread-fields` (off by default), "uses" means
   that code the pass keeps reads the constant: the step of a `Lean`
   package's constant that only code it left out read does not run
-  (`Main.pipeline`; [../optional-passes.md](../optional-passes.md#function-values-in-unread-fields-are-left-out-unread-fields)).
+  (`Main.pipeline`; [../optional-passes.md](../optional-passes.md#values-in-unread-fields-are-left-out-unread-fields)).
   The steps of `Init`, `Std` and the program always run.
 - **Why:** Natively every initializer of a module that is initialized
   runs, at the module's place in the walk (`emitInitFn`). An initializer

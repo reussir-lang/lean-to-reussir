@@ -3818,19 +3818,25 @@ extern)
   yet, so a program that reaches one is rejected (their Lean bodies are not
   used in their place); a program that only uses data structures from
   `Lean` builds. With the optimization `unread-fields` (off by default),
-  a callback that an initializer stores in a field no kept code reads (a
-  linter's `run`, an attribute's `add`, an environment extension's hooks:
-  Batteries registers such callbacks for Lean's elaborator) is left out,
-  with what only it reaches, so a program whose initializers reach the
-  C++ externs only through such callbacks builds.
+  a value that is stored in a field no kept code reads is left out, with
+  what only it reaches: a callback (a linter's `run`, an attribute's
+  `add`, an environment extension's hooks: Batteries registers such
+  callbacks for Lean's elaborator) or data (the `Expr` in a derived
+  `Lean.ToExpr` instance's `toTypeExpr`), so a program that reaches the
+  C++ externs only through such values builds.
 - With the optimization `unread-fields` (off by default), three things
-  that native Lean does at startup do not happen when only a callback the
-  pass leaves out needed them: a closed term read only to build such a
-  callback is not evaluated (natively a panic in its evaluation shows); a
-  value that such a callback captured has one reference less, which
+  that native Lean does at startup do not happen when only a value the
+  pass leaves out (a callback or data in a field no kept code reads)
+  needed them: a closed term read only to build such a value is not
+  evaluated, so the `panic!` and `dbg_trace` messages of its evaluation
+  do not show (Stage 2 lifts every full application with constant
+  arguments into a closed term: this includes the program's own constants,
+  `{ s with … }` updates and `initialize` blocks; an application with a
+  non-constant argument stays); a value that such a callback or such data
+  held has one reference less, which
   `dbgTraceIfShared` can show; the step of a `Lean` package's `initialize`
-  constant that only such callbacks read does not run (these steps
-  register state for Lean's elaborator and print nothing).
+  constant that only such values read does not run (these steps register
+  state for Lean's elaborator and print nothing).
 - The `Lean` package's initializers (thousands of `builtin_initialize`
   declarations that register extensions, attributes and options; 19
   `initialize` ones in Lean 4.34.0), which natively all run

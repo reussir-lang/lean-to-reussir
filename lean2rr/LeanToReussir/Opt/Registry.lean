@@ -78,7 +78,7 @@ def stage2 : Stage2Config := #[
 def optimizations : Array OptPass := #[
   -- Off by default: the owner's decision of 2026-10-08, an exception to the
   -- rule that every optional pass is on by default.
-  ⟨"unread-fields", false, "a function value that a constructor stores in a field no kept code reads (a callback an initializer registers for Lean's elaborator) left out, with what only it reaches, before Stage 3 (the owner's exception to the rule that every optional pass is on by default)", UnreadFields.install⟩,
+  ⟨"unread-fields", false, "a value that a constructor stores in a field no kept code reads (a callback an initializer registers for Lean's elaborator, data such as a ToExpr instance's toTypeExpr) left out, with what only it reaches, before Stage 3 (the owner's exception to the rule that every optional pass is on by default)", UnreadFields.install⟩,
   ⟨"field-order", true, "record fields in decreasing alignment, so records have no padding (declaration order otherwise)", FieldOrder.install⟩,
   ⟨"value-structs", true, "a structure with one relevant field (ST.Out of every BaseIO call) is a [value] struct, not a heap record", ValueStructs.install⟩,
   ⟨"compact-arrays", true, "an Array of a scalar (UInt8, Bool and enumerations of at most 256 constructors as u8; UInt16; UInt32 and Char; UInt64 and USize; Float32; Float) is a compact RVec<u8|u16|u32|u64|f32|f64>, for each storage kind no value of which can reach generic code or a field of type Array α (a whole-program check, CompactArrays); the loops of Array.map are typed at their element types (Opt/SplitMapLoops)", CompactArrays.install⟩,

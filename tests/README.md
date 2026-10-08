@@ -241,7 +241,11 @@ through a nested field (`RtUnreadFieldsCalled`), through `unsafeCast`
 `putStr`, `RtUnreadFieldsStream`; an extern used as a function value,
 `RtUnreadFieldsExternFn`) stay, and so does a closure that holds a file
 handle (`RtUnreadFieldsHandle`); the initializers' output and their
-error keep native's order (`RtUnreadFieldsStartup`). A test's `.opts`
+error keep native's order (`RtUnreadFieldsStartup`). Data goes too: `Expr`s
+that Lean's C++ builds, in a field no code reads (`RtUnreadFieldsData`;
+refused without the pass, `RtUnreadFieldsDataOff`), while data read by
+projection, by a match, through a nested field or only by derived
+`BEq`/`Hashable`/`Ord`/`Repr` instances stays (`RtUnreadFieldsDataRead`). A test's `.opts`
 also takes its names out of `L2R_ENABLE_OPTS` (`RtUnreadFieldsHookOff`
 stays refused in a run that turns the pass on for all).
 

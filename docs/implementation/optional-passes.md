@@ -19,7 +19,7 @@ and passes").
 
 | Pass | What it does | Guard (soundness; other limits) | Details |
 |---|---|---|---|
-| `unread-fields` (off by default) | before Stage 3, a function value that a constructor stores in a field no kept code reads (a callback an initializer registers for Lean's elaborator) becomes `◾`, with the unused parameters of declarations and join points; what only those reached is left out, and the `Lean` package's `initialize` constants that kept code no longer reads do not run | a field counts as read when kept code projects it or uses its binder in a match, and every field of a type that an extern takes by its declared parameter types (not a type variable), of `IO.FS.Stream`, the IO results, tasks, thunks, references and promises; a `let` that may have an effect stays; only arguments whose type may hold a function value; nothing in a program that can cast (`programCasts`, on the code kept); in a program whose kept code creates tasks, only closures whose captured values cannot hold a task; in one whose kept code makes resources, no value that may hold one | below |
+| `unread-fields` (off by default) | before Stage 3, a value that a constructor stores in a field no kept code reads (a callback an initializer registers for Lean's elaborator; data, such as a `ToExpr` instance's `toTypeExpr`) becomes `◾`, with the unused parameters of declarations and join points; what only those reached is left out, and the `Lean` package's `initialize` constants that kept code no longer reads do not run | a field counts as read when kept code projects it or uses its binder in a match, and every field of a type that an extern takes by its declared parameter types (not a type variable), of `IO.FS.Stream`, the IO results, tasks, thunks, references and promises; a `let` that may have an effect stays; never a field of a type the runtime represents itself (`builtinTypeNames`); nothing in a program that can cast (`programCasts`, on the code kept); in a program whose kept code creates tasks, only a value that cannot hold a task (nor can a closure's captured values); in one whose kept code makes resources, no value that may hold one | below |
 | `field-order` | record fields by decreasing alignment, no padding | none needed: every access goes through the constructor layout | [records](representations/records.md#fields-are-ordered-by-decreasing-alignment) |
 | `value-structs` | a structure with one relevant field is a `[value]` struct | not when the field's type is being translated (no type contains itself by value) | [records](representations/records.md#one-field-structures-are-value-structs) |
 | `compact-arrays` | an `Array` of a scalar is `RVec<u8\|u16\|u32\|u64\|f32\|f64>` of its storage kind; the loops of `Array.map` typed at their element types (Stage 3); `Array lcAny` parameters typed from their callers when they get compact arrays; a field `Array α` boxed in an inductive the program uses with a compact array | the whole-program check (`compactArrayKinds`) turns a storage kind off when a value of it could meet an array of boxes: a crossing at any edge of the reachable code, a flow class that holds `Array lcAny`, or a program that casts (axioms that state a `Bool` equation aside); a typed `map` loop only in Lean's shape, its stored values checked once typed; a parameter only when every caller passes one type and its own calls agree | [compact arrays](representations/compact-arrays.md) |
@@ -39,7 +39,7 @@ and passes").
 | `conv-liveness` | unboxing, application and conversion helpers generated only for what live code reaches; unreachable functions dropped | none needed for soundness: an arm left out matches a variant that no live code builds, so no value of it exists at run time; every identifier of raw text, of the prelude and of atoms is a root, every arm of other matches counts, and a variant that text names counts as built | [liveness](conversions/liveness.md) |
 | `merge-fns` | generated functions equal up to their own and local names merged: a copy calls the first, calls of a copy call the first | the canonical texts are equal (the same code once names are renamed in binding order, inside atoms too); a copy keeps its name and calls the function its first ends at, never itself; nothing is removed; a function called from one place only stays (LLVM inlines it there), except startup code (`_init`, `l2r_persist_`) | below |
 
-### Function values in unread fields are left out (`unread-fields`)
+### Values in unread fields are left out (`unread-fields`)
 
 - **What:** Off by default (the owner's decision of 2026-10-08, an
   exception to the rule that every optional pass is on);
@@ -54,11 +54,11 @@ and passes").
   declaration or a useful parameter of a join point receives it; a `let`
   stays when its variable is useful or its value may have an effect (a
   full application of a declaration, an extern or a function value). Then,
-  in the declarations kept, each argument at an unread field whose type
-  may hold a function value (`mayHoldCode`: a function type, `lcAny`, a
-  type variable, a task, thunk, reference or promise, or an inductive with
-  such a field), each argument at an unused parameter of a declaration or
-  a join point becomes `◾`; a `let` that is not useful and has no effect
+  in the declarations kept, each argument at an unread field (a function
+  value or data, but not a field of a type that lean2rr's runtime
+  represents itself, `builtinTypeNames`: strings, arrays, numbers, thunks,
+  tasks) and each argument at an unused parameter of a declaration or a
+  join point becomes `◾`; a `let` that is not useful and has no effect
   goes; a declaration that no kept `let` mentions goes. The lowering
   passes a placeholder for each `◾` (at a function type the nullary
   variant `z`). A step of the `Lean` package's `initialize` constants that
@@ -82,7 +82,14 @@ and passes").
   requests). With the pass, 8,335 of 25,363 declarations are kept
   (the fixpoint takes 49 rounds), no C++ function of the `Lean` package
   is left, and the program's output on three inputs of 500 requests
-  equals native's byte for byte.
+  equals native's byte for byte. Data too, since the owner's approval of
+  2026-10-08: lean-regex 32af6f33 derives `Lean.ToExpr` for its types, and
+  each instance, a program constant evaluated at startup, stores in its
+  `toTypeExpr` an `Expr` that Lean's C++ builds (`Lean.Expr.mkData`,
+  `Lean.Level.mkData`); no kept code reads it. With data replaced too, the
+  unpatched program translates (979 of 1,443 declarations kept) and its
+  driver's output on 1 MB of Dickens and 1 MB of Lean source equals
+  native's.
 - **Soundness:** a field counts as read wherever code lean2rr does not see
   may read it: every field of an inductive that an extern which kept code
   mentions takes, by all the extern's declared parameter types (also when
@@ -95,15 +102,25 @@ and passes").
   and traces with the current stderr's `putStr`, `l2r_stderr_put`), of
   the IO results `EST.Out` and `ST.Out` (the entry point reads `main`'s,
   the startup chain stores an initializer's value and reports its error;
-  F4), of tasks, thunks, references and promises. A declaration's
-  parameter has its type, so data stays data (F2). A program that can read
+  F4), of tasks, thunks, references and promises; no field of a type that
+  lean2rr's runtime represents itself (`builtinTypeNames`) is replaced.
+  No code reads a field generically, data included: structural equality,
+  hashing, `Repr`, `ToString`, `Ord` and the other derived instances are
+  Lean code, which matches the value and uses each field it reads (test
+  `RtUnreadFieldsDataRead`); the runtime prints only strings, and an
+  uncaught error with `IO.Error.toString`, a root; the one structural
+  equality lean2rr's runtime implements, `lean_name_eq`, is an extern, so
+  `Lean.Name`'s fields count as read; `shareCommon` is the identity and
+  `ShareCommon`'s equality and hash compare addresses; the persist walk
+  only looks for tasks (the task check below). A declaration's parameter
+  has its type (F2). A program that can read
   a value as another type (`programCasts`, computed on the declarations
   kept) is left as it is. In a program whose kept code creates tasks
-  (`programCreatesTasks`, on the declarations kept), a closure is replaced
-  only when the values it captures cannot hold a task (`holdsNoTask`, or
-  the same test on a constant's value): natively a constant's first
-  evaluation waits for the tasks its value holds, captured values
-  included. In a program whose kept code makes resources
+  (`programCreatesTasks`, on the declarations kept), a value (a closure or
+  data) is replaced only when it cannot hold a task, nor can the values a
+  closure captures (`holdsNoTask`, or the same test on a constant's
+  value): natively a constant's first evaluation waits for the tasks its
+  value holds, captured values included. In a program whose kept code makes resources
   (`programMakesResources`: files, child processes), a value that may
   hold one is not replaced, at a field or at an unused parameter (F3, test
   `RtUnreadFieldsHandle`): natively the closure keeps the handle alive,
@@ -128,17 +145,19 @@ and passes").
   captured has one reference less, which `dbgTraceIfShared` can show, and
   lean2rr's counts are not native's anyway
   ([representations/identity.md](representations/identity.md#sharing-is-not-observable)).
-  A full application stays even when its result is not used (it may
-  panic or trace). Not covered: a closed term whose evaluation would
-  panic, read only to build a callback that the pass leaves out, is not
-  evaluated, where natively its message shows.
-- **Not done:** data in an unread field stays. `deriving Lean.ToExpr`
-  stores an `Expr` built by Lean's C++ (`Lean.Expr.mkData`) in the
-  instance's `toTypeExpr`, which no kept code reads; the instance is a
-  program constant, evaluated at startup, so lean-regex 32af6f33 with its
-  `ToExpr` instances still reaches `Lean.Expr.mkData` and
-  `Lean.Level.mkData` (the pass removes the other two of its four C++
-  functions, which only the `toExpr` closures reached).
+  Not covered: messages (accepted, plan §10). A full application whose
+  arguments are not all constants stays, even when its result only fed a
+  replaced field (it may panic or trace). But Stage 2 lifts every full
+  application with constant arguments into a closed term, and the read of
+  a closed term has no effect, so it goes with the field: a closed term
+  read only to build a value the pass leaves out (a callback or data) is
+  not evaluated, and the `panic!` and `dbg_trace` messages of its
+  evaluation, which native Lean prints, do not show. This holds for the
+  program's own constants, `{ s with … }` updates and `initialize`
+  blocks too: with `def cfg : Cfg := { name := "c", extra := costly 5 }`
+  and `extra` never read, `costly 5` and its trace do not run (review of
+  the data widening, B1; `costly 21` in a function body, with a constant
+  argument, behaves the same, while `boom (k + 5)` stays).
 - **Where:** `Opt/UnreadFields.lean` (`fixpoint`, `go`, `useValue`,
   `replaceable`, `mayHoldCode`, `externReads`, `alwaysRead`,
   `noTaskValue`, `taint`, `taintValue`, `mayHoldRes`, `usesOnly`,
@@ -154,8 +173,12 @@ and passes").
   `RtUnreadFieldsStartup` (the initializers' output and their error, in
   native order), `RtUnreadFieldsExternFn` (an extern as a function value;
   data parameters), `RtUnreadFieldsHandle` (a closure that holds a file
-  handle); each with `.enable-opts` (`RtUnreadFieldsHookOff` has `.opts`,
-  which keeps the pass off in a run that turns it on for all).
+  handle), `RtUnreadFieldsData` (`Expr`s in a field no code reads, left
+  out) and `RtUnreadFieldsDataOff` (the same program refused without the
+  pass), `RtUnreadFieldsDataRead` (data read by projection, by a match,
+  through a nested field and by derived instances only, kept); each with
+  `.enable-opts` (the two `Off` tests have `.opts`, which keeps the pass
+  off in a run that turns it on for all).
 - **Remove only if:** the runtime has the `Lean` package's C++ functions
   (then the callbacks translate as they are), or the pass is unwanted.
 

@@ -53,7 +53,7 @@ lean2rr --list-opts            # prints the registry
 
 {{gen:passes}}
 
-### Callbacks that no code calls (`unread-fields`)
+### Values that no code reads (`unread-fields`)
 
 This pass is off by default. `--enable-opt unread-fields` turns it on.
 
@@ -65,7 +65,9 @@ elaborator reads those fields. But lean2rr keeps every function that kept
 code mentions. Through the callbacks, a program that imports `Batteries`
 reaches C++ functions of the `Lean` package (`Lean.Expr.instantiate`,
 `Lean.Meta.isExprDefEqAux`, …), which lean2rr's runtime does not have, and
-lean2rr refuses the program.
+lean2rr refuses the program. Data can do the same: a derived
+`Lean.ToExpr` instance holds an `Expr`, which Lean's C++ builds, in its
+field `toTypeExpr`, and no program code reads it.
 
 The pass runs on Stage 2's code, before Stage 3. It finds, from the entry
 point and the startup steps, the code that is useful:
@@ -93,8 +95,12 @@ closure that holds `validate`. No kept code reads `add`, so the closure
 goes. Then `validate` is an unused parameter, so the caller's lambda goes
 too, and all the code that only it reaches.
 
-The pass replaces only values whose type can hold a function: data stays.
-These fields count as read, also when no Lean code reads them:
+The pass replaces functions and data alike, but never a field of a type
+that lean2rr's runtime represents itself (strings, arrays, numbers,
+thunks, tasks). No code reads a field in a generic way: equality,
+hashing, `Repr`, `ToString` and the other derived instances are Lean code
+that matches the value and uses each field. These fields count as read,
+also when no Lean code reads them:
 
 - every field of a type that an extern takes (by the extern's declared
   parameter type, also inside other types). A parameter declared at a type
@@ -106,8 +112,8 @@ These fields count as read, also when no Lean code reads them:
 
 The pass does nothing in a program that can read a value as another type
 (`unsafeCast` in the program's own code). In a program whose kept code
-makes tasks, it replaces a closure only when the values that the closure
-holds cannot hold a task. In a program whose kept code opens files or
+makes tasks, it replaces a value only when it cannot hold a task, nor can
+the values that a closure holds. In a program whose kept code opens files or
 starts processes, it replaces no value that may hold a file handle or a
 process: a handle that is released earlier is flushed and closed
 earlier. A pass over the kept code follows where such values can go. The startup steps of the program, `Init` and
@@ -117,7 +123,9 @@ still reads the constant.
 With the pass, a program that runs cedar-spec's authorizer
 (`Cedar.Spec.isAuthorized`; cedar-spec imports `Batteries`) keeps 8,335 of
 its 25,363 declarations. It reaches no C++ function of the `Lean`
-package, and its output equals native's.
+package, and its output equals native's. lean-regex, with its `ToExpr`
+instances, keeps 979 of its 1,443 declarations, and its output equals
+native's.
 
 ### Helpers for live code only (`conv-liveness`)
 
