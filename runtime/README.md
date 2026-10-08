@@ -105,7 +105,7 @@ and hot paths in `leanrt` and the prelude, which call lean-runtime for the
 rest.
 
 - **The pin.** lean-runtime is the git submodule `third_party/lean-runtime`,
-  pinned at a commit of its `main` (now `9044998`). Clone lean2rr with
+  pinned at a commit of its `main` (now `09faf7a`). Clone lean2rr with
   `git clone --recurse-submodules`, or run `git submodule update --init
   third_party/lean-runtime` in a checkout, and again after a checkout,
   merge or pull that moves the pin: git does not update a submodule on its
@@ -310,7 +310,7 @@ rest.
   and, from its `sched` module (features `sched`, `stack-overflow`):
   - the task manager (`spawn`, `depend`, `wait`, `wait_any`, `state`,
     `cancel`, `check_canceled`, `release`, `promise_new`, `resolve`,
-    `option_get_or_block`, `start_with`, `finish`, `end_running_task`,
+    `option_get_or_block`, `start_with`, `finish`,
     `running_worker`, `await_task` (`Task.get`'s rule in a `sync` task),
     `thread_create_failed` (libc++'s abort text when `main`'s thread
     cannot be made), the yield points `effect`, `poll`, `sleep_ms`,
@@ -647,7 +647,7 @@ promises and the final run are its rules; its `docs/sched.md`).
 cell that is a task lean-runtime has not finished has an entry in a slab
 (its `TaskId`, its state type's tag, flags), whose index the cell's 4 bytes
 of padding after its count hold (initialized by `l2r_lcell_new`); a task is
-named by an address, its cell's or the one a converted task records, and
+named by its cell's address, and
 once its cell holds `done` its id is never given out again
 (`TaskId::FINISHED`). A task's job (lean-runtime's `Job`) holds the cell's
 address and tag, not a count: run, it gives the generated code a counted
@@ -659,16 +659,27 @@ if it holds one, is dropped the same way (`l2r_task_deleting()`). The
 program's last reference to an unfinished task is its cell's last: its drop
 calls lean-runtime's `release(id)` (Lean's `deactivate_task`, IO tasks
 included); a task lean-runtime still runs keeps its cell (the glue holds
-that last reference, and the job gets it). The generated code's primitives
-(unchanged from leanrt's own scheduler, so the program's code is the same):
+that last reference, and the job gets it). The job's own reference goes in
+`l2r_task_end`, and lean-runtime ends the task only after the job has
+returned, so a task whose program reference went while it ran is released
+before its end, which then wakes no waiter, as natively (hunt HTG-01). A
+primitive that takes a task's address (`l2r_lcell_addr` releases the
+reference passed) gets a cell the generated code uses again after the
+call. The generated code's primitives
+(unchanged from leanrt's own scheduler but for `IO.cancel`'s, so the
+program's code is the same):
 `l2r_task_register<S>(c, tag, prio, kind)` (a new task: lean-runtime's
 `spawn`; `prio` the whole priority, one of 2^64 or more passed as
 `u64::MAX`, every priority above 8 a dedicated task: LB-39; `kind` 1 pure
 (`keep_alive` false), 2 a dependent: recorded until
 `l2r_task_depend_at(src, dep, sync)`, which is `depend`), `l2r_task_begin<S>(c)`
-(1 when the task runs as on a worker thread, with stream cells of its own:
-lean-runtime's `Glue::task_begin`), `l2r_task_end<S>(c)` (its cell holds its
-value: finished for lean2rr; 0: lean-runtime walks its dependents),
+(1 for a dedicated task, which runs as on a thread of its own with a fresh
+stream context, which `Glue::task_end` closes after the walk of its
+dependents; 0 for a pool task, which has its emulated worker's stream cells
+from lean-runtime's `Glue::task_begin`, and for a `sync` dependent),
+`l2r_task_end<S>(c)` (its cell holds its value: finished for lean2rr; then
+the job's reference goes; 0: lean-runtime walks its dependents once the job
+has returned),
 `l2r_task_bind_wait<S>(c, src)` (a `bind` task whose function returned the
 unfinished task `src`: its job returns `Outcome::Continue`),
 `l2r_task_source_next_at(a)` and `l2r_task_wait_running(a)` (lean-runtime's
@@ -678,7 +689,9 @@ not), `l2r_task_query_at(a)` (`IO.getTaskState`: lean-runtime's `state`),
 `l2r_task_wait_status_at(a)` and `l2r_task_wait_progress()` (`IO.waitAny`:
 the generated loop's two passes collect the list, then lean-runtime's
 `wait_any` chooses, and the next pass takes the task at its position),
-`l2r_task_cancel_at(a)`, `l2r_task_check_canceled()`,
+`l2r_task_cancel<S>(c)` (the cancel, then the release of the reference
+passed, as natively the caller's decrement follows `lean_io_cancel`; hunt
+HTG-02), `l2r_task_check_canceled()`,
 `l2r_task_deferring()` (lean-runtime's `deferring`: false during
 initialization and with `LEAN_NUM_THREADS=0`, when Lean runs tasks at once;
 set from the numbers `main`'s start read), `l2r_task_manager_start()`
@@ -1279,6 +1292,11 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   what remains different).
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
+- Values are never persistent: a file handle that an initializer stores in
+  an `IO.Ref` closes when the program sets the reference to `none` (its
+  last reference, as Lean's documentation of handles says), where natively
+  the initializers' values are persistent and the handle stays open, its
+  buffer unwritten, until the exit (plan §10, "Runtime"; hunt HSG-02).
 - `getLine` reports only its own call's error (LB-41, plan §10): natively
   a handle's sticky error indicator makes it fail with whatever `errno`
   holds, which was the only way a Lean program could read a stale

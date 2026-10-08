@@ -28,9 +28,11 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 
 ### `take` moves the value out of the cell
 
-- **What:** `ST.Prim.Ref.take` swaps the placeholder into the cell and
-  returns the old value, as `lean_st_ref_take` stores `box(0)`, for every
-  element type (a big `Nat`/`Int` too, since mem-nat).
+- **What:** `ST.Prim.Ref.take` swaps the placeholder `box(0)` into the
+  cell and returns the old value, for every element type (a big
+  `Nat`/`Int` too, since mem-nat). Natively `lean_st_ref_take` stores a
+  null pointer (Lean 4.34's `io.cpp`), which only unsafe code can see
+  before the next store (`refCellOpPlain`'s comment).
 - **Why:** Lean's `modify` is take-then-set: a value only the cell holds
   stays unshared and is updated in place. Reading a copy instead made
   every `modify`/`modifyGet` copy the array or string it updates

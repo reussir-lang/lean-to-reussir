@@ -3288,6 +3288,19 @@ Each item says what differs and when.
   not even equal to itself, and its hash can change.
 - `IO.getNumHeartbeats` is 0; `dbgStackTrace` prints nothing; a panic's
   backtrace line is `(stack trace unavailable)`.
+- Values are never persistent: what a constant's value holds (an
+  initializer's `IO.Ref` included) is released at its last reference once
+  the program takes it out or stores over it. A file handle that an
+  initializer stores in an `IO.Ref` closes when the program sets the
+  reference to `none`, as Lean's documentation says of a handle's last
+  reference (`Init/System/IO.lean`): its buffered bytes are written then,
+  and a `flock` it took is released. Natively the initializers mark their
+  values persistent, so that handle stays open until the exit (glibc
+  writes its buffer then). Example: an initializer writes "from-init" to a
+  new handle and stores it in an `IO.Ref (Option IO.FS.Handle)`; `main`
+  sets the reference to `none` and reads the file: native reads "",
+  lean2rr "from-init"; at the exit the file holds "from-init" in both
+  (hunt HSG-02; docs/implementation/startup/constants.md).
 - An internal panic (`INTERNAL PANIC: ...`, the end of the program) in a
   program that has made a task, a promise, a timer or a watch writes its
   line straight to descriptor 2, without waiting for stderr's lock

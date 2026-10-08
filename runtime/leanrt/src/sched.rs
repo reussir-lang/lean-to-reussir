@@ -17,7 +17,8 @@
 //!   worker (lean-runtime's `running_worker`), which keeps what the task
 //!   leaves, as a native worker thread keeps its streams (`Glue::task_begin`,
 //!   `task_end`); a dedicated task with a fresh stream context, which the
-//!   generated code opens and closes (`l2r_task_begin`, `task::begin`);
+//!   generated code opens (`l2r_task_begin`, `task::begin`) and `task_end`
+//!   closes;
 //! - the waits of lean2rr's own objects, thin calls to lean-runtime's wait
 //!   cores (core 3.1, keyed by the thunk's address): a thunk being forced on
 //!   another context (`thunk_wait_busy`, `on_finish`);
@@ -144,8 +145,9 @@ impl Glue for LeanrtGlue {
     ///   are kept until `task_end` (the worker's first task: empty cells,
     ///   rebuilt as the process's streams on first use);
     /// - a dedicated task (no worker): a fresh stream context, which the
-    ///   generated code opens and closes (`l2r_task_begin` answers
-    ///   `B_ENTER`, `task::begin`; `task::end` ends the task inside it).
+    ///   generated code opens (`l2r_task_begin` answers `B_ENTER`,
+    ///   `task::begin`) and `task_end` closes, after the walk of its `sync`
+    ///   dependents.
     ///
     /// A `sync` task (not `own_thread`) shares the running thread's cells.
     /// Moves values only: no Lean code.

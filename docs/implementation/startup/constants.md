@@ -234,3 +234,31 @@ runtime. Plan
   `serial_base`, `persist_key`, `persist_hand`. Plan §5.14 (*Closed
   terms*), §10 (*Tasks*).
 - **Remove only if:** never.
+
+### What a constant's value holds is released at its last reference
+
+- **What:** A constant's value, an `initialize` constant's included, is
+  never freed (its once-cell holds it), but nothing in it is marked
+  persistent: a value the program later takes out of it, or stores over
+  (a reference an initializer made, set again by `main`), is released at
+  its last reference, as any value. So a file handle that an initializer
+  stores in an `IO.Ref` is closed when the program sets the reference to
+  `none` and nothing else holds the handle: its buffered bytes are written
+  then, and a `flock` it took is released. Natively the module
+  initializers mark every constant's value persistent
+  (`lean_mark_persistent`), a persistent object's count is never
+  decremented, and that handle stays open until the process exits (glibc
+  writes its buffer at the exit). Example: an initializer opens a file,
+  writes "from-init" to the handle and stores the handle in an
+  `IO.Ref (Option IO.FS.Handle)`; `main` sets the reference to `none`, then
+  reads the file. Natively the read gives "", through lean2rr
+  "from-init"; at the exit the file holds "from-init" in both (hunt
+  HSG-02; plan §10, "Runtime").
+- **Why:** lean2rr follows Lean's documentation of handles ("when the last
+  reference to a file handle is dropped, the file is closed",
+  `Init/System/IO.lean`). Persistence is not emulated: a value has no
+  persistent mark, and `Runtime.markPersistent` returns its argument
+  (`l2r_runtime_mark_persistent`).
+- **Where:** `Lower/Conv.lean`: `cafAccessor`; `runtime/leanrt/src/fs.rs`:
+  `FileHandle`'s drop; `runtime/prelude.rr`: `l2r_runtime_mark_persistent`.
+- **Remove only if:** lean2rr marks values persistent.

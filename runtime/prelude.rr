@@ -2661,10 +2661,13 @@ fn l2r_task_handed<S>() -> LCell<S> [{ unsafe { ::std::mem::transmute_copy(&lean
 #[ffi(import)]
 fn l2r_task_deleting() -> bool [{ leanrt::task::deleting() }];
 
-// A task starts running (for `IO.checkCanceled`, its state, its thread);
-// it leaves the queue, and the runtime's reference is dropped. 1: it runs
-// as on a worker thread, with stream cells of its own (`l2r_std_enter`);
-// 0: on the current thread (only a `sync := true` dependent).
+// A task starts running, inside its job (`leanrt::task::begin`); the
+// reference passed is released. 1: a dedicated task, which runs as on a
+// thread of its own with a fresh stream context (`l2r_std_enter_if` opens
+// it; the runtime closes it at the task's end, `leanrt::sched`'s
+// `task_end`); 0: a pool task (its emulated worker's stream cells, which
+// the runtime installed) or a `sync := true` dependent (the current
+// thread's).
 #[ffi(import)]
 fn l2r_task_begin<S>(c : LCell<S>) -> u64 [{
     {
@@ -2691,8 +2694,12 @@ fn l2r_task_bind_wait<S>(c : LCell<S>, src : u64) -> u64 [{
     }
 }];
 
-// The running task has finished. 1: the caller walks its dependents now
-// (`l2r_task_walk`); 0: the walk that handed it over continues with them.
+// The running task has stored its value (`leanrt::task::end`); then the
+// reference passed, the job's, is released: if the program dropped its own
+// while the task ran, this is the last, and the task is released before
+// lean-runtime ends it, so its finish wakes no waiter, as natively. Returns
+// 0: lean-runtime ends the task and walks its dependents once the job has
+// returned (`l2r_task_walk_if` does nothing).
 #[ffi(import)]
 fn l2r_task_end<S>(c : LCell<S>) -> u64 [{
     {
@@ -2704,8 +2711,10 @@ fn l2r_task_end<S>(c : LCell<S>) -> u64 [{
 }];
 
 // A task's identity for the runtime (`leanrt::task`): the address of its
-// cell, or, for a task converted to another representation, the address it
-// records (see lean2rr's `l2r_task_addr_S`).
+// cell. The reference passed is released here, so a caller whose call is
+// the cell's last use passes a cell that may be freed before the runtime
+// reads it: the generated code uses the cell again on some path after the
+// call that takes the address (or a closure it builds first holds it).
 #[ffi(import)]
 fn l2r_lcell_addr<S>(c : LCell<S>) -> u64 [{
     {
@@ -2715,8 +2724,22 @@ fn l2r_lcell_addr<S>(c : LCell<S>) -> u64 [{
     }
 }];
 
+// `IO.cancel` of task `c`: the cancel, then the reference passed is
+// released, as natively the caller's decrement comes after
+// `lean_io_cancel`, which borrows the task. When `IO.cancel` is the task's
+// last use, the release is the cell's last: it releases an unfinished task
+// (`leanrt::task::on_last_reference`) after the cancel. (Hunt HTG-02: the
+// generated code passed `l2r_lcell_addr(c)`, which released the cell first,
+// and the cancel read the index slot of a freed cell.)
 #[ffi(import)]
-fn l2r_task_cancel_at(a : u64) -> u64 [{ { leanrt::task::cancel(a as usize); 0 } }];
+fn l2r_task_cancel<S>(c : LCell<S>) -> u64 [{
+    {
+        let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
+        leanrt::task::cancel(p);
+        drop(c);
+        0
+    }
+}];
 
 // Task `dep` (registered as a dependent) was created depending on task
 // `src`, with `sync := true` or not (for its start and its cancellation).
@@ -2727,17 +2750,20 @@ fn l2r_task_cancel_at(a : u64) -> u64 [{ { leanrt::task::cancel(a as usize); 0 }
 #[ffi(import)]
 fn l2r_task_depend_at(src : u64, dep : u64, sync : bool) -> u64 [{ leanrt::task::depend(src as usize, dep as usize, sync) }];
 
-// 0 waiting, 1 running (or an unresolved promise), 2 finished.
+// 2 finished, else 1 (`leanrt::task::status`).
 #[ffi(import)]
 fn l2r_task_status_at(a : u64) -> u8 [{ leanrt::task::status(a as usize) }];
 
-// For `IO.waitAny`: as `l2r_task_status_at`, or 3 for a pending task that
-// waits for an unresolved promise.
+// For `IO.waitAny`'s generated loop (`leanrt::task::wait_status`): 1 while
+// it collects the list; then 2 at the position lean-runtime's `wait_any`
+// chose, 1 elsewhere (the loop's test for 0, run a waiting task, is never
+// true).
 #[ffi(import)]
 fn l2r_task_wait_status_at(a : u64) -> u8 [{ leanrt::task::wait_status(a as usize) }];
 
-// `IO.getTaskState`: as `l2r_task_status_at`, or 3: run the task first, or
-// 4: run queued tasks until the promise is resolved or none is left.
+// `IO.getTaskState`: lean-runtime's `state`, 0 waiting, 1 running, 2
+// finished (the generated branches for 3 and 4 are never taken; see
+// lean2rr's `taskStateFn`).
 #[ffi(import)]
 fn l2r_task_query_at(a : u64) -> u8 [{ leanrt::task::query(a as usize) }];
 

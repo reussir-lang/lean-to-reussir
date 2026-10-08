@@ -18,7 +18,9 @@ entries here are how lean2rr's generated code reaches them.
   now map it onto lean-runtime's API: `register` is `spawn` (or, for a
   dependent, records the task until `depend_at`, which is `depend`);
   `source_next` and `wait_running` are `await_task` (`wait`, after
-  `Task.get`'s panic in a `sync` task); `query` is `state`; `cancel_at`,
+  `Task.get`'s panic in a `sync` task); `query` is `state`; `cancel`
+  (`l2r_task_cancel<S>`, which takes the task's cell: the one change of the
+  generated code, hunt HTG-02),
   `check_canceled`, `sleep_ms`, `shutdown` (`finish`) and `promise_new` are the calls of the
   same names; `deferring` is `manager_running`, read from the numbers
   `main`'s start read (lean-runtime starts at the first task:
@@ -80,16 +82,40 @@ entries here are how lean2rr's generated code reaches them.
   (`JobRun`'s drop: a bind continuation of a deleted task) frees the entry
   and has the generated code drop that reference (`dispatch` with
   `deleting`). A task that has stored its value is released too (its
-  finish notifies nobody, as natively) and freed.
+  finish notifies nobody, as natively) and freed. For every kind of task
+  (pool, dedicated, `sync`) the job's reference goes inside the generated
+  `l2r_task_end`, right after `task::end` marks the entry `DONE`, and
+  lean-runtime ends the task only once the job has returned: so a task
+  whose program reference went while it ran is released before its end,
+  and its end wakes no waiter. A generated primitive that takes a task's
+  address (`l2r_lcell_addr`, which releases the reference passed) is
+  given a cell the code uses again on some path after the call, or that a
+  closure built before it holds, so the call never frees it; `IO.cancel`
+  passes the cell itself (`l2r_task_cancel<S>`: the cancel, then the
+  release, which may be the last).
 - **Why:** lean-runtime's glue item 3: "call `release(id)` for every
   task, IO tasks included" (a glue that skips it wakes waiters where
   native does not: cases `tasks/sync_walk_mutex_unref_finish`,
   `wait_any_unref_finish`). Lean deletes a pure task the program drops
   before a worker started it (adv4 TK4-01; leanrt's own scheduler read
   cell counts for it, `droppable_in`, which lean-runtime replaced with
-  `release`).
+  `release`). Natively an IO task holds a reference to itself while it
+  runs (`keep_alive`) and drops it when its closure returns; if that is
+  the last, the task is deleted (`m_deleted`) and freed without
+  `resolve_core`'s `notify_all`. Hunt HTG-01 (test
+  `RtDroppedDedicatedNotify`): `task::end` ended a dedicated task in
+  lean-runtime inside its job (`end_running_task`), before the job's
+  reference went, so lean-runtime walked with notification and woke an
+  `IO.waitAny` that natively waits for the next finish. Natively
+  `lean_io_cancel` borrows the task and the caller's decrement follows;
+  hunt HTG-02 (test `RtTaskCancelLastUse`, which exercises the path; the
+  read itself shows in no output): the generated `IO.cancel` passed
+  `l2r_lcell_addr(t)`, and when `IO.cancel` was `t`'s last use and `t` had
+  finished, the cancel read the index slot of the freed cell.
 - **Where:** `runtime/leanrt/src/task.rs`: `on_last_reference`, `unrun`,
-  `JobRun`; `runtime/leanrt/src/drop.rs`: `free_cell`.
+  `JobRun`, `end`, `cancel`; `runtime/leanrt/src/drop.rs`: `free_cell`;
+  `runtime/prelude.rr`: `l2r_task_end`, `l2r_lcell_addr`,
+  `l2r_task_cancel`; `Lower/LazyGlue.lean`: `IO.cancel`, `taskStateFn`.
 - **Remove only if:** never.
 
 ### `IO.waitAny`'s generated loop is mapped onto lean-runtime's `wait_any`

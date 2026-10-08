@@ -26,18 +26,23 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   step 14; before, it queued the `sync` dependent, which later printed
   that panic when it waited). leanrt holds no reference into its entries across
   `depend`, where the job may add entries. The `sync` dependents
-  run with the streams the task left: a pool task's walk comes after its
-  job, with its worker's stream cells still installed; a dedicated task's
-  comes inside its job, before the generated code closes its fresh stream
-  context (`end_running_task`,
+  run with the streams the task left: every task's walk comes after its
+  job, before lean-runtime calls the glue's `task_end`, so a pool task's
+  worker stream cells are still installed and a dedicated task's fresh
+  stream context is still open (`task_end` closes it;
   [scheduler.md](scheduler.md#each-context-pool-worker-and-dedicated-task-has-its-own-standard-streams)).
+  Until hunt HTG-01 a dedicated task's walk came inside its job
+  (lean-runtime's `end_running_task`, from `task::end`): a rule from before
+  review RS15-01, when the generated code closed that context inside the
+  job.
 - **Why:** As Lean's `handle_finished` and `lean_task_map_core` (adv3
   P3-2, 946a9d0; adv4 TK4-05, 5ec3ab9); lean-runtime's model. The stream
   context: natively they run on the finishing worker thread with its
   current streams, the task's own if it set some and did not restore them
   (lean-runtime's AR-24, AR-26; test `RtTaskSyncStream`).
-- **Where:** lean-runtime's `sched::task` (`walk_loop`, `end`,
-  `end_running_task`); `runtime/leanrt/src/task.rs`: `depend`, `end`;
+- **Where:** lean-runtime's `sched::task` (`run_task_once`, `walk_loop`,
+  `end`); `runtime/leanrt/src/task.rs`: `depend`, `end`;
+  `runtime/leanrt/src/sched.rs`: `LeanrtGlue::task_end`;
   `Lower/LazyGlue.lean`: `taskDepend`.
 - **Remove only if:** never.
 

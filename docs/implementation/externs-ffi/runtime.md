@@ -901,6 +901,32 @@ Paths are relative to the repository root.
   `src/semantics/float.rs`.
 - **Remove only if:** never (speed only).
 
+### The worker of a task about to begin, a lock's owner (switch step 17)
+
+- **What:** lean-runtime pinned at `09faf7a` (main: fixes-17). No glue
+  changes for it (lean2rr's own glue fixes of the same step, hunts HTG-01
+  and HTG-02, are in the tasks notes):
+  - a pool task that the scheduler starts on a context of its own holds
+    its worker from the start until the context begins it, and a context
+    whose task a waiter ran first no longer begins it later (a bind
+    task's continuation queued under the same entry): no more pool tasks
+    run at once than `LEAN_NUM_THREADS` (review RF16-03 and its review);
+  - the owner of a lock (`BaseRecursiveMutex`) is the OS thread the
+    scheduler runs on and the emulated thread that `IO.getTID` names, not
+    the depth of a task on its context (hunt HSG-01): a task that ends
+    holding a recursive mutex leaves it held by its thread, and only a
+    later task on the same emulated worker takes it again.
+- **Why:** natively a worker takes a task off the queue at once, and a
+  lock's owner is an OS thread.
+- **Tests:** lean-runtime's cases `tasks/bind_requeue_preselect` and
+  `sync/recursive_mutex_owner` through lean2rr's builds (native's
+  output); `RtRecMutexLazyStart`, `RtRecMutexInitOwner`,
+  `RtHandOffTryLock`, `RtSyncMutex`.
+- **Where:** lean-runtime's `src/sched/task.rs` (`starting_holds`,
+  `hand`), `src/sched/ctx.rs` (`Contexts::starting`),
+  `src/sched/sync.rs` (`Owner`, `me`).
+- **Remove only if:** never.
+
 ### Tasks run on a waiter's stack only with a native worker's room, the event loop's stack (switch step 16)
 
 - **What:** lean-runtime pinned at `9044998` (main: fixes-16). No glue

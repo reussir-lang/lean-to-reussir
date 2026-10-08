@@ -80,11 +80,13 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
     task's thread before its finalizers drop its streams (review RS15-01,
     test `RtDedicatedValueStreams`: the generated code closed the context
     inside the job, and a `sync` dependent that the value's free released
-    printed to the process's stdout); before that, `l2r_task_end` ends the task in lean-runtime
-    (`end_running_task(id)`, with the id `spawn` or `depend` returned, kept
-    in the task's entry before anyone else gets it; not while a bind
-    continuation is pending), so its `sync` dependents run inside its
-    context;
+    printed to the process's stdout); lean-runtime ends the task and walks
+    its `sync` dependents after the job has returned and before
+    `task_end`, so they run inside its context, as for a pool task (until
+    hunt HTG-01, `l2r_task_end` ended a dedicated task inside its job with
+    lean-runtime's `end_running_task`, before the job's reference to the
+    cell went:
+    [deferral.md](deferral.md#the-programs-last-reference-releases-a-task));
   - a task on the current thread (a `sync` dependent) shares that
     thread's cells.
   When the task manager's finalization ends its standard workers
@@ -423,23 +425,27 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
 
 - **What:** `BaseMutex`, `Condvar`, `BaseRecursiveMutex` and
   `BaseSharedMutex` are lean-runtime's (`sched::sync`) in runtime handles:
-  locks belong to threads (a context, and on it the innermost running
-  task's thread), glibc's and libc++'s rules, waits that let the others go
-  on. Each of lean-runtime's methods, the constructors included, starts
+  locks belong to threads (lean-runtime's owner: the OS thread, and on it
+  the thread that the running code natively runs on), glibc's and libc++'s
+  rules, waits that let the others go on. Each of lean-runtime's methods, the constructors included, starts
   the scheduler first if the lazy start is waiting for it (its
   `ensure_started`; until switch step 7 leanrt's `settle` did it before
   each call), and promises resolved inside a free are resolved in
   lean-runtime.
 - **Why:** As Lean's `mutex.cpp` over `std::mutex` & co. (f87ea08); one
   implementation (lean-runtime's, from leanrt's). A lock's owner is a
-  thread, which lean-runtime tells apart from an initializer's by its
-  scheduler having started: with the scheduler started only at the first
-  task, a mutex an initializer made, locked by `main` before that task and
-  again (nested) after it, had two owners, and `main` waited for itself
-  forever (review RS4-05, test `RtRecMutexLazyStart`). The owner names
-  the OS thread (lean-runtime's AR-39, fixed in 471f458, fixes-7; review
-  RS7-02): until then it told an initializer from `main` by the scheduler
-  having started, so a lock an initializer kept, taken again by `main`,
+  thread, by lean-runtime's rule (its `docs/sched.md`, "The glue", item
+  6): the OS thread tells the module initializers, on the process's first
+  thread, from `main`, on a thread of its own (on the same one with
+  `LEAN_MAIN_USE_THREAD=0`), as natively. The owner does not depend on the
+  scheduler's lazy start: when it did, with the scheduler started only at
+  the first task, a mutex an initializer made, locked by `main` before
+  that task and again (nested) after it, had two owners, and `main`
+  waited for itself forever (review RS4-05, test `RtRecMutexLazyStart`).
+  The owner names the OS thread since lean-runtime's AR-39 (fixed in
+  471f458, fixes-7; review RS7-02): until then it told an initializer from
+  `main` by the scheduler having started, so a lock an initializer kept,
+  taken again by `main`,
   hung with `LEAN_MAIN_USE_THREAD=0` (natively nested on one thread) and
   was taken with `LEAN_NUM_THREADS=0` on `main`'s own thread (natively a
   deadlock; now `main` waits forever too, the hub asleep, nothing printed);

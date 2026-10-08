@@ -182,6 +182,12 @@ garbage.
   the line comes after it. The bytes are the same. In a program without
   tasks, the line waits, as natively.
 - `ShareCommon.Object.eq` holds at most for the same cell.
+- No value is persistent. An initializer can store a file handle in an
+  `IO.Ref`. When the program sets that reference to `none`, the handle
+  closes, as Lean's documentation says of a handle's last reference. Its
+  buffered bytes are written then. Natively the initializers' values are
+  persistent, so the handle stays open until the exit, and its bytes stay
+  in its buffer until then.
 - The Windows-only time zone functions fail, as natively on other systems.
 
 ## Costs (time and memory, not results)

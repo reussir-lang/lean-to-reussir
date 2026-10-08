@@ -165,7 +165,15 @@ glue: the task objects (cells with a generated state), the code that
 connects them to the crate's task ids, the one <code>unsafe</code> step of a context
 switch (with its written proof), and the current standard streams of each
 context and of each emulated worker. The generated task code did not
-change.</p>
+change (later, only the call for <code>IO.cancel</code> changed).</p>
+<p><strong>A task that the program drops.</strong> When the program drops its last
+reference to a task that runs, the task runs to its end. Its end wakes no
+waiter, as natively: a native task that nobody holds is deleted without a
+notification. The task's job holds a reference of its own while the task
+runs. The job releases it when the task has its value, and only then does
+the scheduler end the task. This order is the same for pool tasks and
+dedicated tasks. <code>IO.cancel</code> cancels the task first and releases the
+reference after, as the native caller does.</p>
 <p><strong>Waits.</strong> A context that needs a thunk or a constant that another context
 computes waits for it. These waits, the reference rule below and the
 resolution of promises released inside a free use lean-runtime's <em>wait
@@ -390,10 +398,14 @@ can use. lean2rr switched to it in nine steps, from 2026-10-04 to
 <td>16</td>
 <td>no new part: fixes in the single-thread scheduler (lean-runtime's fixes-16). A task runs on the stack of the task that waits for it only when that stack has the room of a native worker's stack; otherwise it runs on a context of its own. The event loop's context has at least 1 GiB of stack, as libuv's loop thread natively. A spawn's helper thread holds no directory after the spawn</td>
 </tr>
+<tr>
+<td>17</td>
+<td>no new part: fixes in the single-thread scheduler (lean-runtime's fixes-17). A pool task that starts on a context of its own holds its worker until it begins, so no more pool tasks run than <code>LEAN_NUM_THREADS</code> permits. The owner of a recursive mutex is the thread that <code>IO.getTID</code> names, as natively. lean2rr's glue changed at the same step (see below)</td>
+</tr>
 </tbody>
 </table>
 <p>Status (2026-10-07): the submodule <code>third_party/lean-runtime</code> is pinned at
-<code>9044998</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
+<code>09faf7a</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
 <code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>) and links
 it with <code>leanrt</code> (<a href="../../runtime/README.md">runtime README</a>, "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline
@@ -559,7 +571,7 @@ list with each test: <a href="differences.html#lean-bugs-we-do-not-reproduce">Kn
   one callback sets is the stream of the next callbacks, as natively.</li>
 <li><strong>The end of a dedicated task.</strong> A dedicated task has a fresh set of
   streams. The runtime closes that set at the end of the task, after the
-  task's value is freed. So the code that the free runs uses the task's
+  task's value is freed and after its <code>sync</code> dependents run. So the code that the free runs uses the task's
   streams, as natively on the task's thread.</li>
 <li><strong>The leave of a thread's streams.</strong> When the drop of one stream sets
   another cell of the same thread again, that cell stays as it is, as

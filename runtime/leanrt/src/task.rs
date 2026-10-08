@@ -92,9 +92,6 @@ const PURE: u16 = 1 << 5;
 const HAS_ID: u16 = 1 << 6;
 /// `cont` is set (`bind_wait`).
 const CONT: u16 = 1 << 7;
-/// A dedicated task running with a fresh stream context (`begin`): `end`
-/// ends it inside the context (`end_running_task`).
-const FRESH: u16 = 1 << 8;
 
 struct Entry {
     /// The cell's address; 0 for a free entry.
@@ -539,7 +536,8 @@ pub fn bind_wait(cell: usize, src: usize) {
 /// A task starts running (the generated `l2r_task_begin`, inside its job):
 /// `B_ENTER` for a dedicated task, which natively runs on a thread of its
 /// own with the process's streams, so with a fresh stream context
-/// (`sched::fresh_context`); a pool task has its worker's cells already
+/// (`sched::fresh_context`), which the generated code opens and
+/// `Glue::task_end` closes; a pool task has its worker's cells already
 /// (`Glue::task_begin`), a `sync` task shares its thread's.
 #[inline(never)]
 pub fn begin(cell: usize) -> u64 {
@@ -548,9 +546,6 @@ pub fn begin(cell: usize) -> u64 {
         t.run_cell = 0;
     }
     if crate::sched::fresh_context() {
-        if let Some(i) = find(cell) {
-            ent(i).flags |= FRESH;
-        }
         B_ENTER
     } else {
         0
@@ -558,29 +553,25 @@ pub fn begin(cell: usize) -> u64 {
 }
 
 /// The running task `cell` has stored its value: it has finished for
-/// lean2rr (its id is no longer given out). A dedicated task ends here, in
-/// lean-runtime too (`end_running_task`, with the id `spawn` or `depend`
-/// gave it): its `sync` dependents run now, inside its stream context,
-/// which the generated code closes next (natively they run on its thread
-/// with the streams it left). Otherwise lean-runtime ends the task once the
-/// job returns: a pool task's worker cells and a `sync` task's thread stay
-/// installed until then. A job that runs before `spawn` or `depend` has
-/// returned has no id yet: it ends when it returns, on the thread that ran
-/// it. In lean2rr's single-thread build that is only a job of `spawn`
-/// without a task manager (during the module initializers, or with
-/// `LEAN_NUM_THREADS=0`), which runs inside the call; in lean-runtime's
-/// threads mode a worker thread can also start a job before `spawn` or
-/// `depend` returns. Returns 0.
+/// lean2rr (its id is no longer given out). lean-runtime ends the task once
+/// the job returns, every kind of task alike, and before that the generated
+/// `l2r_task_end` drops the job's reference to the cell, right after this
+/// call. If the program dropped its own while the task ran, that reference
+/// is the cell's last, and
+/// `on_last_reference` releases the task before lean-runtime ends it, so
+/// its finish wakes no waiter: natively the run's last decrement deletes
+/// the task (`m_deleted`), which is freed without `resolve_core`'s
+/// `notify_all` (hunt HTG-01: a dedicated task ended here, inside its job,
+/// with lean-runtime's `end_running_task`, before that release, and its
+/// finish woke an `IO.waitAny` early). The `sync` dependents then run in
+/// lean-runtime's walk, with what the task left installed: a pool task's
+/// worker cells, a dedicated task's fresh stream context (closed at
+/// `Glue::task_end`, after the walk; review RS15-01), a `sync` task's
+/// thread. Returns 0.
 #[inline(never)]
 pub fn end(cell: usize) -> u64 {
     if let Some(i) = find(cell) {
-        let e = ent(i);
-        let fresh = e.flags & (FRESH | CONT) == FRESH;
-        let id = if e.flags & HAS_ID != 0 { e.id } else { TaskId::FINISHED };
-        e.flags |= DONE;
-        if fresh {
-            ls::end_running_task(id);
-        }
+        ent(i).flags |= DONE;
     }
     0
 }

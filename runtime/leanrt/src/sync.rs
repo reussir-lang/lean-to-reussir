@@ -6,10 +6,15 @@
 //!
 //! Each of lean-runtime's methods (the constructors included) first starts
 //! the scheduler if `task::start`'s lazy start is waiting for it
-//! (lean-runtime's `ensure_started`). A lock's owner is a thread, which
-//! lean-runtime tells apart from an initializer's by its scheduler having
-//! started (`sched::sync`'s owner): so every operation in `main` sees it
-//! started, and an object an initializer made, locked by `main` before its
+//! (lean-runtime's `ensure_started`). A lock's owner is a thread, by
+//! lean-runtime's rule (its `docs/sched.md`, "The glue", item 6, and
+//! `sched::sync`'s module comment): the module initializers run on the
+//! process's first OS thread and `main` on a thread of its own (on the same
+//! one with `LEAN_MAIN_USE_THREAD=0`), as natively, so a recursive mutex an
+//! initializer keeps locked is `main`'s to lock again only when `main` runs
+//! on the initializers' thread (lean-runtime's AR-39, review RS7-02, test
+//! `RtRecMutexInitOwner`). The owner does not depend on the scheduler's
+//! lazy start: an object an initializer made, locked by `main` before its
 //! first task and again (nested) after it, has one owner (review RS4-05,
 //! test `RtRecMutexLazyStart`).
 

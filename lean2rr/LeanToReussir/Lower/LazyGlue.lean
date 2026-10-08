@@ -148,11 +148,14 @@ def taskStepFn (z : String) : LowerM String := do
           ("z", some u64, .atom "0")], .var "z"⟩ }])
     return #[.fn (name ++ "_bind") #[("c", cellTy)] u64 stepBind, .fn name #[("c", cellTy)] u64 body]
 
-/-- `IO.getTaskState` glue (`leanrt::task::query`): the runtime's answer,
-where 3 means the program is polling for a pending task, which then runs
-and is reported finished, and 4 that it is polling for an unresolved
-promise: queued tasks run until it is resolved or none is left (as workers
-would meanwhile), and its state is reported then. -/
+/-- `IO.getTaskState` glue (`leanrt::task::query`, lean-runtime's `state`):
+the runtime answers 0 (waiting), 1 (running) or 2 (finished). The branches
+for 3 (run the task, then report it finished) and for other answers (run the
+task's sources, then report its status) are never taken; the one for 3
+uses the cell `c` after the query, so the program's reference stays alive
+across it when `IO.getTaskState` is the task's last use (natively it
+borrows the task, and the caller's decrement comes after it); the other
+branches release it after the query. -/
 def taskStateFn (z : String) (stateTy : RR.Ty) : LowerM String := do
   let name := s!"l2r_task_state_{z}"
   let t := RR.Ty.box
@@ -360,11 +363,16 @@ def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Arra
     let z ← lazyOf (← pty 0)
     let stateTy ← ioPayloadType ret
     return some (← wrapIOResult resTy (.call (← taskStateFn z stateTy) #[] #[args[0]!]) stateTy)
+  -- `IO.cancel t`: `l2r_task_cancel` takes the cell itself and releases
+  -- it after the cancel, as natively the caller's decrement follows
+  -- `lean_io_cancel` (hunt HTG-02: with the address, `l2r_lcell_addr`
+  -- released the cell first, and when `IO.cancel` was `t`'s last use the
+  -- cancel read a freed cell).
   | ``IO.cancel =>
     let resTy ← lowerType ret
     let z ← lazyOf (← pty 0)
     let r ← fresh "cn"
-    return some (.block ⟨#[(r, some (.named "u64"), .call "l2r_task_cancel_at" #[] #[taskAddr z args[0]!])],
+    return some (.block ⟨#[(r, some (.named "u64"), .call "l2r_task_cancel" #[.named z] #[args[0]!])],
       ← wrapIOResult resTy .unitVal .unit⟩)
   | _ => return none
 
