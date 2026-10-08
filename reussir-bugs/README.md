@@ -14,15 +14,20 @@ local patches that lean2rr's builds apply to Reussir.
 - **Repros.** [`repros/`](repros/) holds the repro programs and `run.sh`,
   which builds and runs them ([running the repros](#running-the-repros)).
 
-Reussir revision: `ef922049`. The checkout at `./reussir` is not part of
-this repository. Its branch `l2r-trim` (head `79c1d5f2`) is ef922049
-plus the 40 patches of the series: the stack that lean2rr's builds use,
-made on 2026-10-07, when the optimizations 07-a, 36-a and 36-b were
-parked ([parked patches](#parked-patches)). Its branch `l2r-local` (head
-`136d9a9f`) is the series as it was before: 43 patches, the parked three
-and the earlier form of 09-a included. (The `l2r-local` before
-2026-10-03, the first twelve patches, is kept as branch
-`l2r-local-pre-final`.)
+Reussir revision: `943f2195`, upstream `main` on 2026-10-07. The
+checkout at `./reussir` is not part of this repository. Its branch
+`l2r-base2` (head `71f17ae2`) is 943f2195 plus the 35 patches of the series:
+the stack that lean2rr's builds use since 2026-10-07. Upstream merged
+five of lean2rr's bug fixes (26-a, 02-a, 09-a, 04-a and 05-a, pull
+requests #651 to #655), so the series dropped them when its base moved
+from `ef922049` to `943f2195`. Older branches of the checkout:
+`l2r-trim` (head `79c1d5f2`) is `ef922049` plus the 40 patches of the
+series before that move, made on 2026-10-07, when the optimizations
+07-a, 36-a and 36-b were parked ([parked patches](#parked-patches));
+`l2r-local` (head `136d9a9f`) is the series as it was before: 43
+patches, the parked three and the earlier form of 09-a included. (The
+`l2r-local` before 2026-10-03, the first twelve patches, is kept as
+branch `l2r-local-pre-final`.)
 
 ## Names
 
@@ -34,12 +39,12 @@ and the earlier form of 09-a included. (The `l2r-local` before
   ...). The slug is a short description. Every patch belongs to exactly one
   entry. In the text, a patch is named by NN-x: 13-b is the second patch of
   issue 13.
-- **Patch file contents** are `git format-patch` output against ef922049.
-  A file's subject line is the subject of its commit on `l2r-local`, and
-  these subjects use older words: "bug NN" or "issue NN" means entry NN,
-  whatever its kind; "13b" and "11b" are parts of entries 13 and 11. The
-  subjects of 40-a and 41-a have no number, and 09-a's is the subject of
-  upstream pull request #653's commit (`[rc] dispatch fusion: ...`).
+- **Patch file contents** are `git format-patch` output of the commits
+  of `l2r-base2`, against `943f2195`. A file's subject line is the subject
+  of its commit on `l2r-local`, and these subjects use older words: "bug
+  NN" or "issue NN" means entry NN, whatever its kind; "13b" and "11b" are
+  parts of entries 13 and 11. The subjects of 40-a and 41-a have no
+  number.
 - **Old numbers.** Until 2026-10-06 the patch files had four-digit numbers
   (0002 to 0069), and commit messages and older notes cite them. The
   [table of old numbers](#old-patch-numbers) gives the new name of each.
@@ -77,30 +82,32 @@ a feature), not a fix.
 
 One row per entry, grouped by kind. Column *Patches*: the entry's patch
 files, in apply order; "none" marks an entry that stays unpatched (the
-reason is in its file); "upstream: #N" names the pull request on
-github.com/reussir-lang/reussir that carries the patch (all open).
-Column *Review*: the adversarial review round and its result
-([Review](#review)). Column *Applied*: whether the patches are
-on `./reussir`'s `l2r-trim` (every patch of the series is); "parked" marks
-a patch outside the series ([parked patches](#parked-patches)).
+reason is in its file); "fixed upstream" names the pull request on
+github.com/reussir-lang/reussir and its commit on `main` that carry a
+dropped patch. Column *Review*: the adversarial review round and its
+result ([Review](#review)). Column *Applied*: whether the patches are on
+`./reussir`'s `l2r-base2` (every patch of the series is); "parked" marks
+a patch outside the series ([parked patches](#parked-patches)), and
+"upstream" an entry whose fix is in Reussir's `main` (the base
+`943f2195` includes it).
 
 | # | Kind | Effect | Affects lean2rr output? | lean2rr workaround | Patches | Review | Applied |
 |---|---|---|---|---|---|---|---|
 | [1](01-value-enum-payload.md) | bug | `[value]` enum payload bytes lost when a variant is moved | no, shape avoided | emits only unaffected `[value]` enums | [01-a](patches/01-a-value-enum-arm-bytes.patch) | rv8/reussir: no defect | yes |
-| [2](02-reuse-field-store.md) | bug | in-place reuse skips the store of a field that sits elsewhere in the new cell | structures: yes, wrong values; variants: no | variants: `--no-pack-record-members` and fields ordered by alignment | [02-a](patches/02-a-struct-field-store.patch) (structures; upstream: #652), [02-b](patches/02-b-variant-field-store.patch) (variants) | 02-a passed (rounds 1-3); 02-b rv8/reussir: no defect | yes |
-| [4](04-recursive-type-compare.md) | bug | rrc recurses forever on two equal recursive types (SIGSEGV) | yes, rrc crash | driver retries without `--reuse-across-call` | [04-a](patches/04-a-coinductive-type-compare.patch) (upstream: #654) | passed | yes |
-| [5](05-one-armed-if.md) | bug | TokenReuse crashes on a one-armed `if` (SIGSEGV) | yes, rrc crash | prelude panics avoid the shape; user code can still hit it | [05-a](patches/05-a-one-armed-if-tokens.patch) (upstream: #655) | passed | yes |
+| [2](02-reuse-field-store.md) | bug | in-place reuse skips the store of a field that sits elsewhere in the new cell | structures: yes, wrong values; variants: no | variants: `--no-pack-record-members` and fields ordered by alignment | structures: fixed upstream (#652, `3be77a64`; 02-a dropped); variants: [02-b](patches/02-b-variant-field-store.patch) | 02-a passed (rounds 1-3); 02-b rv8/reussir: no defect | 02-a upstream; 02-b yes |
+| [4](04-recursive-type-compare.md) | bug | rrc recurses forever on two equal recursive types (SIGSEGV) | yes, rrc crash | driver retries without `--reuse-across-call` | fixed upstream (#654, `634fb551`; 04-a dropped) | passed | upstream |
+| [5](05-one-armed-if.md) | bug | TokenReuse crashes on a one-armed `if` (SIGSEGV) | yes, rrc crash | prelude panics avoid the shape; user code can still hit it | fixed upstream (#655, `943f2195`; 05-a dropped) | passed | upstream |
 | [6](06-static-count-wrap.md) | bug, with a flag workaround | a static cell is freed after about 2^32 references | yes, crash | `--nullary-variant-encoding arch-independent` or `boxed` (not used: 06-a keeps the default encoding's speed; to be remeasured on an idle machine) | [06-a](patches/06-a-immediate-count-wrap.patch) | passed | yes |
 | [8](08-padding-lift.md) | bug | padding "lift" gives LLVM a larger layout than Reussir's | no, shape never emitted | - | [08-a](patches/08-a-padding-widening.patch) | rv8/reussir: no defect | yes |
-| [9](09-duplicate-bound-member.md) | bug | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | [09-a](patches/09-a-fuse-retains-once.patch) (also fixes 14; upstream: #653, whose helper-only form it is since 2026-10-07) | passed (revised after round 2) | yes |
+| [9](09-duplicate-bound-member.md) | bug | a member used twice loses a reference (use after free) | yes, through Reussir's inliner | none | fixed upstream (#653, `0ed0f243`, also fixes 14; 09-a dropped) | passed (revised after round 2) | upstream |
 | [12](12-node-cache-collision.md) | bug (in cstree) | the parser swaps syntax subtrees whose hashes collide | yes, wrong code or bogus errors on very large files | none | [12-a](patches/12-a-no-hash-node-cache.patch) | passed | yes |
-| [14](14-member-consumed-before-release.md) | bug | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | none of its own: fixed by [09-a](patches/09-a-fuse-retains-once.patch) (entry 9; upstream: #653) | passed | yes |
+| [14](14-member-consumed-before-release.md) | bug | a member consumed before the release loses a reference (use after free) | yes, through Reussir's inliner | none | none of its own: fixed upstream with entry 9 (#653, `0ed0f243`; 09-a dropped) | passed | upstream |
 | [15](15-nullable-match-yield.md) | bug | a `match` on a `Nullable` yielding a counted value does not compile | no, `Nullable` not used | - | [15-a](patches/15-a-yield-parent-check.patch) | rv7/p22: no defect | yes |
 | [18](18-rrc-target-deps.md) | bug (build system) | the `rrc` build target alone does not link | no, Reussir's build only | build the default target | [18-a](patches/18-a-archive-build-order.patch) | rv7/p22: no defect | yes |
 | [19](19-cell-of-value-record.md) | bug | a `Cell` of a `[value]` record with counted members does not compile | yes, compile error | `[value]` records in references boxed (`Nat`/`Int` are tagged handles since 41-a) | [19-a](patches/19-a-cell-value-record-glue.patch) (with 11-b's composition fix) | rv7/p22 rounds 1-2 (RV7P-01 fixed); RV8C-01 fixed in 11-b | yes |
 | [21](21-unterminated-placeholder.md) | bug | an unterminated `[:` in a polymorphic FFI texture is dropped | yes, wrong output (a string literal containing `[:` printed without it) | `[` escaped (`\x5b`) in the string literal table | [21-a](patches/21-a-unterminated-placeholder.patch) | round 6 (RV6L-01) | yes |
 | [24](24-matexp-state-order.md) | bug (non-reproducible builds) | the matrix-exponentiation pass orders a loop's state by heap addresses: equivalent but different code from run to run | no difference seen (no transformed loop in the lean2rr programs checked) | - | [24-a](patches/24-a-matexp-state-order.patch) | rv7/p22 round 2: deterministic, values unchanged | yes |
-| [26](26-launder-assume.md) | bug (miscompile) | `assume(launder(p) == p)` undoes the launder, so LICM hoists the stores of a cell rebuilt in place | yes, wrong output (a Lean loop prints 2, natively 25009648) | none | [26-a](patches/26-a-no-launder-assume.patch) (upstream: #651) | rv8/reussir: no defect | yes |
+| [26](26-launder-assume.md) | bug (miscompile) | `assume(launder(p) == p)` undoes the launder, so LICM hoists the stores of a cell rebuilt in place | yes, wrong output (a Lean loop prints 2, natively 25009648) | none | fixed upstream (#651, `5776bbe5`; 26-a dropped) | rv8/reussir: no defect | upstream |
 | [28](28-unique-carrying-join.md) | bug (miscompile) | `-O aggressive` proves a value unique that is shared on one path; the shared cell is updated in place | possible: not seen in lean2rr's corpus | none | [28-a](patches/28-a-unknown-absorbs-join.patch) | rv8/reussir/e (+ round 2): no correctness defect; RV8RE-01 (lost clones) fixed | yes |
 | [29](29-ffi-member-mlir.md) | bug (tooling) | the `--emit mlir` dump of a record with an `#[ffi]` member does not parse back | no, builds unaffected; every lean2rr dump fails to parse | - | [29-a](patches/29-a-ffi-member-verifier.patch) | rv8/reussir/e: no defect | yes |
 | [31](31-deep-expression-stack.md) | bug | rrc overflows its stack on deeply nested expressions | no, lean2rr bounds nesting | - | [31-a](patches/31-a-big-driver-stack.patch) | rv8/reussir/e (+ round 2): no correctness defect; RV8RE-02 (`ulimit -v`) fixed | yes |
@@ -132,12 +139,14 @@ a patch outside the series ([parked patches](#parked-patches)).
 | [41](41-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate (a number) | yes: the one-word `Nat` and `Int` need it (the prelude declares them `tagged`) | none (before: `Nat` was a two-word `[value]` enum) | [41-a](patches/41-a-tagged-ffi-objects.patch) | the mem-nat review and rv8/nat: no defect | yes |
 
 **Counts.** 44 entries: 23 bugs, 13 costs, 3 missed optimizations, 5
-missing features. 34 entries have patches of their own, 40 patch files in
-all (two each for entries 2, 3 and 11, four for entry 13, one each for
-the others); entry 14 is fixed by entry 9's patch 09-a; 9 entries have no
-patch (7, 25, 32, 36, 39, 42, 43, 44, 45). The 40 patches are 20 bug
-fixes, 12 optimizations and 8 features; all 40 are on `l2r-trim`. Five
-parked patches lie outside the series and these counts
+missing features. 30 entries have patches of their own in the series, 35
+patch files in all (two each for entries 3 and 11, four for entry 13, one
+each for the others); 5 entries are fixed upstream (4, 5, 9, 14 and 26:
+their patches 04-a, 05-a, 09-a and 26-a dropped), and half of entry 2
+(02-a dropped; 02-b, the variant half, stays); 9 entries have no patch
+(7, 25, 32, 36, 39, 42, 43, 44, 45). The 35 patches are 15 bug fixes,
+12 optimizations and 8 features; all 35 are on `l2r-base2`. Five parked
+patches lie outside the series and these counts
 ([parked patches](#parked-patches)).
 
 Status words used in the entries' summaries:
@@ -155,7 +164,7 @@ the order to apply them. To make a patched Reussir, from the repository
 root:
 
 ```sh
-git -C reussir checkout -b l2r-trim ef922049
+git -C reussir checkout -b l2r-base2 943f2195
 while read -r p; do
     git -C reussir am "$PWD/reussir-bugs/patches/$p" || break
 done < reussir-bugs/patches/series
@@ -164,15 +173,22 @@ cmake --build reussir/build
 
 `git am` records the patches as local commits; `git apply` works as well,
 if you would rather keep them as uncommitted changes. Checked on
-2026-10-07 in a scratch worktree: the series on ef922049 gives tree
-`a3f5b608`, the tree of `./reussir`'s `l2r-trim` (`79c1d5f2`). The `From
-<sha>` line of each patch file names the commit it was made from (for
-09-a, the commit of `l2r-trim`); apart from 09-a, the commits of
-`l2r-trim` have the same contents and messages as those of `l2r-local`
-(the hashes of `l2r-local`'s commits are in each entry's *Patch*
-section).
+2026-10-07 in a scratch worktree: the series on `943f2195` gives tree
+`6d97d3d0`, the tree of `./reussir`'s `l2r-base2` (`71f17ae2`). The `From
+<sha>` line of each patch file names its commit on `l2r-base2`. These
+commits have the same messages and changes as those of `l2r-trim` and
+`l2r-local` (the hashes of `l2r-local`'s commits are in each entry's
+*Patch* section); only the context of 18-a and 11-a moved: upstream
+added the archive `MLIRReussirIFRTJustInTimeTransform` next to their
+lines in `lib/CAPI/CMakeLists.txt` and
+`crates/reussir-backend-sys/build.rs`.
 
-Until 2026-10-07 the series had 43 patches: 07-a after 02-a, 36-a after
+Until 2026-10-07 the base was `ef922049` and the series had 40 patches:
+the 35 of today and, in this order, 04-a, 02-a, 09-a and 05-a after
+06-a, and 26-a after 01-a. That series on ef922049 gave tree `a3f5b608`,
+the tree of `l2r-trim` (`79c1d5f2`); its patch files, against ef922049,
+are in this repository's history. Before that the series had 43
+patches: 07-a after 02-a, 36-a after
 13-d and 36-b after 03-a, and 09-a in its earlier form, which called a
 helper of 07-a. That series on ef922049 gave tree `70f24fae`, the tree of
 `l2r-local` and of the scratch Reussir branch `l2r-inline` (`136d9a9f`);
@@ -190,8 +206,6 @@ needs 08-a, and 11-b must come after 19-a.
 
 Order and dependencies:
 
-- 09-a (the helper-only form of upstream pull request #653) applies on
-  ef922049 alone; in the series it comes after 02-a.
 - 13-b rewrites 13-a's code, and 13-c rewrites 13-b's runtime: 13-a, 13-b,
   13-c in that order. 13-d changes `emitCellRelease`, 13-b's code as 27-a
   amended it: it comes after 27-a. It was made on branch `l2r-anybox` of a
@@ -204,7 +218,8 @@ Order and dependencies:
   RV8C-01). The patches from 22-a to 16-a in the series were rebased onto
   those from 08-a to 40-a (RV8C-02): 11-a and 20-a edit the archive list of
   `lib/CAPI/CMakeLists.txt` after 18-a.
-- 12-a, 23-a, 28-a, 29-a, 30-a, 31-a and 33-a also apply alone.
+- 12-a, 23-a, 28-a, 29-a, 30-a, 31-a and 33-a also apply alone (on
+  ef922049, and on `943f2195`: `git apply --check`, 2026-10-07).
 - 34-a (bug 34) was made on `l2r-final` cc8e5aa5 (the series up to 33-a),
   on branch `l2r-final-0065` of the local integration checkout; it applies
   after 33-a.
@@ -260,7 +275,14 @@ why it is parked and describes the patch.
 | [03-c](patches/parked/03-c-natural-alignment.patch) | [3](03-global-alloc-align.md) | optimization | 2026-10-06 | an alternative to 03-a and 03-b that changes Reussir's rule of 16-byte alignment for Rust allocations; the owner kept the rule |
 
 Their entries say "not patched" (03-c: issue 3 keeps 03-a and 03-b);
-the issues stay open. Remove a patch from the series the same way: move its file
+the issues stay open. The parked files are against the stacks they were
+made on (ef922049 plus earlier patches of the series). On `l2r-base2`,
+36-a with 36-b, 42-a and 03-c still apply (`git apply --check`,
+2026-10-07); 07-a does not, since upstream's #653 adds the helper
+`consumesFusedMember`, which 07-a also adds (as on `l2r-trim`, whose
+09-a added it).
+
+To park a patch of the series, move its file
 to `patches/parked/`, delete its line from `patches/series`, rebuild the
 Reussir stack from the series, and update the entry, its row and the
 counts.
@@ -325,12 +347,12 @@ Old number, new name:
 
 | Old | New | Old | New | Old | New |
 |---|---|---|---|---|---|
-| 0002 | [02-a](patches/02-a-struct-field-store.patch) | 0019 | [02-b](patches/02-b-variant-field-store.patch) | 0034 | [20-a](patches/20-a-no-inline-into-recursion.patch) |
-| 0004 | [04-a](patches/04-a-coinductive-type-compare.patch) | 0020 | [01-a](patches/01-a-value-enum-arm-bytes.patch) | 0035 | [16-a](patches/16-a-nested-if-token-free.patch) |
-| 0005 | [05-a](patches/05-a-one-armed-if-tokens.patch) | 0021 | [26-a](patches/26-a-no-launder-assume.patch) | 0040 | [40-a](patches/40-a-drain-end-hook.patch) |
+| 0002 | 02-a (dropped: upstream) | 0019 | [02-b](patches/02-b-variant-field-store.patch) | 0034 | [20-a](patches/20-a-no-inline-into-recursion.patch) |
+| 0004 | 04-a (dropped: upstream) | 0020 | [01-a](patches/01-a-value-enum-arm-bytes.patch) | 0035 | [16-a](patches/16-a-nested-if-token-free.patch) |
+| 0005 | 05-a (dropped: upstream) | 0021 | 26-a (dropped: upstream) | 0040 | [40-a](patches/40-a-drain-end-hook.patch) |
 | 0006 | [06-a](patches/06-a-immediate-count-wrap.patch) | 0022 | [15-a](patches/15-a-yield-parent-check.patch) | 0050 | [41-a](patches/41-a-tagged-ffi-objects.patch) |
-| 0007 | [07-a](patches/07-a-sink-bound-retains.patch) | 0023 | [19-a](patches/19-a-cell-value-record-glue.patch) | 0060 | [28-a](patches/28-a-unknown-absorbs-join.patch) |
-| 0009 | [09-a](patches/09-a-fuse-retains-once.patch) | 0024 | [10-a](patches/10-a-closure-type-ids.patch) | 0061 | [29-a](patches/29-a-ffi-member-verifier.patch) |
+| 0007 | [07-a](patches/parked/07-a-sink-bound-retains.patch) (parked) | 0023 | [19-a](patches/19-a-cell-value-record-glue.patch) | 0060 | [28-a](patches/28-a-unknown-absorbs-join.patch) |
+| 0009 | 09-a (dropped: upstream) | 0024 | [10-a](patches/10-a-closure-type-ids.patch) | 0061 | [29-a](patches/29-a-ffi-member-verifier.patch) |
 | 0012 | [12-a](patches/12-a-no-hash-node-cache.patch) | 0025 | [18-a](patches/18-a-archive-build-order.patch) | 0062 | [30-a](patches/30-a-callee-symbol-table.patch) |
 | 0013 | [13-a](patches/13-a-release-chains-in-loop.patch) | 0026 | [24-a](patches/24-a-matexp-state-order.patch) | 0063 | [31-a](patches/31-a-big-driver-stack.patch) |
 | 0014 | [13-b](patches/13-b-pending-release-stack.patch) | 0027 | [27-a](patches/27-a-defer-nullable-member.patch) | 0064 | [33-a](patches/33-a-rc-type-closing-bracket.patch) |
@@ -366,9 +388,11 @@ patch; there was no 0067 file.
   unpatched, with the reason in their file.
 - Patches are local: lean2rr's work never pushes or submits them. The
   "Upstream note" at the end of a patched entry is text for an upstream
-  report. Five of the bug fixes now have pull requests upstream (26-a,
-  02-a, 09-a, 04-a and 05-a: "upstream: #N" in the
-  [status table](#status), and an *Upstream* line in each entry).
+  report. Five of the bug fixes are merged upstream (26-a, 02-a, 09-a,
+  04-a and 05-a: pull requests #651 to #655, "fixed upstream" in the
+  [status table](#status), and an *Upstream* line in each entry). The
+  series dropped them when its base moved to `943f2195`, which includes
+  them.
 - lean2rr's workarounds stay, so that lean2rr also works with an unpatched
   Reussir. The exceptions are the features lean2rr requires
   ([what lean2rr needs](#applying-the-patches)): 13-b (the runtime does not
@@ -387,7 +411,7 @@ finding X" or by finding IDs are local notes, outside this repository
 
 | Patches | Round | Notes | Result |
 |---|---|---|---|
-| 02-a, 04-a, 05-a, 06-a, 07-a, 09-a, 12-a, 13-a | rounds 1 to 3 | `rv-patches/FINDINGS.txt`, `rv-patches/roundN/FINDINGS.txt` | passed (07-a, 09-a, 13-a revised) (07-a parked on 2026-10-07; 09-a now in the helper-only form of upstream #653, the same code) |
+| 02-a, 04-a, 05-a, 06-a, 07-a, 09-a, 12-a, 13-a | rounds 1 to 3 | `rv-patches/FINDINGS.txt`, `rv-patches/roundN/FINDINGS.txt` | passed (07-a, 09-a, 13-a revised) (07-a parked on 2026-10-07; 09-a in the helper-only form of upstream #653, the same code, from 2026-10-07; 02-a, 04-a, 05-a and 09-a merged upstream and dropped on 2026-10-07) |
 | 13-b | round 4 (4, 4b, 4c) | `rv-patches/round4*/FINDINGS.txt` | passed, revised twice |
 | 13-c | round 5 | `perf0014-review/` | passed |
 | 21-a | lean2rr round 6 (RV6L-01) | `rv6/` | passed |
@@ -472,6 +496,9 @@ The repros were checked on these builds (on the aarch64 test machine):
   of 43 before 2026-10-07).
 - `79c1d5f2`: `l2r-trim`, ef922049 + the series of 40 (2026-10-07: 07-a,
   36-a and 36-b parked, 09-a in its helper-only form).
+- `71f17ae2`: `l2r-base2`, upstream `943f2195` + the series of 35
+  (2026-10-07: 26-a, 02-a, 09-a, 04-a and 05-a merged upstream and
+  dropped).
 
 The unpatched `run.sh` lines quoted in the entries come from a recorded run
 of the same script on unpatched ef922049, or, for entries 24 to 32, on

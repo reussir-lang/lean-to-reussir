@@ -1,4 +1,4 @@
-From d76ffba3b1465bef25bc17090e682c19c8399141 Mon Sep 17 00:00:00 2001
+From 653c1f88d94178c118241919e33543fce2c99a47 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 30 Sep 2026 20:38:56 -0400
 Subject: [PATCH] l2r-local: bug 13: release chains of cells in a loop in the
@@ -443,10 +443,10 @@ index 5308f5fd..0de140da 100644
      NullableType nullableType = nullptr;
      if (decMayProduceToken(rcType)) {
 diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
-index 0ffa6e11..77a58c9b 100644
+index 5ba30327..6a5cb2eb 100644
 --- a/lib/IR/ReussirOps.cpp
 +++ b/lib/IR/ReussirOps.cpp
-@@ -3940,6 +3940,7 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+@@ -3966,6 +3966,7 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
        mlir::func::FuncOp::create(builder, builder.getUnknownLoc(), funcName,
                                   builder.getFunctionType({refType}, {}));
    dtor.setPrivate();

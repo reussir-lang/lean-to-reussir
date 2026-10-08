@@ -1,4 +1,4 @@
-From 4d27dc852749a6b59e74f6888f4ad17ee6bb08ba Mon Sep 17 00:00:00 2001
+From d32e23d4a7a982ede55fe8508b6b5c9719dcf6ad Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 30 Sep 2026 18:10:30 -0400
 Subject: [PATCH] l2r-local: bug 6: never free a tagged immediate whose wrapped
@@ -30,7 +30,7 @@ old >= 1 when the pointer's top byte is zero.
  create mode 100644 tests/integration/conversion/rc_dec_expansion_immediates.mlir
 
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index a1a0763c..82305558 100644
+index 1672234a..f1addfaa 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 @@ -114,11 +114,13 @@ namespace {
@@ -52,7 +52,7 @@ index a1a0763c..82305558 100644
  //   * `rc.set` — the one decrementing store — steers a recognized-immediate
  //     access to a separate scratch word (an address select off the critical
  //     path), so the dummy count can never decay to 1.
-@@ -1640,13 +1642,13 @@ struct ReussirRcIncConversionPattern
+@@ -1637,13 +1639,13 @@ struct ReussirRcIncConversionPattern
            rewriter, op.getLoc(), llvmPtrType, convertedBoxType,
            adaptor.getRcPtr(), llvm::ArrayRef<mlir::LLVM::GEPArg>{0, 0});
      }
@@ -73,7 +73,7 @@ index a1a0763c..82305558 100644
      auto countType = rewriter.getI32Type();
      TagEncoding encoding = specialPtrTagEncoding(op);
      bool steerNarrowImmortal = encoding == TagEncoding::Immortal &&
-@@ -1686,10 +1688,19 @@ struct ReussirRcIncConversionPattern
+@@ -1683,10 +1685,19 @@ struct ReussirRcIncConversionPattern
            rewriter, op.getLoc(), mlir::LLVM::AtomicBinOp::add, refcntPtr, delta,
            mlir::LLVM::AtomicOrdering::monotonic);
      }

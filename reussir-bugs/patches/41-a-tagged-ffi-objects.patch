@@ -1,4 +1,4 @@
-From a75ed2cf7cec791cc365fcdf5d164928344e4496 Mon Sep 17 00:00:00 2001
+From 4bf7b414153c44bc6e9603fb1c2a24f9a0e4f972 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 23:42:56 -0400
 Subject: [PATCH] l2r-local: tagged FFI objects: an odd handle is an immediate,
@@ -66,10 +66,10 @@ tests.
  create mode 100644 tests/integration/frontend/ffi_tagged.rr
 
 diff --git a/crates/reussir-backend-sys/src/lib.rs b/crates/reussir-backend-sys/src/lib.rs
-index b495d4d4..af11d535 100644
+index 0b530ead..3df71931 100644
 --- a/crates/reussir-backend-sys/src/lib.rs
 +++ b/crates/reussir-backend-sys/src/lib.rs
-@@ -355,6 +355,7 @@ unsafe extern "C" {
+@@ -356,6 +356,7 @@ unsafe extern "C" {
          context: MlirContext,
          ffi_name: MlirAttribute,
          cleanup_hook: MlirAttribute,
@@ -631,7 +631,7 @@ index 203f2d16..dfd695e6 100644
  
  MlirType reussirStrTypeGet(MlirContext context, ReussirLifeScope lifeScope) {
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index d12858ce..91439cf2 100644
+index 7f503afa..926cf608 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 @@ -260,6 +260,45 @@ void emitGuardedStore(mlir::ConversionPatternRewriter &rewriter,

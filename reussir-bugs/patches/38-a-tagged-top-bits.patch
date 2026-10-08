@@ -1,4 +1,4 @@
-From 3350bc38f9858202b777ad5e4e6f98cdb7917d42 Mon Sep 17 00:00:00 2001
+From a903b82d514b817ae96894a9719e851cca8ef35a Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 6 Oct 2026 04:10:28 -0400
 Subject: [PATCH] l2r-local: issue 38: tagged FFI objects: clear the top 16
@@ -67,7 +67,7 @@ index ec49d11d..671f07d6 100644
    let parameters = (ins "::mlir::StringAttr":$ffiName,
        "::mlir::FlatSymbolRefAttr":$cleanupHook,
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 5f94d471..34d12d09 100644
+index a5b738ff..853187eb 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 @@ -299,6 +299,26 @@ bool isTaggedFFIObject(RcType rcType) {

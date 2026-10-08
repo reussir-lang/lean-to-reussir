@@ -32,8 +32,9 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
   indices 0..i put member i at the same offset.
 - **Why:** Reussir's copy avoidance skips storing a field it believes is
   in place; with packed layouts the variant check is wrong (a wrong value,
-  no error). Patch 02-a fixes the structure half and 02-b the variant
-  half (both applied)
+  no error). Reussir's `main` fixes the structure half (pull request
+  #652, commit `3be77a64`, formerly patch 02-a; in the base `943f2195`)
+  and patch 02-b the variant half (applied)
   ([02-reuse-field-store.md](../../../reussir-bugs/02-reuse-field-store.md);
   444a70a, 7860807).
 - **Where:** `scripts/l2r.py` (`--no-pack-record-members`);
@@ -47,7 +48,8 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
 - **What:** When rrc dies from a signal, `scripts/l2r.py` retries without
   `--reuse-across-call` (and says so on stderr).
 - **Why:** Reussir's structural type comparison crashed on a user list and
-  `List` (456bc97). Patch 04-a (applied) fixes it
+  `List` (456bc97). Reussir's `main` fixes it (pull request #654,
+  commit `634fb551`, formerly patch 04-a; in the base `943f2195`)
   ([04-recursive-type-compare.md](../../../reussir-bugs/04-recursive-type-compare.md)).
 - **Where:** `scripts/l2r.py`: `main`.
 - **Remove only if:** it stays as a fallback for unknown crashes; it costs
@@ -61,15 +63,16 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
   (descriptor 2 without one), instead of a Reussir-level call.
 - **Why:** A Reussir-level call from the prelude's array helpers into the
   stream code made rrc crash in `TokenReusePass` under
-  `--reuse-across-call` (caea747; RtStreamsRedirectOob). Patch 05-a
-  (applied) fixes the crash; user code could still hit it without the
-  patch
+  `--reuse-across-call` (caea747; RtStreamsRedirectOob). Reussir's
+  `main` fixes the crash (pull request #655, commit `943f2195`, formerly
+  patch 05-a; the base); user code could still hit it on an older
+  Reussir
   ([05-one-armed-if.md](../../../reussir-bugs/05-one-armed-if.md)).
 - **Where:** `runtime/prelude.rr`: `l2r_panic_code`, `l2r_diag_put`;
   `runtime/leanrt/src/io.rs`: `diag_put`; `Emit/Entry.lean`: `lowerEntry`.
-- **Remove only if:** not needed with 05-a (applied), but kept: by the
-  policy lean2rr also works with an unpatched Reussir, and the trampoline
-  is cheap.
+- **Remove only if:** not needed with the base `943f2195` (the fix of
+  05-a), but kept: by the policy lean2rr also works with an older
+  Reussir, and the trampoline is cheap.
 
 ### Bug 6: a static cell is freed after about 2^32 references
 
@@ -103,7 +106,8 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
 ### Bugs 9 and 14: a bound member loses a reference
 
 - **What:** No workaround possible: the shapes come from Reussir's own
-  inliner. Patch 09-a (applied) fixes both.
+  inliner. Reussir's `main` fixes both (pull request #653, commit
+  `0ed0f243`, formerly patch 09-a; in the base `943f2195`).
 - **Why:** [09-duplicate-bound-member.md](../../../reussir-bugs/09-duplicate-bound-member.md),
   [14-member-consumed-before-release.md](../../../reussir-bugs/14-member-consumed-before-release.md).
 - **Where:** n/a.

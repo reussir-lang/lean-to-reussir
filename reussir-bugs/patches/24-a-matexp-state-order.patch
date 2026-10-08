@@ -1,4 +1,4 @@
-From d3d6688becfea6956919fc9e709400500f8958e8 Mon Sep 17 00:00:00 2001
+From 6cb73882cd40df9a31a980fe28f7154443c2f460 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 22:56:33 -0400
 Subject: [PATCH] l2r-local: bug 24: order the matrix-exponentiation state by

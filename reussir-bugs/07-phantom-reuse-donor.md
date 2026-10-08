@@ -12,9 +12,10 @@ patch parked. The file of 07-a is in
 build applies it. It was never measured on lean2rr's programs with
 `lazy-fields` on. Patch 09-a (a real use-after-free fix,
 [bug 9](09-duplicate-bound-member.md)) used the helper that 07-a added
-(`consumesFusedMember`); since 2026-10-07 its file is the form that adds
-the helper itself (the commit of upstream pull request #653), so it no
-longer needs 07-a.
+(`consumesFusedMember`); since 2026-10-07 the fix is upstream commit
+`0ed0f243` (pull request #653, in the base `943f2195`), which adds the
+helper itself, so it no longer needs 07-a. 07-a, which adds the helper
+too, no longer applies as it is on `l2r-base2` (nor on `l2r-trim`).
 
 **Verdict: missed optimization, not a bug.** The output is correct.
 `RcDispatchFusion`'s `fuseArm` stops at region-bearing or opaque ops before
@@ -191,7 +192,8 @@ stays live, which Reussir cannot see and 07-a does not reach.
 The patch is parked: its file is in [`patches/parked/`](patches/parked/),
 outside [`patches/series`](patches/series). Until 2026-10-07 it was the
 fourth line of the series. `./reussir`'s `l2r-local` (136d9a9f) has it;
-`l2r-trim`, the stack of the current series, does not. The rest of this
+`l2r-base2`, the stack of the current series, does not (nor does
+`l2r-trim`, the stack before that). The rest of this
 section describes the patch as it was made and reviewed.
 
 Patch file

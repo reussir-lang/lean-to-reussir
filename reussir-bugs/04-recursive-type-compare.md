@@ -2,9 +2,10 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (04-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** bug. **Status:** fixed upstream (pull request #654, commit
+`634fb551`); patch 04-a dropped at base `943f2195`.
 
-**Upstream:** pull request #654 (open), with 04-a.
+**Upstream:** pull request #654, merged as commit `634fb551`, with 04-a.
 
 When a construction reuses the cell of a value that was just freed,
 Reussir tries to skip storing fields whose bytes are already in place
@@ -141,9 +142,10 @@ this bug.
 
 ## Patch
 
-Patch file
-[`patches/04-a-coinductive-type-compare.patch`](patches/04-a-coinductive-type-compare.patch)
-(`l2r-local` commit `60267ac3`, applied in `./reussir`; `l2r-local` head cc8e5aa5).
+Patch file `patches/04-a-coinductive-type-compare.patch` (`l2r-local`
+commit `60267ac3`). Upstream merged it as commit `634fb551` (pull request
+#654; the same code), so the series dropped it when its base moved to
+`943f2195` (2026-10-07). The file is in this repository's history.
 
 **The fix.** All changes are in `structurallySameType` and a new wrapper.
 

@@ -2,12 +2,13 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched: structures by 02-a, variants by 02-b,
-both applied in `./reussir` (`l2r-local` cc8e5aa5). lean2rr also works
-around the variant half (it turns member packing off).
+**Kind:** bug. **Status:** structures: fixed upstream (pull request
+#652, commit `3be77a64`); patch 02-a dropped at base `943f2195`.
+Variants: patched by 02-b, on `./reussir`'s `l2r-base2`. lean2rr also
+works around the variant half (it turns member packing off).
 
-**Upstream:** pull request #652 (open), with 02-a only: 02-b, the
-variant part, is not in it.
+**Upstream:** pull request #652, merged as commit `3be77a64`, with 02-a
+only: 02-b, the variant part, is not in it and stays in the series.
 
 When a function consumes a record and builds another of the same size,
 Reussir writes the new record into the old cell (token reuse). Its copy
@@ -192,10 +193,11 @@ Two patches, one per half.
 
 ### 02-a: structures
 
-Patch file
-[`patches/02-a-struct-field-store.patch`](patches/02-a-struct-field-store.patch)
-(`l2r-local` commit `ae5345cf`, applied in `./reussir`; `l2r-local` head
-`cc8e5aa5`). Structures only.
+Patch file `patches/02-a-struct-field-store.patch` (`l2r-local` commit
+`ae5345cf`). Structures only. Upstream merged it as commit `3be77a64`
+(pull request #652; the same code), so the series dropped it when its
+base moved to `943f2195` (2026-10-07). The file is in this repository's
+history.
 
 **The fix.** One hunk in `markCompoundAvoidedCopies`, right after the
 reused cell is found:
@@ -254,8 +256,8 @@ sit elsewhere in the new type: the wrong-field results above are gone.
 
 Patch file
 [`patches/02-b-variant-field-store.patch`](patches/02-b-variant-field-store.patch)
-(`l2r-local` commit `0218538c`, applied in `./reussir`; `l2r-local` head
-`cc8e5aa5`).
+(`l2r-local` commit `0218538c`; on `./reussir`'s `l2r-base2`, where it
+applies on upstream's 02-a, commit `3be77a64`).
 
 **The change.** `isLoadFromVariantField` (`RcCreateFusion.cpp`) keeps the
 prefix rule and, once it holds, also requires field i to sit at the same

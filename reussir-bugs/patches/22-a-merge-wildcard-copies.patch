@@ -1,4 +1,4 @@
-From bc4aca4b14387d6443fa1e817f5a73aaa9d9fcb8 Mon Sep 17 00:00:00 2001
+From 07e418201c4dc195397f542554a459304ba197b4 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 22:23:15 -0400
 Subject: [PATCH] l2r-local: bug 22: merge the copies of a wildcard arm into
@@ -62,10 +62,10 @@ boxing the dispatched type stay apart).
  create mode 100644 tests/integration/conversion/record_dispatch_merge_boxing.mlir
 
 diff --git a/include/Reussir/IR/ReussirOps.td b/include/Reussir/IR/ReussirOps.td
-index bda58a9a..040c5faa 100644
+index b1d83746..9370e644 100644
 --- a/include/Reussir/IR/ReussirOps.td
 +++ b/include/Reussir/IR/ReussirOps.td
-@@ -1036,8 +1036,12 @@ def ReussirRecordDispatchOp
+@@ -1090,8 +1090,12 @@ def ReussirRecordDispatchOp
      If the dispatch operation has separated regions for each tag, this operation
      will be directly lowered to a scf.index_switch operation. Otherwise, it will
      be expanded into 2 consecutive scf.index_switch operations, where the first
@@ -79,7 +79,7 @@ index bda58a9a..040c5faa 100644
    }];
  
    let arguments = (ins Arg<ReussirRefType, "variant record">:$variant,
-@@ -1047,6 +1051,7 @@ def ReussirRecordDispatchOp
+@@ -1101,6 +1105,7 @@ def ReussirRecordDispatchOp
  
    let hasCustomAssemblyFormat = 1;
    let hasVerifier = 1;
@@ -88,10 +88,10 @@ index bda58a9a..040c5faa 100644
  
  def ReussirRecordCoerceOp : ReussirRecordOp<"coerce", [Pure]> {
 diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
-index 1b883ef8..d833bcf8 100644
+index f8e7d1c2..16e5b632 100644
 --- a/lib/IR/ReussirOps.cpp
 +++ b/lib/IR/ReussirOps.cpp
-@@ -2817,6 +2817,145 @@ void ReussirRecordDispatchOp::print(mlir::OpAsmPrinter &p) {
+@@ -2843,6 +2843,145 @@ void ReussirRecordDispatchOp::print(mlir::OpAsmPrinter &p) {
    p.printOptionalAttrDict(getOperation()->getAttrs(), {"tagSets"});
  }
  

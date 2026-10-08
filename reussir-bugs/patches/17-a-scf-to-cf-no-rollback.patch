@@ -1,4 +1,4 @@
-From 54cdf05456879abc8753cf7b1195a6a454a46110 Mon Sep 17 00:00:00 2001
+From 1de1e319b1fbc2d77b9825735d0dd1a10982561f Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 22:59:44 -0400
 Subject: [PATCH] l2r-local: bug 17: lower SCF to ControlFlow without pattern
@@ -33,10 +33,10 @@ lit suite passes.
  1 file changed, 8 insertions(+), 1 deletion(-)
 
 diff --git a/lib/CAPI/Passes.cpp b/lib/CAPI/Passes.cpp
-index 776a2938..9f7dc73d 100644
+index 0a578cff..cdc024ef 100644
 --- a/lib/CAPI/Passes.cpp
 +++ b/lib/CAPI/Passes.cpp
-@@ -198,7 +198,14 @@ MlirPass reussirCreateControlFlowSinkPass(void) {
+@@ -201,7 +201,14 @@ MlirPass reussirCreateControlFlowSinkPass(void) {
    return wrapOwned(mlir::createControlFlowSinkPass());
  }
  MlirPass reussirCreateSCFToControlFlowPass(void) {

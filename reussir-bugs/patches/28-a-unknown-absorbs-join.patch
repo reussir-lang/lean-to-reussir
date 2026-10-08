@@ -1,4 +1,4 @@
-From 5239371f6e742c7a170b725c04f17eac6f9f67fa Mon Sep 17 00:00:00 2001
+From 55e0da7889ae7a0a6ff77211ba4de6badc9d4b34 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 03:22:04 -0400
 Subject: [PATCH] l2r-local: bug 28: make Unknown absorb the

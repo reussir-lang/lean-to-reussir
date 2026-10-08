@@ -1,4 +1,4 @@
-From 968c4b7dd3ac1c7eebf69f876496cdff6cf42cd8 Mon Sep 17 00:00:00 2001
+From fba69dd8a437812aa92c6bc11aec83d8a1bcdd0f Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 4 Oct 2026 07:58:33 -0400
 Subject: [PATCH] l2r-local: bug 35: cache the compiled polymorphic-FFI

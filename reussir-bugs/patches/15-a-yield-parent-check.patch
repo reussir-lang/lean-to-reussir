@@ -1,4 +1,4 @@
-From 0f02c434dd0d96e9daf2549de2cc2da49e055309 Mon Sep 17 00:00:00 2001
+From d12550201c4e61b168e2673a4add059dc46572db Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 20:49:04 -0400
 Subject: [PATCH] l2r-local: bug 15: check a reussir.scf.yield against its
@@ -37,10 +37,10 @@ nullable_match_counted_yield (both arm orders, run end to end).
  create mode 100644 tests/integration/frontend/nullable_match_counted_yield.rr
 
 diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
-index 76cc5521..d2100bf6 100644
+index 2c037cf0..10e1ed7d 100644
 --- a/lib/IR/ReussirOps.cpp
 +++ b/lib/IR/ReussirOps.cpp
-@@ -2932,43 +2932,39 @@ mlir::LogicalResult ReussirScfYieldOp::verify() {
+@@ -2958,43 +2958,39 @@ mlir::LogicalResult ReussirScfYieldOp::verify() {
    mlir::Type yieldedType = getValue() ? getValue().getType() : mlir::Type{};
    mlir::Type expectedType = mlir::Type{};
    bool allowImplicitArrayResult = false;

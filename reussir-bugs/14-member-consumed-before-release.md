@@ -2,10 +2,12 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (by 09-a, the patch of
-[bug 9](09-duplicate-bound-member.md)), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** bug. **Status:** fixed upstream (pull request #653, commit
+`0ed0f243`, the fix of [bug 9](09-duplicate-bound-member.md)); patch
+09-a dropped at base `943f2195`.
 
-**Upstream:** pull request #653 (open), with 09-a, the patch of entry 9.
+**Upstream:** pull request #653, merged as commit `0ed0f243`, with 09-a,
+the patch of entry 9.
 
 `RcDispatchFusion`'s `fuseArm` fuses a match arm's member retains into the
 release of the scrutinee (a "destructuring" release that transfers the
@@ -82,7 +84,8 @@ not seen in the corpus or test suites.
 
 ## Patch
 
-Fixed by 09-a, the patch of [bug 9](09-duplicate-bound-member.md#patch)
+Fixed by 09-a, the patch of [bug 9](09-duplicate-bound-member.md#patch),
+now upstream commit `0ed0f243` (pull request #653)
 (its second hunk, in the revision after review round 2): no fusion when an
 op before the release uses a bound member other than by a borrow or a
 retain (`consumesFusedMember`, which 09-a adds; before 2026-10-07 the

@@ -1,4 +1,4 @@
-From 136d9a9f83eb50fef57442d36a5814f60ab29937 Mon Sep 17 00:00:00 2001
+From 71f17ae2b571b214b64a700c81880676ce42badf Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 6 Oct 2026 19:30:58 -0400
 Subject: [PATCH] l2r-local: issue 3: round global allocation sizes only under

@@ -1,4 +1,4 @@
-From c9e640b3609e0ef3268e7aa8732d915afef58c75 Mon Sep 17 00:00:00 2001
+From fbab0ed5debedd19513b5973b38e87da6db7dcdc Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 20:56:18 -0400
 Subject: [PATCH] l2r-local: bug 19: give a cell's [value] record its own
@@ -227,10 +227,10 @@ index d6569ad9..97247a8a 100644
          if (!delta)
            delta = rewriter.createOrFold<mlir::arith::ConstantIndexOp>(
 diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
-index d2100bf6..1b883ef8 100644
+index 10e1ed7d..f8e7d1c2 100644
 --- a/lib/IR/ReussirOps.cpp
 +++ b/lib/IR/ReussirOps.cpp
-@@ -3622,7 +3622,8 @@ emitArrayOwnershipAcquisition(mlir::Value view, mlir::OpBuilder &builder,
+@@ -3648,7 +3648,8 @@ emitArrayOwnershipAcquisition(mlir::Value view, mlir::OpBuilder &builder,
  mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
                                               mlir::OpBuilder &builder,
                                               mlir::Location loc,
@@ -240,7 +240,7 @@ index d2100bf6..1b883ef8 100644
    mlir::OpBuilder::InsertionGuard guard(builder);
    mlir::Type type = value.getType();
  
-@@ -3689,7 +3690,8 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+@@ -3715,7 +3716,8 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
                             Capability::field, refType.getAtomicKind());
            mlir::Value slot = ReussirRefProjectOp::create(
                builder, loc, slotType, value, builder.getIndexAttr(0));
@@ -250,7 +250,7 @@ index d2100bf6..1b883ef8 100644
          }
  
          // If reference points to a record, handle fields directly
-@@ -3699,7 +3701,9 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+@@ -3725,7 +3727,9 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
            if (recordType.getKind() == RecordKind::compound) {
              // For compound types, recursively apply to each field. Member
              // links and the projected references inherit the parent
@@ -261,7 +261,7 @@ index d2100bf6..1b883ef8 100644
              for (auto [i, actualMemberType, actualMemberCap] : llvm::enumerate(
                       recordType.getMembers(), recordType.getMemberIsField())) {
                auto projectedType = getProjectedType(
-@@ -3710,11 +3714,32 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+@@ -3736,11 +3740,32 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
                auto fieldRef = ReussirRefProjectOp::create(
                    builder, loc,
                    RefType::get(builder.getContext(), projectedType,
@@ -296,7 +296,7 @@ index d2100bf6..1b883ef8 100644
                        .failed())
                  return mlir::failure();
              }
-@@ -3744,10 +3769,12 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+@@ -3770,10 +3795,12 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
                    refType.getAtomicKind());
  
                // Create a block for this variant region; the arm reference
@@ -311,7 +311,7 @@ index d2100bf6..1b883ef8 100644
                                 refType.getAtomicKind());
                auto *block = builder.createBlock(
                    &dispatchOp.getRegions()[i],
-@@ -3755,9 +3782,11 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+@@ -3781,9 +3808,11 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
  
                // Set insertion point to the block
                builder.setInsertionPointToStart(block);
@@ -324,7 +324,7 @@ index d2100bf6..1b883ef8 100644
                          .failed())
                    return mlir::failure();
                }
-@@ -3918,9 +3947,9 @@ void inheritSanitizerPassthrough(mlir::ModuleOp moduleOp,
+@@ -3944,9 +3973,9 @@ void inheritSanitizerPassthrough(mlir::ModuleOp moduleOp,
  mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
                                           RecordType type,
                                           mlir::OpBuilder &builder,
@@ -336,7 +336,7 @@ index d2100bf6..1b883ef8 100644
    if (!dtorName)
      llvm::report_fatal_error("only named record types have destructors");
    std::string funcName = dtorName.getValue().str();
-@@ -3928,10 +3957,10 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+@@ -3954,10 +3983,10 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
      return funcOp;
    mlir::OpBuilder::InsertionGuard guard(builder);
    builder.setInsertionPointToStart(moduleOp.getBody());
@@ -351,7 +351,7 @@ index d2100bf6..1b883ef8 100644
    auto dtor =
        mlir::func::FuncOp::create(builder, builder.getUnknownLoc(), funcName,
                                   builder.getFunctionType({refType}, {}));
-@@ -3984,9 +4013,9 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+@@ -4010,9 +4039,9 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
  //===----------------------------------------------------------------------===//
  mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
      mlir::ModuleOp moduleOp, RecordType type, mlir::OpBuilder &builder,
@@ -363,7 +363,7 @@ index d2100bf6..1b883ef8 100644
    if (!acquireName)
      llvm::report_fatal_error(
          "only named record types have ownership acquisition functions");
-@@ -3999,9 +4028,8 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+@@ -4025,9 +4054,8 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
    builder.setInsertionPointToStart(moduleOp.getBody());
  
    // Construct RefType from RecordType; the argument reference carries the
@@ -375,7 +375,7 @@ index d2100bf6..1b883ef8 100644
  
    auto funcOp = mlir::func::FuncOp::create(
        builder, builder.getUnknownLoc(), funcName,
-@@ -4017,7 +4045,8 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+@@ -4043,7 +4071,8 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
    auto ref = entryBlock->getArgument(0);
  
    if (emitOwnershipAcquisition(ref, builder, builder.getUnknownLoc(),

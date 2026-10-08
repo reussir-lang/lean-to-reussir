@@ -2,9 +2,10 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (05-a), applied in `./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** bug. **Status:** fixed upstream (pull request #655, commit
+`943f2195`); patch 05-a dropped at base `943f2195`.
 
-**Upstream:** pull request #655 (open), with 05-a.
+**Upstream:** pull request #655, merged as commit `943f2195`, with 05-a.
 
 TokenReuse matches cells freed by releases ("tokens") with later
 allocations of the same size. A token that no allocation takes must be
@@ -129,9 +130,10 @@ stays.
 
 ## Patch
 
-Patch file
-[`patches/05-a-one-armed-if-tokens.patch`](patches/05-a-one-armed-if-tokens.patch)
-(`l2r-local` commit `0f02db2c`, applied in `./reussir`; `l2r-local` head cc8e5aa5).
+Patch file `patches/05-a-one-armed-if-tokens.patch` (`l2r-local` commit
+`0f02db2c`). Upstream merged it as commit `943f2195` (pull request #655;
+the same code), so the series dropped it when its base moved to
+`943f2195` (2026-10-07). The file is in this repository's history.
 
 **New helper `getOrCreateExitBlock(region)`:**
 

@@ -34,7 +34,8 @@ What lean2rr uses from Reussir, and how:
 ## The local patch stack
 
 lean2rr needs Reussir built from source with local patches: Reussir
-`ef922049` plus the {{v:patches_total}} patches of
+`{{v:reussir_base}}` (a commit of Reussir's `main`) plus the
+{{v:patches_total}} patches of
 [reussir-bugs/patches/series](repo:reussir-bugs/patches/series), in that
 order. Each patch belongs to one entry and is named after it: the file
 `13-b-pending-release-stack.patch` is the second patch of issue 13, and the
@@ -56,8 +57,10 @@ builds do not apply them (below).
   speed on a few programs is parked: 07-a (issue 7), 36-a and 36-b
   (issue 36), and 42-a (issue 42).
 - lean2rr's work keeps the patches local: it does not push them or submit
-  them. Five bug fixes (26-a, 02-a, 09-a, 04-a and 05-a) have open pull
-  requests on Reussir's repository; the table below gives their numbers.
+  them. Five bug fixes (26-a, 02-a, 09-a, 04-a and 05-a) are in Reussir's
+  `main` now, through pull requests #651 to #655. The base of the stack
+  has them, so the series does not. The table below gives their numbers
+  and commits. Patch 02-b, the variant half of bug 2, stays in the series.
 - lean2rr keeps its workarounds, so that it also works with an unpatched
   Reussir. The exceptions are the features that lean2rr requires: the
   runtime needs patch 13-b to build, the prelude needs 41-a, and the
@@ -110,8 +113,8 @@ reads at the rare call sites of `RtReadsDeep`, and nowhere else.
 take a release that never frees as the donor of a new cell. 07-a moved
 some increments into a branch so that the matched cell is reused. The
 optional pass `lazy-fields` already avoids the shape, so 07-a is parked.
-Patch 09-a (bug 9) used a helper of 07-a. It is now in the form of
-Reussir's pull request #653, which adds the helper itself.
+Patch 09-a (bug 9) used a helper of 07-a. Reussir's pull request #653,
+now in `main`, fixes bug 9 and adds the helper itself.
 
 **Patch 03-a (issue 3, a cost), applied since 2026-10-07.** Reussir's Rust
 allocator gives every Rust allocation 16-byte alignment, on purpose.

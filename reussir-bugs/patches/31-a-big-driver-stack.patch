@@ -1,4 +1,4 @@
-From f8afea343be346e4c25017a567c6be902bc4d49f Mon Sep 17 00:00:00 2001
+From b4379a7a1bae7a0e1c377aad3a5bf376e62012c4 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 03:45:46 -0400
 Subject: [PATCH] l2r-local: bug 31: run rrc's driver on a thread with a 1 GiB

@@ -1,4 +1,4 @@
-From 1765784110e70f7ad0f77a58eaf64c83c2b1cb10 Mon Sep 17 00:00:00 2001
+From e6e0fdbcf96bebf483321ac0b0b19d40cfe8af10 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 15:44:37 -0400
 Subject: [PATCH] l2r-local: bug 21: keep an unterminated `[:` in a polymorphic

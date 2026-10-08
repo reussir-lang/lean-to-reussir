@@ -1,4 +1,4 @@
-From ac5d1d85566c8789890d22f61de67529046950cf Mon Sep 17 00:00:00 2001
+From 963c16198a4a00f0a2243e5ca1dd5762dfe9d56f Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 00:34:58 -0400
 Subject: [PATCH] l2r-local: bug 20: do not inline a copied call into a
@@ -213,10 +213,10 @@ index 00000000..d213daea
 +  }
 +}
 diff --git a/tool/reussir-opt/main.cpp b/tool/reussir-opt/main.cpp
-index bcf913b2..45bb007c 100644
+index 50a9ab2f..8807641d 100644
 --- a/tool/reussir-opt/main.cpp
 +++ b/tool/reussir-opt/main.cpp
-@@ -114,6 +114,9 @@ int main(int argc, char **argv) {
+@@ -117,6 +117,9 @@ int main(int argc, char **argv) {
    mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
      return reussir::createReussirSCCPPass();
    });

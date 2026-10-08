@@ -1,4 +1,4 @@
-From 1eb710b47e4ff941faf9e7304dbc00441ffbd313 Mon Sep 17 00:00:00 2001
+From cbd796c1fa6996e3fd36c54dfe7ba300696c14c9 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 6 Oct 2026 06:02:30 -0400
 Subject: [PATCH] l2r-local: issue 13: keep a cell's last record box for last

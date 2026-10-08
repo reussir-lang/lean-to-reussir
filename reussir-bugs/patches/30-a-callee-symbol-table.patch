@@ -1,4 +1,4 @@
-From cdc1102d0825702f5720709855cfe1c2d64440de Mon Sep 17 00:00:00 2001
+From 8d1167f6a1c88a5d46d99e858e5422b4084be2c1 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 03:40:44 -0400
 Subject: [PATCH] l2r-local: bug 30: look up call lowering's callees in a
@@ -32,7 +32,7 @@ its convention).
  create mode 100644 tests/integration/conversion/convert_to_llvm_call_callee_lookup.mlir
 
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 91439cf2..5f94d471 100644
+index 926cf608..a5b738ff 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 @@ -4065,7 +4065,9 @@ struct BasicOpsLoweringPass

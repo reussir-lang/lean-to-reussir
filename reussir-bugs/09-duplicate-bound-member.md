@@ -2,13 +2,12 @@
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (09-a, on `./reussir`'s `l2r-trim`;
-since 2026-10-07 in the helper-only form of upstream pull request #653,
-which does not need 07-a; it also fixes
-[bug 14](14-member-consumed-before-release.md)).
+**Kind:** bug. **Status:** fixed upstream (pull request #653, commit
+`0ed0f243`); patch 09-a dropped at base `943f2195`. The same commit
+fixes [bug 14](14-member-consumed-before-release.md).
 
-**Upstream:** pull request #653 (open), with 09-a (which also fixes
-entry 14).
+**Upstream:** pull request #653, merged as commit `0ed0f243`, with 09-a
+(which also fixes entry 14).
 
 When a match arm binds a constructor's fields, Reussir retains each bound
 field and later releases the matched cell. `RcDispatchFusion` merges this
@@ -143,9 +142,11 @@ field used twice or stored in a dead value.
 
 ## Patch
 
-Patch file
-[`patches/09-a-fuse-retains-once.patch`](patches/09-a-fuse-retains-once.patch):
-since 2026-10-07 the helper-only form, commit `670cfac6` of the
+Patch file `patches/09-a-fuse-retains-once.patch`, until the series
+dropped it on 2026-10-07: upstream merged it as commit `0ed0f243` (pull
+request #653; the same code), and the series' base moved to `943f2195`.
+The file is in this repository's history. Its last form, the
+helper-only form, was commit `670cfac6` of the
 `./reussir` branch `pr/dispatch-fusion-member-retain` (upstream pull
 request #653), as commit `fabae64b` of `l2r-trim` (its subject is the pull
 request's). It adds `consumesFusedMember` itself, so it no longer needs

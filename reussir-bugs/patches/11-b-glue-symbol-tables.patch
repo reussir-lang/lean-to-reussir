@@ -1,4 +1,4 @@
-From 5e0273b2ab732a9906fbea8ba5c60abe71b5e22c Mon Sep 17 00:00:00 2001
+From 3d3467617113837e989e9161c9609f3ac254a99a Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 00:34:57 -0400
 Subject: [PATCH] l2r-local: bug 11b: look up drop and acquire glue in symbol
@@ -223,10 +223,10 @@ index 28bd8b76..ceebc855 100644
  
  } // namespace reussir
 diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
-index d833bcf8..9f11553f 100644
+index 16e5b632..69473352 100644
 --- a/lib/IR/ReussirOps.cpp
 +++ b/lib/IR/ReussirOps.cpp
-@@ -3762,7 +3762,9 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+@@ -3788,7 +3788,9 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
                                               mlir::OpBuilder &builder,
                                               mlir::Location loc,
                                               mlir::Value delta,
@@ -237,7 +237,7 @@ index d833bcf8..9f11553f 100644
    mlir::OpBuilder::InsertionGuard guard(builder);
    mlir::Type type = value.getType();
  
-@@ -3830,7 +3832,7 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+@@ -3856,7 +3858,7 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
            mlir::Value slot = ReussirRefProjectOp::create(
                builder, loc, slotType, value, builder.getIndexAttr(0));
            return emitOwnershipAcquisition(slot, builder, loc, delta,
@@ -246,7 +246,7 @@ index d833bcf8..9f11553f 100644
          }
  
          // If reference points to a record, handle fields directly
-@@ -3868,7 +3870,8 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+@@ -3894,7 +3896,8 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
                  mlir::func::FuncOp glue =
                      emitOwnershipAcquisitionFuncIfNotExists(
                          moduleOp, memberRecord, builder,
@@ -256,7 +256,7 @@ index d833bcf8..9f11553f 100644
                  mlir::Value count =
                      delta ? delta
                            : builder.createOrFold<mlir::arith::ConstantIndexOp>(
-@@ -3878,7 +3881,7 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+@@ -3904,7 +3907,7 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
                  continue;
                }
                if (emitOwnershipAcquisition(fieldRef, builder, loc, delta,
@@ -265,7 +265,7 @@ index d833bcf8..9f11553f 100644
                        .failed())
                  return mlir::failure();
              }
-@@ -3925,7 +3928,8 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
+@@ -3951,7 +3954,8 @@ mlir::LogicalResult emitOwnershipAcquisition(mlir::Value value,
                // its members follow `callMemberGlue`.
                if (!isTriviallyCopyable(projectedType)) {
                  if (emitOwnershipAcquisition(block->getArgument(0), builder,
@@ -275,7 +275,7 @@ index d833bcf8..9f11553f 100644
                          .failed())
                    return mlir::failure();
                }
-@@ -4086,8 +4090,11 @@ void inheritSanitizerPassthrough(mlir::ModuleOp moduleOp,
+@@ -4112,8 +4116,11 @@ void inheritSanitizerPassthrough(mlir::ModuleOp moduleOp,
  mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
                                           RecordType type,
                                           mlir::OpBuilder &builder,
@@ -289,7 +289,7 @@ index d833bcf8..9f11553f 100644
    auto dtorName = type.getDtorName(kind, cap);
    if (!dtorName)
      llvm::report_fatal_error("only named record types have destructors");
-@@ -4104,6 +4111,7 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+@@ -4130,6 +4137,7 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
        mlir::func::FuncOp::create(builder, builder.getUnknownLoc(), funcName,
                                   builder.getFunctionType({refType}, {}));
    dtor.setPrivate();
@@ -297,7 +297,7 @@ index d833bcf8..9f11553f 100644
    dtor->setAttr(kDropGlueAttr, builder.getUnitAttr());
    dtor->setAttr("llvm.linkage", builder.getAttr<mlir::LLVM::LinkageAttr>(
                                      mlir::LLVM::linkage::Linkage::LinkonceODR));
-@@ -4140,6 +4148,7 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+@@ -4166,6 +4174,7 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
                                           drainName,
                                           builder.getFunctionType({}, {}));
        drain.setPrivate();
@@ -305,7 +305,7 @@ index d833bcf8..9f11553f 100644
      }
      mlir::func::CallOp::create(builder, builder.getUnknownLoc(), drain);
    }
-@@ -4152,8 +4161,10 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+@@ -4178,8 +4187,10 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
  //===----------------------------------------------------------------------===//
  mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
      mlir::ModuleOp moduleOp, RecordType type, mlir::OpBuilder &builder,
@@ -318,7 +318,7 @@ index d833bcf8..9f11553f 100644
    auto acquireName = type.getAcquireName(kind, cap);
    if (!acquireName)
      llvm::report_fatal_error(
-@@ -4174,6 +4185,7 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+@@ -4200,6 +4211,7 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
        builder, builder.getUnknownLoc(), funcName,
        builder.getFunctionType({refType, builder.getIndexType()}, {}));
    funcOp.setPrivate();
@@ -326,7 +326,7 @@ index d833bcf8..9f11553f 100644
    funcOp->setAttr("llvm.linkage",
                    builder.getAttr<mlir::LLVM::LinkageAttr>(
                        mlir::LLVM::linkage::Linkage::LinkonceODR));
-@@ -4185,7 +4197,7 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
+@@ -4211,7 +4223,7 @@ mlir::func::FuncOp emitOwnershipAcquisitionFuncIfNotExists(
  
    if (emitOwnershipAcquisition(ref, builder, builder.getUnknownLoc(),
                                 entryBlock->getArgument(1),

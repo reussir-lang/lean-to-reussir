@@ -1,4 +1,4 @@
-From d1fbe33b83742b18c8b1811fc36069d112401d18 Mon Sep 17 00:00:00 2001
+From b3b480008e2a6cd11578c0b74b7250ceed975dd8 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 21:41:35 -0400
 Subject: [PATCH] l2r-local: bug 1: keep every arm's bytes when a [value] enum

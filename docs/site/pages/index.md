@@ -201,7 +201,10 @@ Merged from 2026-10-04 to 2026-10-07:
   the read calls from 281 to 2.
 - **Reussir.** Patches 34-a and 35-a are applied. Each
   entry is now a numbered *issue* with a kind: only a *bug* is wrong
-  behaviour (see [Reussir](reussir.html#all-entries)).
+  behaviour (see [Reussir](reussir.html#all-entries)). The stack's base
+  is Reussir's `main` at `{{v:reussir_base}}`. It has five of lean2rr's
+  bug fixes (pull requests #651 to #655), so the series has
+  {{v:patches_total}} patches.
 - **A read of a constant is one load.** Each once-cell's value is also
   kept in a table at a fixed address, so a read is one load and a test, with
   no call (lean-zip fix 4). In lean-zip's codec loops, the once-cell calls

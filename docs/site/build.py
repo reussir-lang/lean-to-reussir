@@ -386,10 +386,11 @@ def values():
     tests, xfail = runtime_tests()
     opts, req, _ = registry()
     rb = read("reussir-bugs/README.md")
-    # "Its branch `NAME` (head `SHA`) is ef922049 plus the [first] N patches of the series"
-    m = re.search(r"branch `([\w.-]+)` \(head `([0-9a-f]+)`\) is ef922049\s+plus\s+the\s+(?:first\s+)?(\d+)\s+"
-                  r"patches\s+of\s+the\s+series", rb)
-    rbranch, rhead, applied = (m.group(1), m.group(2), int(m.group(3))) if m else ("?", "?", 0)
+    # "Its branch `NAME` (head `SHA`) is BASE plus the [first] N patches of the series"
+    m = re.search(r"branch\s+`([\w.-]+)`\s+\(head\s+`([0-9a-f]+)`\)\s+is\s+`?([0-9a-f]{7,40})`?\s+plus\s+the\s+"
+                  r"(?:first\s+)?(\d+)\s+patches\s+of\s+the\s+series", rb)
+    rbranch, rhead, rbase, applied = ((m.group(1), m.group(2), m.group(3), int(m.group(4))) if m
+                                      else ("?", "?", "?", 0))
     series = read("reussir-bugs/patches/series").split()
     pdir = os.path.join(REPO, "reussir-bugs", "patches")
     files = sorted(f for f in os.listdir(pdir) if f.endswith(".patch"))
@@ -397,7 +398,7 @@ def values():
         warn("reussir-bugs/patches/series does not list exactly the patch files of reussir-bugs/patches/")
     if not m or applied > len(series):
         warn(f"reussir-bugs/README.md does not say which Reussir branch has how many of the {len(series)} "
-             "patches of the series ('Its branch `NAME` (head `SHA`) is ef922049 plus the [first] N patches "
+             "patches of the series ('Its branch `NAME` (head `SHA`) is BASE plus the [first] N patches "
              "of the series')")
     m3 = re.search(r"Runtime test suite \((\d+) programs", read("docs/implementation-status.md"))
     if m3 and int(m3.group(1)) != len(tests):
@@ -411,6 +412,7 @@ def values():
         "req_count": str(len(req)),
         "reussir_branch": rbranch,
         "reussir_head": rhead,
+        "reussir_base": rbase,
         "patches_applied": str(applied),
         "patches_total": str(len(series)),
         "bug_entries": str(len(parse_md_table(rb, "#"))),

@@ -32,10 +32,14 @@ the table below.
 
 ## Summary
 
-`l2r-trim` (head `79c1d5f2`, since 2026-10-07) is the branch of
-`./reussir` with the applied local patches: ef922049 plus the 40 patches
-of the series (the series and how to apply it are in
+`l2r-base2` (head `71f17ae2`, since 2026-10-07) is the branch of
+`./reussir` with the applied local patches: `943f2195`, a commit of
+Reussir's `main`, plus the 35 patches of the series (the series and how
+to apply it are in
 [`reussir-bugs/README.md`](../../../reussir-bugs/README.md#applying-the-patches)).
+The base has five of lean2rr's bug fixes, merged upstream (pull requests
+#651 to #655: 26-a, 02-a, 09-a, 04-a and 05-a), so the series no longer
+has them.
 They include 40-a (the drain-end hook,
 [issue 40](../../../reussir-bugs/40-drain-end-hook.md)), 41-a (tagged
 opaque handles, [issue 41](../../../reussir-bugs/41-tagged-ffi-objects.md))
@@ -43,8 +47,9 @@ and 38-a and 13-d, features that `scripts/l2r.py` requires. The owner
 keeps only bug fixes and major items in the series: the optimizations
 07-a (issue 7) and 36-a and 36-b (issue 36) are parked, outside the
 series ([parked patches](../../../reussir-bugs/README.md#parked-patches)).
-`l2r-local` (head `136d9a9f`) is the series before that, parked patches
-included.
+`l2r-trim` (head `79c1d5f2`) is the series before the base moved:
+`ef922049` plus 40 patches. `l2r-local` (head `136d9a9f`) is the series
+before that, parked patches included.
 
 Column "Needed with the patch?": whether lean2rr's workaround is still
 needed once the patch is applied. By the policy above, workarounds stay
@@ -53,14 +58,14 @@ either way.
 | Issue | Kind | lean2rr workaround | Local patch | Needed with the patch? |
 |---|---|---|---|---|
 | [1](../../../reussir-bugs/01-value-enum-payload.md) | bug | only field-less `[value]` enums (`Nat`/`Int` are tagged handles, 41-a) | 01-a, applied | no; kept (policy) |
-| [2](../../../reussir-bugs/02-reuse-field-store.md) | bug | `--no-pack-record-members`; fields ordered by alignment | 02-a (structures) and 02-b (variants), applied | no; kept (policy) |
+| [2](../../../reussir-bugs/02-reuse-field-store.md) | bug | `--no-pack-record-members`; fields ordered by alignment | structures: fixed upstream (#652, in the base; 02-a dropped); variants: 02-b, applied | no; kept (policy) |
 | [3](../../../reussir-bugs/03-global-alloc-align.md) | cost (the 16-byte alignment is intended) | runtime allocates its objects with `mi_malloc` | 03-a and 03-b, applied | kept: the runtime's objects need only 8-byte alignment, and its blocks stay smaller |
-| [4](../../../reussir-bugs/04-recursive-type-compare.md) | bug | driver retries rrc without `--reuse-across-call` | 04-a, applied | no; kept as a fallback for unknown crashes |
-| [5](../../../reussir-bugs/05-one-armed-if.md) | bug | runtime diagnostics through a C trampoline | 05-a, applied | no; kept (policy) |
+| [4](../../../reussir-bugs/04-recursive-type-compare.md) | bug | driver retries rrc without `--reuse-across-call` | fixed upstream (#654, in the base; 04-a dropped) | no; kept as a fallback for unknown crashes |
+| [5](../../../reussir-bugs/05-one-armed-if.md) | bug | runtime diagnostics through a C trampoline | fixed upstream (#655, the base; 05-a dropped) | no; kept (policy) |
 | [6](../../../reussir-bugs/06-static-count-wrap.md) | bug | none (flag alternative not used) | 06-a, applied | n/a |
 | [7](../../../reussir-bugs/07-phantom-reuse-donor.md) | missed optimization | `lazy-fields`, `nullary-scrutinee`, `sink-proj` | none (07-a parked: `lazy-fields` covers it) | n/a; the passes are needed (the parked 07-a also missed the call-before-branch case) |
 | [8](../../../reussir-bugs/08-padding-lift.md) | bug | shape never emitted | 08-a, applied | n/a |
-| [9](../../../reussir-bugs/09-duplicate-bound-member.md), [14](../../../reussir-bugs/14-member-consumed-before-release.md) | bugs | none possible | 09-a, applied | n/a |
+| [9](../../../reussir-bugs/09-duplicate-bound-member.md), [14](../../../reussir-bugs/14-member-consumed-before-release.md) | bugs | none possible | fixed upstream (#653, in the base; 09-a dropped) | n/a |
 | [10](../../../reussir-bugs/10-closure-type-print.md) | cost | `--no-closure-wpd` | 10-a, applied | no; kept (policy) |
 | [11](../../../reussir-bugs/11-sccp-call-graph.md) | cost (11b too) | none | 11-a (and 11-b for 11b), applied | n/a |
 | [12](../../../reussir-bugs/12-node-cache-collision.md) | bug | none possible | 12-a, applied | n/a |
@@ -75,7 +80,7 @@ either way.
 | [23](../../../reussir-bugs/23-polyffi-link.md) | cost | none | 23-a, applied | n/a |
 | [24](../../../reussir-bugs/24-matexp-state-order.md) | bug | none (no difference seen in lean2rr output) | 24-a, applied | n/a |
 | [25](../../../reussir-bugs/25-value-record-dag.md) | cost | none (lean2rr's `[value]` records are shallow) | none (cost) | n/a |
-| [26](../../../reussir-bugs/26-launder-assume.md) | bug | none possible | 26-a, applied | n/a |
+| [26](../../../reussir-bugs/26-launder-assume.md) | bug | none possible | fixed upstream (#651, in the base; 26-a dropped) | n/a |
 | [27](../../../reussir-bugs/27-nullable-member-drop.md) | missing feature | `Nullable` not used | 27-a, applied | n/a |
 | [28](../../../reussir-bugs/28-unique-carrying-join.md) | bug | none possible | 28-a, applied | n/a |
 | [29](../../../reussir-bugs/29-ffi-member-mlir.md) | bug | none (affects MLIR dumps only) | 29-a, applied | n/a |

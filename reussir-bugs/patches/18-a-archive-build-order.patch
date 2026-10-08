@@ -1,4 +1,4 @@
-From a365832049709954fab0bfd5448a99f98f78bdea Mon Sep 17 00:00:00 2001
+From 3d724a1ae9c82d6e1f78f50767e5a221aabeee66 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 21:05:27 -0400
 Subject: [PATCH] l2r-local: bug 18: build every archive build.rs links before
@@ -27,7 +27,7 @@ rrc-build depends on all four archives.
  1 file changed, 9 insertions(+), 1 deletion(-)
 
 diff --git a/lib/CAPI/CMakeLists.txt b/lib/CAPI/CMakeLists.txt
-index f537d3bc..e48f8336 100644
+index e393ef19..fa7e6343 100644
 --- a/lib/CAPI/CMakeLists.txt
 +++ b/lib/CAPI/CMakeLists.txt
 @@ -25,7 +25,11 @@ endif()
@@ -43,12 +43,13 @@ index f537d3bc..e48f8336 100644
  set(REUSSIR_BACKEND_ARCHIVES
    MLIRReussir
    MLIRReussirAnalysis
-@@ -40,14 +44,18 @@ set(REUSSIR_BACKEND_ARCHIVES
+@@ -40,15 +44,19 @@ set(REUSSIR_BACKEND_ARCHIVES
    MLIRReussirTokenInstantiation
    MLIRReussirClosureOutlining
    MLIRReussirCompilePolymorphicFFI
 +  MLIRReussirInstrumentNonlinearFFI
    MLIRReussirAttachNativeTarget
+   MLIRReussirIFRTJustInTimeTransform
    # transformations
 +  MLIRReussirClosureBetaReduction
 +  MLIRReussirDefaultInliner

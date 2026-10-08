@@ -1,4 +1,4 @@
-From c66d301a02b7d7753a5c0adcf3aa5046d702221c Mon Sep 17 00:00:00 2001
+From 5f279e7d7e6e3f3e8f56cd463192287b1c887029 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Thu, 1 Oct 2026 10:10:05 -0400
 Subject: [PATCH] l2r-local: bug 13b: free cells deep through records with a
@@ -333,7 +333,7 @@ index 3a2dd1ee..389617ed 100644
  pub mod instrument;
  pub mod nullable;
 diff --git a/crates/reussir-rt/src/symbols.rs b/crates/reussir-rt/src/symbols.rs
-index 37adc7d6..29126f6c 100644
+index 7f289d3f..49957f13 100644
 --- a/crates/reussir-rt/src/symbols.rs
 +++ b/crates/reussir-rt/src/symbols.rs
 @@ -14,6 +14,7 @@ use crate::alloc::{
@@ -355,10 +355,10 @@ index 37adc7d6..29126f6c 100644
          __reussir_cleanup_region,
          __reussir_acquire_rigid_object,
 diff --git a/include/Reussir/IR/ReussirOps.td b/include/Reussir/IR/ReussirOps.td
-index f127a2df..bda58a9a 100644
+index 88093d4c..b1d83746 100644
 --- a/include/Reussir/IR/ReussirOps.td
 +++ b/include/Reussir/IR/ReussirOps.td
-@@ -575,6 +575,30 @@ def ReussirRcSetOp : ReussirRcOp<"set", []> {
+@@ -629,6 +629,30 @@ def ReussirRcSetOp : ReussirRcOp<"set", []> {
    let hasVerifier = 1;
  }
  
@@ -786,7 +786,7 @@ index 0de140da..d6569ad9 100644
        return mlir::success();
      }
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 82305558..9712f280 100644
+index f1addfaa..7f503afa 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 @@ -633,6 +633,54 @@ struct ReussirRcFetchSubConversionPattern
@@ -844,7 +844,7 @@ index 82305558..9712f280 100644
  struct ReussirRcSetConversionPattern
      : public mlir::OpConversionPattern<ReussirRcSetOp> {
    using OpConversionPattern::OpConversionPattern;
-@@ -3978,9 +4026,10 @@ struct ReussirConvertToLLVMPatternInterface
+@@ -3894,9 +3942,10 @@ struct ReussirConvertToLLVMPatternInterface
          ReussirClosureInspectPayloadOp, ReussirClosureCursorOp,
          ReussirClosureInstantiateOp, ReussirClosureVtableOp,
          ReussirClosureCreateOp, ReussirRcFetchOp, ReussirRcFetchSubOp,
@@ -858,7 +858,7 @@ index 82305558..9712f280 100644
          ReussirStrUnsafeMemcmpOp, ReussirTrampolineOp, ReussirTokenLaunderOp>();
      // `reussir.closure.wpd_test` is created BY the dispatch conversion
      // patterns above, already in its final form (operand = the loaded vtable
-@@ -4140,7 +4189,8 @@ void populateBasicOpsLoweringToLLVMConversionPatterns(
+@@ -4056,7 +4105,8 @@ void populateBasicOpsLoweringToLLVMConversionPatterns(
        ReussirClosureVtableOpConversionPattern,
        ReussirClosureCreateOpConversionPattern,
        ReussirRcReinterpretConversionPattern, ReussirRcFetchConversionPattern,
@@ -869,10 +869,10 @@ index 82305558..9712f280 100644
        ReussirStrCastOpConversionPattern, ReussirStrLenOpConversionPattern,
        ReussirStrUnsafeByteAtOpConversionPattern,
 diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
-index 77a58c9b..f1ba14d9 100644
+index 6a5cb2eb..f94afc63 100644
 --- a/lib/IR/ReussirOps.cpp
 +++ b/lib/IR/ReussirOps.cpp
-@@ -3943,9 +3943,16 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+@@ -3969,9 +3969,16 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
    dtor->setAttr(kDropGlueAttr, builder.getUnitAttr());
    dtor->setAttr("llvm.linkage", builder.getAttr<mlir::LLVM::LinkageAttr>(
                                      mlir::LLVM::linkage::Linkage::LinkonceODR));
@@ -892,7 +892,7 @@ index 77a58c9b..f1ba14d9 100644
    // Drop glue is where a stale box's memory is actually touched; it must be
    // instrumented like the code it was outlined from.
    inheritSanitizerPassthrough(moduleOp, dtor);
-@@ -3957,6 +3964,21 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
+@@ -3983,6 +3990,21 @@ mlir::func::FuncOp createDtorIfNotExists(mlir::ModuleOp moduleOp,
    auto ref = entryBlock->getArgument(0);
    ReussirRefDropOp::create(builder, builder.getUnknownLoc(), ref, true,
                             nullptr);

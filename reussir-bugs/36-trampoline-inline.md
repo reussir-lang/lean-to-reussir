@@ -123,8 +123,8 @@ With the parked 36-a, `RtReadsDeep` kept no call (on `l2r-inline`
 The patch files are in [`patches/parked/`](patches/parked/), outside
 [`patches/series`](patches/series). Until 2026-10-07 they were in the
 series, after 13-d and 03-a. The Reussir branch `l2r-inline` (136d9a9f)
-has them; `./reussir`'s `l2r-trim`, the stack of the current series, does
-not. The rest of this section describes the patch as it was made and
+has them; `./reussir`'s `l2r-base2`, the stack of the current series,
+does not (nor does `l2r-trim`, the stack before that). The rest of this section describes the patch as it was made and
 reviewed.
 
 Patch files

@@ -1,4 +1,4 @@
-From 315216bad8acd4e43fb494c7ca3526cdaa990067 Mon Sep 17 00:00:00 2001
+From aec32546b0ca8c935488495fff92502d80dc21c6 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 17:30:45 -0400
 Subject: [PATCH] l2r-local: bug 34: compile link products position-independent

@@ -581,16 +581,16 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches
-(Reussir `ef922049` plus the patches of
+(Reussir `943f2195`, a commit of Reussir's `main`, plus the 35 patches of
 [`../reussir-bugs/patches/series`](../reussir-bugs/patches/series), in
 that order; each patch file is named after its issue, `NN-x-*.patch`, and
 explained in depth in the file of that issue, indexed in
 [`../reussir-bugs/README.md`](../reussir-bugs/README.md)). Branch
-`l2r-local` of the checkout in `./reussir` (head `d79f8b70`) has the
-first 37 of the 39 patches; 38-a and 13-d, which `scripts/l2r.py`
-requires, are not on it yet.
-They are local only, never submitted upstream, and each is reviewed
-adversarially.
+`l2r-base2` of the checkout in `./reussir` (head `71f17ae2`) has all 35.
+They are local: lean2rr's work does not push them, and each is reviewed
+adversarially. Five bug fixes are merged upstream (pull requests #651 to
+#655: 26-a, 02-a, 09-a, 04-a and 05-a); the base has them, so the series
+dropped them on 2026-10-07 (until then the base was `ef922049`).
 An independent audit checked whether each problem is really a Reussir
 bug. The 40 documented problems are numbered issues (37 is reserved);
 their kind says what each is: 20 are bugs (erroneous behaviour), 11 are

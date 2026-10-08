@@ -1,4 +1,4 @@
-From ac70115a66ec396d804ad282737194702b22afeb Mon Sep 17 00:00:00 2001
+From 8f54a8660fb1bff886499b8ffaa661e0828cd2b4 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 00:34:49 -0400
 Subject: [PATCH] l2r-local: bug 11: run SCCP across calls only within a budget
@@ -50,11 +50,11 @@ Test: tests/integration/conversion/sccp_call_site_budget.mlir.
  create mode 100644 tests/integration/conversion/sccp_call_site_budget.mlir
 
 diff --git a/crates/reussir-backend-sys/build.rs b/crates/reussir-backend-sys/build.rs
-index 88923998..652156a0 100644
+index 67ac7771..47b911f9 100644
 --- a/crates/reussir-backend-sys/build.rs
 +++ b/crates/reussir-backend-sys/build.rs
-@@ -39,6 +39,7 @@ const REUSSIR_ARCHIVES: &[&str] = &[
-     "MLIRReussirAttachNativeTarget",
+@@ -40,6 +40,7 @@ const REUSSIR_ARCHIVES: &[&str] = &[
+     "MLIRReussirIFRTJustInTimeTransform",
      "MLIRReussirClosureBetaReduction",
      "MLIRReussirDefaultInliner",
 +    "MLIRReussirSCCP",
@@ -99,10 +99,10 @@ index b8a213da..12a6f8cb 100644
 +
  #endif // REUSSIR_TRANSFORMATION_PASSES_TD
 diff --git a/lib/CAPI/CMakeLists.txt b/lib/CAPI/CMakeLists.txt
-index e48f8336..8b13918e 100644
+index fa7e6343..b3b146a4 100644
 --- a/lib/CAPI/CMakeLists.txt
 +++ b/lib/CAPI/CMakeLists.txt
-@@ -49,6 +49,7 @@ set(REUSSIR_BACKEND_ARCHIVES
+@@ -50,6 +50,7 @@ set(REUSSIR_BACKEND_ARCHIVES
    # transformations
    MLIRReussirClosureBetaReduction
    MLIRReussirDefaultInliner
@@ -111,10 +111,10 @@ index e48f8336..8b13918e 100644
    MLIRReussirRcCreateFusion
    MLIRReussirRcDispatchFusion
 diff --git a/lib/CAPI/Passes.cpp b/lib/CAPI/Passes.cpp
-index 9f7dc73d..20bc9a0c 100644
+index cdc024ef..6befba4e 100644
 --- a/lib/CAPI/Passes.cpp
 +++ b/lib/CAPI/Passes.cpp
-@@ -188,7 +188,8 @@ MlirPass reussirCreateCanonicalizerPass(void) {
+@@ -191,7 +191,8 @@ MlirPass reussirCreateCanonicalizerPass(void) {
    return wrapOwned(mlir::createCanonicalizerPass());
  }
  MlirPass reussirCreateSCCPPass(void) {
@@ -301,10 +301,10 @@ index 00000000..c8d88fed
 +  }
 +}
 diff --git a/tool/reussir-opt/main.cpp b/tool/reussir-opt/main.cpp
-index b1e09c4c..bcf913b2 100644
+index ec6796da..50a9ab2f 100644
 --- a/tool/reussir-opt/main.cpp
 +++ b/tool/reussir-opt/main.cpp
-@@ -111,6 +111,9 @@ int main(int argc, char **argv) {
+@@ -114,6 +114,9 @@ int main(int argc, char **argv) {
    mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
      return reussir::createReussirTokenReusePass();
    });

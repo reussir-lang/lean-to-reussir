@@ -2,10 +2,11 @@
 
 ## Summary
 
-**Kind:** bug (miscompile). **Status:** patched (26-a), applied in
-`./reussir` (`l2r-local` cc8e5aa5).
+**Kind:** bug (miscompile). **Status:** fixed upstream (pull request
+#651, commit `5776bbe5`); patch 26-a dropped at base `943f2195`.
 
-**Upstream:** pull request #651 (open), with 26-a.
+**Upstream:** pull request #651, merged as commit `5776bbe5`, with 26-a
+(the code of 26-a; upstream reworded its comments and its test's driver).
 
 **Verdict: bug.** When a unique cell is reused for a new record, Reussir
 launders the cell's pointer (`llvm.launder.invariant.group`) so that LLVM
@@ -111,10 +112,11 @@ fields) is enough. No lean2rr workaround.
 
 ## Patch
 
-Patch file
-[`patches/26-a-no-launder-assume.patch`](patches/26-a-no-launder-assume.patch)
-(`l2r-local` commit `9a171995`; applied in `./reussir`, `l2r-local`
-cc8e5aa5). No assume after the launder, in both lowerings:
+Patch file `patches/26-a-no-launder-assume.patch` (`l2r-local` commit
+`9a171995`). Upstream merged its code as commit `5776bbe5` (pull request
+#651), so the series dropped it when its base moved to `943f2195`
+(2026-10-07). The file is in this repository's history. No assume after
+the launder, in both lowerings:
 
 ```c++
    mlir::Value laundered =
