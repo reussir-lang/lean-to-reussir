@@ -286,7 +286,9 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   entry), and otherwise at the context's next point that publishes: a
   cell store (`l2r_lcell_set`), a task's or `main`'s end, every scheduler
   call; `IO.Process.forceExit` waits for them before `_exit`
-  (`io::force_exit`).
+  (`io::force_exit`, at its effect point: the tasks and sleepers that are
+  due run first, as for `IO.Process.exit`; hunt HIO3-01, test
+  `RtForceExitEffect`).
 - **Why:** lean-runtime's glue item 11 asks for its no-suspend scope over
   the whole free path: lean2rr's runtime must never suspend inside a free
   (review RSIO-03), and a pipe whose reader is a task of the same program

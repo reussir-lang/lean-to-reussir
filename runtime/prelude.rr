@@ -2239,9 +2239,6 @@ fn l2r_stream_getLine(fd : u64) -> LStr [{ leanrt::io::stream_get_line(fd) }];
 #[ffi(import)]
 fn l2r_stream_isTty(fd : u64) -> bool [{ leanrt::io::is_tty(fd) }];
 
-// `IO.eprintln` helper.
-fn l2r_eprintln(s : LStr) -> u64 { l2r_stream_putStr(2, lean_string_push(s, 10)) }
-
 // A runtime diagnostic line (`dbgTrace`, `timeit`, `allocprof`):
 // `io_eprintln`, to the current stderr stream.
 fn l2r_diag_println(s : LStr) -> u64 { l2r_stderr_put(lean_string_push(s, 10)) }

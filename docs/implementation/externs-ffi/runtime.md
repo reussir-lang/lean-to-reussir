@@ -257,7 +257,8 @@ Paths are relative to the repository root.
     `std::process::exit`, which runs linked C code's exit handlers, and
     its documentation asks a glue that needs `_Exit` to call `_exit`
     (since step 4 after the context's handed-off streams are written,
-    `io::force_exit`);
+    `io::force_exit`; since step 18 after an effect point, as
+    `IO.Process.exit`: the due tasks and sleepers run first, hunt HIO3-01);
   - `IO.getTID` (`gettid`; lean-runtime has none);
   - the Windows time-zone errors stay the shim's Lean code (the same
     errors as lean-runtime's `time::windows_*`).

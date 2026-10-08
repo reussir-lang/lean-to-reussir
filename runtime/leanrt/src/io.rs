@@ -68,13 +68,6 @@ pub fn stream_get_line(fd: u64) -> crate::string::LStr {
     lean_get_line(&std_handle(fd))
 }
 
-/// Write all buffered stdout bytes (`fflush(stdout)`, as `std::cerr`'s tie
-/// does before a runtime message), ignoring errors.
-#[inline(never)]
-pub fn flush_stdout() {
-    let _ = Handle::stdout().flush();
-}
-
 /// Runtime diagnostics (panics, traces, timings) on stderr: errors are
 /// ignored and the last-error slot is left alone.
 #[inline(never)]
@@ -118,18 +111,21 @@ pub fn exit(code: i32) -> ! {
 }
 
 /// `IO.Process.forceExit` (`std::_Exit`): no flushing, no exit handlers.
-/// First the writer threads of the streams this context's drops handed off
-/// end (lean-runtime's writers point, `sched::before_publish`): natively the
-/// drop's `fclose` had written those bytes before any `_Exit` (lean-runtime
-/// docs/sched.md, "The glue", item 11). lean-runtime's own
-/// `io::exit::force_exit` ends with `std::process::exit`, which runs the
-/// handlers of linked C code (mimalloc's); its documentation asks a glue that
-/// needs `_Exit` exactly to call `_exit`.
+/// First an effect point (`sched::effect`, as `IO.Process.exit`'s): the
+/// queued tasks and sleepers that native threads would have run by now run
+/// (hunt HIO3-01: a task queued before a long computation that ends in
+/// `forceExit` natively prints its line first), and the writer threads of
+/// the streams this context's drops handed off end (lean-runtime's writers
+/// point): natively the drop's `fclose` had written those bytes before any
+/// `_Exit` (lean-runtime docs/sched.md, "The glue", item 11). lean-runtime's
+/// own `io::exit::force_exit` ends with `std::process::exit`, which runs the
+/// handlers of linked C code (mimalloc's); its documentation asks a glue
+/// that needs `_Exit` exactly to call `_exit`.
 pub fn force_exit(code: i32) -> ! {
     extern "C" {
         fn _exit(code: i32) -> !;
     }
-    crate::sched::before_publish();
+    crate::sched::effect();
     unsafe { _exit(code) }
 }
 

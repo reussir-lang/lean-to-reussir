@@ -823,22 +823,11 @@ pub fn copy_slice(src: RVec<u8>, src_off: u64, dest: RVec<u8>, dest_off: u64, le
 // `RVec<u32>`, `RVec<u64>`, `RVec<f32>`; `any::NUM_BYTES` to
 // `any::NUM_F32S`).
 
-/// `ByteArray.data`: each byte as its box, an immediate.
+/// `ByteArray.data`: each byte as its box, an immediate
+/// (`boxes_of_scalars`).
 #[inline(never)]
 pub fn boxes_of_bytes(src: RVec<u8>) -> RVec<crate::any::LAny> {
-    let n = src.len();
-    check_alloc(n as u64, 8);
-    let v = alloc::<crate::any::LAny>(n);
-    unsafe {
-        let s = elems::<u8>(src.hdr());
-        let d = elems::<u64>(v.hdr());
-        for i in 0..n {
-            *d.add(i) = ((*s.add(i) as u64) << 1) | 1;
-        }
-        (*v.hdr()).len = n;
-    }
-    drop(src);
-    v
+    boxes_of_scalars(src)
 }
 
 /// `ByteArray.mk`: each box read as a `UInt8` (`l2r_any_as_u8`: an
@@ -890,24 +879,10 @@ pub fn boxes_all_imm(src: RVec<crate::any::LAny>) -> bool {
 }
 
 /// `FloatArray.data`: each float in its box, a cell (`any::of_f64`), as
-/// natively (`lean_box_float`).
+/// natively (`lean_box_float`; `boxes_of_scalars`).
 #[inline(never)]
 pub fn boxes_of_floats(src: RVec<f64>) -> RVec<crate::any::LAny> {
-    let n = src.len();
-    check_alloc(n as u64, 8);
-    let v = alloc::<crate::any::LAny>(n);
-    unsafe {
-        let s = elems::<f64>(src.hdr());
-        let d = elems::<crate::any::LAny>(v.hdr());
-        for i in 0..n {
-            std::ptr::write(d.add(i), crate::any::of_f64(*s.add(i)));
-            // The block holds exactly the boxes made so far (a cell's
-            // allocation can end the process, never unwind).
-            (*v.hdr()).len = i + 1;
-        }
-    }
-    drop(src);
-    v
+    boxes_of_scalars(src)
 }
 
 /// `FloatArray.mk`: each box read as a `Float` (`l2r_any_as_f64`: a float's
@@ -937,6 +912,9 @@ pub fn floats_of_boxes(src: RVec<crate::any::LAny>) -> RVec<f64> {
 /// `USize` as `any::of_u64` (a cell from 2^63); a `Float` as `any::of_f64`
 /// (a cell).
 pub trait BoxScalar: Clone + Copy {
+    /// Whether `boxed` allocates (a cell): then the conversion's block
+    /// holds exactly the boxes made so far at each step.
+    const ALLOCATES: bool = false;
     fn boxed(self) -> crate::any::LAny;
 }
 
@@ -969,6 +947,7 @@ impl BoxScalar for f32 {
 }
 
 impl BoxScalar for u64 {
+    const ALLOCATES: bool = true;
     #[inline(always)]
     fn boxed(self) -> crate::any::LAny {
         crate::any::of_u64(self)
@@ -976,6 +955,7 @@ impl BoxScalar for u64 {
 }
 
 impl BoxScalar for f64 {
+    const ALLOCATES: bool = true;
     #[inline(always)]
     fn boxed(self) -> crate::any::LAny {
         crate::any::of_f64(self)
@@ -983,10 +963,10 @@ impl BoxScalar for f64 {
 }
 
 /// A compact array of scalars as an array of boxes (`BoxScalar`): a new
-/// array of exactly the source's size, then the source released, as
-/// `boxes_of_bytes` and `boxes_of_floats` (the same boxes at `u8` and
-/// `f64`). The safety net of `any`'s unboxing at `RVec<LAny>`
-/// (`any::boxes_of_compact`).
+/// array of exactly the source's size, then the source released.
+/// `ByteArray.data` and `FloatArray.data` (`boxes_of_bytes`,
+/// `boxes_of_floats`), and the safety net of `any`'s unboxing at
+/// `RVec<LAny>` (`any::boxes_of_compact`).
 #[inline(never)]
 pub fn boxes_of_scalars<T: BoxScalar>(src: RVec<T>) -> RVec<crate::any::LAny> {
     let n = src.len();
@@ -995,11 +975,20 @@ pub fn boxes_of_scalars<T: BoxScalar>(src: RVec<T>) -> RVec<crate::any::LAny> {
     unsafe {
         let s = elems::<T>(src.hdr());
         let d = elems::<crate::any::LAny>(v.hdr());
-        for i in 0..n {
-            std::ptr::write(d.add(i), (*s.add(i)).boxed());
-            // The block holds exactly the boxes made so far (a cell's
-            // allocation can end the process, never unwind).
-            (*v.hdr()).len = i + 1;
+        if T::ALLOCATES {
+            for i in 0..n {
+                std::ptr::write(d.add(i), (*s.add(i)).boxed());
+                // The block holds exactly the boxes made so far (a cell's
+                // allocation can end the process, never unwind).
+                (*v.hdr()).len = i + 1;
+            }
+        } else {
+            // Immediates only: one loop the compiler vectorizes, the size
+            // stored once.
+            for i in 0..n {
+                std::ptr::write(d.add(i), (*s.add(i)).boxed());
+            }
+            (*v.hdr()).len = n;
         }
     }
     drop(src);
