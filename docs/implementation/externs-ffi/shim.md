@@ -56,7 +56,7 @@ compiles it with the program. Plan
 - **What:** The driver names lean2rr's build library directory in
   `L2R_SHIM_DIR`; lean2rr puts it last on the search path and always
   imports `L2RShim` with the program, stopping when the directory does not
-  hold it. It counts as a toolchain module: no startup work, constants
+  hold it (or `L2RShim.Core`). It counts as a toolchain module: no startup work, constants
   evaluated lazily, and its `unsafe`/`@[extern]`/`@[export]` declarations
   do not make a program one that can cast. A program module named
   `L2RShim.*` is rejected
@@ -68,6 +68,34 @@ compiles it with the program. Plan
   `CompileRecord.lean`: `isToolchainModule`; `scripts/l2r.py`:
   `SHIM_DIR`.
 - **Remove only if:** never.
+
+### Only the shim's part over `Init` is loaded when its `Std` imports clash with the program
+
+- **What:** The shim's definitions that need only `Init`
+  (`ShareCommon`'s externs and the replaced definitions, such as
+  `IO.Promise.isResolved`) are the module `L2RShim.Core`, which `L2RShim`
+  imports. lean2rr first imports the program with `L2RShim`; when that
+  import fails, it imports the program with `L2RShim.Core` only and prints
+  a note ("lean2rr's shim L2RShim is not loaded, only L2RShim.Core", with
+  the reason). The externs of `Std.Internal.UV`, `Std.Net` and `Std.Time`
+  that `L2RShim` implements are then missing: a program that calls one is
+  rejected, naming it. When the second import fails too, its error is the
+  program's own and lean2rr stops with it.
+- **Why:** `L2RShim` imports modules of `Std` that the program may not
+  import, and two declarations of one name are an import error.
+  `Std.Internal.UV` imports `Std.Data.ByteSlice`, whose `ByteSlice`
+  structure is in the root namespace: a program that declares its own
+  `ByteSlice` (natively no clash) stopped lean2rr with "environment already
+  contains 'ByteSlice.start'". If the program imports one of those `Std`
+  modules itself, the clash is native too.
+  The same holds for `Std`, which lean2rr loads with a program of the
+  `Lean` package that does not import it
+  ([../startup/order.md](../startup/order.md)).
+- **Where:** `Env.lean`: `shimModules`, `loadEnvironment`;
+  `lean2rr/L2RShim/Core.lean`. Tests `RtShimClash`, `RtShimClashLean`
+  (their `.l2r-log` files check the notes).
+- **Remove only if:** each part of the shim imports only the `Std` module
+  whose externs it implements and is loaded only with it.
 
 ### Operations that complete later resolve through a `sync` continuation
 
@@ -92,7 +120,7 @@ compiles it with the program. Plan
   the promise with `none` only then. Compiled as written, the release came
   inside `result?`, before the question, and `isResolved` on a promise's
   last use answered `true` (470425c).
-- **Where:** `lean2rr/L2RShim.lean`: `promiseIsResolved`,
+- **Where:** `lean2rr/L2RShim/Core.lean`: `promiseIsResolved`,
   `primPromiseIsResolved`; `runtime/leanrt/src/task.rs`:
   `promise_is_resolved`; `Mono.lean`: `redirectTarget`.
 - **Remove only if:** Reussir gets borrowed parameters (or Lower/Borrow
@@ -110,8 +138,8 @@ compiles it with the program. Plan
   byte, and `shareCommon` is the identity here.
 - **Where:** `lean2rr/L2RShim.lean` (`lean_get_current_time`,
   `lean_windows_get_next_transition`,
-  `lean_get_windows_local_timezone_id_at`, `lean_sharecommon_eq`,
-  `lean_sharecommon_hash`); `runtime/leanrt/src/io.rs`: `realtime_nanos`
+  `lean_get_windows_local_timezone_id_at`), `lean2rr/L2RShim/Core.lean`
+  (`lean_sharecommon_eq`, `lean_sharecommon_hash`); `runtime/leanrt/src/io.rs`: `realtime_nanos`
   (lean-runtime's `io::time::current_time_nanos`); `runtime/leanrt/src/sys.rs`:
   `windows_next_transition`, `windows_local_timezone_id_at`.
 - **Remove only if:** never.

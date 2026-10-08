@@ -80,22 +80,25 @@ def reservedNames : String :=
   "lean2rr takes the modules named Init.*, Std.*, Lean.* and Lake.* for Lean's library and \
     L2RShim.* for its own shim, so a program module must not be named like them; rename it"
 
-/-- The shim module to import with the program, `L2RShim`, from the shim
-directory `dir` (described by `src`), which must have it (otherwise a
-program that calls a shimmed extern would fail only in rrc). It must also
-be the module of that name on the search path (a program module named
-`L2RShim`, or a directory `L2RShim` of program modules, earlier on the
-path would replace it). -/
-def shimModules (dir : System.FilePath) (src : String) : IO (Array Name) := do
-  let shim := dir / "L2RShim.olean"
-  unless ← shim.pathExists do
-    throw <| IO.userError s!"lean2rr's shim library (L2RShim.olean) is not in {dir} ({src}): \
-      set L2R_SHIM_DIR to the lib/lean directory of lean2rr's build, as scripts/l2r.py does"
-  if let some found ← (← searchPathRef.get).findWithExt "olean" `L2RShim then
-    if (← moduleDiff found shim).isSome then
-      throw <| IO.userError s!"{found.parent.getD "."} holds program modules named L2RShim or \
-        L2RShim.*, like lean2rr's shim ({shim}): {reservedNames}"
-  return #[`L2RShim]
+/-- The shim modules to import with the program, from the shim directory
+`dir` (described by `src`), which must have them (otherwise a program that
+calls a shimmed extern would fail only in rrc): `L2RShim`, the whole shim,
+and `L2RShim.Core`, its part over `Init` only, which `L2RShim` imports
+(`loadEnvironment` loads `L2RShim.Core` alone when `L2RShim` cannot be
+loaded with the program). Each must also be the module of that name on the
+search path (a program module named `L2RShim`, or a directory `L2RShim` of
+program modules, earlier on the path would replace it). -/
+def shimModules (dir : System.FilePath) (src : String) : IO (Name × Name) := do
+  for m in [`L2RShim, `L2RShim.Core] do
+    let shim := modToFilePath dir m "olean"
+    unless ← shim.pathExists do
+      throw <| IO.userError s!"lean2rr's shim library ({m}.olean) is not in {dir} ({src}): \
+        set L2R_SHIM_DIR to the lib/lean directory of lean2rr's build, as scripts/l2r.py does"
+    if let some found ← (← searchPathRef.get).findWithExt "olean" m then
+      if (← moduleDiff found shim).isSome then
+        throw <| IO.userError s!"{found.parent.getD "."} holds program modules named L2RShim or \
+          L2RShim.*, like lean2rr's shim ({shim}): {reservedNames}"
+  return (`L2RShim, `L2RShim.Core)
 
 /-- Import `modules` and their transitive closure at `private` level. Only
 this level exposes every module's complete base-LCNF bodies; the default
@@ -112,17 +115,49 @@ directory), its files reached by any path (a link, a copy; `moduleDiff`).
 A program that imports a module of the `Lean` package natively initializes
 all of `Init` and `Std` before anything else (`lean_initialize`;
 `Emit/Startup.lean`: `leanInitModules`): when its imports do not reach the
-modules `Init` and `Std`, they are loaded too. -/
+modules `Init` and `Std`, they are loaded too, each one that can be loaded
+with the program (`Std`'s modules can clash with it, see below; that
+changes nothing at startup, since Lean 4.34.0's `Std` has no
+initializer).
+
+The shim (`shimModules`) is loaded with the program. `L2RShim` imports
+modules of `Std` that the program may not import, and a declaration of
+theirs can have the name of one of the program's (`Std.Data.ByteSlice`'s
+`ByteSlice`, which `Std.Internal.UV` imports): natively that is no clash,
+since the program does not import them, but imported together they are an
+error. Then lean2rr loads `L2RShim.Core` (the part over `Init` only) in its
+place, and says so: the externs of the `Std` modules that `L2RShim`
+implements are then missing (a program that calls one is rejected,
+naming it). -/
 def loadEnvironment (modules : Array Name) : IO Environment := do
   let sysroot ← toolchainSysroot
   let (shim, shimSrc) ← shimDir
   initSearchPath sysroot
   searchPathRef.modify (· ++ [shim])
-  let shimMods ← shimModules shim shimSrc
-  let mut env ← importModules ((modules ++ shimMods).map ({ module := · })) {} (level := .private)
+  let (whole, core) ← shimModules shim shimSrc
+  let imp (mods : Array Name) : IO Environment :=
+    importModules (mods.map ({ module := · })) {} (level := .private)
+  -- With `L2RShim`, else (its imports clash with the program) with
+  -- `L2RShim.Core`; an error of the second import is the program's own.
+  let (env0, shimMods) ← try pure ((← imp (modules.push whole)), #[whole]) catch e => do
+    let env ← imp (modules.push core)
+    IO.eprintln s!"lean2rr: note: lean2rr's shim {whole} is not loaded, only {core}: {e}; \
+      the externs of Std that {whole} implements (Std.Internal.UV, Std.Net, Std.Time) are missing"
+    pure (env, #[core])
+  let mut env := env0
   let missing := #[`Init, `Std].filter (env.getModuleIdx? · |>.isNone)
   if env.header.moduleNames.any (`Lean).isPrefixOf && !missing.isEmpty then
-    env ← importModules ((modules ++ missing ++ shimMods).map ({ module := · })) {} (level := .private)
+    -- Each that can be loaded with the program (`Std`'s modules can clash
+    -- with it, as the shim's can; neither has an initializer in Lean
+    -- 4.34.0, so the startup is the same without it).
+    let mut added := #[]
+    for m in missing do
+      try
+        env ← imp (modules ++ added ++ #[m] ++ shimMods)
+        added := added.push m
+      catch e =>
+        IO.eprintln s!"lean2rr: note: module {m}, which a program of the Lean package initializes \
+          natively, is not loaded: {e}"
   let libDir ← getLibDir sysroot
   for m in env.header.moduleNames do
     unless isToolchainModule m do continue

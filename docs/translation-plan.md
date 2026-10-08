@@ -1835,7 +1835,12 @@ Rules:
   lean2rr imports the shim with the program (`LeanToReussir.Env`, from
   `L2R_SHIM_DIR`, which the driver sets to lean2rr's build directory, last
   on the search path; lean2rr stops if that directory has no shim) and
-  treats it as a toolchain module (no startup work). The shim builds Lean's
+  treats it as a toolchain module (no startup work). When the modules of
+  `Std` that the shim imports declare a name the program declares too
+  (`Std.Data.ByteSlice`'s `ByteSlice`; natively no clash, the program does
+  not import them), lean2rr loads only the shim's part over `Init`
+  (`L2RShim.Core`: `ShareCommon` and the replaced definitions below), with
+  a note; the shim's `Std` externs are then missing. The shim builds Lean's
   values over primitives of the runtime (`leanrt::net`, `leanrt::sys`) on
   plain values (numbers, strings, byte arrays, handles, promises), whose
   rules are lean-runtime's: its event loop's timers and signal watchers

@@ -40,7 +40,8 @@ relative to `lean2rr/` unless they start with `scripts/`.
   build time), not the one `lean` or the working directory's
   `lean-toolchain` names. The shim directory (`L2R_SHIM_DIR`, set by the
   driver; else `lib/lean` next to lean2rr's `bin/`) is last on the search
-  path and must hold `L2RShim.olean`, or loading stops naming it.
+  path and must hold `L2RShim.olean` and `L2RShim/Core.olean`, or loading
+  stops naming it.
 - **Why:** lean2rr takes such modules for Lean's library or its shim
   (constants evaluated lazily, `initialize` actions run by the runtime,
   `unsafe` code trusted when deciding whether the program casts); a

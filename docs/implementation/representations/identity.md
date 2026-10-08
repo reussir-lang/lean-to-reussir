@@ -80,6 +80,6 @@ start with `runtime/`.
   `lean_is_scalar`, `lean_sharecommon_quick`, `lean_dbg_trace_if_shared`
   (`runtime/leanrt/src/lib.rs`: `is_shared`); `Lower/ExternCall.lean`:
   `customExtern` (`ShareCommon.State.shareCommon`);
-  `lean2rr/L2RShim.lean` (`lean_sharecommon_eq`/`hash`).
+  `lean2rr/L2RShim/Core.lean` (`lean_sharecommon_eq`/`hash`).
 - **Remove only if:** never (plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features)).

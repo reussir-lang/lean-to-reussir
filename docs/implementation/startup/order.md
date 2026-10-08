@@ -134,7 +134,10 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   program, not per module as natively, and a program that imports part of
   `Lean` loads `Init` and `Std` too (RSG2-01, RSG2-02: plan §10, known
   differences of programs that use the `Lean` package, which are not a
-  target). The library's other constants are pure: evaluating
+  target), each only if it can be loaded with the program: `Std`'s
+  modules can declare a name the program declares (`ByteSlice`), which
+  natively is no clash; without `Std` the startup is the same, as `Std`
+  has no initializer (lean2rr prints a note; test `RtShimClashLean`). The library's other constants are pure: evaluating
   them on first use instead of at startup does not show. `IO.rand` reads
   the seeded generator from its once-cell and never seeds it again (test
   `RtStartupInitRand`). Cost: a few functions per program (the

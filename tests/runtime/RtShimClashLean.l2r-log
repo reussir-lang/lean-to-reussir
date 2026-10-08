@@ -1,0 +1,2 @@
+lean2rr: note: lean2rr's shim L2RShim is not loaded, only L2RShim.Core
+lean2rr: note: module Std, which a program of the Lean package initializes natively, is not loaded

@@ -51,8 +51,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **Why:** For definitions whose native behaviour depends on Lean's
   reference counting in a way the translation does not reproduce
   ([shim.md](shim.md#iopromiseisresolved-is-replaced-borrow-dependent-behaviour)).
-- **Where:** `Mono.lean`: `redirectTarget`; `lean2rr/L2RShim.lean` (end
-  of file).
+- **Where:** `Mono.lean`: `redirectTarget`; `lean2rr/L2RShim/Core.lean`
+  (the end).
 - **Remove only if:** no definition needs replacing.
 
 ### The order an extern call takes
