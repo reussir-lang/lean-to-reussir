@@ -66,7 +66,32 @@ that it gets as an `α` is one box (kind 11), which it passes on unread.
     `Array S` meets `Array T` of another kind or of none (`Array lcAny`,
     `Array Nat`), at any position of the two types (through function types
     and the arguments of one inductive; `alignArr`). `Array S` against a
-    box (`lcAny`) is allowed: the box holds the compact array;
+    box (`lcAny`) is allowed: the box holds the compact array. In a box,
+    `Array S` against `Array lcAny` (or an array of another type `Box`
+    represents) is allowed too, for the same reason: in an inductive's
+    type argument (rule 1 gives the inductive one layout, its type
+    arguments in boxes) and in the element of an array of boxes, not under
+    a function type (a function takes its arguments at their own
+    representations) and not in a `flatten-structs` tuple (its fields are
+    at their own types). The flow class (below) then turns the kind off if
+    generic code can unbox the array as an array of boxes. Example (hunt
+    HCA-02): `structure Matrix (α) where rows : Array (Array α)` has the
+    field `Array (Array lcAny)` in its layout, and a `Matrix Float` stores
+    an `Array (Array Float)` there; before, this turned `f64` off
+    (`List (Array α)` at `UInt8`: `u8`, `Option (Array α)` at `UInt64`:
+    `u64`). An extern's parameters and result keep the strict comparison
+    (`alignArr`'s `strict`);
+  - **a value without an array:** a binder bound to a constructor of
+    Lean's applied to all its fields, each field erased or a binder that
+    holds no array (`List.nil ◾`, `Option.none ◾`, `Except.error e` with
+    `e : String`; `CAM.holdsNoArray`), is aligned nowhere and joins no
+    class: no code can read an array from it, and its type has the one
+    layout of its inductive, whatever the type arguments. Example (hunt
+    HCA-01): mono CSE shares `let _x : List (Array UInt8) := List.nil ◾`
+    (typed at its first use) with a use where `List (Array Float)` is
+    expected; before, this turned `u8` and `f64` off. A constructor that
+    the runtime implements (`Array.mk`: the kind decides its
+    representation) and a `flatten-structs` tuple do not count;
   - **a flow class:** the places above join binders into classes
     (union-find, as rule 4's `flowAnalysis`), also through containers (a
     constructor's arguments and its value, a field and the value read),
@@ -82,7 +107,13 @@ that it gets as an `α` is one box (kind 11), which it passes on unread.
     unboxed there at `Array UInt64` makes the class mention `u64` (review
     F1: an array of boxes from a type-code universe, `Ty.denote`, read by
     `Array.size` at `UInt64` was unboxed as a compact array; test
-    `RtCArrDepUniverse`);
+    `RtCArrDepUniverse`). Such a position also gets a node when its type
+    is an array of boxes (`Array lcAny`) and a box arrives there (an
+    argument of type `lcAny`): the box is unboxed there as an array of
+    boxes, so the class mentions `Array lcAny` (test `RtCArrBoxedAny`: a
+    `T b` that is an `Array UInt64`, read through a proved cast by
+    `Array.size` at `lcAny`; before, `u64` stayed on and leanrt converted
+    the array at each read);
   - **a cast:** the program can read a value as another type
     (`programCasts`): every kind is off. An axiom that states a `Bool`
     equation does not count (`isBoolEqAxiom`): `native_decide` and
@@ -100,10 +131,19 @@ that it gets as an `α` is one box (kind 11), which it passes on unread.
   as an array of boxes (the safety net, below) or the reverse (a panic).
   Examples: `RtCArrColumn` (a column whose element type depends on a value)
   and `RtCArrGeneric` (arrays through a generic function) stay boxed;
-  `RtCArrCast` casts.
+  `RtCArrCast` casts. A box needs no crossing: the value in it has one
+  representation (the box) whatever its element type. Only the code that
+  unboxes it chooses one, and that code is a binder or a position of the
+  value's class. `RtCArrGenericFields` keeps every kind on (fields
+  `Array (Array α)`, `List (Array α)`, `Option (Array α)`,
+  `Array (List (Array α))`); in `RtCArrGenericFieldsDep`, generic code
+  builds or reads such fields (type-code universes, an existential
+  payload), and the classes turn those kinds off; `RtCArrSharedNil` keeps
+  every kind on.
 - **Where:** `CompactArrays.lean`: `compactArrayKinds`, `caCode`,
-  `alignArr`, `mentions`, `mayHoldArr`; `Lower/Conv.lean`: `programCasts`
-  (`ignoreAxiom`), `isBoolEqAxiom`; `Emit/Program.lean`: `lowerProgram`.
+  `alignArr`, `boxArrayElem`, `CAM.holdsNoArray`, `mentions`,
+  `mayHoldArr`; `Lower/Conv.lean`: `programCasts` (`ignoreAxiom`),
+  `isBoolEqAxiom`; `Emit/Program.lean`: `lowerProgram`.
 - **Remove only if:** never while arrays have two representations.
 
 ### A field `Array α` of an inductive used with a compact array is a box
@@ -120,7 +160,10 @@ that it gets as an `α` is one box (kind 11), which it passes on unread.
 - **Why:** The field `Array lcAny` meets every compact array stored in it
   (a crossing): `RtCArrKinds` turned every kind off through
   `Array.toSubarray` before. A box costs a tagged pointer at the store and
-  a number test at the read (no allocation), only in such inductives.
+  a number test at the read (no allocation), only in such inductives. A
+  field that holds arrays inside another type (`Array (Array α)`,
+  `List (Array α)`) needs no change: its arrays are in boxes already (see
+  "a crossing" above).
 - **Where:** `CompactArrays.lean`: `arrayFieldInductives`,
   `isArrayAnyField`, `caFieldTypes`; `LowerBase.lean`: `nominalType`.
 - **Remove only if:** the layouts of generic types change.

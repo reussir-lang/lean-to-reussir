@@ -28,7 +28,13 @@ optimization:
   through function types, and the arguments of one inductive); where
   `Array S` meets `Array T` and `T` has another kind, or none (`lcAny`,
   `Nat`, …), both kinds are turned off. `Array S` against `lcAny` is a box:
-  allowed (leanrt's kinds 7 to 12 box a compact array).
+  allowed (leanrt's kinds 7 to 12 box a compact array). So is `Array S`
+  against `Array lcAny` in a box (an inductive's type argument, the element
+  of an array of boxes, not under a function type; HCA-02: `rows : Array
+  (Array α)` of a `Matrix Float`): the flow class below decides. An
+  extern's parameters and result keep the strict comparison. A binder whose
+  value holds no array (`List.nil ◾`, `CAM.holdsNoArray`) is aligned
+  nowhere and joins no class (HCA-01).
 * **Flow classes.** The same places join the binders into classes
   (union-find, as rule 4's `flowAnalysis` follows function values), also
   through containers (a constructor's arguments and its value, a field and
@@ -43,7 +49,8 @@ optimization:
   binder (an extern's parameter or result, a constructor's field) and whose
   type mentions a storage kind gets a node of its own in the value's class
   (`posNode`): a box unboxed there at `Array UInt64` makes the class mention
-  `u64` (review F1).
+  `u64` (review F1). So does a position of type `Array lcAny` (an extern's
+  parameter, a field) that gets a box: the class then mentions `Array lcAny`.
 * **Casts.** In a program that can read a value as another type
   (`programCasts`), every kind is off.
 
@@ -73,6 +80,9 @@ structure CAState where
   vars : Std.HashMap FVarId Expr := {}
   /-- Join point parameters of the declaration being walked. -/
   jps : Std.HashMap FVarId (Array (FVarId × Expr)) := {}
+  /-- Binders of the declaration being walked whose value holds no array
+  (`CAM.holdsNoArray`): they have no node and are aligned nowhere. -/
+  noArr : Std.HashSet FVarId := {}
   holdCache : Std.HashMap Expr Bool := {}
   mentionCache : Std.HashMap Expr (Array String × Bool) := {}
 
@@ -155,9 +165,22 @@ where
       return acc
     | _ => return acc
 
+/-- Whether `Array e`, `e` without a storage kind, is an array of `Box`es
+that generic code reads (as `mentions` counts it): `Array lcAny`, or of
+another type `Box` represents. -/
+def boxArrayElem (env : Environment) (e : Expr) : Bool := e == anyExpr || mayBeBox env e
+
 /-- Values of type `a` go to a position of type `b` (see the module
-comment, "Crossings"). -/
-partial def alignArr (a b : Expr) (why : String) (fuel : Nat := 16) : CAM Unit := do
+comment, "Crossings"). `inBox`: the two types are the types of a value in
+a `Box` (a type argument of an inductive, the element of an array of
+boxes, not under a function type): there `Array S` against an array of
+boxes that generic code reads (`Array lcAny`) is no crossing, as `Array S`
+against `lcAny` (the box holds the compact array; whoever unboxes it is a
+binder or a position of the value's flow class, which turns the kind off
+if the class reaches an array of boxes; HCA-02). `strict`: no such
+exception (an extern's parameters and result). -/
+partial def alignArr (a b : Expr) (why : String) (fuel : Nat := 16) (inBox : Bool := false)
+    (strict : Bool := false) : CAM Unit := do
   let a := keyTy a
   let b := keyTy b
   if a == b then return
@@ -167,20 +190,31 @@ partial def alignArr (a b : Expr) (why : String) (fuel : Nat := 16) : CAM Unit :
     let ka ← CAM.kindOf ea
     let kb ← CAM.kindOf eb
     if ka != kb then
+      let env ← getEnv
+      if inBox && !strict &&
+          ((ka.isNone && boxArrayElem env ea) || (kb.isNone && boxArrayElem env eb)) then return
       CAM.turnOff ka s!"{why}: {a} meets {b}"
       CAM.turnOff kb s!"{why}: {a} meets {b}"
-    else if ka.isNone then alignArr ea eb why fuel'
+    else if ka.isNone then
+      -- An array of boxes: its elements are in boxes.
+      alignArr ea eb why fuel' (inBox := true) strict
     return
   | _, _ => pure ()
   match a, b with
   | .forallE _ da ba _, .forallE _ db bb _ =>
-    alignArr db da why fuel'
-    alignArr ba bb why fuel'
+    -- A function takes its arguments and gives its result at their own
+    -- representations.
+    alignArr db da why fuel' (inBox := false) strict
+    alignArr ba bb why fuel' (inBox := false) strict
   | _, _ =>
     if a.isApp && b.isApp && a.getAppNumArgs == b.getAppNumArgs then
       if let (.const m _, .const n _) := (a.getAppFn, b.getAppFn) then
         if sameInductive m n then
-          for (x, y) in a.getAppArgs.zip b.getAppArgs do alignArr x y why fuel'
+          -- One layout per inductive (rule 1): what its type arguments
+          -- stand for is in boxes, except in `flatten-structs`' tuples,
+          -- whose fields are at their own types.
+          let inBox' := (flatTupleArity? m).isNone
+          for (x, y) in a.getAppArgs.zip b.getAppArgs do alignArr x y why fuel' inBox' strict
 
 /-- The node of binder `x` of declaration `decl`, of type `t` (made at its
 first sight), if `t` can hold an array. -/
@@ -306,17 +340,50 @@ def caFieldTypes (boxed : NameSet) (ctor : Name) (valTy : Expr) : CoreM (Array E
   unless boxed.contains ci.induct do return fs
   return fs.map fun f => if isArrayAnyField f then anyExpr else f
 
+/-- Whether let value `v` holds no array, whatever its binder's type says:
+a constructor of Lean's (not one the runtime implements, as `Array.mk`)
+applied to all its fields, where each field argument is erased or a binder
+whose type can hold no array (`mayHoldArr`) or whose value holds none
+(`noArr`): `List.nil ◾`, `Option.none ◾`, `Except.error e` with `e :
+String`. Its value is a cell with such fields only, so no code can read an
+array from it. Mono CSE shares one such value between uses at different
+types (`let _x : List (Array UInt8) := List.nil ◾`, typed at its first use,
+passed where `List (Array Float)` is expected: HCA-01). The lowering gives
+its type the one layout of its inductive (rule 1, whatever the type
+arguments), so the value has one representation at both types. Not a
+`flatten-structs` tuple (lowered by its type arguments). -/
+def CAM.holdsNoArray (v : LetValue .pure) : CAM Bool := do
+  let .const f _ args _ := v | return false
+  let env ← getEnv
+  let some (.ctorInfo ci) := env.find? f | return false
+  if isExtern env f || (flatTupleCtorArity? f).isSome || args.size != ci.numParams + ci.numFields then
+    return false
+  for h : i in [ci.numParams:args.size] do
+    let .fvar x := args[i] | continue
+    if (← get).noArr.contains x then continue
+    if ← mayHoldArr ((← get).vars.getD x anyExpr) then return false
+  return true
+
 /-- The flow of declaration `dn`'s code `c`, whose results go to node `res`
 of type `rt`. -/
 partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits : Std.HashMap Name Expr) (dn : Name)
     (res : Option Nat) (rt : Expr) (c : Code .pure) : CAM Unit := do
   let tyOf (x : FVarId) : CAM Expr := return (← get).vars.getD x anyExpr
-  let nodeOf (x : FVarId) : CAM (Option Nat) := do CAM.node dn x (← tyOf x)
+  let noArr (x : FVarId) : CAM Bool := return (← get).noArr.contains x
+  -- The type of `x` as a value that goes somewhere: none if it holds no
+  -- array (`holdsNoArray`).
+  let srcTy (x : FVarId) : CAM (Option Expr) := do if ← noArr x then pure none else some <$> tyOf x
+  let nodeOf (x : FVarId) : CAM (Option Nat) := do
+    if ← noArr x then return none
+    CAM.node dn x (← tyOf x)
   let setTy (x : FVarId) (t : Expr) : CAM Unit := modify fun s => { s with vars := s.vars.insert x t }
   let why := s!"{dn}"
   match c with
   | .let d k =>
     setTy d.fvarId d.type
+    if ← CAM.holdsNoArray d.value then
+      modify fun s => { s with noArr := s.noArr.insert d.fvarId }
+      return ← caCode boxed byName inits dn res rt k
     let x ← CAM.node dn d.fvarId d.type
     match d.value with
     | .proj sn i y =>
@@ -337,7 +404,7 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
         let .fvar ax := a | continue
         match t with
         | .forallE _ dom b _ =>
-          alignArr (← tyOf ax) dom why
+          if let some at_ ← srcTy ax then alignArr at_ dom why
           t := b
         | _ => pure ()
         CAM.union (← nodeOf ax) gn
@@ -346,7 +413,7 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
     | .const f _ args _ =>
       let env ← getEnv
       let argTy (a : Arg .pure) : CAM (Option Expr) := match a with
-        | .fvar ax => some <$> tyOf ax
+        | .fvar ax => srcTy ax
         | _ => pure none
       let argNode (a : Arg .pure) : CAM (Option Nat) := match a with
         | .fvar ax => nodeOf ax
@@ -356,10 +423,20 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
       -- kind: a node of its own, joined with the value there. A box that
       -- arrives there is unboxed at that type, so the kind must be off if
       -- the value can be an array of boxes (review F1: `v : lcAny` of a
-      -- type-code universe read by `Array.size` at `UInt64`).
-      let posNode (tag : Name) (i : Nat) (t : Expr) (v : Option Nat) : CAM Unit := do
+      -- type-code universe read by `Array.size` at `UInt64`). Also a
+      -- parameter or field of type `Array lcAny` that gets a box (an
+      -- argument of type `argT`, `lcAny`): the box is unboxed there as an
+      -- array of boxes, so the kinds of the value's class must be off (else
+      -- leanrt converts a compact array, the safety net: a `T b` that is an
+      -- `Array UInt64` read through a proved cast by `Array.size` at
+      -- `lcAny`; test `RtCArrBoxedAny`).
+      let posNode (tag : Name) (i : Nat) (t : Expr) (v : Option Nat) (argT : Option Expr := none) :
+          CAM Unit := do
         let (ks, _) ← mentions t
-        if ks.isEmpty then return
+        let boxIn := match argT, arrElemOf? t with
+          | some at_, some e => (arrElemOf? at_).isNone && mayBeBox env (keyTy at_) && boxArrayElem env e
+          | _, _ => false
+        if ks.isEmpty && !boxIn then return
         CAM.union v (← CAM.node dn ⟨Name.num (d.fvarId.name ++ tag) i⟩ t)
       if let some t := inits[f]? then
         alignArr t d.type why
@@ -371,8 +448,8 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
           let (ps, r) := caSplitFn (← toMonoTypeKeep (← getOtherDeclBaseType f [])) (ci.numParams + ci.numFields)
           for h : i in [:args.size] do
             if let some pt := ps[i]? then
-              if let some at_ ← argTy args[i] then alignArr at_ pt why
-              posNode `_l2r_arg i pt (← argNode args[i])
+              if let some at_ ← argTy args[i] then alignArr at_ pt why (strict := true)
+              posNode `_l2r_arg i pt (← argNode args[i]) (← argTy args[i])
           if args.size ≥ ps.size then posNode `_l2r_ret 0 r x
           for a in args do CAM.union (← argNode a) x
         else
@@ -382,7 +459,7 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
             for h : i in [ci.numParams:args.size] do
               if let some ft := fs[i - ci.numParams]? then
                 if let some at_ ← argTy args[i] then alignArr at_ ft why
-                posNode `_l2r_field i ft (← argNode args[i])
+                posNode `_l2r_field i ft (← argNode args[i]) (← argTy args[i])
           for a in args do CAM.union (← argNode a) x
       else if let some cd := byName[f]? then
         if cd.ext then
@@ -390,9 +467,9 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
           -- takes joined with what it gives.
           for h : i in [:args.size] do
             if let some (_, pt) := cd.params[i]? then
-              if let some at_ ← argTy args[i] then alignArr at_ pt why
-              posNode `_l2r_arg i pt (← argNode args[i])
-          if args.size == cd.params.size then alignArr cd.ret d.type why
+              if let some at_ ← argTy args[i] then alignArr at_ pt why (strict := true)
+              posNode `_l2r_arg i pt (← argNode args[i]) (← argTy args[i])
+          if args.size == cd.params.size then alignArr cd.ret d.type why (strict := true)
           if args.size ≥ cd.params.size then posNode `_l2r_ret 0 cd.ret x
           let mut prev := x
           for a in args do
@@ -431,9 +508,9 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
           let (ps, r) := caSplitFn md.type md.params.size
           for h : i in [:args.size] do
             if let some pt := ps[i]? then
-              if let some at_ ← argTy args[i] then alignArr at_ pt why
-              posNode `_l2r_arg i pt (← argNode args[i])
-          if args.size == ps.size then alignArr r d.type why
+              if let some at_ ← argTy args[i] then alignArr at_ pt why (strict := true)
+              posNode `_l2r_arg i pt (← argNode args[i]) (← argTy args[i])
+          if args.size == ps.size then alignArr r d.type why (strict := true)
           if args.size ≥ ps.size then posNode `_l2r_ret 0 r x
         let mut prev := x
         for a in args do
@@ -462,10 +539,10 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
     let ps := (← get).jps.getD j #[]
     for (a, (p, pt)) in args.zip ps do
       let .fvar ax := a | continue
-      alignArr (← tyOf ax) pt why
+      if let some at_ ← srcTy ax then alignArr at_ pt why
       CAM.union (← nodeOf ax) (← CAM.node dn p pt)
   | .return x =>
-    alignArr (← tyOf x) rt why
+    if let some at_ ← srcTy x then alignArr at_ rt why
     CAM.union (← nodeOf x) res
   | .cases cs =>
     let dty ← tyOf cs.discr
@@ -529,7 +606,7 @@ def compactArrayKinds (decls : Array (Decl .pure)) (casts : Option Name) (inits 
   let act : CAM Unit := do
     for d in decls do
       let .code c := d.value | continue
-      modify fun s => { s with vars := {}, jps := {} }
+      modify fun s => { s with vars := {}, jps := {}, noArr := {} }
       let some cd := byName[d.name]? | continue
       for h : i in [:d.params.size] do
         let p := d.params[i]

@@ -255,7 +255,11 @@ element type gives the <em>storage kind</em>:</p>
   Otherwise it writes a new array of the result's kind.</li>
 <li><strong>Fields.</strong> A structure field <code>Array α</code> (<code>Subarray.array</code>) holds a box
   when the program uses that structure with a compact array. The box holds
-  the compact array or an array of boxes.</li>
+  the compact array or an array of boxes. A field that holds arrays inside
+  another type (<code>rows : Array (Array α)</code>, <code>xs : List (Array α)</code>) holds
+  them in boxes already. Its arrays can be compact with no change.</li>
+<li><strong>Values without arrays.</strong> An empty list or <code>none</code> holds no array. One
+  such value can go where lists of arrays of different kinds are expected.</li>
 <li><strong>Boxes.</strong> A compact array in a box is one word with the kind's number
   (7 to 12). If generic code ever unboxes it as an array of boxes, the
   runtime converts it (a copy). The check makes this unreachable.</li>

@@ -302,10 +302,14 @@ type arguments (or be a placeholder). An over-applied call (the element
 read of an `Array.map` over functions, applied to the function's argument)
 gives the result after the extra arguments. The types are computed as
 Stage 2 computes an extern instance's (`toMonoTypeKeep`). The call keeps
-its callee: an extern does not depend on its type arguments, and with one
-representation per datatype (`Array α` is one array of boxes) an instance
-at the precise types would differ only in its result type, which Stage 4
-converts to the binder's type anyway (`lowerConstApp`). -/
+its callee, the instance at the unknown type arguments: an extern's code
+does not depend on its type arguments, and Stage 4 converts the result to
+the binder's type (`lowerConstApp`). The representations can differ,
+though: with optimization `compact-arrays`, `Array UInt64` is `RVec<u64>`
+and the instance's `Array lcAny` an array of boxes. A compact array passed
+to such a call is a crossing, and the whole-program check
+(`compactArrayKinds`) turns its kind off: the result stays correct, and
+the arrays of that kind are arrays of boxes (HCA-03). -/
 def externResultType? (sc : Scope) (f : Name) (args : Array (Arg .pure)) : MRetypeM (Option Expr) := do
   let some key := (← get).keys.find? f | return none
   unless key.dicts.isEmpty && key.typeArgs.any (· == anyExpr) do return none

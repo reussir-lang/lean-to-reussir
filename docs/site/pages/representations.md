@@ -124,7 +124,11 @@ The figure above shows an `Array UInt64` as `RVec<u64>`.
   Otherwise it writes a new array of the result's kind.
 - **Fields.** A structure field `Array α` (`Subarray.array`) holds a box
   when the program uses that structure with a compact array. The box holds
-  the compact array or an array of boxes.
+  the compact array or an array of boxes. A field that holds arrays inside
+  another type (`rows : Array (Array α)`, `xs : List (Array α)`) holds
+  them in boxes already. Its arrays can be compact with no change.
+- **Values without arrays.** An empty list or `none` holds no array. One
+  such value can go where lists of arrays of different kinds are expected.
 - **Boxes.** A compact array in a box is one word with the kind's number
   (7 to 12). If generic code ever unboxes it as an array of boxes, the
   runtime converts it (a copy). The check makes this unreachable.
