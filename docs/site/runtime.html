@@ -406,10 +406,14 @@ can use. lean2rr switched to it in nine steps, from 2026-10-04 to
 <td>19</td>
 <td>no new part: fixes in the single-thread scheduler (lean-runtime's fixes-19 to fixes-21). A task that waits while it keeps its pool worker runs the awaited task on a context of its own, so no more pool tasks run than <code>LEAN_NUM_THREADS</code> permits. <code>IO.Process.forceExit</code> uses the crate's shared sequence. lean2rr's glue changed at the same step (see below)</td>
 </tr>
+<tr>
+<td>20</td>
+<td>no new part: fixes in lean-runtime (fixes-22, fixes-23). When neither <code>/sys</code> nor <code>/proc</code> can be read, the number of processors comes from the thread's affinity mask, else 2, as glibc counts it, so the task manager still starts. The other fixes are for the threads mode, which lean2rr does not use. lean2rr's glue changed at the same step (see below)</td>
+</tr>
 </tbody>
 </table>
 <p>Status (2026-10-07): the submodule <code>third_party/lean-runtime</code> is pinned at
-<code>ab1ce21</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
+<code>50840bb</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
 <code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>) and links
 it with <code>leanrt</code> (<a href="../../runtime/README.md">runtime README</a>, "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline

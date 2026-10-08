@@ -193,14 +193,19 @@ impl Glue for LeanrtGlue {
         match run {
             Some(TaskRun::Worker(w, mut set)) => {
                 once::swap_cells(&mut set);
-                WORKER_SETS.with(|s| {
+                // A set the worker still had (two runs on one worker id:
+                // possible only after an early end) is dropped after the
+                // borrow: its cells are the program's values, whose drop can
+                // run Lean code (lean-runtime's slots.rs rule; hunt HDW-02).
+                let old = WORKER_SETS.with(|s| {
                     let mut s = s.borrow_mut();
                     let w = w as usize;
                     if s.len() <= w {
                         s.resize_with(w + 1, || None);
                     }
-                    s[w] = Some(set);
+                    std::mem::replace(&mut s[w], Some(set))
                 });
+                drop(old);
             }
             // A dedicated task's fresh stream context closes here, once its
             // job has returned and lean-runtime has dropped what it left (its

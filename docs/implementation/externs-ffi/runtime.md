@@ -902,6 +902,31 @@ Paths are relative to the repository root.
   `src/semantics/float.rs`.
 - **Remove only if:** never (speed only).
 
+### The processor count without /sys and /proc, a worker's replaced streams (switch step 20)
+
+- **What:** lean-runtime pinned at `50840bb` (main: fixes-22, fixes-23).
+  - The processor count (`hardware_concurrency`, the task manager's
+    workers when `LEAN_NUM_THREADS` is unset, and
+    `lean_internal_get_hardware_concurrency`) follows glibc's
+    `get_nprocs`: `/sys/devices/system/cpu/online`, the `cpuN` lines of
+    `/proc/stat`, the thread's affinity mask, then 2. Before, a sandbox
+    without `/sys` and `/proc` gave 0: no task manager, and
+    `IO.Promise.new` stopped with the internal panic (hunt HDW-01).
+  - leanrt's `Glue::task_end` drops a worker's replaced stream set after
+    `WORKER_SETS`'s borrow, as lean-runtime's slots now do (hunt HDW-02;
+    two runs on one worker id need an early end, so no program reaches it
+    today).
+  - fixes-22 changes only the threads mode (a worker's take of its next
+    task, `full_slot_finished`, which is `true` in the single-thread
+    scheduler lean2rr uses).
+- **Why:** natively the count comes from glibc, which never answers 0.
+- **Tests:** lean-runtime's unit tests of the fallback order
+  (`nprocs_falls_back_as_glibc`); its drivers under strace's fault
+  injection of both files.
+- **Where:** lean-runtime's `src/sched/env.rs` (`hardware_concurrency`,
+  `nprocs`), `src/sched/slots.rs`; leanrt's `sched.rs` (`task_end`).
+- **Remove only if:** never.
+
 ### A waiter that keeps its worker, the shared forceExit (switch step 19)
 
 - **What:** lean-runtime pinned at `ab1ce21` (main: fixes-19 to fixes-21).
