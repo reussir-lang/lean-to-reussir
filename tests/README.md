@@ -220,13 +220,30 @@ which must finish (`stats-polyrec`).
 
 `tests/runtime/run.sh` builds each `tests/runtime/Rt*.lean` natively and
 through lean2rr and compares stdout, stderr and the exit code (its header
-lists the per-test `.args`, `.stdin`, `.pipe`, `.opts`, `.xfail`, `.ffi.c`,
-`.refused` and `.l2r-log` files: `.ffi.c` is C code for the native build
+lists the per-test `.args`, `.stdin`, `.pipe`, `.opts`, `.enable-opts`,
+`.xfail`, `.ffi.c`, `.refused` and `.l2r-log` files: `.opts` turns
+optimizations off for the test, `.enable-opts` turns on one that is off by
+default (`unread-fields`), `.ffi.c` is C code for the native build
 only, `.refused` an expected refusal by lean2rr, `.l2r-log` lines
 expected in lean2rr's build output). Each
 test's header says what it covers. Many come from the adversarial reviews:
 a finding (a bug a reviewer reproduced, fixed since) or a check that held
 up in review.
+
+The tests `RtUnreadFields*` check the optimization `unread-fields` (off by
+default; each turns it on with `.enable-opts`, except `RtUnreadFieldsHookOff`):
+callbacks that `initialize` blocks register and no kept code reads are
+left out (`RtUnreadFieldsHook`: its callbacks call a C++ function of the
+`Lean` package, and without the pass lean2rr refuses the same program,
+`RtUnreadFieldsHookOff`); callbacks read by projection, by a match or
+through a nested field (`RtUnreadFieldsCalled`), through `unsafeCast`
+(`RtUnreadFieldsCast`) or only by the runtime (a stderr stream's
+`putStr`, `RtUnreadFieldsStream`; an extern used as a function value,
+`RtUnreadFieldsExternFn`) stay, and so does a closure that holds a file
+handle (`RtUnreadFieldsHandle`); the initializers' output and their
+error keep native's order (`RtUnreadFieldsStartup`). A test's `.opts`
+also takes its names out of `L2R_ENABLE_OPTS` (`RtUnreadFieldsHookOff`
+stays refused in a run that turns the pass on for all).
 
 `tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests, with
 debug assertions on (so leanrt's invariant checks run, such as no big

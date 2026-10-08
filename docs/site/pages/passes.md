@@ -10,8 +10,9 @@ the guard column of
 <div class="rule" markdown="1">
 - The core translation is correct without any optional pass. The classic
   corpus and the runtime tests match native with all of them off.
-- Every optional pass is on by default. No pass is switched per program or
-  per benchmark.
+- Every optional pass is on by default, except `unread-fields`: the owner
+  wants it off by default. No pass is switched per program or per
+  benchmark.
 - A pass limits itself only through checks it makes on every program: what
   soundness needs, and for some passes bounds on code size or translation
   time (the "guard").
@@ -22,6 +23,8 @@ registry lists it in one line: name, on by default, description,
 `install`. `install` plugs the pass into a hook of `PassConfig` and keeps
 what was installed before. The hooks are:
 
+- passes over Stage 2's code that leave declarations out, before Stage 3
+  (`prunePasses`);
 - choices of representation (field order, `[value]` structs, cached
   placeholders, boxed constants);
 - passes over the checked mono code (`monoPasses`);
@@ -32,12 +35,15 @@ what was installed before. The hooks are:
   reaches: unboxing, application and conversion functions);
 - passes over the generated Reussir functions (`rrPasses`).
 
-To turn a pass off for a test:
+To turn a pass off for a test, or to turn on a pass that is off by
+default:
 
 ```
 lean2rr --disable-opt NAME ...
 scripts/l2r.py --disable-opt NAME ...
 L2R_DISABLE_OPTS=a,b tests/runtime/run.sh
+lean2rr --enable-opt unread-fields ...
+L2R_ENABLE_OPTS=unread-fields tests/runtime/run.sh
 lean2rr --list-opts            # prints the registry
 ```
 
@@ -46,6 +52,72 @@ lean2rr --list-opts            # prints the registry
 {{v:opt_count}} optional passes.
 
 {{gen:passes}}
+
+### Callbacks that no code calls (`unread-fields`)
+
+This pass is off by default. `--enable-opt unread-fields` turns it on.
+
+A library's `initialize` blocks often store callbacks for Lean's
+elaborator: a linter's `run`, an attribute's `add` and `erase`, the hooks
+of an environment extension. The program runs these blocks at startup, as
+native Lean does. The program never calls the callbacks: only the
+elaborator reads those fields. But lean2rr keeps every function that kept
+code mentions. Through the callbacks, a program that imports `Batteries`
+reaches C++ functions of the `Lean` package (`Lean.Expr.instantiate`,
+`Lean.Meta.isExprDefEqAux`, …), which lean2rr's runtime does not have, and
+lean2rr refuses the program.
+
+The pass runs on Stage 2's code, before Stage 3. It finds, from the entry
+point and the startup steps, the code that is useful:
+
+- A field of a constructor is *read* when kept code projects it, or
+  matches the constructor and uses the field.
+- A variable is *useful* when kept code returns it, matches it, calls it,
+  gives it to an extern, or projects a field of it. It is also useful when
+  a useful value is computed from it, or when a read field or a useful
+  parameter gets it.
+- A parameter of a function or of a join point is useful when the body
+  uses it in a useful way.
+- A `let` stays when its variable is useful, or when its value can have an
+  effect (a full call).
+
+Then, in the code that stays, the pass puts `◾` in place of each value
+that a constructor stores in a field that no code reads, and of each value
+that an unused parameter gets. The lowering gives a placeholder for `◾` (at
+a function type, the variant `z`). The `let`s that are no longer useful
+and the functions that no code mentions go.
+
+Example: Batteries registers a tag attribute with
+`registerTagAttribute name descr validate`. The attribute's `add` is a
+closure that holds `validate`. No kept code reads `add`, so the closure
+goes. Then `validate` is an unused parameter, so the caller's lambda goes
+too, and all the code that only it reaches.
+
+The pass replaces only values whose type can hold a function: data stays.
+These fields count as read, also when no Lean code reads them:
+
+- every field of a type that an extern takes (by the extern's declared
+  parameter type, also inside other types). A parameter declared at a type
+  variable does not count: the runtime only keeps the value and gives it
+  back;
+- every field of `IO.FS.Stream` (the runtime writes panics with the
+  current stderr's `putStr`), of the results of IO actions, and of tasks,
+  thunks, references and promises.
+
+The pass does nothing in a program that can read a value as another type
+(`unsafeCast` in the program's own code). In a program whose kept code
+makes tasks, it replaces a closure only when the values that the closure
+holds cannot hold a task. In a program whose kept code opens files or
+starts processes, it replaces no value that may hold a file handle or a
+process: a handle that is released earlier is flushed and closed
+earlier. A pass over the kept code follows where such values can go. The startup steps of the program, `Init` and
+`Std` all run. A step of a `Lean` package constant runs when kept code
+still reads the constant.
+
+With the pass, a program that runs cedar-spec's authorizer
+(`Cedar.Spec.isAuthorized`; cedar-spec imports `Batteries`) keeps 8,335 of
+its 25,363 declarations. It reaches no C++ function of the `Lean`
+package, and its output equals native's.
 
 ### Helpers for live code only (`conv-liveness`)
 

@@ -113,8 +113,13 @@ relative to `lean2rr/` unless they start with `scripts/`.
   checked by `tests/runtime/allow-missing-check.sh`;
   [externs-ffi/program-externs.md](externs-ffi/program-externs.md#refusals-are-reported-at-translation-with-the-reason)),
   `L2R_DEBUG` prints whether the
-  program can cast and why, and each declaration Stage 1 could not
-  recompile from source, with the error. The driver reads `L2R_REUSSIR`,
+  program can cast and why, each declaration Stage 1 could not
+  recompile from source, with the error, and what the optimization
+  `unread-fields` kept; with that optimization on,
+  `L2R_UNREAD_FIELDS_WHY` prints, for each extern of the `Lean` package
+  that kept code reaches, the chain of declarations and reasons that
+  keeps it ([optional-passes.md](optional-passes.md#function-values-in-unread-fields-are-left-out-unread-fields)).
+  The driver reads `L2R_REUSSIR`,
   `L2R_RUSTC`,
   `L2R_GMP`, `L2R_LEAN2RR`, `L2R_DISABLE_OPTS`, `L2R_ENABLE_OPTS`,
   `L2R_RRC_FLAGS`, and `REUSSIR_FFI_CACHE_DIR`, which it sets for rrc

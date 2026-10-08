@@ -28,6 +28,17 @@ structure RRProgram where
 structure PassConfig where
   /-- Edits of Lean's pass lists for Stage 2. -/
   stage2 : Stage2Config := #[]
+  /-- Passes over Stage 2's declarations before Stage 3, in order, that may
+  leave declarations out. They get the instance keys, the declarations the
+  entry point always needs (`main`, the error printer, the startup steps
+  that always run and their `initialize` constants), every startup step of
+  an `initialize` constant as (constant, initializer, whether it is needed
+  only while kept code reads the constant: the `Lean` package's constants
+  that the program uses; the step of one whose initializer is left out does
+  not run), and the declarations; they return the declarations to
+  translate. Plain: none, every declaration Stage 1 reached is translated. -/
+  prunePasses : Array (NameMap InstKey → Array Name → Array (Name × Name × Bool) → Array (Decl .pure) →
+    CoreM (Array (Decl .pure))) := #[]
   /-- The optional parts of Stage 3 (the typed `map` loops). -/
   stage3 : Stage3Config := {}
   /-- Whether an `Array S` of a scalar `S` is stored compactly, `RVec<k>` of

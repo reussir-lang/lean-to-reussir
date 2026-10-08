@@ -1,0 +1,2 @@
+lean_expr_dbg_to_string  (extern of Lean.Expr.dbgToString, module Lean.Expr)
+lean_manual_get_root  (extern of _private.Lean.DocString.Links.0.Lean.getManualRoot, module Lean.DocString.Links)

@@ -14,6 +14,11 @@
 #   NAME.opts   lean2rr optimizations to turn off for this test (one line,
 #               comma-separated, added to L2R_DISABLE_OPTS), e.g. to check a
 #               shape the default passes hide
+#   NAME.enable-opts  lean2rr optimizations to turn on for this test (one
+#               line, comma-separated, added to L2R_ENABLE_OPTS): an
+#               optimization that is off by default (`unread-fields`); a
+#               name in NAME.opts is taken out of L2R_ENABLE_OPTS, so a test
+#               keeps a pass off also in a run that turns it on for all
 #   NAME.xfail  the test is known to fail through lean2rr; the file says why
 #               (a "Requests for lean2rr" item in runtime/README.md); a
 #               file whose first line starts with `alloc-check:` marks only
@@ -117,6 +122,17 @@ for t in "${TESTS[@]}"; do
   stdin=/dev/null; [ -f "$HERE/$t.stdin" ] && stdin="$HERE/$t.stdin"
   opts=${L2R_DISABLE_OPTS:-}
   [ -f "$HERE/$t.opts" ] && opts="$opts${opts:+,}$(tr -d ' \n' < "$HERE/$t.opts")"
+  enable=${L2R_ENABLE_OPTS:-}
+  [ -f "$HERE/$t.enable-opts" ] && enable="$enable${enable:+,}$(tr -d ' \n' < "$HERE/$t.enable-opts")"
+  if [ -f "$HERE/$t.opts" ]; then
+    for o in $(tr ', \n' '   ' < "$HERE/$t.opts"); do
+      prev=
+      while [ "$prev" != "$enable" ]; do
+        prev=$enable
+        enable=$(echo ",$enable," | sed "s/,$o,/,/g; s/^,*//; s/,*$//")
+      done
+    done
+  fi
   ffi=(); [ -f "$HERE/$t.ffi.c" ] && ffi=("$HERE/$t.ffi.c")
   deps=(); [ -f "$HERE/$t.deps" ] && read -r -d '' -a deps < "$HERE/$t.deps"
   for m in ${deps[@]+"${deps[@]}"}; do cp "$HERE/$m.lean" "$d/"; ffi+=("$m.c"); done
@@ -133,7 +149,7 @@ for t in "${TESTS[@]}"; do
     status=fail; why="$t.refused expects lean2rr to refuse, but these files describe a run: $(echo $runfiles)"
   elif [ -f "$HERE/$t.refused" ]; then
     # A translation lean2rr refuses, with the expected message.
-    if L2R_DISABLE_OPTS=$opts LEAN_ABORT_ON_PANIC=1 python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" > "$d/build-l2r.log" 2>&1; then
+    if L2R_DISABLE_OPTS=$opts L2R_ENABLE_OPTS=$enable LEAN_ABORT_ON_PANIC=1 python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" > "$d/build-l2r.log" 2>&1; then
       status=fail; why="lean2rr built it, expected an error"
     else
       while IFS= read -r line; do
@@ -145,7 +161,7 @@ for t in "${TESTS[@]}"; do
         esac
       done < "$HERE/$t.refused"
     fi
-  elif ! L2R_DISABLE_OPTS=$opts LEAN_ABORT_ON_PANIC=1 python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" --keep-rr "$d/$t.rr" \
+  elif ! L2R_DISABLE_OPTS=$opts L2R_ENABLE_OPTS=$enable LEAN_ABORT_ON_PANIC=1 python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" --keep-rr "$d/$t.rr" \
         > "$d/build-l2r.log" 2>&1; then
     status=fail; why="lean2rr build failed (see $d/build-l2r.log)"
   else

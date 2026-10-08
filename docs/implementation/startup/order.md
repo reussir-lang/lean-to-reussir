@@ -113,6 +113,11 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   reach them); then the `Lean` package's `initialize` constants that the
   program uses, by module and position. Every other toolchain constant is
   evaluated lazily, once, and only those the program uses are translated.
+  With the optimization `unread-fields` (off by default), "uses" means
+  that code the pass keeps reads the constant: the step of a `Lean`
+  package's constant that only code it left out read does not run
+  (`Main.pipeline`; [../optional-passes.md](../optional-passes.md#function-values-in-unread-fields-are-left-out-unread-fields)).
+  The steps of `Init`, `Std` and the program always run.
 - **Why:** Natively every initializer of a module that is initialized
   runs, at the module's place in the walk (`emitInitFn`). An initializer
   is an action whose effects show: `IO.stdGenRef` opens and reads
@@ -148,7 +153,9 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   `usesLeanPackage`, `leanInitModules`, `initItem?`, `startupModules` and
   `importPostOrder` (`toolchain`); `Emit/Entry.lean`: `programRoots`,
   `startupSteps`; `Env.lean`: `loadEnvironment`; `CompileRecord.lean`:
-  `isLibraryModule`, `isToolchainModule`; `Main.lean`: `pipeline`.
+  `isLibraryModule`, `isToolchainModule`; `Main.lean`: `pipeline` (with
+  `unread-fields`, `isUsedInit`, the steps dropped); `Opt/UnreadFields.lean`:
+  `markExtern`, `markRoot`.
 - **Remove only if:** never. Check the list when the toolchain changes
   (an `[init]` or `[builtin_init]` attribute in `Init` or `Std`).
 

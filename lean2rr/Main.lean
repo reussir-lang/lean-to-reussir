@@ -128,6 +128,28 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let mainInst := rootInsts[0]!
   let errStr := rootInsts[1]!
   let startup ← startupSteps leanInit items rootInsts st
+  -- The registry's passes that leave declarations out (`Opt/UnreadFields`).
+  -- Their roots: `main`, the error printer, the startup steps that always
+  -- run (the program's items, `Init`'s and `Std`'s initializers) and their
+  -- `initialize` constants (the lowering reads them by name). Every step of
+  -- an `initialize` constant is given as (constant, initializer, whether it
+  -- runs only while kept code reads the constant: the `Lean` package's
+  -- constants that the program uses).
+  let given := (leanInit ++ items).filterMap fun | .init d _ => some d | _ => none
+  let isUsedInit : StartupStep → Bool := fun | .init d _ => !given.contains d | _ => false
+  let always := startup.filter (!isUsedInit ·)
+  let keep := entryCallees mainInst errStr always ++ always.filterMap fun | .init d _ => some d | _ => none
+  let inits := startup.filterMap fun s => match s with
+    | .init d i => some (d, i, isUsedInit s)
+    | _ => none
+  let (decls, startup) ← if cfg.prunePasses.isEmpty then pure (decls, startup) else do
+    let before := decls.foldl (fun s d => s.insert d.name) ({} : NameSet)
+    let decls ← cfg.prunePasses.foldlM (fun ds pass => pass st.keys keep inits ds) decls
+    let kept := decls.foldl (fun s d => s.insert d.name) ({} : NameSet)
+    -- A step whose initializer a pass left out does not run.
+    pure (decls, startup.filter fun s => match s with
+      | .init _ i => !isUsedInit s || kept.contains i || !before.contains i
+      | _ => true)
   let roots := entryCallees mainInst errStr startup
   let table ← programRelevance decls
   -- (With `compact-arrays`, the typed `map` loops, which can add extern

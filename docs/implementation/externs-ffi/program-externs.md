@@ -192,6 +192,10 @@ lowering at the library extern's type arguments, was removed).
   supports Lean code plus Lean's runtime library only. Externs of Lean's
   library whose prelude function is missing are listed in the same
   message, as runtime gaps. `L2R_ALLOW_MISSING_EXTERNS=1` only warns.
+  With the optimization `unread-fields` (off by default), an extern that
+  only callbacks no kept code can call reach (Batteries' linters and
+  attributes) is left out before Stage 3, with them, and so is not
+  reported ([../optional-passes.md](../optional-passes.md#function-values-in-unread-fields-are-left-out-unread-fields)).
 - **Why:** The owner wants refusal by lean2rr, not by rrc's "unknown
   function" (b2ced69 on `lean-externs` for the library's; RV8E-04 for the
   reason).

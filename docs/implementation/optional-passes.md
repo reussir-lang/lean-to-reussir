@@ -2,7 +2,10 @@
 
 Every optimization is a module of `lean2rr/LeanToReussir/Opt/` registered by
 one line in `Opt/Registry.lean` (`optimizations`), and all are on by
-default. `lean2rr --list-opts` prints the registry; `--disable-opt NAME`
+default but one: `unread-fields` is off by default, by the owner's
+decision of 2026-10-08, an exception to the rule that every optional pass
+is on (`--enable-opt unread-fields`, or `L2R_ENABLE_OPTS=unread-fields`,
+turns it on). `lean2rr --list-opts` prints the registry; `--disable-opt NAME`
 (or `L2R_DISABLE_OPTS=a,b` for `scripts/l2r.py`) turns one off for a run.
 The core translation is correct with all of them off. No pass is switched
 per program or benchmark: each restricts itself only through checks it
@@ -16,6 +19,7 @@ and passes").
 
 | Pass | What it does | Guard (soundness; other limits) | Details |
 |---|---|---|---|
+| `unread-fields` (off by default) | before Stage 3, a function value that a constructor stores in a field no kept code reads (a callback an initializer registers for Lean's elaborator) becomes `◾`, with the unused parameters of declarations and join points; what only those reached is left out, and the `Lean` package's `initialize` constants that kept code no longer reads do not run | a field counts as read when kept code projects it or uses its binder in a match, and every field of a type that an extern takes by its declared parameter types (not a type variable), of `IO.FS.Stream`, the IO results, tasks, thunks, references and promises; a `let` that may have an effect stays; only arguments whose type may hold a function value; nothing in a program that can cast (`programCasts`, on the code kept); in a program whose kept code creates tasks, only closures whose captured values cannot hold a task; in one whose kept code makes resources, no value that may hold one | below |
 | `field-order` | record fields by decreasing alignment, no padding | none needed: every access goes through the constructor layout | [records](representations/records.md#fields-are-ordered-by-decreasing-alignment) |
 | `value-structs` | a structure with one relevant field is a `[value]` struct | not when the field's type is being translated (no type contains itself by value) | [records](representations/records.md#one-field-structures-are-value-structs) |
 | `compact-arrays` | an `Array` of a scalar is `RVec<u8\|u16\|u32\|u64\|f32\|f64>` of its storage kind; the loops of `Array.map` typed at their element types (Stage 3); `Array lcAny` parameters typed from their callers when they get compact arrays; a field `Array α` boxed in an inductive the program uses with a compact array | the whole-program check (`compactArrayKinds`) turns a storage kind off when a value of it could meet an array of boxes: a crossing at any edge of the reachable code, a flow class that holds `Array lcAny`, or a program that casts (axioms that state a `Bool` equation aside); a typed `map` loop only in Lean's shape, its stored values checked once typed; a parameter only when every caller passes one type and its own calls agree | [compact arrays](representations/compact-arrays.md) |
@@ -34,6 +38,126 @@ and passes").
 | `flatten-structs` | a structure argument of a loop (join point, self-recursive function) and a structure or two-constructor result passed as its fields at their precise types (worker/wrapper) | a value is split only where its fields are known at every jump, self-call and return; a whole use keeps that level whole, except two rebuilds that add no allocation: a loop's parameter at the loop's exit after a step that built a new value (the first step peeled into the wrapper), and a call's result (each value built at most once per run of its scope); a value whose object is inspected (`ptrAddrUnsafe`, `dbgTraceIfShared`, `isExclusiveUnsafe`) or that the caller passed in is never rebuilt; a result level stays whole when callers (or the wrapper) only use it whole, or when a shared object may arrive there; results with function types or without finite placeholders are not split; in a program that creates resources, declarations with resource parameters or results are left alone (their inferred borrows stay Lean's); bounds: 8 levels, 16 variables, peeled bodies of at most 300 nodes | below |
 | `conv-liveness` | unboxing, application and conversion helpers generated only for what live code reaches; unreachable functions dropped | none needed for soundness: an arm left out matches a variant that no live code builds, so no value of it exists at run time; every identifier of raw text, of the prelude and of atoms is a root, every arm of other matches counts, and a variant that text names counts as built | [liveness](conversions/liveness.md) |
 | `merge-fns` | generated functions equal up to their own and local names merged: a copy calls the first, calls of a copy call the first | the canonical texts are equal (the same code once names are renamed in binding order, inside atoms too); a copy keeps its name and calls the function its first ends at, never itself; nothing is removed; a function called from one place only stays (LLVM inlines it there), except startup code (`_init`, `l2r_persist_`) | below |
+
+### Function values in unread fields are left out (`unread-fields`)
+
+- **What:** Off by default (the owner's decision of 2026-10-08, an
+  exception to the rule that every optional pass is on);
+  `--enable-opt unread-fields` turns it on. After Stage 2, before Stage 3
+  (`PassConfig.prunePasses`, called from `Main.pipeline`), a usefulness
+  fixpoint from the entry point's callees, the startup steps that always
+  run and the `IO.Error` builders: a field (constructor, index) is read
+  when kept code projects it or matches the constructor and uses the
+  field's binder; a variable is useful when kept code returns, matches or
+  applies it, passes it to an extern, or projects it, when a useful `let`
+  computes from it, or when a read field, a useful parameter of a
+  declaration or a useful parameter of a join point receives it; a `let`
+  stays when its variable is useful or its value may have an effect (a
+  full application of a declaration, an extern or a function value). Then,
+  in the declarations kept, each argument at an unread field whose type
+  may hold a function value (`mayHoldCode`: a function type, `lcAny`, a
+  type variable, a task, thunk, reference or promise, or an inductive with
+  such a field), each argument at an unused parameter of a declaration or
+  a join point becomes `◾`; a `let` that is not useful and has no effect
+  goes; a declaration that no kept `let` mentions goes. The lowering
+  passes a placeholder for each `◾` (at a function type the nullary
+  variant `z`). A step of the `Lean` package's `initialize` constants that
+  the program uses stays only when kept code still reads the constant
+  (`Main.pipeline` drops the others; see
+  [startup/order.md](startup/order.md#the-librarys-initializers-run-at-their-modules-place-always)).
+  Example: Batteries' `initialize` blocks call `addLinter` with a
+  `Linter` whose `run` no kept code reads, and `registerTagAttribute`,
+  whose `AttributeImpl.add` closure captures the caller's `validate`
+  argument: the closure, then the unused parameter `validate`, then the
+  caller's lambda and everything only they reach go. For a program that is
+  still refused, `L2R_UNREAD_FIELDS_WHY=1` prints, for each extern of the
+  `Lean` package that kept code reaches, the chain of declarations and
+  reasons that keeps it.
+- **Why:** lean2rr keeps every function that kept code mentions. Natively
+  the initializers run at startup and store the callbacks, which only
+  Lean's elaborator calls; through them a program that imports Batteries
+  reached 29 C++ functions of the `Lean` package that lean2rr's runtime
+  does not have, and was refused (a driver that runs cedar-spec
+  8029f0eb's authorizer, `Cedar.Spec.isAuthorized`, on protobuf
+  requests). With the pass, 8,335 of 25,363 declarations are kept
+  (the fixpoint takes 49 rounds), no C++ function of the `Lean` package
+  is left, and the program's output on three inputs of 500 requests
+  equals native's byte for byte.
+- **Soundness:** a field counts as read wherever code lean2rr does not see
+  may read it: every field of an inductive that an extern which kept code
+  mentions takes, by all the extern's declared parameter types (also when
+  the extern is a function value or partially applied: review of the
+  pass, F1, test `RtUnreadFieldsExternFn`), also through other
+  inductives, function types and type-level definitions (`IO.setStderr`
+  takes an `IO.FS.Stream`), except a parameter declared at a type
+  variable (the runtime only stores such a value and gives it back:
+  `Array.push`); every field of `IO.FS.Stream` (the runtime writes panics
+  and traces with the current stderr's `putStr`, `l2r_stderr_put`), of
+  the IO results `EST.Out` and `ST.Out` (the entry point reads `main`'s,
+  the startup chain stores an initializer's value and reports its error;
+  F4), of tasks, thunks, references and promises. A declaration's
+  parameter has its type, so data stays data (F2). A program that can read
+  a value as another type (`programCasts`, computed on the declarations
+  kept) is left as it is. In a program whose kept code creates tasks
+  (`programCreatesTasks`, on the declarations kept), a closure is replaced
+  only when the values it captures cannot hold a task (`holdsNoTask`, or
+  the same test on a constant's value): natively a constant's first
+  evaluation waits for the tasks its value holds, captured values
+  included. In a program whose kept code makes resources
+  (`programMakesResources`: files, child processes), a value that may
+  hold one is not replaced, at a field or at an unused parameter (F3, test
+  `RtUnreadFieldsHandle`): natively the closure keeps the handle alive,
+  and a handle released earlier is flushed and closed earlier. Which
+  values may hold one is a flow-insensitive over-approximation over the
+  kept code (`taint`): the results of the externs that make resources
+  (`resourceExterns`), and what is computed from such a value, stored in
+  a field, passed to a parameter or a join point, or returned (an
+  `initialize` constant's value is its initializer's result); a value
+  given to an extern that may keep it (any parameter but a handle's or a
+  child process's) or to a function value makes every extern's and
+  function value's result, and the parameters of every declaration used
+  as a function value, suspects too (`rEscape`); when a declaration used
+  as a function value may return one, so may every function value's and
+  extern's result (`rFnRet`: `IO.asTask`, `Thunk.get` call function
+  values); only values whose type may hold one count (`mayHoldRes`:
+  `mayHoldCode`, or Flatten's `holdsResource`). Both checks start as a
+  new attempt when the kept code creates tasks or makes resources, and
+  again while the kept code of the last attempt (which only grows) shows
+  a new kind: at most three attempts (re-review N1, N2). Address and sharing tests read no field: the object stays the
+  same object at the same address; a value that a closure left out
+  captured has one reference less, which `dbgTraceIfShared` can show, and
+  lean2rr's counts are not native's anyway
+  ([representations/identity.md](representations/identity.md#sharing-is-not-observable)).
+  A full application stays even when its result is not used (it may
+  panic or trace). Not covered: a closed term whose evaluation would
+  panic, read only to build a callback that the pass leaves out, is not
+  evaluated, where natively its message shows.
+- **Not done:** data in an unread field stays. `deriving Lean.ToExpr`
+  stores an `Expr` built by Lean's C++ (`Lean.Expr.mkData`) in the
+  instance's `toTypeExpr`, which no kept code reads; the instance is a
+  program constant, evaluated at startup, so lean-regex 32af6f33 with its
+  `ToExpr` instances still reaches `Lean.Expr.mkData` and
+  `Lean.Level.mkData` (the pass removes the other two of its four C++
+  functions, which only the `toExpr` closures reached).
+- **Where:** `Opt/UnreadFields.lean` (`fixpoint`, `go`, `useValue`,
+  `replaceable`, `mayHoldCode`, `externReads`, `alwaysRead`,
+  `noTaskValue`, `taint`, `taintValue`, `mayHoldRes`, `usesOnly`,
+  `rewrite`, `run`); `PassConfig.lean`: `prunePasses`;
+  `Main.lean`: `pipeline` (the roots, the steps of the `Lean` package's
+  constants); `Opt/Registry.lean`. Tests `RtUnreadFieldsHook` (translated
+  with the pass, equal to native; a callback reads `Lean.manualRoot`, whose
+  initializer calls another C++ function and so must not run) and
+  `RtUnreadFieldsHookOff` (the same program refused without it), `RtUnreadFieldsCalled` (callbacks read by
+  projection, by a match and through a nested field are kept),
+  `RtUnreadFieldsCast` (a callback read only through `unsafeCast`),
+  `RtUnreadFieldsStream` (a stderr `putStr` that only the runtime calls),
+  `RtUnreadFieldsStartup` (the initializers' output and their error, in
+  native order), `RtUnreadFieldsExternFn` (an extern as a function value;
+  data parameters), `RtUnreadFieldsHandle` (a closure that holds a file
+  handle); each with `.enable-opts` (`RtUnreadFieldsHookOff` has `.opts`,
+  which keeps the pass off in a run that turns it on for all).
+- **Remove only if:** the runtime has the `Lean` package's C++ functions
+  (then the callbacks translate as they are), or the pass is unwanted.
 
 ### Functions equal up to names are merged (`merge-fns`)
 
@@ -385,6 +509,11 @@ too: [types/lean-passes.md](types/lean-passes.md).
 
 How a pass plugs in, and what installation order means for each kind of
 hook, is in `Opt/Registry.lean`'s module comment and `PassConfig.lean`.
+A pass that leaves declarations out runs before Stage 3
+(`PassConfig.prunePasses`): it gets the instance keys, the roots and the
+`Lean` package's `initialize` constants with their initializers, and a
+startup step whose initializer it leaves out does not run
+(`Main.pipeline`).
 State scoped to the code being lowered (passed down into nested code, not
 back up or across sibling branches) goes in `CodeCtx.ext`
 (`CodeCtx.getExt?`/`setExt`; `Opt/LazyFields.lean`'s `LazyFieldsState`);

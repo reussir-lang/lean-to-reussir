@@ -123,7 +123,8 @@ PassConfig` that plugs it into a hook of `PassConfig`, keeping what was
 installed before: a representation choice of the type translation (record
 field order, `[value]` structs, placeholders kept in once-cells), a pass
 over the checked mono declarations
-(`monoPasses`), Lean definitions replaced by prelude functions, a lowering
+(`monoPasses`), a pass over Stage 2's declarations that leaves some out
+before Stage 3 (`prunePasses`), Lean definitions replaced by prelude functions, a lowering
 hook (`LowerHooks`: the body before lowering, the J1′ choice, the form of
 J4's state machine, constant caching, the binding of a `cases`
 alternative's fields), the choice of which helpers Stage 4 generates at
@@ -3816,7 +3817,20 @@ extern)
   `evalConst`, `Dynlib`, the LLVM bindings, …): not in lean2rr's runtime
   yet, so a program that reaches one is rejected (their Lean bodies are not
   used in their place); a program that only uses data structures from
-  `Lean` builds.
+  `Lean` builds. With the optimization `unread-fields` (off by default),
+  a callback that an initializer stores in a field no kept code reads (a
+  linter's `run`, an attribute's `add`, an environment extension's hooks:
+  Batteries registers such callbacks for Lean's elaborator) is left out,
+  with what only it reaches, so a program whose initializers reach the
+  C++ externs only through such callbacks builds.
+- With the optimization `unread-fields` (off by default), three things
+  that native Lean does at startup do not happen when only a callback the
+  pass leaves out needed them: a closed term read only to build such a
+  callback is not evaluated (natively a panic in its evaluation shows); a
+  value that such a callback captured has one reference less, which
+  `dbgTraceIfShared` can show; the step of a `Lean` package's `initialize`
+  constant that only such callbacks read does not run (these steps
+  register state for Lean's elaborator and print nothing).
 - The `Lean` package's initializers (thousands of `builtin_initialize`
   declarations that register extensions, attributes and options; 19
   `initialize` ones in Lean 4.34.0), which natively all run
