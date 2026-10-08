@@ -2061,7 +2061,8 @@ fn lean_array_fget_borrowed_as<T>(v : RVec<LAny>, i : Nat) -> T { l2r_array_get_
 fn lean_array_uget_as<T>(v : RVec<LAny>, i : u64) -> T { l2r_array_get_as<T>(v, i) }
 fn lean_array_uget_borrowed_as<T>(v : RVec<LAny>, i : u64) -> T { l2r_array_get_as<T>(v, i) }
 
-// `get!` (as `lean_array_get`): out of bounds, the default taken at `T`.
+// `get!` (as `lean_array_get`): out of bounds, the panic first (hunt HA-01's
+// order), then the view's end, then the default taken at `T`.
 fn lean_array_get_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T {
     let x = l2r_nat_raw(i);
     let p = l2r_array_give<LAny>(v);
@@ -2070,9 +2071,9 @@ fn lean_array_get_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T {
         let d = l2r_consume<LAny>(dflt);
         r
     } else {
+        let ignored = l2r_panic_code(0);
         let e = l2r_view_end<LAny>(p);
         let d = l2r_nat_drop_raw(x);
-        let ignored = l2r_panic_code(0);
         l2r_any_take_as<T>(dflt)
     }
 }

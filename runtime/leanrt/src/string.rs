@@ -449,8 +449,11 @@ pub fn length(s: &LStr) -> u64 {
     unsafe { (*s.0).chars }
 }
 
-/// The lead bytes `set` replaces a character at (lean-runtime has no
-/// `lean_string_utf8_set` yet).
+/// The lead bytes `set` replaces a character at. lean-runtime's
+/// `semantics::string::utf8_set` has the same rule (object.cpp's
+/// `lean_string_utf8_set`); `set_slow` applies it to leanrt's own string
+/// block (the lead byte's size, the end clamped to the size, a shared
+/// string copied first, the character count kept).
 #[inline]
 fn is_utf8_first_byte(c: u8) -> bool {
     (c & 0x80) == 0 || (c & 0xe0) == 0xc0 || (c & 0xf0) == 0xe0 || (c & 0xf8) == 0xf0
