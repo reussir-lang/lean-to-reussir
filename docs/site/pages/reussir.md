@@ -145,7 +145,9 @@ outside the series (instruction counts: monadic-interp −5.0%, unionfind
 - A *cost* is correct but slow or big (build time, memory, run time). A
   *missed optimization* is correct but slower than it can be. A *missing
   feature* is something that Reussir does not promise but Lean needs. An
-  *intended* entry is documented behaviour.
+  *issue (dependency)* is an error in a library that Reussir uses, not in
+  Reussir's own code (issue 46, in mimalloc). An *intended* entry is
+  documented behaviour.
 - Only a bug is wrong behaviour. For the other kinds the output is correct,
   and a patch is an optimization or a feature, not a fix.
 

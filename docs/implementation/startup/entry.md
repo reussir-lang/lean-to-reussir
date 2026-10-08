@@ -47,7 +47,8 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
   main thread reserves mimalloc's first arena (1 GiB) with large OS pages,
   and the segments of `main`'s thread come from it: the heap is on
   transparent huge pages, as native Lean's mimalloc v3 advises every
-  arena. leanrt sets no mimalloc option.
+  arena. leanrt sets no mimalloc option for this (its one option is the
+  next entry's).
 - **Why:** From switch step 3 to step 6, lean-runtime's argument
   constructor allocated before mimalloc's constructor, so mimalloc gave
   the main thread a 32 MiB segment from the OS and reserved no arena. The
@@ -71,6 +72,49 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
   that allocates before mimalloc's own (one of lean-runtime's, Reussir's,
   or leanrt's) brings the page faults back; after adding one, check
   `deriv`'s page faults at size 11 (`/usr/bin/time -v`).
+
+### Free arena memory goes back to the OS at once (mimalloc v2.1.8 to v2.2.7)
+
+- **What:** The first call of `run_main2`, before the module initializers,
+  is `alloc::purge_arenas_at_once`: when `mi_version()` is 218 to 227
+  (mimalloc v2.1.8 to v2.2.7; Reussir's `libmimalloc-sys` 0.1.44 bundles
+  v2.2.4) and the environment does not set `MIMALLOC_ARENA_PURGE_MULT` (in
+  any case, as mimalloc reads its variables), it sets mimalloc's
+  `arena_purge_mult` to 0 (`mi_option_set`, option 24 in the
+  `include/mimalloc.h` of every version of the range). An arena then purges
+  a free range (a whole 32 MiB segment, or the segment of a huge block of
+  more than 16 MiB) when it is freed, instead of `purge_delay` x
+  `arena_purge_mult` ms (10 x 10) later. Purges inside segments keep their
+  10 ms delay; `MIMALLOC_PURGE_DELAY=-1` still turns purging off (the OS
+  layer tests it). leanrt declares `mi_version` and `mi_option_set` itself
+  and links them from Reussir's mimalloc, as its `mi_malloc`.
+- **Why:** In these versions `mi_arenas_try_purge` (v2.2.4 `src/arena.c`,
+  line 624: `if (!force && (arenas_expire == 0 || arenas_expire < now))
+  return;`) returns when the purge time has passed, which is when it should
+  purge, so the delayed arena purges run almost never and freed huge
+  blocks and segments stay in the process until they are used again.
+  v2.1.8 added the test; v2.3.0 fixed it (`> now`); v3 never had it
+  (checked in each tag's `src/arena.c`). Measured on 16 benchmark
+  programs with `MIMALLOC_ARENA_PURGE_MULT=0`: lean-zip's peak 422 to
+  330 MiB (native 394 MiB), wall time +0.9 % (about 65 ms of system time);
+  no other program's peak changed, the other wall times within noise. With
+  this function itself (dev 604b97e4): lean-zip 432,024 to 337,820 KB, the
+  output unchanged. [Reussir issue 46](../../../reussir-bugs/46-mimalloc-arena-purge.md)
+  (kind: issue (dependency); a newer `libmimalloc-sys` is parked). Test
+  `RtArenaPurge` (`.alloc`: peak memory of `ByteArray`s made as huge
+  blocks, grown and dropped: 56,400 KB with the option, 77,000 KB
+  without); unit tests `alloc::tests::arena_purge_gate`,
+  `alloc::tests::env_has_ignores_case`, `alloc::tests::arena_purge_mult_set`.
+  `env_has` reads C's `environ` itself: `std::env::vars_os` copied every
+  variable at every start (136 more allocations in the pay-nothing
+  counts).
+- **Where:** `runtime/leanrt/src/alloc.rs`: `purge_arenas_at_once`,
+  `ARENA_PURGE_INVERTED`, `MI_OPTION_ARENA_PURGE_MULT`, `env_has`;
+  `runtime/leanrt/src/rt.rs`: `run_main2`.
+- **Remove only if:** Reussir's mimalloc is v2.3.0 or later (or v3): out
+  of the range the function already does nothing, so then delete it, its
+  call and its unit tests. `RtArenaPurge` stays; check its bounds with the
+  new mimalloc, whose fixed arena purges still wait 100 ms after a free.
 
 ### `main` gets fresh standard streams only on a thread of its own
 

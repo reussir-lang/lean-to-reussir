@@ -31,9 +31,9 @@ branch `l2r-local-pre-final`.)
 
 ## Names
 
-- **Entry numbers** run from 1 to 45: 44 entries, because number 37 is
+- **Entry numbers** run from 1 to 46: 45 entries, because number 37 is
   reserved (another track will use it for its patch: value records across
-  the FFI boundary). The next free number is 46.
+  the FFI boundary). The next free number is 47.
 - **A patch file** is named `NN-x-slug.patch`. NN is the number of its
   entry. The letter x gives the order of the entry's patches (a, b, c,
   ...). The slug is a short description. Every patch belongs to exactly one
@@ -74,6 +74,10 @@ a feature), not a fix.
 - *missing feature*: something Reussir never promised that lean2rr needs
   (bounded-depth frees, a hook at the end of a free, handles that may be a
   number). Its patch is a feature.
+- *issue (dependency)*: an error in a library that Reussir pins, not in
+  Reussir's own code (46: mimalloc v2.2.4). lean2rr works around it
+  outside Reussir; the change on Reussir's side is a newer version of the
+  dependency.
 - *intended*: documented behaviour. No entry has this kind alone since
   2026-10-06: entry 3's 16-byte alignment is intended, but the slow frees
   it caused were avoidable, so entry 3 is a cost.
@@ -137,14 +141,15 @@ a patch outside the series ([parked patches](#parked-patches)), and
 | [38](38-tagged-top-bits.md) | missing feature | the inline count increment of a `tagged` handle uses all 64 bits as the address, so the top 16 bits cannot carry foreign data | yes: the one-word `Box` (`LAny`) needs it (`scripts/l2r.py` requires it) | none | [38-a](patches/38-a-tagged-top-bits.patch) | review-anybox r1: no defect (atomic test case added) | yes |
 | [40](40-drain-end-hook.md) | missing feature | Reussir's runtime does not tell the host when a drain (a free) ends | yes: the `sync` dependents of a promise released inside a free must run when the free is over (`scripts/l2r.py` requires it) | none (a fallback until switch step 6) | [40-a](patches/40-a-drain-end-hook.patch) | rv8/reussir: no defect | yes |
 | [41](41-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate (a number) | yes: the one-word `Nat` and `Int` need it (the prelude declares them `tagged`) | none (before: `Nat` was a two-word `[value]` enum) | [41-a](patches/41-a-tagged-ffi-objects.patch) | the mem-nat review and rv8/nat: no defect | yes |
+| [46](46-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4, which reussir-rt pins through `libmimalloc-sys` 0.1.44) | mimalloc's delayed arena purges do not run (`src/arena.c:624` tests the purge time the wrong way round): freed huge blocks and segments stay in the process | yes, peak memory (lean-zip's benchmark: 422 MiB, 330 MiB with the workaround; native 394 MiB) | leanrt sets mimalloc's `arena_purge_mult` to 0 on v2.1.8 to v2.2.7 (`alloc::purge_arenas_at_once`) | none (a newer `libmimalloc-sys`, 0.1.49 or later, parked) | - | - |
 
-**Counts.** 44 entries: 23 bugs, 13 costs, 3 missed optimizations, 5
-missing features. 30 entries have patches of their own in the series, 35
+**Counts.** 45 entries: 23 bugs, 13 costs, 3 missed optimizations, 5
+missing features, 1 dependency issue. 30 entries have patches of their own in the series, 35
 patch files in all (two each for entries 3 and 11, four for entry 13, one
 each for the others); 5 entries are fixed upstream (4, 5, 9, 14 and 26:
 their patches 04-a, 05-a, 09-a and 26-a dropped), and half of entry 2
-(02-a dropped; 02-b, the variant half, stays); 9 entries have no patch
-(7, 25, 32, 36, 39, 42, 43, 44, 45). The 35 patches are 15 bug fixes,
+(02-a dropped; 02-b, the variant half, stays); 10 entries have no patch
+(7, 25, 32, 36, 39, 42, 43, 44, 45, 46). The 35 patches are 15 bug fixes,
 12 optimizations and 8 features; all 35 are on `l2r-base2`. Five parked
 patches lie outside the series and these counts
 ([parked patches](#parked-patches)).
@@ -252,7 +257,7 @@ come back).
 
 **Adding a patch.** Name the file after its entry: `NN-x-slug.patch`, with
 the next free letter of the entry (a new problem gets the next free entry
-number, 46). Put it in `patches/` and add its name as the last line of
+number, 47). Put it in `patches/` and add its name as the last line of
 `patches/series`. Write the *Patch* and *Upstream note* sections of the
 entry's file, and update the entry's row in the status table (column
 *Applied*: "no" until it is on the Reussir branch named
@@ -297,8 +302,10 @@ script (bugs 18 and 24), plus `bug07b-call-before-branch.rr`, a variant
 used in issue 7's entry, and a Rust test of Reussir's runtime sources
 (`bug43-nullable-as-ref.rs`). Entries 40 and 41 have no repro: they are
 missing features that show only through a host that uses them, and their
-patches carry their own tests. Entries 44 and 45 have none either: 44
-needs a 32-bit target, 45 MLIR written by hand. Each repro file starts
+patches carry their own tests. Entries 44 to 46 have none either: 44
+needs a 32-bit target, 45 MLIR written by hand, and 46 is shown by
+lean2rr's runtime test `RtArenaPurge` (its peak memory, through
+`tests/runtime/alloc-check.sh`). Each repro file starts
 with what it shows, the expected output and what Reussir ef922049 does.
 
     reussir-bugs/repros/run.sh RRC_CHECKOUT [NN...]

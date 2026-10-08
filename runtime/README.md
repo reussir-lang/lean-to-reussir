@@ -1013,7 +1013,14 @@ does: no constructor allocates before mimalloc's own (lean-runtime's
 AR-36), so the process's main thread reserves the first arena with large
 OS pages (until switch step 7 leanrt set mimalloc v2's
 `eager_commit_delay` to 0 for it, `alloc::heap_on_huge_pages`; implementation
-notes, startup/entry.md). Before `main`, lean-runtime's own
+notes, startup/entry.md). `run_main2`'s first call,
+`alloc::purge_arenas_at_once`, sets mimalloc's `arena_purge_mult` to 0 on
+mimalloc v2.1.8 to v2.2.7 (`mi_version()` 218 to 227; Reussir's is v2.2.4)
+unless `MIMALLOC_ARENA_PURGE_MULT` is set: these versions test the arenas'
+purge time the wrong way round (`src/arena.c`), so their delayed purges
+do not run, and a freed huge block or segment stayed in the process
+(lean-zip's peak 422 MiB, with the option 330 MiB, native 394 MiB;
+Reussir issue 46, test `RtArenaPurge`). Before `main`, lean-runtime's own
 ELF constructor (feature `startup-fds`, `.init_array.00101`, audit item
 4.3) opens the descriptors native Lean's runtime has open at startup
 (`io::startup`: libuv's epoll descriptor, two io_uring rings when the

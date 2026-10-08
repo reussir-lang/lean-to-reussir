@@ -4,9 +4,10 @@ Everything lean2rr does because of a Reussir issue: a bug, a cost or a
 limitation. The issues themselves (repro, cause, patch) are documented
 one file each in [`reussir-bugs/`](../../../reussir-bugs/README.md), whose
 column *Kind* says what each is: only a *bug* is erroneous behaviour;
-costs, the missed optimizations (7, 36, 39) and the missing features (13, 27,
-38, 40, 41) have correct output, and their patches are optimizations or features, not
-fixes ([kinds](../../../reussir-bugs/README.md#kinds)). This directory says
+costs, the missed optimizations (7, 36, 39), the missing features (13,
+27, 38, 40, 41) and the dependency issue (46, in mimalloc) have correct
+output, and their patches are optimizations or features, not fixes
+([kinds](../../../reussir-bugs/README.md#kinds)). This directory says
 what lean2rr does about them and whether the patched Reussir still needs
 it. Policy
 ([`reussir-bugs/README.md`](../../../reussir-bugs/README.md#policy)):
@@ -95,3 +96,4 @@ either way.
 | [39](../../../reussir-bugs/39-alias-release-donor.md) | missed optimization | avoided: a field put back into a rebuilt node is boxed again from its unboxed value ([records.md](../representations/records.md#a-field-is-read-at-its-binders-type-once)); passing the field's own box (commit 3f0cb30, reverted) left a dead release of the unboxed value that token reuse preferred to the matched cell (`RtProbeBump`) | none (missed optimization) | n/a |
 | [40](../../../reussir-bugs/40-drain-end-hook.md) | missing feature | none since switch step 6 ([correctness-bugs.md](correctness-bugs.md#the-drain-end-hook-local-patch-40-a)) | 40-a, applied | n/a: `scripts/l2r.py` requires it |
 | [41](../../../reussir-bugs/41-tagged-ffi-objects.md) | missing feature | none: `Nat` and `Int` are tagged handles ([nat-int.md](../representations/nat-int.md)) | 41-a, applied | n/a: the prelude declares `Nat` and `Int` `tagged` |
+| [46](../../../reussir-bugs/46-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | leanrt sets mimalloc's `arena_purge_mult` to 0 on v2.1.8 to v2.2.7, so free arena memory goes back to the OS at once ([startup/entry.md](../startup/entry.md#free-arena-memory-goes-back-to-the-os-at-once-mimalloc-v218-to-v227)) | none (a newer `libmimalloc-sys`, 0.1.49 or later, parked) | n/a: with a fixed mimalloc the workaround turns itself off; delete it then |

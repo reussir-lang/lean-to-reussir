@@ -78,6 +78,10 @@ pub fn set_initializing(b: bool) {
 /// `task::start`, the program's `main`, then `task::shutdown`), since the
 /// scheduler's state is the thread's own.
 pub fn run_main2<I: FnOnce(), F: FnOnce() + Send + 'static>(init: I, body: F) {
+    // On mimalloc v2.1.8 to v2.2.7, whose delayed arena purges do not run,
+    // free arena memory goes back to the OS at once
+    // (`alloc::purge_arenas_at_once`), before the program allocates much.
+    crate::alloc::purge_arenas_at_once();
     // The program's releases of its boxed payloads, before any box is made
     // and before any other thread runs (`any::RELEASES`).
     crate::any::init_releases();

@@ -1,0 +1,8 @@
+# Reussir issue 46: freed huge blocks go back to the OS. Four rounds of a `ByteArray` made with room for 2 * 10^7
+# bytes (a huge block) and grown by pushes to 5 * 10^6 and 5 * 10^7 bytes (`same`), or to 1, 2, 3, 4 times 2 * 10^6
+# and 2 * 10^7 bytes (`grow`). Peak memory at the large size at most 66000 KB (`same`: 56400 KB with leanrt's
+# `alloc::purge_arenas_at_once`, 77000 KB without it, i.e. with MIMALLOC_ARENA_PURGE_MULT=10; native 116700 KB) and
+# 152000 KB (`grow`: 142500 KB, 163000 KB without; native 147300 KB); six runs of each varied by under 200 KB.
+# Allocations and bytes as native's (factor 2).
+same 5000000 4 20000000 | same 50000000 4 20000000 | 2 1000 | rss 0 66000
+grow 2000000 4 20000000 | grow 20000000 4 20000000 | 2 1000 | rss 0 152000

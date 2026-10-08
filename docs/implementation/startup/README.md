@@ -9,6 +9,6 @@ behaviour. Plan [§5.11](../../translation-plan.md#511-program-entry) and
   startup chain.
 - [constants.md](constants.md): once-cells, eager and lazy constants,
   closed-term chains, literal tables, waiting for tasks in constants.
-- [entry.md](entry.md): threads, the heap's huge pages,
-  `IO.initializing`, standard streams, arguments, exit, startup
+- [entry.md](entry.md): threads, the heap's huge pages, mimalloc's
+  arena purges, `IO.initializing`, standard streams, arguments, exit, startup
   descriptors.

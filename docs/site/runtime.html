@@ -247,6 +247,17 @@ thread that waits blocks its context.</p>
   a constructor allocated first. The heap lost its huge pages, until a
   workaround in <code>leanrt</code> restored them. Step 7 removed the allocation and
   the workaround.</li>
+<li><strong>Arena purges.</strong> Reussir's runtime uses mimalloc v2.2.4. In this
+  version, mimalloc does not give freed arena memory back to the OS after
+  its delay: a test in <code>mi_arenas_try_purge</code> compares the time in the
+  wrong direction. So a freed huge block (more than 16 MiB) or a freed
+  segment stays in the process until mimalloc uses it again. At startup,
+  <code>leanrt</code> sets the mimalloc option <code>arena_purge_mult</code> to 0. Then mimalloc
+  gives this memory back when the program frees it. <code>leanrt</code> does this
+  only on the mimalloc versions with the error (v2.1.8 to v2.2.7), and
+  only when the environment does not set <code>MIMALLOC_ARENA_PURGE_MULT</code>.
+  Example: the peak memory of lean-zip's benchmark is 330 MiB with the
+  option and 422 MiB without it (native: 394 MiB).</li>
 <li><strong>Constants.</strong> Every zero-parameter declaration of the program's modules
   runs at startup, in Lean's initialization order. Each constant is a
   once-cell. A context that needs a constant that another context is
