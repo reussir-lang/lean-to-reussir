@@ -257,7 +257,7 @@ Paths are relative to the repository root.
     `std::process::exit`, which runs linked C code's exit handlers, and
     its documentation asks a glue that needs `_Exit` to call `_exit`
     (since step 4 after the context's handed-off streams are written,
-    `io::force_exit`; since step 18 after an effect point, as
+    `io::force_exit`; since lean2rr's step 18 after an effect point, as
     `IO.Process.exit`: the due tasks and sleepers run first, hunt HIO3-01);
   - `IO.getTID` (`gettid`; lean-runtime has none);
   - the Windows time-zone errors stay the shim's Lean code (the same
@@ -901,6 +901,40 @@ Paths are relative to the repository root.
   `float.rs`; lean-runtime's `src/semantics/string.rs` and
   `src/semantics/float.rs`.
 - **Remove only if:** never (speed only).
+
+### A waiter that keeps its worker, the shared forceExit (switch step 19)
+
+- **What:** lean-runtime pinned at `ab1ce21` (main: fixes-19 to fixes-21).
+  - A task that waits while it keeps its pool worker (a `sync` dependent
+    run in a pool task's walk: its wait raises no limit) runs the awaited
+    task on a context of its own instead of on its stack, so the pool
+    counts two workers, as natively (hunt HSC-01).
+  - `IO.Process.forceExit` is lean-runtime's
+    `io::panic::process_force_exit`, the sequence both translators share:
+    the effect point (hunt HIO3-01, lean2rr's step 18), the context's
+    writers joined but a skip window's, the no-flush flag, then the glue's
+    end; leanrt's `ForceExitGlue` ends with `_exit` (lean-runtime's
+    default, `std::process::exit`, runs linked C code's exit handlers).
+  - An effect point's choice of a stale queued task is the one of
+    lean2rr's step 17 again: lean-runtime's fixes-19 rule for it (hunt
+    HSC-02) started tasks that natively could not have been taken yet,
+    and fixes-21 restored the earlier rule; its late-run limit is
+    lean-runtime's LSCHED-05.
+  - lean-runtime's threads-mode fix of the same batches (a worker idle
+    before its task's `task_end` hook) does not apply: lean2rr uses the
+    single-thread scheduler.
+- **Why:** natively a blocked sync dependent keeps its worker busy, and
+  `forceExit` comes after what other threads did by then.
+- **Tests:** `RtForceExitEffect`; lean-runtime's cases
+  `tasks/sync_wait_second_worker`, `tasks/sync_wait_dedicated_keeps_worker`,
+  `tasks/sync_wait_dedicated_waits_queued`,
+  `tasks/effect_older_head_before_inline_child`,
+  `tasks/effect_two_late_runs_keep_queue_order` through lean2rr's builds
+  (native's output or one of its alternatives).
+- **Where:** lean-runtime's `src/sched/task.rs` (`here_or_own_context`,
+  `wait_keeps_worker`), `src/io/panic.rs` (`process_force_exit`);
+  leanrt's `io.rs` (`force_exit`, `ForceExitGlue`).
+- **Remove only if:** never.
 
 ### The worker of a task about to begin, a lock's owner (switch step 17)
 

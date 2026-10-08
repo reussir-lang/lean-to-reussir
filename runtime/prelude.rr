@@ -257,9 +257,10 @@ fn l2r_exit(code : u32) -> unit [{ leanrt::io::main_exit(code as i32) }];
 fn l2r_process_exit(code : u8) -> u64 [{ lean_runtime::io::panic::process_exit(code, &mut lean_runtime::io::panic::Native) }];
 
 // `IO.Process.forceExit` (`std::_Exit`): no flushing, no exit handlers,
-// once the streams this context handed off are written (`leanrt::io`).
+// after an effect point and once the streams this context handed off are
+// written (lean-runtime's `io::panic::process_force_exit`, `leanrt::io`).
 #[ffi(import)]
-fn l2r_process_force_exit(code : u8) -> u64 [{ leanrt::io::force_exit(code as i32) }];
+fn l2r_process_force_exit(code : u8) -> u64 [{ leanrt::io::force_exit(code) }];
 
 #[ffi(import)]
 fn l2r_argc() -> u64 [{ (leanrt::rt::args().len() as u64).saturating_sub(1) }];

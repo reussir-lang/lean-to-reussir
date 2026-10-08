@@ -265,9 +265,10 @@ The switch steps:
 | 15 | fixes in both schedulers and the network code (lean-runtime's fixes-15), and three Lean runtime bugs that the crate no longer copies (LB-50, LB-51, LB-52). A connect that a shutdown interrupts stays pending until the connection exists. The crate tells the glue which context is the event loop's. lean2rr's glue changed at the same step (see below) |
 | 16 | no new part: fixes in the single-thread scheduler (lean-runtime's fixes-16). A task runs on the stack of the task that waits for it only when that stack has the room of a native worker's stack; otherwise it runs on a context of its own. The event loop's context has at least 1 GiB of stack, as libuv's loop thread natively. A spawn's helper thread holds no directory after the spawn |
 | 17 | no new part: fixes in the single-thread scheduler (lean-runtime's fixes-17). A pool task that starts on a context of its own holds its worker until it begins, so no more pool tasks run than `LEAN_NUM_THREADS` permits. The owner of a recursive mutex is the thread that `IO.getTID` names, as natively. lean2rr's glue changed at the same step (see below) |
+| 19 | no new part: fixes in the single-thread scheduler (lean-runtime's fixes-19 to fixes-21). A task that waits while it keeps its pool worker runs the awaited task on a context of its own, so no more pool tasks run than `LEAN_NUM_THREADS` permits. `IO.Process.forceExit` uses the crate's shared sequence. lean2rr's glue changed at the same step (see below) |
 
 Status (2026-10-07): the submodule `third_party/lean-runtime` is pinned at
-`09faf7a`. `scripts/l2r.py` builds it with cargo (the features `io`,
+`ab1ce21`. `scripts/l2r.py` builds it with cargo (the features `io`,
 `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`) and links
 it with `leanrt` ([runtime README](repo:runtime/README.md), "The shared
 crate lean-runtime"). lean2rr keeps its hot paths: the inline

@@ -111,22 +111,30 @@ pub fn exit(code: i32) -> ! {
 }
 
 /// `IO.Process.forceExit` (`std::_Exit`): no flushing, no exit handlers.
-/// First an effect point (`sched::effect`, as `IO.Process.exit`'s): the
-/// queued tasks and sleepers that native threads would have run by now run
-/// (hunt HIO3-01: a task queued before a long computation that ends in
-/// `forceExit` natively prints its line first), and the writer threads of
-/// the streams this context's drops handed off end (lean-runtime's writers
-/// point): natively the drop's `fclose` had written those bytes before any
-/// `_Exit` (lean-runtime docs/sched.md, "The glue", item 11). lean-runtime's
-/// own `io::exit::force_exit` ends with `std::process::exit`, which runs the
-/// handlers of linked C code (mimalloc's); its documentation asks a glue
-/// that needs `_Exit` exactly to call `_exit`.
-pub fn force_exit(code: i32) -> ! {
-    extern "C" {
-        fn _exit(code: i32) -> !;
+/// lean-runtime's `io::panic::process_force_exit`, the sequence both
+/// translators share: an effect point (the queued tasks and sleepers that
+/// native threads would have run by now run first, as at
+/// `IO.Process.exit`; hunt HIO3-01), the writer threads of the streams this
+/// context's drops handed off joined but a skip window's (natively the
+/// drop's `fclose` had written those bytes before any `_Exit`; lean-runtime
+/// docs/sched.md, "The glue", item 11), the no-flush flag, then the glue's
+/// end, here `_exit` ([`ForceExitGlue`]).
+pub fn force_exit(code: u8) -> ! {
+    lio::panic::process_force_exit(code, &mut ForceExitGlue)
+}
+
+/// The panic glue of [`force_exit`]: lean-runtime's defaults, but the end is
+/// `_exit` itself. lean-runtime's default, `std::process::exit`, runs the
+/// exit handlers of linked C code (mimalloc's), which `_Exit` does not.
+struct ForceExitGlue;
+
+impl lio::panic::PanicGlue for ForceExitGlue {
+    fn force_exit(&mut self, code: i32) -> ! {
+        extern "C" {
+            fn _exit(code: i32) -> !;
+        }
+        unsafe { _exit(code) }
     }
-    crate::sched::effect();
-    unsafe { _exit(code) }
 }
 
 /// The end of the process after `main` has returned (`l2r_exit`): the io
