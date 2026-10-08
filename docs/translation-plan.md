@@ -1039,7 +1039,13 @@ its value is stored as `Box`.
     `String` would otherwise convert to the same one over a `Nat`). A word
     read as an object with fields is natively a number used as an address
     (a crash): unreachable.
-  - A `[value]` struct is natively its field.
+  - A `[value]` struct is natively its field when Lean erases its
+    inductive to the field (`ST.Out σ α`, whose other field is a
+    `Void σ`). Lean does not erase an `unsafe` or a recursive inductive
+    (`hasTrivialImpureStructure?`): such a `[value]` struct is natively a
+    constructor object with one field, and converts constructor by
+    constructor, as the inductives above (`unsafeCast (Except.error 5) : U`
+    for `unsafe inductive U | mk : Nat → U` is `U.mk 5`).
   When the two Reussir types (two inductives' records; an array has one
   type) have the same layout (the same constructors with fields of the
   same layouts, position by position, coinductively) and the conversion

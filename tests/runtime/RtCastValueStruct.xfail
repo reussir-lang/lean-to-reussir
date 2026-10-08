@@ -1,1 +1,0 @@
-A `[value]` struct cast to or from an inductive with another number of constructors (natively both constructor objects, fields read by slot) has no conversion in lean2rr (`isObjectNominal` excludes `[value]` structs; `tryCoerce` reads the struct as its field): the cast panics, natively it prints 5 and error 6.

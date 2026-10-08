@@ -396,11 +396,25 @@ def nativeScalarCtor (c : Name) (l : CtorLayout) : LowerM Bool := do
   | some ss => return ss.all Option.isNone
   | none => return l.fields.all Option.isNone
 
+/-- Whether `[value]` struct `n` is natively a constructor object with one
+field: Lean does not erase its inductive to the field
+(`hasTrivialImpureStructure?` gives `none`: an `unsafe` or recursive
+inductive). Lean erases the others (`ST.Out σ α`, whose other field is a
+`Void σ`), and so do generated structs of no inductive (`false`). -/
+def valueStructIsObject (n : String) : LowerM Bool := do
+  let some ind := (← get).typeHeads[n]? | return false
+  try return (← hasTrivialImpureStructure? ind).isNone
+  catch _ => return false
+
 /-- A generated type whose values are heap objects natively when they have
-fields: a shared struct or enum (not a `[value]` type, not an enumeration). -/
+fields: a shared struct or enum, or a `[value]` struct that Lean keeps as
+a constructor object (`valueStructIsObject`); not an enumeration. -/
 def isObjectNominal (n : String) : LowerM Bool := do
   match (← get).typeInfos[n]? with
-  | some info => return !info.value && info.shape != .enumLike
+  | some info =>
+    if info.shape == .enumLike then return false
+    if info.value then return ← valueStructIsObject n
+    return true
   | none => return false
 
 /-- The word lean2rr gives a heap object read as a word (`unsafeCast` to a
@@ -874,7 +888,10 @@ mutual
       | "Nat", "Int" => return some (.call "lean_nat_to_int" #[] #[e])
       | "Int", "Nat" => return some (.call "l2r_int_cast_nat" #[] #[e])
       | _, _ => pure ()
-      -- A `[value]` struct is natively its field.
+      -- A `[value]` struct is natively its field (Lean erases its
+      -- inductive), and a boxed one is its field's box. One that Lean keeps
+      -- as an object (`valueStructIsObject`) is read by constructor where
+      -- the program casts it to another inductive (`coerce`).
       let infos ← getPart (·.typeInfos)
       if let some si := infos[sn]? then
         if si.value && (← nominalHead sn) != (← nominalHead dn) then

@@ -141,6 +141,30 @@ values"); divergences in
 - **Remove only if:** never. Through a `Box` such casts stay unreachable
   ([box-unboxing.md](box-unboxing.md#other-types-variants-only-in-a-program-that-can-cast)).
 
+### A `[value]` struct that Lean keeps as an object converts by constructor
+
+- **What:** A `[value]` struct is natively its field only when Lean erases
+  its inductive to the field (`hasTrivialImpureStructure?` gives a field:
+  `ST.Out σ α`, whose other field is a `Void σ`). Lean does not erase an
+  `unsafe` or a recursive inductive: natively such a value is a
+  constructor object with one field. `isObjectNominal` accepts these
+  `[value]` structs (`valueStructIsObject`), so a cast the program
+  performs between one of them and another inductive converts constructor
+  by constructor (`ctorCastable`, `convArms`). `unsafeCast (Except.error 5)
+  : U`, for `unsafe inductive U | mk : Nat → U`, is `U.mk 5`, and back.
+  The other `[value]` structs, and generated ones of no inductive, keep the
+  rule "the struct is its field" (`tryCoerce`).
+- **Why:** `tryCoerce` read every `[value]` struct as its field, here a
+  `Nat` read as an `Except`: lean2rr warned and the cast panicked; native
+  Lean prints `5` and `error 6` (box hunt 2026-10-07, test
+  `RtCastValueStruct`).
+- **Where:** `Lower/Conv.lean`: `valueStructIsObject`, `isObjectNominal`,
+  `ctorCastable`, `coerce`.
+- **Remove only if:** lean2rr stops making `[value]` structs of inductives
+  that Lean keeps as objects. Through a `Box` the cast stays unreachable, as
+  for other inductives that do not correspond: a boxed `[value]` struct is
+  its field's box.
+
 ### A `cases` on a cast value matches through the value's own constructors
 
 - **What:** A `cases` (or projection) whose discriminant has another
