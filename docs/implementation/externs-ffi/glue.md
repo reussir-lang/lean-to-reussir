@@ -131,6 +131,11 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   result's type parameter (`preludeRetArg`), or the prelude's result type
   (`L2RUnit`). The result field of the IO result is a `Box` (rule 1), so
   `wrapIOResult` boxes the result (test `RtRuntimeMarks`).
+  `Runtime.markPersistent` first walks its argument for tasks and waits
+  for them, as a constant's value (`persistCall`,
+  [../startup/constants.md](../startup/constants.md)); in a program
+  that creates no task, or at a type that cannot hold one, it is the
+  primitive.
 - **Why:** The runtime cannot build `EST.Out`; one convention for all
   infallible IO (runtime request 9; c7b3933, f87ea08). A generic
   primitive's result was taken to be of the field's type, so with rule 1

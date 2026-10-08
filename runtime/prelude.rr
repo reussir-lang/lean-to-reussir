@@ -3337,7 +3337,9 @@ fn lean_is_scalar<T>(a : T) -> bool { false }
 fn lean_sharecommon_quick<T>(a : T) -> T { a }
 
 // Payload primitives of the `Runtime.*` BaseIO externs (memory-management
-// hints without observable effect here).
+// hints without observable effect here). Where a value can hold a task,
+// lean2rr first walks it for `Runtime.markPersistent` and waits for its
+// tasks (`l2r_persist_T`, as native `lean_mark_persistent`).
 fn l2r_runtime_mark_persistent<T>(a : T) -> T { a }
 fn l2r_runtime_mark_multi_threaded<T>(a : T) -> T { a }
 fn l2r_runtime_forget<T>(a : T) -> L2RUnit { L2RUnit::u{} }

@@ -134,12 +134,24 @@ runtime. Plan
 - **What:** A closed term referenced exactly once, from a constant (not
   from a function, not a root of the entry point), is evaluated where it is
   used instead of being kept in a once-cell. It still runs once, at the
-  same point.
+  same point. Exception: in a program that creates tasks, a closed term
+  whose type can hold a task (`holdsNoTask` is false: a function type,
+  `lcAny`, a task, thunk, reference or promise, or an inductive with such
+  a field at the type's arguments) keeps its once-cell, and so its walk
+  for tasks ("A constant that may hold tasks waits for them", below).
 - **Why:** Lean's `extractClosed` makes an `n`-element literal a chain of
   closed terms `_closed_k := push _closed_(k-1) e_k`; caching every step
   kept every intermediate array alive: memory quadratic in the literal's
   length (10000 elements: 1036 MB instead of 7 MB; adv2 N5, fbf37e8).
-- **Where:** `Emit/Program.lean`: `chainConsts`; `LowerBase.lean`:
+  The exception: natively every closed term is marked persistent at its
+  first evaluation, which waits for its tasks and keeps them alive. An
+  uncached term had no walk and was released after its one use: in
+  `List.length (spawnOne 7)` and in `[mk 1, mk 2].length` the tasks were
+  dropped and never ran (hunt2 startup; test `RtClosedChainTasks`).
+  Literals of data (`List Nat`, `Array Float`, records of data) stay
+  uncached.
+- **Where:** `Emit/Program.lean`: `chainConsts`, `holdsNoTask`,
+  `lowerProgram`; `LowerBase.lean`:
   `LowerCtx.uncachedConsts`; `Lower/Code.lean`: `lowerDecl`. Required part
   `closed-chains` in `Opt/Registry.lean`.
 - **Remove only if:** never.
@@ -201,7 +213,9 @@ runtime. Plan
   constant is walked: with one type per inductive, nearly every type
   holds a `Box`, which could hold a task in a program that has some. A placeholder's never-forced task cell (`pending` with the `z`
   function value) is not a task (`l2r_persist_ph_T`): natively it is
-  `box(0)`, which the walk skips (C01R-03).
+  `box(0)`, which the walk skips (C01R-03). `Runtime.markPersistent`
+  walks its argument the same way, then returns it: natively it calls
+  `lean_mark_persistent` too.
 - **Why:** As `lean_mark_persistent` at a closed term's first evaluation:
   a `Task.spawn` extracted as a closed term has finished once the term has
   been used (adv4 TK4-02, a599e0a; closures, thunks and boxes: 17ab235).
@@ -220,10 +234,14 @@ runtime. Plan
   keeps native's walk order because it reads references and thunks when
   it gets to them: a task that replaces the task a reference next to it
   holds has run by then, as natively. Native pushes a reference's value
-  too (RV7L-05, test `RtPersistRef`).
+  too (RV7L-05, test `RtPersistRef`). `Runtime.markPersistent` was the
+  identity: the tasks its value held ran only when waited for, after the
+  output that natively follows them (hunt2 startup; test
+  `RtMarkPersistentWaits`).
 - **Where:** `Lower/Conv.lean`: `persistCall`, `typeHoldsTask` (one
   search: `mayHoldTask` before the variants are final, `holdsTask`
-  after), `persistFnName`, `cafAccessor`; `Lower/Finish.lean`: `holdsTask`,
+  after), `persistFnName`, `cafAccessor`; `Lower/ExternCall.lean`:
+  `lowerExternCall` (`Runtime.markPersistent`); `Lower/Finish.lean`: `holdsTask`,
   `persistListName`, `persistCell`, `PersistGen`, `genPersist`,
   `finishPersistFns`, `variantCount`; `runtime/prelude.rr`:
   `l2r_persist_begin`, `l2r_persist_seen`, `l2r_persist_keep`,

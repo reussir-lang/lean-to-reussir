@@ -120,7 +120,8 @@ plan §5.12). Lean's `extractClosed` turns an array literal into a chain of
 closed terms, `_closed_k := push _closed_(k-1) e_k`, and caching every step
 kept every intermediate array alive: memory quadratic in the literal's
 length (10000 elements: 1036 MB instead of 7 MB). A chain step still runs
-once, at the same point. -/
+once, at the same point. (In a program that creates tasks, `lowerProgram`
+keeps the once-cell of one whose value can hold a task: `holdsNoTask`.) -/
 def chainConsts (decls : Array (Decl .pure)) (roots : Array Name) : NameSet := Id.run do
   let mut uses : NameMap Nat := {}
   let mut fromFunction : NameSet := {}
@@ -135,6 +136,29 @@ def chainConsts (decls : Array (Decl .pure)) (roots : Array Name) : NameSet := I
   return decls.foldl (init := ({} : NameSet)) fun acc d =>
     if d.params.isEmpty && isClosed d.name && uses.getD d.name 0 == 1 && !fromFunction.contains d.name
       && !roots.contains d.name then acc.insert d.name else acc
+
+/-- Whether no value of mono type `t` can hold a task, as far as its type
+tells: it holds data only, followed through the fields of inductives at
+the type's arguments (`ctorFieldTypes`; a proof field is erased). A
+function type (a closure can capture a task), `lcAny` (a type that depends
+on a value), a task, thunk, reference or promise (`opaqueTypes`) and any
+other type can. `Float`/`Float32` are data (`atomicDataTypes`). `seen`
+holds the types being followed (a recursive inductive is data if the rest
+is). -/
+partial def holdsNoTask (t : Expr) : StateT (Std.HashSet Expr) CoreM Bool := do
+  let some t ← monoHead t | return false
+  if t.isErased || t.isConstOf ``lcVoid then return true
+  if (← get).contains t then return true
+  modify (·.insert t)
+  let .const n _ := t.getAppFn | return false
+  if n == ``lcAny || opaqueTypes.contains n then return false
+  if atomicDataTypes.contains n then return true
+  let some iv := inductiveOf (← getEnv) t | return false
+  if t.getAppArgs.size < iv.numParams then return false
+  for c in iv.ctors do
+    for f in ← ctorFieldTypes c t do
+      unless ← holdsNoTask f do return false
+  return true
 
 /-- `v` with its free variables renamed by `ren`. -/
 def renameLetValue (ren : Std.HashMap FVarId FVarId) (v : LetValue .pure) : LetValue .pure :=
@@ -410,11 +434,27 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   let preludeRetArg := genericRetParams prelude
   let valueGenericCls := valueGenericClosureParams prelude
   -- Closed terms used once, by another constant, are not cached; those
-  -- read by straight-line code are spliced into it.
-  let uncachedConsts := chainConsts decls roots
+  -- read by straight-line code are spliced into it. In a program that
+  -- creates tasks, not one whose value can hold a task (`holdsNoTask`):
+  -- natively it is marked persistent at its first evaluation, which waits
+  -- for its tasks and keeps them; its accessor does the same
+  -- (`cafAccessor`, `persistCall`).
+  let createsTasks := programCreatesTasks (← getEnv) keys decls
+  let mut uncachedConsts := chainConsts decls roots
+  if createsTasks then
+    -- (One answer per type: the steps of a literal's chain share theirs.)
+    let mut noTask : Std.HashMap Expr Bool := {}
+    for d in decls do
+      if uncachedConsts.contains d.name then
+        let ok ← match noTask[d.type]? with
+          | some b => pure b
+          | none => do
+            let b ← (holdsNoTask d.type).run' {}
+            noTask := noTask.insert d.type b
+            pure b
+        unless ok do uncachedConsts := uncachedConsts.erase d.name
   let decls := spliceChainConsts decls uncachedConsts
   let casts := programCasts (← getEnv) keys decls
-  let createsTasks := programCreatesTasks (← getEnv) keys decls
   -- Rule 4: where the program's function values complete, along its flow,
   -- for the erased domains of function types (`ErasedDomains`).
   let inits := startup.filterMap fun | .init decl inst => some (decl, inst) | _ => none

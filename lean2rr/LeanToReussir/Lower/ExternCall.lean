@@ -342,6 +342,17 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
                   | some i, _ => pure (argTys[i]?.getD RR.Ty.box)
                   | none, some r => pure r
                   | none, none => ioPayloadFieldTy resTy
+                -- `Runtime.markPersistent`: natively `lean_mark_persistent`,
+                -- which waits for every task the value reaches
+                -- (`lean_task_get`), as when a constant is first computed:
+                -- the same walk (`persistCall`), then the value.
+                if prim == "l2r_runtime_mark_persistent" then
+                  if let (some a, some t) := (passed[0]?, argTys[0]?) then
+                    let x ← fresh "mp"
+                    if let some p ← persistCall t (.var x) then
+                      let w ← fresh "mpw"
+                      return ← wrapIOResult resTy
+                        (.block ⟨#[(x, some t, a), (w, some (.named "u64"), p)], .var x⟩) t
                 return ← wrapIOResult resTy (.call prim #[] passed) vt
   -- A generic prelude function in plain Reussir that does not store its
   -- values in runtime containers (`dbgTrace`, `dbgSleep`, `panic`, …) is
