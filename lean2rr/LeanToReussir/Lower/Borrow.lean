@@ -12,7 +12,8 @@ natively. For most values nobody can tell. For resources whose release is
 observable it shows (translation plan §5.8, §10): a file handle written and
 dropped by a helper that then reads the same file (natively the data is
 still in the handle's buffer), the stdin pipe of a child the helper then
-waits for (natively the child does not see end of file).
+waits for (natively the child does not see end of file), a promise whose
+result task the helper then asks about (natively not resolved yet).
 
 So for programs that create such resources (`resourceExterns`), lean2rr
 runs Lean's own borrow inference on its mono declarations
@@ -23,9 +24,10 @@ calls where it matters:
   types), keeps the
   argument until the call returns (`l2r_release_after`), as Lean's
   `explicitRC` puts the caller's `dec` after the call; an argument the
-  caller only borrows itself (a borrowed parameter, or a field or array
-  element of one) is left alone, as natively (whoever lent it holds it),
-  which also keeps tail calls of loops tail calls;
+  caller only borrows itself (a borrowed parameter, a field or array
+  element of one, the value of a constant, a constructor without relevant
+  fields: `borrowedVars`) is left alone, as natively (whoever lent it holds
+  it), which also keeps tail calls of loops tail calls;
 - a function value of such a declaration calls it through a `_boxed`
   variant that releases the borrowed arguments after the call, as Lean's
   `_boxed` functions do for closures.
@@ -35,10 +37,12 @@ namespace LeanToReussir
 open Lean Compiler LCNF
 
 /-- C symbols of the externs that create resources whose release is
-observable: files (closed and flushed with their last reference) and child
-processes (their pipes). -/
+observable: files (closed and flushed with their last reference), child
+processes (their pipes) and promises (the last reference to an unresolved
+promise resolves its `result?` task with `none`, which `IO.hasFinished`,
+`IO.wait` and the task's dependents see). -/
 def resourceExterns : List String :=
-  ["lean_io_prim_handle_mk", "lean_io_create_tempfile", "lean_io_process_spawn"]
+  ["lean_io_prim_handle_mk", "lean_io_create_tempfile", "lean_io_process_spawn", "lean_io_promise_new"]
 
 /-- Whether a declaration of the program calls an extern of
 `resourceExterns`. -/
@@ -83,12 +87,24 @@ def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
   withoutModifyingEnv do
     let fail (why : MessageData) : CoreM (NameMap (Array Bool)) :=
       throwError m!"lean2rr: Lean's borrow inference failed on this program ({why}), so the release \
-        times of borrowed resources (files, child processes) cannot be emulated (Lower/Borrow, \
+        times of borrowed resources (files, child processes, promises) cannot be emulated (Lower/Borrow, \
         translation plan §5.8); internal error"
     let m ← getPassManager
     let some toImp := m.monoPassesNoLambda.find? (·.name == `toImpure) | fail "no `toImpure` pass"
     let some bi := m.impurePasses.findIdx? (·.name == `inferBorrow) | fail "no `inferBorrow` pass"
     let impure := m.impurePasses.extract 0 (bi + 1)
+    -- Lean's inference takes every parameter of an exported declaration
+    -- (`@[export]`, and `main`) owned (`isExport`), which it decides by
+    -- name: so an instance of one is marked exported too (in this copy of
+    -- the environment only).
+    let env ← getEnv
+    for d in decls do
+      let .code _ := d.value | continue
+      let orig := (keys.find? d.name).map (·.decl) |>.getD d.name
+      if isExport env orig && !isExport (← getEnv) d.name then
+        match exportAttr.setParam (← getEnv) d.name ((getExportNameFor? env orig).getD orig) with
+        | .ok env' => setEnv env'
+        | .error e => return ← fail m!"cannot mark {d.name} exported: {e}"
     try
       CompilerM.run (phase := .mono) do
         let names := decls.foldl (fun s d => s.insert d.name) ({} : NameSet)
@@ -135,13 +151,30 @@ def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
     catch e => fail (← e.toMessageData.toString)
 
 /-- The variables of declaration `d` that it only borrows (given which of
-its parameters are borrowed): its borrowed parameters, the fields and array
-elements read from those (Lean's forward ownership propagation through
-projections, `cases` and `Array` reads), and the parameters of join points
-that every jump passes such a variable (Lean infers a join point's
-parameter owned only when some jump passes an owned value). Lean has no
-`dec` for them after a call: whoever lent them still holds them. -/
-partial def borrowedVars (keys : NameMap InstKey) (d : Decl .pure) (borrowed : Array Bool) : FVarIdSet := Id.run do
+its parameters are borrowed), the values Lean's inference does not make
+owned and after which its `explicitRc` puts no `dec`:
+- its borrowed parameters;
+- the fields and array elements read from such values (Lean's forward
+  ownership propagation through projections, `cases` and `Array` reads); an
+  element read with `a[i]!` (`Array.get!Internal α inst a i`) derives from
+  the array and from the `Inhabited` instance, whose value it is when `i` is
+  out of bounds, so both must be such values (Lean's `explicitRc` takes it
+  as borrowed only while all its parents are, its inference owns it when
+  either is owned);
+- the values of constants (`isConst`: a declaration without parameters, a
+  closed term, an `initialize` constant; Lean's `fap c #[]`: a constant
+  stays alive);
+- a constructor applied to no variable (`isCtor`): it holds nothing.
+  Without relevant fields (`none`) it is Lean's scalar constructor, which
+  nothing owns (`explicitRc` adds no `dec` for a value that is not a
+  reference); with relevant fields that are all `◾` it allocates natively,
+  but its release frees nothing observable, wherever it happens;
+- the parameters of join points to which every jump passes such a value or
+  no variable (`◾`): Lean infers a join point's parameter owned only when
+  some jump passes an owned variable.
+Whoever lent them still holds them (or they hold nothing). -/
+partial def borrowedVars (keys : NameMap InstKey) (isConst isCtor : Name → Bool) (d : Decl .pure)
+    (borrowed : Array Bool) : FVarIdSet := Id.run do
   let .code c := d.value | return {}
   let mut s := (d.params.zip borrowed).foldl (fun s (p, b) => if b then s.insert p.fvarId else s) {}
   -- Join points' parameters and the arguments of the jumps to them.
@@ -154,14 +187,19 @@ partial def borrowedVars (keys : NameMap InstKey) (d : Decl .pure) (borrowed : A
       ps.zipIdx.foldl (init := s') fun s' (p, i) =>
         if !argss.isEmpty && argss.all (fun as => match as[i]? with
             | some (.fvar y) => s'.contains y
-            | _ => false) then s'.insert p else s'
+            | some _ => true
+            | none => false) then s'.insert p else s'
     if s'.size == s.size then break
     s := s'
   return s
 where
-  arrayRead (f : Name) : Option Nat :=
+  -- The positions of the values an array read derives from: `getInternal`
+  -- and `uget` take `α a i h` (the array), `get!Internal` takes
+  -- `α inst a i` (the instance and the array).
+  arrayRead (f : Name) : Option (Array Nat) :=
     let orig := (keys.find? f).map (·.decl) |>.getD f
-    if orig == ``Array.getInternal || orig == ``Array.get!Internal || orig == ``Array.uget then some 1
+    if orig == ``Array.getInternal || orig == ``Array.uget then some #[1]
+    else if orig == ``Array.get!Internal then some #[1, 2]
     else none
   joinPoints (c : Code .pure) (m : Std.HashMap FVarId (Array FVarId)) : Std.HashMap FVarId (Array FVarId) :=
     match c with
@@ -185,10 +223,16 @@ where
       let s := match d.value with
         | .proj _ _ y => if s.contains y then s.insert d.fvarId else s
         | .const f _ args _ =>
-          match arrayRead f with
-          | some i => match args[i]? with
-            | some (.fvar y) => if s.contains y then s.insert d.fvarId else s
-            | _ => s
+          if args.isEmpty && isConst f then s.insert d.fvarId
+          else if isCtor f && args.all (!· matches .fvar _) then s.insert d.fvarId
+          else match arrayRead f with
+          | some ps =>
+            -- Every parent such a value (a parent that is no variable
+            -- holds nothing).
+            if ps.all (fun i => match args[i]? with
+                | some (.fvar y) => s.contains y
+                | some _ => true
+                | none => false) then s.insert d.fvarId else s
           | none => s
         | _ => s
       go k s
@@ -208,9 +252,17 @@ def borrowInfo : LowerM (NameMap (Array Bool) × FVarIdSet) := do
   let ctx ← read
   let r ← if ← programMakesResources ctx.decls ctx.keys then
       let flags ← inferBorrowedParams (ctx.decls.foldl (fun a _ d => a.push d) #[]) ctx.keys
+      let initSlots := (← get).initSlots
+      let isConst (f : Name) : Bool :=
+        initSlots.contains f || (ctx.decls.find? f).any (·.params.isEmpty)
+      -- A constructor that is not a call (constructors that Lean's runtime
+      -- implements, `Int.ofNat`, are externs).
+      let env ← getEnv
+      let isCtor (f : Name) : Bool :=
+        (match env.find? f with | some (.ctorInfo _) => true | _ => false) && !isExtern env f
       let lent := ctx.decls.foldl (init := ({} : FVarIdSet)) fun s n d =>
         match flags.find? n with
-        | some b => (borrowedVars ctx.keys d b).foldl (fun s x => s.insert x) s
+        | some b => (borrowedVars ctx.keys isConst isCtor d b).foldl (fun s x => s.insert x) s
         | none => s
       pure (flags, lent)
     else pure ({}, {})

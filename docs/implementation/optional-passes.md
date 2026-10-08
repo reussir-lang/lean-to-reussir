@@ -121,7 +121,7 @@ and passes").
   closure captures (`holdsNoTask`, or the same test on a constant's
   value): natively a constant's first evaluation waits for the tasks its
   value holds, captured values included. In a program whose kept code makes resources
-  (`programMakesResources`: files, child processes), a value that may
+  (`programMakesResources`: files, child processes, promises), a value that may
   hold one is not replaced, at a field or at an unused parameter (F3, test
   `RtUnreadFieldsHandle`): natively the closure keeps the handle alive,
   and a handle released earlier is flushed and closed earlier. Which

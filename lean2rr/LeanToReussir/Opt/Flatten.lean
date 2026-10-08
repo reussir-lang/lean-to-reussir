@@ -1779,7 +1779,7 @@ def eligible (keys : NameMap InstKey) (excluded : NameSet) (d : Decl .pure) (fac
     ((keys.find? d.name).map (·.decl) |>.getD d.name) != ``IO.Process.output
 
 /-- In a program that creates resources whose release is observable (files,
-child processes: `programMakesResources`), lean2rr emulates native Lean's
+child processes, promises: `programMakesResources`), lean2rr emulates native Lean's
 release times by running Lean's own borrow inference on its declarations
 (Lower/Borrow). That inference depends on the code (a `cases` whose cell
 Lean's reset/reuse would give to the worker's tuple makes the matched

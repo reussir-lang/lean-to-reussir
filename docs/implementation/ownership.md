@@ -9,8 +9,9 @@ runtime.
 ### Borrowed parameters are emulated for resources
 
 - **What:** Only in a program that creates resources (files, temporary
-  files, child processes), lean2rr runs Lean's own borrow inference on
-  copies of its declarations and keeps an owned argument that may hold a
+  files, child processes, promises), lean2rr runs Lean's own borrow
+  inference on copies of its declarations and keeps an owned argument that
+  may hold a
   resource, passed to a borrowed parameter, alive until the call returns
   (`l2r_release_after`); arguments the caller only borrows itself are left
   alone, so loops keep their tail calls, and function values go through
@@ -19,12 +20,40 @@ runtime.
   an `lcAny`, a handle, or an inductive, array or reference with such a
   field at its type arguments), not on its Reussir type: with one type
   per inductive, a `List Nat` holds `Box`es, as a list of handles does.
-  The rules are in plan §5.8, "Borrowing".
+  Lean takes every parameter of an exported declaration (`@[export]`, and
+  `main`) owned, and decides that by name (`isExport`): the instances of
+  such a declaration (`helper._l2r_0`) are marked exported in the copy of
+  the environment that the inference uses. The rules are in plan §5.8,
+  "Borrowing".
 - **Why:** Natively the caller releases a borrowed argument after the
   call; Reussir releases at the last use, inside the callee. Only resources
   can tell: a handle written by a helper that then reads the file again
   (natively still buffered), a child's stdin pipe a helper writes and then
   waits on (natively no end of file yet) (3f72016, test `RtBorrowRelease`).
+  A promise can tell too: its last reference resolves its `result?` task
+  with `none`, so a helper that asks `IO.hasFinished` after its last use
+  of a borrowed promise got `true`, natively `false` (hunt3 own, test
+  `RtBorrowPromise`). The instances of an exported declaration have other
+  names than the declaration: their parameters were inferred borrowed, so
+  a handle written in an exported helper stayed open until the call
+  returned, where natively the helper's last use closes it (hunt3 own,
+  test `RtBorrowExport`). An element read with `a[i]!`
+  (`Array.get!Internal α inst a i`) derives from the array and from the
+  `Inhabited` instance (its value out of bounds): it is borrowed only when
+  both are, as in Lean's `explicitRc`. `borrowedVars` read argument 1 (the
+  instance) as the array: with an instance parameter and an array of the
+  function's own, the element was not kept and closed inside the callee
+  (hunt3 own, test `RtBorrowGetBang`); with the array alone checked, an
+  instance the function builds (`⟨some h⟩`) was not kept either (review,
+  test `RtBorrowGetBangDflt`). Values that Lean's inference does not make
+  owned and after which its `explicitRc` puts no `dec` are borrowed too:
+  the value of a constant (a closed term such as `#[]`, Lean's
+  `fap c #[]`), a constructor applied to no variable (it holds nothing:
+  `none`, a scalar natively, or one whose relevant fields are all `◾`), and a join point's parameter to which every jump passes such
+  a value or `◾`. Kept, they broke self tail calls that passed them to a
+  borrowed parameter, and loops of 10^6 steps overflowed an 8 MB stack
+  (hunt3 own and its review, tests `RtBorrowTailConst`,
+  `RtBorrowTailNone`, `RtBorrowTailNoneH`).
 - **Where:** `Lower/Borrow.lean`: `resourceExterns`,
   `programMakesResources`, `inferBorrowedParams`, `borrowedVars`,
   `borrowInfo`, `mayHoldResource`, `borrowKeeps`, `releaseAfter`,

@@ -1890,12 +1890,18 @@ Rules:
   call returns. Only resources can tell: natively a file handle written by
   a helper that borrows it is still open (its data still buffered) when the
   helper reads the file again; a child whose stdin pipe a helper borrows
-  does not see end of file while the helper waits for it. So for a program
-  that creates resources (it calls `IO.FS.Handle.mk`, `createTempFile` or
-  `IO.Process.spawn`), lean2rr runs Lean's own borrow inference on its mono
+  does not see end of file while the helper waits for it; a promise whose
+  `result?` task a helper asks about is not resolved yet (the last
+  reference to an unresolved promise resolves the task with `none`). So
+  for a program that creates resources (it calls `IO.FS.Handle.mk`,
+  `createTempFile`, `IO.Process.spawn` or `IO.Promise.new`), lean2rr runs
+  Lean's own borrow inference on its mono
   declarations (Lower/Borrow: copies go through `toImpure` and the impure
   passes up to `inferBorrow`, as Lean compiles its own declarations; extern
-  instances get their extern's `@&`) and emulates Lean's reference counting
+  instances get their extern's `@&`; the instances of an exported
+  declaration, `@[export]` or `main`, are marked exported, so their
+  parameters stay owned, as Lean's `isExport` keeps the declaration's) and
+  emulates Lean's reference counting
   where a value may hold a resource, decided on the mono type of the
   parameter it is passed to (a handle, which mono types `lcAny`, so any
   `lcAny`; an inductive or array with such a field at its type arguments,
@@ -1904,8 +1910,11 @@ Rules:
     the call returns (`l2r_release_after`, an effectful FFI call after the
     call, as Lean's `dec`), when the caller owns it; an argument the caller
     itself borrows (a borrowed parameter, a field or array element of one,
-    a join point parameter to which every jump passes such a value) is left
-    alone, as natively, so a loop's tail calls stay tail calls;
+    an `a[i]!` whose array and `Inhabited` instance are both such values,
+    the value of a constant, a constructor applied to no variable such as
+    `none`, a join point parameter to which every jump passes such a value
+    or `◾`) is left alone, as natively, so a loop's tail calls stay tail
+    calls;
   - a function value of such a declaration calls a `_boxed` variant that
     releases its borrowed arguments after the call, as Lean's `_boxed`
     functions do for closures;
