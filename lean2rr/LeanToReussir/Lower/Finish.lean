@@ -193,7 +193,10 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
           let .fn d c := dt | break
           if d == RR.Ty.phantom then largs := largs.push .erased
           else
-            largs := largs.push (.val (.var as[r]!) doms[r]!)
+            -- At `dst`'s own domain `d`, not at `doms[r]` (`d.rt`, the
+            -- same Reussir type): a function type in `d` keeps its phantom
+            -- domains, which a conversion compares (see the `.part` arm).
+            largs := largs.push (.val (.var as[r]!) d)
             r := r + 1
           dt := c
         -- `g` takes the Lean arguments of its own chain (`src`'s domains,
@@ -224,7 +227,14 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
             if tg.takes k then cargs := cargs.push (← zeroValue tg.params[k]!)
           else
             if r == j then break
-            if tg.takes k then cargs := cargs.push (← coerce (.var as[r]!) doms[r]! tg.params[k]!)
+            -- The argument is a value of the target's domain `d` (the type
+            -- of this partial application at Lean position `k`), held at
+            -- `doms[r]`, which is `d.rt`: the same Reussir type, but a
+            -- function type there has lost its phantom domains, and
+            -- converting from it would wrap the value as one whose `◾` is
+            -- an argument (a `(α : Type) → α → α` parameter got `box(0)`
+            -- for its value: test `RtApplyPhantomParam`).
+            if tg.takes k then cargs := cargs.push (← coerce (.var as[r]!) d tg.params[k]!)
             r := r + 1
           ty := c
           k := k + 1

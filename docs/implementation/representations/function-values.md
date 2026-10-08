@@ -111,7 +111,16 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   is dropped; a phantom domain gives a placeholder where the target takes
   the parameter), and a `w<S>` variant passes `◾` to `S` at its own type's
   phantom domains; `tryCoerce` needs no conversion at a phantom domain;
-  `reprCompatible` takes a phantom domain as a unit one.
+  `reprCompatible` takes a phantom domain as a unit one. The types with
+  one run-time type share one `l2r_ap<j>_T`, so its parameters have
+  run-time types (`Ty.rt`: no phantom domain at any depth). Each arm takes
+  an argument at the domain of its variant's own type (the target's type
+  for `p<j>`, `dst` for `w<S>`), not at the parameter's run-time type: the
+  two are one Reussir type, but a function type in the domain keeps its
+  phantom domains (`f : (α : Type) → α → α` is `◾ → Box → Box`), and the
+  conversion from the run-time type `Box → Box` wrapped the argument as a
+  function whose `◾` is an argument, so the target applied `box(0)` for
+  the value (hunt 3; test `RtApplyPhantomParam`).
 - **Why:** `◾` carries no information, and the run-time types are those
   of the dependent-types design (`ops_lam(xs)`). Removing a domain must not
   move the point where a body runs (Lean runs a body when its last
@@ -139,7 +148,8 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   `fnTypeItems`, `runtimeDomWithin`; `Lower/Conv.lean`: `tryCoerce`;
   `Lower/LazyGlue.lean`: `lazyExternGlue` (a task function whose domain is
   phantom); tests `RtErasedEarly`, `RtErasedUniform`, `RtErasedOps`,
-  `RtErasedTypeOnly`, `RtErasedAnyFlow`, `RtErasedFieldFlow*`.
+  `RtErasedTypeOnly`, `RtErasedAnyFlow`, `RtErasedFieldFlow*`,
+  `RtApplyPhantomParam`.
 - **Remove only if:** never (it is rule 4 of the dependent-types design).
   `layoutFieldTypes` must give the field types of the layout the lowering
   uses (rule 1's: a type parameter's field is `lcAny` and a field
