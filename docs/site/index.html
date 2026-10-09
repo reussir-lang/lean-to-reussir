@@ -9,7 +9,7 @@
 <body>
 <header class="top">
   <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
-  <nav class="main"><a href="index.html" class="here">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html">Representations</a><a href="dependent-types.html">Dependent types</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
+  <nav class="main"><a href="index.html" class="here">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html">Representations</a><a href="dependent-types.html">Dependent types</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
 </header>
 <div class="layout">
   <aside class="toc"><div class="tochead">On this page</div><div class="toc">
@@ -29,8 +29,7 @@
 <h1 id="lean2rr-architecture-and-design">lean2rr: architecture and design</h1>
 <p class="lead">lean2rr compiles Lean 4 programs to native executables through
 Reussir. This site explains the design with diagrams and short text. It
-describes the repository that it is built from: Lean v4.34.0, and Reussir
-with lean2rr's local patches (<code>l2r-base2</code> at b2e4a47e).</p>
+describes the repository that it is built from, with Lean v4.34.0.</p>
 
 <div class="note">
 <p><strong>How to read this site.</strong> Each page is a summary. The markdown documents
@@ -40,7 +39,6 @@ in the repository are the authority, and each page links to them:</p>
 <li><a href="../../docs/implementation-status.md">implementation status</a>: what works, results, performance;</li>
 <li><a href="../../docs/implementation/README.md">implementation notes</a>: every trick and special case;</li>
 <li><a href="../../runtime/README.md">runtime README</a>: the runtime's types and functions;</li>
-<li><a href="../../reussir-bugs/README.md">Reussir issues</a>: every Reussir problem (a bug, a cost or another kind), with its patch;</li>
 <li><a href="../../tests/README.md">tests README</a>: the test sets and the findings they cover.</li>
 </ul>
 <p>The <a href="glossary.html">glossary</a> defines the terms that these pages use.</p>
@@ -204,10 +202,6 @@ other results are the last recorded runs.</p>
 <td>Speed</td>
 <td>against native Lean 4.34.0 (2026-10-04, largest size): faster on 15 of the 18 classic programs, about equal on the other 3; geometric mean 0.71× time and 0.69× memory; less memory on all 18</td>
 </tr>
-<tr>
-<td>Reussir</td>
-<td>35 local patches applied†, 34-a (position-independent code) and 35-a (texture cache) included</td>
-</tr>
 </tbody>
 </table>
 <p><a href="testing.html">Testing</a> explains each test set and the review process.</p>
@@ -268,12 +262,6 @@ other results are the last recorded runs.</p>
   <a href="representations.html#strings-and-arrays">Representations</a>). In
   lean-zip's compression loop, the counting stores fell from 77 to 47 and
   the read calls from 281 to 2.</li>
-<li><strong>Reussir.</strong> Patches 34-a and 35-a are applied. Each
-  entry is now a numbered <em>issue</em> with a kind: only a <em>bug</em> is wrong
-  behaviour (see <a href="reussir.html#all-entries">Reussir</a>). The stack's base
-  is Reussir's <code>main</code> at <code>943f2195</code>. It has five of lean2rr's
-  bug fixes (pull requests #651 to #655), so the series has
-  35 patches.</li>
 <li><strong>A read of a constant is one load.</strong> Each once-cell's value is also
   kept in a table at a fixed address, so a read is one load and a test, with
   no call (lean-zip fix 4). In lean-zip's codec loops, the once-cell calls
@@ -292,7 +280,7 @@ possible future work.</p>
 <div class="cards">
 <div class="card">
 <h4 id="pipeline"><a href="pipeline.html">Pipeline</a></h4>
-<p>The stages from <code>.olean</code> to executable: what goes in, what comes out, and the key decisions.</p>
+<p>The stages from <code>.olean</code> to executable: what goes in, what comes out, what Reussir does, and the key decisions.</p>
 </div>
 <div class="card">
 <h4 id="representations"><a href="representations.html">Representations</a></h4>
@@ -313,10 +301,6 @@ possible future work.</p>
 <div class="card">
 <h4 id="testing"><a href="testing.html">Testing</a></h4>
 <p>Native builds as the oracle, the test sets, the review rounds.</p>
-</div>
-<div class="card">
-<h4 id="reussir"><a href="reussir.html">Reussir</a></h4>
-<p>What Reussir is, how lean2rr calls it, the issues met and the local patches.</p>
 </div>
 <div class="card">
 <h4 id="known-differences"><a href="differences.html">Known differences</a></h4>

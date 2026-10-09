@@ -9,7 +9,7 @@
 <body>
 <header class="top">
   <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
-  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html" class="here">Representations</a><a href="dependent-types.html">Dependent types</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
+  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html" class="here">Representations</a><a href="dependent-types.html">Dependent types</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
 </header>
 <div class="layout">
   <aside class="toc"><div class="tochead">On this page</div><div class="toc">
@@ -150,11 +150,11 @@ heap cell. A <em><code>[value]</code></em> type is stored inline and is never al
 </tbody>
 </table>
 <h2 id="numbers">Numbers</h2>
-<figure class="fig" id="fig-natword"><svg class="diagram" viewBox="0 0 900 215" width="900" role="img" aria-labelledby="natword-title"><title id="natword-title">One-word Nat and Int</title><defs><marker id="natword-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><text x="10" y="28" text-anchor="start" class="t">small value n (a Nat below 2^63, an Int in the int32 range): the word 2n+1</text><rect x="10" y="40" width="440" height="34" rx="0" class="c-data"/><text x="230" y="62" text-anchor="middle" class="tc">n  (bits 63 to 1)</text><rect x="450" y="40" width="40" height="34" rx="0" class="c-tag"/><text x="470" y="62" text-anchor="middle" class="tc">1</text><text x="10" y="108" text-anchor="start" class="t">big value: an even word, the address of a counted big-number block</text><rect x="10" y="120" width="440" height="34" rx="0" class="c-ptr"/><text x="230" y="142" text-anchor="middle" class="tc">address (8-aligned)</text><rect x="450" y="120" width="40" height="34" rx="0" class="c-tag"/><text x="470" y="142" text-anchor="middle" class="tc">0</text><line x1="490" y1="137" x2="555" y2="137" class="ar" marker-end="url(#natword-ah)"/><rect x="560" y="117" width="300" height="40" rx="6" class="b-rt"/><text x="710.0" y="141.5" text-anchor="middle" class="tb">big-number block (next figure)</text><text x="10" y="192" text-anchor="start" class="ts">Copying or dropping a small value costs one bit test. A small value is never allocated.</text></svg><figcaption>A <code>Nat</code> or <code>Int</code> is one 64-bit word. Reussir counts the word only when its low bit is 0 (tagged handles, local patch 41-a).</figcaption></figure>
+<figure class="fig" id="fig-natword"><svg class="diagram" viewBox="0 0 900 215" width="900" role="img" aria-labelledby="natword-title"><title id="natword-title">One-word Nat and Int</title><defs><marker id="natword-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><text x="10" y="28" text-anchor="start" class="t">small value n (a Nat below 2^63, an Int in the int32 range): the word 2n+1</text><rect x="10" y="40" width="440" height="34" rx="0" class="c-data"/><text x="230" y="62" text-anchor="middle" class="tc">n  (bits 63 to 1)</text><rect x="450" y="40" width="40" height="34" rx="0" class="c-tag"/><text x="470" y="62" text-anchor="middle" class="tc">1</text><text x="10" y="108" text-anchor="start" class="t">big value: an even word, the address of a counted big-number block</text><rect x="10" y="120" width="440" height="34" rx="0" class="c-ptr"/><text x="230" y="142" text-anchor="middle" class="tc">address (8-aligned)</text><rect x="450" y="120" width="40" height="34" rx="0" class="c-tag"/><text x="470" y="142" text-anchor="middle" class="tc">0</text><line x1="490" y1="137" x2="555" y2="137" class="ar" marker-end="url(#natword-ah)"/><rect x="560" y="117" width="300" height="40" rx="6" class="b-rt"/><text x="710.0" y="141.5" text-anchor="middle" class="tb">big-number block (next figure)</text><text x="10" y="192" text-anchor="start" class="ts">Copying or dropping a small value costs one bit test. A small value is never allocated.</text></svg><figcaption>A <code>Nat</code> or <code>Int</code> is one 64-bit word. Reussir counts the word only when its low bit is 0 (a tagged handle).</figcaption></figure>
 <p><code>Nat</code> and <code>Int</code> use Lean's own encoding of small values. Reussir inserts the
 reference counting, and normally it counts every handle at its address. A
-small <code>Nat</code> has no address. Local Reussir patch 41-a adds <em>tagged opaque
-handles</em>: Reussir counts such a handle only when its low bit is 0. So copying
+small <code>Nat</code> has no address. So <code>Nat</code> and <code>Int</code> are <em>tagged opaque
+handles</em>: Reussir counts such a handle only when its low bit is 0. Copying
 or dropping a small value costs one bit test, as natively.</p>
 <p>The prelude's functions take each argument as its raw word once
 (<code>l2r_nat_raw</code>). Small values are computed inline; a big value or an
@@ -309,8 +309,8 @@ extension.</p>
   box. <code>Option Nat</code> and <code>Option α</code> are one type, and a value goes from one
   to the other as it is.</li>
 <li><strong>Field order.</strong> Fields are sorted by decreasing alignment, so records
-  have no padding (pass <code>field-order</code>). Reussir's own member packing is off,
-  because its in-place reuse mishandled packed fields (Reussir bug 2).</li>
+  have no padding (pass <code>field-order</code>). Reussir's own member packing is
+  off.</li>
 <li><strong>Recursive and mutual types</strong> refer to each other's types.</li>
 <li><strong>Computed fields</strong> (<code>Lean.Name</code>): the implementation type <code>T._impl</code>, as
   in Lean's runtime.</li>

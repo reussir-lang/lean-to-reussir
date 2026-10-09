@@ -2,8 +2,7 @@
 
 <p class="lead">lean2rr compiles Lean 4 programs to native executables through
 Reussir. This site explains the design with diagrams and short text. It
-describes the repository that it is built from: Lean {{v:lean}}, and Reussir
-with lean2rr's local patches (<code>{{v:reussir_branch}}</code> at {{v:reussir_head}}).</p>
+describes the repository that it is built from, with Lean {{v:lean}}.</p>
 
 <div class="note" markdown="1">
 **How to read this site.** Each page is a summary. The markdown documents
@@ -13,7 +12,6 @@ in the repository are the authority, and each page links to them:
 - [implementation status](repo:docs/implementation-status.md): what works, results, performance;
 - [implementation notes](repo:docs/implementation/README.md): every trick and special case;
 - [runtime README](repo:runtime/README.md): the runtime's types and functions;
-- [Reussir issues](repo:reussir-bugs/README.md): every Reussir problem (a bug, a cost or another kind), with its patch;
 - [tests README](repo:tests/README.md): the test sets and the findings they cover.
 
 The [glossary](glossary.html) defines the terms that these pages use.
@@ -137,7 +135,6 @@ other results are the last recorded runs.
 | Lean's own compile tests | 72 programs of Lean's `tests/compile` and `tests/compile_bench`: all match native (checked with Lean 4.33) |
 | Externs of `Init` and `Std` | all 717 of Lean 4.34 available; 706 checked by programs that call each one |
 | Speed | against native Lean 4.34.0 (2026-10-04, largest size): faster on 15 of the 18 classic programs, about equal on the other 3; geometric mean 0.71× time and 0.69× memory; less memory on all 18 |
-| Reussir | {{v:patches_applied}} local patches applied†, 34-a (position-independent code) and 35-a (texture cache) included |
 
 [Testing](testing.html) explains each test set and the review process.
 
@@ -199,12 +196,6 @@ Merged from 2026-10-04 to 2026-10-07:
   [Representations](representations.html#strings-and-arrays)). In
   lean-zip's compression loop, the counting stores fell from 77 to 47 and
   the read calls from 281 to 2.
-- **Reussir.** Patches 34-a and 35-a are applied. Each
-  entry is now a numbered *issue* with a kind: only a *bug* is wrong
-  behaviour (see [Reussir](reussir.html#all-entries)). The stack's base
-  is Reussir's `main` at `{{v:reussir_base}}`. It has five of lean2rr's
-  bug fixes (pull requests #651 to #655), so the series has
-  {{v:patches_total}} patches.
 - **A read of a constant is one load.** Each once-cell's value is also
   kept in a table at a fixed address, so a read is one load and a test, with
   no call (lean-zip fix 4). In lean-zip's codec loops, the once-cell calls
@@ -225,7 +216,7 @@ possible future work.
 <div class="cards" markdown="1">
 <div class="card" markdown="1">
 #### [Pipeline](pipeline.html)
-The stages from `.olean` to executable: what goes in, what comes out, and the key decisions.
+The stages from `.olean` to executable: what goes in, what comes out, what Reussir does, and the key decisions.
 </div>
 <div class="card" markdown="1">
 #### [Representations](representations.html)
@@ -246,10 +237,6 @@ Each optimization, what it does and what guards it. Generated from the registry.
 <div class="card" markdown="1">
 #### [Testing](testing.html)
 Native builds as the oracle, the test sets, the review rounds.
-</div>
-<div class="card" markdown="1">
-#### [Reussir](reussir.html)
-What Reussir is, how lean2rr calls it, the issues met and the local patches.
 </div>
 <div class="card" markdown="1">
 #### [Known differences](differences.html)

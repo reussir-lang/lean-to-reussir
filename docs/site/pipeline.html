@@ -9,7 +9,7 @@
 <body>
 <header class="top">
   <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
-  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html" class="here">Pipeline</a><a href="representations.html">Representations</a><a href="dependent-types.html">Dependent types</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
+  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html" class="here">Pipeline</a><a href="representations.html">Representations</a><a href="dependent-types.html">Dependent types</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="differences.html">Known differences</a><a href="glossary.html">Glossary</a></nav>
 </header>
 <div class="layout">
   <aside class="toc"><div class="tochead">On this page</div><div class="toc">
@@ -363,7 +363,7 @@ entry point or from the runtime's entries. See
 <h2 id="after-lowering">After lowering</h2>
 <ul>
 <li><strong>Outline.</strong> rrc's analyses grow faster than linearly with nesting depth
-  and with straight-line length (Reussir issues 16 and 17, costs). So a tail path 32
+  and with straight-line length. So a tail path 32
   matches deep or 256 <code>let</code>s long is cut into functions. A recursive function
   keeps its loops: the cut part returns a step value, and the function makes
   the tail call itself.</li>
@@ -372,7 +372,49 @@ entry point or from the runtime's entries. See
   prepended (<code>prelude-liveness</code>).</li>
 </ul>
 <h2 id="rrc">rrc</h2>
+<p>Reussir is a research compiler framework for reference-counted functional
+programs (github.com/reussir-lang/reussir). Its front end is in Rust, its
+back end in MLIR and C++, its runtime in Rust. Reusable memory is explicit
+in its IR: a cell that dies becomes a <em>token</em>, and a later allocation of
+the same size can use the token instead of new memory. Reussir does the
+ownership analysis (Perceus-style reference counting), token reuse, drop
+glue and LLVM code generation. <code>rrc</code> is its compiler driver.</p>
 <figure class="fig" id="fig-rrc"><svg class="diagram" viewBox="0 0 900 170" width="900" role="img" aria-labelledby="rrc-title"><title id="rrc-title">What rrc does with prog.rr</title><defs><marker id="rrc-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="40" width="120" height="60" rx="6" class="b-l2r"/><text x="70.0" y="67.5" text-anchor="middle" class="tb">prog.rr</text><text x="70.0" y="83.5" text-anchor="middle" class="ts">with prelude</text><line x1="130" y1="70" x2="160" y2="70" class="ar" marker-end="url(#rrc-ah)"/><rect x="165" y="30" width="150" height="80" rx="6" class="b-rr"/><text x="240.0" y="60.5" text-anchor="middle" class="tb">Reussir front end</text><text x="240.0" y="76.5" text-anchor="middle" class="ts">parse, types,</text><text x="240.0" y="91.5" text-anchor="middle" class="ts">textures (Rust FFI)</text><line x1="315" y1="70" x2="345" y2="70" class="ar" marker-end="url(#rrc-ah)"/><rect x="350" y="20" width="220" height="100" rx="6" class="b-rr"/><text x="460.0" y="46.5" text-anchor="middle" class="tb">MLIR passes</text><text x="460.0" y="62.5" text-anchor="middle" class="ts">ownership: rc.inc / rc.dec</text><text x="460.0" y="77.5" text-anchor="middle" class="ts">token reuse (cells used</text><text x="460.0" y="92.5" text-anchor="middle" class="ts">again in place)</text><text x="460.0" y="107.5" text-anchor="middle" class="ts">drop glue</text><line x1="570" y1="70" x2="600" y2="70" class="ar" marker-end="url(#rrc-ah)"/><rect x="605" y="30" width="130" height="80" rx="6" class="b-rr"/><text x="670.0" y="60.5" text-anchor="middle" class="tb">LLVM</text><text x="670.0" y="76.5" text-anchor="middle" class="ts">optimization,</text><text x="670.0" y="91.5" text-anchor="middle" class="ts">code generation</text><line x1="735" y1="70" x2="765" y2="70" class="ar" marker-end="url(#rrc-ah)"/><rect x="770" y="30" width="120" height="80" rx="6" class="b-rt"/><text x="830.0" y="53.5" text-anchor="middle" class="tb">link</text><text x="830.0" y="69.5" text-anchor="middle" class="ts">leanrt,</text><text x="830.0" y="84.5" text-anchor="middle" class="ts">lean-runtime,</text><text x="830.0" y="99.5" text-anchor="middle" class="ts">libgmp.a</text><text x="10" y="150" text-anchor="start" class="ts">Textures (the Rust bodies of #[ffi(import)] functions) are compiled by rustc and can be inlined into Reussir code.</text></svg><figcaption><code>scripts/l2r.py</code> runs <code>rrc</code> with <code>-O aggressive --no-pack-record-members --reuse-across-call --no-closure-wpd --relocation-mode pic</code>.</figcaption></figure>
+<p>What lean2rr uses from Reussir:</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>lean2rr's use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>shared and <code>[value]</code> records and enums</td>
+<td>Lean's inductive types (<a href="representations.html">Representations</a>)</td>
+</tr>
+<tr>
+<td>opaque <code>#[ffi]</code> types</td>
+<td><code>LStr</code>, <code>RVec</code>, <code>LCell</code>, handles: runtime types that do their own counting</td>
+</tr>
+<tr>
+<td>tagged opaque handles</td>
+<td>one-word <code>Nat</code> and <code>Int</code></td>
+</tr>
+<tr>
+<td>textures (<code>#[ffi(import)]</code> functions with a Rust body)</td>
+<td>the prelude's calls into <code>leanrt</code>; inlined when compiled for the same CPU</td>
+</tr>
+<tr>
+<td>token reuse, <code>--reuse-across-call</code></td>
+<td>in-place updates, as Lean's reset/reuse</td>
+</tr>
+<tr>
+<td><code>#[transform_anchor]</code></td>
+<td>keeps unboxing, wrapper and cast functions out of Reussir's MLIR inliner</td>
+</tr>
+</tbody>
+</table>
 <p>The driver builds the shared crate <code>lean-runtime</code> (the pinned submodule,
 with cargo) and the runtime crate <code>leanrt</code>, each one cached. Then it runs
 lean2rr and rrc, and links <code>leanrt</code>, <code>lean-runtime</code> and GMP. rrc compiles
@@ -380,9 +422,7 @@ each <em>texture</em> (the Rust body of a prelude function) with rustc, one run
 per texture. lean2rr writes only the prelude functions that the program
 uses, so a small program has about 75 textures, not about 480. The driver
 gives rrc a cache directory, so rrc does not compile an unchanged texture
-again (Reussir patch 35-a). If rrc crashes, the driver tries once more without
-<code>--reuse-across-call</code> (a workaround for Reussir bug 4). See
-<a href="reussir.html">Reussir</a>.</p>
+again.</p>
 <h2 id="key-decisions">Key decisions</h2>
 <table>
 <thead>

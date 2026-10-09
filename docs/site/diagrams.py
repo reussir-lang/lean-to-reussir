@@ -292,8 +292,7 @@ def reussir_path():
 def nat_word():
     s = SVG("natword", 900, 215, "One-word Nat and Int",
             "A <code>Nat</code> or <code>Int</code> is one 64-bit word. Reussir "
-            "counts the word only when its low bit is 0 (tagged handles, local "
-            "patch 41-a).")
+            "counts the word only when its low bit is 0 (a tagged handle).")
     s.text(10, 28, "small value n (a Nat below 2^63, an Int in the int32 range): the word 2n+1", "t")
     s.rect(10, 40, 440, 34, "c-data")
     s.text(230, 62, "n  (bits 63 to 1)", "tc", "middle")
@@ -479,7 +478,7 @@ def layers():
                           "float text, once-cells, glue for lean-runtime's IO, its",
                           "scheduler (task cells, the suspend step) and its event loop"], "b-rt")
     s.box(10, 268, W, 50, ["reussir_rt (Reussir's runtime)",
-                          "Rc, the pending stack for frees (local patches 13-a to 13-c), mimalloc"], "b-rr")
+                          "Rc, the pending stack for frees, mimalloc"], "b-rr")
     s.box(10, 332, W, 50, ["System", "libc, libm, GMP, the kernel"], "b-lean")
     s.box(680, 170, 250, 120, ["lean-runtime (submodule)", "a shared crate: Lean's",
                               "runtime rules (semantics, IO,", "startup, the scheduler, the",
@@ -540,7 +539,7 @@ def scheduler():
 def free_stack():
     s = SVG("free", 940, 205, "Freeing without recursion",
             "Native Lean frees iteratively. Here the runtime's containers and "
-            "Reussir's drop glue (local patches 13-a to 13-c) share one stack of "
+            "Reussir's drop glue share one stack of "
             "pending work per thread, popped last first.")
     s.box(10, 50, 170, 70, ["last reference", "released", "(count was 1)"], "b-l2r")
     s.arrow(180, 85, 230, 85)

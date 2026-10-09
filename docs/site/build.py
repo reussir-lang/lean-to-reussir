@@ -17,6 +17,9 @@ What it does:
   attributes) into relative links to the repository's files;
 - checks the sources against each other and prints a warning for each
   disagreement;
+- leaves out the references to Reussir's issues, local patches and
+  workarounds in the texts that it takes from the repository (site_text),
+  and prints a warning for a page that still has one;
 - refuses to write a page that contains a forbidden string (FORBIDDEN):
   the site is public.
 
@@ -50,7 +53,6 @@ PAGES = [
     ("runtime", "Runtime"),
     ("passes", "Optional passes"),
     ("testing", "Testing"),
-    ("reussir", "Reussir"),
     ("differences", "Known differences"),
     ("glossary", "Glossary"),
 ]
@@ -66,6 +68,20 @@ if os.path.exists(_LOCAL_FORBIDDEN):
         FORBIDDEN += [line.strip() for line in _f if line.strip() and not line.startswith("#")]
 
 WARNINGS = []
+
+# The site does not describe Reussir's issues, lean2rr's local Reussir
+# patches or lean2rr's workarounds for them: they stay in reussir-bugs/ and
+# docs/implementation/reussir-workarounds/. site_text() removes such
+# references from texts taken from the repository; a page that still has
+# one gets a warning (REUSSIR_REF).
+REUSSIR_REF = re.compile(r"(?i)reussir-bugs|reussir (?:issues?|bugs?|patch(?:es)?)\b|local patch"
+                         r"|reussir[\w -]{0,30} workaround")
+
+
+def site_text(s):
+    s = re.sub(r"\s*\((?:workaround for )?Reussir (?:issues?|bugs?) [^()]*\)", "", s)
+    s = re.sub(r"\s*\(Reussir [\w-]+ workaround\)", "", s)
+    return re.sub(r";\s*reussir-bugs/[\w./-]+", "", s)
 
 
 def warn(msg):
@@ -199,11 +215,11 @@ def gen_passes():
             warn(f"pass {name} is in Opt/Registry.lean but not in docs/implementation/optional-passes.md")
             guard, detail = "(not documented)", ""
         else:
-            guard = md_inline(g[0], "docs/implementation")
-            detail = md_inline(g[1], "docs/implementation") if g[1] != "below" else \
+            guard = md_inline(site_text(g[0]), "docs/implementation")
+            detail = md_inline(site_text(g[1]), "docs/implementation") if g[1] != "below" else \
                 md_inline("[optional-passes.md](optional-passes.md)", "docs/implementation")
         rows.append([str(i), f"<code>{html.escape(name)}</code>", "on" if on == "true" else "off",
-                     html.escape(unquote(desc)), guard, detail])
+                     html.escape(site_text(unquote(desc))), guard, detail])
     names = [o[0] for o in opts]
     for name in guards:
         if name not in names:
@@ -218,7 +234,8 @@ def gen_passes():
 
 def gen_required():
     _, req, _ = registry()
-    rows = [[f"<code>{html.escape(n)}</code>", html.escape(unquote(d)), html.escape(unquote(w))]
+    rows = [[f"<code>{html.escape(n)}</code>", html.escape(site_text(unquote(d))),
+             html.escape(site_text(unquote(w)))]
             for n, d, w in req]
     return md_table(rows, ["Part", "What it is", "Why it is not optional"])
 
@@ -228,23 +245,8 @@ def gen_stage2():
     rows = []
     for kind, lean_pass, copy, why in st2:
         what = f"replaced by <code>{html.escape(copy)}</code>" if kind == "replace" else "not run here"
-        rows.append([f"<code>{html.escape(lean_pass)}</code>", what, html.escape(unquote(why))])
+        rows.append([f"<code>{html.escape(lean_pass)}</code>", what, html.escape(site_text(unquote(why)))])
     return md_table(rows, ["Lean's pass", "In lean2rr", "Why"])
-
-
-def gen_patches():
-    rows = parse_md_table(read("reussir-bugs/README.md"), "#")
-    out = []
-    for r in rows:
-        if len(r) < 8:
-            continue
-        num, kind, effect, affects, workaround, patch, _review, applied = r[:8]
-        out.append([md_inline(c, "reussir-bugs")
-                    for c in (num, kind, effect, affects, workaround, patch, applied)])
-    if not out:
-        warn("no status table found in reussir-bugs/README.md")
-    return md_table(out, ["Issue", "Kind", "Effect", "Affects lean2rr output?",
-                          "lean2rr workaround", "Patch", "Applied"], "tbl small")
 
 
 def gen_classic():
@@ -298,8 +300,6 @@ def gen_testsets():
         ["Conversion counter", "<code>tests/runtime/conv-count-check.sh</code>", "9 programs",
          "no conversion function in eight programs whose containers cross between typed and generic code; "
          "a cast between inductives whose layouts differ converts, counts its elements and prints what native prints"],
-        ["Reussir repros", "<code>reussir-bugs/repros/run.sh</code>", "one per Reussir issue",
-         "REPRODUCES or FIXED for each issue, on a given rrc"],
     ]
     return md_table(rows, ["Set", "Runner", "Size (counted from the repository)", "What it checks"])
 
@@ -369,7 +369,6 @@ GENERATORS = {
     "passes": gen_passes,
     "required": gen_required,
     "stage2": gen_stage2,
-    "patches": gen_patches,
     "classic": gen_classic,
     "testsets": gen_testsets,
     "xfail": gen_xfail,
@@ -385,21 +384,6 @@ def values():
     tool = read("lean2rr/lean-toolchain").strip()
     tests, xfail = runtime_tests()
     opts, req, _ = registry()
-    rb = read("reussir-bugs/README.md")
-    # "Its branch `NAME` (head `SHA`) is BASE plus the [first] N patches of the series"
-    m = re.search(r"branch\s+`([\w.-]+)`\s+\(head\s+`([0-9a-f]+)`\)\s+is\s+`?([0-9a-f]{7,40})`?\s+plus\s+the\s+"
-                  r"(?:first\s+)?(\d+)\s+patches\s+of\s+the\s+series", rb)
-    rbranch, rhead, rbase, applied = ((m.group(1), m.group(2), m.group(3), int(m.group(4))) if m
-                                      else ("?", "?", "?", 0))
-    series = read("reussir-bugs/patches/series").split()
-    pdir = os.path.join(REPO, "reussir-bugs", "patches")
-    files = sorted(f for f in os.listdir(pdir) if f.endswith(".patch"))
-    if sorted(series) != files:
-        warn("reussir-bugs/patches/series does not list exactly the patch files of reussir-bugs/patches/")
-    if not m or applied > len(series):
-        warn(f"reussir-bugs/README.md does not say which Reussir branch has how many of the {len(series)} "
-             "patches of the series ('Its branch `NAME` (head `SHA`) is BASE plus the [first] N patches "
-             "of the series')")
     m3 = re.search(r"Runtime test suite \((\d+) programs", read("docs/implementation-status.md"))
     if m3 and int(m3.group(1)) != len(tests):
         warn(f"docs/implementation-status.md says {m3.group(1)} runtime tests; tests/runtime has {len(tests)}")
@@ -410,12 +394,6 @@ def values():
         "env_cases": str(len(env_checks())),
         "opt_count": str(len(opts)),
         "req_count": str(len(req)),
-        "reussir_branch": rbranch,
-        "reussir_head": rhead,
-        "reussir_base": rbase,
-        "patches_applied": str(applied),
-        "patches_total": str(len(series)),
-        "bug_entries": str(len(parse_md_table(rb, "#"))),
     }
 
 
@@ -519,6 +497,9 @@ def main():
     pages = {}
     for name, title in PAGES:
         out = render_page(name, title, vals)
+        for m in REUSSIR_REF.finditer(out):
+            warn(f"{name}.html: a reference to a Reussir issue, patch or workaround: "
+                 f"...{out[max(0, m.start() - 60):m.end() + 20]}...")
         bad = forbidden_in(out)
         if bad:
             errors.append(f"{name}.html: forbidden {bad}")

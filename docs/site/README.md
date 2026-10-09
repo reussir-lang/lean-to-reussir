@@ -6,8 +6,15 @@ clone (`file://`). The site needs no network, no CDN and no JavaScript.
 
 The site summarizes. The markdown documents in the repository
 (`docs/translation-plan.md`, `docs/implementation/`, `runtime/README.md`,
-`reussir-bugs/`, `tests/README.md`) are the authority, and the pages link to
-them.
+`tests/README.md`) are the authority, and the pages link to them.
+
+The site describes lean2rr and the Reussir code that it generates. It does
+not describe the local Reussir patches, Reussir's bugs and other issues,
+the patch series, the Reussir commit or branch that the builds use, or
+lean2rr's workarounds for Reussir bugs. That material stays in
+`reussir-bugs/` and `docs/implementation/reussir-workarounds/`. A rule of
+lean2rr that exists because of a Reussir issue stays on the site, without
+the reference to the issue.
 
 ## Files
 
@@ -43,7 +50,7 @@ shows: a source it reads (below), a page, a diagram or the style.
 |---|---|
 | `{{svg:NAME}}` | the diagram `NAME` of `diagrams.DIAGRAMS` |
 | `{{gen:NAME}}` | a table that `build.py` generates from the repository (`GENERATORS`) |
-| `{{v:NAME}}` | a short value: the Lean version, Reussir's patched head, counts (`values()`) |
+| `{{v:NAME}}` | a short value: the Lean version, counts (`values()`) |
 | a link target `repo:PATH` (in a Markdown link or an `href`) | a relative link to `PATH` in the repository |
 
 What is generated, and from where:
@@ -51,7 +58,6 @@ What is generated, and from where:
 | Generated part | Source |
 |---|---|
 | the pass table, the required parts, the Stage 2 edits | `lean2rr/LeanToReussir/Opt/Registry.lean`; the guards from `docs/implementation/optional-passes.md` |
-| the Reussir entries and patches | the status table of `reussir-bugs/README.md`; the patch counts from `reussir-bugs/patches/series` and the README's "plus the first N patches of the series" |
 | test counts, `.xfail` tests, loader checks | `tests/runtime/`, `tests/env/run.sh`, `tests/classic/cases.json`; the `#[test]`s of `runtime/leanrt/src` |
 | the classic corpus table | the "Cases" table of `tests/README.md` |
 | the index of known differences | the groups and items of plan §10 |
@@ -69,10 +75,7 @@ disagreement (`--check` fails on a warning):
 - every pass of the registry is in `optional-passes.md` and in the pass
   table of `docs/implementation-status.md`, and the reverse;
 - the runtime test count in `docs/implementation-status.md` matches
-  `tests/runtime`;
-- `reussir-bugs/patches/series` lists exactly the patch files of
-  `reussir-bugs/patches/`, and `reussir-bugs/README.md` names the Reussir
-  branch that has them and says how many it has.
+  `tests/runtime`.
 
 ## Keeping it up to date
 

@@ -46,8 +46,8 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 
 `Nat` and `Int` use Lean's own encoding of small values. Reussir inserts the
 reference counting, and normally it counts every handle at its address. A
-small `Nat` has no address. Local Reussir patch 41-a adds *tagged opaque
-handles*: Reussir counts such a handle only when its low bit is 0. So copying
+small `Nat` has no address. So `Nat` and `Int` are *tagged opaque
+handles*: Reussir counts such a handle only when its low bit is 0. Copying
 or dropping a small value costs one bit test, as natively.
 
 The prelude's functions take each argument as its raw word once
@@ -158,8 +158,8 @@ Other rules:
   box. `Option Nat` and `Option α` are one type, and a value goes from one
   to the other as it is.
 - **Field order.** Fields are sorted by decreasing alignment, so records
-  have no padding (pass `field-order`). Reussir's own member packing is off,
-  because its in-place reuse mishandled packed fields (Reussir bug 2).
+  have no padding (pass `field-order`). Reussir's own member packing is
+  off.
 - **Recursive and mutual types** refer to each other's types.
 - **Computed fields** (`Lean.Name`): the implementation type `T._impl`, as
   in Lean's runtime.

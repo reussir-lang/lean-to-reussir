@@ -9,7 +9,7 @@
 <body>
 <header class="top">
   <div class="brand"><a href="index.html">lean2rr</a> <span>architecture and design</span></div>
-  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html">Representations</a><a href="dependent-types.html">Dependent types</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="reussir.html">Reussir</a><a href="differences.html">Known differences</a><a href="glossary.html" class="here">Glossary</a></nav>
+  <nav class="main"><a href="index.html">Overview</a><a href="pipeline.html">Pipeline</a><a href="representations.html">Representations</a><a href="dependent-types.html">Dependent types</a><a href="runtime.html">Runtime</a><a href="passes.html">Optional passes</a><a href="testing.html">Testing</a><a href="differences.html">Known differences</a><a href="glossary.html" class="here">Glossary</a></nav>
 </header>
 <div class="layout">
   <aside class="toc"><div class="tochead">On this page</div><div class="toc">
@@ -101,7 +101,7 @@ each concept has one term.</p>
 <dt>immediate</dt>
 <dd>A constructor without fields of a shared enum: a tagged pointer to a static cell, never allocated.</dd>
 <dt>tagged handle</dt>
-<dd>An opaque Reussir handle that may be a number instead of a pointer (local patch 41-a). Reussir counts it only when its low bit is 0. <code>Nat</code> and <code>Int</code> are tagged handles.</dd>
+<dd>An opaque Reussir handle that may be a number instead of a pointer. Reussir counts it only when its low bit is 0. <code>Nat</code> and <code>Int</code> are tagged handles.</dd>
 <dt>box (<code>LAny</code>)</dt>
 <dd>The uniform type: one word, as Lean's <code>lean_object*</code>. An odd word is an immediate (a small scalar, a small <code>Nat</code>, an enumeration's index, <code>box(0)</code>). An even word points to a counted object and holds the object's type number in its top 16 bits. It stores a value whose type is not statically known, and every field, array element and cell value of a parameter's type. Code that needs the concrete type checks the word.</dd>
 <dt>type number</dt>
@@ -144,7 +144,7 @@ each concept has one term.</p>
 <dt>wait core</dt>
 <dd>A wait protocol of lean-runtime's scheduler: the wait for a thunk or a constant that another context computes, the reference rule of a program that creates tasks, and the resolution of a promise put off to the end of a free.</dd>
 <dt>pending stack</dt>
-<dd>The per-thread stack of cells to free. Frees use it instead of recursion (local patches 13-a to 13-c).</dd>
+<dd>The per-thread stack of cells to free. Frees use it instead of recursion.</dd>
 <dt>internal panic</dt>
 <dd>An error of the runtime itself that ends the program at once, as Lean's <code>lean_internal_panic</code>: <code>INTERNAL PANIC:</code> and a message on the process's stderr (for example <code>out of memory</code>), then exit status 1, or an abort (134) under <code>LEAN_ABORT_ON_PANIC</code>. A <code>panic!</code> is not one: it prints its message and the program goes on.</dd>
 </dl>
@@ -156,10 +156,6 @@ each concept has one term.</p>
 <dd>Reussir's compiler driver.</dd>
 <dt>token reuse</dt>
 <dd>Reussir's way to build a new cell in the memory of a cell that dies (Lean's reset/reuse).</dd>
-<dt>local patch</dt>
-<dd>A change to Reussir that lean2rr's builds use, on branch <code>l2r-base2</code> of <code>./reussir</code>. lean2rr's work does not push it upstream. A <em>parked</em> patch is kept outside the series: the builds do not apply it.</dd>
-<dt>issue</dt>
-<dd>A numbered entry of <code>reussir-bugs/README.md</code>: a Reussir problem that lean2rr met. Its kind (bug, cost, missed optimization, missing feature, intended) says what it is. Only a bug is wrong behaviour.</dd>
 </dl>
 <h2 id="testing-and-review">Testing and review</h2>
 <dl>

@@ -51,7 +51,7 @@ and several optional passes help token reuse (see
 
 - **Containers of the runtime** (arrays, string blocks, task and thunk cells)
   are `leanrt` types. Their `Drop` frees the last reference through the same
-  per-thread stack that Reussir's drop glue uses (local patch 13-b). So a
+  per-thread stack that Reussir's drop glue uses. So a
   value deep through records and containers is freed at a bounded depth.
 - **Order of releases.** File handles close (and flush) and promises resolve
   in Lean's order: last pushed, first freed. An array set or pop frees the
@@ -145,7 +145,7 @@ and stores the value in one step, after its wait for the context's writer
 threads. Dropping the
 last reference to an unresolved promise resolves it with `none`, as
 natively. When a free releases the promise, the resolution waits until the
-free ends (Reussir patch 40-a reports the end). **`Std.Sync`** mutexes
+free ends. **`Std.Sync`** mutexes
 and condition variables are lean-runtime's objects in runtime handles; a
 thread that waits blocks its context.
 

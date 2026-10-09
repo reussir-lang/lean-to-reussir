@@ -305,7 +305,7 @@ See [Runtime](runtime.html#startup) for the entry point.
 ## After lowering
 
 - **Outline.** rrc's analyses grow faster than linearly with nesting depth
-  and with straight-line length (Reussir issues 16 and 17, costs). So a tail path 32
+  and with straight-line length. So a tail path 32
   matches deep or 256 `let`s long is cut into functions. A recursive function
   keeps its loops: the cut part returns a step value, and the function makes
   the tail call itself.
@@ -315,7 +315,26 @@ See [Runtime](runtime.html#startup) for the entry point.
 
 ## rrc
 
+Reussir is a research compiler framework for reference-counted functional
+programs (github.com/reussir-lang/reussir). Its front end is in Rust, its
+back end in MLIR and C++, its runtime in Rust. Reusable memory is explicit
+in its IR: a cell that dies becomes a *token*, and a later allocation of
+the same size can use the token instead of new memory. Reussir does the
+ownership analysis (Perceus-style reference counting), token reuse, drop
+glue and LLVM code generation. `rrc` is its compiler driver.
+
 {{svg:rrc}}
+
+What lean2rr uses from Reussir:
+
+| Feature | lean2rr's use |
+|---|---|
+| shared and `[value]` records and enums | Lean's inductive types ([Representations](representations.html)) |
+| opaque `#[ffi]` types | `LStr`, `RVec`, `LCell`, handles: runtime types that do their own counting |
+| tagged opaque handles | one-word `Nat` and `Int` |
+| textures (`#[ffi(import)]` functions with a Rust body) | the prelude's calls into `leanrt`; inlined when compiled for the same CPU |
+| token reuse, `--reuse-across-call` | in-place updates, as Lean's reset/reuse |
+| `#[transform_anchor]` | keeps unboxing, wrapper and cast functions out of Reussir's MLIR inliner |
 
 The driver builds the shared crate `lean-runtime` (the pinned submodule,
 with cargo) and the runtime crate `leanrt`, each one cached. Then it runs
@@ -324,9 +343,7 @@ each *texture* (the Rust body of a prelude function) with rustc, one run
 per texture. lean2rr writes only the prelude functions that the program
 uses, so a small program has about 75 textures, not about 480. The driver
 gives rrc a cache directory, so rrc does not compile an unchanged texture
-again (Reussir patch 35-a). If rrc crashes, the driver tries once more without
-`--reuse-across-call` (a workaround for Reussir bug 4). See
-[Reussir](reussir.html).
+again.
 
 ## Key decisions
 

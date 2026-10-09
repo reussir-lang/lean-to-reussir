@@ -102,7 +102,7 @@ immediate
 :   A constructor without fields of a shared enum: a tagged pointer to a static cell, never allocated.
 
 tagged handle
-:   An opaque Reussir handle that may be a number instead of a pointer (local patch 41-a). Reussir counts it only when its low bit is 0. `Nat` and `Int` are tagged handles.
+:   An opaque Reussir handle that may be a number instead of a pointer. Reussir counts it only when its low bit is 0. `Nat` and `Int` are tagged handles.
 
 box (`LAny`)
 :   The uniform type: one word, as Lean's `lean_object*`. An odd word is an immediate (a small scalar, a small `Nat`, an enumeration's index, `box(0)`). An even word points to a counted object and holds the object's type number in its top 16 bits. It stores a value whose type is not statically known, and every field, array element and cell value of a parameter's type. Code that needs the concrete type checks the word.
@@ -164,7 +164,7 @@ wait core
 :   A wait protocol of lean-runtime's scheduler: the wait for a thunk or a constant that another context computes, the reference rule of a program that creates tasks, and the resolution of a promise put off to the end of a free.
 
 pending stack
-:   The per-thread stack of cells to free. Frees use it instead of recursion (local patches 13-a to 13-c).
+:   The per-thread stack of cells to free. Frees use it instead of recursion.
 
 internal panic
 :   An error of the runtime itself that ends the program at once, as Lean's `lean_internal_panic`: `INTERNAL PANIC: ` and a message on the process's stderr (for example `out of memory`), then exit status 1, or an abort (134) under `LEAN_ABORT_ON_PANIC`. A `panic!` is not one: it prints its message and the program goes on.
@@ -179,12 +179,6 @@ rrc
 
 token reuse
 :   Reussir's way to build a new cell in the memory of a cell that dies (Lean's reset/reuse).
-
-local patch
-:   A change to Reussir that lean2rr's builds use, on branch `{{v:reussir_branch}}` of `./reussir`. lean2rr's work does not push it upstream. A *parked* patch is kept outside the series: the builds do not apply it.
-
-issue
-:   A numbered entry of `reussir-bugs/README.md`: a Reussir problem that lean2rr met. Its kind (bug, cost, missed optimization, missing feature, intended) says what it is. Only a bug is wrong behaviour.
 
 ## Testing and review
 
