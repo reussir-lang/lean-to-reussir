@@ -213,55 +213,72 @@ fn ok<T>(r: Result<T, InternalPanic>) -> T {
 // The slow paths of the prelude's `lean_nat_*`: every one takes the raw
 // words of its operands (owned) and handles all cases, the both-small one
 // included.
+//
+// `#[cold]` on a slow path that the prelude calls only behind a small-word
+// test (not `nat_gcd`, `nat_repr`, `nat_to_int`, `nat_neg_succ`): Reussir's
+// language has no branch hint, so the attribute is the hint. rustc puts
+// `cold` on the declaration in each texture, and LLVM then treats the
+// branch to the call as unlikely, as `LEAN_LIKELY` does natively: the
+// small path falls through, the call is laid out of line.
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_add(a: u64, b: u64) -> LNat {
     of_nat_view(ok(sem::nat::add(unsafe { nat_view(a) }, unsafe { nat_view(b) })))
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_sub(a: u64, b: u64) -> LNat {
     of_nat_view(sem::nat::sub(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_mul(a: u64, b: u64) -> LNat {
     of_nat_view(ok(sem::nat::mul(unsafe { nat_view(a) }, unsafe { nat_view(b) })))
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_div(a: u64, b: u64) -> LNat {
     of_nat_view(sem::nat::div(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_mod(a: u64, b: u64) -> LNat {
     of_nat_view(sem::nat::rem(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
 /// Three-way comparison: -1, 0, 1.
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_cmp(a: u64, b: u64) -> i64 {
     let (x, y) = unsafe { (nat_view(a), nat_view(b)) };
     sem::nat::compare(&x, &y) as i64
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_eq(a: u64, b: u64) -> bool {
     let (x, y) = unsafe { (nat_view(a), nat_view(b)) };
     sem::nat::dec_eq(&x, &y)
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_land(a: u64, b: u64) -> LNat {
     of_nat_view(sem::nat::land(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_lor(a: u64, b: u64) -> LNat {
     of_nat_view(sem::nat::lor(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_xor(a: u64, b: u64) -> LNat {
     of_nat_view(sem::nat::lxor(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
@@ -269,17 +286,20 @@ pub extern "C" fn nat_xor(a: u64, b: u64) -> LNat {
 
 /// `Nat.shiftLeft`, for any shift (LB-12 lifted); a result above
 /// `big::MAX_BITS` ends the process (`sem::nat::shiftl`).
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_shiftl(a: u64, b: u64) -> LNat {
     of_nat_view(ok(sem::nat::shiftl(unsafe { nat_view(a) }, unsafe { nat_view(b) })))
 }
 
 /// `Nat.shiftRight`, for any shift (LB-04 lifted).
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_shiftr(a: u64, b: u64) -> LNat {
     of_nat_view(sem::nat::shiftr(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_log2(a: u64) -> LNat {
     LNat::of_u64(sem::nat::log2(&unsafe { nat_view(a) }))
@@ -287,6 +307,7 @@ pub extern "C" fn nat_log2(a: u64) -> LNat {
 
 /// `Nat.pow`, for any exponent (LB-11 lifted); a result above
 /// `big::MAX_BITS` ends the process (`sem::nat::pow`).
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_pow(a: u64, b: u64) -> LNat {
     of_nat_view(ok(sem::nat::pow(unsafe { nat_view(a) }, unsafe { nat_view(b) })))
@@ -343,6 +364,7 @@ pub fn nat_of_decimal(s: &[u8]) -> LNat {
 /// A `Nat` size or offset as lean-runtime's array rules take it
 /// (`sem::nat::Nat::to_u64_saturating`): the value, or `u64::MAX` for 2^64
 /// or more. The big number the word owns is released.
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_sat_u64(a: u64) -> u64 {
     unsafe { nat_view(a) }.to_u64_saturating()
@@ -351,12 +373,14 @@ pub extern "C" fn nat_sat_u64(a: u64) -> u64 {
 /// `Array.replicate`'s size (`lean_mk_array`, `sem::array::replicate_len`):
 /// the element count, or the end of the process for a size that is not a
 /// word or whose array's byte size overflows.
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_replicate_len(a: u64) -> u64 {
     ok(sem::array::replicate_len(unsafe { nat_view(a) }.to_u64())) as u64
 }
 
 /// The value modulo 2^64 (`UInt64.ofNat`, `USize.ofNat`, ...).
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_low_u64(a: u64) -> u64 {
     unsafe { nat_view(a) }.low_u64()

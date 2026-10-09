@@ -219,6 +219,35 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `RtIntSmallBigEq`.
 - **Remove only if:** lean2rr stops using lean-runtime.
 
+### The `Nat` slow paths are `#[cold]`: the small path falls through
+
+- **What:** The `leanrt::nat` slow paths that the prelude calls only
+  after a small-word test are `#[cold]` (and `#[inline(never)]`, as
+  before): `nat_add`, `nat_sub`, `nat_mul`, `nat_div`, `nat_mod`,
+  `nat_cmp`, `nat_eq`, `nat_land`, `nat_lor`, `nat_xor`, `nat_shiftl`,
+  `nat_shiftr`, `nat_log2`, `nat_pow`, `nat_sat_u64`,
+  `nat_replicate_len`, `nat_low_u64`. Not the ones called for every
+  value (`nat_gcd`, `nat_repr`), nor `nat_to_int`, `nat_neg_succ` and
+  the `Int` slow paths.
+- **Why:** Reussir's language has no branch hint, so the prelude's
+  `if` cannot say which arm is likely. rustc puts `cold` on the
+  declaration of each slow path in the textures that call it, and LLVM
+  infers `cold` for the texture (`l2r_nat_add_raw`, ...). LLVM then
+  takes the branch to the call as unlikely, as native Lean's
+  `LEAN_LIKELY(lean_is_scalar(..))` makes it: the small path falls
+  through and the call is laid out after the loop. E08 (matrix_uint64)'s
+  product loop: 14.2 taken branches an iteration before, 10.1 after
+  (native 6.0; callgrind, about the same instruction count). Most of the
+  rest are the guards of Reussir's `rc.inc` of a tagged handle, which
+  have no weights. Wall time (median of 9, interleaved, pinned; dev
+  5604d38f): E08's kernel 33.1 ms before, 27.3 ms after (native 28.4);
+  E01 (gcd_batch)'s kernel 24.4 ms, 23.5 ms (native 25.2); L11 (bignum,
+  big numbers on the slow paths) 2276 ms both (native 2287).
+- **Where:** `leanrt/src/nat.rs`: the slow paths, and the comment above
+  them.
+- **Remove only if:** Reussir's language gets branch hints that the
+  prelude uses instead.
+
 ### A big `Int` in the `i64` range is computed as a word
 
 - **What:** The slow paths of `Int`'s arithmetic and comparisons
