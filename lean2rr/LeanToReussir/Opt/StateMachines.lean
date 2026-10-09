@@ -24,7 +24,16 @@ which would be kept alive across the jump (an array the loop updates
 before jumping, `a.set! i v`, would then be shared and copied at every
 iteration). Placeholders are cheap: `zeroValue`'s (a constant, or a value
 built once and kept in a once-cell), and for a string one shared empty
-string (`l2r_str_shared_empty`, no once-cell).
+string (`l2r_str_shared_empty`, no once-cell). A slot that the jump's own
+arm does not bind already holds a placeholder (by induction: the
+declaration's function passes placeholders, and every jump passes
+placeholders or such slots), so the jump passes it on unchanged instead
+of a new one: a slot changes only where a jump fills it, and no arm
+rebuilds or releases the placeholders of the slots it does not use.
+
+With every variant nullary the entry enum is a `[value]` enum, a scalar
+tag (a shared enum's nullary variant is a pointer to a static cell, whose
+tag the `match` loads and whose count it tests at every entry).
 
 Soundness guard (checked on every state machine): a slot's placeholder is
 evaluated at every jump that does not fill it, so a type without a finite
@@ -48,24 +57,27 @@ def slotPlaceholder? (t : RR.Ty) : LowerM (Option RR.Expr) := do
   return none
 
 mutual
-  /-- `e` with every call `f(args)` replaced by `g f args` where that gives
-  an expression. -/
-  partial def rewriteCallsE (g : String → Array RR.Expr → LowerM (Option RR.Expr)) : RR.Expr → LowerM RR.Expr
+  /-- `e` with every call `f(args)` replaced by `g tail f args` where that
+  gives an expression; `tail` tells whether the call is in tail position
+  of the function (`e` itself being in tail position when `tail`). -/
+  partial def rewriteCallsE (g : Bool → String → Array RR.Expr → LowerM (Option RR.Expr)) (tail : Bool) :
+      RR.Expr → LowerM RR.Expr
     | .call f tys args => do
-      let args ← args.mapM (rewriteCallsE g)
-      return (← g f args).getD (.call f tys args)
-    | .apply f a => return .apply (← rewriteCallsE g f) (← rewriteCallsE g a)
-    | .ctor t v args => return .ctor t v (← args.mapM (rewriteCallsE g))
-    | .field e i => return .field (← rewriteCallsE g e) i
-    | .cast e t => return .cast (← rewriteCallsE g e) t
-    | .lam p t b => return .lam p t (← rewriteCallsB g b)
-    | .ite c t e => return .ite (← rewriteCallsE g c) (← rewriteCallsB g t) (← rewriteCallsB g e)
-    | .mtch s arms => return .mtch (← rewriteCallsE g s) (← arms.mapM fun a => return { a with body := ← rewriteCallsB g a.body })
-    | .block b => return .block (← rewriteCallsB g b)
+      let args ← args.mapM (rewriteCallsE g false)
+      return (← g tail f args).getD (.call f tys args)
+    | .apply f a => return .apply (← rewriteCallsE g false f) (← rewriteCallsE g false a)
+    | .ctor t v args => return .ctor t v (← args.mapM (rewriteCallsE g false))
+    | .field e i => return .field (← rewriteCallsE g false e) i
+    | .cast e t => return .cast (← rewriteCallsE g false e) t
+    | .lam p t b => return .lam p t (← rewriteCallsB g false b)
+    | .ite c t e => return .ite (← rewriteCallsE g false c) (← rewriteCallsB g tail t) (← rewriteCallsB g tail e)
+    | .mtch s arms => return .mtch (← rewriteCallsE g false s) (← arms.mapM fun a => return { a with body := ← rewriteCallsB g tail a.body })
+    | .block b => return .block (← rewriteCallsB g tail b)
     | e => return e
 
-  partial def rewriteCallsB (g : String → Array RR.Expr → LowerM (Option RR.Expr)) (b : RR.Block) : LowerM RR.Block := do
-    return ⟨← b.lets.mapM fun (x, t, e) => return (x, t, ← rewriteCallsE g e), ← rewriteCallsE g b.result⟩
+  partial def rewriteCallsB (g : Bool → String → Array RR.Expr → LowerM (Option RR.Expr)) (tail : Bool) (b : RR.Block) :
+      LowerM RR.Block := do
+    return ⟨← b.lets.mapM fun (x, t, e) => return (x, t, ← rewriteCallsE g false e), ← rewriteCallsE g tail b.result⟩
 end
 
 /-- Where a state machine's values go: its slots (name, type, placeholder)
@@ -118,14 +130,15 @@ def slotLayout (variants : Array (String × Array (String × RR.Ty))) : LowerM S
   return lay
 
 /-- The call entering state machine `sm` at variant `v` (fields `fs`) with
-values `vals` (in field order): each value in its slot, placeholders in the
-other slots, then the variant with the fields that have no slot. Values
-other than variables and literals are bound first, in their order. -/
+values `vals` (in field order): each value in its slot, in the other slots
+a placeholder, or the slot itself where `untouched` contains it, then the
+variant with the fields that have no slot. Values other than variables and
+literals are bound first, in their order. -/
 def smCall (sm : StateMachine) (lay : SlotLayout) (v : String) (fs : Array (String × RR.Ty))
-    (vals : Array RR.Expr) : LowerM RR.Expr := do
+    (vals : Array RR.Expr) (untouched : Std.HashSet Nat := {}) : LowerM RR.Expr := do
   let some out := lay.fields[v]? | throwError "lean2rr: unknown state-machine variant {v}"
   let mut lets := #[]
-  let mut args := lay.slots.map (·.2.2)
+  let mut args := lay.slots.mapIdx fun s (n, _, ph) => if untouched.contains s then RR.Expr.var n else ph
   let mut rest := #[]
   for h : i in [:vals.size] do
     let val ← match vals[i] with
@@ -151,26 +164,40 @@ def emitStateMachineAlongside (d : Decl .pure) (sm : StateMachine) (params : Arr
   let variants := #[(sm.entry, params)] ++ arms.map fun (v, fps, _) => (v, fps)
   let lay ← slotLayout variants
   let fieldsOf : Std.HashMap String (Array (String × RR.Ty)) := variants.foldl (fun m (v, fs) => m.insert v fs) {}
-  -- The calls the lowering left as `fn(values…, mode::v)`.
-  let place (f : String) (args : Array RR.Expr) : LowerM (Option RR.Expr) := do
+  -- The slots that the arm of variant `v` does not bind: they hold
+  -- placeholders whenever it is entered (every call entering it passes
+  -- placeholders or such slots there), and it does not touch them.
+  let untouched (v : String) : Std.HashSet Nat :=
+    let bound := (lay.fields.getD v #[]).filterMap id
+    (List.range lay.slots.size).foldl (fun acc s => if bound.contains s then acc else acc.insert s) {}
+  -- The calls the lowering left as `fn(values…, mode::v)`, in the arm
+  -- of variant `cur`: one in tail position passes on the slots the arm
+  -- does not touch, so that a slot only changes where a jump fills it;
+  -- elsewhere (inside a closure; the lowering puts these calls in tail
+  -- position only) placeholders.
+  let place (cur : String) (tail : Bool) (f : String) (args : Array RR.Expr) : LowerM (Option RR.Expr) := do
     if f != sm.fn then return none
     let some (.ctor m (some v) #[]) := args.back? | return none
     if m != sm.mode then return none
     let some fs := fieldsOf[v]? | return none
-    return some (← smCall sm lay v fs args.pop)
+    return some (← smCall sm lay v fs args.pop (if tail then untouched cur else {}))
   -- The fields of variant `v` without a slot.
   let kept (v : String) (fs : Array (String × RR.Ty)) : Array (String × RR.Ty) :=
     let out := lay.fields.getD v #[]
     (fs.zipIdx.filter fun (_, i) => (out[i]?.join).isNone).map (·.1)
-  -- A shared enum: Reussir miscompiles `[value]` enums whose arms have
-  -- different layouts (translation plan §9). Its variants are nullary
-  -- unless a field has no slot.
-  let mode := RR.Item.enum sm.mode false (variants.map fun (v, fs) => (v, (kept v fs).map (·.2)))
+  -- Its variants are nullary unless a field has no slot. All nullary: a
+  -- `[value]` enum, a scalar tag as for Lean's field-less inductives (a
+  -- shared enum's nullary variant is a pointer whose tag is loaded, and
+  -- whose count is tested, at every entry). Otherwise shared: Reussir
+  -- miscompiles `[value]` enums whose arms have different layouts
+  -- (translation plan §9).
+  let modeVariants := variants.map fun (v, fs) => (v, (kept v fs).map (·.2))
+  let mode := RR.Item.enum sm.mode (modeVariants.all (·.2.isEmpty)) modeVariants
   let mkArm (v : String) (fs : Array (String × RR.Ty)) (b : RR.Block) : LowerM RR.Arm := do
     let out := lay.fields.getD v #[]
     let bind := fs.zipIdx.filterMap fun ((n, t), i) =>
       (out[i]?.join).map fun s => (n, some t, RR.Expr.var lay.slots[s]!.1)
-    let b ← rewriteCallsB place b
+    let b ← rewriteCallsB (place v) true b
     return { ty := sm.mode, ctor := some v, binders := (kept v fs).map (some ·.1), body := ⟨bind ++ b.lets, b.result⟩ }
   let mut matchArms := #[← mkArm sm.entry params block]
   for (v, fps, b) in arms do matchArms := matchArms.push (← mkArm v fps b)

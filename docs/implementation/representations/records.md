@@ -101,7 +101,10 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   `enum [value]` (no allocation); one constructor is a `struct`; anything
   else is a shared `enum`. An inductive with no constructors gets a single
   variant `c_impossible`. The only `[value]` enums lean2rr emits are these
-  field-less enumerations (`Nat`/`Int` are one-word tagged handles,
+  field-less enumerations and the entry enums of state machines whose
+  variants are all nullary
+  ([../control-flow/state-machines.md](../control-flow/state-machines.md#the-entry-enum-of-nullary-variants-is-a-value-enum-state-machines))
+  (`Nat`/`Int` are one-word tagged handles,
   [nat-int.md](nat-int.md)); multi-field value records are `[value]` structs
   (join-point tuples), whose padding is explicit.
 - **Why:** Reussir moves a `[value]` enum as its tag plus one
@@ -110,7 +113,7 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
 - **Where:** `LowerBase.lean`: `nominalType` (`Shape`), `tupleType`;
   plan [§9](../../translation-plan.md#9-open-items).
 - **Remove only if:** bug 1 is fixed; then multi-arm value enums and value
-  J4 entry enums become possible.
+  J4 entry enums with fields become possible.
 
 ### One-field structures are value structs
 

@@ -2,8 +2,8 @@
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
 allocs 310519
 bytes 8713728
-native-allocs 129751
-native-bytes 2710130
+native-allocs 129752
+native-bytes 2710154
 items 275
 functions 217
 conversion-fns 0
@@ -91,7 +91,7 @@ item l2r_init_chunk_0 e566ab7759a9
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 c690b1a252f6
-item l2r_main_body 556f7936488f
+item l2r_main_body 9652aa818121
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
 item l2r_run_main d750382a583f
@@ -250,10 +250,10 @@ item l_loop___l2r_#____closed__3_init de507185465b
 item l_loop___l2r_#____closed__4 3534f69ed940
 item l_loop___l2r_#____closed__5 0676cb0ed56b
 item l_loop___l2r_#____closed__5_init 6d05bc1ea91a
-item l_loop___l2r_#____l2r__flat bf3c6c14a86a
-item l_loop___l2r_#____l2r__flat_sm dcc30b76c2f7
-item l_loop___l2r_0____l2r__flat_mode f19c2715c159
-item l_main___l2r_#_ 54cd5b6d7f55
+item l_loop___l2r_#____l2r__flat 4d5c91325359
+item l_loop___l2r_#____l2r__flat_sm 7d7da1c6d0bb
+item l_loop___l2r_0____l2r__flat_mode 93f566d34347
+item l_main___l2r_#_ 048155cd0d68
 item l_main___l2r_#____closed__0 1dfb0a17daf7
 item l_main___l2r_#____closed__0_init 235a5173a3d9
 item l_main___l2r_#____closed__1 2771b0c8ae4b

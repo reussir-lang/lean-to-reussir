@@ -247,7 +247,9 @@ The choice matters for two reasons:
 - **Stack use.** Lean runs self tail calls as loops. Under J1 and J2 the tail
   call stays in its own function, and LLVM turns it into a loop. Under J3 the
   loop becomes mutually recursive and can use stack per iteration. J4 makes
-  such a loop one function again.
+  such a loop one function again. With the optional pass `state-machines`,
+  the entry point of that function is a scalar tag, and the values of the
+  loop go in parameter slots. A jump changes only the slots that it fills.
 - **Memory reuse.** J1 and J2 keep "take the old value apart" and "build the
   new value" in one function. Reussir's token reuse needs that to update in
   place.

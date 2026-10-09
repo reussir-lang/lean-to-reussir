@@ -70,3 +70,57 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   form (`StateMachine.form`) so each hook handles its own.
 - **Remove only if:** the pass is off (the core form allocates a variant
   per call and jump).
+
+### The entry enum of nullary variants is a value enum (`state-machines`)
+
+- **What:** When every variant of a state machine's entry enum is nullary
+  (no field without a slot, the usual case), the enum is a `[value]`
+  enum: a scalar tag (`i8`), as for Lean's field-less inductives. A
+  variant that keeps a field (the soundness guard above) makes the enum
+  shared, as in the core form.
+- **Why:** A shared enum's nullary variant is a pointer to a static cell.
+  The state machine's `match` loaded the tag through it and tested the
+  cell's count at every entry, and a re-entry passed the pointer: in
+  lean-zip's inflate loop (Z01d) this was a load, a test and a branch at
+  each of its two or three entries per output byte. A field-less
+  `[value]` enum has no payload, so Reussir bug 1 (lost payload bytes of
+  `[value]` enums whose arms differ) cannot apply. Wall time: with the
+  next entry (both changes measured together there). Supporting detail
+  (callgrind): RtSmDecode's decode loop without its `dbgTraceIfShared`
+  calls, 4 rounds at size 1000000, 441 to 392 million instructions.
+- **Where:** `Opt/StateMachines.lean`: `emitStateMachineAlongside`
+  (`modeVariants`). Test: `tests/runtime/sm-slots-check.sh` (with
+  `RtSmDecode`, `RtStateMachines`, `RtJpSlots`).
+- **Remove only if:** never (speed only).
+
+### A jump passes on the slots its arm does not bind (`state-machines`)
+
+- **What:** In the arm of variant `u`, a call of the state machine in tail
+  position (a self tail call, a jump) passes each slot that the target
+  does not fill and that `u` does not bind as the slot itself, not as a
+  new placeholder. A slot that `u` binds and the target does not fill
+  still gets a placeholder. Elsewhere (a call inside a closure, which the
+  lowering does not make) every slot the target does not fill gets a
+  placeholder.
+- **Why:** Before, every jump rebuilt the placeholder of every slot it
+  did not fill, and every arm released the slots it did not bind: per
+  iteration a constant per slot and a test per slot of a counted type
+  (`Nat`, arrays), and the slots were moved between registers and the
+  stack. Sound by induction: when the state machine is entered at a
+  variant, each slot that the variant does not bind holds a placeholder
+  (the declaration's function passes placeholders; a jump passes
+  placeholders or such slots), so passing one on is passing a
+  placeholder, never a live value (which would keep an array shared,
+  RF-1 above). Wall time with the `[value]` entry enum (median of 9,
+  pinned to cores 15-19, 2026-10-09): lean-zip's decompression (Z01d)
+  2.058 to 1.853 s, 0.736 to 0.663 of native; its compression (Z01c)
+  0.975 to 0.969 of native; RtSmDecode's decode loop without its
+  `dbgTraceIfShared` calls (size 16000000) 0.637 to 0.491 s, 0.970 to
+  0.748 of native (-23%). Supporting detail (callgrind): that loop 392 to
+  272 million instructions (size 1000000); lean-zip's inflate loop (Z01d
+  on dickens) 1346 to 1015 million with both changes.
+- **Where:** `Opt/StateMachines.lean`: `smCall` (`untouched`),
+  `emitStateMachineAlongside` (`untouched`, `place`), `rewriteCallsE`
+  (`tail`). Test: `tests/runtime/sm-slots-check.sh`; `RtJpSlots` and
+  `RtSmDecode` check that arrays stay unshared (`dbgTraceIfShared`).
+- **Remove only if:** never (speed only).

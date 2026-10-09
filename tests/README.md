@@ -319,6 +319,20 @@ no accessor or cannot read the IR's symbols, and checks itself on four
 mutations of the IR named from the IR's own symbols (a call of an
 accessor, of `l2r_once_claim`, of `once::claim`, a load of the record,
 added to a hot loop block), each of which must fail (review PCR-01).
+`tests/runtime/sm-slots-check.sh` builds `RtSmDecode` (a table-driven
+decoder loop, a state machine of three variants), `RtStateMachines` and
+`RtJpSlots` to LLVM IR and fails when the entry enum of a state machine
+whose variants are all nullary is not a `[value]` enum (in the `.rr`) or
+is passed as a pointer (in the IR), when a call entering a variant puts
+anything but a placeholder, or a slot that the calling arm does not bind,
+in a slot that the variant does not bind (a live value kept alive across
+the jump, RF-1), or when an arm passes a placeholder in a slot that it
+does not bind instead of the slot itself
+(docs/implementation/control-flow/state-machines.md). It fails when
+RtSmDecode has no such state machine or no slot passed on, and checks
+itself on three mutations of RtSmDecode's `.rr` (the entry enum made
+shared, a passed-on slot given a placeholder, a placeholder replaced by
+the arm's live variable of that slot), each of which must fail.
 `tests/runtime/rows-check.sh` builds lean-runtime's row oracle
 (`scripts/oracle/Oracle.lean` of the lean-runtime checkout, which evaluates
 the functions of its `tests/cases/<area>/<area>.rows.toml`) with lean2rr and

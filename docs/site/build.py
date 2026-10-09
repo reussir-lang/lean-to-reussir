@@ -288,6 +288,8 @@ def gen_testsets():
         ["Inlined textures", "<code>tests/runtime/ffi-inline-check.sh</code>", f"{ffi_inline_tests()} runtime tests",
          "no call through the FFI boundary in their LLVM IR (it would keep a loop's tail call); "
          "no array read left as a call in <code>RtReadsDeep</code> and no array set in <code>RtArraySets</code>"],
+        ["State machine slots", "<code>tests/runtime/sm-slots-check.sh</code>", "3 runtime tests",
+         "the entry of a state machine whose variants are all nullary is a scalar tag; a jump passes on the slots that its arm does not bind, and puts no live value in a slot that its target does not bind"],
         ["Inlined wait points", "<code>tests/runtime/wait-inline-check.sh</code>", "1 runtime test",
          "in the executable, the reference points and a thunk's store and wake are inline in the loops, their thread-local loads direct"],
         ["Refused externs", "<code>tests/runtime/allow-missing-check.sh</code>", "1 program",
