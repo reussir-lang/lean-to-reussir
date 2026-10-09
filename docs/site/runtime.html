@@ -128,6 +128,10 @@ and several optional passes help token reuse (see
   the difference (a file handle still open, a pipe not yet at end of file).
   So for a program that creates resources, lean2rr runs Lean's own borrow
   inference and keeps such arguments alive until the call returns.</li>
+<li><strong><code>Runtime.forget</code>.</strong> The value is never released, as natively: the
+  call keeps its reference until the process ends (<code>std::mem::forget</code>). So
+  a forgotten promise stays unresolved, a forgotten task still runs, and a
+  forgotten file handle stays open until the exit writes its bytes.</li>
 </ul>
 <h2 id="tasks-and-the-scheduler">Tasks and the scheduler</h2>
 <p>All tasks run on one thread, on the scheduler of the shared crate

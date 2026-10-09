@@ -3341,13 +3341,26 @@ fn lean_is_exclusive_obj<T>(a : T) -> bool { false }
 fn lean_is_scalar<T>(a : T) -> bool { false }
 fn lean_sharecommon_quick<T>(a : T) -> T { a }
 
-// Payload primitives of the `Runtime.*` BaseIO externs (memory-management
-// hints without observable effect here). Where a value can hold a task,
-// lean2rr first walks it for `Runtime.markPersistent` and waits for its
-// tasks (`l2r_persist_T`, as native `lean_mark_persistent`).
+// Payload primitives of the `Runtime.*` BaseIO externs. The two marks
+// return their argument; where a value can hold a task, lean2rr first walks
+// it for `Runtime.markPersistent` and waits for its tasks (`l2r_persist_T`,
+// as native `lean_mark_persistent`). `Runtime.hold` keeps its argument
+// alive until the call (natively a borrowed parameter). `Runtime.forget`
+// keeps its argument forever (`l2r_runtime_leak`), as native
+// `lean_runtime_forget`, which never decrements it: the value and all it
+// reaches are never released. So a forgotten unresolved promise stays
+// unresolved, a forgotten pure task still runs, and a forgotten file handle
+// stays open until the exit flushes it. The argument comes boxed, as
+// natively (`α` is a type parameter): a box crosses the FFI boundary at
+// every type, where a `[value]` record (the unit, a `Tuple`) cannot.
 fn l2r_runtime_mark_persistent<T>(a : T) -> T { a }
 fn l2r_runtime_mark_multi_threaded<T>(a : T) -> T { a }
-fn l2r_runtime_forget<T>(a : T) -> L2RUnit { L2RUnit::u{} }
+#[ffi(import)]
+fn l2r_runtime_leak(a : LAny) -> u64 [{ { ::std::mem::forget(a); 0 } }];
+fn l2r_runtime_forget(a : LAny) -> L2RUnit {
+    let kept = l2r_runtime_leak(a);
+    L2RUnit::u{}
+}
 fn l2r_runtime_hold<T>(a : T) -> L2RUnit { L2RUnit::u{} }
 // `IO.initializing` (lean-runtime's flag): true while the module
 // initializers run; lean2rr's entry calls `l2r_set_initializing(true)`

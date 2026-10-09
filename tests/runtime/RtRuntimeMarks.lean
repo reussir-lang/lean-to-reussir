@@ -4,7 +4,7 @@ an array, and through a function generic in the value's type (review of
 deptypes-cleanup, F2). The four externs are generic `BaseIO` actions; the
 runtime's primitives are generic prelude functions
 (`fn l2r_runtime_mark_persistent<T>(a : T) -> T`,
-`fn l2r_runtime_forget<T>(a : T) -> L2RUnit`). With rule 1 the field of the
+`fn l2r_runtime_hold<T>(a : T) -> L2RUnit`). With rule 1 the field of the
 IO result is a `Box`, and lean2rr took the primitive's result to be of that
 type: rrc rejected every call (`expected 'LAny', found 'LStr'` for a mark
 at a string, `found 'L2RUnit'` for forget and hold). The result now has

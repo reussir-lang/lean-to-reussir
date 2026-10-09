@@ -551,7 +551,9 @@ lean2rr wraps its result with `wrapIOResult`: `l2r_io_mono_ms_now()`,
 `l2r_io_mono_nanos_now()`, `l2r_io_process_get_pid()`, `l2r_io_get_num_heartbeats()`,
 `l2r_io_check_canceled()`, `l2r_io_get_tid()`, `l2r_io_initializing()`,
 `l2r_io_set_heartbeats(n)`, `l2r_runtime_mark_persistent<T>(a)`,
-`l2r_runtime_mark_multi_threaded<T>(a)`, `l2r_runtime_forget<T>(a)`,
+`l2r_runtime_mark_multi_threaded<T>(a)`, `l2r_runtime_forget(a : LAny)`
+(never releases the boxed `a`, as native `lean_runtime_forget`:
+`l2r_runtime_leak(a)`, `std::mem::forget`),
 `l2r_runtime_hold<T>(a)`, `l2r_io_prim_handle_is_tty(h)`. (`l2r_io_app_path()`,
 `l2r_io_current_dir()` and `l2r_io_process_get_current_dir()` are
 infallible stand-ins for the fallible primitives below.) References are

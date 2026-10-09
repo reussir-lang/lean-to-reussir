@@ -18,7 +18,8 @@ runtime's conventions are in [`runtime/README.md`](../../../runtime/README.md)
   tests, their Lean definitions, refusals, why an extern of the program is
   not a cast by itself, the test harness's `.ffi.c`, `.refused`,
   `.l2r-log` and `.l2r-debug`.
-- [glue.md](glue.md): storage types, payload primitives, fallible IO,
+- [glue.md](glue.md): storage types, payload primitives (and
+  `Runtime.forget`, which keeps its argument forever), fallible IO,
   streams, processes and the other generated glue.
 - [shim.md](shim.md): `L2RShim`, lean2rr's Lean library for
   `Std.Internal.UV`, time, `ShareCommon`, and definitions it replaces.

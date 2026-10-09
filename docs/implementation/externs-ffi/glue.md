@@ -124,9 +124,9 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   primitive's: a runtime object (a handle, a mutex, a promise) is `lcAny`
   in mono code (a `Box`), and the runtime's `LHandle` or `LPromise` for the
   primitive. A generic primitive (`Runtime.markPersistent`,
-  `markMultiThreaded`, `forget`, `hold`:
+  `markMultiThreaded`, `hold`:
   `fn l2r_runtime_mark_persistent<T>(a : T) -> T`,
-  `fn l2r_runtime_forget<T>(a : T) -> L2RUnit`) gets its arguments as
+  `fn l2r_runtime_hold<T>(a : T) -> L2RUnit`) gets its arguments as
   they are. Its result has the type of the argument declared at the
   result's type parameter (`preludeRetArg`), or the prelude's result type
   (`L2RUnit`). The result field of the IO result is a `Box` (rule 1), so
@@ -135,7 +135,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   for them, as a constant's value (`persistCall`,
   [../startup/constants.md](../startup/constants.md)); in a program
   that creates no task, or at a type that cannot hold one, it is the
-  primitive.
+  primitive. `Runtime.forget` never releases its argument, which it
+  takes boxed (next entry).
 - **Why:** The runtime cannot build `EST.Out`; one convention for all
   infallible IO (runtime request 9; c7b3933, f87ea08). A generic
   primitive's result was taken to be of the field's type, so with rule 1
@@ -146,6 +147,43 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `Emit/Program.lean`: `lowerProgram` (`preludeRets`, `preludeParams`,
   parsed from the prelude's signatures), `genericRetParams`
   (`preludeRetArg`).
+- **Remove only if:** never.
+
+### `Runtime.forget` keeps its argument forever
+
+- **What:** `l2r_runtime_forget(a : LAny)` gives its argument to
+  `l2r_runtime_leak(a)`, a texture that calls `std::mem::forget` on it:
+  the reference is never released, so the value and all it reaches stay
+  alive until the process ends. This is native `lean_runtime_forget`
+  (`src/runtime/io.cpp`), which takes an owned argument and never
+  decrements it; `Init/System/IO.lean` documents that the value and
+  every object it reaches are never freed. The argument is boxed (the
+  non-generic primitive path converts it to the primitive's `LAny`), as
+  natively, where `α` is a type parameter and the argument an object: a
+  `Float` or a `UInt64` from 2^63 gets a cell that is never freed, as
+  natively. The call takes an owned argument (Lean's parameter is not
+  `@&`), so lean2rr's glue adds no release around it, and Reussir gives
+  the call its own reference. A
+  forgotten unresolved promise stays unresolved (its `result?` task does
+  not finish with `none`). A forgotten pure task that has not started is
+  not deleted: a worker runs it. A forgotten file handle stays open: its
+  buffered bytes are not in the file during the run, and lean-runtime's
+  exit flush writes them (`io/exit.rs`, `exit_flush`, which walks the open
+  files).
+  Example: `let p ← IO.Promise.new (α := Nat); Runtime.forget p` and then
+  `IO.getTaskState p.result?` gives `running`, as natively.
+- **Why:** The primitive was `fn l2r_runtime_forget<T>(a : T) -> L2RUnit
+  { L2RUnit::u{} }`, which released `a` as any owned parameter: the
+  promise was resolved with `none`, the pure task was deleted before it
+  ran, and the handle was closed and its bytes written at once (hunt
+  HTSK2-01; test `RtRuntimeForget`, with one worker thread). The
+  primitive takes a box, not any `T`: a `[value]` record (the unit, a
+  `Tuple`) cannot cross the FFI boundary (rrc: "a `[value]` record cannot
+  cross the FFI boundary yet"), so `Runtime.forget ()` did not compile
+  with a generic texture.
+- **Where:** `runtime/prelude.rr`: `l2r_runtime_forget`,
+  `l2r_runtime_leak`; `Lower/ExternCall.lean`: `lowerExternCall` (the
+  non-generic primitive path, which boxes the argument).
 - **Remove only if:** never.
 
 ### Fallible IO uses a last-error slot and Lean's own error builders
