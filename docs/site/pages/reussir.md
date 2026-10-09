@@ -143,7 +143,9 @@ outside the series (instruction counts: monadic-interp −5.0%, unionfind
 *Kind*) tells what it is:
 
 - A *bug* is wrong behaviour: a crash, a wrong result, valid code that is
-  rejected, or a broken build.
+  rejected, or a broken build. Undefined behaviour that Miri finds in
+  Reussir's Rust code is a bug too, even when no build gives a wrong
+  result (issue 47).
 - A *cost* is correct but slow or big (build time, memory, run time). A
   *missed optimization* is correct but slower than it can be. A *missing
   feature* is something that Reussir does not promise but Lean needs. An

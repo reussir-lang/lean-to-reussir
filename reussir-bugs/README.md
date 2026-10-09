@@ -31,9 +31,9 @@ branch `l2r-local-pre-final`.)
 
 ## Names
 
-- **Entry numbers** run from 1 to 46: 45 entries, because number 37 is
+- **Entry numbers** run from 1 to 47: 46 entries, because number 37 is
   reserved (another track will use it for its patch: value records across
-  the FFI boundary). The next free number is 47.
+  the FFI boundary). The next free number is 48.
 - **A patch file** is named `NN-x-slug.patch`. NN is the number of its
   entry. The letter x gives the order of the entry's patches (a, b, c,
   ...). The slug is a short description. Every patch belongs to exactly one
@@ -63,6 +63,12 @@ a feature), not a fix.
 - *bug*: reproducible, erroneous behaviour: a crash, a wrong result, valid
   code rejected, a broken build or broken build artifacts. Nothing else.
   Its patch is a fix.
+- *bug (latent UB; no miscompile seen)*: a bug in Reussir's Rust code
+  that breaks a rule of the language (for example pointer provenance), so
+  that its behaviour is undefined: Miri shows it reproducibly, but no
+  build is known to give a wrong result (47). The compiler may rely on the
+  rule, so a new compiler version or other inlining can turn it into a
+  wrong result. Its patch is a fix.
 - *cost*: correct, but slow or big (build time, memory, run time; also
   debug output). Its patch, if any, is an optimization. A superlinear build
   cost can make large builds infeasible (time or memory) while the output
@@ -119,6 +125,7 @@ a patch outside the series ([parked patches](#parked-patches)), and
 | [43](43-nullable-as-ref.md) | bug | reussir-rt's `Nullable::as_ref` returns a reference to a local copy of the pointer word (dangling); `Nullable::new` checks the size only in debug builds | no: nothing calls it, and a `Nullable` cannot cross the FFI boundary | - | none | - | - |
 | [44](44-small-allocation-limit.md) | bug (32-bit targets) | constant-size boxes of 513 to 1024 bytes go to `mi_malloc_small`, whose limit is 512 bytes there (heap corruption) | no: lean2rr builds only for 64-bit targets | - | none | - | - |
 | [45](45-polyffi-rc-substitution.md) | bug (hand-written MLIR only) | a polymorphic-FFI substitution given as an MLIR rc type becomes Rust's `Rc` without the record's glue (members leak, immediates and atomic counts mishandled) | no: only hand-written MLIR gets there (the front end substitutes the text itself) | - | none | - | - |
+| [47](47-unlink-provenance.md) | bug (latent UB; no miscompile seen) | reussir-rt's pending stack (`drop.rs`, from 13-b; not upstream) rebuilds the pointer of a linked cell from the linking cell's pointer and an offset (`wrapping_offset`), so the pointer has the provenance of another, already freed allocation (Miri: undefined behaviour) | no wrong result seen (the release functions get the pointer through an indirect call), but many frees run the code | none | none | - | - |
 | [34](34-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes: every lean2rr binary has `DT_TEXTREL` on aarch64; with lld or on x86-64 it would not link | `l2r.py` passes `--relocation-mode pic` | [34-a](patches/34-a-pic-by-default.patch) | rv8/reussir/bug34: no defect | yes |
 | [10](10-closure-type-print.md) | cost (build time) | closure devirtualization prints types exponentially | yes, build time and memory | `--no-closure-wpd` | [10-a](patches/10-a-closure-type-ids.patch) | rv7/p22 rounds 1-2 (RV7P-02, RV7P-04 fixed) | yes |
 | [11](11-sccp-call-graph.md) | cost (stock MLIR pass; 11b: Reussir's own glue lookups) | interprocedural SCCP is superlinear; glue lookups rebuild a symbol table per call (11b) | yes, build time of large programs | none | [11-a](patches/11-a-sccp-call-budget.patch) (SCCP), [11-b](patches/11-b-glue-symbol-tables.patch) (11b) | rv8/reussir-c (RV8C-01, -02, -04 resolved) | yes |
@@ -143,13 +150,13 @@ a patch outside the series ([parked patches](#parked-patches)), and
 | [41](41-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate (a number) | yes: the one-word `Nat` and `Int` need it (the prelude declares them `tagged`) | none (before: `Nat` was a two-word `[value]` enum) | [41-a](patches/41-a-tagged-ffi-objects.patch) | the mem-nat review and rv8/nat: no defect | yes |
 | [46](46-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4, which reussir-rt pins through `libmimalloc-sys` 0.1.44) | mimalloc's delayed arena purges do not run (`src/arena.c:624` tests the purge time the wrong way round): freed huge blocks and segments stay in the process | yes, peak memory (lean-zip's benchmark: 422 MiB, 330 MiB with the workaround; native 394 MiB) | leanrt sets mimalloc's `arena_purge_mult` to 0 on v2.1.8 to v2.2.7 (`alloc::purge_arenas_at_once`) | none (a newer `libmimalloc-sys`, 0.1.49 or later, parked) | - | - |
 
-**Counts.** 45 entries: 23 bugs, 13 costs, 3 missed optimizations, 5
+**Counts.** 46 entries: 24 bugs, 13 costs, 3 missed optimizations, 5
 missing features, 1 dependency issue. 30 entries have patches of their own in the series, 35
 patch files in all (two each for entries 3 and 11, four for entry 13, one
 each for the others); 5 entries are fixed upstream (4, 5, 9, 14 and 26:
 their patches 04-a, 05-a, 09-a and 26-a dropped), and half of entry 2
-(02-a dropped; 02-b, the variant half, stays); 10 entries have no patch
-(7, 25, 32, 36, 39, 42, 43, 44, 45, 46). The 35 patches are 15 bug fixes,
+(02-a dropped; 02-b, the variant half, stays); 11 entries have no patch
+(7, 25, 32, 36, 39, 42, 43, 44, 45, 46, 47). The 35 patches are 15 bug fixes,
 12 optimizations and 8 features; all 35 are on `l2r-base2`. Five parked
 patches lie outside the series and these counts
 ([parked patches](#parked-patches)).
@@ -257,7 +264,7 @@ come back).
 
 **Adding a patch.** Name the file after its entry: `NN-x-slug.patch`, with
 the next free letter of the entry (a new problem gets the next free entry
-number, 47). Put it in `patches/` and add its name as the last line of
+number, 48). Put it in `patches/` and add its name as the last line of
 `patches/series`. Write the *Patch* and *Upstream note* sections of the
 entry's file, and update the entry's row in the status table (column
 *Applied*: "no" until it is on the Reussir branch named
@@ -299,14 +306,17 @@ counts.
 (`bugNN-name.lean`) where the issue needs lean2rr's output, a small
 generator (`bugNN-name.py`) where the program must be large, or a check
 script (bugs 18 and 24), plus `bug07b-call-before-branch.rr`, a variant
-used in issue 7's entry, and a Rust test of Reussir's runtime sources
-(`bug43-nullable-as-ref.rs`). Entries 40 and 41 have no repro: they are
+used in issue 7's entry, and Rust tests of Reussir's runtime sources
+(`bug43-nullable-as-ref.rs`; `bug47-unlink-provenance.rs`, which needs
+Miri: its header gives the commands, and `run.sh` does not run it).
+Entries 40 and 41 have no repro: they are
 missing features that show only through a host that uses them, and their
 patches carry their own tests. Entries 44 to 46 have none either: 44
 needs a 32-bit target, 45 MLIR written by hand, and 46 is shown by
 lean2rr's runtime test `RtArenaPurge` (its peak memory, through
 `tests/runtime/alloc-check.sh`). Each repro file starts
-with what it shows, the expected output and what Reussir ef922049 does.
+with what it shows, the expected output and what Reussir ef922049 does
+(47: what `l2r-base2` does, since its `drop.rs` comes from 13-b).
 
     reussir-bugs/repros/run.sh RRC_CHECKOUT [NN...]
 
@@ -318,7 +328,8 @@ measure), `OTHER` (something else), or `SKIPPED`
 and, in brackets, the rrc flags. (Before 2026-10-05 the label was `bug
 NN`; the recorded lines below and in the entries are shown with the
 current label.) NN is an entry number (`1`, `02`, `13`, ...); the default
-is every entry with a repro except 22, whose generator is run by hand.
+is every entry with a repro except 22, whose generator is run by hand,
+and 47 (Miri, by hand).
 `run.sh` alone prints its header: the options and the environment.
 
 Issue 30's repro is an MLIR module timed through `reussir-opt` (`ninja -C

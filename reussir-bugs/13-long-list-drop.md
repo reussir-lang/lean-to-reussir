@@ -836,7 +836,10 @@ thread.
   and `active()` seen at it, so two implementations can be compared
   exactly. The hashes are identical to 13-b's (400 random scenarios).
 - The tests pass under Miri, with strict provenance, stacked borrows and
-  tree borrows.
+  tree borrows. They take all their cells from one allocation, so they
+  miss [issue 47](47-unlink-provenance.md): with cells in separate
+  allocations, Miri reports undefined behaviour in `unlink` (not
+  patched).
 - Review round 5 compared old and new event by event on 31 million events
   (3000 random programs mixing deferrals, steps, nested drains, immediates
   and a full table). It also covered deep step chains, links at the ±2^39
