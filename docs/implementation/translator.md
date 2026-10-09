@@ -103,7 +103,9 @@ relative to `lean2rr/` unless they start with `scripts/`.
   printer; `externs` as a report of the externs called; `rr` as the program
   text. `--stats`
   runs a dry-run specializer that reports where the typed translation would
-  need `Box`; `--no-check` turns off Lean's checker between Stage 2's
+  need `Box` (its re-typing takes a `◾` argument as a placeholder, as
+  Stage 3 does: `◾` arguments alone do not give a parameter a type);
+  `--no-check` turns off Lean's checker between Stage 2's
   passes. Environment switches: `L2R_NO_OUTLINE` and
   `L2R_NO_INLINE_ANCHORS` turn off two build-time workarounds (for the
   repros of Reussir issues 16, 17 and 20, costs), `L2R_ALLOW_MISSING_EXTERNS`

@@ -3517,10 +3517,8 @@ fn l2r_fs_read_dir(p : LStr) -> RVec<LStr> [{
 fn l2r_fs_metadata(p : LStr, follow : bool) -> RVec<u64> [{
     { let v = leanrt::fs::metadata(p.utf8(), follow); leanrt::rc_release(p); leanrt::array::from_slice(&v[..]) }
 }];
-// `Handle.isEof` / `Handle.isTty` are `BaseIO` (they cannot fail): payload
-// primitives named after the extern symbols.
-#[ffi(import)]
-fn l2r_io_prim_handle_is_eof(h : LHandle) -> bool [{ leanrt::fs::owned::is_eof(h) }];
+// `Handle.isTty` is `BaseIO` (it cannot fail): a payload primitive named
+// after the extern symbol.
 #[ffi(import)]
 fn l2r_io_prim_handle_is_tty(h : LHandle) -> bool [{ leanrt::fs::owned::is_tty(h) }];
 // `IO.currentDir` / `IO.appPath` (user errors) and

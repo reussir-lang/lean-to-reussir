@@ -170,6 +170,14 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
     (List.range (j - k)).toArray.map fun i => (RR.Expr.var as[k + i]!, doms[k + i]!)
   -- The value `e` of the first `k` arguments (at `fnResult t k`), applied to
   -- the others.
+  -- `rest` (and so the `raw` arm) and the sink arms below take the arguments
+  -- at `doms`, the run-time types. That is correct only because they never
+  -- convert an argument: each one is at its own parameter type here, so
+  -- `applyExprs`'s conversions are the identity and `l2r_sink` releases at
+  -- the declared type. Do not add a conversion from `doms[i]` there: a
+  -- function type in `doms` has lost its phantom domains (see the `.part`
+  -- arm). The `.part` and `.wrap` arms take each argument at the variant's
+  -- own domain.
   let rest (e : RR.Expr) (k : Nat) : LowerM RR.Expr := do
     let (r, rt) ← applyExprs e (fnResult t k) (argsFrom k)
     coerce r rt resJ

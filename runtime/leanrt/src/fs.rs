@@ -338,12 +338,6 @@ pub fn read_bytes(h: &LHandle, n: u64) -> crate::array::RVec<u8> {
     }
 }
 
-/// `Handle.isEof` (`feof`; cannot fail).
-pub fn is_eof(h: &LHandle) -> bool {
-    set_ok();
-    fh(h).h.as_ref().is_some_and(Handle::is_eof)
-}
-
 /// `getLine` on `h` (`lean_io_prim_handle_get_line`): the line decoded as
 /// `mk_string` does (lossily); the empty string on failure.
 pub(crate) fn lean_get_line(h: &Handle) -> LStr {
@@ -425,8 +419,6 @@ pub mod owned {
     pub fn get_line(h: LHandle) -> LStr { let s = super::get_line(&h); rc_release(h); s }
     #[inline(never)]
     pub fn is_tty(h: LHandle) -> bool { let r = super::is_tty(&h); rc_release(h); r }
-    #[inline(never)]
-    pub fn is_eof(h: LHandle) -> bool { let r = super::is_eof(&h); rc_release(h); r }
     #[inline(never)]
     pub fn rewind(h: LHandle) { super::rewind(&h); rc_release(h); }
     #[inline(never)]

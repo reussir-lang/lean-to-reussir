@@ -919,8 +919,8 @@ def ioErrorBuilderSyms : Array String := #[
 /-- Is `sym` a fallible IO primitive whose errors the runtime reports
 through its last-error protocol? -/
 def isFallibleIOSym (sym : String) : Bool :=
-  (sym.startsWith "lean_io_prim_handle_" &&
-    sym ∉ ["lean_io_prim_handle_is_tty", "lean_io_prim_handle_is_eof"]) ||
+  -- `Handle.isTty` is `BaseIO`: it cannot fail.
+  (sym.startsWith "lean_io_prim_handle_" && sym != "lean_io_prim_handle_is_tty") ||
   sym ∈ ["lean_io_remove_file", "lean_io_create_dir", "lean_io_remove_dir", "lean_io_rename",
          "lean_io_hard_link", "lean_io_realpath", "lean_io_read_dir", "lean_io_metadata",
          "lean_io_symlink_metadata", "lean_chmod", "lean_io_create_tempfile",

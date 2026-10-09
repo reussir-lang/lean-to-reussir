@@ -837,6 +837,16 @@ mutual
     -- Between a function value and a Reussir closure (prelude callbacks):
     -- a lambda, at the function's run-time type. `e` is bound first, so
     -- that it is evaluated once.
+    -- Both cases take the function side's domain and codomain from `.rt`,
+    -- where a function type has lost its phantom domains. That is safe only
+    -- because prelude closure types never have phantom domains either: they
+    -- are built from run-time types (`lowerExternCall`'s `.cls d c` of
+    -- `t.rt`, the `raw` variant's, `ctorCallbackExtern`'s `.cls .unit rt`
+    -- over an IO result type), so both sides are at run-time types and
+    -- a conversion between them does not drop or add a `◾` argument. A
+    -- closure type that keeps phantom domains would need the function
+    -- side's own domains, as `genApply`'s `.part` arm takes them (test
+    -- `RtApplyPhantomParam`).
     | .fn .., .cls a2 b2 =>
       let .fn a1 b1 := src.rt | return none
       let (pre, callee) ← match e with

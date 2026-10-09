@@ -552,11 +552,10 @@ lean2rr wraps its result with `wrapIOResult`: `l2r_io_mono_ms_now()`,
 `l2r_io_check_canceled()`, `l2r_io_get_tid()`, `l2r_io_initializing()`,
 `l2r_io_set_heartbeats(n)`, `l2r_runtime_mark_persistent<T>(a)`,
 `l2r_runtime_mark_multi_threaded<T>(a)`, `l2r_runtime_forget<T>(a)`,
-`l2r_runtime_hold<T>(a)`, `l2r_io_prim_handle_is_eof(h)`,
-`l2r_io_prim_handle_is_tty(h)`. (`l2r_io_app_path()`, `l2r_io_current_dir()`
-and `l2r_io_process_get_current_dir()` are infallible stand-ins for the
-fallible primitives below.) References are Reussir cells in a
-lean2rr-generated record (`L2RRefN(Cell<T>)`, two allocations;
+`l2r_runtime_hold<T>(a)`, `l2r_io_prim_handle_is_tty(h)`. (`l2r_io_app_path()`,
+`l2r_io_current_dir()` and `l2r_io_process_get_current_dir()` are
+infallible stand-ins for the fallible primitives below.) References are
+Reussir cells in a lean2rr-generated record (`L2RRefN(Cell<T>)`, two allocations;
 translation plan §5.1), read and written by the plain-Reussir helpers
 `l2r_rc_get<T>`, `l2r_rc_set_ref<T, R>` and `l2r_rc_swap<T>` (the cell
 holds a `Box`). Promises hold the `LCell` of their task
@@ -1111,11 +1110,11 @@ lean2rr's dev branch (the tests pass with it).
     `run_main` is gone.)
 14. *done* — The standard-stream glue should check each `l2r_stream_*` call with
     `l2r_io_finish`, as for files (tests `RtBrokenPipe`, `RtClosedStreams`).
-15. *done* — `lean_io_prim_handle_is_tty` and `lean_io_prim_handle_is_eof` are
-    `BaseIO`: the `lean_io_prim_handle_` prefix rule sends them to the
-    fallible glue, which rejects them ("IO result ... cannot fail"). Use the
-    BaseIO payloads `l2r_io_prim_handle_is_tty`/`_is_eof` (test
-    `RtHandleIsTty`).
+15. *done* — `lean_io_prim_handle_is_tty` is `BaseIO`: the
+    `lean_io_prim_handle_` prefix rule sends it to the fallible glue, which
+    rejects it ("IO result ... cannot fail"). Use the BaseIO payload
+    `l2r_io_prim_handle_is_tty` (test `RtHandleIsTty`). (A payload for
+    `lean_io_prim_handle_is_eof` is gone: Lean 4.34 has no `Handle.isEof`.)
 16. *done* — `ST.Prim.Ref.take` is lowered to `l2r_ref_get`, so the value stays in
     the cell and the taken copy is shared: every `modify`/`modifyGet`
     copies the array or string it updates (quadratic loops). Map it to

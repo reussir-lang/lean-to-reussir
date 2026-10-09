@@ -46,11 +46,14 @@ def setParamType (p : Param .pure) (ty : Expr) : RetypeM (Param .pure) := do
   set true
   return p
 
-/-- Types of `args`, dropping those that are themselves unknown. -/
+/-- Types of `args`, dropping those that are themselves unknown. A `◾`
+argument (type `lcErased`) is a placeholder that fits any type, so it is
+no candidate either: `◾` arguments alone do not refine a parameter to
+`lcErased` (as `MonoRetype.refineTo?`, which never refines to `◾`). -/
 def knownArgTypes (args : Array (Arg .pure)) (i : Nat) : RetypeM (Option Expr) := do
   let some a := args[i]? | return none
   let t ← a.inferType
-  return if ← isUnknownType t then none else some t
+  return if t.consumeMData.isErased || (← isUnknownType t) then none else some t
 
 def refineLet (d : LetDecl .pure) : RetypeM (LetDecl .pure) := do
   unless ← isUnknownType d.type do return d

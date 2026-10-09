@@ -120,7 +120,10 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   phantom domains (`f : (α : Type) → α → α` is `◾ → Box → Box`), and the
   conversion from the run-time type `Box → Box` wrapped the argument as a
   function whose `◾` is an argument, so the target applied `box(0)` for
-  the value (hunt 3; test `RtApplyPhantomParam`).
+  the value (hunt 3; test `RtApplyPhantomParam`). The `raw` arm, the
+  arguments applied after a call (`rest`) and the wildcard's sinks use the
+  run-time types: there each argument is at its own parameter type, so
+  nothing converts it.
 - **Why:** `◾` carries no information, and the run-time types are those
   of the dependent-types design (`ops_lam(xs)`). Removing a domain must not
   move the point where a body runs (Lean runs a body when its last
@@ -171,7 +174,9 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
 - **What:** Runtime helpers that take a Reussir closure (`dbgTrace`,
   `timeit`, the constructor callbacks of glue) receive
   `|x| l2r_ap1_…(g, x)`; glue that builds a function value from Reussir
-  code uses the `raw` variant.
+  code uses the `raw` variant. A closure type is built from run-time types
+  (`Ty.rt`), so it has no phantom domain; `tryCoerce` converts between it
+  and the function value's run-time type.
 - **Why:** The prelude cannot name lean2rr's generated enums.
 - **Where:** `Lower/ExternCall.lean`: `lowerExternCall`
   (`valueGenericCls`); `Emit/Program.lean`: `valueGenericClosureParams`;
