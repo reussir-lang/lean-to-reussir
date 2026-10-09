@@ -124,8 +124,9 @@ structure LowerCtx where
   driver turns its own member packing off). -/
   fieldOrder : Array Nat → Array Nat := fun aligns => (List.range aligns.size).toArray
   /-- Whether the program can read a value as another type than its own
-  (`unsafe` code of its own, or a cast justified by `sorry` or an axiom;
-  `programCasts`): otherwise a `Box` holding a value of one inductive is
+  (`unsafe` code of its own, or a cast justified by `sorry` or an axiom,
+  but not by one of Lean's axioms of native evaluation; `programCasts`):
+  otherwise a `Box` holding a value of one inductive is
   never read as another, and an unboxing reads only its own type's payload,
   in line (`boxCastable`, `tryCoerce`). -/
   programCasts : Bool := true

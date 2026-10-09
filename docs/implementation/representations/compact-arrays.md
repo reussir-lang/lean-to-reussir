@@ -115,10 +115,21 @@ that it gets as an `α` is one box (kind 11), which it passes on unread.
     `Array.size` at `lcAny`; before, `u64` stayed on and leanrt converted
     the array at each read);
   - **a cast:** the program can read a value as another type
-    (`programCasts`): every kind is off. An axiom that states a `Bool`
-    equation does not count (`isBoolEqAxiom`): `native_decide` and
-    `bv_decide` add such axioms (lean-zip has them), and they prove no
-    equation between types. An extern of the program does not count by
+    (`programCasts`): every kind is off. An axiom that Lean adds for a
+    proof by native evaluation (`native_decide`, `bv_decide`; lean-zip has
+    them) does not count when the evaluation ran the code of the
+    definitions; every other axiom counts, a user's `axiom bad : true =
+    false` too
+    ([../types/uniform-types.md](../types/uniform-types.md#leans-axioms-of-native-evaluation-are-no-cast);
+    tests `RtCastNativeAxiom`, `RtCastNativeEqIdiom`,
+    `RtCastNativeLibShape`, `RtCastAxiomBoolEq`, `RtCastNativeImplBy`,
+    `RtCastNativeCsimp`, `RtCastNativePrefix`, `RtCastNativeCrossLocal`,
+    `RtCastNativeEqnName`, `RtCastNativeInit`, `RtCastReduceBool`,
+    `RtCastReduceBoolCongr`).
+    Until 2026-10-09 the compact arrays let every axiom that states a
+    `Bool` equation pass (`isBoolEqAxiom`), so a false one could read an
+    `Array UInt64` as an `Array Float` with both compact. The compact
+    arrays now read the fact that the lowering reads. An extern of the program does not count by
     itself: the Lean code that runs for it is walked as the rest of the
     program ([../externs-ffi/program-externs.md](../externs-ffi/program-externs.md#an-extern-of-the-program-is-not-a-cast-by-itself)).
     lean-zip's 12 externs turned every kind off until 2026-10-09 (test
@@ -146,8 +157,8 @@ that it gets as an `α` is one box (kind 11), which it passes on unread.
   every kind on.
 - **Where:** `CompactArrays.lean`: `compactArrayKinds`, `caCode`,
   `alignArr`, `boxArrayElem`, `CAM.holdsNoArray`, `mentions`,
-  `mayHoldArr`; `Lower/Conv.lean`: `programCasts` (`ignoreAxiom`),
-  `isBoolEqAxiom`; `Emit/Program.lean`: `lowerProgram`.
+  `mayHoldArr`; `Lower/Conv.lean`: `programCasts`,
+  `nativeEvalStatement?`; `Emit/Program.lean`: `lowerProgram`.
 - **Remove only if:** never while arrays have two representations.
 
 ### A field `Array α` of an inductive used with a compact array is a box

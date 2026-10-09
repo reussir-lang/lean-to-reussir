@@ -8,7 +8,7 @@ the replacement: the walk did not reach `asP2Fast`, the program counted as
 one that cannot cast, and the program lean2rr built stopped with "INTERNAL
 PANIC: unreachable code has been reached". The walk now starts also from `g`
 for each constant of the program's modules stated as `@f = @g`
-(`programCsimpTargets`). `RtCastCsimpLocal`: the same with a `local`
+(`programCsimps`). `RtCastCsimpLocal`: the same with a `local`
 `@[csimp]`. -/
 
 structure P1 where

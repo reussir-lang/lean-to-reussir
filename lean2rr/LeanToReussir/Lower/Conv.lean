@@ -1135,27 +1135,206 @@ def exportsBySymbol (env : Environment) : Std.HashMap String (Array Name) := Id.
       m := m.insert k ((m.getD k #[]).push d)
   return m
 
-/-- The `@[csimp]` replacements that are declarations of the program (not of
-Lean's library or lean2rr's shim), which `programCasts` takes as roots of
-its walk: the targets of `CSimp.ext`'s state after import, and, for every
-constant of a module of the program whose statement has the shape of a
-constant replacement, `@f = @g` (the shape `@[csimp]` accepts,
-`CSimp.isConstantReplacement?`), `g`. A `local` `@[csimp]` is not saved in
-its module's `.olean`, and a `scoped` one is active only where its
-namespace is open, so the state after import has neither, while the code
-of their module was compiled with them (tests `RtCastCsimpLocal`,
-`RtCastCsimpScoped`). A theorem of that shape without the attribute counts
-too (the set is larger than needed, never smaller). -/
-def programCsimpTargets (env : Environment) (library : Name → Bool) : Array Name := Id.run do
-  let mut out : Array Name := (CSimp.ext.getState env).map.fold (init := #[]) fun acc _ e =>
-    if library e.toDeclName then acc else acc.push e.toDeclName
+/-- The constants of Lean's library whose use rests on compiled code: the
+kernel proves `Lean.reduceBool c = b` (`reduceNat`) by running the compiled
+code of the constant `c`, which can be the program's, and
+`Lean.ofReduceBool` (`ofReduceNat`) turns that into `c = b` (Lean 4.34,
+`Init/Core.lean`). With a wrong `implemented_by` in that code, either
+proves `False` (tests `RtCastReduceBool`, `RtCastReduceBoolCongr`). -/
+def isKernelEvalConst (n : Name) : Bool :=
+  n == `Lean.reduceBool || n == `Lean.reduceNat || n == `Lean.ofReduceBool ||
+    n == `Lean.ofReduceNat
+
+/-- The constants of the program's modules (not of Lean's library or
+lean2rr's shim) whose statement has the shape of a constant replacement,
+`@f = @g` (the shape `@[csimp]` accepts, `CSimp.isConstantReplacement?`),
+each as `f ↦ g` by itself. Every `@[csimp]` theorem of the program is one:
+global, `scoped`, or `local` (a `local` attribute is saved nowhere, and a
+module can make a theorem of another module a `local` `@[csimp]`; tests
+`RtCastCsimpLocal`, `RtCastCsimpScoped`, `RtCastNativeCrossLocal`). So is
+any theorem of that shape without the attribute (the set is larger than
+needed, never smaller). `programCasts` takes the targets that are
+declarations of the program as roots of its walk; `nativeExempt` looks for
+the replaced constants. -/
+def programCsimps (env : Environment) : Array CSimp.Entry := Id.run do
+  let mut out : Array CSimp.Entry := #[]
   for i in [:env.header.moduleNames.size] do
     if isToolchainModule env.header.moduleNames[i]! then continue
     let some data := env.header.moduleData[i]? | continue
     for ci in data.constants do
-      if let some (_, .const _ _, .const g _) := ci.type.eq? then
-        unless library g do out := out.push g
+      if let some (_, .const f _, .const g _) := ci.type.eq? then
+        out := out.push { fromDeclName := f, toDeclName := g, thmName := ci.name }
   return out
+
+/-- The statement `e` of axiom `ci` when it is one that Lean adds for a
+proof by native evaluation: `Lean.Meta.nativeEqTrue` (Lean 4.34,
+`Lean/Meta/Native.lean`; `native_decide`, `decide +native` and `bv_decide`
+call it) compiles `e`, a closed `Bool` term, runs it, and only when it
+gives `true` adds the axiom `e = true` (exactly `@Eq.{1} Bool e true`, not
+`unsafe`), named `<decl>._native.<tactic>.ax_<i>…` (`mkAuxDeclName`:
+`ax_1`, `ax_1_10`; under the module system with `_private.…` in front).
+`none` for every other axiom: one the user writes, whatever it states
+(`axiom bad : true = false` too, test `RtCastAxiomBoolEq`), and one with
+that name and another statement. The name is how Lean names these axioms,
+nothing more: an axiom that the user names so, with that statement shape,
+passes (`axiom foo._native.native_decide.ax_1 : (!true) = true`). -/
+def nativeEvalStatement? (ci : ConstantInfo) : Option Expr := do
+  let .axiomInfo ai := ci | none
+  guard !ai.isUnsafe
+  let .str (.str (.str _ "_native") _) last := ci.name.eraseMacroScopes | none
+  let idx := last.splitOn "_"
+  guard (idx.head? == some "ax" && idx.length ≥ 2 &&
+    idx.tail.all fun s => !s.isEmpty && s.all Char.isDigit)
+  let t := ci.type
+  guard (t.isAppOfArity ``Eq 3 && t.appFn!.appFn!.appArg!.isConstOf ``Bool &&
+    t.appArg!.isConstOf ``Bool.true)
+  return t.appFn!.appArg!
+
+/-- The walk of `nativeExempt` over the code that Lean's evaluation of `e`,
+the statement of an axiom of native evaluation, may have run: from the
+constants of `e` and from `libTargets` (the replacements of library
+constants, which compiled code may call where only a library
+`@[macro_inline]` body shows them), through the definitions and
+`_unsafe_rec` copies of the program's declarations (not into Lean's
+library, whose code is trusted as Lean's compiler is), and from each
+constant reached to the replacements that the `@[csimp]` candidates give
+it (`targets`, `programCsimps`): compiled code runs `g` for `f`. `.error n`:
+`n` may compute another value than its definition says, a program
+declaration with an `implemented_by` target (checked against the declared
+type only: a wrong implementation of a `Bool` makes `native_decide` prove
+`False`, as Lean's `implemented_by` doc says; test `RtCastNativeImplBy`),
+an extern (natively its C), or a constant that an `initialize` or
+`builtin_initialize` action sets (`getInitFnNameFor?`): the action runs
+when a module imports the constant's, so its value can differ between the
+builds of two modules (an environment variable), and two axioms about it,
+each true in its own build, prove `False` (test `RtCastNativeInit`); or a
+constant of kernel evaluation (`isKernelEvalConst`). `.ok s`: the constants reached, the program's
+declarations and the library constants that they and `e` mention. -/
+def nativeEvalWalk (env : Environment) (library : Name → Bool) (targets : NameMap (Array Name))
+    (libTargets : Array Name) (e : Expr) : Except Name NameSet := Id.run do
+  let mut seen : NameSet := {}
+  let mut work : Array Name := e.foldConsts libTargets fun k acc => acc.push k
+  while h : work.size > 0 do
+    let n := work[work.size - 1]
+    work := work.pop
+    if seen.contains n then continue
+    seen := seen.insert n
+    if isKernelEvalConst n then return .error n
+    work := work ++ targets.getD n #[]
+    if library n then continue
+    if (Compiler.getImplementedBy? env n).isSome || isExtern env n ||
+        (getInitFnNameFor? env n).isSome then
+      return .error n
+    let unsafeRec := Compiler.mkUnsafeRecName n
+    if env.contains unsafeRec then work := work.push unsafeRec
+    if let some v := (env.find? n).bind (·.value? (allowOpaque := true)) then
+      work := v.foldConsts work fun k acc => if seen.contains k then acc else acc.push k
+  return .ok seen
+
+/-- The axioms that the proof of `thm` rests on, as `#print axioms` collects
+them (the constants of values and types, transitively), but through the
+declarations of the program only: Lean's library is trusted. `none` when
+one of them can be false whatever the program's code is: `sorryAx`, an
+axiom of the program that is not one of native evaluation, or a constant of
+kernel evaluation (`isKernelEvalConst`). Otherwise the axioms of native
+evaluation among them (`nativeEvalStatement?`), which `nativeExempt`
+judges. Lean's standard axioms (`propext`, `Quot.sound`,
+`Classical.choice`) are the library's: a theorem that uses only them is
+true. -/
+def proofAxioms (env : Environment) (library : Name → Bool) (thm : Name) : Option NameSet := Id.run do
+  let mut natives : NameSet := {}
+  let mut seen : NameSet := {}
+  let mut work := #[thm]
+  while h : work.size > 0 do
+    let n := work[work.size - 1]
+    work := work.pop
+    if seen.contains n then continue
+    seen := seen.insert n
+    if n == ``sorryAx || isKernelEvalConst n then return none
+    if library n then continue
+    let some ci := env.find? n | continue
+    if ci matches .axiomInfo _ then
+      unless (nativeEvalStatement? ci).isSome do return none
+      natives := natives.insert n
+      continue
+    work := ci.type.foldConsts work fun k acc => if seen.contains k then acc else acc.push k
+    if let some v := ci.value? (allowOpaque := true) then
+      work := v.foldConsts work fun k acc => if seen.contains k then acc else acc.push k
+  return some natives
+
+/-- The declaration whose elaboration added the axiom of native evaluation
+`ax` (`T` for `T._native.<tactic>.ax_<i>…`). -/
+def nativeAxiomDecl? (ax : Name) : Option Name :=
+  match ax.eraseMacroScopes with
+  | .str (.str (.str d "_native") _) _ => some d
+  | _ => none
+
+/-- The axioms of native evaluation of the program (`nativeEvalStatement?`)
+that do not make it cast: those whose evaluation ran the code of the
+definitions, so that the axiom is true. An axiom `A : e = true` is exempt
+when
+- the walk over what its evaluation ran (`nativeEvalWalk`) meets no
+  program declaration with an `implemented_by` target, no extern, no
+  constant that an `initialize` action sets and no constant of kernel
+  evaluation; and
+- no dangerous `@[csimp]` candidate (`programCsimps`) acts on it. A
+  candidate `T : @f = @g` acts on `A` when the walk reached `f`, or `f` is
+  a library constant, unless `T` comes after `A`: `A` is `T`'s own axiom
+  (`nativeAxiomDecl?`: Lean adds it while it elaborates `T`), or `T`'s
+  proof uses `A`. A candidate is dangerous when its proof can be false
+  (`proofAxioms`): it uses `sorryAx`, an axiom of the program that is not
+  exempt, or kernel evaluation. A true theorem `@f = @g` makes `f` and `g`
+  compute alike (and the walk goes into `g` anyway).
+A candidate proved with an axiom of native evaluation is dangerous until
+that axiom is exempt, and that axiom's exemption may depend on candidates:
+this is the least fixed point. It starts with no axiom exempt and every
+candidate whose proof uses an axiom dangerous, and grows the exempt set
+until it is stable, so that axioms and candidates that only justify each
+other stay out. The usual idiom `theorem T : tableOk = true := by
+native_decide` has the shape `@f = @g`, but is `A`'s own theorem (test
+`RtCastNativeEqIdiom`); a candidate proved by `sorry` acts on every later
+axiom whose evaluation reaches its `f`, in any module (tests
+`RtCastNativeCsimp`, `RtCastNativePrefix`, `RtCastNativeCrossLocal`). -/
+def nativeExempt (env : Environment) (library : Name → Bool) (csimps : Array CSimp.Entry) :
+    NameSet := Id.run do
+  let mut axioms : Array (Name × Expr) := #[]
+  for i in [:env.header.moduleNames.size] do
+    if isToolchainModule env.header.moduleNames[i]! then continue
+    let some data := env.header.moduleData[i]? | continue
+    for ci in data.constants do
+      if let some e := nativeEvalStatement? ci then axioms := axioms.push (ci.name, e)
+  if axioms.isEmpty then return {}
+  let targets : NameMap (Array Name) := csimps.foldl (init := {}) fun m c =>
+    m.insert c.fromDeclName ((m.getD c.fromDeclName #[]).push c.toDeclName)
+  let libTargets := csimps.filterMap fun c =>
+    if library c.fromDeclName && !library c.toDeclName then some c.toDeclName else none
+  -- What each evaluation ran (`none`: maybe other code than the definitions').
+  let reached : Array (Name × Option NameSet) := axioms.map fun (a, e) =>
+    (a, match nativeEvalWalk env library targets libTargets e with
+      | .ok s => some s
+      | .error _ => none)
+  -- The candidates that could act on some axiom, with their proofs' axioms.
+  let acting := csimps.filter fun c =>
+    library c.fromDeclName || reached.any fun (_, s?) => s?.any (·.contains c.fromDeclName)
+  let proofs : Array (CSimp.Entry × Option NameSet) :=
+    acting.map fun c => (c, proofAxioms env library c.thmName)
+  let mut exempt : NameSet := {}
+  repeat
+    let dangerous := proofs.filter fun (_, ax?) => match ax? with
+      | none => true
+      | some ax => ax.toList.any fun a => !exempt.contains a
+    let next : NameSet := reached.foldl (init := {}) fun acc (a, s?) => match s? with
+      | none => acc
+      | some s =>
+        let acts := dangerous.any fun (c, ax?) =>
+          (library c.fromDeclName || s.contains c.fromDeclName) &&
+            !(nativeAxiomDecl? a == some c.thmName || ax?.any (·.contains a))
+        if acts then acc else acc.insert a
+    -- The set only grows (each round, more axioms exempt and fewer
+    -- candidates dangerous).
+    if next.size == exempt.size then return next
+    exempt := next
+  return exempt
 
 /-- Whether the program can read a value as another type than its own
 (`LowerCtx.programCasts`), and the declaration that shows it: some
@@ -1163,14 +1342,32 @@ declaration it reaches, outside Lean's own library (`Init`, `Std`, `Lean`,
 `Lake`) and lean2rr's shim (`L2RShim`), is `unsafe` (its code may
 `unsafeCast`, build a `TypeName` for `Dynamic`, or be the `implemented_by`
 target of another type's code; the `_unsafe_rec` code Lean (4.33, 4.34) generates
-for a `partial def` is not `unsafe`), is an axiom, uses `sorry` (a cast
-through an equality proved by either), is implemented by an `unsafe`
+for a `partial def` is not `unsafe`), is an axiom (but see below), uses
+`sorry` (a cast through an equality proved by either), is implemented by an `unsafe`
 declaration (`implemented_by` is type-checked, but an `unsafe`
 implementation, even one of the library's, can be applied to any type), or
 is an `@[export]` definition under a C symbol of the library or one that
 starts with `l2r_` (`librarySymbols`; `l2r_override_…` replaces a
 function, `Mono.redirectTarget`): lean2rr calls such a definition in place
 of another declaration without comparing their types.
+
+An axiom that Lean adds for a proof by native evaluation, `e = true` for
+a closed `Bool` term `e` that Lean ran and saw `true`
+(`nativeEvalStatement?`: `native_decide`'s, `bv_decide`'s; lean-zip has
+them), does not count by itself when the code that ran was the code of
+the definitions (`nativeExempt`: no `implemented_by`, extern or kernel
+evaluation on its way, and no `@[csimp]` theorem that may be false acting
+on it). Then the axiom is true of the definitions, and proves no equation
+between two types that the program could not prove without it (test
+`RtCastNativeAxiom`). The walk goes on into the constants of `e`. Every
+other axiom counts: an axiom the user writes can be false, `axiom bad :
+true = false` proves `False` and so `Array UInt64 = Array Float` (test
+`RtCastAxiomBoolEq`; before 2026-10-09 the compact arrays let every axiom
+that states a `Bool` equation pass, and the other users of this fact let
+none pass). So does kernel evaluation (`isKernelEvalConst`: `reduceBool`,
+`reduceNat`, `ofReduceBool`, `ofReduceNat`), in a value or a type: its
+truth rests on the compiled code of the program's constant that the
+kernel ran (tests `RtCastReduceBool`, `RtCastReduceBoolCongr`).
 
 An extern of the program does not count by itself: lean2rr runs Lean code
 for it, which the walk reaches, or nothing (translation plan §5.8,
@@ -1195,7 +1392,7 @@ definition (for a `partial def`, whose value is only an inhabitant of its
 type, the only place where its code shows: test `RtCastPartial`); and the
 `@[export]` definitions of an extern's C symbol. Every `@[csimp]`
 replacement that is a declaration of the program is a root, whether or not
-the walk reaches the constant it replaces (`programCsimpTargets`, also
+the walk reaches the constant it replaces (`programCsimps`, also
 `local` and `scoped` ones): compiled code calls the replacement, whose code
 may be inlined (test `RtCastCsimp`), and the replaced constant may show
 only in compiled code, where a `@[macro_inline]` definition of the library,
@@ -1205,28 +1402,43 @@ Lean's library casts only where lean2rr's representations agree: an
 `Array α` read as an `Array NonScalar` (`Box` elements) and back,
 `unsafeCast ()` placeholders, `Subtype` (`attach`), the world token,
 `Dynamic` values read at the type their `TypeName` names. -/
-def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (Decl .pure))
-    (ignoreAxiom : ConstantInfo → Bool := fun _ => false) : Option Name := Id.run do
+def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (Decl .pure)) :
+    Option Name := Id.run do
   let library (n : Name) : Bool := match env.getModuleIdxFor? n with
     | some i => (env.header.moduleNames[i.toNat]?.map isToolchainModule).getD false
     | none => false
+  let csimps := programCsimps env
+  -- Built on first use (most programs have no axiom of native evaluation).
+  let mut exempt : Option NameSet := none
   -- Built on first use (most programs have no `@[export]` or extern).
   let mut libSyms : Option (Std.HashSet String) := none
   let mut exports : Option (Std.HashMap String (Array Name)) := none
   -- The roots: the program's `@[csimp]` replacements (a replacement that
   -- is a library declaration is not walked), and the sources of its
   -- declarations.
-  let mut work : Array Name := programCsimpTargets env library
+  let mut work : Array Name := csimps.filterMap fun c =>
+    if library c.toDeclName then none else some c.toDeclName
   for d in decls do
     work := work ++ sourceDecls env ((keys.find? d.name).map (·.decl) |>.getD d.name)
   let mut seen : NameSet := {}
   while h : work.size > 0 do
     let n := work[work.size - 1]
     work := work.pop
+    -- Kernel evaluation: true only if the compiled code of the program's
+    -- constant that the kernel ran computes what its definition says.
+    if isKernelEvalConst n then return some n
     if seen.contains n || library n then continue
     seen := seen.insert n
     let some ci := env.find? n | continue
-    if ci matches .axiomInfo _ && !ignoreAxiom ci then return some n
+    if ci matches .axiomInfo _ then
+      let ex := exempt.getD (nativeExempt env library csimps)
+      exempt := some ex
+      unless ex.contains n do return some n
+      if let some e := nativeEvalStatement? ci then
+        work := e.foldConsts work fun k acc => if seen.contains k then acc else acc.push k
+    -- (A statement can use kernel evaluation, `reduceBool c = b`, whose
+    -- proof `rfl` does not show it.)
+    if ci.type.foldConsts false (fun k b => b || isKernelEvalConst k) then return some n
     if ci.isUnsafe then return some n
     if let some sym := getExportNameFor? env n then
       let sym := sym.toString (escape := false)
@@ -1251,16 +1463,6 @@ def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (De
       if v.foldConsts false (fun k b => b || k == ``sorryAx) then return some n
       work := v.foldConsts work fun k acc => if seen.contains k then acc else acc.push k
   return none
-
-/-- Whether axiom `ci` states a `Bool` equation (`∀ …, a = b` at `Bool`):
-the axioms `native_decide` and `bv_decide` add (`…._native.bv_decide.ax_…
-: verifyBVExpr … = true`), whose statements Lean checked by evaluation.
-Such an axiom proves no equation between two types, unless it is false; so
-for the compact arrays (`compactArrayKinds`) it does not make the program
-cast (`programCasts`' `ignoreAxiom`). -/
-def isBoolEqAxiom (ci : ConstantInfo) : Bool :=
-  let body := ci.type.getForallBody
-  body.isAppOfArity ``Eq 3 && body.appFn!.appFn!.appArg!.isConstOf ``Bool
 
 /-- Whether a `Box` holding a value of type `vt` may be read at type `t`,
 so that the unboxing function to `t` (generated at the end, `Finish`)

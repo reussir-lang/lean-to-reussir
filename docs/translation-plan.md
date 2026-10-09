@@ -920,7 +920,22 @@ its value is stored as `Box`.
   that starts with `l2r_`): `unsafeCast` needs `unsafe` code, a `cast`
   between types lean2rr represents differently needs an equality that only
   `sorry` or an axiom proves, and an extern of Lean's library goes to the
-  `@[export]` of its symbol unchecked. Lean does not compare the types of
+  `@[export]` of its symbol unchecked. An axiom that Lean adds for a proof
+  by native evaluation (`native_decide`, `bv_decide`: `e = true`, where
+  Lean compiled the closed `Bool` term `e`, ran it and saw `true`) is no
+  cast when the code that ran is the code of the definitions: no
+  `implemented_by` target, extern, `initialize` constant (its value can
+  differ between two modules' builds) or `@[csimp]` theorem of the program
+  on its way (`nativeEvalStatement?`, `nativeExempt`; a `@[csimp]` theorem,
+  or any constant stated `@f = @g`, only when its proof can be false: it
+  uses `sorry`, an axiom that is not exempt, or kernel evaluation; and not
+  when it comes after the axiom). It is then true of the definitions, so
+  it proves nothing that the program could not prove without it. Every
+  other axiom counts: `axiom bad : true = false` proves `Array UInt64 =
+  Array Float`. So does kernel evaluation (`Lean.reduceBool`,
+  `reduceNat`, `ofReduceBool`, `ofReduceNat`) when the walk reaches it, in
+  a value or a type: the kernel runs the compiled code of the program's
+  constant for it. Lean does not compare the types of
   an extern and the `@[export]` definition that implements it either:
   natively `@[extern "s"] opaque asP2 (p : Pkg) : P2` bound to `@[export
   s] def payload (p : Pkg) : p.α` reads an existential payload as a `P2`;

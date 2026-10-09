@@ -466,10 +466,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   let inits := startup.filterMap fun | .init decl inst => some (decl, inst) | _ => none
   let erased ← flowAnalysis decls casts.isSome inits
   -- `compact-arrays`: the storage kinds whose arrays are compact.
-  -- (An axiom that states a `Bool` equation, `native_decide`'s and
-  -- `bv_decide`'s, casts no array: `isBoolEqAxiom`.)
   let (compactKindsOn, compactOff, boxedArrayFields) ← if cfg.compactArrays then
-      compactArrayKinds decls (programCasts (← getEnv) keys decls (ignoreAxiom := isBoolEqAxiom)) inits roots
+      compactArrayKinds decls casts inits roots
     else pure (#[], #[], {})
   if (← IO.getEnv "L2R_DEBUG").isSome then
     IO.eprintln s!"lean2rr: program casts: {match casts with | some n => s!"yes ({n})" | none => "no"}"

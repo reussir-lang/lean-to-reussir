@@ -117,7 +117,9 @@ The figure above shows an `Array UInt64` as `RVec<u64>`.
   reads arrays so: an `Array α` whose `α` is not statically known. A
   program that casts has no compact arrays. A program casts when code
   that it reaches outside Lean's library is `unsafe`, or uses `sorry` or
-  an axiom. An extern of the program is not a cast: lean2rr examines the
+  an axiom. An axiom that Lean adds for a proof by native evaluation
+  (`native_decide`, `bv_decide`) is not a cast when the code that Lean
+  ran for it is the code of the definitions. An extern of the program is not a cast: lean2rr examines the
   Lean code that runs for it, as all other code (see
   [the extern rule](index.html#the-extern-rule)). In other programs, an
   array of a kind that fails the check holds boxes, as natively. The other

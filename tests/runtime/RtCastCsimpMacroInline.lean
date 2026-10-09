@@ -9,7 +9,7 @@ it does not enter, never `Decidable.casesOn`, so it did not take `myCases`:
 the program counted as one that cannot cast, and the program lean2rr built
 stopped with "INTERNAL PANIC: unreachable code has been reached". Every
 `@[csimp]` replacement that is a declaration of the program is now a root
-of the walk (`programCsimpTargets`). -/
+of the walk (`programCsimps`). -/
 
 structure P1 where
   x : Nat

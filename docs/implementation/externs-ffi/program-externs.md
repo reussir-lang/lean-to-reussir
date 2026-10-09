@@ -167,7 +167,7 @@ lowering at the library extern's type arguments, was removed).
   where `f` or `g` has an `implemented_by` implementation that does not
   agree with its definition. (Natively the extern's C code runs anyway.)
   `programCasts` starts its walk from every replacement that is a
-  declaration of the program, candidates included (`programCsimpTargets`),
+  declaration of the program, candidates included (`programCsimps`),
   so it stays conservative.
 - **Where:** `Mono.lean`: `externBodyDecl`, `compileExternBody`,
   `recompilePasses`.
