@@ -1,4 +1,4 @@
-From 0743ad1dc67ede22283853174a19c46de1862f62 Mon Sep 17 00:00:00 2001
+From bd7334178a2e9f99b71eed6ec509932d79a1d068 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Thu, 1 Oct 2026 21:01:52 -0400
 Subject: [PATCH] l2r-local: bug 13b (runtime): cheaper pending stack, same
@@ -36,20 +36,26 @@ run random drops (deferrals wide and not, immediates, inline releases,
 steps that push work, nested drains, more release functions than the table
 holds) against a model with one entry per pending cell or step, and hash
 every event with the depth() and active() seen then: the hashes are
-identical with the previous implementation. They pass under Miri (strict
-provenance, stacked and tree borrows).
+identical with the previous implementation. They pass under Miri
+(stacked and tree borrows).
+
+Issue 47 (folded in on 2026-10-09): unlink makes the linked cell's
+pointer from its address with the provenance link exposed, not as an
+offset from the linking cell (another allocation). A test links two
+boxed cells. Same machine code; Miri's default mode, not strict
+provenance.
 
 User cycles (perf stat, min of 4 interleaved runs) over the same lean2rr
 without 0014's codegen: deriv +17.5% -> +8.7%, monadic-interp +20.2% ->
 +2.2%, cfold +5.3% -> +1.3%; binarytrees and rbtree unchanged.
 ---
- crates/reussir-rt/src/drop.rs       | 484 +++++++++++++++++++-------
- crates/reussir-rt/src/drop/tests.rs | 517 ++++++++++++++++++++++++++++
- 2 files changed, 875 insertions(+), 126 deletions(-)
+ crates/reussir-rt/src/drop.rs       | 495 +++++++++++++++++-------
+ crates/reussir-rt/src/drop/tests.rs | 563 ++++++++++++++++++++++++++++
+ 2 files changed, 930 insertions(+), 128 deletions(-)
  create mode 100644 crates/reussir-rt/src/drop/tests.rs
 
 diff --git a/crates/reussir-rt/src/drop.rs b/crates/reussir-rt/src/drop.rs
-index d20c20c5..71822391 100644
+index d20c20c5..1c63a6d0 100644
 --- a/crates/reussir-rt/src/drop.rs
 +++ b/crates/reussir-rt/src/drop.rs
 @@ -32,8 +32,21 @@
@@ -88,7 +94,7 @@ index d20c20c5..71822391 100644
      Step(usize, Step),
  }
  
-@@ -62,18 +79,286 @@ const SAME: u32 = 0xff;
+@@ -62,18 +79,289 @@ const SAME: u32 = 0xff;
  /// Offsets (in 8-byte units) a link can hold: 40 bits, signed.
  const OFFSET_BITS: u32 = 40;
  
@@ -269,7 +275,10 @@ index d20c20c5..71822391 100644
 +        prev: *mut u8,
 +        prev_release: Release,
 +    ) -> bool {
-+        let (at, to) = (cell as usize, prev as usize);
++        // The link keeps only the offset to `prev`, another allocation than
++        // `cell`: [`unlink`] makes the pointer from the address, with the
++        // provenance exposed here.
++        let (at, to) = (cell.addr(), prev.expose_provenance());
 +        // An immediate's dummy box (nonzero top byte) is shared: never written.
 +        if at >> 56 != 0 || (at | to) & 7 != 0 {
 +            return false;
@@ -380,7 +389,7 @@ index d20c20c5..71822391 100644
  }
  
  /// The number of entries on the pending stack. Work pushed while a step runs
-@@ -81,13 +366,23 @@ pub fn active() -> bool {
+@@ -81,13 +369,23 @@ pub fn active() -> bool {
  /// whether a release it made pushed work.
  #[inline]
  pub fn depth() -> usize {
@@ -406,7 +415,7 @@ index d20c20c5..71822391 100644
  }
  
  /// Runs incremental work and everything it pushes; inside a drain, only
-@@ -97,57 +392,9 @@ pub fn run_step(p: usize, step: Step) {
+@@ -97,57 +395,12 @@ pub fn run_step(p: usize, step: Step) {
      unsafe { __reussir_drop_drain() };
  }
  
@@ -460,13 +469,22 @@ index d20c20c5..71822391 100644
 -}
 -
  /// The cell that `cell` links to and the index of its release function;
- /// sets the header back (count 1, the upper half of the tag word 0).
+-/// sets the header back (count 1, the upper half of the tag word 0).
++/// sets the header back (count 1, the upper half of the tag word 0). The
++/// pointer has the provenance that [`State::link`] exposed: an offset from
++/// `cell` would keep `cell`'s, which may not access the linked cell, another
++/// allocation (issue 47).
 +#[inline(always)]
  unsafe fn unlink(cell: *mut u8) -> (*mut u8, u32) {
      let words = cell.cast::<u32>();
      let (low, high) = unsafe { (words.read(), words.add(1).read()) };
-@@ -160,29 +407,37 @@ unsafe fn unlink(cell: *mut u8) -> (*mut u8, u32) {
-     (cell.wrapping_offset(units as isize * 8), low & 0xff)
+@@ -157,32 +410,41 @@ unsafe fn unlink(cell: *mut u8) -> (*mut u8, u32) {
+     }
+     let raw = (((high >> 16) as u64) << 24) | (low >> 8) as u64;
+     let units = ((raw << (64 - OFFSET_BITS)) as i64) >> (64 - OFFSET_BITS);
+-    (cell.wrapping_offset(units as isize * 8), low & 0xff)
++    let prev = cell.addr().wrapping_add_signed(units as isize * 8);
++    (core::ptr::with_exposed_provenance_mut(prev), low & 0xff)
  }
  
 -fn defer(cell: *mut u8, release: Release, wide: bool) {
@@ -526,7 +544,7 @@ index d20c20c5..71822391 100644
  }
  
  /// Defers `release(cell)` until the current thread drains its pending work.
-@@ -190,7 +445,9 @@ fn defer(cell: *mut u8, release: Release, wide: bool) {
+@@ -190,7 +452,9 @@ fn defer(cell: *mut u8, release: Release, wide: bool) {
  /// references (or an immediate's dummy box); the cell is not written.
  #[unsafe(no_mangle)]
  pub unsafe extern "C" fn __reussir_drop_defer(cell: *mut u8, release: Release) {
@@ -537,7 +555,7 @@ index d20c20c5..71822391 100644
  }
  
  /// [`__reussir_drop_defer`] for a cell whose first 8 bytes are header: its
-@@ -198,7 +455,9 @@ pub unsafe extern "C" fn __reussir_drop_defer(cell: *mut u8, release: Release) {
+@@ -198,7 +462,9 @@ pub unsafe extern "C" fn __reussir_drop_defer(cell: *mut u8, release: Release) {
  /// cell may be linked through them.
  #[unsafe(no_mangle)]
  pub unsafe extern "C" fn __reussir_drop_defer_wide(cell: *mut u8, release: Release) {
@@ -548,7 +566,7 @@ index d20c20c5..71822391 100644
  }
  
  /// Runs the current thread's pending work, last pushed first, until none is
-@@ -207,51 +466,24 @@ pub unsafe extern "C" fn __reussir_drop_defer_wide(cell: *mut u8, release: Relea
+@@ -207,51 +473,24 @@ pub unsafe extern "C" fn __reussir_drop_defer_wide(cell: *mut u8, release: Relea
  /// runs whatever is pushed meanwhile.
  #[unsafe(no_mangle)]
  pub unsafe extern "C" fn __reussir_drop_drain() {
@@ -618,10 +636,10 @@ index d20c20c5..71822391 100644
 +mod tests;
 diff --git a/crates/reussir-rt/src/drop/tests.rs b/crates/reussir-rt/src/drop/tests.rs
 new file mode 100644
-index 00000000..ef57a774
+index 00000000..ab33190d
 --- /dev/null
 +++ b/crates/reussir-rt/src/drop/tests.rs
-@@ -0,0 +1,517 @@
+@@ -0,0 +1,563 @@
 +//! Order tests for the pending stack.
 +//!
 +//! A scenario is a forest of cells and steps: freeing a cell (its release
@@ -1075,6 +1093,52 @@ index 00000000..ef57a774
 +        );
 +    }
 +    println!("drop-digest all: {:016x}", all.finish());
++}
++
++thread_local! {
++    /// The ids that `release_box` saw on this thread.
++    static BOXES_SEEN: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
++}
++
++/// Reads a boxed cell's id, then frees the box.
++unsafe extern "C" fn release_box(p: *mut u8) {
++    let id = unsafe { p.cast::<u64>().add(1).read() };
++    BOXES_SEEN.with(|s| s.borrow_mut().push(id));
++    drop(unsafe { Box::from_raw(p.cast::<[u64; 2]>()) });
++}
++
++/// A cell in a box of its own: header (count 1, padding 0), then `id`.
++fn boxed_cell(id: u64) -> *mut u8 {
++    Box::into_raw(Box::new([1u64, id])).cast::<u8>()
++}
++
++/// Issue 47: two cells in separate allocations, deferred wide, form one run
++/// (the later one links to the earlier one), as every program's cells do.
++/// The drain releases the earlier cell through the pointer rebuilt from the
++/// link, after the later cell is freed; the other tests take all their cells
++/// from one allocation. Under Miri this checks that the rebuilt pointer may
++/// access the earlier cell: one that kept the later cell's provenance would
++/// be undefined behaviour.
++#[test]
++fn linked_cells_in_separate_boxes() {
++    // A cell 2^42 bytes or more from the one before it starts a new run. A
++    // thread's first boxes can be blocks another thread freed, far from its
++    // own: such a cell is put aside.
++    let mut far = Vec::new();
++    let (mut a, mut b) = (boxed_cell(10), boxed_cell(20));
++    while a.addr().abs_diff(b.addr()) >= 1 << 42 {
++        far.push(unsafe { Box::from_raw(a.cast::<[u64; 2]>()) });
++        unsafe { b.cast::<u64>().add(1).write(10) };
++        (a, b) = (b, boxed_cell(20));
++    }
++    unsafe {
++        __reussir_drop_defer_wide(a, release_box);
++        __reussir_drop_defer_wide(b, release_box);
++        assert_eq!(depth(), 1, "b links to a");
++        __reussir_drop_drain();
++    }
++    assert_eq!(depth(), 0);
++    assert_eq!(BOXES_SEEN.with(|s| s.borrow_mut().split_off(0)), vec![20, 10]);
 +}
 +
 +/// More distinct release functions than the table holds, one after another:

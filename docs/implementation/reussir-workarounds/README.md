@@ -38,6 +38,10 @@ the table below.
 Reussir's `main`, plus the 35 patches of the series (the series and how
 to apply it are in
 [`reussir-bugs/README.md`](../../../reussir-bugs/README.md#applying-the-patches)).
+Since 2026-10-09 13-c also has the fix of
+[issue 47](../../../reussir-bugs/47-unlink-provenance.md); the rebuilt
+stack is branch `l2r-base2` (head `b2e4a47e`; before the fold:
+`l2r-base2-pre47`, `71f17ae2`).
 The base has five of lean2rr's bug fixes, merged upstream (pull requests
 #651 to #655: 26-a, 02-a, 09-a, 04-a and 05-a), so the series no longer
 has them.

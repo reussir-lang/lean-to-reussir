@@ -590,7 +590,9 @@ lean2rr needs Reussir built from source with lean2rr's local patches
 that order; each patch file is named after its issue, `NN-x-*.patch`, and
 explained in depth in the file of that issue, indexed in
 [`../reussir-bugs/README.md`](../reussir-bugs/README.md)). Branch
-`l2r-base2` of the checkout in `./reussir` (head `71f17ae2`) has all 35.
+`l2r-base2` of the checkout in `./reussir` (head `b2e4a47e`) has all 35;
+since 2026-10-09 13-c also has the fix of Reussir issue 47 (the stack
+before the fold is branch `l2r-base2-pre47`, head `71f17ae2`).
 They are local: lean2rr's work does not push them, and each is reviewed
 adversarially. Five bug fixes are merged upstream (pull requests #651 to
 #655: 26-a, 02-a, 09-a, 04-a and 05-a); the base has them, so the series

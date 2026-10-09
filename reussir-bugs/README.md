@@ -16,8 +16,11 @@ local patches that lean2rr's builds apply to Reussir.
 
 Reussir revision: `943f2195`, upstream `main` on 2026-10-07. The
 checkout at `./reussir` is not part of this repository. Its branch
-`l2r-base2` (head `71f17ae2`) is 943f2195 plus the 35 patches of the series:
-the stack that lean2rr's builds use since 2026-10-07. Upstream merged
+`l2r-base2` (head `b2e4a47e`) is 943f2195 plus the 35 patches of the series,
+as they are since 2026-10-09, when the fix of
+[issue 47](47-unlink-provenance.md) was folded into 13-c; `l2r-local` is
+at the same head, and lean2rr's builds use it. Branch `l2r-base2-pre47` (head `71f17ae2`) keeps the stack with
+13-c as it was before, the one lean2rr's builds used from 2026-10-07. Upstream merged
 five of lean2rr's bug fixes (26-a, 02-a, 09-a, 04-a and 05-a, pull
 requests #651 to #655), so the series dropped them when its base moved
 from `ef922049` to `943f2195`. Older branches of the checkout:
@@ -125,7 +128,7 @@ a patch outside the series ([parked patches](#parked-patches)), and
 | [43](43-nullable-as-ref.md) | bug | reussir-rt's `Nullable::as_ref` returns a reference to a local copy of the pointer word (dangling); `Nullable::new` checks the size only in debug builds | no: nothing calls it, and a `Nullable` cannot cross the FFI boundary | - | none | - | - |
 | [44](44-small-allocation-limit.md) | bug (32-bit targets) | constant-size boxes of 513 to 1024 bytes go to `mi_malloc_small`, whose limit is 512 bytes there (heap corruption) | no: lean2rr builds only for 64-bit targets | - | none | - | - |
 | [45](45-polyffi-rc-substitution.md) | bug (hand-written MLIR only) | a polymorphic-FFI substitution given as an MLIR rc type becomes Rust's `Rc` without the record's glue (members leak, immediates and atomic counts mishandled) | no: only hand-written MLIR gets there (the front end substitutes the text itself) | - | none | - | - |
-| [47](47-unlink-provenance.md) | bug (latent UB; no miscompile seen) | reussir-rt's pending stack (`drop.rs`, from 13-b; not upstream) rebuilds the pointer of a linked cell from the linking cell's pointer and an offset (`wrapping_offset`), so the pointer has the provenance of another, already freed allocation (Miri: undefined behaviour) | no wrong result seen (the release functions get the pointer through an indirect call), but many frees run the code | none | none | - | - |
+| [47](47-unlink-provenance.md) | bug (latent UB; no miscompile seen) | reussir-rt's pending stack (`drop.rs`, from 13-b and 13-c; not upstream) rebuilds the pointer of a linked cell from the linking cell's pointer and an offset (`wrapping_offset`), so the pointer has the provenance of another, already freed allocation (Miri: undefined behaviour) | no wrong result seen (the release functions get the pointer through an indirect call), but many frees run the code | none | none of its own: fixed in [13-c](patches/13-c-cheaper-pending-stack.patch) (folded in on 2026-10-09; 13-c was never offered upstream) | fix checked (Miri, the same machine code); not reviewed yet | on `l2r-base2-47`; not yet on `l2r-base2` |
 | [34](34-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes: every lean2rr binary has `DT_TEXTREL` on aarch64; with lld or on x86-64 it would not link | `l2r.py` passes `--relocation-mode pic` | [34-a](patches/34-a-pic-by-default.patch) | rv8/reussir/bug34: no defect | yes |
 | [10](10-closure-type-print.md) | cost (build time) | closure devirtualization prints types exponentially | yes, build time and memory | `--no-closure-wpd` | [10-a](patches/10-a-closure-type-ids.patch) | rv7/p22 rounds 1-2 (RV7P-02, RV7P-04 fixed) | yes |
 | [11](11-sccp-call-graph.md) | cost (stock MLIR pass; 11b: Reussir's own glue lookups) | interprocedural SCCP is superlinear; glue lookups rebuild a symbol table per call (11b) | yes, build time of large programs | none | [11-a](patches/11-a-sccp-call-budget.patch) (SCCP), [11-b](patches/11-b-glue-symbol-tables.patch) (11b) | rv8/reussir-c (RV8C-01, -02, -04 resolved) | yes |
@@ -143,7 +146,7 @@ a patch outside the series ([parked patches](#parked-patches)), and
 | [7](07-phantom-reuse-donor.md) | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (plan §5.5) | none (parked: [07-a](patches/parked/07-a-sink-bound-retains.patch)) | passed (revised after round 2); parked on 2026-10-07 | parked |
 | [36](36-trampoline-inline.md) | missed optimization | a texture's import trampoline has no inline attribute: at a call site LLVM judges cold, a texture costing more than 45 stays a call | yes, speed (at a cold call site the read of a box from an `Array`, and of a `Nat` or `Int` element at its type, `RtReadsDeep`) | read textures kept small (the view protocol, perf-array-reads); `ffi-inline-check.sh` allows these three reads at `RtReadsDeep`'s cold call sites | none (parked: [36-a](patches/parked/36-a-inline-small-textures.patch), [36-b](patches/parked/36-b-inline-guards.patch)) | review-inline: F1 (high, a stack overflow) and F2-F4 fixed in 36-b; parked on 2026-10-07 | parked |
 | [39](39-alias-release-donor.md) | missed optimization | token reuse takes the release of a value an opaque call returned (an alias of a live reference, so it never frees) as the donor, over the matched cell (equal score: the most recent producer wins) | no longer: it did with lean2rr commit 3f0cb30 (a field's own box passed back into a rebuilt node; `RtProbeBump`: one list cell for each rebuilt node), now reverted | avoided: a field put back into a rebuilt node is boxed again from its unboxed value | none | - | - |
-| [13](13-long-list-drop.md) | missing feature | releasing a long list or a deep tree recurses once per cell | yes, stack overflow, 2x time and memory | none | [13-a](patches/13-a-release-chains-in-loop.patch), [13-b](patches/13-b-pending-release-stack.patch), [13-c](patches/13-c-cheaper-pending-stack.patch), [13-d](patches/13-d-last-field-order.patch) | 13-a passed (extended after round 2); 13-b passed (round 4, revised twice); 13-c passed (round 5); 13-d (13-b's release order, review RS11-01) passed (review-0069: no defect) | yes |
+| [13](13-long-list-drop.md) | missing feature | releasing a long list or a deep tree recurses once per cell | yes, stack overflow, 2x time and memory | none | [13-a](patches/13-a-release-chains-in-loop.patch), [13-b](patches/13-b-pending-release-stack.patch), [13-c](patches/13-c-cheaper-pending-stack.patch) (with the fix of issue 47 since 2026-10-09), [13-d](patches/13-d-last-field-order.patch) | 13-a passed (extended after round 2); 13-b passed (round 4, revised twice); 13-c passed (round 5); 13-d (13-b's release order, review RS11-01) passed (review-0069: no defect) | yes |
 | [27](27-nullable-member-drop.md) | missing feature (a gap in issue 13's bounded-depth frees) | drop glue does not defer a `Nullable` member: a long chain through `Nullable` overflows the stack when freed | no, `Nullable` not used | - | [27-a](patches/27-a-defer-nullable-member.patch) (amended for RV8R-01) | rv7/p22 round 2 (RV7P-05); rv8/reussir: RV8R-01 fixed | yes |
 | [38](38-tagged-top-bits.md) | missing feature | the inline count increment of a `tagged` handle uses all 64 bits as the address, so the top 16 bits cannot carry foreign data | yes: the one-word `Box` (`LAny`) needs it (`scripts/l2r.py` requires it) | none | [38-a](patches/38-a-tagged-top-bits.patch) | review-anybox r1: no defect (atomic test case added) | yes |
 | [40](40-drain-end-hook.md) | missing feature | Reussir's runtime does not tell the host when a drain (a free) ends | yes: the `sync` dependents of a promise released inside a free must run when the free is over (`scripts/l2r.py` requires it) | none (a fallback until switch step 6) | [40-a](patches/40-a-drain-end-hook.patch) | rv8/reussir: no defect | yes |
@@ -155,9 +158,12 @@ missing features, 1 dependency issue. 30 entries have patches of their own in th
 patch files in all (two each for entries 3 and 11, four for entry 13, one
 each for the others); 5 entries are fixed upstream (4, 5, 9, 14 and 26:
 their patches 04-a, 05-a, 09-a and 26-a dropped), and half of entry 2
-(02-a dropped; 02-b, the variant half, stays); 11 entries have no patch
-(7, 25, 32, 36, 39, 42, 43, 44, 45, 46, 47). The 35 patches are 15 bug fixes,
-12 optimizations and 8 features; all 35 are on `l2r-base2`. Five parked
+(02-a dropped; 02-b, the variant half, stays); entry 47 has no patch of
+its own: its fix is part of 13-c (since 2026-10-09); 10 entries have no
+patch (7, 25, 32, 36, 39, 42, 43, 44, 45, 46). The 35 patches are 15 bug
+fixes, 12 optimizations and 8 features (13-c, a feature, also has the fix
+of bug 47); all 35 are on `l2r-base2-47`, and on `l2r-base2` with 13-c
+before the fold. Five parked
 patches lie outside the series and these counts
 ([parked patches](#parked-patches)).
 
@@ -185,10 +191,17 @@ cmake --build reussir/build
 
 `git am` records the patches as local commits; `git apply` works as well,
 if you would rather keep them as uncommitted changes. Checked on
-2026-10-07 in a scratch worktree: the series on `943f2195` gives tree
-`6d97d3d0`, the tree of `./reussir`'s `l2r-base2` (`71f17ae2`). The `From
-<sha>` line of each patch file names its commit on `l2r-base2`. These
-commits have the same messages and changes as those of `l2r-trim` and
+2026-10-09 in a scratch worktree: the series on `943f2195` gives tree
+`350be937`, the tree of `./reussir`'s `l2r-base2-47` (`b2e4a47e`). Until
+then (13-c without the fix of issue 47) it gave tree `6d97d3d0`, the
+tree of `l2r-base2` (`71f17ae2`; checked on 2026-10-07). The `From
+<sha>` line of each patch file names its commit on `l2r-base2`, except
+for 13-c and 40-a, whose files were made again from `l2r-base2-47` when
+the fix of issue 47 was folded into 13-c (40-a's file for its moved
+context: hunk line numbers and blob hashes). The other commits of
+`l2r-base2-47` after 13-c were cherry-picked from `l2r-base2` without
+conflicts, with the same changes and messages. The commits of
+`l2r-base2` have the same messages and changes as those of `l2r-trim` and
 `l2r-local` (the hashes of `l2r-local`'s commits are in each entry's
 *Patch* section); only the context of 18-a and 11-a moved: upstream
 added the archive `MLIRReussirIFRTJustInTimeTransform` next to their
@@ -316,7 +329,8 @@ needs a 32-bit target, 45 MLIR written by hand, and 46 is shown by
 lean2rr's runtime test `RtArenaPurge` (its peak memory, through
 `tests/runtime/alloc-check.sh`). Each repro file starts
 with what it shows, the expected output and what Reussir ef922049 does
-(47: what `l2r-base2` does, since its `drop.rs` comes from 13-b).
+(47: what `l2r-base2` does, since its `drop.rs` comes from 13-b; and
+that `l2r-base2-47`, with the fix, passes).
 
     reussir-bugs/repros/run.sh RRC_CHECKOUT [NN...]
 
@@ -517,6 +531,9 @@ The repros were checked on these builds (on the aarch64 test machine):
 - `71f17ae2`: `l2r-base2`, upstream `943f2195` + the series of 35
   (2026-10-07: 26-a, 02-a, 09-a, 04-a and 05-a merged upstream and
   dropped).
+- `b2e4a47e`: `l2r-base2-47`, the series of 35 rebuilt on 2026-10-09
+  with the fix of issue 47 folded into 13-c (`bd733417`); its tree
+  differs from `71f17ae2`'s only in `drop.rs` and `drop/tests.rs`.
 
 The unpatched `run.sh` lines quoted in the entries come from a recorded run
 of the same script on unpatched ef922049, or, for entries 24 to 32, on

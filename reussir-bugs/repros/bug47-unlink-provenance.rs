@@ -24,6 +24,8 @@
 // Reussir l2r-base2 71f17ae2 (13-b and every later patch keep `unlink`):
 // the native run passes; Miri stops in `rel_box` with "Undefined Behavior:
 // in-bounds pointer arithmetic failed: alloc... has been freed".
+// Fixed in 13-c (folded in on 2026-10-09; l2r-base2-47 b2e4a47e): the test
+// passes under Miri, with one warning (integer-to-pointer cast in unlink).
 pub mod drop;
 
 #[cfg(test)]

@@ -41,7 +41,8 @@ Native Lean frees iteratively.
   call. It replaces 13-a's choice of chain members; the loop part remains.
   lean2rr's runtime frees its containers through the same stack.
 - **13-c** (issue 13b, runtime only) makes 13-b's stack cheaper, with the
-  same behaviour.
+  same behaviour. Since 2026-10-09 it also has the fix of
+  [issue 47](47-unlink-provenance.md) (pointer provenance in `unlink`).
 - **13-d** corrects 13-b's release order. 13-b's `drop_and_free` releases
   a cell's last record member after the cell, directly, so that a chain
   stays a loop. When a later member had pushed work (leanrt pushes the
@@ -697,7 +698,9 @@ above in a `List` is a box's payload, released inside a drain:
 Patch file
 [`patches/13-c-cheaper-pending-stack.patch`](patches/13-c-cheaper-pending-stack.patch)
 (`l2r-local` commit `53a8e8de`, applied in `./reussir`; `l2r-local` head cc8e5aa5; it applies on top of 13-b). No compiler
-code changes.
+code changes. On 2026-10-09 the fix of [issue 47](47-unlink-provenance.md)
+was folded into it (commit `bd733417` of the rebuilt branch
+`l2r-base2-47`; [below](#the-fix-of-issue-47)).
 
 **Symptom: speed only.** 13-b's drop glue calls the runtime's pending-stack
 functions for every record cell it frees, and drains the stack at the end
@@ -807,7 +810,9 @@ pub unsafe extern "C" fn __reussir_drop_drain() {
 They cannot unwind, so the entry points reach them by tail calls, and the
 fast paths need no stack frame. The table is emptied by a single store
 (`known.set(0)`) instead of `Vec::clear`. `link`, `unlink`,
-`release_index` and the drain loop keep 13-b's logic and encoding.
+`release_index` and the drain loop keep 13-b's logic and encoding
+(since the fix of issue 47, `unlink` makes the pointer it returns with
+the provenance that `link` exposed; [below](#the-fix-of-issue-47)).
 
 **What stays the same.** The behaviour is 13-b's: the entries, their order
 (last pushed first, a record's last member first, host steps interleaved
@@ -835,11 +840,16 @@ thread.
   a full table. `digest` hashes every event together with the `depth()`
   and `active()` seen at it, so two implementations can be compared
   exactly. The hashes are identical to 13-b's (400 random scenarios).
-- The tests pass under Miri, with strict provenance, stacked borrows and
-  tree borrows. They take all their cells from one allocation, so they
-  miss [issue 47](47-unlink-provenance.md): with cells in separate
-  allocations, Miri reports undefined behaviour in `unlink` (not
-  patched).
+- Before the fix of issue 47, the tests passed under Miri with strict
+  provenance, stacked borrows and tree borrows. They take all their
+  cells from one allocation, so they missed
+  [issue 47](47-unlink-provenance.md): with cells in separate
+  allocations, Miri reported undefined behaviour in `unlink`. With the
+  fix, `unlink` makes its pointer from an exposed provenance
+  (`with_exposed_provenance_mut`), which Miri's strict mode
+  (`-Zmiri-strict-provenance`) does not support: the tests, now with
+  `linked_cells_in_separate_boxes` (two cells in separate boxes), pass in
+  Miri's default mode, not in strict mode.
 - Review round 5 compared old and new event by event on 31 million events
   (3000 random programs mixing deferrals, steps, nested drains, immediates
   and a full table). It also covered deep step chains, links at the ±2^39
@@ -861,6 +871,20 @@ stack. The remaining cost of 13-b (a few percent on Deriv-like programs)
 comes from deferring itself and from the calls in the generated glue.
 Removing it would need a change to Reussir's code generator, which is not
 planned. Release order and all other behaviour are exactly 13-b's.
+
+#### The fix of issue 47
+
+Folded into 13-c on 2026-10-09; [issue 47](47-unlink-provenance.md)
+explains it and its checks. A link keeps only the offset from the later
+cell to the earlier one, and `unlink` rebuilt the earlier cell's pointer
+as `cell.wrapping_offset(...)`: a pointer with the later cell's
+provenance, which may not access the earlier cell, another allocation
+(undefined behaviour under Miri). Now `link` exposes the provenance of the
+earlier cell (`prev.expose_provenance()`), and `unlink` makes the pointer
+from the address with `core::ptr::with_exposed_provenance_mut`. The
+machine code is the same, and so is everything else in this section. 13-c
+was never offered upstream, so the fix went into it and not into a new
+patch.
 
 ### 13-d: the last record member last only when nothing after it pushes work
 
@@ -1069,7 +1093,8 @@ atomic record never defers) release their contents at once and recursively
   `RefCell<Vec>` thread-locals with destructors: one `Cell`-only,
   destructor-less thread-local state, the top run kept in it, and an early
   return for an empty or one-cell drain make the per-cell cost a few loads
-  and stores.
+  and stores. The links keep only offsets, so the pointer of a linked cell
+  is made from its exposed provenance (issue 47).
 - **13-d.** If 13-b were proposed upstream, this patch would be folded
   into it. The member that `drop_and_free` releases directly after the
   cell (the loop member) comes before everything the cell's other members

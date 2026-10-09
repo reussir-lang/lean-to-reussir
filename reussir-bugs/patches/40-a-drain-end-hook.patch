@@ -1,4 +1,4 @@
-From 7da7b3642f4b205fcb7ed3d6ce6a82460d8a8468 Mon Sep 17 00:00:00 2001
+From 19cdab355559d5415351cc4fcae483260d6307db Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 22:09:42 -0400
 Subject: [PATCH] l2r-local: drop: call the host's function when a drain ends
@@ -31,7 +31,7 @@ with nothing to do or one started inside a drain.
  2 files changed, 77 insertions(+), 1 deletion(-)
 
 diff --git a/crates/reussir-rt/src/drop.rs b/crates/reussir-rt/src/drop.rs
-index 71822391..c906a3cd 100644
+index 1c63a6d0..18845f29 100644
 --- a/crates/reussir-rt/src/drop.rs
 +++ b/crates/reussir-rt/src/drop.rs
 @@ -31,7 +31,11 @@
@@ -55,7 +55,7 @@ index 71822391..c906a3cd 100644
  
  /// Releases one pending member, given the pointer it was deferred with.
  pub type Release = unsafe extern "C" fn(*mut u8);
-@@ -351,6 +356,7 @@ impl State {
+@@ -354,6 +359,7 @@ impl State {
              self.with_vec(|stack| stack.shrink_to(KEEP));
          }
          self.draining.set(false);
@@ -63,7 +63,7 @@ index 71822391..c906a3cd 100644
      }
  }
  
-@@ -435,11 +441,32 @@ unsafe extern "C" fn drain_one() {
+@@ -442,11 +448,32 @@ unsafe extern "C" fn drain_one() {
      unsafe { state.release.get()(state.head.get()) };
      if state.n.get() == 0 && state.len.get() == 0 {
          state.draining.set(false);
@@ -97,10 +97,10 @@ index 71822391..c906a3cd 100644
  /// `cell` is a box whose count was read as 1 and which nothing else
  /// references (or an immediate's dummy box); the cell is not written.
 diff --git a/crates/reussir-rt/src/drop/tests.rs b/crates/reussir-rt/src/drop/tests.rs
-index ef57a774..d8533af8 100644
+index ab33190d..fb57a05f 100644
 --- a/crates/reussir-rt/src/drop/tests.rs
 +++ b/crates/reussir-rt/src/drop/tests.rs
-@@ -515,3 +515,52 @@ fn table_full() {
+@@ -561,3 +561,52 @@ fn table_full() {
      let want: Vec<usize> = std::iter::once(0).chain((1..=n).rev()).collect();
      assert_eq!(order, want);
  }

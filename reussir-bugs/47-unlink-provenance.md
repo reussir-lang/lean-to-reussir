@@ -2,13 +2,18 @@
 
 ## Summary
 
-**Kind:** bug (latent UB; no miscompile seen). **Status:** not patched
-(a change to Reussir is the last resort, owner 2026-10-07); a candidate
-for the bug-fix queue, which the owner decides. No wrong result is known.
+**Kind:** bug (latent UB; no miscompile seen). **Status:** fixed in our
+patch 13-c (folded in on 2026-10-09). The faulty code is lean2rr's own:
+13-c wrote today's `link` and `unlink`, and 13-c was never offered
+upstream, so the fix went into 13-c, not into a new patch. The series
+keeps its 35 files; 13-c's file has the fix and a test, and 40-a's file
+was made again for its moved context. The rebuilt stack is branch
+`l2r-base2` (head `b2e4a47e`) of the Reussir checkout since 2026-10-09; the stack before the fold (`71f17ae2`) stays
+reachable. No wrong result was known before the fix.
 
-**Verdict: bug.** The pending stack of Reussir's runtime
-(`crates/reussir-rt/src/drop.rs`) breaks Rust's rule of pointer
-provenance, and Miri reports the undefined behaviour reproducibly. The
+**Verdict: bug.** Before the fix, the pending stack of Reussir's runtime
+(`crates/reussir-rt/src/drop.rs`) broke Rust's rule of pointer
+provenance, and Miri reported the undefined behaviour reproducibly. The
 code comes from lean2rr's own patches: 13-b of
 [issue 13](13-long-list-drop.md) adds the file, and 13-c rewrites it with
 the same links. Upstream Reussir (`943f2195`) has no `drop.rs`.
@@ -98,9 +103,15 @@ help: alloc44672 was deallocated here:
 (Output shortened.) The pointer that `rel_box` gets for `a` has the
 provenance of `b`, which `rel_box(b)` has just freed.
 
-Reussir's own drop tests (`drop/tests.rs`) pass under Miri, also with
+Reussir's own drop tests (`drop/tests.rs`) passed under Miri, also with
 `-Zmiri-strict-provenance`: they take all their cells from one
 allocation, so an offset never leads out of it.
+
+**On `l2r-base2-47` (`b2e4a47e`), with the fix:** the native test
+passes, and so does the test under Miri (nightly-2026-08-31, default
+mode), with one warning: `integer-to-pointer cast` at
+`with_exposed_provenance_mut` in `unlink`
+(`-Zmiri-permissive-provenance` turns it off).
 
 ## Cause
 
@@ -139,8 +150,8 @@ the cell) or one of lean2rr's runtime functions (below).
 
 ## lean2rr
 
-Nothing: no workaround, and none is needed for correct results now.
-Many frees of more than one cell in lean2rr's programs run this code:
+Nothing: lean2rr had no workaround, and needs none. Many frees of more
+than one cell in lean2rr's programs run this code:
 
 - Reussir's drop glue defers record boxes with a wide header through
   `__reussir_drop_defer_wide` (release function:
@@ -152,59 +163,97 @@ Many frees of more than one cell in lean2rr's programs run this code:
   function `release_record`) can be the earlier cell of a link, and then
   gets a rebuilt pointer too.
 
-## Fix (not applied)
+## Fix (in 13-c)
 
-The fix costs nothing. It keeps the address arithmetic, but takes the
-provenance from the earlier cell: `State::link` exposes the provenance of
-`prev`, and `unlink` makes the pointer from the address with the exposed
-provenance.
+Patch file [`patches/13-c-cheaper-pending-stack.patch`](patches/13-c-cheaper-pending-stack.patch)
+(commit `bd733417` on `l2r-base2-47`). The fix costs nothing. It keeps
+the address arithmetic, but takes the provenance from the earlier cell:
+`State::link` exposes the provenance of `prev`, and `unlink` makes the
+pointer from the address with the exposed provenance.
 
 ```rust
-// State::link, line 260
+// State::link
+// The link keeps only the offset to `prev`, another allocation than
+// `cell`: [`unlink`] makes the pointer from the address, with the
+// provenance exposed here.
 let (at, to) = (cell.addr(), prev.expose_provenance());
 
-// unlink, line 413
+// unlink
 let prev = cell.addr().wrapping_add_signed(units as isize * 8);
 (core::ptr::with_exposed_provenance_mut(prev), low & 0xff)
 ```
 
-The `prev as usize` cast at line 260 already exposes the provenance (an
-`as` cast from a pointer to an integer does); the explicit form says why.
-The fix also adds the repro's test to `drop/tests.rs`, so that Reussir's
-Miri job (`cargo miri test -p reussir-rt`) covers cells in separate
-allocations.
+Before, `link` read the two addresses with `as usize` casts and `unlink`
+returned `cell.wrapping_offset(units as isize * 8)`. The `as usize` cast
+of `prev` already exposed its provenance; `expose_provenance()` says why.
+`cell` needs only its address (`addr()`): the pointer to `cell` itself
+stays in the state while it waits. `with_exposed_provenance_mut` gives
+the new pointer the provenance of an exposed allocation that contains the
+address, here the earlier cell's, which `link` exposed when it made the
+link. The address computation is the same.
 
-Checked on a copy of the file outside the checkout:
+The test `linked_cells_in_separate_boxes` in `drop/tests.rs` is the
+repro's test: two cells, each its own `Box`, deferred wide so that they
+form one run, then drained. The other drop tests take all their cells
+from one allocation, so Reussir's Miri job (`cargo miri test -p
+reussir-rt`) now also covers cells in separate allocations.
 
-- The release-mode machine code of `__reussir_drop_defer_wide` and of the
-  drain (`drain_slow`) is the same as before (aarch64), except for symbol
-  names.
-- Under Miri the repro and the four drop tests pass. Miri warns once
-  about the integer-to-pointer cast (`-Zmiri-permissive-provenance`
-  turns the warning off).
+**Why in 13-c.** 13-b added `drop.rs`; 13-c rewrote it and kept 13-b's
+links, and the code fixed here is 13-c's. 13-b and 13-c were never
+offered upstream (upstream Reussir has no `drop.rs`), so the fix is
+folded into 13-c instead of a new patch at the end of the series. The
+later patches apply unchanged: the series was rebuilt with
+`git cherry-pick`, without conflicts. Of their files only 40-a's (the
+other patch that changes `drop.rs` and `drop/tests.rs`) changes: its hunk
+line numbers and blob hashes. The other files after 13-c are unchanged,
+so their `From` lines still name the commits of `71f17ae2`'s history,
+which have the same changes and messages.
+
+**Checks** (2026-10-09):
+
+- The rebuilt head `b2e4a47e` differs from `71f17ae2` only in the fix and
+  the test (`drop.rs`: 10 lines added, 3 removed; `drop/tests.rs`: 46
+  lines added). The series applied with `git am` on `943f2195` gives its
+  tree, `350be937`.
+- `cargo test -p reussir-rt`: the 47 tests pass, the new one among them.
+- `cargo miri test -p reussir-rt drop` (default mode, stacked borrows):
+  the five drop tests pass (`random_drops_match_the_model`, `digest`,
+  `table_full`, `drained_runs_after_the_outermost_drain` and the new
+  `linked_cells_in_separate_boxes`), with the one warning above; with
+  `-Zmiri-tree-borrows` too. The repro passes under Miri. The new test on
+  `71f17ae2`'s `drop.rs` (without the fix) makes Miri stop in
+  `release_box` with "Undefined Behavior: in-bounds pointer arithmetic
+  failed: alloc... has been freed".
+- The release-mode machine code (aarch64; `libreussir_rt.a` of the CMake
+  build) of `__reussir_drop_defer_wide`, of `drain_slow` and of the other
+  eleven functions of the pending stack (`__reussir_drop_defer`,
+  `__reussir_drop_drain`, `defer_slow`, `drain_one`, `grow`, ...) is
+  identical to `71f17ae2`'s, symbol names included (`objdump`, addresses
+  left out).
+- lean2rr (dev `d52e6c34`) built against the rebuilt stack: leanrt's unit
+  tests (82) pass; 26 runtime tests of frees and their order (the `RtDrop*` tests, `RtDepDropOrderBoxed`,
+  `RtBorrowRelease*`, the `RtArray*Free*` tests, `RtNestedArrayFreeOrder`,
+  `RtPromiseNestedFreeOrder`, `RtPromiseResolvedFreeOrder`,
+  `RtListDropWhole`, `RtBoxDeepChain`, `RtBoxLeafRelease`,
+  `RtBoxPackFreeOrder`, `RtArrayGetOobOrder`, `RtCArrInPlace`) give
+  native's output; `tests/runtime/alloc-check.sh` passes on
+  `RtListDropWhole` (all six modes: allocations within the allowed
+  growth, peak memory below native's).
 - With `-Zmiri-strict-provenance`, Miri stops at
-  `with_exposed_provenance_mut` ("unsupported operation"). After the fix,
-  the tests run under Miri's default provenance model only; the message
-  of 13-c and [issue 13](13-long-list-drop.md) say that they pass with
-  strict provenance, which then stops being true. Strict provenance
+  `with_exposed_provenance_mut` ("unsupported operation"). The drop tests
+  now run under Miri's default provenance model only. Strict provenance
   cannot be kept at no cost: the stack would have to keep the pointer of
   each pending cell, which is the memory per cell that the links avoid.
-
-## Why it stays unpatched
-
-The owner's rule since 2026-10-07: Reussir is changed only where lean2rr
-has no other way, and no wrong result is known. The fix is a candidate for
-the bug-fix queue (the owner decides): a new patch 47-a, the last line of
-the series (it changes the `drop.rs` of 13-c and 40-a), or part of 13-b
-if 13-b is offered upstream.
+  13-c's message and [issue 13](13-long-list-drop.md) are updated.
 
 ## Upstream note
 
 Upstream Reussir has no pending stack, so there is nothing to report on
-its own. If 13-b were proposed upstream, this fix would be folded into
-it: `unlink` rebuilds the pointer of the cell that a deferred cell links
-to from the linking cell's pointer and an offset (`wrapping_offset`), so
-the pointer has the provenance of the wrong allocation (Miri: undefined
-behaviour when the cells are separate allocations).
+its own. The fix is part of 13-c; if 13-b and 13-c were proposed upstream,
+it would go with them. Before the fix, `unlink` rebuilt the pointer of
+the cell that a deferred cell links to from the linking cell's pointer
+and an offset (`wrapping_offset`), so the pointer had the provenance of
+the wrong allocation (Miri: undefined behaviour when the cells are
+separate allocations).
 `prev.expose_provenance()` in `link` and `with_exposed_provenance_mut` in
 `unlink` fix it with the same machine code.
