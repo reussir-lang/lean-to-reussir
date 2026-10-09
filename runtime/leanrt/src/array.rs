@@ -683,46 +683,6 @@ pub fn truncate<T: Clone>(v: RVec<T>, n: u64) -> RVec<T> {
     v
 }
 
-/// `a ++ b`.
-#[inline(never)]
-pub fn append<T: Clone>(a: RVec<T>, b: RVec<T>) -> RVec<T> {
-    let k = b.len();
-    if k == 0 {
-        return a;
-    }
-    let mut a = a;
-    // When `a` and `b` are the same array its count is at least 2, so
-    // `make_mut` copies it: `b`'s block is never the one written.
-    let o = make_mut(&mut a, k);
-    unsafe {
-        let n = (*o).len;
-        <T as CloneInto>::clone_to(b.as_slice(), elems::<T>(o).add(n));
-        (*o).len = n + k;
-    }
-    a
-}
-
-/// Elements `[start, stop)` (clamped), for `Array.extract`-like primitives.
-#[inline(never)]
-pub fn extract<T: Clone>(v: RVec<T>, start: u64, stop: u64) -> RVec<T> {
-    let s = v.as_slice();
-    let stop = (stop as usize).min(s.len());
-    let start = (start as usize).min(stop);
-    if start == 0 && stop == s.len() {
-        return v;
-    }
-    clone_of_slice(&s[start..stop], 0)
-}
-
-/// Reverse in place.
-#[inline(never)]
-pub fn reverse<T: Clone>(v: RVec<T>) -> RVec<T> {
-    let mut v = v;
-    let o = make_mut(&mut v, 0);
-    unsafe { std::slice::from_raw_parts_mut(elems::<T>(o), (*o).len).reverse() };
-    v
-}
-
 /// An array of the elements of `v`, moved (one copy of the bits).
 #[inline]
 pub fn from_vec<T: Clone>(v: Vec<T>) -> RVec<T> {
@@ -1142,14 +1102,9 @@ mod tests {
         let c = swap(pop(c), 0, 1);
         assert_eq!(size(&c), 9999);
         assert_eq!(get(&c, 0), 1);
-        let d = append(a.clone(), a.clone()); // the same array twice
-        assert_eq!(size(&d), 20000);
-        assert_eq!(get(&d, 10003), 3);
+        let e = truncate(a.clone(), 3);
+        assert_eq!(e.as_slice(), &[0, 1, 2]);
         assert_eq!(count(&a), 1);
-        let e = extract(d, 9998, 10002);
-        assert_eq!(e.as_slice(), &[9998, 9999, 0, 1]);
-        let e = reverse(truncate(e, 3));
-        assert_eq!(e.as_slice(), &[0, 9999, 9998]);
         // A literal: a shared empty array of capacity 3, copied once.
         let lit: RVec<u64> = with_capacity(3);
         let x = push(push(push(lit.clone(), 1), 2), 3);
@@ -1297,8 +1252,6 @@ mod tests {
         assert_eq!(q.as_slice(), &x[..]);
         let o = pop(a.clone());
         assert_eq!(o.as_slice(), &x[..2]);
-        let r = reverse(a.clone());
-        assert_eq!(r.as_slice(), &[x[2], x[1], x[0]]);
         let t = truncate(a.clone(), 1);
         assert_eq!(t.as_slice(), &x[..1]);
         assert_eq!(a.as_slice(), &x[..3]);
@@ -1309,8 +1262,6 @@ mod tests {
         let a = swap(a, 0, 2);
         let a = pop(a);
         assert_eq!((a.hdr(), a.as_slice()), (h, &[x[2], x[0]][..]));
-        let e = extract(append(a.clone(), q.clone()), 1, 4);
-        assert_eq!(e.as_slice(), &[x[0], x[0], x[1]]);
         let m = replicate(3, x[3]);
         assert_eq!(m.as_slice(), &[x[3]; 3]);
         let mut g: RVec<T> = with_capacity_checked(2, 8);
@@ -1319,7 +1270,7 @@ mod tests {
         }
         assert!((0..1000).all(|i| get(&g, i as u64) == x[i % 4]));
         assert_eq!(size(&empty::<T>()), 0);
-        drop((s, w, q, o, r, t, e, m, g));
+        drop((s, w, q, o, t, m, g));
     }
 
     #[test]

@@ -366,8 +366,8 @@ runtime.
 
 ### Array copies skip the increments of immediates
 
-- **What:** Copying an array of records (copy-on-write, `extract`,
-  `append`) increments real boxes inline, as `rc.inc` does, and skips
+- **What:** Copying an array of records (copy-on-write) increments real
+  boxes inline, as `rc.inc` does, and skips
   immediates (aarch64 only; elsewhere the generic clone). An immediate is
   a pointer with a nonzero top byte (`tbi`, the default encoding) or one
   to a dummy box whose count is 2^31 or more (`immortal`, which

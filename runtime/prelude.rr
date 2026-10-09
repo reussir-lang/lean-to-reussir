@@ -1809,17 +1809,6 @@ fn l2r_string_utf8_get_opt_with<O>(s : LStr, p : Nat, none : O, some : u32 -> O)
     if c == 1114112 { none } else { some(c) }
 }
 
-// `Array.toList` (`lean_array_to_list`), built from the end. `E` is the
-// array's storage type; `cons` takes the stored element (lean2rr unboxes
-// inside the closure when the array stores boxes).
-fn l2r_array_to_list<E, L>(a : RVec<E>, nil : L, cons : E -> (L -> L)) -> L {
-    l2r_array_to_list_go(a, l2r_array_size(a), nil, cons)
-}
-
-fn l2r_array_to_list_go<E, L>(a : RVec<E>, i : u64, acc : L, cons : E -> (L -> L)) -> L {
-    if i == 0 { acc } else { l2r_array_to_list_go(a, i - 1, cons(l2r_array_get(a, i - 1))(acc), cons) }
-}
-
 // `Float.frExp` (`lean_float_frexp`): `mk` builds the `Float × Int`.
 fn l2r_float_frexp_with<P>(x : f64, mk : f64 -> (Int -> P)) -> P {
     mk(l2r_float_frexp_mant(x))(l2r_float_frexp_exp(x))
@@ -1894,13 +1883,7 @@ fn l2r_array_swap<T>(v : RVec<T>, i : u64, j : u64) -> RVec<T> [{ leanrt::array:
 #[ffi(import)]
 fn l2r_array_replicate<T>(n : u64, x : T) -> RVec<T> [{ leanrt::array::replicate(n, x) }];
 #[ffi(import)]
-fn l2r_array_append<T>(a : RVec<T>, b : RVec<T>) -> RVec<T> [{ leanrt::array::append(a, b) }];
-#[ffi(import)]
-fn l2r_array_extract<T>(v : RVec<T>, b : u64, e : u64) -> RVec<T> [{ leanrt::array::extract(v, b, e) }];
-#[ffi(import)]
 fn l2r_array_truncate<T>(v : RVec<T>, n : u64) -> RVec<T> [{ leanrt::array::truncate(v, n) }];
-#[ffi(import)]
-fn l2r_array_reverse<T>(v : RVec<T>) -> RVec<T> [{ leanrt::array::reverse(v) }];
 
 fn lean_mk_empty_array<T>() -> RVec<T> { l2r_array_empty<T>() }
 
