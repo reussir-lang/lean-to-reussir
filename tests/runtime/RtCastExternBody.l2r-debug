@@ -1,0 +1,3 @@
+lean2rr: program casts: yes (wordsAreFloats)
+lean2rr: compact arrays: u64 off: the program can cast (wordsAreFloats)
+lean2rr: compact arrays: f64 off: the program can cast (wordsAreFloats)

@@ -118,7 +118,11 @@ that it gets as an `α` is one box (kind 11), which it passes on unread.
     (`programCasts`): every kind is off. An axiom that states a `Bool`
     equation does not count (`isBoolEqAxiom`): `native_decide` and
     `bv_decide` add such axioms (lean-zip has them), and they prove no
-    equation between types.
+    equation between types. An extern of the program does not count by
+    itself: the Lean code that runs for it is walked as the rest of the
+    program ([../externs-ffi/program-externs.md](../externs-ffi/program-externs.md#an-extern-of-the-program-is-not-a-cast-by-itself)).
+    lean-zip's 12 externs turned every kind off until 2026-10-09 (test
+    `RtCArrExtern`; `RtCastExternBody`: an extern whose definition casts).
 
   Only binders whose type can hold such an array are joined
   (`mayHoldArr`). `L2R_DEBUG=1` prints the kinds that stay on and, for each

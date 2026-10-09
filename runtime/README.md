@@ -1351,7 +1351,8 @@ never uses (it runs their Lean definitions, translation plan §5.8);
 `NAME.refused` makes a refusal by lean2rr the expected outcome (each
 line of the file in its output, or after `! ` not in it), and `NAME.l2r-log` lists lines lean2rr's
 build output must (or, after `! `, must not) contain, such as its note on
-which externs run their Lean definition. `tests/runtime/shim-types.sh`
+which externs run their Lean definition (`NAME.l2r-debug`: the same, with
+lean2rr run under `L2R_DEBUG=1`). `tests/runtime/shim-types.sh`
 checks that each `@[export]` definition of lean2rr's shim (`L2RShim`) has
 the type of the `@[extern]` declaration of its C symbol (Lean pairs them by
 name only). The Rust unit tests of `leanrt`

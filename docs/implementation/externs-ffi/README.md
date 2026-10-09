@@ -15,8 +15,9 @@ runtime's conventions are in [`runtime/README.md`](../../../runtime/README.md)
   which order.
 - [program-externs.md](program-externs.md): externs of the program and
   of packages: the binding of their C symbol to an `@[export]` and its two
-  tests, their Lean definitions, refusals, the test harness's `.ffi.c`, `.refused`
-  and `.l2r-log`.
+  tests, their Lean definitions, refusals, why an extern of the program is
+  not a cast by itself, the test harness's `.ffi.c`, `.refused`,
+  `.l2r-log` and `.l2r-debug`.
 - [glue.md](glue.md): storage types, payload primitives, fallible IO,
   streams, processes and the other generated glue.
 - [shim.md](shim.md): `L2RShim`, lean2rr's Lean library for

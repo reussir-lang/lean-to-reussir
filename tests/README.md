@@ -221,11 +221,13 @@ which must finish (`stats-polyrec`).
 `tests/runtime/run.sh` builds each `tests/runtime/Rt*.lean` natively and
 through lean2rr and compares stdout, stderr and the exit code (its header
 lists the per-test `.args`, `.stdin`, `.pipe`, `.opts`, `.enable-opts`,
-`.xfail`, `.ffi.c`, `.refused` and `.l2r-log` files: `.opts` turns
-optimizations off for the test, `.enable-opts` turns on one that is off by
-default (`unread-fields`), `.ffi.c` is C code for the native build
+`.xfail`, `.ffi.c`, `.refused`, `.l2r-log` and `.l2r-debug` files: `.opts`
+turns optimizations off for the test, `.enable-opts` turns on one that is
+off by default (`unread-fields`), `.ffi.c` is C code for the native build
 only, `.refused` an expected refusal by lean2rr, `.l2r-log` lines
-expected in lean2rr's build output). Each
+expected in lean2rr's build output, `.l2r-debug` the same with lean2rr
+run under `L2R_DEBUG=1`, which prints its whole-program facts: whether the
+program can cast, the compact array kinds). Each
 test's header says what it covers. Many come from the adversarial reviews:
 a finding (a bug a reviewer reproduced, fixed since) or a check that held
 up in review.
@@ -613,6 +615,7 @@ it draws on, with their copyright notices (Apache 2.0):
 | RV6L-02 | RtMapFirstIteration |
 | RV6L-04 (and the hygienic forms of RV6T-01/02) | RtCastHygienic |
 | RV6T-01 | RtCastExtern (now refused: the binding's type test, plan §5.8) |
+| none: gaps in the walk of `programCasts` (found 2026-10-09) | RtCastPartial (a `partial def`'s `_unsafe_rec` code), RtCastCsimp (a `@[csimp]` replacement), RtCastCsimpLocal and RtCastCsimpScoped (a `local` and a `scoped` one, review of that fix), RtCastCsimpMacroInline (a replaced constant that only a library `@[macro_inline]` body mentions), RtCastExternBody (an extern whose definition casts) |
 | RV6T-02 | RtCastUnsafeRec |
 | RV6T-04 | RtTaskConvSync |
 | RV6T-05 | RtCastImplementedBy |
@@ -790,3 +793,4 @@ e4a1e5f (boxed arrays) every output equals native's.
 | RtCArrGenericFieldsDep | the other side of RtCArrGenericFields: generic code builds or reads `List (Array α)` (a type-code universe read at `UInt64`, an existential payload stored at `UInt8` and `Float`, a dependent pair read at `UInt16`); the whole-program check turns those kinds off | — |
 | RtCArrSharedNil | one `List.nil` that mono CSE shares between `List (Array UInt8)`, `List (Array Float)` and `List (Array UInt64)` (hunt HCA-01), `Option.none` and `Except.error` beside values of the same types that hold compact arrays; every kind stays compact (on dev 70a466d `u8`, `u64` and `f64` were off) | — |
 | RtCArrBoxedAny | a compact `Array UInt64` that arrives in a box (an opaque `T b`) read by `Array.size` and `Array.toList` at `lcAny` through a proved cast: the check turns `u64` off (on dev 70a466d it stayed on and leanrt converted the array at each read, the safety net) | — |
+| RtCArrExtern | externs of the program with Lean definitions over `ByteArray`, `Array UInt8`, `Array UInt64` and `Array Float` (lean-zip's `ugetUInt32LE` and `presize` shapes) and an extern bound to an `@[export]` definition, with `unread-fields` on: the program does not cast, every kind stays compact and `unread-fields` runs (`RtCArrExtern.l2r-debug`; on dev 5604d38f every extern of the program counted as a cast and turned every kind off) | — |

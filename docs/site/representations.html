@@ -246,9 +246,13 @@ element type gives the <em>storage kind</em>:</p>
   storage kind. A kind is compact when no value of an array of that kind
   can reach code that reads the array as an array of boxes. Generic code
   reads arrays so: an <code>Array α</code> whose <code>α</code> is not statically known. A
-  program that casts has no compact arrays. In other programs, an array
-  of a kind that fails the check holds boxes, as natively. The other kinds
-  stay compact.</li>
+  program that casts has no compact arrays. A program casts when code
+  that it reaches outside Lean's library is <code>unsafe</code>, or uses <code>sorry</code> or
+  an axiom. An extern of the program is not a cast: lean2rr examines the
+  Lean code that runs for it, as all other code (see
+  <a href="index.html#the-extern-rule">the extern rule</a>). In other programs, an
+  array of a kind that fails the check holds boxes, as natively. The other
+  kinds stay compact.</li>
 <li><strong><code>Array.map</code>.</strong> Lean's library maps an array in place through an
   array of boxes. lean2rr gives each such loop a typed copy at the element
   types of its call. When the two types are equal, the loop runs in place.

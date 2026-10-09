@@ -1109,6 +1109,54 @@ def sourceDecls (env : Environment) (n : Name) : Array Name := Id.run do
       out := add out site
   return out
 
+/-- The C symbols of Lean's library and lean2rr's shim (`isToolchainModule`):
+those of their externs and of their `@[export]` definitions. lean2rr calls
+a program's `@[export]` definition under such a symbol where the library's
+function would run, without comparing types: an extern of the library whose
+C symbol it is (`Mono.redirectTarget`), an `IO.Error` builder the runtime
+calls (`ioErrorBuilderSyms`, `@[export]`s of `Init`). -/
+def librarySymbols (env : Environment) : Std.HashSet String := Id.run do
+  let mut s : Std.HashSet String := {}
+  for i in [:env.header.moduleNames.size] do
+    unless isToolchainModule env.header.moduleNames[i]! do continue
+    for (n, _) in externAttr.ext.getModuleEntries env i do
+      if let some sym := getExternNameFor env `c n then s := s.insert sym
+    for (_, sym) in exportAttr.ext.getModuleEntries env i do
+      s := s.insert (sym.toString (escape := false))
+  return s
+
+/-- Every declaration exported under each C symbol (`@[export sym]`), of any
+module. -/
+def exportsBySymbol (env : Environment) : Std.HashMap String (Array Name) := Id.run do
+  let mut m : Std.HashMap String (Array Name) := {}
+  for i in [:env.header.moduleNames.size] do
+    for (d, sym) in exportAttr.ext.getModuleEntries env i do
+      let k := sym.toString (escape := false)
+      m := m.insert k ((m.getD k #[]).push d)
+  return m
+
+/-- The `@[csimp]` replacements that are declarations of the program (not of
+Lean's library or lean2rr's shim), which `programCasts` takes as roots of
+its walk: the targets of `CSimp.ext`'s state after import, and, for every
+constant of a module of the program whose statement has the shape of a
+constant replacement, `@f = @g` (the shape `@[csimp]` accepts,
+`CSimp.isConstantReplacement?`), `g`. A `local` `@[csimp]` is not saved in
+its module's `.olean`, and a `scoped` one is active only where its
+namespace is open, so the state after import has neither, while the code
+of their module was compiled with them (tests `RtCastCsimpLocal`,
+`RtCastCsimpScoped`). A theorem of that shape without the attribute counts
+too (the set is larger than needed, never smaller). -/
+def programCsimpTargets (env : Environment) (library : Name → Bool) : Array Name := Id.run do
+  let mut out : Array Name := (CSimp.ext.getState env).map.fold (init := #[]) fun acc _ e =>
+    if library e.toDeclName then acc else acc.push e.toDeclName
+  for i in [:env.header.moduleNames.size] do
+    if isToolchainModule env.header.moduleNames[i]! then continue
+    let some data := env.header.moduleData[i]? | continue
+    for ci in data.constants do
+      if let some (_, .const _ _, .const g _) := ci.type.eq? then
+        unless library g do out := out.push g
+  return out
+
 /-- Whether the program can read a value as another type than its own
 (`LowerCtx.programCasts`), and the declaration that shows it: some
 declaration it reaches, outside Lean's own library (`Init`, `Std`, `Lean`,
@@ -1116,28 +1164,59 @@ declaration it reaches, outside Lean's own library (`Init`, `Std`, `Lean`,
 `unsafeCast`, build a `TypeName` for `Dynamic`, or be the `implemented_by`
 target of another type's code; the `_unsafe_rec` code Lean (4.33, 4.34) generates
 for a `partial def` is not `unsafe`), is an axiom, uses `sorry` (a cast
-through an equality proved by either), or is `@[extern]` or `@[export]`
-(Lean does not compare the types of an extern and the `@[export]`
-definition implementing it; lean2rr calls the definition instead of an
-extern of Lean's library unchecked, `Mono.redirectTarget`, and binds an
-extern of the program to it only when the binding's tests pass,
-`Mono.bindingFailure?`, so the condition is conservative there;
-`implemented_by` is type-checked, but an `unsafe` implementation,
-even one of the library's, can be applied to any type: a program declaration
-implemented by one counts too). The declarations reached are those the
-program's declarations come from (`sourceDecls`), and, transitively, the
-constants their definitions mention (inlined code no longer appears in the
-program) and their `implemented_by` targets. Lean's library casts only
-where lean2rr's representations agree: an `Array α` read as an
-`Array NonScalar` (`Box` elements) and back, `unsafeCast ()` placeholders,
-`Subtype` (`attach`), the world token, `Dynamic` values read at the type
-their `TypeName` names. -/
+through an equality proved by either), is implemented by an `unsafe`
+declaration (`implemented_by` is type-checked, but an `unsafe`
+implementation, even one of the library's, can be applied to any type), or
+is an `@[export]` definition under a C symbol of the library or one that
+starts with `l2r_` (`librarySymbols`; `l2r_override_…` replaces a
+function, `Mono.redirectTarget`): lean2rr calls such a definition in place
+of another declaration without comparing their types.
+
+An extern of the program does not count by itself: lean2rr runs Lean code
+for it, which the walk reaches, or nothing (translation plan §5.8,
+`Mono.computeExternRoute`): its `implemented_by` target; the `@[export]`
+definition of its C symbol, bound only when the extern's type is an
+instance of the definition's and their compiled signatures agree
+(`Mono.bindingFailure?`), so that neither reads a value at another type
+(the walk takes every definition exported under the symbol); its own
+definition (its value, or the `_unsafe_rec` copy); or, refused, nothing
+(the program is rejected, or with `L2R_ALLOW_MISSING_EXTERNS` does not
+build). An extern of the program is never bound to Lean's runtime, and
+the externs of Lean's library are the library's. Before the Lean-only
+rule, an extern of the program could be linked C (which can read any
+memory) and was bound to an `@[export]` definition unchecked (review
+RV6T-01, test `RtCastExtern`), so every extern and `@[export]` counted.
+
+The declarations reached are those the program's declarations come from
+(`sourceDecls`), and, transitively: the constants their definitions mention
+(inlined code no longer appears in the program); their `implemented_by`
+targets; their `_unsafe_rec` copies, the code Lean compiles for a recursive
+definition (for a `partial def`, whose value is only an inhabitant of its
+type, the only place where its code shows: test `RtCastPartial`); and the
+`@[export]` definitions of an extern's C symbol. Every `@[csimp]`
+replacement that is a declaration of the program is a root, whether or not
+the walk reaches the constant it replaces (`programCsimpTargets`, also
+`local` and `scoped` ones): compiled code calls the replacement, whose code
+may be inlined (test `RtCastCsimp`), and the replaced constant may show
+only in compiled code, where a `@[macro_inline]` definition of the library,
+whose value the walk does not enter, puts it (`ite` becomes
+`Decidable.casesOn`; test `RtCastCsimpMacroInline`).
+Lean's library casts only where lean2rr's representations agree: an
+`Array α` read as an `Array NonScalar` (`Box` elements) and back,
+`unsafeCast ()` placeholders, `Subtype` (`attach`), the world token,
+`Dynamic` values read at the type their `TypeName` names. -/
 def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (Decl .pure))
     (ignoreAxiom : ConstantInfo → Bool := fun _ => false) : Option Name := Id.run do
   let library (n : Name) : Bool := match env.getModuleIdxFor? n with
     | some i => (env.header.moduleNames[i.toNat]?.map isToolchainModule).getD false
     | none => false
-  let mut work : Array Name := #[]
+  -- Built on first use (most programs have no `@[export]` or extern).
+  let mut libSyms : Option (Std.HashSet String) := none
+  let mut exports : Option (Std.HashMap String (Array Name)) := none
+  -- The roots: the program's `@[csimp]` replacements (a replacement that
+  -- is a library declaration is not walked), and the sources of its
+  -- declarations.
+  let mut work : Array Name := programCsimpTargets env library
   for d in decls do
     work := work ++ sourceDecls env ((keys.find? d.name).map (·.decl) |>.getD d.name)
   let mut seen : NameSet := {}
@@ -1148,7 +1227,20 @@ def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (De
     seen := seen.insert n
     let some ci := env.find? n | continue
     if ci matches .axiomInfo _ && !ignoreAxiom ci then return some n
-    if ci.isUnsafe || isExtern env n || (getExportNameFor? env n).isSome then return some n
+    if ci.isUnsafe then return some n
+    if let some sym := getExportNameFor? env n then
+      let sym := sym.toString (escape := false)
+      let lib := libSyms.getD (librarySymbols env)
+      libSyms := some lib
+      if sym.startsWith "l2r_" || lib.contains sym then return some n
+    if isExtern env n then
+      if let some sym := getExternNameFor env `c n then
+        let m := exports.getD (exportsBySymbol env)
+        exports := some m
+        for g in m.getD sym #[] do
+          unless seen.contains g do work := work.push g
+    let unsafeRec := Compiler.mkUnsafeRecName n
+    if env.contains unsafeRec && !seen.contains unsafeRec then work := work.push unsafeRec
     if let some impl := Compiler.getImplementedBy? env n then
       -- An `unsafe` implementation counts even from the library: Lean only
       -- compares the declared types (`TypeName.mk` gives two types the same

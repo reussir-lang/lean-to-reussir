@@ -1,0 +1,7 @@
+note: 5 extern(s) of the program run their Lean definition, not their C code
+rt_carr_uget_u32le  (extern of ByteArray.ugetU32LE)
+rt_carr_presize  (extern of ByteArray.presize)
+rt_carr_bump  (extern of bump)
+rt_carr_words  (extern of words)
+rt_carr_scale  (extern of scale)
+! (extern of checksum)

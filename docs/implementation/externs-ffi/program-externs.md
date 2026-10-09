@@ -158,6 +158,17 @@ lowering at the library extern's type arguments, was removed).
   body folded on literals in Stage 2). The `@[csimp]` replacement follows
   Lean: without it a body calling a function a `@[csimp]` maps would call
   the slow one. Tests `RtExternBody`, `RtExternRec`, `RtExternCsimp`.
+  Limit: the replacements applied are those of `CSimp.ext`'s state after
+  import, the global ones. A `local` `@[csimp]` of the extern's module is
+  not saved in its `.olean`, and a `scoped` one applied where its
+  namespace was open at the extern's definition, which the `.olean` does
+  not record; the body runs without them. The theorem proves `@f = @g`,
+  so the value is the same; the cost can differ, and so can the behaviour
+  where `f` or `g` has an `implemented_by` implementation that does not
+  agree with its definition. (Natively the extern's C code runs anyway.)
+  `programCasts` starts its walk from every replacement that is a
+  declaration of the program, candidates included (`programCsimpTargets`),
+  so it stays conservative.
 - **Where:** `Mono.lean`: `externBodyDecl`, `compileExternBody`,
   `recompilePasses`.
 - **Remove only if:** never; `noinline` only with RV8E-11's fold gone.
@@ -282,6 +293,46 @@ lowering at the library extern's type arguments, was removed).
   `librarySourceExternSyms`, `externAttrStrings`.
 - **Remove only if:** the note is unwanted.
 
+### An extern of the program is not a cast by itself
+
+- **What:** `programCasts` (whether the program can read a value as
+  another type, [../types/uniform-types.md](../types/uniform-types.md#whether-the-program-can-cast-at-all-is-a-whole-program-fact))
+  does not count an extern of the program. Its walk goes on into the code
+  that runs for the extern, whatever the route: the `implemented_by`
+  target, every `@[export]` definition of the extern's C symbol, the
+  extern's own definition (its value, and its `_unsafe_rec` copy when Lean
+  made one). An `@[export]` definition of the program counts only when its
+  C symbol is one of Lean's library (an extern's or an `@[export]`'s,
+  `librarySymbols`) or starts with `l2r_`: lean2rr calls such a definition
+  in place of the library's function without comparing types
+  (`redirectTarget`; the `IO.Error` builders; `l2r_override_…`). The
+  externs of Lean's library are the library's, as before.
+- **Why:** Every route runs Lean code, which the walk sees as it sees the
+  rest of the program, or nothing: `implementedBy` runs its target;
+  `export` runs the definition, bound only when the extern's type is an
+  instance of the definition's and the compiled signatures agree
+  (`bindingFailure?`, above), so neither side reads a value at another
+  type; `body` runs the definition; `refused` runs nothing (the program is
+  rejected, or under `L2R_ALLOW_MISSING_EXTERNS` it does not build). An
+  extern of the program is never bound to Lean's runtime. The old rule
+  (every extern and `@[export]` of the program counted; review RV6T-01,
+  test `RtCastExtern`) dates from before this rule, when an extern of the
+  program could be linked C and was bound to an `@[export]` without a
+  type test. It turned off every compact array kind and `unread-fields`
+  in each program with an extern: lean-zip's 12 externs (C stopgaps whose
+  Lean bodies are their specifications, `ByteArray.ugetUInt32LE`, …) made
+  its decoder keep every byte of its output in a box. Tests `RtCArrExtern`
+  (externs with Lean definitions over `ByteArray`, `Array UInt8`,
+  `Array UInt64` and `Array Float`, and an `@[export]` binding: every kind
+  stays on, checked under `L2R_DEBUG=1` by `RtCArrExtern.l2r-debug`),
+  `RtCastExternBody` (a `partial` extern whose definition casts through an
+  axiom of the program: every kind is off).
+- **Where:** `Lower/Conv.lean`: `programCasts`, `librarySymbols`,
+  `exportsBySymbol`.
+- **Remove only if:** an extern of the program can again run code that
+  lean2rr does not compile (linked C), or be bound without the binding
+  tests.
+
 ### Tests give the native build the C code, and check routes and refusals
 
 - **What:** `tests/runtime/run.sh`: `NAME.ffi.c` is linked into the
@@ -290,7 +341,9 @@ lowering at the library extern's type arguments, was removed).
   outcome (each line must be in its output, or with `! ` must not;
   natively only `lean -c` runs);
   `NAME.l2r-log` lists lines lean2rr's build output must contain, or with
-  `! ` must not (the note above: which externs run their definition).
+  `! ` must not (the note above: which externs run their definition);
+  `NAME.l2r-debug` does the same with lean2rr run under `L2R_DEBUG=1`
+  (whether the program casts, the compact array kinds and why one is off).
 - **Why:** Natively a program extern needs its C; the routes are not
   visible in the program's output when the C and the body agree.
 - **Where:** `tests/runtime/run.sh`; `RtExtern*`.

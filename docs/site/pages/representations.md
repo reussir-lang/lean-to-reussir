@@ -115,9 +115,13 @@ The figure above shows an `Array UInt64` as `RVec<u64>`.
   storage kind. A kind is compact when no value of an array of that kind
   can reach code that reads the array as an array of boxes. Generic code
   reads arrays so: an `Array α` whose `α` is not statically known. A
-  program that casts has no compact arrays. In other programs, an array
-  of a kind that fails the check holds boxes, as natively. The other kinds
-  stay compact.
+  program that casts has no compact arrays. A program casts when code
+  that it reaches outside Lean's library is `unsafe`, or uses `sorry` or
+  an axiom. An extern of the program is not a cast: lean2rr examines the
+  Lean code that runs for it, as all other code (see
+  [the extern rule](index.html#the-extern-rule)). In other programs, an
+  array of a kind that fails the check holds boxes, as natively. The other
+  kinds stay compact.
 - **`Array.map`.** Lean's library maps an array in place through an
   array of boxes. lean2rr gives each such loop a typed copy at the element
   types of its call. When the two types are equal, the loop runs in place.

@@ -49,10 +49,14 @@
 #               succeed (the program is valid Lean; its C may need code
 #               the test does not give to link); nothing runs, so files
 #               describing a run (NAME.args, .stdin, .pipe, .ffi.c,
-#               .l2r-log, NAME.native.*, NAME.l2r.*) are an error with it
+#               .l2r-log, .l2r-debug, NAME.native.*, NAME.l2r.*) are an
+#               error with it
 #   NAME.l2r-log  lean2rr's build output must contain each line of this
 #               file, and must not contain a line's text after `! ` (e.g.
 #               which externs run their Lean definition, lean2rr's note)
+#   NAME.l2r-debug  as NAME.l2r-log, with lean2rr run under L2R_DEBUG=1,
+#               which prints its whole-program facts (e.g. `lean2rr: program
+#               casts: no`, the compact array kinds and why one is off)
 #
 # Both executables run with LEAN_BACKTRACE=0, so panics print no stack trace.
 # lean2rr runs with LEAN_ABORT_ON_PANIC=1: a panic of lean2rr itself is a
@@ -134,6 +138,8 @@ for t in "${TESTS[@]}"; do
     done
   fi
   ffi=(); [ -f "$HERE/$t.ffi.c" ] && ffi=("$HERE/$t.ffi.c")
+  # (`env` sets it for the lean2rr build only: lean2rr tests whether it is set.)
+  debug=(); [ -f "$HERE/$t.l2r-debug" ] && debug=(env L2R_DEBUG=1)
   deps=(); [ -f "$HERE/$t.deps" ] && read -r -d '' -a deps < "$HERE/$t.deps"
   for m in ${deps[@]+"${deps[@]}"}; do cp "$HERE/$m.lean" "$d/"; ffi+=("$m.c"); done
   status=ok; why=""
@@ -145,7 +151,7 @@ for t in "${TESTS[@]}"; do
         && { [ -z "$link" ] || leanc -O3 -DNDEBUG "$t.c" ${ffi[@]+"${ffi[@]}"} -o native >> build-native.log 2>&1; }); then
     status=fail; why="native build failed (see $d/build-native.log)"
   elif [ -f "$HERE/$t.refused" ] && runfiles=$(cd "$HERE" && ls -d "$t".args "$t".stdin "$t".pipe "$t".ffi.c \
-          "$t".l2r-log "$t".native.* "$t".l2r.* 2> /dev/null || true) && [ -n "$runfiles" ]; then
+          "$t".l2r-log "$t".l2r-debug "$t".native.* "$t".l2r.* 2> /dev/null || true) && [ -n "$runfiles" ]; then
     status=fail; why="$t.refused expects lean2rr to refuse, but these files describe a run: $(echo $runfiles)"
   elif [ -f "$HERE/$t.refused" ]; then
     # A translation lean2rr refuses, with the expected message.
@@ -161,11 +167,13 @@ for t in "${TESTS[@]}"; do
         esac
       done < "$HERE/$t.refused"
     fi
-  elif ! L2R_DISABLE_OPTS=$opts L2R_ENABLE_OPTS=$enable LEAN_ABORT_ON_PANIC=1 python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" --keep-rr "$d/$t.rr" \
+  elif ! L2R_DISABLE_OPTS=$opts L2R_ENABLE_OPTS=$enable LEAN_ABORT_ON_PANIC=1 \
+        ${debug[@]+"${debug[@]}"} python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" --keep-rr "$d/$t.rr" \
         > "$d/build-l2r.log" 2>&1; then
     status=fail; why="lean2rr build failed (see $d/build-l2r.log)"
   else
-    if [ -f "$HERE/$t.l2r-log" ]; then
+    for f in "$HERE/$t.l2r-log" "$HERE/$t.l2r-debug"; do
+      [ -f "$f" ] || continue
       while IFS= read -r line; do
         [ -z "$line" ] && continue
         case $line in
@@ -173,8 +181,8 @@ for t in "${TESTS[@]}"; do
                    status=fail; why="$why '${line#! }' in $d/build-l2r.log;"; fi ;;
           *) grep -qF -- "$line" "$d/build-l2r.log" || { status=fail; why="$why no '$line' in $d/build-l2r.log;"; } ;;
         esac
-      done < "$HERE/$t.l2r-log"
-    fi
+      done < "$f"
+    done
     run_one ./native native
     run_one ./l2r l2r
     for k in out err code; do

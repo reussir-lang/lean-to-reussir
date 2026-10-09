@@ -68,29 +68,57 @@ to `lean2rr/LeanToReussir/`.
   and lean2rr's shim (`L2RShim`), is `unsafe` (whatever its name; the
   `_unsafe_rec` code Lean (4.33, 4.34) generates for a `partial def` is not
   `unsafe`, so `partial` alone does not count), is an axiom, uses `sorry`,
-  is `@[extern]` or `@[export]`, or is
-  `implemented_by` an `unsafe` function (even a library one). The
-  declarations reached are those the program's code comes from
-  (`sourceDecls`), the constants their definitions mention, and their
-  `implemented_by` targets. Only then do `Box` unboxing functions accept
-  the variants of *other* types that an `unsafeCast` can read; otherwise
-  they match only the representations of their own Lean type.
+  is `implemented_by` an `unsafe` function (even a library one), or is an
+  `@[export]` definition under a C symbol of Lean's library or one that
+  starts with `l2r_` (`librarySymbols`). An extern of the program does
+  not count by itself: the walk goes into the code that runs for it
+  ([../externs-ffi/program-externs.md](../externs-ffi/program-externs.md#an-extern-of-the-program-is-not-a-cast-by-itself)).
+  The declarations reached are those the program's code comes from
+  (`sourceDecls`) and, transitively: the constants their definitions
+  mention; their `implemented_by` targets; their `_unsafe_rec` copies (the
+  code Lean compiles for a recursive definition; for a `partial def`, whose
+  value is only an inhabitant of its type, the only place its code shows);
+  the `@[export]` definitions of an extern's C symbol. Every `@[csimp]`
+  replacement that is a declaration of the program is also a root,
+  whether or not the walk reaches the constant it replaces
+  (`programCsimpTargets`): compiled code calls the replacement and may
+  inline it, and the replaced constant may show only in compiled code
+  (a library `@[macro_inline]` definition such as `ite`, whose value the
+  walk does not enter, becomes `Decidable.casesOn`). The replacements are
+  those of `CSimp.ext`'s state after import and, for `local` and `scoped`
+  ones, which that state lacks, the `g` of every constant of the
+  program's modules stated as `@f = @g`. Only then do `Box`
+  unboxing functions accept the variants of *other* types that an
+  `unsafeCast` can read; otherwise they match only the representations of
+  their own Lean type.
 - **Why:** Matching every type a cast could read made unboxing functions
   quadratic in the number of same-shape boxed types (round 6 TY6-02,
   5be764c). The individual conditions each come from a review finding:
   an extern's type is not compared with the `@[export]` definition
-  lean2rr calls instead (RV6T-01; an extern of the program is now bound
-  to an `@[export]` only when their types and compiled signatures agree,
-  so RV6T-01's program is refused, test `RtCastExtern`,
-  [../externs-ffi/program-externs.md](../externs-ffi/program-externs.md);
-  the condition stays, conservatively); an unsafe declaration with any name
+  lean2rr calls instead (RV6T-01: every extern and `@[export]` of the
+  program counted; an extern of the program is now bound to an `@[export]`
+  only when their types and compiled signatures agree, so RV6T-01's
+  program is refused, test `RtCastExtern`; and it runs no C, so since
+  2026-10-09 only an `@[export]` that lean2rr calls unchecked counts:
+  every extern turned compact arrays and `unread-fields` off, lean-zip's
+  among them, test `RtCArrExtern`); an unsafe declaration with any name
   can cast (RV6T-02); `@[implemented_by TypeName.mk]` gives two types one
-  `TypeName`, so `Dynamic.get?` reads one as the other (RV6T-05).
+  `TypeName`, so `Dynamic.get?` reads one as the other (RV6T-05). The
+  walk missed a `partial def`'s code (its `_unsafe_rec` copy) and a
+  `@[csimp]` replacement: a cast inlined there (through a safe declaration
+  implemented by an `unsafe` one) left the program counted as one that
+  cannot cast, and the program lean2rr built stopped at an unboxing with
+  "INTERNAL PANIC: unreachable code has been reached" (tests
+  `RtCastPartial`, `RtCastCsimp`, `RtCastExternBody`; for a `local` or
+  `scoped` `@[csimp]`, review of that fix, `RtCastCsimpLocal`,
+  `RtCastCsimpScoped`; for a replaced constant that only a library
+  `@[macro_inline]` body mentions, `RtCastCsimpMacroInline`).
   Lean's own library casts only where lean2rr's representations agree.
 - **Where:** `Lower/Conv.lean`: `programCasts`, `sourceDecls`,
-  `boxCastable`; `LowerBase.lean`: `LowerCtx.programCasts`;
-  `Emit/Program.lean`: `lowerProgram` (`L2R_DEBUG` prints the deciding
-  declaration); plan [§5.1](../../translation-plan.md#51-type-translation).
+  `librarySymbols`, `exportsBySymbol`, `programCsimpTargets`,
+  `boxCastable`; `LowerBase.lean`:
+  `LowerCtx.programCasts`; `Emit/Program.lean`: `lowerProgram`
+  (`L2R_DEBUG` prints the deciding declaration); plan [§5.1](../../translation-plan.md#51-type-translation).
 - **Remove only if:** never. It relies on library modules being the
   toolchain's: a program module named `Init.*`, `Std.*`, `Lean.*` or
   `Lake.*`, or `L2RShim.*` (trusted too, `isToolchainModule`), that is not

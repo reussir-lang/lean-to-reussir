@@ -906,17 +906,22 @@ its value is stored as `Box`.
   types that an `unsafeCast` can read (below). A program can cast when
   some declaration it reaches outside Lean's library (`Init`, `Std`,
   `Lean`, `Lake`) and lean2rr's shim (`L2RShim`, §5.8) is `unsafe`, is an
-  axiom, uses `sorry`, or is `@[extern]` or `@[export]`: `unsafeCast`
-  needs `unsafe` code, a `cast` between types lean2rr represents
-  differently needs an equality that only `sorry` or an axiom proves, and
-  Lean does not compare the types of an extern and the `@[export]`
-  definition that implements it: natively `@[extern "s"] opaque asP2 (p :
-  Pkg) : P2` bound to `@[export s] def payload (p : Pkg) : p.α` reads an
-  existential payload as a `P2`. (lean2rr binds an extern of the program to
-  an `@[export]` only when their types and compiled signatures agree, so it
-  now refuses that program, test `RtCastExtern`, §5.8; an extern of Lean's
-  library goes to the `@[export]` of its symbol unchecked, so the fact
-  stays conservative.) `implemented_by` is type-checked, but
+  axiom, uses `sorry`, or is an `@[export]` definition that lean2rr calls
+  without comparing types (one under a C symbol of Lean's library or one
+  that starts with `l2r_`): `unsafeCast` needs `unsafe` code, a `cast`
+  between types lean2rr represents differently needs an equality that only
+  `sorry` or an axiom proves, and an extern of Lean's library goes to the
+  `@[export]` of its symbol unchecked. Lean does not compare the types of
+  an extern and the `@[export]` definition that implements it either:
+  natively `@[extern "s"] opaque asP2 (p : Pkg) : P2` bound to `@[export
+  s] def payload (p : Pkg) : p.α` reads an existential payload as a `P2`;
+  but lean2rr binds an extern of the program to an `@[export]` only when
+  their types and compiled signatures agree (it refuses that program, test
+  `RtCastExtern`, §5.8), and otherwise runs the extern's Lean definition
+  or nothing. So an extern of the program is no cast by itself: the walk
+  below goes into its `implemented_by` target, the `@[export]` definitions
+  of its C symbol and its own definition (test `RtCArrExtern`: compact
+  arrays stay on with lean-zip-like externs). `implemented_by` is type-checked, but
   only by its declared type: a program declaration implemented by an
   `unsafe` function, even one of the library's, counts (`@[implemented_by
   TypeName.mk] opaque mkTN` gives two types the same `TypeName`, so
@@ -927,8 +932,15 @@ its value is stored as `Box`.
   `Lake.*` that is not the toolchain's is rejected when the program is
   loaded (§10). The declarations
   reached are those the program's code comes from and, transitively, the
-  constants their definitions mention (code inlined into others) and their
-  `implemented_by` targets (`LowerCtx.programCasts`). Lean's library casts
+  constants their definitions mention (code inlined into others), their
+  `implemented_by` targets, their `_unsafe_rec` copies (a `partial def`'s
+  code; its value is only an inhabitant), and the `@[export]` definitions
+  of an extern's C symbol (`LowerCtx.programCasts`); every `@[csimp]` replacement that is a
+  declaration of the program is a root of the walk (also `local` and
+  `scoped` ones, which are not in the state after import: every `@f = @g`
+  statement of the program's modules counts), since the replaced constant
+  may show only in compiled code (a library `@[macro_inline]` `ite`
+  becomes `Decidable.casesOn`). Lean's library casts
   only where lean2rr's representations agree: `Array.mapMUnsafe`'s
   `NonScalar` elements are `Box`es, `modify`'s `unsafeCast ()` is a
   placeholder, `attach` adds a `Subtype` (which mono erases), and
