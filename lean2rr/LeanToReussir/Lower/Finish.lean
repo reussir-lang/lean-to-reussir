@@ -694,9 +694,15 @@ def boxTypeItems : LowerM RR.Item := do
     text := text ++ f.render ++ "\n"
   return .raw text
 
-/-- The enums of all function types the generated program mentions. -/
+/-- The enums of all function types the generated program mentions. The
+enum of a function type boxed with `boxWideBit` (`boxIsWide`, given before
+its variants were all known) has at most `boxWideMaxCtors` constructors, or
+the translation stops: its cell must keep the wide header. -/
 def fnTypeItems : LowerM (Array RR.Item) := do
   let st ← get
+  -- The run-time types of the function types whose box numbers are wide.
+  let wideFns : Std.HashSet RR.Ty := st.boxNums.fold (init := {}) fun acc t n =>
+    if t matches .fn .. && n &&& boxWideBit != 0 && n &&& boxLeafBit == 0 then acc.insert t.rt else acc
   let mut work : Array RR.Ty := #[]
   for it in st.fns ++ st.typeItems do
     for t in it.tys do work := t.subterms work
@@ -720,6 +726,9 @@ def fnTypeItems : LowerM (Array RR.Item) := do
       let fs ← fnVariantFields v
       for f in fs do work := f.subterms work
       variants := variants.push (fnVariantName v, fs)
+    if wideFns.contains t && variants.size > boxWideMaxCtors then
+      throwError "lean2rr: the boxed function type {RR.fnTypeName t} has {variants.size} variants, \
+        more than a cell with a wide header holds ({boxWideMaxCtors}; boxIsWide, internal error)"
     items := items.push (RR.Item.enum (RR.fnTypeName t) false variants)
   return items
 

@@ -745,6 +745,12 @@ freed whole take no memory on Reussir's pending stack. Only on numbers
 without `boxLeafBit` (a leaf payload is released directly, never deferred). -/
 def boxWideBit : Nat := 0x4000
 
+/-- The most constructors a shared enum's cell can have and keep a wide
+header (`hasWideHeader`: the fused tag stays below 2^16, since the
+deferral links through the upper 16 bits of its word): `boxIsWide`, and
+the check of a boxed function type's enum in `fnTypeItems`. -/
+def boxWideMaxCtors : Nat := 0x10000
+
 /-- Whether a record member of Reussir type `t` is 8-byte aligned in
 Reussir's layout (`memberStorageType` and `deriveCompoundLayout` in
 Reussir's `lib/IR/ReussirTypes.cpp`): a 64-bit scalar; a member that Reussir
@@ -783,22 +789,28 @@ That is Reussir's own rule for `__reussir_drop_defer_wide`
 at most 2^16 constructors (Reussir fuses its tag into the header), or a
 shared struct whose alignment is 8 (its members start at offset 8, after 4
 bytes of padding; `rrAlign8` of a member): a generated record of the
-program, the reference record, an `ElemBox`. Not a function value's enum
-(its constructors are known only at the end of the translation) nor a
-runtime type (`RVec`, `LCell`, `LHandle`: blocks of leanrt or Reussir's
-runtime, not Reussir records). That exclusion is needed for safety, not
-only for accuracy: the deferral writes the second word of the header, and
-those blocks keep data there (an `LCell` its task index, an `RVec` header
-its `SCANNED` mark), so a runtime type must never get the mark. A false
-answer only costs memory; a true one for a cell without a wide header
-corrupts it. -/
+program, the reference record, an `ElemBox`; a function value, the
+shared enum `L2RFn_…` of its run-time type (`fnTypeItems`). A function
+type's variants are known only at the end of the translation, so
+`fnTypeItems` stops with an internal error if the enum of a function type
+boxed with the mark has more than `boxWideMaxCtors` constructors: the mark
+is never wrong. Not a runtime type (`RVec`, `LCell`, `LHandle`: blocks of
+leanrt or Reussir's runtime, not Reussir records). That exclusion is
+needed for safety, not only for accuracy: the deferral writes the second
+word of the header, and those blocks keep data there (an `LCell`, a
+thunk's or task's cell, its task index; an `RVec` header its `SCANNED`
+mark), so a runtime type must never get the mark. A false answer only
+costs memory; a true one for a cell without a wide header corrupts it. -/
 def boxIsWide (store : RR.Ty) : LowerM Bool := do
+  -- A function value (its handle type is the function type, `boxKind`):
+  -- the enum of its run-time type, which `fnTypeItems` checks.
+  if store matches .fn .. then return store.rt matches .fn ..
   let .named n := store | return false
   if (← get).refName == some n then return true
   match (← get).typeInfos[n]? with
   | some info =>
     if info.shape == .enumLike || info.value then return false
-    if info.shape == .enum then return info.ctorOrder.size ≤ 0x10000
+    if info.shape == .enum then return info.ctorOrder.size ≤ boxWideMaxCtors
     let some l := info.ctors.find? info.ctorOrder[0]! | return false
     l.posTys.anyM rrAlign8
   | none =>

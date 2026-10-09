@@ -2,9 +2,11 @@
 # `String` dropped whole, n = 250000 and 10^6. Peak memory at n = 10^6 within native's plus 4000 KB, and
 # allocations and bytes as native's (factor 1): each boxed head of a list freed whole waited on Reussir's pending
 # stack in a 24-byte entry of its own, whose vector grew by doubling (dev 0bfc2018 at 10^6: peak 99304 to 132072
-# KB against native's 55236 to 102264 KB, bytes 1.7 to 2.3 times native's).
+# KB against native's 55236 to 102264 KB, bytes 1.7 to 2.3 times native's). HRT2-02: a list of function values
+# (`fns`), whose enum got `WIDE_BIT` only then (dev 935a87fa at 10^6: 89 MB against native's 70 MB).
 pairs 250000 | pairs 1000000 | 1 2000 | rss 1 4000
 leaf 250000 | leaf 1000000 | 1 2000 | rss 1 4000
 opt 250000 | opt 1000000 | 1 2000 | rss 1 4000
 lists 250000 | lists 1000000 | 1 2000 | rss 1 4000
 strs 250000 | strs 1000000 | 1 2000 | rss 1 4000
+fns 250000 | fns 1000000 | 1 2000 | rss 1 4000

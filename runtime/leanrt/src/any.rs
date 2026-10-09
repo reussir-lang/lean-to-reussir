@@ -418,8 +418,9 @@ pub(crate) fn frees_flat(w: u64) -> bool {
 
 // A payload's cell is deferred with `__reussir_drop_defer_wide` only when
 // lean2rr marks its number with `WIDE_BIT`, Reussir's own rule for the
-// cell's header; the other cells (a function value, an array, a runtime
-// object, a struct without an 8-byte member) with `__reussir_drop_defer`,
+// cell's header (a function value's enum too); the other cells (an array, a
+// runtime object such as a thunk's or task's cell, a struct without an
+// 8-byte member) with `__reussir_drop_defer`,
 // one entry of the stack's vector each when they follow one another inside
 // a free (24 bytes; Reussir's glue releases a list's heads one after the
 // other before the drain pops any of them). The wide deferral costs about 3

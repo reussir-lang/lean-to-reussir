@@ -515,11 +515,19 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
     pointer (a shared record or enum, a function value, a Reussir `Cell`
     or closure, an opaque runtime type such as `Nat`, `LStr`, `LAny`,
     `RVec`: `memberStorageType` in Reussir's `lib/IR/ReussirTypes.cpp`); a
-    `[value]` struct or tuple that holds one.
-  Not marked: a function value's enum (its constructors are known only at
-  the end of the translation), runtime types (`RVec`, `LCell`, `LHandle`:
-  leanrt's or Reussir's blocks, not Reussir records), a struct whose
-  members are all 4-aligned or less (a leaf anyway). `release_last` defers
+    `[value]` struct or tuple that holds one;
+  - a function value: the shared enum `L2RFn_…` of its run-time type
+    (`fnTypeItems`), a fused enum as above. Its variants are known only
+    at the end of the translation, after its number is given, so
+    `fnTypeItems` stops with an internal error if the enum of a function
+    type numbered with `WIDE_BIT` has more than 2^16 constructors
+    (`boxWideMaxCtors`): the mark is never wrong.
+  Not marked: runtime types (`RVec`, `LCell`, `LHandle`: leanrt's or
+  Reussir's blocks, not Reussir records), a struct whose members are all
+  4-aligned or less (a leaf anyway). A thunk's or task's cell (`LCell`)
+  can never be wide: it keeps its task index in the header's second word.
+  An array as a list's head stays one step entry each (not done: needs a
+  step-linking mechanism). `release_last` defers
   a marked payload's cell with `__reussir_drop_defer_wide`
   (`drop::free_deferred_wide`). When the top entry of Reussir's stack is a
   run, the cell links to the run's last cell through its header (the
@@ -545,17 +553,23 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   when the list is consumed cell by cell; `RtListDropWhole` at n = 10^6
   (five head types): peak 46040 to 76756 KB against native's 55216 to
   102332 KB (before: 99304 to 132072 KB), and the bytes requested equal
-  native's (before: 1.7 to 2.3 times, the stack's vector).
-- **Where:** `LowerBase.lean`: `boxWideBit`, `rrAlign8`, `boxIsWide`,
-  `boxNum`; `runtime/leanrt/src/any.rs`: `WIDE_BIT`, `release_last`;
+  native's (before: 1.7 to 2.3 times, the stack's vector). Function
+  values got the mark later (HRT2-02): a `List (Nat → Nat)` dropped whole
+  peaks at 45596 KB at n = 10^6 and 162396 KB at n = 4M, against native's
+  69496 and 258016 KB (before: 89196 and 275496 KB), and lean2rr requests
+  30 MB where native requests 42 MB (before: 68 MB).
+- **Where:** `LowerBase.lean`: `boxWideBit`, `boxWideMaxCtors`,
+  `rrAlign8`, `boxIsWide`, `boxNum`; `Lower/Finish.lean`: `fnTypeItems`
+  (the check of a boxed function type's enum);
+  `runtime/leanrt/src/any.rs`: `WIDE_BIT`, `release_last`;
   `runtime/leanrt/src/drop.rs`: `free_deferred_wide`; Reussir's
   `reussir_rt::drop` (`__reussir_drop_defer_wide`, `State::link`,
   `unlink`). Tests: leanrt's `any::tests::wide_cells_link_into_one_run`
   (the depth a release sees stays 1 for wide cells, grows by one per
   narrow cell), `fields_in_lean_order` and `deep_chain_of_two_numbers`
   with a wide number; `RtListDropWhole` (alloc-check: peak memory of a
-  list of pairs, of options and of lists dropped whole within native's
-  plus 4 MB). An array as a list's head is not a program payload with a
+  list of pairs, of options, of lists and of function values dropped
+  whole within native's plus 4 MB). An array as a list's head is not a program payload with a
   release (`NUM_ARRAY`, `RVec` of records): its free stays a step, one
   entry each.
 - **Remove only if:** Reussir's pending stack changes what a wide
