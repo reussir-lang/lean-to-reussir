@@ -215,11 +215,11 @@ fn ok<T>(r: Result<T, InternalPanic>) -> T {
 // included.
 //
 // `#[cold]` on a slow path that the prelude calls only behind a small-word
-// test (not `nat_gcd`, `nat_repr`, `nat_to_int`, `nat_neg_succ`): Reussir's
-// language has no branch hint, so the attribute is the hint. rustc puts
-// `cold` on the declaration in each texture, and LLVM then treats the
-// branch to the call as unlikely, as `LEAN_LIKELY` does natively: the
-// small path falls through, the call is laid out of line.
+// test (not `nat_gcd`, `nat_repr`; the `Int` ones below likewise, not
+// `int_repr`): Reussir's language has no branch hint, so the attribute is
+// the hint. rustc puts `cold` on the declaration in each texture, and LLVM
+// then treats the branch to the call as unlikely, as `LEAN_LIKELY` does
+// natively: the small path falls through, the call is laid out of line.
 
 #[cold]
 #[inline(never)]
@@ -388,12 +388,14 @@ pub extern "C" fn nat_low_u64(a: u64) -> u64 {
 
 /// `Int.ofNat` (`sem::int::of_nat`). A big `Nat` (>= 2^63) is a big `Int`
 /// too: the same object.
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_to_int(a: u64) -> LInt {
     of_int_view(sem::int::of_nat(unsafe { nat_view(a) }))
 }
 
 /// `Int.negSucc n = -(n + 1)`.
+#[cold]
 #[inline(never)]
 pub extern "C" fn nat_neg_succ(a: u64) -> LInt {
     of_int_view(ok(sem::int::neg_succ_of_nat(unsafe { nat_view(a) })))
@@ -538,59 +540,70 @@ fn of_int_view(i: sem::int::Int<GInt>) -> LInt {
     }
 }
 
-// The slow paths of the prelude's `lean_int_*` (raw owned words, all cases).
+// The slow paths of the prelude's `lean_int_*` (raw owned words, all cases;
+// `#[cold]` as the `Nat` ones above).
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_neg(a: u64) -> LInt {
     of_int_view(sem::int::neg(unsafe { int_view(a) }))
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_add(a: u64, b: u64) -> LInt {
     of_int_view(ok(sem::int::add(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) })))
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_sub(a: u64, b: u64) -> LInt {
     of_int_view(ok(sem::int::sub(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) })))
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_mul(a: u64, b: u64) -> LInt {
     of_int_view(ok(sem::int::mul(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) })))
 }
 
 /// `Int.div` (T-division, C's `/`).
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_div(a: u64, b: u64) -> LInt {
     of_int_view(sem::int::tdiv(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) }))
 }
 
 /// `Int.mod` (T-remainder, C's `%`, sign of the dividend).
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_mod(a: u64, b: u64) -> LInt {
     of_int_view(sem::int::tmod(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) }))
 }
 
 /// `Int.ediv` (Euclidean).
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_ediv(a: u64, b: u64) -> LInt {
     of_int_view(sem::int::ediv(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) }))
 }
 
 /// `Int.emod` (Euclidean, never negative for `y != 0`).
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_emod(a: u64, b: u64) -> LInt {
     of_int_view(sem::int::emod(unsafe { int_view_narrow(a) }, unsafe { int_view_narrow(b) }))
 }
 
 /// Three-way comparison: -1, 0, 1.
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_cmp(a: u64, b: u64) -> i64 {
     let (x, y) = unsafe { (int_view_narrow(a), int_view_narrow(b)) };
     sem::int::compare(&x, &y) as i64
 }
 
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_eq(a: u64, b: u64) -> bool {
     let (x, y) = unsafe { (int_view_narrow(a), int_view_narrow(b)) };
@@ -598,18 +611,21 @@ pub extern "C" fn int_eq(a: u64, b: u64) -> bool {
 }
 
 /// `Int.natAbs`.
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_nat_abs(a: u64) -> LNat {
     of_nat_view(sem::int::nat_abs(unsafe { int_view_narrow(a) }))
 }
 
 /// Whether an `Int` is negative (`!Int.decNonneg`).
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_is_neg(a: u64) -> bool {
     !sem::int::dec_nonneg(&unsafe { int_view(a) })
 }
 
 /// The value modulo 2^64 in two's complement (`Int64.ofInt`, ...).
+#[cold]
 #[inline(never)]
 pub extern "C" fn int_low_twos(a: u64) -> u64 {
     unsafe { int_view(a) }.low_u64()

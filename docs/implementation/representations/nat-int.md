@@ -219,16 +219,18 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `RtIntSmallBigEq`.
 - **Remove only if:** lean2rr stops using lean-runtime.
 
-### The `Nat` slow paths are `#[cold]`: the small path falls through
+### The `Nat` and `Int` slow paths are `#[cold]`: the small path falls through
 
 - **What:** The `leanrt::nat` slow paths that the prelude calls only
   after a small-word test are `#[cold]` (and `#[inline(never)]`, as
   before): `nat_add`, `nat_sub`, `nat_mul`, `nat_div`, `nat_mod`,
   `nat_cmp`, `nat_eq`, `nat_land`, `nat_lor`, `nat_xor`, `nat_shiftl`,
   `nat_shiftr`, `nat_log2`, `nat_pow`, `nat_sat_u64`,
-  `nat_replicate_len`, `nat_low_u64`. Not the ones called for every
-  value (`nat_gcd`, `nat_repr`), nor `nat_to_int`, `nat_neg_succ` and
-  the `Int` slow paths.
+  `nat_replicate_len`, `nat_low_u64`, `nat_to_int`, `nat_neg_succ`;
+  `int_neg`, `int_add`, `int_sub`, `int_mul`, `int_div`, `int_mod`,
+  `int_ediv`, `int_emod`, `int_cmp`, `int_eq`, `int_nat_abs`,
+  `int_is_neg`, `int_low_twos`. Not the ones called for every value
+  (`nat_gcd`, `nat_repr`, `int_repr`).
 - **Why:** Reussir's language has no branch hint, so the prelude's
   `if` cannot say which arm is likely. rustc puts `cold` on the
   declaration of each slow path in the textures that call it, and LLVM
@@ -242,7 +244,12 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   have no weights. Wall time (median of 9, interleaved, pinned; dev
   5604d38f): E08's kernel 33.1 ms before, 27.3 ms after (native 28.4);
   E01 (gcd_batch)'s kernel 24.4 ms, 23.5 ms (native 25.2); L11 (bignum,
-  big numbers on the slow paths) 2276 ms both (native 2287).
+  big numbers on the slow paths) 2276 ms both (native 2287). The `Int`
+  ones (dev 9dabadcc): X13 (tak)'s `tak` 5.3 taken branches a call
+  before, 3.7 after (44.0 and 42.7 instructions); its kernel 20.05 ms,
+  19.84 ms (native 22.32; faster in 9 of 9 paired rounds); E06
+  (expr_eval)'s kernel 29.66 ms, 29.50 ms; L10 (liasolver) 683 ms,
+  682 ms; L15 (monadic-interp) 1081 ms, 1079 ms; E01 unchanged.
 - **Where:** `leanrt/src/nat.rs`: the slow paths, and the comment above
   them.
 - **Remove only if:** Reussir's language gets branch hints that the
