@@ -232,7 +232,9 @@ its mono type.</p>
 <p><code>toMono</code> also does semantic lowering for lean2rr: <code>Decidable</code> becomes
 <code>Bool</code>, <code>Nat</code> constructors become <code>Nat.add x 1</code> and tests on 0, single-field
 structures become their field (<code>Char</code> → <code>UInt32</code>, <code>Fin n</code> → <code>Nat</code>), and
-<code>cases</code> on builtin types become accessor externs.</p>
+<code>cases</code> on builtin types become accessor externs. lean2rr's copy gives the
+field of an <code>Array</code>, a <code>ByteArray</code> or a <code>FloatArray</code> its own type
+(<code>List α</code>, <code>Array UInt8</code>, <code>Array Float</code>), not <code>lcAny</code>.</p>
 <h2 id="stage-3-check-and-recover-lost-types">Stage 3: check and recover lost types</h2>
 <p>Mono code can still have <code>lcAny</code> where the type is known: types inferred
 during the passes go through erased signatures, and the casts of the library
@@ -254,7 +256,9 @@ how it is used. A use at a precise type speaks only for its own branch.</p>
   type <code>T</code>, or when every call binds its result at <code>T</code>;</li>
 <li><strong>externs at unknown types</strong>: a call of a polymorphic extern at <code>lcAny</code>
   (<code>Array.uget</code> at <code>NonScalar</code>) whose arguments determine the type
-  arguments gets the type that the extern returns at them.</li>
+  arguments gets the type that the extern returns at them. The call
+  <code>Array.toList ◾ a</code>, which <code>toMono</code> makes for a <code>match</code> on an array, goes
+  to the extern's instance at the array's element type.</li>
 </ul>
 <p>The fixpoint runs over the whole program until nothing changes. What it
 does not recover stays <code>lcAny</code>, a box.</p>

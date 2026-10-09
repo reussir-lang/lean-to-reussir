@@ -14,14 +14,18 @@ Paths are relative to `lean2rr/LeanToReussir/`.
   `fun _ => T`, or a type constructor such as `List`. A family whose body,
   after eta reduction, mentions its variable stays `lcAny`. Every mono type
   lean2rr computes itself (constructor fields, Stage 3) uses the same
-  function.
+  function. `toMonoK` also binds the field of a `cases` on an `Array`, a
+  `ByteArray` or a `FloatArray` at the field's own type (`List α`,
+  `Array UInt8`, `Array Float`), where Lean's binds it at `lcAny`
+  ([../representations/compact-arrays.md](../representations/compact-arrays.md#a-match-on-an-array-takes-the-array-at-its-own-type)).
 - **Why:** Lean erases every type-former argument: `Std.HashMap Nat Nat`
   is `DHashMap Nat (fun _ => Nat)`, whose buckets became
   `AssocList Nat lcAny`, so every value was boxed (hashmap: 2.7x → 1.24x
   native memory, 1.86x → ~1.3x time, 982fc77). Both passes compute types,
   so both must use the same conversion.
 - **Where:** `MonoTypesKeep.lean`: `toMonoTypeKeep`, `keepFormer?`;
-  `TypedToMono.lean` (`toMonoK`); `TypedStructProjCases.lean`
+  `TypedToMono.lean` (`toMonoK`; `casesArrayToMonoK`,
+  `casesByteArrayToMonoK`, `casesFloatArrayToMonoK`); `TypedStructProjCases.lean`
   (`structProjCasesK`); `Opt/Registry.lean`: `stage2`.
 - **Remove only if:** Lean's own `toMonoType` keeps such arguments. The
   rule is syntactic, after eta reduction: `fun n => Fin n` is `Fin`, kept;

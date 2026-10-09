@@ -126,6 +126,11 @@ The figure above shows an `Array UInt64` as `RVec<u64>`.
   array of boxes. lean2rr gives each such loop a typed copy at the element
   types of its call. When the two types are equal, the loop runs in place.
   Otherwise it writes a new array of the result's kind.
+- **A `match` on an array.** `match a with | ⟨l⟩ => …` takes the array
+  at its own kind: `l` is a `List α`, and the call that makes it reads the
+  compact array. A list holds boxes, so each `Float` of `l` is a new box,
+  as with `a.toList`. For a byte array or a float array, `⟨arr⟩` is the
+  compact `Array UInt8` or `Array Float` itself, with no copy.
 - **Fields.** A structure field `Array α` (`Subarray.array`) holds a box
   when the program uses that structure with a compact array. The box holds
   the compact array or an array of boxes. A field that holds arrays inside

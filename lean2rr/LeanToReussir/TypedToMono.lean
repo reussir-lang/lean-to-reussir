@@ -13,7 +13,10 @@ import LeanToReussir.MonoTypesKeep
 Lean's `toMono` pass, unchanged except that types are converted with
 `toMonoTypeKeep` (see `MonoTypesKeep.lean`) instead of `toMonoType`, so that
 mono types keep closed, non-dependent type-former arguments (the value type
-of a `HashMap`). Definitions carry a `K` suffix to stay apart from Lean's.
+of a `HashMap`), and that a `cases` on `Array`, `ByteArray` or `FloatArray`
+binds its field at the field's own type, not `lcAny`
+(`casesArrayToMonoK`). Definitions carry a `K` suffix to stay apart from
+Lean's.
 -/
 
 namespace Lean.Compiler.LCNF
@@ -247,37 +250,46 @@ partial def casesUIntToMonoK (c : Cases .pure) (uintName : Name) (_ : c.typeName
   let k ← k.toMonoK
   return .let decl k
 
-/-- Eliminate `cases` for `Array. -/
+/-- Eliminate `cases` for `Array`. Unlike Lean's `toMono`, the list is bound
+at the field's own type (`List α`, as every other `cases` field,
+`Param.toMonoK`), not `lcAny`: Stage 3 then sends the call to the instance
+of `Array.toList` at `α` (`externRetarget?`), so a compact array is not
+passed as an array of boxes (hunt HARR2-01). -/
 partial def casesArrayToMonoK (c : Cases .pure) (_ : c.typeName == ``Array) : ToMonoKM (Code .pure) := do
   assert! c.alts.size == 1
   let .alt _ ps k := c.alts[0]! | unreachable!
   eraseParams ps
   let p := ps[0]!
-  let decl := { fvarId := p.fvarId, binderName := p.binderName, type := anyExpr, value := .const ``Array.toList [] #[.erased, .fvar c.discr] }
+  let decl := { fvarId := p.fvarId, binderName := p.binderName, type := (← toMonoTypeKeep p.type), value := .const ``Array.toList [] #[.erased, .fvar c.discr] }
   modifyLCtx fun lctx => lctx.addLetDecl decl
   let k ← k.toMonoK
   return .let decl k
 
-/-- Eliminate `cases` for `ByteArray. -/
+/-- Eliminate `cases` for `ByteArray`. Unlike Lean's `toMono`, the data is
+bound at the field's own type, `Array UInt8` (the result type of
+`ByteArray.data`), not `lcAny` (hunt HARR2-01: a `map` over it could not be
+typed, and the `u8` kind went off). -/
 partial def casesByteArrayToMonoK (c : Cases .pure) (_ : c.typeName == ``ByteArray) :
     ToMonoKM (Code .pure) := do
   assert! c.alts.size == 1
   let .alt _ ps k := c.alts[0]! | unreachable!
   eraseParams ps
   let p := ps[0]!
-  let decl := { fvarId := p.fvarId, binderName := p.binderName, type := anyExpr, value := .const ``ByteArray.data [] #[.fvar c.discr] }
+  let decl := { fvarId := p.fvarId, binderName := p.binderName, type := (← toMonoTypeKeep p.type), value := .const ``ByteArray.data [] #[.fvar c.discr] }
   modifyLCtx fun lctx => lctx.addLetDecl decl
   let k ← k.toMonoK
   return .let decl k
 
-/-- Eliminate `cases` for `FloatArray. -/
+/-- Eliminate `cases` for `FloatArray`. Unlike Lean's `toMono`, the data
+is bound at the field's own type, `Array Float` (the result type of
+`FloatArray.data`), not `lcAny` (hunt HARR2-01). -/
 partial def casesFloatArrayToMonoK (c : Cases .pure) (_ : c.typeName == ``FloatArray) :
     ToMonoKM (Code .pure) := do
   assert! c.alts.size == 1
   let .alt _ ps k := c.alts[0]! | unreachable!
   eraseParams ps
   let p := ps[0]!
-  let decl := { fvarId := p.fvarId, binderName := p.binderName, type := anyExpr, value := .const ``FloatArray.data [] #[.fvar c.discr] }
+  let decl := { fvarId := p.fvarId, binderName := p.binderName, type := (← toMonoTypeKeep p.type), value := .const ``FloatArray.data [] #[.fvar c.discr] }
   modifyLCtx fun lctx => lctx.addLetDecl decl
   let k ← k.toMonoK
   return .let decl k

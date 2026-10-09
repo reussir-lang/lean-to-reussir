@@ -515,7 +515,10 @@ computes itself uses the same conversion.
   let m := n - 1`.
 - `Int` `cases` → a sign test plus `natAbs`.
 - `cases` on builtin runtime types (`Array`, `String`, `ByteArray`,
-  `Float`, `Thunk`, `Task`, `UIntN`) → accessor externs.
+  `Float`, `Thunk`, `Task`, `UIntN`) → accessor externs. (lean2rr's copy
+  binds the field of an `Array`, `ByteArray` or `FloatArray` at its own
+  type, not `lcAny`; §4 sends `Array.toList` to the instance at the
+  element type.)
 - Single-field structures are unwrapped: `Char`→`UInt32`, `Fin n`→`Nat`,
   `Subtype`→its value, `Int8`→`UInt8`, `String.Pos.Raw`→`Nat`.
 - `Quot` is unwrapped.
@@ -653,7 +656,13 @@ binder would also run, and fail, when `t = .str`. The rules:
   arguments determine. Every argument must then have exactly the expected
   type, or be a `◾` placeholder. The call keeps its callee: an extern does
   not depend on its type arguments, and with one representation per
-  datatype only the result binder's type changes.
+  datatype only the result binder's type changes. The call
+  `Array.toList ◾ a` by the extern's own name, which `toMono` makes after
+  Stage 1 for a `match` on an array, goes to the instance at the element
+  type: with compact arrays its declared `Array lcAny` would be a crossing
+  (hunt HARR2-01). (`Thunk.get ◾ t` and `Task.get ◾ t` stay: at their
+  instance a `Float` would be unboxed at the call and boxed again at each
+  boxed use.)
 - **Placeholders.** A placeholder `let z := ◾` gets the type its uses
   expect when they agree: it has no value to convert.
 

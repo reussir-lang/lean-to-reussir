@@ -257,6 +257,11 @@ element type gives the <em>storage kind</em>:</p>
   array of boxes. lean2rr gives each such loop a typed copy at the element
   types of its call. When the two types are equal, the loop runs in place.
   Otherwise it writes a new array of the result's kind.</li>
+<li><strong>A <code>match</code> on an array.</strong> <code>match a with | ⟨l⟩ =&gt; …</code> takes the array
+  at its own kind: <code>l</code> is a <code>List α</code>, and the call that makes it reads the
+  compact array. A list holds boxes, so each <code>Float</code> of <code>l</code> is a new box,
+  as with <code>a.toList</code>. For a byte array or a float array, <code>⟨arr⟩</code> is the
+  compact <code>Array UInt8</code> or <code>Array Float</code> itself, with no copy.</li>
 <li><strong>Fields.</strong> A structure field <code>Array α</code> (<code>Subarray.array</code>) holds a box
   when the program uses that structure with a compact array. The box holds
   the compact array or an array of boxes. A field that holds arrays inside

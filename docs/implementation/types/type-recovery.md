@@ -90,7 +90,8 @@ before Stage 3: data that Lean's `toLCNF` typed `◾`.
   exactly its parameter's mono type (`toMonoTypeKeep`, as Stage 2 types an
   extern instance) or be a placeholder. Over-applied calls (the element of
   an array of functions, applied) are covered too. The callee stays the
-  instance at `lcAny`.
+  instance at `lcAny` (`Array.toList` called by its own name goes to an
+  instance: next entry).
 - **Why:** The result binder gets its precise type: unboxed once, at the
   call (Stage 4 converts an extern call's result to the binder's type).
   An extern does not depend on its type arguments, and with one
@@ -102,6 +103,27 @@ before Stage 3: data that Lean's `toLCNF` typed `◾`.
   FN-02, 1fcb07f.)
 - **Where:** `MonoRetype.lean`: `externResultType?`, `fwdCode`.
 - **Remove only if:** never.
+
+### `Array.toList` called by its own name goes to an instance
+
+- **What:** Lean's `toMono` makes `Array.toList ◾ a` for a `match` on an
+  array, after Stage 1 made the extern instances: a call by the extern's
+  own name, its type argument erased. Stage 3 sends it to the extern's
+  instance at the element type that the array's type determines (matched
+  as for an extern at unknown types, above), when the binder has the
+  instance's result type or an unknown type that it refines. The instance
+  is built as Stage 1 builds one (`externInstance`). The other calls of
+  this kind, `Thunk.get ◾ t` and `Task.get ◾ t` (a `match` on a thunk or a
+  task), stay: at their instance the value would be unboxed at the call
+  and boxed again at each use at a boxed position, a new box per use for a
+  `Float` or a `UInt64` from 2^63.
+- **Why:** At its declared types the call takes `Array lcAny`: with
+  optimization `compact-arrays` a compact array passed there was a
+  crossing, and its kind went off for the whole program (hunt HARR2-01;
+  [../representations/compact-arrays.md](../representations/compact-arrays.md#a-match-on-an-array-takes-the-array-at-its-own-type)).
+- **Where:** `MonoRetype.lean`: `externRetarget?`, `externTypeArgs?`,
+  `fwdCode`, `externInstance`.
+- **Remove only if:** Lean's `toMono` calls an instance.
 
 ### A parameter of type `lcErased` that receives data gets `lcAny`
 

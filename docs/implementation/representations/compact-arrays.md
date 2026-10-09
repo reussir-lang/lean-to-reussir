@@ -230,6 +230,63 @@ that it gets as an `α` is one box (kind 11), which it passes on unread.
   `Stage3Config.paramsFromCallers`, `retypeMono`.
 - **Remove only if:** the optimization is off.
 
+### A `match` on an array takes the array at its own type
+
+- **What:** Lean's `toMono` turns a `match` on an `Array`, a `ByteArray`
+  or a `FloatArray` (`match a with | ⟨l⟩ => …`, also `let ⟨xs⟩ := a`)
+  into a call of the field's extern by its own name, after Stage 1 made
+  the extern instances: `let l := Array.toList ◾ a`, `let arr :=
+  ByteArray.data b`, `let arr := FloatArray.data b`. Lean binds the field
+  at `lcAny`. lean2rr's copy of the pass binds it at the field's own type,
+  as it binds every other `cases` field (`Param.toMonoK`): `List α`,
+  `Array UInt8`, `Array Float`. Stage 3 then sends `Array.toList ◾ a` to
+  the extern's instance at the element type that the array's type
+  determines (`externRetarget?`; the instance is built as Stage 1 builds
+  one, `externInstance`), if the binder has the instance's result type, or
+  an unknown type that the result type refines. The instance takes the
+  array at its own type, so a compact array is no crossing. The field's type is the type that Lean's base code gives the
+  `cases` field (the constructor's field at the discriminant's type), and
+  the extern returns that field. The instance is used only when each
+  argument has exactly its parameter's type at those type arguments
+  (`externTypeArgs?`). If the array's type is not known
+  (`Array lcAny`, an element type that depends on a value), the call stays
+  as Lean made it. The flow class of the array still turns its kind off if
+  generic code can make or read it as an array of boxes. `toMono` makes
+  `Thunk.get ◾ t` and `Task.get ◾ t` for a `match` on a thunk or a task in
+  the same way; these calls stay as Lean made them (they take no array).
+  At their instance the value would be unboxed at the call, and each use at
+  a boxed position (a list head) would box it again: a new box per use for
+  a `Float` or a `UInt64` from 2^63, where the call by the extern's own
+  name passes the thunk's or task's own box on (review probe Rebox).
+  Example: `def bump (b : ByteArray) := match b with | ⟨arr⟩ =>
+  ⟨arr.map (· + 1)⟩` maps the bytes in place; `ByteArray.data` and
+  `ByteArray.mk` are the identity. A cost that stays: the list of a
+  compact array holds boxes, so the list of an `Array Float` (or of an
+  `Array UInt64` with values from 2^63) allocates one box per element, as
+  `a.toList` does on such an array. An array of boxes (the kind off)
+  shares its boxes with the list. The saving is in how the array is built,
+  stored and read.
+- **Why:** Hunt HARR2-01. With Lean's types, `Array.toList` took
+  `Array lcAny`: the compact array was a crossing, and its kind went off
+  for the whole program (`u8 off: viaMatchA._l2r.0: Array Bool meets Array
+  lcAny`; also an enumeration, `Char`, `UInt16`, `UInt64`, and `Float` in a
+  generic function). The data of a byte array or a float array stayed a
+  box. A `map` over it could not be typed (its source was not an
+  `Array α`), and the untyped loop's `Array lcAny` met `ByteArray.mk`'s
+  `Array UInt8` (`u8 off: bump._l2r.0: Array lcAny meets Array UInt8`):
+  the bytes were copied into boxes and back (`l2r_boxes_of_bytes`,
+  `l2r_bytes_of_boxes`), the floats into one cell each. The outputs were
+  correct. Lean's library has no such `match` in compiled code; user code
+  has.
+- **Where:** `TypedToMono.lean`: `casesArrayToMonoK`,
+  `casesByteArrayToMonoK`, `casesFloatArrayToMonoK`; `MonoRetype.lean`:
+  `externRetarget?`, `externTypeArgs?`, `fwdCode`, `externInstance`. Tests
+  `RtCArrMatch`, `RtCArrMatchPatterns`, `RtCArrMatchBytes`,
+  `RtCArrMatchBytesMap` (each with a `.l2r-debug` file: every kind stays
+  on).
+- **Remove only if:** Lean's `toMono` binds the field at its type and
+  calls an instance at the element type.
+
 ### The check sees only the reachable code
 
 - **What:** `compactArrayKinds` walks the declarations the entry point

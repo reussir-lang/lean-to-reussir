@@ -150,7 +150,9 @@ Main mono passes (Lean's): `simp` (inlining, constant folding, dead code),
 `toMono` also does semantic lowering for lean2rr: `Decidable` becomes
 `Bool`, `Nat` constructors become `Nat.add x 1` and tests on 0, single-field
 structures become their field (`Char` → `UInt32`, `Fin n` → `Nat`), and
-`cases` on builtin types become accessor externs.
+`cases` on builtin types become accessor externs. lean2rr's copy gives the
+field of an `Array`, a `ByteArray` or a `FloatArray` its own type
+(`List α`, `Array UInt8`, `Array Float`), not `lcAny`.
 
 ## Stage 3: check and recover lost types
 
@@ -176,7 +178,9 @@ The sources of a type:
   type `T`, or when every call binds its result at `T`;
 - **externs at unknown types**: a call of a polymorphic extern at `lcAny`
   (`Array.uget` at `NonScalar`) whose arguments determine the type
-  arguments gets the type that the extern returns at them.
+  arguments gets the type that the extern returns at them. The call
+  `Array.toList ◾ a`, which `toMono` makes for a `match` on an array, goes
+  to the extern's instance at the array's element type.
 
 The fixpoint runs over the whole program until nothing changes. What it
 does not recover stays `lcAny`, a box.

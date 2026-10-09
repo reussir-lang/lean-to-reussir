@@ -42,7 +42,9 @@ with a type that depends on a value (`data : Array t.denote`), a use as
 * **externs**: a call of a polymorphic extern instantiated at `lcAny`
   (`Array.uget`/`Array.uset` at `NonScalar`) whose arguments determine the
   type arguments binds its result at the type the extern returns at those
-  type arguments (the callee stays);
+  type arguments (the callee stays); the call `Array.toList ◾ a` by the
+  extern's own name, which `toMono` makes for a `cases` on an array, goes
+  to the instance at the array's element type;
 * **placeholders**: `let z := ◾` gets the type its uses expect.
 
 Whatever stays unknown keeps `lcAny` and is represented by the uniform `Box`
@@ -292,35 +294,22 @@ def externInstance (orig : Name) (base : Decl .pure) (typeArgs : Array Expr) : M
 
 /-! ## Results of externs at unknown types -/
 
-/-- The result type of a saturated call of `f`, an extern instance whose
-type arguments Lean did not know (`lcAny`, e.g. `Array.uget` at
-`NonScalar` inside `Array.map`), when the argument types determine them:
-the base extern's declared parameter types are matched strictly against
-the argument types (an argument of unknown type determines nothing), and
-every argument must then have exactly its parameter's mono type at those
-type arguments (or be a placeholder). An over-applied call (the element
-read of an `Array.map` over functions, applied to the function's argument)
-gives the result after the extra arguments. The types are computed as
-Stage 2 computes an extern instance's (`toMonoTypeKeep`). The call keeps
-its callee, the instance at the unknown type arguments: an extern's code
-does not depend on its type arguments, and Stage 4 converts the result to
-the binder's type (`lowerConstApp`). The representations can differ,
-though: with optimization `compact-arrays`, `Array UInt64` is `RVec<u64>`
-and the instance's `Array lcAny` an array of boxes. A compact array passed
-to such a call is a crossing, and the whole-program check
-(`compactArrayKinds`) turns its kind off: the result stays correct, and
-the arrays of that kind are arrays of boxes (HCA-03). -/
-def externResultType? (sc : Scope) (f : Name) (args : Array (Arg .pure)) : MRetypeM (Option Expr) := do
-  let some key := (← get).keys.find? f | return none
-  unless key.dicts.isEmpty && key.typeArgs.any (· == anyExpr) do return none
-  -- An instance with code (the Lean definition of an extern of the program,
-  -- `Mono.ExternRoute.body`) is not an extern instance.
-  if (← get).codeDecls.contains f then return none
-  let some base ← getBaseDecl? key.decl | return none
+/-- The type arguments of a saturated or over-applied call of the extern
+whose base declaration is `base`, when the argument types determine them,
+and the type of the call's result at them: the base extern's declared
+parameter types are matched strictly against the argument types (an
+argument of unknown type determines nothing), and every argument must then
+have exactly its parameter's mono type at those type arguments (or be a
+placeholder). An over-applied call (the element read of an `Array.map` over
+functions, applied to the function's argument) gives the result after the
+extra arguments. The types are computed as Stage 2 computes an extern
+instance's (`toMonoTypeKeep`). -/
+def externTypeArgs? (sc : Scope) (base : Decl .pure) (args : Array (Arg .pure)) :
+    MRetypeM (Option (Array Expr × Expr)) := do
   let positions := typeParamPositions base
   -- Saturated, or over-applied.
   let n := base.params.size
-  unless positions.size == key.typeArgs.size && n ≤ args.size do return none
+  unless n ≤ args.size do return none
   let holes ← positions.mapM fun _ => mkFreshFVarId
   let mut assign : Array (Option Expr) := Array.replicate holes.size none
   let mut ty := eraseLevels base.type
@@ -337,13 +326,14 @@ def externResultType? (sc : Scope) (f : Name) (args : Array (Arg .pure)) : MRety
   let some typeArgs := assign.mapM id | return none
   for t in typeArgs do
     if (← unknown t) || t.hasFVar then return none
+  let typeArgs := typeArgs.map eraseLevels
   -- The extern's mono signature at those type arguments: each argument has
   -- exactly its parameter's type.
   let mut inst := eraseLevels base.type
   for h : i in [:n] do
     let .forallE _ d b _ := inst.headBeta | return none
     match positions.idxOf? i with
-    | some j => inst := b.instantiate1 (eraseLevels typeArgs[j]!)
+    | some j => inst := b.instantiate1 typeArgs[j]!
     | none =>
       let p := (← toMonoTypeKeep d).consumeMData
       unless sc.isPlaceholder args[i]! || p.isErased || p.isSort || p == mkConst ``lcVoid do
@@ -355,7 +345,30 @@ def externResultType? (sc : Scope) (f : Name) (args : Array (Arg .pure)) : MRety
     match ret.consumeMData with
     | .forallE _ _ b _ => ret := b.instantiate1 anyExpr
     | _ => return none
-  return some ret
+  return some (typeArgs, ret)
+
+/-- The result type of a saturated call of `f`, an extern instance whose
+type arguments Lean did not know (`lcAny`, e.g. `Array.uget` at
+`NonScalar` inside `Array.map`), when the argument types determine them
+(`externTypeArgs?`). The call keeps its callee, the instance at the unknown
+type arguments: an extern's code does not depend on its type arguments,
+and Stage 4 converts the result to the binder's type (`lowerConstApp`).
+The representations can differ, though: with optimization
+`compact-arrays`, `Array UInt64` is `RVec<u64>` and the instance's
+`Array lcAny` an array of boxes. A compact array passed to such a call is a
+crossing, and the whole-program check (`compactArrayKinds`) turns its kind
+off: the result stays correct, and the arrays of that kind are arrays of
+boxes (HCA-03; `Array.toList` called by its own name goes to the instance
+at the precise type argument instead, `externRetarget?`). -/
+def externResultType? (sc : Scope) (f : Name) (args : Array (Arg .pure)) : MRetypeM (Option Expr) := do
+  let some key := (← get).keys.find? f | return none
+  unless key.dicts.isEmpty && key.typeArgs.any (· == anyExpr) do return none
+  -- An instance with code (the Lean definition of an extern of the program,
+  -- `Mono.ExternRoute.body`) is not an extern instance.
+  if (← get).codeDecls.contains f then return none
+  let some base ← getBaseDecl? key.decl | return none
+  unless (typeParamPositions base).size == key.typeArgs.size do return none
+  return (← externTypeArgs? sc base args).map (·.2)
 
 /-! ## Retyping from definitions -/
 
@@ -368,6 +381,40 @@ def refineTo? (old : Expr) (new : Option Expr) : MRetypeM (Option Expr) := do
   if new.consumeMData.isErased then return none
   if !(← unknown old) || (← unknown new) then return none
   if refines (← norm old) (← norm new) then return some new else return none
+
+/-- The call `Array.toList ◾ a` by the extern's own name, its type
+argument erased, which Stage 2's `toMono` makes for a `cases` on an array
+(`match a with | ⟨l⟩ => …`) after Stage 1 made the extern instances. Taken
+at the extern's declared types the call takes `Array lcAny`, an array of
+boxes: a compact array passed there is a crossing, and the whole-program
+check turned its kind off (hunt HARR2-01). When the argument types
+determine the type argument (`externTypeArgs?`), the call goes to the
+instance at it (`externInstance`, as Stage 1 makes an extern instance),
+which takes the array at its own type, and the binder gets the instance's
+result type. The binder of type `ty` must be unknown and refined by that
+type, or have it already (`casesArrayToMonoK` types the list at the
+field's type). Returns the instance and the binder's type.
+
+Only `Array.toList`: `toMono` also makes `Thunk.get ◾ t` and
+`Task.get ◾ t` (a `match` on a thunk or a task), which take no array. At
+their instance the value would be unboxed at the call, and each later use
+at a boxed position (a list head, a generic parameter) would box it again:
+a `Float` or a `UInt64` from 2^63 allocates a box per use, where the call
+by the extern's own name passes the thunk's or task's own box on (review
+of HARR2-01's fix, probe Rebox). -/
+def externRetarget? (sc : Scope) (f : Name) (args : Array (Arg .pure)) (ty : Expr) :
+    MRetypeM (Option (Name × Expr)) := do
+  unless f == ``Array.toList do return none
+  let some base ← getBaseDecl? f | return none
+  unless base.value matches .extern _ do return none
+  let positions := typeParamPositions base
+  if positions.isEmpty then return none
+  unless positions.all fun i => (args[i]?.map sc.isPlaceholder).getD false do return none
+  let some (typeArgs, ret) ← externTypeArgs? sc base args | return none
+  let t ← if ← unknown ty then refineTo? ty (some ret)
+    else pure (if (← norm ty) == (← norm ret) then some ty else none)
+  let some t := t | return none
+  return some (← externInstance f base typeArgs, t)
 
 /-- The type of `f` applied to `n` arguments, from its signature. -/
 def appType? (sig : Sig) (n : Nat) : Option Expr :=
@@ -386,6 +433,10 @@ def applyType? (t : Expr) : Nat → Option Expr
 partial def fwdCode (sc : Scope) : Code .pure → StateT Bool MRetypeM (Code .pure × Scope)
   | .let d k => do
     let mut d := d
+    if let .const f _ args _ := d.value then
+      if let some (g, t) ← externRetarget? sc f args d.type then
+        d := { d with value := .const g [] args, type := t }
+        set true
     if let .const f _ args _ := d.value then
       if ← unknown d.type then
         if let some t ← refineTo? d.type (← externResultType? sc f args) then
