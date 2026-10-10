@@ -35,7 +35,7 @@ and passes").
 | `nullary-scrutinee` | in a field-less arm, the matched value rebuilt | only arms of constructors without fields that use the value | [cases](control-flow/cases.md#the-matched-value-of-a-nullary-arm-is-rebuilt-nullary-scrutinee) |
 | `sink-proj` | structure projections sunk into the branches that use them | the projection is unused later in the block and in the condition, and no binder clashes; applies only where some branches use it while another keeps the structure whole | [cases](control-flow/cases.md#structure-projections-move-into-the-branches-that-use-them-sink-proj) |
 | `fresh-rebuild` | an arm returning a fresh matched value returns it rebuilt | the value is freshly built (whole-program analysis); the arm binds every field and only returns it | [cases](control-flow/cases.md#fresh-values-returned-whole-are-rebuilt-fresh-rebuild) |
-| `flatten-structs` | a structure argument of a loop (join point, self-recursive function) and a structure or two-constructor result passed as its fields at their precise types (worker/wrapper) | a value is split only where its fields are known at every jump, self-call and return; a whole use keeps that level whole, except two rebuilds that add no allocation: a loop's parameter at the loop's exit after a step that built a new value (the first step peeled into the wrapper), and a call's result (each value built at most once per run of its scope); a value whose object is inspected (`ptrAddrUnsafe`, `dbgTraceIfShared`, `isExclusiveUnsafe`) or that the caller passed in is never rebuilt; a result level stays whole when callers (or the wrapper) only use it whole, or when a shared object may arrive there; results with function types or without finite placeholders are not split; in a program that creates resources, declarations with resource parameters or results are left alone (their inferred borrows stay Lean's); bounds: 8 levels, 16 variables, peeled bodies of at most 300 nodes | below |
+| `flatten-structs` | a structure argument of a loop (join point, self-recursive function) and a structure or two-constructor result passed as its fields at their precise types (worker/wrapper) | a value is split only where its fields are known at every jump, self-call and return; a whole use keeps that level whole, except two rebuilds that add no allocation: a loop's parameter at the loop's exit after a step that built a new value (the first step peeled into the wrapper), and a call's result (each value built at most once per run of its scope); a value whose object is inspected (`ptrAddrUnsafe`, `dbgTraceIfShared`, `isExclusiveUnsafe`) or that the caller passed in is never rebuilt; a result level stays whole when callers (or the wrapper) only use it whole, or when a shared object may arrive there; results with function types or without finite placeholders are not split; in a program that creates resources, declarations with a parameter or result that may hold one, and those whose borrow flags decide the flag of such a parameter, are left alone and join point parameters that may hold one stay whole (their inferred borrows stay Lean's), decided by a whole-program flow analysis of the values (`ResourceFlow`; by type in a program that can cast); bounds: 8 levels, 16 variables, peeled bodies of at most 300 nodes | below |
 | `conv-liveness` | unboxing, application and conversion helpers generated only for what live code reaches; unreachable functions dropped | none needed for soundness: an arm left out matches a variant that no live code builds, so no value of it exists at run time; every identifier of raw text, of the prelude and of atoms is a root, every arm of other matches counts, and a variant that text names counts as built | [liveness](conversions/liveness.md) |
 | `merge-fns` | generated functions equal up to their own and local names merged: a copy calls the first, calls of a copy call the first | the canonical texts are equal (the same code once names are renamed in binding order, inside atoms too); a copy keeps its name and calls the function its first ends at, never itself; nothing is removed; a function called from one place only stays (LLVM inlines it there), except startup code (`_init`, `l2r_persist_`) | below |
 | `prelude-liveness` | the runtime prelude's functions that the program text does not name, directly or through the prelude's kept functions, are left out of the `.rr` | none needed for soundness: a function no text names cannot be called; every identifier of the generated text and of the prelude's items that always stay (the `extern "rust"` blocks, the types) is a root, also in string literals and in comments at the end of a line; only functions of the form `fn NAME` at column 0, outside a texture, with no attributes but `#[ffi(import)]` and `#[transform_anchor]`, can go; a name the scan missed would make rrc stop with an unknown function, not build another program | below |
@@ -526,6 +526,69 @@ and passes").
   the declaration's name and signature for function values and entry
   points. `L2R_FLATTEN_DEBUG=NAME` prints the decisions about the
   declarations whose names contain NAME.
+
+  **Resources.** In a program that creates resources (files, child
+  processes, promises: `programMakesResources`), lean2rr emulates Lean's
+  release times with Lean's borrow inference on its declarations
+  ([ownership.md](ownership.md#borrowed-parameters-are-emulated-for-resources)).
+  So the pass leaves alone every declaration with a parameter or a result
+  that may hold a resource, and keeps whole every join point parameter
+  that may hold one (`resourceExcluded`): their code, and so their
+  inferred borrows, stay Lean's. A whole-program flow analysis decides
+  which binders may hold one (`Opt/ResourceFlow.lean`). It joins binders
+  into classes (union-find) along every flow: an argument and its
+  parameter, a result and its binder, a returned value, a jump, a
+  constructor's arguments and its value, a projection, the fields of a
+  `cases` and its discriminant, the arguments of an extern with each other
+  and with its result (`ST.Ref.set`'s result holds nothing, but a later
+  `get` gives the value back: review of the analysis, finding 2, test
+  `RtFlattenResRef`),
+  the parameters, result, arguments and captured variables of a function
+  value, the standard streams (one node for `IO.setStdout` and
+  `IO.getStdout`, and stdin and stderr), an `initialize` constant and its
+  initializer's result. A class holds a resource when it has the result
+  of an extern of `resourceExterns`, a binder whose type holds a handle
+  or a child process, or the value of a constant that the analysis cannot
+  follow. Only binders whose type can carry a resource have a node
+  (`mayCarry`: `lcAny`, a handle, a function type, a thunk, a task, an
+  array or an inductive with such an element or field; not `List Nat`,
+  not `EST.Out ε σ Unit`, whose state field is `Void σ`). In a program
+  that can cast (`programCasts`), the type rule stays (`holdsResource`:
+  every `lcAny` may be a handle). Example: lean-regex's driver reads its
+  input with `IO.FS.readFile`. The handle goes to `Handle.read` and to
+  `readBinToEndInto.loop` only, so only that class holds a resource, and
+  `εClosure`'s `SearchState` (`Vector σ.Update n`, an `Array lcAny`) is
+  split. A record whose `lcAny` field gets a handle or a promise is in the
+  class of the extern's result, and stays whole (test
+  `RtFlattenResHeld`). Lean 4.34's inference (`InferBorrow`) decides the
+  ownership of a parameter from the code of its own declaration, from the
+  flags of the callees' parameters that get the parameter or a value whose
+  ownership goes back to it (a field of it: an owned field makes its
+  object owned), and from self tail calls only. So the pass also leaves
+  alone every declaration whose flags decide such a flag (`flagSources`):
+  each callee that gets, in a full application, a variable connected with
+  such a parameter by the inference's edges, taken both ways and whatever
+  the types (`ownershipSources`: a projection and its object, the fields of
+  a `cases`, an alias, an array element and its array, a jump's argument
+  and the join point's parameter, a self-call's argument and the
+  parameter), and the same from that callee's parameter, and so on; a walk
+  one way only missed a join point fed by two records (finding 3). Example (test `RtFlattenResOwner`, a bug of the type rule too):
+  `report (ctx : Ctx)` writes through `ctx.h` and passes `ctx.cfg` to a
+  loop `loopE` that updates its record in place. Natively `ctx` is owned,
+  so `report` closes the handle at its last use and then reads the data
+  back. With `loopE` split, its wrapper only projects its record, Lean's
+  inference took `ctx` borrowed, the handle stayed open until `report`
+  returned, and the read saw nothing. A declaration that the pass changes
+  then has no parameter, result or join point parameter that can hold a
+  resource, and no flag that decides one, so the flags of the parameters
+  that can, and the values that a changed declaration only borrows
+  (`borrowedVars`), stay the same. If Lean's inference starts to keep tail
+  calls across declarations, a changed caller can change a flag of a
+  callee that the pass leaves alone; the callers must then stay unchanged
+  too.
+  `L2R_DEBUG=1` prints the analysis' size and each declaration left alone
+  (`lean2rr: flatten-structs: ...`), `L2R_RESFLOW_DEBUG=1` the seeds and
+  the binders of the classes that hold a resource.
 - **Why:** Rule 1 gives every datatype one layout with type parameters
   boxed, so a loop's state and a monad's result were boxed and unboxed at
   every step, and records allocated per call: the classic Sieve took 166
@@ -537,15 +600,29 @@ and passes").
   the dependent-type branch before (mean of two runs): HigherOrder
   −4.2 %, Liasolver −8.0 %, Mergesort −7.3 %; lean-zip compress −4.8 %,
   decompress −11.0 % (its Adler-32 state passed split to `updateByte`).
+  Resources by flow: by type, every `lcAny` record of a program that
+  reads a file stayed a heap record, and lean-regex's `εClosure` built a
+  new 24-byte `SearchState` per step at its back edge, where native Lean
+  reuses the cell (allocation survey of 2026-10-10, finding B). With the
+  analysis, allocations counted (mimalloc and the C allocator) between
+  two input sizes, on dev 615a9618: Z03d (the VM on 50 kB and 100 kB of
+  Dickens) 33,156,160 → 16,102,300 (native 31,989,470), 857 MB → 448 MB
+  requested (native 832 MB); Z03l (on Lean sources) 10,823,516 →
+  5,315,612 (native 10,122,926); Cedar (Z06d) the same (4,550,626; 35
+  declarations left alone by type, 1 by flow).
 - **Where:** `Opt/Flatten.lean`: `Shape`, `maxShape`, `indInfo?`,
   `placeholderOk`, `collectDecl` (uses, aliases of matched values,
   `constCtor?`), `analyze`, `constrainDecl`, `flowInto`, `allowedWhole`,
   `freshFed`, `isExisting`, `wholeRoot`, `constrainDecl` (rebuild
-  sites), `pruneUnread`, `resourceExcluded`; the rewrite `xform`,
+  sites), `pruneUnread`, `Resources`, `resourceExcluded`,
+  `ownershipSources`, `flagSources` (and the join point parameters in
+  `analyze`); `Opt/ResourceFlow.lean`: `mayCarry`,
+  `mentionsResource`, `walk`, `run`; the rewrite `xform`,
   `explode`, `materialize` (`Env.mats`, `VVal.key`), `callWorker`, `run` (workers, wrappers,
   peeled wrappers). `LowerBase.lean`: `flatTupleName`, `lowerType` (the
   tuple types); `Lower/Values.lean`: `lowerLetValue` (tuple constructor and
-  projections); `Opt/Flatten.lean`'s `holdsResource` follows
+  projections); `Opt/Flatten.lean`'s `holdsResource` (the type rule, for
+  a program that can cast) follows
   `Lower/Borrow.lean`'s `mayHoldResource` (memoized); hook `PassConfig.monoPassesCore`
   (run by `Main.lean` after `monoPasses`; `--emit opt` prints the result).
   Tests `RtFlattenLoops`, `RtFlattenResults`, `RtFlattenSums`,
@@ -553,7 +630,9 @@ and passes").
   `RtFlattenShared.alloc`), `RtFlattenCopies`, `RtFlattenFnValue`,
   `RtFlattenPeelFirst`, `RtFlattenOrder`, `RtFlattenNested`,
   `RtFlattenSumPayload`, `RtFlattenWrapArgs`, `RtFlattenSelfWrap`,
-  `RtFlattenEscape` (each with its `.alloc`), `RtFlattenTrace`.
+  `RtFlattenEscape` (each with its `.alloc`), `RtFlattenTrace`,
+  `RtFlattenResFlow` (with `.alloc` and `.l2r-debug`), `RtFlattenResHeld`,
+  `RtFlattenResRef` and `RtFlattenResOwner` (with `.l2r-debug`).
 - **Remove only if:** the pass is off (the structures are then built at
   every step, with boxed fields, as rule 1 lays them out).
 

@@ -1,0 +1,6 @@
+lean2rr: flatten-structs: left alone (a parameter or the result may hold a resource): report
+lean2rr: flatten-structs: left alone (a parameter or the result may hold a resource): report2
+lean2rr: flatten-structs: left alone (its borrow flags decide those of a parameter that may hold a resource): loopE
+lean2rr: flatten-structs: left alone (its borrow flags decide those of a parameter that may hold a resource): relay
+lean2rr: flatten-structs: left alone (its borrow flags decide those of a parameter that may hold a resource): mix
+lean2rr: flatten-structs: left alone (its borrow flags decide those of a parameter that may hold a resource): grow

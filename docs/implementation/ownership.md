@@ -24,7 +24,15 @@ runtime.
   `main`) owned, and decides that by name (`isExport`): the instances of
   such a declaration (`helper._l2r_0`) are marked exported in the copy of
   the environment that the inference uses. The rules are in plan §5.8,
-  "Borrowing".
+  "Borrowing". The inference runs on lean2rr's code after the optional
+  passes, so a pass that changes code keeps Lean's code where a value may
+  hold a resource: `flatten-structs` leaves alone each declaration with a
+  parameter or a result that may hold one, and each declaration whose
+  borrow flags decide the flag of such a parameter (a callee that gets a
+  field of it), and keeps whole each join point parameter that may hold
+  one; a whole-program flow analysis of the values decides which
+  (`Opt/ResourceFlow.lean`;
+  [optional-passes.md](optional-passes.md#structure-arguments-and-results-are-spread-into-their-fields-flatten-structs)).
 - **Why:** Natively the caller releases a borrowed argument after the
   call; Reussir releases at the last use, inside the callee. Only resources
   can tell: a handle written by a helper that then reads the file again

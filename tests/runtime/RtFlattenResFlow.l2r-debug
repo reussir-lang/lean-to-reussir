@@ -1,0 +1,4 @@
+lean2rr: flatten-structs: resources by flow
+! left alone (a parameter or the result may hold a resource): resLoop
+! left alone (a parameter or the result may hold a resource): resStep
+! left alone (a parameter or the result may hold a resource): resSteps

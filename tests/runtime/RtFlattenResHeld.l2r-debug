@@ -1,0 +1,5 @@
+lean2rr: flatten-structs: resources by flow
+lean2rr: flatten-structs: left alone (a parameter or the result may hold a resource): heldLoop
+lean2rr: flatten-structs: left alone (a parameter or the result may hold a resource): heldLast
+lean2rr: flatten-structs: left alone (a parameter or the result may hold a resource): promLoop
+lean2rr: flatten-structs: left alone (a parameter or the result may hold a resource): promCheck

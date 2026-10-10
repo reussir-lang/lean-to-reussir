@@ -1,0 +1,6 @@
+# flatten-structs in a program that creates a resource (ResourceFlow): loop runs k rounds of n = 1000 elements, step
+# k calls; k = 20 and 80, 2000 and 8000. loop: a regression guard (Reussir reuses the record's cell without the
+# pass too). step: no allocation per call with the pass (natively one, the pair); left alone (the type rule, every
+# lcAny a handle) it built the pair and the record at each call (+12000), so this line pins the analysis.
+loop 20 | loop 80 | 1 2000
+step 2000 | step 8000 | 0 2000

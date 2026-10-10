@@ -1,5 +1,6 @@
 import Lean
 import LeanToReussir.PassConfig
+import LeanToReussir.Opt.ResourceFlow
 
 /-!
 # Structure arguments and results spread into their fields (optimization `flatten-structs`)
@@ -73,10 +74,13 @@ or read by a `cases`, when they are not known); a loop whose split
 parameter is rebuilt at its exit keeps its first step in the wrapper and
 is called through it (`AState.peel`).
 
-**Resources.** In a program that creates files or processes, the pass
-leaves alone every declaration with a parameter or result that may hold
+**Resources.** In a program that creates files, processes or promises,
+the pass leaves alone every declaration with a parameter or result that
+may hold one, every declaration whose borrow flags decide the flag of such
+a parameter (`flagSources`), and every join point parameter that may hold
 one (`resourceExcluded`): lean2rr emulates native release times by Lean's
-borrow inference on that code.
+borrow inference on that code. Which binders may hold one, the whole-program flow analysis
+`ResourceFlow` decides (by type, `holdsResource`, in a program that casts).
 
 Only pure steps move: a constructor application not built, a projection
 read from a known field, a value rebuilt, a match on a tag instead of on a
@@ -215,7 +219,8 @@ observable: Lower/Borrow's `mayHoldResource` (the same rules: a handle,
 `lcAny`, or an inductive or array with such a field or element at its type
 arguments; types being examined count as not holding one), memoized here
 (a `true` wherever it was found, a `false` at the top only), as the pass
-asks it of every declaration's types. -/
+asks it of every declaration's types. Only in a program that casts
+(`Resources.types`); otherwise `ResourceFlow` follows the values. -/
 partial def holdsResource (e : Expr) (seen : Array Expr := #[]) : CoreM Bool := do
   let e := e.consumeMData.headBeta
   if let some r := (← resourceCache.get)[e]? then
@@ -1778,24 +1783,207 @@ def eligible (keys : NameMap InstKey) (excluded : NameSet) (d : Decl .pure) (fac
   d.value matches .code _ && !facts.hasFun && !d.params.isEmpty && !excluded.contains d.name &&
     ((keys.find? d.name).map (·.decl) |>.getD d.name) != ``IO.Process.output
 
+/-- Which binders may hold a resource whose release is observable, in a
+program that creates such resources (see `resourceExcluded`). -/
+inductive Resources where
+  /-- The program creates none. -/
+  | absent
+  /-- `ResourceFlow`'s answer. -/
+  | flow (info : ResourceFlow.Info)
+  /-- By type (`holdsResource`): the program can read a value as another
+  type (`programCasts`), which the flow analysis cannot follow. -/
+  | types
+
+/-- Whether binder `x` (of type `t`) of declaration `decl` may hold a
+resource (`x = ResourceFlow.resultKey`: the declaration's result). -/
+def Resources.holds (r : Resources) (decl : Name) (x : FVarId) (t : Expr) : CoreM Bool :=
+  match r with
+  | .absent => pure false
+  | .flow info => pure (info.holds decl x)
+  | .types => holdsResource t
+
+/-- The variables of declaration `d`'s code connected with `start` by the
+edges along which Lean's borrow inference (`InferBorrow`) passes ownership,
+taken in both directions and whatever the types: a projection and its
+object (`forwardProjectionProp`, `backwardProjectionProp`; the fields of a
+`cases` are projections), an alias, an array element and its array and
+instance (`Array.getInternal`, `get!Internal`, `uget`: `arrayRead`), a
+jump's argument and its join point's parameter (`ownArgsUsingParams`,
+`ownParamsUsingArgs`), a self-call's argument and the parameter
+(`preserveTailCall`). A parameter of `start` is owned only if a variable of
+the set is owned by another rule (a reset, a constructor argument, a
+closure call) or is passed to an owned parameter of a callee (review of
+`ResourceFlow`, finding 3: a one-way walk missed the other arguments of a
+join point and of a tail call). -/
+partial def ownershipSources (arrayRead : Name → Option (Array Nat)) (d : Decl .pure) (c : Code .pure)
+    (start : Std.HashSet FVarId) : Std.HashSet FVarId := Id.run do
+  let jps := joinParams c {}
+  let mut s := start
+  repeat
+    let s' := go jps c s
+    if s'.size == s.size then break
+    s := s'
+  return s
+where
+  joinParams (c : Code .pure) (m : Std.HashMap FVarId (Array FVarId)) : Std.HashMap FVarId (Array FVarId) :=
+    match c with
+    | .let _ k => joinParams k m
+    | .jp d k => joinParams k (joinParams d.value (m.insert d.fvarId (d.params.map (·.fvarId))))
+    | .fun d k _ => joinParams k (joinParams d.value m)
+    | .cases cs => cs.alts.foldl (fun m alt => joinParams alt.getCode m) m
+    | _ => m
+  /-- `s` with `xs` added when one of them is in it. -/
+  link (s : Std.HashSet FVarId) (xs : Array FVarId) : Std.HashSet FVarId :=
+    if xs.any s.contains then xs.foldl (·.insert ·) s else s
+  go (jps : Std.HashMap FVarId (Array FVarId)) (c : Code .pure) (s : Std.HashSet FVarId) : Std.HashSet FVarId :=
+    match c with
+    | .let l k =>
+      let s := match l.value with
+        | .proj _ _ y => link s #[l.fvarId, y]
+        | .fvar y #[] => link s #[l.fvarId, y]
+        | .const g _ args _ =>
+          let s := match arrayRead g with
+            | some ps =>
+              let parents : Array FVarId := ps.filterMap fun i => match (args[i]? : Option (Arg .pure)) with
+                | some (.fvar y) => some y
+                | _ => none
+              link s (parents.push l.fvarId)
+            | none => s
+          if g == d.name && args.size ≥ d.params.size then
+            (d.params.zip args).foldl (fun s (p, a) => match a with
+              | .fvar y => link s #[p.fvarId, y]
+              | _ => s) s
+          else s
+        | _ => s
+      go jps k s
+    | .cases cs =>
+      cs.alts.foldl (fun s alt =>
+        let s := link s (alt.getParams.map (·.fvarId) |>.push cs.discr)
+        go jps alt.getCode s) s
+    | .jp d k => go jps k (go jps d.value s)
+    | .fun d k _ => go jps k (go jps d.value s)
+    | .jmp j args =>
+      let ps := jps.getD j #[]
+      args.zipIdx.foldl (fun s (a, i) => match a, ps[i]? with
+        | .fvar y, some q => link s #[y, q]
+        | _, _ => s) s
+    | _ => s
+
+/-- The declarations whose code decides, through Lean's borrow inference,
+the flag of a parameter in `held` (declaration, parameter index): those
+declarations, and every declaration whose parameter gets a value whose
+ownership goes back to such a parameter (`ownershipSources`) in a full
+application (Lean's `ownArgsUsingParams`: an owned callee parameter makes
+the argument owned), and so on. The flag of `report (ctx : Ctx)` that
+passes `ctx.cfg` to `loopE (c : Config)` is owned natively because
+`loopE`'s is; with `loopE` split, its wrapper only projects `c`, and `ctx`
+was inferred borrowed (test `RtFlattenResOwner`). -/
+partial def flagSources (keys : NameMap InstKey) (byName : Std.HashMap Name (Decl .pure)) (held : Array (Name × Nat)) :
+    NameSet := Id.run do
+  -- The array reads whose element Lean's inference owns with its parents
+  -- (as `borrowedVars`' `arrayRead`): `getInternal` and `uget` take
+  -- `α a i h`, `get!Internal` takes `α inst a i`.
+  let arrayRead (f : Name) : Option (Array Nat) :=
+    let orig := (keys.find? f).map (·.decl) |>.getD f
+    if orig == ``Array.getInternal || orig == ``Array.uget then some #[1]
+    else if orig == ``Array.get!Internal then some #[1, 2]
+    else none
+  let mut seen : Std.HashSet (Name × Nat) := {}
+  let mut out : NameSet := {}
+  let mut work := held.toList
+  while !work.isEmpty do
+    let (f, i) :: rest := work | break
+    work := rest
+    if seen.contains (f, i) then continue
+    seen := seen.insert (f, i)
+    let some d := byName[f]? | continue
+    let .code c := d.value | continue
+    let some p := d.params[i]? | continue
+    out := out.insert f
+    let src := ownershipSources arrayRead d c (({} : Std.HashSet FVarId).insert p.fvarId)
+    for (g, j) in calls c src #[] do
+      unless seen.contains (g, j) do work := (g, j) :: work
+  return out
+where
+  calls (c : Code .pure) (src : Std.HashSet FVarId) (acc : Array (Name × Nat)) : Array (Name × Nat) :=
+    match c with
+    | .let d k =>
+      let acc := match d.value with
+        | .const g _ args _ =>
+          match byName[g]? with
+          | some callee =>
+            if callee.value matches .code _ && args.size ≥ callee.params.size then
+              (args.extract 0 callee.params.size).zipIdx.foldl (fun acc (a, j) => match a with
+                | .fvar y => if src.contains y then acc.push (g, j) else acc
+                | _ => acc) acc
+            else acc
+          | none => acc
+        | _ => acc
+      calls k src acc
+    | .jp d k | .fun d k _ => calls k src (calls d.value src acc)
+    | .cases cs => cs.alts.foldl (fun acc alt => calls alt.getCode src acc) acc
+    | _ => acc
+
 /-- In a program that creates resources whose release is observable (files,
 child processes, promises: `programMakesResources`), lean2rr emulates native Lean's
 release times by running Lean's own borrow inference on its declarations
 (Lower/Borrow). That inference depends on the code (a `cases` whose cell
 Lean's reset/reuse would give to the worker's tuple makes the matched
 parameter owned), so the pass leaves alone every declaration with a
-parameter or a result that may hold such a resource (`holdsResource`):
-their code, and so their inferred borrows, stay Lean's. -/
-def resourceExcluded (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Bool × NameSet) := do
+parameter or a result that may hold such a resource: their code, and so
+their inferred borrows, stay Lean's. Which binders may hold one, the
+whole-program flow analysis decides (`ResourceFlow`: a record whose
+`lcAny` fields only ever get regex data is no resource holder); in a
+program that casts, the type (`holdsResource`: every `lcAny` may be a
+handle). -/
+def resourceExcluded (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Resources × NameSet) := do
   let byName := decls.foldl (fun m d => m.insert d.name d) ({} : NameMap (Decl .pure))
-  unless ← programMakesResources byName keys do return (false, {})
+  unless ← programMakesResources byName keys do return (.absent, {})
+  let r : Resources := match ← ResourceFlow.run keys decls with
+    | some info => .flow info
+    | none => .types
+  let debug := (← IO.getEnv "L2R_DEBUG").isSome
+  let dbg ← IO.getEnv "L2R_FLATTEN_DEBUG"
+  if debug || dbg.isSome then
+    match r with
+    | .flow info => IO.eprintln s!"lean2rr: flatten-structs: resources by flow: {info.stats}"
+    | .types => IO.eprintln s!"lean2rr: flatten-structs: resources by type (the program can cast)"
+    | .absent => pure ()
   let mut out : NameSet := {}
+  let mut held : Array (Name × Nat) := #[]
+  let shown (d : Name) : Bool := debug || dbg.any (fun pat => (d.toString.splitOn pat).length > 1)
+  let origOf (d : Name) : Name := (keys.find? d).map (·.decl) |>.getD d
   for d in decls do
     unless d.value matches .code _ do continue
     let res := (splitArrows d.type d.params.size).2
-    if (← d.params.anyM (holdsResource ·.type)) || (← holdsResource res) then
+    let mut holds := false
+    for h : i in [:d.params.size] do
+      if ← r.holds d.name d.params[i].fvarId d.params[i].type then
+        holds := true
+        held := held.push (d.name, i)
+    if holds || (← r.holds d.name ResourceFlow.resultKey res) then
       out := out.insert d.name
-  return (true, out)
+      if shown d.name then
+        IO.eprintln s!"lean2rr: flatten-structs: left alone (a parameter or the result may hold a resource): \
+          {origOf d.name} ({d.name})"
+  -- The callees whose parameters' flags decide those of the parameters
+  -- that may hold a resource keep their code too.
+  let byName' := decls.foldl (fun m d => m.insert d.name d) ({} : Std.HashMap Name (Decl .pure))
+  for f in (flagSources keys byName' held).toList do
+    unless out.contains f do
+      out := out.insert f
+      if shown f then
+        IO.eprintln s!"lean2rr: flatten-structs: left alone (its borrow flags decide those of a parameter that \
+          may hold a resource): {origOf f} ({f})"
+  if dbg.isSome then
+    -- How many the type rule would leave alone.
+    let mut byType := 0
+    for d in decls do
+      unless d.value matches .code _ do continue
+      if (← d.params.anyM (holdsResource ·.type)) || (← holdsResource (splitArrows d.type d.params.size).2) then
+        byType := byType + 1
+    IO.eprintln s!"flatten: resources: {out.size} declarations left alone (by type: {byType})"
+  return (r, out)
 
 /-- Result shape `s` (at `path` of `f`'s result) without the levels that
 some declaration uses whole while no other declaration reads them field by
@@ -1853,7 +2041,7 @@ where
     | _ => out
 
 /-- The fixed point over the whole program (see the module comment). -/
-def analyze (keys : NameMap InstKey) (excluded : NameSet) (resources : Bool) (decls : Array (Decl .pure))
+def analyze (keys : NameMap InstKey) (excluded : NameSet) (resources : Resources) (decls : Array (Decl .pure))
     (prog : Program) : CoreM AState := do
   let tA0 ← IO.monoMsNow
   let cycles := callCycles decls
@@ -1878,7 +2066,12 @@ def analyze (keys : NameMap InstKey) (excluded : NameSet) (resources : Bool) (de
     -- internal to the declaration).
     for (j, ps) in f.jps.toList do
       for h : i in [:ps.size] do
-        if resources && (← holdsResource ps[i].type) then continue
+        if ← resources.holds d.name ps[i].fvarId ps[i].type then
+          if (← IO.getEnv "L2R_DEBUG").isSome then
+            let orig := (keys.find? d.name).map (·.decl) |>.getD d.name
+            IO.eprintln s!"lean2rr: flatten-structs: join point parameter left whole (it may hold a resource): \
+              {ps[i].binderName} in {orig} ({d.name})"
+          continue
         let s ← maxShape ps[i].type (sums := true)
         if s.isNode then st := { st with slots := st.slots.insert (.jp d.name j i) s }
     -- The result.

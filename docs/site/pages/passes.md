@@ -235,9 +235,19 @@ pass does not split that part of its result for a caller that uses it
 whole. The pass builds each value at most one time in each run of the code
 that has the value. If two builds of one value can both run, for example
 one in a join point and one before the jump to it, the pass keeps that
-value whole. In a program that opens files or starts processes, it
+value whole. In a program that opens files, starts processes or makes promises, it
 does not change a function that takes or returns such a resource: the
 release times of resources come from Lean's borrow inference on that code.
+It also does not change a function that gets a field of such a value (for
+example the numbers of a record that also holds a file): Lean's inference
+reads that function's code to decide if the caller owns the record.
+A whole-program analysis finds the values that can hold a resource. It
+starts at each call that makes a resource and follows the value: to a
+parameter, into a record and out of it, through a closure, into a
+reference or a task. A record whose fields get only numbers holds no
+resource, also when the type of a field depends on a value (`lcAny`). For
+example, a regex engine that reads its input from a file has its search
+state split: the handle goes only to the functions that read the file.
 
 - **Effect.** Against the same build with the pass off (cachegrind): Sieve
   −54 %, MonadicInterp −51 %, Unionfind −51 %, HigherOrder −4 %,
