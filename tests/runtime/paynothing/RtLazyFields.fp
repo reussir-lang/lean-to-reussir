@@ -1,9 +1,9 @@
 # Pay-nothing baseline of RtLazyFields (tests/runtime/RtLazyFields.lean), arguments ''.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 50266
-bytes 2215552
-native-allocs 64616
-native-bytes 2437986
+allocs 50267
+bytes 2215600
+native-allocs 64913
+native-bytes 2546211
 items 381
 functions 319
 conversion-fns 0

@@ -3,12 +3,16 @@
  * Both link mimalloc statically: native Lean's runtime (libleanrt) and
  * lean2rr's (Reussir's runtime crate reussir-rt, whose Rust global allocator
  * also goes to mimalloc) call its entry points from other object files.
+ * Some memory comes from the C library's allocator instead: natively the
+ * limbs of big numbers (GMP's `memory.o` calls `malloc`; Lean sets no GMP
+ * memory functions), so its entry points are counted too, in the same
+ * totals (lean2rr's own C library allocations are a few at startup).
  * Linked with `-Wl,--wrap=SYMBOL` for each entry point below (the flags are
  * in alloccount.sh), every such call goes through the `__wrap_` function
  * here, which counts it and calls the real one (`__real_`). Calls inside
- * mimalloc itself are not wrapped, so each allocation the program asks for
- * is counted once. At exit (a destructor) the counter prints one line to
- * standard error:
+ * mimalloc itself, and inside the C library, are not wrapped, so each
+ * allocation the program asks for is counted once. At exit (a destructor)
+ * the counter prints one line to standard error:
  *
  *     alloccount: allocs A reallocs R bytes B
  *
@@ -32,7 +36,7 @@
  * filling the machine's memory. tests/runtime/alloc-check.sh sets both.
  *
  * Portability: ELF linkers with `--wrap` (GNU ld, gold, lld), and the
- * mimalloc entry points listed here. A program whose allocator is not a
+ * mimalloc and C library entry points listed here. A program whose allocator is not a
  * statically linked mimalloc would count nothing; tests/runtime/alloc-check.sh
  * fails when a run prints no count line. */
 #include <stdatomic.h>
@@ -146,4 +150,26 @@ void *__real_mi_realloc_aligned(void *, size_t, size_t);
 void *__wrap_mi_realloc_aligned(void *p, size_t s, size_t a) {
   count(p ? &n_realloc : &n_alloc, s);
   return __real_mi_realloc_aligned(p, s, a);
+}
+
+/* The C library's allocator (natively GMP's limbs). */
+W_SIZE(malloc)
+W_COUNT(calloc)
+
+void *__real_realloc(void *, size_t);
+void *__wrap_realloc(void *p, size_t s) {
+  count(p ? &n_realloc : &n_alloc, s);
+  return __real_realloc(p, s);
+}
+
+int __real_posix_memalign(void **, size_t, size_t);
+int __wrap_posix_memalign(void **r, size_t a, size_t s) {
+  count(&n_alloc, s);
+  return __real_posix_memalign(r, a, s);
+}
+
+void *__real_aligned_alloc(size_t, size_t);
+void *__wrap_aligned_alloc(size_t a, size_t s) {
+  count(&n_alloc, s);
+  return __real_aligned_alloc(a, s);
 }

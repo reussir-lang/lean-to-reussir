@@ -1,9 +1,9 @@
 # Pay-nothing baseline of Deriv (tests/classic/Deriv.lean), arguments '8'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 464341
+allocs 464340
 bytes 10506016
-native-allocs 553539
-native-bytes 11997691
+native-allocs 553737
+native-bytes 12061854
 items 210
 functions 173
 conversion-fns 0

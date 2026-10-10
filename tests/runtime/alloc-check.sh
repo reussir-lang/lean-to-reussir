@@ -2,9 +2,10 @@
 # lean2rr's allocations grow no faster than native Lean's: for each runtime
 # test with a NAME.alloc file, builds NAME.lean natively (lean + leanc) and
 # through lean2rr, both linked with the allocation counter
-# (tests/runtime/alloccount: every call to mimalloc's allocation entry
-# points counted, "alloccount: allocs A reallocs R" printed to stderr at
-# exit), runs both at the sizes of each line of NAME.alloc, and checks:
+# (tests/runtime/alloccount: every call to mimalloc's and the C library's
+# allocation entry points counted, "alloccount: allocs A reallocs R"
+# printed to stderr at exit), runs both at the sizes of each line of
+# NAME.alloc, and checks:
 # - each run prints what native prints: the same stdout, the same stderr
 #   (without the counter's line) and the same exit code;
 # - lean2rr's allocations grow at most FACTOR times as much as native's,

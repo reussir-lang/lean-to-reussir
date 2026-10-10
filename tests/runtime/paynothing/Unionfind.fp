@@ -1,9 +1,9 @@
 # Pay-nothing baseline of Unionfind (tests/classic/Unionfind.lean), arguments '70000'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 175033
-bytes 6302032
-native-allocs 2956108
-native-bytes 61666218
+allocs 175036
+bytes 6302128
+native-allocs 2956318
+native-bytes 61730561
 items 210
 functions 169
 conversion-fns 0

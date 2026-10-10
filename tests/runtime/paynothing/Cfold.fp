@@ -1,9 +1,9 @@
 # Pay-nothing baseline of Cfold (tests/classic/Cfold.lean), arguments '15'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 91898
+allocs 91897
 bytes 2000912
-native-allocs 102939
-native-bytes 2242758
+native-allocs 103138
+native-bytes 2306946
 items 181
 functions 149
 conversion-fns 0

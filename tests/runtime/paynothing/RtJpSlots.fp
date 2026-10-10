@@ -1,9 +1,9 @@
 # Pay-nothing baseline of RtJpSlots (tests/runtime/RtJpSlots.lean), arguments ''.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 109619
-bytes 2284928
-native-allocs 129752
-native-bytes 2710154
+allocs 109620
+bytes 2284976
+native-allocs 229964
+native-bytes 4374515
 items 273
 functions 216
 conversion-fns 0

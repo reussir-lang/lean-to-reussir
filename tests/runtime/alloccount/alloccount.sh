@@ -1,6 +1,7 @@
 # Sourced by the checks that count allocations (tests/runtime/alloc-check.sh,
 # tests/runtime/paynothing-check.sh): builds the counter (alloccount.c) and
-# defines the link flags of both builds.
+# defines the link flags of both builds (mimalloc's and the C library's
+# allocation entry points, see alloccount.c).
 #   alloccount_setup DIR   compiles DIR/alloccount.o with Lean's C compiler
 #                          (leanc) and sets
 #     AC_LEANC   the extra arguments of the native link (`leanc ... $AC_LEANC`)
@@ -12,7 +13,7 @@
 #                          counter printed nothing)
 #   alloccount_strip FILE  prints the file without the counter's line
 ALLOCCOUNT_SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/alloccount.c
-ALLOCCOUNT_SYMS="mi_malloc mi_malloc_small mi_zalloc mi_zalloc_small mi_calloc mi_malloc_aligned mi_zalloc_aligned mi_mallocn mi_realloc mi_realloc_aligned"
+ALLOCCOUNT_SYMS="mi_malloc mi_malloc_small mi_zalloc mi_zalloc_small mi_calloc mi_malloc_aligned mi_zalloc_aligned mi_mallocn mi_realloc mi_realloc_aligned malloc calloc realloc posix_memalign aligned_alloc"
 
 alloccount_setup() {
   local dir=$1 wrap="-Wl" s

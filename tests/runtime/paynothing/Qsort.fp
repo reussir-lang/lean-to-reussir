@@ -1,9 +1,9 @@
 # Pay-nothing baseline of Qsort (tests/classic/Qsort.lean), arguments '80'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 9548
+allocs 9547
 bytes 3224504
-native-allocs 299234
-native-bytes 12675574
+native-allocs 299445
+native-bytes 12739938
 items 197
 functions 161
 conversion-fns 0
