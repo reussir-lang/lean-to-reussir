@@ -662,15 +662,24 @@ def errStringFn (errStr : Name) (outTy : String) : LowerM String := do
 /-- `l2r_init_put_<slot>(v)`: store the value `v : vt` (the `ok` field of
 the IO result of `initialize` constant `decl`'s action, a `Box`) into the
 constant's once-cell `slot`, at the constant's own type, the type its reads
-take it at (`Callee.initConst`). Generated once per constant. -/
+take it at (`Callee.initConst`). A value that may hold a task is walked
+first (`persistCall`), as native Lean calls `lean_mark_persistent` on the
+result after the initializer (`emitDeclInit`): the walk marks what it
+reaches persistent, so a later walk (a closed term's first evaluation,
+`Runtime.markPersistent`) does not look into a reference the result holds.
+It never waits: before `main` every task has run at once, and no promise
+can be made. Generated once per constant. -/
 def initPutFn (decl : Name) (slot : Nat) (vt : RR.Ty) : LowerM String := do
   let name := s!"l2r_init_put_{slot}"
   if ← hasFn name then return name
   let t ← lowerType (← toMonoTypeKeep (← getOtherDeclBaseType decl []))
   let (st, boxed) ← cellStorage t
   let v ← coerce (.var "v") vt t
-  let stored := if boxed then match st with | .named bn => RR.Expr.ctor bn none #[v] | _ => v else v
-  let body : RR.Block := ⟨#[("s", some st, .call "l2r_once_set" #[st] #[.atom (toString slot), stored])], .atom "0"⟩
+  let (walk, x) ← match ← persistCall t (.var "x") with
+    | some p => pure (#[("x", some t, v), ("p", some (RR.Ty.named "u64"), p)], RR.Expr.var "x")
+    | none => pure (#[], v)
+  let stored := if boxed then match st with | .named bn => RR.Expr.ctor bn none #[x] | _ => x else x
+  let body : RR.Block := ⟨walk.push ("s", some st, .call "l2r_once_set" #[st] #[.atom (toString slot), stored]), .atom "0"⟩
   modify fun s => { s with fns := s.fns.push (.fn name #[("v", vt)] (.named "u64") body) }
   return name
 

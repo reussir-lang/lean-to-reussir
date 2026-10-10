@@ -230,13 +230,47 @@ thread that waits blocks its context.
   helpers, `mutual` blocks). A few orders are not recorded; see
   [Known differences](differences.html#startup-and-evaluation).
 
-### The walk of a closed term for its tasks
+### The persistent walk
 
 {{svg:persist}}
 
-The walk is a loop over a work list, not a recursion, and it visits each
-cell once. So a value 300000 cells deep, or a DAG with 2^40 paths, is no
-problem.
+Native Lean marks a value persistent in these places: after each
+`initialize` declaration's initializer, on each constant at startup, on a
+closed term at its first use, and in `Runtime.markPersistent`. The mark
+visits every object that the value reaches, waits for each task, and sets
+the count of each object to 0. A persistent object is never freed, and a
+later mark does not look into it.
+
+lean2rr walks a value in the same places, in a program that makes tasks
+and at a type that can hold a task. One place is different: a toolchain
+constant is walked at its first use (lean2rr evaluates it then), where
+native Lean marks it when its module starts.
+
+- The walk is a loop over a work list, not a recursion. So a value 300000
+  cells deep is no problem.
+- The walk marks each cell that it visits: a record, an array, a function
+  value, a thunk or task, a reference, a promise. The mark adds 2^30 to the
+  cell's count. So the count never comes back to 1: the cell is never
+  freed, and an update copies it.
+- The walk does not look into a cell that has the mark. So it visits each
+  cell once, also in a DAG with 2^40 paths. And a later walk does not read
+  again a reference or a thunk that an earlier walk visited.
+- The walk looks into a box when it meets it. If the value in the box can
+  hold a task, the walk puts it on the work list. Otherwise the walk marks
+  the value and does not look into it: a marked cell keeps all that it
+  holds, so a file handle in a marked reference stays open. A number in a
+  box is nothing. So a list of numbers adds nothing to the work list.
+- A promise is walked as its task (`result?`): the walk waits until the
+  promise is resolved, as natively.
+
+Example. An initializer makes `r : IO.Ref (Option (IO.Promise Nat))`,
+which holds `none`. The walk after the initializer marks `r`. Then `main`
+puts an unresolved promise into `r`, and reads a closed term `(r, "pair")`.
+The walk of the term finds the mark on `r`, so it does not wait for the
+promise, as natively.
+
+`Runtime.markPersistent` also marks its argument, at every type. So a
+file handle that it marks is never closed. The exit writes its bytes.
 
 ## The shared runtime crate
 

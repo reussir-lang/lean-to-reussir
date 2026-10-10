@@ -182,12 +182,20 @@ garbage.
   the line comes after it. The bytes are the same. In a program without
   tasks, the line waits, as natively.
 - `ShareCommon.Object.eq` holds at most for the same cell.
-- No value is persistent. An initializer can store a file handle in an
-  `IO.Ref`. When the program sets that reference to `none`, the handle
-  closes, as Lean's documentation says of a handle's last reference. Its
-  buffered bytes are written then. Natively the initializers' values are
+- Only some values are persistent: the cells that the walk for tasks
+  visits (the types that can hold a task, in a program that makes tasks),
+  the values in the boxes that it meets, and the argument of
+  `Runtime.markPersistent`
+  ([the persistent walk](runtime.html#the-persistent-walk)). In a program
+  without tasks, an initializer can store a file handle in an `IO.Ref`.
+  When the program sets that reference to `none`, the handle closes, as
+  Lean's documentation says of a handle's last reference. Its buffered
+  bytes are written then. Natively the initializers' values are
   persistent, so the handle stays open until the exit, and its bytes stay
-  in its buffer until then.
+  in its buffer until then. In a program with tasks, the walk after the
+  initializer marks the reference and the value in its box: the handle
+  itself, or the `some` cell that holds it. So the handle stays open when
+  the program sets the reference to another value, as natively.
 - The Windows-only time zone functions fail, as natively on other systems.
 
 ## Costs (time and memory, not results)

@@ -128,8 +128,6 @@ struct Tasks {
     slab: Vec<Entry>,
     free: Vec<u32>,
     serial: u32,
-    /// Entries in use.
-    live: u32,
     /// The cell handed to the program's dispatcher (`handed`), with its tag
     /// (`next_tag`), to run it or, `deleting`, to drop its reference.
     handed: usize,
@@ -145,7 +143,6 @@ static TASKS: Global<Tasks> = Global(UnsafeCell::new(Tasks {
     slab: Vec::new(),
     free: Vec::new(),
     serial: 0,
-    live: 0,
     handed: 0,
     handed_tag: u64::MAX,
     deleting: false,
@@ -203,7 +200,6 @@ fn entry_at(i: u32, serial: u32) -> Option<&'static mut Entry> {
 fn alloc(cell: usize, tag: u32, flags: u16, prio: u32) -> u32 {
     let t = tasks();
     t.serial = t.serial.wrapping_add(1);
-    t.live += 1;
     let e = Entry { cell, id: TaskId::FINISHED, tag, serial: t.serial, flags, prio, cont: TaskId::FINISHED };
     let i = match t.free.pop() {
         Some(i) => {
@@ -227,7 +223,6 @@ fn free_entry(i: u32) {
     }
     e.cell = 0;
     e.flags = 0;
-    t.live -= 1;
     t.free.push(i);
 }
 
@@ -404,16 +399,6 @@ pub(crate) fn last_reference_is_plain(p: usize) -> bool {
 #[inline]
 pub fn deferring() -> bool {
     ls::deferring()
-}
-
-/// Whether every task has finished: no task has an entry (an unfinished
-/// one, a promise included, always has one) and no promise a free dropped
-/// waits for its resolution (lean-runtime's `deferred_pending`, which also
-/// counts one a resolution under way has not reached). Then a constant's
-/// walk for tasks (`persist`) can be skipped.
-#[inline(never)]
-pub fn settled() -> bool {
-    tasks().live == 0 && !ls::deferred_pending()
 }
 
 /// The task manager (Lean's `lean_init_task_manager`): the entry point

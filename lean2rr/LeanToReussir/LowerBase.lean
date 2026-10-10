@@ -529,7 +529,7 @@ installs them in leanrt). Outside it only
 `Lower/Live` reads the encoding: it recognizes the payloads live code
 builds by the number a box construction passes (`l2r_any_of<T>(x, n)`,
 `l2r_any_of_fn<T>(x, n)`: the payload `b<n>`, `boxPayload`); and the
-runtime's generic `l2r_sink`, `l2r_ptr_addr_rec` and `l2r_persist_seen`
+runtime's generic `l2r_sink` and `l2r_ptr_addr_rec`, and `l2r_persist_box`,
 take a box as one counted handle (the prelude's `l2r_ptr_addr_rec` answers
 `LAny::addr` for a box). -/
 

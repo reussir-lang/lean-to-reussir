@@ -549,8 +549,10 @@ single call:
 lean2rr wraps its result with `wrapIOResult`: `l2r_io_mono_ms_now()`,
 `l2r_io_mono_nanos_now()`, `l2r_io_process_get_pid()`, `l2r_io_get_num_heartbeats()`,
 `l2r_io_check_canceled()`, `l2r_io_get_tid()`, `l2r_io_initializing()`,
-`l2r_io_set_heartbeats(n)`, `l2r_runtime_mark_persistent<T>(a)`,
-`l2r_runtime_mark_multi_threaded<T>(a)`, `l2r_runtime_forget(a : LAny)`
+`l2r_io_set_heartbeats(n)`, `l2r_runtime_mark_persistent<T>(a)` (lean2rr
+does not call it: it walks `a` for tasks where `a` can hold one, then marks
+`a` persistent with `l2r_persist_box(a : LAny)`, so `a` is never freed, as
+natively), `l2r_runtime_mark_multi_threaded<T>(a)`, `l2r_runtime_forget(a : LAny)`
 (never releases the boxed `a`, as native `lean_runtime_forget`:
 `l2r_runtime_leak(a)`, `std::mem::forget`),
 `l2r_runtime_hold<T>(a)`, `l2r_io_prim_handle_is_tty(h)`. (`l2r_io_app_path()`,
@@ -1305,11 +1307,20 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   what remains different).
 - `IO.getNumHeartbeats` is 0 (natively it counts small allocations);
   `dbgStackTrace` prints nothing.
-- Values are never persistent: a file handle that an initializer stores in
-  an `IO.Ref` closes when the program sets the reference to `none` (its
-  last reference, as Lean's documentation of handles says), where natively
-  the initializers' values are persistent and the handle stays open, its
-  buffer unwritten, until the exit (plan §10, "Runtime"; hunt HSG-02).
+- Only some values are persistent: the cells that the walk of a constant
+  or of `Runtime.markPersistent` visits (the types that can hold a task, in
+  a program that makes tasks; `leanrt::persist`), the payloads of the boxes
+  it meets, and `Runtime.markPersistent`'s argument. In a program without
+  tasks a file handle that an initializer stores in an `IO.Ref` closes when
+  the program sets the reference to `none` (its last reference, as Lean's
+  documentation of handles says), where natively the initializers' values
+  are persistent and the handle stays open, its buffer unwritten, until
+  the exit (plan §10, "Runtime"; hunt HSG-02).
+- The persistent mark adds 2^30 to a cell's count, and a count of 2^31
+  (`drop::IMMORTAL`) or more is a nullary variant's dummy box for leanrt
+  (`any::of` boxes such a record as an immediate): a marked cell gets
+  there at 2^30 references to it (8 GiB of pointers, as
+  `Array.replicate (2^30) x` of a marked `x`), an unmarked one at 2^31.
 - `getLine` reports only its own call's error (LB-41, plan §10): natively
   a handle's sticky error indicator makes it fail with whatever `errno`
   holds, which was the only way a Lean program could read a stale

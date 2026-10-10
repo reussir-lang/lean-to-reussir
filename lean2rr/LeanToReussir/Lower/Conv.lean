@@ -12,7 +12,8 @@ def nominalHead (n : String) : LowerM (Option Name) := do
 
 /-- Whether a value of type `t` can hold a task (in fields, array
 elements, a task's value, a thunk's value or computation, a function
-value's captured values, a `Box`'s payload, a reference's value): a search
+value's captured values, a `Box`'s payload, a reference's value; a
+promise is its task, `LPromise`): a search
 of the types reachable from `t`, each looked at once (the least fixed
 point, for recursive types; a search along every path was exponential in
 the number of function types of polymorphic recursion). With `final`, the
@@ -44,6 +45,9 @@ where
         for (vt, _) in ← boxPayloads do
           if ← go vt seen then return true
         return false
+      -- A promise holds its task (`Promise.result?`), unresolved until
+      -- the promise is resolved.
+      if n == "LPromise" then return true
       if let some info := (← get).typeInfos[n]? then
         for c in info.ctorOrder do
           let some l := info.ctors.find? c | continue
@@ -75,15 +79,17 @@ def mayHoldTask (t : RR.Ty) : LowerM Bool := do
 def persistFnName (t : RR.Ty) : String := s!"l2r_persist_{t.enc}"
 
 /-- `l2r_persist_T(v)` for the value `v : t` of a constant when it is first
-computed, if `t` may contain tasks: native Lean calls `lean_mark_persistent`
-on a closed term when it is first evaluated (`lean_obj_once_cold`), which
-waits for every task it reaches (`lean_task_get`), through fields, arrays,
-the values of tasks, thunks (their computation, or their value: not
-forcing them), closures (their captured values), references (their
-value) and boxed values. A
-`Task.spawn` extracted as a closed term has finished once the term has
-been evaluated. The traversal is generated at the end
-(`finishPersistFns`). -/
+computed (an `[init]` declaration's result: after its initializer), if `t`
+may contain tasks: native Lean calls `lean_mark_persistent` on a closed term
+when it is first evaluated (`lean_obj_once_cold`), on a constant the module
+initializer evaluates, and on an initializer's result, which waits for
+every task it reaches (`lean_task_get`), through fields, arrays, the values
+of tasks, thunks (their computation, or their value: not forcing them),
+closures (their captured values), references (their value), promises
+(their task) and boxed values, and marks each object it reaches persistent:
+a later walk does not look into it again. A `Task.spawn` extracted as a
+closed term has finished once the term has been evaluated. The traversal is
+generated at the end (`finishPersistFns`). -/
 def persistCall (t : RR.Ty) (v : RR.Expr) : LowerM (Option RR.Expr) := do
   unless ← mayHoldTask t do return none
   unless (← get).persistReqs.contains t do

@@ -1573,7 +1573,7 @@ mod tests {
     /// A compact array of scalars boxed at its kind (whatever number is
     /// passed): the same block, unboxed back unique; a copy of the box
     /// shares the block (`is_shared`), and an update through an unboxed
-    /// copy copies it; the persist walk records the block once; the last
+    /// copy copies it; the persistent mark marks a block through its box; the last
     /// reference releases it (`release_last`, then `release_kind`), also
     /// inside a free (a payload's field) and as an element of an array of
     /// boxes (the array free's two passes, `release_last_in_step`).
@@ -1589,10 +1589,12 @@ mod tests {
         assert_eq!((a.num(), a.addr(), a.is_exclusive()), (num, h as u64, true));
         let v: V<T> = as_(a, 99);
         assert_eq!((v.hdr(), v.is_unique(), v.as_slice()), (h, true, &x[..]));
-        let walk = crate::persist::begin();
-        assert!(!crate::persist::seen(walk, v.clone()));
-        assert!(crate::persist::seen(walk, v.clone()));
-        crate::persist::end(walk);
+        // The persistent mark of another block of the kind, through its
+        // box (`persist::mark_box`).
+        let m = of(crate::array::from_slice(&x), num);
+        assert!(!crate::persist::box_is_persistent(&m));
+        crate::persist::mark_box(m.clone());
+        assert!(crate::persist::box_is_persistent(&m) && !m.is_exclusive());
         // Shared: an update through a copy copies the block.
         let a = of(v, num);
         let b = a.clone();

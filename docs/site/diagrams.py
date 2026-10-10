@@ -556,19 +556,24 @@ def free_stack():
 
 
 def persist_walk():
-    s = SVG("persist", 940, 170, "The walk of a closed term for its tasks",
-            "Native Lean marks a closed term persistent at its first use and "
-            "waits for every task in it. lean2rr's walk does that in one pass; "
+    s = SVG("persist", 940, 190, "The persistent walk",
+            "Native Lean marks a value persistent after an initializer, at "
+            "startup, at a closed term's first use and in "
+            "<code>Runtime.markPersistent</code>. lean2rr's walk does that in one pass; "
             "lean-runtime's wait runs the tasks in the workers' queue order.")
-    s.box(10, 40, 170, 80, ["closed term", "evaluated once,", "at first use"], "b-l2r")
-    s.arrow(180, 80, 225, 80)
-    s.box(230, 30, 290, 100, ["walk the value", "a loop, each cell once,",
-                              "in Lean's order", "(last field first)"], "b-rt")
-    s.arrow(520, 80, 565, 80)
-    s.box(570, 30, 360, 100, ["wait for each task it reaches", "lean-runtime's wait: the task runs",
+    s.box(10, 30, 210, 100, ["where it runs", "an initializer's result,", "a constant at startup,",
+                             "a closed term at first use,", "Runtime.markPersistent"], "b-l2r")
+    s.arrow(220, 80, 255, 80)
+    s.box(260, 30, 300, 100, ["walk the value", "a loop, in Lean's order",
+                              "(last field first);", "skip a cell that has the mark,",
+                              "else mark it (count + 2^30)"], "b-rt")
+    s.arrow(560, 80, 595, 80)
+    s.box(600, 30, 330, 100, ["wait for each task it reaches", "lean-runtime's wait: the task runs",
                               "once a free worker would start it;",
                               "then look into its value"], "b-rt")
-    s.text(10, 160, "Skipped when every task has finished (always at startup). A task the program drops meanwhile is deleted, not run.", "ts")
+    s.text(10, 160, "A marked cell is never freed, and no later walk looks into it. "
+           "A task the program drops meanwhile is deleted, not run.", "ts")
+    s.text(10, 178, "Runtime.markPersistent also marks its argument at every type: a marked file handle is never closed.", "ts")
     return s.render()
 
 

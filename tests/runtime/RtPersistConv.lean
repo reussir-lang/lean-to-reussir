@@ -1,8 +1,7 @@
 /-! Runtime test: a closed term whose tasks are held at another
-representation (in an existential, so uniform code holds converted copies
-of the typed tasks): the walk knows each copy by its original's identity,
-so its first pass collects it instead of forcing it, and the tasks run in
-the order the native workers take them (here the order they were created
+representation (in an existential, so uniform code holds them as boxes):
+the walk waits for each task as it reaches it, and the tasks run in the
+order the native workers take them (here the order they were created
 in). One worker thread (`RtPersistConv.pipe`). From review round 7, area
 L, round 4 (code reading next to RV7L-07). -/
 structure Ex where

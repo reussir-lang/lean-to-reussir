@@ -29,8 +29,8 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   a constant for tasks (`genPersist`, `holdsTask`), identity (`addrOf`) and
   the program's box item (`lowerProgram`). Outside it, `Lower/Live`
   recognizes the payloads live code builds by the number a box
-  construction passes, and the runtime's generic `l2r_sink`,
-  `l2r_ptr_addr_rec` and `l2r_persist_seen` take a box as one counted
+  construction passes, and the runtime's generic `l2r_sink` and
+  `l2r_ptr_addr_rec`, and `l2r_persist_box`, take a box as one counted
   handle (`l2r_ptr_addr_rec` answers `LAny::addr` for a box).
 - **Why:** The encoding changed from a shared enum (a heap cell per box,
   rule 1's step 4) to one word in one section; the rest of lowering did

@@ -133,10 +133,12 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `wrapIOResult` boxes the result (test `RtRuntimeMarks`).
   `Runtime.markPersistent` first walks its argument for tasks and waits
   for them, as a constant's value (`persistCall`,
-  [../startup/constants.md](../startup/constants.md)); in a program
-  that creates no task, or at a type that cannot hold one, it is the
-  primitive. `Runtime.forget` never releases its argument, which it
-  takes boxed (next entry).
+  [../startup/constants.md](../startup/constants.md)), in a program that
+  creates tasks and at a type that can hold one; then it marks the
+  argument itself persistent, whatever its type (`l2r_persist_box`, on
+  the argument boxed: a box crosses the FFI boundary at every type), and
+  gives the argument back (the primitive is not called). `Runtime.forget`
+  never releases its argument, which it takes boxed (next entry).
 - **Why:** The runtime cannot build `EST.Out`; one convention for all
   infallible IO (runtime request 9; c7b3933, f87ea08). A generic
   primitive's result was taken to be of the field's type, so with rule 1

@@ -2760,39 +2760,19 @@ fn l2r_task_deferring() -> bool [{ leanrt::task::deferring() }];
 
 // A constant whose value may hold tasks waits for them when it is first
 // computed (lean2rr's `l2r_persist_T`, as native `lean_mark_persistent`):
-// a walk over its cells, skipped when every task has finished
-// (`l2r_task_settled`). The walk visits each cell once
-// (`l2r_persist_seen`: whether walk `h` has seen it, else it records it)
-// and keeps what it reads out of thunks, tasks and references until it ends
-// (`l2r_persist_keep`), so that no cell it has seen is freed meanwhile.
-// It has two passes (`leanrt::persist`): the first collects the unfinished
-// tasks (`l2r_persist_collect_at`); the second (`l2r_persist_rewalk`) runs,
-// before each task it waits for, the collected ones that natively come
-// before it in the workers' queue (`l2r_task_run_before`, generated, over
-// `l2r_persist_before_at`).
+// a walk over its cells, which marks each cell it visits persistent
+// (`l2r_persist_mark`: whether the cell is persistent already, else it is
+// marked now; only for the counted handle types of `leanrt::persist`'s
+// `Counted`), and a box's payload whose type cannot hold a task without
+// looking into it (`l2r_persist_box`). A persistent cell is never freed,
+// and a later visit does not look into it again. `Runtime.markPersistent`
+// marks its argument too, whatever its type (`l2r_persist_box`, on the
+// argument boxed, after the walk).
 #[ffi(import)]
-fn l2r_task_settled() -> bool [{ leanrt::task::settled() }];
+fn l2r_persist_mark<T>(v : T) -> bool [{ leanrt::persist::mark::<[:T:]>(v) }];
 
 #[ffi(import)]
-fn l2r_persist_begin() -> u64 [{ leanrt::persist::begin() }];
-
-#[ffi(import)]
-fn l2r_persist_seen<T>(h : u64, v : T) -> bool [{ leanrt::persist::seen::<[:T:]>(h, v) }];
-
-#[ffi(import)]
-fn l2r_persist_keep<T>(h : u64, v : T) -> u64 [{ leanrt::persist::keep::<[:T:]>(h, v) }];
-
-#[ffi(import)]
-fn l2r_persist_collect_at(h : u64, a : u64) -> bool [{ leanrt::persist::collect(h, a as usize) }];
-
-#[ffi(import)]
-fn l2r_persist_rewalk(h : u64) -> bool [{ leanrt::persist::rewalk(h) }];
-
-#[ffi(import)]
-fn l2r_persist_before_at(h : u64, a : u64) -> u64 [{ leanrt::persist::before(h, a as usize) }];
-
-#[ffi(import)]
-fn l2r_persist_end(h : u64) -> u64 [{ leanrt::persist::end(h) }];
+fn l2r_persist_box(v : LAny) -> u64 [{ leanrt::persist::mark_box(v) }];
 
 #[ffi(import)]
 fn l2r_task_manager_start() -> u64 [{ { leanrt::task::start(); 0 } }];
@@ -3325,9 +3305,12 @@ fn lean_is_scalar<T>(a : T) -> bool { false }
 fn lean_sharecommon_quick<T>(a : T) -> T { a }
 
 // Payload primitives of the `Runtime.*` BaseIO externs. The two marks
-// return their argument; where a value can hold a task, lean2rr first walks
-// it for `Runtime.markPersistent` and waits for its tasks (`l2r_persist_T`,
-// as native `lean_mark_persistent`). `Runtime.hold` keeps its argument
+// return their argument. For `Runtime.markPersistent` lean2rr first walks
+// the value where it can hold a task, and waits for its tasks
+// (`l2r_persist_T`, as native `lean_mark_persistent`), then marks the
+// argument persistent whatever its type (`l2r_persist_box`, on the
+// argument boxed): it is never freed, as natively (a marked file handle
+// stays open until the exit flushes it). `Runtime.hold` keeps its argument
 // alive until the call (natively a borrowed parameter). `Runtime.forget`
 // keeps its argument forever (`l2r_runtime_leak`), as native
 // `lean_runtime_forget`, which never decrements it: the value and all it

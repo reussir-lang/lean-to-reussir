@@ -1,0 +1,1 @@
+$BIN $ARGS && cat mp-direct.txt && echo && cat mp-struct.txt && echo && cat mp-generic.txt && echo

@@ -344,15 +344,23 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
                   | none, none => ioPayloadFieldTy resTy
                 -- `Runtime.markPersistent`: natively `lean_mark_persistent`,
                 -- which waits for every task the value reaches
-                -- (`lean_task_get`), as when a constant is first computed:
-                -- the same walk (`persistCall`), then the value.
+                -- (`lean_task_get`) and makes every object it reaches
+                -- persistent (never freed), as when a constant is first
+                -- computed: the same walk (`persistCall`), where the value
+                -- can hold a task; then the argument itself is marked
+                -- persistent, whatever its type (`l2r_persist_box`, on the
+                -- argument boxed: a box crosses the FFI boundary at every
+                -- type); then the value.
                 if prim == "l2r_runtime_mark_persistent" then
                   if let (some a, some t) := (passed[0]?, argTys[0]?) then
                     let x ← fresh "mp"
-                    if let some p ← persistCall t (.var x) then
-                      let w ← fresh "mpw"
-                      return ← wrapIOResult resTy
-                        (.block ⟨#[(x, some t, a), (w, some (.named "u64"), p)], .var x⟩) t
+                    let u64 := RR.Ty.named "u64"
+                    let walk ← match ← persistCall t (.var x) with
+                      | some p => pure #[(← fresh "mpw", some u64, p)]
+                      | none => pure #[]
+                    let root := (← fresh "mpr", some u64,
+                      RR.Expr.call "l2r_persist_box" #[] #[← coerce (.var x) t RR.Ty.box])
+                    return ← wrapIOResult resTy (.block ⟨#[(x, some t, a)] ++ walk ++ #[root], .var x⟩) t
                 return ← wrapIOResult resTy (.call prim #[] passed) vt
   -- A generic prelude function in plain Reussir that does not store its
   -- values in runtime containers (`dbgTrace`, `dbgSleep`, `panic`, …) is

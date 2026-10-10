@@ -1,0 +1,1 @@
+$BIN $ARGS && cat persist-init-h.txt && echo

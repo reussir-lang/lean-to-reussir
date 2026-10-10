@@ -520,7 +520,7 @@ Paths are relative to the repository root.
 - **Where:** `runtime/leanrt/src/sched.rs` (`on_finish`,
   `thunk_wait_busy`), `once.rs` (`claim_cold`, `set_raw`), `refs.rs`,
   `task.rs` (`Promise`, `defer_promise_drop`, `resolve_with`, `hook_drained`,
-  `drained`, `settled`), `drop.rs` (`run`, `assert_not_in_free`);
+  `drained`), `drop.rs` (`run`, `assert_not_in_free`);
   `scripts/l2r.py` (`check_reussir_patches`).
   Implementation notes: [../tasks/cells.md](../tasks/cells.md),
   [../tasks/dependents.md](../tasks/dependents.md),

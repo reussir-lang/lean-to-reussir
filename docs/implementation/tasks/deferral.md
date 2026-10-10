@@ -140,21 +140,25 @@ entries here are how lean2rr's generated code reaches them.
 ### A constant's walk for tasks waits in one pass
 
 - **What:** The generated walk of a constant for its tasks (as native
-  `lean_mark_persistent`) waits for each task as it reaches it:
-  `persist::collect` collects nothing, so the walk's first pass waits and
-  looks into the values, and the second pass never runs (`rewalk` false,
-  `before` none). lean-runtime's `wait` runs the queue in the workers'
-  order meanwhile (the awaited task only once a free worker would start
-  it).
+  `lean_mark_persistent`) waits for each task as it reaches it, then
+  looks into its value, in one pass. lean-runtime's `wait` runs the
+  queue in the workers' order meanwhile (the awaited task only once a
+  free worker would start it).
 - **Why:** leanrt's own scheduler ran a task when it was waited for, so
-  the walk collected the tasks first and ran them in the workers' order
-  (round 7 RV7L-06); lean-runtime's `wait` keeps that order itself (with
-  one worker too: a pure task keeps its worker until it runs,
-  lean-runtime's AR-25; tests `RtPersistOrder`, `RtPersistConv`,
-  `RtPersistDropped`).
-- **Where:** `runtime/leanrt/src/persist.rs`: `collect`, `rewalk`,
-  `before`; `Lower/Finish.lean`: `genPersist`.
-- **Remove only if:** lean2rr no longer generates the two passes.
+  the walk had two passes: the first collected the tasks, and the second
+  ran them in the workers' order before it waited (round 7 RV7L-06).
+  lean-runtime's `wait` keeps that order itself (with one worker too: a
+  pure task keeps its worker until it runs, lean-runtime's AR-25; tests
+  `RtPersistOrder`, `RtPersistConv`, `RtPersistDropped`), and the walk
+  marks what it visits persistent, which a second pass would then skip
+  ([../startup/constants.md](../startup/constants.md)): the generator
+  makes one pass, and the two passes' runtime functions (`collect`,
+  `rewalk`, `before`, the generated `l2r_task_run_before`) are gone.
+- **Where:** `Lower/Finish.lean`: `genPersist`, `finishPersistFns`;
+  `runtime/leanrt/src/persist.rs` (module comment).
+- **Remove only if:** lean-runtime's `wait` stops running the queue in
+  the workers' order (then the order of the tasks a walk reaches would
+  change).
 
 ### A priority is the whole value; above 8 is a dedicated task
 

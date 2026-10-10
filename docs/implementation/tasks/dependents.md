@@ -123,8 +123,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   before it and to the other contexts (the store-with-resolve shape of
   lean-runtime's R3, review RW1-05; test `RtPromiseFreeLaterUnresolved`). A free inside a dependent
   resolves its own promises at its own end, before the outer free's next
-  promise (lean-runtime's R5). `task::settled` asks lean-runtime's
-  `deferred_pending`, which counts a resolution under way too.
+  promise (lean-runtime's R5).
 - **Why:** Natively the dependents run at once, on the dropping thread:
   code in between saw the old state, and their output escaped
   `IO.FS.withIsolatedStreams` (round 7 RV7C-01). A walk run after a
@@ -147,7 +146,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   the context's next run of the list, and lean-runtime's debug builds report
   that (its R6).
 - **Where:** `runtime/leanrt/src/task.rs`: `Promise` (`Drop`),
-  `defer_promise_drop`, `resolve_with`, `hook_drained`, `drained`, `settled`;
+  `defer_promise_drop`, `resolve_with`, `hook_drained`, `drained`;
   `scripts/l2r.py`: `REQUIRED_REUSSIR_PATCHES`, `check_reussir_patches`.
 - **Remove only if:** never. Remaining difference: the
   dependents see the rest of the container released too (plan

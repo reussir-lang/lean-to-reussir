@@ -2467,29 +2467,41 @@ resume. lean2rr's part is the task objects and the glue (`leanrt::task`,
   in a `sync := true` task (Lean's panic, then the wait) are lean-runtime's.
 - *Closed terms.* Lean evaluates a closed term once, at its first use, and
   then marks it persistent (`lean_mark_persistent`), which waits for every
-  task it reaches. A closed term whose type may hold tasks waits for its
-  tasks right after it is evaluated (`l2r_persist_T`), whether they are in
-  fields, arrays, the values of tasks, the values captured by function
-  values (partial applications), thunks (their computation, or their
-  value: the thunk is not forced), references (their value) or boxed
-  values. The walk works as Lean's does: a loop over a list of the values
-  still to look at (no recursion), which visits each cell once (the runtime
-  keeps the set of addresses visited), in Lean's order (it pushes an
-  object's fields in order and pops the last one first). Natively waiting
-  only blocks, and the workers run the term's tasks in queue order;
-  lean-runtime's `wait` keeps that order too (the awaited task runs only
-  once a free worker would start it), so the walk waits for each task as
-  it reaches it, in one pass (leanrt's own scheduler needed two:
-  `persist::collect` now collects nothing). What it reads out of a
-  reference or a thunk is read when it gets there, so a task that replaces
-  the task a reference next to it holds has run by then, as natively. A
-  placeholder's never-forced task cell (`pending` with the function value
-  `z`, §5.1) is not a task (natively `box(0)`, which the walk skips; test
-  `RtZeroWalkRef`). The walk keeps what it reads out of thunks, tasks and
-  references until it ends, so that no cell it has visited is freed
-  meanwhile and its address given to a new cell. It is skipped when every
-  task of the program has finished. The walks are generated at the end of
-  lowering, and do nothing for types that cannot hold a task.
+  task it reaches and makes every object it reaches persistent: never
+  freed, and not looked into by a later mark. The module initializer does
+  the same for each constant it evaluates and for each `[init]`
+  declaration's result, and `Runtime.markPersistent` for its argument. A
+  constant whose type may hold tasks waits for its tasks right after it is
+  evaluated (`l2r_persist_T`; a program constant at startup, an `[init]`
+  result after its initializer, a closed term at its first use), whether
+  they are in fields, arrays, the values of tasks, the values captured by
+  function values (partial applications), thunks (their computation, or
+  their value: the thunk is not forced), references (their value),
+  promises (their task) or boxed values. The walk works as Lean's does: a
+  loop over a list of the values still to look at (no recursion), in
+  Lean's order (it pushes an object's fields in order and pops the last
+  one first). It marks each cell it visits persistent (its count goes up
+  by 2^30: never freed, never unique; `leanrt::persist`) and does not look
+  into a cell that is persistent already, marked by this walk or an
+  earlier one. A box is looked into where the walk meets it: a payload
+  whose type can hold a task is pushed, any other is marked without being
+  looked into (a persistent cell keeps all it holds), an immediate is
+  nothing; so a list's or an array's boxed numbers make no work. So a later walk does not read again a reference, a thunk, a
+  task or a promise that an earlier walk (or the startup) reached: a
+  closed term that reaches an initializer's reference does not wait for a
+  promise `main` stored in it. Natively waiting only blocks, and the
+  workers run the term's tasks in queue order; lean-runtime's `wait`
+  keeps that order too (the awaited task runs only once a free worker
+  would start it), so the walk waits for each task as it reaches it, in
+  one pass. What it reads out of a reference or a thunk is read when it
+  gets there, so a task that replaces the task a reference next to it
+  holds has run by then, as natively. A placeholder's never-forced task
+  cell (`pending` with the function value `z`, §5.1) is not a task
+  (natively `box(0)`, which the walk skips; test `RtZeroWalkRef`). The
+  walks are generated at the end of lowering, and do nothing for types
+  that cannot hold a task; a program that creates no task has none.
+  `Runtime.markPersistent` also marks its argument persistent whatever its
+  type, so a marked file handle is never closed.
 - A thunk or task is never converted: it has one type whatever its value
   type, so typed and uniform code share the one cell (a task's address is
   its identity for the runtime).
@@ -2965,10 +2977,7 @@ Each item says what differs and when.
   else can go on). `IO.getTID` inside a task is main's thread id plus the
   number lean-runtime gives the OS thread the code natively runs on (a
   pool task its emulated worker's, a dedicated task a new one), as
-  distinct from main's as a worker's. A
-  closed term does not wait for the task of a promise in it (Lean's
-  `lean_mark_persistent` does, and waits forever for an unresolved one; a
-  closed term can hold a promise only through unsafe code).
+  distinct from main's as a worker's.
 - *Startup order of unrecorded constants* (§5.12): a constant that Lean
   compiled to no IR-only declaration although its value calls a function
   (a callee whose type is not syntactically a function, such as
@@ -3339,9 +3348,15 @@ Each item says what differs and when.
   not even equal to itself, and its hash can change.
 - `IO.getNumHeartbeats` is 0; `dbgStackTrace` prints nothing; a panic's
   backtrace line is `(stack trace unavailable)`.
-- Values are never persistent: what a constant's value holds (an
-  initializer's `IO.Ref` included) is released at its last reference once
-  the program takes it out or stores over it. A file handle that an
+- Only what a walk reaches is persistent (§5.14: the cells of the types
+  that can hold a task and the payloads of the boxes the walk meets, in a
+  program that creates tasks) and `Runtime.markPersistent`'s argument; a
+  persistent cell never releases what it holds. Anything else is released
+  at its last reference once the program takes it out or stores over it:
+  in a program without tasks, everything a constant's value holds (an
+  initializer's `IO.Ref`'s value included); in a program with tasks, the
+  value a reference or a thunk gets after the walk (natively not
+  persistent either). So in a program without tasks a file handle that an
   initializer stores in an `IO.Ref` closes when the program sets the
   reference to `none`, as Lean's documentation says of a handle's last
   reference (`Init/System/IO.lean`): its buffered bytes are written then,
@@ -3350,8 +3365,14 @@ Each item says what differs and when.
   writes its buffer then). Example: an initializer writes "from-init" to a
   new handle and stores it in an `IO.Ref (Option IO.FS.Handle)`; `main`
   sets the reference to `none` and reads the file: native reads "",
-  lean2rr "from-init"; at the exit the file holds "from-init" in both
-  (hunt HSG-02; docs/implementation/startup/constants.md).
+  lean2rr "from-init" (in a program with tasks "", as natively: the walk
+  after the initializer marks the `some` cell, or the handle when the
+  reference holds it directly; tests `RtPersistInitHandle`,
+  `RtPersistInitHandleDirect`); at the exit the file holds "from-init" in
+  both (hunt HSG-02; docs/implementation/startup/constants.md). A marked
+  cell with 2^30 references or more (8 GiB of pointers to it) has a count
+  of 2^31, which leanrt takes for a nullary variant's dummy box; an
+  unmarked one at 2^31 references.
 - An internal panic (`INTERNAL PANIC: ...`, the end of the program) in a
   program that has made a task, a promise, a timer or a watch writes its
   line straight to descriptor 2, without waiting for stderr's lock

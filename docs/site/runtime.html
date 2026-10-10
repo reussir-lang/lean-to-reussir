@@ -22,7 +22,7 @@
 <li><a href="#tasks-and-the-scheduler">Tasks and the scheduler</a></li>
 <li><a href="#input-and-output">Input and output</a></li>
 <li><a href="#startup">Startup</a><ul>
-<li><a href="#the-walk-of-a-closed-term-for-its-tasks">The walk of a closed term for its tasks</a></li>
+<li><a href="#the-persistent-walk">The persistent walk</a></li>
 </ul>
 </li>
 <li><a href="#the-shared-runtime-crate">The shared runtime crate</a><ul>
@@ -279,11 +279,43 @@ thread that waits blocks its context.</p>
   helpers, <code>mutual</code> blocks). A few orders are not recorded; see
   <a href="differences.html#startup-and-evaluation">Known differences</a>.</li>
 </ul>
-<h3 id="the-walk-of-a-closed-term-for-its-tasks">The walk of a closed term for its tasks</h3>
-<figure class="fig" id="fig-persist"><svg class="diagram" viewBox="0 0 940 170" width="940" role="img" aria-labelledby="persist-title"><title id="persist-title">The walk of a closed term for its tasks</title><defs><marker id="persist-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="40" width="170" height="80" rx="6" class="b-l2r"/><text x="95.0" y="70.5" text-anchor="middle" class="tb">closed term</text><text x="95.0" y="86.5" text-anchor="middle" class="ts">evaluated once,</text><text x="95.0" y="101.5" text-anchor="middle" class="ts">at first use</text><line x1="180" y1="80" x2="225" y2="80" class="ar" marker-end="url(#persist-ah)"/><rect x="230" y="30" width="290" height="100" rx="6" class="b-rt"/><text x="375.0" y="63.5" text-anchor="middle" class="tb">walk the value</text><text x="375.0" y="79.5" text-anchor="middle" class="ts">a loop, each cell once,</text><text x="375.0" y="94.5" text-anchor="middle" class="ts">in Lean&#x27;s order</text><text x="375.0" y="109.5" text-anchor="middle" class="ts">(last field first)</text><line x1="520" y1="80" x2="565" y2="80" class="ar" marker-end="url(#persist-ah)"/><rect x="570" y="30" width="360" height="100" rx="6" class="b-rt"/><text x="750.0" y="63.5" text-anchor="middle" class="tb">wait for each task it reaches</text><text x="750.0" y="79.5" text-anchor="middle" class="ts">lean-runtime&#x27;s wait: the task runs</text><text x="750.0" y="94.5" text-anchor="middle" class="ts">once a free worker would start it;</text><text x="750.0" y="109.5" text-anchor="middle" class="ts">then look into its value</text><text x="10" y="160" text-anchor="start" class="ts">Skipped when every task has finished (always at startup). A task the program drops meanwhile is deleted, not run.</text></svg><figcaption>Native Lean marks a closed term persistent at its first use and waits for every task in it. lean2rr's walk does that in one pass; lean-runtime's wait runs the tasks in the workers' queue order.</figcaption></figure>
-<p>The walk is a loop over a work list, not a recursion, and it visits each
-cell once. So a value 300000 cells deep, or a DAG with 2^40 paths, is no
-problem.</p>
+<h3 id="the-persistent-walk">The persistent walk</h3>
+<figure class="fig" id="fig-persist"><svg class="diagram" viewBox="0 0 940 190" width="940" role="img" aria-labelledby="persist-title"><title id="persist-title">The persistent walk</title><defs><marker id="persist-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="30" width="210" height="100" rx="6" class="b-l2r"/><text x="115.0" y="56.5" text-anchor="middle" class="tb">where it runs</text><text x="115.0" y="72.5" text-anchor="middle" class="ts">an initializer&#x27;s result,</text><text x="115.0" y="87.5" text-anchor="middle" class="ts">a constant at startup,</text><text x="115.0" y="102.5" text-anchor="middle" class="ts">a closed term at first use,</text><text x="115.0" y="117.5" text-anchor="middle" class="ts">Runtime.markPersistent</text><line x1="220" y1="80" x2="255" y2="80" class="ar" marker-end="url(#persist-ah)"/><rect x="260" y="30" width="300" height="100" rx="6" class="b-rt"/><text x="410.0" y="56.5" text-anchor="middle" class="tb">walk the value</text><text x="410.0" y="72.5" text-anchor="middle" class="ts">a loop, in Lean&#x27;s order</text><text x="410.0" y="87.5" text-anchor="middle" class="ts">(last field first);</text><text x="410.0" y="102.5" text-anchor="middle" class="ts">skip a cell that has the mark,</text><text x="410.0" y="117.5" text-anchor="middle" class="ts">else mark it (count + 2^30)</text><line x1="560" y1="80" x2="595" y2="80" class="ar" marker-end="url(#persist-ah)"/><rect x="600" y="30" width="330" height="100" rx="6" class="b-rt"/><text x="765.0" y="63.5" text-anchor="middle" class="tb">wait for each task it reaches</text><text x="765.0" y="79.5" text-anchor="middle" class="ts">lean-runtime&#x27;s wait: the task runs</text><text x="765.0" y="94.5" text-anchor="middle" class="ts">once a free worker would start it;</text><text x="765.0" y="109.5" text-anchor="middle" class="ts">then look into its value</text><text x="10" y="160" text-anchor="start" class="ts">A marked cell is never freed, and no later walk looks into it. A task the program drops meanwhile is deleted, not run.</text><text x="10" y="178" text-anchor="start" class="ts">Runtime.markPersistent also marks its argument at every type: a marked file handle is never closed.</text></svg><figcaption>Native Lean marks a value persistent after an initializer, at startup, at a closed term's first use and in <code>Runtime.markPersistent</code>. lean2rr's walk does that in one pass; lean-runtime's wait runs the tasks in the workers' queue order.</figcaption></figure>
+<p>Native Lean marks a value persistent in these places: after each
+<code>initialize</code> declaration's initializer, on each constant at startup, on a
+closed term at its first use, and in <code>Runtime.markPersistent</code>. The mark
+visits every object that the value reaches, waits for each task, and sets
+the count of each object to 0. A persistent object is never freed, and a
+later mark does not look into it.</p>
+<p>lean2rr walks a value in the same places, in a program that makes tasks
+and at a type that can hold a task. One place is different: a toolchain
+constant is walked at its first use (lean2rr evaluates it then), where
+native Lean marks it when its module starts.</p>
+<ul>
+<li>The walk is a loop over a work list, not a recursion. So a value 300000
+  cells deep is no problem.</li>
+<li>The walk marks each cell that it visits: a record, an array, a function
+  value, a thunk or task, a reference, a promise. The mark adds 2^30 to the
+  cell's count. So the count never comes back to 1: the cell is never
+  freed, and an update copies it.</li>
+<li>The walk does not look into a cell that has the mark. So it visits each
+  cell once, also in a DAG with 2^40 paths. And a later walk does not read
+  again a reference or a thunk that an earlier walk visited.</li>
+<li>The walk looks into a box when it meets it. If the value in the box can
+  hold a task, the walk puts it on the work list. Otherwise the walk marks
+  the value and does not look into it: a marked cell keeps all that it
+  holds, so a file handle in a marked reference stays open. A number in a
+  box is nothing. So a list of numbers adds nothing to the work list.</li>
+<li>A promise is walked as its task (<code>result?</code>): the walk waits until the
+  promise is resolved, as natively.</li>
+</ul>
+<p>Example. An initializer makes <code>r : IO.Ref (Option (IO.Promise Nat))</code>,
+which holds <code>none</code>. The walk after the initializer marks <code>r</code>. Then <code>main</code>
+puts an unresolved promise into <code>r</code>, and reads a closed term <code>(r, "pair")</code>.
+The walk of the term finds the mark on <code>r</code>, so it does not wait for the
+promise, as natively.</p>
+<p><code>Runtime.markPersistent</code> also marks its argument, at every type. So a
+file handle that it marks is never closed. The exit writes its bytes.</p>
 <h2 id="the-shared-runtime-crate">The shared runtime crate</h2>
 <p>lean2rr uses the shared crate <strong><code>lean-runtime</code></strong>
 (github.com/QueClr/lean-runtime-rs, public). The crate implements Lean's

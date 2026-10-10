@@ -104,8 +104,7 @@ when `main` has returned), `l2r_task_walk()` (the `sync` dependents of a
 task that just finished, in Lean's walk order; `l2r_task_walk_if(e)` when
 `l2r_task_end` said so) and `l2r_task_force_sources(a)` (the chain of
 pending tasks that task `a` waits for, deepest first, or queued tasks while
-it waits for a promise), `l2r_task_run_before(h, a)` (the tasks walk `h`
-of a constant collected that natively run before task `a`). Each runs its task as a worker would
+it waits for a promise). Each runs its task as a worker would
 (`taskStepFn`), or drops it when the runtime says it is deleted (a pure
 task the program has dropped), then asks again. Generated once every task
 is registered. -/
@@ -136,11 +135,6 @@ def taskDispatchFns : LowerM (Array RR.Item) := do
     .fn "l2r_task_walk_if" #[("e", u64)] u64 (ifOne "e" (.call "l2r_task_walk" #[] #[])),
     ← mk "l2r_task_force_sources" #[("a", u64)] (.call "l2r_task_source_next_at" #[] #[.var "a"]) "l2r_task_handed"
       (.call "l2r_task_force_sources" #[] #[.var "a"]),
-    -- The walk of a constant for its tasks (`l2r_persist_T`): before it
-    -- waits for task `a`, the tasks it collected that natively run before
-    -- it (`leanrt::persist::before`).
-    ← mk "l2r_task_run_before" #[("h", u64), ("a", u64)] (.call "l2r_persist_before_at" #[] #[.var "h", .var "a"])
-      "l2r_task_handed" (.call "l2r_task_run_before" #[] #[.var "h", .var "a"]),
     -- The runtime's scheduler starts queued tasks on contexts of their own
     -- (`leanrt::sched`) through this entry point, and walks the dependents
     -- of promises dropped inside a free once it is over through the next.
