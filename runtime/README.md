@@ -537,12 +537,19 @@ single call:
 | extern | helper |
 |---|---|
 | `lean_string_compare` (→ `Ordering`) | `l2r_string_compare_with<O>(a, b, lt, eq, gt)`; or `l2r_string_compare(a, b) -> u8` (0/1/2) |
-| `lean_string_data` (`String.toList`) | `l2r_string_to_list<L>(s, nil, \|c\| \|t\| cons(c, t))` |
-| `lean_string_utf8_get_opt` (→ `Option Char`) | `l2r_string_utf8_get_opt_with<O>(s, p, none, \|c\| some(c))`; or `l2r_string_utf8_get_opt(s, p) -> u32` (`0x110000` = none) |
-| `lean_float_frexp`, `lean_float32_frexp` (→ `Float × Int`) | `l2r_float_frexp_with<P>(x, \|m\| \|e\| mk(m, e))`; or `l2r_float_frexp_mant`/`_exp` |
 | `lean_io_getenv` (→ `Option String`) | `l2r_io_getenv_with<O>(name, none, \|s\| some(s))` |
 | `lean_slice_hash`, `lean_slice_dec_lt` (take `String.Slice`) | `l2r_slice_hash(s, b, e)`, `l2r_slice_dec_lt(s1, b1, e1, s2, b2, e2)` |
 | `lean_byteslice_beq` (takes `ByteSlice`s) | `l2r_byteslice_beq(a, startA, stopA, b, startB, stopB)` (fields `byteArray`, `start`, `stop`) |
+
+An extern that a program calls once per element or in a hot loop gets no
+such helper, since a closure call allocates where native Lean does not.
+lean2rr builds its result itself from primitives (hunt HSTR2-01):
+
+| extern | primitives lean2rr's glue calls |
+|---|---|
+| `lean_string_data` (`String.toList`) | a generated loop per list type, `l2r_string_to_list_<list>(s)`, over `l2r_string_size(s)`, `l2r_string_prev(s, i)` and `l2r_string_get_fast(s, j)`: the characters consed from the last |
+| `lean_string_utf8_get_opt` (→ `Option Char`) | `l2r_string_utf8_get_opt(s, p) -> u32` (`0x110000` = none), tested in line |
+| `lean_float_frexp`, `lean_float32_frexp` (→ `Float × Int`) | `l2r_float_frexp_mant`/`_exp` (`l2r_float32_frexp_mant`/`_exp`), the pair built in line |
 
 **IO externs that cannot fail** (BaseIO) have a payload primitive named
 `l2r_` + the symbol without `lean_`, taking the same passed arguments;

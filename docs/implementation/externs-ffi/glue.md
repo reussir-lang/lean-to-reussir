@@ -76,9 +76,10 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `List`, `Option`, `Prod`, `EST.Out`, `IO.FS.Stream`) get generated glue:
   a runtime helper that receives the generated constructors as arguments
   (nullary ones as values, others as closures: `String.compare`,
-  `String.toList`, `String.get?`, `Float.frExp`, `IO.getEnv`), or a
-  generated loop (`Array.mk`, `Array.toList`, `String.mk`), or generated
-  code (`timeit`/`allocprof` run the action through the runtime;
+  `IO.getEnv`), or a generated loop (`Array.mk`, `Array.toList`,
+  `String.mk`, `String.toList`), or generated code (`String.get?` and
+  `Float.frExp` build their result in line, see the next entry;
+  `timeit`/`allocprof` run the action through the runtime;
   `Lean.Name.beq` as structural equality comparing the cached hash first;
   `ShareCommon.State.shareCommon` as its reference body `(a, s)`;
   `String.Slice` hash and order, `ByteSlice.beq`).
@@ -89,6 +90,43 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `listFold`, `ctorValue`, `ctorFieldTys`; `Lower/ExternCall.lean`:
   `customExtern`; `Lower/LazyGlue.lean`: `sliceGlue?`.
 - **Remove only if:** never.
+
+### `String.toList`, `String.Pos.Raw.get?` and `frExp` build their results without closures
+
+- **What:** The glue of these externs builds the Lean value itself from
+  the prelude's primitives. It passes no constructor closure.
+  - `String.toList` (`lean_string_data`) calls a generated loop, one per
+    list type. `l2r_string_to_list_<list>(s)` is
+    `go(s, l2r_string_size(s), nil)`, and `go(s, i, acc)` is
+    `if i == 0 { acc } else { let j = l2r_string_prev(s, i);
+    go(s, j, cons{box(l2r_string_get_fast(s, j)), acc}) }`. It conses the
+    characters from the last, as the loop of `Array.toList` conses the
+    elements. The call is a self tail call, so the loop uses a constant
+    stack (1M characters run under a 256 KB stack).
+  - `String.Pos.Raw.get? s p` (`lean_string_utf8_get_opt`) is
+    `let c = l2r_string_utf8_get_opt(s, p); if c == 1114112 { none } else
+    { some{box(c)} }` in line. 0x110000 is the runtime's "no character".
+  - `Float.frExp x` and `Float32.frExp x` (`lean_float_frexp`,
+    `lean_float32_frexp`) are the pair `(mant(x), exp(x))` in line, with
+    `l2r_float_frexp_mant`/`_exp` (`l2r_float32_frexp_mant`/`_exp`).
+
+  Natively, `toList` makes one cons cell per character, and `get?` makes
+  no allocation. lean2rr now makes the same allocations (test
+  `RtGlueAlloc`: from 1000 to 4000 characters, the allocations and the
+  bytes of the two builds grow by the same amount, to a few bytes, for
+  `toList` and for `get?`).
+- **Why:** The prelude helpers took curried constructor closures.
+  `toList` called `cons(c)(acc)` for each character: about 3 allocations
+  per character, against 1 natively. `get?` made a `some` closure at
+  every call, also for `none` (hunt HSTR2-01). For `frExp`, Reussir and
+  LLVM already removed the closure in the measured programs; the code in
+  line does not depend on that.
+- **Where:** `Lower/Externs.lean`: `ctorCallbackExtern` (the cases
+  `lean_string_data`, `lean_string_utf8_get_opt`, `lean_float_frexp` and
+  `lean_float32_frexp`); the primitives in `runtime/prelude.rr`; the test
+  `tests/runtime/RtGlueAlloc.lean` with its `.alloc` file.
+- **Remove only if:** Reussir applies a constructor closure with no
+  allocation, so that a generic prelude helper costs the same.
 
 ### Glue builds a payload at its own type, then boxes it into the result
 

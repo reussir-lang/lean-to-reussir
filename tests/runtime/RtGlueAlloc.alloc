@@ -1,0 +1,7 @@
+# Hunt HSTR2-01: each mode at 1000 and 4000 (RtGlueAlloc.lean). Natively
+# `toList` makes one cons cell per character, `get?` allocates nothing and
+# `frExp` makes its pair (and the boxed mantissa); lean2rr's glue made about
+# 3 allocations per character, 1 per `get?` and a closure per `frExp`.
+list 1000 | list 4000 | 1 200
+getq 1000 | getq 4000 | 1 200
+frexp 1000 | frexp 4000 | 1 200

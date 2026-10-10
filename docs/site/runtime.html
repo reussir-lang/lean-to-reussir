@@ -99,7 +99,11 @@ A comment at each function names the C function it follows.</p>
   <code>lean_array_push&lt;LAny&gt;(arr, x)</code>. The elements of an array are boxes.</li>
 <li>A runtime function cannot build a Lean-defined type (it does not know the
   generated names). So generic helpers take the result type's constructors
-  as arguments, and lean2rr's glue makes a single call.</li>
+  as arguments, and lean2rr's glue makes a single call. A closure call
+  allocates, so an extern that runs per element or in a hot loop has no
+  such helper. lean2rr's glue builds its result from primitives:
+  <code>String.toList</code> in a generated loop, <code>String.Pos.Raw.get?</code> and
+  <code>Float.frExp</code> in line.</li>
 </ul>
 <h2 id="memory-management">Memory management</h2>
 <p><strong>Reference counting and reuse are Reussir's job.</strong> Reussir inserts every

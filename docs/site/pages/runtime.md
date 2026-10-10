@@ -36,7 +36,11 @@ A comment at each function names the C function it follows.
   `lean_array_push<LAny>(arr, x)`. The elements of an array are boxes.
 - A runtime function cannot build a Lean-defined type (it does not know the
   generated names). So generic helpers take the result type's constructors
-  as arguments, and lean2rr's glue makes a single call.
+  as arguments, and lean2rr's glue makes a single call. A closure call
+  allocates, so an extern that runs per element or in a hot loop has no
+  such helper. lean2rr's glue builds its result from primitives:
+  `String.toList` in a generated loop, `String.Pos.Raw.get?` and
+  `Float.frExp` in line.
 
 ## Memory management
 

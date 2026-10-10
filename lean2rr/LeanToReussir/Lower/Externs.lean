@@ -701,8 +701,12 @@ def refGlue (orig : Name) (params : Array Expr) (ret : Expr)
       (.block ⟨#[(x, some u64, ← addr 0), (y, some u64, ← addr 1)], .atom s!"{x} == {y}"⟩) .bool)
   | _ => return none
 
-/-- Externs over Lean-defined types: the runtime's generic helpers receive
-the generated constructors as arguments. -/
+/-- Externs over Lean-defined types, whose results the runtime cannot
+build: the runtime's generic helper receives the generated constructors as
+arguments (`timeit`, `getEnv`, `String.compare`: once per call), or the
+glue builds the result itself, in line or in a generated loop
+(`String.toList`, `String.Pos.Raw.get?`, `frExp`: no closure, so no
+allocation that native Lean does not make; hunt HSTR2-01). -/
 def ctorCallbackExtern (sym : String) (ret : Expr) (args : Array RR.Expr) : LowerM (Option RR.Expr) := do
   let rt ← lowerType ret
   let lam (x : String) (t : RR.Ty) (body : RR.Expr) : RR.Expr := .lam x t (.ofExpr body)
@@ -723,28 +727,59 @@ def ctorCallbackExtern (sym : String) (ret : Expr) (args : Array RR.Expr) : Lowe
     let r := RR.Expr.call "l2r_io_getenv_with" #[pay]
       #[name, ← ctorValue pay ``Option.none #[], lam "s" (.named "LStr") some']
     return some (← wrapIOResult rt r pay)
-  -- `String.mk : List Char → String`: push the characters.
   | "lean_string_compare" =>
     let v (c : Name) := ctorValue rt c #[]
     return some (.call "l2r_string_compare_with" #[rt] (args ++ #[← v ``Ordering.lt, ← v ``Ordering.eq, ← v ``Ordering.gt]))
+  -- `String.toList`/`String.data`: a generated loop per list type,
+  -- `l2r_string_to_list_<list>`, conses the characters from the last, as
+  -- `Array.toList`'s loop (`customExtern`) conses the elements:
+  --   go(s, i, acc) = if i == 0 { acc } else {
+  --     let j = l2r_string_prev(s, i); go(s, j, cons{box(get_fast(s, j)), acc}) }
+  -- A self tail call, so a loop. Natively one allocation per character
+  -- (the cons cell); a curried `cons` closure made about three.
   | "lean_string_data" =>
-    let some hd := (← ctorFieldTys rt ``List.cons)[0]? | return none
-    let cons ← ctorValue rt ``List.cons #[← coerce (.var "c") (.named "u32") hd, .var "t"]
-    return some (.call "l2r_string_to_list" #[rt]
-      (args ++ #[← ctorValue rt ``List.nil #[], lam "c" (.named "u32") (lam "t" rt cons)]))
+    let some s := args[0]? | return none
+    let .named ltn := rt | return none
+    let some info := (← get).typeInfos[ltn]? | return none
+    let some cons := info.ctors.find? ``List.cons | return none
+    -- The head is a `Box` at every instantiation (`nominalType`).
+    let some (_, hd) := cons.fields[0]?.join | return none
+    let name := s!"l2r_string_to_list_{ltn}"
+    unless (← hasFn name) do
+      let u64 := RR.Ty.named "u64"
+      let x ← coerce (.call "l2r_string_get_fast" #[] #[.var "s", .var "j"]) (.named "u32") hd
+      let body : RR.Block := .ofExpr (.ite (.atom "i == 0") (.ofExpr (.var "acc"))
+        ⟨#[("j", some u64, .call "l2r_string_prev" #[] #[.var "s", .var "i"]), ("x", some hd, x),
+           ("c", some rt, ← ctorValue rt ``List.cons #[.var "x", .var "acc"])],
+          .call (name ++ "_go") #[] #[.var "s", .var "j", .var "c"]⟩)
+      let entry : RR.Block := .ofExpr (.call (name ++ "_go") #[] #[.var "s",
+        .call "l2r_string_size" #[] #[.var "s"], ← ctorValue rt ``List.nil #[]])
+      modify fun st => { st with fns := st.fns ++ #[
+        .fn (name ++ "_go") #[("s", .named "LStr"), ("i", u64), ("acc", rt)] rt body,
+        .fn name #[("s", .named "LStr")] rt entry] }
+    return some (.call name #[] #[s])
+  -- `String.Pos.Raw.get? s p : Option Char`: the runtime's read gives
+  -- 0x110000 for "no character"; the glue tests it in line (a `some`
+  -- closure was one allocation per call, natively none).
   | "lean_string_utf8_get_opt" =>
     let some v := (← ctorFieldTys rt ``Option.some)[0]? | return none
-    let some' ← ctorValue rt ``Option.some #[← coerce (.var "c") (.named "u32") v]
-    return some (.call "l2r_string_utf8_get_opt_with" #[rt]
-      (args ++ #[← ctorValue rt ``Option.none #[], lam "c" (.named "u32") some']))
+    let c ← fresh "gc"
+    let some' ← ctorValue rt ``Option.some #[← coerce (.var c) (.named "u32") v]
+    return some (.block ⟨#[(c, some (.named "u32"), .call "l2r_string_utf8_get_opt" #[] args)],
+      .ite (.atom s!"{c} == 1114112") (.ofExpr (← ctorValue rt ``Option.none #[])) (.ofExpr some')⟩)
+  -- `Float.frExp x`, `Float32.frExp x : _ × Int`: the pair built in line
+  -- from the mantissa and the exponent.
   | "lean_float_frexp" | "lean_float32_frexp" =>
-    let fty := RR.Ty.named (if sym == "lean_float_frexp" then "f64" else "f32")
+    let (fty, pre) := if sym == "lean_float_frexp" then (RR.Ty.named "f64", "l2r_float_frexp")
+      else (RR.Ty.named "f32", "l2r_float32_frexp")
     let tys ← ctorFieldTys rt ``Prod.mk
     let some mt := tys[0]? | return none
     let some et := tys[1]? | return none
-    let pair ← ctorValue rt ``Prod.mk #[← coerce (.var "m") fty mt, ← coerce (.var "e") (.named "Int") et]
-    let helper := if sym == "lean_float_frexp" then "l2r_float_frexp_with" else "l2r_float32_frexp_with"
-    return some (.call helper #[rt] (args ++ #[lam "m" fty (lam "e" (.named "Int") pair)]))
+    let some a := args[0]? | return none
+    let (x, m, e) := (← fresh "fr", ← fresh "fm", ← fresh "fe")
+    let pair ← ctorValue rt ``Prod.mk #[← coerce (.var m) fty mt, ← coerce (.var e) (.named "Int") et]
+    return some (.block ⟨#[(x, some fty, a), (m, some fty, .call (pre ++ "_mant") #[] #[.var x]),
+      (e, some (.named "Int"), .call (pre ++ "_exp") #[] #[.var x])], pair⟩)
   | _ => return none
 
 end LeanToReussir

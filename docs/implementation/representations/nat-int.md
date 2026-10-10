@@ -77,8 +77,8 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
     `Nat`, `Lower/Conv.lean`) reuses the word of a small `Nat` below 2^31,
     else `nat_to_int`; `lean_int_neg_succ_of_nat` (`Int.negSucc`, also
     `Int.negOfNat` and so `String.toInt?`); `lean_int8_to_int`,
-    `lean_int16_to_int`, `lean_int32_to_int` and `lean_int_to_int` (an
-    `int32`), `lean_int64_to_int_sint` and `lean_isize_to_int` (through
+    `lean_int16_to_int` and `lean_int32_to_int` (an `int32`),
+    `lean_int64_to_int_sint` and `lean_isize_to_int` (through
     `l2r_int_of_i64`; also `IO.FS.Metadata`'s times, `Lower/Externs.lean`:
     `metadataOf`); `l2r_int_of_word` (`unsafeCast` of a word, its low 32
     bits); `Float.frExp`'s exponent and the shim's clock
