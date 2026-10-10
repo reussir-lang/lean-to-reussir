@@ -1,0 +1,7 @@
+# Review of the closure glue (hunt HSTR2-01): each mode at 1000 and 4000
+# (RtIOFinishAlloc.lean). Natively a `putStr` to a handle makes 1
+# allocation (its result) and a `getLine` 3; lean2rr's glue built two
+# closures at every call (3 and 6 allocations).
+put 1000 | put 4000 | 1 200
+line 1000 | line 4000 | 1 200
+out 1000 | out 4000 | 1 200

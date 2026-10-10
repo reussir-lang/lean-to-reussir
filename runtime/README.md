@@ -862,10 +862,14 @@ reference can switch while the close waits for the handle's writer; hunt
 HCO-01); the glue is
 
     let v = l2r_fs_open(path, modeIndex);
-    l2r_io_finish(v, |v| EST.Out.ok(v), |kind| |errno| |fname| |details| mkError)
+    if l2r_io_ok() { EST.Out.ok(v) }
+    else { l2r_io_error_with(|kind| |errno| |fname| |details| mkError) }
 
-where `mkError` builds the `IO.Error` with the `lean_mk_io_error_*`
-constructor (exported Lean functions) numbered `kind` (`fs::kind_of`: the
+(in line: only the failure path builds the error callback; the former
+prelude helper `l2r_io_finish(v, ok, err)` took both cases as callbacks,
+two closures at every call), where `mkError` builds the `IO.Error` with
+the `lean_mk_io_error_*` constructor (exported Lean functions) numbered
+`kind` (`fs::kind_of`: the
 `IoError`'s constructor, and for those with an optional file name whether
 it has one):
 
@@ -1119,7 +1123,7 @@ lean2rr's dev branch (the tests pass with it).
     step 7 its thread is lean-runtime's `io::startup::run_main`, and
     `run_main` is gone.)
 14. *done* — The standard-stream glue should check each `l2r_stream_*` call with
-    `l2r_io_finish`, as for files (tests `RtBrokenPipe`, `RtClosedStreams`).
+    the last-error check (`l2r_io_ok`), as for files (tests `RtBrokenPipe`, `RtClosedStreams`).
 15. *done* — `lean_io_prim_handle_is_tty` is `BaseIO`: the
     `lean_io_prim_handle_` prefix rule sends it to the fallible glue, which
     rejects it ("IO result ... cannot fail"). Use the BaseIO payload
@@ -1141,7 +1145,7 @@ lean2rr's dev branch (the tests pass with it).
     `IO.Process.getCurrentDir`/`setCurrentDir` with errno errors: use
     `l2r_fs_current_dir`, `l2r_fs_app_path`,
     `l2r_fs_process_get_current_dir`, `l2r_fs_process_set_current_dir`
-    with `l2r_io_finish`; kind 23 needs `IO.userError`.
+    with the last-error check (`l2r_io_ok`); kind 23 needs `IO.userError`.
 21. *done* on the runtime side — native `panic!` (outside
     `LEAN_ABORT_ON_PANIC`), the runtime's own panics (`index out of
     bounds`, `String.get!`), `dbgTrace`, `dbgTraceIfShared`, `timeit` and

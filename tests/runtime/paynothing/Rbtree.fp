@@ -1,11 +1,11 @@
 # Pay-nothing baseline of Rbtree (tests/classic/Rbtree.lean), arguments '100000'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 100024
-bytes 4005768
+allocs 100022
+bytes 4005704
 native-allocs 2490228
 native-bytes 99519442
-items 165
-functions 134
+items 164
+functions 133
 conversion-fns 0
 conversion-sites 0
 box-sites 38
@@ -47,8 +47,8 @@ item l2r_any_rel_# 60670e3a6fe9
 item l2r_any_rel_# de582e5680bb
 item l2r_any_releases 1d20e6866a09
 item l2r_ap1_F3nNat3nNat 442b38188f43
-item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» c2ce32db7deb
-item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 55467a67d8fc
+item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» db5a5ca0f91c
+item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 1aa347c297ea
 item l2r_ap2_F4nboolF3nNat3nNat e1f64cd1c53e
 item l2r_ap3_F3nNatF4nboolF3nNat3nNat 7147f49f8212
 item l2r_err_string 7914d9f838c1

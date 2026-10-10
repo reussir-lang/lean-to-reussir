@@ -207,7 +207,7 @@ def ioErrorCtor (resTy : RR.Ty) : LowerM (String × CtorLayout × RR.Ty) := do
   | some (some (_, t)) => return (rn, errL, t)
   | _ => throwError "lean2rr: IO result {rn} has no error field"
 
-/-- The error callback of `l2r_io_finish` for IO result `resTy`:
+/-- The error callback of `l2r_io_error_with` for IO result `resTy`:
 `|kind| |errno| |fname| |details| EST.Out.error e`, with `e` built by Lean's
 own `IO.Error` builder for the error kind the runtime reports (as Lean's
 `decode_io_error`). -/
@@ -231,24 +231,27 @@ def ioErrorFn (resTy : RR.Ty) : LowerM RR.Expr := do
   return RR.Expr.lam k (.named "u32") <| .ofExpr <| .lam errno (.named "u32") <| .ofExpr <|
     .lam fname (.named "LStr") <| .ofExpr <| .lam details (.named "LStr") (.ofExpr errVal)
 
-/-- `l2r_io_finish(v, ok, err)`: the outcome of a fallible runtime primitive
-(result `v : primRet`) as the IO result `resTy`: `EST.Out.ok (okOf x)`
-(`okOf` gives the payload at type `payTy`), or `EST.Out.error e` with `e`
-built by Lean's own `IO.Error` builder for the error kind the runtime
-reports (as Lean's `decode_io_error`). -/
-def ioFinish (v : RR.Expr) (primRet resTy payTy : RR.Ty) (okOf : RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
-  let x ← fresh "fx"
-  let okFn := RR.Expr.lam x primRet (.ofExpr (← wrapIOResult resTy (← okOf (.var x)) payTy))
-  return .call "l2r_io_finish" #[primRet, resTy] #[v, okFn, ← ioErrorFn resTy]
-
 /-- `if l2r_io_ok() { ok } else { EST.Out.error e }`: the outcome of the
-fallible primitive just called (its result already bound), as `ioFinish`,
-but with the continuation `ok : resTy` in line instead of in a callback. A
-handle that the continuation uses is then released at its last use there,
-not when a callback that captured it is freed. -/
+fallible primitive just called (its result already bound) as the IO result
+`resTy`, with the continuation `ok : resTy` in line. `e` is built by Lean's
+own `IO.Error` builder for the error kind the runtime reports (as Lean's
+`decode_io_error`); its callback (`ioErrorFn`) is built only on that path.
+A handle that the continuation uses is released at its last use there. -/
 def ioCheck (resTy : RR.Ty) (ok : RR.Block) : LowerM RR.Expr := do
   return .ite (.call "l2r_io_ok" #[] #[]) ok
     (.ofExpr (.call "l2r_io_error_with" #[resTy] #[← ioErrorFn resTy]))
+
+/-- `{ let fx : primRet = v; if l2r_io_ok() { EST.Out.ok (okOf fx) } else
+{ EST.Out.error e } }`: the outcome of a fallible runtime primitive (the call
+`v`, made first) as the IO result `resTy` (`okOf` gives the payload at type
+`payTy`), checked in line (`ioCheck`). On an error `fx` (the primitive's
+placeholder result) is not used and is released there. The success path
+builds no closure (callbacks were two closures per call, which Reussir and
+LLVM kept: hunt HSTR2-01's review). -/
+def ioFinish (v : RR.Expr) (primRet resTy payTy : RR.Ty) (okOf : RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
+  let x ← fresh "fx"
+  let ok ← wrapIOResult resTy (← okOf (.var x)) payTy
+  return .block ⟨#[(x, some primRet, v)], ← ioCheck resTy (.ofExpr ok)⟩
 
 /-- `EST.Out.error (IO.userError msg)` as IO result `resTy` (Lean's exported
 builder `lean_mk_io_user_error`). -/
@@ -264,7 +267,7 @@ def ioUserError (resTy : RR.Ty) (msg : String) : LowerM RR.Expr := do
   return .ctor rn (some errL.variant) #[← coerce e ioErr errTy]
 
 /-- Glue for a fallible IO extern: call the runtime primitive, then
-`l2r_io_finish` turns its outcome into `EST.Out.ok payload` or into
+`ioFinish` turns its outcome into `EST.Out.ok payload` or into
 `EST.Out.error e`, where `e` is built by Lean's own `IO.Error` builder for
 the error kind the runtime reports (as Lean's `decode_io_error`). -/
 def fallibleIOGlue (prim : String) (primRet : RR.Ty) (argTys : Array RR.Ty) (args : Array RR.Expr)

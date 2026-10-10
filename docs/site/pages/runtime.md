@@ -170,7 +170,9 @@ thread that waits blocks its context.
 - **Fallible IO.** A runtime primitive records its outcome in a last-error
   slot: nothing, or the crate's `IO.Error`. The glue turns it into `ok` or
   into the `IO.Error` that Lean's own exported builder makes, with libuv's
-  kind and message (Lean 4.34).
+  kind and message (Lean 4.34). The glue reads the slot in line, right
+  after the call. Only the failure path makes a closure: the builder of
+  the error.
 - **Processes.** `IO.Process` follows `process.cpp`. The crate starts a
   child with `posix_spawn` and does what Lean's forked child does before
   `execvp`. `IO.Process.output` reads both pipes together.

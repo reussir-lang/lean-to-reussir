@@ -1,11 +1,11 @@
 # Pay-nothing baseline of Deriv (tests/classic/Deriv.lean), arguments '8'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 464359
-bytes 10506592
-native-allocs 553538
-native-bytes 11997667
-items 211
-functions 174
+allocs 464341
+bytes 10506016
+native-allocs 553539
+native-bytes 11997691
+items 210
+functions 173
 conversion-fns 0
 conversion-sites 0
 box-sites 44
@@ -55,15 +55,15 @@ item l2r_any_rel_# 533270d08e9f
 item l2r_any_rel_# 60670e3a6fe9
 item l2r_any_rel_# de582e5680bb
 item l2r_any_releases 2c66b2a554d2
-item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» c2ce32db7deb
-item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 55467a67d8fc
+item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» db5a5ca0f91c
+item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 1aa347c297ea
 item l2r_ap2_F«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» a099449a6b70
 item l2r_ap3_F3nNatF«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 2f60751d7561
 item l2r_err_string 7914d9f838c1
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 f9a715bd4fbd
+item l2r_init_chunk_0 f2e50f2fad9c
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 c690b1a252f6
@@ -201,7 +201,7 @@ item l_String_Slice_isNat___l2r_#____l2r__flat bdf8886b8a2e
 item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 195635684912
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 81db83ef79c1
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ea351a648107
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 6d39c9e132ca
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
 item l_main___l2r_#_ f8dff2dec9c4
 item l_main___l2r_#____closed__1 78cb48e905b2

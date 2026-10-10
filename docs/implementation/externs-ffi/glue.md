@@ -235,11 +235,14 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   turns it into `EST.Out.ok` with the payload converted (unit, a handle,
   `Metadata`, an array of `DirEntry`) or into `EST.Out.error e`, with `e`
   built by Lean's exported `lean_mk_io_error_*` builder for the kind the
-  runtime reports, as `decode_io_error`: `l2r_io_finish(v, ok, err)` with
-  the two cases as callbacks (`ioFinish`). The `IO.Process.output` glue
-  checks in line instead (`ioCheck`), so a handle its continuation uses is
-  released at its last use there. `IO.FS.Mode` is passed as its
-  constructor index.
+  runtime reports, as `decode_io_error`. The glue checks the slot in line,
+  right after the call (`ioFinish`, `ioCheck`):
+  `{ let fx = prim(..); if l2r_io_ok() { EST.Out.ok(payload of fx) } else
+  { l2r_io_error_with(err) } }`. Only the failure path builds the error
+  callback `err`. A value that the payload uses (the directory of
+  `readDir`) is released at its last use there; on a failure the
+  primitive's placeholder result `fx` is released unused. `IO.FS.Mode` is
+  passed as its constructor index.
 - **Why:** The runtime cannot build `IO.Error`; Lean's own builders give
   the exact messages (57187b2). The decoding is lean-runtime's
   (`io::error`), as Lean 4.34's `decode_uv_error_impl`: kind and details
@@ -251,17 +254,27 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   (switch step 3). The slot is each context's own because a primitive
   can switch contexts after its `record`: when it releases a handle's
   last reference, the close waits for the handle's writer thread (the
-  drain-end hook, switch step 14) while the other contexts run.
+  drain-end hook, switch step 14) while the other contexts run. The check
+  is in line because callbacks cost closures: the prelude helper
+  `l2r_io_finish(v, ok, err)` took both cases as callbacks, two closures
+  at every call, which Reussir and LLVM kept (a `putStr` to a handle made
+  3 allocations, natively 1; a `getLine` 6, natively 3; review of the
+  closure glue, hunt HSTR2-01).
 - **Where:** `Lower/Externs.lean`: `fallibleIOGlue`, `fallibleIOPrim`,
   `ioFinish`, `ioCheck`, `ioErrorFn`, `ioErrorCtor`, `ioUserError`,
-  `metadataOf`, `dirEntriesOf`; `Mono.lean`: `isFallibleIOSym`,
+  `metadataOf`, `dirEntriesOf`, `streamFieldCall`; `Lower/Process.lean`:
+  `processExtern` (`spawn`, `wait`, `tryWait`, `kill`),
+  `processOutputBody`; `Mono.lean`: `isFallibleIOSym`,
   `ioErrorBuilderSyms`, `ensureIOErrorBuilders`;
+  `runtime/prelude.rr` (`l2r_io_ok`, `l2r_io_error_with`);
   `runtime/leanrt/src/sched.rs` (`switched`);
   `runtime/leanrt/src/fs.rs` (`LastError`, `swap_last`, `set_err`, `kind_of`, `errno`, `error_kind`,
   `error_details`; unit test `fs_tests.rs`, every errno through the slot
   against native Lean);
   `runtime/README.md` ("Fallible IO", the table of error kinds); tests
-  `RtIOErrorDecode`, `RtFiles`.
+  `RtIOErrorDecode`, `RtFiles`, `RtIOFinishAlloc` (with
+  `RtIOFinishAlloc.alloc`: a handle's `putStr` and `getLine` and the
+  stdout stream's `putStr` allocate as natively).
 - **Remove only if:** never.
 
 ### Standard streams live in cells, and diagnostics use the current stderr

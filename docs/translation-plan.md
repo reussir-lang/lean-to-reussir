@@ -1797,9 +1797,10 @@ Rules:
   `RtExternStub`). Tests `RtExternBody`, `RtExternBind`, `RtExternRefused`
   and the other `RtExtern*`; plan §10 ("Not supported").
 - **Fallible IO** (files and the file system): the runtime primitive
-  records its outcome in a last-error slot; `l2r_io_finish` turns it into
-  `EST.Out.ok` with the payload (converted: unit, handle, `Metadata`, an
-  array of `DirEntry`) or into `EST.Out.error e`, where `e` is built by
+  records its outcome in a last-error slot; the glue checks it in line
+  after the call (`l2r_io_ok`; the error is built only on that path) and
+  turns it into `EST.Out.ok` with the payload (converted: unit, handle,
+  `Metadata`, an array of `DirEntry`) or into `EST.Out.error e`, where `e` is built by
   Lean's own exported `lean_mk_io_error_*` builder for the reported kind,
   as Lean's `decode_io_error` does (the builders are instantiated when a
   program uses such an extern). Since Lean 4.34 the kind and the message

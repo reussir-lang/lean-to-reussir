@@ -2133,7 +2133,7 @@ fn lean_float_array_set(v : RVec<f64>, i : Nat, x : f64) -> RVec<f64> {
 // operations on lean-runtime's models of glibc's stdin/stdout/stderr
 // `FILE`s (`lean_runtime::io`, through leanrt::io): stdout buffered, stderr
 // unbuffered, all finished at exit as natively. putStr/write/flush/read/getLine record their outcome in the
-// last-error slot (use `l2r_io_finish`, as for files): EPIPE, EBADF (also
+// last-error slot (checked as for files): EPIPE, EBADF (also
 // for the wrong direction), EINVAL on streams closed at startup; isTty
 // cannot fail.
 
@@ -3338,8 +3338,8 @@ fn l2r_io_process_get_pid() -> u32 [{ lean_runtime::io::env::get_pid() }];
 // buffered file, closed when the last reference goes away. Fallible
 // primitives record their outcome in a last-error slot (each context's
 // own, exchanged at each switch); lean2rr's
-// glue for an `IO` extern calls the primitive, then
-//   l2r_io_finish(v, |v| EST.Out.ok(v), mkError)
+// glue for an `IO` extern calls the primitive, then checks in line
+//   let v = prim(...); if l2r_io_ok() { EST.Out.ok(v) } else { l2r_io_error_with(mkError) }
 // where `mkError kind errno fname details` builds the `IO.Error` with the
 // `lean_mk_io_error_*` constructor numbered `kind` (runtime/README.md).
 
@@ -3358,11 +3358,6 @@ fn l2r_io_error_details() -> LStr [{ leanrt::fs::error_details() }];
 
 fn l2r_io_error_with<E>(mk : u32 -> (u32 -> (LStr -> (LStr -> E)))) -> E {
     mk(l2r_io_error_kind())(l2r_io_errno())(l2r_io_error_fname())(l2r_io_error_details())
-}
-
-// The result of the primitive just called: `ok v`, or the error it recorded.
-fn l2r_io_finish<T, R>(v : T, ok : T -> R, err : u32 -> (u32 -> (LStr -> (LStr -> R)))) -> R {
-    if l2r_io_ok() { ok(v) } else { l2r_io_error_with(err) }
 }
 
 // `IO.getRandomBytes n` (an IO error when `/dev/urandom` cannot be read).
