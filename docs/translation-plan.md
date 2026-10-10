@@ -2100,7 +2100,12 @@ unobservable, and it is cheaper than a once-cell read (optional pass
 `UInt64` from 2^63) is boxed once, its box kept in a once-cell, as Lean's
 `_boxed_const_N` (optional pass `boxed-consts`): the default of `a[i]!`
 on an `Array Float` is `instInhabitedFloat`, and boxing it at every read
-was a new cell per read. A closed term referenced exactly once, by another constant
+was a new cell per read. A constant whose code is one string literal
+(many closed terms are) gets no once-cell: a read calls the runtime's
+literal cache, one slot per literal of the program, which makes the string
+at the first read and keeps it (optional pass `literal-consts`; a once-cell
+accessor and its `_init` per constant were 0.97 MB of 35 MB of `.rr` in 50
+programs). A closed term referenced exactly once, by another constant
 (the steps of an array literal, `_closed_k := push _closed_(k-1) e_k`), is
 evaluated where it is used instead of cached: it still runs once, and the
 intermediate values are not kept (caching every step of a 10000-element

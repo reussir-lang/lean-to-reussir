@@ -643,6 +643,114 @@ extern "C" fn shared_empty_init() -> LStr {
     s
 }
 
+/// The literal cache: the strings of lean2rr's literal constants (a
+/// constant or closed term whose code is one string literal), one slot per
+/// id of the program's literal table (`l2r_str_lit`). The generated
+/// `l2r_str_lit_cached(id)` reads it: at the first read the slot is empty,
+/// and the generated code makes the string from the table and stores it
+/// (`lit_put`); every read takes a new reference to it (`lit_ready`,
+/// `lit_get`). The slot keeps its reference for the rest of the run, as a
+/// once-cell keeps a constant's value (`once`) and `SMALL_REPR` its
+/// strings: a value read is never unique, so an update copies it, as
+/// natively a closed term is made once and is persistent (never unique).
+///
+/// A slot's word is the string's address, never 0: 0 is an empty slot. The
+/// slots below `LIT_FAST` are a table at a fixed address (in `.bss`:
+/// untouched pages cost no memory), so, with the textures inlined, a read
+/// of a set slot is one load, a test and the increment, as a constant's
+/// (`once::has`). The other slots are in a record (`LIT_REC`).
+///
+/// There is no claim, unlike a once-cell (`once::claim`): making a
+/// literal's string runs no Lean code, takes no lock and cannot switch the
+/// scheduler's context, so no other context runs between the test and the
+/// store. Single-threaded as `once`: the initializers run on the process's
+/// main thread before `main`'s thread starts, and Lean code then runs on
+/// `main`'s thread only.
+pub const LIT_FAST: usize = 1 << 16;
+
+#[repr(transparent)]
+struct LitWord(std::cell::UnsafeCell<usize>);
+struct LitTable([LitWord; LIT_FAST]);
+unsafe impl Sync for LitTable {}
+
+static LIT_TABLE: LitTable = LitTable([const { LitWord(std::cell::UnsafeCell::new(0)) }; LIT_FAST]);
+
+/// The slots from `LIT_FAST` on (`LIT_REC[id - LIT_FAST]`).
+static LIT_REC: Global<Vec<usize>> = Global(std::cell::UnsafeCell::new(Vec::new()));
+
+/// The word of literal slot `id` (0: empty).
+#[inline(always)]
+fn lit_word(id: u64) -> usize {
+    let i = id as usize;
+    if i < LIT_FAST {
+        unsafe { *LIT_TABLE.0[i].0.get() }
+    } else {
+        lit_rec_word(i)
+    }
+}
+
+#[inline(never)]
+fn lit_rec_word(i: usize) -> usize {
+    let rec = unsafe { &*LIT_REC.0.get() };
+    rec.get(i - LIT_FAST).copied().unwrap_or(0)
+}
+
+/// Whether literal slot `id` has its string (`l2r_lit_ready`): one load.
+/// The empty side is marked cold (only the first read takes it).
+#[inline(always)]
+pub fn lit_ready(id: u64) -> bool {
+    if lit_word(id) != 0 {
+        return true;
+    }
+    std::hint::cold_path();
+    false
+}
+
+/// Store `s`, the string of literal `id`, in its empty slot: the reference
+/// moves into the slot (`l2r_lit_put`). Returns 0. `#[cold]`: Reussir's
+/// language has no branch hint, so the attribute is the hint (as for the
+/// slow paths of `nat`): LLVM then lays the first read's path out of line.
+#[cold]
+#[inline(never)]
+pub extern "C" fn lit_put(id: u64, s: LStr) -> u64 {
+    let w = std::mem::ManuallyDrop::new(s).0 as usize;
+    let i = id as usize;
+    let slot = if i < LIT_FAST {
+        unsafe { &mut *LIT_TABLE.0[i].0.get() }
+    } else {
+        let rec = unsafe { &mut *LIT_REC.0.get() };
+        if rec.len() <= i - LIT_FAST {
+            rec.resize(i - LIT_FAST + 1, 0);
+        }
+        &mut rec[i - LIT_FAST]
+    };
+    if *slot != 0 {
+        crate::internal_panic(&format!("leanrt: literal slot {} set twice", id))
+    }
+    *slot = w;
+    0
+}
+
+/// A new reference to the string of set literal slot `id` (`l2r_lit_get`;
+/// reading an empty slot is a runtime bug: reported). Inline: after
+/// `lit_ready(id)` its load and test fold away.
+#[inline(always)]
+pub fn lit_get(id: u64) -> LStr {
+    let w = lit_word(id);
+    if w == 0 {
+        lit_unset(id)
+    }
+    LStr::clone(&std::mem::ManuallyDrop::new(LStr(w as *mut Obj)))
+}
+
+/// A read of an empty literal slot. `extern "C"`: it cannot unwind (it
+/// exits), so the inlined reads need no landing pad.
+#[cold]
+#[inline(never)]
+extern "C" fn lit_unset(id: u64) -> ! {
+    crate::internal_panic(&format!("leanrt: read of the empty literal slot {}", id))
+}
+
 /// `lean_mk_string_from_bytes`: validate, replacing each invalid
 /// sequence start with U+FFFD as `lean_mk_string_lossy_recover` does
 /// (lean-runtime's `semantics::string::lossy_utf8`).
@@ -845,6 +953,32 @@ mod tests {
         ok(&of_i64(-7), "-7");
         ok(&of_i64(i64::MAX), "9223372036854775807");
         ok(&of_u64(0), "0");
+    }
+
+    /// The literal cache: a slot of the table and one of the record (slots
+    /// far from any other test's: the cache is global). A read is a new
+    /// reference to the one string; it is never unique, so a push copies
+    /// it and the slot's string stays as it was.
+    #[test]
+    fn literal_cache() {
+        for id in [(LIT_FAST - 3) as u64, (LIT_FAST + 5) as u64] {
+            assert!(!lit_ready(id));
+            assert_eq!(lit_put(id, s("lit€")), 0);
+            assert!(lit_ready(id));
+            let a = lit_get(id);
+            let b = lit_get(id);
+            ok(&a, "lit€");
+            assert_eq!(a.0, b.0);
+            assert_eq!(count(&a), 3);
+            let p = push(a, '!' as u32);
+            ok(&p, "lit€!");
+            assert_eq!(count(&b), 2);
+            drop(b);
+            let c = lit_get(id);
+            ok(&c, "lit€");
+            assert_eq!(count(&c), 2);
+        }
+        assert!(!lit_ready((LIT_FAST + 4) as u64));
     }
 
     /// `dec_eq`: the same block, equal bytes in two blocks, other lengths

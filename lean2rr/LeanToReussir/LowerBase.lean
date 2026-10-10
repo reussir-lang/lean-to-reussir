@@ -103,6 +103,10 @@ structure LowerCtx where
   /-- Constants evaluated where they are used instead of cached in a
   once-cell (`chainConsts`, see `lowerDecl`). -/
   uncachedConsts : NameSet := {}
+  /-- Constants whose code is one string literal, with the literal: they
+  get no function, and a read calls the runtime's literal cache
+  (`strLitCached`; `literalConsts`, Emit/Program; `PassConfig.literalConsts`). -/
+  litConsts : NameMap String := {}
   /-- Unary Lean definitions returning a `String` that are replaced by a
   prelude function with the same results: definition ↦ prelude function and
   its parameter type (`PassConfig.preludeReplacements`). -/
@@ -1320,19 +1324,58 @@ def lazyOf? (t : RR.Ty) : LowerM (Option (String × Bool)) := do
   if st.thunkState == some s then return some (s, false)
   return none
 
+/-- The id of string literal `s` in the program's literal table
+(`strLitTable`): the index of its first use. -/
+def strLitId (s : String) : LowerM Nat := do
+  match (← get).strLitIds[s]? with
+  | some id => return id
+  | none =>
+    let id ← getPart (·.strLits.size)
+    modify fun st => { st with strLits := st.strLits.push s, strLitIds := st.strLitIds.insert s id }
+    return id
+
 /-- A string literal: `l2r_str_lit(id)`, which builds the string from a
 table of byte strings generated with the program (`strLitTable`). Passing
 a Reussir `str` to the runtime would go through a stack slot whose address
 escapes, which keeps LLVM from turning tail calls of the enclosing function
 into loops. -/
 def strLit (s : String) : LowerM RR.Expr := do
-  let id ← match (← get).strLitIds[s]? with
-    | some id => pure id
-    | none =>
-      let id ← getPart (·.strLits.size)
-      modify fun st => { st with strLits := st.strLits.push s, strLitIds := st.strLitIds.insert s id }
-      pure id
-  return .call "l2r_str_lit" #[] #[.atom (toString id)]
+  return .call "l2r_str_lit" #[] #[.atom (toString (← strLitId s))]
+
+/-- A read of a constant whose code is the string literal `s`
+(`LowerCtx.litConsts`): `l2r_str_lit_cached(id)`, a new reference to the
+string kept in slot `id` of the runtime's literal cache
+(`leanrt::string::lit_ready`), made at the first read. Natively a closed
+term is made once and every read shares it: a read here allocates nothing
+after the first, and its value is never unique (the slot keeps a
+reference), so an update copies it. Replaces a once-cell accessor and its
+`_init` per constant (`cafAccessor`) by two functions per program,
+generated at the first such read:
+
+    fn l2r_str_lit_cached(id : u64) -> LStr {
+        let r : u64 = if l2r_lit_ready(id) { 0 } else { l2r_str_lit_fill(id) };
+        l2r_lit_get(id)
+    }
+    fn l2r_str_lit_fill(id : u64) -> u64 { l2r_lit_put(id, l2r_str_lit(id)) }
+
+The first is the accessor's fast path (inlined at the read: one load, a
+test and the increment, `l2r_lit_ready` and `l2r_lit_get` loading the same
+word); the second, the slow path, is kept out of rrc's MLIR inliner
+(`anchoredFns`), as an `_init` is. There is no claim (`l2r_once_claim`):
+making a literal runs no Lean code and cannot block. -/
+def strLitCached (s : String) : LowerM RR.Expr := do
+  let id ← strLitId s
+  unless ← hasFn "l2r_str_lit_cached" do
+    let k := RR.Expr.var "id"
+    let u64 := RR.Ty.named "u64"
+    let fill := RR.Block.ofExpr (.call "l2r_lit_put" #[] #[k, .call "l2r_str_lit" #[] #[k]])
+    let test := RR.Expr.ite (.call "l2r_lit_ready" #[] #[k]) (.ofExpr (.atom "0"))
+      (.ofExpr (.call "l2r_str_lit_fill" #[] #[k]))
+    let body : RR.Block := ⟨#[("r", some u64, test)], .call "l2r_lit_get" #[] #[k]⟩
+    let items := #[RR.Item.fn "l2r_str_lit_fill" #[("id", u64)] u64 fill,
+      .fn "l2r_str_lit_cached" #[("id", u64)] (.named "LStr") body]
+    modify fun st => { st with fns := st.fns ++ items }
+  return .call "l2r_str_lit_cached" #[] #[.atom (toString id)]
 
 /-- The runtime function behind `strLit`: the literals as Rust byte strings.
 `[` is escaped too, so that no `[:` in a literal can be taken for a texture

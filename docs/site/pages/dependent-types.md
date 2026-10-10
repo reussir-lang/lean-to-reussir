@@ -376,20 +376,20 @@ fn pickT(b : bool) -> LAny {
         let n : Nat = l2r_nat_small(42);
         l2r_any_of<Nat>(n, 1)
     } else {
-        let s : LStr = hello();          // the constant "hello", made once
+        let s : LStr = l2r_str_lit_cached(28);   // the constant "hello", made once
         l2r_any_of<LStr>(s, 3)
     }
 }
 
 fn describe(b : bool, v : LAny) -> LStr {
     if b {
-        let prefix : LStr = nat_prefix();    // the constant "nat "
+        let prefix : LStr = l2r_str_lit_cached(29);  // the constant "nat "
         let one : Nat = l2r_nat_small(1);
         let m : Nat = lean_nat_add(l2r_any_as<Nat>(v, 1), one);
         let digits : LStr = l2r_nat_repr(m);
         lean_string_append(prefix, digits)
     } else {
-        let prefix : LStr = str_prefix();    // the constant "str "
+        let prefix : LStr = l2r_str_lit_cached(30);  // the constant "str "
         lean_string_append(prefix, l2r_any_as<LStr>(v, 3))
     }
 }
@@ -406,22 +406,22 @@ fn describe(b : bool, v : LAny) -> LStr {
   `box(0)` is reached only with `unsafeCast`. For any other word, it
   panics.
 - A string constant (`"hello"`, `"nat "`, `"str "`) is made once and kept
-  in a once-cell; each use reads it. The constant `"hello"`:
+  in the runtime's literal cache; each use reads it (pass
+  `literal-consts`). `28` is the number of the literal `"hello"` in the
+  program's literal table. The function below serves every such read of
+  the program:
 
 ```rust
-fn hello_init() -> LStr {
-    l2r_str_lit(28)                 // literal number 28 of the program: "hello"
-}
-
-fn hello() -> LStr {
-    let r : u64 = if l2r_once_ready(36) { 0 } else {
-        if l2r_once_claim(36) { 0 } else { l2r_once_put<LStr>(36, hello_init()) }
-    };
-    l2r_once_get<LStr>(36)
+fn l2r_str_lit_cached(id : u64) -> LStr {
+    let r : u64 = if l2r_lit_ready(id) { 0 } else { l2r_str_lit_fill(id) };
+    l2r_lit_get(id)                 // a new reference to the kept string
 }
 ```
 
-`nat_prefix` and `str_prefix` are the same, with other slots.
+`l2r_lit_ready` loads the slot of the literal from a table at a fixed
+address. At the first read the slot is empty, and `l2r_str_lit_fill`
+makes the string and keeps it there. Other constants have a once-cell
+each ([Pipeline](pipeline.html)).
 
 ### Sigma types
 

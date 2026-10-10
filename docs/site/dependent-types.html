@@ -412,20 +412,20 @@ def describe (x.1 : Bool) (x.2 : lcAny) : String :=
         let n : Nat = l2r_nat_small(42);
         l2r_any_of&lt;Nat&gt;(n, 1)
     } else {
-        let s : LStr = hello();          // the constant &quot;hello&quot;, made once
+        let s : LStr = l2r_str_lit_cached(28);   // the constant &quot;hello&quot;, made once
         l2r_any_of&lt;LStr&gt;(s, 3)
     }
 }
 
 fn describe(b : bool, v : LAny) -&gt; LStr {
     if b {
-        let prefix : LStr = nat_prefix();    // the constant &quot;nat &quot;
+        let prefix : LStr = l2r_str_lit_cached(29);  // the constant &quot;nat &quot;
         let one : Nat = l2r_nat_small(1);
         let m : Nat = lean_nat_add(l2r_any_as&lt;Nat&gt;(v, 1), one);
         let digits : LStr = l2r_nat_repr(m);
         lean_string_append(prefix, digits)
     } else {
-        let prefix : LStr = str_prefix();    // the constant &quot;str &quot;
+        let prefix : LStr = l2r_str_lit_cached(30);  // the constant &quot;str &quot;
         lean_string_append(prefix, l2r_any_as&lt;LStr&gt;(v, 3))
     }
 }
@@ -442,20 +442,20 @@ fn describe(b : bool, v : LAny) -&gt; LStr {
   <code>box(0)</code> is reached only with <code>unsafeCast</code>. For any other word, it
   panics.</li>
 <li>A string constant (<code>"hello"</code>, <code>"nat "</code>, <code>"str "</code>) is made once and kept
-  in a once-cell; each use reads it. The constant <code>"hello"</code>:</li>
+  in the runtime's literal cache; each use reads it (pass
+  <code>literal-consts</code>). <code>28</code> is the number of the literal <code>"hello"</code> in the
+  program's literal table. The function below serves every such read of
+  the program:</li>
 </ul>
-<pre><code class="language-rust">fn hello_init() -&gt; LStr {
-    l2r_str_lit(28)                 // literal number 28 of the program: &quot;hello&quot;
-}
-
-fn hello() -&gt; LStr {
-    let r : u64 = if l2r_once_ready(36) { 0 } else {
-        if l2r_once_claim(36) { 0 } else { l2r_once_put&lt;LStr&gt;(36, hello_init()) }
-    };
-    l2r_once_get&lt;LStr&gt;(36)
+<pre><code class="language-rust">fn l2r_str_lit_cached(id : u64) -&gt; LStr {
+    let r : u64 = if l2r_lit_ready(id) { 0 } else { l2r_str_lit_fill(id) };
+    l2r_lit_get(id)                 // a new reference to the kept string
 }
 </code></pre>
-<p><code>nat_prefix</code> and <code>str_prefix</code> are the same, with other slots.</p>
+<p><code>l2r_lit_ready</code> loads the slot of the literal from a table at a fixed
+address. At the first read the slot is empty, and <code>l2r_str_lit_fill</code>
+makes the string and keeps it there. Other constants have a once-cell
+each (<a href="pipeline.html">Pipeline</a>).</p>
 <h3 id="sigma-types">Sigma types</h3>
 <p>A Sigma type <code>(x : A) × B x</code> is a pair. The type of its second component
 depends on the value of its first component.</p>

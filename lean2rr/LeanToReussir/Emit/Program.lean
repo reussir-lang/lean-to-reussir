@@ -327,6 +327,23 @@ def spliceChainConsts (decls : Array (Decl .pure)) (inline : NameSet) : Array (D
     | _ => out := out.push d
   return out.filter fun d => !spliced.contains d.name
 
+/-- The constants of `decls` whose code is one string literal (`let x :
+String := "…"; return x`; many closed terms of Lean's `extractClosed` are),
+with the literal (optimization `literal-consts`): they get no function, and
+a read calls the runtime's literal cache (`strLitCached`). Not a closed term
+evaluated where it is used (`uncached`, `chainConsts`: it has no once-cell
+anyway), nor an `initialize` constant (`inits`: read from its own
+once-cell, `Callee.initConst`). -/
+def literalConsts (decls : Array (Decl .pure)) (uncached inits : NameSet) : NameMap String :=
+  decls.foldl (init := {}) fun m d =>
+    if !d.params.isEmpty || !d.type.isConstOf ``String || uncached.contains d.name || inits.contains d.name then m
+    else match d.value with
+      | .code (.let l (.return x)) =>
+        match l.value with
+        | .lit (.str s) => if x == l.fvarId then m.insert d.name s else m
+        | _ => m
+      | _ => m
+
 /-- The declarations the entry point calls: `main`, the error printer, and
 the startup steps' instances. Stage 3 takes the program's reachable code
 from them. -/
@@ -370,8 +387,9 @@ def LoweredProgram.outline (p : LoweredProgram) : LoweredProgram :=
   { p with fns, stepItems := p.stepItems ++ steps }
 
 /-- The program text: the prelude (with `prunePrelude`, optimization
-`prelude-liveness`, only the functions the rest of the text reaches:
-PreludePrune), the generated types, the functions
+`prelude-liveness`, only the functions the rest of the text reaches, and
+none of its whole-line comments outside textures: PreludePrune), the
+generated types, the functions
 (`#[transform_anchor]` on those kept out of rrc's MLIR inliner: a transform
 anchor stays a function for transform scripts, lean2rr has none, and LLVM
 still inlines it; see `anchoredFns`) and the string literal table. -/
@@ -460,6 +478,10 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
             pure b
         unless ok do uncachedConsts := uncachedConsts.erase d.name
   let decls := spliceChainConsts decls uncachedConsts
+  let litConsts := if cfg.literalConsts then
+      literalConsts decls uncachedConsts
+        (startup.foldl (fun s st => match st with | .init decl _ => s.insert decl | _ => s) {})
+    else {}
   let casts := programCasts (← getEnv) keys decls
   -- Rule 4: where the program's function values complete, along its flow,
   -- for the erased domains of function types (`ErasedDomains`).
@@ -481,7 +503,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   let ctx : LowerCtx := { decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
                           externRefusals,
                           preludeRets, preludeParams, preludeRetArg, ioErrorBuilders, valueGenericFns, valueGenericCls,
-                          uncachedConsts, preludeReplacements := cfg.preludeReplacements,
+                          uncachedConsts, litConsts, preludeReplacements := cfg.preludeReplacements,
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
                           cachePlaceholders := cfg.cachePlaceholders, boxedConsts := cfg.boxedConsts,
                           programCasts := casts.isSome, createsTasks, callCycles := callCycles decls,

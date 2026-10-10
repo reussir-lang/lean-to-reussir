@@ -1,16 +1,16 @@
 # Pay-nothing baseline of Deriv (tests/classic/Deriv.lean), arguments '8'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 464342
-bytes 10506064
-native-allocs 553737
-native-bytes 12061854
-items 211
-functions 174
+allocs 464340
+bytes 10505072
+native-allocs 553749
+native-bytes 12062030
+items 161
+functions 124
 conversion-fns 0
 conversion-sites 0
 box-sites 38
 box-variants 6
-item L2RFn_F10nT_Expr_1614nLStr bb1ac2694bd3
+item L2RFn_F10nT_Expr_1544nLStr 177ba57dd575
 item L2RFn_F3nNatF«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 0fdd90e73b1d
 item L2RFn_F3nu64F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» f96e8eb23184
 item L2RFn_F4aRVec1_2nu8F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9c0c234ead50
@@ -58,28 +58,30 @@ item l2r_any_releases 2c66b2a554d2
 item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» b461d695dd00
 item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 952017134ce6
 item l2r_ap2_F«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» a099449a6b70
-item l2r_ap3_F3nNatF«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 2f60751d7561
-item l2r_err_string 7914d9f838c1
+item l2r_ap3_F3nNatF«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» e9bef31d0ed2
+item l2r_err_string 1d2487775647
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 11829644d0ff
+item l2r_init_chunk_0 80c0c58d6488
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 c690b1a252f6
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
-item l2r_main_body 7dbaf79cb7d0
+item l2r_main_body 81ba9f214f99
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
 item l2r_run_main d750382a583f
 item l2r_run_pending_tasks 39049c3ac015
-item l2r_std_enter b8dc2b0d5ea6
+item l2r_std_enter 968f51e80f85
 item l2r_std_enter_if 5de670c1226b
-item l2r_std_leave 6f36157674f6
+item l2r_std_leave 5927752d257a
 item l2r_std_leave_if 085389c2a4a4
 item l2r_stderr_put 810383903ea2
-item l2r_str_lit baf37b046dbd
+item l2r_str_lit 38c84c0f7441
+item l2r_str_lit_cached 8c89f8820a26
+item l2r_str_lit_fill 1b8397330b80
 item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
 item l2r_zero_# 426eecea9538
@@ -99,21 +101,17 @@ item l2r_zero_#_init 408c8ca4b52d
 item l2r_zero_#_init 8a3c891991b7
 item l2r_zero_#_init c42c9dfca394
 item l2r_zero_#_init e7e03c1546b6
-item l_ByteArray_toUInt64LE_x21___l2r_#_ 39cd43438ee8
-item l_ByteArray_toUInt64LE_x21___l2r_#____closed__3 6baa7ee77cd1
-item l_ByteArray_toUInt64LE_x21___l2r_#____closed__3_init e0015eb8c2fb
+item l_ByteArray_toUInt64LE_x21___l2r_#_ 5aa10a15d1a4
+item l_ByteArray_toUInt64LE_x21___l2r_#____closed__3 28b329d731b5
+item l_ByteArray_toUInt64LE_x21___l2r_#____closed__3_init 37a13966582e
 item l_Expr_add___l2r_#_ 3e26da029c53
 item l_Expr_count___l2r_#_ fffc91531b0d
 item l_Expr_d___l2r_#_ f32eb8fb3a42
 item l_Expr_d___l2r_#____closed__1 0bc493f75760
 item l_Expr_d___l2r_#____closed__1_init b2356f1e0ace
-item l_Expr_deriv___l2r_#_ 8bde97f90872
-item l_Expr_deriv___l2r_#____closed__0 b67a4dccc660
-item l_Expr_deriv___l2r_#____closed__0_init 24a7602c7f44
-item l_Expr_deriv___l2r_#____closed__1 37ad9d716836
-item l_Expr_deriv___l2r_#____closed__1_init 8f75fd1399d8
-item l_Expr_instToString___l2r_#_ f9ffee6f3efe
-item l_Expr_instToString___l2r_#__init 5358122166c6
+item l_Expr_deriv___l2r_#_ 131cbf302117
+item l_Expr_instToString___l2r_#_ 5d38f274b1b8
+item l_Expr_instToString___l2r_#__init f30cb2a438fc
 item l_Expr_ln___l2r_#_ d14a79ad7a6a
 item l_Expr_mul___l2r_#_ e62a32cd60fb
 item l_Expr_mul___l2r_#____closed__0 c877b068bea4
@@ -126,13 +124,7 @@ item l_Expr_pown___l2r_#_ f075f9fa0854
 item l_Expr_pown___l2r_#____closed__0 1c8fa80fa8c7
 item l_Expr_pown___l2r_#____closed__1 579c3148bbdc
 item l_Expr_pown___l2r_#____closed__2 1b1719db2822
-item l_IO_Error_fopenErrorToString___l2r_#_ d5864a773c39
-item l_IO_Error_fopenErrorToString___l2r_#____closed__0 798f05ead334
-item l_IO_Error_fopenErrorToString___l2r_#____closed__0_init 31626fcd3c65
-item l_IO_Error_fopenErrorToString___l2r_#____closed__1 bf03ebb20ef2
-item l_IO_Error_fopenErrorToString___l2r_#____closed__1_init 30122cfe688b
-item l_IO_Error_fopenErrorToString___l2r_#____closed__2 cfc9b2e78d75
-item l_IO_Error_fopenErrorToString___l2r_#____closed__2_init 15310a50e9b3
+item l_IO_Error_fopenErrorToString___l2r_#_ 3f46af42de8e
 item l_IO_Error_mkAlreadyExistsFile___l2r_#_ f227b09ba585
 item l_IO_Error_mkAlreadyExists___l2r_#_ 0d1ad80cafe3
 item l_IO_Error_mkHardwareFault___l2r_#_ 37bea7120be3
@@ -156,42 +148,8 @@ item l_IO_Error_mkResourceVanished___l2r_#_ 75de7d1fa6da
 item l_IO_Error_mkTimeExpired___l2r_#_ f1e44c7368da
 item l_IO_Error_mkUnsatisfiedConstraints___l2r_#_ ce26a4c5b144
 item l_IO_Error_mkUnsupportedOperation___l2r_#_ 4a979451b8c2
-item l_IO_Error_otherErrorToString___l2r_#_ 35b3767653c0
-item l_IO_Error_otherErrorToString___l2r_#____closed__0 99536d7a547a
-item l_IO_Error_otherErrorToString___l2r_#____closed__0_init 190fa86a36a8
-item l_IO_Error_toString___l2r_#_ 0219af2c989b
-item l_IO_Error_toString___l2r_#____closed__0 3df95f341663
-item l_IO_Error_toString___l2r_#____closed__0_init dc299b64c4c8
-item l_IO_Error_toString___l2r_#____closed__1 17d10d8955db
-item l_IO_Error_toString___l2r_#____closed__10 80913dbfc67a
-item l_IO_Error_toString___l2r_#____closed__10_init 3f402cf886ed
-item l_IO_Error_toString___l2r_#____closed__11 8db459bd91d7
-item l_IO_Error_toString___l2r_#____closed__11_init 6c5a00733d9c
-item l_IO_Error_toString___l2r_#____closed__12 177c2296a93c
-item l_IO_Error_toString___l2r_#____closed__12_init 8b1f5d91c792
-item l_IO_Error_toString___l2r_#____closed__13 1bc2f9b24c4d
-item l_IO_Error_toString___l2r_#____closed__13_init 35372abb67d8
-item l_IO_Error_toString___l2r_#____closed__14 736ecbaba6a6
-item l_IO_Error_toString___l2r_#____closed__14_init 7f991f09a561
-item l_IO_Error_toString___l2r_#____closed__15 77a09b8508fc
-item l_IO_Error_toString___l2r_#____closed__15_init 7ec6392afa89
-item l_IO_Error_toString___l2r_#____closed__1_init 0314feb1f245
-item l_IO_Error_toString___l2r_#____closed__2 95e2c6c11dd4
-item l_IO_Error_toString___l2r_#____closed__2_init a422683ee99e
-item l_IO_Error_toString___l2r_#____closed__3 4ba18e40a128
-item l_IO_Error_toString___l2r_#____closed__3_init 1c3d91de71e2
-item l_IO_Error_toString___l2r_#____closed__4 7eb12c9332c1
-item l_IO_Error_toString___l2r_#____closed__4_init e92f58605099
-item l_IO_Error_toString___l2r_#____closed__5 9f19339d944d
-item l_IO_Error_toString___l2r_#____closed__5_init 4c3aad7126d5
-item l_IO_Error_toString___l2r_#____closed__6 578005d54c8f
-item l_IO_Error_toString___l2r_#____closed__6_init aec829c96141
-item l_IO_Error_toString___l2r_#____closed__7 82f4efb40912
-item l_IO_Error_toString___l2r_#____closed__7_init ac36d5718f21
-item l_IO_Error_toString___l2r_#____closed__8 59d3836910a2
-item l_IO_Error_toString___l2r_#____closed__8_init 8f62d1bac94c
-item l_IO_Error_toString___l2r_#____closed__9 9309d8474da0
-item l_IO_Error_toString___l2r_#____closed__9_init 1f8870b1fc62
+item l_IO_Error_otherErrorToString___l2r_#_ 52c809003c67
+item l_IO_Error_toString___l2r_#_ f0a61bd77d51
 item l_IO_print___at___00IO_println___at___00Expr_deriv_spec__0_spec__0___l2r_#_ befcfb9ee34f
 item l_IO_println___at___00Expr_deriv_spec__0___l2r_#_ 0e78db46874f
 item l_IO_userError___l2r_#_ e5a4f2aa2427
@@ -202,22 +160,14 @@ item l_String_Slice_isNat___l2r_#____l2r__flat bdf8886b8a2e
 item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 195635684912
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 81db83ef79c1
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ faa617b7c0f6
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ffd80adacb14
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
-item l_main___l2r_#_ f8dff2dec9c4
-item l_main___l2r_#____closed__1 78cb48e905b2
-item l_main___l2r_#____closed__1_init e6f06a29a032
+item l_main___l2r_#_ e01832d99a1f
+item l_main___l2r_#____closed__1 954634ae2fe0
+item l_main___l2r_#____closed__1_init 5d82333be8d9
 item l_main___l2r_#____closed__2 20253b064d68
 item l_main___l2r_#____closed__2_init 7706cd8a2835
-item l_mkPanicMessageWithDecl___l2r_#_ 86cf874e4ec8
-item l_mkPanicMessageWithDecl___l2r_#____closed__0 94f337210897
-item l_mkPanicMessageWithDecl___l2r_#____closed__0_init 6f02193c1d5f
-item l_mkPanicMessageWithDecl___l2r_#____closed__1 070f48d001ba
-item l_mkPanicMessageWithDecl___l2r_#____closed__1_init 99379ab316f7
-item l_mkPanicMessageWithDecl___l2r_#____closed__2 7a3c0faa3813
-item l_mkPanicMessageWithDecl___l2r_#____closed__2_init 8088fa74060b
-item l_mkPanicMessageWithDecl___l2r_#____closed__3 2d4009e0bf37
-item l_mkPanicMessageWithDecl___l2r_#____closed__3_init 90cc2109b2ec
+item l_mkPanicMessageWithDecl___l2r_#_ 9dc6fe993dc5
 item l_mkStdGen___l2r_#____l2r__flat b08dfeda83c3
 item l_panic___at___00ByteArray_toUInt64LE_x21_spec__0___l2r_#_ 0bbcedca4180
 item lean_main_entry cfcc2a3788db

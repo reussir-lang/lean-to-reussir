@@ -133,6 +133,8 @@ each concept has one term.</p>
 <dd>The Rust body of a Reussir <code>#[ffi(import)]</code> function. rustc compiles it; LLVM can inline it.</dd>
 <dt>once-cell</dt>
 <dd>A runtime slot that holds a constant. The value is computed once and never freed.</dd>
+<dt>literal cache</dt>
+<dd>The runtime's slots for the constants whose code is one string literal, one slot per literal of the program. The first read makes the string; each read takes a new reference.</dd>
 <dt>deferred task</dt>
 <dd>A task that runs only when needed, when the running code blocks, or when <code>main</code> returns.</dd>
 <dt>context</dt>

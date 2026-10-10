@@ -9,7 +9,10 @@ runtime. Plan
 - **What:** A declaration without parameters becomes `<f>_init` (its
   body) and an accessor `<f>` that tests the constant's once-cell inline,
   computes and stores the value if it is not there, then reads the cell
-  (next entry). The cell stores a boundary type; another value is wrapped
+  (next entry). Exceptions: a constant whose code is one string literal
+  (the literal cache, "A constant of one string literal is read from the
+  literal cache", below), the constants that `cheap-consts` recomputes and
+  the closed terms used once, by another constant (below). The cell stores a boundary type; another value is wrapped
   in an `ElemBox`. The value is never freed. Program constants are forced
   at startup ([order.md](order.md)); toolchain constants and closed terms
   only on first use, as natively (Lean 4.34.0 makes a closed term a
@@ -107,6 +110,101 @@ runtime. Plan
   slower than before for those constants, and a slot read at a wider type
   than it was stored at would have seen the mark (review PCR-02, PCR-03);
   the flag table replaced both.
+
+### A constant of one string literal is read from the literal cache
+
+- **What:** A declaration without parameters whose code is one string
+  literal (`let x : String := "…"; return x`: many closed terms of
+  Lean's `extractClosed`, the text of a message, a `toString` or a panic)
+  gets no function (optimization `literal-consts`). A read is
+  `l2r_str_lit_cached(id)`, with `id` the literal's index in the
+  program's literal table
+  ([../representations/strings.md](../representations/strings.md)). Two
+  generated functions, one of each per program, serve all the reads:
+
+  ```
+  fn l2r_str_lit_cached(id : u64) -> LStr {
+      let r : u64 = if l2r_lit_ready(id) { 0 } else { l2r_str_lit_fill(id) };
+      l2r_lit_get(id)
+  }
+  #[transform_anchor]
+  fn l2r_str_lit_fill(id : u64) -> u64 { l2r_lit_put(id, l2r_str_lit(id)) }
+  ```
+
+  The runtime's literal cache has one slot per literal id: a table at a
+  fixed address (`leanrt::string::LIT_TABLE`, 2^16 words in `.bss`;
+  untouched pages cost no memory), and a record (`LIT_REC`) for the ids
+  above. A slot's word is the string's address; 0 is an empty slot. At
+  the first read the slot is empty: the table makes the string, and its
+  reference moves into the slot (`lit_put`). Every read takes a new
+  reference (`lit_get`). Inlined, a read of a set slot is one load from a
+  constant address, a test and the increment, as a constant's read (the
+  entry above); `lit_put` is `#[cold]`, the branch hint, so the first
+  read's path is laid out of line. The slot keeps its reference for the
+  rest of the run, so a value read is never unique: `String.push` on it
+  copies it, and the next read gives the literal again. There is no claim
+  (`l2r_once_claim`): making a literal's string runs no Lean code and
+  cannot block or switch the scheduler's context, so a read in a task, in
+  an initializer or in a constant's computation needs nothing more.
+  Startup does not force such a program constant (`startupChain` leaves
+  out its step): making a literal has no effect, and its first read makes
+  it. The string is not marked persistent: no task can be in a string, so
+  no walk looks into it, and a once-cell keeps a string constant the same
+  way (by its reference). The table holds each text once, so two
+  constants with equal text share one slot: their reads give one object
+  (natively Lean's closed-term cache also makes most equal closed terms
+  one constant; identity is not preserved in general, plan §9 and
+  [../representations/identity.md](../representations/identity.md)).
+  Other constants keep their machinery: more code than the literal, a
+  literal of another type, a constant whose code reads such a constant
+  (Lean often extracts the literal of `def b : String := "b"` into a
+  closed term that `b` reads: `b` keeps its once-cell, the closed term has
+  none), a closed term used once, by another constant (`uncachedConsts`),
+  an `initialize` constant.
+  Example, the closed term `IO.Error.toString._closed_0`
+  (`"already exists"`, literal 11 of the classic program X13). Before, a
+  read was `l_IO_Error_toString___l2r_0____closed__0()`, with these two
+  functions:
+
+  ```
+  #[transform_anchor]
+  fn l_IO_Error_toString___l2r_0____closed__0_init() -> LStr {
+      let x426 : LStr = l2r_str_lit(11);
+      x426
+  }
+  fn l_IO_Error_toString___l2r_0____closed__0() -> LStr {
+      let r : u64 = if l2r_once_ready(14) { 0 } else {
+          if l2r_once_claim(14) { 0 } else { l2r_once_put<LStr>(14, l_IO_Error_toString___l2r_0____closed__0_init()) }
+      };
+      l2r_once_get<LStr>(14)
+  }
+  ```
+
+  Now a read is `l2r_str_lit_cached(11)`, and the two functions are gone.
+- **Why:** These constants were 2286 of the 5788 accessor and `_init`
+  pairs in 50 programs: 0.97 MB of their 35 MB of `.rr` (2.8%; 11% in
+  L11; size survey of 2026-10-10). After the change the 50 programs have
+  27.8 MB of `.rr` (−21%): besides the pairs, the 75 program constants of
+  lean-zip's two drivers that are `bv_decide` certificates (one string
+  literal each, 3 MB in all, evaluated at startup and never read) are no
+  longer in the literal table, since nothing reads them (−41.5% for each
+  driver). A read allocates nothing after the first, as natively (test `RtConstLiteralCache` and its `.alloc` file: a
+  read that made the string each time failed it, 99000 more allocations
+  at 100000 reads).
+- **Where:** `Emit/Program.lean`: `literalConsts`, `lowerProgram`;
+  `LowerBase.lean`: `LowerCtx.litConsts`, `strLitId`, `strLitCached`;
+  `Lower/Values.lean`: `lowerConstApp`; `Lower/Code.lean`: `lowerDecl`;
+  `Emit/Startup.lean`: `startupChain`; `Lower/Finish.lean`:
+  `anchoredFns`; `Opt/LiteralConsts.lean`; `runtime/prelude.rr`:
+  `l2r_lit_ready`, `l2r_lit_put`, `l2r_lit_get`;
+  `runtime/leanrt/src/string.rs`: `LIT_TABLE`, `LIT_FAST`, `LIT_REC`,
+  `lit_ready`, `lit_put`, `lit_get`. Tests: `RtConstLiteralCache`
+  (`.alloc`); `tests/runtime/const-read-check.sh` with `RtConstReads`
+  (`labelSum`: a literal read in a loop is one load, no call);
+  `tests/runtime/rr-fingerprint.py` reads `l2r_str_lit_cached(id)` as the
+  literal's text.
+- **Remove only if:** the pass is off (such a constant is then a
+  once-cell, as any other).
 
 ### Cheap constants are recomputed, float literals folded
 

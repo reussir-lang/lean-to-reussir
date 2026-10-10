@@ -1,0 +1,4 @@
+# Size survey 2026-10-10 (optimization `literal-consts`): 1000 and 100000 reads of a literal constant in a loop.
+# Natively a closed term is made once and a read allocates nothing; lean2rr's literal cache makes the string at the
+# first read only. A read that made the string every time would allocate 99000 times more at the large size.
+1000 | 100000 | 1 50

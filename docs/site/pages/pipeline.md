@@ -304,6 +304,10 @@ entry point or from the runtime's entries. See
   and never freed. A read is one load and a test: the runtime keeps each
   cell's value in a table at a fixed address, and a value whose bits are
   all 0 also has a flag (a second load). No read is a call.
+- A constant whose code is one string literal has no once-cell (pass
+  `literal-consts`). A read is `l2r_str_lit_cached(id)`: the runtime keeps
+  one slot per literal of the program, and the first read makes the string.
+  A read is one load and a test, as for a once-cell.
 - Closed terms (`extractClosed`) are evaluated lazily, once.
 - The startup work is cut into functions of at most 128 steps, because one
   long chain overflows rrc's stack.

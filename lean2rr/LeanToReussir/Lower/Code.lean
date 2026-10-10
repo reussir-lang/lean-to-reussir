@@ -478,6 +478,9 @@ end
 /-- Lower a declaration with code to a Reussir function. -/
 def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let .code body := d.value | return
+  -- A constant whose code is one string literal has no function: its reads
+  -- call the literal cache (`strLitCached`).
+  if (← read).litConsts.contains d.name then return
   let body := H.prepareBody body
   let (ps, r) := splitFnType d.type d.params.size
   let _ := ps
@@ -523,7 +526,8 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
     return
   -- A constant is cached in a once-cell, unless a hook has it recomputed
   -- at each use (Opt/CheapConsts) or it is a closed term evaluated where
-  -- it is used (`uncachedConsts`, `chainConsts`).
+  -- it is used (`uncachedConsts`, `chainConsts`). (One whose code is one
+  -- string literal has no function at all: `litConsts`, above.)
   if d.params.isEmpty && !(← H.recomputeConst body) && !(← read).uncachedConsts.contains d.name then
     let acc ← cafAccessor (fnName d.name) ret
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name ++ "_init") #[] ret block) |>.push acc }

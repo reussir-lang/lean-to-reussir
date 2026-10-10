@@ -14,8 +14,10 @@ code calls, and it lowers every function. A one-line program had 484
 textures before and has 75 (rrc: 14.3 s → 3.1 s with an empty texture
 cache, 1.8 s → 1.1 s with a full one; docs/implementation/optional-passes.md).
 A removed function is one that no code of the program can call, so the
-program computes the same results. Without this pass the whole prelude is
-in the program text.
+program computes the same results. The text also leaves out the prelude's
+whole-line comments outside textures (`PreludePrune.dropCommentLines`: 57 KB
+of every program's text). Without this pass the whole prelude is in the
+program text, byte for byte.
 -/
 
 namespace LeanToReussir

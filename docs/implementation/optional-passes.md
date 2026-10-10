@@ -25,6 +25,7 @@ and passes").
 | `compact-arrays` | an `Array` of a scalar is `RVec<u8\|u16\|u32\|u64\|f32\|f64>` of its storage kind; the loops of `Array.map` typed at their element types (Stage 3); `Array lcAny` parameters typed from their callers when they get compact arrays; a field `Array α` boxed in an inductive the program uses with a compact array | the whole-program check (`compactArrayKinds`) turns a storage kind off when a value of it could meet an array of boxes: a crossing at any edge of the reachable code, a flow class that holds `Array lcAny`, or a program that casts (`programCasts`); a typed `map` loop only in Lean's shape, its stored values checked once typed; a parameter only when every caller passes one type and its own calls agree | [compact arrays](representations/compact-arrays.md) |
 | `placeholder-cache` | placeholders that would allocate built once, in a once-cell | only heap placeholders; a placeholder is never inspected | [placeholders](representations/placeholders.md#placeholders-that-allocate-are-built-once) |
 | `boxed-consts` | a constant whose boxing allocates boxed once, in a once-cell (native Lean's `_boxed_const`) | only a variable bound to a declaration without parameters that runs once (cached) or cannot trace or panic (`cheap-consts`) and whose value is not a literal that boxes as an immediate (`constIsImmediate`), or to a `UInt64` literal from 2^63, at a type whose boxing can allocate (`boxAllocates`), outside the body of a declaration without parameters (`inConstBody`: it runs once); a constant is pure, so one box does as well as a new one | below |
+| `literal-consts` | a constant whose code is one string literal gets no once-cell accessor: a read calls the runtime's literal cache, which makes the string at the first read and keeps it | only a declaration without parameters of type `String` whose code is `let x := "…"; return x`, not a closed term evaluated where it is used (`uncachedConsts`) nor an `initialize` constant (`literalConsts`); making a literal has no effect, so its first read can make it; the slot keeps a reference, so a value read is never unique, as a once-cell's | [constants](startup/constants.md#a-constant-of-one-string-literal-is-read-from-the-literal-cache) |
 | `float-lits` | float literals folded to their bits at compile time | literal arguments only (the functions are pure and total): a `let` of a literal, a `Bool` discriminant inside an alternative that fixes it, a join point parameter to which every jump passes the same literal; work bound: exponent ≤ 2000, mantissa (or `Float.ofNat`'s argument) at most 4096 bits | below |
 | `cheap-consts` | constants of small literals recomputed at each use | `isCheapConst`: unboxed types only, every `Nat`/`Int` small (`Nat` literals and `Nat.succ` < 2^63, `Int.ofNat`/`Int.negSucc` of `int32` values), other constructors, total scalar conversions, other cheap constants; no strings | below |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code | none needed: the same strings (unary calls only) | [nat-int](representations/nat-int.md#natrepr-of-0127-shares-one-string-per-number) |
@@ -38,7 +39,7 @@ and passes").
 | `flatten-structs` | a structure argument of a loop (join point, self-recursive function) and a structure or two-constructor result passed as its fields at their precise types (worker/wrapper) | a value is split only where its fields are known at every jump, self-call and return; a whole use keeps that level whole, except two rebuilds that add no allocation: a loop's parameter at the loop's exit after a step that built a new value (the first step peeled into the wrapper), and a call's result (each value built at most once per run of its scope); a value whose object is inspected (`ptrAddrUnsafe`, `dbgTraceIfShared`, `isExclusiveUnsafe`) or that the caller passed in is never rebuilt; a result level stays whole when callers (or the wrapper) only use it whole, or when a shared object may arrive there; results with function types or without finite placeholders are not split; in a program that creates resources, declarations with a parameter or result that may hold one, and those whose borrow flags decide the flag of such a parameter, are left alone and join point parameters that may hold one stay whole (their inferred borrows stay Lean's), decided by a whole-program flow analysis of the values (`ResourceFlow`; by type in a program that can cast); bounds: 8 levels, 16 variables, peeled bodies of at most 300 nodes | below |
 | `conv-liveness` | unboxing, application and conversion helpers generated only for what live code reaches; unreachable functions dropped | none needed for soundness: an arm left out matches a variant that no live code builds, so no value of it exists at run time; every identifier of raw text, of the prelude and of atoms is a root, every arm of other matches counts, and a variant that text names counts as built | [liveness](conversions/liveness.md) |
 | `merge-fns` | generated functions equal up to their own and local names merged: a copy calls the first, calls of a copy call the first | the canonical texts are equal (the same code once names are renamed in binding order, inside atoms too); a copy keeps its name and calls the function its first ends at, never itself; nothing is removed; a function called from one place only stays (LLVM inlines it there), except startup code (`_init`, `l2r_persist_`) | below |
-| `prelude-liveness` | the runtime prelude's functions that the program text does not name, directly or through the prelude's kept functions, are left out of the `.rr` | none needed for soundness: a function no text names cannot be called; every identifier of the generated text and of the prelude's items that always stay (the `extern "rust"` blocks, the types) is a root, also in string literals and in comments at the end of a line; only functions of the form `fn NAME` at column 0, outside a texture, with no attributes but `#[ffi(import)]` and `#[transform_anchor]`, can go; a name the scan missed would make rrc stop with an unknown function, not build another program | below |
+| `prelude-liveness` | the runtime prelude's functions that the program text does not name, directly or through the prelude's kept functions, are left out of the `.rr`, and so are its whole-line comments outside textures | none needed for soundness: a function no text names cannot be called, and a comment is only lexed; a texture stays as it is; every identifier of the generated text and of the prelude's items that always stay (the `extern "rust"` blocks, the types) is a root, also in string literals and in comments at the end of a line; only functions of the form `fn NAME` at column 0, outside a texture, with no attributes but `#[ffi(import)]` and `#[transform_anchor]`, can go; a name the scan missed would make rrc stop with an unknown function, not build another program | below |
 
 ### Values in unread fields are left out (`unread-fields`)
 
@@ -236,7 +237,13 @@ and passes").
   of the prelude that are a comment as a whole; it reads every other line,
   string literals and comments at the end of a line included. A removed
   function's lines go from its first attribute line to its last line of
-  code; the blank and comment lines after it stay. A comment line after the
+  code; the blank lines after it stay. The text `prune` returns has no
+  line that is a `//` comment as a whole outside a texture
+  (`dropCommentLines`; texture depth as `items` counts it): a texture is
+  Rust and stays as it is, its comments included, and a comment at the
+  end of a line of code stays. The liveness reads no whole-line comment,
+  so the functions kept are the same with and without the comments (the
+  same sets in 50 programs of the size survey). A comment line after the
   prelude gives the number of functions removed. The generated part is the
   same text with and without the pass.
 - **Why:** rrc compiles every texture of its input with its own rustc run,
@@ -253,12 +260,21 @@ and passes").
   69 s in total. For a big program the rest of rrc's time (its MLIR
   passes, LLVM's optimization and code generation) does not change. The
   executables are about 1 MB smaller: each texture is an exported symbol,
-  which keeps its `leanrt` code in the link.
-- **Where:** `PreludePrune.lean`: `prune`, `items`, `namesIn`;
+  which keeps its `leanrt` code in the link. The prelude's whole-line
+  comments (about 930 lines) were 57 to 59 KB of every program's text, 2.93
+  MB (8.3%) of the 35 MB of 50 programs (size survey of 2026-10-10); no
+  step after lean2rr reads them (rrc only lexes them). conv-liveness takes
+  its roots from the whole prelude file, comments included
+  (`liveRootText`), before `render`, so dropping them from the text changes
+  no generated function.
+- **Where:** `PreludePrune.lean`: `prune`, `items`, `namesIn`,
+  `dropCommentLines`;
   `Emit/Program.lean`: `LoweredProgram.render`; `Main.lean`: `pipeline`;
   the switch `PassConfig.prunePrelude`, which `Opt/PreludeLiveness.lean`
   sets. Check `tests/runtime/prelude-liveness-check.sh` (the generated part
-  unchanged, at most half of the prelude's textures kept for `RtIO`);
+  unchanged, at most half of the prelude's textures kept for `RtIO`, no
+  whole-line comment outside a texture left, every line a line of the
+  prelude in order);
   `tests/runtime/any-probe.sh` turns the pass off: its probe calls prelude
   functions that its host program does not use.
 - **Remove only if:** rrc compiles only the textures of the functions that

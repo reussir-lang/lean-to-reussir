@@ -15,6 +15,7 @@ import LeanToReussir.Opt.ValueStructs
 import LeanToReussir.Opt.FieldOrder
 import LeanToReussir.Opt.PlaceholderCache
 import LeanToReussir.Opt.BoxedConsts
+import LeanToReussir.Opt.LiteralConsts
 import LeanToReussir.Opt.FreshRebuild
 import LeanToReussir.Opt.ConvLiveness
 import LeanToReussir.Opt.MergeFns
@@ -85,6 +86,7 @@ def optimizations : Array OptPass := #[
   ⟨"compact-arrays", true, "an Array of a scalar (UInt8, Bool and enumerations of at most 256 constructors as u8; UInt16; UInt32 and Char; UInt64 and USize; Float32; Float) is a compact RVec<u8|u16|u32|u64|f32|f64>, for each storage kind no value of which can reach generic code or a field of type Array α (a whole-program check, CompactArrays); the loops of Array.map are typed at their element types (Opt/SplitMapLoops)", CompactArrays.install⟩,
   ⟨"placeholder-cache", true, "placeholders (box(0) at a type) that would allocate built once, in a once-cell", PlaceholderCache.install⟩,
   ⟨"boxed-consts", true, "a constant whose boxing allocates (a Float, a UInt64 from 2^63) boxed once, in a once-cell, as native Lean's _boxed_const", BoxedConsts.install⟩,
+  ⟨"literal-consts", true, "a constant whose code is one string literal (many of Lean's closed terms) gets no once-cell accessor: a read calls the runtime's literal cache (l2r_str_lit_cached), which makes the string at the first read and keeps it", LiteralConsts.install⟩,
   ⟨"float-lits", true, "Float literals (Float.ofScientific/ofNat on literals) folded to their bits at compile time", FloatLits.install⟩,
   ⟨"cheap-consts", true, "constants built from small literals and scalar conversions recomputed at each use, not cached", CheapConsts.install⟩,
   ⟨"prelude-repr", true, "Nat.repr/Int.repr calls replaced by the runtime's GMP versions (same strings; the runtime keeps them, unused, without the pass)", PreludeRepr.install⟩,
@@ -98,7 +100,7 @@ def optimizations : Array OptPass := #[
   ⟨"flatten-structs", true, "a structure argument of a loop (join point, self-recursive function) and a structure or two-constructor result (EST.Out, Except, Option; a tuple with a tag) passed as its fields, each at its precise type (worker/wrapper), where the fields are known at every jump, call and return: no record built and no field boxed per step", Flatten.install⟩,
   ⟨"conv-liveness", true, "unboxing, application and conversion helpers generated only for what live code reaches (arms only for the Box variants and function values it builds), and functions unreachable from the entry point and the runtime's entries dropped", ConvLiveness.install⟩,
   ⟨"merge-fns", true, "generated functions equal up to their own and local names merged: each copy calls the first, and calls of a copy call the first (List.reverseAux at every type); a function called from one place stays (LLVM inlines it), except startup code", MergeFns.install⟩,
-  ⟨"prelude-liveness", true, "the runtime prelude's functions that the generated code does not name, directly or through the prelude's kept functions, left out of the .rr: rrc compiles each texture (#[ffi(import)] body) with its own rustc run, also one nothing calls (PreludePrune)", PreludeLiveness.install⟩]
+  ⟨"prelude-liveness", true, "the runtime prelude's functions that the generated code does not name, directly or through the prelude's kept functions, left out of the .rr, and so are the prelude's whole-line comments outside textures: rrc compiles each texture (#[ffi(import)] body) with its own rustc run, also one nothing calls (PreludePrune)", PreludeLiveness.install⟩]
 
 /-- Parts of the translation that look like optimizations but are not
 optional. -/

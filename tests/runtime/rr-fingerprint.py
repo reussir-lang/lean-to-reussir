@@ -44,8 +44,9 @@ form:
   canonical definition, refined over four rounds (so `List Nat` and
   `List String` get different labels, and a type keeps its label while its
   layout stays the same);
-- replaces a string literal's index, `l2r_str_lit(31)`, by the literal's
-  text (from the table in the item `l2r_str_lit`), and the cell index of a
+- replaces a string literal's index, `l2r_str_lit(31)`, and that of a read
+  of the literal cache, `l2r_str_lit_cached(31)`, by the literal's text
+  (from the table in the item `l2r_str_lit`), and the cell index of a
   constant (`l2r_once_get<T>(5)`) by its rank in the item;
 - replaces a payload number of `Box` by the label of its type (the program's
   release of each payload type, the item `fn l2r_any_rel_17(x : T) -> unit`,
@@ -104,7 +105,7 @@ FRESH_FN = re.compile(r"^(l2r_zero_|l2r_vconv_|jp_)(\d+)(_[A-Za-z0-9_]*)?$")
 INST = re.compile(r"___l2r_\d+_")
 CONV_FN = re.compile(r"^(l2r_conv_|l2r_vconv_|l2r_fconv_|l2r_lazyconv_|l2r_unbox_)")
 LIT = re.compile(r'b"((?:[^"\\]|\\.)*)"')
-STR_LIT = re.compile(r"l2r_str_lit\((\d+)\)")
+STR_LIT = re.compile(r"(l2r_str_lit(?:_cached)?)\((\d+)\)")
 ONCE = re.compile(r"(l2r_once_[a-z]+(?:<[^()]*?>)?\()(\d+)")
 VARIANT_REF = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)::([a-z]+\d+)\b")
 VARIANT_DEF = re.compile(r"^\s+([a-z]+\d+)\s*(\(.*\))?\s*,?\s*$")
@@ -323,8 +324,8 @@ class Program:
             kept.append(t)
             return f"\0{len(kept) - 1}\0"
         def lit(m):
-            i = int(m.group(1))
-            return keep(f'l2r_str_lit(b"{self.lits[i]}")') if i < len(self.lits) else m.group(0)
+            i = int(m.group(2))
+            return keep(f'{m.group(1)}(b"{self.lits[i]}")') if i < len(self.lits) else m.group(0)
         text = STR_LIT.sub(lit, text)
         cells = {}
         text = ONCE.sub(lambda m: m.group(1) + "#" + str(cells.setdefault(m.group(2), len(cells))), text)

@@ -71,6 +71,10 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
   if args.size == 1 then
     if let some (prim, argTy) ← preludeReplacement? f then
       return ← coerce (.call prim #[] #[← lowerArg ctx args[0]! argTy]) (.named "LStr") rty
+  -- A constant whose code is one string literal: the literal cache.
+  if args.isEmpty then
+    if let some s := (← read).litConsts.find? f then
+      return ← coerce (← strLitCached s) (.named "LStr") rty
   match ← calleeOf f with
   | .initConst slot ty =>
     let t ← lowerType ty

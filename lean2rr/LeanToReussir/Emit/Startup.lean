@@ -713,7 +713,11 @@ def startupChain (errStr : Name) (startup : Array StartupStep) : LowerM String :
     for i in [:stop - start] do
       let j := stop - 1 - i
       match startup[j]! with
-      | .caf inst => code := s!"let caf{j} = {fnName inst}();\n" ++ code
+      | .caf inst =>
+        -- A constant whose code is one string literal has no function, and
+        -- making it has no effect: its first read makes it (`litConsts`).
+        unless (← read).litConsts.contains inst do
+          code := s!"let caf{j} = {fnName inst}();\n" ++ code
       | .ioUnit inst =>
         let (t, ok, err, _, _) ← ioResultOf inst
         code := s!"match {fnName inst}(L2RUnit::u\{}) \{\n{t}::{ok}(v{j}) => \{\n{code}\n},\n{t}::{err}(e{j}) => \{ {failed s!"e{j}"} }\n}"

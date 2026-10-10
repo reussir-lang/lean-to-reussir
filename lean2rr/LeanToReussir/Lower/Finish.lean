@@ -398,8 +398,10 @@ def anchoredFns : LowerM (Std.HashSet String) := do
   for (src, dst) in st.fnConvs do out := out.insert s!"l2r_fconv_{src.enc}_{dst.enc}"
   for t in st.fnUnboxTargets do out := out.insert s!"l2r_unbox_fn_{t.enc}"
   for t in st.unboxTargets do out := out.insert s!"l2r_unbox_{t}"
-  -- A once-cell's computation runs once (`cafAccessor`).
+  -- A once-cell's computation runs once (`cafAccessor`), and so does the
+  -- literal cache's slow path for each literal (`strLitCached`).
   for f in st.cafInits do out := out.insert f
+  out := out.insert "l2r_str_lit_fill"
   for (t, j) in st.fnApplies do
     if wraps t || (t.subterms).contains RR.Ty.box then out := out.insert (applyFnName t j)
   return out

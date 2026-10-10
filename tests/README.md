@@ -309,16 +309,22 @@ disassembly, and a TLS descriptor relocation added to readelf's output
 `tests/runtime/const-read-check.sh` builds `RtConstReads` (constants of
 every kind of once-cell read in loops: a table computed at startup, a
 literal table, closed terms, a toolchain constant, a small scalar,
-64-bit and 8-bit zeros, in a task too) to LLVM IR and fails when, on the
+64-bit and 8-bit zeros, in a task too; closed terms of one string
+literal, read from the literal cache) to LLVM IR and fails when, on the
 hot path of a loop, a constant's read calls its accessor, a once-cell
 texture or a function of leanrt's `once` module, or loads leanrt's slot
-record instead of the tables at fixed addresses (a read of a constant is
+record instead of the tables at fixed addresses, or when a literal
+constant's read calls `l2r_str_lit_cached`, a literal cache texture or
+reader, or loads the literal cache's record (a read of a constant is
 one load: docs/implementation/startup/constants.md). It reads symbols by
 their identifiers, whatever the mangling's prefix, fails when it finds
-no accessor or cannot read the IR's symbols, and checks itself on four
-mutations of the IR named from the IR's own symbols (a call of an
-accessor, of `l2r_once_claim`, of `once::claim`, a load of the record,
-added to a hot loop block), each of which must fail (review PCR-01).
+no accessor, fewer than 2 literal slots read in loops, or cannot read the
+IR's symbols, and checks itself on six mutations of the IR named from the
+IR's own symbols (a call of an accessor, of `l2r_once_claim`, of
+`once::claim`, of `l2r_str_lit_cached`, a load of either record, added to
+a hot loop block), each of which must fail (review PCR-01). With
+`literal-consts` turned off (`L2R_DISABLE_OPTS`) it does not ask for
+literal slots.
 `tests/runtime/sm-slots-check.sh` builds `RtSmDecode` (a table-driven
 decoder loop, a state machine of three variants), `RtStateMachines` and
 `RtJpSlots` to LLVM IR and fails when the entry point of a state machine

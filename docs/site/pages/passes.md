@@ -164,7 +164,10 @@ checkout and after each change of the runtime crates.
 `prelude-liveness` keeps a prelude function only when the generated code
 names it, or a kept prelude function names it. It removes only lines of
 the form `fn NAME` (with their `#[ffi(import)]` attribute). The types and
-the `extern "rust"` blocks stay.
+the `extern "rust"` blocks stay. The pass also removes the prelude's
+comment lines (about 930 lines, 57 KB in every program). A comment in a
+texture stays, because a texture is Rust. The liveness does not read
+comment lines, so the same functions stay.
 
 - **Effect.** A one-line program has 75 textures instead of 484. Its rrc
   step takes 3.1 s instead of 14.3 s with an empty cache, and 1.1 s

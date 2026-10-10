@@ -224,6 +224,13 @@ thread that waits blocks its context.
   runs at startup, in Lean's initialization order. Each constant is a
   once-cell. A context that needs a constant that another context is
   computing waits for it, as a native thread waits for a lock.
+- **Literal constants.** A constant whose code is one string literal has
+  no once-cell. The literal cache in `leanrt::string` has one slot per
+  literal of the program. The first read makes the string and keeps it in
+  the slot; each read takes a new reference. So a read value is never
+  unique, and an update copies it. Making a literal cannot block, so no
+  context waits for another here. Startup does not make these constants:
+  the first read makes each one.
 - **Library initializers.** The `initialize` declarations of `Init` and
   `Std` run at their module's place in the import order, as natively. They
   run also when the program does not use them, because their effects are

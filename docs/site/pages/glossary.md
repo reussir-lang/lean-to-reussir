@@ -148,6 +148,9 @@ texture
 once-cell
 :   A runtime slot that holds a constant. The value is computed once and never freed.
 
+literal cache
+:   The runtime's slots for the constants whose code is one string literal, one slot per literal of the program. The first read makes the string; each read takes a new reference.
+
 deferred task
 :   A task that runs only when needed, when the running code blocks, or when `main` returns.
 

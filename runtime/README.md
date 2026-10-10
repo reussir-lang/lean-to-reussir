@@ -640,6 +640,27 @@ path (`once::claim`) computes it or waits for the scheduler context
 computing it. The tables (`once::FAST`, `once::FLAGS`) mirror the record
 of the slots (`once::SLOTS`).
 
+**Literal constants.** A constant whose code is one string literal has no
+once-cell (lean2rr's optimization `literal-consts`): a read is the
+generated `l2r_str_lit_cached(id)`, which reads the literal cache in
+`leanrt::string`, one slot per id of the program's literal table. What:
+`lit_ready(id)` loads the slot's word from a static table at a fixed
+address (`LIT_TABLE`, 2^16 words; the ids above are in the record
+`LIT_REC`; 0 is an empty slot, as no string is at address 0); at the first
+read the generated code makes the string (`l2r_str_lit`) and `lit_put`
+moves its reference into the slot; `lit_get` then loads the word again and
+takes a new reference. The slot keeps its reference for the run, so a value
+read is never unique (an update copies it), as a constant's. There is no
+claim: making a literal runs no Lean code and cannot block. `lit_put` is
+`#[cold]` (the branch hint: the first read's path is out of line). Why:
+these constants were 2286 of the 5788 once-cell accessor and `_init`
+pairs of 50 programs (0.97 MB of `.rr`), and natively such a closed term
+is made once and shared. Where: `string.rs` (`LIT_TABLE`, `LIT_FAST`,
+`LIT_REC`, `lit_ready`, `lit_put`, `lit_get`, the unit test
+`literal_cache`), the prelude's `l2r_lit_ready`, `l2r_lit_put`,
+`l2r_lit_get`; docs/implementation/startup/constants.md. Remove only if
+the optimization goes (then nothing calls these functions).
+
 **Thunks and tasks.** A thunk or task is an `LCell<S>` holding a
 lean2rr-generated state `enum S { pending(L2RUnit -> LAny), busy,
 done(LAny) }`, one for thunks and one for tasks (tasks also have

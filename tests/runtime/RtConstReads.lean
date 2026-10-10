@@ -16,7 +16,9 @@ calls each).
 - `mask`: a `UInt8` computed by a loop (a value smaller than a word);
 - `zero64`, `zero8`: a `UInt64` 0 and a `UInt8` 0 (their words are 0: a
   read also loads the slot's set flag, and must give 0);
-- `crc32` again inside a task.
+- `crc32` again inside a task;
+- the literals of `labelSum`: closed terms of one string literal, read
+  from the literal cache (optimization `literal-consts`).
 -/
 
 def crcTable : Array UInt32 := Id.run do
@@ -60,6 +62,13 @@ def litSum (data : ByteArray) : Nat := Id.run do
     s := s + (t[b.toNat % 11]!).toNat
   return s
 
+def labelSum (data : ByteArray) : Nat := Id.run do
+  let mut s := 0
+  for b in data do
+    let w := if b % 3 == 0 then "fizz" else if b % 3 == 1 then "buzz" else "fizzbuzz"
+    s := s + w.length
+  return s
+
 def bigMod (data : ByteArray) : Nat := Id.run do
   let mut s : Nat := 0
   for b in data do
@@ -78,6 +87,7 @@ def main (args : List String) : IO Unit := do
   IO.println (crc32 data)
   IO.println (lenSum data)
   IO.println (litSum data)
+  IO.println (labelSum data)
   IO.println (bigMod data)
   IO.println (maskSum data)
   let t := Task.spawn fun _ => crc32 (data.push 1)

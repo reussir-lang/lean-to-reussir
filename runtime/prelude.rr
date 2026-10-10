@@ -2489,6 +2489,21 @@ fn l2r_std_push(base : u64) -> u64 [{ { leanrt::once::push_context(base, 3); 0 }
 #[ffi(import)]
 fn l2r_std_pop(base : u64) -> u64 [{ { leanrt::once::pop_context(base, 3); 0 } }];
 
+// The literal cache: the string of a constant whose code is one string
+// literal, one slot per literal id (`leanrt::string::lit_ready`). A read
+// (lean2rr's `strLitCached`) tests the slot (one load, inlined), fills it
+// at the first read with the string the literal table makes (the reference
+// moves into the slot), then takes a new reference (inline: the load again
+// and the increment).
+#[ffi(import)]
+fn l2r_lit_ready(id : u64) -> bool [{ leanrt::string::lit_ready(id) }];
+
+#[ffi(import)]
+fn l2r_lit_put(id : u64, s : LStr) -> u64 [{ leanrt::string::lit_put(id, s) }];
+
+#[ffi(import)]
+fn l2r_lit_get(id : u64) -> LStr [{ leanrt::string::lit_get(id) }];
+
 // ===========================================================================
 // Thunks and tasks
 //

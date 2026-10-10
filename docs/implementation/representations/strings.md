@@ -111,13 +111,18 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/string.rs`, and
 - **What:** A string literal is `l2r_str_lit(id)`, a runtime function
   generated with the program that builds the string from a table of Rust
   byte strings. The bytes are written as escapes, so every literal
-  round-trips exactly. Literals are deduplicated by content.
+  round-trips exactly. Literals are deduplicated by content. Each call
+  makes a new string (a literal in a constant's body, which runs once, or
+  in code that Lean did not extract). A read of a constant whose code is
+  one literal is `l2r_str_lit_cached(id)` instead: the runtime's literal
+  cache keeps the string made at the first read, one slot per id
+  ([../startup/constants.md](../startup/constants.md#a-constant-of-one-string-literal-is-read-from-the-literal-cache)).
 - **Why:** A Reussir `str` argument goes through a stack slot whose
   address escapes, and LLVM then never turns the enclosing function's tail
   calls into loops (9346467). The prelude avoids `str` parameters on hot
   paths for the same reason.
-- **Where:** `LowerBase.lean`: `strLit`, `strLitTable`;
-  `Emit/Program.lean`: `LoweredProgram.render`; plan
+- **Where:** `LowerBase.lean`: `strLitId`, `strLit`, `strLitCached`,
+  `strLitTable`; `Emit/Program.lean`: `LoweredProgram.render`; plan
   [§5.4](../../translation-plan.md#54-let-return-literals).
 - **Remove only if:** Reussir passes `str` without an escaping slot (or
   guarantees tail calls).

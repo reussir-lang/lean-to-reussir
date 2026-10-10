@@ -24,7 +24,15 @@ with `fn NAME`, outside a texture, with no attributes other than
 `#[ffi(import)]` and `#[transform_anchor]` on the lines just before it.
 Everything else stays: the `extern "rust"` blocks, the types, `pub` items.
 The removed lines run from the function's first attribute line to its last
-line of code; the blank and comment lines after it stay.
+line of code; the blank lines after it stay.
+
+The text that `prune` returns also has no line that is a `//` comment as a
+whole outside a texture (`dropCommentLines`): the prelude's comments are for
+its readers (about 930 lines, 57 KB of every program's text), and no step
+after lean2rr reads them. A texture (`[{ … }]`) is Rust and stays as it
+is, its comments included; so does a comment at the end of a line of
+code. The liveness above reads no whole-line comment either, so the
+functions kept are the same with and without them.
 -/
 
 namespace LeanToReussir.PreludePrune
@@ -120,8 +128,22 @@ private def codeText (lines : Array String) (first stop : Nat) : String := Id.ru
     unless commentOrBlank l do out := out ++ l ++ "\n"
   return out
 
+/-- `lines` without the lines that are a `//` comment as a whole outside a
+texture (`[{ … }]`, whose Rust stays as it is). Texture depth as `items`
+counts it. -/
+def dropCommentLines (lines : Array String) : Array String := Id.run do
+  let mut depth : Int := 0
+  let mut kept : Array String := #[]
+  for l in lines do
+    if depth == 0 && l.trimAsciiStart.startsWith "//" then continue
+    kept := kept.push l
+    let code := (l.splitOn "//").head!
+    depth := depth + ((code.splitOn "[{").length - 1 : Nat) - ((code.splitOn "}]").length - 1 : Nat)
+  return kept
+
 /-- The prelude without the functions that neither `generated` (the rest of
-the program text) nor a kept part of the prelude names; and how many
+the program text) nor a kept part of the prelude names, and without its
+whole-line comments outside textures (`dropCommentLines`); and how many
 functions it removed. -/
 def prune (prelude generated : String) : String × Nat := Id.run do
   let lines := (prelude.splitOn "\n").toArray
@@ -156,10 +178,9 @@ def prune (prelude generated : String) : String × Nat := Id.run do
       unless live.contains n do
         removed := removed + 1
         for i in [it.first:it.stop] do drop := drop.set! i true
-  if removed == 0 then return (prelude, 0)
   let mut kept : Array String := #[]
   for h : i in [0:lines.size] do
     unless drop[i]! do kept := kept.push lines[i]
-  return ("\n".intercalate kept.toList, removed)
+  return ("\n".intercalate (dropCommentLines kept).toList, removed)
 
 end LeanToReussir.PreludePrune

@@ -2,20 +2,26 @@
 # A constant read in a loop stays one load: builds RtConstReads (constants
 # of every kind of once-cell read in loops: a startup table, a literal
 # table, closed terms, a toolchain constant, a small scalar, 64-bit and
-# 8-bit zeros, in a task too) through lean2rr to LLVM IR (scripts/l2r.py
+# 8-bit zeros, in a task too; and closed terms of one string literal, read
+# from the literal cache) through lean2rr to LLVM IR (scripts/l2r.py
 # --emit llvm-ir, with the .rr) and fails when, on the hot path of a loop,
 # there is
 # - a call of a constant's accessor (a function whose body tests a
-#   once-cell, `l2r_once_ready`: the accessor was not inlined);
+#   once-cell, `l2r_once_ready`: the accessor was not inlined), or of the
+#   literal cache's reader `l2r_str_lit_cached`;
 # - a call of a once-cell texture that reads (`l2r_once_ready`, `_get`,
-#   `_claim`, `_put`, `_has`, or its `_ffi` function): a texture LLVM did
-#   not inline;
+#   `_claim`, `_put`, `_has`, or its `_ffi` function), or of a literal
+#   cache texture (`l2r_lit_ready`, `_get`, `_put`, or its `_ffi`): a
+#   texture LLVM did not inline;
 # - a call of a function of leanrt's `once` module (`claim`, `get_raw`,
 #   `has`, ... not inlined), other than the standard streams' mutable-cell
 #   operations (`take_raw`, `swap_raw`, `push_context`, `pop_context`, ...;
-#   the task glue's loops move the streams' cells);
+#   the task glue's loops move the streams' cells), or of the literal
+#   cache's readers in leanrt's `string` module (`lit_ready`, `lit_get`,
+#   `lit_word`, `lit_rec_word`);
 # - a load from leanrt's slot record `SLOTS` (a read through its vectors,
-#   not through the tables at fixed addresses `FAST` and `FLAGS`).
+#   not through the tables at fixed addresses `FAST` and `FLAGS`), or from
+#   the literal cache's record `LIT_REC` (not its table `LIT_TABLE`).
 # Symbols are recognized by their identifiers, whatever the mangling's
 # prefix: each run of digits not preceded by a digit is read as a length
 # and the identifier that follows (Rust's v0 scheme, which Reussir's
@@ -24,7 +30,8 @@
 # The blocks of a loop are those in a cycle of a function's control-flow
 # graph; a block is on the hot path when a path from the function's entry
 # reaches it without entering a cold block: one that ends in `unreachable`,
-# calls the once-cell's slow paths (`claim_cold`, `unset`) or a panic, or is
+# calls the once-cell's slow paths (`claim_cold`, `unset`), the literal
+# cache's (`lit_put`, `lit_unset`, `l2r_str_lit_fill`) or a panic, or is
 # the "not set" side of a test of a flag loaded from `FLAGS` (`trunc f`,
 # `icmp ne f, 0`, an or with such a test, and their negations). A test of a
 # word from `FAST` alone marks no side cold: a word 0 may be a set slot's
@@ -32,10 +39,13 @@
 # It fails when the test is vacuous: no accessor in the .rr, no defined
 # function of the IR whose identifier is a function of the .rr (the
 # symbols are not read as expected), fewer than 6 distinct slots read from
-# `FAST`. It then checks itself on mutations of the IR, with names taken
-# from the IR's own symbols, each of which must fail: added to a hot loop
+# `FAST`, fewer than 2 literal slots read from `LIT_TABLE` on hot loop
+# paths (unless L2R_DISABLE_OPTS turns `literal-consts` off). It then
+# checks itself on mutations of the IR, with names taken from the IR's own
+# symbols, each of which must fail: added to a hot loop
 # block, a call of an accessor, a call of `l2r_once_claim`, a call of
-# leanrt's `once::claim`, a load from `SLOTS`; added to the block where a
+# leanrt's `once::claim`, a load from `SLOTS`, a call of
+# `l2r_str_lit_cached`, a load from `LIT_REC`; added to the block where a
 # constant whose word is 0 tests its flag, a call of an accessor, with the
 # word's test as LLVM wrote it and written the other way (`icmp ne`,
 # successors swapped).
@@ -58,7 +68,7 @@ python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$OUT" --emit llvm-ir -o "$OUT/$
   --keep-rr "$OUT/$t.rr" > "$t.build.log" 2>&1 \
   || { echo "FAIL $t: build failed (see $OUT/$t.build.log)"; exit 1; }
 python3 - "$t.ll" "$t.rr" <<'PY'
-import re, sys
+import os, re, sys
 
 ll_path, rr_path = sys.argv[1], sys.argv[2]
 LABEL = r'(?:"[^"]+"|[A-Za-z0-9_.$\-]+)'
@@ -67,6 +77,11 @@ VAL = r'%' + LABEL
 COLD = re.compile(r'panic|index_bug|internal_panic')
 TEXTURES = {f'l2r_once_{k}{s}' for k in ('ready', 'get', 'claim', 'put', 'has') for s in ('', '_ffi')}
 ONCE_COLD = {'claim_cold', 'unset'}
+# The literal cache: its textures and generated reader, its readers in
+# leanrt's `string` module, and its slow paths.
+LIT_TEXTURES = {f'l2r_lit_{k}{s}' for k in ('ready', 'get', 'put') for s in ('', '_ffi')} | {'l2r_str_lit_cached'}
+LIT_READERS = {'lit_ready', 'lit_get', 'lit_word', 'lit_rec_word'}
+LIT_COLD = {'lit_put', 'lit_unset'}
 ONCE_CELLS = {'take_raw', 'swap_raw', 'push_context', 'pop_context', 'swap_ctx_state', 'swap_cells',
               'enter_cells', 'note_mutable'}
 
@@ -79,13 +94,19 @@ def idents(sym):
         out.append(sym[m.end():m.end() + n])
     return out
 
-def once_item(sym):
-    """The item of leanrt's `once` module a symbol names, or None."""
+def leanrt_item(sym, module):
+    """The item of leanrt's module `module` a symbol names, or None."""
     ids = idents(sym)
     for i in range(len(ids) - 2):
-        if ids[i] == 'leanrt' and ids[i + 1] == 'once':
+        if ids[i] == 'leanrt' and ids[i + 1] == module:
             return ids[i + 2]
     return None
+
+def once_item(sym):
+    return leanrt_item(sym, 'once')
+
+def string_item(sym):
+    return leanrt_item(sym, 'string')
 
 def callee(x):
     m = re.search(r'(?:call|invoke) [^@%]*@("[^"]+"|[A-Za-z0-9_.$]+)\(', x)
@@ -191,6 +212,11 @@ def table_load(x):
             off = re.search(r'@"?' + re.escape(g) + r'"?, i64 (\d+)\)', x)
             k = int(off.group(1)) if off else 0
             return item, (k // 8 if item == 'FAST' else k), m.group(1)
+        item = string_item(g)
+        if item in ('LIT_TABLE', 'LIT_REC'):
+            off = re.search(r'@"?' + re.escape(g) + r'"?, i64 (\d+)\)', x)
+            k = int(off.group(1)) if off else 0
+            return item, (k // 8 if item == 'LIT_TABLE' else k), m.group(1)
     return None
 
 def cold_blocks(bl):
@@ -202,7 +228,8 @@ def cold_blocks(bl):
             cold.add(b)
         for x in i:
             c = callee(x)
-            if c and (COLD.search(c) or once_item(c) in ONCE_COLD):
+            if c and (COLD.search(c) or once_item(c) in ONCE_COLD or string_item(c) in LIT_COLD
+                      or 'l2r_str_lit_fill' in idents(c)):
                 cold.add(b)
     # unset[v] = b: when the i1 value v is b, the slot is not set. Only a
     # flag's test says so (its false side); a word's test alone never does
@@ -253,8 +280,9 @@ def cold_blocks(bl):
 
 def check(lines, accs):
     """Violations on hot loop paths, the slots read from FAST, a hot loop
-    block (function, label)."""
-    bad, fast_slots, a_hot_block = [], set(), None
+    block (function, label), the literal slots read from LIT_TABLE on hot
+    loop paths."""
+    bad, fast_slots, a_hot_block, lit_slots = [], set(), None, set()
     for name, body in functions(lines):
         bl = blocks(body)
         if not bl:
@@ -291,23 +319,32 @@ def check(lines, accs):
                         why = 'call of an accessor'
                     elif ids & TEXTURES:
                         why = 'call of a once-cell texture'
+                    elif ids & LIT_TEXTURES:
+                        why = 'call of a literal cache texture or reader'
                     elif item is not None and item not in ONCE_CELLS:
                         why = f"call of leanrt's once::{item}"
+                    elif string_item(c) in LIT_READERS:
+                        why = f"call of leanrt's string::{string_item(c)}"
                 else:
                     t = table_load(x)
                     if t and t[0] == 'SLOTS':
                         why = 'load from SLOTS'
+                    elif t and t[0] == 'LIT_REC':
+                        why = 'load from LIT_REC'
+                    elif t and t[0] == 'LIT_TABLE':
+                        lit_slots.add(t[1])
                 if why:
                     bad.append(f'{name[:70]} {b}: {why}: {x[:120]}')
-    return bad, fast_slots, a_hot_block
+    return bad, fast_slots, a_hot_block, lit_slots
 
 lines = open(ll_path).read().split('\n')
 names, accs = rr_functions()
-bad, fast_slots, hot_block = check(lines, accs)
+bad, fast_slots, hot_block, lit_slots = check(lines, accs)
 status = 0
 defined = [n for n, _ in functions(lines)]
 known = {d: i for d in defined for i in idents(d) if i in names}
 fast_sym = next((g for x in lines for g in globals_in(x) if once_item(g) == 'FAST'), None)
+lit_sym = next((g for x in lines for g in globals_in(x) if string_item(g) == 'LIT_TABLE'), None)
 if not accs:
     print('FAIL RtConstReads: no accessor in the .rr (none tests a once-cell with l2r_once_ready)')
     status = 1
@@ -327,10 +364,15 @@ elif len(fast_slots) < 6:
     print(f'FAIL RtConstReads: {len(fast_slots)} slots read from the fast table (at least 6 expected): '
           'the test no longer reads its constants through it')
     status = 1
+elif 'literal-consts' not in os.environ.get('L2R_DISABLE_OPTS', '').split(',') and (lit_sym is None or len(lit_slots) < 2):
+    print(f'FAIL RtConstReads: {len(lit_slots)} literal slots read from the literal cache in loops (at least 2 '
+          'expected): the test no longer reads its literal constants through it')
+    status = 1
 else:
-    print(f'PASS  RtConstReads ({len(accs)} accessors, {len(fast_slots)} slots read from the fast table)')
+    print(f'PASS  RtConstReads ({len(accs)} accessors, {len(fast_slots)} slots read from the fast table, '
+          f'{len(lit_slots)} literal slots read in loops)')
 # Self-check: each mutation, with names taken from the IR's symbols, must
-# be caught: four added to a hot loop block, and an accessor call added to
+# be caught: six added to a hot loop block, and an accessor call added to
 # the block where a constant whose word is 0 tests its flag, as LLVM wrote
 # the word's test and with the test written the other way (`icmp ne`,
 # successors swapped; review PCR-05).
@@ -396,7 +438,10 @@ if status == 0:
         ('l2r_once_claim call', fn, blk, tex and f'  %l2r_mut = tail call i1 @"{tex}"(i64 1)', ()),
         ('once::claim call', fn, blk, f'  %l2r_mut = tail call i1 @"{rename(fast_sym, "FAST", "claim")}"(i64 1)', ()),
         ('SLOTS load', fn, blk, f'  %l2r_mut = load i64, ptr getelementptr inbounds nuw (i8, ptr @"{rename(fast_sym, "FAST", "SLOTS")}", i64 40), align 8', ()),
+        ('l2r_str_lit_cached call', fn, blk, f'  %l2r_mut = tail call ptr @"{rename(d, i, "l2r_str_lit_cached")}"(i64 1)', ()),
     ]
+    if lit_sym:
+        mutations.append(('LIT_REC load', fn, blk, f'  %l2r_mut = load i64, ptr getelementptr inbounds nuw (i8, ptr @"{rename(lit_sym, "LIT_TABLE", "LIT_REC")}", i64 40), align 8', ()))
     zw = zero_word_block(lines)
     if zw is None:
         print("FAIL const-read-check: no loop block where a word-0 constant's read tests its flag")
@@ -418,7 +463,7 @@ if status == 0:
             status = 1
             break
         mut, done = mutate(lines, f, b, text, edits)
-        bad2, _, _ = check(mut, accs)
+        bad2, _, _, _ = check(mut, accs)
         if not done or not bad2:
             print(f'FAIL const-read-check: a {what} ({f[:60]} {b}) was not caught')
             status = 1
