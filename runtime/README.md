@@ -537,7 +537,6 @@ single call:
 | extern | helper |
 |---|---|
 | `lean_string_compare` (→ `Ordering`) | `l2r_string_compare_with<O>(a, b, lt, eq, gt)`; or `l2r_string_compare(a, b) -> u8` (0/1/2) |
-| `lean_io_getenv` (→ `Option String`) | `l2r_io_getenv_with<O>(name, none, \|s\| some(s))` |
 | `lean_slice_hash`, `lean_slice_dec_lt` (take `String.Slice`) | `l2r_slice_hash(s, b, e)`, `l2r_slice_dec_lt(s1, b1, e1, s2, b2, e2)` |
 | `lean_byteslice_beq` (takes `ByteSlice`s) | `l2r_byteslice_beq(a, startA, stopA, b, startB, stopB)` (fields `byteArray`, `start`, `stop`) |
 
@@ -550,6 +549,7 @@ lean2rr builds its result itself from primitives (hunt HSTR2-01):
 | `lean_string_data` (`String.toList`) | a generated loop per list type, `l2r_string_to_list_<list>(s)`, over `l2r_string_size(s)`, `l2r_string_prev(s, i)` and `l2r_string_get_fast(s, j)`: the characters consed from the last |
 | `lean_string_utf8_get_opt` (→ `Option Char`) | `l2r_string_utf8_get_opt(s, p) -> u32` (`0x110000` = none), tested in line |
 | `lean_float_frexp`, `lean_float32_frexp` (→ `Float × Int`) | `l2r_float_frexp_mant`/`_exp` (`l2r_float32_frexp_mant`/`_exp`), the pair built in line |
+| `lean_io_getenv` (→ `Option String`) | `l2r_getenv(name) -> LStr`: one lookup, the value or the shared empty string; then `l2r_getenv_found() -> bool` says which, and the `Option` is built in line (hunt HIOG2-02) |
 
 **IO externs that cannot fail** (BaseIO) have a payload primitive named
 `l2r_` + the symbol without `lean_`, taking the same passed arguments;
@@ -862,13 +862,16 @@ reference can switch while the close waits for the handle's writer; hunt
 HCO-01); the glue is
 
     let v = l2r_fs_open(path, modeIndex);
-    if l2r_io_ok() { EST.Out.ok(v) }
-    else { l2r_io_error_with(|kind| |errno| |fname| |details| mkError) }
+    if l2r_io_ok() { EST.Out.ok(v) } else { l2r_io_err_R() }
 
-(in line: only the failure path builds the error callback; the former
-prelude helper `l2r_io_finish(v, ok, err)` took both cases as callbacks,
-two closures at every call), where `mkError` builds the `IO.Error` with
-the `lean_mk_io_error_*` constructor (exported Lean functions) numbered
+(in line, no closure on either path; the former prelude helper
+`l2r_io_finish(v, ok, err)` took both cases as callbacks, two closures at
+every call, and the former `l2r_io_error_with` took a copy of the error
+builder at every call site), where `l2r_io_err_R`, generated once per IO
+result type `R`, reads `l2r_io_error_kind()`, `l2r_io_errno()` and
+`l2r_io_error_details()` (and `l2r_io_error_fname()` for a builder that
+takes the file name) and builds the `IO.Error` with the
+`lean_mk_io_error_*` constructor (exported Lean functions) numbered
 `kind` (`fs::kind_of`: the
 `IoError`'s constructor, and for those with an optional file name whether
 it has one):
@@ -1176,7 +1179,9 @@ lean2rr's dev branch (the tests pass with it).
     exits 1 without running `main`, as natively.
 25. *done* — `IO.getEnv` (`lean_io_getenv`) is emitted as a direct call to
     `lean_io_getenv`, which the prelude cannot define (its result is
-    `Option String`); use `l2r_io_getenv_with(name, none, some)`.
+    `Option String`); lean2rr builds the `Option` in line from
+    `l2r_getenv(name)` and `l2r_getenv_found()` (hunt HIOG2-02; before, a
+    helper with a `some` closure).
 26. *done* — `IO.Process.forceExit` (`lean_io_force_exit`, `std::_Exit`: nothing is
     flushed) has no glue: as `IO.Process.exit`, with
     `l2r_process_force_exit(code)` (test `RtForceExit`).

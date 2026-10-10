@@ -33,7 +33,7 @@
 //! "sinks" below).
 
 use crate::string::{from_bytes, from_bytes_lossy, LStr};
-use lean_runtime::io::{self as lio, ByteSink, FsMode, Handle, IoError};
+use lean_runtime::io::{self as lio, FsMode, Handle, IoError};
 use reussir_rt::rc::Rc;
 use std::any::Any;
 use std::cell::UnsafeCell;
@@ -354,10 +354,10 @@ pub fn get_line(h: &LHandle) -> LStr {
     }
 }
 
-/// `Handle.isTty` (cannot fail; records success so a fallible-glue caller
-/// sees no stale error).
+/// `Handle.isTty` (`BaseIO`: it cannot fail, so it records no outcome; its
+/// glue is a payload primitive, `l2r_io_prim_handle_is_tty`, which reads
+/// no slot).
 pub fn is_tty(h: &LHandle) -> bool {
-    set_ok();
     fh(h).h.as_ref().is_some_and(Handle::is_tty)
 }
 
@@ -551,25 +551,32 @@ pub fn create_temp_dir() -> LStr {
     sink_string(r, s)
 }
 
-/// A sink that keeps nothing (`IO.getEnv`'s test for a value).
-struct Discard;
+/// `IO.getEnv`'s buffer, kept for the run: `get_env` appends the value to
+/// it, and the next lookup reuses its room (natively `getenv` returns a
+/// pointer into the environment, and `mk_string` makes the only copy).
+static ENV_VALUE: Global<Vec<u8>> = Global(UnsafeCell::new(Vec::new()));
+/// Whether the last `getenv` found a value (`getenv_found`).
+static ENV_FOUND: Global<bool> = Global(UnsafeCell::new(false));
 
-impl ByteSink for Discard {
-    #[inline]
-    fn extend_from_slice(&mut self, _: &[u8]) {}
+/// `IO.getEnv name` (lean-runtime's `io::env::get_env`), one lookup: the
+/// value (`mk_string`: lossy), or the shared empty string (no allocation)
+/// when `name` has none. `getenv_found` then tells which: lean2rr's glue
+/// builds the `Option` in line from the two (hunt HIOG2-02).
+pub fn getenv(name: LStr) -> LStr {
+    let buf = unsafe { &mut *ENV_VALUE.0.get() };
+    buf.clear();
+    let found = lio::env::get_env(crate::string::bytes(&name), buf);
+    unsafe { *ENV_FOUND.0.get() = found };
+    if found {
+        from_bytes_lossy(buf)
+    } else {
+        crate::string::shared_empty()
+    }
 }
 
-/// `IO.getEnv name` (lean-runtime's `io::env::get_env`): whether `name` has
-/// a value.
-pub fn getenv_has(name: LStr) -> bool {
-    lio::env::get_env(crate::string::bytes(&name), &mut Discard)
-}
-
-/// `IO.getEnv name`'s value (`mk_string`: lossy), `""` if it has none.
-pub fn getenv_value(name: LStr) -> LStr {
-    let mut s = Vec::new();
-    lio::env::get_env(crate::string::bytes(&name), &mut s);
-    from_bytes_lossy(&s)
+/// Whether the last `getenv` found a value.
+pub fn getenv_found() -> bool {
+    unsafe { *ENV_FOUND.0.get() }
 }
 
 /// `IO.getRandomBytes n` (`lean_io_get_random_bytes`): `/dev/urandom`

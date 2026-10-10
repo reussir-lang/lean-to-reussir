@@ -189,8 +189,9 @@ Paths are relative to the repository root.
   `l2r_stream_getLine`, which gets the string from leanrt, and the
   process and title primitives below), so programs' code is unchanged.
   - The last-error slot keeps the shape it had before (a `failed` flag read
-    inline after every IO primitive, `l2r_io_ok`, and the code, read inline
-    on every error path): `fs::set_err` takes lean-runtime's `IoError`
+    inline after every IO primitive, `l2r_io_ok`, and the code, read on
+    every error path by the generated error builder `l2r_io_err_R`):
+    `fs::set_err` takes lean-runtime's `IoError`
     apart into the `lean_mk_io_error_*` builder (`fs::kind_of`: its
     constructor, with or without a file name), the code (`error_code`), the
     file name and the details, which `fs::errno`, `error_kind`,

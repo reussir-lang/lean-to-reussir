@@ -5,3 +5,15 @@
 put 1000 | put 4000 | 1 200
 line 1000 | line 4000 | 1 200
 out 1000 | out 4000 | 1 200
+# Hunt HIOG2. A failing `putStr` (an error without a file name): natively 3
+# allocations (the details, the IO.Error, the result), lean2rr 5 (the
+# runtime's IoError holds its own copy of the details and the last-error
+# slot one more; before, the glue also read the file name: 6). The bound
+# keeps the error path within twice native's.
+fail 1000 | fail 4000 | 2 200
+# `getEnv` (per call of these loops): natively 2 allocations for a set
+# variable and none for an unset one; lean2rr 3 (lean-runtime's lookup
+# copies the value once more) and none. Before, a `some` closure at every
+# call and a second lookup for the value: 6 and 1.
+envset 1000 | envset 4000 | 2 200
+envunset 1000 | envunset 4000 | 1 200

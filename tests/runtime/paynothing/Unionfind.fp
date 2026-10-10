@@ -1,14 +1,14 @@
 # Pay-nothing baseline of Unionfind (tests/classic/Unionfind.lean), arguments '70000'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 175036
-bytes 6302128
+allocs 175034
+bytes 6302080
 native-allocs 2956318
 native-bytes 61730561
-items 210
-functions 169
+items 211
+functions 170
 conversion-fns 0
 conversion-sites 0
-box-sites 52
+box-sites 46
 box-variants 7
 item L2RFn_F3nu64F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» f96e8eb23184
 item L2RFn_F4aRVec1_2nu8F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9c0c234ead50
@@ -60,16 +60,17 @@ item l2r_any_rel_# aac70cbf9952
 item l2r_any_rel_# b58924afab00
 item l2r_any_rel_# de582e5680bb
 item l2r_any_releases 3b2880c6a153
-item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» db5a5ca0f91c
-item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 1aa347c297ea
+item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» b461d695dd00
+item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 952017134ce6
 item l2r_err_string 7914d9f838c1
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 32149c53af8a
+item l2r_init_chunk_0 e04d029e0679
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 c690b1a252f6
+item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
 item l2r_main_body 19e806123445
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
@@ -179,7 +180,7 @@ item l_String_Slice_isNat___l2r_#____l2r__flat bdf8886b8a2e
 item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 195635684912
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 81db83ef79c1
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 6d39c9e132ca
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ faa617b7c0f6
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
 item l_capacity___l2r_#____l2r__flat 617ffd1e9a10
 item l_findEntryAux___l2r_#____closed__1 5e149ddd7a31

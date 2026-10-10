@@ -207,64 +207,80 @@ def ioErrorCtor (resTy : RR.Ty) : LowerM (String × CtorLayout × RR.Ty) := do
   | some (some (_, t)) => return (rn, errL, t)
   | _ => throwError "lean2rr: IO result {rn} has no error field"
 
-/-- The error callback of `l2r_io_error_with` for IO result `resTy`:
-`|kind| |errno| |fname| |details| EST.Out.error e`, with `e` built by Lean's
-own `IO.Error` builder for the error kind the runtime reports (as Lean's
-`decode_io_error`). -/
-def ioErrorFn (resTy : RR.Ty) : LowerM RR.Expr := do
+/-- The error builder of IO result `resTy`: `l2r_io_err_<R>() -> R`, one
+generated function per result type, which every fallible call site calls on
+its error path (`ioCheck`). It reads the last error the runtime recorded
+and returns `EST.Out.error e`, with `e` built by Lean's own `IO.Error`
+builder for the error kind (as Lean's `decode_io_error`; the numbering of
+`ioErrorBuilderSyms`):
+  fn l2r_io_err_R() -> R {
+      let ek : u32 = l2r_io_error_kind();
+      let ee : u32 = l2r_io_errno();
+      let ed : LStr = l2r_io_error_details();
+      let e : IO.Error = match ek {
+          0 => { mkOtherError(ee, ed) },
+          4 => { mkNoFileOrDirectory(l2r_io_error_fname(), ee, ed) },
+          ...
+          23 => { userError(ed) },
+          _ => { l2r_unreachable() }
+      };
+      R::error{box(e)}
+  }
+A builder of 3 parameters takes `(fname, errno, details)`, one of 2
+`(errno, details)`, one of 1 `(details)`. The file name is read only in the
+arms that pass it (a fresh string: a builder without one made it for
+nothing). The builders are constructors: nothing between the primitive and
+these reads records an error. Before, each call site had its own copy, as
+four curried closures for the prelude's `l2r_io_error_with`: about 110
+lines of `.rr` per call site (hunt HIOG2-01). -/
+def ioErrorFn (resTy : RR.Ty) : LowerM String := do
   let (rn, errL, errTy) ← ioErrorCtor resTy
-  let ioErr ← ioErrorTy
-  let (k, errno, fname, details) := ("ek", "ee", "ef", "ed")
-  let mut mk : RR.Expr := .call "l2r_unreachable" #[ioErr] #[]
-  for i in [:(← read).ioErrorBuilders.size] do
-    let j := (← read).ioErrorBuilders.size - 1 - i
-    let some inst := (← read).ioErrorBuilders[j]! | continue
-    let callee ← calleeOf inst
-    let .code fn ps .. := callee | continue
-    let call := if ps.size == 3 then RR.Expr.call fn #[] #[.var fname, .var errno, .var details]
-      else if ps.size == 2 then RR.Expr.call fn #[] #[.var errno, .var details]
-      else RR.Expr.call fn #[] #[.var details]
-    let kj ← fresh "kj"
-    mk := .block ⟨#[(kj, some (.named "u32"), .atom (toString j))],
-      .ite (.atom s!"{k} == {kj}") (.ofExpr call) (.ofExpr mk)⟩
-  let errVal := RR.Expr.ctor rn (some errL.variant) #[← coerce mk ioErr errTy]
-  return RR.Expr.lam k (.named "u32") <| .ofExpr <| .lam errno (.named "u32") <| .ofExpr <|
-    .lam fname (.named "LStr") <| .ofExpr <| .lam details (.named "LStr") (.ofExpr errVal)
+  let name := s!"l2r_io_err_{rn}"
+  unless (← hasFn name) do
+    let ioErr ← ioErrorTy
+    let (k, errno, details, e) := ("ek", "ee", "ed", "e")
+    let mut arms : Array RR.Arm := #[]
+    let builders := (← read).ioErrorBuilders
+    for h : j in [:builders.size] do
+      let some inst := builders[j] | continue
+      let callee ← calleeOf inst
+      let .code fn ps .. := callee | continue
+      let call := if ps.size == 3 then
+          RR.Expr.call fn #[] #[.call "l2r_io_error_fname" #[] #[], .var errno, .var details]
+        else if ps.size == 2 then RR.Expr.call fn #[] #[.var errno, .var details]
+        else RR.Expr.call fn #[] #[.var details]
+      arms := arms.push (RR.Arm.lit j (.ofExpr call))
+    let unknown : RR.Block := .ofExpr (.call "l2r_unreachable" #[ioErr] #[])
+    arms := arms.push { ty := "_", ctor := none, binders := #[], body := unknown }
+    let body : RR.Block := ⟨#[(k, some (.named "u32"), .call "l2r_io_error_kind" #[] #[]),
+        (errno, some (.named "u32"), .call "l2r_io_errno" #[] #[]),
+        (details, some (.named "LStr"), .call "l2r_io_error_details" #[] #[]),
+        (e, some ioErr, .mtch (.var k) arms)],
+      .ctor rn (some errL.variant) #[← coerce (.var e) ioErr errTy]⟩
+    modify fun s => { s with fns := s.fns.push (.fn name #[] resTy body) }
+  return name
 
-/-- `if l2r_io_ok() { ok } else { EST.Out.error e }`: the outcome of the
+/-- `if l2r_io_ok() { ok } else { l2r_io_err_<R>() }`: the outcome of the
 fallible primitive just called (its result already bound) as the IO result
-`resTy`, with the continuation `ok : resTy` in line. `e` is built by Lean's
-own `IO.Error` builder for the error kind the runtime reports (as Lean's
-`decode_io_error`); its callback (`ioErrorFn`) is built only on that path.
-A handle that the continuation uses is released at its last use there. -/
+`resTy`, with the continuation `ok : resTy` in line. The error path is one
+call of the result type's error builder (`ioErrorFn`), which builds
+`EST.Out.error e` with Lean's own `IO.Error` builder for the error kind the
+runtime reports: no closure on either path. A handle that the continuation
+uses is released at its last use there. -/
 def ioCheck (resTy : RR.Ty) (ok : RR.Block) : LowerM RR.Expr := do
-  return .ite (.call "l2r_io_ok" #[] #[]) ok
-    (.ofExpr (.call "l2r_io_error_with" #[resTy] #[← ioErrorFn resTy]))
+  return .ite (.call "l2r_io_ok" #[] #[]) ok (.ofExpr (.call (← ioErrorFn resTy) #[] #[]))
 
 /-- `{ let fx : primRet = v; if l2r_io_ok() { EST.Out.ok (okOf fx) } else
-{ EST.Out.error e } }`: the outcome of a fallible runtime primitive (the call
-`v`, made first) as the IO result `resTy` (`okOf` gives the payload at type
-`payTy`), checked in line (`ioCheck`). On an error `fx` (the primitive's
-placeholder result) is not used and is released there. The success path
-builds no closure (callbacks were two closures per call, which Reussir and
+{ l2r_io_err_<R>() } }`: the outcome of a fallible runtime primitive (the
+call `v`, made first) as the IO result `resTy` (`okOf` gives the payload at
+type `payTy`), checked in line (`ioCheck`). On an error `fx` (the
+primitive's placeholder result) is not used and is released there. No path
+builds a closure (callbacks were two closures per call, which Reussir and
 LLVM kept: hunt HSTR2-01's review). -/
 def ioFinish (v : RR.Expr) (primRet resTy payTy : RR.Ty) (okOf : RR.Expr → LowerM RR.Expr) : LowerM RR.Expr := do
   let x ← fresh "fx"
   let ok ← wrapIOResult resTy (← okOf (.var x)) payTy
   return .block ⟨#[(x, some primRet, v)], ← ioCheck resTy (.ofExpr ok)⟩
-
-/-- `EST.Out.error (IO.userError msg)` as IO result `resTy` (Lean's exported
-builder `lean_mk_io_user_error`). -/
-def ioUserError (resTy : RR.Ty) (msg : String) : LowerM RR.Expr := do
-  let (rn, errL, errTy) ← ioErrorCtor resTy
-  let ioErr ← ioErrorTy
-  let kind := ioErrorBuilderSyms.idxOf "lean_mk_io_user_error"
-  let e ← match (← read).ioErrorBuilders[kind]?.join with
-    | some inst => match ← calleeOf inst with
-      | .code fn .. => pure (RR.Expr.call fn #[] #[← strLit msg])
-      | _ => pure (RR.Expr.call "l2r_unreachable" #[ioErr] #[])
-    | none => pure (RR.Expr.call "l2r_unreachable" #[ioErr] #[])
-  return .ctor rn (some errL.variant) #[← coerce e ioErr errTy]
 
 /-- Glue for a fallible IO extern: call the runtime primitive, then
 `ioFinish` turns its outcome into `EST.Out.ok payload` or into
@@ -706,13 +722,12 @@ def refGlue (orig : Name) (params : Array Expr) (ret : Expr)
 
 /-- Externs over Lean-defined types, whose results the runtime cannot
 build: the runtime's generic helper receives the generated constructors as
-arguments (`timeit`, `getEnv`, `String.compare`: once per call), or the
-glue builds the result itself, in line or in a generated loop
-(`String.toList`, `String.Pos.Raw.get?`, `frExp`: no closure, so no
-allocation that native Lean does not make; hunt HSTR2-01). -/
+arguments (`timeit`, `String.compare`: once per call), or the glue builds
+the result itself, in line or in a generated loop (`String.toList`,
+`String.Pos.Raw.get?`, `frExp`, `getEnv`: no closure, so no allocation that
+native Lean does not make; hunts HSTR2-01, HIOG2-02). -/
 def ctorCallbackExtern (sym : String) (ret : Expr) (args : Array RR.Expr) : LowerM (Option RR.Expr) := do
   let rt ← lowerType ret
-  let lam (x : String) (t : RR.Ty) (body : RR.Expr) : RR.Expr := .lam x t (.ofExpr body)
   match sym with
   -- `timeit msg act`, `allocprof msg act`: the runtime runs the action.
   | "lean_io_timeit" | "lean_io_allocprof" =>
@@ -721,14 +736,20 @@ def ctorCallbackExtern (sym : String) (ret : Expr) (args : Array RR.Expr) : Lowe
     let some act := args[1]? | return none
     let act ← coerce act (.fn .unit rt) (.cls .unit rt)
     return some (.call helper #[rt] #[msg, act])
-  -- `IO.getEnv name : BaseIO (Option String)`.
+  -- `IO.getEnv name : BaseIO (Option String)`: one lookup, which gives the
+  -- value (the shared empty string when there is none) and records whether
+  -- there is one; the glue builds the `Option` in line:
+  --   { let gv : LStr = l2r_getenv(name); if l2r_getenv_found() { some(gv) } else { none } }
+  -- (a `some` closure and a second lookup for the value cost 3
+  -- allocations per call; hunt HIOG2-02).
   | "lean_io_getenv" =>
     let some name := args[0]? | return none
     let pay ← ioPayloadType ret
     let some v := (← ctorFieldTys pay ``Option.some)[0]? | return none
-    let some' ← ctorValue pay ``Option.some #[← coerce (.var "s") (.named "LStr") v]
-    let r := RR.Expr.call "l2r_io_getenv_with" #[pay]
-      #[name, ← ctorValue pay ``Option.none #[], lam "s" (.named "LStr") some']
+    let gv ← fresh "gv"
+    let some' ← ctorValue pay ``Option.some #[← coerce (.var gv) (.named "LStr") v]
+    let r : RR.Expr := .block ⟨#[(gv, some (.named "LStr"), .call "l2r_getenv" #[] #[name])],
+      .ite (.call "l2r_getenv_found" #[] #[]) (.ofExpr some') (.ofExpr (← ctorValue pay ``Option.none #[]))⟩
     return some (← wrapIOResult rt r pay)
   | "lean_string_compare" =>
     let v (c : Name) := ctorValue rt c #[]

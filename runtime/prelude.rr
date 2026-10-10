@@ -3339,9 +3339,11 @@ fn l2r_io_process_get_pid() -> u32 [{ lean_runtime::io::env::get_pid() }];
 // primitives record their outcome in a last-error slot (each context's
 // own, exchanged at each switch); lean2rr's
 // glue for an `IO` extern calls the primitive, then checks in line
-//   let v = prim(...); if l2r_io_ok() { EST.Out.ok(v) } else { l2r_io_error_with(mkError) }
-// where `mkError kind errno fname details` builds the `IO.Error` with the
-// `lean_mk_io_error_*` constructor numbered `kind` (runtime/README.md).
+//   let v = prim(...); if l2r_io_ok() { EST.Out.ok(v) } else { l2r_io_err_R() }
+// where `l2r_io_err_R`, generated once per IO result type `R`, reads the
+// error's kind, errno, details (and file name) and builds the `IO.Error`
+// with the `lean_mk_io_error_*` constructor numbered `kind`
+// (runtime/README.md).
 
 // (`LHandle` is declared with the runtime types.)
 
@@ -3355,10 +3357,6 @@ fn l2r_io_error_kind() -> u32 [{ leanrt::fs::error_kind() }];
 fn l2r_io_error_fname() -> LStr [{ leanrt::fs::error_fname() }];
 #[ffi(import)]
 fn l2r_io_error_details() -> LStr [{ leanrt::fs::error_details() }];
-
-fn l2r_io_error_with<E>(mk : u32 -> (u32 -> (LStr -> (LStr -> E)))) -> E {
-    mk(l2r_io_error_kind())(l2r_io_errno())(l2r_io_error_fname())(l2r_io_error_details())
-}
 
 // `IO.getRandomBytes n` (an IO error when `/dev/urandom` cannot be read).
 #[ffi(import)]
@@ -3378,8 +3376,6 @@ fn l2r_fs_flush(h : LHandle) -> u64 [{ { leanrt::fs::owned::flush(h); 0 } }];
 fn l2r_fs_read(h : LHandle, n : u64) -> RVec<u8> [{ leanrt::fs::owned::read(h, n) }];
 #[ffi(import)]
 fn l2r_fs_get_line(h : LHandle) -> LStr [{ leanrt::fs::owned::get_line(h) }];
-#[ffi(import)]
-fn l2r_fs_is_tty(h : LHandle) -> bool [{ leanrt::fs::owned::is_tty(h) }];
 #[ffi(import)]
 fn l2r_fs_rewind(h : LHandle) -> u64 [{ { leanrt::fs::owned::rewind(h); 0 } }];
 #[ffi(import)]
@@ -3535,11 +3531,10 @@ fn l2r_io_allocprof_with<R>(msg : LStr, act : L2RUnit -> R) -> R {
 fn l2r_allocprof_text(msg : LStr) -> LStr [{ leanrt::io::allocprof_text(msg) }];
 
 // `IO.getEnv name : BaseIO (Option String)` (lean-runtime's
-// `io::env::get_env`).
+// `io::env::get_env`): one lookup, which gives the value (the shared empty
+// string when there is none) and records whether there is one
+// (`l2r_getenv_found`); lean2rr's glue builds the `Option` in line.
 #[ffi(import)]
-fn l2r_getenv_has(name : LStr) -> bool [{ leanrt::fs::getenv_has(name) }];
+fn l2r_getenv(name : LStr) -> LStr [{ leanrt::fs::getenv(name) }];
 #[ffi(import)]
-fn l2r_getenv_value(name : LStr) -> LStr [{ leanrt::fs::getenv_value(name) }];
-fn l2r_io_getenv_with<O>(name : LStr, none : O, some : LStr -> O) -> O {
-    if l2r_getenv_has(name) { some(l2r_getenv_value(name)) } else { none }
-}
+fn l2r_getenv_found() -> bool [{ leanrt::fs::getenv_found() }];

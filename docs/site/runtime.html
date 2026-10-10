@@ -102,8 +102,8 @@ A comment at each function names the C function it follows.</p>
   as arguments, and lean2rr's glue makes a single call. A closure call
   allocates, so an extern that runs per element or in a hot loop has no
   such helper. lean2rr's glue builds its result from primitives:
-  <code>String.toList</code> in a generated loop, <code>String.Pos.Raw.get?</code> and
-  <code>Float.frExp</code> in line.</li>
+  <code>String.toList</code> in a generated loop, <code>String.Pos.Raw.get?</code>,
+  <code>Float.frExp</code> and <code>IO.getEnv</code> in line.</li>
 </ul>
 <h2 id="memory-management">Memory management</h2>
 <p><strong>Reference counting and reuse are Reussir's job.</strong> Reussir inserts every
@@ -221,8 +221,9 @@ thread that waits blocks its context.</p>
   slot: nothing, or the crate's <code>IO.Error</code>. The glue turns it into <code>ok</code> or
   into the <code>IO.Error</code> that Lean's own exported builder makes, with libuv's
   kind and message (Lean 4.34). The glue reads the slot in line, right
-  after the call. Only the failure path makes a closure: the builder of
-  the error.</li>
+  after the call. No path makes a closure. The failure path calls the
+  error builder, one generated function per IO result type: it reads the
+  kind, the code and the message, and calls Lean's builder for the kind.</li>
 <li><strong>Processes.</strong> <code>IO.Process</code> follows <code>process.cpp</code>. The crate starts a
   child with <code>posix_spawn</code> and does what Lean's forked child does before
   <code>execvp</code>. <code>IO.Process.output</code> reads both pipes together.</li>

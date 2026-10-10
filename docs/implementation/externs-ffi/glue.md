@@ -75,10 +75,10 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **What:** Externs whose results mention Lean-defined types (`Ordering`,
   `List`, `Option`, `Prod`, `EST.Out`, `IO.FS.Stream`) get generated glue:
   a runtime helper that receives the generated constructors as arguments
-  (nullary ones as values, others as closures: `String.compare`,
-  `IO.getEnv`), or a generated loop (`Array.mk`, `Array.toList`,
-  `String.mk`, `String.toList`), or generated code (`String.get?` and
-  `Float.frExp` build their result in line, see the next entry;
+  (nullary ones as values, others as closures: `String.compare`), or a
+  generated loop (`Array.mk`, `Array.toList`, `String.mk`,
+  `String.toList`), or generated code (`String.get?`, `Float.frExp` and
+  `IO.getEnv` build their result in line, see the next entry;
   `timeit`/`allocprof` run the action through the runtime;
   `Lean.Name.beq` as structural equality comparing the cached hash first;
   `ShareCommon.State.shareCommon` as its reference body `(a, s)`;
@@ -91,7 +91,7 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `customExtern`; `Lower/LazyGlue.lean`: `sliceGlue?`.
 - **Remove only if:** never.
 
-### `String.toList`, `String.Pos.Raw.get?` and `frExp` build their results without closures
+### `String.toList`, `String.Pos.Raw.get?`, `frExp` and `getEnv` build their results without closures
 
 - **What:** The glue of these externs builds the Lean value itself from
   the prelude's primitives. It passes no constructor closure.
@@ -109,22 +109,37 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   - `Float.frExp x` and `Float32.frExp x` (`lean_float_frexp`,
     `lean_float32_frexp`) are the pair `(mant(x), exp(x))` in line, with
     `l2r_float_frexp_mant`/`_exp` (`l2r_float32_frexp_mant`/`_exp`).
+  - `IO.getEnv name` (`lean_io_getenv`) is
+    `let gv = l2r_getenv(name); if l2r_getenv_found() { some{box(gv)} }
+    else { none }` in line, then wrapped as the IO result. `l2r_getenv`
+    looks the variable up once (lean-runtime's `io::env::get_env`, into a
+    buffer that leanrt keeps for the run). It returns the value, or the
+    shared empty string (no allocation) when there is none, and records
+    which in a flag that `l2r_getenv_found` reads.
 
   Natively, `toList` makes one cons cell per character, and `get?` makes
   no allocation. lean2rr now makes the same allocations (test
   `RtGlueAlloc`: from 1000 to 4000 characters, the allocations and the
   bytes of the two builds grow by the same amount, to a few bytes, for
-  `toList` and for `get?`).
+  `toList` and for `get?`). `getEnv` of an unset variable makes no
+  allocation, as natively; of a set one 3, natively 2: lean-runtime's
+  lookup (`std::env::var_os`) copies the value once more (test
+  `RtIOFinishAlloc`, modes `envset` and `envunset`).
 - **Why:** The prelude helpers took curried constructor closures.
   `toList` called `cons(c)(acc)` for each character: about 3 allocations
   per character, against 1 natively. `get?` made a `some` closure at
   every call, also for `none` (hunt HSTR2-01). For `frExp`, Reussir and
   LLVM already removed the closure in the measured programs; the code in
-  line does not depend on that.
+  line does not depend on that. `getEnv` made a `some` closure at every
+  call and looked the variable up twice (`getenv_has`, then
+  `getenv_value`, each with its own copy of the value): 6 allocations
+  for a set variable, 1 for an unset one (hunt HIOG2-02).
 - **Where:** `Lower/Externs.lean`: `ctorCallbackExtern` (the cases
-  `lean_string_data`, `lean_string_utf8_get_opt`, `lean_float_frexp` and
-  `lean_float32_frexp`); the primitives in `runtime/prelude.rr`; the test
-  `tests/runtime/RtGlueAlloc.lean` with its `.alloc` file.
+  `lean_string_data`, `lean_string_utf8_get_opt`, `lean_float_frexp`,
+  `lean_float32_frexp` and `lean_io_getenv`); the primitives in
+  `runtime/prelude.rr`; `runtime/leanrt/src/fs.rs` (`getenv`,
+  `getenv_found`); the tests `tests/runtime/RtGlueAlloc.lean` and
+  `tests/runtime/RtIOFinishAlloc.lean` with their `.alloc` files.
 - **Remove only if:** Reussir applies a constructor closure with no
   allocation, so that a generic prelude helper costs the same.
 
@@ -238,11 +253,32 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   runtime reports, as `decode_io_error`. The glue checks the slot in line,
   right after the call (`ioFinish`, `ioCheck`):
   `{ let fx = prim(..); if l2r_io_ok() { EST.Out.ok(payload of fx) } else
-  { l2r_io_error_with(err) } }`. Only the failure path builds the error
-  callback `err`. A value that the payload uses (the directory of
-  `readDir`) is released at its last use there; on a failure the
-  primitive's placeholder result `fx` is released unused. `IO.FS.Mode` is
-  passed as its constructor index.
+  { l2r_io_err_R() } }`. No path builds a closure. A value that the
+  payload uses (the directory of `readDir`) is released at its last use
+  there; on a failure the primitive's placeholder result `fx` is released
+  unused. `IO.FS.Mode` is passed as its constructor index.
+  - The error builder `l2r_io_err_R() -> R` is generated once per IO
+    result type `R` (`ioErrorFn`, cached by name with `hasFn`; a program
+    has one: a generic inductive has one Reussir type, so `EST.Out` has
+    one). It reads the
+    kind, the errno and the details once each
+    (`l2r_io_error_kind`, `l2r_io_errno`, `l2r_io_error_details`), then
+    one `match` on the kind (the numbering of `ioErrorBuilderSyms`)
+    calls the builder: one of 3 parameters with
+    `(l2r_io_error_fname(), errno, details)`, one of 2 with
+    `(errno, details)`, one of 1 with `(details)`; an unknown kind is
+    `l2r_unreachable`. It returns `R::error{box(e)}`. The file name is
+    read only in the arms of the builders that take it: each read makes
+    a string. The builders are constructors, so nothing records an error
+    between the primitive and these reads.
+  - An error makes these allocations in the glue: the details, the file
+    name (natively the argument's own string), the `IO.Error` and the
+    result. The runtime adds its own: lean-runtime's `IoError` holds its
+    copies of the file name and the details, the slot copies them again
+    (`set_err`), and some primitives return a placeholder (a handle, an
+    array). In a loop that catches each error, a `Handle.mk` of a
+    missing file makes 10 allocations per call, natively 3; a `putStr` to
+    a read-only handle 5, natively 3.
 - **Why:** The runtime cannot build `IO.Error`; Lean's own builders give
   the exact messages (57187b2). The decoding is lean-runtime's
   (`io::error`), as Lean 4.34's `decode_uv_error_impl`: kind and details
@@ -259,14 +295,22 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `l2r_io_finish(v, ok, err)` took both cases as callbacks, two closures
   at every call, which Reussir and LLVM kept (a `putStr` to a handle made
   3 allocations, natively 1; a `getLine` 6, natively 3; review of the
-  closure glue, hunt HSTR2-01).
+  closure glue, hunt HSTR2-01). The error builder is one function per
+  result type because each call site had its own copy: four curried
+  closures for the prelude's `l2r_io_error_with`, with the whole chain of
+  24 builders, about 110 lines of `.rr` per call site and 47 to 75% of
+  the bytes of IO-heavy programs (hunt HIOG2-01). Reussir and LLVM had
+  removed those closures' allocations in the measured programs; the
+  builder made one string more for an error without a file name (it read
+  the file name for every kind).
 - **Where:** `Lower/Externs.lean`: `fallibleIOGlue`, `fallibleIOPrim`,
-  `ioFinish`, `ioCheck`, `ioErrorFn`, `ioErrorCtor`, `ioUserError`,
+  `ioFinish`, `ioCheck`, `ioErrorFn`, `ioErrorCtor`,
   `metadataOf`, `dirEntriesOf`, `streamFieldCall`; `Lower/Process.lean`:
   `processExtern` (`spawn`, `wait`, `tryWait`, `kill`),
   `processOutputBody`; `Mono.lean`: `isFallibleIOSym`,
   `ioErrorBuilderSyms`, `ensureIOErrorBuilders`;
-  `runtime/prelude.rr` (`l2r_io_ok`, `l2r_io_error_with`);
+  `runtime/prelude.rr` (`l2r_io_ok`, `l2r_io_errno`, `l2r_io_error_kind`,
+  `l2r_io_error_fname`, `l2r_io_error_details`);
   `runtime/leanrt/src/sched.rs` (`switched`);
   `runtime/leanrt/src/fs.rs` (`LastError`, `swap_last`, `set_err`, `kind_of`, `errno`, `error_kind`,
   `error_details`; unit test `fs_tests.rs`, every errno through the slot
@@ -274,7 +318,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `runtime/README.md` ("Fallible IO", the table of error kinds); tests
   `RtIOErrorDecode`, `RtFiles`, `RtIOFinishAlloc` (with
   `RtIOFinishAlloc.alloc`: a handle's `putStr` and `getLine` and the
-  stdout stream's `putStr` allocate as natively).
+  stdout stream's `putStr` allocate as natively; a failing `putStr` at
+  most twice as much).
 - **Remove only if:** never.
 
 ### Standard streams live in cells, and diagnostics use the current stderr

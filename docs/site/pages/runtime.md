@@ -39,8 +39,8 @@ A comment at each function names the C function it follows.
   as arguments, and lean2rr's glue makes a single call. A closure call
   allocates, so an extern that runs per element or in a hot loop has no
   such helper. lean2rr's glue builds its result from primitives:
-  `String.toList` in a generated loop, `String.Pos.Raw.get?` and
-  `Float.frExp` in line.
+  `String.toList` in a generated loop, `String.Pos.Raw.get?`,
+  `Float.frExp` and `IO.getEnv` in line.
 
 ## Memory management
 
@@ -171,8 +171,9 @@ thread that waits blocks its context.
   slot: nothing, or the crate's `IO.Error`. The glue turns it into `ok` or
   into the `IO.Error` that Lean's own exported builder makes, with libuv's
   kind and message (Lean 4.34). The glue reads the slot in line, right
-  after the call. Only the failure path makes a closure: the builder of
-  the error.
+  after the call. No path makes a closure. The failure path calls the
+  error builder, one generated function per IO result type: it reads the
+  kind, the code and the message, and calls Lean's builder for the kind.
 - **Processes.** `IO.Process` follows `process.cpp`. The crate starts a
   child with `posix_spawn` and does what Lean's forked child does before
   `execvp`. `IO.Process.output` reads both pipes together.

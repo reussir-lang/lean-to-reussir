@@ -1,14 +1,14 @@
 # Pay-nothing baseline of Qsort (tests/classic/Qsort.lean), arguments '80'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 9547
-bytes 3224504
-native-allocs 299445
-native-bytes 12739938
-items 197
-functions 161
+allocs 9549
+bytes 3224552
+native-allocs 299433
+native-bytes 12739762
+items 198
+functions 162
 conversion-fns 0
 conversion-sites 0
-box-sites 45
+box-sites 39
 box-variants 5
 item L2RFn_F3nu64F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» f96e8eb23184
 item L2RFn_F4aRVec1_2nu8F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9c0c234ead50
@@ -53,16 +53,17 @@ item l2r_any_rel_# 335f04c922c7
 item l2r_any_rel_# 60670e3a6fe9
 item l2r_any_rel_# de582e5680bb
 item l2r_any_releases 073a2619551e
-item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» db5a5ca0f91c
-item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 1aa347c297ea
+item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» b461d695dd00
+item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 952017134ce6
 item l2r_err_string 7914d9f838c1
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 5c3ddb72215d
+item l2r_init_chunk_0 0bf9945e9cde
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 c690b1a252f6
+item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
 item l2r_main_body 5190dd06f8bd
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
@@ -178,7 +179,7 @@ item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___
 item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg___closed__0_init 189a83e755cb
 item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg___l2r__flat b76cde151b32
 item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__2___l2r_#____redArg___l2r__flat 6f6f9cd636a7
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 6d39c9e132ca
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ faa617b7c0f6
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
 item l___private_Qsort_0__partitionAux___at___00qsortAux___at___00main_spec__0_spec__0___l2r_#____l2r__flat 3363577c3efe
 item l_badRand___l2r_#_ 58f5f04afa61

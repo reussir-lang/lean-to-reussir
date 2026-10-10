@@ -1,14 +1,14 @@
 # Pay-nothing baseline of RtLazyFields (tests/runtime/RtLazyFields.lean), arguments ''.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 50267
-bytes 2215600
+allocs 50265
+bytes 2215552
 native-allocs 64913
 native-bytes 2546211
-items 381
-functions 319
+items 382
+functions 320
 conversion-fns 0
 conversion-sites 0
-box-sites 197
+box-sites 191
 box-variants 9
 item L2RFn_F3nu324nbool 97c2f4999fe7
 item L2RFn_F3nu64F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» f96e8eb23184
@@ -85,18 +85,19 @@ item l2r_any_rel_# de582e5680bb
 item l2r_any_rel_# eb35743aa9bd
 item l2r_any_releases cebd1541e1f5
 item l2r_ap1_F3nu324nbool bcd732154723
-item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» db5a5ca0f91c
-item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 1aa347c297ea
+item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» b461d695dd00
+item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 952017134ce6
 item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_4nLAny daecf3bfb378
 item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_4nLAny_go f4af20a6c597
 item l2r_err_string 7914d9f838c1
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 7cb0afcfb227
+item l2r_init_chunk_0 91d84a2b62e8
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 c690b1a252f6
+item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
 item l2r_main_body 83d50160cabf
 item l2r_main_on_thread 4f4adafe091e
 item l2r_run_main d750382a583f
@@ -278,7 +279,7 @@ item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spe
 item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____closed__0_init 194b66d7138e
 item l___private_Init_Data_List_Impl_0__List_takeTR_go___l2r_#____redArg 6978eefa24fa
 item l___private_Init_Data_List_Impl_0__List_takeTR_go___l2r_#____redArg 6978eefa24fa
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ 6d39c9e132ca
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ faa617b7c0f6
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0 46b40d7e518e
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0_init d316a35334bb
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___l2r__flat 6e50c6fd1786

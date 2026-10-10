@@ -4,11 +4,11 @@ allocs 100023
 bytes 4005752
 native-allocs 2490318
 native-bytes 99581202
-items 164
-functions 133
+items 165
+functions 134
 conversion-fns 0
 conversion-sites 0
-box-sites 38
+box-sites 33
 box-variants 3
 item L2RFn_F3nNat3nNat 85013f2fb298
 item L2RFn_F3nNatF4nboolF3nNat3nNat eadd54893e45
@@ -47,8 +47,8 @@ item l2r_any_rel_# 60670e3a6fe9
 item l2r_any_rel_# de582e5680bb
 item l2r_any_releases 1d20e6866a09
 item l2r_ap1_F3nNat3nNat 442b38188f43
-item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» db5a5ca0f91c
-item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 1aa347c297ea
+item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» b461d695dd00
+item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 952017134ce6
 item l2r_ap2_F4nboolF3nNat3nNat e1f64cd1c53e
 item l2r_ap3_F3nNatF4nboolF3nNat3nNat 7147f49f8212
 item l2r_err_string 7914d9f838c1
@@ -57,6 +57,7 @@ item l2r_get_std_2 3818079a4a43
 item l2r_init_body c5e90e6a0b70
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
+item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
 item l2r_main_body 382f04d125be
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e

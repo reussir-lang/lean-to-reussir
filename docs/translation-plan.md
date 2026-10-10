@@ -1798,7 +1798,8 @@ Rules:
   and the other `RtExtern*`; plan §10 ("Not supported").
 - **Fallible IO** (files and the file system): the runtime primitive
   records its outcome in a last-error slot; the glue checks it in line
-  after the call (`l2r_io_ok`; the error is built only on that path) and
+  after the call (`l2r_io_ok`; the error is built only on that path, by
+  one generated builder per IO result type, `l2r_io_err_R`) and
   turns it into `EST.Out.ok` with the payload (converted: unit, handle,
   `Metadata`, an array of `DirEntry`) or into `EST.Out.error e`, where `e` is built by
   Lean's own exported `lean_mk_io_error_*` builder for the reported kind,
