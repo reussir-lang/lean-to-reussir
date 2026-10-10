@@ -287,8 +287,9 @@ def writeTestImage (filename : String) (width : Nat := 500) (samplesPerPixel : N
 
   let mut pixels : Array (Color Float) := Array.replicate (height * width) Color.black
 
-  -- lean2rr test suite: THREADS = 0 renders on the main thread (no task, so
-  -- native Lean does not mark the shared generator and scene as multi-threaded)
+  -- lean2rr test suite: THREADS = 0 renders on the main thread, with no task.
+  -- (IO.stdGenRef is a persistent `initialize` value, marked at startup in
+  -- every mode; a task newly marks only the scene and the camera it captures.)
   if numThreads == 0 then
     IO.println s!"Rendering on the main thread."
     pixels ← renderTask true
