@@ -1,0 +1,7 @@
+# Hunt HBOX2-03: 1000 and 4000 promises, each made, resolved and read
+# (RtPromiseBoxAlloc.lean). Natively 6 allocations per promise. lean2rr
+# made 12, one of them the ElemBox cell around the promise in its box; it
+# makes 11 since the box holds the promise itself. The bound allows 5.5
+# more allocations per promise than native (16500 over the 3000 more
+# promises), so that the ElemBox (a 12th) fails it.
+1000 | 4000 | 1 16500

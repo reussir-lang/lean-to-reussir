@@ -540,12 +540,13 @@ def RR.Ty.box : RR.Ty := .named boxName
 
 /-- Types that may cross Reussir's FFI boundary as parameters: integers,
 floats, `bool`, and RC pointers (opaque runtime types, `Nat`/`Int` among
-them, and shared records). -/
+them, a handle and a promise, both `Rc<Box<dyn Any>>`, and shared
+records). -/
 def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
   match t with
   | .named n =>
     if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
-            "Nat", "Int", "LStr", "LHandle", boxName] then return true
+            "Nat", "Int", "LStr", "LHandle", "LPromise", boxName] then return true
     -- A reference is a shared record (see `refType`).
     if (← get).refName == some n then return true
     match (← get).typeInfos[n]? with
@@ -642,6 +643,29 @@ def boolOfU8Fn : LowerM String := do
     modify fun s => { s with fns := s.fns.push (.fn name #[("x", .named "u8")] .bool
       ⟨#[("z", some (.named "u8"), .atom "0")], .atom "x != z"⟩) }
   return name
+
+/-- The `bool` that the word `w : u64` is natively (`lean_unbox`, then the
+truncation to `uint8_t`): its low byte, nonzero, so 256 is `false`
+(`ofWord`, and `boxUnbox` in a program that casts). -/
+def boolOfWord (w : RR.Expr) : LowerM RR.Expr := do
+  let x ← fresh "ix"
+  let z ← fresh "iz"
+  return .block ⟨#[(x, some (.named "u8"), .cast w (.named "u8")), (z, some (.named "u8"), .atom "0")],
+    .atom s!"{x} != {z}"⟩
+
+/-- The value of enumeration type `tn` (of `size` constructors) that the
+word `w : u64` is natively: `lean_unbox`, then the truncation to the
+enumeration's storage width (`u8`; `u16` above 256 constructors, `u32`
+above 65536), then Lean's `switch`, whose last alternative is its default
+(`enumOfIndexFn` gives the last constructor past the end) (`ofWord`, and
+`boxUnbox` in a program that casts). -/
+def enumOfWord (tn : String) (size : Nat) (w : RR.Expr) : LowerM RR.Expr := do
+  let u64 := RR.Ty.named "u64"
+  let mask := if size ≤ 256 then 255 else if size ≤ 65536 then 65535 else 4294967295
+  let x ← fresh "ix"
+  let m ← fresh "im"
+  return .block ⟨#[(x, some u64, w), (m, some u64, .atom (toString mask))],
+    .call (← enumOfIndexFn tn) #[] #[.atom s!"{x} & {m}"]⟩
 
 /-- Whether `tn` is an enumeration (a generated `[value]` enum without
 fields). -/
@@ -757,14 +781,14 @@ Reussir's layout (`memberStorageType` and `deriveCompoundLayout` in
 Reussir's `lib/IR/ReussirTypes.cpp`): a 64-bit scalar; a member that Reussir
 stores as a pointer (a shared record or enum, an `ElemBox`, the reference
 record, a function value, a Reussir `Cell` or closure, an opaque runtime
-type such as `Nat`, `LStr`, `LAny` or `RVec`, which the frontend stores as
-a shared link); or a `[value]` struct or tuple that holds one. Any other
-type answers false: a payload is then deferred without the wide mark, which
-costs memory, never correctness. -/
+type such as `Nat`, `LStr`, `LAny`, `RVec`, `LHandle` or `LPromise`, which
+the frontend stores as a shared link); or a `[value]` struct or tuple that
+holds one. Any other type answers false: a payload is then deferred without
+the wide mark, which costs memory, never correctness. -/
 partial def rrAlign8 (t : RR.Ty) : LowerM Bool := do
   match t with
   | .named n =>
-    if n ∈ ["u64", "i64", "f64", "Nat", "Int", "LStr", "LHandle", boxName] then return true
+    if n ∈ ["u64", "i64", "f64", "Nat", "Int", "LStr", "LHandle", "LPromise", boxName] then return true
     if (← get).refName == some n then return true
     match (← get).typeInfos[n]? with
     | some info =>
@@ -1019,14 +1043,26 @@ program that casts) or unreachable (the box released first). A function
 type (`t` itself, or the field of a `[value]` struct) is unboxed by the
 generated function `fnUnbox t` (`unboxFnFn`: it reads every
 representation of the function type and the typed immediates of
-`l2r_any_of_fn`). -/
-partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Expr)
-    (fnUnbox : RR.Ty → LowerM String) (slow : Option String := none) : LowerM RR.Expr := do
+`l2r_any_of_fn`).
+
+In a program that casts (`slow`; `native` for the immediates that the
+generated function itself reads, `genUnbox`), a box can hold any word, and
+an immediate is read as native Lean reads that word at `t`, as the typed
+casts do (`ofWord`): a `Bool` is its low byte, nonzero (`boolOfWord`: 256
+is `false`); an enumeration is its index masked by its storage width
+(`enumOfWord`); an inductive whose last constructor has no fields gives
+that constructor for an index past the end (Lean's `switch` has its last
+alternative as its default; `ctorOfWordFn`). A program that does not cast
+has only the immediates lean2rr boxes, which read alike either way, and
+pays nothing for this. -/
+partial def boxUnboxWith (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Expr)
+    (fnUnbox : RR.Ty → LowerM String) (slow : Option (RR.Expr → LowerM RR.Expr)) (native : Bool) :
+    LowerM RR.Expr := do
   let u64 := RR.Ty.named "u64"
   let back (w : String) : RR.Expr := .call "l2r_any_of_raw" #[] #[.var w]
-  let otherwise (w : String) : RR.Block := match slow with
-    | some f => .ofExpr (.call f #[] #[back w])
-    | none => ⟨#[("l2rbs", some u64, .call "l2r_any_drop_raw" #[] #[.var w])], .call "l2r_unreachable" #[t] #[]⟩
+  let otherwise (w : String) : LowerM RR.Block := match slow with
+    | some k => return .ofExpr (← k (back w))
+    | none => return ⟨#[("l2rbs", some u64, .call "l2r_any_drop_raw" #[] #[.var w])], .call "l2r_unreachable" #[t] #[]⟩
   let isImm (w : String) : RR.Expr := .call "l2r_any_raw_is_imm" #[] #[.var w]
   -- `if <the word's number is n> { yes } else { no }`
   let ifNum (w : String) (n : Nat) (yes no : RR.Block) : LowerM RR.Expr := do
@@ -1034,6 +1070,7 @@ partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Exp
     let m ← fresh "bm"
     return .block ⟨#[(k, some u64, .call "l2r_any_raw_num" #[] #[.var w]), (m, some u64, .atom (toString n))],
       .ite (.atom s!"{k} == {m}") yes no⟩
+  let ctorCount (tn : String) : LowerM Nat := return ((← get).typeInfos[tn]?.map (·.ctorOrder.size)).getD 0
   match ← boxKind t with
   | .unit =>
     let d ← fresh "du"
@@ -1041,12 +1078,16 @@ partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Exp
   | .scalar k =>
     let dec (e : RR.Expr) : RR.Expr := .call s!"l2r_any_as_{k}" #[] #[e]
     if slow.isNone then
+      -- The generated function's own immediate (`genUnbox`).
+      if native && k == "bool" then return ← boolOfWord (.call "l2r_any_as_imm" #[] #[b])
       -- An array element read at once: its word, without a copy of the box
       -- (`boxWordRead?`).
       if k != "f32" then
         if let some w := boxWordRead? b (.named "u64") then return .call s!"l2r_any_word_as_{k}" #[] #[w]
       return dec b
-    boxWithWord b fun w => return .ite (isImm w) (.ofExpr (dec (back w))) (otherwise w)
+    boxWithWord b fun w => do
+      let yes ← if k == "bool" then boolOfWord (.call "l2r_any_raw_imm" #[] #[.var w]) else pure (dec (back w))
+      return .ite (isImm w) (.ofExpr yes) (← otherwise w)
   | .word k =>
     let dec (e : RR.Expr) : RR.Expr := match k with
       | "u64" => .call "l2r_any_as_u64" #[] #[e]
@@ -1062,23 +1103,34 @@ partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Exp
       let c5 ← fresh "bm"
       let ptr : RR.Block := ⟨#[(k, some u64, .call "l2r_any_raw_num" #[] #[.var w]), (c4, some u64, .atom "4"), (c5, some u64, .atom "5")],
          .ite (.atom s!"{k} == {c4}") (.ofExpr (dec (back w)))
-           (.ofExpr (.ite (.atom s!"{k} == {c5}") (.ofExpr (dec (back w))) (otherwise w)))⟩
+           (.ofExpr (.ite (.atom s!"{k} == {c5}") (.ofExpr (dec (back w))) (← otherwise w)))⟩
       return .ite (isImm w) (.ofExpr (dec (back w))) ptr
   | .enumIdx tn =>
     let ofIdx ← enumOfIndexFn tn
     if slow.isNone then
+      -- The generated function's own immediate (`genUnbox`).
+      if native then return ← enumOfWord tn (← ctorCount tn) (.call "l2r_any_as_imm" #[] #[b])
       if let some w := boxWordRead? b (.named "u64") then return .call ofIdx #[] #[.call "l2r_any_word_imm" #[] #[w]]
       return .call ofIdx #[] #[.call "l2r_any_as_imm" #[] #[b]]
     boxWithWord b fun w => do
-      let yes := RR.Block.ofExpr (.call ofIdx #[] #[.call "l2r_any_raw_imm" #[] #[.var w]])
-      return .ite (isImm w) yes (otherwise w)
+      let yes := RR.Block.ofExpr (← enumOfWord tn (← ctorCount tn) (.call "l2r_any_raw_imm" #[] #[.var w]))
+      return .ite (isImm w) yes (← otherwise w)
   | .valueStruct tn ft =>
     -- Over a box (`ST.Out σ α`): the struct around the box itself.
     if ft == RR.Ty.box then return .ctor tn none #[b]
     -- The field's own unboxing (its zero is the field of the struct's zero);
     -- a function value's through `fnUnbox` (a recursive structure whose one
     -- field is a function, `inductive G | mk : (Nat → Option (Nat × G)) → G`).
-    return .ctor tn none #[← boxUnbox b ft zeroOf fnUnbox none]
+    -- In a program that casts, what the field's unboxing does not read goes
+    -- to `slow`, the struct's own cast function, whose field is taken: a box
+    -- holding another inductive read at an inductive that Lean keeps as a
+    -- one-field object (`isomorphic`, `boxCastable`). The field's payloads
+    -- and cells stay in line (that function has no arm for a `UInt64` or
+    -- `Float` cell), and so does the round trip (`boxUnboxed?`).
+    let fieldSlow : Option (RR.Expr → LowerM RR.Expr) := slow.map fun k bx => do
+      let s ← fresh "vs"
+      return .block ⟨#[(s, some t, ← k bx)], .field (.var s) 0⟩
+    return .ctor tn none #[← boxUnboxWith b ft zeroOf fnUnbox fieldSlow native]
   | .leanrt n =>
     if slow.isNone then
       -- An array element read at once as a `Nat` or `Int`: an immediate
@@ -1088,14 +1140,14 @@ partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Exp
       return .call "l2r_any_as" #[t] #[b, .atom (toString n)]
     boxWithWord b fun w => do
       let yes := RR.Block.ofExpr (.call "l2r_any_as" #[t] #[back w, .atom (toString n)])
-      return .ite (isImm w) yes (.ofExpr (← ifNum w n yes (otherwise w)))
+      return .ite (isImm w) yes (.ofExpr (← ifNum w n yes (← otherwise w)))
   | .prog n _ _ nullary isFn =>
     if isFn then return .call (← fnUnbox t) #[] #[b]
     boxWithWord b fun w => do
       -- An immediate: the index (0 first: `box(0)`).
       let immB : RR.Block ← if nullary.isEmpty then do
           let one ← fresh "bm"
-          pure ⟨#[(one, some u64, .atom "1")], .ite (.atom s!"{w} == {one}") (.ofExpr (← zeroOf t)) (otherwise w)⟩
+          pure ⟨#[(one, some u64, .atom "1")], .ite (.atom s!"{w} == {one}") (.ofExpr (← zeroOf t)) (← otherwise w)⟩
         else do
           let i ← fresh "bi"
           let tn := match t with | .named tn => tn | _ => ""
@@ -1104,11 +1156,31 @@ partial def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Exp
             | some (_, v) => pure (RR.Arm.lit 0 (.ofExpr (.ctor tn (some v) #[])))
             | none => pure (RR.Arm.lit 0 (.ofExpr (← zeroOf t)))
           let rest : Array (Nat × String) := nullary.filter (fun (k, _) => k != 0)
+          -- Any other index: with `slow`, that function; in its own
+          -- immediates (`native`), past the end the last constructor when
+          -- it has no fields.
+          let size ← ctorCount tn
+          let wild ← match slow.isNone && native, nullary.back? with
+            | true, some (k, v) =>
+              if k + 1 == size then do
+                let m ← fresh "bm"
+                pure ⟨#[(m, some u64, .atom (toString size))],
+                  .ite (.atom s!"{i} >= {m}") (.ofExpr (.ctor tn (some v) #[])) (← otherwise w)⟩
+              else otherwise w
+            | _, _ => otherwise w
           let arms := #[zeroArm] ++ rest.map (fun (k, v) => RR.Arm.lit k (.ofExpr (.ctor tn (some v) #[])))
-            |>.push { ty := tn, ctor := none, binders := #[], body := otherwise w }
+            |>.push { ty := tn, ctor := none, binders := #[], body := wild }
           pure ⟨#[(i, some u64, .call "l2r_any_raw_imm" #[] #[.var w])], .mtch (.var i) arms⟩
-      let ptrB ← ifNum w n (.ofExpr (← boxTake (.var w) t)) (otherwise w)
+      let ptrB ← ifNum w n (.ofExpr (← boxTake (.var w) t)) (← otherwise w)
       return .ite (isImm w) immB (.ofExpr ptrB)
+
+/-- `boxUnboxWith` with `slow` the generated function of that name, and
+immediates read as natively whenever there is one (`native` alone: the
+generated function's own immediates, `genUnbox`). -/
+def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Expr)
+    (fnUnbox : RR.Ty → LowerM String) (slow : Option String := none) (native : Bool := false) :
+    LowerM RR.Expr :=
+  boxUnboxWith b t zeroOf fnUnbox (slow.map fun f bx => return .call f #[] #[bx]) (native || slow.isSome)
 
 /-- The array read of a box that `boxWordRead?` made a read at a type. -/
 partial def boxWordReadBack? (w : RR.Expr) : Option RR.Expr :=

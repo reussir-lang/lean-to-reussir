@@ -355,9 +355,11 @@ API's `boxUnbox`): its payload, or, for `box(0)`, the placeholder of `t`
 first), or goes to the generated unboxing function `slow` (values of other
 types read through `unsafeCast`). A function value (the field of a
 `[value]` struct) through the generated unboxing function of its type
-(`unboxFnFn`). -/
-def unboxMatch (e : RR.Expr) (t : RR.Ty) (slow : Option String := none) : LowerM RR.Expr :=
-  boxUnbox e t zeroValue unboxFnFn slow
+(`unboxFnFn`). With `slow`, or `native` (the immediates the generated
+function itself reads), an immediate is read as natively (`boxUnbox`). -/
+def unboxMatch (e : RR.Expr) (t : RR.Ty) (slow : Option String := none) (native : Bool := false) :
+    LowerM RR.Expr :=
+  boxUnbox e t zeroValue unboxFnFn slow native
 
 /-- An enumeration: `bool`, or a generated `[value]` enum without fields. -/
 def isEnumName (n : String) : LowerM Bool := do
@@ -483,12 +485,12 @@ def ctorOfWordFn (tn : String) (info : TypeInfo) : LowerM String := do
 
 /-- Whether values of Reussir type `t` are heap objects natively, other than
 constructors of inductives, when used where Lean expects an object: strings,
-arrays, closures, thunks and tasks, references, handles, and the floats
-Lean boxes into a cell of their own. -/
+arrays, closures, thunks and tasks, references, handles, promises, and the
+floats Lean boxes into a cell of their own. -/
 def isOtherObject (t : RR.Ty) : LowerM Bool := do
   match t with
   | .named n =>
-    if n ∈ ["LStr", "LHandle", "f64", "f32"] then return true
+    if n ∈ ["LStr", "LHandle", "LPromise", "f64", "f32"] then return true
     isRefType t
   | .app n _ => return n == "RVec" || n == "LRef" || n == "LCell"
   | .fn .. => return true
@@ -525,23 +527,12 @@ enumeration the bits of its width (`lean_unbox` then truncation; an index
 past the last constructor gives the last one, as Lean's `switch` does); a
 constructor without fields (`ctorOfWordFn`). `none` for other types. -/
 def ofWord (w : RR.Expr) (n : String) : LowerM (Option RR.Expr) := do
-  let u64 := RR.Ty.named "u64"
   if n == "Nat" then return some (.call "lean_usize_to_nat" #[] #[w])
   if n == "Int" then return some (.call "l2r_int_of_word" #[] #[w])
   if n ∈ ["u8", "u16", "u32"] then return some (.cast w (.named n))
-  if n == "bool" then
-    let x ← fresh "ix"
-    let z ← fresh "iz"
-    return some (.block ⟨#[(x, some (.named "u8"), .cast w (.named "u8")), (z, some (.named "u8"), .atom "0")],
-      .atom s!"{x} != {z}"⟩)
+  if n == "bool" then return some (← boolOfWord w)
   if let some info := (← get).typeInfos[n]? then
-    if info.shape == .enumLike then
-      let size := info.ctorOrder.size
-      let mask := if size ≤ 256 then 255 else if size ≤ 65536 then 65535 else 4294967295
-      let x ← fresh "ix"
-      let m ← fresh "im"
-      return some (.block ⟨#[(x, some u64, w), (m, some u64, .atom (toString mask))],
-        .call (← enumOfIndexFn n) #[] #[.atom s!"{x} & {m}"]⟩)
+    if info.shape == .enumLike then return some (← enumOfWord n info.ctorOrder.size w)
     if !info.value && hasNullaryCtor info then return some (.call (← ctorOfWordFn n info) #[] #[w])
   return none
 

@@ -66,7 +66,10 @@ to `lean2rr/LeanToReussir/`. Plan
 
 - **What:** Unboxing to `Nat`, `Int`, `UInt8/16/32/64`, `Bool`, a float or
   a nominal type is in line (`boxUnbox`): the target's own payload, an
-  immediate read at the target, and the boxed unit (the target's zero).
+  immediate read at the target (in a program that casts, as native Lean
+  reads that word:
+  [../representations/box-and-uniform.md](../representations/box-and-uniform.md#in-a-program-that-casts-an-immediate-is-read-as-native-lean-reads-its-word)),
+  and the boxed unit (the target's zero).
   Only in a program that casts (`programCasts`) do the other payloads go
   to the generated function (`l2r_unbox_T`: another word type or an
   object read through `unsafeCast`, the types a cast reads); otherwise

@@ -36,12 +36,14 @@ values"); divergences in
   `Nat` → `Int` is by value, and `Int` → `Nat` reads a small `Int` as the
   `Nat` of its 32 bits (`-5` is `2^32 - 5`) and a big one as its magnitude;
   an index selects the nullary constructor at that position, and back.
+  A boxed word that a program that casts unboxes reads the same way
+  ([../representations/box-and-uniform.md](../representations/box-and-uniform.md#in-a-program-that-casts-an-immediate-is-read-as-native-lean-reads-its-word)).
 - **Why:** That is what native code computes (adv4 RP4-05/RP4-06,
   ca9b64d).
 - **Where:** `Lower/Conv.lean`: `wordOf`, `ofWord`, `scalarWord`,
   `wordCastable`, `isWordTarget`, `isPureWord`, `ctorWordFn`,
-  `ctorOfWordFn`, `enumIndexFn`, `enumOfIndexFn`; `runtime/prelude.rr`:
-  `l2r_int_cast_nat`.
+  `ctorOfWordFn`, `enumIndexFn`, `enumOfIndexFn`; `LowerBase.lean`:
+  `boolOfWord`, `enumOfWord`; `runtime/prelude.rr`: `l2r_int_cast_nat`.
 - **Remove only if:** never.
 
 ### An object read as a word gets a deterministic stand-in address
@@ -161,9 +163,13 @@ values"); divergences in
 - **Where:** `Lower/Conv.lean`: `valueStructIsObject`, `isObjectNominal`,
   `ctorCastable`, `coerce`.
 - **Remove only if:** lean2rr stops making `[value]` structs of inductives
-  that Lean keeps as objects. Through a `Box` the cast stays unreachable, as
-  for other inductives that do not correspond: a boxed `[value]` struct is
-  its field's box.
+  that Lean keeps as objects. A boxed `[value]` struct is its field's box.
+  Through a `Box`, what the field does not hold goes to the struct's cast
+  function, which converts an isomorphic inductive (a `List P` read as a
+  `List U`; hunt HBOX2-02, test `RtCastBoxValueStruct`;
+  [../representations/box-and-uniform.md](../representations/box-and-uniform.md#in-a-program-that-casts-a-value-structs-field-falls-back-to-the-structs-cast-function));
+  inductives that do not correspond stay unreachable there, as for other
+  inductives.
 
 ### A `cases` on a cast value matches through the value's own constructors
 

@@ -33,8 +33,10 @@ the target's Lean type (with `conv-liveness`, that live code builds) and
 converts them: for a nominal or word type, its own payload only; for a
 function type, any representation of it (wrapped). In a program that
 casts (`programCasts`), also the payloads of types Lean represents alike
-(`boxCastable`). An immediate is read at `t` as the inline unboxing
-reads it (`boxUnbox`: a word, an index, `box(0)` as `t`'s zero); at a
+(`boxCastable`). An immediate is read at `t` as the inline unboxing of a
+program that casts reads it (`boxUnbox` with `native`: a word as native
+Lean reads it, an index, `box(0)` as `t`'s zero; such a function exists
+only in a program that casts, `unboxFn`); at a
 function type it is `box(0)` or a function payload's nullary variant by
 index (`l2r_any_of_fn`), converted. Other payloads are unreachable. -/
 def genUnbox (fname : String) (t : RR.Ty) : LowerM Unit := do
@@ -87,7 +89,9 @@ def genUnbox (fname : String) (t : RR.Ty) : LowerM Unit := do
         .mtch (.var n) fnArms⟩
       return ⟨#[(v, some u64, .call "l2r_any_raw_imm" #[] #[.var w]), (z, some u64, .atom "0")],
         .ite (.atom s!"{v} == {z}") (.ofExpr (← zeroValue t)) typed⟩
-    | _ => return .ofExpr (← unboxMatch bx t)
+    -- An immediate is read as natively (`boxUnbox`'s `native`): this
+    -- function exists only in a program that casts.
+    | _ => return .ofExpr (← unboxMatch bx t (native := true))
   let m ← boxDispatch (.var "b") arms imm unreach
   let item := RR.Item.fn fname #[("b", RR.Ty.box)] t (.ofExpr m)
   replaceFn fname item

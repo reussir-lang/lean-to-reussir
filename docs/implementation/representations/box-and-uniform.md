@@ -62,7 +62,7 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
     (as `ByteArray`), `RVec<f64>` 8 (as `FloatArray`), `RVec<u16>` 9,
     `RVec<u32>` 10, `RVec<u64>` 11, `RVec<f32>` 12;
   - every other type (a shared record or enum, a function value, a
-    reference, a thunk or task cell, a handle, another array): a pointer
+    reference, a thunk or task cell, a handle, a promise, another array): a pointer
     with the program's payload number (`boxNum`, from 16; from `0x8000 +
     16` for a leaf type, `boxIsLeaf`: a record or enum whose fields are
     all scalars), wrapped in an `ElemBox` when it cannot cross the FFI
@@ -71,7 +71,7 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
     into the index). A function value boxes with `l2r_any_of_fn`, whose
     nullary variants keep their type: `(num << 32) | index`. A type
     without nullary variants (a record, an enum whose constructors all
-    have fields, an `ElemBox`, a reference, a cell, a handle) boxes with
+    have fields, an `ElemBox`, a reference, a cell, a handle, a promise) boxes with
     `l2r_any_of_ptr`: its handle is always a pointer, so the box is the
     word with the number (`leanrt::any::of_ptr`'s check of the address
     only), without `l2r_any_of`'s tests for a nullary variant's immediate
@@ -135,10 +135,73 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   (`inductive G | mk : (Nat → Option (Nat × G)) → G`, a `[value]` struct)
   stopped lean2rr at its first unboxing, "boxUnbox at function type
   (internal error)" (hunt box, test `RtValueStructFnBox`).
-- **Where:** `LowerBase.lean`: `boxUnbox`; `Lower/Conv.lean`:
+- **Where:** `LowerBase.lean`: `boxUnbox`, `boxUnboxWith`; `Lower/Conv.lean`:
   `unboxMatch` (passes `unboxFnFn`), `tryCoerce`; `Lower/Finish.lean`:
   `genUnbox` (its immediates through `unboxMatch`).
 - **Remove only if:** `box(0)` stops reaching typed positions.
+
+### In a program that casts, an immediate is read as native Lean reads its word
+
+- **What:** In a program that casts (`programCasts`), a box can hold any
+  word, and `boxUnbox` reads an immediate as native Lean reads that word
+  at the target, as the typed casts do (`ofWord`):
+  - at `Bool`: its low byte, nonzero (`boolOfWord`: 256 is `false`);
+  - at an enumeration: its index masked by the storage width (`u8`; `u16`
+    above 256 constructors; `u32` above 65536), then
+    `l2r_enum_of_index_T`, which gives the last constructor for every index
+    past the end (`enumOfWord`);
+  - at an inductive whose last constructor has no fields: that constructor
+    for an index past the end (`ctorOfWordFn` does the same for a typed
+    cast).
+
+  The in-line unboxing (with `slow`) reads a `Bool` and an enumeration
+  like this. It sends any other immediate of a program type to the
+  generated function `l2r_unbox_T`, which reads its own immediates with
+  `native` (`genUnbox`): an index past the end is then the last
+  constructor, any other index without a nullary constructor is
+  `unreachable`. In a program that does not cast, the unboxing does not
+  change: `l2r_any_as_bool` (any nonzero word), the index unmasked,
+  `unreachable` past the end.
+- **Why:** Natively a boxed word read at `Bool` is
+  `(uint8_t)lean_unbox(x)`, at an enumeration the same truncation to its
+  storage type, and a `cases` is a `switch` whose last alternative is its
+  default. lean2rr's unboxing disagreed with native and with its own typed
+  casts: a `List Nat` of 256, 512, 257, 1, 0 read as `List Bool` printed
+  `TTTTF` (native `FFTTF`); 256, 3, 258, 2, 1 read as an enumeration of
+  three constructors printed `ccccb` (native `acccb`); and a word past the
+  last constructor of `T | a (n : Nat) | b | c` panicked (hunt HBOX2-01,
+  test `RtCastBoxImm`). A program that does not cast has only the
+  immediates that lean2rr boxes (0 and 1 for a `Bool`, an index in range),
+  which read alike both ways: such a program pays nothing.
+- **Where:** `LowerBase.lean`: `boxUnboxWith` (`native`), `boxUnbox`,
+  `boolOfWord`, `enumOfWord`; `Lower/Conv.lean`: `unboxMatch`, `ofWord`;
+  `Lower/Finish.lean`: `genUnbox` (its immediates with `native`).
+- **Remove only if:** never.
+
+### In a program that casts, a `[value]` struct's field falls back to the struct's cast function
+
+- **What:** At a `[value]` struct (not over a `Box`), `boxUnbox` gives the
+  struct around its field's own unboxing, in line. In a program that
+  casts, that field unboxing gets a `slow` of its own: the struct's
+  generated function `l2r_unbox_T`, whose field it takes
+  (`{ let vs : T = l2r_unbox_T(b); vs.0 }`). So a payload that the field
+  does not hold (another inductive's) goes to the cast arms of `T`
+  (`boxCastable`, `tryCoerce`: an isomorphic inductive converts constructor
+  by constructor).
+- **Why:** `boxUnbox` gave the field's unboxing no `slow`, so a box that
+  held another inductive's payload, read at such a struct, panicked: a
+  `List P` read as `List U` (`unsafe inductive U | mk : Nat → U`,
+  `structure P where a : Nat; b : String`) printed `5` for one typed cast
+  and then panicked (natively `U.mk` reads the first object field of `P`:
+  `[5, 7]`; hunt HBOX2-02, test `RtCastBoxValueStruct`). The struct is
+  not unboxed as a whole by `l2r_unbox_T`: that function has no arm for
+  the field's cells (a `Float`, a `UInt64` from 2^63: words are not pointer
+  payloads, `boxPointer?`), and it reads the field's own payload as a cast
+  when the field's type is isomorphic to the struct (`W` in
+  `unsafe inductive UW | mk : W → UW`), which gives no arm. In line, those
+  stay the field's own, and the round trip still folds (`boxUnboxed?`).
+- **Where:** `LowerBase.lean`: `boxUnboxWith` (`.valueStruct`).
+- **Remove only if:** never.
 
 ### A field of a parameter's type holds a `Box`; a boxed value is matched at its type
 

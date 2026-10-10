@@ -171,7 +171,7 @@ fn l2r_any_as_f64(a : LAny) -> f64 [{ leanrt::any::as_f64(a) }];
 
 // A counted value boxed as payload `num`: a Reussir record or enum (a
 // nullary variant becomes the immediate of its index), an opaque type of
-// this prelude (`LStr`, `RVec`, `LCell`, `LHandle`), a `Nat` or `Int` (their
+// this prelude (`LStr`, `RVec`, `LCell`, `LHandle`, `LPromise`), a `Nat` or `Int` (their
 // own words). leanrt's own kinds keep their fixed numbers whatever `num`
 // says: `Nat`, `Int`, `LStr`, `RVec<LAny>`, the arrays of scalars
 // `RVec<u8>`, `RVec<f64>`, `RVec<u16>`, `RVec<u32>`, `RVec<u64>`,
@@ -228,8 +228,14 @@ fn l2r_any_of_ptr<T>(x : T, num : u64) -> LAny [{ {
 // Word 1 is index 0: `box(0)` is the zero of `T`, or its variant 0 when
 // that one is nullary (the 0 arm is then `T::c_0{}`; Lean's `lean_box(0)`
 // is that constructor). A type without nullary variants has only the 0
-// arm and the unreachable one. `l2r_any_as<T>` at a program type panics
-// on any immediate, `box(0)` included.
+// arm and the unreachable one. In a program that casts, the generated
+// function reads an index past the end as the last variant when that one
+// is nullary (here 3 and up are `T::c_2{}`, as Lean's `switch` default), and
+// the in-line unboxing sends every other immediate to it; an immediate
+// read at `bool` is its low byte, nonzero, and at an enumeration its index
+// masked by the enumeration's width, as natively (lean2rr's `boxUnbox`).
+// `l2r_any_as<T>` at a program type panics on any immediate, `box(0)`
+// included.
 #[ffi(import)]
 fn l2r_any_as<T>(a : LAny, num : u64) -> T [{ leanrt::any::as_(a, num) }];
 #[ffi(import)]

@@ -219,6 +219,13 @@ with examples, and what it costs.
   target. A wrong word is a panic, never a wrong read. With the optional
   pass `conv-liveness`, an unboxing function has arms only for the types
   that live code boxes.
+- In a program that casts, a box can hold any word. The unboxing then
+  reads an immediate as native Lean reads that word: a `Bool` is its low
+  byte, nonzero (256 is `false`); an enumeration's index is masked to the
+  enumeration's storage width; an index past the last constructor gives
+  the last constructor when that one has no fields. At a `[value]` struct,
+  a box that holds another inductive's object goes to the struct's cast
+  function.
 - No value of a datatype, array, thunk, task or reference is converted: each
   has one type. A function type has several representations (`Nat -> Nat`
   and `LAny -> LAny`), so a function value can be wrapped for another

@@ -838,7 +838,9 @@ promise, so a last reference resolves it with `none` only after the
 question.
 
 **Promises.** `LPromise` is a runtime object holding the cell of the
-promise's task (`leanrt::task::Promise`); lean-runtime's promise id is that
+promise's task (`leanrt::task::Promise`), `Rc<Box<dyn Any>>` as `LHandle`
+(so a box holds it directly, `l2r_any_of_ptr<LPromise>`, without an
+`ElemBox`; hunt HBOX2-03); lean-runtime's promise id is that
 task's: `l2r_promise_new<S>(c)` (lean-runtime's `promise_new`: Lean's
 internal panic before `main`), `l2r_promise_cell<S>(p)` (the task, a new
 reference), `l2r_promise_release(p)`, and `l2r_promise_resolve_with<S>(c,
