@@ -366,7 +366,7 @@ before the passes over the generated functions, which then see bounded
 functions. -/
 def LoweredProgram.outline (p : LoweredProgram) : LoweredProgram :=
   let (fns, steps) := Outline.outlineFns {} (Outline.variantTable p.rrProgram.types p.prelude)
-    (Outline.takenNames p.preludeFns p.fns) p.fns
+    (Outline.typeTable p.rrProgram.types) (Outline.takenNames p.preludeFns p.fns) p.fns
   { p with fns, stepItems := p.stepItems ++ steps }
 
 /-- The program text: the prelude (with `prunePrelude`, optimization

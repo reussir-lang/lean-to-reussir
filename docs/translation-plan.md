@@ -2835,7 +2835,11 @@ Probe results (Reussir at the pinned commit):
   bytes of another arm that fall on the representative's padding or on a
   `bool` field are lost (`enum [value] M { A(u8), B(bool) }` reads `A(42)`
   back as 0). lean2rr only emits `[value]` enums that are unaffected:
-  enumerations without fields. Everything else with several arms is a shared enum (J4
+  enumerations without fields, and `Outline`'s step enums whose
+  representative arm (the last arm with the largest alignment, which
+  lean2rr chooses by the arms' order) carries every byte of the other arms
+  in a prefix of integers and pointers, by a layout model of the field
+  types (otherwise the step enum is shared). Everything else with several arms is a shared enum (J4
   entry points, §5.6); multi-field value records are `[value]` structs,
   whose padding is explicit.
 - **Candidate Reussir requests.** Guaranteed tail calls; `[value]` types
@@ -3077,7 +3081,10 @@ Each item says what differs and when.
   function of the cycle, with its arguments), and the function matches it
   and makes the tail call itself; a cycle of tail calls through the parts
   would not always be a sibling call and would use stack per iteration.
-  Such a loop allocates a step per iteration, only in functions this long.
+  The step enum is `[value]` (no allocation) when its representative arm
+  surely carries the bytes of the other arms (§9, "Known Reussir bug");
+  otherwise such a loop allocates a step per iteration, only in functions
+  this long.
   Ordinary functions are below the bounds; the classic corpus only has
   some `main`s cut. rrc also copies a wildcard arm into every constructor
   it covers and expands, in each copy, the release of every value the arm

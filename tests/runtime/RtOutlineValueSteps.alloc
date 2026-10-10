@@ -1,0 +1,8 @@
+# Outline's step values: n iterations of each loop, n = 2000 and 8000. With a [value] step enum no iteration
+# allocates, as natively. A shared step enum costs a heap cell for most iterations: before, between the two sizes,
+# loop +4523 allocations, mixed +4972, pair +4974, ping +4974 (alloc-check.sh with the steps made shared again: FAIL).
+# Factor 0: these lines pin the [value] steps.
+loop 2000 | loop 8000 | 0 200
+mixed 2000 | mixed 8000 | 0 200
+pair 2000 | pair 8000 | 0 200
+ping 2000 | ping 8000 | 0 200

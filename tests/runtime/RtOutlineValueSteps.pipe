@@ -1,0 +1,3 @@
+LEAN_STACK_SIZE_KB=1024 $BIN mixed 3000000; echo "mixed (1 MiB stack): exit $?"
+LEAN_STACK_SIZE_KB=1024 $BIN ping 3000000; echo "ping (1 MiB stack): exit $?"
+$BIN; echo "exit $?"

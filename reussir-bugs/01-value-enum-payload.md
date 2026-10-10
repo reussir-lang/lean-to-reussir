@@ -55,14 +55,26 @@ rest; those bytes are copied.)
 
 lean2rr emits only `[value]` enums that are unaffected: enumerations
 without fields (`Nat`/`Int`, once two-arm `[value]` enums whose arms each
-held one 64-bit word, are tagged handles since patch 41-a).
-Other multi-arm types are shared enums, and multi-field value records are
-`[value]` structs, whose padding is explicit (plan §10).
+held one 64-bit word, are tagged handles since patch 41-a), and the step
+enums of outlined recursive functions (`L2RStep_k`, `Outline.lean`:
+`stepItem`) whose representative carries every byte of the other arms.
+A layout model of the field types checks that: integers and pointer-sized
+values carry all their bytes, a `bool` does not, and floating-point values
+and padding are conservatively not counted (as `carriesAllBytes` in 01-a
+counts floating-point values; Reussir lays a record's padding out as
+bytes); lean2rr declares the arm with the
+largest alignment and the longest carried prefix last, and the step enum
+is `[value]` only if every other arm ends within that prefix (otherwise it
+stays shared). Other multi-arm types are shared enums, and multi-field
+value records are `[value]` structs, whose padding is explicit (plan §10).
 
-The patch does not change lean2rr's code: the `[value]` enums it emits
-(field-less enumerations) keep their LLVM types, and lean2rr
-keeps its rule (README policy: workarounds stay, so that lean2rr also works
-with an unpatched Reussir).
+The patch does not change lean2rr's code. The field-less enumerations
+keep their LLVM types; a step enum whose representative has a `bool` or a
+floating-point field gets the patch's integer-array payload (lean2rr's
+test RtOutlineValueSteps: `{ i8, [5 x i64] }` for `done(LStr)`,
+`c0(LStr, RVec<LAny>, Nat, u64, u8, bool)`), which is correct either way.
+lean2rr keeps its rule (README policy: workarounds stay, so that lean2rr
+also works with an unpatched Reussir).
 
 ## Patch
 
@@ -155,9 +167,12 @@ and `i1` cases. [Bug 26](26-launder-assume.md) (an `llvm.assume` after the invar
 launder, patch 26-a) was found by the differential fuzzing of 08-a, 02-b and 01-a; it
 is not caused by them.
 
-**Effect on lean2rr.** None on its current output (its `[value]` enums keep
-their types). `[value]` enums with arms of different layouts become usable,
-should lean2rr emit them.
+**Effect on lean2rr.** Its field-less enumerations keep their types. A
+step enum whose representative has a `bool` or a floating-point field gets
+the integer-array payload; lean2rr's guard already keeps every byte that
+the other arms use in the representative's carried prefix, so both forms
+are correct. `[value]` enums with arms of different layouts in general
+become usable, should lean2rr emit them.
 
 ## Upstream note
 

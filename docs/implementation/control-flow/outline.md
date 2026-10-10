@@ -57,11 +57,61 @@ text, from growing superlinearly. It is a required part (`outline` in
   `RtOutlineLoops` runs such loops with a 1 MiB stack). Before, recursive
   functions were skipped: a recursive IO function of 1500 statements made
   over 100 MB of `.rr` and did not build under 16 GB. Cost: a step value
-  per iteration, only in functions this long.
+  per iteration, only in functions this long; a heap cell only when the
+  step enum is shared (next entry).
 - **Where:** `Outline.lean`: `StepInfo`, `stepInfo`, `stepVariant`,
   `stepify`, `stepDispatch`, `cycleCall?`, `hasCycleCall`,
   `tailCycleCalls`, `cycles`.
 - **Remove only if:** as above.
+
+### Step enums are `[value]` when their layout is safe to move
+
+- **What:** The step enum `L2RStep_k` is an `enum [value]` when a layout
+  model knows every field type and every other arm's bytes lie in the
+  prefix of the representative arm that a move surely carries. The
+  representative is the last arm with the largest alignment; lean2rr
+  declares last the arm with the largest alignment and, of those, the
+  longest carried prefix. Integers and pointer-sized values (shared types,
+  function values, closures, `Nat`, `Int`, `LStr`, `LAny`, `RVec`, …)
+  carry all their bytes; a `bool` (an `i1`) does not; `f32`, `f64` and
+  padding (which Reussir lays out as bytes) are conservatively not counted
+  as carried; a
+  `[value]` struct is its fields in order, a field-less `[value]` enum its
+  tag. The fields of a call variant are in decreasing alignment, fields
+  that carry all their bytes first, ties in parameter order: the
+  construction and the cut point's binders follow that order, the call
+  keeps parameter order. Otherwise (an unknown type, or bytes outside the
+  carried prefix) the enum stays shared. A step value goes only from a
+  part's result to the match at the cut point: never into a field, an
+  array, a `Cell` or a `Box`, and no conversion is generated for its type
+  (Outline runs after lowering), so being `[value]` changes nothing else.
+  Examples (RtOutlineValueSteps): `done(u64)`, `c0(Nat, u64, u64, u64)`
+  is `[value]`; `done(LStr)`, `c0(LStr, RVec<LAny>, Nat, u64, u8, bool)`
+  (parameters `Bool, UInt8, String, Array Nat, Nat, UInt64`) is `[value]`;
+  `done(f64)`, `c0(f64, f64)` stays shared (no carried prefix).
+- **Why:** A shared step enum is a heap cell per iteration. The
+  allocation survey of 2026-10-10 found lean-zip's `lz77LazyMergedLoop`
+  step (23 fields, 192 bytes): 43,049 cells, 8.27 MB of the 10.39 MB that
+  Z01c's allocations grow by between its two sizes (1.10 times native's
+  allocations, 2.04 times its bytes). With `[value]` steps, all seven
+  step enums of lean-zip are `[value]`; Z01c's growth is 7,401
+  allocations and 2.11 MB (0.16 and 0.41 times native's), Z01r's 0.13 and
+  0.59 times native's (before 0.19 and 0.81); Z01d and Z01t do not change
+  (survey sizes and counter, outputs identical).
+  Reussir moves a `[value]` enum as the struct of its representative arm,
+  so another arm's bytes on its padding or on an `i1` are lost
+  ([Reussir bug 1](../../../reussir-bugs/01-value-enum-payload.md)): patch
+  01-a fixes it, and the guard keeps lean2rr's output right without it
+  (policy). Test `RtOutlineValueSteps`: `.alloc`, no allocation per
+  iteration, as natively; `.pipe`, 3000000 steps of `mixed` and of the
+  mutual recursion `ping` on a 1 MiB stack; also `done` arms narrower than
+  a word (`Bool`, `Bool × UInt8`) and a `done` tuple as the representative.
+- **Where:** `Outline.lean`: `FieldLayout`, `fieldLayout`,
+  `compoundLayout`, `typeTable`, `stepFieldOrder`, `StepCall`, `stepItem`,
+  `stepVariant`, `stepInfo`, `stepify`, `stepDispatch`, `outlineFns`;
+  `Emit/Program.lean`: `LoweredProgram.outline`.
+- **Remove only if:** never for the `[value]` choice (speed); the guard
+  can go when every Reussir that lean2rr supports has bug 1's fix.
 
 ### Only blocks whose variables have known types are outlined
 

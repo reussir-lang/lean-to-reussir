@@ -41,7 +41,12 @@ for a call `g(…)` in tail position. The cut point becomes
 returns, and the tail call is made by the function itself, so a loop that
 LLVM turns into a jump stays one (a cycle of tail calls through the parts
 would not always be a sibling call and would use stack per iteration). A
-part costs a step value per iteration, only in functions this long.
+step value is a `[value]` enum, so it needs no heap cell, when its layout
+is safe to move (`stepItem`); otherwise it is shared, a heap cell per
+iteration, only in functions this long. A step value goes only from a
+part's result to the match at the cut point (through the chain of parts
+that return it): it is never stored in a field, an array, a `Cell` or a
+`Box`, and no conversion exists for it (this pass runs after lowering).
 
 A block is outlined only if every variable it uses has a known type: the
 parameters, typed `let`s and the fields of matched variants (from the type
@@ -130,6 +135,130 @@ abbrev Env := Std.HashMap String (Option Ty × Nat)
 
 def Env.bind (env : Env) (x : String) (t : Option Ty) : Env := env.insert x (t, env.size)
 
+/-! ## Step values: their layout
+
+A step enum is `[value]` (returned in registers or the caller's frame, no
+heap cell) when Reussir moves its values without losing bytes. Reussir moves
+a `[value]` enum as the LLVM struct of one arm, its *representative*: the
+last arm with the largest alignment. Another arm's bytes survive the move
+only where the representative's own type carries every byte: an integer or
+a pointer does; a `bool` (an `i1`, one bit of its byte) does not (Reussir
+issue 1, reussir-bugs/01-value-enum-payload.md; patch 01-a makes every move
+carry all bytes, but lean2rr's output also stays right without it).
+Floating-point values and padding are conservatively not counted as carried
+(Reussir lays a record's padding out as bytes, Opt/FieldOrder; the guard
+relies neither on that nor on how a move copies a floating-point value). So
+`stepItem` makes the enum `[value]` only when the layout model below knows
+every field type, and every other arm's bytes lie in the prefix of the
+representative that it carries; otherwise the enum stays shared, as
+before. The model follows Reussir's layout of a record's members in
+declaration order (the driver always passes `--no-pack-record-members`):
+each member at the next multiple of its alignment. -/
+
+/-- A field type's storage in a step arm, as far as the guard needs it:
+size and alignment in bytes, and the length of the prefix of its bytes that
+a move of a value of this type carries for sure (`carried = size`: all). -/
+structure FieldLayout where
+  size : Nat
+  align : Nat
+  carried : Nat
+  deriving Inhabited, Repr
+
+/-- The generated and prelude type declarations by name (`.enum` and
+`.struct` items), for `fieldLayout`. -/
+abbrev TypeTable := Std.HashMap String Item
+
+def typeTable (items : Array Item) : TypeTable :=
+  items.foldl (init := {}) fun m it => match it with
+    | .enum n .. | .struct n .. => m.insert n it
+    | _ => m
+
+/-- The members `fs` laid out in order, each at the next multiple of its
+alignment: (alignment, end of the last member, carried prefix). -/
+def compoundLayout (fs : Array FieldLayout) : Nat × Nat × Nat := Id.run do
+  let mut off := 0
+  let mut align := 1
+  let mut carried := 0
+  let mut open_ := true
+  for f in fs do
+    let o := (off + f.align - 1) / f.align * f.align
+    if open_ then
+      if o == carried then
+        carried := o + f.carried
+        open_ := f.carried == f.size
+      else open_ := false
+    off := o + f.size
+    align := max align f.align
+  return (align, off, carried)
+
+/-- The storage of a value of type `t` in a step arm, or `none` if the
+model does not know it (the step enum then stays shared). Pointer-sized,
+all bytes carried: what Reussir stores as a pointer or one tagged word (a
+shared record or enum, a function value, a closure, an opaque runtime type:
+`rrAlign8` in LowerBase lists them). A `[value]` struct is its fields in
+order; a `[value]` enumeration without fields, such as `L2RUnit`, is its
+tag (8 bits up to 256 variants, then 16, then 32: Reussir's `getTagType`). A
+`[value]` enum with fields (a step enum) is unknown. -/
+partial def fieldLayout (types : TypeTable) (t : Ty) (fuel : Nat := 8) : Option FieldLayout :=
+  let word : FieldLayout := ⟨8, 8, 8⟩
+  match t with
+  | .named n =>
+    match n with
+    | "u8" | "i8" => some ⟨1, 1, 1⟩
+    | "u16" | "i16" => some ⟨2, 2, 2⟩
+    | "u32" | "i32" => some ⟨4, 4, 4⟩
+    | "u64" | "i64" => some word
+    | "bool" => some ⟨1, 1, 0⟩
+    | "f32" => some ⟨4, 4, 0⟩
+    | "f64" => some ⟨8, 8, 0⟩
+    | "Nat" | "Int" | "LStr" | "LHandle" | "LAny" => some word
+    | "L2RUnit" => some ⟨1, 1, 1⟩
+    | _ =>
+      match types[n]? with
+      | some (.enum _ false _) | some (.struct _ false _) => some word
+      | some (.enum _ true vs) =>
+        if !vs.all (·.2.isEmpty) then none
+        else if vs.size ≤ 256 then some ⟨1, 1, 1⟩
+        else if vs.size ≤ 65536 then some ⟨2, 2, 2⟩
+        else some ⟨4, 4, 4⟩
+      | some (.struct _ true fs) =>
+        if fuel == 0 then none else do
+        let ls ← fs.mapM (fieldLayout types · (fuel - 1))
+        let (align, dataEnd, carried) := compoundLayout ls
+        let size := (dataEnd + align - 1) / align * align
+        some ⟨size, align, carried⟩
+      | _ => none
+  | .app n _ => if n ∈ ["RVec", "LRef", "LCell", "Cell"] then some word else none
+  | .fn .. | .cls .. => some word
+
+/-- The order of a step variant's fields (indices into the callee's
+parameters `ps`): decreasing alignment, the fields that carry all their
+bytes first, ties in parameter order. So the variant has no padding between
+fields (like a record with optimization `field-order`, and the order of
+fields that Reussir issue 2's workaround needs), and its carried prefix is
+as long as it can be. Parameter order if a type is unknown. -/
+def stepFieldOrder (types : TypeTable) (ps : Array Ty) : Array Nat :=
+  match ps.mapM (fieldLayout types ·) with
+  | none => (List.range ps.size).toArray
+  | some ls =>
+    (List.range ps.size).toArray.qsort fun i j =>
+      let a := ls[i]!
+      let b := ls[j]!
+      let fa := a.carried == a.size
+      let fb := b.carried == b.size
+      a.align > b.align || (a.align == b.align && ((fa && !fb) || (fa == fb && i < j)))
+
+/-- A function of the cycle that a part calls in tail position: its step
+variant `c<k>` holds its arguments. -/
+structure StepCall where
+  fn : String
+  /-- Its parameter types. -/
+  params : Array Ty
+  /-- The variant's fields: `params[order[0]]`, `params[order[1]]`, …
+  (`stepFieldOrder`). -/
+  order : Array Nat
+  deriving Inhabited
+
 /-- What a recursive function's parts return (see the module comment). -/
 structure StepInfo where
   /-- The generated enum. -/
@@ -137,9 +266,32 @@ structure StepInfo where
   /-- The function's result type (variant `done`). -/
   ret : Ty
   /-- The functions of the cycle called in tail position by a part, in the
-  order of their variants `c0`, `c1`, …, with their parameter types. -/
-  calls : Array (String × Array Ty) := #[]
+  order of their variants `c0`, `c1`, …. -/
+  calls : Array StepCall := #[]
   deriving Inhabited
+
+/-- The item of step enum `info`: `[value]` when its layout is safe to move
+(see "Step values: their layout"), with its representative, the arm with
+the largest alignment and of those the longest carried prefix, declared
+last; otherwise shared, with its variants in order. -/
+def stepItem (types : TypeTable) (info : StepInfo) : Item := Id.run do
+  let arms : Array (String × Array Ty) := #[("done", #[info.ret])] ++
+    info.calls.mapIdx fun i c => (s!"c{i}", c.order.map (c.params[·]!))
+  let shared := Item.enum info.name false arms
+  let some lays := arms.mapM (fun (_, fs) => fs.mapM (fieldLayout types ·)) | return shared
+  let shapes := lays.map compoundLayout
+  -- The representative: largest alignment, then longest carried prefix,
+  -- then the last.
+  let mut r := 0
+  for h : i in [1:shapes.size] do
+    let (a, _, c) := shapes[i]
+    let (ar, _, cr) := shapes[r]!
+    if a > ar || (a == ar && c ≥ cr) then r := i
+  let (_, _, carried) := shapes[r]!
+  for h : i in [:shapes.size] do
+    let (_, dataEnd, _) := shapes[i]
+    if i != r && dataEnd > carried then return shared
+  return .enum info.name true ((arms.eraseIdx! r).push arms[r]!)
 
 /-- The function being cut and its cycle. -/
 structure FnCtx where
@@ -159,6 +311,8 @@ structure Ctx where
   variants : Std.HashMap (String × String) (Array Ty)
   /-- Parameter types of every function of the program. -/
   params : Std.HashMap String (Array Ty)
+  /-- The type declarations, for the layout of step variants. -/
+  types : TypeTable := {}
 
 structure St where
   /-- Function names in use. -/
@@ -255,14 +409,15 @@ partial def tailCycleCalls (cycle : Std.HashSet String) (b : Block) (acc : Array
 
 /-- The variant of step enum `info` for a tail call of `g`, adding it if
 needed. -/
-def stepVariant (fc : FnCtx) (g : String) : M String := do
+def stepVariant (fc : FnCtx) (g : String) : M (String × Array Nat) := do
   let info := (← get).steps[fc.base]!
-  match info.calls.findIdx? (·.1 == g) with
-  | some i => return s!"c{i}"
+  match info.calls.findIdx? (·.fn == g) with
+  | some i => return (s!"c{i}", info.calls[i]!.order)
   | none =>
     let ps := (← read).params.getD g #[]
-    modify fun s => { s with steps := s.steps.insert fc.base { info with calls := info.calls.push (g, ps) } }
-    return s!"c{info.calls.size}"
+    let order := stepFieldOrder (← read).types ps
+    modify fun s => { s with steps := s.steps.insert fc.base { info with calls := info.calls.push { fn := g, params := ps, order } } }
+    return (s!"c{info.calls.size}", order)
 
 /-- The step enum of the function being cut, made on first use, with a
 variant for every function of its cycle that it calls in tail position
@@ -271,8 +426,11 @@ def stepInfo (fc : FnCtx) : M StepInfo := do
   if let some i := (← get).steps[fc.base]? then return i
   let k := (← get).stepOrder.size
   let ps := (← read).params
+  let types := (← read).types
   let info : StepInfo := { name := s!"L2RStep_{k}", ret := fc.ret,
-                           calls := fc.tailCalls.map fun g => (g, ps.getD g #[]) }
+                           calls := fc.tailCalls.map fun g =>
+                             let gps := ps.getD g #[]
+                             { fn := g, params := gps, order := stepFieldOrder types gps } }
   modify fun s => { s with steps := s.steps.insert fc.base info, stepOrder := s.stepOrder.push fc.base }
   return info
 
@@ -282,7 +440,10 @@ function of the cycle becomes its step variant, every other result
 partial def stepify (fc : FnCtx) (b : Block) : M Block := do
   let info ← stepInfo fc
   if let some (lets, g, args) := cycleCall? fc.cycle b then
-    return ⟨lets, .ctor info.name (some (← stepVariant fc g)) args⟩
+    let (v, order) ← stepVariant fc g
+    -- (A call of a function of the program passes all its parameters.)
+    let fields := if order.size == args.size then order.map (args[·]!) else args
+    return ⟨lets, .ctor info.name (some v) fields⟩
   match b.result with
   | .mtch s arms => return ⟨b.lets, .mtch s (← arms.mapM fun a => do return { a with body := ← stepify fc a.body })⟩
   | .ite c t f => return ⟨b.lets, .ite c (← stepify fc t) (← stepify fc f)⟩
@@ -441,10 +602,12 @@ mutual
     let v ← freshLocal "l2rsv"
     let mut arms : Array Arm := #[{ ty := info.name, ctor := some "done", binders := #[some v], body := .ofExpr (.var v) }]
     for h : i in [:info.calls.size] do
-      let (g, gps) := info.calls[i]
-      let xs ← gps.mapM fun _ => freshLocal "l2rsa"
-      arms := arms.push { ty := info.name, ctor := some s!"c{i}", binders := xs.map some,
-                          body := .ofExpr (.call g #[] (xs.map .var)) }
+      let c := info.calls[i]
+      let xs ← c.params.mapM fun _ => freshLocal "l2rsa"
+      -- The binders in the variant's field order, the call's arguments in
+      -- parameter order.
+      arms := arms.push { ty := info.name, ctor := some s!"c{i}", binders := c.order.map (some xs[·]!),
+                          body := .ofExpr (.call c.fn #[] (xs.map .var)) }
     return .block ⟨#[(st, some stepTy, call)], .mtch (.var st) arms⟩
 end
 
@@ -513,11 +676,12 @@ def cycles (callees : Std.HashMap String (Array String)) : Std.HashMap String (S
   return out
 
 /-- Outline the deep and long tail paths and `let` values of every function
-of `fns` (`taken`: every function name of the program). Returns the
-functions, each followed by the functions outlined from it, and the step
-enums of the recursive functions that were cut. -/
+of `fns` (`taken`: every function name of the program; `types`: the type
+declarations, `typeTable`). Returns the functions, each followed by the
+functions outlined from it, and the step enums of the recursive functions
+that were cut (`stepItem`). -/
 def outlineFns (limits : Limits) (variants : Std.HashMap (String × String) (Array Ty))
-    (taken : Std.HashSet String) (fns : Array Item) : Array Item × Array Item := Id.run do
+    (types : TypeTable) (taken : Std.HashSet String) (fns : Array Item) : Array Item × Array Item := Id.run do
   let mut callees : Std.HashMap String (Array String) := {}
   let mut params : Std.HashMap String (Array Ty) := {}
   for it in fns do
@@ -537,14 +701,11 @@ def outlineFns (limits : Limits) (variants : Std.HashMap (String × String) (Arr
       let env : Env := ps.foldl (fun e (n, t) => e.bind n (some t)) {}
       let cycle := cyc.getD name {}
       let fc : FnCtx := { base := name, cycle, ret, tailCalls := tailCycleCalls cycle body #[] }
-      let (body, st') := ((walkBlock fc ret false env 0 0 body).run { limits, variants, params }).run { st with out := #[] }
+      let (body, st') := ((walkBlock fc ret false env 0 0 body).run { limits, variants, params, types }).run { st with out := #[] }
       out := out.push (.fn name ps ret body) ++ st'.out
       st := st'
     | _ => out := out.push it
-  let stepItems := st.stepOrder.map fun f =>
-    let info := st.steps[f]!
-    Item.enum info.name false (#[("done", #[info.ret])] ++ info.calls.mapIdx fun i (_, ps) => (s!"c{i}", ps))
-  return (out, stepItems)
+  return (out, st.stepOrder.map fun f => stepItem types st.steps[f]!)
 
 /-- Every function name of the program: the prelude's (`preludeFns`) and
 those of `fns` (including the functions of raw items). -/

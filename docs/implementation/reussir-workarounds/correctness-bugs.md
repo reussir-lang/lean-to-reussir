@@ -12,7 +12,11 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
 
 - **What:** lean2rr emits only `[value]` enums that are unaffected:
   field-less enumerations (`Nat`/`Int` are tagged handles since patch
-  41-a, not `[value]` enums). Everything else with several arms is a shared enum
+  41-a, not `[value]` enums), and Outline's step enums whose
+  representative arm surely carries every byte of the other arms (a layout
+  model checks it; otherwise the step enum is shared:
+  [../control-flow/outline.md](../control-flow/outline.md#step-enums-are-value-when-their-layout-is-safe-to-move)).
+  Everything else with several arms is a shared enum
   (J4 entry enums with fields included: the core form's, and the
   `state-machines` form's when a field has no slot; with only nullary
   variants that form's entry point is an integer, not an enum);
@@ -22,7 +26,8 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
   ([01-value-enum-payload.md](../../../reussir-bugs/01-value-enum-payload.md)).
 - **Where:** `LowerBase.lean`: `nominalType`, `tupleType`;
   `Lower/StateMachine.lean`: `emitStateMachine`;
-  `Opt/StateMachines.lean`: `emitStateMachineAlongside`.
+  `Opt/StateMachines.lean`: `emitStateMachineAlongside`;
+  `Outline.lean`: `stepItem`, `fieldLayout`.
 - **Remove only if:** not needed with patch 01-a (applied), but kept: by
   the policy lean2rr also works with an unpatched Reussir. Without the
   workaround, J4 entry enums with fields and multi-arm value types could

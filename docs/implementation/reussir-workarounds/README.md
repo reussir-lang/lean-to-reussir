@@ -62,7 +62,7 @@ either way.
 
 | Issue | Kind | lean2rr workaround | Local patch | Needed with the patch? |
 |---|---|---|---|---|
-| [1](../../../reussir-bugs/01-value-enum-payload.md) | bug | only field-less `[value]` enums (`Nat`/`Int` are tagged handles, 41-a) | 01-a, applied | no; kept (policy) |
+| [1](../../../reussir-bugs/01-value-enum-payload.md) | bug | only field-less `[value]` enums (`Nat`/`Int` are tagged handles, 41-a), and step enums whose representative arm carries the other arms' bytes | 01-a, applied | no; kept (policy) |
 | [2](../../../reussir-bugs/02-reuse-field-store.md) | bug | `--no-pack-record-members`; fields ordered by alignment | structures: fixed upstream (#652, in the base; 02-a dropped); variants: 02-b, applied | no; kept (policy) |
 | [3](../../../reussir-bugs/03-global-alloc-align.md) | cost (the 16-byte alignment is intended) | runtime allocates its objects with `mi_malloc` | 03-a and 03-b, applied | kept: the runtime's objects need only 8-byte alignment, and its blocks stay smaller |
 | [4](../../../reussir-bugs/04-recursive-type-compare.md) | bug | driver retries rrc without `--reuse-across-call` | fixed upstream (#654, in the base; 04-a dropped) | no; kept as a fallback for unknown crashes |

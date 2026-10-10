@@ -316,7 +316,9 @@ See [Runtime](runtime.html#startup) for the entry point.
   and with straight-line length. So a tail path 32
   matches deep or 256 `let`s long is cut into functions. A recursive function
   keeps its loops: the cut part returns a step value, and the function makes
-  the tail call itself.
+  the tail call itself. The step value is a `[value]` enum when the layout of
+  its variants lets every move keep all bytes. Then a step needs no heap
+  cell. Otherwise the step enum is shared.
 - **Passes over the generated functions**: `sink-proj`.
 - The text: `prog.rr`, with the functions of `prelude.rr` that it uses
   prepended (`prelude-liveness`).
