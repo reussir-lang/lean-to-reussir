@@ -71,26 +71,72 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **Remove only if:** the pass is off (the core form allocates a variant
   per call and jump).
 
-### The entry enum of nullary variants is a value enum (`state-machines`)
+### The entry point of nullary variants is an integer (`state-machines`)
 
-- **What:** When every variant of a state machine's entry enum is nullary
-  (no field without a slot, the usual case), the enum is a `[value]`
-  enum: a scalar tag (`i8`), as for Lean's field-less inductives. A
-  variant that keeps a field (the soundness guard above) makes the enum
-  shared, as in the core form.
+- **What:** When every variant of a state machine is nullary (no field
+  without a slot, the usual case), its entry point is an integer, not an
+  enum: a `u8` (a `u32` above 256 variants). Variant `i` is the literal
+  `i`: `0` is the declaration's own entry, then come the outlined join
+  points in their order. The function matches its last parameter on the
+  literals `0`, `1`, ..., one arm per variant, and then has a wildcard arm
+  `_ => { l2r_unreachable<R>() }` (`R` is its result type), which no call
+  reaches. A variant that keeps a field (the soundness guard above) makes
+  the entry point a shared enum, as in the core form.
+
+  ```
+  fn f_sm(s1 : Nat, s2 : RVec<u8>, m : u8) -> R {
+      match m {
+          0 => { ... f_sm(x, a, 1) ... },        // the entry
+          1 => { ... f_sm(y, s2, 0) ... },       // join point j1
+          _ => { l2r_unreachable<R>() }
+      }
+  }
+  ```
 - **Why:** A shared enum's nullary variant is a pointer to a static cell.
   The state machine's `match` loaded the tag through it and tested the
-  cell's count at every entry, and a re-entry passed the pointer: in
-  lean-zip's inflate loop (Z01d) this was a load, a test and a branch at
-  each of its two or three entries per output byte. A field-less
-  `[value]` enum has no payload, so Reussir bug 1 (lost payload bytes of
-  `[value]` enums whose arms differ) cannot apply. Wall time: with the
-  next entry (both changes measured together there). Supporting detail
-  (callgrind): RtSmDecode's decode loop without its `dbgTraceIfShared`
-  calls, 4 rounds at size 1000000, 441 to 392 million instructions.
+  cell's count at every entry: in lean-zip's inflate loop (Z01d) a load, a
+  test and a branch at each of its two or three entries per output byte.
+  A `[value]` enum (the form before this one) has no pointer, but in LLVM
+  it is a struct of its tag and an empty payload. After tail-call
+  elimination, the loop then carries its entry point in a phi of that
+  struct type, and the `switch` at the loop's head reads a field of the
+  phi. LLVM's DFAJumpThreading (in the O3 pipeline that `-O aggressive`
+  runs) threads a loop only through a `switch` on a phi (or select) of
+  integers, so it did not thread these loops. On an integer it threads them: each jump
+  goes directly to the arm that it enters, and only the function's entry
+  has the `switch`. Measured in the LLVM IR (blocks `.jtN` of
+  DFAJumpThreading), the loops that it now threads are the same loops
+  that it threads when it is added at the end of Reussir's pipeline (an
+  evaluated Reussir change that is not necessary now), and one more:
+  RtSmDecode's decode loop; in lean-zip's driver (Z01c, Z01d) 4 of its 16
+  state machines (two greedy lz77 loops, the gzip decoder's loop, the
+  split heuristic); in Cedar (Z06d) 24 of 41 (22 specializations of
+  protobuf's `parseMessageHelper`, `String.Slice.Pos.skipWhile`,
+  `Parsec.manyCharsCore`). Every variant has its own literal arm and the
+  wildcard is unreachable, because a wildcard for the last variant makes
+  the `switch`'s default reachable: its jump table then has a range check
+  at each entry where the loop is not threaded (lean-zip's inflate loop
+  `goTreeFreeU` on dickens: 891 to 930 million instructions). LLVM's range
+  analysis makes an unreachable wildcard's default unreachable where it
+  knows the range (from the literals that the callers pass), so that loop
+  is unchanged. Where the entry point comes back through an outlined
+  part's step value (`L2RStep_k`, Outline), the range is not known and the
+  check stays; such a loop of Z01c (`lz77LazyMergedLoop`) still runs fewer
+  instructions than with the enum (415.4 to 407.4 million). Wall time: at the next joint benchmark. Supporting detail
+  (callgrind, instructions, against the `[value]` enum; the programs'
+  `.rr` of the benchmark set at 0b6ef980 with their entry points changed
+  to this form; in parentheses: the `[value]` enum with DFAJumpThreading
+  added at the end of Reussir's pipeline): RtSmDecode at size 200000,
+  190.5 to 171.3 million (171.3), its decode loop 72.3 to 52.7 million
+  (52.7); lean-zip on dickens, decompression (Z01d) 1985.3 million before
+  and after (1985.3: its inflate loop is not threaded in any form),
+  compression (Z01c) 6949.8 to 6924.6 million (6949.8); Cedar (Z06d)
+  57793 to 57343 million (57358).
 - **Where:** `Opt/StateMachines.lean`: `emitStateMachineAlongside`
-  (`modeVariants`). Test: `tests/runtime/sm-slots-check.sh` (with
-  `RtSmDecode`, `RtStateMachines`, `RtJpSlots`).
+  (`scalar`, `modeTy`, the wildcard arm), `smCall` (`SlotLayout.tags`).
+  Test: `tests/runtime/sm-slots-check.sh` (with `RtSmDecode`,
+  `RtStateMachines`, `RtJpSlots`; it also checks that LLVM threads
+  RtSmDecode's loop).
 - **Remove only if:** never (speed only).
 
 ### A jump passes on the slots its arm does not bind (`state-machines`)

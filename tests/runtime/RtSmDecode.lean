@@ -3,10 +3,10 @@ inner loop (a refill branch, a fast literal path through an 11-bit table, a
 slow path returning `Except`, back-references with extra bits and a copy).
 Its compound conditions make join points with two or three jumps, so the
 loop is a state machine (J4). With the optional pass `state-machines`, every
-variant of its entry enum is nullary, so the enum is a `[value]` enum (a
-scalar tag, no pointer to a static cell whose count is tested at every
-entry), and a jump passes the slots that its arm does not bind on
-unchanged. The output buffer, pushed at every step, stays unshared across
+variant of the state machine is nullary, so its entry point is an integer
+(no pointer to a static cell whose count is tested at every entry, and no
+struct, so LLVM threads the loop), and a jump passes the slots that its arm
+does not bind on unchanged. The output buffer, pushed at every step, stays unshared across
 the jumps: `dbgTraceIfShared` prints `shared RC out shared (literal)` once
 per round, for the first push to the initial `ByteArray.empty` (a shared
 constant), as natively, and never for a buffer the loop has built. The

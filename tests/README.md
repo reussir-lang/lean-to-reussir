@@ -321,18 +321,23 @@ accessor, of `l2r_once_claim`, of `once::claim`, a load of the record,
 added to a hot loop block), each of which must fail (review PCR-01).
 `tests/runtime/sm-slots-check.sh` builds `RtSmDecode` (a table-driven
 decoder loop, a state machine of three variants), `RtStateMachines` and
-`RtJpSlots` to LLVM IR and fails when the entry enum of a state machine
-whose variants are all nullary is not a `[value]` enum (in the `.rr`) or
-is passed as a pointer (in the IR), when a call entering a variant puts
+`RtJpSlots` to LLVM IR and fails when the entry point of a state machine
+whose variants are all nullary is an enum, not an integer (in the `.rr`),
+when its match is not one literal arm per variant (0, 1, ... in order)
+and an unreachable wildcard, when its entry point is not an integer in
+the IR, when LLVM did not thread RtSmDecode's loop (no DFAJumpThreading
+block `.jtN` in its IR function), when a call entering a variant puts
 anything but a placeholder, or a slot that the calling arm does not bind,
 in a slot that the variant does not bind (a live value kept alive across
 the jump, RF-1), or when an arm passes a placeholder in a slot that it
 does not bind instead of the slot itself
 (docs/implementation/control-flow/state-machines.md). It fails when
 RtSmDecode has no such state machine or no slot passed on, and checks
-itself on three mutations of RtSmDecode's `.rr` (the entry enum made
-shared, a passed-on slot given a placeholder, a placeholder replaced by
-the arm's live variable of that slot), each of which must fail.
+itself on six mutations of RtSmDecode's `.rr` and IR (the entry point made
+a `[value]` enum, a passed-on slot given a placeholder, a placeholder
+replaced by the arm's live variable of that slot, the wildcard arm taken
+away, the IR's entry point made a struct, the IR's threaded blocks
+renamed), each of which must fail.
 `tests/runtime/rows-check.sh` builds lean-runtime's row oracle
 (`scripts/oracle/Oracle.lean` of the lean-runtime checkout, which evaluates
 the functions of its `tests/cases/<area>/<area>.rows.toml`) with lean2rr and

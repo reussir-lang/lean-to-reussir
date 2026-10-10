@@ -14,8 +14,8 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
   field-less enumerations (`Nat`/`Int` are tagged handles since patch
   41-a, not `[value]` enums). Everything else with several arms is a shared enum
   (J4 entry enums with fields included: the core form's, and the
-  `state-machines` form's when a field has no slot; that form's entry enum
-  with only nullary variants is a field-less enumeration, so `[value]`);
+  `state-machines` form's when a field has no slot; with only nullary
+  variants that form's entry point is an integer, not an enum);
   multi-field value records are `[value]` structs.
 - **Why:** Reussir moves a `[value]` enum as one representative arm's
   struct, so another arm's bytes on its padding or on an `i1` are lost

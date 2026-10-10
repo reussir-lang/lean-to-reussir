@@ -101,9 +101,9 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   `enum [value]` (no allocation); one constructor is a `struct`; anything
   else is a shared `enum`. An inductive with no constructors gets a single
   variant `c_impossible`. The only `[value]` enums lean2rr emits are these
-  field-less enumerations and the entry enums of state machines whose
-  variants are all nullary
-  ([../control-flow/state-machines.md](../control-flow/state-machines.md#the-entry-enum-of-nullary-variants-is-a-value-enum-state-machines))
+  field-less enumerations (a state machine whose variants are all nullary
+  has an integer entry point, not an enum:
+  [../control-flow/state-machines.md](../control-flow/state-machines.md#the-entry-point-of-nullary-variants-is-an-integer-state-machines))
   (`Nat`/`Int` are one-word tagged handles,
   [nat-int.md](nat-int.md)); multi-field value records are `[value]` structs
   (join-point tuples), whose padding is explicit.

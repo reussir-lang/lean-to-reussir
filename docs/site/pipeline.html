@@ -316,8 +316,10 @@ code.</p>
   call stays in its own function, and LLVM turns it into a loop. Under J3 the
   loop becomes mutually recursive and can use stack per iteration. J4 makes
   such a loop one function again. With the optional pass <code>state-machines</code>,
-  the entry point of that function is a scalar tag, and the values of the
-  loop go in parameter slots. A jump changes only the slots that it fills.</li>
+  the entry point of that function is an integer, and the values of the
+  loop go in parameter slots. A jump changes only the slots that it fills.
+  On an integer entry point, LLVM threads the loop: a jump goes directly to
+  the code that it enters.</li>
 <li><strong>Memory reuse.</strong> J1 and J2 keep "take the old value apart" and "build the
   new value" in one function. Reussir's token reuse needs that to update in
   place.</li>

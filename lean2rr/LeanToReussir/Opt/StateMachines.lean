@@ -31,9 +31,18 @@ placeholders or such slots), so the jump passes it on unchanged instead
 of a new one: a slot changes only where a jump fills it, and no arm
 rebuilds or releases the placeholders of the slots it does not use.
 
-With every variant nullary the entry enum is a `[value]` enum, a scalar
-tag (a shared enum's nullary variant is a pointer to a static cell, whose
-tag the `match` loads and whose count it tests at every entry).
+With every variant nullary the entry point is an integer (`u8`; `u32`
+beyond 256 variants), not an enum: variant `i` (the entry first, then
+the join points in their order) is the literal `i`, and the function
+matches its last parameter on the literals, with a wildcard arm that
+cannot be reached (`l2r_unreachable`). A shared enum's nullary variant
+is a pointer to a static cell, whose tag the `match` loads and whose
+count it tests at every entry; a `[value]` enum is a struct of its tag
+and an empty payload in LLVM, so the loop that tail-call elimination
+makes carries the entry point in a phi of struct type, which LLVM's
+DFAJumpThreading (O3) does not follow; on an integer it does, and it
+threads the loop: a jump goes straight to the arm it enters, without the
+`switch` at the loop's head.
 
 Soundness guard (checked on every state machine): a slot's placeholder is
 evaluated at every jump that does not fill it, so a type without a finite
@@ -82,10 +91,12 @@ end
 
 /-- Where a state machine's values go: its slots (name, type, placeholder)
 and, per variant, the slot of each field (`none`: it stays in the
-variant). -/
+variant); when every variant is nullary, `tags`: the integer of each
+variant (the entry point is then an integer, see the module comment). -/
 structure SlotLayout where
   slots : Array (String × RR.Ty × RR.Expr) := #[]
   fields : Std.HashMap String (Array (Option Nat)) := {}
+  tags : Option (Std.HashMap String Nat) := none
 
 /-- The slots of the variants `variants` (the entry, carrying the
 declaration's parameters, first); see the module comment. -/
@@ -132,8 +143,9 @@ def slotLayout (variants : Array (String × Array (String × RR.Ty))) : LowerM S
 /-- The call entering state machine `sm` at variant `v` (fields `fs`) with
 values `vals` (in field order): each value in its slot, in the other slots
 a placeholder, or the slot itself where `untouched` contains it, then the
-variant with the fields that have no slot. Values other than variables and
-literals are bound first, in their order. -/
+variant with the fields that have no slot (its integer when the layout has
+`tags`). Values other than variables and literals are bound first, in their
+order. -/
 def smCall (sm : StateMachine) (lay : SlotLayout) (v : String) (fs : Array (String × RR.Ty))
     (vals : Array RR.Expr) (untouched : Std.HashSet Nat := {}) : LowerM RR.Expr := do
   let some out := lay.fields[v]? | throwError "lean2rr: unknown state-machine variant {v}"
@@ -150,19 +162,41 @@ def smCall (sm : StateMachine) (lay : SlotLayout) (v : String) (fs : Array (Stri
     match out[i]? with
     | some (some s) => args := args.set! s val
     | _ => rest := rest.push val
-  let call := RR.Expr.call sm.fn #[] (args.push (.ctor sm.mode (some v) rest))
+  let mode ← match lay.tags with
+    | none => pure (RR.Expr.ctor sm.mode (some v) rest)
+    | some tags => do
+      unless rest.isEmpty do throwError "lean2rr: state-machine variant {v} keeps a field, but its entry point is an integer"
+      let some k := tags[v]? | throwError "lean2rr: unknown state-machine variant {v}"
+      pure (.atom (toString k))
+  let call := RR.Expr.call sm.fn #[] (args.push mode)
   return if lets.isEmpty then call else .block ⟨lets, call⟩
 
 /-- Emit declaration `d` lowered as state machine `sm` with its values in
 slots (see the module comment): the dispatching function (the slots, then
 the entry point) over the lowered entry code `block` and the outlined join
 points' variants (`LowerState.smArms`), the declaration's function, which
-enters at its own variant, and the entry-point enum. -/
+enters at its own variant, and the entry-point enum (none when the entry
+point is an integer). -/
 def emitStateMachineAlongside (d : Decl .pure) (sm : StateMachine) (params : Array (String × RR.Ty)) (ret : RR.Ty)
     (block : RR.Block) : LowerM Unit := do
   let arms ← getPart (·.smArms)
   let variants := #[(sm.entry, params)] ++ arms.map fun (v, fps, _) => (v, fps)
   let lay ← slotLayout variants
+  -- The fields of variant `v` without a slot.
+  let kept (v : String) (fs : Array (String × RR.Ty)) : Array (String × RR.Ty) :=
+    let out := lay.fields.getD v #[]
+    (fs.zipIdx.filter fun (_, i) => (out[i]?.join).isNone).map (·.1)
+  -- Its variants are nullary unless a field has no slot. All nullary: the
+  -- entry point is an integer, variant `i` the literal `i` (see the module
+  -- comment: no pointer to a static cell as for a shared enum's nullary
+  -- variant, no struct-typed phi as for a `[value]` enum, so LLVM threads
+  -- the loop). Otherwise a shared enum: Reussir miscompiles `[value]` enums
+  -- whose arms have different layouts (translation plan §9).
+  let modeVariants := variants.map fun (v, fs) => (v, (kept v fs).map (·.2))
+  let scalar := modeVariants.all (·.2.isEmpty)
+  let lay := if scalar then { lay with tags := some (variants.zipIdx.foldl (fun m ((v, _), i) => m.insert v i) {}) }
+    else lay
+  let modeTy : RR.Ty := if !scalar then .named sm.mode else if variants.size ≤ 256 then .named "u8" else .named "u32"
   let fieldsOf : Std.HashMap String (Array (String × RR.Ty)) := variants.foldl (fun m (v, fs) => m.insert v fs) {}
   -- The slots that the arm of variant `v` does not bind: they hold
   -- placeholders whenever it is entered (every call entering it passes
@@ -181,33 +215,27 @@ def emitStateMachineAlongside (d : Decl .pure) (sm : StateMachine) (params : Arr
     if m != sm.mode then return none
     let some fs := fieldsOf[v]? | return none
     return some (← smCall sm lay v fs args.pop (if tail then untouched cur else {}))
-  -- The fields of variant `v` without a slot.
-  let kept (v : String) (fs : Array (String × RR.Ty)) : Array (String × RR.Ty) :=
-    let out := lay.fields.getD v #[]
-    (fs.zipIdx.filter fun (_, i) => (out[i]?.join).isNone).map (·.1)
-  -- Its variants are nullary unless a field has no slot. All nullary: a
-  -- `[value]` enum, a scalar tag as for Lean's field-less inductives (a
-  -- shared enum's nullary variant is a pointer whose tag is loaded, and
-  -- whose count is tested, at every entry). Otherwise shared: Reussir
-  -- miscompiles `[value]` enums whose arms have different layouts
-  -- (translation plan §9).
-  let modeVariants := variants.map fun (v, fs) => (v, (kept v fs).map (·.2))
-  let mode := RR.Item.enum sm.mode (modeVariants.all (·.2.isEmpty)) modeVariants
   let mkArm (v : String) (fs : Array (String × RR.Ty)) (b : RR.Block) : LowerM RR.Arm := do
     let out := lay.fields.getD v #[]
     let bind := fs.zipIdx.filterMap fun ((n, t), i) =>
       (out[i]?.join).map fun s => (n, some t, RR.Expr.var lay.slots[s]!.1)
     let b ← rewriteCallsB (place v) true b
-    return { ty := sm.mode, ctor := some v, binders := (kept v fs).map (some ·.1), body := ⟨bind ++ b.lets, b.result⟩ }
+    let body : RR.Block := ⟨bind ++ b.lets, b.result⟩
+    match lay.tags with
+    | some tags => return RR.Arm.lit (tags.getD v 0) body
+    | none => return { ty := sm.mode, ctor := some v, binders := (kept v fs).map (some ·.1), body }
   let mut matchArms := #[← mkArm sm.entry params block]
   for (v, fps, b) in arms do matchArms := matchArms.push (← mkArm v fps b)
+  -- A match on an integer needs a wildcard; no call passes another integer.
+  if scalar then
+    matchArms := matchArms.push { ty := "", ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[ret] #[]) }
   let m ← fresh "m"
   let slotParams := lay.slots.map fun (n, t, _) => (n, t)
   let enter ← smCall sm lay sm.entry params (params.map fun (n, _) => RR.Expr.var n)
   modify fun s => { s with
-    typeItems := s.typeItems.push mode
+    typeItems := if scalar then s.typeItems else s.typeItems.push (RR.Item.enum sm.mode false modeVariants)
     fns := s.fns
-      |>.push (.fn sm.fn (slotParams.push (m, .named sm.mode)) ret (.ofExpr (.mtch (.var m) matchArms)))
+      |>.push (.fn sm.fn (slotParams.push (m, modeTy)) ret (.ofExpr (.mtch (.var m) matchArms)))
       |>.push (.fn (fnName d.name) params ret (.ofExpr enter))
     smArms := #[] }
 
