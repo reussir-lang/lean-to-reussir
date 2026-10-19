@@ -100,6 +100,6 @@ to `lean2rr/LeanToReussir/`. Plan
   hook (one call), so the call costs the same as an in-line release now.
 - **Where:** `LowerBase.lean`: `boxSink`, `boxUnbox`;
   `Lower/Finish.lean`: `genUnbox`. Related:
-  [../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#issue-22-cost-a-wildcard-arm-over-a-wide-enum-costs-n3-code).
+  [../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#old-issue-22-cost-a-wildcard-arm-over-a-wide-enum-cost-n3-code).
 - **Remove only if:** any time (the one-word box): an in-line release of
   the box is one call too.

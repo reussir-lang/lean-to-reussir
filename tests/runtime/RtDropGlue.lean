@@ -4,8 +4,8 @@ a binary tree deep along its left child whose right children are fresh
 nodes, and a rose tree in uniform code, whose list cells hold the deep tree
 in their head and a fresh node in the tail. Native Lean frees iteratively.
 Reussir's drop glue releases the last chain member being freed in a loop
-(local patch 13-a) and pushes the other members being freed on a stack of
-pending work (13-b), so it does not recurse either; with 13-a alone it
+(local patch 02-a) and pushes the other members being freed on a stack of
+pending work (02-b), so it does not recurse either; with 02-a alone it
 recursed once per level and overflowed. -/
 
 inductive T2 | leaf | node (l : T2) (v : Nat) (r : T2)

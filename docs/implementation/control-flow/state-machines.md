@@ -20,8 +20,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   recursive and used stack per iteration (the classic Sieve and Strings
   overflowed a 1 GiB stack at their medium size with the join-point passes
   off; 3597a31). Reussir has no guaranteed tail calls. The enum is shared
-  because Reussir loses bytes of `[value]` enums whose arms differ
-  ([Reussir bug 1](../../../reussir-bugs/01-value-enum-payload.md)); its
+  because Reussir loses bytes of `[value]` enums whose arms differ (a
+  Reussir bug fixed upstream in #663; the old stack still has it); its
   reuse makes the cell cheap. The "inlined into it" case was a loop of
   `Std.Http` that stayed mutually recursive (5585f99).
 - **Where:** `Lower/StateMachine.lean`: `stateMachinePlan`,

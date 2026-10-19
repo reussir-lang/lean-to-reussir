@@ -17,7 +17,7 @@
 //!
 //! On the Reussir side `LAny` is a `tagged` opaque type
 //! (`#[ffi(rust = "::leanrt::any::LAny", tagged)]`): Reussir's `rc.inc`
-//! skips an odd word and, with the local Reussir patch 38-a (issue 38),
+//! skips an odd word and, with the local Reussir patch 07-a (issue 7),
 //! clears the top 16 bits before it increments the count in line; its
 //! `rc.dec` calls the drop hook (`Drop` below) for an even word.
 //!

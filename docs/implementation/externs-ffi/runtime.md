@@ -496,7 +496,7 @@ Paths are relative to the repository root.
     (leanrt's `later` list, `run_later` and its settle points are gone); a
     resolved one releases its task's cell there and then, in the free's
     order (review RS6-01).
-  Reussir's patch 40-a (the drain-end hook) is required: `scripts/l2r.py`
+  Reussir's patch 09-a (the drain-end hook) is required: `scripts/l2r.py`
   checks for it and leanrt names its symbol. lean-runtime pinned at
   `528fcbb` (wait-1; fixes-5's `IO.getTID`: a pool task gets its emulated
   worker's thread id, a dedicated task a new one, through
@@ -1205,7 +1205,7 @@ Paths are relative to the repository root.
   rrc compiles textures with adds the same, and its text names
   lean-runtime's build (its digest: rrc's texture cache keys on the
   script's text, and cargo's rlibs are in no `--polyffi-libdir`
-  directory; Reussir issue 35, a cost); the link passes lean-runtime's rlibs after
+  directory); the link passes lean-runtime's rlibs after
   `libleanrt.rlib` and before GMP, those of the packages its normal
   dependencies reach, in the order of its dependency graph (`cargo
   metadata`: dependents first; build-script dependencies left out; review

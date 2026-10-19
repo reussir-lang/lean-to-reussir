@@ -135,11 +135,12 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/string.rs`, and
   starts a placeholder `[:Name:]`. Reussir dropped an unterminated `[:`, so
   a literal containing `[:` (an IPv6 address `[::1]`, a Python slice)
   printed without it, and the first such `[:` of the whole table was lost
-  ([Reussir bug 21](../../../reussir-bugs/21-unterminated-placeholder.md);
-  round 6 RV6L-01, 96c7140; test `RtStrLitBracket`).
+  (a Reussir bug, fixed upstream in #657; round 6 RV6L-01, 96c7140; test
+  `RtStrLitBracket`).
 - **Where:** `LowerBase.lean`: `strLitTable`.
-- **Remove only if:** never needed with patch 21-a applied (it is not, on
-  `l2r-local`); the escape costs nothing, so it can stay.
+- **Remove only if:** removable after the move to Reussir 7954a367 (the
+  old stack has a local patch for it too); the escape costs nothing, so
+  it can stay.
 
 ### Strings from the operating system are decoded as `lean_mk_string`
 

@@ -322,7 +322,7 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   - a handle a drain reaches (in an array or a list, a box, a record below
     the first cell of a free): its close is put off to that point of the
     drain (`close_deferred`), and the drain's end calls the hook
-    (`task::drained`, Reussir's drain-end hook, patch 40-a), after the
+    (`task::drained`, Reussir's drain-end hook, patch 09-a), after the
     deferred resolutions (`run_deferred`). The hook is installed there
     (`task::hook_drained`), at the first close a free puts off, as at the
     first promise it puts off, so a program with neither pays nothing at

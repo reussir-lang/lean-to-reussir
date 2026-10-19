@@ -32,5 +32,5 @@ relative to `lean2rr/LeanToReussir/`. Plan
   `Lower/Finish.lean`: `genFnConv`, `genApply`; `Lower/Conv.lean`:
   `tryCoerce`.
 - **Remove only if:** never. These functions are kept out of rrc's
-  inliner ([../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#issue-20-cost-the-inliner-multiplies-conversion-code)).
+  inliner ([../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#old-issue-20-cost-the-inliner-multiplies-conversion-code)).
 

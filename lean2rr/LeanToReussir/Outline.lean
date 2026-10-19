@@ -7,8 +7,8 @@ import LeanToReussir.RR
 # Outlining deep and long function bodies
 
 rrc's per-function analyses grow faster than linearly in two shapes of
-code that Lean programs produce routinely (reussir-bugs/, issues 16
-and 17, costs):
+code that Lean programs produce routinely (Reussir costs, fixed upstream
+in Reussir #672 and #670):
 - nesting: every IO bind is a `match` on the action's result whose `ok` arm
   holds the rest of the function, so a `main` of N statements nests N
   matches deep (a 3000-arm literal match nests 3000 `if`s), and reuse across
@@ -142,9 +142,9 @@ heap cell) when Reussir moves its values without losing bytes. Reussir moves
 a `[value]` enum as the LLVM struct of one arm, its *representative*: the
 last arm with the largest alignment. Another arm's bytes survive the move
 only where the representative's own type carries every byte: an integer or
-a pointer does; a `bool` (an `i1`, one bit of its byte) does not (Reussir
-issue 1, reussir-bugs/01-value-enum-payload.md; patch 01-a makes every move
-carry all bytes, but lean2rr's output also stays right without it).
+a pointer does; a `bool` (an `i1`, one bit of its byte) does not (a Reussir
+bug, fixed upstream in Reussir #663, which makes every move carry all
+bytes; lean2rr's output also stays right without it).
 Floating-point values and padding are conservatively not counted as carried
 (Reussir lays a record's padding out as bytes, Opt/FieldOrder; the guard
 relies neither on that nor on how a move copies a floating-point value). So
@@ -235,7 +235,8 @@ partial def fieldLayout (types : TypeTable) (t : Ty) (fuel : Nat := 8) : Option 
 parameters `ps`): decreasing alignment, the fields that carry all their
 bytes first, ties in parameter order. So the variant has no padding between
 fields (like a record with optimization `field-order`, and the order of
-fields that Reussir issue 2's workaround needs), and its carried prefix is
+fields that the workaround for a Reussir bug, fixed upstream in Reussir
+#656, needs), and its carried prefix is
 as long as it can be. Parameter order if a type is unknown. -/
 def stepFieldOrder (types : TypeTable) (ps : Array Ty) : Array Nat :=
   match ps.mapM (fieldLayout types ·) with

@@ -139,7 +139,7 @@ runtime. Plan
   the same.
 - **Why:** rrc compiles each instantiation of a texture with its own rustc
   run, and keeps the result in its cache under a key made from the
-  texture's source (Reussir issue 35). A texture shows a type of the
+  texture's source. A texture shows a type of the
   program by its symbol, and lean2rr numbers these types per program
   (`T_Foo_123`), so every instantiation at a program type missed the
   cache in every new program. `l2r_once_put_field<L2RConstCell>` has the

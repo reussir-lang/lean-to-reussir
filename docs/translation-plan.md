@@ -765,7 +765,7 @@ were weighed (2026-10):
    the low bit is free. Nothing else in Reussir reads through an opaque
    handle (opaque values never donate their cells for reuse, are never
    deferred by the drop glue, and are only passed to Rust code, which knows
-   the encoding). The patch (Reussir patch 41-a) carries the flag from the
+   the encoding). The patch (Reussir patch 10-a) carries the flag from the
    attribute to the type (`!reussir.ffi_object<…, tagged = true>`) and adds
    the two guards in the LLVM lowering of `rc.inc`/`rc.dec`.
 3. *lean2rr alone.* Reussir's only immediates are field-less constructors,
@@ -1257,7 +1257,8 @@ application appears.
   Lean types: with these functions inlinable, rrc's build time and memory
   on such programs grew far faster than the programs (superlinearly; an
   8-line `StateT` tower used at `IO` did not build within 30 minutes or
-  15 GB; Reussir issue 20, a cost, whose cause was found later). Out of
+  15 GB; a Reussir cost, whose cause was found later, fixed upstream in
+  Reussir #674). Out of
   line, a conversion, an unboxing, or the application of a wrapped value or of
   a value of uniform type costs a call (until LLVM inlines it); all are rare
   outside uniform code, and typed function values are unaffected.
@@ -1302,7 +1303,7 @@ the parameter goes back to a `Box` position (a rebuilt constructor's
 field), its value is boxed again: passing the field's own box left the
 unboxed value's release dead in that branch, and Reussir's token reuse
 took it as the new node's donor instead of the matched cell (Reussir
-issue 39, reussir-bugs/39-alias-release-donor.md).
+issue 8, reussir-bugs/08-alias-release-donor.md).
 Reussir syntax notes: match arms have no trailing comma after the last
 arm, and there is no `else if` (use `else { if … }`).
 
@@ -1391,9 +1392,9 @@ used and every field is bound at the match):
   instead of the cell actually freed: `TreeMap.insert` rebuilt every node
   of the path, and so did a BST insert whose key comparison is a call
   before the branch (`Nat`, `String`, `compare`), even with the local fix
-  of Reussir issue 7, a missed optimization (patch 07-a, parked since
+  of Reussir issue 1, a missed optimization (patch 01-a, parked since
   2026-10-07: this pass covers the issue;
-  reussir-bugs/07-phantom-reuse-donor.md). A structure
+  reussir-bugs/01-phantom-reuse-donor.md). A structure
   (one constructor: no match, its fields are projections) that stays live
   the same way projects only the fields used while it is live; an inner
   alternative that no longer uses it projects the others there (the pair
@@ -2606,7 +2607,7 @@ dropping thread, wherever that happens):
   `run_deferred`). A free inside such a dependent is a free of its own:
   its promises' dependents run when it ends, before the dependent goes
   on, as natively (test `RtPromiseNestedFreeOrder`). The runtime sees the
-  end of every free through local Reussir patch 40-a
+  end of every free through local Reussir patch 09-a
   (`__reussir_drop_drained`, which every drain that released something
   calls when it ends), which lean2rr requires (`scripts/l2r.py` stops
   with an error without it).
@@ -2843,26 +2844,27 @@ Probe results (Reussir at the pinned commit):
   at every optimization level.
 - **Stacks.** The main thread has 8 MiB; the program body runs on a 1 GiB
   thread (§5.11).
-- **Known Reussir bug.** A `[value]` enum is lowered to LLVM as its tag
-  plus one representative arm's struct, and moved as that aggregate, so
-  bytes of another arm that fall on the representative's padding or on a
-  `bool` field are lost (`enum [value] M { A(u8), B(bool) }` reads `A(42)`
-  back as 0). lean2rr only emits `[value]` enums that are unaffected:
+- **Known Reussir bug (fixed upstream in Reussir #663).** A `[value]` enum
+  was lowered to LLVM as its tag plus one representative arm's struct, and
+  moved as that aggregate, so bytes of another arm that fall on the
+  representative's padding or on a `bool` field were lost (`enum [value] M { A(u8), B(bool) }` read `A(42)`
+  back as 0; fixed in Reussir `7954a367`, lean2rr's base). lean2rr still only emits `[value]` enums that are unaffected:
   enumerations without fields, and `Outline`'s step enums whose
   representative arm (the last arm with the largest alignment, which
   lean2rr chooses by the arms' order) carries every byte of the other arms
   in a prefix of integers and pointers, by a layout model of the field
   types (otherwise the step enum is shared). Everything else with several arms is a shared enum (J4
   entry points, §5.6); multi-field value records are `[value]` structs,
-  whose padding is explicit.
+  whose padding is explicit. The restriction is removable now (one change, with its test).
 - **Candidate Reussir requests.** Guaranteed tail calls; `[value]` types
   across the FFI (for array elements without a wrapper); borrowed
   FFI parameters (an array `get` currently takes ownership and releases);
   a no-inline attribute (lean2rr uses `#[transform_anchor]`, whose
-  `no_inline` is a side effect, reussir-bugs/20-statet-tower.md); tagged
-  opaque handles (one-word `Nat`/`Int`, §5.1: local patch 41-a,
-  reussir-bugs/41-tagged-ffi-objects.md); bounded-depth frees (local patches
-  13-a to 13-c).
+  `no_inline` is a side effect); tagged
+  opaque handles (one-word `Nat`/`Int`, §5.1: local patch 10-a,
+  reussir-bugs/10-tagged-ffi-objects.md); frees in native Lean's order
+  through a stack the runtime shares (local patches 02-a to 02-e;
+  reussir-bugs/02-native-drop-order.md).
 
 Answered (Lean):
 - Startup order: `EmitC.emitInitFn` runs the module's compiled
@@ -3073,16 +3075,19 @@ Each item says what differs and when.
   (`--no-closure-wpd`: it prints each closure's result type, every named
   type expanded, at every vtable and indirect call site; no classic
   benchmark changes by more than 1%, since lean2rr dispatches function
-  values itself; Reussir issue 10, a cost), and lean2rr keeps the
+  values itself; a Reussir cost, fixed upstream in Reussir #668), and
+  lean2rr keeps the
   conversions, unboxings and the applications of wrapped and uniform
-  function values out of rrc's MLIR inliner (§5.3; issue 20, a cost). The
+  function values out of rrc's MLIR inliner (§5.3; a Reussir cost, fixed
+  upstream in Reussir #674). The
   towers of the adversarial rounds then build in 15 s to 2.5 minutes and at
   most 3 GB, the whole build (a single `StateT` tower used at `IO`: 21 s,
   0.4 GB, where it did not build in 30 minutes; five towers in one program:
   70 s, 1.5 GB, where they took 15 minutes and 7.5 GB). rrc's costs also
   grow faster than linearly in the depth of nested matches (reuse across
   calls; every IO bind nests one) and in the length of straight-line code on
-  `Nat` (Reussir issues 16 and 17, costs). So after lowering, a function with a
+  `Nat` (Reussir costs, fixed upstream in Reussir #672 and #670). So
+  after lowering, a function with a
   tail path 32 matches or `if`s deep, or 256 `let`s long (a long `main`, a
   3000-arm literal match, a long `do` block), or with a `let` whose value is
   that deep or long, is cut (`Outline`): once a tail path is 8 levels deep or
@@ -3169,11 +3174,11 @@ Each item says what differs and when.
   so an element held twice is freed at its last index:
   `RtArrayDupFreeOrder`), a nested array's elements before the elements
   before it, a record's last field first. Here the runtime's containers (`leanrt::drop`)
-  and Reussir's drop glue for records (local patch 13-b) push what they
+  and Reussir's drop glue for records (local patch 02-b) push what they
   free on one stack of pending work per thread, so the order is Lean's
   inside every free that starts at a container (an array, a reference, a
   thunk or task cell), through any records (tests `RtDropOrder`,
-  `RtDropOrderRec`; with Reussir patch 13-d, which scripts/l2r.py
+  `RtDropOrderRec`; with Reussir patch 02-e, which scripts/l2r.py
   requires, also a record field before a container field below the first
   record: `RtNestedArrayFreeOrder`), and mostly below the first cell of a
   free that starts at a record. An element of an array, a reference or a
@@ -3258,8 +3263,8 @@ Each item says what differs and when.
   between (a tree whose children are in arrays, a record → array → record
   chain, a chain of thunks or tasks), is freed at a bounded depth.
   Records are freed by Reussir's drop glue, which with the local patches
-  releases the last record member being freed in a loop (13-a) and pushes
-  the other record members being freed on the same stack (13-b), so a
+  releases the last record member being freed in a loop (02-a) and pushes
+  the other record members being freed on the same stack (02-b), so a
   value deep through records too is freed at a bounded depth: a list, a
   snoc list, a binary tree deep along its left child whose right children
   are fresh nodes, a rose tree in uniform code (test `RtDropGlue`, 10⁶
@@ -3312,10 +3317,10 @@ Each item says what differs and when.
   paths instead of rejoining them; lean2rr passes a read's index in a
   `let`, so that Reussir increments the index before the container; and
   each read texture is small enough for LLVM to inline at a call site it
-  judges cold (Reussir issue 36; docs/implementation/ownership.md, "Reads
+  judges cold (Reussir issue 6; docs/implementation/ownership.md, "Reads
   give their reference up first, for a view"; with the one-word `Box`,
   `l2r_view_take<LAny>` is not, and stays a call there: the patch that
-  inlined it, 36-a, is parked). Index loops and insertion
+  inlined it, 06-a, is parked). Index loops and insertion
   sort on `Array UInt64` ran at 1.2x native or better before these
   changes; with them (perf-array-reads, measured in the LLVM IR), no
   array read of lean-zip stays a call (279 did), and its LZ77 loop has 47

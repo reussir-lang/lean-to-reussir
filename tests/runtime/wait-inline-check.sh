@@ -15,7 +15,7 @@
 # loops, wherever LLVM inlined them: every function that calls a reference
 # operation's slow path (the prelude's `l2r_ref_wait` or
 # `l2r_ref_take_mark`: `modify`'s take; when Reussir inlines these small
-# textures (issue 36), their callers call lean-runtime's `ref_keyed::wait`,
+# textures (Reussir issue 6), their callers call lean-runtime's `ref_keyed::wait`,
 # `take` or `wait_taken` directly, which count the same) and every function
 # that calls a thunk force's slow path (leanrt's `thunk_wait_busy`), other
 # than those helpers themselves; it fails when there are none of either kind. The fast

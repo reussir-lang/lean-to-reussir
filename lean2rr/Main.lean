@@ -170,8 +170,8 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   -- functions), the registry's passes over the generated functions, and
   -- the program text. `L2R_NO_OUTLINE` and
   -- `L2R_NO_INLINE_ANCHORS` turn the two build-time workarounds off, for
-  -- the repros of Reussir issues 16, 17 and 20, costs
-  -- (reussir-bugs/repros/run.sh).
+  -- the repros of three Reussir costs (fixed upstream in Reussir #672,
+  -- #670 and #674; their repros are in git history).
   let prog := if (← IO.getEnv "L2R_NO_OUTLINE").isSome then prog else prog.outline
   let prog := if (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome then { prog with anchored := {} } else prog
   return (prog.runRRPasses cfg).render cfg.prunePrelude

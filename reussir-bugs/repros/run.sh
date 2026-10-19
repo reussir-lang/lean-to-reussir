@@ -1,56 +1,42 @@
 #!/usr/bin/env bash
 # Build and run the repros of the Reussir issues in reussir-bugs/ (one file
 # per entry, NN-*.md; the index is reussir-bugs/README.md, whose Kind column
-# says which issues are bugs and which are costs, missed optimizations,
-# missing features or intended behaviour) with one Reussir build.
+# says which issues are bugs and which are costs, missed optimizations or
+# missing features) with one Reussir build.
 #
 #   reussir-bugs/repros/run.sh RRC_CHECKOUT [NN...]
 #
 # RRC_CHECKOUT is a Reussir checkout with a build: its build/bin/rrc compiles
 # the repros, and plain .rr repros link against its build/target-rt/release.
-# NN is an entry number (1, 02, 13, ...); the default is every entry that
-# has a line here (all but 22, whose generator is run by hand, the missing
-# features 40 and 41, which have no repro: their patches carry their own
-# tests, and 44 and 45, which need a 32-bit target or hand-written MLIR).
-# Each repro prints one line:
+# NN is an entry number (1, 02, ...); the default is every entry that has a
+# line here: 1 to 8 and 12. Entries 9 and 10 (missing features) have no
+# repro: their patches carry their own tests; 11 is a run-time cost of
+# entry 2's stack; 13 needs a 32-bit target, 14 MLIR written by hand, and
+# 15 is shown by lean2rr's runtime test RtArenaPurge. Entry 2's Miri test
+# (bug02-unlink-provenance.rs) is run by hand (its header). Each repro
+# prints one line:
 #
 #   issue NN  REPRODUCES  the documented behaviour (the bug, the cost, ...)
 #                         was seen
 #   issue NN  FIXED       the expected output was seen
 #   issue NN  OTHER       something else (shown)
-#   issue NN  SKIPPED     a tool is missing, or a slow repro under QUICK=1
-#                         (shown)
+#   issue NN  SKIPPED     a tool is missing (shown)
 #
 # followed by what was seen and the rrc flags the repro needs.
 #
 # Plain .rr repros are built with rrc alone (--emit executable plus the
-# polymorphic-FFI directories, as scripts/l2r.py passes them). The Lean
-# repros (13 and 20, and the programs generated for 16 and 17) go through
-# scripts/l2r.py with L2R_REUSSIR set to the checkout. They need the Lean
-# toolchain lean2rr/lean-toolchain pins (or L2R_LEAN_TOOLCHAIN; put first on
-# PATH by scripts/toolchain.sh) and a lean2rr build (`lake build` in lean2rr/,
-# or L2R_LEAN2RR). l2r.py builds the runtime crate leanrt for the checkout
-# once, under runtime/leanrt/target/.
-#
-# Issues 10, 11, 16, 17, 20 and 23 are build-time entries: the repros of 10,
-# 11, 16, 17 and 23 are generated at two sizes and the line reports the growth
-# (for 23, of the link phase alone, timed through a rustc wrapper and
-# rrc -v); issue 20's is built with and without lean2rr's workaround. They
-# take one to three minutes each, and issues 16 and 20 need 1.2 to 3 GB;
-# bug 6 runs for about 15 s. Everything else takes seconds (a first .lean
-# build also builds leanrt). Issues 25, 30, 32 and 35 are build-time
-# entries too, but quick: 25 and 32 compare the sizes of two outputs
-# (--emit mlir-llvm, --emit mlir), 30 times one conversion pass through
-# reussir-opt (SKIPPED when the checkout has not built it), 35 builds one
-# program twice with one REUSSIR_FFI_CACHE_DIR and counts the textures the
-# second build compiles (through a rustc wrapper). Issue 36's repro (a
-# missed optimization) counts the calls left in its LLVM IR; issue 39's (a
-# missed optimization) counts the cells its program allocates (Reussir's
-# allocation entry points wrapped at link time). Bug 43's repro is a Rust
-# test of the checkout's runtime sources, compiled with RUSTC. Bug 24 runs
-# reussir-llvm-opt 12 times on one of the checkout's tests. lean2rr works
-# around 16, 17 and 20; the repros turn its workarounds off (L2R_NO_OUTLINE,
-# L2R_NO_INLINE_ANCHORS).
+# polymorphic-FFI directories, as scripts/l2r.py passes them). Entry 2's
+# Lean repro goes through scripts/l2r.py with L2R_REUSSIR set to the
+# checkout; it needs the Lean toolchain lean2rr/lean-toolchain pins (or
+# L2R_LEAN_TOOLCHAIN; put first on PATH by scripts/toolchain.sh) and a
+# lean2rr build (`lake build` in lean2rr/, or L2R_LEAN2RR). l2r.py builds
+# the runtime crate leanrt for the checkout once, under runtime/leanrt/target/.
+# Entries 3 and 4 compare the sizes of two outputs (--emit mlir-llvm,
+# --emit mlir); entry 6 counts the calls left in its LLVM IR; entry 8
+# counts the cells its program allocates (Reussir's allocation entry points
+# wrapped at link time); entry 12 is a Rust test of the checkout's runtime
+# sources, compiled with RUSTC. Everything takes seconds, except entry 2's
+# Lean repro (a first .lean build also builds leanrt).
 #
 # Environment:
 #   WORK    scratch directory (default: a new one under /tmp); rrc writes
@@ -59,12 +45,11 @@
 #   RUSTC   the rustc that built Reussir's runtime (default: the toolchain
 #           named in RRC_CHECKOUT/rust-toolchain.toml, else the one l2r.py
 #           uses)
-#   QUICK=1 skip the slow repros (6, 10, 11, 16, 17, 20, 23)
+#   QUICK=1 skip the slow repros (none since 2026-10-19; kept for old callers)
 set -u
-# rrc's texture cache (issue 35) off: with it, rrc's time and memory would
-# depend on what the caller's cache holds (the timed repros 16, 17 and 20
-# build through l2r.py, which turns the cache on unless the variable is set;
-# empty is off). Issue 35's repro sets its own directory.
+# rrc's texture cache off: with it, rrc's time and memory would depend on
+# what the caller's cache holds (l2r.py turns the cache on unless the
+# variable is set; empty is off).
 export REUSSIR_FFI_CACHE_DIR=
 
 usage() { sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//; /^set -u/d'; exit 2; }
@@ -155,6 +140,7 @@ mkdir -p "$WRAP/build/bin"
 ln -sfn "$CK/build/target-rt" "$WRAP/build/target-rt"
 # l2r.py checks the checkout's runtime sources for the patches it requires.
 ln -sfn "$CK/crates" "$WRAP/crates"
+ln -sfn "$CK/lib" "$WRAP/lib"
 cat > "$WRAP/build/bin/rrc" <<EOF
 #!/bin/sh
 exec /usr/bin/time -a -o "\${RRC_STATS:-/dev/null}" -f "%e %M" "$RRC" "\$@"
@@ -180,489 +166,163 @@ lean_build() {
     RSECS=$(printf '%.0f' "${RSECS:-0}")
 }
 
-bug01() { plain_value 01 bug01-value-enum-payload 42 0 -O default; }
-bug02() {
-    plain_value 02a bug02a-struct-reuse 7005009 7000009 -O aggressive --no-pack-record-members
-    plain_value 02b bug02b-variant-packed-layout 5001 11001 -O aggressive
-}
-bug03() {
-    rr bug03-global-alloc-align.rr 03 -O aggressive
-    if [ $RC != 0 ]; then say_line OTHER 03 "$(build_fail 03)" "-O aggressive"; return; fi
-    exe 03
-    local a v
-    a=$(sed -n 's/^Box<u64> 16-aligned: \([0-9]*\) of 1000.*/\1/p' "$WORK/out/03.stdout")
-    v=$(sed -n 's/^boxes moved inside a larger block: \([0-9]*\) of 1000.*/\1/p' "$WORK/out/03.stdout")
-    # The alignment is intended (a box not 16-aligned is OTHER); the moved
-    # boxes are the cost.
-    if [ -z "$a" ] || [ -z "$v" ]; then say_line OTHER 03 "prints '$OUT_TXT'" "-O aggressive"
-    elif [ "$a" != 1000 ]; then say_line OTHER 03 "$OUT_TXT (boxes not 16-aligned)" "-O aggressive"
-    elif [ "$v" -gt 0 ]; then say_line REPRODUCES 03 "$OUT_TXT" "-O aggressive"
-    else say_line FIXED 03 "$OUT_TXT" "-O aggressive"; fi
-}
-compile_crash() { # BUG NAME EXPECTED FLAGS: the bad behaviour is an rrc crash
-    local bug=$1 name=$2 exp=$3; shift 3
-    rr "$name.rr" "$bug" "$@"
-    if [ $RC -ge 128 ] || [ $RC = 124 ]; then say_line REPRODUCES "$bug" "rrc killed by $(signame $RC)" "$*"; return; fi
-    if [ $RC != 0 ]; then say_line OTHER "$bug" "$(build_fail "$bug")" "$*"; return; fi
-    exe "$bug"
-    if [ "$OUT_TXT" = "$exp" ]; then say_line FIXED "$bug" "compiles, prints $OUT_TXT" "$*"
-    else say_line OTHER "$bug" "compiles, prints '$OUT_TXT' ($(signame $EXIT)), expected $exp" "$*"; fi
-}
-compile_error() { # BUG NAME EXPECTED PATTERN FLAGS: the bad behaviour is an rrc error
-    local bug=$1 name=$2 exp=$3 pat=$4; shift 4
-    rr "$name.rr" "$bug" "$@"
-    if [ $RC != 0 ]; then
-        if grep -q -- "$pat" "$WORK/out/$bug.log"; then say_line REPRODUCES "$bug" "rrc error: $pat" "$*"
-        else say_line OTHER "$bug" "$(build_fail "$bug")" "$*"; fi
-        return
-    fi
-    exe "$bug"
-    if [ "$OUT_TXT" = "$exp" ]; then say_line FIXED "$bug" "compiles, prints $OUT_TXT" "$*"
-    else say_line OTHER "$bug" "compiles, prints '$OUT_TXT' ($(signame $EXIT)), expected $exp" "$*"; fi
-}
-bug04() { compile_crash 04 bug04-recursive-type-compare 1005 -O aggressive; }
-bug05() { compile_crash 05 bug05-one-armed-if 3 -O aggressive; }
-bug06() {
-    rr bug06-static-count-wrap.rr 06 $L2R_FLAGS
-    if [ $RC != 0 ]; then say_line OTHER 06 "$(build_fail 06)" "$L2R_FLAGS"; return; fi
-    exe 06 4294967300
-    if [ "$OUT_TXT" = 4294967300 ]; then say_line FIXED 06 "N = 4294967300: prints $OUT_TXT" "$L2R_FLAGS"
-    elif [ $EXIT = 139 ]; then say_line REPRODUCES 06 "N = 4294967300: SIGSEGV (static Nil freed)" "$L2R_FLAGS"
-    else say_line OTHER 06 "N = 4294967300: '$OUT_TXT' ($(signame $EXIT))" "$L2R_FLAGS"; fi
-}
-bug07() {
-    rr bug07-phantom-reuse-donor.rr 07 $L2R_FLAGS
-    if [ $RC != 0 ]; then say_line OTHER 07 "$(build_fail 07)" "$L2R_FLAGS"; return; fi
-    exe 07
+bug01() {
+    rr bug01-phantom-reuse-donor.rr 01 $L2R_FLAGS
+    if [ $RC != 0 ]; then say_line OTHER 01 "$(build_fail 01)" "$L2R_FLAGS"; return; fi
+    exe 01
     local r
-    r=$(sed -n 's/^100003 100003 ratio \([0-9.]*\)$/\1/p' "$WORK/out/07.stdout")
-    if [ -z "$r" ]; then say_line OTHER 07 "prints '$OUT_TXT'" "$L2R_FLAGS"
-    elif ge "$r" 3; then say_line REPRODUCES 07 "insert returning t is ${r}x the rebuilding insert" "$L2R_FLAGS"
-    elif le "$r" 1.6; then say_line FIXED 07 "insert returning t is ${r}x the rebuilding insert" "$L2R_FLAGS"
-    else say_line OTHER 07 "time ratio $r (between 1.6 and 3)" "$L2R_FLAGS"; fi
+    r=$(sed -n 's/^100003 100003 ratio \([0-9.]*\)$/\1/p' "$WORK/out/01.stdout")
+    if [ -z "$r" ]; then say_line OTHER 01 "prints '$OUT_TXT'" "$L2R_FLAGS"
+    elif ge "$r" 3; then say_line REPRODUCES 01 "insert returning t is ${r}x the rebuilding insert" "$L2R_FLAGS"
+    elif le "$r" 1.6; then say_line FIXED 01 "insert returning t is ${r}x the rebuilding insert" "$L2R_FLAGS"
+    else say_line OTHER 01 "time ratio $r (between 1.6 and 3)" "$L2R_FLAGS"; fi
 }
-bug08() {
-    local fl="-O aggressive --no-pack-record-members"
-    rr bug08-padding-lift.rr 08 $fl
-    if [ $RC != 0 ]; then say_line OTHER 08 "$(build_fail 08)" "$fl"; return; fi
-    exe 08
-    if [ "$OUT_TXT" = 2550200000 ]; then say_line FIXED 08 "prints 2550200000" "$fl"
-    elif [ $EXIT -ge 128 ] && [ $EXIT != 124 ]; then say_line REPRODUCES 08 "$(signame $EXIT) (cells overflowed), expected 2550200000" "$fl"
-    else say_line OTHER 08 "prints '$OUT_TXT' ($(signame $EXIT)), expected 2550200000" "$fl"; fi
-}
-# The use-after-free repros print the number of wrong results: a crash or a
-# nonzero count is the bug.
-uaf_count() { # BUG NAME FLAGS
-    local bug=$1 name=$2; shift 2
-    rr "$name.rr" "$bug" "$@"
-    if [ $RC != 0 ]; then say_line OTHER "$bug" "$(build_fail "$bug")" "$*"; return; fi
-    exe "$bug"
-    if [ $EXIT = 0 ] && [ "$OUT_TXT" = 0 ]; then say_line FIXED "$bug" "prints 0 (no wrong result in 1000 runs)" "$*"
-    elif [ $EXIT != 0 ] && [ $EXIT != 124 ]; then say_line REPRODUCES "$bug" "use after free: $(signame $EXIT)${ERR_TXT:+ ($ERR_TXT)}, expected 0" "$*"
-    elif [ $EXIT = 0 ] && [ -n "$OUT_TXT" ] && [ "$OUT_TXT" != 0 ]; then say_line REPRODUCES "$bug" "use after free: $OUT_TXT wrong results, expected 0" "$*"
-    else say_line OTHER "$bug" "prints '$OUT_TXT' ($(signame $EXIT))" "$*"; fi
-}
-bug09() { uaf_count 09 bug09-duplicate-bound-member $L2R_FLAGS; }
-bug14() { uaf_count 14 bug14-member-consumed-before-release $L2R_FLAGS; }
-bug10() {
-    python3 "$HERE/bug10-closure-type-print.py" 20 "$WORK/out/10.rr"
-    timed rr "$WORK/out/10.rr" 10 -O aggressive; local tw=$SECS rw=$RC
-    timed rr "$WORK/out/10.rr" 10n -O aggressive --no-closure-wpd; local tn=$SECS
-    if [ $rw != 0 ]; then say_line OTHER 10 "K = 20: $(build_fail 10)" "-O aggressive"; return; fi
-    local msg="K = 20: ${tw} s with closure devirtualization, ${tn} s with --no-closure-wpd"
-    if ge "$tw" "$(echo "3 * $tn + 2" | bc)"; then say_line REPRODUCES 10 "$msg" "-O aggressive"
-    elif le "$tw" "$(echo "1.5 * $tn + 1" | bc)"; then say_line FIXED 10 "$msg" "-O aggressive"
-    else say_line OTHER 10 "$msg" "-O aggressive"; fi
-}
-bug11() {
-    # N = 10 measures the fixed cost of a build (the FFI texture, linking).
-    local n t0 ta tb
-    for n in 10 2000 4000; do python3 "$HERE/bug11-sccp-call-graph.py" $n "$WORK/out/11-$n.rr"; done
-    timed rr "$WORK/out/11-10.rr" 11-10 -O aggressive; t0=$SECS
-    timed rr "$WORK/out/11-2000.rr" 11-2000 -O aggressive; ta=$SECS
-    timed rr "$WORK/out/11-4000.rr" 11-4000 -O aggressive; tb=$SECS
-    if [ $RC != 0 ]; then say_line OTHER 11 "N = 4000: $(build_fail 11-4000)" "-O aggressive"; return; fi
-    local r msg
-    r=$(ratio "$(echo "$tb - $t0" | bc)" "$(echo "$ta - $t0" | bc)")
-    msg="N = 2000: ${ta} s, N = 4000: ${tb} s, N = 10: ${t0} s (${r}x without the fixed cost, for twice the call sites)"
-    if ge "$r" 3; then say_line REPRODUCES 11 "$msg" "-O aggressive"
-    elif le "$r" 2.5; then say_line FIXED 11 "$msg" "-O aggressive"
-    else say_line OTHER 11 "$msg" "-O aggressive"; fi
-}
-bug12() {
-    python3 "$HERE/bug12-node-cache-collision.py" "$WORK/out/12.rr"
-    rr "$WORK/out/12.rr" 12 -O aggressive
-    if [ $RC != 0 ]; then say_line OTHER 12 "$(build_fail 12)" "-O aggressive"; return; fi
-    exe 12
-    case "$OUT_TXT" in
-        424242) say_line FIXED 12 "prints 424242" "-O aggressive" ;;
-        7) say_line REPRODUCES 12 "prints 7 (the literal 424242 was parsed as the variable), expected 424242" "-O aggressive" ;;
-        *) say_line OTHER 12 "prints '$OUT_TXT', expected 424242" "-O aggressive" ;;
-    esac
-}
-bug13() {
-    rr bug13-long-list-drop.rr 13 $L2R_FLAGS
-    if [ $RC != 0 ]; then say_line OTHER 13 "$(build_fail 13)" "$L2R_FLAGS"; else
+bug02() {
+    rr bug02-long-list-drop.rr 02 $L2R_FLAGS
+    if [ $RC != 0 ]; then say_line OTHER 02 "$(build_fail 02)" "$L2R_FLAGS"; else
         local s
         for s in "0 list" "1 snoc" "2 lspine"; do
             set -- $s
-            exe 13 "$1" 1000000
-            if [ "$OUT_TXT" = 1000000 ]; then say_line FIXED "13" "$2, 1M cells, 8 MB stack: prints 1000000" "$L2R_FLAGS"
-            elif [ -n "$ERR_TXT" ] || [ $EXIT -ge 128 ]; then say_line REPRODUCES "13" "$2, 1M cells, 8 MB stack: $ERR_TXT ($(signame $EXIT))" "$L2R_FLAGS"
-            else say_line OTHER "13" "$2, 1M cells: '$OUT_TXT' ($(signame $EXIT))" "$L2R_FLAGS"; fi
+            exe 02 "$1" 1000000
+            if [ "$OUT_TXT" = 1000000 ]; then say_line FIXED "02" "$2, 1M cells, 8 MB stack: prints 1000000" "$L2R_FLAGS"
+            elif [ -n "$ERR_TXT" ] || [ $EXIT -ge 128 ]; then say_line REPRODUCES "02" "$2, 1M cells, 8 MB stack: $ERR_TXT ($(signame $EXIT))" "$L2R_FLAGS"
+            else say_line OTHER "02" "$2, 1M cells: '$OUT_TXT' ($(signame $EXIT))" "$L2R_FLAGS"; fi
         done
     fi
+    bug02n
     local why
-    if ! why=$(have_lean); then say_line SKIPPED "13" "lean2rr repro: $why"; return; fi
-    lean_build "$HERE/bug13-long-list-drop.lean" LongDrop 13l
-    if [ $RC != 0 ]; then say_line OTHER "13" "lean2rr build failed (see $WORK/out/13l.log)"; return; fi
+    if ! why=$(have_lean); then say_line SKIPPED "02" "lean2rr repro: $why"; return; fi
+    lean_build "$HERE/bug02-long-list-drop.lean" LongDrop 02l
+    if [ $RC != 0 ]; then say_line OTHER "02" "lean2rr build failed (see $WORK/out/02l.log)"; return; fi
     local c exp what
     for c in 0 1; do
         if [ $c = 0 ]; then exp="(some 7)"; what="List.replicate"; else exp=0; what=snoc; fi
-        exe 13l $c 40000000
-        if [ "$OUT_TXT" = "$exp" ]; then say_line FIXED 13 "lean2rr $what, 40M cells, 1 GiB stack: prints $OUT_TXT" "l2r.py"
-        elif [ -n "$ERR_TXT" ] || [ $EXIT -ge 128 ]; then say_line REPRODUCES 13 "lean2rr $what, 40M cells, 1 GiB stack: $ERR_TXT ($(signame $EXIT))" "l2r.py"
-        else say_line OTHER 13 "lean2rr $what, 40M cells: '$OUT_TXT' ($(signame $EXIT))" "l2r.py"; fi
+        exe 02l $c 40000000
+        if [ "$OUT_TXT" = "$exp" ]; then say_line FIXED 02 "lean2rr $what, 40M cells, 1 GiB stack: prints $OUT_TXT" "l2r.py"
+        elif [ -n "$ERR_TXT" ] || [ $EXIT -ge 128 ]; then say_line REPRODUCES 02 "lean2rr $what, 40M cells, 1 GiB stack: $ERR_TXT ($(signame $EXIT))" "l2r.py"
+        else say_line OTHER 02 "lean2rr $what, 40M cells: '$OUT_TXT' ($(signame $EXIT))" "l2r.py"; fi
     done
 }
-bug15() { compile_error 15 bug15-nullable-match-yield 1 "parent operation expected a value, but nothing is yielded" -O aggressive; }
-bug16() {
-    local why
-    if ! why=$(have_lean); then say_line SKIPPED 16 "$why"; return; fi
-    python3 "$HERE/bug16-nested-io-matches.py" 50 "$WORK/out/Nest50.lean"
-    python3 "$HERE/bug16-nested-io-matches.py" 100 "$WORK/out/Nest100.lean"
-    # Without lean2rr's workaround (Outline), so that rrc sees the nesting.
-    export L2R_NO_OUTLINE=1
-    lean_build "$WORK/out/Nest50.lean" Nest50 16a; local s1=$RSECS m1=$RKB r1=$RC
-    lean_build "$WORK/out/Nest100.lean" Nest100 16b; local s2=$RSECS m2=$RKB r2=$RC
-    lean_build "$WORK/out/Nest100.lean" Nest100 16c --no-reuse-across-call; local s3=$RSECS m3=$RKB
-    unset L2R_NO_OUTLINE
-    if [ $r1 != 0 ] || [ $r2 != 0 ] || [ -z "$m1" ] || [ -z "$m2" ]; then say_line OTHER 16 "build failed (see $WORK/out/16?.log)" "l2r.py"; return; fi
-    local r msg
-    r=$(ratio "$m2" "$m1")
-    msg="rrc: N = 50: ${s1} s, $((m1 / 1024)) MB; N = 100: ${s2} s, $((m2 / 1024)) MB (${r}x memory); N = 100 without reuse across calls: ${s3:-?} s, $((${m3:-0} / 1024)) MB"
-    if ge "$r" 2.5; then say_line REPRODUCES 16 "$msg" "l2r.py"
-    elif le "$r" 1.6; then say_line FIXED 16 "$msg" "l2r.py"
-    else say_line OTHER 16 "$msg" "l2r.py"; fi
+bug02n() {
+    rr bug02-nullable-chain-drop.rr 02n -O default
+    if [ $RC != 0 ]; then say_line OTHER 02 "$(build_fail 02n)" "-O default"; return; fi
+    exe 02n
+    if [ "$OUT_TXT" = 1 ] && [ $EXIT = 0 ]; then say_line FIXED 02 "1M links through Nullable, 8 MB stack: prints 1" "-O default"
+    elif [ -n "$ERR_TXT" ] || [ $EXIT -ge 128 ]; then say_line REPRODUCES 02 "1M links through Nullable, 8 MB stack: ${ERR_TXT:-stack overflow} ($(signame $EXIT))" "-O default"
+    else say_line OTHER 02 "prints '$OUT_TXT' ($(signame $EXIT)), expected 1" "-O default"; fi
 }
-bug17() {
-    local why
-    if ! why=$(have_lean); then say_line SKIPPED 17 "$why"; return; fi
-    # Three sizes. N = 10 measures the fixed part of rrc's memory (the
-    # prelude, the runtime glue, the FFI textures: about 140 MB), which is
-    # a third of the total at N = 250, so the plain ratio of two sizes is
-    # 1.7-1.9x even when the cost is linear. The line compares the memory
-    # each further `let` costs from 10 to 250 and from 250 to 500: 1.1-1.2x
-    # with 17-a (linear), 2.3-2.4x without it (quadratic).
-    local n
-    for n in 10 250 500; do python3 "$HERE/bug17-long-nat-block.py" $n "$WORK/out/Lets$n.lean"; done
-    # Without lean2rr's workaround (Outline), so that rrc sees the long block.
-    export L2R_NO_OUTLINE=1
-    lean_build "$WORK/out/Lets10.lean" Lets10 17z; local m0=$RKB r0=$RC
-    lean_build "$WORK/out/Lets250.lean" Lets250 17a; local s1=$RSECS m1=$RKB r1=$RC
-    lean_build "$WORK/out/Lets500.lean" Lets500 17b; local s2=$RSECS m2=$RKB r2=$RC
-    unset L2R_NO_OUTLINE
-    if [ $r0 != 0 ] || [ $r1 != 0 ] || [ $r2 != 0 ] || [ -z "$m0" ] || [ -z "$m1" ] || [ -z "$m2" ]; then
-        say_line OTHER 17 "build failed (see $WORK/out/17?.log)" "l2r.py"; return
-    fi
-    local a b r msg
-    a=$(printf '%.2f' "$(echo "scale=4; ($m1 - $m0) / 240 / 1024" | bc)")
-    b=$(printf '%.2f' "$(echo "scale=4; ($m2 - $m1) / 250 / 1024" | bc)")
-    if ge "$a" 0.01; then r=$(ratio "$b" "$a"); else r=0; fi
-    msg="rrc: N = 10: $((m0 / 1024)) MB; N = 250: ${s1} s, $((m1 / 1024)) MB; N = 500: ${s2} s, $((m2 / 1024)) MB (each let: ${a} MB up to 250, ${b} MB from 250 to 500, ${r}x)"
-    if ge "$r" 1.9; then say_line REPRODUCES 17 "$msg" "l2r.py"
-    elif le "$r" 1.5; then say_line FIXED 17 "$msg" "l2r.py"
-    else say_line OTHER 17 "$msg" "l2r.py"; fi
-}
-bug18() {
-    local r
-    r=$("$HERE/bug18-rrc-target-deps.sh" "$CK")
-    say_line "${r%% *}" 18 "${r#* }"
-}
-bug19() { compile_error 19 bug19-cell-of-value-record 42 "operand type mismatch" -O aggressive; }
-bug20() {
-    local why
-    if ! why=$(have_lean); then say_line SKIPPED 20 "$why"; return; fi
-    # Without lean2rr's workaround (#[transform_anchor] on its conversion
-    # and unboxing functions), then with it. Without 20-a the first build
-    # takes about 10x the memory of the second (2.9 GB against 0.3 GB): the
-    # inliner follows chains of copied calls through recursive functions.
-    # With 20-a about 3.5x remains (0.77 GB against 0.22 GB): the inliner's
-    # ordinary one-level inlining of the calls the program writes, which
-    # lean2rr's anchors still avoid (lean2rr keeps them).
-    export L2R_NO_INLINE_ANCHORS=1
-    lean_build "$HERE/bug20-statet-tower.lean" Tower 20a; local s1=$RSECS m1=$RKB r1=$RC
-    unset L2R_NO_INLINE_ANCHORS
-    lean_build "$HERE/bug20-statet-tower.lean" Tower 20b; local s2=$RSECS m2=$RKB r2=$RC
-    if [ $r1 != 0 ] || [ $r2 != 0 ] || [ -z "$m1" ] || [ -z "$m2" ]; then say_line OTHER 20 "build failed (see $WORK/out/20?.log)" "l2r.py"; return; fi
-    local r msg
-    r=$(ratio "$m1" "$m2")
-    msg="rrc: ${s1} s, $((m1 / 1024)) MB; with the conversion functions kept out of the inliner: ${s2} s, $((m2 / 1024)) MB (${r}x memory)"
-    if ge "$r" 6; then say_line REPRODUCES 20 "$msg" "l2r.py"
-    elif le "$r" 4.5; then say_line FIXED 20 "$msg" "l2r.py"
-    else say_line OTHER 20 "$msg" "l2r.py"; fi
-}
-
-bug21() { plain_value 21 bug21-unterminated-placeholder 4 2 -O aggressive; }
-
-bug23() {
-    # K and 2K instances of one polymorphic FFI import. The texture compiles
-    # (one rustc each) are linear and come first; the link phase is timed
-    # alone: from the exit of the last texture rustc (a wrapper logs each
-    # exit) to rrc -v's "running the MLIR lowering pipeline". Twice the
-    # instances: 4x the link time when quadratic, 2x when linear.
-    local k tm tl t secs=() w=$WORK/out/23-rustc
-    printf '#!/bin/sh\n"%s" "$@"\nr=$?\ndate +%%s.%%N >> "$RUSTC_LOG"\nexit $r\n' "$RUSTC" > "$w"
-    chmod +x "$w"
-    for k in 300 600; do
-        python3 "$HERE/bug23-polyffi-link.py" $k "$WORK/out/23-$k.rr"
-        rm -f "$WORK/out/23-$k.rustc"
-        { (cd "$WORK/run" && RUSTC_LOG=$WORK/out/23-$k.rustc "$RRC" "$WORK/out/23-$k.rr" \
-            -o "$WORK/out/23-$k" --emit executable -O aggressive -v --polyffi-rust-path "$w" \
-            --polyffi-libdir "$RT" --polyffi-libdir "$RT/deps" --polyffi-libdir "$TL") \
-            > "$WORK/out/23-$k.log" 2>&1; } 2> /dev/null
-        RC=$?
-        if [ $RC != 0 ]; then say_line OTHER 23 "K = $k: $(build_fail 23-$k)" "-O aggressive"; return; fi
-        exe 23-$k
-        if [ "$OUT_TXT" != $((k * (k - 1) / 2)) ]; then
-            say_line OTHER 23 "K = $k: prints '$OUT_TXT' ($(signame $EXIT)), expected $((k * (k - 1) / 2))" "-O aggressive"; return
-        fi
-        t=$(grep -m1 -o '^[0-9T:.-]*Z.*running the MLIR lowering pipeline' "$WORK/out/23-$k.log" | cut -d' ' -f1)
-        tm=$(date -d "$t" +%s.%N 2> /dev/null)
-        # (the executable's link step runs the wrapper once more, later)
-        tl=$(awk -v t="$tm" '$1 <= t' "$WORK/out/23-$k.rustc" 2> /dev/null | sort -n | tail -1)
-        if [ -z "$tm" ] || [ -z "$tl" ]; then say_line OTHER 23 "K = $k: no phase timestamps (see $WORK/out/23-$k.log)" "-O aggressive"; return; fi
-        secs+=("$(printf '%.1f' "$(echo "$tm - $tl" | bc)")")
-    done
-    local l1=${secs[0]} l2=${secs[1]} r=0 msg
-    ge "$l1" 0.1 && r=$(ratio "$l2" "$l1")
-    msg="link of the gathered modules: K = 300: ${l1} s, K = 600: ${l2} s (${r}x for twice the instances)"
-    if ge "$r" 3 && ge "$l2" 2; then say_line REPRODUCES 23 "$msg" "-O aggressive"
-    elif le "$r" 2.6 || le "$l2" 1; then say_line FIXED 23 "$msg" "-O aggressive"
-    else say_line OTHER 23 "$msg" "-O aggressive"; fi
-}
-
-bug24() {
-    local r
-    r=$("$HERE/bug24-matexp-state-order.sh" "$CK")
-    say_line "${r%% *}" 24 "${r#* }"
-}
-
-bug25() {
+bug03() {
     # The size of the LLVM-dialect module at K and K + 2: 4x when the copy
     # of the [value] record is expanded exponentially.
     local k lines=()
     for k in 8 10; do
-        python3 "$HERE/bug25-value-record-dag.py" $k "$WORK/out/25-$k.rr"
-        { (cd "$WORK/run" && "$RRC" "$WORK/out/25-$k.rr" -o "$WORK/out/25-$k.mlir" --emit mlir-llvm -O default \
+        python3 "$HERE/bug03-value-record-dag.py" $k "$WORK/out/03-$k.rr"
+        { (cd "$WORK/run" && "$RRC" "$WORK/out/03-$k.rr" -o "$WORK/out/03-$k.mlir" --emit mlir-llvm -O default \
             --polyffi-rust-path "$RUSTC" --polyffi-libdir "$RT" --polyffi-libdir "$RT/deps" \
-            --polyffi-libdir "$TL") > "$WORK/out/25-$k.log" 2>&1; } 2> /dev/null
+            --polyffi-libdir "$TL") > "$WORK/out/03-$k.log" 2>&1; } 2> /dev/null
         RC=$?
-        if [ $RC != 0 ]; then say_line OTHER 25 "K = $k: $(build_fail 25-$k)" "-O default"; return; fi
-        lines+=("$(wc -l < "$WORK/out/25-$k.mlir")")
+        if [ $RC != 0 ]; then say_line OTHER 03 "K = $k: $(build_fail 03-$k)" "-O default"; return; fi
+        lines+=("$(wc -l < "$WORK/out/03-$k.mlir")")
     done
     local r msg
     r=$(ratio "${lines[1]}" "${lines[0]}")
     msg="--emit mlir-llvm: K = 8: ${lines[0]} lines, K = 10: ${lines[1]} lines (${r}x for two more levels)"
-    if ge "$r" 3; then say_line REPRODUCES 25 "$msg" "-O default"
-    elif le "$r" 1.6; then say_line FIXED 25 "$msg" "-O default"
-    else say_line OTHER 25 "$msg" "-O default"; fi
+    if ge "$r" 3; then say_line REPRODUCES 03 "$msg" "-O default"
+    elif le "$r" 1.6; then say_line FIXED 03 "$msg" "-O default"
+    else say_line OTHER 03 "$msg" "-O default"; fi
 }
-
-bug26() { plain_value 26 bug26-launder-assume 25009648 2 -O aggressive; }
-
-bug27() {
-    rr bug27-nullable-member-drop.rr 27 -O default
-    if [ $RC != 0 ]; then say_line OTHER 27 "$(build_fail 27)" "-O default"; return; fi
-    exe 27
-    if [ "$OUT_TXT" = 1 ] && [ $EXIT = 0 ]; then say_line FIXED 27 "1M links through Nullable, 8 MB stack: prints 1" "-O default"
-    elif [ -n "$ERR_TXT" ] || [ $EXIT -ge 128 ]; then say_line REPRODUCES 27 "1M links through Nullable, 8 MB stack: ${ERR_TXT:-stack overflow} ($(signame $EXIT))" "-O default"
-    else say_line OTHER 27 "prints '$OUT_TXT' ($(signame $EXIT)), expected 1" "-O default"; fi
-}
-
-bug28() { plain_value 28 bug28-unique-carrying-join "101 1" "101 101" -O aggressive; }
-
-bug29() {
-    # Print the module, then read the dump back (a resumed build).
-    local o=$WORK/out/29
-    { (cd "$WORK/run" && "$RRC" "$HERE/bug29-ffi-member-mlir.rr" --emit mlir -o "$o.a.mlir" \
-        && "$RRC" "$o.a.mlir" -x mlir --emit mlir -o "$o.b.mlir") > "$o.log" 2>&1; } 2> /dev/null
-    RC=$?
-    if [ $RC = 0 ] && cmp -s "$o.a.mlir" "$o.b.mlir"; then say_line FIXED 29 "the --emit mlir dump parses back and prints identically"
-    elif grep -q "rc members must be atomic shared links" "$o.log"; then
-        say_line REPRODUCES 29 "the --emit mlir dump does not parse: rc members must be atomic shared links"
-    else say_line OTHER 29 "$(build_fail 29)"; fi
-}
-
-bug30() {
-    # The conversion alone, through reussir-opt (not built by default:
-    # `ninja -C build reussir-opt`). Twice the functions and calls: 4x the
-    # time when quadratic, 2x when linear.
-    local opt=$CK/build/bin/reussir-opt n secs=()
-    if [ ! -x "$opt" ]; then say_line SKIPPED 30 "no reussir-opt at $opt"; return; fi
-    for n in 5000 10000; do
-        python3 "$HERE/bug30-call-lowering.py" $n "$WORK/out/30-$n.mlir"
-        rm -f "$WORK/out/30-$n.out.mlir"
-        timed "$opt" "$WORK/out/30-$n.mlir" --reussir-convert-to-llvm -o "$WORK/out/30-$n.out.mlir" 2> "$WORK/out/30-$n.log"
-        if [ ! -s "$WORK/out/30-$n.out.mlir" ]; then say_line OTHER 30 "N = $n: reussir-opt failed (see $WORK/out/30-$n.log)"; return; fi
-        secs+=("$SECS")
-    done
-    local t1=${secs[0]} t2=${secs[1]} r=0 msg
-    ge "$t1" 0.1 && r=$(ratio "$t2" "$t1")
-    msg="reussir-opt --reussir-convert-to-llvm: N = 5000: ${t1} s, N = 10000: ${t2} s (${r}x for twice the calls)"
-    if ge "$r" 3 && ge "$t2" 1; then say_line REPRODUCES 30 "$msg"
-    elif le "$r" 2.6 || le "$t2" 0.6; then say_line FIXED 30 "$msg"
-    else say_line OTHER 30 "$msg"; fi
-}
-
-bug31() {
-    python3 "$HERE/bug31-deep-expression.py" 8000 100000 "$WORK/out/31.rr"
-    rr "$WORK/out/31.rr" 31 -O aggressive
-    if [ $RC != 0 ]; then
-        if grep -q "overflowed its stack" "$WORK/out/31.log"; then say_line REPRODUCES 31 "rrc: thread 'main' has overflowed its stack ($(signame $RC))" "-O aggressive"
-        else say_line OTHER 31 "$(build_fail 31)" "-O aggressive"; fi
-        return
-    fi
-    exe 31
-    if [ "$OUT_TXT" = 32004007 ]; then say_line FIXED 31 "compiles, prints 32004007" "-O aggressive"
-    else say_line OTHER 31 "compiles, prints '$OUT_TXT' ($(signame $EXIT)), expected 32004007" "-O aggressive"; fi
-}
-
-bug32() {
+bug04() {
     # The size of the printed module at K and K + 2: 4x when exponential.
     local k sz=()
     for k in 10 12; do
-        python3 "$HERE/bug32-emit-mlir-size.py" $k "$WORK/out/32-$k.rr"
-        { (cd "$WORK/run" && "$RRC" "$WORK/out/32-$k.rr" --emit mlir -o "$WORK/out/32-$k.mlir") > "$WORK/out/32-$k.log" 2>&1; } 2> /dev/null
+        python3 "$HERE/bug04-emit-mlir-size.py" $k "$WORK/out/04-$k.rr"
+        { (cd "$WORK/run" && "$RRC" "$WORK/out/04-$k.rr" --emit mlir -o "$WORK/out/04-$k.mlir") > "$WORK/out/04-$k.log" 2>&1; } 2> /dev/null
         RC=$?
-        if [ $RC != 0 ]; then say_line OTHER 32 "K = $k: $(build_fail 32-$k)"; return; fi
-        sz+=("$(stat -c %s "$WORK/out/32-$k.mlir")")
+        if [ $RC != 0 ]; then say_line OTHER 04 "K = $k: $(build_fail 04-$k)"; return; fi
+        sz+=("$(stat -c %s "$WORK/out/04-$k.mlir")")
     done
     local r msg
     r=$(ratio "${sz[1]}" "${sz[0]}")
     msg="--emit mlir: K = 10: $((sz[0] / 1024)) KB, K = 12: $((sz[1] / 1024)) KB (${r}x for two more levels)"
-    if ge "$r" 3; then say_line REPRODUCES 32 "$msg"
-    elif le "$r" 1.5; then say_line FIXED 32 "$msg"
-    else say_line OTHER 32 "$msg"; fi
+    if ge "$r" 3; then say_line REPRODUCES 04 "$msg"
+    elif le "$r" 1.5; then say_line FIXED 04 "$msg"
+    else say_line OTHER 04 "$msg"; fi
 }
-
-bug33() {
-    # A type with text after its keywords, read back through rrc.
-    local o=$WORK/out/33
-    { (cd "$WORK/run" && "$RRC" "$HERE/bug33-rc-trailing-text.mlir" -x mlir --emit mlir -o "$o.mlir") > "$o.log" 2>&1; } 2> /dev/null
-    RC=$?
-    if [ $RC = 0 ] && grep -q 'func.func private @f() -> !reussir.rc<i64 rigid>' "$o.mlir"; then
-        say_line REPRODUCES 33 "rrc -x mlir reads !reussir.rc<i64 rigid, atomic> as !reussir.rc<i64 rigid>"
-    elif [ $RC != 0 ] && grep -q "expected '>'" "$o.log"; then
-        say_line FIXED 33 "rrc -x mlir rejects !reussir.rc<i64 rigid, atomic>: expected '>'"
-    else say_line OTHER 33 "rrc exit $RC: $(grep -m1 -o "error.\{0,120\}" "$o.log")"; fi
-}
-
-bug34() {
+bug05() {
     # Built as lean2rr builds: --emit executable, no --relocation-mode.
-    rr bug34-executable-textrel.rr 34 -O aggressive
-    if [ $RC != 0 ]; then say_line OTHER 34 "$(build_fail 34)" "-O aggressive"; return; fi
-    if ! command -v readelf > /dev/null; then say_line SKIPPED 34 "no readelf"; return; fi
-    exe 34
+    rr bug05-executable-textrel.rr 05 -O aggressive
+    if [ $RC != 0 ]; then say_line OTHER 05 "$(build_fail 05)" "-O aggressive"; return; fi
+    if ! command -v readelf > /dev/null; then say_line SKIPPED 05 "no readelf"; return; fi
+    exe 05
     local tr
-    tr=$(readelf -d "$WORK/out/34" 2> /dev/null | grep -c TEXTREL)
-    if [ "$OUT_TXT" != 6 ]; then say_line OTHER 34 "prints '$OUT_TXT' ($(signame $EXIT)), expected 6" "-O aggressive"
-    elif [ "$tr" -gt 0 ]; then say_line REPRODUCES 34 "the executable needs text relocations (DT_TEXTREL); prints 6" "-O aggressive"
-    else say_line FIXED 34 "no text relocations; prints 6" "-O aggressive"; fi
+    tr=$(readelf -d "$WORK/out/05" 2> /dev/null | grep -c TEXTREL)
+    if [ "$OUT_TXT" != 6 ]; then say_line OTHER 05 "prints '$OUT_TXT' ($(signame $EXIT)), expected 6" "-O aggressive"
+    elif [ "$tr" -gt 0 ]; then say_line REPRODUCES 05 "the executable needs text relocations (DT_TEXTREL); prints 6" "-O aggressive"
+    else say_line FIXED 05 "no text relocations; prints 6" "-O aggressive"; fi
 }
-
-bug35() {
-    # Two builds with one REUSSIR_FFI_CACHE_DIR, through a rustc wrapper
-    # that counts texture compiles (a reussir_rust_module_*.rs source; the
-    # final link through rustc is not one).
-    local d=$WORK/out/35 i n=()
-    rm -rf "$d"; mkdir -p "$d/cache"
-    printf '#!/bin/sh\ncase " $* " in *reussir_rust_module_*) echo x >> "%s/compiles" ;; esac\nexec "%s" "$@"\n' \
-        "$d" "$RUSTC" > "$d/rustc"
-    chmod +x "$d/rustc"
-    for i in 1 2; do
-        : > "$d/compiles"
-        { (cd "$WORK/run" && REUSSIR_FFI_CACHE_DIR=$d/cache "$RRC" "$HERE/bug35-texture-cache.rr" \
-            -o "$d/exe$i" --emit executable -O aggressive --polyffi-rust-path "$d/rustc" \
-            --polyffi-libdir "$RT" --polyffi-libdir "$RT/deps" --polyffi-libdir "$TL") > "$d/$i.log" 2>&1; } 2> /dev/null
-        RC=$?
-        if [ $RC != 0 ]; then say_line OTHER 35 "build $i: rrc $(signame "$RC"): $(grep -m1 -o "error[:=].\{0,160\}" "$d/$i.log")" "-O aggressive"; return; fi
-        n+=("$(wc -l < "$d/compiles")")
-        { (cd "$WORK/run" && timeout 60 "$d/exe$i") > "$d/exe$i.stdout" 2> /dev/null; } 2> /dev/null
-        if [ "$(cat "$d/exe$i.stdout")" != 42 ]; then say_line OTHER 35 "build $i prints '$(head -c 100 "$d/exe$i.stdout")', expected 42" "-O aggressive"; return; fi
-    done
-    local msg="second build: ${n[1]} of ${n[0]} textures compiled again; both print 42"
-    if [ "${n[0]}" -gt 0 ] && [ "${n[1]}" = 0 ]; then say_line FIXED 35 "$msg" "-O aggressive"
-    elif [ "${n[0]}" -gt 0 ] && [ "${n[1]}" = "${n[0]}" ]; then say_line REPRODUCES 35 "$msg" "-O aggressive"
-    else say_line OTHER 35 "$msg" "-O aggressive"; fi
-}
-
-bug36() {
+bug06() {
     # The textures built as scripts/l2r.py builds them: for the CPU rrc
     # compiles for (NATIVE_FLAGS), else LLVM inlines no texture at all
     # (conflicting target features). Two call sites of `mix`: an ordinary
     # one in `main`, a cold one in `deep`.
-    local d=$WORK/out/36 n
+    local d=$WORK/out/06 n
     mkdir -p "$d"
     printf '#!/bin/sh\nexec "%s" "$@" -C target-cpu=native -C target-feature=-outline-atomics\n' "$RUSTC" > "$d/rustc"
     chmod +x "$d/rustc"
-    { (cd "$WORK/run" && "$RRC" "$HERE/bug36-trampoline-inline.rr" -o "$d/out.ll" --emit llvm-ir -O aggressive \
+    { (cd "$WORK/run" && "$RRC" "$HERE/bug06-trampoline-inline.rr" -o "$d/out.ll" --emit llvm-ir -O aggressive \
         --polyffi-rust-path "$d/rustc" --polyffi-libdir "$RT" --polyffi-libdir "$RT/deps" --polyffi-libdir "$TL") > "$d/log" 2>&1; } 2> /dev/null
     RC=$?
-    if [ $RC != 0 ]; then say_line OTHER 36 "rrc $(signame "$RC"): $(grep -m1 -o "error[:=].\{0,160\}" "$d/log")" "-O aggressive"; return; fi
+    if [ $RC != 0 ]; then say_line OTHER 06 "rrc $(signame "$RC"): $(grep -m1 -o "error[:=].\{0,160\}" "$d/log")" "-O aggressive"; return; fi
     n=$(grep -c 'call [^@]*@_RC3mix(' "$d/out.ll")
-    if [ "$n" = 1 ]; then say_line REPRODUCES 36 "the cold call site still calls the trampoline of mix; main's call is inlined" "-O aggressive"
-    elif [ "$n" = 0 ]; then say_line FIXED 36 "both calls of mix inlined" "-O aggressive"
-    else say_line OTHER 36 "$n calls of mix left (expected 1, or 0 when fixed)" "-O aggressive"; fi
+    if [ "$n" = 1 ]; then say_line REPRODUCES 06 "the cold call site still calls the trampoline of mix; main's call is inlined" "-O aggressive"
+    elif [ "$n" = 0 ]; then say_line FIXED 06 "both calls of mix inlined" "-O aggressive"
+    else say_line OTHER 06 "$n calls of mix left (expected 1, or 0 when fixed)" "-O aggressive"; fi
 }
-
-bug38() {
-    rr bug38-tagged-top-bits.rr 38 -O aggressive
-    if [ $RC != 0 ]; then say_line OTHER 38 "$(build_fail 38)" "-O aggressive"; return; fi
-    exe 38
-    if [ "$OUT_TXT" = 143 ] && [ $EXIT = 0 ]; then say_line FIXED 38 "a tagged handle with top bits copied in line: prints 143" "-O aggressive"
-    elif [ $EXIT -ge 128 ]; then say_line REPRODUCES 38 "a tagged handle with top bits copied in line: killed by $(signame $EXIT)" "-O aggressive"
-    else say_line OTHER 38 "prints '$OUT_TXT' ($(signame $EXIT)), expected 143" "-O aggressive"; fi
+bug07() {
+    rr bug07-tagged-top-bits.rr 07 -O aggressive
+    if [ $RC != 0 ]; then say_line OTHER 07 "$(build_fail 07)" "-O aggressive"; return; fi
+    exe 07
+    if [ "$OUT_TXT" = 143 ] && [ $EXIT = 0 ]; then say_line FIXED 07 "a tagged handle with top bits copied in line: prints 143" "-O aggressive"
+    elif [ $EXIT -ge 128 ]; then say_line REPRODUCES 07 "a tagged handle with top bits copied in line: killed by $(signame $EXIT)" "-O aggressive"
+    else say_line OTHER 07 "prints '$OUT_TXT' ($(signame $EXIT)), expected 143" "-O aggressive"; fi
 }
-
-bug39() {
+bug08() {
     # The cells allocated by bump (the rebuilt cell gets the original head)
     # and by bump_b (it gets the value the opaque identity returned),
     # counted by wrapping Reussir's allocation entry points at link time.
     local fl="$L2R_FLAGS --link-arg=-Wl,--wrap=__reussir_allocate,--wrap=__reussir_allocate_small"
-    rr bug39-alias-release-donor.rr 39 $fl
-    if [ $RC != 0 ]; then say_line OTHER 39 "$(build_fail 39)" "$L2R_FLAGS"; return; fi
-    exe 39
+    rr bug08-alias-release-donor.rr 08 $fl
+    if [ $RC != 0 ]; then say_line OTHER 08 "$(build_fail 08)" "$L2R_FLAGS"; return; fi
+    exe 08
     local a1 a2 b1 b2
-    read -r a1 a2 b1 b2 < <(sed -n 's/^bump \([0-9]*\) \([0-9]*\) bump_b \([0-9]*\) \([0-9]*\)$/\1 \2 \3 \4/p' "$WORK/out/39.stdout")
-    if [ -z "${b2:-}" ]; then say_line OTHER 39 "prints '$OUT_TXT' ($(signame $EXIT))" "$L2R_FLAGS"
+    read -r a1 a2 b1 b2 < <(sed -n 's/^bump \([0-9]*\) \([0-9]*\) bump_b \([0-9]*\) \([0-9]*\)$/\1 \2 \3 \4/p' "$WORK/out/08.stdout")
+    if [ -z "${b2:-}" ]; then say_line OTHER 08 "prints '$OUT_TXT' ($(signame $EXIT))" "$L2R_FLAGS"
     elif [ "$b1" = 0 ] && [ "$b2" = 0 ] && [ $((a2 - a1)) -ge 30000 ]; then
-        say_line REPRODUCES 39 "bump allocates $a1 cells for 1000 bumps, $a2 for 4000 (bump_b: $b1, $b2)" "$L2R_FLAGS"
+        say_line REPRODUCES 08 "bump allocates $a1 cells for 1000 bumps, $a2 for 4000 (bump_b: $b1, $b2)" "$L2R_FLAGS"
     elif [ "$a1" = 0 ] && [ "$a2" = 0 ] && [ "$b1" = 0 ] && [ "$b2" = 0 ]; then
-        say_line FIXED 39 "no cell allocated by either bump" "$L2R_FLAGS"
-    else say_line OTHER 39 "prints '$OUT_TXT'" "$L2R_FLAGS"; fi
+        say_line FIXED 08 "no cell allocated by either bump" "$L2R_FLAGS"
+    else say_line OTHER 08 "prints '$OUT_TXT'" "$L2R_FLAGS"; fi
 }
-
-bug43() {
+bug12() {
     # A Rust test of the checkout's reussir-rt sources (nullable.rs, rc.rs),
     # linked as rt/ next to a copy of the repro.
-    local d=$WORK/out/43 fails
+    local d=$WORK/out/12 fails
     mkdir -p "$d"
-    cp "$HERE/bug43-nullable-as-ref.rs" "$d/"
+    cp "$HERE/bug12-nullable-as-ref.rs" "$d/"
     ln -sfn "$CK/crates/reussir-rt/src" "$d/rt"
-    { "$RUSTC" --edition 2021 --test "$d/bug43-nullable-as-ref.rs" -o "$d/t" > "$d/log" 2>&1; } 2> /dev/null
+    { "$RUSTC" --edition 2021 --test "$d/bug12-nullable-as-ref.rs" -o "$d/t" > "$d/log" 2>&1; } 2> /dev/null
     RC=$?
-    if [ $RC != 0 ]; then say_line OTHER 43 "rustc $(signame "$RC"): $(grep -m1 -o "error.\{0,160\}" "$d/log")"; return; fi
+    if [ $RC != 0 ]; then say_line OTHER 12 "rustc $(signame "$RC"): $(grep -m1 -o "error.\{0,160\}" "$d/log")"; return; fi
     # Only the repro's two tests (`as_ref_*`), not the modules' own.
     { (cd "$d" && timeout 60 ./t --test-threads=1 as_ref_) > "$d/out" 2>&1; } 2> /dev/null
-    if grep -q '^test result: ok. 2 passed' "$d/out"; then say_line FIXED 43 "Nullable::as_ref: both tests pass"
+    if grep -q '^test result: ok. 2 passed' "$d/out"; then say_line FIXED 12 "Nullable::as_ref: both tests pass"
     elif fails=$(sed -n 's/^test result: FAILED. [0-9]* passed; \([0-9]*\) failed.*/\1/p' "$d/out") && [ -n "$fails" ]; then
-        say_line REPRODUCES 43 "Nullable::as_ref: $fails of 2 tests fail (the reference points to a dead copy)"
-    else say_line OTHER 43 "$(tail -1 "$d/out")"; fi
+        say_line REPRODUCES 12 "Nullable::as_ref: $fails of 2 tests fail (the reference points to a dead copy)"
+    else say_line OTHER 12 "$(tail -1 "$d/out")"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33 34 35 36 38 39 43"
-SLOW=" 06 10 11 16 17 20 23 "
+ALL="01 02 03 04 05 06 07 08 12"
+SLOW=" "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do
     b=$(printf '%02d' "$((10#${b%%[ab]}))")

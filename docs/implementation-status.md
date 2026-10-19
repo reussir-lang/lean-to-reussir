@@ -103,7 +103,7 @@ traits.
 Reussir generates the reference counting itself, and normally treats every
 handle as a pointer whose count it increments when the value is copied. A
 small `Nat` is not a pointer, so lean2rr declares `Nat` and `Int` as
-*tagged* opaque handles, a small local Reussir extension (patch 41-a):
+*tagged* opaque handles, a small local Reussir extension (patch 10-a):
 Reussir counts such a handle only when its low bit is clear, exactly as
 Lean's C runtime tests the bit before every count update. Copying or
 dropping a small `Nat` is a bit test; it is never allocated.
@@ -539,7 +539,7 @@ for well under a second, so their ratios are rough):
 
 Where lean2rr is not faster, the known causes are: freeing through the
 pending-work stack that bounded-depth frees need (deriv, monadic-interp;
-local patch 13-c made it cheaper), and Reussir having no borrowed
+local patch 02-c made it cheaper), and Reussir having no borrowed
 parameters, so code that walks shared data (looking up a hash bucket
 shared between map versions) writes reference counts that native Lean
 only reads (hash-map-heavily-shared).
@@ -585,81 +585,57 @@ time).
 
 ## Reussir
 
-lean2rr needs Reussir built from source with lean2rr's local patches
-(Reussir `943f2195`, a commit of Reussir's `main`, plus the 35 patches of
-[`../reussir-bugs/patches/series`](../reussir-bugs/patches/series), in
-that order; each patch file is named after its issue, `NN-x-*.patch`, and
-explained in depth in the file of that issue, indexed in
-[`../reussir-bugs/README.md`](../reussir-bugs/README.md)). Branch
-`l2r-base2` of the checkout in `./reussir` (head `b2e4a47e`) has all 35;
-since 2026-10-09 13-c also has the fix of Reussir issue 47 (the stack
-before the fold is branch `l2r-base2-pre47`, head `71f17ae2`).
-They are local: lean2rr's work does not push them, and each is reviewed
-adversarially. Five bug fixes are merged upstream (pull requests #651 to
-#655: 26-a, 02-a, 09-a, 04-a and 05-a); the base has them, so the series
-dropped them on 2026-10-07 (until then the base was `ef922049`).
-An independent audit checked whether each problem is really a Reussir
-bug. The 40 documented problems are numbered issues (37 is reserved);
-their kind says what each is: 20 are bugs (erroneous behaviour), 11 are
-costs, 3 are missed optimizations, 5 are missing features and 1 is
-intended behaviour. Only the bugs are wrong: the others have correct
-output, and their patches are optimizations or features, not fixes. 34
-issues have patches (39 patch files; issue 14 is fixed by issue 9's patch
-09-a) and 5 are documented only:
+lean2rr needs Reussir built from source with lean2rr's local patches.
+Its base is upstream Reussir `7954a367` (2026-10-19) plus the 9 patches
+of the series: branch `l2r-base3` of the checkout in `./reussir` (head
+`4c490260`). The base before it was branch `l2r-base2` (head
+`b2e4a47e`), Reussir `943f2195` plus the 35 patches of the old series;
+the old patch files are in git history and in that branch.
+[`../reussir-bugs/`](../reussir-bugs/README.md) describes the state at
+`7954a367`: upstream fixes 30 of the old
+issues in full (most of them lean2rr's own fixes, sent as pull requests
+#651 to #663 or adapted by Reussir's author from lean2rr's patches), so
+their files are gone, and the 16 open issues have new numbers. The
+series there,
+[`../reussir-bugs/patches/series`](../reussir-bugs/patches/series), has
+9 patches on `7954a367`, in that order; each patch file is named after
+its issue, `NN-x-*.patch`, and explained in the file of that issue. They
+are local: lean2rr's work does not push them, and each is reviewed
+adversarially. Only the bugs are wrong: the other kinds have correct
+output, and their patches are optimizations or features, not fixes.
 
-- **Real bugs fixed (19 patches):** wrong values after in-place reuse of a
-  structure or variant cell (bug 2), `[value]` enum bytes lost (1), a
-  layout mismatch that overflowed cells (8), compiler crashes (4, 5, 31),
-  use-after-free (9, 14), the parser mixing up subtrees on very large
-  files (12, in Reussir's parser library `cstree`), programs that did not
-  compile (15, 19), wrong code after an LLVM assumption undid a pointer
-  launder (26) and from a uniqueness analysis that proved a shared value
-  unique (28), a texture placeholder dropped (21), non-reproducible builds
-  (24), MLIR dumps that did not parse back (29), MLIR types whose trailing
-  text was silently dropped (33), Reussir's own build (18), and executables
-  linked with text relocations (34: lean2rr's driver also passes
-  `--relocation-mode pic`).
-- **A real bug with a flag workaround (1 patch):** a static cell freed after 2^32
-  references (6). Another nullary-constructor encoding avoids it; the patch
-  keeps the default encoding for speed.
-- **Build-time costs, not bugs, with a small optimization (10 patches):**
-  type ids printed exponentially by closure devirtualization (10),
-  interprocedural SCCP (11) and Reussir's own quadratic glue lookups
-  (11b), reuse across calls in deep matches (16), a straight-line `Nat`
-  function (17), the inliner on lean2rr's conversion code (20), wildcard
-  arms over wide enums (22), the polymorphic-FFI modules linked one call
-  each (23), the call lowering's symbol lookups (30), and rustc run again
-  for every FFI texture on every build (35: about 13 s of a small
-  program's 16 s; the patch caches the bitcode, and lean2rr's driver gives
-  rrc the cache directory). The superlinear ones can make large builds
-  infeasible; the output is correct either way.
-- **A missed optimization, not a bug (1 patch):** token reuse picking a
-  cell that never frees (7). Its optimization patch stays because the use-after-free
-  fix (9) builds on it.
-- **Missing features, not bugs, implemented locally (8 patches):** freeing
-  long or deep structures without recursion, in Lean's order (13, four
-  patches; lean2rr's runtime needs them), and the same for a member behind
-  `Nullable` (27); a hook at the end of a drain that lean2rr's runtime
-  uses for promises released inside a free (40, required since switch
+- **A real bug with a patch (1 patch):** executables linked with text
+  relocations (5: lean2rr's driver also passes `--relocation-mode pic`).
+- **Missing features, not bugs, implemented locally (8 patches):**
+  freeing long or deep structures in native Lean's order, through a stack
+  of pending work that lean2rr's runtime shares (2, five patches; the
+  runtime needs them; upstream now frees in bounded stack its own way,
+  first field first); a hook at the end of a drain that lean2rr's runtime
+  uses for promises released inside a free (9, required since switch
   step 6); opaque handles that may be a tagged number instead of a pointer
-  (41), so that `Nat` and `Int` are one word with no allocation for small
+  (10), so that `Nat` and `Int` are one word with no allocation for small
   values (lean2rr's prelude needs it); and foreign data in the top 16 bits
-  of such a handle (38, for the one-word `Box`).
-- **Documented only, not bugs:** Rust allocations on mimalloc's aligned
-  path (3, intended), two costs whose removal would be a redesign: the
-  inline expansion of copies of `[value]` records shared in a DAG (25) and
-  the size of `--emit mlir` dumps (32), and two missed optimizations: no
-  inline attribute on texture trampolines (36) and a reuse token taken
-  from a release that never frees (39).
+  of such a handle (7, for the one-word `Box`).
+- **Documented only:** two costs whose removal would be a redesign: the
+  inline expansion of copies of `[value]` records shared in a DAG (3) and
+  the size of `--emit mlir` dumps (4); three missed optimizations: token
+  reuse picking a cell that never frees (1, its patch parked), no inline
+  attribute on texture trampolines (6, patches parked) and a reuse token
+  taken from a release that never frees (8); the cost of freeing one cell
+  through the pending stack (11, patch parked); four bugs that do not
+  reach lean2rr (12 to 14, and 16: rrc's 1 GiB driver stack under an
+  address-space limit, its fix parked); and a mimalloc bug that leanrt
+  works around (15).
 
-Every Reussir problem met so far is documented with a reproducer,
-including those lean2rr works around and those the audit classified as
-intended behaviour or build costs, in
-[`../reussir-bugs/`](../reussir-bugs/README.md), whose status table also
-shows which patches are applied. lean2rr keeps its workarounds, so that it
-also works with an unpatched Reussir (except for the features it
-requires: its runtime needs patch 13-b, its prelude 41-a, and
-`scripts/l2r.py` requires 40-a, 38-a and 13-d: `REQUIRED_REUSSIR_PATCHES`).
+Every Reussir problem met so far is documented with a reproducer, in
+[`../reussir-bugs/`](../reussir-bugs/README.md) while it is open (the
+fixed ones in git history). lean2rr keeps its workarounds, so that it
+also works with a Reussir without the patches that fix or improve them
+(except for the features it requires: its runtime needs patch 02-b, its
+prelude 10-a, and `scripts/l2r.py` requires 02-a, 09-a, 07-a and 02-e:
+`REQUIRED_REUSSIR_PATCHES`); the workarounds for the issues fixed
+upstream are listed as removable after the move (now) in
+[`implementation/reussir-workarounds/`](implementation/reussir-workarounds/README.md).
 Two parts of Reussir that its author offered (LLVM coroutine bindings,
 dynamic-extent arrays) are not needed: lean2rr's tasks need stackful
 contexts, which lean-runtime's scheduler has (corosensei coroutines), and

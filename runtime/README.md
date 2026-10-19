@@ -88,15 +88,17 @@ inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`).
      with its own rustc run (about 470 per program when the text had the
      whole prelude, most of rrc's time; with `prelude-liveness` about 75
      for a one-line program, 330 for a regex engine), and
-     with Reussir patch 35-a it keeps their bitcode there and reuses it
-     (Reussir issue 35, a cost; an rrc without the patch ignores the
-     variable). Its key covers the texture, the `rustc-native` script (whose
+     with rrc's texture cache (a local patch on the old stack; upstream
+     Reussir #690 reads the same variable) it keeps their bitcode there
+     and reuses it (an rrc without a cache ignores the variable). Its key covers the texture, the `rustc-native` script (whose
      text also names lean-runtime's build), rustc's options and every
      library in the `--polyffi-libdir` directories, so a change to leanrt or
-     lean-runtime only makes new entries. Old entries are never removed:
-     delete the directory to reclaim the space. rrc checks entries for
-     damage, not for tampering: the directory must be one only you can
-     write.
+     lean-runtime only makes new entries. rrc prunes the directory
+     (`llvm::pruneCache`): it removes the entries (`llvmcache-*`) not read
+     for a week and keeps their total at most 1 GiB. Other files stay, such
+     as the `<hex>.bc` entries of the old local patch (deleted once, at the
+     move to Reussir `7954a367`). rrc checks entries for damage, not for
+     tampering: the directory must be one only you can write.
 
 ### The shared crate lean-runtime
 
@@ -345,7 +347,7 @@ rest.
 
 | Lean (mono) | Reussir | Notes |
 |---|---|---|
-| `Nat` | `Nat` = `leanrt::nat::LNat`, one word, declared `tagged` (Reussir patch 41-a) | odd: the small value `(n << 1) \| 1`, n < 2^63; even: an owned `LBig` pointer (below) |
+| `Nat` | `Nat` = `leanrt::nat::LNat`, one word, declared `tagged` (Reussir patch 10-a) | odd: the small value `(n << 1) \| 1`, n < 2^63; even: an owned `LBig` pointer (below) |
 | `Int` | `Int` = `leanrt::nat::LInt`, likewise | odd: `lean_box((unsigned)(int)i)` for i in the `int32` range; even: an owned `LBig` pointer |
 | big numbers | `LBig`, one `mi_malloc` block: count `u32`, flags `u32`, signed size `i32` (limbs in use, negative for a negative value), capacity `u32`, then the limbs | GMP `mpn` operations on the limbs, in a unique operand's block with room (grown by a carry, shrunk when a result leaves most of it unused) or a fresh one; `mpz` operations on read-only views for `pow`, `gcd`, parsing and printing; normalized (only values outside the small ranges); only behind a `Nat`/`Int` word |
 | `String` | `LStr` = `leanrt::string::LStr`, a pointer to one block: count, byte size, capacity, character count (32 bytes, as Lean's header), bytes | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write; grows by `realloc` (below); equality compares the lengths, then the blocks (two references to one block are equal at once, as `lean_string_eq`), then the bytes |
@@ -411,7 +413,7 @@ with a 16-byte header and the limbs inline (`leanrt::big`; native Lean's
 `lean_mpz_object` keeps the limbs in a second allocation). C code written
 against `lean.h` could take and return the small words unchanged; a big
 number would be converted. Reussir copies and drops them as handles of an opaque type declared
-`#[ffi(rust = "::leanrt::nat::LNat", tagged)]`: with Reussir patch 41-a it
+`#[ffi(rust = "::leanrt::nat::LNat", tagged)]`: with Reussir patch 10-a it
 counts only even words (`rc.inc` and the drop hook, `LNat`'s `Drop`, run
 only when the low bit is clear). The prelude's functions take each `Nat`
 argument as its word once (`l2r_nat_raw`, which then owns the reference),
@@ -486,7 +488,7 @@ lean2rr's compact arrays, which its whole-program check rules out; with
 `L2R_DEBUG_ARRAY_CONVERT` set, each conversion writes `leanrt: compact
 array of kind N converted to boxes (L elements)` on descriptor 2. The
 reverse (an array of boxes at a compact kind) is a mismatch. A copy increments
-the payload's count in line (Reussir patch 38-a masks the top bits); the
+the payload's count in line (Reussir patch 07-a masks the top bits); the
 last reference releases leanrt's kinds directly and a program payload
 through the program's release of its type (`l2r_any_rel_<num>_c(cell)`,
 a trampoline per payload type, in leanrt's table by number), its cell
@@ -597,12 +599,12 @@ records `r` as taken by the running thread (Lean 4.35's rule).
 **Freeing containers.** Native Lean frees an object iteratively: the
 children whose count drops to zero go on a stack of objects to free, popped
 last first. Reussir's drop glue does the same for records with the local
-patches 13-a and 13-b: the record members it frees go on a stack of
+patches 02-a and 02-b: the record members it frees go on a stack of
 pending work per thread (`reussir_rt::drop`), and it releases a container
 field through the container's Rust `Drop` (the opaque type's drop hook),
 which releases the elements. The prelude's containers are therefore
 `leanrt::drop`'s types, whose `Drop` frees the last reference through
-that same stack (so the runtime needs Reussir with 13-b): a container
+that same stack (so the runtime needs Reussir with 02-b): a container
 freed while another free runs (from an element's release, or from record
 glue) is pushed instead, and the outermost free, glue or container, pops
 the stack until it is empty. An array is freed in native Lean's two
@@ -794,7 +796,7 @@ when the free reaches it, in Lean's order, `task::defer_promise_drop` puts
 the resolution off with `defer`; the drain's end runs the resolutions in
 that order, on this context, with `run_deferred`, before `after_drain`), since its dependents
 are Lean code that may block. Reussir reports every drain's end through
-`__reussir_drop_drained`, its local patch 40-a, which lean2rr requires:
+`__reussir_drop_drained`, its local patch 09-a, which lean2rr requires:
 `scripts/l2r.py` stops with an error when the Reussir checkout lacks it,
 and leanrt names the symbol (`task::hook_drained`), so it would not link
 without it. Output
@@ -1077,7 +1079,7 @@ unless `MIMALLOC_ARENA_PURGE_MULT` is set: these versions test the arenas'
 purge time the wrong way round (`src/arena.c`), so their delayed purges
 do not run, and a freed huge block or segment stayed in the process
 (lean-zip's peak 422 MiB, with the option 330 MiB, native 394 MiB;
-Reussir issue 46, test `RtArenaPurge`). Before `main`, lean-runtime's own
+Reussir issue 15, test `RtArenaPurge`). Before `main`, lean-runtime's own
 ELF constructor (feature `startup-fds`, `.init_array.00101`, audit item
 4.3) opens the descriptors native Lean's runtime has open at startup
 (`io::startup`: libuv's epoll descriptor, two io_uring rings when the
@@ -1276,7 +1278,7 @@ lean2rr's dev branch (the tests pass with it).
     boxes keeps its box (`boxedOnlyVars`, test `RtBoxPassOnCast`). Giving
     the box to the boxed uses of a field with other uses too would leave
     the unboxed value dead there, which Reussir's token reuse takes as a
-    donor (Reussir issue 39). Test `RtCastMixedRebox`, expected to fail.
+    donor (Reussir issue 8). Test `RtCastMixedRebox`, expected to fail.
 
 For Reussir: `[value]` records across the FFI boundary would let arrays
 store enum-like values directly; and `mi_free` takes mimalloc's

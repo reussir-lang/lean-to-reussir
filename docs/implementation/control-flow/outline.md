@@ -17,12 +17,10 @@ text, from growing superlinearly. It is a required part (`outline` in
   shorter than 16 `let`s without nested `match`/`if` stays. Ordinary
   functions are below the triggers and come out unchanged.
 - **Why:** Every IO bind nests one `match`, so a `main` of N statements is
-  N levels deep, and reuse across calls costs about depth^2.6
-  ([Reussir issue 16](../../../reussir-bugs/16-nested-io-matches.md), a
-  cost);
-  rrc's memory is quadratic in a straight-line `Nat` function
-  ([Reussir issue 17](../../../reussir-bugs/17-long-nat-block.md), a
-  cost); the
+  N levels deep, and reuse across calls cost about depth^2.6 (a Reussir
+  cost, fixed upstream in #672);
+  rrc's memory was quadratic in a straight-line `Nat` function (a
+  Reussir cost, fixed upstream in #670); the
   `.rr` indentation follows the nesting (a 3000-arm literal match: 126 MB
   of `.rr`, lean2rr out of memory at 16 GB; 072c620, 3597a31). A
   2000-line `main` now builds in about two minutes and 2 GB.
@@ -30,9 +28,10 @@ text, from growing superlinearly. It is a required part (`outline` in
   `maxDepth`, `maxLets`, `minRest`), `outlineFns`, `walkBlock`,
   `walkTail`, `outlineTail`, `extent`, `heavy`; `Emit/Program.lean`:
   `LoweredProgram.outline`; `lean2rr/Main.lean`: `pipeline` (`L2R_NO_OUTLINE`
-  skips it, for the repros of issues 16 and 17).
-- **Remove only if:** the costs of issues 16 and 17 are gone and the
-  `.rr` text no longer grows with nesting.
+  skips it, for the repros of those costs).
+- **Remove only if:** the two costs are gone upstream (Reussir #672 and
+  #670: removable after the move to Reussir 7954a367 as a workaround) and
+  the `.rr` text no longer grows with nesting.
 
 ### Deep `let` values come from a function
 
@@ -99,10 +98,9 @@ text, from growing superlinearly. It is a required part (`outline` in
   0.59 times native's (before 0.19 and 0.81); Z01d and Z01t do not change
   (survey sizes and counter, outputs identical).
   Reussir moves a `[value]` enum as the struct of its representative arm,
-  so another arm's bytes on its padding or on an `i1` are lost
-  ([Reussir bug 1](../../../reussir-bugs/01-value-enum-payload.md)): patch
-  01-a fixes it, and the guard keeps lean2rr's output right without it
-  (policy). Test `RtOutlineValueSteps`: `.alloc`, no allocation per
+  so another arm's bytes on its padding or on an `i1` are lost (a Reussir
+  bug, fixed upstream in #663; the old stack has a local patch for it),
+  and the guard keeps lean2rr's output right without it (policy). Test `RtOutlineValueSteps`: `.alloc`, no allocation per
   iteration, as natively; `.pipe`, 3000000 steps of `mixed` and of the
   mutual recursion `ping` on a 1 MiB stack; also `done` arms narrower than
   a word (`Bool`, `Bool × UInt8`) and a `done` tuple as the representative.
@@ -111,7 +109,8 @@ text, from growing superlinearly. It is a required part (`outline` in
   `stepVariant`, `stepInfo`, `stepify`, `stepDispatch`, `outlineFns`;
   `Emit/Program.lean`: `LoweredProgram.outline`.
 - **Remove only if:** never for the `[value]` choice (speed); the guard
-  can go when every Reussir that lean2rr supports has bug 1's fix.
+  can go when every Reussir that lean2rr supports has that fix (removable
+  after the move to Reussir 7954a367).
 
 ### Only blocks whose variables have known types are outlined
 

@@ -24,7 +24,7 @@
 # (`l2r_view_take<LAny>`: with the one-word `Box`) and the reads of a `Nat`
 # or `Int` element at its type (`l2r_view_take_as<Nat>`, `<Int>`), and rrc
 # gives a texture's import trampoline no inline attribute (Reussir issue
-# 36, not patched: its patch 36-a is parked). So in RtReadsDeep, whose
+# 6, not patched: its patch 06-a is parked). So in RtReadsDeep, whose
 # reads all sit at cold call sites, the calls of these three symbols
 # (COLD_ALLOWED) are allowed and counted.
 # For RtArraySets (array sets and reads in loops at ordinary call sites), it
@@ -80,7 +80,7 @@ for (a, n), k in sorted(seen.items()):
     print(f"{a + ' ' if a else ''}{k:7d} x {n}")
 PY
 }
-# The reads that Reussir issue 36 (not patched) keeps as calls at a cold
+# The reads that Reussir issue 6 (not patched) keeps as calls at a cold
 # call site: `l2r_view_take<LAny>`, `l2r_view_take_as<Nat>`,
 # `l2r_view_take_as<Int>`.
 COLD_ALLOWED="_RIC13l2r_view_takeC4LAnyE _RIC16l2r_view_take_asC3NatE _RIC16l2r_view_take_asC3IntE"
@@ -111,7 +111,7 @@ for t in "$@"; do
     echo "FAIL $t: black_box barriers inlined into Reussir functions:"; echo "$barriers"; status=1
   else
     echo "PASS  $t"
-    [ -z "$allowed" ] || { echo "      allowed at cold call sites (Reussir issue 36, not patched):"; echo "$allowed"; }
+    [ -z "$allowed" ] || { echo "      allowed at cold call sites (Reussir issue 6, not patched):"; echo "$allowed"; }
   fi
 done
 [ $status -eq 0 ] && echo "PASS  ffi-inline-check"

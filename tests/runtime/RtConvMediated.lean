@@ -6,7 +6,7 @@ built typed (`Nat` elements), put in an existential package (the uniform
 representation), walked there and dropped; one comes back to typed code
 (`h ▸`). Run at an 8 MB stack (`RtConvMediated.pipe`): a conversion or free
 that took a stack frame per cell would need at least 300000 frames of 32
-bytes (reussir-bugs/13). RtConvDeep has the direct shapes.
+bytes (reussir-bugs/02). RtConvDeep has the direct shapes.
 A coverage test from Crane's test corpus (Bloomberg's Rocq-to-C++ extractor,
 whose regression tests document shapes that broke a typed, reference-counted
 code generator); the code is new, the shapes are those of Crane's

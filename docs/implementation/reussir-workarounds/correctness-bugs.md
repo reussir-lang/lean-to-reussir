@@ -1,18 +1,22 @@
 # Reussir bugs that affect what a program computes
 
-One entry per bug: what lean2rr does, whether a local patch fixes it, and
-whether the workaround can be dropped. Every issue here is a bug
-(erroneous behaviour); the last entry, the drain-end hook, is a local
-addition, not an issue. Issues 7 (a missed optimization) and 13 (a missing
-feature), which are not bugs, are in [limitations.md](limitations.md). The
-issue files are in [`reussir-bugs/`](../../../reussir-bugs/README.md).
+One entry per bug: what lean2rr does, which Reussir change fixes it, and
+whether the workaround can be dropped. Every issue here was a bug
+(erroneous behaviour), and upstream Reussir `7954a367` fixes each one, so
+its file in `reussir-bugs/` is gone (the headings give the old entry
+numbers). lean2rr's builds use that base (`./reussir` branch
+`l2r-base3`, `4c490260`); the workarounds stay until each is removed.
+The last entry, the drain-end hook, is a local addition for an open issue
+(9). Issues 1 (a missed optimization) and 2 (a missing feature), which
+are not bugs, are in [limitations.md](limitations.md). The open issue
+files are in [`reussir-bugs/`](../../../reussir-bugs/README.md).
 Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
 
-### Bug 1: `[value]` enum payloads are lost when moved
+### Old bug 1: `[value]` enum payloads were lost when moved
 
 - **What:** lean2rr emits only `[value]` enums that are unaffected:
   field-less enumerations (`Nat`/`Int` are tagged handles since patch
-  41-a, not `[value]` enums), and Outline's step enums whose
+  10-a, not `[value]` enums), and Outline's step enums whose
   representative arm surely carries every byte of the other arms (a layout
   model checks it; otherwise the step enum is shared:
   [../control-flow/outline.md](../control-flow/outline.md#step-enums-are-value-when-their-layout-is-safe-to-move)).
@@ -22,18 +26,18 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
   variants that form's entry point is an integer, not an enum);
   multi-field value records are `[value]` structs.
 - **Why:** Reussir moves a `[value]` enum as one representative arm's
-  struct, so another arm's bytes on its padding or on an `i1` are lost
-  ([01-value-enum-payload.md](../../../reussir-bugs/01-value-enum-payload.md)).
+  struct, so another arm's bytes on its padding or on an `i1` were lost
+  (fixed upstream in Reussir #663, commit `823a7b29`; formerly a local
+  patch).
 - **Where:** `LowerBase.lean`: `nominalType`, `tupleType`;
   `Lower/StateMachine.lean`: `emitStateMachine`;
   `Opt/StateMachines.lean`: `emitStateMachineAlongside`;
   `Outline.lean`: `stepItem`, `fieldLayout`.
-- **Remove only if:** not needed with patch 01-a (applied), but kept: by
-  the policy lean2rr also works with an unpatched Reussir. Without the
-  workaround, J4 entry enums with fields and multi-arm value types could
-  be `[value]`.
+- **Remove only if:** removable after the move to Reussir 7954a367.
+  Without the workaround, J4 entry enums with fields and multi-arm value
+  types could be `[value]`.
 
-### Bug 2: in-place reuse skips a field store
+### Old bug 2: in-place reuse skipped a field store
 
 - **What:** The driver passes `--no-pack-record-members`, and lean2rr
   orders each constructor's fields by decreasing alignment itself, so
@@ -41,30 +45,28 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
   indices 0..i put member i at the same offset.
 - **Why:** Reussir's copy avoidance skips storing a field it believes is
   in place; with packed layouts the variant check is wrong (a wrong value,
-  no error). Reussir's `main` fixes the structure half (pull request
-  #652, commit `3be77a64`, formerly patch 02-a; in the base `943f2195`)
-  and patch 02-b the variant half (applied)
-  ([02-reuse-field-store.md](../../../reussir-bugs/02-reuse-field-store.md);
-  444a70a, 7860807).
+  no error). Reussir fixes the structure half (#652, commit `3be77a64`,
+  in the old base `943f2195`) and the variant half (#656, commit
+  `c7ab73d5`, the offset rule; formerly a local patch) (444a70a,
+  7860807).
 - **Where:** `scripts/l2r.py` (`--no-pack-record-members`);
   `Opt/FieldOrder.lean`; `LowerBase.lean`: `nominalType`, `fieldAlign`.
-- **Remove only if:** not needed with 02-b (applied), but kept: by the
-  policy lean2rr also works with an unpatched Reussir. `field-order` itself
-  is optional; the flag is not.
+- **Remove only if:** the flag is removable after the move to Reussir
+  7954a367. `field-order` itself is optional; it stays for records
+  without padding.
 
-### Bug 4: rrc recurses forever on two equal recursive types
+### Old bug 4: rrc recursed forever on two equal recursive types
 
 - **What:** When rrc dies from a signal, `scripts/l2r.py` retries without
   `--reuse-across-call` (and says so on stderr).
 - **Why:** Reussir's structural type comparison crashed on a user list and
-  `List` (456bc97). Reussir's `main` fixes it (pull request #654,
-  commit `634fb551`, formerly patch 04-a; in the base `943f2195`)
-  ([04-recursive-type-compare.md](../../../reussir-bugs/04-recursive-type-compare.md)).
+  `List` (456bc97). Reussir fixes it (#654, commit `634fb551`, formerly a
+  local patch; in the old base `943f2195`).
 - **Where:** `scripts/l2r.py`: `main`.
 - **Remove only if:** it stays as a fallback for unknown crashes; it costs
   nothing when rrc does not crash.
 
-### Bug 5: TokenReuse crashed on a one-armed `if`
+### Old bug 5: TokenReuse crashed on a one-armed `if`
 
 - **What:** The runtime's own diagnostics (index out of bounds,
   `String.get!`, `dbgTraceIfShared`) reach `l2r_stderr_put` from Rust,
@@ -73,109 +75,69 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
 - **Why:** A Reussir-level call from the prelude's array helpers into the
   stream code made rrc crash in `TokenReusePass` under
   `--reuse-across-call` (caea747; RtStreamsRedirectOob). Reussir's
-  `main` fixes the crash (pull request #655, commit `943f2195`, formerly
-  patch 05-a; the base); user code could still hit it on an older
-  Reussir
-  ([05-one-armed-if.md](../../../reussir-bugs/05-one-armed-if.md)).
+  `main` fixes the crash (#655, commit `943f2195`, formerly a local patch;
+  the old base); user code could still hit it on an older Reussir.
 - **Where:** `runtime/prelude.rr`: `l2r_panic_code`, `l2r_diag_put`;
   `runtime/leanrt/src/io.rs`: `diag_put`; `Emit/Entry.lean`: `lowerEntry`.
-- **Remove only if:** not needed with the base `943f2195` (the fix of
-  05-a), but kept: by the policy lean2rr also works with an older
-  Reussir, and the trampoline is cheap.
+- **Remove only if:** removable after the move to Reussir 7954a367 (not
+  needed since the old base `943f2195`); the trampoline is cheap and may
+  stay.
 
-### Bug 6: a static cell is freed after about 2^32 references
+### Old bug 6: a static cell was freed after about 2^32 references
 
 - **What:** No lean2rr-side workaround: the retains come from Reussir's
-  own lowering of nullary constructors. lean2rr relies on patch 06-a
-  (applied); the documented flag alternative
+  own lowering of nullary constructors. lean2rr relies on Reussir's fix
+  (#661, commit `198213ff`, formerly a local patch); the documented
+  flag alternative
   (`--nullary-variant-encoding arch-independent` or `boxed`, through
   `L2R_RRC_FLAGS`) is not used. The runtime's array code relies on an
   immediate never being freed: it skips immediates when freeing or
   copying arrays of records (aarch64).
-- **Why:** 06-a keeps the default encoding's speed (to be remeasured on an
-  idle machine;
-  [06-static-count-wrap.md](../../../reussir-bugs/06-static-count-wrap.md)).
+- **Why:** the fix keeps the default encoding's speed (to be remeasured on
+  an idle machine).
 - **Where:** `scripts/l2r.py` (`L2R_RRC_FLAGS`, 42dacc7);
   `runtime/leanrt/src/drop.rs`: `ReleaseElems`;
   `runtime/leanrt/src/array.rs`: `ExtendCloned`.
-- **Remove only if:** n/a. If the flag replaces 06-a, revisit the
-  immediate skips ([../ownership.md](../ownership.md#array-copies-skip-the-increments-of-immediates)).
+- **Remove only if:** n/a: the skips stay. If the flag replaces the
+  default encoding, revisit the immediate skips ([../ownership.md](../ownership.md#array-copies-skip-the-increments-of-immediates)).
 
-### Bug 8: a padding lift breaks declaration-order layouts
-
-- **What:** Nothing to do: lean2rr never emits the shape (records have no
-  padding between members; one-field `[value]` structs).
-- **Why:** [08-padding-lift.md](../../../reussir-bugs/08-padding-lift.md)
-  (patch 08-a, applied).
-  With `field-order` off, Reussir pads with bytes, which does not trigger
-  it either (5830b1c).
-- **Where:** `LowerBase.lean`: `nominalType`.
-- **Remove only if:** n/a.
-
-### Bugs 9 and 14: a bound member loses a reference
-
-- **What:** No workaround possible: the shapes come from Reussir's own
-  inliner. Reussir's `main` fixes both (pull request #653, commit
-  `0ed0f243`, formerly patch 09-a; in the base `943f2195`).
-- **Why:** [09-duplicate-bound-member.md](../../../reussir-bugs/09-duplicate-bound-member.md),
-  [14-member-consumed-before-release.md](../../../reussir-bugs/14-member-consumed-before-release.md).
-- **Where:** n/a.
-- **Remove only if:** n/a.
-
-### Bug 12: the parser swaps subtrees whose hashes collide
-
-- **What:** No workaround possible (any shape, name or literal can
-  collide in a large file). Patch 12-a (applied).
-- **Why:** [12-node-cache-collision.md](../../../reussir-bugs/12-node-cache-collision.md).
-- **Where:** n/a.
-- **Remove only if:** n/a.
-
-### Bug 15: a `match` on a `Nullable` yielding a counted value
-
-- **What:** Nothing to do: lean2rr does not use `Nullable`.
-- **Why:** [15-nullable-match-yield.md](../../../reussir-bugs/15-nullable-match-yield.md)
-  (patch 15-a, applied).
-- **Where:** n/a.
-- **Remove only if:** n/a.
-
-### Bug 19: a `Cell` of a `[value]` record with counted members
+### Old bug 19: a `Cell` of a `[value]` record with counted members
 
 - **What:** A Reussir cell holds no `[value]` record: a reference's cell
   holds a `Box` (one reference type), a once-cell a value of a boundary
-  type or an `ElemBox` (`Nat`/`Int`, `[value]` enums before patch 41-a,
+  type or an `ElemBox` (`Nat`/`Int`, `[value]` enums before patch 10-a,
   are counted handles now, which cells hold directly).
-- **Why:** rrc rejects `cell::get`/`set` on such a cell
-  ([19-cell-of-value-record.md](../../../reussir-bugs/19-cell-of-value-record.md);
-  patch 19-a, applied).
+- **Why:** rrc rejected `cell::get`/`set` on such a cell (fixed upstream
+  in Reussir #666, commit `3f96d206`, and #681, commit `1ec611dc`;
+  formerly a local patch).
 - **Where:** [../representations/references.md](../representations/references.md#a-reference-is-one-record-type-around-a-reussir-cell-of-a-box);
   `LowerBase.lean`: `cellStorage`.
-- **Remove only if:** not needed with 19-a (applied), but kept: by the
-  policy lean2rr also works with an unpatched Reussir.
+- **Remove only if:** removable after the move to Reussir 7954a367.
 
-### Bug 21: an unterminated `[:` in a texture is dropped
+### Old bug 21: an unterminated `[:` in a texture was dropped
 
 - **What:** `[` is written as `\x5b` in the string literal table.
-- **Why:** [21-unterminated-placeholder.md](../../../reussir-bugs/21-unterminated-placeholder.md);
+- **Why:** Reussir dropped the `[:` and the text after it (fixed
+  upstream in Reussir #657, commit `fec8f033`; formerly a local patch);
   round 6 RV6L-01.
 - **Where:** [../representations/strings.md](../representations/strings.md#-is-escaped-in-the-string-literal-table).
-- **Remove only if:** not needed with patch 21-a (applied since
-  2026-10-03), but kept: by the policy lean2rr also works with an unpatched Reussir,
-  and the escape is free.
+- **Remove only if:** removable after the move to Reussir 7954a367; the
+  escape is free and may stay.
 
-### The drain-end hook (local patch 40-a)
+### The drain-end hook (local patch 09-a)
 
 - **What:** The runtime stores a callback in Reussir's
-  `__reussir_drop_drained`, which local patch 40-a makes every outermost
+  `__reussir_drop_drained`, which local patch 09-a makes every outermost
   drain that released something call when it ends. lean2rr requires the
   patch since switch step 6: `scripts/l2r.py` stops with an error when the
   Reussir checkout lacks it (`check_reussir_patches`), and leanrt names the
   symbol (`task::hook_drained`), so it would not link either. The
-  patch is [`reussir-bugs/patches/40-a-drain-end-hook.patch`](../../../reussir-bugs/patches/40-a-drain-end-hook.patch),
-  described in [issue 40](../../../reussir-bugs/40-drain-end-hook.md).
+  patch is [`reussir-bugs/patches/09-a-drain-end-hook.patch`](../../../reussir-bugs/patches/09-a-drain-end-hook.patch),
+  described in [issue 9](../../../reussir-bugs/09-drain-end-hook.md).
 - **Why:** Not a bug: Reussir has no hook at the end of a free, and the
   `sync` dependents of promises dropped inside a free must run when it is
-  over (round 7 RV7C-01). A missing feature: issue 40.
+  over (round 7 RV7C-01). A missing feature: issue 9.
 - **Where:** [../tasks/dependents.md](../tasks/dependents.md#dependents-of-a-promise-dropped-inside-a-free-run-when-the-free-is-over).
-- **Remove only if:** n/a (40-a is applied to `l2r-local` since
+- **Remove only if:** n/a (the patch is applied to `l2r-local` since
   2026-10-03; the fallback for builds without it went in switch step 6,
   when lean-runtime's deferred resolutions came to need every drain's end).

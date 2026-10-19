@@ -1,7 +1,8 @@
 # Reussir limitations that shape lean2rr's output
 
-Not bugs: a cost of documented Reussir behaviour (issue 3), missed
-optimizations (issues 7 and 36), a missing feature (issue 13), or properties of its
+Not bugs: a cost of documented Reussir behaviour (old issue 3, fixed
+upstream), missed optimizations (issues 1 and 6), a missing feature
+(issue 2), or properties of its
 FFI and LLVM pipeline, that lean2rr works with. In each case rrc's output
 is correct; a local patch for one of these issues is an optimization or a
 feature, not a fix. Plan
@@ -91,24 +92,23 @@ files, `runtime/` and `scripts/` from the repository root.
   [../ownership.md](../ownership.md#reference-sets-store-the-new-value-before-releasing-the-old-one).
 - **Remove only if:** see the linked entry.
 
-### Rust allocations are 16-aligned (issue 3, a cost)
+### Rust allocations are 16-aligned (old issue 3, a cost)
 
 - **What:** The runtime allocates strings, arrays and big numbers with
   `mi_malloc`/`mi_realloc` directly, not through Rust's global allocator.
 - **Why:** Reussir's global allocator raises every Rust allocation to
-  16-byte alignment (intended) through mimalloc's aligned path. Without
-  Reussir patch 03-a, a size that is not a multiple of 16 could be moved
-  inside a larger block, and every later free in that block's page took
+  16-byte alignment (intended) through mimalloc's aligned path. Before
+  the fix (a local patch on the old stack; upstream Reussir #667, commit
+  `dce185d2`), a size that is not a multiple of 16 could be moved inside
+  a larger block, and every later free in that block's page took
   mimalloc's slow path (up to 5% of a program's instructions, varying
-  from run to run). 03-a rounds the size up instead. The runtime's own
+  from run to run). The fix rounds the size up instead. The runtime's own
   objects need only 8-byte alignment: `mi_malloc` keeps their blocks
-  smaller either way
-  ([03-global-alloc-align.md](../../../reussir-bugs/03-global-alloc-align.md);
-  98f27d2).
+  smaller either way (98f27d2).
 - **Where:** `runtime/leanrt/src/alloc.rs`.
 - **Remove only if:** never (the blocks would grow to multiples of 16).
 
-### Token reuse picks decrements that never free (issue 7, missed optimization)
+### Token reuse picks decrements that never free (issue 1, missed optimization)
 
 - **What:** The optional passes `lazy-fields` and `sink-proj` bind fields
   where they are used, so a value that stays live has no retained fields
@@ -117,15 +117,15 @@ files, `runtime/` and `scripts/` from the repository root.
   alive by a use there.
 - **Why:** A missed optimization, not a bug: rrc's output is correct, only
   slower (allocations where a cell could be reused). Reussir has no patch
-  for it: 07-a (an optimization for some shapes, such as `UInt64` keys,
+  for it: 01-a (an optimization for some shapes, such as `UInt64` keys,
   but not a call before the branch, `Nat` and `String` comparisons) is
   parked, because the passes cover the issue (owner, 2026-10-07;
-  [07-phantom-reuse-donor.md](../../../reussir-bugs/07-phantom-reuse-donor.md)).
+  [01-phantom-reuse-donor.md](../../../reussir-bugs/01-phantom-reuse-donor.md)).
 - **Where:** [../control-flow/cases.md](../control-flow/cases.md).
 - **Remove only if:** Reussir's token reuse handles the call-before-branch
   shape; then measure with the passes off.
 
-### A texture at a cold call site inlines only below cost 45 (issue 36, missed optimization)
+### A texture at a cold call site inlines only below cost 45 (issue 6, missed optimization)
 
 - **What:** The runtime's textures on hot paths, the array reads above
   all, are kept small: each costs less than 45 in LLVM's inline cost model
@@ -144,10 +144,10 @@ files, `runtime/` and `scripts/` from the repository root.
   ordinary cost model, at a call site it judges cold (deep in branches)
   only below 45. A read texture that checked the bounds (cost 80) stayed a
   call at 279 of lean-zip's array reads; one that decremented first and
-  checked after (cost 55) at 41 reads of its LZ77 loop. Patches 36-a and
-  36-b, which inlined such textures at cold sites too, are parked: the
+  checked after (cost 55) at 41 reads of its LZ77 loop. Patches 06-a and
+  06-b, which inlined such textures at cold sites too, are parked: the
   gain is too small for a local Reussir patch (owner, 2026-10-07;
-  [36-trampoline-inline.md](../../../reussir-bugs/36-trampoline-inline.md)).
+  [06-trampoline-inline.md](../../../reussir-bugs/06-trampoline-inline.md)).
 - **Where:** [../ownership.md](../ownership.md#reads-give-their-reference-up-first-for-a-view);
   `runtime/prelude.rr` (the read textures);
   `tests/runtime/ffi-inline-check.sh` (`COLD_ALLOWED`).
@@ -156,15 +156,17 @@ files, `runtime/` and `scripts/` from the repository root.
   the check, and the read could be one texture again (measure the reads
   first).
 
-### Drop glue recursed once per cell (issue 13, missing feature)
+### Drop glue in native Lean's release order (issue 2, missing feature)
 
 - **What:** The runtime frees its containers through the per-thread
-  pending stack that patch 13-b adds (`reussir_rt::drop`), and needs it to
-  build; 13-a and 13-c complete it.
-- **Why:** A missing feature, not a bug: Reussir never promised frees of
-  bounded depth (its drop glue recurses, as Rust's does), and Lean frees
-  iteratively. Patches 13-a to 13-c (applied) add the feature
-  ([13-long-list-drop.md](../../../reussir-bugs/13-long-list-drop.md)).
+  pending stack that patch 02-b adds (`reussir_rt::drop`), and needs it to
+  build; 02-a and 02-c complete it.
+- **Why:** A missing feature, not a bug: Reussir's drop glue recursed once
+  per cell (upstream Reussir `7954a367` frees in bounded stack now, its
+  own way, first field first), and Lean frees iteratively, last field
+  first. Patches 02-a to 02-e (applied) free in Lean's order through a
+  stack the runtime shares
+  ([02-native-drop-order.md](../../../reussir-bugs/02-native-drop-order.md)).
 - **Where:** [../ownership.md](../ownership.md#containers-free-through-the-threads-pending-stack-in-leans-order).
 - **Remove only if:** never (required).
 
@@ -197,11 +199,12 @@ files, `runtime/` and `scripts/` from the repository root.
 ### The driver's choice of rrc flags
 
 - **What:** `-O aggressive` by default; `--reuse-across-call` on unless
-  `--no-reuse-across-call` (with the bug-4 retry); `--no-pack-record-members`
-  (bug 2); `--no-closure-wpd` (issue 10, a cost); `L2R_RRC_FLAGS` appends
-  flags for experiments. rrc runs with `REUSSIR_FFI_CACHE_DIR` set, for
-  patch 35-a's texture cache (issue 35, a cost,
-  [build-time.md](build-time.md#issue-35-cost-every-texture-is-compiled-again-on-every-build)).
+  `--no-reuse-across-call` (with the retry for old bug 4);
+  `--no-pack-record-members` (old bug 2); `--no-closure-wpd` (old issue
+  10, a cost); `L2R_RRC_FLAGS` appends flags for experiments. rrc runs
+  with `REUSSIR_FFI_CACHE_DIR` set, for rrc's texture cache (old issue
+  35, a cost,
+  [build-time.md](build-time.md#old-issue-35-cost-every-texture-was-compiled-again-on-every-build)).
   `leanrt` is built per Reussir checkout (`L2R_REUSSIR`) and cached by a
   hash of its sources, under a file lock for concurrent drivers; rustc
   runs in the crate's directory, so a rebuild gives the same bytes from

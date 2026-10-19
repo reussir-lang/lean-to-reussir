@@ -1480,7 +1480,8 @@ def strLitCached (s : String) : LowerM RR.Expr := do
 
 /-- The runtime function behind `strLit`: the literals as Rust byte strings.
 `[` is escaped too, so that no `[:` in a literal can be taken for a texture
-placeholder `[:Name:]` (Reussir bug 21 dropped an unterminated one). -/
+placeholder `[:Name:]` (Reussir dropped an unterminated one: a bug, fixed
+upstream in Reussir #657). -/
 def strLitTable (lits : Array String) : String :=
   let hex := "0123456789abcdef".toList.toArray
   let esc (s : String) : String := s.toUTF8.foldl (init := "") fun acc b =>

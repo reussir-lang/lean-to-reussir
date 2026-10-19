@@ -9,7 +9,7 @@ loop while still held (so the walk frees nothing), and dropped by the call
 that takes its last reference (`top`), in one free. Then frees that must stop at a shared cell: a
 list whose 300000-cell suffix another live list shares, and a rose tree whose
 children list three roots share. Run at an 8 MB stack (`RtDropMediated.pipe`):
-a free that took one 32-byte frame per cell (reussir-bugs/13) would need at
+a free that took one 32-byte frame per cell (reussir-bugs/02) would need at
 least 9.6 MB. RtDropGlue and RtDropDeep have the direct shapes.
 A coverage test from Crane's test corpus (Bloomberg's Rocq-to-C++ extractor,
 whose regression tests document shapes that broke a typed, reference-counted

@@ -1,6 +1,6 @@
 /-! Runtime test: a value that is fresh on some calls and shared on one reaches
 an update that rebuilds it in place when it is unique (the Lean form of the
-shape of Reussir bug 28, reussir-bugs/28-unique-carrying-join.md). A
+shape of a Reussir bug, fixed upstream in Reussir #660). A
 self-recursive function's argument is sometimes a field of a value the caller
 still holds, a global constant (a structure and a list), an element of an
 array, a reference's contents, a value captured by a closure, a forced

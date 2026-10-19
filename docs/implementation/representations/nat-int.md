@@ -29,10 +29,10 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   does not constrain lean2rr's layouts while the C FFI is parked) or
   Reussir gains a native tagged-integer type.
 
-### Reussir counts only the even words (tagged opaque handles, patch 41-a)
+### Reussir counts only the even words (tagged opaque handles, patch 10-a)
 
 - **What:** The prelude declares `#[ffi(rust = "::leanrt::nat::LNat",
-  tagged)] pub struct Nat;` (and `Int`). With Reussir patch 41-a, `rc.inc`
+  tagged)] pub struct Nat;` (and `Int`). With Reussir patch 10-a, `rc.inc`
   of a `tagged` handle touches the count, and `rc.dec` calls the drop hook,
   only when the low bit is clear; the nonlinear-FFI instrumentation and
   `rc.assume_unique` skip such handles too. Copying or dropping a small
@@ -42,8 +42,8 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   hook would cost a call per copy; lean2rr cannot count `Nat`s itself
   because it cannot change the drop glue Reussir generates for records,
   closures and enums.
-- **Where:** `reussir-bugs/patches/41-a-tagged-ffi-objects.patch` and
-  [issue 41](../../../reussir-bugs/41-tagged-ffi-objects.md)
+- **Where:** `reussir-bugs/patches/10-a-tagged-ffi-objects.patch` and
+  [issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md)
   (`BasicOpsLowering.cpp`: `beginRealBoxGuard`); `prelude.rr`: `struct
   Nat`, `struct Int`.
 - **Remove only if:** upstream Reussir supports immediates in opaque types
@@ -292,7 +292,7 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   and take the fast path when `s & x & 1` is 1 (both words odd: `s` is
   odd when `x` and `y` have the same parity), not when `x & y & 1` is.
 - **Why:** With `x & y & 1`, LLVM pairs `y & 1` with the identical
-  low-bit test of Reussir's `rc.inc` of `y` (patch 41-a's guard; `y` is
+  low-bit test of Reussir's `rc.inc` of `y` (patch 10-a's guard; `y` is
   often a field just read out of a cell that is then released) and keeps
   it in a callee-saved register across the release calls in between. In
   cfold's `constFolding`, which recurses about 2^n deep without a tail
@@ -414,8 +414,8 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   holds the handle like any other value, and a once-cell holds it directly
   (the prelude's `L2RNatRef`/`L2RIntRef` are gone).
 - **Why:** They are counted handles now, which Reussir passes across the
-  FFI boundary and keeps in cells (bug 19 only concerns `[value]`
-  records).
+  FFI boundary and keeps in cells (the old Reussir bug with cells, fixed
+  upstream in #666 and #681, only concerned `[value]` records).
 - **Where:** `LowerBase.lean`: `isBoundaryTy`, `refType`.
 - **Remove only if:** `Nat` stops being a counted handle.
 

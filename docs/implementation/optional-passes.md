@@ -248,8 +248,9 @@ and passes").
   same text with and without the pass.
 - **Why:** rrc compiles every texture of its input with its own rustc run,
   one after the other, about 25 ms each, also a texture that no code calls
-  (Reussir issue 35, a cost), and it lowers every function. The texture
-  cache of patch 35-a hides this only while it is full: it is empty in a
+  (a Reussir cost; the old stack's local patch and upstream Reussir #690
+  cache the bitcode), and it lowers every function. The texture
+  cache hides this only while it is full: it is empty in a
   new checkout and after each change of leanrt, lean-runtime, Reussir's
   runtime or the toolchain. Measured on 2026-10-08 (rrc's wall time, quiet
   machine, single runs, empty cache / full cache): a one-line program,
@@ -663,8 +664,8 @@ Listed in `Opt/Registry.lean` (`required`); `--disable-opt` rejects them.
 | `closed-chains` | [startup/constants.md](startup/constants.md#a-closed-term-used-once-by-another-constant-is-not-cached) |
 | `stage3-types` | [types/type-recovery.md](types/type-recovery.md) |
 | `outline` | [control-flow/outline.md](control-flow/outline.md) |
-| `wildcard-sinks` | [reussir-workarounds/build-time.md](reussir-workarounds/build-time.md#issue-22-cost-a-wildcard-arm-over-a-wide-enum-costs-n3-code) |
-| `inline-anchors` | [reussir-workarounds/build-time.md](reussir-workarounds/build-time.md#issue-20-cost-the-inliner-multiplies-conversion-code) |
+| `wildcard-sinks` | [reussir-workarounds/build-time.md](reussir-workarounds/build-time.md#old-issue-22-cost-a-wildcard-arm-over-a-wide-enum-cost-n3-code) |
+| `inline-anchors` | [reussir-workarounds/build-time.md](reussir-workarounds/build-time.md#old-issue-20-cost-the-inliner-multiplies-conversion-code) |
 
 Stage 2's edits of Lean's pass lists (two passes replaced, `extractClosed`
 moved to the end, `inferVisibility` and `toImpure` not run) are required

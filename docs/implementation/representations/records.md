@@ -60,7 +60,7 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   never frees) as the donor of the new node instead of the matched cell:
   `RtProbeBump`, an association list of pairs bumped in a loop, allocated
   a list cell per rebuilt node (Reussir
-  [issue 39](../../../reussir-bugs/39-alias-release-donor.md), a missed
+  [issue 8](../../../reussir-bugs/08-alias-release-donor.md), a missed
   optimization). A new box leaves no such release. A parameter that is
   only boxed again has no unboxed value, so there is no dead release
   either (`RtProbeBump` stays at native's allocations).
@@ -112,11 +112,13 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   (join-point tuples), whose padding is explicit.
 - **Why:** Reussir moves a `[value]` enum as its tag plus one
   representative arm, so bytes of another arm that fall on padding or on a
-  `bool` are lost ([Reussir bug 1](../../../reussir-bugs/01-value-enum-payload.md)).
+  `bool` are lost (a Reussir bug, fixed upstream in #663; the old stack
+  has a local patch for it).
 - **Where:** `LowerBase.lean`: `nominalType` (`Shape`), `tupleType`;
   plan [§9](../../translation-plan.md#9-open-items).
-- **Remove only if:** bug 1 is fixed; then multi-arm value enums and value
-  J4 entry enums with fields become possible.
+- **Remove only if:** removable after the move to Reussir 7954a367, which
+  fixes the bug; then multi-arm value enums and value J4 entry enums with
+  fields become possible.
 
 ### One-field structures are value structs
 
@@ -146,17 +148,17 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   member packing off.
 - **Why:** Records without padding (rbtree memory 1.17x → 1.00x native,
   7860807); and Reussir's in-place variant reuse with packed layouts skips
-  stores of fields packing moves
-  ([Reussir bug 2](../../../reussir-bugs/02-reuse-field-store.md),
-  variants half, unpatched), so packing must stay off and lean2rr does the
-  ordering itself.
+  stores of fields packing moves (a Reussir bug, fixed upstream in #656;
+  the old stack has a local patch for it), so packing stays off and
+  lean2rr does the ordering itself.
 - **Where:** `LowerBase.lean`: `nominalType`, `fieldAlign`,
   `CtorLayout.place`, `CtorLayout.posTys`; `Opt/FieldOrder.lean`:
   `alignmentOrder`; `scripts/l2r.py` (`--no-pack-record-members`).
 - **Remove only if:** the optional pass `field-order` may be turned off
   (then Reussir lays padding out as bytes); `--no-pack-record-members`
-  stays until bug 2's variant half is fixed. See
-  [../reussir-workarounds/correctness-bugs.md](../reussir-workarounds/correctness-bugs.md#bug-2-in-place-reuse-skips-a-field-store).
+  is removable after the move to Reussir 7954a367, which fixes the
+  variant half of that bug. See
+  [../reussir-workarounds/correctness-bugs.md](../reussir-workarounds/correctness-bugs.md#old-bug-2-in-place-reuse-skipped-a-field-store).
 
 ### Types with computed fields use their implementation inductive
 

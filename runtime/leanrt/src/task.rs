@@ -45,7 +45,7 @@
 //!   a free (whose walk runs Lean code, which may block) is resolved, its
 //!   cell's store included, once the free is over (lean-runtime's deferred
 //!   resolutions, core 3.3: `defer`, then `run_deferred` at the drain's
-//!   end, which Reussir reports through its patch 40-a).
+//!   end, which Reussir reports through its patch 09-a).
 //! - **The drain's end** (`drained`, Reussir's drain-end hook): first the
 //!   deferred resolutions (`run_deferred`: each waits only for the writers
 //!   of the streams handed off before it, review RF14-07), then
@@ -867,7 +867,7 @@ pub fn resolve_with(a: usize, store: &mut dyn FnMut()) -> u64 {
 
 /// Have Reussir's drains call `drained` when they end: the function every
 /// drain that released something calls once it is over
-/// (`reussir_rt::drop::__reussir_drop_drained`, local Reussir patch 40-a,
+/// (`reussir_rt::drop::__reussir_drop_drained`, local Reussir patch 09-a,
 /// which lean2rr requires: `scripts/l2r.py` checks for it, and this
 /// reference does not link without it). Installed at the first thing a
 /// free puts off to its end: an unresolved promise's resolution

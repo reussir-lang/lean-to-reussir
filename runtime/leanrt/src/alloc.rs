@@ -4,10 +4,10 @@
 //! raises every Rust allocation to 16-byte alignment, above what it treats as
 //! mimalloc's natural alignment (8), so *every* Rust `Box`/`Vec` allocation
 //! takes mimalloc's aligned path (`mi_malloc_aligned`, `mi_realloc_aligned`).
-//! Without Reussir patch 03-a, a size that is not a multiple of 16 could be
-//! moved inside a larger block, and later frees in that page went down
-//! mimalloc's generic path (reussir-bugs/03-global-alloc-align.md); with it,
-//! the size is rounded up to a multiple of 16. Strings, arrays and big
+//! Before Reussir's fix (a local patch on the old stack; upstream Reussir
+//! #667), a size that is not a multiple of 16 could be moved inside a larger
+//! block, and later frees in that page went down mimalloc's generic path;
+//! with it, the size is rounded up to a multiple of 16. Strings, arrays and big
 //! numbers are allocated here instead with `mi_malloc`/`mi_realloc`, whose
 //! blocks are 8-aligned (Reussir builds mimalloc with `MI_MAX_ALIGN_SIZE=8`),
 //! which is all runtime objects need, in blocks no larger than they need.

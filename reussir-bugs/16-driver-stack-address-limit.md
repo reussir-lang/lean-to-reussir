@@ -1,0 +1,126 @@
+# 16. rrc's 1 GiB driver stack breaks builds under an address-space limit
+
+## Summary
+
+**Kind:** bug (crash on valid input under a resource limit). **Status:**
+not patched in lean2rr's builds: the reworked patch 16-a is parked
+outside the series ([parked option](#parked-option-16-a)). It does not
+affect lean2rr: lean2rr's builds set no address-space limit that rrc
+comes near ([lean2rr](#lean2rr)).
+
+**Upstream (2026-10-19):** Open in upstream 7954a367. Upstream #686
+(`3e34334f`) is our old patch 31-a, which fixed the stack overflow on
+deep expressions (old entry 31); this entry is the part of old 31 that
+remains. A follow-up pull request with 16-a is queued after the pull
+request for 05-a.
+
+**Verdict: bug.** Since #686, rrc runs its driver on a thread with a
+1 GiB stack. The stack is reserved address space, and an address-space
+limit (`ulimit -v`, `RLIMIT_AS`) counts all of it. Under a limit that is
+too small for the stack, the thread cannot be created, and rrc runs the
+driver on the main thread as before: the build works. Under a limit
+slightly larger, the thread is created, but the compilation then has
+about 1 GiB less address space than before, and rrc aborts where an rrc
+without the thread compiled.
+
+## Symptom and repro
+
+No repro file in [`repros/`](repros/): upstream's own test
+`tests/integration/frontend/driver_stack_address_limit.rr` (a 3-line
+program, with the C driver `driver_stack_address_limit.c`) is the repro
+when it runs under other limits. From a scratch directory:
+
+```sh
+bash -c 'ulimit -v LIMIT && exec RRC_CHECKOUT/build/bin/rrc \
+    RRC_CHECKOUT/tests/integration/frontend/driver_stack_address_limit.rr \
+    -o out.o --relocation-mode pic'
+```
+
+**Expected.** Compiles (exit 0) under each limit, as rrc built from
+upstream before #686 (for example `b6981996`) does.
+
+**Actual on 7954a367 (and on `l2r-base3`, 2026-10-19), 20 cores:**
+
+| LIMIT (KiB) | Result |
+|---|---|
+| 1000000 | compiles: the thread cannot be created, and the fallback runs |
+| 1250000 | aborts (exit 134): `terminate called after throwing an instance of 'St9bad_alloc'` |
+| 1600000 | aborts (exit 134): `LLVM ERROR: pthread_create failed: Resource temporarily unavailable` |
+
+At 1600000 the failure is in the threads of LLVM's backend. With
+`--disable-backend-multithreading` (as the test's own RUN line has it)
+that limit compiles, and 1250000 still aborts. Under `ulimit -d`
+(`RLIMIT_DATA`), the same three limits compile.
+
+## Cause
+
+`crates/reussir-compiler/src/main.rs`, `main`: `DRIVER_STACK_SIZE` is
+1 GiB, and `main` spawns `reussir_compiler::driver::main` on a thread
+with that stack. Only if the spawn fails does it run the driver on the
+main thread. The spawn reserves the whole stack at once (`mmap`), and
+`RLIMIT_AS` counts the reservation, although only the touched pages
+become resident. So the spawn succeeds under any limit with 1 GiB free,
+and later allocations of the compilation (the C++ `new` of the MLIR and
+LLVM stages, LLVM's thread pool) fail. Upstream's test checks only a
+limit below the spawn's need (1000000), where the fallback runs.
+
+## lean2rr
+
+No effect in practice:
+
+- `scripts/l2r.py` sets no `ulimit`.
+- `cg` (the memory cgroup of lean2rr's local tools) limits resident
+  memory, not address space.
+- The local `bin/l2r` wrapper sets `ulimit -v 16000000` (16 GB). rrc's
+  virtual size on a lean2rr program is about 1.9 GB.
+
+With 16-a (or its upstream form), an rrc under a finite `ulimit -v`, as
+under `bin/l2r`, runs on the 8 MiB main thread again. Deep nesting then
+overflows rrc's stack as before #686, and `Outline`'s bound on nesting
+is needed again
+([reussir-workarounds](../docs/implementation/reussir-workarounds/README.md),
+old issue 31).
+
+## Parked option: 16-a
+
+Patch file: to come (the rebase of the reworked patch onto `7954a367` is
+in progress; it will be `patches/parked/16-a-*.patch`). No build applies
+it.
+
+The reworked patch (commit `26fe23ec` on the branch
+`pr/deep-expression-stack` of the local pull-request checkout, made on
+the old base) replaces #686's code:
+
+- The driver thread has a 256 MiB stack, not 1 GiB (about 160000 nested
+  `+` at the measured 1.6 KiB per level).
+- A new function `keep_main_thread()` keeps the driver on the main
+  thread, as before #686, when
+  - `RLIMIT_AS` (`ulimit -v`) or `RLIMIT_DATA` (`ulimit -d`) has a finite
+    soft limit (both count the reserved stack; `RLIMIT_DATA` since
+    Linux 4.7);
+  - `RLIMIT_STACK` (`ulimit -s`) is unlimited or at least 256 MiB (the
+    user's deeper main stack stays);
+  - a limit cannot be read.
+  On other targets it returns false.
+- If the thread cannot be created, the driver runs on the main thread,
+  as in #686.
+- It adds a dependency on `libc` for Unix targets (for `getrlimit`), and
+  a second build under `ulimit -d 1000000` to
+  `driver_stack_address_limit.rr`.
+
+**Why it is parked.** The owner's rule since 2026-10-07: Reussir is
+changed only where lean2rr has no other way. lean2rr does not reach the
+bug.
+
+## Upstream note
+
+rrc runs its driver on a thread with a 1 GiB stack (#686) and falls back
+to the main thread only when the spawn fails. The reservation counts
+against `RLIMIT_AS`, so under `ulimit -v 1250000` the spawn succeeds and
+the compilation then aborts (`std::bad_alloc`, exit 134); under
+`ulimit -v 1600000` LLVM's thread pool cannot start a thread
+(`pthread_create failed`, exit 134). rrc before #686 compiles in both
+cases. Fix (branch `pr/deep-expression-stack`): a 256 MiB stack, and the
+driver stays on the main thread under any finite `RLIMIT_AS` or
+`RLIMIT_DATA`, under an unlimited or large `RLIMIT_STACK`, or when a
+limit cannot be read.

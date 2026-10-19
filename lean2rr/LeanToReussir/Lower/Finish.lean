@@ -383,8 +383,8 @@ mutually recursive functions. With them inlinable, rrc's build time and
 memory grow far faster than the program (superlinearly in the number of
 representations; the mechanism inside rrc is not narrowed down, and the
 growth was not measured as exponential: an 8-line `StateT` tower used at
-`IO` did not build within 30 minutes or 15 GB;
-reussir-bugs/20-statet-tower.md); with the application functions of uniform
+`IO` did not build within 30 minutes or 15 GB; a Reussir cost, fixed
+upstream in Reussir #674); with the application functions of uniform
 types inlinable, four towers in one program (`Cn3PolyScalar`) still took
 4.5 GB, 2 GB without. Out of line, they cost a call each (LLVM, which runs
 after Reussir's passes, still inlines them where it pays): the unboxing of

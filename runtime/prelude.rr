@@ -54,7 +54,7 @@ pub struct LStr;
 // word is a small value: `lean_box(n)` for a `Nat` below 2^63,
 // `lean_box((unsigned)(int)i)` for an `Int` in the `int32` range. An even
 // word is a reference to a big number, one block with the limbs inline
-// (`leanrt::big`). `tagged` (local Reussir patch 41-a): Reussir copies and
+// (`leanrt::big`). `tagged` (local Reussir patch 10-a): Reussir copies and
 // drops them like any shared handle but counts only the even words, so a
 // small value costs no allocation and its copy or drop is a bit test.
 #[ffi(rust = "::leanrt::nat::LNat", tagged)]
@@ -101,7 +101,7 @@ pub struct LHandle;
 // reference to a counted object: the low 48 bits are its address, the top
 // 16 bits the number of the payload's type (1 to 15: leanrt's kinds,
 // `leanrt::any::NUM_*`; 16 and up: the program's). `tagged` (local Reussir
-// patches 41-a and 38-a): Reussir copies an even word by incrementing the
+// patches 10-a and 07-a): Reussir copies an even word by incrementing the
 // count at the address without the top 16 bits, in line, and drops it
 // through the drop hook, which sends the last reference of a program
 // payload to the program's release of its type through the drop worklist
@@ -455,7 +455,7 @@ fn l2r_u64_pow_checked(x : u64, e : u64) -> u64 [{ x.checked_pow(e as u32).unwra
 // Both words are odd exactly when `s` and `x` are (`s` is odd when `x` and
 // `y` have the same parity). The test is not `x & y & 1`: LLVM then shares
 // `y & 1` with the low-bit test of Reussir's `rc.inc` of `y` (a field just
-// read from a cell, patch 41-a's guard) and keeps it in a callee-saved
+// read from a cell, patch 10-a's guard) and keeps it in a callee-saved
 // register across the calls in between, which grew cfold's recursive
 // `constFolding` frame from 80 to 96 bytes (peak memory at n = 23:
 // 1074 MB instead of 946).

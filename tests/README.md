@@ -267,7 +267,7 @@ twice, under both of Reussir's
 nullary-variant encodings; the second run must give its result and free
 every block it allocates exactly once. A third run unboxes at the wrong
 number and must end with Lean's internal panic. It needs a Reussir with
-patch 38-a (`L2R_REUSSIR`).
+patch 07-a (`L2R_REUSSIR`).
 `tests/runtime/allow-missing-check.sh` builds `tests/runtime/AllowMissing.lean`
 (refused externs of the program used directly, partially applied, as a
 closure, through an instance and through the `ptrAddrUnsafe` shortcut) with
@@ -289,7 +289,7 @@ would keep a Lean loop's tail call. For `RtReadsDeep` it also fails when an
 array read stays a call (reads deep in branches, cold call sites), except
 the three reads that cost more than LLVM's cold-site threshold
 (`l2r_view_take<LAny>`, `l2r_view_take_as<Nat>` and `<Int>`), whose calls
-it allows and counts (Reussir issue 36, not patched: its patch 36-a is
+it allows and counts (Reussir issue 6, not patched: its patch 06-a is
 parked), and for `RtArraySets` when an array set or read stays a call
 (sets in loops and a read of a box, at ordinary call sites; the set of an
 `Array` of a structure stayed a call before switch step 10).
@@ -630,7 +630,7 @@ it draws on, with their copyright notices (Apache 2.0):
 | IO6-09 | RtOsStringsLossy |
 | IO6-13 | RtTimerPeriod0 |
 | IO6-14 | RtJpRebound |
-| S6-01 (Reussir bug 21), RV6L-01 | RtStrLitBracket |
+| S6-01 (Reussir bug fixed upstream in #657), RV6L-01 | RtStrLitBracket |
 | PRG6-01 | RtNestedMap |
 | PRG6-02 | RtWildcardSink |
 | TY6-01 | RtNestGrowType |
@@ -678,7 +678,7 @@ it draws on, with their copyright notices (Apache 2.0):
 | A Lean 4.34.0 compiler bug, judged (plan §10, "Compiler: Lean bugs we do not reproduce"): a `match` whose one arm gives a type or a predicate and whose other arm gives data; `joinTypes` types the join point's parameter `◾`, so native reads `box(0)` in place of the data (a wrong value or a crash), and lean2rr did too | RtJoinErasedProp, RtJoinErasedType, RtJoinErasedFlow; from the review of the fix RtJoinErasedIndirect, RtJoinErasedMisc, RtJoinErasedMerge, RtJoinErasedLayouts (native crashes: exit 139) (expectation files: native's output and the kernel's values) |
 | Performance review of the dependent-type work, item 7 (an array element unboxed at once at an immediate type, `Nat` or `Int`: no copy of an immediate's box) | RtArrayReadImm (and `ffi-inline-check.sh`'s list of reads) |
 | Performance review of the dependent-type work, translation size (cast conversions that never return a value; functions equal up to names) | RtCastDeadConv, RtMergeFns |
-| Performance review of the dependent-type work, item 5 (a field or `let` of a parameter's type unboxed only to be boxed again; issue 39's shape must stay away) | RtBoxPassOn, RtBoxPassOnCast (a `List Nat` read as `List UInt8` and copied read back truncated words before), RtCastMixedRebox (expected to fail: the same field also used at its type), RtProbeBump (`alloc-check.sh`: the rebuilt cells reuse the matched ones), RtArrayAppendFloat (reviewer's E19Append, `alloc-check.sh`: `a ++ b` on `Array Float` made a cell per appended element) |
+| Performance review of the dependent-type work, item 5 (a field or `let` of a parameter's type unboxed only to be boxed again; Reussir issue 8's shape must stay away) | RtBoxPassOn, RtBoxPassOnCast (a `List Nat` read as `List UInt8` and copied read back truncated words before), RtCastMixedRebox (expected to fail: the same field also used at its type), RtProbeBump (`alloc-check.sh`: the rebuilt cells reuse the matched ones), RtArrayAppendFloat (reviewer's E19Append, `alloc-check.sh`: `a ++ b` on `Array Float` made a cell per appended element) |
 | RVA-01 (review of perf-rvec) | RtReadIntoArray |
 | LR1-01 (lean-runtime's oracle rows) | RtStringExtractBig |
 | lean-runtime's case io/startup_fd_limit (`IO.stdGenRef`, the library's initializer, ran only when the program used it) | RtStartupInitUrandom, RtStartupInitRand |
@@ -694,8 +694,8 @@ it draws on, with their copyright notices (Apache 2.0):
 | Review of the runtime's speed items, checks that held up: nested arrays with shared siblings freed on a 256 KiB stack, scalar cells and array conversions, the cast conversions, raw NaN payloads, boxes made and freed before `main`, leaf payloads | RtArrayDeepSharedFree (10^6 levels, `.pipe`), RtScalarCells, RtCastArrayConv, RtFloatArrayNanRaw, RtInitBoxes, RtBoxLeafRelease |
 | leanrt-perf-1: the array free calls a boxed payload's release where the pending stack would pop it next (in the second pass's step; an array that keeps one element, outside a free, without a step): the closes in native's order | RtArrayFreeDirectOrder |
 | switch step 11: a reference set that is the reference's last use freed the new value before the old one (runtime/README.md, Requests for lean2rr 33, done: `l2r_rc_set_ref` releases the reference after the old value) | RtRefSetLastUse |
-| RS11-01 (review of switch step 11: below the first cell of a free, Reussir's glue released a cell's last record field before a later array field that had already pushed its free; Reussir patch 13-d, issue 13; its first part needed switch step 10 before rule 1; with rule 1 an array element is a box, which leanrt's worklist frees in Lean's order) | RtNestedArrayFreeOrder |
-| review of Reussir patch 13-d (a record field before an array, a thunk, in a variant's arm, after an `Option` of a record, three cells below the start of a free; needs Reussir patch 13-d, which `scripts/l2r.py` requires) | RtDropDepth3Order |
+| RS11-01 (review of switch step 11: below the first cell of a free, Reussir's glue released a cell's last record field before a later array field that had already pushed its free; Reussir patch 02-e, issue 2; its first part needed switch step 10 before rule 1; with rule 1 an array element is a box, which leanrt's worklist frees in Lean's order) | RtNestedArrayFreeOrder |
+| review of Reussir patch 02-e (a record field before an array, a thunk, in a variant's arm, after an `Option` of a record, three cells below the start of a free; needs Reussir patch 02-e, which `scripts/l2r.py` requires) | RtDropDepth3Order |
 | switch step 13, lean-runtime's LB-39 (review RF12-02 of its fixes-12): a dependent kept its priority as 32 bits, so 2^32 + 1 was a pool priority, and a priority of 2^64 or more was its low 64 bits, 0 (expectation files: natively 2^32 + 1 is a pool priority) | RtTaskPrioBig |
 | switch step 13, lean-runtime's LB-36: `scaleB` by an `Int` outside the C `int` range, moved from RtFloat and RtSweepFloat (expectation files: natively `+0.0` for a NaN, an infinity, `-0.0` and a negative value scaled down) | RtFloatScaleBBig |
 | `float-lits` missed a float literal whose `Bool` flag Lean's simp had replaced by a discriminant (in the alternative `true` of `cases b`, `Bool.true` becomes `b`), also after `simpJpCases` made the alternative a join point with that parameter: `Float.ofScientific` ran at every iteration of a loop (seen in an f64 loop of the boxed-constants work); `RtFloatLitDiscr.alloc` checks that lean2rr's allocations do not grow with N | RtFloatLitDiscr |
@@ -745,7 +745,7 @@ it draws on, with their copyright notices (Apache 2.0):
 | REB-13, REB-14 | RtExternStub (`dec`, `myDrop2`), RtExternRefused (`myDropO`) |
 | none: coverage from the Crane corpus (rv9/crane CrGram) | RtGrammarActions |
 | none: coverage from the Crane corpus (rv9/crane CrPrintf) | RtComputedFnTypes |
-| none: coverage from the Crane corpus (rv9/crane CrUniq; the Lean form of Reussir bug 28's shape) | RtSharedOnOnePath |
+| none: coverage from the Crane corpus (rv9/crane CrUniq; the Lean form of the shape of a Reussir bug fixed upstream in #660) | RtSharedOnOnePath |
 | none: coverage from the Crane corpus (rv9/crane CrDrain, CrInd) | RtDropMediated |
 | none: coverage from the Crane corpus (rv9/crane CrConv) | RtConvMediated |
 | none: coverage from the Crane corpus (rv9/crane CrReuse) | RtReuseAlias |

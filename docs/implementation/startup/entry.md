@@ -99,7 +99,7 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
   330 MiB (native 394 MiB), wall time +0.9 % (about 65 ms of system time);
   no other program's peak changed, the other wall times within noise. With
   this function itself (dev 604b97e4): lean-zip 432,024 to 337,820 KB, the
-  output unchanged. [Reussir issue 46](../../../reussir-bugs/46-mimalloc-arena-purge.md)
+  output unchanged. [Reussir issue 15](../../../reussir-bugs/15-mimalloc-arena-purge.md)
   (kind: issue (dependency); a newer `libmimalloc-sys` is parked). Test
   `RtArenaPurge` (`.alloc`: peak memory of `ByteArray`s made as huge
   blocks, grown and dropped: 56,400 KB with the option, 77,000 KB
@@ -254,7 +254,7 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
   of them weakly.
 - **Why:** The runtime cannot name generated code; calling through Rust
   also removes a Reussir-level call cycle through the stream code that
-  crashed rrc ([Reussir bug 5](../../../reussir-bugs/05-one-armed-if.md)).
+  crashed rrc (a Reussir bug, fixed upstream in #655).
 - **Where:** `Emit/Entry.lean`: `lowerEntry`; `Lower/Promises.lean`:
   `promiseResolveFn`, `taskDispatchFns`; `runtime/leanrt/src/io.rs`:
   `diag_put`.

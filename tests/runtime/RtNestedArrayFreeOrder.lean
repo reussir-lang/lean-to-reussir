@@ -6,10 +6,10 @@ handles; `W` = a handle, then an `S`; `V` = a handle, then a `W`. Natively
 `lean_del` pushes a cell's fields in order and pops the last first:
 freeing a `V` closes `w.arr1 w.arr0 w.i.b w.i.a w.h h`.
 - The free of the array (second part): Reussir's glue for a cell below the
-  first one (local patch 13-b, `drop_and_free`) released the cell's last
+  first one (local patch 02-b, `drop_and_free`) released the cell's last
   record field (`i`) after the cell, directly, while the array had already
   pushed its free: `i`'s handles closed before the array's
-  (`w.i.b w.i.a w.arr1 w.arr0 w.h h`). Reussir patch 13-d (issue 13)
+  (`w.i.b w.i.a w.arr1 w.arr0 w.h h`). Reussir patch 02-e (issue 2)
   keeps that field for last only when no later field pushes work;
   scripts/l2r.py requires it.
 - The `Array.set!` (first part): on dev an `Array V` held the `V` records

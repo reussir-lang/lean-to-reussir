@@ -1,4 +1,4 @@
-/-! Runtime test (Reussir patch 13-d, issue 13; review of 13-d): the order
+/-! Runtime test (Reussir patch 02-e, issue 2; review of 02-e): the order
 of the closes when a free reaches a structure whose last record field is
 followed by a field that pushes its own free (an array, a thunk), three
 cells below the start of the free (the array, then `E`, then `W`). Each
@@ -6,7 +6,7 @@ scenario puts `E x` (a handle, then `W x`: a handle, then `x`) into an
 array held by an `IO.Ref` and frees the array with `r.set #[]`; each
 handle writes its tag to the scenario's file when it is closed. Natively
 `lean_del` pushes a cell's fields in order and pops the last first: in
-`x`, the array (or thunk) goes before the record field. Without 13-d,
+`x`, the array (or thunk) goes before the record field. Without 02-e,
 Reussir's glue for `x` (`drop_and_free`) released the record field after
 the cell, directly, before the free the later field had pushed: T1 closed
 `i.b i.a arr1 arr0`, natively `arr1 arr0 i.b i.a`. -/

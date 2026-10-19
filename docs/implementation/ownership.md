@@ -128,7 +128,7 @@ runtime.
   d5169c4). Releasing through the record's `_ffi_release` let Reussir's
   glue free the old value first field first: the dependents of the
   promises it held ran, and the file handles it held were closed, in the
-  reverse of native's order (round 8 RV8T-02); and without patch 40-a
+  reverse of native's order (round 8 RV8T-02); and without patch 09-a
   (required since switch step 6) the end of that free was not seen, so the
   dependents ran late and a condition-variable loop reading its flag first
   waited forever (RV8T-01;
@@ -154,7 +154,7 @@ runtime.
   the runtime's one-block array; `LCell`: `leanrt::drop::Cell`, a
   transparent wrapper of Reussir's `Rc`) have a `Drop` that frees a last
   reference through Reussir's per-thread
-  stack of pending work (`reussir_rt::drop`, local patch 13-b), shared with
+  stack of pending work (`reussir_rt::drop`, local patch 02-b), shared with
   the record drop glue. A container freed while a free runs is pushed
   instead; the outermost free pops until empty. An array is freed in
   native Lean's two passes (below): its elements are decremented in index
@@ -164,16 +164,16 @@ runtime.
 - **Why:** Lean frees iteratively (`lean_dec_ref_cold`); a value deep
   through containers (a tree whose children are in arrays, chains of thunks)
   overflowed the stack (59b2551). Two separate stacks (the runtime's and
-  13-b's) released handles in another order than native (6889792, test
+  02-b's) released handles in another order than native (6889792, test
   `RtDropOrderRec`; `RtArrayRecordFreeOrder`: one release of an array of
   structures that hold handles, an array of handles and unresolved
   promises, whose file and dependents fail if elements whose last
   reference goes were released outside the stack, in field order). The
   glue's own order must match too: below the first
-  cell of a free, 13-b's glue released a cell's last record field after
+  cell of a free, 02-b's glue released a cell's last record field after
   the cell, directly, while a later container field had already pushed
   its free, so the record field's contents came out first (review
-  RS11-01, test `RtNestedArrayFreeOrder`). Local patch 13-d keeps the last
+  RS11-01, test `RtNestedArrayFreeOrder`). Local patch 02-e keeps the last
   record field for last only when no field after it can push work;
   otherwise every record field is pushed, in field order. The order still
   differs at the top of a free that starts at a record user code drops by
@@ -182,10 +182,10 @@ runtime.
   "Order of releases in one free").
 - **Where:** `runtime/leanrt/src/drop.rs`: `Vec`, `Cell`, `free_vec`,
   `step_vec`, `free_cell`, `run`, `defer`, `active`;
-  [Reussir issue 13](../../reussir-bugs/13-long-list-drop.md) (a missing
-  feature; patches 13-b and 13-d).
+  [Reussir issue 2](../../reussir-bugs/02-native-drop-order.md) (a missing
+  feature; patches 02-b and 02-e).
 - **Remove only if:** never; the runtime does not build without patch
-  13-b.
+  02-b.
 
 ### Arrays are freed in native Lean's two passes
 
@@ -242,11 +242,13 @@ runtime.
   1.79x → 1.05x native, `hash-map-shared` 1.33x → 0.84x (perf5, 1dc63c6).
   Inside a free the array is still pushed: a later field of the record
   being freed may hold one of its elements. An immediate is never freed
-  (local patch 06-a), so skipping it changes nothing.
+  (Reussir #661; a local patch on the old stack), so skipping it changes
+  nothing.
 - **Where:** `runtime/leanrt/src/drop.rs`: `ReleaseElems`,
   `release_from_end`, `scan`, `free_vec`.
 - **Remove only if:** never (speed only); the immediate skip depends on
-  patch 06-a ([Reussir bug 6](../../reussir-bugs/06-static-count-wrap.md)).
+  Reussir #661 (a Reussir bug fixed upstream; a local patch on the old
+  stack).
 
 ### Arrays of boxes skip immediates and decrement shared payloads inline
 
@@ -386,7 +388,7 @@ runtime.
   dummy's count was changed, and after about 2^30 releases it was no
   longer immortal; `drop::IMMORTAL`).
 - **Why:** Under Reussir's aarch64 (TBI) encoding of nullary variants,
-  which patch 06-a keeps, an immediate's increment is unguarded: every
+  which Reussir #661 keeps (a local patch on the old stack), an immediate's increment is unguarded: every
   `nil` bucket of a hash map incremented the one static dummy of `nil`, a
   serial chain through one word (Pf4HashPersist 1.04 → 0.80 s; adv4
   PF4-11, fe483fe).
@@ -454,14 +456,14 @@ runtime.
   of the structure there. At a call site that LLVM judges cold (deep in
   branches) every set texture, of any element type, is still a call: the
   uniqueness test with its copy, the bounds check with its panic and the
-  store are above LLVM's cold-site threshold (Reussir issue 36, not
-  patched: its patch 36-a, which made every such texture `alwaysinline`,
+  store are above LLVM's cold-site threshold (Reussir issue 6, not
+  patched: its patch 06-a, which made every such texture `alwaysinline`,
   is parked).
 - **Where:** `runtime/leanrt/src/array.rs`: `ReleaseElem`,
   `release_last`, `set_in`, `pop_in`; `runtime/leanrt/src/drop.rs`:
   `release`; tests `RtArraySets`, `RtArraySetFreeOrder`,
   `RtArrayPopFreeOrder`, `tests/runtime/ffi-inline-check.sh`.
-- **Remove only if:** never; the immediate skip depends on patch 06-a, as
+- **Remove only if:** never; the immediate skip depends on Reussir #661, as
   the array free's. The record's own release for element types with no
   observable release, or a cheaper drain of one cell in Reussir's
   runtime, would remove the rest of the cost.
@@ -476,11 +478,11 @@ runtime.
   the thread's pending stack as one deferred cell (a deferral that is not
   `_wide` writes nothing into the cell), and `__reussir_drop_drain()`
   releases it. Outside a free that is Reussir's drain of one pending cell
-  (`drain_one`, local patch 13-b): the drain starts, `release_record` runs
+  (`drain_one`, local patch 02-b): the drain starts, `release_record` runs
   the record's `<record>_ffi_release` inside it (its fields go on the
   stack and come out last first), and the drain ends, through the general
   loop only when the release pushed work; the end of the drain calls
-  `__reussir_drop_drained` (patch 40-a: the promise resolutions put off,
+  `__reussir_drop_drained` (patch 09-a: the promise resolutions put off,
   `task::drained`). Inside a free the drain returns at once: the cell is
   only pushed (above the run on top, which moves to the vector) and is
   released when the free pops it. `release_unique` does not test the
@@ -518,7 +520,7 @@ runtime.
   identical `.rr`; `check` has four alignment `nop`s before its loop,
   executed once per call, and an erratum-843419 veneer moved to a load
   in `make'`). Reussir's three calls (61 of the 74 instructions) could be
-  one: the parked Reussir patch 42-a (reussir-bugs/42-drop-run.md) adds
+  one: the parked Reussir patch 11-a (reussir-bugs/11-drop-run.md) adds
   that entry point (monadic-interp -4.99% instructions, unionfind
   -2.52%), a gain too small for a local Reussir patch (owner,
   2026-10-07).
@@ -577,7 +579,7 @@ runtime.
   elimination needs one store that overwrites it on every path (58); one
   checked texture that decrements first costs 55 in LLVM's inline cost
   model, above its threshold for a cold call site, 45 (41 of the loop's
-  reads stayed calls; [Reussir issue 36](../../reussir-bugs/36-trampoline-inline.md),
+  reads stayed calls; [Reussir issue 6](../../reussir-bugs/06-trampoline-inline.md),
   a missed optimization, not patched). Split into `give`, `size` and
   `take`, each texture is small enough for a cold call site: no read stays
   a call, and the loop has 47 hot stores, at most 7 on one iteration (15

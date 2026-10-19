@@ -93,7 +93,7 @@ def rustc_wrapper(rlib, lr):
     build directory (per Reussir checkout).
 
     The script's text names lean-runtime's build (`lr.digest`): rrc's
-    texture cache (`REUSSIR_FFI_CACHE_DIR`, Reussir issue 35) hashes the
+    texture cache (`REUSSIR_FFI_CACHE_DIR`) hashes the
     script's text and the libraries in the `--polyffi-libdir` directories,
     and cargo's build of lean-runtime puts its rlibs in none of them."""
     w = rlib.parent / "rustc-native"
@@ -169,8 +169,8 @@ def build_locked(out, stamp, outputs, digest, cmd, cwd, digest_after=None):
 
     `cwd` is the crate's directory, not the caller's: rustc records its
     working directory in the rlib's metadata, so a rebuild from another
-    directory would give an rlib with other bytes, and rrc's texture cache
-    (Reussir issue 35), which hashes the rlibs, would miss on every texture.
+    directory would give an rlib with other bytes, and rrc's texture cache,
+    which hashes the rlibs, would miss on every texture.
     The paths in `cmd` are absolute (so are the source paths rustc records,
     which panic messages show)."""
     out.mkdir(parents=True, exist_ok=True)
@@ -350,27 +350,38 @@ def build_lean_runtime(out):
 
 
 # Local Reussir patches whose absence would not show as a build error at the
-# right place: (patch, file of the Reussir checkout, a symbol the patch adds
+# right place: (patch, file of the Reussir checkout, a text the patch adds
 # there). A patch is named NN-x, as its file reussir-bugs/patches/NN-x-*.patch
-# (NN: its entry, reussir-bugs/NN-*.md). 40-a: every drain that released
-# something calls the function the host stores in `__reussir_drop_drained`
-# once it is over; leanrt resolves the promises a free dropped there
-# (runtime/README.md, "The scheduler"). leanrt's reference to the symbol
-# would also fail to compile without it.
+# (NN: its entry, reussir-bugs/NN-*.md); the base is upstream Reussir
+# 7954a367 plus reussir-bugs/patches/series. Plain upstream fails the first
+# check. 02-a: both acquire/drop expansion passes of rrc's lowering pipeline
+# (pipeline.rs, and its C++ copy in Bridge.cppm) run with upstream's
+# tail-recursive and retcon drops (#677, #679) off, so that upstream's drop
+# lowering cannot mix with 02-a's glue; check_reussir_patches also checks
+# that no argument of the passes is upstream's switch (OptLevel::Tpde).
+# 09-a: every drain that released something calls the function the host
+# stores in `__reussir_drop_drained` once it is over; leanrt resolves the
+# promises a free dropped there (runtime/README.md, "The scheduler").
+# leanrt's reference to the symbol would also fail to compile without it.
 REQUIRED_REUSSIR_PATCHES = [
-    ("40-a", "crates/reussir-rt/src/drop.rs", "__reussir_drop_drained"),
+    ("02-a", "crates/reussir-backend/src/pipeline.rs", "l2r-local: no tail-recursive or retcon drops"),
+    ("02-a", "lib/Bridge/Bridge.cppm", "options.tailRecursiveDrops = false"),
+    ("09-a", "crates/reussir-rt/src/drop.rs", "__reussir_drop_drained"),
     # The one-word box `LAny` keeps its payload's type number in the top 16
-    # bits of a tagged handle (reussir-bugs/38-tagged-top-bits.md).
-    ("38-a", "lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp", "taggedBoxAddress"),
+    # bits of a tagged handle (reussir-bugs/07-tagged-top-bits.md).
+    ("07-a", "lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp", "taggedBoxAddress"),
     # The drop glue releases a cell's members in native Lean's order when a
-    # later field pushes work (reussir-bugs/13-long-list-drop.md).
-    ("13-d", "lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp", "releasesQuietly"),
+    # later field pushes work (reussir-bugs/02-native-drop-order.md).
+    ("02-e", "lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp", "releasesQuietly"),
 ]
+REUSSIR_HELP = ("build with upstream Reussir 7954a367 plus the patches of "
+                "reussir-bugs/patches/series (reussir-bugs/README.md)")
 
 
 def check_reussir_patches():
     """The Reussir checkout (L2R_REUSSIR) is one, and has the local patches
-    lean2rr requires (REQUIRED_REUSSIR_PATCHES)."""
+    lean2rr requires (REQUIRED_REUSSIR_PATCHES), with upstream's
+    tail-recursive and retcon drops off (02-a)."""
     if not (REUSSIR / "crates" / "reussir-rt" / "src").is_dir():
         sys.exit(f"l2r: no Reussir checkout at {REUSSIR} (no crates/reussir-rt/src there): "
                  "set L2R_REUSSIR to a Reussir checkout (default: reussir/ in the lean2rr checkout)")
@@ -378,8 +389,13 @@ def check_reussir_patches():
         src = REUSSIR / rel
         if not src.is_file() or symbol not in src.read_text():
             sys.exit(f"l2r: the Reussir checkout {REUSSIR} lacks the local Reussir patch {patch} "
-                     f"(`{symbol}` in {rel}), which lean2rr requires: build with a Reussir that has it "
-                     "(reussir-bugs/README.md)")
+                     f"(`{symbol}` in {rel}), which lean2rr requires: {REUSSIR_HELP}")
+    rel = REQUIRED_REUSSIR_PATCHES[0][1]
+    calls = (REUSSIR / rel).read_text().split("reussirCreateAcquireDropExpansionPass(")[1:]
+    if not calls or any("Tpde" in c.split(")", 1)[0] for c in calls):
+        sys.exit(f"l2r: in the Reussir checkout {REUSSIR}, the acquire/drop expansion passes "
+                 f"({rel}) do not have upstream's tail-recursive and retcon drops off "
+                 f"(local Reussir patch 02-a), which lean2rr requires: {REUSSIR_HELP}")
 
 
 def build_leanrt():
@@ -492,13 +508,16 @@ def main():
     env["L2R_SHIM_DIR"] = str(SHIM_DIR)
     # rrc compiles each of the prelude's textures with its own rustc run,
     # most of its time on a small program; this directory keeps the bitcode
-    # (Reussir issue 35, a cost; patch 35-a; an rrc without the patch ignores
-    # the variable). rrc keys each entry by everything the bitcode depends on,
-    # the texture, rustc (here the rustc-native script, whose text names the
-    # rlibs and the flags), its options and the libraries in the
-    # --polyffi-libdir directories (leanrt's build directory among them), so
-    # all builds share one directory. Nothing removes old entries: delete the
-    # directory to reclaim the space. An empty value turns the cache off.
+    # (rrc's texture cache, a local patch on the old stack and upstream
+    # Reussir #690; an rrc without a cache ignores the variable). rrc keys
+    # each entry by everything the bitcode depends on, the texture, rustc
+    # (here the rustc-native script, whose text names the rlibs and the
+    # flags), its options and the libraries in the --polyffi-libdir
+    # directories (leanrt's build directory among them), so all builds share
+    # one directory. rrc prunes it (llvm::pruneCache): it removes entries
+    # (llvmcache-*) not read for a week and keeps the total at most 1 GiB.
+    # It never removes other files, such as the <hex>.bc entries of the old
+    # local patch. An empty value turns the cache off.
     env.setdefault("REUSSIR_FFI_CACHE_DIR", str(LEANRT_OUT / "polyffi-cache"))
 
     rlib, lr = build_leanrt()
@@ -532,19 +551,19 @@ def main():
                # avoidance): keep declaration-order layouts until that is fixed.
                + ["--no-pack-record-members"]
                # -O aggressive enables closure devirtualization, which prints
-               # each closure's result type, every named type expanded, at
-               # every vtable and indirect call site: build time and memory
-               # grow with the nesting of lean2rr's function representations
-               # (3x on an interpreter, out of memory at 16 GB on polymorphic
-               # recursion through monad transformers), while it changes no
-               # classic benchmark by more than 1% (lean2rr dispatches
-               # function values itself).
+               # each closure's result type at every vtable and indirect call
+               # site. Before Reussir #668 it expanded every named type there
+               # (out of memory at 16 GB on polymorphic recursion through
+               # monad transformers). The flag stays: devirtualization changes
+               # no classic benchmark by more than 1% (lean2rr dispatches
+               # function values itself), and unnamed closure result types
+               # are still printed again at each site.
                + ["--no-closure-wpd"]
                # rrc compiles with LLVM's static relocation model unless told
                # otherwise, but links a position-independent executable, so
                # read-only data with absolute addresses (closure vtables) needs
                # text relocations (DT_TEXTREL) with GNU ld and fails with lld
-               # (Reussir bug 34, patch 34-a). Native Lean executables are PIEs
+               # (Reussir issue 5, patch 05-a). Native Lean executables are PIEs
                # without text relocations.
                + ["--relocation-mode", "pic"]
                # Extra rrc flags for experiments (L2R_RRC_FLAGS, split on spaces).

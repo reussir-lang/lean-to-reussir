@@ -12,7 +12,7 @@
 # exactly once (live blocks before = after, no free of a block that is not
 # live). A third run unboxes at the wrong number and must end with Lean's
 # internal panic (exit 1).
-# Needs a Reussir with patch 38-a (reussir-bugs/38-tagged-top-bits.md);
+# Needs a Reussir with patch 07-a (reussir-bugs/07-tagged-top-bits.md);
 # without it the program is killed by SIGSEGV at the first copy of a
 # boxed pointer. Scenarios: records, enums with nullary variants (at
 # indices 0, 1, 2; all-nullary), function values with closures (one

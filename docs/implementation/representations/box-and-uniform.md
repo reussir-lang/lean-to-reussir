@@ -249,7 +249,8 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   instances are now identical up to names. A variable with another use as
   well is not given the box for its boxed uses: the unboxed value would
   then be dead where only the box goes on, and Reussir's token reuse
-  takes such a release as a new cell's donor (issue 39, `RtProbeBump`).
+  takes such a release as a new cell's donor (Reussir issue 8,
+  `RtProbeBump`).
   So a word read at another type and also used at that type is still
   truncated where it is boxed again (`RtCastMixedRebox`, expected to
   fail). A `let` whose value is not a box (a constructor) stays at its
@@ -389,8 +390,8 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   number lets the drop hook release the payload as its own type and lets
   an unbox check the type (a mismatch panics, it never reads wrongly).
 - **Where:** `runtime/leanrt/src/any.rs`; `runtime/prelude.rr`, section
-  "The one-word box"; Reussir patch 38-a (issue 38: `rc.inc` clears the top
-  16 bits of a tagged handle; `reussir-bugs/38-tagged-top-bits.md`).
+  "The one-word box"; Reussir patch 07-a (issue 7: `rc.inc` clears the top
+  16 bits of a tagged handle; `reussir-bugs/07-tagged-top-bits.md`).
   Places in lean2rr that the switch to `LAny` touches, because they treat
   `Box` as one record pointer today: `Lower/Identity.lean`, `addrOf` (the
   `Box` case calls `l2r_ptr_addr_rec`, used by `ptrAddrUnsafe` and

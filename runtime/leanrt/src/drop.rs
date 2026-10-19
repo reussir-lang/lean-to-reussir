@@ -4,7 +4,7 @@
 //! Native Lean frees an object iteratively (`lean_dec_ref_cold`): the
 //! children whose count drops to zero go onto a stack of objects to free,
 //! popped last first. Reussir's drop glue does the same with the local
-//! patch 13-b: a record member it frees is pushed on a stack of pending
+//! patch 02-b: a record member it frees is pushed on a stack of pending
 //! work per thread (`reussir_rt::drop`), which the outermost drop empties.
 //! A record releases a container field through the container's Rust `Drop`
 //! (the opaque type's drop hook), which releases the elements, records
@@ -149,7 +149,7 @@ impl<X> ReleaseValue for reussir_rt::bridge::Bridge<X> {
         }
         let p: usize = unsafe { std::mem::transmute_copy(&self) };
         if cfg!(target_arch = "aarch64") {
-            // An immediate (never freed: local patch 06-a) changes nothing:
+            // An immediate (never freed: Reussir #661) changes nothing:
             // a nonzero top byte, or a dummy's count (`IMMORTAL`). A shared
             // cell is decremented in line.
             if p >> 56 != 0 {
@@ -545,7 +545,7 @@ impl<T> ReleaseElems for T {
 /// encoding of nullary variants) and frees the box when the count was 1.
 /// Here the first pass (`scan`) decrements a shared element inline, as
 /// `lean_del` does natively, and skips an immediate (its release changes
-/// nothing: Reussir never frees one, local patch 06-a; a nonzero top byte,
+/// nothing: Reussir never frees one, Reussir #661; a nonzero top byte,
 /// or a dummy's count of `IMMORTAL` or more under the immortal encoding,
 /// which `--nullary-variant-encoding arch-independent` selects on aarch64
 /// too); only an element whose count is 1 goes through
