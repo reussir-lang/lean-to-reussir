@@ -638,7 +638,17 @@ slot is empty, and then its set flag in a second table, a second load),
 then reads the same word (`once::get_raw`) and clones the value; the slow
 path (`once::claim`) computes it or waits for the scheduler context
 computing it. The tables (`once::FAST`, `once::FLAGS`) mirror the record
-of the slots (`once::SLOTS`).
+of the slots (`once::SLOTS`). A constant of a program type is set through
+lean2rr's enum `L2RConstCell` (`once::put_field`, the prelude's
+`l2r_once_put_field`): the slot gets the word of the variant's field, the
+value's, and the variant's cell keeps the reference for the rest of the
+run. It checks the cell's tag at offset 4 and reads the field at offset
+8 (the 8-byte header of a shared enum of at most 2^16 constructors,
+`any::WIDE_BIT`). So the texture that sets these cells is the same in
+every program (rrc's texture cache hits); `l2r_once_put<T>` at each
+program type was a rustc run in every new program
+(docs/implementation/startup/constants.md, "A constant of a program type
+is set through one enum").
 
 **Literal constants.** A constant whose code is one string literal, or one
 read of such a constant, has no once-cell (lean2rr's optimization

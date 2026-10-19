@@ -13,7 +13,9 @@ runtime. Plan
   or one read of such a constant (the literal cache, "A constant of one
   string literal is read from the literal cache", below), the constants that `cheap-consts` recomputes and
   the closed terms used once, by another constant (below). The cell stores a boundary type; another value is wrapped
-  in an `ElemBox`. The value is never freed. Program constants are forced
+  in an `ElemBox`. A value of a program type is stored through the enum
+  `L2RConstCell` ("A constant of a program type is set through one enum",
+  below). The value is never freed. Program constants are forced
   at startup ([order.md](order.md)); toolchain constants and closed terms
   only on first use, as natively (Lean 4.34.0 makes a closed term a
   `lean_obj_once` cell, computed at its first read; the library's
@@ -28,7 +30,7 @@ runtime. Plan
   the slots (`Lower/Externs.lean`).
 - **Where:** `Lower/Conv.lean`: `cafAccessor`; `Lower/Code.lean`:
   `lowerDecl`; `runtime/prelude.rr`: `l2r_once_ready`, `l2r_once_claim`,
-  `l2r_once_get`, `l2r_once_put`, `l2r_once_set`;
+  `l2r_once_get`, `l2r_once_put`, `l2r_once_put_field`, `l2r_once_set`;
   `runtime/leanrt/src/once.rs`: `claim`.
 - **Remove only if:** never (the storage may change, next entry).
 
@@ -110,6 +112,78 @@ runtime. Plan
   slower than before for those constants, and a slot read at a wider type
   than it was stored at would have seen the mark (review PCR-02, PCR-03);
   the flag table replaced both.
+
+### A constant of a program type is set through one enum
+
+- **What:** A once-cell's slot holds the value's word at its storage type
+  `S` (`cellStorage`: the type itself, or its `ElemBox`), and every read
+  is `l2r_once_get<S>(k)` (previous entry). When `S` is the same Rust type
+  in every program (`tyInEveryProgram`: an integer, a float, `bool`,
+  leanrt's `Nat`, `Int`, `LStr`, `LAny`, `LHandle`, `LPromise`, and an
+  `RVec`, `LRef` or `LCell` of those), the slow path sets the slot with
+  `l2r_once_put<S>`. Any other storage type (a record, an enum, a function
+  value, a `Tuple`, an `ElemBox`, the reference record, an array of such
+  values) is a type of the program, and the slow path sets the slot
+  through the one enum `L2RConstCell`, which has a variant per such type
+  (`c0(S0)`, `c1(S1)`, …):
+
+  ```
+  l2r_once_put_field<L2RConstCell>(k, 5, L2RConstCell::c5{<f>_init()})
+  ```
+
+  `leanrt::once::put_field` checks that the cell's tag is 5, stores the
+  word of the variant's field in the slot (the word `l2r_once_put<S5>`
+  stores), and keeps the cell for the rest of the run: the cell holds the
+  value's reference that the slot uses. The read does not change. The
+  startup chain's stores of `initialize` results (`l2r_init_put_<k>`) do
+  the same.
+- **Why:** rrc compiles each instantiation of a texture with its own rustc
+  run, and keeps the result in its cache under a key made from the
+  texture's source (Reussir issue 35). A texture shows a type of the
+  program by its symbol, and lean2rr numbers these types per program
+  (`T_Foo_123`), so every instantiation at a program type missed the
+  cache in every new program. `l2r_once_put_field<L2RConstCell>` has the
+  same source in every program. Z06g (the Cedar benchmark, 398 program
+  types in once-cells), rrc to an executable with an empty texture cache,
+  three runs each on five quiet cores: 1120 textures compiled before, 723
+  after, of which 937 and 539 name a type of the program (they miss the
+  cache in every new program); the texture phase 26.7 s to 16.0 s
+  (median), the whole build 113.3 s to 104.2 s (median; 8%); with a cache
+  filled by other programs' builds, 1017 to 619 misses, 108.1 s to
+  103.8 s. The reads of constants in loops took the same time (the
+  shared benchmark set's X01, X02, X03, and a test of a structure and an
+  `Option` constant read in loops: medians within 0.6%).
+- **Cost:** one more cell (16 bytes) for each constant of a program type
+  that the run sets, made once and never freed: one allocation more per
+  such constant, none per read. The reads are the same IR as before (the
+  slow path changes: X02's `deriv`). `_init` makes the variant,
+  not the accessor: made in the accessor, which is inlined where the
+  constant is read, the cell gave rrc's token reuse a place to reuse a
+  cell the reader frees, and the reader's free moved behind the read.
+  The `.rr` grows by 0.1% (Z06g) to 1% (small programs: the texture's
+  text in the prelude).
+- **Not done:** a read through the enum (a `match` on the variant) instead
+  of `l2r_once_get<S>` would also remove the read's texture per type, but
+  rrc expands the `match`'s wildcard arm into one region per variant at
+  every read, in line: Z06g, with 398 such types, ran out of memory
+  (20 GB). A box (`LAny`) as the storage type does not help: boxing and
+  unboxing a program type are textures per type too (`l2r_any_of_ptr<T>`,
+  `l2r_any_raw_take<T>`), and only 68 of Z06g's 395 program types had
+  them already.
+- **Where:** `LowerBase.lean`: `tyInEveryProgram`, `OnceCell`,
+  `onceCell`, `OnceCell.put`, `OnceCell.read`, `constCellItem`;
+  `Lower/Conv.lean`: `cafAccessor`; `Lower/Values.lean`:
+  `lowerConstApp` (reads of `initialize` constants); `Emit/Startup.lean`:
+  `initPutFn`; `Emit/Program.lean`: the enum's item;
+  `runtime/prelude.rr`: `l2r_once_put_field`;
+  `runtime/leanrt/src/once.rs`: `put_field`;
+  `tests/runtime/rr-fingerprint.py`: `ONCE_TAG`.
+- **Remove only if:** rrc compiles the instantiations of a texture at
+  different types in one rustc run, or caches them across programs (then
+  `l2r_once_put<S>` for every type, and no extra cell), or the layout of
+  Reussir's enum cells changes (`put_field` reports a tag that is not the
+  variant's; it relies on the 8-byte header of a shared enum of at most
+  2^16 constructors, `any::WIDE_BIT`, and a one-word field after it).
 
 ### A constant of one string literal is read from the literal cache
 

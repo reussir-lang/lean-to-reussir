@@ -47,7 +47,8 @@ form:
 - replaces a string literal's index, `l2r_str_lit(31)`, and that of a read
   of the literal cache, `l2r_str_lit_cached(31)`, by the literal's text
   (from the table in the item `l2r_str_lit`), and the cell index of a
-  constant (`l2r_once_get<T>(5)`) by its rank in the item;
+  constant (`l2r_once_get<T>(5)`) by its rank in the item (and the variant
+  number `l2r_once_put_field` checks by `#`);
 - replaces a payload number of `Box` by the label of its type (the program's
   release of each payload type, the item `fn l2r_any_rel_17(x : T) -> unit`,
   gives each number's type): where a box is made or taken apart (the last
@@ -106,7 +107,11 @@ INST = re.compile(r"___l2r_\d+_")
 CONV_FN = re.compile(r"^(l2r_conv_|l2r_vconv_|l2r_fconv_|l2r_lazyconv_|l2r_unbox_)")
 LIT = re.compile(r'b"((?:[^"\\]|\\.)*)"')
 STR_LIT = re.compile(r"(l2r_str_lit(?:_cached)?)\((\d+)\)")
-ONCE = re.compile(r"(l2r_once_[a-z]+(?:<[^()]*?>)?\()(\d+)")
+ONCE = re.compile(r"(l2r_once_[a-z_]+(?:<[^()]*?>)?\()(\d+)")
+# The variant number that `l2r_once_put_field<L2RConstCell>(slot, tag, ...)`
+# checks (lean2rr's `onceCell`): the variant it names, renamed below, says
+# the same.
+ONCE_TAG = re.compile(r"(l2r_once_put_field<[^()]*?>\(#\d+, )(\d+)")
 VARIANT_REF = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)::([a-z]+\d+)\b")
 VARIANT_DEF = re.compile(r"^\s+([a-z]+\d+)\s*(\(.*\))?\s*,?\s*$")
 KEPT = re.compile(r"\x00(\d+)\x00")
@@ -329,6 +334,7 @@ class Program:
         text = STR_LIT.sub(lit, text)
         cells = {}
         text = ONCE.sub(lambda m: m.group(1) + "#" + str(cells.setdefault(m.group(2), len(cells))), text)
+        text = ONCE_TAG.sub(lambda m: m.group(1) + "#", text)
         def variant(m):
             new = self.variants.get((m.group(1), m.group(2)))
             return m.group(1) + "::" + (keep(new) if new else m.group(2))

@@ -99,9 +99,10 @@ def persistCall (t : RR.Ty) (v : RR.Expr) : LowerM (Option RR.Expr) := do
 /-- The accessor of a constant (a declaration without parameters): its value
 is computed once, by `<name>_init`, and kept in a runtime once-cell for the
 rest of the run, like native Lean's CAFs and closed terms (translation plan
-§5.12). The cell stores a boundary type; other values are boxed. A value
-that may contain tasks first waits for them (`persistCall`), unless `walk`
-is false: a placeholder (`zeroTry`) is natively `box(0)`, which
+§5.12). The cell stores a boundary type; other values are boxed
+(`onceCell`). A value that may contain tasks first waits for them
+(`persistCall`), unless `walk` is false: a placeholder (`zeroTry`) is
+natively `box(0)`, which
 `lean_mark_persistent` never sees, and the never-forced `pending` cell one
 can hold must not be run.
 
@@ -111,6 +112,9 @@ The accessor reads the cell in one place, after the test:
                   else { if l2r_once_claim(k) { 0 } else { l2r_once_put<T>(k, init) } };
     l2r_once_get<T>(k)
 
+(for a type of the program, the cell is set through the enum
+`L2RConstCell`: `<name>_init` returns the variant, and the store is
+`l2r_once_put_field<L2RConstCell>(k, i, <name>_init())`, `onceCell`).
 `l2r_once_ready` is one load from the runtime's table at a fixed address
 (the slot is a literal), and `l2r_once_get` loads the same word again,
 which LLVM merges: a read of a set constant is one load, a test and the
@@ -120,28 +124,47 @@ are the slow path. The computation `<name>_init` runs once: it is kept out
 of rrc's MLIR inliner (`anchoredFns`), so that the accessor stays small
 enough to be inlined where the constant is read (a literal table's
 initializer, a run of pushes of boxed immediates, made the accessor too big
-for the loops that read it: tests/runtime/const-read-check.sh). -/
-def cafAccessor (name : String) (ret : RR.Ty) (walk := true) : LowerM RR.Item := do
+for the loops that read it: tests/runtime/const-read-check.sh). Returns
+`<name>_init`, whose body is `body`, and the accessor. -/
+def cafAccessor (name : String) (ret : RR.Ty) (body : RR.Block) (walk := true) :
+    LowerM (Array RR.Item) := do
   let slot ← getPart (·.cafSlots)
   modify fun s => { s with cafSlots := slot + 1, cafInits := s.cafInits.push (name ++ "_init") }
-  let (st, boxed) ← cellStorage ret
-  let wrap (e : RR.Expr) : RR.Expr := match st with
-    | .named bn => if boxed then .ctor bn none #[e] else e
-    | _ => e
-  let unwrap (e : RR.Expr) : RR.Expr := if boxed then .field e 0 else e
+  let cell ← onceCell ret
   let k := RR.Expr.atom (toString slot)
-  let init := RR.Expr.call (name ++ "_init") #[] #[]
-  let init := match ← (if walk then persistCall ret (.var "v") else pure none) with
-    | some p => RR.Expr.block ⟨#[("v", some ret, init), ("p", some (.named "u64"), p)], .var "v"⟩
-    | none => init
+  let initName := name ++ "_init"
+  let zero := RR.Block.ofExpr (.atom "0")
+  -- The computation and the store. A cell set through `L2RConstCell`
+  -- (`onceCell`): `_init` returns the variant (after the walk), so that
+  -- the variant's cell is made out of line, in `_init`, which rrc does not
+  -- inline; made in the accessor, it was inlined where the constant is
+  -- read, and rrc's token reuse kept a cell the reader frees for it (the
+  -- reader's free moved behind the read: X02's `deriv`).
+  let (initItem, put) ← match cell.idx with
+    | none =>
+      let init := RR.Expr.call initName #[] #[]
+      let init := match ← (if walk then persistCall ret (.var "v") else pure none) with
+        | some p => RR.Expr.block ⟨#[("v", some ret, init), ("p", some (.named "u64"), p)], .var "v"⟩
+        | none => init
+      pure (RR.Item.fn initName #[] ret body, cell.put k init)
+    | some _ =>
+      -- `body`'s result, named unless it is a variable, walked, wrapped.
+      let (lets, x) ← match body.result with
+        | .var x => pure (body.lets, RR.Expr.var x)
+        | e => do
+          let x ← fresh "cv"
+          pure (body.lets.push (x, some ret, e), RR.Expr.var x)
+      let lets ← match ← (if walk then persistCall ret x else pure none) with
+        | some p => do pure (lets.push (← fresh "cvp", some (.named "u64"), p))
+        | none => pure lets
+      pure (.fn initName #[] (.named constCellName) ⟨lets, cell.store x⟩,
+        cell.putStored k (.call initName #[] #[]))
   -- `l2r_once_claim`: a context of the runtime's scheduler that needs the
   -- value while another computes it waits for it.
-  let zero := RR.Block.ofExpr (.atom "0")
   let fill := RR.Expr.ite (.call "l2r_once_ready" #[] #[k]) zero
-    (.ofExpr (.ite (.call "l2r_once_claim" #[] #[k]) zero
-      (.ofExpr (.call "l2r_once_put" #[st] #[k, wrap init]))))
-  let body : RR.Block := ⟨#[("r", some (.named "u64"), fill)], unwrap (.call "l2r_once_get" #[st] #[k])⟩
-  return .fn name #[] ret body
+    (.ofExpr (.ite (.call "l2r_once_claim" #[] #[k]) zero (.ofExpr put)))
+  let acc : RR.Block := ⟨#[("r", some (.named "u64"), fill)], cell.read k⟩
+  return #[initItem, .fn name #[] ret acc]
 
 /-- The placeholder of `t` (`zeroValue`), searched for depth first: a
 constructor without fields if there is one, else the first constructor
@@ -276,8 +299,8 @@ partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
     | ⟨#[], .ctor _ _ #[]⟩ => true
     | _ => false
   if heap && !nullary && (← read).cachePlaceholders then
-    let acc ← cafAccessor f t (walk := false)
-    modify fun s => { s with fns := s.fns.push (.fn (f ++ "_init") #[] t body) |>.push acc }
+    let items ← cafAccessor f t body (walk := false)
+    modify fun s => { s with fns := s.fns ++ items }
   else
     modify fun s => { s with fns := s.fns.push (.fn f #[] t body) }
   return (some (.call f #[] #[]), inf)
@@ -319,8 +342,8 @@ def boxedConst (v : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
   let f ← fresh "l2r_boxed_"
   modify fun s => { s with boxedConstFns := s.boxedConstFns.insert key f }
   let body : RR.Block := ⟨#[("c", some t, v)], ← boxValue (.var "c") t⟩
-  let acc ← cafAccessor f RR.Ty.box (walk := false)
-  modify fun s => { s with fns := s.fns.push (.fn (f ++ "_init") #[] RR.Ty.box body) |>.push acc }
+  let items ← cafAccessor f RR.Ty.box body (walk := false)
+  modify fun s => { s with fns := s.fns ++ items }
   return .call f #[] #[]
 
 /-- `e : t` boxed (the box API's `boxValue`), as native Lean boxes:

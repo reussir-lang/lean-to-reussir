@@ -79,9 +79,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
   match ← calleeOf f with
   | .initConst slot ty =>
     let t ← lowerType ty
-    let (st, boxed) ← cellStorage t
-    let v := RR.Expr.call "l2r_once_get" #[st] #[.atom (toString slot)]
-    let v := if boxed then .field v 0 else v
+    let v := (← onceCell t).read (.atom (toString slot))
     let (e, t) ← applyChain v t ctx args
     coerce e t rty
   | .code fn params ret keep =>

@@ -341,6 +341,34 @@ pub fn pop_context(base: u64, n: u64) {
     }
 }
 
+/// Set slot `slot` to the field of the one-field variant `cell` of a
+/// shared enum (lean2rr's `L2RConstCell`, through which it sets the
+/// once-cells of the program's types: the prelude's `l2r_once_put_field`):
+/// the slot gets the field's word, as `set_raw(slot, word_of(field))`
+/// would, and the variant's cell keeps the field's reference for the rest
+/// of the run (it is never released: neither is the slot's value). The
+/// cell is Reussir's cell of a shared enum of at most 2^16 constructors
+/// (`any::WIDE_BIT`): its first 8 bytes are the 32-bit count and the
+/// 32-bit tag, `tag` (checked: a different layout is reported, not read
+/// wrongly), then the field, one word (lean2rr stores types that cross the
+/// FFI boundary only: a pointer or a handle).
+///
+/// # Safety
+/// `cell` is the address of such a cell, of variant `tag`, whose reference
+/// the caller gives up.
+#[inline(never)]
+pub unsafe fn put_field(slot: u64, cell: *const u8, tag: u64) {
+    let t = unsafe { (cell.add(4) as *const u32).read() };
+    if t as u64 != tag {
+        crate::internal_panic(&format!(
+            "leanrt: once slot {} set from a cell of tag {}, not {} (Reussir's layout of enum cells changed?)",
+            slot, t, tag
+        ));
+    }
+    let w = unsafe { (cell.add(8) as *const usize).read() };
+    set_raw(slot, w);
+}
+
 #[inline(never)]
 pub fn set_raw(slot: u64, raw: usize) {
     let vals = unsafe { &mut *SLOTS.0.get() };
@@ -414,5 +442,23 @@ mod tests {
         let h2 = h + 1;
         set_raw(h2, word_of(9u64));
         assert_eq!(get_raw(h2), 9);
+    }
+
+    // A slot set from a one-field variant's cell (lean2rr's `L2RConstCell`):
+    // it gets the word after the 8-byte header (count, tag).
+    #[test]
+    fn put_field_word() {
+        #[repr(C, align(8))]
+        struct Cell {
+            count: u32,
+            tag: u32,
+            field: usize,
+        }
+        let s = (FAST_SLOTS - 20) as u64;
+        let c = Cell { count: 1, tag: 3, field: 0x1234_5670 };
+        unsafe { put_field(s, &c as *const Cell as *const u8, 3) };
+        assert!(ready(s));
+        assert_eq!(get_raw(s), 0x1234_5670);
+        assert_eq!((c.count, c.tag), (1, 3));
     }
 }

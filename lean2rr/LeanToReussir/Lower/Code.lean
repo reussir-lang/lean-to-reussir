@@ -530,8 +530,8 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
   -- it is used (`uncachedConsts`, `chainConsts`). (One whose code is one
   -- string literal has no function at all: `litConsts`, above.)
   if d.params.isEmpty && !(← H.recomputeConst body) && !(← read).uncachedConsts.contains d.name then
-    let acc ← cafAccessor (fnName d.name) ret
-    modify fun s => { s with fns := s.fns.push (.fn (fnName d.name ++ "_init") #[] ret block) |>.push acc }
+    let items ← cafAccessor (fnName d.name) ret block
+    modify fun s => { s with fns := s.fns ++ items }
   else
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) params ret block) }
 

@@ -2453,6 +2453,25 @@ fn l2r_once_put<T>(slot : u64, v : T) -> u64 [{
     }
 }];
 
+// Store in slot `slot` the value that `w`, a one-field variant (number
+// `tag`) of a shared enum, holds: lean2rr's `L2RConstCell`, through which
+// it sets the once-cells of the program's types, so that this texture is
+// instantiated at one type, the same in every program (rrc's texture cache
+// hits), instead of `l2r_once_put` at each program type (lean2rr's
+// `onceCell`). The slot gets the field's word, which `l2r_once_get` at the
+// field's type reads; the variant's cell keeps the reference
+// (`leanrt::once::put_field`).
+#[ffi(import)]
+fn l2r_once_put_field<C>(slot : u64, tag : u64, w : C) -> u64 [{
+    {
+        const { assert!(::std::mem::size_of::<[:C:]>() == 8) };
+        let p: *const u8 = unsafe { ::std::mem::transmute_copy(&w) };
+        ::std::mem::forget(w);
+        unsafe { leanrt::once::put_field(slot, p, tag) };
+        0
+    }
+}];
+
 // Mutable global cells (e.g. the current standard streams for
 // `IO.setStdout`/`setStderr`/`setStdin`), in the same slot numbering as the
 // once-cells: `l2r_once_has`/`l2r_once_get` read them, `l2r_once_set`
