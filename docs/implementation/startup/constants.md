@@ -9,9 +9,9 @@ runtime. Plan
 - **What:** A declaration without parameters becomes `<f>_init` (its
   body) and an accessor `<f>` that tests the constant's once-cell inline,
   computes and stores the value if it is not there, then reads the cell
-  (next entry). Exceptions: a constant whose code is one string literal
-  (the literal cache, "A constant of one string literal is read from the
-  literal cache", below), the constants that `cheap-consts` recomputes and
+  (next entry). Exceptions: a constant whose code is one string literal,
+  or one read of such a constant (the literal cache, "A constant of one
+  string literal is read from the literal cache", below), the constants that `cheap-consts` recomputes and
   the closed terms used once, by another constant (below). The cell stores a boundary type; another value is wrapped
   in an `ElemBox`. The value is never freed. Program constants are forced
   at startup ([order.md](order.md)); toolchain constants and closed terms
@@ -148,19 +148,40 @@ runtime. Plan
   an initializer or in a constant's computation needs nothing more.
   Startup does not force such a program constant (`startupChain` leaves
   out its step): making a literal has no effect, and its first read makes
-  it. The string is not marked persistent: no task can be in a string, so
-  no walk looks into it, and a once-cell keeps a string constant the same
-  way (by its reference). The table holds each text once, so two
+  it. The cache does not mark the string persistent; it needs no mark, as
+  the slot's reference keeps the string alive and not unique for the run.
+  The string can get the persistent bit later, through
+  `persist::mark_box` (`runtime/leanrt/src/persist.rs`): when a walk for
+  tasks (`l2r_persist_T`) meets it as the payload of a box, or when
+  `Runtime.markPersistent` takes it. That is harmless: the bit keeps a
+  cell from being freed and from being unique, which the slot's reference
+  does already, and no walk looks into a string (no task can be in one).
+  A once-cell keeps a string constant the same way (by its reference).
+  The table holds each text once, so two
   constants with equal text share one slot: their reads give one object
   (natively Lean's closed-term cache also makes most equal closed terms
   one constant; identity is not preserved in general, plan §9 and
   [../representations/identity.md](../representations/identity.md)).
-  Other constants keep their machinery: more code than the literal, a
-  literal of another type, a constant whose code reads such a constant
-  (Lean often extracts the literal of `def b : String := "b"` into a
-  closed term that `b` reads: `b` keeps its once-cell, the closed term has
-  none), a closed term used once, by another constant (`uncachedConsts`),
-  an `initialize` constant.
+  The rule is transitive: a declaration without parameters of type
+  `String` whose code is one read of such a constant (`let x : String :=
+  c; return x`) is one too, with `c`'s literal (the same `id`).
+  `literalConsts` follows such reads to a fixed point, so a chain of any
+  length ends at its literal; a cycle never reaches one. Lean 4.34 makes
+  these shapes: `extractClosed` puts the literal of `def greet : String :=
+  "hello"` into a closed term `greet._closed_0` when other code reads the
+  same literal, and `greet` reads the closed term (when only `greet`
+  reads it, `spliceChainConsts` puts the literal back into `greet`); a
+  constant that reads a `@[noinline]` one, `def b : String := a`, reads
+  `a`, and so on. The exclusions below hold for each constant of a
+  chain. The code is that of Lean's compilation, so `implemented_by` is
+  followed already (a read of the declaration is a read of its
+  implementation), an extern without a Lean body has no code, and
+  `@[export]` does not change what a read gives.
+  Other constants keep their machinery: more code than the literal or the
+  read, a literal of another type, a read of a constant that is not one
+  (one that computes its string, an `initialize` constant), a closed term
+  used once, by another constant (`uncachedConsts`), an `initialize`
+  constant.
   Example, the closed term `IO.Error.toString._closed_0`
   (`"already exists"`, literal 11 of the classic program X13). Before, a
   read was `l_IO_Error_toString___l2r_0____closed__0()`, with these two
@@ -181,6 +202,30 @@ runtime. Plan
   ```
 
   Now a read is `l2r_str_lit_cached(11)`, and the two functions are gone.
+  Example of the transitive rule, `def greet : String := "hello"` with
+  `@[noinline] def hi (n : Nat) : String := if n == 0 then greet else
+  "bye"`: Lean's code is `greet._closed_0 := "hello"`, `greet :=
+  greet._closed_0`, and `hi` reads `greet._closed_0`. Before, the closed
+  term was a literal constant, but `greet` had these two functions and a
+  startup step, `let caf1 = l_greet___l2r_0_();`:
+
+  ```
+  #[transform_anchor]
+  fn l_greet___l2r_0__init() -> LStr {
+      let x0 : LStr = l2r_str_lit_cached(0);
+      x0
+  }
+  fn l_greet___l2r_0_() -> LStr {
+      let r : u64 = if l2r_once_ready(1) { 0 } else {
+          if l2r_once_claim(1) { 0 } else { l2r_once_put<LStr>(1, l_greet___l2r_0__init()) }
+      };
+      l2r_once_get<LStr>(1)
+  }
+  ```
+
+  Now `greet` has no function, no once-cell and no startup step; a read
+  of `greet` or of its closed term is `l2r_str_lit_cached(id)` with the
+  id of `"hello"`.
 - **Why:** These constants were 2286 of the 5788 accessor and `_init`
   pairs in 50 programs: 0.97 MB of their 35 MB of `.rr` (2.8%; 11% in
   L11; size survey of 2026-10-10). After the change the 50 programs have
@@ -190,7 +235,13 @@ runtime. Plan
   longer in the literal table, since nothing reads them (−41.5% for each
   driver). A read allocates nothing after the first, as natively (test `RtConstLiteralCache` and its `.alloc` file: a
   read that made the string each time failed it, 99000 more allocations
-  at 100000 reads).
+  at 100000 reads). The transitive rule (a follow-up) finds three more
+  constants in the ten programs L11, L17, X13, E01, Z06g, Z01c, Z03d,
+  RtIO, Z02 and L10: L10's `inputText` and Z03d's `specialCharacters` and
+  `caseFoldData` (the other eight have none: their code is byte for byte
+  the same). So three accessor pairs and three startup steps go; the
+  `.rr` of the ten is 14,861,434 → 14,859,816 B (Z03d −0.14%, L10
+  −0.09%).
 - **Where:** `Emit/Program.lean`: `literalConsts`, `lowerProgram`;
   `LowerBase.lean`: `LowerCtx.litConsts`, `strLitId`, `strLitCached`;
   `Lower/Values.lean`: `lowerConstApp`; `Lower/Code.lean`: `lowerDecl`;
@@ -199,7 +250,8 @@ runtime. Plan
   `l2r_lit_ready`, `l2r_lit_put`, `l2r_lit_get`;
   `runtime/leanrt/src/string.rs`: `LIT_TABLE`, `LIT_FAST`, `LIT_REC`,
   `lit_ready`, `lit_put`, `lit_get`. Tests: `RtConstLiteralCache`
-  (`.alloc`); `tests/runtime/const-read-check.sh` with `RtConstReads`
+  (`.alloc`; the transitive rule: `motto`, the chain `chainC`, `chainB`,
+  `chainA`, read in its loop); `tests/runtime/const-read-check.sh` with `RtConstReads`
   (`labelSum`: a literal read in a loop is one load, no call);
   `tests/runtime/rr-fingerprint.py` reads `l2r_str_lit_cached(id)` as the
   literal's text.

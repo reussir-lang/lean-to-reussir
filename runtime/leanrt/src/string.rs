@@ -663,9 +663,18 @@ extern "C" fn shared_empty_init() -> LStr {
 /// There is no claim, unlike a once-cell (`once::claim`): making a
 /// literal's string runs no Lean code, takes no lock and cannot switch the
 /// scheduler's context, so no other context runs between the test and the
-/// store. Single-threaded as `once`: the initializers run on the process's
-/// main thread before `main`'s thread starts, and Lean code then runs on
-/// `main`'s thread only.
+/// store.
+///
+/// The cache is single-threaded, as `once` is, and has no synchronization:
+/// its words are plain loads and stores. lean2rr runs Lean code on one OS
+/// thread at a time: the initializers run on the process's main thread
+/// before `main`'s thread starts, and Lean code then runs on `main`'s
+/// thread only (the scheduler's contexts take turns on it). leanrt does not
+/// use lean-runtime's threads mode (feature `threads`, `sched::mt`;
+/// scripts/l2r.py builds `sched`). With Lean code on several threads at
+/// once, `lit_put`'s store would have to release and the read's load to
+/// acquire, and two threads could fill one slot (the second `lit_put`
+/// reports "set twice").
 pub const LIT_FAST: usize = 1 << 16;
 
 #[repr(transparent)]

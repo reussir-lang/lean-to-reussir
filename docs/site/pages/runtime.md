@@ -230,7 +230,10 @@ thread that waits blocks its context.
   the slot; each read takes a new reference. So a read value is never
   unique, and an update copies it. Making a literal cannot block, so no
   context waits for another here. Startup does not make these constants:
-  the first read makes each one.
+  the first read makes each one. A constant whose code reads such a
+  constant is one too, with the same slot. Example: Lean puts the literal
+  of `def greet : String := "hello"` into a closed term, and `greet` reads
+  that closed term. So `greet` has no once-cell either.
 - **Library initializers.** The `initialize` declarations of `Init` and
   `Std` run at their module's place in the import order, as natively. They
   run also when the program does not use them, because their effects are

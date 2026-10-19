@@ -307,7 +307,10 @@ entry point or from the runtime's entries. See
 - A constant whose code is one string literal has no once-cell (pass
   `literal-consts`). A read is `l2r_str_lit_cached(id)`: the runtime keeps
   one slot per literal of the program, and the first read makes the string.
-  A read is one load and a test, as for a once-cell.
+  A read is one load and a test, as for a once-cell. A constant whose code
+  reads such a constant, as `def greet : String := "hello"` reads the closed
+  term of its literal, has no once-cell either. lean2rr follows a chain of
+  such reads to its literal.
 - Closed terms (`extractClosed`) are evaluated lazily, once.
 - The startup work is cut into functions of at most 128 steps, because one
   long chain overflows rrc's stack.

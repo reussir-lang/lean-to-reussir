@@ -103,8 +103,8 @@ structure LowerCtx where
   /-- Constants evaluated where they are used instead of cached in a
   once-cell (`chainConsts`, see `lowerDecl`). -/
   uncachedConsts : NameSet := {}
-  /-- Constants whose code is one string literal, with the literal: they
-  get no function, and a read calls the runtime's literal cache
+  /-- Constants whose code is one string literal, or one read of such a
+  constant, with the literal: they get no function, and a read calls the runtime's literal cache
   (`strLitCached`; `literalConsts`, Emit/Program; `PassConfig.literalConsts`). -/
   litConsts : NameMap String := {}
   /-- Unary Lean definitions returning a `String` that are replaced by a

@@ -12,16 +12,34 @@ natively, where such a constant is made once and shared:
 - a read value is never unique: `String.push` on it copies it, so the next
   read gives the literal again;
 - two reads of one literal are one object (`sameObj`, `ptrEq`).
+Transitively (follow-up of the size survey), a constant whose code is one
+read of such a constant is one too: Lean makes the literal of the program
+constant `motto` a closed term that `motto` reads; `chainA` (kept a read by
+`@[noinline]`) reads its closed term, `chainB` reads `chainA` (a chain of
+two reads) and `chainC` reads `chainB`. Their reads, also in the loop
+(`userWord`), give their literal, never unique, one object per text.
 The argument is the loop's length (default 1000). -/
 
 @[noinline] def word (i : Nat) : String :=
   if i % 3 == 0 then "fizz" else if i % 3 == 1 then "buzz" else "fizzbuzz"
 
--- The total length of `n` words: one literal read per iteration.
+def motto : String := "motto"
+
+@[noinline] def chainA : String := "chain"
+
+@[noinline] def chainB : String := chainA
+
+def chainC : String := chainB
+
+@[noinline] def userWord (i : Nat) : String :=
+  if i % 3 == 0 then motto else if i % 3 == 1 then chainB else chainC
+
+-- The total length of `n` words and `n` user constants: two literal reads
+-- per iteration.
 def lengths (n : Nat) : Nat := Id.run do
   let mut s := 0
   for i in [0:n] do
-    s := s + (word i).length
+    s := s + (word i).length + (userWord i).length
   return s
 
 @[noinline] def taskWord (i : Nat) : String :=
@@ -53,3 +71,6 @@ def main (args : List String) : IO Unit := do
   let w2 := w.push '!'
   IO.println s!"{w2} {w} {word 0} {word 3} {sameObj (word 0) (word 3)}"
   IO.println s!"{banner.push '?'} {banner} {sameObj banner banner}"
+  let c := chainB.push '!'
+  IO.println s!"{motto} {chainA} {chainB} {chainC} {c} {chainB} {userWord 0} {userWord 1} {userWord 2}"
+  IO.println s!"{sameObj chainA chainB} {sameObj chainB chainC} {sameObj (userWord 1) (userWord 2)}"

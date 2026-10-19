@@ -478,8 +478,9 @@ end
 /-- Lower a declaration with code to a Reussir function. -/
 def lowerDecl (d : Decl .pure) : LowerM Unit := do
   let .code body := d.value | return
-  -- A constant whose code is one string literal has no function: its reads
-  -- call the literal cache (`strLitCached`).
+  -- A constant whose code is one string literal (or one read of such a
+  -- constant) has no function: its reads call the literal cache
+  -- (`strLitCached`).
   if (← read).litConsts.contains d.name then return
   let body := H.prepareBody body
   let (ps, r) := splitFnType d.type d.params.size

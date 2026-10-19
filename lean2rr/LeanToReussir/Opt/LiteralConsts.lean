@@ -18,7 +18,10 @@ literal table (`strLitCached`, LowerBase). The cache has one slot per
 literal id (`leanrt::string::lit_ready`): the first read makes the string
 and stores it, every read takes a new reference to it. A read allocates
 nothing after the first, and its value is never unique, as a once-cell's.
-The program computes the same results. Without this pass such a constant is
+So does a constant whose code is one read of such a constant (`def greet :
+String := "hello"`, which reads the closed term of its literal), with the
+same literal, along a chain of such reads. The program computes the same
+results. Without this pass such a constant is
 a once-cell accessor and its `_init`, as any constant.
 -/
 

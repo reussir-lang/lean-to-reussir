@@ -67,8 +67,8 @@ structure PassConfig where
   2^63) is boxed once and kept in a once-cell, as native Lean's
   `_boxed_const`. Plain: boxed where it is used. -/
   boxedConsts : Bool := false
-  /-- Whether a constant whose code is one string literal has no once-cell
-  accessor: its reads call the runtime's literal cache
+  /-- Whether a constant whose code is one string literal, or one read of
+  such a constant, has no once-cell accessor: its reads call the runtime's literal cache
   (`l2r_str_lit_cached`). Plain: a once-cell accessor and its `_init`, as
   any constant. -/
   literalConsts : Bool := false

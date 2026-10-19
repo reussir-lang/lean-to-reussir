@@ -333,16 +333,41 @@ with the literal (optimization `literal-consts`): they get no function, and
 a read calls the runtime's literal cache (`strLitCached`). Not a closed term
 evaluated where it is used (`uncached`, `chainConsts`: it has no once-cell
 anyway), nor an `initialize` constant (`inits`: read from its own
-once-cell, `Callee.initConst`). -/
-def literalConsts (decls : Array (Decl .pure)) (uncached inits : NameSet) : NameMap String :=
-  decls.foldl (init := {}) fun m d =>
-    if !d.params.isEmpty || !d.type.isConstOf ``String || uncached.contains d.name || inits.contains d.name then m
-    else match d.value with
-      | .code (.let l (.return x)) =>
-        match l.value with
-        | .lit (.str s) => if x == l.fvarId then m.insert d.name s else m
-        | _ => m
-      | _ => m
+once-cell, `Callee.initConst`).
+
+Transitively, a constant whose code is one read of such a constant (`let
+x : String := c; return x`) is one too, with `c`'s literal: Lean's
+`extractClosed` makes the literal of `def greet : String := "hello"` a
+closed term `greet._closed_0` that `greet` reads (when the closed term has
+other reads; read by `greet` only, it is spliced into `greet`:
+`spliceChainConsts`). Such reads are followed to a fixed point (a chain of
+any length; a cycle never reaches a literal). The same exclusions hold for
+every constant of the chain. The code is that of Lean's compilation, so an
+`implemented_by` is already followed (a read of the declaration is a read
+of its implementation), an extern without a Lean body has no code, and an
+`@[export]` does not change what a read gives. -/
+def literalConsts (decls : Array (Decl .pure)) (uncached inits : NameSet) : NameMap String := Id.run do
+  let mut m : NameMap String := {}
+  -- (constant, the constant it reads), for the transitive rule.
+  let mut reads : Array (Name × Name) := #[]
+  for d in decls do
+    if !d.params.isEmpty || !d.type.isConstOf ``String || uncached.contains d.name || inits.contains d.name then
+      continue
+    let .code (.let l (.return x)) := d.value | continue
+    unless x == l.fvarId do continue
+    match l.value with
+    | .lit (.str s) => m := m.insert d.name s
+    | .const c _ #[] _ => reads := reads.push (d.name, c)
+    | _ => pure ()
+  -- Each round takes the reads of constants found so far; it stops when a
+  -- round takes none.
+  repeat
+    let (ready, rest) := reads.partition fun (_, c) => m.contains c
+    if ready.isEmpty then break
+    for (d, c) in ready do
+      if let some s := m.find? c then m := m.insert d s
+    reads := rest
+  return m
 
 /-- The declarations the entry point calls: `main`, the error printer, and
 the startup steps' instances. Stage 3 takes the program's reachable code

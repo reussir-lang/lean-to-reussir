@@ -640,8 +640,9 @@ path (`once::claim`) computes it or waits for the scheduler context
 computing it. The tables (`once::FAST`, `once::FLAGS`) mirror the record
 of the slots (`once::SLOTS`).
 
-**Literal constants.** A constant whose code is one string literal has no
-once-cell (lean2rr's optimization `literal-consts`): a read is the
+**Literal constants.** A constant whose code is one string literal, or one
+read of such a constant, has no once-cell (lean2rr's optimization
+`literal-consts`): a read is the
 generated `l2r_str_lit_cached(id)`, which reads the literal cache in
 `leanrt::string`, one slot per id of the program's literal table. What:
 `lit_ready(id)` loads the slot's word from a static table at a fixed
@@ -651,7 +652,10 @@ read the generated code makes the string (`l2r_str_lit`) and `lit_put`
 moves its reference into the slot; `lit_get` then loads the word again and
 takes a new reference. The slot keeps its reference for the run, so a value
 read is never unique (an update copies it), as a constant's. There is no
-claim: making a literal runs no Lean code and cannot block. `lit_put` is
+claim: making a literal runs no Lean code and cannot block. The cache is
+single-threaded, as `once` is, with no synchronization: Lean code runs on
+one OS thread at a time, and leanrt does not use lean-runtime's threads
+mode. `lit_put` is
 `#[cold]` (the branch hint: the first read's path is out of line). Why:
 these constants were 2286 of the 5788 once-cell accessor and `_init`
 pairs of 50 programs (0.97 MB of `.rr`), and natively such a closed term

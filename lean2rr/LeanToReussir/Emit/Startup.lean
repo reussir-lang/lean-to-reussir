@@ -714,8 +714,9 @@ def startupChain (errStr : Name) (startup : Array StartupStep) : LowerM String :
       let j := stop - 1 - i
       match startup[j]! with
       | .caf inst =>
-        -- A constant whose code is one string literal has no function, and
-        -- making it has no effect: its first read makes it (`litConsts`).
+        -- A constant whose code is one string literal (or one read of such a
+        -- constant) has no function, and making it has no effect: its first
+        -- read makes it (`litConsts`).
         unless (← read).litConsts.contains inst do
           code := s!"let caf{j} = {fnName inst}();\n" ++ code
       | .ioUnit inst =>

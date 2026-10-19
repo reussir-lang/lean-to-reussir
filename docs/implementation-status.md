@@ -564,7 +564,7 @@ soundness.
 | `compact-arrays` | an `Array` of a scalar is a compact `RVec<u8\|u16\|u32\|u64\|f32\|f64>` (`Bool` and small enumerations as bytes), for each storage kind that a whole-program check finds never meets an array of boxes; the loops of `Array.map` typed at their element types. lean-zip's compression of the Silesia corpus: peak 1.9 GB before, 512 MB after (native 2.17 GB); matrix (`Array UInt64`) fully compact |
 | `placeholder-cache` | Lean's placeholder values built once |
 | `boxed-consts` | a constant whose boxing allocates (a `Float`, a `UInt64` from 2^63) boxed once, as native Lean's `_boxed_const` |
-| `literal-consts` | a constant whose code is one string literal read from the runtime's literal cache, without a once-cell accessor and `_init`: 50 programs' `.rr` 35.2 MB → 27.8 MB (2284 accessor pairs fewer; L11 −11.9%; lean-zip's two drivers (Survey.Main, ZipBench) −41.5%, as their unread `bv_decide` certificate strings, 3 MB, leave the literal table) |
+| `literal-consts` | a constant whose code is one string literal, or one read of such a constant, read from the runtime's literal cache, without a once-cell accessor and `_init`: 50 programs' `.rr` 35.2 MB → 27.8 MB (2284 accessor pairs fewer; L11 −11.9%; lean-zip's two drivers (Survey.Main, ZipBench) −41.5%, as their unread `bv_decide` certificate strings, 3 MB, leave the literal table) |
 | `float-lits` | float literals computed at compile time |
 | `cheap-consts` | constants made of small literals (one-word `Nat`/`Int` values only) recomputed instead of cached |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code |

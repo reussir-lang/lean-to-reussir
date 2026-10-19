@@ -114,7 +114,7 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/string.rs`, and
   round-trips exactly. Literals are deduplicated by content. Each call
   makes a new string (a literal in a constant's body, which runs once, or
   in code that Lean did not extract). A read of a constant whose code is
-  one literal is `l2r_str_lit_cached(id)` instead: the runtime's literal
+  one literal (or one read of such a constant) is `l2r_str_lit_cached(id)` instead: the runtime's literal
   cache keeps the string made at the first read, one slot per id
   ([../startup/constants.md](../startup/constants.md#a-constant-of-one-string-literal-is-read-from-the-literal-cache)).
 - **Why:** A Reussir `str` argument goes through a stack slot whose

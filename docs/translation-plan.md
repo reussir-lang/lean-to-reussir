@@ -2101,7 +2101,9 @@ unobservable, and it is cheaper than a once-cell read (optional pass
 `_boxed_const_N` (optional pass `boxed-consts`): the default of `a[i]!`
 on an `Array Float` is `instInhabitedFloat`, and boxing it at every read
 was a new cell per read. A constant whose code is one string literal
-(many closed terms are) gets no once-cell: a read calls the runtime's
+(many closed terms are), or one read of such a constant (a `def greet :
+String := "hello"` that reads the closed term of its literal), gets no
+once-cell: a read calls the runtime's
 literal cache, one slot per literal of the program, which makes the string
 at the first read and keeps it (optional pass `literal-consts`; a once-cell
 accessor and its `_init` per constant were 0.97 MB of 35 MB of `.rr` in 50
