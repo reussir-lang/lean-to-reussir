@@ -1,11 +1,11 @@
 # Pay-nothing baseline of Deriv (tests/classic/Deriv.lean), arguments '8'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
 allocs 464349
-bytes 10505232
+bytes 10505168
 native-allocs 553749
 native-bytes 12062030
-items 162
-functions 124
+items 161
+functions 123
 conversion-fns 0
 conversion-sites 0
 box-sites 38
@@ -69,7 +69,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
-item l2r_main_body c48da136c83a
+item l2r_main_body 73a03857e097
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
@@ -86,8 +86,8 @@ item l2r_str_lit_fill 1b8397330b80
 item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
 item l2r_zero_# 272126066dab
-item l2r_zero_# 426eecea9538
 item l2r_zero_# 6065a415a850
+item l2r_zero_# 64b17cf5704f
 item l2r_zero_# 8cd89651b501
 item l2r_zero_# 8ce037aaca3e
 item l2r_zero_# 965581aefdf9
@@ -98,7 +98,6 @@ item l2r_zero_# b4787830fc3f
 item l2r_zero_# d71d5ec18d04
 item l2r_zero_# f33d0f6f8f3a
 item l2r_zero_# fb7fc53512ff
-item l2r_zero_#_init 408c8ca4b52d
 item l2r_zero_#_init 565f7e35a601
 item l2r_zero_#_init b0b2f572a1b5
 item l2r_zero_#_init b6ed8bb6c7fe
@@ -154,7 +153,7 @@ item l_IO_Error_toString___l2r_#_ f0a61bd77d51
 item l_IO_print___at___00IO_println___at___00Expr_deriv_spec__0_spec__0___l2r_#_ 3cc6a809e567
 item l_IO_println___at___00Expr_deriv_spec__0___l2r_#_ 84030112250a
 item l_IO_userError___l2r_#_ e5a4f2aa2427
-item l_List_head_x3f___l2r_#____redArg___l2r__flat 16f153cd41ba
+item l_List_head_x3f___l2r_#____redArg___l2r__flat 481eddf2b93a
 item l_String_Slice_isNat___l2r_#____closed__0 a2d18430389b
 item l_String_Slice_isNat___l2r_#____closed__0_init ed2bd87a03cb
 item l_String_Slice_isNat___l2r_#____l2r__flat 5eaca2313f66
@@ -163,7 +162,7 @@ item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#__
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
 item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ffd80adacb14
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
-item l_main___l2r_#_ eb51d3b64c4c
+item l_main___l2r_#_ 67cec5d5038d
 item l_main___l2r_#____closed__1 74577e80cb31
 item l_main___l2r_#____closed__1_init 8a7f238ccf62
 item l_main___l2r_#____closed__2 1125e7d1db85

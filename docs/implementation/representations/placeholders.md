@@ -94,7 +94,11 @@ element being updated stays unshared (`Array.modifyMUnsafe`,
   unit) is kept in a once-cell like a constant, but without the
   constant's walk for tasks (`cafAccessor`'s `walk := false`); nullary
   values (a nullary constructor, a function value's `z`) are not cached:
-  they do not allocate.
+  they do not allocate. With the optional pass `literal-consts` the
+  `String` placeholder has no once-cell either: it is the empty string of
+  the runtime's literal cache (`l2r_zero_N() -> LStr {
+  l2r_str_lit_cached(k) }`, `strLitCached`), shared as a once-cell's value
+  is (see [literal constants](../startup/constants.md)).
 - **Why:** `Array.modify` stores one placeholder per update: on
   `Array (Array Nat)` that allocated an empty array per update (F07,
   829f20a). A placeholder is never inspected, so a shared value does as
@@ -107,7 +111,8 @@ element being updated stays unshared (`Array.modifyMUnsafe`,
   reference `ST.Ref.take` left holding a placeholder), as native skips
   `box(0)` (C01R-03, tests `RtZeroWalkRef`, `RtZeroWalkRefNoCache`).
 - **Where:** `Lower/Conv.lean`: `zeroTry`, `cafAccessor`;
-  `Opt/PlaceholderCache.lean`; `LowerCtx.cachePlaceholders`.
+  `Opt/PlaceholderCache.lean`; `LowerCtx.cachePlaceholders`,
+  `LowerCtx.literalCache` (the `String` placeholder).
 - **Remove only if:** the pass is off; then each placeholder is built
   where it is used.
 

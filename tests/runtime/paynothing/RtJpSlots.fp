@@ -1,11 +1,11 @@
 # Pay-nothing baseline of RtJpSlots (tests/runtime/RtJpSlots.lean), arguments ''.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 109624
-bytes 2284232
-native-allocs 229964
-native-bytes 4374515
-items 191
-functions 133
+allocs 109621
+bytes 2284280
+native-allocs 229952
+native-bytes 4374339
+items 190
+functions 132
 conversion-fns 0
 conversion-sites 0
 box-sites 40
@@ -93,7 +93,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
-item l2r_main_body 322074552e76
+item l2r_main_body 26d03795c100
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
 item l2r_run_main d750382a583f
@@ -111,9 +111,9 @@ item l2r_task_walk 9c19386ba6fa
 item l2r_zero_# 098354a8ae5a
 item l2r_zero_# 272126066dab
 item l2r_zero_# 3cb3d04ef333
-item l2r_zero_# 426eecea9538
 item l2r_zero_# 4621a50aa2da
 item l2r_zero_# 6065a415a850
+item l2r_zero_# 64b17cf5704f
 item l2r_zero_# 8cd89651b501
 item l2r_zero_# 8ce037aaca3e
 item l2r_zero_# 9f3e31b628c0
@@ -123,7 +123,6 @@ item l2r_zero_# d2129bcee136
 item l2r_zero_# d71d5ec18d04
 item l2r_zero_# f33d0f6f8f3a
 item l2r_zero_# fb7fc53512ff
-item l2r_zero_#_init 408c8ca4b52d
 item l2r_zero_#_init 565f7e35a601
 item l2r_zero_#_init 6a8819e684fa
 item l2r_zero_#_init b0b2f572a1b5
@@ -165,7 +164,7 @@ item l_IO_print___at___00loop_spec__0___l2r_#_ 52f059a1bed9
 item l_IO_println___at___00main_spec__1___l2r_#_ 88b526d3a65e
 item l_IO_userError___l2r_#_ e5a4f2aa2427
 item l_List_foldl___at___00List_toString___at___00main_spec__0_spec__0___l2r_#_ bfb7208b375e
-item l_List_head_x3f___l2r_#____redArg___l2r__flat 16f153cd41ba
+item l_List_head_x3f___l2r_#____redArg___l2r__flat 481eddf2b93a
 item l_List_toString___at___00main_spec__0___l2r_#_ a13aaff42db8
 item l_String_Internal_anyImpl___l2r_#_ 9049da56e465
 item l_String_Internal_isPrefixOfImpl___l2r_#_ 2ebcf6449e89
@@ -185,9 +184,9 @@ item l_addParenHeuristic___l2r_#____closed__0 1107ed4a2e22
 item l_addParenHeuristic___l2r_#____closed__0_init 5d200319dac5
 item l_addParenHeuristic___l2r_#____lam__0 bd87390da478
 item l_loop___l2r_#____closed__4 3534f69ed940
-item l_loop___l2r_#____l2r__flat 98bab54697da
-item l_loop___l2r_#____l2r__flat_sm 8fb4e1124d0f
-item l_main___l2r_#_ 2707c5add9da
+item l_loop___l2r_#____l2r__flat b722493f3119
+item l_loop___l2r_#____l2r__flat_sm 3863f54062d4
+item l_main___l2r_#_ eefcb9de13c5
 item l_main___l2r_#____closed__0 271aabf60790
 item l_main___l2r_#____closed__0_init 6e4078aa0b4d
 item l_main___l2r_#____closed__1 152d197b6926

@@ -1,11 +1,11 @@
 # Pay-nothing baseline of RtLazyFields (tests/runtime/RtLazyFields.lean), arguments ''.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 50281
-bytes 2214544
-native-allocs 64913
-native-bytes 2546211
-items 269
-functions 206
+allocs 50279
+bytes 2214480
+native-allocs 64901
+native-bytes 2546035
+items 268
+functions 205
 conversion-fns 0
 conversion-sites 0
 box-sites 191
@@ -99,7 +99,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
-item l2r_main_body 7aba442a6b56
+item l2r_main_body 40b6e65d5900
 item l2r_main_on_thread 4f4adafe091e
 item l2r_run_main d750382a583f
 item l2r_run_pending_tasks 39049c3ac015
@@ -115,9 +115,9 @@ item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
 item l2r_zero_# 098354a8ae5a
 item l2r_zero_# 272126066dab
-item l2r_zero_# 426eecea9538
 item l2r_zero_# 4621a50aa2da
 item l2r_zero_# 6065a415a850
+item l2r_zero_# 64b17cf5704f
 item l2r_zero_# 8cd89651b501
 item l2r_zero_# 8ce037aaca3e
 item l2r_zero_# 9f3e31b628c0
@@ -127,7 +127,6 @@ item l2r_zero_# d71d5ec18d04
 item l2r_zero_# f0bd81cd5793
 item l2r_zero_# f33d0f6f8f3a
 item l2r_zero_# fb7fc53512ff
-item l2r_zero_#_init 408c8ca4b52d
 item l2r_zero_#_init 565f7e35a601
 item l2r_zero_#_init 6a8819e684fa
 item l2r_zero_#_init 91c7f44e741a
@@ -192,7 +191,7 @@ item l_List_reverse___l2r_#____redArg b7c61df63ba4
 item l_List_toString___at___00main_spec__15___l2r_#_ b83415165143
 item l_List_toString___at___00main_spec__17___l2r_#_ fbb75b53520c
 item l_List_toString___at___00main_spec__8___l2r_#_ 62e9816ca2d7
-item l_Std_DTreeMap_Internal_Impl_Const_get_x3f___at___00__private_Std_Sync_Broadcast_0__Std_Bounded_Receiver_unsubscribe_spec__1___l2r_#____redArg___l2r__flat be2a1e28d77c
+item l_Std_DTreeMap_Internal_Impl_Const_get_x3f___at___00__private_Std_Sync_Broadcast_0__Std_Bounded_Receiver_unsubscribe_spec__1___l2r_#____redArg___l2r__flat 73c9ff151c6a
 item l_Std_DTreeMap_Internal_Impl_erase___at___00__private_Std_Sync_Broadcast_0__Std_Bounded_Receiver_unsubscribe_spec__3___l2r_#____redArg d89eec177207
 item l_Std_DTreeMap_Internal_Impl_foldlM___at___00Std_DTreeMap_Internal_Impl_foldl___at___00main_spec__12_spec__14___l2r_#_ 3ac1fa1641b7
 item l_Std_DTreeMap_Internal_Impl_insert___at___00__private_Std_Sync_Broadcast_0__Std_Bounded_subscribe_spec__0___l2r_#____redArg cea08294ea97
@@ -239,7 +238,7 @@ item l_instInhabitedU___l2r_#_ e8c4fc772b80
 item l_instInhabitedU___l2r_#__init e8b717927ef1
 item l_instInhabitedU_default___l2r_#_ a9bece088bff
 item l_instInhabitedU_default___l2r_#__init e628d6709f95
-item l_main___l2r_#_ c6a00c07386c
+item l_main___l2r_#_ 527a35d7622d
 item l_main___l2r_#____closed__0 b4520b0b59ff
 item l_main___l2r_#____closed__0_init fd656884f724
 item l_main___l2r_#____closed__1 93452f96e265

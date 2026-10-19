@@ -320,7 +320,10 @@ runtime. Plan
   `LowerBase.lean`: `LowerCtx.litConsts`, `strLitId`, `strLitCached`;
   `Lower/Values.lean`: `lowerConstApp`; `Lower/Code.lean`: `lowerDecl`;
   `Emit/Startup.lean`: `startupChain`; `Lower/Finish.lean`:
-  `anchoredFns`; `Opt/LiteralConsts.lean`; `runtime/prelude.rr`:
+  `anchoredFns`; `Lower/Conv.lean`: `zeroTry` (the `String` placeholder
+  is the cached empty string, without a once-cell,
+  [placeholders](../representations/placeholders.md#placeholders-that-allocate-are-built-once));
+  `Opt/LiteralConsts.lean`; `runtime/prelude.rr`:
   `l2r_lit_ready`, `l2r_lit_put`, `l2r_lit_get`;
   `runtime/leanrt/src/string.rs`: `LIT_TABLE`, `LIT_FAST`, `LIT_REC`,
   `lit_ready`, `lit_put`, `lit_get`. Tests: `RtConstLiteralCache`

@@ -185,7 +185,9 @@ would allocate (a string, an array, a record, a reference, a boxed unit)
 is built once and kept in a once-cell like a constant (`cafAccessor`, but
 without the walk for tasks: see there): `Array.modify` stores one per
 update, and it is never inspected, so a shared value does as well as a
-fresh one. -/
+fresh one. With the literal cache (`literalCache`) the `String`
+placeholder is the cached empty string instead (`strLitCached`), shared
+already, so it has no once-cell. -/
 partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
   let inf := 1000000000
   if t == .unit then return (some .unitVal, inf)
@@ -219,7 +221,11 @@ partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
         pure (some ⟨#[("z", some (.named "u64"), .atom "0")], .call "l2r_nat_small" #[] #[.var "z"]⟩, inf)
       else if n == "Int" then
         pure (some ⟨#[("z", some (.named "i64"), .atom "0")], .call "l2r_int_small" #[] #[.var "z"]⟩, inf)
-      else if n == "LStr" then pure (some (.ofExpr (← strLit "")), inf)
+      else if n == "LStr" then
+        -- With the literal cache the empty string is a cached literal, as a
+        -- literal constant (`strLitCached`): no once-cell (see below).
+        let e ← if (← read).literalCache then strLitCached "" else strLit ""
+        pure (some (.ofExpr e), inf)
       else if n == boxName then pure (some (.ofExpr (← boxZero)), inf)
       else if ← isRefType t then
         -- A reference (never used: any cell will do).
@@ -289,7 +295,9 @@ partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
   -- allocate).
   let heap ← match t with
     | .named n =>
-      if n == "LStr" || (n == boxName && boxZeroAllocates) || (← isRefType t) then pure true
+      -- A `String` placeholder from the literal cache is shared already.
+      if n == "LStr" then pure !(← read).literalCache
+      else if (n == boxName && boxZeroAllocates) || (← isRefType t) then pure true
       else match (← get).typeInfos[n]? with
         | some info => pure (info.shape != .enumLike && !info.value)
         | none => pure (← elemBoxOf? t).isSome

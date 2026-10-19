@@ -1,11 +1,11 @@
 # Pay-nothing baseline of Qsort (tests/classic/Qsort.lean), arguments '80'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 9551
-bytes 3223624
-native-allocs 299433
-native-bytes 12739762
-items 149
-functions 112
+allocs 9549
+bytes 3223544
+native-allocs 299445
+native-bytes 12739938
+items 148
+functions 111
 conversion-fns 0
 conversion-sites 0
 box-sites 39
@@ -65,7 +65,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
-item l2r_main_body 33d41fcfd8e5
+item l2r_main_body 993b9b35a3a5
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
 item l2r_run_main d750382a583f
@@ -82,8 +82,8 @@ item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
 item l2r_zero_# 272126066dab
 item l2r_zero_# 41b0dfc98745
-item l2r_zero_# 426eecea9538
 item l2r_zero_# 6065a415a850
+item l2r_zero_# 64b17cf5704f
 item l2r_zero_# 8cd89651b501
 item l2r_zero_# 8ce037aaca3e
 item l2r_zero_# 9f3e31b628c0
@@ -93,7 +93,6 @@ item l2r_zero_# d71d5ec18d04
 item l2r_zero_# f33d0f6f8f3a
 item l2r_zero_# fb7fc53512ff
 item l2r_zero_#_init 34d5caf59767
-item l2r_zero_#_init 408c8ca4b52d
 item l2r_zero_#_init 565f7e35a601
 item l2r_zero_#_init b0b2f572a1b5
 item l_ByteArray_toUInt64LE_x21___l2r_#_ 5aa10a15d1a4
@@ -130,7 +129,7 @@ item l_IO_println___at___00main_spec__3___l2r_#_ ddee66a4c9bd
 item l_IO_userError___l2r_#_ e5a4f2aa2427
 item l_Lean_Name_mkStr1___l2r_#_ 26d3431e96f7
 item l_Lean_Name_str___override___l2r_#_ 73b9590253f3
-item l_List_head_x3f___l2r_#____redArg___l2r__flat 16f153cd41ba
+item l_List_head_x3f___l2r_#____redArg___l2r__flat 481eddf2b93a
 item l_String_Slice_isNat___l2r_#____closed__0 a2d18430389b
 item l_String_Slice_isNat___l2r_#____closed__0_init ed2bd87a03cb
 item l_String_Slice_isNat___l2r_#____l2r__flat 5eaca2313f66
@@ -150,7 +149,7 @@ item l_checkSortedAux___l2r_#____closed__1 d7308faea791
 item l_checkSortedAux___l2r_#____closed__1_init 6e09ca4b3bd5
 item l_checkSortedAux___l2r_#____l2r__flat 29770027eca7
 item l_checksum___l2r_#_ 7d9e3d7d016b
-item l_main___l2r_#_ 1961bfd89d63
+item l_main___l2r_#_ 49560eabfcb6
 item l_mkPanicMessageWithDecl___l2r_#_ 9dc6fe993dc5
 item l_mkRandomArray___l2r_#_ e634152b0d32
 item l_mkStdGen___l2r_#____l2r__flat b08dfeda83c3

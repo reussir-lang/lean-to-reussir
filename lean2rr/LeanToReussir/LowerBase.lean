@@ -107,6 +107,11 @@ structure LowerCtx where
   constant, with the literal: they get no function, and a read calls the runtime's literal cache
   (`strLitCached`; `literalConsts`, Emit/Program; `PassConfig.literalConsts`). -/
   litConsts : NameMap String := {}
+  /-- Whether the runtime's literal cache serves string literals that are
+  read many times (`PassConfig.literalConsts`): besides `litConsts`, the
+  `String` placeholder (`zeroTry`) is a cached literal instead of a
+  once-cell. -/
+  literalCache : Bool := false
   /-- Unary Lean definitions returning a `String` that are replaced by a
   prelude function with the same results: definition ↦ prelude function and
   its parameter type (`PassConfig.preludeReplacements`). -/
