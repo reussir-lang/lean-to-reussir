@@ -145,7 +145,9 @@ its mono type.
 Main mono passes (Lean's): `simp` (inlining, constant folding, dead code),
 `reduceJpArity`, `structProjCases`, `extendJoinPointContext`,
 `floatLetIn`, `reduceArity`, `commonJoinPointArgs`, `lambdaLifting`,
-`elimDeadBranches`, `cse`, `extractClosed`.
+`elimDeadBranches`, `cse`, `extractClosed`. After Lean's passes, lean2rr
+puts the parameters of each join point in the order of their first use in
+its body, so that an unrelated definition does not reorder them.
 
 `toMono` also does semantic lowering for lean2rr: `Decidable` becomes
 `Bool`, `Nat` constructors become `Nat.add x 1` and tests on 0, single-field

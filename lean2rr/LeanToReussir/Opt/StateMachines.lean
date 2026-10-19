@@ -222,7 +222,9 @@ def emitStateMachineAlongside (d : Decl .pure) (sm : StateMachine) (params : Arr
     let b ← rewriteCallsB (place v) true b
     let body : RR.Block := ⟨bind ++ b.lets, b.result⟩
     match lay.tags with
-    | some tags => return RR.Arm.lit (tags.getD v 0) body
+    | some tags =>
+      let some k := tags[v]? | throwError "lean2rr: unknown state-machine variant {v}"
+      return RR.Arm.lit k body
     | none => return { ty := sm.mode, ctor := some v, binders := (kept v fs).map (some ·.1), body }
   let mut matchArms := #[← mkArm sm.entry params block]
   for (v, fps, b) in arms do matchArms := matchArms.push (← mkArm v fps b)

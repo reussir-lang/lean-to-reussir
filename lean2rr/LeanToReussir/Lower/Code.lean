@@ -5,26 +5,46 @@ import LeanToReussir.Lower.Hooks
 namespace LeanToReussir
 open Lean Compiler LCNF
 
-/-- Free variable names of an RR expression/block (for outlined join points). -/
-partial def rrFreeVars (e : RR.Expr) (bound : Std.HashSet String) (acc : Std.HashSet String) : Std.HashSet String :=
+/-- `f` folded over the free occurrences of variable names in an RR
+expression/block, in the order in which they occur in its text. -/
+partial def rrFoldFree {α : Type} (f : α → String → α) (e : RR.Expr) (bound : Std.HashSet String) (acc : α) : α :=
   match e with
-  | .var n => if bound.contains n || n.startsWith "L2RUnit" then acc else acc.insert n
+  | .var n => if bound.contains n || n.startsWith "L2RUnit" then acc else f acc n
   | .atom _ => acc
-  | .call _ _ args => args.foldl (fun acc a => rrFreeVars a bound acc) acc
-  | .apply f a => rrFreeVars a bound (rrFreeVars f bound acc)
-  | .ctor _ _ args => args.foldl (fun acc a => rrFreeVars a bound acc) acc
-  | .field e _ => rrFreeVars e bound acc
-  | .cast e _ => rrFreeVars e bound acc
-  | .lam x _ b => blockFreeVars b (bound.insert x) acc
-  | .ite c t f => blockFreeVars f bound (blockFreeVars t bound (rrFreeVars c bound acc))
+  | .call _ _ args => args.foldl (fun acc a => rrFoldFree f a bound acc) acc
+  | .apply fn a => rrFoldFree f a bound (rrFoldFree f fn bound acc)
+  | .ctor _ _ args => args.foldl (fun acc a => rrFoldFree f a bound acc) acc
+  | .field e _ => rrFoldFree f e bound acc
+  | .cast e _ => rrFoldFree f e bound acc
+  | .lam x _ b => block f b (bound.insert x) acc
+  | .ite c t e => block f e bound (block f t bound (rrFoldFree f c bound acc))
   | .mtch s arms => arms.foldl (fun acc arm =>
       let bound := arm.binders.foldl (fun b x => match x with | some x => b.insert x | none => b) bound
-      blockFreeVars arm.body bound acc) (rrFreeVars s bound acc)
-  | .block b => blockFreeVars b bound acc
+      block f arm.body bound acc) (rrFoldFree f s bound acc)
+  | .block b => block f b bound acc
 where
-  blockFreeVars (b : RR.Block) (bound : Std.HashSet String) (acc : Std.HashSet String) : Std.HashSet String :=
-    let (bound, acc) := b.lets.foldl (fun (bound, acc) (x, _, e) => (bound.insert x, rrFreeVars e bound acc)) (bound, acc)
-    rrFreeVars b.result bound acc
+  block (f : α → String → α) (b : RR.Block) (bound : Std.HashSet String) (acc : α) : α :=
+    let (bound, acc) := b.lets.foldl (fun (bound, acc) (x, _, e) => (bound.insert x, rrFoldFree f e bound acc)) (bound, acc)
+    rrFoldFree f b.result bound acc
+
+/-- Free variable names of an RR expression/block (for outlined join points). -/
+def rrFreeVars (e : RR.Expr) (bound : Std.HashSet String) (acc : Std.HashSet String) : Std.HashSet String :=
+  rrFoldFree (·.insert ·) e bound acc
+
+def rrFreeVars.blockFreeVars (b : RR.Block) (bound : Std.HashSet String) (acc : Std.HashSet String) :
+    Std.HashSet String :=
+  rrFoldFree.block (·.insert ·) b bound acc
+
+/-- The free variable names of the blocks `bs` (`rrFreeVars`; block `i`
+with the names `bound[i]` bound), each once, in the order of their first
+occurrence: the first block's text first. An order that depends only on
+the code, not on the names: lean2rr numbers its names with one counter for
+the whole program, so an order by name changes when an unrelated
+definition is added (determinism-check). -/
+def rrFreeVarsInOrder (bs : Array (RR.Block × Std.HashSet String)) : Array String :=
+  let add (acc : Array String × Std.HashSet String) (n : String) :=
+    if acc.2.contains n then acc else (acc.1.push n, acc.2.insert n)
+  (bs.foldl (fun acc (b, bound) => rrFoldFree.block add b bound acc) (#[], {})).1
 
 /-- The names of the conversions `bindField` made for field parameters
 `ps` (`CodeCtx.fieldConv`), in context `ctx` right after the binding. -/
@@ -85,11 +105,12 @@ def sinkWildcardHeld (ctx : CodeCtx) (scrut : String) (nCtors : Nat) (arms : Arr
   let freeIn (a : RR.Arm) (acc : Std.HashSet String) : Std.HashSet String :=
     rrFreeVars.blockFreeVars a.body (a.binders.foldl (fun b x => match x with | some x => b.insert x | none => b) {}) acc
   let own := freeIn wild {}
-  let mut used : Std.HashSet String := {}
-  for h : j in [:arms.size] do
-    if j != w then used := freeIn arms[j] used
+  -- In the order of their first use in the other arms (not by name, see
+  -- `rrFreeVarsInOrder`).
+  let used := rrFreeVarsInOrder ((arms.zipIdx.filter (·.2 != w)).map fun (a, _) =>
+    (a.body, a.binders.foldl (fun b x => match x with | some x => b.insert x | none => b) {}))
   let mut sinks := #[]
-  for n in used.toArray.qsort (· < ·) do
+  for n in used do
     if n == scrut || own.contains n then continue
     let some t := varTys[n]? | continue
     unless ← hasWideRelease t do continue
@@ -261,7 +282,10 @@ mutual
         let bodyCtx := { ctx with vars }
         let body ← lowerCode bodyCtx outlined retTy d.value
         let bound := pnames.foldl (·.insert ·) ({} : Std.HashSet String)
-        let free := (rrFreeVars.blockFreeVars body bound {}).toArray.qsort (· < ·)
+        -- Captured in the order of their first use in the body, not by
+        -- name (`rrFreeVarsInOrder`): the order of the outlined function's
+        -- parameters, and of a state machine's slots.
+        let free := rrFreeVarsInOrder #[(body, bound)]
         -- The variables in scope: those `vars` names, and those captured
         -- by the outlined join points in scope, which the body's jumps to
         -- them pass by name even where `vars` names them differently.

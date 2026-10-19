@@ -40,8 +40,13 @@ one. -/
 structure StateMachine where
   /-- The dispatching function. -/
   fn : String
-  /-- The entry-point enum: `e` for the declaration itself, one variant per
-  outlined join point. -/
+  /-- The name of the entry-point enum, whose variants are `e` for the
+  declaration itself and one per outlined join point. The lowering marks
+  each call and jump that enters the state machine with its variant
+  (`mode::v`). The core form emits this enum. Opt/StateMachines emits it
+  only when a variant keeps a field; when every variant is nullary, the
+  entry point is an integer, each mark becomes the variant's literal, and
+  no enum is emitted. -/
   mode : String
   /-- The declaration, whose tail calls re-enter at `entry`. -/
   self : Name

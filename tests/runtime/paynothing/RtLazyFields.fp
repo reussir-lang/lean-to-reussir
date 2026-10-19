@@ -4,7 +4,7 @@ allocs 50279
 bytes 2214480
 native-allocs 64901
 native-bytes 2546035
-items 268
+items 267
 functions 205
 conversion-fns 0
 conversion-sites 0
@@ -33,31 +33,30 @@ item T_Std_Slice_Internal_SubarrayData_# 761b7c7dd120
 item T_String_Slice_# 74f079416627
 item T_T_# f2d5687ae37e
 item T_U_# 15e694c48c6b
+item Tuple# 0f89ed8754b6
 item Tuple# 1bec48b38b83
-item Tuple# 1c7bbedd8a84
 item Tuple# 21c01db35095
-item Tuple# 2abd41522e9d
-item Tuple# 311dd1ffa6b4
-item Tuple# 3183c8045963
-item Tuple# 4187da7c75ca
+item Tuple# 2c0ad728dbb9
 item Tuple# 4873bfc698da
+item Tuple# 4eab69a3cbe8
+item Tuple# 53624feee3df
 item Tuple# 539dc5810481
-item Tuple# 6c94bd7931e9
+item Tuple# 63b839cead06
 item Tuple# 6f19b44cb476
+item Tuple# 73d4c70c23a3
 item Tuple# 7d1ae1a722a1
-item Tuple# 8e7bbdf8d883
-item Tuple# 8e99058cef1f
+item Tuple# 914aabebccda
 item Tuple# 91b0405c4172
-item Tuple# 9edaecfd9393
 item Tuple# a253a5239e06
 item Tuple# a304cd1087de
 item Tuple# b01ecbfe1bf4
+item Tuple# b49ca365c26f
 item Tuple# c3785e5640de
+item Tuple# c4790f2e2b1e
+item Tuple# c48a7f30d386
 item Tuple# d4eee5540d99
-item Tuple# e2a1bf9869ad
-item Tuple# ec0297a5fd55
-item Tuple# f115dd2d228d
-item Tuple# ff02127f24dc
+item Tuple# dbde042dde78
+item Tuple# fd4a01cee92a
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 2aa16ae60f2c
@@ -73,7 +72,7 @@ item extern "C" trampoline "l2r_main_body" = l2r_main_body; 398932703e9e
 item extern "C" trampoline "l2r_stderr_put_c" = l2r_stderr_put; 539822ee00dd
 item extern "C" trampoline "l2r_task_run_one_c" = l2r_task_run_one; 7efa4a35bf26
 item extern "C" trampoline "l2r_task_walk_c" = l2r_task_walk; 409416745cb3
-item jp_# 830d52d9b970
+item jp_# a3df5230075c
 item l2r_any_init e46e2d58cfdd
 item l2r_any_rel_# 0119670e1a65
 item l2r_any_rel_# 088dffee5ccf
@@ -90,7 +89,7 @@ item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9fbde3aed1e8
 item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 873c2bcee3f0
 item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_4nLAny daecf3bfb378
 item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_4nLAny_go f4af20a6c597
-item l2r_err_string 1d2487775647
+item l2r_err_string 2ad2bdbb8308
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
@@ -99,7 +98,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
-item l2r_main_body 40b6e65d5900
+item l2r_main_body 7023e2347ad0
 item l2r_main_on_thread 4f4adafe091e
 item l2r_run_main d750382a583f
 item l2r_run_pending_tasks 39049c3ac015
@@ -160,7 +159,7 @@ item l_IO_Error_mkTimeExpired___l2r_#_ f1e44c7368da
 item l_IO_Error_mkUnsatisfiedConstraints___l2r_#_ ce26a4c5b144
 item l_IO_Error_mkUnsupportedOperation___l2r_#_ 4a979451b8c2
 item l_IO_Error_otherErrorToString___l2r_#_ 52c809003c67
-item l_IO_Error_toString___l2r_#_ f0a61bd77d51
+item l_IO_Error_toString___l2r_#_ edd1ea0d4dee
 item l_IO_print___at___00IO_println___at___00main_spec__1_spec__1___l2r_#_ d6caa0132c94
 item l_IO_println___at___00main_spec__1___l2r_#_ 6e72210ec751
 item l_IO_userError___l2r_#_ e5a4f2aa2427
@@ -169,8 +168,8 @@ item l_List_foldl___at___00List_toString___at___00main_spec__15_spec__18___l2r_#
 item l_List_foldl___at___00List_toString___at___00main_spec__17_spec__21___l2r_#_ 9bb798f7f27c
 item l_List_foldl___at___00List_toString___at___00main_spec__8_spec__9___l2r_#_ 4cc050ea35a4
 item l_List_foldl___at___00main_spec__0___l2r_#_ 4375356d2461
-item l_List_foldl___at___00main_spec__10___l2r_#_ ef61efea3a04
-item l_List_foldl___at___00main_spec__11___l2r_#_ 91f3696edfb4
+item l_List_foldl___at___00main_spec__10___l2r_#_ 197269f0f831
+item l_List_foldl___at___00main_spec__11___l2r_#_ feb8c624914e
 item l_List_foldl___at___00main_spec__4___l2r_#_ bc0ae3f0a29e
 item l_List_lengthTRAux___l2r_#____redArg 5e1cabfdfcc6
 item l_List_lengthTRAux___l2r_#____redArg 5e1cabfdfcc6
@@ -192,11 +191,11 @@ item l_List_toString___at___00main_spec__15___l2r_#_ b83415165143
 item l_List_toString___at___00main_spec__17___l2r_#_ fbb75b53520c
 item l_List_toString___at___00main_spec__8___l2r_#_ 62e9816ca2d7
 item l_Std_DTreeMap_Internal_Impl_Const_get_x3f___at___00__private_Std_Sync_Broadcast_0__Std_Bounded_Receiver_unsubscribe_spec__1___l2r_#____redArg___l2r__flat 73c9ff151c6a
-item l_Std_DTreeMap_Internal_Impl_erase___at___00__private_Std_Sync_Broadcast_0__Std_Bounded_Receiver_unsubscribe_spec__3___l2r_#____redArg d89eec177207
+item l_Std_DTreeMap_Internal_Impl_erase___at___00__private_Std_Sync_Broadcast_0__Std_Bounded_Receiver_unsubscribe_spec__3___l2r_#____redArg dee66bbbc946
 item l_Std_DTreeMap_Internal_Impl_foldlM___at___00Std_DTreeMap_Internal_Impl_foldl___at___00main_spec__12_spec__14___l2r_#_ 3ac1fa1641b7
-item l_Std_DTreeMap_Internal_Impl_insert___at___00__private_Std_Sync_Broadcast_0__Std_Bounded_subscribe_spec__0___l2r_#____redArg cea08294ea97
-item l_Std_DTreeMap_Internal_Impl_maxView___l2r_#____redArg___l2r__flat 3a601e70dba4
-item l_Std_DTreeMap_Internal_Impl_minView___l2r_#____redArg___l2r__flat c3fa292cec59
+item l_Std_DTreeMap_Internal_Impl_insert___at___00__private_Std_Sync_Broadcast_0__Std_Bounded_subscribe_spec__0___l2r_#____redArg 4de3b304a764
+item l_Std_DTreeMap_Internal_Impl_maxView___l2r_#____redArg___l2r__flat 34a9458f0013
+item l_Std_DTreeMap_Internal_Impl_minView___l2r_#____redArg___l2r__flat 377dd5e3c98c
 item l_String_Internal_anyImpl___l2r_#_ 9049da56e465
 item l_String_Internal_isPrefixOfImpl___l2r_#_ 2ebcf6449e89
 item l_String_Slice_contains___at___00String_anyAux_spec__0___l2r_#____l2r__flat d56cbe6b4c34
@@ -218,10 +217,10 @@ item l___private_Init_Data_List_Impl_0__List_takeTR_go___l2r_#____redArg 6978eef
 item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ffd80adacb14
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0 3ad8c95d9d3a
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0_init 370fd2591027
-item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___l2r__flat ec89e238422e
+item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___l2r__flat c132b89c7cf7
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__2___l2r_#____redArg___l2r__flat 95dc9f8944a8
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__5___l2r_#____redArg___l2r__flat ceba89cac2ab
-item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__9___l2r_#____redArg___l2r__flat 7a81d502f95e
+item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__9___l2r_#____redArg___l2r__flat 304ab3f38d5e
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
 item l_addParenHeuristic___l2r_#_ b69bc10ed317
 item l_addParenHeuristic___l2r_#____closed__0 1107ed4a2e22
@@ -238,7 +237,7 @@ item l_instInhabitedU___l2r_#_ e8c4fc772b80
 item l_instInhabitedU___l2r_#__init e8b717927ef1
 item l_instInhabitedU_default___l2r_#_ a9bece088bff
 item l_instInhabitedU_default___l2r_#__init e628d6709f95
-item l_main___l2r_#_ 527a35d7622d
+item l_main___l2r_#_ 07d3539dd00b
 item l_main___l2r_#____closed__0 b4520b0b59ff
 item l_main___l2r_#____closed__0_init fd656884f724
 item l_main___l2r_#____closed__1 93452f96e265
@@ -273,7 +272,7 @@ item l_mergeLists___l2r_#_ 809231c69bc1
 item l_mkPanicMessageWithDecl___l2r_#_ 9dc6fe993dc5
 item l_mkStdGen___l2r_#____l2r__flat b08dfeda83c3
 item l_mkU___l2r_#_ f9c4ca15905b
-item l_nested___l2r_#_ a079a8137e96
+item l_nested___l2r_#_ a3f786433658
 item l_pairs___l2r_#_ 52febd8de51f
 item l_panic___at___00ByteArray_toUInt64LE_x21_spec__0___l2r_#_ 0bbcedca4180
 item l_subtrees___l2r_#____l2r__flat 2abcbd2a3c30

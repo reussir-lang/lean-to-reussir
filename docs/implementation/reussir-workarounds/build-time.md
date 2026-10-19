@@ -91,7 +91,9 @@ lean2rr's files.
 - **What:** A wildcard arm covering two or more constructors releases the
   values of wide enums (8 or more constructors) that it holds and does not
   use through one out-of-line call, `let us = l2r_sink<T>(v);` (the value
-  is released at the arm's entry as before). Likewise the `unreachable`
+  is released at the arm's entry as before). The calls come in the order
+  of the values' first use in the other arms (`rrFreeVarsInOrder`), not
+  by name: names carry lean2rr's one counter. Likewise the `unreachable`
   arm of an unboxing function releases its `Box` out of line.
 - **Why:** rrc copies a wildcard arm into every constructor it covers and
   expands each release there in line, as a match over the variants: a

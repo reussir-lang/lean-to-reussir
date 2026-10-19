@@ -205,9 +205,105 @@ def extractLikeLean (keys : NameMap InstKey) (sccs : Array (Array (Decl .pure)))
   for h : i in [:flat.size] do out := out ++ results.getD i #[flat[i]]
   return out
 
+/-- The variables of `targets` that code `c` uses, each once, in the order of
+their first use, appended to `acc` (it stops when it has found them all). -/
+partial def firstUses (targets : Std.HashSet FVarId) (c : Code .pure) (acc : Array FVarId) : Array FVarId :=
+  let use (acc : Array FVarId) (x : FVarId) : Array FVarId :=
+    if targets.contains x && !acc.contains x then acc.push x else acc
+  let useArgs (acc : Array FVarId) (args : Array (Arg .pure)) : Array FVarId :=
+    args.foldl (fun acc a => match a with | .fvar x => use acc x | _ => acc) acc
+  if acc.size == targets.size then acc else
+  match c with
+  | .let d k =>
+    let acc := match d.value with
+      | .proj _ _ x => use acc x
+      | .const _ _ args => useArgs acc args
+      | .fvar f args => useArgs (use acc f) args
+      | _ => acc
+    firstUses targets k acc
+  | .fun d k _ | .jp d k => firstUses targets k (firstUses targets d.value acc)
+  | .jmp _ args => useArgs acc args
+  | .cases cs => cs.alts.foldl (fun acc alt => firstUses targets alt.getCode acc) (use acc cs.discr)
+  | .return x => use acc x
+  | _ => acc
+
+/-- `ty` (a function type of at least `n` arguments) with its first `n`
+domains in the order `perm`; `none` if one of them, or the rest of the
+type, depends on one of them. -/
+def permuteDomains (ty : Expr) (n : Nat) (perm : Array Nat) : Option Expr := Id.run do
+  let mut doms : Array (Name × Expr × BinderInfo) := #[]
+  let mut t := ty
+  for _ in [:n] do
+    let .forallE x d b bi := t | return none
+    if d.hasLooseBVars then return none
+    doms := doms.push (x, d, bi)
+    t := b
+  if t.hasLooseBVars then return none
+  return some (perm.foldr (init := t) fun i acc =>
+    let (x, d, bi) := doms[i]!
+    .forallE x d acc bi)
+
+/-- The order of join point `d`'s parameters by their first use in its
+body `body` (`firstUses`; the unused ones last, in their order), and its
+type with its domains in that order; `none` if that is its order, or if
+its type depends on a parameter (`permuteDomains`). -/
+def jpParamOrder? (d : FunDecl .pure) (body : Code .pure) : Option (Array Nat × Expr) := do
+  let n := d.params.size
+  guard (n ≥ 2)
+  let order := firstUses (d.params.foldl (·.insert ·.fvarId) {}) body #[]
+  let rank : Std.HashMap FVarId Nat := order.zipIdx.foldl (fun m (x, i) => m.insert x i) {}
+  let key (i : Nat) : Nat := (rank[d.params[i]!.fvarId]?).getD (n + i)
+  let perm := (Array.range n).qsort fun i j => key i < key j
+  guard (perm != Array.range n)
+  return (perm, ← permuteDomains d.type n perm)
+
+/-- Code `c` with the parameters of each join point in the order of their
+first use in its body (`jpParamOrder?`, after the same reordering inside
+it), and the arguments of each jump in that order too; `perms`: the new
+orders of the join points in scope. -/
+partial def stableJpParamsCode (perms : Std.HashMap FVarId (Array Nat)) (c : Code .pure) : Code .pure :=
+  match c with
+  | .let d k => .let d (stableJpParamsCode perms k)
+  | .fun d k _ =>
+    .fun (.mk d.fvarId d.binderName d.params d.type (stableJpParamsCode perms d.value)) (stableJpParamsCode perms k)
+  | .jp d k =>
+    -- A join point's body does not jump to it (LCNF): only `k` does.
+    let body := stableJpParamsCode perms d.value
+    match jpParamOrder? d body with
+    | some (perm, ty) =>
+      .jp (.mk d.fvarId d.binderName (perm.map (d.params[·]!)) ty body)
+        (stableJpParamsCode (perms.insert d.fvarId perm) k)
+    | none => .jp (.mk d.fvarId d.binderName d.params d.type body) (stableJpParamsCode perms k)
+  | .jmp j args =>
+    match perms[j]? with
+    | some perm => .jmp j (perm.map (args[·]!))
+    | none => c
+  | .cases cs => .cases (cs.updateAlts (cs.alts.map fun alt => alt.updateCode (stableJpParamsCode perms alt.getCode)))
+  | c => c
+
+/-- The program `decls` with the parameters of every join point that its
+body uses in the order of their first use, and the unused ones last in
+their old order (`stableJpParamsCode`): Lean's `extendJoinPointContext`
+adds the variables a join point uses as its parameters in the order of a
+hash map over their unique ids, which the one counter of Stage 2's session
+draws for the whole program, so a definition added anywhere reordered them
+(a join point's tuple type, an outlined function's parameters, a state
+machine's slots). A join point whose type depends on its parameters keeps
+its order. Known gap: the old order of the unused parameters is still
+Lean's hash order. Lean runs no `reduceJpArity` after
+`extendJoinPointContext`, and `elimDeadBranches` can make a use
+unreachable, so a join point can keep unused parameters; two or more of
+them can still change order when an unrelated definition is added (rare;
+results are not affected). -/
+def stableJpParams (decls : Array (Decl .pure)) : Array (Decl .pure) :=
+  decls.map fun d => match d.value with
+    | .code c => { d with value := .code (stableJpParamsCode {} c) }
+    | _ => d
+
 /-- Stage 2 on the output of Stage 1 (`keys`: Stage 1's instances).
 Returns the mono declarations (instances plus the declarations passes
-created: `_redArg`, `_lam_N`, `_closed_N`, …). -/
+created: `_redArg`, `_lam_N`, `_closed_N`, …), the parameters of their join
+points in a stable order (`stableJpParams`). -/
 def runStage2 (cfg : Stage2Config) (decls : Array (Decl .pure)) (externs : Array (Decl .pure))
     (keys : NameMap InstKey) (check := true) : CoreM (Array (Decl .pure)) := do
   let passes ← stage2Passes cfg
@@ -227,7 +323,9 @@ def runStage2 (cfg : Stage2Config) (decls : Array (Decl .pure)) (externs : Array
       let group ← runPasses passes.mono group check
       for scc in ← splitScc group do
         sccs := sccs.push (← runPasses passes.monoNoLambda scc check)
-    -- `extractClosed` (not in the pass lists, see Opt/Registry.lean) last.
-    return out ++ (← extractLikeLean keys sccs)
+    -- `extractClosed` (not in the pass lists, see Opt/Registry.lean) last,
+    -- on Lean's own code; then the join points' parameters in a stable
+    -- order.
+    return stableJpParams (out ++ (← extractLikeLean keys sccs))
 
 end LeanToReussir

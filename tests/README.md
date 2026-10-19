@@ -326,24 +326,35 @@ a hot loop block), each of which must fail (review PCR-01). With
 `literal-consts` turned off (`L2R_DISABLE_OPTS`) it does not ask for
 literal slots.
 `tests/runtime/sm-slots-check.sh` builds `RtSmDecode` (a table-driven
-decoder loop, a state machine of three variants), `RtStateMachines` and
-`RtJpSlots` to LLVM IR and fails when the entry point of a state machine
-whose variants are all nullary is an enum, not an integer (in the `.rr`),
-when its match is not one literal arm per variant (0, 1, ... in order)
-and an unreachable wildcard, when its entry point is not an integer in
-the IR, when LLVM did not thread RtSmDecode's loop (no DFAJumpThreading
-block `.jtN` in its IR function), when a call entering a variant puts
-anything but a placeholder, or a slot that the calling arm does not bind,
-in a slot that the variant does not bind (a live value kept alive across
-the jump, RF-1), or when an arm passes a placeholder in a slot that it
-does not bind instead of the slot itself
-(docs/implementation/control-flow/state-machines.md). It fails when
-RtSmDecode has no such state machine or no slot passed on, and checks
-itself on six mutations of RtSmDecode's `.rr` and IR (the entry point made
-a `[value]` enum, a passed-on slot given a placeholder, a placeholder
-replaced by the arm's live variable of that slot, the wildcard arm taken
-away, the IR's entry point made a struct, the IR's threaded blocks
-renamed), each of which must fail.
+decoder loop, a state machine of three variants), `RtStateMachines`,
+`RtJpSlots`, `RtSmU32` (a state machine of 261 variants) and `RtSmGuard`
+(a variant that keeps a field: the soundness guard) to LLVM IR, with the
+optimizations of a `NAME.opts` off as in run.sh. It fails when the
+entry point of a state machine whose variants are all nullary is an enum,
+not an integer (in the `.rr`), when the entry point of a state machine
+with a variant that keeps a field is a `[value]` enum, not a shared one
+(Reussir bug 1), when its match is not one literal arm per variant (0,
+1, ... in order) and an unreachable wildcard, when that integer is not a
+`u8` for up to 256 variants and a `u32` above (in the `.rr`, and as the
+last parameter of its function in the IR), when LLVM did not thread
+RtSmDecode's loop (no DFAJumpThreading block `.jtN` in its IR function),
+when a call entering a variant puts anything but a placeholder, or a
+slot that the calling arm does not bind, in a slot that the variant does
+not bind (a live value kept alive across the jump, RF-1), or when an arm
+passes a placeholder in a slot that it does not bind instead of the slot
+itself (docs/implementation/control-flow/state-machines.md). A call that
+only passes on the values of an outlined part's step is not checked
+(Outline splits RtSmU32's entry arm into parts). It fails when the test
+is vacuous: RtSmDecode has no such state machine, no slot passed on or
+no IR function of one; RtSmU32 has no state machine of more than 256
+variants in the IR, or none of at most 256; RtSmGuard has no shared-enum
+entry point with a variant that keeps a field. It checks itself on eight
+mutations, each of which must fail: six of RtSmDecode's `.rr` and IR
+(the entry point made a `[value]` enum, a passed-on slot given a
+placeholder, a placeholder replaced by the arm's live variable of that
+slot, the wildcard arm taken away, the IR's entry point made a struct,
+the IR's threaded blocks renamed), RtSmU32's `u32` entry point made a
+`u8`, and RtSmGuard's shared enum made `[value]`.
 `tests/runtime/rows-check.sh` builds lean-runtime's row oracle
 (`scripts/oracle/Oracle.lean` of the lean-runtime checkout, which evaluates
 the functions of its `tests/cases/<area>/<area>.rows.toml`) with lean2rr and

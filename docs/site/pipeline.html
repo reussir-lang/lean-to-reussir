@@ -228,7 +228,9 @@ its mono type.</p>
 <p>Main mono passes (Lean's): <code>simp</code> (inlining, constant folding, dead code),
 <code>reduceJpArity</code>, <code>structProjCases</code>, <code>extendJoinPointContext</code>,
 <code>floatLetIn</code>, <code>reduceArity</code>, <code>commonJoinPointArgs</code>, <code>lambdaLifting</code>,
-<code>elimDeadBranches</code>, <code>cse</code>, <code>extractClosed</code>.</p>
+<code>elimDeadBranches</code>, <code>cse</code>, <code>extractClosed</code>. After Lean's passes, lean2rr
+puts the parameters of each join point in the order of their first use in
+its body, so that an unrelated definition does not reorder them.</p>
 <p><code>toMono</code> also does semantic lowering for lean2rr: <code>Decidable</code> becomes
 <code>Bool</code>, <code>Nat</code> constructors become <code>Nat.add x 1</code> and tests on 0, single-field
 structures become their field (<code>Char</code> → <code>UInt32</code>, <code>Fin n</code> → <code>Nat</code>), and

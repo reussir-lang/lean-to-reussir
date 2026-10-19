@@ -111,15 +111,23 @@ relative to `lean2rr/LeanToReussir/`. Plan
   scrutinee, a lazily bound field) captures the old names its jumps pass.
   The binders that a rebuilt matched value reads (`fresh-rebuild`) are
   recorded there too. Free variables are also found inside casts (an
-  `RR.Expr.cast` node).
+  `RR.Expr.cast` node). The captured variables come in the order of their
+  first use in the lowered body (`rrFreeVarsInOrder`), not in the order of
+  their names.
 - **Why:** Every `Std.Http` program failed in rrc with "unknown variable"
   (round 6 IO6-14, 8f1dfa7, test `RtJpRebound`); an `IO.FS.Mode` index in
   a join point was missed inside a cast (adv2 EFF-2, aa03809); a join
   point outlined in an arm that returned a rebuilt value did not capture
   the binder of a converted field (hunt 2026-10-07, test
-  `RtFreshRebuildJp`).
+  `RtFreshRebuildJp`). lean2rr numbers names with one counter for the
+  whole program, so an order by name changed when an unrelated definition
+  was added: the outlined function's parameters, a state machine's slots
+  (determinism check: RtSmDecode, RtStateMachines, RtJpSlots).
 - **Where:** `Lower/Code.lean`: `lowerCode` (the `.jp` case),
-  `rrFreeVars`; `Lower/Ctx.lean`: `CodeCtx.captured`.
+  `rrFoldFree`, `rrFreeVars`, `rrFreeVarsInOrder`; `Lower/Ctx.lean`:
+  `CodeCtx.captured`. Stage 2 gives the parameters of a join point in the
+  order of their first use too
+  ([../types/lean-passes.md](../types/lean-passes.md#join-point-parameters-are-put-in-the-order-of-their-first-use)).
 - **Remove only if:** never.
 
 ### A local `fun` left after lambda lifting is a raw closure

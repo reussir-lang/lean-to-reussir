@@ -37,13 +37,13 @@ FP="python3 $HERE/rr-fingerprint.py"
 mkdir -p "$OUT"
 cd "$OUT"
 # Programs with conversions, uniform code, dependent fields, function values,
-# tasks, and two classic programs without values of unknown type.
-PROGRAMS=(RtReprProdDag RtDepFields RtUniformUpdates RtExistPayloads RtTaskConvSync RtFnConvChain Rbtree TypeclassGeneric)
+# tasks, a state machine (its slots and outlined join points), and two
+# classic programs without values of unknown type.
+PROGRAMS=(RtReprProdDag RtDepFields RtUniformUpdates RtExistPayloads RtTaskConvSync RtFnConvChain RtSmDecode Rbtree TypeclassGeneric)
 [ $# -gt 0 ] && PROGRAMS=("$@")
-# Programs known to fail the second part (XFAIL; XPASS once fixed), and why.
-declare -A KNOWN=(
-  [RtTaskConvSync]="a join point of check gets its parameters in another order from the mono phase (lean2rr --emit mono: same variables, other _uniq ids, other order; Stage 2 runs Lean's passes over the whole program in one session, so one counter draws the ids, and the order follows them, likely through a hash-ordered set): its tuple type and check's code change"
-)
+# Programs known to fail the second part (XFAIL; XPASS once fixed), and why
+# ([NAME]="reason"). None at present.
+declare -A KNOWN=()
 opts=()
 IFS=, read -r -a dis <<< "${L2R_DISABLE_OPTS:-}"
 for o in ${dis[@]+"${dis[@]}"}; do [ -n "$o" ] && opts+=(--disable-opt "$o"); done

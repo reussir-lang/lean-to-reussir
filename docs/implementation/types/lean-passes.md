@@ -60,6 +60,41 @@ Paths are relative to `lean2rr/LeanToReussir/`.
 - **Remove only if:** never: which declaration evaluates a shared closed
   term, and when, is observable through traces and panics.
 
+### Join-point parameters are put in the order of their first use
+
+- **What:** After every pass of Stage 2 (`extractClosed` included), the
+  parameters of each join point are put in the order of their first use
+  in its body. The parameters that the body does not use come last, in
+  their old order. Known gap: that old order is Lean's hash order, so two
+  or more unused parameters (Lean runs no `reduceJpArity` after
+  `extendJoinPointContext`, and `elimDeadBranches` can make a use
+  unreachable) can still change order when an unrelated definition is
+  added; this is rare and does not change results. Each jump passes its arguments in the new order. Inner
+  join points are put in order first, so the order of an outer one
+  follows the code after that change. A join point whose type depends on
+  one of its parameters keeps its order (mono code has none).
+
+  ```
+  jp _jp.1 (x.7 : Nat) (y.3 : Nat) : Nat :=      -- before (hash order)
+    let z := Nat.add y.3 x.7 ...
+  jp _jp.1 (y.3 : Nat) (x.7 : Nat) : Nat :=      -- after (first use)
+    let z := Nat.add y.3 x.7 ...
+  ```
+- **Why:** Lean's `extendJoinPointContext` adds the variables that a join
+  point uses as new parameters in the order of a hash map over their
+  unique ids. One counter draws these ids for the whole program in Stage
+  2's session, so a definition added anywhere changed the order of
+  parameters in code that it does not touch: a J2 join point's tuple
+  type, an outlined join point's parameters, a state machine's slots.
+  The determinism check found this (`determinism-check.sh`:
+  RtTaskConvSync, RtSmDecode, RtStateMachines, RtJpSlots). Results were
+  not affected.
+- **Where:** `Pipeline.lean`: `stableJpParams` (called by `runStage2`),
+  `stableJpParamsCode`, `jpParamOrder?`, `firstUses`, `permuteDomains`.
+- **Remove only if:** Lean's `extendJoinPointContext` gives an order that
+  does not depend on the unique ids (the determinism check of the
+  programs above then passes without it).
+
 ### `inferVisibility` and everything from `toImpure` on are not run
 
 - **What:** Stage 2 stops at mono (plus `extractClosed`).

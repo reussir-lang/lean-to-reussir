@@ -58,7 +58,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `state-machines` on: 53 s at its small size; RF-1, 5c5f6fc). A
   placeholder without a finite value stopped the loop with "INTERNAL
   PANIC: unreachable code has been reached" at its first jump, hence the
-  guard (round 7 RV7L-03, 69ab202; test `RtJpSlots`); since round 9
+  guard (round 7 RV7L-03, 69ab202; test `RtSmGuard`, whose state
+  machine carries a value of a type without a finite value); since round 9
   (RV9C-01) only types without a value have no finite placeholder, and the
   guard asks `zeroValue`'s own search (`zeroFinite`), so the two agree.
 - **Where:** `Opt/StateMachines.lean`: `slotPlaceholder?` (the guard,
@@ -81,7 +82,7 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   literals `0`, `1`, ..., one arm per variant, and then has a wildcard arm
   `_ => { l2r_unreachable<R>() }` (`R` is its result type), which no call
   reaches. A variant that keeps a field (the soundness guard above) makes
-  the entry point a shared enum, as in the core form.
+  the entry point a shared enum, as in the core form (test `RtSmGuard`).
 
   ```
   fn f_sm(s1 : Nat, s2 : RVec<u8>, m : u8) -> R {
@@ -135,8 +136,12 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **Where:** `Opt/StateMachines.lean`: `emitStateMachineAlongside`
   (`scalar`, `modeTy`, the wildcard arm), `smCall` (`SlotLayout.tags`).
   Test: `tests/runtime/sm-slots-check.sh` (with `RtSmDecode`,
-  `RtStateMachines`, `RtJpSlots`; it also checks that LLVM threads
-  RtSmDecode's loop).
+  `RtStateMachines`, `RtJpSlots`; `RtSmU32`, a state machine of 261
+  variants, whose entry point is a `u32`; `RtSmGuard`, whose entry point
+  is a shared enum because a variant keeps a field; it also checks that
+  LLVM threads RtSmDecode's loop). `RtSmU32` and `RtSmGuard` turn
+  `jp-small` off (`.opts`): it would copy their small join points to the
+  jumps, and no state machine would be left.
 - **Remove only if:** never (speed only).
 
 ### A jump passes on the slots its arm does not bind (`state-machines`)

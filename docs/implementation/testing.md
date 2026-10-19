@@ -141,20 +141,25 @@ Paths are relative to the repository root.
 - **Where:** `tests/runtime/determinism-check.sh`.
 - **Remove only if:** never.
 
-### A known locality failure: join-point parameter order
+### The determinism check has no known failure
 
-- **What:** `determinism-check.sh` lists RtTaskConvSync in `KNOWN`
-  (XFAIL): with the unrelated definition, a join point of its `check` gets
-  its parameters in another order from the mono phase (`--emit mono`: the
-  same variables with other `_uniq` ids), so the join point's tuple type
-  and `check`'s code change.
-- **Why:** Stage 2 runs Lean's passes over the whole program in one
-  session, so one counter draws the unique ids, and some order (likely a
-  hash-ordered set of free variables) follows them. Results are not
-  affected; a golden comparison of generated code is.
-- **Where:** `tests/runtime/determinism-check.sh` (`KNOWN`).
-- **Remove only if:** the order no longer depends on the ids (the check
-  then reports XPASS).
+- **What:** `determinism-check.sh`'s list `KNOWN` (programs known to
+  fail its locality part, reported as XFAIL) is empty. Its default
+  programs include a state machine (RtSmDecode): its slots and outlined
+  join points follow the order of parameters and captured variables.
+- **Why:** RtTaskConvSync was in `KNOWN`: a join point of its `check`
+  got its parameters in another order when an unrelated definition was
+  added. RtSmDecode, RtStateMachines and RtJpSlots failed the same way
+  (their state machines' slots), and the order of an outlined join
+  point's captured variables, by name, changed with lean2rr's counter.
+  Both orders now follow the code: Stage 2 puts join-point parameters in
+  the order of their first use
+  ([types/lean-passes.md](types/lean-passes.md#join-point-parameters-are-put-in-the-order-of-their-first-use)),
+  and the lowering captures variables in the order of their first use
+  ([control-flow/join-points.md](control-flow/join-points.md#outlined-join-points-capture-what-their-jumps-pass-by-name)).
+- **Where:** `tests/runtime/determinism-check.sh` (`PROGRAMS`, `KNOWN`).
+- **Remove only if:** never (a new known failure goes in `KNOWN` with its
+  reason).
 
 ### Pay-nothing baselines
 
