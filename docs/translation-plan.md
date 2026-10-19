@@ -207,7 +207,10 @@ Nothing else can occur in a program Lean compiled: Lean refuses to compile
 code that uses noncomputable constants. Anything else is a lean2rr bug, and
 Stage 4 then fails with "unknown callee". Because every constant of the
 program is a root, a constant that `main` never uses is still translated,
-and can make the translation or link fail (§10).
+and can make the translation or link fail (§10). The exception (optional
+pass `unread-consts`, §5.12): after Stage 1, a constant that no code
+reachable from the other roots reads and whose evaluation cannot show is
+no root, and what only it reaches is not translated.
 
 ### 2.3 Instances
 
@@ -2090,6 +2093,21 @@ Native Lean behaves as follows (observed; `EmitC.emitInitFn`):
 - simple ground values (literals, constructors of literals) are static
   data and cost nothing.
 
+A constant that no kept code reads and whose evaluation cannot show is
+not evaluated at all (optional pass `unread-consts`): its code only builds
+values, calls pure total externs (arithmetic, conversions, array and
+string operations whose index has a proof) and terminates (no recursion
+but the checked recursion of Lean's library; no function value applied;
+none of the program's `unsafe` code). Natively it is evaluated once and
+never read, which shows nothing; only resource exhaustion at startup can
+differ (§10, "Unread constants are not evaluated"). Most unread constants
+are such data: derived instances, parser descriptors, the expression trees
+of `bv_decide` (a sixth of the code of a program that uses lean-zip; its
+certificates, one string literal each, have no function at all,
+`literal-consts`). A constant that may show (a trace, a panic, a `!` read, a call
+of the program's own recursion) stays a startup step at its place, read or
+not.
+
 A constant whose code only builds unboxed values from small literals and
 constructors (`Int.ofNat 0`, an enumeration value) is recomputed at every
 use instead of cached. Every `Nat` or `Int` it builds must be small (a
@@ -3055,6 +3073,16 @@ Each item says what differs and when.
     with one outside it, where Lean inlined the local function first; a
     call in a join point merged with one in a branch that jumps to it,
     where Lean inlined the join point into that branch): both run.
+- *Unread constants are not evaluated* (§5.12, optional pass
+  `unread-consts`): natively every constant is evaluated at startup. A
+  constant that no kept code reads and whose evaluation cannot show is not
+  evaluated by lean2rr. Such an evaluation ends and writes nothing, but it
+  can exhaust a resource: memory (`Array.replicate (2^40) 0`), the stack,
+  a size limit of Lean's runtime (`2 ^ 2^33`: `Nat.pow exponent is too
+  big`) or time (a checked recursion of Lean's library that runs for
+  hours). Then the native program stops at startup, or starts late, and
+  lean2rr's program runs at once. Natively such a program does nothing
+  useful; a constant that is read is evaluated at its place as before.
 - *Running out of memory*: lean2rr ends every failed allocation, including
   a big number's limbs (one block allocated by leanrt since the one-block
   layout; only `pow`, `gcd` and decimal conversion go through GMP's own
@@ -3881,7 +3909,9 @@ native's output and lean2rr's in expectation files, `NAME.native.*` and
 extern)
 - Every constant of the program is translated (§2.2), so an unused constant
   that reaches an unsupported extern makes lean2rr reject the whole
-  program.
+  program (the call of such an extern keeps the constant, `unread-consts`
+  leaves out only quiet constants; an unsupported extern that only a
+  closure built by a left-out constant names is not translated).
 - *Lean-only target* (the owner's decision, 2026-10-03, §5.8): the C code
   of a program or of a package it requires is never compiled, linked or
   called. An `@[extern]` of the program runs the `@[export]` definition its

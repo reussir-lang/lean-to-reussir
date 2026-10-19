@@ -23,6 +23,8 @@ registry lists it in one line: name, on by default, description,
 `install`. `install` plugs the pass into a hook of `PassConfig` and keeps
 what was installed before. The hooks are:
 
+- a pass over Stage 1's result that leaves out startup steps of constants
+  (`startupPrune`);
 - passes over Stage 2's code that leave declarations out, before Stage 3
   (`prunePasses`);
 - choices of representation (field order, `[value]` structs, cached
@@ -126,6 +128,41 @@ its 25,363 declarations. It reaches no C++ function of the `Lean`
 package, and its output equals native's. lean-regex, with its `ToExpr`
 instances, keeps 979 of its 1,443 declarations, and its output equals
 native's.
+
+### Constants that nothing reads (`unread-consts`)
+
+Natively a module's initializer evaluates every constant of the module,
+read or not. Most unread constants are data: derived instances, the parser
+descriptors of `syntax` commands, and the certificates and expression trees
+that `bv_decide` stores as constants. In a program that uses lean-zip they
+were half of the generated code. The certificates are one string literal
+each, and `literal-consts` gives them no function; the rest was a sixth.
+
+After Stage 1, lean2rr leaves out the startup step of a constant when two
+things are true:
+
+- **Unread.** The code that `main`, the error printer and the other startup
+  steps reach does not name the constant.
+- **Quiet.** Its evaluation cannot show. The constant's code, and all the
+  code it runs, only build values and call pure total externs: arithmetic,
+  conversions, and array and string operations whose index has a proof. It
+  applies no function value. It has no recursion, except the checked
+  recursion of Lean's library (structural or well-founded, or the loops
+  of the library's implementations); a `partial` definition or a recursion
+  of the program keeps the constant. The program's own `unsafe` code keeps
+  it too, and so does a task, thunk, reference or promise in its type.
+
+The code that only such constants reach is not translated. A constant that
+code reads stays a startup step at its place.
+
+- **Effect.** After `literal-consts` (which already takes the constants of
+  one string literal): lean-zip's compression benchmark 4.3 MB of `.rr` to
+  3.6 MB (−16 %); lean-regex −12 %, cedar −6 %. The 50 distinct `.rr`
+  files of the benchmark set: 24.9 MB to 22.9 MB (−7.9 %).
+- **Soundness.** Natively the constant is evaluated once, and nothing reads
+  the value. Its evaluation ends and writes nothing, so leaving it out
+  changes no output and no order. Only resource exhaustion at startup can
+  differ ([Known differences](differences.html#startup-and-evaluation)).
 
 ### Helpers for live code only (`conv-liveness`)
 

@@ -58,7 +58,10 @@ of `Init` and `Std` (`IO.stdGenRef`), `IO.Error.toString`, and the
 `IO.Error` builders when the program uses fallible IO. Everything these
 reach is collected: declarations with code, `@[extern]` declarations and
 constructors. A constant that `main` never uses is still a root, because
-native Lean evaluates it at startup.
+native Lean evaluates it at startup. One exception: after Stage 1, a
+constant that no other root's code reads, and whose evaluation cannot show,
+is not a root, and what only it reaches is not translated
+([`unread-consts`](passes.html#constants-that-nothing-reads-unread-consts)).
 
 **Instances.** A polymorphic declaration becomes one *instance* per list of
 type arguments. Each instance gets a fresh name (`d._l2r.k`), so Lean's
@@ -296,7 +299,9 @@ entry point or from the runtime's entries. See
 
 - Every zero-parameter declaration of the program's modules runs at startup,
   in Lean's initialization order, as natively. lean2rr rebuilds that order
-  from the `.olean` record and the source structure.
+  from the `.olean` record and the source structure. A constant that no
+  code reads and whose evaluation cannot show does not run
+  ([`unread-consts`](passes.html#constants-that-nothing-reads-unread-consts)).
 - The `initialize` declarations of `Init` and `Std` (`IO.stdGenRef`) run
   at their module's place in the same order, also when the program does
   not use them. They open files, and they can fail, so they cannot wait

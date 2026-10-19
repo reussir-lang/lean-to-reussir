@@ -165,8 +165,11 @@ Paths are relative to the repository root.
 
 - **What:** `tests/runtime/paynothing/NAME.fp` records, for programs
   without values of unknown type, the pay-nothing counts of
-  `rr-fingerprint.py show` (conversion helpers and uses, box constructions
-  and the program's pointer payload types of `Box`), the allocations and bytes of a run at a
+  `rr-fingerprint.py show` (conversion helpers and uses, box constructions,
+  the program's pointer payload types of `Box`, and the values taken out
+  of a `Box` at a program type: the uses of the generated
+  `l2r_unbox_rest_T`, `unbox-sites`; a baseline without the count does not
+  compare it), the allocations and bytes of a run at a
   fixed size (lean2rr's, with native's beside them), and every item's
   canonical hash. `paynothing-check.sh` fails when a count or the
   allocations (1% plus 100) or bytes (1% plus 10000) grow, and lists the

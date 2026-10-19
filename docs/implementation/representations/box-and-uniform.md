@@ -135,7 +135,11 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   (`inductive G | mk : (Nat → Option (Nat × G)) → G`, a `[value]` struct)
   stopped lean2rr at its first unboxing, "boxUnbox at function type
   (internal error)" (hunt box, test `RtValueStructFnBox`).
-- **Where:** `LowerBase.lean`: `boxUnbox`, `boxUnboxWith`; `Lower/Conv.lean`:
+- **Where:** `LowerBase.lean`: `boxUnbox`, `boxUnboxWith` (at a program
+  type, the pointer test in line and the rest one generated function per
+  type and kind, `ownUnboxName`:
+  [../conversions/box-unboxing.md](../conversions/box-unboxing.md#at-a-program-payload-type-only-the-pointer-test-stays-in-line));
+  `Lower/Conv.lean`:
   `unboxMatch` (passes `unboxFnFn`), `tryCoerce`; `Lower/Finish.lean`:
   `genUnbox` (its immediates through `unboxMatch`).
 - **Remove only if:** `box(0)` stops reaching typed positions.

@@ -22,7 +22,7 @@ otherwise. Its message names each extern that is the cause.
 | An `@[extern]` of the program with no Lean code behind it (an `opaque`, an axiom) | Refused. An extern with Lean code runs that code, and its C code is never built: see [the extern rule](index.html#the-extern-rule). Support for calling C is parked. |
 | An extern of the program whose C symbol names a function of Lean's runtime | It runs its own Lean definition, not the runtime function. Where that definition is a stub, the result differs from native. An `opaque` re-declaration is refused, and the message names Lean's declaration to call instead. |
 | `Lean`'s externs implemented in C++ (`Expr.mkData`, `evalConst`, `Dynlib`, the LLVM bindings) | Refused. Their Lean bodies are not used in their place. Data structures from `Lean` work. |
-| A constant that `main` never uses but that reaches an unsupported extern | The whole program is refused, because every constant is translated (native Lean evaluates every constant at startup). |
+| A constant that `main` never uses but that reaches an unsupported extern | The whole program is refused, because every constant is translated (native Lean evaluates every constant at startup). A call of such an extern keeps the constant. |
 | Mathlib, and programs that import it | Refused: Mathlib's module initializers reach `Lean`'s C++ externs. Mathlib is not a target. Computational code from such a library, written as a program that imports only `Init` and `Std`, translates like any other program. |
 | A program module named `Init.*`, `Std.*`, `Lean.*`, `Lake.*` or `L2RShim.*` that is not the toolchain's | Rejected at load. lean2rr trusts modules with these names. |
 
@@ -91,6 +91,12 @@ schedules native Lean can produce. See
   the order of some constants: members of a `mutual` block that do not use
   each other, some names that macros make. lean2rr chooses an order. You can
   see it only when such constants trace or panic.
+- **Unread constants are not evaluated.** Natively every constant runs at
+  startup. lean2rr does not evaluate a constant that no code reads and
+  whose evaluation cannot show. Such an evaluation can only exhaust a
+  resource: memory, the stack, a size limit of Lean's runtime, or time.
+  Then the native program stops (or starts late) before `main`, and
+  lean2rr's program runs.
 - **Dictionary rebuilding.** lean2rr specializes a callee on every static
   dictionary, also where Lean's specializer does not. Instance code can then
   run more or fewer times than natively. You can see it through traces or

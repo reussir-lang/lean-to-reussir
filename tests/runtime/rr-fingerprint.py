@@ -74,8 +74,14 @@ any other OLD item without its hash in NEW is `dropped`.
 Counts printed by `show` (the "pay nothing" markers; a program without
 values of unknown type has few, all from the runtime's own startup code):
 - `conversion-fns`: generated conversion helpers (`l2r_conv_*`,
-  `l2r_vconv_*`, `l2r_fconv_*`, `l2r_lazyconv_*`, `l2r_unbox_*`);
+  `l2r_vconv_*`, `l2r_fconv_*`, `l2r_lazyconv_*`, `l2r_unbox_*`; not the
+  unboxings at a program type, below);
 - `conversion-sites`: the uses of those helpers in the other items;
+- `unbox-fns`, `unbox-sites`: the generated ends of the unboxings of a box
+  at a program payload type (`l2r_unbox_rest_*`, one per type: what
+  `boxUnbox` does when the word is not a pointer of the type's number),
+  and their uses in the other items: the values taken out of a `Box` at a
+  program type;
 - `box-sites`: values put into a `Box` (a call of `l2r_any_of`,
   `l2r_any_of_fn`, `l2r_any_of_ptr`, `l2r_any_of_<scalar>` or `l2r_any_imm`) in the items
   other than conversion helpers;
@@ -104,7 +110,8 @@ FRESH_FN = re.compile(r"^(l2r_zero_|l2r_vconv_|jp_)(\d+)(_[A-Za-z0-9_]*)?$")
 # The number of a Lean declaration's instance (`freshInstName`, Mono.lean:
 # `decl._l2r.k`, mangled `decl___l2r_k_`).
 INST = re.compile(r"___l2r_\d+_")
-CONV_FN = re.compile(r"^(l2r_conv_|l2r_vconv_|l2r_fconv_|l2r_lazyconv_|l2r_unbox_)")
+CONV_FN = re.compile(r"^(l2r_conv_|l2r_vconv_|l2r_fconv_|l2r_lazyconv_|l2r_unbox_(?!rest_))")
+OWN_UNBOX_FN = re.compile(r"^l2r_unbox_rest_")
 LIT = re.compile(r'b"((?:[^"\\]|\\.)*)"')
 STR_LIT = re.compile(r"(l2r_str_lit(?:_cached)?)\((\d+)\)")
 ONCE = re.compile(r"(l2r_once_[a-z_]+(?:<[^()]*?>)?\()(\d+)")
@@ -387,7 +394,9 @@ class Program:
     def fingerprint(self):
         """(counts, [(key, hash)])."""
         conv_fns = conv_sites = box_sites = box_variants = fns = 0
+        unbox_fns = unbox_sites = 0
         conv_names = {name for kind, name, _ in self.items if kind == "fn" and CONV_FN.match(name)}
+        unbox_names = {name for kind, name, _ in self.items if kind == "fn" and OWN_UNBOX_FN.match(name)}
         raws = {name: text for _, name, text in self.items}
         entries = []
         for kind, name, key, text in self.canonical:
@@ -396,14 +405,18 @@ class Program:
             if name in conv_names:
                 conv_fns += 1
                 continue
+            if name in unbox_names:
+                unbox_fns += 1
             if kind == "fn" and REL_DEF.match(raws[name]):
                 box_variants += 1
                 continue
             raw = raws[name]
             conv_sites += sum(1 for m in IDENT.finditer(raw) if m.group(0) in conv_names)
+            unbox_sites += sum(1 for m in IDENT.finditer(raw) if m.group(0) in unbox_names and m.group(0) != name)
             box_sites += len(BOX_SITE.findall(raw))
         counts = {"items": len(self.items), "functions": fns, "conversion-fns": conv_fns,
-                  "conversion-sites": conv_sites, "box-sites": box_sites, "box-variants": box_variants}
+                  "conversion-sites": conv_sites, "box-sites": box_sites, "box-variants": box_variants,
+                  "unbox-fns": unbox_fns, "unbox-sites": unbox_sites}
         return counts, sorted(entries)
 
 

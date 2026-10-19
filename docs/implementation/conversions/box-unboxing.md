@@ -87,6 +87,53 @@ to `lean2rr/LeanToReussir/`. Plan
   `LowerBase.lean`: `boxUnbox`.
 - **Remove only if:** never.
 
+### At a program payload type, only the pointer test stays in line
+
+- **What:** An unboxing at a program payload type (a nominal type, an
+  array of a program type, a reference, a closure record: `BoxKind.prog`,
+  not a function type) keeps in line only the common case: the box's word
+  is a pointer of the type's own number (`l2r_any_raw_is_num(w, n)`, one
+  masked compare once LLVM folds it), and the payload is taken
+  (`l2r_any_raw_take`). Anything else (an immediate: a nullary variant by
+  index, `box(0)` as the zero; another number: unreachable, or in a
+  program that casts the cast function) is a call of a function generated
+  once per type and kind, which takes the word (`boxUnboxWith`,
+  `ownUnboxName`): `l2r_unbox_rest_T(w)`, `l2r_unbox_rest_T_n` (the
+  immediates read as natively, in the generated cast function itself,
+  `genUnbox`) and `l2r_unbox_rest_T_c` (in a program that casts: anything
+  else goes to `l2r_unbox_T`). Its body is the in-line match it replaces,
+  minus the pointer test. The functions are kept out of rrc's MLIR inliner
+  (`#[transform_anchor]`, `anchoredFns`); LLVM inlines the small ones (an
+  enumeration's immediates). A round trip (unboxed and boxed again at once)
+  is still folded into the box (`boxUnboxed?`: the block starts with the
+  word). The field of a `[value]` struct over a program type takes the
+  same form, except in a program that casts, where its fallback is the
+  struct's cast function (all in line). `tests/runtime/rr-fingerprint.py`
+  counts the functions and their uses as `unbox-fns` and `unbox-sites`,
+  not as conversion helpers.
+- **Why:** The in-line match is about 17 lines, and there were 2087 sites
+  in the benchmark set (2.48 MB, 7.1 % of the `.rr` text) for 338 distinct
+  (program, type) pairs; rrc's build time grows with the code it compiles.
+  The whole unboxing as one called function was smaller still, but LLVM
+  did not inline it where the type's zero is a cached placeholder (a
+  record's `box(0)`: the once-cell's code made the function too big), so
+  the loops of liasolver over arrays of records called it at every
+  element. With the pointer test in line, the remaining calls are on the
+  paths of `box(0)` and of errors only (L10's IR: the pointer test of all
+  87 sites in line, one masked compare; 35 calls left, all on those
+  paths). `.rr` text after `unread-consts`: the 50 distinct files of the
+  benchmark set 22.9 → 21.4 MB (−6.6 %), RtIO −13 %, L10 −12 %, cedar −8 %,
+  lean-zip −8 %, lean-regex −5 %. rrc's peak memory −1 to −2 % (cedar
+  2.37 → 2.34 GB, lean-zip 0.75 → 0.73 GB); its time changed within the
+  noise of a loaded machine (lean-zip 36 → 32 s, cedar 100 → 111 s with a
+  warm texture cache).
+- **Where:** `LowerBase.lean`: `ownUnboxName`, `boxUnboxWith` (`.prog`,
+  `outline`, `slowKey`), `boxUnbox`, `LowerState.ownUnboxFns`;
+  `Lower/Finish.lean`: `anchoredFns`; `runtime/prelude.rr`:
+  `l2r_any_raw_is_num`.
+- **Remove only if:** rrc's cost per line of code drops enough that the
+  copies cost nothing.
+
 ### The `unreachable` arm releases the `Box` out of line
 
 - **What:** The fallback arm of every unboxing function, and of an in-line

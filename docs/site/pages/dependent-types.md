@@ -723,19 +723,22 @@ fn nest_Nat(n : Nat, x : Nat) -> LStr {
   layout. Its fields are the boxes of `x`.
 - `nest_Box` makes the next pairs, with the same type.
 - The arm `wrap_Prod` of `apply_Fn_Box_Str` takes the `Prod` out of the
-  box in line. It splits the word, and it converts nothing. Here is that
-  code as a function, `unbox_Prod`:
+  box. It splits the word, and it converts nothing. The test for a pointer
+  with the number of `Prod` and the take are in line; the rest is one
+  function per type, `l2r_unbox_rest_Prod`:
 
 ```rust
-fn unbox_Prod(b : LAny) -> Prod {
-    let w : u64 = l2r_any_raw(b);
+// In line, where the Prod is read:
+let w : u64 = l2r_any_raw(b);
+if l2r_any_raw_is_num(w, 22) { l2r_any_raw_take<Prod>(w) }   // 22: the number of Prod
+else { l2r_unbox_rest_Prod(w) }
+
+// Generated once for Prod: the other words.
+fn l2r_unbox_rest_Prod(w : u64) -> Prod {
     if l2r_any_raw_is_imm(w) {
         if w == 1 { zero_Prod() }                        // box(0): the zero of Prod
         else { l2r_unreachable<Prod>() }
-    } else {
-        if l2r_any_raw_num(w) == 22 { l2r_any_raw_take<Prod>(w) }   // the number of Prod
-        else { l2r_unreachable<Prod>() }
-    }
+    } else { l2r_unreachable<Prod>() }
 }
 ```
 

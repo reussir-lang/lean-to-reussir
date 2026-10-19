@@ -2,6 +2,7 @@ import Lean
 import LeanToReussir.Pipeline
 import LeanToReussir.Lower
 import LeanToReussir.MonoRetype
+import LeanToReussir.Emit.Startup
 
 /-!
 # The configurable parts of the pipeline
@@ -28,6 +29,14 @@ structure RRProgram where
 structure PassConfig where
   /-- Edits of Lean's pass lists for Stage 2. -/
   stage2 : Stage2Config := #[]
+  /-- A pass over Stage 1's result, before Stage 2, that leaves out startup
+  steps of constants and what only they reach (`Opt/UnreadConsts`). It gets
+  Stage 1's state, the instances of `main` and of the error printer, and the
+  startup steps; it returns the steps to run and the state with the
+  declarations to translate. Plain: none, every constant of the program is a
+  startup step. -/
+  startupPrune : Option (MonoState → Name → Name → Array StartupStep →
+    CoreM (Array StartupStep × MonoState)) := none
   /-- Passes over Stage 2's declarations before Stage 3, in order, that may
   leave declarations out. They get the instance keys, the declarations the
   entry point always needs (`main`, the error printer, the startup steps

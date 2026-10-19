@@ -221,7 +221,8 @@ thread that waits blocks its context.
   Example: the peak memory of lean-zip's benchmark is 330 MiB with the
   option and 422 MiB without it (native: 394 MiB).
 - **Constants.** Every zero-parameter declaration of the program's modules
-  runs at startup, in Lean's initialization order. Each constant is a
+  runs at startup, in Lean's initialization order, except a constant that
+  no code reads and whose evaluation cannot show. Each constant is a
   once-cell. A context that needs a constant that another context is
   computing waits for it, as a native thread waits for a lock. A constant
   of a program type is stored through one generated enum,

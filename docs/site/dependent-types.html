@@ -725,18 +725,21 @@ the box:</p>
   layout. Its fields are the boxes of <code>x</code>.</li>
 <li><code>nest_Box</code> makes the next pairs, with the same type.</li>
 <li>The arm <code>wrap_Prod</code> of <code>apply_Fn_Box_Str</code> takes the <code>Prod</code> out of the
-  box in line. It splits the word, and it converts nothing. Here is that
-  code as a function, <code>unbox_Prod</code>:</li>
+  box. It splits the word, and it converts nothing. The test for a pointer
+  with the number of <code>Prod</code> and the take are in line; the rest is one
+  function per type, <code>l2r_unbox_rest_Prod</code>:</li>
 </ul>
-<pre><code class="language-rust">fn unbox_Prod(b : LAny) -&gt; Prod {
-    let w : u64 = l2r_any_raw(b);
+<pre><code class="language-rust">// In line, where the Prod is read:
+let w : u64 = l2r_any_raw(b);
+if l2r_any_raw_is_num(w, 22) { l2r_any_raw_take&lt;Prod&gt;(w) }   // 22: the number of Prod
+else { l2r_unbox_rest_Prod(w) }
+
+// Generated once for Prod: the other words.
+fn l2r_unbox_rest_Prod(w : u64) -&gt; Prod {
     if l2r_any_raw_is_imm(w) {
         if w == 1 { zero_Prod() }                        // box(0): the zero of Prod
         else { l2r_unreachable&lt;Prod&gt;() }
-    } else {
-        if l2r_any_raw_num(w) == 22 { l2r_any_raw_take&lt;Prod&gt;(w) }   // the number of Prod
-        else { l2r_unreachable&lt;Prod&gt;() }
-    }
+    } else { l2r_unreachable&lt;Prod&gt;() }
 }
 </code></pre>
 <h3 id="a-partial-application-that-leaves-a-type-open">A partial application that leaves a type open</h3>

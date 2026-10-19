@@ -251,6 +251,17 @@ projection, by a match, through a nested field or only by derived
 also takes its names out of `L2R_ENABLE_OPTS` (`RtUnreadFieldsHookOff`
 stays refused in a run that turns the pass on for all).
 
+`RtUnreadConsts` checks the optimization `unread-consts` (on by default):
+unread constants that cannot show (derived instances, an array, a string,
+a sum over `List.range`, a structure) are left out, while unread constants
+that trace, panic or read past an array's end run at startup in native
+order, a quiet constant that a kept one reads stays, and constants over
+the program's own recursion (structural, `partial`) stay; its
+`.l2r-debug` lists lean2rr's decision for each (`L2R_DEBUG`).
+`RtUnreadConstsIoErr`: a left-out constant that calls an `IO.Error`
+builder does not take the builder with it (`createDir "."` reports the
+error natively; before the fix, an internal panic).
+
 `tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests, with
 debug assertions on (so leanrt's invariant checks run, such as no big
 `Int` in the small range).
@@ -435,7 +446,7 @@ results, so each runs at two sizes.
   RtLazyFields) against their baselines in `tests/runtime/paynothing/`: the
   pay-nothing counts of the generated code (conversion helpers and their
   uses, values put into a `Box`, the program's pointer payload types of
-  `Box`) must not
+  `Box`, the values taken out of a `Box` at a program type) must not
   grow, nor the allocations and bytes of a run (1% plus 100 allocations or
   10000 bytes of slack); the native counts are recorded beside them. The
   changed items are listed (with `PAYNOTHING_STRICT=1` they fail the

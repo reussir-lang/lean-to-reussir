@@ -19,14 +19,92 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   the runtime lacks (or an extern of the program that lean2rr refuses)
   makes lean2rr reject the program (plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
-  "Not supported"). The exception, with the optimization `unread-fields`
-  (off by default): a constant's closed terms that only feed fields no
-  kept code reads are not evaluated (the constant itself still is), so a
-  `panic!` or `dbg_trace` in them does not show
+  "Not supported"). Two exceptions: with the optimization `unread-consts`
+  (on by default), an unread constant whose evaluation cannot show is not
+  evaluated and not translated (below); with the optimization
+  `unread-fields` (off by default), a constant's closed terms that only
+  feed fields no kept code reads are not evaluated (the constant itself
+  still is), so a `panic!` or `dbg_trace` in them does not show
   ([../optional-passes.md](../optional-passes.md#values-in-unread-fields-are-left-out-unread-fields)).
 - **Where:** `Emit/Startup.lean`: `startupItems`, `StartupItem`;
   `Emit/Entry.lean`: `entryRoots`, `programRoots`.
 - **Remove only if:** never.
+
+### An unread constant whose evaluation cannot show is left out (`unread-consts`)
+
+- **What:** After Stage 1, the startup step of a constant goes when both
+  hold:
+  - *unread*: the code that `main`, the error printer and the other
+    startup steps reach (calls, closures, constant reads, transitively)
+    does not name the constant's instance;
+  - *quiet*: its evaluation cannot show. The constant's code and the code
+    of every instance it runs (a call with all its parameters, a constant
+    read) only bind literals, build constructors and closures, project
+    fields, match, jump and return, and call the externs in
+    `pureExterns` (total arithmetic and conversions of `Nat`, `Int`, the
+    fixed-width numbers and floats; array and string operations whose
+    index has a proof; never `panic`, `dbg_trace`, IO, tasks, thunks,
+    references, `!` reads, `sorryAx`). No function value is applied (a
+    closure is only built). A recursion among these instances counts
+    only when every instance on it comes from a definition of Lean's
+    toolchain that Lean checked (structural or well-founded recursion),
+    or from an `unsafe` implementation of one (the loop of
+    `Array.foldlMUnsafe`); never a `partial` definition, never the
+    program's own recursion. The program's own `unsafe` code keeps the
+    constant, except Lean's computed-field implementations
+    (`BVExpr.const._override`). A constant whose type mentions a task,
+    thunk, reference or promise stays (the persistence walk at its first
+    evaluation, constants.md).
+  Then the instances that only such constants reach go too (Stage 2 and
+  later never see them), but not the `IO.Error` builders Stage 1 made
+  (the lowering calls them by name for every fallible IO extern and
+  child-process extern, also when only a left-out constant names one,
+  `IO.Error.mkAlreadyExistsFile`: review of size-core, test
+  `RtUnreadConstsIoErr`, and also when nothing names one). As a net, an
+  instance that nothing reaches stays too: Stage 1 makes an instance
+  without a reference in code only for these builders and for init
+  functions, and an init function is a root through its `.init` step. A
+  constant that kept code reads stays a startup step at its place: its
+  evaluation, and the order, are as before. With `L2R_DEBUG` set, lean2rr
+  prints the decision for every constant (`lean2rr: unread-consts: C:
+  left out`, `…: kept, read`, `…: kept, <the reason>`).
+- **Why:** Most unread constants are data that nothing reads: derived
+  instances, parser descriptors of `syntax` commands, and the LRAT
+  certificates (`*_cert__def*`, string literals up to 1.7 MB) and
+  expression trees (`*_expr__def*`) that `bv_decide` stores as constants.
+  The size survey of 2026-10-10 found them 23 % of the `.rr` text of the
+  benchmark set and 50 % of a program that uses lean-zip. A constant of
+  one string literal (the certificates) already has no function and no
+  step (`literal-consts`, [constants.md](constants.md#a-constant-of-one-string-literal-is-read-from-the-literal-cache));
+  this rule takes the rest: of the 50 distinct files of the benchmark set
+  24.9 MB to 22.9 MB (−7.9 %), lean-zip's 4.3 MB to 3.6 MB (−16 %, its
+  expression trees), lean-regex −12 %, cedar −6 %; rrc's build time grows
+  with the code.
+  Natively such a constant is evaluated once, at startup, and its value
+  is never read. Its evaluation ends (no recursion but Lean's checked
+  library recursion) and writes nothing (no extern but pure ones), so
+  leaving it out changes no output, no exit code and no order of the other
+  steps (the kept constants a dropped one reads are kept by others or are
+  quiet too). What can differ is resource exhaustion: an evaluation that
+  natively runs out of memory or stack, exceeds a size limit of Lean's
+  runtime (`Nat.pow` of an exponent above 2^32) or runs for a very long
+  time stops (or delays) the native program at startup, and lean2rr's
+  program runs (plan
+  [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
+  "Unread constants are not evaluated"). Memory and startup time drop.
+  The interactions: the startup order of the steps that stay is
+  unchanged (a filter); `boxed-consts`, `cheap-consts`, closed terms and
+  once-cells, `unread-fields`, `conv-liveness` and `prelude-liveness` see
+  fewer declarations and work as before on the rest; closed terms that
+  Lean shared between a dropped constant and kept code are made again by
+  the kept code (`ExtractClosedK` runs per module on what is left), which
+  changes sharing only.
+- **Where:** `Opt/UnreadConsts.lean`: `prune`, `blockers`, `scanCode`,
+  `classifyCall`, `pureExterns`, `recursionEnds`, `isComputedFieldImpl`;
+  hook `PassConfig.startupPrune`; `Main.lean`: `pipeline` (after Stage 1).
+  Tests `RtUnreadConsts` (its `.l2r-debug` lists the decisions),
+  `RtUnreadConstsIoErr`.
+- **Remove only if:** the pass is off (every constant is a step).
 
 ### Modules follow the module system's phases
 

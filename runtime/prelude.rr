@@ -130,6 +130,10 @@ fn l2r_any_unit() -> LAny { l2r_any_of_raw(1) }
 fn l2r_any_raw_is_imm(w : u64) -> bool { (w & 1) == 1 }
 fn l2r_any_raw_imm(w : u64) -> u64 { w >> 1 }
 fn l2r_any_raw_num(w : u64) -> u64 { w >> 48 }
+// Whether the word is a pointer of payload number `n` (an unboxing at a
+// program type takes it in line, and calls its generated function for the
+// rest: `boxUnboxWith`).
+fn l2r_any_raw_is_num(w : u64, n : u64) -> bool { (w & 1) == 0 && (w >> 48) == n }
 // The value of an immediate box (a pointer: `l2r_unreachable`).
 fn l2r_any_as_imm(a : LAny) -> u64 {
     let w = l2r_any_raw(a);

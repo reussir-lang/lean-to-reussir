@@ -6,7 +6,8 @@
 # its baseline:
 # - the pay-nothing counts of its generated code (tests/runtime/
 #   rr-fingerprint.py `show`: conversion helpers and their uses, values put
-#   into an `L2RBox`, the constructors of `L2RBox`) must not grow;
+#   into an `L2RBox`, the constructors of `L2RBox`, values taken out of one
+#   at a program type) must not grow;
 # - its allocations and the bytes it allocates (through lean2rr, with the
 #   counter of tests/runtime/alloccount, at a fixed size) must not grow by
 #   more than 1% plus 100 allocations or 10000 bytes; the native build's
@@ -105,8 +106,10 @@ for p in "${PROGRAMS[@]}"; do
   if [ ! -f "$BASE/$p.fp" ]; then
     echo "FAIL $p: no baseline $BASE/$p.fp (write it with --update)"; status=1; continue
   fi
-  for k in conversion-fns conversion-sites box-sites box-variants; do
+  for k in conversion-fns conversion-sites box-sites box-variants unbox-sites; do
     old=$(count "$BASE/$p.fp" "$k"); new=$(count "$d/$p.fp" "$k")
+    # (A baseline older than a count has none: nothing to compare.)
+    [ -n "$old" ] || continue
     if [ "$new" -gt "$old" ]; then why="$why $k grew from $old to $new;"; fi
   done
   oa=$(count "$BASE/$p.fp" allocs); ob=$(count "$BASE/$p.fp" bytes)

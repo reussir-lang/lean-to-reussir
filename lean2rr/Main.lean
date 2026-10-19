@@ -92,6 +92,15 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let (leanInit, items) ← startupItems opts.root
   let (rootInsts, st) ← monomorphize (programRoots opts.root leanInit items)
     { preludeFns := ← preludeFnDeclsM prelude }
+  -- The startup steps, with instance names; the registry's pass that
+  -- leaves out the steps of unread constants without effects, with what
+  -- only they reach (`Opt/UnreadConsts`).
+  let mainInst := rootInsts[0]!
+  let errStr := rootInsts[1]!
+  let startup ← startupSteps leanInit items rootInsts st
+  let (startup, st) ← match cfg.startupPrune with
+    | some pass => pass st mainInst errStr startup
+    | none => pure (startup, st)
   -- The externs of the program that run their Lean definition (natively
   -- their C code runs): a note of the build, on lean2rr's stderr (the
   -- program's output is not affected).
@@ -125,9 +134,6 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   if stage == "mono" then return dumpDecls header decls
   -- Stage 3: the types mono lost, recovered from the code the entry point
   -- reaches (`main`, the error printer, the startup steps).
-  let mainInst := rootInsts[0]!
-  let errStr := rootInsts[1]!
-  let startup ← startupSteps leanInit items rootInsts st
   -- The registry's passes that leave declarations out (`Opt/UnreadFields`).
   -- Their roots: `main`, the error printer, the startup steps that always
   -- run (the program's items, `Init`'s and `Std`'s initializers) and their

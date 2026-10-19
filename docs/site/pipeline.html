@@ -149,7 +149,10 @@ of <code>Init</code> and <code>Std</code> (<code>IO.stdGenRef</code>), <code>IO.
 <code>IO.Error</code> builders when the program uses fallible IO. Everything these
 reach is collected: declarations with code, <code>@[extern]</code> declarations and
 constructors. A constant that <code>main</code> never uses is still a root, because
-native Lean evaluates it at startup.</p>
+native Lean evaluates it at startup. One exception: after Stage 1, a
+constant that no other root's code reads, and whose evaluation cannot show,
+is not a root, and what only it reaches is not translated
+(<a href="passes.html#constants-that-nothing-reads-unread-consts"><code>unread-consts</code></a>).</p>
 <p><strong>Instances.</strong> A polymorphic declaration becomes one <em>instance</em> per list of
 type arguments. Each instance gets a fresh name (<code>d._l2r.k</code>), so Lean's
 passes in Stage 2 see only lean2rr's copies.</p>
@@ -355,7 +358,9 @@ entry point or from the runtime's entries. See
 <ul>
 <li>Every zero-parameter declaration of the program's modules runs at startup,
   in Lean's initialization order, as natively. lean2rr rebuilds that order
-  from the <code>.olean</code> record and the source structure.</li>
+  from the <code>.olean</code> record and the source structure. A constant that no
+  code reads and whose evaluation cannot show does not run
+  (<a href="passes.html#constants-that-nothing-reads-unread-consts"><code>unread-consts</code></a>).</li>
 <li>The <code>initialize</code> declarations of <code>Init</code> and <code>Std</code> (<code>IO.stdGenRef</code>) run
   at their module's place in the same order, also when the program does
   not use them. They open files, and they can fail, so they cannot wait

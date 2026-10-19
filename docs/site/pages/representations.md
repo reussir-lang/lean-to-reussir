@@ -216,9 +216,11 @@ with examples, and what it costs.
   A `[value]` struct of several fields goes into a one-field cell
   (`ElemBox`).
 - To unbox, the code checks the word against the type number of the
-  target. A wrong word is a panic, never a wrong read. With the optional
-  pass `conv-liveness`, an unboxing function has arms only for the types
-  that live code boxes.
+  target. A wrong word is a panic, never a wrong read. At a program type,
+  the test for a pointer of the target's number and the take are in line;
+  the rest (an immediate, another number) is a call of one function per
+  target type, `l2r_unbox_rest_T`. With the optional pass `conv-liveness`,
+  an unboxing function has arms only for the types that live code boxes.
 - In a program that casts, a box can hold any word. The unboxing then
   reads an immediate as native Lean reads that word: a `Bool` is its low
   byte, nonzero (256 is `false`); an enumeration's index is masked to the

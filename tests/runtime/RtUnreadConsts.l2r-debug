@@ -1,0 +1,15 @@
+lean2rr: unread-consts: instReprPoint: left out
+lean2rr: unread-consts: pureText: left out
+lean2rr: unread-consts: pureSum: left out
+lean2rr: unread-consts: purePoint: left out
+lean2rr: unread-consts: pureTable: kept, read
+lean2rr: unread-consts: helper: kept, read
+lean2rr: unread-consts: readList: kept, read
+lean2rr: unread-consts: traced1: kept, calls the extern dbgTrace
+lean2rr: unread-consts: panics: kept
+lean2rr: unread-consts: readsPastEnd: kept, calls the extern Array.get!Internal
+lean2rr: unread-consts: viaProgramRec: kept, recursion through sumTo
+lean2rr: unread-consts: viaPartial: kept, recursion through countDown
+! traced2: left out
+! traced3: left out
+! tracedReader: left out
