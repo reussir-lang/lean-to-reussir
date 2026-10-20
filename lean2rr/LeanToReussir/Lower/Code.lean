@@ -193,12 +193,14 @@ mutual
           ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, t) }
         let b ← lowerCode ctx' outlined retTy body
         return { b with lets := lets ++ b.lets }
-      | some (.yield tys order) =>
+      | some (.yield tys) =>
         let vals ← (taken.zip tys).mapM fun (a, t) => lowerArg ctx a t
         match vals.size with
         | 0 => return .ofExpr .unitVal
         | 1 => return .ofExpr vals[0]!
-        | _ => return .ofExpr (.ctor (← tupleType (order.map (tys[·]!))) none (order.map (vals[·]!)))
+        | _ =>
+          let (tn, order) ← tupleType tys
+          return .ofExpr (.ctor tn none (order.map (vals[·]!)))
       | some (.call fn captured) =>
         let tys := ctx.jpParams.getD j #[]
         let vals ← (taken.zip tys).mapM fun (a, t) => lowerArg ctx a t
@@ -257,15 +259,14 @@ mutual
             outlined retTy k
         else
           -- J2: the scope computes the join point's arguments, two or more
-          -- as a tuple in the order of `jpTupleOrder`.
-          let order ← jpTupleOrder ptys
-          let mut posOf := Array.replicate ptys.size 0
-          for h : k in [:order.size] do posOf := posOf.set! order[k] k
-          let resTy ← match ptys.size with
-            | 0 => pure RR.Ty.unit
-            | 1 => pure ptys[0]!
-            | _ => pure (RR.Ty.named (← tupleType (order.map (ptys[·]!))))
-          let scope ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.yield ptys order) } outlined resTy k
+          -- as a tuple (`tupleType`, its members in `memberOrder`).
+          let (resTy, posOf) ← match ptys.size with
+            | 0 => pure (RR.Ty.unit, #[])
+            | 1 => pure (ptys[0]!, #[0])
+            | _ => do
+              let (tn, order) ← tupleType ptys
+              pure (RR.Ty.named tn, positionsOf order)
+          let scope ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.yield ptys) } outlined resTy k
           let r ← fresh "jv"
           let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[(r, some resTy, .block scope)]
           let mut ctx' := { ctx with vars := unitVars ctx.vars }

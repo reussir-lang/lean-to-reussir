@@ -235,7 +235,9 @@ does not change a layout.
 - **Results.** A function whose result is a structure, or a type with two
   constructors (`EST.Out`, `Except`, `Option`, `ForInStep`), returns its
   fields as a `[value]` tuple. A type with two constructors adds a tag (a
-  `bool`). The fields of the other constructor hold placeholders.
+  `bool`). The fields of the other constructor hold placeholders. The
+  tuple's fields are sorted by decreasing alignment, as the fields of a
+  record are.
 - **Worker and wrapper.** The function becomes a worker with the new
   signature. A wrapper keeps the old name and signature, for function
   values and entry points. Every direct call goes to the worker.

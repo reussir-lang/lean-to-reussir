@@ -30,9 +30,11 @@ relative to `lean2rr/LeanToReussir/`. Plan
 
 - **What:** The structured `let` of a J2 join point with several
   parameters produces a generated `[value]` struct `TupleN` (N a fresh
-  number; one struct per list of field types), taken apart
-  afterwards. Its fields are the parameters in decreasing alignment, ties
-  in parameter order (`jpTupleOrder`, the record order of `field-order`):
+  number; one struct per list of parameter types, `tupleType`), taken
+  apart afterwards. Its fields are the parameters in decreasing alignment,
+  ties in parameter order (`memberOrder`, the order of every generated
+  tuple and of records with `field-order`,
+  [records](../representations/records.md#fields-are-ordered-by-decreasing-alignment)):
   a jump builds the tuple in that order, and the join point reads
   parameter `i` from its field. Example: the join point of `'a' ≤ c && c ≤
   'z'` in a fold that carries a `Nat` takes `(b : Bool) (n : Nat)`
@@ -47,9 +49,9 @@ relative to `lean2rr/LeanToReussir/`. Plan
   longer folded (Strings' `charStats` loop with `Tuple(bool, Nat)`: the
   whole program ran 3.0% more instructions; issue 17 of `reussir-bugs/`).
   Without padding between members there is no widened member.
-- **Where:** `LowerBase.lean`: `tupleType`, `jpTupleOrder`;
-  `Lower/Code.lean`: `lowerCode` (`.jp`, `.jmp`); `Lower/Ctx.lean`:
-  `JumpAction.yield`.
+- **Where:** `LowerBase.lean`: `tupleType`, `memberOrder`,
+  `positionsOf`; `Lower/Code.lean`: `lowerCode` (`.jp`, `.jmp`);
+  `Lower/Ctx.lean`: `JumpAction.yield`.
 - **Remove only if:** never (the tuple); the order only if Reussir no
   longer widens a padded member (issue 17) or the driver packs record
   members again.

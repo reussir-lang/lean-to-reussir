@@ -319,11 +319,16 @@ structure LowerState where
   for. -/
   persistReqs : Array RR.Ty := #[]
   persistDone : Option (Nat × Nat) := none
-  /-- Generated `[value]` structs carrying several join-point arguments. -/
+  /-- Generated positional structs, by key: a `Tuple` (`tupleType`) by
+  the types of its values in their own order, an `ElemBox` (`cellStorage`)
+  by its field's type and the marker `__elem_box`. -/
   tupleTypes : Std.HashMap (Array RR.Ty) String := {}
   /-- The key of each of `tupleTypes`, by name (finding it by scanning
   `tupleTypes` was linear: round 9 RV9S-02). -/
   tupleKeys : Std.HashMap String (Array RR.Ty) := {}
+  /-- The member order of each `Tuple` (`tupleType`, `memberOrder`), by
+  name: member `k` holds value `order[k]` of its key. -/
+  tupleOrders : Std.HashMap String (Array Nat) := {}
   /-- Generated functions (declarations and outlined join points). A
   function replaced by another of the same name leaves a tombstone
   (`fnTombstone`, dropped at the end) where it was, so that positions stay
@@ -597,12 +602,22 @@ def elemBoxOf? (t : RR.Ty) : LowerM (Option RR.Ty) := do
   let some k := (← get).tupleKeys[n]? | return none
   if k.size == 2 && k[1]! == .named "__elem_box" then return some k[0]! else return none
 
-/-- The fields of generated positional struct `n`: a `Tuple`'s (its key,
-see `tupleType`) or an `ElemBox`'s one field (see `cellStorage`), if `n` is
-one of them. -/
+/-- The member types of generated positional struct `n`, in member order:
+a `Tuple`'s (its key in its member order, see `tupleType`) or an
+`ElemBox`'s one field (see `cellStorage`), if `n` is one of them. -/
 def tupleFields? (n : String) : LowerM (Option (Array RR.Ty)) := do
   let some k := (← get).tupleKeys[n]? | return none
-  return some (if k.size == 2 && k[1]! == .named "__elem_box" then #[k[0]!] else k)
+  if k.size == 2 && k[1]! == .named "__elem_box" then return some #[k[0]!]
+  match (← get).tupleOrders[n]? with
+  | some order => return some (order.map (k[·]!))
+  | none => return some k
+
+/-- The value types (in the values' order) and the member order of
+generated tuple `n` (`tupleType`), if `n` is one. -/
+def tupleLayout? (n : String) : LowerM (Option (Array RR.Ty × Array Nat)) := do
+  let some order := (← get).tupleOrders[n]? | return none
+  let some k := (← get).tupleKeys[n]? | return none
+  return some (k, order)
 
 /-- The shared enum through which the once-cells of program types are
 set (`onceCell`): `enum L2RConstCell { c0(S0), c1(S1), … }`, one variant
@@ -1621,31 +1636,47 @@ or enum: 8; so is a type the model does not know (a pointer, see
 def fieldAlign (t : RR.Ty) : LowerM Nat := do
   return (RR.fieldAlign? (layoutItem? (← get)) t).getD 8
 
-/-- The order of the fields of the tuple that carries a join point's
-arguments of types `tys` (J2; `JumpAction.yield`): field `k` is argument
-`order[k]`. As for a record's fields (`fieldOrder`; Opt/FieldOrder:
-decreasing alignment, ties in parameter order), so the tuple has no
-padding between members. With the driver's `--no-pack-record-members`,
-Reussir widens a member to the alignment of the next one (a `bool` before
-a `Nat`: an `i64` member) and stores only the field's own bits (`store
-i1`), so LLVM keeps the tuple on the stack and loads the `bool` back from
-it: Strings' `charStats` loop ran 3% more instructions with a `(bool, Nat)`
-tuple than with `(Nat, bool)`. -/
-def jpTupleOrder (tys : Array RR.Ty) : LowerM (Array Nat) := do
+/-- The order of the members of a struct lean2rr generates over fields of
+types `tys`: member `k` is field `order[k]`. One rule for every such
+struct: a record's constructor (`nominalType`) and a generated tuple
+(`tupleType`: a join point's arguments, a `flatten-structs` result). It is
+`fieldOrder` (Opt/FieldOrder: decreasing alignment, ties in field order),
+so the struct has no padding between members. With the driver's
+`--no-pack-record-members`, Reussir widens a member to the alignment of
+the next one (a `bool` before a `Nat`: an `i64` member) and stores only
+the field's own bits (`store i1`), so LLVM keeps the struct on the stack
+and loads the `bool` back from it: Strings' `charStats` loop ran 3% more
+instructions with a join point's tuple `(bool, Nat)` than with
+`(Nat, bool)`. -/
+def memberOrder (tys : Array RR.Ty) : LowerM (Array Nat) := do
   if tys.size < 2 then return Array.range tys.size
   return (← read).fieldOrder (← tys.mapM fieldAlign)
 
-/-- A `[value]` struct type carrying several values: the arguments of a
-join point (J2), or a result of optimization `flatten-structs`
-(`flatTupleName`). -/
-def tupleType (tys : Array RR.Ty) : LowerM String := do
-  if let some n := (← get).tupleTypes[tys]? then return n
+/-- The member of each field under member order `order` (`memberOrder`):
+field `i` is member `(positionsOf order)[i]`. -/
+def positionsOf (order : Array Nat) : Array Nat := Id.run do
+  let mut pos := Array.replicate order.size 0
+  for h : k in [:order.size] do pos := pos.set! order[k] k
+  return pos
+
+/-- A `[value]` struct type carrying values of types `tys`, given in the
+order of the values (the arguments of a join point, J2; the fields of a
+result of optimization `flatten-structs`, `flatTupleName`), and the order
+of its members (`memberOrder`): member `k` holds value `order[k]`. The
+type is found by `tys` in the values' order, so each tuple type has one
+order (`tupleOrders`); a construction lists the values in member order,
+a read of value `i` reads member `(positionsOf order)[i]`. -/
+def tupleType (tys : Array RR.Ty) : LowerM (String × Array Nat) := do
+  if let some n := (← get).tupleTypes[tys]? then
+    return (n, (← get).tupleOrders.getD n (Array.range tys.size))
+  let order ← memberOrder tys
   let n ← fresh "Tuple"
   modify fun s => { s with
     tupleTypes := s.tupleTypes.insert tys n
     tupleKeys := s.tupleKeys.insert n tys
-    typeItems := s.typeItems.push (.struct n true tys) }
-  return n
+    tupleOrders := s.tupleOrders.insert n order
+    typeItems := s.typeItems.push (.struct n true (order.map (tys[·]!))) }
+  return (n, order)
 
 /-- The structure `L2RFlat.Tuple<k>` (`k` type parameters, one field of
 each) that optimization `flatten-structs` (Opt/Flatten) adds to the
@@ -1701,7 +1732,7 @@ mutual
         -- `flatten-structs`' tuples: a `[value]` struct of the fields.
         if let some k := flatTupleArity? n then
           let args := e.getAppArgs
-          if args.size == k then return .named (← tupleType (← args.mapM lowerType))
+          if args.size == k then return .named (← tupleType (← args.mapM lowerType)).1
         -- An array: of its element type's storage (`compact-arrays`).
         if n == ``Array && e.getAppNumArgs == 1 then
           return .app "RVec" #[← arrayStorage e.appArg!]
@@ -1850,14 +1881,12 @@ mutual
       -- Lean prints unescaped (RV9L-01a). Plain ASCII names keep their
       -- spelling (`c_node`, `c_a_b`).
       let variant := (ctorName.replacePrefix base .anonymous).mangle "c_"
-      -- The record's field order (`fieldOrder`; Opt/FieldOrder sorts by
-      -- decreasing alignment, so the record has no padding): Reussir keeps
-      -- the given order (the driver turns its own member packing off, see
-      -- scripts/l2r.py).
-      let aligns ← rrFields.mapM fieldAlign
-      let perm := (← read).fieldOrder aligns
-      let mut posOf := Array.replicate rrFields.size 0
-      for h : r in [:perm.size] do posOf := posOf.set! perm[r] r
+      -- The record's field order (`memberOrder`, as for generated tuples;
+      -- Opt/FieldOrder sorts by decreasing alignment, so the record has no
+      -- padding): Reussir keeps the given order (the driver turns its own
+      -- member packing off, see scripts/l2r.py).
+      let perm ← memberOrder rrFields
+      let posOf := positionsOf perm
       let placed := fields.map (·.map fun (i, t) => (posOf[i]!, t))
       let packed := perm.map (rrFields[·]!)
       ctors := ctors.insert ctorName { variant, numParams := ival.numParams, fields := placed }

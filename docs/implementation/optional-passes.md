@@ -21,7 +21,7 @@ and passes").
 |---|---|---|---|
 | `unread-fields` (off by default) | before Stage 3, a value that a constructor stores in a field no kept code reads (a callback an initializer registers for Lean's elaborator; data, such as a `ToExpr` instance's `toTypeExpr`) becomes `◾`, with the unused parameters of declarations and join points; what only those reached is left out, and the `Lean` package's `initialize` constants that kept code no longer reads do not run | a field counts as read when kept code projects it or uses its binder in a match, and every field of a type that an extern takes by its declared parameter types (not a type variable), of `IO.FS.Stream`, the IO results, tasks, thunks, references and promises; a `let` that may have an effect stays; never a field of a type the runtime represents itself (`builtinTypeNames`); nothing in a program that can cast (`programCasts`, on the code kept); in a program whose kept code creates tasks, only a value that cannot hold a task (nor can a closure's captured values); in one whose kept code makes resources, no value that may hold one | below |
 | `unread-consts` | after Stage 1, a constant that no kept code reads and whose evaluation cannot show is not a startup step, and what only such constants reach is not translated | quiet: no function value applied, no extern but the pure total ones (`pureExterns`), no recursion but Lean's checked library recursion (never `partial`, never the program's own), no `unsafe` code of the program but Lean's computed-field implementations, no task, thunk, reference or promise in its type, no instance whose declaration rests on a claim Lean did not check: `sorry` or an axiom other than `propext`, `Quot.sound`, `Classical.choice` (also in a `@[csimp]` theorem or a `partial` definition's code), or an `@[implemented_by]` of the program (`axiomTaints`); unread: no reference from the code that `main`, the error printer and the other steps reach; the `IO.Error` builders and the instances made without a reference in code stay; plan §10 for resource exhaustion | [startup/order.md](startup/order.md#an-unread-constant-whose-evaluation-cannot-show-is-left-out-unread-consts) |
-| `field-order` | record fields, and the fields of a join point's tuple (J2), by decreasing alignment, no padding | none needed: every access goes through the constructor layout | [records](representations/records.md#fields-are-ordered-by-decreasing-alignment) |
+| `field-order` | record fields, and the fields of every generated tuple (a join point's, J2; a `flatten-structs` result), by decreasing alignment, no padding | none needed: every access goes through the constructor layout or the tuple's order (`tupleType`) | [records](representations/records.md#fields-are-ordered-by-decreasing-alignment) |
 | `value-structs` | a structure with one relevant field is a `[value]` struct | not when the field's type is being translated (no type contains itself by value) | [records](representations/records.md#one-field-structures-are-value-structs) |
 | `compact-arrays` | an `Array` of a scalar is `RVec<u8\|u16\|u32\|u64\|f32\|f64>` of its storage kind; the loops of `Array.map` typed at their element types (Stage 3); `Array lcAny` parameters typed from their callers when they get compact arrays; a field `Array α` boxed in an inductive the program uses with a compact array | the whole-program check (`compactArrayKinds`) turns a storage kind off when a value of it could meet an array of boxes: a crossing at any edge of the reachable code, a flow class that holds `Array lcAny`, or a program that casts (`programCasts`); a typed `map` loop only in Lean's shape, its stored values checked once typed; a parameter only when every caller passes one type and its own calls agree | [compact arrays](representations/compact-arrays.md) |
 | `placeholder-cache` | placeholders that would allocate built once, in a once-cell | only heap placeholders; a placeholder is never inspected | [placeholders](representations/placeholders.md#placeholders-that-allocate-are-built-once) |
@@ -434,7 +434,9 @@ and passes").
     (`EST.Out`, `Except`, `Option`, `ForInStep`), nested in each other:
     the declaration returns the variables as a `[value]` tuple
     (`L2RFlat.Tuple<k>`, a structure the pass adds to the environment, which
-    `lowerType` lowers to `tupleType` of its fields' types). The fields of
+    `lowerType` lowers to `tupleType` of its fields' types: its members in
+    decreasing alignment, as a record's fields,
+    [records](representations/records.md#fields-are-ordered-by-decreasing-alignment)). The fields of
     the constructor a value does not have are placeholders (`◾`); two
     constructors with the same field types (`ForInStep`) share them.
 
@@ -638,8 +640,8 @@ and passes").
   `mentionsResource`, `walk`, `run`; the rewrite `xform`,
   `explode`, `materialize` (`Env.mats`, `VVal.key`), `callWorker`, `run` (workers, wrappers,
   peeled wrappers). `LowerBase.lean`: `flatTupleName`, `lowerType` (the
-  tuple types); `Lower/Values.lean`: `lowerLetValue` (tuple constructor and
-  projections); `Opt/Flatten.lean`'s `holdsResource` (the type rule, for
+  tuple types, `tupleType`); `Lower/Values.lean`: `lowerLetValue` (tuple
+  constructor and projections, through `tupleLayout?`); `Opt/Flatten.lean`'s `holdsResource` (the type rule, for
   a program that can cast) follows
   `Lower/Borrow.lean`'s `mayHoldResource` (memoized); hook `PassConfig.monoPassesCore`
   (run by `Main.lean` after `monoPasses`; `--emit opt` prints the result).

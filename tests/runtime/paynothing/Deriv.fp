@@ -4,8 +4,8 @@ allocs 464346
 bytes 10505024
 native-allocs 553749
 native-bytes 12062030
-items 162
-functions 125
+items 164
+functions 127
 conversion-fns 0
 conversion-sites 0
 box-sites 38
@@ -32,11 +32,11 @@ item T_ST_Out_# d89b44c55864
 item T_StdGen_# 066265cc92ad
 item T_Std_IterStep_# 2e6b3397c95a
 item T_String_Slice_# 74f079416627
-item Tuple# 1bec48b38b83
 item Tuple# 380acfa4c4fa
+item Tuple# 4637db716227
+item Tuple# 85118fa9d3d2
 item Tuple# d4eee5540d99
-item Tuple# d895e58c720b
-item Tuple# f01e57c465fa
+item Tuple# e437b791653f
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 347a0beb0162
@@ -61,6 +61,8 @@ item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9fbde3aed1e8
 item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 873c2bcee3f0
 item l2r_ap2_F«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 107ae66909d4
 item l2r_ap3_F3nNatF«T_Expr_#~c0934c0ffd7f»F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 8ee95270dce0
+item l2r_box_«T_IO_Error_#~9355e6117fd3» d8238479b9fe
+item l2r_box_«T_Option_#~b05d6063b715» a8fed88eb7a3
 item l2r_err_string ca5b2a8474bb
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
@@ -69,8 +71,8 @@ item l2r_init_chunk_0 e04d029e0679
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
-item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
-item l2r_main_body 4100cb9154e3
+item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» 572330f53511
+item l2r_main_body 348170c0fce9
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
@@ -119,7 +121,7 @@ item l_Expr_ln___l2r_#_ 00867edc213a
 item l_Expr_mul___l2r_#_ c886e3364b0e
 item l_Expr_mul___l2r_#____closed__0 00c3a5d78617
 item l_Expr_mul___l2r_#____closed__0_init 798dd0ac9def
-item l_Expr_nestAux___l2r_#____l2r__flat 518ebf5e0efe
+item l_Expr_nestAux___l2r_#____l2r__flat 0ab3794071a7
 item l_Expr_pow___l2r_#_ fd4e14a5421c
 item l_Expr_pow___l2r_#____closed__0 ba7b1ccb7865
 item l_Expr_pow___l2r_#____closed__0_init e02ec57a611d
@@ -156,16 +158,16 @@ item l_IO_Error_toString___l2r_#_ edd1ea0d4dee
 item l_IO_print___at___00IO_println___at___00Expr_deriv_spec__0_spec__0___l2r_#_ e941463455c1
 item l_IO_println___at___00Expr_deriv_spec__0___l2r_#_ edd9c41dd13f
 item l_IO_userError___l2r_#_ e5a4f2aa2427
-item l_List_head_x3f___l2r_#____redArg___l2r__flat 481eddf2b93a
-item l_String_Slice_isNat___l2r_#____closed__0 a2d18430389b
-item l_String_Slice_isNat___l2r_#____closed__0_init ed2bd87a03cb
-item l_String_Slice_isNat___l2r_#____l2r__flat bd978759f7b0
-item l_String_Slice_toNat_x3f___l2r_#____l2r__flat a070fb629c50
+item l_List_head_x3f___l2r_#____redArg___l2r__flat 5cf1203e5023
+item l_String_Slice_isNat___l2r_#____closed__0 598888998569
+item l_String_Slice_isNat___l2r_#____closed__0_init b21061b66c89
+item l_String_Slice_isNat___l2r_#____l2r__flat a365ee7ca991
+item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 27031b1666f1
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 81db83ef79c1
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
 item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ffd80adacb14
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
-item l_main___l2r_#_ ecf587e32950
+item l_main___l2r_#_ 767259ca8c0d
 item l_main___l2r_#____closed__1 74577e80cb31
 item l_main___l2r_#____closed__1_init 8a7f238ccf62
 item l_main___l2r_#____closed__2 1125e7d1db85

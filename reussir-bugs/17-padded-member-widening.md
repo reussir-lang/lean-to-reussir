@@ -5,9 +5,10 @@
 ## Summary
 
 **Kind:** missed optimization. **Status:** worked around: lean2rr puts
-the fields of its join-point tuples in decreasing alignment
-(`jpTupleOrder`), as it already does for records (`field-order`), so no
-member has padding after it. Not patched. It shows only with
+the fields of every tuple it generates (join-point tuples,
+`flatten-structs` results) in decreasing alignment (`memberOrder`), as it
+already does for records (`field-order`), so no member has padding after
+it. Not patched. It shows only with
 `--no-pack-record-members`, which lean2rr's driver passes; Reussir's
 default packed order has no padding between members.
 
@@ -64,17 +65,21 @@ a store of the field zero-extended to the widened integer.
 
 - Records: their fields are already in decreasing alignment
   (`Opt/FieldOrder.lean`, `field-order`), so no member is padded.
-- Join-point tuples (J2, `LowerBase.lean`: `jpTupleOrder`): the same order
-  since the fix of the run-7 regressions. Before it, the tuple followed
+- Join-point tuples (J2, `LowerBase.lean`: `tupleType`, `memberOrder`):
+  the same order since the fix of the run-7 regressions. Before it, the tuple followed
   the join point's parameter order. The parameter order by first use
   (`stableJpParams`, dev 713037fa) made the tuple of `'a' ≤ c && c ≤ 'z'`
   in Strings' `charStats` loop `(bool, Nat)` instead of `(Nat, bool)`, and
   the program ran 3.0% more instructions (cachegrind, 13.97 → 14.39
   billion; `docs/implementation/control-flow/join-points.md`).
-- Not covered: the tuples of `flatten-structs` (`L2RFlat.Tuple<k>`) keep
-  the order of the structure's fields; an `Option` result is flattened to
-  `(bool, value)`, for example Strings' `String.Slice.toNat?` returns
-  `Tuple(bool, Nat)`.
+- The tuples of `flatten-structs` (`L2RFlat.Tuple<k>`, the same
+  `tupleType` and `memberOrder`): the same order since the change that
+  follows the fix of the run-7 regressions. Before it, they kept the
+  order of the structure's fields; an `Option` result is flattened to
+  `(bool, value)`, for example Strings' `String.Slice.toNat?` returned
+  `Tuple(bool, Nat)`, now `Tuple(Nat, bool)`. Across run 7's programs,
+  1144 of 1999 tuple types had a smaller field before a larger one, in 38
+  programs.
 - `--no-pack-record-members` itself was a workaround for a Reussir bug
   that upstream fixed (#652, #656;
   `docs/implementation/reussir-workarounds/correctness-bugs.md`, old

@@ -155,8 +155,19 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   decreasing alignment, ties in declaration order; `CtorLayout` maps each
   Lean field to its record position, and constructions, patterns,
   projections and conversions go through it. The driver turns Reussir's own
-  member packing off. A J2 join point's tuple orders its fields the same
-  way ([join points](../control-flow/join-points.md#a-j2-join-point-with-several-parameters-yields-a-value-tuple)).
+  member packing off. Every tuple that lean2rr generates (`tupleType`: a
+  J2 join point's tuple,
+  [join points](../control-flow/join-points.md#a-j2-join-point-with-several-parameters-yields-a-value-tuple);
+  a `flatten-structs` result `L2RFlat.Tuple<k>`,
+  [optional passes](../optional-passes.md#structure-arguments-and-results-are-spread-into-their-fields-flatten-structs)) orders its
+  members the same way, through the same function (`memberOrder`).
+  `tupleType` finds a tuple type by its value types in the values' order
+  and keeps its member order (`tupleOrders`); a construction lists the
+  values in that order, and a projection of value `i` reads its member
+  (`tupleLayout?`, `positionsOf`). Example: `String.Slice.toNat?`
+  returns `Option Nat`, flattened to the tag and the value, `(bool, Nat)`
+  in Lean's order; its tuple is `Tuple(Nat, bool)`, built as
+  `Tuple{n, true}`, and a caller reads the tag from member 1.
   A field's alignment (`fieldAlign`) is the one Reussir
   gives the member (`RR.fieldAlign?`, the model that the step variants of
   `outline` also use; Reussir's `memberStorageType` and
@@ -171,15 +182,26 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   7860807); and Reussir's in-place variant reuse with packed layouts skips
   stores of fields packing moves (a Reussir bug, fixed upstream in #656;
   the old stack has a local patch for it), so packing stays off and
-  lean2rr does the ordering itself.
+  lean2rr does the ordering itself. A generated tuple: with
+  `--no-pack-record-members`, Reussir widens a member that the next
+  member's alignment pads (a `bool` before a `Nat`: an `i64`) and stores
+  only the field's own bits, so LLVM keeps the tuple on the stack (issue
+  17 of `reussir-bugs/`). Sorted `flatten-structs` tuples took
+  MonadicInterp (n = 30000) from 21.95 to 21.73 billion instructions
+  (−1.0%, cachegrind) and Liasolver (n = 50) from 13.58 to 13.49 billion
+  (−0.7%).
 - **Where:** `LowerBase.lean`: `nominalType`, `fieldAlign`, `layoutItem?`,
-  `CtorLayout.place`, `CtorLayout.posTys`; `FieldAlign.lean`:
-  `fieldAlign?`; `Opt/FieldOrder.lean`: `alignmentOrder`;
-  `scripts/l2r.py` (`--no-pack-record-members`).
+  `memberOrder`, `positionsOf`, `tupleType`, `tupleLayout?`,
+  `CtorLayout.place`, `CtorLayout.posTys`; `Lower/Values.lean`:
+  `lowerLetValue` (a `flatten-structs` tuple's constructor and
+  projections); `Lower/Code.lean`: `lowerCode` (J2);
+  `FieldAlign.lean`: `fieldAlign?`; `Opt/FieldOrder.lean`: `alignmentOrder`; `scripts/l2r.py`
+  (`--no-pack-record-members`).
 - **Tests:** `RtValueStructAlign` (`[value]` structs of sub-word fields in
   four records; its comment gives the layouts before and after).
 - **Remove only if:** the optional pass `field-order` may be turned off
-  (then Reussir lays padding out as bytes); `--no-pack-record-members`
+  (then Reussir lays padding out as bytes, and tuples keep the values'
+  order); `--no-pack-record-members`
   is removable after the move to Reussir 7954a367, which fixes the
   variant half of that bug. See
   [../reussir-workarounds/correctness-bugs.md](../reussir-workarounds/correctness-bugs.md#old-bug-2-in-place-reuse-skipped-a-field-store).

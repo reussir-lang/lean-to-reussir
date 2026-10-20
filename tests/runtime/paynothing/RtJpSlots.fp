@@ -1,11 +1,11 @@
 # Pay-nothing baseline of RtJpSlots (tests/runtime/RtJpSlots.lean), arguments ''.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 109621
-bytes 2284280
+allocs 109623
+bytes 2284328
 native-allocs 229964
 native-bytes 4374515
-items 193
-functions 135
+items 195
+functions 137
 conversion-fns 0
 conversion-sites 0
 box-sites 40
@@ -41,19 +41,19 @@ item T_Tally_# 323356c6c92f
 item T_W_# e9ab9b769a5e
 item T_oat_Model_UnpackedFloat_ExtendedMantissa_# 579cbb1db395
 item Tuple# 14cd12a91513
-item Tuple# 1bec48b38b83
 item Tuple# 380acfa4c4fa
+item Tuple# 3efebec8fbe1
 item Tuple# 413795818de2
 item Tuple# 421dc49b8b53
+item Tuple# 45207e009328
 item Tuple# 4b3eeb9824b1
 item Tuple# 566ce1576869
 item Tuple# 5ba4fcb55c39
 item Tuple# 67ef8e6d8cee
+item Tuple# 85118fa9d3d2
 item Tuple# 921cbfa2ca97
-item Tuple# cb1b0c98b410
 item Tuple# d4eee5540d99
-item Tuple# d895e58c720b
-item Tuple# f3eb70457158
+item Tuple# e437b791653f
 item Tuple# f6392972497e
 item Tuple# f8b863d56368
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
@@ -86,6 +86,8 @@ item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9fbde3aed1e8
 item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 873c2bcee3f0
 item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_4nLAny daecf3bfb378
 item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_4nLAny_go f4af20a6c597
+item l2r_box_«T_IO_Error_#~9355e6117fd3» d8238479b9fe
+item l2r_box_«T_Option_#~b05d6063b715» a8fed88eb7a3
 item l2r_err_string ca5b2a8474bb
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
@@ -94,8 +96,8 @@ item l2r_init_chunk_0 e04d029e0679
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
-item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
-item l2r_main_body 6574264d06d7
+item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» 572330f53511
+item l2r_main_body 8f00d132264e
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
 item l2r_run_main d750382a583f
@@ -169,15 +171,15 @@ item l_IO_print___at___00loop_spec__0___l2r_#_ e6fbd31124a8
 item l_IO_println___at___00main_spec__1___l2r_#_ 7346d679feda
 item l_IO_userError___l2r_#_ e5a4f2aa2427
 item l_List_foldl___at___00List_toString___at___00main_spec__0_spec__0___l2r_#_ bfb7208b375e
-item l_List_head_x3f___l2r_#____redArg___l2r__flat 481eddf2b93a
+item l_List_head_x3f___l2r_#____redArg___l2r__flat 5cf1203e5023
 item l_List_toString___at___00main_spec__0___l2r_#_ a13aaff42db8
 item l_String_Internal_anyImpl___l2r_#_ 9049da56e465
 item l_String_Internal_isPrefixOfImpl___l2r_#_ 2ebcf6449e89
 item l_String_Slice_contains___at___00String_anyAux_spec__0___l2r_#____l2r__flat d56cbe6b4c34
-item l_String_Slice_isNat___l2r_#____closed__0 a2d18430389b
-item l_String_Slice_isNat___l2r_#____closed__0_init ed2bd87a03cb
-item l_String_Slice_isNat___l2r_#____l2r__flat bd978759f7b0
-item l_String_Slice_toNat_x3f___l2r_#____l2r__flat a070fb629c50
+item l_String_Slice_isNat___l2r_#____closed__0 598888998569
+item l_String_Slice_isNat___l2r_#____closed__0_init b21061b66c89
+item l_String_Slice_isNat___l2r_#____l2r__flat a365ee7ca991
+item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 27031b1666f1
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_contains___at___00String_anyAux_spec__0_spec__0___l2r_#____redArg___l2r__flat d4fe98801c93
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 81db83ef79c1
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
@@ -189,9 +191,9 @@ item l_addParenHeuristic___l2r_#____closed__0 1107ed4a2e22
 item l_addParenHeuristic___l2r_#____closed__0_init 5d200319dac5
 item l_addParenHeuristic___l2r_#____lam__0 bd87390da478
 item l_loop___l2r_#____closed__4 3534f69ed940
-item l_loop___l2r_#____l2r__flat a7fc60f5df65
-item l_loop___l2r_#____l2r__flat_sm f8cd41e0bd19
-item l_main___l2r_#_ 056746be3b2a
+item l_loop___l2r_#____l2r__flat a38ab1d07c0b
+item l_loop___l2r_#____l2r__flat_sm 05296f95590d
+item l_main___l2r_#_ 447825afd51d
 item l_main___l2r_#____closed__0 271aabf60790
 item l_main___l2r_#____closed__0_init 6e4078aa0b4d
 item l_main___l2r_#____closed__1 152d197b6926
