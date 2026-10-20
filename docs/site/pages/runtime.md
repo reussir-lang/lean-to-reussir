@@ -224,11 +224,13 @@ thread that waits blocks its context.
   runs at startup, in Lean's initialization order, except a constant that
   no code reads and whose evaluation cannot show. Each constant is a
   once-cell. A context that needs a constant that another context is
-  computing waits for it, as a native thread waits for a lock. A constant
-  of a program type is stored through one generated enum,
-  `L2RConstCell`, so that the Rust code that stores it is the same in
-  every program, and rrc compiles that code only once for all programs.
-  The read does not change: one load and a test.
+  computing waits for it, as a native thread waits for a lock. The program
+  puts a constant of a program type into a box, and the runtime keeps the
+  handle word from the box. Thus the Rust code that stores it is the same
+  in every program, and rrc compiles that code only once for all programs.
+  The read does not change: one load and a test. At a type with variants
+  that have no fields, the read also tests the low bit of the word and,
+  for such a variant, makes it from its index.
 - **Literal constants.** A constant whose code is one string literal has
   no once-cell. The literal cache in `leanrt::string` has one slot per
   literal of the program. The first read makes the string and keeps it in

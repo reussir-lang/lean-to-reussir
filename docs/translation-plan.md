@@ -2390,11 +2390,13 @@ blocked) waits until it is set, as natively a thread waits for the one
 computing a closed term (`lean_obj_once_cold` holds a lock); needed again
 by the context computing it, it waits forever, as natively. A value that
 is not a pointer-sized boundary type is wrapped in an `ElemBox` struct.
-A value of a type of the program is stored through one generated enum,
-`L2RConstCell` (`l2r_once_put_field`: the slot gets the word of the
-variant's field, and the variant's cell keeps the reference), so that
-the texture that stores it is the same in every program
-(docs/implementation/startup/constants.md); the read is the same.
+A value of a type of the program is set through a box of the value
+(`l2r_once_put_box`: the slot gets the box's payload, the handle word, and
+keeps the box's reference), so that the texture that stores it is the
+same in every program (docs/implementation/startup/constants.md); the read
+is the same, except that at a type with nullary variants it also tests the
+word's low bit (a nullary variant is stored as the box's immediate word and
+built from its index).
 The tables' words and flags are plain loads and stores: Lean code runs
 on one thread at a time (the initializers', then `main`'s); with Lean
 code on several threads, the store would have to release and the load

@@ -1,18 +1,17 @@
 # Pay-nothing baseline of RtLazyFields (tests/runtime/RtLazyFields.lean), arguments ''.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 50276
-bytes 2214288
+allocs 50263
+bytes 2214080
 native-allocs 64913
 native-bytes 2546211
-items 269
-functions 207
+items 282
+functions 217
 conversion-fns 0
 conversion-sites 0
-box-sites 191
-box-variants 9
+box-sites 207
+box-variants 13
 unbox-fns 5
 unbox-sites 19
-item L2RConstCell 4c7f4a9ef373
 item L2RFn_F3nu324nbool 97c2f4999fe7
 item L2RFn_F3nu64F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» f96e8eb23184
 item L2RFn_F4aRVec1_2nu8F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9c0c234ead50
@@ -60,13 +59,17 @@ item Tuple# d4eee5540d99
 item Tuple# f65785b93149
 item Tuple# fd4a01cee92a
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
+item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 006f0efa3349
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
+item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 208f43455cd7
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 2aa16ae60f2c
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 3f03f6ad69ec
+item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 3f90ae81a431
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 5d895c52f576
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 7649f3688788
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 8042c9da9fdc
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; b6a2fc0fd801
+item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; e122ebc32024
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; e6f65a91ca02
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; fc8ab091200c
 item extern "C" trampoline "l2r_init_body" = l2r_init_body; 1a20ba858821
@@ -83,28 +86,38 @@ item l2r_any_rel_# 2457057329a7
 item l2r_any_rel_# 3190d4b509c2
 item l2r_any_rel_# 335f04c922c7
 item l2r_any_rel_# 5d9b3bfe95fc
+item l2r_any_rel_# 97aa07f9e12c
+item l2r_any_rel_# ba250db4e619
+item l2r_any_rel_# c22eb239ffb3
 item l2r_any_rel_# de582e5680bb
+item l2r_any_rel_# e7f60d5b8ad4
 item l2r_any_rel_# eb35743aa9bd
-item l2r_any_releases cebd1541e1f5
+item l2r_any_releases 51dd6072313f
 item l2r_ap1_F3nu324nbool bcd732154723
-item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9fbde3aed1e8
-item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 873c2bcee3f0
+item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 982388568fdd
+item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 79eac63a4e00
 item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_4nLAny daecf3bfb378
 item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_4nLAny_go f4af20a6c597
+item l2r_box_F3nu324nbool 49b4909e853d
 item l2r_box_«T_IO_Error_#~9355e6117fd3» d8238479b9fe
 item l2r_box_«T_List_#~aeda86a38d96» a41aad7692e3
 item l2r_box_«T_T_#~88c57bff0e39» 4b5ee9e37c5d
+item l2r_box_«T_U_#~609bf7c14fef» e8f472e94260
 item l2r_err_string ca5b2a8474bb
+item l2r_fn_of_index_F3nu324nbool 519d44c3b77d
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 13fed1365a56
+item l2r_init_chunk_0 951b6d6e6811
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» 572330f53511
-item l2r_main_body 5ef982aa4217
+item l2r_main_body 376cc9bd05e7
 item l2r_main_on_thread 4f4adafe091e
+item l2r_nullary_of_index_«T_List_#~aeda86a38d96» 94aed60e17ee
+item l2r_nullary_of_index_«T_T_#~88c57bff0e39» f990d51b2718
+item l2r_nullary_of_index_«T_U_#~609bf7c14fef» b0e0e75b46b8
 item l2r_run_main d750382a583f
 item l2r_run_pending_tasks 39049c3ac015
 item l2r_std_enter 4b0c46b9332b
@@ -118,28 +131,28 @@ item l2r_str_lit_fill 1b8397330b80
 item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
 item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» e516aaa2c94b
-item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» 70b5013cb6e9
+item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» f0e19419da5a
 item l2r_unbox_rest_«T_List_#~aeda86a38d96» ea800b6cf729
-item l2r_unbox_rest_«T_Prod_#~7e6da67e941d» 0ccf83ea3435
+item l2r_unbox_rest_«T_Prod_#~7e6da67e941d» 820052a90bdd
 item l2r_unbox_rest_«T_T_#~88c57bff0e39» 681e2378fef3
+item l2r_zero_# 05400cf3c50b
 item l2r_zero_# 098354a8ae5a
-item l2r_zero_# 272126066dab
+item l2r_zero_# 19a6e9c60fb1
 item l2r_zero_# 4621a50aa2da
 item l2r_zero_# 6065a415a850
 item l2r_zero_# 64b17cf5704f
 item l2r_zero_# 8cd89651b501
 item l2r_zero_# 8ce037aaca3e
 item l2r_zero_# 9f3e31b628c0
-item l2r_zero_# ab0f8758625c
+item l2r_zero_# b348ef685842
 item l2r_zero_# b416255d196c
 item l2r_zero_# d71d5ec18d04
-item l2r_zero_# f0bd81cd5793
 item l2r_zero_# f33d0f6f8f3a
 item l2r_zero_# fb7fc53512ff
-item l2r_zero_#_init 565f7e35a601
 item l2r_zero_#_init 6a8819e684fa
-item l2r_zero_#_init 91c7f44e741a
-item l2r_zero_#_init b0b2f572a1b5
+item l2r_zero_#_init 77e9461e58b4
+item l2r_zero_#_init e80553a14196
+item l2r_zero_#_init edc7bc631e24
 item l_Array_toSubarray___l2r_#____redArg___l2r__flat 67b8897c75fa
 item l_ByteArray_toUInt64LE_x21___l2r_#_ 5aa10a15d1a4
 item l_ByteArray_toUInt64LE_x21___l2r_#____closed__3 28b329d731b5
@@ -219,59 +232,59 @@ item l_U_hash___l2r_#_ 52aa0b0a045e
 item l_U_size___l2r_#_ a5e62440528d
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_contains___at___00String_anyAux_spec__0_spec__0___l2r_#____redArg___l2r__flat d4fe98801c93
 item l___private_Init_Data_Array_Basic_0__Array_forIn_x27Unsafe_loop___at___00main_spec__7___l2r_#____l2r__flat 35d8eb238951
-item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#_ 6d4b484eba1e
-item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____closed__0 62ccc72eb7e5
-item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____closed__0_init c43010cc0c2a
+item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#_ ccf8da8aaa27
+item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____closed__0 9c4e4230dadf
+item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____closed__0_init 2eba11b8cc56
 item l___private_Init_Data_List_Impl_0__List_takeTR_go___l2r_#____redArg 6978eefa24fa
 item l___private_Init_Data_List_Impl_0__List_takeTR_go___l2r_#____redArg 6978eefa24fa
 item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ffd80adacb14
-item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0 3ad8c95d9d3a
-item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0_init 370fd2591027
-item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___l2r__flat 9a11a2789aec
+item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0 90aa8c56236c
+item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0_init e71bee722491
+item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___l2r__flat 37ad1da3c677
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__2___l2r_#____redArg___l2r__flat 2c25706cffe2
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__5___l2r_#____redArg___l2r__flat 5b3c7253c843
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__9___l2r_#____redArg___l2r__flat 8d29d72f0193
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
-item l_addParenHeuristic___l2r_#_ b69bc10ed317
-item l_addParenHeuristic___l2r_#____closed__0 1107ed4a2e22
-item l_addParenHeuristic___l2r_#____closed__0_init 5d200319dac5
+item l_addParenHeuristic___l2r_#_ 2716276de4fa
+item l_addParenHeuristic___l2r_#____closed__0 2c5b4ac3a3d2
+item l_addParenHeuristic___l2r_#____closed__0_init 4668c94482cf
 item l_addParenHeuristic___l2r_#____lam__0 bd87390da478
 item l_balanceL___l2r_#_ 14b3ee4b7846
 item l_balanceR___l2r_#_ 21c3f9ab9317
 item l_big___l2r_#_ 02e7ea360cae
-item l_instInhabitedT___l2r_#_ 919cf2f1fce1
-item l_instInhabitedT___l2r_#__init 3d349762b8ec
-item l_main___l2r_#_ 250e91e672b9
-item l_main___l2r_#____closed__0 b4520b0b59ff
-item l_main___l2r_#____closed__0_init fd656884f724
-item l_main___l2r_#____closed__1 93452f96e265
-item l_main___l2r_#____closed__13 7bc6626dcc42
-item l_main___l2r_#____closed__13_init c86ea24d48c1
-item l_main___l2r_#____closed__15 92242dd34b9f
-item l_main___l2r_#____closed__15_init 229a6a8ec5d3
+item l_instInhabitedT___l2r_#_ 7f674612a608
+item l_instInhabitedT___l2r_#__init 94fd285a8c68
+item l_main___l2r_#_ 9993d06bb04e
+item l_main___l2r_#____closed__0 b57667f50315
+item l_main___l2r_#____closed__0_init e8502f1a4d1f
+item l_main___l2r_#____closed__1 9804e8a34e3e
+item l_main___l2r_#____closed__13 6ff564e579c5
+item l_main___l2r_#____closed__13_init b074e9f24521
+item l_main___l2r_#____closed__15 9ec05dbb11e0
+item l_main___l2r_#____closed__15_init 4e02b04d1d49
 item l_main___l2r_#____closed__17 ff43bbad559c
 item l_main___l2r_#____closed__17_init f49d72aefe45
-item l_main___l2r_#____closed__1_init 1477b779ca91
-item l_main___l2r_#____closed__20 cd34df091634
-item l_main___l2r_#____closed__20_init 95a884b7ffb3
-item l_main___l2r_#____closed__29 90b53e4b7280
-item l_main___l2r_#____closed__29_init fbd87ad401e8
-item l_main___l2r_#____closed__30 caaa10d16136
-item l_main___l2r_#____closed__30_init 64df72cfd182
+item l_main___l2r_#____closed__1_init cd025b5f6454
+item l_main___l2r_#____closed__20 3229f3506c65
+item l_main___l2r_#____closed__20_init 14fc0e2a9e96
+item l_main___l2r_#____closed__29 abfc0cb41077
+item l_main___l2r_#____closed__29_init 8c548f82f1cb
+item l_main___l2r_#____closed__30 b68a6cd4ca88
+item l_main___l2r_#____closed__30_init 8a7e0c02f277
 item l_main___l2r_#____closed__32 f820d670289c
 item l_main___l2r_#____closed__32_init 1fa5d27d8e7b
-item l_main___l2r_#____closed__33 d44c1e475fec
-item l_main___l2r_#____closed__33_init c3ffc27519bd
-item l_main___l2r_#____closed__34 a07e7dfa7063
-item l_main___l2r_#____closed__34_init e01d8878e758
-item l_main___l2r_#____closed__35 bca47bd31f17
-item l_main___l2r_#____closed__35_init 51ed7bdc95c9
-item l_main___l2r_#____closed__5 2b07d1363250
-item l_main___l2r_#____closed__5_init b16c94488e5b
-item l_main___l2r_#____closed__7 32c83030cb39
-item l_main___l2r_#____closed__7_init 6fd4e084c5a7
-item l_main___l2r_#____closed__9 55b6612f19b0
-item l_main___l2r_#____closed__9_init 00a1dc49fd15
+item l_main___l2r_#____closed__33 cbf9dd8ab2a3
+item l_main___l2r_#____closed__33_init a155f9fc7d32
+item l_main___l2r_#____closed__34 2df432f99c5a
+item l_main___l2r_#____closed__34_init ac0207155317
+item l_main___l2r_#____closed__35 395e21b32595
+item l_main___l2r_#____closed__35_init fa5b7fda01c7
+item l_main___l2r_#____closed__5 5f432a22fb7c
+item l_main___l2r_#____closed__5_init 9d1d38f952ff
+item l_main___l2r_#____closed__7 dfcec2b0a43f
+item l_main___l2r_#____closed__7_init a4e752a26f13
+item l_main___l2r_#____closed__9 fead3840982f
+item l_main___l2r_#____closed__9_init b5ffc9d9b1b9
 item l_mergeLists___l2r_#_ 809231c69bc1
 item l_mkPanicMessageWithDecl___l2r_#_ 9dc6fe993dc5
 item l_mkStdGen___l2r_#____l2r__flat b08dfeda83c3

@@ -2457,24 +2457,23 @@ fn l2r_once_put<T>(slot : u64, v : T) -> u64 [{
     }
 }];
 
-// Store in slot `slot` the value that `w`, a one-field variant (number
-// `tag`) of a shared enum, holds: lean2rr's `L2RConstCell`, through which
-// it sets the once-cells of the program's types, so that this texture is
-// instantiated at one type, the same in every program (rrc's texture cache
-// hits), instead of `l2r_once_put` at each program type (lean2rr's
-// `onceCell`). The slot gets the field's word, which `l2r_once_get` at the
-// field's type reads; the variant's cell keeps the reference
-// (`leanrt::once::put_field`).
+// Store in slot `slot` the value that box `b` holds: lean2rr sets the
+// once-cells of the program's types through a box of the value (its
+// `onceCell`), so that this texture is the same in every program (rrc's
+// texture cache hits), instead of `l2r_once_put` at each program type. A
+// pointer box's payload, the value's handle word, goes into the slot (the
+// slot keeps the box's reference), as `l2r_once_put` would store it and
+// `l2r_once_get` reads it; an immediate (a nullary variant, by its index)
+// as the box's word, odd, which the generated read tells apart
+// (`l2r_once_word`; `leanrt::once::put_box`).
 #[ffi(import)]
-fn l2r_once_put_field<C>(slot : u64, tag : u64, w : C) -> u64 [{
-    {
-        const { assert!(::std::mem::size_of::<[:C:]>() == 8) };
-        let p: *const u8 = unsafe { ::std::mem::transmute_copy(&w) };
-        ::std::mem::forget(w);
-        unsafe { leanrt::once::put_field(slot, p, tag) };
-        0
-    }
-}];
+fn l2r_once_put_box(slot : u64, b : LAny) -> u64 [{ { leanrt::once::put_box(slot, b); 0 } }];
+
+// The word in set slot `slot` (no reference taken): a read at a type with
+// nullary variants tests it for a box's immediate first (lean2rr's
+// `OnceCell.read`).
+#[ffi(import)]
+fn l2r_once_word(slot : u64) -> u64 [{ leanrt::once::get_raw(slot) as u64 }];
 
 // Mutable global cells (e.g. the current standard streams for
 // `IO.setStdout`/`setStderr`/`setStdin`), in the same slot numbering as the

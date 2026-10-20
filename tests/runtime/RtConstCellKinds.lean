@@ -1,10 +1,10 @@
 /-! Runtime test: constants and closed terms of each kind of program type,
-which lean2rr sets through its enum `L2RConstCell` (`onceCell`: a slot
-gets the word of the variant's field), read many times and updated: a
-record, an inductive with a nullary and a non-nullary constructor (a
-constant that is the nullary one, an immediate word, and one that is not),
-an enumeration (stored in an `ElemBox`), a one-field structure of a
-scalar, a function value, an array of records, a reference made by
+which lean2rr sets through a box of the value (`onceCell`: a slot gets the
+handle word of the box's payload, or a nullary variant's box word), read
+many times and updated: a record, an inductive with a nullary and a
+non-nullary constructor (a constant that is the nullary one, an immediate
+word, and one that is not), an enumeration (its index), a one-field
+structure of a scalar, a function value, an array of records, a reference made by
 `initialize` (the startup chain's store), a thunk, and a toolchain type
 (`Std.Format`). A value read from a constant is never unique: an update
 copies it, and the constant keeps its value. -/
@@ -19,7 +19,7 @@ inductive E where
   | node (l : E) (v : Nat) (r : E)
   deriving Repr
 
--- An enumeration: stored in an `ElemBox`, itself set through the enum.
+-- An enumeration: its cell holds its index.
 inductive Color where
   | red | green | blue
   deriving Repr

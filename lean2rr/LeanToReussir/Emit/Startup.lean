@@ -679,7 +679,7 @@ def initPutFn (decl : Name) (slot : Nat) (vt : RR.Ty) : LowerM String := do
   let (walk, x) ← match ← persistCall t (.var "x") with
     | some p => pure (#[("x", some t, v), ("p", some (RR.Ty.named "u64"), p)], RR.Expr.var "x")
     | none => pure (#[], v)
-  let body : RR.Block := ⟨walk, cell.put (.atom (toString slot)) x⟩
+  let body : RR.Block := ⟨walk, ← cell.put t (.atom (toString slot)) x⟩
   modify fun s => { s with fns := s.fns.push (.fn name #[("v", vt)] (.named "u64") body) }
   return name
 

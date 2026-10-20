@@ -308,6 +308,10 @@ structure LowerState where
   /-- Function types whose nullary variants an unboxing builds by index
   (`l2r_fn_of_index_T`, generated with the program's box item). -/
   fnIndexReqs : Array RR.Ty := #[]
+  /-- Shared enums whose nullary variants a constant's read builds by index
+  (`l2r_nullary_of_index_T`, `OnceCell.read`; generated with the box
+  item). -/
+  enumIndexReqs : Array RR.Ty := #[]
   /-- Payload types with nullary variants (shared enums, function values)
   whose boxing is the generated `l2r_box_T` (`boxOfFn`, generated with the
   program's box item). -/
@@ -363,10 +367,6 @@ structure LowerState where
   /-- The `_init` functions of the once-cells (`cafAccessor`): kept out of
   rrc's MLIR inliner (`anchoredFns`). -/
   cafInits : Array String := #[]
-  /-- The types whose once-cells hold their values in the enum
-  `L2RConstCell` (`onceCell`), by variant number, and the number of each. -/
-  constCellTys : Array RR.Ty := #[]
-  constCellIdx : Std.HashMap RR.Ty Nat := {}
   /-- First of the three cell slots holding the current standard streams
   (stdin, stdout, stderr), and the stream record type, once used. -/
   stdSlots : Option Nat := none
@@ -619,11 +619,6 @@ def tupleLayout? (n : String) : LowerM (Option (Array RR.Ty × Array Nat)) := do
   let some k := (← get).tupleKeys[n]? | return none
   return some (k, order)
 
-/-- The shared enum through which the once-cells of program types are
-set (`onceCell`): `enum L2RConstCell { c0(S0), c1(S1), … }`, one variant
-per storage type, emitted at the end (`constCellItem`). -/
-def constCellName : String := "L2RConstCell"
-
 /-- Whether `t` is the same Rust type in every program: a scalar, one of
 leanrt's own types, or an array, reference or cell of such types. rrc
 renders a type of the program (a record, an enum, a function value, a
@@ -638,79 +633,6 @@ partial def tyInEveryProgram (t : RR.Ty) : Bool :=
                      "Nat", "Int", "LStr", "LHandle", "LPromise", boxName]
   | .app n args => (n == "RVec" || n == "LRef" || n == "LCell") && args.all tyInEveryProgram
   | _ => false
-
-/-- How the once-cell of a constant keeps its value (`onceCell`): stored
-at type `st` (`cellStorage`; `boxed`: in its `ElemBox`), and set directly
-(`idx = none`) or through variant `c<idx>` of `L2RConstCell`. -/
-structure OnceCell where
-  st : RR.Ty
-  boxed : Bool
-  idx : Option Nat
-
-/-- The once-cell of a constant of Reussir type `t`. Its slot holds the
-value's word at storage type `st` (`cellStorage`), read by the prelude's
-`l2r_once_get<st>` (one load, inlined), as before. A type of
-`tyInEveryProgram` is set by `l2r_once_put<st>`. Any other type (a type of
-the program) is set through the one enum `L2RConstCell`:
-
-    l2r_once_put_field<L2RConstCell>(k, 5, <f>_init())
-
-(the constant's `_init` computes `v` and returns the variant
-`L2RConstCell::c5{v}`: `cafAccessor`), which stores the word of the
-variant's field, `v`'s, in the slot
-(`leanrt::once::put_field`); the variant's cell keeps that reference for
-the rest of the run, as the slot keeps the value. So a program's
-once-cells instantiate `l2r_once_put` at its types of `tyInEveryProgram`
-and `l2r_once_put_field` at `L2RConstCell` only (the same texture in every
-program: rrc's cache hits), instead of once per program type (each a
-rustc run in every new program, `tyInEveryProgram`). The read stays one
-texture per type: a read through `L2RConstCell` would be a match, which
-rrc expands into one region per variant at every read, in line (a program
-of 400 such types ran out of memory). The cost is one more cell (16 bytes)
-per constant set, made once; reads are unchanged. The enum has at most
-2^16 variants (`leanrt::once::put_field` reads the cell of an enum of at
-most 2^16 constructors); later types are set by `l2r_once_put<st>`. -/
-def onceCell (t : RR.Ty) : LowerM OnceCell := do
-  let (st, boxed) ← cellStorage t
-  if tyInEveryProgram st then return { st, boxed, idx := none }
-  if let some i := (← get).constCellIdx[st]? then return { st, boxed, idx := some i }
-  let i := (← get).constCellTys.size
-  if i ≥ 65536 then return { st, boxed, idx := none }
-  modify fun s => { s with constCellTys := s.constCellTys.push st, constCellIdx := s.constCellIdx.insert st i }
-  return { st, boxed, idx := some i }
-
-/-- The value stored in the once-cell for the value `v` (of the
-constant's type): `v`, in its `ElemBox` if the storage type is one, in
-its variant of `L2RConstCell` if the cell is set through it. -/
-def OnceCell.store (c : OnceCell) (v : RR.Expr) : RR.Expr :=
-  let v := match c.boxed, c.st with
-    | true, .named bn => RR.Expr.ctor bn none #[v]
-    | _, _ => v
-  match c.idx with
-  | none => v
-  | some i => .ctor constCellName (some s!"c{i}") #[v]
-
-/-- Set once-cell `k` to `w`, a value `OnceCell.store` made: the call,
-of type `u64`. -/
-def OnceCell.putStored (c : OnceCell) (k w : RR.Expr) : RR.Expr :=
-  match c.idx with
-  | none => .call "l2r_once_put" #[c.st] #[k, w]
-  | some i => .call "l2r_once_put_field" #[.named constCellName] #[k, .atom (toString i), w]
-
-/-- Set once-cell `k` to the value `v` (of the constant's type): the
-call, of type `u64`. -/
-def OnceCell.put (c : OnceCell) (k v : RR.Expr) : RR.Expr :=
-  c.putStored k (c.store v)
-
-/-- A new reference to the value of set once-cell `k`. -/
-def OnceCell.read (c : OnceCell) (k : RR.Expr) : RR.Expr :=
-  let v := RR.Expr.call "l2r_once_get" #[c.st] #[k]
-  if c.boxed then .field v 0 else v
-
-/-- The enum `L2RConstCell` (`onceCell`), if a once-cell uses it. -/
-def constCellItem (st : LowerState) : Option RR.Item :=
-  if st.constCellTys.isEmpty then none
-  else some (.enum constCellName false (st.constCellTys.mapIdx fun i t => (s!"c{i}", #[t])))
 
 /-- The representation of an `ST.Ref σ α`, whatever `α` is (translation
 plan §5.1): one shared record holding Reussir's mutable cell of a `Box`,
@@ -1500,6 +1422,146 @@ def boxFnOfIndex (t : RR.Ty) : LowerM String := do
   unless (← getPart (·.fnIndexReqs)).contains t do
     modify fun s => { s with fnIndexReqs := s.fnIndexReqs.push t }
   return s!"l2r_fn_of_index_{t.enc}"
+
+/-- The function `l2r_nullary_of_index_T` builds the nullary variant of
+index `i` of shared enum `t` (a constant's read, `OnceCell.read`);
+generated with the box item (`boxTypeItems`). -/
+def boxNullaryOfIndex (t : RR.Ty) : LowerM String := do
+  unless (← getPart (·.enumIndexReqs)).contains t do
+    modify fun s => { s with enumIndexReqs := s.enumIndexReqs.push t }
+  return s!"l2r_nullary_of_index_{t.enc}"
+
+/-- How the once-cell of a constant keeps its value in its slot's word
+(`onceCell`), by the representation of the constant's type:
+- `every st`: a type of `tyInEveryProgram`, its word (`l2r_once_put<st>`,
+  `l2r_once_get<st>`);
+- `handle store wrapped imm`: a pointer payload of the box (a record, a
+  shared enum, a function value; `wrapped`: in its `ElemBox`): the handle
+  word, set through a box of the value (`l2r_once_put_box`, the same
+  texture in every program), read as the handle (`l2r_once_get<store>`);
+  `imm`: the type has nullary variants (a function value's typed ones:
+  `some true`), which the box holds as immediates, stored as the box's
+  word (odd) and built from their index at a read;
+- `index tn`: an enumeration, its index (`l2r_once_put<u64>`);
+- `field tn inner`: a `[value]` struct, its one field's cell;
+- `boxField tn`: a `[value]` struct over a box, the box (`l2r_once_put<LAny>`);
+- `unit`: no value (`l2r_once_put<u64>` of 0);
+- `typed st boxed`: any other type, at its storage type (`boxed`: in its
+  `ElemBox`; `cellStorage`; `l2r_once_put<st>`: a texture per type). -/
+inductive OnceCell where
+  | every (st : RR.Ty)
+  | handle (store : RR.Ty) (wrapped : Bool) (imm : Option Bool)
+  | index (tn : String)
+  | field (tn : String) (inner : OnceCell)
+  | boxField (tn : String)
+  | unit
+  | typed (st : RR.Ty) (boxed : Bool)
+
+/-- The once-cell of a constant of Reussir type `t` (`OnceCell`). Nothing
+reads a Reussir cell's layout or takes an unboxing at a read (before clean
+step A1 the cells of program types were set through the enum
+`L2RConstCell`, whose variant's tag and field leanrt read from its cell).
+So a program's once-cells instantiate `l2r_once_put` at its types of
+`tyInEveryProgram`, `l2r_once_put_box` (the same in every program: rrc's
+cache hits) and the boxing of each payload type (`l2r_any_of_ptr<st>`,
+which most such types have anyway), and only for `typed` cells
+`l2r_once_put` at a program type; the read stays one texture per type, as
+before. -/
+partial def onceCell (t : RR.Ty) : LowerM OnceCell := do
+  -- `cellStorage` only where the `ElemBox` is used (a `typed` cell, or a
+  -- wrapped handle, through `boxKind`): it registers the struct.
+  if (← isBoundaryTy t) && tyInEveryProgram t then return .every t
+  match ← boxKind t with
+  | .prog _ store wrapped nullary isFn =>
+    return .handle store wrapped (if isFn then some true else if nullary.isEmpty then none else some false)
+  | .enumIdx tn => return .index tn
+  | .valueStruct tn ft =>
+    if ft == RR.Ty.box then return .boxField tn
+    return .field tn (← onceCell ft)
+  | .unit => return .unit
+  | _ =>
+    let (st, boxed) ← cellStorage t
+    if tyInEveryProgram st then return .every st
+    return .typed st boxed
+
+/-- The type `_init` returns for the cell (`cafAccessor`): what its slot
+is set from. -/
+partial def OnceCell.initTy : OnceCell → RR.Ty
+  | .every st | .typed st _ => st
+  | .handle .. | .boxField _ => RR.Ty.box
+  | .index _ | .unit => .named "u64"
+  | .field _ inner => inner.initTy
+
+/-- The value `_init` returns for the value `v` (of the constant's type),
+which the slot is set from (`OnceCell.putStored`). -/
+partial def OnceCell.stored (c : OnceCell) (t : RR.Ty) (v : RR.Expr) : LowerM RR.Expr := do
+  match c with
+  | .every _ => return v
+  | .typed st boxed =>
+    let .named bn := st | return v
+    return if boxed then .ctor bn none #[v] else v
+  | .handle .. => boxValue v t
+  | .index tn => return .call (← enumIndexFn tn) #[] #[v]
+  | .boxField _ => return .field v 0
+  | .field tn inner =>
+    let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no [value] struct {tn}"
+    let some ft := (info.ctors.find? info.ctorOrder[0]!).bind (·.posTys[0]?) | throwError "lean2rr: no field in {tn}"
+    inner.stored ft (.field v 0)
+  | .unit =>
+    let d ← fresh "du"
+    return .block ⟨#[(d, some t, v)], .atom "0"⟩
+
+/-- Set once-cell `k` to `w`, a value `OnceCell.stored` made: the call, of
+type `u64`. -/
+partial def OnceCell.putStored (c : OnceCell) (k w : RR.Expr) : RR.Expr :=
+  match c with
+  | .every st | .typed st _ => .call "l2r_once_put" #[st] #[k, w]
+  | .handle .. => .call "l2r_once_put_box" #[] #[k, w]
+  | .index _ | .unit => .call "l2r_once_put" #[.named "u64"] #[k, w]
+  | .boxField _ => .call "l2r_once_put" #[RR.Ty.box] #[k, w]
+  | .field _ inner => inner.putStored k w
+
+/-- Set once-cell `k` to the value `v` (of the constant's type `t`): the
+call, of type `u64`. -/
+def OnceCell.put (c : OnceCell) (t : RR.Ty) (k v : RR.Expr) : LowerM RR.Expr := do
+  return c.putStored k (← c.stored t v)
+
+/-- A new reference to the value of set once-cell `k`: one load and the
+clone, in line (`l2r_once_get` at the slot's type). A handle at a type
+with nullary variants may be an immediate's box word, odd: the read tests
+the slot's word first (the same load) and builds the variant from its
+index (`l2r_nullary_of_index_T`; a function value's typed immediate
+`(num << 32) | index`, `l2r_fn_of_index_T`), unless the constant's value
+is known to be no nullary variant (`mayBeNullary` false: a constructor
+with fields, `cafAccessor`; Binarytrees reads its closed term
+`node nil nil` at every leaf: the test cost 3.4% of its instructions). -/
+partial def OnceCell.read (c : OnceCell) (t : RR.Ty) (k : RR.Expr) (mayBeNullary := true) :
+    LowerM RR.Expr := do
+  match c with
+  | .every st => return .call "l2r_once_get" #[st] #[k]
+  | .typed st boxed =>
+    let get := RR.Expr.call "l2r_once_get" #[st] #[k]
+    return if boxed then .field get 0 else get
+  | .index tn => return .call (← enumOfIndexFn tn) #[] #[.call "l2r_once_get" #[.named "u64"] #[k]]
+  | .unit => return .unitVal
+  | .boxField tn => return .ctor tn none #[.call "l2r_once_get" #[RR.Ty.box] #[k]]
+  | .field tn inner =>
+    let some info := (← get).typeInfos[tn]? | throwError "lean2rr: no [value] struct {tn}"
+    let some ft := (info.ctors.find? info.ctorOrder[0]!).bind (·.posTys[0]?) | throwError "lean2rr: no field in {tn}"
+    -- `mayBeNullary` is about the constant's value, the struct; its field
+    -- may still be a nullary variant (a function value's).
+    return .ctor tn none #[← inner.read ft k]
+  | .handle store wrapped imm =>
+    let get := RR.Expr.call "l2r_once_get" #[store] #[k]
+    let v := if wrapped then RR.Expr.field get 0 else get
+    let some isFn := imm | return v
+    if !mayBeNullary then return v
+    let w ← fresh "cw"
+    let ofIndex ← if isFn then
+        pure (RR.Expr.call (← boxFnOfIndex t) #[] #[.atom s!"(({w} >> 1) & 4294967295)"])
+      else pure (RR.Expr.call (← boxNullaryOfIndex t) #[] #[.atom s!"({w} >> 1)"])
+    return .block ⟨#[(w, some (.named "u64"), .call "l2r_once_word" #[] #[k])],
+      .ite (.atom s!"({w} & 1) == 1") (.ofExpr ofIndex) (.ofExpr v)⟩
 
 /-- The state type of thunks (`task = false`) or of tasks: one each, over
 `Box` values (whatever `α` is in `Thunk α`, `Task α`): a generated shared

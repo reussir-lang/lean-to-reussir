@@ -18,7 +18,15 @@ calls each).
   read also loads the slot's set flag, and must give 0);
 - `crc32` again inside a task;
 - the literals of `labelSum`: closed terms of one string literal, read
-  from the literal cache (optimization `literal-consts`).
+  from the literal cache (optimization `literal-consts`);
+- constants of program types, set through a box of the value
+  (docs/implementation/startup/constants.md, "A constant of a program type
+  is set through a box of its value"), in `cfgSum`: a structure (`cfg`), an
+  `Option` that is `none` (`noneC`: a nullary variant, read through the
+  slot word's low bit) and one that is `some` (`someC`), a structure whose
+  one field is a function value (`fobj`: Lean erases it to its field, a
+  function value), and a `[value]` struct over an `Option` (`hc`: its
+  cell is its field's).
 -/
 
 def crcTable : Array UInt32 := Id.run do
@@ -42,6 +50,37 @@ def mask : UInt8 := Id.run do
 def zero64 : UInt64 := (List.range 3).foldl (fun a b => a * b.toUInt64) 1
 
 def zero8 : UInt8 := (List.range 3).foldl (fun a b => a * b.toUInt8) 1
+
+structure Cfg where
+  a : Nat
+  b : Nat
+
+structure F where
+  f : Nat → Nat
+
+def cfg : Cfg := ⟨(List.range 10).length, (List.range 20).length⟩
+
+def noneC : Option Nat := (List.range 3).find? (· > 10)
+
+def someC : Option Nat := (List.range 30).find? (· > 10)
+
+def fobj : F := let k := (List.range 5).length; ⟨fun x => x + k⟩
+
+/-- A recursive one-field type: a `[value]` struct over an `Option H`. -/
+inductive H where
+  | mk : Option H → H
+
+def hc : H := .mk ((List.range 3).find? (· > 10) |>.map fun _ => .mk none)
+
+def H.isLeaf : H → Bool
+  | .mk none => true
+  | .mk (some _) => false
+
+def cfgSum (data : ByteArray) : Nat := Id.run do
+  let mut s := 0
+  for b in data do
+    s := s + cfg.a + (noneC.getD b.toNat) + (someC.getD 0) + fobj.f b.toNat + (if hc.isLeaf then 1 else 0)
+  return s
 
 def crc32 (data : ByteArray) : UInt32 := Id.run do
   let mut c : UInt32 := 0xFFFFFFFF
@@ -90,6 +129,7 @@ def main (args : List String) : IO Unit := do
   IO.println (labelSum data)
   IO.println (bigMod data)
   IO.println (maskSum data)
+  IO.println (cfgSum data)
   let t := Task.spawn fun _ => crc32 (data.push 1)
   IO.println t.get
   IO.println s!"{mask} {zero64} {zero8} {lenBase.size} {crcTable[255]!}"

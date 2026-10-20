@@ -762,6 +762,18 @@ def boxTypeItems : LowerM RR.Item := do
     iarms := iarms.push { ty := "", ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) }
     let f := RR.Item.fn s!"l2r_fn_of_index_{t.enc}" #[("i", u64)] t (.ofExpr (.mtch (.var "i") iarms))
     text := text ++ f.render ++ "\n"
+  for t in ← getPart (·.enumIndexReqs) do
+    -- A shared enum's nullary variant by its index (its position among
+    -- the constructors: Reussir's tag), for a constant's read
+    -- (`OnceCell.read`).
+    let .prog _ _ _ nullary _ ← boxKind t | continue
+    let .named tn := t | continue
+    let mut arms : Array RR.Arm := #[]
+    for (i, v) in nullary do
+      arms := arms.push (RR.Arm.lit i (.ofExpr (.ctor tn (some v) #[])))
+    arms := arms.push { ty := "", ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) }
+    let f := RR.Item.fn s!"l2r_nullary_of_index_{t.enc}" #[("i", u64)] t (.ofExpr (.mtch (.var "i") arms))
+    text := text ++ f.render ++ "\n"
   for t in ← getPart (·.boxOfReqs) do
     let name := s!"l2r_box_{t.enc}"
     if (← read).convLiveness && !(← getPart (·.live.names.contains name)) then continue

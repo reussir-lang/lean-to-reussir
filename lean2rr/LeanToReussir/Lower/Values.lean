@@ -79,7 +79,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
   match ← calleeOf f with
   | .initConst slot ty =>
     let t ← lowerType ty
-    let v := (← onceCell t).read (.atom (toString slot))
+    let v ← (← onceCell t).read t (.atom (toString slot))
     let (e, t) ← applyChain v t ctx args
     coerce e t rty
   | .code fn params ret keep =>

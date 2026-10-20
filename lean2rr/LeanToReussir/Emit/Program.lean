@@ -599,11 +599,6 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
       unless (← finishFnValues) || (← finishPersistFns) do break
     return (← fnTypeItems, ← anchoredFns)
   let ((fnItems, anchored), st) ← (act.run ctx).run {}
-  -- The enum of the program-typed once-cells (`onceCell`), before the
-  -- enums of the function types it may mention are listed (`fnTypeItems`).
-  let st := match constCellItem st with
-    | some it => { st with typeItems := st.typeItems.push it }
-    | none => st
   if (← IO.getEnv "L2R_DEBUG").isSome then
     -- By skeleton (the types of one skeleton can differ in their flow).
     let env ← getEnv

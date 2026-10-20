@@ -96,6 +96,22 @@ def persistCall (t : RR.Ty) (v : RR.Expr) : LowerM (Option RR.Expr) := do
     modify fun s => { s with persistReqs := s.persistReqs.push t }
   return some (.call (persistFnName t) #[] #[v])
 
+/-- Whether the value of block `b` may be a nullary variant: unless its
+result is a constructor with fields (or a variable bound to one), as a
+closed term usually is (`OnceCell.read`). -/
+partial def mayBeNullary (b : RR.Block) : Bool :=
+  let rec go (e : RR.Expr) (fuel : Nat) : Bool :=
+    match fuel, e with
+    | 0, _ => true
+    | _, .ctor _ _ args => args.isEmpty
+    | n + 1, .var x =>
+      match b.lets.reverse.find? (·.1 == x) with
+      | some (_, _, e') => go e' n
+      | none => true
+    | n + 1, .block inner => mayBeNullary inner && go inner.result n
+    | _, _ => true
+  go b.result 8
+
 /-- The accessor of a constant (a declaration without parameters): its value
 is computed once, by `<name>_init`, and kept in a runtime once-cell for the
 rest of the run, like native Lean's CAFs and closed terms (translation plan
@@ -112,9 +128,9 @@ The accessor reads the cell in one place, after the test:
                   else { if l2r_once_claim(k) { 0 } else { l2r_once_put<T>(k, init) } };
     l2r_once_get<T>(k)
 
-(for a type of the program, the cell is set through the enum
-`L2RConstCell`: `<name>_init` returns the variant, and the store is
-`l2r_once_put_field<L2RConstCell>(k, i, <name>_init())`, `onceCell`).
+(for a type of the program, `<name>_init` returns the value boxed, the
+store is `l2r_once_put_box(k, <name>_init())`, and a read at a type with
+nullary variants tests the slot's word first, `onceCell`).
 `l2r_once_ready` is one load from the runtime's table at a fixed address
 (the slot is a literal), and `l2r_once_get` loads the same word again,
 which LLVM merges: a read of a set constant is one load, a test and the
@@ -134,21 +150,21 @@ def cafAccessor (name : String) (ret : RR.Ty) (body : RR.Block) (walk := true) :
   let k := RR.Expr.atom (toString slot)
   let initName := name ++ "_init"
   let zero := RR.Block.ofExpr (.atom "0")
-  -- The computation and the store. A cell set through `L2RConstCell`
-  -- (`onceCell`): `_init` returns the variant (after the walk), so that
-  -- the variant's cell is made out of line, in `_init`, which rrc does not
-  -- inline; made in the accessor, it was inlined where the constant is
-  -- read, and rrc's token reuse kept a cell the reader frees for it (the
-  -- reader's free moved behind the read: X02's `deriv`).
-  let (initItem, put) ← match cell.idx with
-    | none =>
+  -- The computation and the store. A cell set through a box
+  -- (`onceCell`): `_init` returns the box (after the walk), so that the
+  -- value is boxed out of line, in `_init`, which rrc does not inline (as
+  -- the variant of the enum `L2RConstCell` that set such cells before:
+  -- made in the accessor, it was inlined where the constant is read, and
+  -- rrc's token reuse kept a cell the reader frees for it, the reader's
+  -- free moved behind the read: X02's `deriv`).
+  let (initItem, put) ← if cell matches .every _ then do
       let init := RR.Expr.call initName #[] #[]
       let init := match ← (if walk then persistCall ret (.var "v") else pure none) with
         | some p => RR.Expr.block ⟨#[("v", some ret, init), ("p", some (.named "u64"), p)], .var "v"⟩
         | none => init
-      pure (RR.Item.fn initName #[] ret body, cell.put k init)
-    | some _ =>
-      -- `body`'s result, named unless it is a variable, walked, wrapped.
+      pure (RR.Item.fn initName #[] ret body, ← cell.put ret k init)
+    else do
+      -- `body`'s result, named unless it is a variable, walked, stored.
       let (lets, x) ← match body.result with
         | .var x => pure (body.lets, RR.Expr.var x)
         | e => do
@@ -157,13 +173,13 @@ def cafAccessor (name : String) (ret : RR.Ty) (body : RR.Block) (walk := true) :
       let lets ← match ← (if walk then persistCall ret x else pure none) with
         | some p => do pure (lets.push (← fresh "cvp", some (.named "u64"), p))
         | none => pure lets
-      pure (.fn initName #[] (.named constCellName) ⟨lets, cell.store x⟩,
+      pure (.fn initName #[] cell.initTy ⟨lets, ← cell.stored ret x⟩,
         cell.putStored k (.call initName #[] #[]))
   -- `l2r_once_claim`: a context of the runtime's scheduler that needs the
   -- value while another computes it waits for it.
   let fill := RR.Expr.ite (.call "l2r_once_ready" #[] #[k]) zero
     (.ofExpr (.ite (.call "l2r_once_claim" #[] #[k]) zero (.ofExpr put)))
-  let acc : RR.Block := ⟨#[("r", some (.named "u64"), fill)], cell.read k⟩
+  let acc : RR.Block := ⟨#[("r", some (.named "u64"), fill)], ← cell.read ret k (mayBeNullary body)⟩
   return #[initItem, .fn name #[] ret acc]
 
 /-- The placeholder of `t` (`zeroValue`), searched for depth first: a

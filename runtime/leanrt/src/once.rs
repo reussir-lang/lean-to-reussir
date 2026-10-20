@@ -341,32 +341,19 @@ pub fn pop_context(base: u64, n: u64) {
     }
 }
 
-/// Set slot `slot` to the field of the one-field variant `cell` of a
-/// shared enum (lean2rr's `L2RConstCell`, through which it sets the
-/// once-cells of the program's types: the prelude's `l2r_once_put_field`):
-/// the slot gets the field's word, as `set_raw(slot, word_of(field))`
-/// would, and the variant's cell keeps the field's reference for the rest
-/// of the run (it is never released: neither is the slot's value). The
-/// cell is Reussir's cell of a shared enum of at most 2^16 constructors
-/// (`any::WIDE_BIT`): its first 8 bytes are the 32-bit count and the
-/// 32-bit tag, `tag` (checked: a different layout is reported, not read
-/// wrongly), then the field, one word (lean2rr stores types that cross the
-/// FFI boundary only: a pointer or a handle).
-///
-/// # Safety
-/// `cell` is the address of such a cell, of variant `tag`, whose reference
-/// the caller gives up.
+/// Set slot `slot` to the value box `b` holds (lean2rr's constants of
+/// program types, the prelude's `l2r_once_put_box`): a pointer box's
+/// payload, the value's handle word (the box's word without its number),
+/// as `set_raw(slot, word_of(value))` would store it; the slot keeps the
+/// box's reference. An immediate (a nullary variant boxed as its index)
+/// is stored as the box's word, odd: no handle word is odd, and the
+/// generated read tests the low bit (its `l2r_once_word`). Only leanrt's
+/// own box encoding is read, no Reussir cell.
 #[inline(never)]
-pub unsafe fn put_field(slot: u64, cell: *const u8, tag: u64) {
-    let t = unsafe { (cell.add(4) as *const u32).read() };
-    if t as u64 != tag {
-        crate::internal_panic(&format!(
-            "leanrt: once slot {} set from a cell of tag {}, not {} (Reussir's layout of enum cells changed?)",
-            slot, t, tag
-        ));
-    }
-    let w = unsafe { (cell.add(8) as *const usize).read() };
-    set_raw(slot, w);
+pub fn put_box(slot: u64, b: crate::any::LAny) {
+    let w = b.into_raw();
+    let raw = if w & 1 == 0 { (w & crate::any::ADDR_MASK) as usize } else { w as usize };
+    set_raw(slot, raw);
 }
 
 #[inline(never)]
@@ -393,9 +380,9 @@ mod tests {
 
     /// The slots are one global record without a lock (lean2rr runs Lean
     /// code on one thread at a time); unit tests run on several threads,
-    /// so the tests that set slots take this lock (`fast_table` and
-    /// `put_field_word` raced on the record's vectors: an index out of
-    /// bounds, in most runs of the combined unit tests).
+    /// so the tests that set slots take this lock (`fast_table` and a test
+    /// of the enum cell that set constants before clean step A1 raced on
+    /// the record's vectors: an index out of bounds, in most runs).
     static SLOT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn back<T: Copy>(w: usize) -> T {
@@ -414,6 +401,20 @@ mod tests {
         assert_eq!(back::<u64>(word_of(7u32)), 7);
         assert_eq!(back::<u64>(word_of(u64::MAX)), u64::MAX);
         assert_eq!(back::<f64>(word_of(-0.0f64)).to_bits(), (-0.0f64).to_bits());
+    }
+
+    /// A box's payload goes into the slot as the value's handle word, read
+    /// back as `word_of` the value; an immediate as the box's word, odd.
+    #[test]
+    fn put_box_words() {
+        let _g = SLOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let s = crate::string::from_bytes(b"constant");
+        let w = word_of(s.clone());
+        let slot = FAST_SLOTS as u64 + 20;
+        put_box(slot, crate::any::of(s, crate::any::NUM_STR));
+        assert_eq!(get_raw(slot), w);
+        put_box(slot + 1, crate::any::LAny::imm(3));
+        assert_eq!(get_raw(slot + 1), 7);
     }
 
     // Slots far above any test's others (the tables and record are global).
@@ -452,22 +453,4 @@ mod tests {
         assert_eq!(get_raw(h2), 9);
     }
 
-    // A slot set from a one-field variant's cell (lean2rr's `L2RConstCell`):
-    // it gets the word after the 8-byte header (count, tag).
-    #[test]
-    fn put_field_word() {
-        let _g = SLOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-        #[repr(C, align(8))]
-        struct Cell {
-            count: u32,
-            tag: u32,
-            field: usize,
-        }
-        let s = (FAST_SLOTS - 20) as u64;
-        let c = Cell { count: 1, tag: 3, field: 0x1234_5670 };
-        unsafe { put_field(s, &c as *const Cell as *const u8, 3) };
-        assert!(ready(s));
-        assert_eq!(get_raw(s), 0x1234_5670);
-        assert_eq!((c.count, c.tag), (1, 3));
-    }
 }

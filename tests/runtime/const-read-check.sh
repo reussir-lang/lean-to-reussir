@@ -75,7 +75,7 @@ LABEL = r'(?:"[^"]+"|[A-Za-z0-9_.$\-]+)'
 VAL = r'%' + LABEL
 # Cold calls other than leanrt's once module's (read by identifier below).
 COLD = re.compile(r'panic|index_bug|internal_panic')
-TEXTURES = {f'l2r_once_{k}{s}' for k in ('ready', 'get', 'claim', 'put', 'has') for s in ('', '_ffi')}
+TEXTURES = {f'l2r_once_{k}{s}' for k in ('ready', 'get', 'claim', 'put', 'has', 'word') for s in ('', '_ffi')}
 ONCE_COLD = {'claim_cold', 'unset'}
 # The literal cache: its textures and generated reader, its readers in
 # leanrt's `string` module, and its slow paths.
