@@ -76,6 +76,31 @@ Paths are relative to the repository root.
 - **Remove only if:** never; adjust a test's FACTOR when a known constant
   factor changes.
 
+### Native's counts are the largest of three runs at each size
+
+- **What:** `alloc-check.sh` runs the native build `ALLOC_CHECK_NATIVE_RUNS`
+  times at each size (default 3) and takes the largest allocation count
+  and the largest byte count; the first run's output is the one compared
+  with lean2rr's. lean2rr runs once, as before.
+- **Why:** native Lean's runtime starts libuv's event-loop thread during
+  initialization (`lean::event_loop_run_loop`), whose first act is to
+  allocate its 16 KiB signal stack (`lean::stack_guard`, `malloc`). Nothing
+  joins or waits for that thread, so on a busy machine a short run can end
+  before it has run, and its count lacks that one allocation of 16384
+  bytes. The bytes growth between two runs then dropped by 16 KiB, below a
+  tight test's bound: RtFlattenCopies `store 2000 -> 8000`, native +32096
+  instead of +48304 (16384 less, with 176 bytes of the main thread's own
+  run-to-run variation); RtDepFloatArrayAlloc `pushu`, +32787 instead of
+  +49171 (16384 less). The largest count is the run in which that
+  allocation landed, so the bound is native's full growth again. The
+  program itself runs on a second thread (`lean_run_main`), which is joined
+  before the count is printed. lean2rr's background threads allocate a few
+  bytes at most (54 or 56 allocations, 22904 or 22952 bytes for `store
+  2000`).
+- **Where:** `tests/runtime/alloc-check.sh` (`NATIVE_RUNS`, `max_counts`).
+- **Remove only if:** native Lean stops starting a thread it does not wait
+  for, or its signal stack stops coming from `malloc`.
+
 ### An `.xfail` can mark only the allocation check
 
 - **What:** a `NAME.xfail` whose first line starts with `alloc-check:`

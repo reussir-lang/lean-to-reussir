@@ -22,6 +22,17 @@
 # - optionally (`rss FACTOR OFFSET_KB`), lean2rr's peak memory in the large
 #   run (maximum RSS, /usr/bin/time) is at most FACTOR times native's plus
 #   OFFSET_KB.
+# Native's counts are the largest of ALLOC_CHECK_NATIVE_RUNS runs at each
+# size (default 3; the first run's output is the one compared). Native Lean
+# starts libuv's event-loop thread while its runtime initializes, and that
+# thread's first act is to allocate its 16 KiB signal stack
+# (`lean::stack_guard`). The thread runs beside the program and nothing
+# waits for it, so on a busy machine a run can end before it has run: the
+# count then lacks one allocation of 16384 bytes, and a growth measured
+# between two runs drops by 16 KiB, below the bytes bound of a tight test
+# (RtFlattenCopies `store`: native +32096 instead of +48304). The largest
+# count is the run in which that allocation landed. lean2rr's single run is
+# checked against it as before.
 # Every run stops when it has made ALLOC_CHECK_MAX_ALLOCS allocations
 # (default 5 x 10^7) or requested ALLOC_CHECK_MAX_BYTES bytes (default 1 GiB):
 # the counter's limits (alloccount.c), a safety net that bounds the time
@@ -44,7 +55,7 @@
 #
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN, L2R_LEAN_RUNTIME, L2R_DISABLE_OPTS, L2R_RRC_FLAGS);
-# ALLOC_CHECK_MAX_ALLOCS, ALLOC_CHECK_MAX_BYTES.
+# ALLOC_CHECK_MAX_ALLOCS, ALLOC_CHECK_MAX_BYTES, ALLOC_CHECK_NATIVE_RUNS.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -56,6 +67,7 @@ cd "$OUT" || exit 2
 alloccount_setup "$OUT" || { echo "FAIL alloc-check: cannot compile the counter"; exit 1; }
 MAX_ALLOCS=${ALLOC_CHECK_MAX_ALLOCS:-50000000}
 MAX_BYTES=${ALLOC_CHECK_MAX_BYTES:-1073741824}
+NATIVE_RUNS=${ALLOC_CHECK_NATIVE_RUNS:-3}
 
 if [ $# -gt 0 ]; then
   TESTS=("$@")
@@ -76,6 +88,20 @@ run_one() {
       < /dev/null > "$tag.out" 2> "$tag.err"
     echo $? > "$tag.code"
   )
+}
+
+# max_counts FILE...: "ALLOCS BYTES", the largest allocation count and the
+# largest byte count over the runs whose stderr is in FILE... (empty when
+# one of them has no count line).
+max_counts() {
+  local f n b ma="" mb=""
+  for f in "$@"; do
+    read -r n b <<< "$(alloccount_read "$f")"
+    [ -n "$n" ] || return 0
+    if [ -z "$ma" ] || [ "$n" -gt "$ma" ]; then ma=$n; fi
+    if [ -z "$mb" ] || [ "$b" -gt "$mb" ]; then mb=$b; fi
+  done
+  echo "$ma $mb"
 }
 
 pass=0; fail=0; xfail=0; xpass=0
@@ -109,6 +135,8 @@ for t in "${TESTS[@]}"; do
         for size in small large; do
           a=${!size}
           for b in native l2r; do run_one "$d" "$b" "$a" "$k.$size.$b"; done
+          # Native's further runs, for its counts only (see the top).
+          for ((r = 2; r <= NATIVE_RUNS; r++)); do run_one "$d" native "$a" "$k.$size.native.$r"; done
           p=$d/$k.$size
           for b in native l2r; do
             if grep -q '^alloccount: stopped at the limit' "$p.$b.err"; then
@@ -123,8 +151,12 @@ for t in "${TESTS[@]}"; do
             res="$res exit code $(cat "$p.l2r.code") at '$a', native $(cat "$p.native.code");"
           fi
         done
-        read -r n1 nb1 <<< "$(alloccount_read "$d/$k.small.native.err")"
-        read -r n2 nb2 <<< "$(alloccount_read "$d/$k.large.native.err")"
+        for size in small large; do
+          errs=("$d/$k.$size.native.err")
+          for ((r = 2; r <= NATIVE_RUNS; r++)); do errs+=("$d/$k.$size.native.$r.err"); done
+          read -r "n_$size" "nb_$size" <<< "$(max_counts "${errs[@]}")"
+        done
+        n1=$n_small nb1=$nb_small n2=$n_large nb2=$nb_large
         read -r l1 lb1 <<< "$(alloccount_read "$d/$k.small.l2r.err")"
         read -r l2 lb2 <<< "$(alloccount_read "$d/$k.large.l2r.err")"
         if [ -z "$n1" ] || [ -z "$n2" ] || [ -z "$l1" ] || [ -z "$l2" ]; then
