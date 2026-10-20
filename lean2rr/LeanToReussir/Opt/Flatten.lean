@@ -22,7 +22,10 @@ join points only), whose fields are spread in turn, nested at most
 one more variable, its tag (a `Bool`: `true` for the second constructor),
 and the fields of both constructors; those of the constructor the value
 does not have are placeholders (`◾`, Lean's `box(0)` at their types: only
-types with a finite placeholder qualify, `placeholderOk`). Two constructors
+types with a finite placeholder qualify, `placeholderOk`); a `String` of
+the error constructor of `Except`, `EST.Out` or `EStateM.Result` is a
+boxed variable, whose placeholder `box(0)` has no count
+(`boxedStringCtors`). Two constructors
 with the same field types share their fields (`Ctors.shared`). Only types
 the lowering treats as ordinary inductives qualify (`indInfo?`).
 
@@ -330,11 +333,34 @@ where
       if ok then return true
     return false
 
+/-- `s` with every `String` leaf boxed (`lcAny`): the leaves of one
+constructor of a two-constructor node, which hold a placeholder when the
+value has the other constructor. A boxed placeholder is Lean's `box(0)`,
+an immediate word without a count; the `String` placeholder is a counted
+string (an increment where it is made, a decrement where it is dropped).
+The lowering boxes a real string where it goes into the leaf and unboxes
+it where the program reads it (only in its constructor's code). -/
+partial def boxStringLeaves : Shape → Shape
+  | .leaf t => if t.consumeMData.isConstOf ``String then .leaf anyExpr else .leaf t
+  | .irr t => .irr t
+  | .node t ind cs fs => .node t ind cs (fs.map boxStringLeaves)
+
+/-- The constructors whose `String` fields are boxed (`boxStringLeaves`):
+the error constructors of `Except`, `EST.Out` (every `IO` result) and
+`EStateM.Result`. The error is the exceptional path: its placeholder is
+made and dropped on every success, a boxed message costs a box and an
+unbox only when there is an error. A `String` of another constructor
+stays at its type: there both ends of the string are usually a string
+(an `IO String` result read from a stream and printed), and the box
+would be one more operation on the path the program takes. -/
+def boxedStringCtors : List Name := [``Except.error, ``EST.Out.error, ``EStateM.Result.error]
+
 /-- The largest shape of a value of type `ty`, within `depth` levels and a
 budget of leaves (the state: leaves still allowed besides this one). Two
 constructors only with `sums` (results) and when every variable of the
-node has a finite placeholder. A value without relevant fields stays a
-leaf. -/
+node has a finite placeholder; the `String` leaves of an error
+constructor's fields are boxed (`boxedStringCtors`, `boxStringLeaves`).
+A value without relevant fields stays a leaf. -/
 partial def expandShape (sums : Bool) (ty : Expr) (depth : Nat) : StateT Nat CoreM Shape := do
   if depth == 0 then return .leaf ty
   let some (iv, cs, fts) ← indInfo? ty | return .leaf ty
@@ -349,6 +375,11 @@ partial def expandShape (sums : Bool) (ty : Expr) (depth : Nat) : StateT Nat Cor
   for ft in all do
     if irrelevantTy ft then fs := fs.push (.irr ft)
     else fs := fs.push (← expandShape sums ft (depth - 1))
+  if cs.size > 1 && !cs.shared then
+    fs := fs.mapIdx fun j f =>
+      match cs.owner? j with
+      | some c => if (cs.cs[c]?.map (·.name)).any (boxedStringCtors.contains ·) then boxStringLeaves f else f
+      | none => f
   let s := Shape.node ty iv.name cs fs
   if cs.size > 1 then
     for t in s.leafTypes do

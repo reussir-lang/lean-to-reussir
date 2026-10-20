@@ -440,7 +440,9 @@ and passes").
     tuple has no padding to return,
     [records](representations/records.md#fields-are-ordered-by-decreasing-alignment)). The fields of
     the constructor a value does not have are placeholders (`◾`); two
-    constructors with the same field types (`ForInStep`) share them.
+    constructors with the same field types (`ForInStep`) share them. A
+    `String` of an error constructor is passed boxed (see the next
+    entry).
 
   A value's fields are known where it is a constructor application of the
   same declaration, a split parameter or a field of one, a value matched
@@ -657,6 +659,59 @@ and passes").
   `RtFlattenResRef` and `RtFlattenResOwner` (with `.l2r-debug`).
 - **Remove only if:** the pass is off (the structures are then built at
   every step, with boxed fields, as rule 1 lays them out).
+
+### An error message that can be a placeholder is passed boxed (`flatten-structs`)
+
+- **What:** In the shape of `Except ε α`, `EST.Out ε σ α` (every `IO`
+  result) and `EStateM.Result ε σ α`, every `String` variable of the
+  `error` constructor's fields (`Except String α`, also inside a nested
+  structure: `Except (String × Nat) α`) is an `lcAny` variable
+  (`boxedStringCtors`, `boxStringLeaves` in `expandShape`): a `LAny`
+  member of the tuple, a `LAny` parameter of a join point, a `LAny` field
+  of a `cases`. On the success path its placeholder is `box(0)`
+  (`l2r_any_unit()`, the word 1). A real message goes into the box where
+  it is a field (`l2r_any_of<LStr>`) and comes out where the program reads
+  it, in the error's code only (`l2r_any_as<LStr>`). A message that comes
+  from a box (`Except.error`'s field, which the uniform layout boxes) and
+  only goes into the tuple keeps its box (`boxedOnlyVars` counts a `Box`
+  member of the tuple as a boxed use,
+  [box-and-uniform](representations/box-and-uniform.md#a-value-that-only-goes-back-into-boxes-keeps-its-box)):
+  no unboxing and boxing again. Example: Unionfind's `findEntryAux` returns
+  `Except String nodeData × Array nodeData` as
+  `Tuple(u64, LAny, T_nodeData, RVec<LAny>)`; on the `ok` path the second
+  member is the word 1. The `String` fields of other constructors
+  (`Option.some`, `EST.Out.ok`, a program type's) stay at their type.
+- **Why:** The `String` placeholder is a counted string: the empty string
+  of the literal cache (`l2r_str_lit_cached`: a load of the slot, a test
+  and an increment), and a decrement where the tuple is dropped. A boxed
+  placeholder has no count: its drop is a test of the low bit. Unionfind
+  (L08, n = 3000000) did this on every `ok` result of `findEntryAux` and
+  `mergePackAux`: 14% of its instructions were in `string.rs`. The error
+  is the exceptional path, so the placeholder was paid on every success,
+  and the box costs only when there is an error. On another constructor's
+  path both ends of the string are usually strings (an `IO String` result
+  read from a stream and printed), and a box would be one more operation
+  on the path the program takes: with every constructor's `String` boxed,
+  the pay-nothing check found one more box site in `RtJpSlots` (its loop's
+  `IO (… × String × …)` result). Cachegrind on the SVE-free build of dev
+  09c72f68 → this change: Unionfind (L08) 8.277 → 6.797 billion
+  instructions (−17.9%), Cedar (Z06g) 76.27 → 75.91 billion (−0.5%);
+  k-nucleotide (X12), monadic-interp (L15), word-freq (E05), lean-regex's
+  backtracker (Z03b), liasolver (L10), bignum (L11) and bignum-bytes (E09)
+  the same (within 0.003%). The other placeholders are free (`0`,
+  `box(0)`, a nullary constructor, the `z` function value) or come from a
+  once-cell (an array, a record): only the `String` was hot in the
+  measured programs. A record or array field stays at its own type: it
+  would be unboxed with a test of the box's number on the path where it is
+  real, and a `Float` field would get a cell per box.
+- **Where:** `Opt/Flatten.lean`: `boxedStringCtors`, `boxStringLeaves`,
+  `expandShape`; `Lower/BoxedUses.lean`: `boxedUsesValue` (the tuple's
+  `Box` members); the lowering's conversions between `Box` and `LStr`
+  (`coerce`; `Lower/Values.lean`: `lowerLetValue`, the tuple's projections
+  and constructor; `Lower/Code.lean`: `lowerCases`, `bindField`). Test
+  `RtFlattenStrLeaf`; the classic `Unionfind`.
+- **Remove only if:** the `String` placeholder costs no count (a string
+  type with an immediate value), or the pass is off.
 
 ## Required parts that look like optimizations
 

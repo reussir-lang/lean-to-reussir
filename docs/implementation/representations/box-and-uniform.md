@@ -224,7 +224,10 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   type in a constructor, a `Box` parameter of a callee, an extern's
   argument at a `Box` parameter or at a type variable it stores in a
   `Box` (`Array.push`'s element), a `Box` result, a `Box` join-point
-  parameter (`CodeCtx.boxedOnly`). A `cases` field among them is bound as
+  parameter, a `Box` member of a `flatten-structs` tuple (the `String`
+  of an error constructor:
+  [optional-passes](../optional-passes.md#an-error-message-that-can-be-a-placeholder-is-passed-boxed-flatten-structs))
+  (`CodeCtx.boxedOnly`). A `cases` field among them is bound as
   the field's box (`bindField`: no unboxing `let`), and a `let` among them
   whose value is a box to start with (a projection of a box field, a call
   whose callee returns a `Box`, an extern's result at a type variable it

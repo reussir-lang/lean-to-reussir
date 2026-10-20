@@ -236,8 +236,12 @@ does not change a layout.
   constructors (`EST.Out`, `Except`, `Option`, `ForInStep`), returns its
   fields as a `[value]` tuple. A type with two constructors adds a tag (a
   `bool`). The fields of the other constructor hold placeholders. The
-  tuple's fields are sorted by decreasing alignment, as the fields of a
-  record are. A `Bool`, `UInt8`, `UInt16`, `UInt32` or `Char` field uses
+  message of an error (a `String` in `Except.error`) is boxed in the
+  tuple, so its placeholder on the success path is `box(0)`: one word,
+  with no reference count to change. The string itself goes into the box
+  and out of it only in the error's code. The tuple's fields are sorted by
+  decreasing alignment, as the fields of a record are. A `Bool`, `UInt8`,
+  `UInt16`, `UInt32` or `Char` field uses
   a full 64-bit word in the tuple, and a `Unit` field uses no space. Thus
   the tuple has no padding, and a function can return it in registers.
 - **Worker and wrapper.** The function becomes a worker with the new

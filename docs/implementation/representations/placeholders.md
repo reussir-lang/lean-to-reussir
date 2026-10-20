@@ -126,8 +126,12 @@ element being updated stays unshared (`Array.modifyMUnsafe`,
   ([../conversions/casts.md](../conversions/casts.md#fields-pair-by-native-layout-slot)),
   a field of a parameter's type when the parameter is a proof or a type
   ([records.md](records.md#an-inductive-has-one-type-whatever-its-arguments)),
-  and the value `ST.Ref.take` leaves in the cell
-  ([references.md](references.md#take-moves-the-value-out-of-the-cell)).
+  the value `ST.Ref.take` leaves in the cell
+  ([references.md](references.md#take-moves-the-value-out-of-the-cell)),
+  and the fields of the constructor a `flatten-structs` value does not
+  have, where an error constructor's `String` is boxed so that its
+  placeholder is `box(0)`
+  ([../optional-passes.md](../optional-passes.md#an-error-message-that-can-be-a-placeholder-is-passed-boxed-flatten-structs)).
 - **Why:** Passing a live value instead would keep it alive (and shared)
   across the call.
 - **Where:** see the linked entries.

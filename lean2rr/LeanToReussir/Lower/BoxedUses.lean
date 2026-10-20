@@ -7,7 +7,8 @@ A field of a parameter's type is a `Box` in the record (one type per
 inductive). An alternative binds it at its own type (`bindField`), so it
 is unboxed once. When every use of the binder puts the value back into a
 box (a field of a parameter's type, a `Box` parameter, a `Box` result, a
-`Box` join-point parameter), the unboxing and each boxing again are wasted:
+`Box` join-point parameter, a `Box` member of a `flatten-structs` tuple),
+the unboxing and each boxing again are wasted:
 `List.reverseAux` at `String` unboxed each head to rebox it into the new
 cell. Such a binder keeps the field's box (`CodeCtx.boxedOnly`): the box
 is passed on unchanged, as natively, where the head is the same
@@ -111,6 +112,16 @@ def boxedUsesValue (u : BoxedUses) (v : LetValue .pure) (ty : Expr) : LowerM Box
     | .ctor c =>
       let arity := c.numParams + c.numFields
       if args.size < arity then return u.useAll args
+      -- A `flatten-structs` tuple: its `k` type arguments, then its
+      -- values, a boxed use where the value's member is a `Box` (a
+      -- `String` field of a two-constructor result, `boxStringLeaves`).
+      if let some k := flatTupleCtorArity? f then
+        let .named tn ← lowerType ty | return u.useAll args
+        let some (tys, _) ← tupleLayout? tn | return u.useAll args
+        let mut u := u
+        for h : i in [:args.size] do
+          u := u.use args[i] (k ≤ i && tys[i - k]? == some RR.Ty.box)
+        return u
       let .named tn ← lowerType ty | return u.useAll args
       let some info := (← get).typeInfos[tn]? | return u.useAll args
       let some layout := info.ctors.find? c.name | return u.useAll args
