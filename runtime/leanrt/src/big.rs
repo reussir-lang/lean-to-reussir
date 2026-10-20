@@ -746,6 +746,21 @@ fn div(a: LBig, b: LBig, k: Div) -> LBig {
     let (na, nb) = (a.len(), b.len());
     debug_assert!(nb > 0);
     let (sa, sb) = (a.neg(), b.neg());
+    // |a| < |b|: the quotient is 0 and the remainder `a` (for `EQ` and `ER`
+    // only when `a` is not negative: else they are one away), without the
+    // scratch limbs and the two copies: `x % 2^w` for an `x < 2^w`
+    // (`BitVec.ofNat`, in every wide `BitVec` operation that makes a value).
+    if (!sa || matches!(k, Div::TQ | Div::TR))
+        && (na < nb || (na == nb && unsafe { __gmpn_cmp(a.ptr(), b.ptr(), na as i64) } < 0))
+    {
+        return match k {
+            Div::TR | Div::ER => {
+                drop(b);
+                a
+            }
+            Div::TQ | Div::EQ => zero(a, b),
+        };
+    }
     let qn = if na >= nb { na - nb + 1 } else { 0 };
     let (mut qs, mut qh) = ([0u64; SMALL], Vec::new());
     let (mut rs, mut rh) = ([0u64; SMALL], Vec::new());
@@ -922,40 +937,58 @@ fn bitwise(a: LBig, b: LBig, op: Bit) -> LBig {
     let (x, y) = if a.len() >= b.len() { (a, b) } else { (b, a) };
     let (nx, ny) = (x.len(), y.len());
     let n = if op == Bit::And { ny } else { nx };
-    // `rp` may be `xp` or `yp` exactly: each limb is read before it is
-    // written.
-    let run = |rp: *mut u64, xp: *const u64, yp: *const u64| unsafe {
-        for i in 0..ny {
-            let (u, v) = (*xp.add(i), *yp.add(i));
-            *rp.add(i) = match op {
-                Bit::And => u & v,
-                Bit::Or => u | v,
-                Bit::Xor => u ^ v,
-            };
+    unsafe {
+        if x.is_unique() {
+            // Into `x`, whose limbs above `ny` stay. `y` is another block:
+            // the same one would have a second reference.
+            let mut r = x;
+            bits_into(std::slice::from_raw_parts_mut(r.ptr(), ny), std::slice::from_raw_parts(y.ptr(), ny), op);
+            drop(y);
+            r.set(n, false);
+            r
+        } else if y.is_unique() && y.cap() >= n {
+            let mut r = y;
+            bits_into(std::slice::from_raw_parts_mut(r.ptr(), ny), std::slice::from_raw_parts(x.ptr(), ny), op);
+            if op != Bit::And {
+                ptr::copy_nonoverlapping(x.ptr().add(ny), r.ptr().add(ny), nx - ny);
+            }
+            drop(x);
+            r.set(n, false);
+            r
+        } else {
+            let mut r = alloc(n);
+            // The fresh block's limbs are not initialized yet.
+            let rs = std::slice::from_raw_parts_mut(r.ptr() as *mut std::mem::MaybeUninit<u64>, ny);
+            let (xs, ys) = (std::slice::from_raw_parts(x.ptr(), ny), std::slice::from_raw_parts(y.ptr(), ny));
+            match op {
+                Bit::And => rs.iter_mut().zip(xs.iter().zip(ys)).for_each(|(d, (u, v))| _ = d.write(u & v)),
+                Bit::Or => rs.iter_mut().zip(xs.iter().zip(ys)).for_each(|(d, (u, v))| _ = d.write(u | v)),
+                Bit::Xor => rs.iter_mut().zip(xs.iter().zip(ys)).for_each(|(d, (u, v))| _ = d.write(u ^ v)),
+            }
+            if op != Bit::And {
+                ptr::copy_nonoverlapping(x.ptr().add(ny), r.ptr().add(ny), nx - ny);
+            }
+            drop(x);
+            drop(y);
+            r.set(n, false);
+            r
         }
-        if op != Bit::And && rp as *const u64 != xp {
-            ptr::copy_nonoverlapping(xp.add(ny), rp.add(ny), nx - ny);
-        }
-    };
-    if x.is_unique() {
-        let mut r = x;
-        run(r.ptr(), r.ptr(), y.ptr());
-        drop(y);
-        r.set(n, false);
-        r
-    } else if y.is_unique() && y.cap() >= n {
-        let mut r = y;
-        run(r.ptr(), x.ptr(), r.ptr());
-        drop(x);
-        r.set(n, false);
-        r
-    } else {
-        let mut r = alloc(n);
-        run(r.ptr(), x.ptr(), y.ptr());
-        drop(x);
-        drop(y);
-        r.set(n, false);
-        r
+    }
+}
+
+/// `r[i] = r[i] op y[i]`: one loop per operation over two different
+/// blocks, which LLVM vectorizes; the overlap test it puts before the
+/// vector loop compares the two blocks and passes. One loop that selected
+/// the operation per limb over the result and both sources stayed scalar
+/// (9 instructions a limb without SVE) for a result in a source's block,
+/// where that test compared the block with itself and failed:
+/// `b ||| (1 <<< i)` into a unique `b` (a wide `BitVec`'s `set`).
+#[inline(always)]
+fn bits_into(r: &mut [u64], y: &[u64], op: Bit) {
+    match op {
+        Bit::And => r.iter_mut().zip(y).for_each(|(u, v)| *u &= v),
+        Bit::Or => r.iter_mut().zip(y).for_each(|(u, v)| *u |= v),
+        Bit::Xor => r.iter_mut().zip(y).for_each(|(u, v)| *u ^= v),
     }
 }
 

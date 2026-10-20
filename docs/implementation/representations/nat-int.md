@@ -474,6 +474,57 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `mi_malloc`, and C code reading a big number through `lean.h` would need
   a converted `lean_mpz_object`.
 
+### A bitwise operation runs one loop per operation over slices that do not overlap
+
+- **What:** `big::bitwise` (`Nat`'s `&&&`, `|||`, `^^^` on big numbers)
+  writes into the longer operand's block when it is unique, else into the
+  shorter one's when it is unique and has room, else into a fresh block,
+  each with its own loop for each of the three operations (`bits_into` for
+  a result in an operand's block: `r[i] op= y[i]`; a zip of three slices
+  for a fresh block, its limbs written as `MaybeUninit`). The two blocks
+  of `bits_into` are different: a unique operand is never the other
+  operand (that would be a second reference).
+- **Why:** The former single loop selected the operation per limb and
+  could write over one of its sources, so LLVM either kept it scalar
+  (9 instructions a limb without SVE) or vectorized it behind a runtime
+  overlap test that fails when the result is in a source's block, the
+  usual case (`b ||| (1 <<< i)` into a unique `b`: a wide `BitVec`'s
+  `set`). Now that test compares two different blocks and passes, and the
+  loop runs vectorized (NEON, 8 limbs an iteration, with or without
+  SVE). Z03b (lean-regex's backtracker, whose
+  visited set is a `BitVec` of states times positions) spent 47% of its
+  instructions in the loop.
+- **Where:** `leanrt/src/big.rs`: `bitwise`, `bits_into`; unit tests
+  `big::tests::against_mpz` and `mixed_ownership` (every branch, against
+  GMP's `mpz_and`, `mpz_ior`, `mpz_xor`).
+- **Remove only if:** GMP's `mpn_and_n`/`mpn_ior_n`/`mpn_xor_n` are used
+  instead (unrolled scalar code, about 3.5 instructions a limb).
+
+### A division by a bigger divisor returns the dividend or zero at once
+
+- **What:** For the truncated division (`Nat./`, `Nat.%`, `Int.tdiv`,
+  `Int.tmod`), and for the Euclidean one (`Int.ediv`, `Int.emod`) of a
+  non-negative `a`, `big::div` first compares the magnitudes (the limb
+  counts, then `mpn_cmp` for equal counts). When `|a| < |b|` the
+  remainder is `a` itself (`b` is dropped) and the quotient zero (in an
+  operand's block when one is unique, `zero`). A negative `a` under
+  `ediv`/`emod` (one away from those) and `|a| >= |b|` take the general
+  path.
+- **Why:** The general path computes the remainder in scratch limbs (on
+  the heap, zeroed, beyond 32 limbs), copies `a` into them, then copies
+  them into a result block (an operand's when one is unique, else a fresh
+  one): two copies, and up to two allocations, to give back `a`. Every
+  wide `BitVec` operation that makes a value computes `x % 2^w`
+  (`BitVec.ofNat`), mostly for an `x < 2^w`. Z03b's `b ||| (1#w <<< i)` did so once per bit set:
+  about a third of its instructions after the bitwise loop's
+  vectorization.
+- **Where:** `leanrt/src/big.rs`: `div`; unit tests
+  `big::tests::against_mpz` and `mixed_ownership` (the four divisions on
+  operands of equal and of different lengths, signed, unique, shared and
+  roomy, against GMP's `mpz` divisions).
+- **Remove only if:** never (the result is the same; the test is a
+  limb-count comparison, and `mpn_cmp` only for equal counts).
+
 ### Literals: small below 2^63, big ones parsed from their decimal text
 
 - **What:** A `Nat` literal below 2^63 (`natIsSmall`) is
