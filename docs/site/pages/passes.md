@@ -237,7 +237,9 @@ does not change a layout.
   fields as a `[value]` tuple. A type with two constructors adds a tag (a
   `bool`). The fields of the other constructor hold placeholders. The
   tuple's fields are sorted by decreasing alignment, as the fields of a
-  record are.
+  record are. A `Bool`, `UInt8`, `UInt16`, `UInt32` or `Char` field uses
+  a full 64-bit word in the tuple, and a `Unit` field uses no space. Thus
+  the tuple has no padding, and a function can return it in registers.
 - **Worker and wrapper.** The function becomes a worker with the new
   signature. A wrapper keeps the old name and signature, for function
   values and entry points. Every direct call goes to the worker.

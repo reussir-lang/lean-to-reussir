@@ -246,7 +246,9 @@ does not change a layout.</p>
   fields as a <code>[value]</code> tuple. A type with two constructors adds a tag (a
   <code>bool</code>). The fields of the other constructor hold placeholders. The
   tuple's fields are sorted by decreasing alignment, as the fields of a
-  record are.</li>
+  record are. A <code>Bool</code>, <code>UInt8</code>, <code>UInt16</code>, <code>UInt32</code> or <code>Char</code> field uses
+  a full 64-bit word in the tuple, and a <code>Unit</code> field uses no space. Thus
+  the tuple has no padding, and a function can return it in registers.</li>
 <li><strong>Worker and wrapper.</strong> The function becomes a worker with the new
   signature. A wrapper keeps the old name and signature, for function
   values and entry points. Every direct call goes to the worker.</li>

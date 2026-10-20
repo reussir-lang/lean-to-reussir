@@ -77,9 +77,13 @@ a store of the field zero-extended to the widened integer.
   follows the fix of the run-7 regressions. Before it, they kept the
   order of the structure's fields; an `Option` result is flattened to
   `(bool, value)`, for example Strings' `String.Slice.toNat?` returned
-  `Tuple(bool, Nat)`, now `Tuple(Nat, bool)`. Across run 7's programs,
+  `Tuple(bool, Nat)`, then `Tuple(Nat, bool)`. Across run 7's programs,
   1144 of 1999 tuple types had a smaller field before a larger one, in 38
-  programs.
+  programs. The narrow member then came last, and its tail padding made
+  the tuple come back in memory ([entry 18](18-tail-padding-return.md)):
+  since the fix of the run-8 regression, these tuples keep a `bool`, `u8`,
+  `u16` or `u32` in a `u64` member (`Tuple(u64, Nat)`), so no member is
+  padded at all.
 - `--no-pack-record-members` itself was a workaround for a Reussir bug
   that upstream fixed (#652, #656;
   `docs/implementation/reussir-workarounds/correctness-bugs.md`, old

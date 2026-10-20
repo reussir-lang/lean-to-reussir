@@ -234,12 +234,14 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
   | .erased => zeroValue rty
   | .proj sn i x _ =>
     -- A field of a `flatten-structs` tuple (`flatTupleName`): its member
-    -- (`tupleType`, the members in `memberOrder`).
+    -- (`tupleType`, the members in `memberOrder`, a narrow value in a
+    -- whole word, `ofTupleMember`), or the unit value, which has no member.
     if (flatTupleArity? sn).isSome then
       let some (n, .named tn) := ctx.vars[x]? | throwError "lean2rr: projection of a flat tuple from an unbound variable (internal error)"
       let some (tys, order) ← tupleLayout? tn | throwError "lean2rr: projection of a flat tuple from {tn} (internal error)"
       let some ft := tys[i]? | throwError "lean2rr: field {i} of the flat tuple {tn} (internal error)"
-      return ← coerce (.field (.var n) (positionsOf order)[i]!) ft rty
+      let some k := order.findIdx? (· == i) | return ← coerce .unitVal ft rty
+      return ← coerce (← ofTupleMember ft (.field (.var n) k)) ft rty
     match ctx.vars[x]? with
     | some (n, st) =>
       -- A projection of a cast value: as a `cases` (see `castCases`).
@@ -274,14 +276,15 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
     | _ => throwError "lean2rr: projection from unknown variable"
   | .const f _ args _ =>
     -- A `flatten-structs` tuple built: its `k` (erased) type arguments,
-    -- then its fields, which the tuple holds in member order (`tupleType`).
+    -- then its fields, which the tuple holds in member order (`tupleType`;
+    -- a narrow value in a whole word, `toTupleMember`; no unit value).
     if let some k := flatTupleCtorArity? f then
       let .named tn := rty | throwError "lean2rr: a flat tuple built at type {rty.render} (internal error)"
       let some (tys, order) ← tupleLayout? tn | throwError "lean2rr: a flat tuple built at type {tn} (internal error)"
       unless args.size == 2 * k && tys.size == k do
         throwError "lean2rr: a flat tuple of {k} fields built with {args.size} arguments at type {tn} (internal error)"
       let vals ← (args.extract k (2 * k) |>.zip tys).mapM fun (a, t) => lowerArg ctx a t
-      return .ctor tn none (order.map (vals[·]!))
+      return .ctor tn none (← order.mapM fun j => toTupleMember tys[j]! vals[j]!)
     lowerConstApp ctx f args ty rty
   | .fvar g args =>
     match ctx.vars[g]? with

@@ -1,9 +1,9 @@
 # Pay-nothing baseline of Deriv (tests/classic/Deriv.lean), arguments '8'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 464342
-bytes 10504976
-native-allocs 553737
-native-bytes 12061854
+allocs 464340
+bytes 10504928
+native-allocs 553749
+native-bytes 12062030
 items 171
 functions 132
 conversion-fns 0
@@ -31,11 +31,11 @@ item T_ST_Out_# d89b44c55864
 item T_StdGen_# 066265cc92ad
 item T_Std_IterStep_# 2e6b3397c95a
 item T_String_Slice_# 74f079416627
-item Tuple# 380acfa4c4fa
-item Tuple# 4637db716227
-item Tuple# 85118fa9d3d2
+item Tuple# 4b88ca5e79fc
+item Tuple# 984a3fe98f9e
+item Tuple# 9f0aaa56ba0d
+item Tuple# d2e12fa3f4c3
 item Tuple# d4eee5540d99
-item Tuple# e437b791653f
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 208f43455cd7
@@ -79,7 +79,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» 572330f53511
-item l2r_main_body ea4544403010
+item l2r_main_body fc6c3b8aabf7
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
@@ -128,7 +128,7 @@ item l_Expr_ln___l2r_#_ bc51ef412ab3
 item l_Expr_mul___l2r_#_ 713d00ea941e
 item l_Expr_mul___l2r_#____closed__0 577aeb2112f6
 item l_Expr_mul___l2r_#____closed__0_init 2911d7f273c9
-item l_Expr_nestAux___l2r_#____l2r__flat 4b1f64832679
+item l_Expr_nestAux___l2r_#____l2r__flat 0d21846a7dc8
 item l_Expr_pow___l2r_#_ 1c0885303b92
 item l_Expr_pow___l2r_#____closed__0 0b55f3033957
 item l_Expr_pow___l2r_#____closed__0_init c0e3865fd1fe
@@ -165,16 +165,16 @@ item l_IO_Error_toString___l2r_#_ edd1ea0d4dee
 item l_IO_print___at___00IO_println___at___00Expr_deriv_spec__0_spec__0___l2r_#_ e941463455c1
 item l_IO_println___at___00Expr_deriv_spec__0___l2r_#_ edd9c41dd13f
 item l_IO_userError___l2r_#_ e5a4f2aa2427
-item l_List_head_x3f___l2r_#____redArg___l2r__flat 5cf1203e5023
+item l_List_head_x3f___l2r_#____redArg___l2r__flat cc9d0ebdb33a
 item l_String_Slice_isNat___l2r_#____closed__0 92ac5a1b8193
 item l_String_Slice_isNat___l2r_#____closed__0_init dd97e62b090f
-item l_String_Slice_isNat___l2r_#____l2r__flat 6c4ec5b57e8d
-item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 22d3dd162c82
-item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 81db83ef79c1
+item l_String_Slice_isNat___l2r_#____l2r__flat c2ee491896d1
+item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 42673d532266
+item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 1e05eedf8850
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
 item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ffd80adacb14
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
-item l_main___l2r_#_ 9946564db434
+item l_main___l2r_#_ a6af9d04d68d
 item l_main___l2r_#____closed__1 23fce99d6af6
 item l_main___l2r_#____closed__1_init f3ad8856f3a0
 item l_main___l2r_#____closed__2 715ca48e2bea

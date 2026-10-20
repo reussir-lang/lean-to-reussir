@@ -1,0 +1,16 @@
+// Issue 18: a [value] struct whose last member is narrower than the
+// struct's alignment gets its tail padding as explicit bytes in the LLVM
+// struct (T1: { i64, i1, [7 x i8] }). LLVM counts every byte of the array
+// as one more value of a returned struct, and on aarch64 a result of more
+// than 8 values comes back in memory (sret: the caller passes the address
+// of a stack slot in x8). T1 already has 9 values: f1 stores its result
+// through x8, the 7 padding bytes one by one; f2, the same with a u64 in
+// place of the bool (no padding), returns in x0 and x1. Build:
+//   rrc bug18-tail-padding-return.rr -o out.s --emit asm \
+//       -O aggressive --no-pack-record-members
+pub struct [value] T1(u64, bool)
+pub struct [value] T2(u64, u64)
+
+pub fn f1(n : u64, b : bool) -> T1 { T1{n + 1, b} }
+
+pub fn f2(n : u64, b : u64) -> T2 { T2{n + 1, b} }

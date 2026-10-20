@@ -331,8 +331,13 @@ structure LowerState where
   `tupleTypes` was linear: round 9 RV9S-02). -/
   tupleKeys : Std.HashMap String (Array RR.Ty) := {}
   /-- The member order of each `Tuple` (`tupleType`, `memberOrder`), by
-  name: member `k` holds value `order[k]` of its key. -/
+  name: member `k` holds value `order[k]` of its key (a `flatten-structs`
+  result keeps no member for a unit value, `flatTuples`). -/
   tupleOrders : Std.HashMap String (Array Nat) := {}
+  /-- The `Tuple`s that carry a `flatten-structs` result (`tupleType`
+  with `flat`): their members are `tupleMemberTy`'s, without the unit
+  values. -/
+  flatTuples : Std.HashSet String := {}
   /-- Generated functions (declarations and outlined join points). A
   function replaced by another of the same name leaves a tombstone
   (`fnTombstone`, dropped at the end) where it was, so that positions stay
@@ -602,14 +607,36 @@ def elemBoxOf? (t : RR.Ty) : LowerM (Option RR.Ty) := do
   let some k := (← get).tupleKeys[n]? | return none
   if k.size == 2 && k[1]! == .named "__elem_box" then return some k[0]! else return none
 
+/-- The type of the member in which the tuple of a `flatten-structs`
+result (`tupleType` with `flat`) keeps a value of type `t`: `u64` for a
+`bool`, `u8`, `u16` or `u32`, so that no padding follows the member; `t`
+itself for any other type. A unit value has no member at all. With the
+driver's `--no-pack-record-members`, Reussir lays out the padding after a
+narrow member in one of two ways: it widens the member to an `i64` when a
+wider member follows (and stores only the field's own bits, so LLVM keeps
+the tuple on the stack, see `memberOrder`), and it adds explicit bytes at
+the end of the struct otherwise (`{ ptr, ptr, ptr, i1, [7 x i8] }`). LLVM
+counts each of those bytes as one more value to return, and on aarch64 a
+result of more than 8 values comes back in memory (`sret`): already
+`(Nat, bool)` has 9. Unionfind's `findEntryAux`, which returns the tuple
+`(String, nodeData, Array, bool)`, then ran 16% more instructions (dev
+b874c365). A join point's tuple (J2) is not returned and keeps its
+values' own types. The member conversions are `toTupleMember` and
+`ofTupleMember`. -/
+def tupleMemberTy (t : RR.Ty) : RR.Ty :=
+  if t == .named "bool" || t == .named "u8" || t == .named "u16" || t == .named "u32" then .named "u64" else t
+
 /-- The member types of generated positional struct `n`, in member order:
-a `Tuple`'s (its key in its member order, see `tupleType`) or an
-`ElemBox`'s one field (see `cellStorage`), if `n` is one of them. -/
+a `Tuple`'s (its key in its member order, see `tupleType`; for a
+`flatten-structs` result each value type as its member type,
+`tupleMemberTy`, without the unit values) or an `ElemBox`'s one field
+(see `cellStorage`), if `n` is one of them. -/
 def tupleFields? (n : String) : LowerM (Option (Array RR.Ty)) := do
   let some k := (← get).tupleKeys[n]? | return none
   if k.size == 2 && k[1]! == .named "__elem_box" then return some #[k[0]!]
+  let flat := (← get).flatTuples.contains n
   match (← get).tupleOrders[n]? with
-  | some order => return some (order.map (k[·]!))
+  | some order => return some (order.map fun j => if flat then tupleMemberTy k[j]! else k[j]!)
   | none => return some k
 
 /-- The value types (in the values' order) and the member order of
@@ -1721,23 +1748,60 @@ def positionsOf (order : Array Nat) : Array Nat := Id.run do
   for h : k in [:order.size] do pos := pos.set! order[k] k
   return pos
 
+/-- Value `e` of type `t` as the member of a `flatten-structs` result's
+tuple that keeps it (`tupleMemberTy`): a `bool` as 1 or 0, a `u8`, `u16` or
+`u32` zero-extended (`as u64`), any other value as it is. -/
+def toTupleMember (t : RR.Ty) (e : RR.Expr) : LowerM RR.Expr := do
+  let u64 := RR.Ty.named "u64"
+  if t == RR.Ty.bool then
+    let o ← fresh "tm"
+    return .ite e ⟨#[(o, some u64, .atom "1")], .var o⟩ ⟨#[(o, some u64, .atom "0")], .var o⟩
+  if tupleMemberTy t != t then return .cast e u64
+  return e
+
+/-- The value of type `t` that member `e` of a `flatten-structs` result's
+tuple keeps (`toTupleMember` in reverse): a `bool` as the member's test
+against 0, a `u8`, `u16` or `u32` truncated (`as t`), any other value as it
+is. -/
+def ofTupleMember (t : RR.Ty) (e : RR.Expr) : LowerM RR.Expr := do
+  let u64 := RR.Ty.named "u64"
+  if t == RR.Ty.bool then
+    let x ← fresh "tm"
+    let z ← fresh "tz"
+    return .block ⟨#[(x, some u64, e), (z, some u64, .atom "0")], .atom s!"{x} != {z}"⟩
+  if tupleMemberTy t != t then return .cast e t
+  return e
+
 /-- A `[value]` struct type carrying values of types `tys`, given in the
-order of the values (the arguments of a join point, J2; the fields of a
-result of optimization `flatten-structs`, `flatTupleName`), and the order
-of its members (`memberOrder`): member `k` holds value `order[k]`. The
-type is found by `tys` in the values' order, so each tuple type has one
-order (`tupleOrders`); a construction lists the values in member order,
-a read of value `i` reads member `(positionsOf order)[i]`. -/
-def tupleType (tys : Array RR.Ty) : LowerM (String × Array Nat) := do
-  if let some n := (← get).tupleTypes[tys]? then
+order of the values (the arguments of a join point, J2; with `flat`, the
+fields of a result of optimization `flatten-structs`, `flatTupleName`),
+and the order of its members (`memberOrder` of the member types): member
+`k` holds value `order[k]`. The type is found by `tys` in the values'
+order (and `flat`), so each tuple type has one order (`tupleOrders`); a
+construction lists the values in member order, and a read of value `i`
+reads member `(positionsOf order)[i]`. The tuple of a `flatten-structs`
+result is returned, so it keeps narrow values in whole words
+(`tupleMemberTy`; converted by `toTupleMember` and `ofTupleMember`) and
+has no member for a unit value (unless all its values are units): its
+`order` lists only the values it keeps, and a read of value `i` reads the
+member `k` with `order[k] = i`, or gives the unit value
+(`Lower/Values.lean`). -/
+def tupleType (tys : Array RR.Ty) (flat : Bool := false) : LowerM (String × Array Nat) := do
+  let key := if flat then tys.push (.named "__flat") else tys
+  if let some n := (← get).tupleTypes[key]? then
     return (n, (← get).tupleOrders.getD n (Array.range tys.size))
-  let order ← memberOrder tys
+  let mtys := if flat then tys.map tupleMemberTy else tys
+  let kept := if flat && tys.any (· != RR.Ty.unit) then
+      (Array.range tys.size).filter (tys[·]! != RR.Ty.unit)
+    else Array.range tys.size
+  let order := (← memberOrder (kept.map (mtys[·]!))).map (kept[·]!)
   let n ← fresh "Tuple"
   modify fun s => { s with
-    tupleTypes := s.tupleTypes.insert tys n
+    tupleTypes := s.tupleTypes.insert key n
     tupleKeys := s.tupleKeys.insert n tys
     tupleOrders := s.tupleOrders.insert n order
-    typeItems := s.typeItems.push (.struct n true (order.map (tys[·]!))) }
+    flatTuples := if flat then s.flatTuples.insert n else s.flatTuples
+    typeItems := s.typeItems.push (.struct n true (order.map (mtys[·]!))) }
   return (n, order)
 
 /-- The structure `L2RFlat.Tuple<k>` (`k` type parameters, one field of
@@ -1794,7 +1858,7 @@ mutual
         -- `flatten-structs`' tuples: a `[value]` struct of the fields.
         if let some k := flatTupleArity? n then
           let args := e.getAppArgs
-          if args.size == k then return .named (← tupleType (← args.mapM lowerType)).1
+          if args.size == k then return .named (← tupleType (← args.mapM lowerType) (flat := true)).1
         -- An array: of its element type's storage (`compact-arrays`).
         if n == ``Array && e.getAppNumArgs == 1 then
           return .app "RVec" #[← arrayStorage e.appArg!]

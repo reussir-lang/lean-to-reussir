@@ -1,9 +1,9 @@
 # Pay-nothing baseline of Qsort (tests/classic/Qsort.lean), arguments '80'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 9538
-bytes 3223184
-native-allocs 299433
-native-bytes 12739762
+allocs 9536
+bytes 3223136
+native-allocs 299445
+native-bytes 12739938
 items 151
 functions 115
 conversion-fns 0
@@ -28,13 +28,13 @@ item T_ST_Out_# d89b44c55864
 item T_StdGen_# 066265cc92ad
 item T_Std_IterStep_# 2e6b3397c95a
 item T_String_Slice_# 74f079416627
-item Tuple# 1b707eb6d4e6
 item Tuple# 33f6256c7dbf
-item Tuple# 380acfa4c4fa
-item Tuple# 3f5d20a70b1f
-item Tuple# 85118fa9d3d2
+item Tuple# 4b88ca5e79fc
+item Tuple# 84d5fb870679
+item Tuple# 984a3fe98f9e
+item Tuple# 9f0aaa56ba0d
 item Tuple# d4eee5540d99
-item Tuple# e437b791653f
+item Tuple# dcca1e39e413
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 208f43455cd7
@@ -70,7 +70,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» 572330f53511
-item l2r_main_body 6710f03432c3
+item l2r_main_body 4d3d84125d82
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
 item l2r_run_main d750382a583f
@@ -136,30 +136,30 @@ item l_IO_Error_toString___l2r_#_ edd1ea0d4dee
 item l_IO_print___at___00IO_println___at___00main_spec__3_spec__4___l2r_#_ 0c5e0fa42bcc
 item l_IO_println___at___00main_spec__3___l2r_#_ ee2b3919e48c
 item l_IO_userError___l2r_#_ e5a4f2aa2427
-item l_List_head_x3f___l2r_#____redArg___l2r__flat 5cf1203e5023
+item l_List_head_x3f___l2r_#____redArg___l2r__flat cc9d0ebdb33a
 item l_String_Slice_isNat___l2r_#____closed__0 92ac5a1b8193
 item l_String_Slice_isNat___l2r_#____closed__0_init dd97e62b090f
-item l_String_Slice_isNat___l2r_#____l2r__flat 6c4ec5b57e8d
-item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 22d3dd162c82
-item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 81db83ef79c1
+item l_String_Slice_isNat___l2r_#____l2r__flat c2ee491896d1
+item l_String_Slice_toNat_x3f___l2r_#____l2r__flat 42673d532266
+item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 1e05eedf8850
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
 item l___private_Init_Data_Array_Basic_0__Array_foldlMUnsafe_fold___at___00checksum_spec__0___l2r_#_ 3192d0ae346b
 item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg___closed__0 a3da01d25104
 item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg___closed__0_init 189a83e755cb
-item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg___l2r__flat dee9ea0b2019
-item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__2___l2r_#____redArg___l2r__flat 6a549c073fa0
+item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg___l2r__flat 54e8bc24ac0a
+item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__2___l2r_#____redArg___l2r__flat cd9f48b71889
 item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ffd80adacb14
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
-item l___private_Qsort_0__partitionAux___at___00qsortAux___at___00main_spec__0_spec__0___l2r_#____l2r__flat 45ecdb5ab9da
+item l___private_Qsort_0__partitionAux___at___00qsortAux___at___00main_spec__0_spec__0___l2r_#____l2r__flat bfed80da7f33
 item l_badRand___l2r_#_ 58f5f04afa61
 item l_checkSortedAux___l2r_#____closed__1 76738295071c
 item l_checkSortedAux___l2r_#____closed__1_init ab3f2816a30d
-item l_checkSortedAux___l2r_#____l2r__flat ffa8ad18f4c9
+item l_checkSortedAux___l2r_#____l2r__flat b1a05aecc4f7
 item l_checksum___l2r_#_ 7d9e3d7d016b
-item l_main___l2r_#_ 088836ba8603
+item l_main___l2r_#_ f6dfb918300c
 item l_mkPanicMessageWithDecl___l2r_#_ 9dc6fe993dc5
 item l_mkRandomArray___l2r_#_ e634152b0d32
 item l_mkStdGen___l2r_#____l2r__flat b08dfeda83c3
 item l_panic___at___00ByteArray_toUInt64LE_x21_spec__0___l2r_#_ 0bbcedca4180
-item l_qsortAux___at___00main_spec__0___l2r_#_ 98e4913c61a4
+item l_qsortAux___at___00main_spec__0___l2r_#_ be2b5e0fbed1
 item lean_main_entry cfcc2a3788db

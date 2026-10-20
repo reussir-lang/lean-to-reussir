@@ -182,7 +182,10 @@ Other rules:
 - **Field order.** Fields are sorted by decreasing alignment, so records
   have no padding (pass `field-order`). The tuples that lean2rr makes
   (the arguments of a join point, the fields of a flattened result) are
-  sorted the same way. Reussir's own member packing is off. A value struct is stored in place, so its
+  sorted the same way. The tuple of a flattened result also keeps a
+  narrow value (a `Bool`, `UInt8`, `UInt16`, `UInt32` or `Char`) in a
+  64-bit word and has no member for a `Unit` value, so it has no padding.
+  Reussir's own member packing is off. A value struct is stored in place, so its
   alignment is the largest alignment of its fields: a value struct of a
   `UInt8` has alignment 1, and goes after the 8-byte fields.
 - **Recursive and mutual types** refer to each other's types.

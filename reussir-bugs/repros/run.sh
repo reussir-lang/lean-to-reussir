@@ -9,7 +9,7 @@
 # RRC_CHECKOUT is a Reussir checkout with a build: its build/bin/rrc compiles
 # the repros, and plain .rr repros link against its build/target-rt/release.
 # NN is an entry number (1, 02, ...); the default is every entry that has a
-# line here: 1 to 8, 12 and 17. Entries 9 and 10 (missing features) have no
+# line here: 1 to 8, 12, 17 and 18. Entries 9 and 10 (missing features) have no
 # repro: their patches carry their own tests; 11 is a run-time cost of
 # entry 2's stack; 13 needs a 32-bit target, 14 MLIR written by hand, and
 # 15 is shown by lean2rr's runtime test RtArenaPurge. Entry 2's Miri test
@@ -33,7 +33,7 @@
 # the runtime crate leanrt for the checkout once, under runtime/leanrt/target/.
 # Entries 3 and 4 compare the sizes of two outputs (--emit mlir-llvm,
 # --emit mlir); entries 6 and 17 read their LLVM IR (the calls left, the
-# stack slots left); entry 8
+# stack slots left), entry 18 its aarch64 assembly (stores through x8); entry 8
 # counts the cells its program allocates (Reussir's allocation entry points
 # wrapped at link time); entry 12 is a Rust test of the checkout's runtime
 # sources, compiled with RUSTC. Everything takes seconds, except entry 2's
@@ -337,7 +337,24 @@ bug17() {
     else say_line FIXED 17 "neither function keeps a stack slot" "-O aggressive --no-pack-record-members"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 12 17"
+bug18() {
+    # The aarch64 assembly of two functions that return a two-field [value]
+    # struct: f1's (u64, bool) has tail padding, f2's (u64, u64) none.
+    local d=$WORK/out/18 n m
+    mkdir -p "$d"
+    { (cd "$WORK/run" && "$RRC" "$HERE/bug18-tail-padding-return.rr" -o "$d/out.s" --emit asm -O aggressive \
+        --no-pack-record-members) > "$d/log" 2>&1; } 2> /dev/null
+    RC=$?
+    if [ $RC != 0 ]; then say_line OTHER 18 "rrc $(signame "$RC"): $(grep -m1 -o "error[:=].\{0,160\}" "$d/log")" "-O aggressive --no-pack-record-members"; return; fi
+    if ! grep -q '^_RC2f1:' "$d/out.s"; then say_line SKIPPED 18 "no f1 in the assembly (not an aarch64 build?)"; return; fi
+    n=$(awk '/^_RC2f1:/{p=1} p && /\[x8/{c++} p && /\.Lfunc_end/{exit} END{print c+0}' "$d/out.s")
+    m=$(awk '/^_RC2f2:/{p=1} p && /\[x8/{c++} p && /\.Lfunc_end/{exit} END{print c+0}' "$d/out.s")
+    if [ "$m" != 0 ]; then say_line OTHER 18 "f2 stores $m times through x8 (expected 0)" "-O aggressive --no-pack-record-members"
+    elif [ "$n" -gt 0 ]; then say_line REPRODUCES 18 "f1 (u64, bool) returns in memory ($n stores through x8); f2 (u64, u64) in registers" "-O aggressive --no-pack-record-members"
+    else say_line FIXED 18 "both functions return in registers" "-O aggressive --no-pack-record-members"; fi
+}
+
+ALL="01 02 03 04 05 06 07 08 12 17 18"
 SLOW=" "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

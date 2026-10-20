@@ -164,10 +164,19 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   `tupleType` finds a tuple type by its value types in the values' order
   and keeps its member order (`tupleOrders`); a construction lists the
   values in that order, and a projection of value `i` reads its member
-  (`tupleLayout?`, `positionsOf`). Example: `String.Slice.toNat?`
-  returns `Option Nat`, flattened to the tag and the value, `(bool, Nat)`
-  in Lean's order; its tuple is `Tuple(Nat, bool)`, built as
-  `Tuple{n, true}`, and a caller reads the tag from member 1.
+  (`tupleLayout?`; `positionsOf` for a J2 tuple). The tuple of a `flatten-structs`
+  result is returned, so it has no narrow member at its end: it keeps a
+  `bool`, `u8`, `u16` or `u32` in a `u64` member (`tupleMemberTy`; a
+  `bool` as 1 or 0, the others zero-extended; `toTupleMember`,
+  `ofTupleMember`), and a unit value has no member (unless all its values
+  are units; the projection gives the unit value). Its member order lists
+  only the values it keeps. A J2 tuple is not returned and keeps its
+  values' own types. Example: `String.Slice.toNat?` returns `Option Nat`,
+  flattened to the tag and the value, `(bool, Nat)` in Lean's order; its
+  tuple is `Tuple(u64, Nat)` (two members of 8 bytes, in the values'
+  order), built as `Tuple{if t { 1 } else { 0 }, n}`, and a caller reads
+  the tag as member 0 tested against 0. `Except String Unit × Array α`
+  (Unionfind's monad) is `Tuple(u64, LStr, RVec<LAny>)`.
   A field's alignment (`fieldAlign`) is the one Reussir
   gives the member (`RR.fieldAlign?`, the model that the step variants of
   `outline` also use; Reussir's `memberStorageType` and
@@ -189,16 +198,38 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   17 of `reussir-bugs/`). Sorted `flatten-structs` tuples took
   MonadicInterp (n = 30000) from 21.95 to 21.73 billion instructions
   (−1.0%, cachegrind) and Liasolver (n = 50) from 13.58 to 13.49 billion
-  (−0.7%).
+  (−0.7%). Sorted, a narrow member came last, and Reussir writes the
+  padding at the end of a struct as explicit bytes (`{ ptr, ptr, ptr, i1,
+  [7 x i8] }`): LLVM counts each byte as one more value of a returned
+  struct, and on aarch64 a result of more than 8 values comes back in
+  memory (`sret`; `(Nat, bool)` already has 9). Where the padding stays
+  live (a result returned again as it is, as by a recursive call), the
+  function then returned through the stack: Unionfind's `findEntryAux`
+  ran 16% more instructions (dev b874c365; the program's median wall
+  time went from 448 to 477 ms between timing runs 7 and 8). With
+  whole-word members and no unit members (dev b874c365 → this rule,
+  cachegrind, SVE-free builds, the benchmark arguments): Unionfind
+  (n = 3000000) 9.397 → 8.256 billion instructions (−12.1%),
+  MonadicInterp 21.758 → 20.351 billion (−6.5%), Liasolver −0.05%,
+  Strings −0.07%, k-nucleotide −0.16%, Cedar (Z06g) −0.09%, the lean-zip
+  cases Z01d and Z03d −0.01% or less, ClosurePipeline and ExprEval
+  unchanged; the functions returned in memory (call sites that pass a
+  stack slot in `x8`): Unionfind 2 → 0, MonadicInterp 7 → 0, Strings
+  3 → 0, Liasolver 1 → 0, ExprEval 1 → 0.
 - **Where:** `LowerBase.lean`: `nominalType`, `fieldAlign`, `layoutItem?`,
   `memberOrder`, `positionsOf`, `tupleType`, `tupleLayout?`,
+  `tupleMemberTy`, `toTupleMember`, `ofTupleMember`, `tupleFields?`
+  (`LowerState.flatTuples`),
   `CtorLayout.place`, `CtorLayout.posTys`; `Lower/Values.lean`:
   `lowerLetValue` (a `flatten-structs` tuple's constructor and
   projections); `Lower/Code.lean`: `lowerCode` (J2);
   `FieldAlign.lean`: `fieldAlign?`; `Opt/FieldOrder.lean`: `alignmentOrder`; `scripts/l2r.py`
   (`--no-pack-record-members`).
 - **Tests:** `RtValueStructAlign` (`[value]` structs of sub-word fields in
-  four records; its comment gives the layouts before and after).
+  four records; its comment gives the layouts before and after);
+  `RtFlattenNarrow` (`flatten-structs` results with `Bool`, `UInt8`,
+  `UInt16`, `UInt32`, `Char` and `Unit` fields, the largest values,
+  returned again by recursive calls).
 - **Remove only if:** the optional pass `field-order` may be turned off
   (then Reussir lays padding out as bytes, and tuples keep the values'
   order); `--no-pack-record-members`

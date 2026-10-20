@@ -435,7 +435,9 @@ and passes").
     the declaration returns the variables as a `[value]` tuple
     (`L2RFlat.Tuple<k>`, a structure the pass adds to the environment, which
     `lowerType` lowers to `tupleType` of its fields' types: its members in
-    decreasing alignment, as a record's fields,
+    decreasing alignment, as a record's fields, a `bool`, `u8`, `u16` or
+    `u32` in a whole `u64` and no member for a unit value, so that the
+    tuple has no padding to return,
     [records](representations/records.md#fields-are-ordered-by-decreasing-alignment)). The fields of
     the constructor a value does not have are placeholders (`◾`); two
     constructors with the same field types (`ForInStep`) share them.
