@@ -866,9 +866,11 @@ where the parameter is a proof or a type: it holds `box(0)`, as natively.
   contains itself by value). (Optional pass `value-structs`; without it
   such a structure is a shared record like the others.)
 - **Field order.** lean2rr orders each constructor's fields by decreasing
-  alignment (ties in declaration order), so records have no padding; the
-  layout maps each Lean field to its record position, and constructions,
-  patterns and projections go through it. (Reussir's own member packing is
+  alignment (ties in declaration order), so records have no padding (a
+  `[value]` struct is laid out in place: its alignment is the largest of
+  its fields', 1 for `struct [value] W(u8)`); the layout maps each Lean
+  field to its record position, and constructions, patterns and
+  projections go through it. (Reussir's own member packing is
   off: its in-place reuse of a cell for another variant mishandles fields
   that packing moves.) This is the optional pass `field-order`; without it
   the fields stay in declaration order, and Reussir lays the padding out as

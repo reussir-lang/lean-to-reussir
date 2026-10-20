@@ -1,6 +1,7 @@
 import Lean
 import LeanToReussir.MonoTypesKeep
 import LeanToReussir.RR
+import LeanToReussir.FieldAlign
 import LeanToReussir.Relevance
 import LeanToReussir.Collect
 import LeanToReussir.Mono
@@ -1555,18 +1556,30 @@ def arrayElem? (t : RR.Ty) : Option RR.Ty :=
 def arrayCall (e : RR.Ty) (op : String) (args : Array RR.Expr) : RR.Expr :=
   .call s!"l2r_array_{op}" #[e] args
 
-/-- Alignment class of a field type: 1, 2, 4 or 8 bytes (pointers,
-64-bit scalars, `Nat`/`Int` and records are 8). -/
+/-- Nominal type `n` as the alignment model needs it (`RR.fieldAlign?`): an
+enumeration with its number of variants, a `[value]` struct with its field,
+otherwise its kind (shared: a pointer). `none` if `n` is not a finished
+nominal type: one whose fields are being lowered (`nominalType`; it holds a
+pointer, since a `[value]` struct's field is of a finished type), or a type
+that `nominalType` does not make (an `ElemBox`, the reference record,
+`LPromise`: pointers). -/
+def layoutItem? (st : LowerState) (n : String) : Option RR.Item := do
+  let info ← st.typeInfos[n]?
+  match info.shape with
+  | .enumLike => return .enum n true (Array.replicate (max 1 info.ctorOrder.size) ("", #[]))
+  | .struct =>
+    if info.value then return .struct n true (← info.ctors.find? info.ctorOrder[0]!).posTys
+    return .struct n false #[]
+  | .enum => return .enum n false #[]
+
+/-- The alignment of a field of type `t` in a record, in bytes, as Reussir
+lays the record out (`RR.fieldAlign?`): 1, 2, 4 or 8. A `[value]` struct is
+laid out in place, with the alignment of its field (`struct [value]
+T_W(u8)`: 1); a pointer, a 64-bit scalar, `Nat`, `Int` and a shared record
+or enum: 8; so is a type the model does not know (a pointer, see
+`layoutItem?`). -/
 def fieldAlign (t : RR.Ty) : LowerM Nat := do
-  match t with
-  | .named n =>
-    if n ∈ ["u8", "i8", "bool", "L2RUnit"] then return 1
-    if n ∈ ["u16", "i16"] then return 2
-    if n ∈ ["u32", "i32", "f32"] then return 4
-    match (← get).typeInfos[n]? with
-    | some info => if info.shape == .enumLike then return (if info.ctorOrder.size ≤ 256 then 1 else 2) else return 8
-    | none => return 8
-  | _ => return 8
+  return (RR.fieldAlign? (layoutItem? (← get)) t).getD 8
 
 /-- The order of the fields of the tuple that carries a join point's
 arguments of types `tys` (J2; `JumpAction.yield`): field `k` is argument

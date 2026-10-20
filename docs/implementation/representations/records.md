@@ -157,14 +157,27 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   projections and conversions go through it. The driver turns Reussir's own
   member packing off. A J2 join point's tuple orders its fields the same
   way ([join points](../control-flow/join-points.md#a-j2-join-point-with-several-parameters-yields-a-value-tuple)).
+  A field's alignment (`fieldAlign`) is the one Reussir
+  gives the member (`RR.fieldAlign?`, the model that the step variants of
+  `outline` also use; Reussir's `memberStorageType` and
+  `deriveCompoundLayout`). A `[value]` struct is laid out in place, so its
+  alignment is the largest alignment of its fields, recursively. Example:
+  with `struct [value] T_W(u8)` (a one-field structure that Lean keeps,
+  such as one in a `mutual` block), `P.mk (w : W) (n : Nat) (b : UInt8)` is
+  `T_P(Nat, T_W, u8)`, 16 bytes. Until 2026-10-19 every `[value]` struct
+  counted as 8 bytes aligned: `T_P(T_W, Nat, u8)`, 24 bytes, 7 of them
+  padding after `T_W`.
 - **Why:** Records without padding (rbtree memory 1.17x → 1.00x native,
   7860807); and Reussir's in-place variant reuse with packed layouts skips
   stores of fields packing moves (a Reussir bug, fixed upstream in #656;
   the old stack has a local patch for it), so packing stays off and
   lean2rr does the ordering itself.
-- **Where:** `LowerBase.lean`: `nominalType`, `fieldAlign`,
-  `CtorLayout.place`, `CtorLayout.posTys`; `Opt/FieldOrder.lean`:
-  `alignmentOrder`; `scripts/l2r.py` (`--no-pack-record-members`).
+- **Where:** `LowerBase.lean`: `nominalType`, `fieldAlign`, `layoutItem?`,
+  `CtorLayout.place`, `CtorLayout.posTys`; `FieldAlign.lean`:
+  `fieldAlign?`; `Opt/FieldOrder.lean`: `alignmentOrder`;
+  `scripts/l2r.py` (`--no-pack-record-members`).
+- **Tests:** `RtValueStructAlign` (`[value]` structs of sub-word fields in
+  four records; its comment gives the layouts before and after).
 - **Remove only if:** the optional pass `field-order` may be turned off
   (then Reussir lays padding out as bytes); `--no-pack-record-members`
   is removable after the move to Reussir 7954a367, which fixes the

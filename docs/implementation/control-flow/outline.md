@@ -108,9 +108,10 @@ text, from growing superlinearly. It is a required part (`outline` in
   3000000 steps of `mixed` and of the mutual recursion `ping` on a 1 MiB
   stack; also `done` arms narrower than a word (`Bool`, `Bool × UInt8`)
   and a `done` tuple larger than the call variant.
-- **Where:** `Outline.lean`: `typeTable`, `fieldAlign?`,
-  `stepFieldOrder`, `StepCall`, `stepItem`, `stepVariant`, `stepInfo`,
-  `stepify`, `stepDispatch`, `outlineFns`; `Emit/Program.lean`:
+- **Where:** `Outline.lean`: `typeTable`, `stepFieldOrder`, `StepCall`,
+  `stepItem`, `stepVariant`, `stepInfo`, `stepify`, `stepDispatch`,
+  `outlineFns`; `FieldAlign.lean`: `fieldAlign?` (shared with
+  `fieldAlign`, the record field order); `Emit/Program.lean`:
   `LoweredProgram.outline`.
 - **Remove only if:** never (speed).
 

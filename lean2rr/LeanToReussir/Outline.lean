@@ -2,6 +2,7 @@ import Std.Data.HashMap
 import Std.Data.HashSet
 import Lean.Util.SCC
 import LeanToReussir.RR
+import LeanToReussir.FieldAlign
 
 /-!
 # Outlining deep and long function bodies
@@ -148,7 +149,7 @@ carry another arm's bytes). The fields of a call variant are in decreasing
 alignment (`stepFieldOrder`), so the variant has no padding between them. -/
 
 /-- The generated and prelude type declarations by name (`.enum` and
-`.struct` items), for `fieldAlign?`. -/
+`.struct` items), for `fieldAlign?` (FieldAlign.lean). -/
 abbrev TypeTable := Std.HashMap String Item
 
 def typeTable (items : Array Item) : TypeTable :=
@@ -156,42 +157,13 @@ def typeTable (items : Array Item) : TypeTable :=
     | .enum n .. | .struct n .. => m.insert n it
     | _ => m
 
-/-- The alignment in bytes of a value of type `t` in a step variant, or
-`none` if the type table does not know it (the variant then keeps the
-parameter order). Pointer-sized: what Reussir stores as a pointer or one
-tagged word (a shared record or enum, a function value, a closure, an
-opaque runtime type: `rrAlign8` in LowerBase lists them). A `[value]`
-struct or enum: the largest alignment of its members and, for an enum, of
-its tag (8 bits up to 256 variants, then 16, then 32: Reussir's
-`getTagType`). -/
-partial def fieldAlign? (types : TypeTable) (t : Ty) (fuel : Nat := 8) : Option Nat :=
-  let maxAlign (init : Nat) (fs : Array Ty) : Option Nat :=
-    fs.foldlM (init := init) fun a f => return max a (← fieldAlign? types f (fuel - 1))
-  match t with
-  | .named n =>
-    match n with
-    | "u8" | "i8" | "bool" | "L2RUnit" => some 1
-    | "u16" | "i16" => some 2
-    | "u32" | "i32" | "f32" => some 4
-    | "u64" | "i64" | "f64" | "Nat" | "Int" | "LStr" | "LHandle" | "LAny" => some 8
-    | _ =>
-      match types[n]? with
-      | some (.enum _ false _) | some (.struct _ false _) => some 8
-      | some (.enum _ true vs) =>
-        if fuel == 0 then none else
-        let tag := if vs.size ≤ 256 then 1 else if vs.size ≤ 65536 then 2 else 4
-        vs.foldlM (init := tag) fun a (_, fs) => maxAlign a fs
-      | some (.struct _ true fs) => if fuel == 0 then none else maxAlign 1 fs
-      | _ => none
-  | .app n _ => if n ∈ ["RVec", "LRef", "LCell", "Cell"] then some 8 else none
-  | .fn .. | .cls .. => some 8
-
 /-- The order of a step variant's fields (indices into the callee's
 parameters `ps`): decreasing alignment, ties in parameter order, so the
 variant has no padding between fields (like a record with optimization
-`field-order`). Parameter order if a type is unknown. -/
+`field-order`, which uses the same model). Parameter order if a type is
+unknown. -/
 def stepFieldOrder (types : TypeTable) (ps : Array Ty) : Array Nat :=
-  match ps.mapM (fieldAlign? types ·) with
+  match ps.mapM (fieldAlign? (types[·]?) ·) with
   | none => (List.range ps.size).toArray
   | some as =>
     (List.range ps.size).toArray.qsort fun i j => as[i]! > as[j]! || (as[i]! == as[j]! && i < j)

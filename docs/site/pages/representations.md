@@ -182,7 +182,9 @@ Other rules:
 - **Field order.** Fields are sorted by decreasing alignment, so records
   have no padding (pass `field-order`). The tuple that carries a join
   point's arguments is sorted the same way. Reussir's own member packing
-  is off.
+  is off. A value struct is stored in place, so its alignment is the largest
+  alignment of its fields: a value struct of a `UInt8` has alignment 1,
+  and goes after the 8-byte fields.
 - **Recursive and mutual types** refer to each other's types.
 - **Computed fields** (`Lean.Name`): the implementation type `T._impl`, as
   in Lean's runtime.
