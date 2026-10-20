@@ -120,8 +120,8 @@ to `lean2rr/LeanToReussir/`.
   `@[macro_inline]` body mentions, `RtCastCsimpMacroInline`).
   Lean's own library casts only where lean2rr's representations agree.
 - **Where:** `Lower/Conv.lean`: `programCasts`, `sourceDecls`,
-  `librarySymbols`, `exportsBySymbol`, `programCsimps`,
-  `boxCastable`; `LowerBase.lean`:
+  `librarySymbols`, `exportsBySymbol`, `boxCastable`;
+  `CompileRecord.lean`: `programCsimps`; `LowerBase.lean`:
   `LowerCtx.programCasts`; `Emit/Program.lean`: `lowerProgram`
   (`L2R_DEBUG` prints the deciding declaration); plan [§5.1](../../translation-plan.md#51-type-translation).
 - **Remove only if:** never. It relies on library modules being the
@@ -242,7 +242,7 @@ to `lean2rr/LeanToReussir/`.
   `unread-fields` off and gave its unboxing functions their cast arms.
 - **Where:** `Lower/Conv.lean`: `nativeEvalStatement?`, `nativeExempt`,
   `nativeEvalWalk`, `proofAxioms`, `nativeAxiomDecl?`, `isKernelEvalConst`,
-  `programCsimps`, `programCasts`.
+  `programCasts`; `CompileRecord.lean`: `programCsimps`.
 - **Remove only if:** never while axioms can be cast sources. The name
   test assumes that only Lean names an axiom `…._native.<tactic>.ax_<i>`.
   Lean accepts that name from the user, so a user axiom with that name and

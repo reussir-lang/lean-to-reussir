@@ -54,7 +54,36 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
     constant, except Lean's computed-field implementations
     (`BVExpr.const._override`). A constant whose type mentions a task,
     thunk, reference or promise stays (the persistence walk at its first
-    evaluation, constants.md).
+    evaluation, constants.md). An instance whose declaration rests on a
+    claim that Lean did not check keeps the constant (`axiomTaints`):
+    - an axiom other than `propext`, `Quot.sound` and
+      `Classical.choice`: `sorryAx`, a user `axiom`, and the axiom that
+      `native_decide` adds in Lean 4.34 for each use
+      (`t._native.native_decide.ax_1_1`; sound when the compiler is, so
+      this is conservative);
+    - an `@[implemented_by]` of the program: the target can compute other
+      values than the declaration, with no axiom at all (`stepI 0 = 1`,
+      its target gives 0: a range's `step_pos` is about the declaration,
+      the loop runs the target). Lean's computed-field implementations
+      (`isComputedFieldImpl`) do not count.
+    As Lean's `collectAxioms`, the walk goes through the types and values
+    of the declarations, transitively, and through an inductive type's
+    constructors. It also goes where the compiled code is not the
+    kernel's term: into the `implemented_by` target; into `f._unsafe_rec`
+    for a `partial` definition `f` (the code that runs; the kernel's `f`
+    is an opaque constant); and, for a reference to `f`, into each
+    theorem of the program stated as `@f = @g` and into `g`
+    (`programCsimps`: every `@[csimp]` theorem, also a `local` or
+    `scoped` one; the compiler runs `g` for `f`, and a theorem proved
+    with `sorry` lets `g` compute other values). It stops at a
+    declaration of Lean's toolchain that is not an axiom, but for
+    `Lean.reduceBool` and `Lean.reduceNat` (the kernel reduces them by
+    running compiled code; their values name `Lean.trustCompiler`): in
+    Lean 4.34.0's `Init` and `Std` the only other axioms a declaration
+    names are `lcProof` (in `unsafe` implementations) and
+    `Lean.trustCompiler` (in those two). The toolchain's own
+    `implemented_by`s and `csimp` theorems are trusted. One walk serves
+    all constants: each declaration is visited once.
   Then the instances that only such constants reach go too (Stage 2 and
   later never see them), but not the `IO.Error` builders Stage 1 made
   (the lowering calls them by name for every fallible IO extern and
@@ -85,7 +114,19 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   library recursion) and writes nothing (no extern but pure ones), so
   leaving it out changes no output, no exit code and no order of the other
   steps (the kept constants a dropped one reads are kept by others or are
-  quiet too). What can differ is resource exhaustion: an evaluation that
+  quiet too). Both "ends" and "never runs `unreach`" hold only when the
+  proofs are true and the compiled code computes what the kernel's terms
+  say. A false proof (made with `sorry` or a user axiom) can reach an
+  `unreach` (`False.elim`: natively `INTERNAL PANIC: unreachable code has
+  been reached` at startup) or make Lean's library recursion run for ever
+  (`for i in r` over a `Std.Legacy.Range` of step 0 whose `step_pos` is
+  `sorry`). So can compiled code that differs from the kernel's terms: a
+  `@[csimp]` theorem proved with `sorry` or an `@[implemented_by]` that
+  makes the step 0 at run time while `step_pos` is a true proof about the
+  declaration, or `sorry` only in a `partial` definition's code. The pass
+  left out all of these, and the program ran where native panics or
+  never ends (hunt r7 B, and the review of its fix). The walk keeps
+  them. What can differ is resource exhaustion: an evaluation that
   natively runs out of memory or stack, exceeds a size limit of Lean's
   runtime (`Nat.pow` of an exponent above 2^32) or runs for a very long
   time stops (or delays) the native program at startup, and lean2rr's
@@ -100,10 +141,15 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   the kept code (`ExtractClosedK` runs per module on what is left), which
   changes sharing only.
 - **Where:** `Opt/UnreadConsts.lean`: `prune`, `blockers`, `scanCode`,
-  `classifyCall`, `pureExterns`, `recursionEnds`, `isComputedFieldImpl`;
+  `classifyCall`, `pureExterns`, `recursionEnds`, `isComputedFieldImpl`,
+  `axiomTaints`, `standardAxioms`, `isAxiomLeaf`;
+  `CompileRecord.lean`: `programCsimps`;
   hook `PassConfig.startupPrune`; `Main.lean`: `pipeline` (after Stage 1).
   Tests `RtUnreadConsts` (its `.l2r-debug` lists the decisions),
-  `RtUnreadConstsIoErr`.
+  `RtUnreadConstsIoErr`, `RtUnreadConstsSorry` (native panics at
+  startup), `RtUnreadConstsAxioms` (`.l2r-debug`: `sorry`, a user axiom,
+  `native_decide`, a `partial` definition, a `@[csimp]` theorem and a
+  `local` one, an `implemented_by`, only standard axioms).
 - **Remove only if:** the pass is off (every constant is a step).
 
 ### Modules follow the module system's phases

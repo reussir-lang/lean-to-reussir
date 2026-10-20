@@ -1173,27 +1173,6 @@ def isKernelEvalConst (n : Name) : Bool :=
   n == `Lean.reduceBool || n == `Lean.reduceNat || n == `Lean.ofReduceBool ||
     n == `Lean.ofReduceNat
 
-/-- The constants of the program's modules (not of Lean's library or
-lean2rr's shim) whose statement has the shape of a constant replacement,
-`@f = @g` (the shape `@[csimp]` accepts, `CSimp.isConstantReplacement?`),
-each as `f ↦ g` by itself. Every `@[csimp]` theorem of the program is one:
-global, `scoped`, or `local` (a `local` attribute is saved nowhere, and a
-module can make a theorem of another module a `local` `@[csimp]`; tests
-`RtCastCsimpLocal`, `RtCastCsimpScoped`, `RtCastNativeCrossLocal`). So is
-any theorem of that shape without the attribute (the set is larger than
-needed, never smaller). `programCasts` takes the targets that are
-declarations of the program as roots of its walk; `nativeExempt` looks for
-the replaced constants. -/
-def programCsimps (env : Environment) : Array CSimp.Entry := Id.run do
-  let mut out : Array CSimp.Entry := #[]
-  for i in [:env.header.moduleNames.size] do
-    if isToolchainModule env.header.moduleNames[i]! then continue
-    let some data := env.header.moduleData[i]? | continue
-    for ci in data.constants do
-      if let some (_, .const f _, .const g _) := ci.type.eq? then
-        out := out.push { fromDeclName := f, toDeclName := g, thmName := ci.name }
-  return out
-
 /-- The statement `e` of axiom `ci` when it is one that Lean adds for a
 proof by native evaluation: `Lean.Meta.nativeEqTrue` (Lean 4.34,
 `Lean/Meta/Native.lean`; `native_decide`, `decide +native` and `bv_decide`

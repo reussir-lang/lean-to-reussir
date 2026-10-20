@@ -125,11 +125,18 @@ runtime. Plan
   value, a `Tuple`, an `ElemBox`, the reference record, an array of such
   values) is a type of the program, and the slow path sets the slot
   through the one enum `L2RConstCell`, which has a variant per such type
-  (`c0(S0)`, `c1(S1)`, …):
+  (`c0(S0)`, `c1(S1)`, …). The constant's `<f>_init` computes the value
+  `v` and returns the variant, `L2RConstCell::c5{v}`; the accessor stores
+  what `_init` returns:
 
   ```
-  l2r_once_put_field<L2RConstCell>(k, 5, L2RConstCell::c5{<f>_init()})
+  l2r_once_put_field<L2RConstCell>(k, 5, <f>_init())
   ```
+
+  (`_init` makes the variant's cell out of line, because rrc does not
+  inline `_init`. When the accessor made the cell, it was inlined where
+  the constant is read, and rrc's token reuse kept a cell that the reader
+  frees for it: X02's `deriv`.)
 
   `leanrt::once::put_field` checks that the cell's tag is 5, stores the
   word of the variant's field in the slot (the word `l2r_once_put<S5>`

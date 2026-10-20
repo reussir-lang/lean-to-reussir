@@ -928,8 +928,12 @@ def isFallibleIOSym (sym : String) : Bool :=
          "lean_io_process_get_current_dir", "lean_io_process_set_current_dir",
          "lean_io_get_random_bytes"] ||
   -- The standard streams' operations (their glue is generated with the
-  -- `IO.FS.Stream` values) report errors the same way.
-  sym ∈ ["lean_get_stdout", "lean_get_stderr", "lean_get_stdin"]
+  -- `IO.FS.Stream` values) report errors the same way. A program reaches
+  -- these values through any of the six externs: `IO.setStdout` & co. give
+  -- the previous stream back (a program that only sets its streams has no
+  -- `getStdout`; hunt r7 B).
+  sym ∈ ["lean_get_stdout", "lean_get_stderr", "lean_get_stdin",
+         "lean_get_set_stdout", "lean_get_set_stderr", "lean_get_set_stdin"]
 
 /-- The child-process externs that can fail. Their glue (Lower's "Child
 processes") reports errors through the runtime's last-error protocol too. -/

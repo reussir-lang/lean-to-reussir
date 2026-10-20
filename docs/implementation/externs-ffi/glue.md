@@ -267,7 +267,13 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
     calls the builder: one of 3 parameters with
     `(l2r_io_error_fname(), errno, details)`, one of 2 with
     `(errno, details)`, one of 1 with `(details)`; an unknown kind is
-    `l2r_unreachable`. It returns `R::error{box(e)}`. The file name is
+    `l2r_unreachable`. It returns `R::error{box(e)}`. All 24 builders
+    must be in the program (Stage 1 makes them when it reaches a
+    fallible extern, `ensureIOErrorBuilders`): a missing one stops the
+    build with an internal error that names it. Before, its arm was left
+    out, and that error became `l2r_unreachable` at run time (a program
+    that reached the standard streams only through `IO.setStdout` & co.:
+    hunt r7 B, test `RtSetStdBuilders`). The file name is
     read only in the arms of the builders that take it: each read makes
     a string. The builders are constructors, so nothing records an error
     between the primitive and these reads.
@@ -316,7 +322,7 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `error_details`; unit test `fs_tests.rs`, every errno through the slot
   against native Lean);
   `runtime/README.md` ("Fallible IO", the table of error kinds); tests
-  `RtIOErrorDecode`, `RtFiles`, `RtIOFinishAlloc` (with
+  `RtIOErrorDecode`, `RtSetStdBuilders`, `RtFiles`, `RtIOFinishAlloc` (with
   `RtIOFinishAlloc.alloc`: a handle's `putStr` and `getLine` and the
   stdout stream's `putStr` allocate as natively; a failing `putStr` at
   most twice as much).

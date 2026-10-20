@@ -635,10 +635,11 @@ value's word at storage type `st` (`cellStorage`), read by the prelude's
 `tyInEveryProgram` is set by `l2r_once_put<st>`. Any other type (a type of
 the program) is set through the one enum `L2RConstCell`:
 
-    l2r_once_put_field<L2RConstCell>(k, 5, L2RConstCell::c5{v})
+    l2r_once_put_field<L2RConstCell>(k, 5, <f>_init())
 
-(the variant is made in the constant's `_init`: `cafAccessor`), which
-stores the word of the variant's field, `v`'s, in the slot
+(the constant's `_init` computes `v` and returns the variant
+`L2RConstCell::c5{v}`: `cafAccessor`), which stores the word of the
+variant's field, `v`'s, in the slot
 (`leanrt::once::put_field`); the variant's cell keeps that reference for
 the rest of the run, as the slot keeps the value. So a program's
 once-cells instantiate `l2r_once_put` at its types of `tyInEveryProgram`

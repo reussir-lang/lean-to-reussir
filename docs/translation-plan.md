@@ -2105,8 +2105,10 @@ are such data: derived instances, parser descriptors, the expression trees
 of `bv_decide` (a sixth of the code of a program that uses lean-zip; its
 certificates, one string literal each, have no function at all,
 `literal-consts`). A constant that may show (a trace, a panic, a `!` read, a call
-of the program's own recursion) stays a startup step at its place, read or
-not.
+of the program's own recursion, code whose declaration rests on a claim Lean
+did not check: `sorry` or an axiom other than the three standard ones, also in
+a `@[csimp]` theorem, or an `@[implemented_by]` of the program) stays a
+startup step at its place, read or not.
 
 A constant whose code only builds unboxed values from small literals and
 constructors (`Int.ofNat 0`, an enumeration value) is recomputed at every

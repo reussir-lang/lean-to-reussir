@@ -33,8 +33,14 @@ step of a constant when both hold:
   `dbg_trace`, IO, tasks, references, thunks are all externs); none of the
   program's own `unsafe` code runs, except the computed-field
   implementations Lean makes (`_override`; the toolchain's `unsafe` code is
-  trusted, as everywhere in lean2rr); no `initialize` constant is read; the
-  value holds no task, thunk, reference or promise.
+  trusted, as everywhere in lean2rr); no instance it runs comes from a
+  declaration that rests on a claim Lean did not check: `sorry` or an
+  axiom other than `propext`, `Quot.sound` and `Classical.choice`, also in
+  a `@[csimp]` theorem or the `_unsafe_rec` code of a `partial` definition,
+  or an `@[implemented_by]` of the program (`axiomTaints`: a false claim
+  can reach an `unreach` or make a library recursion run for ever); no
+  `initialize` constant is read; the value holds no task, thunk, reference
+  or promise.
 Then what only such constants reach is left out too: the code of each is
 never translated. The `IO.Error` builder instances that Stage 1 made stay:
 the lowering refers to them by name. A constant that is read stays a
@@ -172,7 +178,9 @@ def classifyCall (cx : Ctx) (c : Name) (nargs : Nat) : Call := Id.run do
 instances it runs (`classifyCall`). A local function's body runs only when
 the function value is applied, which shows here; a join point's body runs
 at its jumps. Lean puts `unreach` where the types prove that no value gets
-(`False.elim`, an impossible match arm): it never runs. -/
+(`False.elim`, an impossible match arm): it never runs, as long as no proof
+rests on a claim Lean did not check (`axiomTaints`; natively
+`False.elim sorry` reaches `lean_internal_panic_unreachable`). -/
 partial def scanCode (cx : Ctx) : Code .pure → StateM (Option String × Array Name) Unit
   | .let d k => do
     match d.value with
@@ -212,8 +220,16 @@ guarantees: `n` comes from a declaration of the toolchain (which has no
 recursion), or an `unsafe` implementation of one (`implemented_by`: the
 loop of `Array.foldlMUnsafe` runs over an index range), or a part of
 one; not a `partial` definition. A recursion through the program's own
-code does not count: its termination proof could use `sorry`. `impls`:
-the `implemented_by` targets of safe declarations (`implTargets`). -/
+code does not count: its termination proof could use `sorry`. A recursion
+of the toolchain can still depend on a proof the program passes in (the
+`step_pos` of a `Std.Legacy.Range`, the measure of a well-founded loop),
+and on the values that proof is about, which the compiled code computes:
+the proof can rest on `sorry` or an axiom of the program, and the code
+that computes the values can differ from the kernel's terms (a `@[csimp]`
+theorem proved with `sorry`, an `@[implemented_by]` of the program, the
+`_unsafe_rec` code of a `partial` definition). `axiomTaints` checks these
+instead. `impls`: the `implemented_by` targets of safe declarations
+(`implTargets`). -/
 def Ctx.recursionEnds (cx : Ctx) (impls : NameSet) (n : Name) : Bool := Id.run do
   let some s := cx.source? n | return false
   unless isToolchainDeclIn cx.env s do return false
@@ -237,12 +253,121 @@ def implTargets (env : Environment) : NameSet := Id.run do
       unless ci.isUnsafe do out := out.insert (userName impl)
   return out
 
+/-- Lean's three standard axioms. They are consistent: a proof that uses
+only these cannot prove `False`. -/
+def standardAxioms : List Name := [``propext, ``Quot.sound, ``Classical.choice]
+
+/-- Whether the walk of `axiomTaints` stops at `n`: a declaration of Lean's
+toolchain that is not an axiom, and not `Lean.reduceBool` or
+`Lean.reduceNat`: the kernel reduces these by running compiled code, and
+their values name the axiom `Lean.trustCompiler` (as `collectAxioms`
+reports for a proof by `rfl` through them). -/
+def isAxiomLeaf (env : Environment) (n : Name) : Bool :=
+  isToolchainDeclIn env n && !(env.find? n matches some (.axiomInfo _)) &&
+    n != ``Lean.reduceBool && n != ``Lean.reduceNat
+
+/-- For the kernel declarations `starts`, each declaration that rests on a
+claim Lean did not check, with what it rests on (`the axiom sorryAx`):
+- an axiom other than the standard ones (`standardAxioms`): `sorryAx` for a
+  `sorry`, an `axiom` of the program, the axiom that Lean 4.34 adds for each
+  use of `native_decide` (`t._native.native_decide.ax_1_1`),
+  `Lean.ofReduceBool` (conservative: these are sound when the compiler is);
+- an `@[implemented_by]` of the program: the code that runs is the target,
+  which can compute other values than the declaration (`stepI 0 = 1` with an
+  implementation that gives 0: the `step_pos` proof of a range is about the
+  declaration, the loop runs the target). Lean's computed-field
+  implementations (`isComputedFieldImpl`) only cast, and do not count.
+As Lean's `collectAxioms`, the walk goes through the type and the value of
+each declaration it reaches, and an inductive type's constructors. It also
+goes where the compiled code differs from the kernel's terms:
+- into the `implemented_by` target (the code that runs, which Lean can
+  inline into the constant's own code);
+- into `f._unsafe_rec` for a `partial` definition `f` (its compiled code,
+  `Compiler.mkUnsafeRecName`; the kernel's `f` is an opaque constant whose
+  value is any inhabitant);
+- for a reference to `f`, also a toolchain `f`, into each theorem of the
+  program stated as `@f = @g` and into `g` (`programCsimps`: every
+  `@[csimp]` theorem of the program, global, `scoped` or `local`; the
+  compiler replaces `f` by `g`, and a theorem proved with `sorry` lets `g`
+  compute other values).
+It does not go into a declaration of Lean's toolchain that is not an axiom
+(`isAxiomLeaf`): Lean's safe declarations use only the standard axioms (in
+Lean 4.34.0's `Init` and `Std`, the only others named by a declaration are
+`lcProof`, in `unsafe` implementations, and `Lean.trustCompiler`, in
+`Lean.reduceBool` and `Lean.reduceNat`, which the walk enters), and their
+`implemented_by`s and `csimp` theorems are trusted, as everywhere in
+lean2rr; so the walk costs the program's declarations only. One walk for all of `starts`: each
+declaration is visited once, then each claim found goes back along the
+references to every declaration that reaches it (cycles, an inductive type
+and its constructors, are fine). -/
+def axiomTaints (env : Environment) (starts : Array Name) : NameMap String := Id.run do
+  -- The theorems `@f = @g` of the program, by `f`, with `g`.
+  let csimp : Std.HashMap Name (Array Name) := (programCsimps env).foldl (init := {}) fun m e =>
+    m.alter e.fromDeclName fun xs => some ((xs.getD #[]).push e.thmName |>.push e.toDeclName)
+  let mut seen : NameSet := {}
+  let mut todo := starts.filter (!isAxiomLeaf env ·)
+  -- `isAxiomLeaf` of each name met, once each: `Environment.find?` is most
+  -- of the walk's cost otherwise (a reference to `Nat` from every
+  -- declaration; Z06g: 68 000 references, 4 500 declarations).
+  let mut leaves : Std.HashMap Name Bool := {}
+  -- For each declaration reached, the declarations of the program that use it.
+  let mut users : Std.HashMap Name (Array Name) := {}
+  let mut taint : NameMap String := {}
+  let mut found : Array Name := #[]
+  while h : todo.size > 0 do
+    let n := todo.back
+    todo := todo.pop
+    if seen.contains n then continue
+    seen := seen.insert n
+    let some ci := env.find? n | continue
+    if ci matches .axiomInfo _ then
+      unless standardAxioms.contains n do
+        taint := taint.insert n s!"the axiom {n}"
+        found := found.push n
+      continue
+    let impl := Compiler.getImplementedBy? env n
+    if let some t := impl then
+      unless isComputedFieldImpl env t do
+        taint := taint.insert n s!"the implemented_by of {n}"
+        found := found.push n
+    let unsafeRec := Compiler.mkUnsafeRecName n
+    let refs := ci.type.getUsedConstants ++
+      ((ci.value? (allowOpaque := true)).map (·.getUsedConstants)).getD #[] ++
+      (match ci with | .inductInfo v => v.ctors.toArray | _ => #[]) ++
+      impl.toArray ++ (if env.contains unsafeRec then #[unsafeRec] else #[])
+    for m in refs do
+      -- The `csimp` theorems that may replace `m` in compiled code, and
+      -- the replacements.
+      for u in #[m] ++ csimp.getD m #[] do
+        let leaf ← match leaves[u]? with
+          | some b => pure b
+          | none => do
+            let b := isAxiomLeaf env u
+            leaves := leaves.insert u b
+            pure b
+        if leaf then continue
+        users := users.alter u fun us => some ((us.getD #[]).push n)
+        unless seen.contains u do todo := todo.push u
+  let mut work := found
+  while h : work.size > 0 do
+    let m := work.back
+    work := work.pop
+    let some a := taint.find? m | continue
+    for n in users.getD m #[] do
+      unless taint.contains n do
+        taint := taint.insert n a
+        work := work.push n
+  return taint
+
 /-- For each instance in `starts`, why evaluating it (its code, with all its
 parameters given) may show, or nothing: the instances it runs, transitively
 (`scanCode`), show nothing, and every recursion among them ends
 (`recursionEnds`). The program's own `unsafe` code shows (a cast can make
 any value of any type), except the computed-field implementations Lean
-makes (`isComputedFieldImpl`). -/
+makes (`isComputedFieldImpl`). So does an instance whose declaration rests
+on a claim Lean did not check (`axiomTaints`): a false claim can reach an
+`unreach` (`False.elim`) or make a recursion of Lean's library run for
+ever (a `Std.Legacy.Range` of step 0; hunt r7 B and its review). -/
 def blockers (cx : Ctx) (starts : Array Name) : Std.HashMap Name String := Id.run do
   -- Each instance's own blocker and the instances it runs.
   let mut nodes : Std.HashMap Name (Option String × Array Name) := {}
@@ -266,6 +391,16 @@ def blockers (cx : Ctx) (starts : Array Name) : Std.HashMap Name String := Id.ru
       | .extern _ => (some s!"{o} is an extern", #[])
     nodes := nodes.insert n (w, ms)
     for m in ms do unless nodes.contains m do todo := todo.push m
+  -- The declarations that rest on a claim Lean did not check (`sorry`,
+  -- an axiom of the program, an `implemented_by`): one walk for all.
+  let srcs := nodes.toArray.filterMap fun (n, _) => cx.source? n
+  let taint := axiomTaints cx.env srcs
+  unless taint.isEmpty do
+    for (n, (w, ms)) in nodes.toArray do
+      if w.isSome then continue
+      let some s := cx.source? n | continue
+      if let some a := taint.find? s then
+        nodes := nodes.insert n (some s!"{s} depends on {a}", ms)
   -- The strongly connected components, callees first.
   let succs (n : Name) : List Name := ((nodes[n]?.map (·.2)).getD #[]).toList
   let comps := Lean.SCC.scc (nodes.toList.map (·.1)) succs

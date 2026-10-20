@@ -1,0 +1,11 @@
+lean2rr: unread-consts: r0: kept, r0 depends on the axiom sorryAx
+lean2rr: unread-consts: spin: kept, spin depends on the axiom sorryAx
+lean2rr: unread-consts: r1: kept, r1 depends on the axiom stepPos
+lean2rr: unread-consts: viaNative: kept, viaNative depends on the axiom byNative.
+lean2rr: unread-consts: viaPartial: kept, viaPartial depends on the axiom sorryAx
+lean2rr: unread-consts: rC: kept, rC depends on the axiom sorryAx
+lean2rr: unread-consts: spinC: kept, spinC depends on the axiom sorryAx
+lean2rr: unread-consts: rL: kept, rL depends on the axiom sorryAx
+lean2rr: unread-consts: rI: kept, rI depends on the implemented_by of stepI
+lean2rr: unread-consts: spinI: kept, spinI depends on the implemented_by of stepI
+lean2rr: unread-consts: classical: left out

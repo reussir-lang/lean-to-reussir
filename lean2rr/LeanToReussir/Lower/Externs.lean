@@ -241,10 +241,19 @@ def ioErrorFn (resTy : RR.Ty) : LowerM String := do
     let (k, errno, details, e) := ("ek", "ee", "ed", "e")
     let mut arms : Array RR.Arm := #[]
     let builders := (← read).ioErrorBuilders
+    -- Every builder must be in the program: Stage 1 instantiates them all
+    -- when it reaches a fallible extern (`ensureIOErrorBuilders`), and a
+    -- missing arm would turn that error into `l2r_unreachable` at run time.
+    -- A gap in that list (`isFallibleIOSym`) stops the build here instead.
+    if builders.size != ioErrorBuilderSyms.size then
+      throwError "lean2rr: the IO.Error builders are not in the program, but the error path of {rn} needs them (internal error: see ensureIOErrorBuilders, isFallibleIOSym)"
     for h : j in [:builders.size] do
-      let some inst := builders[j] | continue
+      let sym := ioErrorBuilderSyms[j]!
+      let some inst := builders[j] |
+        throwError "lean2rr: the IO.Error builder {sym} is not in the program, but the error path of {rn} needs it (internal error: see ensureIOErrorBuilders, isFallibleIOSym)"
       let callee ← calleeOf inst
-      let .code fn ps .. := callee | continue
+      let .code fn ps .. := callee |
+        throwError "lean2rr: the IO.Error builder {sym} ({inst}) has no code (internal error)"
       let call := if ps.size == 3 then
           RR.Expr.call fn #[] #[.call "l2r_io_error_fname" #[] #[], .var errno, .var details]
         else if ps.size == 2 then RR.Expr.call fn #[] #[.var errno, .var details]

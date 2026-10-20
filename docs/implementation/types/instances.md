@@ -292,14 +292,22 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
 ### The `IO.Error` builders become roots on demand
 
 - **What:** When the program reaches a fallible IO extern (files,
-  processes), Stage 1 instantiates Lean's exported `lean_mk_io_error_*`
-  builders.
+  processes, the standard streams), Stage 1 instantiates Lean's exported
+  `lean_mk_io_error_*` builders. The standard streams count through all
+  six of their externs: `IO.getStdout` & co. and `IO.setStdout` & co.
+  (`lean_get_set_stdout`, ...), because a setter gives the previous
+  stream back, whose operations can fail.
 - **Why:** The runtime reports errors as a kind number; the glue builds
   the `IO.Error` with Lean's own builder for that kind, as
   `decode_io_error` does (see
   [../externs-ffi/glue.md](../externs-ffi/glue.md#fallible-io-uses-a-last-error-slot-and-leans-own-error-builders)).
+  The list had only the three getters: a program that reaches the streams
+  only through the setters had no builders, and its stream errors ended
+  in `l2r_unreachable` (hunt r7 B, test `RtSetStdBuilders`). Since then a
+  missing builder stops the build (`ioErrorFn`).
 - **Where:** `Mono.lean`: `ensureIOErrorBuilders`, `ioErrorBuilderSyms`,
-  `isFallibleIOSym`, `processIOSyms`.
+  `isFallibleIOSym`, `processIOSyms`; `Lower/Externs.lean`: `ioErrorFn`
+  (the build check). Test `RtSetStdBuilders`.
 - **Remove only if:** never.
 
 ### Type-unsafe library code is kept, not recompiled from source
