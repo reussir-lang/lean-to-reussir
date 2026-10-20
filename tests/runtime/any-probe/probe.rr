@@ -310,8 +310,8 @@ fn s_unit_zero() -> u64 {
     p.0 + p.1 + t + f + m + s + v + by + fl + n + i + u + d + e + b + sm
 }
 
-// The generic textures at scalars and at leanrt's kinds, and the
-// record-address texture at a box.
+// The generic textures at scalars and at leanrt's kinds, and the address of
+// a box against its record's (`l2r_any_addr`, `l2r_ptr_pass`).
 #[transform_anchor]
 fn s_generic() -> u64 {
     let u : u64 = probe_word(l2r_any_of<u64>(probe_opaque(4096), 1016));
@@ -319,12 +319,16 @@ fn s_generic() -> u64 {
     let fb : u64 = probe_f64_bits(l2r_any_as<f64>(l2r_any_of<f64>(probe_f64_of_bits(4612248968380809216), 1016), 16));
     let sn : u64 = probe_word(l2r_any_of<LStr>(lean_mk_string("k"), 1016)) >> 48;
     let an : u64 = probe_word(l2r_any_of<RVec<LAny>>(l2r_array_empty<LAny>(), 30)) >> 48;
-    let au : u64 = l2r_ptr_addr_rec<LAny>(l2r_any_unit());
+    let au : u64 = l2r_any_addr(l2r_any_unit());
     let x : LAny = box_pt(Pt{probe_opaque(1), 2});
-    let ap : u64 = if l2r_ptr_addr_rec<LAny>(x) == l2r_any_addr(x) { 1 } else { 0 };
+    let xa : u64 = l2r_any_addr(x);
+    let xp : Pt = l2r_ptr_pass<Pt>(unbox_pt(x));
+    let xw : u64 = l2r_ptr_passed();
+    let xk : u64 = l2r_consume<Pt>(xp);
+    let ap : u64 = if xa == xw { 1 } else { 0 };
     let k0 : u64 = probe_say("u64 4096 word (8193), u64 max back, f64 bits back equal", u + (if ub == probe_u64_max() { 1 } else { 0 }) + (if fb == 4612248968380809216 { 1 } else { 0 }));
     let k1 : u64 = probe_say("numbers of a string and an array boxed under 16 and 30 (3, 6)", sn * 10 + an);
-    let k2 : u64 = probe_say("record address of box(0) (1); of a pointer box equals l2r_any_addr", au * 10 + ap);
+    let k2 : u64 = probe_say("address of box(0) (1); a pointer box's l2r_any_addr is its record's address", au * 10 + ap);
     u + (if ub == probe_u64_max() { 1 } else { 0 }) + (if fb == 4612248968380809216 { 1 } else { 0 }) + sn * 10 + an + au * 10 + ap
 }
 
@@ -488,8 +492,9 @@ fn s_unique() -> u64 {
     let al0 : u64 = probe_allocs();
     let q : Pt = bump(p);
     let al1 : u64 = probe_allocs();
-    let addr1 : u64 = l2r_ptr_addr_rec<Pt>(q);
-    let b : LAny = box_pt(q);
+    let qp : Pt = l2r_ptr_pass<Pt>(q);
+    let addr1 : u64 = l2r_ptr_passed();
+    let b : LAny = box_pt(qp);
     let r : Pt = unbox_pt(b);
     let k1 : u64 = probe_say("same address after the update", if addr0 == addr1 { 1 } else { 0 });
     let k2 : u64 = probe_say("allocations made by the update", al1 - al0);

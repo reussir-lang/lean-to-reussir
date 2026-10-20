@@ -14,9 +14,9 @@
 //! same:
 //!
 //! - **A task's id.** A cell that is a task lean-runtime has not finished
-//!   has an entry here, which holds its `TaskId`; the entry's index is kept
-//!   in the cell's padding (the 4 bytes after its count; `l2r_lcell_new`
-//!   sets them to `NONE`). The slot comes first (lean-runtime's rule): once
+//!   has an entry here, which holds its `TaskId`; a map from the cell's
+//!   address to the entry's index finds it (`Tasks::by_cell`: nothing is
+//!   kept in the cell, whose layout is Reussir's). The slot comes first (lean-runtime's rule): once
 //!   the cell holds `done(v)` the task has finished for lean2rr, and the id
 //!   is never passed again (`TaskId::FINISHED` instead).
 //! - **A task's job** (`make_job`) holds the cell's address, uncounted, and
@@ -58,9 +58,6 @@ use std::cell::UnsafeCell;
 
 struct Global<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Global<T> {}
-
-/// No entry.
-pub const NONE: u32 = u32::MAX;
 
 /// `kind` bits of `register`: a pure task (`keep_alive = false`), and a
 /// dependent (`depend` follows and decides where it goes).
@@ -137,6 +134,14 @@ struct Tasks {
     /// code asks for its own sources (`source_next`) before it runs.
     run_cell: usize,
     wait_any: WaitAny,
+    /// The entry of each cell that has one, by the cell's address. A cell
+    /// can be freed while its entry lives on (a task that has stored its
+    /// value, its job not returned yet): a new cell at that address drops
+    /// the stale mapping (`init_cell`), and an entry that goes removes the
+    /// mapping only if it is still its own (`free_entry`). Until clean step
+    /// A1's follow-up the index was kept in the cell's padding, the 4 bytes
+    /// after Reussir's count.
+    by_cell: crate::addr_map::AddrMap,
 }
 
 static TASKS: Global<Tasks> = Global(UnsafeCell::new(Tasks {
@@ -148,6 +153,7 @@ static TASKS: Global<Tasks> = Global(UnsafeCell::new(Tasks {
     deleting: false,
     run_cell: 0,
     wait_any: WaitAny::Idle,
+    by_cell: crate::addr_map::AddrMap::new(),
 }));
 
 /// The glue's state. lean2rr runs on one thread at a time (the module
@@ -158,24 +164,23 @@ fn tasks() -> &'static mut Tasks {
     unsafe { &mut *TASKS.0.get() }
 }
 
-/// The index slot in a cell (the box's padding, after the 4-byte count).
-#[inline]
-fn slot(cell: usize) -> *mut u32 {
-    (cell + 4) as *mut u32
-}
-
-/// Initialize a new cell's index slot (`l2r_lcell_new`).
+/// A new cell at `cell` (`l2r_lcell_new`): no entry yet. A freed cell's
+/// entry may still be mapped to the address (`Tasks::by_cell`); the new
+/// cell must not find it. With no entry at all, one load.
 #[inline]
 pub fn init_cell(cell: usize) {
-    unsafe { *slot(cell) = NONE }
+    let t = tasks();
+    if !t.by_cell.is_empty() {
+        t.by_cell.remove(cell);
+    }
 }
 
-/// The entry of the task at `cell` (a task's address for the runtime: a
-/// converted copy's is its original's), if it has one.
+/// The entry of the task at `cell`, if it has one. Every cell's last
+/// reference asks (`on_last_reference`): with no entry at all, one load.
 #[inline]
 fn find(cell: usize) -> Option<u32> {
     let t = tasks();
-    let i = unsafe { *slot(cell) };
+    let i = t.by_cell.get(cell)?;
     if (i as usize) < t.slab.len() && t.slab[i as usize].cell == cell {
         Some(i)
     } else {
@@ -211,7 +216,7 @@ fn alloc(cell: usize, tag: u32, flags: u16, prio: u32) -> u32 {
             (t.slab.len() - 1) as u32
         }
     };
-    unsafe { *slot(cell) = i };
+    t.by_cell.insert(cell, i);
     i
 }
 
@@ -221,9 +226,12 @@ fn free_entry(i: u32) {
     if e.cell == 0 {
         return;
     }
-    e.cell = 0;
+    let cell = std::mem::replace(&mut e.cell, 0);
     e.flags = 0;
     t.free.push(i);
+    if t.by_cell.get(cell) == Some(i) {
+        t.by_cell.remove(cell);
+    }
 }
 
 /// The id to give lean-runtime for the task at address `a`: its `TaskId`
@@ -235,10 +243,12 @@ fn id_of(a: usize) -> TaskId {
     }
 }
 
-/// Add one to the cell's count (Reussir's `Rc`: a `u32` at offset 0).
+/// One more reference to the cell (`Rc`'s own clone; the state's type does
+/// not matter to the count, so the handle is read as an `Rc<()>`).
 fn inc(cell: usize) {
-    let c = cell as *mut u32;
-    unsafe { *c = (*c).checked_add(1).expect("leanrt: task cell count overflow") };
+    let rc = std::mem::ManuallyDrop::new(unsafe { std::mem::transmute::<usize, reussir_rt::rc::Rc<()>>(cell) });
+    debug_assert!(rc.count_ref().get() < u32::MAX, "leanrt: task cell count overflow");
+    std::mem::forget(reussir_rt::rc::Rc::clone(&rc));
 }
 
 extern "C" {
@@ -925,4 +935,41 @@ pub fn promise_resolved(cell: usize) -> bool {
 #[inline(never)]
 pub fn promise_is_resolved(cell: usize) -> bool {
     query(cell) == 2
+}
+
+/// Unit tests run on several threads at once: the ones that reach the task
+/// glue's state (a cell's last reference asks it) take this lock.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cell freed while its entry lives on, and a new cell at its address:
+    /// the new cell finds no entry, its own entry is found, and the old
+    /// entry's end leaves the new mapping alone.
+    #[test]
+    fn a_reused_address_finds_its_own_entry() {
+        let _g = test_lock();
+        // Not a real cell: the glue only maps the address here.
+        let a: usize = 0x7a5c_0000_0040;
+        let e1 = alloc(a, 0, 0, 0);
+        assert_eq!(find(a), Some(e1));
+        init_cell(a);
+        assert_eq!(find(a), None);
+        let e2 = alloc(a, 0, 0, 0);
+        assert_ne!(e1, e2);
+        assert_eq!(find(a), Some(e2));
+        free_entry(e1);
+        assert_eq!(find(a), Some(e2));
+        free_entry(e2);
+        assert_eq!(find(a), None);
+        assert!(tasks().by_cell.is_empty());
+    }
 }

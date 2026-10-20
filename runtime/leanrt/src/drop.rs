@@ -216,11 +216,6 @@ unsafe extern "C" fn release_record<X>(cell: *mut u8) {
     drop(std::mem::transmute_copy::<usize, reussir_rt::bridge::Bridge<X>>(&p));
 }
 
-#[inline(always)]
-fn count(p: usize) -> u32 {
-    unsafe { *(p as *const u32) }
-}
-
 /// The header of an array block (`Vec`): the reference count (the `u32`
 /// at the handle's address, which Reussir's `rc.inc` bumps and its
 /// uniqueness analysis reads), the number of elements and the room for
@@ -704,18 +699,21 @@ impl<T> DerefMut for Cell<T> {
 }
 
 impl<T> Drop for Cell<T> {
-    /// A shared handle is a decrement; the last reference is freed out of
-    /// line. The test is `count == 1`, as `Vec`'s: after Reussir's `rc.inc`
-    /// LLVM then cancels a read's increment and release (forcing a finished
-    /// thunk, reading a task's state).
+    /// A shared handle is `Rc`'s own drop, a decrement there; the last
+    /// reference (`Rc::is_unique`) is freed out of line, through the task
+    /// glue and leanrt's free of the cell's block. The test is `count == 1`,
+    /// as `Vec`'s: after Reussir's `rc.inc` LLVM then cancels a read's
+    /// increment and release (forcing a finished thunk, reading a task's
+    /// state). leanrt reads and writes the count only through `Rc` (except
+    /// `lib::is_shared`'s read, open in clean step C7).
     #[inline(always)]
     fn drop(&mut self) {
-        let p = unsafe { *(self as *const Self as *const usize) };
-        let c = count(p);
-        if c == 1 {
+        if self.0.is_unique() {
+            let p = unsafe { *(self as *const Self as *const usize) };
             free_cell::<T>(p);
         } else {
-            unsafe { *(p as *mut u32) = c - 1 };
+            debug_assert!(self.0.count_ref().get() != 0, "leanrt: a cell released with count 0");
+            unsafe { ManuallyDrop::drop(&mut self.0) }
         }
     }
 }
@@ -730,16 +728,16 @@ impl<T> Drop for Cell<T> {
 /// block, which releases nothing, as the copy and the free did.
 #[inline(always)]
 pub fn cell_get<T: Clone>(c: Cell<T>) -> T {
-    let p = unsafe { *(&c as *const Cell<T> as *const usize) };
-    std::mem::forget(c);
-    let n = count(p);
-    if n == 1 {
+    let c = ManuallyDrop::new(c);
+    if c.is_unique() {
+        let p = unsafe { *(&*c as *const Cell<T> as *const usize) };
         return cell_take_last::<T>(p);
     }
-    unsafe { *(p as *mut u32) = n - 1 };
+    // `Rc`'s count, one down (the caller's increment and this cancel).
     // Others still hold the cell, so it outlives the copy.
-    let r = std::mem::ManuallyDrop::new(unsafe { std::mem::transmute::<usize, reussir_rt::rc::Rc<T>>(p) });
-    r.data_ref().clone()
+    let n = c.count_ref();
+    n.set(n.get() - 1);
+    c.data_ref().clone()
 }
 
 /// The value of the cell at `p` (count 1), moved out; its block is freed.
@@ -800,7 +798,7 @@ mod tests {
     }
 
     fn cell_count<T>(c: &Cell<T>) -> u32 {
-        count(unsafe { *(c as *const Cell<T> as *const usize) })
+        c.count_ref().get()
     }
 
     /// A record cell of the tests: the 32-bit count at offset 0. `id` is
@@ -992,6 +990,7 @@ mod tests {
 
     #[test]
     fn cell_get_shared_and_last() {
+        let _g = crate::task::test_lock();
         let c = Cell::from_inner(reussir_rt::rc::Rc::new(E(7)));
         let d = c.clone();
         assert_eq!(cell_count(&c), 2);

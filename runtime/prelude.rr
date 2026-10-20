@@ -2248,8 +2248,8 @@ fn l2r_ref_write_point() -> bool [{ leanrt::refs::write_point() }];
 #[ffi(import)]
 fn l2r_ref_swap_point() -> bool [{ leanrt::refs::swap_point() }];
 
-// The address of reference record `r` (its handle's word, as
-// `l2r_ptr_addr_rec`), then the wait: `store` 1 for `set` and `swap`; the
+// The address of reference record `r` (its handle's word, as lean2rr's
+// `recordAddr` notes it), then the wait: `store` 1 for `set` and `swap`; the
 // reference the call received is released after the wait (the record's
 // own release). Returns 0.
 #[ffi(import)]
@@ -2540,8 +2540,8 @@ fn l2r_lit_get(id : u64) -> LStr [{ leanrt::string::lit_get(id) }];
 // initialization it is computed at once). `leanrt::task` keeps the queues
 // of pending tasks and answers questions about their state.
 
-// A new cell; its padding (after the count) is the runtime's index slot for
-// tasks (`leanrt::task`), set to "none" here.
+// A new cell; a task entry left over for its address (a freed cell's) stops
+// naming it (`leanrt::task::init_cell`).
 #[ffi(import)]
 fn l2r_lcell_new<T>(v : T) -> LCell<T> [{
     {
@@ -3173,7 +3173,8 @@ fn lean_dbg_sleep<T>(ms : u32, f : L2RUnit -> T) -> T {
 
 // `ptrAddrUnsafe` (lean2rr's `addrOf`). Native pointer identity is not
 // emulated: a heap value answers the address of its cell in its own
-// representation (`l2r_ptr_addr_obj`, `l2r_ptr_addr_rec`), a scalar a word
+// representation (`l2r_ptr_addr_obj`; a record's through `l2r_ptr_pass`,
+// below; a box's `l2r_any_addr`), a scalar a word
 // computed from its value: `lean_box(n) = 2n+1` for `UInt8/16/32`, `Char`,
 // `Bool` and enumerations (their index), `1` for `Unit`; the bits of a
 // `UInt64` or `Float`. A `Nat` or `Int` answers its word, which is native
@@ -3218,30 +3219,6 @@ fn l2r_ptr_addr_obj<T>(a : T) -> u64 [{
             p as u64
         } else {
             leanrt::fresh_addr()
-        }
-    }
-}];
-
-// The same for a shared Reussir record (a generated struct or enum, a
-// function value, a `Box`): its handle's word. The reference the call
-// received goes through the record's own release (`<record>_ffi_release`,
-// which knows Reussir's count and its encodings of nullary variants). A
-// one-word box (`LAny`, an opaque type whose word is not an address)
-// answers `l2r_any_addr`'s address and is released as a box (lean2rr's
-// `addrOf` and `boxSink` call this texture at `Box`).
-#[ffi(import)]
-fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
-    {
-        if ::std::any::type_name::<[:T:]>() == "leanrt::any::LAny" {
-            let b: leanrt::any::LAny = unsafe { ::std::mem::transmute_copy(&a) };
-            ::std::mem::forget(a);
-            let r = b.addr();
-            drop(b);
-            r
-        } else {
-            let p = unsafe { *(&a as *const [:T:] as *const usize) };
-            drop(a);
-            p as u64
         }
     }
 }];

@@ -703,9 +703,9 @@ runs, its queues, dependents and walks, waits, polling, cancellation,
 promises and the final run are its rules; its `docs/sched.md`).
 `leanrt::task` is the glue: the cell is the task's slot (its value), and a
 cell that is a task lean-runtime has not finished has an entry in a slab
-(its `TaskId`, its state type's tag, flags), whose index the cell's 4 bytes
-of padding after its count hold (initialized by `l2r_lcell_new`); a task is
-named by its cell's address, and
+(its `TaskId`, its state type's tag, flags), found by a map from the cell's
+address (`Tasks::by_cell`; a new cell drops a stale mapping in
+`l2r_lcell_new`); a task is named by its cell's address, and
 once its cell holds `done` its id is never given out again
 (`TaskId::FINISHED`). A task's job (lean-runtime's `Job`) holds the cell's
 address and tag, not a count: run, it gives the generated code a counted

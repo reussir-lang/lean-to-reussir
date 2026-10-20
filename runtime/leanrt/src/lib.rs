@@ -30,6 +30,7 @@
 
 extern crate reussir_rt;
 
+mod addr_map;
 pub mod alloc;
 pub mod any;
 pub mod array;

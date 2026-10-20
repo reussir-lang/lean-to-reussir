@@ -30,7 +30,9 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
   `Lower/LazyGlue.lean`: `lazyExtern`, `lazyExternGlue`;
   `runtime/prelude.rr`: `LCell`, `l2r_lcell_new`, `l2r_lcell_swap`;
   `runtime/leanrt/src/drop.rs`: `Cell` (its release and `l2r_lcell_get`'s
-  `cell_get` test `count == 1`, the read releasing the cell before it
+  `cell_get` test `count == 1` through reussir-rt's `Rc`, `is_unique`, and
+  a shared cell goes through `Rc`'s own `drop` or `count_ref`, as
+  `task::inc` through its `clone`; the read releasing the cell before it
   copies the state, so that LLVM cancels the caller's increment; a read
   that takes the last reference skips `task::on_last_reference`, which
   has nothing to do then: checked in debug builds,
@@ -77,22 +79,33 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
   `thunk_wait_busy`, `on_finish`.
 - **Remove only if:** never.
 
-### A cell names its task in lean-runtime through its padding
+### A cell names its task in lean-runtime through a map by its address
 
 - **What:** lean-runtime names a task with a `TaskId`. A cell that is a
   task lean-runtime has not finished has an entry in `leanrt::task`'s slab
-  (its `TaskId`, the task state type's tag, flags); the entry's index is stored
-  in the 4 bytes of padding after the cell's count (`l2r_lcell_new`
-  initializes it to "none"). A task is found by its cell's address. Once the cell holds `done`, its id is
-  never given out again (`TaskId::FINISHED` instead: lean-runtime reuses
-  entries and, after 2^32 tasks, generations).
+  (its `TaskId`, the task state type's tag, flags); a map from the cell's
+  address to the entry's index finds it (`Tasks::by_cell`, an
+  open-addressing table, `leanrt::addr_map`). A task is found by its cell's
+  address. A cell can be freed while its entry lives on (a task that has
+  stored its value, its job not returned yet): a new cell at that address
+  drops the stale mapping (`init_cell`, from `l2r_lcell_new`), and an entry
+  that goes removes the mapping only if it is still its own (`free_entry`).
+  With no entry at all (no unfinished task), the lookup of every cell's
+  last reference (`on_last_reference`) and `init_cell` are one load. Once
+  the cell holds `done`, its id is never given out again
+  (`TaskId::FINISHED` instead: lean-runtime reuses entries and, after 2^32
+  tasks, generations).
 - **Why:** The generated code names tasks by address (unchanged from
-  leanrt's own scheduler, so the program's code is the same); a lookup by
-  the padding is O(1) (BTreeMaps were slow: adv4 TK4-08, 5ec3ab9).
-  lean-runtime's rule that the glue's slot comes first (its
-  `docs/sched.md`, "The glue", item 3).
-- **Where:** `runtime/leanrt/src/task.rs` (module comment): `init_cell`,
-  `find`, `alloc`, `id_of`; `Lower/LazyForce.lean`: `taskAddr`.
+  leanrt's own scheduler, so the program's code is the same); the lookup
+  is O(1) (BTreeMaps were slow: adv4 TK4-08, 5ec3ab9). Until clean step
+  A1's follow-up the entry's index was stored in the 4 bytes of padding
+  after the cell's count: a write into a cell that Reussir lays out, which
+  held only because the state type is 8-aligned (owner, 2026-10-19: no
+  reliance on Reussir's cell layout). lean-runtime's rule that the glue's
+  slot comes first (its `docs/sched.md`, "The glue", item 3).
+- **Where:** `runtime/leanrt/src/task.rs` (module comment): `Tasks::by_cell`,
+  `init_cell`, `find`, `alloc`, `free_entry`, `id_of`;
+  `runtime/leanrt/src/addr_map.rs`; `Lower/LazyForce.lean`: `taskAddr`.
 - **Remove only if:** never.
 
 ### A promise is a runtime object holding a task over `Option Box`

@@ -29,8 +29,8 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   a constant for tasks (`genPersist`, `holdsTask`), identity (`addrOf`) and
   the program's box item (`lowerProgram`). Outside it, `Lower/Live`
   recognizes the payloads live code builds by the number a box
-  construction passes, and the runtime's generic `l2r_ptr_addr_rec` and
-  `l2r_persist_box` take a box as one counted handle (`l2r_ptr_addr_rec` answers `LAny::addr` for a box).
+  construction passes, and the runtime's `l2r_persist_box` takes a box as
+  one counted handle.
 - **Why:** The encoding changed from a shared enum (a heap cell per box,
   rule 1's step 4) to one word in one section; the rest of lowering did
   not change.
@@ -395,11 +395,9 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   "The one-word box"; Reussir patch 07-a (issue 7: `rc.inc` clears the top
   16 bits of a tagged handle; `reussir-bugs/07-tagged-top-bits.md`).
   Places in lean2rr that the switch to `LAny` touches, because they treat
-  `Box` as one record pointer today: `Lower/Identity.lean`, `addrOf` (the
-  `Box` case calls `l2r_ptr_addr_rec`, used by `ptrAddrUnsafe` and
-  `ptrEq`; the texture answers `LAny::addr` for a box, `l2r_any_addr` is
-  the direct form); `Lower/Finish.lean`, `boxSink` (releases a box out of
-  line through `l2r_ptr_addr_rec`); `LowerBase.lean`, `isBoundaryTy` (a box
+  `Box` as one handle: `Lower/Identity.lean`, `addrOf` (the `Box` case:
+  `l2r_any_addr`, used by `ptrAddrUnsafe` and `ptrEq`); `LowerBase.lean`,
+  `boxSink` (releases a box through `l2r_any_addr`); `LowerBase.lean`, `isBoundaryTy` (a box
   crosses the FFI boundary as one handle) and `refType`'s boxed path; the
   prelude's shared checks (`lean_dbg_trace_if_shared`, `l2r_shared_check`:
   they answer for a box's payload); leanrt's array copy and release loops
